@@ -14,7 +14,102 @@ steps:
 budget: { requests: 200, tokens: 500000, wall_minutes: 240 }
 ---
 
-# Feature-full 流程说明
+# feature-full — reference flow
 
-> 骨架占位：frontmatter 是唯一结构 schema（`docs/design/.../01-workflow-skills.md` §4），
-> 本正文是 WI Agent 第 0 步加载的流程级说明。正式内容按项目方法论展开。
+This is the flow-level narrative the WI Agent loads at step 0. It explains how the ten
+steps compose and what flows between them; it is not itself a structural schema — the
+frontmatter `steps` array above is the *only* execution order (`01-workflow-skills.md`
+§4.1 rule V3). Nothing here overrides it.
+
+## Shape of the flow
+
+```
+grill --> spec --> grill-review --> plan --> code --> e2e-author --> verification --> e2e-run --> review --> release
+                       |                                  |                                              |
+                  (FAIL: rewind to spec)          (FAIL: rewind to code)                        (FAIL: rewind to code / review)
+```
+
+The flow has two front-loaded interactive checkpoints (`grill`, `grill-review`) that
+replace a heavy spec-review loop with a leaner two-pass confirmation, a build lane
+(`plan` -> `code`), a verification lane running in parallel concern to the build
+(`e2e-author` authors scenarios against the *spec*, independent of how `code` turns out,
+so it can run right after `code` without waiting on a second code pass), and a release
+slot at the end that is a normal step, not a special mechanism.
+
+## Artifact flow between steps
+
+Nothing here is wired through frontmatter. Every step's output is a path recorded in
+`execution.json`'s `steps.<id>.output`, pointing at a file under `artifacts/`
+(`03-execution-capsule.md` §4.2). Downstream steps read their inputs by following that
+convention, not by any declared edge:
+
+| step | primary artifact it writes | who reads it |
+|---|---|---|
+| `grill` | `artifacts/grill-qa.md` (grill section) | `spec` |
+| `spec` | `artifacts/spec.md` | `grill-review`, `plan`, `e2e-author` |
+| `grill-review` | `artifacts/grill-qa.md` (grill-review section, appended) | `spec` (only on rewind, via `pending_rewind_input`) |
+| `plan` | `artifacts/plan.md` | `code` |
+| `code` | changes under `repos/<name>/**`, `artifacts/code-summary.md` | `e2e-run`, `verification`, `review` |
+| `e2e-author` | `artifacts/e2e-scenarios.md` (+ generated test files under `repos/<name>/**` if the project runs them from the tree) | `e2e-run` |
+| `verification` | `artifacts/verification-report.md` (verdict) | `review` |
+| `e2e-run` | `artifacts/e2e-results.md` (raw results) | `review` |
+| `review` | `artifacts/review.md` (verdict) | `release` |
+| `release` | `artifacts/release-notes.md`, tag/version metadata | (terminal) |
+
+`grill` and `grill-review` share one running document, `artifacts/grill-qa.md`, sectioned
+by step id: `grill` appends its question/answer pairs first, `spec` reads the whole file
+for context, and `grill-review` appends its own confirmation pass underneath.
+
+## Rewind boundaries
+
+Two rewind targets exist in this flow, both declared in the frontmatter `on_fail` of
+their gates — this section only explains *why*, the mechanism is `01-workflow-skills.md`
+§6.2:
+
+- **`grill-review` FAILs -> rewind to `spec`.** The user's confirmation pass found the
+  spec itself wrong (not just the confirmation script). Rewinding to `spec` re-runs
+  spec authoring with the FAIL verdict attached as input; `grill` is *not* re-run —
+  the raw requirements gathered there are still valid, only the spec's interpretation
+  of them needs correction.
+- **`verification` FAILs -> rewind to `code`.** Verification is a machine-checkable gate
+  (build/lint/targeted checks) run before the costly `e2e-run`; a failure here means the
+  implementation itself needs another pass, not the plan.
+- **`review` FAILs -> rewind to `code`.** Human/senior review found the implementation
+  wanting after e2e passed; `code` is re-run with the review verdict attached. `plan`
+  is not re-run unless the reviewer's verdict says the plan itself was wrong, in which
+  case the plan step's own re-authoring happens as part of the `code` step consuming the
+  verdict text (the flow does not need a third rewind target for this — see
+  `01-workflow-skills.md` §12 item 2 on composite rewind ergonomics).
+- **`release` FAILs -> rewind to `review`** (this bundle's default; a project may
+  override `release`'s `on_fail.target` to `code` if its release gate is really a code
+  gate). A release failure re-runs review because the failure is normally either a
+  release-blocking review comment resurfacing at ship time, or a release-gate check that
+  is itself business judgment about readiness — not automatically evidence the code is
+  wrong.
+
+Workflow-level rewind bounds for this bundle are declared once in the frontmatter:
+`max_total: 4`, `max_per_step: 2`. A gate that keeps failing past those bounds ends the
+workflow in `failed_rewind_exhausted`, not an infinite loop.
+
+## Budget guidance
+
+The frontmatter workflow-level budget (`requests: 200, tokens: 500000, wall_minutes: 240`)
+is sized for one full pass through all ten steps plus one rewind of the most expensive
+lane (`code` + `verification` + `e2e-run` + `review`). Projects with larger codebases or
+slower CI should raise the workflow-level ceiling and/or add a per-step `budget` override
+on `code`/`e2e-run` rather than trying to fit a bigger repo into the reference default.
+Do not treat hitting the budget as a quality signal — it is purely a resource ceiling
+(`WF-103 OVER_BUDGET`), unrelated to gate verdicts, and never triggers rewind.
+
+## The release step (per-project convention)
+
+`release` is an ordinary step slot, not a distinct mechanism — it reuses every existing
+step primitive (inputs, `output` schema, worktree, budget, rewind, sync boundaries;
+`01-workflow-skills.md` §4.2). The version shipped in this reference bundle
+(`agents/release.md`) is deliberately generic: it defines the shape of a release step
+(what a release verdict/output looks like) without hard-wiring a specific version scheme,
+build system, tagging convention, or publish target, because those are legitimately
+per-project. Each project consuming this bundle as a template is expected to replace the
+body of `agents/release.md` with its own concrete release procedure while keeping the
+frontmatter contract (`name`, `description`, `tools`, `output`) intact. The platform's own
+release of aihub/pf-daemon/pf is just one instance of this same hook, not a special case.
