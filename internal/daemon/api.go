@@ -113,6 +113,8 @@ func NewAPIServer(d *Daemon, socketPath string) (*APIServer, error) {
 	mux.HandleFunc("GET /jobs/{id}/observe", s.hObserve)
 	mux.HandleFunc("POST /jobs/{id}/answer", s.hAnswer)
 	mux.HandleFunc("POST /jobs/{id}/publish_request", s.hPublishRequest)
+	mux.HandleFunc("POST /jobs/{id}/pause", s.hPause)
+	mux.HandleFunc("POST /jobs/{id}/wrap", s.hWrap)
 	mux.HandleFunc("GET /status", s.hStatus)
 	mux.HandleFunc("POST /mode", s.hMode)
 	mux.HandleFunc("POST /batch_submit", s.hBatchSubmit)
@@ -125,7 +127,12 @@ func NewAPIServer(d *Daemon, socketPath string) (*APIServer, error) {
 // Serve blocks until Close.
 func (s *APIServer) Serve() error { return s.srv.Serve(s.ln) }
 
-// Close shuts the face down and removes the socket.
+// Close shuts the face down and removes the socket. With the accepted
+// conns kept in non-blocking (poller-registered) mode by credListener's
+// SO_PEERCRED handling (see credListener.Accept), srv.Close unblocks
+// every idle keep-alive read through the poller — a live pooled CLI
+// `pf observe` session no longer hangs the shutdown (polyforge#11
+// FIX-ROUND, inference 4).
 func (s *APIServer) Close() error {
 	err := s.srv.Close()
 	os.Remove(s.path)
@@ -152,12 +159,24 @@ func (l *credListener) Accept() (net.Conn, error) {
 	}
 	cc := &credConn{Conn: c, pid: -1, uid: -1}
 	if uc, ok := c.(*net.UnixConn); ok {
-		if f, ferr := uc.File(); ferr == nil {
-			if cred, gerr := unix.GetsockoptUcred(int(f.Fd()), unix.SOL_SOCKET, unix.SO_PEERCRED); gerr == nil {
-				cc.pid = int(cred.Pid)
-				cc.uid = int(cred.Uid)
-			}
-			f.Close()
+		// SO_PEERCRED via SyscallConn().Control: no File()/Fd() here. The
+		// old uc.File()+f.Fd() dance dup'd the fd and (a dup shares the
+		// open file description, and File/Fd deliberately return a
+		// BLOCKING descriptor) cleared O_NONBLOCK on the SHARED description
+		// — flipping the accepted conn into kernel-blocking mode. Its
+		// server-side read then blocked inside the syscall, where no close
+		// could reach it: APIServer.Close waited on poll.FD.Close's
+		// in-flight-IO lock forever whenever a pooled CLI keep-alive conn
+		// was left open (a live `pf observe` session would hang a real
+		// daemon shutdown). Control runs against the real fd while no I/O
+		// is in flight (we are still at accept time) and changes no modes.
+		if rc, rerr := uc.SyscallConn(); rerr == nil {
+			_ = rc.Control(func(fd uintptr) {
+				if cred, gerr := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED); gerr == nil {
+					cc.pid = int(cred.Pid)
+					cc.uid = int(cred.Uid)
+				}
+			})
 		}
 	}
 	return cc, nil
@@ -211,13 +230,48 @@ func writeSubmitErr(w http.ResponseWriter, err error) {
 		writeAPIErr(w, ErrCodePreflight, err.Error())
 	case errors.Is(err, ErrFlushFailed):
 		writeAPIErr(w, ErrCodeFlushFail, err.Error())
+	case errors.Is(err, ErrNoLocalJob):
+		writeAPIErr(w, ErrCodeNotFound, err.Error())
+	case errors.Is(err, ErrCloseInProgress):
+		writeAPIErr(w, ErrCodeConflict, err.Error())
+	case errors.Is(err, ErrSecretRolledBack):
+		// 04 §7.3: the scene is quarantined by the classifier; recovery is an
+		// admin force-takeover, never a retry of this call.
+		writeAPIErr(w, ErrCodeForbidden, ReasonSecretRolledBack+": capsule quarantined; recovery is admin force-takeover")
 	default:
+		// 04 §5.1 amendment (close routes): a typed Core verdict comes back
+		// verbatim (CORE-* passthrough), not flattened into DAEMON-500 —
+		// CORE-403 stale_generation on the post-crash pause etc. stay
+		// machine-readable for the CLI and the recovery tooling.
+		var ae *aihub.APIError
+		if errors.As(err, &ae) {
+			writeCoreErr(w, ae)
+			return
+		}
 		if strings.Contains(err.Error(), "DAEMON-409") {
 			writeAPIErr(w, ErrCodeConflict, err.Error())
 			return
 		}
 		writeAPIErr(w, "DAEMON-500", err.Error())
 	}
+}
+
+// writeCoreErr surfaces one typed Core verdict verbatim: the envelope
+// carries the Core's own error code (CORE-403 etc.) with the Core's
+// reason/detail as the detail string, and the HTTP status the Core's own
+// envelope answered with (APIError.Status) — no invented mapping.
+func writeCoreErr(w http.ResponseWriter, ae *aihub.APIError) {
+	detail := ae.Detail
+	if ae.Reason != "" {
+		detail = ae.Reason + ": " + ae.Detail
+	}
+	status := ae.Status
+	if status == 0 {
+		status = http.StatusInternalServerError
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{"error": apiError{Code: ae.Code, Detail: detail}})
 }
 
 func (s *APIServer) hObserve(w http.ResponseWriter, r *http.Request) {
@@ -412,6 +466,54 @@ func (s *APIServer) hPublishRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := s.d.PublishRequest(r.Context(), wi, body.Reason)
+	if err != nil {
+		writeSubmitErr(w, err)
+		return
+	}
+	writeJSONOK(w, out)
+}
+
+// hPause is the 00 §5.1 pause verb on the daemon face: the 04 §6.2 A-path
+// close with reason "pause" — boundary notice, final flush, Core
+// end-generation carrying the Daemon-generated flush_evidence (02 §6.4),
+// then seal. The WI is paused server-side; resume is a fresh claim
+// (generation+1) through the ordinary claim route — nothing here re-claims
+// or re-queues anything.
+func (s *APIServer) hPause(w http.ResponseWriter, r *http.Request) {
+	wi := r.PathValue("id")
+	// No fields are defined on the pause body; an empty object is the
+	// whole request (the generation token never travels — the daemon
+	// holds it and signs the Core call itself).
+	var body struct{}
+	_ = decodeJSON(r, &body)
+	out, err := s.d.PauseJob(r.Context(), wi)
+	if err != nil {
+		writeSubmitErr(w, err)
+		return
+	}
+	writeJSONOK(w, out)
+}
+
+// hWrap is the 00 §5.1 wrap verb: the same 04 §6.2 A-path close with a
+// TERMINAL reason (wrap|fail). After a successful wrap the job is sealed
+// and gone from jobs[]; a second wrap answers the typed DAEMON-404.
+func (s *APIServer) hWrap(w http.ResponseWriter, r *http.Request) {
+	wi := r.PathValue("id")
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeAPIErr(w, "DAEMON-400", err.Error())
+		return
+	}
+	if body.Reason == "" {
+		body.Reason = "wrap" // the CLI's non---fail default
+	}
+	if body.Reason != "wrap" && body.Reason != "fail" {
+		writeAPIErr(w, "DAEMON-400", "reason must be wrap or fail")
+		return
+	}
+	out, err := s.d.WrapJob(r.Context(), wi, body.Reason)
 	if err != nil {
 		writeSubmitErr(w, err)
 		return

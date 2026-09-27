@@ -43,12 +43,19 @@ type integAgent struct {
 	// D9): the resume-write archives the answer and clears pending_question
 	// in the SAME atomic write.
 	onAnswer func(AnswerRelay)
+	// onNotifyStop, when set, replaces the channel push in NotifyStop —
+	// used to park a close at its boundary wait for race tests.
+	onNotifyStop func()
 }
 
 func (a *integAgent) PID() int          { return a.pid }
 func (a *integAgent) StartedAt() string { return a.startedAt }
 func (a *integAgent) Alive() bool       { return !a.dead }
 func (a *integAgent) NotifyStop(ctx context.Context) error {
+	if a.onNotifyStop != nil {
+		a.onNotifyStop()
+		return nil
+	}
 	select {
 	case a.stopped <- struct{}{}:
 	default:
