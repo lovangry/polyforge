@@ -9,12 +9,13 @@
 //     double-digest staleness check (06 §4.3, INV-7d),
 //   - the §4.4 body extraction rule for the FTS index,
 //   - short-query (<3-character, incl. 2-char CJK) retrieval widening
-//     beside the FTS5 trigram MATCH path.
-//
-// Explicitly NOT implemented here (deferred, see the work item): the §5.3
-// full rebuild/reconciliation procedure (startup tmp sweeping, orphan-row
-// rollback, _redacted forward-completion) and INV-7f read-path serving
-// validation — RebuildIndex below remains the 02 §4.9 FTS full rebuild.
+//     beside the FTS5 trigram MATCH path,
+//   - INV-7f read-path serving validation and the full §5.3 reconcile
+//     procedure (reconcile.go: transient sweep, orphan handling both
+//     ways, _redacted forward-completion, frontmatter metadata backfill,
+//     unconditional FTS rebuild),
+//   - the 06 §9 B5 crash-injection hooks on every numbered boundary of
+//     the §5.2 write order (crashHook below).
 package memory
 
 import (
@@ -79,6 +80,28 @@ var BackupBarrier sync.RWMutex
 // applied by the server layer per 02 §4.10 / 06 §7).
 var visibilities = map[string]bool{"admin": true, "private": true, "project": true, "public": true, "team": true}
 
+// crashHook is the 06 §9 B5 test-time crash-injection hook. It is nil in
+// production; the write paths call crashpoint at every numbered boundary
+// of the 06 §5.2 write order so a test can kill the operation exactly
+// where a real process would die. A test hook typically panics with a
+// sentinel; the defers that run during the unwind (SQLite rolling an
+// uncommitted transaction back, lock release) leave behind exactly the
+// durable state a hard crash leaves — the tmp file and any committed rows
+// survive, nothing else changes.
+var crashHook func(stage string)
+
+// Write-order stages passed to crashHook (06 §9 B5):
+//
+//	create/update: "…:pre-write"   before ① — no authority byte written yet
+//	               "…:post-tmp"    ① done, ② not started
+//	               "…:post-commit" ② done, ③ not started
+//	redact:        "redact:pre-move" / "redact:post-move" (① done, ② not)
+func crashpoint(stage string) {
+	if crashHook != nil {
+		crashHook(stage)
+	}
+}
+
 // maxContentBytes is the 06 §5.4 MEM-413 body limit (≤ 1 MiB).
 const maxContentBytes = 1 << 20
 
@@ -128,7 +151,9 @@ func (s *Store) authorityDir(projectID, memID string) string {
 // write-vs-backup consistency); the two are acquired independently in a
 // FIXED order everywhere (memLock first, barrier read lock second — the
 // barrier's write side is never held while waiting on a memLock, so no
-// cycle can form). create has no memID yet and needs no memLock.
+// cycle can form). create takes its memLock right after the id is
+// allocated, before the first authority byte — from that point on the id
+// is known for the whole write order (06 §6: "before entering file writing").
 //
 // Entries are never evicted (bounded by the number of distinct mem_ids in
 // the process lifetime; 06 §6 scopes the lock table to one AIHub process).
@@ -226,6 +251,12 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The per-mem write mutex is held from before the first authority byte
+	// (06 §6: the lock is taken “before entering file writing” — the id IS
+	// known by then) so the INV-7f read-path recheck and the §5.3 sweep can
+	// distinguish a live ①→③ window from crash residue.
+	unlockMem := s.memLock(memID)
+	defer unlockMem()
 	now := store.Now()
 	fm := &frontmatter{
 		ID:             memID,
@@ -268,10 +299,12 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	tmp := filepath.Join(dir, "memory.md.tmp")
 	authority := filepath.Join(dir, "memory.md")
 	// ① tmp + fsync — the authority path is still untouched.
+	crashpoint("create:pre-write") // 06 §9: dies before any byte
 	if err := writeTmpSync(tmp, authorityBytes); err != nil {
 		return nil, errf("MEM-500", "", "write authority: %v", err)
 	}
 	contentSHA := shaHex(authorityBytes)
+	crashpoint("create:post-tmp") // 06 §9: ① done, ② not started
 
 	// ② one Core tx: metadata row + FTS (02 §4.9 delete-then-insert).
 	rel := "memory/" + projectID + "/" + memID // authority_path, data-dir-relative
@@ -297,6 +330,7 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	crashpoint("create:post-commit") // 06 §9: ② done, ③ not started
 
 	// ③ rename over the authority file, fsync dir, then derive.
 	if err := os.Rename(tmp, authority); err != nil {
@@ -312,17 +346,22 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	e := &Entry{ID: memID, ProjectID: projectID, OwnerUserID: owner, apath: rel,
 		ContentSHA: contentSHA, ContentLen: int64(len(authorityBytes))}
 	_, _ = s.deriveHTML(e, authorityBytes, body)
-	return s.Get(memID)
+	// Raw load, not the INV-7f gate: this path just completed ③ and holds
+	// the memLock — re-validating here would deadlock on the mutex.
+	return s.load(memID)
 }
 
-// Get returns one entry (format=html derivation is HTML()).
+// Get returns one entry through the INV-7f serving gate (06 §2.3/§6):
+// the row's content_sha is verified against the live authority file
+// digest before anything is served, and a mismatch runs the single-entry
+// reconcile (file wins) instead of serving a half-committed state.
 func (s *Store) Get(memID string) (*Entry, error) {
-	return s.load(memID)
+	return s.validated(memID)
 }
 
 // Content returns the authority Markdown bytes.
 func (s *Store) Content(memID string) ([]byte, error) {
-	e, err := s.load(memID)
+	e, err := s.validated(memID)
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +437,7 @@ func (s *Store) Update(memID string, req UpdateRequest) (*Entry, error) {
 	}
 	dir := filepath.Join(s.dataDir, filepath.FromSlash(e.apath))
 	authority := filepath.Join(dir, "memory.md")
+	crashpoint("update:pre-write") // 06 §9: before any byte (incl. the history snapshot)
 
 	// Seed the new frontmatter from the CURRENT row, then apply the new
 	// content's frontmatter (if any) and the PATCH fields.
@@ -476,6 +516,7 @@ func (s *Store) Update(memID string, req UpdateRequest) (*Entry, error) {
 		return nil, errf("MEM-500", "", "write authority: %v", err)
 	}
 	contentSHA := shaHex(authorityBytes)
+	crashpoint("update:post-tmp") // 06 §9: ① done, ② not started
 
 	// ② one Core tx: full metadata update + FTS delete-then-insert.
 	tx, err := s.db.Begin()
@@ -495,6 +536,7 @@ func (s *Store) Update(memID string, req UpdateRequest) (*Entry, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	crashpoint("update:post-commit") // 06 §9: ② done, ③ not started (the B5 window)
 
 	// ③ rename over the authority file, fsync dir, then re-derive.
 	if err := os.Rename(tmp, authority); err != nil {
@@ -504,7 +546,8 @@ func (s *Store) Update(memID string, req UpdateRequest) (*Entry, error) {
 		return nil, errf("MEM-500", "", "fsync authority dir: %v", err)
 	}
 	_, _ = s.deriveHTML(e, authorityBytes, body)
-	return s.Get(memID)
+	// Raw load, not the INV-7f gate: the memLock is still held here.
+	return s.load(memID)
 }
 
 // HTML returns the derived view for format=html reads, applying the 06
@@ -519,7 +562,9 @@ func (s *Store) Update(memID string, req UpdateRequest) (*Entry, error) {
 // still takes the barrier read lock while it writes and the per-mem mutex
 // to serialize against a concurrent update of the same entry.
 func (s *Store) HTML(memID string) ([]byte, error) {
-	e, err := s.load(memID)
+	// INV-7f gate first: the authority file digest is verified against the
+	// row before the derived view is even considered.
+	e, err := s.validated(memID)
 	if err != nil {
 		return nil, err
 	}
@@ -656,6 +701,11 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 		if err != nil {
 			continue
 		}
+		if e.Status != "active" || !s.serveConsistent(e) {
+			// INV-7f: an inconsistent hit is dropped from THIS result set
+			// (its reconcile is dispatched inside serveConsistent).
+			continue
+		}
 		if memType != "" && e.Type != memType {
 			continue
 		}
@@ -742,6 +792,9 @@ func (s *Store) List(projectID string, allowed func(*Entry) bool) ([]Entry, erro
 		if err != nil {
 			continue
 		}
+		if e.Status != "active" || !s.serveConsistent(e) {
+			continue // INV-7f: not served in a half-committed state
+		}
 		if allowed != nil && !allowed(e) {
 			continue
 		}
@@ -771,7 +824,25 @@ func (s *Store) Redact(memID string) error {
 	if e.Status != "active" {
 		return errf("MEM-409", "", "memory is %s", e.Status)
 	}
+	if !s.entryConsistent(e) {
+		// Crash residue on the very entry being redacted: resolve it under
+		// the lock we already hold before moving anything (06 §6). A
+		// redact that crashed between ① and ② forward-completes here; a
+		// create/update orphan (authority file nowhere) is rolled back and
+		// the redact target simply does not exist.
+		if _, serr := os.Stat(filepath.Join(s.dataDir, "memory", e.ProjectID, "_redacted", memID, "memory.md")); serr == nil {
+			if ferr := s.forwardCompleteRedact(e); ferr != nil {
+				return ferr
+			}
+			return errf("MEM-409", "", "memory is redacted")
+		}
+		if derr := s.deleteOrphanRow(memID); derr != nil {
+			return derr
+		}
+		return errf("MEM-404", "", "memory %s", memID)
+	}
 	// ① file move.
+	crashpoint("redact:pre-move")
 	src := filepath.Join(s.dataDir, "memory", e.ProjectID, memID)
 	dst := filepath.Join(s.dataDir, "memory", e.ProjectID, "_redacted", memID)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
@@ -780,6 +851,7 @@ func (s *Store) Redact(memID string) error {
 	if err := os.Rename(src, dst); err != nil {
 		return errf("MEM-500", "", "redact move: %v", err)
 	}
+	crashpoint("redact:post-move") // 06 §9: ① done, ② not started
 	// ② metadata + FTS removal in one tx.
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -835,54 +907,6 @@ func (s *Store) ResolveShare(token string, secret []byte) (string, error) {
 		return "", errf("MEM-404", "", "bad share token")
 	}
 	return memID, nil
-}
-
-// RebuildIndex re-derives the whole FTS table from the authority files
-// (02 §4.9: a derived artifact is fully rebuildable from the authority
-// Markdown). The FULL §5.3 procedure (tmp sweeping, frontmatter metadata
-// backfill for file-without-row entries, _redacted forward-completion,
-// orphan-row rollback, conditional HTML re-derivation) is owned by the
-// reconciliation task and intentionally not implemented in this work
-// item; this remains the unconditional FTS rebuild.
-func (s *Store) RebuildIndex() (int, error) {
-	rows, err := s.db.Query(`SELECT id, authority_path FROM memories WHERE status='active'`)
-	if err != nil {
-		return 0, errf("MEM-502", "", "scan: %v", err)
-	}
-	type item struct{ id, path string }
-	var items []item
-	for rows.Next() {
-		var it item
-		if err := rows.Scan(&it.id, &it.path); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		items = append(items, it)
-	}
-	rows.Close()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM memory_fts`); err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, it := range items {
-		content, err := os.ReadFile(filepath.Join(s.dataDir, filepath.FromSlash(it.path), "memory.md"))
-		if err != nil {
-			continue // authority missing ⇒ not searchable until repaired
-		}
-		if err := ftsReplace(tx, it.id, extractBody(string(content))); err != nil {
-			return 0, err
-		}
-		n++
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return n, nil
 }
 
 // ftsReplace enforces the 02 §4.9 invariant: delete-then-insert so each
