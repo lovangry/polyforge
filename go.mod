@@ -3,6 +3,7 @@ module github.com/silgrid/polyforge
 go 1.26
 
 require (
+	github.com/klauspost/compress v1.20.1
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.57.0
 )
