@@ -22,6 +22,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/work-items/{id}/cancel", s.hCancelWI)
 	s.mux.HandleFunc("GET /api/v1/work-items/{id}/progress", s.hProgress)
 
+	// Dependency edges (design amendment row 26, PR #10): domain logic
+	// (AddDependency/RemoveDependency/Dependencies) already existed in
+	// internal/core/workitem; these three routes expose it (fix #19).
+	s.mux.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.hAddDependency)
+	s.mux.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.hListDependencies)
+	s.mux.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking_id}/{kind}", s.hDeleteDependency)
+
 	// B. Execution right (rows 7–13; no membership filtering, §8).
 	s.mux.HandleFunc("POST /api/v1/work-items/{id}/claim", s.hClaim)
 	s.mux.HandleFunc("POST /api/v1/work-items/{id}/force-takeover", s.hForceTakeover)
@@ -291,6 +298,116 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request) {
 	}
 	d, err := s.WIs.Cancel(wiID, idn.UserID)
 	writeResult(w, err, func() { writeJSON(w, http.StatusOK, d) })
+}
+
+// hAddDependency is fix #19's POST route: path {id} names the BLOCKED side;
+// the body names the blocking side. Authorization: writer+ on the WI's
+// project (same-project-only enforcement lives in the domain, which also
+// owns cycle detection).
+func (s *Server) hAddDependency(w http.ResponseWriter, r *http.Request) {
+	idn, err := s.authenticate(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	wiID := r.PathValue("id")
+	projectID, aerr := s.wiProject(idn, wiID)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	if err := s.requireScope(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	ok, err := s.canWrite(idn, projectID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !ok {
+		writeErr(w, ownerAPI("CORE-403", "forbidden"))
+		return
+	}
+	var body struct {
+		BlockingWiID string `json:"blocking_wi_id"`
+		Kind         string `json:"kind"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if body.Kind == "" {
+		body.Kind = "blocks"
+	}
+	if err := s.WIs.AddDependency(body.BlockingWiID, wiID, body.Kind); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"ok": true})
+}
+
+// hListDependencies is fix #19's GET route: same shape as include=deps.
+func (s *Server) hListDependencies(w http.ResponseWriter, r *http.Request) {
+	idn, err := s.authenticate(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	wiID := r.PathValue("id")
+	projectID, aerr := s.wiProject(idn, wiID)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	if err := s.requireScope(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	ok, err := s.canRead(idn, projectID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !ok {
+		writeErr(w, ownerAPI("CORE-404", "work item "+wiID))
+		return
+	}
+	deps, err := s.WIs.Dependencies(wiID)
+	writeResult(w, err, func() { writeJSON(w, http.StatusOK, deps) })
+}
+
+// hDeleteDependency is fix #19's DELETE route: physical delete of one edge.
+func (s *Server) hDeleteDependency(w http.ResponseWriter, r *http.Request) {
+	idn, err := s.authenticate(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	wiID := r.PathValue("id")
+	projectID, aerr := s.wiProject(idn, wiID)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	if err := s.requireScope(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	ok, err := s.canWrite(idn, projectID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !ok {
+		writeErr(w, ownerAPI("CORE-403", "forbidden"))
+		return
+	}
+	if err := s.WIs.RemoveDependency(r.PathValue("blocking_id"), wiID, r.PathValue("kind")); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) hProgress(w http.ResponseWriter, r *http.Request) {

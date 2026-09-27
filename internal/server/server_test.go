@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 type env struct {
 	ts     *httptest.Server
 	client *http.Client
+	db     *store.DB
 	admin  string // admin api key
 	writer string // member writer api key
 	outsider string // key of a user with no membership
@@ -62,7 +64,7 @@ func newEnv(t *testing.T) *env {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	e := &env{ts: ts, client: ts.Client()}
+	e := &env{ts: ts, client: ts.Client(), db: db}
 	e.admin = e.mintKey(t, db, "usr_admin", nil)
 	e.writer = e.mintKey(t, db, "usr_worker", nil)
 	e.outsider = e.mintKey(t, db, "usr_outsider", nil)
@@ -73,15 +75,20 @@ func newEnv(t *testing.T) *env {
 
 func (e *env) mintKey(t *testing.T, db *store.DB, user string, project *string) string {
 	t.Helper()
-	plain := "pfk_test_" + user + "_" + fmt.Sprint(len(user))
+	suffix := user
+	if project != nil {
+		suffix = user + "_" + *project
+	}
+	// The plaintext MUST be unique per (user, project) pair, not just per
+	// user: a scoped and an unscoped key for the same user would otherwise
+	// share one key_hash, and authenticate()'s WHERE key_hash=?1 lookup would
+	// non-deterministically resolve to whichever row SQLite happens to
+	// return, silently defeating any scope test.
+	plain := "pfk_test_" + suffix
 	sum := sha256Hex(plain)
 	var proj any
 	if project != nil {
 		proj = *project
-	}
-	suffix := user
-	if project != nil {
-		suffix = user + "_" + *project
 	}
 	if _, err := db.Exec(`INSERT INTO api_keys(id, user_id, project_id, key_hash) VALUES (?1,?2,?3,?4)`,
 		"key_"+suffix, user, proj, sum); err != nil {
@@ -388,3 +395,286 @@ func decodeManifest(t *testing.T, m map[string]any) capsule.Manifest {
 }
 
 func nowRFC() string { return timeNow() }
+
+// --- fix #2: heartbeat privilege escalation ---
+
+func TestHeartbeatAuthorization(t *testing.T) {
+	e := newEnv(t)
+	// Mint a MACHINE-kind key (mac_user_a, seeded by testsupport) to stand in
+	// for an unattended/non-human caller.
+	machineKey := e.mintKey(t, e.db, "mac_user_a", nil)
+
+	// A machine-kind caller must not be able to register a brand-new machine
+	// identity for itself.
+	st, m, _ := e.do(t, "POST", "/api/v1/machines/heartbeat", machineKey, map[string]any{"machine_id": "mac_new_1"})
+	if st != 403 || errCode(t, m) != "CORE-403" {
+		t.Fatalf("machine caller must not self-register: %d %v", st, m)
+	}
+
+	// A human (writer) caller CAN register a new machine.
+	st, m, _ = e.do(t, "POST", "/api/v1/machines/heartbeat", e.writer, map[string]any{"machine_id": "mac_new_1"})
+	if st != 200 || m["api_key"] == nil {
+		t.Fatalf("human registration failed: %d %v", st, m)
+	}
+	newMachineKey := m["api_key"].(string)
+
+	// The new machine's OWN key can refresh its own heartbeat.
+	st, m, _ = e.do(t, "POST", "/api/v1/machines/heartbeat", newMachineKey, map[string]any{"machine_id": "mac_new_1"})
+	if st != 200 {
+		t.Fatalf("self-refresh: %d %v", st, m)
+	}
+
+	// A DIFFERENT machine's key must not be able to refresh mac_new_1's
+	// heartbeat.
+	st, m, _ = e.do(t, "POST", "/api/v1/machines/heartbeat", machineKey, map[string]any{"machine_id": "mac_new_1"})
+	if st != 403 || errCode(t, m) != "CORE-403" {
+		t.Fatalf("cross-machine refresh must be forbidden: %d %v", st, m)
+	}
+
+	// A human/admin can still refresh any machine's heartbeat.
+	st, _, _ = e.do(t, "POST", "/api/v1/machines/heartbeat", e.writer, map[string]any{"machine_id": "mac_new_1"})
+	if st != 200 {
+		t.Fatalf("human refresh of another machine: %d", st)
+	}
+}
+
+func TestHeartbeatConcurrentRegistrationIsIdempotent(t *testing.T) {
+	e := newEnv(t)
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	registered, refreshed := 0, 0
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			st, m, _ := e.do(t, "POST", "/api/v1/machines/heartbeat", e.writer, map[string]any{"machine_id": "mac_race"})
+			if st != 200 {
+				t.Errorf("heartbeat call failed: %d %v", st, m)
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if reg, _ := m["registered"].(bool); reg {
+				registered++
+			} else {
+				refreshed++
+			}
+		}()
+	}
+	wg.Wait()
+	if registered != 1 {
+		t.Fatalf("expected exactly one registration winner, got %d (refreshed=%d)", registered, refreshed)
+	}
+	// Exactly one user + one api_key row exist for this machine.
+	var userCount int
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM machines WHERE id='mac_race'`).Scan(&userCount); err != nil {
+		t.Fatal(err)
+	}
+	if userCount != 1 {
+		t.Fatalf("expected exactly one machines row, got %d", userCount)
+	}
+	var uid string
+	if err := e.db.QueryRow(`SELECT user_id FROM machines WHERE id='mac_race'`).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	var keyCount int
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM api_keys WHERE user_id=?1`, uid).Scan(&keyCount); err != nil {
+		t.Fatal(err)
+	}
+	if keyCount != 1 {
+		t.Fatalf("expected exactly one api_key row for the winning machine user, got %d", keyCount)
+	}
+}
+
+// --- fix #3: missing key-scope checks on execution/sync plane ---
+
+func TestScopeEnforcedOnExecutionAndSyncPlane(t *testing.T) {
+	e := newEnv(t)
+
+	// A second project the scoped key (bound to p1/pj1, user usr_worker) is
+	// NOT scoped to.
+	st, m, _ := e.do(t, "POST", "/api/v1/projects", e.admin, map[string]any{"name": "p2"})
+	if st != 201 {
+		t.Fatalf("create p2: %d %v", st, m)
+	}
+	// Give usr_worker membership in p2 too, so any 403 we observe is
+	// definitely the SCOPE gate, not a membership/visibility 404.
+	p2ID := m["id"].(string)
+	if _, err := e.db.Exec(`INSERT INTO project_members(project_id, user_id, role, created_at) VALUES (?1,'usr_worker','writer','2026-01-01T00:00:00Z')`, p2ID); err != nil {
+		t.Fatal(err)
+	}
+	st, m, _ = e.do(t, "POST", "/api/v1/work-items", e.admin, map[string]any{"project": "p2", "goal": "in p2", "bundle_name": "demo",
+		"repo_inventory": []map[string]any{{"name": "r1", "url": "u"}}, "repo_inventory_base": []map[string]any{{"name": "r1", "base": "sha1"}}})
+	if st != 201 {
+		t.Fatalf("create wi in p2: %d %v", st, m)
+	}
+	wi2 := m["id"].(string)
+
+	// The scoped key (bound to pj1) must be refused CORE-403 on every one of
+	// these execution/sync-plane routes for a WI in a DIFFERENT project.
+	cases := []struct {
+		method, path string
+	}{
+		{"GET", "/api/v1/work-items/" + wi2 + "/budget"},
+		{"GET", "/api/v1/work-items/" + wi2 + "/repo-inventory"},
+		{"POST", "/api/v1/work-items/" + wi2 + "/end-generation"},
+		{"GET", "/api/v1/work-items/" + wi2 + "/head"},
+		{"GET", "/api/v1/work-items/" + wi2 + "/revisions?since=0"},
+		{"PUT", "/api/v1/work-items/" + wi2 + "/revisions/0/blocks/" + strings.Repeat("a", 64)},
+		{"POST", "/api/v1/work-items/" + wi2 + "/revisions/0/manifest"},
+		{"GET", "/api/v1/work-items/" + wi2 + "/revisions/0/blocks/" + strings.Repeat("a", 64)},
+	}
+	for _, c := range cases {
+		st, m, _ := e.do(t, c.method, c.path, e.scoped, nil)
+		if st != 403 || errCode(t, m) != "CORE-403" {
+			t.Fatalf("%s %s: expected CORE-403 out-of-scope, got %d %v", c.method, c.path, st, m)
+		}
+	}
+
+	// Admin-gated routes (force-takeover / tombstone / revert-tombstone) need
+	// a scoped ADMIN key to observe the scope gate specifically (the role
+	// gate would otherwise fire first for a non-admin scoped key).
+	scopedAdmin := e.mintKey(t, e.db, "usr_admin", &p2ID)
+	// scopedAdmin is scoped to p2, so it should be REFUSED on a WI in p1.
+	st, m, _ = e.do(t, "POST", "/api/v1/work-items", e.writer, map[string]any{"project": "p1", "goal": "in p1", "bundle_name": "demo",
+		"repo_inventory": []map[string]any{{"name": "r1", "url": "u"}}, "repo_inventory_base": []map[string]any{{"name": "r1", "base": "sha1"}}})
+	if st != 201 {
+		t.Fatalf("create wi in p1: %d %v", st, m)
+	}
+	wi1 := m["id"].(string)
+	for _, c := range []struct{ method, path string }{
+		{"POST", "/api/v1/work-items/" + wi1 + "/force-takeover"},
+		{"DELETE", "/api/v1/work-items/" + wi1 + "/capsule-data?confirm=" + wi1},
+		{"POST", "/api/v1/work-items/" + wi1 + "/capsule-data/revert-tombstone"},
+	} {
+		st, m, _ := e.do(t, c.method, c.path, scopedAdmin, nil)
+		if st != 403 || errCode(t, m) != "CORE-403" {
+			t.Fatalf("%s %s: expected CORE-403 out-of-scope, got %d %v", c.method, c.path, st, m)
+		}
+	}
+}
+
+// --- fix #17: STALE_SERVICE wiring ---
+
+func TestStaleServiceRejectsMutations(t *testing.T) {
+	e := newEnv(t)
+	// Simulate a newer process having taken over: tamper the service_id row
+	// directly, out from under this running server's in-memory Service.
+	if _, err := e.db.Exec(`UPDATE core_meta SET value='svc_someone_else' WHERE key='service_id'`); err != nil {
+		t.Fatal(err)
+	}
+	st, m, _ := e.do(t, "POST", "/api/v1/work-items", e.writer, map[string]any{"project": "p1", "goal": "x"})
+	if st != 409 || errCode(t, m) != "CORE-509" {
+		t.Fatalf("expected CORE-509 on a mutating call from a stale service, got %d %v", st, m)
+	}
+	// Reads are unaffected.
+	st, _, _ = e.do(t, "GET", "/api/v1/ready-queue?project=p1", e.writer, nil)
+	if st != 200 {
+		t.Fatalf("reads must stay available: %d", st)
+	}
+}
+
+// --- fix #18: M3 member removal ---
+
+func TestPatchProjectMemberRemoval(t *testing.T) {
+	e := newEnv(t)
+	st, m, _ := e.do(t, "PATCH", "/api/v1/projects/p1", e.admin, map[string]any{
+		"remove_members": []string{"usr_other"},
+	})
+	if st != 200 {
+		t.Fatalf("remove_members: %d %v", st, m)
+	}
+	var n int
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM project_members WHERE project_id='pj1' AND user_id='usr_other'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expected the membership row to be deleted, still have %d", n)
+	}
+}
+
+// --- fix #19: dependency-edge routes ---
+
+func TestDependencyEdgeRoutes(t *testing.T) {
+	e := newEnv(t)
+	mk := func(goal string) string {
+		st, m, _ := e.do(t, "POST", "/api/v1/work-items", e.writer, map[string]any{"project": "p1", "goal": goal, "bundle_name": "demo",
+			"repo_inventory": []map[string]any{{"name": "r1", "url": "u"}}, "repo_inventory_base": []map[string]any{{"name": "r1", "base": "sha1"}}})
+		if st != 201 {
+			t.Fatalf("create %s: %d %v", goal, st, m)
+		}
+		return m["id"].(string)
+	}
+	a := mk("a")
+	b := mk("b")
+
+	// Create: a blocks b (path {id}=b is the BLOCKED side).
+	st, m, _ := e.do(t, "POST", fmt.Sprintf("/api/v1/work-items/%s/dependencies", b), e.writer,
+		map[string]any{"blocking_wi_id": a, "kind": "blocks"})
+	if st != 201 {
+		t.Fatalf("create edge: %d %v", st, m)
+	}
+
+	// List from both sides.
+	st, m, _ = e.do(t, "GET", fmt.Sprintf("/api/v1/work-items/%s/dependencies", b), e.writer, nil)
+	if st != 200 {
+		t.Fatalf("list on blocked: %d %v", st, m)
+	}
+	blockedBy := m["blocked_by"].([]any)
+	if len(blockedBy) != 1 {
+		t.Fatalf("expected one blocked_by edge, got %v", m)
+	}
+	st, m, _ = e.do(t, "GET", fmt.Sprintf("/api/v1/work-items/%s/dependencies", a), e.writer, nil)
+	if st != 200 || len(m["blocking"].([]any)) != 1 {
+		t.Fatalf("list on blocking: %d %v", st, m)
+	}
+
+	// waiting_on materialization on the blocked WI.
+	st, m, _ = e.do(t, "GET", "/api/v1/work-items/"+b, e.writer, nil)
+	if st != 200 || m["waiting_on"] != "dependency:"+a {
+		t.Fatalf("waiting_on not materialized: %d %v", st, m)
+	}
+
+	// Cycle: b blocks a would close a→b→a.
+	st, m, _ = e.do(t, "POST", fmt.Sprintf("/api/v1/work-items/%s/dependencies", a), e.writer,
+		map[string]any{"blocking_wi_id": b, "kind": "blocks"})
+	if st != 409 || errCode(t, m) != "CORE-409" {
+		t.Fatalf("expected cycle 409, got %d %v", st, m)
+	}
+
+	// Cross-project: a WI in a different project.
+	st, m, _ = e.do(t, "POST", "/api/v1/projects", e.admin, map[string]any{"name": "p3"})
+	if st != 201 {
+		t.Fatalf("create p3: %d %v", st, m)
+	}
+	st, m, _ = e.do(t, "POST", "/api/v1/work-items", e.admin, map[string]any{"project": "p3", "goal": "other project"})
+	if st != 201 {
+		t.Fatalf("create wi in p3: %d %v", st, m)
+	}
+	other := m["id"].(string)
+	st, m, _ = e.do(t, "POST", fmt.Sprintf("/api/v1/work-items/%s/dependencies", b), e.writer,
+		map[string]any{"blocking_wi_id": other, "kind": "blocks"})
+	if st != 400 || errCode(t, m) != "CORE-400" {
+		t.Fatalf("expected cross-project 400, got %d %v", st, m)
+	}
+
+	// Delete the edge.
+	st, m, _ = e.do(t, "DELETE", fmt.Sprintf("/api/v1/work-items/%s/dependencies/%s/blocks", b, a), e.writer, nil)
+	if st != 200 {
+		t.Fatalf("delete edge: %d %v", st, m)
+	}
+	st, m, _ = e.do(t, "GET", fmt.Sprintf("/api/v1/work-items/%s/dependencies", b), e.writer, nil)
+	if st != 200 || asSliceLen(m["blocked_by"]) != 0 {
+		t.Fatalf("edge not removed: %d %v", st, m)
+	}
+}
+
+// asSliceLen treats a JSON null (an empty Go slice marshals as null, not [])
+// the same as an empty array.
+func asSliceLen(v any) int {
+	if v == nil {
+		return 0
+	}
+	return len(v.([]any))
+}

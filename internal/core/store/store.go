@@ -35,10 +35,12 @@ func Open(dataDir string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open: %w", err)
 	}
-	// SQLite is a single-writer database; one write connection avoids
-	// SQLITE_BUSY between our own goroutines (busy_timeout still covers
-	// external readers).
-	sqlDB.SetMaxOpenConns(4)
+	// SQLite is a single-writer database; INV-2a requires ALL writes to go
+	// through one connection so two pooled connections never both try to
+	// upgrade a read snapshot to a write snapshot (SQLITE_BUSY). One
+	// connection also serializes our own goroutines; busy_timeout still
+	// covers external readers/tools attached to the same file.
+	sqlDB.SetMaxOpenConns(1)
 	if err := schema.Migrate(sqlDB); err != nil {
 		sqlDB.Close()
 		return nil, err

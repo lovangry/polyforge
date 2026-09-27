@@ -5,7 +5,9 @@ package owner_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -363,6 +365,136 @@ func TestSecretRollbackKillsOldCredentials(t *testing.T) {
 	_ = caps
 	if err := h.own.EndGeneration(wi2, owner.EndGenerationRequest{Reason: "wrap", FlushEvidence: emptyFlush(r2.Generation)}, r2.GenerationToken); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// --- fix #5: ForceTakeover state validation ---
+
+func TestForceTakeoverRejectsTerminalAndRegistration(t *testing.T) {
+	h := newHarness(t)
+	wi := newExecWI(t, h, "g")
+	r := claim(t, h, wi, "k", "usr_worker", "mac_a")
+	if err := h.own.EndGeneration(wi, owner.EndGenerationRequest{Reason: "wrap", FlushEvidence: emptyFlush(r.Generation)}, r.GenerationToken); err != nil {
+		t.Fatal(err)
+	}
+	// Terminal WI: force-takeover must not resurrect it.
+	_, err := h.own.ForceTakeover(wi, "usr_admin", "mac_b")
+	ae := asAPIErr(t, err)
+	if ae.Code != "CORE-410" {
+		t.Fatalf("got %v", ae)
+	}
+
+	// Registration ticket (bundle NULL): force-takeover must not open a
+	// generation on it either.
+	reg, err := h.wi.Create(workitem.CreateRequest{Project: "p1", Goal: "reg", Reporter: "usr_worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.own.ForceTakeover(reg.ID, "usr_admin", "mac_b")
+	ae = asAPIErr(t, err)
+	if ae.Code != "CORE-409" || ae.Reason != "NOT_CLAIMABLE" {
+		t.Fatalf("got %v", ae)
+	}
+
+	// Unknown WI → CORE-404.
+	_, err = h.own.ForceTakeover("wi_nope", "usr_admin", "mac_b")
+	ae = asAPIErr(t, err)
+	if ae.Code != "CORE-404" {
+		t.Fatalf("got %v", ae)
+	}
+}
+
+// --- fix #9: claim dependency rejection ---
+
+func TestClaimRejectsUnfinishedBlocker(t *testing.T) {
+	h := newHarness(t)
+	blocker := newExecWI(t, h, "blocker")
+	blocked := newExecWI(t, h, "blocked")
+	// Create the edge directly in the test DB (no route exists yet at the
+	// domain layer's test level, mirrors internal/core/workitem tests).
+	if _, err := h.db.Exec(`INSERT INTO wi_dependencies(blocking_wi_id, blocked_wi_id, kind, created_at)
+		VALUES (?1,?2,'blocks',?3)`, blocker, blocked, store.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := h.own.Claim(blocked, owner.ClaimRequest{IdempotencyKey: "kb"}, "usr_worker", nil)
+	ae := asAPIErr(t, err)
+	if ae.Code != "CORE-409" || ae.Reason != "DEPENDENCY_BLOCKED" {
+		t.Fatalf("got %v", ae)
+	}
+
+	// Once the blocker reaches a terminal state, claim succeeds.
+	rb := claim(t, h, blocker, "kblocker", "usr_worker", "mac_a")
+	if err := h.own.EndGeneration(blocker, owner.EndGenerationRequest{Reason: "wrap", FlushEvidence: emptyFlush(rb.Generation)}, rb.GenerationToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.own.Claim(blocked, owner.ClaimRequest{IdempotencyKey: "kb2"}, "usr_worker", nil); err != nil {
+		t.Fatalf("claim should succeed once the blocker is terminal: %v", err)
+	}
+}
+
+// --- fix #11: EndGeneration reason=block requires waiting_on ---
+
+func TestEndGenerationBlockRequiresWaitingOn(t *testing.T) {
+	h := newHarness(t)
+	wi := newExecWI(t, h, "g")
+	r := claim(t, h, wi, "k", "usr_worker", "mac_a")
+	err := h.own.EndGeneration(wi, owner.EndGenerationRequest{Reason: "block", FlushEvidence: emptyFlush(r.Generation)}, r.GenerationToken)
+	ae := asAPIErr(t, err)
+	if ae.Code != "CORE-400" {
+		t.Fatalf("got %v", ae)
+	}
+	// With waiting_on set, it succeeds.
+	if err := h.own.EndGeneration(wi, owner.EndGenerationRequest{Reason: "block", FlushEvidence: emptyFlush(r.Generation), WaitingOn: "owner"}, r.GenerationToken); err != nil {
+		t.Fatal(err)
+	}
+	d, err := h.wi.Get(wi, workitem.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Status != "blocked" || d.WaitingOn == nil || *d.WaitingOn != "owner" {
+		t.Fatalf("got %+v", d.WorkItem)
+	}
+}
+
+// TestClaimConcurrent (fix #7: SetMaxOpenConns(1)): several goroutines race
+// a fresh claim (distinct idempotency keys) on the SAME never-claimed WI;
+// exactly one must win, every loser must see a typed CORE-409
+// ALREADY_CLAIMED — no SQLITE_BUSY snapshot-upgrade failure between pooled
+// connections.
+func TestClaimConcurrent(t *testing.T) {
+	h := newHarness(t)
+	wi := newExecWI(t, h, "g")
+
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins, conflicts, other := 0, 0, 0
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, err := h.own.Claim(wi, owner.ClaimRequest{IdempotencyKey: fmt.Sprintf("race-%d", i), MachineID: "mac_a"}, "usr_worker", nil)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				wins++
+			default:
+				if ae, ok := err.(*owner.APIError); ok && ae.Code == "CORE-409" {
+					conflicts++
+				} else {
+					other++
+					t.Logf("unexpected error type: %T %v", err, err)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("expected exactly one winner, got %d wins, %d conflicts, %d other", wins, conflicts, other)
+	}
+	if conflicts != n-1 {
+		t.Fatalf("expected %d typed CORE-409 conflicts, got %d (other=%d)", n-1, conflicts, other)
 	}
 }
 

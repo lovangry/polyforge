@@ -95,16 +95,27 @@ func (s *Store) manifestPath(wiID string, seq int64) string {
 // PutBlock writes one CAS block idempotently. Block-level fencing (05 §2.9):
 // the generation token must validate for the WI's active generation BEFORE
 // any write, so a fenced-out old owner cannot produce orphan blocks.
+//
+// Digest verification (05 §5.1 row 14, fix #6): the presented shaHex is
+// ALWAYS checked against sha256(body) — or, for a zstd-compressed block,
+// against sha256 of the decompressed original — even on the CAS-hit path;
+// a mismatch is SYNC-400 and nothing is written or treated as a no-op.
 func (s *Store) PutBlock(wiID, shaHex string, body []byte, tokenHex string) error {
-	if len(shaHex) != 64 || !isHexLower(shaHex) {
-		return errf("SYNC-400", "", "block id must be 64-hex sha256")
+	if err := validateWiID(wiID); err != nil {
+		return err
+	}
+	if err := validateShaHex(shaHex); err != nil {
+		return err
 	}
 	if err := s.fence(wiID, tokenHex); err != nil {
 		return err
 	}
+	if err := verifyBlockDigest(body, shaHex); err != nil {
+		return err
+	}
 	dst := s.casPath(wiID, shaHex)
 	if _, err := os.Stat(dst); err == nil {
-		return nil // CAS hit: idempotent no-op
+		return nil // CAS hit: idempotent no-op, only after the digest matched above
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 		return errf("CORE-507", "", "mkdir: %v", err)
@@ -116,8 +127,31 @@ func (s *Store) PutBlock(wiID, shaHex string, body []byte, tokenHex string) erro
 	return nil
 }
 
+// verifyBlockDigest checks sha256(content) == shaHex, where content is body
+// itself for a non-zstd payload or the zstd-decompressed original otherwise
+// (decodeBlock handles both transparently; 05 §4.2: digest addresses the
+// ORIGINAL content, not the compressed wire bytes).
+func verifyBlockDigest(body []byte, shaHex string) error {
+	content, err := decodeBlock(body)
+	if err != nil {
+		return errf("SYNC-400", "DIGEST_MISMATCH", "zstd decode failed: %v", err)
+	}
+	sum := sha256.Sum256(content)
+	got := hex.EncodeToString(sum[:])
+	if got != shaHex {
+		return errf("SYNC-400", "DIGEST_MISMATCH", "sha256(content) %s != presented %s", got, shaHex)
+	}
+	return nil
+}
+
 // GetBlock streams one CAS block back (row 17).
 func (s *Store) GetBlock(wiID, shaHex string) ([]byte, error) {
+	if err := validateWiID(wiID); err != nil {
+		return nil, err
+	}
+	if err := validateShaHex(shaHex); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(s.casPath(wiID, shaHex))
 	if os.IsNotExist(err) {
 		return nil, errf("SYNC-404", "", "block %s", shaHex)
@@ -132,6 +166,13 @@ func (s *Store) GetBlock(wiID, shaHex string) ([]byte, error) {
 // fencing → idempotency → HEAD bootstrap/parent → manifest_sha recompute →
 // SYNC-INV-3 → block integrity, then INSERT revision + INSERT/UPDATE HEAD in
 // one transaction (先数据后状态: blocks were uploaded first).
+//
+// Validation order (fix #10, pinned to 05 §5.1 row 15): fencing →
+// idempotency → HEAD bootstrap/parent → manifest_sha recompute →
+// SYNC-INV-3 (execution_state_included) → block integrity. A stale parent
+// AND a bad hash in the same request therefore surfaces SYNC-409
+// (SEQ_CONFLICT), not the hash mismatch — HEAD is checked first and HEAD
+// never moves on any later failure either.
 func (s *Store) PostManifest(wiID string, manifest Manifest, manifestSha string, tokenHex string) (headSeq int64, err error) {
 	if manifest.WorkItemID != wiID {
 		return 0, errf("SYNC-400", "", "manifest work_item_id mismatch")
@@ -154,6 +195,25 @@ func (s *Store) PostManifest(wiID string, manifest Manifest, manifestSha string,
 	}
 	if !errors.Is(qerr, sql.ErrNoRows) {
 		return 0, qerr
+	}
+
+	// HEAD bootstrap / chain validation (05 §2.6) — moved ahead of the
+	// manifest_sha recompute and block-integrity checks (fix #10).
+	var headSeqCur sql.NullInt64
+	if qerr := s.db.QueryRow(`SELECT seq FROM capsule_heads WHERE work_item_id=?1`, wiID).Scan(&headSeqCur); qerr != nil && !errors.Is(qerr, sql.ErrNoRows) {
+		return 0, qerr
+	}
+	if !headSeqCur.Valid {
+		if manifest.Seq != 0 || manifest.Parent != nil {
+			return 0, errf("SYNC-409", "SEQ_CONFLICT", "bootstrap requires seq=0 and parent=null")
+		}
+	} else {
+		if manifest.Parent == nil || *manifest.Parent != headSeqCur.Int64 {
+			return 0, errf("SYNC-409", "SEQ_CONFLICT", "parent must equal current HEAD %d", headSeqCur.Int64)
+		}
+		if manifest.Seq != headSeqCur.Int64+1 {
+			return 0, errf("SYNC-409", "SEQ_CONFLICT", "seq must be HEAD+1 = %d", headSeqCur.Int64+1)
+		}
 	}
 
 	// manifest_sha recompute over the idempotent view (built_at stripped).
@@ -185,26 +245,12 @@ func (s *Store) PostManifest(wiID string, manifest Manifest, manifestSha string,
 		}
 	}
 
-	// HEAD bootstrap / chain validation (05 §2.6).
-	var headSeqCur sql.NullInt64
-	if qerr := s.db.QueryRow(`SELECT seq FROM capsule_heads WHERE work_item_id=?1`, wiID).Scan(&headSeqCur); qerr != nil && !errors.Is(qerr, sql.ErrNoRows) {
-		return 0, qerr
-	}
-	if !headSeqCur.Valid {
-		if manifest.Seq != 0 || manifest.Parent != nil {
-			return 0, errf("SYNC-409", "SEQ_CONFLICT", "bootstrap requires seq=0 and parent=null")
-		}
-	} else {
-		if manifest.Parent == nil || *manifest.Parent != headSeqCur.Int64 {
-			return 0, errf("SYNC-409", "SEQ_CONFLICT", "parent must equal current HEAD %d", headSeqCur.Int64)
-		}
-		if manifest.Seq != headSeqCur.Int64+1 {
-			return 0, errf("SYNC-409", "SEQ_CONFLICT", "seq must be HEAD+1 = %d", headSeqCur.Int64+1)
-		}
-	}
-
-	// Persist manifest file + row + HEAD in one transaction. The manifest.json
-	// on disk keeps built_at (audit); the stored manifest_sha is the
+	// Persist manifest file + row + HEAD. The manifest.json file is written
+	// BEFORE tx.Commit (fix #8): read-through reconstruction (Progress) depends
+	// on it being present for every committed revision, so a write failure
+	// here must abort the whole publish (tx.Rollback via defer) rather than
+	// leave a capsule_revisions row with no matching manifest file. The
+	// on-disk copy keeps built_at (audit); the stored manifest_sha is the
 	// idempotent-view digest.
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -228,15 +274,20 @@ func (s *Store) PostManifest(wiID string, manifest Manifest, manifestSha string,
 			return 0, err
 		}
 	}
+	mblob, merr := json.MarshalIndent(manifest, "", "  ")
+	if merr != nil {
+		return 0, merr
+	}
+	mpath := s.manifestPath(wiID, manifest.Seq)
+	if err := os.MkdirAll(filepath.Dir(mpath), 0o750); err != nil {
+		return 0, errf("CORE-507", "", "mkdir manifest dir: %v", err)
+	}
+	if err := atomicWrite(mpath+".tmp", mpath, mblob); err != nil {
+		return 0, errf("CORE-507", "", "write manifest: %v", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	// Manifest file write happens outside the DB transaction but after commit;
-	// it is re-derivable from the DB row + blocks and is a best-effort audit
-	// artifact (the DB row is the authority).
-	mblob, _ := json.MarshalIndent(manifest, "", "  ")
-	_ = os.MkdirAll(filepath.Dir(s.manifestPath(wiID, manifest.Seq)), 0o750)
-	_ = atomicWrite(s.manifestPath(wiID, manifest.Seq)+".tmp", s.manifestPath(wiID, manifest.Seq), mblob)
 	return manifest.Seq, nil
 }
 
@@ -314,6 +365,9 @@ type Head struct {
 }
 
 func (s *Store) Head(wiID string) (*Head, error) {
+	if err := validateWiID(wiID); err != nil {
+		return nil, err
+	}
 	var h Head
 	err := s.db.QueryRow(`SELECT h.seq, h.generation, r.manifest_sha, h.updated_at
 		FROM capsule_heads h JOIN capsule_revisions r ON r.work_item_id=h.work_item_id AND r.seq=h.seq
@@ -325,6 +379,17 @@ func (s *Store) Head(wiID string) (*Head, error) {
 		return nil, err
 	}
 	return &h, nil
+}
+
+// everClaimed reports whether the WI has ever had an owner_generations row
+// (claimed at least once), regardless of whether that generation is still
+// active (fix #16).
+func (s *Store) everClaimed(wiID string) (bool, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM owner_generations WHERE work_item_id=?1`, wiID).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *Store) HeadSeq(wiID string) (int64, error) {
@@ -346,6 +411,9 @@ type RevisionMeta struct {
 }
 
 func (s *Store) RevisionsSince(wiID string, since int64) ([]RevisionMeta, error) {
+	if err := validateWiID(wiID); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(`SELECT seq, parent, generation, manifest_sha, data_bytes, published_at
 		FROM capsule_revisions WHERE work_item_id=?1 AND seq >= ?2 ORDER BY seq`, wiID, since)
 	if err != nil {
@@ -374,6 +442,9 @@ func (s *Store) RevisionsSince(wiID string, since int64) ([]RevisionMeta, error)
 // Tombstone writes the deletion-protection row (05 §2.10): only terminal WIs,
 // explicit confirm token, 24h revert window.
 func (s *Store) Tombstone(wiID, confirm string) error {
+	if err := validateWiID(wiID); err != nil {
+		return err
+	}
 	if confirm != wiID {
 		return errf("SYNC-400", "", "confirm token must repeat the work item id")
 	}
@@ -391,16 +462,49 @@ func (s *Store) Tombstone(wiID, confirm string) error {
 	}
 	now := time.Now().UTC()
 	hard := now.Add(24 * time.Hour).Format(time.RFC3339Nano)
+	// fix #14: a WI whose latest tombstone row was reverted must be
+	// re-tombstoneable with a FRESH 24h window rather than silently no-op
+	// (the previous ON CONFLICT DO NOTHING left it permanently un-deletable
+	// after one revert). A row already 'pending' or 'hard_deleted' is left
+	// alone by the WHERE guard: re-tombstoning an already-pending row does
+	// not reset its window, and a hard-deleted row cannot be resurrected.
 	if _, err := s.db.Exec(`INSERT INTO capsule_tombstones(work_item_id, tombstoned_at, hard_delete_at, status, confirm_wi_id)
 		VALUES (?1, ?2, ?3, 'pending', ?4)
-		ON CONFLICT(work_item_id) DO NOTHING`, wiID, now.Format(time.RFC3339Nano), hard, confirm); err != nil {
+		ON CONFLICT(work_item_id) DO UPDATE SET
+			tombstoned_at=excluded.tombstoned_at,
+			hard_delete_at=excluded.hard_delete_at,
+			status='pending',
+			confirm_wi_id=excluded.confirm_wi_id
+		WHERE capsule_tombstones.status='reverted'`, wiID, now.Format(time.RFC3339Nano), hard, confirm); err != nil {
 		return err
 	}
 	return nil
 }
 
 // RevertTombstone cancels a pending tombstone inside the 24h window.
+//
+// Window check (fix #14): 05 §2.10 defines the 24h window but does not name
+// an error code for a revert attempted after hard_delete_at has elapsed.
+// SYNC-409 (state conflict: the capsule is already committed to deletion) is
+// used rather than SYNC-410 (which this package already uses for "no pending
+// tombstone exists at all" — a materially different condition: here a row
+// DOES exist, it is simply too late to revert it).
 func (s *Store) RevertTombstone(wiID string) error {
+	if err := validateWiID(wiID); err != nil {
+		return err
+	}
+	var hardDeleteAt string
+	err := s.db.QueryRow(`SELECT hard_delete_at FROM capsule_tombstones
+		WHERE work_item_id=?1 AND status='pending'`, wiID).Scan(&hardDeleteAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errf("SYNC-410", "", "no pending tombstone to revert")
+	}
+	if err != nil {
+		return err
+	}
+	if hd, perr := time.Parse(time.RFC3339Nano, hardDeleteAt); perr == nil && !time.Now().UTC().Before(hd) {
+		return errf("SYNC-409", "WINDOW_ELAPSED", "revert window elapsed at %s", hardDeleteAt)
+	}
 	res, err := s.db.Exec(`UPDATE capsule_tombstones SET status='reverted'
 		WHERE work_item_id=?1 AND status='pending'`, wiID)
 	if err != nil {
@@ -454,7 +558,20 @@ func (s *Store) SweepTombstones() error {
 func (s *Store) Progress(wiID string) (headSeq *int64, headGen *int64, updatedAt *string, execJSON []byte, err error) {
 	h, herr := s.Head(wiID)
 	if herr != nil {
-		if herr.(*APIError).Code == "404" {
+		var ae *APIError
+		if errors.As(herr, &ae) && ae.Code == "404" {
+			// No HEAD. 02 §5.2 distinguishes "never claimed" (head_seq: null is
+			// a legitimate answer) from "claimed but nothing published yet",
+			// which must surface CORE-504 instead of silently looking identical
+			// (fix #16). errors.As replaces an unchecked type assertion that
+			// could panic on a plain DB error.
+			claimed, cerr := s.everClaimed(wiID)
+			if cerr != nil {
+				return nil, nil, nil, nil, cerr
+			}
+			if claimed {
+				return nil, nil, nil, nil, errf("CORE-504", "", "work item %s was claimed but has no published HEAD", wiID)
+			}
 			return nil, nil, nil, nil, nil // never claimed/published: head_seq null
 		}
 		return nil, nil, nil, nil, herr
@@ -569,6 +686,40 @@ func isHexLower(s string) bool {
 		}
 	}
 	return true
+}
+
+// validateWiID is the shared path-safety guard (fix #1) for every function
+// that builds a filesystem path from a caller-supplied work item id
+// (capsuleDir/casPath/manifestPath): charset [A-Za-z0-9_-] only, no "/", no
+// "..", no encoded separators — a traversal attempt ("../", a %2F-smuggled
+// segment that decodes to a slash, an over-length id) is rejected SYNC-400
+// before touching the filesystem. Length is bounded generously (Core ids are
+// "wi_" + 12 chars; 128 leaves headroom without being unbounded).
+func validateWiID(id string) error {
+	if id == "" || len(id) > 128 {
+		return errf("SYNC-400", "", "invalid work item id")
+	}
+	for _, c := range id {
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '_' || c == '-':
+		default:
+			return errf("SYNC-400", "", "invalid work item id")
+		}
+	}
+	return nil
+}
+
+// validateShaHex guards the other filesystem-path component derived from
+// caller input (casPath uses sha[:2]); a short or malformed value must be
+// rejected here rather than panic on the slice.
+func validateShaHex(sha string) error {
+	if len(sha) != 64 || !isHexLower(sha) {
+		return errf("SYNC-400", "", "block id must be 64-hex sha256")
+	}
+	return nil
 }
 
 func atomicWrite(tmp, dst string, body []byte) error {

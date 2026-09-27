@@ -57,7 +57,7 @@ func main() {
 		t := time.NewTicker(5 * time.Minute)
 		defer t.Stop()
 		for range t.C {
-			if err := svc.SweepRetired(time.Duration(service.DefaultGraceSeconds) * time.Second); err != nil {
+			if err := svc.SweepRetired(svc.StoredGraceSeconds()); err != nil {
 				log.Printf("aihub: sweep secrets: %v", err)
 			}
 		}

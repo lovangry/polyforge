@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/core/service"
@@ -119,6 +120,15 @@ func (m *Manager) Claim(wiID string, req ClaimRequest, callerIdentity string, bo
 	if !bundleName.Valid || bundleName.String == "" {
 		return nil, errf("CORE-409", "NOT_CLAIMABLE", "registration-only work item (bundle_name IS NULL)")
 	}
+	// fix #9: a WI with an unfinished `blocks` dependency is excluded from the
+	// executable ready-queue (02 §5.1b); claim hard-rejects it too (human
+	// ruling), rather than silently opening a generation the queue would never
+	// have offered.
+	if blocked, err := m.hasUnfinishedBlockers(wiID); err != nil {
+		return nil, err
+	} else if blocked {
+		return nil, errf("CORE-409", "DEPENDENCY_BLOCKED", "work item has an unfinished blocking dependency")
+	}
 	if _, _, _, active, err := m.ActiveGeneration(wiID); err != nil {
 		return nil, err
 	} else if active {
@@ -198,6 +208,15 @@ func (m *Manager) claimNew(wiID string, req ClaimRequest, callerIdentity string,
 	}
 	if _, err := tx.Exec(`INSERT INTO owner_generations(work_item_id, generation, owner, machine_id, started_at)
 		VALUES (?1, ?2, ?3, ?4, ?5)`, wiID, gen, callerIdentity, machineAny, store.Now()); err != nil {
+		// A concurrent claimant that read "no active generation" at the same
+		// moment (TOCTOU window between Claim's ActiveGeneration check and this
+		// transaction) loses the race here: the uq_owner_gen_active partial
+		// unique index refuses the second INSERT. Surface that as the same
+		// typed CORE-409 ALREADY_CLAIMED the pre-check would have returned had
+		// it run a moment later, rather than a raw driver error.
+		if isUniqueViolation(err) {
+			return nil, errf("CORE-409", "ALREADY_CLAIMED", "an active generation exists")
+		}
 		return nil, err
 	}
 	if _, err := tx.Exec(`UPDATE work_items SET assignee=?1, status='running', waiting_on=NULL, updated_at=?2 WHERE id=?3`,
@@ -205,7 +224,11 @@ func (m *Manager) claimNew(wiID string, req ClaimRequest, callerIdentity string,
 		return nil, err
 	}
 
-	token, epoch, err := m.svc.SignToken(wiID, gen, req.MachineID)
+	// SignTokenTx (not SignToken): this call runs INSIDE the open tx above, and
+	// with the store's single-connection pool (INV-2a) a plain SignToken here
+	// would ask for a second connection while this one is held — a
+	// self-deadlock. SignTokenTx reads the epoch through the same tx handle.
+	token, epoch, err := m.svc.SignTokenTx(tx, wiID, gen, req.MachineID)
 	if err != nil {
 		return nil, err
 	}
@@ -272,6 +295,12 @@ func (m *Manager) EndGeneration(wiID string, req EndGenerationRequest, tokenHex 
 	case "pause", "block", "wrap", "fail":
 	default:
 		return errf("CORE-400", "", "reason must be one of pause|block|wrap|fail")
+	}
+	// fix #11: 02 §2.4 invariant — status='blocked' implies a non-empty
+	// waiting_on. A block transition with no waiting_on would otherwise commit
+	// a blocked row that violates that invariant.
+	if req.Reason == "block" && strings.TrimSpace(req.WaitingOn) == "" {
+		return errf("CORE-400", "", "waiting_on is required when reason=block")
 	}
 	gen, ownerID, machine, active, err := m.ActiveGeneration(wiID)
 	if err != nil {
@@ -408,6 +437,19 @@ func (m *Manager) checkFrozenCheckpointFields(fc *FrozenCheckpoint) error {
 }
 
 
+// hasUnfinishedBlockers reports whether wiID has any non-terminal `blocks`
+// dependency (fix #9). Reimplemented here rather than imported from
+// workitem: owner must not import workitem (would create a cycle), so this
+// is a minimal, self-contained query over the same two tables.
+func (m *Manager) hasUnfinishedBlockers(wiID string) (bool, error) {
+	var n int
+	err := m.db.QueryRow(`SELECT COUNT(*) FROM wi_dependencies d
+		JOIN work_items b ON b.id = d.blocking_wi_id
+		WHERE d.blocked_wi_id=?1 AND d.kind='blocks'
+		AND b.status NOT IN ('wrapped','failed','cancelled')`, wiID).Scan(&n)
+	return n > 0, err
+}
+
 // CheckTokenForWI validates a presented token against the WI's active
 // generation (used by capsule fencing and the sync endpoints).
 func (m *Manager) CheckTokenForWI(wiID, tokenHex string) (gen int64, ok bool, reason string, err error) {
@@ -431,10 +473,45 @@ func isHexLower(s string) bool {
 	return true
 }
 
+// isUniqueViolation is a best-effort, driver-agnostic detection of a SQLite
+// UNIQUE/PRIMARY KEY constraint failure (modernc.org/sqlite's error strings
+// contain this phrase; there is no typed sentinel exported for it here).
+func isUniqueViolation(err error) bool {
+	return err != nil && strings.Contains(strings.ToUpper(err.Error()), "UNIQUE CONSTRAINT")
+}
+
 // ForceTakeover ends the old active generation (end_reason=takeover) and
 // opens a new one for the admin caller (§6.2). No flush evidence, no old token
 // required. The returned response carries the new generation's token.
 func (m *Manager) ForceTakeover(wiID, callerID, machineID string) (*ClaimResponse, error) {
+	// fix #5: mirror Claim's state validation — an admin must not be able to
+	// resurrect a terminal WI or open a generation on a registration ticket
+	// (bundle_name IS NULL, which has no owner_generations/Capsule concept at
+	// all) via force-takeover.
+	var status string
+	var bundleName sql.NullString
+	err := m.db.QueryRow(`SELECT status, bundle_name FROM work_items WHERE id=?1`, wiID).Scan(&status, &bundleName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errf("CORE-404", "", "work item %s", wiID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch status {
+	case "wrapped", "failed", "cancelled":
+		return nil, errf("CORE-410", "", "work item is in terminal state %s", status)
+	}
+	if !bundleName.Valid || bundleName.String == "" {
+		return nil, errf("CORE-409", "NOT_CLAIMABLE", "registration-only work item (bundle_name IS NULL)")
+	}
+	// ActiveGeneration is read BEFORE opening the transaction below: it uses
+	// m.db directly (not the tx), and with the store's single connection
+	// (INV-2a) calling it while the tx already holds that one connection
+	// would self-deadlock waiting for a second connection that never comes.
+	g, _, _, active, aerr := m.ActiveGeneration(wiID)
+	if aerr != nil {
+		return nil, aerr
+	}
 	tx, err := m.db.Begin()
 	if err != nil {
 		return nil, err
@@ -442,9 +519,7 @@ func (m *Manager) ForceTakeover(wiID, callerID, machineID string) (*ClaimRespons
 	defer tx.Rollback()
 	now := store.Now()
 	var gen int64
-	if g, _, _, active, err := m.ActiveGeneration(wiID); err != nil {
-		return nil, err
-	} else if active {
+	if active {
 		gen = g
 		if _, err := tx.Exec(`UPDATE owner_generations SET ended_at=?1, end_reason='takeover'
 			WHERE work_item_id=?2 AND generation=?3 AND ended_at IS NULL`, now, wiID, gen); err != nil {

@@ -770,6 +770,11 @@ func (m *Manager) Cancel(wiID, actor string) (*Detail, error) {
 	}
 	switch status {
 	case "queued", "paused", "blocked":
+	case "wrapped", "failed", "cancelled":
+		// fix #15: 02 §5.1 row 5 pins CORE-410 for an already-terminal WI,
+		// distinct from CORE-409 for a status that is simply not one of the
+		// three cancellable ones (i.e. running).
+		return nil, errf("CORE-410", "", "work item %s is already terminal (%s)", wiID, status)
 	default:
 		return nil, errf("CORE-409", "", "cancel requires a non-active status (queued/paused/blocked), got %s", status)
 	}
@@ -831,7 +836,10 @@ func (m *Manager) List(f ListFilters) ([]WorkItem, error) {
 		args = append(args, f.Milestone)
 		q += fmt.Sprintf(` AND w.milestone=?%d`, len(args))
 	}
-	q += ` ORDER BY w.created_at DESC, w.seq DESC LIMIT 500`
+	// fix #12: no LIMIT here — v1 has no pagination, and the ready-queue path
+	// (which reuses List) must see every queued/blocked WI, not just the most
+	// recent 500.
+	q += ` ORDER BY w.created_at DESC, w.seq DESC`
 	rows, err := m.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -915,8 +923,16 @@ func (m *Manager) ReadyQueue(projectName string) (*ReadyQueue, error) {
 			out.Executable = append(out.Executable, entry)
 		case w.Status == "blocked" || w.Status == "paused":
 			out.Blocked = append(out.Blocked, entry)
-		case w.Status == "queued" && (w.BundleName == nil || *w.BundleName == "" || w.WaitingOn != nil || len(unfinished) > 0):
-			out.Blocked = append(out.Blocked, entry)
+		case w.Status == "queued":
+			// fix #12: a plain queued registration ticket (bundle NULL, no
+			// waiting_on, no unfinished blocker) belongs in NEITHER array (02
+			// §5.1b) — it is not executable content and nothing is blocking it,
+			// it simply has no workflow to run. Anything actually waiting on
+			// something (waiting_on set, or an unfinished blocker) still lands
+			// in blocked, execution ticket or not.
+			if w.WaitingOn != nil || len(unfinished) > 0 {
+				out.Blocked = append(out.Blocked, entry)
+			}
 		}
 	}
 	sort.SliceStable(out.Executable, func(i, j int) bool {
