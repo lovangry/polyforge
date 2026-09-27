@@ -1,19 +1,17 @@
 package server
 
 import (
-	"encoding/json"
-	"html/template"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/memory"
-	"github.com/silgrid/polyforge/internal/core/store"
 )
 
-// E group (rows 22–25). The HTTP surface is 02's; the full 06 semantics
-// (three-step write order + backupBarrier, HTML derivation, share
-// persistence) land in the Memory-domain WI.
+// E group (rows 22–25). The HTTP surface is 02's; the 06 semantics live
+// in internal/memory: three-step write order under the shared backupBarrier
+// (06 §5.2), HTML derivation with the double-digest staleness check
+// (06 §4.3), short-query retrieval widening, and the A18 share ruling.
 
 func (s *Server) memoryAllowed(idn *identity, projectID string) func(*memory.Entry) bool {
 	return func(e *memory.Entry) bool {
@@ -83,6 +81,10 @@ func (s *Server) memForRead(w http.ResponseWriter, r *http.Request, memID string
 	return e, idn, true
 }
 
+// hGetMemory serves row 22 GET: Markdown authority + metadata; with
+// format=html the DERIVED view (06 §4.3) — the memory store applies the
+// source_markdown_sha/html_sha staleness check and re-derives if stale
+// (INV-7d), so a stale or out-of-band-edited memory.html is never served.
 func (s *Server) hGetMemory(w http.ResponseWriter, r *http.Request) {
 	e, _, ok := s.memForRead(w, r, r.PathValue("id"))
 	if !ok {
@@ -95,21 +97,16 @@ func (s *Server) hGetMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]any{"entry": e, "content": string(content)}
 	if r.URL.Query().Get("format") == "html" {
-		// 06-deferred: 06 §4 owns the derivation rules; v1 wraps the
-		// authority text in an escaped document so the contract shape holds.
-		doc := "<!doctype html><html><head><meta charset='utf-8'><title>" +
-			template.HTMLEscapeString(orDash(e.Title)) + "</title></head><body><pre>" +
-			template.HTMLEscapeString(string(content)) + "</pre></body></html>"
-		resp["html"] = doc
+		html, err := s.Mems.HTML(e.ID)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		// Inference (recorded): memory.html holds the rendered body
+		// fragment; the consuming UI wraps it in its own document shell.
+		resp["html"] = string(html)
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func orDash(t *string) string {
-	if t == nil {
-		return "memory"
-	}
-	return *t
 }
 
 func (s *Server) hListMemories(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +156,9 @@ func (s *Server) hPatchMemory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	upd, err := s.Mems.Update(e.ID, body.Content, body.Title, body.Tags)
+	upd, err := s.Mems.Update(e.ID, memory.UpdateRequest{
+		Content: body.Content, Title: body.Title, Tags: body.Tags,
+	})
 	writeResult(w, err, func() { writeJSON(w, http.StatusOK, upd) })
 }
 
@@ -233,6 +232,8 @@ func (s *Server) hShareMemory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Stateless token per the recorded ruling in memory.Store.Share (06
+	// §5.1 A18 pins no persistence/revocation for tokens).
 	token, err := s.Mems.Share(e.ID, secret)
 	writeResult(w, err, func() {
 		writeJSON(w, http.StatusOK, map[string]any{"share_token": token})
@@ -281,9 +282,7 @@ func (s *Server) hRebuildIndex(w http.ResponseWriter, r *http.Request) {
 // secret epoch (fix #4: previously a hardcoded public string "pf-share-"+epoch,
 // which anyone holding a mem_id could reproduce to forge an anonymous share
 // token; it is now HMAC-derived from the actual rotatable secret file, which
-// only the aihub process can read). 06-deferred: persistence/revocation of
-// share tokens themselves still lands in the Memory WI; the token shape
-// stays stateless.
+// only the aihub process can read).
 func (s *Server) shareKey() ([]byte, error) {
 	epoch, err := s.Svc.CurrentEpoch()
 	if err != nil {
@@ -291,6 +290,3 @@ func (s *Server) shareKey() ([]byte, error) {
 	}
 	return s.Svc.ShareKey(epoch)
 }
-
-var _ = json.Marshal
-var _ = store.Now

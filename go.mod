@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/klauspost/compress v1.20.1
+	github.com/yuin/goldmark v1.7.13
 	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.57.0

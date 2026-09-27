@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/silgrid/polyforge/internal/core/store"
+	"github.com/silgrid/polyforge/internal/memory"
 )
 
 // F group (M1–M5): the pf management CLI face. Admin unless noted (M3 also
@@ -140,8 +141,8 @@ func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		UserID    string `json:"user_id"`
-		Name      string `json:"name"`
+		UserID    string  `json:"user_id"`
+		Name      string  `json:"name"`
 		ProjectID *string `json:"project_id"`
 	}
 	if err := decodeBody(r, &body); err != nil {
@@ -210,8 +211,8 @@ func (s *Server) hCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name string `json:"name"`
-		Visible *bool `json:"visible"`
+		Name    string `json:"name"`
+		Visible *bool  `json:"visible"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, err)
@@ -356,6 +357,11 @@ func (s *Server) hPatchProject(w http.ResponseWriter, r *http.Request) {
 }
 
 // M4: on-demand backup snapshot (VACUUM INTO under <data_dir>/backups).
+// The write side of the backupBarrier (07 §6.2): it blocks until every
+// memory write path (06 §4.6 create/update/redact, each holding the read
+// side across its whole write order) has drained, and no new one enters
+// until the SQLite snapshot is taken — so the snapshot can never observe
+// a "files changed but Core not committed" (or inverse) pair.
 func (s *Server) hBackup(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(s, w, r); !ok {
 		return
@@ -367,6 +373,8 @@ func (s *Server) hBackup(w http.ResponseWriter, r *http.Request) {
 	name := "aihub-" + store.Now() + ".db"
 	name = sanitizeFilename(name)
 	target := filepath.Join(s.DataDir, "backups", name)
+	memory.BackupBarrier.Lock()
+	defer memory.BackupBarrier.Unlock()
 	if _, err := s.DB.Exec(`VACUUM INTO ?1`, target); err != nil {
 		writeErr(w, ownerAPI("CORE-507", "vacuum failed"))
 		return
