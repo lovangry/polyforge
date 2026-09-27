@@ -13,11 +13,19 @@ import (
 // admin-triggered deletion protection.
 
 func (s *Server) hPutBlock(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authenticate(r); err != nil {
+	idn, err := s.authenticate(r)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	wiID := r.PathValue("id")
+	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
+		writeErr(w, aerr)
+		return
+	} else if serr := s.requireScope(idn, projectID); serr != nil {
+		writeErr(w, serr)
+		return
+	}
 	shaHex := r.PathValue("sha")
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256<<20))
 	if err != nil {
@@ -32,11 +40,19 @@ func (s *Server) hPutBlock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hPostManifest(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authenticate(r); err != nil {
+	idn, err := s.authenticate(r)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	wiID := r.PathValue("id")
+	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
+		writeErr(w, aerr)
+		return
+	} else if serr := s.requireScope(idn, projectID); serr != nil {
+		writeErr(w, serr)
+		return
+	}
 	pathSeqV, err := pathSeq(r)
 	if err != nil {
 		writeErr(w, err)
@@ -59,11 +75,20 @@ func (s *Server) hPostManifest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hHead(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authenticate(r); err != nil {
+	idn, err := s.authenticate(r)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	h, err := s.Caps.Head(r.PathValue("id"))
+	wiID := r.PathValue("id")
+	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
+		writeErr(w, aerr)
+		return
+	} else if serr := s.requireScope(idn, projectID); serr != nil {
+		writeErr(w, serr)
+		return
+	}
+	h, err := s.Caps.Head(wiID)
 	if err != nil {
 		// 404 for the pre-bootstrap no-row case (row 16).
 		writeErr(w, err)
@@ -73,11 +98,20 @@ func (s *Server) hHead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hGetBlock(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authenticate(r); err != nil {
+	idn, err := s.authenticate(r)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	b, err := s.Caps.GetBlock(r.PathValue("id"), r.PathValue("sha"))
+	wiID := r.PathValue("id")
+	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
+		writeErr(w, aerr)
+		return
+	} else if serr := s.requireScope(idn, projectID); serr != nil {
+		writeErr(w, serr)
+		return
+	}
+	b, err := s.Caps.GetBlock(wiID, r.PathValue("sha"))
 	writeResult(w, err, func() {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
@@ -86,8 +120,17 @@ func (s *Server) hGetBlock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hRevisionsSince(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authenticate(r); err != nil {
+	idn, err := s.authenticate(r)
+	if err != nil {
 		writeErr(w, err)
+		return
+	}
+	wiID := r.PathValue("id")
+	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
+		writeErr(w, aerr)
+		return
+	} else if serr := s.requireScope(idn, projectID); serr != nil {
+		writeErr(w, serr)
 		return
 	}
 	since, err := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
@@ -95,7 +138,7 @@ func (s *Server) hRevisionsSince(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ownerAPI("SYNC-400", "bad since"))
 		return
 	}
-	metas, err := s.Caps.RevisionsSince(r.PathValue("id"), since)
+	metas, err := s.Caps.RevisionsSince(wiID, since)
 	writeResult(w, err, func() { writeJSON(w, http.StatusOK, map[string]any{"revisions": metas}) })
 }
 
@@ -109,7 +152,15 @@ func (s *Server) hTombstone(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ownerAPI("CORE-403", "forbidden: admin only"))
 		return
 	}
-	if err := s.Caps.Tombstone(r.PathValue("id"), r.URL.Query().Get("confirm")); err != nil {
+	wiID := r.PathValue("id")
+	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
+		writeErr(w, aerr)
+		return
+	} else if serr := s.requireScope(idn, projectID); serr != nil {
+		writeErr(w, serr)
+		return
+	}
+	if err := s.Caps.Tombstone(wiID, r.URL.Query().Get("confirm")); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -126,7 +177,15 @@ func (s *Server) hRevertTombstone(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ownerAPI("CORE-403", "forbidden: admin only"))
 		return
 	}
-	if err := s.Caps.RevertTombstone(r.PathValue("id")); err != nil {
+	wiID := r.PathValue("id")
+	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
+		writeErr(w, aerr)
+		return
+	} else if serr := s.requireScope(idn, projectID); serr != nil {
+		writeErr(w, serr)
+		return
+	}
+	if err := s.Caps.RevertTombstone(wiID); err != nil {
 		writeErr(w, err)
 		return
 	}

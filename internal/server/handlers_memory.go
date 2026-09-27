@@ -277,14 +277,19 @@ func (s *Server) hRebuildIndex(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, err, func() { writeJSON(w, http.StatusOK, map[string]any{"rebuilt": n}) })
 }
 
-// shareKey derives the stateless share-signing key from the current
-// service secret (06-deferred persistence/revocation in the Memory WI).
+// shareKey derives the stateless share-signing key from the CURRENT service
+// secret epoch (fix #4: previously a hardcoded public string "pf-share-"+epoch,
+// which anyone holding a mem_id could reproduce to forge an anonymous share
+// token; it is now HMAC-derived from the actual rotatable secret file, which
+// only the aihub process can read). 06-deferred: persistence/revocation of
+// share tokens themselves still lands in the Memory WI; the token shape
+// stays stateless.
 func (s *Server) shareKey() ([]byte, error) {
 	epoch, err := s.Svc.CurrentEpoch()
 	if err != nil {
 		return nil, err
 	}
-	return []byte("pf-share-" + strconv.Itoa(epoch)), nil
+	return s.Svc.ShareKey(epoch)
 }
 
 var _ = json.Marshal

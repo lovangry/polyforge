@@ -49,7 +49,26 @@ func New(db *store.DB, dataDir, workflowsDir string, svc *service.Service) *Serv
 	return s
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+// ServeHTTP wraps the mux with the STALE_SERVICE guard (fix #17, 02 §2.2
+// layer 3 / CORE-509): a mutating request is refused if this process's
+// service_id no longer matches the row in core_meta — the sign a newer
+// process has taken over and this one is a stale double-write hazard. Reads
+// are unaffected (GET is not a state-machine mutation and staying available
+// for reads during the handover window is the point of this being
+// mutation-scoped rather than global). s.Svc may be nil only in tests that
+// skip generation endpoints entirely; those bypass the guard.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		if s.Svc != nil {
+			if err := s.Svc.CheckActive(); err != nil {
+				writeErr(w, err)
+				return
+			}
+		}
+	}
+	s.mux.ServeHTTP(w, r)
+}
 
 // errStatus maps a CORE-/SYNC-/MEM- code to its HTTP status. The code itself
 // rides in the JSON body (inference: the design pins codes, not statuses).

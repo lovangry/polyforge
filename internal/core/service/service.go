@@ -136,10 +136,25 @@ func (s *Service) loadSecret(epoch int) ([]byte, error) {
 	return os.ReadFile(secretPath(s.dataDir, epoch))
 }
 
+// queryRower is satisfied by both *store.DB (embedding *sql.DB) and *sql.Tx.
+// It lets a caller that already holds an open transaction (and therefore the
+// database's one connection under SetMaxOpenConns(1)) read epoch/secret data
+// through THAT transaction instead of asking the pool for a second
+// connection — a request that would otherwise block forever behind the
+// transaction it is nested inside (own deadlock fixed alongside store.go's
+// single-connection change).
+type queryRower interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // CurrentEpoch reads core_meta.current_secret_epoch.
 func (s *Service) CurrentEpoch() (int, error) {
+	return s.currentEpoch(s.db)
+}
+
+func (s *Service) currentEpoch(q queryRower) (int, error) {
 	var v string
-	if err := s.db.QueryRow(`SELECT value FROM core_meta WHERE key='current_secret_epoch'`).Scan(&v); err != nil {
+	if err := q.QueryRow(`SELECT value FROM core_meta WHERE key='current_secret_epoch'`).Scan(&v); err != nil {
 		return 0, err
 	}
 	e, err := strconv.Atoi(v)
@@ -150,18 +165,55 @@ func (s *Service) CurrentEpoch() (int, error) {
 }
 
 // RotateSecret implements M5 (02 §6.6). mode ∈ {grace, rollback};
-// graceSeconds only meaningful (and forced 0) for rollback, where every
-// non-retired older epoch is retired immediately and its file removed in the
-// same call — no revival window for any pre-rollback credential.
+// graceSeconds is only meaningful for mode=grace (a caller-supplied value
+// overrides DefaultGraceSeconds and is persisted for SweepRetired's default,
+// fix #13); mode=rollback forces grace to 0 (every non-retired older epoch
+// is retired immediately and its file removed in the same call — no revival
+// window for any pre-rollback credential) and REJECTS a nonzero
+// graceSeconds outright (CORE-400): rollback and a grace window are
+// contradictory requests.
 func (s *Service) RotateSecret(mode string, graceSeconds int, rotatedBy string) error {
 	switch mode {
 	case "grace":
-		return s.rotateLocked("grace", DefaultGraceSeconds, rotatedBy, true)
+		g := graceSeconds
+		if g <= 0 {
+			g = DefaultGraceSeconds
+		}
+		if err := s.setGraceSeconds(g); err != nil {
+			return err
+		}
+		return s.rotateLocked("grace", g, rotatedBy, true)
 	case "rollback":
+		if graceSeconds != 0 {
+			return errors.New("CORE-400 grace_seconds must be 0 for mode=rollback")
+		}
 		return s.rotateLocked("rollback", 0, rotatedBy, true)
 	default:
 		return errors.New("CORE-400 unknown rotate mode")
 	}
+}
+
+// setGraceSeconds persists the caller-chosen grace window so SweepRetired's
+// default (called with no args from the periodic sweeper) can honor it
+// instead of silently discarding it (fix #13).
+func (s *Service) setGraceSeconds(g int) error {
+	_, err := s.db.Exec(`INSERT INTO core_meta(key, value) VALUES ('secret_grace_seconds', ?1)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, strconv.Itoa(g))
+	return err
+}
+
+// StoredGraceSeconds returns the last mode=grace rotation's caller-supplied
+// grace window, or DefaultGraceSeconds if none was ever stored.
+func (s *Service) StoredGraceSeconds() time.Duration {
+	var v string
+	if err := s.db.QueryRow(`SELECT value FROM core_meta WHERE key='secret_grace_seconds'`).Scan(&v); err != nil {
+		return DefaultGraceSeconds * time.Second
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return DefaultGraceSeconds * time.Second
+	}
+	return time.Duration(n) * time.Second
 }
 
 func (s *Service) rotateLocked(mode string, graceSeconds int, rotatedBy string, retireOld bool) error {
@@ -270,6 +322,21 @@ func mustCurrentEpochOrZero(s *Service) int {
 	return e
 }
 
+// ShareKey derives the anonymous memory-share HMAC signing key from a
+// specific secret epoch (fix #4): the stateless share token stays a bearer
+// capability, but its key is the service's own rotatable secret rather than
+// a hardcoded public string, so a share token minted under one epoch's
+// secret cannot be forged without reading that epoch's secret file.
+func (s *Service) ShareKey(epoch int) ([]byte, error) {
+	secret, err := s.loadSecret(epoch)
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte("pf-share-v1"))
+	return mac.Sum(nil), nil
+}
+
 // RollbackBoundary returns R = the latest mode=rollback epoch (0 if none).
 // Credentials bound to epoch ≤ R are dead permanently (02 §6.6 回滚边界判定).
 func (s *Service) RollbackBoundary() (int, error) {
@@ -301,7 +368,19 @@ type TokenResult struct {
 // SignToken computes token = HMAC-SHA256(secret[epoch], wi|g|machine), hex
 // encoded, with the CURRENT epoch (02 §5.1).
 func (s *Service) SignToken(wiID string, generation int64, machineID string) (token string, epoch int, err error) {
-	e, err := s.CurrentEpoch()
+	return s.signToken(s.db, wiID, generation, machineID)
+}
+
+// SignTokenTx is SignToken run against an already-open transaction: use it
+// from inside a caller's own db.Begin()/tx.Commit() block (e.g. owner.Claim)
+// so the epoch lookup shares that transaction's connection instead of
+// requesting a second one from the pool.
+func (s *Service) SignTokenTx(tx *sql.Tx, wiID string, generation int64, machineID string) (token string, epoch int, err error) {
+	return s.signToken(tx, wiID, generation, machineID)
+}
+
+func (s *Service) signToken(q queryRower, wiID string, generation int64, machineID string) (token string, epoch int, err error) {
+	e, err := s.currentEpoch(q)
 	if err != nil {
 		return "", 0, err
 	}

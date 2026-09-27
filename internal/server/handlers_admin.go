@@ -311,7 +311,12 @@ func (s *Server) hPatchProject(w http.ResponseWriter, r *http.Request) {
 			UserID string `json:"user_id"`
 			Role   string `json:"role"`
 		} `json:"members"`
-		Visible *bool `json:"visible"`
+		// RemoveMembers (fix #18, M3): explicit removal list — deliberately
+		// simpler than an expected_removals/CAS scheme; a member listed here is
+		// physically deleted from project_members. Gated by the same
+		// admin-or-maintainer check as the rest of this endpoint.
+		RemoveMembers []string `json:"remove_members"`
+		Visible       *bool    `json:"visible"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, err)
@@ -335,6 +340,14 @@ func (s *Server) hPatchProject(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.DB.Exec(`INSERT INTO project_members(project_id, user_id, role, created_at)
 			VALUES (?1,?2,?3,?4) ON CONFLICT(project_id, user_id) DO UPDATE SET role=excluded.role`,
 			projectID, m.UserID, m.Role, store.Now()); err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
+	// Removal runs AFTER the upsert loop so an explicit removal wins if the
+	// same user_id somehow appears in both lists of one request.
+	for _, uid := range body.RemoveMembers {
+		if _, err := s.DB.Exec(`DELETE FROM project_members WHERE project_id=?1 AND user_id=?2`, projectID, uid); err != nil {
 			writeErr(w, err)
 			return
 		}

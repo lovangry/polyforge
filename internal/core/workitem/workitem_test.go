@@ -7,6 +7,7 @@ package workitem_test
 import (
 	"encoding/json"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -190,10 +191,11 @@ func TestCancel(t *testing.T) {
 	if err != nil || c.Status != "cancelled" || c.ClosedAt == nil {
 		t.Fatalf("cancel: %v", err)
 	}
-	// Terminal: cancel again → 409 (not one of the three legal statuses).
+	// Terminal: cancel again → CORE-410 (02 §5.1 row 5 + §5.3), distinct from
+	// the CORE-409 used for a legal-but-not-cancellable status (running).
 	_, err = h.wi.Cancel(queued.ID, "usr_worker")
 	e := ae(t, err)
-	if e.Code != "CORE-409" {
+	if e.Code != "CORE-410" {
 		t.Fatalf("got %v", e)
 	}
 }
@@ -218,6 +220,13 @@ func TestReadyQueue(t *testing.T) {
 	for _, e := range q.Executable {
 		if e.ID == reg.ID {
 			t.Fatal("registration tickets must never appear in executable")
+		}
+	}
+	// fix #12: a plain queued registration ticket (no bundle, no waiting_on,
+	// no unfinished blocker) must appear in NEITHER array.
+	for _, e := range q.Blocked {
+		if e.ID == reg.ID {
+			t.Fatal("plain registration ticket must not appear in blocked either")
 		}
 	}
 
@@ -317,4 +326,46 @@ func TestBudgetCAS(t *testing.T) {
 		t.Fatalf("baseline mutated: %s", row.BudgetBaseline)
 	}
 	_ = time.Now
+}
+
+// TestBudgetCASConcurrent (fix #7: SetMaxOpenConns(1)): several goroutines
+// race AddBudgetIncrement with the SAME based_on_seq; exactly one must win,
+// every loser must see a typed CORE-409 CAS_CONFLICT — not a SQLITE_BUSY
+// panic or an untyped error from two pooled connections both trying to
+// upgrade a read snapshot to a write snapshot.
+func TestBudgetCASConcurrent(t *testing.T) {
+	h := setup(t)
+	d, _ := h.wi.Create(workitem.CreateRequest{Project: "p1", Goal: "b", Reporter: "usr_worker", BundleName: "demo"})
+
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins, conflicts, other := 0, 0, 0
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := h.wi.AddBudgetIncrement(d.ID, "requests", 1, "", 0, "usr_admin")
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				wins++
+			default:
+				if e, ok := err.(*workitem.APIError); ok && e.Code == "CORE-409" {
+					conflicts++
+				} else {
+					other++
+					t.Logf("unexpected error type: %T %v", err, err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("expected exactly one winner, got %d wins, %d conflicts, %d other", wins, conflicts, other)
+	}
+	if conflicts != n-1 {
+		t.Fatalf("expected %d typed CAS conflicts, got %d (other=%d)", n-1, conflicts, other)
+	}
 }
