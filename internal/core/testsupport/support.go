@@ -55,7 +55,7 @@ func SeedBase(db *store.DB) error {
 // wfDir/workflows/demo with one code step.
 func MakeDemoBundle(wfDir string) error {
 	return WriteFileTree(wfDir, map[string]string{
-		"workflows/demo/workflow.md":  "---\nname: demo\nbudget: { requests: 100 }\nsteps:\n  - id: code\n    kind: code\n---\nbody\n",
+		"workflows/demo/workflow.md":    "---\nname: demo\nbudget: { requests: 100 }\nsteps:\n  - id: code\n    kind: code\n---\nbody\n",
 		"workflows/demo/agents/code.md": "---\nname: code\ndescription: c\ntools: bash\noutput: {type: object}\n---\n",
 	})
 }

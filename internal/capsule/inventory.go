@@ -67,6 +67,13 @@ func (c *Capsule) CheckoutInventory(bootstrap *Bootstrap) error {
 }
 
 func (c *Capsule) checkoutInventory(bootstrap *Bootstrap, run gitRunner) error {
+	// Name rules are enforced at parse time, but a Bootstrap can also be
+	// assembled directly (tests, future callers): the checkout re-validates
+	// because ITS join (repos/<name>) is where an unsafe segment would
+	// actually escape the capsule.
+	if err := validateInventoryNames(bootstrap.RepoInventory); err != nil {
+		return err
+	}
 	inDir := func(dir string, args ...string) (string, error) {
 		if run != nil {
 			return run(args...)

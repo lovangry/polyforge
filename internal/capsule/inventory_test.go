@@ -4,6 +4,7 @@ package capsule
 // fresh checkout at base, reuse when HEAD==base, CAP-405 when diverged.
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,6 +108,56 @@ func TestBootstrapParse(t *testing.T) {
 		`{"name":"r7","url":"u","base":"b"},{"name":"r8","url":"u","base":"b"},{"name":"r9","url":"u","base":"b"}]}`
 	if _, err := ParseBootstrap([]byte(tooMany)); err == nil {
 		t.Fatal("9 inventory entries must be refused")
+	}
+}
+
+// TestBootstrapRejectsUnsafeRepoNames is the FE-3 regression: an inventory
+// name becomes the path segment <capsule>/repos/<name> via filepath.Join —
+// a name carrying separators or ".." escapes the capsule, and a duplicate
+// aliases one checkout under two declarations. Both the parse and the
+// checkout refuse them (03 §4.1/§4.3; uniqueness mirrors 02 §4.6's
+// UNIQUE(work_item_id, name)).
+func TestBootstrapRejectsUnsafeRepoNames(t *testing.T) {
+	for _, name := range []string{"../evil", "../../evil", "a/b", `a\b`, "..", ".", "a\x00b"} {
+		// json.Marshal gives the NUL a valid \u0000 escape; %q would not.
+		entry, merr := json.Marshal(map[string]string{"name": name, "url": "u", "base": "b"})
+		if merr != nil {
+			t.Fatal(merr)
+		}
+		raw := `{"work_item_id":"wi_x","repo_inventory":[` + string(entry) + `]}`
+		if _, err := ParseBootstrap([]byte(raw)); err == nil {
+			t.Errorf("unsafe inventory name %q must be refused at parse time", name)
+		}
+	}
+	// A duplicate name aliases one checkout: refused.
+	dup := `{"work_item_id":"wi_x","repo_inventory":[` +
+		`{"name":"r1","url":"u","base":"b"},{"name":"r1","url":"u2","base":"b2"}]}`
+	if _, err := ParseBootstrap([]byte(dup)); err == nil {
+		t.Error("a duplicate inventory name must be refused at parse time")
+	}
+	// Defense in depth: a DIRECTLY assembled Bootstrap (not via ParseBootstrap)
+	// is re-validated at checkout, where the join would actually escape.
+	c := newCapsule(t, 3)
+	for _, boot := range []*Bootstrap{
+		{WorkItemID: c.WorkItemID, RepoInventory: []RepoEntry{{Name: "../evil", URL: "u", Base: "b"}}},
+		{WorkItemID: c.WorkItemID, RepoInventory: []RepoEntry{{Name: "../../evil", URL: "u", Base: "b"}}},
+		{WorkItemID: c.WorkItemID, RepoInventory: []RepoEntry{
+			{Name: "r1", URL: "u", Base: "b"}, {Name: "r1", URL: "u2", Base: "b2"}}},
+	} {
+		if err := c.CheckoutInventory(boot); err == nil {
+			t.Errorf("checkout must refuse the unsafe inventory: %+v", boot.RepoInventory)
+		}
+	}
+	// The escapes must not have materialized anything outside the capsule
+	// ("../evil" would land at <capsule>/evil, "../../evil" outside the
+	// capsules root) nor inside it.
+	for _, p := range []string{
+		filepath.Join(c.Dir, "evil"),
+		filepath.Join(filepath.Dir(c.Dir), "evil"),
+	} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("an unsafe name must never materialize a checkout at %s", p)
+		}
 	}
 }
 

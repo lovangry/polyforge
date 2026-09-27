@@ -379,6 +379,26 @@ func TestErrorNonEnvelopeBody(t *testing.T) {
 	}
 }
 
+func TestExecuteSetsJSONContentType(t *testing.T) {
+	// Regression (FC-5): requests carrying a JSON body must declare
+	// Content-Type: application/json (POST/PATCH/PUT alike).
+	var cap captured
+	srv := newCapturingServer(t, 200, `{}`, &cap)
+	if _, err := NewClient(srv.URL, "k").PatchWorkItem("wi_x", map[string]any{"goal": "g"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := cap.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	// Bodyless requests must not claim a Content-Type.
+	if _, err := NewClient(srv.URL, "k").GetWorkItem("wi_x", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := cap.Header.Get("Content-Type"); got != "" {
+		t.Errorf("Content-Type = %q on a bodyless GET, want unset", got)
+	}
+}
+
 func TestErrorKeepsRawForJSONMode(t *testing.T) {
 	var cap captured
 	body := envelope("CORE-410", "", "terminal")

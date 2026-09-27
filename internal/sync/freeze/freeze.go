@@ -41,6 +41,36 @@ type Quiescer interface {
 	RequestQuiesce(ctx context.Context) error
 }
 
+// Releaser is the WI-Agent coordination face for the OTHER end of the
+// window (05 §2.7 release step): the Daemon notifies the agent that the
+// freeze is over and it may resume sync-surface writes. A Quiescer that
+// does not implement it (or a nil Quiescer — the process-dead shortcut
+// path) has nobody to notify, so Release is a no-op for it.
+type Releaser interface {
+	// ReleaseQuiesce tells the WI Agent it may resume writes. The design
+	// pins no failure semantics for this notification (05 §2.7): the
+	// staged bytes are already pinned, so a failed notify cannot corrupt
+	// the in-flight publish — callers treat it as best-effort.
+	ReleaseQuiesce(ctx context.Context) error
+}
+
+// Release ends a write freeze window acquired via Acquire (05 §2.7):
+// "staging 固化完成后 …… Daemon 立即释放 write freeze（通知 WI Agent 恢复
+// 写入；WI Agent 已终止则无需通知），不等待块上传、manifest 提交或 HEAD
+// 推进完成". The publisher calls this immediately after the staging pin,
+// BEFORE any network I/O; the publish mutex stays held (its release waits
+// for the network outcome). No-op when there is nobody to notify.
+func Release(ctx context.Context, c Conditions) error {
+	if c.Quiescer == nil {
+		return nil // process-dead shortcut: the agent has terminated
+	}
+	r, ok := c.Quiescer.(Releaser)
+	if !ok {
+		return nil // quiescer face without a release counterpart
+	}
+	return r.ReleaseQuiesce(ctx)
+}
+
 // Conditions describes how a freeze window may be acquired (05 §2.7).
 type Conditions struct {
 	// Quiescer is the normal confirmation path. Required unless the

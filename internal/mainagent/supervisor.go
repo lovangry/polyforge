@@ -22,11 +22,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -56,6 +59,11 @@ const (
 	// acks that no in-flight sync-surface writes exist and none will
 	// start until released.
 	MethodQuiesce = "pf/quiesce"
+	// MethodResume: the freeze-release notification (05 §2.7 release
+	// step). The staging pin is complete — the agent may resume
+	// sync-surface writes. Paired with MethodQuiesce; byte-identical with
+	// the SKILL.md closed method set.
+	MethodResume = "pf/resume"
 	// MethodStopNotice: the stop-advancing notice (04 §6.5 step 3). The
 	// agent picks its own next safe boundary; the daemon never picks or
 	// skips steps on its behalf (00 §3.6).
@@ -171,15 +179,166 @@ func (a *ClaudeAdapter) InitialMessage(p SpawnParams) (*rpcMessage, error) {
 // Proc: the supervised handle over one derived agent process.
 
 type Proc struct {
-	mu        sync.Mutex
-	cmd       *exec.Cmd
-	adapter   Adapter
-	sessionID string
-	startedAt string
-	stdin     io.WriteCloser
-	outCh     chan string
-	exited    chan struct{}
-	exitErr   error
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	adapter     Adapter
+	sessionID   string
+	startedAt   string
+	stdin       io.WriteCloser
+	ctrl        *lineQueue // bounded lossless control/ack path (see lineQueue)
+	bulkDropped int64      // bulk (non-control) lines dropped when nobody consumes them
+	exited      chan struct{}
+	exitErr     error
+	// unhealthy holds the typed reason the agent was marked unhealthy
+	// (control queue overflow, overlong control line): set once, read by
+	// send/awaitAck so every later control call fails fast and LOUDLY
+	// instead of waiting out its bound against a closed path.
+	unhealthy atomic.Value // error
+}
+
+// Control-path bounds (R2N-9). Acks can never be silently dropped — a
+// lost pf/quiesce or pf/stop_notice ack turns every freeze/boundary wait
+// into a timeout (05 §2.7 / 04 §6.5) — so the queue is bounded rather than
+// lossy: no legitimate harness emits more than maxControlQueueLines
+// control-shaped lines within one bounded ack wait (a handful is the
+// protocol's whole vocabulary), and hitting the bound is itself PROOF of a
+// flooding/compromised harness. The design-faithful shape at that point is
+// to close the control path LOUDLY — every future ack fails fast with the
+// typed reason and the agent is marked unhealthy (the daemon's freeze/close
+// then fails honestly instead of hanging) — never to silently drop the one
+// ack that might be awaited.
+const (
+	// maxControlQueueLines bounds the control queue before it is closed.
+	maxControlQueueLines = 1024
+	// maxControlLineBytes bounds ONE control line; bufio.Scanner's silent
+	// ErrTooLong death is replaced by a bounded reader that surfaces the
+	// overlong line, closes the control path typed and keeps draining bulk
+	// so the child can never block on its stdout.
+	maxControlLineBytes = 4 << 20
+)
+
+// ErrControlChannelOverflow marks a harness that flooded more than
+// maxControlQueueLines control-shaped lines: the control path is closed
+// and the agent marked unhealthy.
+var ErrControlChannelOverflow = errors.New("mainagent: control queue overflow (harness floods control-shaped lines)")
+
+// ErrControlLineTooLong marks a single control-shaped line beyond
+// maxControlLineBytes: the control path is closed and the agent marked
+// unhealthy.
+var ErrControlLineTooLong = errors.New("mainagent: control line exceeded the bounded reader limit")
+
+// lineQueue is the bounded LOSSLESS control-channel buffer: lines
+// classified as potential control acks are queued and never dropped while
+// the queue is open; crossing maxControlQueueLines closes the queue typed
+// with ErrControlChannelOverflow (see the bounds comment for why closing
+// loudly beats dropping). Bulk (non-control) output is NOT buffered here:
+// the stdout reader drops it, keeping memory bounded.
+type lineQueue struct {
+	mu     sync.Mutex
+	notify chan struct{}
+	items  []string
+	closed bool
+	err    error // typed close reason (overflow/overlong); nil = clean EOF
+}
+
+func newLineQueue() *lineQueue { return &lineQueue{notify: make(chan struct{}, 1)} }
+
+// push appends one line, or closes the queue typed when the bound is hit.
+// ok=false means the queue was closed (by this push or earlier).
+func (q *lineQueue) push(line string) (ok bool) {
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		return false
+	}
+	if len(q.items) >= maxControlQueueLines {
+		q.closed = true
+		q.err = fmt.Errorf("%w: %d lines queued", ErrControlChannelOverflow, len(q.items))
+		q.mu.Unlock()
+		select {
+		case q.notify <- struct{}{}:
+		default:
+		}
+		return false
+	}
+	q.items = append(q.items, line)
+	q.mu.Unlock()
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// close ends the queue with a reason (nil = clean end of output). Already
+// queued lines remain readable: an ack that arrived before the failure is
+// still delivered to its waiter.
+func (q *lineQueue) close(err error) {
+	q.mu.Lock()
+	if !q.closed {
+		q.closed = true
+		q.err = err
+	}
+	q.mu.Unlock()
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+}
+
+// reason returns the typed close reason, if any.
+func (q *lineQueue) reason() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.err
+}
+
+// next pops one line, waiting until ctx ends (an empty string with ok=false
+// means the queue is drained and closed).
+func (q *lineQueue) next(ctx context.Context) (string, bool) {
+	for {
+		q.mu.Lock()
+		if len(q.items) > 0 {
+			line := q.items[0]
+			q.items = q.items[1:]
+			q.mu.Unlock()
+			return line, true
+		}
+		closed := q.closed
+		q.mu.Unlock()
+		if closed {
+			return "", false
+		}
+		select {
+		case <-ctx.Done():
+			return "", false
+		case <-q.notify:
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// isControlLine classifies one stdout line: JSON objects carrying a
+// "method" field, or a "result" object with an ack marker, are potential
+// control acks (the two-sided contract shape); everything else — free text,
+// progress streams, non-ack JSON — is bulk output.
+func isControlLine(line string) bool {
+	s := strings.TrimSpace(line)
+	if !strings.HasPrefix(s, "{") {
+		return false
+	}
+	var probe struct {
+		Method string         `json:"method"`
+		Result map[string]any `json:"result"`
+	}
+	if json.Unmarshal([]byte(s), &probe) != nil {
+		return false
+	}
+	if probe.Method != "" {
+		return true
+	}
+	_, hasAck := probe.Result["ack"]
+	return hasAck
 }
 
 // PID implements daemon.AgentHandle.
@@ -199,7 +358,13 @@ func (p *Proc) Alive() bool {
 }
 
 // send writes one control line; a dead pipe reports the process as gone.
+// An agent marked unhealthy (control path closed by overflow or an
+// overlong line) fails fast with the typed reason instead of writing into
+// a path whose acks can never arrive.
 func (p *Proc) send(m rpcMessage) error {
+	if r, ok := p.unhealthyReason(); ok {
+		return fmt.Errorf("mainagent: agent marked unhealthy, control path closed: %w", r)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.stdin == nil {
@@ -215,33 +380,44 @@ func (p *Proc) send(m rpcMessage) error {
 	return nil
 }
 
-// awaitAck waits for one stdout line acknowledging the pending method
+// awaitAck waits for one CONTROL line acknowledging the pending method
 // (bounded by ctx; the pf-execute main loop's contract is to ack control
-// methods at its next safe boundary).
+// methods at its next safe boundary). Control lines are buffered on the
+// lossless path, so concurrent bulk output on the same stdout can never
+// push the ack out of the window.
 func (p *Proc) awaitAck(ctx context.Context, method string) error {
 	deadline := time.Now().Add(30 * time.Second)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
+	qctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case line, ok := <-p.outCh:
-			if !ok {
-				return fmt.Errorf("mainagent: agent output closed")
+		line, ok := p.ctrl.next(qctx)
+		if !ok {
+			if qctx.Err() != nil {
+				if qctx.Err() == context.DeadlineExceeded {
+					return fmt.Errorf("mainagent: no ack for %s", method)
+				}
+				return qctx.Err()
 			}
-			var ack struct {
-				Result map[string]any `json:"result"`
-				Method string         `json:"method"`
+			// The control path ENDED: a typed reason (overflow/overlong)
+			// is surfaced LOUDLY — the old code reported a silent
+			// "agent output closed" for a Scanner that had died on an
+			// overlong line (R2N-9).
+			if r := p.ctrl.reason(); r != nil {
+				return fmt.Errorf("mainagent: no ack for %s: control path closed: %w", method, r)
 			}
-			if json.Unmarshal([]byte(line), &ack) == nil && (ack.Method == method || ack.Result["ack"] == method) {
-				return nil
-			}
-			// Other traffic (step output streams): keep waiting.
-		case <-time.After(time.Until(deadline)):
-			return fmt.Errorf("mainagent: no ack for %s", method)
+			return fmt.Errorf("mainagent: agent output closed")
 		}
+		var ack struct {
+			Result map[string]any `json:"result"`
+			Method string         `json:"method"`
+		}
+		if json.Unmarshal([]byte(line), &ack) == nil && (ack.Method == method || ack.Result["ack"] == method) {
+			return nil
+		}
+		// Other control traffic: keep waiting.
 	}
 }
 
@@ -266,6 +442,18 @@ func (p *Proc) Quiesce(ctx context.Context) error {
 	return p.awaitAck(ctx, MethodQuiesce)
 }
 
+// Resume implements the freeze-release notification (05 §2.7): the write
+// freeze window is over (the staged bytes are pinned), so the agent may
+// resume sync-surface writes. Best-effort by design — an agent that died
+// mid-window simply never acks.
+func (p *Proc) Resume(ctx context.Context) error {
+	m := rpcMessage{JSONRPC: "2.0", Method: MethodResume}
+	if err := p.send(m); err != nil {
+		return err
+	}
+	return p.awaitAck(ctx, MethodResume)
+}
+
 // DeliverAnswer relays an answer payload verbatim to the waiting agent
 // (00 §3.4a: the daemon forwards, never parses).
 func (p *Proc) DeliverAnswer(relay daemon.AnswerRelay) error {
@@ -278,32 +466,171 @@ func (p *Proc) DeliverAnswer(relay daemon.AnswerRelay) error {
 	return p.send(rpcMessage{JSONRPC: "2.0", Method: MethodAnswer, Params: params})
 }
 
-// Terminate kills the WHOLE process group (04 §6.2 path B / §7.1 residue):
-// SIGTERM to -pgid, bounded wait, then SIGKILL.
+// Terminate kills the WHOLE process group and proves it empty (04 §6.2
+// path B / §7.1 residue): SIGTERM to -pgid, bounded wait for the GROUP to
+// be empty — not merely for the leader to exit (a child that ignores
+// SIGTERM keeps writing otherwise) — then SIGKILL to -pgid and a second
+// bounded wait. Works for an already-dead leader too: the group id
+// persists while any member lives, so the residue collection still runs.
 func (p *Proc) Terminate(timeout time.Duration) error {
 	if p.cmd.Process == nil {
 		return nil
 	}
 	pgid := p.cmd.Process.Pid // Setpgid: the child IS the group leader
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	select {
-	case <-p.exited:
-		return nil
-	case <-time.After(timeout):
+	if !waitForGroupEmpty(pgid, timeout) {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		select {
-		case <-p.exited:
-		case <-time.After(5 * time.Second):
+		if !waitForGroupEmpty(pgid, 5*time.Second) {
 			return fmt.Errorf("mainagent: process group %d refused to die", pgid)
 		}
 	}
 	return nil
 }
 
+// GroupEmpty implements daemon.AgentHandle (05 §2.7 shortcut condition ①):
+// the whole process group — the agent and every step agent / command child
+// — is verified empty, not just the top-level pid. FAILS CLOSED: an
+// unverifiable group (unreadable procfs) is reported as NON-empty and the
+// typed error is logged — the dead-writers shortcut is never granted on
+// an assumption.
+func (p *Proc) GroupEmpty() bool {
+	if p.cmd.Process == nil {
+		return true
+	}
+	empty, err := daemon.ProcessGroupEmpty(p.cmd.Process.Pid)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mainagent: process group %d emptiness unverifiable, failing closed: %v\n", p.cmd.Process.Pid, err)
+		return false
+	}
+	return empty
+}
+
+// waitForGroupEmpty polls the group-emptiness check until it holds or the
+// bound elapses. An unverifiable group fails closed (false + loud log),
+// same as daemon.ProcessGroupEmpty's contract.
+func waitForGroupEmpty(pgid int, bound time.Duration) bool {
+	deadline := time.Now().Add(bound)
+	for {
+		empty, err := daemon.ProcessGroupEmpty(pgid)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mainagent: process group %d emptiness unverifiable, failing closed: %v\n", pgid, err)
+			return false
+		}
+		if empty {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // Exposed for the supervisor's respawn decisions.
 func (p *Proc) Wait() error {
 	<-p.exited
 	return p.exitErr
+}
+
+// markUnhealthy records the typed reason the control path died; the first
+// reason wins (the overflow that closed the path, not a later symptom).
+func (p *Proc) markUnhealthy(reason error) {
+	if p.unhealthy.Load() == nil {
+		p.unhealthy.Store(reason)
+	}
+}
+
+// unhealthyReason reports the unhealthy marker, if set.
+func (p *Proc) unhealthyReason() (error, bool) {
+	v := p.unhealthy.Load()
+	if v == nil {
+		return nil, false
+	}
+	r, _ := v.(error)
+	return r, true
+}
+
+// Unhealthy reports whether the agent was marked unhealthy (control path
+// closed by queue overflow or an overlong control line, R2N-9). An
+// unhealthy agent is still ALIVE — the caller (the daemon's freeze/close
+// path) decides collection — but no control message can reach it.
+func (p *Proc) Unhealthy() bool {
+	_, bad := p.unhealthyReason()
+	return bad
+}
+
+// readBoundedLine reads one newline-terminated line through br, never
+// accumulating more than max bytes of line CONTENT (the terminator is
+// framing, not content): a line longer than the bound is drained and
+// reported as tooLong (the caller closes the control path typed), so a
+// hostile harness cannot balloon the reader's memory. A trailing \r is
+// trimmed like bufio.Scanner's ScanLines did.
+//
+// R3N-F9: the bound is enforced on COMPLETED lines too. The old code only
+// checked size on ErrBufferFull, so a final fragment ending in a newline
+// (or EOF) was appended without checking the accumulated length — a
+// completed line over the limit evaded ErrControlLineTooLong whenever it
+// fit the reader's buffer. The accumulation guard keeps a 2-byte slack
+// for a possible "\r\n" terminator so an at-limit line is never
+// false-flagged before its terminator is seen.
+//
+// R4N-4: the WHOLE terminator — "\r\n" as well as the lone "\n" — is
+// framing. The old completed-line check subtracted only the "\n", so a
+// line of exactly max content bytes + "\r\n" was wrongly rejected (the
+// CR counted as content). The full terminator is stripped before the
+// bound check; the 2-byte accumulation slack stays for safety, but a
+// completed line's content is measured without the CR. The CR may sit at
+// the end of an earlier accumulated chunk (a buffer boundary can split
+// "\r\n"), so the terminator is stripped from the COMBINED line, never
+// from the last chunk alone.
+func readBoundedLine(br *bufio.Reader, max int) (line string, tooLong bool, err error) {
+	const termSlack = 2 // a pending terminator may be "\r\n"
+	var buf []byte
+	for {
+		chunk, rerr := br.ReadSlice('\n')
+		if rerr == bufio.ErrBufferFull {
+			if len(buf)+len(chunk) > max+termSlack {
+				// Drain the remainder of the overlong line so the stream
+				// stays framed for whatever follows.
+				for rerr == bufio.ErrBufferFull {
+					chunk, rerr = br.ReadSlice('\n')
+				}
+				return "", true, nil
+			}
+			buf = append(buf, chunk...)
+			continue
+		}
+		if rerr != nil {
+			if rerr == io.EOF && len(buf)+len(chunk) > 0 {
+				// Final unterminated line: deliver it (Scanner parity) —
+				// after the SAME content bound check as terminated lines.
+				if len(buf)+len(chunk) > max {
+					return "", true, nil
+				}
+				buf = append(buf, chunk...)
+				return strings.TrimRight(string(buf), "\r"), false, nil
+			}
+			return "", false, rerr
+		}
+		// Completed (newline-terminated) line: R3N-F9 — the accumulated
+		// payload is checked here too, not only on the ErrBufferFull path.
+		// R4N-4: the FULL terminator ("\r\n" or the lone "\n") is framing,
+		// not content, so a line of exactly max content bytes + "\r\n"
+		// stays legal; the strip happens on the combined line so a
+		// terminator split across the accumulation boundary is handled.
+		buf = append(buf, chunk...)
+		content := buf
+		if len(content) > 0 && content[len(content)-1] == '\n' {
+			content = content[:len(content)-1]
+			if len(content) > 0 && content[len(content)-1] == '\r' {
+				content = content[:len(content)-1]
+			}
+		}
+		if len(content) > max {
+			return "", true, nil
+		}
+		return strings.TrimRight(string(content), "\r"), false, nil
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -375,17 +702,47 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 	proc := &Proc{
 		cmd: cmd, adapter: adapter, sessionID: p.SessionID,
 		startedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		stdin:     stdin, outCh: make(chan string, 64), exited: make(chan struct{}),
+		stdin:     stdin, ctrl: newLineQueue(), exited: make(chan struct{}),
 	}
-	// Stdout reader: every line lands in the ack channel (streamed output
-	// the supervisor does not interpret beyond pf/* acks).
+	// Stdout reader: TWO paths. Lines that look like control acks go to
+	// the bounded LOSSLESS queue (an ack may never be dropped — a lost
+	// pf/quiesce or pf/stop_notice ack becomes a freeze/boundary timeout,
+	// 05 §2.7); all other output is bulk and may be dropped when nobody
+	// consumes it, keeping memory bounded under a flooding harness.
+	// R2N-9: bufio.Scanner is GONE — its overlong-line death was silent
+	// (sc.Err ignored, control path just stops). The bounded reader below
+	// surfaces the overlong line: the control path is closed typed, the
+	// agent marked unhealthy and the failure logged; reading CONTINUES as
+	// bulk so a chatty child can never block on its own stdout.
 	go func() {
-		sc := bufio.NewScanner(stdout)
-		sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
-		for sc.Scan() {
-			select {
-			case proc.outCh <- sc.Text():
-			default: // ring semantics: control acks matter, bulk output may drop
+		defer proc.ctrl.close(nil)
+		br := bufio.NewReaderSize(stdout, 64*1024)
+		for {
+			line, tooLong, rerr := readBoundedLine(br, maxControlLineBytes)
+			if rerr != nil {
+				if rerr != io.EOF {
+					fmt.Fprintf(os.Stderr, "mainagent: harness stdout read failed: %v\n", rerr)
+				}
+				return
+			}
+			if tooLong {
+				reason := fmt.Errorf("%w: limit is %d bytes", ErrControlLineTooLong, maxControlLineBytes)
+				proc.markUnhealthy(reason)
+				proc.ctrl.close(reason)
+				fmt.Fprintf(os.Stderr, "mainagent: control line exceeded %d bytes; control path CLOSED, agent marked unhealthy\n", maxControlLineBytes)
+				continue // keep draining as bulk (never block the child)
+			}
+			if isControlLine(line) {
+				if !proc.ctrl.push(line) {
+					reason := proc.ctrl.reason()
+					if reason == nil {
+						reason = ErrControlChannelOverflow
+					}
+					proc.markUnhealthy(reason)
+					fmt.Fprintf(os.Stderr, "mainagent: control queue bound (%d) hit; control path CLOSED, agent marked unhealthy: %v\n", maxControlQueueLines, reason)
+				}
+			} else {
+				atomic.AddInt64(&proc.bulkDropped, 1) // ring semantics for bulk output
 			}
 		}
 	}()
@@ -393,12 +750,35 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 		proc.exitErr = cmd.Wait()
 		close(proc.exited)
 	}()
+	// R3N-F6: journal the process identity BEFORE Spawn returns (and before
+	// the first instruction is injected, so a journaled agent has at most
+	// received nothing yet). A crash between the successful derivation and
+	// the daemon's formal jobs[] record used to leave a live agent no
+	// restart could discover (no pid anywhere durable), so the orphan
+	// requeue spawned a SECOND agent over the live one, overwriting
+	// unpublished local work. The callback lets the daemon persist
+	// (pid, started-at) into the pending_jobs[] row first; its failure
+	// fails the spawn and tears the process down (the reaper goroutine
+	// above is already running, so no corpse is left behind).
+	if p.OnProcessStarted != nil {
+		if jerr := p.OnProcessStarted(cmd.Process.Pid, proc.startedAt); jerr != nil {
+			_ = proc.Terminate(5 * time.Second)
+			return nil, fmt.Errorf("mainagent: process-identity journaling failed (process torn down): %w", jerr)
+		}
+	}
 	// Inject the pf-execute initial instruction (04 §6.1a): pi gets it as
 	// the session's FIRST prompt, claude already carries it in the system
-	// prompt.
-	if m, ierr := adapter.InitialMessage(p); ierr == nil && m != nil {
+	// prompt. Any failure here must not leak a running half-initialized
+	// agent: the process group is torn down BEFORE the error is returned.
+	m, ierr := adapter.InitialMessage(p)
+	if ierr != nil {
+		_ = proc.Terminate(5 * time.Second)
+		return nil, fmt.Errorf("mainagent: initial instruction build failed (DAEMON-503): %w", ierr)
+	}
+	if m != nil {
 		if serr := proc.send(*m); serr != nil {
-			return proc, fmt.Errorf("mainagent: initial instruction injection failed: %w", serr)
+			_ = proc.Terminate(5 * time.Second)
+			return nil, fmt.Errorf("mainagent: initial instruction injection failed (DAEMON-503): %w", serr)
 		}
 	}
 	return proc, nil

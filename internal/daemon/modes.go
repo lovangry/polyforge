@@ -107,6 +107,18 @@ func (m *ModeCtl) AbortDrain() error {
 	return nil
 }
 
+// restore unconditionally reinstates a PREVIOUSLY-HELD mode. It exists for
+// exactly one caller: the R3N-F8 persistence-failure rollback in the
+// daemon's setMode/abortDrain, which must put the visible admission state
+// back when the state file refused the transition. It bypasses the
+// legality checks on purpose — `mode` is a value this same ModeCtl held
+// moments earlier, never a caller-supplied target.
+func (m *ModeCtl) restore(mode string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mode = mode
+}
+
 // AdmitSingle decides a single claim/resume/takeover request: legal in
 // Interactive and Batch; refused in Drain (its internal loop is the only
 // creation entry there). Every submission source is refused once

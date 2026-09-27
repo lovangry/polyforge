@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,10 @@ import (
 // everything written to stdout/stderr.
 func runCLI(t *testing.T, cfg Config, stdin string, argv ...string) (int, string, string) {
 	t.Helper()
+	// Isolate the default config location: Run loads
+	// ~/.config/polyforge/cli.toml when --config is absent, and no test
+	// may depend on (or be broken by) the developer's real file.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("PF_SERVER", cfg.Server)
 	t.Setenv("PF_API_KEY", cfg.APIKey)
 	t.Setenv("PF_DAEMON_SOCKET", cfg.DaemonSocket)
@@ -796,5 +801,147 @@ func TestRunUnknownCommandAndHelp(t *testing.T) {
 	code, out, _ = runCLI(t, Config{}, "", "help", "batch-confirm")
 	if code != 0 || !strings.Contains(out, "--all") {
 		t.Errorf("help <cmd> broken: code=%d out=%q", code, out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Regressions: default config file, human-mode output, filter keys,
+// positional strictness, PATCH visibility semantics, usage text honesty.
+// ---------------------------------------------------------------------------
+
+func TestRunDefaultConfigFileAppliesWithoutConfigFlag(t *testing.T) {
+	// Regression (FC-2): with no --config, Run must load the documented
+	// default file. The file carries server/api_key/project; no PF_* env
+	// is set, so the request must carry the file's values.
+	var cap captured
+	srv := newCapturingServer(t, 200, `{"project":"fileproj","executable":[],"blocked":[]}`, &cap)
+	for _, k := range []string{"PF_SERVER", "PF_API_KEY", "PF_DAEMON_SOCKET", "PF_USER_ID", "PF_PROJECT"} {
+		t.Setenv(k, "")
+	}
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	if err := os.MkdirAll(filepath.Join(base, "polyforge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(base, "polyforge", "cli.toml")
+	body := "server = \"" + srv.URL + "\"\n" +
+		"api_key = \"k_fromfile\"\n" +
+		"project = \"fileproj\"\n"
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"queue", "--ready"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(cap.Path, "project=fileproj") {
+		t.Errorf("path = %s, want the default file's project", cap.Path)
+	}
+	if got := cap.Header.Get("Authorization"); got != "Bearer k_fromfile" {
+		t.Errorf("Authorization = %q, want the default file's key", got)
+	}
+}
+
+func TestHumanModeOmitsRawJSON(t *testing.T) {
+	// Regression (FC-1): human mode renders the view; the raw server
+	// JSON must NOT also be emitted on stdout.
+	var cap captured
+	resp := `{"project":"pi","executable":[{"id":"wi_a","slug":"pi#1","goal":"do","priority":"urgent","status":"queued","labels":[],"created_at":"t"}],"blocked":[]}`
+	srv := newCapturingServer(t, 200, resp, &cap)
+	code, out, errOut := runCLI(t, testCtxConfig(srv.URL), "", "queue", "--ready")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, errOut)
+	}
+	if strings.Contains(out, "{\"project\"") || strings.Contains(out, "\"executable\"") {
+		t.Errorf("human output must not contain the raw JSON body: %q", out)
+	}
+	if !strings.Contains(out, "pi#1") || !strings.Contains(out, "executable") {
+		t.Errorf("human render missing: %q", out)
+	}
+	// --json still passes the raw body through verbatim.
+	code, out, _ = runCLI(t, testCtxConfig(srv.URL), "", "--json", "queue", "--ready")
+	if code != 0 || strings.TrimSpace(out) != resp {
+		t.Errorf("--json passthrough broken: code=%d out=%q", code, out)
+	}
+}
+
+func TestRunQueueWaitingOnFilter(t *testing.T) {
+	// Regression (FC-4): the --waiting-on flag must reach the wire as the
+	// openapi row-2 query parameter `waiting_on`, not be silently dropped.
+	var cap captured
+	srv := newCapturingServer(t, 200, `{"items":[]}`, &cap)
+	code, _, errOut := runCLI(t, testCtxConfig(srv.URL), "",
+		"queue", "--waiting-on", "dependency:wi_a")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, errOut)
+	}
+	if !strings.Contains(cap.Path, "waiting_on=dependency%3Awi_a") {
+		t.Errorf("path = %s, want waiting_on filter on the wire", cap.Path)
+	}
+}
+
+func TestRunFileCreateRejectsExtraPositionals(t *testing.T) {
+	// Regression (FC-7): file create takes flags only; a stray positional
+	// must be a usage error, not silently accepted.
+	code, _, errOut := runCLI(t, Config{}, "",
+		"file", "create", "--project", "p", "--goal", "g", "stray")
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 (usage error)", code)
+	}
+	if !strings.Contains(errOut, "unexpected arguments") {
+		t.Errorf("stderr = %q", errOut)
+	}
+}
+
+func TestRunProjectsPatchVisibleExplicitSetOnly(t *testing.T) {
+	// Regression (FC-3): the wire body carries `visible` only when the
+	// flag was explicitly given; a plain patch must not flip a private
+	// project visible (openapi ProjectPatchRequest: optional property).
+	var cap captured
+	srv := newCapturingServer(t, 200, `{"id":"proj_1","name":"pi","visible":false}`, &cap)
+	cfg := testCtxConfig(srv.URL)
+
+	// Plain patch: no `visible` key at all.
+	code, _, errOut := runCLI(t, cfg, "", "projects", "patch", "proj_1")
+	if code != 0 {
+		t.Fatalf("plain patch exit=%d stderr=%s", code, errOut)
+	}
+	if cap.Body != `{}` {
+		t.Errorf("plain patch body = %s, want {} (no visible key)", cap.Body)
+	}
+
+	// --visible: explicit true.
+	code, _, errOut = runCLI(t, cfg, "", "projects", "patch", "proj_1", "--visible")
+	if code != 0 {
+		t.Fatalf("--visible exit=%d stderr=%s", code, errOut)
+	}
+	if cap.Body != `{"visible":true}` {
+		t.Errorf("--visible body = %s", cap.Body)
+	}
+
+	// --visible=false: explicit false (how a project is made private).
+	code, _, errOut = runCLI(t, cfg, "", "projects", "patch", "proj_1", "--visible=false")
+	if code != 0 {
+		t.Fatalf("--visible=false exit=%d stderr=%s", code, errOut)
+	}
+	if cap.Body != `{"visible":false}` {
+		t.Errorf("--visible=false body = %s", cap.Body)
+	}
+}
+
+func TestCancelUsageAdvertisesIdOnly(t *testing.T) {
+	// Regression (FC-6): the cancel path takes the work item ID only
+	// (openapi {id}: "wi_" + 12 random chars; no slug resolution), so the
+	// usage text must not advertise <id|slug>.
+	code, out, _ := runCLI(t, Config{}, "", "help", "cancel")
+	if code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	if !strings.Contains(out, "pf cancel <id>") {
+		t.Errorf("usage = %q, want `pf cancel <id>`", out)
+	}
+	if strings.Contains(out, "slug") {
+		t.Errorf("usage = %q, must not advertise slug", out)
 	}
 }

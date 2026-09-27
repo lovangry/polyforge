@@ -27,14 +27,14 @@ import (
 )
 
 type env struct {
-	ts     *httptest.Server
-	client *http.Client
-	db     *store.DB
-	dir    string // server data dir (memory authority files live under it)
-	admin  string // admin api key
-	writer string // member writer api key
+	ts       *httptest.Server
+	client   *http.Client
+	db       *store.DB
+	dir      string // server data dir (memory authority files live under it)
+	admin    string // admin api key
+	writer   string // member writer api key
 	outsider string // key of a user with no membership
-	scoped  string // project-scoped key
+	scoped   string // project-scoped key
 }
 
 func newEnv(t *testing.T) *env {
@@ -197,7 +197,7 @@ func TestEndToEndClaimPublishWrap(t *testing.T) {
 	// Create the execution ticket.
 	st, m, _ := e.do(t, "POST", "/api/v1/work-items", e.writer, map[string]any{
 		"project": "p1", "goal": "e2e", "bundle_name": "demo",
-		"repo_inventory": []map[string]any{{"name": "r1", "url": "u"}},
+		"repo_inventory":      []map[string]any{{"name": "r1", "url": "u"}},
 		"repo_inventory_base": []map[string]any{{"name": "r1", "base": "sha1"}},
 	})
 	if st != 201 {
@@ -284,7 +284,7 @@ func TestEndToEndClaimPublishWrap(t *testing.T) {
 			"frozen_checkpoint": map[string]any{
 				"scanned_at": nowRFC(), "bytes_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
 				"worktree_state": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-				"manifest_sha": headSha, "matches_head": true,
+				"manifest_sha":   headSha, "matches_head": true,
 			},
 		},
 	}
@@ -319,7 +319,7 @@ func TestMemoryFace(t *testing.T) {
 	st, m, _ := e.do(t, "POST", "/api/v1/memories", e.writer, map[string]any{
 		"project": "p1", "type": "experience.debug", "visibility": "project",
 		"content": "---\ntitle: t\n---\n你好世界 polyforge trigram probe",
-		"title": "t", "tags": []string{"a"},
+		"title":   "t", "tags": []string{"a"},
 	})
 	if st != 201 {
 		t.Fatalf("create memory: %d %v", st, m)

@@ -93,6 +93,21 @@ type MemoryCreateRequest struct {
 	IdempotencyKey *string  `json:"idempotency_key,omitempty"`
 }
 
+// MachineRegisterRequest mirrors the row-21 heartbeat/registration body
+// (api/openapi.yaml POST /api/v1/machines/heartbeat).
+type MachineRegisterRequest struct {
+	MachineID      string `json:"machine_id"`
+	RuntimeVersion string `json:"runtime_version,omitempty"`
+	DisplayName    string `json:"display_name,omitempty"`
+}
+
+// RegisterMachine performs the row-21 registration upsert (02 §4.10): an
+// unknown machine_id registers (machine user + machines row + one-time
+// api key in the response), a known one refreshes its heartbeat.
+func (c *Client) RegisterMachine(req *MachineRegisterRequest) ([]byte, error) {
+	return c.do("POST", "/api/v1/machines/heartbeat", nil, req)
+}
+
 // UserCreateRequest mirrors M1.
 type UserCreateRequest struct {
 	DisplayName string `json:"display_name"`

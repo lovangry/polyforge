@@ -7,6 +7,7 @@ package memory
 // coordination (B08).
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -458,3 +459,244 @@ func TestRawHTMLEscaped(t *testing.T) {
 		t.Fatalf("markdown links not rendered: %s", doc)
 	}
 }
+
+// ---------- lock-discipline regressions for the INV-7f serving gate ----------
+
+// simulatingPatchCommits performs, under a test-held memLock, everything a
+// finished PATCH leaves behind: new authority bytes, row metadata and FTS
+// from the file, and (when derive is true) the fresh html + digest pair.
+// It is the state the blocked read must observe once the lock releases.
+func simulatingPatchCommits(t *testing.T, s *Store, memID, body string, derive bool) []byte {
+	t.Helper()
+	row, err := s.load(memID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fm := &frontmatter{ID: memID, Type: row.Type, OwnerUserID: row.OwnerUserID,
+		Title: row.Title, Tags: row.Tags, Visibility: row.Visibility,
+		WorkItemID: row.WorkItemID, ProjectID: row.ProjectID, Related: row.Related,
+		CreatedAt: row.CreatedAt, UpdatedAt: store.Now()}
+	raw := writeAuthority(t, filepath.Join(s.dataDir, "memory", "pj1", memID), fm, body)
+	if err := s.updateRowFromFile(row, fm, raw, shaHex(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if derive {
+		_, fmBody, _ := splitFrontmatter(string(raw))
+		if _, derr := s.deriveHTML(row, raw, fmBody); derr != nil {
+			t.Fatal(derr)
+		}
+	}
+	return raw
+}
+
+// TestContentServesUnderEntryLock pins the FB-3 ordering for Content: the
+// INV-7f validation and the authority-byte read happen inside ONE hold of
+// the entry's per-mem write mutex, so the bytes served always pair with
+// the row the gate validated. The pre-fix shape validated without the
+// lock and read the file afterwards — a PATCH completing in between
+// served its new bytes against the validated old row.
+func TestContentServesUnderEntryLock(t *testing.T) {
+	s := newTestStore(t)
+	e := mustCreate(t, s, "original gate body")
+
+	// A writer holding the entry's critical section.
+	unlock := s.memLock(e.ID)
+
+	type result struct {
+		b   []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		b, err := s.Content(e.ID)
+		done <- result{b, err}
+	}()
+
+	select {
+	case r := <-done:
+		t.Fatalf("Content completed while the entry lock was held (gate/read not lock-protected): err=%v", r.err)
+	case <-time.After(150 * time.Millisecond):
+		// Still blocked: the validate+read pair is atomic against writers.
+	}
+
+	raw := simulatingPatchCommits(t, s, e.ID, "replacement gate body", false)
+	unlock()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("Content: %v", r.err)
+		}
+		if shaHex(r.b) != shaHex(raw) {
+			t.Fatal("Content served bytes other than the post-lock committed state")
+		}
+		row, err := s.load(e.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if row.ContentSHA != shaHex(r.b) {
+			t.Fatal("served bytes do not match the row the gate validated (TOCTOU)")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Content did not resume after the lock was released")
+	}
+}
+
+// TestHTMLDerivesUnderEntryLock pins the FB-3 ordering for HTML: the
+// freshness judgment (row digests + live file digests) and any
+// re-derivation all read state captured INSIDE the entry lock, so the
+// digest pair can never be judged against or overwritten from a
+// superseded committed state. The pre-fix shape captured authority bytes
+// and the row's digests BEFORE the lock and re-derived from those bytes
+// under it — a PATCH completing in between had its fresh
+// source_markdown_sha/html_sha pair clobbered with stale digests.
+func TestHTMLDerivesUnderEntryLock(t *testing.T) {
+	s := newTestStore(t)
+	e := mustCreate(t, s, "original html body")
+	// Prime the derived pair so the pre-fix fast path would return
+	// immediately instead of blocking on the lock.
+	if _, err := s.HTML(e.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A writer holding the entry's critical section.
+	unlock := s.memLock(e.ID)
+
+	type htmlResult struct {
+		b   []byte
+		err error
+	}
+	done := make(chan htmlResult, 1)
+	go func() {
+		b, err := s.HTML(e.ID)
+		done <- htmlResult{b, err}
+	}()
+
+	select {
+	case r := <-done:
+		t.Fatalf("HTML completed while the entry lock was held (freshness judgment not lock-protected): err=%v", r.err)
+	case <-time.After(150 * time.Millisecond):
+		// Still blocked: the whole read runs under the entry mutex.
+	}
+
+	simulatingPatchCommits(t, s, e.ID, "replacement html body", true)
+	unlock()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("HTML: %v", r.err)
+		}
+		doc := string(r.b)
+		if !strings.Contains(doc, "replacement html body") {
+			t.Fatalf("HTML derived from pre-lock (superseded) bytes: %s", doc)
+		}
+		if strings.Contains(doc, "original html body") {
+			t.Fatalf("stale derived view served: %s", doc)
+		}
+		// The digest pair must reflect the post-lock authority, not a
+		// stale overwrite (INV-7d).
+		row, err := s.load(e.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !row.smsSHA.Valid || row.smsSHA.String != row.ContentSHA {
+			t.Fatalf("source_markdown_sha %v != content_sha %s (stale digest overwrite)", row.smsSHA, row.ContentSHA)
+		}
+		if !row.hSHA.Valid || row.hSHA.String != fileSHA(t, filepath.Join(s.dataDir, "memory", "pj1", e.ID, "memory.html")) {
+			t.Fatal("html_sha does not match the on-disk derived view")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("HTML did not resume after the lock was released")
+	}
+}
+
+// TestReadViewAuthorizesAndServesOneSnapshot (R2C-F3 regression): the
+// detail route's authorization decision and the bytes it serves must come
+// from ONE snapshot, captured inside a single hold of the entry's per-mem
+// write mutex. The pre-fix server shape authorized against Get's metadata
+// and then read Content under a separate lock window: a PATCH landing in
+// between (visibility→private + new body) disclosed the NEW private body
+// to a caller whose authorization was based on the OLD metadata. Here the
+// PATCH commits while the read is blocked on the lock; the read must then
+// judge the post-lock state and refuse — never serve the private bytes.
+func TestReadViewAuthorizesAndServesOneSnapshot(t *testing.T) {
+	s := newTestStore(t)
+	e := mustCreate(t, s, "public body snapshot probe")
+
+	// The server layer's tier predicate shape (06 §7 layer 2): a
+	// non-owner is entitled exactly while the entry is not private.
+	tierAllowed := func(e *Entry) (bool, error) { return e.Visibility != "private", nil }
+
+	// A writer holding the entry's critical section.
+	unlock := s.memLock(e.ID)
+
+	type result struct {
+		entry   *Entry
+		content []byte
+		html    []byte
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		entry, content, html, err := s.ReadView(e.ID, tierAllowed, true)
+		done <- result{entry, content, html, err}
+	}()
+
+	select {
+	case r := <-done:
+		t.Fatalf("ReadView completed while the entry lock was held (authorize/read not one lock window): err=%v", r.err)
+	case <-time.After(150 * time.Millisecond):
+		// Still blocked: decision and byte read share one critical section.
+	}
+
+	// Commit everything a finished PATCH leaves behind — with the entry
+	// now flipped to visibility=private and a brand-new body.
+	row, err := s.load(e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fm := &frontmatter{ID: e.ID, Type: row.Type, OwnerUserID: row.OwnerUserID,
+		Title: row.Title, Tags: row.Tags, Visibility: "private",
+		WorkItemID: row.WorkItemID, ProjectID: row.ProjectID, Related: row.Related,
+		CreatedAt: row.CreatedAt, UpdatedAt: store.Now()}
+	raw := writeAuthority(t, filepath.Join(s.dataDir, "memory", "pj1", e.ID), fm, "private secret body")
+	if err := s.updateRowFromFile(row, fm, raw, shaHex(raw)); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+
+	select {
+	case r := <-done:
+		ae, ok := r.err.(*APIError)
+		if !ok || ae.Code != "MEM-404" {
+			t.Fatalf("ReadView served a snapshot that turned private mid-read: err=%v entry=%v content=%q", r.err, r.entry, r.content)
+		}
+		if r.content != nil || r.html != nil {
+			t.Fatal("refused read still returned bytes")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadView did not resume after the lock was released")
+	}
+
+	// The owner-shaped predicate (private allowed) reads the SAME
+	// post-lock snapshot fine: entry, markdown and derived view all pair.
+	entry, content, html, err := s.ReadView(e.ID, nil, true)
+	if err != nil {
+		t.Fatalf("owner-shaped ReadView: %v", err)
+	}
+	if entry.Visibility != "private" || !strings.Contains(string(content), "private secret body") {
+		t.Fatalf("post-lock snapshot wrong: vis=%s content=%q", entry.Visibility, content)
+	}
+	if !strings.Contains(string(html), "private secret body") {
+		t.Fatalf("derived view not from the same snapshot: %s", html)
+	}
+	// A predicate error is propagated verbatim (the server layer's typed
+	// CORE-403 scope rejection must reach the client, not collapse to 404).
+	_, _, _, err = s.ReadView(e.ID, func(*Entry) (bool, error) { return false, errTestReject }, false)
+	if err != errTestReject {
+		t.Fatalf("predicate error not propagated: %v", err)
+	}
+}
+
+var errTestReject = errors.New("test typed rejection")

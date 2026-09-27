@@ -15,8 +15,13 @@ import (
 //   - errors: "pf: CORE-409 ALREADY_CLAIMED: detail" with the code
 //     prominent; in --json mode the raw wire envelope is emitted instead.
 
-// emit prints the command payload: raw passthrough in --json mode.
+// emit prints the command payload: raw passthrough in --json mode ONLY.
+// Human mode renders instead (every caller's !ctx.JSON branch) — emitting
+// the raw JSON there duplicated the server body above the rendered view.
 func (ctx *Context) emit(raw []byte) {
+	if !ctx.JSON {
+		return
+	}
 	ctx.Out(raw)
 }
 

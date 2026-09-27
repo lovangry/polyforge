@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -42,6 +44,12 @@ type apiError struct {
 }
 
 func writeAPIErr(w http.ResponseWriter, code string, detail string) {
+	// The daemon error STRINGS embed their own code ("... (DAEMON-409)",
+	// see answers.go/finish.go); the envelope carries the code in its own
+	// field, so a client rendering code+detail would print it twice
+	// ("pf: DAEMON-409: daemon: ... (DAEMON-409)", found in the
+	// polyforge#17 dogfood round). Strip the trailing code marker.
+	detail = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(detail), "("+code+")"))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatusFor(code))
 	json.NewEncoder(w).Encode(map[string]any{"error": apiError{Code: code, Detail: detail}})
@@ -214,8 +222,21 @@ func (s *APIServer) hSubmit(intent string) http.HandlerFunc {
 			return
 		}
 		// Opportunistically spawn immediately (the dispatcher also drains
-		// the queue on its tick).
-		_, _ = s.d.SpawnNext(r.Context())
+		// the queue on its tick). The spawned entry is reported so a claim
+		// or takeover that FAILS at spawn time answers the submit call
+		// with the typed verdict instead of a silent "accepted"
+		// (polyforge#17 dogfood: a CORE-403 admin-only takeover left the
+		// operator with no surface at all).
+		for {
+			e, spawned, serr := s.d.SpawnNextEntry(r.Context())
+			if !spawned {
+				break
+			}
+			if serr != nil && e.WorkItemID == wi {
+				writeSubmitErr(w, serr)
+				return
+			}
+		}
 		writeJSONOK(w, map[string]any{"accepted": true, "work_item_id": wi})
 	}
 }
@@ -234,10 +255,17 @@ func writeSubmitErr(w http.ResponseWriter, err error) {
 		writeAPIErr(w, ErrCodeNotFound, err.Error())
 	case errors.Is(err, ErrCloseInProgress):
 		writeAPIErr(w, ErrCodeConflict, err.Error())
+	case errors.Is(err, ErrTerminalWI):
+		writeAPIErr(w, ErrCodeConflict, err.Error())
 	case errors.Is(err, ErrSecretRolledBack):
 		// 04 §7.3: the scene is quarantined by the classifier; recovery is an
 		// admin force-takeover, never a retry of this call.
 		writeAPIErr(w, ErrCodeForbidden, ReasonSecretRolledBack+": capsule quarantined; recovery is admin force-takeover")
+	case errors.Is(err, ErrStaleGeneration):
+		// 05 §2.9 / 04 §6.2 B: the generation was taken over; the local scene
+		// is sealed and quarantined by the classifier. Recovery is a fresh
+		// claim/force-takeover by whoever holds authority — never a retry.
+		writeAPIErr(w, ErrCodeForbidden, ReasonStaleGeneration+": generation taken over; local scene sealed and quarantined; recovery is a fresh claim/force-takeover")
 	default:
 		// 04 §5.1 amendment (close routes): a typed Core verdict comes back
 		// verbatim (CORE-* passthrough), not flattened into DAEMON-500 —
@@ -570,20 +598,20 @@ func (s *APIServer) hMode(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if body.Mode != "" {
-			if err := s.d.modes.Set(body.Mode); err != nil {
+			if err := s.d.setMode(body.Mode); err != nil {
 				writeSubmitErr(w, err)
 				return
 			}
 		}
 		writeJSONOK(w, map[string]any{"mode": s.d.modes.Current()})
 	case "drain":
-		if err := s.d.modes.Set(ModeDrain); err != nil {
+		if err := s.d.setMode(ModeDrain); err != nil {
 			writeSubmitErr(w, err)
 			return
 		}
 		writeJSONOK(w, map[string]any{"mode": s.d.modes.Current()})
 	case "abort-drain":
-		if err := s.d.modes.AbortDrain(); err != nil {
+		if err := s.d.abortDrain(); err != nil {
 			writeSubmitErr(w, err)
 			return
 		}
@@ -639,6 +667,64 @@ var proxyWhitelist = map[string]bool{
 	"publish_request":    true,
 }
 
+// proxyGetBudget issues GET /work-items/{id}/budget on the WI Agent's
+// behalf, signing with the daemon's api_key and — when the daemon holds
+// one for this job — the generation token (02 §5.1 row 12 is tier 3 while
+// a generation is active; 04 §5.3 has the proxy sign with the WI's current
+// owner generation token). The wire mirrors aihub.Client.do so the typed
+// Core error envelope decodes into *aihub.APIError and surfaces verbatim
+// through writeSubmitErr/writeCoreErr instead of being flattened. The
+// token is the daemon-held jobRuntime token; when empty the call rides the
+// tier-2 face (api_key only) — exactly what the CLI uses for non-running
+// WIs, and what the Core accepts whenever no generation is active.
+func proxyGetBudget(c *aihub.Client, wiID, token string) (map[string]any, error) {
+	req, err := http.NewRequest(http.MethodGet,
+		c.BaseURL+"/api/v1/work-items/"+url.PathEscape(wiID)+"/budget", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if token != "" {
+		req.Header.Set("X-PF-Generation-Token", token)
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		var env struct {
+			Error struct {
+				Code   string `json:"code"`
+				Reason string `json:"reason"`
+				Detail string `json:"detail"`
+			} `json:"error"`
+		}
+		if jerr := json.Unmarshal(raw, &env); jerr == nil && env.Error.Code != "" {
+			return nil, &aihub.APIError{
+				Code: env.Error.Code, Reason: env.Error.Reason,
+				Detail: env.Error.Detail, Status: resp.StatusCode,
+			}
+		}
+		return nil, &aihub.APIError{
+			Code:   fmt.Sprintf("HTTP-%d", resp.StatusCode),
+			Detail: string(raw), Status: resp.StatusCode,
+		}
+	}
+	out := map[string]any{}
+	if len(raw) == 0 {
+		return out, nil
+	}
+	if uerr := json.Unmarshal(raw, &out); uerr != nil {
+		return nil, fmt.Errorf("aihub: decode budget: %w", uerr)
+	}
+	return out, nil
+}
+
 func (s *APIServer) hProxyCall(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		WorkItemID string         `json:"work_item_id"`
@@ -673,7 +759,21 @@ func (s *APIServer) hProxyCall(w http.ResponseWriter, r *http.Request) {
 			writeSubmitErr(w, err)
 			return
 		}
-		budget, _ := s.d.client.GetBudget(body.WorkItemID)
+		// Row 12 (budget read) is tier 3 while a generation is active (02
+		// §5.1): the proxy must sign it with the generation token this
+		// daemon holds for the job — the same token end-generation signs
+		// with (04 §5.3). With no active generation (paused/terminal WI)
+		// the read is tier 2 and the daemon's api_key alone suffices — the
+		// same face the CLI uses for non-running WIs — so the payload stays
+		// present. When the token is unavailable against an active
+		// generation (the post-restart recovered job holds none) the Core's
+		// typed CORE-403 is surfaced verbatim below, never swallowed into a
+		// null budget.
+		budget, berr := proxyGetBudget(s.d.client, body.WorkItemID, jr.token)
+		if berr != nil {
+			writeSubmitErr(w, berr)
+			return
+		}
 		writeJSONOK(w, map[string]any{"work_item": detail, "budget": budget})
 	case "report_step_result":
 		// End-generation passthrough: the proxy signs with the daemon-held
@@ -694,15 +794,12 @@ func (s *APIServer) hProxyCall(w http.ResponseWriter, r *http.Request) {
 		}
 		waitingOn, _ := body.Payload["waiting_on"].(string)
 		if serr := s.d.client.EndGeneration(body.WorkItemID, reason, waitingOn, jr.token, fe); serr != nil {
-			// 04 §7.3: a rolled-back credential ends this path in scene
-			// isolation — the agent's own close-out is as dead as its
-			// token; recovery is an admin force-takeover, never a retry.
-			if isSecretRolledBack(serr) {
-				_ = s.d.quarantineRolledBack(body.WorkItemID)
-				writeAPIErr(w, ErrCodeForbidden, ReasonSecretRolledBack+": capsule quarantined; recovery is admin force-takeover")
-				return
-			}
-			writeSubmitErr(w, serr)
+			// Both fence verdicts isolate locally: secret_rolled_back (04 §7.3:
+			// quarantine, admin force-takeover only) and stale_generation (05
+			// §2.9 / 04 §6.2 B: seal the scene, no retry). The shared classifier
+			// runs the right sequence and wraps the typed verdict; writeSubmitErr
+			// surfaces it.
+			writeSubmitErr(w, s.d.classifyWriteErr(body.WorkItemID, serr))
 			return
 		}
 		writeJSONOK(w, map[string]any{"ok": true})

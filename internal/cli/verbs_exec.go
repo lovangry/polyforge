@@ -32,6 +32,9 @@ var cmdSubmit = &Command{
 		if len(args) != 1 {
 			return fmt.Errorf("submit: expected exactly one work item id")
 		}
+		if err := submitPrecheck(ctx, args[0]); err != nil {
+			return err
+		}
 		takeover := boolFlag(fs, "takeover")
 		priority := stringFlag(fs, "priority")
 		d := ctx.daemon()
@@ -75,6 +78,9 @@ var cmdResume = &Command{
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
 			return fmt.Errorf("resume: expected exactly one work item id")
+		}
+		if err := submitPrecheck(ctx, args[0]); err != nil {
+			return err
 		}
 		raw, err := ctx.daemon().Resume(args[0], stringFlag(fs, "priority"))
 		if err != nil {
@@ -157,6 +163,35 @@ func observeReadThrough(ctx *Context, wiID string) error {
 		var p progressView
 		if err := decodeJSON(raw, &p); err == nil {
 			renderProgress(ctx.Stdout, &p)
+		}
+	}
+	return nil
+}
+
+// submitPrecheck asks the Core — with the CALLER's own api key, not the
+// daemon's machine key — for the work item before the local daemon is
+// involved (real-usage fix, polyforge#17 dogfood round: a submit of a
+// terminal or mistyped id used to answer "accepted", and the doomed
+// claim then failed with no operator-visible surface anywhere). Refusals:
+// a typed CORE-404 (unknown or hidden id) and an explicit terminal
+// status; every other read outcome defers to the daemon's spawn-time
+// claim, which stays the authority.
+func submitPrecheck(ctx *Context, wiID string) error {
+	raw, err := NewClient(ctx.Cfg.Server, ctx.Cfg.APIKey).GetWorkItem(wiID, nil)
+	if err != nil {
+		var ae *APIError
+		if asAPIError(err, &ae) && ae.Code == "CORE-404" {
+			return err
+		}
+		return nil
+	}
+	var d struct {
+		Status string `json:"status"`
+	}
+	if decodeJSON(raw, &d) == nil {
+		switch d.Status {
+		case "wrapped", "failed", "cancelled":
+			return fmt.Errorf("submit: %s is terminal (%s); no claim, resume or takeover can start", wiID, d.Status)
 		}
 	}
 	return nil

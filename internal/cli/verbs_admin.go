@@ -201,7 +201,7 @@ var cmdProjects = &Command{
 	Usage: "pf projects create --name N [--visible]\n" +
 		"pf projects list\n" +
 		"pf projects get <id-or-name>\n" +
-		"pf projects patch <id-or-name> [--visible]\n" +
+		"pf projects patch <id-or-name> [--visible[=true|false]]\n" +
 		"pf projects members add <id-or-name> --user U --role viewer|writer|maintainer\n" +
 		"pf projects members remove <id-or-name> --user U [--user U ...]",
 	Setup: func(fs *flag.FlagSet) {},
@@ -268,7 +268,12 @@ var cmdProjects = &Command{
 		case "patch":
 			f := flag.NewFlagSet("pf projects patch", flag.ContinueOnError)
 			f.SetOutput(ctx.Stderr)
-			visible := f.Bool("visible", true, "directory-listing visibility")
+			// Explicit-set tracking: the wire body carries `visible` ONLY
+			// when the flag was given (openapi ProjectPatchRequest marks
+			// it optional). A plain patch must not flip a private project
+			// visible (02 §5.1 M3).
+			visible := optBool{}
+			f.Var(&visible, "visible", "directory-listing visibility (omit to leave unchanged)")
 			ids, err := parseCommandArgs(f, rest)
 			if err != nil {
 				return err
@@ -276,7 +281,7 @@ var cmdProjects = &Command{
 			if len(ids) != 1 {
 				return fmt.Errorf("projects patch: expected one project id or name")
 			}
-			raw, err := client.PatchProject(ids[0], &ProjectPatchRequest{Visible: visible})
+			raw, err := client.PatchProject(ids[0], &ProjectPatchRequest{Visible: visible.Ptr()})
 			if err != nil {
 				return err
 			}
@@ -355,6 +360,74 @@ func projectsMembers(ctx *Context, client *Client, args []string) error {
 	default:
 		return fmt.Errorf("projects members: unknown action %q", sub)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// machines — row 21: the operator's machine-registration face (02 §4.10:
+// the FIRST registration call is made by the deployment operator with a
+// human/admin api key; the response carries the machine's one-time api
+// key). Not one of the 12 routing verbs nor an M-group row, but it is a
+// documented operator duty the pf-daemon fatal message itself points to
+// ("register this machine via POST /api/v1/machines/heartbeat first") —
+// before the polyforge#17 dogfood round there was NO CLI path for it.
+// ---------------------------------------------------------------------------
+
+var cmdMachines = &Command{
+	Name:    "machines",
+	Summary: "Machine registration/heartbeat (row 21; operator duty)",
+	Usage: "pf machines register <machine-id> [--version V] [--display-name N]\n" +
+		"pf machines heartbeat <machine-id> [--version V]",
+	Setup: func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("machines: expected register|heartbeat")
+		}
+		client := NewClient(ctx.Cfg.Server, ctx.Cfg.APIKey)
+		sub, rest := args[0], args[1:]
+		switch sub {
+		case "register", "heartbeat":
+			f := flag.NewFlagSet("pf machines "+sub, flag.ContinueOnError)
+			f.SetOutput(ctx.Stderr)
+			version := f.String("version", "", "runtime version stamp")
+			name := f.String("display-name", "", "machine display name")
+			ids, err := parseCommandArgs(f, rest)
+			if err != nil {
+				return err
+			}
+			if len(ids) != 1 || ids[0] == "" {
+				return fmt.Errorf("machines %s: expected exactly one machine id", sub)
+			}
+			raw, err := client.RegisterMachine(&MachineRegisterRequest{
+				MachineID: ids[0], RuntimeVersion: *version, DisplayName: *name,
+			})
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				var r struct {
+					MachineID  string `json:"machine_id"`
+					UserID     string `json:"user_id"`
+					Registered bool   `json:"registered"`
+					APIKey     string `json:"api_key"`
+				}
+				if err := decodeJSON(raw, &r); err == nil {
+					if r.Registered {
+						fmt.Fprintf(ctx.Stdout, "machine %s registered (user %s)\n", r.MachineID, r.UserID)
+						fmt.Fprintf(ctx.Stdout, "machine api key (shown exactly once): %s\n", r.APIKey)
+						fmt.Fprintln(ctx.Stdout, "NOTE: put it in the daemon's --api-key-file / POLYFORGE_API_KEY; it is never stored again.")
+					} else {
+						fmt.Fprintf(ctx.Stdout, "machine %s heartbeat refreshed (already registered)\n", r.MachineID)
+					}
+				} else {
+					printJSON(ctx.Stdout, raw)
+				}
+			}
+			return nil
+		default:
+			return fmt.Errorf("machines: unknown action %q", sub)
+		}
+	},
 }
 
 // ---------------------------------------------------------------------------

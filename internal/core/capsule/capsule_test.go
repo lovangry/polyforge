@@ -51,7 +51,7 @@ func setup(t *testing.T) *h {
 	}
 	own := owner.NewManager(db, svc)
 	hh := &h{db: db, svc: svc, own: own, dir: dir,
-		wi: workitem.NewManager(db, filepath.Join(dir, "workflows")),
+		wi:  workitem.NewManager(db, filepath.Join(dir, "workflows")),
 		cap: capsule.NewStore(db, dir, own)}
 	return hh
 }
@@ -241,7 +241,7 @@ func TestManifestValidationRejections(t *testing.T) {
 
 	// manifest_sha mismatch → SYNC-400 MANIFEST_HASH_MISMATCH.
 	m, _ := buildManifest(wi, 0, nil, r.Generation, []capsule.Op{good})
-	_, err := hh.cap.PostManifest(wi, m, "sha256:" + strings.Repeat("0", 64), r.GenerationToken)
+	_, err := hh.cap.PostManifest(wi, m, "sha256:"+strings.Repeat("0", 64), r.GenerationToken)
 	e := ae(t, err)
 	if e.Code != "SYNC-400" || e.Reason != "MANIFEST_HASH_MISMATCH" {
 		t.Fatalf("got %v", e)
@@ -386,7 +386,7 @@ func TestDeletionProtection(t *testing.T) {
 			// Stale-by-window is fine here: freshness not enforced for this
 			// path in the test because EndGeneration runs below only after
 			// we patch scanned_at to now via the emptyFlush semantics.
-			BytesDigest:  "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+			BytesDigest:   "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
 			WorktreeState: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
 		},
 	}

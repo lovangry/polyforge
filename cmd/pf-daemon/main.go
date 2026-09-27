@@ -9,8 +9,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,13 +24,18 @@ import (
 
 func main() {
 	var (
-		aihubURL     = flag.String("aihub-url", envOr("POLYFORGE_AIHUB_URL", "http://127.0.0.1:8080"), "AIHub Core base URL")
+		// Default aihub base URL: port 8420, the SAME default the aihub
+		// service listens on (cmd/aihub --listen ":8420", the single-port A5
+		// ruling) and the pf CLI points at (internal/cli defaultServer;
+		// api/openapi.yaml servers: http://localhost:8420). A default
+		// three-binary install must be able to talk without flags.
+		aihubURL     = flag.String("aihub-url", envOr("POLYFORGE_AIHUB_URL", "http://127.0.0.1:8420"), "AIHub Core base URL")
 		apiKey       = flag.String("api-key", os.Getenv("POLYFORGE_API_KEY"), "machine api key (or POLYFORGE_API_KEY)")
 		apiKeyFile   = flag.String("api-key-file", "", "read the machine api key from this 0600 file (daemon/credentials convention)")
 		machineID    = flag.String("machine-id", envOr("POLYFORGE_MACHINE_ID", ""), "this machine's id (heartbeats, claims)")
 		socketPath   = flag.String("socket", envOr("POLYFORGE_SOCKET", "/run/polyforge.sock"), "Unix domain socket operations face")
 		home         = flag.String("home", envOr("POLYFORGE_HOME", os.Getenv("HOME")+"/.polyforge"), "Polyforge home (daemon data under <home>/daemon)")
-		workspace    = flag.String("workspace-root", envOr("POLYFORGE_WORKSPACE", homeEnvDefault()), "workspace root (capsules live under <root>/capsules)")
+		workspace    = flag.String("workspace-root", "", "workspace root (capsules live under <root>/capsules); precedence: this flag > POLYFORGE_WORKSPACE > <home>/workspace")
 		workflowsDir = flag.String("workflows-dir", "", "daemon checkout workflows/ dir (defaults <home>/workflows)")
 		skillsDir    = flag.String("skills-dir", "", "daemon checkout skills/ dir (defaults <home>/skills)")
 		mode         = flag.String("mode", "interactive", "startup mode: interactive | batch | drain")
@@ -39,6 +46,14 @@ func main() {
 		version      = flag.String("version-flag", "vnext-dev", "runtime version stamp for heartbeats")
 	)
 	flag.Parse()
+
+	// Workspace-root precedence, resolved AFTER flag parsing so --home is
+	// already final: an explicit --workspace-root wins, then the
+	// POLYFORGE_WORKSPACE env, then <home>/workspace — the same home that
+	// derives the daemon data, workflows and skills dirs, so --home moves
+	// the WHOLE local layout consistently (capsules included) instead of
+	// leaving them under the old default.
+	*workspace = resolveWorkspaceRoot(*home, *workspace)
 
 	if *apiKeyFile != "" {
 		raw, err := os.ReadFile(*apiKeyFile)
@@ -111,7 +126,13 @@ func main() {
 		fatal("operations face: %v", err)
 	}
 	go func() {
-		if serr := api.Serve(); serr != nil {
+		// Serve returns http.ErrServerClosed on the GRACEFUL shutdown path
+		// (main calls api.Close after the shutdown sequence). That is not
+		// an error: treating it as one (polyforge#17 dogfood finding) made
+		// the goroutine os.Exit(1) the whole process mid-epilogue — a
+		// clean shutdown exited 1 and never printed its final line, racing
+		// main's own exit path.
+		if serr := api.Serve(); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			fatal("operations face serve: %v", serr)
 		}
 	}()
@@ -163,9 +184,15 @@ func trimNewlines(s string) string {
 	return s[start:end]
 }
 
-func homeEnvDefault() string {
-	if h := os.Getenv("POLYFORGE_HOME"); h != "" {
-		return filepath.Join(h, "workspace")
+// resolveWorkspaceRoot applies the workspace-root precedence: explicit
+// flag value > POLYFORGE_WORKSPACE env > <home>/workspace (home already
+// flag-resolved, so --home derives the workspace too).
+func resolveWorkspaceRoot(home, flagValue string) string {
+	if flagValue != "" {
+		return flagValue
 	}
-	return filepath.Join(os.Getenv("HOME"), ".polyforge", "workspace")
+	if v := os.Getenv("POLYFORGE_WORKSPACE"); v != "" {
+		return v
+	}
+	return filepath.Join(home, "workspace")
 }

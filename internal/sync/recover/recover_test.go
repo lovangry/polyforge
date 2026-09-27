@@ -6,9 +6,11 @@ package recover
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/capsule"
@@ -251,5 +253,171 @@ func TestRecoverVerifiesSha(t *testing.T) {
 	}
 	if _, serr := os.Stat(filepath.Join(c.Dir, "artifacts", "bad.md")); !os.IsNotExist(serr) {
 		t.Fatal("corrupt file must not be left on disk")
+	}
+}
+
+// TestRecoverMissingLateBlockLeavesSurfaceIntact is the FE-2 regression:
+// recovery used to delete the current surface BEFORE fetching the blocks,
+// so a missing or corrupt LATE block left a half-destroyed tree. Every
+// block must be fetched and verified BEFORE the first mutation — a failed
+// prefetch aborts with the old surface intact (03 §6.3 rule 3;
+// 05 §7.4 delete-then-write runs only once all bytes are in hand).
+func TestRecoverMissingLateBlockLeavesSurfaceIntact(t *testing.T) {
+	c := newCapsuleWithLayout(t)
+	remote := &memRemote{manifests: map[int64]revision.Manifest{}, blocks: map[string][]byte{}}
+	// The current surface holds local state the failed rebuild must not touch.
+	if err := os.MkdirAll(filepath.Join(c.Dir, "artifacts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.Dir, "artifacts", "old.md"), []byte("old surface"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	shaA := block(t, remote, "A")
+	// The SECOND entry's block is missing from the remote CAS.
+	remote.manifests[0] = revision.Manifest{WorkItemID: "wi_rec01", Seq: 0, Kind: revision.KindIncremental,
+		Ops: []revision.Op{
+			{Op: revision.OpPut, Path: "artifacts/first.md", Sha256: shaA, Mode: modeP(420)},
+			{Op: revision.OpPut, Path: "artifacts/second.md", Sha256: revision.DigestHex([]byte("never uploaded")), Mode: modeP(420)},
+		}}
+	remote.head = &revision.HeadInfo{Seq: 0, Generation: 1, ManifestSha: "sha:x"}
+	_, err := Recover(context.Background(), c, remote)
+	if err == nil {
+		t.Fatal("a missing block must abort the recovery")
+	}
+	// The old surface is intact: the pre-existing file still holds its bytes.
+	raw, rerr := os.ReadFile(filepath.Join(c.Dir, "artifacts", "old.md"))
+	if rerr != nil || string(raw) != "old surface" {
+		t.Fatalf("the old surface must survive a failed rebuild untouched: %q %v", raw, rerr)
+	}
+	// And nothing was partially applied: not even the fetchable first entry.
+	if _, serr := os.Stat(filepath.Join(c.Dir, "artifacts", "first.md")); !os.IsNotExist(serr) {
+		t.Fatal("no expected entry may be written before every block is in hand")
+	}
+}
+
+// TestRecoverRejectsMalformedListing is the FE-4 regression: the replay
+// must validate the revision chain BEFORE touching the surface — contiguous
+// seqs from the seq-0 bootstrap, unique parent links, and a HEAD row that
+// matches the tip. A malformed listing is rejected typed (ErrChainInvalid)
+// with the local surface untouched (05 §2.1/§2.2/§7.4).
+func TestRecoverRejectsMalformedListing(t *testing.T) {
+	// Each case builds a remote whose listing is malformed in one way.
+	cases := []struct {
+		name    string
+		build   func(*memRemote)
+		headSha string
+	}{
+		{
+			name: "gap in seqs",
+			build: func(m *memRemote) {
+				m.manifests[0] = revision.Manifest{WorkItemID: "wi_rec01", Seq: 0, Kind: revision.KindIncremental,
+					Ops: []revision.Op{{Op: revision.OpPut, Path: "artifacts/a.md", Sha256: revision.DigestHex([]byte("A")), Mode: modeP(420)}}}
+				// seq 1 missing; seq 2 exists → listing shows 0, 2.
+				p1 := int64(1)
+				m.manifests[2] = revision.Manifest{WorkItemID: "wi_rec01", Seq: 2, Parent: &p1, Kind: revision.KindIncremental,
+					Ops: []revision.Op{{Op: revision.OpPut, Path: "artifacts/c.md", Sha256: revision.DigestHex([]byte("C")), Mode: modeP(420)}}}
+				m.head = &revision.HeadInfo{Seq: 2, Generation: 1, ManifestSha: "sha:x"}
+			},
+		},
+		{
+			name: "broken parent link",
+			build: func(m *memRemote) {
+				m.manifests[0] = revision.Manifest{WorkItemID: "wi_rec01", Seq: 0, Kind: revision.KindIncremental,
+					Ops: []revision.Op{{Op: revision.OpPut, Path: "artifacts/a.md", Sha256: revision.DigestHex([]byte("A")), Mode: modeP(420)}}}
+				p0 := int64(0)
+				// seq 2 claims parent 0 — not the previous seq 1.
+				m.manifests[1] = revision.Manifest{WorkItemID: "wi_rec01", Seq: 1, Parent: &p0, Kind: revision.KindIncremental,
+					Ops: []revision.Op{{Op: revision.OpPut, Path: "artifacts/b.md", Sha256: revision.DigestHex([]byte("B")), Mode: modeP(420)}}}
+				m.manifests[2] = revision.Manifest{WorkItemID: "wi_rec01", Seq: 2, Parent: &p0, Kind: revision.KindIncremental,
+					Ops: []revision.Op{{Op: revision.OpPut, Path: "artifacts/c.md", Sha256: revision.DigestHex([]byte("C")), Mode: modeP(420)}}}
+				m.head = &revision.HeadInfo{Seq: 2, Generation: 1, ManifestSha: "sha:x"}
+			},
+		},
+		{
+			name: "bootstrap with a non-null parent",
+			build: func(m *memRemote) {
+				px := int64(5)
+				m.manifests[0] = revision.Manifest{WorkItemID: "wi_rec01", Seq: 0, Parent: &px, Kind: revision.KindIncremental,
+					Ops: []revision.Op{{Op: revision.OpPut, Path: "artifacts/a.md", Sha256: revision.DigestHex([]byte("A")), Mode: modeP(420)}}}
+				m.head = &revision.HeadInfo{Seq: 0, Generation: 1, ManifestSha: "sha:x"}
+			},
+		},
+		{
+			name: "HEAD names a different manifest than the tip",
+			build: func(m *memRemote) {
+				m.manifests[0] = revision.Manifest{WorkItemID: "wi_rec01", Seq: 0, Kind: revision.KindIncremental,
+					Ops: []revision.Op{{Op: revision.OpPut, Path: "artifacts/a.md", Sha256: revision.DigestHex([]byte("A")), Mode: modeP(420)}}}
+				m.head = &revision.HeadInfo{Seq: 0, Generation: 1, ManifestSha: "sha256:someone-else"}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCapsuleWithLayout(t)
+			remote := &memRemote{manifests: map[int64]revision.Manifest{}, blocks: map[string][]byte{}}
+			tc.build(remote)
+			// Local state that proves the surface was never touched.
+			if err := os.MkdirAll(filepath.Join(c.Dir, "artifacts"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(c.Dir, "artifacts", "sentinel.md"), []byte("local"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Recover(context.Background(), c, remote)
+			if !errors.Is(err, ErrChainInvalid) {
+				t.Fatalf("malformed listing must be rejected typed, got %v", err)
+			}
+			raw, rerr := os.ReadFile(filepath.Join(c.Dir, "artifacts", "sentinel.md"))
+			if rerr != nil || string(raw) != "local" {
+				t.Fatal("a rejected listing must leave the surface untouched")
+			}
+			for _, f := range []string{"a.md", "b.md", "c.md"} {
+				if _, serr := os.Stat(filepath.Join(c.Dir, "artifacts", f)); !os.IsNotExist(serr) {
+					t.Fatalf("%s must not be written from a rejected listing", f)
+				}
+			}
+		})
+	}
+}
+
+// TestRecoverSeedsSymlinkFactsLikeTheScan is the FE-7 regression: the
+// replay used to seed symlink LiveFiles with an empty sha and zero bytes,
+// though the scan defines a symlink from its TARGET TEXT — every
+// post-recovery flush would then report a false "changed" diff. The seeded
+// live set must equal what a fresh full scan of the recovered tree produces.
+func TestRecoverSeedsSymlinkFactsLikeTheScan(t *testing.T) {
+	c := newCapsuleWithLayout(t)
+	remote := &memRemote{manifests: map[int64]revision.Manifest{}, blocks: map[string][]byte{}}
+	shaA := block(t, remote, "A")
+	shaExec := block(t, remote, `{"version":4}`)
+	remote.manifests[0] = revision.Manifest{WorkItemID: "wi_rec01", Seq: 0, Kind: revision.KindIncremental,
+		Ops: []revision.Op{
+			{Op: revision.OpPut, Path: "artifacts/a.md", Sha256: shaA, Bytes: 1, Mode: modeP(420)},
+			{Op: revision.OpPut, Path: "repos/r1/x.go", Sha256: shaA, Bytes: 1, Mode: modeP(420)},
+			{Op: revision.OpSymlink, Path: "repos/r1/link", Target: "x.go"},
+			{Op: revision.OpPut, Path: "runtime-state/execution.json", Sha256: shaExec, Bytes: 13, Mode: modeP(420)},
+		}}
+	remote.head = &revision.HeadInfo{Seq: 0, Generation: 1, ManifestSha: "sha:x"}
+	res, err := Recover(context.Background(), c, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The recovered symlink entry must carry the scan's facts, not a husk.
+	link, ok := res.LiveFiles["repos/r1/link"]
+	if !ok || !link.IsSymlink {
+		t.Fatalf("symlink missing from the live set: %+v", res.LiveFiles)
+	}
+	want := revision.SymlinkFileInfo("x.go")
+	if link.Sha256 != want.Sha256 || link.Bytes != want.Bytes || link.Target != want.Target || link.Mode != want.Mode {
+		t.Fatalf("replayed symlink facts must match the scan's: got %+v want %+v", link, want)
+	}
+	// Whole-set equality: the seeded publish state IS a fresh scan of the
+	// recovered tree — the no-change flush precondition (05 §6.1 branch 2).
+	scan, err := revision.ScanCapsule(c.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.LiveFiles, scan.Files) {
+		t.Fatalf("recovered live set must equal a fresh scan (else every flush reports a false change):\nrecovered: %+v\nscan:      %+v", res.LiveFiles, scan.Files)
 	}
 }

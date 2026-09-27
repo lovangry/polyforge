@@ -8,11 +8,13 @@ package publish
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/sync/freeze"
 	"github.com/silgrid/polyforge/internal/sync/revision"
@@ -28,6 +30,11 @@ type fakeRemote struct {
 	head     map[string]*revision.HeadInfo
 	tokenOK  func(wi, token string) error
 	putCalls int
+	// onPutBlock, when set, runs at every PutBlock entry (ordering probes).
+	onPutBlock func()
+	// transportFailAll makes every block PUT die on the wire (plain net
+	// error, never an APIError) — the persistent-transport-failure drill.
+	transportFailAll bool
 	// loseNextResponse simulates a lost manifest confirmation: the server
 	// accepts the manifest but the client never sees the response.
 	loseNextResponse bool
@@ -44,12 +51,18 @@ func newFakeRemote() *fakeRemote {
 func (f *fakeRemote) PutBlock(ctx context.Context, wi string, seq int64, shaHex string, block []byte, token string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.onPutBlock != nil {
+		f.onPutBlock()
+	}
+	f.putCalls++ // every attempt counts, transport deaths included
+	if f.transportFailAll {
+		return fmt.Errorf("connection reset by peer") // transport loss, not a verdict
+	}
 	if f.tokenOK != nil {
 		if err := f.tokenOK(wi, token); err != nil {
 			return err
 		}
 	}
-	f.putCalls++
 	content, err := revision.DecodeBlock(block)
 	if err != nil {
 		return fmt.Errorf("zstd decode: %w", err)
@@ -526,5 +539,135 @@ func TestFencingStopsBlockUpload(t *testing.T) {
 	}
 	if e.remote.putCalls != 0 && e.remote.putCalls > 1 {
 		t.Fatalf("fencing must bite at the FIRST block PUT (calls=%d)", e.remote.putCalls)
+	}
+}
+
+// countingQuiescer records both ends of the freeze window (05 §2.7).
+type countingQuiescer struct {
+	mu       sync.Mutex
+	quiesced int
+	released int
+}
+
+func (q *countingQuiescer) RequestQuiesce(ctx context.Context) error {
+	q.mu.Lock()
+	q.quiesced++
+	q.mu.Unlock()
+	return nil
+}
+
+func (q *countingQuiescer) ReleaseQuiesce(ctx context.Context) error {
+	q.mu.Lock()
+	q.released++
+	q.mu.Unlock()
+	return nil
+}
+
+func (q *countingQuiescer) counts() (int, int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.quiesced, q.released
+}
+
+// TestPublishRoundTripEndsUnquiesced is the FE-1 regression: the
+// publisher acquires quiescence for the scan but MUST release it at the
+// design-pinned point — immediately after the staging pin, BEFORE any
+// network I/O (05 §2.7: “staging 固化完成后……立即释放 write freeze（通知 WI
+// Agent 恢复写入），不等待块上传、manifest 提交或 HEAD 推进完成”). A publish
+// round trip therefore ends with the agent un-quiesced, and the release
+// has already fired when the first block PUT leaves.
+func TestPublishRoundTripEndsUnquiesced(t *testing.T) {
+	e := newEnv(t)
+	e.writeCapsule("runtime-state/execution.json", `{"version":1}`)
+	e.writeCapsule("artifacts/a.md", "hello")
+	q := &countingQuiescer{}
+	releasedBeforeFirstPut := false
+	e.remote.onPutBlock = func() {
+		if _, rel := q.counts(); rel > 0 {
+			releasedBeforeFirstPut = true
+		}
+	}
+	req := e.req()
+	req.Conditions = freeze.Conditions{Quiescer: q, Timeout: 5 * time.Second}
+	res := e.mustPublish(e.pub.Publish(context.Background(), req))
+	if res.HeadSeq != 0 {
+		t.Fatalf("bootstrap: %+v", res)
+	}
+	quiesced, released := q.counts()
+	if quiesced != 1 {
+		t.Fatalf("the scan window must quiesce the agent exactly once, got %d", quiesced)
+	}
+	if released != 1 {
+		t.Fatalf("the round trip must END with the agent un-quiesced: released %d times, want 1", released)
+	}
+	if !releasedBeforeFirstPut {
+		t.Fatal("the release must fire BEFORE the first block PUT (staging pin ends the window, not the upload)")
+	}
+	// The flow settled normally despite the release having happened mid-flow.
+	if rec, _ := e.store.LoadPending("wi_test01"); rec != nil {
+		t.Fatal("pending record must be settled after the round trip")
+	}
+
+	// Milestone abandonment (05 §2.7): an abandoned optional scan must ALSO
+	// release the freeze request — the agent may have already paused.
+	q2 := &milestoneQuiescer{delay: 500 * time.Millisecond}
+	mreq := e.req()
+	mreq.Conditions = freeze.Conditions{Quiescer: q2, Timeout: 20 * time.Millisecond, Milestone: true}
+	mres, err := e.pub.Publish(context.Background(), mreq)
+	if err != nil || mres == nil || !mres.Noop {
+		t.Fatalf("milestone timeout must abandon the scan: %v %+v", err, mres)
+	}
+	if q2.releases != 1 {
+		t.Fatalf("milestone abandonment must release the freeze request, got %d releases", q2.releases)
+	}
+}
+
+// milestoneQuiescer never confirms within the window (timeout → abandon)
+// but records the release notification.
+type milestoneQuiescer struct {
+	delay    time.Duration
+	releases int
+}
+
+func (q *milestoneQuiescer) RequestQuiesce(ctx context.Context) error {
+	select {
+	case <-time.After(q.delay):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (q *milestoneQuiescer) ReleaseQuiesce(ctx context.Context) error {
+	q.releases++
+	return nil
+}
+
+// TestPublishPersistentTransportFailureParksPending is the FE-5
+// regression: a transport failure followed by a HEAD-at-parent
+// disambiguation used to recurse into the resend unboundedly. It must
+// terminate typed after ONE bounded resend, with the pending record (and
+// its staging) left intact for the next trigger's recovery (05 §2.8/§7.2:
+// no independent retry scheduling — convergence happens at the next §2.4
+// trigger's full scan).
+func TestPublishPersistentTransportFailureParksPending(t *testing.T) {
+	e := newEnv(t)
+	e.writeCapsule("runtime-state/execution.json", `{"version":1}`)
+	e.writeCapsule("artifacts/a.md", "hello")
+	e.remote.transportFailAll = true
+	_, err := e.pub.Publish(context.Background(), e.req())
+	if !errors.Is(err, ErrTransportUnresolved) {
+		t.Fatalf("persistent transport failure must terminate typed, got %v", err)
+	}
+	// Bounded: the original attempt plus exactly one resend, then it stops.
+	if e.remote.putCalls != 2 {
+		t.Fatalf("exactly one bounded resend is allowed, saw %d block PUTs", e.remote.putCalls)
+	}
+	// The pending record and its staging survive for later recovery.
+	if rec, rerr := e.store.LoadPending("wi_test01"); rerr != nil || rec == nil {
+		t.Fatalf("the pending record must survive an unresolved transport failure: %v %+v", rerr, rec)
+	}
+	if _, serr := os.Stat(e.stager.SeqDir("wi_test01", 0)); serr != nil {
+		t.Fatal("the pending record's staging must survive (it is the resend source)")
 	}
 }

@@ -32,7 +32,7 @@ func TestE2ESmokeClaimPublishObserveAnswerWrap(t *testing.T) {
 	core := newCoreEnv(t)
 	mach := newDaemonEnv(t, core)
 	mach.serve()
-	pf := mach.pf()          // CLI daemon client (UDS)
+	pf := mach.pf()                   // CLI daemon client (UDS)
 	corepf := core.pf(core.workerKey) // CLI Core client (HTTP)
 
 	// --- create: two execution tickets; both land in the ready queue. ---

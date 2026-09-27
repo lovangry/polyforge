@@ -10,6 +10,7 @@ package publish
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/sync/aihub"
@@ -77,8 +78,19 @@ func (p *Publisher) FinalFlush(ctx context.Context, req FlushRequest) (*FlushEvi
 	}
 
 	if err := p.Mutex.Acquire(ctx, req.WorkItemID, req.Conditions); err != nil {
+		if errors.Is(err, freeze.ErrMilestoneAbandoned) {
+			// 05 §2.7: an abandoned milestone scan releases the freeze
+			// request too — the agent may have already paused writes.
+			_ = freeze.Release(ctx, req.Conditions)
+		}
 		return nil, err
 	}
+	// R2N-4: the window is open — every exit path from here (scan/digest
+	// failure, HEAD/state failure, the sentinel and no-change branches
+	// that skip commitScan, and commitScan's own pre-pin failures) must
+	// release the freeze, or the agent stays quiesced forever.
+	guard := newFreezeGuard(ctx, req.Conditions)
+	defer guard.release()
 	scan, err := revision.ScanCapsule(req.CapsuleDir)
 	if err != nil {
 		return nil, err
@@ -121,7 +133,7 @@ func (p *Publisher) FinalFlush(ctx context.Context, req FlushRequest) (*FlushEvi
 		}
 		// Bootstrap publish first (05 §2.6), then normal evidence below.
 		res, perr := p.commitScan(ctx, req.WorkItemID, req.CapsuleDir, req.Generation, req.Token,
-			scan, bytesDigest, worktreeDigest)
+			guard, scan, bytesDigest, worktreeDigest)
 		if perr != nil {
 			return nil, perr
 		}
@@ -148,7 +160,7 @@ func (p *Publisher) FinalFlush(ctx context.Context, req FlushRequest) (*FlushEvi
 		}, nil
 	}
 	res, perr := p.commitScan(ctx, req.WorkItemID, req.CapsuleDir, req.Generation, req.Token,
-		scan, bytesDigest, worktreeDigest)
+		guard, scan, bytesDigest, worktreeDigest)
 	if perr != nil {
 		return nil, perr
 	}

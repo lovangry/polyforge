@@ -58,9 +58,11 @@ func parseAuthorityDoc(raw []byte, dirMemID string) (*frontmatter, string, error
 	}
 	// NOT NULL columns (02 §4.9) must all be derivable from the file
 	// (06 §5.3 step 3 branch 1): an invalid frontmatter never produces an
-	// illegal row.
+	// illegal row. project_id is REQUIRED here (06 §4.2: it is a 必填
+	// frontmatter field and the authority for the row's project binding —
+	// the directory only fixes the file location, never the binding).
 	if fm.Type == "" || !visibilities[fm.Visibility] || fm.OwnerUserID == "" ||
-		fm.CreatedAt == "" || fm.UpdatedAt == "" {
+		fm.ProjectID == "" || fm.CreatedAt == "" || fm.UpdatedAt == "" {
 		return nil, "", errf("MEM-400", "FRONTMATTER_INVALID", "missing/invalid required frontmatter fields")
 	}
 	return &fm, body, nil
@@ -113,18 +115,34 @@ func (s *Store) entryConsistent(e *Entry) bool {
 }
 
 // validated is the serving gate for every single-entry read path
-// (Get/Content/HTML, 06 §2.3 INV-7f, §6 execution detail):
-//
-//  1. serve an active entry only if its file digest matches the row;
-//  2. on mismatch take the per-mem write mutex and RECHECK — a writer in
-//     its ②→③ window completes while we wait and the entry is served
-//     normally (the in-flight window must never be mistaken for residue);
-//  3. a surviving mismatch is crash residue or an out-of-band edit: run
-//     the single-entry reconcile (same logic as §5.3) and re-serve from
-//     the reconciled state. A redacted (terminal) entry is not served —
-//     the active-path file is gone by design and 06 §5.2 pins detail reads
-//     of that state to MEM-404.
+// (Get/Content/HTML, 06 §2.3 INV-7f, §6 execution detail). The whole gate
+// — row load, live digest check and any repair — runs INSIDE the entry's
+// per-mem write mutex, and the byte-reading callers (Content, HTML) keep
+// the same lock hold across their file reads, so the row that was
+// validated and the bytes that are served are always the same committed
+// state. The earlier shape ran the digest check BEFORE acquiring the
+// lock and served bytes captured pre-lock: a concurrent PATCH landing
+// between the check and the read served a row/bytes pair that had never
+// been validated together (TOCTOU vs concurrent writes and out-of-band
+// edits, 06 §6). Holding the lock from the start also subsumes the §6
+// mismatch-recheck: no writer can sit in its ②→③ window while the mutex
+// is held, so a surviving mismatch is genuine crash residue or an
+// out-of-band edit and runs the single-entry reconcile (same logic as
+// §5.3) before the entry is served. A redacted (terminal) entry is not
+// served — the active-path file is gone by design and 06 §5.2 pins
+// detail reads of that state to MEM-404.
 func (s *Store) validated(memID string) (*Entry, error) {
+	unlock := s.memLock(memID)
+	defer unlock()
+	return s.validatedLocked(memID)
+}
+
+// validatedLocked is validated for a CALLER that already holds the
+// entry's per-mem write mutex (Content and HTML keep the hold across
+// their byte reads; the reconcile passes hold it across their per-entry
+// work). No writer can be in flight, so the gate is check → repair →
+// re-serve with no in-flight recheck needed.
+func (s *Store) validatedLocked(memID string) (*Entry, error) {
 	e, err := s.load(memID)
 	if err != nil {
 		return nil, err
@@ -135,19 +153,10 @@ func (s *Store) validated(memID string) (*Entry, error) {
 	if s.entryConsistent(e) {
 		return e, nil
 	}
-	unlock := s.memLock(memID)
-	defer unlock()
-	fresh, err := s.load(memID)
-	if err != nil {
-		return nil, err
-	}
-	if fresh.Status == "active" && s.entryConsistent(fresh) {
-		return fresh, nil // the mismatch was an in-flight ②→③ window
-	}
 	if rerr := s.reconcileOne(memID); rerr != nil {
 		return nil, rerr
 	}
-	fresh, err = s.load(memID)
+	fresh, err := s.load(memID)
 	if err != nil {
 		// reconcile deleted an orphan row: the entry never existed
 		// as far as serving is concerned (06 §6).
@@ -160,18 +169,30 @@ func (s *Store) validated(memID string) (*Entry, error) {
 }
 
 // serveConsistent is the INV-7f gate for the list-shaped read paths
-// (Search candidates, List items, 06 §6): an inconsistent entry is
-// excluded from THIS result set, and a best-effort single-entry reconcile
-// is dispatched (synchronously here — v1 has no background queue) so the
-// entry returns on the next call.
-func (s *Store) serveConsistent(e *Entry) bool {
-	if s.entryConsistent(e) {
-		return true
-	}
+// (Search candidates, List items, 06 §6). The consistency check runs
+// INSIDE the entry's per-mem write mutex — not before it: the passed-in
+// candidate row was loaded pre-lock, so it is judged against the live
+// file under the lock, and a row reloaded there is what gets served when
+// the candidate merely went stale while queueing for the mutex. An
+// inconsistent entry is excluded from THIS result set, and a best-effort
+// single-entry reconcile is dispatched (synchronously here — v1 has no
+// background queue) so the entry returns on the next call.
+func (s *Store) serveConsistent(e *Entry) (*Entry, bool) {
 	unlock := s.memLock(e.ID)
 	defer unlock()
+	if e.Status == "active" && s.entryConsistent(e) {
+		return e, true
+	}
+	// The pre-lock candidate is not servable as-is. Reload under the
+	// lock: either the candidate went stale (a writer completed ③ while
+	// we queued) — the fresh row is served — or the entry is genuine
+	// crash residue / out-of-band drift and is excluded.
+	fresh, err := s.load(e.ID)
+	if err == nil && fresh.Status == "active" && s.entryConsistent(fresh) {
+		return fresh, true
+	}
 	_ = s.reconcileOne(e.ID) // best-effort: the entry is excluded regardless
-	return false
+	return nil, false
 }
 
 // ---------- single-entry reconcile (06 §6, same logic as §5.3) ----------
@@ -228,8 +249,11 @@ func (s *Store) reconcileOne(memID string) error {
 	}
 	// Active file missing: a redact that crashed between ① and ② is
 	// forward-completed from the file's position (06 §5.2); anything else
-	// is an orphan row (create ②→③ crash) and dies with its FTS row.
-	if _, serr := os.Stat(filepath.Join(s.dataDir, "memory", e.ProjectID, "_redacted", memID, "memory.md")); serr == nil {
+	// is an orphan row (create ②→③ crash) and dies with its FTS row. The
+	// _redacted probe is derived from the recorded placement
+	// (redactedRelOf), never from project_id: a cross-bound entry lives
+	// in the tree its authority_path names.
+	if _, serr := os.Stat(filepath.Join(s.dataDir, filepath.FromSlash(redactedRelOf(e)), "memory.md")); serr == nil {
 		return s.forwardCompleteRedact(e)
 	}
 	s.sweepDirTransients(dir)
@@ -393,20 +417,23 @@ func (s *Store) sweepOrphanHistory(dir string) {
 
 // ---------- full §5.3 rebuild/reconcile ----------
 
-// activeFile is one parsed authority document of the active tree.
-type activeFile struct {
-	projectID string
-	memID     string
-	raw       []byte
-	fm        *frontmatter
-	noFTS     bool // relation to the row forbids indexing (redacted row)
-}
-
 // RebuildIndex runs the full 06 §5.3 procedure. It supersedes the bare
 // FTS rebuild: every numbered step runs on each call, so the same method
 // serves the admin endpoint, the startup reconcile and the scheduled task.
 // The return value is the number of reindexed active entries (06 §5.3
 // step 7 rebuild statistics).
+//
+// Lock discipline (06 §6): every per-entry action of the file-driven
+// passes — snapshot (file read + frontmatter parse), the step-3 metadata
+// branch and the step-4 unconditional FTS rewrite — happens inside the
+// entry's per-mem write mutex, in ONE lock hold per entry. The earlier
+// shape cached the walked bytes and rewrote FTS from them in a later
+// batch transaction; a PATCH/redact committing between the walk and that
+// rewrite left the row's content_sha and the FTS body permanently
+// disagreeing (INV-7c). Holding the memLock across snapshot→rewrite makes
+// the interleaving impossible: a concurrent writer either finishes before
+// the lock is taken (snapshot sees the new state) or waits until the
+// entry's whole rebuild section is done.
 func (s *Store) RebuildIndex() (int, error) {
 	// Step 1 (B5): sweep write-order transients — they can only be ②-side
 	// crash residue; the authority path was never touched by them.
@@ -414,8 +441,6 @@ func (s *Store) RebuildIndex() (int, error) {
 		return 0, errf("MEM-502", "", "sweep: %v", err)
 	}
 
-	// Steps 2–3: file-driven pass over the active tree.
-	var actives []activeFile
 	projDirs, err := os.ReadDir(filepath.Join(s.dataDir, "memory"))
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -423,116 +448,53 @@ func (s *Store) RebuildIndex() (int, error) {
 		}
 		projDirs = nil
 	}
+
+	// Steps 2–4, one locked section per entry (see the lock-discipline note
+	// above).n counts the entries whose FTS row was rebuilt.
+	n := 0
 	for _, pd := range projDirs {
 		if !pd.IsDir() {
 			continue
 		}
-		projectID := pd.Name()
-		memDirs, err := os.ReadDir(filepath.Join(s.dataDir, "memory", projectID))
-		if err != nil {
-			return 0, errf("MEM-502", "", "walk: %v", err)
+		dirProject := pd.Name()
+		memDirs, werr := os.ReadDir(filepath.Join(s.dataDir, "memory", dirProject))
+		if werr != nil {
+			return 0, errf("MEM-502", "", "walk: %v", werr)
 		}
 		for _, md := range memDirs {
 			if !md.IsDir() || md.Name() == "_redacted" {
 				continue
 			}
-			memID := md.Name()
-			raw, rerr := os.ReadFile(filepath.Join(s.dataDir, "memory", projectID, memID, "memory.md"))
-			if rerr != nil {
-				continue // no authority file here: the row-driven scan decides the row's fate
+			counted, cerr := s.rebuildActiveEntry(dirProject, md.Name())
+			if cerr != nil {
+				return 0, errf("MEM-502", "", "rebuild %s: %v", md.Name(), cerr)
 			}
-			fm, _, perr := parseAuthorityDoc(raw, memID)
-			if perr != nil {
-				// 06 §5.3: an invalid frontmatter never becomes an illegal
-				// row. The file is skipped; an existing row is left
-				// untouched (there is no branch that could act on it).
-				continue
-			}
-			actives = append(actives, activeFile{projectID: projectID, memID: memID, raw: raw, fm: fm})
-		}
-	}
-	// The loop must mutate the slice elements (noFTS below), so it walks
-	// by index: a range-copy would silently drop the redaction guard.
-	for i := range actives {
-		f := &actives[i]
-		row, lerr := s.load(f.memID)
-		if isNotFound(lerr) {
-			// File without row (manual placement/import, 06 §10.1): the
-			// row is backfilled entirely from the frontmatter.
-			if berr := s.backfillRow(*f, "active"); berr != nil {
-				return 0, errf("MEM-502", "", "backfill %s: %v", f.memID, berr)
-			}
-			continue
-		}
-		if lerr != nil {
-			return 0, errf("MEM-502", "", "load %s: %v", f.memID, lerr)
-		}
-		if row.Status == "redacted" {
-			// Inference (recorded): an active-tree placement whose row is
-			// terminal-redacted has no §5.3 branch. Redact is terminal
-			// (06 §5.4 MEM-409 终态不可写), so the file must NOT resurrect
-			// the row; it is ignored and never indexed.
-			f.noFTS = true
-			continue
-		}
-		if row.ContentSHA != shaHex(f.raw) || !rowMatchesFrontmatter(row, f.fm) {
-			// Row drifted from the file (B5 ②→③ crash window or an
-			// out-of-band edit — including direct row edits, the
-			// "row columns vs written frontmatter" backfill direction):
-			// the file wins. Under the per-mem mutex with a recheck.
-			if cerr := s.reconcileEntry(f.memID); cerr != nil {
-				if ae, ok := cerr.(*APIError); ok && ae.Code == "MEM-400" {
-					f.noFTS = true // file went invalid mid-rebuild: do not index it
-					continue
-				}
-				return 0, errf("MEM-502", "", "reconcile %s: %v", f.memID, cerr)
+			if counted {
+				n++
 			}
 		}
 	}
 
 	// Step 5: _redacted pass — migrated redacted stock is backfilled (no
 	// FTS); a redact that crashed between ① and ② is forward-completed.
+	// Same per-entry lock discipline as the active pass.
 	for _, pd := range projDirs {
 		if !pd.IsDir() {
 			continue
 		}
-		memDirs, err := os.ReadDir(filepath.Join(s.dataDir, "memory", pd.Name(), "_redacted"))
-		if err != nil {
-			if os.IsNotExist(err) {
+		redDirs, rerr := os.ReadDir(filepath.Join(s.dataDir, "memory", pd.Name(), "_redacted"))
+		if rerr != nil {
+			if os.IsNotExist(rerr) {
 				continue
 			}
-			return 0, errf("MEM-502", "", "walk: %v", err)
+			return 0, errf("MEM-502", "", "walk: %v", rerr)
 		}
-		for _, md := range memDirs {
+		for _, md := range redDirs {
 			if !md.IsDir() {
 				continue
 			}
-			memID := md.Name()
-			raw, rerr := os.ReadFile(filepath.Join(s.dataDir, "memory", pd.Name(), "_redacted", memID, "memory.md"))
-			if rerr != nil {
-				continue
-			}
-			fm, _, perr := parseAuthorityDoc(raw, memID)
-			if perr != nil {
-				continue
-			}
-			row, lerr := s.load(memID)
-			if isNotFound(lerr) {
-				f := activeFile{projectID: pd.Name(), memID: memID, raw: raw, fm: fm}
-				if berr := s.backfillRow(f, "redacted"); berr != nil {
-					return 0, errf("MEM-502", "", "backfill %s: %v", memID, berr)
-				}
-				continue
-			}
-			if lerr != nil {
-				return 0, errf("MEM-502", "", "load %s: %v", memID, lerr)
-			}
-			if row.Status != "redacted" {
-				// File already in _redacted/ ⇒ the redact is authoritative;
-				// correct the lagging row (forward completion).
-				if cerr := s.reconcileEntry(memID); cerr != nil {
-					return 0, errf("MEM-502", "", "reconcile %s: %v", memID, cerr)
-				}
+			if cerr := s.rebuildRedactedEntry(pd.Name(), md.Name()); cerr != nil {
+				return 0, errf("MEM-502", "", "rebuild %s: %v", md.Name(), cerr)
 			}
 		}
 	}
@@ -540,6 +502,8 @@ func (s *Store) RebuildIndex() (int, error) {
 	// Step 6 (B5): row-driven scan — active rows whose authority file is
 	// missing at the active path: in _redacted/ → forward-complete;
 	// nowhere → the orphan row (create ②→③ crash) dies with its FTS row.
+	// reconcileEntry takes the per-mem mutex and rechecks inside, so a
+	// live writer is waited out rather than mistaken for residue.
 	rows, err := s.db.Query(`SELECT id FROM memories WHERE status='active'`)
 	if err != nil {
 		return 0, errf("MEM-502", "", "scan rows: %v", err)
@@ -570,11 +534,10 @@ func (s *Store) RebuildIndex() (int, error) {
 		}
 	}
 
-	// Step 4: unconditional per-entry FTS rebuild — deliberately NOT gated
-	// on which branch step 3 took, so a pure index loss (Markdown and row
-	// fully consistent, FTS corrupt) is repaired even when no metadata
-	// needed touching (06 §9 仅FTS丢失专项). FTS rows pointing at no row
-	// are dropped in the same transaction.
+	// Dangling FTS rows (index entries whose backing memories row is gone)
+	// are dropped in one final transaction, taken with NO per-entry lock
+	// held — never a memLock while a transaction is open, the same
+	// single-writer ordering every other path obeys.
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
@@ -583,37 +546,170 @@ func (s *Store) RebuildIndex() (int, error) {
 	if _, err := tx.Exec(`DELETE FROM memory_fts WHERE mem_id NOT IN (SELECT id FROM memories)`); err != nil {
 		return 0, errf("MEM-502", "", "fts: %v", err)
 	}
-	n := 0
-	for _, f := range actives {
-		if f.noFTS {
-			continue
-		}
-		if err := ftsReplace(tx, f.memID, extractBody(string(f.raw))); err != nil {
-			return 0, errf("MEM-502", "", "fts %s: %v", f.memID, err)
-		}
-		n++
-	}
 	if err := tx.Commit(); err != nil {
 		return 0, errf("MEM-502", "", "commit: %v", err)
 	}
 	return n, nil
 }
 
+// rebuildActiveEntry runs the §5.3 steps 2–4 for ONE active-tree entry,
+// entirely inside the entry's per-mem write mutex (06 §6). counted
+// reports whether the step-4 FTS rebuild ran for this entry (the §5.3
+// step-7 statistic).
+func (s *Store) rebuildActiveEntry(dirProject, memID string) (counted bool, err error) {
+	unlock := s.memLock(memID)
+	defer unlock()
+
+	// Steps 2–3: snapshot the authority file and parse its frontmatter —
+	// UNDER the lock, so the bytes indexed below are the bytes judged.
+	raw, rerr := os.ReadFile(filepath.Join(s.dataDir, "memory", dirProject, memID, "memory.md"))
+	if rerr != nil {
+		return false, nil // no authority file here: the row-driven scan decides the row's fate
+	}
+	fm, _, perr := parseAuthorityDoc(raw, memID)
+	if perr != nil {
+		// 06 §5.3: an invalid frontmatter never becomes an illegal row. The
+		// file is skipped; an existing row is left untouched (there is no
+		// branch that could act on it).
+		return false, nil
+	}
+	row, lerr := s.load(memID)
+	if isNotFound(lerr) {
+		// File without row (manual placement/import, 06 §10.1): the row is
+		// backfilled entirely from the frontmatter — but only if the
+		// frontmatter's bindings can satisfy the 02 §4.9 DDL constraints;
+		// otherwise the file is skipped like any other invalid frontmatter
+		// (one bad planted file must never abort the whole rebuild).
+		if !s.bindingsExist(fm) {
+			return false, nil
+		}
+		if berr := s.backfillRow(fm, raw, dirProject, memID, "active"); berr != nil {
+			return false, berr
+		}
+	} else if lerr != nil {
+		return false, lerr
+	} else if row.Status == "redacted" {
+		// Inference (recorded): an active-tree placement whose row is
+		// terminal-redacted has no §5.3 branch. Redact is terminal
+		// (06 §5.4 MEM-409 终态不可写), so the file must NOT resurrect
+		// the row; it is ignored and never indexed.
+		return false, nil
+	} else if row.ContentSHA != shaHex(raw) || !rowMatchesFrontmatter(row, fm) {
+		// Row drifted from the file (B5 ②→③ crash window or an
+		// out-of-band edit — including direct row edits, the
+		// "row columns vs written frontmatter" backfill direction):
+		// the file wins. The lock is already held, so reconcileOne runs
+		// inline with its recheck-on-entry semantics (06 §6).
+		if cerr := s.reconcileOne(memID); cerr != nil {
+			if ae, ok := cerr.(*APIError); ok && ae.Code == "MEM-400" {
+				return false, nil // file went invalid mid-rebuild: do not index it
+			}
+			return false, cerr
+		}
+	}
+
+	// Step 4: unconditional FTS rebuild from the SAME locked snapshot —
+	// deliberately NOT gated on which branch step 3 took, so a pure index
+	// loss (Markdown and row fully consistent, FTS corrupt/missing) is
+	// repaired even when no metadata needed touching (06 §9 仅FTS丢失
+	// 专项). One short per-entry transaction, opened while only this
+	// entry's memLock is held.
+	tx, terr := s.db.Begin()
+	if terr != nil {
+		return false, terr
+	}
+	defer tx.Rollback()
+	if terr := ftsReplace(tx, memID, extractBody(string(raw))); terr != nil {
+		return false, terr
+	}
+	if terr := tx.Commit(); terr != nil {
+		return false, terr
+	}
+	return true, nil
+}
+
+// rebuildRedactedEntry runs the §5.3 step-5 branch for ONE _redacted/
+// entry, inside the entry's per-mem write mutex: migrated redacted stock
+// is backfilled (never indexed); a row still active while the directory
+// already sits in _redacted/ is forward-completed from the file position
+// (a redact that crashed between ① and ②, 06 §5.2).
+func (s *Store) rebuildRedactedEntry(dirProject, memID string) error {
+	unlock := s.memLock(memID)
+	defer unlock()
+
+	raw, rerr := os.ReadFile(filepath.Join(s.dataDir, "memory", dirProject, "_redacted", memID, "memory.md"))
+	if rerr != nil {
+		return nil // no authority here: nothing to backfill or correct
+	}
+	fm, _, perr := parseAuthorityDoc(raw, memID)
+	if perr != nil {
+		return nil // invalid frontmatter: never an illegal row
+	}
+	row, lerr := s.load(memID)
+	if isNotFound(lerr) {
+		// Migrated redacted stock: same §4.2/§5.3 frontmatter-authority
+		// and DDL-constraint rules as the active backfill (bindings must
+		// reference real rows, or the file is skipped, not inserted).
+		if !s.bindingsExist(fm) {
+			return nil
+		}
+		return s.backfillRow(fm, raw, dirProject, memID, "redacted")
+	}
+	if lerr != nil {
+		return lerr
+	}
+	if row.Status != "redacted" {
+		// File already in _redacted/ ⇒ the redact is authoritative; the
+		// lagging Core row is corrected (forward completion). The lock is
+		// already held: reconcileOne runs inline with its recheck.
+		return s.reconcileOne(memID)
+	}
+	return nil
+}
+
+// bindingsExist verifies that a frontmatter's row bindings can satisfy
+// the 02 §4.9 DDL constraints before a §5.3 backfill inserts a row:
+// memories.project_id and memories.owner_user_id are FOREIGN KEY columns
+// (foreign_keys=ON), so the frontmatter's project (06 §4.2: the AUTHORITY
+// for the project_id column — the walk directory fixes only the file
+// location) and owner must name real rows. A planted file whose bindings
+// dangle is treated exactly like any other invalid frontmatter: it is
+// skipped — never an illegal row, and never a reason to abort the whole
+// rebuild with MEM-502.
+func (s *Store) bindingsExist(fm *frontmatter) bool {
+	var one int
+	if err := s.db.QueryRow(`SELECT 1 FROM projects WHERE id=?1`, fm.ProjectID).Scan(&one); err != nil {
+		return false
+	}
+	if err := s.db.QueryRow(`SELECT 1 FROM users WHERE id=?1`, fm.OwnerUserID).Scan(&one); err != nil {
+		return false
+	}
+	return true
+}
+
 // backfillRow inserts a memories row for a file whose mem_id has none
 // (06 §5.3 step 3 branch 1 / step 5): the FULL frontmatter→DDL mapping,
 // status from the caller ('active' from the active tree, 'redacted' from
 // _redacted/), content_sha computed live, digest pair NULL (the lazy
-// §4.3 read-time derivation handles the html). authority_path records
-// where the file actually IS, so placement (the directory) is the truth
-// for the path even if a hand-edited frontmatter disagrees.
-func (s *Store) backfillRow(f activeFile, status string) error {
-	rel := "memory/" + f.projectID + "/" + f.memID
+// §4.3 read-time derivation handles the html).
+//
+// Binding vs placement (06 §4.2/§5.3): the row's project_id column is
+// read from the FRONTMATTER — frontmatter is the authority for the
+// metadata columns, and §5.3 step 3 branch 1 names project_id among the
+// fields “均从 frontmatter 读出” — while authority_path records where the
+// file actually IS (dirProject, the directory the walk found it in), so
+// the directory remains the file-location authority and the two can
+// legitimately differ for a hand-planted file. Callers hold the entry's
+// per-mem mutex, have validated the frontmatter (parseAuthorityDoc, incl.
+// the required project_id) and checked bindingsExist.
+func (s *Store) backfillRow(fm *frontmatter, raw []byte, dirProject, memID, status string) error {
+	rel := "memory/" + dirProject + "/" + memID
 	if status == "redacted" {
-		rel = "memory/" + f.projectID + "/_redacted/" + f.memID
+		rel = "memory/" + dirProject + "/_redacted/" + memID
 	}
 	var idem any
-	if f.fm.IdempotencyKey != nil && *f.fm.IdempotencyKey != "" {
-		idem = *f.fm.IdempotencyKey
+	if fm.IdempotencyKey != nil && *fm.IdempotencyKey != "" {
+		idem = *fm.IdempotencyKey
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -623,9 +719,9 @@ func (s *Store) backfillRow(f activeFile, status string) error {
 	if _, err := tx.Exec(`INSERT INTO memories(id, project_id, owner_user_id, work_item_id, type, title,
 		visibility, authority_path, content_sha, content_len, tags, related, idempotency_key, status, created_at, updated_at)
 		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)`,
-		f.memID, f.projectID, f.fm.OwnerUserID, anyPtr(f.fm.WorkItemID), f.fm.Type, anyPtr(f.fm.Title),
-		f.fm.Visibility, rel, shaHex(f.raw), len(f.raw), jsonOrEmpty(f.fm.Tags), jsonOrEmpty(f.fm.Related),
-		idem, status, f.fm.CreatedAt, f.fm.UpdatedAt); err != nil {
+		memID, fm.ProjectID, fm.OwnerUserID, anyPtr(fm.WorkItemID), fm.Type, anyPtr(fm.Title),
+		fm.Visibility, rel, shaHex(raw), len(raw), jsonOrEmpty(fm.Tags), jsonOrEmpty(fm.Related),
+		idem, status, fm.CreatedAt, fm.UpdatedAt); err != nil {
 		return err
 	}
 	return tx.Commit()

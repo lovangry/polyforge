@@ -7,8 +7,13 @@ package daemon
 // shutdown sequence. The Daemon NEVER executes step commands (INV-D2) and
 // never drives workflow logic.
 
+// The alive-agent re-attachment after a daemon restart (adopt.go) rebuilds
+// only the process-control face: the stdio control channel cannot be
+// re-created for an already-running process (the D2-ruled reality).
+
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -54,6 +59,23 @@ type SpawnParams struct {
 	Adapter       string
 	InitialPrompt string // pf-execute SKILL.md text + bundle reference header
 	Bootstrap     *capsule.Bootstrap
+	// OnProcessStarted, when non-nil, is invoked by the spawner ONCE,
+	// IMMEDIATELY after the WI Agent process exists and BEFORE Spawn
+	// returns, carrying the process identity the pid-reuse guard needs
+	// (pid + creation started-at). Its purpose is R3N-F6: the daemon
+	// journals that identity into the pending_jobs[] row BEFORE the
+	// formal jobs[] record exists, so a crash between the derivation and
+	// step 10 leaves a DISCOVERABLE orphan the next boot can adopt instead
+	// of blindly re-spawning a second agent over the live one. An error
+	// return fails the spawn and must tear the just-started process down.
+	//
+	// RESIDUAL WINDOW (documented honestly): a crash between the process
+	// start and this callback's journal fsync still leaves an
+	// UNDISCOVERABLE live agent; the next boot re-spawns per 04 §6.1's
+	// orphan paragraph. The window is the spawn call's own prologue
+	// (milliseconds) instead of the whole span from derivation to the
+	// jobs[] record (the agent's entire first step) it used to be.
+	OnProcessStarted func(pid int, startedAt string) error
 }
 
 // AgentHandle is the supervision face over one persistent WI Agent process.
@@ -67,10 +89,19 @@ type AgentHandle interface {
 	// Quiesce confirms: no in-flight sync-surface writes, none will start
 	// (the freeze.Quiescer face for publish).
 	Quiesce(ctx context.Context) error
+	// Resume is the freeze-release notification (05 §2.7): the write
+	// freeze window is over, the agent may resume sync-surface writes.
+	Resume(ctx context.Context) error
 	// DeliverAnswer relays an answer to a needs_input-waiting agent.
 	DeliverAnswer(relay AnswerRelay) error
 	// Alive reports process liveness.
 	Alive() bool
+	// GroupEmpty reports whether the agent's WHOLE process group — the
+	// agent itself and every step agent / command child it spawned — has
+	// exited (05 §2.7 shortcut condition ①: every member confirmed gone,
+	// not just the top-level pid). Side-effect-free: a caller that finds
+	// residue collects it via Terminate, then re-asks.
+	GroupEmpty() bool
 	// Terminate kills the whole process group: SIGTERM, then SIGKILL after
 	// the timeout (04 §6.2 path B / §7.1 residue collection).
 	Terminate(timeout time.Duration) error
@@ -97,11 +128,13 @@ type Daemon struct {
 
 	spawner AgentSpawner
 
-	mu       sync.Mutex
-	jobs     map[string]*jobRuntime // wiID → live bookkeeping
-	closing  map[string]bool        // wiID → a 04 §6.2 close is mid-flight
-	shutdown chan struct{}
-	shutOnce sync.Once
+	mu           sync.Mutex
+	jobs         map[string]*jobRuntime // wiID → live bookkeeping
+	closing      map[string]bool        // wiID → a 04 §6.2 close is mid-flight
+	shutdown     chan struct{}
+	shutOnce     sync.Once
+	shutdownDone chan struct{} // closed when the FIRST Shutdown call completes
+	shutdownErr  error         // the first Shutdown's verdict, delivered to joiners
 }
 
 // jobRuntime is the in-memory per-job assembly.
@@ -124,7 +157,24 @@ func New(cfg Config, spawner AgentSpawner) (*Daemon, error) {
 		return nil, err
 	}
 	store := NewStateStore(cfg.DataDir)
-	st, err := store.Load()
+	// R3N-F4 (crash-recoverable swap protocol): reconcile any capsule-tree
+	// swap interrupted by the previous daemon life BEFORE anything can lay
+	// a fresh tree over the gap — a marker naming the three swap paths
+	// survives the crash window between Rename(live,trash) and
+	// Rename(staged,live), and the reconciliation completes or rolls back
+	// deterministically. Loud, non-fatal per the 04 §7.1 step-5 pattern:
+	// one broken capsule must not brick every other WI's startup.
+	if err := recover.ReconcileInterruptedSwaps(filepath.Join(cfg.WorkspaceRoot, "capsules")); err != nil {
+		fmt.Fprintf(os.Stderr, "pf-daemon: interrupted capsule swap reconciliation reported failures (human attention): %v\n", err)
+	}
+	// 04 §4.1/§11: create-or-adopt state.json carrying the state-level
+	// header (machine_id/mode/workspace_root/started_at are required by
+	// validation; an older-format file without them is backfilled first —
+	// an upgrade never bricks the daemon on its own previous state file).
+	st, err := store.LoadOrAdopt(StateHeader{
+		MachineID: cfg.MachineID, Mode: ModeInteractive,
+		WorkspaceRoot: cfg.WorkspaceRoot, StartedAt: NowStamp(),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -133,19 +183,20 @@ func New(cfg Config, spawner AgentSpawner) (*Daemon, error) {
 	stager := freeze.NewStager(cfg.DataDir)
 	pubStore := publish.NewStore(cfg.DataDir)
 	d := &Daemon{
-		cfg:      cfg,
-		client:   client,
-		state:    store,
-		st:       st,
-		jobq:     NewJobQueue(),
-		modes:    NewModeCtl(),
-		ledger:   NewAnswerLedger(),
-		beats:    NewBeatTracker(),
-		pub:      publish.New(&remoteAdapter{c: client}, mutex, stager, pubStore),
-		spawner:  spawner,
-		jobs:     map[string]*jobRuntime{},
-		closing:  map[string]bool{},
-		shutdown: make(chan struct{}),
+		cfg:          cfg,
+		client:       client,
+		state:        store,
+		st:           st,
+		jobq:         NewJobQueue(),
+		modes:        NewModeCtl(),
+		ledger:       NewAnswerLedger(),
+		beats:        NewBeatTracker(),
+		pub:          publish.New(&remoteAdapter{c: client}, mutex, stager, pubStore),
+		spawner:      spawner,
+		jobs:         map[string]*jobRuntime{},
+		closing:      map[string]bool{},
+		shutdown:     make(chan struct{}),
+		shutdownDone: make(chan struct{}),
 	}
 	return d, nil
 }
@@ -230,6 +281,32 @@ type SubmitIntent struct {
 	Priority   string
 }
 
+// ErrTerminalWI is the DAEMON-409 shape for a submit-family intent against
+// a work item that can never be claimed again (terminal status, 02 §2.3
+// state machine: wrapped/failed/cancelled are forever).
+var ErrTerminalWI = errors.New("daemon: work item is terminal")
+
+// checkSubmittable is the submit-family admission precheck (found in the
+// polyforge#17 dogfood round): admission used to accept ANY id — a
+// submit of a wrapped/failed/cancelled WI answered "accepted" and the
+// doomed claim then failed SILENTLY at spawn time (no event, no queue
+// record, nothing the operator could see). The precheck refuses ONLY an
+// explicit terminal status read from the Core. Every read failure is
+// TOLERATED (logged, deferred to the spawn-time claim, which stays the
+// authority): a machine key without project membership reads every WI as
+// a hidden CORE-404 (02 §4.10 — no existence leak), and that legitimate
+// configuration must not turn the precheck into a blanket refusal.
+func (d *Daemon) checkSubmittable(wi string) error {
+	detail, err := d.client.GetWI(wi)
+	if err != nil {
+		return nil // spawn-time claim stays the authority for read failures
+	}
+	if status, _ := detail["status"].(string); status == "wrapped" || status == "failed" || status == "cancelled" {
+		return fmt.Errorf("%w: %s is %s; no claim, resume or takeover can start", ErrTerminalWI, wi, status)
+	}
+	return nil
+}
+
 // Submit applies admission (mode + shutdown + duplicates), then enqueues.
 // The claim itself runs at SPAWN time (04 §6.1b/6.1d): every spawned job
 // walks the full preflight → intent persist → claim → capsule → session →
@@ -251,6 +328,11 @@ func (d *Daemon) Submit(it SubmitIntent) error {
 	}
 	if d.jobq.IsRunning(it.WorkItemID) {
 		return fmt.Errorf("daemon: %s already queued (DAEMON-409)", it.WorkItemID)
+	}
+	// Precheck AFTER local admission (mode/shutdown/duplicates keep their
+	// precedence): refuse what can never be claimed before enqueueing.
+	if err := d.checkSubmittable(it.WorkItemID); err != nil {
+		return err
 	}
 	d.jobq.Enqueue(QEntry{WorkItemID: it.WorkItemID, Priority: it.Priority, Intent: it.Intent})
 	return nil
@@ -283,15 +365,26 @@ func (d *Daemon) GetRecommendation(ctx context.Context) (*aihub.ReadyQueue, erro
 // 04 §6.1 sequence for it. The dispatcher loop calls this; tests may drive
 // it directly for determinism.
 func (d *Daemon) SpawnNext(ctx context.Context) (bool, error) {
+	_, spawned, err := d.SpawnNextEntry(ctx)
+	return spawned, err
+}
+
+// SpawnNextEntry is SpawnNext with the attempted entry exposed for
+// ATTRIBUTION (the submit route reports a spawn failure only when the
+// failed entry is the one the operator submitted — real-usage fix from
+// the polyforge#17 dogfood round: a failed claim/takeover used to be
+// swallowed here and the submit answer stayed "accepted" while nothing
+// ever ran).
+func (d *Daemon) SpawnNextEntry(ctx context.Context) (*QEntry, bool, error) {
 	e := d.jobq.Take()
 	if e == nil {
-		return false, nil
+		return nil, false, nil
 	}
 	if err := d.spawnJob(ctx, *e); err != nil {
 		d.jobq.Complete(e.WorkItemID) // slot not held
-		return true, err
+		return e, true, err
 	}
-	return true, nil
+	return e, true, nil
 }
 
 func (d *Daemon) spawnJob(ctx context.Context, e QEntry) error {
@@ -300,12 +393,38 @@ func (d *Daemon) spawnJob(ctx context.Context, e QEntry) error {
 		return err
 	}
 	// Step 4: persist the claim intent BEFORE any irreversible action.
-	idem := fmt.Sprintf("pf-%s-%s-%d", wi, e.Intent, time.Now().UnixNano())
+	// A re-run (crash-recovery orphan requeue) arrives with the key the
+	// journal already persisted: reuse it (04 §6.1 step 4) so the re-claim
+	// hits the Core's idempotent cache and returns the SAME attempt
+	// (02 §6.1/§6.6) instead of opening a duplicate generation.
+	idem := e.IdempotencyKey
+	if idem == "" {
+		idem = fmt.Sprintf("pf-%s-%s-%d", wi, e.Intent, time.Now().UnixNano())
+	}
 	pending := PendingJob{
 		WorkItemID: wi, IdempotencyKey: idem, Intent: e.Intent,
 		CreatedAt: NowStamp(), Status: PendingIntentPersisted,
 	}
-	if err := d.state.AppendPending(d.st, pending); err != nil {
+	if existing := d.st.FindPending(wi, idem); existing != nil {
+		// R2N-5: continue from the JOURNALED row. Overwriting it with the
+		// fresh intent_persisted record above would destroy the
+		// claim_confirmed generation/token/bootstrap a takeover re-run
+		// MUST consume below (and regress the journal's status mid-flight
+		// for claim/resume too).
+		pending = *existing
+		// R3N-F6: the journaled process identity (if any) describes the
+		// PREVIOUS attempt's process — this re-run derives a NEW one, and
+		// OnProcessStarted below rewrites the pair. Clearing the stale
+		// values keeps the row honest about the CURRENT attempt if the
+		// re-run dies before the callback lands.
+		pending.MainAgentPID = 0
+		pending.MainAgentStartedAt = ""
+	} else if err := d.state.UpdatePending(d.st, pending); err != nil {
+		// UpdatePending, not a blind append: the journal is ONE row per WI
+		// (R3N-F7) — a leftover row from a failed previous attempt is
+		// superseded even when its idempotency key differs (a key change
+		// on retry is expected), never allowed to accumulate into the
+		// duplicate-rows state validation rejects on the next load.
 		return err
 	}
 	// Step 5: claim (resume is a new claim; takeover is admin force-takeover
@@ -313,19 +432,60 @@ func (d *Daemon) spawnJob(ctx context.Context, e QEntry) error {
 	// §6.2: never a second claim).
 	var resp *aihub.ClaimResponse
 	var cerr error
-	switch e.Intent {
-	case "takeover":
+	switch {
+	case e.Intent == "takeover" && (pending.Status == PendingClaimConfirmed || pending.Status == PendingSessionPersisted):
+		// R2N-5: an orphaned TAKEOVER requeue whose journal row is already
+		// claim_confirmed/session_persisted must NOT re-call ForceTakeover.
+		// 02 §6.2/04 §7.3: the force-takeover call ITSELF ends the old
+		// generation and opens generation+1 in one response — calling it
+		// again would end the generation the previous daemon life just
+		// opened and open ANOTHER one (generation churn), stranding the
+		// persisted token. The generation is already open server-side
+		// under the persisted token: consume the journaled
+		// GenerationToken + Generation (+ journaled capsule_bootstrap)
+		// and continue the spawn. Only rows still at intent_persisted
+		// re-run ForceTakeover (that takeover never landed server-side).
+		if pending.Generation >= 1 && pending.GenerationToken != "" && pending.CapsuleBootstrap != "" {
+			resp = &aihub.ClaimResponse{
+				Generation:       pending.Generation,
+				GenerationToken:  pending.GenerationToken,
+				CapsuleBootstrap: json.RawMessage(pending.CapsuleBootstrap),
+			}
+		} else {
+			// Incomplete journal (pre-upgrade row or corruption): the
+			// journaled credentials cannot be consumed, so a fresh
+			// ForceTakeover is the only honest path to credentials. It
+			// opens a NEW generation; that churn is the price of the
+			// broken journal and is logged loudly.
+			fmt.Fprintf(os.Stderr, "pf-daemon: takeover requeue for %s has an incomplete claim_confirmed journal row (generation=%d token=%v bootstrap=%v); re-running ForceTakeover — this opens a NEW generation\n",
+				wi, pending.Generation, pending.GenerationToken != "", pending.CapsuleBootstrap != "")
+			resp, cerr = d.client.ForceTakeover(wi, d.cfg.MachineID)
+		}
+	case e.Intent == "takeover":
 		resp, cerr = d.client.ForceTakeover(wi, d.cfg.MachineID)
 	default:
 		resp, cerr = d.client.Claim(wi, idem, d.cfg.MachineID)
 	}
 	if cerr != nil {
-		d.state.RemovePending(d.st, wi, idem)
+		// A re-run with a journal-persisted key KEEPS the record on a
+		// failed re-claim: the intent is exactly what the next restart needs
+		// to retry the same key against the Core's idempotent cache (04
+		// §6.1 step 4). A fresh key whose claim was refused has nothing to
+		// retry — drop it as before.
+		if e.IdempotencyKey == "" {
+			d.state.RemovePending(d.st, wi, idem)
+		} else {
+			fmt.Fprintf(os.Stderr, "pf-daemon: re-run claim for %s failed (key %s kept in the pending journal for the next retry): %v\n", wi, idem, cerr)
+		}
 		return cerr
 	}
 	pending.Status = PendingClaimConfirmed
 	pending.Generation = resp.Generation
 	pending.GenerationToken = resp.GenerationToken
+	// Journal the bootstrap too: a takeover re-run that must consume this
+	// row (see above) needs every input of the spawn sequence — the
+	// bootstrap is the only data-plane read the sequence has (02 §8).
+	pending.CapsuleBootstrap = string(resp.CapsuleBootstrap)
 	if err := d.state.UpdatePending(d.st, pending); err != nil {
 		return err
 	}
@@ -384,9 +544,21 @@ func (d *Daemon) spawnJob(ctx context.Context, e QEntry) error {
 		return err
 	}
 	// Step 9: derive the persistent WI Agent (INV-14: one per WI).
+	// R3N-F6: the spawner reports the process identity the moment it
+	// exists — journaled into the pending row BELOW, before Spawn returns —
+	// so a crash between here and the step-10 jobs[] record leaves a
+	// DISCOVERABLE orphan the next boot ADOPTS (04 §6.1 orphan recovery +
+	// §7.1 step 3) instead of re-spawning a second agent over the live
+	// one (which would re-run checkout/recovery and overwrite unpublished
+	// local work, 05 §7.4 same-generation no-replace).
 	handle, err := d.spawner.Spawn(ctx, SpawnParams{
 		WorkItemID: wi, CapsuleDir: capc.Dir, Generation: resp.Generation,
 		SessionID: sessionID, Adapter: d.cfg.Adapter, InitialPrompt: prompt, Bootstrap: boot,
+		OnProcessStarted: func(pid int, startedAt string) error {
+			pending.MainAgentPID = pid
+			pending.MainAgentStartedAt = startedAt
+			return d.state.UpdatePending(d.st, pending)
+		},
 	})
 	if err != nil {
 		return err
@@ -498,17 +670,76 @@ func (d *Daemon) PublishRequest(ctx context.Context, wi, reason string) (*Publis
 	return out, nil
 }
 
-// freezeConditions builds the 05 §2.7 conditions for a job: the live agent's
-// quiesce confirmation when it is alive; the all-writers-dead shortcut when
-// it is not (a dead agent cannot ack, and its process group residue is
-// terminated by the supervisor).
+// freezeConditions builds the 05 §2.7 conditions for a job. When the
+// agent is alive, the normal quiesce confirmation path is used. When it is
+// dead, the process-group-dead shortcut applies — but HONESTLY (05 §2.7
+// condition ①): the shortcut holds only when the WHOLE group (step
+// agents, command children, native runner) is verified empty, never merely
+// because the top-level agent exited. Residue is collected on the spot
+// (04 §6.2 B step 2 / §7.1 residue collection) and the emptiness re-checked.
+//
+// FAILS CLOSED on the unknown: a nil/unknown agent state NEVER grants the
+// dead-writers shortcut. 05 §2.7's shortcut condition ① is "every member
+// confirmed gone" — an assumption is the opposite of a confirmation, and
+// fail-open here would let a publish race a live writer we lost track of
+// (single-writer domain, 03 §7). With the alive-reattach fix every recovered
+// job has a handle; the genuinely-unknown case (no handle AND no recorded
+// pid) is unverifiable and answers "not dead", so freeze.Acquire then
+// fails loudly on its no-quiescer path instead of quietly publishing.
+//
+// KNOWN v1 LIMIT (condition ②, recorded honestly): whether a re-derived
+// replacement agent has already written to the sync surface is NOT
+// verifiable here — the daemon tracks no per-write bookkeeping for a
+// replacement, so freeze.Conditions.ReplacementWriting is left unset and
+// the shortcut is granted on condition ① alone. In every current flow the
+// close/publish that builds these conditions and a re-derivation of the
+// same WI are never in flight together (sealJob removes the job before any
+// re-derivation can start), so the gap is theoretical in v1.
 func (d *Daemon) freezeConditions(jr *jobRuntime, milestone bool) freeze.Conditions {
 	alive := jr.agent != nil && jr.agent.Alive()
 	cond := freeze.Conditions{Timeout: 30 * time.Second, Milestone: milestone}
 	if alive {
 		cond.Quiescer = quiescerOf{jr}
-	} else {
-		cond.ProcessGroupDead = func() bool { return true }
+		return cond
+	}
+	cond.ProcessGroupDead = func() bool {
+		if jr.agent != nil {
+			if jr.agent.GroupEmpty() {
+				return true
+			}
+			// Residue: the dead agent's group still holds possible writers.
+			// Collect it, then re-verify (bounded by the Terminate bound).
+			_ = jr.agent.Terminate(10 * time.Second)
+			return jr.agent.GroupEmpty()
+		}
+		// Genuinely unknown (no handle): verify by the RECORDED pid/procfs,
+		// never assume. The jobs[] bookkeeping is the only pid source left.
+		j := d.st.FindJob(jr.cap.WorkItemID)
+		if j == nil || j.MainAgentPID <= 0 {
+			fmt.Fprintf(os.Stderr, "pf-daemon: %s has no agent handle and no recorded pid; dead-writers shortcut DENIED (fail closed)\n", jr.cap.WorkItemID)
+			return false
+		}
+		empty, err := ProcessGroupEmpty(j.MainAgentPID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pf-daemon: %s recorded group %d unverifiable; dead-writers shortcut DENIED (fail closed): %v\n", jr.cap.WorkItemID, j.MainAgentPID, err)
+			return false
+		}
+		if empty {
+			return true
+		}
+		// Residue at the recorded pid: collect it (the pid-reuse guard inside
+		// skips signaling when the pid was recycled by an unrelated process
+		// and only a PROVEN outcome returns nil, R3N-F3), then re-verify by
+		// procfs — the re-check below stays the authority and fails closed.
+		if cerr := collectResidualProcessGroup(j.MainAgentPID, j.MainAgentStartedAt); cerr != nil {
+			fmt.Fprintf(os.Stderr, "pf-daemon: %s residual group collection could not prove death: %v\n", jr.cap.WorkItemID, cerr)
+		}
+		empty, err = ProcessGroupEmpty(j.MainAgentPID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pf-daemon: %s recorded group %d unverifiable after collection; dead-writers shortcut DENIED (fail closed): %v\n", jr.cap.WorkItemID, j.MainAgentPID, err)
+			return false
+		}
+		return empty
 	}
 	return cond
 }
@@ -516,6 +747,10 @@ func (d *Daemon) freezeConditions(jr *jobRuntime, milestone bool) freeze.Conditi
 type quiescerOf struct{ jr *jobRuntime }
 
 func (q quiescerOf) RequestQuiesce(ctx context.Context) error { return q.jr.agent.Quiesce(ctx) }
+
+// ReleaseQuiesce implements freeze.Releaser: the staging pin is complete,
+// so the WI Agent is told it may resume writes (05 §2.7 release step).
+func (q quiescerOf) ReleaseQuiesce(ctx context.Context) error { return q.jr.agent.Resume(ctx) }
 
 func (d *Daemon) jobGeneration(wi string) int64 {
 	if j := d.st.FindJob(wi); j != nil {
@@ -606,8 +841,37 @@ var ErrFlushFailed = errors.New("daemon: shutdown flush failed to converge (DAEM
 //  6. the caller exits.
 func (d *Daemon) Shutdown(ctx context.Context) error {
 	d.modes.SetShuttingDown()
-	d.shutOnce.Do(func() { close(d.shutdown) })
+	first := false
+	d.shutOnce.Do(func() { close(d.shutdown); first = true })
+	if !first {
+		// JOIN, never race: the daemon face answers the shutdown request
+		// and runs the sequence in the background; the process main's own
+		// Shutdown call then used to run a SECOND sequence that skipped
+		// every job via the one-close guard and let the process EXIT
+		// while the first close was still mid-flight — the remaining
+		// job stayed running server-side with zero events (found with the
+		// real pf-daemon binary in the polyforge#17 dogfood round; no
+		// in-process test boots cmd/pf-daemon). A concurrent caller now
+		// waits for the in-flight sequence and receives its verdict.
+		select {
+		case <-d.shutdownDone:
+			return d.shutdownErr
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	// The FIRST caller runs the sequence; its verdict is published to
+	// joiners via the channel close (write-before-close is the
+	// happens-before edge, no lock needed).
+	err := d.runShutdownSequence(ctx)
+	d.shutdownErr = err
+	close(d.shutdownDone)
+	return err
+}
 
+// runShutdownSequence is the shutdown body (steps 2–5; step 1 is the latch
+// Shutdown itself performed above).
+func (d *Daemon) runShutdownSequence(ctx context.Context) error {
 	d.mu.Lock()
 	wis := make([]string, 0, len(d.jobs))
 	for wi := range d.jobs {
@@ -616,21 +880,30 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 	d.mu.Unlock()
 
 	for _, wi := range wis {
-		d.mu.Lock()
-		jr := d.jobs[wi]
-		d.mu.Unlock()
-		if jr == nil {
-			continue // closed by a pause/wrap route that won the race
+		// Route through the SAME one-close guard as the pause/wrap routes
+		// (04 §6.2: ONE close path, no duplication — and never two closes
+		// racing on one job): a pause/wrap that already holds the guard is
+		// completing the identical A-path close for this WI — skip and let
+		// it finish; a job already sealed is done.
+		jr, cerr := d.beginClose(wi)
+		if cerr != nil {
+			if errors.Is(cerr, ErrCloseInProgress) || errors.Is(cerr, ErrNoLocalJob) {
+				continue
+			}
+			return fmt.Errorf("%w: %s: %v", ErrFlushFailed, wi, cerr)
 		}
 		// Steps 3–4 run in the ONE shared 04 §6.2 A-path close (finish.go):
 		// boundary notice, final flush, end the generation (pause) with the
 		// Daemon-generated evidence — the shutdown-interrupted close is a
 		// NORMAL end (04 §6.2).
-		if _, err := d.closeJob(ctx, wi, jr, "pause", "shutdown"); err != nil {
-			// 04 §7.3: a rolled-back credential is isolated and the shutdown
-			// moves on — this WI is already dead server-side; failing the
-			// whole shutdown would hold every OTHER WI's close hostage.
-			if errors.Is(err, ErrSecretRolledBack) {
+		_, err := d.closeJob(ctx, wi, jr, "pause", "shutdown")
+		d.endClose(wi)
+		if err != nil {
+			// 04 §7.3 / 05 §2.9: a rolled-back credential AND a taken-over
+			// (stale) generation are both isolation paths — the WI is already
+			// dead server-side; failing the whole shutdown would hold every
+			// OTHER WI's close hostage.
+			if errors.Is(err, ErrSecretRolledBack) || errors.Is(err, ErrStaleGeneration) {
 				continue
 			}
 			return fmt.Errorf("%w: %s: %v", ErrFlushFailed, wi, err)
@@ -660,13 +933,27 @@ func (d *Daemon) sealJob(wi string, jr *jobRuntime) {
 // Crash recovery (04 §7.1)
 
 // RecoverFromState re-adopts the jobs recorded in state.json after a daemon
-// restart: alive agents (pid + creation-time match) are re-attached as-is;
-// dead ones get their residual process group collected and are re-derived
+// restart: alive agents (pid + creation-time match) are RE-ATTACHED via
+// Adopt (04 §7.1 step 3: "存活……不重新派生，重接该 WI Agent……重接不打扰其
+// 运行、不重置其 session、不重复派发任何 step；把该 Job 保留在内存中的活跃
+// 集合，harness_session_id 不变") — the previous daemon life's supervision
+// connection is rebuilt as a process-control-only handle, because the stdio
+// control channel is a pipe pair of the OLD daemon process and cannot be
+// re-created (D2-ruled reality, documented on Adopt). Dead agents get their
+// residual process group COLLECTED (04 §7.1 step 4: SIGTERM to the recorded
+// group, SIGKILL after the bound — the agent is dead, but orphaned step
+// agents / command children could still be writing) before being re-derived
 // with the SAME session id (the only session-reuse case, 03 §4.4).
 func (d *Daemon) RecoverFromState(ctx context.Context) error {
 	for i := range d.st.Jobs {
 		j := d.st.Jobs[i]
 		alive := processAlive(j.MainAgentPID, j.MainAgentStartedAt)
+		// R3N-F4: the capsule open path checks for a pending swap marker
+		// too (idempotent with the New-time sweep; only a concurrent
+		// writer could have left one behind).
+		if err := recover.ReconcilePendingSwap(filepath.Join(capsule.CapsuleRoot(d.cfg.WorkspaceRoot), j.WorkItemID)); err != nil {
+			fmt.Fprintf(os.Stderr, "pf-daemon: %s capsule swap reconciliation failed: %v\n", j.WorkItemID, err)
+		}
 		capc, _, oerr := capsule.Open(d.cfg.WorkspaceRoot, j.WorkItemID)
 		if oerr != nil {
 			// 04 §7.1 step 5: capsule dir gone = human attention, never a
@@ -680,7 +967,34 @@ func (d *Daemon) RecoverFromState(ctx context.Context) error {
 		d.jobs[j.WorkItemID] = jr
 		d.mu.Unlock()
 		d.jobq.MarkRunning(j.WorkItemID)
-		if !alive {
+		if alive {
+			// 04 §7.1 step 3: alive ⇒ RE-ATTACH, never re-derive. Before
+			// this the runtime kept a nil agent after restart, so proxy
+			// operations could not target the live pid, Shutdown could not
+			// terminate the agent, and freezeConditions misfired. The adopted
+			// handle restores the process-control face; control messaging is
+			// lost and fails typed (ErrControlChannelLost). No ring event: the
+			// observe vocabulary is the closed nine-type set (04 §5.1a) and
+			// wi_agent_rederived would be a FALSE statement for a re-attach
+			// (04 §7.1 step 3: "不重新派生").
+			jr.agent = Adopt(j.MainAgentPID, j.MainAgentStartedAt)
+		} else {
+			// 04 §7.1 step 4: collect the residual process group FIRST —
+			// the dead agent's orphaned children must stop writing before
+			// the re-derived instance starts (single-writer domain, 03 §7).
+			// R3N-F3: collection must PROVE the group dead; only a proven
+			// (nil) outcome earns the re-derivation. An unproven collection
+			// (pid reused with surviving members, or an unverifiable group)
+			// DENIES the re-derivation: spawning a second writer generation
+			// beside unproven residue is exactly the two-writers violation
+			// the collection exists to prevent. The job stays in the
+			// runtime without an agent — human attention, never a silent
+			// respawn.
+			if cerr := collectResidualProcessGroup(j.MainAgentPID, j.MainAgentStartedAt); cerr != nil {
+				fmt.Fprintf(os.Stderr, "pf-daemon: %s residual group collection did not prove death; re-derivation DENIED (human attention required): %v\n", j.WorkItemID, cerr)
+				jr.watcher = watcher.Start(capc.Dir, 0)
+				continue
+			}
 			// Re-derive: same generation, same machine → SAME session id
 			// (crash continuation, INV-14/D4: a new INSTANCE of the same
 			// role, never a per-step agent).
@@ -707,14 +1021,100 @@ func (d *Daemon) RecoverFromState(ctx context.Context) error {
 		}
 		jr.watcher = watcher.Start(capc.Dir, 0)
 	}
-	// Orphan pending intents (04 §6.1 orphan collection): claims confirmed
-	// but never derived — re-queue them for a fresh spawn pass.
-	for _, p := range d.st.PendingJobs {
-		if p.Status == PendingSessionPersisted || p.Status == PendingClaimConfirmed {
-			d.jobq.Enqueue(QEntry{WorkItemID: p.WorkItemID, Priority: "high", Intent: p.Intent})
+	// Orphan pending intents (04 §6.1 orphan collection): claim intents the
+	// journal persisted but whose spawn never completed — re-queue them for
+	// a fresh spawn pass carrying the PERSISTED idempotency key, so the
+	// re-claim replays the Core's idempotent cache and returns the SAME
+	// attempt instead of a duplicate claim (04 §6.1 step 4/5, 02 §6.6). All
+	// three journal statuses are orphans when no jobs[] record exists:
+	// intent_persisted (crash before the claim completed — retry the same
+	// key), claim_confirmed and session_persisted (crash after the claim,
+	// before derivation).
+	//
+	// R3N-F6 (04 §6.1 orphan-recovery paragraph + 05 §7.4 same-generation
+	// no-replace): a session_persisted orphan that carries a JOURNALED
+	// process identity (written by the spawner's OnProcessStarted callback
+	// before Spawn returned) may hold a LIVE WI Agent. Blindly re-queuing
+	// it made spawnJob reuse the generation but unconditionally re-run
+	// checkout + remote recovery (a full-replacement rebuild — destroying
+	// unpublished local work) and spawn a SECOND agent beside the live one.
+	// Instead:
+	//   - identity ALIVE (pid + started-at match, 04 §7.1 step 2): ADOPT it
+	//     (process-control-only handle, same as the jobs[] alive branch),
+	//     complete the jobs[] record from the journal, run NO checkout and
+	//     NO re-derivation;
+	//   - identity DEAD: collect the residual group first (04 §7.1 step 4
+	//     requires a PROVEN collection before any re-derivation), then
+	//     requeue for the fresh spawn pass;
+	//   - identity UNPROVABLE (pid reused): leave the row and surface it —
+	//     requeueing would risk a second writer generation.
+	// Rows with NO journaled pid (pre-upgrade rows, or a crash inside the
+	// spawn prologue before the callback's fsync) are not discoverable —
+	// 03 §4.4 records only {session_id, adapter, created_at} in
+	// harness/<adapter>/session.json — and requeue as before; that residual
+	// window is documented on SpawnParams.OnProcessStarted.
+	orphans := append([]PendingJob(nil), d.st.PendingJobs...)
+	for _, p := range orphans {
+		if p.Status != PendingSessionPersisted && p.Status != PendingClaimConfirmed && p.Status != PendingIntentPersisted {
+			continue
 		}
+		if d.st.FindJob(p.WorkItemID) != nil {
+			continue // the spawn DID complete: not an orphan
+		}
+		if p.Status == PendingSessionPersisted && p.MainAgentPID >= 1 {
+			if processAlive(p.MainAgentPID, p.MainAgentStartedAt) {
+				if aerr := d.adoptOrphanAgent(p); aerr != nil {
+					fmt.Fprintf(os.Stderr, "pf-daemon: orphan %s has a LIVE recorded agent but could not be adopted; journal row kept, NOT requeued (human attention): %v\n", p.WorkItemID, aerr)
+				}
+				continue
+			}
+			// The journaled process is dead: collect its residual group
+			// first; only a PROVEN collection earns the requeue (R3N-F3).
+			if cerr := collectResidualProcessGroup(p.MainAgentPID, p.MainAgentStartedAt); cerr != nil {
+				fmt.Fprintf(os.Stderr, "pf-daemon: orphan %s residual collection did not prove death; journal row kept, NOT requeued (human attention): %v\n", p.WorkItemID, cerr)
+				continue
+			}
+		}
+		d.jobq.Enqueue(QEntry{WorkItemID: p.WorkItemID, Priority: "high", Intent: p.Intent, IdempotencyKey: p.IdempotencyKey})
 	}
 	return nil
+}
+
+// adoptOrphanAgent completes 04 §6.1's orphan-recovery paragraph for a
+// LIVE discovered orphan (R3N-F6): the previous daemon life derived the WI
+// Agent and journaled its identity, then died before the formal jobs[]
+// record. The agent is ours and alive — re-attach it (Adopt, 04 §7.1
+// step 3: never re-derive, never re-checkout, session unchanged), write
+// the jobs[] record the crash interrupted, and clear the journal row.
+// Control messaging is lost with the old daemon's pipes and fails typed
+// (ErrControlChannelLost) exactly like the jobs[] alive branch.
+func (d *Daemon) adoptOrphanAgent(p PendingJob) error {
+	capc, _, oerr := capsule.Open(d.cfg.WorkspaceRoot, p.WorkItemID)
+	if oerr != nil {
+		return fmt.Errorf("capsule not openable: %w", oerr)
+	}
+	if err := d.state.UpsertJob(d.st, Job{
+		WorkItemID: p.WorkItemID, CapsuleID: capc.ID(), Generation: p.Generation,
+		HarnessAdapter: p.HarnessAdapter, HarnessSessionID: p.HarnessSessionID,
+		MainAgentPID: p.MainAgentPID, MainAgentStartedAt: p.MainAgentStartedAt,
+		Status: JobRunning,
+	}); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	jr := &jobRuntime{
+		cap: capc, ring: &Ring{}, token: p.GenerationToken,
+		adapter: p.HarnessAdapter, sessionID: p.HarnessSessionID,
+	}
+	// No ring event: the observe vocabulary is the closed nine-type set
+	// (04 §5.1a) and a job-started or rederived event would be a FALSE
+	// statement for a re-attach (same reasoning as the jobs[] alive branch).
+	jr.agent = Adopt(p.MainAgentPID, p.MainAgentStartedAt)
+	d.jobs[p.WorkItemID] = jr
+	d.mu.Unlock()
+	d.jobq.MarkRunning(p.WorkItemID)
+	jr.watcher = watcher.Start(capc.Dir, 0)
+	return d.state.RemovePending(d.st, p.WorkItemID, p.IdempotencyKey)
 }
 
 // crashRecoveryPrompt rebuilds the executor instruction for a re-derivation
@@ -731,7 +1131,10 @@ func (d *Daemon) crashRecoveryPrompt(j Job) (string, error) {
 // ---------------------------------------------------------------------------
 // Heartbeat (04 §7.2): 60s cadence, mode rides along.
 
-// RunHeartbeat beats until ctx ends. Every SUCCESSFUL beat is recorded in
+// RunHeartbeat beats until ctx ends. The FIRST beat fires immediately on
+// start — 04 §7.2: "registration IS the first heartbeat" (02 §4.10), so a
+// freshly started daemon must not sit through a whole empty interval
+// unregistered and unobserved. Every SUCCESSFUL beat is recorded in
 // the beat tracker (the stale-machines status signal, 04 §7.2/§9) — failed
 // beats deliberately do not advance the clock, so a Core outage ages the
 // machine out exactly like a stopped daemon would.
@@ -739,6 +1142,12 @@ func (d *Daemon) RunHeartbeat(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = DefaultHeartbeatInterval
 	}
+	beat := func() {
+		if _, err := d.client.Heartbeat(d.cfg.MachineID, d.cfg.Version, d.modes.Current()); err == nil {
+			d.beats.Record(d.cfg.MachineID, time.Now())
+		}
+	}
+	beat() // 04 §7.2: the first beat completes registration — no startup dead window
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -746,11 +1155,47 @@ func (d *Daemon) RunHeartbeat(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if _, err := d.client.Heartbeat(d.cfg.MachineID, d.cfg.Version, d.modes.Current()); err == nil {
-				d.beats.Record(d.cfg.MachineID, time.Now())
-			}
+			beat()
 		}
 	}
+}
+
+// setMode applies a mode transition and persists it to state.json's mode
+// field in the same step (04 §6.7: "合法后原子更新 daemon/state.json 的
+// mode 字段" — the transition and its record are one atomic write).
+//
+// R3N-F8: a persistence failure must NOT leave the new mode active. The
+// state file is the authoritative record (04 §4.1) and the in-memory
+// ModeCtl is its fast-path copy, so on a failed ApplyMode the visible
+// admission state is ROLLED BACK to the previous mode — the caller gets
+// the error and the daemon keeps advertising (and admitting against) the
+// last mode that is actually on disk. ModeCtl.Set stays a single atomic
+// validate+commit, so no concurrent admission ever observes a torn
+// transition.
+func (d *Daemon) setMode(next string) error {
+	prev := d.modes.Current()
+	if err := d.modes.Set(next); err != nil {
+		return err
+	}
+	if err := d.state.ApplyMode(d.st, next); err != nil {
+		d.modes.restore(prev)
+		return err
+	}
+	return nil
+}
+
+// abortDrain ends Drain mode and persists the transition (04 §6.1c/§6.7)
+// with the same persistence-failure rollback as setMode (R3N-F8).
+func (d *Daemon) abortDrain() error {
+	prev := d.modes.Current()
+	if err := d.modes.AbortDrain(); err != nil {
+		return err
+	}
+	if err := d.state.ApplyMode(d.st, ModeInteractive); err != nil {
+		d.modes.restore(prev)
+		return err
+	}
+	return nil
 }
 
 // staleHeartbeatThreshold resolves the configured threshold (default when
@@ -768,12 +1213,12 @@ func (d *Daemon) staleHeartbeatThreshold() time.Duration {
 func (d *Daemon) SetStartupMode(mode string) error {
 	switch mode {
 	case ModeInteractive, ModeBatch:
-		return d.modes.Set(mode)
+		return d.setMode(mode)
 	case ModeDrain:
 		if d.cfg.DrainProject == "" {
 			return fmt.Errorf("daemon: drain mode requires a configured project")
 		}
-		return d.modes.Set(ModeDrain)
+		return d.setMode(ModeDrain)
 	}
 	return fmt.Errorf("daemon: unknown mode %q", mode)
 }

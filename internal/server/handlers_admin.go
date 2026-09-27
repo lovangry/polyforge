@@ -1,6 +1,8 @@
 package server
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +13,20 @@ import (
 
 // F group (M1–M5): the pf management CLI face. Admin unless noted (M3 also
 // allows the project's maintainer).
+//
+// Project-scope enforcement (02 §8): an api_keys.project_id-scoped key is
+// rejected for every out-of-scope project object, on the management face
+// exactly as on the data plane — scope only narrows, never widens. Handlers
+// whose objects carry a project dimension (M2 key scope, M3 projects)
+// enforce it below. M1 (users), M4 (backup) and M5 (rotate-secret) operate
+// on global, non-project objects; 02 §8 frames scope over project objects
+// only, so those stay reachable — but a scoped key can never parley them
+// into out-of-scope reach: M2 below refuses to mint anything but in-scope
+// keys, membership is never granted by a key (02 §4.10), and M1 refuses to
+// ELEVATE a user to role='admin' from a scoped key (hPatchUser) — admin is
+// a global authority grant, and the composed chain scoped key -> register
+// machine (global key, handlers_exec.go) -> PATCH role=admin is closed at
+// BOTH links (machine registration itself refuses scoped keys).
 
 func requireAdmin(s *Server, w http.ResponseWriter, r *http.Request) (*identity, bool) {
 	idn, err := s.authenticate(r)
@@ -105,7 +121,8 @@ func (s *Server) hGetUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hPatchUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(s, w, r); !ok {
+	idn, ok := requireAdmin(s, w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -118,6 +135,17 @@ func (s *Server) hPatchUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Role != "" && body.Role != "admin" && body.Role != "writer" {
 		writeErr(w, ownerAPI("CORE-400", "bad role"))
+		return
+	}
+	// 02 §8: scope only narrows, never widens. role='admin' is a GLOBAL
+	// authority grant (the membership exemption of 02 §4.10 applies to
+	// every project), so elevating any user to admin from a project-scoped
+	// key mints authority outside its scope. In particular this closes the
+	// composition where a scoped admin registers a machine — its api_key is
+	// global (02 §4.10) — and then patches that machine user to admin,
+	// turning the machine key into an unscoped admin credential.
+	if idn.KeyScope != nil && body.Role == "admin" {
+		writeErr(w, ownerAPI("CORE-403", "scoped key cannot grant the admin role"))
 		return
 	}
 	if _, err := s.DB.Exec(`UPDATE users SET display_name=COALESCE(?1, display_name), role=COALESCE(?2, role) WHERE id=?3`,
@@ -137,7 +165,8 @@ func nullIfEmpty(s string) any {
 
 // M2: api-keys CRUD. Plaintext is returned exactly once; only hashes stored.
 func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(s, w, r); !ok {
+	idn, ok := requireAdmin(s, w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -151,6 +180,13 @@ func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.UserID == "" {
 		writeErr(w, ownerAPI("CORE-400", "user_id required"))
+		return
+	}
+	// 02 §8: scope only narrows. A scoped admin key may mint keys for its
+	// own project only — a NULL (unscoped) or out-of-scope project_id would
+	// hand out authority wider than the caller's own key and is refused.
+	if idn.KeyScope != nil && (body.ProjectID == nil || *body.ProjectID != *idn.KeyScope) {
+		writeErr(w, ownerAPI("CORE-403", "scoped key may only issue keys for its own project"))
 		return
 	}
 	id, _ := store.NewID("key_")
@@ -172,10 +208,20 @@ func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hListAPIKeys(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(s, w, r); !ok {
+	idn, ok := requireAdmin(s, w, r)
+	if !ok {
 		return
 	}
-	rows, err := s.DB.Query(`SELECT id, user_id, project_id, revoked_at FROM api_keys ORDER BY id`)
+	// A scoped key lists only its own scope's keys (02 §8: out-of-scope
+	// objects are rejected even in list/filter requests).
+	query := `SELECT id, user_id, project_id, revoked_at FROM api_keys`
+	args := []any{}
+	if idn.KeyScope != nil {
+		query += ` WHERE project_id=?1`
+		args = append(args, *idn.KeyScope)
+	}
+	query += ` ORDER BY id`
+	rows, err := s.DB.Query(query, args...)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -195,8 +241,28 @@ func (s *Server) hListAPIKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(s, w, r); !ok {
+	idn, ok := requireAdmin(s, w, r)
+	if !ok {
 		return
+	}
+	// A scoped key may only revoke keys inside its own scope (02 §8); a
+	// NULL-scope target key is a global object, outside a scoped caller's
+	// narrowed face.
+	if idn.KeyScope != nil {
+		var proj sql.NullString
+		err := s.DB.QueryRow(`SELECT project_id FROM api_keys WHERE id=?1`, r.PathValue("id")).Scan(&proj)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, ownerAPI("CORE-404", "api key"))
+			return
+		}
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		if !proj.Valid || proj.String != *idn.KeyScope {
+			writeErr(w, ownerAPI("CORE-403", "scoped key may only revoke keys in its own project"))
+			return
+		}
 	}
 	if _, err := s.DB.Exec(`UPDATE api_keys SET revoked_at=?1 WHERE id=?2`, store.Now(), r.PathValue("id")); err != nil {
 		writeErr(w, err)
@@ -207,7 +273,14 @@ func (s *Server) hRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 
 // M3: projects CRUD + membership management (admin or project maintainer).
 func (s *Server) hCreateProject(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(s, w, r); !ok {
+	idn, ok := requireAdmin(s, w, r)
+	if !ok {
+		return
+	}
+	// A newly created project is outside any existing key scope by
+	// definition; a scoped key's narrowed face must not extend (02 §8).
+	if idn.KeyScope != nil {
+		writeErr(w, ownerAPI("CORE-403", "scoped key cannot create projects outside its scope"))
 		return
 	}
 	var body struct {
@@ -242,7 +315,8 @@ func (s *Server) hListProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.DB.Query(`SELECT p.id, p.name, p.visible FROM projects p
 		LEFT JOIN project_members m ON m.project_id = p.id AND m.user_id=?1
-		WHERE p.visible=1 OR m.user_id IS NOT NULL OR ?2='admin'`, idn.UserID, idn.Role)
+		WHERE (p.visible=1 OR m.user_id IS NOT NULL OR ?2='admin') AND (?3 IS NULL OR p.id=?3)`,
+		idn.UserID, idn.Role, idn.KeyScope)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -275,6 +349,12 @@ func (s *Server) hGetProject(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ownerAPI("CORE-404", "project"))
 		return
 	}
+	// Key scope precedes the membership read check (02 §8: a scoped key is
+	// rejected for out-of-scope projects on every route, scope only narrows).
+	if err := s.requireScope(idn, id); err != nil {
+		writeErr(w, err)
+		return
+	}
 	ok, err := s.canRead(idn, id)
 	if err != nil {
 		writeErr(w, err)
@@ -296,6 +376,12 @@ func (s *Server) hPatchProject(w http.ResponseWriter, r *http.Request) {
 	var projectID string
 	if err := s.DB.QueryRow(`SELECT id FROM projects WHERE id=?1 OR name=?1`, r.PathValue("id")).Scan(&projectID); err != nil {
 		writeErr(w, ownerAPI("CORE-404", "project"))
+		return
+	}
+	// Key scope precedes the admin/maintainer check (02 §8: a scoped key
+	// is rejected for out-of-scope projects on every route).
+	if err := s.requireScope(idn, projectID); err != nil {
+		writeErr(w, err)
 		return
 	}
 	role, err := s.memberRole(projectID, idn.UserID)

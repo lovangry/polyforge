@@ -46,7 +46,10 @@ func DefaultConfigPath() string {
 }
 
 // LoadConfig reads the config file (a missing file is not an error: the
-// defaults apply) and applies environment overrides on top:
+// defaults apply) and applies environment overrides on top. An empty path
+// means the documented default location (DefaultConfigPath), not "no
+// file": a `pf` invocation without --config must still honor
+// ~/.config/polyforge/cli.toml.
 //
 //	PF_SERVER         -> Server
 //	PF_API_KEY        -> APIKey
@@ -61,17 +64,18 @@ func LoadConfig(path string) (Config, error) {
 		Server:       defaultServer,
 		DaemonSocket: defaultDaemonSocket,
 	}
-	if path != "" {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			kv, perr := parseFlatTOML(string(data))
-			if perr != nil {
-				return cfg, fmt.Errorf("config %s: %w", path, perr)
-			}
-			applyConfigFile(&cfg, kv)
-		} else if !os.IsNotExist(err) {
-			return cfg, fmt.Errorf("config %s: %w", path, err)
+	if path == "" {
+		path = DefaultConfigPath()
+	}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		kv, perr := parseFlatTOML(string(data))
+		if perr != nil {
+			return cfg, fmt.Errorf("config %s: %w", path, perr)
 		}
+		applyConfigFile(&cfg, kv)
+	} else if !os.IsNotExist(err) {
+		return cfg, fmt.Errorf("config %s: %w", path, err)
 	}
 	applyEnv(&cfg)
 	return cfg, nil
@@ -119,14 +123,15 @@ func applyEnv(cfg *Config) {
 // cli.toml: `key = "value"` (or single-quoted literal strings) with `#`
 // comments and blank lines. Tables, arrays and non-string values are out
 // of scope by ruling — the file carries exactly five string keys — and
-// are rejected rather than guessed at.
+// are rejected rather than guessed at. NARROWING, deliberate: escape
+// sequences are NOT supported — a double-quoted value containing a
+// backslash is rejected below — and values are taken literally between
+// their quotes. A `#` inside a quoted value is data, not a comment.
 func parseFlatTOML(text string) (map[string]string, error) {
 	out := map[string]string{}
 	for ln, line := range strings.Split(text, "\n") {
 		// Strip comments (TOML: # starts a comment outside a string).
-		if i := strings.IndexByte(line, '#'); i >= 0 {
-			line = line[:i]
-		}
+		line = stripTOMLComment(line)
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -157,4 +162,34 @@ func parseFlatTOML(text string) (map[string]string, error) {
 		out[key] = inner
 	}
 	return out, nil
+}
+
+// stripTOMLComment cuts a line at the first `#` that is OUTSIDE any
+// quoted string (a `#` inside quotes is data — an api key may contain
+// one). Double-quoted strings skip the character after a backslash so an
+// escaped quote cannot end the scan early; the value itself is still
+// rejected later when it contains an escape (the documented narrowing).
+// Single-quoted literal strings have no escapes in TOML, so every `#`
+// after an opening `'` is data.
+func stripTOMLComment(line string) string {
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if quote != 0 {
+			switch {
+			case quote == '"' && c == '\\':
+				i++ // skip the escaped character
+			case c == quote:
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+		case '#':
+			return line[:i]
+		}
+	}
+	return line
 }

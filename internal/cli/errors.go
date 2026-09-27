@@ -97,6 +97,10 @@ func execute(httpc *http.Client, method, url string, body any, header map[string
 	if err != nil {
 		return nil, err
 	}
+	if payload != nil {
+		// The body is JSON (json.Marshal above); say so on the wire.
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for k, v := range header {
 		req.Header.Set(k, v)
 	}

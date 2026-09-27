@@ -20,7 +20,9 @@ package memory
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/core/store"
 )
@@ -885,4 +887,288 @@ func TestRebuildRedactedRowNotResurrected(t *testing.T) {
 	}
 	_, gerr := s.Get(e.ID)
 	want404(t, gerr)
+}
+
+// ---------- lock-discipline regressions (06 §6) ----------
+
+// TestRebuildSnapshotUnderEntryLock pins the FB-2 ordering: the §5.3
+// per-entry work — snapshot, metadata branch and the step-4 FTS rewrite —
+// happens INSIDE the entry's per-mem write mutex. The test holds the lock
+// (a writer mid-critical-section), starts a rebuild and mutates the
+// entry to a fully-committed NEW state while the rebuild is blocked;
+// the rebuild must then snapshot and index the state it observes under the
+// lock. The previous shape read the file during the walk and rewrote FTS
+// from those cached bytes in a later batch transaction, letting this exact
+// interleaving leave content_sha and the FTS body disagreeing.
+func TestRebuildSnapshotUnderEntryLock(t *testing.T) {
+	s := newTestStore(t)
+	e := mustCreate(t, s, "original rebuild probe")
+
+	// A writer holding the entry's critical section: the rebuild must not
+	// be able to observe or touch this entry until it releases.
+	unlock := s.memLock(e.ID)
+
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := s.RebuildIndex()
+		done <- result{n, err}
+	}()
+
+	select {
+	case r := <-done:
+		t.Fatalf("rebuild completed while the entry lock was held (snapshot/rewrite not lock-protected): n=%d err=%v", r.n, r.err)
+	case <-time.After(150 * time.Millisecond):
+		// Still blocked: the per-entry lock discipline holds.
+	}
+
+	// Simulate the writer completing its whole write order UNDER the lock:
+	// new authority file, row metadata and FTS all committed — the state a
+	// finished PATCH leaves behind.
+	row, err := s.load(e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fm := &frontmatter{ID: e.ID, Type: row.Type, OwnerUserID: row.OwnerUserID,
+		Title: row.Title, Tags: row.Tags, Visibility: row.Visibility,
+		WorkItemID: row.WorkItemID, ProjectID: row.ProjectID, Related: row.Related,
+		CreatedAt: row.CreatedAt, UpdatedAt: store.Now()}
+	raw := writeAuthority(t, filepath.Join(s.dataDir, "memory", "pj1", e.ID), fm, "replacement committed body")
+	if err := s.updateRowFromFile(row, fm, raw, shaHex(raw)); err != nil {
+		t.Fatal(err)
+	}
+
+	unlock()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("rebuild: %v", r.err)
+		}
+		if r.n != 1 {
+			t.Fatalf("rebuild must index the one active entry: n=%d", r.n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("rebuild did not resume after the lock was released")
+	}
+
+	// The index must reflect the state snapshot UNDER the lock: the
+	// replacement body is searchable, the superseded one is not, and the
+	// row's content_sha agrees with the FTS body (no stale-bytes rewrite).
+	row2, err := s.load(e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row2.ContentSHA != shaHex(raw) {
+		t.Fatal("row content_sha does not follow the committed replacement")
+	}
+	hits, err := s.Search("replacement", "", nil, 50, nil)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("replacement body not indexed from the locked snapshot: %v (err %v)", hits, err)
+	}
+	hits, err = s.Search("original rebuild", "", nil, 50, nil)
+	if err != nil || len(hits) != 0 {
+		t.Fatalf("stale snapshot bytes survived into the index: %v (err %v)", hits, err)
+	}
+}
+
+// ---------- frontmatter project-binding regressions (06 §4.2/§5.3) ----------
+
+// plantedFMs returns a valid planted-entry frontmatter bound to the given
+// project, for the project-binding tests.
+func plantedFMs(memID, projectID string) *frontmatter {
+	return &frontmatter{ID: memID, Type: "experience.rule", OwnerUserID: "usr_worker",
+		Title: strp("planted"), Visibility: "project", ProjectID: projectID,
+		Tags: []string{}, Related: []string{}, CreatedAt: store.Now(), UpdatedAt: store.Now()}
+}
+
+// TestRebuildProjectFrontmatterRequired pins 06 §4.2: project_id is a
+// required frontmatter field (FRONTMATTER_INVALID when missing), so a
+// planted file without it is never backfilled, and neither is a file whose
+// project binding dangles (the insert could never satisfy the 02 §4.9
+// FOREIGN KEY constraints). One bad planted file must not abort the whole
+// rebuild.
+func TestRebuildProjectFrontmatterRequired(t *testing.T) {
+	s := newTestStore(t)
+
+	// Missing project_id: valid in every other field.
+	noProject := &frontmatter{ID: "mem_noproject", Type: "experience.rule", OwnerUserID: "usr_worker",
+		Title: strp("x"), Visibility: "project", ProjectID: "",
+		Tags: []string{}, Related: []string{}, CreatedAt: store.Now(), UpdatedAt: store.Now()}
+	writeAuthority(t, filepath.Join(s.dataDir, "memory", "pj1", "mem_noproject"), noProject, "noproject body probe")
+
+	// Project binding that names no real project row.
+	writeAuthority(t, filepath.Join(s.dataDir, "memory", "pj1", "mem_ghostproject"), plantedFMs("mem_ghostproject", "pj_nope"), "ghostproject body probe")
+
+	// Same rules in the _redacted pass.
+	writeAuthority(t, filepath.Join(s.dataDir, "memory", "pj1", "_redacted", "mem_rednoproject"), plantedFMs("mem_rednoproject", "pj_nope"), "rednoproject body")
+
+	// A control entry so the rebuild exercises a real index too.
+	ctrl := mustCreate(t, s, "control entry stays")
+
+	n, err := s.RebuildIndex()
+	if err != nil || n != 1 { // only the control entry
+		t.Fatalf("rebuild: n=%d err=%v (bad planted files must be skipped, not fail the rebuild)", n, err)
+	}
+	for _, id := range []string{"mem_noproject", "mem_ghostproject", "mem_rednoproject"} {
+		if _, lerr := s.load(id); !isNotFound(lerr) {
+			t.Fatalf("%s was backfilled despite invalid/missing project frontmatter", id)
+		}
+		if c := ftsCount(t, s, id); c != 0 {
+			t.Fatalf("%s was indexed despite invalid/missing project frontmatter", id)
+		}
+	}
+	// The control entry keeps serving; the planted probes never appear.
+	hits, _ := s.Search("probe", "", nil, 50, nil)
+	if len(hits) != 0 {
+		t.Fatalf("planted files searchable: %v", hits)
+	}
+	hits, _ = s.Search("control", "", nil, 50, nil)
+	if len(hits) != 1 || hits[0].ID != ctrl.ID {
+		t.Fatalf("control entry lost: %v", hits)
+	}
+}
+
+// TestRebuildBindsProjectFromFrontmatter pins the §5.3/§4.2 binding rule:
+// the row's project_id comes from the FRONTMATTER (the metadata
+// authority), while authority_path stays directory-based (the file-location
+// authority) — a hand-planted file under another project's tree binds to
+// the project its frontmatter declares, and placement never rewrites
+// binding or path.
+func TestRebuildBindsProjectFromFrontmatter(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`INSERT INTO projects(id, name) VALUES ('pj2','p2')`); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := writeAuthority(t, filepath.Join(s.dataDir, "memory", "pj1", "mem_misplaced"), plantedFMs("mem_misplaced", "pj2"), "misplaced body trigramok")
+
+	n, err := s.RebuildIndex()
+	if err != nil || n != 1 {
+		t.Fatalf("rebuild: n=%d err=%v", n, err)
+	}
+	row, lerr := s.load("mem_misplaced")
+	if lerr != nil {
+		t.Fatalf("planted file not backfilled: %v", lerr)
+	}
+	// Binding follows the frontmatter, not the directory.
+	if row.ProjectID != "pj2" {
+		t.Fatalf("project binding followed the directory (%s), not the frontmatter (pj2)", row.ProjectID)
+	}
+	// The file-location authority stays directory-based.
+	if row.apath != "memory/pj1/mem_misplaced" {
+		t.Fatalf("authority_path not dir-based: %s", row.apath)
+	}
+	if row.ContentSHA != shaHex(raw) {
+		t.Fatal("backfilled content_sha does not match the file bytes")
+	}
+	// Servable through the gate and listed under the BOUND project.
+	if _, gerr := s.Get("mem_misplaced"); gerr != nil {
+		t.Fatalf("misplaced file not servable: %v", gerr)
+	}
+	lst, lerr := s.List("pj2", nil)
+	if lerr != nil || len(lst) != 1 || lst[0].ID != "mem_misplaced" {
+		t.Fatalf("entry not bound to the frontmatter project in listings: %v (err %v)", lst, lerr)
+	}
+	lst, _ = s.List("pj1", nil)
+	if len(lst) != 0 {
+		t.Fatalf("directory placement leaked into the directory project's listing: %v", lst)
+	}
+	hits, _ := s.Search("misplaced", "", nil, 50, nil)
+	if len(hits) != 1 {
+		t.Fatalf("misplaced file not searchable: %v", hits)
+	}
+
+	// R2C-F6: every physical path the redact write order touches is
+	// derived from the recorded placement (authority_path), never from
+	// the frontmatter project_id — a cross-bound entry (bound pj2, placed
+	// under pj1) is redacted inside the tree it physically lives in.
+	//
+	// Part 1 — a full clean redact: the rename must succeed (source taken
+	// from the recorded placement, not the non-existent memory/pj2 tree)
+	// and the file lands in memory/pj1/_redacted/, leaving the bound
+	// project's tree untouched.
+	if err := s.Redact("mem_misplaced"); err != nil {
+		t.Fatalf("cross-bound redact failed on a placement-derived source: %v", err)
+	}
+	row, lerr = s.load("mem_misplaced")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if row.Status != "redacted" {
+		t.Fatalf("clean redact did not commit status: %s", row.Status)
+	}
+	if n := ftsCount(t, s, "mem_misplaced"); n != 0 {
+		t.Fatalf("FTS row survived the redact: %d", n)
+	}
+	if _, serr := os.Stat(filepath.Join(s.dataDir, "memory", "pj1", "_redacted", "mem_misplaced", "memory.md")); serr != nil {
+		t.Fatal("redacted authority not in the placement-side _redacted tree")
+	}
+	for _, p := range []string{
+		filepath.Join(s.dataDir, "memory", "pj1", "mem_misplaced"), // old placement gone
+		filepath.Join(s.dataDir, "memory", "pj2", "mem_misplaced"), // bound tree never touched
+		filepath.Join(s.dataDir, "memory", "pj2", "_redacted", "mem_misplaced"),
+	} {
+		if _, serr := os.Stat(p); !os.IsNotExist(serr) {
+			t.Fatalf("bound-project tree must stay untouched: %s exists (err %v)", p, serr)
+		}
+	}
+	if _, gerr := s.Get("mem_misplaced"); gerr == nil {
+		t.Fatal("redacted entry must not serve")
+	}
+
+	// Part 2 — crash forward-completion: redact dies between ① and ②
+	// (file moved, row still active), and the read-path reconcile finds
+	// the file only through the placement-derived probe and forward-
+	// completes the metadata (status='redacted' + FTS delete).
+	writeAuthority(t, filepath.Join(s.dataDir, "memory", "pj1", "mem_misplaced_b"),
+		plantedFMs("mem_misplaced_b", "pj2"), "second misplaced body trigramok")
+	n, rerr := s.RebuildIndex()
+	if rerr != nil || n != 1 {
+		t.Fatalf("second plant not backfilled: n=%d err=%v", n, rerr)
+	}
+	injectCrash(t, "redact:post-move")
+	expectCrash(t, "redact:post-move", func() { _ = s.Redact("mem_misplaced_b") })
+	if _, serr := os.Stat(filepath.Join(s.dataDir, "memory", "pj1", "_redacted", "mem_misplaced_b", "memory.md")); serr != nil {
+		t.Fatal("post-move crash left the file outside the placement-side _redacted tree")
+	}
+	row, lerr = s.load("mem_misplaced_b")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if row.Status != "active" {
+		t.Fatalf("crash window not reproduced: status=%s", row.Status)
+	}
+	// The gated read 404s and its inline reconcile forward-completes the
+	// redact from the placement-derived file position.
+	_, gerr := s.Get("mem_misplaced_b")
+	want404(t, gerr)
+	row, lerr = s.load("mem_misplaced_b")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if row.Status != "redacted" {
+		t.Fatalf("crashed cross-bound redact not forward-completed: %s", row.Status)
+	}
+	if n := ftsCount(t, s, "mem_misplaced_b"); n != 0 {
+		t.Fatalf("FTS row survived the forward completion: %d", n)
+	}
+	// A repeat Redact on the crashed entry reaches MEM-409 through the
+	// same placement-derived residue probe — never a MEM-500 rename from
+	// a source that only exists under the bound project's tree.
+	if rerr := s.Redact("mem_misplaced_b"); rerr == nil || !strings.Contains(rerr.Error(), "MEM-409") {
+		t.Fatalf("repeat redact after forward completion: want MEM-409, got %v", rerr)
+	}
+	// Rebuild stays idempotent: the placement-side _redacted file is
+	// found by the §5.3 step-5 walk and the already-correct row untouched.
+	if n, berr := s.RebuildIndex(); berr != nil || n != 0 {
+		t.Fatalf("rebuild must be idempotent here: n=%d err=%v", n, berr)
+	}
+	// The bound project's tree was never created by any of it.
+	if _, serr := os.Stat(filepath.Join(s.dataDir, "memory", "pj2")); !os.IsNotExist(serr) {
+		t.Fatal("the bound project's tree must never come into existence")
+	}
 }

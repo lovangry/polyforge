@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/sync/aihub"
 )
@@ -73,26 +74,40 @@ func (d *Daemon) WrapJob(ctx context.Context, wi, reason string) (*FinishOutcome
 	return d.finishJob(ctx, wi, reason)
 }
 
-// finishJob is the route entry into the shared close: job lookup, the
-// one-close-at-a-time guard, then closeJob.
-func (d *Daemon) finishJob(ctx context.Context, wi, reason string) (*FinishOutcome, error) {
+// beginClose is the ONE close-entry guard (04 §6.2: one close path, no
+// duplication — and never two closes racing on one job): it atomically
+// looks the job up and installs the closing flag. Every close entry — the
+// pause/wrap routes AND the graceful-shutdown sequence — must pass through
+// it; on success the caller MUST pair with endClose.
+func (d *Daemon) beginClose(wi string) (*jobRuntime, error) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	jr, ok := d.jobs[wi]
 	if !ok {
-		d.mu.Unlock()
 		return nil, fmt.Errorf("%w for %s", ErrNoLocalJob, wi)
 	}
 	if d.closing[wi] {
-		d.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrCloseInProgress, wi)
 	}
 	d.closing[wi] = true
+	return jr, nil
+}
+
+// endClose releases the one-close guard installed by beginClose.
+func (d *Daemon) endClose(wi string) {
+	d.mu.Lock()
+	delete(d.closing, wi)
 	d.mu.Unlock()
-	defer func() {
-		d.mu.Lock()
-		delete(d.closing, wi)
-		d.mu.Unlock()
-	}()
+}
+
+// finishJob is the route entry into the shared close: job lookup, the
+// one-close-at-a-time guard, then closeJob.
+func (d *Daemon) finishJob(ctx context.Context, wi, reason string) (*FinishOutcome, error) {
+	jr, err := d.beginClose(wi)
+	if err != nil {
+		return nil, err
+	}
+	defer d.endClose(wi)
 	return d.closeJob(ctx, wi, jr, reason, reason)
 }
 
@@ -121,6 +136,21 @@ func (d *Daemon) closeJob(ctx context.Context, wi string, jr *jobRuntime, endRea
 	if jr.agent != nil && jr.agent.Alive() {
 		if err := jr.agent.NotifyStop(ctx); err == nil {
 			_ = jr.agent.Quiesce(ctx)
+		} else if errors.Is(err, ErrControlChannelLost) {
+			// ADOPTED agent (crash-restart re-attach, 04 §7.1 step 3): the
+			// graceful notice is undeliverable — the stdio control channel
+			// died with the previous daemon process. Degrade to the B-path
+			// collection (04 §6.2 B / §7.1): terminate the WHOLE group NOW so
+			// the final flush below runs over a provably dead writer domain
+			// (the 05 §2.7 process-group-dead shortcut), never over a live
+			// writer we cannot quiesce. Capsule writes are atomic
+			// (tmp+fsync+rename, 03 §4.2), so any interruption boundary is
+			// disk-consistent; the close was going to recycle the agent
+			// anyway (sealJob).
+			fmt.Fprintf(os.Stderr, "pf-daemon: close of %s holds an adopted agent (control channel lost at daemon restart); collecting its process group before the final flush\n", wi)
+			if terr := jr.agent.Terminate(15 * time.Second); terr != nil {
+				fmt.Fprintf(os.Stderr, "pf-daemon: adopted agent group collection for %s failed: %v\n", wi, terr)
+			}
 		}
 	}
 	// Final flush on the agent's behalf. PublishRequest classifies a

@@ -128,6 +128,67 @@ func TestDefaultConfigPath(t *testing.T) {
 	}
 }
 
+func TestLoadConfigEmptyPathLoadsDefaultFile(t *testing.T) {
+	// Regression (FC-2): an empty path means "the documented default",
+	// not "no file": without --config the CLI must still honor
+	// ~/.config/polyforge/cli.toml.
+	clearEnv(t)
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	if err := os.MkdirAll(filepath.Join(base, "polyforge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(base, "polyforge", "cli.toml")
+	if err := os.WriteFile(file, []byte(`server = "http://from-default-file:8420"`+"\n"+
+		`api_key = "k_defaultfile"`+"\n"+
+		`project = "fileproj"`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig(\"\") must load the default file: %v", err)
+	}
+	if cfg.Server != "http://from-default-file:8420" {
+		t.Errorf("Server = %q, want the default file's value", cfg.Server)
+	}
+	if cfg.APIKey != "k_defaultfile" {
+		t.Errorf("APIKey = %q, want the default file's value", cfg.APIKey)
+	}
+	if cfg.Project != "fileproj" {
+		t.Errorf("Project = %q, want the default file's value", cfg.Project)
+	}
+}
+
+func TestLoadConfigEmptyPathMissingDefaultFileIsNotError(t *testing.T) {
+	// An absent default file keeps the documented defaults (no error).
+	clearEnv(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("missing default file must not error: %v", err)
+	}
+	if cfg.Server != defaultServer || cfg.APIKey != "" {
+		t.Errorf("cfg = %+v, want built-in defaults", cfg)
+	}
+}
+
+func TestParseFlatTOMLHashInsideQuotedValue(t *testing.T) {
+	// Regression (FC-8): `#` inside a quoted value is data (an api key
+	// may contain one); comments are stripped only outside quotes.
+	kv, err := parseFlatTOML("api_key = \"k#abc\"\n" +
+		"server = 'http://x#y:1' # trailing comment\n" +
+		"# full-line comment\n")
+	if err != nil {
+		t.Fatalf("values containing # must parse: %v", err)
+	}
+	if kv["api_key"] != "k#abc" {
+		t.Errorf("api_key = %q, want k#abc", kv["api_key"])
+	}
+	if kv["server"] != "http://x#y:1" {
+		t.Errorf("server = %q, want http://x#y:1 (trailing comment stripped)", kv["server"])
+	}
+}
+
 // clearEnv removes the override variables for hermetic tests.
 func clearEnv(t *testing.T) {
 	t.Helper()

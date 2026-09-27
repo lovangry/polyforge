@@ -9,7 +9,9 @@
 //     double-digest staleness check (06 §4.3, INV-7d),
 //   - the §4.4 body extraction rule for the FTS index,
 //   - short-query (<3-character, incl. 2-char CJK) retrieval widening
-//     beside the FTS5 trigram MATCH path,
+//     beside the FTS5 trigram MATCH path (KEPT as the recorded
+//     reconciliation of §4.4's arbitrary-substring guarantee with the
+//     measured trigram floor; see Search),
 //   - INV-7f read-path serving validation and the full §5.3 reconcile
 //     procedure (reconcile.go: transient sweep, orphan handling both
 //     ways, _redacted forward-completion, frontmatter metadata backfill,
@@ -27,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -216,10 +219,23 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	}
 
 	// Idempotent create: UNIQUE(idempotency_key) returns the original entry.
+	// The replay is bound to the FULL creation identity — key + caller
+	// principal + project — mirroring the INV-2d three-way match 02 §4.3/
+	// §6.6 pins for the claim face (same key + different caller/object is a
+	// DIFFERENT request → typed rejection, never a cached hit). The earlier
+	// globally-keyed lookup returned another project/owner's existing entry
+	// with no scope/membership/visibility recheck. The code is the
+	// memory-face conflict code of 06 §5.1/§5.4 (POST /memories: MEM-400 /
+	// MEM-409), carrying the INV-2d reason.
 	if req.IdempotencyKey != nil && *req.IdempotencyKey != "" {
-		var existing string
-		qerr := s.db.QueryRow(`SELECT id FROM memories WHERE idempotency_key=?1`, *req.IdempotencyKey).Scan(&existing)
+		var existing, proj, own string
+		qerr := s.db.QueryRow(`SELECT id, project_id, owner_user_id FROM memories WHERE idempotency_key=?1`,
+			*req.IdempotencyKey).Scan(&existing, &proj, &own)
 		if qerr == nil {
+			if proj != projectID || own != owner {
+				return nil, errf("MEM-409", "IDEMPOTENCY_KEY_REUSED",
+					"idempotency_key %q belongs to another owner or project", *req.IdempotencyKey)
+			}
 			return s.Get(existing)
 		}
 		if !errors.Is(qerr, sql.ErrNoRows) {
@@ -359,9 +375,17 @@ func (s *Store) Get(memID string) (*Entry, error) {
 	return s.validated(memID)
 }
 
-// Content returns the authority Markdown bytes.
+// Content returns the authority Markdown bytes. The INV-7f gate and the
+// byte read happen inside ONE hold of the entry's per-mem write mutex:
+// the bytes served are exactly the bytes whose digest the gate verified.
+// The earlier shape validated first and read the file after releasing —
+// a PATCH completing its ③ in between served new bytes against the
+// validated old row (TOCTOU against concurrent writes and out-of-band
+// edits).
 func (s *Store) Content(memID string) ([]byte, error) {
-	e, err := s.validated(memID)
+	unlock := s.memLock(memID)
+	defer unlock()
+	e, err := s.validatedLocked(memID)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +464,11 @@ func (s *Store) Update(memID string, req UpdateRequest) (*Entry, error) {
 	crashpoint("update:pre-write") // 06 §9: before any byte (incl. the history snapshot)
 
 	// Seed the new frontmatter from the CURRENT row, then apply the new
-	// content's frontmatter (if any) and the PATCH fields.
+	// content's frontmatter (if any) and the PATCH fields. project_id is
+	// deliberately NOT seedable here: the project binding is fixed at
+	// create and only the §5.3 rebuild reads it back from the authority
+	// frontmatter (06 §4.2) — a PATCH must not silently rebind an entry
+	// to another project.
 	fm := &frontmatter{
 		ID: memID, Type: e.Type, OwnerUserID: e.OwnerUserID, Title: e.Title,
 		Tags: e.Tags, Visibility: e.Visibility, WorkItemID: e.WorkItemID,
@@ -558,20 +586,42 @@ func (s *Store) Update(memID string, req UpdateRequest) (*Entry, error) {
 // equals the sha256 of the memory.html bytes as currently on disk. Any
 // miss → one re-derivation, writing memory.html plus BOTH digests.
 //
-// Derivation mutates derived (never authority) state, so this read path
-// still takes the barrier read lock while it writes and the per-mem mutex
-// to serialize against a concurrent update of the same entry.
+// The whole read — INV-7f gate, authority-byte read, freshness judgment
+// and any re-derivation — happens inside the entry's per-mem write mutex,
+// so the digest pair being judged and the bytes being derived can never
+// come from two different committed states. The earlier shape judged
+// freshness from bytes and digests captured BEFORE the lock and then
+// re-derived from those pre-lock bytes while holding it: a PATCH
+// completing in between let this path overwrite the writer's fresh
+// source_markdown_sha/html_sha pair with digests of the superseded
+// content (stale HTML digests, INV-7d).
+//
+// Derivation mutates derived (never authority) state, so the
+// re-derivation branch also takes the barrier read lock while it writes,
+// after the memLock (the fixed acquisition order everywhere).
 func (s *Store) HTML(memID string) ([]byte, error) {
-	// INV-7f gate first: the authority file digest is verified against the
-	// row before the derived view is even considered.
-	e, err := s.validated(memID)
+	unlock := s.memLock(memID)
+	defer unlock()
+
+	// INV-7f gate first (caller-held lock): the authority file digest is
+	// verified against the row before the derived view is even considered.
+	e, err := s.validatedLocked(memID)
 	if err != nil {
 		return nil, err
 	}
+	return s.htmlLocked(e)
+}
+
+// htmlLocked serves the derived view for a caller that ALREADY holds the
+// entry's per-mem write mutex (HTML and ReadView): the 06 §4.3 freshness
+// judgment runs on bytes and digests captured inside that hold, and any
+// re-derivation takes the barrier read lock afterwards (the fixed
+// memLock → barrier acquisition order everywhere).
+func (s *Store) htmlLocked(e *Entry) ([]byte, error) {
 	dir := filepath.Join(s.dataDir, filepath.FromSlash(e.apath))
 	authorityBytes, err := os.ReadFile(filepath.Join(dir, "memory.md"))
 	if err != nil {
-		return nil, errf("MEM-404", "", "authority file missing for %s", memID)
+		return nil, errf("MEM-404", "", "authority file missing for %s", e.ID)
 	}
 	mdSHA := shaHex(authorityBytes)
 	htmlPath := filepath.Join(dir, "memory.html")
@@ -582,17 +632,63 @@ func (s *Store) HTML(memID string) ([]byte, error) {
 		return htmlBytes, nil
 	}
 
-	unlock := s.memLock(memID)
-	defer unlock()
 	BackupBarrier.RLock()
 	defer BackupBarrier.RUnlock()
 
 	_, body, _ := splitFrontmatter(string(authorityBytes))
-	out, derr := s.deriveHTML(e, authorityBytes, body)
-	if derr != nil {
-		return nil, derr
+	return s.deriveHTML(e, authorityBytes, body)
+}
+
+// ReadView is the single-snapshot authorized read for the detail route
+// (02 row 22 GET): the INV-7f gate, the caller's authorization decision,
+// the authority-byte read and (when wantHTML) the derived view all happen
+// inside ONE hold of the entry's per-mem write mutex, and `allowed` is
+// evaluated against exactly the entry snapshot whose bytes are served.
+//
+// The earlier server shape authorized against Get's metadata (one lock
+// window) and then read Content/HTML under separate windows: a PATCH
+// landing in between — e.g. visibility→private plus a new body — let a
+// non-owner read the NEW private body against the OLD authorized
+// metadata. Binding decision and bytes to one snapshot closes that
+// window: an entry that became private while the reader waited for the
+// lock is judged on its post-lock state and refused.
+//
+// `allowed` returns (ok, err): an error is propagated verbatim (the
+// server layer passes its typed CORE-403 scope rejection through), a
+// plain false answers MEM-404 (no existence leak, 06 §5.4). A nil
+// `allowed` skips the predicate (the anonymous share-consume path, whose
+// authorization is the token itself).
+//
+// NOTE (file scope): this is a read-only helper added to internal/memory
+// because the fix genuinely requires the authorization decision and the
+// byte read to share one lock — the lock is private to this package.
+func (s *Store) ReadView(memID string, allowed func(*Entry) (bool, error), wantHTML bool) (*Entry, []byte, []byte, error) {
+	unlock := s.memLock(memID)
+	defer unlock()
+	e, err := s.validatedLocked(memID)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	return out, nil
+	if allowed != nil {
+		ok, aerr := allowed(e)
+		if aerr != nil {
+			return nil, nil, nil, aerr
+		}
+		if !ok {
+			return nil, nil, nil, errf("MEM-404", "", "memory %s", memID)
+		}
+	}
+	content, err := os.ReadFile(filepath.Join(s.dataDir, filepath.FromSlash(e.apath), "memory.md"))
+	if err != nil {
+		return nil, nil, nil, errf("MEM-404", "", "authority file missing for %s", memID)
+	}
+	var html []byte
+	if wantHTML {
+		if html, err = s.htmlLocked(e); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return e, content, html, nil
 }
 
 // deriveHTML renders the body of the given authority bytes, writes
@@ -622,14 +718,23 @@ func (s *Store) deriveHTML(e *Entry, authorityBytes []byte, body string) ([]byte
 // Membership-first filtering (project membership before visibility tiers)
 // is applied by the server layer per 02 §4.10 / 06 §7.
 //
-// Short-query widening: the trigram tokenizer cannot serve a token of
-// fewer than 3 characters (a measured SQLite limitation — such MATCHes
-// return nothing, notably 2-character CJK terms). Tokens shorter than 3
-// runes are answered with a substring scan over the indexed bodies
-// instead: if ALL tokens are short the scan is the query; if long tokens
-// exist they run as the FTS MATCH and the short tokens filter the
-// candidate set. Substring semantics for ≥3-rune text remain trigram
-// MATCH, per 06 §4.4.
+// Short-query widening — KEPT, reconciliation recorded (06 §4.4): §4.4
+// pins the trigram tokenizer precisely so that “任意子串检索对中文等无
+// 空格分词边界的语言同样成立” — arbitrary-substring retrieval must hold
+// for Chinese. A measured SQLite limitation stands against the literal
+// MATCH path: an FTS5 trigram index cannot answer a query token of fewer
+// than 3 runes (no trigram contains it), and 2-character CJK terms are the
+// most common Chinese query shape — pure trigram MATCH would silently
+// return nothing for them, breaking the very guarantee §4.4 exists to
+// make. Tokens shorter than 3 runes are therefore answered with a plain
+// substring scan over the SAME indexed bodies (if ALL tokens are short
+// the scan is the query; long tokens run as the FTS MATCH and the short
+// tokens filter the candidate set). This is not a second retrieval layer:
+// §4.5's “v1 检索路径唯一 = FTS 文本检索” and the B02 ruling (§1.2/§10.3)
+// exclude the vector/SEMANTIC path, while this remains ordinary text
+// retrieval over the same §4.4-extracted corpus — the only way §4.4's
+// substring guarantee can hold below the trigram floor. Substring
+// semantics for ≥3-rune text remain trigram MATCH, per 06 §4.4.
 func (s *Store) Search(q string, memType string, tags []string, limit int, allowed func(*Entry) bool) ([]Entry, error) {
 	if strings.TrimSpace(q) == "" {
 		return nil, errf("MEM-400", "", "q required")
@@ -701,9 +806,14 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 		if err != nil {
 			continue
 		}
-		if e.Status != "active" || !s.serveConsistent(e) {
-			// INV-7f: an inconsistent hit is dropped from THIS result set
-			// (its reconcile is dispatched inside serveConsistent).
+		if e.Status != "active" {
+			continue
+		}
+		// INV-7f: the gate (and any row refresh) runs under the entry's
+		// memLock; an inconsistent hit is dropped from THIS result set (its
+		// reconcile is dispatched inside serveConsistent).
+		e, ok := s.serveConsistent(e)
+		if !ok {
 			continue
 		}
 		if memType != "" && e.Type != memType {
@@ -792,8 +902,14 @@ func (s *Store) List(projectID string, allowed func(*Entry) bool) ([]Entry, erro
 		if err != nil {
 			continue
 		}
-		if e.Status != "active" || !s.serveConsistent(e) {
-			continue // INV-7f: not served in a half-committed state
+		if e.Status != "active" {
+			continue
+		}
+		// INV-7f: the gate runs under the entry's memLock; a half-committed
+		// state is never served.
+		e, ok := s.serveConsistent(e)
+		if !ok {
+			continue
 		}
 		if allowed != nil && !allowed(e) {
 			continue
@@ -801,6 +917,27 @@ func (s *Store) List(projectID string, allowed func(*Entry) bool) ([]Entry, erro
 		out = append(out, *e)
 	}
 	return out, nil
+}
+
+// redactedRelOf maps an ACTIVE entry's recorded placement to its
+// _redacted destination: authority_path "memory/<p>/<id>" becomes
+// "memory/<p>/_redacted/<id>". Every physical path the redact write order
+// touches — ①'s rename source and destination, the crash-residue probe
+// inside Redact, reconcile's forward-completion search — is derived from
+// the RECORDED PLACEMENT (authority_path, the file-location authority),
+// never from the row's project_id: for a hand-planted cross-bound entry
+// (06 §4.2/§5.3 binding rule) project_id follows the FRONTMATTER while
+// authority_path stays dir-based, so deriving the paths from project_id
+// would rename from a directory that has never existed. 06 §5.2 pins the
+// redact destination as memory/<project>/_redacted/<mem_id> for the
+// aligned case and is silent on the cross-bound one; the placement-side
+// ruling keeps the move inside the tree the file physically lives in —
+// the tree the §5.3 step-5 _redacted walk and the backfillRow rel
+// derivation both read from — and leaves the bound project's tree
+// untouched.
+func redactedRelOf(e *Entry) string {
+	rel := filepath.ToSlash(e.apath)
+	return path.Join(path.Dir(rel), "_redacted", path.Base(rel))
 }
 
 // Redact soft-deletes (06 §5.2 redact): the two-step shape under a single
@@ -830,7 +967,7 @@ func (s *Store) Redact(memID string) error {
 		// redact that crashed between ① and ② forward-completes here; a
 		// create/update orphan (authority file nowhere) is rolled back and
 		// the redact target simply does not exist.
-		if _, serr := os.Stat(filepath.Join(s.dataDir, "memory", e.ProjectID, "_redacted", memID, "memory.md")); serr == nil {
+		if _, serr := os.Stat(filepath.Join(s.dataDir, filepath.FromSlash(redactedRelOf(e)), "memory.md")); serr == nil {
 			if ferr := s.forwardCompleteRedact(e); ferr != nil {
 				return ferr
 			}
@@ -841,10 +978,14 @@ func (s *Store) Redact(memID string) error {
 		}
 		return errf("MEM-404", "", "memory %s", memID)
 	}
-	// ① file move.
+	// ① file move. Both ends of the rename come from the recorded
+	// placement (authority_path), not from project_id: a cross-bound
+	// entry is moved inside the tree it physically lives in
+	// (redactedRelOf doc comment; 06 §5.2 is silent on cross-bound
+	// placement, placement-side is kept).
 	crashpoint("redact:pre-move")
-	src := filepath.Join(s.dataDir, "memory", e.ProjectID, memID)
-	dst := filepath.Join(s.dataDir, "memory", e.ProjectID, "_redacted", memID)
+	src := filepath.Join(s.dataDir, filepath.FromSlash(e.apath))
+	dst := filepath.Join(s.dataDir, filepath.FromSlash(redactedRelOf(e)))
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 		return err
 	}

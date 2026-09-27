@@ -66,8 +66,12 @@ func fileCreate(ctx *Context, args []string) error {
 	f.Var(&repos, "repo", "repo declaration name=url (repeatable, order = position)")
 	f.Var(&repoBases, "repo-base", "frozen base commit name=sha (repeatable)")
 	f.Var(&attrs, "attr", "business attr key=json-value (repeatable)")
-	if _, err := parseCommandArgs(f, args); err != nil {
+	rest, err := parseCommandArgs(f, args)
+	if err != nil {
 		return err
+	}
+	if len(rest) != 0 {
+		return fmt.Errorf("file create: unexpected arguments %v (file create takes flags only; see `pf help file`)", rest)
 	}
 
 	var req CreateWorkItemRequest
@@ -375,9 +379,11 @@ var cmdQueue = &Command{
 			return nil
 		}
 		raw, err := client.ListWorkItems(proj, map[string]string{
-			"status":     stringFlag(fs, "status"),
-			"assignee":   stringFlag(fs, "assignee"),
-			"waiting-on": stringFlag(fs, "waiting-on"),
+			"status":   stringFlag(fs, "status"),
+			"assignee": stringFlag(fs, "assignee"),
+			// The map key is the wire parameter name (api/openapi.yaml
+			// row 2: waiting_on), NOT the flag spelling.
+			"waiting_on": stringFlag(fs, "waiting-on"),
 			"parent":     stringFlag(fs, "parent"),
 			"milestone":  stringFlag(fs, "milestone"),
 		})
@@ -403,8 +409,12 @@ var cmdQueue = &Command{
 var cmdCancel = &Command{
 	Name:    "cancel",
 	Summary: "Cancel a queued/paused/blocked work item (no active generation)",
-	Usage:   "pf cancel <id|slug>",
-	Setup:   func(fs *flag.FlagSet) {},
+	// The wire contract takes the work item ID only (api/openapi.yaml
+	// /work-items/{id}: "wi_" + 12 random chars — no slug resolution
+	// endpoint exists for this path), so the usage text must not
+	// advertise <id|slug>.
+	Usage: "pf cancel <id>",
+	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
 			return fmt.Errorf("cancel: expected exactly one work item id")
