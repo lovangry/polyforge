@@ -535,13 +535,13 @@ Daemon 侧的机械执行实现见 `04-local-runtime.md#§6.3`/§6.4）。
 
 本节只给**接口总览与权威文档指针**；每个接口的完整签名、参数与错误码在权威文档定义，对端文档
 引用时逐字一致。AIHub HTTP API 的端点权威枚举是 `02-aihub-core.md#§5.1` 的 canonical
-25 端点清单（计数口径一并以该节为唯一权威），本文与各文档一律引用该表、不另行枚举端点；AIHub 的对外客户端面有且只有
+26 端点清单（计数口径一并以该节为唯一权威；行 26 依赖边为基线修订 polyforge#3 所补，理由与裁定记录在该票），本文与各文档一律引用该表、不另行枚举端点；AIHub 的对外客户端面有且只有
 HTTP API 与 `pf` CLI 两个（MCP 删除，§3.1），且全部端点共用单端口（A5，§3.1）。
 
 | 接口 | 调用方 → 被调方 | 权威定义 |
 |---|---|---|
 | 路由 Skill → Daemon 操作请求（执行面动词 submit/observe/answer/batch-confirm/pause/resume/wrap/ops，分流表 §5.1） | Harness → Daemon | `04-local-runtime.md#§5.1` |
-| 路由 Skill / CI → AIHub 数据面动词（file/queue/cancel/recall，经 `pf` CLI 直连 HTTP，不经 Daemon） | `pf` CLI → AIHub | 本文 §5.1、`02-aihub-core.md#§5.1`（canonical 25 端点清单） |
+| 路由 Skill / CI → AIHub 数据面动词（file/queue/cancel/recall，经 `pf` CLI 直连 HTTP，不经 Daemon） | `pf` CLI → AIHub | 本文 §5.1、`02-aihub-core.md#§5.1`（canonical 26 端点清单） |
 | Workflow 选择与创建时校验/固化（提交方创建 WI 时只提交 `bundle_name`；frontmatter 校验与 digest 固化是 AIHub 创建事务内的服务端内部步骤，无独立端点，INV-8） | 路由 Skill/CLI → AIHub（`POST /api/v1/work-items`） | `01-workflow-skills.md#§4.6`、`02-aihub-core.md#§4.5` |
 | Core 读写 API（允许操作集为 WI 生命周期/读操作） | WI Agent（不持有任何 Core API key 或 Revision 发布 token）→ Daemon 本地认证代理（`04-local-runtime.md#§5.3`）→ AIHub | `04-local-runtime.md#§5.3`、`02-aihub-core.md#§5.1` |
 | 全扫描发布请求（内部） | WI Agent → 本机 Daemon | `04-local-runtime.md#§5.1` |
@@ -564,7 +564,7 @@ HTTP API 与 `pf` CLI 两个（MCP 删除，§3.1），且全部端点共用单�
 
 | 路由 verb | 目标面 | 承载与权威 |
 |---|---|---|
-| `file`（创建/编辑 WI） | AIHub（直连） | `pf` CLI → `02-aihub-core.md#§5.1`（canonical 25 端点清单） |
+| `file`（创建/编辑 WI） | AIHub（直连） | `pf` CLI → `02-aihub-core.md#§5.1`（canonical 26 端点清单） |
 | `queue`（列表/就绪队列查询） | AIHub（直连） | `pf` CLI → `02-aihub-core.md#§5.1` |
 | `cancel`（取消非活跃 WI） | AIHub（直连） | `pf` CLI → `02-aihub-core.md#§5.1`、`02-aihub-core.md#§6.5` |
 | `recall`（Memory 检索） | AIHub（直连） | `pf` CLI → `06-memory-search.md#§5.1` |

@@ -468,7 +468,7 @@ CREATE TABLE service_secret_epochs (
 
 本节是 AIHub 对外 HTTP API 的唯一权威面（端点 canonical 清单见 §5.1）。
 
-**单端口与无长连接（A5 裁定，保留）**：AIHub 只监听一个 HTTP 端口，§5.1 全部端点（业务面 25 端点与管理面 M1–M5）共用该端口与同一鉴权面，不按功能分设第二监听面；AIHub 与任何调用方之间不存在长连接（无 WebSocket/SSE/流式保活），一切交互均为短 HTTP 请求/响应。**跨机无 Daemon 直连**：Daemon 是本机执行面（`00-architecture.md#§3.1`，只经本机 Unix domain socket 服务同机 Harness，`04-local-runtime.md#§5.1`），跨机器的客户端（`pf` CLI、CI、人）一律直连 AIHub 本节端点，不存在「跨机直连他人 Daemon」的任何路径。
+**单端口与无长连接（A5 裁定，保留）**：AIHub 只监听一个 HTTP 端口，§5.1 全部端点（业务面 26 端点与管理面 M1–M5）共用该端口与同一鉴权面，不按功能分设第二监听面；AIHub 与任何调用方之间不存在长连接（无 WebSocket/SSE/流式保活），一切交互均为短 HTTP 请求/响应。**跨机无 Daemon 直连**：Daemon 是本机执行面（`00-architecture.md#§3.1`，只经本机 Unix domain socket 服务同机 Harness，`04-local-runtime.md#§5.1`），跨机器的客户端（`pf` CLI、CI、人）一律直连 AIHub 本节端点，不存在「跨机直连他人 Daemon」的任何路径。
 
 **路由 verbs 分流表（12 个用户动词 → 目标面；分流判据权威在 `00-architecture.md#§5.1`，本表为其在 Core API 面的投影）**：
 
@@ -479,13 +479,13 @@ CREATE TABLE service_secret_epochs (
 
 分流不改变语义权威，也不放宽 Core 侧校验：直连 verbs 与其他 HTTP 客户端过同一套鉴权（§8）；经 Daemon 的 verbs 由 Daemon 机械转发与本地认证代理（`04-local-runtime.md#§5.3`），Core 端点仍是同一张 §5.1 清单。
 
-### 5.1 API 全集（25 端点）——canonical inventory <!-- §5.1 -->
+### 5.1 API 全集（26 端点）——canonical inventory <!-- §5.1 -->
 
-**计数口径（权威，A6 修复；B06 裁定后计数为 25）**：本表是 AIHub HTTP API 的唯一 canonical 端点清单（`00-architecture.md#§5` 所引「25 个端点分组」即本表），任何文档不得在别处另行枚举 AIHub 端点。计数单位 = **端点行**：A–D 组每行是一个 method+path 端点（唯一例外：行 3 把 `/work-items/{id}` 同路径的 GET（详情）与 PATCH（更新）合并计 1 行——两方法共享同一路径、同一鉴权与 §4.10 权限面）；E 组每行是一个**操作组**（组内可含多条 method+path，计 1 行）；F 组每行是一个资源的 CRUD 面（同资源路径族计 1 行）。业务面 25 行逐字可复算：
+**计数口径（权威，A6 修复；B06 裁定后计数为 25；基线修订 polyforge#3 补 G 组行 26 后为 26——理由：§4.2a 定义了 wi_dependencies 完整写路径，原清单漏列其路由）**：本表是 AIHub HTTP API 的唯一 canonical 端点清单（`00-architecture.md#§5` 所引「26 个端点分组」即本表），任何文档不得在别处另行枚举 AIHub 端点。计数单位 = **端点行**：A–D 组每行是一个 method+path 端点（唯一例外：行 3 把 `/work-items/{id}` 同路径的 GET（详情）与 PATCH（更新）合并计 1 行——两方法共享同一路径、同一鉴权与 §4.10 权限面）；E 组每行是一个**操作组**（组内可含多条 method+path，计 1 行）；F 组每行是一个资源的 CRUD 面（同资源路径族计 1 行）。业务面 26 行逐字可复算：
 
-**25 = WI 业务 6（行 1–6）+ 执行权 7（行 7–13）+ 同步 7（行 14–20）+ 机器 1（行 21）+ Memory 4 组（行 22–25）**
+**26 = WI 业务 6（行 1–6）+ 执行权 7（行 7–13）+ 同步 7（行 14–20）+ 机器 1（行 21）+ Memory 4 组（行 22–25）+ 依赖边 1 组（行 26，基线修订 polyforge#3）**
 
-F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-secret）单列 M1–M5 共 5 行：同端口、同鉴权，属 `pf` 管理 CLI 的 CRUD 面，不在 25 端点计数口径内（该口径只覆盖业务/执行/同步/机器/Memory 面）。清单外的旧端点行全部删除：workflow-pin（§4.5 已改为创建事务内部步骤，无独立端点）、bundle 注册表与文件取回端点（§4.4 裁定删除）、`pause`/`block`/`wrap`/`fail` 四个分立端点（合并为行 9 的 `end-generation` 四合一）、`resume`（并入行 7：§2.3 裁定 resume 即新一次 claim）、事件流分立读写端点（读取并入行 3 的 `include=events`，追加由 Core 状态机事务内部完成，§5.1c）、`reauthorize` 独立端点（§6.6 改为 claim 幂等重放流程，无独立端点）与 service 自管理操作（`service/heartbeat` 已由行 21 承载、`whoami` 由 `pf` 读本地配置不设端点、`rotate-secret` 归管理面 M5 行——均不占业务 25 端点行）。
+F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-secret）单列 M1–M5 共 5 行：同端口、同鉴权，属 `pf` 管理 CLI 的 CRUD 面，不在 26 端点计数口径内（该口径只覆盖业务/执行/同步/机器/Memory/依赖边面）。清单外的旧端点行全部删除：workflow-pin（§4.5 已改为创建事务内部步骤，无独立端点）、bundle 注册表与文件取回端点（§4.4 裁定删除）、`pause`/`block`/`wrap`/`fail` 四个分立端点（合并为行 9 的 `end-generation` 四合一）、`resume`（并入行 7：§2.3 裁定 resume 即新一次 claim）、事件流分立读写端点（读取并入行 3 的 `include=events`，追加由 Core 状态机事务内部完成，§5.1c）、`reauthorize` 独立端点（§6.6 改为 claim 幂等重放流程，无独立端点）与 service 自管理操作（`service/heartbeat` 已由行 21 承载、`whoami` 由 `pf` 读本地配置不设端点、`rotate-secret` 归管理面 M5 行——均不占业务 26 端点行）。
 
 | # | 方法 | 路径 | 调用方 | 语义 | 错误码 |
 |---|---|---|---|---|---|
@@ -525,6 +525,8 @@ F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-se
 | M3 | POST/GET/PATCH | `/api/v1/projects`、`/api/v1/projects/{id}` | 人（admin / 该 project maintainer）经 `pf` 管理 CLI | projects CRUD 与 `project_members` 成员关系管理（role ∈ viewer/writer/maintainer；§4.10 权限硬边界的唯一机械判据） | CORE-400 / CORE-403 / CORE-404 / CORE-409 |
 | M4 | POST | `/api/v1/admin/backup` | 人（admin）经 `pf` 管理 CLI | 按需触发 `<data_dir>/backups` 快照（§11 每日热备之外的显式触发入口） | CORE-403 / CORE-507 |
 | M5 | POST | `/api/v1/service/rotate-secret` | 人（admin）经 `pf` 管理 CLI / 启动自检自动触发 | 凭证轮换两模式（§6.6：`grace` 宽限 / `rollback` 立即失效，body `{mode, grace_seconds?}`）；`whoami`/心跳残余语义不设端点（whoami 由 `pf` 读本地配置，心跳已由行 21 承载） | CORE-403 / CORE-400 |
+| **G. 依赖边（1 组 = 1 行：行 26；基线修订 polyforge#3 所补——§4.2a 定义了 wi_dependencies 的完整写路径，原清单漏列其路由；路由形状照现役 aihub precedent，语义一律按本文：同 project 硬边界、只标 waiting_on 不迁移状态。排列在 F 组之后仅为不重编号（M1–M5 标号被跨文档引用），行 26 属业务面计数）** | | | | | |
+| 26 | POST/GET/DELETE | `/api/v1/work-items/{id}/dependencies`、`/api/v1/work-items/{id}/dependencies/{blocking_id}/{kind}` | `pf` CLI | 【依赖边 CRUD 组】建边（POST，body `{blocking_wi_id, kind?}`，kind 缺省 `blocks`，path `{id}` = 被阻塞方）/ 列边（GET，返回 `blocking` 与 `blocked_by` 两组清单，与行 3 `include=deps` 同构）/ 删边（DELETE，物理删除行，§4.2a）。全部写路径约束在 §4.2a 事务内强制：同 project 硬边界、防环（`CORE-409 DEPENDENCY_CYCLE`）、父不可依赖子；授权：对该 project 的 writer+ 或 admin（§4.10）。`blocks` 边只物化 `waiting_on=dependency:<wi_id>`（§2.4），**不迁移状态**——依赖等待的 `queued` WI 由 §5.1b 的 `blocked` 数组按未终态边呈现，不沿用现役 aihub 的 queued→blocked 状态迁移；删除边时按剩余未终态边重派 `waiting_on` | CORE-400（含 PARENT_CHILD_DEPENDENCY）/ CORE-403 / CORE-404 / CORE-409（DEPENDENCY_CYCLE） |
 
 **generation 凭证（能力令牌，不可伪造）**：`claim`（§6.2）成功时签发一个 capability token：`token = HMAC-SHA256(service_secret[epoch], wi_id + "|" + generation + "|" + machine_id)`，其中 `service_secret[epoch]` 为当前生效或宽限期内的历史 secret（§6.6）。第 3 类端点（见下）以 `X-PF-Generation-Token: <token>` 传递；`g`（generation 整数）仍可同传供日志可读性，但校验以 token 为准。Core 用当前及宽限期内的历史 `service_secret` 逐一重算并常量时间比对：
 
@@ -685,7 +687,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 ### 6.6 凭证轮换后的重新授权（B09 修复） <!-- §6.6 -->
 
-**两种轮换模式（管理面操作 M5，不占业务 25 端点口径；由 `mode` 区分，互不混用）**：经 `POST /api/v1/service/rotate-secret`（行 M5，`role='admin'` 或启动自检触发）接受 body `{mode: "grace"|"rollback", grace_seconds?}`：
+**两种轮换模式（管理面操作 M5，不占业务 26 端点口径；由 `mode` 区分，互不混用）**：经 `POST /api/v1/service/rotate-secret`（行 M5，`role='admin'` 或启动自检触发）接受 body `{mode: "grace"|"rollback", grace_seconds?}`：
 
 - `mode="grace"`（缺省，即下文的常规轮换）：旧 epoch 进入宽限期后才失效，适用于定期安全轮换、无异常事件触发的场景。
 - `mode="rollback"`（**rollback 专用，与 `07-deployment-pilot.md#§6.4` 的回滚序列绑定，不可用于常规轮换**）：旧 epoch **立即**失效（`grace_seconds` 强制视为 0，不接受非零值，否则 `CORE-400`）：本次插入的 `service_secret_epochs` 行在同一个事务内将该新 epoch 之前的**所有**未 `retired_at` 的旧 epoch 一并标记 `retired_at=now()`并删除对应 `service.secret.<epoch>` 文件，不等待任何定时任务；这保证回滚前签发的全部 capability token（不论属于哪个旧 epoch）在本次调用返回后立即无法通过 HMAC 校验，不存在「旧凭证复活」窗口。`rollback` 模式 **MUST NOT** 复用 `mode="grace"` 的宽限期路径。
