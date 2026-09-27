@@ -99,6 +99,7 @@ type Daemon struct {
 
 	mu       sync.Mutex
 	jobs     map[string]*jobRuntime // wiID → live bookkeeping
+	closing  map[string]bool        // wiID → a 04 §6.2 close is mid-flight
 	shutdown chan struct{}
 	shutOnce sync.Once
 }
@@ -143,6 +144,7 @@ func New(cfg Config, spawner AgentSpawner) (*Daemon, error) {
 		pub:      publish.New(&remoteAdapter{c: client}, mutex, stager, pubStore),
 		spawner:  spawner,
 		jobs:     map[string]*jobRuntime{},
+		closing:  map[string]bool{},
 		shutdown: make(chan struct{}),
 	}
 	return d, nil
@@ -161,8 +163,9 @@ func (r *remoteAdapter) GetHead(ctx context.Context, wi string) (*revision.HeadI
 	return r.c.GetHead(wi)
 }
 
-// recoverRemote adapts the client to the recover.Remote face (manifest
-// content via the in-process transport until the Core exposes an endpoint).
+// recoverRemote adapts the client to the recover.Remote face: manifest
+// content now travels over the real Core face (row 19 revisions list with
+// include=ops, wired in polyforge#14).
 type recoverRemote struct{ c *aihub.Client }
 
 func (r *recoverRemote) GetHead(ctx context.Context, wi string) (*revision.HeadInfo, bool, error) {
@@ -594,7 +597,8 @@ var ErrFlushFailed = errors.New("daemon: shutdown flush failed to converge (DAEM
 //  1. latch shutting_down FIRST (before any other action);
 //  2. external submissions now refuse (DAEMON-410) and the Drain loop
 //     stopped fetching (same flag, different path);
-//  3. per active job: notify stop-advancing, wait for the interruptible
+//  3. per active job: the ONE shared 04 §6.2 A-path close (finish.go
+//     closeJob): notify stop-advancing, wait for the interruptible
 //     boundary (step boundary + sync boundary);
 //  4. final flush per WI (the daemon publishes on the agent's behalf) +
 //     end the generation (pause) with the Daemon-generated evidence;
@@ -616,33 +620,21 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 		jr := d.jobs[wi]
 		d.mu.Unlock()
 		if jr == nil {
-			continue
+			continue // closed by a pause/wrap route that won the race
 		}
-		jr.ring.Append(EvJobStopped, map[string]any{"cause": "shutdown"})
-		// Step 3: stop-advancing notice + wait for the safe boundary.
-		if jr.agent != nil && jr.agent.Alive() {
-			if err := jr.agent.NotifyStop(ctx); err == nil {
-				_ = jr.agent.Quiesce(ctx)
-			}
-		}
-		// Step 4: final flush on the agent's behalf.
-		outcome, err := d.PublishRequest(ctx, wi, "pause")
-		if err != nil || outcome == nil || outcome.FlushEvidence == nil {
-			return fmt.Errorf("%w: %s: %v", ErrFlushFailed, wi, err)
-		}
-		// End the generation (the daemon holds the token; 04 §6.2 A path
-		// step 3 — the shutdown-interrupted close is a NORMAL end).
-		if err := d.client.EndGeneration(wi, "pause", "", jr.token, outcome.FlushEvidence); err != nil {
+		// Steps 3–4 run in the ONE shared 04 §6.2 A-path close (finish.go):
+		// boundary notice, final flush, end the generation (pause) with the
+		// Daemon-generated evidence — the shutdown-interrupted close is a
+		// NORMAL end (04 §6.2).
+		if _, err := d.closeJob(ctx, wi, jr, "pause", "shutdown"); err != nil {
 			// 04 §7.3: a rolled-back credential is isolated and the shutdown
 			// moves on — this WI is already dead server-side; failing the
 			// whole shutdown would hold every OTHER WI's close hostage.
-			if isSecretRolledBack(err) {
-				_ = d.quarantineRolledBack(wi)
+			if errors.Is(err, ErrSecretRolledBack) {
 				continue
 			}
-			return fmt.Errorf("%w: %s end-generation: %v", ErrFlushFailed, wi, err)
+			return fmt.Errorf("%w: %s: %v", ErrFlushFailed, wi, err)
 		}
-		d.sealJob(wi, jr)
 	}
 	return nil
 }

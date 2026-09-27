@@ -129,7 +129,15 @@ func (s *Server) hForceTakeover(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = decodeBody(r, &body)
 	resp, err := s.Owners.ForceTakeover(wiID, idn.UserID, body.MachineID)
-	writeResult(w, err, func() { writeJSON(w, http.StatusOK, resp) })
+	writeResult(w, err, func() {
+		// 02 §8 + 04 §6.1d/§7.3 step 4: the takeover response carries the
+		// SAME capsule bootstrap the claim response does, so the taking-over
+		// machine can create its scene with no data-plane reads. The owner
+		// manager owns only the generation bookkeeping; the payload is
+		// attached here exactly the way the claim route does.
+		resp.CapsuleBootstrap = s.capsuleBootstrap(wiID)
+		writeJSON(w, http.StatusOK, resp)
+	})
 }
 
 func (s *Server) hEndGeneration(w http.ResponseWriter, r *http.Request) {

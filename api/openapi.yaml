@@ -1406,8 +1406,9 @@ paths:
         transaction. Full PATCH field coverage (visibility etc.) plus the
         history/ archive step land in the Memory-domain work item; the v1
         wire accepts content/title/tags (implementation truth). Redacted
-        (terminal) entries -> MEM-409. Owner-only (MEM-403 otherwise,
-        implementation; 06 section 5.2).
+        (terminal) entries -> MEM-404 (redacted-as-nonexistent serving
+        semantics; recorded by the #11 contract sweep). Owner-only
+        (MEM-403 otherwise, implementation; 06 section 5.2).
 
         Implementation divergence encoded here (wire truth): the response
         is the updated full Entry (06 section 5.2 says `{id, updated_at}`);
@@ -1450,7 +1451,9 @@ paths:
         the FTS entry (06 section 5.2 redact two-step shape; the
         backupBarrier read-lock integration lands in the Memory-domain work
         item). Redaction is auditable, never physical destruction. Already
-        redacted -> MEM-409. Owner-only (MEM-403 otherwise).
+        redacted -> MEM-404 (redacted-as-nonexistent serving semantics;
+        recorded by the #11 contract sweep). Owner-only (MEM-403
+        otherwise).
 
         Implementation divergences encoded here (wire truth): the response
         is `{ok:true}` (200); the owner violation MEM-403 surfaces as HTTP
