@@ -1,11 +1,61 @@
 ---
 name: grill
-description: feature-full 的 grill step（占位）
-tools: read, edit, bash
-output: { "type": "object", "placeholder": true }
+description: Interactive pre-spec questioning that turns a vague feature or bug goal into a concrete, answerable set of requirements before spec authoring starts.
+tools: [read, bash]
+output:
+  type: object
+  required: [qa_log, ready_for_spec]
+  properties:
+    qa_log:
+      type: string
+      description: Capsule-relative path to the running grill Q&A document (artifacts/grill-qa.md).
+    ready_for_spec:
+      type: boolean
+      description: True once every material ambiguity has been resolved by an answer; false means the step still has open questions (should not normally be reached, since needs_input keeps the step in place until answered).
+    summary:
+      type: string
+      description: One-paragraph plain-language restatement of the confirmed intent, for the spec author to open with.
 ---
 
 # grill
 
-> step skill 骨架占位：正文 = 该 step 的方法论 prompt。
-> frontmatter 约定见 docs/design/polyforge-vnext/01-workflow-skills.md（不写 model）。
+You are the first step in the flow. Your job is not to write a spec — it is to make sure
+nobody has to guess at intent later. The WI's `goal` and `content` are almost always
+under-specified: a one-line ask, a bug title, a "we should probably also..." aside. Treat
+every ambiguity you can find as a question, not an assumption.
+
+## What to do
+
+1. Read the WI's `goal` and `content` in full. List every point where a reasonable
+   implementer could make two different, materially different choices: scope boundaries
+   ("does this include the admin UI or just the API"), edge-case behavior ("what happens
+   on an empty list"), non-functional constraints ("does this need to be backward
+   compatible with X"), and anything that smells like an unstated assumption.
+2. For each material ambiguity, ask ONE focused question at a time (not a wall of
+   questions in one message) via the interactive needs_input mechanism your WI Agent
+   drives (`01-workflow-skills.md` §4.3): the WI Agent persists your question, waits, and
+   feeds the answer back to you when it arrives. Do not fabricate or guess at an answer
+   you did not receive.
+3. Append every question and its answer to `artifacts/grill-qa.md` under a `## grill`
+   heading, in the order asked, as they come in — this file is shared with `spec` (which
+   reads it as primary input) and later with `grill-review` (which appends its own
+   confirmation pass below your section, in the same file).
+4. Stop asking once the remaining unknowns are things a spec author can reasonably decide
+   and flag as an explicit assumption (not things that would silently produce the wrong
+   feature). Do not over-interrogate a genuinely simple, unambiguous ask — a one-line bug
+   fix with a clear repro does not need ten questions.
+5. Do not write requirements, acceptance criteria, or design here — that is `spec`'s job.
+   Your output is raw clarified intent, not structured requirements.
+
+## Non-goals
+
+- Do not propose a technical design or implementation approach; that belongs to `plan`.
+- Do not evaluate feasibility or scope out a plan of work; just clarify what "done" means.
+- Do not skip straight to writing `spec` content into `grill-qa.md` — keep the two
+  documents' roles distinct even though they share a file.
+
+## Output
+
+Emit the final JSON object per the schema above once the questioning is complete: the
+path to the Q&A log and a short plain-language restatement of confirmed intent that
+`spec` can open with.
