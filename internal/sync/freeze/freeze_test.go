@@ -29,6 +29,42 @@ func (f *fakeQuiescer) RequestQuiesce(ctx context.Context) error {
 	}
 }
 
+// releasableQuiescer is a quiescer WITH the freeze.Releaser face: it
+// records both ends of the window (05 §2.7 acquisition + release).
+type releasableQuiescer struct {
+	fakeQuiescer
+	releases int
+}
+
+func (r *releasableQuiescer) ReleaseQuiesce(ctx context.Context) error {
+	r.releases++
+	return nil
+}
+
+// TestReleaseNotifiesTheAgent: the release step (05 §2.7) must notify a
+// quiescer that carries the Releaser face.
+func TestReleaseNotifiesTheAgent(t *testing.T) {
+	q := &releasableQuiescer{}
+	if err := Release(context.Background(), Conditions{Quiescer: q}); err != nil {
+		t.Fatal(err)
+	}
+	if q.releases != 1 {
+		t.Fatalf("Release must fire the release notification exactly once, got %d", q.releases)
+	}
+}
+
+// TestReleaseNoOpWhenNobodyToNotify: the process-dead shortcut (nil
+// quiescer) and a quiescer without the release face have nobody to notify —
+// Release is a no-op, never a panic.
+func TestReleaseNoOpWhenNobodyToNotify(t *testing.T) {
+	if err := Release(context.Background(), Conditions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Release(context.Background(), Conditions{Quiescer: &fakeQuiescer{}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAcquireShortcutWhenProcessGroupDead(t *testing.T) {
 	m := NewManager()
 	// ① all writers dead ② no replacement wrote yet → granted without any

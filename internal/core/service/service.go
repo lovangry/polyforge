@@ -152,6 +152,14 @@ func (s *Service) CurrentEpoch() (int, error) {
 	return s.currentEpoch(s.db)
 }
 
+// CurrentEpochTx is CurrentEpoch run against an already-open transaction
+// (the SignTokenTx discipline, INV-2a): a caller whose transaction already
+// holds the store's single connection must read the epoch through THAT
+// transaction, never through the pool.
+func (s *Service) CurrentEpochTx(tx *sql.Tx) (int, error) {
+	return s.currentEpoch(tx)
+}
+
 func (s *Service) currentEpoch(q queryRower) (int, error) {
 	var v string
 	if err := q.QueryRow(`SELECT value FROM core_meta WHERE key='current_secret_epoch'`).Scan(&v); err != nil {
@@ -282,16 +290,42 @@ func (s *Service) rotateLocked(mode string, graceSeconds int, rotatedBy string, 
 	return tx.Commit()
 }
 
-// SweepRetired retires grace-mode epochs whose grace window has elapsed and
+// SweepRetired retires epochs whose effective window has elapsed and
 // removes their secret files (02 §6.6 step 4). Call periodically.
+//
+// R3C-F2: retirement accounts for HOW an epoch was superseded, not only
+// for the mode it was created in. The previous WHERE selected mode='grace'
+// rows only, so a rollback-CREATED epoch — the boundary epoch R itself,
+// whose freshly minted secret is deliberately live so post-rollback
+// claims work (§6.6 “a fresh claim is unaffected by the rotation”) — was
+// never swept once a later grace rotation made it non-current: its secret
+// file stayed on disk forever and CheckToken kept accepting its tokens
+// far beyond any grace window. An epoch is sweepable when it is
+// non-current and EITHER
+//
+//   - its creation-mode window elapsed (a grace epoch's own created_at —
+//     unchanged semantics), OR
+//   - it was SUPERSEDED past the caller's grace window: the successor
+//     epoch's created_at is the moment it stopped being current, and 02
+//     §6.6 step 3 pins the grace window to that post-supersession period
+//     (“旧 epoch 不立即失效：进入一个宽限期”).
+//
+// The second arm is what reaches rollback-created epochs; for grace epochs
+// it is subsumed by the first (supersession never precedes creation), so
+// grace timing is unchanged. The current epoch is never a candidate.
 func (s *Service) SweepRetired(grace time.Duration) error {
 	if grace < 0 {
 		grace = 0 // force-sweep for tests / operators
 	}
 	cutoff := time.Now().UTC().Add(-grace).Format(time.RFC3339Nano)
-	rows, err := s.db.Query(`SELECT epoch FROM service_secret_epochs
-		WHERE mode='grace' AND retired_at IS NULL AND created_at < ?1 AND epoch < ?2`,
-		cutoff, mustCurrentEpochOrZero(s))
+	rows, err := s.db.Query(`SELECT e.epoch FROM service_secret_epochs e
+		WHERE e.retired_at IS NULL
+		  AND e.epoch < ?2
+		  AND (
+		        (e.mode='grace' AND e.created_at < ?1)
+		     OR (SELECT MIN(n.created_at) FROM service_secret_epochs n WHERE n.epoch > e.epoch) < ?1
+		  )
+		ORDER BY e.epoch`, cutoff, mustCurrentEpochOrZero(s))
 	if err != nil {
 		return err
 	}
@@ -338,14 +372,60 @@ func (s *Service) ShareKey(epoch int) ([]byte, error) {
 }
 
 // RollbackBoundary returns R = the latest mode=rollback epoch (0 if none).
-// Credentials bound to epoch ≤ R are dead permanently (02 §6.6 回滚边界判定).
+// Credentials bound to epoch ≤ R are dead permanently (02 §6.6 rollback
+// boundary rule: the rollback abolishes trust in every earlier credential,
+// forever, regardless of any later grace rotations).
 func (s *Service) RollbackBoundary() (int, error) {
+	return s.rollbackBoundary(s.db)
+}
+
+// RollbackBoundaryTx is RollbackBoundary run against an already-open
+// transaction (R3C-F1, the SignTokenTx discipline): the idempotent-replay
+// path reads R INSIDE its decision transaction, so a rollback committing
+// around the replay is either fully visible to that read or fully excluded
+// — never half-observed through a stale out-of-transaction snapshot.
+func (s *Service) RollbackBoundaryTx(tx *sql.Tx) (int, error) {
+	return s.rollbackBoundary(tx)
+}
+
+func (s *Service) rollbackBoundary(q queryRower) (int, error) {
 	var r sql.NullInt64
-	err := s.db.QueryRow(`SELECT MAX(epoch) FROM service_secret_epochs WHERE mode='rollback'`).Scan(&r)
+	err := q.QueryRow(`SELECT MAX(epoch) FROM service_secret_epochs WHERE mode='rollback'`).Scan(&r)
 	if err != nil {
 		return 0, err
 	}
 	return int(r.Int64), nil
+}
+
+// EpochDisposition classifies one secret epoch for the post-hoc token
+// classification of 02 §6.6: "rolled_back" (epoch < the rollback boundary R,
+// the same strict-less-than the token check itself uses — the rollback
+// epoch's OWN freshly minted secret stays live, otherwise no post-rollback
+// claim could ever work, contradicting §6.6 "a fresh claim is unaffected by
+// the rotation"), "retired" (retired_at set: grace window elapsed), or
+// "live". An epoch row that does not exist is reported "live" — there is
+// nothing better to say about it, and callers treat live as "no
+// refinement".
+func (s *Service) EpochDisposition(epoch int) (string, error) {
+	R, err := s.RollbackBoundary()
+	if err != nil {
+		return "", err
+	}
+	if epoch < R {
+		return "rolled_back", nil
+	}
+	var retired sql.NullString
+	err = s.db.QueryRow(`SELECT retired_at FROM service_secret_epochs WHERE epoch=?1`, epoch).Scan(&retired)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "live", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if retired.Valid {
+		return "retired", nil
+	}
+	return "live", nil
 }
 
 // tokenCandidate describes one epoch against which a presented token can be
@@ -408,6 +488,14 @@ func signHMAC(secret []byte, wiID string, generation int64, machineID string) []
 //   - no match at all                    ⇒ stale_generation (fenced)
 //
 // Comparison is constant-time per candidate.
+//
+// NOTE on the no-match fallback: once SweepRetired has deleted an expired
+// epoch's secret file (02 §6.6 step 4), a token signed under that epoch is
+// indistinguishable from a fenced or garbage one at this layer — the HMAC
+// can no longer be recomputed. owner.classifyToken refines the fallback
+// through the claim_idempotency cache (§4.3), which is why every
+// production caller must go through that refinement rather than this
+// method directly.
 func (s *Service) CheckToken(tokenHex string, wiID string, generation int64, machineID string) TokenResult {
 	if len(tokenHex) != 64 {
 		return TokenResult{Reason: "stale_generation"}

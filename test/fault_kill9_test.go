@@ -22,9 +22,11 @@ package test
 //     up) but CANNOT re-issue the close: the generation token was lost
 //     with the process (state.json deliberately records no execution
 //     secret material, INV-D1/D8), so its end-generation is fenced out
-//     as CORE-403 stale_generation — surfaced by the pause route as the
-//     typed CORE-403 passthrough itself (04 §5.1 close-routes amendment,
-//     polyforge#11 FIX-ROUND D3; the old DAEMON-500 flattening is gone);
+//     as CORE-403 stale_generation — which the daemon now ISOLATES
+//     locally (05 §2.9 / 04 §6.2 B: the fenced old generation seals and
+//     exits, no retry): the typed DAEMON-403 verdict names
+//     stale_generation, the local scene is quarantined and the jobs[]
+//     record dropped;
 //   - no double close EVER lands: generation 1 receives exactly one end
 //     (the arbitration force-takeover), and the drill converges the WI
 //     to wrapped through the recovery-consumption path (02 §6.2), with
@@ -33,6 +35,7 @@ package test
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -145,15 +148,22 @@ func TestFaultInjectKill9MidClose(t *testing.T) {
 	// --- the recovered daemon re-attempts the close — and CANNOT land it:
 	// the generation token lived only in the dead process's memory
 	// (daemon jobs[] carries no execution secret, INV-D1/D8), so its
-	// end-generation is fenced out. FIX (polyforge#11 FIX-ROUND D3): the
-	// close routes pass the typed Core verdict through verbatim now — the
-	// answer IS the Core's CORE-403 with its reason in the detail, at the
-	// Core's own HTTP status, not a DAEMON-500 with the code buried inside.
+	// end-generation is fenced out as stale_generation. The daemon
+	// isolates the fenced scene locally (05 §2.9 / 04 §6.2 B): the typed
+	// DAEMON-403 verdict names the stale_generation reason, the capsule is
+	// quarantined and the jobs[] record dropped — never a retry.
 	code, env := udsErr(t, machB.socket, "POST", "/jobs/"+wi+"/pause", map[string]any{}, nil)
-	if code != 403 || env.Error.Code != "CORE-403" ||
+	if code != 403 || env.Error.Code != "DAEMON-403" ||
 		!strings.Contains(env.Error.Detail, "stale_generation") {
 		t.Fatalf("the recovered daemon's close must be fenced out by the lost "+
-			"generation token (CORE-403 stale_generation, passed through verbatim): %d %+v", code, env.Error)
+			"generation token (typed DAEMON-403 stale_generation isolation): %d %+v", code, env.Error)
+	}
+	if j := machB.state().FindJob(wi); j != nil {
+		t.Fatalf("the fenced-out close must drop the jobs[] record: %+v", j)
+	}
+	qm, _ := filepath.Glob(filepath.Join(machB.cfg.WorkspaceRoot, "capsules", "_quarantine", wi, "*"))
+	if len(qm) != 1 {
+		t.Fatalf("the fenced-out scene must be quarantined exactly once, never deleted: %v", qm)
 	}
 	if core.eventCount(wi, "paused") != 0 || len(core.genEnds(wi)) != 1 {
 		t.Fatalf("the refused close must land nothing: %+v", core.genEnds(wi))

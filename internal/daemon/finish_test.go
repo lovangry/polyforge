@@ -344,6 +344,52 @@ func TestMarkJobStatusInterrupting(t *testing.T) {
 	}
 }
 
+// TestShutdownSkipsInFlightClose: the graceful shutdown sequence routes
+// through the SAME one-close guard as the pause/wrap routes (04 §6.2: ONE
+// close per job, never two racing). A pause parked mid-close holds the
+// guard; the shutdown must SKIP that WI (letting the identical A-path
+// close finish) instead of driving a second close whose end-generation
+// would double-close the generation — the FD-4 regression.
+func TestShutdownSkipsInFlightClose(t *testing.T) {
+	e := newDaemonEnv(t)
+	ctx := context.Background()
+	_, agent := spawnWorkingJob(t, e)
+
+	// Park the pause inside its boundary wait so the close stays mid-flight.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	agent.onNotifyStop = func() { close(entered); <-release }
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.d.PauseJob(ctx, e.wi)
+		done <- err
+	}()
+	<-entered // the pause close is mid-flight and holds the guard
+
+	// The graceful shutdown arrives while the pause close is parked: it
+	// must skip this WI without error (the in-flight close IS the same
+	// 04 §6.2 A-path close) and must NOT start a second one.
+	if err := e.d.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown racing a parked close must skip it cleanly, got: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the parked pause must finish after release: %v", err)
+	}
+	// Exactly ONE close landed: the WI is paused (not double-closed into an
+	// error), the generation ended once, and the local bookkeeping is gone.
+	if s := e.wiStatus(t); s != "paused" {
+		t.Fatalf("wi status after the race: %s", s)
+	}
+	if jobs := e.daemonStateJobs(t); len(jobs) != 0 {
+		t.Fatalf("jobs[] must be empty after the race: %+v", jobs)
+	}
+	if len(e.spawner.spawns) != 1 {
+		t.Fatalf("no re-derivation may happen during the race: %d", len(e.spawner.spawns))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // secret_rolled_back on the wrap close (stubbed Core)
 
@@ -353,6 +399,7 @@ func TestMarkJobStatusInterrupting(t *testing.T) {
 // the final flush succeeds but the close's Core write is refused.
 type finishStub struct {
 	rolledBack atomic.Bool
+	stale      atomic.Bool // end-generation answers CORE-403 stale_generation
 	wi         string
 }
 
@@ -370,6 +417,10 @@ func (s *finishStub) handler(w http.ResponseWriter, r *http.Request) {
 			"owner": "usr_worker", "capsule_bootstrap": boot,
 		})
 	case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/end-generation"):
+		if s.stale.Load() {
+			writeStubErr(w, 403, "CORE-403", ReasonStaleGeneration, "generation was taken over")
+			return
+		}
 		if s.rolledBack.Load() {
 			writeStubErr(w, 403, "CORE-403", ReasonSecretRolledBack, "cached credential predates rollback boundary")
 			return

@@ -150,11 +150,13 @@ func (f *fakeAgent) PID() int                             { return 0 }
 func (f *fakeAgent) StartedAt() string                    { return "" }
 func (f *fakeAgent) NotifyStop(ctx context.Context) error { f.stopped = true; return nil }
 func (f *fakeAgent) Quiesce(ctx context.Context) error    { return f.quiesceErr }
+func (f *fakeAgent) Resume(ctx context.Context) error     { return nil }
 func (f *fakeAgent) DeliverAnswer(rel AnswerRelay) error {
 	f.answers = append(f.answers, rel)
 	return nil
 }
 func (f *fakeAgent) Alive() bool                           { return true }
+func (f *fakeAgent) GroupEmpty() bool                      { return false }
 func (f *fakeAgent) Terminate(timeout time.Duration) error { return nil }
 
 type fixedQuestion struct{ q, step string }
@@ -243,10 +245,15 @@ func TestStatePersistenceAndPendingJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.MachineID = "m-01"
-	if err := store.AppendPending(st, PendingJob{WorkItemID: "wi_a", IdempotencyKey: "k1", Intent: "claim", Status: PendingIntentPersisted}); err != nil {
+	st.Mode = ModeInteractive
+	st.WorkspaceRoot = "/ws/root"
+	st.StartedAt = NowStamp()
+	if err := store.AppendPending(st, PendingJob{WorkItemID: "wi_a", IdempotencyKey: "k1", Intent: "claim", CreatedAt: NowStamp(), Status: PendingIntentPersisted}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertJob(st, Job{WorkItemID: "wi_a", Generation: 1, MainAgentPID: 42, Status: JobRunning}); err != nil {
+	if err := store.UpsertJob(st, Job{WorkItemID: "wi_a", CapsuleID: "cap_wi_a", Generation: 1,
+		HarnessAdapter: "pi", HarnessSessionID: "sess_wi_a_1", MainAgentPID: 42,
+		MainAgentStartedAt: NowStamp(), Status: JobRunning}); err != nil {
 		t.Fatal(err)
 	}
 	// Reload: both persisted.

@@ -88,11 +88,11 @@ func (s *Server) capsuleBootstrap(wiID string) json.RawMessage {
 		inv = nil
 	}
 	b, _ := json.Marshal(map[string]any{
-		"work_item_id": wiID,
-		"bundle_name":  d.BundleName,
-		"bundle_digest": d.BundleDigest,
+		"work_item_id":             wiID,
+		"bundle_name":              d.BundleName,
+		"bundle_digest":            d.BundleDigest,
 		"workflow_budget_baseline": json.RawMessage(orNull(d.BudgetBaseline)),
-		"repo_inventory": inv,
+		"repo_inventory":           inv,
 	})
 	return b
 }
@@ -197,10 +197,10 @@ func (s *Server) hBudgetIncrement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Dimension string `json:"dimension"`
-		Amount    int64  `json:"amount"`
-		Note      string `json:"note"`
-		BasedOnSeq int64 `json:"based_on_seq"`
+		Dimension  string `json:"dimension"`
+		Amount     int64  `json:"amount"`
+		Note       string `json:"note"`
+		BasedOnSeq int64  `json:"based_on_seq"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
@@ -225,6 +225,26 @@ func (s *Server) hGetBudget(w http.ResponseWriter, r *http.Request) {
 	if err := s.requireScope(idn, projectID); err != nil {
 		writeErr(w, err)
 		return
+	}
+	// FA-4 (02 §5.1 tier 3): row 12 (budget read) belongs to the active
+	// generation's execution plane — with an active generation the caller
+	// must present its X-PF-Generation-Token (checked against the active
+	// generation, CORE-403 with the §6.6 reason taxonomy on failure); with
+	// no active generation (tier 2) the api_key alone suffices.
+	if _, _, _, active, err := s.Owners.ActiveGeneration(wiID); err != nil {
+		writeErr(w, err)
+		return
+	} else if active {
+		_, ok, reason, terr := s.Owners.CheckTokenForWI(wiID, r.Header.Get("X-PF-Generation-Token"))
+		if terr != nil {
+			writeErr(w, terr)
+			return
+		}
+		if !ok {
+			writeErr(w, &owner.APIError{Code: "CORE-403", Reason: reason,
+				Detail: "budget read of a work item with an active generation requires its X-PF-Generation-Token (02 §5.1 tier 3)"})
+			return
+		}
 	}
 	b, err := s.WIs.GetBudget(wiID)
 	writeResult(w, err, func() { writeJSON(w, http.StatusOK, b) })
@@ -288,6 +308,20 @@ func (s *Server) hHeartbeat(w http.ResponseWriter, r *http.Request) {
 		// Registration path.
 		if !isHumanOrAdmin {
 			writeErr(w, ownerAPI("CORE-403", "forbidden: machine registration requires a human or admin caller"))
+			return
+		}
+		// 02 §8 (scope only narrows, never widens) composed with 02 §4.10
+		// (registration mints a GLOBAL machine key, project_id=NULL — the
+		// design pins that key global, so scope-inheriting it at registration
+		// is not an option; narrowing happens afterwards via M2). Registration
+		// hands the caller the plaintext of a fresh NULL-scope credential, and
+		// a project-scoped key must never mint anything outside its scope, so
+		// it may not register machines at all. This closes the escalation
+		// chain scoped-admin-key -> register machine (unscoped key) -> PATCH
+		// role=admin (also refused for scoped keys, handlers_admin.go) ->
+		// unscoped admin credential.
+		if idn.KeyScope != nil {
+			writeErr(w, ownerAPI("CORE-403", "forbidden: machine registration requires an unscoped human/admin api key"))
 			return
 		}
 		resp, rerr := s.registerMachine(body.MachineID, body.RuntimeVersion, body.DisplayName)

@@ -38,6 +38,13 @@ type QEntry struct {
 	EnqueuedAt time.Time
 	// Intent: claim | resume | takeover (drives the claim call shape).
 	Intent string
+	// IdempotencyKey is the PERSISTED claim idempotency key reused on a
+	// re-run (04 §6.1 step 4: "generate if absent, REUSE the same key on
+	// retry"). Empty on a first submission — spawnJob mints a fresh key;
+	// the orphan requeue in crash recovery carries the journal's key so
+	// the re-claim hits the Core's idempotent cache and returns the SAME
+	// attempt instead of a duplicate claim (02 §6.6/§6.1).
+	IdempotencyKey string
 }
 
 // JobQueue is the pending queue plus the running-slot counter.

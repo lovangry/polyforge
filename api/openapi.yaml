@@ -39,10 +39,10 @@ info:
       2. WI exists, no active generation (rows 5, 7, 10, PATCH of row 3):
          api_key + state-machine legality; no generation token.
       3. Active-generation execution plane: the `X-PF-Generation-Token`
-         header is REQUIRED on rows 9 (end-generation), 14 (PUT block) and
-         15 (POST manifest). NOTE: 02 section 5.1 tier 3 also lists row 12
-         (GET budget); the implementation does NOT check a token there -
-         the wire truth (no token required) is what this contract encodes.
+         header is REQUIRED on rows 9 (end-generation), 12 (GET budget),
+         14 (PUT block) and 15 (POST manifest). Row 12 is tier 3 only while
+         the WI has an active generation; without one the read is tier 2
+         (api_key only).
 
     Row-3 note: GET and PATCH share the `/work-items/{id}` path and count
     as one canonical row (02 section 5.1 counting rule).
@@ -779,11 +779,14 @@ paths:
         4.5a/6.7 - precomputed so callers need not sum) and the global max
         increment seq (the `based_on_seq` read source for row 11).
 
-        Divergence encoded here (wire truth): 02 section 5.1 tier 3 lists
-        row 12 among token-checked operations, but the implementation
-        performs NO X-PF-Generation-Token check on this route - only
-        api_key auth. This contract encodes the implementation (no token
-        parameter).
+        Tier-3 credential (02 section 5.1): while the WI has an active
+        generation the X-PF-Generation-Token header is REQUIRED and is
+        validated against that generation (CORE-403 with reason
+        stale_generation | secret_rotated_expired | secret_rolled_back on
+        failure); with no active generation the read is tier 2 (api_key
+        only).
+      parameters:
+        - $ref: '#/components/parameters/GenerationTokenTiered'
       responses:
         '200':
           description: Budget baseline, increments, effective ceilings, max seq.
@@ -1931,12 +1934,35 @@ components:
       description: |
         Capability token signed at claim/takeover time:
         HMAC-SHA256(service_secret[epoch], wi_id + "|" + generation + "|"
-        + machine_id), hex-encoded (02 section 5.1). Required on the
-        tier-3 execution-plane operations: rows 9 (end-generation), 14
-        (PUT block), 15 (POST manifest). A stale/expired/rolled-back token
-        yields CORE-403 (reason stale_generation | secret_rotated_expired |
-        secret_rolled_back) or SYNC-403 on the sync face (05 section 2.9,
-        with retry_hint reclaim_required).
+        + machine_id), hex-encoded (02 section 5.1). UNCONDITIONALLY
+        required on the tier-3 execution-plane operations whose wire
+        contract never admits a key-only branch: rows 9 (end-generation),
+        14 (PUT block), 15 (POST manifest) — a request without the header
+        is CORE-403 on its face. Row 12 (GET budget) is tiered instead and
+        uses GenerationTokenTiered (required: false at the schema level,
+        conditionally required per its description). A
+        stale/expired/rolled-back token yields CORE-403 (reason
+        stale_generation | secret_rotated_expired | secret_rolled_back) or
+        SYNC-403 on the sync face (05 section 2.9, with retry_hint
+        reclaim_required).
+    GenerationTokenTiered:
+      name: X-PF-Generation-Token
+      in: header
+      required: false
+      schema: {type: string}
+      description: |
+        Same capability token as GenerationToken (HMAC-SHA256 over
+        wi_id + "|" + generation + "|" + machine_id, 02 section 5.1),
+        but on a TIERED operation the header's applicability is
+        CONDITIONAL, so the parameter is optional at the schema level and
+        the conditional requirement is pinned here instead of a blanket
+        `required: true` (R2C-F8): the header is REQUIRED when the work
+        item has an active generation — the request is then tier 3 and a
+        missing or invalid token yields CORE-403 (reason stale_generation
+        | secret_rotated_expired | secret_rolled_back) — and is NOT
+        required when the work item has no active generation: that branch
+        is tier 2 and the api_key alone authorizes it (02 section 5.1).
+        Used by row 12 (GET budget), the one tiered tier-3 operation.
 
   responses:
     BadRequest:

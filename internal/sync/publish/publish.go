@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/sync/freeze"
@@ -219,6 +220,36 @@ func New(remote Remote, mutex *freeze.Manager, stager *freeze.Stager, store *Sto
 	return &Publisher{Remote: remote, Mutex: mutex, Stager: stager, Store: store}
 }
 
+// freezeGuard ends the write-freeze window EXACTLY ONCE, on every exit
+// path between freeze.Acquire and the design-pinned release point (05
+// §2.7: the staging pin completes, the Daemon releases immediately).
+//
+// R2N-4: before this guard, every post-acquire FAILURE path (scan, digest,
+// HEAD fetch, state load, manifest build, staging pin) returned without
+// releasing — the WI Agent stayed quiesced FOREVER, a permanent freeze
+// indistinguishable from a hung daemon. The guard is armed right after a
+// successful Acquire and released via the caller's defer, so an error
+// anywhere in the window still notifies the agent it may resume;
+// commitScan releases through the SAME once at the pinned point, making
+// the deferred release a no-op there. Release stays best-effort per the
+// design (the bytes are pinned before it matters).
+type freezeGuard struct {
+	ctx  context.Context
+	cond freeze.Conditions
+	once sync.Once
+}
+
+func newFreezeGuard(ctx context.Context, cond freeze.Conditions) *freezeGuard {
+	return &freezeGuard{ctx: ctx, cond: cond}
+}
+
+// release ends the freeze window once: at the design-pinned point when
+// commitScan calls it after the staging pin, or on ANY exit path via the
+// caller's defer.
+func (g *freezeGuard) release() {
+	g.once.Do(func() { _ = freeze.Release(g.ctx, g.cond) })
+}
+
 // Publish runs one full-scan publish (05 §6 steps 2–6; step 1 is the caller
 // deciding to request). Serialize per WI via the publish mutex; hold the
 // write freeze only through staging.
@@ -240,10 +271,18 @@ func (p *Publisher) Publish(ctx context.Context, req Request) (*Result, error) {
 	// Step 2: write freeze (05 §2.7).
 	if err := p.Mutex.Acquire(ctx, req.WorkItemID, req.Conditions); err != nil {
 		if errors.Is(err, freeze.ErrMilestoneAbandoned) {
+			// 05 §2.7 timeout handling: an abandoned milestone scan must
+			// also release the freeze request ("释放 write freeze 请求与
+			// publish mutex") — the agent may have already paused writes.
+			_ = freeze.Release(ctx, req.Conditions)
 			return &Result{Noop: true}, nil
 		}
 		return nil, err // forced-trigger timeout: infra failure escalation
 	}
+	// R2N-4: the window is open — from here to the pinned release point
+	// EVERY exit path must release the freeze (see freezeGuard).
+	guard := newFreezeGuard(ctx, req.Conditions)
+	defer guard.release()
 
 	// Step 3: full scan inside the window.
 	scan, err := revision.ScanCapsule(req.CapsuleDir)
@@ -259,15 +298,20 @@ func (p *Publisher) Publish(ctx context.Context, req Request) (*Result, error) {
 		return nil, err
 	}
 	return p.commitScan(ctx, req.WorkItemID, req.CapsuleDir, req.Generation, req.Token,
-		scan, bytesDigest, worktreeDigest)
+		guard, scan, bytesDigest, worktreeDigest)
 }
 
 // commitScan is steps 3c–6 shared by Publish and the final-flush publish
 // branch: manifest build, staging pin (closing the freeze window), pending
 // record, block upload from staging only, manifest submit, settlement.
-// The per-WI publish mutex must already be held.
+// The per-WI publish mutex must already be held; guard carries the freeze
+// faces and releases the window EXACTLY ONCE — at the pinned point below
+// on the success path, or (already) via the caller's deferred release when
+// any pre-pin step (state load, HEAD fetch, manifest build/validation,
+// staging pin) fails. Without the guard a pre-pin failure left the agent
+// quiesced forever (R2N-4).
 func (p *Publisher) commitScan(ctx context.Context, wi, capsuleDir string, generation int64, token string,
-	scan *revision.ScanResult, bytesDigest, worktreeDigest string) (*Result, error) {
+	guard *freezeGuard, scan *revision.ScanResult, bytesDigest, worktreeDigest string) (*Result, error) {
 
 	state, err := p.Store.LoadState(wi)
 	if err != nil {
@@ -334,6 +378,17 @@ func (p *Publisher) commitScan(ctx context.Context, wi, capsuleDir string, gener
 		return nil, err
 	}
 
+	// 05 §2.7 release, the design-pinned point: the staging pin is
+	// complete, so the write freeze window ENDS HERE — "Daemon 立即释放
+	// write freeze（通知 WI Agent 恢复写入）……不等待块上传、manifest 提交或
+	// HEAD 推进完成". The pending record below and all network I/O happen
+	// OUTSIDE the window, still under the publish mutex. The notify is
+	// best-effort: the bytes are already pinned, so a failed notify cannot
+	// corrupt this publish — it only delays the agent's own writes, which
+	// the next trigger's quiesce round re-establishes (the design pins no
+	// failure semantics for the release notification).
+	guard.release()
+
 	// SYNC-INV-8: the pending record exists BEFORE the first block PUT.
 	rec := &PendingRecord{
 		WorkItemID: wi, Manifest: *manifest, ManifestSha: sha,
@@ -347,11 +402,27 @@ func (p *Publisher) commitScan(ctx context.Context, wi, capsuleDir string, gener
 	return p.uploadAndSubmit(ctx, wi, rec)
 }
 
+// ErrTransportUnresolved marks a publish whose transport failure survived
+// its one bounded disambiguation-and-resend round (05 §2.8/§7.2): the flow
+// terminates WITHOUT settling, the pending publish record and its staging
+// directory stay on disk, and convergence is deferred to the next §2.4
+// trigger's full scan ("失败后的收敛发生在下一次触发时刻的全扫描内，不存在
+// 独立的重试调度", 05 §2.5).
+var ErrTransportUnresolved = errors.New("publish: transport failure persists after the bounded disambiguation round; pending record kept for later recovery")
+
 // uploadAndSubmit performs steps 4c–6: block upload from STAGING ONLY (never
 // the live tree), manifest submit, outcome settlement, pending-record and
 // staging cleanup. The publish mutex is expected to be held by the caller
-// (Publish) or re-acquired by ResolvePending.
+// (Publish) or re-acquired by ResolvePending. Transport failures get ONE
+// bounded disambiguation-and-resend round (resends); a failure that
+// survives it terminates typed with the pending record intact (05 §2.5:
+// no independent retry scheduling — the next trigger's full scan converges).
 func (p *Publisher) uploadAndSubmit(ctx context.Context, wi string, rec *PendingRecord) (*Result, error) {
+	return p.upload(ctx, wi, rec, 1)
+}
+
+// upload is uploadAndSubmit with an explicit resend budget.
+func (p *Publisher) upload(ctx context.Context, wi string, rec *PendingRecord, resends int) (*Result, error) {
 	for _, op := range rec.Manifest.Ops {
 		if op.Op != revision.OpPut {
 			continue
@@ -374,8 +445,10 @@ func (p *Publisher) uploadAndSubmit(ctx context.Context, wi string, rec *Pending
 			}
 			// Response lost mid-flight: disambiguate NOW via GET-HEAD
 			// (05 §2.8); the record survives if the branches cannot decide.
-			if res, derr := p.ResolvePending(ctx, wi, rec.Token); derr == nil && res != nil {
+			if res, derr := p.resolve(ctx, wi, rec.Token, resends); derr == nil && res != nil {
 				return res, nil
+			} else if derr != nil && errors.Is(derr, ErrTransportUnresolved) {
+				return nil, derr
 			}
 			return nil, err
 		}
@@ -388,9 +461,13 @@ func (p *Publisher) uploadAndSubmit(ctx context.Context, wi string, rec *Pending
 			p.settleFailed(ctx, wi, rec)
 			return nil, err
 		}
-		// Confirmation lost: GET-HEAD disambiguation (three branches).
-		res, derr := p.ResolvePending(ctx, wi, rec.Token)
+		// Confirmation lost: GET-HEAD disambiguation (three branches),
+		// bounded by the same resend budget.
+		res, derr := p.resolve(ctx, wi, rec.Token, resends)
 		if derr != nil {
+			if errors.Is(derr, ErrTransportUnresolved) {
+				return nil, derr
+			}
 			return nil, err
 		}
 		return res, nil
@@ -408,12 +485,18 @@ func (p *Publisher) uploadAndSubmit(ctx context.Context, wi string, rec *Pending
 // ResolvePending runs the GET-HEAD three-branch disambiguation (05 §2.8):
 //  1. HEAD == record.seq AND sha matches   → ACCEPTED: settle as success.
 //  2. HEAD == record.parent (or no HEAD row and record.parent == nil)
-//     → NEVER ACCEPTED: safe resend from staging.
+//     → NEVER ACCEPTED: safe resend from staging — ONE bounded round; a
+//     transport failure that survives it terminates typed with the record
+//     intact (ErrTransportUnresolved), never an unbounded retry loop.
 //  3. anything else                       → STALE: drop the record; the
 //     next full scan reconverges on the remote truth.
 //
 // Returns the settled Result, or nil when the record was dropped as stale.
 func (p *Publisher) ResolvePending(ctx context.Context, wi, token string) (*Result, error) {
+	return p.resolve(ctx, wi, token, 1)
+}
+
+func (p *Publisher) resolve(ctx context.Context, wi, token string, resends int) (*Result, error) {
 	rec, err := p.Store.LoadPending(wi)
 	if err != nil {
 		return nil, err
@@ -428,7 +511,7 @@ func (p *Publisher) ResolvePending(ctx context.Context, wi, token string) (*Resu
 	if !found {
 		if rec.Parent == nil {
 			// Branch 2 (bootstrap never accepted): safe resend.
-			return p.uploadAndSubmit(ctx, wi, rec)
+			return p.resendOrPark(ctx, wi, rec, resends)
 		}
 		// Branch 3: no HEAD but a non-bootstrap record — stale.
 		p.dropRecord(wi, rec)
@@ -441,11 +524,24 @@ func (p *Publisher) ResolvePending(ctx context.Context, wi, token string) (*Resu
 	}
 	if rec.Parent != nil && head.Seq == *rec.Parent {
 		// Branch 2: server still at the parent — resend from staging.
-		return p.uploadAndSubmit(ctx, wi, rec)
+		return p.resendOrPark(ctx, wi, rec, resends)
 	}
 	// Branch 3: HEAD beyond the record, or same seq different sha — stale.
 	p.dropRecord(wi, rec)
 	return nil, nil
+}
+
+// resendOrPark performs branch 2's safe resend within the budget: with
+// resends left it retries the flow (each retry itself bounded — the retry
+// passes a DECREMENTED budget so a persistently failing transport can
+// never recurse unboundedly); with none left it parks the flow — the
+// pending record and its staging stay on disk for the next trigger's
+// recovery (05 §2.8/§7.2).
+func (p *Publisher) resendOrPark(ctx context.Context, wi string, rec *PendingRecord, resends int) (*Result, error) {
+	if resends > 0 {
+		return p.upload(ctx, wi, rec, resends-1)
+	}
+	return nil, fmt.Errorf("%w (wi=%s seq=%d)", ErrTransportUnresolved, wi, rec.Seq)
 }
 
 func (p *Publisher) settleSuccess(wi string, rec *PendingRecord, headSeq int64) {

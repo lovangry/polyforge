@@ -68,9 +68,9 @@ type Manifest struct {
 
 // Store is the Core-side capsule data store.
 type Store struct {
-	db     *store.DB
+	db      *store.DB
 	dataDir string
-	owners *owner.Manager
+	owners  *owner.Manager
 }
 
 func NewStore(db *store.DB, dataDir string, owners *owner.Manager) *Store {

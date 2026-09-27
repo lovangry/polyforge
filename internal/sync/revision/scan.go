@@ -132,8 +132,7 @@ func statFile(capsuleDir, rel string) (FileInfo, bool, error) {
 		if terr != nil {
 			return FileInfo{}, false, terr
 		}
-		sum := sha256.Sum256([]byte(tgt))
-		return FileInfo{Sha256: hexOf(sum), Bytes: int64(len(tgt)), IsSymlink: true, Target: tgt}, true, nil
+		return SymlinkFileInfo(tgt), true, nil
 	}
 	if !lst.Mode().IsRegular() {
 		return FileInfo{}, false, nil // sockets/fifos/devices are not synced
@@ -169,8 +168,7 @@ func walkFiles(capsuleDir, root string, add func(string, FileInfo)) error {
 			if terr != nil {
 				return terr
 			}
-			sum := sha256.Sum256([]byte(tgt))
-			add(rel, FileInfo{Sha256: hexOf(sum), Bytes: int64(len(tgt)), IsSymlink: true, Target: tgt})
+			add(rel, SymlinkFileInfo(tgt))
 			return nil
 		}
 		if !info.Mode().IsRegular() {
@@ -235,6 +233,16 @@ func digestFile(p string) (FileInfo, error) {
 	sum := h.Sum(nil)
 	mode := int64(st.Mode().Perm())
 	return FileInfo{Sha256: hex.EncodeToString(sum), Bytes: n, Mode: mode}, nil
+}
+
+// SymlinkFileInfo is the canonical FileInfo of one symlink member, used by
+// BOTH the scan and the §7.4 recovery replay (05 §6.1: a symlink's
+// aggregate-digest contribution is sha256 of its TARGET TEXT with mode 0;
+// recovery must seed the publish state with byte-identical values or every
+// post-recovery flush would report a false "changed" diff).
+func SymlinkFileInfo(target string) FileInfo {
+	sum := sha256.Sum256([]byte(target))
+	return FileInfo{Sha256: hexOf(sum), Bytes: int64(len(target)), IsSymlink: true, Target: target}
 }
 
 func hexOf(sum [32]byte) string {

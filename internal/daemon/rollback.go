@@ -109,16 +109,26 @@ func (d *Daemon) quarantineRolledBack(wi string) error {
 	return firstErr
 }
 
-// classifyWriteErr runs the 04 §7.3 trigger check on one failed write and,
-// when it fires, executes the isolation sequence. Callers wrap the ORIGINAL
-// error (the server's verdict) for their face and surface ErrSecretRolledBack
-// alongside it.
+// classifyWriteErr runs the 04 §7.3 (secret_rolled_back) and the 05 §2.9
+// takeover-fence (stale_generation, 04 §6.2 B) trigger checks on one
+// failed write and, when either fires, executes its isolation sequence.
+// Callers wrap the ORIGINAL error (the server's verdict) for their face
+// and surface the typed daemon verdict alongside it.
 func (d *Daemon) classifyWriteErr(wi string, err error) error {
-	if err == nil || !isSecretRolledBack(err) {
+	if err == nil {
 		return err
 	}
-	if qerr := d.quarantineRolledBack(wi); qerr != nil {
-		fmt.Fprintf(os.Stderr, "pf-daemon: rollback quarantine for %s partially failed: %v\n", wi, qerr)
+	if isSecretRolledBack(err) {
+		if qerr := d.quarantineRolledBack(wi); qerr != nil {
+			fmt.Fprintf(os.Stderr, "pf-daemon: rollback quarantine for %s partially failed: %v\n", wi, qerr)
+		}
+		return fmt.Errorf("%w: %s: %v", ErrSecretRolledBack, wi, err)
 	}
-	return fmt.Errorf("%w: %s: %v", ErrSecretRolledBack, wi, err)
+	if isStaleGeneration(err) {
+		if serr := d.isolateTakenOver(wi); serr != nil {
+			fmt.Fprintf(os.Stderr, "pf-daemon: takeover isolation for %s partially failed: %v\n", wi, serr)
+		}
+		return fmt.Errorf("%w: %s: %v", ErrStaleGeneration, wi, err)
+	}
+	return err
 }

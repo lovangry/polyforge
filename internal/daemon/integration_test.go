@@ -7,6 +7,7 @@ package daemon
 // Unix domain socket (including the SO_PEERCRED proxy refusal).
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +37,7 @@ type integAgent struct {
 	pid       int
 	startedAt string
 	quiesced  chan struct{}
+	resumed   chan struct{}
 	stopped   chan struct{}
 	dead      bool
 	child     *exec.Cmd
@@ -51,6 +54,10 @@ type integAgent struct {
 func (a *integAgent) PID() int          { return a.pid }
 func (a *integAgent) StartedAt() string { return a.startedAt }
 func (a *integAgent) Alive() bool       { return !a.dead }
+
+// GroupEmpty: the fake models a clean exit with NO residual group — empty
+// exactly when the agent is dead.
+func (a *integAgent) GroupEmpty() bool { return a.dead }
 func (a *integAgent) NotifyStop(ctx context.Context) error {
 	if a.onNotifyStop != nil {
 		a.onNotifyStop()
@@ -65,6 +72,13 @@ func (a *integAgent) NotifyStop(ctx context.Context) error {
 func (a *integAgent) Quiesce(ctx context.Context) error {
 	select {
 	case a.quiesced <- struct{}{}:
+	default:
+	}
+	return nil
+}
+func (a *integAgent) Resume(ctx context.Context) error {
+	select {
+	case a.resumed <- struct{}{}:
 	default:
 	}
 	return nil
@@ -89,6 +103,10 @@ type integSpawner struct {
 	mu     chan struct{}
 	spawns []SpawnParams
 	agents []*integAgent
+	// cmd, when set, replaces the default "sleep 60" child: the proxy
+	// success-path tests need the spawned WI Agent process itself to
+	// originate the UDS proxy_call (SO_PEERCRED matches main_agent_pid).
+	cmd func() *exec.Cmd
 }
 
 func newIntegSpawner() *integSpawner {
@@ -101,7 +119,12 @@ func (s *integSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, e
 	s.spawns = append(s.spawns, p)
 	// A real distinct child pid: the SO_PEERCRED guard must be able to
 	// tell the agent apart from the (same-pid) test caller.
-	child := exec.Command("sleep", "60")
+	var child *exec.Cmd
+	if s.cmd != nil {
+		child = s.cmd()
+	} else {
+		child = exec.Command("sleep", "60")
+	}
 	if err := child.Start(); err != nil {
 		return nil, err
 	}
@@ -109,6 +132,7 @@ func (s *integSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, e
 		pid:       child.Process.Pid,
 		startedAt: NowStamp(),
 		quiesced:  make(chan struct{}, 1),
+		resumed:   make(chan struct{}, 1),
 		stopped:   make(chan struct{}, 1),
 		child:     child,
 	}
@@ -326,6 +350,14 @@ func TestDaemonClaimSequenceAndShutdown(t *testing.T) {
 	}
 	if !out.Published || out.HeadSeq != 0 {
 		t.Fatalf("publish_request: %+v", out)
+	}
+	// FE-1 regression at the Daemon face: the publish quiesced the LIVE
+	// agent for the scan and must have RELEASED it after the staging pin —
+	// the round trip ends with the WI Agent un-quiesced (05 §2.7).
+	select {
+	case <-e.spawner.agents[0].resumed:
+	default:
+		t.Fatal("publish must release the write freeze: the live WI Agent must be told to resume (05 §2.7)")
 	}
 
 	// Graceful shutdown (04 §6.5): latch, boundary, final flush (with the
@@ -567,3 +599,240 @@ func (c *udsClient) doAs(method, path string, body any, out any, user string) (i
 }
 
 var _ = capsule.StatusRunning
+
+// ---------------------------------------------------------------------------
+// proxy_call success-path harness (04 §5.3)
+
+// TestMain: a re-exec of this test binary is the proxy helper process for
+// the §5.3 tests. The SO_PEERCRED guard only accepts a proxy_call from the
+// recorded main_agent_pid itself, so the fake WI Agent in the proxy tests
+// IS this binary re-executed, performing the UDS call from its own pid.
+func TestMain(m *testing.M) {
+	if os.Getenv("PF_DAEMON_TEST_PROXY_HELPER") != "" {
+		proxyHelperMain()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// proxyHelperMain: polls PF_PROXY_DIR for request markers req_<n>; for
+// each it performs one proxy_call read_workflow_ref over the daemon
+// socket and records {status, body} to resp_<n>. Exits after
+// PF_PROXY_CALLS calls.
+func proxyHelperMain() {
+	dir := os.Getenv("PF_PROXY_DIR")
+	socket := os.Getenv("PF_PROXY_SOCKET")
+	wi := os.Getenv("PF_PROXY_WI")
+	calls, _ := strconv.Atoi(os.Getenv("PF_PROXY_CALLS"))
+	for i := 0; i < calls; i++ {
+		marker := filepath.Join(dir, fmt.Sprintf("req_%d", i))
+		for {
+			if _, err := os.Stat(marker); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		code, body := proxyHelperCall(socket, wi)
+		blob, merr := json.Marshal(map[string]any{"status": code, "body": body})
+		if merr != nil {
+			os.Exit(1)
+		}
+		tmp := filepath.Join(dir, fmt.Sprintf("resp_%d.tmp", i))
+		if err := os.WriteFile(tmp, blob, 0o644); err != nil {
+			os.Exit(1)
+		}
+		if err := os.Rename(tmp, filepath.Join(dir, fmt.Sprintf("resp_%d", i))); err != nil {
+			os.Exit(1)
+		}
+	}
+	os.Exit(0)
+}
+
+// proxyHelperCall is the helper's UDS HTTP client: one proxy_call
+// read_workflow_ref, returning the daemon's HTTP status and parsed body.
+func proxyHelperCall(socket, wi string) (int, map[string]any) {
+	blob, _ := json.Marshal(map[string]any{
+		"work_item_id": wi, "operation": "read_workflow_ref", "payload": map[string]any{},
+	})
+	req, err := http.NewRequest(http.MethodPost, "http://daemon/proxy_call", bytes.NewReader(blob))
+	if err != nil {
+		os.Exit(1)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer conn.Close()
+	tr := &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+		return conn, nil
+	}}
+	resp, err := (&http.Client{Transport: tr}).Do(req)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var body map[string]any
+	_ = json.Unmarshal(raw, &body)
+	return resp.StatusCode, body
+}
+
+// proxyReq signals the helper to make call n.
+func proxyReq(t *testing.T, dir string, n int) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("req_%d", n)), []byte("go"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// proxyResp waits for the helper's answer to call n.
+func proxyResp(t *testing.T, dir string, n int) (int, map[string]any) {
+	t.Helper()
+	path := filepath.Join(dir, fmt.Sprintf("resp_%d", n))
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("helper response %d never arrived", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Status int            `json:"status"`
+		Body   map[string]any `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("helper response %d: %v", n, err)
+	}
+	return out.Status, out.Body
+}
+
+// errCodeOf digs the typed code out of a daemon/Core error envelope.
+func errCodeOf(t *testing.T, m map[string]any) string {
+	t.Helper()
+	e, _ := m["error"].(map[string]any)
+	c, _ := e["code"].(string)
+	return c
+}
+
+// TestProxyReadWorkflowRefBudget: regression for the tier-3 budget read
+// (02 §5.1 row 12). read_workflow_ref's budget leg must be signed with the
+// daemon-held generation token — the pre-fix code sent none and swallowed
+// the CORE-403, nulling the budget for every running WI.
+//
+// Scenarios:
+//
+//  1. running WI -> proxied budget payload present (token attached);
+//  2. token unavailable (the post-restart recovered job holds none:
+//     RecoverFromState adopts the jobRuntime with token:"") against an
+//     active generation -> the Core's typed CORE-403 surfaces, never a 200
+//     with a null budget;
+//  3. non-running WI -> 04 §5.3: the proxy serves only a live derived WI
+//     Agent of the work item, and the daemon's pause ends the generation
+//     AND seals the local job, so the proxy refuses (DAEMON-403) — the
+//     read-only budget detail of a non-running WI rides the tier-2
+//     api_key face (no token), the same face the CLI uses, and the payload
+//     is still present there.
+func TestProxyReadWorkflowRefBudget(t *testing.T) {
+	e := newDaemonEnv(t)
+	hdir := t.TempDir()
+	// The fake WI Agent is a re-exec of this binary (TestMain helper
+	// mode): its OWN pid — recorded as main_agent_pid — originates the
+	// proxy_call, satisfying the SO_PEERCRED check.
+	e.spawner.cmd = func() *exec.Cmd {
+		cmd := exec.Command(os.Args[0])
+		cmd.Env = append(os.Environ(),
+			"PF_DAEMON_TEST_PROXY_HELPER=1",
+			"PF_PROXY_SOCKET="+e.socket,
+			"PF_PROXY_WI="+e.wi,
+			"PF_PROXY_DIR="+hdir,
+			"PF_PROXY_CALLS=2",
+		)
+		return cmd
+	}
+	spawnWorkingJob(t, e)
+	t.Cleanup(func() {
+		if a := e.spawner.agents[0]; a != nil && a.child != nil && a.child.Process != nil {
+			a.child.Process.Kill()
+		}
+	})
+	api, err := NewAPIServer(e.d, e.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { api.Close() })
+	go api.Serve()
+
+	// Scenario 1: running WI — active generation, token held: the budget
+	// payload must come back present through the proxy.
+	proxyReq(t, hdir, 0)
+	st, body := proxyResp(t, hdir, 0)
+	if st != 200 {
+		t.Fatalf("running WI read_workflow_ref: %d %v", st, body)
+	}
+	if wi, _ := body["work_item"].(map[string]any); wi == nil || wi["id"] != e.wi {
+		t.Fatalf("work_item missing or wrong: %v", body)
+	}
+	budget, _ := body["budget"].(map[string]any)
+	if budget == nil || budget["max_seq"] == nil {
+		t.Fatalf("running WI: budget payload must be present via proxy, got: %v", body["budget"])
+	}
+
+	// Scenario 2: token unavailable, generation still active server-side
+	// -> typed CORE-403 (the pre-fix code answered 200 with null here).
+	e.d.mu.Lock()
+	held := e.d.jobs[e.wi].token
+	e.d.jobs[e.wi].token = ""
+	e.d.mu.Unlock()
+	proxyReq(t, hdir, 1)
+	st, body = proxyResp(t, hdir, 1)
+	if st != 403 || errCodeOf(t, body) != "CORE-403" {
+		t.Fatalf("token-less budget read of a running WI must be a typed CORE-403, got %d %v", st, body)
+	}
+	e.d.mu.Lock()
+	e.d.jobs[e.wi].token = held
+	e.d.mu.Unlock()
+
+	// Scenario 3: non-running WI — pause ends the generation and seals the
+	// local job.
+	c := &udsClient{path: e.socket}
+	var out map[string]any
+	if code, err := c.do("POST", "/jobs/"+e.wi+"/pause", map[string]any{}, &out); err != nil || code != 200 {
+		t.Fatalf("pause: %d %v %v", code, err, out)
+	}
+	if s := e.wiStatus(t); s != "paused" {
+		t.Fatalf("wi status after pause: %s", s)
+	}
+	// The proxy no longer serves this WI at all (04 §5.3: only a live
+	// derived WI Agent of the work item — the pause sealed the job).
+	if code, err := c.do("POST", "/proxy_call", map[string]any{
+		"work_item_id": e.wi, "operation": "read_workflow_ref", "payload": map[string]any{},
+	}, &out); err != nil || code != 403 || errCodeOf(t, out) != ErrCodeForbidden {
+		t.Fatalf("non-running WI proxy call must be DAEMON-403, got %d %v %v", code, err, out)
+	}
+	// Read-only budget detail for the non-running WI rides the tier-2
+	// api_key face (no token) — the same face the CLI uses — and the
+	// payload is still present there.
+	req, _ := http.NewRequest("GET", e.ts.url+"/api/v1/work-items/"+e.wi+"/budget", nil)
+	req.Header.Set("Authorization", "Bearer pfk_daemon_it")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("tier-2 budget read of a paused WI: %d %s", resp.StatusCode, raw)
+	}
+	var b map[string]any
+	if err := json.Unmarshal(raw, &b); err != nil || b["max_seq"] == nil {
+		t.Fatalf("tier-2 budget payload must be present for a non-running WI: %s", raw)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -47,9 +48,11 @@ var commands = []*Command{
 	cmdResume,
 	cmdWrap,
 	cmdOps,
-	// Supporting faces (also `pf` CLI callers per 02 §5.1 rows 11/12/26):
+	// Supporting faces (also `pf` CLI callers per 02 §5.1 rows 11/12/26)
+	// plus the row-21 machine face (the operator's registration duty).
 	cmdDeps,
 	cmdBudget,
+	cmdMachines,
 	// Management face M1–M5 (02 §5.1 F group).
 	cmdUsers,
 	cmdApiKeys,
@@ -219,12 +222,12 @@ func printUsage(w io.Writer) {
 	for _, c := range commands[4:12] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
-	fmt.Fprintln(w, "Supporting faces (rows 11/12/26):")
-	for _, c := range commands[12:14] {
+	fmt.Fprintln(w, "Supporting faces (rows 11/12/26) + machines (row 21):")
+	for _, c := range commands[12:15] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Management face (M1–M5):")
-	for _, c := range commands[14:] {
+	for _, c := range commands[15:] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w)
@@ -269,6 +272,34 @@ func (o *optString) Set(s string) error {
 func (o *optString) IsSet() bool { return o.set }
 func (o *optString) Val() string { return o.val }
 func (o *optString) Ptr() *string {
+	if !o.set {
+		return nil
+	}
+	v := o.val
+	return &v
+}
+
+// optBool is a flag.Value that records whether it was explicitly set —
+// PATCH semantics need "flag absent" (send nothing) distinct from "flag
+// set to false". IsBoolFlag makes the bare `--flag` form work like the
+// built-in bool flags.
+type optBool struct {
+	val bool
+	set bool
+}
+
+func (o *optBool) String() string { return fmt.Sprintf("%v", o.val) }
+func (o *optBool) Set(s string) error {
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		return err
+	}
+	o.val, o.set = v, true
+	return nil
+}
+func (o *optBool) IsBoolFlag() bool { return true }
+func (o *optBool) IsSet() bool      { return o.set }
+func (o *optBool) Ptr() *bool {
 	if !o.set {
 		return nil
 	}

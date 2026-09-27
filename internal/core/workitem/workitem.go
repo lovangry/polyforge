@@ -1,7 +1,7 @@
 // Package workitem implements the WI state machine, creation transaction
-// (with workflow frontmatter validation + digest 固化 + repo inventory freeze),
-// queries (list/detail/include/ready-queue), dependency edges (§4.2a domain
-// logic), budget increments (CAS) and cancel. Design authority:
+// (with workflow frontmatter validation + digest pinning + repo inventory
+// freeze), queries (list/detail/include/ready-queue), dependency edges
+// (§4.2a domain logic), budget increments (CAS) and cancel. Design authority:
 // docs/design/polyforge-vnext/02-aihub-core.md §2.4/§2.5/§4.2/§4.2a/§4.4–§4.7/§5.1b/§5.1c/§6.5/§6.7.
 package workitem
 
@@ -14,10 +14,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/silgrid/polyforge/internal/core/store"
 	wfdigest "github.com/silgrid/polyforge/internal/workflow/digest"
 	wfschema "github.com/silgrid/polyforge/internal/workflow/schema"
-	"github.com/silgrid/polyforge/internal/core/store"
 )
 
 // APIError mirrors owner.APIError (kept local to avoid an owner dependency).
@@ -40,37 +41,37 @@ func errf(code, reason, format string, args ...any) *APIError {
 
 // WorkItem is the row shape returned to the HTTP face.
 type WorkItem struct {
-	ID           string          `json:"id"`
-	Slug         string          `json:"slug"`
-	Seq          int64           `json:"seq"`
-	ProjectID    string          `json:"project_id"`
-	ProjectName  string          `json:"project"`
-	Goal         string          `json:"goal"`
-	Content      *string         `json:"content"`
-	ParentID     *string         `json:"parent_id"`
-	Status       string          `json:"status"`
-	Priority     string          `json:"priority"`
-	Milestone    *string         `json:"milestone"`
-	Labels       []string        `json:"labels"`
-	Attrs        map[string]any  `json:"attrs"`
-	Reporter     string          `json:"reporter"`
-	Assignee     *string         `json:"assignee"`
-	WaitingOn    *string         `json:"waiting_on"`
-	BundleName   *string         `json:"bundle_name"`
-	BundleDigest  *string         `json:"bundle_digest"`
+	ID             string          `json:"id"`
+	Slug           string          `json:"slug"`
+	Seq            int64           `json:"seq"`
+	ProjectID      string          `json:"project_id"`
+	ProjectName    string          `json:"project"`
+	Goal           string          `json:"goal"`
+	Content        *string         `json:"content"`
+	ParentID       *string         `json:"parent_id"`
+	Status         string          `json:"status"`
+	Priority       string          `json:"priority"`
+	Milestone      *string         `json:"milestone"`
+	Labels         []string        `json:"labels"`
+	Attrs          map[string]any  `json:"attrs"`
+	Reporter       string          `json:"reporter"`
+	Assignee       *string         `json:"assignee"`
+	WaitingOn      *string         `json:"waiting_on"`
+	BundleName     *string         `json:"bundle_name"`
+	BundleDigest   *string         `json:"bundle_digest"`
 	BudgetBaseline json.RawMessage `json:"workflow_budget_baseline"`
-	CreatedAt    string          `json:"created_at"`
-	UpdatedAt    string          `json:"updated_at"`
-	ClosedAt     *string         `json:"closed_at"`
+	CreatedAt      string          `json:"created_at"`
+	UpdatedAt      string          `json:"updated_at"`
+	ClosedAt       *string         `json:"closed_at"`
 }
 
 // RepoEntry is one wi_repo_inventory row (with frozen base).
 type RepoEntry struct {
-	Position int64  `json:"position"`
-	Name     string `json:"name"`
-	URL      string `json:"url"`
+	Position int64   `json:"position"`
+	Name     string  `json:"name"`
+	URL      string  `json:"url"`
 	Subdir   *string `json:"subdir"`
-	Base     string `json:"base"`
+	Base     string  `json:"base"`
 }
 
 // Manager is the work-item domain manager.
@@ -88,17 +89,17 @@ func NewManager(db *store.DB, workflowsDir string) *Manager {
 
 // CreateRequest is the POST /api/v1/work-items body.
 type CreateRequest struct {
-	Project        string           `json:"project"`
-	Goal           string           `json:"goal"`
-	Content        *string          `json:"content"`
-	ParentID       *string          `json:"parent_id"`
-	Priority       string           `json:"priority"`
-	Milestone      *string          `json:"milestone"`
-	Labels         []string         `json:"labels"`
-	Attrs          map[string]any   `json:"attrs"`
-	Reporter       string           `json:"-"`
-	BundleName     string           `json:"bundle_name"`
-	RepoInventory  []RepoDecl       `json:"repo_inventory"`
+	Project           string         `json:"project"`
+	Goal              string         `json:"goal"`
+	Content           *string        `json:"content"`
+	ParentID          *string        `json:"parent_id"`
+	Priority          string         `json:"priority"`
+	Milestone         *string        `json:"milestone"`
+	Labels            []string       `json:"labels"`
+	Attrs             map[string]any `json:"attrs"`
+	Reporter          string         `json:"-"`
+	BundleName        string         `json:"bundle_name"`
+	RepoInventory     []RepoDecl     `json:"repo_inventory"`
 	RepoInventoryBase []RepoBaseDecl `json:"repo_inventory_base"`
 }
 
@@ -117,13 +118,18 @@ type RepoBaseDecl struct {
 
 // Create runs the full creation transaction (02 §4.5):
 // registration vs execution ticket split, parent constraints, frontmatter
-// validation + digest 固化 (execution tickets only), inventory freeze, all in
-// one SQLite transaction.
+// validation + digest pinning (execution tickets only), inventory freeze,
+// all in one SQLite transaction.
 func (m *Manager) Create(req CreateRequest) (*Detail, error) {
 	if strings.TrimSpace(req.Goal) == "" {
 		return nil, errf("CORE-400", "", "goal required")
 	}
-	if len(req.Goal) > 500 {
+	// R2C-F11: 02 §4.2 pins goal "≤500 字符" — CHARACTERS, not UTF-8 bytes.
+	// Counting bytes (len(string)) rejected multilingual goals early (200
+	// CJK chars = 600 bytes) even though the doc's own limit is 500
+	// characters. Rune-counting applies the documented limit consistently
+	// to every script; the PATCH path below shares the same rule.
+	if utf8.RuneCountInString(req.Goal) > 500 {
 		return nil, errf("CORE-400", "", "goal exceeds 500 characters")
 	}
 	if req.Priority == "" {
@@ -206,7 +212,7 @@ func (m *Manager) Create(req CreateRequest) (*Detail, error) {
 		}
 	}
 
-	// Execution ticket: workflow frontmatter validation + digest 固化
+	// Execution ticket: workflow frontmatter validation + digest pinning
 	// (server-internal step, 02 §4.5); registration ticket skips it.
 	var bundleDigest, budgetBaseline string
 	fm := (*wfschema.Frontmatter)(nil)
@@ -306,8 +312,9 @@ func (m *Manager) Create(req CreateRequest) (*Detail, error) {
 	return m.Get(id, GetOptions{})
 }
 
-// budgetBaselineJSON抄录 the workflow-level budget into the three-scalar
-// baseline stored on the row (02 §4.4: {"requests","tokens","wall_minutes"}).
+// budgetBaselineJSON transcribes the workflow-level budget into the
+// three-scalar baseline stored on the row (02 §4.4:
+// {"requests","tokens","wall_minutes"}).
 func budgetBaselineJSON(fm *wfschema.Frontmatter) (string, error) {
 	bl := map[string]any{"requests": nil, "tokens": nil, "wall_minutes": nil}
 	if fm.Budget != nil {
@@ -329,7 +336,7 @@ func budgetBaselineJSON(fm *wfschema.Frontmatter) (string, error) {
 }
 
 // warnDrift reports a bundle digest drift: same bundle_name referenced by
-// non-terminal WIs with a different digest (02 §4.4 漂移告警 — monitoring
+// non-terminal WIs with a different digest (02 §4.4 drift alert — monitoring
 // signal only; nothing already stored is rewritten, no new event type).
 func (m *Manager) warnDrift(bundleName, digest string) {
 	rows, err := m.db.Query(`SELECT DISTINCT bundle_digest FROM work_items
@@ -379,24 +386,36 @@ type GetOptions struct {
 // Detail is the full GET response (base record + repo_inventory + includes).
 type Detail struct {
 	*WorkItem
-	RepoInventory []RepoEntry    `json:"repo_inventory"`
-	Events        []Event        `json:"events,omitempty"`
-	Deps          *Deps          `json:"deps,omitempty"`
+	RepoInventory []RepoEntry     `json:"repo_inventory"`
+	Events        []Event         `json:"events,omitempty"`
+	Deps          *Deps           `json:"deps,omitempty"`
 	Children      *ChildrenRollup `json:"children,omitempty"`
 }
 
 // Event is one wi_events row.
 type Event struct {
-	ID         int64           `json:"id"`
-	CreatedAt  string          `json:"created_at"`
-	Actor      *string         `json:"actor"`
-	EventType  string          `json:"event_type"`
-	Payload    json.RawMessage `json:"payload"`
+	ID        int64           `json:"id"`
+	CreatedAt string          `json:"created_at"`
+	Actor     *string         `json:"actor"`
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// dbHandle is satisfied by both *store.DB (which embeds *sql.DB) and
+// *sql.Tx; the read/edge helpers below take it so the same code runs either
+// directly (list/queue paths) or inside a caller-held transaction. With the
+// store's single connection (INV-2a) a helper must NEVER touch m.db while a
+// transaction is open - that would ask the pool for a second connection that
+// never comes (self-deadlock).
+type dbHandle interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+	Exec(query string, args ...any) (sql.Result, error)
 }
 
 // Deps is the two-list dependency include.
 type Deps struct {
-	Blocking []Edge `json:"blocking"`
+	Blocking  []Edge `json:"blocking"`
 	BlockedBy []Edge `json:"blocked_by"`
 }
 
@@ -414,39 +433,53 @@ type ChildrenRollup struct {
 
 // Rollup counts direct children by status bucket (02 §5.1c).
 type Rollup struct {
-	Total    int `json:"total"`
-	Wrapped  int `json:"wrapped"`
-	Running  int `json:"running"`
-	Blocked  int `json:"blocked"`
-	Queued   int `json:"queued"`
+	Total   int `json:"total"`
+	Wrapped int `json:"wrapped"`
+	Running int `json:"running"`
+	Blocked int `json:"blocked"`
+	Queued  int `json:"queued"`
 }
 
 func (m *Manager) Get(wiID string, opts GetOptions) (*Detail, error) {
-	row, err := m.loadWI(wiID)
+	// FA-8 (02 §5.1c): the include assembly and the base-record read run in
+	// ONE read transaction so the assembled detail is a single consistent
+	// snapshot - base row, inventory, events, deps and children cannot tear
+	// against a concurrent write. Read-only: the deferred rollback merely
+	// releases the snapshot.
+	tx, err := m.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	return m.getTx(tx, wiID, opts)
+}
+
+func (m *Manager) getTx(q dbHandle, wiID string, opts GetOptions) (*Detail, error) {
+	row, err := m.loadWI(q, wiID)
 	if err != nil {
 		return nil, err
 	}
 	d := &Detail{WorkItem: row}
-	d.RepoInventory, err = m.Inventory(wiID)
+	d.RepoInventory, err = m.inventory(q, wiID)
 	if err != nil {
 		return nil, err
 	}
 	if opts.Events {
-		evs, err := m.Events(wiID)
+		ev, err := m.events(q, wiID)
 		if err != nil {
 			return nil, err
 		}
-		d.Events = evs
+		d.Events = ev
 	}
 	if opts.Deps {
-		dep, err := m.Dependencies(wiID)
+		dep, err := m.deps(q, wiID)
 		if err != nil {
 			return nil, err
 		}
 		d.Deps = dep
 	}
 	if opts.Children {
-		kids, err := m.children(wiID)
+		kids, err := m.children(q, wiID)
 		if err != nil {
 			return nil, err
 		}
@@ -455,11 +488,11 @@ func (m *Manager) Get(wiID string, opts GetOptions) (*Detail, error) {
 	return d, nil
 }
 
-func (m *Manager) loadWI(wiID string) (*WorkItem, error) {
+func (m *Manager) loadWI(q dbHandle, wiID string) (*WorkItem, error) {
 	var w WorkItem
 	var content, parentID, milestone, assignee, waitingOn, bundleName, bundleDigest, baseline, closedAt sql.NullString
 	var labels, attrs string
-	err := m.db.QueryRow(`SELECT w.id, w.seq, w.project_id, p.name, w.goal, w.content, w.parent_id,
+	err := q.QueryRow(`SELECT w.id, w.seq, w.project_id, p.name, w.goal, w.content, w.parent_id,
 		w.status, w.priority, w.milestone, w.labels, w.attrs, w.reporter, w.assignee, w.waiting_on,
 		w.bundle_name, w.bundle_digest, w.workflow_budget_baseline, w.created_at, w.updated_at, w.closed_at
 		FROM work_items w JOIN projects p ON p.id=w.project_id WHERE w.id=?1`, wiID).
@@ -477,7 +510,14 @@ func (m *Manager) loadWI(wiID string) (*WorkItem, error) {
 	nullable(&parentID, &w.ParentID)
 	nullable(&milestone, &w.Milestone)
 	nullable(&assignee, &w.Assignee)
-	nullable(&waitingOn, &w.WaitingOn)
+	// R2C-F10 read-path defense: 02 §2.4's empty waiting_on value is
+	// stored as NULL; a legacy '' row (written before the PATCH write-path
+	// normalization) reads as no-waiting here so the ready-queue's
+	// “waiting_on non-NULL = blocked signal” test (§5.1b) cannot mis-sort a
+	// queued executable ticket on old data.
+	if waitingOn.Valid && waitingOn.String != "" {
+		w.WaitingOn = &waitingOn.String
+	}
 	nullable(&bundleName, &w.BundleName)
 	nullable(&bundleDigest, &w.BundleDigest)
 	if baseline.Valid && baseline.String != "" {
@@ -505,7 +545,11 @@ func nullable(src *sql.NullString, dst **string) {
 
 // Inventory returns the frozen repo inventory (base included).
 func (m *Manager) Inventory(wiID string) ([]RepoEntry, error) {
-	rows, err := m.db.Query(`SELECT position, name, url, subdir, base FROM wi_repo_inventory
+	return m.inventory(m.db, wiID)
+}
+
+func (m *Manager) inventory(q dbHandle, wiID string) ([]RepoEntry, error) {
+	rows, err := q.Query(`SELECT position, name, url, subdir, base FROM wi_repo_inventory
 		WHERE work_item_id=?1 ORDER BY position`, wiID)
 	if err != nil {
 		return nil, err
@@ -528,7 +572,11 @@ func (m *Manager) Inventory(wiID string) ([]RepoEntry, error) {
 
 // Events returns the WI event stream ordered by id.
 func (m *Manager) Events(wiID string) ([]Event, error) {
-	rows, err := m.db.Query(`SELECT id, created_at, actor, event_type, payload FROM wi_events
+	return m.events(m.db, wiID)
+}
+
+func (m *Manager) events(q dbHandle, wiID string) ([]Event, error) {
+	rows, err := q.Query(`SELECT id, created_at, actor, event_type, payload FROM wi_events
 		WHERE work_item_id=?1 ORDER BY id`, wiID)
 	if err != nil {
 		return nil, err
@@ -538,9 +586,15 @@ func (m *Manager) Events(wiID string) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		var actor sql.NullString
-		if err := rows.Scan(&e.ID, &e.CreatedAt, &actor, &e.EventType, &e.Payload); err != nil {
+		// The driver hands TEXT back as string; *json.RawMessage is not a
+		// scannable destination for it, so take the payload as []byte and
+		// wrap. (First exercised by the FA-8 snapshot test - the
+		// include=events path was previously untested at this layer.)
+		var payload []byte
+		if err := rows.Scan(&e.ID, &e.CreatedAt, &actor, &e.EventType, &payload); err != nil {
 			return nil, err
 		}
+		e.Payload = json.RawMessage(payload)
 		if actor.Valid {
 			e.Actor = &actor.String
 		}
@@ -551,19 +605,23 @@ func (m *Manager) Events(wiID string) ([]Event, error) {
 
 // Dependencies returns both edge lists (§5.1c include=deps).
 func (m *Manager) Dependencies(wiID string) (*Deps, error) {
-	blocking, err := m.edges(`SELECT blocked_wi_id, kind FROM wi_dependencies WHERE blocking_wi_id=?1`, wiID)
+	return m.deps(m.db, wiID)
+}
+
+func (m *Manager) deps(q dbHandle, wiID string) (*Deps, error) {
+	blocking, err := m.edges(q, `SELECT blocked_wi_id, kind FROM wi_dependencies WHERE blocking_wi_id=?1`, wiID)
 	if err != nil {
 		return nil, err
 	}
-	blockedBy, err := m.edges(`SELECT blocking_wi_id, kind FROM wi_dependencies WHERE blocked_wi_id=?1`, wiID)
+	blockedBy, err := m.edges(q, `SELECT blocking_wi_id, kind FROM wi_dependencies WHERE blocked_wi_id=?1`, wiID)
 	if err != nil {
 		return nil, err
 	}
 	return &Deps{Blocking: blocking, BlockedBy: blockedBy}, nil
 }
 
-func (m *Manager) edges(q string, args ...any) ([]Edge, error) {
-	rows, err := m.db.Query(q, args...)
+func (m *Manager) edges(q dbHandle, query string, args ...any) ([]Edge, error) {
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -579,8 +637,8 @@ func (m *Manager) edges(q string, args ...any) ([]Edge, error) {
 	return out, rows.Err()
 }
 
-func (m *Manager) children(wiID string) (*ChildrenRollup, error) {
-	rows, err := m.db.Query(`SELECT id FROM work_items WHERE parent_id=?1 ORDER BY seq`, wiID)
+func (m *Manager) children(q dbHandle, wiID string) (*ChildrenRollup, error) {
+	rows, err := q.Query(`SELECT id FROM work_items WHERE parent_id=?1 ORDER BY seq`, wiID)
 	if err != nil {
 		return nil, err
 	}
@@ -596,7 +654,7 @@ func (m *Manager) children(wiID string) (*ChildrenRollup, error) {
 	rows.Close()
 	out := &ChildrenRollup{Children: []WorkItem{}}
 	for _, id := range ids {
-		w, err := m.loadWI(id)
+		w, err := m.loadWI(q, id)
 		if err != nil {
 			return nil, err
 		}
@@ -646,6 +704,17 @@ var patchable = map[string]bool{
 
 // Patch applies a partial update. fields keys must ⊆ patchable; attrs passes
 // the INV-2c blacklist.
+//
+// R3C-F3 (02 §2.5): the status read below and the field validations run on
+// the shared connection BEFORE the applying transaction opens, so an
+// end-generation(block) can commit `blocked` + waiting_on in that window —
+// the unconditional UPDATE would then clear waiting_on on a blocked row,
+// leaving a blocked WI with no waiting object (dissolving the §2.5
+// invariant the R2C-F10 guard exists to protect). The status-dependent
+// refusals are therefore re-evaluated INSIDE the transaction (patchTx),
+// which holds the store's single connection (INV-2a) so nothing can
+// interleave past that point, and the UPDATE itself is guarded for the
+// clearing case.
 func (m *Manager) Patch(wiID string, fields map[string]json.RawMessage) (*Detail, error) {
 	var status string
 	if err := m.db.QueryRow(`SELECT status FROM work_items WHERE id=?1`, wiID).Scan(&status); err != nil {
@@ -668,6 +737,10 @@ func (m *Manager) Patch(wiID string, fields map[string]json.RawMessage) (*Detail
 	}
 	sets := []string{}
 	args := []any{}
+	// clearing marks a patch that sets waiting_on to the NULL "no
+	// waiting" value (02 §2.4) — the one field whose legality depends on
+	// the live status (R2C-F10/R3C-F3).
+	clearing := false
 	add := func(col string, val any) {
 		sets = append(sets, fmt.Sprintf("%s=?%d", col, len(args)+1))
 		args = append(args, val)
@@ -676,6 +749,15 @@ func (m *Manager) Patch(wiID string, fields map[string]json.RawMessage) (*Detail
 		var goal string
 		if err := json.Unmarshal(v, &goal); err != nil || goal == "" {
 			return nil, errf("CORE-400", "", "goal must be a non-empty string")
+		}
+		// FA-9: creation enforces goal <= 500 chars (02 §4.2); PATCH carries
+		// the same column limit so the closed invariant cannot be widened
+		// through the update path. R2C-F11: "chars" means CHARACTERS per
+		// 02 §4.2 (rune count), the same rule the creation path applies —
+		// a byte-count here would make multilingual PATCH goals fail under
+		// a limit their creation already passed.
+		if utf8.RuneCountInString(goal) > 500 {
+			return nil, errf("CORE-400", "", "goal exceeds 500 characters")
 		}
 		add("goal", goal)
 	}
@@ -729,9 +811,38 @@ func (m *Manager) Patch(wiID string, fields map[string]json.RawMessage) (*Detail
 		if err := json.Unmarshal(v, &wo); err != nil {
 			return nil, errf("CORE-400", "", "waiting_on must be a string or null")
 		}
-		if wo == nil {
+		if wo == nil || *wo == "" {
+			// R2C-F10: 02 §2.4 pins waiting_on's empty value as "no waiting"
+			// and “waiting_on 非空是「被阻塞」的可见信号” — the stored form of
+			// the empty value is NULL (the column's own nullable semantics),
+			// so an explicit "" is normalized to NULL on write. Storing ''
+			// non-NULL made a queued EXECUTION ticket read as waiting and land
+			// in the ready-queue's blocked list (§5.1b) even though nothing
+			// blocks it.
+			//
+			// 02 §2.5 additionally defines `blocked` BY its non-empty
+			// waiting_on (“blocked 是有明确等待对象（waiting_on 非空）”);
+			// clearing waiting_on on a blocked WI would strand a blocked row
+			// with no waiting object, dissolving the documented paused/blocked
+			// distinction. The recovery path out of blocked is `unblock` (a
+			// fresh claim, §2.5/§6.2), never a PATCH — so the clear is refused;
+			// re-pointing the waiting object to another non-empty domain value
+			// stays legal.
+			if status == "blocked" {
+				// Precheck only — the authoritative re-evaluation runs inside
+				// the applying transaction (R3C-F3), on a status a concurrent
+				// end-generation(block) cannot slip past.
+				return nil, errf("CORE-400", "BLOCKED_NEEDS_WAITING_ON",
+					"waiting_on cannot be cleared while the work item is blocked (02 §2.5: blocked implies a non-empty waiting_on); unblock (a fresh claim) is the recovery path")
+			}
 			sets = append(sets, "waiting_on=NULL")
+			clearing = true
 		} else {
+			// FA-7: 02 §2.4 pins a closed waiting_on value domain; a PATCH
+			// must not widen it with arbitrary non-empty strings.
+			if err := validateWaitingOn(*wo); err != nil {
+				return nil, err
+			}
 			add("waiting_on", *wo)
 		}
 	}
@@ -749,13 +860,72 @@ func (m *Manager) Patch(wiID string, fields map[string]json.RawMessage) (*Detail
 	if len(sets) == 0 {
 		return m.Get(wiID, GetOptions{})
 	}
-	sets = append(sets, fmt.Sprintf("updated_at=?%d", len(args)+1))
-	args = append(args, store.Now())
-	args = append(args, wiID)
-	if _, err := m.db.Exec(`UPDATE work_items SET `+strings.Join(sets, ", ")+` WHERE id=?`+fmt.Sprint(len(args)), args...); err != nil {
+	tx, err := m.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := m.patchTx(tx, wiID, sets, args, clearing); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return m.Get(wiID, GetOptions{})
+}
+
+// patchTx applies the validated SET list inside the caller's open
+// transaction (the transactional half, mirroring cancelTx/claimNew so the
+// R3C-F3 interleave is white-box testable). sets/args carry the field
+// assignments WITHOUT the updated_at/id tail; clearing marks a patch that
+// sets waiting_on to the NULL "no waiting" value.
+//
+// The status is re-read on the transaction's own snapshot and the two
+// status-dependent refusals — terminal WI, and clearing waiting_on on a
+// blocked WI (R2C-F10, 02 §2.5) — are re-evaluated there. The UPDATE is
+// additionally guarded for the clearing case (WHERE ... AND
+// (status<>'blocked' OR waiting_on IS NULL)) so the §2.5 invariant holds
+// by the write itself, not only by the read: 0 rows affected is refused
+// with nothing written.
+func (m *Manager) patchTx(tx *sql.Tx, wiID string, sets []string, args []any, clearing bool) error {
+	var status string
+	if err := tx.QueryRow(`SELECT status FROM work_items WHERE id=?1`, wiID).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errf("CORE-404", "", "work item %s", wiID)
+		}
+		return err
+	}
+	switch status {
+	case "wrapped", "failed", "cancelled":
+		// A terminalization (cancel/end-generation wrap|fail) won the race
+		// the outer read lost: the patch must not touch a terminal row.
+		return errf("CORE-410", "", "terminal work item")
+	}
+	if clearing && status == "blocked" {
+		return errf("CORE-400", "BLOCKED_NEEDS_WAITING_ON",
+			"waiting_on cannot be cleared while the work item is blocked (02 §2.5: blocked implies a non-empty waiting_on); unblock (a fresh claim) is the recovery path")
+	}
+	args = append(args, store.Now())
+	sets = append(sets, fmt.Sprintf("updated_at=?%d", len(args)))
+	args = append(args, wiID)
+	query := `UPDATE work_items SET ` + strings.Join(sets, ", ") + fmt.Sprintf(` WHERE id=?%d`, len(args))
+	if clearing {
+		// The invariant guard rides the write: a blocked row with a waiting
+		// object can never be flipped to a cleared waiting_on, even if some
+		// future store shape ever lets a write land inside this transaction.
+		query += ` AND (status<>'blocked' OR waiting_on IS NULL)`
+	}
+	res, err := tx.Exec(query, args...)
+	if err != nil {
+		return err
+	}
+	if clearing {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return errf("CORE-400", "BLOCKED_NEEDS_WAITING_ON",
+				"waiting_on cannot be cleared while the work item is blocked (02 §2.5: blocked implies a non-empty waiting_on); unblock (a fresh claim) is the recovery path")
+		}
+	}
+	return nil
 }
 
 // Cancel terminates a non-active WI (02 §6.5). Authorization is resolved by
@@ -783,18 +953,63 @@ func (m *Manager) Cancel(wiID, actor string) (*Detail, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	now := store.Now()
-	if _, err := tx.Exec(`UPDATE work_items SET status='cancelled', closed_at=?1, updated_at=?1 WHERE id=?2`, now, wiID); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`INSERT INTO wi_events(work_item_id, created_at, actor, event_type, payload)
-		VALUES (?1,?2,?3,'cancelled','{}')`, wiID, now, actor); err != nil {
+	if err := m.cancelTx(tx, wiID, actor); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return m.Get(wiID, GetOptions{})
+}
+
+// cancelTx performs the cancellation writes inside the caller's open
+// transaction. FA-6 (02 §2.5/§6.5): the outer status check runs on the
+// shared connection BEFORE the transaction opens, so a claim can commit in
+// between and the WI may already be running with an active generation by
+// the time this transaction starts; cancelling it then would violate §2.3
+// ("cancel never ends an active generation row") and orphan the live
+// generation. The status is therefore re-checked IN the transaction (which
+// holds the single connection, so nothing can interleave past this point)
+// and the UPDATE is guarded: 0 rows affected means the race was lost and
+// the typed CORE-409/CORE-410 is returned with nothing written.
+func (m *Manager) cancelTx(tx *sql.Tx, wiID, actor string) error {
+	var status string
+	if err := tx.QueryRow(`SELECT status FROM work_items WHERE id=?1`, wiID).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errf("CORE-404", "", "work item %s", wiID)
+		}
+		return err
+	}
+	switch status {
+	case "queued", "paused", "blocked":
+	case "wrapped", "failed", "cancelled":
+		return errf("CORE-410", "", "work item %s is already terminal (%s)", wiID, status)
+	default:
+		return errf("CORE-409", "", "cancel requires a non-active status (queued/paused/blocked), got %s", status)
+	}
+	// Defense in depth: none of the three cancellable statuses may carry an
+	// active generation (02 §2.3); refuse rather than cancel around one.
+	var active int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM owner_generations WHERE work_item_id=?1 AND ended_at IS NULL`, wiID).Scan(&active); err != nil {
+		return err
+	}
+	if active > 0 {
+		return errf("CORE-409", "", "work item %s has an active generation; end it (pause/block) before cancelling", wiID)
+	}
+	now := store.Now()
+	res, err := tx.Exec(`UPDATE work_items SET status='cancelled', closed_at=?1, updated_at=?1
+		WHERE id=?2 AND status IN ('queued','paused','blocked')`, now, wiID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errf("CORE-409", "", "work item %s is no longer cancellable (state changed concurrently)", wiID)
+	}
+	if _, err := tx.Exec(`INSERT INTO wi_events(work_item_id, created_at, actor, event_type, payload)
+		VALUES (?1,?2,?3,'cancelled','{}')`, wiID, now, actor); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ListFilters are the GET /work-items query params (02 §5.1 row 2).
@@ -856,7 +1071,7 @@ func (m *Manager) List(f ListFilters) ([]WorkItem, error) {
 	rows.Close()
 	out := []WorkItem{}
 	for _, id := range ids {
-		w, err := m.loadWI(id)
+		w, err := m.loadWI(m.db, id)
 		if err != nil {
 			return nil, err
 		}
@@ -867,16 +1082,16 @@ func (m *Manager) List(f ListFilters) ([]WorkItem, error) {
 
 // ReadyQueueEntry is one queue entry (02 §5.1b).
 type ReadyQueueEntry struct {
-	ID        string   `json:"id"`
-	Slug      string   `json:"slug"`
-	Goal      string   `json:"goal"`
-	Priority  string   `json:"priority"`
-	Status    string   `json:"status"`
-	BundleName *string `json:"bundle_name"`
-	WaitingOn *string  `json:"waiting_on,omitempty"`
-	BlockedBy []string `json:"blocked_by,omitempty"`
-	CreatedAt string   `json:"created_at"`
-	Labels    []string `json:"labels"`
+	ID         string   `json:"id"`
+	Slug       string   `json:"slug"`
+	Goal       string   `json:"goal"`
+	Priority   string   `json:"priority"`
+	Status     string   `json:"status"`
+	BundleName *string  `json:"bundle_name"`
+	WaitingOn  *string  `json:"waiting_on,omitempty"`
+	BlockedBy  []string `json:"blocked_by,omitempty"`
+	CreatedAt  string   `json:"created_at"`
+	Labels     []string `json:"labels"`
 }
 
 // ReadyQueue is the flat two-array response (02 §5.1b).
@@ -912,7 +1127,7 @@ func (m *Manager) ReadyQueue(projectName string) (*ReadyQueue, error) {
 			Status: w.Status, BundleName: w.BundleName, WaitingOn: w.WaitingOn,
 			CreatedAt: w.CreatedAt, Labels: w.Labels,
 		}
-		unfinished, err := m.unfinishedBlockers(w.ID)
+		unfinished, err := m.unfinishedBlockers(m.db, w.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -953,8 +1168,8 @@ func queueLess(a, b ReadyQueueEntry) bool {
 }
 
 // unfinishedBlockers returns the ids of blocking WIs that are not terminal.
-func (m *Manager) unfinishedBlockers(wiID string) ([]string, error) {
-	rows, err := m.db.Query(`SELECT d.blocking_wi_id FROM wi_dependencies d
+func (m *Manager) unfinishedBlockers(q dbHandle, wiID string) ([]string, error) {
+	rows, err := q.Query(`SELECT d.blocking_wi_id FROM wi_dependencies d
 		JOIN work_items b ON b.id = d.blocking_wi_id
 		WHERE d.blocked_wi_id=?1 AND d.kind='blocks'
 		AND b.status NOT IN ('wrapped','failed','cancelled')`, wiID)
@@ -975,12 +1190,41 @@ func (m *Manager) unfinishedBlockers(wiID string) ([]string, error) {
 }
 
 // ---------------------------------------------------------------------------
+// validateWaitingOn enforces the closed waiting_on value domain of 02
+// §2.4: "" | owner | runtime:<machine_id> | dependency:<wi_id> | gate.
+// (Kept local: owner cannot import workitem, so the closed domain is
+// spelled out in both packages, like hasUnfinishedBlockers there.)
+func validateWaitingOn(wo string) error {
+	switch {
+	case wo == "" || wo == "owner" || wo == "gate":
+		return nil
+	case strings.HasPrefix(wo, "runtime:"):
+		if strings.TrimPrefix(wo, "runtime:") == "" {
+			return errf("CORE-400", "", "waiting_on runtime: requires a machine_id (02 §2.4)")
+		}
+		return nil
+	case strings.HasPrefix(wo, "dependency:"):
+		if strings.TrimPrefix(wo, "dependency:") == "" {
+			return errf("CORE-400", "", "waiting_on dependency: requires a wi_id (02 §2.4)")
+		}
+		return nil
+	}
+	return errf("CORE-400", "", "waiting_on %q is outside the §2.4 value domain (owner|runtime:<machine_id>|dependency:<wi_id>|gate|empty)", wo)
+}
+
 // Dependency edges (02 §4.2a domain logic; endpoint surface pending — see
 // work-mode note: the canonical 25-row inventory in §5.1 has no edge route).
 
-// AddDependency enforces all §4.2a write-path constraints in one transaction:
-// same project, no self edge, cycle detection for blocks/supersedes, and the
-// epic parent/child exclusion.
+// AddDependency enforces all §4.2a write-path constraints and the insert in
+// ONE transaction. FA-5 (02 §4.2a: every write-path constraint is enforced
+// inside the create/delete-edge transaction): the reachability check, the
+// insert and the waiting_on materialization previously ran as independent
+// statements on the shared connection, so two concurrent AddDependency
+// calls could BOTH pass their cycle checks before either insert landed and
+// then both commit - closing a cycle the check exists to refuse. With the
+// check inside the transaction (which holds the store's single connection,
+// INV-2a), a concurrent add cannot interleave between the check and the
+// insert.
 func (m *Manager) AddDependency(blocking, blocked, kind string) error {
 	switch kind {
 	case "blocks", "supersedes", "related":
@@ -990,14 +1234,19 @@ func (m *Manager) AddDependency(blocking, blocked, kind string) error {
 	if blocking == blocked {
 		return errf("CORE-400", "", "edge endpoints must differ")
 	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var bp, dp string
-	if err := m.db.QueryRow(`SELECT project_id FROM work_items WHERE id=?1`, blocking).Scan(&bp); err != nil {
+	if err := tx.QueryRow(`SELECT project_id FROM work_items WHERE id=?1`, blocking).Scan(&bp); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errf("CORE-404", "", "work item %s", blocking)
 		}
 		return err
 	}
-	if err := m.db.QueryRow(`SELECT project_id FROM work_items WHERE id=?1`, blocked).Scan(&dp); err != nil {
+	if err := tx.QueryRow(`SELECT project_id FROM work_items WHERE id=?1`, blocked).Scan(&dp); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errf("CORE-404", "", "work item %s", blocked)
 		}
@@ -1008,38 +1257,46 @@ func (m *Manager) AddDependency(blocking, blocked, kind string) error {
 	}
 	// Epic parent/child exclusion (any kind).
 	var p1, p2 sql.NullString
-	_ = m.db.QueryRow(`SELECT parent_id FROM work_items WHERE id=?1`, blocking).Scan(&p1)
-	_ = m.db.QueryRow(`SELECT parent_id FROM work_items WHERE id=?1`, blocked).Scan(&p2)
+	_ = tx.QueryRow(`SELECT parent_id FROM work_items WHERE id=?1`, blocking).Scan(&p1)
+	_ = tx.QueryRow(`SELECT parent_id FROM work_items WHERE id=?1`, blocked).Scan(&p2)
 	if (p1.Valid && p1.String == blocked) || (p2.Valid && p2.String == blocking) {
 		return errf("CORE-400", "PARENT_CHILD_DEPENDENCY", "edges may not cross the epic parent/child relation")
 	}
 	if kind != "related" {
-		cyclic, err := m.reaches(blocked, blocking, kind)
+		cyclic, err := m.reaches(tx, blocked, blocking, kind)
 		if err != nil {
 			return err
 		}
 		if cyclic {
-			return errf("CORE-409", "DEPENDENCY_CYCLE", "%s edge %s→%s would close a cycle", kind, blocked, blocking)
+			return errf("CORE-409", "DEPENDENCY_CYCLE", "%s edge %s->%s would close a cycle", kind, blocked, blocking)
 		}
 	}
-	if _, err := m.db.Exec(`INSERT INTO wi_dependencies(blocking_wi_id, blocked_wi_id, kind, created_at)
+	if _, err := tx.Exec(`INSERT INTO wi_dependencies(blocking_wi_id, blocked_wi_id, kind, created_at)
 		VALUES (?1,?2,?3,?4)`, blocking, blocked, kind, store.Now()); err != nil {
 		return err
 	}
 	// blocks edges materialize the waiting_on signal (§2.4/§4.2a).
 	if kind == "blocks" {
-		if _, err := m.db.Exec(`UPDATE work_items SET waiting_on=?1, updated_at=?2 WHERE id=?3 AND status='queued'`,
+		if _, err := tx.Exec(`UPDATE work_items SET waiting_on=?1, updated_at=?2 WHERE id=?3 AND status='queued'`,
 			"dependency:"+blocking, store.Now(), blocked); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // RemoveDependency physically deletes the edge (§4.2a) and re-derives
-// waiting_on for the previously blocked WI.
+// waiting_on for the previously blocked WI in the SAME transaction (FA-5:
+// the delete and the re-derivation must not tear - a concurrent re-add of
+// another blocks edge between the two statements would otherwise be
+// overwritten by a stale waiting_on recomputation).
 func (m *Manager) RemoveDependency(blocking, blocked, kind string) error {
-	res, err := m.db.Exec(`DELETE FROM wi_dependencies WHERE blocking_wi_id=?1 AND blocked_wi_id=?2 AND kind=?3`,
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM wi_dependencies WHERE blocking_wi_id=?1 AND blocked_wi_id=?2 AND kind=?3`,
 		blocking, blocked, kind)
 	if err != nil {
 		return err
@@ -1049,7 +1306,7 @@ func (m *Manager) RemoveDependency(blocking, blocked, kind string) error {
 		return errf("CORE-404", "", "no such edge")
 	}
 	if kind == "blocks" {
-		left, err := m.unfinishedBlockers(blocked)
+		left, err := m.unfinishedBlockers(tx, blocked)
 		if err != nil {
 			return err
 		}
@@ -1057,16 +1314,18 @@ func (m *Manager) RemoveDependency(blocking, blocked, kind string) error {
 		if len(left) > 0 {
 			wo = "dependency:" + left[0]
 		}
-		if _, err := m.db.Exec(`UPDATE work_items SET waiting_on=?1, updated_at=?2 WHERE id=?3 AND status='queued'`,
+		if _, err := tx.Exec(`UPDATE work_items SET waiting_on=?1, updated_at=?2 WHERE id=?3 AND status='queued'`,
 			wo, store.Now(), blocked); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
-// reaches reports whether src can reach dst following edges of kind.
-func (m *Manager) reaches(src, dst, kind string) (bool, error) {
+// reaches reports whether src can reach dst following edges of kind, reading
+// through the caller's handle so the cycle check shares the add/remove
+// transaction (FA-5).
+func (m *Manager) reaches(q dbHandle, src, dst, kind string) (bool, error) {
 	if src == dst {
 		return true, nil
 	}
@@ -1079,7 +1338,7 @@ func (m *Manager) reaches(src, dst, kind string) (bool, error) {
 			continue
 		}
 		seen[cur] = true
-		rows, err := m.db.Query(`SELECT blocked_wi_id FROM wi_dependencies WHERE blocking_wi_id=?1 AND kind=?2`, cur, kind)
+		rows, err := q.Query(`SELECT blocked_wi_id FROM wi_dependencies WHERE blocking_wi_id=?1 AND kind=?2`, cur, kind)
 		if err != nil {
 			return false, err
 		}
@@ -1189,7 +1448,7 @@ func (m *Manager) AddBudgetIncrement(wiID, dimension string, amount int64, note 
 	if amount <= 0 {
 		return nil, errf("CORE-400", "", "amount must be > 0")
 	}
-	if _, err := m.loadWI(wiID); err != nil {
+	if _, err := m.loadWI(m.db, wiID); err != nil {
 		return nil, err
 	}
 	tx, err := m.db.Begin()

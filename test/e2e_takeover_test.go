@@ -152,11 +152,16 @@ func TestE2ETakeoverRecoveryDrill(t *testing.T) {
 	if q := readyQueue(t, core); q.hasExecutable(wi) || q.hasBlocked(wi) {
 		t.Fatalf("wrapped wi must be gone from the ready queue: %+v", q)
 	}
-	// The gen-1 capsule stayed on machine A for audit (04 §6.2 B: the old
-	// owner's scene is left in place; it is never resurrected),
-	// and the takeover machine's rebuilt scene is a real capsule.
-	if _, err := os.Stat(capc.Dir); err != nil {
-		t.Fatalf("machine A's capsule must remain on disk: %v", err)
+	// The gen-1 scene stayed on machine A for audit — QUARANTINED (moved
+	// under _quarantine, marked, never deleted) and never resurrected:
+	// 04 §6.2 B step 3, the takeover fence's local seal of the old owner's
+	// scene (05 §2.9/§7.3: the old daemon stops publishing and seals).
+	qm, _ := filepath.Glob(filepath.Join(machA.wsRoot(), "capsules", "_quarantine", wi, "*"))
+	if len(qm) != 1 {
+		t.Fatalf("machine A's capsule must be preserved exactly once under the quarantine tree: %v", qm)
+	}
+	if j := machA.state().FindJob(wi); j != nil {
+		t.Fatalf("the fenced-out old owner's jobs[] record must be dropped: %+v", j)
 	}
 	if _, err := os.Stat(filepath.Join(capB.Dir, "repos", "inventory.json")); err != nil {
 		t.Fatalf("the rebuilt scene must carry the inventory snapshot: %v", err)

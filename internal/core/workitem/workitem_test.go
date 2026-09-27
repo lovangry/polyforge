@@ -7,6 +7,7 @@ package workitem_test
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -283,6 +284,153 @@ func TestDependencyCycleDetection(t *testing.T) {
 	err = h.wi.AddDependency(a.ID, a.ID, "blocks")
 	if e := ae(t, err); e.Code != "CORE-400" {
 		t.Fatalf("got %v", e)
+	}
+}
+
+// --- FA-5: concurrent opposite edges cannot both pass the cycle check ---
+
+func TestAddDependencyConcurrentOppositeEdges(t *testing.T) {
+	h := setup(t)
+	a, _ := h.wi.Create(workitem.CreateRequest{Project: "p1", Goal: "a", Reporter: "usr_worker", BundleName: "demo"})
+	b, _ := h.wi.Create(workitem.CreateRequest{Project: "p1", Goal: "b", Reporter: "usr_worker", BundleName: "demo"})
+
+	// Two concurrent adds that would close a 2-cycle if both passed their
+	// checks. With the cycle check inside the add transaction (02 §4.2a),
+	// the store's single connection serializes them: the second transaction
+	// sees the first's committed edge and must refuse DEPENDENCY_CYCLE.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var wins, cycles int
+	wg.Add(2)
+	for _, pair := range [][2]string{{a.ID, b.ID}, {b.ID, a.ID}} {
+		blocking, blocked := pair[0], pair[1]
+		go func() {
+			defer wg.Done()
+			err := h.wi.AddDependency(blocking, blocked, "blocks")
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				wins++
+			default:
+				if e := ae(t, err); e.Code == "CORE-409" && e.Reason == "DEPENDENCY_CYCLE" {
+					cycles++
+				} else {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if wins != 1 || cycles != 1 {
+		t.Fatalf("expected exactly one winner and one DEPENDENCY_CYCLE, got wins=%d cycles=%d", wins, cycles)
+	}
+	// The winner's edge materialized waiting_on on the blocked side.
+	q, err := h.wi.ReadyQueue("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawWaiting bool
+	for _, e := range q.Blocked {
+		if e.ID == b.ID && e.WaitingOn != nil {
+			sawWaiting = true
+		}
+	}
+	_ = sawWaiting // a.ID or b.ID is blocked depending on the winner; not asserted
+}
+
+// --- FA-7: PATCH waiting_on must stay inside the §2.4 value domain ---
+
+func TestPatchWaitingOnDomain(t *testing.T) {
+	h := setup(t)
+	d, _ := h.wi.Create(workitem.CreateRequest{Project: "p1", Goal: "g", Reporter: "usr_worker"})
+	for _, bad := range []string{"nonsense", "runtime:", "dependency:", "OWNER", "gatekeeper", "runtime:"} {
+		_, err := h.wi.Patch(d.ID, map[string]json.RawMessage{"waiting_on": json.RawMessage(`"` + bad + `"`)})
+		e := ae(t, err)
+		if e.Code != "CORE-400" {
+			t.Fatalf("waiting_on=%q must be rejected CORE-400, got %v", bad, e)
+		}
+	}
+	for _, good := range []string{"owner", "gate", "runtime:mac_a", "dependency:wi_abc"} {
+		p, err := h.wi.Patch(d.ID, map[string]json.RawMessage{"waiting_on": json.RawMessage(`"` + good + `"`)})
+		if err != nil || p.WaitingOn == nil || *p.WaitingOn != good {
+			t.Fatalf("waiting_on=%q must be accepted, got %v %+v", good, err, p.WaitingOn)
+		}
+	}
+	// null clears it.
+	p, err := h.wi.Patch(d.ID, map[string]json.RawMessage{"waiting_on": json.RawMessage(`null`)})
+	if err != nil || p.WaitingOn != nil {
+		t.Fatalf("waiting_on=null must clear, got %v %+v", err, p.WaitingOn)
+	}
+}
+
+// --- FA-9: PATCH goal carries the same <=500 limit as creation (02 §4.2) ---
+
+func TestPatchGoalLengthLimit(t *testing.T) {
+	h := setup(t)
+	d, _ := h.wi.Create(workitem.CreateRequest{Project: "p1", Goal: "g", Reporter: "usr_worker"})
+	long := strings.Repeat("x", 501)
+	_, err := h.wi.Patch(d.ID, map[string]json.RawMessage{"goal": json.RawMessage(`"` + long + `"`)})
+	e := ae(t, err)
+	if e.Code != "CORE-400" {
+		t.Fatalf("501-char goal must be rejected CORE-400, got %v", e)
+	}
+	exact := strings.Repeat("y", 500)
+	p, err := h.wi.Patch(d.ID, map[string]json.RawMessage{"goal": json.RawMessage(`"` + exact + `"`)})
+	if err != nil || p.Goal != exact {
+		t.Fatalf("500-char goal must be accepted, got %v", err)
+	}
+}
+
+// --- FA-8: Get assembles base + inventory + events + deps + children from
+// one read snapshot (02 §5.1c) ---
+
+func TestGetIncludesAssembledSnapshot(t *testing.T) {
+	h := setup(t)
+	parent, err := h.wi.Create(workitem.CreateRequest{Project: "p1", Goal: "parent", Reporter: "usr_worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Direct child (registration ticket; the parent stays one too so the
+	// epic-lite constraints hold).
+	child, err := h.wi.Create(workitem.CreateRequest{Project: "p1", Goal: "child", Reporter: "usr_worker", ParentID: &parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A dependency edge onto the parent from another ticket.
+	other, err := h.wi.Create(workitem.CreateRequest{Project: "p1", Goal: "other", Reporter: "usr_worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.wi.AddDependency(parent.ID, other.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	// Some events on the parent.
+	if err := h.wi.AppendEvent(parent.ID, "usr_worker", "note", map[string]any{"text": "hello"}); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := h.wi.Get(parent.ID, workitem.GetOptions{Events: true, Deps: true, Children: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.ID != parent.ID || len(d.RepoInventory) != 0 {
+		t.Fatalf("base record wrong: %+v", d.WorkItem)
+	}
+	if len(d.Events) != 1 || d.Events[0].EventType != "note" {
+		t.Fatalf("events include wrong: %+v", d.Events)
+	}
+	if d.Deps == nil || len(d.Deps.Blocking) != 1 || d.Deps.Blocking[0].WiID != other.ID || d.Deps.Blocking[0].Kind != "blocks" {
+		t.Fatalf("deps include wrong: %+v", d.Deps)
+	}
+	if len(d.Deps.BlockedBy) != 0 {
+		t.Fatalf("deps include wrong: %+v", d.Deps.BlockedBy)
+	}
+	if d.Children == nil || len(d.Children.Children) != 1 || d.Children.Children[0].ID != child.ID {
+		t.Fatalf("children include wrong: %+v", d.Children)
+	}
+	if d.Children.Rollup.Total != 1 || d.Children.Rollup.Queued != 1 {
+		t.Fatalf("rollup wrong: %+v", d.Children.Rollup)
 	}
 }
 

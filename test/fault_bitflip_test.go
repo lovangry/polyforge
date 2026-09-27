@@ -145,10 +145,10 @@ func manifestFor(wi string, seq, parent int64, sha string, content []byte) revis
 	mode := int64(0o644)
 	m := revision.Manifest{
 		WorkItemID: wi, Seq: seq, Parent: &parent, Generation: 1,
-		Kind: revision.KindIncremental,
+		Kind:      revision.KindIncremental,
 		LiveFiles: 2, DataBytes: int64(len(content)),
 		ExecutionStateIncluded: true,
-		BuiltAt: "2026-01-01T00:00:00Z",
+		BuiltAt:                "2026-01-01T00:00:00Z",
 	}
 	m.Ops = []revision.Op{{Op: revision.OpPut, Path: "artifacts/flip.txt", Sha256: sha,
 		Bytes: int64(len(content)), Mode: &mode}}

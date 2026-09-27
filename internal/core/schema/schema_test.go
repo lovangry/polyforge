@@ -1,8 +1,8 @@
 package schema_test
 
 import (
-	"github.com/silgrid/polyforge/internal/core/schema"
 	"database/sql"
+	"github.com/silgrid/polyforge/internal/core/schema"
 	"path/filepath"
 	"strings"
 	"testing"

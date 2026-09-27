@@ -27,9 +27,9 @@ type Budget struct {
 
 // OnFail is the bounded rewind declaration, allowed only on gate steps (V5).
 type OnFail struct {
-	Action         string  `yaml:"action"` // "rewind" | "terminate"; default terminate
-	Target         string  `yaml:"target"` // required when action=rewind
-	IncludeVerdict *bool   `yaml:"include_verdict"` // default true
+	Action         string `yaml:"action"`          // "rewind" | "terminate"; default terminate
+	Target         string `yaml:"target"`          // required when action=rewind
+	IncludeVerdict *bool  `yaml:"include_verdict"` // default true
 }
 
 // Step is one frontmatter step entry.
@@ -45,8 +45,8 @@ type Step struct {
 
 // Rewind holds the workflow-level rewind bounds (defaults 4 / 2, V6).
 type Rewind struct {
-	MaxTotal    *int64 `yaml:"max_total"`
-	MaxPerStep  *int64 `yaml:"max_per_step"`
+	MaxTotal   *int64 `yaml:"max_total"`
+	MaxPerStep *int64 `yaml:"max_per_step"`
 }
 
 // Defaults carries the workflow-level fallback model candidates (V9).

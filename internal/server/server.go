@@ -6,29 +6,29 @@ package server
 import (
 	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/core/capsule"
-	"github.com/silgrid/polyforge/internal/memory"
 	"github.com/silgrid/polyforge/internal/core/owner"
 	"github.com/silgrid/polyforge/internal/core/service"
 	"github.com/silgrid/polyforge/internal/core/store"
 	"github.com/silgrid/polyforge/internal/core/workitem"
+	"github.com/silgrid/polyforge/internal/memory"
 )
 
 // Server wires the domain managers behind one mux.
 type Server struct {
-	DB       *store.DB
-	Svc      *service.Service
-	Owners   *owner.Manager
-	WIs      *workitem.Manager
-	Caps     *capsule.Store
-	Mems     *memory.Store
-	DataDir  string
+	DB      *store.DB
+	Svc     *service.Service
+	Owners  *owner.Manager
+	WIs     *workitem.Manager
+	Caps    *capsule.Store
+	Mems    *memory.Store
+	DataDir string
 
 	mux *http.ServeMux
 }
@@ -46,6 +46,11 @@ func New(db *store.DB, dataDir, workflowsDir string, svc *service.Service) *Serv
 		DataDir: dataDir,
 	}
 	s.routes()
+	// Share issuance storage (02 row 24, FB-10): fail fast at boot rather
+	// than failing the first share request.
+	if err := s.ensureShareTokens(); err != nil {
+		panic("server: share_tokens schema: " + err.Error())
+	}
 	return s
 }
 
@@ -122,6 +127,14 @@ func writeErr(w http.ResponseWriter, err error) {
 			end := strings.IndexAny(rest, " :")
 			if end > 0 {
 				code = prefix + rest[:end]
+				// The parsed code is carried by the envelope's code field;
+				// leaving it in detail too doubled it in every client render
+				// ("pf: CORE-401: CORE-401: invalid api key", found in the
+				// polyforge#17 dogfood round). When the raw error carries
+				// the "CODE: detail" form, detail keeps only the sentence.
+				if strings.HasPrefix(rest, rest[:end]+":") {
+					detail = strings.TrimSpace(rest[end+1:])
+				}
 			}
 			break
 		}
@@ -167,10 +180,10 @@ func decodeBody(r *http.Request, v any) error {
 
 // identity is the authenticated caller.
 type identity struct {
-	UserID     string
-	Role       string // global role: admin|writer
-	Kind       string // human|machine
-	KeyScope   *string // api_keys.project_id when the key is project-scoped
+	UserID   string
+	Role     string  // global role: admin|writer
+	Kind     string  // human|machine
+	KeyScope *string // api_keys.project_id when the key is project-scoped
 }
 
 // authenticate resolves the api key. Inference (recorded): keys travel in the

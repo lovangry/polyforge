@@ -282,6 +282,10 @@ only:
   sync surfaces (`repos/**`, `artifacts/**`, `logs/**`, `runtime-state/execution.json`),
   commit to starting none until released, and ack. A pending full-scan publish waits
   for this ack; a missing ack stalls the publish, so treat the method as urgent.
+- **`pf/resume`** — freeze release (05 §2.7). When you receive it, the Daemon's staging
+  pin for the publish is complete and the write-freeze window is OVER: you may resume
+  sync-surface writes (`repos/**`, `artifacts/**`, `logs/**`, `runtime-state/execution.json`)
+  and continue driving. Ack it. It only ever follows a `pf/quiesce` you already acked.
 - **`pf/stop_notice`** — the stop-advancing notice (04 §6.5 step 3, graceful shutdown).
   When you receive it, prepare for shutdown: stop advancing to any next step, drive the
   current step to its next safe boundary (a step boundary plus its sync trigger per §8),

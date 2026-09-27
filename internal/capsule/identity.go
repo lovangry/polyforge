@@ -206,8 +206,12 @@ func Create(workspaceRoot, wiID string, gen int64, machineID, bundleDigest strin
 			return nil, nil, qerr
 		}
 		res.Quarantined = q
-	} else if !os.IsNotExist(rerr) && !os.IsNotExist(osErrCause(rerr)) {
-		// A readable-but-broken capsule.json is treated as a husk too.
+	} else if dirExists(dir) {
+		// 03 §6.1 step 2b/3: the directory exists but capsule.json is
+		// MISSING (or broken) — an untrusted husk from a crashed or tampered
+		// creation. It is quarantined like every other husk, never reused in
+		// place: the new generation always starts from a clean directory
+		// (§2.4 “新代总是从干净目录开始，不信任任何本地残留”).
 		q, qerr := c.quarantine(0, StatusInitializing)
 		if qerr != nil {
 			return nil, nil, qerr
@@ -238,12 +242,12 @@ func Create(workspaceRoot, wiID string, gen int64, machineID, bundleDigest strin
 	return c, res, nil
 }
 
-// osErrCause unwraps *fs.PathError to test for the underlying ENOENT.
-func osErrCause(err error) error {
-	if pe, ok := err.(*os.PathError); ok {
-		return pe.Err
-	}
-	return err
+// dirExists reports whether the capsule directory itself is present
+// (regardless of capsule.json): its existence without a readable identity
+// file marks a husk (03 §6.1 step 2b).
+func dirExists(dir string) bool {
+	st, err := os.Stat(dir)
+	return err == nil && st.IsDir()
 }
 
 // quarantine moves the whole capsule dir to
@@ -311,9 +315,30 @@ func (c *Capsule) MarkReady() error {
 
 // SealReadOnly seals the capsule as a read-only scene after a normal job
 // end (03 §2.1: the directory is kept, never disk-deleted here; deletion
-// goes through the Core deletion-protection flow only).
+// goes through the Core deletion-protection flow only). The WHOLE preserved
+// scene is sealed — 03 §2.1's “只读现场” is the directory and its contents,
+// not just the root entry: files 0444, directories 0555, symlinks untouched
+// (chmod follows links, and a symlink's target may live outside the scene).
+// B02 scope: the Daemon runs as the same OS account as everything else on
+// the host, so these bits are an ANTI-MISTAKE guard (stray writes against a
+// sealed scene fail with EACCES), NOT a security boundary — a same-UID
+// process can chmod them back.
 func (c *Capsule) SealReadOnly() error {
-	return os.Chmod(c.Dir, 0o555)
+	return filepath.Walk(c.Dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil // never chmod through a link
+		}
+		if info.IsDir() {
+			return os.Chmod(p, 0o555)
+		}
+		if info.Mode().IsRegular() {
+			return os.Chmod(p, 0o444)
+		}
+		return nil // sockets/fifos/devices carry no scene bytes
+	})
 }
 
 // ValidateGeneration checks a caller-presented generation against the local

@@ -277,9 +277,12 @@ type fakeAgent struct {
 	onNotifyStop func()
 }
 
-func (a *fakeAgent) PID() int        { return a.pid }
+func (a *fakeAgent) PID() int          { return a.pid }
 func (a *fakeAgent) StartedAt() string { return a.startedAt }
-func (a *fakeAgent) Alive() bool     { return !a.dead }
+func (a *fakeAgent) Alive() bool       { return !a.dead }
+
+// GroupEmpty: the fake models a clean exit with no residual group.
+func (a *fakeAgent) GroupEmpty() bool { return a.dead }
 
 func (a *fakeAgent) NotifyStop(ctx context.Context) error {
 	if a.onNotifyStop != nil {
@@ -288,7 +291,8 @@ func (a *fakeAgent) NotifyStop(ctx context.Context) error {
 	}
 	return nil
 }
-func (a *fakeAgent) Quiesce(ctx context.Context) error  { return nil }
+func (a *fakeAgent) Quiesce(ctx context.Context) error { return nil }
+func (a *fakeAgent) Resume(ctx context.Context) error  { return nil }
 func (a *fakeAgent) DeliverAnswer(rel daemon.AnswerRelay) error {
 	a.mu.Lock()
 	a.answers = append(a.answers, rel)
@@ -319,10 +323,10 @@ func (a *fakeAgent) relays() []daemon.AnswerRelay {
 }
 
 type fakeSpawner struct {
-	t       *testing.T
-	mu      sync.Mutex
-	spawns  []daemon.SpawnParams
-	agents  []*fakeAgent
+	t      *testing.T
+	mu     sync.Mutex
+	spawns []daemon.SpawnParams
+	agents []*fakeAgent
 }
 
 func newFakeSpawner(t *testing.T) *fakeSpawner {
@@ -367,15 +371,15 @@ func (s *fakeSpawner) last() *fakeAgent {
 // baseURL (the real face, or a fault-injection proxy in front of it),
 // and its UDS operations face.
 type daemonEnv struct {
-	t       *testing.T
-	core    *coreEnv
-	machine string
-	apiKey  string
-	home    string // <temp>/home: ws/, daemon/, skills/, workflows/
-	cfg     daemon.Config
-	d       *daemon.Daemon
-	spawner *fakeSpawner
-	socket  string
+	t        *testing.T
+	core     *coreEnv
+	machine  string
+	apiKey   string
+	home     string // <temp>/home: ws/, daemon/, skills/, workflows/
+	cfg      daemon.Config
+	d        *daemon.Daemon
+	spawner  *fakeSpawner
+	socket   string
 	pfClient *cli.DaemonClient
 }
 

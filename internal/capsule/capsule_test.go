@@ -116,6 +116,103 @@ func TestValidateGeneration(t *testing.T) {
 	}
 }
 
+// TestSealReadOnlySealsWholeScene is the FE-8 regression: sealing used to
+// chmod only the capsule ROOT, leaving the preserved scene's contents
+// writable. 03 §2.1's “只读现场” is the whole preserved scene: directories
+// 0555, regular files 0444, symlinks untouched (chmod follows links).
+func TestSealReadOnlySealsWholeScene(t *testing.T) {
+	c := newCapsule(t, 3)
+	// Nested content: files, a subdirectory, and a symlink.
+	if err := os.MkdirAll(filepath.Join(c.Dir, "artifacts", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		filepath.Join(c.Dir, "artifacts", "f.md"),
+		filepath.Join(c.Dir, "artifacts", "sub", "g.md"),
+	} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("f.md", filepath.Join(c.Dir, "artifacts", "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SealReadOnly(); err != nil {
+		t.Fatal(err)
+	}
+	// B02 scope note: the mode bits are the assertion — this environment
+	// runs tests as root, which bypasses DAC enforcement, so the bits (not
+	// an EACCES probe) are what the test can hold; for the non-root Daemon
+	// the bits ARE the anti-mistake EACCES guard.
+	for _, d := range []string{c.Dir, filepath.Join(c.Dir, "artifacts"), filepath.Join(c.Dir, "artifacts", "sub")} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o555 {
+			t.Errorf("sealed directory %s must be 0555, got %o", d, fi.Mode().Perm())
+		}
+	}
+	for _, f := range []string{filepath.Join(c.Dir, "artifacts", "f.md"), filepath.Join(c.Dir, "artifacts", "sub", "g.md")} {
+		fi, err := os.Stat(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o444 {
+			t.Errorf("sealed file %s must be 0444, got %o", f, fi.Mode().Perm())
+		}
+	}
+	// The symlink itself is untouched (never chmod'd through the link);
+	// its TARGET was sealed by the walk's own visit.
+	li, err := os.Lstat(filepath.Join(c.Dir, "artifacts", "link"))
+	if err != nil || li.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the symlink must survive sealing as a symlink: %v", err)
+	}
+	// Restore writability so t.TempDir's cleanup can remove the scene.
+	filepath.Walk(c.Dir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && info.IsDir() {
+			os.Chmod(p, 0o755)
+		}
+		return nil
+	})
+}
+
+// TestCreateQuarantinesDirWithoutIdentity is the FE-9 regression: a capsule
+// directory whose capsule.json is MISSING (crashed creation, tampering) is
+// a husk — 03 §6.1 step 2b/3 wants it quarantined, never reused in place
+// (§2.4: the new generation always starts from a clean directory).
+func TestCreateQuarantinesDirWithoutIdentity(t *testing.T) {
+	ws := t.TempDir()
+	// A husk: the directory exists, the identity file does not.
+	dir := filepath.Join(ws, "capsules", "wi_test01")
+	if err := os.MkdirAll(filepath.Join(dir, "repos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repos", "junk.txt"), []byte("husk residue"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, res, err := Create(ws, "wi_test01", 3, "m-01", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reused || res.Quarantined == "" {
+		t.Fatalf("a directory without capsule.json must be quarantined, not reused: %+v", res)
+	}
+	// The residue was preserved under _quarantine (audit scene), not reused.
+	raw, rerr := os.ReadFile(filepath.Join(res.Quarantined, "repos", "junk.txt"))
+	if rerr != nil || string(raw) != "husk residue" {
+		t.Fatalf("the quarantined husk must be preserved: %q %v", raw, rerr)
+	}
+	// The fresh directory carries a clean identity and none of the residue.
+	idn, ierr := readIdentity(c.Dir)
+	if ierr != nil || idn.Generation != 3 || idn.Status != StatusInitializing {
+		t.Fatalf("fresh identity: %v %+v", ierr, idn)
+	}
+	if _, serr := os.Stat(filepath.Join(c.Dir, "repos", "junk.txt")); !os.IsNotExist(serr) {
+		t.Fatal("the fresh capsule must not inherit husk residue")
+	}
+}
+
 func TestPathValidation(t *testing.T) {
 	c := newCapsule(t, 3)
 	if _, err := c.Path("repos/x/a.go"); err != nil {

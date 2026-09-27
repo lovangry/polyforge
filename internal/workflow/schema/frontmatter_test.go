@@ -65,7 +65,7 @@ steps:
 
 func validBundleFiles() map[string]string {
 	return map[string]string{
-		"workflow.md":     validFM,
+		"workflow.md":            validFM,
 		"agents/grill.md":        "---\nname: grill\ndescription: q\ntools: [read]\noutput: {type: object}\n---\n",
 		"agents/spec.md":         "---\nname: spec\ndescription: s\ntools: [read, write]\noutput: {type: object}\n---\n",
 		"agents/code.md":         "---\nname: code\ndescription: c\ntools: [bash]\noutput: {type: object}\n---\n",
@@ -92,9 +92,9 @@ func TestRuleViolations(t *testing.T) {
 	base := func() map[string]string { return validBundleFiles() }
 
 	cases := []struct {
-		name  string
+		name   string
 		mutate func(files map[string]string) map[string]string
-		rule  string
+		rule   string
 	}{
 		{"unknown top key", func(f map[string]string) map[string]string {
 			f["workflow.md"] = strings.Replace(validFM, "description: reference flow", "isolation: container\ndescription: reference flow", 1)

@@ -35,9 +35,9 @@ import (
 // operation GROUPS in the design: each listed method+path pair below is one
 // OpenAPI operation, and the groups are counted as single rows.
 var expectedOps = []struct {
-	Row   string
+	Row    string
 	Method string
-	Path  string
+	Path   string
 }{
 	// A. WI business (rows 1–6).
 	{"1", "post", "/api/v1/work-items"},
@@ -95,14 +95,40 @@ var expectedOps = []struct {
 	{"M5", "post", "/api/v1/service/rotate-secret"},
 }
 
-// tokenRequiredOps are the operations whose wire contract requires the
-// X-PF-Generation-Token header (02 §5.1 tier 3, as enforced by the
-// implementation: rows 9, 14, 15 — NOT row 12, whose token check the
-// implementation omits).
-var tokenRequiredOps = map[string]bool{
-	"post /api/v1/work-items/{id}/end-generation":                    true,
-	"put /api/v1/work-items/{id}/revisions/{seq}/blocks/{sha256}":     true,
-	"post /api/v1/work-items/{id}/revisions/{seq}/manifest":           true,
+// tokenOps pins the X-PF-Generation-Token applicability of the wire
+// contract (02 §5.1 tier 3, as enforced by the implementation). Two
+// distinct shapes exist since R2C-F8:
+//
+//   - ALWAYS: rows 9, 14, 15 — tier 3 unconditionally; the operation must
+//     carry the header parameter marked required: true (the shared
+//     components/parameters/GenerationToken).
+//   - TIERED: row 12 (budget read) — tier 3 only while the WI has an
+//     active generation; with no active generation the read is tier 2
+//     (api_key only). A blanket required: true here contradicted the
+//     tier-2 branch the implementation (correctly) serves, so the contract
+//     now carries the parameter as optional at the schema level with the
+//     conditional requirement pinned in its description
+//     (components/parameters/GenerationTokenTiered), and the linter checks
+//     THAT rule: the parameter must be present, must NOT be required, and
+//     its description must state the active-generation condition and the
+//     tier-2 key-only branch.
+var tokenAlwaysRequiredOps = map[string]bool{
+	"post /api/v1/work-items/{id}/end-generation":                 true,
+	"put /api/v1/work-items/{id}/revisions/{seq}/blocks/{sha256}": true,
+	"post /api/v1/work-items/{id}/revisions/{seq}/manifest":       true,
+}
+
+var tokenTieredOps = map[string]bool{
+	"get /api/v1/work-items/{id}/budget": true,
+}
+
+// tieredTokenDoc pins the description markers a TIERED operation's token
+// parameter must carry: the active-generation condition and the tier-2
+// key-only branch. The linter enforces the distinction the contract now
+// documents instead of a blanket required flag.
+var tieredTokenDoc = []string{
+	"active generation", // the tier-3 condition
+	"tier 2",            // the key-only branch when it does not apply
 }
 
 // anonymousOp is the only operation that must explicitly opt out of the
@@ -157,7 +183,14 @@ const (
 )
 
 func main() {
-	if err := run("api/openapi.yaml"); err != nil {
+	// Optional argv override: the R3C-F5 regression probe (internal/server/
+	// openapi_lint_probe_test.go) lints MUTATED copies of the contract to
+	// prove the in:header and applicability rules actually fail them.
+	path := "api/openapi.yaml"
+	if len(os.Args) > 1 {
+		path = os.Args[1]
+	}
+	if err := run(path); err != nil {
 		fmt.Fprintf(os.Stderr, "openapi-lint: FAIL: %v\n", err)
 		os.Exit(1)
 	}
@@ -193,6 +226,7 @@ func run(path string) error {
 
 	// 2. Bearer security scheme present.
 	comps, _ := doc["components"].(map[string]any)
+	compsParams, _ := comps["parameters"].(map[string]any)
 	schemes, _ := comps["securitySchemes"].(map[string]any)
 	bearer, ok := schemes["BearerAuth"].(map[string]any)
 	if !ok {
@@ -270,14 +304,46 @@ func run(path string) error {
 				fail("%s: must declare security: [] (anonymous by design)", key)
 			}
 
-			// Token applicability: tier-3 operations must carry the
-			// X-PF-Generation-Token header parameter (directly or via the
-			// shared path/operation parameter list), marked required.
-			if tokenRequiredOps[key] && !hasGenerationToken(item, op) {
-				fail("%s: must require the X-PF-Generation-Token header (02 §5.1 tier 3)", key)
+			// Token applicability (R2C-F8): three distinct rules.
+			//   - ALWAYS tier-3 ops must carry the header marked required: true.
+			//   - TIERED ops must carry the header NOT required, with the
+			//     conditional requirement pinned in its description.
+			//   - every other op must not carry the header at all.
+			//
+			// R3C-F5: the parameter must be a HEADER. The generation token is a
+			// credential that rides the X-PF-Generation-Token request header (02
+			// §5.1 tier 3); a contract edit moving it to in:query would put the
+			// capability token into URLs and access logs and still pass the
+			// presence/required checks below, so `in` is validated for BOTH
+			// token parameters (GenerationToken and GenerationTokenTiered — both
+			// resolve to the X-PF-Generation-Token name) wherever the parameter
+			// is present.
+			present, req, loc, desc := generationTokenParam(item, op, compsParams)
+			if present && loc != "header" {
+				fail("%s: the X-PF-Generation-Token parameter must be in:header (02 §5.1 tier-3 credential; in:query would leak it into URLs and access logs), got in:%q", key, loc)
 			}
-			if !tokenRequiredOps[key] && hasGenerationToken(item, op) {
-				fail("%s: must NOT require the X-PF-Generation-Token header (tier 1/2 operation)", key)
+			switch {
+			case tokenAlwaysRequiredOps[key]:
+				if !present || !req {
+					fail("%s: must REQUIRE the X-PF-Generation-Token header (02 §5.1 tier 3, unconditional)", key)
+				}
+			case tokenTieredOps[key]:
+				if !present {
+					fail("%s: must carry the X-PF-Generation-Token header (02 §5.1 tier 3 while an active generation exists)", key)
+					break
+				}
+				if req {
+					fail("%s: the token header is CONDITIONALLY required (tier 3 only with an active generation; tier 2/key-only otherwise) and must not be blanket required:true — use the GenerationTokenTiered parameter", key)
+				}
+				for _, marker := range tieredTokenDoc {
+					if !strings.Contains(desc, marker) {
+						fail("%s: the tiered token parameter's description must pin the conditional requirement (missing %q; want the active-generation condition and the tier-2 key-only branch)", key, marker)
+					}
+				}
+			default:
+				if present {
+					fail("%s: must NOT carry the X-PF-Generation-Token header (tier 1/2 operation)", key)
+				}
 			}
 		}
 	}
@@ -382,34 +448,46 @@ func lookupRow(key string) (string, bool) {
 	return "", false
 }
 
-// hasGenerationToken reports whether the operation (or its shared path-item
-// parameters) references the GenerationToken header parameter with
-// required: true.
-func hasGenerationToken(pathItem, op map[string]any) bool {
+// generationTokenParam reports whether the operation (or its shared
+// path-item parameters) carries the X-PF-Generation-Token header
+// parameter, and with which required flag, location and description. $ref
+// use sites are resolved into components.parameters so the flags are read
+// from the shared definition they point at (R2C-F8: the ALWAYS and TIERED
+// shapes differ exactly there). The location is part of the answer since
+// R3C-F5: a credential parameter must never silently move off the header.
+func generationTokenParam(pathItem, op, compsParams map[string]any) (present, required bool, location, description string) {
 	check := func(params []any) bool {
 		for _, pAny := range params {
 			p, ok := pAny.(map[string]any)
 			if !ok {
 				continue
 			}
-			name, _ := p["name"].(string)
-			req, _ := p["required"].(bool)
-			if ref, ok := p["$ref"].(string); ok && strings.HasSuffix(ref, "/GenerationToken") {
-				return true
+			if ref, ok := p["$ref"].(string); ok && strings.HasPrefix(ref, "#/components/parameters/") {
+				name := strings.TrimPrefix(ref, "#/components/parameters/")
+				def, ok := compsParams[name].(map[string]any)
+				if !ok {
+					continue
+				}
+				p = def
 			}
-			if name == "X-PF-Generation-Token" && req {
-				return true
+			if name, _ := p["name"].(string); name != "X-PF-Generation-Token" {
+				continue
 			}
+			present = true
+			required, _ = p["required"].(bool)
+			location, _ = p["in"].(string)
+			description, _ = p["description"].(string)
+			return true
 		}
 		return false
 	}
 	if ps, ok := op["parameters"].([]any); ok && check(ps) {
-		return true
+		return present, required, location, description
 	}
 	if ps, ok := pathItem["parameters"].([]any); ok && check(ps) {
-		return true
+		return present, required, location, description
 	}
-	return false
+	return false, false, "", ""
 }
 
 // refExists resolves a local "#/..." pointer inside the parsed document.
