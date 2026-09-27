@@ -1,15 +1,16 @@
 ---
+name: feature-full
 steps:
   - { id: grill, kind: qa, interactive: true }
-  - { id: spec, kind: author }
-  - { id: grill-review, kind: gate, interactive: true, on_fail: { action: rewind, target: spec } }
+  - { id: spec, kind: spec }
+  - { id: grill-review, kind: qa, interactive: true, gate: true, on_fail: { action: rewind, target: spec } }
   - { id: plan, kind: author }
   - { id: code, kind: code }
   - { id: e2e-author, kind: author }
-  - { id: verification, kind: gate, on_fail: { action: rewind, target: code } }
+  - { id: verification, kind: gate, gate: true, on_fail: { action: rewind, target: code } }
   - { id: e2e-run, kind: code }
-  - { id: review, kind: review, on_fail: { action: rewind, target: code } }
-  - { id: release, kind: code, on_fail: { action: rewind, target: review } }
+  - { id: review, kind: review, gate: true, on_fail: { action: rewind, target: code } }
+  - { id: release, kind: code, gate: true, on_fail: { action: rewind, target: review } }
 budget: { requests: 200, tokens: 500000, wall_minutes: 240 }
 ---
 
