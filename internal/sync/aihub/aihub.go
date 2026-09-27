@@ -4,14 +4,12 @@
 // force-takeover / end-generation, 02 §5.1), the scheduler face (ready
 // queue, 02 §5.1b) and the machine heartbeat (02 §4.10).
 //
-// KNOWN PROTOCOL GAP (recorded honestly): 05 §7.4 remote site reconstruction
-// needs the MANIFEST CONTENT of each revision in the replay chain; the
-// canonical endpoint table (02 §5.1 row 19) is implemented by the Core as
-// metadata-only (GET /revisions?since → no ops). GetManifest therefore
-// returns a typed ErrManifestEndpointUnsupported from the HTTP client; the
-// recover package abstracts the remote behind an interface so an in-process
-// transport (integration tests, or a future Core endpoint) can supply
-// manifest content without changing the recovery logic.
+// Manifest content over HTTP: closed by the row-19 amendment (polyforge#14)
+// - GET /revisions?since=&include=ops serves each revision's manifest
+// audit content (kind + ops) inline, so 05 §7.4 remote-site reconstruction
+// replays entirely over HTTP. ListRevisions always requests include=ops
+// (the Daemon's only listing consumer is recovery); GetManifest fetches
+// one revision's content through the same endpoint as the fallback path.
 package aihub
 
 import (
@@ -46,9 +44,6 @@ func IsCode(err error, code string) bool {
 	ae, ok := err.(*APIError)
 	return ok && ae.Code == code
 }
-
-// ErrManifestEndpointUnsupported marks the manifest-content fetch gap.
-var ErrManifestEndpointUnsupported = fmt.Errorf("aihub: no HTTP endpoint serves manifest content (02 §5.1 row 19 is metadata-only)")
 
 // ClaimResponse mirrors owner.ClaimResponse (the hardened, idempotency-
 // cached claim result; 02 §6.1).
@@ -317,24 +312,47 @@ func (c *Client) GetBlock(wiID, shaHex string) ([]byte, error) {
 	return raw, nil
 }
 
-// ListRevisions fetches revision METADATA since seq (row 19).
+// ListRevisions fetches the revision listing since seq (row 19). The
+// Daemon's only consumer is remote-site recovery (05 §7.4), which replays
+// each revision's manifest ops, so the listing is ALWAYS requested with
+// include=ops (the row-19 amendment, polyforge#14) and the returned rows
+// carry kind+ops inline. The endpoint's default (parameter absent)
+// remains metadata-only per the wire contract.
 func (c *Client) ListRevisions(wiID string, since int64) ([]revision.RevisionMeta, error) {
 	var out struct {
 		Revisions []revision.RevisionMeta `json:"revisions"`
 	}
 	if err := c.do("GET",
-		fmt.Sprintf("/api/v1/work-items/%s/revisions?since=%d", url.PathEscape(wiID), since),
+		fmt.Sprintf("/api/v1/work-items/%s/revisions?since=%d&include=ops", url.PathEscape(wiID), since),
 		nil, "", &out); err != nil {
 		return nil, err
 	}
 	return out.Revisions, nil
 }
 
-// GetManifest fetches manifest CONTENT: NOT IMPLEMENTED by the Core HTTP
-// face (see the package comment). The recover package consumes manifests
-// through its Remote interface instead.
+// GetManifest fetches one revision's manifest content over the real HTTP
+// face: row 19 with include=ops (the amendment, polyforge#14) serves the
+// manifest audit content inline, so this lists since=seq and picks the
+// matching row. It is the FALLBACK path of recover.Recover (used when a
+// remote's listing does not carry ops inline). Fields the row-19 listing
+// does not carry (live_files, execution_state_included, built_at) are
+// zero-valued; recovery only consumes kind and ops.
 func (c *Client) GetManifest(wiID string, seq int64) (revision.Manifest, error) {
-	return revision.Manifest{}, ErrManifestEndpointUnsupported
+	rows, err := c.ListRevisions(wiID, seq)
+	if err != nil {
+		return revision.Manifest{}, err
+	}
+	for _, r := range rows {
+		if r.Seq == seq {
+			return revision.Manifest{
+				WorkItemID: wiID, Seq: r.Seq, Parent: r.Parent, Generation: r.Generation,
+				Kind: r.Kind, Ops: r.Ops, DataBytes: r.DataBytes,
+			}, nil
+		}
+	}
+	return revision.Manifest{}, &APIError{
+		Code: "SYNC-404", Detail: fmt.Sprintf("revision %d not listed", seq), Status: 404,
+	}
 }
 
 // Progress read-through: renders the latest published HEAD's execution.json

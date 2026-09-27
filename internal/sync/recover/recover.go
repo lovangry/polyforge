@@ -33,9 +33,11 @@ import (
 	"github.com/silgrid/polyforge/internal/sync/revision"
 )
 
-// Remote is the recovery read face (05 §5.1 rows 16/17/19 + manifest
-// content; see the aihub client's package comment for the manifest-content
-// endpoint gap).
+// Remote is the recovery read face (05 §5.1 rows 16/17/19). With the
+// row-19 amendment (polyforge#14) the listing can carry each revision's
+// manifest ops inline (include=ops); Recover replays from those and
+// falls back to per-seq GetManifest only when a remote's listing is
+// metadata-only.
 type Remote interface {
 	GetHead(ctx context.Context, wiID string) (*revision.HeadInfo, bool, error)
 	ListRevisions(ctx context.Context, wiID string, since int64) ([]revision.RevisionMeta, error)
@@ -80,13 +82,24 @@ func Recover(ctx context.Context, cap *capsule.Capsule, remote Remote) (*Result,
 		return nil, fmt.Errorf("recover: HEAD at %d but no revisions listed", head.Seq)
 	}
 	// Replay window: newest checkpoint ≤ HEAD resets the set; every
-	// incremental after it mutates it (05 §7.4). Manifest kind lives in the
-	// manifest content, fetched per seq here.
+	// incremental after it mutates it (05 §7.4). With the ops-bearing
+	// listing (row 19 include=ops, amendment polyforge#14) kind and ops
+	// arrive INLINE with the metadata - one round trip for the whole
+	// chain; a metadata-only listing falls back to per-seq GetManifest.
 	expected := map[string]revision.FileInfo{}
 	for _, m := range chain {
-		man, err := remote.GetManifest(ctx, wi, m.Seq)
-		if err != nil {
-			return nil, fmt.Errorf("recover: manifest %d: %w", m.Seq, err)
+		var man revision.Manifest
+		if m.Kind != "" {
+			man = revision.Manifest{
+				WorkItemID: wi, Seq: m.Seq, Parent: m.Parent,
+				Generation: m.Generation, Kind: m.Kind, Ops: m.Ops,
+			}
+		} else {
+			fetched, ferr := remote.GetManifest(ctx, wi, m.Seq)
+			if ferr != nil {
+				return nil, fmt.Errorf("recover: manifest %d: %w", m.Seq, ferr)
+			}
+			man = fetched
 		}
 		if man.Kind == revision.KindCheckpoint {
 			expected = map[string]revision.FileInfo{}

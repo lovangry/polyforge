@@ -17,8 +17,9 @@ import (
 
 func modeP(m int64) *int64 { return &m }
 
-// memRemote stores manifests and blocks directly (the in-process transport
-// that stands in for the missing manifest-content HTTP endpoint).
+// memRemote stores manifests and blocks directly: its listing rows carry
+// NO ops (metadata-only), so Recover exercises the per-seq GetManifest
+// fallback path of the Remote face.
 type memRemote struct {
 	manifests map[int64]revision.Manifest
 	blocks    map[string][]byte // sha → ORIGINAL content
