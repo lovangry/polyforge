@@ -30,6 +30,7 @@ type env struct {
 	ts     *httptest.Server
 	client *http.Client
 	db     *store.DB
+	dir    string // server data dir (memory authority files live under it)
 	admin  string // admin api key
 	writer string // member writer api key
 	outsider string // key of a user with no membership
@@ -64,7 +65,7 @@ func newEnv(t *testing.T) *env {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	e := &env{ts: ts, client: ts.Client(), db: db}
+	e := &env{ts: ts, client: ts.Client(), db: db, dir: dir}
 	e.admin = e.mintKey(t, db, "usr_admin", nil)
 	e.writer = e.mintKey(t, db, "usr_worker", nil)
 	e.outsider = e.mintKey(t, db, "usr_outsider", nil)
@@ -359,6 +360,105 @@ func TestMemoryFace(t *testing.T) {
 	st, m, _ = e.do(t, "GET", "/api/v1/memories/search?project=p1&q=你好世界", e.writer, nil)
 	if st == 200 && len(m["items"].([]any)) != 0 {
 		t.Fatalf("redacted memory still searchable: %v", m)
+	}
+}
+
+// TestRevisionsSinceIncludeOps: row 19 amendment (polyforge#14) at the
+// HTTP level — default listing metadata-only; include=ops carries kind+ops
+// inline; any unknown include value is CORE-400 (row 3 §5.1c style).
+func TestRevisionsSinceIncludeOps(t *testing.T) {
+	e := newEnv(t)
+
+	// Create an execution ticket, claim it, publish one revision.
+	st, m, _ := e.do(t, "POST", "/api/v1/work-items", e.writer, map[string]any{
+		"project": "p1", "goal": "rev-ops", "bundle_name": "demo",
+		"repo_inventory": []map[string]any{}, "repo_inventory_base": []map[string]any{},
+	})
+	if st != 201 {
+		t.Fatalf("create: %d %v", st, m)
+	}
+	wi := m["id"].(string)
+	st, m, _ = e.do(t, "POST", fmt.Sprintf("/api/v1/work-items/%s/claim", wi), e.writer,
+		map[string]any{"idempotency_key": "revops-k1", "machine_id": "mac_a"})
+	if st != 200 {
+		t.Fatalf("claim: %d %v", st, m)
+	}
+	token := m["generation_token"].(string)
+	gen := int64(m["generation"].(float64))
+
+	exec := `{"version":1}`
+	blockSha := sha256Long(exec)
+	req, _ := http.NewRequest("PUT", fmt.Sprintf("%s/api/v1/work-items/%s/revisions/0/blocks/%s", e.ts.URL, wi, blockSha), strings.NewReader(exec))
+	req.Header.Set("Authorization", "Bearer "+e.writer)
+	req.Header.Set("X-PF-Generation-Token", token)
+	resp, err := e.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("block put: %d", resp.StatusCode)
+	}
+	manifest := map[string]any{
+		"work_item_id": wi, "seq": 0, "parent": nil, "generation": gen,
+		"kind": "incremental",
+		"ops": []map[string]any{{
+			"op": "put", "path": "runtime-state/execution.json",
+			"sha256": blockSha, "bytes": float64(len(exec)), "mode": 420,
+		}},
+		"live_files": 1, "data_bytes": float64(len(exec)),
+		"execution_state_included": true, "built_at": nowRFC(),
+	}
+	sha := capsule.ComputeManifestSha(decodeManifest(t, manifest))
+	st, m, _ = e.doWithToken(t, "POST", fmt.Sprintf("/api/v1/work-items/%s/revisions/0/manifest", wi), e.writer, token,
+		map[string]any{"manifest": manifest, "manifest_sha": sha})
+	if st != 200 {
+		t.Fatalf("manifest: %d %v", st, m)
+	}
+
+	// Default: metadata only — no kind, no ops.
+	st, m, _ = e.do(t, "GET", fmt.Sprintf("/api/v1/work-items/%s/revisions?since=0", wi), e.writer, nil)
+	if st != 200 {
+		t.Fatalf("default listing: %d %v", st, m)
+	}
+	rows := m["revisions"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("rows: %v", rows)
+	}
+	if row := rows[0].(map[string]any); row["kind"] != nil || row["ops"] != nil {
+		t.Fatalf("default listing must be metadata-only: %v", row)
+	}
+
+	// include=ops: kind + ops inline from the manifest audit copy.
+	st, m, _ = e.do(t, "GET", fmt.Sprintf("/api/v1/work-items/%s/revisions?since=0&include=ops", wi), e.writer, nil)
+	if st != 200 {
+		t.Fatalf("ops listing: %d %v", st, m)
+	}
+	rows = m["revisions"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("rows: %v", rows)
+	}
+	row := rows[0].(map[string]any)
+	if row["kind"] != "incremental" {
+		t.Fatalf("kind: %v", row)
+	}
+	ops, ok := row["ops"].([]any)
+	if !ok || len(ops) != 1 {
+		t.Fatalf("ops: %v", row)
+	}
+	op := ops[0].(map[string]any)
+	if op["path"] != "runtime-state/execution.json" || op["sha256"] != blockSha {
+		t.Fatalf("op: %v", op)
+	}
+
+	// Unknown include value: CORE-400, same verdict style as row 3.
+	st, m, _ = e.do(t, "GET", fmt.Sprintf("/api/v1/work-items/%s/revisions?since=0&include=events", wi), e.writer, nil)
+	if st != 400 || errCode(t, m) != "CORE-400" {
+		t.Fatalf("unknown include: %d %v", st, m)
+	}
+	st, m, _ = e.do(t, "GET", fmt.Sprintf("/api/v1/work-items/%s/revisions?since=0&include=ops,bogus", wi), e.writer, nil)
+	if st != 400 || errCode(t, m) != "CORE-400" {
+		t.Fatalf("mixed include: %d %v", st, m)
 	}
 }
 

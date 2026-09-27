@@ -264,3 +264,40 @@ subagent wrote to `artifacts/`/`repos/` and its final structured JSON output.
 - On restart after a crash, always re-derive your position, your pending question (if
   any), and your effective model-candidate index purely from `execution.json` — never
   from your own prior process's memory, which no longer exists.
+
+## 12. Daemon control channel: the stdio protocol you must answer
+
+The Daemon that spawned you supervises you over your own standard process handles. On
+your **stdin** it writes single-line JSON messages (JSON-RPC 2.0 envelope:
+`{"jsonrpc":"2.0","method":"<method>","params":{...}}`, one message per line). You
+acknowledge every control method by writing ONE line to your **stdout** in the ack
+shape `{"method":"<method>","result":{"ack":"<method>"}}` at your next safe
+boundary — never mid-write to `execution.json` or any sync-surface file. The method
+names below are a fixed, closed set; they are byte-identical with the Daemon-side
+supervisor's declarations (`internal/mainagent`) and must never be renamed on one side
+only:
+
+- **`pf/quiesce`** — freeze confirmation (05 §2.7 / 04 §6.4). When you receive it,
+  finish or abandon any in-flight write so that you hold NO uncommitted writes to the
+  sync surfaces (`repos/**`, `artifacts/**`, `logs/**`, `runtime-state/execution.json`),
+  commit to starting none until released, and ack. A pending full-scan publish waits
+  for this ack; a missing ack stalls the publish, so treat the method as urgent.
+- **`pf/stop_notice`** — the stop-advancing notice (04 §6.5 step 3, graceful shutdown).
+  When you receive it, prepare for shutdown: stop advancing to any next step, drive the
+  current step to its next safe boundary (a step boundary plus its sync trigger per §8),
+  and ack. You pick the boundary — the Daemon never picks or skips steps on your behalf
+  (00 §3.6).
+- **`pf/answer`** — the Interactive answer relay (00 §3.4a). The `params` object is the
+  five-field answer relay forwarded VERBATIM by the Daemon:
+  `{question_id, answer_id, answer_text, answered_at, answered_by}`. Consume it only for
+  the waiting step whose persisted `pending_question.question_id` equals the relay's
+  `question_id` (that binding was already checked by the Daemon against your persisted
+  state — you re-check against `execution.json` anyway); then follow §7 step 4 exactly:
+  persist `pending_question.pending_answer` first, then in the same or the immediately
+  following atomic write append the consumed answer to `steps.<id>.answers[]`, clear
+  `pending_question`, and continue the SAME step in place. Ack after the relay is
+  durably recorded.
+
+You never initiate messages on this channel; you only ack. Any other `pf/*` method you
+do not recognize must be ignored, not answered, and never routed around — there is no
+second channel to the Daemon besides the local proxy of §11.

@@ -125,6 +125,29 @@ var expectedErrorCodes = []string{
 	"404",
 }
 
+// expectedErrorStatus pins the HTTP status every code in expectedErrorCodes
+// must map to in x-error-status-map — a value-level mirror of errStatus in
+// internal/server/server.go, so the yaml contract cannot drift from the
+// Go mapping (presence alone once let SYNC-403/MEM-403 sit at 500 while the
+// design classes them as 403).
+var expectedErrorStatus = map[string]int{
+	"404":      404,
+	"CORE-400": 400, "SYNC-400": 400, "MEM-400": 400,
+	"CORE-401": 401,
+	"CORE-403": 403, "SYNC-403": 403, "MEM-403": 403,
+	"CORE-404": 404, "MEM-404": 404, "SYNC-404": 404,
+	"CORE-409": 409, "SYNC-409": 409, "MEM-409": 409,
+	"CORE-410": 410, "SYNC-410": 410, "MEM-410": 410,
+	"CORE-413": 413, "MEM-413": 413,
+	"CORE-425": 425,
+	"CORE-500": 500, "MEM-500": 500,
+	"CORE-503": 503, "MEM-503": 503,
+	"CORE-504": 502, "MEM-502": 502,
+	"CORE-507": 507,
+	"CORE-508": 409, "CORE-509": 409,
+	"MEM-501": 501,
+}
+
 // businessRows/managementRows pin the counting rule: 26 business rows (with
 // row 3 counting GET+PATCH once and rows 22/24/26 being operation groups)
 // and 5 management rows.
@@ -320,8 +343,18 @@ func run(path string) error {
 		errMapAny = map[string]any{}
 	}
 	for _, code := range expectedErrorCodes {
-		if _, ok := errMapAny[code]; !ok {
+		v, ok := errMapAny[code]
+		if !ok {
 			fail("x-error-status-map missing code %s", code)
+			continue
+		}
+		got, ok := v.(int)
+		if !ok {
+			fail("x-error-status-map[%s] is not an integer: %v", code, v)
+			continue
+		}
+		if want := expectedErrorStatus[code]; got != want {
+			fail("x-error-status-map[%s] = %d, want %d (drift from internal/server/server.go errStatus)", code, got, want)
 		}
 	}
 

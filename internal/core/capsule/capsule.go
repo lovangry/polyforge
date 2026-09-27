@@ -408,9 +408,19 @@ type RevisionMeta struct {
 	ManifestSha string `json:"manifest_sha"`
 	DataBytes   int64  `json:"data_bytes"`
 	PublishedAt string `json:"published_at"`
+
+	// Ops-bearing extension (02 §5.1 row 19 amendment, polyforge#14):
+	// populated ONLY for include=ops listings — kind and ops are read
+	// from the rev/<seq>/manifest.json audit copy so 05 §7.4 recovery can
+	// replay over HTTP. The metadata fields above are unchanged.
+	Kind string `json:"kind,omitempty"`
+	Ops  []Op   `json:"ops,omitempty"`
 }
 
-func (s *Store) RevisionsSince(wiID string, since int64) ([]RevisionMeta, error) {
+// RevisionsSince lists revisions with seq >= since (row 19). With
+// includeOps the rows additionally carry each revision's manifest audit
+// content (kind + ops); the default listing stays metadata-only.
+func (s *Store) RevisionsSince(wiID string, since int64, includeOps bool) ([]RevisionMeta, error) {
 	if err := validateWiID(wiID); err != nil {
 		return nil, err
 	}
@@ -430,6 +440,14 @@ func (s *Store) RevisionsSince(wiID string, since int64) ([]RevisionMeta, error)
 		if parent.Valid {
 			p := parent.Int64
 			r.Parent = &p
+		}
+		if includeOps {
+			m, err := s.loadManifest(wiID, r)
+			if err != nil {
+				return nil, err
+			}
+			r.Kind = m.Kind
+			r.Ops = m.Ops
 		}
 		out = append(out, r)
 	}
@@ -624,7 +642,7 @@ func (s *Store) revisionChain(wiID string, head int64) ([]Manifest, error) {
 	// Manifests are replayed from the on-disk manifest.json audit copies
 	// (written at accept time); the DB rows carry the metadata.
 	var bestCheckpoint int64 = -1
-	all, err := s.RevisionsSince(wiID, 0)
+	all, err := s.RevisionsSince(wiID, 0, false)
 	if err != nil {
 		return nil, err
 	}

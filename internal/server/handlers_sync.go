@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/silgrid/polyforge/internal/core/capsule"
 )
@@ -138,7 +139,21 @@ func (s *Server) hRevisionsSince(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ownerAPI("SYNC-400", "bad since"))
 		return
 	}
-	metas, err := s.Caps.RevisionsSince(wiID, since)
+	// Row 19 amendment (polyforge#14): include=ops serves each revision's
+	// manifest audit content inline (same include style as row 3; §5.1c).
+	// Legal value here is ONLY "ops"; anything else is CORE-400.
+	includeOps := false
+	for _, inc := range strings.Split(r.URL.Query().Get("include"), ",") {
+		switch strings.TrimSpace(inc) {
+		case "ops":
+			includeOps = true
+		case "":
+		default:
+			writeErr(w, ownerAPI("CORE-400", "unknown include value "+inc))
+			return
+		}
+	}
+	metas, err := s.Caps.RevisionsSince(wiID, since, includeOps)
 	writeResult(w, err, func() { writeJSON(w, http.StatusOK, map[string]any{"revisions": metas}) })
 }
 

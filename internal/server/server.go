@@ -72,6 +72,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // errStatus maps a CORE-/SYNC-/MEM- code to its HTTP status. The code itself
 // rides in the JSON body (inference: the design pins codes, not statuses).
+// The SYNC set is 05 §5.2 and the MEM set is 06 §5.4: every code either
+// table defines gets its numeric status here, so no defined code falls to
+// the 500 default branch.
 func errStatus(code string) int {
 	switch code {
 	case "404":
@@ -80,7 +83,7 @@ func errStatus(code string) int {
 		return http.StatusBadRequest
 	case "CORE-401":
 		return http.StatusUnauthorized
-	case "CORE-403":
+	case "CORE-403", "SYNC-403", "MEM-403":
 		return http.StatusForbidden
 	case "CORE-404", "MEM-404", "SYNC-404":
 		return http.StatusNotFound
@@ -88,10 +91,12 @@ func errStatus(code string) int {
 		return http.StatusConflict
 	case "CORE-410", "SYNC-410", "MEM-410":
 		return http.StatusGone
-	case "CORE-413":
+	case "CORE-413", "MEM-413":
 		return http.StatusRequestEntityTooLarge
 	case "CORE-425":
 		return http.StatusTooEarly // 425 exists; body carries the typed code
+	case "MEM-501":
+		return http.StatusNotImplemented // DERIVE_FAILED: authority survives (06 §5.4)
 	case "CORE-503", "MEM-503":
 		return http.StatusServiceUnavailable
 	case "CORE-504", "MEM-502":
