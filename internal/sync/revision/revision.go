@@ -91,6 +91,14 @@ type RevisionMeta struct {
 	ManifestSha string `json:"manifest_sha"`
 	DataBytes   int64  `json:"data_bytes"`
 	PublishedAt string `json:"published_at"`
+
+	// Ops-bearing extension (02 §5.1 row 19 amendment, polyforge#14):
+	// present only when the listing was requested with include=ops; kind
+	// and ops are the revision's manifest audit content, so 05 §7.4
+	// recovery can replay over HTTP without a second per-seq fetch. The
+	// metadata fields above are unchanged.
+	Kind string `json:"kind,omitempty"`
+	Ops  []Op   `json:"ops,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

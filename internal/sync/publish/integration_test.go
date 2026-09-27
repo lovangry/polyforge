@@ -460,9 +460,11 @@ func TestRealNoChangeFlushDoesNotPublish(t *testing.T) {
 }
 
 // TestRealRecoveryRoundTrip: publish from capsule A, reconstruct into a
-// fresh capsule B via the recovery replay (manifest content served
-// in-process from the Core's on-disk audit copies), assert full replacement
-// fidelity. This is the §7.4 end-to-end against real stored bytes.
+// fresh capsule B via the recovery replay over the REAL HTTP face — the
+// ops-bearing listing (row 19 include=ops, amendment polyforge#14) serves
+// manifest content inline, blocks come via row 17 — assert full replacement
+// fidelity. This is the §7.4 end-to-end against real stored bytes with
+// HTTP as the only transport.
 func TestRealRecoveryRoundTrip(t *testing.T) {
 	e := newPubEnv(t)
 	e.writeCapsule("runtime-state/execution.json", `{"version":1,"current_step":"code"}`)
@@ -480,7 +482,7 @@ func TestRealRecoveryRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rr := &coreManifestRemote{e: e}
+	rr := &httpRecoveryRemote{c: e.client, stripOps: true}
 	res, err := recoverpkg.Recover(context.Background(), capB, rr)
 	if err != nil {
 		t.Fatal(err)
@@ -503,27 +505,115 @@ func TestRealRecoveryRoundTrip(t *testing.T) {
 	}
 }
 
-// coreManifestRemote is the in-process recovery transport: HEAD/list/blocks
-// over the real HTTP face; manifest content from the Core's on-disk audit
-// copies (the documented stand-in for the missing endpoint).
-type coreManifestRemote struct{ e *pubEnv }
+// TestRealRecoveryHTTPOnlyReplay: full recovery replay over HTTP-only
+// transport using the ops-bearing listing inline (no per-seq fallback):
+// bootstrap → incremental (with a delete) → a hand-posted checkpoint, then
+// a fresh-capsule reconstruction whose every byte crossed the wire.
+func TestRealRecoveryHTTPOnlyReplay(t *testing.T) {
+	e := newPubEnv(t)
+	e.writeCapsule("runtime-state/execution.json", `{"version":9}`)
+	e.writeCapsule("artifacts/a.md", "alpha content")
+	if _, err := e.pub.Publish(context.Background(), e.publishReq()); err != nil {
+		t.Fatal(err)
+	}
+	// Incremental: add b.md, drop a.md.
+	e.writeCapsule("artifacts/b.md", "beta content")
+	os.Remove(filepath.Join(e.capsule.Dir, "artifacts", "a.md"))
+	if _, err := e.pub.Publish(context.Background(), e.publishReq()); err != nil {
+		t.Fatal(err)
+	}
+	// Hand-post a checkpoint at seq 2 (full put list of the live set:
+	// b.md + execution.json; a.md stays dead).
+	shaB := revision.DigestHex([]byte("beta content"))
+	shaX := revision.DigestHex([]byte(`{"version":9}`))
+	mode := int64(420)
+	p1 := int64(1)
+	cp := revision.Manifest{
+		WorkItemID: e.wi, Seq: 2, Parent: &p1, Generation: e.gen,
+		Kind: revision.KindCheckpoint,
+		Ops: []revision.Op{
+			{Op: revision.OpPut, Path: "artifacts/b.md", Sha256: shaB, Bytes: 12, Mode: &mode},
+			{Op: revision.OpPut, Path: "runtime-state/execution.json", Sha256: shaX, Bytes: 12, Mode: &mode},
+		},
+		LiveFiles: 2, DataBytes: 24, ExecutionStateIncluded: true,
+	}
+	cpSha, err := revision.ComputeManifestSha(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.client.PostManifest(e.wi, cp, cpSha, e.token); err != nil {
+		t.Fatal(err)
+	}
 
-func (r *coreManifestRemote) GetHead(ctx context.Context, wi string) (*revision.HeadInfo, bool, error) {
-	return r.e.client.GetHead(wi)
+	// Fresh takeover machine: every recovery read crosses HTTP only, and
+	// the listing carries ops inline (stripOps=false) so the replay never
+	// falls back to GetManifest.
+	capB, _, err := capsule.Create(t.TempDir(), e.wi, e.gen+1, "mac_c", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Local stale file: full replacement must clear it.
+	os.MkdirAll(filepath.Join(capB.Dir, "artifacts"), 0o755)
+	os.WriteFile(filepath.Join(capB.Dir, "artifacts", "stale.md"), []byte("stale"), 0o644)
+
+	rr := &httpRecoveryRemote{c: e.client}
+	res, err := recoverpkg.Recover(context.Background(), capB, rr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Head == nil || res.Head.Seq != 2 {
+		t.Fatalf("recovery head: %+v", res.Head)
+	}
+	// Checkpoint window: a.md (deleted before the checkpoint) and the stale
+	// local file must NOT exist; b.md + execution.json must be byte-exact.
+	for _, gone := range []string{"artifacts/a.md", "artifacts/stale.md"} {
+		if _, serr := os.Stat(filepath.Join(capB.Dir, filepath.FromSlash(gone))); !os.IsNotExist(serr) {
+			t.Fatalf("%s must not exist after HTTP-only replay", gone)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(capB.Dir, "artifacts", "b.md"))
+	if err != nil || string(raw) != "beta content" {
+		t.Fatalf("b.md after recovery: %q %v", raw, err)
+	}
+	raw, err = os.ReadFile(filepath.Join(capB.Dir, "runtime-state", "execution.json"))
+	if err != nil || string(raw) != `{"version":9}` {
+		t.Fatalf("execution.json after recovery: %q %v", raw, err)
+	}
+	if res.Restored != 2 {
+		t.Fatalf("restored = %d, want 2", res.Restored)
+	}
 }
-func (r *coreManifestRemote) ListRevisions(ctx context.Context, wi string, since int64) ([]revision.RevisionMeta, error) {
-	return r.e.client.ListRevisions(wi, since)
+
+// httpRecoveryRemote is the recovery transport over the REAL HTTP face:
+// every method goes through the aihub client (rows 16/17/19). stripOps
+// drops the inline ops of the listing rows to force the per-seq
+// GetManifest fallback (also over HTTP) — used to prove both paths.
+type httpRecoveryRemote struct {
+	c        *aihub.Client
+	stripOps bool
 }
-func (r *coreManifestRemote) GetManifest(ctx context.Context, wi string, seq int64) (revision.Manifest, error) {
-	m := r.e.readCoreManifest(r.e.t, seq)
-	return revision.Manifest{
-		WorkItemID: m.WorkItemID, Seq: m.Seq, Parent: m.Parent, Generation: m.Generation,
-		Kind: m.Kind, Ops: convertOps(m.Ops), LiveFiles: m.LiveFiles, DataBytes: m.DataBytes,
-		ExecutionStateIncluded: m.ExecutionStateIncluded, BuiltAt: m.BuiltAt,
-	}, nil
+
+func (r *httpRecoveryRemote) GetHead(ctx context.Context, wi string) (*revision.HeadInfo, bool, error) {
+	return r.c.GetHead(wi)
 }
-func (r *coreManifestRemote) GetBlock(ctx context.Context, wi, sha string) ([]byte, error) {
-	return r.e.client.GetBlock(wi, sha)
+func (r *httpRecoveryRemote) ListRevisions(ctx context.Context, wi string, since int64) ([]revision.RevisionMeta, error) {
+	metas, err := r.c.ListRevisions(wi, since)
+	if err != nil {
+		return nil, err
+	}
+	if r.stripOps {
+		for i := range metas {
+			metas[i].Kind = ""
+			metas[i].Ops = nil
+		}
+	}
+	return metas, nil
+}
+func (r *httpRecoveryRemote) GetManifest(ctx context.Context, wi string, seq int64) (revision.Manifest, error) {
+	return r.c.GetManifest(wi, seq)
+}
+func (r *httpRecoveryRemote) GetBlock(ctx context.Context, wi, sha string) ([]byte, error) {
+	return r.c.GetBlock(wi, sha)
 }
 
 var _ = sql.ErrNoRows

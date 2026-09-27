@@ -1030,6 +1030,16 @@ paths:
         latest checkpoint and the increments to replay; block bodies come
         via row 17.
 
+        Baseline amendment (polyforge#14): 05 section 7.4 replays each
+        revision's manifest OPS over HTTP, which the metadata-only listing
+        could not serve. The optional `include=ops` parameter (same style
+        as row 3's include; no new endpoint, no count change) makes the
+        response carry, per row, that revision's manifest audit content
+        inline (`kind` + `ops`, read from the Core's rev/<seq>/manifest.json
+        audit copy; the metadata fields are unchanged). Default (parameter
+        absent): metadata-only, unchanged behavior. Unknown include value
+        -> CORE-400 (the only legal value here is `ops`).
+
         Implementation divergences encoded here (wire truth): `since` is
         required and integer (SYNC-400 when unparsable); the response
         wraps the array as `{revisions:[...]}`.
@@ -1039,6 +1049,13 @@ paths:
           required: true
           schema: {type: integer, format: int64}
           description: Include revisions with seq >= since.
+        - name: include
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ops]
+          description: 'When `ops`: each row additionally carries the revision''s manifest audit content (`kind` + `ops`) inline - the ops-bearing variant. Default: metadata-only.'
       responses:
         '200':
           description: Revision metadata list.
@@ -2406,7 +2423,7 @@ components:
 
     RevisionMeta:
       type: object
-      description: 'One capsule_revisions row as served by row 19 (recovery listing).'
+      description: 'One capsule_revisions row as served by row 19 (recovery listing). With include=ops (amendment polyforge#14) each row additionally carries the manifest audit content inline - the ops-bearing variant; the metadata properties are identical in both variants.'
       required: [seq, parent, generation, manifest_sha, data_bytes, published_at]
       properties:
         seq: {type: integer, format: int64}
@@ -2417,6 +2434,15 @@ components:
         manifest_sha: {type: string}
         data_bytes: {type: integer, format: int64}
         published_at: {type: string, format: date-time}
+        kind:
+          type: string
+          enum: [incremental, checkpoint]
+          description: 'Ops-bearing variant only (include=ops): manifest kind from the rev/<seq>/manifest.json audit copy.'
+        ops:
+          type: array
+          description: 'Ops-bearing variant only (include=ops): manifest ops from the rev/<seq>/manifest.json audit copy - the replay input of 05 section 7.4.'
+          items:
+            $ref: '#/components/schemas/ManifestOp'
 
     RevisionList:
       type: object

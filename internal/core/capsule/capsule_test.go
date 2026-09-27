@@ -127,7 +127,7 @@ func TestBootstrapChainAndIdempotency(t *testing.T) {
 	if _, err := hh.cap.PostManifest(wi, m0, s0, r.GenerationToken); err != nil {
 		t.Fatal(err)
 	}
-	metas, _ := hh.cap.RevisionsSince(wi, 0)
+	metas, _ := hh.cap.RevisionsSince(wi, 0, false)
 	if len(metas) != 1 {
 		t.Fatalf("replay must not insert a second row: %+v", metas)
 	}
@@ -170,6 +170,64 @@ func TestBootstrapChainAndIdempotency(t *testing.T) {
 	}
 	if decoded["current_step"] != "code" {
 		t.Fatalf("progress content: %s", body)
+	}
+}
+
+// TestRevisionsSinceIncludeOps: the default listing stays metadata-only;
+// includeOps reads kind+ops from the rev/<seq>/manifest.json audit copies
+// (row 19 amendment, polyforge#14) while the metadata fields are unchanged.
+func TestRevisionsSinceIncludeOps(t *testing.T) {
+	hh := setup(t)
+	wi, r := newClaimedWI(t, hh)
+	exec := `{"version":1}`
+	if err := hh.cap.PutBlock(wi, sha([]byte(exec)), []byte(exec), r.GenerationToken); err != nil {
+		t.Fatal(err)
+	}
+	wantOps := []capsule.Op{putOp("runtime-state/execution.json", exec)}
+	m0, s0 := buildManifest(wi, 0, nil, r.Generation, wantOps)
+	if _, err := hh.cap.PostManifest(wi, m0, s0, r.GenerationToken); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default: metadata only, no ops-bearing extension.
+	plain, err := hh.cap.RevisionsSince(wi, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain) != 1 {
+		t.Fatalf("rows: %+v", plain)
+	}
+	if plain[0].Kind != "" || plain[0].Ops != nil {
+		t.Fatalf("default listing must be metadata-only: %+v", plain[0])
+	}
+
+	// includeOps: kind + ops inline, metadata fields identical.
+	withOps, err := hh.cap.RevisionsSince(wi, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withOps) != 1 {
+		t.Fatalf("rows: %+v", withOps)
+	}
+	row := withOps[0]
+	if row.Kind != "incremental" {
+		t.Fatalf("kind = %q", row.Kind)
+	}
+	if len(row.Ops) != len(wantOps) {
+		t.Fatalf("ops = %+v, want %+v", row.Ops, wantOps)
+	}
+	for i, got := range row.Ops {
+		want := wantOps[i]
+		if got.Op != want.Op || got.Path != want.Path || got.Sha256 != want.Sha256 ||
+			got.Bytes != want.Bytes || got.Target != want.Target ||
+			got.Mode == nil || *got.Mode != *want.Mode {
+			t.Fatalf("ops[%d] = %+v, want %+v", i, got, want)
+		}
+	}
+	if row.Seq != plain[0].Seq || row.Generation != plain[0].Generation ||
+		row.ManifestSha != plain[0].ManifestSha || row.DataBytes != plain[0].DataBytes ||
+		row.PublishedAt != plain[0].PublishedAt {
+		t.Fatalf("metadata fields changed with includeOps: %+v vs %+v", row, plain[0])
 	}
 }
 
@@ -384,7 +442,7 @@ func TestPathTraversalGuards(t *testing.T) {
 		if _, err := hh.cap.Head(bad); ae(t, err).Code != "SYNC-400" {
 			t.Fatalf("Head(%q): expected SYNC-400, got %v", bad, err)
 		}
-		if _, err := hh.cap.RevisionsSince(bad, 0); ae(t, err).Code != "SYNC-400" {
+		if _, err := hh.cap.RevisionsSince(bad, 0, false); ae(t, err).Code != "SYNC-400" {
 			t.Fatalf("RevisionsSince(%q): expected SYNC-400, got %v", bad, err)
 		}
 		if err := hh.cap.Tombstone(bad, bad); ae(t, err).Code != "SYNC-400" {
@@ -486,7 +544,7 @@ func TestManifestWriteFailureAbortsPublish(t *testing.T) {
 	}
 
 	// No capsule_revisions row and HEAD unmoved (still bootstrap / no HEAD).
-	metas, merr := hh.cap.RevisionsSince(wi, 0)
+	metas, merr := hh.cap.RevisionsSince(wi, 0, false)
 	if merr != nil {
 		t.Fatal(merr)
 	}
