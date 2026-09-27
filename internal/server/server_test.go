@@ -30,6 +30,7 @@ type env struct {
 	ts     *httptest.Server
 	client *http.Client
 	db     *store.DB
+	dir    string // server data dir (memory authority files live under it)
 	admin  string // admin api key
 	writer string // member writer api key
 	outsider string // key of a user with no membership
@@ -64,7 +65,7 @@ func newEnv(t *testing.T) *env {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	e := &env{ts: ts, client: ts.Client(), db: db}
+	e := &env{ts: ts, client: ts.Client(), db: db, dir: dir}
 	e.admin = e.mintKey(t, db, "usr_admin", nil)
 	e.writer = e.mintKey(t, db, "usr_worker", nil)
 	e.outsider = e.mintKey(t, db, "usr_outsider", nil)

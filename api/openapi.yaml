@@ -76,13 +76,12 @@ tags:
     description: 'F. Management face M1-M5 (02 section 5.1).'
 
 # Mirrors internal/server/server.go errStatus() verbatim (the code rides in
-# the body; the status is derived). Codes not present in errStatus fall to
-# the default branch (HTTP 500) - MEM-413 and MEM-501 are listed here with
-# that default because the design defines them (06 section 5.4) but
-# errStatus has no explicit mapping for them. The same applies to SYNC-403
-# and MEM-403: the design classes them as 403-family (05 section 5.2 /
-# 06 section 5.4), but errStatus maps only CORE-403 to 403, so on the wire
-# these two codes surface with HTTP 500 (the errStatus default branch).
+# the body; the status is derived). Every code defined by 02 section 5.3
+# (CORE), 05 section 5.2 (SYNC) and 06 section 5.4 (MEM) is mapped to its
+# numeric status: the 403 family (SYNC-403 STALE_OWNER fencing, MEM-403
+# share/redact/update owner-only), MEM-413 (content over the 1 MiB limit)
+# and MEM-501 (DERIVE_FAILED) all carry their own status instead of
+# falling to the errStatus default branch (HTTP 500).
 x-error-status-map:
   '404': 404
   CORE-400: 400
@@ -90,8 +89,8 @@ x-error-status-map:
   MEM-400: 400
   CORE-401: 401
   CORE-403: 403
-  SYNC-403: 500
-  MEM-403: 500
+  SYNC-403: 403
+  MEM-403: 403
   CORE-404: 404
   MEM-404: 404
   SYNC-404: 404
@@ -112,8 +111,8 @@ x-error-status-map:
   CORE-507: 507
   CORE-508: 409
   CORE-509: 409
-  MEM-501: 500
-  MEM-413: 500
+  MEM-501: 501
+  MEM-413: 413
 
 paths:
   /api/v1/work-items:
@@ -869,8 +868,7 @@ paths:
 
         Divergence encoded here (wire truth): a fencing rejection is
         SYNC-403 (reason stale_generation | secret_rotated_expired |
-        secret_rolled_back), which errStatus does not map to 403 - it
-        surfaces as HTTP 500 carrying the SYNC-403 code in the body.
+        secret_rolled_back), surfaced as HTTP 403 (05 section 5.2).
       parameters:
         - $ref: '#/components/parameters/GenerationToken'
       requestBody:
@@ -956,9 +954,8 @@ paths:
 
         Implementation divergence encoded here (wire truth): the path
         `{seq}` must equal `manifest.seq` (else SYNC-400); success answers
-        HTTP 200 `{head_seq}`; a fencing rejection is SYNC-403, which
-        errStatus does not map to 403 - it surfaces as HTTP 500 carrying
-        the SYNC-403 code in the body.
+        HTTP 200 `{head_seq}`; a fencing rejection is SYNC-403, surfaced as
+        HTTP 403 (05 section 5.2).
       parameters:
         - $ref: '#/components/parameters/GenerationToken'
       requestBody:
@@ -1213,6 +1210,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/TooLarge'
     get:
       operationId: listMemories
       tags: [memory]
@@ -1378,6 +1377,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/DeriveFailed'
     patch:
       operationId: patchMemory
       tags: [memory]
@@ -1393,8 +1394,8 @@ paths:
 
         Implementation divergence encoded here (wire truth): the response
         is the updated full Entry (06 section 5.2 says `{id, updated_at}`);
-        the owner violation MEM-403 is not mapped by errStatus and
-        surfaces as HTTP 500 carrying the MEM-403 code in the body.
+        the owner violation MEM-403 surfaces as HTTP 403 and content over
+        the 1 MiB limit is MEM-413 / HTTP 413 (06 section 5.4).
       requestBody:
         required: true
         content:
@@ -1418,6 +1419,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
 
   /api/v1/memories/{id}/redact:
     post:
@@ -1433,9 +1436,8 @@ paths:
         redacted -> MEM-409. Owner-only (MEM-403 otherwise).
 
         Implementation divergences encoded here (wire truth): the response
-        is `{ok:true}` (200); the owner violation MEM-403 is not mapped by
-        errStatus and surfaces as HTTP 500 carrying the MEM-403 code in
-        the body.
+        is `{ok:true}` (200); the owner violation MEM-403 surfaces as HTTP
+        403 (06 section 5.4).
       responses:
         '200':
           description: Redacted.
@@ -1469,8 +1471,8 @@ paths:
         secret epoch (fix #4 - HMAC key derived from the rotatable secret,
         not a public constant); persistence/revocation lands in the
         Memory-domain work item; the response is `{share_token}`; the
-        owner violation MEM-403 is not mapped by errStatus and surfaces as
-        HTTP 500 carrying the MEM-403 code in the body.
+        owner violation MEM-403 surfaces as HTTP 403 (06 section 5.4,
+        A18).
       responses:
         '200':
           description: Share token minted.
@@ -1930,7 +1932,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
     Forbidden:
-      description: 'CORE-403: token or authorization failure (reason stale_generation | secret_rotated_expired | secret_rolled_back | forbidden, 02 section 5.3). NOTE: the sibling codes SYNC-403 and MEM-403 are NOT mapped by errStatus and surface under HTTP 500 carrying their typed code in the body.'
+      description: 'CORE-403 / SYNC-403 / MEM-403: token, fencing or authorization failure (reason stale_generation | secret_rotated_expired | secret_rolled_back | forbidden, 02 section 5.3, 05 section 5.2, 06 section 5.4).'
       content:
         application/json:
           schema:
@@ -1954,7 +1956,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
     TooLarge:
-      description: 'CORE-413: payload exceeds the limit (bodies capped at 16 MiB, blocks at 256 MiB).'
+      description: 'CORE-413 / MEM-413: payload exceeds the limit (request bodies capped at 16 MiB, CAS blocks at 256 MiB, memory authority content at 1 MiB - 06 section 5.4).'
       content:
         application/json:
           schema:
@@ -1966,7 +1968,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
     InternalServerError:
-      description: 'CORE-500 / MEM-500 / any unmapped typed code (incl. MEM-501, MEM-413 via the errStatus default branch).'
+      description: 'CORE-500 / MEM-500 / any unmapped typed code (the errStatus default branch).'
       content:
         application/json:
           schema:
@@ -1985,6 +1987,12 @@ components:
             $ref: '#/components/schemas/ErrorEnvelope'
     InsufficientStorage:
       description: 'CORE-507: local storage unavailable (write failure, disk full).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    DeriveFailed:
+      description: 'MEM-501: DERIVE_FAILED - the HTML derivation failed; the authority Markdown content is unaffected and retrieval keeps working (06 section 5.4). Served on format=html reads.'
       content:
         application/json:
           schema:
