@@ -1,0 +1,531 @@
+package cli
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"flag"
+	"fmt"
+	"net"
+	"net/url"
+	"time"
+)
+
+// daemon returns the daemon-socket client for the resolved config.
+func (ctx *Context) daemon() *DaemonClient {
+	return NewDaemonClient(ctx.Cfg.DaemonSocket)
+}
+
+// ---------------------------------------------------------------------------
+// submit — interactive submit of one WI (claim/resume/takeover; 00 §5.1
+// routes submit to the daemon face, 04 §5.1 claim/takeover rows).
+// ---------------------------------------------------------------------------
+
+var cmdSubmit = &Command{
+	Name:    "submit",
+	Summary: "Submit a WI for execution on this machine (claim, or takeover)",
+	Usage:   "pf submit <id> [--takeover] [--priority low|normal|high|urgent]",
+	Setup: func(fs *flag.FlagSet) {
+		fs.Bool("takeover", false, "admin force-takeover instead of a plain claim")
+		fs.String("priority", "normal", "queue priority (low|normal|high|urgent)")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("submit: expected exactly one work item id")
+		}
+		takeover := boolFlag(fs, "takeover")
+		priority := stringFlag(fs, "priority")
+		d := ctx.daemon()
+		var (
+			raw []byte
+			err error
+		)
+		if takeover {
+			raw, err = d.Takeover(args[0], priority)
+		} else {
+			raw, err = d.Claim(args[0], priority)
+		}
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			var sr SubmitResponse
+			if err := decodeJSON(raw, &sr); err == nil && sr.Accepted {
+				fmt.Fprintf(ctx.Stdout, "submitted %s (accepted by the local daemon)\n", sr.WorkItemID)
+			} else {
+				printJSON(ctx.Stdout, raw)
+			}
+		}
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
+// resume — resume a paused WI (always a fresh claim, generation+1;
+// 04 §5.1 resume row).
+// ---------------------------------------------------------------------------
+
+var cmdResume = &Command{
+	Name:    "resume",
+	Summary: "Resume a paused WI on this machine (fresh generation)",
+	Usage:   "pf resume <id> [--priority low|normal|high|urgent]",
+	Setup: func(fs *flag.FlagSet) {
+		fs.String("priority", "normal", "queue priority (low|normal|high|urgent)")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("resume: expected exactly one work item id")
+		}
+		raw, err := ctx.daemon().Resume(args[0], stringFlag(fs, "priority"))
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			var sr SubmitResponse
+			if err := decodeJSON(raw, &sr); err == nil && sr.Accepted {
+				fmt.Fprintf(ctx.Stdout, "resumed %s (fresh claim accepted by the local daemon)\n", sr.WorkItemID)
+			} else {
+				printJSON(ctx.Stdout, raw)
+			}
+		}
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
+// observe — two-layer observation (04 §5.1a): the daemon event stream when
+// this machine has the Capsule; the aihub read-through (row 6) otherwise.
+// ---------------------------------------------------------------------------
+
+var cmdObserve = &Command{
+	Name:    "observe",
+	Summary: "Observe WI progress (daemon event stream, or AIHub read-through)",
+	Usage:   "pf observe <id> [--after N] [--read-through]",
+	Setup: func(fs *flag.FlagSet) {
+		fs.Int64("after", 0, "last received event cursor (first call: 0)")
+		fs.Bool("read-through", false, "skip the local daemon layer, render the published HEAD directly")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("observe: expected exactly one work item id")
+		}
+		after := int64Flag(fs, "after")
+		readThrough := boolFlag(fs, "read-through")
+
+		if !readThrough {
+			d := ctx.daemon()
+			raw, err := d.Observe(args[0], after)
+			switch {
+			case err == nil:
+				ctx.emit(raw)
+				if !ctx.JSON {
+					var resp ObserveResponse
+					if err := decodeJSON(raw, &resp); err == nil {
+						renderObserve(ctx.Stdout, &resp)
+					} else {
+						printJSON(ctx.Stdout, raw)
+					}
+				}
+				return nil
+			case daemonSaysNotLocal(err):
+				// DAEMON-404: neither a local Capsule nor any published
+				// progress on the daemon side — fall through to the
+				// read-through layer (04 §5.1a).
+			case isDialError(err):
+				// Daemon not reachable at all (not running here): treat as
+				// "not local", with a note — the local layer being absent
+				// must not hide the WI from observation.
+				fmt.Fprintln(ctx.Stderr, "pf: daemon not reachable locally; using AIHub read-through")
+			default:
+				return err
+			}
+		}
+		return observeReadThrough(ctx, args[0])
+	},
+}
+
+// observeReadThrough renders the latest published HEAD via the aihub
+// row-6 progress face.
+func observeReadThrough(ctx *Context, wiID string) error {
+	raw, err := NewClient(ctx.Cfg.Server, ctx.Cfg.APIKey).GetProgress(wiID)
+	if err != nil {
+		return err
+	}
+	ctx.emit(raw)
+	if !ctx.JSON {
+		var p progressView
+		if err := decodeJSON(raw, &p); err == nil {
+			renderProgress(ctx.Stdout, &p)
+		}
+	}
+	return nil
+}
+
+// daemonSaysNotLocal reports whether the daemon answered the typed
+// "object not found" code (DAEMON-404: this machine holds no Capsule and
+// Core has no published progress either).
+func daemonSaysNotLocal(err error) bool {
+	var ae *APIError
+	if asAPIError(err, &ae) {
+		return ae.Code == "DAEMON-404"
+	}
+	return false
+}
+
+// isDialError reports whether the failure is a socket-level connection
+// problem (daemon not running on this machine) rather than a typed answer.
+func isDialError(err error) bool {
+	var ae *APIError
+	if asAPIError(err, &ae) {
+		return false
+	}
+	var uerr *url.Error
+	if ok := asType(err, &uerr); ok {
+		var nerr *net.OpError
+		return asType(uerr.Err, &nerr)
+	}
+	var nerr *net.OpError
+	return asType(err, &nerr)
+}
+
+// asType is a tiny errors.As equivalent for the two concrete types used
+// above.
+func asType[T any](err error, target *T) bool {
+	if err == nil {
+		return false
+	}
+	if v, ok := err.(T); ok {
+		*target = v
+		return true
+	}
+	if uerr, ok := err.(interface{ Unwrap() error }); ok {
+		return asType(uerr.Unwrap(), target)
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// answer — answer a needs_input question (00 §3.4a relay message; the
+// daemon forwards the payload verbatim, identity via X-PF-User).
+// ---------------------------------------------------------------------------
+
+var cmdAnswer = &Command{
+	Name:    "answer",
+	Summary: "Answer a pending needs_input question of a WI",
+	Usage:   "pf answer <id> --question q_xxx --text \"...\" [--answer-id a_xxxx] [--by user]",
+	Setup: func(fs *flag.FlagSet) {
+		fs.String("question", "", "question_id shown by observe (required)")
+		fs.String("text", "", "natural-language answer (required)")
+		fs.String("answer-id", "", "explicit answer id (default: generated a_ + 6 chars)")
+		fs.String("by", "", "answerer user id (default: config user_id / PF_USER_ID)")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("answer: expected exactly one work item id")
+		}
+		question := stringFlag(fs, "question")
+		text := stringFlag(fs, "text")
+		answerID := stringFlag(fs, "answer-id")
+		by := stringFlag(fs, "by")
+		if question == "" || text == "" {
+			return fmt.Errorf("answer: --question and --text are required")
+		}
+		who := by
+		if who == "" {
+			who = ctx.Cfg.UserID
+		}
+		if who == "" {
+			return fmt.Errorf("answer: answered_by identity required (--by or PF_USER_ID / user_id in config)")
+		}
+		if answerID == "" {
+			answerID = newAnswerID()
+		}
+		payload := AnswerPayload{
+			QuestionID: question,
+			AnswerID:   answerID,
+			AnswerText: text,
+			AnsweredAt: time.Now().UTC().Format(time.RFC3339),
+			AnsweredBy: who,
+		}
+		raw, err := ctx.daemon().Answer(args[0], payload)
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			fmt.Fprintf(ctx.Stdout, "answer %s delivered for question %s\n", payload.AnswerID, payload.QuestionID)
+		}
+		return nil
+	},
+}
+
+// newAnswerID mints an answer id: "a_" + 6 random hex chars (the format
+// pinned by 00 §3.4a).
+func newAnswerID() string {
+	b := make([]byte, 3)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failure is unrecoverable; fall back to time-based.
+		return fmt.Sprintf("a_%06x", time.Now().UnixNano()&0xffffff)
+	}
+	return "a_" + hex.EncodeToString(b)
+}
+
+// ---------------------------------------------------------------------------
+// batch-confirm — Batch wave: read the scheduler recommendation, let the
+// human confirm (possibly edited), submit the wave in one call
+// (00 §3.4b; 04 §5.1 mode(get_recommendation) + batch_submit).
+// ---------------------------------------------------------------------------
+
+var cmdBatchConfirm = &Command{
+	Name:    "batch-confirm",
+	Summary: "Batch wave: show the recommendation, confirm and submit it",
+	Usage: "pf batch-confirm                # show the recommended wave only (no Job is created)\n" +
+		"pf batch-confirm --all           # confirm and submit the whole recommendation\n" +
+		"pf batch-confirm <id> [<id>...]  # confirm and submit exactly this set",
+	Setup: func(fs *flag.FlagSet) {
+		fs.Bool("all", false, "submit the entire recommendation as the confirmed wave")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		all := boolFlag(fs, "all")
+		ids := args
+		d := ctx.daemon()
+
+		// Always fetch the scheduler recommendation first (04 §6.1b step 1;
+		// the daemon forwards the aihub ready-queue answer read-only).
+		raw, err := d.Mode(ModeRequest{Action: "get_recommendation"})
+		if err != nil {
+			return err
+		}
+		var rec readyQueueView
+		if err := decodeJSON(raw, &rec); err != nil {
+			return fmt.Errorf("batch-confirm: cannot parse recommendation: %w", err)
+		}
+
+		if !all && len(ids) == 0 {
+			// Read-only recommendation display; NO Job is created (04 §6.1b
+			// step 1: the daemon never treats a recommendation as confirmed).
+			ctx.emit(raw)
+			if !ctx.JSON {
+				renderReadyQueue(ctx.Stdout, &rec)
+				fmt.Fprintln(ctx.Stdout, "\nconfirm with: pf batch-confirm --all  or  pf batch-confirm <id> ...")
+			}
+			return nil
+		}
+		if all {
+			ids = make([]string, 0, len(rec.Executable))
+			for _, e := range rec.Executable {
+				ids = append(ids, e.ID)
+			}
+		}
+		if len(ids) == 0 {
+			return fmt.Errorf("batch-confirm: the recommendation is empty; nothing to submit")
+		}
+		sraw, err := d.BatchSubmit(ids)
+		if err != nil {
+			return err
+		}
+		ctx.emit(sraw)
+		if !ctx.JSON {
+			fmt.Fprintf(ctx.Stdout, "wave submitted: %d work item(s)\n", len(ids))
+			printJSON(ctx.Stdout, sraw)
+		}
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
+// pause — pause a running WI via the daemon (generation close needs the
+// daemon-generated flush_evidence, 02 §6.4 / 04 §6.2 path A).
+// ---------------------------------------------------------------------------
+
+var cmdPause = &Command{
+	Name:    "pause",
+	Summary: "Pause a running WI at the next safe boundary",
+	Usage:   "pf pause <id>",
+	Setup:   func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("pause: expected exactly one work item id")
+		}
+		raw, err := ctx.daemon().Pause(args[0])
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			fmt.Fprintf(ctx.Stdout, "pause requested for %s\n", args[0])
+			printJSON(ctx.Stdout, raw)
+		}
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
+// wrap — wrap (or fail) a running WI via the daemon; same final-flush
+// requirement as pause (02 §6.4).
+// ---------------------------------------------------------------------------
+
+var cmdWrap = &Command{
+	Name:    "wrap",
+	Summary: "Wrap a running WI as terminal success (--fail for terminal failure)",
+	Usage:   "pf wrap <id> [--fail]",
+	Setup: func(fs *flag.FlagSet) {
+		fs.Bool("fail", false, "close the generation with reason=fail instead of wrap")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("wrap: expected exactly one work item id")
+		}
+		reason := "wrap"
+		if boolFlag(fs, "fail") {
+			reason = "fail"
+		}
+		raw, err := ctx.daemon().Wrap(args[0], reason)
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			fmt.Fprintf(ctx.Stdout, "%s requested for %s\n", reason, args[0])
+			printJSON(ctx.Stdout, raw)
+		}
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
+// ops — the daemon ops face: status / mode / shutdown (04 §5.1).
+// ---------------------------------------------------------------------------
+
+var cmdOps = &Command{
+	Name:    "ops",
+	Summary: "Daemon ops: local job status, mode switching, graceful shutdown",
+	Usage: "pf ops status\n" +
+		"pf ops mode                                   # query the current mode (via status)\n" +
+		"pf ops mode set --max-concurrent-jobs N [--mode interactive|batch|drain]\n" +
+		"pf ops mode drain                             # enter autonomous drain mode\n" +
+		"pf ops mode abort-drain                       # leave drain mode\n" +
+		"pf ops shutdown                               # graceful shutdown (quiesce)",
+	Setup: func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("ops: expected status|mode|shutdown")
+		}
+		d := ctx.daemon()
+		switch args[0] {
+		case "status":
+			raw, err := d.Status()
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				var s StatusResponse
+				if err := decodeJSON(raw, &s); err == nil {
+					renderStatus(ctx.Stdout, &s)
+				} else {
+					printJSON(ctx.Stdout, raw)
+				}
+			}
+			return nil
+		case "mode":
+			return opsMode(ctx, d, args[1:])
+		case "shutdown":
+			raw, err := d.Shutdown()
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				fmt.Fprintln(ctx.Stdout, "graceful shutdown requested; the daemon quiesces and exits")
+			}
+			return nil
+		default:
+			return fmt.Errorf("ops: unknown action %q", args[0])
+		}
+	},
+}
+
+// opsMode handles `pf ops mode [set|drain|abort-drain]`. A bare query has
+// no POST /mode "get" action (hMode rejects it) — it reads GET /status.
+func opsMode(ctx *Context, d *DaemonClient, args []string) error {
+	if len(args) == 0 {
+		raw, err := d.Status()
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			var s StatusResponse
+			if err := decodeJSON(raw, &s); err == nil {
+				fmt.Fprintf(ctx.Stdout, "mode: %s\n", s.Mode)
+			} else {
+				printJSON(ctx.Stdout, raw)
+			}
+		}
+		return nil
+	}
+	switch args[0] {
+	case "set":
+		f := flag.NewFlagSet("pf ops mode set", flag.ContinueOnError)
+		f.SetOutput(ctx.Stderr)
+		maxJobs := f.Int("max-concurrent-jobs", 0, "max concurrent jobs on this machine (n >= 1)")
+		mode := f.String("mode", "", "also switch the mode: interactive|batch|drain")
+		rest, err := parseCommandArgs(f, args[1:])
+		if err != nil {
+			return err
+		}
+		if len(rest) != 0 {
+			return fmt.Errorf("ops mode set: unexpected arguments %v", rest)
+		}
+		req := ModeRequest{Action: "set", Mode: *mode}
+		if *maxJobs >= 1 {
+			req.MaxConcurrentJobs = maxJobs
+		} else if *maxJobs < 0 {
+			return fmt.Errorf("ops mode set: --max-concurrent-jobs must be >= 1")
+		}
+		if req.Mode == "" && req.MaxConcurrentJobs == nil {
+			return fmt.Errorf("ops mode set: expected --max-concurrent-jobs N and/or --mode M")
+		}
+		raw, err := d.Mode(req)
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			printJSON(ctx.Stdout, raw)
+		}
+		return nil
+	case "drain", "abort-drain":
+		raw, err := d.Mode(ModeRequest{Action: args[0]})
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			printJSON(ctx.Stdout, raw)
+		}
+		return nil
+	default:
+		return fmt.Errorf("ops mode: unknown sub-action %q (set|drain|abort-drain)", args[0])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Flag accessors for flags registered in Setup (values are already parsed
+// by the dispatcher when Run executes).
+// ---------------------------------------------------------------------------
+
+func boolFlag(fs *flag.FlagSet, name string) bool {
+	return fs.Lookup(name).Value.(flag.Getter).Get().(bool)
+}
+func stringFlag(fs *flag.FlagSet, name string) string {
+	return fs.Lookup(name).Value.(flag.Getter).Get().(string)
+}
+func int64Flag(fs *flag.FlagSet, name string) int64 {
+	return fs.Lookup(name).Value.(flag.Getter).Get().(int64)
+}
+func intFlag(fs *flag.FlagSet, name string) int {
+	return fs.Lookup(name).Value.(flag.Getter).Get().(int)
+}
