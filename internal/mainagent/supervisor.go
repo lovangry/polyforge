@@ -45,6 +45,26 @@ type rpcMessage struct {
 	Params  map[string]any `json:"params,omitempty"`
 }
 
+// The stdio control channel method names (the WI-Agent side of the
+// protocol this supervisor speaks). These names are a TWO-SIDED contract:
+// skills/pf-execute/SKILL.md declares the agent's half and must name each
+// method BYTE-IDENTICALLY. TestPfExecuteSkillDeclaresControlChannel in
+// skills_contract_test.go is the drift guard — change a name here and the
+// test fails until the skill file matches.
+const (
+	// MethodQuiesce: freeze confirmation (05 §2.7 / 04 §6.4). The agent
+	// acks that no in-flight sync-surface writes exist and none will
+	// start until released.
+	MethodQuiesce = "pf/quiesce"
+	// MethodStopNotice: the stop-advancing notice (04 §6.5 step 3). The
+	// agent picks its own next safe boundary; the daemon never picks or
+	// skips steps on its behalf (00 §3.6).
+	MethodStopNotice = "pf/stop_notice"
+	// MethodAnswer: the Interactive answer relay (00 §3.4a). Params carry
+	// the five-field AnswerRelay verbatim, bound by question_id.
+	MethodAnswer = "pf/answer"
+)
+
 var msgID int64
 
 func nextMsgID() int64 {
@@ -229,21 +249,21 @@ func (p *Proc) awaitAck(ctx context.Context, method string) error {
 // (04 §6.5 step 3): the agent picks its own next safe boundary; the daemon
 // never picks or skips steps on its behalf (00 §3.6).
 func (p *Proc) NotifyStop(ctx context.Context) error {
-	m := rpcMessage{JSONRPC: "2.0", Method: "pf/stop_notice", Params: map[string]any{"reason": "graceful_shutdown"}}
+	m := rpcMessage{JSONRPC: "2.0", Method: MethodStopNotice, Params: map[string]any{"reason": "graceful_shutdown"}}
 	if err := p.send(m); err != nil {
 		return err
 	}
-	return p.awaitAck(ctx, "pf/stop_notice")
+	return p.awaitAck(ctx, MethodStopNotice)
 }
 
 // Quiesce implements the freeze confirmation (05 §2.7 / 04 §6.4): the
 // agent confirms no in-flight sync-surface writes and none will start.
 func (p *Proc) Quiesce(ctx context.Context) error {
-	m := rpcMessage{JSONRPC: "2.0", Method: "pf/quiesce"}
+	m := rpcMessage{JSONRPC: "2.0", Method: MethodQuiesce}
 	if err := p.send(m); err != nil {
 		return err
 	}
-	return p.awaitAck(ctx, "pf/quiesce")
+	return p.awaitAck(ctx, MethodQuiesce)
 }
 
 // DeliverAnswer relays an answer payload verbatim to the waiting agent
@@ -255,7 +275,7 @@ func (p *Proc) DeliverAnswer(relay daemon.AnswerRelay) error {
 	}
 	params := map[string]any{}
 	json.Unmarshal(b, &params)
-	return p.send(rpcMessage{JSONRPC: "2.0", Method: "pf/answer", Params: params})
+	return p.send(rpcMessage{JSONRPC: "2.0", Method: MethodAnswer, Params: params})
 }
 
 // Terminate kills the WHOLE process group (04 §6.2 path B / §7.1 residue):

@@ -37,6 +37,12 @@ type Config struct {
 	Version       string
 	DrainProject  string // project whose ready queue Drain consumes
 	Adapter       string // default harness adapter (pi|claude)
+	// StaleHeartbeatThreshold configures the stale-machines status signal
+	// (04 §7.2/§9): a machine whose last successful heartbeat is older than
+	// this is listed in the status output. Monitoring signal only — no
+	// auto-takeover is ever derived from it. Zero selects
+	// DefaultStaleHeartbeatThreshold.
+	StaleHeartbeatThreshold time.Duration
 }
 
 // SpawnParams is what the daemon hands the agent spawner (04 §6.1 step 9).
@@ -85,6 +91,7 @@ type Daemon struct {
 	jobq   *JobQueue
 	modes  *ModeCtl
 	ledger *AnswerLedger
+	beats  *BeatTracker
 
 	pub *publish.Publisher
 
@@ -132,6 +139,7 @@ func New(cfg Config, spawner AgentSpawner) (*Daemon, error) {
 		jobq:     NewJobQueue(),
 		modes:    NewModeCtl(),
 		ledger:   NewAnswerLedger(),
+		beats:    NewBeatTracker(),
 		pub:      publish.New(&remoteAdapter{c: client}, mutex, stager, pubStore),
 		spawner:  spawner,
 		jobs:     map[string]*jobRuntime{},
@@ -462,7 +470,9 @@ func (d *Daemon) PublishRequest(ctx context.Context, wi, reason string) (*Publis
 		})
 		if err != nil {
 			jr.ring.Append(EvSyncFailed, map[string]any{"reason": reason, "error": err.Error()})
-			return nil, err
+			// 04 §7.3: a rolled-back generation credential is a dedicated
+			// isolation path, not a publish failure to retry.
+			return nil, d.classifyWriteErr(wi, err)
 		}
 		jr.ring.Append(EvPublished, map[string]any{"reason": reason, "final": true})
 		return &PublishOutcome{
@@ -475,7 +485,8 @@ func (d *Daemon) PublishRequest(ctx context.Context, wi, reason string) (*Publis
 	})
 	if err != nil {
 		jr.ring.Append(EvSyncFailed, map[string]any{"reason": reason, "error": err.Error()})
-		return nil, err
+		// 04 §7.3: secret_rolled_back isolates the scene instead of a retry.
+		return nil, d.classifyWriteErr(wi, err)
 	}
 	if res != nil && !res.Noop {
 		jr.ring.Append(EvPublished, map[string]any{"reason": reason, "head_seq": res.HeadSeq})
@@ -622,6 +633,13 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 		// End the generation (the daemon holds the token; 04 §6.2 A path
 		// step 3 — the shutdown-interrupted close is a NORMAL end).
 		if err := d.client.EndGeneration(wi, "pause", "", jr.token, outcome.FlushEvidence); err != nil {
+			// 04 §7.3: a rolled-back credential is isolated and the shutdown
+			// moves on — this WI is already dead server-side; failing the
+			// whole shutdown would hold every OTHER WI's close hostage.
+			if isSecretRolledBack(err) {
+				_ = d.quarantineRolledBack(wi)
+				continue
+			}
 			return fmt.Errorf("%w: %s end-generation: %v", ErrFlushFailed, wi, err)
 		}
 		d.sealJob(wi, jr)
@@ -721,10 +739,13 @@ func (d *Daemon) crashRecoveryPrompt(j Job) (string, error) {
 // ---------------------------------------------------------------------------
 // Heartbeat (04 §7.2): 60s cadence, mode rides along.
 
-// RunHeartbeat beats until ctx ends.
+// RunHeartbeat beats until ctx ends. Every SUCCESSFUL beat is recorded in
+// the beat tracker (the stale-machines status signal, 04 §7.2/§9) — failed
+// beats deliberately do not advance the clock, so a Core outage ages the
+// machine out exactly like a stopped daemon would.
 func (d *Daemon) RunHeartbeat(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
-		interval = 60 * time.Second
+		interval = DefaultHeartbeatInterval
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -733,9 +754,20 @@ func (d *Daemon) RunHeartbeat(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_, _ = d.client.Heartbeat(d.cfg.MachineID, d.cfg.Version, d.modes.Current())
+			if _, err := d.client.Heartbeat(d.cfg.MachineID, d.cfg.Version, d.modes.Current()); err == nil {
+				d.beats.Record(d.cfg.MachineID, time.Now())
+			}
 		}
 	}
+}
+
+// staleHeartbeatThreshold resolves the configured threshold (default when
+// unset or non-positive).
+func (d *Daemon) staleHeartbeatThreshold() time.Duration {
+	if d.cfg.StaleHeartbeatThreshold > 0 {
+		return d.cfg.StaleHeartbeatThreshold
+	}
+	return DefaultStaleHeartbeatThreshold
 }
 
 // SetStartupMode applies the cmd-level startup mode (cmd/pf-daemon): the

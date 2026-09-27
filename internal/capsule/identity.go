@@ -250,7 +250,11 @@ func osErrCause(err error) error {
 // <root>/capsules/_quarantine/<wi_id>/<gen>-<status>-<ts>/ (03 §2.4/§6.1):
 // never reuse in place, never resume in place.
 func (c *Capsule) quarantine(oldGen int64, oldStatus string) (string, error) {
-	qdir := filepath.Join(CapsuleRoot(filepath.Dir(c.Dir)), "_quarantine", c.WorkItemID)
+	// c.Dir is always <ws>/capsules/<wi_id> (capsuleDirFor), so its parent
+	// IS the capsules root; joining CapsuleRoot here would double the
+	// segment (<ws>/capsules/capsules/_quarantine) and drop the scene outside
+	// the layout 03 §2.4 declares.
+	qdir := filepath.Join(filepath.Dir(c.Dir), "_quarantine", c.WorkItemID)
 	name := fmt.Sprintf("%d-%s-%d", oldGen, oldStatus, time.Now().UnixNano())
 	dst := filepath.Join(qdir, name)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
@@ -260,6 +264,36 @@ func (c *Capsule) quarantine(oldGen int64, oldStatus string) (string, error) {
 		return "", err
 	}
 	return dst, nil
+}
+
+// Quarantine isolates the capsule outside the rollback/fencing path
+// (04 §7.3 step 3): the directory is MOVED under
+// <root>/capsules/_quarantine/<wi_id>/ and a local marker naming the cause
+// is written inside it — the scene is preserved for audit, MARKED, never
+// deleted (deletion belongs to the Core deletion-protection flow only,
+// 03 §2.1). Unlike the Create-internal quarantine, the reason is recorded
+// as a durable, human-readable marker file (logs/quarantine.json) so the
+// audit trail says WHY the scene was sealed; the quarantined tree is
+// outside every sync surface, so the marker stays local-only.
+func (c *Capsule) Quarantine(reason string) (string, error) {
+	idn, err := readIdentity(c.Dir)
+	if err != nil {
+		return "", err
+	}
+	marker := map[string]any{
+		"capsule_id":     c.ID(),
+		"work_item_id":   c.WorkItemID,
+		"generation":     idn.Generation,
+		"reason":         reason,
+		"quarantined_at": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	blob, merr := json.MarshalIndent(marker, "", "  ")
+	if merr == nil {
+		// Best-effort: a failed marker write must not block the isolation
+		// itself (the move below is the safety-relevant action).
+		_ = AtomicWrite(filepath.Join(c.Dir, "logs", "quarantine.json"), blob, 0o444)
+	}
+	return c.quarantine(idn.Generation, idn.Status)
 }
 
 // MarkReady atomically flips capsule.json.status to ready (03 §6.1 step 6).

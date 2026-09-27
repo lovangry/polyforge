@@ -44,6 +44,21 @@ type gitRunner func(args ...string) (string, error)
 //  4. dir missing → git clone --no-checkout <url> dir && git -C dir checkout <base>.
 //  5. write the repos/inventory.json snapshot.
 //
+// SUBDIR RULING (recorded, v1): repo_entry carries an optional `subdir`
+// (03 §4.1 declaration format, storage authority 02 §4.6 "in-repo
+// subdirectory anchor"), but the checkout flow deliberately does NOT
+// consume it: 03 §3.1 declares <capsule>/repos/<repo_name>/ as the FULL
+// working tree of the inventory checkout, 03 §4.3's five-step flow clones
+// and checks out the WHOLE repo at the frozen base commit and its
+// inventory.json snapshot schema ({name,url,base,checked_out_at,
+// head_at_checkout}) has no subdir field, and 03 §7 pins the RunCommand
+// cwd to repos/<name> or artifacts. Full-repo checkout at base is therefore
+// the intended v1 shape; `subdir` is reserved declaration metadata the
+// Capsule layout never reads. If a future revision activates subdir as the
+// working anchor, the change must land here (checkout anchor), in the
+// snapshot schema (03 §4.3) and in the RunCommand cwd rules (03 §7)
+// together — not by local inference.
+//
 // The .git directory is part of the capsule (subagent read/write per
 // 03 §5.2) and is EXCLUDED from the sync surface (05 §4.1: the only
 // exclusion inside repos/<name>/).
