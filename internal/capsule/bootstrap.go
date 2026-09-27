@@ -9,6 +9,9 @@ import "encoding/json"
 
 // RepoEntry is one inventory repo as frozen in the WI creation transaction
 // (02 §4.6): {name, url, subdir?, base}. Base is immutable after creation.
+// Subdir is declared/frozen but NOT consumed by the v1 Capsule layout —
+// see the SUBDIR RULING in inventory.go (full-repo checkout is the
+// intended v1 shape; subdir stays reserved metadata).
 type RepoEntry struct {
 	Position int64   `json:"position"`
 	Name     string  `json:"name"`

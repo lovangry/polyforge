@@ -17,9 +17,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/silgrid/polyforge/internal/capsule"
 	"github.com/silgrid/polyforge/internal/sync/aihub"
 )
 
@@ -229,10 +231,17 @@ func (s *APIServer) hObserve(w http.ResponseWriter, r *http.Request) {
 		// runtime-state/execution.json).
 		resp := jr.ring.Observe(after, func() map[string]any {
 			if e, err := jr.cap.LoadExecution(); err == nil && e != nil {
-				return map[string]any{
+				snap := map[string]any{
 					"current_step": e.CurrentStep, "workflow_status": e.WorkflowStatus,
 					"version": e.Version,
 				}
+				// The open needs_input question is presented in the 00 §3.4a
+				// observation shape (same shape both layers; the ring's
+				// needs_input/answered EVENTS carry the §3.4a payload too).
+				if v := renderPendingQuestion(e); v != nil {
+					snap["pending_question"] = v
+				}
+				return snap
 			}
 			return map[string]any{}
 		})
@@ -240,11 +249,23 @@ func (s *APIServer) hObserve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Second layer: no local capsule → Core read-through of the latest
-	// published HEAD, with the freshness note (04 §5.1a).
+	// published HEAD, with the freshness note (04 §5.1a). The rendered
+	// progress is the published execution.json VERBATIM; the open pending
+	// question (if the last published revision caught the step entering
+	// needs_input) is presented in the same 00 §3.4a observation shape as
+	// the first layer, extracted from that published state.
 	headSeq, progress, err := s.d.client.Progress(wi)
 	if err != nil {
 		writeAPIErr(w, ErrCodeNotFound, "no local job and no published progress for "+wi)
 		return
+	}
+	if progress == nil {
+		progress = map[string]any{}
+	}
+	if e := executionFromProgress(progress); e != nil {
+		if v := renderPendingQuestion(e); v != nil {
+			progress["pending_question"] = v
+		}
 	}
 	writeJSONOK(w, map[string]any{
 		"events":         []map[string]any{},
@@ -253,6 +274,54 @@ func (s *APIServer) hObserve(w http.ResponseWriter, r *http.Request) {
 		"read_through":   true,
 		"freshness_note": "数据截至最近一次发布",
 	})
+}
+
+// pendingQuestionView is the 00 §3.4a needs_input observation shape — the
+// presentation-layer projection of the persisted pending_question (03
+// §4.2). timeout_hint is optional in §3.4a and the persisted schema carries
+// none, so it is omitted rather than invented.
+type pendingQuestionView struct {
+	QuestionID string `json:"question_id"`
+	StepID     string `json:"step_id"`
+	AskedAt    string `json:"asked_at"`
+	Content    string `json:"content"`
+	Status     string `json:"status"` // pending | answered (00 §3.4a)
+}
+
+// renderPendingQuestion projects one execution state's open question into
+// the §3.4a shape, or nil when no question is open. A question only stays
+// in pending_question while unanswered (consumption clears it in the same
+// atomic write), so the rendered status is always "pending" — an
+// "answered" question never appears in an observe stream.
+func renderPendingQuestion(e *capsule.Execution) *pendingQuestionView {
+	if e == nil {
+		return nil
+	}
+	q, step := e.PendingQuestion()
+	if q == nil {
+		return nil
+	}
+	return &pendingQuestionView{
+		QuestionID: q.QuestionID, StepID: step, AskedAt: q.AskedAt,
+		Content: q.Content, Status: "pending",
+	}
+}
+
+// executionFromProgress decodes the read-through progress payload (the
+// published execution.json as a generic JSON map) back into the typed
+// execution state for question rendering. A decode failure yields nil —
+// the verbatim map is still rendered, only the question projection is
+// skipped.
+func executionFromProgress(progress map[string]any) *capsule.Execution {
+	blob, err := json.Marshal(progress)
+	if err != nil {
+		return nil
+	}
+	var e capsule.Execution
+	if json.Unmarshal(blob, &e) != nil {
+		return nil
+	}
+	return &e
 }
 
 func (s *APIServer) hAnswer(w http.ResponseWriter, r *http.Request) {
@@ -264,6 +333,17 @@ func (s *APIServer) hAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	// The submitter's authenticated identity (v1 local face: the caller
 	// presents its user id; answered_by must match it — 00 §3.4a).
+	//
+	// KNOWN v1 DEGRADATION (kept deliberately): this face has no
+	// authenticated user layer, so X-PF-User is caller-SELF-DECLARED and an
+	// absent header degrades to trusting relay.AnsweredBy itself. The socket
+	// ALREADY hands us the peer's kernel identity via SO_PEERCRED (uid in
+	// credConn, see peerPID's sibling); a future hardening can map that uid
+	// to the local user name (getpwuid-style lookup) and treat a mismatching
+	// X-PF-User as a forgery instead of a declaration. Not done in v1:
+	// answered_by carries AIHub user ids ("usr_..."), not POSIX uid
+	// mappings, so the mapping is a deployment decision, not a trivial
+	// change.
 	callerID := r.Header.Get("X-PF-User")
 	if callerID == "" {
 		callerID = relay.AnsweredBy // degraded local trust; recorded as ambiguity
@@ -349,12 +429,23 @@ func (s *APIServer) hStatus(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.d.mu.Unlock()
+	// Stale-heartbeat exposure (04 §7.2/§9, monitoring signal ONLY — the
+	// daemon never auto-takes-over anything on this list; takeover is a
+	// human decision, deliberately not wired here).
+	now := time.Now()
+	threshold := s.d.staleHeartbeatThreshold()
+	stale := s.d.beats.Stale(now, threshold)
+	if stale == nil {
+		stale = []StaleMachine{}
+	}
 	writeJSONOK(w, map[string]any{
-		"machine_id":    s.d.cfg.MachineID,
-		"mode":          s.d.modes.Current(),
-		"shutting_down": s.d.modes.ShuttingDown(),
-		"jobs":          jobs,
-		"queue":         map[string]any{"pending": s.d.jobq.LenPending(), "running": s.d.jobq.Running(), "max_concurrent": s.d.jobq.MaxConcurrent()},
+		"machine_id":                        s.d.cfg.MachineID,
+		"mode":                              s.d.modes.Current(),
+		"shutting_down":                     s.d.modes.ShuttingDown(),
+		"jobs":                              jobs,
+		"queue":                             map[string]any{"pending": s.d.jobq.LenPending(), "running": s.d.jobq.Running(), "max_concurrent": s.d.jobq.MaxConcurrent()},
+		"stale_machines":                    stale,
+		"stale_heartbeat_threshold_seconds": int64(threshold.Seconds()),
 	})
 }
 
@@ -501,6 +592,14 @@ func (s *APIServer) hProxyCall(w http.ResponseWriter, r *http.Request) {
 		}
 		waitingOn, _ := body.Payload["waiting_on"].(string)
 		if serr := s.d.client.EndGeneration(body.WorkItemID, reason, waitingOn, jr.token, fe); serr != nil {
+			// 04 §7.3: a rolled-back credential ends this path in scene
+			// isolation — the agent's own close-out is as dead as its
+			// token; recovery is an admin force-takeover, never a retry.
+			if isSecretRolledBack(serr) {
+				_ = s.d.quarantineRolledBack(body.WorkItemID)
+				writeAPIErr(w, ErrCodeForbidden, ReasonSecretRolledBack+": capsule quarantined; recovery is admin force-takeover")
+				return
+			}
 			writeSubmitErr(w, serr)
 			return
 		}
