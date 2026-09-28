@@ -101,8 +101,23 @@ type usageInstall struct {
 // newUsageInstall boots a real aihub on a free loopback port with its own
 // data dir, harvests the FIRST-BOOT bootstrap admin key (the real-usage
 // fix under test: a fresh install must be operable at all), writes the
-// pf CLI's default config file, and creates the "usage" project.
+// pf CLI's default config file, and creates the "usage" project. The
+// module's reference bundles serve as the workflows checkout.
 func newUsageInstall(t *testing.T) *usageInstall {
+	wf, err := filepath.Abs(filepath.Join("..", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newUsageInstallWithWorkflows(t, wf)
+}
+
+// newUsageInstallWithWorkflows is newUsageInstall with an explicit
+// workflows checkout: the S12-S16 fault scenarios point BOTH the aihub
+// and the daemons at the testdata fixture bundles directory
+// (test/testdata/bundles) so their fixture bundles are first-class pins
+// — bundle_name + bundle_digest come from the same directory on both
+// faces, exactly the two-checkout deployment shape of 02 §4.5/04 §6.1.
+func newUsageInstallWithWorkflows(t *testing.T, wfDir string) *usageInstall {
 	t.Helper()
 	bins := usageBins(t)
 	inst := &usageInstall{
@@ -123,24 +138,21 @@ func newUsageInstall(t *testing.T) *usageInstall {
 	ln.Close()
 	inst.url = "http://127.0.0.1:" + strconv.Itoa(inst.port)
 
-	// The workflows dir: the module's real reference bundle.
-	wf, err := filepath.Abs(filepath.Join("..", "workflows"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The workflows dir: the requested checkout (module reference bundles
+	// or the scenario fixture bundles).
+	inst.workflowsDir = wfDir
 	skills, err := filepath.Abs(filepath.Join("..", "skills"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	inst.skillsDir = skills
-	inst.workflowsDir = wf
 
 	logf, err := os.Create(inst.aihubLog)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(filepath.Join(bins, "aihub"),
-		"--data-dir", inst.dataDir, "--listen", "127.0.0.1:"+strconv.Itoa(inst.port), "--workflows-dir", wf)
+		"--data-dir", inst.dataDir, "--listen", "127.0.0.1:"+strconv.Itoa(inst.port), "--workflows-dir", wfDir)
 	cmd.Stdout, cmd.Stderr = logf, logf
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
