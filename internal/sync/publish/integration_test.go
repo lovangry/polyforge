@@ -12,7 +12,6 @@ package publish_test
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -50,12 +49,7 @@ type coreEnv struct {
 
 func newCoreEnv(t *testing.T) *coreEnv {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, dir := testsupport.NewDB(t)
 	svc, err := service.Register(db, dir)
 	if err != nil {
 		t.Fatal(err)
@@ -145,25 +139,11 @@ func newPubEnv(t *testing.T) *pubEnv {
 	st := publish.NewStore(daemonLocal)
 	stager := freeze.NewStager(daemonLocal)
 	mutex := freeze.NewManager()
-	pub := publish.New(&realRemote{c: e.client}, mutex, stager, st)
+	pub := publish.New(&aihub.RemoteAdapter{Client: e.client}, mutex, stager, st)
 	return &pubEnv{
 		coreEnv: e, wi: wi, capsule: capc, pub: pub, store: st, stager: stager,
 		gen: claim.Generation, token: claim.GenerationToken,
 	}
-}
-
-// realRemote adapts the aihub HTTP client to publish.Remote against the
-// live server.
-type realRemote struct{ c *aihub.Client }
-
-func (r *realRemote) PutBlock(ctx context.Context, wi string, seq int64, sha string, block []byte, token string) error {
-	return r.c.PutBlock(wi, seq, sha, block, token)
-}
-func (r *realRemote) PostManifest(ctx context.Context, wi string, m revision.Manifest, sha, token string) (int64, error) {
-	return r.c.PostManifest(wi, m, sha, token)
-}
-func (r *realRemote) GetHead(ctx context.Context, wi string) (*revision.HeadInfo, bool, error) {
-	return r.c.GetHead(wi)
 }
 
 func (e *pubEnv) writeCapsule(rel, content string) {
@@ -482,7 +462,7 @@ func TestRealRecoveryRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rr := &httpRecoveryRemote{c: e.client, stripOps: true}
+	rr := &httpRecoveryRemote{RemoteAdapter: aihub.RemoteAdapter{Client: e.client}, stripOps: true}
 	res, err := recoverpkg.Recover(context.Background(), capB, rr)
 	if err != nil {
 		t.Fatal(err)
@@ -556,7 +536,7 @@ func TestRealRecoveryHTTPOnlyReplay(t *testing.T) {
 	os.MkdirAll(filepath.Join(capB.Dir, "artifacts"), 0o755)
 	os.WriteFile(filepath.Join(capB.Dir, "artifacts", "stale.md"), []byte("stale"), 0o644)
 
-	rr := &httpRecoveryRemote{c: e.client}
+	rr := &httpRecoveryRemote{RemoteAdapter: aihub.RemoteAdapter{Client: e.client}}
 	res, err := recoverpkg.Recover(context.Background(), capB, rr)
 	if err != nil {
 		t.Fatal(err)
@@ -585,19 +565,18 @@ func TestRealRecoveryHTTPOnlyReplay(t *testing.T) {
 }
 
 // httpRecoveryRemote is the recovery transport over the REAL HTTP face:
-// every method goes through the aihub client (rows 16/17/19). stripOps
-// drops the inline ops of the listing rows to force the per-seq
-// GetManifest fallback (also over HTTP) — used to prove both paths.
+// every method goes through the aihub client (rows 16/17/19). The
+// common forwarding lives in the shared aihub.RemoteAdapter (embedded);
+// ONLY the ListRevisions stripOps drill override is local — it drops
+// the inline ops of the listing rows to force the per-seq GetManifest
+// fallback (also over HTTP) — used to prove both paths.
 type httpRecoveryRemote struct {
-	c        *aihub.Client
+	aihub.RemoteAdapter
 	stripOps bool
 }
 
-func (r *httpRecoveryRemote) GetHead(ctx context.Context, wi string) (*revision.HeadInfo, bool, error) {
-	return r.c.GetHead(wi)
-}
 func (r *httpRecoveryRemote) ListRevisions(ctx context.Context, wi string, since int64) ([]revision.RevisionMeta, error) {
-	metas, err := r.c.ListRevisions(wi, since)
+	metas, err := r.Client.ListRevisions(wi, since)
 	if err != nil {
 		return nil, err
 	}
@@ -609,11 +588,3 @@ func (r *httpRecoveryRemote) ListRevisions(ctx context.Context, wi string, since
 	}
 	return metas, nil
 }
-func (r *httpRecoveryRemote) GetManifest(ctx context.Context, wi string, seq int64) (revision.Manifest, error) {
-	return r.c.GetManifest(wi, seq)
-}
-func (r *httpRecoveryRemote) GetBlock(ctx context.Context, wi, sha string) ([]byte, error) {
-	return r.c.GetBlock(wi, sha)
-}
-
-var _ = sql.ErrNoRows

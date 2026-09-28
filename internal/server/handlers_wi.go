@@ -203,19 +203,8 @@ func (s *Server) hGetWI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	idn, wiID, projectID, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	ok, err := s.canWrite(idn, projectID)
@@ -266,19 +255,8 @@ func (s *Server) hReadyQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	idn, wiID, projectID, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	// §6.5 authorization: reporter OR project maintainer OR admin.
@@ -305,19 +283,8 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request) {
 // project (same-project-only enforcement lives in the domain, which also
 // owns cycle detection).
 func (s *Server) hAddDependency(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	idn, wiID, projectID, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	ok, err := s.canWrite(idn, projectID)
@@ -349,19 +316,8 @@ func (s *Server) hAddDependency(w http.ResponseWriter, r *http.Request) {
 
 // hListDependencies is fix #19's GET route: same shape as include=deps.
 func (s *Server) hListDependencies(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	idn, wiID, projectID, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	ok, err := s.canRead(idn, projectID)
@@ -379,19 +335,8 @@ func (s *Server) hListDependencies(w http.ResponseWriter, r *http.Request) {
 
 // hDeleteDependency is fix #19's DELETE route: physical delete of one edge.
 func (s *Server) hDeleteDependency(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	idn, wiID, projectID, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	ok, err := s.canWrite(idn, projectID)
@@ -411,19 +356,8 @@ func (s *Server) hDeleteDependency(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hProgress(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	idn, wiID, projectID, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	ok, err := s.canRead(idn, projectID)
@@ -459,14 +393,10 @@ func ownerAPI(code, detail string) *ownerAPIError { return &ownerAPIError{code: 
 
 type ownerAPIError struct {
 	code   string
-	reason string
 	detail string
 }
 
 func (e *ownerAPIError) Error() string {
-	if e.reason != "" {
-		return e.code + " " + e.reason + ": " + e.detail
-	}
 	return e.code + ": " + e.detail
 }
 

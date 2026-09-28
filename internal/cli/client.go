@@ -3,6 +3,8 @@ package cli
 import (
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 )
 
 // Client is the typed aihub HTTP client. The wire contract is
@@ -183,9 +185,9 @@ func (c *Client) ListWorkItems(project string, filters map[string]string) ([]byt
 func (c *Client) GetWorkItem(id string, include []string) ([]byte, error) {
 	q := url.Values{}
 	if len(include) > 0 {
-		q.Set("include", joinComma(include))
+		q.Set("include", strings.Join(include, ","))
 	}
-	return c.do("GET", "/api/v1/work-items/"+pathEscape(id), q, nil)
+	return c.do("GET", "/api/v1/work-items/"+url.PathEscape(id), q, nil)
 }
 
 // PatchWorkItem updates the closed PATCHable field set (row 3, PATCH).
@@ -193,7 +195,7 @@ func (c *Client) GetWorkItem(id string, include []string) ([]byte, error) {
 // milestone, waiting_on, attrs} — sending an immutable key answers
 // CORE-400 IMMUTABLE server-side.
 func (c *Client) PatchWorkItem(id string, body map[string]any) ([]byte, error) {
-	return c.do("PATCH", "/api/v1/work-items/"+pathEscape(id), nil, body)
+	return c.do("PATCH", "/api/v1/work-items/"+url.PathEscape(id), nil, body)
 }
 
 // ReadyQueue reads the flat two-array ready queue (row 4, §5.1b A8).
@@ -204,14 +206,14 @@ func (c *Client) ReadyQueue(project string) ([]byte, error) {
 
 // CancelWorkItem terminates a queued/paused/blocked WI (row 5).
 func (c *Client) CancelWorkItem(id string) ([]byte, error) {
-	return c.do("POST", "/api/v1/work-items/"+pathEscape(id)+"/cancel", nil, map[string]any{})
+	return c.do("POST", "/api/v1/work-items/"+url.PathEscape(id)+"/cancel", nil, map[string]any{})
 }
 
 // GetProgress is the read-through progress face (row 6) — the fallback
 // observe layer for WIs whose Capsule is not on this machine
 // (04-local-runtime.md §5.1a layer two).
 func (c *Client) GetProgress(id string) ([]byte, error) {
-	return c.do("GET", "/api/v1/work-items/"+pathEscape(id)+"/progress", nil, nil)
+	return c.do("GET", "/api/v1/work-items/"+url.PathEscape(id)+"/progress", nil, nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -221,18 +223,18 @@ func (c *Client) GetProgress(id string) ([]byte, error) {
 // AddDependency creates one edge; blockedID is the path {id} side (the
 // dependent), req names the blocking side.
 func (c *Client) AddDependency(blockedID string, req *DependencyCreateRequest) ([]byte, error) {
-	return c.do("POST", "/api/v1/work-items/"+pathEscape(blockedID)+"/dependencies", nil, req)
+	return c.do("POST", "/api/v1/work-items/"+url.PathEscape(blockedID)+"/dependencies", nil, req)
 }
 
 // ListDependencies returns the blocking/blocked_by lists.
 func (c *Client) ListDependencies(id string) ([]byte, error) {
-	return c.do("GET", "/api/v1/work-items/"+pathEscape(id)+"/dependencies", nil, nil)
+	return c.do("GET", "/api/v1/work-items/"+url.PathEscape(id)+"/dependencies", nil, nil)
 }
 
 // DeleteDependency removes one edge physically.
 func (c *Client) DeleteDependency(blockedID, blockingID, kind string) ([]byte, error) {
-	p := "/api/v1/work-items/" + pathEscape(blockedID) + "/dependencies/" +
-		pathEscape(blockingID) + "/" + pathEscape(kind)
+	p := "/api/v1/work-items/" + url.PathEscape(blockedID) + "/dependencies/" +
+		url.PathEscape(blockingID) + "/" + url.PathEscape(kind)
 	return c.do("DELETE", p, nil, nil)
 }
 
@@ -242,12 +244,12 @@ func (c *Client) DeleteDependency(blockedID, blockingID, kind string) ([]byte, e
 
 // GetBudget reads baseline + increments + effective ceilings + max_seq.
 func (c *Client) GetBudget(id string) ([]byte, error) {
-	return c.do("GET", "/api/v1/work-items/"+pathEscape(id)+"/budget", nil, nil)
+	return c.do("GET", "/api/v1/work-items/"+url.PathEscape(id)+"/budget", nil, nil)
 }
 
 // AddBudgetIncrement posts one CAS increment (row 11).
 func (c *Client) AddBudgetIncrement(id string, req *BudgetIncrementRequest) ([]byte, error) {
-	return c.do("POST", "/api/v1/work-items/"+pathEscape(id)+"/budget-increments", nil, req)
+	return c.do("POST", "/api/v1/work-items/"+url.PathEscape(id)+"/budget-increments", nil, req)
 }
 
 // ---------------------------------------------------------------------------
@@ -264,10 +266,10 @@ func (c *Client) SearchMemories(project, q, memType string, tags []string, limit
 		v.Set("type", memType)
 	}
 	if len(tags) > 0 {
-		v.Set("tags", joinComma(tags))
+		v.Set("tags", strings.Join(tags, ","))
 	}
 	if limit > 0 {
-		v.Set("limit", itoa(limit))
+		v.Set("limit", strconv.Itoa(limit))
 	}
 	return c.do("GET", "/api/v1/memories/search", v, nil)
 }
@@ -288,12 +290,12 @@ func (c *Client) ListUsers() ([]byte, error) {
 
 // GetUser reads one user (M1).
 func (c *Client) GetUser(id string) ([]byte, error) {
-	return c.do("GET", "/api/v1/users/"+pathEscape(id), nil, nil)
+	return c.do("GET", "/api/v1/users/"+url.PathEscape(id), nil, nil)
 }
 
 // PatchUser updates display_name and/or role (M1).
 func (c *Client) PatchUser(id string, req *UserPatchRequest) ([]byte, error) {
-	return c.do("PATCH", "/api/v1/users/"+pathEscape(id), nil, req)
+	return c.do("PATCH", "/api/v1/users/"+url.PathEscape(id), nil, req)
 }
 
 // CreateApiKey mints a key (M2; plaintext returned exactly once).
@@ -308,7 +310,7 @@ func (c *Client) ListApiKeys() ([]byte, error) {
 
 // RevokeApiKey sets revoked_at (M2).
 func (c *Client) RevokeApiKey(id string) ([]byte, error) {
-	return c.do("DELETE", "/api/v1/api-keys/"+pathEscape(id), nil, nil)
+	return c.do("DELETE", "/api/v1/api-keys/"+url.PathEscape(id), nil, nil)
 }
 
 // CreateProject creates a project (M3, admin only).
@@ -323,12 +325,12 @@ func (c *Client) ListProjects() ([]byte, error) {
 
 // GetProject reads one project by id or name (M3).
 func (c *Client) GetProject(idOrName string) ([]byte, error) {
-	return c.do("GET", "/api/v1/projects/"+pathEscape(idOrName), nil, nil)
+	return c.do("GET", "/api/v1/projects/"+url.PathEscape(idOrName), nil, nil)
 }
 
 // PatchProject updates a project and/or its membership rows (M3).
 func (c *Client) PatchProject(idOrName string, req *ProjectPatchRequest) ([]byte, error) {
-	return c.do("PATCH", "/api/v1/projects/"+pathEscape(idOrName), nil, req)
+	return c.do("PATCH", "/api/v1/projects/"+url.PathEscape(idOrName), nil, req)
 }
 
 // Backup triggers the on-demand snapshot (M4, admin only).

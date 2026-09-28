@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -352,9 +353,9 @@ func renderMemories(w io.Writer, m *memoryListView) {
 func renderProgress(w io.Writer, p *progressView) {
 	fmt.Fprintf(w, "%s — %s\n", p.WorkItemID, p.FreshnessNote)
 	if p.HeadSeq != nil {
-		fmt.Fprintf(w, "head: seq=%s", itoa64(*p.HeadSeq))
+		fmt.Fprintf(w, "head: seq=%s", strconv.FormatInt(*p.HeadSeq, 10))
 		if p.HeadGeneration != nil {
-			fmt.Fprintf(w, " generation=%s", itoa64(*p.HeadGeneration))
+			fmt.Fprintf(w, " generation=%s", strconv.FormatInt(*p.HeadGeneration, 10))
 		}
 		if p.HeadUpdatedAt != nil {
 			fmt.Fprintf(w, " at=%s", *p.HeadUpdatedAt)
@@ -395,7 +396,7 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 	rows := make([][]string, 0, len(s.Jobs))
 	for _, j := range s.Jobs {
 		rows = append(rows, []string{
-			j.WorkItemID, j.HarnessAdapter, j.HarnessSessionID, itoa64(j.RingLatest),
+			j.WorkItemID, j.HarnessAdapter, j.HarnessSessionID, strconv.FormatInt(j.RingLatest, 10),
 		})
 	}
 	printTable(w, []string{"WORK ITEM", "ADAPTER", "SESSION", "RING"}, rows)
@@ -408,7 +409,7 @@ func renderObserve(w io.Writer, resp *ObserveResponse) {
 		// The daemon performed the layer-two Core read-through itself.
 		fmt.Fprintf(w, "%s\n", resp.FreshnessNote)
 		if resp.HeadSeq != nil {
-			fmt.Fprintf(w, "head: seq=%s\n", itoa64(*resp.HeadSeq))
+			fmt.Fprintf(w, "head: seq=%s\n", strconv.FormatInt(*resp.HeadSeq, 10))
 		}
 		if len(resp.StateSnapshot) > 0 && string(resp.StateSnapshot) != "null" {
 			printJSON(w, resp.StateSnapshot)
@@ -425,7 +426,7 @@ func renderObserve(w io.Writer, resp *ObserveResponse) {
 			if len(e.Payload) > 0 && string(e.Payload) != "null" {
 				payload = truncate(string(e.Payload), 80)
 			}
-			rows = append(rows, []string{itoa64(e.Seq), e.Type, payload})
+			rows = append(rows, []string{strconv.FormatInt(e.Seq, 10), e.Type, payload})
 		}
 		printTable(w, []string{"SEQ", "EVENT", "PAYLOAD"}, rows)
 	}
@@ -433,7 +434,7 @@ func renderObserve(w io.Writer, resp *ObserveResponse) {
 		fmt.Fprintln(w, "state:")
 		printJSON(w, resp.StateSnapshot)
 	}
-	fmt.Fprintf(w, "next_cursor: %s\n", itoa64(resp.NextCursor))
+	fmt.Fprintf(w, "next_cursor: %s\n", strconv.FormatInt(resp.NextCursor, 10))
 }
 
 // renderUsers renders the M1 list.

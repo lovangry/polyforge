@@ -32,6 +32,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/silgrid/polyforge/internal/testutil"
 	"github.com/silgrid/polyforge/internal/workflow/digest"
 )
 
@@ -312,14 +313,8 @@ func writeBundleDir(t *testing.T, files map[string]string) string {
 	// The bundle lives in a subdirectory named after its frontmatter `name`
 	// (rule V2: name must equal the bundle directory name).
 	dir := filepath.Join(t.TempDir(), "demo")
-	for rel, content := range files {
-		p := filepath.Join(dir, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if err := testutil.WriteFileTree(dir, files); err != nil {
+		t.Fatal(err)
 	}
 	return dir
 }

@@ -140,10 +140,6 @@ func writeErr(w http.ResponseWriter, err error) {
 		}
 	}
 	// owner/workitem/capsule/memory APIError carries structured fields.
-	var ae interface {
-		Error() string
-	}
-	_ = ae
 	switch e := err.(type) {
 	case *owner.APIError:
 		code, reason, detail = e.Code, e.Reason, e.Detail

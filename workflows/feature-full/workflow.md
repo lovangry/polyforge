@@ -113,5 +113,6 @@ step primitive (inputs, `output` schema, worktree, budget, rewind, sync boundari
 build system, tagging convention, or publish target, because those are legitimately
 per-project. Each project consuming this bundle as a template is expected to replace the
 body of `agents/release.md` with its own concrete release procedure while keeping the
-frontmatter contract (`name`, `description`, `tools`, `output`) intact. The platform's own
-release of aihub/pf-daemon/pf is just one instance of this same hook, not a special case.
+frontmatter contract (`name`, `description`, `tools`, `output`) intact. The platform's
+own release of aihub and the work-machine binary (two build outputs) is just one
+instance of this same hook, not a special case.

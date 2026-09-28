@@ -49,7 +49,6 @@ import (
 	"github.com/silgrid/polyforge/internal/sync/freeze"
 	"github.com/silgrid/polyforge/internal/sync/publish"
 	"github.com/silgrid/polyforge/internal/sync/recover"
-	"github.com/silgrid/polyforge/internal/sync/revision"
 )
 
 // ---------------------------------------------------------------------------
@@ -689,36 +688,6 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 // consuming the claim-family response directly (02 §6.2); the drills use
 // them wherever a component-level path is the faithful one.
 
-// pubRemote adapts the aihub client to publish.Remote.
-type pubRemote struct{ c *aihub.Client }
-
-func (r *pubRemote) PutBlock(ctx context.Context, wi string, seq int64, sha string, block []byte, token string) error {
-	return r.c.PutBlock(wi, seq, sha, block, token)
-}
-func (r *pubRemote) PostManifest(ctx context.Context, wi string, m revision.Manifest, sha, token string) (int64, error) {
-	return r.c.PostManifest(wi, m, sha, token)
-}
-func (r *pubRemote) GetHead(ctx context.Context, wi string) (*revision.HeadInfo, bool, error) {
-	return r.c.GetHead(wi)
-}
-
-// recRemote adapts the aihub client to recover.Remote (the row-19
-// revisions listing is requested with include=ops by the client).
-type recRemote struct{ c *aihub.Client }
-
-func (r *recRemote) GetHead(ctx context.Context, wi string) (*revision.HeadInfo, bool, error) {
-	return r.c.GetHead(wi)
-}
-func (r *recRemote) ListRevisions(ctx context.Context, wi string, since int64) ([]revision.RevisionMeta, error) {
-	return r.c.ListRevisions(wi, since)
-}
-func (r *recRemote) GetManifest(ctx context.Context, wi string, seq int64) (revision.Manifest, error) {
-	return r.c.GetManifest(wi, seq)
-}
-func (r *recRemote) GetBlock(ctx context.Context, wi, sha string) ([]byte, error) {
-	return r.c.GetBlock(wi, sha)
-}
-
 // bootstrapFromCore assembles the capsule_bootstrap payload from the
 // Core read faces — the same fields the claim-family response carries
 // (bundle reference + repo inventory, 02 §8). Used where a drill builds a
@@ -784,11 +753,11 @@ func rebuildSite(ctx context.Context, t *testing.T, e *coreEnv, key, machine, wi
 	if err := capc.CheckoutInventory(boot); err != nil {
 		t.Fatalf("inventory checkout: %v", err)
 	}
-	rec, err := recover.Recover(ctx, capc, &recRemote{c: client})
+	rec, err := recover.Recover(ctx, capc, &aihub.RemoteAdapter{Client: client})
 	if err != nil {
 		t.Fatalf("remote site reconstruction: %v", err)
 	}
-	pub := publish.New(&pubRemote{c: client}, freeze.NewManager(), freeze.NewStager(dataDir), publish.NewStore(dataDir))
+	pub := publish.New(&aihub.RemoteAdapter{Client: client}, freeze.NewManager(), freeze.NewStager(dataDir), publish.NewStore(dataDir))
 	if rec.Head != nil {
 		if err := pub.SeedFromRecovery(wi, gen, rec.Head, rec.LiveFiles, rec.BytesDigest, rec.WorktreeDigest); err != nil {
 			t.Fatal(err)
@@ -889,7 +858,7 @@ func capsuleCreate(wsRoot, wi string, gen int64, machine, bundleDigest string) (
 }
 
 func recoverReplay(ctx context.Context, capc *capsule.Capsule, client *aihub.Client) (*recover.Result, error) {
-	return recover.Recover(ctx, capc, &recRemote{c: client})
+	return recover.Recover(ctx, capc, &aihub.RemoteAdapter{Client: client})
 }
 
 func statFile(path string) (os.FileInfo, error) { return os.Stat(path) }

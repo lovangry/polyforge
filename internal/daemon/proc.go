@@ -132,20 +132,11 @@ func processAlive(pid int, startedAt string) bool {
 	if startedAt == "" {
 		return true
 	}
-	rec, err := time.Parse(time.RFC3339Nano, startedAt)
-	if err != nil {
-		return true // unparseable record: fall back to pid existence
-	}
-	start := procStartWall(pid)
-	if start == 0 {
-		return true
-	}
-	// Tolerance covers HZ granularity and scheduling jitter.
-	recUnix := rec.Unix()
-	if start > recUnix-2 && start < recUnix+2 {
-		return true
-	}
-	return false // pid exists but belongs to an unrelated new process
+	// Trailing identity check: the same pid-reuse comparison
+	// procCreationMatches centralizes (empty/unparseable record → fall
+	// back to pid existence; ±2s tolerance covers HZ granularity and
+	// scheduling jitter).
+	return procCreationMatches(pid, startedAt)
 }
 
 // procCreationMatches reports whether the CURRENT occupant of pid was
@@ -256,17 +247,23 @@ func ProcessGroupEmpty(pgid int) (bool, error) {
 	return true, nil
 }
 
-// waitForGroupEmpty polls ProcessGroupEmpty until it holds or the bound
-// elapses (04 §7.1 step 4 / §7.3 step 2: bounded wait between SIGTERM and
-// the SIGKILL escalation). An UNVERIFIABLE group fails closed: false is
-// returned immediately and the typed error is logged — a kill loop must
-// never conclude "empty" from a check it could not perform.
-func waitForGroupEmpty(pgid int, bound time.Duration) bool {
+// WaitForGroupEmpty polls ProcessGroupEmpty until it holds or the bound
+// elapses (04 §7.1 step 4 / §7.3 step 2: bounded wait between SIGTERM
+// and the SIGKILL escalation). An UNVERIFIABLE group fails closed: false
+// is returned immediately and the typed error is logged — a kill loop
+// must never conclude "empty" from a check it could not perform.
+// The diagnostic prefix (diag) is parameterized so each caller's log
+// text stays exactly what it was ("pf-daemon" from this package,
+// "mainagent" from internal/mainagent).
+// Tolerances preserved: the emptiness check runs BEFORE the deadline
+// comparison (check-before-deadline), polling is 50ms, and an
+// unverifiable group fails immediately.
+func WaitForGroupEmpty(pgid int, bound time.Duration, diag string) bool {
 	deadline := time.Now().Add(bound)
 	for {
 		empty, err := ProcessGroupEmpty(pgid)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "pf-daemon: process group %d emptiness unverifiable, failing closed: %v\n", pgid, err)
+			fmt.Fprintf(os.Stderr, "%s: process group %d emptiness unverifiable, failing closed: %v\n", diag, pgid, err)
 			return false
 		}
 		if empty {
@@ -517,13 +514,13 @@ func proveResidualGroupOurs(pgid int, startedAt string, observedGone time.Time) 
 // assumption — an unverifiable or non-empty group is a typed error).
 func killResidualGroup(pgid int) error {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	if !waitForGroupEmpty(pgid, 10*time.Second) {
+	if !WaitForGroupEmpty(pgid, 10*time.Second, "pf-daemon") {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		if !waitForGroupEmpty(pgid, 5*time.Second) {
+		if !WaitForGroupEmpty(pgid, 5*time.Second, "pf-daemon") {
 			return fmt.Errorf("%w: group %d (unverifiable or surviving SIGKILL)", ErrResidualRefusedToDie, pgid)
 		}
 	}
-	// Final proof: waitForGroupEmpty returned true only from a clean
+	// Final proof: WaitForGroupEmpty returned true only from a clean
 	// (bool, nil) answer, so the group death is confirmed.
 	return nil
 }

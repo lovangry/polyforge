@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -191,15 +190,4 @@ func itoa(n int64) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
-}
-
-// SortedPaths is a test/diagnostic helper (also used by the daemon when it
-// wants to log what the watcher sees).
-func SortedPaths(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
