@@ -59,6 +59,9 @@ var commands = []*Command{
 	cmdProjects,
 	cmdBackup,
 	cmdRotateSecret,
+	// One-time migration verb (06 §10.1): admin, operates on the data
+	// dir + the live server during the deployment's silent window.
+	cmdMigrateMemories,
 }
 
 // Run executes the CLI with argv (without the program name) and returns
@@ -227,7 +230,11 @@ func printUsage(w io.Writer) {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Management face (M1–M5):")
-	for _, c := range commands[15:] {
+	for _, c := range commands[15 : len(commands)-1] {
+		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
+	}
+	fmt.Fprintln(w, "One-time migration:")
+	for _, c := range commands[len(commands)-1:] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w)
