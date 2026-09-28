@@ -107,7 +107,7 @@ while IFS= read -r line; do
   esac
 done
 `)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_rmt1")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -145,7 +145,7 @@ while IFS= read -r line; do
   esac
 done
 `)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_rmt2")
 	t.Setenv("MARKER", marker) // inherited by the child through os.Environ
 	h, err := s.Spawn(context.Background(), p)
@@ -225,7 +225,7 @@ while IFS= read -r line; do
 done
 `)
 	t.Setenv("RECORD_FILE", recFile)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_rmt3")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -330,7 +330,7 @@ while IFS= read -r line; do
   esac
 done
 `)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_rmt4")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -376,7 +376,7 @@ while IFS= read -r line; do
 done
 `)
 	t.Setenv("MARKER", marker)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_rmt5")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -432,7 +432,7 @@ big=$(head -c 5000000 /dev/zero | tr '\0' 'a')
 printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}\n' "$big"
 sleep 300
 `)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_rmt6")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {

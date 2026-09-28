@@ -204,7 +204,7 @@ done
 `
 	bin := writeHarness(t, "clauderecharness", script)
 	t.Setenv("RECORD_FILE", recFile)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterClaude, "sess_cr1")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -307,7 +307,7 @@ while IFS= read -r line; do
 done
 `
 	bin := writeHarness(t, "claudeackharness", script)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterClaude, "sess_cr2")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -359,7 +359,7 @@ done
 `
 	bin := writeHarness(t, "claudeackduperharness", script)
 	t.Setenv("MARKER", marker)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterClaude, "sess_cr3")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -402,7 +402,7 @@ while IFS= read -r line; do
 done
 `
 	bin := writeHarness(t, "claudechattyharness", script)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterClaude, "sess_cr4")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -444,7 +444,7 @@ done
 `
 	bin := writeHarness(t, "claudeerrresultharness", script)
 	t.Setenv("MARKER", marker)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterClaude, "sess_cr5")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -487,7 +487,7 @@ done
 `
 	bin := writeHarness(t, "claudefreshharness", script)
 	t.Setenv("ARGV_LOG", argvLog)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterClaude, "sess_cr6")
 	h1, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -553,7 +553,7 @@ func TestFakeClaudeEndToEnd(t *testing.T) {
 	t.Setenv("FAKECLAUDE_STATE_DIR", t.TempDir())
 	spawnLog := filepath.Join(t.TempDir(), "spawn.log")
 	t.Setenv("FAKECLAUDE_SPAWN_LOG", spawnLog)
-	s := NewSupervisor("pi-unused", bin)
+	s := NewSupervisor("pi-unused", bin, "")
 	p := newSpawnParams(t, capsule.AdapterClaude, "sess_fc_1")
 
 	// First derivation: fresh session, full control round-trip.
@@ -621,7 +621,7 @@ func TestFakeClaudeZeroTurnResumeFails(t *testing.T) {
 	}
 	bin := buildFakeClaude(t)
 	t.Setenv("FAKECLAUDE_STATE_DIR", t.TempDir())
-	s := NewSupervisor("pi-unused", bin)
+	s := NewSupervisor("pi-unused", bin, "")
 	p := newSpawnParams(t, capsule.AdapterClaude, "sess_fc_2")
 	// Pre-existing session identity WITHOUT any completed turn: the
 	// §3.6a crash-continuation shape whose conversation never got a turn

@@ -40,7 +40,7 @@ while IFS= read -r line; do
   esac
 done
 `)
-	s := NewSupervisor(dieBin, dieBin)
+	s := NewSupervisor(dieBin, dieBin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_ans")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -57,7 +57,7 @@ done
 	// continuation — same capsule, same session id) receives the SAME
 	// answer and acks it.
 	ackBin := writeFakeHarness(t, false)
-	s2 := NewSupervisor(ackBin, ackBin)
+	s2 := NewSupervisor(ackBin, ackBin, "")
 	p2 := newSpawnParams(t, capsule.AdapterPi, "sess_ans")
 	p2.CapsuleDir = p.CapsuleDir
 	h2, err := s2.Spawn(context.Background(), p2)
@@ -91,7 +91,7 @@ while IFS= read -r line; do
   esac
 done
 `)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_bulkmethod")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -193,7 +193,7 @@ while IFS= read -r line; do
   esac
 done
 `)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_spoof")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -234,7 +234,7 @@ while [ $i -lt 2000 ]; do
 done
 sleep 300
 `)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_spoofno")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {

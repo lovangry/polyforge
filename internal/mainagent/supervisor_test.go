@@ -77,7 +77,7 @@ func newSpawnParams(t *testing.T, adapter, sessionID string) daemon.SpawnParams 
 
 func TestSupervisorSpawnInjectQuiesceAnswer(t *testing.T) {
 	bin := writeFakeHarness(t, false)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_wi_ag01_3")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -117,7 +117,7 @@ func TestSupervisorSpawnInjectQuiesceAnswer(t *testing.T) {
 
 func TestSupervisorSessionIDReuseGuard(t *testing.T) {
 	bin := writeFakeHarness(t, false)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	// First derivation writes sess_A.
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_A")
 	h1, err := s.Spawn(context.Background(), p)
@@ -145,7 +145,7 @@ func TestSupervisorSessionIDReuseGuard(t *testing.T) {
 
 func TestSupervisorProcessGroupKill(t *testing.T) {
 	bin := writeFakeHarness(t, true) // leaves a grandchild behind
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_g")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
