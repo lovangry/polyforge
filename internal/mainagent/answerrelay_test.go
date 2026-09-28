@@ -70,20 +70,24 @@ done
 	}
 }
 
-// TestBulkMethodLinesAreBulk: N bulk lines shaped {"method":"status",...}
-// (a plausible tool/progress vocabulary) must never enter the control
-// queue — the agent stays healthy and a real pf/quiesce ack still arrives
-// behind the flood.
+// TestBulkMethodLinesAreBulk: N bulk records whose assistant text carries
+// {"method":"status",...} (a plausible tool/progress vocabulary) must
+// never enter the control queue — the agent stays healthy and a real
+// pf/quiesce ack still arrives behind the flood.
 func TestBulkMethodLinesAreBulk(t *testing.T) {
 	bin := writeHarness(t, "bulkmethodharness", `#!/bin/sh
 i=0
 while [ $i -lt 3000 ]; do
-  echo '{"method":"status","progress":"bulk"}'
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"method\":\"status\",\"progress\":\"bulk\"}"}]}}'
   i=$((i+1))
 done
 while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   case "$line" in
-    *pf/quiesce*) echo '{"method":"pf/quiesce","result":{"ack":"pf/quiesce"}}' ;;
+    *pf/quiesce*)
+      printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
+      printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"method\":\"pf/quiesce\",\"result\":{\"ack\":\"pf/quiesce\"}}"}]}}'
+      ;;
   esac
 done
 `)
@@ -163,24 +167,29 @@ func TestIsControlLineClosedSet(t *testing.T) {
 }
 
 // TestBulkMethodSpoofLinesNeverSatisfyAckNorFloodQueue (F2-2): a noisy
-// harness emitting bulk lines that carry EACH of the four control method
-// names must not spoof Quiesce/Resume/NotifyStop/DeliverAnswer success —
-// the pending ack is satisfied only by the exact ack shape — and must
-// not flood the control queue: the lines are classified BULK, the agent
-// stays healthy, and a genuine ack still arrives behind the flood.
+// harness emitting assistant messages whose text carries EACH of the four
+// control method names (without the exact ack shape) must not spoof
+// Quiesce/Resume/NotifyStop/DeliverAnswer success — the pending ack is
+// satisfied only by the exact ack shape — and must not flood the control
+// queue: the extracted lines are classified BULK, the agent stays healthy,
+// and a genuine ack still arrives behind the flood.
 func TestBulkMethodSpoofLinesNeverSatisfyAckNorFloodQueue(t *testing.T) {
 	bin := writeHarness(t, "methodspoofharness", `#!/bin/sh
 i=0
 while [ $i -lt 2000 ]; do
-  echo '{"method":"pf/quiesce","progress":"bulk"}'
-  echo '{"method":"pf/resume","progress":"bulk"}'
-  echo '{"method":"pf/stop_notice","progress":"bulk"}'
-  echo '{"method":"pf/answer","progress":"bulk"}'
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"method\":\"pf/quiesce\",\"progress\":\"bulk\"}"}]}}'
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"method\":\"pf/resume\",\"progress\":\"bulk\"}"}]}}'
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"method\":\"pf/stop_notice\",\"progress\":\"bulk\"}"}]}}'
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"method\":\"pf/answer\",\"progress\":\"bulk\"}"}]}}'
   i=$((i+1))
 done
 while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   case "$line" in
-    *pf/quiesce*) echo '{"method":"pf/quiesce","result":{"ack":"pf/quiesce"}}' ;;
+    *pf/quiesce*)
+      printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
+      printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"method\":\"pf/quiesce\",\"result\":{\"ack\":\"pf/quiesce\"}}"}]}}'
+      ;;
   esac
 done
 `)
@@ -220,7 +229,7 @@ func TestBulkMethodSpoofNeverSatisfiesPendingAck(t *testing.T) {
 	bin := writeHarness(t, "spoofnoackharness", `#!/bin/sh
 i=0
 while [ $i -lt 2000 ]; do
-  echo '{"method":"pf/quiesce","progress":"bulk"}'
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"method\":\"pf/quiesce\",\"progress\":\"bulk\"}"}]}}'
   i=$((i+1))
 done
 sleep 300

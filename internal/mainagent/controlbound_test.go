@@ -45,18 +45,19 @@ func waitForUnhealthy(t *testing.T, proc *Proc) {
 	t.Fatal("the agent must be marked unhealthy after the control-path failure")
 }
 
-// TestControlQueueOverflowClosesLoudly: 5000 control lines (the closed
-// pf/* ack shape, the only vocabulary isControlLine admits) from a
-// flooding harness cross maxControlQueueLines; the control path must close
-// typed and the agent be marked unhealthy, so the daemon's freeze/close
-// fails fast and honest instead of hanging on an ack that can never come.
-// Bulk JSON carrying a foreign "method" field never reaches this queue
-// at all — that regression is TestBulkMethodLinesAreBulk (SK-6/CR-4).
+// TestControlQueueOverflowClosesLoudly: 5000 ack-bearing assistant
+// message records (the closed pf/* ack shape, the only vocabulary the
+// extraction admits) from a flooding harness cross maxControlQueueLines;
+// the control path must close typed and the agent be marked unhealthy, so
+// the daemon's freeze/close fails fast and honest instead of hanging on
+// an ack that can never come. Bulk records whose text carries a foreign
+// "method" field never reach this queue at all — that regression is
+// TestBulkMethodLinesAreBulk (SK-6/CR-4).
 func TestControlQueueOverflowClosesLoudly(t *testing.T) {
 	bin := writeHarness(t, "floodharness", `#!/bin/sh
 i=0
 while [ $i -lt 5000 ]; do
-  echo '{"method":"pf/quiesce","result":{"ack":"pf/quiesce"}}'
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"spam\n{\"method\":\"pf/quiesce\",\"result\":{\"ack\":\"pf/quiesce\"}}"}]}}'
   i=$((i+1))
 done
 sleep 300

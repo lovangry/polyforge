@@ -2,13 +2,15 @@ package mainagent
 
 // Supervisor + adapter tests against a scripted fake harness binary: the
 // full stdio protocol (initial injection, quiesce ack, stop notice, answer
-// relay), process-group termination, session id reuse rules.
+// relay), process-group termination, session id reuse rules. The fake
+// harness speaks the REAL pi RPC wire protocol — prompt commands in,
+// response records + assistant-message event bursts (with the embedded ack
+// line) out — the same shapes test/fakepi reproduces for the dogfood
+// scenarios.
 
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -17,32 +19,46 @@ import (
 	"github.com/silgrid/polyforge/internal/daemon"
 )
 
-// fakeHarness is a shell "harness": reads JSON lines, acks every pf/* and
-// user/prompt method, and leaves a grandchild alive on SIGTERM only if
-// asked (to exercise group kill).
-func writeFakeHarness(t *testing.T, leaveGrandchild bool) string {
-	t.Helper()
-	dir := t.TempDir()
-	p := filepath.Join(dir, "fakeharness")
-	script := `#!/bin/sh
+// rpcHarnessBody is the shared body of the REAL-protocol fake harnesses:
+// a prompt-command loop that answers every command with a response record
+// (echoing its id) and acks each pf/* control method with a REAL event
+// burst whose multi-line assistant message embeds the ack JSON line — the
+// exact shapes the supervisor's record-stream classifier consumes.
+// Non-control prompts (the initial pf-execute instruction) are answered
+// with the response record only.
+const rpcHarnessBody = `emit_resp() {
+  printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$1"
+}
+ack_turn() {
+  printf '%s\n' '{"type":"agent_start"}'
+  printf '%s\n' '{"type":"message_start","message":{"role":"assistant","content":[]}}'
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"at a safe boundary now\n{\"method\":\"'$1'\",\"result\":{\"ack\":\"'$1'\"}}\ncontinuing the step"}]}}'
+  printf '%s\n' '{"type":"agent_settled"}'
+}
 while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   case "$line" in
-    *pf/stop_notice*) echo '{"method":"pf/stop_notice","result":{"ack":"pf/stop_notice"}}' ;;
-    *pf/quiesce*)     echo '{"method":"pf/quiesce","result":{"ack":"pf/quiesce"}}' ;;
-    *pf/answer*)      echo '{"method":"pf/answer","result":{"ack":"pf/answer"}}' ;;
-    *user/prompt*)    echo '{"method":"user/prompt","result":{"ack":"user/prompt"}}' ;;
+    *pf/quiesce*)     emit_resp "$id"; ack_turn pf/quiesce ;;
+    *pf/resume*)      emit_resp "$id"; ack_turn pf/resume ;;
+    *pf/stop_notice*) emit_resp "$id"; ack_turn pf/stop_notice ;;
+    *pf/answer*)      emit_resp "$id"; ack_turn pf/answer ;;
+    *)                emit_resp "$id" ;;
   esac
 done
 `
+
+// writeFakeHarness writes a REAL-protocol shell harness: answers every
+// prompt command with a response record and acks every pf/* control method
+// via an assistant-message event burst. leaveGrandchild starts a sleeping
+// child that ignores nothing (the group-kill drill needs a second member).
+func writeFakeHarness(t *testing.T, leaveGrandchild bool) string {
+	t.Helper()
+	script := "#!/bin/sh\n"
 	if leaveGrandchild {
-		script = `#!/bin/sh
-sh -c 'sleep 300' &
-` + script
+		script += "sh -c 'sleep 300' &\n"
 	}
-	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return p
+	script += rpcHarnessBody
+	return writeHarness(t, "fakeharness", script)
 }
 
 func newSpawnParams(t *testing.T, adapter, sessionID string) daemon.SpawnParams {
@@ -163,8 +179,8 @@ func TestPiAdapterArgv(t *testing.T) {
 		t.Fatal("pi session dir must be Capsule-local (cwd inside the capsule)")
 	}
 	m, err := a.InitialMessage(daemon.SpawnParams{InitialPrompt: "X"})
-	if err != nil || m.Method != "user/prompt" || m.Params["text"] != "X" {
-		t.Fatalf("initial message: %+v %v", m, err)
+	if err != nil || m.Type != "prompt" || m.Message != "X" || m.ID == "" {
+		t.Fatalf("initial message must be a real prompt command: %+v %v", m, err)
 	}
 }
 
@@ -189,6 +205,11 @@ func TestClaudeAdapterArgv(t *testing.T) {
 	// No first-prompt message: the system prompt carries pf-execute.
 	if m, _ := a.InitialMessage(daemon.SpawnParams{}); m != nil {
 		t.Fatal("claude injection is the system prompt, not a first prompt")
+	}
+	// The claude control frame is the raw control line (UNVERIFIED legacy
+	// path, unchanged by the pi-transport rework).
+	if got := a.FrameControl("pf-1", `{"jsonrpc":"2.0","method":"pf/quiesce"}`); got != `{"jsonrpc":"2.0","method":"pf/quiesce"}` {
+		t.Fatalf("claude FrameControl must return the raw line, got %v", got)
 	}
 }
 
