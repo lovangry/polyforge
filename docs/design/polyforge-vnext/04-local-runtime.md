@@ -179,6 +179,7 @@ session 数据。
 | `DAEMON-507` | PREFLIGHT_FAILED：本机状态预检失败，**未发起 claim**（§6.1） |
 | `DAEMON-511` | SHUTDOWN_FLUSH_FAILED：优雅停机时代 WI Agent 发起并执行全扫描发布多次重试仍不收敛，停机中止且不退出进程（§6.5），需人工介入排查同步障碍 |
 | `DAEMON-512` | SHIP_PUSH_PREFLIGHT_FAILED（基线修订 polyforge#37）：`ship`（§5.1）的本机推送预检失败——无可用 git push 身份（SSH/credential helper）或 origin 不可达；推送未发起。与 PR 凭证缺失严格区分：后者不是错误（compare URL 回退后成功返回，见 §5.1 `ship` 行） |
+| `DAEMON-513` | SESSION_JSONL_MISSING：seal/收尾时的会话记录终态采集失败——claude 适配器下本代已派生 harness 会话（本机 `session.json` 存在），但其默认会话位置未找到该会话的 JSONL；收尾以本码失败，不产出归档、不静默跳过（§6.2 A 第 2 步、`03-execution-capsule.md#§4.4`） |
 
 ### 5.3 WI Agent → Daemon authenticated local proxy（凭证最小暴露，呼应 `00-architecture.md#§5`/`#§8`、`01-workflow-skills.md#§5.1`） <!-- §5.3 -->
 
@@ -290,7 +291,15 @@ Daemon 在第 6 步派生持久 WI Agent 时，按该 WI 配置选定的 harness
   同样在 claim（或 resume——按新 generation 重新分配）时生成一次，**仅在同一 generation、同一台
   机器的崩溃续跑之间复用**（§7.1）；resume 视为新 generation，不延续旧 session。该适配器是否
   暴露对其派生 step agent 的 introspection 接口取决于所用 harness 版本——Daemon 的派生/监督/回收
-  逻辑（§6.2/§7）不依赖该接口存在，只依赖标准进程句柄（pid、退出码、stdout/stderr、进程组）。
+  逻辑（§6.2/§7）不依赖该接口存在，只依赖标准进程句柄（pid、退出码、stdout/stderr、进程组）。该 harness 不支持自定义
+  session 路径：会话运行时数据位于其**默认会话位置**（本机、Capsule 外；自适配器验证修复以来的现状，不变），运行中的
+  会话数据读取一律指向该默认位置，不指向 Capsule；WI 到达终态时由 Daemon 在 seal 序列（§6.2 A 第 2 步）内从该默认
+  位置**只读**采集本代会话 JSONL 进该 Capsule 的 `harness/<adapter>/session-data/`，随后归档为
+  `logs/session/<generation>.jsonl`（权威在 `03-execution-capsule.md#§4.4`）；本代已派生 harness 会话而默认位置缺失该
+  JSONL 时以 `DAEMON-513 SESSION_JSONL_MISSING`（§5.2）失败收尾，不静默。
+- **Daemon 不管理 harness 登录（裁定）**：派生 WI Agent 时 Daemon 直接调用机器上已安装的 harness 二进制（Pi CLI /
+  Claude Code CLI），不代理、不托管其登录/凭据——登录与凭据配置是各 harness 自身的事前项（`07-deployment-pilot.md#§2.1`
+  运行时依赖清单，在部署 CLI 面之外）；harness 自身的报错（含登录/凭据类）**原样透传**给用户，不包装、不拦截、不代答。
 - 两条适配器共用同一套 Daemon state 记录结构（§4.1）与同一套崩溃续跑规则（§7.1）；新增第三条适配器时只需在此新增一个分支，不改变 §6.1/§6.2/§7 的流程结构。
 - **`pf-execute` 初始指令的注入方式（注入时机 = §6.1 第 9 步派生时）**：第 8 步读取的
   `skills/pf-execute/SKILL.md` 内容在两条适配器上分别经以下通道成为 WI Agent RPC 会话的初始
@@ -341,7 +350,11 @@ Job 回收的触发原因分两类，机械动作**不同**，不共用同一套
 **A. 正常结束**（WI 到达 pause / wrap，或优雅停机中断收尾——即 §6.5 第 4 步已经完成过一次代发起的边界发布之后的收尾）：此时该 WI 的 owner generation 仍然有效（没有被别的角色夺走），发布仍然是在这个仍然 active 的 generation 下完成的，因此顺序是「先边界发布、再结束 generation」：
 
 1. 停止该 Capsule 的 watcher。
-2. 等待（或确认已完成）该 WI 的边界全扫描发布（`00-architecture.md#§4.3`；发起者是该 WI 的 WI Agent 本身，或 §6.5 第 4 步下由 Daemon 代其发起并直接机械执行）——这一步必须先于下一步：generation 此时还没有结束，发布仍然发生在同一个 owner generation 之内。
+2. **会话记录终态采集（claude 适配器）先行**：进入本步 final flush 的冻结扫描之前，Daemon 先按
+   `03-execution-capsule.md#§4.4` 从该 harness 的**默认会话位置**（本机、Capsule 外）**只读**复制本代会话 JSONL
+   进该 Capsule 的 `harness/<adapter>/session-data/`（pi 适配器的会话数据本就位于 Capsule 内，无此采集步）；本代
+   已派生过 harness 会话（本机 `session.json` 存在）而默认会话位置缺失该 JSONL 时，以
+   `DAEMON-513 SESSION_JSONL_MISSING`（§5.2）失败本次 seal——不产出归档、不静默跳过、不代为收尾。随后等待（或确认已完成）该 WI 的边界全扫描发布（`00-architecture.md#§4.3`；发起者是该 WI 的 WI Agent 本身，或 §6.5 第 4 步下由 Daemon 代其发起并直接机械执行）——这一步必须先于下一步：generation 此时还没有结束，发布仍然发生在同一个 owner generation 之内。
    收尾边界上的这一次发布即 `05-sync-revision-recovery.md#§6.1` 定义的 **final flush**：Daemon 按 `05-sync-revision-recovery.md#§6.1` 的生成序列获取
    write freeze、执行冻结扫描、比对 HEAD（一致则本 generation 无需新 Revision，不一致则先完成一次
    真实发布推进 HEAD），并**据此生成 `flush_evidence`**——D6 裁定：final flush 证据由 Daemon 生成，

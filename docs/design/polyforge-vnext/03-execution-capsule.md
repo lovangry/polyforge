@@ -12,7 +12,7 @@
 
 - Capsule 权威定义：标识符格式、与 WI 的绑定关系、生成时机、生命周期（创建/复用/销毁，§2）。
 - Capsule 目录布局（§3）。
-- session transcript 归档的固定位置约定（A14 裁定）：`logs/session/<generation>.jsonl`、**每次 end-generation（pause/block/wrap/fail）无例外按代一次性归档发布**、不逐边界重传（§4.4；同步侧确认见 `05-sync-revision-recovery.md#§4.1`/§6.1）。
+- session transcript 归档的固定位置约定（A14 裁定）：`logs/session/<generation>.jsonl`、**每次 end-generation（pause/block/wrap/fail）无例外按代一次性归档发布**、不逐边界重传；claude 适配器（无自定义 session 路径）的运行时 transcript 位于 harness 默认会话位置，终态由 Daemon 只读采集进 Capsule，采集缺失为 `DAEMON-513` typed error（§4.4；同步侧确认见 `05-sync-revision-recovery.md#§4.1`/§6.1）。
 - Capsule 内 harness 适配器 subagent 定义目录（`.pi/agents/`、`.claude/agents/`）与 workflow 执行图快照（`workflow.md` 或 `workflow/`）：第 0 步物化、subagent 定义文件模型、防冲突三层，及其不进入同步根的边界（§3.1/§4.5；同步侧排除由 `05-sync-revision-recovery.md#§4.1` 落实）。
 - repo inventory 的声明格式、检出流程、基线 commit 记录（§4.1/§4.3）。
 - `runtime-state/execution.json` 的完整文件格式：`current_step`、step 尝试历史（归档 attempts 列表）、step 级与 WI 级预算消耗、step 起始基线（墙钟基线与 diff 基线：每个 inventory 项的起始 HEAD/脏集）、待消费 rewind 输入（gate FAIL 判定全文）、interactive 待问问题、review 轮次、`workflow_status` 取值集合，与 `01-workflow-skills.md` 的 workflow 语义逐字一致（§4.2）。
@@ -92,7 +92,7 @@
 ├── workflow.md                 # 本 WI 的执行图快照（§4.5；或以 workflow/ 目录形态存放，同一 capsule 内两种形态取其一）
 ├── harness/<adapter>/          # harness 适配器会话目录（adapter ∈ {pi, claude}）；WI Agent/Daemon 专用，subagent 不可见（§4.4）
 │   ├── session.json            #   稳定 session identity：{session_id, adapter, created_at}
-│   └── session-data/           #   该 harness 自身写入的本机会话工作目录（不透明，格式由 harness 定义）
+│   └── session-data/           #   该 harness 自身写入的本机会话工作目录（不透明，格式由 harness 定义）；claude 运行时在 harness 默认会话位置（Capsule 外），终态由 Daemon 采集进本目录（§4.4）
 └── sync/                       # Revision 暂存（WI Agent/Daemon 专用；subagent 不可见；发布协议权威在 `05-sync-revision-recovery.md#§5.1`）
 ```
 
@@ -231,7 +231,7 @@ inventory 检出以**声明的 base commit 为唯一基线**——多仓 WI 的 
 
 ### 4.4 harness 会话目录：session 身份规则与本机会话数据的界限（`00-architecture.md#§3.6a` 会话数据落位的权威布局，本节是该规则的唯一权威定义，`04`/`05` 引用本节不重复定义） <!-- §4.4 -->
 
-`00-architecture.md#§3.6a` 把「稳定的会话身份」与「harness 会话本地数据落在该 WI 的 Capsule 内」列为跨 harness 的最小契约，权威布局与身份规则由本文给出：`<capsule>/harness/<adapter>/`（`adapter` 取当前该 WI 使用的 harness 适配器名，v1 为 `pi` 或 `claude`，`04-local-runtime.md#§6.1a` 权威）。
+`00-architecture.md#§3.6a` 把「稳定的会话身份」与「会话数据落位」（跨 harness 契约要求＝封存（seal）时刻该 WI 的 Capsule 内含有该会话的会话记录；运行时落位按适配器区分，见下文 `session-data/` 条与 A14 归档段）列为跨 harness 的最小契约，权威布局与身份规则由本文给出：`<capsule>/harness/<adapter>/`（`adapter` 取当前该 WI 使用的 harness 适配器名，v1 为 `pi` 或 `claude`，`04-local-runtime.md#§6.1a` 权威）。
 
 **session 身份规则（唯一权威）**：
 - **仅一种情况复用 session**：同一台机器上、同一个 generation 内，Daemon/WI Agent 崩溃后续跑（即 Daemon 在本机重新派生该 generation 的 WI Agent，非接管、非新 generation）——此时复用同一个 `session_id`，不重新分配。
@@ -243,9 +243,9 @@ inventory 检出以**声明的 base commit 为唯一基线**——多仓 WI 的 
 该目录下明确区分两类数据，处理方式不同：
 
 - **`session.json`（稳定 session identity，小体量元数据，可同步）**：`{session_id, adapter, created_at}`，由该 capsule 实例的 WI Agent 首次派生 harness 进程时写入一次，此后只读。仅在同 generation、同机器的崩溃续跑（`04-local-runtime.md#§7.1`、本文 §7）时，续跑的 WI Agent 才从这份本机文件读回 `session_id` 并原样传给 harness 适配器的启动参数（`04-local-runtime.md#§6.1a`），不重新分配——这是上面「session 身份规则」的唯一本地实现依据，Daemon 不问 harness 进程本身要这个值。pause → resume 不属于这一情况：resume 是新 generation，必须写入全新的 `session.json`（新 `session_id`），不读回旧文件。`session.json` 本身体量小，**允许作为同步根的一部分随正常发布触发时机一并发布**（与 `repos/`/`artifacts/` 同类，非强制），但发布出去的这份副本**仅作为历史元数据留痕**（供人工/监控事后查看某一次发布时对应的 session 身份），**从不用于恢复身份**：任何恢复路径一律只读本机的 `session.json`，不读、也不信任从 Revision 重建出的副本——session-data 永远不同步，发布若发生仅为历史元数据。
-- **`session-data/`（harness 自身的本机会话工作目录，不透明、可能较大，仅本机）**：Pi/Claude 各自的会话转录、工具调用缓存等内部格式，只有对应 harness 进程自己读写，WI Agent/Daemon 不解析其内容。这部分是**仅本机运行元数据**：不属于 `05-sync-revision-recovery.md` 定义的同步根文件集合（`05-sync-revision-recovery.md#§4.1`），watcher 不观察它，任何一次全扫描发布都不会把它打包进 Revision——与 `sync/` 一样，对 subagent 不可见，且额外地对「是否参与同步」也给出确定答案（不参与）。
+- **`session-data/`（harness 自身的本机会话工作目录，不透明、可能较大，仅本机）**：Pi/Claude 各自的会话转录、工具调用缓存等内部格式，只有对应 harness 进程自己读写，WI Agent/Daemon 不解析其内容——**运行时落位按适配器区分**（`00-architecture.md#§3.6a`）：pi 支持自定义 session 路径，其 harness 进程直接写本目录；claude 不支持自定义 session 路径，运行时写在该 harness 的**默认会话位置**（本机、Capsule 外），本目录在运行期为空，直到终态采集（下文 A14 段）把本代会话 JSONL 收进来——该采集复制是 Daemon 对本目录的唯一写入（机械文件复制、不解析内容，发生在该代 harness 进程结束后），是「只有对应 harness 进程自己读写」的唯一例外。这部分是**仅本机运行元数据**：不属于 `05-sync-revision-recovery.md` 定义的同步根文件集合（`05-sync-revision-recovery.md#§4.1`），watcher 不观察它，任何一次全扫描发布都不会把它打包进 Revision——与 `sync/` 一样，对 subagent 不可见，且额外地对「是否参与同步」也给出确定答案（不参与）。
 
-**session transcript 归档（A14 裁定，本节为 `logs/session/` 固定位置的唯一权威）**：会话进行中，harness 的会话 transcript（JSONL）写在本机 `harness/<adapter>/session-data/` 内，随 `session-data/` 一起**不同步**（上文）——会话进行中的 transcript 不进入任何 Revision。**每次 end-generation（pause/block/wrap/fail）时**，Daemon 把该 generation 的会话 JSONL 复制为 `<capsule>/logs/session/<generation>.jsonl`：`logs/session/` 是 transcript 归档的唯一固定位置，文件名与归档它的 generation 一一对应，一个 generation 至多一份归档。复制发生在该 generation 最后一次发布（final flush，`05-sync-revision-recovery.md#§6.1`）的冻结扫描**之前**，归档随该次 end-generation 的最后一次 Revision **一次性发布，不逐边界重传**——裁定理由：CAS 按整文件内容寻址，transcript 在会话期间持续增长，若随每条 Revision 边界同步，每次都要为整个文件重新上传一个块，成本随会话长度线性放大；按代归档使每代 transcript 至多占用一个 CAS 块（pause→跨机 resume→wrap 时前代已在 pause 时归档，换代路径完整覆盖）。归档文件只是**审计材料**：任何恢复路径都不依赖它（跨机重建见 `05-sync-revision-recovery.md#§7.4`），它也不参与 harness 身份的任何判定（上文 session 身份规则只读本机 `session.json`）；写入者是 Daemon（end-generation 收尾时该 capsule 已无 subagent 运行），不占用 subagent 的 `logs/**` 追加写权限面（§5.2）。
+**session transcript 归档（A14 裁定 + claude 终态采集修订，本节为 `logs/session/` 固定位置与终态采集的唯一权威）**：会话进行中，transcript（JSONL）的**运行时**落位按适配器区分：**pi** 写在本机 `harness/<adapter>/session-data/` 内，随 `session-data/` 一起**不同步**（上文）；**claude** 不支持自定义 session 路径，写在该 harness 的**默认会话位置**（本机、Capsule 外）——运行中的任何会话数据读取一律指向该默认位置，不指向 Capsule（`04-local-runtime.md#§6.1a`），且因位于 Capsule 外而天然不在任何同步面。无论哪个适配器，会话进行中的 transcript 都不进入任何 Revision。**每次 end-generation（pause/block/wrap/fail）时**，Daemon 把该 generation 的会话 JSONL 复制为 `<capsule>/logs/session/<generation>.jsonl`：`logs/session/` 是 transcript 归档的唯一固定位置，文件名与归档它的 generation 一一对应，一个 generation 至多一份归档。**claude 适配器的终态采集（本节权威）**：归档复制之前，Daemon 先以**只读**方式从该 harness 的默认会话位置把本代会话 JSONL 复制进该 Capsule 的 `harness/<adapter>/session-data/`（该会话在 Capsule 内的本机会话目录）——这是「封存时刻 Capsule 含会话记录」这一 `00-architecture.md#§3.6a` 契约的实质落点，采集完成后归档步骤对两条适配器统一从 `harness/<adapter>/session-data/` 取源复制出 `logs/session/<generation>.jsonl`。**采集缺失是 typed error，不是静默跳过**：本代已派生过 harness 会话（本机 `session.json` 存在）而默认会话位置未找到该会话的 JSONL 时，Daemon 以 `DAEMON-513 SESSION_JSONL_MISSING`（`04-local-runtime.md#§5.2`）失败本次收尾，不产出归档文件、也不代为收尾；本代从未派生 harness 会话或 transcript 为空文件时不产生归档路径、不触发该错误（与 `05-sync-revision-recovery.md#§6.1` 的空链分支一致）。采集与归档复制均发生在该 generation 最后一次发布（final flush，`05-sync-revision-recovery.md#§6.1`）的冻结扫描**之前**，归档随该次 end-generation 的最后一次 Revision **一次性发布，不逐边界重传**——裁定理由：CAS 按整文件内容寻址，transcript 在会话期间持续增长，若随每条 Revision 边界同步，每次都要为整个文件重新上传一个块，成本随会话长度线性放大；按代归档使每代 transcript 至多占用一个 CAS 块（pause→跨机 resume→wrap 时前代已在 pause 时归档，换代路径完整覆盖）。归档文件只是**审计材料**：任何恢复路径都不依赖它（跨机重建见 `05-sync-revision-recovery.md#§7.4`），它也不参与 harness 身份的任何判定（上文 session 身份规则只读本机 `session.json`）；写入者是 Daemon（end-generation 收尾时该 capsule 已无 subagent 运行），不占用 subagent 的 `logs/**` 追加写权限面（§5.2）。
 
 **接管/跨机的处理**：`harness/` 整体随 Capsule 目录在接管时被 §2.4/§6.1 的 quarantine 机制隔离，新 generation 的 WI Agent 在新建的干净目录里为该 WI 重新创建全新的 `session.json`（新 `session_id`）与全新的 `session-data/`——不尝试跨 generation 或跨机延续旧 harness 会话。接管（force-takeover）本质上也是产生新 generation，与 pause → resume 适用同一条规则；这与 §2.4 裁定「新代总是从干净目录开始，不信任任何本地残留」对 `harness/` 同样成立，也与上面「session 身份规则」逐字一致。`00-architecture.md#§3.6a`、`04-local-runtime.md`（harness 适配器启动参数，§6.1a）与 `05-sync-revision-recovery.md`（同步根定义，§4.1）均引用本节作为该规则的唯一权威，不重复定义。
 

@@ -428,7 +428,7 @@ dirty 标记作为"是否值得扫一次"的提示，`watcher/` 绝不反向调�
   `artifacts/` 而非 `repos/` 才会被同步（`repos/` 内被 gitignore 的文件不入 Revision，因为
   `git status --porcelain` 默认不列 ignored 文件）。`session.json`（若纳入）不适用 gitignore
   过滤，因为它不是 `repos/<name>/` 下的 git 工作树。
-- **session transcript 归档的同步确认（A14 裁定）**：`logs/` 已在同步根（上文），其子目录 `logs/session/` 随之天然在同步根内。session transcript 归档文件 `logs/session/<generation>.jsonl`（固定位置与命名规则的权威在 `03-execution-capsule.md#§4.4`：文件名与归档它的 generation 一一对应，**每次 end-generation（pause/block/wrap/fail）无例外**由 Daemon 从本机 `harness/<adapter>/session-data/` 复制写入，复制先于 final flush 的冻结扫描）**随该 generation 的 final flush（§6.1）即最后一次 Revision 一次性上传**；会话进行中该文件不存在，不存在逐边界重传的问题——裁定理由：CAS 按整文件内容寻址，transcript 在会话期间持续增长，若逐 Revision 边界同步，每次发布都要为整个文件重新上传一个块，成本随会话长度线性放大；按代一次性归档使每代 transcript 至多占用一个 CAS 块。归档文件只是审计材料，跨机重建不依赖它（§7.4）。
+- **session transcript 归档的同步确认（A14 裁定）**：`logs/` 已在同步根（上文），其子目录 `logs/session/` 随之天然在同步根内。session transcript 归档文件 `logs/session/<generation>.jsonl`（固定位置与命名规则的权威在 `03-execution-capsule.md#§4.4`：文件名与归档它的 generation 一一对应，**每次 end-generation（pause/block/wrap/fail）无例外**由 Daemon 从本机 `harness/<adapter>/session-data/` 复制写入——claude 适配器下，该源文件本身由 Daemon 在同一时点先从该 harness 的**默认会话位置**（本机、Capsule 外）只读采集进 `session-data/`，采集缺失为 `DAEMON-513` typed error（权威见 `03-execution-capsule.md#§4.4`、`04-local-runtime.md#§5.2`）——复制先于 final flush 的冻结扫描）**随该 generation 的 final flush（§6.1）即最后一次 Revision 一次性上传**；会话进行中该文件不存在，不存在逐边界重传的问题——裁定理由：CAS 按整文件内容寻址，transcript 在会话期间持续增长，若逐 Revision 边界同步，每次发布都要为整个文件重新上传一个块，成本随会话长度线性放大；按代一次性归档使每代 transcript 至多占用一个 CAS 块。归档文件只是审计材料，跨机重建不依赖它（§7.4）。
 - 内容寻址存储（CAS，唯一权威存储布局，`02-aihub-core.md#§4.11` 本地数据目录布局与此逐字一致）：数据块按其
   内容 sha256 命名存放于 `<data_dir>/capsules/<wi>/rev/_cas/<sha256[:2]>/<sha256>`；
   manifest 落盘于 `<data_dir>/capsules/<wi>/rev/<seq>/manifest.json`（不存数据，只存操作
@@ -595,7 +595,10 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
    Daemon 发起一次发布请求（reason 对应收尾类型）；Daemon 按步骤 2–3 获取 write freeze 并
    完成一次 **final flush 冻结扫描**——无论本 generation 是否产生过改动，这次扫描都必须
    实际执行（`02-aihub-core.md#§6.4` 明确不允许仅凭旧 HEAD 推断）。**每次 end-generation（pause/block/wrap/fail）**，Daemon 在发起
-   本次 final flush 的冻结扫描**之前**，若本机 `harness/<adapter>/session-data/` 内存在**非空**的会话
+   本次 final flush 的冻结扫描**之前**（claude 适配器下须先完成 `03-execution-capsule.md#§4.4` 的终态采集：从该
+   harness 默认会话位置只读复制本代 JSONL 进 `harness/<adapter>/session-data/`；本代已派生 harness 会话而默认位置
+   缺失该 JSONL 时以 `DAEMON-513`（`04-local-runtime.md#§5.2`）失败本次收尾，不静默跳过），若本机
+   `harness/<adapter>/session-data/` 内存在**非空**的会话
    transcript 文件，则把它复制为同步根内的 `logs/session/<generation>.jsonl`（固定位置与命名规则
    权威在 `03-execution-capsule.md#§4.4`，A14 裁定；归档前提=本代曾实际产出会话内容：从未派生
    harness 会话、或 transcript 为空文件的 generation 不产生归档路径——「首次 claim 后未及派生即
