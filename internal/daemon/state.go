@@ -39,8 +39,34 @@ type Job struct {
 	// left for human attention rather than silently re-derived.
 	BundleName   string `json:"bundle_name,omitempty"`
 	BundleDigest string `json:"bundle_digest,omitempty"`
+	// Watchdog carries the runtime watchdog's PERSISTED bits (watchdog.go,
+	// 04 §6.2 runtime note) — exactly the pieces the 04 §7.1 restart recovery
+	// needs and nothing else (the live activity samples stay in memory):
+	// the per-step incident counter of the storm guard and the bounded
+	// termination verdict. A verdict on record denies re-derivation and
+	// re-attachment at recovery, so a bounded-terminated step is never
+	// silently retried forever across daemon restarts.
+	Watchdog *JobWatchdog `json:"watchdog,omitempty"`
 	// Status: running | interrupting | sealing (04 §4.1).
 	Status string `json:"status"`
+}
+
+// JobWatchdog is the persisted watchdog bookkeeping of one jobs[] entry
+// (watchdog.go): Hangs counts consecutive watchdog incidents (hang verdict,
+// backstop expiry or observed death) attributed to StepID — the counter
+// resets whenever the current step changes (progress). Bounded is the
+// typed storm-guard verdict: the SAME step hit the bound twice, the job
+// was terminated with the infra-failure/blocked shape and no further
+// relaunch may happen.
+type JobWatchdog struct {
+	StepID string `json:"step_id,omitempty"`
+	Hangs  int    `json:"hangs,omitempty"`
+	// BoundedStep is non-empty iff Bounded holds (the sentinel
+	// "(no-step)" records a verdict rendered before any step had
+	// started); BoundedAt is the verdict's UTC stamp.
+	BoundedStep string `json:"bounded_step,omitempty"`
+	Bounded     bool   `json:"bounded,omitempty"`
+	BoundedAt   string `json:"bounded_at,omitempty"`
 }
 
 // Job statuses.
@@ -271,6 +297,21 @@ func (st *State) validate() error {
 			return fmt.Errorf("%s: empty main_agent_started_at", where)
 		case j.Status != JobRunning && j.Status != JobInterrupting && j.Status != JobSealing:
 			return fmt.Errorf("%s: unknown status %q", where, j.Status)
+		}
+		// Persisted watchdog bits (watchdog.go): the bounded-termination
+		// verdict is a closed shape — a verdict requires its step and its
+		// stamp, and a stamp/step without the verdict can only be corruption.
+		if j.Watchdog != nil {
+			switch {
+			case j.Watchdog.Bounded && j.Watchdog.BoundedStep == "":
+				return fmt.Errorf("%s: watchdog bounded verdict requires bounded_step", where)
+			case j.Watchdog.Bounded && j.Watchdog.BoundedAt == "":
+				return fmt.Errorf("%s: watchdog bounded verdict requires bounded_at", where)
+			case !j.Watchdog.Bounded && (j.Watchdog.BoundedStep != "" || j.Watchdog.BoundedAt != ""):
+				return fmt.Errorf("%s: watchdog bounded_step/bounded_at without the bounded verdict", where)
+			case j.Watchdog.Hangs < 0:
+				return fmt.Errorf("%s: watchdog hangs must be >= 0, got %d", where, j.Watchdog.Hangs)
+			}
 		}
 		seen[j.WorkItemID] = true
 	}

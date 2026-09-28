@@ -108,7 +108,7 @@ func (d *Daemon) finishJob(ctx context.Context, wi, reason string) (*FinishOutco
 		return nil, err
 	}
 	defer d.endClose(wi)
-	return d.closeJob(ctx, wi, jr, reason, reason)
+	return d.closeJob(ctx, wi, jr, reason, reason, "")
 }
 
 // closeJob runs the single 04 §6.2 A-path close for one active local job:
@@ -124,9 +124,12 @@ func (d *Daemon) finishJob(ctx context.Context, wi, reason string) (*FinishOutco
 //
 // A rolled-back credential isolates through the shared 04 §7.3 classifier
 // (quarantine, never a retry) at either Core-writing step. endReason is
-// the Core reason (pause|wrap|fail); ringCause is what live observers see
-// on the ring (the shutdown sequence passes "shutdown").
-func (d *Daemon) closeJob(ctx context.Context, wi string, jr *jobRuntime, endReason, ringCause string) (*FinishOutcome, error) {
+// the Core reason (pause|block|wrap|fail); ringCause is what live observers
+// see on the ring (the shutdown sequence passes "shutdown", the watchdog
+// passes "watchdog_bounded_termination"); waitingOn rides along ONLY on
+// reason=block (02 §2.4's closed waiting_on value domain — the watchdog's
+// bounded termination passes runtime:<machine_id>).
+func (d *Daemon) closeJob(ctx context.Context, wi string, jr *jobRuntime, endReason, ringCause, waitingOn string) (*FinishOutcome, error) {
 	jr.ring.Append(EvJobStopped, map[string]any{"cause": ringCause})
 	// Bookkeeping mark: the close is under way (04 §4.1 interrupting), so
 	// a crash mid-close leaves an honest record, not a stale running row.
@@ -184,7 +187,7 @@ func (d *Daemon) closeJob(ctx context.Context, wi string, jr *jobRuntime, endRea
 	// End the generation with the Daemon-generated evidence. On a
 	// rolled-back token the 04 §7.3 path (quarantine, no retry) runs via
 	// the same shared classifier.
-	if err := d.client.EndGeneration(wi, endReason, "", jr.token, outcome.FlushEvidence); err != nil {
+	if err := d.client.EndGeneration(wi, endReason, waitingOn, jr.token, outcome.FlushEvidence); err != nil {
 		return nil, d.classifyWriteErr(wi, err)
 	}
 	d.sealJob(wi, jr)
