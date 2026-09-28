@@ -3,10 +3,12 @@ package cli
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -156,6 +158,30 @@ var cmdObserve = &Command{
 func observeReadThrough(ctx *Context, wiID string) error {
 	raw, err := NewClient(ctx.Cfg.Server, ctx.Cfg.APIKey).GetProgress(wiID)
 	if err != nil {
+		if isClaimedEmptyChainProgress(err) {
+			// The claimed-but-no-published-HEAD CORE-504 is the minutes-long
+			// first-publish window of every real WI, not an illegal state
+			// (polyforge#36): the read-only face renders the empty-chain
+			// view instead of hard-erroring. Every OTHER CORE-504 variant
+			// (broken published chain) still falls through to the error
+			// below — read-only faces degrade, they do not erase
+			// diagnostics.
+			p := progressView{
+				WorkItemID:    wiID,
+				FreshnessNote: noteFirstPublishPending,
+				claimedNoHead: true,
+			}
+			if synthesized, merr := json.Marshal(p); merr == nil {
+				// --json mode: emit the same shape the Core answers for the
+				// never-claimed case (row-6 200 with null fields), so the
+				// machine consumer sees a payload, not an error envelope.
+				ctx.emit(synthesized)
+			}
+			if !ctx.JSON {
+				renderProgress(ctx.Stdout, &p)
+			}
+			return nil
+		}
 		return err
 	}
 	ctx.emit(raw)
@@ -166,6 +192,33 @@ func observeReadThrough(ctx *Context, wiID string) error {
 		}
 	}
 	return nil
+}
+
+// claimedNoHeadDetail anchors the ONE CORE-504 variant that is a legal
+// state rather than a broken chain: the Core's typed row-6 answer for
+// "claimed but nothing published yet" (internal/core/capsule/capsule.go
+// Store.Progress, api/openapi.yaml getProgress). The server contract pins
+// the code with an empty reason for every CORE-504, so the deterministic
+// detail text is the only wire-side distinguisher; all other variants
+// (execution.json missing at HEAD, undecodable block, unreadable or
+// unparsable manifest) must keep erroring. Mirrored by the daemon-side
+// predicate in internal/daemon/api.go.
+const claimedNoHeadDetail = "was claimed but has no published HEAD"
+
+// noteFirstPublishPending is the empty-chain rendering for the
+// claimed-but-no-HEAD state (polyforge#36): it extends the Core's own
+// never-claimed row-6 note so both observe layers agree on the wording.
+const noteFirstPublishPending = "no published revision yet (claimed, first publish pending)"
+
+// isClaimedEmptyChainProgress reports whether err is exactly the
+// claimed-empty-chain CORE-504 (the first-publish window), the one
+// variant the read-through observe renders instead of surfacing.
+func isClaimedEmptyChainProgress(err error) bool {
+	var ae *APIError
+	if !asAPIError(err, &ae) || ae.Code != "CORE-504" {
+		return false
+	}
+	return strings.Contains(ae.Detail, claimedNoHeadDetail)
 }
 
 // submitPrecheck asks the Core — with the CALLER's own api key, not the

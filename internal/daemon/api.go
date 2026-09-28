@@ -358,6 +358,23 @@ func (s *APIServer) hObserve(w http.ResponseWriter, r *http.Request) {
 	// the first layer, extracted from that published state.
 	headSeq, progress, err := s.d.client.Progress(wi)
 	if err != nil {
+		if isEmptyChainPendingErr(err) {
+			// CORE-504 "claimed but has no published HEAD" is the
+			// minutes-long first-publish window of every real WI, not an
+			// illegal state (polyforge#36): the read-only observation face
+			// degrades to the empty-chain view instead of erroring. Every
+			// OTHER CORE-504 variant (broken published chain) keeps the
+			// DAEMON-404 fallback below — read-only faces degrade, they do
+			// not erase diagnostics.
+			writeJSONOK(w, map[string]any{
+				"events":         []map[string]any{},
+				"state_snapshot": map[string]any{},
+				"head_seq":       nil,
+				"read_through":   true,
+				"freshness_note": freshnessNoteFirstPublishPending,
+			})
+			return
+		}
 		writeAPIErr(w, ErrCodeNotFound, "no local job and no published progress for "+wi)
 		return
 	}
@@ -369,13 +386,56 @@ func (s *APIServer) hObserve(w http.ResponseWriter, r *http.Request) {
 			progress["pending_question"] = v
 		}
 	}
+	// Never-claimed (head_seq null from the Core) keeps the Core's own
+	// row-6 wording rather than claiming a publish that never happened.
+	note := freshnessNoteAsOfPublish
+	if headSeq == nil {
+		note = freshnessNoteNeverClaimed
+	}
 	writeJSONOK(w, map[string]any{
 		"events":         []map[string]any{},
 		"state_snapshot": progress,
 		"head_seq":       headSeq,
 		"read_through":   true,
-		"freshness_note": "数据截至最近一次发布",
+		"freshness_note": note,
 	})
+}
+
+// freshnessNoteFirstPublishPending renders the claimed-but-no-published-HEAD
+// state (polyforge#36): the empty-chain view observe must yield instead of a
+// hard error for the first-publish window of every real WI. The wording
+// extends the Core's own never-claimed row-6 note ("no published revision
+// yet", internal/server/handlers_wi.go hProgress), mirrored here so both
+// observe layers agree.
+const freshnessNoteFirstPublishPending = "no published revision yet (claimed, first publish pending)"
+
+// freshnessNoteNeverClaimed mirrors the Core's row-6 never-claimed note
+// (head_seq: null, nothing ever claimed).
+const freshnessNoteNeverClaimed = "no published revision yet"
+
+// freshnessNoteAsOfPublish is the published-HEAD freshness note (04 §5.1a
+// layer two: data as of the latest publish).
+const freshnessNoteAsOfPublish = "数据截至最近一次发布"
+
+// claimedNoHeadDetail anchors the ONE CORE-504 variant that is a legal
+// state rather than a broken chain: the Core's typed row-6 answer for
+// "claimed but nothing published yet" (internal/core/capsule/capsule.go
+// Store.Progress, api/openapi.yaml getProgress). The server contract pins
+// the code with an empty reason for every CORE-504, so the deterministic
+// detail text is the only wire-side distinguisher; all other variants
+// (execution.json missing at HEAD, undecodable block, unreadable or
+// unparsable manifest) must keep erroring.
+const claimedNoHeadDetail = "was claimed but has no published HEAD"
+
+// isEmptyChainPendingErr reports whether err is exactly the
+// claimed-empty-chain CORE-504 (the first-publish window), the one variant
+// the observe faces render instead of surfacing (polyforge#36).
+func isEmptyChainPendingErr(err error) bool {
+	ae, ok := err.(*aihub.APIError)
+	if !ok || ae.Code != "CORE-504" {
+		return false
+	}
+	return strings.Contains(ae.Detail, claimedNoHeadDetail)
 }
 
 // pendingQuestionView is the 00 §3.4a needs_input observation shape — the
