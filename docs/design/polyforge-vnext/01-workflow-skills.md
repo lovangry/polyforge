@@ -197,7 +197,7 @@ frontmatter 字段：
 
 **校验时机与生效**：AIHub 创建事务不解析 agents frontmatter——只做存在性检查与按字节摘要（V7/§4.5，`02-aihub-core.md#§4.5`）；`internal/workflow/schema` 提供本表校验库，供 bundle 测试与执行侧告警使用，不阻塞创建；派发时由 harness 适配器按 `03-execution-capsule.md#§4.5` 的物化产物解析生效。
 
-**输出契约（INV-1h）**：step agent 的最终输出必须是符合 `output` schema 的 JSON，**不符合即按该 step 的基础设施失败处理**（§6.3，原地重派并推进候选指针），不产出业务判定、不触发 gate（与 `03-execution-capsule.md#§4.5` 一致）。
+**输出契约（INV-1h）**：step agent 的最终输出必须是符合 `output` schema 的 JSON，**不符合即按该 step 的基础设施失败处理**（§6.3，原地重派并推进候选指针），不产出业务判定、不触发 gate（与 `03-execution-capsule.md#§4.5` 一致）。「不符合」的判定来源有两个（polyforge#27 修订）：一是执行侧自查（WI Agent 读取 schema 的既有路径）；二是**发布时机械校验**——每次全扫描发布（HEAD 推进）时，Daemon 侧校验器从已固化进 staging 的快照字节中逐 step 比对每个已完成 step 的输出与其 pinned `output` JSON Schema。校验器是 draft-07 的机械完整实现，schema-authoring 规则与本仓 bundle 测试（`internal/workflow/schema`）强制的同一契约：参考 bundle 的 output schema 只使用标准 draft-07 关键字，真校验器接入即同一契约生效，不要求改写任何既有 schema。该检查只读将随本次发布写入 Revision 的快照字节，**绝不触碰 Capsule 内 `runtime-state/` 活文件**（INV-6：runtime-state 是 WI Agent 的单写者私有域，Daemon 的校验只在发布面读已发布快照；Capsule 侧契约的权威在 `03-execution-capsule.md#§5.1a`）。失配分类不变：不合 schema = 该 step 的基础设施失败（§6.3），不产出业务判定、不新增终态。
 
 正文为自然语言执行指令，由该 step 的 WI Agent 在派生 step agent 时组装进其 prompt（WI Agent 驱动逻辑的一部分，`00-architecture.md#§3.6`），不属于 harness 适配器或 Daemon 的实现细节。model/候选声明位置一律在 workflow.md frontmatter 的 step/defaults 字段（§4.1）——保证模型选择是流程作者的决定，而非 step skill 作者的决定。
 
@@ -361,13 +361,13 @@ bundleDigest := sha256.Sum256(canonical)
 
 ### 6.3 基础设施失败 → 当前 step 原地 resume（按候选顺序有界切换），追加 attempt 历史 <!-- §6.3 -->
 
-1. 判定标准：step agent 进程死亡或被杀、上游接口连续 429/5xx、宿主机重启、网络中断、本机磁盘或工具链不可用、step agent 最终输出不符合该 step 的 `output` JSON Schema（§4.4，INV-1h）——一切「未产出任何业务判定」的失败均归为基础设施失败。
+1. 判定标准：step agent 进程死亡或被杀、上游接口连续 429/5xx、宿主机重启、网络中断、本机磁盘或工具链不可用、step agent 最终输出不符合该 step 的 `output` JSON Schema（§4.4，INV-1h）——一切「未产出任何业务判定」的失败均归为基础设施失败。其中「输出不合 schema」有两个机械来源：WI Agent 派发侧自查，与每次全扫描发布时 Daemon 对已固化快照字节的 draft-07 校验（`03-execution-capsule.md#§5.1a`，polyforge#27）；二者失配分类相同，均走本节语义，不存在第二条处理路径。
 2. 处理（两个动作同一次写入原子完成，互不矛盾）：
    a. 该 step 在 `execution.json.steps[step_id].status` 中保持 `in_progress`，不重置为 `pending`（这是对**业务结果车道**而言：不归档为失败结果，不触发 gate FAIL 语义，也不清空上一次已成功 step 的输出）。
    b. **同时向 `execution.json.steps[step_id].attempts[]` 追加一条历史记录**，字段为 `{attempt_seq, started_at, interrupted_at, cause: "infra_failure", detail, consumed_budget}`（该数组结构与 §6.2 rewind 归档历史属于同一 `attempts[]` 列表，只是 `cause` 不同：`gate_fail_rewind` vs `infra_failure`；归档 attempts 的权威 schema 在 `03-execution-capsule.md#§4.2`，本文只引用）。这满足 spec 「基础设施失败原地恢复」场景的「attempt 历史追加记录」要求，与上面 a 项「不归档为失败尝试」不冲突：**归档为失败尝试**指的是把 step 的业务结果记为 FAIL/重置为 `pending`（本节不做）；**追加 attempt 历史**指的是在不改变 step 状态机的前提下，单纯追加一条可审计的中断记录（本节做）。
 3. 待 Daemon 检测到恢复条件满足（`04-local-runtime.md#§7`），在原地重新派发同一个 step，不跳过、不回退到更早的 step；重新派发前先写入下一条 `attempts[]` 记录的 `attempt_seq`（递增）。
 4. **重派时的模型候选切换（有界，INV-1g 的 infra 侧）**：该 step 的生效候选列表 = step 级 `model_candidates`，缺省取 `defaults.model_candidates`（V9；两处皆缺省时不存在可切换候选，重派沿用 harness 适配器缺省模型）。首次派发用列表第 1 项；每次基础设施失败重派前进一档；**切换次数以候选列表长度为上界**——耗尽后保持末位候选继续原地重派，重派本身是否继续由恢复条件与预算（§6.6）决定，候选耗尽不是独立的终止条件。候选指针不是新的持久化字段：当前候选序号 = 1 +（该 step `attempts[]` 中位于最后一条 `gate_fail_rewind` 归档之后的 `infra_failure` 条目数；无任何 `gate_fail_rewind` 归档时从头计数），对列表长度取 min——该复算只依赖 `execution.json` 的既有归档结构（`03-execution-capsule.md#§4.2`），因此崩溃恢复后新 WI Agent 复算出的指针与崩溃前一致，不依赖进程内存。
-5. 已完成（`done`）的 step 绝不因基础设施失败而重跑；被中断进程此前已消耗的预算额度计入累计消耗（写入对应 attempt 记录的 `consumed_budget`），不因中断而回滚。
+5. 已完成（`done`）的 step 绝不因基础设施失败而重跑——**唯一例外**：发布时机械校验证伪其 `done` 判定的 step（输出不合 `output` schema，`03-execution-capsule.md#§5.1a`，polyforge#27）。此时「已完成」不成立：按本节基础设施失败语义原地重派，WI Agent 在追加第 2b 条 `infra_failure` 记录的同一次原子写入内把该 step `status` 由 `done` 改回 `in_progress`（不重置为 `pending`；`03-execution-capsule.md#§4.2`），候选指针推进同第 4 步有界规则，不新增任何终态。被中断进程此前已消耗的预算额度计入累计消耗（写入对应 attempt 记录的 `consumed_budget`），不因中断而回滚。
 6. 与 gate FAIL 的边界（`00-architecture.md#§2.3` INV-9）：FAIL 的前提是 step 确实产出了业务判定；任何没有产出判定的中断（含输出不符合 `output` schema），一律按基础设施失败处理并 resume，不允许把「无判定的死亡」误记为业务否决。
 
 ### 6.3b 归档 attempts 的两分法（cause 语义） <!-- §6.3b -->

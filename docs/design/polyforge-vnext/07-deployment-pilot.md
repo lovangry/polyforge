@@ -228,7 +228,12 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
    （`00-architecture.md#§3.1`）。任何 harness 不安装 `pf-execute` 或任何 bundle/step skill（§2.3）。路由
    skill 是 Interactive 模式的唯一入口（`00-architecture.md#§3.4a`）。
 6. 安装完成的判据：`pf doctor` 对 AIHub 业务端点（如 `GET /api/v1/work-items`）的连通性自检通过，且响应头报告的 `schema_version` 为当前 v1 版本（无独立 whoami 端点，`02-aihub-core.md#§5.1`）；
-   至少一台工作机的 Daemon 心跳已出现在 `machines` 表中，且其 `mode` 已成功写入 Daemon state。
+   至少一台工作机的 Daemon 心跳已出现在 `machines` 表中，且其 `mode` 已成功写入 Daemon state。装机自检另含一次
+   **候选 liveness 探针**（polyforge#27）：对参与 Pilot 的 bundle（第 4 步确认就位的 `workflows/<bundle-name>/`
+   全集）所声明的全部 model_candidates（defaults 与 step 级覆盖的并集，`01-workflow-skills.md#§2.1`/
+   `01-workflow-skills.md#§4.1`），经对应 harness 的模型调用路径各发一次微型探针请求，全部可达方判安装完成、方入
+   Pilot；探针属安装面判据，不是运行时依赖——Pilot 期间候选不可达仍按 `01-workflow-skills.md#§6.3` 的基础设施
+   失败原地 resume 语义处理，装机探针不为其兜底，也不因探针曾通过而改变该语义。
 
 ### 6.2 一致性备份（`pf-deploy backup`，升级/回滚均以此为前置步骤） <!-- §6.2 -->
 
