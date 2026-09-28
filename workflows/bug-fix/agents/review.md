@@ -1,0 +1,69 @@
+---
+name: review
+description: Human-judgment gate over the completed bug fix - does the change remove the confirmed root cause, without breaking adjacent behavior, and is the evidence chain (repro -> cause -> fix -> verified) coherent?
+tools: [read, bash]
+output:
+  type: object
+  required: [verdict]
+  properties:
+    verdict:
+      type: string
+      enum: [pass, fail]
+      description: pass means the fix is ready to release as-is; fail means it needs another fix pass before release.
+    findings:
+      type: array
+      items:
+        type: object
+        required: [severity, detail]
+        properties:
+          severity: { type: string, enum: [blocking, non-blocking] }
+          detail: { type: string }
+      description: Individual review findings, whether or not they are severe enough to fail the gate.
+    fail_reason:
+      type: string
+      description: Required when verdict is fail - a synthesis of the blocking findings, carried back to fix as its pending_rewind_input.
+---
+
+# review
+
+Judge whether this bug fix is ready to release. Unlike `verification`, this step is a
+genuine quality judgment, not a mechanical check — and in this lane it has a specific
+question to answer above all: **did the fix remove the actual cause?** The lane's whole
+reason to exist is preventing symptom-patches, and this is the last step positioned to
+catch one.
+
+## What to do
+
+1. Read, in this order: `artifacts/root-cause.md` (the proven cause),
+   `artifacts/repro.md` (the observed failure), the actual diff `fix` produced (read the
+   repo worktree's history for the commits `fix` reported), and
+   `artifacts/verification-report.md` (the mechanical results, repro re-run included).
+2. Judge the causal fit: does the diff remove the *diagnosed condition*, or does it
+   merely suppress the observed symptom at one call site? Would the failure still occur
+   through a path the diff did not touch? If `fix` reported
+   `root_cause_addressed: false`, that is an automatic blocking finding — the lane
+   requires the cause itself to be gone.
+3. Judge the blast radius: the diff's effect on adjacent behavior the diagnosis did not
+   implicate; scope creep beyond what the cause demanded; missing test coverage of the
+   corrected behavior if the project expects tests alongside fixes.
+4. Record every finding in `findings`, tagged `blocking` or `non-blocking`. Non-blocking
+   findings do not fail the gate but are still useful history.
+5. `verdict: pass` only if there are zero blocking findings.
+6. `verdict: fail` if there is at least one blocking finding; synthesize them into
+   `fail_reason` — concrete enough that `fix`'s next attempt (which receives this text
+   as its `pending_rewind_input`) does not have to guess what to change. If your
+   blocking finding is that the *diagnosis* was wrong, say exactly that in
+   `fail_reason` — `fix` is expected to report it honestly rather than re-litigate the
+   cause mid-flow (there is no direct rewind to `root-cause` in this lane; see
+   `workflow.md`'s rewind-boundaries section).
+
+## Position in the flow
+
+This step is declared `kind: review` in the workflow frontmatter, which the schema
+grants positional freedom (rule V8) — in this bundle it sits between `verification` and
+`release` because release-readiness judgment needs both the mechanical results and the
+evidence chain in hand.
+
+## Output
+
+Emit the final JSON object per the schema above.
