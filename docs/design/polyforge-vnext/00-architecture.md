@@ -238,7 +238,7 @@
 （§11.1）；该取代声明与 §11.1 的迁移/处置表并列，同为本设计对旧系统的唯一处置权威。部署侧的
 并存与切换（Pilot 通过前旧 aihub 系统继续承担生产）见 `07-deployment-pilot.md#§2.1`。
 
-vNext AIHub 为单仓（monorepo）形态（D0 裁定）：一个 git tag 即一个版本，仓级唯一 semver——aihub 服务、pf-daemon、pf CLI 三产物同 tag 同版构建；`skills/` 与 `workflows/` 随仓演进、不单独发版（路由 skill 与 bundle 的分发渠道即 git 本身）。滚动部署存在各机时差，但不构成独立版本线。按模块拆目录：
+vNext AIHub 为单仓（monorepo）形态（D0 裁定）：一个 git tag 即一个版本，仓级唯一 semver——`aihub` 服务二进制与工作机二进制（单文件：`pf` CLI 动词 + `daemon` 子命令，部署单元合并裁定 `07-deployment-pilot.md#§3`）二产物同 tag 同版构建，releases 按 tag 存二产物 + 校验清单；`skills/` 与 `workflows/` 随仓演进、不单独发版（路由 skill 与 bundle 的分发渠道即 git 本身）。滚动部署存在各机时差，但不构成独立版本线。按模块拆目录：
 
 ```
 aihub/

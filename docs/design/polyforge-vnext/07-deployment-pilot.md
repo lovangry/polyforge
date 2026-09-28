@@ -47,9 +47,9 @@
   `00-architecture.md#§11.1` 迁移矩阵为准，本条裁定的是**能力范围**而非入口去向。
 - **发版（release）= bundle 内 release step 钩子（定稿裁定）**：平台零发版专用代码；发版逻辑长在项目
   bundle 的 `agents/release.md`（模板随参考 bundle 交付，`01-workflow-skills.md#§4.2`），多项目天然隔离。
-  平台自身发版（aihub / pf-daemon / pf 三产物）是同一钩子的实例，不另立发版模型。
+  平台自身发版（`aihub` 服务二进制与工作机二进制二产物）是同一钩子的实例，不另立发版模型。
   **`pf upgrade` 是部署管道而非发版系统**：只负责下载已发布制品、校验 sha256、quiesce、替换二进制、拉起
-  （§6.3），不承担任何发版决策；制品 = v1 内网 `releases/` 目录按 tag 存三产物 + 校验清单（mono-repo 单一 semver，
+  （§6.3），不承担任何发版决策；制品 = v1 内网 `releases/` 目录按 tag 存二产物 + 校验清单（mono-repo 单一 semver，
   `00-architecture.md#§3.2`）。一期部署面（§3/§6）不含发版 step，发版由各项目 bundle 自带。
 
 ## 2. 术语与不变量（含一期部署形态） <!-- §2 -->
@@ -59,7 +59,7 @@
 单主机运行 `aihub` 服务进程（单 active Service，INV-2，`02-aihub-core.md#§2.2`）；Core 是单个 SQLite 文件 +
 WAL，**不保存任何 workflow 执行状态**（INV-1）。远端数据——Capsule Revision 的 CAS 存储、Memory
 权威 Markdown、最终结果归档——全部落在本机目录 `<data_dir>/`（布局权威在 `02-aihub-core.md#§4.11`；本文 §4 给出
-部署视角的摘要树）。每台工作机运行一个 Daemon 进程（`pf-daemon`，`00-architecture.md#§3.1`）：Daemon 是
+部署视角的摘要树）。每台工作机运行一个 Daemon 进程（工作机二进制的 `daemon` 子命令，部署单元合并裁定 `00-architecture.md#§3.2`）：Daemon 是
 Interactive / Batch / Drain 三种 WI Job 执行模式下唯一的执行者（`00-architecture.md#§3.4`），为每个正在执行的 WI
 创建/回收 Capsule 并派生并监督其**唯一执行权威**——`runtime-state/execution.json`（`03-execution-capsule.md#§4.2`）——
 的**唯一写者**：该 WI 的 Harness RPC WI Agent（`00-architecture.md#§3.6`）。机器与 AIHub 之间仅经 HTTP 通信
@@ -77,7 +77,7 @@ Daemon-to-Daemon 协议或互推通道，一切跨机信息经 AIHub HTTP 中转
   仓库边界下不引入 per-step 隔离（`00-architecture.md#§3.7`）。这份清单本身
   就是 INV-10 在部署侧的落地判据：任何部署步骤为 AIHub 服务主机引入清单之外的存储/中间件依赖，
   都是对该不变量的违反。
-- **工作机宿主执行依赖（每台运行 Daemon 的工作机）**：`pf-daemon` 二进制；宿主机原生进程执行
+- **工作机宿主执行依赖（每台运行 Daemon 的工作机）**：工作机二进制（`daemon` 子命令长驻）；宿主机原生进程执行
   环境本身（v1 可信内部仓库边界内的宿主机原生执行，不引入 per-step 隔离，INV-12）；该 WI 选定的 harness 适配器所依赖的 harness 运行时——
   **Pi CLI**（`--mode rpc` 持久进程）或 **Claude Code CLI**（稳定 session + stream），二者是
   v1 仅有的两条 harness 适配器（`00-architecture.md#§3.6a`、`04-local-runtime.md#§6.1a`），须预先安装并完成其自身的登录/凭证
@@ -120,9 +120,9 @@ WI Agent（`00-architecture.md#§3.6`）**不是**独立安装的部署单元：
 实现，WI Agent 内部运行的都是同一份 `pf-execute` 主循环（`00-architecture.md#§3.6`）——三种模式只影响 Job 的
 来源与准入判据，不产生三套不同的执行部署形态。
 
-**用户机器部署物 = `pf-daemon` + 路由 skill 引用（安装面裁定的部署侧落地）**：一台用户工作机的全部
-vNext 部署物是 `pf-daemon` 二进制（含其发行物内的 `skills/pf-execute/`，见下段）加路由 skill 的一个
-引用，以及随 `pf-daemon` 同批分发的 `pf` CLI（数据面动词经它直连 AIHub，分流表
+**用户机器部署物 = 工作机二进制 + 路由 skill 引用（安装面裁定的部署侧落地）**：一台用户工作机的全部
+vNext 部署物是工作机二进制（单文件：CLI 动词 + `daemon` 子命令；其发行物内含 `skills/pf-execute/`，见下段）加路由 skill 的一个
+引用（数据面动词经 CLI 直连 AIHub，分流表
 `00-architecture.md#§5.1`）——**Pi 侧**是 settings 中 skills 配置的一行路径，直接指向本机 aihub checkout 内的
 `skills/polyforge/`（零复制，不搬文件）；**Claude Code 侧**经 plugin marketplace 安装路由 skill
 （`00-architecture.md#§3.1` 安装面裁定、`01-workflow-skills.md#§2.1`）。用户 harness **永不执行 workflow**：
@@ -146,8 +146,7 @@ agents 废弃）——部署面不部署、不迁移其中任何被删除或废�
 | 单元 | 产物 | 部署位置 | 独立升级/回滚 |
 |---|---|---|---|
 | `aihub` | AIHub 服务二进制（**新仓部署物**，`00-architecture.md#§3.3` 取代声明；与旧 aihub 系统并存到 Pilot 通过，切换见 §2.1/§11） | 单主机，systemd 单元 `polyforge-aihub` | 是（§6.3/§6.4） |
-| Daemon | `pf-daemon` 二进制（`00-architecture.md#§3.1` 命名裁定；`04` 现行文本） | 每台工作机：**Linux** 工作机注册为 systemd 单元 `polyforge-daemon`（随开机自启、由 systemd 监督重启）；**macOS** 工作机以 launchd agent/daemon（`plist` 设 `KeepAlive`，监督重启）或由操作者显式管理的前台常驻进程二选一运行——v1 不规定 macOS 侧具体使用哪一种，只要求该工作机的 `pf-daemon` 进程满足 `00-architecture.md#§3.1`/`04` 的长驻语义（崩溃后可被重新拉起，`04-local-runtime.md#§7`） | 是，逐台滚动（§6.3⑤），两类平台各自按自身进程管理机制重启，升级步骤本身不因平台而分叉 |
-| `pf` | CLI（数据面动词直连 AIHub 与管理操作，分流表 `00-architecture.md#§5.1`） | 工作机 + CI 机器 | 随 Daemon 同批分发，无独立版本协商 |
+| 工作机二进制 | 单文件：`pf` CLI 动词 + `daemon` 子命令（部署单元合并裁定，`00-architecture.md#§3.2`；数据面动词直连 AIHub 与管理操作，分流表 `00-architecture.md#§5.1`） | 每台工作机 + CI 机器：**Linux** 注册为 systemd 单元 `polyforge-daemon`（ExecStart 指向 `<binary> daemon`，随开机自启、由 systemd 监督重启）；**macOS** 以 launchd agent/daemon（`plist` 设 `KeepAlive`，监督重启）同理，或由操作者显式管理的前台常驻 `<binary> daemon`——v1 不规定 macOS 侧具体使用哪一种，只要求该机进程满足 `00-architecture.md#§3.1`/`04` 的长驻语义（崩溃后可被重新拉起，`04-local-runtime.md#§7`） | 是，逐台滚动（§6.3⑤，优雅停机后替换单文件再拉起），两类平台各自按自身进程管理机制重启，升级步骤本身不因平台而分叉 |
 | 路由 Skill | Skill 包 | 各用户 Harness | 随仓 tag 版本（mono-repo 单一 semver，`00-architecture.md#§3.2`）：pi 经 settings 路径引用仓内 `skills/polyforge`（git pull 即更新，零复制）、cc 经 marketplace 随 tag 打包；滚动更新存在时差，不构成独立版本线 |
 | bundle | `workflows/<bundle-name>/`：`workflow.md`（frontmatter + 正文）+ `agents/*.md`（`01-workflow-skills.md#§2.1`/§3） | 随 aihub 仓本机 checkout 交付：AIHub 服务主机（创建 WI 时服务端读取，`02-aihub-core.md#§4.5`）与每台工作机（WI Agent 第 0 步物化来源，`03-execution-capsule.md#§4.5`） | 否——无注册接口、无 registry/Core catalog（`01-workflow-skills.md#§2.1`）；随 checkout 的 git 版本演进，不构成独立部署/升级/回滚单元 |
 
@@ -211,10 +210,10 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 1. 在主机创建 `<data_dir>`（权限 `0750`，属主为服务运行用户）。
 2. 部署 `aihub` 二进制；启用并启动 systemd 单元 `polyforge-aihub`：启动序列内部依次完成
    `service.lock` 获取 → schema 迁移到 v1（`02-aihub-core.md#§11`）→ 自注册（`02-aihub-core.md#§4.10` `core_meta`）。
-3. 在每台工作机部署 `pf-daemon` 二进制，并按该机器操作系统配置其进程监督方式：**Linux** 工作机
-   注册并启用 systemd 单元 `polyforge-daemon`；**macOS** 工作机安装 launchd agent/daemon（`plist`
-   设 `KeepAlive`，随登录/开机拉起）或由操作者以前台常驻进程方式运行并自行负责重启——两者均需
-   满足 `pf-daemon` 崩溃后能被重新拉起这一长驻语义（`04-local-runtime.md#§7`），v1 不进一步规定 macOS 侧的具体
+3. 在每台工作机部署单一工作机二进制（`pf`，含 `daemon` 子命令），并按该机器操作系统配置其进程监督方式，使 `daemon` 子命令在监督下长驻运行（§3）：**Linux** 工作机
+   注册并启用 systemd 单元 `polyforge-daemon`（ExecStart 指向 `<binary> daemon`）；**macOS** 工作机安装
+   launchd agent/daemon（`plist` 设 `KeepAlive`，随登录/开机拉起）或由操作者以前台常驻 `<binary> daemon` 方式运行并自行负责重启——两者均需
+   满足 `daemon` 子命令崩溃后能被重新拉起这一长驻语义（`04-local-runtime.md#§7`），v1 不进一步规定 macOS 侧的具体
    选择。随后执行注册流程，把机器身份写入 Core 的 `machines` 表（`02-aihub-core.md#§5.1`、`02-aihub-core.md#§4.10`），并把
    该机器的初始 Job 执行模式（Interactive/Batch/Drain，`00-architecture.md#§3.4`）写入
    `$POLYFORGE_HOME/daemon/state.json` 的 `mode` 字段（`04-local-runtime.md#§4.1`/§6.7）。
@@ -223,7 +222,7 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
    `workflows/<bundle-name>/`（`workflow.md` + `agents/*.md`）存在即可；创建 WI 时由 AIHub 服务端从
    本机 checkout 读取并固化三 scalar（`02-aihub-core.md#§4.5`），执行侧由 WI Agent 第 0 步从工作机本机
    checkout 物化并按 `bundle_digest` 校验（`03-execution-capsule.md#§4.5`）。
-5. 把路由 skill 安排到参与 Pilot 的用户 harness——用户机器的部署物到此为止只有 `pf-daemon` 与路由
+5. 把路由 skill 安排到参与 Pilot 的用户 harness——用户机器的部署物到此为止只有工作机二进制与路由
    skill 引用（§2.3）：Pi 侧在 settings 的 skills 配置中加一行路径，指向本机 aihub checkout 内的
    `skills/polyforge/`（零复制）；Claude Code 侧经 plugin marketplace 安装
    （`00-architecture.md#§3.1`）。任何 harness 不安装 `pf-execute` 或任何 bundle/step skill（§2.3）。路由
@@ -279,12 +278,12 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 3. 替换 `aihub` 二进制；以迁移模式启动一次，执行 schema 迁移（`02-aihub-core.md#§11`，`schema_version` 单调
    递增，迁移事务原子）。
 4. 正常启动 `polyforge-aihub`；执行起服自检（业务端点响应头返回新版本号且自注册成功，无独立 whoami 端点）。
-5. 逐台滚动升级工作机的 `pf-daemon` 二进制；Core API 协议向后兼容一个版本窗，允许旧版本 Daemon
-   与新版本 AIHub 短暂共存直到该台完成升级。升级某台 Daemon 前，先让其完成一次优雅停机
+5. 逐台滚动升级工作机的单一工作机二进制；Core API 协议向后兼容一个版本窗，允许旧版本 Daemon
+   与新版本 AIHub 短暂共存直到该台完成升级。升级某台工作机前，先让其完成一次优雅停机
    （`00-architecture.md#§3.5`、`04-local-runtime.md#§6.5`）：该动作代替所有仍在进行的 WI Agent 各触发一次全扫描发布，保证
-   替换二进制前没有正在飞行的执行现场。替换二进制后按该机器的进程监督方式重新拉起：**Linux**
+   替换二进制前没有正在飞行的执行现场。随后替换该机的单一工作机二进制，按该机器的进程监督方式重新拉起 `daemon` 子命令：**Linux**
    工作机 `systemctl restart polyforge-daemon`；**macOS** 工作机重新加载对应的 launchd job
-   （`launchctl kickstart`/`bootstrap`）或由操作者重启前台进程——两种情形下 Daemon 重启后**不**按
+   （`launchctl kickstart`/`bootstrap`）或由操作者重启前台 `<binary> daemon`——两种情形下 Daemon 重启后**不**按
    `04-local-runtime.md#§7.1` 的崩溃恢复规则处理：升级前的优雅停机已按 `04-local-runtime.md#§6.2` A 路径结束该 WI 当时的
    generation（并从 `jobs[]` 中移除对应记录），因此重启后的 Daemon 看不到一个仍在“未结束”的
    旧 Job 可供“识别并续跑”；待升级完成后，该 WI 需经 Interactive/Batch/Drain 三种模式之一的

@@ -25,8 +25,11 @@ tests, adapter argv tables) land here per the design's handoff note.
 
 ## The `pf` CLI (naming ruling)
 
-The client CLI lives in `cmd/pf` + `internal/cli`. **Naming ruling:** the v1
-binary name is **`pf`** (short, typed dozens of times a day by both humans
+The client CLI lives in `cmd/pf` + `internal/cli`. **Naming ruling:** the end state is
+**one user-facing binary** that carries every CLI verb plus the long-running
+**`daemon` subcommand** (work-machine binary, deployment-unit merge ruling —
+00 §3.2 / 07 §3; one-shot verbs + `daemon` long-running in a single file). The
+v1 binary name is **`pf`** (short, typed dozens of times a day by both humans
 and routing-skill prompts). At **legacy retirement** the binary cuts over
 to the full name **`polyforge`**, leaving a **`pf` symlink** behind so every
 existing invocation, script and skill fragment keeps working — the same
@@ -39,8 +42,8 @@ Client-side wire notes (authorities: `api/openapi.yaml` for the AIHub face,
 - The daemon face answers mode queries via `GET /status` (`POST /mode`
   has no `get` action) and the batch wave route is `POST /batch_submit`.
 - `pf pause` / `pf wrap` project into the daemon's `/jobs/{id}/...` route
-  family (`/pause`, `/wrap`). This is a **client-side inference**: 00 §5.1
-  routes the pause/wrap verbs to the daemon face (the closing
-  `flush_evidence` is daemon-generated, 02 §6.4), but the daemon operations
-table (04 §5.1) and `internal/daemon/api.go` expose no pause/wrap route
-  today — a spec gap to settle when the daemon grows those routes.
+  family (`/pause`, `/wrap`), and both routes are live: the daemon operations
+  table (04 §5.1) documents the pause and wrap rows, `internal/daemon/api.go`
+  registers both handlers (`POST /jobs/{id}/pause`, `POST /jobs/{id}/wrap`),
+  and the dogfood runs exercise both — no spec gap remains here (the daemon
+  generates the closing `flush_evidence`, 02 §6.4).
