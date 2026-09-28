@@ -8,9 +8,13 @@
 // v1 harness adapters (00 §3.6a minimal contract):
 //   - Pi:     pi --mode rpc, Capsule-local session dir, pf-execute injected
 //     as the FIRST prompt of the RPC session.
-//   - Claude: claude -p with a stable session id and streaming output,
-//     pf-execute injected as an appended system prompt; crash continuation
-//     resumes via claude --resume <session id>.
+//   - Claude: claude -p --input-format stream-json --output-format
+//     stream-json --verbose — the REAL persistent streaming mode
+//     (measured live, Claude Code CLI 2.1.280): one long-lived process,
+//     one user-message record per stdin line, JSON protocol records on
+//     stdout, graceful exit on stdin EOF. pf-execute is injected as an
+//     appended system prompt plus one kickoff user message; crash
+//     continuation resumes via claude --resume <session uuid>.
 //
 // The wire protocol between supervisor and harness is line-delimited JSON on
 // the process stdio. The pi adapter speaks the REAL pi RPC protocol (pi
@@ -29,6 +33,7 @@ package mainagent
 import (
 	"bufio"
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -117,15 +122,18 @@ type Adapter interface {
 	// BuildCmd constructs the argv/env/stdio for one derivation.
 	BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error)
 	// InitialMessage returns the first stdin write delivering the
-	// pf-execute instruction (pi: the session's first prompt command;
-	// claude rides the system prompt instead, so this returns nil).
-	InitialMessage(p SpawnParams) (*piCommand, error)
+	// pf-execute instruction. Pi wraps it as the session's first prompt
+	// command; claude rides the system prompt for the instruction itself
+	// (04 §6.1a) and returns a fixed kickoff user message — the real CLI
+	// never begins a turn until a user message arrives on stdin
+	// (measured), so the main loop needs one to start.
+	InitialMessage(p SpawnParams) (any, error)
 	// FrameControl returns the stdin payload for ONE daemon→agent control
 	// line. line is the transport-neutral control JSON (controlEnvelope
-	// serialized); id is the command id for correlation. The pi adapter
-	// wraps the line in a prompt command (the agent receives it as a user
-	// message whose text is the line VERBATIM); the claude adapter writes
-	// the line itself.
+	// serialized). Both v1 adapters carry it as the text of a user-facing
+	// message — pi wraps it in a prompt command, claude in a
+	// streaming-input user-message record — so the agent-side pf-execute
+	// parses the user message text as the control line VERBATIM.
 	FrameControl(id, line string) any
 }
 
@@ -160,7 +168,7 @@ func (a *PiAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error
 	return cmd, nil
 }
 
-func (a *PiAdapter) InitialMessage(p SpawnParams) (*piCommand, error) {
+func (a *PiAdapter) InitialMessage(p SpawnParams) (any, error) {
 	// The pf-execute instruction is the session's FIRST prompt of the RPC
 	// session (04 §6.1a). The agent is idle at derivation, so no
 	// streamingBehavior is needed (and none may appear: the initial prompt
@@ -178,16 +186,69 @@ func (a *PiAdapter) FrameControl(id, line string) any {
 }
 
 // ---------------------------------------------------------------------------
-// Claude adapter (04 §6.1a): claude -p, stable session id + streaming;
-// crash continuation resumes the same session.
+// Claude adapter (04 §6.1a): claude -p in streaming-input mode, stable
+// session id + streaming; crash continuation resumes the same session.
 //
-// UNVERIFIED: this adapter's stdio protocol has never been exercised
-// against the real cc harness (out of scope for the pi-transport rework;
-// see FrameControl). Do not take any of its wire behavior as measured.
+// MEASURED against the real Claude Code CLI 2.1.280 (ground-truth probes,
+// polyforge#33):
+//
+//   - `claude -p --input-format stream-json --output-format stream-json
+//     --verbose` is a PERSISTENT multi-turn session: the process stays
+//     alive across turns, one stdin line carries one user-message record
+//     {"type":"user","message":{"role":"user","content":<string>}},
+//     each turn streams JSON records to stdout, and stdin EOF exits
+//     cleanly (exit 0). -p with the default text input is ONE-SHOT
+//     (result record, process exits) and cannot host the §3.6a
+//     persistent contract.
+//   - `--output-format stream-json` in print mode REQUIRES --verbose
+//     (the CLI refuses the combination without it).
+//   - `--session-id <uuid>` pins the conversation id but demands a VALID
+//     UUID ("sess_<wi>_<gen>" is rejected: "Invalid session ID. Must be a
+//     valid UUID."); `--resume <uuid>` continues that conversation
+//     (context retained, same id echoed). claudeSessionUUID maps the
+//     polyforge session id onto a deterministic UUID so the §3.6a
+//     identity rules ride through unchanged.
+//   - A session with ZERO completed turns is NOT resumable: --resume of a
+//     conversation that never finished a turn exits 1 with "No
+//     conversation found with session ID: <uuid>". A crash before the
+//     first turn completes therefore breaks the continuation chain — the
+//     re-derived claude dies at startup and the daemon's dead-agent
+//     handling takes over. UNVERIFIED: whether a crash MID first turn
+//     leaves a resumable conversation.
+//   - Output record shapes (no --include-partial-messages): hook noise +
+//     {"type":"system","subtype":"init",...,"session_id"} per turn,
+//     {"type":"assistant","message":{"role":"assistant","content":
+//     [{"type":"text"|"thinking",...}]}} per assistant message (a
+//     message may be thinking-only — no text block), and ONE
+//     {"type":"result","subtype":"success"|"error_during_execution",
+//     "result":<last assistant text>,"is_error":<bool>,"num_turns",
+//     "result_index"} per turn.
+//
+// Still UNVERIFIED against the real CLI (kept conservative):
+//
+//   - mid-turn control delivery: a user message arriving while a turn is
+//     in flight (real pi queues it via steer; claude's streaming input is
+//     documented to queue — not measured here);
+//   - --append-system-prompt on --resume: the flag COMBINATION is
+//     accepted (measured: --resume + --append-system-prompt + streaming
+//     input exits 0 on a persisted conversation); the SEMANTICS are not
+//     live-measured: the CLI records the system prompt on the
+//     conversation's first request (system-prompt snapshot) and reuses
+//     that record on later resumes, so a re-derived agent keeps the FIRST
+//     generation's pf-execute text even when the daemon re-injects an
+//     updated one (CLI help text, not live-measured);
+//   - capsule-local session storage (00 §3.6a "session data placement"):
+//     the real CLI writes conversations under CLAUDE_CONFIG_DIR (default
+//     ~/.claude), which also owns credentials — relocating it into the
+//     capsule would move auth material there (04 §8 forbids). v1 claude
+//     session isolation therefore rides the pinned conversation UUID,
+//     not a capsule-local directory.
 
 type ClaudeAdapter struct {
 	Bin string
 	// Resume marks a crash-continuation derivation: claude --resume <sid>.
+	// Set by the supervisor's session-identity read-back (Spawn), never
+	// by hand in production paths.
 	Resume bool
 }
 
@@ -200,41 +261,135 @@ func (a *ClaudeAdapter) claudeBin() string {
 	return "claude"
 }
 
+// claudeUserMessage is one stdin record of the REAL claude streaming-input
+// protocol (measured): {"type":"user","message":{"role":"user",
+// "content":"<text>"}}. The daemon→agent control JSON line rides
+// `content` VERBATIM — the agent-side pf-execute parses the user message
+// text exactly as the pi-side parses its prompt-command text (the same
+// §12 two-sided contract).
+type claudeUserMessage struct {
+	Type    string                `json:"type"` // "user"
+	Message claudeUserMessageBody `json:"message"`
+}
+
+type claudeUserMessageBody struct {
+	Role    string `json:"role"` // "user"
+	Content string `json:"content"`
+}
+
+// claudeKickoff is the first-turn user message. The pf-execute instruction
+// rides --append-system-prompt (04 §6.1a), but a claude -p session never
+// begins a turn until a user message arrives on stdin (measured: a
+// streaming-input session fed immediate EOF emits hook records and exits
+// without a single turn), so the adapter kicks the main loop off with
+// this fixed line. Deliberately NOT a control JSON line: nothing to ack.
+const claudeKickoff = "pf-execute kickoff: begin the work-item main loop now, following the pf-execute instructions in your system prompt."
+
+// claudeUUIDNS is the RFC 4122 URL namespace, the fixed UUIDv5 namespace
+// claudeSessionUUID hashes under.
+var claudeUUIDNS = [16]byte{
+	0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1,
+	0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+}
+
+// claudeSessionUUID derives the claude conversation UUID from the
+// polyforge harness session id. The real CLI demands a UUID for
+// --session-id/--resume while §3.6a mints "sess_<wi>_<generation>"; the
+// map is DETERMINISTIC (RFC 4122 name-based UUIDv5 under a fixed
+// namespace), so the same harness session id always maps to the same
+// claude conversation id and the crash-continuation reuse (03 §4.4: same
+// id, same machine, same generation) re-derives exactly the conversation
+// to resume — no extra bookkeeping, no stored harness id. (Measured
+// live: the CLI accepts and persists a name-derived uuid5 as the
+// conversation id, and --resume continues it after a real turn.)
+func claudeSessionUUID(sessionID string) string {
+	h := sha1.New()
+	h.Write(claudeUUIDNS[:])
+	h.Write([]byte("polyforge/mainagent/claude-session/" + sessionID))
+	var b [16]byte
+	copy(b[:], h.Sum(nil)[:16])
+	b[6] = (b[6] & 0x0f) | 0x50 // version 5 (name-based, SHA-1)
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func (a *ClaudeAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error) {
-	args := []string{"-p", "--output-format", "stream-json"}
+	sid := claudeSessionUUID(p.SessionID)
+	// The REAL persistent-session argv (measured): -p plus streaming input
+	// and output; --verbose is REQUIRED for stream-json output in print
+	// mode. One process per WI for its whole lifetime (00 §3.6a
+	// persistence): each turn is one user-message record on stdin, exit
+	// comes at stdin EOF.
+	args := []string{
+		"-p",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+	}
 	if a.Resume {
 		// Crash continuation: same session id, same machine, same
 		// generation — the ONLY reuse case (03 §4.4).
-		args = append(args, "--resume", p.SessionID)
+		args = append(args, "--resume", sid)
 	} else {
-		args = append(args, "--session-id", p.SessionID)
+		args = append(args, "--session-id", sid)
 	}
 	// pf-execute is injected as an APPENDED SYSTEM PROMPT (not a user
-	// message that later traffic can wash away), per 04 §6.1a.
+	// message that later traffic can wash away), per 04 §6.1a. On a
+	// --resume derivation the CLI reuses the conversation's recorded
+	// system-prompt snapshot (see the UNVERIFIED note above).
 	args = append(args, "--append-system-prompt", p.InitialPrompt)
 	cmd := exec.Command(a.claudeBin(), args...)
 	cmd.Dir = p.CapsuleDir
+	// Credentials never enter the env (04 §8): only capsule path + session
+	// id. sessionDir is deliberately UNUSED: the real CLI has no
+	// capsule-local session-dir env (the old CLAUDE_SESSION_DIR was an
+	// invented variable the CLI ignores); conversations live under
+	// CLAUDE_CONFIG_DIR keyed by the pinned UUID.
 	cmd.Env = append(os.Environ(),
-		"CLAUDE_SESSION_DIR="+sessionDir,
 		"PF_SESSION_ID="+p.SessionID,
 		"PF_WORK_ITEM_ID="+p.WorkItemID,
 	)
 	return cmd, nil
 }
 
-func (a *ClaudeAdapter) InitialMessage(p SpawnParams) (*piCommand, error) {
-	return nil, nil // system-prompt channel: no first-prompt message
+func (a *ClaudeAdapter) InitialMessage(p SpawnParams) (any, error) {
+	// The instruction rides the system prompt (04 §6.1a); this kickoff
+	// user message is the turn that starts the main loop (see
+	// claudeKickoff).
+	m := claudeUserMessage{Type: "user"}
+	m.Message.Role = "user"
+	m.Message.Content = claudeKickoff
+	return m, nil
 }
 
-// FrameControl implements Adapter: the claude control line is written as
-// itself. UNVERIFIED: like the rest of the claude stdio contract, this
-// framing has never been exercised against the real cc harness — the
-// entire adapter (argv, session resume, ack shapes on stdout) is out of
-// scope until a real-harness smoke runs; treat every behavior here as a
-// placeholder that may need its own transport rework.
+// FrameControl implements Adapter: ONE control line rides one
+// streaming-input user-message record whose content is the control JSON
+// VERBATIM — the agent-side pf-execute parses the user message text
+// exactly as the pi-side parses its prompt-command text (the same §12
+// contract). The id is UNUSED: the real claude CLI has no command-id
+// correlation (no response records to observe); per-turn outcomes arrive
+// as result records instead.
 func (a *ClaudeAdapter) FrameControl(id, line string) any {
-	return line
+	m := claudeUserMessage{Type: "user"}
+	m.Message.Role = "user"
+	m.Message.Content = line
+	return m
 }
+
+// MarkContinuation implements the supervisor's optional continuation face:
+// the capsule's session identity already existed with the matching id
+// (03 §4.4's only reuse case), so the next BuildCmd resumes the same
+// claude conversation instead of pinning a fresh one.
+func (a *ClaudeAdapter) MarkContinuation() { a.Resume = true }
+
+// continuationAdapter is the supervisor's OPTIONAL adapter face for
+// harnesses that re-attach to an EXISTING conversation on re-derivation
+// (claude: --resume). The supervisor marks the adapter when the capsule's
+// session identity already existed with the matching id and nothing else;
+// how the harness continues the session — or ignores the mark, as pi does
+// (its session dir carries the state) — is adapter-internal, so the
+// supervisor face stays shape-agnostic (00 §3.6a).
+type continuationAdapter interface{ MarkContinuation() }
 
 // ---------------------------------------------------------------------------
 // Proc: the supervised handle over one derived agent process.
@@ -447,11 +602,13 @@ func isControlLine(line string) bool {
 // claude adapter's raw-line legacy stream.
 type stdoutRecord struct {
 	Type    string          `json:"type"`
+	Subtype string          `json:"subtype"` // claude system/result subtypes
 	ID      *string         `json:"id"`      // response records repeat the command id (null = not ours)
 	Command string          `json:"command"` // "prompt" on response records
 	Success *bool           `json:"success"`
 	ErrText string          `json:"error"`
-	Message json.RawMessage `json:"message"` // message_start/message_end
+	Message json.RawMessage `json:"message"`  // pi message_end / claude assistant
+	IsError *bool           `json:"is_error"` // claude result records
 }
 
 // assistantMessage is the message object inside a message_end record
@@ -473,27 +630,35 @@ type assistantMessage struct {
 //     carrier: its text is extracted and scanned line-by-line for the
 //     closed ack shape (isControlLine); ack lines enter the bounded
 //     lossless ctrl queue, every other extracted line is bulk;
-//   - every other record (agent/turn events, message_update deltas,
-//     extension-UI noise, responses for foreign ids) is BULK and dropped
-//     with the existing bookkeeping;
+//   - a claude assistant record (same inner message shape as pi's
+//     message_end: role + typed content blocks, measured) is the claude
+//     ack carrier, scanned the same way; a thinking-only record carries
+//     no text block and stays bulk;
+//   - a claude result record is the per-turn outcome: an error turn is
+//     logged to stderr (the same failure observation as a pi
+//     success=false response), never an ack — its result field duplicates
+//     the turn's LAST assistant text (measured), so scanning it would
+//     queue one ack twice;
+//   - every other record (pi session events, message_update deltas,
+//     claude system/hook noise, extension-UI records, responses for
+//     foreign ids) is BULK and dropped with the existing bookkeeping;
 //   - a line that is not a protocol record at all (no JSON object with a
-//     type field) falls back to the legacy RAW-line classifier. Real pi
-//     never emits such a line (stdout is reserved for records); the
-//     fallback exists for the claude adapter, whose stdio contract is
-//     UNVERIFIED and whose acks arrive as raw lines.
+//     type field) falls back to the legacy RAW-line classifier. Both
+//     real harnesses emit records only (pi by protocol, claude
+//     measured); the fallback stays as defense for unknown noise.
 func (p *Proc) classifyStdoutLine(line string) {
 	var rec stdoutRecord
 	if json.Unmarshal([]byte(line), &rec) != nil || rec.Type == "" {
-		// Not a protocol record: legacy raw-line classification (claude
-		// path). Bulk or ack, never a response observation.
+		// Not a protocol record: legacy raw-line classification.
+		// Bulk or ack, never a response observation.
 		p.classifyCandidateLine(line)
 		return
 	}
 	switch rec.Type {
-	case "response":
+	case "response": // pi command outcome
 		p.observeResponse(rec)
 		atomic.AddInt64(&p.bulkDropped, 1)
-	case "message_end":
+	case "message_end": // pi authoritative assistant message
 		text, ok := assistantText(rec.Message)
 		if !ok {
 			atomic.AddInt64(&p.bulkDropped, 1)
@@ -503,13 +668,33 @@ func (p *Proc) classifyStdoutLine(line string) {
 		// as raw lines: an ack may never be silently dropped, and an
 		// overlong extracted line closes the control path typed
 		// (ErrControlLineTooLong) exactly like an overlong raw line.
-		for _, l := range strings.Split(text, "\n") {
-			p.classifyCandidateLine(strings.TrimSuffix(l, "\r"))
+		p.scanAssistantText(text)
+	case "assistant": // claude assistant message (the ack carrier)
+		text, ok := assistantText(rec.Message)
+		if !ok {
+			atomic.AddInt64(&p.bulkDropped, 1)
+			return
 		}
-	default:
-		// Session events, message_update deltas, extension-UI records,
-		// responses for command ids we never sent: bulk.
+		p.scanAssistantText(text)
+	case "result": // claude per-turn outcome
+		p.observeClaudeResult(rec)
 		atomic.AddInt64(&p.bulkDropped, 1)
+	default:
+		// Session events, message_update deltas, claude system/hook noise,
+		// extension-UI records, responses for command ids we never sent:
+		// bulk.
+		atomic.AddInt64(&p.bulkDropped, 1)
+	}
+}
+
+// scanAssistantText scans ONE extracted assistant text (pi message_end or
+// claude assistant record) line-by-line through the closed control
+// vocabulary with the same bounds as raw lines: an ack may never be
+// silently dropped, and an overlong extracted line closes the control
+// path typed (ErrControlLineTooLong) exactly like an overlong raw line.
+func (p *Proc) scanAssistantText(text string) {
+	for _, l := range strings.Split(text, "\n") {
+		p.classifyCandidateLine(strings.TrimSuffix(l, "\r"))
 	}
 }
 
@@ -561,6 +746,24 @@ func (p *Proc) observeResponse(rec stdoutRecord) {
 	if rec.Success != nil && !*rec.Success {
 		fmt.Fprintf(os.Stderr, "mainagent: pi command %s (%s) failed: %s\n", *rec.ID, orDefault(rec.Command, "?"), orDefault(rec.ErrText, "unknown error"))
 	}
+}
+
+// observeClaudeResult handles one claude per-turn result record. An
+// error turn — is_error set or a non-success subtype, e.g. the measured
+// "No conversation found with session ID: <uuid>" failure of a --resume
+// derivation whose conversation never completed a turn, or an API
+// failure — is logged to stderr, mirroring the pi response-failure
+// observation: never an ack, never an unhealthy marker. The result field
+// duplicates the turn's LAST assistant text (measured: identical to the
+// final assistant record's text), so it is NOT scanned for acks — the
+// assistant record already carried it, and scanning both would queue one
+// ack twice.
+func (p *Proc) observeClaudeResult(rec stdoutRecord) {
+	failed := rec.IsError != nil && *rec.IsError
+	if !failed && (rec.Subtype == "" || rec.Subtype == "success") {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "mainagent: claude turn failed (subtype=%s): see the harness stderr/session for detail\n", orDefault(rec.Subtype, "unknown"))
 }
 
 func orDefault(s, def string) string {
@@ -650,16 +853,32 @@ func (p *Proc) writeStdin(payload any) error {
 	// Correlation: register the command id of a pi RPC command so the
 	// matching response record can be observed (failures are logged).
 	// Registered AFTER the successful write (pendMu, never mu: see the
-	// field comment) so the stdout reader can keep draining.
-	if cmd, ok := payload.(piCommand); ok && cmd.ID != "" {
-		p.pendMu.Lock()
-		if p.pending == nil {
-			p.pending = map[string]bool{}
+	// field comment) so the stdout reader can keep draining. The initial
+	// prompt arrives as *piCommand (InitialMessage returns any) while
+	// control prompts arrive as piCommand values — both register.
+	switch c := payload.(type) {
+	case piCommand:
+		if c.ID != "" {
+			p.pendMu.Lock()
+			p.pendMuRegister(c.ID)
+			p.pendMu.Unlock()
 		}
-		p.pending[cmd.ID] = true
-		p.pendMu.Unlock()
+	case *piCommand:
+		if c != nil && c.ID != "" {
+			p.pendMu.Lock()
+			p.pendMuRegister(c.ID)
+			p.pendMu.Unlock()
+		}
 	}
 	return nil
+}
+
+// pendMuRegister adds id to the pending set (caller holds pendMu).
+func (p *Proc) pendMuRegister(id string) {
+	if p.pending == nil {
+		p.pending = map[string]bool{}
+	}
+	p.pending[id] = true
 }
 
 // SendControl delivers ONE daemon→agent control method: the control JSON
@@ -968,13 +1187,24 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 	// continuation of the same generation finds the SAME id on disk
 	// (03 §4.4's only reuse case) — the daemon already computed it, this
 	// read-back is the consistency guard.
+	resumed := false
 	if idn, err := capc.ReadSessionIdentity(p.Adapter); err == nil && idn.SessionID != "" {
 		if idn.SessionID != p.SessionID {
 			return nil, fmt.Errorf("mainagent: session id conflict: local %s vs requested %s (new generation must not reuse an old session)", idn.SessionID, p.SessionID)
 		}
+		resumed = true
 	} else {
 		if err := capc.WriteSessionIdentity(p.Adapter, p.SessionID); err != nil {
 			return nil, err
+		}
+	}
+	// Crash-continuation mark (03 §4.4's only reuse case): an adapter whose
+	// harness re-attaches to an existing conversation (claude --resume)
+	// learns it here. The supervisor face stays shape-agnostic — pi
+	// ignores the mark (its session dir carries the state).
+	if resumed {
+		if ca, ok := adapter.(continuationAdapter); ok {
+			ca.MarkContinuation()
 		}
 	}
 
@@ -1055,9 +1285,10 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 			return nil, fmt.Errorf("mainagent: process-identity journaling failed (process torn down): %w", jerr)
 		}
 	}
-	// Inject the pf-execute initial instruction (04 §6.1a): pi gets it as
-	// the session's FIRST prompt, claude already carries it in the system
-	// prompt. Any failure here must not leak a running half-initialized
+	// Inject the initial stdin write (04 §6.1a): pi gets the pf-execute
+	// instruction as the session's FIRST prompt; claude carries the
+	// instruction in its system prompt and writes the fixed kickoff user
+	// message. Any failure here must not leak a running half-initialized
 	// agent: the process group is torn down BEFORE the error is returned.
 	m, ierr := adapter.InitialMessage(p)
 	if ierr != nil {
@@ -1065,7 +1296,7 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 		return nil, fmt.Errorf("mainagent: initial instruction build failed (DAEMON-503): %w", ierr)
 	}
 	if m != nil {
-		if serr := proc.writeStdin(*m); serr != nil {
+		if serr := proc.writeStdin(m); serr != nil {
 			_ = proc.Terminate(5 * time.Second)
 			return nil, fmt.Errorf("mainagent: initial instruction injection failed (DAEMON-503): %w", serr)
 		}
