@@ -5,7 +5,7 @@ steps:
   - { id: spec, kind: spec }
   - { id: grill-review, kind: qa, interactive: true, gate: true, on_fail: { action: rewind, target: spec } }
   - { id: plan, kind: author }
-  - { id: code, kind: code }
+  - { id: code, kind: code, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
   - { id: e2e-author, kind: author }
   - { id: verification, kind: gate, gate: true, on_fail: { action: rewind, target: code } }
   - { id: e2e-run, kind: code }

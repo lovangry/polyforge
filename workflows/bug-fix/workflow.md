@@ -10,7 +10,7 @@ defaults:
 steps:
   - { id: repro, kind: code }
   - { id: root-cause, kind: qa, gate: true, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { action: rewind, target: repro } }
-  - { id: fix, kind: code }
+  - { id: fix, kind: code, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
   - { id: verification, kind: gate, gate: true, on_fail: { action: rewind, target: fix } }
   - { id: review, kind: review, gate: true, on_fail: { action: rewind, target: fix } }
   - { id: release, kind: code, gate: true, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: review } }
