@@ -382,6 +382,8 @@ Job 回收的触发原因分两类，机械动作**不同**，不共用同一套
 
 两条路径共用的不变量：无论走哪一条，Daemon 都是「机械执行发布」的唯一角色（INV-D3）；A 路径下它执行的是一次真实发布（或一次确认无需发布的冻结扫描）并生成 `flush_evidence` 随收尾调用提交（`02-aihub-core.md#§6.4` 要求的正是这份证据），B 路径下它明确地**不**执行任何发布、也**不**生成/携带任何 `flush_evidence`（`02-aihub-core.md#§6.4` 只约束 end-generation 端点的 pause/block/wrap/fail 四个 reason；force-takeover 不需要证据，`02-aihub-core.md#§6.2`，cancel 则只作用于无活跃 generation 的 WI，`02-aihub-core.md#§6.5`）——不存在「默认仍然发布」的第三种模糊路径，也不存在「无发布却补证据」的通道。
 
+**运行期双看门狗（polyforge#44 裁定 refined option A）**：§7.1 只定义了 Daemon 重启时刻的存活判定，运行期的同一职责由 dispatcher tick（200ms）承担，并把两个不同的问题分开探测。**死亡探测**：每 tick 以非阻塞方式询问每个运行中 Job 的 WI Agent 退出信号（`AgentHandle` 的退出面），观察到退出即**就地**执行 §7.1 第 4 步的崩溃续跑序列（先有证明地回收残留进程组、同 session id 重派、回写 `jobs[]`），不等优雅停机、也不等 Daemon 重启。**挂起探测**：以**活动性**为判据——主 Agent 进程的 `/proc/<pid>` I/O 与 CPU jiffies 计数在可配置窗口（默认 10 分钟，Daemon `Config` 字段）内零变化 ⇒ 判定挂起 ⇒ 终止其进程组后走同一崩溃续跑；持续产出（哪怕很慢）的 Agent 永不被触碰，`needs_input`（当前 step 持有 `pending_question`，`03-execution-capsule.md#§4.2`）是协议内合法等待，两个探针均对其豁免。墙钟仅作**绝对兜底**：`max(3× 当前 step 声明的 wall 预算, 15 分钟)`，防的正是活动性探针自身失效或缺失（procfs 不可读时挂起探测降级为仅墙钟，并在启动时说明一次）；step wall 预算读自 Capsule 内物化的 `workflow.md` frontmatter——Daemon 自己物化的同一声明，也是执行器步间预算纪律的同源输入。**风暴护栏**：同一 step 连续两次挂起/死亡 ⇒ **有界终止**——先持久化类型化判定，再走本节 A 路径 close，以 `end-generation reason=block`、`waiting_on=runtime:<machine_id>`（`02-aihub-core.md#§2.4` 取值域）收尾，不再第三次重派；该判定持久化于 `daemon/state.json` 的 `jobs[]` 行（§4.1），Daemon 重启后的恢复（§7.1）对带此判定的 Job 拒绝重接与重派，交人工介入。
+
 ### 6.3 驱动 watcher（只做 dirty 标记，`00-architecture.md#§4.3`/INV-11 的实现） <!-- §6.3 -->
 
 Daemon 为每个活跃 Capsule 启动一个 watcher（进程内协程或子进程均可，实现细节不影响协议）：watcher 监视 Capsule 目录（尤其 `runtime-state/`、`repos/`、`artifacts/`）的文件系统变化，检测到变化时**只**把该 Capsule 标记为 dirty（一个布尔位 + 时间戳），写入 `05` 定义的暂存结构。watcher **不**调用发布路径，也**不**定时轮询后自主发布——它不构成 `00-architecture.md#§4.3` 四类触发时机之外的第五种触发时机；是否需要发布、何时发布，只在下面四类事件发生时由 WI Agent（或代其行动的 Daemon）发起请求，再由 Daemon 机械执行（详细协议见 `05-sync-revision-recovery.md#§2.4`/§6）。
@@ -537,6 +539,7 @@ Daemon 在整个 Job 生命周期中**不直接执行任何 step 命令**。命�
 - 模式与切换次数；当前承载 Job 数（`daemon/state.json.jobs` 长度）；持久 WI Agent 存活数 / 派生失败率（`DAEMON-503`）；各 harness 适配器的启动成功率；watcher→发布请求→机械发布完成的端到端延迟（`05-sync-revision-recovery.md#§9` 联动，Daemon 是机械执行者，指标口径以本文档与 `05` 共同定义）；优雅停机时长；心跳年龄；预检失败率（`DAEMON-507` 尖峰 = 本机环境劣化）。
 - Daemon 重启后的恢复耗时与「续跑 vs 存活复用」的比例（后者应占绝大多数，前者尖峰意味着 WI Agent 崩溃率异常）。
 - Batch 推荐命中率（`get_recommendation` 返回的候选中有多少最终被人确认提交）；Drain 循环的取批频率与空闲占比。
+- **预算与看门狗的职责边界（polyforge#44）**：step 预算（`wall`/`requests`/`tokens`）是**成本意图**，由 WI Agent 执行器在 turn 之间自行检视（`01-workflow-skills.md#§6.6`），从不承担活性探测；运行期活性（进程死亡、turn 内挂起）由 Daemon 的双看门狗独立探测（§6.2 运行期双看门狗），看门狗也从不计预算。两个判据不得互相替代：一次 in-flight 的模型调用挂死可逃过任何「步间」预算检查（预算只在 turn 边界生效），而一个慢但持续产出的 Agent 不因墙钟被误杀；双看门狗的触发与有界终止次数（同一 step 连续两次）本身也是本节的监控项。
 
 ## 10. 测试与故障注入 <!-- §10 -->
 

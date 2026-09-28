@@ -64,6 +64,15 @@ type Config struct {
 	// DefaultQuiesceTimeout. Tests tighten it; production leaves it at the
 	// design default.
 	QuiesceTimeout time.Duration
+	// WatchdogActivityWindow is the flat-activity window of the runtime
+	// hang watchdog (watchdog.go, 04 §6.2 runtime note): the MAIN agent
+	// process's /proc activity counters (I/O + CPU) flat for this long ⇒
+	// judged hung ⇒ kill ⇒ crash continuation. Zero selects
+	// DefaultWatchdogActivityWindow (10 minutes). Tests tighten it; the
+	// absolute backstop max(3× step wall, 15min) is FIXED and stays on
+	// regardless. (A CLI flag for this knob belongs to cmd/pf, outside this
+	// item's file scope.)
+	WatchdogActivityWindow time.Duration
 }
 
 // SpawnParams is what the daemon hands the agent spawner (04 §6.1 step 9).
@@ -144,6 +153,15 @@ type Daemon struct {
 
 	spawner AgentSpawner
 
+	// wdSample is the activity-probe face of the hang watchdog
+	// (watchdog.go): one point-in-time activity reading for a pid. Set to
+	// the procfs default in New; a test replaces it to script availability.
+	wdSample func(pid int) (activitySample, bool)
+	// wdProbeAvailable records the startup procfs probe's verdict (New):
+	// false means the hang watchdog runs wall-clock-only for every job and
+	// the operator was told so once at startup.
+	wdProbeAvailable bool
+
 	mu           sync.Mutex
 	jobs         map[string]*jobRuntime // wiID → live bookkeeping
 	closing      map[string]bool        // wiID → a 04 §6.2 close is mid-flight
@@ -162,6 +180,11 @@ type jobRuntime struct {
 	token     string
 	adapter   string
 	sessionID string
+	// wd is the watchdog's per-job runtime bookkeeping (watchdog.go):
+	// last activity sample, flat-window start, instance start for the
+	// backstop, per-step profile cache. Touched only from the dispatcher
+	// goroutine (Run's tick / watchdog tests).
+	wd *watchState
 }
 
 // New assembles a daemon. spawner may be nil in tests that never spawn.
@@ -222,7 +245,12 @@ func New(cfg Config, spawner AgentSpawner) (*Daemon, error) {
 		closing:      map[string]bool{},
 		shutdown:     make(chan struct{}),
 		shutdownDone: make(chan struct{}),
+		wdSample:     procfsActivitySample,
 	}
+	// Dual runtime watchdog (watchdog.go): probe procfs availability on our
+	// own pid ONCE and say so loudly when the hang watchdog must degrade
+	// to wall-clock-only.
+	d.watchdogStartupCheck()
 	return d, nil
 }
 
@@ -595,6 +623,10 @@ func (d *Daemon) spawnJob(ctx context.Context, e QEntry) error {
 	jr := d.jobs[wi]
 	d.mu.Unlock()
 	jr.ring.Append(EvJobStarted, map[string]any{"generation": resp.Generation})
+	// Watchdog: the freshly derived instance starts under observation with
+	// its own bookkeeping (activity window + backstop base = its own
+	// started-at, never the job's).
+	jr.wd = newWatchState(handle)
 	// Step 11: watcher (dirty marks only — it can never publish).
 	jr.watcher = watcher.Start(capc.Dir, 0)
 	return nil
@@ -874,6 +906,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-d.shutdown:
 			return nil
 		case <-tick.C:
+			// Dual runtime watchdog (watchdog.go, 04 §6.2 runtime note):
+			// observe every running job's agent — death, hang, backstop —
+			// BEFORE admitting new work, so a lost agent is crash-continued
+			// within one tick instead of waiting for a restart.
+			d.watchdogTick(ctx)
 			// Drain admission: fetch the next wave only in drain mode and
 			// only while not shutting down (the flag stops this loop at
 			// the SAME instant it refuses external callers — 04 §6.5 2b).
@@ -1048,7 +1085,7 @@ func (d *Daemon) runShutdownSequence(ctx context.Context) error {
 		// boundary notice, final flush, end the generation (pause) with the
 		// Daemon-generated evidence — the shutdown-interrupted close is a
 		// NORMAL end (04 §6.2).
-		_, err := d.closeJob(ctx, wi, jr, "pause", "shutdown")
+		_, err := d.closeJob(ctx, wi, jr, "pause", "shutdown", "")
 		d.endClose(wi)
 		if err != nil {
 			// 04 §7.3 / 05 §2.9: a rolled-back credential AND a taken-over
@@ -1126,6 +1163,18 @@ func (d *Daemon) RecoverFromState(ctx context.Context) error {
 		d.jobs[j.WorkItemID] = jr
 		d.mu.Unlock()
 		d.jobq.MarkRunning(j.WorkItemID)
+		// Runtime-watchdog recovery gate (watchdog.go): a persisted
+		// bounded-termination verdict — or two recorded consecutive
+		// incidents on the current step — denies BOTH the re-attachment and
+		// the re-derivation below. The storm guard's whole point is that a
+		// step the runtime judged unmakeable twice is never silently
+		// retried forever across daemon restarts; the job stays in the
+		// runtime WITHOUT an agent, human attention.
+		if deny, why := watchdogRecoveryDeny(&j, capc); deny {
+			fmt.Fprintf(os.Stderr, "pf-daemon: %s recovery DENIED by the watchdog record (%s); job left without an agent — human attention required\n", j.WorkItemID, why)
+			jr.watcher = watcher.Start(capc.Dir, 0)
+			continue
+		}
 		if alive {
 			// 04 §7.1 step 3: alive ⇒ RE-ATTACH, never re-derive. Before
 			// this the runtime kept a nil agent after restart, so proxy
@@ -1189,12 +1238,14 @@ func (d *Daemon) RecoverFromState(ctx context.Context) error {
 				}
 				jr.agent = handle
 				jr.ring.Append(EvWIAgentRederived, map[string]any{"session_id": j.HarnessSessionID})
-				_ = d.state.UpsertJob(d.st, Job{
-					WorkItemID: j.WorkItemID, CapsuleID: capc.ID(), Generation: j.Generation,
-					HarnessAdapter: j.HarnessAdapter, HarnessSessionID: j.HarnessSessionID,
-					MainAgentPID: handle.PID(), MainAgentStartedAt: handle.StartedAt(),
-					BundleName: j.BundleName, BundleDigest: j.BundleDigest, Status: JobRunning,
-				})
+				jr.wd = newWatchState(handle)
+				// The re-derivation write-back keeps the persisted watchdog
+				// bookkeeping (the storm counter / verdict must survive the
+				// restart that performed this recovery).
+				j.MainAgentPID = handle.PID()
+				j.MainAgentStartedAt = handle.StartedAt()
+				j.Status = JobRunning
+				_ = d.state.UpsertJob(d.st, j)
 			}
 		}
 		jr.watcher = watcher.Start(capc.Dir, 0)

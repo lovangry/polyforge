@@ -1289,6 +1289,21 @@ func (p *Proc) Wait() error {
 	return p.exitErr
 }
 
+// Done is the NON-BLOCKING exit probe the daemon's runtime death watchdog
+// polls once per dispatcher tick (watchdog.go, 04 §6.2 runtime note): the
+// reaper closes `exited` the moment cmd.Wait() returns, so a true here is
+// the authoritative exit signal with zero waiting. Additive to the
+// AgentHandle face by design: the blocking Wait above and every existing
+// agentexit.go consumer keep their semantics untouched.
+func (p *Proc) Done() bool {
+	select {
+	case <-p.exited:
+		return true
+	default:
+		return false
+	}
+}
+
 // markUnhealthy records the typed reason the control path died; the first
 // reason wins (the overflow that closed the path, not a later symptom).
 func (p *Proc) markUnhealthy(reason error) {
