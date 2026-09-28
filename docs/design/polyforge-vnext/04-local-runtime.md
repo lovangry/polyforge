@@ -326,7 +326,10 @@ Daemon 在第 6 步派生持久 WI Agent 时，按该 WI 配置选定的 harness
 `mode(drain)` 开启后，Daemon 进入一个内部循环（不是对外暴露的轮询端点）：反复调用 AIHub 现有
 调度器的 ready queue 取下一批可执行 WI，取到后直接对每个 WI 走 §6.1 的 claim→Capsule→持久
 WI Agent 序列，无需逐条人工确认；取不到候选时空闲等待并再次轮询（这是 Drain 模式本身的空闲
-状态，不是优雅停机，`00` INV-13）。**该内部循环在每次取批前都会检查 Daemon 的 `shutting_down`
+状态，不是优雅停机，`00` INV-13）。该空闲状态只覆盖「调度器不可达」（连接失败或 5xx，静默等待下一轮）；
+鉴权类拒绝（ready queue 读因机器身份不是项目成员而被折叠成的 CORE-404，以及 401/403）不属于空闲状态——它们置位
+`drain_fetch_degraded` 监控信号（`04-local-runtime.md#§5.1` 的操作面 status 可见）并在首次失败时输出一条
+警告日志，下一次取批成功后信号自动清除。**该内部循环在每次取批前都会检查 Daemon 的 `shutting_down`
 标志**（§6.5 第 1 步置位）：一旦该标志置位，循环立即停止取下一批，不再向 AIHub 调度器发起新的
 ready queue 请求，也不再创建新 Job——这是优雅停机对「禁止一切来源创建新 Job」判据的一部分（§6.5），
 与 `mode(abort-drain)` 是两个不同的停止入口（前者是外部显式撤销 Drain 模式本身；后者是优雅停机

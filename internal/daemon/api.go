@@ -680,6 +680,7 @@ func (s *APIServer) hStatus(w http.ResponseWriter, r *http.Request) {
 			"harness_session_id": jr.sessionID, "ring_latest": jr.ring.Latest(),
 		})
 	}
+	drainDegraded := s.d.drainFetchDegraded
 	s.d.mu.Unlock()
 	// Stale-heartbeat exposure (04 §7.2/§9, monitoring signal ONLY — the
 	// daemon never auto-takes-over anything on this list; takeover is a
@@ -698,6 +699,7 @@ func (s *APIServer) hStatus(w http.ResponseWriter, r *http.Request) {
 		"queue":                             map[string]any{"pending": s.d.jobq.LenPending(), "running": s.d.jobq.Running(), "max_concurrent": s.d.jobq.MaxConcurrent()},
 		"stale_machines":                    stale,
 		"stale_heartbeat_threshold_seconds": int64(threshold.Seconds()),
+		"drain_fetch_degraded":              drainDegraded,
 	})
 }
 

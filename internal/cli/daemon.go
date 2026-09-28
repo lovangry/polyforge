@@ -125,6 +125,10 @@ type StatusResponse struct {
 	ShuttingDown bool        `json:"shutting_down"`
 	Jobs         []DaemonJob `json:"jobs"`
 	Queue        QueueStats  `json:"queue"`
+	// DrainFetchDegraded is the authorization-class drain-fetch signal
+	// (04 §6.1c): the drain loop's ready-queue read was denied (e.g. the
+	// non-member CORE-404). Monitoring signal only, like stale_machines.
+	DrainFetchDegraded bool `json:"drain_fetch_degraded"`
 }
 
 // DaemonJob is one jobs[] bookkeeping entry. The daemon face exposes the
