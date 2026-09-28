@@ -87,7 +87,9 @@ Daemon-to-Daemon 协议或互推通道，一切跨机信息经 AIHub HTTP 中转
   具体路径由该 harness 自身约定，部署面不物化、不迁移、不清理；
   该仓库任务实际需要的宿主工具链（如 git、目标语言的构建/测试工具链），由 repo 自身决定，vNext
   不声明、不物化、不做工具链闭包（`03-execution-capsule.md#§1.2`/§3.2）——工具链缺失时的失败路径权威在 `03-execution-capsule.md#§5.1`
-  `CAP-401`（R11，§10.2）；以及与 AIHub 的 HTTP 网络可达性。**对任务仓 origin 的 git push 可达与推送权限**（基线修订 polyforge#37 所加）：`ship` 交付桥（`04-local-runtime.md#§5.1`）在本机把已收尾 WI 的 `polyforge/<wi-slug>` 固定名分支推送到任务仓 origin，复用工作机既有 git 身份（SSH/credential helper），不新增任何凭证存储；`ship` 成为第 13 个用户动词（`00-architecture.md#§5.1`）后，仅有 clone 拉取权限的工作机不再充分——push 权限与可达性自此属于本清单的一部分。这份清单是 INV-12 在工作机侧的落地
+  `CAP-401`（R11，§10.2）；对运行 Drain/Batch 的工作机，其机器用户还须是对应 project 的 writer
+  成员——membership 不随机器注册自动授予（`machines register` 只建身份），缺失时 ready-queue 查询
+  折叠为 `CORE-404`、Daemon 静默空转（安装步骤见 §6.1 步 3）；以及与 AIHub 的 HTTP 网络可达性。**对任务仓 origin 的 git push 可达与推送权限**（基线修订 polyforge#37 所加）：`ship` 交付桥（`04-local-runtime.md#§5.1`）在本机把已收尾 WI 的 `polyforge/<wi-slug>` 固定名分支推送到任务仓 origin，复用工作机既有 git 身份（SSH/credential helper），不新增任何凭证存储；`ship` 成为第 13 个用户动词（`00-architecture.md#§5.1`）后，仅有 clone 拉取权限的工作机不再充分——push 权限与可达性自此属于本清单的一部分。这份清单是 INV-12 在工作机侧的落地
   判据，与上一条 AIHub 存储依赖清单是两份独立的清单，检查/升级一方不隐含对另一方的任何断言。
 
 **新仓部署物与旧系统的并存（权威）**：vNext AIHub 是新 repo 实现的部署物
@@ -219,7 +221,12 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
    满足 `daemon` 子命令崩溃后能被重新拉起这一长驻语义（`04-local-runtime.md#§7`），v1 不进一步规定 macOS 侧的具体
    选择。随后执行注册流程，把机器身份写入 Core 的 `machines` 表（`02-aihub-core.md#§5.1`、`02-aihub-core.md#§4.10`），并把
    该机器的初始 Job 执行模式（Interactive/Batch/Drain，`00-architecture.md#§3.4`）写入
-   `$POLYFORGE_HOME/daemon/state.json` 的 `mode` 字段（`04-local-runtime.md#§4.1`/§6.7）。
+   `$POLYFORGE_HOME/daemon/state.json` 的 `mode` 字段（`04-local-runtime.md#§4.1`/§6.7）。对运行
+   Drain/Batch 的机器，还须把其机器用户加入对应 project 作为 writer 成员（membership 经 `pf` 管理
+   CLI 的 projects/members 端点授予，`02-aihub-core.md#§5.1` 管理面 M3）——`machines register` 只创建
+   机器身份，不授予任何 project membership；缺此步时机器用户非项目成员，Drain/Batch 的 ready-queue
+   查询按不存在处理折叠为 `CORE-404`（membership 硬边界 `02-aihub-core.md#§4.10`、404 折叠规则
+   `02-aihub-core.md#§5.1b` 尾注），Daemon 因此静默空转、不取 wave。
 4. 确认参考 bundle 就位：bundle **没有**注册步骤、注册接口或「已注册 bundle 列表」
    （`01-workflow-skills.md#§2.1`/§4.6）——在 AIHub 服务主机与各工作机确认 aihub checkout 内
    `workflows/<bundle-name>/`（`workflow.md` + `agents/*.md`）存在即可；创建 WI 时由 AIHub 服务端从
