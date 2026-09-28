@@ -150,6 +150,79 @@ func TestProbeWorkflowsDirTableAndExitVerdict(t *testing.T) {
 	}
 }
 
+// TestProbeWorkflowsDirDedupesCandidatesAcrossBundles: the reference
+// checkout case (bug-fix, chore, feature-full, quick-fix all declaring
+// the same three candidates) must issue ONE micro request per unique
+// candidate — 4 × 3 declarations → exactly 3 Probe calls — while every
+// bundle's report still carries its full row set, each shared candidate
+// showing the SAME shared outcome in every bundle that declares it.
+func TestProbeWorkflowsDirDedupesCandidatesAcrossBundles(t *testing.T) {
+	dir := t.TempDir()
+	sameThree := `defaults:
+  model_candidates: [provA/m1, provB/m2, provC/m3]
+steps:
+  - { id: code, kind: code }
+`
+	for _, name := range []string{"bug-fix", "chore", "feature-full", "quick-fix"} {
+		writeBundle(t, dir, name, sameThree)
+	}
+	fake := &fakeProber{unreachable: map[string]error{
+		"provB/m2": errors.New("connection refused (dial tcp 127.0.0.1:1)"),
+	}}
+	reports, err := ProbeWorkflowsDir(context.Background(), fake, dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 4 {
+		t.Fatalf("want 4 bundle reports, got %d", len(reports))
+	}
+	// Exactly 3 Probe calls: one per unique candidate, none repeated per
+	// bundle.
+	if len(fake.calls) != 3 {
+		t.Fatalf("Probe called %d times (%v), want exactly 3 (one per unique candidate)", len(fake.calls), fake.calls)
+	}
+	want := map[string]int{"provA/m1": 1, "provB/m2": 1, "provC/m3": 1}
+	for c, n := range want {
+		if got := count(fake.calls, c); got != n {
+			t.Fatalf("candidate %s probed %d times, want %d", c, got, n)
+		}
+	}
+	// Report completeness: every bundle carries all three candidates in
+	// its declared order, the shared unreachable candidate reading the
+	// SAME shared outcome (unreachable + error) in each bundle.
+	for _, rep := range reports {
+		if len(rep.Rows) != 3 {
+			t.Fatalf("bundle %s rows = %+v, want all 3 candidates", rep.Bundle, rep.Rows)
+		}
+		for i, cand := range []string{"provA/m1", "provB/m2", "provC/m3"} {
+			if rep.Rows[i].Candidate != cand {
+				t.Fatalf("bundle %s row %d = %q, want %q (declared order)", rep.Bundle, i, rep.Rows[i].Candidate, cand)
+			}
+		}
+		m2 := rep.Rows[1]
+		if m2.Reachable || m2.Error != "connection refused (dial tcp 127.0.0.1:1)" {
+			t.Fatalf("bundle %s must show provB/m2 unreachable with the shared error: %+v", rep.Bundle, m2)
+		}
+		if !rep.Rows[0].Reachable || !rep.Rows[2].Reachable {
+			t.Fatalf("bundle %s: provA/m1 and provC/m3 must be reachable: %+v", rep.Bundle, rep.Rows)
+		}
+		if rep.AllReachable {
+			t.Fatalf("bundle %s with an unreachable candidate must not be all-reachable", rep.Bundle)
+		}
+	}
+	// The verdict fails on the unreachable candidate, and the table still
+	// renders every bundle's full row set with the shared outcome.
+	if AllReachable(reports) {
+		t.Fatal("verdict must fail with an unreachable candidate")
+	}
+	table := FormatTable(reports)
+	for _, s := range []string{"bug-fix", "chore", "feature-full", "quick-fix", "provA/m1", "provB/m2", "provC/m3", "connection refused"} {
+		if !strings.Contains(table, s) {
+			t.Fatalf("table must contain %q:\n%s", s, table)
+		}
+	}
+}
+
 func TestProbeWorkflowsDirBundleFilter(t *testing.T) {
 	dir := t.TempDir()
 	writeBundle(t, dir, "feature-full", featureCandidates)
