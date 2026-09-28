@@ -207,6 +207,97 @@ func TestAnswerRelayRules(t *testing.T) {
 	}
 }
 
+// failingAgent fails the first N deliveries, then succeeds — the
+// "agent died before its pf/answer ack" shape at ledger level.
+type failingAgent struct {
+	fakeAgent
+	failsLeft int
+}
+
+func (f *failingAgent) DeliverAnswer(rel AnswerRelay) error {
+	if f.failsLeft > 0 {
+		f.failsLeft--
+		return errors.New("agent died before its pf/answer ack")
+	}
+	return f.fakeAgent.DeliverAnswer(rel)
+}
+
+// TestAnswerFailedDeliveryKeepsRedeliverable (F2-1): a FAILED delivery
+// must not finalize the idempotency entry — the same answer_id can be
+// re-submitted and re-delivered (00 §3.4a failure-keeps-redeliverable,
+// matching the supervisor's SK-4/CR-3 behavior); only the SUCCESSFUL
+// delivery consumes it, after which a replay is refused a second effect.
+// The old ledger recorded the delivery error permanently, so the
+// re-submission returned the stale error with no retry.
+func TestAnswerFailedDeliveryKeepsRedeliverable(t *testing.T) {
+	l := NewAnswerLedger()
+	agent := &failingAgent{fakeAgent: fakeAgent{}, failsLeft: 1}
+	relay := AnswerRelay{
+		QuestionID: "q_r1", AnswerID: "a_r1", AnswerText: "yes",
+		AnsweredAt: "2026-09-26T10:00:00Z", AnsweredBy: "u_x",
+	}
+	src := fixedQuestion{q: "q_r1", step: "code"}
+
+	// First submission: delivery fails — error surfaced, nothing applied.
+	if err := l.Submit(relay, "u_x", src, agent.DeliverAnswer); err == nil {
+		t.Fatal("the failed delivery must be reported as an error")
+	}
+	if len(agent.answers) != 0 {
+		t.Fatal("nothing may be applied on a failed delivery")
+	}
+	// Re-submission of the SAME answer_id: re-delivered (not replayed with
+	// the stale error), this time successfully — delivered exactly once.
+	if err := l.Submit(relay, "u_x", src, agent.DeliverAnswer); err != nil {
+		t.Fatalf("the same answer_id must be re-deliverable after a failed delivery: %v", err)
+	}
+	if len(agent.answers) != 1 {
+		t.Fatalf("expected exactly one delivery, got %d", len(agent.answers))
+	}
+	// The success finalized the entry: a replay returns the first outcome
+	// and never delivers again.
+	if err := l.Submit(relay, "u_x", src, agent.DeliverAnswer); err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.answers) != 1 {
+		t.Fatal("the replay must be refused a second effect")
+	}
+}
+
+// TestAnswerInFlightDuplicateRefused (F2-1): a concurrent duplicate of an
+// answer_id whose delivery has not settled is refused transiently
+// (ErrAnswerInFlight), never silently told "success" by the reservation.
+func TestAnswerInFlightDuplicateRefused(t *testing.T) {
+	l := NewAnswerLedger()
+	relay := AnswerRelay{
+		QuestionID: "q_c1", AnswerID: "a_c1", AnswerText: "yes",
+		AnsweredAt: "2026-09-26T10:00:00Z", AnsweredBy: "u_x",
+	}
+	src := fixedQuestion{q: "q_c1", step: "code"}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	deliver := func(rel AnswerRelay) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- l.Submit(relay, "u_x", src, deliver) }()
+	<-entered
+	// While the first delivery is in flight, a duplicate of the same
+	// answer_id must be refused transiently — not applied, not "success".
+	if err := l.Submit(relay, "u_x", src, deliver); !errors.Is(err, ErrAnswerInFlight) {
+		t.Fatalf("in-flight duplicate must be refused transiently, got %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// After settling, the replay is idempotent.
+	if err := l.Submit(relay, "u_x", src, deliver); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestObserveRing(t *testing.T) {
 	r := &Ring{}
 	r.Append(EvJobStarted, nil)

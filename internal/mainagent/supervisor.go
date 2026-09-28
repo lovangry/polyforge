@@ -227,12 +227,12 @@ var ErrControlChannelOverflow = errors.New("mainagent: control queue overflow (h
 // unhealthy.
 var ErrControlLineTooLong = errors.New("mainagent: control line exceeded the bounded reader limit")
 
-// lineQueue is the bounded LOSSLESS control-channel buffer: lines
-// classified as potential control acks are queued and never dropped while
-// the queue is open; crossing maxControlQueueLines closes the queue typed
-// with ErrControlChannelOverflow (see the bounds comment for why closing
-// loudly beats dropping). Bulk (non-control) output is NOT buffered here:
-// the stdout reader drops it, keeping memory bounded.
+// lineQueue is the bounded LOSSLESS control-channel buffer: lines in the
+// CLOSED control vocabulary (isControlLine) are queued and never dropped
+// while the queue is open; crossing maxControlQueueLines closes the queue
+// typed with ErrControlChannelOverflow (see the bounds comment for why
+// closing loudly beats dropping). Bulk (non-control) output is NOT
+// buffered here: the stdout reader drops it, keeping memory bounded.
 type lineQueue struct {
 	mu     sync.Mutex
 	notify chan struct{}
@@ -318,10 +318,31 @@ func (q *lineQueue) next(ctx context.Context) (string, bool) {
 	}
 }
 
-// isControlLine classifies one stdout line: JSON objects carrying a
-// "method" field, or a "result" object with an ack marker, are potential
-// control acks (the two-sided contract shape); everything else — free text,
-// progress streams, non-ack JSON — is bulk output.
+// isControlMethod reports whether m is one of the four pf/* control
+// methods — the CLOSED vocabulary of the stdio control channel.
+func isControlMethod(m string) bool {
+	switch m {
+	case MethodQuiesce, MethodResume, MethodStopNotice, MethodAnswer:
+		return true
+	}
+	return false
+}
+
+// isControlLine classifies one stdout line against the CLOSED control
+// vocabulary (SK-6/CR-4, tightened in fix round 2): a line is control ONLY
+// when it carries the EXACT ack shape pf-execute §12 defines,
+// {"method":X,"result":{"ack":X}} with X one of the four pf/* methods
+// (method and result.ack must name the SAME method). Everything else —
+// free text, progress streams, bulk JSON that merely carries a "method"
+// field naming one of the four methods (a noisy harness spoofing
+// Quiesce/Resume/NotifyStop/DeliverAnswer), acks whose result.ack does not
+// echo the method, method-only lines without the ack result — is BULK
+// output. Two properties closed the spoof holes of the previous
+// classifier, which admitted any line whose method named one of the four
+// (flooding the bounded control queue) and let awaitAck accept it as an
+// ack: the agent never initiates control traffic (pf-execute §12: "You
+// never initiate messages on this channel; you only ack"), so nothing
+// legitimate is lost by demanding the exact two-sided ack shape.
 func isControlLine(line string) bool {
 	s := strings.TrimSpace(line)
 	if !strings.HasPrefix(s, "{") {
@@ -334,11 +355,13 @@ func isControlLine(line string) bool {
 	if json.Unmarshal([]byte(s), &probe) != nil {
 		return false
 	}
-	if probe.Method != "" {
-		return true
+	if !isControlMethod(probe.Method) {
+		return false
 	}
-	_, hasAck := probe.Result["ack"]
-	return hasAck
+	// The exact ack shape: the acknowledged method is echoed in
+	// result.ack, byte-identical with the line's own method field.
+	ack, hasAck := probe.Result["ack"].(string)
+	return hasAck && ack == probe.Method
 }
 
 // PID implements daemon.AgentHandle.
@@ -411,11 +434,18 @@ func (p *Proc) awaitAck(ctx context.Context, method string) error {
 			return fmt.Errorf("mainagent: agent output closed")
 		}
 		var ack struct {
-			Result map[string]any `json:"result"`
 			Method string         `json:"method"`
+			Result map[string]any `json:"result"`
 		}
-		if json.Unmarshal([]byte(line), &ack) == nil && (ack.Method == method || ack.Result["ack"] == method) {
-			return nil
+		// The EXACT closed ack shape only (fix round 2): a genuine ack
+		// echoes the acknowledged method in BOTH its method field and
+		// result.ack. A bulk line merely carrying the method name — the
+		// noisy-harness spoof — has no result.ack and must never satisfy
+		// the pending ack; an ack line for a DIFFERENT method keeps waiting.
+		if json.Unmarshal([]byte(line), &ack) == nil && ack.Method == method {
+			if echoed, ok := ack.Result["ack"].(string); ok && echoed == method {
+				return nil
+			}
 		}
 		// Other control traffic: keep waiting.
 	}
@@ -455,7 +485,23 @@ func (p *Proc) Resume(ctx context.Context) error {
 }
 
 // DeliverAnswer relays an answer payload verbatim to the waiting agent
-// (00 §3.4a: the daemon forwards, never parses).
+// (00 §3.4a: the daemon forwards, never parses) and WAITS for the agent's
+// pf/answer ack before reporting success (SK-4/CR-3). The ack is the
+// durability signal the two-sided contract already defines: pf-execute
+// §12 commits the agent to "Ack after the relay is durably recorded" —
+// the pending_answer persist happens BEFORE the ack. Returning success on
+// the bare pipe write turned the window between the write and that atomic
+// persist into a PERMANENT loss: the daemon had told the submitter the
+// answer was applied, the answer_id idempotency (00 §3.4a) then blocks
+// any re-delivery of the same answer, and an agent crash inside that
+// window left the question pending forever with its answer gone. Awaiting
+// the ack (bounded like every other control wait) closes the window: on
+// timeout, agent death or a closed control path this reports FAILURE, the
+// question stays pending on the agent's persisted state, and the answer
+// stays re-deliverable — the same relay reaches a re-derived agent
+// attached to the same capsule. A daemon-side pending-answer journal would
+// add a second durable record for data the capsule already owns; the ack
+// wait is the design-faithful smaller shape.
 func (p *Proc) DeliverAnswer(relay daemon.AnswerRelay) error {
 	b, err := json.Marshal(relay)
 	if err != nil {
@@ -463,7 +509,10 @@ func (p *Proc) DeliverAnswer(relay daemon.AnswerRelay) error {
 	}
 	params := map[string]any{}
 	json.Unmarshal(b, &params)
-	return p.send(rpcMessage{JSONRPC: "2.0", Method: MethodAnswer, Params: params})
+	if err := p.send(rpcMessage{JSONRPC: "2.0", Method: MethodAnswer, Params: params}); err != nil {
+		return err
+	}
+	return p.awaitAck(context.Background(), MethodAnswer)
 }
 
 // Terminate kills the WHOLE process group and proves it empty (04 §6.2
@@ -683,11 +732,12 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 		startedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		stdin:     stdin, ctrl: newLineQueue(), exited: make(chan struct{}),
 	}
-	// Stdout reader: TWO paths. Lines that look like control acks go to
-	// the bounded LOSSLESS queue (an ack may never be dropped — a lost
-	// pf/quiesce or pf/stop_notice ack becomes a freeze/boundary timeout,
-	// 05 §2.7); all other output is bulk and may be dropped when nobody
-	// consumes it, keeping memory bounded under a flooding harness.
+	// Stdout reader: TWO paths. Lines in the closed control vocabulary
+	// (isControlLine) go to the bounded LOSSLESS queue (an ack may never be
+	// dropped — a lost pf/quiesce or pf/stop_notice ack becomes a
+	// freeze/boundary timeout, 05 §2.7); all other output is bulk and may
+	// be dropped when nobody consumes it, keeping memory bounded under a
+	// flooding harness.
 	// R2N-9: bufio.Scanner is GONE — its overlong-line death was silent
 	// (sc.Err ignored, control path just stops). The bounded reader below
 	// surfaces the overlong line: the control path is closed typed, the

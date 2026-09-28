@@ -11,8 +11,9 @@ output:
       description: Capsule-relative path to the written spec artifact (artifacts/spec.md).
     requirement_titles:
       type: array
+      minItems: 1
       items: { type: string }
-      description: Titles of every Requirement in the spec, in document order.
+      description: Titles of every Requirement in the spec, in document order. At least one is required (minItems 1) - a spec with zero requirements is an unfilled template.
     non_goals:
       type: array
       items: { type: string }
@@ -88,4 +89,5 @@ Example:
 ## Output
 
 Emit the final JSON object per the schema above: the artifact path, the list of
-requirement titles in document order, and the list of non-goals.
+requirement titles in document order (at least one - the schema rejects an empty list),
+and the list of non-goals.

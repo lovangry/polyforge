@@ -94,8 +94,11 @@ pf [global flags] <verb> [verb flags] [positional args]
   response body raw, as-is (machine consumption).
 - **Errors**: human mode prints `pf: CORE-409 ALREADY_CLAIMED: <detail>` —
   the typed code is prominent, never doubled, never a stack trace; `--json`
-  prints the raw wire envelope `{"error":{"code","reason","detail"}}` on
-  stderr. Exit codes: 0 success, 1 runtime error, 2 usage error.
+  prints the raw wire error envelope on stderr, and the two faces differ in
+  shape: the **AIHub face** carries `{"error":{"code","reason","detail"}}`;
+  the **daemon face** carries `{"error":{"code","detail"}}` — the same outer
+  envelope but without a `reason` field (internal/cli/daemon.go is the
+  authority). Exit codes: 0 success, 1 runtime error, 2 usage error.
 - A daemon-face failure to dial (`dial unix ...`) means the daemon is not
   running on this machine — start it or check `--socket`; it is not a typed
   verdict about any work item.

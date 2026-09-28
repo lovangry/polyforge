@@ -64,9 +64,9 @@ for context, and `grill-review` appends its own confirmation pass underneath.
 
 ## Rewind boundaries
 
-Two rewind targets exist in this flow, both declared in the frontmatter `on_fail` of
-their gates — this section only explains *why*, the mechanism is `01-workflow-skills.md`
-§6.2:
+Every gate in this flow declares its rewind target in the frontmatter `on_fail` — four
+gates, three distinct targets (`spec`, `code`, `review`). This section only explains
+*why* each target was picked, the mechanism is `01-workflow-skills.md` §6.2:
 
 - **`grill-review` FAILs -> rewind to `spec`.** The user's confirmation pass found the
   spec itself wrong (not just the confirmation script). Rewinding to `spec` re-runs
@@ -89,9 +89,10 @@ their gates — this section only explains *why*, the mechanism is `01-workflow-
   is itself business judgment about readiness — not automatically evidence the code is
   wrong.
 
-Workflow-level rewind bounds for this bundle are declared once in the frontmatter:
-`max_total: 4`, `max_per_step: 2`. A gate that keeps failing past those bounds ends the
-workflow in `failed_rewind_exhausted`, not an infinite loop.
+Workflow-level rewind bounds: this bundle's frontmatter deliberately omits the
+`rewind` block, so the schema defaults apply — `max_total: 4`, `max_per_step: 2`
+(`01-workflow-skills.md` §4.1 rule V6). A gate that keeps failing past those bounds ends
+the workflow in `failed_rewind_exhausted`, not an infinite loop.
 
 ## Budget guidance
 

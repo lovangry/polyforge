@@ -11,8 +11,10 @@ output:
       description: Capsule-relative path to the authored e2e scenario document/spec (artifacts/e2e-scenarios.md), plus any generated test files under repos/<name>/** if the project runs its e2e suite from the tree.
     scenario_titles:
       type: array
+      minItems: 1
+      uniqueItems: true
       items: { type: string }
-      description: Titles of every e2e scenario authored, in document order.
+      description: Titles of every e2e scenario authored, in document order. At least one is required (minItems 1) - zero scenarios means the acceptance criteria were not covered. Titles must be UNIQUE (uniqueItems) - `e2e-run` echoes this list verbatim as its authored_titles cross-check under its own uniqueItems constraint, so a duplicated title would leave the echo step with no valid response; a duplicate title also cannot key the 1:1 scenario-to-result correspondence.
     test_files:
       type: array
       items: { type: string }
@@ -54,4 +56,5 @@ verifies intent, not implementation.
 ## Output
 
 Emit the final JSON object per the schema above: the scenario document path, the ordered
-scenario titles, and any generated test file paths.
+scenario titles (at least one - the schema rejects an empty list), and any generated test
+file paths.

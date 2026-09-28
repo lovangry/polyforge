@@ -73,19 +73,20 @@ func usageBins(t *testing.T) string {
 
 // usageInstall is a scratch install of the real system under temp dirs.
 type usageInstall struct {
-	t         *testing.T
-	binDir    string
-	dataDir   string
-	url       string
-	port      int
-	adminKey  string
-	aihubLog  string
-	aihubCmd  *exec.Cmd
-	xdgHome   string // XDG_CONFIG_HOME: <xdg>/polyforge/cli.toml
-	cfgPath   string
-	pfPath    string
-	socketDir string
-	skillsDir string // module skills/ checkout (daemon --skills-dir)
+	t            *testing.T
+	binDir       string
+	dataDir      string
+	url          string
+	port         int
+	adminKey     string
+	aihubLog     string
+	aihubCmd     *exec.Cmd
+	xdgHome      string // XDG_CONFIG_HOME: <xdg>/polyforge/cli.toml
+	cfgPath      string
+	pfPath       string
+	socketDir    string
+	skillsDir    string // module skills/ checkout (daemon --skills-dir)
+	workflowsDir string // module workflows/ checkout (daemon --workflows-dir, fix round 2: materialization source)
 }
 
 // newUsageInstall boots a real aihub on a free loopback port with its own
@@ -123,6 +124,7 @@ func newUsageInstall(t *testing.T) *usageInstall {
 		t.Fatal(err)
 	}
 	inst.skillsDir = skills
+	inst.workflowsDir = wf
 
 	logf, err := os.Create(inst.aihubLog)
 	if err != nil {
@@ -326,6 +328,7 @@ func (m *usageMachine) start(extraEnv ...string) {
 		"--socket", m.socket,
 		"--pi-bin", filepath.Join(m.inst.binDir, "fakepi"),
 		"--skills-dir", m.inst.skillsDir,
+		"--workflows-dir", m.inst.workflowsDir,
 	)
 	cmd.Env = append(append(os.Environ(), extraEnv...),
 		"FAKEPI_SPAWN_LOG="+m.spawnLog,

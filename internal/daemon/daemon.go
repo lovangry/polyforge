@@ -488,6 +488,24 @@ func (d *Daemon) spawnJob(ctx context.Context, e QEntry) error {
 	if err := capc.MarkReady(); err != nil {
 		return err
 	}
+	// Step 5a — step-0 materialization (03 §4.5, wired into the spawn path
+	// in fix round 2): the workflow/agent snapshot is materialized from the
+	// daemon's OWN checkout and verified against the pin BEFORE any WI
+	// Agent is derived. The old path went from capsule create straight to
+	// spawn, so a new capsule could spawn without the snapshot and a torn
+	// snapshot was never rejected by the production path. The gate is the
+	// identity-validated MaterializationComplete: an already-complete
+	// snapshot (idempotent same-generation retry) is trusted and NOT
+	// re-read from the checkout; anything else is materialized wholesale.
+	// Failure fails CLOSED: the typed spawn error surfaces to the submit
+	// route and nothing is derived over a missing/torn snapshot.
+	matID := capsule.MaterializationIdentity{
+		BundleName: boot.BundleName, BundleDigest: boot.BundleDigest,
+		Adapters: []string{d.cfg.Adapter},
+	}
+	if err := d.ensureMaterialized(capc, matID); err != nil {
+		return err
+	}
 	// Step 7: session identity — persisted BEFORE the process exists: the
 	// session id lands in the pending record AND in the capsule's
 	// harness/<adapter>/session.json (the identity file the WI Agent's
@@ -535,6 +553,7 @@ func (d *Daemon) spawnJob(ctx context.Context, e QEntry) error {
 		WorkItemID: wi, CapsuleID: capc.ID(), Generation: resp.Generation,
 		HarnessAdapter: d.cfg.Adapter, HarnessSessionID: sessionID,
 		MainAgentPID: handle.PID(), MainAgentStartedAt: handle.StartedAt(),
+		BundleName: boot.BundleName, BundleDigest: boot.BundleDigest,
 		Status: JobRunning,
 	}); err != nil {
 		return err
@@ -966,6 +985,24 @@ func (d *Daemon) RecoverFromState(ctx context.Context) error {
 			// (crash continuation, INV-14/D4: a new INSTANCE of the same
 			// role, never a per-step agent).
 			if d.spawner != nil {
+				// Same-generation trust gate first (03 §4.5/§7, wired in fix
+				// round 2): the re-derived agent may reuse the existing
+				// snapshot ONLY when the identity-validated gate says it is
+				// complete; anything else (torn swap, missing marker,
+				// interrupted staging, deleted target) is re-materialized
+				// WHOLESALE before the new instance starts. A materialization
+				// that cannot complete fails CLOSED: the job is left in the
+				// runtime WITHOUT an agent — human attention, never a silent
+				// respawn over a snapshot nobody can vouch for.
+				matID := capsule.MaterializationIdentity{
+					BundleName: j.BundleName, BundleDigest: j.BundleDigest,
+					Adapters: []string{j.HarnessAdapter},
+				}
+				if merr := d.ensureMaterialized(capc, matID); merr != nil {
+					fmt.Fprintf(os.Stderr, "pf-daemon: %s materialization failed before re-derivation; job left without an agent (human attention required): %v\n", j.WorkItemID, merr)
+					jr.watcher = watcher.Start(capc.Dir, 0)
+					continue
+				}
 				prompt, perr := d.crashRecoveryPrompt(j)
 				if perr != nil {
 					return perr
@@ -982,7 +1019,8 @@ func (d *Daemon) RecoverFromState(ctx context.Context) error {
 				_ = d.state.UpsertJob(d.st, Job{
 					WorkItemID: j.WorkItemID, CapsuleID: capc.ID(), Generation: j.Generation,
 					HarnessAdapter: j.HarnessAdapter, HarnessSessionID: j.HarnessSessionID,
-					MainAgentPID: handle.PID(), MainAgentStartedAt: handle.StartedAt(), Status: JobRunning,
+					MainAgentPID: handle.PID(), MainAgentStartedAt: handle.StartedAt(),
+					BundleName: j.BundleName, BundleDigest: j.BundleDigest, Status: JobRunning,
 				})
 			}
 		}
@@ -1060,10 +1098,37 @@ func (d *Daemon) adoptOrphanAgent(p PendingJob) error {
 	if oerr != nil {
 		return fmt.Errorf("capsule not openable: %w", oerr)
 	}
+	// R3-F1: the jobs[] record this crash-interrupted write completes is
+	// the ONLY place the bundle identity survives — adoption DELETES the
+	// journal row below, and that row is the only other carrier of the
+	// journaled capsule_bootstrap. Without parsing the bundle reference out
+	// of it here, the adopted Job lands with an EMPTY BundleName/
+	// BundleDigest, and the NEXT dead-agent recovery (04 §7.1 step 4) runs
+	// the materialization trust gate with no expected identity:
+	// MaterializationComplete fails closed on the empty expectation even
+	// with a complete on-disk snapshot, and the job is left without an
+	// agent for human attention. Parse the bootstrap the claim journaled
+	// and preserve the pinned identity in the record. An ABSENT bootstrap
+	// (pre-upgrade rows) adopts as before — degraded, fail-closed later;
+	// a PRESENT but unparsable one means a corrupt journal: refuse the
+	// adoption, keep the row for human attention (never adopt a live
+	// agent under an identity nobody can vouch for).
+	var bundleName, bundleDigest string
+	if p.CapsuleBootstrap != "" {
+		boot, berr := capsule.ParseBootstrap(json.RawMessage(p.CapsuleBootstrap))
+		if berr != nil {
+			return fmt.Errorf("journaled capsule_bootstrap unparsable: %w", berr)
+		}
+		if boot.WorkItemID != p.WorkItemID {
+			return fmt.Errorf("journaled capsule_bootstrap names work item %s, not %s", boot.WorkItemID, p.WorkItemID)
+		}
+		bundleName, bundleDigest = boot.BundleName, boot.BundleDigest
+	}
 	if err := d.state.UpsertJob(d.st, Job{
 		WorkItemID: p.WorkItemID, CapsuleID: capc.ID(), Generation: p.Generation,
 		HarnessAdapter: p.HarnessAdapter, HarnessSessionID: p.HarnessSessionID,
 		MainAgentPID: p.MainAgentPID, MainAgentStartedAt: p.MainAgentStartedAt,
+		BundleName: bundleName, BundleDigest: bundleDigest,
 		Status: JobRunning,
 	}); err != nil {
 		return err
@@ -1082,6 +1147,45 @@ func (d *Daemon) adoptOrphanAgent(p PendingJob) error {
 	d.jobq.MarkRunning(p.WorkItemID)
 	jr.watcher = watcher.Start(capc.Dir, 0)
 	return d.state.RemovePending(d.st, p.WorkItemID, p.IdempotencyKey)
+}
+
+// ErrMaterialization marks a step-0 materialization failure (03 §4.5):
+// the capsule's workflow/agent snapshot could not be landed from the
+// daemon's own checkout, or did not end provably complete. The submit
+// route recognizes the sentinel and answers HTTP 503 / DAEMON-503 (04
+// §5.1: a local-resource failure — the bundle/checkout is unavailable on
+// THIS machine — is retryable once the environment is repaired, never a
+// DAEMON-500 "internal error"). Before R3-F2 these failures were bare
+// fmt.Errorf strings whose "(DAEMON-503)" marker writeSubmitErr could
+// not recognize, so the promised 503 contract surfaced as HTTP 500.
+var ErrMaterialization = errors.New("daemon: step-0 materialization failed (DAEMON-503)")
+
+// ensureMaterialized guarantees the capsule carries a COMPLETE, trusted
+// materialized snapshot (workflow.md + the harness agents dirs, 03 §4.5)
+// before a WI Agent is derived — the production wiring fix of round 2
+// (F2-3): the claim path and the crash re-derivation both route through
+// this gate. Trust is granted ONLY by the identity-validated
+// MaterializationComplete (F2-4): a complete snapshot for the SAME pinned
+// bundle is reused (03 §7 same-generation continuation — no re-read of the
+// checkout); anything else is re-materialized wholesale from the daemon's
+// own checkout. Digest drift is warn-and-continue per 03 §4.5 (v1 trusts
+// the internal checkout; drift is a configuration incident). Failure is
+// the caller's to fail closed on — the typed error names the WI.
+func (d *Daemon) ensureMaterialized(capc *capsule.Capsule, id capsule.MaterializationIdentity) error {
+	if capc.MaterializationComplete(id) {
+		return nil // trusted: same pinned identity, complete set, no residue
+	}
+	warn, err := capc.Materialize(d.cfg.WorkflowsDir, id.BundleName, id.BundleDigest, id.Adapters)
+	if warn != nil {
+		fmt.Fprintf(os.Stderr, "pf-daemon: %s materialization bundle digest drift (warn, continuing): %s\n", capc.WorkItemID, warn.Message)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: materialization of %s failed: %v", ErrMaterialization, capc.WorkItemID, err)
+	}
+	if !capc.MaterializationComplete(id) {
+		return fmt.Errorf("%w: materialization of %s did not end complete", ErrMaterialization, capc.WorkItemID)
+	}
+	return nil
 }
 
 // crashRecoveryPrompt rebuilds the executor instruction for a re-derivation

@@ -251,6 +251,11 @@ func writeSubmitErr(w http.ResponseWriter, err error) {
 		writeAPIErr(w, ErrCodePreflight, err.Error())
 	case errors.Is(err, ErrFlushFailed):
 		writeAPIErr(w, ErrCodeFlushFail, err.Error())
+	case errors.Is(err, ErrMaterialization):
+		// R3-F2: a step-0 materialization failure is the promised 503
+		// contract (04 §5.1: local resource unavailable on this machine),
+		// not a DAEMON-500 internal error.
+		writeAPIErr(w, ErrCodeSpawnFail, err.Error())
 	case errors.Is(err, ErrNoLocalJob):
 		writeAPIErr(w, ErrCodeNotFound, err.Error())
 	case errors.Is(err, ErrCloseInProgress):
@@ -278,6 +283,14 @@ func writeSubmitErr(w http.ResponseWriter, err error) {
 		}
 		if strings.Contains(err.Error(), "DAEMON-409") {
 			writeAPIErr(w, ErrCodeConflict, err.Error())
+			return
+		}
+		// R3-F2: the mainagent spawner reports its spawn failures as
+		// "(DAEMON-503)"-marked strings (mainagent/supervisor.go); the same
+		// passthrough as DAEMON-409 keeps the promised 503 contract for
+		// those legacy strings instead of flattening them into DAEMON-500.
+		if strings.Contains(err.Error(), "DAEMON-503") {
+			writeAPIErr(w, ErrCodeSpawnFail, err.Error())
 			return
 		}
 		writeAPIErr(w, "DAEMON-500", err.Error())
@@ -459,7 +472,7 @@ func (s *APIServer) hAnswer(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}
 	if err := s.d.ledger.Submit(relay, callerID, src, deliver); err != nil {
-		if errors.Is(err, ErrAnswerConsumed) {
+		if errors.Is(err, ErrAnswerConsumed) || errors.Is(err, ErrAnswerInFlight) {
 			writeAPIErr(w, ErrCodeConflict, err.Error())
 			return
 		}

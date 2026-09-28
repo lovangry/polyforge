@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/capsule"
+	"github.com/silgrid/polyforge/internal/core/testsupport"
 	"github.com/silgrid/polyforge/internal/sync/aihub"
 )
 
@@ -69,6 +70,11 @@ func TestWrapTakenOverIsolates(t *testing.T) {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(home, "skills", "pf-execute", "SKILL.md"), []byte("# pf-execute\nrun\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The daemon's own workflows checkout must carry the demo bundle: the
+	// spawn path materializes the snapshot from it (03 §4.5, fix round 2).
+	if err := testsupport.MakeDemoBundle(home); err != nil {
 		t.Fatal(err)
 	}
 	spawner := newIntegSpawner()
@@ -177,6 +183,11 @@ func TestShutdownContinuesPastTakenOverWI(t *testing.T) {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(home, "skills", "pf-execute", "SKILL.md"), []byte("# pf-execute\nrun\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The daemon's own workflows checkout must carry the demo bundle: the
+	// spawn path materializes the snapshot from it (03 §4.5, fix round 2).
+	if err := testsupport.MakeDemoBundle(home); err != nil {
 		t.Fatal(err)
 	}
 	spawner := newIntegSpawner()

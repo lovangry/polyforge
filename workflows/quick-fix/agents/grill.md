@@ -14,8 +14,9 @@ output:
       description: Capsule-relative path to the micro-spec memo (artifacts/fix-memo.md) that fix consumes as its sole written instruction.
     scope_points:
       type: array
+      minItems: 1
       items: { type: string }
-      description: Confirmed scope items - the things this fix MUST cover, as short declarative lines.
+      description: Confirmed scope items - the things this fix MUST cover, as short declarative lines. At least one is required (minItems 1) - a fix memo with no confirmed scope is an unfilled template.
     non_goals:
       type: array
       items: { type: string }
@@ -67,4 +68,5 @@ requester, so whatever `fix` needs to know must end up in your memo.
 ## Output
 
 Emit the final JSON object per the schema above: the Q&A log path, the memo path, the
-confirmed scope items, and the non-goals.
+confirmed scope items (at least one - the schema rejects an empty list, because a fix
+with no confirmed scope is not a fix), and the non-goals.

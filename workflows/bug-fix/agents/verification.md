@@ -4,7 +4,7 @@ description: Machine-checkable gate - build, lint, tests, and above all the orig
 tools: [read, bash]
 output:
   type: object
-  required: [verdict]
+  required: [verdict, checks]
   properties:
     verdict:
       type: string
@@ -12,6 +12,7 @@ output:
       description: pass means build/lint/tests AND the original repro all succeeded on the current tree; fail means at least one did not.
     checks:
       type: array
+      minItems: 1
       items:
         type: object
         required: [name, status]
@@ -19,10 +20,34 @@ output:
           name: { type: string }
           status: { type: string, enum: [pass, fail, skipped] }
           detail: { type: string }
-      description: Per-check breakdown, in the order run. Must include the repro re-run as its own named check (e.g. "repro").
+      description: Per-check breakdown, in the order run. At least one check must be recorded (minItems 1) - a verdict over zero checks is an unfilled template. Must include the repro re-run as its own named check (e.g. "repro").
     fail_reason:
       type: string
-      description: Required when verdict is fail - a precise description of what failed, to be carried back to fix as its pending_rewind_input.
+      description: Required when verdict is fail - a precise description of what failed, to be carried back to fix as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
+  oneOf:
+    - description: A pass verdict - every recorded check must itself be pass or an honestly-marked skipped; no check may be recorded as fail.
+      properties:
+        verdict: { type: string, enum: [pass] }
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              status: { type: string, enum: [pass, skipped] }
+      required: [verdict]
+    - description: A fail verdict - at least one check failed; requires a non-empty fail_reason. The contains constraint mechanically requires at least one check with status fail, so an all-pass checks array cannot ride a fail verdict (draft-07 mechanical only).
+      properties:
+        verdict: { type: string, enum: [fail] }
+        fail_reason: { type: string, minLength: 1 }
+        checks:
+          type: array
+          minItems: 1
+          contains:
+            type: object
+            required: [status]
+            properties:
+              status: { type: string, enum: [fail] }
+      required: [verdict, fail_reason]
 ---
 
 # verification
@@ -44,11 +69,14 @@ quality belongs here (`review` handles that next).
    against the fixed tree; if `repro` authored a failing test, run that test. Record the
    outcome as its own named check. The observed behavior must match `## Expected` — a
    repro that now fails *differently* is a fail, not a pass.
-4. Record every check run (name, pass/fail/skipped, detail) in `checks`, repro included.
-5. If every check passes: `verdict: pass`.
-6. If any check fails: `verdict: fail` with a precise `fail_reason` — exact command,
-   output excerpt, and which part of the fix it implicates. This text becomes `fix`'s
-   `pending_rewind_input`; vague language wastes the rewind.
+4. Record every check run (name, pass/fail/skipped, detail) in `checks` - at least one
+   entry is required, repro included.
+5. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
+   pass verdict - the schema's oneOf rejects that combination as self-contradictory.
+6. If any check fails: `verdict: fail` with a precise `fail_reason` - exact command,
+   output excerpt, and which part of the fix it implicates. The schema requires
+   `fail_reason` here. This text becomes `fix`'s `pending_rewind_input`; vague language
+   wastes the rewind.
 
 ## Honesty
 

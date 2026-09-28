@@ -43,11 +43,16 @@ bug that turns out to need design decisions belongs on `feature-full`.
 The schema allows any step to carry `gate: true` — `01-workflow-skills.md` §4.1 defines
 the flag as "this step produces a business verdict" and lists review/verification/
 grill-review as examples, not as an exclusive set. Root-cause analysis produces exactly
-such a verdict: `confirmed` (the cause is identified and supported by evidence that
-explains the observed repro) or `inconclusive` (it is not, and proceeding to `fix` would
-mean guessing). Making it a gate is also structurally load-bearing rather than cosmetic:
+such a verdict, stated in the executor's gate convention (`01-workflow-skills.md` §6.2):
+`pass` (the cause is identified and supported by evidence that explains the observed
+repro; formerly worded `confirmed`) or `fail` (it is not, and proceeding to `fix` would
+mean guessing; formerly `inconclusive`). The step's output schema uses
+`enum: [pass, fail]` so no verdict-vocabulary mapping is ever needed — a reading agent
+sees the same two words the gate machinery acts on. Making it a gate is also
+structurally load-bearing rather than cosmetic:
 
-- An `inconclusive` verdict FAILs the gate and rewinds to `repro` — the correct bounded
+- A `fail` verdict (inconclusive diagnosis) FAILs the gate and rewinds to `repro` — the
+  correct bounded
   response is better evidence, not a blind fix attempt.
 - Rule V10 ties non-gate `kind: qa` steps to the existence of a later `kind: spec` step.
   This lane has no spec step (bugs spec their corrected behavior inside the fix memo/
@@ -81,7 +86,8 @@ All rewind declarations live in the frontmatter `on_fail` of their gates; the me
 is `01-workflow-skills.md` §6.2 (rule V5: targets must exist and sit strictly earlier
 than the failing step). This section explains the choices:
 
-- **`root-cause` FAILs (inconclusive) -> rewind to `repro`.** The analysis could not
+- **`root-cause` FAILs (fail verdict = inconclusive diagnosis) -> rewind to `repro`.**
+  The analysis could not
   determine the cause from the evidence at hand. `repro` re-runs with the `fail_reason`
   (what was missing: intermittent behavior, missing logs, wrong environment) attached as
   its `pending_rewind_input`, and sharpens the reproduction accordingly.

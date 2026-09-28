@@ -391,7 +391,6 @@ func newMachineEnv(t *testing.T, core *coreEnv, machine, apiKey, baseURL string)
 	home := t.TempDir()
 	for _, d := range []string{
 		filepath.Join(home, "skills", "pf-execute"),
-		filepath.Join(home, "workflows"),
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -399,6 +398,12 @@ func newMachineEnv(t *testing.T, core *coreEnv, machine, apiKey, baseURL string)
 	}
 	if err := os.WriteFile(filepath.Join(home, "skills", "pf-execute", "SKILL.md"),
 		[]byte("# pf-execute\nDrive the workflow step by step.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The daemon's own workflows checkout must carry the demo bundle: the
+	// spawn path materializes the workflow/agent snapshot from it (03
+	// §4.5, wired into the production path in fix round 2).
+	if err := testsupport.MakeDemoBundle(home); err != nil {
 		t.Fatal(err)
 	}
 	spawner := newFakeSpawner(t)

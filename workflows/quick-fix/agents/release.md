@@ -12,14 +12,27 @@ output:
       description: pass means the release completed (version cut, built, tagged, published per this project's convention); fail means the release attempt did not complete.
     version:
       type: string
-      description: The version identifier produced by this release, if any (e.g. a semver tag).
+      minLength: 1
+      description: The version identifier produced by this release (e.g. a semver tag). Required non-empty when verdict is pass - an unfilled template must not validate as a completed release.
     artifacts_published:
       type: array
       items: { type: string }
-      description: Identifiers or locations of anything actually published (tags, packages, images, channel promotions).
+      description: Identifiers or locations of anything actually published (tags, packages, images, channel promotions). Required with at least one entry when verdict is pass - "pass" means something was actually published.
     fail_reason:
       type: string
-      description: Required when verdict is fail - what went wrong, to be carried back to fix (this bundle's on_fail target) as its pending_rewind_input.
+      description: Required when verdict is fail - what went wrong, to be carried back to fix (this bundle's on_fail target) as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
+  oneOf:
+    - description: A completed release - requires a non-empty version and at least one published artifact; the unfilled template does not validate.
+      properties:
+        verdict: { type: string, enum: [pass] }
+        version: { type: string, minLength: 1 }
+        artifacts_published: { type: array, minItems: 1 }
+      required: [verdict, version, artifacts_published]
+    - description: A failed release attempt - requires a non-empty fail_reason.
+      properties:
+        verdict: { type: string, enum: [fail] }
+        fail_reason: { type: string, minLength: 1 }
+      required: [verdict, fail_reason]
 ---
 
 # release
@@ -70,7 +83,10 @@ forever, and the honest record is what the human closing out the WI needs.
 ## Honesty
 
 A nonzero exit from any of the steps above should still `fail` the gate; do not report
-`pass` on a release that did not actually publish something.
+`pass` on a release that did not actually publish something. The schema enforces the
+same line mechanically: a `pass` verdict requires a non-empty `version` and at least
+one `artifacts_published` entry, so a template left unfilled cannot validate as a
+completed release.
 
 ## Output
 

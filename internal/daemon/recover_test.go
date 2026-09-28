@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/capsule"
+	"github.com/silgrid/polyforge/internal/core/testsupport"
 )
 
 // claimRecordingStub is a scripted AIHub that records the idempotency key
@@ -101,13 +102,17 @@ func TestCrashedClaimRequeueReusesIdempotencyKey(t *testing.T) {
 	home := filepath.Join(dir, "home")
 	for _, d := range []string{
 		filepath.Join(home, "skills", "pf-execute"),
-		filepath.Join(home, "workflows"),
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(home, "skills", "pf-execute", "SKILL.md"), []byte("# pf-execute\nrun\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The daemon's own workflows checkout must carry the demo bundle: the
+	// spawn path materializes the snapshot from it (03 §4.5, fix round 2).
+	if err := testsupport.MakeDemoBundle(home); err != nil {
 		t.Fatal(err)
 	}
 	cfg := Config{
@@ -221,7 +226,9 @@ func TestRecoverCollectsResidualProcessGroup(t *testing.T) {
 		t.Fatal("precondition: the orphaned child must still occupy the group")
 	}
 
-	// state.json records the dead leader as the job's agent.
+	// state.json records the dead leader as the job's agent. The bundle
+	// identity rides along (F2-3): the re-derivation's materialization trust
+	// gate reads it from the persisted record.
 	store := NewStateStore(filepath.Join(dir, "daemon"))
 	st, err := store.Load()
 	if err != nil {
@@ -231,23 +238,29 @@ func TestRecoverCollectsResidualProcessGroup(t *testing.T) {
 	if err := store.UpsertJob(st, Job{
 		WorkItemID: wi, CapsuleID: capc.ID(), Generation: 1,
 		HarnessAdapter: "pi", HarnessSessionID: "sess_rc01_1",
-		MainAgentPID: pgid, MainAgentStartedAt: startedAt, Status: JobRunning,
+		MainAgentPID: pgid, MainAgentStartedAt: startedAt,
+		BundleName: "demo", BundleDigest: "sha256:demo", Status: JobRunning,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	// The recovery: re-derives the dead agent (fake spawner) and MUST have
-	// collected the residual group first.
+	// collected the residual group first. The daemon's own checkout carries
+	// the demo bundle so the re-derivation's materialization gate can run.
 	spawner := newIntegSpawner()
 	cfg := Config{
 		AIHubURL: "http://127.0.0.1:1", APIKey: "pfk_x", MachineID: "m-01",
 		DataDir:       filepath.Join(dir, "daemon"),
 		WorkspaceRoot: ws,
+		WorkflowsDir:  filepath.Join(dir, "workflows"),
 		SkillsDir:     filepath.Join(dir, "skills"),
 		Adapter:       "pi", Version: "residue-test",
 	}
 	os.MkdirAll(filepath.Join(cfg.SkillsDir, "pf-execute"), 0o755)
 	os.WriteFile(filepath.Join(cfg.SkillsDir, "pf-execute", "SKILL.md"), []byte("# pf-execute\n"), 0o644)
+	if err := testsupport.MakeDemoBundle(dir); err != nil {
+		t.Fatal(err)
+	}
 	d, err := New(cfg, spawner)
 	if err != nil {
 		t.Fatal(err)
