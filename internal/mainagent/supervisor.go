@@ -34,6 +34,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,12 +139,87 @@ type Adapter interface {
 }
 
 // ---------------------------------------------------------------------------
+// Env sanitize point (04 §8): the ONE place every spawned WI Agent's
+// environment is built.
+
+// envSanitizer is the single sanitize point both adapters route their
+// cmd.Env through. Design 04 §8: AIHub credentials must NEVER enter a WI
+// Agent's env/cwd/argv — yet the daemon legitimately holds its machine
+// api key (from --api-key, POLYFORGE_API_KEY or --api-key-file), and in
+// the --api-key/POLYFORGE_API_KEY modes that key sits in the DAEMON'S OWN
+// environment. The previous wholesale inherit (`append(os.Environ(),
+// ...)`) therefore handed the key to every spawned agent VERBATIM — a
+// literal §8 violation reachable by ONE operator mistake (`pf daemon
+// --api-key <key>`; the pilot runs use --api-key-file, which is
+// compliant). This closes it: the child env is built as
+// (sanitized os.Environ) + (the capsule/session additions), where the
+// sanitize is a BLACKLIST — deliberately not a whitelist, the harness
+// needs PATH/HOME and its own config vars and must not be broken by an
+// invented allowlist — stripping at minimum:
+//
+//   - every POLYFORGE_* variable (the polyforge/aihub credential
+//     namespace: POLYFORGE_API_KEY, POLYFORGE_AIHUB_URL, ...);
+//   - every PF_* variable;
+//   - belt and braces, any variable whose VALUE equals the daemon's
+//     currently-configured api key, so even a RENAMED variable (an
+//     operator exporting the key under another name) cannot smuggle it.
+type envSanitizer struct {
+	// apiKey is the daemon's currently-configured machine api key,
+	// captured ONCE at construction (constructor injection via
+	// NewSupervisor — never parsed per spawn). Empty means no key is
+	// configured: the exact-value filter is unarmed, the prefix blacklist
+	// still applies.
+	apiKey string
+}
+
+// newEnvSanitizer captures the daemon's api key for the lifetime of the
+// supervisor (04 §8: one read, not one per spawn).
+func newEnvSanitizer(apiKey string) *envSanitizer {
+	return &envSanitizer{apiKey: apiKey}
+}
+
+// childEnv builds one spawned agent's environment: sanitized os.Environ
+// followed by the adapter's capsule/session additions. The exact-value
+// key filter is a single constant-time comparison per inherited entry
+// (crypto/subtle.ConstantTimeCompare: no early-exit on a mismatched
+// prefix), cheap enough to run over the whole environ on every spawn. A
+// nil receiver is tolerated (adapters constructed bare in unit tests):
+// the prefix blacklist still applies, only the key filter is unarmed.
+func (e *envSanitizer) childEnv(additions ...string) []string {
+	var key string
+	if e != nil {
+		key = e.apiKey
+	}
+	inherit := os.Environ()
+	out := make([]string, 0, len(inherit)+len(additions))
+	for _, kv := range inherit {
+		name, val, _ := strings.Cut(kv, "=")
+		// The polyforge/aihub credential namespace: everything the
+		// daemon's own flag/env surface uses is POLYFORGE_* or PF_*.
+		if strings.HasPrefix(name, "POLYFORGE_") || strings.HasPrefix(name, "PF_") {
+			continue
+		}
+		// Belt and braces: a renamed variable whose VALUE is exactly the
+		// configured key cannot carry it either.
+		if key != "" && subtle.ConstantTimeCompare([]byte(val), []byte(key)) == 1 {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, additions...)
+}
+
+// ---------------------------------------------------------------------------
 // Pi adapter (04 §6.1a): pi --mode rpc, session dir inside the Capsule.
 
 type PiAdapter struct {
 	// Bin overrides the pi executable path (defaults to "pi"; tests
 	// substitute a fake).
 	Bin string
+	// env is the shared §8 env sanitizer (constructor-injected once by
+	// NewSupervisor, shared with the claude adapter). Nil keeps the
+	// prefix blacklist with the exact-value key filter unarmed.
+	env *envSanitizer
 }
 
 func (a *PiAdapter) Name() string { return capsule.AdapterPi }
@@ -158,13 +234,14 @@ func (a *PiAdapter) piBin() string {
 func (a *PiAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error) {
 	cmd := exec.Command(a.piBin(), "--mode", "rpc")
 	cmd.Dir = p.CapsuleDir // capsule-local session dir: pi resolves sessions under cwd
-	cmd.Env = append(os.Environ(),
+	// Credentials never enter the env (04 §8): sanitized os.Environ plus
+	// ONLY capsule path + session id additions, via the shared sanitizer.
+	cmd.Env = a.env.childEnv(
 		"PI_SESSION_DIR="+sessionDir,
 		"PF_SESSION_ID="+p.SessionID,
 		"PF_WORK_ITEM_ID="+p.WorkItemID,
 		"PF_GENERATION="+fmt.Sprint(p.Generation),
 	)
-	// Credentials never enter the env (04 §8): only capsule path + session id.
 	return cmd, nil
 }
 
@@ -246,6 +323,10 @@ func (a *PiAdapter) FrameControl(id, line string) any {
 
 type ClaudeAdapter struct {
 	Bin string
+	// env is the shared §8 env sanitizer (constructor-injected once by
+	// NewSupervisor, shared with the pi adapter). Nil keeps the prefix
+	// blacklist with the exact-value key filter unarmed.
+	env *envSanitizer
 	// Resume marks a crash-continuation derivation: claude --resume <sid>.
 	// Set by the supervisor's session-identity read-back (Spawn), never
 	// by hand in production paths.
@@ -340,12 +421,13 @@ func (a *ClaudeAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, e
 	args = append(args, "--append-system-prompt", p.InitialPrompt)
 	cmd := exec.Command(a.claudeBin(), args...)
 	cmd.Dir = p.CapsuleDir
-	// Credentials never enter the env (04 §8): only capsule path + session
-	// id. sessionDir is deliberately UNUSED: the real CLI has no
-	// capsule-local session-dir env (the old CLAUDE_SESSION_DIR was an
-	// invented variable the CLI ignores); conversations live under
-	// CLAUDE_CONFIG_DIR keyed by the pinned UUID.
-	cmd.Env = append(os.Environ(),
+	// Credentials never enter the env (04 §8): sanitized os.Environ plus
+	// ONLY the session id additions, via the shared sanitizer. sessionDir
+	// is deliberately UNUSED: the real CLI has no capsule-local session-dir
+	// env (the old CLAUDE_SESSION_DIR was an invented variable the CLI
+	// ignores); conversations live under CLAUDE_CONFIG_DIR keyed by the
+	// pinned UUID.
+	cmd.Env = a.env.childEnv(
 		"PF_SESSION_ID="+p.SessionID,
 		"PF_WORK_ITEM_ID="+p.WorkItemID,
 	)
@@ -1160,14 +1242,18 @@ type Supervisor struct {
 }
 
 // NewSupervisor wires the two v1 adapters (with optional binary overrides
-// for tests/fakes).
-func NewSupervisor(piBin, claudeBin string) *Supervisor {
+// for tests/fakes). apiKey is the daemon's currently-configured machine api
+// key, captured ONCE here (04 §8: it must never reach a spawned agent, not
+// even via a renamed env var) — both adapters share the one envSanitizer
+// built from it.
+func NewSupervisor(piBin, claudeBin, apiKey string) *Supervisor {
+	env := newEnvSanitizer(apiKey)
 	return &Supervisor{AdapterFor: func(name string) Adapter {
 		switch name {
 		case capsule.AdapterClaude:
-			return &ClaudeAdapter{Bin: claudeBin}
+			return &ClaudeAdapter{Bin: claudeBin, env: env}
 		default:
-			return &PiAdapter{Bin: piBin}
+			return &PiAdapter{Bin: piBin, env: env}
 		}
 	}}
 }

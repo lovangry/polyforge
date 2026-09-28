@@ -54,7 +54,7 @@ done
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s := NewSupervisor(p, p)
+	s := NewSupervisor(p, p, "")
 	spawn := newSpawnParams(t, capsule.AdapterPi, "sess_sig")
 	h, err := s.Spawn(context.Background(), spawn)
 	if err != nil {
@@ -186,7 +186,7 @@ done
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s := NewSupervisor(p, p)
+	s := NewSupervisor(p, p, "")
 	sp := newSpawnParams(t, capsule.AdapterPi, "sess_flood")
 	h, err := s.Spawn(context.Background(), sp)
 	if err != nil {

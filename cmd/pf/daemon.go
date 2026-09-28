@@ -130,7 +130,10 @@ func runDaemon(args []string) {
 		Version:       *version,
 	}
 
-	d, err := daemon.New(cfg, mainagent.NewSupervisor(*piBin, *claudeBin))
+	// The supervisor is handed the resolved api key ONCE (04 §8 env
+	// sanitize: the key lives only in the daemon, never in a spawned
+	// agent's environment — not even via a renamed variable).
+	d, err := daemon.New(cfg, mainagent.NewSupervisor(*piBin, *claudeBin, *apiKey))
 	if err != nil {
 		fatal("daemon init: %v", err)
 	}

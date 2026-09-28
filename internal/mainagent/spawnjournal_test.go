@@ -26,7 +26,7 @@ import (
 // started-at that matches the handle's own identity.
 func TestSupervisorJournalsProcessIdentityBeforeReturning(t *testing.T) {
 	bin := writeFakeHarness(t, false)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_journal")
 
 	var calls int32
@@ -64,7 +64,7 @@ func TestSupervisorJournalsProcessIdentityBeforeReturning(t *testing.T) {
 // exactly the undiscoverable orphan R3N-F6 exists to shrink.
 func TestSupervisorJournalFailureTearsDownProcess(t *testing.T) {
 	bin := writeFakeHarness(t, false)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_journal_fail")
 
 	var gotPID int32

@@ -62,7 +62,7 @@ while [ $i -lt 5000 ]; do
 done
 sleep 300
 `)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_flood")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
@@ -95,7 +95,7 @@ printf '{"method":"%s"}\n' "$(head -c 5000000 /dev/zero | tr '\0' 'a')"
 echo '{"method":"still-alive"}'
 sleep 300
 `)
-	s := NewSupervisor(bin, bin)
+	s := NewSupervisor(bin, bin, "")
 	p := newSpawnParams(t, capsule.AdapterPi, "sess_giant")
 	h, err := s.Spawn(context.Background(), p)
 	if err != nil {
