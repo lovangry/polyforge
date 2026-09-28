@@ -285,6 +285,33 @@ func TestDaemonStatusDecodes(t *testing.T) {
 	}
 }
 
+func TestDaemonStatusDrainFetchDegraded(t *testing.T) {
+	// The drain degraded signal must ride the status answer and the
+	// human pf ops status rendering (monitoring signal, like the stale
+	// heartbeat list).
+	var cap captured
+	d := newUnixDaemon(t, 200,
+		`{"machine_id":"m-01","mode":"drain","shutting_down":false,`+
+			`"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":4},`+
+			`"drain_fetch_degraded":true}`, &cap)
+	raw, err := d.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s StatusResponse
+	if err := decodeJSON(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.DrainFetchDegraded {
+		t.Fatalf("status must decode drain_fetch_degraded, got %+v", s)
+	}
+	var buf strings.Builder
+	renderStatus(&buf, &s)
+	if !strings.Contains(buf.String(), "drain fetch degraded") {
+		t.Fatalf("pf ops status must render the degraded signal:\n%s", buf.String())
+	}
+}
+
 func TestDaemonErrorEnvelopeDAEMONCode(t *testing.T) {
 	var cap captured
 	d := newUnixDaemon(t, 409, envelope("DAEMON-409", "", "question already consumed"), &cap)
