@@ -430,6 +430,54 @@ var cmdWrap = &Command{
 }
 
 // ---------------------------------------------------------------------------
+// ship — the wrap→git delivery bridge (00 §5.1 ship verb; 04 §5.1 ship
+// row, baseline amendment polyforge#37): push the sealed capsule commits
+// of a CLOSED work item to each inventory repo's origin as the fixed-name
+// branch polyforge/<id>, then open/reuse a PR when a credential exists.
+// ---------------------------------------------------------------------------
+
+var cmdShip = &Command{
+	Name:    "ship",
+	Summary: "Push a closed WI's sealed capsule commits to git origin (branch polyforge/<id>)",
+	Usage: "pf ship <id>\n" +
+		"\n" +
+		"Pushes the sealed commit of every inventory repo of the WI's local\n" +
+		"sealed capsule to its git origin as the fixed-name branch\n" +
+		"polyforge/<id>, then opens or reuses a PR when the gh CLI is present\n" +
+		"and authenticated. Without a PR credential the answer carries a\n" +
+		"compare URL and STILL SUCCEEDS — a missing PR credential is not an\n" +
+		"error (only the push credential is).\n" +
+		"\n" +
+		"Typed errors:\n" +
+		"  DAEMON-404  this machine holds no sealed capsule for the WI\n" +
+		"  DAEMON-403  reserved branch target (main/master is never pushed)\n" +
+		"  DAEMON-409  the remote branch moved past the sealed commit\n" +
+		"              (never force-pushed over it)\n" +
+		"  DAEMON-512  push preflight failed: no usable local git push identity\n" +
+		"              (SSH/credential helper) or the origin is unreachable",
+	Setup: func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("ship: expected exactly one work item id")
+		}
+		raw, err := ctx.daemon().Ship(args[0])
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			var sr ShipResponse
+			if err := decodeJSON(raw, &sr); err == nil {
+				renderShip(ctx.Stdout, &sr)
+			} else {
+				printJSON(ctx.Stdout, raw)
+			}
+		}
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
 // ops — the daemon ops face: status / mode / shutdown (04 §5.1).
 // ---------------------------------------------------------------------------
 

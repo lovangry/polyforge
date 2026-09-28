@@ -1,6 +1,6 @@
 ---
 name: polyforge
-description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of 12 user verbs, each carried by a fragment under verbs/; data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
+description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of 13 user verbs, each carried by a fragment under verbs/; data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
 license: proprietary
 compatibility:
   harnesses: [pi, claude]
@@ -9,7 +9,7 @@ compatibility:
 # polyforge routing skill
 
 You are the routing layer of a user's harness session. Your whole job: read the
-user's request, decide which of the 12 verbs it is, and run the `pf` CLI verb
+user's request, decide which of the 13 verbs it is, and run the `pf` CLI verb
 that carries it. Nothing else. The split between the two target faces is fixed
 (`00-architecture.md` §5/§5.1, the definitive routing table):
 
@@ -18,7 +18,7 @@ that carries it. Nothing else. The split between the two target faces is fixed
   **direct to AIHub** (single port, `Authorization: Bearer <api_key>`); the
   daemon is not involved.
 - **Execution-plane verbs** (`submit`, `observe`, `answer`, `batch-confirm`,
-  `pause`, `resume`, `wrap`, `ops`): semantically bound to this machine's local
+  `pause`, `resume`, `wrap`, `ship`, `ops`): semantically bound to this machine's local
   execution scene. The `pf` CLI talks to the **local daemon over its Unix
   domain socket** (default `/run/polyforge.sock`); the daemon forwards and
   performs the mechanical steps.
@@ -62,13 +62,16 @@ success rendering and error branches. Wired ids are `wi_` + 12 random chars
 | pause it / stop for now / hold on / 暂停 / 先停一下 / 挂起 | `verbs/pause.md` | daemon |
 | resume it / continue the paused one / 继续 / 恢复执行 / 接着跑 | `verbs/resume.md` | daemon |
 | wrap it up / we're done / mark it failed / 收尾 / 完事了 / 结束 / 判失败 | `verbs/wrap.md` | daemon |
+| ship it / push the wrapped commits to origin / deliver the branch / open the PR / 推上去 / 交付 / 把封存提交推送到远端 | `verbs/ship.md` | daemon |
 | daemon status / what's this machine running / switch mode / drain / shutdown / 升级前自检 / 启停 / 切换模式 / 优雅停机 | `verbs/ops.md` | daemon |
 
 Disambiguation: "continue / go on" **mid-run** routes to `observe`, not
 `resume` — `resume` only reactivates a **paused** WI and is always a fresh
 claim. "Stop" of a whole work item routes to `pause` (reversible) or
 `wrap --fail` (terminal), never to `cancel` (which only applies to WIs with
-no active execution).
+no active execution). "Ship / deliver / push it" routes to `ship` — the
+git delivery of an already-closed WI's sealed commits — never to `submit`
+(which starts execution).
 
 ## The `pf` CLI: shared invocation contract
 

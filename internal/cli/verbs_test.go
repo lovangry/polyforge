@@ -567,6 +567,34 @@ func TestRunPauseAndWrap(t *testing.T) {
 	}
 }
 
+func TestRunShip(t *testing.T) {
+	var cap captured
+	sock := filepath.Join(t.TempDir(), "polyforge.sock")
+	newUnixDaemonAt(t, sock, 200,
+		`{"work_item_id":"wi_x","branch":"polyforge/wi_x","repos":[{"name":"app","origin_url":"/srv/git/app.git","head":"0f1e2d","branch":"polyforge/wi_x","pushed":true,"reused":false,"compare_url":"/srv/git/app.git"}]}`,
+		&cap)
+	cfg := daemonCtxConfig(sock)
+
+	code, out, errOut := runCLI(t, cfg, "", "ship", "wi_x")
+	if code != 0 {
+		t.Fatalf("ship exit=%d stderr=%s", code, errOut)
+	}
+	if cap.Path != "/jobs/wi_x/ship" || cap.Body != "{}" {
+		t.Errorf("ship: %s %s", cap.Path, cap.Body)
+	}
+	for _, want := range []string{"shipped wi_x", "branch polyforge/wi_x", "pushed", "compare:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ship render must contain %q, got %q", want, out)
+		}
+	}
+
+	// One positional only (a runtime error like every id-taking sibling).
+	code, _, _ = runCLI(t, cfg, "", "ship")
+	if code != 1 {
+		t.Errorf("ship with no id: exit=%d, want 1", code)
+	}
+}
+
 func TestRunOpsStatusAndMode(t *testing.T) {
 	var cap captured
 	sock := filepath.Join(t.TempDir(), "polyforge.sock")

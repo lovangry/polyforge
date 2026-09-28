@@ -402,6 +402,30 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 	printTable(w, []string{"WORK ITEM", "ADAPTER", "SESSION", "RING"}, rows)
 }
 
+// renderShip renders the ship(wi_id) answer: the fixed-name branch plus
+// one line per inventory repo (pushed vs idempotently reused), each with
+// the PR URL or the compare-URL fallback.
+func renderShip(w io.Writer, s *ShipResponse) {
+	fmt.Fprintf(w, "shipped %s → branch %s\n", s.WorkItemID, s.Branch)
+	if len(s.Repos) == 0 {
+		fmt.Fprintln(w, "  (no inventory repos in the sealed capsule: nothing to push)")
+		return
+	}
+	for _, r := range s.Repos {
+		verdict := "pushed"
+		if r.Reused {
+			verdict = "reused (remote branch already at the sealed commit)"
+		}
+		fmt.Fprintf(w, "  %-18s %s  %s\n", r.Name+":", r.Head, verdict)
+		if r.PRURL != "" {
+			fmt.Fprintf(w, "    pr:      %s\n", r.PRURL)
+		}
+		if r.CompareURL != "" {
+			fmt.Fprintf(w, "    compare: %s\n", r.CompareURL)
+		}
+	}
+}
+
 // renderObserve renders the layer-one event stream + snapshot, or the
 // daemon-side read-through answer when the WI is not local.
 func renderObserve(w io.Writer, resp *ObserveResponse) {

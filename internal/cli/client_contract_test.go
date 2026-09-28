@@ -584,6 +584,25 @@ func TestDaemonClientFramingMatchesDaemonAPI(t *testing.T) {
 		}
 	})
 
+	t.Run("ship", func(t *testing.T) {
+		cap = captured{}
+		if _, err := d.Ship("wi_abc"); err != nil {
+			t.Fatal(err)
+		}
+		if cap.Method != "POST" {
+			t.Fatalf("method %s", cap.Method)
+		}
+		mustMatchRoute(t, "POST", cap.Path)
+		if cap.Path != "/jobs/wi_abc/ship" {
+			t.Errorf("path %s", cap.Path)
+		}
+		// Empty-object body (hShip decodes nothing; the wi id is the whole
+		// input — the branch is the fixed name polyforge/<wi_id>).
+		if strings.TrimSpace(cap.Body) != "{}" {
+			t.Errorf("ship body = %q, want the empty object", cap.Body)
+		}
+	})
+
 	t.Run("shutdown", func(t *testing.T) {
 		cap = captured{}
 		if _, err := d.Shutdown(); err != nil {

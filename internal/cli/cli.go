@@ -20,7 +20,7 @@ type Context struct {
 
 // Command is one `pf <name>` subcommand.
 type Command struct {
-	// Name is the subcommand word (one of the 12 routing verbs or a
+	// Name is the subcommand word (one of the 13 routing verbs or a
 	// management verb).
 	Name string
 	// Summary is one line for the usage listing.
@@ -34,7 +34,7 @@ type Command struct {
 }
 
 // commands is the full registry, in routing-table order (00 §5.1) with
-// the management verbs after the 12.
+// the management verbs after the 13.
 var commands = []*Command{
 	cmdFile,
 	cmdQueue,
@@ -47,6 +47,7 @@ var commands = []*Command{
 	cmdPause,
 	cmdResume,
 	cmdWrap,
+	cmdShip,
 	cmdOps,
 	// Supporting faces (also `pf` CLI callers per 02 §5.1 rows 11/12/26)
 	// plus the row-21 machine face (the operator's registration duty).
@@ -226,15 +227,15 @@ func printUsage(w io.Writer) {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Execution-plane verbs (local daemon face, 00 §5.1):")
-	for _, c := range commands[4:12] {
+	for _, c := range commands[4:13] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Supporting faces (rows 11/12/26) + machines (row 21):")
-	for _, c := range commands[12:15] {
+	for _, c := range commands[13:16] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Management face (M1–M5):")
-	for _, c := range commands[15 : len(commands)-1] {
+	for _, c := range commands[16 : len(commands)-1] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "One-time migration:")
