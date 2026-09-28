@@ -151,6 +151,13 @@ type Daemon struct {
 	shutOnce     sync.Once
 	shutdownDone chan struct{} // closed when the FIRST Shutdown call completes
 	shutdownErr  error         // the first Shutdown's verdict, delivered to joiners
+
+	// drainFetchDegraded is the authorization-class drain-fetch signal
+	// (04 §6.1c): the drain loop's ready-queue read was denied (401/403/
+	// 404 — the non-member/hidden-project CORE-404), which is NOT Drain's
+	// idle state. In-memory only; it re-arms after restart and auto-clears
+	// on the first subsequent successful fetch. Guarded by mu.
+	drainFetchDegraded bool
 }
 
 // jobRuntime is the in-memory per-job assembly.
@@ -896,14 +903,58 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 }
 
+// drainFetchAuthDenial classifies a ReadyQueue error as authorization-
+// class: a typed *aihub.APIError whose HTTP status or Core code is
+// 401/403/404 (404-on-ready-queue is the server folding the canRead
+// denial of a non-member/hidden project into CORE-404). Everything
+// else — transport loss and 5xx alike — stays connection-class
+// ("scheduler unreachable", Drain's idle state).
+func drainFetchAuthDenial(err error) bool {
+	ae, ok := err.(*aihub.APIError)
+	if !ok {
+		return false
+	}
+	switch ae.Status {
+	case 401, 403, 404:
+		return true
+	}
+	switch ae.Code {
+	case "CORE-401", "CORE-403", "CORE-404", "HTTP-401", "HTTP-403", "HTTP-404":
+		return true
+	}
+	return false
+}
+
 func (d *Daemon) fetchDrainWave(ctx context.Context) {
 	if d.jobq.Running() >= d.jobq.MaxConcurrent() {
 		return // cap reached: pause wave fetches (not convergence)
 	}
 	rq, err := d.client.ReadyQueue(d.cfg.DrainProject)
 	if err != nil {
-		return // scheduler unreachable: idle-poll again next tick (Drain's idle state)
+		// Error triage (04 §6.1c): only a genuinely unreachable scheduler
+		// (transport loss or a 5xx) is Drain's silent idle state. An
+		// authorization-class denial — the non-member/hidden-project
+		// CORE-404 the ready-queue read folds canRead into, or 401/403 —
+		// is NOT idleness: it raises the degraded signal. Either way the
+		// loop keeps polling each tick (degradation is a signal, not a
+		// stop); other 4xx verdicts keep the silent behavior.
+		if drainFetchAuthDenial(err) {
+			d.mu.Lock()
+			first := !d.drainFetchDegraded
+			d.drainFetchDegraded = true
+			d.mu.Unlock()
+			// Warn exactly once per episode (the silent→degraded edge).
+			if first {
+				fmt.Fprintf(os.Stderr, "pf-daemon: drain fetch degraded: machine %s is denied the ready queue of drain project %q (Core says: %v) — check the machine user's project membership; the signal clears on the next successful fetch\n",
+					d.cfg.MachineID, d.cfg.DrainProject, err)
+			}
+		}
+		return // idle-poll again next tick
 	}
+	// Auto-repair: the first subsequent successful fetch ends the episode.
+	d.mu.Lock()
+	d.drainFetchDegraded = false
+	d.mu.Unlock()
 	for _, entry := range rq.Executable {
 		if entry.BundleName == nil {
 			continue // registration tickets never execute (INV-2e)

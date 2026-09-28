@@ -401,6 +401,9 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 	if s.ShuttingDown {
 		fmt.Fprint(w, "  (shutting down)")
 	}
+	if s.DrainFetchDegraded {
+		fmt.Fprint(w, "  (drain fetch degraded: authorization-class ready-queue denial on the drain project)")
+	}
 	fmt.Fprintf(w, "  queue: %d pending / %d running / max %d\n\n",
 		s.Queue.Pending, s.Queue.Running, s.Queue.MaxConcurrent)
 	rows := make([][]string, 0, len(s.Jobs))
