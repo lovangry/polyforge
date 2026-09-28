@@ -39,42 +39,70 @@ output:
 
 This is a normal step slot — it reuses every existing step primitive (inputs, this
 `output` schema, worktree access, budget, rewind, sync boundaries;
-`01-workflow-skills.md` §4.2). It is a template each project is expected to replace with
-its own concrete release procedure while keeping this file's frontmatter contract
-(`name`, `description`, `tools`, `output`) intact.
+`01-workflow-skills.md` §4.2). For this repo the template is already filled in: the body
+below is polyforge's own concrete release procedure — the platform bootstraps its
+releases through the same hook it ships to projects — while this file's frontmatter
+contract (`name`, `description`, `tools`, `output`) stays exactly as shipped.
 
 Before starting, read `artifacts/review.md` and `artifacts/verification-report.md`: a
 release attempted on top of anything less than a clean review pass on this lane is a
 self-inflicted failure — the whole point of proving the root cause was to ship a fix
 worth releasing.
 
-## Template body — replace this section per project
+## The polyforge release procedure
 
-1. **Determine the version identifier.** Decide where the next version number comes from
-   for this project — a tag-based scheme (`git describe`), a changelog-driven bump, a
-   monotonic build counter, or something else. State the source explicitly; do not invent
-   a version number ad hoc each run. For a bug-fix lane the bump is usually the patch
-   segment, and the release notes should reference the fixed defect.
-2. **Build the release artifact(s).** Run this project's actual build/package command(s)
-   for a release build (which may differ from the dev-mode build `verification` ran —
-   e.g. optimized builds, stripped binaries, container images).
-3. **Tag.** Create the version control tag (or equivalent) recording this release point,
-   tied to the exact commit `fix`'s last commit produced (read it from
-   `execution.json`'s `steps.fix.output.commits` rather than assuming HEAD).
-4. **Publish.** Upload/push the built artifact(s) to this project's actual distribution
-   target. Record every location/identifier actually published to in
-   `artifacts_published`.
-5. **Channel promotion**, if this project has release channels, is a project-specific
-   decision: state in this file once filled in whether this step promotes directly or a
-   mechanism outside this workflow bundle handles promotion.
+Polyforge is a mono-repo with a single repo-level semver: one git tag is one version, and
+the two deployment artifacts are built together under that same tag
+(`00-architecture.md` §3.3). Distribution is the intranet `releases/<tag>/` directory
+holding the two binaries plus a sha256 checksum manifest — that is what `pf upgrade`
+downloads and verifies before running the `07-deployment-pilot.md` §6.3 upgrade
+sequence, and what a §6.4 rollback restores from. `skills/` and `workflows/` are not
+released separately; they travel with the repo itself. Concretely:
+
+1. **Determine the version.** The version is the git tag and nothing else — no
+   per-artifact versioning, no build or step numbers. Take the current floor from
+   `git tag -l 'v*' | sort -V | tail -1` and bump one segment of it: patch for a fix,
+   minor for new capability. Record the decided version and its notes in
+   `artifacts/release-notes.md`; do not invent a version ad hoc each run.
+2. **Build the two artifacts.** Build from the exact commit `fix`'s last commit produced
+   (read it from `execution.json`'s `steps.fix.output.commits` rather than assuming
+   HEAD):
+
+   ```
+   GOWORK=off go build -o artifacts/release-<tag>/ ./cmd/aihub ./cmd/pf
+   ```
+
+   Two binaries come out and nothing else is shipped: `aihub`, the AIHub service
+   binary, and `pf`, the work-machine binary — one file carrying the `pf` CLI verbs plus
+   the `daemon` subcommand (`00-architecture.md` §3.3).
+3. **Checksum manifest.** In the same staging directory, produce `SHA256SUMS` covering
+   the two binaries in the plain `sha256sum -c` format that `pf upgrade` verifies
+   against:
+
+   ```
+   cd artifacts/release-<tag> && sha256sum aihub pf > SHA256SUMS
+   ```
+
+   The manifest is itself one of the published artifacts: it sits beside the binaries
+   and is listed in `artifacts_published` with them.
+4. **Tag.** Create a single annotated tag named exactly the version (`v<semver>`) on the
+   commit from step 2. The tag is the version — there is no second numbering scheme
+   anywhere in the release.
+5. **Publish.** Place `aihub`, `pf` and `SHA256SUMS` into the intranet `releases/<tag>/`
+   directory — one directory per tag holding the two binaries and their checksum
+   manifest (`00-architecture.md` §3.3 placement). That directory is v1's only
+   distribution channel: there are no alpha/stable channel promotions, so publishing
+   into the per-tag directory is the whole promotion. `artifacts_published` is the
+   published path list: `releases/<tag>/aihub`, `releases/<tag>/pf`,
+   `releases/<tag>/SHA256SUMS`.
 
 ## Rewind contract
 
-This bundle points `release`'s `on_fail` at `review` (feature-full's default
-convention): a release failure is normally a release-blocking review concern resurfacing
-at ship time, or a readiness judgment, not automatically evidence the code is wrong. In
-practice that means your `fail_reason` must be written for a **re-reviewing** reader —
-what to re-check before another release attempt — not as a code-change order.
+This bundle points `release`'s `on_fail` at `review`: a release failure is normally a
+release-blocking review concern resurfacing at ship time, or a readiness judgment, not
+automatically evidence the code is wrong. In practice that means your `fail_reason` must
+be written for a **re-reviewing** reader — what to re-check before another release
+attempt — not as a code-change order.
 
 ## Honesty
 
