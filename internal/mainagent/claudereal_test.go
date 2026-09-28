@@ -31,8 +31,13 @@ package mainagent
 // tool echoes, thinking-only messages); (f) error result records
 // observed but never acked; (g) the crash-continuation --resume wiring
 // (session-identity read-back → MarkContinuation); (h) an end-to-end
-// drive of test/fakeclaude, the protocol-faithful test double,
-// including the measured zero-turn resume failure.
+// drive of test/fakeclaude, the protocol-faithful test double; (i) the
+// ZERO-TURN CRASH WINDOW fallback (polyforge#39): the measured
+// zero-turn resume refusal is caught by the supervisor's startup watch
+// and answered with a fresh derivation under the SAME session id —
+// while a continuation after a real first turn still --resumes, and a
+// resume failure with a DIFFERENT error text stays a typed spawn
+// failure.
 
 import (
 	"context"
@@ -477,11 +482,16 @@ func TestClaudeContinuationResumesSameConversation(t *testing.T) {
 	// One log line per invocation, with newlines squashed (the
 	// --append-system-prompt value legitimately contains line breaks —
 	// measured "$*" would otherwise split one invocation across lines).
+	// The default case answers the kickoff (and any other non-control
+	// line) with an assistant record — the served-turn evidence the
+	// zero-turn startup watch ends on, exactly as the real CLI answers
+	// the kickoff with a turn.
 	script := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$(printf '%s' \"$*\" | tr '\\n' ' ')\" >> \"$ARGV_LOG\"\n" +
 		`while IFS= read -r line; do
   case "$line" in
     *pf/quiesce*) printf '%s\n' '` + claudeAckAssistantRecord("pf/quiesce") + `' ;;
+    *)            printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"kickoff received; standing by"}]}}' ;;
   esac
 done
 `
@@ -529,9 +539,15 @@ done
 }
 
 // ---------------------------------------------------------------------------
-// (h) end-to-end against test/fakeclaude (the protocol-faithful test
-// double): full control round-trip, conversation persistence across a
-// crash continuation, and the MEASURED zero-turn resume failure.
+// (i) the ZERO-TURN CRASH WINDOW fallback (polyforge#39): a continuation
+// derivation whose conversation never completed a turn is refused by
+// the real CLI at startup (measured: exit 1, "No conversation found
+// with session ID: <uuid>", before any assistant/result record of a
+// served turn). The supervisor's startup watch catches the refusal and
+// falls back to a FRESH derivation under the SAME harness session id —
+// same conversation UUID via --session-id, same initial instruction —
+// so the 04 §6.1a continuation chain survives the window
+// shape-internally; the daemon and the supervisor face are unchanged.
 
 func buildFakeClaude(t *testing.T) string {
 	t.Helper()
@@ -607,41 +623,185 @@ func TestFakeClaudeEndToEnd(t *testing.T) {
 	}
 }
 
-// TestFakeClaudeZeroTurnResumeFails: the MEASURED corner — a conversation
-// whose first turn never completed is NOT resumable; the resumed harness
-// dies at startup ("No conversation found", exit 1) instead of serving
-// control acks. This is the claude-side residual risk documented on the
-// adapter (a crash before the first completed turn breaks the chain);
-// the test pins that the failure is LOUD either way it manifests: as a
-// dead handle (Wait errors) or as a spawn-time injection failure into
-// the already-dying process.
-func TestFakeClaudeZeroTurnResumeFails(t *testing.T) {
+// TestFakeClaudeZeroTurnFallbackFreshDerivation: (a)+(c) — a zero-turn
+// continuation (identity on disk, conversation never persisted) is
+// refused at startup; the supervisor must fall back to a FRESH
+// derivation under the SAME session id, the agent runs normally after,
+// and the capsule keeps exactly ONE session identity (the fallback is
+// not a generation change).
+func TestFakeClaudeZeroTurnFallbackFreshDerivation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("go build of the fake in-test")
 	}
 	bin := buildFakeClaude(t)
 	t.Setenv("FAKECLAUDE_STATE_DIR", t.TempDir())
+	spawnLog := filepath.Join(t.TempDir(), "spawn.log")
+	t.Setenv("FAKECLAUDE_SPAWN_LOG", spawnLog)
 	s := NewSupervisor("pi-unused", bin, "")
-	p := newSpawnParams(t, capsule.AdapterClaude, "sess_fc_2")
-	// Pre-existing session identity WITHOUT any completed turn: the
-	// §3.6a crash-continuation shape whose conversation never got a turn
-	// (the real CLI never persisted one).
+	p := newSpawnParams(t, capsule.AdapterClaude, "sess_fc_zt")
+	// The zero-turn continuation shape: a session identity is on disk
+	// (an earlier derivation wrote it and crashed before its first turn
+	// completed), but the conversation store holds NO completed turn —
+	// the re-derived harness is refused at startup (measured).
 	capc := &capsule.Capsule{Dir: p.CapsuleDir, WorkItemID: p.WorkItemID}
 	if err := capc.WriteSessionIdentity(capsule.AdapterClaude, p.SessionID); err != nil {
 		t.Fatal(err)
 	}
-	h, err := s.Spawn(context.Background(), p)
+	idnBefore, err := capc.ReadSessionIdentity(capsule.AdapterClaude)
 	if err != nil {
-		// The kickoff write raced the harness's exit-1 death: a loud
-		// spawn failure is an acceptable manifestation of the measured
-		// "No conversation found" refusal.
-		if !contains(err.Error(), "initial instruction injection failed") &&
-			!contains(err.Error(), "not accepting control messages") {
-			t.Fatalf("unexpected spawn error: %v", err)
-		}
-		return
+		t.Fatal(err)
 	}
-	if werr := h.(*Proc).Wait(); werr == nil {
-		t.Fatal("resuming a zero-turn conversation must fail loudly (measured: exit 1, \"No conversation found\")")
+
+	h, serr := s.Spawn(context.Background(), p)
+	if serr != nil {
+		t.Fatalf("the measured zero-turn refusal must fall back to a fresh derivation under the same session id: %v", serr)
+	}
+	defer h.Terminate(2 * time.Second)
+
+	// The fallback agent runs normally after: full control round-trip.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := h.Quiesce(ctx); err != nil {
+		t.Fatalf("the fallback agent must serve control methods: %v", err)
+	}
+	if err := h.NotifyStop(ctx); err != nil {
+		t.Fatalf("notify stop over the fallback agent: %v", err)
+	}
+
+	// Derivation trace: exactly two harness invocations — the refused
+	// --resume, then the fresh --session-id of the SAME conversation
+	// UUID (not --resume, not a new id).
+	waitForFileLines(t, spawnLog, 2)
+	raw, rerr := os.ReadFile(spawnLog)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	spawns := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(spawns) != 2 {
+		t.Fatalf("exactly two fakeclaude invocations expected (refused resume + fresh fallback), got %d: %q", len(spawns), string(raw))
+	}
+	uuid := claudeSessionUUID("sess_fc_zt")
+	if !contains(spawns[0], uuid+" resume ") {
+		t.Fatalf("the first derivation must --resume the pinned conversation UUID %s: %q", uuid, spawns[0])
+	}
+	if !contains(spawns[1], uuid+" fresh ") || contains(spawns[1], " resume ") {
+		t.Fatalf("the fallback derivation must pin the SAME conversation UUID %s fresh via --session-id: %q", uuid, spawns[1])
+	}
+
+	// (c) ONE session identity: the fallback must not create a second
+	// one (it is not a generation change) — session.json keeps the
+	// single pre-existing record, untouched.
+	idnAfter, aerr := capc.ReadSessionIdentity(capsule.AdapterClaude)
+	if aerr != nil {
+		t.Fatal(aerr)
+	}
+	if idnAfter.SessionID != p.SessionID || idnAfter.CreatedAt != idnBefore.CreatedAt {
+		t.Fatalf("the fallback must keep the ONE session identity untouched: before %+v, after %+v", idnBefore, idnAfter)
+	}
+}
+
+// TestFakeClaudeContinuationAfterTurnStillResumes: (b) regression pin —
+// a crash continuation AFTER a real first turn is NOT the zero-turn
+// window: the re-derivation must still --resume the same conversation
+// UUID (never the fresh fallback), the startup watch must end on the
+// first served turn instead of eating its whole bound, and the resumed
+// agent keeps acking control methods.
+func TestFakeClaudeContinuationAfterTurnStillResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("go build of the fake in-test")
+	}
+	bin := buildFakeClaude(t)
+	t.Setenv("FAKECLAUDE_STATE_DIR", t.TempDir())
+	spawnLog := filepath.Join(t.TempDir(), "spawn.log")
+	t.Setenv("FAKECLAUDE_SPAWN_LOG", spawnLog)
+	s := NewSupervisor("pi-unused", bin, "")
+	p := newSpawnParams(t, capsule.AdapterClaude, "sess_fc_rt")
+
+	// First derivation: fresh; a completed turn (the quiesce ack)
+	// persists the conversation and makes it resumable (measured).
+	h1, err := s.Spawn(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := h1.Quiesce(ctx); err != nil {
+		t.Fatalf("quiesce: %v", err)
+	}
+	h1.Terminate(2 * time.Second)
+
+	// Crash continuation AFTER the real first turn.
+	t0 := time.Now()
+	h2, err := s.Spawn(context.Background(), p)
+	if err != nil {
+		t.Fatalf("re-derivation: %v", err)
+	}
+	defer h2.Terminate(2 * time.Second)
+	if elapsed := time.Since(t0); elapsed >= zeroTurnWatchBound {
+		t.Fatalf("the startup watch must end on the first served turn, not the whole bound (took %s)", elapsed)
+	}
+	if err := h2.Quiesce(ctx); err != nil {
+		t.Fatalf("the resumed conversation must ack: %v", err)
+	}
+
+	waitForFileLines(t, spawnLog, 2)
+	raw, rerr := os.ReadFile(spawnLog)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	spawns := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(spawns) != 2 {
+		t.Fatalf("two fakeclaude invocations expected, got %d: %q", len(spawns), string(raw))
+	}
+	uuid := claudeSessionUUID("sess_fc_rt")
+	if !contains(spawns[0], uuid+" fresh ") {
+		t.Fatalf("first spawn must be fresh: %q", spawns[0])
+	}
+	if !contains(spawns[1], uuid+" resume ") || contains(spawns[1], " fresh ") {
+		t.Fatalf("a continuation after a real first turn must still --resume the same conversation UUID %s (no fallback): %q", uuid, spawns[1])
+	}
+}
+
+// TestClaudeResumeFailureDifferentErrorStaysTyped: (d) — a resume
+// failure whose stderr carries a DIFFERENT error text (e.g. a network
+// failure: exit 1, an error result record, no assistant record) must
+// NOT trigger the fresh fallback. It stays a typed spawn failure, and
+// no second derivation ever happens.
+func TestClaudeResumeFailureDifferentErrorStaysTyped(t *testing.T) {
+	argvLog := filepath.Join(t.TempDir(), "argv.log")
+	// A resume failure that is NOT the measured zero-turn refusal: the
+	// error text differs (network), the exit code is still 1 and an
+	// error result record is still emitted — only the stderr text and
+	// the absence of a served turn separate it from the refusal.
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$(printf '%s' \"$*\" | tr '\\n' ' ')\" >> \"$ARGV_LOG\"\n" +
+		"printf 'Error: Network error: connection refused\\n' >&2\n" +
+		"printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"result\":\"\",\"is_error\":true,\"num_turns\":0,\"result_index\":0}'\n" +
+		"exit 1\n"
+	bin := writeHarness(t, "claudenetfailharness", script)
+	t.Setenv("ARGV_LOG", argvLog)
+	s := NewSupervisor(bin, bin, "")
+	p := newSpawnParams(t, capsule.AdapterClaude, "sess_fc_net")
+	// Session identity on disk: the derivation is a continuation
+	// (watch armed), but its "failure" is not the refusal.
+	capc := &capsule.Capsule{Dir: p.CapsuleDir, WorkItemID: p.WorkItemID}
+	if err := capc.WriteSessionIdentity(capsule.AdapterClaude, p.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Spawn(context.Background(), p)
+	if err == nil {
+		t.Fatal("a resume failure with a different error text must stay a typed spawn failure, not become a fresh fallback")
+	}
+	if !contains(err.Error(), "DAEMON-503") {
+		t.Fatalf("the failure must be typed (DAEMON-503): %v", err)
+	}
+	// Exactly ONE harness invocation: no fallback re-derivation.
+	waitForFileLines(t, argvLog, 1)
+	raw, rerr := os.ReadFile(argvLog)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if n := len(strings.Split(strings.TrimSpace(string(raw)), "\n")); n != 1 {
+		t.Fatalf("exactly one harness invocation expected (no fallback re-derivation), got %d: %q", n, string(raw))
 	}
 }

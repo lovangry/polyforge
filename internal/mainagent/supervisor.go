@@ -288,10 +288,14 @@ func (a *PiAdapter) FrameControl(id, line string) any {
 //   - A session with ZERO completed turns is NOT resumable: --resume of a
 //     conversation that never finished a turn exits 1 with "No
 //     conversation found with session ID: <uuid>". A crash before the
-//     first turn completes therefore breaks the continuation chain — the
-//     re-derived claude dies at startup and the daemon's dead-agent
-//     handling takes over. UNVERIFIED: whether a crash MID first turn
-//     leaves a resumable conversation.
+//     first turn completes therefore used to break the continuation
+//     chain — the re-derived claude died at startup and the daemon's
+//     dead-agent handling crash-looped on the same refusal forever. The
+//     supervisor's zero-turn startup watch (Spawn) now catches the
+//     refusal and falls back to a FRESH derivation under the SAME
+//     harness session id (see the ZERO-TURN CRASH WINDOW paragraph
+//     below). UNVERIFIED: whether a crash MID first turn leaves a
+//     resumable conversation.
 //   - Output record shapes (no --include-partial-messages): hook noise +
 //     {"type":"system","subtype":"init",...,"session_id"} per turn,
 //     {"type":"assistant","message":{"role":"assistant","content":
@@ -320,6 +324,27 @@ func (a *PiAdapter) FrameControl(id, line string) any {
 //     capsule would move auth material there (04 §8 forbids). v1 claude
 //     session isolation therefore rides the pinned conversation UUID,
 //     not a capsule-local directory.
+//
+// THE ZERO-TURN CRASH WINDOW is the cc twin of the daemon's
+// spawn-prologue orphan window (R3N-F6, 04 §6.1): both are the sliver
+// between derivation and the first durable record where a crash leaves
+// nothing the continuation chain can re-attach to. The daemon's window
+// is between the process start and the identity journal's fsync; this
+// one is between the claude spawn and the first COMPLETED turn — the
+// conversation only becomes resumable then (measured), so an agent
+// crash inside that window leaves a session identity on disk whose
+// conversation the CLI refuses to resume, and every re-derivation
+// hits the same refusal. The reaction is adapter-internal, exactly as
+// the journal callback is daemon-internal: when a continuation
+// derivation observes the measured refusal (exit 1 with "No
+// conversation found with session ID: <uuid>" before any assistant or
+// successful result record), the supervisor falls back to a FRESH
+// derivation under the SAME harness session id — the same conversation
+// UUID pinned via --session-id (NOT --resume), the same initial
+// instruction. This preserves 04 §6.1a's continuation semantics (same
+// session identity, same generation, same machine — 03 §4.4's only
+// reuse case): the fallback is shape-internal, and neither the
+// supervisor's face nor the daemon needs to know it exists.
 
 type ClaudeAdapter struct {
 	Bin string
@@ -331,6 +356,16 @@ type ClaudeAdapter struct {
 	// Set by the supervisor's session-identity read-back (Spawn), never
 	// by hand in production paths.
 	Resume bool
+	// freshFallback, armed by the supervisor's zero-turn refusal
+	// fallback (ArmFreshFallback), re-arms the NEXT BuildCmd as a FRESH
+	// derivation under the SAME session id: the same conversation UUID
+	// via --session-id instead of --resume. One-shot — consumed by that
+	// BuildCmd — because the supervisor arms it at most once per Spawn.
+	freshFallback bool
+	// lastSid is the conversation UUID of the most recent BuildCmd — the
+	// id the measured refusal text names, so the startup classification
+	// matches the refusal of OUR conversation, never a foreign one.
+	lastSid string
 }
 
 func (a *ClaudeAdapter) Name() string { return capsule.AdapterClaude }
@@ -396,6 +431,7 @@ func claudeSessionUUID(sessionID string) string {
 
 func (a *ClaudeAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error) {
 	sid := claudeSessionUUID(p.SessionID)
+	a.lastSid = sid
 	// The REAL persistent-session argv (measured): -p plus streaming input
 	// and output; --verbose is REQUIRED for stream-json output in print
 	// mode. One process per WI for its whole lifetime (00 §3.6a
@@ -407,11 +443,19 @@ func (a *ClaudeAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, e
 		"--output-format", "stream-json",
 		"--verbose",
 	}
-	if a.Resume {
+	switch {
+	case a.freshFallback:
+		// Zero-turn refusal fallback: a FRESH derivation under the SAME
+		// harness session id — the same conversation UUID via --session-id,
+		// NOT --resume — so 04 §6.1a continuation semantics survive (same
+		// session identity, same generation, same machine). One-shot.
+		args = append(args, "--session-id", sid)
+		a.freshFallback = false
+	case a.Resume:
 		// Crash continuation: same session id, same machine, same
 		// generation — the ONLY reuse case (03 §4.4).
 		args = append(args, "--resume", sid)
-	} else {
+	default:
 		args = append(args, "--session-id", sid)
 	}
 	// pf-execute is injected as an APPENDED SYSTEM PROMPT (not a user
@@ -464,6 +508,37 @@ func (a *ClaudeAdapter) FrameControl(id, line string) any {
 // claude conversation instead of pinning a fresh one.
 func (a *ClaudeAdapter) MarkContinuation() { a.Resume = true }
 
+// claudeZeroTurnRefusalText is the MEASURED refusal line (claude 2.1.280,
+// polyforge#33): --resume of a conversation that never completed a turn
+// prints exactly this — naming the requested id — to stderr and exits 1,
+// before serving any turn.
+const claudeZeroTurnRefusalText = "No conversation found with session ID: "
+
+// StartupRefusal implements zeroTurnFallback: it classifies the startup
+// death of ONE continuation derivation as the measured zero-turn resume
+// refusal — and ONLY that. The discriminator set is deliberately tight:
+// a session that already served a turn is not the zero-turn case; the
+// exit code must be the measured 1; and the stderr tail must carry the
+// refusal text naming OUR conversation UUID (the CLI echoes the id it
+// was asked to resume). Any other startup death — a network error, a
+// flag error, a clean exit — stays what it is: a typed spawn failure the
+// caller reports.
+func (a *ClaudeAdapter) StartupRefusal(exitErr error, stderrTail string, servedTurn bool) bool {
+	if servedTurn {
+		return false
+	}
+	var ee *exec.ExitError
+	if !errors.As(exitErr, &ee) || ee.ExitCode() != 1 {
+		return false
+	}
+	return a.lastSid != "" && strings.Contains(stderrTail, claudeZeroTurnRefusalText+a.lastSid)
+}
+
+// ArmFreshFallback implements zeroTurnFallback: the NEXT BuildCmd pins
+// the same conversation UUID via --session-id instead of --resume. The
+// supervisor arms at most ONE fallback per Spawn.
+func (a *ClaudeAdapter) ArmFreshFallback() { a.freshFallback = true }
+
 // continuationAdapter is the supervisor's OPTIONAL adapter face for
 // harnesses that re-attach to an EXISTING conversation on re-derivation
 // (claude: --resume). The supervisor marks the adapter when the capsule's
@@ -472,6 +547,31 @@ func (a *ClaudeAdapter) MarkContinuation() { a.Resume = true }
 // (its session dir carries the state) — is adapter-internal, so the
 // supervisor face stays shape-agnostic (00 §3.6a).
 type continuationAdapter interface{ MarkContinuation() }
+
+// zeroTurnFallback is the supervisor's OPTIONAL adapter face for
+// harnesses whose CONTINUATION derivations can be REFUSED at startup
+// (claude: the measured zero-turn --resume refusal — a conversation that
+// never completed a turn is not resumable, so the re-derived harness
+// dies at launch; 04 §6.1a's zero-turn crash window). When the adapter
+// implements this face, the supervisor watches a continuation
+// derivation's startup window; on the adapter's own classification of
+// the refusal it arms ONE fresh fallback derivation under the SAME
+// session id. The supervisor face stays shape-agnostic (00 §3.6a): a
+// harness without the face (pi) never gets the watch, and the daemon
+// observes neither the refusal nor the fallback.
+type zeroTurnFallback interface {
+	continuationAdapter
+	// StartupRefusal classifies the startup death of one continuation
+	// derivation. exitErr is the process's Wait() outcome, stderrTail
+	// the captured tail of the harness stderr, servedTurn whether the
+	// stream proved ANY served turn (an assistant record or a non-error
+	// result record) before the death — the measured refusal arrives
+	// before any of those.
+	StartupRefusal(exitErr error, stderrTail string, servedTurn bool) bool
+	// ArmFreshFallback re-arms the NEXT BuildCmd as a FRESH derivation
+	// under the SAME session id.
+	ArmFreshFallback()
+}
 
 // ---------------------------------------------------------------------------
 // Proc: the supervised handle over one derived agent process.
@@ -502,6 +602,14 @@ type Proc struct {
 	// send/awaitAck so every later control call fails fast and LOUDLY
 	// instead of waiting out its bound against a closed path.
 	unhealthy atomic.Value // error
+	// turnServed is closed (once) when the stdout stream classifies a
+	// record proving the harness SERVED a turn — any assistant record,
+	// or a result record that is not the turn's own error outcome. The
+	// zero-turn startup watch (a continuation derivation of a
+	// zeroTurnFallback adapter) uses it as the healthy signal that ends
+	// the watch; the measured zero-turn resume refusal emits neither.
+	turnServed chan struct{}
+	turnOnce   sync.Once
 }
 
 // Control-path bounds (R2N-9). Acks can never be silently dropped — a
@@ -534,6 +642,40 @@ var ErrControlChannelOverflow = errors.New("mainagent: control queue overflow (h
 // maxControlLineBytes: the control path is closed and the agent marked
 // unhealthy.
 var ErrControlLineTooLong = errors.New("mainagent: control line exceeded the bounded reader limit")
+
+// maxStderrTail bounds the captured harness stderr tail. The zero-turn
+// startup watch reads it for the measured refusal text, which sits at
+// the END of the stream (right before the exit), so a tail buffer is
+// sufficient — and a chatty harness cannot balloon it.
+const maxStderrTail = 64 << 10
+
+// stderrTail keeps the LAST max bytes written to it. The zero-turn
+// startup watch needs the harness's final stderr lines (the measured
+// refusal text) without an unbounded buffer; it is tee'd next to
+// os.Stderr so the daemon's log face is unchanged.
+type stderrTail struct {
+	mu  sync.Mutex
+	max int
+	buf []byte
+}
+
+// Write implements io.Writer (tail-truncating).
+func (t *stderrTail) Write(b []byte) (int, error) {
+	t.mu.Lock()
+	t.buf = append(t.buf, b...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+	}
+	t.mu.Unlock()
+	return len(b), nil
+}
+
+// String returns the captured tail.
+func (t *stderrTail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
+}
 
 // lineQueue is the bounded LOSSLESS control-channel buffer: lines in the
 // CLOSED control vocabulary (isControlLine) are queued and never dropped
@@ -752,6 +894,7 @@ func (p *Proc) classifyStdoutLine(line string) {
 		// (ErrControlLineTooLong) exactly like an overlong raw line.
 		p.scanAssistantText(text)
 	case "assistant": // claude assistant message (the ack carrier)
+		p.markTurnServed() // ANY assistant record proves a served turn (even thinking-only)
 		text, ok := assistantText(rec.Message)
 		if !ok {
 			atomic.AddInt64(&p.bulkDropped, 1)
@@ -760,6 +903,13 @@ func (p *Proc) classifyStdoutLine(line string) {
 		p.scanAssistantText(text)
 	case "result": // claude per-turn outcome
 		p.observeClaudeResult(rec)
+		if !claudeResultFailed(rec) {
+			// A COMPLETED turn: the healthy-signal evidence for the
+			// zero-turn startup watch. The refusal path's own
+			// error_during_execution result record is excluded by the
+			// same claudeResultFailed test.
+			p.markTurnServed()
+		}
 		atomic.AddInt64(&p.bulkDropped, 1)
 	default:
 		// Session events, message_update deltas, claude system/hook noise,
@@ -841,11 +991,44 @@ func (p *Proc) observeResponse(rec stdoutRecord) {
 // assistant record already carried it, and scanning both would queue one
 // ack twice.
 func (p *Proc) observeClaudeResult(rec stdoutRecord) {
-	failed := rec.IsError != nil && *rec.IsError
-	if !failed && (rec.Subtype == "" || rec.Subtype == "success") {
+	if !claudeResultFailed(rec) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "mainagent: claude turn failed (subtype=%s): see the harness stderr/session for detail\n", orDefault(rec.Subtype, "unknown"))
+}
+
+// claudeResultFailed reports whether one claude result record is an
+// ERROR outcome — is_error set, or a subtype other than success. The
+// measured zero-turn resume refusal and an API/network failure both
+// carry this shape; the zero-turn startup watch must not mistake the
+// refusal's own error record for a served turn.
+func claudeResultFailed(rec stdoutRecord) bool {
+	if rec.IsError != nil && *rec.IsError {
+		return true
+	}
+	return rec.Subtype != "" && rec.Subtype != "success"
+}
+
+// markTurnServed records (once) that the harness stream proved a served
+// turn; see the turnServed field comment. Tolerates a bare Proc (no
+// watch armed) as a no-op.
+func (p *Proc) markTurnServed() {
+	if p.turnServed == nil {
+		return
+	}
+	p.turnOnce.Do(func() { close(p.turnServed) })
+}
+
+// servedTurn reports whether a served turn was proven on the stream —
+// the zero-turn startup watch's "the session already produced output"
+// input.
+func (p *Proc) servedTurn() bool {
+	select {
+	case <-p.turnServed:
+		return true
+	default:
+		return false
+	}
 }
 
 func orDefault(s, def string) string {
@@ -1294,29 +1477,98 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 		}
 	}
 
+	// Derivation loop: at most TWO derivations. The first is the marked
+	// one (a continuation re-attaches where the harness can). A
+	// continuation derivation of a zeroTurnFallback adapter is watched
+	// through its startup window (see derive); only the adapter's
+	// classification of the MEASURED zero-turn resume refusal (claude:
+	// the harness died at launch refusing --resume of a conversation
+	// that never completed a turn) earns the second — a FRESH derivation
+	// under the SAME harness session id (04 §6.1a semantics preserved:
+	// same session identity, same generation, same machine).
+	//
+	// The session-identity read-back above deliberately does NOT re-run
+	// for the fallback: the identity on disk is already OURS (that
+	// read-back is what marked this a continuation), and re-reading it
+	// would re-mark the adapter and loop the refusal. The fallback is
+	// NOT a generation change and must not touch session.json at all —
+	// one identity, one id, exactly as before.
+	watch := resumed
+	if _, ok := adapter.(zeroTurnFallback); !ok {
+		watch = false // the harness has no refusal shape: nothing to watch
+	}
+	for {
+		proc, refused, err := s.derive(adapter, p, sessionDir, watch)
+		if err != nil {
+			return nil, err
+		}
+		if !refused {
+			return proc, nil
+		}
+		// refused is only ever set with the watch armed, which implies
+		// the face; arming clears the watch, so the loop runs at most
+		// twice (the fallback derivation is fresh and cannot be refused).
+		adapter.(zeroTurnFallback).ArmFreshFallback()
+		watch = false
+	}
+}
+
+// zeroTurnWatchBound bounds the zero-turn startup watch of a
+// continuation derivation (claude). The measured refusal is the
+// harness's FIRST act after its startup records (the conversation-store
+// check precedes any turn), so a healthy resumed derivation either
+// serves its first turn or outlives the bound. Continuations are rare
+// (crash re-derivation only), so this bound costs nothing on the fresh
+// path; a refusal slower than the bound degrades to the pre-fallback
+// behavior (a dead handle the daemon's liveness observation catches).
+const zeroTurnWatchBound = 5 * time.Second
+
+// derive derives ONE harness process for p — BuildCmd → start → identity
+// journal → initial-instruction injection — and returns the supervised
+// handle. watch arms the zero-turn startup watch; only a CONTINUATION
+// derivation of a zeroTurnFallback adapter gets it. refused=true means
+// the watched derivation died at startup with the adapter's measured
+// zero-turn resume refusal: the caller arms exactly one fresh fallback
+// derivation under the same session id. Any OTHER watched startup death
+// is a typed spawn failure (a network error must never silently become
+// a fresh session); an unwatched derivation behaves exactly as before
+// (early deaths surface through the injection write or the daemon's
+// liveness observation).
+func (s *Supervisor) derive(adapter Adapter, p SpawnParams, sessionDir string, watch bool) (*Proc, bool, error) {
 	cmd, err := adapter.BuildCmd(p, sessionDir)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// Process group: the agent is its own group leader so Terminate can
 	// collect step agents / command children with one signal (04 §7.1).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	cmd.Stderr = os.Stderr
+	// The zero-turn startup watch needs the harness's stderr tail (the
+	// measured refusal text) — captured next to the daemon's log face,
+	// bounded so a chatty harness cannot balloon it. Unwatched
+	// derivations keep the direct stderr pass-through unchanged.
+	var tail *stderrTail
+	if watch {
+		tail = &stderrTail{max: maxStderrTail}
+		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
+	} else {
+		cmd.Stderr = os.Stderr
+	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("mainagent: harness start failed (DAEMON-503): %w", err)
+		return nil, false, fmt.Errorf("mainagent: harness start failed (DAEMON-503): %w", err)
 	}
 	proc := &Proc{
 		cmd: cmd, adapter: adapter, sessionID: p.SessionID,
 		startedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		stdin:     stdin, ctrl: newLineQueue(), exited: make(chan struct{}),
+		turnServed: make(chan struct{}),
 	}
 	// Stdout reader: under the REAL pi protocol stdout is a RECORD STREAM
 	// (classifyStdoutLine): assistant message records carry the ack lines
@@ -1364,11 +1616,14 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 	// unpublished local work. The callback lets the daemon persist
 	// (pid, started-at) into the pending_jobs[] row first; its failure
 	// fails the spawn and tears the process down (the reaper goroutine
-	// above is already running, so no corpse is left behind).
+	// above is already running, so no corpse is left behind). The
+	// zero-turn fallback derivation journals its OWN pid through the same
+	// callback — the journal row must name the process that is LIVE when
+	// Spawn returns, never the refused one it replaced.
 	if p.OnProcessStarted != nil {
 		if jerr := p.OnProcessStarted(cmd.Process.Pid, proc.startedAt); jerr != nil {
 			_ = proc.Terminate(5 * time.Second)
-			return nil, fmt.Errorf("mainagent: process-identity journaling failed (process torn down): %w", jerr)
+			return nil, false, fmt.Errorf("mainagent: process-identity journaling failed (process torn down): %w", jerr)
 		}
 	}
 	// Inject the initial stdin write (04 §6.1a): pi gets the pf-execute
@@ -1379,13 +1634,56 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 	m, ierr := adapter.InitialMessage(p)
 	if ierr != nil {
 		_ = proc.Terminate(5 * time.Second)
-		return nil, fmt.Errorf("mainagent: initial instruction build failed (DAEMON-503): %w", ierr)
+		return nil, false, fmt.Errorf("mainagent: initial instruction build failed (DAEMON-503): %w", ierr)
 	}
 	if m != nil {
 		if serr := proc.writeStdin(m); serr != nil {
-			_ = proc.Terminate(5 * time.Second)
-			return nil, fmt.Errorf("mainagent: initial instruction injection failed (DAEMON-503): %w", serr)
+			if !watch {
+				_ = proc.Terminate(5 * time.Second)
+				return nil, false, fmt.Errorf("mainagent: initial instruction injection failed (DAEMON-503): %w", serr)
+			}
+			// Under the watch, a failed kickoff write is most likely the
+			// startup death itself (the pipe closed as the harness died —
+			// the measured refusal races the injection). Let the watch
+			// classify instead of failing blind: a refusal becomes the
+			// fresh fallback, anything else the typed spawn failure.
 		}
 	}
-	return proc, nil
+	if !watch {
+		return proc, false, nil
+	}
+	// Zero-turn startup watch (continuation derivations only, 04 §6.1a's
+	// zero-turn crash window): race the harness's startup against
+	// (i) its death — the measured refusal arrives before any served
+	// turn; (ii) the first served turn (the healthy signal: a --resume
+	// the harness accepted is already past its conversation-store
+	// check); and (iii) the bound, after which the derivation is taken
+	// as healthy exactly as before.
+	select {
+	case <-proc.exited:
+		// Startup death: classify. The refusal earns exactly one fresh
+		// fallback; anything else stays a typed spawn failure.
+		ra := adapter.(zeroTurnFallback) // the watch implies the face
+		if ra.StartupRefusal(proc.exitErr, tail.String(), proc.servedTurn()) {
+			// Collect the refused derivation's residue BEFORE the fallback
+			// derivation starts — the same 04 §7.1 step 4 discipline:
+			// proven group-empty before re-derivation.
+			_ = proc.Terminate(5 * time.Second)
+			return nil, true, nil
+		}
+		_ = proc.Terminate(5 * time.Second)
+		st := tail.String()
+		if len(st) > 1024 {
+			st = st[len(st)-1024:] // keep the typed failure readable
+		}
+		return nil, false, fmt.Errorf("mainagent: harness continuation died at startup (DAEMON-503): %v; stderr tail: %q", proc.exitErr, st)
+	case <-proc.turnServed:
+		// The resumed harness served a turn: the conversation existed and
+		// was accepted — healthy; the watch ends.
+		return proc, false, nil
+	case <-time.After(zeroTurnWatchBound):
+		// Still alive and quiet past the bound: healthy as far as this
+		// watch can prove; behave exactly as the unwatched path.
+		return proc, false, nil
+	}
 }
