@@ -85,6 +85,55 @@ func TestProbeCandidatesUnreachableExitsOne(t *testing.T) {
 	}
 }
 
+// TestProbeCandidatesDedupesAcrossBundles: the reference checkout case —
+// four bundles declaring the same three candidates — must drive the fake
+// pi adapter exactly 3 times (one micro request per unique candidate),
+// while the table still shows every bundle's full row set. The fake pi
+// records each invocation, one line per run.
+func TestProbeCandidatesDedupesAcrossBundles(t *testing.T) {
+	dir := t.TempDir()
+	callsFile := filepath.Join(dir, "calls")
+	script := filepath.Join(dir, "countpi")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho x >> \""+callsFile+"\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Four bundles, all declaring the same three candidates.
+	wd := t.TempDir()
+	for _, name := range []string{"bug-fix", "chore", "feature-full", "quick-fix"} {
+		bundle := filepath.Join(wd, name)
+		if err := os.MkdirAll(filepath.Join(bundle, "agents"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := "---\nname: " + name + "\ndefaults:\n  model_candidates: [prov/up-1, prov/up-2, prov/up-3]\nsteps:\n  - { id: code, kind: code }\n---\nbody\n"
+		if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out strings.Builder
+	code := Run([]string{"probe-candidates", "--workflows-dir", wd, "--pi-bin", script},
+		strings.NewReader(""), &out, &out)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; output: %s", code, out.String())
+	}
+	raw, err := os.ReadFile(callsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Count(strings.TrimSpace(string(raw)), "\n") + 1
+	if lines != 3 {
+		t.Fatalf("fake pi invoked %d times, want exactly 3 (one per unique candidate)", lines)
+	}
+	// Report completeness: every bundle's full row set is still rendered.
+	for _, name := range []string{"bundle bug-fix", "bundle chore", "bundle feature-full", "bundle quick-fix"} {
+		if !strings.Contains(out.String(), name) {
+			t.Fatalf("table must contain %q: %s", name, out.String())
+		}
+	}
+	if got := strings.Count(out.String(), "reachable"); got < 12 {
+		t.Fatalf("table must show all 4 bundles × 3 candidates reachable, got %d: %s", got, out.String())
+	}
+}
+
 func TestProbeCandidatesErrorExitCodes(t *testing.T) {
 	dir := probeBundleDir(t, "[prov/up-1]")
 	// unknown adapter flag value -> typed runtime error (exit 1)

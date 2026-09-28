@@ -2,8 +2,10 @@
 // (07-deployment-pilot.md §6.1 step 6, polyforge#27 amendment): for the
 // bundles present in the daemon's workflows checkout, parse every
 // declared model_candidates entry (defaults plus step-level overrides,
-// the union per §6.1 step 6) and issue ONE micro request per candidate
-// through the harness adapter's model call path. The probe is an
+// the union per §6.1 step 6) and issue ONE micro request per UNIQUE
+// candidate through the harness adapter's model call path (a run probes
+// one adapter, so the (adapter, candidate) key reduces to the candidate
+// string; bundles declaring the same candidate share its outcome). The probe is an
 // INSTALL-FACE criterion, not a runtime dependency: a candidate that is
 // unreachable during the Pilot is still handled at run time by the
 // ordinary infrastructure-failure in-place resume semantics
@@ -183,10 +185,22 @@ type Report struct {
 // ProbeBundle issues one micro request per declared candidate of one
 // bundle, sequentially (install-time tool: no need for concurrency).
 func ProbeBundle(ctx context.Context, prober Prober, bundle string, fm *schema.Frontmatter) *Report {
+	outcomes := map[string]error{}
+	for _, c := range Candidates(fm) {
+		outcomes[c] = prober.Probe(ctx, c)
+	}
+	return bundleReport(bundle, fm, outcomes)
+}
+
+// bundleReport builds one bundle's report from probed candidate outcomes:
+// every declared candidate gets a row, in the per-bundle candidate order;
+// an outcome of nil marks the candidate reachable, an error marks it
+// unreachable with that error's text.
+func bundleReport(bundle string, fm *schema.Frontmatter, outcomes map[string]error) *Report {
 	rep := &Report{Bundle: bundle, Rows: []Row{}}
 	for _, c := range Candidates(fm) {
 		row := Row{Candidate: c}
-		if err := prober.Probe(ctx, c); err != nil {
+		if err := outcomes[c]; err != nil {
 			row.Error = err.Error()
 		} else {
 			row.Reachable = true
@@ -207,6 +221,14 @@ func ProbeBundle(ctx context.Context, prober Prober, bundle string, fm *schema.F
 // set). bundleFilter, when non-empty, restricts the run to that bundle.
 // Reports are sorted by bundle name; a bundle without declared
 // candidates reports an empty (all-reachable) row set.
+//
+// ONE micro request per UNIQUE candidate, not per (bundle, candidate)
+// pair: a run probes exactly one adapter (--adapter, default pi), so
+// the global (adapter, candidate) key reduces to the candidate string,
+// and the reference bundles — which declare the same candidates — share
+// the outcome. Each bundle's report still carries a row for every
+// candidate it declares (its own per-bundle order), all reading the same
+// shared probe result.
 func ProbeWorkflowsDir(ctx context.Context, prober Prober, workflowsDir, bundleFilter string) ([]*Report, error) {
 	entries, err := os.ReadDir(workflowsDir)
 	if err != nil {
@@ -226,20 +248,47 @@ func ProbeWorkflowsDir(ctx context.Context, prober Prober, workflowsDir, bundleF
 	if bundleFilter != "" && len(names) == 0 {
 		return nil, fmt.Errorf("probe: bundle %q not found under %s", bundleFilter, workflowsDir)
 	}
-	reports := make([]*Report, 0, len(names))
-	for _, name := range names {
+	// First pass: validate every bundle's frontmatter (recording bundle
+	// errors in their sorted-report slots) and collect the run's unique
+	// candidate set, order-preserving by first declaration.
+	reports := make([]*Report, len(names))
+	type validBundle struct {
+		idx int
+		fm  *schema.Frontmatter
+	}
+	var valid []validBundle
+	seen := map[string]bool{}
+	var unique []string
+	for i, name := range names {
 		bundleDir := filepath.Join(workflowsDir, name)
 		fm, ferr := schema.ValidateWorkflowFrontmatter(bundleDir, name)
 		if ferr != nil {
 			// A bundle that fails its own frontmatter validation cannot
 			// be probed: record the failure as the bundle's report — the
 			// install check fails closed without crashing the probe run.
-			reports = append(reports, &Report{
+			reports[i] = &Report{
 				Bundle: name, BundleError: ferr.Error(), Rows: []Row{}, AllReachable: false,
-			})
+			}
 			continue
 		}
-		reports = append(reports, ProbeBundle(ctx, prober, name, fm))
+		valid = append(valid, validBundle{idx: i, fm: fm})
+		for _, c := range Candidates(fm) {
+			if !seen[c] {
+				seen[c] = true
+				unique = append(unique, c)
+			}
+		}
+	}
+	// One micro request per unique candidate, sequentially (install-time
+	// tool: no concurrency, §6.1 step 6).
+	outcomes := make(map[string]error, len(unique))
+	for _, c := range unique {
+		outcomes[c] = prober.Probe(ctx, c)
+	}
+	// Second pass: every bundle's report reads the shared outcomes, so a
+	// candidate declared by several bundles shows the SAME result in each.
+	for _, v := range valid {
+		reports[v.idx] = bundleReport(names[v.idx], v.fm, outcomes)
 	}
 	return reports, nil
 }
