@@ -9,7 +9,7 @@ defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
   - { id: plan, kind: author }
-  - { id: code, kind: code }
+  - { id: code, kind: code, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
   - { id: verification, kind: gate, gate: true, on_fail: { action: rewind, target: code } }
 ---
 
