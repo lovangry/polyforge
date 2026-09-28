@@ -38,7 +38,7 @@ type Prober interface {
 }
 
 // PiProber probes through the pi adapter's model call path:
-// `pi --provider <p> --model <m> --no-tools --no-session -p <micro prompt>`.
+// `pi --provider <p> --model <m> --no-session -p <micro prompt>`.
 // Candidates are provider-qualified ("provider/model", 00 §3.6a): pi
 // resolves the PROVIDER from --provider and the local model id from
 // --model, so a qualified candidate must be SPLIT — passing the whole
@@ -46,7 +46,14 @@ type Prober interface {
 // unknown model ids (measured on the first real install: 422
 // unsupported-conversion from the wrong provider's proxy). A bare
 // model id (no "/") is passed to --model alone, provider left to
-// pi's own default.
+// pi's own default. The argv family carries NO --no-tools: the real
+// WI-Agent derivation runs WITH tools, and on cursor-format
+// provider backends the no-tools flag flips the request shape to a
+// plain chat-completion form those backends reject (422, measured
+// on the first real install) — the probe must ride the SAME argv
+// family as the real spawn or it tests a path nothing will ever
+// take. The micro prompt answers "OK" without invoking any tool, so
+// enabling tools costs only the request's tool-schema bytes.
 type PiProber struct {
 	// Bin overrides the pi executable path (tests substitute a fake).
 	Bin string
@@ -69,7 +76,7 @@ func (p *PiProber) Probe(ctx context.Context, candidate string) error {
 		args = append(args, "--model", candidate)
 		what += " --model " + candidate
 	}
-	args = append(args, "--no-tools", "--no-session", "-p", MicroPrompt)
+	args = append(args, "--no-session", "-p", MicroPrompt)
 	cmd := exec.CommandContext(ctx, p.bin(), args...)
 	cmd.Env = os.Environ()
 	return runCollectingOutput(cmd, what)
