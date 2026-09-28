@@ -178,7 +178,7 @@ func TestPiProberInvokesModelCallPath(t *testing.T) {
 	dir := t.TempDir()
 	argvFile := filepath.Join(dir, "argv")
 	script := filepath.Join(dir, "fakepi")
-	os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\" > \""+argvFile+"\"\nfor a in \"$@\"; do\n  [ \"$a\" = \"down/1\" ] && exit 3\ndone\nexit 0\n"), 0o755)
+	os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\" > \""+argvFile+"\"\nfor a in \"$@\"; do\n  [ \"$a\" = \"down\" ] && exit 3\ndone\nexit 0\n"), 0o755)
 	p := &PiProber{Bin: script}
 	ctx := context.Background()
 	if err := p.Probe(ctx, "up/1"); err != nil {
@@ -188,14 +188,51 @@ func TestPiProberInvokesModelCallPath(t *testing.T) {
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
-	// The micro request rides the adapter's model call path: --model <candidate> -p <prompt>.
+	// The micro request rides the adapter's model call path: a
+	// provider-qualified candidate must arrive SPLIT as --provider up
+	// --model 1 (the whole qualified string in --model makes pi fall
+	// back to its default provider — measured on the first real
+	// install), then -p <prompt>.
 	argv := string(raw)
-	if !strings.Contains(argv, "--model up/1") || !strings.Contains(argv, "-p") || !strings.Contains(argv, MicroPrompt) {
-		t.Fatalf("fake pi argv must carry the model call path: %q", argv)
+	if !strings.Contains(argv, "--provider up") || !strings.Contains(argv, "--model 1") || strings.Contains(argv, "--model up/1") || !strings.Contains(argv, "-p") || !strings.Contains(argv, MicroPrompt) {
+		t.Fatalf("fake pi argv must carry the split provider/model call path: %q", argv)
+	}
+	// A bare model id keeps the single-flag form: provider left to
+	// pi's own default.
+	if err := p.Probe(ctx, "bare-model"); err != nil {
+		t.Fatalf("bare candidate must be reachable: %v", err)
+	}
+	if raw, _ := os.ReadFile(argvFile); !strings.Contains(string(raw), "--model bare-model") {
+		t.Fatalf("bare candidate must pass --model bare-model: %q", string(raw))
 	}
 	err := p.Probe(ctx, "down/1")
 	if err == nil || !strings.Contains(err.Error(), "down/1") {
 		t.Fatalf("down candidate must be unreachable with the candidate named: %v", err)
+	}
+}
+
+func TestClaudeProberStripsProviderPrefix(t *testing.T) {
+	// A fake claude executable: records argv, exit 0.
+	dir := t.TempDir()
+	argvFile := filepath.Join(dir, "argv")
+	script := filepath.Join(dir, "fakeclaude")
+	os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\" > \""+argvFile+"\"\nexit 0\n"), 0o755)
+	c := &ClaudeProber{Bin: script}
+	if err := c.Probe(context.Background(), "sub2api-claude/pi-claude-opus-5"); err != nil {
+		t.Fatalf("probe must succeed through the fake: %v", err)
+	}
+	raw, _ := os.ReadFile(argvFile)
+	// claude --model takes the LOCAL model id only; the provider prefix
+	// must be stripped, never passed as part of the model string.
+	if !strings.Contains(string(raw), "--model pi-claude-opus-5") || strings.Contains(string(raw), "--model sub2api-claude/pi-claude-opus-5") {
+		t.Fatalf("fake claude argv must carry the stripped model: %q", string(raw))
+	}
+	// A bare id passes through unchanged.
+	if err := c.Probe(context.Background(), "opus-x"); err != nil {
+		t.Fatalf("bare candidate must be reachable: %v", err)
+	}
+	if raw, _ := os.ReadFile(argvFile); !strings.Contains(string(raw), "--model opus-x") {
+		t.Fatalf("bare candidate must pass --model opus-x: %q", string(raw))
 	}
 }
 

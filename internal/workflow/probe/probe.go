@@ -38,9 +38,15 @@ type Prober interface {
 }
 
 // PiProber probes through the pi adapter's model call path:
-// `pi --model <candidate> --no-tools --no-session -p <micro prompt>`.
-// The candidate format ("provider/model", 00 §3.6a) is passed through
-// verbatim to the harness.
+// `pi --provider <p> --model <m> --no-tools --no-session -p <micro prompt>`.
+// Candidates are provider-qualified ("provider/model", 00 §3.6a): pi
+// resolves the PROVIDER from --provider and the local model id from
+// --model, so a qualified candidate must be SPLIT — passing the whole
+// string to --model makes pi fall back to the default provider for
+// unknown model ids (measured on the first real install: 422
+// unsupported-conversion from the wrong provider's proxy). A bare
+// model id (no "/") is passed to --model alone, provider left to
+// pi's own default.
 type PiProber struct {
 	// Bin overrides the pi executable path (tests substitute a fake).
 	Bin string
@@ -54,14 +60,26 @@ func (p *PiProber) bin() string {
 }
 
 func (p *PiProber) Probe(ctx context.Context, candidate string) error {
-	cmd := exec.CommandContext(ctx, p.bin(),
-		"--model", candidate, "--no-tools", "--no-session", "-p", MicroPrompt)
+	args := []string{}
+	what := "pi --candidate " + candidate
+	if provider, model, ok := strings.Cut(candidate, "/"); ok {
+		args = append(args, "--provider", provider, "--model", model)
+		what += " --provider " + provider + " --model " + model
+	} else {
+		args = append(args, "--model", candidate)
+		what += " --model " + candidate
+	}
+	args = append(args, "--no-tools", "--no-session", "-p", MicroPrompt)
+	cmd := exec.CommandContext(ctx, p.bin(), args...)
 	cmd.Env = os.Environ()
-	return runCollectingOutput(cmd, "pi --model "+candidate)
+	return runCollectingOutput(cmd, what)
 }
 
 // ClaudeProber probes through the claude adapter's model call path:
-// `claude -p --model <candidate> <micro prompt>`.
+// `claude -p --model <model> <micro prompt>`. The claude CLI's --model
+// takes the local model id only — provider routing is claude's own
+// environment, not a CLI flag — so a provider-qualified candidate is
+// stripped to its model part; a bare id passes through unchanged.
 type ClaudeProber struct {
 	Bin string
 }
@@ -74,10 +92,14 @@ func (c *ClaudeProber) bin() string {
 }
 
 func (c *ClaudeProber) Probe(ctx context.Context, candidate string) error {
+	model := candidate
+	if _, rest, ok := strings.Cut(candidate, "/"); ok {
+		model = rest
+	}
 	cmd := exec.CommandContext(ctx, c.bin(),
-		"-p", "--model", candidate, MicroPrompt)
+		"-p", "--model", model, MicroPrompt)
 	cmd.Env = os.Environ()
-	return runCollectingOutput(cmd, "claude --model "+candidate)
+	return runCollectingOutput(cmd, "claude --candidate "+candidate+" --model "+model)
 }
 
 // runCollectingOutput runs the micro request with stdout/stderr attached
