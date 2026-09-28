@@ -1,10 +1,23 @@
-// Command pf-daemon is the per-machine Polyforge Daemon: the single WI Job
-// executor for Interactive/Batch/Drain, supervising one persistent Harness
-// RPC WI Agent per work item (00 §3.1/§3.4/§3.6), publishing Revisions to
-// AIHub over HTTP only.
+// daemon.go: the `pf daemon` subcommand — the per-machine Polyforge
+// Daemon, the single WI Job executor for Interactive/Batch/Drain,
+// supervising one persistent Harness RPC WI Agent per work item
+// (00 §3.1/§3.4/§3.6), publishing Revisions to AIHub over HTTP only.
+//
+// It is dispatched in cmd/pf/main.go BEFORE the CLI verb dispatcher: it
+// is not a one-shot verb. Its flag set, env handling and config
+// precedence are its own, and its error path is a process exit (fatal →
+// os.Exit(1)) — a long-running supervisor must not be flattened into the
+// CLI verbs' exit-code surface. Its success path never returns either:
+// after the graceful-shutdown epilogue the process simply ends, and on
+// the DAEMON-511 flush-did-not-converge refusal it deliberately stays up
+// forever awaiting human attention.
 //
 // Design authority: docs/design/polyforge-vnext/04-local-runtime.md (all),
-// 00-architecture.md §3.5 (graceful shutdown), §3.4a (answer relay).
+// 00-architecture.md §3.5 (graceful shutdown), §3.4a (answer relay),
+// 00-architecture.md §3.2 / 07-deployment-pilot.md §3 (deployment-unit
+// merge ruling: the work-machine binary is this single `pf` binary, CLI
+// verbs + daemon subcommand; the binary name stays `pf` until the
+// cutover rename ruling fires).
 package main
 
 import (
@@ -22,30 +35,39 @@ import (
 	"github.com/silgrid/polyforge/internal/mainagent"
 )
 
-func main() {
+// runDaemon is the `pf daemon` subcommand body. It never returns: every
+// terminal path is a process exit (fatal, or the epilogue after the
+// graceful shutdown join), and the DAEMON-511 refusal blocks forever.
+func runDaemon(args []string) {
+	// ExitOnError preserves the standalone-entry behavior this wiring
+	// had as cmd/pf-daemon: -h prints the flag defaults and exits 0, a
+	// malformed flag exits 2. The flag defaults themselves keep the
+	// same names, env fallbacks and precedence as before the merge.
+	fs := flag.NewFlagSet("pf daemon", flag.ExitOnError)
+	fs.SetOutput(os.Stderr)
 	var (
 		// Default aihub base URL: port 8420, the SAME default the aihub
 		// service listens on (cmd/aihub --listen ":8420", the single-port A5
 		// ruling) and the pf CLI points at (internal/cli defaultServer;
 		// api/openapi.yaml servers: http://localhost:8420). A default
-		// three-binary install must be able to talk without flags.
-		aihubURL     = flag.String("aihub-url", envOr("POLYFORGE_AIHUB_URL", "http://127.0.0.1:8420"), "AIHub Core base URL")
-		apiKey       = flag.String("api-key", os.Getenv("POLYFORGE_API_KEY"), "machine api key (or POLYFORGE_API_KEY)")
-		apiKeyFile   = flag.String("api-key-file", "", "read the machine api key from this 0600 file (daemon/credentials convention)")
-		machineID    = flag.String("machine-id", envOr("POLYFORGE_MACHINE_ID", ""), "this machine's id (heartbeats, claims)")
-		socketPath   = flag.String("socket", envOr("POLYFORGE_SOCKET", "/run/polyforge.sock"), "Unix domain socket operations face")
-		home         = flag.String("home", envOr("POLYFORGE_HOME", os.Getenv("HOME")+"/.polyforge"), "Polyforge home (daemon data under <home>/daemon)")
-		workspace    = flag.String("workspace-root", "", "workspace root (capsules live under <root>/capsules); precedence: this flag > POLYFORGE_WORKSPACE > <home>/workspace")
-		workflowsDir = flag.String("workflows-dir", "", "daemon checkout workflows/ dir (defaults <home>/workflows)")
-		skillsDir    = flag.String("skills-dir", "", "daemon checkout skills/ dir (defaults <home>/skills)")
-		mode         = flag.String("mode", "interactive", "startup mode: interactive | batch | drain")
-		project      = flag.String("project", "", "project whose ready queue Batch/Drain consume")
-		adapter      = flag.String("adapter", "pi", "harness adapter: pi | claude")
-		piBin        = flag.String("pi-bin", "pi", "pi executable (tests/fakes override)")
-		claudeBin    = flag.String("claude-bin", "claude", "claude executable (tests/fakes override)")
-		version      = flag.String("version-flag", "vnext-dev", "runtime version stamp for heartbeats")
+		// install must be able to talk without flags.
+		aihubURL     = fs.String("aihub-url", envOr("POLYFORGE_AIHUB_URL", "http://127.0.0.1:8420"), "AIHub Core base URL")
+		apiKey       = fs.String("api-key", os.Getenv("POLYFORGE_API_KEY"), "machine api key (or POLYFORGE_API_KEY)")
+		apiKeyFile   = fs.String("api-key-file", "", "read the machine api key from this 0600 file (daemon/credentials convention)")
+		machineID    = fs.String("machine-id", envOr("POLYFORGE_MACHINE_ID", ""), "this machine's id (heartbeats, claims)")
+		socketPath   = fs.String("socket", envOr("POLYFORGE_SOCKET", "/run/polyforge.sock"), "Unix domain socket operations face")
+		home         = fs.String("home", envOr("POLYFORGE_HOME", os.Getenv("HOME")+"/.polyforge"), "Polyforge home (daemon data under <home>/daemon)")
+		workspace    = fs.String("workspace-root", "", "workspace root (capsules live under <root>/capsules); precedence: this flag > POLYFORGE_WORKSPACE > <home>/workspace")
+		workflowsDir = fs.String("workflows-dir", "", "daemon checkout workflows/ dir (defaults <home>/workflows)")
+		skillsDir    = fs.String("skills-dir", "", "daemon checkout skills/ dir (defaults <home>/skills)")
+		mode         = fs.String("mode", "interactive", "startup mode: interactive | batch | drain")
+		project      = fs.String("project", "", "project whose ready queue Batch/Drain consume")
+		adapter      = fs.String("adapter", "pi", "harness adapter: pi | claude")
+		piBin        = fs.String("pi-bin", "pi", "pi executable (tests/fakes override)")
+		claudeBin    = fs.String("claude-bin", "claude", "claude executable (tests/fakes override)")
+		version      = fs.String("version-flag", "vnext-dev", "runtime version stamp for heartbeats")
 	)
-	flag.Parse()
+	fs.Parse(args)
 
 	// Workspace-root precedence, resolved AFTER flag parsing so --home is
 	// already final: an explicit --workspace-root wins, then the
@@ -127,11 +149,11 @@ func main() {
 	}
 	go func() {
 		// Serve returns http.ErrServerClosed on the GRACEFUL shutdown path
-		// (main calls api.Close after the shutdown sequence). That is not
-		// an error: treating it as one (polyforge#17 dogfood finding) made
-		// the goroutine os.Exit(1) the whole process mid-epilogue — a
+		// (runDaemon calls api.Close after the shutdown sequence). That is
+		// not an error: treating it as one (polyforge#17 dogfood finding)
+		// made the goroutine os.Exit(1) the whole process mid-epilogue — a
 		// clean shutdown exited 1 and never printed its final line, racing
-		// main's own exit path.
+		// the main path's own exit.
 		if serr := api.Serve(); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			fatal("operations face serve: %v", serr)
 		}
@@ -159,13 +181,22 @@ func main() {
 	}
 	api.Close()
 	fmt.Fprintln(os.Stderr, "pf-daemon: bye")
+	// Fall off the end of runDaemon: the process ends with the zero
+	// status a supervisor (systemd/launchd) reads as a clean stop.
 }
 
+// fatal is the daemon's process-exit error path, unchanged from the
+// standalone cmd/pf-daemon entry: print to stderr prefixed the same way
+// the internal/daemon package prefixes its own diagnostics, then exit 1.
+// The "pf-daemon:" prefix is kept on purpose — internal/daemon prints it
+// and is not touched by the merge — so one daemon's stderr stays
+// uniformly prefixed.
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "pf-daemon: "+format+"\n", args...)
 	os.Exit(1)
 }
 
+// envOr returns the env value when set, else the default.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -173,6 +204,7 @@ func envOr(key, def string) string {
 	return def
 }
 
+// trimNewlines strips leading/trailing CR/LF/space bytes (key files).
 func trimNewlines(s string) string {
 	start, end := 0, len(s)
 	for start < end && (s[start] == '\n' || s[start] == '\r' || s[start] == ' ') {

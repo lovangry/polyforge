@@ -1,5 +1,6 @@
 // Command fakepi is the dogfood stand-in for the real `pi --mode rpc`
-// harness binary (04 §6.1a). The REAL pf-daemon spawns it as the persistent
+// harness binary (04 §6.1a). The REAL `pf daemon` subcommand spawns it
+// as the persistent
 // WI Agent process; it speaks the stdio control-channel contract that
 // skills/pf-execute/SKILL.md declares (the same names as
 // internal/mainagent's control methods) and does capsule-side work the way
@@ -21,9 +22,9 @@
 //	FAKEPI_EXIT  – when non-empty, exit(0) immediately (a harness that
 //	               dies on startup; crash drills).
 //
-// On stdin EOF the process stays alive: a kill -9 of the parent pf-daemon
-// must leave a LIVE WI Agent behind (04 §7.1 step 3's alive-reattach case),
-// so EOF parks instead of exiting.
+// On stdin EOF the process stays alive: a kill -9 of the parent daemon
+// (the `pf daemon` process) must leave a LIVE WI Agent behind (04 §7.1
+// step 3's alive-reattach case), so EOF parks instead of exiting.
 package main
 
 import (

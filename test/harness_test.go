@@ -364,7 +364,8 @@ func (s *fakeSpawner) last() *fakeAgent {
 }
 
 // ---------------------------------------------------------------------------
-// Daemon env: one machine's pf-daemon over the real Core.
+// Daemon env: one machine's daemon (the `pf daemon` subcommand body,
+// driven in-process here) over the real Core.
 
 // daemonEnv is one machine: its own home (workspace root, daemon data
 // dir, daemon checkout of skills/), a real Daemon wired to the Core at

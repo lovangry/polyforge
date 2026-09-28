@@ -1,7 +1,8 @@
 package test
 
-// usage_s5_daemon_restart_test.go: S5 — kill -9 of the REAL pf-daemon
-// process mid-run with the WI Agent alive (both real OS processes), then
+// usage_s5_daemon_restart_test.go: S5 — kill -9 of the REAL daemon
+// process (the `pf daemon` subcommand of the merged work-machine
+// binary) mid-run with the WI Agent alive (both real OS processes), then
 // a restart of the real binary. Pins, against real processes:
 //   - the agent SURVIVES the daemon's kill -9 (it is its own process
 //     group, 04 §6.1a Setpgid);

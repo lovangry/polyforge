@@ -1,12 +1,20 @@
-// Command pf is the Polyforge vNext client CLI: the 12 routing verbs
-// (file/queue/cancel/recall direct to the AIHub HTTP face;
-// submit/observe/answer/batch-confirm/pause/resume/wrap/ops to the local
-// daemon unix-socket face), the supporting WI faces (deps, budget) and
-// the management face (users/api-keys/projects/backup/rotate-secret).
+// Command pf is the Polyforge vNext work-machine binary: the merged
+// deployment unit (00-architecture.md §3.2 / 07-deployment-pilot.md §3)
+// carrying BOTH faces in one file —
+//   - the 12 one-shot routing CLI verbs (file/queue/cancel/recall direct
+//     to the AIHub HTTP face; submit/observe/answer/batch-confirm/
+//     pause/resume/wrap/ops to the local daemon unix-socket face), the
+//     supporting WI faces (deps, budget) and the management face
+//     (users/api-keys/projects/backup/rotate-secret), dispatched by
+//     internal/cli.Run; and
+//   - the long-running `daemon` subcommand (daemon.go), the per-machine
+//     WI Job executor, dispatched below BEFORE the verb dispatcher.
 //
-// Design authority: docs/design/polyforge-vnext/00-architecture.md §5.1
-// (routing split), 02-aihub-core.md §5.1 (aihub endpoints),
-// 04-local-runtime.md §5.1 (daemon operations).
+// The binary name stays `pf` until the cutover rename ruling fires.
+//
+// Design authority: docs/design/polyforge-vnext/00-architecture.md §3.2
+// (deployment-unit merge), §5.1 (routing split), 02-aihub-core.md §5.1
+// (aihub endpoints), 04-local-runtime.md §5.1 (daemon operations).
 // Wire contract: api/openapi.yaml.
 package main
 
@@ -17,5 +25,17 @@ import (
 )
 
 func main() {
+	// `pf daemon` — the long-running subcommand. Intercepted before the
+	// CLI verb dispatcher because it is NOT a one-shot verb: it owns its
+	// flag set, its env handling and a process-exit error path (fatal →
+	// os.Exit(1)), and its success path never returns — a supervisor
+	// must not be flattened into the CLI verbs' exit-code surface
+	// (internal/cli.Run maps Run errors onto exit codes 0/1/2). Nothing
+	// was deployed in the field before the merge, so the subcommand is
+	// the only daemon entry — no deprecation stub for a standalone
+	// pf-daemon binary.
+	if len(os.Args) > 1 && os.Args[1] == "daemon" {
+		runDaemon(os.Args[2:]) // never returns
+	}
 	os.Exit(cli.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }

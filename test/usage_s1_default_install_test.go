@@ -1,12 +1,14 @@
 package test
 
 // usage_s1_default_install_test.go: S1 — default-install smoke with the
-// REAL three binaries. Everything an operator needs on a fresh machine:
+// REAL binaries. Everything an operator needs on a fresh machine:
 // first boot (bootstrap admin), CLI config at the DEFAULT path (no
 // --config flag), machine registration (the row-21 operator duty),
 // project + WI seeding, and the full submit -> observe -> wrap loop
-// through real processes. Also pins the three binaries' DEFAULT flag
-// values (the 8420 single-port ruling) from their own -h output.
+// through real processes. Also pins the binaries' DEFAULT flag values
+// (the 8420 single-port ruling) from their own -h output — the daemon's
+// via `pf daemon -h` (the subcommand surface of the merged work-machine
+// binary).
 
 import (
 	"os"
@@ -45,10 +47,12 @@ func TestUsageS1DefaultInstallSmoke(t *testing.T) {
 
 	// The default flag values: the daemon must point at port 8420 by
 	// default (the single-port A5 ruling the scratch install relies on).
-	// -h prints flag defaults from the real binary.
-	daemonHelp := runBinaryStderr(t, filepath.Join(inst.binDir, "pf-daemon"), "-h")
+	// -h prints flag defaults from the real binary — the daemon is the
+	// `pf daemon` subcommand of the merged work-machine binary now, so
+	// the probe goes through the subcommand surface.
+	daemonHelp := runBinaryStderr(t, inst.pfPath, "daemon", "-h")
 	if !strings.Contains(daemonHelp, `default "http://127.0.0.1:8420"`) {
-		t.Fatalf("pf-daemon default aihub-url must stay http://127.0.0.1:8420:\n%s", daemonHelp)
+		t.Fatalf("pf daemon default aihub-url must stay http://127.0.0.1:8420:\n%s", daemonHelp)
 	}
 	aihubHelp := runBinaryStderr(t, filepath.Join(inst.binDir, "aihub"), "-h")
 	if !strings.Contains(aihubHelp, `default ":8420"`) {

@@ -3,10 +3,12 @@ package test
 // usage_helpers_test.go: the REAL-BINARY dogfood harness (polyforge#17
 // real-usage simulation round). Unlike harness_test.go (which boots the
 // real components IN-PROCESS), these helpers exec the REAL BUILT
-// BINARIES — cmd/aihub, cmd/pf-daemon, cmd/pf — as actual operating-system
-// processes, exactly the way an operator runs them, plus test/fakepi as
-// the stand-in harness binary the daemon derives as the WI Agent
-// (--pi-bin override, the injectable boundary of 04 §6.1 step 9).
+// BINARIES — cmd/aihub and cmd/pf (the merged work-machine binary: one-shot
+// verbs plus the `daemon` subcommand, 00 §3.2 deployment-unit merge) — as
+// actual operating-system processes, exactly the way an operator runs
+// them, plus test/fakepi as the stand-in harness binary the daemon
+// derives as the WI Agent (--pi-bin override, the injectable boundary of
+// 04 §6.1 step 9).
 //
 // Hermetic: every test gets its own temp install (aihub data dir + daemon
 // home + socket + XDG config home), a free loopback port, and cleanups
@@ -38,7 +40,9 @@ var (
 	usageBinErr  error
 )
 
-// usageBins builds aihub, pf-daemon, pf and fakepi into a shared temp dir.
+// usageBins builds aihub, pf and fakepi into a shared temp dir (three
+// build targets: the work-machine binary is one file — the daemon runs
+// as the `pf daemon` subcommand, not a separate binary).
 func usageBins(t *testing.T) string {
 	t.Helper()
 	usageBinOnce.Do(func() {
@@ -49,7 +53,7 @@ func usageBins(t *testing.T) string {
 		}
 		// go test's cwd is the package dir (test/): build module targets.
 		cmd := exec.Command("go", "build", "-o", dir+"/",
-			"./cmd/aihub", "./cmd/pf-daemon", "./cmd/pf", "./test/fakepi")
+			"./cmd/aihub", "./cmd/pf", "./test/fakepi")
 		cmd.Dir = ".." // module root
 		cmd.Env = append(os.Environ(), "GOWORK=off")
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -251,7 +255,7 @@ func jsonUnmarshalStrict(s string, out any) error {
 }
 
 // ---------------------------------------------------------------------------
-// Real machine: one pf-daemon process (+ its WI Agents) over the install.
+// Real machine: one `pf daemon` process (+ its WI Agents) over the install.
 
 // usageMachine is one real daemon process with its own machine identity,
 // home, socket and api key.
@@ -302,8 +306,9 @@ func (u *usageInstall) newUsageMachine(t *testing.T, machineID string) *usageMac
 	return m
 }
 
-// start launches the REAL pf-daemon process. mode knobs (FAKEPI_MODE=ask)
-// are inherited by the WI Agent child (04 §6.1a env).
+// start launches the REAL daemon: the `pf daemon` subcommand of the
+// merged work-machine binary. mode knobs (FAKEPI_MODE=ask) are
+// inherited by the WI Agent child (04 §6.1a env).
 func (m *usageMachine) start(extraEnv ...string) {
 	m.t.Helper()
 	if m.cmd != nil {
@@ -313,7 +318,7 @@ func (m *usageMachine) start(extraEnv ...string) {
 	if err != nil {
 		m.t.Fatal(err)
 	}
-	cmd := exec.Command(filepath.Join(m.inst.binDir, "pf-daemon"),
+	cmd := exec.Command(filepath.Join(m.inst.binDir, "pf"), "daemon",
 		"--aihub-url", m.inst.url,
 		"--api-key-file", m.keyFile,
 		"--machine-id", m.id,
