@@ -36,6 +36,8 @@ const (
 	ErrCodeSpawnFail    = "DAEMON-503"
 	ErrCodePreflight    = "DAEMON-507"
 	ErrCodeFlushFail    = "DAEMON-511"
+	// DAEMON-512 (SHIP_PUSH_PREFLIGHT_FAILED, baseline amendment
+	// polyforge#37) is declared in ship.go, next to the op that owns it.
 )
 
 type apiError struct {
@@ -70,6 +72,10 @@ func httpStatusFor(code string) int {
 	case ErrCodeSpawnFail:
 		return http.StatusServiceUnavailable
 	case ErrCodePreflight, ErrCodeFlushFail:
+		return http.StatusInternalServerError
+	case ErrCodeShipPreflight:
+		// DAEMON-512 is a preflight failure like 507/511: the push was
+		// never initiated; the 5xx family carries it.
 		return http.StatusInternalServerError
 	}
 	return http.StatusInternalServerError
@@ -123,6 +129,7 @@ func NewAPIServer(d *Daemon, socketPath string) (*APIServer, error) {
 	mux.HandleFunc("POST /jobs/{id}/publish_request", s.hPublishRequest)
 	mux.HandleFunc("POST /jobs/{id}/pause", s.hPause)
 	mux.HandleFunc("POST /jobs/{id}/wrap", s.hWrap)
+	mux.HandleFunc("POST /jobs/{id}/ship", s.hShip)
 	mux.HandleFunc("GET /status", s.hStatus)
 	mux.HandleFunc("POST /mode", s.hMode)
 	mux.HandleFunc("POST /batch_submit", s.hBatchSubmit)
@@ -557,6 +564,30 @@ func (s *APIServer) hWrap(w http.ResponseWriter, r *http.Request) {
 	out, err := s.d.WrapJob(r.Context(), wi, body.Reason)
 	if err != nil {
 		writeSubmitErr(w, err)
+		return
+	}
+	writeJSONOK(w, out)
+}
+
+// hShip is the 00 §5.1 ship verb on the daemon face: the wrap→git
+// delivery bridge (04 §5.1 ship row, baseline amendment polyforge#37).
+// Body is empty (the wi id is the whole input; no token, no branch — the
+// branch is the fixed name polyforge/<wi-slug>). The op is synchronous:
+// the push and the PR layer complete before the answer. The initiator
+// identity rides X-PF-User with the same degraded-local-trust ruling as
+// pause/wrap (04 §5.1).
+func (s *APIServer) hShip(w http.ResponseWriter, r *http.Request) {
+	wi := r.PathValue("id")
+	var body struct{}
+	_ = decodeJSON(r, &body)
+	out, err := s.d.Ship(r.Context(), wi, r.Header.Get("X-PF-User"))
+	if err != nil {
+		var se *ShipError
+		if errors.As(err, &se) {
+			writeAPIErr(w, se.Code, se.Detail)
+			return
+		}
+		writeAPIErr(w, "DAEMON-500", err.Error())
 		return
 	}
 	writeJSONOK(w, out)

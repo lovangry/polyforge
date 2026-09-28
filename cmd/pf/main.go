@@ -1,9 +1,9 @@
 // Command pf is the Polyforge vNext work-machine binary: the merged
 // deployment unit (00-architecture.md §3.2 / 07-deployment-pilot.md §3)
 // carrying BOTH faces in one file —
-//   - the 12 one-shot routing CLI verbs (file/queue/cancel/recall direct
+//   - the 13 one-shot routing CLI verbs (file/queue/cancel/recall direct
 //     to the AIHub HTTP face; submit/observe/answer/batch-confirm/
-//     pause/resume/wrap/ops to the local daemon unix-socket face), the
+//     pause/resume/wrap/ship/ops to the local daemon unix-socket face), the
 //     supporting WI faces (deps, budget) and the management face
 //     (users/api-keys/projects/backup/rotate-secret), dispatched by
 //     internal/cli.Run; and

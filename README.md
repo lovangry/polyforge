@@ -9,12 +9,12 @@ Layout:
 | Path | What | Design authority |
 |---|---|---|
 | `cmd/aihub` | AIHub service (single-active, SQLite) | `docs/design/.../02-aihub-core.md` |
-| `cmd/pf` | Work-machine binary: client CLI (12 verbs + admin) **plus the long-running `daemon` subcommand** (per-machine WI Job executor) | `docs/design/.../00-architecture.md` §3.3/§5, `04-local-runtime.md` |
+| `cmd/pf` | Work-machine binary: client CLI (13 verbs + admin) **plus the long-running `daemon` subcommand** (per-machine WI Job executor) | `docs/design/.../00-architecture.md` §3.3/§5, `04-local-runtime.md` |
 | `internal/server` | AIHub HTTP surface (25 endpoints + M1–M5) | 02 |
 | `internal/domain` | Work items / generations / memory domain | 02 |
 | `internal/sync` | Boundary sync engine (freeze→staging→publish) | 05 |
 | `internal/runtime` | Daemon internals (jobq / observe / recovery) | 04 |
-| `skills/polyforge` | Routing skill (user harness, 12 verb fragments) | 01 |
+| `skills/polyforge` | Routing skill (user harness, 13 verb fragments) | 01 |
 | `skills/pf-execute` | WI Agent execution skill (Daemon-injected) | 01 |
 | `workflows/` | Workflow bundles (workflow.md + agents/*.md) | 01 |
 
@@ -46,6 +46,17 @@ Client-side wire notes (authorities: `api/openapi.yaml` for the AIHub face,
   registers both handlers (`POST /jobs/{id}/pause`, `POST /jobs/{id}/wrap`),
   and the dogfood runs exercise both — no spec gap remains here (the daemon
   generates the closing `flush_evidence`, 02 §6.4).
+- `pf ship` projects into the same family (`POST /jobs/{id}/ship`, the
+  13th verb — the wrap→git delivery bridge, baseline amendment
+  polyforge#37): it pushes the sealed capsule's per-repo worktree HEAD to
+  each inventory origin as the fixed-name branch `polyforge/<wi_id>`
+  (idempotent on same-sha, DAEMON-409 on a moved branch, never force;
+  main/master never pushed), reading the sealed capsule strictly
+  read-only, and layers a PR on top when the `gh` CLI is authenticated —
+  otherwise the answer carries a compare URL and still succeeds.
+  Typed refusals: `DAEMON-404` (no local capsule), `DAEMON-403` (reserved
+  branch target), `DAEMON-409` (moved branch), `DAEMON-512`
+  (SHIP_PUSH_PREFLIGHT_FAILED).
 
 ## Running the daemon (`pf daemon`)
 

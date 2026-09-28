@@ -37,6 +37,13 @@ import (
 //     {"reason":"wrap"|"fail"} (reason defaults to "wrap"; the
 //     daemon holds the generation token and signs the Core
 //     end-generation call itself, so no token ever travels)
+//     ship                   POST /jobs/{wi_id}/ship {} (wrap→git
+//     delivery bridge: pushes the sealed capsule commits to each
+//     inventory origin as branch polyforge/<wi_id>; body empty, the
+//     response carries per-repo outcomes with pr_url or compare_url;
+//     DAEMON-404 no local capsule, DAEMON-403 reserved main/master
+//     target, DAEMON-409 moved remote branch (never force-pushed),
+//     DAEMON-512 push preflight failed)
 //     shutdown               POST /shutdown
 //   - Error envelope: {"error":{"code":<DAEMON-*>,"detail":...}} — same
 //     outer shape as the aihub face but without a reason field.
@@ -224,6 +231,37 @@ func (d *DaemonClient) Pause(wiID string) ([]byte, error) {
 func (d *DaemonClient) Wrap(wiID, reason string) ([]byte, error) {
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/wrap", "",
 		map[string]any{"reason": reason}, nil)
+}
+
+// ShipResponse is the ship(wi_id) answer: the fixed-name branch plus one
+// outcome line per inventory repo of the sealed capsule.
+type ShipResponse struct {
+	WorkItemID string            `json:"work_item_id"`
+	Branch     string            `json:"branch"`
+	Initiator  string            `json:"initiator,omitempty"`
+	Repos      []ShipRepoOutcome `json:"repos"`
+}
+
+// ShipRepoOutcome is one repo's ship result (mirrors the daemon's
+// internal/daemon/ship.go ShipRepoOutcome).
+type ShipRepoOutcome struct {
+	Name       string `json:"name"`
+	OriginURL  string `json:"origin_url"`
+	Head       string `json:"head"`
+	Branch     string `json:"branch"`
+	Pushed     bool   `json:"pushed"`
+	Reused     bool   `json:"reused"`
+	PRURL      string `json:"pr_url,omitempty"`
+	CompareURL string `json:"compare_url,omitempty"`
+}
+
+// Ship asks the daemon to push a closed WI's sealed capsule commits to
+// each inventory repo's git origin as the fixed-name branch
+// polyforge/<wi_id>, with the PR layered on top when a credential exists
+// (compare-URL fallback otherwise — never an error). Route pinned by
+// internal/daemon/api.go (POST /jobs/{wi_id}/ship).
+func (d *DaemonClient) Ship(wiID string) ([]byte, error) {
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/ship", "", map[string]any{}, nil)
 }
 
 // PublishRequest is the internal WI-Agent-facing operation (04 §5.1);
