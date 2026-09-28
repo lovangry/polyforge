@@ -50,11 +50,18 @@
 // Knobs (environment, set by the spawning scenario):
 //
 //	FAKEPI_MODE  idle  – write a running execution.json, then wait (default)
-//	               ask  – same, then park the step on an open pending_question
+//	               ask   – same, then park the step on an open pending_question
+//	               drive – run the mechanical pf-execute main loop (drive.go):
+//	               a scripted executor over the real capsule write face and
+//	               the real daemon proxy, with fault knobs for the S12-S16
+//	               fault-injection scenarios
 //	FAKEPI_SPAWN_LOG – when set, append one "<pid> <session_id> <started_at>"
 //	               line per process start (spawn-count / session-reuse pins).
 //	FAKEPI_EXIT  – when non-empty, exit(0) immediately (a harness that
 //	               dies on startup; crash drills).
+//
+// Every other FAKEPI_* knob belongs to the drive mode and is documented
+// in drive.go.
 package main
 
 import (
@@ -76,6 +83,12 @@ const (
 	methodStopNotice = "pf/stop_notice"
 	methodAnswer     = "pf/answer"
 )
+
+// drv is the drive-mode executor state, nil in every other mode (the
+// control loop below branches on it: the drive mode's quiesce/resume
+// answer/stop_notice handling coordinates with the drive goroutine,
+// while the other modes keep their plain acknowledgments).
+var drv *driveEnv
 
 // execPath is the capsule-side execution state file (cwd is the capsule
 // dir; the daemon spawns with cmd.Dir = capsule dir).
@@ -101,6 +114,17 @@ func main() {
 			AskedAt:    nowStamp(),
 			Content:    "Which design should the code step take: A or B?",
 		})
+	case "drive":
+		// The mechanical executor double (drive.go): the capsule-side
+		// state is NOT staged here — the drive loop derives everything
+		// from runtime-state/execution.json through the real capsule
+		// write face, on its own goroutine, while this main goroutine
+		// keeps the RPC control loop responsive (a publish's pf/quiesce
+		// must stay ackable while a proxy call is in flight).
+		drv = newDriveEnv()
+		if drv != nil {
+			go runDriveLoop(drv)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "fakepi: unknown FAKEPI_MODE %q\n", mode)
 		os.Exit(1)
@@ -139,10 +163,36 @@ func main() {
 			ctl.Method = "" // free text, not a control line
 		}
 		switch ctl.Method {
-		case methodQuiesce, methodResume, methodStopNotice:
-			ackViaAssistantMessage(ctl.Method)
+		case methodQuiesce:
+			// Drive mode (SKILL §12): commit to no new sync-surface writes
+			// until pf/resume — the write-gate token is HELD while the
+			// window is open, and a quiesce that arrives while it is
+			// already open (the daemon's close path sends two, with no
+			// resume between) simply re-confirms. Every other mode holds no
+			// writers anyway.
+			if drv != nil {
+				drv.enterQuiesce()
+			}
+			ackViaAssistantMessage(methodQuiesce)
+		case methodResume:
+			if drv != nil {
+				drv.leaveResume()
+			}
+			ackViaAssistantMessage(methodResume)
+		case methodStopNotice:
+			if drv != nil {
+				drv.setStopAdvancing()
+			}
+			ackViaAssistantMessage(methodStopNotice)
 		case methodAnswer:
-			consumeAnswer([]byte(cmd.Message))
+			if drv != nil {
+				// Drive mode: the waiting step's consumption (archive +
+				// clear + grill-qa append) happens here, BEFORE the ack —
+				// the ack is the durability signal (00 §3.4a).
+				driveConsumeAnswer(drv, []byte(cmd.Message))
+			} else {
+				consumeAnswer([]byte(cmd.Message))
+			}
 			ackViaAssistantMessage(methodAnswer)
 		default:
 			// The initial pf-execute instruction: a plain assistant turn
