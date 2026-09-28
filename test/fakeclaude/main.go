@@ -42,7 +42,14 @@
 //     fields the supervisor reads);
 //   - conversation "storage" is one file per session UUID under
 //     FAKECLAUDE_STATE_DIR (the real CLI keeps sessions under
-//     CLAUDE_CONFIG_DIR keyed by cwd + id);
+//     CLAUDE_CONFIG_DIR keyed by cwd + id). The transcript-shaped
+//     <uuid>.jsonl written beside it models WHAT the daemon's
+//     seal-time terminal-state collection copies out of the real
+//     CLI's default session location (03 §4.4 / 04 §6.2 A step 2:
+//     read-only copy into harness/claude/session-data/); the flat
+//     one-file-per-uuid layout is the fake's own simplification — the
+//     daemon's search tolerates any subdirectory layout under the
+//     configured root (internal/daemon/sessioncollect.go);
 //   - the thinking-block key shape ({"type":"thinking",...}) was not
 //     captured verbatim from the real output; only its OBSERVABLE
 //     effect is reproduced (an assistant record with no text block);
@@ -348,7 +355,7 @@ func ackTurn(s *session, turn int, method string) {
 		`{"method":"` + method + `","result":{"ack":"` + method + `"}}` + "\nstanding by"
 	emitAssistant(s, []any{textBlock(text)})
 	emitResult(s, turn, text)
-	persistConversation(s.uuid)
+	persistConversation(s, turn)
 }
 
 // plainTurn answers a non-control user message (e.g. the kickoff) and
@@ -358,12 +365,16 @@ func plainTurn(s *session, turn int, text string) {
 	emitAssistant(s, []any{map[string]any{"type": "thinking", "thinking": "no control line here"}})
 	emitAssistant(s, []any{textBlock(reply)})
 	emitResult(s, turn, reply)
-	persistConversation(s.uuid)
+	persistConversation(s, turn)
 }
 
 // ---------------------------------------------------------------------------
 // Conversation persistence: a conversation exists (is resumable) only
-// after a turn completed in it (measured zero-turn rule).
+// after a turn completed in it (measured zero-turn rule). Beside the
+// resumability marker, every completed turn also appends to a
+// transcript-shaped <uuid>.jsonl — the session record the daemon's
+// terminal-state collection later copies out of this default session
+// location into the capsule (03 §4.4).
 
 func stateDir() string {
 	if d := os.Getenv("FAKECLAUDE_STATE_DIR"); d != "" {
@@ -376,15 +387,38 @@ func conversationPath(uuid string) string {
 	return filepath.Join(stateDir(), uuid+".json")
 }
 
+// transcriptPath is the <uuid>.jsonl session record at this harness's
+// default session location — the file the daemon's seal-time collection
+// looks for (named by the conversation UUID, exactly like the real CLI's
+// session JSONL).
+func transcriptPath(uuid string) string {
+	return filepath.Join(stateDir(), uuid+".jsonl")
+}
+
 func conversationExists(uuid string) bool {
 	_, err := os.Stat(conversationPath(uuid))
 	return err == nil
 }
 
-func persistConversation(uuid string) {
+func persistConversation(s *session, turn int) {
 	_ = os.MkdirAll(stateDir(), 0o755)
-	_ = os.WriteFile(conversationPath(uuid),
+	_ = os.WriteFile(conversationPath(s.uuid),
 		[]byte(`{"status":"turn_completed"}`), 0o644)
+	// Append one JSON record per completed turn: the transcript shape
+	// (JSONL, one record per line) the real CLI persists and the daemon
+	// collects read-only at end-generation.
+	rec, err := json.Marshal(map[string]any{
+		"type": "user", "session_id": s.uuid, "turn": turn,
+	})
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(transcriptPath(s.uuid), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s\n", rec)
 }
 
 // ---------------------------------------------------------------------------

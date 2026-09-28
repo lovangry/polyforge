@@ -36,6 +36,13 @@ const (
 	ErrCodeSpawnFail    = "DAEMON-503"
 	ErrCodePreflight    = "DAEMON-507"
 	ErrCodeFlushFail    = "DAEMON-511"
+	// ErrCodeSessionJSONL is DAEMON-513 SESSION_JSONL_MISSING (04 §5.2,
+	// baseline amendment polyforge#41): the claude adapter's seal-time
+	// terminal-state collection found no conversation JSONL at the
+	// harness default session location. Declared next to the other
+	// error codes; the sentinel error and the collection live in
+	// sessioncollect.go.
+	ErrCodeSessionJSONL = "DAEMON-513"
 	// DAEMON-512 (SHIP_PUSH_PREFLIGHT_FAILED, baseline amendment
 	// polyforge#37) is declared in ship.go, next to the op that owns it.
 )
@@ -72,6 +79,11 @@ func httpStatusFor(code string) int {
 	case ErrCodeSpawnFail:
 		return http.StatusServiceUnavailable
 	case ErrCodePreflight, ErrCodeFlushFail:
+		return http.StatusInternalServerError
+	case ErrCodeSessionJSONL:
+		// DAEMON-513 is a collection failure at the seal boundary, the
+		// same infrastructure class as 507/511: the close failed before the
+		// generation ended; the 5xx family carries it.
 		return http.StatusInternalServerError
 	case ErrCodeShipPreflight:
 		// DAEMON-512 is a preflight failure like 507/511: the push was
@@ -258,6 +270,12 @@ func writeSubmitErr(w http.ResponseWriter, err error) {
 		writeAPIErr(w, ErrCodePreflight, err.Error())
 	case errors.Is(err, ErrFlushFailed):
 		writeAPIErr(w, ErrCodeFlushFail, err.Error())
+	case errors.Is(err, ErrSessionJSONLMissing):
+		// DAEMON-513 (04 §5.2): the close failed at the claude
+		// terminal-state collection — typed, never silent, and the rest
+		// of the seal sequence is untouched (the generation was NOT ended
+		// server-side; a retry after restoring the source completes).
+		writeAPIErr(w, ErrCodeSessionJSONL, err.Error())
 	case errors.Is(err, ErrMaterialization):
 		// R3-F2: a step-0 materialization failure is the promised 503
 		// contract (04 §5.1: local resource unavailable on this machine),

@@ -91,7 +91,7 @@ func TestClaudeAdapterArgvMeasured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid := claudeSessionUUID("sess_wi_1_2")
+	sid := daemon.ClaudeSessionUUID("sess_wi_1_2")
 	want := []string{"/custom/claude",
 		"-p",
 		"--input-format", "stream-json",
@@ -141,9 +141,9 @@ func TestClaudeAdapterArgvMeasured(t *testing.T) {
 }
 
 func TestClaudeSessionUUIDShapeAndDeterminism(t *testing.T) {
-	u1 := claudeSessionUUID("sess_wi_9_1")
-	u2 := claudeSessionUUID("sess_wi_9_1")
-	u3 := claudeSessionUUID("sess_wi_9_2")
+	u1 := daemon.ClaudeSessionUUID("sess_wi_9_1")
+	u2 := daemon.ClaudeSessionUUID("sess_wi_9_1")
+	u3 := daemon.ClaudeSessionUUID("sess_wi_9_2")
 	if u1 != u2 {
 		t.Fatal("the UUID map must be deterministic: the same session id must always map to the same conversation UUID")
 	}
@@ -152,8 +152,8 @@ func TestClaudeSessionUUIDShapeAndDeterminism(t *testing.T) {
 	}
 	re := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	for _, id := range []string{"sess_wi_9_1", "sess_x", ""} {
-		if !re.MatchString(claudeSessionUUID(id)) {
-			t.Fatalf("claudeSessionUUID(%q) must be a valid RFC 4122 v5 UUID (the CLI validates the format)", id)
+		if !re.MatchString(daemon.ClaudeSessionUUID(id)) {
+			t.Fatalf("daemon.ClaudeSessionUUID(%q) must be a valid RFC 4122 v5 UUID (the CLI validates the format)", id)
 		}
 	}
 }
@@ -529,7 +529,7 @@ done
 		t.Fatalf("exactly two harness invocations expected, got %d: %q", len(lines), string(raw))
 	}
 	t.Logf("harness argv log: %q", lines)
-	uuid := claudeSessionUUID("sess_cr6")
+	uuid := daemon.ClaudeSessionUUID("sess_cr6")
 	if !contains(lines[0], "--session-id "+uuid) || contains(lines[0], "--resume") {
 		t.Fatalf("first derivation must pin a fresh --session-id %s: %q", uuid, lines[0])
 	}
@@ -618,7 +618,7 @@ func TestFakeClaudeEndToEnd(t *testing.T) {
 	if !contains(spawns[0], " fresh ") || contains(spawns[0], " resume ") {
 		t.Fatalf("first spawn must be fresh: %q", spawns[0])
 	}
-	if !contains(spawns[1], " resume ") || !contains(spawns[1], claudeSessionUUID("sess_fc_1")) {
+	if !contains(spawns[1], " resume ") || !contains(spawns[1], daemon.ClaudeSessionUUID("sess_fc_1")) {
 		t.Fatalf("second spawn must resume the pinned conversation UUID: %q", spawns[1])
 	}
 }
@@ -680,7 +680,7 @@ func TestFakeClaudeZeroTurnFallbackFreshDerivation(t *testing.T) {
 	if len(spawns) != 2 {
 		t.Fatalf("exactly two fakeclaude invocations expected (refused resume + fresh fallback), got %d: %q", len(spawns), string(raw))
 	}
-	uuid := claudeSessionUUID("sess_fc_zt")
+	uuid := daemon.ClaudeSessionUUID("sess_fc_zt")
 	if !contains(spawns[0], uuid+" resume ") {
 		t.Fatalf("the first derivation must --resume the pinned conversation UUID %s: %q", uuid, spawns[0])
 	}
@@ -753,7 +753,7 @@ func TestFakeClaudeContinuationAfterTurnStillResumes(t *testing.T) {
 	if len(spawns) != 2 {
 		t.Fatalf("two fakeclaude invocations expected, got %d: %q", len(spawns), string(raw))
 	}
-	uuid := claudeSessionUUID("sess_fc_rt")
+	uuid := daemon.ClaudeSessionUUID("sess_fc_rt")
 	if !contains(spawns[0], uuid+" fresh ") {
 		t.Fatalf("first spawn must be fresh: %q", spawns[0])
 	}

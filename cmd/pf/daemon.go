@@ -70,7 +70,16 @@ func runDaemon(args []string) {
 		adapter      = fs.String("adapter", "pi", "harness adapter: pi | claude")
 		piBin        = fs.String("pi-bin", "pi", "pi executable (tests/fakes override)")
 		claudeBin    = fs.String("claude-bin", "claude", "claude executable (tests/fakes override)")
-		version      = fs.String("version-flag", "vnext-dev", "runtime version stamp for heartbeats")
+		// The claude harness's DEFAULT session store root, resolved at the
+		// seal-time terminal-state collection (03 §4.4 / 04 §6.2 A step 2):
+		// the daemon copies the generation's conversation JSONL from here
+		// into the capsule. The exact subdirectory layout under the root
+		// is CLI-version specific and deliberately not pinned — the daemon
+		// searches the root for <conversation-uuid>.jsonl — so a CLI
+		// storage-layout change needs at most THIS flag change.
+		claudeSessionRoot = fs.String("claude-session-root", envOr("POLYFORGE_CLAUDE_SESSION_ROOT", ""),
+			"claude harness default session store root for seal-time transcript collection (empty: $CLAUDE_CONFIG_DIR, else ~/.claude)")
+		version = fs.String("version-flag", "vnext-dev", "runtime version stamp for heartbeats")
 	)
 	fs.Parse(args) // ExitOnError: malformed flag exits 2, -h exits 0
 
@@ -127,7 +136,10 @@ func runDaemon(args []string) {
 		SkillsDir:     *skillsDir,
 		DrainProject:  *project,
 		Adapter:       *adapter,
-		Version:       *version,
+		// Empty keeps the daemon's own default resolution (flag >
+		// CLAUDE_CONFIG_DIR > ~/.claude, sessioncollect.go).
+		ClaudeSessionStoreRoot: *claudeSessionRoot,
+		Version:                *version,
 	}
 
 	// The supervisor is handed the resolved api key ONCE (04 §8 env
