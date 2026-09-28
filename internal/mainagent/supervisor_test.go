@@ -10,7 +10,6 @@ package mainagent
 
 import (
 	"context"
-	"fmt"
 	"syscall"
 	"testing"
 	"time"
@@ -179,39 +178,19 @@ func TestPiAdapterArgv(t *testing.T) {
 		t.Fatal("pi session dir must be Capsule-local (cwd inside the capsule)")
 	}
 	m, err := a.InitialMessage(daemon.SpawnParams{InitialPrompt: "X"})
-	if err != nil || m.Type != "prompt" || m.Message != "X" || m.ID == "" {
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcmd, ok := m.(*piCommand)
+	if !ok || pcmd.Type != "prompt" || pcmd.Message != "X" || pcmd.ID == "" {
 		t.Fatalf("initial message must be a real prompt command: %+v %v", m, err)
 	}
 }
 
-func TestClaudeAdapterArgv(t *testing.T) {
-	a := &ClaudeAdapter{Bin: "/custom/claude"}
-	cmd, err := a.BuildCmd(daemon.SpawnParams{
-		CapsuleDir: "/caps", SessionID: "sess_c", InitialPrompt: "SYS",
-	}, "/caps/harness/claude/session-data")
-	if err != nil {
-		t.Fatal(err)
-	}
-	joined := fmt.Sprint(cmd.Args)
-	if !contains(joined, "-p") || !contains(joined, "--session-id") || !contains(joined, "--append-system-prompt") {
-		t.Fatalf("claude argv: %v", cmd.Args)
-	}
-	// Crash continuation: --resume <same session id>.
-	a.Resume = true
-	cmd2, _ := a.BuildCmd(daemon.SpawnParams{SessionID: "sess_c"}, "d")
-	if !contains(fmt.Sprint(cmd2.Args), "--resume") || !contains(fmt.Sprint(cmd2.Args), "sess_c") {
-		t.Fatalf("claude resume argv: %v", cmd2.Args)
-	}
-	// No first-prompt message: the system prompt carries pf-execute.
-	if m, _ := a.InitialMessage(daemon.SpawnParams{}); m != nil {
-		t.Fatal("claude injection is the system prompt, not a first prompt")
-	}
-	// The claude control frame is the raw control line (UNVERIFIED legacy
-	// path, unchanged by the pi-transport rework).
-	if got := a.FrameControl("pf-1", `{"jsonrpc":"2.0","method":"pf/quiesce"}`); got != `{"jsonrpc":"2.0","method":"pf/quiesce"}` {
-		t.Fatalf("claude FrameControl must return the raw line, got %v", got)
-	}
-}
+// TestClaudeAdapterArgv was superseded by the measured-protocol pins in
+// claudereal_test.go (polyforge#33): the argv, session-UUID mapping,
+// initial message and control framing are pinned there against the REAL
+// Claude Code CLI flags.
 
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 || func() bool {

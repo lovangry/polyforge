@@ -118,7 +118,7 @@ func (a *bigMsgAdapter) Name() string { return a.base.Name() }
 func (a *bigMsgAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error) {
 	return a.base.BuildCmd(p, sessionDir)
 }
-func (a *bigMsgAdapter) InitialMessage(p SpawnParams) (*piCommand, error) {
+func (a *bigMsgAdapter) InitialMessage(p SpawnParams) (any, error) {
 	return &piCommand{
 		ID: "pf-init", Type: "prompt", Message: strings.Repeat("x", 1<<20),
 	}, nil
@@ -151,7 +151,7 @@ func (a *errInitialAdapter) Name() string { return a.base.Name() }
 func (a *errInitialAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error) {
 	return a.base.BuildCmd(p, sessionDir)
 }
-func (a *errInitialAdapter) InitialMessage(p SpawnParams) (*piCommand, error) {
+func (a *errInitialAdapter) InitialMessage(p SpawnParams) (any, error) {
 	return nil, fmt.Errorf("boom: initial message build failed")
 }
 func (a *errInitialAdapter) FrameControl(id, line string) any { return a.base.FrameControl(id, line) }
