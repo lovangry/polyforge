@@ -39,12 +39,7 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, dir := testsupport.NewDB(t)
 	svc, err := service.Register(db, dir)
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +125,17 @@ func (e *env) do(t *testing.T, method, path, key string, body any) (int, map[str
 	var m map[string]any
 	_ = json.Unmarshal(raw, &m)
 	return resp.StatusCode, m, raw
+}
+
+// doWantStatus fires one request through do and asserts only its HTTP
+// status. For the status-only probes of the admin tests: the failure
+// diagnostic carries label/method/path — never the api key.
+func (e *env) doWantStatus(t *testing.T, label string, want int, method, path, key string, body any) {
+	t.Helper()
+	st, _, _ := e.do(t, method, path, key, body)
+	if st != want {
+		t.Fatalf("%s: %s %s: status %d, want %d", label, method, path, st, want)
+	}
 }
 
 func errCode(t *testing.T, m map[string]any) string {

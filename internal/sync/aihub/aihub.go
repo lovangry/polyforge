@@ -136,17 +136,12 @@ func (c *Client) do(method, path string, body any, token string, out any) error 
 		return err
 	}
 	if resp.StatusCode >= 400 {
-		var env struct {
-			Error struct {
-				Code   string `json:"code"`
-				Reason string `json:"reason"`
-				Detail string `json:"detail"`
-			} `json:"error"`
-		}
-		if jerr := json.Unmarshal(raw, &env); jerr == nil && env.Error.Code != "" {
-			return &APIError{Code: env.Error.Code, Reason: env.Error.Reason, Detail: env.Error.Detail, Status: resp.StatusCode}
-		}
-		return &APIError{Code: fmt.Sprintf("HTTP-%d", resp.StatusCode), Detail: string(raw), Status: resp.StatusCode}
+		// decodeErr (:377) is the common impl: typed envelope when the
+		// body decodes and carries a code, else the malformed-body
+		// fallback (HTTP-<status>, UNTRIMMED raw detail). Deliberately
+		// NOT shared with the CLI's error decoding — the two faces keep
+		// intentionally different decoders.
+		return decodeErr(raw, resp.StatusCode)
 	}
 	if out != nil {
 		if len(raw) == 0 {

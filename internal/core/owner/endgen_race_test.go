@@ -13,17 +13,12 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/silgrid/polyforge/internal/core/store"
+	"github.com/silgrid/polyforge/internal/core/testsupport"
 )
 
 func seedEndGenRace(t *testing.T) (*Manager, string) {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, _ := testsupport.NewDB(t)
 	m := NewManager(db, nil)
 	for _, q := range []string{
 		`INSERT INTO users(id, display_name, kind, role) VALUES ('usr_old', 'old owner', 'human', 'writer')`,

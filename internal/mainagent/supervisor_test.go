@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -207,6 +206,3 @@ func contains(s, sub string) bool {
 // Guard: the supervisor satisfies the daemon's spawner face at compile time.
 var _ daemon.AgentSpawner = (*Supervisor)(nil)
 var _ daemon.AgentHandle = (*Proc)(nil)
-
-// Silence unused warnings in constrained builds.
-var _ = exec.Command

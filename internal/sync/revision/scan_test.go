@@ -9,18 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/silgrid/polyforge/internal/testutil"
 )
 
 func writeCapsuleTree(t *testing.T, dir string, files map[string]string) {
 	t.Helper()
-	for rel, content := range files {
-		p := filepath.Join(dir, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if err := testutil.WriteFileTree(dir, files); err != nil {
+		t.Fatal(err)
 	}
 }
 

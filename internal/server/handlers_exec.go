@@ -14,19 +14,8 @@ import (
 // membership filtering (02 §8 两面分层): key scope still applies.
 
 func (s *Server) hClaim(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	idn, wiID, _, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	var req owner.ClaimRequest
@@ -41,19 +30,8 @@ func (s *Server) hClaim(w http.ResponseWriter, r *http.Request) {
 
 // hUnblock is row 10: blocked → running as a fresh claim (§2.5/§6.2).
 func (s *Server) hUnblock(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	idn, wiID, _, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	var status string
@@ -141,19 +119,8 @@ func (s *Server) hForceTakeover(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hEndGeneration(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	_, wiID, _, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	var req owner.EndGenerationRequest
@@ -161,24 +128,13 @@ func (s *Server) hEndGeneration(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	err = s.Owners.EndGeneration(wiID, req, r.Header.Get("X-PF-Generation-Token"))
+	err := s.Owners.EndGeneration(wiID, req, r.Header.Get("X-PF-Generation-Token"))
 	writeResult(w, err, func() { writeJSON(w, http.StatusOK, map[string]any{"ok": true}) })
 }
 
 func (s *Server) hBudgetIncrement(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	idn, wiID, projectID, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	// §6.7 authorization: reporter OR project maintainer OR admin; no token.
@@ -211,19 +167,8 @@ func (s *Server) hBudgetIncrement(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hGetBudget(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	_, wiID, _, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	// FA-4 (02 §5.1 tier 3): row 12 (budget read) belongs to the active
@@ -251,19 +196,8 @@ func (s *Server) hGetBudget(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hRepoInventory(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	projectID, aerr := s.wiProject(idn, wiID)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	if err := s.requireScope(idn, projectID); err != nil {
-		writeErr(w, err)
+	_, wiID, _, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	inv, err := s.WIs.Inventory(wiID)

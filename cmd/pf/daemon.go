@@ -7,9 +7,10 @@
 // is not a one-shot verb. Its flag set, env handling and config
 // precedence are its own, and its error path is a process exit (fatal →
 // os.Exit(1)) — a long-running supervisor must not be flattened into the
-// CLI verbs' exit-code surface. Its success path never returns either:
-// after the graceful-shutdown epilogue the process simply ends, and on
-// the DAEMON-511 flush-did-not-converge refusal it deliberately stays up
+// CLI verbs' exit-code surface. Its graceful-shutdown epilogue RETURNS:
+// cmd/pf/main.go returns immediately after runDaemon so the process ends
+// with the ZERO status a supervisor reads as a clean stop; only on the
+// DAEMON-511 flush-did-not-converge refusal does it deliberately stay up
 // forever awaiting human attention.
 //
 // Design authority: docs/design/polyforge-vnext/04-local-runtime.md (all),
@@ -29,15 +30,19 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/silgrid/polyforge/internal/daemon"
 	"github.com/silgrid/polyforge/internal/mainagent"
 )
 
-// runDaemon is the `pf daemon` subcommand body. It never returns: every
-// terminal path is a process exit (fatal, or the epilogue after the
-// graceful shutdown join), and the DAEMON-511 refusal blocks forever.
+// runDaemon is the `pf daemon` subcommand body. Fatal paths are process
+// exits (fatal → os.Exit(1)); the DAEMON-511 refusal blocks forever; and
+// the graceful-shutdown epilogue RETURNS — cmd/pf/main.go returns
+// immediately after this function, so the process ends with the zero
+// status (never a fall-through to the CLI verb dispatcher, which would
+// print `unknown command "daemon"` and exit 2).
 func runDaemon(args []string) {
 	// ExitOnError preserves the standalone-entry behavior this wiring
 	// had as cmd/pf-daemon: -h prints the flag defaults and exits 0, a
@@ -67,7 +72,19 @@ func runDaemon(args []string) {
 		claudeBin    = fs.String("claude-bin", "claude", "claude executable (tests/fakes override)")
 		version      = fs.String("version-flag", "vnext-dev", "runtime version stamp for heartbeats")
 	)
-	fs.Parse(args)
+	fs.Parse(args) // ExitOnError: malformed flag exits 2, -h exits 0
+
+	// A stray positional must be REJECTED, not ignored: Go's flag package
+	// stops parsing at the first non-flag argument, so `pf daemon stray
+	// --workspace-root X` would silently swallow every later flag and
+	// start on the DEFAULT workspace. Everything after a bare `--` lands
+	// in fs.Args() the same way. Refuse with the usage surface and exit
+	// 2 (the CLI's own exit code for a usage error).
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "pf daemon: unexpected argument(s): %v\n\n", fs.Args())
+		fs.Usage()
+		os.Exit(2)
+	}
 
 	// Workspace-root precedence, resolved AFTER flag parsing so --home is
 	// already final: an explicit --workspace-root wins, then the
@@ -205,15 +222,10 @@ func envOr(key, def string) string {
 }
 
 // trimNewlines strips leading/trailing CR/LF/space bytes (key files).
+// The cutset is exactly "\r\n " — NOT TrimSpace, which would also strip
+// tabs and every other whitespace byte a key must never silently lose.
 func trimNewlines(s string) string {
-	start, end := 0, len(s)
-	for start < end && (s[start] == '\n' || s[start] == '\r' || s[start] == ' ') {
-		start++
-	}
-	for end > start && (s[end-1] == '\n' || s[end-1] == '\r' || s[end-1] == ' ') {
-		end--
-	}
-	return s[start:end]
+	return strings.Trim(s, "\r\n ")
 }
 
 // resolveWorkspaceRoot applies the workspace-root precedence: explicit

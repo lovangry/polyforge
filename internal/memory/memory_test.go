@@ -16,16 +16,12 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/core/store"
+	"github.com/silgrid/polyforge/internal/core/testsupport"
 )
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, dir := testsupport.NewDB(t)
 	if _, err := db.Exec(`INSERT INTO projects(id, name) VALUES ('pj1','p1')`); err != nil {
 		t.Fatal(err)
 	}

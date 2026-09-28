@@ -16,7 +16,7 @@ import (
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/core/service"
-	"github.com/silgrid/polyforge/internal/core/store"
+	"github.com/silgrid/polyforge/internal/core/testsupport"
 )
 
 // seedClaimRace builds a manager backed by a REAL registered service
@@ -24,12 +24,7 @@ import (
 // service would panic) and one queued EXECUTION ticket.
 func seedClaimRace(t *testing.T) (*Manager, string) {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, dir := testsupport.NewDB(t)
 	svc, err := service.Register(db, dir)
 	if err != nil {
 		t.Fatal(err)

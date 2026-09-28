@@ -4,11 +4,10 @@
 package testsupport
 
 import (
-	"database/sql"
-	"os"
-	"path/filepath"
+	"testing"
 
 	"github.com/silgrid/polyforge/internal/core/store"
+	"github.com/silgrid/polyforge/internal/testutil"
 )
 
 // SeedBase creates the minimal identity/project fixture every core test uses.
@@ -54,28 +53,24 @@ func SeedBase(db *store.DB) error {
 // MakeDemoBundle writes a minimal valid workflow bundle (name "demo") under
 // wfDir/workflows/demo with one code step.
 func MakeDemoBundle(wfDir string) error {
-	return WriteFileTree(wfDir, map[string]string{
+	return testutil.WriteFileTree(wfDir, map[string]string{
 		"workflows/demo/workflow.md":    "---\nname: demo\nbudget: { requests: 100 }\nsteps:\n  - id: code\n    kind: code\n---\nbody\n",
 		"workflows/demo/agents/code.md": "---\nname: code\ndescription: c\ntools: bash\noutput: {type: object}\n---\n",
 	})
 }
 
-// WriteFileTree writes every rel→content pair under root (mkdir -p).
-func WriteFileTree(root string, files map[string]string) error {
-	for rel, content := range files {
-		p := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			return err
-		}
+// NewDB opens a migrated Core DB in a fresh temp dir for the test, closes
+// it on cleanup, and returns the handle plus its data dir. Opening is fatal
+// on error (a test that cannot open its store cannot test anything). It
+// seeds nothing: callers decide which users/services exist (fixtures that
+// intentionally omit them must keep omitting them).
+func NewDB(t testing.TB) (*store.DB, string) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("testsupport.NewDB: %v", err)
 	}
-	return nil
+	t.Cleanup(func() { db.Close() })
+	return db, dir
 }
-
-// OpenTestDB opens a migrated Core DB in a temp dir and registers the
-// service (lock file is not taken; service.Register only self-registers).
-func OpenTestDB(dir string) (*store.DB, error) { return store.Open(dir) }
-
-var _ = sql.Open

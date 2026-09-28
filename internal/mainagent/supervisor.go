@@ -478,9 +478,9 @@ func (p *Proc) Terminate(timeout time.Duration) error {
 	}
 	pgid := p.cmd.Process.Pid // Setpgid: the child IS the group leader
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	if !waitForGroupEmpty(pgid, timeout) {
+	if !daemon.WaitForGroupEmpty(pgid, timeout, "mainagent") {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		if !waitForGroupEmpty(pgid, 5*time.Second) {
+		if !daemon.WaitForGroupEmpty(pgid, 5*time.Second, "mainagent") {
 			return fmt.Errorf("mainagent: process group %d refused to die", pgid)
 		}
 	}
@@ -503,27 +503,6 @@ func (p *Proc) GroupEmpty() bool {
 		return false
 	}
 	return empty
-}
-
-// waitForGroupEmpty polls the group-emptiness check until it holds or the
-// bound elapses. An unverifiable group fails closed (false + loud log),
-// same as daemon.ProcessGroupEmpty's contract.
-func waitForGroupEmpty(pgid int, bound time.Duration) bool {
-	deadline := time.Now().Add(bound)
-	for {
-		empty, err := daemon.ProcessGroupEmpty(pgid)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "mainagent: process group %d emptiness unverifiable, failing closed: %v\n", pgid, err)
-			return false
-		}
-		if empty {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
 }
 
 // Exposed for the supervisor's respawn decisions.

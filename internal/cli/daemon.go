@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -171,15 +173,15 @@ func (d *DaemonClient) submit(wiID, intent, priority string) ([]byte, error) {
 	if priority == "" {
 		priority = "normal"
 	}
-	return d.do("POST", "/jobs/"+pathEscape(wiID)+"/"+intent, "",
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/"+intent, "",
 		map[string]any{"priority": priority}, nil)
 }
 
 // Observe pulls the layer-one incremental event stream after the given
 // cursor (first call: after=0).
 func (d *DaemonClient) Observe(wiID string, after int64) ([]byte, error) {
-	q := "after=" + itoa64(after)
-	return d.do("GET", "/jobs/"+pathEscape(wiID)+"/observe", q, nil, nil)
+	q := "after=" + strconv.FormatInt(after, 10)
+	return d.do("GET", "/jobs/"+url.PathEscape(wiID)+"/observe", q, nil, nil)
 }
 
 // Status returns the local jobs bookkeeping (status()).
@@ -192,7 +194,7 @@ func (d *DaemonClient) Status() ([]byte, error) {
 // identity travels in the X-PF-User header and must match answered_by
 // (00 §3.4a identity rule, DAEMON-403 otherwise).
 func (d *DaemonClient) Answer(wiID string, payload AnswerPayload) ([]byte, error) {
-	return d.do("POST", "/jobs/"+pathEscape(wiID)+"/answer", "", payload,
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/answer", "", payload,
 		map[string]string{"X-PF-User": payload.AnsweredBy})
 }
 
@@ -213,21 +215,21 @@ func (d *DaemonClient) BatchSubmit(wiIDs []string) ([]byte, error) {
 // (02 §6.4, 04 §6.2 A-path). Route pinned by internal/daemon/api.go
 // (POST /jobs/{wi_id}/pause; the route amendment landed it).
 func (d *DaemonClient) Pause(wiID string) ([]byte, error) {
-	return d.do("POST", "/jobs/"+pathEscape(wiID)+"/pause", "", map[string]any{}, nil)
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/pause", "", map[string]any{}, nil)
 }
 
 // Wrap asks the daemon to wrap (or fail, when reason=="fail") a running
 // WI — same final-flush requirement as pause (02 §6.4). Route pinned by
 // internal/daemon/api.go (POST /jobs/{wi_id}/wrap).
 func (d *DaemonClient) Wrap(wiID, reason string) ([]byte, error) {
-	return d.do("POST", "/jobs/"+pathEscape(wiID)+"/wrap", "",
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/wrap", "",
 		map[string]any{"reason": reason}, nil)
 }
 
 // PublishRequest is the internal WI-Agent-facing operation (04 §5.1);
 // exposed on the client for completeness; the CLI itself never drives it.
 func (d *DaemonClient) PublishRequest(wiID, reason string) ([]byte, error) {
-	return d.do("POST", "/jobs/"+pathEscape(wiID)+"/publish_request", "",
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/publish_request", "",
 		map[string]any{"reason": reason}, nil)
 }
 

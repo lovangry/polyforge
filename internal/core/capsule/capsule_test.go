@@ -33,12 +33,7 @@ type h struct {
 
 func setup(t *testing.T) *h {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, dir := testsupport.NewDB(t)
 	svc, err := service.Register(db, dir)
 	if err != nil {
 		t.Fatal(err)

@@ -376,7 +376,6 @@ func run(path string) error {
 
 	// 5. $ref resolution: every local ref must point at an existing
 	//    component node.
-	errs := 0
 	var walk func(node any)
 	walk = func(node any) {
 		switch t := node.(type) {
@@ -398,7 +397,6 @@ func run(path string) error {
 		}
 	}
 	walk(doc)
-	_ = errs
 
 	// 6. Error-code status map: every typed code of 02 §5.3 / 05 §5.2 /
 	//    06 §5.4 must be mapped (the map mirrors errStatus in

@@ -150,7 +150,7 @@ vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontm
 9. `review`（`kind: review`，`gate: true`；`on_fail: {action: rewind, target: code}`）
 10. `release`（发版钩子槽位：`kind: code` 缺省或 `gate` 按项目自选，`gate: true` 建议；`on_fail` 按项目自定，缺省 `{action: rewind, target: review}`）
 
-**release step（发版钩子，定稿裁定）**：release 是 bundle 内的一个普通 step 槽位——平台零发版专用代码，全部复用既有 step 机器（inputs/output schema/worktree/预算/rewind/边界同步）。不新增 step kind：沿用 `code`（缺省，产生版本号 commit/tag 的 diff）或 `gate`（纯验证型发版），按项目自选；失败语义建议 `gate: true`——发版失败属业务判定，走既有有界 `on_fail` rewind。`agents/release.md` 是随参考 bundle 交付的模板骨架（版本号来源/构建/打 tag/上传目标/渠道晋升，全为 TODO 占位），各项目在各自 bundle 中自填——发版逻辑 per-project，多项目天然隔离。平台自身的发版（aihub 服务 / pf-daemon / pf 三产物）是同一钩子的一个实例，不另立发版模型；`pf upgrade` 只是消费已发布制品的部署管道（`07-deployment-pilot.md#§6`）。
+**release step（发版钩子，定稿裁定）**：release 是 bundle 内的一个普通 step 槽位——平台零发版专用代码，全部复用既有 step 机器（inputs/output schema/worktree/预算/rewind/边界同步）。不新增 step kind：沿用 `code`（缺省，产生版本号 commit/tag 的 diff）或 `gate`（纯验证型发版），按项目自选；失败语义建议 `gate: true`——发版失败属业务判定，走既有有界 `on_fail` rewind。`agents/release.md` 是随参考 bundle 交付的模板骨架（版本号来源/构建/打 tag/上传目标/渠道晋升，全为 TODO 占位），各项目在各自 bundle 中自填——发版逻辑 per-project，多项目天然隔离。平台自身的发版（`aihub` 服务二进制与工作机二进制二产物）是同一钩子的一个实例，不另立发版模型；`pf upgrade` 只是消费已发布制品的部署管道（`07-deployment-pilot.md#§6`）。
 
 流程级 `rewind` 声明：`max_total: 4`，`max_per_step: 2`。
 

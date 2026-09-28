@@ -56,6 +56,9 @@ func TestUsageS9ModeOpsAndShutdown(t *testing.T) {
 		t.Fatalf("ops shutdown must confirm, got:\n%s", out)
 	}
 	waitUntilUse(t, "the daemon process to exit", func() bool { return daemonExitedUsage(m.cmd) })
+	// B-1/RH-1 pin: the ops-face shutdown path must end the process with
+	// exit 0, not fall through to the CLI dispatcher (exit 2).
+	daemonAssertExit0Usage(t, m.cmd)
 	waitUntilUse(t, "the remaining job to close as paused", func() bool { return inst.wiStatus(t, wi) == "paused" })
 	if !strings.Contains(m.daemonLog(), "shutdown sequence starting") {
 		t.Fatalf("the daemon log must show the graceful sequence:\n%s", m.daemonLog())
@@ -77,5 +80,8 @@ func TestUsageS9ShutdownWithDeadAgent(t *testing.T) {
 	// is provably empty, so the final flush runs and the pause lands.
 	m.pfOn("ops", "shutdown")
 	waitUntilUse(t, "the daemon process to exit", func() bool { return daemonExitedUsage(m.cmd) })
+	// B-1/RH-1 pin: the dead-writers-shortcut shutdown path must also end
+	// the process with exit 0.
+	daemonAssertExit0Usage(t, m.cmd)
 	waitUntilUse(t, "the job to close as paused", func() bool { return inst.wiStatus(t, wi) == "paused" })
 }

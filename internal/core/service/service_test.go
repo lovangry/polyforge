@@ -13,17 +13,12 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/core/service"
-	"github.com/silgrid/polyforge/internal/core/store"
+	"github.com/silgrid/polyforge/internal/core/testsupport"
 )
 
 func newSvc(t *testing.T) *service.Service {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, dir := testsupport.NewDB(t)
 	svc, err := service.Register(db, dir)
 	if err != nil {
 		t.Fatal(err)
@@ -171,12 +166,7 @@ func TestShareKeyDiffersAcrossEpochsAndIsSecretDerived(t *testing.T) {
 // forever and CheckToken kept accepting its tokens beyond any grace.
 func newSvcDir(t *testing.T) (*service.Service, string) {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, dir := testsupport.NewDB(t)
 	svc, err := service.Register(db, dir)
 	if err != nil {
 		t.Fatal(err)

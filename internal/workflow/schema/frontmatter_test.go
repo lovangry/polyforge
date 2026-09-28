@@ -5,19 +5,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/silgrid/polyforge/internal/testutil"
 )
 
 func writeBundle(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
-	for rel, content := range files {
-		p := filepath.Join(dir, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if err := testutil.WriteFileTree(dir, files); err != nil {
+		t.Fatal(err)
 	}
 	return dir
 }

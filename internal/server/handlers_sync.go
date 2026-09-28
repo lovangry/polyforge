@@ -14,17 +14,8 @@ import (
 // admin-triggered deletion protection.
 
 func (s *Server) hPutBlock(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
-		writeErr(w, aerr)
-		return
-	} else if serr := s.requireScope(idn, projectID); serr != nil {
-		writeErr(w, serr)
+	_, wiID, _, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	shaHex := r.PathValue("sha")
@@ -41,17 +32,8 @@ func (s *Server) hPutBlock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hPostManifest(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
-		writeErr(w, aerr)
-		return
-	} else if serr := s.requireScope(idn, projectID); serr != nil {
-		writeErr(w, serr)
+	_, wiID, _, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	pathSeqV, err := pathSeq(r)
@@ -76,17 +58,8 @@ func (s *Server) hPostManifest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hHead(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
-		writeErr(w, aerr)
-		return
-	} else if serr := s.requireScope(idn, projectID); serr != nil {
-		writeErr(w, serr)
+	_, wiID, _, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	h, err := s.Caps.Head(wiID)
@@ -99,17 +72,8 @@ func (s *Server) hHead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hGetBlock(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
-		writeErr(w, aerr)
-		return
-	} else if serr := s.requireScope(idn, projectID); serr != nil {
-		writeErr(w, serr)
+	_, wiID, _, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	b, err := s.Caps.GetBlock(wiID, r.PathValue("sha"))
@@ -121,17 +85,8 @@ func (s *Server) hGetBlock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hRevisionsSince(w http.ResponseWriter, r *http.Request) {
-	idn, err := s.authenticate(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	wiID := r.PathValue("id")
-	if projectID, aerr := s.wiProject(idn, wiID); aerr != nil {
-		writeErr(w, aerr)
-		return
-	} else if serr := s.requireScope(idn, projectID); serr != nil {
-		writeErr(w, serr)
+	_, wiID, _, ok := s.authenticatedWI(w, r)
+	if !ok {
 		return
 	}
 	since, err := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)

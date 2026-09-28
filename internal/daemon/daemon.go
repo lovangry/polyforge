@@ -26,7 +26,6 @@ import (
 	"github.com/silgrid/polyforge/internal/sync/freeze"
 	"github.com/silgrid/polyforge/internal/sync/publish"
 	"github.com/silgrid/polyforge/internal/sync/recover"
-	"github.com/silgrid/polyforge/internal/sync/revision"
 	"github.com/silgrid/polyforge/internal/sync/watcher"
 )
 
@@ -191,7 +190,7 @@ func New(cfg Config, spawner AgentSpawner) (*Daemon, error) {
 		modes:        NewModeCtl(),
 		ledger:       NewAnswerLedger(),
 		beats:        NewBeatTracker(),
-		pub:          publish.New(&remoteAdapter{c: client}, mutex, stager, pubStore),
+		pub:          publish.New(&aihub.RemoteAdapter{Client: client}, mutex, stager, pubStore),
 		spawner:      spawner,
 		jobs:         map[string]*jobRuntime{},
 		closing:      map[string]bool{},
@@ -201,45 +200,12 @@ func New(cfg Config, spawner AgentSpawner) (*Daemon, error) {
 	return d, nil
 }
 
-// remoteAdapter bridges aihub.Client to the publish.Remote face.
-type remoteAdapter struct{ c *aihub.Client }
-
-func (r *remoteAdapter) PutBlock(ctx context.Context, wi string, seq int64, sha string, block []byte, token string) error {
-	return r.c.PutBlock(wi, seq, sha, block, token)
-}
-func (r *remoteAdapter) PostManifest(ctx context.Context, wi string, m revision.Manifest, sha, token string) (int64, error) {
-	return r.c.PostManifest(wi, m, sha, token)
-}
-func (r *remoteAdapter) GetHead(ctx context.Context, wi string) (*revision.HeadInfo, bool, error) {
-	return r.c.GetHead(wi)
-}
-
-// recoverRemote adapts the client to the recover.Remote face: manifest
-// content now travels over the real Core face (row 19 revisions list with
-// include=ops, wired in polyforge#14).
-type recoverRemote struct{ c *aihub.Client }
-
-func (r *recoverRemote) GetHead(ctx context.Context, wi string) (*revision.HeadInfo, bool, error) {
-	return r.c.GetHead(wi)
-}
-func (r *recoverRemote) ListRevisions(ctx context.Context, wi string, since int64) ([]revision.RevisionMeta, error) {
-	return r.c.ListRevisions(wi, since)
-}
-func (r *recoverRemote) GetManifest(ctx context.Context, wi string, seq int64) (revision.Manifest, error) {
-	return r.c.GetManifest(wi, seq)
-}
-func (r *recoverRemote) GetBlock(ctx context.Context, wi, sha string) ([]byte, error) {
-	return r.c.GetBlock(wi, sha)
-}
-
 // ---------------------------------------------------------------------------
 // Preflight (04 §6.1 step 1): refuse BEFORE any server call — never a
 // "claimed but no local site" state.
 
 // ErrPreflight is the DAEMON-507 shape.
 var ErrPreflight = errors.New("daemon: local preflight failed (DAEMON-507)")
-
-type preflightFunc func() error
 
 // Preflight checks workspace/data/capsule writability and Core reachability.
 func (d *Daemon) Preflight(ctx context.Context) error {
@@ -504,9 +470,10 @@ func (d *Daemon) spawnJob(ctx context.Context, e QEntry) error {
 		return err
 	}
 	// Remote site reconstruction when a HEAD exists (05 §7.4): full
-	// replacement; seeds the publish state.
-	recRemote := &recoverRemote{c: d.client}
-	recRes, err := recover.Recover(ctx, capc, recRemote)
+	// replacement; seeds the publish state. The transport is the shared
+	// aihub.RemoteAdapter (manifest content travels over the real Core
+	// face, the row-19 revisions list with include=ops, polyforge#14).
+	recRes, err := recover.Recover(ctx, capc, &aihub.RemoteAdapter{Client: d.client})
 	if err != nil {
 		return err
 	}

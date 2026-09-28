@@ -244,8 +244,7 @@ vNext AIHub 为单仓（monorepo）形态（D0 裁定）：一个 git tag 即一
 aihub/
 ├── cmd/
 │   ├── aihub/            # AIHub Service 入口
-│   ├── pf-daemon/        # Daemon 守护进程入口
-│   └── pf/               # CLI（用户与 CI 面）
+│   └── pf/               # CLI（用户与 CI 面）+ `daemon` 子命令——单文件工作机二进制（部署单元合并裁定 `07-deployment-pilot.md#§3`）
 ├── internal/
 │   ├── core/             # Core 领域模型 + SQLite 存取（02）
 │   ├── workflow/         # workflow.md frontmatter 校验、bundle digest、驱动语义（01）

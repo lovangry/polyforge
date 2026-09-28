@@ -432,18 +432,13 @@ func (st *State) FindPending(wi, idemKey string) *PendingJob {
 
 // AppendPending appends a pending_jobs[] entry and persists. Like
 // UpdatePending it keeps the one-row-per-WI invariant (R3N-F7): an
-// existing row for the same WI is superseded, never duplicated.
+// existing row for the same WI is superseded, never duplicated. The two
+// entry points are behaviorally IDENTICAL (the historical append was
+// folded into UpdatePending's supersede semantics); this one stays as
+// an alias for its callers and delegates WITHOUT taking the mutex
+// first — UpdatePending holds it.
 func (s *StateStore) AppendPending(st *State, p PendingJob) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range st.PendingJobs {
-		if st.PendingJobs[i].WorkItemID == p.WorkItemID {
-			st.PendingJobs[i] = p
-			return s.saveLocked(st)
-		}
-	}
-	st.PendingJobs = append(st.PendingJobs, p)
-	return s.saveLocked(st)
+	return s.UpdatePending(st, p)
 }
 
 // UpdatePending replaces the pending entry for a WI and persists.

@@ -9,7 +9,7 @@ Layout:
 | Path | What | Design authority |
 |---|---|---|
 | `cmd/aihub` | AIHub service (single-active, SQLite) | `docs/design/.../02-aihub-core.md` |
-| `cmd/pf` | Work-machine binary: client CLI (12 verbs + admin) **plus the long-running `daemon` subcommand** (per-machine WI Job executor) | `docs/design/.../00-architecture.md` §3.2/§5, `04-local-runtime.md` |
+| `cmd/pf` | Work-machine binary: client CLI (12 verbs + admin) **plus the long-running `daemon` subcommand** (per-machine WI Job executor) | `docs/design/.../00-architecture.md` §3.3/§5, `04-local-runtime.md` |
 | `internal/server` | AIHub HTTP surface (25 endpoints + M1–M5) | 02 |
 | `internal/domain` | Work items / generations / memory domain | 02 |
 | `internal/sync` | Boundary sync engine (freeze→staging→publish) | 05 |
@@ -27,7 +27,7 @@ tests, adapter argv tables) land here per the design's handoff note.
 The client CLI lives in `cmd/pf` + `internal/cli`. **Naming ruling:** the end state is
 **one user-facing binary** that carries every CLI verb plus the long-running
 **`daemon` subcommand** (work-machine binary, deployment-unit merge ruling —
-00 §3.2 / 07 §3; one-shot verbs + `daemon` long-running in a single file). The
+00 §3.3 / 07 §3; one-shot verbs + `daemon` long-running in a single file). The
 v1 binary name is **`pf`** (short, typed dozens of times a day by both humans
 and routing-skill prompts). At **legacy retirement** the binary cuts over
 to the full name **`polyforge`**, leaving a **`pf` symlink** behind so every
@@ -50,7 +50,7 @@ Client-side wire notes (authorities: `api/openapi.yaml` for the AIHub face,
 ## Running the daemon (`pf daemon`)
 
 The daemon is the `daemon` subcommand of the same `pf` binary — the merged
-work-machine deployment unit (00 §3.2 / 07 §3: **two** build outputs,
+work-machine deployment unit (00 §3.3 / 07 §3: **two** build outputs,
 `aihub` + this one). It is not a one-shot verb: it has its own flag set and
 a process-exit error path, so the subcommand word comes first:
 

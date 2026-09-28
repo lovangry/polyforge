@@ -587,17 +587,52 @@ func killAgentUsage(t *testing.T, pid int) {
 	}
 }
 
+// daemonExitedStatus holds each reaped daemon child's ACTUAL process
+// exit status, keyed by the *exec.Cmd: the Wait4 probe below REAPS the
+// child on the observing call, so the status must be captured at that
+// moment — it cannot be read afterwards (a later Wait would only ECHILD).
+var daemonExitedStatus = map[*exec.Cmd]int{}
+
 // daemonExitedUsage reports whether the daemon child has exited (a
 // zombie counts as exited — the test process has not reaped it yet; the
-// kill/kill-0 probe cannot tell the two apart).
+// kill/kill-0 probe cannot tell the two apart). Once exit is observed
+// the child is reaped and its ACTUAL exit status is recorded in
+// daemonExitedStatus: callers must assert it (daemonAssertExit0Usage)
+// instead of treating "exited" as enough — the process-level exit-0
+// guarantee of the shutdown paths is exactly what a supervisor
+// (systemd Restart=on-failure) reads.
 func daemonExitedUsage(cmd *exec.Cmd) bool {
 	if cmd == nil || cmd.Process == nil {
 		return true
+	}
+	if _, reaped := daemonExitedStatus[cmd]; reaped {
+		return true // already observed and reaped: keep answering exited
 	}
 	var ws syscall.WaitStatus
 	pid, err := syscall.Wait4(cmd.Process.Pid, &ws, syscall.WNOHANG, nil)
 	if err != nil {
 		return false // ECHILD etc.: treat as still running (probe below)
 	}
-	return pid == cmd.Process.Pid
+	if pid == cmd.Process.Pid {
+		daemonExitedStatus[cmd] = ws.ExitStatus() // <0 on signal death
+		return true
+	}
+	return false
+}
+
+// daemonAssertExit0Usage asserts the reaped daemon child's ACTUAL exit
+// status is 0 — the exit-0 guarantee of BOTH graceful shutdown paths
+// (signal-driven and ops-face). Before the RH-1 fix main fell through
+// to the CLI verb dispatcher after runDaemon returned, printing
+// `unknown command "daemon"` and exiting 2; a signal death records a
+// negative status. Either way this assertion fails, so that regression
+// can never pass again.
+func daemonAssertExit0Usage(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	if !daemonExitedUsage(cmd) {
+		t.Fatal("daemon child has not exited yet")
+	}
+	if code := daemonExitedStatus[cmd]; code != 0 {
+		t.Fatalf("daemon process exit status = %d, want 0 (graceful shutdown exit-0 guarantee; <0 = signal death)", code)
+	}
 }

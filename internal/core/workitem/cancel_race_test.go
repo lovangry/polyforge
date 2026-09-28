@@ -12,18 +12,12 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/silgrid/polyforge/internal/core/store"
 	"github.com/silgrid/polyforge/internal/core/testsupport"
 )
 
 func seedCancelRace(t *testing.T) *Manager {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, dir := testsupport.NewDB(t)
 	if err := testsupport.SeedBase(db); err != nil {
 		t.Fatal(err)
 	}
