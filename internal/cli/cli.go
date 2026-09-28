@@ -62,6 +62,10 @@ var commands = []*Command{
 	// One-time migration verb (06 §10.1): admin, operates on the data
 	// dir + the live server during the deployment's silent window.
 	cmdMigrateMemories,
+	// Install-face candidate liveness probe (07 §6.1 step 6): operator
+	// tool, no server or daemon involved — runs against the local
+	// workflows checkout and the harness adapter's model call path.
+	cmdProbeCandidates,
 }
 
 // Run executes the CLI with argv (without the program name) and returns

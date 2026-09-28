@@ -58,6 +58,13 @@ type Result struct {
 	Noop            bool
 	HeadSeq         int64
 	HeadManifestSha string
+	// SchemaMismatches is the publish-time output-contract signal
+	// (03 §5.1a): the per-step violations found by validating each done
+	// step's staged output against its pinned schema. SIGNAL, NOT VETO:
+	// HEAD advanced regardless; the list rides the publish_request
+	// response for the WI Agent to consume per 01 §6.3. Empty when
+	// nothing was checkable or everything conformed.
+	SchemaMismatches []SchemaMismatch
 }
 
 // ---------------------------------------------------------------------------
@@ -377,17 +384,28 @@ func (p *Publisher) commitScan(ctx context.Context, wi, capsuleDir string, gener
 	if _, err := p.Stager.Stage(wi, seq, entries); err != nil {
 		return nil, err
 	}
-
 	// 05 §2.7 release, the design-pinned point: the staging pin is
-	// complete, so the write freeze window ENDS HERE — "Daemon 立即释放
-	// write freeze（通知 WI Agent 恢复写入）……不等待块上传、manifest 提交或
-	// HEAD 推进完成". The pending record below and all network I/O happen
-	// OUTSIDE the window, still under the publish mutex. The notify is
-	// best-effort: the bytes are already pinned, so a failed notify cannot
-	// corrupt this publish — it only delays the agent's own writes, which
-	// the next trigger's quiesce round re-establishes (the design pins no
-	// failure semantics for the release notification).
+	// complete, so the write freeze window ENDS HERE — the Daemon releases
+	// the write freeze immediately (notifying the WI Agent that it may
+	// resume writes) and does NOT wait for the block upload, manifest
+	// submit or HEAD advance. The pending record below and all network
+	// I/O happen OUTSIDE the window, still under the publish mutex. The
+	// notify is best-effort: the bytes are already pinned, so a failed
+	// notify cannot corrupt this publish — it only delays the agent's own
+	// writes, which the next trigger's quiesce round re-establishes (the
+	// design pins no failure semantics for the release notification).
 	guard.release()
+
+	// 03 §5.1a: the publish-time output-schema check rides the
+	// staging→manifest window — the bytes are pinned into immutable
+	// staging, HEAD has not moved yet. The check reads ONLY staged bytes
+	// (INV-6) and its outcome is a SIGNAL, never a veto: the flow
+	// proceeds to upload/manifest/HEAD regardless, and an internal
+	// failure of the check itself is logged, not escalated.
+	mismatches, cerr := p.checkStagedOutputs(wi, capsuleDir, seq, manifest.Ops)
+	if cerr != nil {
+		fmt.Fprintf(os.Stderr, "pf-daemon: output-schema check for %s failed (non-fatal, signal suppressed): %v\n", wi, cerr)
+	}
 
 	// SYNC-INV-8: the pending record exists BEFORE the first block PUT.
 	rec := &PendingRecord{
@@ -399,7 +417,42 @@ func (p *Publisher) commitScan(ctx context.Context, wi, capsuleDir string, gener
 	if err := p.Store.SavePending(rec); err != nil {
 		return nil, err
 	}
-	return p.uploadAndSubmit(ctx, wi, rec)
+	res, err := p.uploadAndSubmit(ctx, wi, rec)
+	if err != nil {
+		return nil, err
+	}
+	if res != nil {
+		res.SchemaMismatches = mismatches
+	}
+	return res, nil
+}
+
+// checkStagedOutputs runs one 03 §5.1a check over this flow's staged
+// bytes. The capsule's materialized snapshot (03 §4.5) supplies the
+// pinned per-step schemas; the outputs come from staging only. A capsule
+// without a materialized agents snapshot has nothing pinned to validate
+// against — the check is skipped (empty signal), never fatal.
+func (p *Publisher) checkStagedOutputs(wi, capsuleDir string, seq int64, ops []revision.Op) ([]SchemaMismatch, error) {
+	agentsDir := ""
+	for _, cand := range []string{
+		filepath.Join(capsuleDir, ".pi", "agents"),
+		filepath.Join(capsuleDir, ".claude", "agents"),
+	} {
+		if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
+			agentsDir = cand
+			break
+		}
+	}
+	if agentsDir == "" {
+		return nil, nil
+	}
+	check, err := NewOutputCheck(agentsDir, func(sha string) ([]byte, error) {
+		return p.Stager.Block(wi, seq, sha)
+	})
+	if err != nil {
+		return nil, err // INV-6 guard tripped: refuse loudly, still not a veto
+	}
+	return check.Check(ops)
 }
 
 // ErrTransportUnresolved marks a publish whose transport failure survived

@@ -603,6 +603,13 @@ type PublishOutcome struct {
 	HeadSeq       int64                `json:"head_seq"`
 	ManifestSha   string               `json:"manifest_sha"`
 	FlushEvidence *aihub.FlushEvidence `json:"flush_evidence,omitempty"`
+	// SchemaMismatches is the 03 §5.1a publish-time output-contract
+	// signal: per-done-step violations found while validating the STAGED
+	// bytes against each step's pinned output schema. SIGNAL, NOT VETO:
+	// HEAD (head_seq) advanced regardless; the WI Agent consumes this
+	// list per 01-workflow-skills.md §6.3 (falsified-done: done→in_progress
+	// + infra_failure attempt archive + bounded candidate advance).
+	SchemaMismatches []publish.SchemaMismatch `json:"schema_mismatches,omitempty"`
 }
 
 var endReasons = map[string]bool{"pause": true, "block": true, "wrap": true, "fail": true}
@@ -620,13 +627,17 @@ func (d *Daemon) PublishRequest(ctx context.Context, wi, reason string) (*Publis
 	cond := d.freezeConditions(jr, reason == "milestone")
 	if endReasons[reason] {
 		// Final flush (05 §6.1): ALWAYS an actual frozen scan; the session
-		// transcript archive rides the last revision.
+		// transcript archive rides the last revision. The 03 §5.1a signal
+		// of the real publish branch (if one runs) is captured through the
+		// request hook and surfaced on this response — signal, not veto.
+		var signal []publish.SchemaMismatch
 		fe, err := d.pub.FinalFlush(ctx, publish.FlushRequest{
 			WorkItemID: wi, CapsuleDir: jr.cap.Dir, Generation: d.jobGeneration(wi),
 			Token: jr.token, Archive: func() error {
 				_, aerr := jr.cap.ArchiveTranscript(jr.adapter, d.jobGeneration(wi))
 				return aerr
 			},
+			Signal:     func(ms []publish.SchemaMismatch) { signal = ms },
 			Conditions: cond,
 		})
 		if err != nil {
@@ -638,6 +649,7 @@ func (d *Daemon) PublishRequest(ctx context.Context, wi, reason string) (*Publis
 		jr.ring.Append(EvPublished, map[string]any{"reason": reason, "final": true})
 		return &PublishOutcome{
 			Published: true, HeadSeq: fe.PublishedSeq, ManifestSha: fe.ManifestSha, FlushEvidence: fe,
+			SchemaMismatches: signal,
 		}, nil
 	}
 	res, err := d.pub.Publish(ctx, publish.Request{
@@ -652,7 +664,10 @@ func (d *Daemon) PublishRequest(ctx context.Context, wi, reason string) (*Publis
 	if res != nil && !res.Noop {
 		jr.ring.Append(EvPublished, map[string]any{"reason": reason, "head_seq": res.HeadSeq})
 	}
-	out := &PublishOutcome{Published: res.Published, Idempotent: res.Idempotent, HeadSeq: res.HeadSeq, ManifestSha: res.HeadManifestSha}
+	out := &PublishOutcome{
+		Published: res.Published, Idempotent: res.Idempotent, HeadSeq: res.HeadSeq, ManifestSha: res.HeadManifestSha,
+		SchemaMismatches: res.SchemaMismatches,
+	}
 	return out, nil
 }
 
