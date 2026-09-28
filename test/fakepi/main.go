@@ -1,13 +1,47 @@
 // Command fakepi is the dogfood stand-in for the real `pi --mode rpc`
 // harness binary (04 §6.1a). The REAL `pf daemon` subcommand spawns it
-// as the persistent
-// WI Agent process; it speaks the stdio control-channel contract that
-// skills/pf-execute/SKILL.md declares (the same names as
-// internal/mainagent's control methods) and does capsule-side work the way
-// the real agent's pf-execute loop would: atomic runtime-state/
-// execution.json writes, one artifact, needs_input question ask and
-// answer consumption (archive + clear pending_question in the SAME atomic
-// write, 03 §4.2 D9).
+// as the persistent WI Agent process; it speaks the REAL pi RPC wire
+// protocol (pi docs: RPC mode / RPC Commands / JSON Event Stream) and does
+// capsule-side work the way the real agent's pf-execute loop would:
+// atomic runtime-state/execution.json writes, one artifact, needs_input
+// question ask and answer consumption (archive + clear pending_question
+// in the SAME atomic write, 03 §4.2 D9).
+//
+// REAL-pi behaviors REPRODUCED here (verified live against pi 0.87.1,
+// `pi --mode rpc`):
+//
+//   - stdin: one JSON command object per line; prompt commands
+//     {"id":..,"type":"prompt","message":..} are the only commands
+//     accepted (real pi answers anything else with a success=false
+//     response, e.g. "Unknown command: undefined" for a JSON-RPC
+//     envelope — the bug this fake used to encode);
+//   - stdout: response records {"id","type":"response","command":"prompt",
+//     "success":true} echo the command id, emitted BEFORE the run events;
+//   - assistant text rides session events — message_start,
+//     message_update (text_start/text_delta/text_end inside
+//     assistantMessageEvent) and the authoritative message_end whose
+//     message.content is a typed-block array [{"type":"text","text":..}]
+//     (this is the record the supervisor's ack extraction consumes);
+//   - control methods arrive as prompt commands whose message text is the
+//     control JSON line VERBATIM; the ack line is embedded in a
+//     MULTI-LINE assistant message (the SKILL.md §12 transport);
+//   - agent lifecycle records agent_start/turn_start/turn_end/agent_end,
+//     and agent_settled — including the startup agent_settled real pi
+//     emits for a fresh session before any prompt;
+//   - stdout is reserved for protocol records; diagnostics go to stderr.
+//
+// REAL-pi behaviors NOT reproduced (known deviations):
+//
+//   - stdin EOF does NOT exit: the process parks alive. Real pi shuts
+//     down on EOF, but the dogfood crash drills (usage_s5/s6) pin the
+//     kill -9'd daemon's WI Agent SURVIVING (04 §7.1 alive-reattach),
+//     which requires ignoring the closed pipe;
+//   - no real model: the "run" behind a prompt is a canned synchronous
+//     event burst (no compaction, retry, queue_update, tool or
+//     extension-UI records, no session files, no failure responses for
+//     prompts issued mid-"streaming" — fakepi never streams);
+//   - the initial pf-execute instruction is not interpreted: the
+//     capsule-side effects are the FAKEPI_MODE scripts below.
 //
 // Test-only helper (the usage_* dogfood scenarios build and exec it);
 // `go build ./...` ships it as a main package but nothing in production
@@ -21,10 +55,6 @@
 //	               line per process start (spawn-count / session-reuse pins).
 //	FAKEPI_EXIT  – when non-empty, exit(0) immediately (a harness that
 //	               dies on startup; crash drills).
-//
-// On stdin EOF the process stays alive: a kill -9 of the parent daemon
-// (the `pf daemon` process) must leave a LIVE WI Agent behind (04 §7.1
-// step 3's alive-reattach case), so EOF parks instead of exiting.
 package main
 
 import (
@@ -38,9 +68,9 @@ import (
 )
 
 // Control-channel method names — byte-identical with the two-sided
-// contract (internal/mainagent Method* constants / SKILL.md).
+// contract (internal/mainagent Method* constants / SKILL.md §12). Under
+// the pi transport these arrive as the TEXT of prompt commands.
 const (
-	methodPrompt     = "user/prompt"
 	methodQuiesce    = "pf/quiesce"
 	methodResume     = "pf/resume"
 	methodStopNotice = "pf/stop_notice"
@@ -76,23 +106,48 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The stdio control loop: every pf/* method is acked in the shape the
-	// supervisor's awaitAck accepts ({"method":..., "result":{"ack":...}}).
+	// RPC startup: real pi emits agent_settled for the fresh session BEFORE
+	// any prompt arrives (measured live).
+	emitRecord(map[string]any{"type": "agent_settled"})
+
+	// The RPC command loop (REAL protocol): stdin carries one JSON command
+	// object per line; only prompt commands are meaningful here. The
+	// control methods ride prompt commands whose message text is the
+	// control JSON line VERBATIM — parsed exactly as the old raw lines
+	// were. Every prompt is answered by a response record echoing the
+	// command id, then — for control methods — a full event burst whose
+	// assistant message embeds the ack line.
 	sc := bufio.NewScanner(os.Stdin)
-	sc.Buffer(make([]byte, 1<<20), 4<<20)
+	sc.Buffer(make([]byte, 1<<20), 8<<20)
 	for sc.Scan() {
-		var msg struct {
+		var cmd struct {
+			ID      string `json:"id"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(sc.Bytes(), &cmd) != nil || cmd.Type != "prompt" {
+			continue // not a prompt command: ignore (real pi answers unknown
+			// commands with a success=false response; nothing here needs that)
+		}
+		emitRecord(map[string]any{
+			"id": cmd.ID, "type": "response", "command": "prompt", "success": true,
+		})
+		var ctl struct {
 			Method string `json:"method"`
 		}
-		if json.Unmarshal(sc.Bytes(), &msg) != nil || msg.Method == "" {
-			continue // bulk output / non-control line: ignore
+		if json.Unmarshal([]byte(cmd.Message), &ctl) != nil {
+			ctl.Method = "" // free text, not a control line
 		}
-		switch msg.Method {
-		case methodPrompt, methodQuiesce, methodResume, methodStopNotice:
-			ack(msg.Method)
+		switch ctl.Method {
+		case methodQuiesce, methodResume, methodStopNotice:
+			ackViaAssistantMessage(ctl.Method)
 		case methodAnswer:
-			consumeAnswer(sc.Bytes())
-			ack(methodAnswer)
+			consumeAnswer([]byte(cmd.Message))
+			ackViaAssistantMessage(methodAnswer)
+		default:
+			// The initial pf-execute instruction: a plain assistant turn
+			// (no ack line — nothing to ack yet).
+			emitAssistantTurn("fakepi: instruction received; standing by for control methods.")
 		}
 	}
 	// stdin EOF (e.g. the daemon died): park alive — the crash drills need
@@ -105,9 +160,61 @@ func main() {
 	}
 }
 
-// ack emits the supervisor-recognized acknowledgment line.
-func ack(method string) {
-	fmt.Printf("{\"jsonrpc\":\"2.0\",\"method\":%q,\"result\":{\"ack\":%q}}\n", method, method)
+// ackViaAssistantMessage acks one control method the way the REAL
+// transport contract defines (SKILL.md §12 transport note): the ack JSON
+// line is embedded in a MULTI-LINE assistant message — never written as a
+// raw stdout line.
+func ackViaAssistantMessage(method string) {
+	text := "control method received; acking at a safe boundary\n" +
+		`{"method":"` + method + `","result":{"ack":"` + method + `"}}` + "\nstanding by"
+	emitAssistantTurn(text)
+}
+
+// emitAssistantTurn streams one complete assistant message as the REAL
+// event sequence (pi docs: JSON Event Stream): agent/turn lifecycle,
+// message_start, message_update deltas (text_start / text_delta /
+// text_end inside assistantMessageEvent) and the authoritative message_end
+// carrying the full typed-block content array. The burst ends with
+// agent_end + agent_settled (quiescence).
+func emitAssistantTurn(text string) {
+	block := map[string]any{"type": "text", "text": text}
+	content := []any{block}
+	message := map[string]any{"role": "assistant", "content": content}
+	usage := map[string]any{
+		"input": 0, "output": len(text), "cacheRead": 0, "cacheWrite": 0,
+		"totalTokens": len(text),
+		"cost":        map[string]any{"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+	}
+	firstDelta := text
+	if len(firstDelta) > 16 { // two deltas: the ack line may straddle chunks
+		firstDelta = text[:16]
+	}
+	emitRecord(map[string]any{"type": "agent_start"})
+	emitRecord(map[string]any{"type": "turn_start"})
+	emitRecord(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant", "content": []any{}}})
+	emitRecord(map[string]any{"type": "message_update", "usage": usage,
+		"assistantMessageEvent": map[string]any{"type": "text_start", "contentIndex": 0}})
+	emitRecord(map[string]any{"type": "message_update", "usage": usage,
+		"assistantMessageEvent": map[string]any{"type": "text_delta", "contentIndex": 0, "delta": firstDelta}})
+	if firstDelta != text {
+		emitRecord(map[string]any{"type": "message_update", "usage": usage,
+			"assistantMessageEvent": map[string]any{"type": "text_delta", "contentIndex": 0, "delta": text[len(firstDelta):]}})
+	}
+	emitRecord(map[string]any{"type": "message_update", "usage": usage,
+		"assistantMessageEvent": map[string]any{"type": "text_end", "contentIndex": 0, "content": text}})
+	emitRecord(map[string]any{"type": "message_end", "message": message})
+	emitRecord(map[string]any{"type": "turn_end", "message": message, "toolResults": []any{}})
+	emitRecord(map[string]any{"type": "agent_end", "messages": []any{message}, "willRetry": false})
+	emitRecord(map[string]any{"type": "agent_settled"})
+}
+
+// emitRecord writes ONE protocol record to stdout (JSON + LF).
+func emitRecord(rec map[string]any) {
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	fmt.Println(string(raw))
 }
 
 // logSpawn journals this process start for the scenario's spawn-count and

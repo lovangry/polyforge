@@ -118,12 +118,12 @@ func (a *bigMsgAdapter) Name() string { return a.base.Name() }
 func (a *bigMsgAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error) {
 	return a.base.BuildCmd(p, sessionDir)
 }
-func (a *bigMsgAdapter) InitialMessage(p SpawnParams) (*rpcMessage, error) {
-	return &rpcMessage{
-		JSONRPC: "2.0", Method: "user/prompt",
-		Params: map[string]any{"text": strings.Repeat("x", 1<<20)},
+func (a *bigMsgAdapter) InitialMessage(p SpawnParams) (*piCommand, error) {
+	return &piCommand{
+		ID: "pf-init", Type: "prompt", Message: strings.Repeat("x", 1<<20),
 	}, nil
 }
+func (a *bigMsgAdapter) FrameControl(id, line string) any { return a.base.FrameControl(id, line) }
 
 // TestSpawnInitialMessageErrorPropagates: an adapter whose InitialMessage
 // build fails must propagate the error (previously silently ignored) and
@@ -151,30 +151,35 @@ func (a *errInitialAdapter) Name() string { return a.base.Name() }
 func (a *errInitialAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error) {
 	return a.base.BuildCmd(p, sessionDir)
 }
-func (a *errInitialAdapter) InitialMessage(p SpawnParams) (*rpcMessage, error) {
+func (a *errInitialAdapter) InitialMessage(p SpawnParams) (*piCommand, error) {
 	return nil, fmt.Errorf("boom: initial message build failed")
 }
+func (a *errInitialAdapter) FrameControl(id, line string) any { return a.base.FrameControl(id, line) }
 
 // TestAckSurvivesBulkFlood: the control/ack path is LOSSLESS while bulk
-// output is lossy. The harness answers the pf/quiesce request with a flood
-// of plain bulk lines FIRST and the ack LAST — with one shared bounded
-// channel the ack was droppable; it must always arrive now.
+// output is lossy. The harness answers the pf/quiesce command with a flood
+// of bulk protocol records FIRST and the ack-bearing assistant message
+// LAST — with one shared bounded channel the ack was droppable; it must
+// always arrive now.
 func TestAckSurvivesBulkFlood(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "floodharness")
-	// The ack line is assembled from concatenated parts so the script needs
-	// no nested double-quote escaping.
+	// The ack-carrying message_end record embeds the ack line inside the
+	// assistant text; inside the single-quoted shell literal the JSON
+	// escapes (\" and \n) are plain bytes, so no splicing is needed.
 	script := `#!/bin/sh
-ACK='{"method":"pf/quiesce","result":{"ack":"pf/quiesce"}}'
+ACKMSG='{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"at a boundary\n{\"method\":\"pf/quiesce\",\"result\":{\"ack\":\"pf/quiesce\"}}\ncontinuing"}]}}'
 while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   case "$line" in
     *pf/quiesce*)
+      printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
       i=0
-      while [ $i -lt 20000 ]; do echo "bulk progress line $i"; i=$((i+1)); done
-      echo "$ACK"
+      while [ $i -lt 20000 ]; do printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"bulk progress $i"}}'; i=$((i+1)); done
+      printf '%s\n' "$ACKMSG"
+      printf '%s\n' '{"type":"agent_settled"}'
       ;;
-    *pf/stop_notice*) echo '{"method":"pf/stop_notice","result":{"ack":"pf/stop_notice"}}' ;;
-    *user/prompt*)    echo '{"method":"user/prompt","result":{"ack":"user/prompt"}}' ;;
+    *pf/stop_notice*) printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"method\":\"pf/stop_notice\",\"result\":{\"ack\":\"pf/stop_notice\"}}"}]}}' ;;
   esac
 done
 `
@@ -189,7 +194,7 @@ done
 	}
 	defer h.Terminate(5 * time.Second)
 	// The quiesce ack must arrive within the bounded window despite the
-	// 20000-line bulk flood that precedes it.
+	// 20000-record bulk flood that precedes it.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := h.Quiesce(ctx); err != nil {

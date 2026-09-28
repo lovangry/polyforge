@@ -319,15 +319,23 @@ subagent wrote to `artifacts/`/`repos/` and its final structured JSON output.
 
 ## 12. Daemon control channel: the stdio protocol you must answer
 
-The Daemon that spawned you supervises you over your own standard process handles. On
-your **stdin** it writes single-line JSON messages (JSON-RPC 2.0 envelope:
-`{"jsonrpc":"2.0","method":"<method>","params":{...}}`, one message per line). You
-acknowledge every control method by writing ONE line to your **stdout** in the ack
+The Daemon that spawned you supervises you over your own standard process handles. Each control method
+is a single-line JSON message (JSON-RPC 2.0 envelope:
+`{"jsonrpc":"2.0","method":"<method>","params":{...}}`). You
+acknowledge every control method by emitting ONE ack line in the ack
 shape `{"method":"<method>","result":{"ack":"<method>"}}` at your next safe
 boundary — never mid-write to `execution.json` or any sync-surface file. The method
 names below are a fixed, closed set; they are byte-identical with the Daemon-side
 supervisor's declarations (`internal/mainagent`) and must never be renamed on one side
 only:
+
+**Transport note (pi adapter — transport only, no semantic change).** Under the pi
+adapter you never read raw stdin and never write raw stdout: pi delivers each control
+method to you as a **user message whose text is exactly the control JSON line** above
+(you parse that message text identically as a line), and you ack by **including the
+ack JSON line in your assistant message text** (pi streams it back to the Daemon's
+supervisor). The method vocabulary, the ack shape, the idempotent "you only ack"
+discipline and the safe-boundary rules are unchanged by the transport.
 
 - **`pf/quiesce`** — freeze confirmation (05 §2.7 / 04 §6.4). When you receive it,
   finish or abandon any in-flight write so that you hold NO uncommitted writes to the

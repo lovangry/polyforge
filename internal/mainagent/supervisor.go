@@ -12,10 +12,18 @@
 //     pf-execute injected as an appended system prompt; crash continuation
 //     resumes via claude --resume <session id>.
 //
-// The wire protocol between supervisor and harness is line-delimited JSON
-// on the process stdio (pi --mode rpc speaks JSON-RPC 2.0 over stdio); the
-// supervisor sends pf/* control methods and treats any ack line as the
-// confirmation. Tests drive this against a scripted fake harness.
+// The wire protocol between supervisor and harness is line-delimited JSON on
+// the process stdio. The pi adapter speaks the REAL pi RPC protocol (pi
+// docs: RPC mode — `pi --mode rpc`): stdin carries one JSON command object
+// per line ({"id":..,"type":"prompt","message":..}), stdout carries
+// protocol records only (response records for our command ids plus session
+// events; assistant text arrives inside message records, never as raw
+// lines), diagnostics go to stderr and stdin EOF is a graceful shutdown.
+// The daemon→agent pf/* control methods ride prompt commands whose message
+// text is the control JSON line VERBATIM; the agent acks inside its
+// assistant message text, and the supervisor extracts ack lines from the
+// message records. Tests drive this against a scripted fake harness
+// (test/fakepi reproduces the same record shapes).
 package mainagent
 
 import (
@@ -40,12 +48,33 @@ import (
 // SpawnParams re-exports the daemon's spawn contract (one shape).
 type SpawnParams = daemon.SpawnParams
 
-// rpcMessage is one line of the stdio control channel.
-type rpcMessage struct {
+// controlEnvelope is the daemon→agent control JSON line — the
+// transport-neutral payload the agent-side pf-execute parses (SKILL.md
+// §12). Under the pi adapter it never touches the wire by itself: it is
+// carried VERBATIM as the text of a prompt command (piCommand below), so
+// the agent receives it as a user message whose text is exactly this
+// line. The jsonrpc key is historical (the closed two-sided line shape);
+// both sides parse method/params, and neither may rename it alone.
+type controlEnvelope struct {
 	JSONRPC string         `json:"jsonrpc"`
-	ID      *int64         `json:"id,omitempty"`
 	Method  string         `json:"method"`
 	Params  map[string]any `json:"params,omitempty"`
+}
+
+// piCommand is one stdin command of the REAL pi RPC protocol (pi docs:
+// RPC Commands — prompt). Every command MAY carry a string id; the
+// matching response record repeats it, which is how the supervisor
+// correlates failures.
+type piCommand struct {
+	ID      string `json:"id,omitempty"`
+	Type    string `json:"type"` // "prompt"
+	Message string `json:"message"`
+	// StreamingBehavior "steer" on control prompts: pi rejects a bare
+	// prompt while the agent is streaming, and steer queues the message
+	// for delivery after the current assistant turn — exactly the
+	// next-safe-boundary discipline the control contract demands. The
+	// initial prompt needs none (the agent is idle at derivation).
+	StreamingBehavior string `json:"streamingBehavior,omitempty"`
 }
 
 // The stdio control channel method names (the WI-Agent side of the
@@ -75,9 +104,10 @@ const (
 
 var msgID int64
 
-func nextMsgID() int64 {
-	msgID++
-	return msgID
+// nextCommandID mints the string id of one pi RPC command (the response
+// record repeats it; the supervisor correlates failures by it).
+func nextCommandID() string {
+	return fmt.Sprintf("pf-%d", atomic.AddInt64(&msgID, 1))
 }
 
 // Adapter is a harness-specific launcher.
@@ -86,10 +116,17 @@ type Adapter interface {
 	Name() string
 	// BuildCmd constructs the argv/env/stdio for one derivation.
 	BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error)
-	// InitialMessage returns the first stdio message delivering the
-	// pf-execute instruction (pi: first prompt; claude rides the system
-	// prompt instead, so this returns nil).
-	InitialMessage(p SpawnParams) (*rpcMessage, error)
+	// InitialMessage returns the first stdin write delivering the
+	// pf-execute instruction (pi: the session's first prompt command;
+	// claude rides the system prompt instead, so this returns nil).
+	InitialMessage(p SpawnParams) (*piCommand, error)
+	// FrameControl returns the stdin payload for ONE daemon→agent control
+	// line. line is the transport-neutral control JSON (controlEnvelope
+	// serialized); id is the command id for correlation. The pi adapter
+	// wraps the line in a prompt command (the agent receives it as a user
+	// message whose text is the line VERBATIM); the claude adapter writes
+	// the line itself.
+	FrameControl(id, line string) any
 }
 
 // ---------------------------------------------------------------------------
@@ -123,16 +160,30 @@ func (a *PiAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error
 	return cmd, nil
 }
 
-func (a *PiAdapter) InitialMessage(p SpawnParams) (*rpcMessage, error) {
-	return &rpcMessage{
-		JSONRPC: "2.0", ID: nil, Method: "user/prompt",
-		Params: map[string]any{"text": p.InitialPrompt},
-	}, nil
+func (a *PiAdapter) InitialMessage(p SpawnParams) (*piCommand, error) {
+	// The pf-execute instruction is the session's FIRST prompt of the RPC
+	// session (04 §6.1a). The agent is idle at derivation, so no
+	// streamingBehavior is needed (and none may appear: the initial prompt
+	// is the envelope regression-pinned shape).
+	return &piCommand{ID: "pf-init", Type: "prompt", Message: p.InitialPrompt}, nil
+}
+
+// FrameControl implements Adapter: one control line rides a prompt command
+// whose message text is the control JSON VERBATIM — the agent parses the
+// user message text exactly as it parsed the raw line. steer keeps the
+// command legal while the agent is mid-run and delivers it at the agent's
+// next turn boundary (the safe-boundary contract of SKILL.md §12).
+func (a *PiAdapter) FrameControl(id, line string) any {
+	return piCommand{ID: id, Type: "prompt", Message: line, StreamingBehavior: "steer"}
 }
 
 // ---------------------------------------------------------------------------
 // Claude adapter (04 §6.1a): claude -p, stable session id + streaming;
 // crash continuation resumes the same session.
+//
+// UNVERIFIED: this adapter's stdio protocol has never been exercised
+// against the real cc harness (out of scope for the pi-transport rework;
+// see FrameControl). Do not take any of its wire behavior as measured.
 
 type ClaudeAdapter struct {
 	Bin string
@@ -171,8 +222,18 @@ func (a *ClaudeAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, e
 	return cmd, nil
 }
 
-func (a *ClaudeAdapter) InitialMessage(p SpawnParams) (*rpcMessage, error) {
+func (a *ClaudeAdapter) InitialMessage(p SpawnParams) (*piCommand, error) {
 	return nil, nil // system-prompt channel: no first-prompt message
+}
+
+// FrameControl implements Adapter: the claude control line is written as
+// itself. UNVERIFIED: like the rest of the claude stdio contract, this
+// framing has never been exercised against the real cc harness — the
+// entire adapter (argv, session resume, ack shapes on stdout) is out of
+// scope until a real-harness smoke runs; treat every behavior here as a
+// placeholder that may need its own transport rework.
+func (a *ClaudeAdapter) FrameControl(id, line string) any {
+	return line
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +250,16 @@ type Proc struct {
 	bulkDropped int64      // bulk (non-control) lines dropped when nobody consumes them
 	exited      chan struct{}
 	exitErr     error
+	// pending tracks the command ids this supervisor sent to the child's
+	// RPC face: a response record repeating one of them is OBSERVED (a
+	// success=false failure is logged to stderr, never treated as an ack)
+	// and dropped from the map. Guarded by pendMu — its OWN lock, never mu:
+	// the stdout reader observes responses with it while writeStdin holds
+	// mu across a potentially BLOCKING stdin write; sharing mu would let a
+	// child that fills its stdout pipe while not reading stdin deadlock
+	// both goroutines on each other.
+	pending map[string]bool
+	pendMu  sync.Mutex
 	// unhealthy holds the typed reason the agent was marked unhealthy
 	// (control queue overflow, overlong control line): set once, read by
 	// send/awaitAck so every later control call fails fast and LOUDLY
@@ -364,6 +435,182 @@ func isControlLine(line string) bool {
 	return hasAck && ack == probe.Method
 }
 
+// ---------------------------------------------------------------------------
+// Stdout record-stream classification (REAL pi RPC protocol).
+
+// stdoutRecord is the probe shape for one stdout protocol record. Under
+// the real protocol stdout is RESERVED for protocol records: response
+// records for our command ids, session events (agent/turn/message/tool
+// activity) and extension-UI records. The supervisor only needs three of
+// them: response (failure observation), message_end (assistant text —
+// the ONLY carrier of acks) and the type field to tell records from the
+// claude adapter's raw-line legacy stream.
+type stdoutRecord struct {
+	Type    string          `json:"type"`
+	ID      *string         `json:"id"`      // response records repeat the command id (null = not ours)
+	Command string          `json:"command"` // "prompt" on response records
+	Success *bool           `json:"success"`
+	ErrText string          `json:"error"`
+	Message json.RawMessage `json:"message"` // message_start/message_end
+}
+
+// assistantMessage is the message object inside a message_end record
+// (pi docs: JSON Event Stream — message_end is the authoritative final
+// message). Assistant content is an array of typed blocks; a bare string
+// is tolerated defensively.
+type assistantMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+// classifyStdoutLine sorts ONE raw stdout line under the real protocol:
+//
+//   - a response record repeating one of OUR command ids is OBSERVED (a
+//     success=false failure is logged to stderr — a rejected prompt
+//     command, e.g. a malformed control line — but NEVER treated as an
+//     ack) and dropped as bulk;
+//   - a message_end record carrying an ASSISTANT message is the ack
+//     carrier: its text is extracted and scanned line-by-line for the
+//     closed ack shape (isControlLine); ack lines enter the bounded
+//     lossless ctrl queue, every other extracted line is bulk;
+//   - every other record (agent/turn events, message_update deltas,
+//     extension-UI noise, responses for foreign ids) is BULK and dropped
+//     with the existing bookkeeping;
+//   - a line that is not a protocol record at all (no JSON object with a
+//     type field) falls back to the legacy RAW-line classifier. Real pi
+//     never emits such a line (stdout is reserved for records); the
+//     fallback exists for the claude adapter, whose stdio contract is
+//     UNVERIFIED and whose acks arrive as raw lines.
+func (p *Proc) classifyStdoutLine(line string) {
+	var rec stdoutRecord
+	if json.Unmarshal([]byte(line), &rec) != nil || rec.Type == "" {
+		// Not a protocol record: legacy raw-line classification (claude
+		// path). Bulk or ack, never a response observation.
+		p.classifyCandidateLine(line)
+		return
+	}
+	switch rec.Type {
+	case "response":
+		p.observeResponse(rec)
+		atomic.AddInt64(&p.bulkDropped, 1)
+	case "message_end":
+		text, ok := assistantText(rec.Message)
+		if !ok {
+			atomic.AddInt64(&p.bulkDropped, 1)
+			return
+		}
+		// The extracted text is scanned line-by-line with the SAME bounds
+		// as raw lines: an ack may never be silently dropped, and an
+		// overlong extracted line closes the control path typed
+		// (ErrControlLineTooLong) exactly like an overlong raw line.
+		for _, l := range strings.Split(text, "\n") {
+			p.classifyCandidateLine(strings.TrimSuffix(l, "\r"))
+		}
+	default:
+		// Session events, message_update deltas, extension-UI records,
+		// responses for command ids we never sent: bulk.
+		atomic.AddInt64(&p.bulkDropped, 1)
+	}
+}
+
+// classifyCandidateLine runs ONE candidate line (raw or extracted from a
+// message record) through the closed control vocabulary: an ack-shaped
+// line enters the bounded lossless queue (with the overflow close),
+// everything else is bulk. An extracted line beyond maxControlLineBytes
+// closes the control path typed — the same ErrControlLineTooLong
+// semantics the bounded reader enforces on raw lines.
+func (p *Proc) classifyCandidateLine(line string) {
+	if len(line) > maxControlLineBytes {
+		reason := fmt.Errorf("%w: limit is %d bytes", ErrControlLineTooLong, maxControlLineBytes)
+		p.markUnhealthy(reason)
+		p.ctrl.close(reason)
+		fmt.Fprintf(os.Stderr, "mainagent: control line exceeded %d bytes; control path CLOSED, agent marked unhealthy\n", maxControlLineBytes)
+		return
+	}
+	if !isControlLine(line) {
+		atomic.AddInt64(&p.bulkDropped, 1)
+		return
+	}
+	if !p.ctrl.push(line) {
+		reason := p.ctrl.reason()
+		if reason == nil {
+			reason = ErrControlChannelOverflow
+		}
+		p.markUnhealthy(reason)
+		fmt.Fprintf(os.Stderr, "mainagent: control queue bound (%d) hit; control path CLOSED, agent marked unhealthy: %v\n", maxControlQueueLines, reason)
+	}
+}
+
+// observeResponse handles one response record. A record repeating one of
+// OUR command ids is the command's outcome: success=false is logged to
+// stderr (a rejected command — the control line never reached the agent,
+// so the pending ack wait will surface the failure through its bound) and
+// NEVER treated as an ack. A success record, and every record for a
+// foreign or absent id, is silently dropped by the caller as bulk.
+func (p *Proc) observeResponse(rec stdoutRecord) {
+	if rec.ID == nil || *rec.ID == "" {
+		return // parse failures and foreign commands: not ours to observe
+	}
+	p.pendMu.Lock()
+	_, ours := p.pending[*rec.ID]
+	delete(p.pending, *rec.ID)
+	p.pendMu.Unlock()
+	if !ours {
+		return
+	}
+	if rec.Success != nil && !*rec.Success {
+		fmt.Fprintf(os.Stderr, "mainagent: pi command %s (%s) failed: %s\n", *rec.ID, orDefault(rec.Command, "?"), orDefault(rec.ErrText, "unknown error"))
+	}
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
+// assistantText extracts the assistant message text from the message
+// object of one message_end record. ok=false means the record does not
+// carry an assistant message (user/system echoes, malformed payloads):
+// the caller drops it as bulk. Content is a typed-block array
+// ([{"type":"text","text":...}]); a bare string is tolerated.
+// message_end is the AUTHORITATIVE final message (pi docs), so acks are
+// scanned here exactly once — never in the message_update deltas, which
+// stream the same text piecemeal (scanning both would queue one ack
+// twice and let a stale duplicate satisfy a LATER wait for the same
+// method). The tradeoff is ack latency: an ack is visible when its
+// message completes, not while it streams; the pf-execute contract acks
+// at safe boundaries with short messages, well inside the bounded waits.
+func assistantText(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var m assistantMessage
+	if json.Unmarshal(raw, &m) != nil || m.Role != "assistant" {
+		return "", false
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(m.Content, &blocks); err == nil {
+		var b strings.Builder
+		for _, blk := range blocks {
+			if blk.Type == "text" {
+				b.WriteString(blk.Text)
+			}
+		}
+		return b.String(), true
+	}
+	// Defensive: a bare string content.
+	var s string
+	if json.Unmarshal(m.Content, &s) == nil {
+		return s, true
+	}
+	return "", false
+}
+
 // PID implements daemon.AgentHandle.
 func (p *Proc) PID() int { return p.cmd.Process.Pid }
 
@@ -380,11 +627,11 @@ func (p *Proc) Alive() bool {
 	return p.cmd.Process != nil && p.cmd.Process.Signal(syscall.Signal(0)) == nil
 }
 
-// send writes one control line; a dead pipe reports the process as gone.
-// An agent marked unhealthy (control path closed by overflow or an
-// overlong line) fails fast with the typed reason instead of writing into
-// a path whose acks can never arrive.
-func (p *Proc) send(m rpcMessage) error {
+// writeStdin writes ONE framed stdin record (a JSON object + LF); a dead
+// pipe reports the process as gone. An agent marked unhealthy (control
+// path closed by overflow or an overlong line) fails fast with the typed
+// reason instead of writing into a path whose acks can never arrive.
+func (p *Proc) writeStdin(payload any) error {
 	if r, ok := p.unhealthyReason(); ok {
 		return fmt.Errorf("mainagent: agent marked unhealthy, control path closed: %w", r)
 	}
@@ -393,14 +640,40 @@ func (p *Proc) send(m rpcMessage) error {
 	if p.stdin == nil {
 		return fmt.Errorf("mainagent: agent stdio closed")
 	}
-	blob, err := json.Marshal(m)
+	blob, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	if _, err := p.stdin.Write(append(blob, '\n')); err != nil {
 		return fmt.Errorf("mainagent: agent not accepting control messages: %w", err)
 	}
+	// Correlation: register the command id of a pi RPC command so the
+	// matching response record can be observed (failures are logged).
+	// Registered AFTER the successful write (pendMu, never mu: see the
+	// field comment) so the stdout reader can keep draining.
+	if cmd, ok := payload.(piCommand); ok && cmd.ID != "" {
+		p.pendMu.Lock()
+		if p.pending == nil {
+			p.pending = map[string]bool{}
+		}
+		p.pending[cmd.ID] = true
+		p.pendMu.Unlock()
+	}
 	return nil
+}
+
+// SendControl delivers ONE daemon→agent control method: the control JSON
+// line (controlEnvelope) is framed for the adapter's transport — under the
+// pi adapter it rides a prompt command whose message text is the line
+// VERBATIM, so the agent-side executor parses the user message text
+// exactly as it parsed the raw line. The bounded lossless ctrl-queue
+// semantics on the ack side are unchanged.
+func (p *Proc) SendControl(method string, params map[string]any) error {
+	line, err := json.Marshal(controlEnvelope{JSONRPC: "2.0", Method: method, Params: params})
+	if err != nil {
+		return err
+	}
+	return p.writeStdin(p.adapter.FrameControl(nextCommandID(), string(line)))
 }
 
 // awaitAck waits for one CONTROL line acknowledging the pending method
@@ -455,8 +728,7 @@ func (p *Proc) awaitAck(ctx context.Context, method string) error {
 // (04 §6.5 step 3): the agent picks its own next safe boundary; the daemon
 // never picks or skips steps on its behalf (00 §3.6).
 func (p *Proc) NotifyStop(ctx context.Context) error {
-	m := rpcMessage{JSONRPC: "2.0", Method: MethodStopNotice, Params: map[string]any{"reason": "graceful_shutdown"}}
-	if err := p.send(m); err != nil {
+	if err := p.SendControl(MethodStopNotice, map[string]any{"reason": "graceful_shutdown"}); err != nil {
 		return err
 	}
 	return p.awaitAck(ctx, MethodStopNotice)
@@ -465,8 +737,7 @@ func (p *Proc) NotifyStop(ctx context.Context) error {
 // Quiesce implements the freeze confirmation (05 §2.7 / 04 §6.4): the
 // agent confirms no in-flight sync-surface writes and none will start.
 func (p *Proc) Quiesce(ctx context.Context) error {
-	m := rpcMessage{JSONRPC: "2.0", Method: MethodQuiesce}
-	if err := p.send(m); err != nil {
+	if err := p.SendControl(MethodQuiesce, nil); err != nil {
 		return err
 	}
 	return p.awaitAck(ctx, MethodQuiesce)
@@ -477,8 +748,7 @@ func (p *Proc) Quiesce(ctx context.Context) error {
 // resume sync-surface writes. Best-effort by design — an agent that died
 // mid-window simply never acks.
 func (p *Proc) Resume(ctx context.Context) error {
-	m := rpcMessage{JSONRPC: "2.0", Method: MethodResume}
-	if err := p.send(m); err != nil {
+	if err := p.SendControl(MethodResume, nil); err != nil {
 		return err
 	}
 	return p.awaitAck(ctx, MethodResume)
@@ -509,7 +779,7 @@ func (p *Proc) DeliverAnswer(relay daemon.AnswerRelay) error {
 	}
 	params := map[string]any{}
 	json.Unmarshal(b, &params)
-	if err := p.send(rpcMessage{JSONRPC: "2.0", Method: MethodAnswer, Params: params}); err != nil {
+	if err := p.SendControl(MethodAnswer, params); err != nil {
 		return err
 	}
 	return p.awaitAck(context.Background(), MethodAnswer)
@@ -732,12 +1002,13 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 		startedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		stdin:     stdin, ctrl: newLineQueue(), exited: make(chan struct{}),
 	}
-	// Stdout reader: TWO paths. Lines in the closed control vocabulary
-	// (isControlLine) go to the bounded LOSSLESS queue (an ack may never be
-	// dropped — a lost pf/quiesce or pf/stop_notice ack becomes a
-	// freeze/boundary timeout, 05 §2.7); all other output is bulk and may
-	// be dropped when nobody consumes it, keeping memory bounded under a
-	// flooding harness.
+	// Stdout reader: under the REAL pi protocol stdout is a RECORD STREAM
+	// (classifyStdoutLine): assistant message records carry the ack lines
+	// into the bounded LOSSLESS queue (an ack may never be dropped — a lost
+	// pf/quiesce or pf/stop_notice ack becomes a freeze/boundary timeout,
+	// 05 §2.7); response records for our command ids are observed for
+	// failure; every other record is bulk and may be dropped when nobody
+	// consumes it, keeping memory bounded under a flooding harness.
 	// R2N-9: bufio.Scanner is GONE — its overlong-line death was silent
 	// (sc.Err ignored, control path just stops). The bounded reader below
 	// surfaces the overlong line: the control path is closed typed, the
@@ -761,18 +1032,7 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 				fmt.Fprintf(os.Stderr, "mainagent: control line exceeded %d bytes; control path CLOSED, agent marked unhealthy\n", maxControlLineBytes)
 				continue // keep draining as bulk (never block the child)
 			}
-			if isControlLine(line) {
-				if !proc.ctrl.push(line) {
-					reason := proc.ctrl.reason()
-					if reason == nil {
-						reason = ErrControlChannelOverflow
-					}
-					proc.markUnhealthy(reason)
-					fmt.Fprintf(os.Stderr, "mainagent: control queue bound (%d) hit; control path CLOSED, agent marked unhealthy: %v\n", maxControlQueueLines, reason)
-				}
-			} else {
-				atomic.AddInt64(&proc.bulkDropped, 1) // ring semantics for bulk output
-			}
+			proc.classifyStdoutLine(line)
 		}
 	}()
 	go func() {
@@ -805,7 +1065,7 @@ func (s *Supervisor) Spawn(ctx context.Context, p SpawnParams) (daemon.AgentHand
 		return nil, fmt.Errorf("mainagent: initial instruction build failed (DAEMON-503): %w", ierr)
 	}
 	if m != nil {
-		if serr := proc.send(*m); serr != nil {
+		if serr := proc.writeStdin(*m); serr != nil {
 			_ = proc.Terminate(5 * time.Second)
 			return nil, fmt.Errorf("mainagent: initial instruction injection failed (DAEMON-503): %w", serr)
 		}
