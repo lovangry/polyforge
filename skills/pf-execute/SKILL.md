@@ -45,9 +45,16 @@ Before driving any step:
 
 1. Materialize `workflow.md` and `agents/*.md` from the bundle pinned to this WI
    (`bundle_name`/`bundle_digest`) into the Capsule, per `03-execution-capsule.md` §4.5.
-   This has normally already happened by the time you start (or resume); if you are a
-   freshly-derived process picking up mid-generation, trust the existing materialized
-   snapshot in the Capsule rather than re-materializing, unless it is absent.
+   This has normally already happened by the time you start (or resume). The
+   materialization is ATOMIC AS A SET: all targets are staged first, then swapped
+   into place, and a completion marker (`sync/materialized.json`) is written only
+   after EVERY target has landed. Trust the existing materialized snapshot ONLY
+   when that completion marker is present. If the marker is absent while target
+   files exist (a torn/partial snapshot — the previous process died between the
+   copies), or the snapshot is absent entirely, re-materialize from the checkout
+   per `03-execution-capsule.md` §4.5 before driving any step; never trust, read
+   or execute from a torn snapshot — it may mix one generation's `workflow.md`
+   with another's agent definitions.
 2. Load `workflow.md`'s Markdown body (not just its frontmatter) as the flow-level
    narrative for this WI — it tells you how artifacts are expected to flow between
    steps, where rewind boundaries sit, and any project-specific budget or release
@@ -94,23 +101,46 @@ For the step `next_step_by_order` selected:
    mechanism (`00-architecture.md` §3.6 "harness-native subagent") — never spawn an
    independent headless agent process. Pick the model from the step's effective
    `model_candidates` list at the currently effective candidate index (see §6 below for
-   how that index is computed after an infra failure). Pass the step skill's `tools`
+   how that index is computed after an infra failure). **No-candidate fallback**:
+   when BOTH levels are absent — the step declares no `model_candidates` AND
+   `defaults.model_candidates` is missing — there is NO switchable candidate list at
+   all; the §6 index formula does not apply, and every dispatch (the first one and
+   every infrastructure-failure re-dispatch alike) simply keeps the harness
+   adapter's default model (`01-workflow-skills.md` §6.3: 两处皆缺省时不存在可切换候选，
+   重派沿用 harness 适配器缺省模型). Pass the step skill's `tools`
    declaration through as the subagent's tool-face.
-4. **Collect the subagent's final JSON output** and validate it against the step skill's
+4. **Command audit (obligation).** Every command executed for this step — each
+   `RunCommand` call you make (`03-execution-capsule.md` §5.1) — must append one
+   record to `steps.<id>.output.commands` in the same write that records the step's
+   result: `{argv, exit_code, duration_ms, started_at}`, taken directly from the
+   `RunCommand` `Result`, never relayed or summarized through the subagent. This is
+   the command-execution evidence of record (`03-execution-capsule.md` §4.2): the
+   M4/M5 verifications read ONLY this field as proof a command actually ran and
+   accept no free-text substitute anywhere else in `output`.
+5. **Collect the subagent's final JSON output** and validate it against the step skill's
    `output` JSON Schema.
    - **Valid and the step is `gate: true`**: this is a business verdict (PASS/WARN/FAIL,
      or whatever the schema encodes) — proceed to §5.
    - **Valid and the step is not a gate**: mark the step `done`, write its `output` into
      `execution.json`, and loop back to `next_step_by_order`.
+   - **Echoed-field cross-check (done-handling).** When a step's `output` schema requires
+     echoing a field from a referenced prior step's output — the same upstream
+     `steps.<upstream-id>.output` you assembled the dispatch prompt from in step 2 —
+     mechanically compare the echoed field against that source BEFORE marking the step
+     `done`: element for element, same order, no additions, no omissions. The worked
+     example is feature-full's `e2e-run`, whose `authored_titles` must equal
+     `e2e-author`'s `scenario_titles`. A mismatch means the step did not exercise what
+     the upstream step produced; treat it as an infrastructure failure of this step (§6),
+     never a silent `done`.
    - **Invalid** (does not conform to the schema at all — malformed JSON, missing
      required fields, wrong types): this is an **infrastructure failure of this step**,
      never a gate FAIL, whatever the content looked like it was trying to say
      (`01-workflow-skills.md` INV-1h). Handle it via §6, not §5. A step producing no
      business judgment does not get to fail the gate by accident.
-5. Whichever path completes, write the result into `execution.json` via the tmp+fsync+
+6. Whichever path completes, write the result into `execution.json` via the tmp+fsync+
    rename sequence (`03-execution-capsule.md` §4.2) — you are the only writer of
    `runtime-state/`.
-6. After the write, fire the appropriate sync trigger (§8).
+7. After the write, fire the appropriate sync trigger (§8).
 
 ## 5. Gate semantics: business verdicts and bounded rewind
 
@@ -146,7 +176,7 @@ mechanism (§6) — never conflate the two.
 ## 6. Infrastructure failure: resume the same step in place
 
 A step that produced no business judgment at all — subagent process died, network partition,
-host restart, upstream provider outage, or the output-schema validation in §4 step 4
+host restart, upstream provider outage, or the output-schema validation in §4 step 5
 failed — is an infrastructure failure, never a gate FAIL, regardless of how the failure
 looked:
 
@@ -155,12 +185,24 @@ looked:
    output from an earlier `done` state — there is none here since it never completed).
 2. Append a `{attempt_seq, started_at, interrupted_at, cause: "infra_failure", detail,
    consumed_budget}` record to `steps.<id>.attempts[]` in the same atomic write.
-3. Recompute the effective model-candidate index: 1 + the count of `infra_failure`
-   entries in `attempts[]` since the last `gate_fail_rewind` entry (or since the start if
-   none), clamped to the candidate list length. Re-dispatch the step with that candidate.
-   Advancing candidates is itself bounded by list length — once you reach the last
-   candidate, keep re-dispatching with it; running out of candidates is not a separate
-   terminal condition.
+3. Recompute the effective model-candidate ordinal — a **1-BASED ORDINAL that maps
+d   directly to list position**, not a zero-based offset: the candidate used is the
+   <ordinal>-TH entry of the effective list (ordinal 1 = the first entry = the one the
+   first dispatch uses; ordinal N = the Nth entry — never "ordinal minus one"). The
+   formula, quoted from `01-workflow-skills.md` §6.3: 当前候选序号 = 1 +（该 step
+   `attempts[]` 中位于最后一条 `gate_fail_rewind` 归档之后的 `infra_failure` 条目数；
+   无任何 `gate_fail_rewind` 归档时从头计数），对列表长度取 min — in English: ordinal =
+   1 + the count of `infra_failure` entries in `attempts[]` after the last
+   `gate_fail_rewind` entry (counting from the start when there is none), capped by
+   min() against the candidate list length. Re-dispatch the step with that candidate.
+   Advancing candidates is itself bounded by the list length — once the ordinal reaches
+   the list length it stays there and you keep re-dispatching with the last candidate;
+   running out of candidates is not a separate terminal condition. **No-candidate
+   fallback**: when both the step-level `model_candidates` and
+   `defaults.model_candidates` are absent, no switchable candidate list exists at all —
+   this formula does not apply, and the re-dispatch keeps the harness adapter's default
+   model, exactly like the first dispatch did (`01-workflow-skills.md` §6.3: 两处皆缺省
+   时不存在可切换候选，重派沿用 harness 适配器缺省模型).
 4. This recomputation must be derivable purely from `execution.json`, because you may not
    be the same process that started the attempt. Never keep the candidate pointer only in
    memory.

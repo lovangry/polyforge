@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -42,6 +43,9 @@ type integAgent struct {
 	dead      bool
 	child     *exec.Cmd
 	answers   []AnswerRelay
+	// answerErr, when set, makes DeliverAnswer fail — the "agent died
+	// before its pf/answer ack" simulation for the redelivery regression.
+	answerErr error
 	// onAnswer mirrors the real WI Agent's consumption contract (03 §4.2
 	// D9): the resume-write archives the answer and clears pending_question
 	// in the SAME atomic write.
@@ -84,6 +88,9 @@ func (a *integAgent) Resume(ctx context.Context) error {
 	return nil
 }
 func (a *integAgent) DeliverAnswer(rel AnswerRelay) error {
+	if a.answerErr != nil {
+		return a.answerErr
+	}
 	a.answers = append(a.answers, rel)
 	if a.onAnswer != nil {
 		a.onAnswer(rel)
@@ -103,6 +110,11 @@ type integSpawner struct {
 	mu     chan struct{}
 	spawns []SpawnParams
 	agents []*integAgent
+	// sawSnapshot records, per spawn, whether the capsule already carried
+	// the materialized workflow snapshot (workflow.md + completion marker)
+	// at derivation time — the F2-3 ordering regression: materialization
+	// must precede the spawn.
+	sawSnapshot []bool
 	// cmd, when set, replaces the default "sleep 60" child: the proxy
 	// success-path tests need the spawned WI Agent process itself to
 	// originate the UDS proxy_call (SO_PEERCRED matches main_agent_pid).
@@ -117,6 +129,11 @@ func (s *integSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, e
 	s.mu <- struct{}{}
 	defer func() { <-s.mu }()
 	s.spawns = append(s.spawns, p)
+	// F2-3 ordering observation: was the snapshot materialized before this
+	// derivation? (workflow.md + the completion marker both present.)
+	_, werr := os.Stat(filepath.Join(p.CapsuleDir, "workflow.md"))
+	_, merr := os.Stat(filepath.Join(p.CapsuleDir, filepath.FromSlash("sync/materialized.json")))
+	s.sawSnapshot = append(s.sawSnapshot, werr == nil && merr == nil)
 	// A real distinct child pid: the SO_PEERCRED guard must be able to
 	// tell the agent apart from the (same-pid) test caller.
 	var child *exec.Cmd
@@ -203,11 +220,15 @@ func newDaemonEnv(t *testing.T) *denv {
 	json.Unmarshal(raw, &created)
 
 	// Daemon under test, with a fake spawner and a real pf-execute file in
-	// the "checkout".
+	// the "checkout". The daemon's OWN workflows checkout must carry the
+	// demo bundle: the spawn path materializes the workflow/agent snapshot
+	// from it (03 §4.5, wired in fix round 2) before deriving the agent.
 	home := filepath.Join(dir, "home")
 	os.MkdirAll(filepath.Join(home, "skills", "pf-execute"), 0o755)
 	os.WriteFile(filepath.Join(home, "skills", "pf-execute", "SKILL.md"), []byte("# pf-execute\nDrive the workflow.\n"), 0o644)
-	os.MkdirAll(filepath.Join(home, "workflows"), 0o755)
+	if err := testsupport.MakeDemoBundle(home); err != nil {
+		t.Fatalf("demo bundle for the daemon checkout: %v", err)
+	}
 
 	spawner := newIntegSpawner()
 	cfg := Config{
@@ -551,6 +572,110 @@ func TestDaemonAPIServerFace(t *testing.T) {
 	}
 	if code, err := c.do("POST", "/jobs/wi_other9/claim", nil, &out); err != nil || code != 410 {
 		t.Fatalf("post-shutdown submit: %d %v body=%v", code, err, out)
+	}
+}
+
+// TestAnswerFailedDeliveryStaysRedeliverableThroughAPI: F2-1 regression
+// THROUGH THE DAEMON API PATH (hAnswer → ledger → deliver → the agent
+// handle — the path answerrelay_test does not cover, it drives the
+// supervisor directly). A delivery that fails because the agent died
+// before its pf/answer ack must NOT consume the answer_id: the same
+// answer re-submitted after agent re-derivation is delivered exactly
+// once, and only then is the idempotency entry finalized — a later replay
+// is refused a second effect. The old ledger stored the delivery error
+// PERMANENTLY, so the re-submission returned the stale error and the
+// answer was lost forever behind the idempotency map.
+func TestAnswerFailedDeliveryStaysRedeliverableThroughAPI(t *testing.T) {
+	e := newDaemonEnv(t)
+	ctx := context.Background()
+	if err := e.d.Submit(SubmitIntent{WorkItemID: e.wi, Intent: "claim"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.d.SpawnNext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	api, err := NewAPIServer(e.d, e.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { api.Close() })
+	go api.Serve()
+	c := &udsClient{path: e.socket}
+
+	capc, _, err := capsule.Open(filepath.Join(e.dataDir, "home", "ws"), e.wi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := capc.MakeWritable(); err != nil {
+		t.Fatal(err)
+	}
+	question := &capsule.PendingQuestion{QuestionID: "q_retry1", AskedAt: NowStamp(), Content: "Which option?"}
+	if err := capc.SaveExecution(&capsule.Execution{
+		CapsuleID: capc.ID(), WorkItemID: e.wi, Generation: 1,
+		CurrentStep: "grill", WorkflowStatus: capsule.StatusRunning,
+		Steps:   map[string]*capsule.Step{"grill": {Status: capsule.StepInProgress, PendingQuestion: question}},
+		Version: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Consumption contract on the fake agent (03 §4.2 D9): archive the
+	// answer and clear pending_question in one atomic write.
+	e.spawner.agents[0].onAnswer = func(rel AnswerRelay) {
+		if err := capc.MakeWritable(); err != nil {
+			return
+		}
+		cur, lerr := capc.LoadExecution()
+		if lerr != nil || cur == nil {
+			return
+		}
+		step := cur.Steps[cur.CurrentStep]
+		if step == nil {
+			return
+		}
+		step.Answers = append(step.Answers, capsule.ArchivedAnswer{
+			QuestionID: rel.QuestionID, AnswerText: rel.AnswerText,
+			AnsweredAt: rel.AnsweredAt, AnsweredBy: rel.AnsweredBy,
+		})
+		step.PendingQuestion = nil
+		cur.Version++
+		capc.SaveExecution(cur)
+	}
+
+	relay := map[string]any{
+		"question_id": "q_retry1", "answer_id": "a_retry01", "answer_text": "Option B",
+		"answered_at": NowStamp(), "answered_by": "usr_worker",
+	}
+	var out map[string]any
+
+	// 1. First submission: the agent dies before its ack — the delivery
+	//    FAILS (never success), and the failure must surface, not vanish.
+	e.spawner.agents[0].answerErr = errors.New("agent died before its pf/answer ack")
+	if code, err := c.doAs("POST", "/jobs/"+e.wi+"/answer", relay, &out, "usr_worker"); err != nil || code != 500 {
+		t.Fatalf("failed delivery must surface as a 500, got %d %v body=%v", code, err, out)
+	}
+	if len(e.spawner.agents[0].answers) != 0 {
+		t.Fatal("the failed delivery must not count as applied")
+	}
+
+	// 2. Agent re-derivation (same capsule, same session): the SAME
+	//    answer_id is re-submitted — the failure did NOT consume the
+	//    idempotency entry — and is delivered exactly once.
+	e.spawner.agents[0].answerErr = nil // the re-derived agent acks
+	if code, err := c.doAs("POST", "/jobs/"+e.wi+"/answer", relay, &out, "usr_worker"); err != nil || code != 200 {
+		t.Fatalf("the same answer must be re-deliverable after re-derivation, got %d %v body=%v", code, err, out)
+	}
+	if len(e.spawner.agents[0].answers) != 1 {
+		t.Fatalf("the answer must be delivered exactly once, got %d", len(e.spawner.agents[0].answers))
+	}
+
+	// 3. The successful delivery CONSUMED the entry: a replay of the same
+	//    answer_id returns the first outcome and never delivers again
+	//    (the question is also consumed by the agent's atomic write).
+	if code, err := c.doAs("POST", "/jobs/"+e.wi+"/answer", relay, &out, "usr_worker"); err != nil || code != 200 {
+		t.Fatalf("replay of a finalized answer must be idempotent-200, got %d %v body=%v", code, err, out)
+	}
+	if len(e.spawner.agents[0].answers) != 1 {
+		t.Fatal("the replay must be refused a second effect (delivered once, never twice)")
 	}
 }
 

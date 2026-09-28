@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/capsule"
+	"github.com/silgrid/polyforge/internal/core/testsupport"
 )
 
 // aliveProc starts a real group-leader process and returns its pid and a
@@ -372,7 +373,8 @@ func TestRecoverZombieLeaderRederivesAfterCollection(t *testing.T) {
 	if err := store.UpsertJob(st, Job{
 		WorkItemID: wi, CapsuleID: capc.ID(), Generation: 1,
 		HarnessAdapter: "pi", HarnessSessionID: "sess_rc02_1",
-		MainAgentPID: pgid, MainAgentStartedAt: startedAt, Status: JobRunning,
+		MainAgentPID: pgid, MainAgentStartedAt: startedAt,
+		BundleName: "demo", BundleDigest: "sha256:demo", Status: JobRunning,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -382,11 +384,17 @@ func TestRecoverZombieLeaderRederivesAfterCollection(t *testing.T) {
 		AIHubURL: "http://127.0.0.1:1", APIKey: "pfk_x", MachineID: "m-01",
 		DataDir:       filepath.Join(dir, "daemon"),
 		WorkspaceRoot: ws,
+		WorkflowsDir:  filepath.Join(dir, "workflows"),
 		SkillsDir:     filepath.Join(dir, "skills"),
 		Adapter:       "pi", Version: "zombie-recover-test",
 	}
 	os.MkdirAll(filepath.Join(cfg.SkillsDir, "pf-execute"), 0o755)
 	os.WriteFile(filepath.Join(cfg.SkillsDir, "pf-execute", "SKILL.md"), []byte("# pf-execute\n"), 0o644)
+	// The daemon's own checkout carries the demo bundle so the
+	// re-derivation's materialization gate can run (F2-3).
+	if err := testsupport.MakeDemoBundle(dir); err != nil {
+		t.Fatal(err)
+	}
 	d, err := New(cfg, spawner)
 	if err != nil {
 		t.Fatal(err)

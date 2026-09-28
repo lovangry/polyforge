@@ -8,13 +8,14 @@ output:
   properties:
     commits:
       type: array
+      minItems: 1
       items:
         type: object
         required: [sha, message]
         properties:
           sha: { type: string }
           message: { type: string }
-      description: Every commit actually made, in the order committed.
+      description: Every commit actually made, in the order committed. At least one commit is required (minItems 1) - a completed fix step that changed nothing is not a valid completion (report infeasibility honestly instead, never an empty list).
     build_status:
       type: string
       enum: [green, red]
@@ -62,6 +63,7 @@ reasonable effort, do not fabricate `build_status: green`. Leave it `red`, expla
 
 ## Output
 
-Emit the final JSON object per the schema above: every commit made, the final build
+Emit the final JSON object per the schema above: every commit made (at least one - the
+schema rejects an empty list), the final build
 status, whether the root cause itself is addressed, and a prose summary for the next
 reader.

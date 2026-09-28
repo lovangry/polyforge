@@ -18,10 +18,31 @@ output:
         properties:
           severity: { type: string, enum: [blocking, non-blocking] }
           detail: { type: string }
-      description: Individual review findings, whether or not they are severe enough to fail the gate.
+      description: Individual review findings, whether or not they are severe enough to fail the gate. A pass verdict with a blocking finding is self-contradictory - the schema's oneOf forbids it.
     fail_reason:
       type: string
-      description: Required when verdict is fail — a synthesis of the blocking findings, to be carried back to code as its pending_rewind_input.
+      description: Required when verdict is fail — a synthesis of the blocking findings, to be carried back to code as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
+  oneOf:
+    - description: A pass verdict - zero blocking findings; any recorded findings must be non-blocking.
+      properties:
+        verdict: { type: string, enum: [pass] }
+        findings:
+          type: array
+          items:
+            type: object
+            properties:
+              severity: { type: string, enum: [non-blocking] }
+      required: [verdict]
+    - description: A fail verdict - at least one blocking finding exists; requires a non-empty fail_reason synthesizing them.
+      properties:
+        verdict: { type: string, enum: [fail] }
+        fail_reason: { type: string, minLength: 1 }
+        findings:
+          type: array
+          contains:
+            properties:
+              severity: { type: string, enum: [blocking] }
+      required: [verdict, fail_reason]
 ---
 
 # review
@@ -44,11 +65,13 @@ rather than merely passing on a technicality.
 3. Record every finding in `findings`, tagged `blocking` or `non-blocking`. Non-blocking
    findings (style nits, minor improvement suggestions) do not fail the gate but should
    still be recorded — they are useful history even when the overall verdict is pass.
-4. `verdict: pass` only if there are zero blocking findings.
-5. `verdict: fail` if there is at least one blocking finding. Synthesize the blocking
+4. `verdict: pass` only if there are zero blocking findings — the schema enforces this:
+   under a pass verdict every recorded finding must be `non-blocking`.
+5. `verdict: fail` if there is at least one blocking finding (the schema's fail branch
+   requires the findings list to contain one). Synthesize the blocking
    findings into `fail_reason` — concrete and actionable enough that `code`'s next attempt
    (which receives this text as its `pending_rewind_input`) does not have to guess what to
-   change.
+   change. The schema requires `fail_reason` on any fail verdict.
 
 ## Position in the flow
 

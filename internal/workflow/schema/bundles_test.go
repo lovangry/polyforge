@@ -34,6 +34,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/testutil"
 	"github.com/silgrid/polyforge/internal/workflow/digest"
+	"gopkg.in/yaml.v3"
 )
 
 // The step kind catalog observed in feature-full and fixed by
@@ -77,6 +78,300 @@ func candidateProblems(where string, cands []string) []string {
 			probs = append(probs, fmt.Sprintf("%s model_candidates: duplicate element %q", where, c))
 		}
 		seen[c] = true
+	}
+	return probs
+}
+
+// --- output schema contract (fail-closed round) ---
+//
+// Enforcement reality, which decides the shape of every check below: there
+// is NO machine JSON-Schema validator in the execution path. AIHub's creation
+// transaction does not even parse agents frontmatter (02 §4.5); the runtime
+// conformance check is the WI Agent's own reading of the schema (pf-execute
+// §4 step 4, INV-1h: non-conforming output = infrastructure failure), backed
+// by the M4/M5 mechanical evidence channels in execution.json. The layer that
+// CAN mechanically guarantee something about the schemas is this test: it
+// parses each output schema into a plain map and asserts the structural
+// invariants the reference bundles must encode. Every invariant below is also
+// expressed with standard draft-07 keywords only (required/enum/minItems/
+// minLength/oneOf/contains), so wiring a real validator into the runtime later
+// enforces the same contract with no schema rewrite.
+
+// asMap / asSlice / strSlice / intVal / dig are small navigation helpers over
+// the yaml-decoded schema map (map[string]any trees of any).
+func asMap(v any) map[string]any {
+	m, _ := v.(map[string]any)
+	return m
+}
+
+func asSlice(v any) []any {
+	s, _ := v.([]any)
+	return s
+}
+
+func strSlice(v any) []string {
+	var out []string
+	for _, e := range asSlice(v) {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func intVal(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	}
+	return 0, false
+}
+
+func hasStr(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// dig walks a chain of mapping keys through a decoded schema tree, returning
+// nil as soon as any step is absent or not a mapping.
+func dig(v any, path ...string) any {
+	cur := v
+	for _, k := range path {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur = m[k]
+	}
+	return cur
+}
+
+// outputSchemaProblems validates one agent file's output schema against the
+// reference-bundle output contract. raw is the whole file; frontmatter must
+// already have passed ValidateStepSkill (bundleProblems calls this only after
+// a clean ValidateStepSkill, and the negative table calls it on synthetic
+// but structurally valid frontmatter).
+//
+// Rules, generic-first:
+//   - every REQUIRED array property declares minItems >= 1 (an empty list is
+//     an unfilled template — WF-6/WF-8 class);
+//   - any schema whose verdict enum carries both pass and fail (a gate in the
+//     executor's convention) carries a two-branch oneOf split: the fail branch
+//     requires a non-empty fail_reason (minLength 1), the pass branch must
+//     not (WF-1/WF-9 class — no verdict-vocabulary or conditionality gaps);
+//   - evidence (root-cause) requires minItems >= 1 and item-level
+//     kind/ref/detail (WF-2);
+//   - ready_for_spec (feature-full grill) admits only [true] (WF-7 — false is
+//     not a valid completion);
+//   - targeted, keyed by reference-bundle step id: verification (checks
+//     required + minItems, no `fail` check status under a pass verdict,
+//     and a `fail`-status check REQUIRED under a fail verdict — an all-pass
+//     checks array riding a fail verdict is the fix-round-2 contradiction),
+//     review (no `blocking` severity under pass; a `blocking` finding must
+//     exist under fail), release (pass requires non-empty version + at least
+//     one artifacts_published), e2e-run (authored_titles echo required),
+//     e2e-author (scenario_titles must itself be uniqueItems - the
+//     producer side of the echoed pair).
+func outputSchemaProblems(stepID string, raw []byte) []string {
+	front, _, ok := SplitFrontmatter(raw)
+	if !ok {
+		return nil // ValidateStepSkill reports the missing frontmatter
+	}
+	var sk StepSkillFrontmatter
+	if err := yaml.Unmarshal(front, &sk); err != nil {
+		return nil // ValidateStepSkill reports the parse failure
+	}
+	out := sk.Output
+	if out == nil {
+		return nil // ValidateStepSkill reports the missing output
+	}
+	var probs []string
+	add := func(format string, args ...any) {
+		probs = append(probs, fmt.Sprintf("agents/%s.md output schema: "+format, append([]any{stepID}, args...)...))
+	}
+	props := asMap(out["properties"])
+
+	// Generic: required arrays must be non-empty-able only via minItems >= 1.
+	for _, name := range strSlice(out["required"]) {
+		p := asMap(props[name])
+		if t, _ := p["type"].(string); t != "array" {
+			continue
+		}
+		if mi, ok := intVal(p["minItems"]); !ok || mi < 1 {
+			add("required array property %q must declare minItems >= 1 (an empty list is an unfilled template)", name)
+		}
+	}
+
+	// Gate split: verdict enum carrying both pass and fail ⇒ oneOf split
+	// with a fail branch that requires a non-empty fail_reason.
+	verdictEnum := strSlice(dig(props, "verdict", "enum"))
+	var passBr, failBr map[string]any
+	if hasStr(verdictEnum, "pass") && hasStr(verdictEnum, "fail") {
+		branches := asSlice(out["oneOf"])
+		if len(branches) != 2 {
+			add("verdict gate must carry a two-branch oneOf split (pass branch / fail branch)")
+		} else {
+			for _, b := range branches {
+				bp := asMap(b)
+				be := strSlice(dig(bp, "properties", "verdict", "enum"))
+				if len(be) == 1 && be[0] == "pass" {
+					passBr = bp
+				} else if len(be) == 1 && be[0] == "fail" {
+					failBr = bp
+				}
+			}
+			if passBr == nil || failBr == nil {
+				add("oneOf branches must be verdict-specific: one branch with verdict enum [pass], one with [fail]")
+				passBr, failBr = nil, nil
+			} else {
+				passReq := strSlice(passBr["required"])
+				failReq := strSlice(failBr["required"])
+				if !hasStr(passReq, "verdict") || !hasStr(failReq, "verdict") {
+					add("both oneOf branches must require verdict")
+				}
+				if !hasStr(failReq, "fail_reason") {
+					add("the fail branch must require fail_reason")
+				}
+				if hasStr(passReq, "fail_reason") {
+					add("the pass branch must not require fail_reason")
+				}
+				if ml, ok := intVal(dig(failBr, "properties", "fail_reason", "minLength")); !ok || ml < 1 {
+					add("the fail branch fail_reason must declare minLength >= 1")
+				}
+			}
+		}
+	}
+
+	// Shape-keyed: evidence items must carry kind/ref/detail and be non-empty.
+	if ev := asMap(props["evidence"]); ev != nil {
+		if mi, ok := intVal(ev["minItems"]); !ok || mi < 1 {
+			add("evidence must declare minItems >= 1")
+		}
+		itemReq := strSlice(dig(ev, "items", "required"))
+		for _, k := range []string{"kind", "ref", "detail"} {
+			if !hasStr(itemReq, k) {
+				add("evidence items must require %q", k)
+			}
+		}
+	}
+
+	// Shape-keyed: ready_for_spec admits only true.
+	if rfs := asMap(props["ready_for_spec"]); rfs != nil {
+		rawEnum := asSlice(rfs["enum"])
+		if len(rawEnum) != 1 || rawEnum[0] != true {
+			add("ready_for_spec must be enum: [true] - the only valid completion asserts readiness")
+		}
+	}
+
+	// Targeted rules keyed by reference-bundle step id.
+	switch stepID {
+	case "verification":
+		if !hasStr(strSlice(out["required"]), "checks") {
+			add("verification output must require checks (a verdict over zero checks is an unfilled template)")
+		}
+		if ck := asMap(props["checks"]); ck != nil {
+			if mi, ok := intVal(ck["minItems"]); !ok || mi < 1 {
+				add("verification checks must declare minItems >= 1")
+			}
+		}
+		if passBr != nil {
+			stEnum := strSlice(dig(passBr, "properties", "checks", "items", "properties", "status", "enum"))
+			if len(stEnum) == 0 {
+				add("verification pass branch must restrict check status (items properties status enum) and exclude fail")
+			} else if hasStr(stEnum, "fail") {
+				add("verification pass branch must not admit a check status of fail (a pass verdict with a failing check is self-contradictory)")
+			}
+		}
+		if failBr != nil {
+			// F2-5 (fix round 2): a fail verdict must mechanically carry at
+			// least one check with status fail (draft-07 contains) — the old
+			// fail branch accepted an all-pass checks array, so
+			// {verdict:fail, fail_reason, checks:[{status:pass}]} validated.
+			if stEnum := strSlice(dig(failBr, "properties", "checks", "contains", "properties", "status", "enum")); len(stEnum) != 1 || stEnum[0] != "fail" {
+				add("verification fail branch must require checks to contain a failing check (contains with status enum exactly [fail]) — an all-pass checks array cannot ride a fail verdict")
+			}
+			if !hasStr(strSlice(dig(failBr, "properties", "checks", "contains", "required")), "status") {
+				add("verification fail branch contains schema must require status (an item without the field would satisfy it vacuously)")
+			}
+		}
+	case "review":
+		if passBr != nil {
+			sevEnum := strSlice(dig(passBr, "properties", "findings", "items", "properties", "severity", "enum"))
+			if len(sevEnum) == 0 {
+				add("review pass branch must restrict finding severity (items properties severity enum) and exclude blocking")
+			} else if hasStr(sevEnum, "blocking") {
+				add("review pass branch must not admit a blocking finding severity (a pass verdict with a blocking finding is self-contradictory)")
+			}
+		}
+		if failBr != nil {
+			if !hasStr(strSlice(dig(failBr, "properties", "findings", "contains", "properties", "severity", "enum")), "blocking") {
+				add("review fail branch must require findings to contain a blocking finding (contains)")
+			}
+		}
+	case "release":
+		if passBr != nil {
+			preq := strSlice(passBr["required"])
+			if !hasStr(preq, "version") {
+				add("release pass branch must require version (an unfilled template must not validate as a completed release)")
+			}
+			if !hasStr(preq, "artifacts_published") {
+				add("release pass branch must require artifacts_published (an unfilled template must not validate as a completed release)")
+			}
+			if ap := asMap(dig(passBr, "properties", "artifacts_published")); ap != nil {
+				if mi, ok := intVal(ap["minItems"]); !ok || mi < 1 {
+					add("release pass branch artifacts_published must declare minItems >= 1")
+				}
+			} else {
+				add("release pass branch must restate artifacts_published with minItems >= 1")
+			}
+			if v := asMap(dig(passBr, "properties", "version")); v != nil {
+				if ml, ok := intVal(v["minLength"]); !ok || ml < 1 {
+					add("release pass branch version must declare minLength >= 1")
+				}
+			} else {
+				add("release pass branch must restate version with minLength >= 1")
+			}
+		}
+	case "e2e-run":
+		if !hasStr(strSlice(out["required"]), "authored_titles") {
+			add("e2e-run output must require authored_titles (the verbatim echo of e2e-author's scenario_titles)")
+		}
+		// F2-6 (fix round 2): the echo must be uniqueItems — a duplicated
+		// title cannot correspond 1:1 with the authored scenarios, which is
+		// the whole point of the echo. The element-for-element equality
+		// itself is not expressible in draft-07; that half lives in
+		// pf-execute §4's echoed-field cross-check (executor-side), flagged
+		// as a design-ruling finding for a future runtime validator.
+		if at := asMap(props["authored_titles"]); at != nil {
+			if uniq, ok := at["uniqueItems"].(bool); !ok || !uniq {
+				add("e2e-run authored_titles must declare uniqueItems: true (a duplicated echo cannot correspond 1:1 with the authored scenarios)")
+			}
+		}
+	case "e2e-author":
+		// R3-F3: the producer side of the echoed pair must constrain the
+		// SAME uniqueness the consumer demands. e2e-run echoes
+		// scenario_titles verbatim under its own uniqueItems constraint,
+		// so a producer schema without uniqueItems admits a duplicated
+		// list that leaves the echo step with NO valid response (echoing
+		// it violates uniqueItems; deduping it violates the exact-echo
+		// instruction). The two sides of a schema-constrained echo pair
+		// must agree.
+		if !hasStr(strSlice(out["required"]), "scenario_titles") {
+			add("e2e-author output must require scenario_titles (e2e-run echoes it verbatim as its authored_titles cross-check)")
+		}
+		if st := asMap(props["scenario_titles"]); st != nil {
+			if uniq, ok := st["uniqueItems"].(bool); !ok || !uniq {
+				add("e2e-author scenario_titles must declare uniqueItems: true (e2e-run must echo it verbatim under its own uniqueItems constraint - a duplicated authored list leaves the echo step with no valid response)")
+			}
+		}
 	}
 	return probs
 }
@@ -216,7 +511,8 @@ func bundleProblems(bundleDir string) (problems []string, notices []string) {
 		}
 	}
 
-	// --- step skill frontmatter (§4.4): parseable description/tools/output ---
+	// --- step skill frontmatter (§4.4): parseable description/tools/output,
+	// plus the fail-closed output-schema contract (see outputSchemaProblems) ---
 	for _, st := range fm.Steps {
 		raw, err := os.ReadFile(filepath.Join(agentsDir, st.ID+".md"))
 		if err != nil {
@@ -224,7 +520,9 @@ func bundleProblems(bundleDir string) (problems []string, notices []string) {
 		}
 		if err := ValidateStepSkill(st.ID, string(raw)); err != nil {
 			add("agents/%s.md: %v", st.ID, err)
+			continue
 		}
+		problems = append(problems, outputSchemaProblems(st.ID, raw)...)
 	}
 
 	// --- bundle digest (01 §4.5): computable, stable, well-formed ---
@@ -304,7 +602,7 @@ steps:
 # demo body
 `,
 		"agents/code.md":         "---\nname: code\ndescription: demo code step\ntools: [read, bash]\noutput:\n  type: object\n  required: [build_status]\n  properties:\n    build_status: { type: string }\n---\n# code\n",
-		"agents/verification.md": "---\nname: verification\ndescription: demo gate step\ntools: [read, bash]\noutput:\n  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n---\n# verification\n",
+		"agents/verification.md": "---\nname: verification\ndescription: demo gate step\ntools: [read, bash]\noutput:\n  type: object\n  required: [verdict, checks]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    checks:\n      type: array\n      minItems: 1\n      items: { type: object, required: [name, status] }\n    fail_reason: { type: string }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n        checks:\n          type: array\n          items:\n            type: object\n            properties:\n              status: { type: string, enum: [pass, skipped] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n        checks:\n          type: array\n          minItems: 1\n          contains:\n            type: object\n            required: [status]\n            properties:\n              status: { type: string, enum: [fail] }\n      required: [verdict, fail_reason]\n---\n# verification\n",
 	}
 }
 
@@ -445,6 +743,205 @@ func TestMalformedBundleFixtures(t *testing.T) {
 				}
 			}
 			t.Fatalf("no reported problem contains %q; problems: %v", tc.want, problems)
+		})
+	}
+}
+
+// mkAgent builds a structurally valid step skill (frontmatter + body) around
+// one output schema, for the negative table below: ValidateStepSkill would
+// accept every one of these — only outputSchemaProblems catches the contract
+// violations.
+func mkAgent(name, outputYAML string) string {
+	return "---\nname: " + name + "\ndescription: synthetic contract fixture\ntools: [read]\noutput:\n" +
+		outputYAML + "\n---\n# " + name + "\n"
+}
+
+// gateOutput is the contract-conforming gate schema the negative table mutates:
+// verdict [pass, fail] with the two-branch oneOf split.
+const gateOutput = `  type: object
+  required: [verdict]
+  properties:
+    verdict: { type: string, enum: [pass, fail] }
+    fail_reason: { type: string }
+  oneOf:
+    - properties:
+        verdict: { type: string, enum: [pass] }
+      required: [verdict]
+    - properties:
+        verdict: { type: string, enum: [fail] }
+        fail_reason: { type: string, minLength: 1 }
+      required: [verdict, fail_reason]`
+
+// TestOutputSchemaContract is the positive control for the contract checker:
+// the canonical gate shape above must produce zero problems, otherwise every
+// expected-failure below is suspect.
+func TestOutputSchemaContract(t *testing.T) {
+	if probs := outputSchemaProblems("some-gate", []byte(mkAgent("some-gate", gateOutput))); len(probs) != 0 {
+		for _, p := range probs {
+			t.Errorf("%s", p)
+		}
+	}
+}
+
+// TestOutputSchemaProblemsNegatives proves the output-schema contract checks
+// fire on the classic authoring mistakes: a verdict gate without the oneOf
+// split, a fail branch that does not require (a non-empty) fail_reason, a
+// required array without minItems, the release pass branch that still admits
+// an unfilled template, a pass verdict that admits contradictory evidence
+// (failing check / blocking finding), a fail verdict that admits an all-pass
+// checks array (the fix-round-2 contradiction), a missing authored_titles
+// echo, a ready_for_spec that still admits false, and evidence items without
+// detail.
+// These schemas all PASS ValidateStepSkill — the contract checker is the only
+// layer that rejects them, matching the enforcement reality (no machine
+// JSON-Schema validator exists in the execution path).
+func TestOutputSchemaProblemsNegatives(t *testing.T) {
+	cases := []struct {
+		name   string
+		stepID string
+		output string
+		want   string // required substring of at least one reported problem
+	}{
+		{
+			name:   "verdict gate without oneOf split",
+			stepID: "verification",
+			output: "  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }",
+			want:   "oneOf",
+		},
+		{
+			name:   "fail branch missing fail_reason",
+			stepID: "verification",
+			output: "  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n      required: [verdict]",
+			want:   "fail branch must require fail_reason",
+		},
+		{
+			name:   "fail branch fail_reason without minLength",
+			stepID: "verification",
+			output: "  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string }\n      required: [verdict, fail_reason]",
+			want:   "minLength",
+		},
+		{
+			name:   "required array without minItems",
+			stepID: "code",
+			output: "  type: object\n  required: [commits]\n  properties:\n    commits:\n      type: array\n      items: { type: string }",
+			want:   "minItems",
+		},
+		{
+			name:   "release pass branch without artifacts_published",
+			stepID: "release",
+			output: "  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    version: { type: string, minLength: 1 }\n    artifacts_published:\n      type: array\n      items: { type: string }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n        version: { type: string, minLength: 1 }\n      required: [verdict, version]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n      required: [verdict, fail_reason]",
+			want:   "artifacts_published",
+		},
+		{
+			name:   "release pass branch artifacts_published without minItems",
+			stepID: "release",
+			output: "  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    version: { type: string, minLength: 1 }\n    artifacts_published:\n      type: array\n      items: { type: string }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n        version: { type: string, minLength: 1 }\n        artifacts_published:\n          type: array\n          items: { type: string }\n      required: [verdict, version, artifacts_published]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n      required: [verdict, fail_reason]",
+			want:   "minItems",
+		},
+		{
+			name:   "verification pass branch without status narrowing",
+			stepID: "verification",
+			output: "  type: object\n  required: [verdict, checks]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    checks:\n      type: array\n      minItems: 1\n      items: { type: object, required: [name, status] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n      required: [verdict, fail_reason]",
+			want:   "restrict check status",
+		},
+		{
+			name:   "verification pass branch admits a failing check",
+			stepID: "verification",
+			output: "  type: object\n  required: [verdict, checks]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    checks:\n      type: array\n      minItems: 1\n      items: { type: object, required: [name, status] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n        checks:\n          type: array\n          items:\n            type: object\n            properties:\n              status: { type: string, enum: [pass, fail, skipped] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n      required: [verdict, fail_reason]",
+			want:   "self-contradictory",
+		},
+		{
+			name:   "verification without checks required",
+			stepID: "verification",
+			output: "  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    checks:\n      type: array\n      minItems: 1\n      items: { type: object, required: [name, status] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n      required: [verdict, fail_reason]",
+			want:   "require checks",
+		},
+		{
+			name:   "verification fail branch without a contains-failing-check requirement",
+			stepID: "verification",
+			output: "  type: object\n  required: [verdict, checks]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    checks:\n      type: array\n      minItems: 1\n      items: { type: object, required: [name, status] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n      required: [verdict, fail_reason]",
+			want:   "contain a failing check",
+		},
+		{
+			name:   "verification fail branch contains admits non-fail status",
+			stepID: "verification",
+			output: "  type: object\n  required: [verdict, checks]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    checks:\n      type: array\n      minItems: 1\n      items: { type: object, required: [name, status] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n        checks:\n          type: array\n          minItems: 1\n          contains:\n            type: object\n            required: [status]\n            properties:\n              status: { type: string, enum: [pass, fail, skipped] }\n      required: [verdict, fail_reason]",
+			want:   "contain a failing check",
+		},
+		{
+			name:   "verification fail branch contains does not require status",
+			stepID: "verification",
+			output: "  type: object\n  required: [verdict, checks]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    checks:\n      type: array\n      minItems: 1\n      items: { type: object, required: [name, status] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n        checks:\n          type: array\n          minItems: 1\n          contains:\n            type: object\n            properties:\n              status: { type: string, enum: [fail] }\n      required: [verdict, fail_reason]",
+			want:   "must require status",
+		},
+		{
+			name:   "review pass branch without severity narrowing",
+			stepID: "review",
+			output: "  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    findings:\n      type: array\n      items:\n        type: object\n        required: [severity, detail]\n        properties:\n          severity: { type: string, enum: [blocking, non-blocking] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n      required: [verdict, fail_reason]",
+			want:   "restrict finding severity",
+		},
+		{
+			name:   "review pass branch admits a blocking finding",
+			stepID: "review",
+			output: "  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    findings:\n      type: array\n      items:\n        type: object\n        required: [severity, detail]\n        properties:\n          severity: { type: string, enum: [blocking, non-blocking] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n        findings:\n          type: array\n          items:\n            type: object\n            properties:\n              severity: { type: string, enum: [blocking, non-blocking] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n      required: [verdict, fail_reason]",
+			want:   "self-contradictory",
+		},
+		{
+			name:   "review fail branch without a contains-blocking requirement",
+			stepID: "review",
+			output: "  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    findings:\n      type: array\n      items:\n        type: object\n        required: [severity, detail]\n        properties:\n          severity: { type: string, enum: [blocking, non-blocking] }\n  oneOf:\n    - properties:\n        verdict: { type: string, enum: [pass] }\n        findings:\n          type: array\n          items:\n            type: object\n            properties:\n              severity: { type: string, enum: [non-blocking] }\n      required: [verdict]\n    - properties:\n        verdict: { type: string, enum: [fail] }\n        fail_reason: { type: string, minLength: 1 }\n      required: [verdict, fail_reason]",
+			want:   "contains",
+		},
+		{
+			name:   "e2e-run without authored_titles",
+			stepID: "e2e-run",
+			output: "  type: object\n  required: [results_path, scenarios]\n  properties:\n    results_path: { type: string }\n    scenarios:\n      type: array\n      minItems: 1\n      items: { type: object, required: [title, status] }",
+			want:   "authored_titles",
+		},
+		{
+			name:   "e2e-run authored_titles without uniqueItems",
+			stepID: "e2e-run",
+			output: "  type: object\n  required: [results_path, scenarios, authored_titles]\n  properties:\n    results_path: { type: string }\n    authored_titles:\n      type: array\n      minItems: 1\n      items: { type: string }\n    scenarios:\n      type: array\n      minItems: 1\n      items: { type: object, required: [title, status] }",
+			want:   "uniqueItems",
+		},
+		{
+			name:   "e2e-author without scenario_titles required",
+			stepID: "e2e-author",
+			output: "  type: object\n  required: [scenarios_path]\n  properties:\n    scenarios_path: { type: string }\n    scenario_titles:\n      type: array\n      minItems: 1\n      uniqueItems: true\n      items: { type: string }",
+			want:   "scenario_titles",
+		},
+		{
+			name:   "e2e-author scenario_titles without uniqueItems",
+			stepID: "e2e-author",
+			output: "  type: object\n  required: [scenarios_path, scenario_titles]\n  properties:\n    scenarios_path: { type: string }\n    scenario_titles:\n      type: array\n      minItems: 1\n      items: { type: string }",
+			want:   "uniqueItems",
+		},
+		{
+			name:   "ready_for_spec still admits false",
+			stepID: "grill",
+			output: "  type: object\n  required: [qa_log, ready_for_spec]\n  properties:\n    qa_log: { type: string }\n    ready_for_spec: { type: boolean, enum: [true, false] }",
+			want:   "enum: [true]",
+		},
+		{
+			name:   "evidence items without required detail",
+			stepID: "root-cause",
+			output: "  type: object\n  required: [verdict, root_cause, evidence]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n    root_cause: { type: string }\n    evidence:\n      type: array\n      minItems: 1\n      items:\n        type: object\n        required: [kind, ref]\n        properties:\n          kind: { type: string }\n          ref: { type: string }\n          detail: { type: string }",
+			want:   "detail",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			probs := outputSchemaProblems(tc.stepID, []byte(mkAgent(tc.stepID, tc.output)))
+			if len(probs) == 0 {
+				t.Fatalf("expected a contract problem containing %q, got none", tc.want)
+			}
+			for _, p := range probs {
+				if strings.Contains(p, tc.want) {
+					return
+				}
+			}
+			t.Fatalf("no reported problem contains %q; problems: %v", tc.want, probs)
 		})
 	}
 }

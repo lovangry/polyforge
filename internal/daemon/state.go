@@ -31,6 +31,14 @@ type Job struct {
 	HarnessSessionID   string `json:"harness_session_id"`
 	MainAgentPID       int    `json:"main_agent_pid"`
 	MainAgentStartedAt string `json:"main_agent_started_at"`
+	// BundleName/BundleDigest carry the WI's immutable bundle reference
+	// (02 §4.4) into the persisted record, so the crash-recovery
+	// re-derivation can run the materialization trust gate (03 §4.5/§7)
+	// WITHOUT any data-plane read: the pinned identity is already local.
+	// Absent on pre-upgrade rows — those fail closed on the gate and are
+	// left for human attention rather than silently re-derived.
+	BundleName   string `json:"bundle_name,omitempty"`
+	BundleDigest string `json:"bundle_digest,omitempty"`
 	// Status: running | interrupting | sealing (04 §4.1).
 	Status string `json:"status"`
 }

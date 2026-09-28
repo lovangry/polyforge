@@ -11,17 +11,19 @@ output:
       description: Capsule-relative path to the written plan artifact (artifacts/plan.md).
     step_ids:
       type: array
+      minItems: 1
       items: { type: string }
-      description: Ordered ids of every implementation step declared in the plan. One entry is the correct answer for a genuinely single-step chore.
+      description: Ordered ids of every implementation step declared in the plan. One entry is the correct answer for a genuinely single-step chore. At least one is required (minItems 1) - a plan with zero steps is an unfilled template.
     touched_files:
       type: array
+      minItems: 1
       items:
         type: object
         required: [path, intent]
         properties:
           path: { type: string, description: "repo-relative path" }
           intent: { type: string, enum: [read, write] }
-      description: Deduplicated list of every file the plan declares as read or written, across all steps (write wins over read for the same path).
+      description: Deduplicated list of every file the plan declares as read or written, across all steps (write wins over read for the same path). At least one entry is required (minItems 1) - a plan that touches nothing leaves `code` nothing to commit.
 ---
 
 # plan

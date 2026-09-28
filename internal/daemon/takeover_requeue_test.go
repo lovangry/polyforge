@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/silgrid/polyforge/internal/core/testsupport"
 )
 
 // takeoverStub is a scripted Core that COUNTS force-takeover calls and
@@ -69,13 +71,17 @@ func takeoverEnv(t *testing.T, wi, url string) Config {
 	home := filepath.Join(dir, "home")
 	for _, d := range []string{
 		filepath.Join(home, "skills", "pf-execute"),
-		filepath.Join(home, "workflows"),
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(home, "skills", "pf-execute", "SKILL.md"), []byte("# pf-execute\nrun\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The daemon's own workflows checkout must carry the demo bundle: the
+	// spawn path materializes the snapshot from it (03 §4.5, fix round 2).
+	if err := testsupport.MakeDemoBundle(home); err != nil {
 		t.Fatal(err)
 	}
 	return Config{

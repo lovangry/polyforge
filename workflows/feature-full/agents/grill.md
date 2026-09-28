@@ -11,7 +11,8 @@ output:
       description: Capsule-relative path to the running grill Q&A document (artifacts/grill-qa.md).
     ready_for_spec:
       type: boolean
-      description: True once every material ambiguity has been resolved by an answer; false means the step still has open questions (should not normally be reached, since needs_input keeps the step in place until answered).
+      enum: [true]
+      description: Must be true in any final output - the schema accepts no other value, so a false value is not a valid completion. A state that still has open questions belongs in the step (keep asking via needs_input) or in an honest incomplete hand-off, never in a "done" answer.
     summary:
       type: string
       description: One-paragraph plain-language restatement of the confirmed intent, for the spec author to open with.
@@ -56,6 +57,7 @@ every ambiguity you can find as a question, not an assumption.
 
 ## Output
 
-Emit the final JSON object per the schema above once the questioning is complete: the
-path to the Q&A log and a short plain-language restatement of confirmed intent that
-`spec` can open with.
+Emit the final JSON output per the schema above once the questioning is complete:
+`ready_for_spec` must be `true` (the schema accepts nothing else - a step that still has
+open questions is not done), plus the path to the Q&A log and a short plain-language
+restatement of confirmed intent that `spec` can open with.

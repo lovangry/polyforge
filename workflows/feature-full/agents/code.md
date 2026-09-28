@@ -8,6 +8,7 @@ output:
   properties:
     commits:
       type: array
+      minItems: 1
       items:
         type: object
         required: [step_id, sha, message]
@@ -15,7 +16,7 @@ output:
           step_id: { type: string }
           sha: { type: string }
           message: { type: string }
-      description: One entry per plan step actually committed, in the order committed.
+      description: One entry per plan step actually committed, in the order committed. At least one commit is required (minItems 1) - a completed code step that changed nothing is not a valid completion (report infeasibility honestly instead, never an empty list).
     build_status:
       type: string
       enum: [green, red]
@@ -62,5 +63,6 @@ trusts this step's word for it.
 ## Output
 
 Emit the final JSON object per the schema above: every commit actually made (step id, sha,
-message), the final build status, and a prose summary useful to the next reader
-(reviewer, or a future rewound instance of this very step).
+message - at least one; the schema rejects an empty list), the final build status, and a
+prose summary useful to the next reader (reviewer, or a future rewound instance of this
+very step).

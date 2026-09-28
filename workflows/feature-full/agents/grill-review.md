@@ -15,7 +15,17 @@ output:
       description: Capsule-relative path to the grill Q&A document (artifacts/grill-qa.md), now including this step's appended confirmation section.
     fail_reason:
       type: string
-      description: Required when verdict is fail — the user's stated objection or requested change, verbatim or closely paraphrased. This is the text that will be carried back to spec as pending_rewind_input.
+      description: Required when verdict is fail — the user's stated objection or requested change, verbatim or closely paraphrased. This is the text that will be carried back to spec as pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
+  oneOf:
+    - description: The user confirmed the spec matches intent with no changes required.
+      properties:
+        verdict: { type: string, enum: [pass] }
+      required: [verdict]
+    - description: The user asked for changes - requires a non-empty fail_reason carrying their actual words.
+      properties:
+        verdict: { type: string, enum: [fail] }
+        fail_reason: { type: string, minLength: 1 }
+      required: [verdict, fail_reason]
 ---
 
 # grill-review
@@ -36,7 +46,8 @@ not grading the spec's writing quality, you are checking for a match against int
    remove the earlier section.
 4. If the user confirms with no changes requested: `verdict: pass`.
 5. If the user asks for any correction, however small: `verdict: fail`, and capture their
-   objection precisely in `fail_reason`. Do not soften, summarize away, or "fix it
+   objection precisely in `fail_reason` - required by the schema on any fail verdict. Do
+   not soften, summarize away, or "fix it
    yourself and call it pass" — a fail here is what drives the bounded rewind to `spec`
    (`on_fail: {action: rewind, target: spec}` in the workflow frontmatter), and the spec
    author on the next pass depends on `fail_reason` being the user's actual words.

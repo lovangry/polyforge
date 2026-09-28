@@ -4,7 +4,7 @@ description: Machine-checkable gate that the build, lint, and tests pass on the 
 tools: [read, bash]
 output:
   type: object
-  required: [verdict]
+  required: [verdict, checks]
   properties:
     verdict:
       type: string
@@ -12,6 +12,7 @@ output:
       description: pass means build/lint/tests all succeeded on the current tree; fail means at least one did not.
     checks:
       type: array
+      minItems: 1
       items:
         type: object
         required: [name, status]
@@ -19,10 +20,34 @@ output:
           name: { type: string }
           status: { type: string, enum: [pass, fail, skipped] }
           detail: { type: string }
-      description: Per-check breakdown (build, lint, tests, etc.), in the order run.
+      description: Per-check breakdown (build, lint, tests, etc.), in the order run. At least one check must be recorded (minItems 1) - a verdict over zero checks is an unfilled template.
     fail_reason:
       type: string
-      description: Required when verdict is fail - a precise description of what failed, to be carried back to code as its pending_rewind_input.
+      description: Required when verdict is fail — a precise description of what failed, to be carried back to code as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
+  oneOf:
+    - description: A pass verdict - every recorded check must itself be pass or an honestly-marked skipped; no check may be recorded as fail.
+      properties:
+        verdict: { type: string, enum: [pass] }
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              status: { type: string, enum: [pass, skipped] }
+      required: [verdict]
+    - description: A fail verdict - at least one check failed; requires a non-empty fail_reason. The contains constraint mechanically requires at least one check with status fail, so an all-pass checks array cannot ride a fail verdict (draft-07 mechanical only).
+      properties:
+        verdict: { type: string, enum: [fail] }
+        fail_reason: { type: string, minLength: 1 }
+        checks:
+          type: array
+          minItems: 1
+          contains:
+            type: object
+            required: [status]
+            properties:
+              status: { type: string, enum: [fail] }
+      required: [verdict, fail_reason]
 ---
 
 # verification
@@ -43,12 +68,13 @@ all. Your job is to run the project's build, lint, and test commands against the
    declaration: undeclared writes are a finding worth recording even when the checks
    pass — they signal a lock-scope gap. Record this as a `plan-conformance` check.
 4. Record every check run (name, pass/fail/skipped, and enough detail to reproduce a
-   failure) in `checks`.
-5. If every check passes: `verdict: pass`.
+   failure) in `checks` - at least one entry is required.
+5. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
+   pass verdict - the schema's oneOf rejects that combination as self-contradictory.
 6. If any check fails: `verdict: fail`, and write a precise `fail_reason` — the exact
-   failing command, its output excerpt, and which plan step's work it implicates. This
-   text becomes `code`'s `pending_rewind_input` on the next attempt; vague language
-   wastes the rewind.
+   failing command, its output excerpt, and which plan step's work it implicates. The
+   schema requires `fail_reason` here. This text becomes `code`'s `pending_rewind_input`
+   on the next attempt; vague language wastes the rewind.
 
 ## Honesty
 

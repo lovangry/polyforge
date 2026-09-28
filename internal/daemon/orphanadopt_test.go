@@ -24,6 +24,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/core/testsupport"
 )
 
 // crashAfterStartSpawner simulates the R3N-F6 crash point END-TO-END: it
@@ -56,6 +58,16 @@ func (s *crashAfterStartSpawner) Spawn(ctx context.Context, p SpawnParams) (Agen
 	return nil, errors.New("simulated crash after successful spawn")
 }
 
+// killOrphanGroup tears down the crash spawner's surviving process group.
+// Guarded: a zero pid must NEVER reach syscall.Kill(-0, ...) — Kill(0,
+// SIGKILL) signals the CALLER'S whole process group, which once turned a
+// mere fixture gap into the test binary itself being killed (exit 137).
+func killOrphanGroup(pgid int) {
+	if pgid > 0 {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+}
+
 // TestCrashAfterSpawnAdoptsSurvivingAgent (R3N-F6, the full regression):
 // crash between the successful Spawn and the jobs[] record → restart →
 // exactly ONE agent alive (the original, ADOPTED), no re-checkout, and
@@ -70,6 +82,12 @@ func TestCrashAfterSpawnAdoptsSurvivingAgent(t *testing.T) {
 	home := filepath.Join(dir, "home")
 	os.MkdirAll(filepath.Join(home, "skills", "pf-execute"), 0o755)
 	os.WriteFile(filepath.Join(home, "skills", "pf-execute", "SKILL.md"), []byte("# pf-execute\nrun\n"), 0o644)
+	// The daemon's own workflows checkout must carry the demo bundle: the
+	// spawn path materializes the snapshot from it (03 §4.5, fix round 2)
+	// BEFORE the derivation the crash point of this test depends on.
+	if err := testsupport.MakeDemoBundle(home); err != nil {
+		t.Fatal(err)
+	}
 	cfg := Config{
 		AIHubURL: ts.URL, APIKey: "pfk_stub", MachineID: "mac_or",
 		DataDir:       filepath.Join(home, "daemon"),
@@ -93,7 +111,7 @@ func TestCrashAfterSpawnAdoptsSurvivingAgent(t *testing.T) {
 		t.Fatal("the simulated crash must abort the first life's spawn")
 	}
 	orphanPID := crash.lastPID
-	defer func() { _ = syscall.Kill(-orphanPID, syscall.SIGKILL) }()
+	defer killOrphanGroup(orphanPID)
 	if orphanPID <= 0 {
 		t.Fatal("the crash spawner must have started a real agent")
 	}
@@ -172,6 +190,60 @@ func TestCrashAfterSpawnAdoptsSurvivingAgent(t *testing.T) {
 	q, _ := filepath.Glob(filepath.Join(cfg.WorkspaceRoot, "capsules", "_quarantine", wi))
 	if len(q) != 0 {
 		t.Fatalf("adoption must not re-checkout or quarantine the capsule: %v", q)
+	}
+	// R3-F1: the completed jobs[] record must carry the PINNED BUNDLE
+	// IDENTITY parsed from the journaled capsule_bootstrap — adoption
+	// deletes that journal row, so the record is the identity's only
+	// surviving carrier. An empty identity would doom the NEXT recovery.
+	if j.BundleName != "demo" || j.BundleDigest != "sha256:demo" {
+		t.Fatalf("the adopted jobs[] record must preserve the bundle identity from the journal, got name=%q digest=%q", j.BundleName, j.BundleDigest)
+	}
+
+	// --- third life (R3-F1): the adopted agent dies; the next boot's
+	// dead-agent recovery must re-derive it with the PRESERVED identity.
+	// Before the fix, the record's empty identity made the materialization
+	// trust gate fail closed (MaterializationComplete refuses an empty
+	// expectation even with a complete snapshot) and the job was left
+	// without an agent; with the fix the same-generation re-derivation
+	// proceeds. ---
+	if err := syscall.Kill(-orphanPID, syscall.SIGKILL); err != nil {
+		t.Fatalf("killing the adopted agent for the dead-agent recovery phase: %v", err)
+	}
+	// SIGKILL delivery is asynchronous: poll until the corpse is
+	// PROVABLY dead (state Z / gone) so the recovery below
+	// deterministically takes the dead-agent branch.
+	deadline := time.Now().Add(5 * time.Second)
+	for processAlive(orphanPID, row.MainAgentStartedAt) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	spawner3 := newIntegSpawner()
+	d3, err := New(cfg, spawner3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d3.RecoverFromState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(spawner3.spawns) != 1 {
+		t.Fatalf("R3-F1: the dead adopted agent must be re-derived with the preserved identity (spawns=%d; the empty expected identity fails the materialization gate and leaves the job without an agent)", len(spawner3.spawns))
+	}
+	if got := spawner3.spawns[0].SessionID; got != row.HarnessSessionID {
+		t.Fatalf("the re-derivation must reuse the same session id %q, got %q", row.HarnessSessionID, got)
+	}
+	d3.mu.Lock()
+	jr3 := d3.jobs[wi]
+	d3.mu.Unlock()
+	if jr3 == nil || jr3.agent == nil || !jr3.agent.Alive() {
+		t.Fatal("R3-F1: the re-derived agent must be live in the runtime")
+	}
+	// And the refreshed jobs[] record keeps the identity for the NEXT
+	// crash cycle.
+	st3, err := NewStateStore(cfg.DataDir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j3 := st3.FindJob(wi); j3 == nil || j3.BundleName != "demo" || j3.BundleDigest != "sha256:demo" {
+		t.Fatalf("the re-derived jobs[] record must keep the bundle identity, got %+v", j3)
 	}
 }
 

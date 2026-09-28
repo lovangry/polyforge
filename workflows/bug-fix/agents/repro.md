@@ -55,8 +55,9 @@ non-reproducible record poisons the whole lane.
 4. Do not debug. Do not form or record a hypothesis about the cause — that is
    `root-cause`'s job, and a repro document contaminated by premature theorizing biases
    the analysis that reads it.
-5. If this is a rewind re-entry (an `inconclusive` verdict from `root-cause` arrived as
-   your `pending_rewind_input`), read it first: it names what evidence was missing
+5. If this is a rewind re-entry (a `fail` - inconclusive - verdict from `root-cause`
+   arrived as your `pending_rewind_input`), read it first: it names what evidence was
+   missing
    (intermittent timing, missing log line, environment delta). Sharpen the repro
    accordingly — add logging around the failing path, tighten the trigger, capture more
    of the environment — rather than re-running the same script unchanged.
