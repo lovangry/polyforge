@@ -84,7 +84,7 @@ Daemon-to-Daemon 协议或互推通道，一切跨机信息经 AIHub HTTP 中转
   配置，这一步在部署 CLI 面之外，由参与 Pilot 的用户或运维按各 harness 自己的安装说明完成；
   该仓库任务实际需要的宿主工具链（如 git、目标语言的构建/测试工具链），由 repo 自身决定，vNext
   不声明、不物化、不做工具链闭包（`03-execution-capsule.md#§1.2`/§3.2）——工具链缺失时的失败路径权威在 `03-execution-capsule.md#§5.1`
-  `CAP-401`（R11，§10.2）；以及与 AIHub 的 HTTP 网络可达性。这份清单是 INV-12 在工作机侧的落地
+  `CAP-401`（R11，§10.2）；以及与 AIHub 的 HTTP 网络可达性。**对任务仓 origin 的 git push 可达与推送权限**（基线修订 polyforge#37 所加）：`ship` 交付桥（`04-local-runtime.md#§5.1`）在本机把已收尾 WI 的 `polyforge/<wi-slug>` 固定名分支推送到任务仓 origin，复用工作机既有 git 身份（SSH/credential helper），不新增任何凭证存储；`ship` 成为第 13 个用户动词（`00-architecture.md#§5.1`）后，仅有 clone 拉取权限的工作机不再充分——push 权限与可达性自此属于本清单的一部分。这份清单是 INV-12 在工作机侧的落地
   判据，与上一条 AIHub 存储依赖清单是两份独立的清单，检查/升级一方不隐含对另一方的任何断言。
 
 **新仓部署物与旧系统的并存（权威）**：vNext AIHub 是新 repo 实现的部署物
@@ -409,7 +409,7 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
   `repos/<name>/` 内），按 `03-execution-capsule.md#§10` 的待验证项实测 Claude 在该布局下的 agent 发现
   行为；若实测结论为「不做 git 根无法发现」，须在 claude 适配器层提供显式装载路径后才进入观测窗口
   （该项不得顺延到联调阶段之后）；
-  ③ **12 verbs 冒烟**：对路由 skill `verbs/` 下的 12 个用户动词 fragment
+  ③ **13 verbs 冒烟**：对路由 skill `verbs/` 下的 13 个用户动词 fragment（`ship` 为基线修订 polyforge#37 所加，需一个已 wrap 的 WI 与可用 push 凭证作前置）
   （`01-workflow-skills.md#§2.1`/§3）各执行一次端到端冒烟（用户意图 → 目标面：执行面动词打
   本机 Daemon、数据面动词经 `pf` CLI 直连 AIHub，分流表 `00-architecture.md#§5.1` → Core
   响应），断言意图映射覆盖面无缺漏；

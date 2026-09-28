@@ -28,8 +28,9 @@
   不是第四种执行模式，不得把 Drain 定义为停机，也不得把停机定义为一种「没活可干」的空闲状态
   （§3.5、INV-13）。
 - 定义 AIHub 的**对外面与接口分流**：AIHub 的对外客户端面有且只有 HTTP API 与 `pf` CLI 两个
-  （MCP 删除，§3.1）；AIHub 进程只开一个 HTTP 监听端口（A5 单端口裁定，§3.1）；路由 12 个
-  用户动词按目标面二分为「经 `pf` CLI 直连 AIHub」与「打 Daemon 本机面」（分流表 §5.1）；
+  （MCP 删除，§3.1）；AIHub 进程只开一个 HTTP 监听端口（A5 单端口裁定，§3.1）；路由 13 个
+  用户动词按目标面二分为「经 `pf` CLI 直连 AIHub」与「打 Daemon 本机面」（分流表 §5.1；
+  第 13 个动词 `ship` 为基线修订 polyforge#37 所加，见 §5.1）；
   AIHub 服务端是权限硬边界的唯一执行点（A17，§8）。
 - 定义每 WI 一个的**持久化 Harness RPC WI Agent**：宿主机原生、长驻进程，从 claim 到
   wrap/fail/停机中断全程存活，执行与交互式路径完全相同的 `pf-execute` 主循环，并使用
@@ -71,7 +72,7 @@
 以下术语的**唯一权威定义**均在其权威文档（见 §2.2 分配表）；本节仅作导航索引：
 - **路由 Skill、Daemon、Interactive/Batch/Drain、优雅停机（quiesce/shutdown）、持久化 Harness
   RPC WI Agent、harness-native subagent、harness 适配器最小契约**：本文 §3。
-- **`pf` CLI、路由 verbs 分流（12 个用户动词 → 目标面）、AIHub 对外面（HTTP + `pf` CLI，MCP 删除）、
+- **`pf` CLI、路由 verbs 分流（13 个用户动词 → 目标面）、AIHub 对外面（HTTP + `pf` CLI，MCP 删除）、
   单端口（A5）**：本文 §3.1/§5.1。
 - **Capsule、`runtime-state/execution.json`、repo inventory、Native runner profile、
   Capsule 本地会话目录**：见 `03-execution-capsule.md`。
@@ -95,7 +96,7 @@
 | Daemon 内部职责实现（Job 队列、持久 WI Agent 生命周期管理、harness 适配器启动参数）、命令执行入口（调用面）、Daemon state 存储位置、模式切换实现、全扫描发布的机械执行 | `04-local-runtime.md` |
 | Revision（数据模型与文件格式）、HEAD（推进规则）、watcher（dirty 标记）、全扫描发布协议、同步传输机制、先数据后状态、takeover fencing（判定条件与错误码）、删除保护、崩溃恢复（同步域） | `05-sync-revision-recovery.md` |
 | Memory Markdown 权威格式、frontmatter 约定、Markdown→HTML 派生规则、搜索索引（可重建）、实时检索、Memory API | `06-memory-search.md` |
-| AIHub 对外面（HTTP + `pf` CLI，MCP 删除）、单端口（A5）、路由 verbs 分流（12 个用户动词 → 目标面）、AIHub 新 repo 实现的正式取代声明、权限硬边界（A17） | 本文（00）§3.1/§3.3/§5/§5.1/§8 |
+| AIHub 对外面（HTTP + `pf` CLI，MCP 删除）、单端口（A5）、路由 verbs 分流（13 个用户动词 → 目标面）、AIHub 新 repo 实现的正式取代声明、权限硬边界（A17） | 本文（00）§3.1/§3.3/§5/§5.1/§8 |
 | 一期部署形态、安装/升级/回滚、回归清单（#699…#780）、Pilot 否决门槛、与旧 aihub 系统的并存与切换 | `07-deployment-pilot.md` |
 
 各模块的监控指标分层、测试与故障注入类别、迁移总序在本文 §9/§10/§11 给出**总则**，各文档在
@@ -539,7 +540,7 @@ HTTP API 与 `pf` CLI 两个（MCP 删除，§3.1），且全部端点共用单�
 
 | 接口 | 调用方 → 被调方 | 权威定义 |
 |---|---|---|
-| 路由 Skill → Daemon 操作请求（执行面动词 submit/observe/answer/batch-confirm/pause/resume/wrap/ops，分流表 §5.1） | Harness → Daemon | `04-local-runtime.md#§5.1` |
+| 路由 Skill → Daemon 操作请求（执行面动词 submit/observe/answer/batch-confirm/pause/resume/wrap/ship/ops，分流表 §5.1） | Harness → Daemon | `04-local-runtime.md#§5.1` |
 | 路由 Skill / CI → AIHub 数据面动词（file/queue/cancel/recall，经 `pf` CLI 直连 HTTP，不经 Daemon） | `pf` CLI → AIHub | 本文 §5.1、`02-aihub-core.md#§5.1`（canonical 26 端点清单） |
 | Workflow 选择与创建时校验/固化（提交方创建 WI 时只提交 `bundle_name`；frontmatter 校验与 digest 固化是 AIHub 创建事务内的服务端内部步骤，无独立端点，INV-8） | 路由 Skill/CLI → AIHub（`POST /api/v1/work-items`） | `01-workflow-skills.md#§4.6`、`02-aihub-core.md#§4.5` |
 | Core 读写 API（允许操作集为 WI 生命周期/读操作） | WI Agent（不持有任何 Core API key 或 Revision 发布 token）→ Daemon 本地认证代理（`04-local-runtime.md#§5.3`）→ AIHub | `04-local-runtime.md#§5.3`、`02-aihub-core.md#§5.1` |
@@ -554,12 +555,16 @@ HTTP API 与 `pf` CLI 两个（MCP 删除，§3.1），且全部端点共用单�
 `05`→`SYNC-*`，`06`→`MEM-*`，`07`→`DEPLOY-*`/`PILOT-*`。各前缀下的具体错误码见各文档自己的错误
 码表；任何文档不得在他人前缀下定义错误码。
 
-### 5.1 路由 verbs 分流表（12 个用户动词 → 目标面，定稿裁决） <!-- §5.1 -->
+### 5.1 路由 verbs 分流表（13 个用户动词 → 目标面，定稿裁决） <!-- §5.1 -->
 
-路由 skill 的 12 个用户动词 fragment（`01-workflow-skills.md#§2.1`/§3）按目标面二分；分流判据：**凡
+路由 skill 的 13 个用户动词 fragment（`01-workflow-skills.md#§2.1`/§3）按目标面二分；分流判据：**凡
 语义上依赖本机执行现场（Capsule、WI Agent 进程）或必须由 Daemon 机械执行的 Revision 发布
 （INV-11，含收尾 flush 证据 `02-aihub-core.md#§6.4`）的动词，打 Daemon 本机面；纯 Core 数据读写
-（不触碰执行现场）的动词直连 AIHub，由 `pf` CLI 承载 HTTP 调用**。
+（不触碰执行现场）的动词直连 AIHub，由 `pf` CLI 承载 HTTP 调用**。第 13 个动词 `ship`
+（wrap→git 交付桥，基线修订 polyforge#37 所加，方案 B 裁定：polyforge#2 全程 wrap 落定后，其
+git commit 只存在于封存 capsule（detached HEAD）与 Revision 链，原有动词无一能把它推送至 git
+origin，人工桥接验证可行后收编为一等动词）按同一判据落在 Daemon 本机面：ship 的语义依赖本机
+封存 capsule 的现场字节（执行现场），不是纯 Core 数据读写。
 
 | 路由 verb | 目标面 | 承载与权威 |
 |---|---|---|
@@ -574,6 +579,7 @@ HTTP API 与 `pf` CLI 两个（MCP 删除，§3.1），且全部端点共用单�
 | `pause`（暂停执行中的 WI） | Daemon 本机面 | `04-local-runtime.md#§5.1`（收尾需 Daemon 生成的 `flush_evidence`，`02-aihub-core.md#§6.4`） |
 | `resume`（恢复执行） | Daemon 本机面 | `04-local-runtime.md#§5.1` |
 | `wrap`（收尾） | Daemon 本机面 | `04-local-runtime.md#§5.1`（同 `pause` 的 flush 理由） |
+| `ship`（wrap→git 交付桥：把已收尾 WI 的封存 capsule 以固定名分支 `polyforge/<wi-slug>` 推送到 git origin） | Daemon 本机面 | `04-local-runtime.md#§5.1`（语义、幂等、PR 分层与安全面权威在彼处；CLI 入口 `pf ship <wi>` 同面转发；基线修订 polyforge#37） |
 | `ops`（模式切换、优雅停机等运维动作） | Daemon 本机面 | `04-local-runtime.md#§5.1`（`mode(set/drain/...)`、`shutdown()`） |
 
 分流不改变任何动词的语义权威，也不绕过任何校验：数据面动词直连不意味着豁免 A17 权限硬边界

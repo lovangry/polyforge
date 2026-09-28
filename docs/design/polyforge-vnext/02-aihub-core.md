@@ -470,12 +470,12 @@ CREATE TABLE service_secret_epochs (
 
 **单端口与无长连接（A5 裁定，保留）**：AIHub 只监听一个 HTTP 端口，§5.1 全部端点（业务面 26 端点与管理面 M1–M5）共用该端口与同一鉴权面，不按功能分设第二监听面；AIHub 与任何调用方之间不存在长连接（无 WebSocket/SSE/流式保活），一切交互均为短 HTTP 请求/响应。**跨机无 Daemon 直连**：Daemon 是本机执行面（`00-architecture.md#§3.1`，只经本机 Unix domain socket 服务同机 Harness，`04-local-runtime.md#§5.1`），跨机器的客户端（`pf` CLI、CI、人）一律直连 AIHub 本节端点，不存在「跨机直连他人 Daemon」的任何路径。
 
-**路由 verbs 分流表（12 个用户动词 → 目标面；分流判据权威在 `00-architecture.md#§5.1`，本表为其在 Core API 面的投影）**：
+**路由 verbs 分流表（13 个用户动词 → 目标面；分流判据权威在 `00-architecture.md#§5.1`，本表为其在 Core API 面的投影）**：
 
 | 路由 verb | 目标面 | 承载 |
 |---|---|---|
 | `file`（创建/编辑 WI）、`queue`（列表/就绪队列查询）、`cancel`（取消非活跃 WI）、`recall`（Memory 检索）——共 4 个 | AIHub（直连） | `pf` CLI → §5.1 端点行（`file`：行 1–3；`queue`：行 2–4；`cancel`：行 5；`recall`：行 23） |
-| `submit`、`observe`、`answer`、`batch-confirm`、`pause`、`resume`、`wrap`、`ops`——其余 8 个 | Daemon 本机面 | `04-local-runtime.md#§5.1`（`observe` 的 read-through 经 Daemon 本地认证代理落到行 6；`pause`/`wrap` 的收尾由 Daemon 生成 `flush_evidence` 后调行 9；`resume`/`submit` 的 claim 落到行 7） |
+| `submit`、`observe`、`answer`、`batch-confirm`、`pause`、`resume`、`wrap`、`ship`（基线修订 polyforge#37 所加：wrap→git 交付桥，纯本机 git 面，**不落任何 Core 端点**，见 `04-local-runtime.md#§5.1`）、`ops`——其余 9 个 | Daemon 本机面 | `04-local-runtime.md#§5.1`（`observe` 的 read-through 经 Daemon 本地认证代理落到行 6；`pause`/`wrap` 的收尾由 Daemon 生成 `flush_evidence` 后调行 9；`resume`/`submit` 的 claim 落到行 7） |
 
 分流不改变语义权威，也不放宽 Core 侧校验：直连 verbs 与其他 HTTP 客户端过同一套鉴权（§8）；经 Daemon 的 verbs 由 Daemon 机械转发与本地认证代理（`04-local-runtime.md#§5.3`），Core 端点仍是同一张 §5.1 清单。
 
