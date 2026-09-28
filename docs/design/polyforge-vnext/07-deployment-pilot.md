@@ -81,7 +81,10 @@ Daemon-to-Daemon 协议或互推通道，一切跨机信息经 AIHub HTTP 中转
   环境本身（v1 可信内部仓库边界内的宿主机原生执行，不引入 per-step 隔离，INV-12）；该 WI 选定的 harness 适配器所依赖的 harness 运行时——
   **Pi CLI**（`--mode rpc` 持久进程）或 **Claude Code CLI**（稳定 session + stream），二者是
   v1 仅有的两条 harness 适配器（`00-architecture.md#§3.6a`、`04-local-runtime.md#§6.1a`），须预先安装并完成其自身的登录/凭证
-  配置，这一步在部署 CLI 面之外，由参与 Pilot 的用户或运维按各 harness 自己的安装说明完成；
+  配置，这一步在部署 CLI 面之外，由参与 Pilot 的用户或运维按各 harness 自己的安装说明完成；对使用 Claude Code CLI
+  的工作机，该 harness 的**默认会话位置**（其会话 JSONL 的运行时落位，本机、Capsule 外）随之是一项本机运行要素——
+  Daemon 只读访问它做运行中的会话数据读取与终态采集（`00-architecture.md#§3.6a`、`04-local-runtime.md#§6.1a`/`#§6.2`），
+  具体路径由该 harness 自身约定，部署面不物化、不迁移、不清理；
   该仓库任务实际需要的宿主工具链（如 git、目标语言的构建/测试工具链），由 repo 自身决定，vNext
   不声明、不物化、不做工具链闭包（`03-execution-capsule.md#§1.2`/§3.2）——工具链缺失时的失败路径权威在 `03-execution-capsule.md#§5.1`
   `CAP-401`（R11，§10.2）；以及与 AIHub 的 HTTP 网络可达性。**对任务仓 origin 的 git push 可达与推送权限**（基线修订 polyforge#37 所加）：`ship` 交付桥（`04-local-runtime.md#§5.1`）在本机把已收尾 WI 的 `polyforge/<wi-slug>` 固定名分支推送到任务仓 origin，复用工作机既有 git 身份（SSH/credential helper），不新增任何凭证存储；`ship` 成为第 13 个用户动词（`00-architecture.md#§5.1`）后，仅有 clone 拉取权限的工作机不再充分——push 权限与可达性自此属于本清单的一部分。这份清单是 INV-12 在工作机侧的落地

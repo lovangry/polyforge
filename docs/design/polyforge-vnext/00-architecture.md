@@ -75,7 +75,7 @@
 - **`pf` CLI、路由 verbs 分流（13 个用户动词 → 目标面）、AIHub 对外面（HTTP + `pf` CLI，MCP 删除）、
   单端口（A5）**：本文 §3.1/§5.1。
 - **Capsule、`runtime-state/execution.json`、repo inventory、Native runner profile、
-  Capsule 本地会话目录**：见 `03-execution-capsule.md`。
+  harness 会话目录与会话数据落位（per-adapter）**：见 `03-execution-capsule.md`。
 - **workflow bundle / workflow.md / step skill（step agent 定义文件）/ bundle digest / budget /
   on_fail rewind / grill / e2e-author / interactive step / needs_input 判定层语义**：见
   `01-workflow-skills.md`。
@@ -92,7 +92,7 @@
 | 路由 Skill（Routing Skill）、Daemon 命名裁定、Interactive/Batch/Drain 模式定义、优雅停机（quiesce/shutdown）与其和 Drain 的区分、持久化 Harness RPC WI Agent、harness-native subagent、harness 适配器最小契约、模块归属判据、Core/Capsule 状态分离、全局不变量 | 本文（00）§3 / §4 / §2.3 |
 | Core（数据集）、单 active Service、owner generation（存储与生命周期）、assignee / waiting_on、attrs 拆分、进度 read-through、AIHub 本地目录布局 | `02-aihub-core.md` |
 | workflow.md frontmatter schema、workflow bundle、bundle digest、step skill（step agent 定义文件）内容 schema、model_candidates、grill、interactive step / needs_input 判定、e2e-author、budget、on_fail rewind（有界）、执行语义（rewind vs resume）、pf-execute 主循环 | `01-workflow-skills.md` |
-| Capsule（身份/绑定/生成时机）、`runtime-state/execution.json`（执行权威文件格式）、repo inventory、Native runner profile、Capsule 本地会话目录布局、Subagent 写限制不变量、多机副本裁定 | `03-execution-capsule.md` |
+| Capsule（身份/绑定/生成时机）、`runtime-state/execution.json`（执行权威文件格式）、repo inventory、Native runner profile、harness 会话目录布局与会话数据落位（per-adapter）、Subagent 写限制不变量、多机副本裁定 | `03-execution-capsule.md` |
 | Daemon 内部职责实现（Job 队列、持久 WI Agent 生命周期管理、harness 适配器启动参数）、命令执行入口（调用面）、Daemon state 存储位置、模式切换实现、全扫描发布的机械执行 | `04-local-runtime.md` |
 | Revision（数据模型与文件格式）、HEAD（推进规则）、watcher（dirty 标记）、全扫描发布协议、同步传输机制、先数据后状态、takeover fencing（判定条件与错误码）、删除保护、崩溃恢复（同步域） | `05-sync-revision-recovery.md` |
 | Memory Markdown 权威格式、frontmatter 约定、Markdown→HTML 派生规则、搜索索引（可重建）、实时检索、Memory API | `06-memory-search.md` |
@@ -160,7 +160,7 @@
                                   │  · worktree/repo inventory│
                                   │  · runtime-state/      │
                                   │    execution.json（唯一执行权威）│
-                                  │  · Capsule 本地会话目录 │
+                                  │  · harness 会话目录（落位 per-adapter）│
                                   │  · artifacts / logs   │
                                   └─────────────────────┘
 ```
@@ -446,7 +446,7 @@ WI Agent 是「宿主机原生进程 + pf-execute 主循环」这一抽象在具
 |---|---|
 | 进程持久性 | 每 WI 一个长驻进程，符合 §3.6 持久化要求，不因单个 step 结束而退出 |
 | 会话身份规则 | pause 终止当前 generation（报告发布完毕后 WI Agent 退出）；resume 总是开启一个新 generation，因而总是建立一个全新 session id，从不复用 pause 前的旧 session；**唯一**复用旧 session id 的情形是同一台机器上同一个还没结束的 generation 因 WI Agent 进程崩溃而由 Daemon 重新派生续跑（非 pause 导致的进程退出，同机、同 generation）；换 generation（包括 pause 后的 resume、或同机的 owner 变更）或换机器时一律建立新 session，新 WI Agent 从 Capsule 的 `runtime-state/execution.json` 恢复执行现场；完整规则权威见 `03-execution-capsule.md#§4.4`，本节不重复定义 |
-| 会话数据落位 | 该 harness 会话的本地数据（session 目录/文件）位于该 WI 的 Capsule 内（Capsule 本地会话目录，权威布局见 `03-execution-capsule.md`），不落在 Capsule 之外的共享路径，也不与其它 WI 的会话数据混放 |
+| 会话数据落位 | 跨 harness 的契约要求是**封存（seal）时刻该 WI 的 Capsule 内含有该会话的会话记录**（the sealed capsule contains the session record）；运行时落位为各适配器的实现注记（权威布局见 `03-execution-capsule.md#§4.4`）：**Pi**（支持自定义 session 路径）运行时 session 目录即位于该 WI 的 Capsule 内（Capsule 本地会话目录，现状不变）；**Claude**（不支持自定义 session 路径）运行时使用该 harness 的**默认会话位置**（本机、Capsule 外，现状不变），运行中的会话数据读取一律指向该默认位置，并在 WI 到达终态（end-generation 收尾）时由 Daemon 把该会话的 JSONL 从默认位置**只读**复制进 Capsule——封存完整性（seal 时刻的完整现场）是本契约项的实质，不是运行时共位；采集源缺失时以 typed error（`DAEMON-513`，`04-local-runtime.md#§5.2`）失败收尾，**绝不静默**；任何适配器的会话数据都不与其它 WI 的会话数据混放 |
 | subagent introspection | **可选能力**：一个 harness 适配器可以不提供对已派生 subagent 的外部可观测接口；Daemon/WI Agent 的核心流程不得依赖该能力存在 |
 
 v1 的两条具体适配器（实现细节在 `04-local-runtime.md`）：
@@ -455,7 +455,9 @@ v1 的两条具体适配器（实现细节在 `04-local-runtime.md`）：
   `03-execution-capsule.md#§4.4` 建立新 session；session 目录落在 Capsule 内（Capsule-local session-dir）。
 - **Claude 适配器**：支持稳定的 session id 与该 session 之上的流式（stream）交互；同一机器上
   同一个还未结束的 generation 内因进程崩溃而续跑时复用同一 session id，pause 后的 resume 则建立
-  新 session（规则同上，`03-execution-capsule.md#§4.4`）；
+  新 session（规则同上，`03-execution-capsule.md#§4.4`）；该 harness 不支持自定义 session
+  路径——运行时会话数据位于其默认会话位置（本机、Capsule 外），终态由 Daemon 采集进 Capsule
+  （上表「会话数据落位」行，权威布局 `03-execution-capsule.md#§4.4`）；
   对其子代理的 introspection 是否可用取决于该 harness 版本，按上表「可选能力」处理，不作为 v1
   的硬性前提。
 
@@ -494,7 +496,7 @@ per-step isolation**：
 | Memory 元数据 / 派生 HTML / 搜索索引 | AIHub（目录 + SQLite 派生库） | 文件 + SQLite | `06-memory-search.md#§4`/§5 |
 | repo inventory（检出清单与基线 commit） | Capsule 声明，Core 可见（声明随 WI），检出在 Capsule | Capsule 目录 + 声明镜像 | `03-execution-capsule.md#§4` |
 | 工作树（worktree，含未提交改动，Git diff 的操作对象） | Capsule | 文件系统 | `03-execution-capsule.md#§3` |
-| harness 会话数据（Capsule 本地会话目录，§3.6a） | Capsule | 文件系统 | `03-execution-capsule.md#§4` |
+| harness 会话数据（运行时落位按适配器区分，§3.6a：pi＝Capsule 本地会话目录；claude＝harness 默认会话位置（本机、Capsule 外）；终态会话记录由 Daemon 采集进 Capsule） | pi 运行时即在内；claude 运行时在本机默认位置，终态记录进 Capsule | 文件系统 | `03-execution-capsule.md#§4` |
 | **`runtime-state/execution.json`（current step / step 结果 / review 轮次 / per-step `budget_consumed` / wall-clock 基线 / 待消费 rewind 输入（gate FAIL 判定全文）/ 归档 attempts / interactive 待问问题与回答关联；权威 schema 在 `03-execution-capsule.md#§4.2`，本文只引用；workflow 执行的唯一权威）** | **Capsule**，只由该 WI 的 WI Agent 写 | Capsule 内单一 JSON 文件 | `01-workflow-skills.md#§6`、`03-execution-capsule.md#§4.2` |
 | step 执行日志、产物中间态 | Capsule | Capsule artifacts/logs 目录 | `03-execution-capsule.md#§3` |
 | Daemon 自身状态（当前承载的 Job 列表、模式、机器注册） | Daemon | Daemon state 文件（本机） | `04-local-runtime.md#§4.1` |
