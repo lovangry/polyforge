@@ -172,7 +172,7 @@ type denv struct {
 
 type serverURL struct{ url string }
 
-func newDaemonEnv(t *testing.T) *denv {
+func newDaemonEnv(t *testing.T, cfgTweak ...func(*Config)) *denv {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := store.Open(dir)
@@ -240,6 +240,11 @@ func newDaemonEnv(t *testing.T) *denv {
 		DrainProject:  "p1",
 		Adapter:       "pi",
 		Version:       "it",
+	}
+	for _, f := range cfgTweak {
+		if f != nil {
+			f(&cfg)
+		}
 	}
 	d, err := New(cfg, spawner)
 	if err != nil {

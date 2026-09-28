@@ -42,6 +42,15 @@ type Config struct {
 	Version       string
 	DrainProject  string // project whose ready queue Drain consumes
 	Adapter       string // default harness adapter (pi|claude)
+	// ClaudeSessionStoreRoot overrides the claude harness's DEFAULT
+	// session store root for the seal-time terminal-state collection
+	// (03 §4.4 / 04 §6.2 A step 2). Empty selects the measured default
+	// resolution: $CLAUDE_CONFIG_DIR, else $HOME/.claude (the adapter
+	// verification measured conversations under CLAUDE_CONFIG_DIR;
+	// the subdirectory layout under the root is version-specific and
+	// deliberately not pinned — see sessioncollect.go). A CLI
+	// storage-layout change needs at most this knob.
+	ClaudeSessionStoreRoot string
 	// StaleHeartbeatThreshold configures the stale-machines status signal
 	// (04 §7.2/§9): a machine whose last successful heartbeat is older than
 	// this is listed in the status output. Monitoring signal only — no
@@ -651,6 +660,17 @@ func (d *Daemon) PublishRequest(ctx context.Context, wi, reason string) (*Publis
 		fe, err := d.pub.FinalFlush(ctx, publish.FlushRequest{
 			WorkItemID: wi, CapsuleDir: jr.cap.Dir, Generation: d.jobGeneration(wi),
 			Token: jr.token, Archive: func() error {
+				// 04 §6.2 A step 2 (before the frozen scan, inside the one
+				// Archive hook): claude jobs first get their terminal-state
+				// session JSONL collected READ-ONLY from the harness default
+				// session location into harness/<claude>/session-data/
+				// (03 §4.4); a missing source fails the close typed
+				// (DAEMON-513). Every other adapter is a strict no-op — the
+				// pi path is ZERO-change. Then the shared archive mirrors
+				// the transcript to logs/session/<generation>.jsonl.
+				if cerr := d.collectTerminalSession(jr); cerr != nil {
+					return cerr
+				}
 				_, aerr := jr.cap.ArchiveTranscript(jr.adapter, d.jobGeneration(wi))
 				return aerr
 			},

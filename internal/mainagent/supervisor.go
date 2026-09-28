@@ -33,7 +33,6 @@ package mainagent
 import (
 	"bufio"
 	"context"
-	"crypto/sha1"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -282,7 +281,7 @@ func (a *PiAdapter) FrameControl(id, line string) any {
 //   - `--session-id <uuid>` pins the conversation id but demands a VALID
 //     UUID ("sess_<wi>_<gen>" is rejected: "Invalid session ID. Must be a
 //     valid UUID."); `--resume <uuid>` continues that conversation
-//     (context retained, same id echoed). claudeSessionUUID maps the
+//     (context retained, same id echoed). daemon.ClaudeSessionUUID maps the
 //     polyforge session id onto a deterministic UUID so the §3.6a
 //     identity rules ride through unchanged.
 //   - A session with ZERO completed turns is NOT resumable: --resume of a
@@ -401,36 +400,12 @@ type claudeUserMessageBody struct {
 // this fixed line. Deliberately NOT a control JSON line: nothing to ack.
 const claudeKickoff = "pf-execute kickoff: begin the work-item main loop now, following the pf-execute instructions in your system prompt."
 
-// claudeUUIDNS is the RFC 4122 URL namespace, the fixed UUIDv5 namespace
-// claudeSessionUUID hashes under.
-var claudeUUIDNS = [16]byte{
-	0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1,
-	0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-}
-
-// claudeSessionUUID derives the claude conversation UUID from the
-// polyforge harness session id. The real CLI demands a UUID for
-// --session-id/--resume while §3.6a mints "sess_<wi>_<generation>"; the
-// map is DETERMINISTIC (RFC 4122 name-based UUIDv5 under a fixed
-// namespace), so the same harness session id always maps to the same
-// claude conversation id and the crash-continuation reuse (03 §4.4: same
-// id, same machine, same generation) re-derives exactly the conversation
-// to resume — no extra bookkeeping, no stored harness id. (Measured
-// live: the CLI accepts and persists a name-derived uuid5 as the
-// conversation id, and --resume continues it after a real turn.)
-func claudeSessionUUID(sessionID string) string {
-	h := sha1.New()
-	h.Write(claudeUUIDNS[:])
-	h.Write([]byte("polyforge/mainagent/claude-session/" + sessionID))
-	var b [16]byte
-	copy(b[:], h.Sum(nil)[:16])
-	b[6] = (b[6] & 0x0f) | 0x50 // version 5 (name-based, SHA-1)
-	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
+// ClaudeSessionUUID (daemon package) is the ONE harness-session-id →
+// conversation-UUID mapping: the adapter's spawn argv and the daemon's
+// seal-time terminal-state collection both call it — never a second
+// mapping anywhere.
 func (a *ClaudeAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error) {
-	sid := claudeSessionUUID(p.SessionID)
+	sid := daemon.ClaudeSessionUUID(p.SessionID)
 	a.lastSid = sid
 	// The REAL persistent-session argv (measured): -p plus streaming input
 	// and output; --verbose is REQUIRED for stream-json output in print
