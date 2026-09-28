@@ -690,7 +690,10 @@ func (s *APIServer) hBatchSubmit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) hShutdown(w http.ResponseWriter, r *http.Request) {
-	// Latch FIRST (04 §6.5 step 1), answer, then run the sequence.
+	// Latch FIRST (04 §6.5 step 1), answer, then run the sequence. The
+	// Background context is safe since the bounded-shutdown audit
+	// (polyforge#32): Shutdown wraps an unbounded ctx with the
+	// DefaultShutdownBudget ceiling itself.
 	s.d.modes.SetShuttingDown()
 	writeJSONOK(w, map[string]any{"shutting_down": true})
 	go func() {

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -47,6 +48,13 @@ type Config struct {
 	// auto-takeover is ever derived from it. Zero selects
 	// DefaultStaleHeartbeatThreshold.
 	StaleHeartbeatThreshold time.Duration
+	// QuiesceTimeout bounds ONE write-freeze confirmation wait (05 §2.7 /
+	// 04 §6.5 step 3): the window the daemon waits for the WI Agent's
+	// pf/quiesce ack (or its proven death) before the forced-trigger
+	// escalation (freeze.ErrQuiesceTimeout). Zero selects
+	// DefaultQuiesceTimeout. Tests tighten it; production leaves it at the
+	// design default.
+	QuiesceTimeout time.Duration
 }
 
 // SpawnParams is what the daemon hands the agent spawner (04 §6.1 step 9).
@@ -178,6 +186,15 @@ func New(cfg Config, spawner AgentSpawner) (*Daemon, error) {
 		return nil, err
 	}
 	client := aihub.New(cfg.AIHubURL, cfg.APIKey)
+	// Bounded-network fix (polyforge#32 shutdown-path audit): the Core
+	// client builds its requests WITHOUT a request context, so neither
+	// the shutdown budget nor any other ctx can abort an in-flight Core
+	// round trip — a wedged TCP connection would hang the graceful
+	// shutdown's final flush / end-generation calls forever (bounded ctx
+	// or not). The http.Client round-trip timeout is the only in-scope
+	// lever: every Core call the daemon makes — including the publish
+	// drains on the shutdown path — is now capped per request.
+	client.HTTP = &http.Client{Timeout: CoreCallTimeout}
 	mutex := freeze.NewManager()
 	stager := freeze.NewStager(cfg.DataDir)
 	pubStore := publish.NewStore(cfg.DataDir)
@@ -679,6 +696,12 @@ func (d *Daemon) PublishRequest(ctx context.Context, wi, reason string) (*Publis
 // because the top-level agent exited. Residue is collected on the spot
 // (04 §6.2 B step 2 / §7.1 residue collection) and the emptiness re-checked.
 //
+// The ONE condition-① prover (groupDeadProofer) is shared by both shapes
+// and also handed to the alive path's quiescer: an agent that dies
+// INSIDE the confirmation window is re-judged by the same proof there
+// (see quiescerOf.RequestQuiesce) instead of escalating the quiesce
+// failure — the polyforge#32 pilot's 20-minute (shutting down) hang.
+//
 // FAILS CLOSED on the unknown: a nil/unknown agent state NEVER grants the
 // dead-writers shortcut. 05 §2.7's shortcut condition ① is "every member
 // confirmed gone" — an assumption is the opposite of a confirmation, and
@@ -698,12 +721,33 @@ func (d *Daemon) PublishRequest(ctx context.Context, wi, reason string) (*Publis
 // re-derivation can start), so the gap is theoretical in v1.
 func (d *Daemon) freezeConditions(jr *jobRuntime, milestone bool) freeze.Conditions {
 	alive := jr.agent != nil && jr.agent.Alive()
-	cond := freeze.Conditions{Timeout: 30 * time.Second, Milestone: milestone}
+	// The confirmation window is configurable (05 §12 OQ1): production
+	// keeps the 30s design default; the shutdown-path tests tighten it.
+	cond := freeze.Conditions{Timeout: d.quiesceWindow(), Milestone: milestone}
+	proveDead := d.groupDeadProofer(jr)
 	if alive {
-		cond.Quiescer = quiescerOf{jr}
+		cond.Quiescer = quiescerOf{jr: jr, proveDead: proveDead}
 		return cond
 	}
-	cond.ProcessGroupDead = func() bool {
+	cond.ProcessGroupDead = proveDead
+	return cond
+}
+
+// quiesceWindow resolves the configured write-freeze confirmation window
+// (05 §2.7 / 04 §6.5 step 3).
+func (d *Daemon) quiesceWindow() time.Duration {
+	if d.cfg.QuiesceTimeout > 0 {
+		return d.cfg.QuiesceTimeout
+	}
+	return DefaultQuiesceTimeout
+}
+
+// groupDeadProofer builds the ONE 05 §2.7 condition-① prover for a job:
+// the process-group-dead judgment with on-the-spot residue collection,
+// shared by the dead-agent shortcut path and the alive path's mid-window
+// death grant. It FAILS CLOSED: nothing is ever "probably dead".
+func (d *Daemon) groupDeadProofer(jr *jobRuntime) func() bool {
+	return func() bool {
 		if jr.agent != nil {
 			if jr.agent.GroupEmpty() {
 				return true
@@ -742,12 +786,41 @@ func (d *Daemon) freezeConditions(jr *jobRuntime, milestone bool) freeze.Conditi
 		}
 		return empty
 	}
-	return cond
 }
 
-type quiescerOf struct{ jr *jobRuntime }
+type quiescerOf struct {
+	jr        *jobRuntime
+	proveDead func() bool // the 05 §2.7 condition-① prover from freezeConditions
+}
 
-func (q quiescerOf) RequestQuiesce(ctx context.Context) error { return q.jr.agent.Quiesce(ctx) }
+func (q quiescerOf) RequestQuiesce(ctx context.Context) error {
+	err := controlWatch(ctx, q.jr.agent, q.jr.agent.Quiesce)
+	if err == nil {
+		return nil // confirmed: no in-flight sync-surface writes, none will start
+	}
+	if !agentGone(q.jr.agent) {
+		// The agent is still alive (stuck, unhealthy, or merely slow): the
+		// failure keeps its original verdict — a forced-trigger quiesce
+		// failure escalates exactly as before (freeze.ErrQuiesceTimeout /
+		// the typed control-path reason).
+		return err
+	}
+	// The agent died inside the confirmation window (the exit-watched
+	// short-circuit, a control path that died with the process, or an
+	// already-dead handle): 05 §2.7 grants the freeze on condition ① — a
+	// PROVEN-empty process group is STRONGER than any ack, and 04 §6.5
+	// step 4 requires the group proof, never the bare top-level exit.
+	// Escalating here instead was the polyforge#32 pilot failure: the
+	// agent died mid-window, the quiesce error escalated into DAEMON-511
+	// and the daemon parked in (shutting down) forever with the job still
+	// recorded running.
+	if q.proveDead != nil && q.proveDead() {
+		return nil
+	}
+	// Residue could not be proven dead: fail closed — the freeze is NOT
+	// granted on an assumption (the original error is the honest verdict).
+	return err
+}
 
 // ReleaseQuiesce implements freeze.Releaser: the staging pin is complete,
 // so the WI Agent is told it may resume writes (05 §2.7 release step).
@@ -829,6 +902,29 @@ func (d *Daemon) fetchDrainWave(ctx context.Context) {
 // up, human attention required.
 var ErrFlushFailed = errors.New("daemon: shutdown flush failed to converge (DAEMON-511)")
 
+// Bounded windows of the graceful-shutdown path (04 §6.5 + the design's
+// intent that shutdown terminates in bounded time; polyforge#32 audit).
+const (
+	// DefaultQuiesceTimeout is the design's write-freeze confirmation
+	// window (05 §2.7 / 04 §6.5 step 3): the wait for the WI Agent's
+	// pf/quiesce ack — or its proven death — before the forced-trigger
+	// escalation.
+	DefaultQuiesceTimeout = 30 * time.Second
+	// DefaultShutdownBudget bounds the WHOLE graceful-shutdown sequence
+	// when the caller passes an unbounded context (the operations face's
+	// hShutdown and the process main both do). It is a LAST-RESORT
+	// ceiling on top of the per-wait windows — sized to cover a small
+	// active set's notice+quiesce+flush round trips with margin; a budget
+	// overrun surfaces as DAEMON-511 (ErrFlushFailed) instead of the
+	// unbounded `(shutting down)` hang the polyforge#32 pilot observed.
+	DefaultShutdownBudget = 5 * time.Minute
+	// CoreCallTimeout caps ONE AIHub round trip (final-flush block
+	// uploads, manifest submit, end-generation). The Core client builds
+	// requests without a context, so this client-level cap is the only
+	// bound those calls have — see New.
+	CoreCallTimeout = 2 * time.Minute
+)
+
 // Shutdown runs the graceful-shutdown sequence:
 //  1. latch shutting_down FIRST (before any other action);
 //  2. external submissions now refuse (DAEMON-410) and the Drain loop
@@ -840,6 +936,28 @@ var ErrFlushFailed = errors.New("daemon: shutdown flush failed to converge (DAEM
 //     end the generation (pause) with the Daemon-generated evidence;
 //  5. remove job records, stop watchers, seal capsules read-only;
 //  6. the caller exits.
+//
+// BOUNDED-SHUTDOWN AUDIT (polyforge#32 — the pilot stayed `(shutting
+// down)` for 20+ minutes after the killed agent never converged its
+// close; SIGTERM was swallowed by the blocked main, only SIGKILL
+// cleared it). Every wait the sequence can hit is now bounded:
+//
+//   - agent-facing waits (stop notice, quiesce acks): each call's own
+//     ack deadline, PLUS the agent-exit selection (controlWatch,
+//     agentexit.go) — a dead agent short-circuits the wait instead of
+//     parking it; a mid-window death grants the write freeze on the
+//     proven group-dead condition (quiescerOf.RequestQuiesce);
+//   - Core round trips (final flush upload, manifest, end-generation):
+//     CoreCallTimeout (New) — the sequence ctx cannot abort them because
+//     the Core client ignores request contexts;
+//   - watcher stops (sealJob): at most one poll interval, agent-independent;
+//   - agent recycling (sealJob Terminate): SIGTERM bound + SIGKILL bound;
+//   - the heartbeat goroutine is NOT part of the sequence: it is bound
+//     to the process's signal context (cmd main) and each beat to
+//     CoreCallTimeout; a beat in flight when the budget fires cannot
+//     hold the sequence;
+//   - the sequence itself: DefaultShutdownBudget below, the last-resort
+//     ceiling over all of the above.
 func (d *Daemon) Shutdown(ctx context.Context) error {
 	d.modes.SetShuttingDown()
 	first := false
@@ -864,6 +982,19 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 	// The FIRST caller runs the sequence; its verdict is published to
 	// joiners via the channel close (write-before-close is the
 	// happens-before edge, no lock needed).
+	//
+	// Bounded sequence (audit item above): both real callers arrive with
+	// context.Background() — an UNBOUNDED context. Everything inside has
+	// its own window now, but a ceiling over the whole sequence still has
+	// to exist for the shutdown to TERMINATE in bounded time: wrap an
+	// unbounded ctx with the budget so a pathological combination of
+	// slow windows cannot outlive it. A caller-supplied deadline is
+	// respected as-is (tighter or looser: it is the caller's call).
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), DefaultShutdownBudget)
+		defer cancel()
+	}
 	err := d.runShutdownSequence(ctx)
 	d.shutdownErr = err
 	close(d.shutdownDone)
@@ -915,6 +1046,13 @@ func (d *Daemon) runShutdownSequence(ctx context.Context) error {
 
 // sealJob stops the watcher, removes bookkeeping, seals the capsule
 // read-only (kept on disk; deletion only via the Core protection flow).
+// Bounded-wait audit (polyforge#32): every wait inside is bounded —
+// watcher.Stop blocks at most one poll interval (the loop's select
+// returns on the closed stop channel; no agent involvement);
+// Terminate is SIGTERM to the group with a bounded empty-wait, then
+// SIGKILL with a second bounded wait (04 §6.2 B); SealReadOnly is local
+// fsync + chmod, no cross-process waits. Nothing here can park the
+// shutdown on a dead or stuck agent.
 func (d *Daemon) sealJob(wi string, jr *jobRuntime) {
 	if jr.watcher != nil {
 		jr.watcher.Stop()
