@@ -1,7 +1,7 @@
 package test
 
 // usage_s7_takeover_test.go: S7 — takeover between two REAL daemons: two
-// pf-daemon processes with different machine identities, homes and
+// `pf daemon` processes with different machine identities, homes and
 // sockets on one box (two "machines"). Machine A runs the WI and
 // publishes a working revision; machine B force-takes-over from its own
 // CLI; B's daemon rebuilds its capsule via the row-19 replay (the

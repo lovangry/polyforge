@@ -31,6 +31,10 @@ import (
 //     get_recommendation, "mode":..., "max_concurrent_jobs":N}
 //     batch_submit           POST /batch_submit {"wi_ids":[...],
 //     "priorities":{...}}  (underscore)
+//     pause/wrap             POST /jobs/{wi_id}/pause {} | wrap
+//     {"reason":"wrap"|"fail"} (reason defaults to "wrap"; the
+//     daemon holds the generation token and signs the Core
+//     end-generation call itself, so no token ever travels)
 //     shutdown               POST /shutdown
 //   - Error envelope: {"error":{"code":<DAEMON-*>,"detail":...}} — same
 //     outer shape as the aihub face but without a reason field.
@@ -39,19 +43,6 @@ import (
 //     head_seq, read_through:true, freshness_note) and answers DAEMON-404
 //     only when neither layer has anything.
 //   - mode has no "get" action: the current mode is queried via GET /status.
-//
-// CLIENT-SIDE INFERENCES (recorded; not yet pinned by the daemon face):
-//
-//   - pause/wrap: 00 §5.1 routes the pause/wrap verbs to the daemon face
-//     (the closing flush_evidence is daemon-generated, 02 §6.4), but the
-//     daemon operations table (04 §5.1) has no pause/wrap row and
-//     internal/daemon/api.go exposes no such route today. The natural
-//     projection into the existing /jobs/{id}/... family is used:
-//     pause   POST /jobs/{wi_id}/pause  {}
-//     wrap    POST /jobs/{wi_id}/wrap   {"reason":"wrap"|"fail"}
-//     until the daemon lands its own routes (spec gap, see README).
-//   - pause/wrap request bodies carry no generation token: the daemon
-//     holds the token and signs the Core end-generation call itself.
 type DaemonClient struct {
 	Sock string
 	HTTP *http.Client
@@ -219,15 +210,15 @@ func (d *DaemonClient) BatchSubmit(wiIDs []string) ([]byte, error) {
 // Pause asks the daemon to pause a running WI: WI Agent stops at a safe
 // boundary, the daemon executes the boundary publish (final flush) and
 // closes the generation with the daemon-generated flush_evidence
-// (02 §6.4, 04 §6.2 A-path). Route is a client-side inference (see the
-// file header note).
+// (02 §6.4, 04 §6.2 A-path). Route pinned by internal/daemon/api.go
+// (POST /jobs/{wi_id}/pause; the route amendment landed it).
 func (d *DaemonClient) Pause(wiID string) ([]byte, error) {
 	return d.do("POST", "/jobs/"+pathEscape(wiID)+"/pause", "", map[string]any{}, nil)
 }
 
 // Wrap asks the daemon to wrap (or fail, when reason=="fail") a running
-// WI — same final-flush requirement as pause (02 §6.4). Route is a
-// client-side inference (see the file header note).
+// WI — same final-flush requirement as pause (02 §6.4). Route pinned by
+// internal/daemon/api.go (POST /jobs/{wi_id}/wrap).
 func (d *DaemonClient) Wrap(wiID, reason string) ([]byte, error) {
 	return d.do("POST", "/jobs/"+pathEscape(wiID)+"/wrap", "",
 		map[string]any{"reason": reason}, nil)
