@@ -250,6 +250,12 @@ type progressView struct {
 	Progress       json.RawMessage `json:"progress"`
 	HeadUpdatedAt  *string         `json:"head_updated_at"`
 	FreshnessNote  string          `json:"freshness_note"`
+
+	// claimedNoHead marks the CLI-side empty-chain mapping of the typed
+	// claimed-but-no-published-HEAD CORE-504 (polyforge#36): the server
+	// never 200s that state, so this field is set only by
+	// observeReadThrough and is never decoded off the wire.
+	claimedNoHead bool
 }
 
 // budgetView is the row-12 response.
@@ -361,6 +367,10 @@ func renderProgress(w io.Writer, p *progressView) {
 			fmt.Fprintf(w, " at=%s", *p.HeadUpdatedAt)
 		}
 		fmt.Fprintln(w)
+	} else if p.claimedNoHead {
+		// Claimed with an empty revision chain: the first publish is
+		// still pending (polyforge#36), which is not "never claimed".
+		fmt.Fprintln(w, "head: (claimed, first publish pending)")
 	} else {
 		fmt.Fprintln(w, "head: (never claimed)")
 	}

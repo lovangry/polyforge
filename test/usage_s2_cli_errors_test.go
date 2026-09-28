@@ -92,11 +92,16 @@ func TestUsageS2CLIErrorPaths(t *testing.T) {
 	if !strings.Contains(errs, "dial unix") {
 		t.Fatalf("dead socket must surface the dial error: %q", errs)
 	}
-	// Before any publish the read-through layer honestly answers the
-	// typed no-published-HEAD verdict (with the fallback note).
-	errs = inst.pfExit(t, 1, "--socket", dead, "observe", wi)
-	if !strings.Contains(errs, "daemon not reachable locally") || !strings.Contains(errs, "CORE-504") {
-		t.Fatalf("daemon-down observe of a never-published WI: want fallback note + CORE-504, got %q", errs)
+	// Before any publish the read-through layer renders the
+	// first-publish-pending empty-chain view instead of surfacing the
+	// typed CORE-504 as a hard error (polyforge#36): exit 0, view on
+	// stdout, fallback note on stderr.
+	out = inst.pfExit(t, 0, "--socket", dead, "observe", wi)
+	if !strings.Contains(out, "no published revision yet (claimed, first publish pending)") {
+		t.Fatalf("claimed-unpublished observe must render the empty-chain view, got %q", out)
+	}
+	if _, noteIO := inst.pfIO("--socket", dead, "observe", wi); !strings.Contains(noteIO, "daemon not reachable locally") {
+		t.Fatalf("daemon-down observe must still note the fallback on stderr: %q", noteIO)
 	}
 	// A working publish through the daemon face (the WI Agent's own
 	// operation, 04 §5.1) gives the read-through layer something to show.
