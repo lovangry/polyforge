@@ -250,6 +250,16 @@ An optional fifth trigger, `milestone`, may be declared by a workflow but is nev
 mandatory. You do not decide when Revisions get bundled or when HEAD moves — you only
 ever *ask*; the mechanical work belongs entirely to the Daemon.
 
+**Consume the publish response's `schema_mismatches`** (`01-workflow-skills.md#§4.4`/
+`03-execution-capsule.md#§5.1a`): every `publish_request` answer carries the list of
+steps whose published output failed the bundle's pinned output JSON-Schema. Each entry
+falsifies that step's `done` state: apply the `01 §6.3` falsified-done exception — in
+ONE atomic write, rewrite the step `done` -> `in_progress`, append the
+`infra_failure` archive entry (cause `output_schema_mismatch`, detail = pointer +
+keyword), and recompute the candidate pointer per §6.3 rule 4 — then re-dispatch the
+step with the advanced candidate. The publish itself is never vetoed: HEAD advanced
+and stays; only the step's status rewinds.
+
 ## 9. Budget: two layers, both must hold
 
 Every step execution attempt is checked against **step-level** budget (its own

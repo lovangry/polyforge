@@ -34,6 +34,11 @@ type FlushRequest struct {
 	// Archive runs BEFORE the frozen scan (05 §6.1 step 1): the session
 	// transcript archive must ride this last revision. May be nil.
 	Archive func() error
+	// Signal, when non-nil, receives the 03 §5.1a output-schema mismatch
+	// signal of the real publish this flush performs (if it performs
+	// one), so the caller can surface it on the publish_request response
+	// of the end-generation call too — a signal, never a veto. May be nil.
+	Signal func(mismatches []SchemaMismatch)
 	// Conditions carry the freeze acquisition faces (quiescer /
 	// process-group-dead shortcut).
 	Conditions freeze.Conditions
@@ -137,6 +142,9 @@ func (p *Publisher) FinalFlush(ctx context.Context, req FlushRequest) (*FlushEvi
 		if perr != nil {
 			return nil, perr
 		}
+		if req.Signal != nil && res != nil {
+			req.Signal(res.SchemaMismatches)
+		}
 		return evidenceForPublish(req.Generation, res, scannedAt, bytesDigest, worktreeDigest), nil
 	}
 
@@ -163,6 +171,9 @@ func (p *Publisher) FinalFlush(ctx context.Context, req FlushRequest) (*FlushEvi
 		guard, scan, bytesDigest, worktreeDigest)
 	if perr != nil {
 		return nil, perr
+	}
+	if req.Signal != nil && res != nil {
+		req.Signal(res.SchemaMismatches)
 	}
 	return evidenceForPublish(req.Generation, res, scannedAt, bytesDigest, worktreeDigest), nil
 }
