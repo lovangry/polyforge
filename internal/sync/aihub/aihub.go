@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/sync/revision"
@@ -410,10 +411,53 @@ func (c *Client) GetBudget(wiID string) (map[string]any, error) {
 	return out, nil
 }
 
-// MemorySearch forwards a memory_read proxy operation (06 §5.1).
+// MemorySearch forwards a memory_read proxy operation (06 §5.1). The
+// Core's search face is GET /api/v1/memories/search with QUERY
+// PARAMETERS (q, type, tags, limit; the endpoint authority is 06 §5.1's
+// table, the same wire the CLI's SearchMemories rides) — the first
+// wired version POSTed a JSON body to that path and every memory_read
+// through the proxy answered 405 (caught by the daemon-face proxy
+// test). The proxy payload's keys map onto those parameters; project is
+// required by the server (its absence answers MEM-404).
 func (c *Client) MemorySearch(body map[string]any) (map[string]any, error) {
+	q := url.Values{}
+	if v, ok := body["project"].(string); ok && v != "" {
+		q.Set("project", v)
+	}
+	if v, ok := body["q"].(string); ok && v != "" {
+		q.Set("q", v)
+	}
+	if v, ok := body["type"].(string); ok && v != "" {
+		q.Set("type", v)
+	}
+	switch tv := body["tags"].(type) {
+	case []any:
+		parts := make([]string, 0, len(tv))
+		for _, tag := range tv {
+			if s, ok := tag.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		if len(parts) > 0 {
+			q.Set("tags", strings.Join(parts, ","))
+		}
+	case string:
+		if tv != "" {
+			q.Set("tags", tv)
+		}
+	}
+	switch lv := body["limit"].(type) {
+	case float64:
+		q.Set("limit", strconv.Itoa(int(lv)))
+	case int:
+		q.Set("limit", strconv.Itoa(lv))
+	case string:
+		if lv != "" {
+			q.Set("limit", lv)
+		}
+	}
 	var out map[string]any
-	if err := c.do("POST", "/api/v1/memories/search", body, "", &out); err != nil {
+	if err := c.do("GET", "/api/v1/memories/search?"+q.Encode(), nil, "", &out); err != nil {
 		return nil, err
 	}
 	return out, nil
