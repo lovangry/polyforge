@@ -133,10 +133,29 @@ func (d *Daemon) closeJob(ctx context.Context, wi string, jr *jobRuntime, endRea
 	d.markJobStatus(wi, JobInterrupting)
 	// Boundary notice: the daemon cannot pick or skip steps for the agent
 	// (00 §3.6) — it only asks it to stop advancing at the next boundary.
+	// Bounded-wait audit (polyforge#32): both waits below run through
+	// controlWatch, which SELECTS on the agent's exit signal alongside the
+	// call's own ack deadline. An agent that dies inside the window returns
+	// ErrAgentDied instead of parking the close on a control path that
+	// will never answer (the pilot: 20+ minutes parked in `(shutting
+	// down)` after the stuck agent was killed).
+	//
+	// SHUTDOWN PRECEDENCE over crash continuation (§7.1): an agent that
+	// dies during the shutdown window is NOT re-derived. The shutting_down
+	// latch has already frozen every job-creation source (04 §6.5 step 2)
+	// and this close ends the generation (pause) and removes the jobs[]
+	// record below (sealJob), so a later daemon restart finds nothing
+	// recorded as running for this WI — §7.1 re-derivation applies only to
+	// a job a crash left recorded as running, never to one this sequence
+	// closed. The dead agent is instead handled exactly as §6.5 step 4
+	// defines for the daemon-exit shape: the final flush below runs on the
+	// agent's behalf over a PROVEN-empty writer domain (the 05 §2.7
+	// condition-① group proof — never the bare top-level exit).
 	if jr.agent != nil && jr.agent.Alive() {
-		if err := jr.agent.NotifyStop(ctx); err == nil {
-			_ = jr.agent.Quiesce(ctx)
-		} else if errors.Is(err, ErrControlChannelLost) {
+		notice := controlWatch(ctx, jr.agent, jr.agent.NotifyStop)
+		if notice == nil {
+			_ = controlWatch(ctx, jr.agent, jr.agent.Quiesce)
+		} else if errors.Is(notice, ErrControlChannelLost) {
 			// ADOPTED agent (crash-restart re-attach, 04 §7.1 step 3): the
 			// graceful notice is undeliverable — the stdio control channel
 			// died with the previous daemon process. Degrade to the B-path
