@@ -10,8 +10,10 @@ steps:
   - { id: verification, kind: gate, gate: true, on_fail: { action: rewind, target: code } }
   - { id: e2e-run, kind: code }
   - { id: review, kind: review, gate: true, on_fail: { action: rewind, target: code } }
-  - { id: release, kind: code, gate: true, on_fail: { action: rewind, target: review } }
+  - { id: release, kind: code, gate: true, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: review } }
 budget: { requests: 200, tokens: 500000, wall_minutes: 240 }
+defaults:
+  model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 ---
 
 # feature-full — reference flow

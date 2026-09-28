@@ -46,12 +46,50 @@ var bundleStepIDRegex = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 
 var bundleDigestHexRegex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// candidateElemRegex is the element-format convention adopted by the reference
+// bundles: a provider-qualified harness model id ("<provider>/<model>"),
+// the same provider/id form the pi harness accepts for --model.
+// 01-workflow-skills.md §12 item 4 deliberately leaves the concrete candidate
+// encoding OPEN (interpretation belongs to the harness adapter contract,
+// 00-architecture.md §3.6a, which pins no encoding either), so the product
+// parser enforces only V9's non-empty-string rule; this test-side convention
+// gate is what keeps every shipped reference bundle on one spelling: a
+// lowercase provider segment and model segment, one '/' between them, no
+// whitespace.
+var candidateElemRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$`)
+
+// candidateProblems validates one declared model_candidates list (defaults
+// or a step override) against the reference-bundle element convention:
+// every entry matches candidateElemRegex and the list carries no duplicate
+// (a duplicate is a pointless candidate under V9's bounded in-order switch
+// and always an authoring mistake). Absence is legal and never lands here
+// (V9: lists are optional; a step without an override inherits defaults
+// wholesale — replace, never merge).
+func candidateProblems(where string, cands []string) []string {
+	var probs []string
+	seen := map[string]bool{}
+	for _, c := range cands {
+		if !candidateElemRegex.MatchString(c) {
+			probs = append(probs, fmt.Sprintf("%s model_candidates: element %q is not a provider-qualified id \"<provider>/<model>\"", where, c))
+		}
+		if seen[c] {
+			probs = append(probs, fmt.Sprintf("%s model_candidates: duplicate element %q", where, c))
+		}
+		seen[c] = true
+	}
+	return probs
+}
+
 // bundleProblems runs the full mechanical validation over one bundle
-// directory and returns every problem found (empty slice = valid bundle).
-func bundleProblems(bundleDir string) []string {
-	var problems []string
+// directory and returns every problem found (empty slice = valid bundle)
+// plus advisory notices (legal-but-noteworthy states that must not fail
+// a reference bundle, only surface it).
+func bundleProblems(bundleDir string) (problems []string, notices []string) {
 	add := func(format string, args ...any) {
 		problems = append(problems, fmt.Sprintf(format, args...))
+	}
+	notice := func(format string, args ...any) {
+		notices = append(notices, fmt.Sprintf(format, args...))
 	}
 	name := filepath.Base(filepath.Clean(bundleDir))
 
@@ -59,7 +97,7 @@ func bundleProblems(bundleDir string) []string {
 	fm, err := ValidateWorkflowFrontmatter(bundleDir, name)
 	if err != nil {
 		add("frontmatter validation: %v", err)
-		return problems
+		return problems, notices
 	}
 
 	// --- thin checks: ids, kinds, interactive, gates, on_fail, budget ---
@@ -132,6 +170,26 @@ func bundleProblems(bundleDir string) []string {
 		}
 	}
 
+	// --- model candidates (V9): absent allowed (notice), present gated ---
+	// Absence is LEGAL everywhere (V9: the lists are optional), but a
+	// reference bundle without defaults.model_candidates degrades the
+	// infra-failure machinery to a no-op — re-dispatch cannot switch
+	// models, it just reuses the harness adapter's default — so it is
+	// surfaced as a NOTICE, never a problem. Presence gets the element-
+	// format and duplicate gate. Step-level lists REPLACE defaults (V9:
+	// whole-list replacement, no merge), so each list is validated
+	// standalone and a step override need not repeat defaults' entries.
+	if fm.Defaults == nil || len(fm.Defaults.ModelCandidates) == 0 {
+		notice("defaults.model_candidates absent: infra-failure re-dispatch will reuse the harness adapter's default model (V9)")
+	} else {
+		problems = append(problems, candidateProblems("defaults", fm.Defaults.ModelCandidates)...)
+	}
+	for _, st := range fm.Steps {
+		if len(st.ModelCandidates) > 0 {
+			problems = append(problems, candidateProblems("step "+st.ID, st.ModelCandidates)...)
+		}
+	}
+
 	// --- agents correspondence (V7): one file per step id, no orphans ---
 	if err := CheckAgentsExist(bundleDir, fm); err != nil {
 		add("agents existence: %v", err)
@@ -180,7 +238,7 @@ func bundleProblems(bundleDir string) []string {
 		add("digest not deterministic: %s != %s", d1, d2)
 	}
 
-	return problems
+	return problems, notices
 }
 
 // TestReferenceBundles iterates every bundle under workflows/ and requires
@@ -205,8 +263,15 @@ func TestReferenceBundles(t *testing.T) {
 		}
 		dir := filepath.Join(root, d.Name())
 		t.Run(d.Name(), func(t *testing.T) {
-			for _, p := range bundleProblems(dir) {
+			problems, notices := bundleProblems(dir)
+			for _, p := range problems {
 				t.Errorf("%s", p)
+			}
+			// Absent candidates are legal (V9) — surfaced as notices so a
+			// bundle that silently lost its defaults stays visible in -v
+			// output without failing the gate.
+			for _, n := range notices {
+				t.Logf("notice: %s", n)
 			}
 			got, err := digest.ComputeBundleDigest(dir)
 			if err != nil {
@@ -264,7 +329,8 @@ func writeBundleDir(t *testing.T, files map[string]string) string {
 // below is suspect.
 func TestValidDemoBundle(t *testing.T) {
 	dir := writeBundleDir(t, validDemoBundle())
-	if problems := bundleProblems(dir); len(problems) != 0 {
+	problems, _ := bundleProblems(dir)
+	if len(problems) != 0 {
 		for _, p := range problems {
 			t.Errorf("%s", p)
 		}
@@ -274,7 +340,8 @@ func TestValidDemoBundle(t *testing.T) {
 // TestMalformedBundleFixtures proves the bundle validation FAILS on the
 // classic authoring mistakes: unknown kind, dangling on_fail target,
 // duplicate id, missing agent file, non-parseable output schema, a
-// non-boolean interactive flag, and an orphan agent file.
+// non-boolean interactive flag, an orphan agent file, a malformed
+// model-candidate element, and a duplicate model-candidate entry.
 func TestMalformedBundleFixtures(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -341,6 +408,31 @@ func TestMalformedBundleFixtures(t *testing.T) {
 			},
 			want: "orphan file",
 		},
+		{
+			// The one candidate-element negative fixture: an unqualified
+			// model id (no provider segment) must fail the reference-bundle
+			// convention gate. The product parser accepts it (V9 checks only
+			// non-empty strings; the element encoding is an open item, 01
+			// §12 item 4) — this test is the gate.
+			name: "malformed model candidate element",
+			mutate: func(f map[string]string) {
+				f["workflow.md"] = strings.Replace(f["workflow.md"],
+					"budget: { requests: 10, tokens: 1000, wall_minutes: 5 }",
+					"defaults:\n  model_candidates: [sub2api-glm/glm-5.3, glm-5.3]\nbudget: { requests: 10, tokens: 1000, wall_minutes: 5 }", 1)
+			},
+			want: "provider-qualified",
+		},
+		{
+			// Companion to the element gate: a duplicate entry is a
+			// pointless candidate under V9's bounded in-order switch.
+			name: "duplicate model candidate",
+			mutate: func(f map[string]string) {
+				f["workflow.md"] = strings.Replace(f["workflow.md"],
+					"budget: { requests: 10, tokens: 1000, wall_minutes: 5 }",
+					"defaults:\n  model_candidates: [sub2api-glm/glm-5.3, sub2api-glm/glm-5.3]\nbudget: { requests: 10, tokens: 1000, wall_minutes: 5 }", 1)
+			},
+			want: "duplicate element",
+		},
 	}
 
 	for _, tc := range cases {
@@ -348,7 +440,7 @@ func TestMalformedBundleFixtures(t *testing.T) {
 			files := validDemoBundle()
 			tc.mutate(files)
 			dir := writeBundleDir(t, files)
-			problems := bundleProblems(dir)
+			problems, _ := bundleProblems(dir)
 			if len(problems) == 0 {
 				t.Fatalf("expected a validation problem containing %q, got none", tc.want)
 			}

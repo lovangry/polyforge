@@ -5,13 +5,15 @@ rewind:
   max_total: 4
   max_per_step: 2
 budget: { requests: 140, tokens: 350000, wall_minutes: 180 }
+defaults:
+  model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
   - { id: repro, kind: code }
-  - { id: root-cause, kind: qa, gate: true, on_fail: { action: rewind, target: repro } }
+  - { id: root-cause, kind: qa, gate: true, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { action: rewind, target: repro } }
   - { id: fix, kind: code }
   - { id: verification, kind: gate, gate: true, on_fail: { action: rewind, target: fix } }
   - { id: review, kind: review, gate: true, on_fail: { action: rewind, target: fix } }
-  - { id: release, kind: code, gate: true, on_fail: { action: rewind, target: review } }
+  - { id: release, kind: code, gate: true, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: review } }
 ---
 
 # bug-fix — root-cause lane

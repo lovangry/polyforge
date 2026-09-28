@@ -5,6 +5,8 @@ rewind:
   max_total: 2
   max_per_step: 2
 budget: { requests: 40, tokens: 100000, wall_minutes: 60 }
+defaults:
+  model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
   - { id: plan, kind: author }
   - { id: code, kind: code }
