@@ -741,15 +741,45 @@ func TestMain(m *testing.M) {
 }
 
 // proxyHelperMain: polls PF_PROXY_DIR for request markers req_<n>; for
-// each it performs one proxy_call read_workflow_ref over the daemon
-// socket and records {status, body} to resp_<n>. Exits after
-// PF_PROXY_CALLS calls.
+// each it performs one proxy_call over the daemon socket and records
+// {status, body} to resp_<n>. Two drive modes: PF_PROXY_PLAN (a JSON
+// array of {"op","payload"} requests, one call per entry — all from the
+// same helper pid, which the SO_PEERCRED check matches), or the legacy
+// PF_PROXY_CALLS count of one operation (PF_PROXY_OP, default
+// read_workflow_ref) with one payload (PF_PROXY_PAYLOAD, default the
+// empty object).
 func proxyHelperMain() {
 	dir := os.Getenv("PF_PROXY_DIR")
 	socket := os.Getenv("PF_PROXY_SOCKET")
 	wi := os.Getenv("PF_PROXY_WI")
-	calls, _ := strconv.Atoi(os.Getenv("PF_PROXY_CALLS"))
-	for i := 0; i < calls; i++ {
+	var plan []struct {
+		Op      string         `json:"op"`
+		Payload map[string]any `json:"payload"`
+	}
+	if raw := os.Getenv("PF_PROXY_PLAN"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &plan); err != nil {
+			os.Exit(1)
+		}
+	} else {
+		op := os.Getenv("PF_PROXY_OP")
+		if op == "" {
+			op = "read_workflow_ref"
+		}
+		payload := map[string]any{}
+		if raw := os.Getenv("PF_PROXY_PAYLOAD"); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+				os.Exit(1)
+			}
+		}
+		calls, _ := strconv.Atoi(os.Getenv("PF_PROXY_CALLS"))
+		for i := 0; i < calls; i++ {
+			plan = append(plan, struct {
+				Op      string         `json:"op"`
+				Payload map[string]any `json:"payload"`
+			}{Op: op, Payload: payload})
+		}
+	}
+	for i, step := range plan {
 		marker := filepath.Join(dir, fmt.Sprintf("req_%d", i))
 		for {
 			if _, err := os.Stat(marker); err == nil {
@@ -757,7 +787,7 @@ func proxyHelperMain() {
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		code, body := proxyHelperCall(socket, wi)
+		code, body := proxyHelperCall(socket, wi, step.Op, step.Payload)
 		blob, merr := json.Marshal(map[string]any{"status": code, "body": body})
 		if merr != nil {
 			os.Exit(1)
@@ -773,11 +803,11 @@ func proxyHelperMain() {
 	os.Exit(0)
 }
 
-// proxyHelperCall is the helper's UDS HTTP client: one proxy_call
-// read_workflow_ref, returning the daemon's HTTP status and parsed body.
-func proxyHelperCall(socket, wi string) (int, map[string]any) {
+// proxyHelperCall is the helper's UDS HTTP client: one proxy_call of the
+// given operation, returning the daemon's HTTP status and parsed body.
+func proxyHelperCall(socket, wi, op string, payload map[string]any) (int, map[string]any) {
 	blob, _ := json.Marshal(map[string]any{
-		"work_item_id": wi, "operation": "read_workflow_ref", "payload": map[string]any{},
+		"work_item_id": wi, "operation": op, "payload": payload,
 	})
 	req, err := http.NewRequest(http.MethodPost, "http://daemon/proxy_call", bytes.NewReader(blob))
 	if err != nil {

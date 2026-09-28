@@ -46,6 +46,15 @@ var (
 func usageBins(t *testing.T) string {
 	t.Helper()
 	usageBinOnce.Do(func() {
+		// Manual instrumented round (covdata measurement): pre-built
+		// binaries (go build -cover -coverpkg=./...) replace the fresh
+		// build, so the spawned aihub/pf/fakepi subprocesses emit covdata
+		// into the caller's GOCOVERDIR (inherited via the environment).
+		// Opt-in only: unset in every ordinary test run.
+		if dir := os.Getenv("PF_USAGE_BIN_DIR"); dir != "" {
+			usageBinDir = dir
+			return
+		}
 		dir, err := os.MkdirTemp("", "pf17-dogfood-bins")
 		if err != nil {
 			usageBinErr = err
@@ -312,6 +321,14 @@ func (u *usageInstall) newUsageMachine(t *testing.T, machineID string) *usageMac
 // merged work-machine binary. mode knobs (FAKEPI_MODE=ask) are
 // inherited by the WI Agent child (04 §6.1a env).
 func (m *usageMachine) start(extraEnv ...string) {
+	m.startWithArgs(nil, extraEnv...)
+}
+
+// startWithArgs is start() with extra daemon argv. The Batch wave
+// scenarios need `--project`: the daemon's recommendation face
+// (mode(get_recommendation)) reads the ready queue of the CONFIGURED
+// project, and a daemon started without it cannot serve a wave at all.
+func (m *usageMachine) startWithArgs(extraArgs []string, extraEnv ...string) {
 	m.t.Helper()
 	if m.cmd != nil {
 		m.t.Fatal("machine daemon already started")
@@ -320,7 +337,7 @@ func (m *usageMachine) start(extraEnv ...string) {
 	if err != nil {
 		m.t.Fatal(err)
 	}
-	cmd := exec.Command(filepath.Join(m.inst.binDir, "pf"), "daemon",
+	cmd := exec.Command(filepath.Join(m.inst.binDir, "pf"), append([]string{"daemon",
 		"--aihub-url", m.inst.url,
 		"--api-key-file", m.keyFile,
 		"--machine-id", m.id,
@@ -329,7 +346,7 @@ func (m *usageMachine) start(extraEnv ...string) {
 		"--pi-bin", filepath.Join(m.inst.binDir, "fakepi"),
 		"--skills-dir", m.inst.skillsDir,
 		"--workflows-dir", m.inst.workflowsDir,
-	)
+	}, extraArgs...)...)
 	cmd.Env = append(append(os.Environ(), extraEnv...),
 		"FAKEPI_SPAWN_LOG="+m.spawnLog,
 	)
