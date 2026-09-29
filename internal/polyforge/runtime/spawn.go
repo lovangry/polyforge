@@ -289,6 +289,7 @@ type proc struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	startedAt string
+	taps      []func(string) // stdout record taps (phase-3 observe adapter)
 
 	mu   sync.Mutex // guards stdin writes
 	pend sync.Mutex // guards pending ids (own lock: stdin writes may block)
@@ -299,7 +300,7 @@ type proc struct {
 	exitErr error
 }
 
-func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser) *proc {
+func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...func(string)) *proc {
 	p := &proc{
 		cmd:       cmd,
 		stdin:     stdin,
@@ -307,6 +308,7 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser) *proc {
 		pending:   map[string]bool{},
 		ctrl:      newLineQueue(),
 		exited:    make(chan struct{}),
+		taps:      taps,
 	}
 	go func() {
 		p.exitErr = cmd.Wait()
@@ -327,6 +329,9 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser) *proc {
 				p.ctrl.closeTyped(errControlTooLong)
 				fmt.Fprintf(os.Stderr, "runtime: control line over %d bytes; control path closed\n", maxControlLineBytes)
 				continue // keep draining as bulk, never block the child
+			}
+			for _, t := range p.taps {
+				t(line)
 			}
 			p.classify(line)
 		}

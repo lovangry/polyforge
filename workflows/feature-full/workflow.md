@@ -123,7 +123,7 @@ attempt never books more than an hour.
 ## The release step (per-project convention)
 
 `release` is an ordinary step slot, not a distinct mechanism — it reuses every existing
-step primitive (inputs, `output` schema, worktree, budget, rewind, sync boundaries;
+step primitive (inputs, `output` schema, worktree, budget, rewind;
 `01-workflow-skills.md` §4.2). The version shipped in this reference bundle
 (`agents/release.md`) is deliberately generic: it defines the shape of a release step
 (what a release verdict/output looks like) without hard-wiring a specific version scheme,

@@ -38,7 +38,7 @@ output:
 # release
 
 This is a normal step slot — it reuses every existing step primitive (inputs, this
-`output` schema, worktree access, budget, rewind, sync boundaries;
+`output` schema, worktree access, budget, rewind;
 `01-workflow-skills.md` §4.2). For this repo the template is already filled in: the body
 below is polyforge's own concrete release procedure — the platform bootstraps its
 releases through the same hook it ships to projects — while this file's frontmatter

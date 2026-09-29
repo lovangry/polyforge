@@ -59,6 +59,12 @@ type Config struct {
 	// credential) the spawned agents' environment must never carry, even
 	// under a renamed variable.
 	EnvSecrets []string
+	// RecordTap, when non-nil, receives every raw stdout record line the
+	// production spawner reads (one harness record per delivery, verbatim
+	// including the trailing newline stripped). The phase-3 daemon binds it
+	// to its observe adapter so the Observe lane's stream monitoring sees
+	// the record stream; nil (tests, non-pi spawners) disables it.
+	RecordTap func(wi string, line []byte)
 }
 
 func (c *Config) fill() {
@@ -265,10 +271,19 @@ func randomKey() string {
 // Start (§一 Runtime): claim → clone/init capsule → materialize → spawn →
 // RTStarted.
 
-// Start claims wi and runs it to a live agent. Idempotency rides on the
-// claim idempotency key: a retry after a lost response re-claims the same
-// attempt server-side.
+// Start claims wi and runs it to a live agent (a plain claim). Idempotency
+// rides on the claim idempotency key: a retry after a lost response
+// re-claims the same attempt server-side. See StartIntent for the
+// resume/takeover intents.
 func (r *Runtime) Start(ctx context.Context, wi string) error {
+	return r.StartIntent(ctx, wi, "claim")
+}
+
+// StartIntent claims wi with an explicit claim intent (claim|resume|
+// takeover — the aihub claim-endpoint semantics differ per intent) and
+// runs it to a live agent. The phase-3 daemon routes the CLI's
+// submit/resume/takeover verbs here.
+func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	if j := r.jobOf(wi); j != nil {
@@ -276,7 +291,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	}
 	resp, err := r.hub.Claim(aihubclient.ClaimRequest{
 		WorkItemID:     wi,
-		Intent:         "claim",
+		Intent:         intent,
 		MachineID:      r.cfg.MachineID,
 		Owner:          r.cfg.MachineID,
 		IdempotencyKey: randomKey(),
