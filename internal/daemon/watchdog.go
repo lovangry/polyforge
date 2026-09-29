@@ -23,11 +23,14 @@ package daemon
 //     04 §7.1 step-4 crash-continuation sequence immediately — collect the
 //     residual process group, re-derive with the SAME session id, write the
 //     new pid back into jobs[] — no waiting for shutdown or restart.
-//   - Watchdog 2 (hang): ACTIVITY-based judgment. The main agent process's
-//     /proc counters (I/O + CPU jiffies) flat over a configurable window
-//     (default 10 minutes) ⇒ judged hung ⇒ kill ⇒ the same crash
-//     continuation. A slow-but-streaming agent shows continuous activity
-//     and is never touched.
+//   - Watchdog 2 (hang): STREAM-based judgment since polyforge#48 (see
+//     the stream-heartbeat block below). The supervised agent's protocol
+//     record stream silent while a TURN IS IN FLIGHT over a configurable
+//     window (default 10 minutes) ⇒ confirmation probe ⇒ no ack ⇒ kill ⇒
+//     the same crash continuation. A slow-but-streaming agent keeps
+//     emitting records and is never touched. The /proc activity counters
+//     are DEMOTED to auxiliary evidence (and remain the judgment only for
+//     a handle with no observable stream, e.g. an adopted agent).
 //   - Wall clock is ONLY an absolute backstop: max(3× the current step's
 //     declared wall budget, 15min) remains as a second bound in case the
 //     activity probe itself fails or is unavailable.
@@ -37,17 +40,68 @@ package daemon
 //     relaunch. The counter and the verdict are persisted in the jobs[] row
 //     so a daemon restart cannot silently retry a bounded-terminated step.
 //
-// KNOWN LIMIT (recorded honestly, same discipline as freezeConditions): the
-// activity probe watches the MAIN agent pid only. A step command CHILD
-// running longer than the window while the main agent quietly drains its
-// pipes is indistinguishable from a hang by these counters alone; the
-// ruling accepts that trade (the manual diagnosis that produced it used
-// exactly this signal), and the storm guard bounds the damage of one false
-// verdict to a single relaunch before the bounded termination surfaces it
-// for human triage. The char counters (rchar/wchar) are included precisely
-// because they move on pipe and socket traffic — the block-backed
-// read_bytes/write_bytes alone would stay flat even for a main agent
-// actively draining a child's output.
+// ---------------------------------------------------------------------------
+// polyforge#48 — THE STREAM-HEARTBEAT REVISION of Watchdog 2.
+//
+// WHAT BROKE. The activity criterion above was measured failing in
+// production (pilot 2026-09-29 00:45, wi polyforge#7). Every human
+// criterion said hung — no TCP connection in flight, no session write
+// for 12+ minutes, zero io increment — and the watchdog never fired,
+// because /proc/<pid>/stat kept ticking +1 jiffy every ~10 seconds: the
+// node runtime's epoll timer accounting. "ANY counter moved ⇒ activity"
+// is over-sensitive to IDLE NOISE. The regression that was supposed to
+// cover this (test (d)) simulated a steady TRICKLE of real work, never
+// the floor noise of an idle runtime, so the false negative shipped.
+//
+// THE RULED CRITERION (primary). The supervisor's stdout reader already
+// classifies every protocol record — it must, it is the ack carrier —
+// so the stream costs nothing extra to observe and it measures the
+// right thing: AGENT PROGRESS, not process scheduling.
+//
+//	inFlight && now-lastRecordAt > window ⇒ hung
+//
+// inFlight is flipped by the harness's own run/turn lifecycle records
+// (pinned against a real capture, see mainagent/streamheartbeat.go).
+// Both halves matter: silence with NO turn in flight is an idle agent,
+// never a hang.
+//
+// WINDOW CALIBRATION (human-approved, default 10 minutes). Legal silence
+// on this stream is THINKING ONLY — a model reasoning before its first
+// text delta. Everything else streams: text deltas arrive continuously,
+// and a step command or subagent emits records throughout its run. The
+// pilot measured legal thinking gaps at ≤4 minutes and real hangs at
+// 7-15+ minutes that never returned. 10 minutes sits above the measured
+// legal maximum with >2x headroom and below the observed hang floor.
+// Configurable by the daemon operator (Config.WatchdogActivityWindow /
+// POLYFORGE_WATCHDOG_WINDOW) AND per-step, through the same workflow.md
+// frontmatter mechanism the step wall budget already uses
+// (budget.hang_window_minutes) — a step that legitimately thinks longer
+// declares it rather than forcing a global loosening.
+//
+// CONFIRMATION PROBE (before any kill). Window expiry is a SUSPICION,
+// not a verdict. The daemon sends one control-shaped pf/probe and waits
+// turn-scale for the agent's ack; only silence there confirms the hang.
+// The ack must be the AGENT's, not the harness's: a harness whose
+// upstream call is wedged still answers its RPC layer instantly (the
+// measured `response` record precedes any model work), so a
+// transport-level echo would rebuild the very false negative this fixes.
+//
+// THE PROCFS PROBE DEMOTES to auxiliary evidence: sampled and attached
+// to the incident for the operator, never overriding the stream. It
+// stays the CRITERION only where no stream exists (an adopted agent
+// re-attached to a bare pid after a daemon restart), and there it now
+// carries the threshold band #48 asked for — see activityDelta.
+//
+// KNOWN LIMIT (recorded honestly, same discipline as freezeConditions):
+// the procfs fallback watches the MAIN agent pid only. A step command
+// CHILD running longer than the window while the main agent quietly
+// drains its pipes is indistinguishable from a hang by those counters
+// alone; the ruling accepts that trade, and the storm guard bounds the
+// damage of one false verdict to a single relaunch before the bounded
+// termination surfaces it for human triage. The char counters
+// (rchar/wchar) are included precisely because they move on pipe and
+// socket traffic. The STREAM criterion does not share this limit: a
+// step agent's output flows through the same record stream.
 
 import (
 	"context"
@@ -95,7 +149,42 @@ var (
 	// exercises the probe-unavailable degradation without breaking the
 	// pid-reuse guards.
 	watchProcRoot = "/proc"
+	// watchdogProbeBoundVar is the turn-scale bound of ONE confirmation
+	// probe (polyforge#48). It is spent only AFTER the hang window has
+	// already expired, so it is never on a healthy path; it is the last
+	// benefit of the doubt a legitimately-slow turn gets. A handle whose
+	// probe face is missing skips straight to the kill, exactly as
+	// before this existed.
+	watchdogProbeBoundVar = 2 * time.Minute
 )
+
+// watchdogCPUNoiseRate is the threshold band of the DEMOTED procfs
+// criterion (polyforge#48 item 1 / the original #44 activity probe).
+// Measured floor noise of an idle node runtime in epoll: ~1 jiffy per
+// 10 seconds, i.e. ~6 jiffies/minute, produced by timer accounting with
+// zero io increment. A real streaming turn burns orders of magnitude
+// more (JSON parsing of a token stream is not free). 30 jiffies/minute
+// — 0.5% of one core at the usual USER_HZ=100 — sits ~5x above the
+// measured noise and far below any real work, so
+//
+//	io chars flat  &&  cpu delta < rate×window  ⇒  FLAT
+//
+// A RATE (not a fixed per-window count) is required: the production
+// noise accumulated 60 jiffies over the 10-minute window, which any
+// fixed small constant would have read as work — the exact false
+// negative being fixed.
+const watchdogCPUNoiseRate = 30.0 // jiffies per minute
+
+// noiseFloorTicks is the jiffy budget the band allows over window.
+// Floored at 2 so a very short (test-shrunk) window still tolerates a
+// scheduling tick without calling a busy process hung.
+func noiseFloorTicks(window time.Duration) uint64 {
+	n := uint64(watchdogCPUNoiseRate * window.Minutes())
+	if n < 2 {
+		return 2
+	}
+	return n
+}
 
 // watchdogBackstopBound is the fixed absolute backstop over one agent
 // instance: max(3× the step's wall budget, the 15-minute floor).
@@ -107,12 +196,42 @@ func watchdogBackstopBound(stepWall time.Duration) time.Duration {
 	return b
 }
 
-// activityWindow resolves the configured hang window.
+// activityWindow resolves the DAEMON-WIDE hang window: the operator's
+// Config value (the daemon flag / POLYFORGE_WATCHDOG_WINDOW, resolved in
+// New) or the design default.
 func (d *Daemon) activityWindow() time.Duration {
 	if d.cfg.WatchdogActivityWindow > 0 {
 		return d.cfg.WatchdogActivityWindow
 	}
 	return DefaultWatchdogActivityWindow
+}
+
+// hangWindow resolves the window ACTUALLY applied to one job: the
+// per-step frontmatter override when the current step declares one,
+// else the daemon-wide window (polyforge#48: "configurable by daemon
+// flag AND per-step frontmatter override, same mechanism as the step
+// budget"). A step that legitimately thinks longer than the global
+// window declares budget.hang_window_minutes instead of forcing every
+// other step to be judged loosely.
+//
+// The override is scaled, never absolute, when the daemon window has
+// been tightened below the default: a test (or an operator) running a
+// 250ms window must not have a step's "3 minutes" silently reinstate a
+// production-scale window. The ratio the step declares against the
+// DESIGN default is what carries over.
+func (d *Daemon) hangWindow(stepHang time.Duration) time.Duration {
+	base := d.activityWindow()
+	if stepHang <= 0 {
+		return base
+	}
+	if base == DefaultWatchdogActivityWindow {
+		return stepHang
+	}
+	scaled := time.Duration(float64(base) * (float64(stepHang) / float64(DefaultWatchdogActivityWindow)))
+	if scaled <= 0 {
+		return base
+	}
+	return scaled
 }
 
 // ---------------------------------------------------------------------------
@@ -129,9 +248,32 @@ type activitySample struct {
 	cpuTicks   uint64 // /proc/<pid>/stat: utime+stime in ticks
 }
 
-// flat reports whether NOTHING moved between two samples.
+// flat reports whether NOTHING moved between two samples. Kept for the
+// exact-equality diagnostics; the JUDGMENT uses flatWithin below.
 func (s activitySample) flat(prev activitySample) bool {
 	return s == prev
+}
+
+// flatWithin is the polyforge#48 threshold band: s is flat against the
+// window BASE sample when no io byte moved and the CPU delta stayed
+// inside the idle-noise budget for window. The io side keeps its strict
+// zero-increment rule deliberately — the pilot measured io at exactly
+// zero through the whole 12-minute hang, and unlike the CPU counters
+// the char counters have no equivalent idle floor (an idle runtime that
+// is not reading or writing anything moves neither).
+//
+// A counter that went BACKWARDS (impossible within one process life, so:
+// a pid recycled under us) is treated as movement — fail safe, do not
+// kill on a reading we cannot trust.
+func (s activitySample) flatWithin(base activitySample, window time.Duration) bool {
+	if s.rchar != base.rchar || s.wchar != base.wchar ||
+		s.readBytes != base.readBytes || s.writeBytes != base.writeBytes {
+		return false
+	}
+	if s.cpuTicks < base.cpuTicks {
+		return false
+	}
+	return s.cpuTicks-base.cpuTicks < noiseFloorTicks(window)
 }
 
 // procfsActivitySample reads one activity sample for pid. Portability
@@ -257,10 +399,29 @@ type watchState struct {
 	// step profile cache: re-read only when the current step changes.
 	stepID      string
 	stepWall    time.Duration
+	stepHang    time.Duration // per-step hang-window override (0 = none)
 	profileRead bool
 	// probeFailLogged suppresses the per-job "sample unreadable" line to
 	// one occurrence instead of one per 200ms tick.
 	probeFailLogged bool
+	// --- polyforge#48 stream-heartbeat bookkeeping ---
+	// streamSeen records that this instance's handle answered the stream
+	// face at least once; a handle that never does keeps the DEGRADED
+	// procfs criterion (and says so once).
+	streamSeen   bool
+	streamNoteed bool // the one-shot "no observable stream" log
+	// confirm is the in-flight confirmation probe, non-nil from the
+	// moment the window expired until the probe settles. The tick stays
+	// NON-BLOCKING: the probe runs on its own goroutine and the tick
+	// polls its channel, the same discipline as the death probe.
+	confirm *confirmProbe
+}
+
+// confirmProbe is one in-flight watchdog confirmation probe.
+type confirmProbe struct {
+	sentAt time.Time
+	done   chan error
+	cancel context.CancelFunc
 }
 
 func newWatchState(h AgentHandle) *watchState {
@@ -280,11 +441,33 @@ func newWatchState(h AgentHandle) *watchState {
 //
 //   - stepID: the current step ("" before the first step starts), the
 //     storm guard's identity key;
-//   - needsInput: the current step holds an open pending_question — a
-//     PROTOCOL wait for a human answer. Both probes are exempt while it
-//     holds: an agent legitimately parked on needs_input can outlive every
-//     window, and killing it would only re-enter the same wait after a
-//     pointless relaunch.
+//
+//   - needsInput: the current step holds an open pending_question WITH NO
+//     pending_answer yet — a PROTOCOL wait for a human. Both probes are
+//     exempt while it holds: an agent legitimately parked on needs_input
+//     can outlive every window, and killing it would only re-enter the
+//     same wait after a pointless relaunch.
+//
+//     NARROWED BY polyforge#48 (folded from #50). The old test was
+//     "pending_question != nil", which the pilot of 2026-09-29 01:20
+//     measured as far too wide: an answer had been DELIVERED and the
+//     agent hung mid-consumption (zero TCP / zero io / zero writes for
+//     8+ minutes), yet the question was still open, so the exemption
+//     held, the wall backstop was exempt with it, and all three
+//     self-healing paths were dead — only a human could recover it.
+//     pending_answer is the switch: pf-execute persists it BEFORE it
+//     processes the answer (SKILL.md §12, and the daemon relies on that
+//     ordering elsewhere already), so its presence means "the agent is
+//     WORKING on an answer", which is ordinary in-flight work and earns
+//     no exemption at all.
+//
+//     Under the STREAM criterion this stops being a special case: a
+//     needs_input wait has no turn in flight, so the criterion
+//     (inFlight && silence) cannot fire on it, while a consuming agent
+//     DOES have a turn in flight and is judged like any other turn. The
+//     explicit flag is kept for the degraded procfs path, which has no
+//     way to see a turn.
+//
 //   - stepWall: the current step's declared wall budget — the ONE source
 //     the backstop formula consumes: the per-step budget.wall_minutes in
 //     the capsule's MATERIALIZED workflow.md frontmatter (03 §4.5), the
@@ -292,28 +475,39 @@ func newWatchState(h AgentHandle) *watchState {
 //     reads, materialized by this daemon itself from its own checkout —
 //     no data-plane read, no second authority. A step without an explicit
 //     wall budget assumes the default (watchdogStepWallDefault).
-func (d *Daemon) stepProfile(jr *jobRuntime) (stepID string, needsInput bool, stepWall time.Duration) {
+func (d *Daemon) stepProfile(wi string, jr *jobRuntime) (stepID string, needsInput bool, stepWall, stepHang time.Duration) {
 	exec, err := jr.cap.LoadExecution()
 	if err != nil || exec == nil {
 		// No execution state yet (first step not started): no step id, no
 		// protocol wait, the default wall for the backstop.
-		return "", false, watchdogStepWallDefault
+		return "", false, watchdogStepWallDefault, 0
 	}
 	stepID = exec.CurrentStep
-	if q, _ := exec.PendingQuestion(); q != nil {
-		needsInput = true
+	if q, _ := exec.PendingQuestion(); q != nil && q.PendingAnswer == nil {
+		// Open question, answer not yet PERSISTED. Two sub-cases, and the
+		// capsule alone cannot tell them apart:
+		//
+		//   - nothing was ever delivered: a genuine wait for a human ⇒
+		//     exempt;
+		//   - the daemon DID deliver a relay for this question and never
+		//     observed its consumption: the answer is in the agent's hands
+		//     and the agent is working. Not a wait ⇒ NOT exempt. This is
+		//     the window the pilot's hang landed in (delivered, agent hung
+		//     before its atomic pending_answer persist), and the daemon is
+		//     the only party that can see it — it did the delivering.
+		needsInput = !d.ledger.AwaitingQuestion(wi, q.QuestionID)
 	}
 	// The workflow.md read is cached per CURRENT STEP (the declaration
 	// cannot change mid-step); the needs_input flag is NOT cached — a
-	// question can be asked at any point inside the step.
+	// question can be asked, and answered, at any point inside the step.
 	if jr.wd != nil && jr.wd.profileRead && jr.wd.stepID == stepID {
-		return stepID, needsInput, jr.wd.stepWall
+		return stepID, needsInput, jr.wd.stepWall, jr.wd.stepHang
 	}
-	wall := d.declaredStepWall(jr, stepID)
+	wall, hang := d.declaredStepBudget(jr, stepID)
 	if jr.wd != nil {
-		jr.wd.stepID, jr.wd.stepWall, jr.wd.profileRead = stepID, wall, true
+		jr.wd.stepID, jr.wd.stepWall, jr.wd.stepHang, jr.wd.profileRead = stepID, wall, hang, true
 	}
-	return stepID, needsInput, wall
+	return stepID, needsInput, wall, hang
 }
 
 // declaredStepWall resolves one step's declared wall budget from the
@@ -322,28 +516,79 @@ func (d *Daemon) stepProfile(jr *jobRuntime) (stepID string, needsInput bool, st
 // the backstop is a safety net, and a missing declaration must never
 // disable it.
 func (d *Daemon) declaredStepWall(jr *jobRuntime, stepID string) time.Duration {
+	wall, _ := d.declaredStepBudget(jr, stepID)
+	return wall
+}
+
+// declaredStepBudget reads BOTH watchdog-relevant declarations of one
+// step from the SAME single source: budget.wall_minutes (the backstop's
+// input, unchanged) and budget.hang_window_minutes (the polyforge#48
+// per-step hang-window override; 0 when undeclared, meaning the
+// daemon-wide window applies). One read, one cache, one authority.
+func (d *Daemon) declaredStepBudget(jr *jobRuntime, stepID string) (wall, hang time.Duration) {
 	raw, err := os.ReadFile(filepath.Join(jr.cap.Dir, "workflow.md"))
 	if err != nil {
-		return watchdogStepWallDefault
+		return watchdogStepWallDefault, 0
 	}
 	front, _, ok := schema.SplitFrontmatter(raw)
 	if !ok {
-		return watchdogStepWallDefault
+		return watchdogStepWallDefault, 0
 	}
 	var fm schema.Frontmatter
 	if err := yaml.Unmarshal(front, &fm); err != nil {
-		return watchdogStepWallDefault
+		return watchdogStepWallDefault, 0
 	}
 	for _, st := range fm.Steps {
 		if st.ID != stepID {
 			continue
 		}
-		if st.Budget != nil && st.Budget.WallMinutes != nil && *st.Budget.WallMinutes > 0 {
-			return time.Duration(*st.Budget.WallMinutes) * time.Minute
+		wall = watchdogStepWallDefault
+		if st.Budget == nil {
+			return wall, 0
 		}
-		return watchdogStepWallDefault
+		if st.Budget.WallMinutes != nil && *st.Budget.WallMinutes > 0 {
+			wall = time.Duration(*st.Budget.WallMinutes) * time.Minute
+		}
+		hang = declaredStepHangWindow(front, stepID)
+		return wall, hang
 	}
-	return watchdogStepWallDefault
+	return watchdogStepWallDefault, 0
+}
+
+// wdFrontmatter is the DAEMON-LOCAL view of the one frontmatter key this
+// watchdog owns. budget.hang_window_minutes is a RUNTIME-supervision
+// knob, not a workflow-semantics one: the executor never reads it, the
+// bundle validator has no opinion on it, and the workflow schema
+// (internal/workflow/schema) stays unextended on purpose — a supervision
+// detail must not become part of the authored-bundle contract. YAML
+// unmarshalling is non-strict, so a bundle carrying the key parses
+// identically for every other consumer, and a bundle without it simply
+// yields 0 (= use the daemon-wide window).
+type wdFrontmatter struct {
+	Steps []struct {
+		ID     string `yaml:"id"`
+		Budget *struct {
+			HangWindowMinutes *float64 `yaml:"hang_window_minutes"`
+		} `yaml:"budget"`
+	} `yaml:"steps"`
+}
+
+// declaredStepHangWindow extracts one step's hang-window override from
+// already-split frontmatter bytes. 0 means undeclared.
+func declaredStepHangWindow(front []byte, stepID string) time.Duration {
+	var fm wdFrontmatter
+	if err := yaml.Unmarshal(front, &fm); err != nil {
+		return 0
+	}
+	for _, st := range fm.Steps {
+		if st.ID != stepID || st.Budget == nil || st.Budget.HangWindowMinutes == nil {
+			continue
+		}
+		if m := *st.Budget.HangWindowMinutes; m > 0 {
+			return time.Duration(m * float64(time.Minute))
+		}
+	}
+	return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -387,32 +632,64 @@ func (d *Daemon) watchdogJob(ctx context.Context, wi string, jr *jobRuntime) {
 	if jr.wd == nil {
 		jr.wd = newWatchState(agent)
 	}
-	stepID, needsInput, stepWall := d.stepProfile(jr)
+	stepID, needsInput, stepWall, stepHang := d.stepProfile(wi, jr)
 	d.stormResetOnProgress(wi, jr, stepID)
+	// Infra incidents first, ALWAYS: a provider error is news even for an
+	// exempt or healthy job, and it is the earliest warning the operator
+	// can get (polyforge#48 item 3).
+	d.drainStreamIncidents(wi, jr, agent)
 
 	// Watchdog 1 — death: the moment the exit face says the process is
 	// gone, the crash continuation owns the job (collect + re-derive).
 	if agentDone(agent) {
+		d.cancelConfirmProbe(jr)
 		d.watchdogIncident(ctx, wi, jr, stepID, "agent_exit")
 		return
 	}
-	// needs_input: a protocol wait for a human answer — exempt from both
-	// probes (see stepProfile). The process is alive (checked above); the
-	// step cannot advance until the answer relay arrives.
+	// needs_input: a protocol wait for a HUMAN (open question, answer not
+	// yet delivered) — exempt from both probes (see stepProfile for the
+	// polyforge#48 narrowing: a delivered-but-unconsumed answer is NOT
+	// exempt). The process is alive (checked above); the step cannot
+	// advance until the answer relay arrives.
 	if needsInput {
+		d.cancelConfirmProbe(jr)
 		return
 	}
 	now := time.Now()
-	// Absolute backstop: per agent instance, regardless of the probe. This
-	// is the bound that holds when the activity probe is disabled,
-	// unavailable, or itself lied to.
+	// Absolute backstop: per agent instance, regardless of every probe.
+	// This is the bound that holds when the criteria are disabled,
+	// unavailable, or themselves lied to.
 	if bound := watchdogBackstopBound(stepWall); now.Sub(jr.wd.instStart) > bound {
+		d.cancelConfirmProbe(jr)
 		d.killAgentGroup(jr)
 		d.watchdogIncident(ctx, wi, jr, stepID, "wall_backstop")
 		return
 	}
-	// Watchdog 2 — hang: activity judgment, only when a sample is
-	// observable. An unavailable probe degrades this job to backstop-only.
+	window := d.hangWindow(stepHang)
+	// A confirmation probe already in flight owns the verdict until it
+	// settles: no second probe, no parallel judgment.
+	if jr.wd.confirm != nil {
+		d.settleConfirmProbe(ctx, wi, jr, agent, stepID, now)
+		return
+	}
+	// Watchdog 2 — hang. PRIMARY criterion: the protocol record stream.
+	if hb, ok := streamHeartbeat(agent); ok {
+		jr.wd.streamSeen = true
+		// The procfs sample is still taken, as AUXILIARY EVIDENCE only:
+		// it is attached to the incident so the operator sees both
+		// stories, and it never overrides the stream.
+		if hb.Silent(now, window) {
+			d.beginConfirmProbe(wi, jr, agent, stepID, hb, window, now)
+		}
+		return
+	}
+	if !jr.wd.streamNoteed {
+		jr.wd.streamNoteed = true
+		fmt.Fprintf(os.Stderr, "pf-daemon: %s agent pid %d exposes no record stream (adopted handle?); the hang watchdog falls back to the DEMOTED /proc activity criterion plus the wall backstop\n", wi, agent.PID())
+	}
+	// DEGRADED criterion: /proc counters, now with the polyforge#48
+	// threshold band (idle runtime noise is not activity). Only reached
+	// when no stream is observable.
 	sample, ok := d.sampleActivity(agent.PID())
 	if !ok {
 		if d.wdProbeAvailable && !jr.wd.probeFailLogged {
@@ -421,23 +698,156 @@ func (d *Daemon) watchdogJob(ctx context.Context, wi string, jr *jobRuntime) {
 		}
 		return
 	}
-	if !jr.wd.hasSample || sample.flat(jr.wd.last) {
-		if !jr.wd.hasSample {
-			jr.wd.hasSample = true
-			jr.wd.last = sample
-			jr.wd.flatSince = now
-			return
-		}
-		window := d.activityWindow()
+	if !jr.wd.hasSample {
+		jr.wd.hasSample = true
+		jr.wd.last = sample
+		jr.wd.flatSince = now
+		return
+	}
+	// The band is measured against the WINDOW BASE, never against the
+	// previous tick: 1 jiffy per tick would otherwise look like movement
+	// forever, which is exactly the production false negative.
+	if sample.flatWithin(jr.wd.last, window) {
 		if now.Sub(jr.wd.flatSince) >= window {
-			d.killAgentGroup(jr)
-			d.watchdogIncident(ctx, wi, jr, stepID, "hang")
+			d.beginConfirmProbe(wi, jr, agent, stepID, StreamHeartbeat{}, window, now)
 		}
 		return
 	}
-	// Activity observed: the window restarts, the agent is left alone.
+	// Real activity observed: the window restarts, the agent is left alone.
 	jr.wd.last = sample
 	jr.wd.flatSince = now
+}
+
+// streamHeartbeat reads one handle's stream heartbeat through the
+// OPTIONAL face; ok=false means this handle has no observable stream.
+func streamHeartbeat(h AgentHandle) (StreamHeartbeat, bool) {
+	sp, is := h.(AgentStreamProbe)
+	if !is {
+		return StreamHeartbeat{}, false
+	}
+	hb := sp.StreamHeartbeat()
+	if !hb.Observable {
+		return StreamHeartbeat{}, false
+	}
+	return hb, true
+}
+
+// ---------------------------------------------------------------------------
+// Infra incidents from the record stream (polyforge#48 item 3)
+
+// drainStreamIncidents moves whatever the supervisor's classifier queued
+// into the job's observe ring and the daemon log. Before this, a
+// provider failure was bulk output: the operator's first sign of a dead
+// upstream was the hang that followed minutes later. The incident is an
+// IMMEDIATE signal — it appears within one 200ms dispatcher tick of the
+// harness reporting it — and it is deliberately NOT a verdict: nothing
+// here kills, relaunches or counts toward the storm guard. A provider
+// error is information; the hang criterion remains the judgment.
+func (d *Daemon) drainStreamIncidents(wi string, jr *jobRuntime, agent AgentHandle) {
+	sp, ok := agent.(AgentStreamProbe)
+	if !ok {
+		return
+	}
+	for _, in := range sp.DrainStreamIncidents() {
+		fmt.Fprintf(os.Stderr, "pf-daemon: %s harness infra incident [%s] fatal=%v: %s\n", wi, in.Kind, in.Fatal, in.Detail)
+		jr.ring.Append(EvInfraIncident, map[string]any{
+			"kind": in.Kind, "detail": in.Detail, "fatal": in.Fatal,
+			"at": in.At.UTC().Format(time.RFC3339Nano),
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation probe (polyforge#48 item 2)
+
+// beginConfirmProbe arms ONE confirmation probe for a job whose hang
+// window just expired. Window expiry is a suspicion; the probe is the
+// ruled last step before a kill. A handle with no probe face has no way
+// to answer, so the verdict stands immediately — the pre-#48 behavior,
+// unchanged for those handles.
+func (d *Daemon) beginConfirmProbe(wi string, jr *jobRuntime, agent AgentHandle, stepID string, hb StreamHeartbeat, window time.Duration, now time.Time) {
+	aux := d.auxiliaryEvidence(agent)
+	lp, ok := agent.(AgentLivenessProbe)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "pf-daemon: %s judged hung (%s silent %s, in_flight=%v; aux: %s) and exposes no confirmation-probe face; killing\n",
+			wi, hangCriterion(hb), window, hb.InFlight, aux)
+		d.killAgentGroup(jr)
+		d.watchdogIncident(context.Background(), wi, jr, stepID, "hang")
+		return
+	}
+	fmt.Fprintf(os.Stderr, "pf-daemon: %s %s silent for %s (in_flight=%v; aux: %s); sending the watchdog confirmation probe (bound %s) before any kill\n",
+		wi, hangCriterion(hb), window, hb.InFlight, aux, watchdogProbeBoundVar)
+	pctx, cancel := context.WithTimeout(context.Background(), watchdogProbeBoundVar)
+	cp := &confirmProbe{sentAt: now, done: make(chan error, 1), cancel: cancel}
+	jr.wd.confirm = cp
+	jr.ring.Append(EvInfraIncident, map[string]any{
+		"kind": "hang_suspected", "detail": fmt.Sprintf("%s silent for %s; confirmation probe sent", hangCriterion(hb), window),
+		"fatal": false, "at": now.UTC().Format(time.RFC3339Nano),
+	})
+	go func() {
+		cp.done <- lp.ProbeLiveness(pctx)
+		cancel()
+	}()
+}
+
+// settleConfirmProbe polls the in-flight probe WITHOUT blocking the
+// tick. An ack cancels the kill and restarts the window (the agent was
+// slow, not hung); silence past the bound confirms the verdict.
+func (d *Daemon) settleConfirmProbe(ctx context.Context, wi string, jr *jobRuntime, agent AgentHandle, stepID string, now time.Time) {
+	cp := jr.wd.confirm
+	select {
+	case err := <-cp.done:
+		jr.wd.confirm = nil
+		cp.cancel()
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "pf-daemon: %s answered the watchdog confirmation probe after %s; NOT hung, window restarted\n", wi, now.Sub(cp.sentAt).Round(time.Second))
+			jr.wd.flatSince = now
+			if s, ok := d.sampleActivity(agent.PID()); ok {
+				jr.wd.last, jr.wd.hasSample = s, true
+			}
+			jr.ring.Append(EvInfraIncident, map[string]any{
+				"kind": "hang_cleared", "detail": "confirmation probe acked; the agent is alive and advancing",
+				"fatal": false, "at": now.UTC().Format(time.RFC3339Nano),
+			})
+			return
+		}
+		fmt.Fprintf(os.Stderr, "pf-daemon: %s did not answer the watchdog confirmation probe (%v); hang CONFIRMED, killing (aux: %s)\n", wi, err, d.auxiliaryEvidence(agent))
+		d.killAgentGroup(jr)
+		d.watchdogIncident(ctx, wi, jr, stepID, "hang")
+	default:
+		// Still waiting. The probe goroutine's own ctx bounds it, so this
+		// cannot wait forever; the backstop above bounds it again.
+	}
+}
+
+// cancelConfirmProbe drops an in-flight probe whose job left the judged
+// state (died, or entered a needs_input wait).
+func (d *Daemon) cancelConfirmProbe(jr *jobRuntime) {
+	if jr.wd == nil || jr.wd.confirm == nil {
+		return
+	}
+	jr.wd.confirm.cancel()
+	jr.wd.confirm = nil
+}
+
+// hangCriterion names which criterion is speaking, for the operator.
+func hangCriterion(hb StreamHeartbeat) string {
+	if hb.Observable {
+		return "record stream"
+	}
+	return "/proc activity (degraded criterion)"
+}
+
+// auxiliaryEvidence renders the DEMOTED procfs reading for the incident
+// log: it no longer decides anything, but "cpu +N jiffies, io flat" is
+// exactly what a human needs to tell an epoll-idle runtime (the
+// polyforge#48 production case) from a genuinely busy one.
+func (d *Daemon) auxiliaryEvidence(agent AgentHandle) string {
+	s, ok := d.sampleActivity(agent.PID())
+	if !ok {
+		return "/proc counters unreadable"
+	}
+	return fmt.Sprintf("cpu=%d ticks, rchar=%d, wchar=%d", s.cpuTicks, s.rchar, s.wchar)
 }
 
 // killAgentGroup terminates a judged-hung agent's WHOLE process group with
@@ -665,6 +1075,10 @@ func (d *Daemon) crashContinueJob(ctx context.Context, wi string, jr *jobRuntime
 	jr.ring.Append(EvWIAgentRederived, map[string]any{
 		"cause": cause, "session_id": j.HarnessSessionID, "runtime_watchdog": true,
 	})
+	// polyforge#48 item 5: a NEW DERIVATION is a new consumer. Any answer
+	// whose consumption was never observed is re-armed for it here — the
+	// missing half of the self-healing chain the pilot measured.
+	d.redeliverPendingAnswers(wi, jr)
 	// Write the new process identity back into the jobs[] row (04 §7.1
 	// step 4's final write), preserving the persisted watchdog state.
 	j.MainAgentPID = handle.PID()
@@ -672,6 +1086,81 @@ func (d *Daemon) crashContinueJob(ctx context.Context, wi string, jr *jobRuntime
 	j.Status = JobRunning
 	if err := d.state.UpsertJob(d.st, *j); err != nil {
 		fmt.Fprintf(os.Stderr, "pf-daemon: %s re-derivation pid write-back persist failed: %v\n", wi, err)
+	}
+}
+
+// redeliverPendingAnswers re-delivers, to a freshly derived agent, every
+// relay whose CONSUMPTION the daemon never observed (polyforge#48 item
+// 5, folded from #50). Before this, the three-state ledger called such a
+// delivery "retryable" and then nothing ever retried it: the pilot of
+// 2026-09-29 01:20 watched an answer die with the agent that was
+// consuming it, with the question still open and no path back short of a
+// human re-running `pf answer`.
+//
+// IDEMPOTENCY is the relay's OWN ids, exactly as 00 §3.4a intends:
+//
+//   - the capsule is re-read first, and a relay is re-delivered ONLY
+//     while its question_id is still the open pending_question. A
+//     question the agent consumed before dying is gone from the capsule,
+//     so its answer is dropped here and can never be applied twice;
+//   - a pending_answer ALREADY persisted for this answer_id means the
+//     dead agent got far enough to record it; the continuation prompt
+//     resumes from that persisted state, so re-delivering would only
+//     duplicate it. Dropped too.
+//
+// Best-effort by design: a re-delivery that fails leaves the relay in
+// the awaiting set for the NEXT continuation, and never fails the
+// continuation itself.
+func (d *Daemon) redeliverPendingAnswers(wi string, jr *jobRuntime) {
+	pending := d.ledger.Awaiting(wi)
+	if len(pending) == 0 {
+		return
+	}
+	exec, err := jr.cap.LoadExecution()
+	if err != nil || exec == nil {
+		return
+	}
+	q, _ := exec.PendingQuestion()
+	d.mu.Lock()
+	agent := jr.agent
+	d.mu.Unlock()
+	for _, relay := range pending {
+		if q == nil || q.QuestionID != relay.QuestionID {
+			// Consumed (or superseded) before the death: nothing to redo.
+			d.ledger.clearAwaiting(wi, relay.AnswerID)
+			continue
+		}
+		if q.PendingAnswer != nil && q.PendingAnswer.AnsweredAt == relay.AnsweredAt &&
+			q.PendingAnswer.AnswerText == relay.AnswerText {
+			// Already durably recorded by the dead agent: the continuation
+			// resumes from it.
+			d.ledger.clearAwaiting(wi, relay.AnswerID)
+			continue
+		}
+		if agent == nil {
+			return
+		}
+		// The ledger entry is re-opened so this delivery is not refused by
+		// the idempotency map it filled in on the first attempt.
+		d.ledger.markRedeliverable(relay.AnswerID)
+		derr := agent.DeliverAnswer(relay)
+		switch {
+		case derr == nil:
+			d.ledger.clearAwaiting(wi, relay.AnswerID)
+			jr.ring.Append(EvAnswered, map[string]any{
+				"question_id": relay.QuestionID, "answer_id": relay.AnswerID,
+				"redelivered": true,
+			})
+			fmt.Fprintf(os.Stderr, "pf-daemon: %s answer %s re-delivered to the re-derived agent and consumed\n", wi, relay.AnswerID)
+		case errors.Is(derr, ErrAnswerAckPending):
+			jr.ring.Append(EvAnswered, map[string]any{
+				"question_id": relay.QuestionID, "answer_id": relay.AnswerID,
+				"redelivered": true, "consumption": "pending",
+			})
+			fmt.Fprintf(os.Stderr, "pf-daemon: %s answer %s re-delivered to the re-derived agent; consumption pending\n", wi, relay.AnswerID)
+		default:
+			fmt.Fprintf(os.Stderr, "pf-daemon: %s answer %s re-delivery failed (kept for the next continuation): %v\n", wi, relay.AnswerID, derr)
+		}
 	}
 }
 

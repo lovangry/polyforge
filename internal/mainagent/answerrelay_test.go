@@ -20,6 +20,7 @@ package mainagent
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,7 +112,7 @@ done
 	if proc.Unhealthy() {
 		t.Fatal("bulk lines carrying a method field must never mark the agent unhealthy")
 	}
-	if d := proc.bulkDropped; d < 3000 {
+	if d := atomic.LoadInt64(&proc.bulkDropped); d < 3000 {
 		t.Fatalf("the bulk lines must be counted as dropped bulk output, got %d", d)
 	}
 }
@@ -215,7 +216,7 @@ done
 	if proc.Unhealthy() {
 		t.Fatal("bulk method-spoof lines must never mark the agent unhealthy (they never enter the control queue)")
 	}
-	if d := proc.bulkDropped; d < 8000 {
+	if d := atomic.LoadInt64(&proc.bulkDropped); d < 8000 {
 		t.Fatalf("every spoof line must be counted as dropped bulk output, got %d", d)
 	}
 }

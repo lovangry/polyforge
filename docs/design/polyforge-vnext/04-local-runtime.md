@@ -161,6 +161,7 @@ session 数据。
 - 观察端点：`GET /jobs/{wi_id}/observe?after=<cursor>`（`after` 为观察者已收到的最后一条事件序号，首次传 0）。响应体固定三段 `{events, state_snapshot, next_cursor}`：`events` 为序号严格大于 `after` 的增量事件列表；`state_snapshot` 为该 WI 当前 workflow 执行状态的快照渲染（来源 Capsule `runtime-state/execution.json`）；`next_cursor` 为本次推进到的事件序号，观察者以其继续增量拉取。
 - **cursor 掉出 ring buffer**（观察者落后超过 500 条，或 Daemon 重启后 ring buffer 已清空）：返回**不携带 `events`**、只含当前 `state_snapshot` 的响应并置 `compacted=true` 标记——观察者据快照重建全量视图，再以返回的 `next_cursor` 继续增量观察。
 - **九种粗事件类型**（封闭集）：`job_started` / `wi_agent_rederived` / `step_started` / `step_completed` / `needs_input` / `answered` / `published` / `job_stopped` / `sync_failed`。其中 `needs_input` / `answered` 事件的载荷沿用 `00-architecture.md#§3.4a` 定义的中继/观察报文形态，本文不另设本地变体。
+- **第十种：`infra_incident`（polyforge#48 补充）**。原封闭集封的是**执行进展**，而上游 provider 失败不是执行进展——它是解释「进展为何停了」的基础设施消息，之前对观察者完全不可见。载荷 `{kind, detail, fatal, at}`，`kind ∈ {provider_error, retry, hang_suspected, hang_cleared}`：前两者直接自 harness 记录流分类（§6.2a），后两者是看门狗确认探针的进出。纯消息性质：不构成判决，不计入风暴护栏。
 - **事件不持久化**：ring buffer 是「活的视图」，仅服务于增量观察；workflow 执行状态的唯一权威始终是 Capsule 的 `runtime-state/execution.json`（`00` INV-1、本文 INV-D1 同口径），事件丢失或截断不损失任何执行状态。
 
 **第二层：本机无该 WI Capsule 的 WI（在别机执行或已结束）——read-through。**read-through 由 Daemon 经其 UDS 面提供：`pf observe` 调用 Daemon 面的 read-through 端点，响应携带 `read_through:true` 与 freshness 标注，渲染**最新已发布 HEAD** 的 `execution.json`（与 `02-aihub-core.md#§5.2` read-through 同口径，UI 必须标注「数据截至最近一次发布」）；`DAEMON-404` 仅在事件流层与本层都无结果时返回。**CLI 直走 `02` read-through（`02-aihub-core.md#§5.2`）有三条触发路径**：`pf observe --read-through` 显式跳过本机 Daemon 层、直接渲染已发布 HEAD；Daemon 面可达但对两层均无结果（答复 `DAEMON-404`）时 CLI 落回直走；Daemon 面不可达（本机未运行）时 CLI 回退直走。三条路径渲染的是同一已发布事实，直走不改变本层语义。执行中 WI 的实时增量走第一层，本层只呈现已发布事实，观察到的进度至多滞后一次发布时延。
@@ -386,7 +387,54 @@ Job 回收的触发原因分两类，机械动作**不同**，不共用同一套
 
 两条路径共用的不变量：无论走哪一条，Daemon 都是「机械执行发布」的唯一角色（INV-D3）；A 路径下它执行的是一次真实发布（或一次确认无需发布的冻结扫描）并生成 `flush_evidence` 随收尾调用提交（`02-aihub-core.md#§6.4` 要求的正是这份证据），B 路径下它明确地**不**执行任何发布、也**不**生成/携带任何 `flush_evidence`（`02-aihub-core.md#§6.4` 只约束 end-generation 端点的 pause/block/wrap/fail 四个 reason；force-takeover 不需要证据，`02-aihub-core.md#§6.2`，cancel 则只作用于无活跃 generation 的 WI，`02-aihub-core.md#§6.5`）——不存在「默认仍然发布」的第三种模糊路径，也不存在「无发布却补证据」的通道。
 
-**运行期双看门狗（polyforge#44 裁定 refined option A）**：§7.1 只定义了 Daemon 重启时刻的存活判定，运行期的同一职责由 dispatcher tick（200ms）承担，并把两个不同的问题分开探测。**死亡探测**：每 tick 以非阻塞方式询问每个运行中 Job 的 WI Agent 退出信号（`AgentHandle` 的退出面），观察到退出即**就地**执行 §7.1 第 4 步的崩溃续跑序列（先有证明地回收残留进程组、同 session id 重派、回写 `jobs[]`），不等优雅停机、也不等 Daemon 重启。**挂起探测**：以**活动性**为判据——主 Agent 进程的 `/proc/<pid>` I/O 与 CPU jiffies 计数在可配置窗口（默认 10 分钟，Daemon `Config` 字段）内零变化 ⇒ 判定挂起 ⇒ 终止其进程组后走同一崩溃续跑；持续产出（哪怕很慢）的 Agent 永不被触碰，`needs_input`（当前 step 持有 `pending_question`，`03-execution-capsule.md#§4.2`）是协议内合法等待，两个探针均对其豁免。墙钟仅作**绝对兜底**：`max(3× 当前 step 声明的 wall 预算, 15 分钟)`，防的正是活动性探针自身失效或缺失（procfs 不可读时挂起探测降级为仅墙钟，并在启动时说明一次）；step wall 预算读自 Capsule 内物化的 `workflow.md` frontmatter——Daemon 自己物化的同一声明，也是执行器步间预算纪律的同源输入。**风暴护栏**：同一 step 连续两次挂起/死亡 ⇒ **有界终止**——先持久化类型化判定，再走本节 A 路径 close，以 `end-generation reason=block`、`waiting_on=runtime:<machine_id>`（`02-aihub-core.md#§2.4` 取值域）收尾，不再第三次重派；该判定持久化于 `daemon/state.json` 的 `jobs[]` 行（§4.1），Daemon 重启后的恢复（§7.1）对带此判定的 Job 拒绝重接与重派，交人工介入。
+**运行期双看门狗（polyforge#44 裁定 refined option A；挂起判据已由 §6.2a 修订为记录流心跳，下文的「活动量判据」降为无流可观测时的降级路径）**：§7.1 只定义了 Daemon 重启时刻的存活判定，运行期的同一职责由 dispatcher tick（200ms）承担，并把两个不同的问题分开探测。**死亡探测**：每 tick 以非阻塞方式询问每个运行中 Job 的 WI Agent 退出信号（`AgentHandle` 的退出面），观察到退出即**就地**执行 §7.1 第 4 步的崩溃续跑序列（先有证明地回收残留进程组、同 session id 重派、回写 `jobs[]`），不等优雅停机、也不等 Daemon 重启。**挂起探测**：以**活动性**为判据——主 Agent 进程的 `/proc/<pid>` I/O 与 CPU jiffies 计数在可配置窗口（默认 10 分钟，Daemon `Config` 字段）内零变化 ⇒ 判定挂起 ⇒ 终止其进程组后走同一崩溃续跑；持续产出（哪怕很慢）的 Agent 永不被触碰，`needs_input`（当前 step 持有 `pending_question`，`03-execution-capsule.md#§4.2`）是协议内合法等待，两个探针均对其豁免。墙钟仅作**绝对兜底**：`max(3× 当前 step 声明的 wall 预算, 15 分钟)`，防的正是活动性探针自身失效或缺失（procfs 不可读时挂起探测降级为仅墙钟，并在启动时说明一次）；step wall 预算读自 Capsule 内物化的 `workflow.md` frontmatter——Daemon 自己物化的同一声明，也是执行器步间预算纪律的同源输入。**风暴护栏**：同一 step 连续两次挂起/死亡 ⇒ **有界终止**——先持久化类型化判定，再走本节 A 路径 close，以 `end-generation reason=block`、`waiting_on=runtime:<machine_id>`（`02-aihub-core.md#§2.4` 取值域）收尾，不再第三次重派；该判定持久化于 `daemon/state.json` 的 `jobs[]` 行（§4.1），Daemon 重启后的恢复（§7.1）对带此判定的 Job 拒绝重接与重派，交人工介入。
+
+### 6.2a 挂起判据修订：记录流心跳（polyforge#48 裁定，取代 §6.2 的活动量判据） <!-- §6.2a -->
+
+§6.2 的挂起探测以 `/proc` 活动量为判据，生产实测（2026-09-29 00:45，wi polyforge#7）证明该判据**方向反了**：agent 按一切人工判据都已挂起（无 TCP 在飞、会话零写 12min+、io 零增量），但 node 运行时的 epoll timer 记账每 10 秒仍 +1 jiffy，「任一计数变化 ⇒ 活动」把**空转底噪**读成工作，看门狗永不触发。判据测的是进程调度，不是 agent 进展。
+
+**新判据（主）= 协议记录流心跳。** supervisor 的 stdout reader 本就分类 harness 的每一条协议记录（它是 ack 载体，不得不看），因此该流零成本可观测，且测的正是 agent 进展：
+
+> `inFlight && now - lastRecordAt > window` ⇒ 判定挂起
+
+`inFlight` 由 harness 自己的 run/turn 生命周期记录翻转（记录形状以真机抓包钉死，见下）。两个条件缺一不可：**无回合在飞的静默是空闲，不是挂起**。
+
+**窗口标定（人裁定，默认 10 分钟）。** 该流上的合法静默**只有思考**——模型在首个 text delta 之前的推理；其余一切都在流式产出：文本 delta 连续到达，step 命令与 subagent 在整个执行期间持续吐记录。实测合法思考间隙 ≤4 分钟，真实挂起 7-15 分钟以上且永不返回。10 分钟落在实测合法上限的 2 倍余量之上、观测挂起下限之下。可配置两级：Daemon 级（`Config.WatchdogActivityWindow` / `POLYFORGE_WATCHDOG_WINDOW`）与**每 step 级**——沿用 step 预算同一机制，即 Capsule 内物化 `workflow.md` frontmatter 的 `budget.hang_window_minutes`（`03-execution-capsule.md#§4.5`）；合法思考更久的 step 自行声明，而不是逼全局放宽。该键是运行期监督旋钮，不进 workflow schema 的作者契约（`01-workflow-skills.md#§4.1`）。
+
+**确认探针（杀之前必经）。** 窗口耗尽只是**怀疑**，不是判决。Daemon 沿其它控制方法同一通道下发一条 `pf/probe`，按回合尺度等 ack；只有这里也静默才确认挂起，随后才是终止进程组 + §7.1 第 4 步就地续跑。ack 必须来自 **agent** 而非 harness：上游模型调用卡死的 harness 其 RPC 层仍会瞬时应答（实测 `response` 记录先于任何模型工作产生），接受传输层回声等于把本条目要修的假阴性原样搬回来。
+
+**`/proc` 活动量降级为旁证。** 仍然采样、仍然随 incident 记入日志（「cpu +N jiffies、io 平」正是人判断 epoll 空转与真忙的依据），但不再压过记录流。它只在**无流可观测**时（Daemon 重启后重接裸 pid 的 adopted agent）仍作判据，且此时带上 #48 要求的阈值带：`io 字节零增量 && cpu 增量 < 30 jiffies/分钟 × 窗口` ⇒ 判平。必须是**速率**而非每窗口固定值：生产底噪在 10 分钟窗口内累积 60 jiffies，任何小常数都会把它读成工作。增量一律对**窗口基准样本**比较，不对上一 tick 比较。
+
+**墙钟兜底不变**：`max(3× step wall 预算, 15 分钟)`，一切判据失效时的绝对界。
+
+**needs_input 豁免收窄（折入 polyforge#50 实测）。** 旧判据是「`pending_question != nil` 即豁免」，实测过宽（2026-09-29 01:20）：答案**已送达**、agent 消化中挂起（零 TCP/零 io/零写 8min+），而问题仍开着，于是豁免成立、墙钟兜底同被豁免、relay 也不重投——三条自愈路径同时失效，只剩人工可救。收窄后的映射：
+
+| 状态 | `pending_question` | `pending_answer` | 回合在飞 | 判据结论 |
+|---|---|---|---|---|
+| 等人回答 | 有 | 无 | 否 | **豁免**（协议内合法等待） |
+| 答案已送达、消化中 | 有 | **有** | 是 | **不豁免**，按普通在飞回合判 |
+| 普通执行 | 无 | — | 是 | 按普通在飞回合判 |
+| 空闲/步间 | 无 | — | 否 | 记录流判据不触发（无回合在飞） |
+
+切换点是 `pending_answer` 持久化——`skills/pf-execute` §12 本就规定「先持久化 `pending_answer`，再做消化处理」（`03-execution-capsule.md#§4.2`），正好是「停止等人、开始干活」的那一刻。注意在记录流判据下**这不再是特例**：等人时无回合在飞，判据天然不触发；消化时有回合在飞，与任何回合一视同仁。显式标志只为无流可观测的降级路径保留——那条路径看不见回合。
+
+**基础设施事件即时化（polyforge#48 第 3 项）。** 上游 provider 失败此前被归为 bulk（至多一行 stderr），运维第一次得知是几分钟后的挂起。现在同一次记录流分类即产出 incident，一个 dispatcher tick（≤200ms）内进入该 Job 的 observe 事件环（`infra_incident`，见 §5.1a 事件类型的第十项）与日志。它是**消息不是判决**：不杀、不重派、不计入风暴护栏计数。
+
+**真机记录形状（钉死，pi 0.87.1 `pi --mode rpc`，2026-09-29 抓取并二次独立复现）。** 一个 prompt 回合依次产出 `response`（命令回执）、`agent_start`、`turn_start`、`message_start`/`message_end`（system/user/assistant 各一对）、`message_update`（`assistantMessageEvent` 的 text_start/text_delta/text_end）、`turn_end`、`agent_end`、`agent_settled`。`agent_start`/`turn_start` 开回合，`turn_end`/`agent_end`/`agent_settled` 关回合；`response` **不计入心跳**——那是 Daemon 自己下发命令的回声，计入它会让确认探针重置自己正在测量的窗口。**关键准确性结论**：pi **没有** `type:"error"` 记录、也没有 pi 侧 `result` 记录；provider 失败搭在普通记录里，即 `message.stopReason == "error"` + `message.errorMessage`（出现在 assistant 的 `message_start`/`message_end` 与 `turn_end` 上）。按臆测的记录名分类将一条也匹配不到，该信号会静默死在生产里。抓包固化为 `internal/mainagent/testdata/pi_rpc_turn_{normal,provider_error}.jsonl` 并由回归测试钉住。
+
+### 6.2b 答案中继的两阶段语义（polyforge#48 裁定，折入 polyforge#49） <!-- §6.2b -->
+
+`00-architecture.md#§3.4a` 的答案中继一直有两个不同时刻，却只有一个词。现在分开：
+
+- **送达（delivery）**：中继已写入 agent 控制通道。写成功即同步确认。
+- **消费（consumption）**：agent 持久化 `pending_answer` 并 ack。那是**一整个模型回合**之后的事。
+
+实测（2026-09-29 01:10）：`DeliverAnswer` 的 ack 等待按 fake harness 标定为 30 秒，真实 agent 在 45-90 秒后才 ack，答案随后正确落账；而 CLI 早已报 `DAEMON-500`，运维无从判断答案丢没丢（本例没丢）。修订：
+
+1. **窗口放大到回合尺度**：`pf/answer` 的 ack 窗口默认 10 分钟（`POLYFORGE_ANSWER_ACK_WINDOW` 可调），与挂起窗口同尺度；`pf/quiesce`/`pf/resume`/`pf/stop_notice` 仍用 30 秒——它们答自边界簿记，实测远在窗口内。
+2. **超时不再是错误级**：ack 窗口耗尽 ≠ 送达失败。写入失败/控制通道已死才是失败（类型化错误照旧）；仅 ack 未到则返回「已送达、消费待确认」，`POST /jobs/{id}/answer` 回 200 `{applied:false, delivered:true, consumption:"pending"}`，CLI 照此措辞输出，不再红字报错。
+3. **消化进度可观察**：observe 的 `pending_question.status` 在 `pending_answer` 落盘后翻为 `answered` 并带 `answer_received_at`（§5.1a 的观察形状）——运维看得见「agent 正在消化」与「答案从未到达」的区别，这正是实测中缺的那一格。
+4. **崩溃续跑幂等重投**：消费未被观察到的中继留在 Daemon 内存的待投集合中，§7.1 第 4 步重派出新 agent 后立即重投。幂等由中继**自身的 id** 保证（`00-architecture.md#§3.4a`），不引入第二份持久记录：重投前重读 Capsule，`question_id` 已不是当前开着的 `pending_question` 则丢弃（死前已消费，永不二次应用），`pending_answer` 已持久化为同一答案则丢弃（续跑提示词从该持久状态接着走）。重投失败留待下一次续跑，且从不失败续跑本身。
 
 ### 6.3 驱动 watcher（只做 dirty 标记，`00-architecture.md#§4.3`/INV-11 的实现） <!-- §6.3 -->
 

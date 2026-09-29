@@ -20,7 +20,7 @@ func TestPfExecuteSkillDeclaresControlChannel(t *testing.T) {
 		t.Fatalf("pf-execute skill not readable from the daemon checkout: %v", err)
 	}
 	skill := string(raw)
-	for _, m := range []string{MethodQuiesce, MethodResume, MethodStopNotice, MethodAnswer} {
+	for _, m := range []string{MethodQuiesce, MethodResume, MethodStopNotice, MethodAnswer, MethodProbe} {
 		if !strings.Contains(skill, m) {
 			t.Errorf("skills/pf-execute/SKILL.md must declare the control method %q byte-identically with internal/mainagent", m)
 		}

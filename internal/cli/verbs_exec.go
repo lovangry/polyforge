@@ -342,10 +342,47 @@ var cmdAnswer = &Command{
 		}
 		ctx.emit(raw)
 		if !ctx.JSON {
-			fmt.Fprintf(ctx.Stdout, "answer %s delivered for question %s\n", payload.AnswerID, payload.QuestionID)
+			fmt.Fprint(ctx.Stdout, renderAnswerPhases(raw, payload))
 		}
 		return nil
 	},
+}
+
+// renderAnswerPhases renders the TWO-PHASE answer outcome (polyforge#48,
+// folded from #49). Delivery and consumption are separate facts and the
+// operator needs both:
+//
+//   - consumption "confirmed": the agent acked inside the window — done.
+//   - consumption "pending": the relay reached the agent and its
+//     consuming turn is still running. This is the ORDINARY outcome for
+//     a real agent (a turn over a large context takes minutes) and it is
+//     deliberately NOT error-grade: the pilot's red DAEMON-500 told the
+//     operator an answer was lost that in fact landed 45-90s later. The
+//     line says what to watch instead.
+//
+// An older daemon answers neither key; the plain pre-#48 line is kept
+// for it rather than inventing a phase we did not observe.
+func renderAnswerPhases(raw []byte, payload AnswerPayload) string {
+	var resp struct {
+		Applied     *bool  `json:"applied"`
+		Delivered   *bool  `json:"delivered"`
+		Consumption string `json:"consumption"`
+		Note        string `json:"note"`
+	}
+	_ = json.Unmarshal(raw, &resp)
+	switch resp.Consumption {
+	case "confirmed":
+		return fmt.Sprintf("answer %s delivered for question %s; consumption confirmed by the agent\n",
+			payload.AnswerID, payload.QuestionID)
+	case "pending":
+		note := resp.Note
+		if note == "" {
+			note = "the agent consumes an answer inside a model turn; poll `pf observe` for the question to clear"
+		}
+		return fmt.Sprintf("answer %s delivered for question %s; consumption PENDING (not an error)\n  %s\n",
+			payload.AnswerID, payload.QuestionID, note)
+	}
+	return fmt.Sprintf("answer %s delivered for question %s\n", payload.AnswerID, payload.QuestionID)
 }
 
 // newAnswerID mints an answer id: "a_" + 6 random hex chars (the format

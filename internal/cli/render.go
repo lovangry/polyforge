@@ -470,8 +470,41 @@ func renderObserve(w io.Writer, resp *ObserveResponse) {
 	if len(resp.StateSnapshot) > 0 && string(resp.StateSnapshot) != "null" {
 		fmt.Fprintln(w, "state:")
 		printJSON(w, resp.StateSnapshot)
+		if line := answerConsumptionLine(resp.StateSnapshot); line != "" {
+			fmt.Fprint(w, line)
+		}
 	}
 	fmt.Fprintf(w, "next_cursor: %s\n", strconv.FormatInt(resp.NextCursor, 10))
+}
+
+// answerConsumptionLine surfaces the answer-CONSUMPTION phase in plain
+// words next to the raw snapshot (polyforge#48, folded from #49 item 3).
+// The snapshot already carries pending_question.status, but an operator
+// scanning JSON for a status flip is exactly the blind spot the pilot
+// hit: they could not tell "the agent is digesting the answer" from
+// "the answer never arrived". Empty string when there is nothing to say.
+func answerConsumptionLine(snapshot json.RawMessage) string {
+	var snap struct {
+		PendingQuestion *struct {
+			QuestionID       string `json:"question_id"`
+			Status           string `json:"status"`
+			AnswerReceivedAt string `json:"answer_received_at"`
+		} `json:"pending_question"`
+	}
+	if json.Unmarshal(snapshot, &snap) != nil || snap.PendingQuestion == nil {
+		return ""
+	}
+	q := snap.PendingQuestion
+	if q.Status != "answered" {
+		return fmt.Sprintf("question %s: waiting for a human answer (`pf answer %s --question %s --text ...`)\n",
+			q.QuestionID, "<id>", q.QuestionID)
+	}
+	since := ""
+	if q.AnswerReceivedAt != "" {
+		since = " (received " + q.AnswerReceivedAt + ")"
+	}
+	return fmt.Sprintf("question %s: answer DELIVERED%s, agent still consuming it \u2014 the question clears when the consuming turn ends\n",
+		q.QuestionID, since)
 }
 
 // renderUsers renders the M1 list.
