@@ -80,8 +80,9 @@ func TestErrorJSONModeReemitsEnvelope(t *testing.T) {
 
 // TestErrorNoEnvelopeDegradesToHTTPCode: a plain-text crash page must
 // degrade to HTTP-<status> rather than masking the failure. Pinned on
-// the daemon face, whose client we own; the frozen aihub client
-// synthesizes AUTH-401 for any non-envelope body instead.
+// BOTH faces: the daemon client and the aihub client (which used to
+// synthesize AUTH-401 for any non-envelope body, misclassifying proxy
+// 502/504 pages as auth failures — #14).
 func TestErrorNoEnvelopeDegradesToHTTPCode(t *testing.T) {
 	d := newDaemonFixture(t)
 	d.answers["GET /jobs/wi_x/observe"] = func(w http.ResponseWriter, r *http.Request) {
@@ -94,6 +95,49 @@ func TestErrorNoEnvelopeDegradesToHTTPCode(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "HTTP-502") || !strings.Contains(stderr, "proxy garbage") {
 		t.Errorf("stderr = %q", stderr)
+	}
+}
+
+// TestAihubNoEnvelopeDegradesToHTTPCode: the aihub face synthesizes the
+// status-derived code too — 5xx HTML answers exit 2, 4xx exit 1, and a
+// 401 that DOES carry the typed envelope still wins over the synthesis.
+func TestAihubNoEnvelopeDegradesToHTTPCode(t *testing.T) {
+	cases := []struct {
+		status   int
+		body     string
+		wantExit int
+		wantCode string
+	}{
+		{502, "<html>bad gateway</html>", 2, "HTTP-502"},
+		{504, "gateway timeout", 2, "HTTP-504"},
+		{404, "not found page", 1, "HTTP-404"},
+		{401, "unauthorized", 1, "HTTP-401"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.wantCode, func(t *testing.T) {
+			var rec reqRecorder
+			srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			})
+			code, _, stderr := runPf(t, map[string]string{"PF_SERVER": srv.URL}, "cancel", "wi_x")
+			if code != tc.wantExit {
+				t.Errorf("exit = %d, want %d", code, tc.wantExit)
+			}
+			if !strings.Contains(stderr, tc.wantCode) || !strings.Contains(stderr, tc.body) {
+				t.Errorf("stderr = %q, want %s + body", stderr, tc.wantCode)
+			}
+		})
+	}
+	// Envelope wins over synthesis on the same status.
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		io.WriteString(w, `{"code":"AUTH-401","detail":"wire detail"}`)
+	})
+	code, _, stderr := runPf(t, map[string]string{"PF_SERVER": srv.URL}, "cancel", "wi_x")
+	if code != 1 || !strings.Contains(stderr, "AUTH-401: wire detail") {
+		t.Errorf("envelope 401: exit=%d stderr=%q", code, stderr)
 	}
 }
 

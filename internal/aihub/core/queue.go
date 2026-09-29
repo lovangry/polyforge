@@ -80,25 +80,30 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 		Running:           []api.WorkItem{},
 		Paused:            []api.WorkItem{},
 	}
-	rows, err := m.db.Query(`SELECT id, COALESCE(waiting_on,'') FROM work_items
+	// Loaded per candidate below: bundle_name decides execution vs
+	// registration ticket (02 §5.1b: the executable segments always exclude
+	// registration tickets — they cannot be claimed, #17).
+	rows, err := m.db.Query(`SELECT id, COALESCE(waiting_on,''), bundle_name IS NULL FROM work_items
 		WHERE project_id=? AND status IN ('queued','running','paused')`, projectID)
 	if err != nil {
 		return nil, err
 	}
 	type cand struct {
-		wi        *api.WorkItem
-		waitingOn string
+		wi           *api.WorkItem
+		waitingOn    string
+		registration bool
 	}
 	var cands []cand
 	var ids []string
 	for rows.Next() {
 		var id, waiting string
-		if err := rows.Scan(&id, &waiting); err != nil {
+		var registration bool
+		if err := rows.Scan(&id, &waiting, &registration); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		ids = append(ids, id)
-		cands = append(cands, cand{nil, waiting})
+		cands = append(cands, cand{waitingOn: waiting, registration: registration})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -126,6 +131,9 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 		case api.StatusPaused:
 			q.Paused = append(q.Paused, *c.wi)
 		case api.StatusQueued:
+			if c.registration {
+				continue // registration tickets never execute (#17)
+			}
 			if c.waitingOn != "" {
 				continue // blocked-visible: not executable
 			}

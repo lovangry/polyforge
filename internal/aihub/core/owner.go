@@ -60,6 +60,17 @@ type generationRow struct {
 // fails at the git face immediately); the timestamp is informational.
 const credentialTTL = 24 * time.Hour
 
+// idempotencyTTL bounds how long a cached claim response may be replayed.
+// Tradeoff (#22): claim_idempotency.response_json deliberately stores the
+// PLAINTEXT attempt token/secret — replay-after-lost-response is the point
+// of the cache, and owner_generations keeps only the hash, so the plaintext
+// would otherwise be unrecoverable. The TTL caps how long that plaintext
+// sits at rest: past the window a replay is refused with CORE-409 and the
+// caller must claim again with a fresh key (minting a new attempt). Stale
+// rows are not deleted here — the gate renders them inert, and physical
+// cleanup is a deploy-level sweep.
+var idempotencyTTL = 24 * time.Hour
+
 func (m *OwnerManager) activeGeneration(q interface {
 	QueryRow(query string, args ...any) *sql.Row
 }, wiID string) (*generationRow, bool, error) {
@@ -119,14 +130,22 @@ func (m *OwnerManager) Claim(wiID string, req ClaimRequest, callerIdentity strin
 	if req.IdempotencyKey != "" {
 		// Idempotency first: same key + same caller + same WI replays the
 		// same attempt; a key bound elsewhere is a different request.
-		var cached, cachedIdentity, cachedWI string
-		err := m.db.QueryRow(`SELECT response_json, caller_identity, work_item_id
+		var cached, cachedIdentity, cachedWI, cachedAt string
+		err := m.db.QueryRow(`SELECT response_json, caller_identity, work_item_id, created_at
 			FROM claim_idempotency WHERE idempotency_key=?1`, req.IdempotencyKey).
-			Scan(&cached, &cachedIdentity, &cachedWI)
+			Scan(&cached, &cachedIdentity, &cachedWI, &cachedAt)
 		if err == nil {
 			if cachedIdentity != callerIdentity || cachedWI != wiID {
 				return nil, Fail(api.ErrCoreConflict, "IDEMPOTENCY_KEY_REUSED",
 					"key is bound to a different caller or work item")
+			}
+			// Replay window (#22): the cached response carries the attempt's
+			// plaintext credential; past the TTL it must not be handed out
+			// again — re-claim with a fresh key instead.
+			if createdAt, perr := time.Parse(time.RFC3339Nano, cachedAt); perr == nil &&
+				time.Since(createdAt) > idempotencyTTL {
+				return nil, Fail(api.ErrCoreConflict, "IDEMPOTENCY_KEY_EXPIRED",
+					"the cached claim response is past the replay TTL; claim again with a fresh idempotency key")
 			}
 			var res ClaimResult
 			if err := json.Unmarshal([]byte(cached), &res); err != nil {
@@ -150,7 +169,8 @@ func (m *OwnerManager) Claim(wiID string, req ClaimRequest, callerIdentity strin
 	}
 
 	var status string
-	err := m.db.QueryRow(`SELECT status FROM work_items WHERE id=?1`, wiID).Scan(&status)
+	var bundleName sql.NullString
+	err := m.db.QueryRow(`SELECT status, bundle_name FROM work_items WHERE id=?1`, wiID).Scan(&status, &bundleName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
 	}
@@ -190,6 +210,13 @@ func (m *OwnerManager) Claim(wiID string, req ClaimRequest, callerIdentity strin
 			return nil, err
 		} else if blocked {
 			return nil, Fail(api.ErrCoreConflict, "DEPENDENCY_BLOCKED", "work item has an unfinished blocking dependency")
+		}
+		// Registration tickets never execute (02 §4.4/§6.1): a WI whose
+		// bundle_name IS NULL is not claimable. Takeover is exempt — it
+		// seizes an already-running attempt, whatever the ticket kind.
+		if !bundleName.Valid {
+			return nil, Fail(api.ErrCoreConflict, "NOT_CLAIMABLE",
+				"registration-only work item (no workflow bundle) is not claimable")
 		}
 	}
 	return m.claimNew(wiID, req, callerIdentity)
@@ -231,6 +258,23 @@ func (m *OwnerManager) claimNew(wiID string, req ClaimRequest, callerIdentity st
 	}
 	if !legalState {
 		return nil, Fail(api.ErrCoreConflict, "", "claim %s not legal from status %s", req.Intent, status)
+	}
+
+	// The bundle reference rides the transaction snapshot too (#5/#17):
+	// the claim response must carry the WI's pinned bundle, and a
+	// registration ticket must not open an execution generation (takeover
+	// excepted — it seizes an existing one).
+	var bundleName, bundleDigest sql.NullString
+	if err := tx.QueryRow(`SELECT bundle_name, bundle_digest FROM work_items WHERE id=?1`, wiID).
+		Scan(&bundleName, &bundleDigest); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
+		}
+		return nil, err
+	}
+	if req.Intent != IntentTakeover && !bundleName.Valid {
+		return nil, Fail(api.ErrCoreConflict, "NOT_CLAIMABLE",
+			"registration-only work item (no workflow bundle) is not claimable")
 	}
 
 	now := Now()
@@ -301,6 +345,8 @@ func (m *OwnerManager) claimNew(wiID string, req ClaimRequest, callerIdentity st
 			MachineID:    req.MachineID,
 			Owner:        owner,
 			Generation:   gen,
+			BundleName:   bundleName.String,
+			BundleDigest: bundleDigest.String,
 			ClaimedAt:    now,
 			Token:        secret,
 			TokenExpires: expires,

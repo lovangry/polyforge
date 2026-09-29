@@ -21,12 +21,13 @@ import (
 
 // Server wires the domain managers behind one mux.
 type Server struct {
-	DB     *core.DB
-	WIs    *core.WIManager
-	Owners *core.OwnerManager
-	Admin  *core.AdminManager
-	Mems   *memory.Store
-	Git    *git.Manager
+	DB      *core.DB
+	WIs     *core.WIManager
+	Owners  *core.OwnerManager
+	Admin   *core.AdminManager
+	Mems    *memory.Store
+	Git     *git.Manager
+	DataDir string
 
 	mux *http.ServeMux
 }
@@ -34,12 +35,13 @@ type Server struct {
 // New assembles the server.
 func New(db *core.DB, dataDir string, gitMgr *git.Manager) *Server {
 	s := &Server{
-		DB:     db,
-		WIs:    core.NewWIManager(db),
-		Owners: core.NewOwnerManager(db),
-		Admin:  core.NewAdminManager(db),
-		Mems:   memory.NewStore(db, dataDir),
-		Git:    gitMgr,
+		DB:      db,
+		WIs:     core.NewWIManager(db),
+		Owners:  core.NewOwnerManager(db),
+		Admin:   core.NewAdminManager(db),
+		Mems:    memory.NewStore(db, dataDir),
+		Git:     gitMgr,
+		DataDir: dataDir,
 	}
 	s.routes()
 	return s
@@ -75,12 +77,18 @@ func (s *Server) routes() {
 	// Admin face.
 	m.HandleFunc("POST /api/v1/users", s.authAdmin(s.hCreateUser))
 	m.HandleFunc("GET /api/v1/users", s.authAdmin(s.hListUsers))
+	m.HandleFunc("GET /api/v1/users/{id}", s.authAdmin(s.hGetUser))
+	m.HandleFunc("PATCH /api/v1/users/{id}", s.authAdmin(s.hPatchUser))
 	m.HandleFunc("POST /api/v1/api-keys", s.authAdmin(s.hCreateAPIKey))
+	m.HandleFunc("GET /api/v1/api-keys", s.authAdmin(s.hListAPIKeys))
 	m.HandleFunc("DELETE /api/v1/api-keys/{id}", s.authAdmin(s.hRevokeAPIKey))
 	m.HandleFunc("POST /api/v1/projects", s.authAdmin(s.hCreateProject))
 	m.HandleFunc("GET /api/v1/projects", s.authAdmin(s.hListProjects))
 	m.HandleFunc("GET /api/v1/projects/{id}", s.authAdmin(s.hGetProject))
+	m.HandleFunc("PATCH /api/v1/projects/{id}", s.auth(s.hPatchProject))
 	m.HandleFunc("POST /api/v1/projects/{id}/rotate-identifier", s.authAdmin(s.hRotateIdentifier))
+	m.HandleFunc("POST /api/v1/admin/backup", s.authAdmin(s.hBackup))
+	m.HandleFunc("POST /api/v1/service/rotate-secret", s.authAdmin(s.hRotateSecret))
 
 	// Git proxy (own auth: attempt-scoped Basic credential).
 	m.Handle("/git/", http.HandlerFunc(s.Git.HandleGit))
@@ -907,16 +915,34 @@ func (s *Server) hListUsers(w http.ResponseWriter, r *http.Request, idn *identit
 }
 
 func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request, idn *identity) {
+	// The scope field is accepted under BOTH wire names (#11): the CLI
+	// sends project_id, older callers sent project_scope. Both present and
+	// disagreeing is a 400; either one alone works.
 	var req struct {
-		UserID       string `json:"user_id"`
-		Name         string `json:"name"`
-		ProjectScope string `json:"project_scope,omitempty"`
+		UserID       string  `json:"user_id"`
+		Name         string  `json:"name"`
+		ProjectID    *string `json:"project_id,omitempty"`
+		ProjectScope *string `json:"project_scope,omitempty"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
 	}
-	key, err := s.Admin.CreateAPIKey(req.UserID, req.Name, req.ProjectScope)
+	scope := ""
+	switch {
+	case req.ProjectID != nil && req.ProjectScope != nil:
+		if *req.ProjectID != *req.ProjectScope {
+			writeErr(w, core.Fail(api.ErrCoreBadInput, "",
+				"project_id and project_scope both present but disagree"))
+			return
+		}
+		scope = *req.ProjectID
+	case req.ProjectID != nil:
+		scope = *req.ProjectID
+	case req.ProjectScope != nil:
+		scope = *req.ProjectScope
+	}
+	key, err := s.Admin.CreateAPIKey(req.UserID, req.Name, scope)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -971,4 +997,102 @@ func (s *Server) hRotateIdentifier(w http.ResponseWriter, r *http.Request, idn *
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"identifier": plain}) // once
+}
+
+func (s *Server) hGetUser(w http.ResponseWriter, r *http.Request, idn *identity) {
+	u, err := s.Admin.GetUser(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
+}
+
+func (s *Server) hPatchUser(w http.ResponseWriter, r *http.Request, idn *identity) {
+	var req struct {
+		DisplayName string `json:"display_name"`
+		Role        string `json:"role"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	u, err := s.Admin.PatchUser(r.PathValue("id"), req.DisplayName, req.Role)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
+}
+
+func (s *Server) hListAPIKeys(w http.ResponseWriter, r *http.Request, idn *identity) {
+	keys, err := s.Admin.ListAPIKeys()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.ListResponse[core.APIKeyInfo]{Items: keys, Total: len(keys)})
+}
+
+// hPatchProject serves PATCH /api/v1/projects/{id} (M3): description,
+// visibility and membership. Authorization: global admin or a maintainer
+// of THAT project (02 M3); a project-scoped key may only touch its own.
+func (s *Server) hPatchProject(w http.ResponseWriter, r *http.Request, idn *identity) {
+	projectID, err := s.projectIDOf(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if idn.Role != "admin" {
+		role, merr := s.memberRole(projectID, idn.UserID)
+		if merr != nil || role != "maintainer" {
+			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "project patch requires admin or project maintainer"))
+			return
+		}
+	}
+	var req core.ProjectPatchRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	p, err := s.Admin.PatchProject(r.PathValue("id"), req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+func (s *Server) hBackup(w http.ResponseWriter, r *http.Request, idn *identity) {
+	name, err := s.Admin.Backup(s.DataDir)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"backup": name})
+}
+
+func (s *Server) hRotateSecret(w http.ResponseWriter, r *http.Request, idn *identity) {
+	var req struct {
+		Mode         string `json:"mode"`
+		GraceSeconds int64  `json:"grace_seconds"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	mode := req.Mode
+	if mode == "" {
+		mode = "grace" // v0 default
+	}
+	epoch, err := s.Admin.RotateSecret(req.Mode, req.GraceSeconds, idn.UserID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"epoch": epoch, "mode": mode})
 }

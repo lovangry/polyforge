@@ -66,7 +66,16 @@ func (c *Client) Do(method, path string, body, out any) error {
 		if json.Unmarshal(data, &ae) == nil && ae.Code != "" {
 			return &ae
 		}
-		return &api.Error{Code: "AUTH-401", Detail: fmt.Sprintf("HTTP %d: %.200s", resp.StatusCode, data)}
+		// No typed envelope in the body (a proxy's HTML 502/504 page, a
+		// bare 404...): synthesize the code from the HTTP status itself so
+		// the class survives — 5xx stays server-class (CLI exit 2, the
+		// daemon's connection-class idle), 4xx stays client-class. The old
+		// blanket AUTH-401 misclassified every such answer as an auth
+		// failure. A 401 that DOES carry the envelope keeps the envelope.
+		return &api.Error{
+			Code:   fmt.Sprintf("HTTP-%d", resp.StatusCode),
+			Detail: fmt.Sprintf("HTTP %d: %.200s", resp.StatusCode, data),
+		}
 	}
 	if out == nil || len(data) == 0 {
 		return nil
