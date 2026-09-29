@@ -8,12 +8,12 @@ budget: { requests: 140, tokens: 350000, wall_minutes: 180 }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: repro, kind: code }
-  - { id: root-cause, kind: qa, gate: true, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { action: rewind, target: repro } }
-  - { id: fix, kind: code, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verification, kind: gate, gate: true, on_fail: { action: rewind, target: fix } }
-  - { id: review, kind: review, gate: true, on_fail: { action: rewind, target: fix } }
-  - { id: release, kind: code, gate: true, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: review } }
+  - { id: repro, kind: code, budget: { wall_minutes: 30 } }
+  - { id: root-cause, kind: qa, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { action: rewind, target: repro } }
+  - { id: fix, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: verification, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
+  - { id: review, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
+  - { id: release, kind: code, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: review } }
 ---
 
 # bug-fix — root-cause lane
@@ -113,8 +113,21 @@ The frontmatter workflow-level budget (`requests: 140, tokens: 350000,
 wall_minutes: 180`) is sized between quick-fix and feature-full: six steps plus the
 realistic rewinds of the two analysis-flavored lanes (`repro` re-runs are expected to be
 cheap; `fix` re-runs are the expensive ones). Repos with slow CI should raise the
-workflow-level ceiling or add a per-step `budget` override on `fix` rather than
+workflow-level ceiling or raise the per-step `budget.wall_minutes` on `fix` rather than
 shrinking the verification set.
+
+Every step declares its own `budget.wall_minutes`: the code-writing steps `repro`/`fix`
+get 30, and `root-cause`, `verification`, `review` and `release` 20 each — summing to
+140 minutes, under the 180-minute workflow ceiling so one in-budget pass never busts
+it. The per-step wall is what the daemon watchdog's absolute backstop over a single
+agent instance is computed from: `max(3× the step's declared wall, 15 min)`. A step
+declaring nothing falls back to a 5-minute assumed wall, collapsing the backstop to its
+15-minute floor and bounded-terminating agents that are still legitimately working
+(measured attempts run 2–5 minutes healthy, 15–52 minutes in the slow tail). Declared
+walls stay within `[5, 60]` by convention (enforced by
+`internal/workflow/schema/bundles_test.go`): at least 5 so the backstop is genuinely
+`3× wall` rather than clamped to the floor, at most 60 so one attempt never books more
+than an hour.
 
 ## The release step (per-project convention)
 

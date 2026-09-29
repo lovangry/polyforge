@@ -4,13 +4,13 @@ description: Maintenance lane - plan, code, verify. No review step, no release s
 rewind:
   max_total: 2
   max_per_step: 2
-budget: { requests: 40, tokens: 100000, wall_minutes: 60 }
+budget: { requests: 40, tokens: 100000, wall_minutes: 120 }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: plan, kind: author }
-  - { id: code, kind: code, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verification, kind: gate, gate: true, on_fail: { action: rewind, target: code } }
+  - { id: plan, kind: author, budget: { wall_minutes: 15 } }
+  - { id: code, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: verification, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
 ---
 
 # chore — maintenance flow
@@ -77,8 +77,20 @@ honestly instead of burning the budget.
 ## Budget guidance
 
 The frontmatter workflow-level budget (`requests: 40, tokens: 100000,
-wall_minutes: 60`) is the smallest reference budget, matching the lane's contract:
+wall_minutes: 120`) is the smallest reference budget, matching the lane's contract:
 mechanical work, known shape, no judgment passes. Slow-CI repos should raise the
 workflow-level ceiling rather than thin the verification set. Hitting the budget is a
 resource ceiling (`WF-103 OVER_BUDGET`), unrelated to gate verdicts, and never triggers
 rewind.
+
+Every step also declares its own `budget.wall_minutes` — `plan: 15`, `code: 30`,
+`verification: 20`, summing to 65 minutes, under the 120-minute workflow ceiling so one
+in-budget pass never busts it. The per-step wall is what the daemon watchdog's absolute
+backstop over a single agent instance is computed from: `max(3× the step's declared
+wall, 15 min)`. A step declaring nothing falls back to a 5-minute assumed wall, which
+collapses the backstop to its 15-minute floor and bounded-terminates agents that are
+still legitimately working (measured attempts run 2–5 minutes healthy, 15–52 minutes in
+the slow tail). Declared walls stay within `[5, 60]` by convention (enforced by
+`internal/workflow/schema/bundles_test.go`): at least 5 so the backstop is genuinely
+`3× wall` rather than clamped to the floor, at most 60 so one attempt never books more
+than an hour.
