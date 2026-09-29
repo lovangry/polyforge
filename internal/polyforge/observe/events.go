@@ -58,13 +58,18 @@ const EventsFile = "events.log"
 // and mirrors them into per-WI rings. Safe for concurrent use: monitor
 // goroutines, flush sub-goroutines and the HTTP read face all touch it.
 type EventLog struct {
-	mu    sync.Mutex
-	f     *os.File
-	path  string
-	rings map[string][]protocolEvent
+	mu     sync.Mutex
+	f      *os.File
+	path   string
+	rings  map[string][]protocolEvent
+	totals map[string]int64 // per-WI append count: the monotonic seq source
 }
 
 // protocolEvent is protocol.EventEntry plus the ring's sequence number.
+// Seq is the per-WI MONOTONIC append ordinal (total appended count at
+// write time), not a ring index: truncation only bounds how many entries
+// stay RETAINED, never the numbering — a client's ?after cursor keeps
+// working across ring turnover (#21).
 type protocolEvent struct {
 	Seq int64 `json:"seq"`
 	protocol.EventEntry
@@ -81,7 +86,7 @@ func NewEventLog(dataDir string) (*EventLog, error) {
 		return nil, err
 	}
 	return &EventLog{f: f, path: filepath.Join(dataDir, EventsFile),
-		rings: map[string][]protocolEvent{}}, nil
+		rings: map[string][]protocolEvent{}, totals: map[string]int64{}}, nil
 }
 
 // Path returns the events file location (diagnostic/tests).
@@ -112,7 +117,9 @@ func (l *EventLog) Append(wi, kind string, body any) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_, werr := l.f.Write(append(line, '\n'))
-	ring := append(l.rings[wi], protocolEvent{Seq: int64(len(l.rings[wi])) + 1, EventEntry: entry})
+	l.totals[wi]++
+	seq := l.totals[wi]
+	ring := append(l.rings[wi], protocolEvent{Seq: seq, EventEntry: entry})
 	if len(ring) > RingCap {
 		ring = ring[len(ring)-RingCap:]
 	}
@@ -128,6 +135,23 @@ func (l *EventLog) Since(wi string) []protocolEvent {
 	defer l.mu.Unlock()
 	out := make([]protocolEvent, len(l.rings[wi]))
 	copy(out, l.rings[wi])
+	return out
+}
+
+// SinceAfter returns the retained entries for wi whose seq is strictly
+// greater than after — the GET /jobs/{id}/observe ?after cursor (#21).
+// Because seq counts TOTAL appends, not ring slots, an after value that
+// falls in the truncated span simply yields the whole retained ring.
+func (l *EventLog) SinceAfter(wi string, after int64) []protocolEvent {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ring := l.rings[wi]
+	out := make([]protocolEvent, 0, len(ring))
+	for _, e := range ring {
+		if e.Seq > after {
+			out = append(out, e)
+		}
+	}
 	return out
 }
 

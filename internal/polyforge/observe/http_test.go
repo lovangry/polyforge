@@ -236,3 +236,81 @@ func TestHTTPFlushRejectsBadReason(t *testing.T) {
 		t.Fatalf("unknown reason: %d", code)
 	}
 }
+
+// TestHTTPFlushStaleAttemptRefused (#8): the flush face is attempt-fenced.
+// A zombie survivor of a superseded instance — or any request not naming
+// the monitor's CURRENT instance — answers DAEMON-409 STALE_ATTEMPT and
+// never reaches the monitor: no seal, no OBCompleted, and the live
+// attempt's own flush still works afterwards.
+func TestHTTPFlushStaleAttemptRefused(t *testing.T) {
+	h := newFakeHandle("att_cur")
+	hs := newHarness(t)
+	hs.start(t, h)
+	soon(t, time.Second, "job registered", func() bool {
+		code, _ := hs.get(t, "/jobs/wi_http/observe")
+		return code == http.StatusOK
+	})
+
+	// (1) flush(wrap) from a superseded instance's id: 409 STALE_ATTEMPT.
+	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
+		WorkItem: "wi_http", AttemptID: "att_old", // a zombie of the same claim
+		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
+	}, nil)
+	if code != http.StatusConflict {
+		t.Fatalf("stale wrap flush: %d %s", code, body)
+	}
+	if !bytes.Contains(body, []byte("STALE_ATTEMPT")) {
+		t.Fatalf("stale wrap flush detail must name STALE_ATTEMPT: %s", body)
+	}
+
+	// (2) a flush with NO attempt id is stale too (the fence requires it).
+	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
+		WorkItem: "wi_http", Reason: protocol.FlushNeedsInput,
+		QuestionID: "q_stale", Question: "which?",
+	}, nil)
+	if code != http.StatusConflict {
+		t.Fatalf("anonymous needs_input flush: %d %s", code, body)
+	}
+
+	// (3) the current attempt was untouched: no OB message, no seal, no
+	// pending question from the refused flush, job still running.
+	expectNoOB(t, hs.ob, 150*time.Millisecond, "OBCompleted from a stale flush")
+	_, body = hs.get(t, "/jobs/wi_http/observe")
+	var view protocol.JobView
+	if err := json.Unmarshal(body, &view); err != nil {
+		t.Fatalf("view decode: %v (%s)", err, body)
+	}
+	if view.Status != protocol.JobRunning || view.Pending != nil {
+		t.Fatalf("stale flush leaked into the live attempt: %+v", view)
+	}
+	for _, e := range hs.o.Events().Since("wi_http") {
+		if e.Kind == EvNeedsInput && bytes.Contains(e.Body, []byte("q_stale")) {
+			t.Fatalf("refused flush still recorded its question: %+v", e)
+		}
+	}
+
+	// (4) the LIVE attempt's flushes still work: needs_input lands, and
+	// the wrap seals exactly once for the current instance.
+	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
+		WorkItem: "wi_http", AttemptID: "att_cur",
+		Reason: protocol.FlushNeedsInput, QuestionID: "q_live", Question: "which?",
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("live needs_input flush: %d %s", code, body)
+	}
+	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
+		WorkItem: "wi_http", AttemptID: "att_cur",
+		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("live wrap flush: %d %s", code, body)
+	}
+	var ack protocol.FlushAck
+	if err := json.Unmarshal(body, &ack); err != nil || !ack.OK {
+		t.Fatalf("live wrap ack: %v (%s)", err, body)
+	}
+	msg := waitOB(t, hs.ob, "WICompleted from the live attempt")
+	if msg.Kind != protocol.OBCompleted || msg.AttemptID != "att_cur" {
+		t.Fatalf("WICompleted: %+v", msg)
+	}
+}

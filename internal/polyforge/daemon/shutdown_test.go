@@ -91,6 +91,14 @@ func TestShutdownFlushPositive(t *testing.T) {
 	})
 	td.submitClaim(t, "wi_s3")
 	td.waitMonitored(t, "wi_s3")
+	sraw, err := td.client.Observe("wi_s3", 0)
+	if err != nil {
+		t.Fatalf("observe wi_s3: %v", err)
+	}
+	var sjv protocol.JobView
+	if err := json.Unmarshal(sraw, &sjv); err != nil || sjv.AttemptID == "" {
+		t.Fatalf("wi_s3 view undecodable: %v (%s)", err, sraw)
+	}
 
 	done := make(chan error, 1)
 	go func() { done <- td.Shutdown(context.Background()) }()
@@ -107,7 +115,7 @@ func TestShutdownFlushPositive(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if _, err := td.client.Flush("wi_s3", protocol.FlushRequest{
-		WorkItem: "wi_s3", Reason: protocol.FlushShutdown,
+		WorkItem: "wi_s3", AttemptID: sjv.AttemptID, Reason: protocol.FlushShutdown,
 	}); err != nil {
 		t.Fatalf("flush(shutdown): %v", err)
 	}

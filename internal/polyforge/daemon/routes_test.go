@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,11 +146,22 @@ func TestWrapDualPathArbitration(t *testing.T) {
 	})
 	td.submitClaim(t, "wi_c")
 	td.waitMonitored(t, "wi_c")
+	// The flush face is attempt-fenced (#8): play the agent with its
+	// CURRENT attempt id, as the live one would.
+	craw, err := td.client.Observe("wi_c", 0)
+	if err != nil {
+		t.Fatalf("observe wi_c: %v", err)
+	}
+	var cjv protocol.JobView
+	if err := json.Unmarshal(craw, &cjv); err != nil || cjv.AttemptID == "" {
+		t.Fatalf("wi_c view undecodable: %v (%s)", err, craw)
+	}
 
 	flushDone := make(chan error, 1)
 	go func() {
 		_, err := td.client.Flush("wi_c", protocol.FlushRequest{
-			WorkItem: "wi_c", Reason: protocol.FlushWrap, FinalStatus: "wrapped",
+			WorkItem: "wi_c", AttemptID: cjv.AttemptID,
+			Reason: protocol.FlushWrap, FinalStatus: "wrapped",
 		})
 		flushDone <- err
 	}()
@@ -192,8 +204,17 @@ func TestWrapDualPathArbitration(t *testing.T) {
 		wrapDone <- err
 	}()
 	waitState(t, td2, "wi_d", "sealing")
+	draw, err := td2.client.Observe("wi_d", 0)
+	if err != nil {
+		t.Fatalf("observe wi_d: %v", err)
+	}
+	var djv protocol.JobView
+	if err := json.Unmarshal(draw, &djv); err != nil || djv.AttemptID == "" {
+		t.Fatalf("wi_d view undecodable: %v (%s)", err, draw)
+	}
 	if _, err := td2.client.Flush("wi_d", protocol.FlushRequest{
-		WorkItem: "wi_d", Reason: protocol.FlushWrap, FinalStatus: "wrapped",
+		WorkItem: "wi_d", AttemptID: djv.AttemptID,
+		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
 	}); err == nil {
 		t.Fatal("flush(wrap) during the CLI close succeeded; want DAEMON-409")
 	} else {
@@ -546,4 +567,43 @@ func dialWorks(sock string) bool {
 	}
 	c.Close()
 	return true
+}
+
+// TestFlushStaleAttemptRefused (#8): through the daemon's own socket — a
+// flush not naming the monitor's current instance answers DAEMON-409
+// STALE_ATTEMPT without sealing anything; the live attempt stays closable.
+func TestFlushStaleAttemptRefused(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.submitClaim(t, "wi_f")
+	td.waitMonitored(t, "wi_f")
+	fraw, err := td.client.Observe("wi_f", 0)
+	if err != nil {
+		t.Fatalf("observe wi_f: %v", err)
+	}
+	var fjv protocol.JobView
+	if err := json.Unmarshal(fraw, &fjv); err != nil || fjv.AttemptID == "" {
+		t.Fatalf("wi_f view undecodable: %v (%s)", err, fraw)
+	}
+
+	// A zombie's wrap flush (a stale instance id): refused at the fence.
+	_, err = td.client.Flush("wi_f", protocol.FlushRequest{
+		WorkItem: "wi_f", AttemptID: "ra_stale",
+		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
+	})
+	if err == nil {
+		t.Fatal("stale flush(wrap) succeeded; want DAEMON-409 STALE_ATTEMPT")
+	}
+	var ae *api.Error
+	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "STALE_ATTEMPT") {
+		t.Fatalf("stale flush error = %v, want DAEMON-409 STALE_ATTEMPT", err)
+	}
+
+	// The live attempt was untouched: the CLI close still wins.
+	if _, err := td.client.Wrap("wi_f", "wrap"); err != nil {
+		t.Fatalf("wrap after a stale flush: %v", err)
+	}
+	waitGone(t, td, "wi_f")
+	if td.hub.endCount() != 1 {
+		t.Fatalf("end-generation calls = %d, want 1", td.hub.endCount())
+	}
 }
