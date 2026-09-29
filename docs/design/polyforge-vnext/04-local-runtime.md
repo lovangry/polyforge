@@ -297,6 +297,7 @@ Daemon 在第 6 步派生持久 WI Agent 时，按该 WI 配置选定的 harness
   位置**只读**采集本代会话 JSONL 进该 Capsule 的 `harness/<adapter>/session-data/`，随后归档为
   `logs/session/<generation>.jsonl`（权威在 `03-execution-capsule.md#§4.4`）；本代已派生 harness 会话而默认位置缺失该
   JSONL 时以 `DAEMON-513 SESSION_JSONL_MISSING`（§5.2）失败收尾，不静默。
+- **WI Agent 出生隔离档（birth isolation profile）**：WI Agent 继承 HOME（§8 只清理凭据，不清理 HOME——harness 自身登录需要它），因此默认会加载**操作者的全局 harness 配置**：全局 skill、`AGENTS.md`/`CLAUDE.md` 上下文文件、prompt 模板与扩展。这些是 v1 时代的路由指令与 harness 级后台任务机制，会污染执行器（其唯一权威指令是本节注入的 `pf-execute`），其派生的后台任务 Daemon 看不见、也在 Capsule 单写者域（`03-execution-capsule.md#§7`）之外。故两条适配器在派生时各带一组**具名的隔离启动参数**：Pi 为 `--no-skills --no-context-files --no-prompt-templates`，Claude 为 `--disable-slash-commands`。**本机物化的 agent 定义不受影响**：`.pi/agents/<step>.md` 与 `.claude/agents/<step>.md`（`03-execution-capsule.md#§4.5`）与 skill 属于不同的资源族，上述参数全开时步骤 agent 仍可被发现并派发（两条 harness 均实测确认）。两处**刻意不加**的参数同样是裁定的一部分：Pi 的 `--no-extensions`（会连带移除提供 subagent 能力的扩展，等于取消步骤 agent 派发）、Claude 的 `--safe-mode`（按其帮助文本会禁用「custom commands and agents」）与 `--bare`（强制仅 `ANTHROPIC_API_KEY` 鉴权，与下一条「Daemon 不管理 harness 登录」冲突）。由此残留的暴露面（扩展注册的后台任务工具、Claude 侧的 `CLAUDE.md` 与内建后台会话）不再由参数关闭，而由指令关闭：`pf-execute` 基本规则禁止 WI Agent 使用任何 harness 后台任务机制——参数与指令互为冗余，缺一不视为违规入口。
 - **Daemon 不管理 harness 登录（裁定）**：派生 WI Agent 时 Daemon 直接调用机器上已安装的 harness 二进制（Pi CLI /
   Claude Code CLI），不代理、不托管其登录/凭据——登录与凭据配置是各 harness 自身的事前项（`07-deployment-pilot.md#§2.1`
   运行时依赖清单，在部署 CLI 面之外）；harness 自身的报错（含登录/凭据类）**原样透传**给用户，不包装、不拦截、不代答。

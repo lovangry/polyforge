@@ -171,7 +171,9 @@ func TestPiAdapterArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cmd.Args) != 3 || cmd.Args[0] != "/custom/pi" || cmd.Args[1] != "--mode" || cmd.Args[2] != "rpc" {
+	// Transport first, then the birth isolation profile (polyforge#51);
+	// the profile itself is pinned flag by flag in isolation_test.go.
+	if len(cmd.Args) != 3+len(piIsolationFlags) || cmd.Args[0] != "/custom/pi" || cmd.Args[1] != "--mode" || cmd.Args[2] != "rpc" {
 		t.Fatalf("pi argv: %v", cmd.Args)
 	}
 	if cmd.Dir != "/caps" {

@@ -211,6 +211,51 @@ func (e *envSanitizer) childEnv(additions ...string) []string {
 // ---------------------------------------------------------------------------
 // Pi adapter (04 §6.1a): pi --mode rpc, session dir inside the Capsule.
 
+// piIsolationFlags is the WI-agent BIRTH ISOLATION PROFILE for the pi
+// adapter (polyforge#51): the named, documented flag set that keeps a
+// spawned WI Agent from inheriting the OPERATOR's global pi
+// configuration. A WI Agent inherits HOME (04 §8 sanitizes credentials,
+// not HOME — the harness needs it for its own auth), so without these
+// flags the child loads ~/.pi/agent's global skills, AGENTS.md/CLAUDE.md
+// context files and prompt templates: v1-era routing instructions that
+// can confuse the executor, whose ONLY instruction of record is the
+// pf-execute text injected at derivation (04 §6.1a).
+//
+// MEASURED against the real pi 0.87.1 on the pilot box (rpc session in a
+// capsule-shaped cwd; the role=system message record's sections{} +
+// toolsAdded[] is the inventory channel, get_commands the command one):
+//
+//	--no-skills, -ns          skills section 6705B → 0, 19 `skill:` commands → 0;
+//	                          tool inventory unchanged (73 tools).
+//	--no-context-files, -nc   project_context section 1153B → 0 (the operator's
+//	                          ~/.pi/agent/AGENTS.md and workspace CLAUDE.md);
+//	                          tool inventory unchanged.
+//	--no-prompt-templates, -np  command list 37 → 34; sections and tools unchanged.
+//	all three together        73 tools kept, skills + project_context both empty,
+//	                          and the capsule's .pi/agents/<step>.md is STILL
+//	                          discovered and dispatched (live: toolCall subagent
+//	                          {agent:"code",agentScope:"project"} → "OK").
+//
+// --no-extensions (-ne) IS DELIBERATELY ABSENT, and must stay absent.
+// It is the only flag that silences the operator's extension UI noise
+// (measured: 4 extension_ui_request records at baseline, including the
+// background-tasks setWidget, → 0 with -ne), but it also takes the tool
+// inventory from 73 down to the 4 built-ins (read/bash/edit/write) —
+// and `subagent` is one of the tools it removes. pi 0.87.1 has NO
+// built-in subagent facility: the tool that reads the Capsule's
+// materialized .pi/agents/<step>.md (03 §4.5) is EXTENSION-provided and
+// resolves the nearest .pi/agents from the process cwd, i.e. from this
+// adapter's capsule-local cmd.Dir. With -ne the step-agent dispatch of
+// pf-execute §4.3 has no mechanism at all, so -ne trades the whole
+// executor for quieter startup. Pinning an explicit `-e <path>` to the
+// operator's subagent extension is not a substitute either: that path is
+// per-machine and the daemon may not invent it (04 §6.1a: the daemon
+// calls the installed harness binary and manages none of its config).
+// The residual exposure — extension-registered harness background tasks
+// — is therefore closed by INSTRUCTION instead: pf-execute's base rules
+// forbid a WI Agent from using any harness background-task mechanism.
+var piIsolationFlags = []string{"--no-skills", "--no-context-files", "--no-prompt-templates"}
+
 type PiAdapter struct {
 	// Bin overrides the pi executable path (defaults to "pi"; tests
 	// substitute a fake).
@@ -231,7 +276,10 @@ func (a *PiAdapter) piBin() string {
 }
 
 func (a *PiAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, error) {
-	cmd := exec.Command(a.piBin(), "--mode", "rpc")
+	// --mode rpc first (the transport, 04 §6.1a), then the birth isolation
+	// profile (piIsolationFlags: one named constant, never ad-hoc flags).
+	args := append([]string{"--mode", "rpc"}, piIsolationFlags...)
+	cmd := exec.Command(a.piBin(), args...)
 	cmd.Dir = p.CapsuleDir // capsule-local session dir: pi resolves sessions under cwd
 	// Credentials never enter the env (04 §8): sanitized os.Environ plus
 	// ONLY capsule path + session id additions, via the shared sanitizer.
@@ -400,6 +448,45 @@ type claudeUserMessageBody struct {
 // this fixed line. Deliberately NOT a control JSON line: nothing to ack.
 const claudeKickoff = "pf-execute kickoff: begin the work-item main loop now, following the pf-execute instructions in your system prompt."
 
+// claudeIsolationFlags is the cc twin of piIsolationFlags (polyforge#51):
+// the WI-agent birth isolation profile for the claude adapter. It holds
+// exactly ONE flag, and what is missing from it is measured, not
+// forgotten.
+//
+// SURVEYED against the REAL Claude Code CLI 2.1.283 on the pilot box
+// (`claude --help`, plus live probes from a capsule-shaped cwd holding
+// .claude/agents/<step>.md):
+//
+//   - --disable-slash-commands ("Disable all skills") is the cc analogue
+//     of pi's --no-skills and is VERIFIED agent-safe: with it on, the
+//     Task-tool agent list is byte-identical to the baseline one — the
+//     capsule's project agent included — and a real dispatch of that
+//     capsule agent completed normally. It is therefore the one flag in
+//     this set.
+//   - --safe-mode is REFUSED by its own help text: it disables "custom
+//     commands and agents", i.e. exactly the .claude/agents/<step>.md
+//     materialization pf-execute §4.3 dispatches. Isolation that removes
+//     the executor is not isolation.
+//   - --bare is REFUSED for two independent reasons: it makes Anthropic
+//     auth "strictly ANTHROPIC_API_KEY or apiKeyHelper (OAuth and
+//     keychain are never read)" — the pilot box authenticates by
+//     oauth_token (measured: `claude auth status`), so --bare would break
+//     login, and 04 §6.1a forbids the daemon from managing harness
+//     credentials at all — and it also requires agents be passed
+//     explicitly via --agents rather than discovered.
+//
+// UNVERIFIED-NO-ISOLATION, deliberately left as-is: the cc CLI exposes NO
+// flag that suppresses operator-global CLAUDE.md discovery without also
+// breaking auth (--bare) or agent discovery (--safe-mode), so the cc WI
+// Agent still inherits the operator's context files; --setting-sources
+// narrows settings loading but its effect on agent/skill discovery is not
+// measured here and no flag is added on a guess. cc's background-session
+// mechanisms (`claude --bg`, Bash run_in_background) are built-in and have
+// no disabling flag at all. Both residues are closed by INSTRUCTION — the
+// pf-execute base rule forbidding harness background tasks — exactly as
+// the pi side's extension residue is.
+var claudeIsolationFlags = []string{"--disable-slash-commands"}
+
 // ClaudeSessionUUID (daemon package) is the ONE harness-session-id →
 // conversation-UUID mapping: the adapter's spawn argv and the daemon's
 // seal-time terminal-state collection both call it — never a second
@@ -418,6 +505,8 @@ func (a *ClaudeAdapter) BuildCmd(p SpawnParams, sessionDir string) (*exec.Cmd, e
 		"--output-format", "stream-json",
 		"--verbose",
 	}
+	// Birth isolation profile (polyforge#51), one named constant.
+	args = append(args, claudeIsolationFlags...)
 	switch {
 	case a.freshFallback:
 		// Zero-turn refusal fallback: a FRESH derivation under the SAME

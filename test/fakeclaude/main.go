@@ -108,6 +108,9 @@ type session struct {
 	uuid      string
 	resume    bool // --resume (continuation) vs --session-id (fresh)
 	sysprompt string
+	// noSlashCommands records --disable-slash-commands (the WI-agent
+	// isolation profile's one cc flag): accepted, inert for the fake.
+	noSlashCommands bool
 }
 
 func main() {
@@ -218,6 +221,14 @@ func parseArgs(args []string) (*session, int) {
 			sawOut = true
 		case "--verbose":
 			sawVerbose = true
+		case "--disable-slash-commands":
+			// The birth isolation profile's one cc flag (polyforge#51,
+			// claudeIsolationFlags): a REAL CLI 2.1.283 option ("Disable
+			// all skills") the adapter now always passes. Accepted and
+			// inert here — the fake has no skills to disable, and its job
+			// is to pin that the argv the adapter builds is one the real
+			// CLI accepts.
+			s.noSlashCommands = true
 		case "--session-id":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "Error: --session-id requires a value\n")
