@@ -34,15 +34,6 @@ win; this file exists to turn their rules into an operational loop, not to reint
   remember anything from a prior process. Read the file, find the step whose status is
   `in_progress` (if any) or `pending_question` is non-null (if any), and resume from
   exactly there. Never re-run a step whose status is already `done`.
-- **Never use a harness background-task mechanism.** Whatever your harness happens to
-  expose in this session (a background-task tool or extension, a `--bg`/background session
-  command, a backgrounded shell run), you never use it: every command you run for a step
-  runs in the foreground under `03-execution-capsule.md` §5.1 so its `{argv, exit_code,
-  duration_ms, started_at}` record lands in the step's command audit, and a task the
-  Daemon cannot see is an orphan outside the Capsule's single-writer domain
-  (`03-execution-capsule.md` §7). This holds even when the Daemon's adapter flags already
-  stripped those mechanisms from your session (`04-local-runtime.md` §6.1a): the
-  instruction is the belt, the flags are the braces.
 - **Never start another step's work out of order.** The only legitimate reason to touch a
   step other than the one `next_step_by_order` currently names is the bounded rewind
   reset described in §4 below, and even that is driven by the gate's own `on_fail`
