@@ -376,6 +376,68 @@ func outputSchemaProblems(stepID string, raw []byte) []string {
 	return probs
 }
 
+// --- step wall-budget gate (reference bundles) ---
+//
+// The daemon watchdog derives its absolute backstop over a single agent
+// instance as max(3x the step's declared wall, watchdogBackstopFloor) with
+// watchdogBackstopFloor = 15 min, and when the step declares NO wall it
+// assumes watchdogStepWallDefault = 5 min (internal/daemon/watchdog.go).
+// A reference bundle that declares nothing therefore gets a flat 15-minute
+// backstop on every step of every lane, and measured attempts (2-5 min
+// healthy, 15-52 min in the slow tail, interactive steps routinely past 15)
+// run straight through it: the agent is bounded-terminated by wall_backstop
+// while still legitimately working.
+//
+// So every step of every shipped reference bundle must declare
+// budget.wall_minutes, and the declarations must satisfy two relationships:
+//
+//   - stepWallMin <= wall <= stepWallMax. The lower bound is the watchdog's
+//     assumed default, so the backstop is genuinely 3x the declared wall and
+//     never clamps back to the 15-minute floor; the upper bound keeps a
+//     single attempt under one hour (backstop <= 180 min).
+//   - sum(step walls) <= workflow budget.wall_minutes, so one in-budget pass
+//     over the whole flow cannot on its own bust the workflow-level ceiling
+//     (WF-103 OVER_BUDGET).
+//
+// This is a reference-bundle convention gate, NOT a WF-201 rule:
+// ValidateWorkflowFrontmatter stays permissive (V6 only requires > 0) so
+// custom bundles may still declare nothing and ride the watchdog default.
+const (
+	stepWallMin = 5
+	stepWallMax = 60
+)
+
+func stepWallProblems(fm *Frontmatter) []string {
+	var probs []string
+	add := func(format string, args ...any) {
+		probs = append(probs, fmt.Sprintf(format, args...))
+	}
+	var sum int64
+	for _, st := range fm.Steps {
+		if st.Budget == nil || st.Budget.WallMinutes == nil {
+			add("step %q: no budget.wall_minutes declared - the watchdog would fall back to its assumed step wall and clamp the backstop to the 15-minute floor", st.ID)
+			continue
+		}
+		w := *st.Budget.WallMinutes
+		if w < stepWallMin {
+			add("step %q: budget.wall_minutes %d is below the %d-minute minimum (the backstop max(3xwall, 15min) would clamp to its floor)", st.ID, w, stepWallMin)
+		} else if w > stepWallMax {
+			add("step %q: budget.wall_minutes %d is above the %d-minute maximum (a single attempt must not book more than one hour)", st.ID, w, stepWallMax)
+		}
+		sum += w
+	}
+	if fm.Budget == nil || fm.Budget.WallMinutes == nil {
+		if sum > 0 {
+			add("workflow budget.wall_minutes missing: nothing bounds the %d-minute sum of declared step walls", sum)
+		}
+		return probs
+	}
+	if ceiling := *fm.Budget.WallMinutes; sum > ceiling {
+		add("declared step walls sum to %d minutes, over the workflow budget.wall_minutes ceiling of %d (one in-budget pass must not bust the workflow budget)", sum, ceiling)
+	}
+	return probs
+}
+
 // bundleProblems runs the full mechanical validation over one bundle
 // directory and returns every problem found (empty slice = valid bundle)
 // plus advisory notices (legal-but-noteworthy states that must not fail
@@ -563,6 +625,13 @@ func TestReferenceBundles(t *testing.T) {
 		dir := filepath.Join(root, d.Name())
 		t.Run(d.Name(), func(t *testing.T) {
 			problems, notices := bundleProblems(dir)
+			// Step wall-budget gate: layered on top of bundleProblems
+			// because it is a reference-bundle convention, not something
+			// the synthetic demo fixtures below are expected to satisfy.
+			// A frontmatter parse failure is already reported above.
+			if fm, err := ValidateWorkflowFrontmatter(dir, d.Name()); err == nil {
+				problems = append(problems, stepWallProblems(fm)...)
+			}
 			for _, p := range problems {
 				t.Errorf("%s", p)
 			}
@@ -580,6 +649,95 @@ func TestReferenceBundles(t *testing.T) {
 				t.Errorf("bundle digest collides with %s", other)
 			}
 			digests[got] = d.Name()
+		})
+	}
+}
+
+// i64 is the pointer helper for the *int64 budget fields.
+func i64(v int64) *int64 { return &v }
+
+// wallFlow builds a Frontmatter carrying a workflow-level wall ceiling and
+// one step per entry in walls; a nil entry means "this step declares no
+// budget at all", which is the exact state the four reference bundles were
+// in before this gate existed.
+func wallFlow(ceiling *int64, walls ...*int64) *Frontmatter {
+	fm := &Frontmatter{Name: "demo"}
+	if ceiling != nil {
+		fm.Budget = &Budget{WallMinutes: ceiling}
+	}
+	for i, w := range walls {
+		st := Step{ID: fmt.Sprintf("s%d", i), Kind: "code"}
+		if w != nil {
+			st.Budget = &Budget{WallMinutes: w}
+		}
+		fm.Steps = append(fm.Steps, st)
+	}
+	return fm
+}
+
+// TestStepWallProblemsValid is the positive control for the wall gate: a flow
+// whose steps all declare a wall inside [5,60] and whose sum sits under the
+// workflow ceiling must report nothing, including the exact boundary values.
+func TestStepWallProblemsValid(t *testing.T) {
+	fm := wallFlow(i64(180), i64(stepWallMin), i64(30), i64(stepWallMax), i64(20))
+	if probs := stepWallProblems(fm); len(probs) != 0 {
+		for _, p := range probs {
+			t.Errorf("%s", p)
+		}
+	}
+}
+
+// TestStepWallProblemsNegatives proves the gate goes RED on each way a bundle
+// can get the wall declarations wrong: a step declaring nothing (the original
+// defect - the watchdog then assumes 5 min and the backstop collapses to its
+// 15-minute floor), a wall under the minimum, a wall over the maximum, a step
+// sum that busts the workflow ceiling, and declared walls with no workflow
+// ceiling to bound them.
+func TestStepWallProblemsNegatives(t *testing.T) {
+	cases := []struct {
+		name string
+		fm   *Frontmatter
+		want string
+	}{
+		{
+			name: "step declares no wall at all",
+			fm:   wallFlow(i64(180), i64(30), nil, i64(20)),
+			want: "no budget.wall_minutes declared",
+		},
+		{
+			name: "wall below the minimum",
+			fm:   wallFlow(i64(180), i64(stepWallMin-1)),
+			want: "below the 5-minute minimum",
+		},
+		{
+			name: "wall above the maximum",
+			fm:   wallFlow(i64(180), i64(stepWallMax+1)),
+			want: "above the 60-minute maximum",
+		},
+		{
+			name: "step sum busts the workflow ceiling",
+			fm:   wallFlow(i64(60), i64(30), i64(30), i64(20)),
+			want: "over the workflow budget.wall_minutes ceiling",
+		},
+		{
+			name: "no workflow ceiling to bound the step walls",
+			fm:   wallFlow(nil, i64(30), i64(20)),
+			want: "workflow budget.wall_minutes missing",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			probs := stepWallProblems(tc.fm)
+			if len(probs) == 0 {
+				t.Fatalf("expected a wall-budget problem containing %q, got none", tc.want)
+			}
+			for _, p := range probs {
+				if strings.Contains(p, tc.want) {
+					return
+				}
+			}
+			t.Fatalf("no reported problem contains %q; problems: %v", tc.want, probs)
 		})
 	}
 }
