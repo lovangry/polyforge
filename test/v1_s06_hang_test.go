@@ -13,10 +13,11 @@ import (
 // the work item wraps. The idle agent (s01's parked one) is never a
 // hang — only the in-flight silence is.
 //
-// The detection windows are injected small through the in-process rig
-// (the production defaults — 10min hang window, 2min probe bound — are
-// correct for production but unusable in a test; the seam is
-// observe.Config, which the rig passes through).
+// The detection windows are injected small through the in-process rig:
+// the daemon.Config Observe seam exists for in-process assemblies, but
+// the e2e harness drives the daemon as an OS process whose CLI exposes
+// no window flags, and the production defaults (10min hang window, 2min
+// probe bound) are unusable in a test — so s06 stays on the rig.
 func TestV1S06HangRecovery(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s06: hung agent (in-flight silence)",

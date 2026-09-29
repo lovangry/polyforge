@@ -145,8 +145,16 @@ func New(cfg Config, hub Aihub, spawner Spawner, toOB chan<- protocol.RTMsg, fro
 	}
 }
 
-// DefaultSpawner returns the production pi-harness spawner.
-func DefaultSpawner(cfg Config) Spawner {
+// DefaultSpawner returns the production pi-harness spawner. It takes
+// the runtime config BY POINTER: the spawner reads its fields at spawn
+// time from the shared config, so the assembling daemon may bind
+// RecordTap AFTER the spawner is built. A value copy here is the
+// e2e-lane's high-severity assembly bug: the daemon set RecordTap after
+// DefaultSpawner had already copied the config, so the spawner's copy
+// held RecordTap==nil forever and production agents' record streams
+// never reached Observe (every stream-fed detection face blind). The
+// pointer makes the value-copy recurrence structurally impossible.
+func DefaultSpawner(cfg *Config) Spawner {
 	return newPiSpawner(cfg)
 }
 

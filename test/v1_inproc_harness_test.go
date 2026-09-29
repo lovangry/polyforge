@@ -2,23 +2,21 @@ package test
 
 // v1_inproc_harness_test.go: the in-process runtime+observe rig for the
 // fault-injection scenarios whose detection windows must be shrunk
-// (hang watchdog, probe bound). The REAL `pf daemon` assembly hard-codes
-// the production windows (10min hang / 2min probe) with no injection
-// seam, so these scenarios assemble the SAME production components —
-// runtime.New (lifecycle + recovery engine), observe.New (per-WI
-// monitor + detection faces), runtime.DefaultSpawner (the real
+// (hang watchdog, probe bound). The REAL `pf daemon` binary keeps the
+// production windows (10min hang / 2min probe) — the daemon.Config
+// Observe seam (Bug 4) makes them injectable for IN-PROCESS assemblies,
+// but the e2e harness drives the daemon as an OS process whose CLI has
+// no window flags — so these scenarios assemble the SAME production
+// components — runtime.New (lifecycle + recovery engine), observe.New
+// (per-WI monitor + detection faces), runtime.DefaultSpawner (the real
 // pi-spawner that derives the real fakepi process) and observe.Handler
 // (the real UDS flush/answer/observe routes) — with the observe config
 // injected.
 //
-// The RecordTap binding is wired HERE in the correct order (the tap is
-// set on the config BEFORE DefaultSpawner copies it). The production
-// daemon.New binds it the other way around — see the Real Bugs section
-// of the lane report: internal/polyforge/daemon/daemon.go copies
-// rtCfg into the spawner at line ~172 and only sets
-// rtCfg.RecordTap = d.tapRecord at line ~188, so the assembled daemon's
-// record stream never reaches Observe. Every scenario that depends on
-// stream classification therefore runs through this rig.
+// The RecordTap binding order bug the lane report pinned here is fixed
+// at the source: DefaultSpawner now takes the runtime config by pointer,
+// so the tap set after the spawner is built (the rig's own order below)
+// is the same binding the production daemon's assembly produces.
 
 import (
 	"context"
@@ -148,10 +146,11 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 		SocketPath:        sock,
 		ExecutorPromptFile: filepath.Join(inst.root, "skills", "pf-execute", "SKILL.md"),
 	}
-	// THE ORDERING THAT MATTERS: the tap rides the spawner's config
-	// copy, so it must be set BEFORE DefaultSpawner is built.
+	// The tap rides the spawner's SHARED config (DefaultSpawner takes it
+	// by pointer), so the binding order is no longer load-bearing — kept
+	// here in the historical order for readability.
 	rtCfg.RecordTap = rig.tapRecord
-	sp := runtime.DefaultSpawner(rtCfg)
+	sp := runtime.DefaultSpawner(&rtCfg)
 
 	rtMsgs := make(chan protocol.RTMsg, 64)
 	obMsgs := make(chan protocol.OBMsg, 64)

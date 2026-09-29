@@ -163,7 +163,15 @@ func (o *Observe) serveFlush(w http.ResponseWriter, r *http.Request) {
 	// admits residue) or an older generation must never seal work that
 	// belongs to the live attempt. Mismatch — including an absent id —
 	// answers DAEMON-409 STALE_ATTEMPT and never reaches the monitor.
-	if cur := m.currentAttempt(); req.AttemptID == "" || req.AttemptID != cur {
+	// EXCEPT the recovery window: an id that matches the hub's LATEST
+	// KNOWN instance (registered at RTRecovered emission time, which the
+	// monitor's adoption lags) passes — the just-resumed agent's own
+	// flush is never stale. The monitor queues such a call until its
+	// adoption completes (onFlush), so an old-generation id can still
+	// never reach the flush paths.
+	cur := m.currentAttempt()
+	if req.AttemptID == "" ||
+		(req.AttemptID != cur && req.AttemptID != o.instanceKnown(wi)) {
 		writeErr(w, api.ErrDaemonConflict,
 			"STALE_ATTEMPT: flush carries attempt_id "+req.AttemptID+
 				"; the current instance is "+cur)

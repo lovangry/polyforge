@@ -210,6 +210,13 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 		return
 	}
 	defer d.releaseSeal(wi)
+	// The agent's death in this close is expected: arm the monitor's
+	// suppression BEFORE the teardown starts, so a fast exit poll can
+	// never win the race against the RTFinished teardown and journal a
+	// spurious needs_recovery for a healthy run (the runtime's SEALING
+	// fence drops the OB message either way — the event log is the
+	// observable lie this closes).
+	d.obs.MarkClosing(wi)
 	if err := d.rt.Stop(ctx, wi, reason); err != nil {
 		graceful, ae := d.mapCloseErr(err)
 		if graceful {
@@ -272,7 +279,10 @@ func (d *Daemon) wrapRoute(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 // flush gate: the wrap arbitration on the agent's own flush path. Only
 // reason=wrap claims the seal guard (needs_input and shutdown are the
-// agent's ordinary lifeline, never a close).
+// agent's ordinary lifeline, never a close). The recovery window — new
+// instance alive, recovered() not yet back to RUNNING — is answered
+// with the typed retryable RECOVERING transient, never a "close in
+// progress" refusal: no close is in progress there.
 func (d *Daemon) flushGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
@@ -284,10 +294,30 @@ func (d *Daemon) flushGate(next http.Handler) http.Handler {
 		r.Body = io.NopCloser(bytes.NewReader(raw))
 		var req protocol.FlushRequest
 		if json.Unmarshal(raw, &req) == nil && req.Reason == protocol.FlushWrap {
-			if ji, ok := d.rt.Info(wi); ok &&
-				(ji.State == runtime.StateSealing || ji.State == runtime.StateRecovering) {
-				writeErr(w, api.ErrDaemonConflict, "work item is "+string(ji.State)+"; a close is already in progress")
-				return
+			if ji, ok := d.rt.Info(wi); ok {
+				if ji.State == runtime.StateSealing {
+					writeErr(w, api.ErrDaemonConflict, "work item is sealing; a close is already in progress")
+					return
+				}
+				if ji.State == runtime.StateRecovering {
+					if d.sealHeld(wi) {
+						// A close path holds the guard and its Stop is
+						// queued behind the recovery: a close genuinely
+						// is in progress — keep the original semantics.
+							writeErr(w, api.ErrDaemonConflict, "a close is already in progress for this work item")
+						return
+					}
+					// The recovery window, no close anywhere: between
+					// the new agent going live and recovered() flipping
+					// the state back to RUNNING, the NEW instance's
+					// flush(wrap) used to eat a nonsense "close in
+					// progress" refusal. Answer the typed retryable
+					// transient instead — no seal is claimed, and the
+					// caller's bounded retry clears it in milliseconds.
+					writeErr(w, api.ErrDaemonConflict,
+						"work item is recovering; instance just spawned; retry shortly")
+					return
+				}
 			}
 			if !d.claimSeal(wi) {
 				writeErr(w, api.ErrDaemonConflict, "a close is already in progress for this work item")

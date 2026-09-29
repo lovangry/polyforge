@@ -119,6 +119,12 @@ type Observe struct {
 
 	mu       sync.Mutex
 	monitors map[string]*Monitor
+	// latest holds, per work item, the newest instance id the hub has
+	// HEARD announced (RTStarted/RTRecovered emission time) — the recovery
+	// window's fence input. The monitor adopts the id only after its
+	// select loop processes the attachment; in that window the flush
+	// fence compares against this map instead of refusing.
+	latest map[string]string
 
 	wg sync.WaitGroup
 }
@@ -138,7 +144,7 @@ func New(cfg Config) (*Observe, error) {
 		log.Close()
 		return nil, errConfig("OB channel must be buffered")
 	}
-	return &Observe{cfg: cfg, log: log, monitors: map[string]*Monitor{}}, nil
+	return &Observe{cfg: cfg, log: log, monitors: map[string]*Monitor{}, latest: map[string]string{}}, nil
 }
 
 type errConfig string
@@ -171,6 +177,10 @@ func (o *Observe) onAttach(at Attach) {
 	wi := at.Msg.WorkItem
 	switch at.Msg.Kind {
 	case protocol.RTStarted:
+		// Emission-time registration (the recovery-window fence input,
+		// #8): even when the attachment below is malformed and never
+		// yields a monitor, the announced id is the newest the hub knows.
+		o.NoteInstance(wi, at.Msg.AttemptID)
 		if old := o.takeMonitor(wi); old != nil {
 			// A stale monitor for the same WI (Runtime restarted the WI
 			// without a WIFinished): stop it, the new attempt wins.
@@ -190,6 +200,11 @@ func (o *Observe) onAttach(at Attach) {
 			m.run()
 		}()
 	case protocol.RTRecovered:
+		// Same emission-time registration as RTStarted: the monitor adopts
+		// the new instance only when its select loop reaches the rtCh
+		// delivery — the flush fence must accept the announced id for the
+		// whole window.
+		o.NoteInstance(wi, at.Msg.AttemptID)
 		m := o.lookup(wi)
 		if m == nil {
 			_ = o.log.Append(wi, EvJobStopped, map[string]any{
@@ -205,6 +220,9 @@ func (o *Observe) onAttach(at Attach) {
 			})
 		}
 	case protocol.RTFinished:
+		o.mu.Lock()
+		delete(o.latest, wi) // the instance lineage ended with the job
+		o.mu.Unlock()
 		if m := o.takeMonitor(wi); m != nil {
 			m.requestStop() // monitor emits its own job_stopped event
 		}
@@ -234,10 +252,52 @@ func (o *Observe) lookup(wi string) *Monitor {
 	return o.monitors[wi]
 }
 
+// NoteInstance records the latest KNOWN instance id of a work item at
+// the moment Runtime announces it (the daemon bridge calls this at
+// RTStarted/RTRecovered emission time; onAttach repeats it as the
+// structural backstop). The monitor's current-attempt read lags this by
+// the whole attachment pipeline — the hub loop, the rtCh handoff and the
+// monitor's select adoption — and a just-resumed agent's flush(reason)
+// must not eat a STALE_ATTEMPT refusal in that window (#8's fence keeps
+// refusing every OLDER id). A nil/empty id is ignored.
+func (o *Observe) NoteInstance(wi, attemptID string) {
+	if wi == "" || attemptID == "" {
+		return
+	}
+	o.mu.Lock()
+	o.latest[wi] = attemptID
+	o.mu.Unlock()
+}
+
+// instanceKnown returns the latest known instance id of wi ("" when
+// none was ever announced). The serveFlush fence accepts it as the
+// recovery window's alternate identity — see NoteInstance.
+func (o *Observe) instanceKnown(wi string) string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.latest[wi]
+}
+
 func (o *Observe) setMonitor(wi string, m *Monitor) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.monitors[wi] = m
+}
+
+// MarkClosing marks the work item's monitor as sealing-for-close: a
+// daemon-initiated close (CLI wrap/pause) has claimed the seal guard and
+// is about to terminate the agent, and that death is EXPECTED — the
+// monitor must not raise a recovery for it. The runtime's SEALING fence
+// already drops the resulting OB message, but without this the events
+// log still records a spurious needs_recovery in a perfectly healthy
+// run whenever the adapter's exit poll wins the race against the close
+// sequence's RTFinished teardown. The monitor-local sealing flag is the
+// same suppression flush(wrap) arms; the flag dies with the monitor at
+// the RTFinished teardown. No monitor (never monitored) is a no-op.
+func (o *Observe) MarkClosing(wi string) {
+	if m := o.lookup(wi); m != nil {
+		m.markClosing()
+	}
 }
 
 func (o *Observe) takeMonitor(wi string) *Monitor {

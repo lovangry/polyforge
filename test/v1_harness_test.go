@@ -680,6 +680,24 @@ func (u *v1Install) waitWIStatus(t *testing.T, wi, status string, bound time.Dur
 		func() bool { return u.wiStatus(t, wi) == status })
 }
 
+// waitForEvent polls the daemon's durable events.log until one event of
+// the given kind appears for wi, and returns it.
+func waitForEvent(t *testing.T, d *v1Daemon, wi, kind string, bound time.Duration) protocol.EventEntry {
+	t.Helper()
+	deadline := time.Now().Add(bound)
+	for {
+		for _, e := range d.eventsOf(t, wi) {
+			if e.Kind == kind {
+				return e
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout: no %q event for %s (saw %v)", kind, wi, d.eventKinds(t, wi))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Real-git assertions against the aihub's on-disk bare repos.
 

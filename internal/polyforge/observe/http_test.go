@@ -314,3 +314,68 @@ func TestHTTPFlushStaleAttemptRefused(t *testing.T) {
 		t.Fatalf("WICompleted: %+v", msg)
 	}
 }
+
+// TestHTTPFlushRecoveryWindowNotStale (the #8 fence's recovery window): a
+// flush whose attempt id names the hub's LATEST KNOWN instance — the id
+// RTRecovered announced, which the monitor's adoption lags — must NOT be
+// refused as STALE_ATTEMPT: it is the just-resumed agent's own lifeline.
+// The call is queued by the monitor until the adoption completes (or
+// answered once the id is current), while every OLDER generation's id
+// stays fenced exactly as before.
+func TestHTTPFlushRecoveryWindowNotStale(t *testing.T) {
+	h := newFakeHandle("att_cur")
+	hs := newHarness(t)
+	hs.start(t, h)
+	soon(t, time.Second, "job registered", func() bool {
+		code, _ := hs.get(t, "/jobs/wi_http/observe")
+		return code == http.StatusOK
+	})
+
+	// (1) the recovery window, adoption NOT yet delivered: the hub knows
+	// the announced id (emission-time registration), the monitor does
+	// not. The flush is queued, not refused — it must not answer the
+	// instant STALE_ATTEMPT 409; it settles only after adoption, so the
+	// bounded caller sees the settle-timeout instead (CallTimeout here).
+	hs.o.NoteInstance("wi_http", "att_next")
+	start := time.Now()
+	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
+		WorkItem: "wi_http", AttemptID: "att_next",
+		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
+	}, nil)
+	if code == http.StatusConflict && bytes.Contains(body, []byte("STALE_ATTEMPT")) {
+		t.Fatalf("recovery-window flush was refused as stale: %d %s", code, body)
+	}
+	if code != http.StatusInternalServerError || !bytes.Contains(body, []byte("settle")) {
+		t.Fatalf("queued flush before adoption: %d %s, want the settle-timeout shape", code, body)
+	}
+	if time.Since(start) < 400*time.Millisecond {
+		t.Fatalf("queued flush answered too fast (%v): it must wait out the adoption window", time.Since(start))
+	}
+
+	// (2) the adoption lands: from here the announced id is current, and
+	// its flushes take the ordinary path.
+	h2 := newFakeHandle("att_next")
+	hs.rt <- Attach{
+		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_http", AttemptID: "att_next"},
+		Handle: h2,
+	}
+	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
+		WorkItem: "wi_http", AttemptID: "att_next",
+		Reason: protocol.FlushNeedsInput, QuestionID: "q_next", Question: "which?",
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("post-adoption needs_input flush: %d %s", code, body)
+	}
+
+	// (3) the fence did not widen: every OLDER generation — the
+	// pre-recovery current id included — is still refused.
+	for _, stale := range []string{"att_old", "att_cur"} {
+		code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
+			WorkItem: "wi_http", AttemptID: stale,
+			Reason: protocol.FlushNeedsInput, QuestionID: "q_z_" + stale, Question: "which?",
+		}, nil)
+		if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_ATTEMPT")) {
+			t.Fatalf("older id %q after recovery: %d %s, want 409 STALE_ATTEMPT", stale, code, body)
+		}
+	}
+}
