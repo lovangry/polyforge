@@ -56,3 +56,40 @@ of the git proposal, one review of the message-driven model).
 7. Module reorganization (9 packages → 3 directories)
 8. Regression rewrite + new scenario e2e
 9. Migration plan (SQLite revision chain → git revision chain)
+
+## Consistency Check Rulings (2026-09-29)
+
+Three blocking issues from the consistency check, resolved by human ruling:
+
+### C1: Secret scanning removed; transcripts go into git
+Pre-receive hook drops secret scanning. Transcripts enter the capsule git
+repo normally (each step commit includes the transcript). Cross-machine
+recovery gets transcripts automatically via git clone. No side-channel
+upload needed. `.gitignore` reduced to: `repos/` + `artifacts/release-*/`.
+
+### C2: Control protocol split into two channels
+- **stdio control channel** (daemon→agent): `answer`, `stop_notice`, `probe` — 3 methods
+- **UDS proxy** (agent→daemon): `flush(reason)` — replaces `publish_request`
+Not one protocol; two transports with separate method sets.
+
+### C3: INV-11 explicitly abolished
+Old invariant (00 §4.3): "agent MUST proactively request publication at
+four mandatory boundaries" — DELETED.
+New invariant: agent is zero-blocking. Daemon observes execution.json
+changes and triggers async commit+push autonomously. Agent does not know
+git exists, does not know daemon is watching, does not initiate any
+archival request. pf-execute §8 completely rewritten.
+
+### Additional corrections from consistency check
+- Resume IS already implemented (watchdog same-session re-derivation in v0
+  code) — recovery engine is modification, not pure new work
+- `repos/<name>/.git` injection risk persists even with capsule git-dir
+  externalized — task repo hooks still need `core.hooksPath` neutralization
+- `capsule` and `workflow` packages need assigned homes in the 3-directory
+  reorg (recommend: `common/capsule` + `common/workflow`)
+- Tickets 4+5 must land in one commit (drift guard coupling)
+- Ticket 7 (module reorg) must land after tickets 1-3
+
+### Version naming correction
+This spec is **v1**, not v2. The current pilot code is **v0**. The old
+aihub system (10.146.0.34) is not versioned in this scheme.
