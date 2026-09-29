@@ -181,10 +181,7 @@ func endGenerationReq(j *job, status string) aihubclient.EndGenerationRequest {
 // are the caller's to log; the LOCAL commit is the durable half and it
 // stands on its own.
 func commitDirty(r *Runtime, j *job) {
-	sha, pushed, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
-	if perr == nil && sha != "" && !pushed {
-		_, perr = gitops.Push(j.git)
-	}
+	sha, _, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)
 	}

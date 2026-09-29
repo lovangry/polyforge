@@ -563,18 +563,14 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	r.killAgentTree(j)
 
 	// Final push (flush(wrap) semantics, §五). The seq trailer is
-	// gitops' business (derived in-lock); CommitPush without a seq derives
-	// it itself. gitops.CommitPush cannot honestly re-push a standing
-	// local commit (a retry after a failed push sees a clean tree and
-	// answers the standing HEAD with pushed=false), so the retry is the
-	// direct gitops.Push of HEAD below. A persistently failed push
-	// degrades the terminal reason to blocked — the local commit keeps
-	// the bytes, but the server never heard the final state.
+	// gitops' business (derived in-lock). CommitPush is honest on every
+	// path — including a clean tree, where it pushes the standing HEAD —
+	// so a failed first push is retried directly via gitops.Push below.
+	// A persistently failed push degrades the terminal reason to blocked
+	// — the local commit keeps the bytes, but the server never heard the
+	// final state.
 	finalReason := reason
-	sha, pushed, perr := gitops.CommitPush(j.git, "seal: "+reason)
-	if perr == nil && sha != "" && !pushed {
-		_, perr = gitops.Push(j.git)
-	}
+	_, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
 	for i := 0; i < 2 && perr != nil; i++ {
 		_, perr = gitops.Push(j.git)
 	}

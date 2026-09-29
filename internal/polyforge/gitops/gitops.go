@@ -150,7 +150,7 @@ func CommitPush(o Opts, message string) (localSHA string, pushed bool, err error
 		// server unreachability) it exists for.
 		sha, serr := git(env, o.CapsuleDir, "rev-parse", "HEAD")
 		if serr != nil {
-			return "", false, ErrEmptyHistory
+			return "", false, fmt.Errorf("%w: %v", ErrEmptyHistory, serr)
 		}
 		localSHA = strings.TrimSpace(sha)
 		pushed, perr := pushLocked(o)

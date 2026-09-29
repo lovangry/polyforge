@@ -165,8 +165,9 @@ func run(t *testing.T, name string, args ...string) (string, error) {
 }
 
 // TestPushStanding pins the honest final-push retry: a standing local
-// commit whose first push failed must be re-drivable directly (the case
-// gitops.CommitPush answers with the standing HEAD and pushed=false).
+// commit whose first push failed must be re-drivable directly (CommitPush
+// itself now pushes the standing HEAD on a clean tree, so both paths are
+// honest; the direct Push retry covers the failed-first-push case).
 func TestPushStanding(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
