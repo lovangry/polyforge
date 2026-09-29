@@ -48,6 +48,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -423,7 +424,7 @@ done
 	if proc.Unhealthy() {
 		t.Fatal("non-ack claude records are bulk: the agent must stay healthy")
 	}
-	if d := proc.bulkDropped; d < 12000 {
+	if d := atomic.LoadInt64(&proc.bulkDropped); d < 12000 {
 		t.Fatalf("every non-ack record must be counted as dropped bulk, got %d", d)
 	}
 }

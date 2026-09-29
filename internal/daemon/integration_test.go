@@ -115,6 +115,10 @@ type integSpawner struct {
 	// at derivation time — the F2-3 ordering regression: materialization
 	// must precede the spawn.
 	sawSnapshot []bool
+	// wrap optionally decorates each spawned integAgent with extra
+	// OPTIONAL handle faces (polyforge#48 stream probes). nil = the bare
+	// integAgent, which is what every pre-#48 test expects.
+	wrap func(*integAgent) AgentHandle
 	// cmd, when set, replaces the default "sleep 60" child: the proxy
 	// success-path tests need the spawned WI Agent process itself to
 	// originate the UDS proxy_call (SO_PEERCRED matches main_agent_pid).
@@ -154,6 +158,13 @@ func (s *integSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, e
 		child:     child,
 	}
 	s.agents = append(s.agents, a)
+	// polyforge#48: the stream-heartbeat tests need handles that also
+	// implement the OPTIONAL AgentStreamProbe / AgentLivenessProbe faces.
+	// The hook decorates the same integAgent, so `agents[i]` stays the
+	// liveness/kill observation point for every existing assertion.
+	if s.wrap != nil {
+		return s.wrap(a), nil
+	}
 	return a, nil
 }
 

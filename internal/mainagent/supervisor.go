@@ -105,6 +105,14 @@ const (
 	// MethodAnswer: the Interactive answer relay (00 §3.4a). Params carry
 	// the five-field AnswerRelay verbatim, bound by question_id.
 	MethodAnswer = "pf/answer"
+	// MethodProbe: the watchdog CONFIRMATION probe (04 §6.2 runtime note,
+	// stream-heartbeat revision / polyforge#48). Sent ONLY after the hang
+	// window has already expired, as the last benefit of the doubt before
+	// the kill: the agent acks it at its next safe boundary exactly like
+	// every other control method, and an ack CANCELS the kill. It carries
+	// no instruction — the agent is not asked to do anything, only to
+	// prove its loop still turns.
+	MethodProbe = "pf/probe"
 )
 
 var msgID int64
@@ -585,6 +593,11 @@ type Proc struct {
 	// the watch; the measured zero-turn resume refusal emits neither.
 	turnServed chan struct{}
 	turnOnce   sync.Once
+	// stream is the polyforge#48 record-stream observation (lastRecordAt,
+	// in-flight turn, infra incidents) the daemon's hang watchdog reads
+	// through the AgentStreamProbe face. See streamheartbeat.go; nil on a
+	// bare Proc built by a unit test, which every reader tolerates.
+	stream *streamState
 }
 
 // Control-path bounds (R2N-9). Acks can never be silently dropped — a
@@ -747,7 +760,7 @@ func (q *lineQueue) next(ctx context.Context) (string, bool) {
 // methods — the CLOSED vocabulary of the stdio control channel.
 func isControlMethod(m string) bool {
 	switch m {
-	case MethodQuiesce, MethodResume, MethodStopNotice, MethodAnswer:
+	case MethodQuiesce, MethodResume, MethodStopNotice, MethodAnswer, MethodProbe:
 		return true
 	}
 	return false
@@ -849,9 +862,23 @@ func (p *Proc) classifyStdoutLine(line string) {
 	var rec stdoutRecord
 	if json.Unmarshal([]byte(line), &rec) != nil || rec.Type == "" {
 		// Not a protocol record: legacy raw-line classification.
-		// Bulk or ack, never a response observation.
+		// Bulk or ack, never a response observation. It still counts as
+		// stream progress (the harness produced output) — the heartbeat
+		// measures SILENCE, and a noisy non-record stream is not silent.
+		if p.stream != nil {
+			p.stream.noteRecord("")
+		}
 		p.classifyCandidateLine(line)
 		return
+	}
+	// polyforge#48: the heartbeat and the infra-incident classification
+	// ride this SAME pass — the reader already sees every record, so the
+	// stream criterion costs two atomic stores and no extra plumbing.
+	// Both run before the ack dispatch so a control-path close (overlong
+	// line) cannot swallow the liveness observation that explains it.
+	if p.stream != nil {
+		p.stream.noteRecord(rec.Type)
+		p.classifyIncident(rec)
 	}
 	switch rec.Type {
 	case "response": // pi command outcome
@@ -1141,7 +1168,47 @@ func (p *Proc) SendControl(method string, params map[string]any) error {
 // lossless path, so concurrent bulk output on the same stdout can never
 // push the ack out of the window.
 func (p *Proc) awaitAck(ctx context.Context, method string) error {
-	deadline := time.Now().Add(30 * time.Second)
+	return p.awaitAckBound(ctx, method, defaultAckBound)
+}
+
+// defaultAckBound is the control-ack window every method EXCEPT the two
+// turn-scale ones uses. quiesce / resume / stop_notice are answered from
+// the agent's boundary bookkeeping and were measured well inside it.
+const defaultAckBound = 30 * time.Second
+
+// answerAckBound is the pf/answer ack window (polyforge#48 item 5,
+// folded from #49). The 30-second default was calibrated against the
+// FAKE harness, which acks instantly. A real agent consuming an answer
+// runs a whole model turn — the pilot of 2026-09-29 01:10 measured the
+// ack arriving 45-90s after the daemon had already reported DAEMON-500,
+// with the answer landing correctly afterwards. The window is therefore
+// raised to turn scale, and a timeout is no longer error-grade:
+// DeliverAnswer reports daemon.ErrAnswerAckPending, the two-phase
+// "delivered, consumption pending" outcome.
+//
+// Operator override: POLYFORGE_ANSWER_ACK_WINDOW (a Go duration).
+var answerAckBound = envDuration("POLYFORGE_ANSWER_ACK_WINDOW", 10*time.Minute)
+
+// envDuration reads a Go duration from the environment, falling back to
+// def on an absent or unparsable value (loudly for the latter: a typo in
+// an operator override must not silently restore a default).
+func envDuration(name string, def time.Duration) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		fmt.Fprintf(os.Stderr, "mainagent: %s=%q is not a positive Go duration; using %s\n", name, raw, def)
+		return def
+	}
+	return d
+}
+
+// awaitAckBound is awaitAck with an explicit bound (the ack windows are
+// per-method since polyforge#48: see answerAckBound / probeAckBound).
+func (p *Proc) awaitAckBound(ctx context.Context, method string, bound time.Duration) error {
+	deadline := time.Now().Add(bound)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
@@ -1231,6 +1298,21 @@ func (p *Proc) Resume(ctx context.Context) error {
 // attached to the same capsule. A daemon-side pending-answer journal would
 // add a second durable record for data the capsule already owns; the ack
 // wait is the design-faithful smaller shape.
+//
+// TWO-PHASE OUTCOME (polyforge#48 item 5, folded from #49). The wait is
+// now turn-scale (answerAckBound) and its EXPIRY is separated from its
+// FAILURE, because the pilot proved they are different facts:
+//
+//   - the stdin write failed, or the control path is closed/dead: the
+//     relay never reached the agent — a real delivery failure, returned
+//     as the typed error it is;
+//   - the write succeeded but no ack arrived inside the window: delivery
+//     is CONFIRMED and consumption is merely unobserved. The measured
+//     case landed the answer 45-90s later. Reporting that as an error
+//     told the operator the answer was lost when it was not.
+//     daemon.ErrAnswerAckPending carries that distinction all the way to
+//     the CLI, and keeps the ledger entry redeliverable so a crash
+//     continuation re-delivers the same answer_id idempotently.
 func (p *Proc) DeliverAnswer(relay daemon.AnswerRelay) error {
 	b, err := json.Marshal(relay)
 	if err != nil {
@@ -1239,9 +1321,22 @@ func (p *Proc) DeliverAnswer(relay daemon.AnswerRelay) error {
 	params := map[string]any{}
 	json.Unmarshal(b, &params)
 	if err := p.SendControl(MethodAnswer, params); err != nil {
+		return err // the relay never reached the wire: a true delivery failure
+	}
+	err = p.awaitAckBound(context.Background(), MethodAnswer, answerAckBound)
+	if err == nil {
+		return nil
+	}
+	// Distinguish the ack WINDOW expiring (consumption pending) from the
+	// control path dying under the wait (the agent will never consume it).
+	if p.Unhealthy() || p.Done() {
 		return err
 	}
-	return p.awaitAck(context.Background(), MethodAnswer)
+	if strings.HasPrefix(err.Error(), "mainagent: no ack for "+MethodAnswer) {
+		fmt.Fprintf(os.Stderr, "mainagent: answer %s delivered, no consumption ack within %s (agent turn still running; not an error)\n", relay.AnswerID, answerAckBound)
+		return daemon.ErrAnswerAckPending
+	}
+	return err
 }
 
 // Terminate kills the WHOLE process group and proves it empty (04 §6.2
@@ -1559,6 +1654,7 @@ func (s *Supervisor) derive(adapter Adapter, p SpawnParams, sessionDir string, w
 		startedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		stdin:     stdin, ctrl: newLineQueue(), exited: make(chan struct{}),
 		turnServed: make(chan struct{}),
+		stream:     &streamState{},
 	}
 	// Stdout reader: under the REAL pi protocol stdout is a RECORD STREAM
 	// (classifyStdoutLine): assistant message records carry the ack lines

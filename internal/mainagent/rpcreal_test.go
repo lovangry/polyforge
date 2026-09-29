@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -346,7 +347,7 @@ done
 	if proc.Unhealthy() {
 		t.Fatal("non-assistant records are bulk: the agent must stay healthy")
 	}
-	if d := proc.bulkDropped; d < 16000 {
+	if d := atomic.LoadInt64(&proc.bulkDropped); d < 16000 {
 		t.Fatalf("every non-assistant record must be counted as dropped bulk, got %d", d)
 	}
 }

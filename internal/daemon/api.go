@@ -466,13 +466,26 @@ type pendingQuestionView struct {
 	AskedAt    string `json:"asked_at"`
 	Content    string `json:"content"`
 	Status     string `json:"status"` // pending | answered (00 §3.4a)
+	// AnswerReceivedAt is set with status=answered: when the agent
+	// persisted pending_answer. It is the operator's view of the
+	// consumption window (polyforge#48 item 5) — how long the agent has
+	// been digesting, so a stall is visible as a stall.
+	AnswerReceivedAt string `json:"answer_received_at,omitempty"`
 }
 
 // renderPendingQuestion projects one execution state's open question into
-// the §3.4a shape, or nil when no question is open. A question only stays
-// in pending_question while unanswered (consumption clears it in the same
-// atomic write), so the rendered status is always "pending" — an
-// "answered" question never appears in an observe stream.
+// the §3.4a shape, or nil when no question is open.
+//
+// The status is the TWO-PHASE consumption signal (polyforge#48, folded
+// from #49 item 3). It used to be hardcoded "pending" on the reasoning
+// that consumption clears the question in the same atomic write — true,
+// but it skipped the window in between: pf-execute persists
+// pending_answer FIRST and only then runs the turn that consumes it, so
+// a question with pending_answer set is "answered, being digested", and
+// that window is minutes long. The pilot's operator had no way to see
+// it and could not tell a delivered answer from a lost one. Now they
+// can: status flips to "answered" the moment the agent records the
+// answer, and the question disappears when consumption completes.
 func renderPendingQuestion(e *capsule.Execution) *pendingQuestionView {
 	if e == nil {
 		return nil
@@ -481,10 +494,17 @@ func renderPendingQuestion(e *capsule.Execution) *pendingQuestionView {
 	if q == nil {
 		return nil
 	}
-	return &pendingQuestionView{
+	status := "pending"
+	v := &pendingQuestionView{
 		QuestionID: q.QuestionID, StepID: step, AskedAt: q.AskedAt,
-		Content: q.Content, Status: "pending",
+		Content: q.Content,
 	}
+	if q.PendingAnswer != nil {
+		status = "answered"
+		v.AnswerReceivedAt = q.PendingAnswer.ReceivedAt
+	}
+	v.Status = status
+	return v
 }
 
 // executionFromProgress decodes the read-through progress payload (the
@@ -556,7 +576,7 @@ func (s *APIServer) hAnswer(w http.ResponseWriter, r *http.Request) {
 		jr.ring.Append(EvAnswered, map[string]any{"question_id": rel.QuestionID, "answer_id": rel.AnswerID})
 		return nil
 	}
-	if err := s.d.ledger.Submit(relay, callerID, src, deliver); err != nil {
+	if err := s.d.ledger.SubmitFor(wi, relay, callerID, src, deliver); err != nil {
 		if errors.Is(err, ErrAnswerConsumed) || errors.Is(err, ErrAnswerInFlight) {
 			writeAPIErr(w, ErrCodeConflict, err.Error())
 			return
@@ -565,10 +585,32 @@ func (s *APIServer) hAnswer(w http.ResponseWriter, r *http.Request) {
 			writeAPIErr(w, ErrCodeForbidden, err.Error())
 			return
 		}
+		if errors.Is(err, ErrAnswerAckPending) {
+			// TWO-PHASE (polyforge#48, folded from #49): delivery is
+			// CONFIRMED, consumption is merely unobserved. Reporting this
+			// as DAEMON-500 is what made the pilot's operator believe a
+			// successfully-delivered answer had been lost. A 200 with the
+			// honest phase is the right answer: the CLI renders it as
+			// "delivered, consumption pending" and `pf observe` shows the
+			// question flip to answered when the agent lands it.
+			jr.ring.Append(EvAnswered, map[string]any{
+				"question_id": relay.QuestionID, "answer_id": relay.AnswerID,
+				"consumption": "pending",
+			})
+			writeJSONOK(w, map[string]any{
+				"applied": false, "delivered": true, "consumption": "pending",
+				"answer_id": relay.AnswerID,
+				"note":      "the agent consumes an answer inside a model turn; poll `pf observe` for the question to clear",
+			})
+			return
+		}
 		writeAPIErr(w, "DAEMON-500", err.Error())
 		return
 	}
-	writeJSONOK(w, map[string]any{"applied": true, "answer_id": relay.AnswerID})
+	writeJSONOK(w, map[string]any{
+		"applied": true, "delivered": true, "consumption": "confirmed",
+		"answer_id": relay.AnswerID,
+	})
 }
 
 // execQuestionSource reads the persisted comparison basis (03 §4.2

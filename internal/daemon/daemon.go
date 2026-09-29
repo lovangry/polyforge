@@ -254,11 +254,37 @@ func New(cfg Config, spawner AgentSpawner) (*Daemon, error) {
 		shutdownDone: make(chan struct{}),
 		wdSample:     procfsActivitySample,
 	}
+	// Operator overrides for the runtime-supervision windows that have no
+	// dedicated Config field set by the caller (polyforge#48). Resolved
+	// HERE, in the daemon, so the knob exists for an operator today; the
+	// matching `pf daemon --watchdog-window` flag is a one-line binding in
+	// cmd/pf, deliberately left out of this change's file scope.
+	if d.cfg.WatchdogActivityWindow <= 0 {
+		d.cfg.WatchdogActivityWindow = envWatchdogDuration("POLYFORGE_WATCHDOG_WINDOW", 0)
+	}
 	// Dual runtime watchdog (watchdog.go): probe procfs availability on our
 	// own pid ONCE and say so loudly when the hang watchdog must degrade
 	// to wall-clock-only.
 	d.watchdogStartupCheck()
 	return d, nil
+}
+
+// envWatchdogDuration reads a Go duration from the environment. An
+// unparsable or non-positive value is reported LOUDLY and ignored: a
+// typo in a supervision knob must never silently restore a default the
+// operator thought they had changed.
+func envWatchdogDuration(name string, def time.Duration) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil || v <= 0 {
+		fmt.Fprintf(os.Stderr, "pf-daemon: %s=%q is not a positive Go duration; ignoring it\n", name, raw)
+		return def
+	}
+	fmt.Fprintf(os.Stderr, "pf-daemon: %s=%s applied\n", name, v)
+	return v
 }
 
 // ---------------------------------------------------------------------------

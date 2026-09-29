@@ -11,7 +11,13 @@ import "sync"
 // Ring capacity (04 §5.1a).
 const ObserveRingCap = 500
 
-// The nine coarse event types (04 §5.1a, closed set).
+// The coarse event types (04 §5.1a). Nine as originally ruled, plus the
+// tenth added by polyforge#48 (EvInfraIncident): the closed set was
+// closed against EXECUTION progress, and an upstream provider failure
+// is not execution progress — it is the infrastructure news that
+// explains why progress stopped. It was previously invisible to an
+// observer (bulk output, at best a daemon stderr line), so the first
+// signal an operator got was the hang that followed minutes later.
 const (
 	EvJobStarted       = "job_started"
 	EvWIAgentRederived = "wi_agent_rederived"
@@ -22,6 +28,13 @@ const (
 	EvPublished        = "published"
 	EvJobStopped       = "job_stopped"
 	EvSyncFailed       = "sync_failed"
+	// EvInfraIncident carries {kind, detail, fatal, at}: a provider
+	// error or retry classified straight off the harness record stream
+	// (kinds provider_error / retry), or the watchdog's own
+	// hang_suspected / hang_cleared confirmation-probe transitions.
+	// Informational: nothing branches on it, and it never counts toward
+	// the storm guard.
+	EvInfraIncident = "infra_incident"
 )
 
 // Event is one ring entry.
