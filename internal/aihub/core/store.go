@@ -151,6 +151,18 @@ CREATE TABLE IF NOT EXISTS claim_idempotency (
   created_at      TEXT NOT NULL
 );
 
+-- M5 service-secret epoch ledger (02 §4.10/§6.6). v1 minted credentials
+-- are per-attempt random secrets (hash-only in owner_generations), so no
+-- validation path consumes a shared service secret; the ledger exists for
+-- the rotate-secret wire contract and its audit trail.
+CREATE TABLE IF NOT EXISTS service_secret_epochs (
+  epoch       INTEGER PRIMARY KEY,
+  mode        TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  retired_at  TEXT,
+  rotated_by  TEXT
+);
+
 CREATE TABLE IF NOT EXISTS wi_events (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   work_item_id TEXT NOT NULL REFERENCES work_items(id),

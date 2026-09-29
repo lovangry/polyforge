@@ -8,8 +8,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -72,6 +76,26 @@ func (m *AdminManager) GetUser(id string) (*api.User, error) {
 	u.Email = email.String
 	u.APITokens = []api.APIToken{}
 	return &u, nil
+}
+
+// PatchUser updates display_name and/or the global role (M1). Empty
+// fields mean "leave unchanged".
+func (m *AdminManager) PatchUser(id, displayName, role string) (*api.User, error) {
+	if strings.TrimSpace(displayName) == "" && role == "" {
+		return nil, Fail(api.ErrCoreBadInput, "", "nothing to update: display_name and/or role required")
+	}
+	if role != "" && role != "admin" && role != "writer" {
+		return nil, Fail(api.ErrCoreBadInput, "", "role must be admin or writer")
+	}
+	res, err := m.db.Exec(`UPDATE users SET display_name=CASE WHEN ?1<>'' THEN ?1 ELSE display_name END,
+		role=CASE WHEN ?2<>'' THEN ?2 ELSE role END WHERE id=?3`, displayName, role, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, Fail(api.ErrCoreNotFound, "", "user %s", id)
+	}
+	return m.GetUser(id)
 }
 
 // ListUsers returns users (with token metadata, never hashes).
@@ -185,6 +209,47 @@ func (m *AdminManager) RevokeAPIKey(keyID string) error {
 		}
 	}
 	return nil
+}
+
+// APIKeyInfo is one admin-list row (M2 list): metadata only — never the
+// hash, never material.
+type APIKeyInfo struct {
+	ID        string  `json:"id"`
+	UserID    string  `json:"user_id"`
+	ProjectID *string `json:"project_id"`
+	Name      string  `json:"name"`
+	CreatedAt string  `json:"created_at"`
+	RevokedAt *string `json:"revoked_at"`
+}
+
+// ListAPIKeys lists key metadata (M2), newest first, revoked rows last
+// within a user. Only metadata is returned; plaintext exists exactly once
+// at issuance and the hash never leaves the store.
+func (m *AdminManager) ListAPIKeys() ([]APIKeyInfo, error) {
+	rows, err := m.db.Query(`SELECT id, user_id, project_id, name, created_at, revoked_at
+		FROM api_keys ORDER BY created_at DESC, id LIMIT 500`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []APIKeyInfo{}
+	for rows.Next() {
+		var k APIKeyInfo
+		var projectID, revoked sql.NullString
+		if err := rows.Scan(&k.ID, &k.UserID, &projectID, &k.Name, &k.CreatedAt, &revoked); err != nil {
+			return nil, err
+		}
+		if projectID.Valid {
+			p := projectID.String
+			k.ProjectID = &p
+		}
+		if revoked.Valid {
+			r := revoked.String
+			k.RevokedAt = &r
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -443,4 +508,183 @@ func (m *AdminManager) RotateIdentifier(idOrName string) (string, error) {
 		return "", Fail(api.ErrCoreNotFound, "", "project %q", idOrName)
 	}
 	return plain, nil
+}
+
+// ---------------------------------------------------------------------------
+// Project patch (M3): description/visible plus membership management.
+
+// ProjectPatchRequest is the PATCH /api/v1/projects/{id} body. The wire
+// shape is pinned by the client (aihubclient.ProjectPatchRequest):
+// `members` is an explicit UPSERT list (not a wholesale replacement) and
+// `remove_members` is an explicit remove list.
+type ProjectPatchRequest struct {
+	Description   *string              `json:"description,omitempty"`
+	Members       *[]api.ProjectMember `json:"members,omitempty"`
+	RemoveMembers *[]string            `json:"remove_members,omitempty"`
+	Visible       *bool                `json:"visible,omitempty"`
+}
+
+// PatchProject applies a project patch. Membership CAS tradeoff vs v0:
+// v0 guarded a wholesale member-list replacement with members_version
+// plus expected_removals (a shorter-than-intended list could otherwise
+// silently drop members). The v1 wire shape cannot express that hazard —
+// every mutation names its user explicitly — so the version token is
+// dropped: upserts and removes are per-row idempotent operations and
+// concurrent patches converge row-wise under the single SQLite writer.
+// Removal runs AFTER the upsert loop, so an explicit removal wins when
+// the same user appears in both lists of one request.
+func (m *AdminManager) PatchProject(idOrName string, req ProjectPatchRequest) (*api.Project, error) {
+	var projectID string
+	err := m.db.QueryRow(`SELECT id FROM projects WHERE id=?1 OR name=?1`, idOrName).Scan(&projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, Fail(api.ErrCoreNotFound, "", "project %q", idOrName)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if req.Members != nil {
+		for _, mem := range *req.Members {
+			switch mem.Role {
+			case "viewer", "writer", "maintainer":
+			default:
+				return nil, Fail(api.ErrCoreBadInput, "", "member role must be viewer|writer|maintainer (got %q)", mem.Role)
+			}
+			// Pre-check the user so a bad id answers 404, not an FK 500.
+			var one int
+			if err := m.db.QueryRow(`SELECT 1 FROM users WHERE id=?1`, mem.UserID).Scan(&one); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return nil, Fail(api.ErrCoreNotFound, "", "user %s", mem.UserID)
+				}
+				return nil, err
+			}
+			if err := m.AddMember(projectID, mem.UserID, mem.Role); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if req.RemoveMembers != nil {
+		for _, uid := range *req.RemoveMembers {
+			if _, err := m.db.Exec(`DELETE FROM project_members WHERE project_id=?1 AND user_id=?2`,
+				projectID, uid); err != nil {
+				return nil, err
+			}
+		}
+	}
+	sets := []string{"updated_at=?"}
+	args := []any{Now()}
+	if req.Description != nil {
+		sets = append(sets, "description=?")
+		args = append(args, *req.Description)
+	}
+	if req.Visible != nil {
+		sets = append(sets, "visible=?")
+		args = append(args, *req.Visible)
+	}
+	args = append(args, projectID)
+	if _, err := m.db.Exec(`UPDATE projects SET `+strings.Join(sets, ",")+` WHERE id=?`, args...); err != nil {
+		return nil, err
+	}
+	return m.GetProject(projectID)
+}
+
+// ---------------------------------------------------------------------------
+// Backup (M4) and service-secret rotation (M5)
+
+// sanitizeFilename keeps a backup name filesystem-safe.
+func sanitizeFilename(s string) string {
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '.' {
+			out = append(out, r)
+		} else {
+			out = append(out, '_')
+		}
+	}
+	return string(out)
+}
+
+// Backup takes an on-demand SQLite snapshot (M4) via VACUUM INTO under
+// <dataDir>/backups and returns the snapshot file name. Scope: the SQLite
+// file only — memory content files (dataDir/memory) are NOT part of this
+// snapshot (the v0 backupBarrier machinery is not part of the v1 lane).
+func (m *AdminManager) Backup(dataDir string) (string, error) {
+	if dataDir == "" {
+		return "", Fail(api.ErrCoreInternal, "", "backup: data dir not configured")
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "backups"), 0o750); err != nil {
+		return "", err
+	}
+	name := sanitizeFilename("aihub-" + Now() + ".db")
+	target := filepath.Join(dataDir, "backups", name)
+	if _, err := m.db.Exec(`VACUUM INTO ?1`, target); err != nil {
+		return "", Fail("CORE-507", "", "vacuum into %s: %v", target, err)
+	}
+	return name, nil
+}
+
+// RotateSecret records a service-secret epoch rotation (M5, 02 §6.6).
+// v1 minted credentials are per-attempt random secrets (hash-only in
+// owner_generations) — no validation path consumes a shared service
+// secret — so rotation maintains the epoch LEDGER only: the M5 wire
+// contract and its audit trail. mode=grace requires grace_seconds > 0
+// and retires the superseded epoch at now+grace; mode=rollback forces
+// grace to zero and retires every older live epoch immediately.
+func (m *AdminManager) RotateSecret(mode string, graceSeconds int64, rotatedBy string) (int, error) {
+	if mode == "" {
+		mode = "grace"
+	}
+	now := Now()
+	var retireExpr string
+	var retireArgs []any
+	switch mode {
+	case "grace":
+		if graceSeconds <= 0 {
+			return 0, Fail(api.ErrCoreBadInput, "", "grace_seconds must be > 0 for mode=grace")
+		}
+		retireExpr = `?`
+		expire := time.Now().UTC().Add(time.Duration(graceSeconds) * time.Second).Format(time.RFC3339Nano)
+		retireArgs = append(retireArgs, expire)
+	case "rollback":
+		if graceSeconds != 0 {
+			return 0, Fail(api.ErrCoreBadInput, "", "grace_seconds must be 0 for mode=rollback")
+		}
+		retireExpr = `?`
+		retireArgs = append(retireArgs, now)
+	default:
+		return 0, Fail(api.ErrCoreBadInput, "", "mode must be grace or rollback")
+	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var maxEpoch sql.NullInt64
+	if err := tx.QueryRow(`SELECT MAX(epoch) FROM service_secret_epochs`).Scan(&maxEpoch); err != nil {
+		return 0, err
+	}
+	epoch := maxEpoch.Int64 + 1
+	var actor any
+	if rotatedBy != "" {
+		actor = rotatedBy
+	}
+	if _, err := tx.Exec(`INSERT INTO service_secret_epochs(epoch, mode, created_at, rotated_by)
+		VALUES (?1,?2,?3,?4)`, epoch, mode, now, actor); err != nil {
+		return 0, err
+	}
+	// Retire the superseded epochs: for grace, at the end of the window;
+	// for rollback, immediately and permanently.
+	args := append([]any{}, retireArgs...)
+	args = append(args, epoch)
+	if _, err := tx.Exec(`UPDATE service_secret_epochs SET retired_at=`+retireExpr+`
+		WHERE epoch < ?2 AND retired_at IS NULL`, args...); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`INSERT INTO core_meta(key, value) VALUES ('current_secret_epoch', ?1)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, strconv.FormatInt(epoch, 10)); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(epoch), nil
 }

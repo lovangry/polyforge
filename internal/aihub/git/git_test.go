@@ -71,12 +71,17 @@ func newGitEnv(t *testing.T) *gitEnv {
 	return env
 }
 
+// bundleNameTest pins the workflow bundle for git-chain test tickets
+// (registration tickets are not claimable).
+var bundleNameTest = "git-chain-bundle"
+
 // claimWI creates + claims a WI, installs the bare repo, and returns the
 // claim result.
 func (e *gitEnv) claimWI(t *testing.T, caller string) (wiID string, res *core.ClaimResult) {
 	t.Helper()
 	wi, err := e.wis.Create(core.CreateRequest{
 		Project: "alpha", Goal: "git chain test", Reporter: e.userID,
+		BundleName: &bundleNameTest, // execution ticket: claimable
 	})
 	if err != nil {
 		t.Fatalf("create wi: %v", err)

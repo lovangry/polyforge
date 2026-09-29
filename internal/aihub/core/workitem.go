@@ -37,6 +37,12 @@ type CreateRequest struct {
 	Labels    []string       `json:"labels"`
 	Attrs     map[string]any `json:"attrs"`
 	Reporter  string         `json:"reporter"` // user id (from auth)
+	// BundleName non-empty marks an execution ticket; NULL leaves a pure
+	// registration ticket (02 §4.4: not claimable, CORE-409 NOT_CLAIMABLE).
+	// The bundle reference triple is immutable after the create
+	// transaction (INV-2e); there is no UPDATE path.
+	BundleName   *string `json:"bundle_name"`
+	BundleDigest *string `json:"bundle_digest"` // optional client-supplied pin; defaulted below
 }
 
 // terminal statuses (common/api vocabulary, single-l "canceled").
@@ -169,6 +175,22 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	}
 	seq := maxSeq.Int64 + 1
 
+	// Bundle reference (02 §4.4/§4.5): a non-empty bundle_name makes an
+	// execution ticket. Full §4.5 fixation (re-hashing the bundle checkout
+	// server-side at create time) is not wired in this round; a client may
+	// pin the digest explicitly via bundle_digest, and otherwise the
+	// server stores a deterministic name-derived stand-in so the
+	// reference triple is never half-empty. TODO(v1): §4.5 checkout hash.
+	var bundleName, bundleDigest any
+	if req.BundleName != nil && *req.BundleName != "" {
+		bundleName = *req.BundleName
+		if req.BundleDigest != nil && *req.BundleDigest != "" {
+			bundleDigest = *req.BundleDigest
+		} else {
+			bundleDigest = sha256Hex("bundle-name:" + *req.BundleName)
+		}
+	}
+
 	id, err := NewID("wi_")
 	if err != nil {
 		return nil, err
@@ -177,10 +199,11 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	labels, _ := json.Marshal(req.Labels)
 	attrs, _ := json.Marshal(req.Attrs)
 	if _, err := tx.Exec(`INSERT INTO work_items(id, seq, project_id, goal, content, parent_id,
-		status, priority, milestone, labels, attrs, reporter, created_at, updated_at)
-		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)`,
+		status, priority, milestone, labels, attrs, reporter, bundle_name, bundle_digest, created_at, updated_at)
+		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15)`,
 		id, seq, projectID, req.Goal, nullableString(req.Content), nullableString(req.ParentID),
-		api.StatusQueued, req.Priority, nullableString(req.Milestone), string(labels), string(attrs), req.Reporter, now); err != nil {
+		api.StatusQueued, req.Priority, nullableString(req.Milestone), string(labels), string(attrs), req.Reporter,
+		bundleName, bundleDigest, now); err != nil {
 		return nil, err
 	}
 	if err := appendEventTx(tx, id, now, req.Reporter, "work_item_filed", nil); err != nil {
