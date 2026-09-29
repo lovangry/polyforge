@@ -69,7 +69,7 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	t.Setenv("PLAIN_VAR", "keep-me")
 	t.Setenv("SOME_OTHER_NAME", "machine-key") // renamed secret: value match
 	sp := newPiSpawner(Config{EnvSecrets: []string{"machine-key"}, SocketPath: "/run/polyforge.sock"})
-	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionID: "s", Generation: 1})
+	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionID: "s", Generation: 1, InstanceID: "ra_wi_env#2"})
 	env := strings.Join(cmd.Env, "\n")
 	if strings.Contains(env, "POLYFORGE_API_KEY") || strings.Contains(env, "PF_LEAK=") {
 		t.Fatalf("POLYFORGE_*/PF_* must be stripped, got:\n%s", env)
@@ -86,6 +86,9 @@ func TestSpawnEnvSanitized(t *testing.T) {
 		// flush(reason) proxy): stripped as an inherited PF_* only to be
 		// handed back explicitly
 		"PF_DAEMON_SOCKET=/run/polyforge.sock",
+		// the derivation's own lineage id is a DELIBERATE addition too
+		// (same mechanism): the agent's flush fence identity
+		"PF_INSTANCE_ID=ra_wi_env#2",
 	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env must carry %q, got:\n%s", want, env)
@@ -96,8 +99,47 @@ func TestSpawnEnvSanitized(t *testing.T) {
 func TestSpawnEnvNoSocketPathOmitted(t *testing.T) {
 	sp := newPiSpawner(Config{})
 	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionID: "s", Generation: 1})
-	if strings.Contains(strings.Join(cmd.Env, "\n"), "PF_DAEMON_SOCKET") {
+	env := strings.Join(cmd.Env, "\n")
+	if strings.Contains(env, "PF_DAEMON_SOCKET") {
 		t.Fatal("an unconfigured socket path must not inject an empty PF_DAEMON_SOCKET")
+	}
+	if strings.Contains(env, "PF_INSTANCE_ID") {
+		t.Fatal("an unknown lineage id must not inject an empty PF_INSTANCE_ID")
+	}
+}
+
+// TestSpawnInstanceIDEnvReachesChild drives the REAL spawn path (scripted
+// harness) with a lineage id and proves the child's environment carries
+// PF_INSTANCE_ID with exactly that value: the agent reads its flush
+// identity from env, not from scraping the spawn journal.
+func TestSpawnInstanceIDEnvReachesChild(t *testing.T) {
+	capDir, sp := scriptedHarness(t)
+	envDump := filepath.Join(capDir, "child-env.txt")
+	t.Setenv("GO_BE_ENV", envDump)
+	h, err := sp.Spawn(context.Background(), SpawnParams{
+		WorkItemID:    "wi_inst",
+		CapsuleDir:    capDir,
+		SessionID:     "s1",
+		Generation:    1,
+		InitialPrompt: "begin",
+		InstanceID:    "ra_wi_inst#2",
+		Journal:       func(pid int, startedAt string) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer func() { _ = h.Terminate(3 * time.Second) }()
+
+	raw, err := os.ReadFile(envDump)
+	for deadline := time.Now().Add(5 * time.Second); (err != nil || len(raw) == 0) && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+		raw, err = os.ReadFile(envDump)
+	}
+	if err != nil {
+		t.Fatalf("the harness never dumped its env: %v", err)
+	}
+	if !strings.Contains(string(raw), `"PF_INSTANCE_ID=ra_wi_inst#2"`) {
+		t.Fatalf("child env must carry the derivation's lineage id, got:\n%s", raw)
 	}
 }
 
@@ -397,6 +439,13 @@ func scriptedHarness(t *testing.T) (string, *piSpawner) {
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_BE_HARNESS") != "1" {
 		return // the normal test run: nothing to do
+	}
+	// optional env dump for the deliberate-addition regressions (e.g.
+	// PF_INSTANCE_ID reaching the real child).
+	if dump := os.Getenv("GO_BE_ENV"); dump != "" {
+		if blob, err := json.Marshal(os.Environ()); err == nil {
+			_ = os.WriteFile(dump, append(blob, '\n'), 0o644)
+		}
 	}
 	capture := os.Getenv("GO_BE_CAPTURE")
 	f, err := os.OpenFile(capture, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)

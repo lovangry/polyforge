@@ -65,13 +65,15 @@ type EventLog struct {
 	totals map[string]int64 // per-WI append count: the monotonic seq source
 }
 
-// protocolEvent is protocol.EventEntry plus the ring's sequence number.
-// Seq is the per-WI MONOTONIC append ordinal (total appended count at
-// write time), not a ring index: truncation only bounds how many entries
-// stay RETAINED, never the numbering — a client's ?after cursor keeps
-// working across ring turnover (#21).
+// protocolEvent is the ring's entry type. Seq (inside the embedded
+// protocol.EventEntry) is the per-WI MONOTONIC append ordinal — the total
+// appended count at write time, not a ring index: truncation only bounds
+// RETENTION, never the numbering, so a client's ?after cursor keeps
+// working across ring turnover (#21). The ring is the ONLY seq authority:
+// the durable file keeps writing the bare entry without one (a daemon
+// restart legitimately renumbers seq from 1, so written-back seqs would
+// collide with earlier runs' lines).
 type protocolEvent struct {
-	Seq int64 `json:"seq"`
 	protocol.EventEntry
 }
 
@@ -119,7 +121,11 @@ func (l *EventLog) Append(wi, kind string, body any) error {
 	_, werr := l.f.Write(append(line, '\n'))
 	l.totals[wi]++
 	seq := l.totals[wi]
-	ring := append(l.rings[wi], protocolEvent{Seq: seq, EventEntry: entry})
+	// The file line above keeps the wire-stable bare shape (no seq);
+	// the ring entry is the one that carries it, so the serve face can
+	// hand clients their next ?after cursor.
+	entry.Seq = seq
+	ring := append(l.rings[wi], protocolEvent{EventEntry: entry})
 	if len(ring) > RingCap {
 		ring = ring[len(ring)-RingCap:]
 	}

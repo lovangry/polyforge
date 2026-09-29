@@ -214,6 +214,11 @@ func New(cfg Config) (*Daemon, error) {
 		if err := d.modes.Set(cfg.Mode); err != nil {
 			return nil, fmt.Errorf("daemon: initial mode %q: %w", cfg.Mode, err)
 		}
+		// The flag override must survive the restart it rode in on:
+		// without this persist, a `--mode interactive` that overrides a
+		// persisted drain stays interactive in memory only — the NEXT boot
+		// would load the stale drain again (the fx3 gap).
+		d.persistModeQuietly()
 	}
 	return d, nil
 }

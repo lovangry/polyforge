@@ -11,7 +11,12 @@ package git
 //     and the sequence increases monotonically, continuing above the
 //     previous tip;
 //   - blob size ≤ MaxBlobBytes (via the GIT_PF_MAX_BLOB env the proxy
-//     sets; the default matches capsule.MaxBlobBytes).
+//     sets; the default matches capsule.MaxBlobBytes);
+//   - the attempt-id push option, when both sides of the comparison exist,
+//     must equal PF_EXPECTED_ATTEMPT (Generation fencing 备层, §六: the
+//     proxy derives it from the attempt-scoped credential that just
+//     authenticated, so an ended generation's id can never push even
+//     with a leaked credential).
 //
 // The hook is a bash script exec'd by the real git receive-pack; the
 // server process never interprets pack data itself.
@@ -32,6 +37,41 @@ MAXBLOB="${GIT_PF_MAX_BLOB:-%d}"
 TRAILER="${GIT_PF_SEQ_TRAILER:-Polyforge-Seq}"
 zero=0000000000000000000000000000000000000000
 reject() { echo "aihub: $*" >&2; exit 1; }
+
+# Generation fencing 备层 (§六): the proxy exports PF_EXPECTED_ATTEMPT —
+# the attempt id the Basic credential authenticated against — and git
+# exposes the push's options as GIT_PUSH_OPTION_COUNT + GIT_PUSH_OPTION_0..N
+# (only when the repo advertises push options; note git spells the counter
+# env in UPPERCASE). Find attempt-id=<value> among them and compare it
+# STRICTLY with the expected id.
+#
+# When the comparison is enforced — only when BOTH sides exist:
+#   - the push carries no attempt-id option at all: nothing to compare,
+#     the gate stays open (older clients, and plain fetch/upload traffic
+#     that never reaches a hook);
+#   - PF_EXPECTED_ATTEMPT is absent — a push that did not travel through
+#     the proxy, e.g. a direct local test push against the bare repo —
+#     has nothing to compare against, and the gate stays open: the proxy
+#     is the only party that can vouch for which attempt a credential
+#     belongs to, and inventing an expectation here would fence off
+#     exactly the local tooling that must keep working.
+# A mismatch (both present, different values) rejects the WHOLE push.
+poptcount="${GIT_PUSH_OPTION_COUNT:-0}"
+case "$poptcount" in ''|*[!0-9]*) poptcount=0 ;; esac
+sent_attempt=""
+if [ -n "${PF_EXPECTED_ATTEMPT:-}" ] && [ "$poptcount" -gt 0 ]; then
+  i=0
+  while [ "$i" -lt "$poptcount" ]; do
+    eval "opt=\"\${GIT_PUSH_OPTION_$i:-}\""
+    case "$opt" in
+      attempt-id=*) sent_attempt="${opt#attempt-id=}" ;;
+    esac
+    i=$((i+1))
+  done
+  if [ -n "$sent_attempt" ] && [ "$sent_attempt" != "$PF_EXPECTED_ATTEMPT" ]; then
+    reject "attempt-id push option '$sent_attempt' does not match the credential's attempt '$PF_EXPECTED_ATTEMPT'"
+  fi
+fi
 
 while read -r old new ref; do
   [ "$new" = "$zero" ] && reject "ref deletion is not allowed ($ref)"

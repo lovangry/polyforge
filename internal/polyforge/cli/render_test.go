@@ -50,8 +50,8 @@ func TestGoldenObserve(t *testing.T) {
 		Budget:  json.RawMessage(`{"requests":{"used":3,"ceiling":50}}`),
 		Pending: &protocol.PendingView{ID: "q_1", Step: "implement", Question: "Ship now?", AskedAt: "t2"},
 		Events: []protocol.EventEntry{
-			{At: "t3", Kind: "step_started", Body: json.RawMessage(`{"step":"implement"}`)},
-			{At: "t4", Kind: "needs_input"},
+			{At: "t3", Kind: "step_started", Body: json.RawMessage(`{"step":"implement"}`), Seq: 7},
+			{At: "t4", Kind: "needs_input", Seq: 8},
 		},
 	}
 	var b bytes.Buffer
@@ -84,6 +84,7 @@ AT  KIND          BODY
 --  ------------  --------------------
 t3  step_started  {"step":"implement"}
 t4  needs_input
+next cursor: pf observe wi_abc --after 8
 `)
 }
 

@@ -193,11 +193,18 @@ type PendingView struct {
 }
 
 // EventEntry is one line of the daemon events file + observe output.
+// Seq is the observe ring's per-WI monotonic append ordinal, assigned at
+// Append time; served entries carry it so a client can resume with
+// ?after=<last seq>. The durable events file keeps its wire-stable shape
+// and does NOT write a seq (Seq is a live-ring concept that a daemon
+// restart legitimately renumbers from 1), so Seq marshals away there
+// via omitempty.
 type EventEntry struct {
-	At    string          `json:"at"`
-	Kind  string          `json:"kind"`
-	WI    string          `json:"work_item,omitempty"`
-	Body  json.RawMessage `json:"body,omitempty"`
+	At   string          `json:"at"`
+	Kind string          `json:"kind"`
+	WI   string          `json:"work_item,omitempty"`
+	Body json.RawMessage `json:"body,omitempty"`
+	Seq  int64           `json:"seq,omitempty"`
 }
 
 // Daemon modes (04 §3).

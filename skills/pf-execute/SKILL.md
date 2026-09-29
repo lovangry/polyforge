@@ -286,9 +286,13 @@ by the transport.
 `attempt_id` must name YOUR OWN derivation: the daemon refuses any other value
 with `DAEMON-409 STALE_ATTEMPT` (a superseded instance — even a zombie survivor
 of a replaced one — must never seal the live attempt's work). Read the value
-ONCE at startup: the `instance` field of the last line of
+ONCE at startup: the `PF_INSTANCE_ID` environment variable, injected by the
+spawner with this derivation's lineage id (the attempt id for a first
+derivation, `attempt#N` after a re-derivation), and never re-read identity
+sources at flush time. If `PF_INSTANCE_ID` is absent (older daemon build),
+fall back to the `instance` field of the last line of
 `runtime-state/spawn-journal.jsonl` (for a first-derivation agent it equals
-`capsule.json`'s `attempt_id`), and never re-read identity files at flush time.
+`capsule.json`'s `attempt_id`).
 
 with `question_id`/`question`/`step` on `needs_input`, and `final_status`
 (`wrapped`|`failed`) plus the final result on `wrap`. The call is bounded at 60 seconds;

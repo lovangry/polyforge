@@ -35,14 +35,20 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Basic auth against the active attempt's credential.
+	// Basic auth against the active attempt's credential. The returned
+	// attempt id is the Generation fencing 备层's expected value (§六):
+	// it rides the CGI environment as PF_EXPECTED_ATTEMPT so the
+	// pre-receive hook can compare it with the push's
+	// --push-option=attempt-id=<id> (http-backend passes its env through
+	// to receive-pack and thus to the hook).
 	user, secret, ok := r.BasicAuth()
 	if !ok {
 		w.Header().Set("WWW-Authenticate", `Basic realm="polyforge"`)
 		writeGitErr(w, api.ErrGitUnauthorized, "git access requires an attempt-scoped credential")
 		return
 	}
-	if _, err := m.checker.CheckPushCredential(wiID, user, secret); err != nil {
+	expectedAttempt, err := m.checker.CheckPushCredential(wiID, user, secret)
+	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Basic realm="polyforge"`)
 		// The git client only understands the 401; the typed code rides in
 		// the response headers for diagnostics.
@@ -81,6 +87,7 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		"REMOTE_ADDR="+remoteAddr(r),
 		"CONTENT_TYPE="+r.Header.Get("Content-Type"),
 		"GIT_PF_MAX_BLOB="+strconv.FormatInt(m.MaxBlobBytes, 10),
+		"PF_EXPECTED_ATTEMPT="+expectedAttempt,
 	)
 	if n := r.Header.Get("Content-Length"); n != "" {
 		env = append(env, "CONTENT_LENGTH="+n)
