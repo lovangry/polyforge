@@ -30,12 +30,21 @@ import (
 
 // piIsolationFlags is the WI-agent birth isolation profile: the named flag
 // set that keeps a spawned agent from inheriting the OPERATOR's global
-// harness configuration (global extensions, skills, context files and
-// prompt templates). The agent's only instruction of record is the initial
-// prompt injected at derivation; a capsule's materialized step-agent
-// definitions are a different resource family and stay reachable.
+// harness configuration (global skills, context files and prompt
+// templates). The agent's only instruction of record is the initial prompt
+// injected at derivation; a capsule's materialized step-agent definitions
+// are a different resource family and stay reachable.
+//
+// --no-extensions is DELIBERATELY ABSENT and must stay absent (the v0
+// supervisor's live-tested baseline, v0/internal/mainagent/supervisor.go:
+// it silences the operator's extension UI noise but also removes the
+// harness-native subagent tool — which is extension-provided — and with
+// it the whole step-agent dispatch path; the harness has no built-in
+// subagent facility to fall back on). The residual exposure of
+// extension-registered harness background tasks is closed by instruction
+// instead (the executor rules forbid a WI agent from using any harness
+// background-task mechanism).
 var piIsolationFlags = []string{
-	"--no-extensions",
 	"--no-skills",
 	"--no-context-files",
 	"--no-prompt-templates",
@@ -144,8 +153,11 @@ type AgentHandle interface {
 	Done() bool
 	Terminate(bound time.Duration) error
 	SendControl(m protocol.ControlMsg) error
-	// WaitControlAck awaits the agent's ack of one control method.
-	WaitControlAck(ctx context.Context, method string, bound time.Duration) error
+	// WaitControlAck awaits the agent's ack of exactly the control
+	// message m, matching on (method, correlation) — not method alone, so
+	// concurrent waiters (stop notice, answer, probe) can never steal each
+	// other's acks.
+	WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error
 }
 
 // Spawner derives agent processes; tests substitute fakes that spawn real
@@ -161,6 +173,20 @@ type piSpawner struct {
 
 func newPiSpawner(cfg Config) *piSpawner {
 	return &piSpawner{cfg: cfg}
+}
+
+// recordTaps wires the runtime Config's RecordTap into the process's
+// stdout tap chain: the production daemon binds RecordTap to its observe
+// adapter, so EVERY raw stdout record the spawner reads also reaches
+// the Observe lane's stream monitoring. Without the binding the record
+// stream (and with it the whole detection face) would be blind in
+// production.
+func (s *piSpawner) recordTaps(p SpawnParams) []func(string) {
+	if s.cfg.RecordTap == nil {
+		return nil
+	}
+	wi, tap := p.WorkItemID, s.cfg.RecordTap
+	return []func(string){func(line string) { tap(wi, []byte(line)) }}
 }
 
 func (s *piSpawner) bin() string {
@@ -181,12 +207,19 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 	}
 	cmd := exec.Command(s.bin(), args...)
 	cmd.Dir = p.CapsuleDir // cwd = capsule root
-	cmd.Env = newEnvSanitizer(s.cfg.EnvSecrets...).childEnv(
-		"PI_SESSION_DIR="+filepath.Join(p.CapsuleDir, capsule.DirSession),
-		"PF_WI_ID="+p.WorkItemID, // layer-4 cleanup marker (deliberate addition)
-		"PF_SESSION_ID="+p.SessionID,
-		"PF_GENERATION="+strconv.FormatInt(p.Generation, 10),
-	)
+	additions := []string{
+		"PI_SESSION_DIR=" + filepath.Join(p.CapsuleDir, capsule.DirSession),
+		"PF_WI_ID=" + p.WorkItemID, // layer-4 cleanup marker (deliberate addition)
+		"PF_SESSION_ID=" + p.SessionID,
+		"PF_GENERATION=" + strconv.FormatInt(p.Generation, 10),
+	}
+	if s.cfg.SocketPath != "" {
+		// deliberate addition, same mechanism as PF_WI_ID: the env sanitize
+		// point strips every inherited PF_*, so the daemon's UDS path (the
+		// agent's flush(reason) proxy, §五) is handed back explicitly.
+		additions = append(additions, "PF_DAEMON_SOCKET="+s.cfg.SocketPath)
+	}
+	cmd.Env = newEnvSanitizer(s.cfg.EnvSecrets...).childEnv(additions...)
 	return cmd
 }
 
@@ -213,7 +246,7 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("runtime: harness start failed: %w", err)
 	}
-	proc := newProc(cmd, stdin, stdout)
+	proc := newProc(cmd, stdin, stdout, s.recordTaps(p)...)
 	// Layer-0 enrollment: move the agent (and with it every descendant) into
 	// the per-WI cgroup. Unavailable cgroups degrade silently — layers 1-4
 	// remain the kill path.
@@ -275,27 +308,23 @@ func writeSpawnJournal(p SpawnParams, pid int, startedAt string, instance string
 // Proc: the supervised handle.
 
 const (
-	maxControlLineBytes  = 4 << 20
-	maxControlQueueLines = 1024
+	maxControlLineBytes = 4 << 20
 )
 
-var (
-	errControlOverflow = fmt.Errorf("runtime: control queue overflow (harness floods control lines)")
-	errControlTooLong  = fmt.Errorf("runtime: control line exceeded the bounded reader limit")
-)
+var errControlTooLong = fmt.Errorf("runtime: control line exceeded the bounded reader limit")
 
 // proc wraps one derived harness process.
 type proc struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	startedAt string
-	taps      []func(string) // stdout record taps (phase-3 observe adapter)
+	taps      []func(string) // stdout record taps (the observe adapter binding)
+	acks      ackHub
 
 	mu   sync.Mutex // guards stdin writes
 	pend sync.Mutex // guards pending ids (own lock: stdin writes may block)
 
 	pending map[string]bool
-	ctrl    *lineQueue
 	exited  chan struct{}
 	exitErr error
 }
@@ -306,7 +335,7 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 		stdin:     stdin,
 		startedAt: nowStamp(),
 		pending:   map[string]bool{},
-		ctrl:      newLineQueue(),
+		acks:      newAckHub(),
 		exited:    make(chan struct{}),
 		taps:      taps,
 	}
@@ -315,7 +344,6 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 		close(p.exited)
 	}()
 	go func() {
-		defer p.ctrl.close(nil)
 		br := bufio.NewReaderSize(stdout, 64*1024)
 		for {
 			line, tooLong, rerr := readBoundedLine(br, maxControlLineBytes)
@@ -326,8 +354,7 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 				return
 			}
 			if tooLong {
-				p.ctrl.closeTyped(errControlTooLong)
-				fmt.Fprintf(os.Stderr, "runtime: control line over %d bytes; control path closed\n", maxControlLineBytes)
+				fmt.Fprintf(os.Stderr, "runtime: control line over %d bytes dropped: %v\n", maxControlLineBytes, errControlTooLong)
 				continue // keep draining as bulk, never block the child
 			}
 			for _, t := range p.taps {
@@ -396,42 +423,80 @@ func (p *proc) SendControl(m protocol.ControlMsg) error {
 	})
 }
 
-// WaitControlAck awaits the agent's ack (protocol.ControlAck echoing the
-// method with ok=true), bounded like every control wait.
-func (p *proc) WaitControlAck(ctx context.Context, method string, bound time.Duration) error {
+// WaitControlAck awaits the agent's ack of exactly m, bounded like every
+// control wait. The match is (method, correlation): the correlation token
+// of m is the question id (pf/answer) or the nonce (pf/probe) when those
+// are set, otherwise the numeric Seq — and the ack satisfies the wait by
+// echoing that token (Ref for string tokens, Seq for numeric ones).
+func (p *proc) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error {
 	deadline := time.Now().Add(bound)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
 	qctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	for {
-		line, ok := p.ctrl.next(qctx)
-		if !ok {
-			if qctx.Err() != nil {
-				return fmt.Errorf("runtime: no ack for %s: %w", method, qctx.Err())
-			}
-			if r := p.ctrl.reason(); r != nil {
-				return fmt.Errorf("runtime: no ack for %s: control path closed: %w", method, r)
-			}
-			return fmt.Errorf("runtime: no ack for %s: agent output closed", method)
-		}
-		var ack protocol.ControlAck
-		if json.Unmarshal([]byte(line), &ack) == nil && ack.Method == method {
-			if ack.OK {
-				return nil
-			}
-			return fmt.Errorf("runtime: agent refused %s: %s", method, ack.Error)
-		}
-		// other control traffic: keep waiting
+	w := p.acks.register(m)
+	defer p.acks.unregister(w)
+	if ack := p.acks.claim(w); ack != nil {
+		return ackOutcome(m, *ack)
 	}
+	for {
+		select {
+		case ack := <-w.ch:
+			return ackOutcome(m, ack)
+		case <-qctx.Done():
+			return fmt.Errorf("runtime: no ack for %s: %w", m.Method, qctx.Err())
+		case <-p.exited:
+			return fmt.Errorf("runtime: no ack for %s: agent exited", m.Method)
+		}
+	}
+}
+
+func ackOutcome(m protocol.ControlMsg, ack protocol.ControlAck) error {
+	if ack.OK {
+		return nil
+	}
+	return fmt.Errorf("runtime: agent refused %s: %s", m.Method, ack.Error)
+}
+
+// ackTokenOf is the correlation token a control message carries:
+// pf/answer → the question id, pf/probe → the nonce, everything else →
+// the numeric seq.
+func ackTokenOf(m protocol.ControlMsg) string {
+	switch m.Method {
+	case protocol.ControlAnswer:
+		if m.ID != "" {
+			return m.ID
+		}
+	case protocol.ControlProbe:
+		if m.Nonce != "" {
+			return m.Nonce
+		}
+	}
+	return strconv.FormatInt(m.Seq, 10)
+}
+
+// ackMatches decides whether an incoming ack answers the message m: the
+// method must agree and the echoed token must agree (Ref for the string
+// tokens, Seq for the numeric one). A method whose message carries no
+// correlation at all (Seq 0) matches its tokenless ack.
+func ackMatches(m protocol.ControlMsg, ack protocol.ControlAck) bool {
+	if ack.Method != m.Method {
+		return false
+	}
+	token := ackTokenOf(m)
+	if ack.Ref != "" {
+		return ack.Ref == token
+	}
+	return strconv.FormatInt(ack.Seq, 10) == token
 }
 
 // classify sorts one stdout line: response records repeating OUR command
 // ids are observed (success=false is logged, never an ack) and dropped;
 // message_end records carrying an assistant message are the ack carrier —
-// their text is scanned line-by-line for the closed ack shape; everything
-// else is bulk.
+// their text is scanned line-by-line for the closed ack shape and every
+// match is ROUTED to the waiter whose (method, correlation) it answers;
+// everything else is bulk.
 func (p *proc) classify(line string) {
 	var rec stdoutRecord
 	if json.Unmarshal([]byte(line), &rec) != nil || rec.Type == "" {
@@ -464,15 +529,20 @@ func (p *proc) observeResponse(rec stdoutRecord) {
 	}
 }
 
-// controlCandidate queues one ack-shaped line: a JSON object carrying a
-// control method and ok=true. Anything else is bulk.
+// controlCandidate routes one ack-shaped line: a JSON object carrying a
+// control method of the closed vocabulary is delivered to the waiter it
+// answers — by (method, correlation), so concurrent waiters never steal
+// each other's acks. Refusals (ok=false) are delivered too: the waiter
+// must learn its method was refused, not time out on a dropped line. An
+// ack that answers no live waiter (a late echo of a dead wait) is
+// dropped.
 func (p *proc) controlCandidate(line string) {
 	s := strings.TrimSpace(line)
 	if !strings.HasPrefix(s, "{") {
 		return
 	}
 	var ack protocol.ControlAck
-	if json.Unmarshal([]byte(s), &ack) != nil || ack.Method == "" || !ack.OK {
+	if json.Unmarshal([]byte(s), &ack) != nil || ack.Method == "" {
 		return
 	}
 	switch ack.Method {
@@ -481,9 +551,7 @@ func (p *proc) controlCandidate(line string) {
 	default:
 		return
 	}
-	if !p.ctrl.push(s) {
-		p.ctrl.closeTyped(errControlOverflow)
-	}
+	p.acks.deliver(ack)
 }
 
 func assistantText(raw json.RawMessage) (string, bool) {
@@ -535,80 +603,104 @@ func (p *proc) Terminate(bound time.Duration) error {
 }
 
 // ---------------------------------------------------------------------------
-// Bounded lossless control queue: an ack may never be silently dropped (a
-// lost ack turns every later control wait into a timeout), so the queue is
-// bounded rather than lossy and crossing the bound closes it LOUDLY.
+// The ack hub: per-waiter ack routing. The review's dual-key fix: a single
+// FIFO let concurrent waiters consume each other's lines and never matched
+// the echoed correlation. Each waiter registers under its own control
+// message; an incoming ack is handed to the FIRST waiter whose (method,
+// correlation) it satisfies. An ack that races ahead of its waiter —
+// SendControl returns before WaitControlAck parks the wait, and a fast
+// agent may ack in between — parks in the hub's bounded orphan backlog
+// and is claimed by the waiter at registration, so nothing is lost on
+// that path either.
 
-type lineQueue struct {
-	mu     sync.Mutex
-	notify chan struct{}
-	items  []string
-	closed bool
-	err    error
+const maxAckBacklog = 16 // bounds both the per-waiter and orphan backlogs
+
+// ackHub routes control acks to the waiter that asked for them.
+type ackHub struct {
+	mu      sync.Mutex
+	next    uint64
+	waiters map[uint64]*ackWaiter
+	orphans []protocol.ControlAck // acks that arrived before their waiter
 }
 
-func newLineQueue() *lineQueue { return &lineQueue{notify: make(chan struct{}, 1)} }
+func newAckHub() ackHub {
+	return ackHub{waiters: map[uint64]*ackWaiter{}}
+}
 
-func (q *lineQueue) push(line string) bool {
-	q.mu.Lock()
-	if q.closed || len(q.items) >= maxControlQueueLines {
-		q.closed = true
-		if q.err == nil {
-			q.err = errControlOverflow
-		}
-		q.mu.Unlock()
-		return false
-	}
-	q.items = append(q.items, line)
-	q.mu.Unlock()
+// ackWaiter is one outstanding WaitControlAck.
+type ackWaiter struct {
+	id      uint64
+	msg     protocol.ControlMsg
+	ch      chan protocol.ControlAck
+	backlog []protocol.ControlAck
+}
+
+// register parks one waiter for m. The returned waiter's channel is
+// buffered 1; an ack that raced ahead of the registration is served
+// first through claim.
+func (h *ackHub) register(m protocol.ControlMsg) *ackWaiter {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.next++
+	w := &ackWaiter{id: h.next, msg: m, ch: make(chan protocol.ControlAck, 1)}
+	h.waiters[w.id] = w
+	return w
+}
+
+func (h *ackHub) unregister(w *ackWaiter) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.waiters, w.id)
+}
+
+// claim hands w one ack answering its message: its channel (already
+// delivered) first, then its backlog, then the hub's orphan backlog (the
+// SendControl→WaitControlAck race window).
+func (h *ackHub) claim(w *ackWaiter) *protocol.ControlAck {
 	select {
-	case q.notify <- struct{}{}:
+	case ack := <-w.ch:
+		return &ack
 	default:
 	}
-	return true
-}
-
-func (q *lineQueue) close(err error) {
-	q.mu.Lock()
-	if !q.closed {
-		q.closed = true
-		q.err = err
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(w.backlog) > 0 {
+		ack := w.backlog[0]
+		w.backlog = w.backlog[1:]
+		return &ack
 	}
-	q.mu.Unlock()
-	select {
-	case q.notify <- struct{}{}:
-	default:
-	}
-}
-
-func (q *lineQueue) closeTyped(err error) { q.close(err) }
-
-func (q *lineQueue) reason() error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.err
-}
-
-func (q *lineQueue) next(ctx context.Context) (string, bool) {
-	for {
-		q.mu.Lock()
-		if len(q.items) > 0 {
-			line := q.items[0]
-			q.items = q.items[1:]
-			q.mu.Unlock()
-			return line, true
+	for i, orphan := range h.orphans {
+		if ackMatches(w.msg, orphan) {
+			h.orphans = append(h.orphans[:i], h.orphans[i+1:]...)
+			ack := orphan
+			return &ack
 		}
-		closed := q.closed
-		q.mu.Unlock()
-		if closed {
-			return "", false
+	}
+	return nil
+}
+
+// deliver routes one parsed ack to the first waiter it answers. A waiter
+// with a full channel parks the ack in its bounded backlog; an ack that
+// answers nobody YET parks in the bounded orphan backlog (its waiter may
+// be one SendControl-return away); beyond the bound it is dropped.
+func (h *ackHub) deliver(ack protocol.ControlAck) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, w := range h.waiters {
+		if !ackMatches(w.msg, ack) {
+			continue
 		}
 		select {
-		case <-ctx.Done():
-			return "", false
-		case <-q.notify:
-		case <-time.After(50 * time.Millisecond):
+		case w.ch <- ack:
+		default:
+			if len(w.backlog) < maxAckBacklog {
+				w.backlog = append(w.backlog, ack)
+			}
 		}
+		return
+	}
+	if len(h.orphans) < maxAckBacklog {
+		h.orphans = append(h.orphans, ack)
 	}
 }
 

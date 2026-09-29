@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -50,8 +49,12 @@ type Config struct {
 	PiBin          string        // harness binary (default "pi")
 	CgroupRoot     string        // cgroup v2 root; empty ⇒ layer-0 unavailable
 	MaxResumeFails int           // consecutive resume failures before fresh (default 2)
-	MaxRecoveries  int           // cumulative recoveries before bounded fail (default 2)
+	MaxRecoveries  int           // consecutive FAILED recoveries before bounded fail (default 2)
 	SendBound      time.Duration // bound on one RT→OB send (default 5s)
+	// SocketPath is the daemon's UDS listen path, injected into every
+	// spawned agent as PF_DAEMON_SOCKET so the agent can call
+	// flush(reason) on the proxy (§五).
+	SocketPath string
 	// ExecutorPromptFile, when set, is prepended verbatim to every agent's
 	// initial prompt (the executor skill shipped with the daemon release).
 	ExecutorPromptFile string
@@ -119,10 +122,10 @@ type job struct {
 	agentPID       int
 	agentStartedAt string
 
-	spawnN      int
-	recoveries  int
-	resumeFails int
-	resumeDead  bool
+	spawnN       int
+	recoverFails int // consecutive FAILED recoveries; reset on success
+	resumeFails  int
+	resumeDead   bool
 
 	mu sync.Mutex
 }
@@ -188,11 +191,10 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 		if state != StateRunning {
 			return
 		}
-		reason := msg.Reason
-		if reason != protocol.FinishFailed {
-			reason = protocol.FinishWrapped
-		}
-		if err := r.Stop(ctx, msg.WorkItem, reason); err != nil {
+		// The terminal vocabulary (wrapped|failed|blocked) passes through
+		// VERBATIM: flush(wrap)'s blocked outcome (3 failed seals) must
+		// reach aihub as blocked, not be silently upgraded to wrapped.
+		if err := r.Stop(ctx, msg.WorkItem, msg.Reason); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: stop after completion failed: %v\n", msg.WorkItem, err)
 		}
 	}
@@ -308,6 +310,7 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		capsuleDir: r.capsuleDir(wi),
 		git: gitops.Opts{
 			WorkItemID: wi,
+			AttemptID:  c.AttemptID,
 			CapsuleDir: r.capsuleDir(wi),
 			GitDir:     r.gitDirFor(wi),
 			RemoteURL:  r.remoteURLFor(wi),
@@ -374,87 +377,14 @@ func (r *Runtime) prepareCapsule(j *job) error {
 	}
 	if err := gitops.Clone(o); err != nil {
 		// No usable remote (or a torn local state): fall back to a purely
-		// local init via the shared gitops.Init; its known pointer-write
-		// shortcoming against a fresh .git directory is repaired by
-		// externalizeGitDir below either way.
-		if lerr := localGitInit(o); lerr != nil {
+		// local init — gitops owns the single implementation of the
+		// init/externalize pair (the old gitops.Init was removed: it
+		// wrote the .git pointer over a live directory).
+		if lerr := gitops.InitLocal(o); lerr != nil {
 			return fmt.Errorf("runtime: %s: capsule clone failed: %w", j.wi, err)
 		}
 	}
-	return externalizeGitDir(o)
-}
-
-// localGitInit initializes the capsule worktree without a remote.
-func localGitInit(o gitops.Opts) error {
-	if err := os.MkdirAll(o.CapsuleDir, 0o755); err != nil {
-		return err
-	}
-	cmd := exec.Command("git", "init", o.CapsuleDir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git init: %s", strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// externalizeGitDir moves the worktree's git-dir out to o.GitDir and leaves
-// the .git pointer file, then pins the working branch to main.
-func externalizeGitDir(o gitops.Opts) error {
-	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {
-		return err
-	}
-	inner := filepath.Join(o.CapsuleDir, ".git")
-	if isRegularFile(inner) {
-		if dirExists(o.GitDir) {
-			return nil // already externalized
-		}
-		return fmt.Errorf("runtime: capsule %s has a pointer but no git-dir at %s", o.CapsuleDir, o.GitDir)
-	}
-	if err := os.Rename(inner, o.GitDir); err != nil {
-		if !os.IsExist(err) {
-			return err
-		}
-		if err := os.RemoveAll(inner); err != nil {
-			return err
-		}
-	}
-	if err := os.WriteFile(inner, []byte("gitdir: "+o.GitDir+"\n"), 0o644); err != nil {
-		return err
-	}
-	cmd := exec.Command("git", "symbolic-ref", "HEAD", "refs/heads/main")
-	cmd.Env = gitEnv(o)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git symbolic-ref: %s", strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func gitEnv(o gitops.Opts) []string {
-	return append(os.Environ(),
-		"GIT_DIR="+o.GitDir,
-		"GIT_WORK_TREE="+o.CapsuleDir,
-	)
-}
-
-// pushStanding pushes the capsule's standing HEAD to the aihub bare repo
-// with the attempt-scoped credential, mirroring gitops' push URL shape.
-// Used to retry a final/flush push whose local commit already landed —
-// the case gitops.CommitPush cannot re-drive honestly.
-func pushStanding(o gitops.Opts) error {
-	if o.RemoteURL == "" {
-		return fmt.Errorf("runtime: no capsule remote configured")
-	}
-	remote := o.RemoteURL
-	if o.Username != "" && o.Secret != "" {
-		cred := o.Username + ":" + o.Secret
-		remote = strings.Replace(o.RemoteURL, "https://", "https://"+cred+"@", 1)
-	}
-	cmd := exec.Command("git", "push", remote, "HEAD:refs/heads/main")
-	cmd.Env = gitEnv(o)
-	cmd.Dir = o.CapsuleDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git push: %s", strings.TrimSpace(string(out)))
-	}
-	return nil
+	return gitops.ExternalizeGitDir(o)
 }
 
 func isRegularFile(p string) bool {
@@ -600,23 +530,6 @@ func atomicWriteFileMode(dst string, in io.Reader, perm os.FileMode) error {
 	return os.Rename(tmp, dst)
 }
 
-// nextSeq derives the next Polyforge-Seq trailer value from the capsule's
-// commit count (monotonic per WI, survives a lost state.json).
-func (r *Runtime) nextSeq(j *job) int64 {
-	cmd := exec.Command("git", "rev-list", "--count", "HEAD")
-	cmd.Env = gitEnv(j.git)
-	cmd.Dir = j.capsuleDir
-	out, err := cmd.Output()
-	if err != nil {
-		return 1
-	}
-	n, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	if perr != nil || n < 0 {
-		return 1
-	}
-	return n + 1
-}
-
 // ---------------------------------------------------------------------------
 // Stop (§一): seal → final push → EndGeneration → RTFinished.
 
@@ -649,20 +562,21 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// Six-layer teardown: no writer survives into the sealed scene.
 	r.killAgentTree(j)
 
-	// Final push (flush(wrap) semantics, §五). gitops.CommitPush cannot
-	// honestly re-push a standing local commit (a retry after a failed
-	// push sees "nothing to commit" and answers nil while the commit is
-	// still local), so the retry is the direct push of HEAD below. A
-	// persistently failed push degrades the terminal reason to blocked —
-	// the local commit keeps the bytes, but the server never heard the
-	// final state.
+	// Final push (flush(wrap) semantics, §五). The seq trailer is
+	// gitops' business (derived in-lock); CommitPush without a seq derives
+	// it itself. gitops.CommitPush cannot honestly re-push a standing
+	// local commit (a retry after a failed push sees a clean tree and
+	// answers the standing HEAD with pushed=false), so the retry is the
+	// direct gitops.Push of HEAD below. A persistently failed push
+	// degrades the terminal reason to blocked — the local commit keeps
+	// the bytes, but the server never heard the final state.
 	finalReason := reason
-	sha, pushed, perr := gitops.CommitPush(j.git, r.nextSeq(j), "seal: "+reason)
+	sha, pushed, perr := gitops.CommitPush(j.git, "seal: "+reason)
 	if perr == nil && sha != "" && !pushed {
-		perr = pushStanding(j.git)
+		_, perr = gitops.Push(j.git)
 	}
 	for i := 0; i < 2 && perr != nil; i++ {
-		perr = pushStanding(j.git)
+		_, perr = gitops.Push(j.git)
 	}
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: final push failed after retries: %v\n", j.wi, perr)

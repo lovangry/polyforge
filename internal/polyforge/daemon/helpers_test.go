@@ -55,12 +55,12 @@ func (a *fakeAgent) SendControl(m protocol.ControlMsg) error {
 	a.mu.Unlock()
 	return nil
 }
-func (a *fakeAgent) WaitControlAck(ctx context.Context, method string, bound time.Duration) error {
+func (a *fakeAgent) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error {
 	a.mu.Lock()
 	fn := a.ackFn
 	a.mu.Unlock()
 	if fn != nil {
-		return fn(method)
+		return fn(m.Method)
 	}
 	return nil
 }
@@ -231,12 +231,16 @@ func setGitIdentity(t *testing.T) {
 }
 
 // mkBare creates the aihub-side bare repo for wi so runtime's clone and
-// every push succeed.
+// every push succeed. Push options are advertised: every push from the
+// gitops choke point carries --push-option=attempt-id=… (§六 备层).
 func mkBare(t *testing.T, base, wi string) string {
 	t.Helper()
 	dir := filepath.Join(base, wi+".git")
 	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "--git-dir", dir, "config", "receive.advertisePushOptions", "true").CombinedOutput(); err != nil {
+		t.Fatalf("git config advertisePushOptions: %v: %s", err, out)
 	}
 	return dir
 }

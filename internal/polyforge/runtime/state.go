@@ -120,7 +120,7 @@ type jobRecord struct {
 	AgentPID     int    `json:"agent_pid"`
 	AgentStart   string `json:"agent_started_at"`
 	SpawnN       int    `json:"spawn_n"`
-	Recoveries   int    `json:"recoveries"`
+	RecoverFails int    `json:"recover_fails"` // consecutive failed recoveries
 	ResumeFails  int    `json:"resume_fails"`
 	ResumeDead   bool   `json:"resume_dead"`
 }
@@ -148,7 +148,7 @@ func (j *job) record() *jobRecord {
 		AgentPID:     j.agentPID,
 		AgentStart:   j.agentStartedAt,
 		SpawnN:       j.spawnN,
-		Recoveries:   j.recoveries,
+		RecoverFails: j.recoverFails,
 		ResumeFails:  j.resumeFails,
 		ResumeDead:   j.resumeDead,
 	}
@@ -166,6 +166,7 @@ func jobFromRecord(rec *jobRecord) *job {
 		capsuleDir: rec.CapsuleDir,
 		git: gitops.Opts{
 			WorkItemID: rec.WorkItemID,
+			AttemptID:  rec.AttemptID,
 			CapsuleDir: rec.CapsuleDir,
 			GitDir:     rec.GitDir,
 			RemoteURL:  rec.RemoteURL,
@@ -179,7 +180,7 @@ func jobFromRecord(rec *jobRecord) *job {
 		agentPID:       rec.AgentPID,
 		agentStartedAt: rec.AgentStart,
 		spawnN:         rec.SpawnN,
-		recoveries:     rec.Recoveries,
+		recoverFails:   rec.RecoverFails,
 		resumeFails:    rec.ResumeFails,
 		resumeDead:     rec.ResumeDead,
 	}

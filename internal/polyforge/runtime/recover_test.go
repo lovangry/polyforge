@@ -153,21 +153,26 @@ func TestRecoverResumeFailsTwiceThenFresh(t *testing.T) {
 	}
 }
 
-func TestRecoverStormGuardBoundedFail(t *testing.T) {
+// TestRecoverBudgetTwoFailuresBoundedFail pins the ruled budget semantics
+// (§三/§七): the budget counts FAILED recoveries; the ladder retries until
+// MaxRecoveries (default 2) failures, then bounded-fails — never earlier,
+// and never on the first failure alone.
+func TestRecoverBudgetTwoFailuresBoundedFail(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, hub, sp)
-	wi := "wi_storm"
+	wi := "wi_budget"
 	j := seedJob(r, wi)
-	j.mu.Lock()
-	j.recoveries = 1 // one recovery already spent: this event is the second
-	j.mu.Unlock()
 	installOldAgent(t, sp, j)
+	sp.mu.Lock()
+	sp.failFresh = 2 // no transcript → fresh; both fresh attempts fail
+	sp.mu.Unlock()
 
 	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
 
-	if n := sp.callCount(); n != 1 { // only the install: NO relaunch
-		t.Fatalf("storm guard must refuse a second relaunch, got %d derivations", n)
+	// two failed ladder attempts, then the budget is spent
+	if n := sp.callCount(); n != 3 { // install + 2 failed fresh derivations
+		t.Fatalf("expected two failed derivations before bounded fail, got %d calls", n)
 	}
 	msg := recvRT(t, toOB)
 	if msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
@@ -184,12 +189,87 @@ func TestRecoverStormGuardBoundedFail(t *testing.T) {
 	}
 }
 
-func TestRecoverFreshFailureBoundedFail(t *testing.T) {
+// TestRecoverBudgetReservesAcrossEpisodes: a pre-spent budget (a crash
+// mid-recovery left one failure on the record) plus one new failed ladder
+// reaches the bound — the storm guard never lets a poisoned WI relaunch
+// forever.
+func TestRecoverBudgetSpentAfterPersistedFailure(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, hub, sp)
+	wi := "wi_storm"
+	j := seedJob(r, wi)
+	j.mu.Lock()
+	j.recoverFails = 1 // one failed recovery already on the record
+	j.mu.Unlock()
+	installOldAgent(t, sp, j)
+	sp.mu.Lock()
+	sp.failFresh = 1
+	sp.mu.Unlock()
+
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+
+	if n := sp.callCount(); n != 2 { // install + ONE failed relaunch: the bound hit
+		t.Fatalf("a pre-spent budget must bounded-fail after one new failure, got %d calls", n)
+	}
+	msg := recvRT(t, toOB)
+	if msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
+		t.Fatalf("expected RTFinished(blocked), got %+v", msg)
+	}
+}
+
+// TestRecoverBudgetResetOnSuccess: one failed ladder attempt followed by
+// a successful relaunch RESETS the budget — a later, independent failure
+// episode starts from zero, not from the inherited count.
+func TestRecoverBudgetResetOnSuccess(t *testing.T) {
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, newFakeHub(), sp)
+	wi := "wi_reset"
+	j := seedJob(r, wi)
+	installOldAgent(t, sp, j)
+	sp.mu.Lock()
+	sp.failFresh = 1 // first ladder attempt fails, the retry goes live
+	sp.mu.Unlock()
+
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+
+	if n := sp.callCount(); n != 3 { // install + failed fresh + retry fresh
+		t.Fatalf("expected one failed then one successful derivation, got %d calls", n)
+	}
+	msg := recvRT(t, toOB)
+	if msg.Kind != protocol.RTRecovered {
+		t.Fatalf("expected RTRecovered, got %+v", msg)
+	}
+	j.mu.Lock()
+	fails := j.recoverFails
+	j.mu.Unlock()
+	if fails != 0 {
+		t.Fatalf("a successful recovery must reset the budget, got %d", fails)
+	}
+	// a SECOND death episode starts from a clean budget: one scripted
+	// failure is absorbed by a retry, not a bounded fail
+	sp.mu.Lock()
+	sp.failFresh = 1
+	sp.mu.Unlock()
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	msg2 := recvRT(t, toOB)
+	if msg2.Kind != protocol.RTRecovered {
+		t.Fatalf("the reset budget must absorb an isolated failure, got %+v", msg2)
+	}
+	if h := j.agent; h != nil {
+		_ = h.Terminate(2e9)
+	}
+}
+
+// TestRecoverSingleFreshFailureIsRetriedNotTerminal: ONE failed ladder
+// attempt spends one unit of the budget and is RETRIED — a transient
+// spawn failure is not a terminal verdict; only the exhausted budget is.
+func TestRecoverSingleFreshFailureIsRetriedNotTerminal(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, hub, sp)
 	wi := "wi_freshfail"
-	j := seedJob(r, wi) // no transcript → fresh; fresh is scripted to fail
+	j := seedJob(r, wi) // no transcript → fresh; fresh is scripted to fail once
 	installOldAgent(t, sp, j)
 	sp.mu.Lock()
 	sp.failFresh = 1
@@ -198,14 +278,20 @@ func TestRecoverFreshFailureBoundedFail(t *testing.T) {
 	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
 
 	msg := recvRT(t, toOB)
-	if msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
-		t.Fatalf("a failed fresh derivation must bounded-fail, got %+v", msg)
+	if msg.Kind != protocol.RTRecovered {
+		t.Fatalf("a single fresh failure must be retried, got %+v", msg)
 	}
-	if hub.endCount() != 1 || hub.lastEnd().Status != protocol.FinishBlocked {
-		t.Fatalf("bounded fail must end the generation blocked, got %+v", hub.lastEnd())
+	if hub.endCount() != 0 {
+		t.Fatalf("no generation may end on a retried failure, got %+v", hub.lastEnd())
 	}
-	if r.jobOf(wi) != nil {
-		t.Fatal("bounded-failed job must leave the live set")
+	j.mu.Lock()
+	fails := j.recoverFails
+	j.mu.Unlock()
+	if fails != 0 {
+		t.Fatalf("the successful retry must reset the budget, got %d", fails)
+	}
+	if h := j.agent; h != nil {
+		_ = h.Terminate(2e9)
 	}
 }
 

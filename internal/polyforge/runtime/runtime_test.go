@@ -14,6 +14,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
 func TestStartStopEndToEnd(t *testing.T) {
@@ -30,6 +31,11 @@ func TestStartStopEndToEnd(t *testing.T) {
 	bare := filepath.Join(base, wi+".git")
 	if out, err := run(t, "git", "init", "--bare", bare); err != nil {
 		t.Fatalf("bare init: %s", out)
+	}
+	// every push carries --push-option=attempt-id=… (§六 备层): the
+	// receiving end must advertise push options
+	if out, err := run(t, "git", "--git-dir", bare, "config", "receive.advertisePushOptions", "true"); err != nil {
+		t.Fatalf("bare advertisePushOptions: %s", out)
 	}
 
 	ctx := context.Background()
@@ -160,7 +166,7 @@ func run(t *testing.T, name string, args ...string) (string, error) {
 
 // TestPushStanding pins the honest final-push retry: a standing local
 // commit whose first push failed must be re-drivable directly (the case
-// gitops.CommitPush answers "nothing to commit" for).
+// gitops.CommitPush answers with the standing HEAD and pushed=false).
 func TestPushStanding(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -171,13 +177,14 @@ func TestPushStanding(t *testing.T) {
 	// an unreachable remote answers a typed error and nothing lands
 	bad := j.git
 	bad.RemoteURL = filepath.Join(t.TempDir(), "nowhere.git")
-	if err := pushStanding(bad); err == nil {
+	if pushed, err := gitops.Push(bad); err == nil || pushed {
 		t.Fatal("push to a nonexistent remote must fail")
 	}
 
 	// the real remote accepts the standing HEAD
-	if err := pushStanding(j.git); err != nil {
-		t.Fatalf("pushStanding: %v", err)
+	pushed, err := gitops.Push(j.git)
+	if err != nil || !pushed {
+		t.Fatalf("gitops.Push of the standing HEAD = (%v, %v)", pushed, err)
 	}
 	if !bareHasMain(t, bare) {
 		t.Fatal("the standing commit must land on the bare repo")

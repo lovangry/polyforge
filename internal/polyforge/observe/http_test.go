@@ -39,7 +39,7 @@ func newHarness(t *testing.T) *harness {
 		RT:      rt,
 		OB:      ob,
 		DataDir: dataDir,
-		PushFunc: func(ctx context.Context, o gitops.Opts, seq int64, message string) (string, bool, error) {
+		PushFunc: func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
 			return "sha_http", true, nil
 		},
 		CallTimeout: 500 * time.Millisecond,

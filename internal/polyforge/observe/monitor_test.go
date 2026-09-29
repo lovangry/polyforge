@@ -240,10 +240,10 @@ func TestMonitorNotBlockedByAnswerAckWait(t *testing.T) {
 func TestMonitorNotBlockedByPushInFlight(t *testing.T) {
 	h := newFakeHandle("att_1")
 	release := make(chan struct{})
-	pushes := make(chan int64, 16)
+	pushes := make(chan struct{}, 16)
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, seq int64, message string) (string, bool, error) {
-			pushes <- seq
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+			pushes <- struct{}{}
 			<-release // the "long" push
 			return "sha_slow", true, nil
 		}

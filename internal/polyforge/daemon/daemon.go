@@ -165,6 +165,7 @@ func New(cfg Config) (*Daemon, error) {
 		Harness:        cfg.Harness,
 		PiBin:          cfg.PiBin,
 		CgroupRoot:     cfg.CgroupRoot,
+		SocketPath:     cfg.SocketPath, // the spawned agent's PF_DAEMON_SOCKET (flush proxy, §五)
 		EnvSecrets:     []string{cfg.APIKey},
 		ExecutorPromptFile: cfg.ExecutorPromptFile,
 	}
@@ -409,7 +410,7 @@ func (a *agentAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg)
 			bound = b
 		}
 	}
-	if err := a.h.WaitControlAck(ctx, msg.Method, bound); err != nil {
+	if err := a.h.WaitControlAck(ctx, msg, bound); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return ack, observe.ErrAnswerAckPending
 		}

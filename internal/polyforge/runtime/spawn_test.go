@@ -1,10 +1,13 @@
 package runtime
 
-// Spawn regressions: the birth isolation profile (four flags), the env
-// sanitize point (POLYFORGE_*/PF_* prefixes + renamed secret values), the
-// spawn journal, and the real RPC envelope end-to-end against a scripted
-// harness process (prompt commands in, ack extracted from the assistant
-// message_end record).
+// Spawn regressions: the birth isolation profile (three flags — the
+// extension system stays reachable because the subagent tool is
+// extension-provided, per the v0 live-tested baseline), the env sanitize
+// point (POLYFORGE_*/PF_* prefixes + renamed secret values + the
+// deliberate PF_DAEMON_SOCKET addition), the spawn journal, the RecordTap
+// binding, and the real RPC envelope end-to-end against a scripted harness
+// process (prompt commands in, ack routed to its waiter by
+// (method, correlation)).
 
 import (
 	"bufio"
@@ -14,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,10 +35,15 @@ func TestSpawnIsolationFlags(t *testing.T) {
 		t.Fatalf("argv[0] must be the harness binary, got %v", args)
 	}
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"--mode rpc", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates"} {
+	for _, want := range []string{"--mode rpc", "--no-skills", "--no-context-files", "--no-prompt-templates"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("argv must contain %q, got %v", want, args)
 		}
+	}
+	// --no-extensions is DELIBERATELY ABSENT (the v0 baseline): it would
+	// remove the harness-native subagent tool the executor depends on.
+	if strings.Contains(joined, "--no-extensions") {
+		t.Fatal("argv must NOT contain --no-extensions")
 	}
 	if cmd.Dir != "/caps" {
 		t.Fatalf("cwd must be the capsule root, got %q", cmd.Dir)
@@ -59,7 +68,7 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	t.Setenv("PF_LEAK", "leak")
 	t.Setenv("PLAIN_VAR", "keep-me")
 	t.Setenv("SOME_OTHER_NAME", "machine-key") // renamed secret: value match
-	sp := newPiSpawner(Config{EnvSecrets: []string{"machine-key"}})
+	sp := newPiSpawner(Config{EnvSecrets: []string{"machine-key"}, SocketPath: "/run/polyforge.sock"})
 	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionID: "s", Generation: 1})
 	env := strings.Join(cmd.Env, "\n")
 	if strings.Contains(env, "POLYFORGE_API_KEY") || strings.Contains(env, "PF_LEAK=") {
@@ -71,10 +80,24 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	if !strings.Contains(env, "PLAIN_VAR=keep-me") {
 		t.Fatal("the blacklist must not strip unrelated variables")
 	}
-	for _, want := range []string{"PF_WI_ID=wi_env", "PF_SESSION_ID=s", "PI_SESSION_DIR=/caps/session", "PF_GENERATION=1"} {
+	for _, want := range []string{
+		"PF_WI_ID=wi_env", "PF_SESSION_ID=s", "PI_SESSION_DIR=/caps/session", "PF_GENERATION=1",
+		// the daemon's UDS path is a DELIBERATE addition (the agent's
+		// flush(reason) proxy): stripped as an inherited PF_* only to be
+		// handed back explicitly
+		"PF_DAEMON_SOCKET=/run/polyforge.sock",
+	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env must carry %q, got:\n%s", want, env)
 		}
+	}
+}
+
+func TestSpawnEnvNoSocketPathOmitted(t *testing.T) {
+	sp := newPiSpawner(Config{})
+	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionID: "s", Generation: 1})
+	if strings.Contains(strings.Join(cmd.Env, "\n"), "PF_DAEMON_SOCKET") {
+		t.Fatal("an unconfigured socket path must not inject an empty PF_DAEMON_SOCKET")
 	}
 }
 
@@ -124,27 +147,10 @@ func TestSpawnJournalWritten(t *testing.T) {
 // TestPiRPCEnvelopeAndAck drives the real protocol layer against a
 // scripted harness process: the daemon→agent control line rides a prompt
 // command (streamingBehavior steer) whose message text is the control JSON
-// VERBATIM, and the agent's ack is extracted from the assistant
-// message_end record.
+// VERBATIM, and the agent's ack is extracted from the assistant message_end
+// record and routed to the waiter by (method, correlation).
 func TestPiRPCEnvelopeAndAck(t *testing.T) {
-	capDir := t.TempDir()
-	capture := filepath.Join(capDir, "stdin-capture.jsonl")
-	t.Setenv("GO_BE_HARNESS", "1")
-	t.Setenv("GO_BE_CAPTURE", capture)
-	// PiBin points at a wrapper that re-invokes THIS test binary with only
-	// the helper test selected; the spawner's argv (--mode rpc ...) rides
-	// after `--` so the test framework's flag parsing ignores it.
-	t.Setenv("GO_TESTBIN", os.Args[0])
-	wrapper := filepath.Join(capDir, "fake-pi")
-	script := "#!/bin/sh\nexec \"$GO_TESTBIN\" -test.run '^TestHelperProcess$' -- \"$@\"\n"
-	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	sp := newPiSpawner(Config{PiBin: wrapper})
-	if err := os.MkdirAll(filepath.Join(capDir, "session"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	capDir, sp := scriptedHarness(t)
 	h, err := sp.Spawn(context.Background(), SpawnParams{
 		WorkItemID:    "wi_rpc",
 		CapsuleDir:    capDir,
@@ -158,15 +164,16 @@ func TestPiRPCEnvelopeAndAck(t *testing.T) {
 	}
 	defer func() { _ = h.Terminate(3 * time.Second) }()
 
-	if err := h.SendControl(protocol.ControlMsg{Method: protocol.ControlProbe, Nonce: "n-1"}); err != nil {
+	probe := protocol.ControlMsg{Method: protocol.ControlProbe, Nonce: "n-1", Seq: 7}
+	if err := h.SendControl(probe); err != nil {
 		t.Fatalf("SendControl: %v", err)
 	}
-	if err := h.WaitControlAck(context.Background(), protocol.ControlProbe, 5*time.Second); err != nil {
+	if err := h.WaitControlAck(context.Background(), probe, 5*time.Second); err != nil {
 		t.Fatalf("WaitControlAck: %v", err)
 	}
 
 	// the harness captured the raw stdin lines: assert the envelope
-	raw, err := os.ReadFile(capture)
+	raw, err := os.ReadFile(filepath.Join(capDir, "stdin-capture.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,10 +206,193 @@ func TestPiRPCEnvelopeAndAck(t *testing.T) {
 	}
 }
 
+// TestSpawnRecordTapFeedsEveryStdoutRecord pins the RecordTap binding: every
+// raw stdout record the production spawner reads also reaches the
+// configured tap — the daemon binds the tap to its observe adapter, so the
+// Observe lane's Records() stream receives exactly this line.
+func TestSpawnRecordTapFeedsEveryStdoutRecord(t *testing.T) {
+	capDir, sp := scriptedHarness(t)
+
+	var mu sync.Mutex
+	var seen []string
+	cfg := sp.cfg
+	cfg.RecordTap = func(wi string, line []byte) {
+		mu.Lock()
+		if wi == "wi_tap" {
+			seen = append(seen, string(line))
+		}
+		mu.Unlock()
+	}
+	sp.cfg = cfg
+
+	h, err := sp.Spawn(context.Background(), SpawnParams{
+		WorkItemID:    "wi_tap",
+		CapsuleDir:    capDir,
+		SessionID:     "s1",
+		Generation:    1,
+		InitialPrompt: "begin",
+		Journal:       func(pid int, startedAt string) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer func() { _ = h.Terminate(3 * time.Second) }()
+
+	// the scripted harness writes one fixture record at derivation; the
+	// tap must see it verbatim
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(seen)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("RecordTap never saw the startup record, saw %q", seen)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(seen[0], `"type":"agent_start"`) {
+		t.Fatalf("tap must see the raw record verbatim, got %q", seen[0])
+	}
+}
+
+// TestAckRoutingByMethodAndCorrelation pins the dual-key ack routing: two
+// concurrent waiters of the SAME method with different correlations each
+// settle on their OWN ack — a method-only matcher hands whichever ack
+// arrives first to whichever waiter asked first.
+func TestAckRoutingByMethodAndCorrelation(t *testing.T) {
+	capDir, sp := scriptedHarness(t)
+	h, err := sp.Spawn(context.Background(), SpawnParams{
+		WorkItemID:    "wi_ack",
+		CapsuleDir:    capDir,
+		SessionID:     "s1",
+		Generation:    1,
+		InitialPrompt: "begin",
+		Journal:       func(pid int, startedAt string) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer func() { _ = h.Terminate(3 * time.Second) }()
+
+	// two pf/answer methods in flight with different question ids
+	a := protocol.ControlMsg{Method: protocol.ControlAnswer, Seq: 1, ID: "q-first", Answer: "A"}
+	b := protocol.ControlMsg{Method: protocol.ControlAnswer, Seq: 2, ID: "q-second", Answer: "B"}
+	if err := h.SendControl(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.SendControl(b); err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 2)
+	go func() { errCh <- h.WaitControlAck(context.Background(), a, 5*time.Second) }()
+	go func() { errCh <- h.WaitControlAck(context.Background(), b, 5*time.Second) }()
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("waiter %d: %v", i, err)
+		}
+	}
+}
+
+// TestAckRefusalReachedTheWaiter: an ok=false ack is delivered, not dropped
+// — the waiter must learn its method was refused instead of timing out.
+func TestAckRefusalReachedTheWaiter(t *testing.T) {
+	capDir, sp := scriptedHarness(t)
+	t.Setenv("GO_BE_REFUSE", "1") // this harness refuses everything
+	h, err := sp.Spawn(context.Background(), SpawnParams{
+		WorkItemID:    "wi_refuse",
+		CapsuleDir:    capDir,
+		SessionID:     "s1",
+		Generation:    1,
+		InitialPrompt: "begin",
+		Journal:       func(pid int, startedAt string) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer func() { _ = h.Terminate(3 * time.Second) }()
+
+	msg := protocol.ControlMsg{Method: protocol.ControlProbe, Nonce: "n-ref", Seq: 3}
+	if err := h.SendControl(msg); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.WaitControlAck(context.Background(), msg, 5*time.Second); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("the refusal ack must reach its waiter, got %v", err)
+	}
+}
+
+// TestAckHubOrphanClaim: an ack that arrives BEFORE its waiter registers
+// (the SendControl→WaitControlAck race window) parks in the hub's orphan
+// backlog and is claimed at registration — never dropped.
+func TestAckHubOrphanClaim(t *testing.T) {
+	h := newAckHub()
+	msg := protocol.ControlMsg{Method: protocol.ControlAnswer, Seq: 5, ID: "q1", Answer: "A"}
+	ack := protocol.ControlAck{Method: protocol.ControlAnswer, Seq: 5, Ref: "q1", OK: true}
+
+	h.deliver(ack) // no waiter registered yet
+	w := h.register(msg)
+	got := h.claim(w)
+	if got == nil || !got.OK || got.Seq != 5 {
+		t.Fatalf("the raced-ahead ack must be claimed at registration, got %+v", got)
+	}
+	if again := h.claim(w); again != nil {
+		t.Fatalf("the orphan backlog must be emptied by the claim, got %+v", again)
+	}
+}
+
+// TestAckHubRoutedByKey: a registered waiter never consumes an ack that
+// answers a DIFFERENT correlation of the same method.
+func TestAckHubRoutedByKey(t *testing.T) {
+	h := newAckHub()
+	a := protocol.ControlMsg{Method: protocol.ControlAnswer, Seq: 1, ID: "qa"}
+	b := protocol.ControlMsg{Method: protocol.ControlAnswer, Seq: 2, ID: "qb"}
+	wa := h.register(a)
+	wb := h.register(b)
+	defer h.unregister(wb)
+
+	// the ack for B arrives while BOTH waiters are parked
+	h.deliver(protocol.ControlAck{Method: protocol.ControlAnswer, Seq: 2, Ref: "qb", OK: true})
+	if got := h.claim(wa); got != nil {
+		t.Fatalf("waiter A must not claim B's ack, got %+v", got)
+	}
+	if got := h.claim(wb); got == nil || got.Seq != 2 {
+		t.Fatalf("waiter B must claim its own ack, got %+v", got)
+	}
+}
+
+// scriptedHarness builds a piSpawner whose PiBin is a wrapper re-invoking
+// THIS test binary as the harness (TestHelperProcess): the harness emits one
+// fixture record at derivation, echoes correlation-carrying acks onto stdout
+// for every pf/* control method, and captures every stdin line.
+func scriptedHarness(t *testing.T) (string, *piSpawner) {
+	t.Helper()
+	capDir := t.TempDir()
+	t.Setenv("GO_BE_HARNESS", "1")
+	t.Setenv("GO_BE_CAPTURE", filepath.Join(capDir, "stdin-capture.jsonl"))
+	// PiBin points at a wrapper that re-invokes THIS test binary with only
+	// the helper test selected; the spawner's argv (--mode rpc ...) rides
+	// after `--` so the test framework's flag parsing ignores it.
+	t.Setenv("GO_TESTBIN", os.Args[0])
+	wrapper := filepath.Join(capDir, "fake-pi")
+	script := "#!/bin/sh\nexec \"$GO_TESTBIN\" -test.run '^TestHelperProcess$' -- \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(capDir, "session"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return capDir, newPiSpawner(Config{PiBin: wrapper})
+}
+
 // ---------------------------------------------------------------------------
 // the scripted harness: a re-invocation of the test binary (GO_BE_HARNESS)
-// that echoes ack records onto stdout for the probe control method and
-// captures every stdin line for the assertions above.
+// that emits one fixture record at derivation, echoes correlation-carrying
+// ack records onto stdout for the pf/* control methods and captures every
+// stdin line for the assertions above.
 
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_BE_HARNESS") != "1" {
@@ -214,21 +404,42 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(3)
 	}
 	defer f.Close()
+	// one fixture record at derivation: the RecordTap must see it verbatim
+	os.Stdout.WriteString(`{"type":"agent_start"}` + "\n")
 	br := bufio.NewReader(os.Stdin)
 	for {
-		line, err := br.ReadString('\n')
+		line, rerr := br.ReadString('\n')
 		if line != "" {
 			fmt.Fprintln(f, strings.TrimRight(line, "\n"))
 		}
-		if strings.Contains(line, protocol.ControlProbe) {
-			// the exact ack shape: a protocol.ControlAck inside the
-			// assistant message_end record's text, extracted by the
-			// supervisor's classifier
-			ack := `{"method":"pf/probe","ok":true}`
-			rec := fmt.Sprintf(`{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`, ack)
-			os.Stdout.WriteString(rec + "\n")
+		// the exact ack shape: a protocol.ControlAck inside the assistant
+		// message_end record's text, ECHOING the control message's
+		// correlation (seq + ref: the question id or the nonce). The
+		// control line rides the outer prompt command's message text, so
+		// the pf/ method name appears in its JSON-ESCAPED form.
+		if strings.Contains(line, `\"method\":\"pf/`) {
+			var outer struct {
+				Message string `json:"message"`
+			}
+			if json.Unmarshal([]byte(line), &outer) == nil {
+				var ctrl protocol.ControlMsg
+				if json.Unmarshal([]byte(outer.Message), &ctrl) == nil && strings.HasPrefix(ctrl.Method, "pf/") {
+					ref := ctrl.ID
+					if ref == "" {
+						ref = ctrl.Nonce
+					}
+					var ack string
+					if os.Getenv("GO_BE_REFUSE") == "1" {
+						ack = fmt.Sprintf(`{"method":%q,"seq":%d,"ref":%q,"ok":false,"error":"refused by script"}`, ctrl.Method, ctrl.Seq, ref)
+					} else {
+						ack = fmt.Sprintf(`{"method":%q,"seq":%d,"ref":%q,"ok":true}`, ctrl.Method, ctrl.Seq, ref)
+					}
+					rec := fmt.Sprintf(`{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`, ack)
+					os.Stdout.WriteString(rec + "\n")
+				}
+			}
 		}
-		if err != nil {
+		if rerr != nil {
 			os.Exit(0) // stdin EOF: graceful shutdown
 		}
 	}

@@ -110,7 +110,7 @@ func testCfg() monitorCfg {
 		BackpressureSteps: 5,
 		BackpressureAfter: 30 * time.Minute,
 		FlushBound:        time.Second,
-		push: func(ctx context.Context, o gitops.Opts, seq int64, message string) (string, bool, error) {
+		push: func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
 			return "sha_default", true, nil
 		},
 	}
