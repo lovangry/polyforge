@@ -1,0 +1,432 @@
+package cli
+
+import (
+	"flag"
+	"fmt"
+	"strings"
+
+	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
+)
+
+// Management face M1–M5 (same port, same auth, admin unless noted).
+// Semantics ported from the v0 CLI: users, api-keys, projects
+// (incl. membership), backup, rotate-secret.
+
+// ---------------------------------------------------------------------------
+// users (M1)
+// ---------------------------------------------------------------------------
+
+var cmdUsers = &Command{
+	Name:    "users",
+	Summary: "User management (M1, admin only)",
+	Usage: "pf users create --display-name N [--user-type human|machine] [--role writer|admin]\n" +
+		"pf users list\n" +
+		"pf users get <id>\n" +
+		"pf users patch <id> [--display-name N] [--role writer|admin]",
+	Setup: func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("users: expected create|list|get|patch")
+		}
+		client := ctx.aihub()
+		sub, rest := args[0], args[1:]
+		switch sub {
+		case "create":
+			f := flag.NewFlagSet("pf users create", flag.ContinueOnError)
+			f.SetOutput(ctx.Stderr)
+			name := f.String("display-name", "", "human-readable display name (required)")
+			kind := f.String("user-type", "human", "human|machine")
+			role := f.String("role", "writer", "writer|admin (global role)")
+			rest, err := parseCommandArgs(f, rest)
+			if err != nil {
+				return err
+			}
+			if len(rest) != 0 || *name == "" {
+				return fmt.Errorf("users create: --display-name is required")
+			}
+			raw, err := client.CreateUser(aihubclient.UserCreateRequest{
+				DisplayName: *name,
+				UserType:    *kind,
+				Role:        *role,
+			})
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				var u api.User
+				if err := decodeJSON(raw, &u); err == nil {
+					fmt.Fprintf(ctx.Stdout, "created user %s (%s, %s)\n", u.ID, u.UserType, u.Role)
+				}
+			}
+			return nil
+		case "list":
+			raw, err := client.ListUsers()
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				var l struct {
+					Items []api.User `json:"items"`
+				}
+				if err := decodeJSON(raw, &l); err == nil {
+					renderUsers(ctx.Stdout, l.Items)
+				}
+			}
+			return nil
+		case "get":
+			if len(rest) != 1 {
+				return fmt.Errorf("users get: expected exactly one user id")
+			}
+			raw, err := client.GetUser(rest[0])
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				printJSON(ctx.Stdout, raw)
+			}
+			return nil
+		case "patch":
+			f := flag.NewFlagSet("pf users patch", flag.ContinueOnError)
+			f.SetOutput(ctx.Stderr)
+			name := f.String("display-name", "", "new display name")
+			role := f.String("role", "", "writer|admin")
+			ids, err := parseCommandArgs(f, rest)
+			if err != nil {
+				return err
+			}
+			if len(ids) != 1 || (*name == "" && *role == "") {
+				return fmt.Errorf("users patch: expected <id> and at least one of --display-name / --role")
+			}
+			raw, err := client.PatchUser(ids[0], aihubclient.UserPatchRequest{
+				DisplayName: *name,
+				Role:        *role,
+			})
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				fmt.Fprintf(ctx.Stdout, "user %s updated\n", ids[0])
+			}
+			return nil
+		default:
+			return fmt.Errorf("users: unknown action %q", sub)
+		}
+	},
+}
+
+// ---------------------------------------------------------------------------
+// api-keys (M2)
+// ---------------------------------------------------------------------------
+
+var cmdApiKeys = &Command{
+	Name:    "api-keys",
+	Summary: "API key management (M2, admin only; plaintext shown exactly once)",
+	Usage: "pf api-keys create --user U [--project-scope P]\n" +
+		"pf api-keys list\n" +
+		"pf api-keys revoke <id>",
+	Setup: func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("api-keys: expected create|list|revoke")
+		}
+		client := ctx.aihub()
+		sub, rest := args[0], args[1:]
+		switch sub {
+		case "create":
+			f := flag.NewFlagSet("pf api-keys create", flag.ContinueOnError)
+			f.SetOutput(ctx.Stderr)
+			user := f.String("user", "", "user id to mint the key for (required)")
+			scope := f.String("project-scope", "", "optional project scope (narrows, never grants)")
+			rest, err := parseCommandArgs(f, rest)
+			if err != nil {
+				return err
+			}
+			if len(rest) != 0 || *user == "" {
+				return fmt.Errorf("api-keys create: --user is required")
+			}
+			req := aihubclient.ApiKeyCreateRequest{UserID: *user}
+			if *scope != "" {
+				req.ProjectID = strPtr(*scope)
+			}
+			raw, err := client.CreateApiKey(req)
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				printJSON(ctx.Stdout, raw)
+				fmt.Fprintln(ctx.Stdout, "NOTE: the key plaintext is shown exactly once and never stored.")
+			}
+			return nil
+		case "list":
+			raw, err := client.ListApiKeys()
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				renderApiKeys(ctx.Stdout, raw)
+			}
+			return nil
+		case "revoke":
+			if len(rest) != 1 {
+				return fmt.Errorf("api-keys revoke: expected exactly one key id")
+			}
+			raw, err := client.RevokeApiKey(rest[0])
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				fmt.Fprintf(ctx.Stdout, "key %s revoked\n", rest[0])
+			}
+			return nil
+		default:
+			return fmt.Errorf("api-keys: unknown action %q", sub)
+		}
+	},
+}
+
+// ---------------------------------------------------------------------------
+// projects (M3), including membership add/remove
+// ---------------------------------------------------------------------------
+
+var cmdProjects = &Command{
+	Name:    "projects",
+	Summary: "Project and membership management (M3)",
+	Usage: "pf projects create --name N [--visible]\n" +
+		"pf projects list\n" +
+		"pf projects get <id-or-name>\n" +
+		"pf projects patch <id-or-name> [--visible[=true|false]]\n" +
+		"pf projects members add <id-or-name> --user U --role viewer|writer|maintainer\n" +
+		"pf projects members remove <id-or-name> --user U [--user U ...]",
+	Setup: func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("projects: expected create|list|get|patch|members")
+		}
+		client := ctx.aihub()
+		sub, rest := args[0], args[1:]
+		switch sub {
+		case "create":
+			f := flag.NewFlagSet("pf projects create", flag.ContinueOnError)
+			f.SetOutput(ctx.Stderr)
+			name := f.String("name", "", "project name (required)")
+			visible := f.Bool("visible", true, "directory-listing visibility (grants no data access)")
+			rest, err := parseCommandArgs(f, rest)
+			if err != nil {
+				return err
+			}
+			if len(rest) != 0 || *name == "" {
+				return fmt.Errorf("projects create: --name is required")
+			}
+			raw, err := client.CreateProject(aihubclient.ProjectCreateRequest{
+				Name:    *name,
+				Visible: visible,
+			})
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				var p api.Project
+				if err := decodeJSON(raw, &p); err == nil {
+					fmt.Fprintf(ctx.Stdout, "created project %s (%s)\n", p.Name, p.ID)
+				}
+			}
+			return nil
+		case "list":
+			raw, err := client.ListProjects()
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				var l struct {
+					Items []api.Project `json:"items"`
+				}
+				if err := decodeJSON(raw, &l); err == nil {
+					renderProjects(ctx.Stdout, l.Items)
+				}
+			}
+			return nil
+		case "get":
+			if len(rest) != 1 {
+				return fmt.Errorf("projects get: expected exactly one project id or name")
+			}
+			raw, err := client.GetProject(rest[0])
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				printJSON(ctx.Stdout, raw)
+			}
+			return nil
+		case "patch":
+			f := flag.NewFlagSet("pf projects patch", flag.ContinueOnError)
+			f.SetOutput(ctx.Stderr)
+			// The wire body carries `visible` ONLY when the flag was
+			// given; a plain patch must not flip a private project
+			// visible.
+			visible := optBool{}
+			f.Var(&visible, "visible", "directory-listing visibility (omit to leave unchanged)")
+			ids, err := parseCommandArgs(f, rest)
+			if err != nil {
+				return err
+			}
+			if len(ids) != 1 {
+				return fmt.Errorf("projects patch: expected one project id or name")
+			}
+			raw, err := client.PatchProject(ids[0], aihubclient.ProjectPatchRequest{Visible: visible.Ptr()})
+			if err != nil {
+				return err
+			}
+			ctx.emit(raw)
+			if !ctx.JSON {
+				fmt.Fprintf(ctx.Stdout, "project %s updated\n", ids[0])
+			}
+			return nil
+		case "members":
+			return projectsMembers(ctx, client, rest)
+		default:
+			return fmt.Errorf("projects: unknown action %q", sub)
+		}
+	},
+}
+
+// projectsMembers handles `pf projects members add|remove ...` — both map
+// onto the M3 project PATCH (members upsert / remove_members).
+func projectsMembers(ctx *Context, client *aihubclient.Client, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("projects members: expected add|remove")
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "add":
+		f := flag.NewFlagSet("pf projects members add", flag.ContinueOnError)
+		f.SetOutput(ctx.Stderr)
+		user := f.String("user", "", "user id (required)")
+		role := f.String("role", "writer", "viewer|writer|maintainer")
+		ids, err := parseCommandArgs(f, rest)
+		if err != nil {
+			return err
+		}
+		if len(ids) != 1 || *user == "" {
+			return fmt.Errorf("projects members add: expected <id-or-name> --user U --role R")
+		}
+		switch *role {
+		case "viewer", "writer", "maintainer":
+		default:
+			return fmt.Errorf("projects members add: --role must be viewer|writer|maintainer")
+		}
+		members := []aihubclient.ProjectMember{{UserID: *user, Role: *role}}
+		raw, err := client.PatchProject(ids[0], aihubclient.ProjectPatchRequest{Members: &members})
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			fmt.Fprintf(ctx.Stdout, "member %s upserted on %s as %s\n", *user, ids[0], *role)
+		}
+		return nil
+	case "remove", "rm":
+		f := flag.NewFlagSet("pf projects members remove", flag.ContinueOnError)
+		f.SetOutput(ctx.Stderr)
+		var users stringList
+		f.Var(&users, "user", "user id to remove (repeatable)")
+		ids, err := parseCommandArgs(f, rest)
+		if err != nil {
+			return err
+		}
+		if len(ids) != 1 || len(users) == 0 {
+			return fmt.Errorf("projects members remove: expected <id-or-name> --user U [--user U ...]")
+		}
+		rem := []string(users)
+		raw, err := client.PatchProject(ids[0], aihubclient.ProjectPatchRequest{RemoveMembers: &rem})
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			fmt.Fprintf(ctx.Stdout, "removed from %s: %s\n", ids[0], strings.Join(rem, ","))
+		}
+		return nil
+	default:
+		return fmt.Errorf("projects members: unknown action %q", sub)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// backup (M4) and rotate-secret (M5)
+// ---------------------------------------------------------------------------
+
+var cmdBackup = &Command{
+	Name:    "backup",
+	Summary: "Trigger an on-demand backup snapshot (M4, admin only)",
+	Usage:   "pf backup",
+	Setup:   func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		raw, err := ctx.aihub().Backup()
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			var resp struct {
+				Backup string `json:"backup"`
+			}
+			if err := decodeJSON(raw, &resp); err == nil {
+				fmt.Fprintf(ctx.Stdout, "snapshot written: %s\n", resp.Backup)
+			} else {
+				printJSON(ctx.Stdout, raw)
+			}
+		}
+		return nil
+	},
+}
+
+var cmdRotateSecret = &Command{
+	Name:    "rotate-secret",
+	Summary: "Rotate the service secret (M5, admin only)",
+	Usage: "pf rotate-secret --mode grace --grace-seconds N\n" +
+		"pf rotate-secret --mode rollback",
+	Setup: func(fs *flag.FlagSet) {
+		fs.String("mode", "", "grace (old epochs valid for a window) | rollback (immediate, permanent)")
+		fs.Int64("grace-seconds", 0, "grace window seconds (mode=grace)")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 0 {
+			return fmt.Errorf("rotate-secret: unexpected arguments %v", args)
+		}
+		mode := stringFlag(fs, "mode")
+		grace := int64Flag(fs, "grace-seconds")
+		switch mode {
+		case "grace":
+			if grace <= 0 {
+				return fmt.Errorf("rotate-secret: --grace-seconds is required for mode=grace")
+			}
+		case "rollback":
+			grace = 0 // grace_seconds MUST be 0 for rollback
+		default:
+			return fmt.Errorf("rotate-secret: --mode must be grace|rollback")
+		}
+		raw, err := ctx.aihub().RotateSecret(aihubclient.RotateSecretRequest{
+			Mode:         mode,
+			GraceSeconds: grace,
+		})
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			fmt.Fprintf(ctx.Stdout, "service secret rotated (mode=%s)\n", mode)
+		}
+		return nil
+	},
+}

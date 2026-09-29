@@ -1,16 +1,21 @@
-// Command pf is the v1 work-machine binary: 13 user verbs + `pf daemon`.
+// Command pf is the v1 work-machine client binary: 13 user verbs plus
+// the M1-M5 management face, routed per the v1 architecture
+// (docs/design/polyforge-vnext/v1-architecture-spec.md):
 //
-// Architecture: docs/design/polyforge-vnext/v1-architecture-spec.md.
-// Modules: internal/polyforge/{cli,runtime,observe} over internal/common.
-// The daemon hosts Runtime (lifecycle: Start/Stop/Recover/Restart) and
-// Observe (per-WI monitor goroutines); they communicate only via
-// internal/common/protocol messages carrying attempt-ids.
-//
-// Phase 1 skeleton; wired up by the runtime/observe/cli lanes.
+//   - direct-to-aihub verbs speak the shared HTTP contract
+//     (internal/common/api) through internal/polyforge/aihubclient;
+//   - execution-plane verbs speak the daemon's UDS HTTP face
+//     (internal/common/protocol);
+//   - `pf daemon` is a placeholder until the phase-3 daemon assembly
+//     (Runtime + Observe) lands.
 package main
 
-import "fmt"
+import (
+	"os"
+
+	"github.com/silgrid/polyforge/internal/polyforge/cli"
+)
 
 func main() {
-	fmt.Println("pf: v1 (modules pending — see internal/polyforge/)")
+	os.Exit(cli.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
