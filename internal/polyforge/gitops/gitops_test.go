@@ -8,6 +8,7 @@ package gitops
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -260,7 +261,7 @@ func TestCommitPushRetryKeepsSeqConsistent(t *testing.T) {
 	}
 }
 
-func TestCommitPushCleanTreeReturnsStandingHead(t *testing.T) {
+func TestCommitPushCleanTreePushesStandingHead(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_clean")
 	bare := mkBare(t, barePath, true)
@@ -273,20 +274,97 @@ func TestCommitPushCleanTreeReturnsStandingHead(t *testing.T) {
 	}
 	pushes := len(bare.pushesSeen(t))
 
-	// Clean tree: no error, the standing HEAD, pushed=false — and NO
-	// new push (the hook saw nothing more).
+	// Clean tree: no error, the standing HEAD — and an HONEST push
+	// result. The re-push of an already-pushed HEAD is an idempotent
+	// no-op ("Everything up-to-date": the hook saw nothing more), but
+	// pushed reports the truthful server-reached state, not a
+	// presumed one.
 	sha2, pushed, err := CommitPush(o, "wrap: wrapped")
 	if err != nil {
 		t.Fatalf("clean tree must not error: %v", err)
 	}
-	if pushed {
-		t.Fatal("clean tree must answer pushed=false")
+	if !pushed {
+		t.Fatal("clean tree must report the standing HEAD's push honestly (pushed=true)")
 	}
 	if sha2 != sha {
 		t.Fatalf("clean tree must answer the standing HEAD: %q vs %q", sha2, sha)
 	}
 	if got := len(bare.pushesSeen(t)); got != pushes {
-		t.Fatalf("clean tree must not push: %d pushes, want %d", got, pushes)
+		t.Fatalf("clean tree re-push must be an idempotent no-op: %d pushes, want %d", got, pushes)
+	}
+}
+
+// TestCommitPushCleanTreeRetryIsHonestAfterFailedPush is the N1
+// regression: a commit lands locally, the push fails, and the retry hits
+// a CLEAN tree. The retry must attempt the push of the standing HEAD
+// (so a still-dead server answers with its error, not a fake success)
+// and once the server is back it must report pushed=true with the
+// standing SHA — never let a clean tree fake a publish.
+func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_cleantree")
+	bare := mkBare(t, barePath, true)
+	mkCapsule(t, o)
+
+	// Round 1: the remote is dead — the commit lands locally, push fails.
+	dead := o
+	dead.RemoteURL = filepath.Join(t.TempDir(), "nowhere.git")
+	writeDirty(t, o, "a.txt", "a\n")
+	sha1, pushed, err := CommitPush(dead, "first")
+	if err == nil || pushed {
+		t.Fatalf("push to a dead remote must fail: (%q, %v, %v)", sha1, pushed, err)
+	}
+	if sha1 == "" {
+		t.Fatal("the local commit must still be reported on push failure")
+	}
+
+	// Round 2: the tree is clean, the remote STILL dead — the retry
+	// must NOT fake success. It pushes the standing HEAD, fails, and
+	// reports the error.
+	sha2, pushed, err := CommitPush(dead, "retry on clean tree")
+	if err == nil {
+		t.Fatal("a clean-tree retry against a dead remote must surface the push error")
+	}
+	if pushed {
+		t.Fatal("a failed clean-tree retry must not report pushed=true")
+	}
+	if sha2 != sha1 {
+		t.Fatalf("clean tree must answer the standing HEAD: %q vs %q", sha2, sha1)
+	}
+	if bare.hasMain(t) {
+		t.Fatal("nothing may have reached the server through the dead remote")
+	}
+
+	// Round 3: the tree is still clean, the server is back — the retry
+	// pushes the standing HEAD through and reports pushed=true.
+	sha3, pushed, err := CommitPush(o, "retry once the server is back")
+	if err != nil || !pushed {
+		t.Fatalf("clean-tree retry against the live remote = (%q, %v, %v)", sha3, pushed, err)
+	}
+	if sha3 != sha1 {
+		t.Fatalf("the standing HEAD must be the one pushed: %q vs %q", sha3, sha1)
+	}
+	if got := bare.tipSeq(t); got != 1 {
+		t.Fatalf("bare tip seq = %d, want 1", got)
+	}
+}
+
+// TestCommitPushCleanTreeWithNoHistoryIsTyped covers the practically
+// unreachable shape (materialization always leaves untracked files): a
+// clean porcelain with no standing HEAD must answer the typed
+// ErrEmptyHistory, not raw rev-parse noise.
+func TestCommitPushCleanTreeWithNoHistoryIsTyped(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_nohist")
+	mkBare(t, barePath, false)
+	mkCapsule(t, o) // initialized, unborn branch, empty tree: clean porcelain
+
+	sha, pushed, err := CommitPush(o, "nothing anywhere")
+	if err == nil {
+		t.Fatalf("clean tree with no history must error: (%q, %v)", sha, pushed)
+	}
+	if !errors.Is(err, ErrEmptyHistory) {
+		t.Fatalf("the error must be the typed ErrEmptyHistory, got %v", err)
 	}
 }
 
@@ -391,6 +469,67 @@ func TestCredentialEnvSkipsNonHTTPRemotes(t *testing.T) {
 	defer cleanup()
 	if len(additions) != 0 {
 		t.Fatalf("local remote must not build an askpass helper: %v", additions)
+	}
+}
+
+// TestAskpassFallbackBaseIsCleanedUp: the MkdirTemp fallback (no usable
+// GitDir parent) must clean up the whole temp base directory with the
+// call, not leak one fresh base per invocation.
+func TestAskpassFallbackBaseIsCleanedUp(t *testing.T) {
+	o, _ := testOpts(t, "wi_fallback")
+	o.GitDir = "" // forces the MkdirTemp("", "pf-askpass-") fallback
+	o.RemoteURL = "http://127.0.0.1:1/wi_fallback.git"
+
+	additions, cleanup, err := credentialEnv(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(additions) != 2 {
+		t.Fatalf("expected GIT_ASKPASS + GIT_TERMINAL_PROMPT additions: %v", additions)
+	}
+	script := strings.TrimPrefix(additions[0], "GIT_ASKPASS=")
+	base := filepath.Dir(filepath.Dir(script)) // <temp>/pf-askpass-xxx/askpass/<script>
+	if _, serr := os.Stat(base); serr != nil {
+		t.Fatalf("fallback base must exist before cleanup: %v", serr)
+	}
+	cleanup()
+	if _, serr := os.Stat(base); !os.IsNotExist(serr) {
+		t.Fatalf("cleanup must remove the fallback base dir %s", base)
+	}
+}
+
+// TestSweepAskpassRemovesCrashResidue: a killed daemon leaves one-shot
+// askpass scripts (holding push secrets) under <gitRoot>/askpass; the
+// startup sweep must remove them, leave unrelated entries alone, and be
+// a no-op when the directory does not exist.
+func TestSweepAskpassRemovesCrashResidue(t *testing.T) {
+	o, _ := testOpts(t, "wi_sweep")
+	gitRoot := filepath.Dir(o.GitDir) // <base>/git
+	askpassDir := filepath.Join(gitRoot, "askpass")
+	if err := os.MkdirAll(askpassDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	residue := filepath.Join(askpassDir, "askpass-wi_dead-0123456789abcdef")
+	if err := os.WriteFile(residue, []byte("#!/bin/sh\nsecret\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(askpassDir, "keep-me.txt")
+	if err := os.WriteFile(unrelated, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SweepAskpass(gitRoot); err != nil {
+		t.Fatalf("SweepAskpass: %v", err)
+	}
+	if _, serr := os.Stat(residue); !os.IsNotExist(serr) {
+		t.Fatal("the crash-residue script must be swept")
+	}
+	if _, serr := os.Stat(unrelated); serr != nil {
+		t.Fatalf("unrelated entries must survive the sweep: %v", serr)
+	}
+	// a gitRoot without an askpass dir is a clean no-op, not an error
+	if err := SweepAskpass(filepath.Join(t.TempDir(), "absent")); err != nil {
+		t.Fatalf("SweepAskpass on an absent dir must be a no-op: %v", err)
 	}
 }
 

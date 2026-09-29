@@ -527,6 +527,15 @@ func (m *Monitor) schedulePush() {
 
 func (m *Monitor) onPushResult(res pushResult) {
 	<-m.gate // release the single-in-flight slot
+	// 兜底: an honest gitops result is either (pushed, nil) or a non-nil
+	// error — a clean-tree CommitPush pushes the standing HEAD, so a
+	// failed push always carries its error. Should a PushFunc ever
+	// report (nil error, pushed=false) anyway, publishing it would mark
+	// the version server-reached when it was not and silence the §九
+	// backpressure episode forever; classify it retry-worthy instead.
+	if res.err == nil && !res.pushed {
+		res.err = fmt.Errorf("push reported success without pushing (sha=%q)", res.sha)
+	}
 	if res.err == nil {
 		if res.version > m.pushedVersion {
 			m.pushedVersion = res.version
