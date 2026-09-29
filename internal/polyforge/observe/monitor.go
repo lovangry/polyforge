@@ -153,6 +153,12 @@ type Monitor struct {
 	stop     sync.Once
 	answerCh chan AnswerCall
 	flushCh  chan FlushCall
+	// deferredFlush holds one flush call whose (serveFlush-validated)
+	// attempt id names the hub's LATEST KNOWN instance while the monitor
+	// still holds its predecessor — the recovery-adoption window. The
+	// call is released by onRecovered once the announced id is adopted;
+	// the fence never lets an OLD-generation id reach this field.
+	deferredFlush *FlushCall
 
 	// execution.json polling state (monitor goroutine only).
 	execPath      string
@@ -246,11 +252,30 @@ func (m *Monitor) requestStop() { m.stop.Do(func() { close(m.stopCh) }) }
 // criterion, poll execution.json, maybe schedule a push, check
 // backpressure.
 func (m *Monitor) onTick() {
+	m.releaseDeferredFlush()
 	m.drainIncidents()
 	m.checkHang()
 	m.pollExecution()
 	m.schedulePush()
 	m.checkBackpressure()
+}
+
+// releaseDeferredFlush re-examines a flush parked in the adoption window:
+// the adoption it waits for may have completed between the serveFlush
+// fence and this monitor pass (the fence read the OLD current attempt,
+// onRecovered ran, and only then did the call reach onFlush) — a
+// deferred call stranded that way is released here within one poll
+// tick instead of waiting out the flush bound. A call whose id is still
+// ahead stays parked; onRecovered owns the immediate release path.
+func (m *Monitor) releaseDeferredFlush() {
+	if m.deferredFlush == nil {
+		return
+	}
+	call := *m.deferredFlush
+	if call.Req.AttemptID == m.attemptID {
+		m.deferredFlush = nil
+		m.onFlush(call)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +442,22 @@ func (m *Monitor) onRecovered(at Attach) {
 	_ = m.log.Append(m.wi.WorkItem, EvAgentRecovered, map[string]any{
 		"attempt_id": at.Msg.AttemptID,
 	})
+	// Release the flush that arrived during the adoption window: the id
+	// it carries is now current, so it takes the ordinary path; an id
+	// that STILL does not match (a superseded announcement) is answered
+	// with the stale-refusal shape — the fence's promise holds.
+	if m.deferredFlush != nil {
+		call := *m.deferredFlush
+		m.deferredFlush = nil
+		if call.Req.AttemptID == at.Msg.AttemptID {
+			m.onFlush(call)
+		} else {
+			call.Resp <- protocol.FlushAck{
+				OK: false, Error: "STALE_ATTEMPT: flush carries attempt_id " + call.Req.AttemptID +
+					"; the current instance is " + at.Msg.AttemptID,
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +693,24 @@ func (m *Monitor) clearPendingByID(questionID string) {
 // flush(reason) handling (the UDS face entry)
 
 func (m *Monitor) onFlush(call FlushCall) {
+	// The recovery-adoption window: the request names an instance the
+	// monitor has not adopted yet (the serveFlush fence has already
+	// proven it is the hub's latest known id, never a stale generation).
+	// Queue it — the RTRecovered attachment this id belongs to is
+	// already in flight on rtCh; onRecovered releases the call the
+	// moment the id becomes current. Only one such call can exist (the
+	// window is one spawn deep); a second answers an explicit refusal.
+	if id := call.Req.AttemptID; id != "" && id != m.attemptID {
+		if m.deferredFlush == nil {
+			m.deferredFlush = &call
+			return
+		}
+		call.Resp <- protocol.FlushAck{
+			OK: false, Error: "flush adoption window busy; retry: attempt_id " + id +
+				" is still ahead of the monitor (holding " + m.attemptID + ")",
+		}
+		return
+	}
 	switch call.Req.Reason {
 	case protocol.FlushNeedsInput:
 		m.flushNeedsInput(call)
@@ -824,6 +883,16 @@ func (m *Monitor) currentAttempt() string {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
 	return m.attemptID
+}
+
+// markClosing arms the expected-exit suppression (the daemon-initiated
+// close path; see Observe.MarkClosing). The flag is the same one the
+// flush(wrap) path arms, so onExit's suppression set needs no new
+// member.
+func (m *Monitor) markClosing() {
+	m.stateMu.Lock()
+	m.sealing = true
+	m.stateMu.Unlock()
 }
 
 func itoa(n int) string {

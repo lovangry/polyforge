@@ -25,8 +25,7 @@ import (
 )
 
 func TestSpawnIsolationFlags(t *testing.T) {
-	cfg := Config{PiBin: "/nonexistent-pi"}
-	sp := newPiSpawner(cfg)
+	sp := newPiSpawner(&Config{PiBin: "/nonexistent-pi"})
 	cmd := sp.buildCmd(SpawnParams{
 		WorkItemID: "wi_iso", CapsuleDir: "/caps", SessionID: "s1", Generation: 7,
 	})
@@ -51,7 +50,7 @@ func TestSpawnIsolationFlags(t *testing.T) {
 }
 
 func TestSpawnResumeAddsSessionArg(t *testing.T) {
-	sp := newPiSpawner(Config{})
+	sp := newPiSpawner(&Config{})
 	cmd := sp.buildCmd(SpawnParams{TranscriptPath: "/caps/session/t.jsonl", Resume: true, CapsuleDir: "/caps"})
 	joined := strings.Join(cmd.Args, " ")
 	if !strings.Contains(joined, "--session /caps/session/t.jsonl") {
@@ -68,7 +67,7 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	t.Setenv("PF_LEAK", "leak")
 	t.Setenv("PLAIN_VAR", "keep-me")
 	t.Setenv("SOME_OTHER_NAME", "machine-key") // renamed secret: value match
-	sp := newPiSpawner(Config{EnvSecrets: []string{"machine-key"}, SocketPath: "/run/polyforge.sock"})
+	sp := newPiSpawner(&Config{EnvSecrets: []string{"machine-key"}, SocketPath: "/run/polyforge.sock"})
 	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionID: "s", Generation: 1, InstanceID: "ra_wi_env#2"})
 	env := strings.Join(cmd.Env, "\n")
 	if strings.Contains(env, "POLYFORGE_API_KEY") || strings.Contains(env, "PF_LEAK=") {
@@ -97,7 +96,7 @@ func TestSpawnEnvSanitized(t *testing.T) {
 }
 
 func TestSpawnEnvNoSocketPathOmitted(t *testing.T) {
-	sp := newPiSpawner(Config{})
+	sp := newPiSpawner(&Config{})
 	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionID: "s", Generation: 1})
 	env := strings.Join(cmd.Env, "\n")
 	if strings.Contains(env, "PF_DAEMON_SOCKET") {
@@ -257,15 +256,13 @@ func TestSpawnRecordTapFeedsEveryStdoutRecord(t *testing.T) {
 
 	var mu sync.Mutex
 	var seen []string
-	cfg := sp.cfg
-	cfg.RecordTap = func(wi string, line []byte) {
+	sp.cfg.RecordTap = func(wi string, line []byte) {
 		mu.Lock()
 		if wi == "wi_tap" {
 			seen = append(seen, string(line))
 		}
 		mu.Unlock()
 	}
-	sp.cfg = cfg
 
 	h, err := sp.Spawn(context.Background(), SpawnParams{
 		WorkItemID:    "wi_tap",
@@ -299,6 +296,55 @@ func TestSpawnRecordTapFeedsEveryStdoutRecord(t *testing.T) {
 	defer mu.Unlock()
 	if !strings.Contains(seen[0], `"type":"agent_start"`) {
 		t.Fatalf("tap must see the raw record verbatim, got %q", seen[0])
+	}
+}
+
+// TestSpawnRecordTapBoundAfterSpawnerBuild is the assembly-order
+// regression for the e2e lane's high-severity bug: the daemon binds
+// RecordTap AFTER DefaultSpawner is built (the tap is a method value on
+// the daemon, which does not exist yet at spawner-construction time).
+// The spawner holds the config by pointer, so a tap bound after the
+// build — the exact production order — must still receive every record;
+// with a value copy this test is the bug, not the pin.
+func TestSpawnRecordTapBoundAfterSpawnerBuild(t *testing.T) {
+	capDir, sp := scriptedHarness(t)
+
+	var mu sync.Mutex
+	var seen []string
+	// THE PRODUCTION ORDER: spawner first, tap afterwards.
+	sp.cfg.RecordTap = func(wi string, line []byte) {
+		mu.Lock()
+		if wi == "wi_tap_order" {
+			seen = append(seen, string(line))
+		}
+		mu.Unlock()
+	}
+
+	h, err := sp.Spawn(context.Background(), SpawnParams{
+		WorkItemID:    "wi_tap_order",
+		CapsuleDir:    capDir,
+		SessionID:     "s1",
+		Generation:    1,
+		InitialPrompt: "begin",
+		Journal:       func(pid int, startedAt string) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer func() { _ = h.Terminate(3 * time.Second) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(seen)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("RecordTap bound after the spawner build never saw the record, saw %q", seen)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -427,7 +473,7 @@ func scriptedHarness(t *testing.T) (string, *piSpawner) {
 	if err := os.MkdirAll(filepath.Join(capDir, "session"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return capDir, newPiSpawner(Config{PiBin: wrapper})
+	return capDir, newPiSpawner(&Config{PiBin: wrapper})
 }
 
 // ---------------------------------------------------------------------------

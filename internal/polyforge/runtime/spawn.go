@@ -171,12 +171,14 @@ type Spawner interface {
 	Spawn(ctx context.Context, p SpawnParams) (AgentHandle, error)
 }
 
-// piSpawner is the production spawner for the pi harness.
+// piSpawner is the production spawner for the pi harness. It holds the
+// config BY POINTER (see DefaultSpawner): fields are read at spawn time
+// from the shared config, never from a copy.
 type piSpawner struct {
-	cfg Config
+	cfg *Config
 }
 
-func newPiSpawner(cfg Config) *piSpawner {
+func newPiSpawner(cfg *Config) *piSpawner {
 	return &piSpawner{cfg: cfg}
 }
 

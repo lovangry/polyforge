@@ -399,11 +399,13 @@ func (d *driveEnv) flushWrap(finalStatus string) {
 }
 
 // flush delivers the agent→daemon proxy call with a bounded retry: the
-// spawn-window races (the daemon's listener or its RECOVERING→RUNNING
-// transition may lag the freshly spawned agent by a moment) answer
-// connection-refused / DAEMON-409 transiently, and a real agent retries
-// its lifeline calls the same way (the v0 baseline documented this
-// discipline for its own proxy calls).
+// spawn-window races (the daemon's listener, its RECOVERING→RUNNING
+// transition, or the monitor's adoption of the recovered instance may
+// lag the freshly spawned agent by a moment) answer connection-refused
+// or one of the DAEMON-409 transients (a close genuinely in progress, or
+// the recovery window's typed "instance just spawned; retry shortly"),
+// and a real agent retries its lifeline calls the same way (the v0
+// baseline documented this discipline for its own proxy calls).
 func (d *driveEnv) flush(reason string, extra map[string]any) bool {
 	if d.socket == "" {
 		fmt.Fprintln(os.Stderr, "fakepi: PF_DAEMON_SOCKET not set; flush unavailable")
@@ -459,8 +461,12 @@ func (d *driveEnv) flushOnce(reason string, raw []byte) (ok, retry bool) {
 	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 {
 		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): HTTP %d: %s\n", reason, resp.StatusCode, out)
-		// a close/recovery race is transient; a stale attempt is forever
+		// a close/recovery race is transient; a stale attempt is forever.
+		// "instance just spawned" is the flushGate's typed RECOVERING
+		// transient (the recovery window); "already in progress" is a
+		// close genuinely holding the seal guard.
 		return false, bytes.Contains(out, []byte("already in progress")) ||
+			bytes.Contains(out, []byte("instance just spawned")) ||
 			resp.StatusCode >= 500
 	}
 	var fa struct {

@@ -63,12 +63,32 @@ type Config struct {
 	Hub               Hub               // required; aihubclient.Client satisfies
 	PushFunc          observe.PushFunc  // nil = the shared gitops choke point
 	ObservePoll       time.Duration   // observe execution.json poll tick
+	// Observe carries the observe lane's supervision windows into the
+	// assembly — the injection seam the fault-injection scenarios shrink
+	// (hang watchdog, liveness-probe bound, answer-ack window). Zero
+	// fields keep the observe defaults (10min / 2min / 2min).
+	Observe           ObserveWindows
 	DrainInterval     time.Duration   // drain wave-fetch period (5s)
 	DispatchTick      time.Duration   // dispatcher/backfill period (200ms)
 	NoticeAckBound    time.Duration   // stop_notice ack wait (30s)
 	ShutdownFlushWait time.Duration  // per-job flush(shutdown) wait (60s)
 	ShutdownBudget    time.Duration  // whole-shutdown ceiling (5min)
 	ExitPoll          time.Duration  // adapter exit-poll period (200ms)
+}
+
+// ObserveWindows is the observe-lane supervision-window subset of the
+// observe config that daemon.Config passes through. All three default
+// to zero — observe's own fill() then applies the production defaults —
+// so a production Config with an untouched Observe field assembles the
+// production windows.
+type ObserveWindows struct {
+	// HangWindow is the stream-silence window while a turn is in flight
+	// that arms the liveness probe.
+	HangWindow time.Duration
+	// ProbeTimeout bounds one liveness probe's ack wait.
+	ProbeTimeout time.Duration
+	// AnswerAckWindow bounds the agent's pf/answer consumption ack.
+	AnswerAckWindow time.Duration
 }
 
 func (c *Config) fill() {
@@ -167,9 +187,17 @@ func New(cfg Config) (*Daemon, error) {
 		EnvSecrets:     []string{cfg.APIKey},
 		ExecutorPromptFile: cfg.ExecutorPromptFile,
 	}
+	// The production spawner takes the runtime config BY POINTER
+	// (runtime.DefaultSpawner): the RecordTap binding below — a method
+	// value on the daemon, so it can only be set after d exists — is read
+	// by the spawner at spawn time from the shared config. A value copy
+	// here is the e2e lane's high-severity bug (the tap never reached the
+	// spawner's snapshot and every stream-fed detection face went blind
+	// under the real daemon); the pointer keeps the assembly order
+	// harmless, whichever way later edits shuffle it.
 	sp := cfg.Spawner
 	if sp == nil {
-		sp = runtime.DefaultSpawner(rtCfg)
+		sp = runtime.DefaultSpawner(&rtCfg)
 	}
 
 	d := &Daemon{
@@ -193,6 +221,11 @@ func New(cfg Config) (*Daemon, error) {
 		DataDir:      cfg.DataDir,
 		PollInterval: cfg.ObservePoll,
 		PushFunc:     cfg.PushFunc,
+		// Bug-4 seam: the supervision windows pass through; zero fields
+		// keep the observe defaults.
+		HangWindow:      cfg.Observe.HangWindow,
+		ProbeTimeout:    cfg.Observe.ProbeTimeout,
+		AnswerAckWindow: cfg.Observe.AnswerAckWindow,
 	})
 	if err != nil {
 		return nil, err
@@ -337,6 +370,16 @@ func (d *Daemon) bridge() {
 			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
+				// Emission-time instance registration (the flush fence's
+				// recovery window, #8): the hub records the new lineage id
+				// the moment Runtime announces it — before the monitor
+				// adopts the attachment — so a just-resumed agent's
+				// flush(reason) never eats a STALE_ATTEMPT refusal in the
+				// window between the RTRecovered emission and the
+				// monitor's adoption.
+				if msg.AttemptID != "" {
+					d.obs.NoteInstance(msg.WorkItem, msg.AttemptID)
+				}
 				if ji, live := d.rt.Info(msg.WorkItem); live && ji.Agent != nil {
 					at = d.buildAttach(msg, ji)
 				}
@@ -566,6 +609,16 @@ func (d *Daemon) releaseSeal(wi string) {
 	d.sealMu.Lock()
 	delete(d.sealedWI, wi)
 	d.sealMu.Unlock()
+}
+
+// sealHeld reports whether a close path currently holds the seal guard
+// of wi (the wrap dual-path arbitration's non-claiming read; the flush
+// gate distinguishes a REAL in-progress close from the recovery
+// window's transient).
+func (d *Daemon) sealHeld(wi string) bool {
+	d.sealMu.Lock()
+	defer d.sealMu.Unlock()
+	return d.sealedWI[wi]
 }
 
 // terminalStatus reports whether an aihub status is terminal for the
