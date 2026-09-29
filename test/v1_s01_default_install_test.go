@@ -1,0 +1,136 @@
+package test
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// v1_s01: default-install smoke. A real aihub, a real `pf daemon`
+// (interactive), a real `pf submit`, a scripted agent that walks two
+// steps, the capsule git chain visible on the server side BEFORE the
+// close (the observe lane's async push), a real `pf wrap`, the terminal
+// wrapped state, and the sealed chain carrying the transcript — plus the
+// no-orphan invariant.
+func TestV1S01DefaultInstallSmoke(t *testing.T) {
+	inst := newV1Install(t)
+	wi := inst.newWI(t, "s01: smoke the default install end to end",
+		[]map[string]any{
+			{"do": "step", "id": "code"},
+			{"do": "sleep", "ms": 1500}, // let the async push land the first step
+			{"do": "step", "id": "review"},
+		}, nil)
+	d := newV1Daemon(t, inst)
+	d.start()
+
+	// Interactive submit through the real CLI.
+	out := d.pf(t, "submit", wi)
+	if !strings.Contains(out, "accepted") {
+		t.Fatalf("submit answer: %q", out)
+	}
+
+	// The job runs: a live agent pid, a materialized capsule.
+	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
+		return d.agentPIDOf(t, wi) > 0
+	})
+	capDir := d.capsuleDir(wi)
+	rawID, err := os.ReadFile(filepath.Join(capDir, "capsule.json"))
+	if err != nil {
+		t.Fatalf("capsule.json: %v", err)
+	}
+	var idn struct {
+		WorkItemID   string `json:"work_item_id"`
+		Generation   int64  `json:"generation"`
+		AttemptID    string `json:"attempt_id"`
+		BundleName   string `json:"bundle_name"`
+	}
+	if err := json.Unmarshal(rawID, &idn); err != nil {
+		t.Fatalf("capsule.json unparsable: %v", err)
+	}
+	if idn.WorkItemID != wi || idn.Generation != 1 || idn.AttemptID == "" || idn.BundleName != "quick-fix" {
+		t.Fatalf("capsule identity wrong: %+v", idn)
+	}
+	// The materialized bundle rides the capsule.
+	if _, err := os.Stat(filepath.Join(capDir, "workflows", "quick-fix", "workflow.md")); err != nil {
+		t.Fatalf("materialized bundle missing: %v", err)
+	}
+
+	// The observe projection shows both steps done (the CLI face).
+	waitUntil(t, 30*time.Second, "steps never reached done", func() bool {
+		jv := d.observe(t, wi)
+		return jv.Steps["code"] != nil && jv.Steps["code"].Status == "done" &&
+			jv.Steps["review"] != nil && jv.Steps["review"].Status == "done"
+	})
+
+	// The capsule chain is visible on the SERVER side before the close:
+	// the observe lane's async push landed the agent's writes — one
+	// commit per landed wave, so the mid-run chain already has history.
+	inst.waitBareCommits(t, wi, 2, 40*time.Second)
+
+	// Close through the real CLI.
+	d.pf(t, "wrap", wi)
+	inst.waitWIStatus(t, wi, "wrapped", 30*time.Second)
+
+	// The sealed chain: seq trailers strictly increasing from 1, the
+	// transcript and the execution state committed, the final push done.
+	seqs := inst.bareSeqTrailers(t, wi)
+	if len(seqs) < 2 {
+		t.Fatalf("sealed chain too short: %d commits", len(seqs))
+	}
+	for i, s := range seqs {
+		if s != int64(i+1) {
+			t.Fatalf("seq trailer %d is %d, want %d (chain: %v)", i, s, i+1, seqs)
+		}
+	}
+	if !inst.bareHasPath(t, wi, "runtime-state/execution.json") {
+		t.Fatal("sealed chain misses runtime-state/execution.json")
+	}
+	transcript := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
+	if !strings.Contains(transcript, `"work_item_id":"`+wi+`"`) {
+		t.Fatalf("execution.json at main is not this work item's: %s", transcript)
+	}
+	// The harness transcript rides the chain (ruling C1).
+	hasTranscript := false
+	out2 := gitRun(t, inst.bareRepo(wi), "ls-tree", "--name-only", "-r", "main", "session")
+	for _, l := range strings.Split(out2, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "session/session-") {
+			hasTranscript = true
+		}
+	}
+	if !hasTranscript {
+		t.Fatalf("sealed chain misses the harness transcript:\n%s", out2)
+	}
+
+	// The daemon holds no job for a sealed work item.
+	if st := d.status(t); len(st.Jobs) != 0 {
+		t.Fatalf("daemon still holds jobs after wrap: %+v", st.Jobs)
+	}
+
+	// No orphaned agent survives the close (PF_WI_ID marker scan).
+	waitUntil(t, 10*time.Second, "agent processes survived the wrap", func() bool {
+		return len(orphanPIDs(wi)) == 0
+	})
+
+	// The events file tells the whole story in order.
+	kinds := d.eventKinds(t, wi)
+	for _, want := range []string{"job_started", "published"} {
+		if !contains(kinds, want) {
+			t.Fatalf("events %v miss %q", kinds, want)
+		}
+	}
+	if contains(kinds, "needs_recovery") {
+		t.Fatalf("healthy run raised a recovery: %v", kinds)
+	}
+}
+
+func contains(list []string, s string) bool {
+	for _, e := range list {
+		if e == s {
+			return true
+		}
+	}
+	return false
+}
