@@ -238,6 +238,9 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool) (AgentHan
 		Generation:     j.generation,
 		InitialPrompt:  r.buildPrompt(j, resume),
 		CgroupPath:     r.cgroupPathFor(j.wi),
+		// The derivation's own lineage id rides the env as PF_INSTANCE_ID
+		// (the agent's flush fence identity) and the journal alike.
+		InstanceID: nextInst,
 	}
 	p.Journal = func(pid int, startedAt string) error {
 		return writeSpawnJournal(p, pid, startedAt, nextInst)

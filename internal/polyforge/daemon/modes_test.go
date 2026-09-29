@@ -144,6 +144,16 @@ func TestNewKeepsPersistedModeAcrossRestart(t *testing.T) {
 	if got := d4.modes.Current(); got != protocol.ModeInteractive {
 		t.Fatalf("explicit interactive = %q, want interactive", got)
 	}
+	// The flag override is PERSISTED, not just applied in memory: the
+	// next boot (flag unset) must stay interactive, not fall back to the
+	// stale drain the override replaced (the fx3 gap).
+	d4b, err := boot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d4b.modes.Current(); got != protocol.ModeInteractive {
+		t.Fatalf("boot after a flag override = %q, want interactive (the override must land in daemon-state.json)", got)
+	}
 	// An explicit bad mode is still a construction error.
 	if _, err := boot("turbo"); err == nil {
 		t.Fatal("unknown initial mode must fail New")

@@ -156,6 +156,12 @@ func TestHTTPObserveAfterCursor(t *testing.T) {
 	if len(view.Events) != len(ring) {
 		t.Fatalf("after=0 events: got %d, want %d", len(view.Events), len(ring))
 	}
+	// Served entries carry their seq (#21 gap: the client's next cursor is
+	// the last event's seq, so the EventEntry wire must expose it).
+	if got := view.Events[len(view.Events)-1].Seq; got != maxSeq {
+		t.Fatalf("last served seq: got %d, want %d (the ring's newest)", got, maxSeq)
+	}
+	// The file layer's wire shape is unchanged: bare entries, no seq.
 	// after=maxSeq: nothing new.
 	_, body = hs.get(t, "/jobs/wi_http/observe?after="+strconv.FormatInt(maxSeq, 10))
 	if err := json.Unmarshal(body, &view); err != nil {

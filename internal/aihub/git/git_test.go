@@ -154,6 +154,92 @@ func push(t *testing.T, dir, remote string) error {
 	return err
 }
 
+// pushWithAttempt pushes HEAD:main carrying --push-option=attempt-id=<id>,
+// exactly the way the pf gitops choke point does.
+func pushWithAttempt(t *testing.T, dir, remote, attemptID string) (string, error) {
+	t.Helper()
+	return runGit(t, dir, "push", "--push-option=attempt-id="+attemptID, remote, "HEAD:refs/heads/main")
+}
+
+// TestPushOptionAdvertisedAndFenced (§六 备层): the bare repo advertises
+// push options (without the advertisement git rejects every push that
+// carries one — and the gitops choke point now always does), a push whose
+// attempt-id option matches the credential's attempt succeeds, and one
+// with a foreign id is rejected by the pre-receive hook.
+func TestPushOptionAdvertisedAndFenced(t *testing.T) {
+	e := newGitEnv(t)
+	wiID, res := e.claimWI(t, e.userID)
+	attempt := res.Claim.AttemptID
+	if attempt == "" {
+		t.Fatalf("claim result carries no attempt id")
+	}
+	// The bare repo advertises push options — both on fresh creation and
+	// idempotently for a pre-existing repo (re-EnsureBare must not regress
+	// it).
+	out := mustGit(t, e.mgr.RepoDir(wiID), "config", "receive.advertisePushOptions")
+	if strings.TrimSpace(out) != "true" {
+		t.Fatalf("receive.advertisePushOptions = %q, want true", strings.TrimSpace(out))
+	}
+	if err := e.mgr.EnsureBare(wiID); err != nil {
+		t.Fatalf("re-ensure bare: %v", err)
+	}
+	out = mustGit(t, e.mgr.RepoDir(wiID), "config", "receive.advertisePushOptions")
+	if strings.TrimSpace(out) != "true" {
+		t.Fatalf("receive.advertisePushOptions after re-ensure = %q, want true", strings.TrimSpace(out))
+	}
+
+	cred := e.credURL(wiID, res.Credential.Secret)
+	wt := newWorktree(t)
+	commitSeq(t, wt, "a.txt", "one\n", 1)
+	// A push WITHOUT the option still succeeds through the proxy (the
+	// hook only compares when both sides of the fence exist).
+	if err := push(t, wt, cred); err != nil {
+		t.Fatalf("option-less push rejected: %v", err)
+	}
+	// The matching attempt-id option succeeds.
+	commitSeq(t, wt, "b.txt", "two\n", 2)
+	if out, err := pushWithAttempt(t, wt, cred, attempt); err != nil {
+		t.Fatalf("push with the matching attempt-id option failed: %v (%s)", err, out)
+	}
+	// A foreign attempt id is rejected by the pre-receive hook.
+	commitSeq(t, wt, "c.txt", "three\n", 3)
+	out, err := pushWithAttempt(t, wt, cred, "ra_someone_else")
+	if err == nil {
+		t.Fatalf("push with a foreign attempt-id accepted: %s", out)
+	}
+	if !strings.Contains(out, "does not match the credential's attempt") {
+		t.Fatalf("wrong rejection: %s", out)
+	}
+	// The rejected push moved nothing: the remote tip still ends at b.txt,
+	// and a corrected push (same commits, right id) lands cleanly.
+	second := filepath.Join(t.TempDir(), "second")
+	mustGit(t, t.TempDir(), "clone", cred, second)
+	if _, err := os.Stat(filepath.Join(second, "c.txt")); !os.IsNotExist(err) {
+		t.Fatalf("rejected push leaked c.txt into the bare repo: %v", err)
+	}
+	if out, err := pushWithAttempt(t, wt, cred, attempt); err != nil {
+		t.Fatalf("corrected push failed: %v (%s)", err, out)
+	}
+}
+
+// TestPushOptionFenceAbsentExpected: when PF_EXPECTED_ATTEMPT is absent
+// (a push that never traveled through the proxy — e.g. a direct local
+// push against the bare repo for testing) the hook must NOT fence, even
+// though the push carries an attempt-id option: there is nothing to
+// compare against.
+func TestPushOptionFenceAbsentExpected(t *testing.T) {
+	e := newGitEnv(t)
+	wiID, res := e.claimWI(t, e.userID)
+	wt := newWorktree(t)
+	commitSeq(t, wt, "a.txt", "one\n", 1)
+	// Direct push to the bare repo path (no proxy, no PF_EXPECTED_ATTEMPT)
+	// carrying an attempt-id option: accepted.
+	out, err := pushWithAttempt(t, wt, e.mgr.RepoDir(wiID), res.Claim.AttemptID)
+	if err != nil {
+		t.Fatalf("local option-carrying push rejected: %v (%s)", err, out)
+	}
+}
+
 func TestLegalPushAndClone(t *testing.T) {
 	e := newGitEnv(t)
 	wiID, res := e.claimWI(t, e.userID)

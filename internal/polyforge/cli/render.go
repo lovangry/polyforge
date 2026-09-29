@@ -244,6 +244,13 @@ func renderObserve(w io.Writer, jv *protocol.JobView) {
 			rows = append(rows, []string{e.At, e.Kind, body})
 		}
 		printTable(w, []string{"AT", "KIND", "BODY"}, rows)
+		// The next-cursor hint: the last served event's seq is the cursor a
+		// follow-up `pf observe --after` passes to see only what lands after
+		// this view. Served entries always carry seq; the guard keeps the
+		// renderer quiet against a hand-built view without one.
+		if last := jv.Events[len(jv.Events)-1]; last.Seq > 0 {
+			fmt.Fprintf(w, "next cursor: pf observe %s --after %d\n", jv.WorkItem, last.Seq)
+		}
 	}
 }
 

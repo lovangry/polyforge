@@ -36,6 +36,12 @@ func TestRecoverTranscriptPresentResumes(t *testing.T) {
 	if c := sp.call(1); !c.Resume || c.TranscriptPath != j.transcript {
 		t.Fatalf("derivation must be a resume of the transcript, got %+v", c)
 	}
+	// The resume derivation carries its OWN lineage id in its spawn params
+	// (injected as PF_INSTANCE_ID): the re-derivation is instance #1 of the
+	// claim's attempt, not the bare attempt id.
+	if id := sp.call(1).InstanceID; id != "ra_"+wi+"#1" {
+		t.Fatalf("resume derivation instance id: got %q, want ra_%s#1", id, wi)
+	}
 	msg := recvRT(t, toOB)
 	if msg.Kind != protocol.RTRecovered || msg.WorkItem != wi {
 		t.Fatalf("expected RTRecovered, got %+v", msg)

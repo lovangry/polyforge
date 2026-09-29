@@ -142,7 +142,12 @@ type SpawnParams struct {
 	Generation     int64
 	InitialPrompt  string
 	CgroupPath     string // per-WI cgroup v2 dir; "" = layer 0 unavailable
-	Journal        func(pid int, startedAt string) error
+	// InstanceID is THIS derivation's lineage id (the attempt id, or
+	// attempt#N after a re-derivation) — the protocol attempt-id fence.
+	// Injected as PF_INSTANCE_ID so the agent reads its own identity from
+	// the environment instead of scraping the spawn journal.
+	InstanceID string
+	Journal    func(pid int, startedAt string) error
 }
 
 // AgentHandle is the supervised face over one derived agent process.
@@ -218,6 +223,14 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		// point strips every inherited PF_*, so the daemon's UDS path (the
 		// agent's flush(reason) proxy, §五) is handed back explicitly.
 		additions = append(additions, "PF_DAEMON_SOCKET="+s.cfg.SocketPath)
+	}
+	if p.InstanceID != "" {
+		// deliberate addition, same mechanism as PF_DAEMON_SOCKET: the
+		// agent's OWN lineage id (attempt or attempt#N) — the attempt-id it
+		// must put in every flush(reason) call. Handed back explicitly so
+		// the agent reads identity from env instead of scraping the spawn
+		// journal (§五 flush fence).
+		additions = append(additions, "PF_INSTANCE_ID="+p.InstanceID)
 	}
 	cmd.Env = newEnvSanitizer(s.cfg.EnvSecrets...).childEnv(additions...)
 	return cmd

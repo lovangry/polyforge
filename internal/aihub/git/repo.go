@@ -95,6 +95,9 @@ func (m *Manager) EnsureBare(wiID string) error {
 		if err := writeHook(filepath.Join(dir, "hooks", "pre-receive"), m.MaxBlobBytes); err != nil {
 			return err
 		}
+		if err := m.ensurePushOptions(dir); err != nil {
+			return err
+		}
 		m.known[wiID] = true
 		return nil
 	}
@@ -102,6 +105,9 @@ func (m *Manager) EnsureBare(wiID string) error {
 		return err
 	}
 	if _, err := git(dir, nil, "config", "core.hooksPath", "hooks"); err != nil {
+		return err
+	}
+	if err := m.ensurePushOptions(dir); err != nil {
 		return err
 	}
 	if _, err := git(dir, nil, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
@@ -112,4 +118,16 @@ func (m *Manager) EnsureBare(wiID string) error {
 	}
 	m.known[wiID] = true
 	return nil
+}
+
+// ensurePushOptions idempotently sets receive.advertisePushOptions=true on
+// a bare repo. git's protocol rule: a server that does not advertise push
+// options REJECTS any push that carries them — and the pf gitops choke
+// point now sends --push-option=attempt-id=<id> on EVERY push (§六 备层),
+// so without this config every push to an aihub bare repo fails. Both the
+// fresh-creation and the pre-existing-repo paths run it, so repos created
+// by older server builds are repaired at their next EnsureBare.
+func (m *Manager) ensurePushOptions(dir string) error {
+	_, err := git(dir, nil, "config", "receive.advertisePushOptions", "true")
+	return err
 }
