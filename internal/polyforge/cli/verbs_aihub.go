@@ -1,0 +1,430 @@
+package cli
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
+)
+
+// ---------------------------------------------------------------------------
+// file — create/edit/show work items (direct to aihub).
+// ---------------------------------------------------------------------------
+
+var cmdFile = &Command{
+	Name:    "file",
+	Summary: "Create, edit or show a work item",
+	Usage: "pf file create --project P --goal G [flags] | --stdin\n" +
+		"pf file edit <id> [flags] | --stdin\n" +
+		"pf file show <id>",
+	Setup: func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("file: expected create|edit|show (see `pf help file`)")
+		}
+		sub, rest := args[0], args[1:]
+		switch sub {
+		case "create":
+			return fileCreate(ctx, rest)
+		case "edit":
+			return fileEdit(ctx, rest)
+		case "show":
+			return fileShow(ctx, rest)
+		default:
+			return fmt.Errorf("file: unknown action %q", sub)
+		}
+	},
+}
+
+// fileCreate builds the create body from flags or from full stdin JSON.
+func fileCreate(ctx *Context, args []string) error {
+	f := flag.NewFlagSet("pf file create", flag.ContinueOnError)
+	f.SetOutput(ctx.Stderr)
+	var (
+		project   = f.String("project", "", "project name (required unless stdin JSON carries it)")
+		goal      = f.String("goal", "", "one-line goal (<=500 chars)")
+		content   optString
+		labels    stringList
+		priority  = f.String("priority", "", "low|normal|high|urgent")
+		milestone optString
+		bundle    = f.String("bundle", "", "bundle_name: non-empty makes an execution ticket")
+		parent    = f.String("parent", "", "parent work item id")
+		attrs     kvList
+		useStdin  = f.Bool("stdin", false, "read the full create-body JSON from stdin")
+	)
+	f.Var(&content, "content", "markdown background; '-' reads stdin, '@file' reads a file")
+	f.Var(&labels, "label", "label (repeatable)")
+	f.Var(&milestone, "milestone", "milestone name")
+	f.Var(&attrs, "attr", "business attr key=json-value (repeatable)")
+	rest, err := parseCommandArgs(f, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 0 {
+		return fmt.Errorf("file create: unexpected arguments %v (file create takes flags only)", rest)
+	}
+
+	var req aihubclient.CreateWorkItemRequest
+	if *useStdin {
+		raw, err := io.ReadAll(ctx.Stdin)
+		if err != nil {
+			return err
+		}
+		if err := decodeJSON(raw, &req); err != nil {
+			return fmt.Errorf("stdin JSON: %w", err)
+		}
+	}
+	if *project != "" {
+		req.Project = *project // flag fills a gap in the stdin body
+	}
+	if *goal != "" {
+		req.Goal = *goal
+	}
+	if req.Project == "" {
+		req.Project = ctx.Cfg.Project
+	}
+	if req.Project == "" {
+		return fmt.Errorf("file create: --project is required")
+	}
+	if req.Goal == "" {
+		return fmt.Errorf("file create: --goal is required (or use --stdin with a full JSON body)")
+	}
+	if content.IsSet() {
+		s, err := readValueOrStdin(ctx, content.Val())
+		if err != nil {
+			return err
+		}
+		req.Content = &s
+	}
+	if len(labels) > 0 {
+		req.Labels = labels
+	}
+	if *priority != "" {
+		req.Priority = *priority
+	}
+	if milestone.IsSet() {
+		req.Milestone = milestone.Ptr()
+	}
+	if *bundle != "" {
+		req.BundleName = strPtr(*bundle)
+	}
+	if *parent != "" {
+		req.ParentID = strPtr(*parent)
+	}
+	if len(attrs) > 0 {
+		req.Attrs = map[string]any{}
+		for _, kv := range attrs {
+			v, err := parseAttrValue(kv.Value)
+			if err != nil {
+				return fmt.Errorf("--attr %s: %w", kv.Key, err)
+			}
+			req.Attrs[kv.Key] = v
+		}
+	}
+
+	raw, err := ctx.aihub().CreateWorkItem(req)
+	if err != nil {
+		return err
+	}
+	ctx.emit(raw)
+	if !ctx.JSON {
+		var wi api.WorkItem
+		if err := decodeJSON(raw, &wi); err == nil {
+			fmt.Fprintln(ctx.Stdout)
+			renderWIDetail(ctx.Stdout, &wi)
+		}
+	}
+	return nil
+}
+
+// fileEdit issues a PATCH with only the flags actually provided.
+func fileEdit(ctx *Context, args []string) error {
+	f := flag.NewFlagSet("pf file edit", flag.ContinueOnError)
+	f.SetOutput(ctx.Stderr)
+	var (
+		goal      optString
+		content   optString
+		labels    stringList
+		priority  optString
+		milestone optString
+		waitingOn optString
+		attrs     kvList
+		useStdin  = f.Bool("stdin", false, "read the full PATCH-body JSON from stdin")
+	)
+	f.Var(&goal, "goal", "new goal")
+	f.Var(&content, "content", "new markdown background; '-' reads stdin, '@file' reads a file")
+	f.Var(&labels, "label", "labels (repeatable; replaces the whole set)")
+	f.Var(&priority, "priority", "low|normal|high|urgent")
+	f.Var(&milestone, "milestone", "milestone (empty string clears it)")
+	f.Var(&waitingOn, "waiting-on", "waiting_on value")
+	f.Var(&attrs, "attr", "business attr key=json-value (repeatable)")
+	rest, err := parseCommandArgs(f, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 && !*useStdin {
+		return fmt.Errorf("file edit: expected exactly one work item id")
+	}
+	var id string
+	if len(rest) == 1 {
+		id = rest[0]
+	}
+
+	body := map[string]any{}
+	if *useStdin {
+		raw, err := io.ReadAll(ctx.Stdin)
+		if err != nil {
+			return err
+		}
+		if err := decodeJSON(raw, &body); err != nil {
+			return fmt.Errorf("stdin JSON: %w", err)
+		}
+		if v, ok := body["id"].(string); ok && id == "" {
+			id = v
+		}
+		delete(body, "id")
+	}
+	if id == "" {
+		return fmt.Errorf("file edit: work item id required")
+	}
+	if goal.IsSet() {
+		body["goal"] = goal.Val()
+	}
+	if content.IsSet() {
+		s, err := readValueOrStdin(ctx, content.Val())
+		if err != nil {
+			return err
+		}
+		body["content"] = s
+	}
+	if len(labels) > 0 {
+		body["labels"] = []string(labels)
+	}
+	if priority.IsSet() {
+		body["priority"] = priority.Val()
+	}
+	if milestone.IsSet() {
+		body["milestone"] = milestone.Ptr()
+	}
+	if waitingOn.IsSet() {
+		body["waiting_on"] = waitingOn.Ptr()
+	}
+	if len(attrs) > 0 {
+		m := map[string]any{}
+		for _, kv := range attrs {
+			v, err := parseAttrValue(kv.Value)
+			if err != nil {
+				return fmt.Errorf("--attr %s: %w", kv.Key, err)
+			}
+			m[kv.Key] = v
+		}
+		body["attrs"] = m
+	}
+
+	raw, err := ctx.aihub().PatchWorkItem(id, body)
+	if err != nil {
+		return err
+	}
+	ctx.emit(raw)
+	if !ctx.JSON {
+		var wi api.WorkItem
+		if err := decodeJSON(raw, &wi); err == nil {
+			fmt.Fprintln(ctx.Stdout)
+			renderWIDetail(ctx.Stdout, &wi)
+		}
+	}
+	return nil
+}
+
+// fileShow reads the detail record.
+func fileShow(ctx *Context, args []string) error {
+	f := flag.NewFlagSet("pf file show", flag.ContinueOnError)
+	f.SetOutput(ctx.Stderr)
+	rest, err := parseCommandArgs(f, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 {
+		return fmt.Errorf("file show: expected exactly one work item id")
+	}
+	raw, err := ctx.aihub().GetWorkItemRaw(rest[0])
+	if err != nil {
+		return err
+	}
+	ctx.emit(raw)
+	if !ctx.JSON {
+		var wi api.WorkItem
+		if err := decodeJSON(raw, &wi); err == nil {
+			fmt.Fprintln(ctx.Stdout)
+			renderWIDetail(ctx.Stdout, &wi)
+		}
+	}
+	return nil
+}
+
+// readValueOrStdin resolves a value flag: "-" reads all stdin, "@path"
+// reads a file, anything else is the literal value.
+func readValueOrStdin(ctx *Context, v string) (string, error) {
+	switch {
+	case v == "-":
+		b, err := io.ReadAll(ctx.Stdin)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	case strings.HasPrefix(v, "@"):
+		b, err := os.ReadFile(strings.TrimPrefix(v, "@"))
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	default:
+		return v, nil
+	}
+}
+
+// parseAttrValue decodes an --attr flag value: JSON when it parses, plain
+// string otherwise.
+func parseAttrValue(v string) (any, error) {
+	var out any
+	if err := json.Unmarshal([]byte(v), &out); err == nil {
+		return out, nil
+	}
+	return v, nil
+}
+
+// ---------------------------------------------------------------------------
+// queue — WI list + ready-queue (direct to aihub).
+// ---------------------------------------------------------------------------
+
+var cmdQueue = &Command{
+	Name:    "queue",
+	Summary: "List work items / show the ready queue",
+	Usage: "pf queue [--project P] [--status S]\n" +
+		"pf queue --ready [--project P]",
+	Setup: func(fs *flag.FlagSet) {
+		fs.String("project", "", "project name")
+		fs.Bool("ready", false, "show the ready queue instead of the list")
+		fs.String("status", "", "filter: queued|running|paused|blocked|wrapped|failed|canceled")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 0 {
+			return fmt.Errorf("queue: unexpected arguments %v", args)
+		}
+		proj := stringFlag(fs, "project")
+		if proj == "" {
+			proj = ctx.Cfg.Project
+		}
+		if proj == "" {
+			return fmt.Errorf("queue: --project is required (or set project in the config)")
+		}
+		var (
+			raw json.RawMessage
+			err error
+		)
+		if boolFlag(fs, "ready") {
+			raw, err = ctx.aihub().ReadyQueueRaw(proj)
+		} else {
+			raw, err = ctx.aihub().ListWorkItemsRaw(proj, stringFlag(fs, "status"))
+		}
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			var l struct {
+				Items []api.WorkItem `json:"items"`
+			}
+			if err := decodeJSON(raw, &l); err == nil {
+				fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items))
+				renderWITable(ctx.Stdout, l.Items)
+			}
+		}
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
+// cancel — terminate a non-active WI (direct to aihub).
+// ---------------------------------------------------------------------------
+
+var cmdCancel = &Command{
+	Name:    "cancel",
+	Summary: "Cancel a queued/paused/blocked work item (no active generation)",
+	Usage:   "pf cancel <id>",
+	Setup:   func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("cancel: expected exactly one work item id")
+		}
+		raw, err := ctx.aihub().CancelWorkItem(args[0])
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			var wi api.WorkItem
+			if err := decodeJSON(raw, &wi); err == nil {
+				fmt.Fprintf(ctx.Stdout, "cancelled %s (status %s)\n", wi.Slug, wi.Status)
+			}
+		}
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
+// recall — memory retrieval (direct to the aihub memory face).
+// ---------------------------------------------------------------------------
+
+var cmdRecall = &Command{
+	Name:    "recall",
+	Summary: "Search project memories",
+	Usage:   "pf recall [--project P] <query> [--type T] [--tags a,b] [--limit N]",
+	Setup: func(fs *flag.FlagSet) {
+		fs.String("project", "", "project name")
+		fs.String("q", "", "query text (alternative to the positional argument)")
+		fs.String("type", "", "memory type filter (e.g. experience.debug)")
+		fs.String("tags", "", "comma-separated tags")
+		fs.Int("limit", 0, "max results")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		q := stringFlag(fs, "q")
+		if q == "" {
+			q = strings.Join(args, " ")
+		}
+		if strings.TrimSpace(q) == "" {
+			return fmt.Errorf("recall: a query is required (positional or --q)")
+		}
+		proj := stringFlag(fs, "project")
+		if proj == "" {
+			proj = ctx.Cfg.Project
+		}
+		if proj == "" {
+			return fmt.Errorf("recall: --project is required (or set project in the config)")
+		}
+		var tagList []string
+		if tags := stringFlag(fs, "tags"); tags != "" {
+			tagList = strings.Split(tags, ",")
+		}
+		raw, err := ctx.aihub().SearchMemories(proj, q, stringFlag(fs, "type"), tagList, intFlag(fs, "limit"))
+		if err != nil {
+			return err
+		}
+		ctx.emit(raw)
+		if !ctx.JSON {
+			var l struct {
+				Items []api.Memory `json:"items"`
+			}
+			if err := decodeJSON(raw, &l); err == nil {
+				fmt.Fprintf(ctx.Stdout, "%d hit(s)\n", len(l.Items))
+				renderMemories(ctx.Stdout, l.Items)
+			}
+		}
+		return nil
+	},
+}
