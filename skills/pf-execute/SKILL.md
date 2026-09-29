@@ -34,15 +34,6 @@ win; this file exists to turn their rules into an operational loop, not to reint
   remember anything from a prior process. Read the file, find the step whose status is
   `in_progress` (if any) or `pending_question` is non-null (if any), and resume from
   exactly there. Never re-run a step whose status is already `done`.
-- **Never use a harness background-task mechanism.** Whatever your harness happens to
-  expose in this session (a background-task tool or extension, a `--bg`/background session
-  command, a backgrounded shell run), you never use it: every command you run for a step
-  runs in the foreground under `03-execution-capsule.md` §5.1 so its `{argv, exit_code,
-  duration_ms, started_at}` record lands in the step's command audit, and a task the
-  Daemon cannot see is an orphan outside the Capsule's single-writer domain
-  (`03-execution-capsule.md` §7). This holds even when the Daemon's adapter flags already
-  stripped those mechanisms from your session (`04-local-runtime.md` §6.1a): the
-  instruction is the belt, the flags are the braces.
 - **Never start another step's work out of order.** The only legitimate reason to touch a
   step other than the one `next_step_by_order` currently names is the bounded rewind
   reset described in §4 below, and even that is driven by the gate's own `on_fail`
@@ -370,6 +361,25 @@ discipline and the safe-boundary rules are unchanged by the transport.
   following atomic write append the consumed answer to `steps.<id>.answers[]`, clear
   `pending_question`, and continue the SAME step in place. Ack after the relay is
   durably recorded.
+
+  **Sequencing note (mandatory, not an optimization).** `pending_answer` is persisted
+  BEFORE any consumption processing, and the ack comes after that persist — never
+  before it, and never after the whole consumption finishes. The Daemon now *depends*
+  on this ordering in two places, so an agent that reorders it breaks supervision, not
+  just its own recovery: (1) a persisted `pending_answer` is the Daemon's signal that
+  this step has stopped waiting for a human and is now doing ordinary work, which
+  switches it OUT of the watchdog's needs_input exemption (a hang while digesting an
+  answer used to be unrecoverable); (2) the ack is what tells the Daemon consumption
+  was observed, so it stops holding the relay for re-delivery. Consumption itself takes
+  a whole turn and the Daemon expects that: if your ack arrives after its window, the
+  operator is told "delivered, consumption pending", not that the answer failed.
+
+- **`pf/probe`** — the watchdog confirmation probe (04 §6.2 runtime note). It asks you
+  to do NOTHING except ack at your next safe boundary. You only ever receive it after
+  the Daemon has already seen no record from you for the whole hang window while a turn
+  was in flight; your ack is the evidence that cancels a kill it was otherwise about to
+  perform, so treat it as urgent and ack it before starting further work. `params`
+  carries `{reason}` for your log only — never change what you are doing because of it.
 
 You never initiate messages on this channel; you only ack. Any other `pf/*` method you
 do not recognize must be ignored, not answered, and never routed around — there is no
