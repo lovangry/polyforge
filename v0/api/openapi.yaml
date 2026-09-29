@@ -1,0 +1,2901 @@
+# =============================================================================
+# Polyforge vNext - AIHub Core Service HTTP API (wire contract)
+# =============================================================================
+# This file is the single machine-readable authority for the aihub HTTP API.
+# Downstream consumers (pf CLI, contract tests, pf-daemon) MUST consume this
+# file and MUST NOT reverse-engineer the API from source.
+#
+# Canonical endpoint inventory: docs/design/polyforge-vnext/02-aihub-core.md
+# section 5.1 (26 business rows + management face M1-M5 + the row-26
+# dependency-edge routes). Field-level wire shapes are frozen from the
+# implementation under internal/server/ and internal/core/ (wire truth
+# where the design leaves details open); every divergence is recorded in
+# the operation description.
+#
+# Error model: every non-2xx response carries the ErrorEnvelope
+# {error:{code,reason,detail}}. The typed code (CORE-*/SYNC-*/MEM-*) rides in
+# the body; the HTTP status is derived from it per the root-level
+# x-error-status-map extension, which mirrors internal/server/server.go's
+# errStatus function verbatim.
+# =============================================================================
+openapi: 3.1.0
+info:
+  title: Polyforge AIHub Core API
+  version: 1.0.0
+  summary: Single-port HTTP face of the aihub core service (SQLite Core, owner generations, capsule sync, memory).
+  description: |
+    The AIHub core service exposes every endpoint on ONE HTTP port (02
+    section 5.1, A5: single port, no long connections, no WebSocket/SSE).
+    Default listen address is `:8420` (cmd/aihub flag `-listen`).
+
+    Authentication: every endpoint requires an api_key unless the operation
+    says otherwise (`GET /api/v1/share/{token}` is anonymous by design, 02
+    section 5.1 row 24). Keys travel as `Authorization: Bearer <api_key>`
+    (the implementation also accepts an `X-API-Key` header as a fallback,
+    internal/server/server.go authenticate). Only sha256 hashes are stored.
+
+    Three-tier generation-credential applicability (02 section 5.1):
+      1. No WI context (rows 1, 21): api_key only.
+      2. WI exists, no active generation (rows 5, 7, 10, PATCH of row 3):
+         api_key + state-machine legality; no generation token.
+      3. Active-generation execution plane: the `X-PF-Generation-Token`
+         header is REQUIRED on rows 9 (end-generation), 12 (GET budget),
+         14 (PUT block) and 15 (POST manifest). Row 12 is tier 3 only while
+         the WI has an active generation; without one the read is tier 2
+         (api_key only).
+
+    Row-3 note: GET and PATCH share the `/work-items/{id}` path and count
+    as one canonical row (02 section 5.1 counting rule).
+
+    All timestamps are RFC3339 UTC strings.
+externalDocs:
+  description: Design baseline (docs/design/polyforge-vnext/)
+  url: https://example.invalid/docs/design/polyforge-vnext/02-aihub-core.md
+
+servers:
+  - url: http://localhost:8420
+    description: Single aihub port (02 section 5.1, A5). Host/port configurable via the -listen deployment flag; one HTTP server serves ALL endpoints (business + management face).
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: wi-business
+    description: 'A. WI business rows 1-6 (02 section 5.1).'
+  - name: dependencies
+    description: 'G. Dependency edges - row 26 (02 section 5.1, design amendment polyforge#3; section 4.2a write-path constraints).'
+  - name: execution
+    description: 'B. Execution right rows 7-13 (02 section 5.1).'
+  - name: sync
+    description: 'C. Capsule sync rows 14-20 (02 section 5.1; signatures 05 section 5.1).'
+  - name: machines
+    description: 'D. Machines row 21 (02 section 5.1).'
+  - name: memory
+    description: 'E. Memory rows 22-25 (02 section 5.1; semantics 06 section 5.1).'
+  - name: management
+    description: 'F. Management face M1-M5 (02 section 5.1).'
+
+# Mirrors internal/server/server.go errStatus() verbatim (the code rides in
+# the body; the status is derived). Every code defined by 02 section 5.3
+# (CORE), 05 section 5.2 (SYNC) and 06 section 5.4 (MEM) is mapped to its
+# numeric status: the 403 family (SYNC-403 STALE_OWNER fencing, MEM-403
+# share/redact/update owner-only), MEM-413 (content over the 1 MiB limit)
+# and MEM-501 (DERIVE_FAILED) all carry their own status instead of
+# falling to the errStatus default branch (HTTP 500).
+x-error-status-map:
+  '404': 404
+  CORE-400: 400
+  SYNC-400: 400
+  MEM-400: 400
+  CORE-401: 401
+  CORE-403: 403
+  SYNC-403: 403
+  MEM-403: 403
+  CORE-404: 404
+  MEM-404: 404
+  SYNC-404: 404
+  CORE-409: 409
+  SYNC-409: 409
+  MEM-409: 409
+  CORE-410: 410
+  SYNC-410: 410
+  MEM-410: 410
+  CORE-413: 413
+  CORE-425: 425
+  CORE-500: 500
+  MEM-500: 500
+  CORE-503: 503
+  MEM-503: 503
+  CORE-504: 502
+  MEM-502: 502
+  CORE-507: 507
+  CORE-508: 409
+  CORE-509: 409
+  MEM-501: 501
+  MEM-413: 413
+
+paths:
+  /api/v1/work-items:
+    post:
+      operationId: createWorkItem
+      tags: [wi-business]
+      summary: Create a work item (row 1)
+      description: |
+        Canonical row 1 (02 section 5.1). Create a WI in status `queued`.
+        Design anchors: 02 section 4.2 (fields), 4.2a (parent_id
+        constraints), 4.4/4.5 (workflow reference columns; frontmatter
+        validation + digest freeze as a server-internal creation step),
+        4.6 (repo inventory freeze), 5.1a/INV-2c (attrs blacklist).
+        Tier-1 credential: api_key only, no generation token.
+
+        `bundle_name` non-empty makes an execution ticket (frontmatter
+        validated and the digest frozen in the creation transaction);
+        omitted/empty makes a registration-only ticket (not claimable, 02
+        section 4.4). The three workflow columns and `parent_id` are
+        immutable after creation (INV-2e).
+
+        Implementation divergences encoded here (wire truth): an unknown
+        `project` is CORE-404 (design row 1 lists only CORE-400/CORE-409);
+        the response is the full WorkItemDetail with HTTP 201.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkItemRequest'
+      responses:
+        '201':
+          description: Created; returns the full detail record (base + repo_inventory).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkItemDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    get:
+      operationId: listWorkItems
+      tags: [wi-business]
+      summary: List / filter work items (row 2)
+      description: |
+        Canonical row 2 (02 section 5.1). List and filter WIs; results are
+        pruned by the 4.10 permission hard boundary first (no-membership
+        projects are invisible: CORE-404 for the project, no existence
+        leak). `parent=` rides idx_wi_parent, `milestone=` rides
+        idx_wi_milestone (02 section 4.2). v1 has no pagination.
+
+        Implementation divergences encoded here (wire truth): `project` is
+        required (CORE-400 when absent, CORE-404 when unknown); the response
+        wraps the array as `{items:[...]}`.
+      parameters:
+        - name: project
+          in: query
+          required: true
+          schema: {type: string}
+          description: Project name.
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [queued, running, paused, blocked, wrapped, failed, cancelled]
+        - name: assignee
+          in: query
+          required: false
+          schema: {type: string}
+        - name: waiting_on
+          in: query
+          required: false
+          schema: {type: string}
+        - name: parent
+          in: query
+          required: false
+          schema: {type: string}
+          description: Filter direct children of this epic (epic-lite, 02 section 4.2a).
+        - name: milestone
+          in: query
+          required: false
+          schema: {type: string}
+      responses:
+        '200':
+          description: Matching work items (base records only, no includes).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkItemList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/work-items/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: 'Work item id ("wi_" + 12 random chars, 02 section 4.2).'
+    get:
+      operationId: getWorkItem
+      tags: [wi-business]
+      summary: Work item detail (row 3, GET)
+      description: |
+        Canonical row 3 (02 section 5.1). Detail = base record +
+        `repo_inventory` (with frozen `base`). The `include` parameter is
+        authoritative in 02 section 5.1c (A9): `events` (wi_events stream,
+        5.1a schemas), `deps` (two dependency lists, 4.2a), `children`
+        (direct children + derived rollup, query-time, never stored).
+        Unknown include value -> CORE-400. Events have NO external append
+        endpoint (Core state-machine transactions only). Tier-2 credential:
+        api_key only.
+      parameters:
+        - name: include
+          in: query
+          required: false
+          schema: {type: string}
+          description: 'Comma-separated multi-value: `events`, `deps`, `children`.'
+      responses:
+        '200':
+          description: Detail record; include-selected sections are present when requested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkItemDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      operationId: patchWorkItem
+      tags: [wi-business]
+      summary: Update a work item (row 3, PATCH)
+      description: |
+        Canonical row 3 (02 section 5.1). Partial update of the closed
+        PATCHable field set: goal, content, labels, priority, milestone,
+        waiting_on, attrs. Workflow reference columns (bundle_name,
+        bundle_digest, workflow_budget_baseline) and parent_id are immutable
+        (INV-2e / 4.2a) - sending them -> CORE-400 reason IMMUTABLE. Any
+        other field name -> CORE-400. `attrs` passes the INV-2c recursive
+        execution-state key blacklist (02 section 5.1a). Terminal WI ->
+        CORE-410. Tier-2 credential: api_key only (PATCH of a
+        queued/paused/blocked WI needs no token).
+
+        Implementation divergence encoded here (wire truth): the response
+        is the full WorkItemDetail (200), not a bare ack.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchWorkItemRequest'
+      responses:
+        '200':
+          description: Updated detail record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkItemDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /api/v1/ready-queue:
+    get:
+      operationId: getReadyQueue
+      tags: [wi-business]
+      summary: Ready queue - flat two arrays (row 4)
+      description: |
+        Canonical row 4 (02 section 5.1). Response schema authority: 02
+        section 5.1b (A8) - flat `{executable, blocked}`, no third section,
+        no pagination. `executable` = queued execution tickets with no
+        waiting_on and no unfinished `blocks` edge (registration tickets
+        permanently excluded). `blocked` = blocked + paused WIs plus
+        dependency-waiting queued WIs; `blocked_by` lists unfinished
+        blocking WI ids. Both arrays sort priority (urgent -> low) then
+        created_at. running WIs (including stale) never appear. Caller
+        without project access -> CORE-404 (whole query treated as
+        nonexistent, 4.10).
+
+        Implementation divergences encoded here (wire truth): entries also
+        carry `status` and `labels`; `waiting_on`/`blocked_by` are omitted
+        (not emitted as empty values) when absent; a queued registration
+        ticket with nothing waiting on it appears in NEITHER array.
+      parameters:
+        - name: project
+          in: query
+          required: true
+          schema: {type: string}
+          description: Project name.
+      responses:
+        '200':
+          description: Ready queue for the project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyQueue'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/work-items/{id}/cancel:
+    post:
+      operationId: cancelWorkItem
+      tags: [wi-business]
+      summary: Cancel a non-active work item (row 5)
+      description: |
+        Canonical row 5 (02 section 5.1). Terminate a
+        `queued`/`paused`/`blocked` WI - no active generation exists in
+        those states, so no generation token is required (tier-2
+        credential, 02 section 6.5). Authorization: reporter OR project
+        maintainer OR admin (6.5). A `running` WI must be paused/blocked or
+        force-taken-over first (CORE-409). Already terminal -> CORE-410
+        (implementation fix #15 pins the 409/410 split).
+
+        Implementation divergence encoded here (wire truth): the response
+        is the updated WorkItemDetail (200); no request body is required.
+      responses:
+        '200':
+          description: Cancelled; returns the updated detail record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkItemDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /api/v1/work-items/{id}/progress:
+    get:
+      operationId: getProgress
+      tags: [wi-business]
+      summary: Read-through progress (row 6)
+      description: |
+        Canonical row 6 (02 section 5.1). Progress is NOT Core-side data:
+        the server reconstructs the HEAD revision (05 section 7.4) and
+        passes the complete `runtime-state/execution.json` JSON content
+        through as `progress`, unmodified (02 sections 5.2/6.3, INV-1).
+        Every call re-reads; no materialized cache. `head_seq: null` when
+        the WI was never claimed; CORE-504 when the WI was claimed but
+        nothing was published yet (implementation fix #16) or
+        execution.json is not reconstructable. Freshness = HEAD update time
+        (`freshness_note`).
+
+        Implementation divergences encoded here (wire truth): CORE-504
+        maps to HTTP 502 via errStatus; the never-claimed null-HEAD case
+        answers 200 with null progress fields rather than an error.
+      responses:
+        '200':
+          description: Read-through progress payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProgressResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+  /api/v1/work-items/{id}/dependencies:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Blocked-side work item id (path {id} names the DEPENDENT side).
+    post:
+      operationId: addDependency
+      tags: [dependencies]
+      summary: Create a dependency edge (row 26, POST)
+      description: |
+        Canonical row 26 (02 section 5.1, G group; design amendment
+        polyforge#3). Create one wi_dependencies edge. Path `{id}` is the
+        blocked (dependent) side; the body names the blocking side. `kind`
+        defaults to `blocks`. All 4.2a write-path constraints are enforced
+        in the transaction: same-project hard boundary (CORE-400), no self
+        edge (CORE-400), parent/child exclusion (CORE-400
+        PARENT_CHILD_DEPENDENCY), cycle detection for blocks/supersedes
+        (CORE-409 DEPENDENCY_CYCLE). A `blocks` edge only materializes
+        `waiting_on=dependency:<wi_id>` on a queued WI - it never migrates
+        status. Authorization: writer+ on the project or admin (4.10).
+
+        Implementation divergences encoded here (wire truth): 201 Created
+        with `{ok:true}`; a non-existent edge-endpoint WI -> CORE-404.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DependencyCreateRequest'
+      responses:
+        '201':
+          description: Edge created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    get:
+      operationId: listDependencies
+      tags: [dependencies]
+      summary: List dependency edges (row 26, GET)
+      description: |
+        Canonical row 26 (02 section 5.1). Both edge lists for the WI -
+        same shape as the row-3 `include=deps` assembly (02 section 5.1c):
+        `blocking` (whom this WI blocks) and `blocked_by` (who blocks this
+        WI), each entry `{wi_id, kind}`. Edge endpoints are pruned by the
+        4.10 permission boundary before serving.
+      responses:
+        '200':
+          description: Two dependency lists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deps'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/work-items/{id}/dependencies/{blocking_id}/{kind}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Blocked-side work item id.
+      - name: blocking_id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Blocking-side work item id.
+      - name: kind
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [blocks, supersedes, related]
+    delete:
+      operationId: deleteDependency
+      tags: [dependencies]
+      summary: Delete a dependency edge (row 26, DELETE)
+      description: |
+        Canonical row 26 (02 section 5.1). Physical delete of one edge
+        (4.2a). After removing a `blocks` edge, `waiting_on` is re-derived
+        from the remaining unfinished blockers. Authorization: writer+ on
+        the project or admin. Missing edge -> CORE-404 (implementation,
+        wire truth).
+      responses:
+        '200':
+          description: Edge deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/work-items/{id}/claim:
+    post:
+      operationId: claimWorkItem
+      tags: [execution]
+      summary: Claim - open a new generation (row 7)
+      description: |
+        Canonical row 7 (02 section 5.1). Claim = generation+1 + active
+        owner_generations row + assignee/status/waiting_on update + signed
+        capability token, all in one transaction (02 section 6.1). `resume`
+        and `unblock` are NOT separate endpoints - both re-enter here
+        (2.3). Idempotency hardened (INV-2d/6.6): resending the same
+        `idempotency_key` + same caller identity + same WI returns the
+        cached result (re-signed under the current secret epoch when the
+        cached one went stale; refused `secret_rolled_back` when it
+        predates the rollback boundary R). Same key with a different
+        caller/WI -> CORE-409 IDEMPOTENCY_KEY_REUSED. Registration tickets
+        -> CORE-409 NOT_CLAIMABLE. Tier-2 credential: api_key only, no
+        token.
+
+        Implementation divergences encoded here (wire truth): the response
+        also carries `owner`; a WI with an unfinished `blocks` dependency is
+        hard-rejected CORE-409 DEPENDENCY_BLOCKED (fix #9, matching the
+        5.1b executable exclusion); HTTP status is 200 (not 201).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimRequest'
+      responses:
+        '200':
+          description: Claim result with the generation token and capsule bootstrap payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/work-items/{id}/force-takeover:
+    post:
+      operationId: forceTakeover
+      tags: [execution]
+      summary: Admin force takeover (row 8)
+      description: |
+        Canonical row 8 (02 section 5.1). Admin-only (users.role=admin)
+        takeover: end the old active generation (end_reason=takeover) and
+        open generation+1 for the caller (02 section 6.2). No
+        flush_evidence, no old token required - the authorization is
+        role-based, not execution-plane (02 section 8). The old owner's
+        token becomes CORE-403 stale_generation.
+
+        Implementation divergences encoded here (wire truth): the response
+        is a ClaimResponse WITHOUT capsule_bootstrap (only claim/unblock
+        attach it); terminal WIs and registration tickets are refused
+        (CORE-410 / CORE-409 NOT_CLAIMABLE, fix #5); the request body is an
+        optional `{machine_id}`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                machine_id:
+                  type: string
+                  description: Optional machine to bind to the new generation.
+      responses:
+        '200':
+          description: New generation credentials.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /api/v1/work-items/{id}/end-generation:
+    post:
+      operationId: endGeneration
+      tags: [execution]
+      summary: Four-in-one generation close (row 9)
+      description: |
+        Canonical row 9 (02 section 5.1). One endpoint for the four
+        active-generation-ending transitions (2.5): `reason` in
+        pause|block|wrap|fail. Requires the X-PF-Generation-Token header
+        (tier-3 credential) and the full flush evidence of 02 section 6.4
+        (`flush_evidence` + `frozen_checkpoint`, produced by the Daemon per
+        05 section 6.1). Evidence failures -> CORE-425 with reason MISSING /
+        GENERATION_MISMATCH / NOT_HEAD / MANIFEST_MISMATCH /
+        FROZEN_CHECKPOINT_MISSING / FROZEN_CHECKPOINT_STALE /
+        FROZEN_CHECKPOINT_MISMATCH / UNPUBLISHED_CHANGES. Empty-chain
+        branch (no HEAD ever): only published_seq=0 + empty manifest_sha +
+        bytes_digest == EMPTY_SYNC_BYTES_DIGEST is accepted (6.4 rule 8,
+        05 section 6.1 SYNC-INV-9).
+
+        Implementation divergence encoded here (wire truth): `reason=block`
+        additionally requires a non-empty `waiting_on` body field (fix #11,
+        2.4 invariant).
+      parameters:
+        - $ref: '#/components/parameters/GenerationToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EndGenerationRequest'
+      responses:
+        '200':
+          description: Generation closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '425':
+          $ref: '#/components/responses/FlushRequired'
+
+  /api/v1/work-items/{id}/unblock:
+    post:
+      operationId: unblockWorkItem
+      tags: [execution]
+      summary: Unblock - fresh claim of a blocked WI (row 10)
+      description: |
+        Canonical row 10 (02 section 5.1). `blocked` -> `running` as a NEW
+        claim (generation+1, 2.5/6.2) - the old generation is never
+        revived. Requires status `blocked` (else CORE-409) and an
+        idempotency key (CORE-400 when absent). Tier-2 credential: api_key
+        only, no token. The response carries the capsule bootstrap payload
+        like row 7.
+
+        Implementation divergence encoded here (wire truth): HTTP 200 (not
+        201); the idempotency_key requirement is explicit on this route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimRequest'
+      responses:
+        '200':
+          description: New generation credentials (fresh claim).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/work-items/{id}/budget-increments:
+    post:
+      operationId: addBudgetIncrement
+      tags: [execution]
+      summary: Add a budget increment, CAS (row 11)
+      description: |
+        Canonical row 11 (02 section 5.1). Human-plane budget raise (6.7):
+        authorization is reporter OR project maintainer OR admin - role
+        based, NO generation token (02 section 8). CAS: `based_on_seq` must
+        equal the WI's current global max increment seq (read via row 12);
+        mismatch -> CORE-409 (reason CAS_CONFLICT on the wire, carrying the
+        current max seq in detail). The insert lands seq=based_on_seq+1 in
+        the transaction and appends the `budget_incremented` event (5.1a).
+        The baseline itself is never rewritten (INV-2e, 4.5a).
+
+        Implementation divergence encoded here (wire truth): the response
+        is the full recomputed Budget object (row-12 shape), not a bare
+        ack; a CAS loss carries reason CAS_CONFLICT.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BudgetIncrementRequest'
+      responses:
+        '200':
+          description: Recomputed budget state after the increment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Budget'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/work-items/{id}/budget:
+    get:
+      operationId: getBudget
+      tags: [execution]
+      summary: Workflow budget state (row 12)
+      description: |
+        Canonical row 12 (02 section 5.1). Returns the immutable baseline
+        (workflow_budget_baseline), all granted increments, the
+        per-dimension effective ceilings (baseline + sum of increments,
+        4.5a/6.7 - precomputed so callers need not sum) and the global max
+        increment seq (the `based_on_seq` read source for row 11).
+
+        Tier-3 credential (02 section 5.1): while the WI has an active
+        generation the X-PF-Generation-Token header is REQUIRED and is
+        validated against that generation (CORE-403 with reason
+        stale_generation | secret_rotated_expired | secret_rolled_back on
+        failure); with no active generation the read is tier 2 (api_key
+        only).
+      parameters:
+        - $ref: '#/components/parameters/GenerationTokenTiered'
+      responses:
+        '200':
+          description: Budget baseline, increments, effective ceilings, max seq.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Budget'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/work-items/{id}/repo-inventory:
+    get:
+      operationId: getRepoInventory
+      tags: [execution]
+      summary: Frozen repo inventory (row 13)
+      description: |
+        Canonical row 13 (02 section 5.1). Read-only repo inventory list
+        with the frozen `base` commits (4.6), equivalent to the embedded
+        field of the row-3 detail - lets the remote-site recovery flow (05
+        section 7.4) rebuild the checkout list without pulling the whole WI
+        detail. The response wraps the array as `{repo_inventory:[...]}`
+        (implementation, wire truth).
+      responses:
+        '200':
+          description: Frozen inventory entries in declaration order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [repo_inventory]
+                properties:
+                  repo_inventory:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RepoEntry'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/work-items/{id}/revisions/{seq}/blocks/{sha256}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Work item id.
+      - name: seq
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+        description: Revision seq the block belongs to.
+      - name: sha256
+        in: path
+        required: true
+        schema: {type: string, pattern: '^[0-9a-f]{64}$'}
+        description: Content sha256 of the ORIGINAL (decompressed) file content - the CAS address, not the compressed wire bytes.
+    put:
+      operationId: putBlock
+      tags: [sync]
+      summary: Upload one CAS block (row 14)
+      description: |
+        Canonical row 14 (02 section 5.1). Idempotent content-addressed
+        block upload. X-PF-Generation-Token REQUIRED (tier-3): fencing
+        fires at the block stage already, so a fenced-out old owner cannot
+        pile up orphan blocks (05 sections 2.9/5.1). Body is the block
+        content - 05 section 4.2 stores blocks zstd-compressed; the digest
+        addresses the ORIGINAL content, so the server verifies
+        sha256(decompressed)==path sha (non-zstd payloads are accepted
+        raw). A digest mismatch is SYNC-400 even on the CAS-hit path
+        (implementation fix #6). Blocks are capped at 256 MiB (CORE-413).
+        A CAS hit with a matching digest is a no-op 200.
+
+        Design anchors: 05 section 4.1 (CAS layout), 2.9 (fencing), 02
+        section 5.1 row 14. Only the Daemon calls this route (INV-11).
+
+        Divergence encoded here (wire truth): a fencing rejection is
+        SYNC-403 (reason stale_generation | secret_rotated_expired |
+        secret_rolled_back), surfaced as HTTP 403 (05 section 5.2).
+      parameters:
+        - $ref: '#/components/parameters/GenerationToken'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              maxLength: 268435456
+      responses:
+        '200':
+          description: Block stored (or already present - idempotent no-op).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
+    get:
+      operationId: getBlock
+      tags: [sync]
+      summary: Download one CAS block (row 17)
+      description: |
+        Canonical row 17 (02 section 5.1). Recovery-side pull of a single
+        CAS block (05 section 7.4). Missing block -> SYNC-404. Content
+        type is application/octet-stream (zstd-compressed as stored, 05
+        section 4.2); the recovery side decompresses.
+      responses:
+        '200':
+          description: Block bytes (zstd-compressed as stored).
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/work-items/{id}/revisions/{seq}/manifest:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+      - name: seq
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+    post:
+      operationId: postManifest
+      tags: [sync]
+      summary: Submit a manifest - HEAD advance (row 15)
+      description: |
+        Canonical row 15 (02 section 5.1). X-PF-Generation-Token REQUIRED
+        (tier-3). Accept chain (05 section 5.1 row 15, validation order
+        pinned by implementation fix #10): fencing -> idempotency on
+        (work_item_id, seq, manifest_sha) - a hit returns the current
+        head_seq without any HEAD comparison (05 section 2.8) -> HEAD
+        bootstrap/chain check (SYNC-409 SEQ_CONFLICT; bootstrap requires
+        seq=0 + parent=null, 05 section 2.6) -> manifest_sha recompute
+        over the idempotent view (built_at stripped; SYNC-400
+        MANIFEST_HASH_MISMATCH) -> SYNC-INV-3 (execution_state_included)
+        -> block integrity + path safety (SYNC-400 MODE_MISSING /
+        BLOCK_MISSING / PATH_ESCAPE). Data-first-then-state (05 section
+        2.5): HEAD never moves unless everything landed.
+
+        Implementation divergence encoded here (wire truth): the path
+        `{seq}` must equal `manifest.seq` (else SYNC-400); success answers
+        HTTP 200 `{head_seq}`; a fencing rejection is SYNC-403, surfaced as
+        HTTP 403 (05 section 5.2).
+      parameters:
+        - $ref: '#/components/parameters/GenerationToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManifestSubmit'
+      responses:
+        '200':
+          description: Accepted (or idempotent replay); the current HEAD seq.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [head_seq]
+                properties:
+                  head_seq:
+                    type: integer
+                    format: int64
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
+
+  /api/v1/work-items/{id}/head:
+    get:
+      operationId: getHead
+      tags: [sync]
+      summary: Read the current HEAD pointer (row 16)
+      description: |
+        Canonical row 16 (02 section 5.1). Returns the capsule_heads
+        pointer `{seq, generation, manifest_sha, updated_at}`. No row
+        (pre-bootstrap) -> HTTP 404. Also used by the Daemon for the
+        pending-publish disambiguation three-way branch (05 section 2.8).
+
+        Implementation divergence encoded here (wire truth): the 404
+        envelope's `code` field is the literal string `"404"` (the
+        pre-bootstrap sentinel code produced by capsule.Head), not a
+        SYNC-*/CORE-* code.
+      responses:
+        '200':
+          description: Current HEAD.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Head'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/work-items/{id}/revisions:
+    get:
+      operationId: listRevisions
+      tags: [sync]
+      summary: Revision metadata list since a seq (row 19)
+      description: |
+        Canonical row 19 (02 section 5.1). Recovery-facing manifest metadata
+        list: all revisions with seq >= `since` (inclusive), ascending -
+        lets the remote-site recovery flow (05 section 7.4) locate the
+        latest checkpoint and the increments to replay; block bodies come
+        via row 17.
+
+        Baseline amendment (polyforge#14): 05 section 7.4 replays each
+        revision's manifest OPS over HTTP, which the metadata-only listing
+        could not serve. The optional `include=ops` parameter (same style
+        as row 3's include; no new endpoint, no count change) makes the
+        response carry, per row, that revision's manifest audit content
+        inline (`kind` + `ops`, read from the Core's rev/<seq>/manifest.json
+        audit copy; the metadata fields are unchanged). Default (parameter
+        absent): metadata-only, unchanged behavior. Unknown include value
+        -> CORE-400 (the only legal value here is `ops`).
+
+        Implementation divergences encoded here (wire truth): `since` is
+        required and integer (SYNC-400 when unparsable); the response
+        wraps the array as `{revisions:[...]}`.
+      parameters:
+        - name: since
+          in: query
+          required: true
+          schema: {type: integer, format: int64}
+          description: Include revisions with seq >= since.
+        - name: include
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ops]
+          description: 'When `ops`: each row additionally carries the revision''s manifest audit content (`kind` + `ops`) inline - the ops-bearing variant. Default: metadata-only.'
+      responses:
+        '200':
+          description: Revision metadata list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevisionList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/work-items/{id}/capsule-data:
+    delete:
+      operationId: deleteCapsuleData
+      tags: [sync]
+      summary: Deletion-protection entry - tombstone (row 18)
+      description: |
+        Canonical row 18 (02 section 5.1). Admin-triggered deletion
+        protection (05 section 2.10): persist a capsule_tombstones row
+        (soft delete, 24h revert window). State gate: only terminal WIs
+        (SYNC-409 otherwise); confirmation gate: `confirm` query param must
+        repeat the work item id (SYNC-400 otherwise). Hard deletion happens
+        after the window; never independently of a live HEAD / retained
+        checkpoint.
+
+        Implementation divergences encoded here (wire truth): a reverted
+        tombstone may be re-tombstoned with a fresh 24h window (fix #14);
+        a missing WI -> CORE-404; the response is `{ok:true}`.
+      parameters:
+        - name: confirm
+          in: query
+          required: true
+          schema: {type: string}
+          description: Must repeat the target work item id.
+      responses:
+        '200':
+          description: Tombstone written.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/work-items/{id}/capsule-data/revert-tombstone:
+    post:
+      operationId: revertTombstone
+      tags: [sync]
+      summary: Revert a pending tombstone (row 20)
+      description: |
+        Canonical row 20 (02 section 5.1). Admin-triggered, inside the 24h
+        window: flip the pending capsule_tombstones row to `reverted`;
+        hard delete will not run. No pending tombstone -> SYNC-410.
+
+        Implementation divergence encoded here (wire truth): a revert
+        attempted after hard_delete_at elapsed is SYNC-409 reason
+        WINDOW_ELAPSED (fix #14) - materially different from SYNC-410's
+        "no pending row at all".
+      responses:
+        '200':
+          description: Tombstone reverted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /api/v1/machines/heartbeat:
+    post:
+      operationId: machineHeartbeat
+      tags: [machines]
+      summary: Machine heartbeat upsert (row 21)
+      description: |
+        Canonical row 21 (02 section 5.1). Upsert keyed on `machine_id`.
+        Registration-is-first-heartbeat (02 section 4.10): when no row
+        exists, this call creates the machine user, binds machines.user_id
+        and mints the machine's api_key - the plaintext is returned EXACTLY
+        ONCE (only hashes are stored). Existing rows only refresh
+        last_heartbeat_at/runtime_version (idempotent). Tier-1 credential:
+        api_key only, no generation token.
+
+        Implementation divergences encoded here (wire truth):
+        registration requires a human or admin caller (fix #2 - a machine
+        key cannot mint itself a fresh global identity; CORE-403
+        otherwise); a heartbeat refresh must come from the machine itself
+        or a human/admin (CORE-403 otherwise); the body accepts an optional
+        `display_name` for the machine user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        '200':
+          description: Registration or refresh result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartbeatResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/memories:
+    post:
+      operationId: createMemory
+      tags: [memory]
+      summary: Create a memory (row 22, POST)
+      description: |
+        Canonical row 22 (02 section 5.1). Create a memory entry; the
+        server assigns the `mem_id` (client-supplied `id` is not part of
+        this API shape - 06 section 2.2). Write path: authority Markdown +
+        metadata + FTS row in one transaction (02 section 4.9
+        delete-then-insert invariant); the full 06 section 5.2 three-step
+        write order under backupBarrier lands in the Memory-domain work
+        item. Optional `idempotency_key` dedups retries via the UNIQUE
+        constraint (06 section 2.1 wrap-summary contract; a retry returns
+        the original entry). `owner_user_id` is taken from the
+        authenticated caller, never from the body (06 section 5.2).
+
+        Implementation divergences encoded here (wire truth): the response
+        is the full Entry with HTTP 201 (06 section 5.2 says `{id}`); an
+        unknown project is MEM-404; duplicate-id semantics ride the
+        idempotency key rather than MEM-409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryCreateRequest'
+      responses:
+        '201':
+          description: Created (or the original entry on an idempotency-key replay).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+    get:
+      operationId: listMemories
+      tags: [memory]
+      summary: List project memories (row 22, GET collection)
+      description: |
+        Canonical row 22 (02 section 5.1) - the collection GET of the CRUD
+        group: active memories of one project, visibility-filtered per
+        caller (membership-first, then tiers; 06 sections 4.5/7). The 02
+        row-22 method set "POST/GET/PATCH" over `/api/v1/memories` +
+        `/api/v1/memories/{id}` leaves the collection GET implicit; the
+        implementation serves it (wire truth) - the response wraps the
+        array as `{items:[...]}`.
+      parameters:
+        - name: project
+          in: query
+          required: true
+          schema: {type: string}
+          description: Project name.
+      responses:
+        '200':
+          description: Active, visible memory entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/memories/search:
+    get:
+      operationId: searchMemories
+      tags: [memory]
+      summary: Real-time FTS text search (row 23)
+      description: |
+        Canonical row 23 (02 section 5.1). Real-time trigram FTS retrieval -
+        the ONLY v1 search path (06 section 4.5: no semantic parameter, no
+        vector layer, B02). Write-then-search latency p99 <= 5s (06 section
+        4.5). Filter order is fixed (A17): project membership first, then
+        visibility tiers inside the candidate set.
+
+        Implementation divergences encoded here (wire truth): `project` is
+        a required query parameter (MEM-404 when unknown/absent) - the
+        membership-first filter needs the project scope; the response wraps
+        the array as `{items:[...]}`; a blank `q` is MEM-400; an FTS
+        failure is MEM-503.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: {type: string}
+          description: Trigram FTS text query (06 section 4.4).
+        - name: project
+          in: query
+          required: true
+          schema: {type: string}
+        - name: type
+          in: query
+          required: false
+          schema: {type: string}
+          description: Optional memory type filter (e.g. experience.debug).
+        - name: tags
+          in: query
+          required: false
+          schema: {type: string}
+          description: Comma-separated tag list; an entry must contain all of them.
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, default: 50, maximum: 200}
+      responses:
+        '200':
+          description: Ranked, filtered hits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/memories/rebuild-index:
+    post:
+      operationId: rebuildMemoryIndex
+      tags: [memory]
+      summary: Rebuild the FTS index from authority Markdown (row 25)
+      description: |
+        Canonical row 25 (02 section 5.1). Full re-derivation of the
+        memory_fts index from the authority Markdown files (02 section 4.9:
+        the index is a rebuildable derived artifact; 06 section 5.3 flow).
+        Administration CLI plane: admin only on the wire (CORE-403
+        otherwise, implementation truth).
+
+        Implementation divergence encoded here (wire truth): the response
+        is `{rebuilt:<count>}` (06 section 5.3 step 7 statistics), success
+        HTTP 200.
+      responses:
+        '200':
+          description: Rebuild finished; count of re-indexed entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rebuilt]
+                properties:
+                  rebuilt:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/memories/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: 'Memory id ("mem_" + 12 random chars, server-assigned).'
+    get:
+      operationId: getMemory
+      tags: [memory]
+      summary: Memory detail (row 22, GET)
+      description: |
+        Canonical row 22 (02 section 5.1). Returns the entry metadata plus
+        the authority Markdown content. `format=html` additionally returns
+        a derived HTML document (06 section 4.3 derivation rules; the
+        stale-check + regenerate semantics land in the Memory-domain work
+        item - v1 wraps the authority text in an escaped document so the
+        contract shape holds, implementation truth).
+
+        Implementation divergences encoded here (wire truth): the response
+        is `{entry, content}` (+ `html` when format=html), not a bare
+        frontmatter+body document; redacted/hidden entries are MEM-404.
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [html]
+          description: When set to `html`, include the derived HTML document in the response.
+      responses:
+        '200':
+          description: Memory metadata + authority content.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/DeriveFailed'
+    patch:
+      operationId: patchMemory
+      tags: [memory]
+      summary: Update a memory - new version (row 22, PATCH)
+      description: |
+        Canonical row 22 (02 section 5.1). Replace the authority content
+        (new version): content_sha updated, FTS delete-then-insert in one
+        transaction. Full PATCH field coverage (visibility etc.) plus the
+        history/ archive step land in the Memory-domain work item; the v1
+        wire accepts content/title/tags (implementation truth). Redacted
+        (terminal) entries -> MEM-404 (redacted-as-nonexistent serving
+        semantics; recorded by the #11 contract sweep). Owner-only
+        (MEM-403 otherwise, implementation; 06 section 5.2).
+
+        Implementation divergence encoded here (wire truth): the response
+        is the updated full Entry (06 section 5.2 says `{id, updated_at}`);
+        the owner violation MEM-403 surfaces as HTTP 403 and content over
+        the 1 MiB limit is MEM-413 / HTTP 413 (06 section 5.4).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryUpdateRequest'
+      responses:
+        '200':
+          description: Updated entry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+
+  /api/v1/memories/{id}/redact:
+    post:
+      operationId: redactMemory
+      tags: [memory]
+      summary: Redact - soft delete a memory (row 24)
+      description: |
+        Canonical row 24 (02 section 5.1). Soft delete: move the authority
+        directory to `_redacted/`, mark the row status=redacted and drop
+        the FTS entry (06 section 5.2 redact two-step shape; the
+        backupBarrier read-lock integration lands in the Memory-domain work
+        item). Redaction is auditable, never physical destruction. Already
+        redacted -> MEM-404 (redacted-as-nonexistent serving semantics;
+        recorded by the #11 contract sweep). Owner-only (MEM-403
+        otherwise).
+
+        Implementation divergences encoded here (wire truth): the response
+        is `{ok:true}` (200); the owner violation MEM-403 surfaces as HTTP
+        403 (06 section 5.4).
+      responses:
+        '200':
+          description: Redacted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/memories/{id}/share:
+    post:
+      operationId: shareMemory
+      tags: [memory]
+      summary: Generate an owner share link (row 24)
+      description: |
+        Canonical row 24 (02 section 5.1). Owner-explicit share link (A18):
+        NOT a sixth visibility tier - an explicit exception to the entry's
+        visibility, minted only by the owner (MEM-403 otherwise). The token
+        is opaque, unguessable and non-enumerable; it grants read on
+        exactly this one entry via GET /api/v1/share/{token}.
+
+        Implementation divergences encoded here (wire truth): the token is
+        stateless `"<mem_id>.<hmac-prefix>"` signed with the current service
+        secret epoch (fix #4 - HMAC key derived from the rotatable secret,
+        not a public constant); persistence/revocation lands in the
+        Memory-domain work item; the response is `{share_token}`; the
+        owner violation MEM-403 surfaces as HTTP 403 (06 section 5.4,
+        A18).
+      responses:
+        '200':
+          description: Share token minted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShareResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/share/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema: {type: string}
+        description: Opaque share token minted by POST /api/v1/memories/{id}/share.
+    get:
+      operationId: consumeShare
+      tags: [memory]
+      summary: Anonymous read-only consumption of one shared memory (row 24)
+      description: |
+        Canonical row 24 (02 section 5.1). ANONYMOUS: no api_key, no
+        membership - the middleware skips authentication for this route
+        (02 section 5.1 row 24, A18). Read-only view of exactly ONE
+        memory; no list, no search, no write. Bad/revoked token -> MEM-404
+        without leaking any other object's existence.
+
+        Implementation divergence encoded here (wire truth): the response
+        is `{entry, content}` - the same shape as the authenticated detail
+        GET minus format=html.
+      security: []
+      responses:
+        '200':
+          description: The single shared memory.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/users:
+    post:
+      operationId: createUser
+      tags: [management]
+      summary: Create a user (M1)
+      description: |
+        Canonical management row M1 (02 section 5.1). Users CRUD (human /
+        machine identity, display_name, global role; 4.10). Admin only.
+        `kind` defaults to human, `role` defaults to writer. Machine-user
+        ids get the `mac_` prefix, human ids `usr_` (implementation truth).
+
+        Implementation divergence encoded here (wire truth): the response
+        is the created user record with HTTP 201.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreateRequest'
+      responses:
+        '201':
+          description: Created user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      operationId: listUsers
+      tags: [management]
+      summary: List users (M1)
+      description: |
+        Canonical management row M1 (02 section 5.1). Admin only. The
+        response wraps the array as `{items:[...]}` (implementation truth).
+      responses:
+        '200':
+          description: All users, ordered by id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: User id (usr_* or mac_*).
+    get:
+      operationId: getUser
+      tags: [management]
+      summary: Get one user (M1)
+      description: Canonical management row M1 (02 section 5.1). Admin only.
+      responses:
+        '200':
+          description: The user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      operationId: patchUser
+      tags: [management]
+      summary: Update a user (M1)
+      description: |
+        Canonical management row M1 (02 section 5.1). Admin only. Updates
+        display_name and/or global role; empty/omitted fields are left
+        unchanged (implementation truth). The response is `{ok:true}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserPatchRequest'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/api-keys:
+    post:
+      operationId: createApiKey
+      tags: [management]
+      summary: Issue an API key (M2)
+      description: |
+        Canonical management row M2 (02 section 5.1). Admin only. Mint an
+        api_key for a user; optional project_id narrows the key's scope
+        (scope narrows, never grants - 4.10). Only the sha256 hash is
+        stored; the PLAINTEXT is returned exactly once in this response
+        and never again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyCreateRequest'
+      responses:
+        '201':
+          description: Key issued; the plaintext appears exactly once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      operationId: listApiKeys
+      tags: [management]
+      summary: List API keys (M2)
+      description: |
+        Canonical management row M2 (02 section 5.1). Admin only. Never
+        returns key material - ids, owners, scopes, revocation state only.
+        The response wraps the array as `{items:[...]}` (implementation
+        truth).
+      responses:
+        '200':
+          description: All keys, ordered by id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/api-keys/{id}:
+    delete:
+      operationId: revokeApiKey
+      tags: [management]
+      summary: Revoke an API key (M2)
+      description: |
+        Canonical management row M2 (02 section 5.1). Admin only. Sets
+        revoked_at; the key stops authenticating immediately
+        (authenticate() filters revoked_at IS NULL). The response is
+        `{ok:true}`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+          description: API key id (key_*).
+      responses:
+        '200':
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/projects:
+    post:
+      operationId: createProject
+      tags: [management]
+      summary: Create a project (M3)
+      description: |
+        Canonical management row M3 (02 section 5.1). Admin only. Project
+        definition (id, name, directory visibility flag - 4.10:
+        `visible` only affects directory listing, never data access).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreateRequest'
+      responses:
+        '201':
+          description: Project created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      operationId: listProjects
+      tags: [management]
+      summary: List visible projects (M3)
+      description: |
+        Canonical management row M3 (02 section 5.1). Any authenticated
+        caller: returns projects that are visible=1 OR the caller is a
+        member OR the caller is admin (4.10 directory-visibility rule).
+        Directory listing grants NO data access. The response wraps the
+        array as `{items:[...]}` (implementation truth).
+      responses:
+        '200':
+          description: Projects visible to the caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/projects/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project id OR name (the implementation resolves either - wire truth).
+    get:
+      operationId: getProject
+      tags: [management]
+      summary: Get one project (M3)
+      description: |
+        Canonical management row M3 (02 section 5.1). Requires read access
+        (membership OR admin; CORE-404 otherwise, no existence leak).
+      responses:
+        '200':
+          description: The project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      operationId: patchProject
+      tags: [management]
+      summary: Update a project + membership (M3)
+      description: |
+        Canonical management row M3 (02 section 5.1). Admin or the
+        project's maintainer. Membership management: `members` upserts
+        (role in viewer|writer|maintainer - the permission hard
+        boundary's sole mechanical criterion, 4.10).
+
+        Implementation divergence encoded here (wire truth): a
+        `remove_members` list physically deletes membership rows (fix #18
+        - deliberately simpler than a CAS/expected-removals scheme), and a
+        same-request entry in both lists resolves to removal. The response
+        is `{ok:true}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectPatchRequest'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/backup:
+    post:
+      operationId: adminBackup
+      tags: [management]
+      summary: On-demand backup snapshot (M4)
+      description: |
+        Canonical management row M4 (02 section 5.1). Admin only. Triggers
+        an on-demand SQLite snapshot (VACUUM INTO) under
+        `<data_dir>/backups` - the explicit trigger entry besides the
+        daily hot backup (02 section 11). Failure to produce the snapshot
+        -> CORE-507.
+
+        Implementation divergence encoded here (wire truth): the response
+        is `{backup:<filename>}` naming the produced snapshot file.
+      responses:
+        '200':
+          description: Snapshot written.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [backup]
+                properties:
+                  backup:
+                    type: string
+                    description: Snapshot file name under <data_dir>/backups.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
+
+  /api/v1/service/rotate-secret:
+    post:
+      operationId: rotateSecret
+      tags: [management]
+      summary: Rotate the service secret (M5)
+      description: |
+        Canonical management row M5 (02 section 5.1). Admin only (or
+        startup self-check). Credential rotation, two mutually exclusive
+        modes (6.6): `grace` (old epochs stay valid for a grace window,
+        then expire) and `rollback` (old epochs retire IMMEDIATELY in the
+        same transaction - grace_seconds MUST be 0, else CORE-400; every
+        pre-rollback credential is dead permanently: tokens and idempotent
+        claim caches bound to epoch <= R answer CORE-403
+        secret_rolled_back, the only exit is admin force-takeover). The
+        secret bytes live only in <data_dir>/service.secret.<epoch> (0600),
+        never in SQLite. New claims are unaffected by rotation.
+
+        Implementation divergence encoded here (wire truth):
+        `grace_seconds` for mode=grace is persisted so the sweeper honors
+        the caller-chosen window (fix #13); the response is `{ok:true}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateSecretRequest'
+      responses:
+        '200':
+          description: Rotated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        AIHub api_key as a Bearer token (the implementation also accepts
+        the same key in an X-API-Key header as a fallback,
+        internal/server/server.go authenticate). Only the sha256 hash is
+        stored server-side. Project-scoped keys (api_keys.project_id set)
+        are refused outside their scope by the middleware before any
+        handler runs (02 section 8).
+
+  parameters:
+    GenerationToken:
+      name: X-PF-Generation-Token
+      in: header
+      required: true
+      schema: {type: string}
+      description: |
+        Capability token signed at claim/takeover time:
+        HMAC-SHA256(service_secret[epoch], wi_id + "|" + generation + "|"
+        + machine_id), hex-encoded (02 section 5.1). UNCONDITIONALLY
+        required on the tier-3 execution-plane operations whose wire
+        contract never admits a key-only branch: rows 9 (end-generation),
+        14 (PUT block), 15 (POST manifest) — a request without the header
+        is CORE-403 on its face. Row 12 (GET budget) is tiered instead and
+        uses GenerationTokenTiered (required: false at the schema level,
+        conditionally required per its description). A
+        stale/expired/rolled-back token yields CORE-403 (reason
+        stale_generation | secret_rotated_expired | secret_rolled_back) or
+        SYNC-403 on the sync face (05 section 2.9, with retry_hint
+        reclaim_required).
+    GenerationTokenTiered:
+      name: X-PF-Generation-Token
+      in: header
+      required: false
+      schema: {type: string}
+      description: |
+        Same capability token as GenerationToken (HMAC-SHA256 over
+        wi_id + "|" + generation + "|" + machine_id, 02 section 5.1),
+        but on a TIERED operation the header's applicability is
+        CONDITIONAL, so the parameter is optional at the schema level and
+        the conditional requirement is pinned here instead of a blanket
+        `required: true` (R2C-F8): the header is REQUIRED when the work
+        item has an active generation — the request is then tier 3 and a
+        missing or invalid token yields CORE-403 (reason stale_generation
+        | secret_rotated_expired | secret_rolled_back) — and is NOT
+        required when the work item has no active generation: that branch
+        is tier 2 and the api_key alone authorizes it (02 section 5.1).
+        Used by row 12 (GET budget), the one tiered tier-3 operation.
+
+  responses:
+    BadRequest:
+      description: 'Typed 4xx: CORE-400 / SYNC-400 / MEM-400 (see x-error-status-map).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthorized:
+      description: 'CORE-401: missing or invalid api key.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: 'CORE-403 / SYNC-403 / MEM-403: token, fencing or authorization failure (reason stale_generation | secret_rotated_expired | secret_rolled_back | forbidden, 02 section 5.3, 05 section 5.2, 06 section 5.4).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: 'Typed: CORE-404 / MEM-404 / SYNC-404 / the literal "404" pre-bootstrap sentinel (row 16).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Conflict:
+      description: 'Typed: CORE-409 / SYNC-409 / MEM-409 (state conflict, cycle, CAS, idempotency reuse).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Gone:
+      description: 'Typed: CORE-410 / SYNC-410 / MEM-410 (terminal state or nothing left to revert).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    TooLarge:
+      description: 'CORE-413 / MEM-413: payload exceeds the limit (request bodies capped at 16 MiB, CAS blocks at 256 MiB, memory authority content at 1 MiB - 06 section 5.4).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    FlushRequired:
+      description: 'CORE-425: flush evidence missing or failed validation (02 section 6.4); reason MISSING | GENERATION_MISMATCH | NOT_HEAD | MANIFEST_MISMATCH | FROZEN_CHECKPOINT_MISSING | FROZEN_CHECKPOINT_STALE | FROZEN_CHECKPOINT_MISMATCH | UNPUBLISHED_CHANGES.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    InternalServerError:
+      description: 'CORE-500 / MEM-500 / any unmapped typed code (the errStatus default branch).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    ServiceUnavailable:
+      description: 'CORE-503 / MEM-503: core busy (transaction timeout) or FTS failure.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    BadGateway:
+      description: 'CORE-504 / MEM-502 (progress unavailable / rebuild failed) - mapped to 502 by errStatus.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    InsufficientStorage:
+      description: 'CORE-507: local storage unavailable (write failure, disk full).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    DeriveFailed:
+      description: 'MEM-501: DERIVE_FAILED - the HTML derivation failed; the authority Markdown content is unaffected and retrieval keeps working (06 section 5.4). Served on format=html reads.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'
+      description: The wire error envelope produced by internal/server/server.go writeErr.
+    Error:
+      type: object
+      required: [code, reason, detail]
+      properties:
+        code:
+          type: string
+          description: 'Typed error code: CORE-* / SYNC-* / MEM-* (02 section 5.3, 05 section 5.2, 06 section 5.4), or the literal "404" pre-bootstrap sentinel.'
+          examples:
+            - CORE-409
+            - SYNC-403
+            - MEM-404
+        reason:
+          type: string
+          description: 'Machine-readable sub-reason ("" when none) - e.g. ALREADY_CLAIMED, NOT_CLAIMABLE, IDEMPOTENCY_KEY_REUSED, DEPENDENCY_CYCLE, DEPENDENCY_BLOCKED, CAS_CONFLICT, IMMUTABLE, PARENT_DEPTH, PARENT_NOT_REGISTRY, PARENT_PROJECT_MISMATCH, PARENT_CHILD_DEPENDENCY, INVENTORY_MISMATCH, INVENTORY_BASE_MISSING, EXECUTION_STATE_REJECTED, UNKNOWN_EVENT_TYPE, FRONTMATTER_INVALID, stale_generation, secret_rotated_expired, secret_rolled_back, forbidden, SEQ_CONFLICT, MANIFEST_HASH_MISMATCH, MODE_MISSING, BLOCK_MISSING, PATH_ESCAPE, DIGEST_MISMATCH, STALE_OWNER, WINDOW_ELAPSED, CLIENT_ID_NOT_ALLOWED, FRONTMATTER_INVALID, FRONTMATTER_ID_MISMATCH, MISSING, GENERATION_MISMATCH, NOT_HEAD, FROZEN_CHECKPOINT_MISSING, FROZEN_CHECKPOINT_STALE, FROZEN_CHECKPOINT_MISMATCH, UNPUBLISHED_CHANGES.'
+        detail:
+          type: string
+          description: Human-readable detail (e.g. the hit rule_id for frontmatter failures, 02 section 4.5).
+
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+
+    WorkItem:
+      type: object
+      description: The work_items base record as served (02 section 4.2; internal/core/workitem.WorkItem).
+      required: [id, slug, seq, project_id, project, goal, status, priority, labels, attrs, reporter, workflow_budget_baseline, created_at, updated_at]
+      properties:
+        id: {type: string, description: '"wi_" + 12 random chars.'}
+        slug: {type: string, description: 'Display name "<project>#<seq>".'}
+        seq: {type: integer, format: int64}
+        project_id: {type: string}
+        project: {type: string, description: Project NAME (denormalized for display).}
+        goal: {type: string, maxLength: 500}
+        content: {type: [string, 'null'], description: Markdown background, nullable.}
+        parent_id: {type: [string, 'null'], description: 'Epic-lite parent (depth 1, immutable; 4.2a).'}
+        status:
+          type: string
+          enum: [queued, running, paused, blocked, wrapped, failed, cancelled]
+        priority:
+          type: string
+          enum: [low, normal, high, urgent]
+        milestone: {type: [string, 'null']}
+        labels: {type: array, items: {type: string}, maxItems: 20}
+        attrs:
+          type: object
+          description: 'Business-level free attributes; INV-2c recursive execution-state key blacklist enforced (02 section 5.1a).'
+          additionalProperties: true
+        reporter: {type: string, description: Reporting user id.}
+        assignee: {type: [string, 'null'], description: 'Active generation owner (2.4); kept as the last owner after generation end.'}
+        waiting_on: {type: [string, 'null'], description: 'owner | runtime:<machine_id> | dependency:<wi_id> | gate | null (2.4).'}
+        bundle_name: {type: [string, 'null'], description: 'NULL = registration-only ticket (not claimable; 4.4).'}
+        bundle_digest: {type: [string, 'null'], description: 'sha256 hex of the pinned bundle (immutable, INV-2e).'}
+        workflow_budget_baseline:
+          oneOf:
+            - $ref: '#/components/schemas/BudgetScalars'
+            - type: 'null'
+          description: 'Immutable three-scalar baseline (4.4/4.5); null for registration tickets.'
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        closed_at: {type: [string, 'null'], description: Terminal-state timestamp.}
+
+    WorkItemDetail:
+      description: 'Row-3 GET/PATCH response: base record + repo_inventory + include-selected sections (02 section 5.1c).'
+      allOf:
+        - $ref: '#/components/schemas/WorkItem'
+        - type: object
+          required: [repo_inventory]
+          properties:
+            repo_inventory:
+              type: array
+              items:
+                $ref: '#/components/schemas/RepoEntry'
+            events:
+              type: array
+              items:
+                $ref: '#/components/schemas/WIEvent'
+              description: 'Present only with include=events (wi_events stream, id ascending).'
+            deps:
+              $ref: '#/components/schemas/Deps'
+            children:
+              $ref: '#/components/schemas/ChildrenRollup'
+
+    WorkItemList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkItem'
+
+    RepoEntry:
+      type: object
+      description: One wi_repo_inventory row with the frozen base (02 section 4.6).
+      required: [position, name, url, base]
+      properties:
+        position: {type: integer, format: int64, description: 'Declaration order 1..8.'}
+        name: {type: string}
+        url: {type: string}
+        subdir: {type: [string, 'null'], description: 'Optional in-repo subdirectory anchor.'}
+        base: {type: string, description: 'Frozen commit sha (immutable after the creation transaction).'}
+
+    CreateWorkItemRequest:
+      type: object
+      description: 'POST /api/v1/work-items body (02 sections 4.2/4.5/4.6). Reporter is taken from the authenticated caller, never the body.'
+      required: [project, goal]
+      properties:
+        project: {type: string, description: Project name.}
+        goal: {type: string, maxLength: 500}
+        content: {type: [string, 'null']}
+        parent_id: {type: [string, 'null'], description: 'Epic-lite parent; all 4.2a write-path constraints enforced.'}
+        priority:
+          type: string
+          enum: [low, normal, high, urgent]
+          default: normal
+        milestone: {type: [string, 'null']}
+        labels: {type: array, items: {type: string}, maxItems: 20}
+        attrs: {type: object, additionalProperties: true}
+        bundle_name:
+          type: [string, 'null']
+          description: 'Non-empty = execution ticket (frontmatter validated, digest frozen in-transaction, 4.5); null/empty = registration-only ticket.'
+        repo_inventory:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/RepoDecl'
+        repo_inventory_base:
+          type: array
+          description: 'Must match repo_inventory in count and name set; each entry freezes the base commit (4.6).'
+          items:
+            $ref: '#/components/schemas/RepoBaseDecl'
+
+    RepoDecl:
+      type: object
+      required: [name, url]
+      properties:
+        name: {type: string, description: 'Repo short name; unique within the WI.'}
+        url: {type: string}
+        subdir: {type: [string, 'null']}
+
+    RepoBaseDecl:
+      type: object
+      required: [name, base]
+      properties:
+        name: {type: string}
+        base: {type: string, description: Commit sha to freeze.}
+
+    PatchWorkItemRequest:
+      type: object
+      description: |
+        Closed PATCHable field set (02 section 5.1 row 3).
+        bundle_name / bundle_digest / workflow_budget_baseline / parent_id
+        are immutable (INV-2e / 4.2a): sending them -> CORE-400 reason
+        IMMUTABLE. Any other key -> CORE-400.
+      additionalProperties: false
+      properties:
+        goal: {type: string, minLength: 1}
+        content: {type: [string, 'null']}
+        labels: {type: array, items: {type: string}, maxItems: 20}
+        priority:
+          type: string
+          enum: [low, normal, high, urgent]
+        milestone: {type: [string, 'null']}
+        waiting_on: {type: [string, 'null']}
+        attrs: {type: object, additionalProperties: true}
+
+    ReadyQueue:
+      type: object
+      description: 'Flat two-array ready queue (02 section 5.1b, A8); no pagination, no third section.'
+      required: [project, executable, blocked]
+      properties:
+        project: {type: string}
+        executable:
+          type: array
+          description: 'Queued execution tickets with no waiting_on and no unfinished blocks edge, sorted priority then created_at.'
+          items:
+            $ref: '#/components/schemas/ReadyQueueEntry'
+        blocked:
+          type: array
+          description: 'Blocked + paused WIs plus dependency-waiting queued WIs, sorted priority then created_at.'
+          items:
+            $ref: '#/components/schemas/ReadyQueueEntry'
+
+    ReadyQueueEntry:
+      type: object
+      required: [id, slug, goal, priority, status, bundle_name, created_at, labels]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        goal: {type: string}
+        priority:
+          type: string
+          enum: [low, normal, high, urgent]
+        status:
+          type: string
+          enum: [queued, paused, blocked]
+        bundle_name: {type: [string, 'null']}
+        waiting_on:
+          type: [string, 'null']
+          description: Omitted when null (implementation omitempty).
+        blocked_by:
+          type: array
+          items: {type: string}
+          description: Unfinished blocking WI ids; omitted when empty (implementation omitempty).
+        created_at: {type: string, format: date-time}
+        labels: {type: array, items: {type: string}}
+
+    ClaimRequest:
+      type: object
+      description: 'POST claim / unblock body (02 sections 6.1/6.6; INV-2d triple binding).'
+      required: [idempotency_key]
+      properties:
+        idempotency_key:
+          type: string
+          description: 'Client idempotency key; same key + same caller + same WI replays the cached claim result.'
+        machine_id:
+          type: string
+          description: 'Machine the generation is bound to (owner_generations.machine_id); the token is triple-bound to it.'
+
+    ClaimResponse:
+      type: object
+      description: 'Claim/unblock/takeover response (02 section 6.1 step 4; internal/core/owner.ClaimResponse).'
+      required: [generation, generation_token, secret_epoch, owner]
+      properties:
+        generation: {type: integer, format: int64}
+        generation_token:
+          type: string
+          description: 'HMAC capability token (02 section 5.1); pass back as X-PF-Generation-Token on tier-3 operations.'
+        secret_epoch:
+          type: integer
+          description: 'Secret epoch the token was signed under; a value below the rollback boundary R is dead permanently (6.6).'
+        owner: {type: string, description: Assignee user id of the new generation.}
+        capsule_bootstrap:
+          $ref: '#/components/schemas/CapsuleBootstrap'
+
+    CapsuleBootstrap:
+      type: object
+      description: |
+        Execution bootstrap payload attached to claim/unblock responses (02
+        section 8: the machine needs no data-plane reads to execute).
+        Absent on force-takeover responses (implementation truth).
+      required: [work_item_id, bundle_name, bundle_digest, workflow_budget_baseline, repo_inventory]
+      properties:
+        work_item_id: {type: string}
+        bundle_name: {type: [string, 'null']}
+        bundle_digest: {type: [string, 'null']}
+        workflow_budget_baseline:
+          oneOf:
+            - $ref: '#/components/schemas/BudgetScalars'
+            - type: 'null'
+        repo_inventory:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepoEntry'
+
+    EndGenerationRequest:
+      type: object
+      description: |
+        Four-in-one generation-close body (02 section 5.1 row 9; flush
+        evidence protocol 6.4; Daemon-side generation 05 section 6.1).
+      required: [reason, flush_evidence]
+      properties:
+        reason:
+          type: string
+          enum: [pause, block, wrap, fail]
+        flush_evidence:
+          oneOf:
+            - $ref: '#/components/schemas/FlushEvidence'
+            - type: 'null'
+          description: 'Null/missing -> CORE-425 reason MISSING.'
+        waiting_on:
+          type: string
+          description: 'REQUIRED when reason=block (implementation fix #11; maps workflow terminal states to blocked + waiting_on=owner, 2.5).'
+
+    FlushEvidence:
+      type: object
+      description: '02 section 6.4 evidence object; all fact fields are Daemon-generated (D6).'
+      required: [published_generation, published_seq, manifest_sha, frozen_checkpoint]
+      properties:
+        published_generation:
+          type: integer
+          format: int64
+          description: Must equal the generation resolved from the token.
+        published_seq:
+          type: integer
+          format: int64
+          description: 'Last published Revision seq of this generation (= previous HEAD seq when nothing new was published); sentinel 0 ONLY in the no-HEAD empty-chain branch.'
+        manifest_sha:
+          type: string
+          description: 'capsule_revisions.manifest_sha of (wi, published_seq); empty string in the empty-chain branch.'
+        frozen_checkpoint:
+          $ref: '#/components/schemas/FrozenCheckpoint'
+
+    FrozenCheckpoint:
+      type: object
+      description: 'Binding to the post-freeze final local checkpoint (02 section 6.4 rule 6).'
+      required: [scanned_at, bytes_digest, worktree_state, manifest_sha, matches_head]
+      properties:
+        scanned_at:
+          type: string
+          format: date-time
+          description: 'Freeze-scan completion moment; older than the freshness window (default 60s) -> CORE-425 FROZEN_CHECKPOINT_STALE.'
+        bytes_digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: 'sha256 over the canonical-JSON of the sorted (path, sha256, mode) list; equals EMPTY_SYNC_BYTES_DIGEST (sha256("[]") = 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945) in the empty-chain branch.'
+        worktree_state:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: 'sha256 over the canonical-JSON of the per-inventory-repo {name, base, head, dirty_count} list.'
+        manifest_sha:
+          type: string
+          description: 'Alignment declaration - always equals the outer flush_evidence.manifest_sha (current HEAD row digest); never a freshly computed candidate.'
+        matches_head:
+          type: boolean
+          description: 'Judged against the HEAD at submission time; false is only the failed shape (CORE-425 UNPUBLISHED_CHANGES) - a successful close is never submitted with false. Ignored in the empty-chain branch.'
+
+    ManifestSubmit:
+      type: object
+      description: |
+        POST manifest body (05 section 5.1 row 15 / 4.2): the manifest rides
+        in the body; manifest_sha is transmitted at the outer level, never
+        embedded in the manifest (self-referential digest resolution). The
+        sha is computed over the idempotent view (built_at stripped) with
+        canonical JSON (UTF-8, keys in code-point order, 2-space indent, no
+        trailing newline).
+      required: [manifest, manifest_sha]
+      properties:
+        manifest:
+          $ref: '#/components/schemas/Manifest'
+        manifest_sha:
+          type: string
+          description: 'Format "sha256:<64-hex>" over the idempotent view (05 section 4.2).'
+
+    Manifest:
+      type: object
+      description: 'The rev/<seq>/manifest.json object (05 section 4.2; internal/core/capsule.Manifest).'
+      required: [work_item_id, seq, parent, generation, kind, ops, live_files, data_bytes, execution_state_included, built_at]
+      properties:
+        work_item_id: {type: string}
+        seq: {type: integer, format: int64}
+        parent:
+          type: [integer, 'null']
+          format: int64
+          description: 'null ONLY for the seq=0 bootstrap sentinel; otherwise seq-1.'
+        generation: {type: integer, format: int64, description: Publisher's owner generation (fencing input).}
+        kind:
+          type: string
+          enum: [incremental, checkpoint]
+          description: 'checkpoint (every 64 revisions or >512 MiB) carries a full put list; incremental is relative to parent.'
+        ops:
+          type: array
+          description: 'Data/artifact ops are fixed BEFORE the runtime-state/execution.json put (SYNC-INV-6).'
+          items:
+            $ref: '#/components/schemas/ManifestOp'
+        live_files: {type: integer, format: int64}
+        data_bytes: {type: integer, format: int64}
+        execution_state_included:
+          type: boolean
+          enum: [true]
+          description: 'SYNC-INV-3 assertion: the complete runtime-state/execution.json put is in ops; false -> SYNC-400.'
+        built_at:
+          type: string
+          format: date-time
+          description: 'Audit-only generation moment; EXCLUDED from manifest_sha (B10).'
+
+    ManifestOp:
+      type: object
+      required: [op, path]
+      properties:
+        op:
+          type: string
+          enum: [put, delete, symlink, chmod]
+        path:
+          type: string
+          description: 'Sync-root-relative; "..", absolute paths, backslashes and NUL rejected (SYNC-400 PATH_ESCAPE).'
+        sha256: {type: string, description: 'put only - CAS address of the original (decompressed) content.'}
+        bytes: {type: integer, format: int64, description: put only.}
+        mode:
+          type: integer
+          format: int64
+          description: 'POSIX permission bits for put/chmod (420=0644, 493=0755); REQUIRED on put (SYNC-400 MODE_MISSING).'
+        target: {type: string, description: symlink only - resolved target must stay inside the sync root.}
+
+    Head:
+      type: object
+      description: 'capsule_heads pointer (02 section 4.8; row 16).'
+      required: [seq, generation, manifest_sha, updated_at]
+      properties:
+        seq: {type: integer, format: int64}
+        generation: {type: integer, format: int64}
+        manifest_sha: {type: string}
+        updated_at: {type: string, format: date-time}
+
+    RevisionMeta:
+      type: object
+      description: 'One capsule_revisions row as served by row 19 (recovery listing). With include=ops (amendment polyforge#14) each row additionally carries the manifest audit content inline - the ops-bearing variant; the metadata properties are identical in both variants.'
+      required: [seq, parent, generation, manifest_sha, data_bytes, published_at]
+      properties:
+        seq: {type: integer, format: int64}
+        parent:
+          type: [integer, 'null']
+          format: int64
+        generation: {type: integer, format: int64}
+        manifest_sha: {type: string}
+        data_bytes: {type: integer, format: int64}
+        published_at: {type: string, format: date-time}
+        kind:
+          type: string
+          enum: [incremental, checkpoint]
+          description: 'Ops-bearing variant only (include=ops): manifest kind from the rev/<seq>/manifest.json audit copy.'
+        ops:
+          type: array
+          description: 'Ops-bearing variant only (include=ops): manifest ops from the rev/<seq>/manifest.json audit copy - the replay input of 05 section 7.4.'
+          items:
+            $ref: '#/components/schemas/ManifestOp'
+
+    RevisionList:
+      type: object
+      required: [revisions]
+      properties:
+        revisions:
+          type: array
+          items:
+            $ref: '#/components/schemas/RevisionMeta'
+
+    ProgressResponse:
+      type: object
+      description: 'Read-through progress (02 section 5.2); head fields are null when the WI was never claimed.'
+      required: [work_item_id, head_seq, head_generation, progress, head_updated_at, freshness_note]
+      properties:
+        work_item_id: {type: string}
+        head_seq:
+          type: [integer, 'null']
+          format: int64
+        head_generation:
+          type: [integer, 'null']
+          format: int64
+        progress:
+          description: 'The complete runtime-state/execution.json JSON content, passed through verbatim (03 section 4.2 schema); null when no HEAD exists.'
+        head_updated_at:
+          type: [string, 'null']
+          format: date-time
+        freshness_note:
+          type: string
+          description: 'Data-as-of-the-last-publish marker (e.g. "数据截至最近一次发布" / "no published revision yet").'
+
+    BudgetScalars:
+      type: object
+      description: 'Immutable workflow-level budget baseline / effective ceilings: three scalars, positive integer or null (= no upper bound) (02 sections 4.4/4.5a).'
+      required: [requests, tokens, wall_minutes]
+      properties:
+        requests:
+          type: [integer, 'null']
+        tokens:
+          type: [integer, 'null']
+        wall_minutes:
+          type: [integer, 'null']
+
+    Budget:
+      type: object
+      description: 'Row-12 response: baseline + increments + precomputed effective ceilings + global max seq (02 sections 4.5a/6.7).'
+      required: [baseline, increments, effective, max_seq]
+      properties:
+        baseline:
+          oneOf:
+            - $ref: '#/components/schemas/BudgetScalars'
+            - type: 'null'
+        increments:
+          type: array
+          items:
+            $ref: '#/components/schemas/BudgetIncrement'
+        effective:
+          oneOf:
+            - $ref: '#/components/schemas/BudgetScalars'
+            - type: 'null'
+          description: Per-dimension current ceilings (baseline + sum of increments), precomputed server-side.
+        max_seq:
+          type: integer
+          format: int64
+          description: 'Global max increment seq across ALL dimensions (the based_on_seq CAS read source; 0 when none).'
+
+    BudgetIncrement:
+      type: object
+      required: [dimension, seq, amount, granted_by, granted_at]
+      properties:
+        dimension:
+          type: string
+          enum: [requests, tokens, wall_minutes]
+        seq: {type: integer, format: int64, description: 'Global per-WI sequence (dimensions share one sequence, 4.5a).'}
+        amount: {type: integer, format: int64}
+        granted_by: {type: string}
+        granted_at: {type: string, format: date-time}
+        note: {type: [string, 'null']}
+
+    BudgetIncrementRequest:
+      type: object
+      description: 'Row-11 body (02 section 6.7 CAS protocol).'
+      required: [dimension, amount, based_on_seq]
+      properties:
+        dimension:
+          type: string
+          enum: [requests, tokens, wall_minutes]
+        amount: {type: integer, format: int64, minimum: 1}
+        note: {type: string, description: 'Free-text human annotation, optional.'}
+        based_on_seq:
+          type: integer
+          format: int64
+          description: 'Current global max seq read via row 12; mismatch -> CORE-409 reason CAS_CONFLICT (retry after re-reading).'
+
+    HeartbeatRequest:
+      type: object
+      required: [machine_id]
+      properties:
+        machine_id:
+          type: string
+          description: 'Upsert key; a new id performs registration in this very call (4.10).'
+        runtime_version: {type: string}
+        display_name:
+          type: string
+          description: 'Display name for the machine user at registration (implementation extension; defaults to "machine <id>").'
+
+    HeartbeatResponse:
+      type: object
+      required: [machine_id, registered]
+      properties:
+        machine_id: {type: string}
+        registered:
+          type: boolean
+          description: 'true = this call performed the registration; false = heartbeat refresh of an existing row.'
+        user_id:
+          type: string
+          description: 'Bound machine user id (registration path).'
+        api_key:
+          type: string
+          description: 'Machine api_key PLAINTEXT - returned exactly once, at registration only; only hashes are stored.'
+
+    MemoryEntry:
+      type: object
+      description: 'The memories row as served (02 section 4.9; internal/memory.Entry). The authority content lives in the memory.md file, addressed by content_sha.'
+      required: [id, project_id, owner_user_id, type, visibility, content_sha, content_len, tags, related, status, created_at, updated_at]
+      properties:
+        id: {type: string, description: '"mem_" + 12 random chars, server-assigned (06 section 2.2).'}
+        project_id: {type: string}
+        owner_user_id: {type: string, description: 'Authenticated creator; private-visibility judge (06 section 8).'}
+        work_item_id: {type: [string, 'null']}
+        type: {type: string, description: 'Type domain follows current practice (e.g. experience.debug).'}
+        title: {type: [string, 'null'], maxLength: 120}
+        visibility:
+          type: string
+          enum: [private, project, team, public, admin]
+          description: 'Exactly five tiers (06 section 4.2); share links are NOT a sixth tier (A18).'
+        content_sha: {type: string, description: 'sha256 of the authority memory.md (INV-7c).'}
+        content_len: {type: integer, format: int64}
+        tags: {type: array, items: {type: string}}
+        related: {type: array, items: {type: string}, description: 'mem_* ids; same-project only in v1 (06 section 11).'}
+        status:
+          type: string
+          enum: [active, redacted]
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+
+    MemoryDetail:
+      type: object
+      description: 'Memory detail response: metadata + authority Markdown content (+ derived HTML when format=html).'
+      required: [entry, content]
+      properties:
+        entry:
+          $ref: '#/components/schemas/MemoryEntry'
+        content:
+          type: string
+          description: The authority Markdown body.
+        html:
+          type: string
+          description: 'Derived HTML document (06 section 4.3 rules; present only with format=html).'
+
+    MemoryList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryEntry'
+
+    MemoryCreateRequest:
+      type: object
+      description: |
+        POST /api/v1/memories body. The server assigns the id; a
+        client-supplied id field is not part of this shape (06 section
+        2.2 would reject one as MEM-400 CLIENT_ID_NOT_ALLOWED). owner is
+        taken from the authenticated caller.
+      required: [project, type, visibility, content]
+      properties:
+        project: {type: string, description: Project name.}
+        type: {type: string}
+        title: {type: [string, 'null']}
+        visibility:
+          type: string
+          enum: [private, project, team, public, admin]
+        content:
+          type: string
+          description: 'Authority Markdown body (frontmatter mirrored by the server into memory.md; 06 section 4.2).'
+        tags: {type: array, items: {type: string}}
+        related: {type: array, items: {type: string}}
+        work_item_id: {type: [string, 'null']}
+        idempotency_key:
+          type: [string, 'null']
+          description: 'Optional explicit idempotency key (e.g. wrap-summary-<wi>-<generation>); UNIQUE-constraint dedup returns the original entry on replay (06 section 2.1).'
+
+    MemoryUpdateRequest:
+      type: object
+      description: 'PATCH body (v1 wire: content/title/tags; full 06 section 5.2 field coverage lands in the Memory-domain work item).'
+      required: [content]
+      properties:
+        content: {type: string}
+        title: {type: [string, 'null']}
+        tags: {type: array, items: {type: string}}
+
+    ShareResponse:
+      type: object
+      required: [share_token]
+      properties:
+        share_token:
+          type: string
+          description: 'Opaque owner-minted share token; consume anonymously via GET /api/v1/share/{token}.'
+
+    WIEvent:
+      type: object
+      description: |
+        One wi_events row (02 sections 4.7/5.1a). Events are appended ONLY
+        by Core state-machine transactions - there is no external append
+        endpoint; external reads go through include=events.
+      required: [id, created_at, event_type, payload]
+      properties:
+        id: {type: integer, format: int64}
+        created_at: {type: string, format: date-time}
+        actor: {type: [string, 'null'], description: 'Null = system event.'}
+        event_type:
+          type: string
+          enum: [claimed, paused, resumed, blocked, unblocked, wrapped, failed, cancelled, capsule_registered, capsule_takeover, budget_incremented, secret_rotated, note]
+          description: 'Closed enumeration (02 section 5.1a); workflow terminal causes (failed_gate etc.) never enter the Core event stream (INV-2c).'
+        payload:
+          type: object
+          additionalProperties: true
+          description: |
+            Closed per-type key set + recursive execution-state key
+            blacklist (INV-2c): lifecycle types {generation, reason?};
+            capsule_registered/capsule_takeover {machine_id, generation};
+            budget_incremented {seq, dimension, amount}; secret_rotated
+            {epoch}; note {text} (<=4KB).
+
+    Deps:
+      type: object
+      description: 'Two dependency lists (02 sections 4.2a/5.1c) - same shape served by include=deps and row 26 GET.'
+      required: [blocking, blocked_by]
+      properties:
+        blocking:
+          type: array
+          description: WIs this WI blocks.
+          items:
+            $ref: '#/components/schemas/DependencyEdge'
+        blocked_by:
+          type: array
+          description: WIs blocking this WI.
+          items:
+            $ref: '#/components/schemas/DependencyEdge'
+
+    DependencyEdge:
+      type: object
+      required: [wi_id, kind]
+      properties:
+        wi_id: {type: string}
+        kind:
+          type: string
+          enum: [blocks, supersedes, related]
+
+    DependencyCreateRequest:
+      type: object
+      description: 'Row-26 POST body: path {id} is the blocked side; the body names the blocking side (02 section 5.1 row 26).'
+      required: [blocking_wi_id]
+      properties:
+        blocking_wi_id: {type: string}
+        kind:
+          type: string
+          enum: [blocks, supersedes, related]
+          default: blocks
+
+    ChildrenRollup:
+      type: object
+      description: 'include=children assembly: direct children + query-time rollup (never stored; 02 section 5.1c).'
+      required: [children, rollup]
+      properties:
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkItem'
+        rollup:
+          type: object
+          required: [total, wrapped, running, blocked, queued]
+          properties:
+            total: {type: integer}
+            wrapped: {type: integer}
+            running: {type: integer}
+            blocked: {type: integer}
+            queued: {type: integer}
+
+    User:
+      type: object
+      required: [id, display_name, kind, role]
+      properties:
+        id: {type: string, description: 'usr_* (human) or mac_* (machine).'}
+        display_name: {type: string}
+        kind:
+          type: string
+          enum: [human, machine]
+        role:
+          type: string
+          enum: [admin, writer]
+          description: Global role across every project (4.10).
+
+    UserCreateRequest:
+      type: object
+      required: [display_name]
+      properties:
+        display_name: {type: string}
+        kind:
+          type: string
+          enum: [human, machine]
+          default: human
+        role:
+          type: string
+          enum: [admin, writer]
+          default: writer
+
+    UserPatchRequest:
+      type: object
+      properties:
+        display_name: {type: string}
+        role:
+          type: string
+          enum: [admin, writer]
+
+    UserList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+
+    ApiKeyCreateRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id: {type: string}
+        project_id:
+          type: [string, 'null']
+          description: 'Optional project scope; NULL = the whole visible plane of the owning user. Scope narrows, never grants (4.10).'
+
+    ApiKeyCreated:
+      type: object
+      required: [id, user_id, api_key]
+      properties:
+        id: {type: string}
+        user_id: {type: string}
+        api_key:
+          type: string
+          description: PLAINTEXT - returned exactly once; only the sha256 hash is stored.
+
+    ApiKeyList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, user_id, project_id, revoked_at]
+            properties:
+              id: {type: string}
+              user_id: {type: string}
+              project_id: {type: [string, 'null']}
+              revoked_at: {type: [string, 'null'], format: date-time}
+
+    Project:
+      type: object
+      required: [id, name, visible]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        visible:
+          type: boolean
+          description: 'Directory-listing visibility only - grants NO data access (4.10).'
+
+    ProjectCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+        visible: {type: boolean, default: true}
+
+    ProjectPatchRequest:
+      type: object
+      properties:
+        members:
+          type: array
+          description: Upsert membership rows (admin or project maintainer).
+          items:
+            type: object
+            required: [user_id, role]
+            properties:
+              user_id: {type: string}
+              role:
+                type: string
+                enum: [viewer, writer, maintainer]
+        remove_members:
+          type: array
+          description: 'Explicit physical removal list (implementation fix #18); wins over members on a same-request conflict.'
+          items: {type: string}
+        visible: {type: boolean}
+
+    ProjectList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Project'
+
+    RotateSecretRequest:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [grace, rollback]
+          description: 'grace = old epochs valid for a window then expire; rollback = old epochs retire immediately, permanently (6.6).'
+        grace_seconds:
+          type: integer
+          description: 'Grace window for mode=grace (persisted, honored by the sweeper); MUST be 0 for mode=rollback (else CORE-400).'
