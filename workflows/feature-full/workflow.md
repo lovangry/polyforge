@@ -1,16 +1,16 @@
 ---
 name: feature-full
 steps:
-  - { id: grill, kind: qa, interactive: true }
-  - { id: spec, kind: spec }
-  - { id: grill-review, kind: qa, interactive: true, gate: true, on_fail: { action: rewind, target: spec } }
-  - { id: plan, kind: author }
-  - { id: code, kind: code, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: e2e-author, kind: author }
-  - { id: verification, kind: gate, gate: true, on_fail: { action: rewind, target: code } }
-  - { id: e2e-run, kind: code }
-  - { id: review, kind: review, gate: true, on_fail: { action: rewind, target: code } }
-  - { id: release, kind: code, gate: true, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: review } }
+  - { id: grill, kind: qa, interactive: true, budget: { wall_minutes: 30 } }
+  - { id: spec, kind: spec, budget: { wall_minutes: 15 } }
+  - { id: grill-review, kind: qa, interactive: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { action: rewind, target: spec } }
+  - { id: plan, kind: author, budget: { wall_minutes: 15 } }
+  - { id: code, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: e2e-author, kind: author, budget: { wall_minutes: 15 } }
+  - { id: verification, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
+  - { id: e2e-run, kind: code, budget: { wall_minutes: 30 } }
+  - { id: review, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
+  - { id: release, kind: code, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: review } }
 budget: { requests: 200, tokens: 500000, wall_minutes: 240 }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
@@ -99,10 +99,26 @@ the workflow in `failed_rewind_exhausted`, not an infinite loop.
 The frontmatter workflow-level budget (`requests: 200, tokens: 500000, wall_minutes: 240`)
 is sized for one full pass through all ten steps plus one rewind of the most expensive
 lane (`code` + `verification` + `e2e-run` + `review`). Projects with larger codebases or
-slower CI should raise the workflow-level ceiling and/or add a per-step `budget` override
-on `code`/`e2e-run` rather than trying to fit a bigger repo into the reference default.
-Do not treat hitting the budget as a quality signal — it is purely a resource ceiling
-(`WF-103 OVER_BUDGET`), unrelated to gate verdicts, and never triggers rewind.
+slower CI should raise the workflow-level ceiling and/or raise the per-step
+`budget.wall_minutes` on `code`/`e2e-run` rather than trying to fit a bigger repo into
+the reference default. Do not treat hitting the budget as a quality signal — it is
+purely a resource ceiling (`WF-103 OVER_BUDGET`), unrelated to gate verdicts, and never
+triggers rewind.
+
+Every step declares its own `budget.wall_minutes`: the interactive checkpoints `grill`
+and `grill-review` get 30 (the user's own thinking time is inside the step), the
+authoring steps `spec`/`plan`/`e2e-author` 15, the code-writing steps `code`/`e2e-run`
+30, `release` 20, and the judgment gates `verification`/`review` 20 — summing to 225
+minutes, under the 240-minute workflow ceiling so one in-budget pass never busts it.
+The per-step wall is what the daemon watchdog's absolute backstop over a single agent
+instance is computed from: `max(3× the step's declared wall, 15 min)`. A step declaring
+nothing falls back to a 5-minute assumed wall, collapsing the backstop to its
+15-minute floor and bounded-terminating agents that are still legitimately working
+(measured attempts run 2–5 minutes healthy, 15–52 minutes in the slow tail, and
+interactive steps routinely exceed 15). Declared walls stay within `[5, 60]` by
+convention (enforced by `internal/workflow/schema/bundles_test.go`): at least 5 so the
+backstop is genuinely `3× wall` rather than clamped to the floor, at most 60 so one
+attempt never books more than an hour.
 
 ## The release step (per-project convention)
 

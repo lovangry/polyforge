@@ -4,14 +4,14 @@ description: Light remediation flow - one interactive checkpoint, a single fix p
 rewind:
   max_total: 2
   max_per_step: 2
-budget: { requests: 60, tokens: 150000, wall_minutes: 90 }
+budget: { requests: 60, tokens: 150000, wall_minutes: 180 }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: grill, kind: spec, interactive: true }
-  - { id: fix, kind: code, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verification, kind: gate, gate: true, on_fail: { action: rewind, target: fix } }
-  - { id: release, kind: code, gate: true, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: fix } }
+  - { id: grill, kind: spec, interactive: true, budget: { wall_minutes: 30 } }
+  - { id: fix, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: verification, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
+  - { id: release, kind: code, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: fix } }
 ---
 
 # quick-fix — light remediation flow
@@ -91,12 +91,25 @@ not more loops.
 
 ## Budget guidance
 
-The frontmatter workflow-level budget (`requests: 60, tokens: 150000, wall_minutes: 90`)
+The frontmatter workflow-level budget (`requests: 60, tokens: 150000, wall_minutes: 180`)
 is sized for one pass over four steps plus at most the declared two rewinds. This is the
 tightest reference budget on purpose: the lane's contract is that the WI is small. Do
 not raise the budget to make an oversized WI fit — re-route the WI instead. Hitting the
 budget is a resource ceiling (`WF-103 OVER_BUDGET`), unrelated to gate verdicts, and
 never triggers rewind.
+
+Every step also declares its own `budget.wall_minutes` — `grill: 30` (interactive, the
+user's own thinking time is inside the step), `fix: 30`, `verification: 20`,
+`release: 20`, summing to 100 minutes, comfortably under the 180-minute workflow
+ceiling so one in-budget pass never busts it. These are not decorative: the daemon
+watchdog's absolute backstop over a single agent instance is `max(3× the step's
+declared wall, 15 min)`, and a step that declares nothing falls back to a 5-minute
+assumed wall, collapsing the backstop to its 15-minute floor. Measured attempts span
+2–5 minutes healthy and 15–52 minutes in the slow tail, so an undeclared step gets
+bounded-terminated while still legitimately working. Declared walls stay within
+`[5, 60]` by convention (enforced by `internal/workflow/schema/bundles_test.go`): at
+least 5 so the backstop is genuinely `3× wall` rather than clamped to the floor, at
+most 60 so one attempt never books more than an hour.
 
 ## The release step (per-project convention)
 
