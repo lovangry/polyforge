@@ -27,6 +27,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -227,6 +228,13 @@ func New(cfg Config) (*Daemon, error) {
 // caller's context ends, which triggers the same shutdown sequence).
 // It returns when the process should exit.
 func (d *Daemon) Run(ctx context.Context) error {
+	// Startup askpass sweep (crash residue): a previous daemon killed
+	// mid-push leaves one-shot credential scripts — they hold push
+	// secrets — under <DataDir>/git/askpass. Nothing can be live this
+	// early, so every entry there is residue. Best-effort, non-fatal.
+	if err := gitops.SweepAskpass(filepath.Join(d.cfg.DataDir, "git")); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: askpass sweep: %v\n", err)
+	}
 	d.runCtx, d.cancelRun = context.WithCancel(ctx)
 	d.obsCtx, d.cancelObs = context.WithCancel(d.runCtx)
 

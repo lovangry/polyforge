@@ -250,8 +250,15 @@ Each control method is a single JSON line:
 ```
 
 Acknowledge every method by emitting ONE ack line in the shape
-`{"method":"<method>","seq":<n>,"ok":true}` at your next safe boundary — never mid-write
-to `execution.json`. The three names are a closed set; anything else you do not
+`{"method":"<method>","ref":"<correlation>","seq":<n>,"ok":true}` at your next safe
+boundary — never mid-write to `execution.json`. The daemon matches your ack on the
+correlation token it sent: **`pf/answer`** → `ref` is the message's `id` (the question
+id); **`pf/probe`** → `ref` is the probe's `nonce`; **`pf/stop_notice`** carries no
+string token — omit `ref` and let `seq` carry the correlation. An ack that echoes the
+wrong or no token matches nothing: a `pf/probe` wait left unanswered by a
+wrong-`ref` ack eventually classifies you unresponsive and gets you killed and
+re-derived, and a `pf/answer` ack without the question id never clears the relay
+wait. The three names are a closed set; anything else you do not
 recognize you ignore, never answer, never route around.
 
 **Transport note (harness RPC mode):** you never read raw stdin and never write raw
@@ -262,7 +269,8 @@ by the transport.
 
 - **`pf/answer`** — the interactive answer relay, `{id, answer, seq}`. Consume it only
   for the waiting step whose persisted `pending_question.question_id` equals `id`, then
-  follow §7 step 4 exactly: persist the answer slot first, then consume, then ack after
+  follow §7 step 4 exactly: persist the answer slot first, then consume, then ack
+  (with `ref` = that same question id) after
   the relay is durably recorded — never before the persist, never after the whole
   consumption finishes.
 - **`pf/stop_notice`** — the daemon is closing. Ack it, drive the current step to its
@@ -270,8 +278,9 @@ by the transport.
   then call `flush(shutdown)` (below), then stop advancing. You pick the boundary; the
   daemon never picks or skips steps on your behalf.
 - **`pf/probe`** — the liveness probe. It asks you to do NOTHING except ack at your next
-  safe boundary. You only ever receive it after the daemon has seen a long stream
-  silence with a turn in flight; your ack is the evidence that cancels a kill it was
+  safe boundary, echoing its `nonce` in `ref`. You only ever receive it after the
+  daemon has seen a long stream silence with a turn in flight; your ack is the
+  evidence that cancels a kill it was
   otherwise about to perform — treat it as urgent.
 
 ### UDS proxy: you → daemon (one verb)
@@ -306,9 +315,12 @@ the ack distinguishes the local commit from the server push:
   immediately; the ack is your license to block (§7).
 - **`wrap`** — the terminal flush: seal + push before the ack. Call it when the workflow
   is finished (`final_status: "wrapped"`) or terminally failed (`final_status:
-  "failed"`) with the final result attached. After an `ok:true` ack you stop: the
-  generation is closed and the capsule sealed. If the daemon reports failure after its
-  retries, the work item lands `blocked` — do not loop; stop.
+  "failed"`) with the final result attached. An `ok:true` ack means the daemon has
+  ACCEPTED the wrap request and the local commit is recorded — it is not by itself a
+  certificate of the terminal state: the final outcome is whatever the server-side
+  WI status says (a post-ack push failure can still land the work item blocked). After
+  the ack you stop either way — do not loop; if the daemon reports failure after its
+  retries, the work item lands `blocked` — stop.
 - **`shutdown`** — the closing flush after a `pf/stop_notice`: commit what exists. A
   failure here never holds you: the data stays in the local commit and the recovery
   engine picks it up; proceed to idle.

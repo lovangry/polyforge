@@ -30,6 +30,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -106,12 +107,24 @@ var git = func(env []string, dir string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
+// ErrEmptyHistory is the typed error for the (practically unreachable)
+// clean-tree-with-no-standing-HEAD shape: the porcelain is empty but
+// rev-parse HEAD fails, so there is nothing to answer and nothing to
+// push. Materialization always leaves untracked files, so reaching it
+// means the capsule was emptied out from under the daemon. It is NOT
+// retry-worthy: a retry cannot conjure a history.
+var ErrEmptyHistory = errors.New("gitops: empty capsule history (clean tree with no standing HEAD)")
+
 // CommitPush stages everything, commits with the seq trailer (derived
 // here — the single authority) and pushes to the aihub bare repo. It
 // takes the per-WI git lock itself; callers must not hold it. A clean
-// tree (nothing staged after the porcelain check) answers the standing
-// HEAD with pushed=false and no error — the retry shape a wrap/seal
-// re-drive needs. Returns the local commit SHA and whether the push
+// tree (nothing staged after the porcelain check) PUSHES the standing
+// HEAD — an idempotent no-op ("Everything up-to-date") when the server
+// already holds it — so the pushed flag is honest on every return shape,
+// including the retry-after-failed-push one a wrap/seal re-drive needs:
+// a commit that landed locally on a failed push finally reaches the
+// server HERE, and a still-dead server answers with its error, not a
+// fake success. Returns the local commit SHA and whether the push
 // reached the server.
 func CommitPush(o Opts, message string) (localSHA string, pushed bool, err error) {
 	release := Lock(o.WorkItemID)
@@ -130,11 +143,18 @@ func CommitPush(o Opts, message string) (localSHA string, pushed bool, err error
 		return "", false, err
 	}
 	if strings.TrimSpace(status) == "" {
+		// Clean tree: the standing HEAD is the answer — and it is
+		// PUSHED, not presumed. Skipping the push here would let a
+		// clean-tree retry after a failed push fake success and
+		// silence §九 backpressure in the one scenario (persistent
+		// server unreachability) it exists for.
 		sha, serr := git(env, o.CapsuleDir, "rev-parse", "HEAD")
 		if serr != nil {
-			return "", false, serr
+			return "", false, ErrEmptyHistory
 		}
-		return strings.TrimSpace(sha), false, nil
+		localSHA = strings.TrimSpace(sha)
+		pushed, perr := pushLocked(o)
+		return localSHA, pushed, perr
 	}
 	seq, err := nextSeq(env, o.CapsuleDir)
 	if err != nil {
@@ -309,10 +329,15 @@ func credentialEnv(o Opts) (additions []string, cleanup func(), err error) {
 		return nil, noop, nil
 	}
 	base := filepath.Dir(o.GitDir)
+	tempBase := false
 	if o.GitDir == "" || base == "" || base == "." {
 		if base, err = os.MkdirTemp("", "pf-askpass-"); err != nil {
 			return nil, noop, err
 		}
+		// The fallback base is ours alone (nothing else names it);
+		// cleaning it up WITH the call, or every invocation leaks a
+		// fresh temp base directory.
+		tempBase = true
 	}
 	dir := filepath.Join(base, "askpass")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -338,6 +363,9 @@ func credentialEnv(o Opts) (additions []string, cleanup func(), err error) {
 	cleanup = func() {
 		_ = os.Remove(script)
 		_ = os.Remove(dir) // best-effort: another WI's script may keep it alive
+		if tempBase {
+			_ = os.RemoveAll(base)
+		}
 	}
 	return []string{
 		"GIT_ASKPASS=" + script,
@@ -356,6 +384,36 @@ func randomSuffix() (string, error) {
 // shellQuote single-quotes s for /bin/sh.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// SweepAskpass removes the one-shot askpass scripts a killed process
+// left behind. credentialEnv's cleanup only runs when the call unwinds:
+// a daemon killed mid-push (SIGKILL, power loss) leaves its 0700
+// script — which holds the push secret — under <gitRoot>/askpass
+// forever. Call it ONCE at daemon startup with the directory that holds
+// the external git-dirs (filepath.Dir of any GitDir, i.e.
+// <DataDir>/git): nothing can be live that early, so every askpass-*
+// entry is crash residue. Best-effort — an unreadable entry is skipped
+// (the first removal error is reported, the sweep continues).
+func SweepAskpass(gitRoot string) error {
+	dir := filepath.Join(gitRoot, "askpass")
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var firstErr error
+	for _, e := range ents {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "askpass-") {
+			continue
+		}
+		if rerr := os.Remove(filepath.Join(dir, e.Name())); rerr != nil && firstErr == nil {
+			firstErr = rerr
+		}
+	}
+	return firstErr
 }
 
 // ---------------------------------------------------------------------------
