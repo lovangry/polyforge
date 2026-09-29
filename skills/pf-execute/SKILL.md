@@ -371,6 +371,25 @@ discipline and the safe-boundary rules are unchanged by the transport.
   `pending_question`, and continue the SAME step in place. Ack after the relay is
   durably recorded.
 
+  **Sequencing note (mandatory, not an optimization).** `pending_answer` is persisted
+  BEFORE any consumption processing, and the ack comes after that persist — never
+  before it, and never after the whole consumption finishes. The Daemon now *depends*
+  on this ordering in two places, so an agent that reorders it breaks supervision, not
+  just its own recovery: (1) a persisted `pending_answer` is the Daemon's signal that
+  this step has stopped waiting for a human and is now doing ordinary work, which
+  switches it OUT of the watchdog's needs_input exemption (a hang while digesting an
+  answer used to be unrecoverable); (2) the ack is what tells the Daemon consumption
+  was observed, so it stops holding the relay for re-delivery. Consumption itself takes
+  a whole turn and the Daemon expects that: if your ack arrives after its window, the
+  operator is told "delivered, consumption pending", not that the answer failed.
+
+- **`pf/probe`** — the watchdog confirmation probe (04 §6.2 runtime note). It asks you
+  to do NOTHING except ack at your next safe boundary. You only ever receive it after
+  the Daemon has already seen no record from you for the whole hang window while a turn
+  was in flight; your ack is the evidence that cancels a kill it was otherwise about to
+  perform, so treat it as urgent and ack it before starting further work. `params`
+  carries `{reason}` for your log only — never change what you are doing because of it.
+
 You never initiate messages on this channel; you only ack. Any other `pf/*` method you
 do not recognize must be ignored, not answered, and never routed around — there is no
 second channel to the Daemon besides the local proxy of §11.
