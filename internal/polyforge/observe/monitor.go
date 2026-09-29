@@ -49,7 +49,7 @@ const wrapRetries = 3
 // tests use; production binds gitops.CommitPush). ctx bounds the call;
 // returning ctx.Err() reports the attempt as failed while the underlying
 // git keeps running — the per-WI git lock serializes any successor.
-type PushFunc func(ctx context.Context, o gitops.Opts, seq int64, message string) (localSHA string, pushed bool, err error)
+type PushFunc func(ctx context.Context, o gitops.Opts, message string) (localSHA string, pushed bool, err error)
 
 // WIInfo carries the per-WI static facts a monitor needs; supplied by
 // Runtime alongside the RTStarted protocol message.
@@ -99,7 +99,6 @@ type FlushCall struct {
 
 type pushResult struct {
 	version int64
-	seq     int64
 	sha     string
 	pushed  bool
 	err     error
@@ -139,8 +138,7 @@ type Monitor struct {
 	cfg  monitorCfg
 	log  *EventLog
 	ob   chan<- protocol.OBMsg
-	seq  int64 // git trailer seq, seeded from execution.json Version
-	ctrl int64 // control-message sequence number (atomic)
+	ctrl int64 // control-message correlation counter (atomic): the ack wait's (method, correlation) dual key
 
 	// handle attachment (monitor-goroutine only; captured into spawned
 	// sub-goroutines at spawn time).
@@ -362,11 +360,14 @@ func (m *Monitor) checkHang() {
 	})
 	handle := m.handle // captured: no race with a concurrent recovery
 	nonce, _ := randomNonce()
+	// the correlation tokens the ack wait matches on: the nonce (echoed
+	// as Ref) and the numeric seq
+	ctrlSeq := atomic.AddInt64(&m.ctrl, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.ProbeTimeout)
 		defer cancel()
 		ack, err := handle.SendControl(ctx, protocol.ControlMsg{
-			Method: protocol.ControlProbe, Nonce: nonce,
+			Method: protocol.ControlProbe, Nonce: nonce, Seq: ctrlSeq,
 		})
 		m.probeDone <- probeResult{ack: ack, err: err}
 	}()
@@ -449,9 +450,6 @@ func (m *Monitor) pollExecution() {
 		m.stream.resetChain()
 	}
 	m.currentStep = exec.CurrentStep
-	if m.seq == 0 && exec.Version > 0 {
-		m.seq = exec.Version // seed the trailer seq at the observed version
-	}
 	if exec.Version > m.dirtyVersion {
 		m.dirtyVersion = exec.Version
 	}
@@ -517,14 +515,13 @@ func (m *Monitor) schedulePush() {
 		return // one already in flight; the next tick retries
 	}
 	m.retryAt = time.Time{}
-	m.seq++
-	version, seq := m.dirtyVersion, m.seq
+	version := m.dirtyVersion // the seq trailer is gitops' single authority (derived in-lock)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.FlushBound)
 		defer cancel()
-		sha, pushed, err := m.cfg.push(ctx, m.wi.Git, seq,
+		sha, pushed, err := m.cfg.push(ctx, m.wi.Git,
 			fmt.Sprintf("observe: execution v%d", version))
-		m.pushDone <- pushResult{version: version, seq: seq, sha: sha, pushed: pushed, err: err}
+		m.pushDone <- pushResult{version: version, sha: sha, pushed: pushed, err: err}
 	}()
 }
 
@@ -540,7 +537,7 @@ func (m *Monitor) onPushResult(res pushResult) {
 		m.pushDegraded = false
 		m.timeDegraded = false
 		_ = m.log.Append(m.wi.WorkItem, EvPublished, map[string]any{
-			"version": res.version, "seq": res.seq, "local_commit": res.sha, "pushed": res.pushed,
+			"version": res.version, "local_commit": res.sha, "pushed": res.pushed,
 		})
 		return
 	}
@@ -699,8 +696,7 @@ func (m *Monitor) flushWrap(call FlushCall) {
 	m.sealing = true
 	m.stateMu.Unlock()
 
-	m.seq++
-	seq, version := m.seq, m.dirtyVersion
+	version := m.dirtyVersion
 	finalStatus := call.Req.FinalStatus
 	go func() {
 		deadline := time.Now().Add(m.cfg.FlushBound)
@@ -712,7 +708,7 @@ func (m *Monitor) flushWrap(call FlushCall) {
 		for try := 1; try <= wrapRetries && !ok; try++ {
 			m.gate <- struct{}{} // wait out any in-flight async push
 			ctx, cancel := context.WithDeadline(context.Background(), deadline)
-			sha, p, err := m.cfg.push(ctx, m.wi.Git, seq, "wrap: "+finalStatus)
+			sha, p, err := m.cfg.push(ctx, m.wi.Git, "wrap: "+finalStatus)
 			cancel()
 			<-m.gate
 			psha, pushed = sha, p
@@ -756,7 +752,7 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 		m.pushDegraded = false
 		m.timeDegraded = false
 		_ = m.log.Append(m.wi.WorkItem, EvPublished, map[string]any{
-			"wrap": true, "seq": wr.sha, "pushed": wr.pushed, "final_status": wr.finalStatus,
+			"wrap": true, "local_commit": wr.sha, "pushed": wr.pushed, "final_status": wr.finalStatus,
 		})
 		reason := wr.finalStatus
 		if reason != protocol.FinishFailed {
@@ -791,12 +787,10 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 // result, never wait (§五: a failed shutdown flush does not hold the
 // agent — the data is in the local commit).
 func (m *Monitor) flushShutdown(call FlushCall) {
-	m.seq++
-	seq := m.seq
 	go func() {
 		m.gate <- struct{}{}
 		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.FlushBound)
-		sha, pushed, err := m.cfg.push(ctx, m.wi.Git, seq, "shutdown flush")
+		sha, pushed, err := m.cfg.push(ctx, m.wi.Git, "shutdown flush")
 		cancel()
 		<-m.gate
 		ack := protocol.FlushAck{OK: err == nil, LocalCommit: sha, Pushed: pushed && err == nil}

@@ -37,7 +37,7 @@ func TestFlushWrapAckSeparatesLocalCommitAndPush(t *testing.T) {
 
 	// Case 1: commit landed AND reached the server.
 	m1, ob1 := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, seq int64, msg string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
 			return "sha_full", true, nil
 		}
 	})
@@ -54,7 +54,7 @@ func TestFlushWrapAckSeparatesLocalCommitAndPush(t *testing.T) {
 	// nothing to commit / server deferral). The two fields are asserted
 	// SEPARATELY: LocalCommit set, Pushed false.
 	m2, ob2 := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, seq int64, msg string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
 			return "sha_local", false, nil
 		}
 	})
@@ -77,7 +77,7 @@ func TestFlushWrapRetriesThreeThenBlocks(t *testing.T) {
 	h := newFakeHandle("att_1")
 	attempts := 0
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, seq int64, msg string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
 			attempts++
 			return "sha_partial", false, errors.New("GIT-500: upstream refused")
 		}
@@ -114,7 +114,7 @@ func TestFlushWrapSecondCallWhileSealingRefused(t *testing.T) {
 	h := newFakeHandle("att_1")
 	release := make(chan struct{})
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, seq int64, msg string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
 			<-release
 			return "sha_w", true, nil
 		}
@@ -159,7 +159,7 @@ func TestFlushNeedsInputIdempotentByQuestionID(t *testing.T) {
 func TestFlushShutdownAcksFastAndReportsFailure(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, seq int64, msg string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
 			return "sha_s", true, nil
 		}
 	})
@@ -173,7 +173,7 @@ func TestFlushShutdownAcksFastAndReportsFailure(t *testing.T) {
 	}
 
 	m2, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, seq int64, msg string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
 			return "", false, errors.New("GIT-500: refused")
 		}
 	})

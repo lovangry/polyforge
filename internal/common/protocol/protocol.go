@@ -85,7 +85,11 @@ const (
 	ControlProbe = "pf/probe"
 )
 
-// ControlMsg is the stdio control-channel envelope.
+// ControlMsg is the stdio control-channel envelope. Seq is the numeric
+// correlation token (monotonic per sender); pf/answer additionally
+// carries the question id in ID and pf/probe its nonce in Nonce — the
+// ack MUST echo one of them so concurrent waits cannot steal each
+// other's acks.
 type ControlMsg struct {
 	Method string `json:"method"`
 	Seq    int64  `json:"seq,omitempty"`
@@ -94,10 +98,15 @@ type ControlMsg struct {
 	Nonce  string `json:"nonce,omitempty"`  // probe: echo this back
 }
 
-// ControlAck is the agent's stdout reply to a control method.
+// ControlAck is the agent's stdout reply to a control method. It MUST
+// echo the correlation token of the message it answers: the numeric Seq
+// and/or Ref (pf/answer → the question id, pf/probe → the nonce). The
+// daemon-side wait matches on (method, correlation) — an ack that
+// echoes neither token matches nothing.
 type ControlAck struct {
 	Method string `json:"method"` // echoes the method
 	Seq    int64  `json:"seq,omitempty"`
+	Ref    string `json:"ref,omitempty"` // echoes answer question id / probe nonce
 	OK     bool   `json:"ok"`
 	Error  string `json:"error,omitempty"`
 }

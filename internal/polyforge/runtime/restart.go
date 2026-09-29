@@ -106,9 +106,12 @@ func (r *Runtime) restartRunning(ctx context.Context, rec *jobRecord) error {
 	}
 	state, _ := j.snapshot()
 	if state == StateSealing {
-		// finish the interrupted close
+		// finish the interrupted close — the sealed reason passes through
+		// verbatim (wrapped|failed|blocked); anything a crashed stop never
+		// wrote reads as the safest default
 		reason := j.stopReason
-		if reason != protocol.FinishFailed && reason != protocol.FinishWrapped {
+		if reason != protocol.FinishFailed && reason != protocol.FinishWrapped &&
+			reason != protocol.FinishBlocked {
 			reason = protocol.FinishWrapped
 		}
 		return r.stopOp(ctx, j, reason, true)

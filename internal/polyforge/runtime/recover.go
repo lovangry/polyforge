@@ -7,9 +7,12 @@
 //	  session; seconds)
 //	resume failing twice consecutively → fresh derivation (a brand-new
 //	  agent that may read the capsule's old transcripts for context)
-//	fresh failing → bounded fail: the cumulative recovery budget
-//	  (default 2) is exhausted and the WI terminates RTFinished(blocked)
-//	  — the storm guard: never a third relaunch.
+//	fresh failing → one FAILED recovery: the budget counts failures and
+//	  a successful recovery RESETS it. After MaxRecoveries (default 2)
+//	  consecutive failed recoveries the WI terminates
+//	  RTFinished(blocked) — the storm guard: never a third relaunch
+//	  attempt after two failed ones, and never a poisoned budget after
+//	  a healthy relaunch.
 package runtime
 
 import (
@@ -42,13 +45,6 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	if err := j.transition(StateRecovering); err != nil {
 		return // lost the race to SEALING/DONE: the fence did its job
 	}
-	j.mu.Lock()
-	j.recoveries++
-	rec := j.recoveries
-	j.mu.Unlock()
-	if perr := r.persist(); perr != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
-	}
 
 	// Kill the old tree first (§一 Recover): six layers, no writer may
 	// survive next to the re-derivation.
@@ -60,17 +56,35 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	// boundary; the local commit already keeps the bytes.
 	commitDirty(r, j)
 
-	// Storm guard: the cumulative budget is spent — bounded fail, no
-	// relaunch, human attention.
-	if rec >= r.cfg.MaxRecoveries {
-		r.boundedFail(ctx, j, fmt.Sprintf("recovery budget exhausted (%d recoveries, cause %q)", rec, cause))
-		return
+	// The storm guard (§三): each FAILED recovery ladder spends one unit
+	// of the budget; a successful recovery RESETS it (a healthy relaunch
+	// must never inherit earlier failures). Only when MaxRecoveries
+	// recoveries have FAILED outright does the WI bounded-fail — never
+	// merely because it has recovered before.
+	for {
+		if r.cascade(ctx, j, cause) {
+			return // recovered (or otherwise settled) — budget already reset
+		}
+		j.mu.Lock()
+		j.recoverFails++
+		fails := j.recoverFails
+		j.mu.Unlock()
+		if perr := r.persist(); perr != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+		}
+		if fails >= r.cfg.MaxRecoveries {
+			r.boundedFail(ctx, j, fmt.Sprintf("recovery budget exhausted (%d consecutive failed recoveries, cause %q)", fails, cause))
+			return
+		}
+		fmt.Fprintf(os.Stderr, "runtime: %s: recovery failed (%d/%d), retrying the ladder\n", j.wi, fails, r.cfg.MaxRecoveries)
 	}
-	r.cascade(ctx, j, cause)
 }
 
-// cascade runs the resume→fresh ladder for one recovery event.
-func (r *Runtime) cascade(ctx context.Context, j *job, cause string) {
+// cascade runs the resume→fresh ladder for one recovery attempt. It
+// answers true when a re-derivation went live (the caller's budget is
+// reset inside); false when the ladder failed outright and the caller
+// must spend budget / retry.
+func (r *Runtime) cascade(ctx context.Context, j *job, cause string) bool {
 	j.mu.Lock()
 	resumeDead := j.resumeDead
 	j.mu.Unlock()
@@ -79,7 +93,7 @@ func (r *Runtime) cascade(ctx context.Context, j *job, cause string) {
 			h, err := r.spawnAgent(ctx, j, true)
 			if err == nil {
 				r.recovered(j, h, cause, true)
-				return
+				return true
 			}
 			fmt.Fprintf(os.Stderr, "runtime: %s: resume derivation failed: %v\n", j.wi, err)
 			j.mu.Lock()
@@ -97,15 +111,17 @@ func (r *Runtime) cascade(ctx context.Context, j *job, cause string) {
 	h, err := r.spawnAgent(ctx, j, false)
 	if err == nil {
 		r.recovered(j, h, cause, false)
-		return
+		return true
 	}
 	fmt.Fprintf(os.Stderr, "runtime: %s: fresh derivation failed: %v\n", j.wi, err)
-	r.boundedFail(ctx, j, "fresh derivation failed: "+err.Error())
+	return false
 }
 
-// recovered finishes a successful re-derivation.
+// recovered finishes a successful re-derivation. A successful recovery
+// RESETS the failure budget — the counter is spent by failures only.
 func (r *Runtime) recovered(j *job, h AgentHandle, cause string, resumed bool) {
 	j.mu.Lock()
+	j.recoverFails = 0
 	if resumed {
 		j.resumeFails = 0 // a successful resume breaks the failure streak
 	}
@@ -165,9 +181,9 @@ func endGenerationReq(j *job, status string) aihubclient.EndGenerationRequest {
 // are the caller's to log; the LOCAL commit is the durable half and it
 // stands on its own.
 func commitDirty(r *Runtime, j *job) {
-	sha, pushed, perr := gitops.CommitPush(j.git, r.nextSeq(j), "recover: commit dirty capsule before re-derivation")
+	sha, pushed, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
 	if perr == nil && sha != "" && !pushed {
-		perr = pushStanding(j.git)
+		_, perr = gitops.Push(j.git)
 	}
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)

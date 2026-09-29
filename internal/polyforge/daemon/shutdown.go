@@ -170,13 +170,16 @@ func (d *Daemon) liveJobs() []runtime.JobInfo {
 // notifyStop delivers pf/stop_notice to one live agent and waits for
 // the ack, bounded by the notice window. Best-effort by design.
 func (d *Daemon) notifyStop(ji runtime.JobInfo) {
-	if err := ji.Agent.SendControl(protocol.ControlMsg{Method: protocol.ControlStopNotice}); err != nil {
+	// one message value carries the correlation the ack wait matches on
+	// ((method, correlation), not method alone)
+	notice := protocol.ControlMsg{Method: protocol.ControlStopNotice}
+	if err := ji.Agent.SendControl(notice); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: %s: stop_notice delivery failed: %v\n", ji.WorkItem, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.NoticeAckBound)
 	defer cancel()
-	if err := ji.Agent.WaitControlAck(ctx, protocol.ControlStopNotice, d.cfg.NoticeAckBound); err != nil {
+	if err := ji.Agent.WaitControlAck(ctx, notice, d.cfg.NoticeAckBound); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: %s: stop_notice not acked in the window (proceeding): %v\n", ji.WorkItem, err)
 	}
 }

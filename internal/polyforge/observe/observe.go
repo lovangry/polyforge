@@ -90,8 +90,10 @@ func (c *Config) fill() {
 
 // defaultPush binds the shared gitops choke point with a ctx race: on
 // deadline the caller learns failure while the underlying git keeps
-// running — the per-WI git lock serializes any successor push.
-func defaultPush(ctx context.Context, o gitops.Opts, seq int64, message string) (string, bool, error) {
+// running — the per-WI git lock serializes any successor push. The seq
+// trailer is derived INSIDE gitops (single authority); nothing seq-wise
+// flows through here.
+func defaultPush(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
 	type res struct {
 		sha    string
 		pushed bool
@@ -99,7 +101,7 @@ func defaultPush(ctx context.Context, o gitops.Opts, seq int64, message string) 
 	}
 	done := make(chan res, 1)
 	go func() {
-		sha, pushed, err := gitops.CommitPush(o, seq, message)
+		sha, pushed, err := gitops.CommitPush(o, message)
 		done <- res{sha, pushed, err}
 	}()
 	select {

@@ -191,7 +191,7 @@ func seedJob(r *Runtime, wi string) *job {
 		generation: 1,
 		state:      StateRunning,
 		capsuleDir: capDir,
-		git:        gitops.Opts{WorkItemID: wi, CapsuleDir: capDir, GitDir: filepath.Join(r.cfg.DataDir, "git", wi+".git")},
+		git:        gitops.Opts{WorkItemID: wi, AttemptID: "ra_" + wi, CapsuleDir: capDir, GitDir: filepath.Join(r.cfg.DataDir, "git", wi+".git")},
 		sessionID:  "sess_" + wi + "_1",
 		transcript: filepath.Join(capDir, "session", "session-ra_"+wi+".jsonl"),
 		bundleName: "demo-bundle",
@@ -235,7 +235,9 @@ func writeTranscript(t *testing.T, j *job) {
 }
 
 // initGitCapsule gives j a real capsule worktree with an external git-dir
-// and a local bare repo as its push remote, so CommitPush succeeds.
+// and a local bare repo as its push remote, so CommitPush succeeds. The
+// bare advertises push options: every push from the gitops choke point
+// carries --push-option=attempt-id=… (§六 备层).
 func initGitCapsule(t *testing.T, j *job) string {
 	t.Helper()
 	setGitIdentity(t)
@@ -243,24 +245,27 @@ func initGitCapsule(t *testing.T, j *job) string {
 	if out, err := exec.Command("git", "init", "--bare", bare).CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %v: %s", err, out)
 	}
+	if out, err := exec.Command("git", "--git-dir", bare, "config", "receive.advertisePushOptions", "true").CombinedOutput(); err != nil {
+		t.Fatalf("git config advertisePushOptions: %v: %s", err, out)
+	}
 	if err := os.MkdirAll(j.git.CapsuleDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	j.git.RemoteURL = bare
 	j.git.Username = j.wi
 	j.git.Secret = "push-secret"
-	if err := localGitInit(j.git); err != nil {
-		t.Fatalf("localGitInit: %v", err)
+	if err := gitops.InitLocal(j.git); err != nil {
+		t.Fatalf("gitops.InitLocal: %v", err)
 	}
-	if err := externalizeGitDir(j.git); err != nil {
-		t.Fatalf("externalizeGitDir: %v", err)
+	if err := gitops.ExternalizeGitDir(j.git); err != nil {
+		t.Fatalf("gitops.ExternalizeGitDir: %v", err)
 	}
 	// one initial commit so rev-list/push have a HEAD to stand on
 	if err := os.WriteFile(filepath.Join(j.capsuleDir, "seed.txt"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("git", "commit", "--allow-empty", "-m", "init")
-	cmd.Env = gitEnv(j.git)
+	cmd.Env = j.git.Env()
 	cmd.Dir = j.capsuleDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("initial commit: %v: %s", err, out)
