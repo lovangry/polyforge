@@ -1,0 +1,129 @@
+// restart.go: daemon-startup reconciliation (v1-spec-full §十一). The
+// Runtime never revives from state.json alone — every recorded job is
+// reconciled against aihub's own verdict first:
+//
+//	aihub says wrapped/failed/canceled → do NOT revive; collect any local
+//	  residue and drop the record.
+//	aihub says running → the old agent tree is killed and the WI runs
+//	  through the recovery engine (RTRecovered), unless the local record
+//	  was mid-seal, in which case the interrupted stop is finished.
+//	aihub says blocked → leave everything untouched (human attention).
+package runtime
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/protocol"
+)
+
+// Restart loads state.json, reconciles every recorded job with aihub and
+// recovers what is still ours to run. Jobs aihub no longer knows as ours
+// are dropped; a job with no local record needs no reconciliation (a
+// running WI whose capsule lives on another machine is that machine's
+// business).
+func (r *Runtime) Restart(ctx context.Context) error {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	st, err := loadState(r.statePath)
+	if err != nil {
+		return err
+	}
+	// Seed every recorded job into the live map first: persist() rewrites
+	// state.json from the map, so records that must SURVIVE the
+	// reconciliation (blocked, aihub-unreachable) are preserved by simply
+	// staying in it. A record whose WI is already live (Start ran before
+	// Restart) is left entirely alone.
+	for _, rec := range st.Jobs {
+		if r.jobOf(rec.WorkItemID) != nil {
+			continue
+		}
+		r.mu.Lock()
+		r.jobs[rec.WorkItemID] = jobFromRecord(rec)
+		r.mu.Unlock()
+	}
+	for _, rec := range st.Jobs {
+		if j := r.jobOf(rec.WorkItemID); j != nil && j.liveAgent() {
+			continue // already running under this daemon: not a restart case
+		}
+		wi, err := r.hub.GetWorkItem(rec.WorkItemID)
+		if err != nil {
+			// aihub unreachable for this WI: keep the record, try again on
+			// the next restart — never guess a verdict.
+			fmt.Fprintf(os.Stderr, "runtime: %s: aihub lookup failed, record kept: %v\n", rec.WorkItemID, err)
+			continue
+		}
+		switch wi.Status {
+		case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
+			r.restartDrop(rec)
+		case api.StatusBlocked:
+			// 不动: the bounded-fail verdict stands; no revival, no kill.
+		case api.StatusRunning:
+			if serr := r.restartRunning(ctx, rec); serr != nil {
+				fmt.Fprintf(os.Stderr, "runtime: %s: restart recovery failed: %v\n", rec.WorkItemID, serr)
+			}
+		default:
+			// queued/paused: the generation is no longer ours; drop the
+			// bookkeeping (the capsule scene stays on disk).
+			r.forgetRecord(rec)
+		}
+	}
+	return r.persist()
+}
+
+// restartDrop handles aihub's terminal verdicts: no revival. A local agent
+// still alive is a writer of a dead generation — its tree is collected and
+// the record dropped.
+func (r *Runtime) restartDrop(rec *jobRecord) {
+	j := r.jobOf(rec.WorkItemID)
+	if j == nil {
+		j = jobFromRecord(rec)
+	}
+	if j.agentPID > 0 {
+		// dead or alive: either way the tree's orphans must not survive
+		// (killAgentTree's identity guard refuses to signal a reused pid)
+		r.killAgentTree(j)
+	}
+	r.forgetRecord(rec)
+}
+
+func (r *Runtime) forgetRecord(rec *jobRecord) {
+	r.mu.Lock()
+	delete(r.jobs, rec.WorkItemID)
+	r.mu.Unlock()
+}
+
+// restartRunning handles aihub's running verdict for a locally recorded
+// job: kill the old tree and run the recovery engine. A record caught
+// mid-seal (the daemon died between SEALING and EndGeneration) finishes
+// the interrupted stop instead of reviving.
+func (r *Runtime) restartRunning(ctx context.Context, rec *jobRecord) error {
+	j := r.jobOf(rec.WorkItemID)
+	if j == nil {
+		return fmt.Errorf("runtime: %s: no seeded record", rec.WorkItemID)
+	}
+	state, _ := j.snapshot()
+	if state == StateSealing {
+		// finish the interrupted close
+		reason := j.stopReason
+		if reason != protocol.FinishFailed && reason != protocol.FinishWrapped {
+			reason = protocol.FinishWrapped
+		}
+		return r.stopOp(ctx, j, reason, true)
+	}
+	if state == StateDone {
+		r.forgetRecord(rec)
+		return nil
+	}
+	// RUNNING or a crash mid-RECOVERING: both recover through the engine
+	// (recoverCore kills the old tree itself — with the pid-identity guard
+	// when the recorded agent still lives, or its orphaned group when it
+	// does not).
+	j.mu.Lock()
+	j.state = StateRunning
+	j.mu.Unlock()
+	r.recoverCore(ctx, j, "daemon_restart")
+	return nil
+}
