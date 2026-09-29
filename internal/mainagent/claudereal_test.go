@@ -97,6 +97,11 @@ func TestClaudeAdapterArgvMeasured(t *testing.T) {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose", // REQUIRED: the real CLI refuses stream-json without it in print mode
+		// The WI-agent birth isolation profile (polyforge#51,
+		// claudeIsolationFlags) rides every derivation, right after the
+		// measured transport flags; isolation_test.go pins WHY it is
+		// exactly this one flag.
+		"--disable-slash-commands",
 		"--session-id", sid,
 		"--append-system-prompt", "SYS",
 	}
