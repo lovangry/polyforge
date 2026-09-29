@@ -1,0 +1,109 @@
+package observe
+
+// view.go: the JobView projection served by GET /jobs/{id}/observe —
+// TWO layers over one response (04 §5.1a):
+//
+//   - the execution.json DIRECT-READ layer: the capsule's
+//     runtime-state/execution.json is re-read from disk at request time.
+//     It is the single execution-state authority (INV-1); the monitor's
+//     in-memory copy is only a poll cache and is never served as state.
+//   - the events layer: the per-WI ring mirrored from the events file.
+//
+// PENDING-QUESTION PROJECTION ACROSS RECOVERY (answer relay + recovery
+// contract): when an agent dies with an answer delivered-but-unconsumed
+// — or with no answer at all — the pending question stays visible here.
+// The NEW attempt's first turn sees the same question because the agent
+// persisted pending_question into execution.json BEFORE calling
+// flush(needs_input), and Runtime injects that file as the recovered
+// agent's opening context; the monitor therefore NEVER re-sends
+// pf/answer to a recovered agent (Runtime owns context injection), it
+// only keeps this projection honest. The CLI may re-submit the same
+// answer_id; the three-state ledger re-delivers it idempotently to the
+// new handle.
+
+import (
+	"encoding/json"
+	"os"
+
+	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/protocol"
+)
+
+// JobView renders the two-layer projection for this work item. A missing
+// or unreadable execution.json degrades to the monitor-known facts
+// (status from the monitor state machine, no step detail) — observe
+// stays available exactly when the operator needs it most.
+func (m *Monitor) JobView() *protocol.JobView {
+	m.stateMu.Lock()
+	pending := m.pending
+	sealing, wrapped, blocked := m.sealing, m.wrapped, m.blocked
+	attempt := m.attemptID
+	m.stateMu.Unlock()
+
+	view := &protocol.JobView{
+		WorkItem:   m.wi.WorkItem,
+		Project:    m.wi.Project,
+		AttemptID:  attempt,
+		BundleName: m.wi.BundleName,
+		Pending:    pending,
+	}
+
+	// layer 1: execution.json direct read (authoritative).
+	var exec capsule.Execution
+	if data, err := os.ReadFile(m.execPath); err == nil &&
+		json.Unmarshal(data, &exec) == nil {
+		view.Generation = exec.Generation
+		view.CurrentStep = exec.CurrentStep
+		view.Steps = map[string]*protocol.StepView{}
+		for id, s := range exec.Steps {
+			sv := &protocol.StepView{
+				Status:    s.Status,
+				Attempts:  len(s.Attempts),
+				StartedAt: s.StepStartedAt,
+			}
+			if len(s.Output) > 0 {
+				if raw, err := json.Marshal(s.Output); err == nil {
+					sv.Output = string(raw)
+				}
+			}
+			view.Steps[id] = sv
+		}
+		if raw, err := json.Marshal(exec.BudgetConsumed); err == nil {
+			view.Budget = raw
+		}
+	}
+
+	// layer 2: events.
+	ring := m.log.Since(m.wi.WorkItem)
+	view.Events = make([]protocol.EventEntry, 0, len(ring))
+	for _, e := range ring {
+		view.Events = append(view.Events, e.EventEntry)
+	}
+
+	// status derivation, most specific first. A terminal attempt
+	// (wrap acked or wrap-blocked) or a terminal workflow_status in the
+	// authoritative file wins; then the seal-in-progress window; then the
+	// needs_input exemption; otherwise the job is running.
+	switch {
+	case wrapped || blocked || isTerminalStatus(exec.WorkflowStatus):
+		view.Status = protocol.JobDone
+	case sealing:
+		view.Status = protocol.JobSealing
+	case pending != nil:
+		view.Status = protocol.JobNeedsInput
+	default:
+		view.Status = protocol.JobRunning
+	}
+	return view
+}
+
+// isTerminalStatus reports whether execution.json's workflow_status is
+// terminal (the zero value of the struct read is "" when the file was
+// unreadable, which correctly lands in the not-terminal branch).
+func isTerminalStatus(s string) bool {
+	switch s {
+	case "wrapped", "failed", "blocked":
+		return true
+	}
+	return false
+}
