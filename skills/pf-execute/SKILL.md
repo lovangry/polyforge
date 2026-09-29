@@ -187,18 +187,15 @@ to wait for:
 - **You have no publish verb.** The only daemon call you may initiate is
   `flush(reason)` (§12), and only for the three reasons that genuinely block you:
   needing a human, finishing the WI, and being told the daemon is closing.
-- **React to daemon signals through events, at turn boundaries.** The daemon validates
-  step outputs against the bundle's pinned output schemas before committing. A step
-  whose published output failed validation is falsified: the daemon writes an
-  `output_schema_mismatch` event (carrying the pointer and the failing keyword) into
-  your work item's event stream — it never rewrites your `execution.json` and never
-  interrupts your turn. **At the start of every new model turn**, read the event layer
-  of your observe projection (§12) and scan for `output_schema_mismatch` entries newer
-  than your last read: each one falsifies the named step's `done` state — in ONE atomic
-  write, rewrite that step `done` → `in_progress`, append the `infra_failure` archive
-  entry (cause `output_schema_mismatch`, detail = pointer + keyword), recompute the
-  candidate pointer per §6 rule 3, and let the main loop re-dispatch it. The published
-  history is never rewritten; only your step status rewinds.
+- **No event face is addressed to you.** The daemon writes its own observation
+  events (job lifecycle, infrastructure incidents, push bookkeeping) to its own
+  events log and serves them on the human-facing observe route; none of them is
+  a signal you read or react to — and today no output-schema validation happens
+  daemon-side at all. Your contact surface stays exactly §11's closed set: the
+  three stdio methods you ack plus the one `flush(reason)` call. If the event
+  surface is ever extended with an agent-facing signal, it will arrive as a new
+  §12 method carrying its own contract; until such a method exists, no event
+  requires anything from you.
 
 ## 9. Budget: two layers, both must hold
 
@@ -283,8 +280,15 @@ by the transport.
 `/run/polyforge.sock`, or the path in `PF_DAEMON_SOCKET` when set), body:
 
 ```
-{"work_item":"<wi>","attempt_id":"<from capsule.json>","reason":"needs_input|wrap|shutdown", ...}
+{"work_item":"<wi>","attempt_id":"<your instance id>","reason":"needs_input|wrap|shutdown", ...}
 ```
+
+`attempt_id` must name YOUR OWN derivation: the daemon refuses any other value
+with `DAEMON-409 STALE_ATTEMPT` (a superseded instance — even a zombie survivor
+of a replaced one — must never seal the live attempt's work). Read the value
+ONCE at startup: the `instance` field of the last line of
+`runtime-state/spawn-journal.jsonl` (for a first-derivation agent it equals
+`capsule.json`'s `attempt_id`), and never re-read identity files at flush time.
 
 with `question_id`/`question`/`step` on `needs_input`, and `final_status`
 (`wrapped`|`failed`) plus the final result on `wrap`. The call is bounded at 60 seconds;

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -45,12 +46,32 @@ func writeErr(w http.ResponseWriter, code string, detail string) {
 }
 
 func (o *Observe) serveObserve(w http.ResponseWriter, r *http.Request) {
-	m := o.lookup(r.PathValue("wi"))
+	wi := r.PathValue("wi")
+	m := o.lookup(wi)
 	if m == nil {
 		writeErr(w, api.ErrDaemonNotFound, "work item is not monitored on this daemon")
 		return
 	}
-	writeJSON(w, http.StatusOK, m.JobView())
+	view := m.JobView()
+	// The ?after cursor (#21): serve only events with seq > after (the
+	// CLI's --after flag). seq counts total appends, so the cursor stays
+	// meaningful across ring turnover; an after past every retained seq
+	// answers an empty events layer.
+	if s := r.URL.Query().Get("after"); s != "" {
+		after, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || after < 0 {
+			writeErr(w, api.ErrDaemonBadInput, "after must be a non-negative integer cursor")
+			return
+		}
+		if after > 0 {
+			ring := o.log.SinceAfter(wi, after)
+			view.Events = make([]protocol.EventEntry, 0, len(ring))
+			for _, e := range ring {
+				view.Events = append(view.Events, e.EventEntry)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 // serveAnswer relays a human answer. Caller identity rides X-PF-User
@@ -133,6 +154,19 @@ func (o *Observe) serveFlush(w http.ResponseWriter, r *http.Request) {
 	case protocol.FlushNeedsInput, protocol.FlushWrap, protocol.FlushShutdown:
 	default:
 		writeErr(w, api.ErrDaemonBadInput, "unknown flush reason: "+req.Reason)
+		return
+	}
+	// The attempt-id fence (§二: every message carries the current
+	// attempt-id — the agent→daemon flush face included, #8). The
+	// request's AttemptID must name the monitor's CURRENT instance: a
+	// zombie survivor of a superseded instance (the six-layer cleanup
+	// admits residue) or an older generation must never seal work that
+	// belongs to the live attempt. Mismatch — including an absent id —
+	// answers DAEMON-409 STALE_ATTEMPT and never reaches the monitor.
+	if cur := m.currentAttempt(); req.AttemptID == "" || req.AttemptID != cur {
+		writeErr(w, api.ErrDaemonConflict,
+			"STALE_ATTEMPT: flush carries attempt_id "+req.AttemptID+
+				"; the current instance is "+cur)
 		return
 	}
 	call := FlushCall{Req: req, Resp: make(chan protocol.FlushAck, 1)}

@@ -54,7 +54,7 @@ type Config struct {
 	CgroupRoot        string
 	APIKey            string // machine credential; NEVER reaches an agent env
 	MaxConcurrent     int    // cross-mode concurrency cap (default 4)
-	Mode              string // initial mode; "" = interactive
+	Mode              string // initial mode; "" = not specified (persisted mode wins; default interactive)
 	Harness           string // harness adapter name (default "pi")
 
 	// Test/ops knobs.
@@ -76,9 +76,6 @@ func (c *Config) fill() {
 	}
 	if c.MaxConcurrent <= 0 {
 		c.MaxConcurrent = 4
-	}
-	if c.Mode == "" {
-		c.Mode = protocol.ModeInteractive
 	}
 	if c.Harness == "" {
 		c.Harness = "pi"
@@ -207,8 +204,15 @@ func New(cfg Config) (*Daemon, error) {
 	if err := d.loadDaemonState(); err != nil {
 		return nil, err
 	}
-	if err := d.modes.Set(cfg.Mode); err != nil {
-		return nil, fmt.Errorf("daemon: initial mode %q: %w", cfg.Mode, err)
+	// cfg.Mode is an EXPLICIT flag override only (#18): unset ("") keeps
+	// the persisted mode — a drain daemon restarting stays drain — and
+	// loadDaemonState has already defaulted to interactive when no state
+	// file exists. An explicit flag equal to the loaded mode is a no-op
+	// (Set would refuse drain→drain as a non-exit transition).
+	if cfg.Mode != "" && cfg.Mode != d.modes.Current() {
+		if err := d.modes.Set(cfg.Mode); err != nil {
+			return nil, fmt.Errorf("daemon: initial mode %q: %w", cfg.Mode, err)
+		}
 	}
 	return d, nil
 }
