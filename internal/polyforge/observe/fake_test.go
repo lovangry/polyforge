@@ -102,8 +102,11 @@ func (h *fakeHandle) die() { close(h.exit) }
 
 func testCfg() monitorCfg {
 	return monitorCfg{
-		PollInterval:      5 * time.Millisecond,
-		HangWindow:        40 * time.Millisecond,
+		PollInterval: 5 * time.Millisecond,
+		HangWindow:   40 * time.Millisecond,
+		// IdleWindow: inert for every test that does not override it —
+		// the idle watchdog tests below shrink it explicitly.
+		IdleWindow:        time.Hour,
 		ProbeTimeout:      80 * time.Millisecond,
 		AnswerAckWindow:   50 * time.Millisecond,
 		PushRetryBackoff:  2 * time.Millisecond,
@@ -252,4 +255,29 @@ func eventsOf(m *Monitor, kind string) []protocol.EventEntry {
 		}
 	}
 	return out
+}
+
+// incidentKinds reads the infra_incident payload kinds off the ring.
+func incidentKinds(m *Monitor) []string {
+	var out []string
+	for _, e := range eventsOf(m, EvInfraIncident) {
+		var body map[string]any
+		if json.Unmarshal(e.Body, &body) == nil {
+			if k, _ := body["kind"].(string); k != "" {
+				out = append(out, k)
+			}
+		}
+	}
+	return out
+}
+
+// hasIncidentKind reports whether an infra_incident of that payload kind
+// was written.
+func hasIncidentKind(m *Monitor, kind string) bool {
+	for _, k := range incidentKinds(m) {
+		if k == kind {
+			return true
+		}
+	}
+	return false
 }

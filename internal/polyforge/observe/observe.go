@@ -56,8 +56,14 @@ type Config struct {
 	// nil = no resolution (the route id must already be canonical).
 	Resolve func(wi string) string
 
-	PollInterval      time.Duration // execution.json poll tick (500ms)
-	HangWindow        time.Duration // stream-silence window while a turn is in flight (10min)
+	PollInterval time.Duration // execution.json poll tick (500ms)
+	HangWindow   time.Duration // stream-silence window while a turn is in flight (10min)
+	// IdleWindow is the F5 idle-watchdog window: no progress record
+	// AND no turn in flight for this long ⇒ liveness probe ⇒ (no ack)
+	// WINeedsRecovery(idle). It covers the shape the hang window is
+	// blind to by definition — a turn that already ENDED (e.g. on a
+	// fatal provider error) with the session left driving nothing.
+	IdleWindow        time.Duration // no-record-no-turn quiet window (10min)
 	ProbeTimeout      time.Duration // liveness-probe ack bound (2min)
 	AnswerAckWindow   time.Duration // pf/answer consumption-ack window (2min)
 	PushRetryBackoff  time.Duration // async push retry spacing after a failure (10s)
@@ -74,6 +80,9 @@ func (c *Config) fill() {
 	}
 	if c.HangWindow == 0 {
 		c.HangWindow = 10 * time.Minute
+	}
+	if c.IdleWindow == 0 {
+		c.IdleWindow = 10 * time.Minute
 	}
 	if c.ProbeTimeout == 0 {
 		c.ProbeTimeout = 2 * time.Minute
@@ -341,6 +350,7 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 		cfg: monitorCfg{
 			PollInterval:      o.cfg.PollInterval,
 			HangWindow:        o.cfg.HangWindow,
+			IdleWindow:        o.cfg.IdleWindow,
 			ProbeTimeout:      o.cfg.ProbeTimeout,
 			AnswerAckWindow:   o.cfg.AnswerAckWindow,
 			PushRetryBackoff:  o.cfg.PushRetryBackoff,
@@ -378,6 +388,7 @@ func (m *Monitor) attach(at Attach) {
 	m.handle = at.Handle
 	m.records = at.Handle.Records()
 	m.exitCh = at.Handle.Exit()
+	m.idleAnchor = time.Now() // the idle window's pre-first-record baseline
 	m.stateMu.Lock()
 	m.attemptID = at.Msg.AttemptID
 	m.stateMu.Unlock()

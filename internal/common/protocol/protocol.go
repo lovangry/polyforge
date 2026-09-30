@@ -32,7 +32,7 @@ type OBMsg struct {
 	Kind      OBMsgKind `json:"kind"`
 	AttemptID string    `json:"attempt_id"`
 	WorkItem  string    `json:"work_item"`
-	Reason    string    `json:"reason"`  // WINeedsRecovery: death|hang|provider_error|...
+	Reason    string    `json:"reason"`  // WINeedsRecovery: death|hang|provider_error|idle|...
 	Detail    string    `json:"detail,omitempty"`
 }
 
@@ -56,6 +56,10 @@ const (
 	RecoverDeath         = "agent_death"
 	RecoverHang          = "hang"
 	RecoverProviderError = "provider_error"
+	// RecoverIdle is the F5 watchdog cause: the session is alive but
+	// nobody drives it — no progress record, no turn in flight past the
+	// idle window, and the liveness probe went unacknowledged.
+	RecoverIdle = "idle"
 )
 
 // Terminal reasons carried by WIFinished.
