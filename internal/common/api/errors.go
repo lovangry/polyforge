@@ -47,9 +47,11 @@ const (
 	ErrCoreRateLimit    = "CORE-425"
 	ErrCoreInternal     = "CORE-500"
 	ErrCoreUnavailable  = "CORE-503"
-	ErrCoreBadGateway   = "CORE-504"
-	ErrCoreLockHeld     = "CORE-508"
-	ErrCoreStaleService = "CORE-509"
+	// CORE-504 is the §5.2 read-through miss: progress unobtainable
+	// (no readable object at the WI's published HEAD).
+	ErrCoreProgressUnavailable = "CORE-504"
+	ErrCoreLockHeld            = "CORE-508"
+	ErrCoreStaleService        = "CORE-509"
 
 	// MEM — memory errors (06 §5)
 	ErrMemBadInput       = "MEM-400"

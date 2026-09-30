@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/aihub/core"
 	"github.com/silgrid/polyforge/internal/aihub/git"
@@ -56,6 +57,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/v1/work-items/{id}", s.auth(s.hGetWI))
 	m.HandleFunc("PATCH /api/v1/work-items/{id}", s.auth(s.hPatchWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/cancel", s.auth(s.hCancelWI))
+	m.HandleFunc("GET /api/v1/work-items/{id}/progress", s.auth(s.hProgress))
 	m.HandleFunc("POST /api/v1/work-items/{id}/claim", s.auth(s.hClaim))
 	m.HandleFunc("POST /api/v1/work-items/{id}/end-generation", s.auth(s.hEndGeneration))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
@@ -433,6 +435,59 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 		return
 	}
 	writeJSON(w, http.StatusOK, wi)
+}
+
+// hProgress serves GET /api/v1/work-items/{id}/progress (02 §5.2): the
+// read-only progress projection. The server reads its own local bare
+// repo HEAD's runtime-state/execution.json and passes it through
+// VERBATIM in `progress` — no field pruning, no re-representation in
+// Core's data model, no materialized cache (INV-1). Authorization is
+// the ordinary object-data rule: project-member canRead (membership OR
+// global admin) with the caller's ordinary API key; a non-readable WI
+// stays hidden behind CORE-404 like every other GET route.
+func (s *Server) hProgress(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !s.requireRead(w, idn, projectID, "work item %s", r.PathValue("id")) {
+		return
+	}
+	hp, err := s.Git.ReadHeadProgress(id)
+	if err != nil {
+		if errors.Is(err, git.ErrNoPublishedProgress) {
+			// §5.2: never-published WIs answer CORE-504 — no invented HEAD
+			// data is fabricated for a WI whose chain is still empty.
+			writeErr(w, core.Fail(api.ErrCoreProgressUnavailable, "",
+				"no published revision for %s yet (read-through has no readable object)", id))
+			return
+		}
+		writeErr(w, core.Fail(api.ErrCoreInternal, "", "read HEAD progress: %v", err))
+		return
+	}
+	if !json.Valid(hp.Content) {
+		writeErr(w, core.Fail(api.ErrCoreProgressUnavailable, "",
+			"the published execution state of %s is not valid JSON", id))
+		return
+	}
+	// head_generation is not a git artifact: the capsule records its
+	// generation inside execution.json at every write, so the single
+	// top-level `generation` field is read out of the PUBLISHED file
+	// itself to fill the response header fields. The file body is still
+	// returned unchanged as `progress`.
+	var head struct {
+		Generation int64 `json:"generation"`
+	}
+	_ = json.Unmarshal(hp.Content, &head)
+	writeJSON(w, http.StatusOK, &api.ProgressResponse{
+		WorkItemID:     id,
+		HeadSeq:        hp.Seq,
+		HeadGeneration: head.Generation,
+		Progress:       json.RawMessage(hp.Content),
+		HeadUpdatedAt:  hp.UpdatedAt.UTC().Format(time.RFC3339),
+		FreshnessNote:  api.ProgressFreshnessNote,
+	})
 }
 
 // hClaim serves claim/resume/takeover. claim and resume are the machine
