@@ -365,6 +365,8 @@ func (s *Store) Update(memID string, req UpdateRequest) (*Entry, error) {
 // Search runs the real-time text query: FTS5 trigram for ≥3-rune tokens,
 // substring widening for shorter tokens (kept from v0; a trigram index
 // cannot answer <3-rune queries, which are the common CJK shape).
+// memType filters by memory type: a value ending in ".*" is a prefix
+// match (X.* → prefix "X."), any other value is an exact match.
 // allowed filters candidates (membership/visibility, applied by the
 // server layer).
 func (s *Store) Search(q string, memType string, tags []string, limit int, allowed func(*Entry) bool) ([]Entry, error) {
@@ -434,7 +436,7 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 		if !ok {
 			continue
 		}
-		if memType != "" && e.Type != memType {
+		if !typeMatches(e.Type, memType) {
 			continue
 		}
 		if len(tags) > 0 && !containsAll(e.Tags, tags) {
@@ -449,6 +451,22 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 		}
 	}
 	return out, nil
+}
+
+// typeMatches answers the type filter for one entry. An empty filter
+// passes every type. A value ending in ".*" is a prefix match on "X.":
+// experience.* matches experience.debug and experience.approach but
+// not fact.note (and not the bare type experience). Any other value
+// stays an exact match. No whitelist — a new type prefix filters as
+// soon as memories carry it.
+func typeMatches(entryType, memType string) bool {
+	if memType == "" {
+		return true
+	}
+	if prefix, ok := strings.CutSuffix(memType, ".*"); ok {
+		return strings.HasPrefix(entryType, prefix+".")
+	}
+	return entryType == memType
 }
 
 // candRow is one search candidate (mem id + indexed body).

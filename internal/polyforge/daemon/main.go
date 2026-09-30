@@ -43,6 +43,12 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
 	recallTopK := fs.Int("recall-topk", 0, "claim-time memory snapshot hit count (env POLYFORGE_RECALL_TOPK; default 10, max 50)")
 	mode := fs.String("mode", "", "initial mode: interactive|batch|drain (default interactive)")
+	// Observe supervision windows (#12): Go duration strings, flags only
+	// (no env fallbacks). Omitted or zero keeps observe's own default.
+	hangWindow := fs.Duration("hang-window", 0, "stream-silence window while a turn is in flight before the liveness probe arms (default 10m)")
+	idleWindow := fs.Duration("idle-window", 0, "no-record-no-turn quiet window before the idle watchdog probes (default 10m)")
+	probeTimeout := fs.Duration("probe-timeout", 0, "liveness-probe ack bound (default 2m)")
+	answerAckWindow := fs.Duration("answer-ack-window", 0, "pf/answer consumption-ack window (default 2m)")
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}
@@ -137,6 +143,14 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		RecallTopK:          *recallTopK,
 		Mode:                *mode,
 		Hub:                 aihubclient.New(*server, *apiKey),
+		// Zero fields fall through to observe's own fill() defaults, so a
+		// daemon started without these flags keeps the production windows.
+		Observe: ObserveWindows{
+			HangWindow:      *hangWindow,
+			IdleWindow:      *idleWindow,
+			ProbeTimeout:    *probeTimeout,
+			AnswerAckWindow: *answerAckWindow,
+		},
 	}
 	d, err := New(cfg)
 	if err != nil {

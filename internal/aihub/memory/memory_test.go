@@ -123,6 +123,71 @@ func TestFtsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSearchTypePrefixFilter: the type filter's wildcard form — a
+// trailing ".*" is a prefix match on "X." (experience.* matches
+// experience.debug and experience.approach, not fact.note and not the
+// bare type experience); a non-wildcard value keeps exact-match
+// semantics (fact.* never matches experience.* rows).
+func TestSearchTypePrefixFilter(t *testing.T) {
+	e := newEnv(t)
+	mk := func(memType string) {
+		t.Helper()
+		if _, err := e.store.Create(CreateRequest{
+			Project: "alpha", Type: memType,
+			Visibility: "project", Content: "the shared xylophone token",
+		}, e.user); err != nil {
+			t.Fatalf("create %s: %v", memType, err)
+		}
+	}
+	mk("experience.debug")
+	mk("experience.approach")
+	mk("fact.note")
+	mk("experience")
+
+	types := func(hits []Entry) []string {
+		out := make([]string, 0, len(hits))
+		for _, h := range hits {
+			out = append(out, h.Type)
+		}
+		return out
+	}
+
+	// experience.*: both experience.* rows, never fact.note and never
+	// the bare type experience.
+	hits, err := e.store.Search("xylophone", "experience.*", nil, 10, nil)
+	if err != nil {
+		t.Fatalf("search experience.*: %v", err)
+	}
+	got := types(hits)
+	if len(got) != 2 {
+		t.Fatalf("experience.* hits = %v, want the two experience.* types", got)
+	}
+	for _, ty := range got {
+		if !strings.HasPrefix(ty, "experience.") {
+			t.Fatalf("experience.* matched non-experience type %q", ty)
+		}
+	}
+
+	// fact.*: only fact.note — an experience.* row never matches.
+	hits, err = e.store.Search("xylophone", "fact.*", nil, 10, nil)
+	if err != nil {
+		t.Fatalf("search fact.*: %v", err)
+	}
+	if got = types(hits); len(got) != 1 || got[0] != "fact.note" {
+		t.Fatalf("fact.* hits = %v, want only fact.note", got)
+	}
+
+	// Non-wildcard values keep exact-match semantics.
+	hits, err = e.store.Search("xylophone", "experience.debug", nil, 10, nil)
+	if err != nil || len(hits) != 1 || hits[0].Type != "experience.debug" {
+		t.Fatalf("exact hits = %+v err=%v, want only experience.debug", hits, err)
+	}
+	hits, err = e.store.Search("xylophone", "experience", nil, 10, nil)
+	if err != nil || len(hits) != 1 || hits[0].Type != "experience" {
+		t.Fatalf("bare-type hits = %+v err=%v, want only the bare experience row", hits, err)
+	}
+}
+
 func TestReconcileOrphanRowRollback(t *testing.T) {
 	// Scenario: the row committed (step ②) but the authority file was
 	// never placed (crash before ③). Reconcile deletes the whole create.

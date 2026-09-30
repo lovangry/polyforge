@@ -77,8 +77,9 @@ type Config struct {
 	ObservePoll time.Duration    // observe execution.json poll tick
 	// Observe carries the observe lane's supervision windows into the
 	// assembly — the injection seam the fault-injection scenarios shrink
-	// (hang watchdog, liveness-probe bound, answer-ack window). Zero
-	// fields keep the observe defaults (10min / 2min / 2min).
+	// (hang watchdog, idle watchdog, liveness-probe bound, answer-ack
+	// window). Zero fields keep the observe defaults
+	// (10min / 10min / 2min / 2min).
 	Observe           ObserveWindows
 	DrainInterval     time.Duration // drain wave-fetch period (5s)
 	DispatchTick      time.Duration // dispatcher/backfill period (200ms)
@@ -89,7 +90,7 @@ type Config struct {
 }
 
 // ObserveWindows is the observe-lane supervision-window subset of the
-// observe config that daemon.Config passes through. All three default
+// observe config that daemon.Config passes through. All four default
 // to zero — observe's own fill() then applies the production defaults —
 // so a production Config with an untouched Observe field assembles the
 // production windows.
@@ -97,6 +98,9 @@ type ObserveWindows struct {
 	// HangWindow is the stream-silence window while a turn is in flight
 	// that arms the liveness probe.
 	HangWindow time.Duration
+	// IdleWindow is the no-record-no-turn quiet window that arms the
+	// idle watchdog's liveness probe.
+	IdleWindow time.Duration
 	// ProbeTimeout bounds one liveness probe's ack wait.
 	ProbeTimeout time.Duration
 	// AnswerAckWindow bounds the agent's pf/answer consumption ack.
@@ -167,6 +171,13 @@ type Daemon struct {
 	shutDone    chan struct{} // closed when the FIRST shutdown sequence finished
 	shutMu      sync.Mutex
 	shutdownErr error
+
+	// drainDegraded is the drain degraded-signal episode flag: set when
+	// the first drain_degraded event of a silent→degraded transition has
+	// been emitted, cleared on the next successful wave fetch. Only the
+	// drain ticker goroutine touches it (fetchDrainWave), so it carries
+	// no lock.
+	drainDegraded bool
 
 	adapMu   sync.Mutex
 	adapters map[string]*agentAdapter
@@ -256,6 +267,7 @@ func New(cfg Config) (*Daemon, error) {
 		// Bug-4 seam: the supervision windows pass through; zero fields
 		// keep the observe defaults.
 		HangWindow:      cfg.Observe.HangWindow,
+		IdleWindow:      cfg.Observe.IdleWindow,
 		ProbeTimeout:    cfg.Observe.ProbeTimeout,
 		AnswerAckWindow: cfg.Observe.AnswerAckWindow,
 	})
@@ -601,7 +613,10 @@ func (d *Daemon) dispatch() {
 // fetchDrainWave pulls the ready queue and enqueues what is claimable
 // (04 §6.1c): only in drain mode, never once shutting_down latched, and
 // only while a concurrency slot is free. Authorization-class denials
-// raise the degraded signal; transport-class losses stay silent idle.
+// raise the degraded signal — a typed drain_degraded event in the
+// observe lane's durable log, once per silent→degraded episode (the
+// flag clears on the next successful fetch); transport-class losses
+// stay silent idle.
 func (d *Daemon) fetchDrainWave() {
 	if !d.modes.AdmitDrainWave() || !d.q.SlotFree() {
 		return
@@ -610,9 +625,18 @@ func (d *Daemon) fetchDrainWave() {
 	if err != nil {
 		if authDenied(err) {
 			fmt.Fprintf(os.Stderr, "daemon: drain fetch degraded: ready queue of project %q denied (%v)\n", d.cfg.Project, err)
+			if !d.drainDegraded && d.obs != nil {
+				d.drainDegraded = true
+				_ = d.obs.Events().Append("", observe.EvDrainDegraded, map[string]any{
+					"project": d.cfg.Project,
+					"class":   "authorization",
+					"error":   err.Error(),
+				})
+			}
 		}
 		return
 	}
+	d.drainDegraded = false // episode cleared: this fetch succeeded
 	for _, it := range items {
 		if it.BundleName == nil {
 			continue // registration tickets never execute

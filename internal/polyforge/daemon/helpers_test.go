@@ -147,6 +147,10 @@ type fakeHub struct {
 	// adapters make (search + memory create); nil answers a typed
 	// refusal. The tests that exercise the memory lanes script it.
 	memDo func(method, path string, body, out any) error
+	// queueErr, when non-nil, is what Queue answers instead of the
+	// seeded list — the drain degraded-signal test scripts denials with
+	// it.
+	queueErr error
 }
 
 type endCall struct {
@@ -206,6 +210,9 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 func (h *fakeHub) Queue(project string) ([]api.WorkItem, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.queueErr != nil {
+		return nil, h.queueErr
+	}
 	out := make([]api.WorkItem, 0, len(h.queues))
 	out = append(out, h.queues...)
 	return out, nil

@@ -63,6 +63,17 @@ const (
 	// stateless proxies and carry no monitor state.
 	EvMemoryRecall   = "memory_recall"
 	EvMemoryRemember = "memory_remember"
+	// EvDrainDegraded is the drain loop's authorization-class degraded
+	// signal (daemon/daemon.go fetchDrainWave): a drain-mode wave fetch of
+	// the ready queue was denied for authorization reasons (typed aihub
+	// error with HTTP 401/403/404 — e.g. the machine key revoked mid-run).
+	// Daemon-scope: appended with wi="" (the fetch owns no job) and
+	// merged into every live monitor's JobView events layer, so any
+	// observe view can read it. Edge-triggered once per silent→degraded
+	// episode; the episode clears on the next successful fetch. Denial
+	// MUST surface as this event, never as silent idling; transport-class
+	// losses (network/5xx) stay silent idle, unchanged.
+	EvDrainDegraded = "drain_degraded"
 )
 
 // Infra-incident payload kinds (04 §5.1a tenth-event family).
