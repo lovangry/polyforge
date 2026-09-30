@@ -254,11 +254,13 @@ func TestV1S19AwaitingAnswerRedeliveredAfterDaemonCrash(t *testing.T) {
 	// The relay reached the successor verbatim and was archived in the
 	// capsule (the persistent authority), pending question cleared.
 	exec := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
+	// Only the answer TEXT is asserted here: the capsule archive record
+	// (capsule.ArchivedAnswer) carries question_id/answer/answered_by/
+	// answered_at and deliberately no answer_id — that identifier is
+	// daemon-ledger scoped and is asserted against answers.json above
+	// (answersFileHas). Same contract as the S02 reference scenario.
 	if !strings.Contains(exec, answerText) {
 		t.Fatalf("sealed execution.json misses the re-delivered answer:\n%s", exec)
-	}
-	if !strings.Contains(exec, answerID) {
-		t.Fatalf("sealed execution.json misses the answer id %s:\n%s", answerID, exec)
 	}
 	if strings.Contains(exec, `"pending_question"`) {
 		t.Fatalf("sealed execution.json still carries a pending question:\n%s", exec)
@@ -426,9 +428,12 @@ func TestV1S19CorruptLedgerFileQuarantinedAtStartup(t *testing.T) {
 		}, nil)
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
+	waitUntil(t, 30*time.Second, "agent never spawned", func() bool { return d.agentPIDOf(t, wi) > 0 })
 	waitUntil(t, 30*time.Second, "pending question never became visible", func() bool {
-		jv := d.observe(t, wi)
-		return jv.Pending != nil && jv.Pending.ID == qid
+		// observeSoft: the submit->monitored window answers DAEMON-404 by
+		// design and must be polled through, not fatal'd on.
+		jv := observeSoft(d, wi)
+		return jv != nil && jv.Pending != nil && jv.Pending.ID == qid
 	})
 	d.pf(t, "answer", wi, "--text", "It does.", "--question", qid, "--answer-id", "a_s19d", "--by", "usr_root")
 	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
