@@ -279,6 +279,22 @@ func renderObserve(w io.Writer, jv *protocol.JobView) {
 	}
 }
 
+// renderReadThrough renders the §5.2 read-through projection: the
+// aihub-side answer of the WI's last published revision, visibly a
+// DIFFERENT layer from the daemon's live JobView — labeled
+// layer=read-through with the as-of-last-publish freshness note.
+// Daemon-layer-only content (live events ring, --after cursor,
+// pending-question interactivity) has no read-through equivalent and
+// is never fabricated here.
+func renderReadThrough(w io.Writer, p *api.ProgressResponse) {
+	fmt.Fprintf(w, "%s — layer=read-through (read-only projection of the last published revision)\n", p.WorkItemID)
+	fmt.Fprintf(w, "head: seq %d  generation %d  updated %s\n",
+		p.HeadSeq, p.HeadGeneration, p.HeadUpdatedAt)
+	fmt.Fprintf(w, "freshness: %s\n", p.FreshnessNote)
+	fmt.Fprintln(w, "\nprogress:")
+	printJSON(w, p.Progress)
+}
+
 // renderStatus renders the daemon status() bookkeeping list.
 // renderStatus renders the daemon status() bookkeeping list. The
 // QUESTION column is the D6 owner face: any job the daemon reports with a

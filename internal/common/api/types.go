@@ -130,6 +130,26 @@ type PushCredential struct {
 	ExpiresAt string `json:"expires_at"`
 }
 
+// ProgressResponse is the §5.2 read-through answer (02-aihub-core.md):
+// HEAD metadata plus the verbatim runtime-state/execution.json content
+// of the WI's last published revision. Progress passes through
+// unchanged — Core never re-represents execution state in its own data
+// model (INV-1); only the single top-level `generation` field is read
+// out of it to fill HeadGeneration.
+type ProgressResponse struct {
+	WorkItemID     string          `json:"work_item_id"`
+	HeadSeq        int64           `json:"head_seq"`
+	HeadGeneration int64           `json:"head_generation"`
+	Progress       json.RawMessage `json:"progress"`
+	HeadUpdatedAt  string          `json:"head_updated_at"`
+	FreshnessNote  string          `json:"freshness_note"`
+}
+
+// ProgressFreshnessNote marks read-through data as as-of the most
+// recent publish (02 §5.2: freshness = HEAD update time; AIHub never
+// pulls live state from a daemon or agent).
+const ProgressFreshnessNote = "data is as of the most recent publish"
+
 // Memory (06).
 type Memory struct {
 	ID             string   `json:"id"`
