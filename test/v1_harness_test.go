@@ -259,6 +259,63 @@ func v1HarvestBootstrapKey(t *testing.T, logPath string) string {
 	}
 }
 
+// stopAihub terminates the REAL aihub process: SIGTERM (the server's
+// own graceful shutdown path) with a hard-kill fallback. Idempotent.
+// The data dir survives, so the bare repos and the whole hub state are
+// exactly what the restart re-opens.
+func (u *v1Install) stopAihub() {
+	if u.aihubCmd == nil || u.aihubCmd.Process == nil {
+		return
+	}
+	_ = u.aihubCmd.Process.Signal(syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() { _, _ = u.aihubCmd.Process.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		_ = u.aihubCmd.Process.Kill()
+		<-done
+	}
+	u.aihubCmd = nil
+}
+
+// restartAihub re-execs the aihub on the SAME data dir and port (the
+// outage-scenario recovery lever) and waits for its HTTP face. The data
+// dir persists across stopAihub, so the bare repos the agents push to
+// keep their history and their pre-receive seq bookkeeping.
+func (u *v1Install) restartAihub() {
+	u.t.Helper()
+	if u.aihubCmd != nil && u.aihubCmd.Process != nil {
+		u.t.Fatal("restartAihub: aihub still running; stopAihub first")
+	}
+	logf, err := os.OpenFile(u.aihubLog, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		u.t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(u.binDir, "aihub"),
+		"--data-dir", u.dataDir, "--listen", "127.0.0.1:"+strconv.Itoa(u.port))
+	cmd.Stdout, cmd.Stderr = logf, logf
+	if err := cmd.Start(); err != nil {
+		u.t.Fatal(err)
+	}
+	u.aihubCmd = cmd
+	u.t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			done := make(chan struct{})
+			go func() { _, _ = cmd.Process.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+				<-done
+			}
+		}
+		logf.Close()
+	})
+	u.waitHTTP(u.t)
+}
+
 // pf runs the REAL pf CLI against this install (env overrides carry the
 // configuration; no config file is involved). wantExit < 0 means the
 // command must succeed.
@@ -815,6 +872,34 @@ func (u *v1Install) waitBareCommits(t *testing.T, wi string, n int, bound time.D
 	t.Helper()
 	waitUntil(t, bound, fmt.Sprintf("bare repo of %s never reached %d commits (has %d)", wi, n, u.bareCommitCount(t, wi)),
 		func() bool { return u.bareCommitCount(t, wi) >= n })
+}
+
+// capsuleCommitCount is the LOCAL chain length of one capsule: commits
+// on main of the daemon-side external git dir (<dataDir>/git/<wi>.git).
+// A failed push leaves its commit here — the backpressure scenarios'
+// catch-up baseline (what the server-side bare repo must reach once the
+// aihub is back).
+func capsuleCommitCount(t *testing.T, dataDir, wi string) int {
+	t.Helper()
+	gitDir := filepath.Join(dataDir, "git", wi+".git")
+	if _, err := os.Stat(filepath.Join(gitDir, "HEAD")); err != nil {
+		return 0
+	}
+	cmd := exec.Command("git", "--git-dir", gitDir, "rev-list", "--count", "main")
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "ambiguous argument") ||
+			strings.Contains(string(out), "unknown revision") {
+			return 0 // unborn branch: the chain has not started yet
+		}
+		t.Fatalf("capsule rev-list count: %v: %s", err, out)
+	}
+	n, perr := strconv.Atoi(strings.TrimSpace(string(out)))
+	if perr != nil {
+		t.Fatalf("capsule rev-list count %q: %v", out, perr)
+	}
+	return n
 }
 
 // bareSeqTrailers returns the Polyforge-Seq trailer values of main, in
