@@ -284,10 +284,10 @@ func TestRestartMigratesSlugKeyedRecord(t *testing.T) {
 
 func TestPiSessionDirName(t *testing.T) {
 	cases := map[string]string{
-		"/root":                                 "--root--",
-		"/root/.local/share/x/capsules/wi_1":    "--root-.local-share-x-capsules-wi_1--",
-		"/root/ws/capsules/wi_3Ot791uZaXqL":      "--root-ws-capsules-wi_3Ot791uZaXqL--",
-		"/tmp/ox/capsules/polyforge#9":          "--tmp-ox-capsules-polyforge#9--",
+		"/root":                              "--root--",
+		"/root/.local/share/x/capsules/wi_1": "--root-.local-share-x-capsules-wi_1--",
+		"/root/ws/capsules/wi_3Ot791uZaXqL":  "--root-ws-capsules-wi_3Ot791uZaXqL--",
+		"/tmp/ox/capsules/polyforge#9":       "--tmp-ox-capsules-polyforge#9--",
 	}
 	for in, want := range cases {
 		if got := piSessionDirName(in); got != want {
