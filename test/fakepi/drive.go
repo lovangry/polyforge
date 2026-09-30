@@ -717,6 +717,12 @@ func withKind(body map[string]any, kind string) map[string]any {
 // makeRepo lays a real git worktree under repos/<name> with an origin
 // remote — the ship scenario's inventory (the daemon's ship bridge pushes
 // this worktree's HEAD to its own origin as the fixed-name branch).
+// When an origin carries a main baseline, the worktree descends from it
+// (the real-agent shape: clone the repo, work on top) so the origin's
+// history and the shipped branch share a root — github's PR API refuses
+// to open a PR for a head with no history in common with the base. An
+// origin without a main (s04's fresh empty bare repo) keeps today's
+// fresh-init worktree.
 func (d *driveEnv) makeRepo(name, origin string) {
 	if name == "" {
 		name = "demo"
@@ -738,12 +744,15 @@ func (d *driveEnv) makeRepo(name, origin string) {
 	if err := run("init", "-q", "-b", "main"); err != nil {
 		return
 	}
+	if origin != "" {
+		_ = run("remote", "add", "origin", origin)
+		if run("fetch", "--quiet", "origin", "main") == nil {
+			_ = run("checkout", "--quiet", "-B", "main", "FETCH_HEAD")
+		}
+	}
 	_ = os.WriteFile(filepath.Join(dir, "work.txt"), []byte("fake agent repo work for "+d.wi+"\n"), 0o644)
 	_ = run("add", "-A")
 	_ = run("-c", "user.name=fake-agent", "-c", "user.email=fake-agent@invalid",
 		"commit", "-q", "-m", "repo work "+d.wi)
-	if origin != "" {
-		_ = run("remote", "add", "origin", origin)
-	}
 	d.journal("repo", map[string]any{"name": name, "origin": origin})
 }
