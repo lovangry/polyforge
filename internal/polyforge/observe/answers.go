@@ -38,6 +38,7 @@ package observe
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
 // ErrAnswerAckPending is the two-phase outcome: delivery confirmed,
@@ -93,6 +94,34 @@ const (
 type answerOutcome struct {
 	state answerState
 	err   error
+	// wi is the OWNING work item. The in-memory idempotency map is
+	// keyed by answer_id alone (ids are globally unique), but the
+	// persisted file must be prunable per work item (spec A4:
+	// RTFinished drops that work item's entries), so the owner is
+	// carried here.
+	wi string
+	// relay is the submitted relay verbatim. It is what the serializer
+	// projects an IN-FLIGHT reservation onto disk with (as retryable +
+	// awaiting), so "a persisted entry exists before delivery starts"
+	// holds without the file ever carrying an in-flight marker.
+	relay AnswerRelay
+	// settledAt is the moment this state was recorded — the load-time
+	// age-out input (spec A4).
+	settledAt time.Time
+}
+
+// answerStore is the ledger's optional durable backend: the daemon-wide
+// answers.json under the observe data directory. nil ⇒ the ledger is
+// memory-only and every persist is a no-op.
+//
+// LOCK ORDER IS ALWAYS store.mu → AnswerLedger.mu. persist takes the
+// store lock first, snapshots under the ledger lock, then writes, so
+// two concurrent settles can never land on disk out of order. persist
+// is NEVER called while the ledger lock is held.
+type answerStore struct {
+	mu      sync.Mutex
+	dataDir string
+	rec     ledgerRecorder
 }
 
 // AnswerLedger holds the per-WI applied-answer idempotency map plus the
@@ -118,17 +147,186 @@ type AnswerLedger struct {
 	// entries whose question is still the open pending one are re-sent
 	// to the new handle automatically (monitor.redeliverAwaiting), and
 	// the manual CLI re-submit of the same answer_id re-delivers
-	// idempotently on top. In-memory only, deliberately: the capsule
-	// already owns the durable data; a second durable record of what
-	// the capsule owns is exactly the shape 00 §3.4a rules out.
+	// idempotently on top.
+	//
+	// DURABILITY: both halves are mirrored to answers.json under the
+	// daemon data directory (see answerfile.go) whenever the ledger
+	// settles, so a daemon restart does not silently swallow an
+	// unconsumed owner answer and does not turn every restart into an
+	// idempotency hole. The AUTHORITY SPLIT is unchanged: the capsule's
+	// execution.json still owns the open pending question and every
+	// binding decision is still made against it — this file is only a
+	// DELIVERY-STATUS CACHE recording what the daemon itself did. Losing
+	// it costs at worst one owner re-submission, which is why no load
+	// failure may block startup.
 	awaiting map[string]map[string]AnswerRelay
+
+	// store is the durable backend; nil = memory-only (the constructor
+	// below, used by the unit tests and by any caller with no data dir).
+	store *answerStore
 }
 
-// NewAnswerLedger creates the ledger.
+// NewAnswerLedger creates a MEMORY-ONLY ledger (no backing file); every
+// persist is a no-op. Production builds the daemon-wide ledger with
+// NewAnswerLedgerAt instead.
 func NewAnswerLedger() *AnswerLedger {
 	return &AnswerLedger{
 		applied:  map[string]answerOutcome{},
 		awaiting: map[string]map[string]AnswerRelay{},
+	}
+}
+
+// NewAnswerLedgerAt creates the DAEMON-WIDE ledger backed by
+// <dataDir>/answers.json, loading whatever the previous daemon left
+// there. record (may be nil) receives the ledger's own bookkeeping
+// events; the hub binds it to the events log.
+//
+// It never fails: a missing file is first boot, and an unreadable,
+// unparsable or unknown-version file is quarantined and replaced by an
+// empty ledger (spec A3 — the capsule is the authority, so a bad cache
+// must never stop the daemon from starting). An empty dataDir yields a
+// memory-only ledger.
+//
+// The load also applies the A4 age-out; when it dropped anything the
+// trimmed document is written straight back.
+func NewAnswerLedgerAt(dataDir string, record func(kind string, body map[string]any)) *AnswerLedger {
+	l := NewAnswerLedger()
+	if dataDir == "" {
+		return l
+	}
+	rec := ledgerRecorder(record)
+	doc, pruned := loadAnswerFile(dataDir, rec, time.Now())
+	l.store = &answerStore{dataDir: dataDir, rec: rec}
+	l.hydrate(doc)
+	if pruned {
+		l.persist()
+	}
+	return l
+}
+
+// hydrate fills a fresh ledger from a loaded document. It can NEVER
+// produce an answerInflight entry: the on-disk enum has no encoding for
+// it, so a crash mid-delivery reloads as retryable + awaiting and the
+// owner's re-submission is not refused with ErrAnswerInFlight.
+func (l *AnswerLedger) hydrate(doc answerFileDoc) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for wi, m := range doc.Awaiting {
+		if wi == "" || len(m) == 0 {
+			continue
+		}
+		cp := make(map[string]AnswerRelay, len(m))
+		for id, r := range m {
+			cp[id] = r
+		}
+		l.awaiting[wi] = cp
+	}
+	for id, e := range doc.Applied {
+		if id == "" {
+			continue
+		}
+		ts, _ := time.Parse(time.RFC3339Nano, e.SettledAt)
+		out := answerOutcome{
+			state:     decodeAnswerState(e.State),
+			err:       decodeAnswerErr(e.ErrorCode, e.ErrorMessage),
+			wi:        e.WorkItem,
+			settledAt: ts,
+		}
+		if m := doc.Awaiting[e.WorkItem]; m != nil {
+			out.relay = m[id]
+		}
+		l.applied[id] = out
+	}
+}
+
+// snapshot renders the current ledger as the on-disk document. The
+// IN-FLIGHT PROJECTION lives here: a reserved-but-unsettled slot is
+// written as retryable plus its awaiting relay — the file records
+// settled states only, and that is exactly the state a crash
+// mid-delivery must reload as.
+func (l *AnswerLedger) snapshot() answerFileDoc {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	doc := newAnswerFileDoc()
+	for wi, m := range l.awaiting {
+		cp := make(map[string]AnswerRelay, len(m))
+		for id, r := range m {
+			cp[id] = r
+		}
+		doc.Awaiting[wi] = cp
+	}
+	now := time.Now()
+	for id, o := range l.applied {
+		settled := o.settledAt
+		if settled.IsZero() {
+			settled = now
+		}
+		code, msg := encodeAnswerErr(o.err)
+		doc.Applied[id] = answerFileEntry{
+			State:        encodeAnswerState(o.state),
+			ErrorCode:    code,
+			ErrorMessage: msg,
+			WorkItem:     o.wi,
+			SettledAt:    settled.UTC().Format(time.RFC3339Nano),
+		}
+		if o.state != answerInflight || o.wi == "" || o.relay.AnswerID == "" {
+			continue
+		}
+		// The in-flight half of the projection: the accepted answer is on
+		// disk as re-deliverable before its delivery even begins.
+		if doc.Awaiting[o.wi] == nil {
+			doc.Awaiting[o.wi] = map[string]AnswerRelay{}
+		}
+		if _, ok := doc.Awaiting[o.wi][id]; !ok {
+			doc.Awaiting[o.wi][id] = o.relay
+		}
+	}
+	return doc
+}
+
+// persist writes the whole ledger to its backing file. BEST EFFORT by
+// design: a write failure is recorded as one answer_ledger event and
+// never fails the submission that triggered it — the capsule remains
+// the authority, so a stale cache is a recoverable annoyance while a
+// refused answer is a lost one. Must NOT be called with l.mu held.
+func (l *AnswerLedger) persist() {
+	s := l.store
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc := l.snapshot()
+	if err := writeAnswerFile(s.dataDir, doc); err != nil {
+		s.rec.record(map[string]any{
+			"detail": "write_failed",
+			"error":  err.Error(),
+			"path":   answerFilePath(s.dataDir),
+		})
+	}
+}
+
+// ForgetWorkItem drops every trace of one work item (spec A4: the
+// RTFinished path). Both halves go — a finished work item can neither
+// receive a re-delivery nor be re-answered, so nothing is lost and the
+// file cannot grow without bound.
+func (l *AnswerLedger) ForgetWorkItem(wi string) {
+	if wi == "" {
+		return
+	}
+	l.mu.Lock()
+	_, hadAwaiting := l.awaiting[wi]
+	delete(l.awaiting, wi)
+	dropped := hadAwaiting
+	for id, o := range l.applied {
+		if o.wi == wi {
+			delete(l.applied, id)
+			dropped = true
+		}
+	}
+	l.mu.Unlock()
+	if dropped {
+		l.persist()
 	}
 }
 
@@ -146,13 +344,14 @@ func (l *AnswerLedger) noteAwaiting(wi string, relay AnswerRelay) {
 
 func (l *AnswerLedger) clearAwaiting(wi, answerID string) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if m := l.awaiting[wi]; m != nil {
 		delete(m, answerID)
 		if len(m) == 0 {
 			delete(l.awaiting, wi)
 		}
 	}
+	l.mu.Unlock()
+	l.persist()
 }
 
 // AwaitingQuestion reports whether a relay for questionID was DELIVERED
@@ -193,7 +392,6 @@ func (l *AnswerLedger) clearAwaitingQuestion(wi, questionID string) {
 		return
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	m := l.awaiting[wi]
 	for id, r := range m {
 		if r.QuestionID == questionID {
@@ -203,6 +401,8 @@ func (l *AnswerLedger) clearAwaitingQuestion(wi, questionID string) {
 	if len(m) == 0 {
 		delete(l.awaiting, wi)
 	}
+	l.mu.Unlock()
+	l.persist()
 }
 
 // PendingSource is the persisted comparison basis: the currently open
@@ -258,8 +458,12 @@ func (l *AnswerLedger) SubmitFor(wi string, relay AnswerRelay, callerID string, 
 		// answerRetryable: re-attempt below, re-reserving the slot.
 	}
 	// Reserve the slot BEFORE delivering so a concurrent duplicate
-	// cannot double-deliver while this call is in flight.
-	l.applied[relay.AnswerID] = answerOutcome{state: answerInflight}
+	// cannot double-deliver while this call is in flight. The owner and
+	// the verbatim relay ride the reservation so the serializer can
+	// project it onto disk as retryable + awaiting.
+	l.applied[relay.AnswerID] = answerOutcome{
+		state: answerInflight, wi: wi, relay: relay, settledAt: time.Now(),
+	}
 	l.mu.Unlock()
 
 	outcome := answerOutcome{state: answerFinal}
@@ -296,7 +500,11 @@ func (l *AnswerLedger) SubmitFor(wi string, relay AnswerRelay, callerID string, 
 		}
 	}
 	l.mu.Lock()
+	outcome.wi = wi
+	outcome.relay = relay
+	outcome.settledAt = time.Now()
 	l.applied[relay.AnswerID] = outcome
 	l.mu.Unlock()
+	l.persist()
 	return delivered, outcome.err
 }
