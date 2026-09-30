@@ -184,6 +184,22 @@ type Daemon struct {
 
 	lst net.Listener
 	srv *http.Server
+
+	// faceMu guards srv and the faceClosed latch: Run assembles and
+	// starts serving the face only after restart reconciliation, so an
+	// external Shutdown arriving inside that window runs concurrently
+	// with Run's face setup — the latch lets whichever side loses the
+	// race tear the listener down instead of serving on a face the
+	// shutdown sequence already closed.
+	faceMu     sync.Mutex
+	faceClosed bool
+
+	// faceOwned latches once this process bound the UDS face (the
+	// single-instance guard passed): only a daemon that owns the socket
+	// may rewrite the shared on-disk bookkeeping — a startup abort must
+	// never persist its (never-seeded) view over the running daemon's
+	// state.
+	faceOwned bool
 }
 
 // New validates and assembles the daemon. Restart reconciliation is NOT
@@ -321,22 +337,53 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go func() { d.obs.Run(d.obsCtx); close(d.obsDone) }()
 	go d.bridge()
 
+	// Single-instance guard FIRST — before ANY push lane can open. The
+	// UDS face is the one cross-process serialization point this data-dir
+	// has: an old daemon mid-graceful-shutdown keeps its listener (it
+	// closes only at step 5 of the sequence) while its in-flight
+	// recovery pushes are still running, so dialing the socket here is
+	// the only reliable "is the old process gone yet?" check. Restart
+	// reconciliation used to run BEFORE this guard, which let a daemon
+	// started in that window push the same work items from a second
+	// process — the per-WI git mutex is process-local, so nothing
+	// serialized the two lanes and the server's ref compare-and-swap
+	// rejected the duplicate pushes. Guarding first makes the new
+	// process abort before it can open a push lane at all.
+	lst, err := d.listenUDS()
+	if err != nil {
+		// Startup abort: unwind the lanes this process already started,
+		// but persist NOTHING — this process never owned the socket, so
+		// the shared on-disk bookkeeping (state.json) belongs to the
+		// daemon that still holds it.
+		d.abortStartup()
+		return err
+	}
+	d.faceOwned = true
+	// d.lst is read by closeFace under faceMu; publish it under the
+	// same lock so a shutdown arriving in the next instant cannot race
+	// the assignment.
+	d.faceMu.Lock()
+	d.lst = lst
+	d.faceMu.Unlock()
+
 	// Restart reconciliation (§十一): every recorded job is re-derived
-	// against aihub's own verdict BEFORE the daemon serves anything.
+	// against aihub's own verdict — strictly after this process owns
+	// the socket (see the guard note above), and before the face serves
+	// a single request: a client that reaches the daemon must see a
+	// reconciled runtime, never a seeded record's pre-reconciliation
+	// snapshot (stale agent pids, superseded lineages).
 	if err := d.rt.Restart(d.runCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: restart reconciliation failed: %v\n", err)
 	}
 	d.reattachRecovered()
 
-	lst, err := d.listenUDS()
-	if err != nil {
-		_ = d.Shutdown(context.Background())
-		return err
+	serveErr, serving := d.startFace(lst)
+	if !serving {
+		// A shutdown sequence closed the face while this process was
+		// reconciling: the listener is already gone, so there is nothing
+		// left to drive — Run exits exactly like the shutDone case.
+		return nil
 	}
-	d.lst = lst
-	d.srv = &http.Server{Handler: d.handler()}
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- d.srv.Serve(lst) }()
 
 	dispatch := time.NewTicker(d.cfg.DispatchTick)
 	defer dispatch.Stop()
@@ -360,6 +407,63 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-drain.C:
 			d.fetchDrainWave()
 		}
+	}
+}
+
+// startFace begins serving the UDS face on lst. It reports false
+// when a shutdown sequence already closed the face (the shutdown-
+// during-reconciliation window): the listener is then dead and Run
+// must not serve on it. The srv assignment happens under faceMu so a
+// concurrent closeFace either sees this server (and closes it, making
+// Serve answer ErrServerClosed) or has already latched faceClosed.
+func (d *Daemon) startFace(lst net.Listener) (chan error, bool) {
+	d.faceMu.Lock()
+	defer d.faceMu.Unlock()
+	if d.faceClosed {
+		return nil, false
+	}
+	d.srv = &http.Server{Handler: d.handler()}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- d.srv.Serve(lst) }()
+	return serveErr, true
+}
+
+// closeFace tears the UDS face down (runShutdown step 5): the serving
+// server if Run started it, otherwise the bare listener (a shutdown
+// that raced the startup reconciliation window, before Serve began).
+// Idempotent under the mutex; a second close is a no-op.
+func (d *Daemon) closeFace() {
+	d.faceMu.Lock()
+	defer d.faceMu.Unlock()
+	if d.faceClosed {
+		return
+	}
+	d.faceClosed = true
+	if d.srv != nil {
+		_ = d.srv.Close()
+		return
+	}
+	if d.lst != nil {
+		_ = d.lst.Close()
+	}
+}
+
+// abortStartup unwinds a daemon whose single-instance guard refused
+// the UDS face: stop the already-started lanes and wait for them, but
+// persist nothing (see faceOwned). Run returns the guard error right
+// after; the process exits without ever having touched a push lane.
+func (d *Daemon) abortStartup() {
+	if d.cancelObs != nil {
+		d.cancelObs()
+	}
+	if d.obsDone != nil {
+		<-d.obsDone
+	}
+	if d.cancelRun != nil {
+		d.cancelRun()
+	}
+	if d.rtDone != nil {
+		<-d.rtDone
 	}
 }
 
