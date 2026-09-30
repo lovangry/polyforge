@@ -39,7 +39,7 @@ not grading the spec's writing quality, you are checking for a match against int
 
 1. Read `artifacts/spec.md` in full.
 2. Present a concise summary of the spec's scope, non-goals, and requirements back to the
-   user via the interactive needs_input mechanism (`01-workflow-skills.md` §4.3) — ask
+   user via the interactive needs_input mechanism (pf-execute §7) — ask
    one clear confirmation question: does this match what you meant, or is something off?
 3. Append the question and the user's answer to `artifacts/grill-qa.md` under a
    `## grill-review` heading, below the existing `## grill` section — do not overwrite or
