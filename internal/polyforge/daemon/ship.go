@@ -58,7 +58,7 @@ type shipRepoOutcome struct {
 	OriginURL  string `json:"origin_url"`
 	Head       string `json:"head"`
 	Branch     string `json:"branch"`
-	Pushed      bool   `json:"pushed"`
+	Pushed     bool   `json:"pushed"`
 	Reused     bool   `json:"reused"`
 	PRURL      string `json:"pr_url,omitempty"`
 	CompareURL string `json:"compare_url,omitempty"`

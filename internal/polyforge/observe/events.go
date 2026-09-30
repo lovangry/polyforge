@@ -39,6 +39,15 @@ const (
 	// per attempt; a failed re-delivery carries its error and the ledger
 	// keeps the answer re-deliverable.
 	EvAnswerRedelivery = "answer_redelivery"
+	// EvAnswerLedger is the persisted-answer-ledger bookkeeping record
+	// (answers.json under the daemon data directory). Payload `detail`
+	// is a closed set: "quarantine" (an unreadable/unparsable/unknown
+	// -version file was moved aside to answers.json.corrupt-<ts> and the
+	// daemon started with an empty ledger) and "write_failed" (one
+	// best-effort persist did not reach disk). Daemon-scope: appended
+	// with wi="" — the ledger spans every work item, and a load-time
+	// quarantine happens before any monitor exists.
+	EvAnswerLedger     = "answer_ledger"
 	EvPublished        = "published"
 	EvPushFailed       = "push_failed"
 	EvPushBackpressure = "push_backpressure"
@@ -59,8 +68,14 @@ const (
 	EvJobStopped      = "job_stopped"
 	// The F6-B memory channel bookkeeping: one event per UDS recall /
 	// remember the daemon proxied (payload: top_k + hit count, or the
-	// stored id/type/visibility). Observability only — the routes are
+	// stored id/type/visibility — plus the write_ms timing on remember,
+	// see EvMemoryRemember). Observability only — the routes are
 	// stateless proxies and carry no monitor state.
+	// EvMemoryRemember is the memory channel's write half: the body
+	// carries the stored id/type/visibility plus write_ms — the
+	// Store.Create commit round-trip in milliseconds as seen at the
+	// append site (M6's write→retrievable latency sample; observed-only,
+	// idempotent replays timed just as honestly as fresh writes).
 	EvMemoryRecall   = "memory_recall"
 	EvMemoryRemember = "memory_remember"
 	// EvDrainDegraded is the drain loop's authorization-class degraded

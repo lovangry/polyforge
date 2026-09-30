@@ -167,14 +167,14 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 	}
 
 	rtCfg := runtime.Config{
-		MachineID:         "m-inproc",
-		WorkspaceRoot:     workspace,
-		DataDir:           dataDir,
-		GitRemoteBase:     inst.url + "/git",
-		WorkflowsDir:      filepath.Join(inst.root, "workflows"),
-		Harness:           "pi",
-		PiBin:             inst.fakepiPath,
-		SocketPath:        sock,
+		MachineID:          "m-inproc",
+		WorkspaceRoot:      workspace,
+		DataDir:            dataDir,
+		GitRemoteBase:      inst.url + "/git",
+		WorkflowsDir:       filepath.Join(inst.root, "workflows"),
+		Harness:            "pi",
+		PiBin:              inst.fakepiPath,
+		SocketPath:         sock,
 		ExecutorPromptFile: filepath.Join(inst.root, "skills", "pf-execute", "SKILL.md"),
 	}
 	// The tap rides the spawner's SHARED config (DefaultSpawner takes it
@@ -294,7 +294,7 @@ func (r *inprocRig) bridge(rtMsgs <-chan protocol.RTMsg, attachCh chan<- observe
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
 				if ji, live := r.rt.Info(msg.WorkItem); live && ji.Agent != nil {
 					at = observe.Attach{
-						Msg: msg,
+						Msg:    msg,
 						Handle: r.installAdapter(ji),
 						WI: observe.WIInfo{
 							WorkItem:   ji.WorkItem,
@@ -383,4 +383,3 @@ func eventBody(t *testing.T, e protocol.EventEntry, v any) {
 		t.Fatalf("event %s body: %v", e.Kind, err)
 	}
 }
-

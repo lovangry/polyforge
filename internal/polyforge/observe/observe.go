@@ -38,7 +38,8 @@ type Config struct {
 	// It must be buffered (Runtime drains it; the monitor never blocks
 	// on a send and drops only if the buffer is full).
 	OB chan protocol.OBMsg
-	// DataDir hosts the daemon events file (events.log).
+	// DataDir hosts the daemon events file (events.log) and the
+	// persisted answer ledger (answers.json).
 	DataDir string
 	// PushFunc overrides the capsule commit+push operation (tests).
 	PushFunc PushFunc
@@ -130,23 +131,25 @@ func (c *Config) fill() {
 // deadline the caller learns failure while the underlying git keeps
 // running — the per-WI git lock serializes any successor push. The seq
 // trailer is derived INSIDE gitops (single authority); nothing seq-wise
-// flows through here.
-func defaultPush(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+// flows through here, and the commit/push timings ride the result path
+// out untouched (observed-only latency samples).
+func defaultPush(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 	type res struct {
 		sha    string
 		pushed bool
+		t      gitops.PushTimings
 		err    error
 	}
 	done := make(chan res, 1)
 	go func() {
-		sha, pushed, err := gitops.CommitPush(o, message)
-		done <- res{sha, pushed, err}
+		sha, pushed, t, err := gitops.CommitPush(o, message)
+		done <- res{sha, pushed, t, err}
 	}()
 	select {
 	case r := <-done:
-		return r.sha, r.pushed, r.err
+		return r.sha, r.pushed, r.t, r.err
 	case <-ctx.Done():
-		return "", false, ctx.Err()
+		return "", false, gitops.PushTimings{}, ctx.Err()
 	}
 }
 
@@ -154,6 +157,13 @@ func defaultPush(ctx context.Context, o gitops.Opts, message string) (string, bo
 type Observe struct {
 	cfg Config
 	log *EventLog
+	// ledger is the DAEMON-WIDE answer ledger, loaded from
+	// <DataDir>/answers.json in New() and shared by every monitor. One
+	// ledger, one file, keyed per work item inside: a restarted daemon's
+	// first instance attachment already sees the restored awaiting set,
+	// and an answer_id that settled before the restart still replays its
+	// recorded outcome. The capsule stays the authority for binding.
+	ledger *AnswerLedger
 
 	mu       sync.Mutex
 	monitors map[string]*Monitor
@@ -167,13 +177,27 @@ type Observe struct {
 	wg sync.WaitGroup
 }
 
-// New validates the config and opens the events log.
+// New validates the config, opens the events log and LOADS the
+// persisted answer ledger.
+//
+// The load happens here, before New can hand back a hub, and therefore
+// before any RTStarted/RTRecovered attachment, any attach-time
+// redeliverAwaiting and any HTTP answer submission can run — the
+// ordering F9 cross-restart re-delivery depends on. It never fails the
+// daemon: a missing file is first boot and a corrupt one is quarantined
+// with one recorded event (spec A3).
 func New(cfg Config) (*Observe, error) {
 	cfg.fill()
 	log, err := NewEventLog(cfg.DataDir)
 	if err != nil {
 		return nil, err
 	}
+	// Daemon-scope bookkeeping: the ledger spans every work item and a
+	// load-time quarantine happens before any monitor exists, so its
+	// events are appended with wi="".
+	ledger := NewAnswerLedgerAt(cfg.DataDir, func(kind string, body map[string]any) {
+		_ = log.Append("", kind, body)
+	})
 	if cfg.RT == nil || cfg.OB == nil {
 		log.Close()
 		return nil, errConfig("RT and OB channels are both required")
@@ -182,7 +206,8 @@ func New(cfg Config) (*Observe, error) {
 		log.Close()
 		return nil, errConfig("OB channel must be buffered")
 	}
-	return &Observe{cfg: cfg, log: log, monitors: map[string]*Monitor{}, latest: map[string]string{}}, nil
+	return &Observe{cfg: cfg, log: log, ledger: ledger,
+		monitors: map[string]*Monitor{}, latest: map[string]string{}}, nil
 }
 
 type errConfig string
@@ -261,6 +286,12 @@ func (o *Observe) onAttach(at Attach) {
 		o.mu.Lock()
 		delete(o.latest, wi) // the instance lineage ended with the job
 		o.mu.Unlock()
+		// Retention (spec A4): a finished work item can neither receive a
+		// re-delivery nor be re-answered, so its ledger entries — both
+		// halves — are dropped from memory and from the file. This is the
+		// only pruning that touches AWAITING entries; the load-time
+		// age-out never does.
+		o.ledger.ForgetWorkItem(wi)
 		if m := o.takeMonitor(wi); m != nil {
 			m.requestStop() // monitor emits its own job_stopped event
 		}
@@ -374,9 +405,11 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 			push:                 o.cfg.PushFunc,
 			locateLive:           o.cfg.LocateLive,
 		},
-		log:    o.log,
-		ob:     o.cfg.OB,
-		ledger: NewAnswerLedger(),
+		log: o.log,
+		ob:  o.cfg.OB,
+		// the SHARED daemon-wide ledger, not a per-monitor one: the
+		// persisted file is single and keyed by work item.
+		ledger: o.ledger,
 
 		rtCh:     make(chan Attach, 4),
 		stopCh:   make(chan struct{}),
@@ -415,3 +448,6 @@ func (m *Monitor) attach(at Attach) {
 
 // Events exposes the log (diagnostic/tests).
 func (o *Observe) Events() *EventLog { return o.log }
+
+// Ledger exposes the daemon-wide answer ledger (diagnostic/tests).
+func (o *Observe) Ledger() *AnswerLedger { return o.ledger }

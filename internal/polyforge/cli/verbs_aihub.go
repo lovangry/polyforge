@@ -329,6 +329,22 @@ var cmdQueue = &Command{
 		if err != nil {
 			return err
 		}
+		if boolFlag(fs, "ready") {
+			// Ready queue: the takeable set is items + unclassified (the same
+			// union aihubclient.Queue() implements). --json stays raw
+			// passthrough of the full server body (all 7 sections).
+			ctx.finish(raw, func() {
+				var l struct {
+					Items       []api.WorkItem `json:"items"`
+					Unclassified []api.WorkItem `json:"unclassified"`
+				}
+				if err := json.Unmarshal(raw, &l); err == nil {
+						fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items)+len(l.Unclassified))
+						renderReadyWITable(ctx.Stdout, l.Items, l.Unclassified)
+					}
+			})
+			return nil
+		}
 		ctx.finish(raw, func() {
 			var l struct {
 				Items []api.WorkItem `json:"items"`

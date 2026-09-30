@@ -913,7 +913,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		// retried directly via gitops.Push below. A persistently failed
 		// push degrades the terminal reason to blocked — the local commit
 		// keeps the bytes, but the server never heard the final state.
-		_, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
+		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
 		for i := 0; i < 2 && perr != nil; i++ {
 			_, perr = gitops.Push(j.git)
 		}

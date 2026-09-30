@@ -132,19 +132,41 @@ func nullable(v *string) string {
 // Human renderers.
 // ---------------------------------------------------------------------------
 
+// wiRow renders the shared per-WI cells (no segment).
+func wiRow(it api.WorkItem) []string {
+	slug := it.Slug
+	if slug == "" {
+		slug = it.ID
+	}
+	return []string{
+		slug, it.Status, it.Priority, nullable(it.BundleName), truncate(it.Goal, 60),
+	}
+}
+
 // renderWITable renders a WI list table.
 func renderWITable(w io.Writer, items []api.WorkItem) {
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
-		slug := it.Slug
-		if slug == "" {
-			slug = it.ID
-		}
-		rows = append(rows, []string{
-			slug, it.Status, it.Priority, nullable(it.BundleName), truncate(it.Goal, 60),
-		})
+		rows = append(rows, wiRow(it))
 	}
 	printTable(w, []string{"SLUG", "STATUS", "PRIORITY", "BUNDLE", "GOAL"}, rows)
+}
+
+// renderReadyWITable renders the ready-queue table: items first, then
+// unclassified, with a SEGMENT column carrying the wire segment key
+// ("items" / "unclassified"). Both segments are takeable.
+func renderReadyWITable(w io.Writer, items, unclassified []api.WorkItem) {
+	segments := []struct {
+		key string
+		wis []api.WorkItem
+	}{{"items", items}, {"unclassified", unclassified}}
+	rows := make([][]string, 0, len(items)+len(unclassified))
+	for _, seg := range segments {
+		for _, it := range seg.wis {
+			rows = append(rows, append(wiRow(it), seg.key))
+		}
+	}
+	printTable(w, []string{"SLUG", "STATUS", "PRIORITY", "BUNDLE", "GOAL", "SEGMENT"}, rows)
 }
 
 // renderWIDetail renders the detail record.
@@ -199,8 +221,87 @@ func firstLine(s string) string {
 // renderObserve renders the observe projection (protocol.JobView): the
 // two-layer view of current step, the step table, the budget block, the
 // pending question and the recent events.
+// latencyFromBody defensively parses an event body for the commit_ms /
+// push_ms bookkeeping keys published by the daemon (#29). It returns the
+// human-readable latency segment (e.g. "commit 1234ms · push 567ms") when
+// at least one key is present, and "" when the body carries neither key,
+// is empty/null, or is not parseable JSON — the caller then falls back to
+// the raw truncated rendering, so a malformed body never fails the render.
+func latencyFromBody(body json.RawMessage) string {
+	if len(body) == 0 || string(body) == "null" {
+		return ""
+	}
+	var fields map[string]interface{}
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return ""
+	}
+	labels := map[string]string{"commit_ms": "commit", "push_ms": "push"}
+	var parts []string
+	for _, key := range []string{"commit_ms", "push_ms"} {
+		v, ok := fields[key]
+		if !ok {
+			continue
+		}
+		n, ok := v.(float64)
+		if !ok {
+			// Unexpected shape for a latency field: show the raw body
+			// instead of a half-parsed figure.
+			return ""
+		}
+		parts = append(parts, labels[key]+" "+strconv.FormatFloat(n, 'f', -1, 64)+"ms")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// wallFromBudget extracts the cumulative wall_ms figure from the raw
+// JobView.Budget JSON. Returns 0 when the budget is empty, null, invalid,
+// or carries no wall_ms key.
+func wallFromBudget(budget json.RawMessage) int64 {
+	if len(budget) == 0 || string(budget) == "null" {
+		return 0
+	}
+	var b struct {
+		WallMs int64 `json:"wall_ms"`
+	}
+	if err := json.Unmarshal(budget, &b); err != nil {
+		return 0
+	}
+	return b.WallMs
+}
+
+// humanWall renders a wall_ms figure for the JOB header ("3.2h", "45m",
+// "12s", "980ms"). Returns "" for non-positive values so the header
+// never grows a "0ms" artifact.
+func humanWall(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	sec := float64(ms) / 1000
+	switch {
+	case sec < 60:
+		return formatWallFigure(sec) + "s"
+	case sec < 3600:
+		return formatWallFigure(sec/60) + "m"
+	default:
+		return formatWallFigure(sec/3600) + "h"
+	}
+}
+
+// formatWallFigure formats one decimal place, dropping a trailing ".0".
+func formatWallFigure(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 1, 64)
+	return strings.TrimSuffix(s, ".0")
+}
+
 func renderObserve(w io.Writer, jv *protocol.JobView) {
-	fmt.Fprintf(w, "%s (%s) — %s\n", jv.WorkItem, jv.Project, jv.Status)
+	fmt.Fprintf(w, "%s (%s) — %s", jv.WorkItem, jv.Project, jv.Status)
+	if wall := humanWall(wallFromBudget(jv.Budget)); wall != "" {
+		fmt.Fprintf(w, " · wall %s", wall)
+	}
+	fmt.Fprintln(w)
 	fmt.Fprintf(w, "attempt: %s  generation: %s", jv.AttemptID, strconv.FormatInt(jv.Generation, 10))
 	if jv.BundleName != "" {
 		fmt.Fprintf(w, "  bundle: %s", jv.BundleName)
@@ -242,7 +343,11 @@ func renderObserve(w io.Writer, jv *protocol.JobView) {
 		for _, e := range jv.Events {
 			body := ""
 			if len(e.Body) > 0 && string(e.Body) != "null" {
-				body = truncate(string(e.Body), 80)
+				if lat := latencyFromBody(e.Body); lat != "" {
+					body = lat
+				} else {
+					body = truncate(string(e.Body), 80)
+				}
 			}
 			rows = append(rows, []string{e.At, e.Kind, body})
 		}
@@ -255,6 +360,22 @@ func renderObserve(w io.Writer, jv *protocol.JobView) {
 			fmt.Fprintf(w, "next cursor: pf observe %s --after %d\n", jv.WorkItem, last.Seq)
 		}
 	}
+}
+
+// renderReadThrough renders the §5.2 read-through projection: the
+// aihub-side answer of the WI's last published revision, visibly a
+// DIFFERENT layer from the daemon's live JobView — labeled
+// layer=read-through with the as-of-last-publish freshness note.
+// Daemon-layer-only content (live events ring, --after cursor,
+// pending-question interactivity) has no read-through equivalent and
+// is never fabricated here.
+func renderReadThrough(w io.Writer, p *api.ProgressResponse) {
+	fmt.Fprintf(w, "%s — layer=read-through (read-only projection of the last published revision)\n", p.WorkItemID)
+	fmt.Fprintf(w, "head: seq %d  generation %d  updated %s\n",
+		p.HeadSeq, p.HeadGeneration, p.HeadUpdatedAt)
+	fmt.Fprintf(w, "freshness: %s\n", p.FreshnessNote)
+	fmt.Fprintln(w, "\nprogress:")
+	printJSON(w, p.Progress)
 }
 
 // renderStatus renders the daemon status() bookkeeping list.

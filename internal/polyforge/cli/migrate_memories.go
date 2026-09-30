@@ -233,7 +233,7 @@ func RunMigrateMemories(opts MigMemoriesOptions, client *aihubclient.Client) (*M
 	// ③ the live server's reconcile backfills rows + FTS from the files.
 	rep.Rebuilt, err = client.RebuildMemoryIndex()
 	if err != nil {
-		return nil, resolveErrf("rebuild-index: %v (start the server first — the file-wins reconcile is the only backfill path)", err)
+		return nil, resolveWrapErrf(err, "rebuild-index: %v (start the server first — the file-wins reconcile is the only backfill path)", err)
 	}
 
 	// ④ the four-step verification.

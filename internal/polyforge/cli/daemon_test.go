@@ -234,7 +234,10 @@ func TestDaemonClientTypedErrorDecoding(t *testing.T) {
 	if ae.HTTPStatus() != 404 {
 		t.Errorf("HTTPStatus = %d, want 404", ae.HTTPStatus())
 	}
-	if code, _, _ := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock}, "observe", "wi_missing"); code != 1 {
+	// --read-through=false keeps the observe verb hermetic here: the
+	// daemon error surfaces directly and no aihub call is attempted.
+	if code, _, _ := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock},
+		"observe", "wi_missing", "--read-through=false"); code != 1 {
 		t.Errorf("DAEMON-404 must exit 1, got %d", code)
 	}
 }
@@ -333,6 +336,99 @@ func TestObserveRenderedOutput(t *testing.T) {
 	for _, want := range []string{"wi_abc (polyforge) — running", "current step: implement", "implement  in_progress"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// progressAnswer is a canned §5.2 read-through body for the fake aihub.
+const progressAnswer = `{"work_item_id":"wi_abc","head_seq":7,"head_generation":2,` +
+	`"progress":{"work_item_id":"wi_abc","generation":2,"current_step":"fix","workflow_status":"running","version":12},` +
+	`"head_updated_at":"2026-10-01T00:00:00Z","freshness_note":"data is as of the most recent publish"}`
+
+// TestObserveReadThroughFallback: a daemon DAEMON-404 (not monitored) plus
+// a reachable aihub observe succeeds by default, visibly labeled as the
+// read-through layer, with the caller's ordinary api key on the call.
+func TestObserveReadThroughFallback(t *testing.T) {
+	var rec reqRecorder
+	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, progressAnswer)
+	})
+	d := newDaemonFixture(t) // no observe answer → DAEMON-404 not monitored
+
+	code, stdout, stderr := runPf(t, map[string]string{
+		"PF_SERVER": aihub.URL, "PF_API_KEY": "key-ordinary", "PF_DAEMON_SOCKET": d.sock,
+	}, "observe", "wi_abc")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	for _, want := range []string{
+		"layer=read-through",
+		"seq 7  generation 2  updated 2026-10-01T00:00:00Z",
+		"data is as of the most recent publish",
+		"current_step",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	// The fallback rode the ordinary api key, and the daemon was tried
+	// first.
+	last := rec.last()
+	if last.Path != "/api/v1/work-items/wi_abc/progress" {
+		t.Errorf("progress path = %s", last.Path)
+	}
+	if got := last.Header.Get("Authorization"); got != "Bearer key-ordinary" {
+		t.Errorf("Authorization = %q, want the caller's ordinary api key", got)
+	}
+	if daemonReq := d.rec.last(); !strings.HasPrefix(daemonReq.Path, "/jobs/wi_abc/observe") {
+		t.Errorf("daemon was not tried first: %s", daemonReq.Path)
+	}
+}
+
+// TestObserveReadThroughOptOut: --read-through=false restores the old
+// fail-fast behavior — the daemon's not-monitored error surfaces and NO
+// server call is made.
+func TestObserveReadThroughOptOut(t *testing.T) {
+	var rec reqRecorder
+	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, progressAnswer)
+	})
+	d := newDaemonFixture(t) // DAEMON-404 not monitored
+
+	code, stdout, stderr := runPf(t, map[string]string{
+		"PF_SERVER": aihub.URL, "PF_API_KEY": "key-ordinary", "PF_DAEMON_SOCKET": d.sock,
+	}, "observe", "wi_abc", "--read-through=false")
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stderr, "DAEMON-404") {
+		t.Errorf("stderr must surface the daemon error, got: %s", stderr)
+	}
+	if n := len(rec.all()); n != 0 {
+		t.Errorf("--read-through=false must make no server call, made %d", n)
+	}
+}
+
+// TestObserveReadThroughFailure: when the daemon is not monitored AND the
+// read-through fails, the combined error names both layers (neither
+// failure is swallowed).
+func TestObserveReadThroughFailure(t *testing.T) {
+	var rec reqRecorder
+	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `{"code":"CORE-404","detail":"work item wi_abc"}`)
+	})
+	d := newDaemonFixture(t) // DAEMON-404 not monitored
+
+	code, stdout, stderr := runPf(t, map[string]string{
+		"PF_SERVER": aihub.URL, "PF_API_KEY": "key-ordinary", "PF_DAEMON_SOCKET": d.sock,
+	}, "observe", "wi_abc")
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s", code, stdout)
+	}
+	for _, want := range []string{"DAEMON-404", "read-through failed", "CORE-404"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q: %s", want, stderr)
 		}
 	}
 }

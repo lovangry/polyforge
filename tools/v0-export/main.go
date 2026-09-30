@@ -22,6 +22,7 @@ func main() {
 		noCaps   = flag.Bool("skip-capsules", false, "skip the capsule snapshot replay")
 		delta    = flag.Bool("delta", false, "top-up mode: emit only records new or changed since the baseline")
 		baseline = flag.String("baseline", "", "delta mode: the seed-v1 state file (per-record hash baseline) from the last successful run; required with --delta")
+		onlyWI   = flag.String("only-wi", "", "export ONLY this work item's capsule snapshot (work-items and memories stay full exports)")
 	)
 	flag.Parse()
 	rep, err := v0export.Run(v0export.Options{
@@ -31,6 +32,7 @@ func main() {
 		SkipCapsules: *noCaps,
 		Delta:        *delta,
 		BaselineFile: *baseline,
+		OnlyWI:       *onlyWI,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "v0-export: %v\n", err)

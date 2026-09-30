@@ -42,8 +42,12 @@ type Command struct {
 	Run     func(ctx *Context, fs *flag.FlagSet, args []string) error
 }
 
-// commands is the full registry: the 13 routing verbs first (4 direct +
-// 9 daemon), then the management face M1–M5, then the daemon placeholder.
+// commands is the full registry: the 13 routing verbs first — 5 direct
+// to aihub (file, queue, cancel, recall, remember) + 8 on the daemon UDS
+// face (submit, observe, answer, batch-confirm, pause, resume, wrap,
+// ops) — then ship (the wrap→git delivery bridge, daemon face), then the
+// management face M1–M5, then the two migrations, then the daemon
+// placeholder (help-only: cmd/pf/main.go intercepts the real launch).
 var commands = []*Command{
 	cmdFile,
 	cmdQueue,
@@ -232,23 +236,27 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "pf — polyforge v1 client CLI")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Data-plane verbs (direct to aihub):")
-	for _, c := range commands[0:4] {
+	for _, c := range commands[0:5] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Execution-plane verbs (local daemon UDS face):")
-	for _, c := range commands[4:13] {
+	for _, c := range commands[5:13] {
+		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
+	}
+	fmt.Fprintln(w, "Delivery bridge (wrap→git, local daemon UDS face):")
+	for _, c := range commands[13:14] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Management face (M1–M5):")
-	for _, c := range commands[13:18] {
+	for _, c := range commands[14:19] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Migration (admin; one-shot v0→v1 cutover):")
-	for _, c := range commands[18:20] {
+	for _, c := range commands[19:21] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Process:")
-	for _, c := range commands[20:] {
+	for _, c := range commands[21:] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w)

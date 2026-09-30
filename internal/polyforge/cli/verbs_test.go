@@ -94,6 +94,48 @@ func TestVerbQueueRequestShape(t *testing.T) {
 	}
 }
 
+func TestVerbQueueReadyHumanOutput(t *testing.T) {
+	unclassified := strings.Replace(cannedWI, "pf-42", "pf-99", 1)
+	body := `{"items":[` + cannedWI + `],"unclassified":[` + unclassified + `],` +
+		`"needs_human_session":[` + cannedWI + `],"running":[],"stalled":[],"paused":[],"stale_running":[]}`
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	})
+	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+
+	// Human mode: count is items+unclassified, non-takeable segments are
+	// ignored, items come first, and a SEGMENT column tells them apart.
+	code, stdout, stderr := runPf(t, env, "queue", "--ready")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	for _, want := range []string{
+		"2 work item(s)",
+		"SEGMENT",
+		"pf-42",
+		"items",
+		"pf-99",
+		"unclassified",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Index(stdout, "pf-42") > strings.Index(stdout, "pf-99") {
+		t.Errorf("items must be listed before unclassified:\n%s", stdout)
+	}
+
+	// --json stays verbatim passthrough of the full server body.
+	code, stdout, stderr = runPf(t, env, "--json", "queue", "--ready")
+	if code != 0 {
+		t.Fatalf("json: code=%d stderr=%s", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != body {
+		t.Errorf("json stdout = %q, want verbatim body", stdout)
+	}
+}
+
 func TestVerbCancelRequestShape(t *testing.T) {
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {

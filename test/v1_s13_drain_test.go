@@ -45,6 +45,9 @@ func TestV1S13Drain(t *testing.T) {
 	if err := json.Unmarshal(rawD, &wiD); err != nil {
 		t.Fatal(err)
 	}
+	// filed through the raw client, so register it for the harness's
+	// post-teardown orphan sweep by hand.
+	inst.trackWI(wiD.ID)
 
 	d := newV1Daemon(t, inst, optMode("drain"))
 	d.start()

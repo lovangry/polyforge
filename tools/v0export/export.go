@@ -44,6 +44,7 @@ type Options struct {
 	// file (the seed-v1 state promoted by the last successful run).
 	Delta        bool
 	BaselineFile string
+	OnlyWI       string // --only-wi: export ONLY this work item's capsule snapshot ("" = all)
 }
 
 // Report is the export report (also written as export-report.json).
@@ -88,6 +89,14 @@ func Run(opts Options) (*Report, error) {
 	// file only after all four steps pass).
 	cand := &HashState{Version: hashStateVersion,
 		WorkItems: map[string]string{}, Memories: map[string]string{}}
+	if opts.OnlyWI != "" {
+		if opts.SkipCapsules {
+			return nil, fmt.Errorf("--only-wi %s conflicts with --skip-capsules: the filter selects capsule snapshots to replay, but the replay is disabled", opts.OnlyWI)
+		}
+		if opts.Delta {
+			return nil, fmt.Errorf("--only-wi %s conflicts with --delta: the filter selects capsule snapshots to replay, but delta mode skips the replay", opts.OnlyWI)
+		}
+	}
 	db, err := openReadOnly(opts.DBPath)
 	if err != nil {
 		return nil, err
@@ -543,17 +552,29 @@ func exportCapsuleSnapshots(db *sql.DB, opts Options, rep *Report) error {
 		return err
 	}
 	var heads []headRow
+	found := false
 	for rows.Next() {
 		var h headRow
 		if err := rows.Scan(&h.WorkItemID, &h.Generation, &h.Seq, &h.UpdatedAt); err != nil {
 			rows.Close()
 			return err
 		}
+		if opts.OnlyWI != "" {
+			// The filter narrows ONLY the snapshot replay; work-items and
+			// memories exports stay full regardless.
+			if h.WorkItemID != opts.OnlyWI {
+				continue
+			}
+			found = true
+		}
 		heads = append(heads, h)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	if opts.OnlyWI != "" && !found {
+		return fmt.Errorf("--only-wi %s: no published capsule head for that work item in capsule_heads", opts.OnlyWI)
 	}
 	sort.Slice(heads, func(i, j int) bool { return heads[i].WorkItemID < heads[j].WorkItemID })
 	outRoot := filepath.Join(opts.Out, "capsule-snapshots")

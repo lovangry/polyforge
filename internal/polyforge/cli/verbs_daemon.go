@@ -120,9 +120,10 @@ func submitPrecheck(ctx *Context, wiID string) error {
 var cmdObserve = &Command{
 	Name:    "observe",
 	Summary: "Observe WI progress (daemon projection: steps, budget, question, events)",
-	Usage:   "pf observe <id> [--after N]",
+	Usage:   "pf observe <id> [--after N] [--read-through=false]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.Int64("after", 0, "last received event cursor (first call: 0)")
+		fs.Bool("read-through", true, "on the daemon's not-monitored answer, fall back to the aihub progress read-through (layer=read-through)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
@@ -130,6 +131,13 @@ var cmdObserve = &Command{
 		}
 		raw, err := ctx.daemon().Observe(args[0], int64Flag(fs, "after"))
 		if err != nil {
+			// The daemon's not-monitored answer (DAEMON-404 on the observe
+			// face) is the read-through trigger: fall back to the aihub
+			// progress endpoint (02 §5.2) unless the caller opted out with
+			// --read-through=false (the old fail-fast behavior).
+			if boolFlag(fs, "read-through") && daemonNotMonitored(err) {
+				return observeReadThrough(ctx, args[0], err)
+			}
 			return err
 		}
 		ctx.finish(raw, func() {
@@ -142,6 +150,48 @@ var cmdObserve = &Command{
 		})
 		return nil
 	},
+}
+
+// daemonNotMonitored reports whether err is the daemon's not-monitored
+// answer (DAEMON-404 from the observe face: no local capsule for the WI).
+func daemonNotMonitored(err error) bool {
+	var ae *api.Error
+	return errors.As(err, &ae) && ae.Code == api.ErrDaemonNotFound
+}
+
+// observeReadThrough is the second observe layer: the aihub §5.2 progress
+// read-through, called with the CALLER's ordinary api key. The rendered
+// view is visibly a different layer (labeled layer=read-through, with the
+// as-of-last-publish freshness note); daemon-layer-only content (the
+// live events ring, --after cursor semantics, pending-question
+// interactivity) has no read-through equivalent and is never fabricated.
+// daemonErr is the daemon's not-monitored answer, surfaced when the
+// read-through itself fails so neither layer's failure is swallowed.
+func observeReadThrough(ctx *Context, wiID string, daemonErr error) error {
+	raw, err := ctx.aihub().GetProgressRaw(wiID)
+	if err != nil {
+		// Neither layer's failure is swallowed: the combined error names
+		// the daemon's not-monitored answer AND the read-through miss.
+		// Typed read-through errors keep their code (the CLI's exit-code
+		// and error rendering key on it); renderError prints the detail.
+		var ae *api.Error
+		if errors.As(err, &ae) {
+			return &api.Error{Code: ae.Code, Extra: ae.Extra,
+				Detail: fmt.Sprintf("daemon does not monitor %s (%s); read-through failed: %s",
+					wiID, daemonErr, ae.Detail)}
+		}
+		return fmt.Errorf("observe: daemon does not monitor %s (%s); read-through failed: %w",
+			wiID, daemonErr, err)
+	}
+	ctx.finish(raw, func() {
+		var p api.ProgressResponse
+		if err := json.Unmarshal(raw, &p); err != nil {
+			printJSON(ctx.Stdout, raw)
+			return
+		}
+		renderReadThrough(ctx.Stdout, &p)
+	})
+	return nil
 }
 
 // ---------------------------------------------------------------------------

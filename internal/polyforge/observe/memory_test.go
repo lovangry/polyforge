@@ -69,8 +69,8 @@ func newMemHarness(t *testing.T, face MemoryFace) *harness {
 		RT:      rt,
 		OB:      ob,
 		DataDir: dataDir,
-		PushFunc: func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
-			return "sha_mem", true, nil
+		PushFunc: func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
+			return "sha_mem", true, gitops.PushTimings{}, nil
 		},
 		CallTimeout: 500 * time.Millisecond,
 		MemoryFace:  face,
@@ -227,6 +227,11 @@ func TestMemoryRememberRoute(t *testing.T) {
 	for _, e := range hs.o.Events().Since("wi_http") {
 		if e.Kind == EvMemoryRemember {
 			sawEvent = true
+			// write_ms (M6's latency sample) must be an integer
+			// millisecond reading — present on every remember.
+			if got := eventBodyInt64(t, e, "write_ms"); got < 0 {
+				t.Fatalf("write_ms must be a non-negative duration, got %d", got)
+			}
 		}
 	}
 	if !sawEvent {

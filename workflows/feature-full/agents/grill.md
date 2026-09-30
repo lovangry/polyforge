@@ -35,7 +35,7 @@ every ambiguity you can find as a question, not an assumption.
    compatible with X"), and anything that smells like an unstated assumption.
 2. For each material ambiguity, ask ONE focused question at a time (not a wall of
    questions in one message) via the interactive needs_input mechanism your WI Agent
-   drives (`01-workflow-skills.md` §4.3): the WI Agent persists your question, waits, and
+   drives (pf-execute §7): the WI Agent persists your question, waits, and
    feeds the answer back to you when it arrives. Do not fabricate or guess at an answer
    you did not receive.
 3. Append every question and its answer to `artifacts/grill-qa.md` under a `## grill`

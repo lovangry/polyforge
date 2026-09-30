@@ -3,8 +3,11 @@ package v0export
 import (
 	"database/sql"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -367,4 +370,173 @@ func contains(ids []string, id string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// --only-wi: the capsule snapshot filter
+
+// secondHead gives the fixture a second published capsule head so the
+// --only-wi narrowing is observable (one head would pass trivially).
+func secondHead(t *testing.T, f *Fixture, wi string) {
+	t.Helper()
+	if err := buildCapsuleChain(f.Dir, wi); err != nil {
+		t.Fatalf("second capsule chain: %v", err)
+	}
+}
+
+// assertTreeEqual fails unless two materialized snapshot trees are
+// byte-identical (same files, same bytes).
+func assertTreeEqual(t *testing.T, wantRoot, gotRoot string) {
+	t.Helper()
+	collect := func(root string) map[string][]byte {
+		files := map[string][]byte{}
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			rel, rerr := filepath.Rel(root, path)
+			if rerr != nil {
+				return rerr
+			}
+			raw, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			files[rel] = raw
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+		return files
+	}
+	want, got := collect(wantRoot), collect(gotRoot)
+	if len(want) != len(got) {
+		t.Fatalf("file count differs: want %d, got %d (%v vs %v)", len(want), len(got), keysOf(want), keysOf(got))
+	}
+	for rel, w := range want {
+		g, ok := got[rel]
+		if !ok {
+			t.Fatalf("missing file %s", rel)
+		}
+		if string(w) != string(g) {
+			t.Fatalf("file %s differs: %q vs %q", rel, w, g)
+		}
+	}
+}
+
+func keysOf(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// Filtered export: exactly the one requested snapshot + its head
+// manifest, byte-identical to the unfiltered run's copy of that WI,
+// while work-items.jsonl and memories.jsonl stay the FULL exports.
+func TestExportOnlyWIFiltersCapsuleSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	f, err := BuildFixture(dir)
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	const target = "wi_wrapped000001"
+	secondHead(t, f, "wi_failed0000001")
+
+	// Baseline unfiltered run: both heads replayed.
+	outAll := filepath.Join(dir, "export-all")
+	repAll, err := Run(Options{DBPath: f.DBPath, DataDir: f.Dir, Out: outAll})
+	if err != nil {
+		t.Fatalf("unfiltered export: %v", err)
+	}
+	if len(repAll.CapsuleSnapshots) != 2 {
+		t.Fatalf("baseline snapshots = %v, want 2", repAll.CapsuleSnapshots)
+	}
+
+	// Filtered run: only the named WI's snapshot.
+	outOne := filepath.Join(dir, "export-one")
+	rep, err := Run(Options{DBPath: f.DBPath, DataDir: f.Dir, Out: outOne, OnlyWI: target})
+	if err != nil {
+		t.Fatalf("filtered export: %v", err)
+	}
+	if len(rep.CapsuleSnapshots) != 1 || !strings.HasPrefix(rep.CapsuleSnapshots[0], target+"@") {
+		t.Fatalf("filtered snapshots = %v, want exactly [%s@…]", rep.CapsuleSnapshots, target)
+	}
+
+	// capsule-snapshots/ holds ONLY the requested dir + head manifest.
+	snapRoot := filepath.Join(outOne, "capsule-snapshots")
+	ents, err := os.ReadDir(snapRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, e := range ents {
+		got = append(got, e.Name())
+	}
+	sort.Strings(got)
+	want := []string{target, target + ".head-manifest.json"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("capsule-snapshots entries = %v, want %v", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(outOne, "capsule-snapshots", "wi_failed0000001")); !os.IsNotExist(err) {
+		t.Errorf("the other WI's snapshot dir leaked into the filtered export (stat err = %v)", err)
+	}
+
+	// Snapshot content byte-identical to the unfiltered run's copy.
+	assertTreeEqual(t,
+		filepath.Join(outAll, "capsule-snapshots", target),
+		filepath.Join(outOne, "capsule-snapshots", target))
+	mAll := mustRead(t, filepath.Join(outAll, "capsule-snapshots", target+".head-manifest.json"))
+	mOne := mustRead(t, filepath.Join(outOne, "capsule-snapshots", target+".head-manifest.json"))
+	if string(mAll) != string(mOne) {
+		t.Errorf("head manifest differs between runs")
+	}
+
+	// The JSONL exports stay FULL and unchanged regardless of --only-wi.
+	for _, p := range []string{filepath.Join("work-items.jsonl"), filepath.Join("memory", "memories.jsonl")} {
+		if string(mustRead(t, filepath.Join(outAll, p))) != string(mustRead(t, filepath.Join(outOne, p))) {
+			t.Errorf("%s differs between the filtered and unfiltered runs", p)
+		}
+	}
+	if rep.WorkItems != repAll.WorkItems || rep.Memories != repAll.Memories {
+		t.Errorf("counts drifted: %d/%d vs %d/%d", rep.WorkItems, rep.Memories, repAll.WorkItems, repAll.Memories)
+	}
+}
+
+// A named WI with no capsule_heads row is a hard error naming the WI.
+func TestExportOnlyWIUnknownErrors(t *testing.T) {
+	dir := t.TempDir()
+	f, err := BuildFixture(dir)
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	_, err = Run(Options{DBPath: f.DBPath, DataDir: f.Dir, Out: filepath.Join(dir, "export"), OnlyWI: "wi_nope00000001"})
+	if err == nil {
+		t.Fatalf("unknown --only-wi did not error")
+	}
+	if !strings.Contains(err.Error(), "wi_nope00000001") {
+		t.Errorf("error does not name the WI: %v", err)
+	}
+}
+
+// --only-wi + --skip-capsules contradict each other: validation error.
+func TestExportOnlyWIConflictsWithSkipCapsules(t *testing.T) {
+	dir := t.TempDir()
+	f, err := BuildFixture(dir)
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	_, err = Run(Options{DBPath: f.DBPath, DataDir: f.Dir, Out: filepath.Join(dir, "export"),
+		OnlyWI: "wi_wrapped000001", SkipCapsules: true})
+	if err == nil {
+		t.Fatalf("--only-wi with --skip-capsules did not error")
+	}
+	if !strings.Contains(err.Error(), "skip-capsules") {
+		t.Errorf("error does not mention the conflict: %v", err)
+	}
 }

@@ -58,8 +58,11 @@ const defaultVersionStagnantTicks = 3
 // PushFunc is the injectable capsule commit+push operation (the seam the
 // tests use; production binds gitops.CommitPush). ctx bounds the call;
 // returning ctx.Err() reports the attempt as failed while the underlying
-// git keeps running — the per-WI git lock serializes any successor.
-type PushFunc func(ctx context.Context, o gitops.Opts, message string) (localSHA string, pushed bool, err error)
+// git keeps running — the per-WI git lock serializes any successor. The
+// returned timings are the observed-only latency samples (commit_ms /
+// push_ms) the published event bodies carry; nothing judgmental consumes
+// them.
+type PushFunc func(ctx context.Context, o gitops.Opts, message string) (localSHA string, pushed bool, timings gitops.PushTimings, err error)
 
 // WIInfo carries the per-WI static facts a monitor needs; supplied by
 // Runtime alongside the RTStarted protocol message.
@@ -123,6 +126,7 @@ type pushResult struct {
 	sha      string
 	pushed   bool
 	stagnant bool // the push was scheduled by the stagnation fallback
+	timings  gitops.PushTimings
 	err      error
 }
 
@@ -135,6 +139,7 @@ type wrapResult struct {
 	ok          bool
 	sha         string
 	pushed      bool
+	timings     gitops.PushTimings // the settled (successful, or last) attempt's latency samples
 	err         string
 	version     int64
 	finalStatus string
@@ -239,6 +244,12 @@ type Monitor struct {
 	trSpawnAt        time.Time // the derivation's birth moment
 	transcriptWarned bool      // one transcript_missing event per attempt
 
+	// ledger is the hub's SHARED, daemon-wide answer ledger (one
+	// answers.json for the whole daemon, keyed per work item inside),
+	// handed down by Observe.newMonitor. A monitor never owns one: an
+	// answer accepted before a daemon restart must still be visible to
+	// the monitor that comes back for the same work item. Unit tests
+	// that build a monitor directly hand it a memory-only ledger.
 	ledger *AnswerLedger
 
 	// stateMu guards the fields every goroutine (HTTP view, flush/answer
@@ -728,6 +739,17 @@ func (m *Monitor) applyPendingFromExec(exec *capsule.Execution) {
 	var pv *protocol.PendingView
 	if s := exec.Steps[exec.CurrentStep]; s != nil && s.PendingQuestion != nil {
 		q := s.PendingQuestion
+		if q.ID == "" {
+			// F10: a schema-invalid pending (id missing — e.g. the agent wrote
+			// the wire field name instead of the schema's `id`) must NOT
+			// clobber a valid pending the flush face already recorded, and
+			// must not become an unanswerable projection: ignore it for the
+			// pending projection, one event per invalid sighting.
+			_ = m.log.Append(m.wi.WorkItem, "pending_invalid", map[string]any{
+				"step": q.Step, "hint": "execution.json pending_question.id missing; see skill §7.2",
+			})
+			return
+		}
 		pv = &protocol.PendingView{
 			ID: q.ID, Step: q.Step, Question: q.Question, AskedAt: q.AskedAt,
 		}
@@ -907,8 +929,8 @@ func (m *Monitor) schedulePush() {
 			// contract violation this commit compensates for
 			message = fmt.Sprintf("observe: execution v%d (mtime advanced without a Version bump)", version)
 		}
-		sha, pushed, err := m.cfg.push(ctx, m.wi.Git, message)
-		m.pushDone <- pushResult{version: version, sha: sha, pushed: pushed, stagnant: stagnant, err: err}
+		sha, pushed, timings, err := m.cfg.push(ctx, m.wi.Git, message)
+		m.pushDone <- pushResult{version: version, sha: sha, pushed: pushed, stagnant: stagnant, timings: timings, err: err}
 	}()
 }
 
@@ -934,6 +956,7 @@ func (m *Monitor) onPushResult(res pushResult) {
 		m.timeDegraded = false
 		_ = m.log.Append(m.wi.WorkItem, EvPublished, map[string]any{
 			"version": res.version, "local_commit": res.sha, "pushed": res.pushed,
+			"commit_ms": res.timings.CommitMS, "push_ms": res.timings.PushMS,
 		})
 		return
 	}
@@ -1226,14 +1249,15 @@ func (m *Monitor) flushWrap(call FlushCall) {
 			lastSHA, lastErr string
 			pushed, ok       bool
 			psha             string
+			pt               gitops.PushTimings
 		)
 		for try := 1; try <= wrapRetries && !ok; try++ {
 			m.gate <- struct{}{} // wait out any in-flight async push
 			ctx, cancel := context.WithDeadline(context.Background(), deadline)
-			sha, p, err := m.cfg.push(ctx, m.wi.Git, "wrap: "+finalStatus)
+			sha, p, t, err := m.cfg.push(ctx, m.wi.Git, "wrap: "+finalStatus)
 			cancel()
 			<-m.gate
-			psha, pushed = sha, p
+			psha, pushed, pt = sha, p, t
 			if err == nil {
 				ok = true
 				break
@@ -1244,7 +1268,7 @@ func (m *Monitor) flushWrap(call FlushCall) {
 			}
 		}
 		m.wrapDone <- wrapResult{
-			ok: ok, sha: pickSHA(ok, psha, lastSHA), pushed: pushed,
+			ok: ok, sha: pickSHA(ok, psha, lastSHA), pushed: pushed, timings: pt,
 			err: lastErr, version: version, finalStatus: finalStatus, call: call,
 		}
 	}()
@@ -1275,6 +1299,7 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 		m.timeDegraded = false
 		_ = m.log.Append(m.wi.WorkItem, EvPublished, map[string]any{
 			"wrap": true, "local_commit": wr.sha, "pushed": wr.pushed, "final_status": wr.finalStatus,
+			"commit_ms": wr.timings.CommitMS, "push_ms": wr.timings.PushMS,
 		})
 		reason := wr.finalStatus
 		if reason != protocol.FinishFailed {
@@ -1316,7 +1341,7 @@ func (m *Monitor) flushShutdown(call FlushCall) {
 		// (F3): copy before the push, inside the gate.
 		m.syncTranscript(tr)
 		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.FlushBound)
-		sha, pushed, err := m.cfg.push(ctx, m.wi.Git, "shutdown flush")
+		sha, pushed, timings, err := m.cfg.push(ctx, m.wi.Git, "shutdown flush")
 		cancel()
 		<-m.gate
 		ack := protocol.FlushAck{OK: err == nil, LocalCommit: sha, Pushed: pushed && err == nil}
@@ -1328,6 +1353,7 @@ func (m *Monitor) flushShutdown(call FlushCall) {
 		} else {
 			_ = m.log.Append(m.wi.WorkItem, EvPublished, map[string]any{
 				"shutdown": true, "local_commit": sha, "pushed": pushed,
+				"commit_ms": timings.CommitMS, "push_ms": timings.PushMS,
 			})
 		}
 		call.Resp <- ack
