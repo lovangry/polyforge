@@ -116,6 +116,12 @@ type v1Install struct {
 	planDir    string
 	pfPath     string
 	fakepiPath string
+
+	// wis holds every work item this scenario created (through newWI or
+	// trackWI): the post-teardown orphan sweep (sweepOrphans) kills and
+	// then asserts gone every live process carrying one of these WIs'
+	// PF_WI_ID env marker at the scenario's final cleanup.
+	wis []string
 }
 
 // newV1Install boots a real aihub on a free loopback port, harvests the
@@ -171,6 +177,13 @@ func newV1InstallRepos(t *testing.T, repos []api.ProjectRepo) *v1Install {
 		pfPath:     filepath.Join(bins, "pf"),
 		fakepiPath: filepath.Join(bins, "fakepi"),
 	}
+	// The post-teardown orphan sweep is registered FIRST of the
+	// scenario's cleanups so Go's LIFO cleanup order runs it LAST —
+	// after every daemon teardown registered later (newV1Daemon's own
+	// d.stop, struct-literal daemons' stop, the SIGKILL fallback inside
+	// stop, the inproc rig's terminate) and thus over the final process
+	// state, whatever teardown path was taken.
+	t.Cleanup(func() { inst.sweepOrphans() })
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -409,6 +422,7 @@ func (u *v1Install) newWI(t *testing.T, goal string, actions, resumeActions []ma
 		t.Fatalf("create work item answer: %v (%s)", err, raw)
 	}
 	u.setPlanFull(t, wi.ID, actions, resumeActions)
+	u.trackWI(wi.ID)
 	return wi.ID
 }
 
@@ -1097,6 +1111,62 @@ func orphanPIDs(wi string) []int {
 func killOrphans(wi string) {
 	for _, pid := range orphanPIDs(wi) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
+// trackWI records wi in the install's sweep set: after the scenario's
+// whole teardown, every live process carrying PF_WI_ID=<wi> is killed and
+// asserted gone (sweepOrphans). newWI registers automatically; scenarios
+// that file a ticket through the raw aihub client (s12's priority wave
+// member, s13's refusal probe) register here so the sweep covers every
+// WI of the scenario.
+func (u *v1Install) trackWI(wi string) {
+	for _, w := range u.wis {
+		if w == wi {
+			return
+		}
+	}
+	u.wis = append(u.wis, wi)
+}
+
+// sweepOrphans is the harness-level post-teardown orphan sweep: after
+// every daemon process of the scenario has been fully torn down (graceful
+// stop, crash, the SIGKILL fallback, struct-literal daemon structs, the
+// inproc rig alike), it scans /proc for any live process still carrying
+// one of the scenario's PF_WI_ID markers — the same L4 env-marker
+// semantics as orphanPIDs, so grandchildren of the daemon's agent tree
+// (born with the inherited environ) are caught too — SIGKILLs every
+// survivor, and then, with a short bounded poll (a SIGKILLed process
+// takes a moment to leave /proc), asserts that none is left. Any
+// survivor at that point fails the test with the leaked pids, so a red
+// is diagnosable; the assertion lands even when the body already
+// failed. Registered by newV1InstallRepos as the scenario's FIRST
+// cleanup, so LIFO order runs it after all daemon teardown cleanups.
+func (u *v1Install) sweepOrphans() {
+	t := u.t
+	if len(u.wis) == 0 {
+		return
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		for _, wi := range u.wis {
+			killOrphans(wi)
+		}
+		var leaks []string
+		for _, wi := range u.wis {
+			if pids := orphanPIDs(wi); len(pids) > 0 {
+				leaks = append(leaks, fmt.Sprintf("%s: %v", wi, pids))
+			}
+		}
+		if len(leaks) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("post-teardown orphan sweep: leaked agent processes survived the scenario's teardown (PF_WI_ID markers still live after SIGKILL): %s",
+				strings.Join(leaks, "; "))
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
