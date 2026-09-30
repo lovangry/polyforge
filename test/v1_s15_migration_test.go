@@ -14,7 +14,9 @@ package test
 // pilot directory (/root/polyforge-pilot stays read-only everywhere).
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,4 +154,154 @@ func projID(t *testing.T, inst *v1Install) string {
 		t.Fatal(err)
 	}
 	return id
+}
+
+// The cutover window: records changed and added in v0 AFTER the first
+// successful run. --delta tops them up; a changed record hard-fails the
+// run without --accept-changed (per-field diff, no baseline promotion)
+// and is applied in place (new version wins) with it.
+func TestV1S15DeltaTopUpRehearsal(t *testing.T) {
+	inst := newV1Install(t)
+	bins := v1Bins(t)
+
+	fix, err := v0export.BuildFixture(filepath.Join(t.TempDir(), "v0pilot"))
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	script := filepath.Join(v1Root(t), "tools", "seed-v1.sh")
+	v0exportBin := filepath.Join(bins, "v0-export")
+	runSeed := func(extra ...string) (string, error) {
+		args := []string{"sh", script,
+			"--pilot-dir", fix.Dir,
+			"--server", inst.url,
+			"--api-key", inst.adminKey,
+			"--data-dir", inst.dataDir,
+			"--project", v1Project,
+			"--owner", "usr_root",
+			"--pf", inst.pfPath,
+			"--v0-export", v0exportBin,
+		}
+		args = append(args, extra...)
+		out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+		return string(out), err
+	}
+
+	// Full seed first (establishes the baseline state file).
+	exportFull := filepath.Join(t.TempDir(), "export-full")
+	out, err := runSeed("--out", exportFull)
+	if err != nil {
+		t.Fatalf("full seed: %v\n%s", err, out)
+	}
+	stateFile := filepath.Join(inst.dataDir, "seed-v1.state.json")
+	baseRaw, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("the full run did not establish the state file: %v", err)
+	}
+
+	// --delta with no baseline at the state path is a hard error.
+	out, err = runSeed("--delta", "--state-file", filepath.Join(t.TempDir(), "missing.state.json"),
+		"--out", filepath.Join(t.TempDir(), "export-missing"))
+	if err == nil || !strings.Contains(out, "no baseline") {
+		t.Fatalf("--delta without a baseline must hard-error: err=%v\n%s", err, out)
+	}
+
+	// The v0 world moves on: one changed WI, one new WI, one changed
+	// memory (its row's content_sha updated with the file, as the live
+	// writer would).
+	memPath := filepath.Join(fix.Dir, "memory", fix.Project, "mem_fix00000002", "memory.md")
+	memRaw, err := os.ReadFile(memPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memNew := strings.Replace(string(memRaw), "fixture body", "fixture body EDITED", 1)
+	if err := os.WriteFile(memPath, []byte(memNew), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(memNew))
+	db, err := sql.Open("sqlite", "file:"+fix.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE work_items SET goal='fixture goal EDITED after the first seed'
+		WHERE id='wi_wrapped000001'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO work_items(id, seq, project_id, goal, content, status, priority,
+		labels, attrs, reporter, waiting_on, bundle_name, bundle_digest, workflow_budget_baseline,
+		created_at, updated_at, closed_at)
+		VALUES ('wi_newafter0001', 5, ?1, 'a record created after the first seed', NULL, 'wrapped',
+		'normal','[]','{}','usr_root',NULL,NULL,NULL,NULL,
+		'2026-09-03T08:00:00Z','2026-09-03T09:00:00Z','2026-09-03T09:00:00Z')`, fix.Project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE memories SET content_sha=?1, content_len=?2, updated_at='2026-09-02T09:00:00Z'
+		WHERE id='mem_fix00000002'`, hex.EncodeToString(sum[:]), len(memNew)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delta WITHOUT --accept-changed: the changed record hard-fails with
+	// the per-field diff, and the failed run must NOT promote the
+	// baseline (its changes stay visible to the next delta run).
+	exportDelta := filepath.Join(t.TempDir(), "export-delta")
+	out, err = runSeed("--delta", "--out", exportDelta)
+	if err == nil || !strings.Contains(out, "diverge") {
+		t.Fatalf("the changed record must fail-closed without --accept-changed: err=%v\n%s", err, out)
+	}
+	nowRaw, rerr := os.ReadFile(stateFile)
+	if rerr != nil || string(nowRaw) != string(baseRaw) {
+		t.Errorf("the failed delta run promoted the baseline")
+	}
+
+	// Delta WITH --accept-changed: the top-up lands.
+	exportAccept := filepath.Join(t.TempDir(), "export-accept")
+	out, err = runSeed("--delta", "--accept-changed", "--out", exportAccept)
+	if err != nil {
+		t.Fatalf("delta + --accept-changed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "delta work items:    1 new, 1 changed") {
+		t.Errorf("work-item delta counts wrong:\n%s", out)
+	}
+	if !strings.Contains(out, "delta memories:     0 new, 1 changed") {
+		t.Errorf("memory delta counts wrong:\n%s", out)
+	}
+	if !strings.Contains(out, "capsule snapshots:  skipped (delta mode)") {
+		t.Errorf("capsule skip not reported:\n%s", out)
+	}
+	if _, serr := os.Stat(filepath.Join(exportAccept, "capsule-snapshots")); !os.IsNotExist(serr) {
+		t.Errorf("delta export replayed capsule snapshots")
+	}
+	// the changed record's new version won; the new record landed
+	wi, err := inst.client.GetWorkItem("wi_wrapped000001")
+	if err != nil || wi.Goal != "fixture goal EDITED after the first seed" {
+		t.Errorf("the changed record was not applied: %+v (%v)", wi, err)
+	}
+	newWI, err := inst.client.GetWorkItem("wi_newafter0001")
+	if err != nil || newWI.Status != "wrapped" || newWI.Seq != 5 {
+		t.Errorf("the new record did not land: %+v (%v)", newWI, err)
+	}
+	// the changed memory re-placed and the reconcile serves it
+	raw, err := inst.client.SearchMemories(v1Project, "EDITED", "", nil, 10)
+	if err != nil || !strings.Contains(string(raw), "mem_fix00000002") {
+		t.Errorf("changed memory not retrievable after the top-up: %s (%v)", raw, err)
+	}
+	// the baseline was refreshed by the successful run
+	refreshed, rerr := os.ReadFile(stateFile)
+	if rerr != nil || string(refreshed) == string(baseRaw) {
+		t.Errorf("the successful delta run did not promote the new baseline")
+	}
+
+	// A second delta with nothing further is a zero-delta top-up.
+	exportZero := filepath.Join(t.TempDir(), "export-zero")
+	out, err = runSeed("--delta", "--out", exportZero)
+	if err != nil {
+		t.Fatalf("zero delta run: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "delta work items:    0 new, 0 changed") ||
+		!strings.Contains(out, "delta memories:     0 new, 0 changed") ||
+		!strings.Contains(out, "seed-v1: done") {
+		t.Errorf("zero delta run wrong:\n%s", out)
+	}
 }

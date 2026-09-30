@@ -60,7 +60,7 @@ func migVerifyMemories(opts MigMemoriesOptions, rep *MigMemoriesReport, placed [
 			failures = append(failures, step.Step+": "+step.Detail)
 		}
 	}
-	appendStep(migVerifyCounts(db, rep, placed))
+	appendStep(migVerifyCounts(db, opts, rep, placed))
 	appendStep(migVerifyContentSHA(opts.DataDir, db, rep, placed))
 	appendStep(migVerifyRetrieval(rep, placed, client))
 	appendStep(migVerifyConversions(opts.DataDir, rep, placed))
@@ -71,9 +71,12 @@ func migVerifyMemories(opts MigMemoriesOptions, rep *MigMemoriesReport, placed [
 }
 
 // migVerifyCounts is step ①: every migrated id has a row with the
-// expected status, the global row counts equal the run's counts and the
-// reconcile statistic equals the active count.
-func migVerifyCounts(db *sql.DB, rep *MigMemoriesReport, placed []placedMem) StepResult {
+// expected status, the global row counts equal the placed authority
+// tree's counts and the reconcile statistic equals the tree's active
+// count. The placed tree (not this run's import count) is the global
+// stock: a delta run feeds a subset, and earlier runs' placements
+// persist — so the tree is what the global rows must add up to.
+func migVerifyCounts(db *sql.DB, opts MigMemoriesOptions, rep *MigMemoriesReport, placed []placedMem) StepResult {
 	step := StepResult{Step: "count-reconciliation", OK: true}
 	var problems []string
 	for _, p := range placed {
@@ -103,14 +106,18 @@ func migVerifyCounts(db *sql.DB, rep *MigMemoriesReport, placed []placedMem) Ste
 		counts[st] = n
 	}
 	rows.Close()
-	if counts["active"] != rep.ActiveCount {
-		problems = append(problems, fmt.Sprintf("global active rows %d != imported %d", counts["active"], rep.ActiveCount))
+	treeActive, treeRedacted, terr := migPlacedTreeCounts(opts.DataDir, rep.TargetProject)
+	if terr != nil {
+		return StepResult{Step: step.Step, OK: false, Detail: "count placed tree: " + terr.Error()}
 	}
-	if counts["redacted"] != rep.RedactedCount {
-		problems = append(problems, fmt.Sprintf("global redacted rows %d != imported %d", counts["redacted"], rep.RedactedCount))
+	if counts["active"] != treeActive {
+		problems = append(problems, fmt.Sprintf("global active rows %d != placed tree %d", counts["active"], treeActive))
 	}
-	if rep.Rebuilt != rep.ActiveCount {
-		problems = append(problems, fmt.Sprintf("rebuild-index rebuilt %d != imported active %d", rep.Rebuilt, rep.ActiveCount))
+	if counts["redacted"] != treeRedacted {
+		problems = append(problems, fmt.Sprintf("global redacted rows %d != placed tree %d", counts["redacted"], treeRedacted))
+	}
+	if rep.Rebuilt != treeActive {
+		problems = append(problems, fmt.Sprintf("rebuild-index rebuilt %d != placed tree active %d", rep.Rebuilt, treeActive))
 	}
 	if len(problems) > 0 {
 		step.OK = false
@@ -118,8 +125,43 @@ func migVerifyCounts(db *sql.DB, rep *MigMemoriesReport, placed []placedMem) Ste
 		return step
 	}
 	step.Detail = fmt.Sprintf("%d row(s) reconciled; global active=%d redacted=%d; rebuilt=%d",
-		len(placed), rep.ActiveCount, rep.RedactedCount, rep.Rebuilt)
+		len(placed), treeActive, treeRedacted, rep.Rebuilt)
 	return step
+}
+
+// migPlacedTreeCounts counts the authority-file stock the target tree
+// carries for the project: active memory/<pj>/<mem>/ directories plus
+// the _redacted ones. The tree IS the global placed set (files placed
+// by earlier runs persist), which is what the global row counts must
+// equal — for a full run and a delta subset alike.
+func migPlacedTreeCounts(dataDir, projectID string) (active, redacted int, err error) {
+	root := filepath.Join(dataDir, "memory", projectID)
+	memDirs, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	for _, md := range memDirs {
+		if !md.IsDir() {
+			continue
+		}
+		if md.Name() == "_redacted" {
+			redDirs, rerr := os.ReadDir(filepath.Join(root, "_redacted"))
+			if rerr != nil {
+				continue
+			}
+			for _, rd := range redDirs {
+				if rd.IsDir() {
+					redacted++
+				}
+			}
+			continue
+		}
+		active++
+	}
+	return active, redacted, nil
 }
 
 // migVerifyContentSHA is step ②: for every sampled id, the live sha256
