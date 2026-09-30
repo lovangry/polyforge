@@ -82,8 +82,6 @@ func (o Opts) Env() []string {
 	)
 }
 
-func (o Opts) env() []string { return o.Env() }
-
 // git runs git once with the given environment (nil = inherit) and dir.
 // It is a var so the tests can probe the argv the package builds.
 var git = func(env []string, dir string, args ...string) (string, error) {
@@ -133,7 +131,7 @@ func CommitPush(o Opts, message string) (localSHA string, pushed bool, err error
 	if err := cleanStaleLocks(o.GitDir); err != nil {
 		return "", false, err
 	}
-	env := o.env()
+	env := o.Env()
 	// Clean-tree check BEFORE committing: git reports "nothing to commit"
 	// on stdout, so the failure cannot be told apart from a real commit
 	// error by the error string. The porcelain listing is the honest
@@ -221,7 +219,7 @@ func pushLocked(o Opts) (bool, error) {
 		return false, err
 	}
 	defer cleanup()
-	env := append(o.env(), additions...)
+	env := append(o.Env(), additions...)
 	out, err := git(env, o.CapsuleDir, args...)
 	if err != nil {
 		return false, &api.Error{Code: api.ErrGitInternal, Detail: strings.TrimSpace(out) + ": " + err.Error()}

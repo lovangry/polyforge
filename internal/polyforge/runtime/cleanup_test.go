@@ -7,6 +7,7 @@ package runtime
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -36,8 +37,8 @@ func startTree(t *testing.T, wi string) (pid int, startedAt string) {
 	return pid, startedAt
 }
 
-func spawnTreeCmd(wi string) *osCmd {
-	c := osCommand("sh", "-c", "sleep 300 & exec sleep 300")
+func spawnTreeCmd(wi string) *exec.Cmd {
+	c := exec.Command("sh", "-c", "sleep 300 & exec sleep 300")
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if wi != "" {
 		c.Env = append(os.Environ(), "PF_WI_ID="+wi)
@@ -46,7 +47,7 @@ func spawnTreeCmd(wi string) *osCmd {
 }
 
 func groupMemberCount(pgid int) int {
-	entries, err := osReadDir(procRoot)
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return 0
 	}
@@ -138,7 +139,7 @@ func TestCleanupLayer0DegradesWhenUnavailable(t *testing.T) {
 func TestCleanupPidReuseGuard(t *testing.T) {
 	// signalIdent refuses to touch a pid whose CURRENT occupant no longer
 	// matches the snapshot's starttime — the mis-kill protection.
-	cmd := osCommand("sleep", "300")
+	cmd := exec.Command("sleep", "300")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -165,7 +166,7 @@ func TestCleanupReusedRootPidIsNotKilled(t *testing.T) {
 	// the recorded pid is now occupied by an UNRELATED process whose
 	// creation time does not match: the root/group signals are skipped and
 	// the process survives
-	cmd := osCommand("sleep", "300")
+	cmd := exec.Command("sleep", "300")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -186,7 +187,7 @@ func TestCleanupReusedRootPidIsNotKilled(t *testing.T) {
 
 func TestCleanupLayer4EnvMarkerSweep(t *testing.T) {
 	wi := "wi_c5_marker"
-	cmd := osCommand("sleep", "300")
+	cmd := exec.Command("sleep", "300")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi)
 	if err := cmd.Start(); err != nil {
@@ -206,7 +207,7 @@ func TestCleanupLayer4EnvMarkerSweep(t *testing.T) {
 
 func TestCleanupLayer5CwdScanWarnsOnly(t *testing.T) {
 	capDir := t.TempDir()
-	cmd := osCommand("sleep", "300")
+	cmd := exec.Command("sleep", "300")
 	cmd.Dir = capDir // cwd inside the capsule; no marker, own group
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {

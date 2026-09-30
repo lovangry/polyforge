@@ -1,7 +1,6 @@
 package core
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,20 +9,14 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
-// readRandom is the single crypto-random entry point (kept local so store.go
-// stays import-light).
-func readRandom(b []byte) (int, error) { return rand.Read(b) }
-
-// sha256Hex is the storage digest for every secret (api keys, push
-// credentials, project identifiers): only hashes are persisted, plaintext
-// is handed out exactly once.
-func sha256Hex(s string) string {
+// Sha256Hex is the storage digest for every secret (api keys, push
+// credentials, project identifiers) and the HTTP auth middleware's
+// token hash alike: only hashes are persisted, plaintext is handed out
+// exactly once.
+func Sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
-
-// Sha256Hex is the exported form for the HTTP auth middleware.
-func Sha256Hex(s string) string { return sha256Hex(s) }
 
 // Fail builds the typed wire error. Reason is the machine-readable
 // sub-reason carried in Extra (ALREADY_CLAIMED etc.); Detail is the human

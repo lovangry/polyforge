@@ -67,11 +67,7 @@ func (c *Client) Do(method, path string, body, out any) error {
 			return &ae
 		}
 		// No typed envelope in the body (a proxy's HTML 502/504 page, a
-		// bare 404...): synthesize the code from the HTTP status itself so
-		// the class survives — 5xx stays server-class (CLI exit 2, the
-		// daemon's connection-class idle), 4xx stays client-class. The old
-		// blanket AUTH-401 misclassified every such answer as an auth
-		// failure. A 401 that DOES carry the envelope keeps the envelope.
+		// bare 404): synthesize the code from the HTTP status itself.
 		return &api.Error{
 			Code:   fmt.Sprintf("HTTP-%d", resp.StatusCode),
 			Detail: fmt.Sprintf("HTTP %d: %.200s", resp.StatusCode, data),
@@ -81,6 +77,16 @@ func (c *Client) Do(method, path string, body, out any) error {
 		return nil
 	}
 	return json.Unmarshal(data, out)
+}
+
+// raw performs one CLI-facing passthrough call: out is the undecoded
+// response body so --json mode hands the server payload through verbatim.
+func (c *Client) raw(method, path string, body any) (json.RawMessage, error) {
+	var raw json.RawMessage
+	if err := c.Do(method, path, body, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // ClaimRequest asks aihub to open a generation on a work item.
@@ -187,41 +193,25 @@ type CreateWorkItemRequest struct {
 
 // CreateWorkItem creates a work item and returns the raw detail record.
 func (c *Client) CreateWorkItem(req CreateWorkItemRequest) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("POST", "/api/v1/work-items", req, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("POST", "/api/v1/work-items", req)
 }
 
 // GetWorkItemRaw reads the detail record undecoded (--json passthrough).
 func (c *Client) GetWorkItemRaw(idOrSlug string) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug), nil, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug), nil)
 }
 
 // PatchWorkItem updates the PATCHable field set. body must contain only
 // keys from {goal, content, labels, priority, milestone, waiting_on,
 // attrs} — an immutable key answers CORE-400 server-side.
 func (c *Client) PatchWorkItem(id string, body map[string]any) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("PATCH", "/api/v1/work-items/"+url.PathEscape(id), body, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("PATCH", "/api/v1/work-items/"+url.PathEscape(id), body)
 }
 
 // CancelWorkItem terminates a queued/paused/blocked WI (no active
 // generation).
 func (c *Client) CancelWorkItem(id string) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(id)+"/cancel", map[string]any{}, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(id)+"/cancel", map[string]any{})
 }
 
 // ListWorkItemsRaw is the raw-body variant of ListWorkItems (same wire
@@ -234,20 +224,12 @@ func (c *Client) ListWorkItemsRaw(project, status string) (json.RawMessage, erro
 	if status != "" {
 		q.Set("status", status)
 	}
-	var raw json.RawMessage
-	if err := c.Do("GET", "/api/v1/work-items?"+q.Encode(), nil, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("GET", "/api/v1/work-items?"+q.Encode(), nil)
 }
 
 // ReadyQueueRaw is the raw-body variant of Queue (same endpoint).
 func (c *Client) ReadyQueueRaw(project string) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("GET", "/api/v1/projects/"+url.PathEscape(project)+"/ready-queue", nil, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("GET", "/api/v1/projects/"+url.PathEscape(project)+"/ready-queue", nil)
 }
 
 // SearchMemories runs the memory retrieval (06 §5.1). q is required;
@@ -265,11 +247,7 @@ func (c *Client) SearchMemories(project, q, memType string, tags []string, limit
 	if limit > 0 {
 		v.Set("limit", strconv.Itoa(limit))
 	}
-	var raw json.RawMessage
-	if err := c.Do("GET", "/api/v1/memories/search?"+v.Encode(), nil, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("GET", "/api/v1/memories/search?"+v.Encode(), nil)
 }
 
 // UserCreateRequest is the M1 create body. v1 field: user_type
@@ -323,117 +301,65 @@ type RotateSecretRequest struct {
 
 // CreateUser issues a user (M1).
 func (c *Client) CreateUser(req UserCreateRequest) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("POST", "/api/v1/users", req, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("POST", "/api/v1/users", req)
 }
 
 // ListUsers lists users (M1).
 func (c *Client) ListUsers() (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("GET", "/api/v1/users", nil, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("GET", "/api/v1/users", nil)
 }
 
 // GetUser reads one user (M1).
 func (c *Client) GetUser(id string) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("GET", "/api/v1/users/"+url.PathEscape(id), nil, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("GET", "/api/v1/users/"+url.PathEscape(id), nil)
 }
 
 // PatchUser updates display_name and/or role (M1).
 func (c *Client) PatchUser(id string, req UserPatchRequest) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("PATCH", "/api/v1/users/"+url.PathEscape(id), req, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("PATCH", "/api/v1/users/"+url.PathEscape(id), req)
 }
 
 // CreateApiKey mints a key (M2).
 func (c *Client) CreateApiKey(req ApiKeyCreateRequest) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("POST", "/api/v1/api-keys", req, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("POST", "/api/v1/api-keys", req)
 }
 
 // ListApiKeys lists key metadata, never material (M2).
 func (c *Client) ListApiKeys() (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("GET", "/api/v1/api-keys", nil, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("GET", "/api/v1/api-keys", nil)
 }
 
 // RevokeApiKey sets revoked_at (M2).
 func (c *Client) RevokeApiKey(id string) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("DELETE", "/api/v1/api-keys/"+url.PathEscape(id), nil, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("DELETE", "/api/v1/api-keys/"+url.PathEscape(id), nil)
 }
 
 // CreateProject creates a project (M3).
 func (c *Client) CreateProject(req ProjectCreateRequest) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("POST", "/api/v1/projects", req, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("POST", "/api/v1/projects", req)
 }
 
 // ListProjects lists visible projects (M3).
 func (c *Client) ListProjects() (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("GET", "/api/v1/projects", nil, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("GET", "/api/v1/projects", nil)
 }
 
 // GetProject reads one project by id or name (M3).
 func (c *Client) GetProject(idOrName string) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("GET", "/api/v1/projects/"+url.PathEscape(idOrName), nil, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("GET", "/api/v1/projects/"+url.PathEscape(idOrName), nil)
 }
 
 // PatchProject updates a project and/or its membership rows (M3).
 func (c *Client) PatchProject(idOrName string, req ProjectPatchRequest) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("PATCH", "/api/v1/projects/"+url.PathEscape(idOrName), req, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("PATCH", "/api/v1/projects/"+url.PathEscape(idOrName), req)
 }
 
 // Backup triggers the on-demand snapshot (M4).
 func (c *Client) Backup() (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("POST", "/api/v1/admin/backup", map[string]any{}, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("POST", "/api/v1/admin/backup", map[string]any{})
 }
 
 // RotateSecret rotates the service secret (M5).
 func (c *Client) RotateSecret(req RotateSecretRequest) (json.RawMessage, error) {
-	var raw json.RawMessage
-	if err := c.Do("POST", "/api/v1/service/rotate-secret", req, &raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return c.raw("POST", "/api/v1/service/rotate-secret", req)
 }

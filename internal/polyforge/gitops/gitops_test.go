@@ -761,7 +761,7 @@ func TestInitLocalAndExternalize(t *testing.T) {
 		t.Fatalf("external git-dir missing at %s", o.GitDir)
 	}
 	// the working branch is main
-	out, err := git(o.env(), o.CapsuleDir, "symbolic-ref", "HEAD")
+	out, err := git(o.Env(), o.CapsuleDir, "symbolic-ref", "HEAD")
 	if err != nil || strings.TrimSpace(out) != "refs/heads/main" {
 		t.Fatalf("working branch = %q (%v), want refs/heads/main", out, err)
 	}

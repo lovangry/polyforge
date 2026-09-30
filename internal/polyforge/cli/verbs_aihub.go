@@ -43,8 +43,7 @@ var cmdFile = &Command{
 
 // fileCreate builds the create body from flags or from full stdin JSON.
 func fileCreate(ctx *Context, args []string) error {
-	f := flag.NewFlagSet("pf file create", flag.ContinueOnError)
-	f.SetOutput(ctx.Stderr)
+	f := subFlags(ctx, "file create")
 	var (
 		project   = f.String("project", "", "project name (required unless stdin JSON carries it)")
 		goal      = f.String("goal", "", "one-line goal (<=500 chars)")
@@ -75,7 +74,7 @@ func fileCreate(ctx *Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := decodeJSON(raw, &req); err != nil {
+		if err := json.Unmarshal(raw, &req); err != nil {
 			return fmt.Errorf("stdin JSON: %w", err)
 		}
 	}
@@ -131,21 +130,19 @@ func fileCreate(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx.emit(raw)
-	if !ctx.JSON {
+	ctx.finish(raw, func() {
 		var wi api.WorkItem
-		if err := decodeJSON(raw, &wi); err == nil {
+		if err := json.Unmarshal(raw, &wi); err == nil {
 			fmt.Fprintln(ctx.Stdout)
 			renderWIDetail(ctx.Stdout, &wi)
 		}
-	}
+	})
 	return nil
 }
 
 // fileEdit issues a PATCH with only the flags actually provided.
 func fileEdit(ctx *Context, args []string) error {
-	f := flag.NewFlagSet("pf file edit", flag.ContinueOnError)
-	f.SetOutput(ctx.Stderr)
+	f := subFlags(ctx, "file edit")
 	var (
 		goal      optString
 		content   optString
@@ -181,7 +178,7 @@ func fileEdit(ctx *Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := decodeJSON(raw, &body); err != nil {
+		if err := json.Unmarshal(raw, &body); err != nil {
 			return fmt.Errorf("stdin JSON: %w", err)
 		}
 		if v, ok := body["id"].(string); ok && id == "" {
@@ -230,21 +227,19 @@ func fileEdit(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx.emit(raw)
-	if !ctx.JSON {
+	ctx.finish(raw, func() {
 		var wi api.WorkItem
-		if err := decodeJSON(raw, &wi); err == nil {
+		if err := json.Unmarshal(raw, &wi); err == nil {
 			fmt.Fprintln(ctx.Stdout)
 			renderWIDetail(ctx.Stdout, &wi)
 		}
-	}
+	})
 	return nil
 }
 
 // fileShow reads the detail record.
 func fileShow(ctx *Context, args []string) error {
-	f := flag.NewFlagSet("pf file show", flag.ContinueOnError)
-	f.SetOutput(ctx.Stderr)
+	f := subFlags(ctx, "file show")
 	rest, err := parseCommandArgs(f, args)
 	if err != nil {
 		return err
@@ -256,14 +251,13 @@ func fileShow(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx.emit(raw)
-	if !ctx.JSON {
+	ctx.finish(raw, func() {
 		var wi api.WorkItem
-		if err := decodeJSON(raw, &wi); err == nil {
+		if err := json.Unmarshal(raw, &wi); err == nil {
 			fmt.Fprintln(ctx.Stdout)
 			renderWIDetail(ctx.Stdout, &wi)
 		}
-	}
+	})
 	return nil
 }
 
@@ -335,16 +329,15 @@ var cmdQueue = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			var l struct {
 				Items []api.WorkItem `json:"items"`
 			}
-			if err := decodeJSON(raw, &l); err == nil {
+			if err := json.Unmarshal(raw, &l); err == nil {
 				fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items))
 				renderWITable(ctx.Stdout, l.Items)
 			}
-		}
+		})
 		return nil
 	},
 }
@@ -366,13 +359,12 @@ var cmdCancel = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			var wi api.WorkItem
-			if err := decodeJSON(raw, &wi); err == nil {
+			if err := json.Unmarshal(raw, &wi); err == nil {
 				fmt.Fprintf(ctx.Stdout, "cancelled %s (status %s)\n", wi.Slug, wi.Status)
 			}
-		}
+		})
 		return nil
 	},
 }
@@ -415,16 +407,15 @@ var cmdRecall = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			var l struct {
 				Items []api.Memory `json:"items"`
 			}
-			if err := decodeJSON(raw, &l); err == nil {
+			if err := json.Unmarshal(raw, &l); err == nil {
 				fmt.Fprintf(ctx.Stdout, "%d hit(s)\n", len(l.Items))
 				renderMemories(ctx.Stdout, l.Items)
 			}
-		}
+		})
 		return nil
 	},
 }

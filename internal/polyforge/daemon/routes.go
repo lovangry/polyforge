@@ -301,19 +301,13 @@ func (d *Daemon) flushGate(next http.Handler) http.Handler {
 				}
 				if ji.State == runtime.StateRecovering {
 					if d.sealHeld(wi) {
-						// A close path holds the guard and its Stop is
-						// queued behind the recovery: a close genuinely
-						// is in progress — keep the original semantics.
-							writeErr(w, api.ErrDaemonConflict, "a close is already in progress for this work item")
+						// close holds the guard with its Stop queued behind
+						// the recovery: genuinely "close in progress".
+						writeErr(w, api.ErrDaemonConflict, "a close is already in progress for this work item")
 						return
 					}
-					// The recovery window, no close anywhere: between
-					// the new agent going live and recovered() flipping
-					// the state back to RUNNING, the NEW instance's
-					// flush(wrap) used to eat a nonsense "close in
-					// progress" refusal. Answer the typed retryable
-					// transient instead — no seal is claimed, and the
-					// caller's bounded retry clears it in milliseconds.
+					// no close anywhere: the recovery window answers the
+					// typed retryable RECOVERING transient.
 					writeErr(w, api.ErrDaemonConflict,
 						"work item is recovering; instance just spawned; retry shortly")
 					return

@@ -183,7 +183,7 @@ func (m *AdminManager) CreateAPIKey(userID, name, projectScope string) (*IssuedK
 		scopeAny = projectScope
 	}
 	if _, err := m.db.Exec(`INSERT INTO api_keys(id, user_id, project_id, name, key_hash, created_at)
-		VALUES (?1,?2,?3,?4,?5,?6)`, id, userID, scopeAny, name, sha256Hex(plain), Now()); err != nil {
+		VALUES (?1,?2,?3,?4,?5,?6)`, id, userID, scopeAny, name, Sha256Hex(plain), Now()); err != nil {
 		return nil, err
 	}
 	return &IssuedKey{
@@ -324,7 +324,7 @@ func (m *AdminManager) Heartbeat(req MachineHeartbeat) (*HeartbeatResult, error)
 		return nil, err
 	}
 	if _, err := tx.Exec(`INSERT INTO api_keys(id, user_id, project_id, name, key_hash, created_at)
-		VALUES (?1,?2,NULL,'machine registration',?3,?4)`, keyID, uid, sha256Hex(plain), Now()); err != nil {
+		VALUES (?1,?2,NULL,'machine registration',?3,?4)`, keyID, uid, Sha256Hex(plain), Now()); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -387,7 +387,7 @@ func (m *AdminManager) CreateProject(req CreateProjectRequest) (*ProjectWithSecr
 	now := Now()
 	if _, err := m.db.Exec(`INSERT INTO projects(id, name, description, repos, visible, identifier_hash, created_at, updated_at)
 		VALUES (?1,?2,?3,?4,?5,?6,?7,?7)`,
-		id, req.Name, req.Description, string(repos), visible, sha256Hex(identifier), now); err != nil {
+		id, req.Name, req.Description, string(repos), visible, Sha256Hex(identifier), now); err != nil {
 		if isUniqueViolation(err) {
 			return nil, Fail(api.ErrCoreConflict, "", "project %q already exists", req.Name)
 		}
@@ -500,7 +500,7 @@ func (m *AdminManager) RotateIdentifier(idOrName string) (string, error) {
 		return "", err
 	}
 	res, err := m.db.Exec(`UPDATE projects SET identifier_hash=?, updated_at=? WHERE id=? OR name=?`,
-		sha256Hex(plain), Now(), idOrName, idOrName)
+		Sha256Hex(plain), Now(), idOrName, idOrName)
 	if err != nil {
 		return "", err
 	}

@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -835,7 +836,7 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 		m.sealing = false
 		m.blocked = true
 		m.stateMu.Unlock()
-		ack.Error = "wrap flush failed after " + itoa(wrapRetries) + " retries"
+		ack.Error = "wrap flush failed after " + strconv.Itoa(wrapRetries) + " retries"
 		if wr.err != "" {
 			ack.Error += ": " + wr.err
 		}
@@ -893,8 +894,4 @@ func (m *Monitor) markClosing() {
 	m.stateMu.Lock()
 	m.sealing = true
 	m.stateMu.Unlock()
-}
-
-func itoa(n int) string {
-	return fmt.Sprintf("%d", n)
 }

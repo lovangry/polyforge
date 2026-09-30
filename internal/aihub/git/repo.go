@@ -56,9 +56,6 @@ func (m *Manager) RepoDir(wiID string) string {
 	return filepath.Join(m.Root, wiID+".git")
 }
 
-// RemotePath is the URL path the pf side appends to the aihub base URL.
-func RemotePath(wiID string) string { return "/" + wiID + ".git" }
-
 // git runs git once with the given environment.
 func git(dir string, env []string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)

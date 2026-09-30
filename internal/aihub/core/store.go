@@ -10,6 +10,7 @@
 package core
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -227,7 +228,7 @@ func Now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 func NewID(prefix string) (string, error) {
 	var b [12]byte
 	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	if _, err := readRandom(b[:]); err != nil {
+	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("core: rand: %w", err)
 	}
 	out := make([]byte, 12)
@@ -240,7 +241,7 @@ func NewID(prefix string) (string, error) {
 // NewSecret returns n cryptographically random bytes, hex encoded.
 func NewSecret(n int) (string, error) {
 	b := make([]byte, n)
-	if _, err := readRandom(b); err != nil {
+	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("core: rand: %w", err)
 	}
 	return hex.EncodeToString(b), nil

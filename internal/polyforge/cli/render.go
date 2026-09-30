@@ -30,6 +30,15 @@ func (ctx *Context) emit(raw []byte) {
 	}
 }
 
+// finish prints the command payload: raw passthrough in --json mode, the
+// human renderer closure otherwise.
+func (ctx *Context) finish(raw json.RawMessage, human func()) {
+	ctx.emit(raw)
+	if !ctx.JSON {
+		human()
+	}
+}
+
 // Out writes to stdout.
 func (ctx *Context) Out(data []byte) {
 	ctx.Stdout.Write(data)
@@ -49,12 +58,6 @@ func printJSON(w io.Writer, raw []byte) {
 	fmt.Fprintln(w)
 }
 
-// decodeJSON unmarshals raw into v.
-func decodeJSON(raw []byte, v any) error {
-	return json.Unmarshal(raw, v)
-}
-
-// printTable renders a simple aligned text table.
 // printTable renders a simple aligned text table. The last column is
 // not padded (no trailing whitespace on output lines).
 func printTable(w io.Writer, headers []string, rows [][]string) {
@@ -316,7 +319,7 @@ func renderApiKeys(w io.Writer, raw json.RawMessage) {
 			RevokedAt *string `json:"revoked_at"`
 		} `json:"items"`
 	}
-	if err := decodeJSON(raw, &l); err != nil {
+	if err := json.Unmarshal(raw, &l); err != nil {
 		printJSON(w, raw)
 		return
 	}

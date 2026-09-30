@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -34,7 +35,7 @@ func (j *Janitor) GCOnce() error {
 		return err
 	}
 	for _, e := range entries {
-		if !e.IsDir() || !stringsSuffix(e.Name(), ".git") {
+		if !e.IsDir() || !strings.HasSuffix(e.Name(), ".git") {
 			continue
 		}
 		dir := filepath.Join(j.Manager.Root, e.Name())
@@ -45,10 +46,6 @@ func (j *Janitor) GCOnce() error {
 		}
 	}
 	return nil
-}
-
-func stringsSuffix(s, suffix string) bool {
-	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
 
 // Start launches the periodic loop; Stop terminates it.

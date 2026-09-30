@@ -257,6 +257,36 @@ func (s *Server) canWrite(idn *identity, projectID string) (bool, error) {
 	return role == "writer" || role == "maintainer", err
 }
 
+// requireWrite enforces write access to projectID: on error or denial it
+// writes the typed refusal envelope itself and answers false.
+func (s *Server) requireWrite(w http.ResponseWriter, idn *identity, projectID string) bool {
+	ok, err := s.canWrite(idn, projectID)
+	if err != nil {
+		writeErr(w, err)
+		return false
+	}
+	if !ok {
+		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "writer role on the project required"))
+		return false
+	}
+	return true
+}
+
+// requireRead enforces read access to projectID, hiding the object
+// behind the caller-supplied not-found detail on denial.
+func (s *Server) requireRead(w http.ResponseWriter, idn *identity, projectID, notFound string, args ...any) bool {
+	ok, err := s.canRead(idn, projectID)
+	if err != nil {
+		writeErr(w, err)
+		return false
+	}
+	if !ok {
+		writeErr(w, core.Fail(api.ErrCoreNotFound, "", notFound, args...))
+		return false
+	}
+	return true
+}
+
 // wiProject loads a WI's project id (hidden objects stay hidden).
 func (s *Server) wiProject(idn *identity, idOrSlug string) (string, string, error) {
 	id, err := s.WIs.Resolve(idOrSlug)
@@ -288,13 +318,7 @@ func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity
 		writeErr(w, err)
 		return
 	}
-	ok, err := s.canWrite(idn, projectID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !ok {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "writer role on the project required"))
+	if !s.requireWrite(w, idn, projectID) {
 		return
 	}
 	wi, err := s.WIs.Create(req)
@@ -334,13 +358,7 @@ func (s *Server) hGetWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 		writeErr(w, err)
 		return
 	}
-	ok, err := s.canRead(idn, projectID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !ok {
-		writeErr(w, core.Fail(api.ErrCoreNotFound, "", "work item %s", r.PathValue("id")))
+	if !s.requireRead(w, idn, projectID, "work item %s", r.PathValue("id")) {
 		return
 	}
 	opts := core.GetOptions{}
@@ -370,13 +388,7 @@ func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request, idn *identity)
 		writeErr(w, err)
 		return
 	}
-	ok, err := s.canWrite(idn, projectID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !ok {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "writer role on the project required"))
+	if !s.requireWrite(w, idn, projectID) {
 		return
 	}
 	var fields map[string]json.RawMessage
@@ -510,13 +522,7 @@ func (s *Server) hAddDep(w http.ResponseWriter, r *http.Request, idn *identity) 
 		writeErr(w, err)
 		return
 	}
-	ok, err := s.canWrite(idn, projectID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !ok {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "writer role on the project required"))
+	if !s.requireWrite(w, idn, projectID) {
 		return
 	}
 	var req struct {
@@ -545,13 +551,7 @@ func (s *Server) hDeps(w http.ResponseWriter, r *http.Request, idn *identity) {
 		writeErr(w, err)
 		return
 	}
-	ok, rerr := s.canRead(idn, projectID)
-	if rerr != nil {
-		writeErr(w, rerr)
-		return
-	}
-	if !ok {
-		writeErr(w, core.Fail(api.ErrCoreNotFound, "", "work item %s", id))
+	if !s.requireRead(w, idn, projectID, "work item %s", id) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.depsView(id))
@@ -571,13 +571,7 @@ func (s *Server) hDelDep(w http.ResponseWriter, r *http.Request, idn *identity) 
 		writeErr(w, err)
 		return
 	}
-	ok, err := s.canWrite(idn, projectID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !ok {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "writer role on the project required"))
+	if !s.requireWrite(w, idn, projectID) {
 		return
 	}
 	blocked, err := s.WIs.Resolve(r.PathValue("id"))
@@ -607,14 +601,7 @@ func (s *Server) hReadyQueue(w http.ResponseWriter, r *http.Request, idn *identi
 		writeErr(w, err)
 		return
 	}
-	ok, err := s.canRead(idn, projectID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !ok {
-		// No existence leak for hidden projects.
-		writeErr(w, core.Fail(api.ErrCoreNotFound, "", "project %q", project))
+	if !s.requireRead(w, idn, projectID, "project %q", project) {
 		return
 	}
 	q, err := s.WIs.ReadyQueue(project)
@@ -1089,7 +1076,7 @@ func (s *Server) hRotateSecret(w http.ResponseWriter, r *http.Request, idn *iden
 	if mode == "" {
 		mode = "grace" // v0 default
 	}
-	epoch, err := s.Admin.RotateSecret(req.Mode, req.GraceSeconds, idn.UserID)
+	epoch, err := s.Admin.RotateSecret(mode, req.GraceSeconds, idn.UserID)
 	if err != nil {
 		writeErr(w, err)
 		return

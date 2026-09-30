@@ -56,7 +56,6 @@ const (
 	RecoverDeath         = "agent_death"
 	RecoverHang          = "hang"
 	RecoverProviderError = "provider_error"
-	RecoverStreamStall   = "stream_stall"
 )
 
 // Terminal reasons carried by WIFinished.
@@ -141,8 +140,10 @@ type FlushAck struct {
 	OK          bool   `json:"ok"`
 	LocalCommit string `json:"local_commit,omitempty"` // local commit SHA
 	Pushed      bool   `json:"pushed"`
-	PushedTo    string `json:"pushed_to,omitempty"` // bare repo ref, e.g. wi_xxx:refs/heads/main
-	Error       string `json:"error,omitempty"`
+	// PushedTo (bare repo ref) has never been written by any flush path
+	// yet; kept for the multi-machine visibility answers it will carry.
+	PushedTo string `json:"pushed_to,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 // FlushTimeout is the hard bound on any flush call (v1-spec-full §五).
@@ -154,9 +155,7 @@ const FlushTimeout = 60 * 1e9 // 60 seconds (ns, for time.Duration)
 
 // Daemon job states.
 const (
-	JobQueued     = "queued"
 	JobRunning    = "running"
-	JobPaused     = "paused"
 	JobNeedsInput = "needs_input"
 	JobSealing    = "sealing"
 	JobDone       = "done"

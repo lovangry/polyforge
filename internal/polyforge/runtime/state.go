@@ -77,18 +77,6 @@ func (j *job) liveAgent() bool {
 	return h != nil && h.Alive()
 }
 
-// newInstanceLocked mints the agent-lineage id that fences RT/OB messages
-// (protocol.go attempt-id): the first agent instance carries the aihub
-// claim's attempt id verbatim; every re-derivation appends #N so Observe's
-// stale death signals for a replaced handle are dropped by the fence.
-// Caller holds j.mu.
-func (j *job) newInstanceLocked() string {
-	if j.spawnN <= 1 {
-		return j.attempt
-	}
-	return fmt.Sprintf("%s#%d", j.attempt, j.spawnN-1)
-}
-
 // ---------------------------------------------------------------------------
 // state.json — the Runtime's persisted bookkeeping (restart input).
 

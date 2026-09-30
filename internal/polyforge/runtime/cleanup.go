@@ -271,7 +271,7 @@ func rootIdentityHolds(t CleanupTarget) bool {
 	if t.PID <= 0 {
 		return true // nothing recorded: vacuously ours
 	}
-	state, _, _, start, ok := procStat(t.PID)
+	_, _, _, start, ok := procStat(t.PID)
 	if !ok {
 		return true // gone (and reaped): the group id may still hold orphans
 	}
@@ -288,10 +288,7 @@ func rootIdentityHolds(t CleanupTarget) bool {
 	}
 	startWall := bt + start/100
 	recUnix := rec.Unix()
-	if state == "Z" {
-		// a corpse still carries its own creation time
-		return startWall > recUnix-2 && startWall < recUnix+2
-	}
+	// a live occupant and a corpse alike carry their own creation time
 	return startWall > recUnix-2 && startWall < recUnix+2
 }
 

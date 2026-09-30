@@ -67,7 +67,7 @@ func (o *Observe) serveObserve(w http.ResponseWriter, r *http.Request) {
 			ring := o.log.SinceAfter(wi, after)
 			view.Events = make([]protocol.EventEntry, 0, len(ring))
 			for _, e := range ring {
-				view.Events = append(view.Events, e.EventEntry)
+				view.Events = append(view.Events, e)
 			}
 		}
 	}

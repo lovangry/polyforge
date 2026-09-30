@@ -113,7 +113,7 @@ func (m *OwnerManager) CheckPushCredential(wiID, username, secret string) (strin
 	if !ok {
 		return "", Fail(api.ErrGitUnauthorized, "NO_ACTIVE_ATTEMPT", "credential rejected: no active attempt")
 	}
-	if sha256Hex(secret) != g.SecretHash {
+	if Sha256Hex(secret) != g.SecretHash {
 		return "", Fail(api.ErrGitUnauthorized, "BAD_CREDENTIAL", "credential rejected")
 	}
 	return g.AttemptID, nil
@@ -319,7 +319,7 @@ func (m *OwnerManager) claimNew(wiID string, req ClaimRequest, callerIdentity st
 		owner = callerIdentity
 	}
 	if _, err := tx.Exec(`INSERT INTO owner_generations(work_item_id, generation, attempt_id, owner, machine_id, secret_hash, started_at)
-		VALUES (?1,?2,?3,?4,?5,?6,?7)`, wiID, gen, attemptID, owner, machineAny, sha256Hex(secret), now); err != nil {
+		VALUES (?1,?2,?3,?4,?5,?6,?7)`, wiID, gen, attemptID, owner, machineAny, Sha256Hex(secret), now); err != nil {
 		if isUniqueViolation(err) {
 			return nil, Fail(api.ErrCoreConflict, "ALREADY_CLAIMED", "an active attempt exists")
 		}

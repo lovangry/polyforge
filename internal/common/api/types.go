@@ -139,15 +139,6 @@ type Memory struct {
 	WorkItemID    string          `json:"work_item_id,omitempty"`
 }
 
-// Generation is the per-attempt execution generation opened by a claim.
-type Generation struct {
-	Seq         int64  `json:"seq"`
-	AttemptID   string `json:"attempt_id"`
-	OpenedAt    string `json:"opened_at"`
-	Owner       string `json:"owner"`
-	BundleDigest string `json:"bundle_digest"`
-}
-
 // ListResponse is the envelope for list endpoints.
 type ListResponse[T any] struct {
 	Items    []T     `json:"items"`
