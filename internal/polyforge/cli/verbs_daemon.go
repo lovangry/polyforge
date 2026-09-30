@@ -45,15 +45,14 @@ var cmdSubmit = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			var sr SubmitResponse
-			if err := decodeJSON(raw, &sr); err == nil && sr.Accepted {
+			if err := json.Unmarshal(raw, &sr); err == nil && sr.Accepted {
 				fmt.Fprintf(ctx.Stdout, "submitted %s (accepted by the local daemon)\n", sr.WorkItemID)
 			} else {
 				printJSON(ctx.Stdout, raw)
 			}
-		}
+		})
 		return nil
 	},
 }
@@ -80,15 +79,14 @@ var cmdResume = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			var sr SubmitResponse
-			if err := decodeJSON(raw, &sr); err == nil && sr.Accepted {
+			if err := json.Unmarshal(raw, &sr); err == nil && sr.Accepted {
 				fmt.Fprintf(ctx.Stdout, "resumed %s (fresh claim accepted by the local daemon)\n", sr.WorkItemID)
 			} else {
 				printJSON(ctx.Stdout, raw)
 			}
-		}
+		})
 		return nil
 	},
 }
@@ -134,15 +132,14 @@ var cmdObserve = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			var jv protocol.JobView
-			if err := decodeJSON(raw, &jv); err == nil {
+			if err := json.Unmarshal(raw, &jv); err == nil {
 				renderObserve(ctx.Stdout, &jv)
 			} else {
 				printJSON(ctx.Stdout, raw)
 			}
-		}
+		})
 		return nil
 	},
 }
@@ -187,7 +184,7 @@ var cmdAnswer = &Command{
 				return fmt.Errorf("answer: --question is required (observe failed: %w)", err)
 			}
 			var jv protocol.JobView
-			if err := decodeJSON(raw, &jv); err != nil {
+			if err := json.Unmarshal(raw, &jv); err != nil {
 				return fmt.Errorf("answer: --question is required (observe undecodable)")
 			}
 			if jv.Pending == nil {
@@ -210,10 +207,9 @@ var cmdAnswer = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			fmt.Fprintf(ctx.Stdout, "answer %s delivered for question %s\n", payload.AnswerID, payload.QuestionID)
-		}
+		})
 		return nil
 	},
 }
@@ -255,18 +251,17 @@ var cmdBatchConfirm = &Command{
 		var rec struct {
 			Items []api.WorkItem `json:"items"`
 		}
-		if err := decodeJSON(raw, &rec); err != nil {
+		if err := json.Unmarshal(raw, &rec); err != nil {
 			return fmt.Errorf("batch-confirm: cannot parse recommendation: %w", err)
 		}
 
 		if !all && len(ids) == 0 {
 			// Read-only recommendation display; NO Job is created.
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				fmt.Fprintf(ctx.Stdout, "%d recommended work item(s)\n", len(rec.Items))
 				renderWITable(ctx.Stdout, rec.Items)
 				fmt.Fprintln(ctx.Stdout, "\nconfirm with: pf batch-confirm --all  or  pf batch-confirm <id> ...")
-			}
+			})
 			return nil
 		}
 		if all {
@@ -282,11 +277,10 @@ var cmdBatchConfirm = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(sraw)
-		if !ctx.JSON {
+		ctx.finish(sraw, func() {
 			fmt.Fprintf(ctx.Stdout, "wave submitted: %d work item(s)\n", len(ids))
 			printJSON(ctx.Stdout, sraw)
-		}
+		})
 		return nil
 	},
 }
@@ -308,10 +302,9 @@ var cmdPause = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			fmt.Fprintf(ctx.Stdout, "pause requested for %s\n", args[0])
-		}
+		})
 		return nil
 	},
 }
@@ -339,10 +332,9 @@ var cmdWrap = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			fmt.Fprintf(ctx.Stdout, "%s requested for %s\n", reason, args[0])
-		}
+		})
 		return nil
 	},
 }
@@ -375,15 +367,14 @@ var cmdShip = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			var sr ShipResponse
-			if err := decodeJSON(raw, &sr); err == nil {
+			if err := json.Unmarshal(raw, &sr); err == nil {
 				renderShip(ctx.Stdout, &sr)
 			} else {
 				printJSON(ctx.Stdout, raw)
 			}
-		}
+		})
 		return nil
 	},
 }
@@ -413,15 +404,14 @@ var cmdOps = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				var s StatusResponse
-				if err := decodeJSON(raw, &s); err == nil {
+				if err := json.Unmarshal(raw, &s); err == nil {
 					renderStatus(ctx.Stdout, &s)
 				} else {
 					printJSON(ctx.Stdout, raw)
 				}
-			}
+			})
 			return nil
 		case "mode":
 			return opsMode(ctx, d, args[1:])
@@ -430,10 +420,9 @@ var cmdOps = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				fmt.Fprintln(ctx.Stdout, "graceful shutdown requested; the daemon quiesces and exits")
-			}
+			})
 			return nil
 		default:
 			return fmt.Errorf("ops: unknown action %q", args[0])
@@ -449,21 +438,19 @@ func opsMode(ctx *Context, d *DaemonClient, args []string) error {
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			var s StatusResponse
-			if err := decodeJSON(raw, &s); err == nil {
+			if err := json.Unmarshal(raw, &s); err == nil {
 				fmt.Fprintf(ctx.Stdout, "mode: %s\n", s.Mode)
 			} else {
 				printJSON(ctx.Stdout, raw)
 			}
-		}
+		})
 		return nil
 	}
 	switch args[0] {
 	case "set":
-		f := flag.NewFlagSet("pf ops mode set", flag.ContinueOnError)
-		f.SetOutput(ctx.Stderr)
+		f := subFlags(ctx, "ops mode set")
 		maxJobs := f.Int("max-concurrent-jobs", 0, "max concurrent jobs on this machine (n >= 1)")
 		mode := f.String("mode", "", "also switch the mode: interactive|batch|drain")
 		rest, err := parseCommandArgs(f, args[1:])
@@ -491,20 +478,18 @@ func opsMode(ctx *Context, d *DaemonClient, args []string) error {
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			printJSON(ctx.Stdout, raw)
-		}
+		})
 		return nil
 	case "drain", "abort-drain":
 		raw, err := d.Mode(ModeRequest{Action: args[0]})
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			printJSON(ctx.Stdout, raw)
-		}
+		})
 		return nil
 	default:
 		return fmt.Errorf("ops mode: unknown sub-action %q (set|drain|abort-drain)", args[0])

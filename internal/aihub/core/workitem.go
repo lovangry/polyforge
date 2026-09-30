@@ -187,7 +187,7 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		if req.BundleDigest != nil && *req.BundleDigest != "" {
 			bundleDigest = *req.BundleDigest
 		} else {
-			bundleDigest = sha256Hex("bundle-name:" + *req.BundleName)
+			bundleDigest = Sha256Hex("bundle-name:" + *req.BundleName)
 		}
 	}
 

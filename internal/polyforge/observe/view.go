@@ -9,17 +9,9 @@ package observe
 //     in-memory copy is only a poll cache and is never served as state.
 //   - the events layer: the per-WI ring mirrored from the events file.
 //
-// PENDING-QUESTION PROJECTION ACROSS RECOVERY (answer relay + recovery
-// contract): when an agent dies with an answer delivered-but-unconsumed
-// — or with no answer at all — the pending question stays visible here.
-// The NEW attempt's first turn sees the same question because the agent
-// persisted pending_question into execution.json BEFORE calling
-// flush(needs_input), and Runtime injects that file as the recovered
-// agent's opening context; the monitor therefore NEVER re-sends
-// pf/answer to a recovered agent (Runtime owns context injection), it
-// only keeps this projection honest. The CLI may re-submit the same
-// answer_id; the three-state ledger re-delivers it idempotently to the
-// new handle.
+// The pending-question projection across recovery is specified once, in
+// answers.go (the relay's single authority); this projection only keeps
+// it visible.
 
 import (
 	"encoding/json"
@@ -77,7 +69,7 @@ func (m *Monitor) JobView() *protocol.JobView {
 	ring := m.log.Since(m.wi.WorkItem)
 	view.Events = make([]protocol.EventEntry, 0, len(ring))
 	for _, e := range ring {
-		view.Events = append(view.Events, e.EventEntry)
+		view.Events = append(view.Events, e)
 	}
 
 	// status derivation, most specific first. A terminal attempt

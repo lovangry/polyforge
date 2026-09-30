@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"strings"
@@ -33,8 +34,7 @@ var cmdUsers = &Command{
 		sub, rest := args[0], args[1:]
 		switch sub {
 		case "create":
-			f := flag.NewFlagSet("pf users create", flag.ContinueOnError)
-			f.SetOutput(ctx.Stderr)
+			f := subFlags(ctx, "users create")
 			name := f.String("display-name", "", "human-readable display name (required)")
 			kind := f.String("user-type", "human", "human|machine")
 			role := f.String("role", "writer", "writer|admin (global role)")
@@ -53,28 +53,26 @@ var cmdUsers = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				var u api.User
-				if err := decodeJSON(raw, &u); err == nil {
+				if err := json.Unmarshal(raw, &u); err == nil {
 					fmt.Fprintf(ctx.Stdout, "created user %s (%s, %s)\n", u.ID, u.UserType, u.Role)
 				}
-			}
+			})
 			return nil
 		case "list":
 			raw, err := client.ListUsers()
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				var l struct {
 					Items []api.User `json:"items"`
 				}
-				if err := decodeJSON(raw, &l); err == nil {
+				if err := json.Unmarshal(raw, &l); err == nil {
 					renderUsers(ctx.Stdout, l.Items)
 				}
-			}
+			})
 			return nil
 		case "get":
 			if len(rest) != 1 {
@@ -84,14 +82,12 @@ var cmdUsers = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				printJSON(ctx.Stdout, raw)
-			}
+			})
 			return nil
 		case "patch":
-			f := flag.NewFlagSet("pf users patch", flag.ContinueOnError)
-			f.SetOutput(ctx.Stderr)
+			f := subFlags(ctx, "users patch")
 			name := f.String("display-name", "", "new display name")
 			role := f.String("role", "", "writer|admin")
 			ids, err := parseCommandArgs(f, rest)
@@ -108,10 +104,9 @@ var cmdUsers = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				fmt.Fprintf(ctx.Stdout, "user %s updated\n", ids[0])
-			}
+			})
 			return nil
 		default:
 			return fmt.Errorf("users: unknown action %q", sub)
@@ -138,8 +133,7 @@ var cmdApiKeys = &Command{
 		sub, rest := args[0], args[1:]
 		switch sub {
 		case "create":
-			f := flag.NewFlagSet("pf api-keys create", flag.ContinueOnError)
-			f.SetOutput(ctx.Stderr)
+			f := subFlags(ctx, "api-keys create")
 			user := f.String("user", "", "user id to mint the key for (required)")
 			scope := f.String("project-scope", "", "optional project scope (narrows, never grants)")
 			rest, err := parseCommandArgs(f, rest)
@@ -157,21 +151,19 @@ var cmdApiKeys = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				printJSON(ctx.Stdout, raw)
 				fmt.Fprintln(ctx.Stdout, "NOTE: the key plaintext is shown exactly once and never stored.")
-			}
+			})
 			return nil
 		case "list":
 			raw, err := client.ListApiKeys()
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				renderApiKeys(ctx.Stdout, raw)
-			}
+			})
 			return nil
 		case "revoke":
 			if len(rest) != 1 {
@@ -181,10 +173,9 @@ var cmdApiKeys = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				fmt.Fprintf(ctx.Stdout, "key %s revoked\n", rest[0])
-			}
+			})
 			return nil
 		default:
 			return fmt.Errorf("api-keys: unknown action %q", sub)
@@ -214,8 +205,7 @@ var cmdProjects = &Command{
 		sub, rest := args[0], args[1:]
 		switch sub {
 		case "create":
-			f := flag.NewFlagSet("pf projects create", flag.ContinueOnError)
-			f.SetOutput(ctx.Stderr)
+			f := subFlags(ctx, "projects create")
 			name := f.String("name", "", "project name (required)")
 			visible := f.Bool("visible", true, "directory-listing visibility (grants no data access)")
 			rest, err := parseCommandArgs(f, rest)
@@ -232,28 +222,26 @@ var cmdProjects = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				var p api.Project
-				if err := decodeJSON(raw, &p); err == nil {
+				if err := json.Unmarshal(raw, &p); err == nil {
 					fmt.Fprintf(ctx.Stdout, "created project %s (%s)\n", p.Name, p.ID)
 				}
-			}
+			})
 			return nil
 		case "list":
 			raw, err := client.ListProjects()
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				var l struct {
 					Items []api.Project `json:"items"`
 				}
-				if err := decodeJSON(raw, &l); err == nil {
+				if err := json.Unmarshal(raw, &l); err == nil {
 					renderProjects(ctx.Stdout, l.Items)
 				}
-			}
+			})
 			return nil
 		case "get":
 			if len(rest) != 1 {
@@ -263,14 +251,12 @@ var cmdProjects = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				printJSON(ctx.Stdout, raw)
-			}
+			})
 			return nil
 		case "patch":
-			f := flag.NewFlagSet("pf projects patch", flag.ContinueOnError)
-			f.SetOutput(ctx.Stderr)
+			f := subFlags(ctx, "projects patch")
 			// The wire body carries `visible` ONLY when the flag was
 			// given; a plain patch must not flip a private project
 			// visible.
@@ -287,10 +273,9 @@ var cmdProjects = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.emit(raw)
-			if !ctx.JSON {
+			ctx.finish(raw, func() {
 				fmt.Fprintf(ctx.Stdout, "project %s updated\n", ids[0])
-			}
+			})
 			return nil
 		case "members":
 			return projectsMembers(ctx, client, rest)
@@ -309,8 +294,7 @@ func projectsMembers(ctx *Context, client *aihubclient.Client, args []string) er
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "add":
-		f := flag.NewFlagSet("pf projects members add", flag.ContinueOnError)
-		f.SetOutput(ctx.Stderr)
+		f := subFlags(ctx, "projects members add")
 		user := f.String("user", "", "user id (required)")
 		role := f.String("role", "writer", "viewer|writer|maintainer")
 		ids, err := parseCommandArgs(f, rest)
@@ -330,14 +314,12 @@ func projectsMembers(ctx *Context, client *aihubclient.Client, args []string) er
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			fmt.Fprintf(ctx.Stdout, "member %s upserted on %s as %s\n", *user, ids[0], *role)
-		}
+		})
 		return nil
 	case "remove", "rm":
-		f := flag.NewFlagSet("pf projects members remove", flag.ContinueOnError)
-		f.SetOutput(ctx.Stderr)
+		f := subFlags(ctx, "projects members remove")
 		var users stringList
 		f.Var(&users, "user", "user id to remove (repeatable)")
 		ids, err := parseCommandArgs(f, rest)
@@ -352,10 +334,9 @@ func projectsMembers(ctx *Context, client *aihubclient.Client, args []string) er
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			fmt.Fprintf(ctx.Stdout, "removed from %s: %s\n", ids[0], strings.Join(rem, ","))
-		}
+		})
 		return nil
 	default:
 		return fmt.Errorf("projects members: unknown action %q", sub)
@@ -376,17 +357,16 @@ var cmdBackup = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			var resp struct {
 				Backup string `json:"backup"`
 			}
-			if err := decodeJSON(raw, &resp); err == nil {
+			if err := json.Unmarshal(raw, &resp); err == nil {
 				fmt.Fprintf(ctx.Stdout, "snapshot written: %s\n", resp.Backup)
 			} else {
 				printJSON(ctx.Stdout, raw)
 			}
-		}
+		})
 		return nil
 	},
 }
@@ -423,10 +403,9 @@ var cmdRotateSecret = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.emit(raw)
-		if !ctx.JSON {
+		ctx.finish(raw, func() {
 			fmt.Fprintf(ctx.Stdout, "service secret rotated (mode=%s)\n", mode)
-		}
+		})
 		return nil
 	},
 }

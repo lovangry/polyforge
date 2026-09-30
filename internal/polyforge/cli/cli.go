@@ -270,6 +270,14 @@ func printCommandUsage(w io.Writer, name string) int {
 // Flag value helpers.
 // ---------------------------------------------------------------------------
 
+// subFlags builds the flag set of one sub-action, wired to the CLI's
+// stderr (the flag package writes its usage errors there).
+func subFlags(ctx *Context, name string) *flag.FlagSet {
+	f := flag.NewFlagSet("pf "+name, flag.ContinueOnError)
+	f.SetOutput(ctx.Stderr)
+	return f
+}
+
 // optString is a flag.Value that records whether it was explicitly set,
 // distinguishing "flag absent" from "flag set to empty string" (PATCH
 // semantics need both).

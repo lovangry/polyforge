@@ -455,15 +455,13 @@ func (p *proc) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound 
 	if ack := p.acks.claim(w); ack != nil {
 		return ackOutcome(m, *ack)
 	}
-	for {
-		select {
-		case ack := <-w.ch:
-			return ackOutcome(m, ack)
-		case <-qctx.Done():
-			return fmt.Errorf("runtime: no ack for %s: %w", m.Method, qctx.Err())
-		case <-p.exited:
-			return fmt.Errorf("runtime: no ack for %s: agent exited", m.Method)
-		}
+	select {
+	case ack := <-w.ch:
+		return ackOutcome(m, ack)
+	case <-qctx.Done():
+		return fmt.Errorf("runtime: no ack for %s: %w", m.Method, qctx.Err())
+	case <-p.exited:
+		return fmt.Errorf("runtime: no ack for %s: agent exited", m.Method)
 	}
 }
 
@@ -610,11 +608,8 @@ func (p *proc) Terminate(bound time.Duration) error {
 	if p.cmd.Process == nil {
 		return nil
 	}
-	pgid := p.cmd.Process.Pid // Setpgid: the child IS the group leader
-	if err := killGroup(pgid, bound); err != nil {
-		return err
-	}
-	return nil
+	// Setpgid: the child IS the group leader.
+	return killGroup(p.cmd.Process.Pid, bound)
 }
 
 // ---------------------------------------------------------------------------

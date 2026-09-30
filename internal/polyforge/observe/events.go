@@ -58,23 +58,19 @@ const EventsFile = "events.log"
 // and mirrors them into per-WI rings. Safe for concurrent use: monitor
 // goroutines, flush sub-goroutines and the HTTP read face all touch it.
 type EventLog struct {
-	mu     sync.Mutex
-	f      *os.File
-	path   string
-	rings  map[string][]protocolEvent
+	mu   sync.Mutex
+	f    *os.File
+	path string
+	// rings holds per-WI protocol.EventEntry values. Seq is the per-WI
+	// MONOTONIC append ordinal — the total appended count at write time,
+	// not a ring index: truncation only bounds RETENTION, never the
+	// numbering, so a client's ?after cursor keeps working across ring
+	// turnover (#21). The ring is the ONLY seq authority: the durable
+	// file keeps writing the bare entry without one (a daemon restart
+	// legitimately renumbers seq from 1, so written-back seqs would
+	// collide with earlier runs' lines).
+	rings  map[string][]protocol.EventEntry
 	totals map[string]int64 // per-WI append count: the monotonic seq source
-}
-
-// protocolEvent is the ring's entry type. Seq (inside the embedded
-// protocol.EventEntry) is the per-WI MONOTONIC append ordinal — the total
-// appended count at write time, not a ring index: truncation only bounds
-// RETENTION, never the numbering, so a client's ?after cursor keeps
-// working across ring turnover (#21). The ring is the ONLY seq authority:
-// the durable file keeps writing the bare entry without one (a daemon
-// restart legitimately renumbers seq from 1, so written-back seqs would
-// collide with earlier runs' lines).
-type protocolEvent struct {
-	protocol.EventEntry
 }
 
 // NewEventLog opens (creating if needed) <dataDir>/events.log.
@@ -88,7 +84,7 @@ func NewEventLog(dataDir string) (*EventLog, error) {
 		return nil, err
 	}
 	return &EventLog{f: f, path: filepath.Join(dataDir, EventsFile),
-		rings: map[string][]protocolEvent{}, totals: map[string]int64{}}, nil
+		rings: map[string][]protocol.EventEntry{}, totals: map[string]int64{}}, nil
 }
 
 // Path returns the events file location (diagnostic/tests).
@@ -125,7 +121,7 @@ func (l *EventLog) Append(wi, kind string, body any) error {
 	// the ring entry is the one that carries it, so the serve face can
 	// hand clients their next ?after cursor.
 	entry.Seq = seq
-	ring := append(l.rings[wi], protocolEvent{EventEntry: entry})
+	ring := append(l.rings[wi], entry)
 	if len(ring) > RingCap {
 		ring = ring[len(ring)-RingCap:]
 	}
@@ -136,10 +132,10 @@ func (l *EventLog) Append(wi, kind string, body any) error {
 // Since returns the ring entries for wi (at most RingCap, oldest first).
 // The live view only: a daemon restart empties it, and the file remains
 // the durable record.
-func (l *EventLog) Since(wi string) []protocolEvent {
+func (l *EventLog) Since(wi string) []protocol.EventEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	out := make([]protocolEvent, len(l.rings[wi]))
+	out := make([]protocol.EventEntry, len(l.rings[wi]))
 	copy(out, l.rings[wi])
 	return out
 }
@@ -148,11 +144,11 @@ func (l *EventLog) Since(wi string) []protocolEvent {
 // greater than after — the GET /jobs/{id}/observe ?after cursor (#21).
 // Because seq counts TOTAL appends, not ring slots, an after value that
 // falls in the truncated span simply yields the whole retained ring.
-func (l *EventLog) SinceAfter(wi string, after int64) []protocolEvent {
+func (l *EventLog) SinceAfter(wi string, after int64) []protocol.EventEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ring := l.rings[wi]
-	out := make([]protocolEvent, 0, len(ring))
+	out := make([]protocol.EventEntry, 0, len(ring))
 	for _, e := range ring {
 		if e.Seq > after {
 			out = append(out, e)
@@ -169,17 +165,17 @@ func (l *EventLog) Close() error {
 }
 
 // ReadEventsFile parses the whole events file (test/diagnostic face).
-func ReadEventsFile(path string) ([]protocolEvent, error) {
+func ReadEventsFile(path string) ([]protocol.EventEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	var out []protocolEvent
+	var out []protocol.EventEntry
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {
-		var e protocolEvent
+		var e protocol.EventEntry
 		if json.Unmarshal(sc.Bytes(), &e) == nil {
 			out = append(out, e)
 		}

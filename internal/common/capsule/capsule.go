@@ -15,10 +15,7 @@
 //     any other capsule file.
 package capsule
 
-import (
-	"encoding/json"
-	"fmt"
-)
+import "encoding/json"
 
 // Capsule directory layout (relative to capsule root).
 const (
@@ -32,7 +29,6 @@ const (
 	CapsuleJSON      = "capsule.json"    // capsule identity
 	SessionJSON      = "session.json"    // per-attempt session/harness state
 	ExecutionJSON    = "runtime-state/execution.json"
-	JournalJSON      = "runtime-state/journal.json"
 )
 
 // GitignoreContent is the .gitignore written at capsule init (ruling C1).
@@ -61,7 +57,6 @@ type Session struct {
 	Harness        string `json:"harness"`         // pi|cc
 	SessionID      string `json:"session_id"`     // harness-native session identifier
 	TranscriptPath string `json:"transcript_path"` // absolute path to the .jsonl transcript
-	Seq            int64  `json:"seq"`             // last applied control-sequence number
 	UpdatedAt      string `json:"updated_at"`
 }
 
@@ -155,11 +150,6 @@ type RewindStats struct {
 // SeqTrailer is the git commit trailer used by pre-receive hooks to enforce
 // monotonically increasing commit sequence per work item (v1-spec-full §六).
 const SeqTrailer = "Polyforge-Seq"
-
-// CommitTrailerSeq formats the seq trailer value for a commit message.
-func CommitTrailerSeq(seq int64) string {
-	return fmt.Sprintf("%s: %d", SeqTrailer, seq)
-}
 
 // MaxBlobBytes is the pre-receive blob size limit (default 16 MiB; the
 // secret scanner is gone per ruling C1 but size stays bounded).

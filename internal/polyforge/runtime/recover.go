@@ -251,7 +251,11 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool) (AgentHan
 	j.agent = h
 	j.agentPID = h.PID()
 	j.agentStartedAt = h.StartedAt()
-	j.instance = j.newInstanceLocked()
+	// nextInst (minted from the pre-increment spawnN above) IS the
+	// post-increment lineage id: with spawnN'=n+1, the old
+	// newInstanceLocked() answered attempt (n==0) or attempt#n (n>=1)
+	// — exactly nextInst — so the derivation installs it directly.
+	j.instance = nextInst
 	j.mu.Unlock()
 	return h, nil
 }

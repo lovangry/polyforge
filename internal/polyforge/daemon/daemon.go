@@ -188,13 +188,9 @@ func New(cfg Config) (*Daemon, error) {
 		ExecutorPromptFile: cfg.ExecutorPromptFile,
 	}
 	// The production spawner takes the runtime config BY POINTER
-	// (runtime.DefaultSpawner): the RecordTap binding below — a method
-	// value on the daemon, so it can only be set after d exists — is read
-	// by the spawner at spawn time from the shared config. A value copy
-	// here is the e2e lane's high-severity bug (the tap never reached the
-	// spawner's snapshot and every stream-fed detection face went blind
-	// under the real daemon); the pointer keeps the assembly order
-	// harmless, whichever way later edits shuffle it.
+	// (runtime.DefaultSpawner): fields bound after assembly (the
+	// RecordTap binding below included) are read at spawn time from the
+	// shared config.
 	sp := cfg.Spawner
 	if sp == nil {
 		sp = runtime.DefaultSpawner(&rtCfg)

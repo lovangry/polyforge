@@ -284,16 +284,10 @@ func (o *Observe) setMonitor(wi string, m *Monitor) {
 	o.monitors[wi] = m
 }
 
-// MarkClosing marks the work item's monitor as sealing-for-close: a
-// daemon-initiated close (CLI wrap/pause) has claimed the seal guard and
-// is about to terminate the agent, and that death is EXPECTED — the
-// monitor must not raise a recovery for it. The runtime's SEALING fence
-// already drops the resulting OB message, but without this the events
-// log still records a spurious needs_recovery in a perfectly healthy
-// run whenever the adapter's exit poll wins the race against the close
-// sequence's RTFinished teardown. The monitor-local sealing flag is the
-// same suppression flush(wrap) arms; the flag dies with the monitor at
-// the RTFinished teardown. No monitor (never monitored) is a no-op.
+// MarkClosing arms the expected-death suppression for a daemon-initiated
+// close: the agent's imminent death raises no recovery, and the monitor
+// already shares the flush(wrap) sealing flag — the same suppression, no
+// new state. No monitor (never monitored) is a no-op.
 func (o *Observe) MarkClosing(wi string) {
 	if m := o.lookup(wi); m != nil {
 		m.markClosing()

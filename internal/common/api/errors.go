@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"strconv"
 )
 
@@ -100,5 +99,3 @@ const (
 	ErrCapFenced         = "CAP-409"
 	ErrCapRunnerCrash   = "CAP-500"
 )
-
-var _ = fmt.Sprintf // keep fmt import if unused later

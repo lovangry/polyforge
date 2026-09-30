@@ -34,6 +34,7 @@ type fakeHub struct {
 	claims    []aihubclient.ClaimRequest
 	ends      []aihubclient.EndGenerationRequest
 	gen       int64
+	digest    string // claim-time bundle digest (default "deadbeef")
 }
 
 func newFakeHub() *fakeHub {
@@ -45,13 +46,17 @@ func (h *fakeHub) Claim(req aihubclient.ClaimRequest) (*aihubclient.ClaimRespons
 	defer h.mu.Unlock()
 	h.claims = append(h.claims, req)
 	h.gen++
+	digest := h.digest
+	if digest == "" {
+		digest = "deadbeef"
+	}
 	return &aihubclient.ClaimResponse{
 		Claim: api.Claim{
 			WorkItemID:   req.WorkItemID,
 			AttemptID:    "ra_" + req.WorkItemID,
 			Generation:   h.gen,
 			BundleName:   "demo-bundle",
-			BundleDigest: "deadbeef",
+			BundleDigest: digest,
 		},
 		Credential: api.PushCredential{AttemptID: "ra_" + req.WorkItemID, Username: req.WorkItemID, Secret: "push-secret"},
 		WorkItem:   api.WorkItem{ID: req.WorkItemID, ProjectName: "proj"},
@@ -431,18 +436,9 @@ func spawnOrphaningSleeper(wi string) (*orphaningAgent, error) {
 	if err != nil {
 		return nil, err
 	}
-	pid, err := strconvAtoi(strings.TrimSpace(string(raw)))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil {
 		return nil, err
 	}
 	return &orphaningAgent{handle: h, orphanPID: pid}, nil
 }
-
-func strconvAtoi(s string) (int, error) { return strconv.Atoi(s) }
-
-// osCommand / osCmd / osReadDir: thin aliases keeping the cleanup tests'
-// focus on the layer logic.
-type osCmd = exec.Cmd
-
-func osCommand(name string, args ...string) *exec.Cmd { return exec.Command(name, args...) }
-func osReadDir(p string) ([]os.DirEntry, error)       { return os.ReadDir(p) }

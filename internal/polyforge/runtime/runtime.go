@@ -11,8 +11,10 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -27,6 +29,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
@@ -145,15 +148,10 @@ func New(cfg Config, hub Aihub, spawner Spawner, toOB chan<- protocol.RTMsg, fro
 	}
 }
 
-// DefaultSpawner returns the production pi-harness spawner. It takes
-// the runtime config BY POINTER: the spawner reads its fields at spawn
-// time from the shared config, so the assembling daemon may bind
-// RecordTap AFTER the spawner is built. A value copy here is the
-// e2e-lane's high-severity assembly bug: the daemon set RecordTap after
-// DefaultSpawner had already copied the config, so the spawner's copy
-// held RecordTap==nil forever and production agents' record streams
-// never reached Observe (every stream-fed detection face blind). The
-// pointer makes the value-copy recurrence structurally impossible.
+// DefaultSpawner returns the production pi-harness spawner. It takes the
+// runtime config BY POINTER: the spawner reads its fields at spawn time
+// from the shared config, so any field bound after assembly (RecordTap
+// included) is seen by the spawner.
 func DefaultSpawner(cfg *Config) Spawner {
 	return newPiSpawner(cfg)
 }
@@ -347,9 +345,8 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", wi, err)
 	}
-	pid := 0
 	j.mu.Lock()
-	pid = j.agentPID
+	pid := j.agentPID
 	inst := j.instance
 	j.mu.Unlock()
 	r.send(protocol.RTMsg{Kind: protocol.RTStarted, AttemptID: inst, WorkItem: wi, AgentPID: pid})
@@ -429,7 +426,9 @@ func quarantineCapsule(capsuleDir string) error {
 
 // materialize lays out the capsule: workflows/, agents/, capsule.json,
 // session.json, .gitignore and the runtime-state/ tree. The bundle is
-// copied read-only from the daemon checkout when configured.
+// copied read-only from the daemon checkout when configured; a pinned
+// bundle digest is verified against the copied tree (CAP-405 on
+// divergence, name-derived stand-ins excepted).
 func (r *Runtime) materialize(j *job) error {
 	for _, d := range []string{
 		capsule.DirAgents, capsule.DirArtifacts, capsule.DirLogs, capsule.DirRepos,
@@ -482,11 +481,72 @@ func (r *Runtime) materialize(j *job) error {
 	if err := copyTree(src, dst); err != nil {
 		return err
 	}
+	// Digest verification (§4.5): the COPIED tree is walked and hashed,
+	// and the aggregate must equal the pinned digest — a bundle whose
+	// checkout diverged from its pin is refused materialization. The
+	// name-derived stand-in (and an absent digest) was never a content
+	// pin: verification is skipped with a notice instead of a refusal.
+	if j.bundleDigest != "" && j.bundleDigest != nameDerivedDigest(j.bundleName) {
+		entries, err := bundleEntries(dst)
+		if err != nil {
+			return err
+		}
+		if got := workflow.Digest(entries); got != j.bundleDigest {
+			return &api.Error{
+				Code:   api.ErrCapCheckoutDiver,
+				Detail: fmt.Sprintf("bundle %s digest mismatch: pinned %s, materialized tree %s", j.bundleName, j.bundleDigest, got),
+			}
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s carries no pinned content digest; materialized without verification\n", j.wi, j.bundleName)
+	}
 	// step-agent definitions ride the bundle's agents/ subdir
 	if dirExists(filepath.Join(src, "agents")) {
 		return copyTree(filepath.Join(src, "agents"), filepath.Join(j.capsuleDir, capsule.DirAgents))
 	}
 	return nil
+}
+
+// nameDerivedDigest is the name-derived stand-in aihub stores when a work
+// item pins a bundle by name only (core/workitem.go's default:
+// sha256Hex("bundle-name:"+name)). A pinned digest equal to it is not a
+// content pin, so materialization cannot verify against it.
+func nameDerivedDigest(name string) string {
+	sum := sha256.Sum256([]byte("bundle-name:" + name))
+	return hex.EncodeToString(sum[:])
+}
+
+// bundleEntries walks the copied bundle tree and derives the digest input
+// set: one FileEntry per regular file, path slash-separated relative to
+// the bundle root, SHA-256 over the LF-normalized content, byte length of
+// the normalized content.
+func bundleEntries(root string) ([]workflow.FileEntry, error) {
+	var out []workflow.FileEntry
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(root, p)
+		if rerr != nil {
+			return rerr
+		}
+		raw, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		norm := bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
+		sum := sha256.Sum256(norm)
+		out = append(out, workflow.FileEntry{
+			Path:   filepath.ToSlash(rel),
+			Sha256: hex.EncodeToString(sum[:]),
+			Bytes:  uint64(len(norm)),
+		})
+		return nil
+	})
+	return out, err
 }
 
 func copyTree(src, dst string) error {

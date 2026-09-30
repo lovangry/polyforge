@@ -244,8 +244,8 @@ func soon(t *testing.T, bound time.Duration, what string, cond func() bool) {
 }
 
 // eventsOf reads the monitor's ring, filtered by kind.
-func eventsOf(m *Monitor, kind string) []protocolEvent {
-	var out []protocolEvent
+func eventsOf(m *Monitor, kind string) []protocol.EventEntry {
+	var out []protocol.EventEntry
 	for _, e := range m.log.Since(m.wi.WorkItem) {
 		if e.Kind == kind {
 			out = append(out, e)
