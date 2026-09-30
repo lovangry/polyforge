@@ -132,19 +132,41 @@ func nullable(v *string) string {
 // Human renderers.
 // ---------------------------------------------------------------------------
 
+// wiRow renders the shared per-WI cells (no segment).
+func wiRow(it api.WorkItem) []string {
+	slug := it.Slug
+	if slug == "" {
+		slug = it.ID
+	}
+	return []string{
+		slug, it.Status, it.Priority, nullable(it.BundleName), truncate(it.Goal, 60),
+	}
+}
+
 // renderWITable renders a WI list table.
 func renderWITable(w io.Writer, items []api.WorkItem) {
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
-		slug := it.Slug
-		if slug == "" {
-			slug = it.ID
-		}
-		rows = append(rows, []string{
-			slug, it.Status, it.Priority, nullable(it.BundleName), truncate(it.Goal, 60),
-		})
+		rows = append(rows, wiRow(it))
 	}
 	printTable(w, []string{"SLUG", "STATUS", "PRIORITY", "BUNDLE", "GOAL"}, rows)
+}
+
+// renderReadyWITable renders the ready-queue table: items first, then
+// unclassified, with a SEGMENT column carrying the wire segment key
+// ("items" / "unclassified"). Both segments are takeable.
+func renderReadyWITable(w io.Writer, items, unclassified []api.WorkItem) {
+	segments := []struct {
+		key string
+		wis []api.WorkItem
+	}{{"items", items}, {"unclassified", unclassified}}
+	rows := make([][]string, 0, len(items)+len(unclassified))
+	for _, seg := range segments {
+		for _, it := range seg.wis {
+			rows = append(rows, append(wiRow(it), seg.key))
+		}
+	}
+	printTable(w, []string{"SLUG", "STATUS", "PRIORITY", "BUNDLE", "GOAL", "SEGMENT"}, rows)
 }
 
 // renderWIDetail renders the detail record.
