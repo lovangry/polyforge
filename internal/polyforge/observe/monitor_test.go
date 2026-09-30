@@ -1,7 +1,8 @@
 package observe
 
 // monitor_test.go: the detection surface — death, hang (probe-confirmed),
-// provider errors (storm-guarded), recovery lifecycle — plus the
+// provider errors (fatal → instant recovery; non-fatal → storm-guarded
+// chain), the idle watchdog (F5), recovery lifecycle — plus the
 // select-never-blocks proofs.
 //
 // The non-blocking tests are the MUTATION-HONEST kind: the fake handle's
@@ -133,27 +134,26 @@ func TestHangProbeClearedRestartsWindow(t *testing.T) {
 	}
 }
 
-func TestProviderErrorNeedsTwoConsecutiveStrikes(t *testing.T) {
+func TestProviderErrorNonFatalChainStillStormGuarded(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, ob := newTestMonitor(t, h, nil)
 	m.writeExec(t, 1, "code")
 
-	const detail = "upstream API error (503)"
-	strike := func() {
-		feed(h, fxTurnStart)
-		feed(h, fxMsgEndErr(detail))
-		feed(h, fxTurnEndErr(detail))
-	}
-	// Strike one: an immediate infra_incident event, but NO recovery —
-	// one failed turn may be a transient the harness retries.
-	strike()
+	// NON-FATAL mid-turn reports (the turn has not ended on them):
+	// each becomes an immediate infra_incident event, and the recovery
+	// decision stays storm-guarded — the same step needs two consecutive
+	// incidents before one WINeedsRecovery goes out.
+	feed(h, fxTurnStart)
+	feed(h, fxMsgEndErr("upstream API error (503)"))
 	soon(t, 500*time.Millisecond, "first incident event", func() bool {
 		return len(eventsOf(m, EvInfraIncident)) >= 1
 	})
-	expectNoOB(t, ob, 150*time.Millisecond, "one strike must not recover")
+	expectNoOB(t, ob, 150*time.Millisecond, "one non-fatal report must not recover")
 
-	// Strike two, same step, no clean turn between → WINeedsRecovery.
-	strike()
+	// Second consecutive report in the same turn, a different error
+	// text (the dedup keeps one report per failure): the chain reaches
+	// two and the storm guard releases ONE recovery.
+	feed(h, fxMsgEndErr("upstream API error (429)"))
 	msg := waitOB(t, ob, "WINeedsRecovery(provider_error)")
 	if msg.Reason != protocol.RecoverProviderError {
 		t.Fatalf("reason: got %s", msg.Reason)
@@ -165,27 +165,212 @@ func TestProviderErrorCleanTurnResetsChain(t *testing.T) {
 	m, ob := newTestMonitor(t, h, nil)
 	m.writeExec(t, 1, "code")
 
-	const detail = "upstream API error (503)"
-	strike := func() {
+	// A single NON-FATAL report per turn, each turn ending clean: the
+	// clean turn_end resets the chain, so the strikes never accumulate.
+	strike := func(detail string) {
 		feed(h, fxTurnStart)
 		feed(h, fxMsgEndErr(detail))
-		feed(h, fxTurnEndErr(detail))
-	}
-	clean := func() {
-		feed(h, fxTurnStart)
 		feed(h, fxMsgEndStop)
 		feed(h, fxTurnEndStop)
 	}
-
-	strike()
+	strike("upstream API error (503)")
 	soon(t, 500*time.Millisecond, "first incident event", func() bool {
 		return len(eventsOf(m, EvInfraIncident)) >= 1
 	})
-	// A successful turn between the failures breaks the chain: the
-	// next failure starts a NEW chain at strike one.
-	clean()
-	strike()
-	expectNoOB(t, ob, 250*time.Millisecond, "strike after a clean turn must not recover")
+	strike("upstream API error (503)")
+	expectNoOB(t, ob, 250*time.Millisecond, "a clean turn between failures starts a new chain; two isolated strikes never accumulate")
+}
+
+func TestFatalProviderErrorRecoversInstantly(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, nil)
+	m.writeExec(t, 1, "code")
+
+	const detail = "upstream API error (503)"
+	// ONE full failed turn — the turn ENDS on the provider error
+	// (turn_end stopReason=error) — is the whole judgment: the F5
+	// pilot shape. The harness's RPC session does not self-retry
+	// after a fatal turn error, so waiting for a second consecutive
+	// incident is waiting for an event that never comes.
+	feed(h, fxTurnStart)
+	feed(h, fxMsgEndErr(detail))
+	feed(h, fxTurnEndErr(detail))
+	msg := waitOB(t, ob, "WINeedsRecovery(provider_error)")
+	if msg.Reason != protocol.RecoverProviderError {
+		t.Fatalf("reason: got %s", msg.Reason)
+	}
+	soon(t, 500*time.Millisecond, "needs_recovery event written", func() bool {
+		return len(eventsOf(m, EvNeedsRecovery)) == 1
+	})
+
+	// Storm guard: the same attempt stays silent — a further fatal
+	// turn is logged as an incident but never produces a second
+	// recovery (“已发后静默到恢复完成”).
+	feed(h, fxTurnStart)
+	feed(h, fxMsgEndErr(detail))
+	feed(h, fxTurnEndErr(detail))
+	expectNoOB(t, ob, 250*time.Millisecond, "fatal recovery fires exactly once per attempt")
+}
+
+// ---------------------------------------------------------------------------
+// idle watchdog (F5): quiet stream with NO turn in flight → probe →
+// recover-or-restart, with the needs_input and RECOVERING exemptions.
+
+func TestIdleWatchdogRecoversOnce(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.IdleWindow = 40 * time.Millisecond
+	})
+	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
+		if msg.Method != protocol.ControlProbe {
+			t.Errorf("idle watchdog must send pf/probe, got %s", msg.Method)
+		}
+		return protocol.ControlAck{}, errors.New("no ack: session wedged")
+	})
+
+	// A turn completes cleanly, then the stream goes quiet with NO turn
+	// in flight — outside the hang window by definition. Past the idle
+	// window the watchdog probes; the probe goes unacknowledged.
+	feed(h, fxTurnStart)
+	feed(h, fxMsgEndStop)
+	feed(h, fxTurnEndStop)
+
+	msg := waitOB(t, ob, "WINeedsRecovery(idle)")
+	if msg.Reason != protocol.RecoverIdle {
+		t.Fatalf("reason: got %s, want %s", msg.Reason, protocol.RecoverIdle)
+	}
+	if !hasIncidentKind(m, IdleSuspected) {
+		t.Fatal("idle_suspect infra incident must be written")
+	}
+
+	// Storm guard: the recovery fired once and only once — RECOVERING
+	// suppresses every further idle probe and signal for this attempt.
+	expectNoOB(t, ob, 150*time.Millisecond, "idle recovery fires exactly once")
+	if h.sentCount() != 1 {
+		t.Fatalf("exactly one confirmation probe, got %d", h.sentCount())
+	}
+}
+
+func TestIdleProbeAckedNoRecovery(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.IdleWindow = 40 * time.Millisecond
+	})
+	var probes atomic.Int64
+	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
+		probes.Add(1)
+		return protocol.ControlAck{Method: msg.Method, OK: true}, nil
+	})
+
+	feed(h, fxTurnStart)
+	feed(h, fxMsgEndStop)
+	feed(h, fxTurnEndStop)
+
+	// The window expires, the probe is answered: the agent is alive but
+	// on legal slow work — the window restarts and nothing recovers.
+	// No probe storm either: a restarted window spaces the probes.
+	time.Sleep(150 * time.Millisecond)
+	if probes.Load() == 0 {
+		t.Fatal("the probe must have been sent after the idle window")
+	}
+	if probes.Load() > 4 {
+		t.Fatalf("probe storm: %d probes in one restarted window set", probes.Load())
+	}
+	expectNoOB(t, ob, 100*time.Millisecond, "a live-but-quiet session never recovers")
+	if !hasIncidentKind(m, IdleCleared) {
+		t.Fatal("idle_cleared must be written when the probe is acknowledged")
+	}
+}
+
+func TestIdleWatchdogRecoversWithNoStream(t *testing.T) {
+	h := newFakeHandle("att_1")
+	_, ob := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.IdleWindow = 40 * time.Millisecond
+	})
+	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
+		return protocol.ControlAck{}, errors.New("no ack: session wedged")
+	})
+
+	// The starved-stream shape: not ONE record ever arrived (the idle
+	// anchor — set at attach — is the window baseline), no turn is in
+	// flight. Past the window: probe, no ack, one recovery.
+	msg := waitOB(t, ob, "WINeedsRecovery(idle)")
+	if msg.Reason != protocol.RecoverIdle {
+		t.Fatalf("reason: got %s, want %s", msg.Reason, protocol.RecoverIdle)
+	}
+	expectNoOB(t, ob, 150*time.Millisecond, "idle recovery fires exactly once")
+	if h.sentCount() != 1 {
+		t.Fatalf("exactly one confirmation probe, got %d", h.sentCount())
+	}
+}
+
+func TestIdleExemptWhilePendingQuestion(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.IdleWindow = 40 * time.Millisecond
+	})
+
+	feed(h, fxTurnStart)
+	feed(h, fxMsgEndStop)
+	feed(h, fxTurnEndStop)
+
+	// Arm a pending question (flush(needs_input)): waiting for a human
+	// answer is a designed standstill — never idle.
+	resp := make(chan protocol.FlushAck, 1)
+	m.flushCh <- FlushCall{
+		Req: protocol.FlushRequest{
+			WorkItem:   "wi_test",
+			AttemptID:  "att_1",
+			Reason:     protocol.FlushNeedsInput,
+			QuestionID: "q_1",
+			Question:   "which way?",
+			Step:       "code",
+		},
+		Resp: resp,
+	}
+	select {
+	case <-resp:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flush(needs_input) was never answered")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	if h.sentCount() != 0 {
+		t.Fatalf("no idle probe while a question is pending, got %d", h.sentCount())
+	}
+	expectNoOB(t, ob, 100*time.Millisecond, "needs_input is exempt from the idle judgment")
+}
+
+func TestIdleSuppressedWhileRecovering(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.IdleWindow = 40 * time.Millisecond
+	})
+
+	// Enter RECOVERING deterministically: one fatal provider error is an
+	// instant recovery, no wall-clock involved.
+	feed(h, fxTurnStart)
+	feed(h, fxMsgEndErr("upstream API error (503)"))
+	feed(h, fxTurnEndErr("upstream API error (503)"))
+	msg := waitOB(t, ob, "WINeedsRecovery(provider_error)")
+	if msg.Reason != protocol.RecoverProviderError {
+		t.Fatalf("reason: got %s", msg.Reason)
+	}
+
+	// A clean turn closes the stream state (no turn in flight, fresh
+	// last record), then the idle window elapses: RECOVERING suppresses
+	// the idle judgment — no probe, no second signal.
+	feed(h, fxTurnStart)
+	feed(h, fxMsgEndStop)
+	feed(h, fxTurnEndStop)
+	time.Sleep(150 * time.Millisecond)
+	if h.sentCount() != 0 {
+		t.Fatalf("no idle probe while RECOVERING, got %d probes", h.sentCount())
+	}
+	expectNoOB(t, ob, 100*time.Millisecond, "RECOVERING suppresses the idle watchdog")
+	if hasIncidentKind(m, IdleSuspected) {
+		t.Fatal("no idle_suspect may be written while RECOVERING")
+	}
 }
 
 // ---------------------------------------------------------------------------

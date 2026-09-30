@@ -142,8 +142,11 @@ type wrapResult struct {
 
 // monitorCfg carries the tunables (defaults in observe.go Config).
 type monitorCfg struct {
-	PollInterval      time.Duration
-	HangWindow        time.Duration
+	PollInterval time.Duration
+	HangWindow   time.Duration
+	// IdleWindow bounds the F5 idle watchdog (zero = disabled — a
+	// zero window would fire on every tick; production default 10min).
+	IdleWindow        time.Duration
 	ProbeTimeout      time.Duration
 	AnswerAckWindow   time.Duration
 	PushRetryBackoff  time.Duration
@@ -220,6 +223,13 @@ type Monitor struct {
 	probeInFlight bool
 	probeDone     chan probeResult
 	hangAnchor    time.Time // probe-cleared window restart
+	// idle detection (F5). idleAnchor is the idle window's baseline
+	// when the stream has produced no progress record yet (set at
+	// attach/recovery adoption) and its restart point after a probe the
+	// agent answered; probeIdle remembers WHICH criterion armed the
+	// in-flight probe so the result lands as the right recovery reason.
+	idleAnchor time.Time
+	probeIdle  bool
 
 	// live-transcript sync state (F3; monitor goroutine only — the push
 	// sub-goroutines receive the values as arguments, never over m).
@@ -298,6 +308,7 @@ func (m *Monitor) onTick() {
 	m.releaseDeferredFlush()
 	m.drainIncidents()
 	m.checkHang()
+	m.checkIdle()
 	m.pollExecution()
 	m.schedulePush()
 	m.checkBackpressure()
@@ -322,20 +333,56 @@ func (m *Monitor) releaseDeferredFlush() {
 }
 
 // ---------------------------------------------------------------------------
-// detection: provider errors (incident chain → storm-guarded recovery)
+// detection: provider errors (fatal → instant recovery; the chain
+// stays the storm-guarded backstop for non-fatal reports)
 
-// drainIncidents is the provider-error detection surface: every
+// drainIncidents is the provider-error detection surface. Every
 // classified incident becomes an IMMEDIATE infra_incident event (the
 // operator learns about a dead provider in the same tick the harness
-// reported it), while the RECOVERY decision is storm-guarded: the same
-// step needs two consecutive incidents — counted in stream order —
-// before one WINeedsRecovery goes out.
+// reported it — v0 #48's "provider-error instant incidents"), while
+// the RECOVERY decision splits on fatality:
+//
+//   - FATAL (the turn ENDED on the error: turn_end stopReason=error) →
+//     WINeedsRecovery fires on THIS single event, outside the
+//     storm-count chain. The v1 pilot (F5) proved the decision must
+//     be as instant as the news: a real harness's RPC session does
+//     NOT self-retry after a fatal turn error — the turn is wrongly
+//     terminated, nobody sends the next prompt, and the session sits
+//     permanently idle (35+ minutes observed on the real machine).
+//     The storm guard's "2 consecutive incidents in the same step"
+//     then waits for a second event that never comes, and the hang
+//     window is blind too (its criterion is silence WITH a turn in
+//     flight; the turn already ended). One fatal event is the whole
+//     judgment.
+//   - non-fatal (a mid-turn report the harness may still recover
+//     from) → the existing event face only, plus the storm-guarded
+//     chain: the same step needs two consecutive incidents — counted
+//     in stream order — before one WINeedsRecovery goes out.
 func (m *Monitor) drainIncidents() {
+	fatalDetail := ""
 	for _, in := range m.stream.drain() {
 		_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
 			"kind": in.Kind, "detail": in.Detail, "fatal": in.Fatal,
 			"at": in.At.UTC().Format(time.RFC3339Nano),
 		})
+		if in.Fatal && fatalDetail == "" {
+			fatalDetail = in.Detail
+		}
+	}
+	if fatalDetail != "" {
+		// Single-event recovery: the fatal incident never joins the
+		// chain arithmetic (already judged here); reset it so the
+		// drained reports cannot re-fire the storm path. The storm guard
+		// in needRecovery keeps this attempt silent until recovery lands.
+		m.stream.resetChain()
+		step := m.currentStep
+		if step == "" {
+			step = "-"
+		}
+		m.needRecovery(protocol.RecoverProviderError,
+			fmt.Sprintf("step %s: fatal provider error ended the turn: %s",
+				step, fatalDetail))
+		return
 	}
 	if m.stream.chainValue() >= 2 {
 		m.stream.resetChain()
@@ -421,6 +468,7 @@ func (m *Monitor) checkHang() {
 		return
 	}
 	m.probeInFlight = true
+	m.probeIdle = false
 	_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
 		"kind": HangSuspected,
 		"detail": fmt.Sprintf("stream silent past the %.0fs window with a turn in flight; sending liveness probe",
@@ -441,14 +489,97 @@ func (m *Monitor) checkHang() {
 	}()
 }
 
+// checkIdle is the F5 idle watchdog — the general backstop the hang
+// criterion is structurally blind to. v0 #44's runtime watchdog judged
+// ACTIVITY (procfs I/O/CPU motion), so it caught an agent that was
+// merely idle; the v1 port kept only the in-flight criterion (stream
+// silence WITH a turn open) and lost that layer. The pilot's F5 shape
+// is exactly the hole: a fatal provider error ENDS the turn (fatal
+// recovery now catches that on the spot), but any other path that
+// leaves the session running with no open turn and no arriving prompt
+// — a wrongly-terminated turn, a lost driver — leaves the stream
+// quiet with turnDepth 0, which no in-flight window ever covers.
+// Criterion: no progress record AND no in-flight turn for longer than
+// IdleWindow ⇒ liveness probe (the same probe mechanism, the same
+// ProbeTimeout bound) ⇒ no ack ⇒ WINeedsRecovery(idle); ack ⇒ the
+// window restarts and nothing recovers (the agent is on legal slow
+// work). Exemptions: a pending question (needs_input is a designed
+// standstill — waiting for a human answer is not idleness) and every
+// suppressed state (RECOVERING already shipped its one signal; the
+// storm semantics are unchanged).
+func (m *Monitor) checkIdle() {
+	if m.cfg.IdleWindow <= 0 {
+		return // disabled: a zero window would fire on every tick
+	}
+	if m.probeInFlight {
+		return // one probe at a time, whichever criterion armed it
+	}
+	hb := m.stream.heartbeat()
+	if hb.InFlight {
+		return // a turn is open: the hang criterion owns that silence
+	}
+	eff := hb.LastRecordAt
+	if m.idleAnchor.After(eff) {
+		eff = m.idleAnchor // pre-first-record baseline / probe-cleared restart
+	}
+	if eff.IsZero() || time.Since(eff) < m.cfg.IdleWindow {
+		return
+	}
+	m.stateMu.Lock()
+	pending := m.pending != nil
+	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing
+	m.stateMu.Unlock()
+	if pending {
+		return // needs_input: waiting for a human answer is designed stillness
+	}
+	if suppressed {
+		return
+	}
+	m.probeInFlight = true
+	m.probeIdle = true
+	_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
+		"kind": IdleSuspected,
+		"detail": fmt.Sprintf("no stream record and no turn in flight past the %.0fs idle window; sending liveness probe",
+			m.cfg.IdleWindow.Seconds()),
+	})
+	handle := m.handle // captured: no race with a concurrent recovery
+	nonce, _ := randomNonce()
+	ctrlSeq := atomic.AddInt64(&m.ctrl, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.ProbeTimeout)
+		defer cancel()
+		ack, err := handle.SendControl(ctx, protocol.ControlMsg{
+			Method: protocol.ControlProbe, Nonce: nonce, Seq: ctrlSeq,
+		})
+		m.probeDone <- probeResult{ack: ack, err: err}
+	}()
+}
+
 func (m *Monitor) onProbeResult(pr probeResult) {
 	m.probeInFlight = false
+	idleProbe := m.probeIdle
+	m.probeIdle = false
 	if pr.err == nil && pr.ack.OK {
+		if idleProbe {
+			// The agent answered with no turn open: legal slow work or
+			// a live-but-quiet session. The idle window restarts;
+			// nothing recovers.
+			m.idleAnchor = time.Now()
+			_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
+				"kind": IdleCleared, "detail": "liveness probe acknowledged with no turn in flight; idle window restarted",
+			})
+			return
+		}
 		// The agent answered: kill cancelled, window restarts.
 		m.hangAnchor = time.Now()
 		_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
 			"kind": HangCleared, "detail": "liveness probe acknowledged; hang window restarted",
 		})
+		return
+	}
+	if idleProbe {
+		m.needRecovery(protocol.RecoverIdle,
+			"no stream record and no turn in flight past the idle window; liveness probe failed")
 		return
 	}
 	m.needRecovery(protocol.RecoverHang, "stream silent with turn in flight; liveness probe failed")
@@ -477,7 +608,9 @@ func (m *Monitor) onRecovered(at Attach) {
 	m.exitCh = at.Handle.Exit()
 	m.stream = newStreamState()
 	m.probeInFlight = false
+	m.probeIdle = false
 	m.hangAnchor = time.Now()
+	m.idleAnchor = time.Now() // the successor derivation gets a fresh idle baseline
 	// The successor derivation carries its own transcript facts (its
 	// declared capsule path, its live file, its spawn moment): adopt
 	// them for the sync points that follow (F3).

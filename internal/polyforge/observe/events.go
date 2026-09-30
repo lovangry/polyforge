@@ -25,7 +25,7 @@ import (
 // Event kinds emitted by the observe lane. A closed set: execution
 // progress (job lifecycle), infrastructure news (the infra_incident
 // family, payload kind ∈ {provider_error, retry, hang_suspected,
-// hang_cleared}) and the push bookkeeping.
+// hang_cleared, idle_suspect, idle_cleared}) and the push bookkeeping.
 const (
 	EvJobStarted       = "job_started"
 	EvAgentRecovered   = "wi_agent_rederived"
@@ -59,6 +59,11 @@ const (
 	IncidentRetry         = "retry"
 	HangSuspected         = "hang_suspected"
 	HangCleared           = "hang_cleared"
+	// IdleSuspected/IdleCleared are the F5 idle watchdog's probe
+	// bookkeeping: the same confirmation-probe in/out shape as the hang
+	// pair, fired when the stream is quiet with NO turn in flight.
+	IdleSuspected = "idle_suspect"
+	IdleCleared   = "idle_cleared"
 )
 
 // RingCap bounds the per-WI live view served over observe.
