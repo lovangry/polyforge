@@ -63,6 +63,8 @@ var commands = []*Command{
 	cmdProjects,
 	cmdBackup,
 	cmdRotateSecret,
+	cmdMigrateMemories,
+	cmdMigrateWorkItems,
 	cmdDaemon,
 }
 
@@ -240,8 +242,12 @@ func printUsage(w io.Writer) {
 	for _, c := range commands[13:18] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
+	fmt.Fprintln(w, "Migration (admin; one-shot v0→v1 cutover):")
+	for _, c := range commands[18:20] {
+		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
+	}
 	fmt.Fprintln(w, "Process:")
-	for _, c := range commands[18:] {
+	for _, c := range commands[20:] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w)

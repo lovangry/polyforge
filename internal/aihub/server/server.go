@@ -88,6 +88,7 @@ func (s *Server) routes() {
 	m.HandleFunc("PATCH /api/v1/projects/{id}", s.auth(s.hPatchProject))
 	m.HandleFunc("POST /api/v1/projects/{id}/rotate-identifier", s.authAdmin(s.hRotateIdentifier))
 	m.HandleFunc("POST /api/v1/admin/backup", s.authAdmin(s.hBackup))
+	m.HandleFunc("POST /api/v1/admin/import-work-item", s.authAdmin(s.hImportWorkItem))
 	m.HandleFunc("POST /api/v1/service/rotate-secret", s.authAdmin(s.hRotateSecret))
 
 	// Git proxy (own auth: attempt-scoped Basic credential).
@@ -1061,6 +1062,28 @@ func (s *Server) hBackup(w http.ResponseWriter, r *http.Request, idn *identity) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"backup": name})
+}
+
+// hImportWorkItem is the migration-only record import (admin face; see
+// core/import.go for the face constraints). A same-id re-import answers
+// 200 with outcome=skipped-existing — idempotent re-runs count skips, they
+// do not error.
+func (s *Server) hImportWorkItem(w http.ResponseWriter, r *http.Request, idn *identity) {
+	var req core.ImportRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := s.WIs.Import(req)
+	if err != nil {
+		if core.IsImportAlreadyExists(err) {
+			writeJSON(w, http.StatusOK, &core.ImportResult{Outcome: core.ImportSkipped})
+			return
+		}
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, res)
 }
 
 func (s *Server) hRotateSecret(w http.ResponseWriter, r *http.Request, idn *identity) {
