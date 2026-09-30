@@ -407,6 +407,10 @@ func (m *Monitor) attach(at Attach) {
 	m.attemptID = at.Msg.AttemptID
 	m.stateMu.Unlock()
 	m.setTranscriptInfo(at.WI)
+	// F9: the attach-time answer redelivery (a no-op for a fresh
+	// monitor — the ledger is empty — but the same landing point for
+	// every successor).
+	m.redeliverAwaiting()
 }
 
 // Events exposes the log (diagnostic/tests).

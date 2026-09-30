@@ -136,6 +136,105 @@ func TestVerbRecallRequestShape(t *testing.T) {
 	}
 }
 
+// TestVerbRecallLimitContract: --limit is the CLI's product contract —
+// the default 20 is sent when the flag is omitted, and 1..200 is
+// validated locally so an out-of-range value fails loudly with NO
+// request sent. (The endpoint's own 50 default stays a wire backstop
+// for other callers and is not the CLI's business.)
+func TestVerbRecallLimitContract(t *testing.T) {
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"items":[],"total":0}`)
+	})
+	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+
+	// Omitted --limit: the default 20 is sent explicitly.
+	if code, _, stderr := runPf(t, env, "recall", "flaky build"); code != 0 {
+		t.Fatalf("recall default limit: code=%d stderr=%s", code, stderr)
+	}
+	if got := rec.last(); !strings.Contains(got.Path, "limit=20") {
+		t.Errorf("omitted --limit: path = %s, want limit=20", got.Path)
+	}
+
+	// Both ends of the in-range contract pass through unchanged.
+	for _, n := range []string{"1", "200"} {
+		if code, _, stderr := runPf(t, env, "recall", "flaky build", "--limit", n); code != 0 {
+			t.Fatalf("recall --limit %s: code=%d stderr=%s", n, code, stderr)
+		}
+		if got := rec.last(); !strings.Contains(got.Path, "limit="+n+"&") {
+			t.Errorf("--limit %s: path = %s", n, got.Path)
+		}
+	}
+
+	// Out of range (0, negatives, >200): loud local error, non-zero
+	// exit, and no request on the wire.
+	for _, n := range []string{"0", "-3", "201"} {
+		before := len(rec.all())
+		code, _, stderr := runPf(t, env, "recall", "flaky build", "--limit", n)
+		if code == 0 {
+			t.Fatalf("--limit %s must exit non-zero", n)
+		}
+		if !strings.Contains(stderr, "recall: --limit must be 1..200") {
+			t.Errorf("--limit %s stderr = %q", n, stderr)
+		}
+		if after := len(rec.all()); after != before {
+			t.Errorf("--limit %s sent a request (%d → %d)", n, before, after)
+		}
+	}
+}
+
+// TestVerbRecallTypeForms: --type accepts exactly three forms — a
+// trailing .* prefix (passed through for the store's prefix
+// interpretation), a lone * (all types: no type filter sent at all),
+// and a plain value (exact match). Any other * placement fails loudly
+// with no request sent.
+func TestVerbRecallTypeForms(t *testing.T) {
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"items":[],"total":0}`)
+	})
+	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+
+	// Trailing .*: sent through (the wire percent-encodes the *).
+	if code, _, stderr := runPf(t, env, "recall", "q", "--type", "experience.*"); code != 0 {
+		t.Fatalf("recall --type experience.*: code=%d stderr=%s", code, stderr)
+	}
+	if got := rec.last(); !strings.Contains(got.Path, "type=experience.%2A") {
+		t.Errorf("--type experience.*: path = %s", got.Path)
+	}
+
+	// Plain value: exact match, sent as-is.
+	if code, _, stderr := runPf(t, env, "recall", "q", "--type", "experience.debug"); code != 0 {
+		t.Fatalf("recall --type experience.debug: code=%d stderr=%s", code, stderr)
+	}
+	if got := rec.last(); !strings.Contains(got.Path, "type=experience.debug") {
+		t.Errorf("--type experience.debug: path = %s", got.Path)
+	}
+
+	// Lone *: all types — equivalent to omitting --type entirely.
+	if code, _, stderr := runPf(t, env, "recall", "q", "--type", "*"); code != 0 {
+		t.Fatalf("recall --type *: code=%d stderr=%s", code, stderr)
+	}
+	if got := rec.last(); strings.Contains(got.Path, "type=") {
+		t.Errorf("--type *: path = %s, want no type filter sent", got.Path)
+	}
+
+	// Every other * placement: loud local refusal, no request.
+	for _, bad := range []string{"*.debug", "exp*rience", "experience*", "experience.**", ".*"} {
+		before := len(rec.all())
+		code, _, stderr := runPf(t, env, "recall", "q", "--type", bad)
+		if code == 0 {
+			t.Fatalf("--type %q must exit non-zero", bad)
+		}
+		if !strings.Contains(stderr, "recall: --type") {
+			t.Errorf("--type %q stderr = %q", bad, stderr)
+		}
+		if after := len(rec.all()); after != before {
+			t.Errorf("--type %q sent a request (%d → %d)", bad, before, after)
+		}
+	}
+}
+
 func TestVerbSubmitPrecheckRefusesTerminal(t *testing.T) {
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {

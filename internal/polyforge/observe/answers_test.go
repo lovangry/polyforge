@@ -145,12 +145,12 @@ func TestAnswerRelayBindingAndIdentity(t *testing.T) {
 }
 
 func TestAnswerSurvivesAgentDeathForRecoveredAttempt(t *testing.T) {
-	// The recovery projection: an answer delivered-but-unconsumed (or not
-	// delivered at all) before an agent death stays visible. The monitor
-	// never re-sends pf/answer to the recovered handle — Runtime injects
-	// the pending question from execution.json as the new agent's opening
-	// context — but the JobView keeps showing it and the CLI may
-	// re-submit.
+	// The recovery projection (F9 semantics): an answer delivered but
+	// never consumed before an agent death stays re-deliverable in the
+	// ledger, and the monitor now re-sends it to the recovered handle
+	// AUTOMATICALLY at the RTRecovered landing — the pending question
+	// stays visible until that re-delivery is consumed. The manual CLI
+	// re-submit path still works on top (idempotently).
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, nil)
 	armQuestion(t, m, "q1")
@@ -164,14 +164,28 @@ func TestAnswerSurvivesAgentDeathForRecoveredAttempt(t *testing.T) {
 	m.rtCh <- Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", AttemptID: "att_2"}, Handle: h2}
 	soon(t, 500*time.Millisecond, "recovery adopted", func() bool { return m.currentAttempt() == "att_2" })
 
-	// The pending question is still projected for the new attempt...
-	view := m.JobView()
-	if view.Pending == nil || view.Pending.ID != "q1" {
-		t.Fatalf("pending question must survive recovery, got %+v", view.Pending)
+	// The awaiting answer was re-delivered to the NEW handle automatically
+	// and consumed there: the pending question clears with it.
+	soon(t, 2*time.Second, "auto re-delivery to the recovered handle", func() bool {
+		return len(sentAnswers(h2)) == 1
+	})
+	if got := sentAnswers(h2); got[0].ID != "q1" {
+		t.Fatalf("re-delivered relay bound to the wrong question: %+v", got[0])
 	}
-	// ...and a re-submitted answer_id reaches the NEW handle.
-	h2.setSend(nil)
+	soon(t, 2*time.Second, "re-delivered answer never settled consumed", func() bool {
+		return len(m.ledger.Awaiting(m.wi.WorkItem)) == 0
+	})
+	view := m.JobView()
+	if view.Pending != nil {
+		t.Fatalf("pending must clear once the re-delivered answer is consumed: %+v", view.Pending)
+	}
+
+	// The manual re-submit path is unchanged: the finalized answer_id
+	// replays its outcome verbatim and never re-delivers.
 	if err := submitAnswer(m, relayFor("q1", "a1")); err != nil {
-		t.Fatalf("re-delivery to recovered handle: %v", err)
+		t.Fatalf("manual re-submit of the finalized answer: %v", err)
+	}
+	if len(sentAnswers(h2)) != 1 {
+		t.Fatalf("a finalized answer_id must never re-deliver")
 	}
 }

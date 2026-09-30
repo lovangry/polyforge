@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
@@ -377,5 +378,53 @@ func TestHTTPFlushRecoveryWindowNotStale(t *testing.T) {
 		if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_ATTEMPT")) {
 			t.Fatalf("older id %q after recovery: %d %s, want 409 STALE_ATTEMPT", stale, code, body)
 		}
+	}
+}
+
+// TestHTTPFlushNeedsInputEmptyQuestionIDFailClosed (F9): a needs_input
+// flush without a question id can never be answered — the relay binds on
+// the id — and an empty id accepted here mints an unanswerable hanging
+// pending. The entry refuses it DAEMON-400 before the monitor ever sees
+// the call; the live attempt keeps working afterwards.
+func TestHTTPFlushNeedsInputEmptyQuestionIDFailClosed(t *testing.T) {
+	h := newFakeHandle("att_cur")
+	hs := newHarness(t)
+	hs.start(t, h)
+	soon(t, time.Second, "job registered", func() bool {
+		code, _ := hs.get(t, "/jobs/wi_http/observe")
+		return code == http.StatusOK
+	})
+
+	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
+		WorkItem: "wi_http", AttemptID: "att_cur",
+		Reason: protocol.FlushNeedsInput, QuestionID: "", Question: "which?",
+	}, nil)
+	if code != http.StatusBadRequest {
+		t.Fatalf("empty question_id flush: %d %s, want 400", code, body)
+	}
+	if !bytes.Contains(body, []byte(api.ErrDaemonBadInput)) {
+		t.Fatalf("refusal must carry DAEMON-400: %s", body)
+	}
+
+	// Fail-closed, not fail-deaf: no pending question was minted and the
+	// live attempt's own needs_input flush still works.
+	_, body = hs.get(t, "/jobs/wi_http/observe")
+	var view protocol.JobView
+	if err := json.Unmarshal(body, &view); err != nil {
+		t.Fatalf("view decode: %v (%s)", err, body)
+	}
+	if view.Pending != nil {
+		t.Fatalf("the refused flush must not mint a pending: %+v", view.Pending)
+	}
+	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
+		WorkItem: "wi_http", AttemptID: "att_cur",
+		Reason: protocol.FlushNeedsInput, QuestionID: "q_live", Question: "which?",
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("live needs_input flush after the refusal: %d %s", code, body)
+	}
+	var ack protocol.FlushAck
+	if err := json.Unmarshal(body, &ack); err != nil || !ack.OK {
+		t.Fatalf("live needs_input ack: %v (%s)", err, body)
 	}
 }
