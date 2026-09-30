@@ -14,6 +14,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -41,6 +42,11 @@ type statusJob struct {
 	// human must never read as merely busy).
 	NeedsInput bool   `json:"needs_input,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
+	// LastProgressAgoSec is the F15c owner face: whole seconds since the
+	// job's stream last proved AGENT progress (nil = no progress record
+	// yet — the CLI renders "-"). UI-noise records never refresh it, so
+	// a wedged-but-chattering job reads as stale, not fresh.
+	LastProgressAgoSec *int64 `json:"last_progress_ago_sec,omitempty"`
 }
 
 type queueStats struct {
@@ -354,8 +360,10 @@ func (d *Daemon) flushGate(next http.Handler) http.Handler {
 func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	// D6: the per-job needs_input projection, derived from the observe
 	// lane's monitors (keyed by the canonical id — the same key
-	// rt.List() reports).
+	// rt.List() reports). F15c rides the same loop: the per-job progress
+	// staleness for the LAST-PROGRESS column.
 	pending := d.obs.PendingInputs()
+	progress := d.obs.ProgressAges()
 	jobs := make([]statusJob, 0, 8)
 	for _, ji := range d.rt.List() {
 		sj := statusJob{
@@ -374,6 +382,10 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 				sj.Status = protocol.JobNeedsInput
 				sj.NeedsInput = true
 			}
+		}
+		if pa, ok := progress[ji.WorkItem]; ok && !pa.LastProgressAt.IsZero() {
+			ago := int64(time.Since(pa.LastProgressAt) / time.Second)
+			sj.LastProgressAgoSec = &ago
 		}
 		jobs = append(jobs, sj)
 	}

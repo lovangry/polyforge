@@ -79,7 +79,7 @@ no active execution). "Ship / deliver / push it" routes to `ship` — the git
 delivery of an already-closed WI's sealed commits — never to `submit`
 (which starts execution).
 
-## Turn-start obligation: surface pending questions (needs_input)
+## Turn-start obligation: surface pending questions (needs_input) and stalled jobs (LAST-PROGRESS)
 
 At the start of **every execution-plane verb turn** — and once at session
 start — run `pf ops status` first. Any job shown with status `needs_input`
@@ -90,6 +90,17 @@ else they asked. A pending question must never wait for the user to happen
 to ask for status: v0's known gap was exactly that needs_input had no
 proactive owner notification, and jobs sat blocked for hours. Answering
 routes to `verbs/answer.md` as usual.
+
+The same status read carries the LAST-PROGRESS column (mm:ss since the
+job's stream last proved **agent progress**; `-` when no progress record
+exists). UI noise does not refresh it — only real turn machinery does. A
+large LAST-PROGRESS (> 10m) on a job whose status is not `needs_input`
+means the job is stalled or wedged: report it to the owner FIRST, with the
+work item id and the staleness figure, before doing anything else — the
+on-machine pilot wedge ran 2.7 hours with zero events and no visible
+surface precisely because nobody looked at progress staleness. (The
+daemon's watchdogs probe and recover such jobs on their own windows, but
+the owner should hear about the stall from you, not from a post-mortem.)
 
 ## The `pf` CLI: shared invocation contract
 

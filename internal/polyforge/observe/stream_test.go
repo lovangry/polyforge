@@ -105,11 +105,100 @@ func TestStreamProviderErrorRepeatsAcrossTurns(t *testing.T) {
 	}
 }
 
-func TestStreamNonRecordNoiseIsProgress(t *testing.T) {
+// TestStreamNonRecordNoiseIsNoise pins the F15 ruling that replaced the
+// old "any output is life" rule: an unparseable stdout line is NOISE —
+// the pilot's wedge weaponized exactly that assumption.
+func TestStreamNonRecordNoiseIsNoise(t *testing.T) {
 	s := newStreamState()
 	s.note([]byte("some non-JSON stdout line\n"))
 	hb := s.heartbeat()
-	if hb.Records != 1 || hb.LastRecordAt.IsZero() {
-		t.Fatal("unknown stream output still proves agent progress")
+	if hb.Noise != 1 || hb.Records != 0 || hb.LastNoiseAt.IsZero() {
+		t.Fatalf("non-record output must classify as noise: %+v", hb)
+	}
+	if !hb.LastProgressAt.IsZero() {
+		t.Fatal("non-record output must never set the progress clock")
+	}
+}
+
+// TestStreamNoiseVsProgressClassification pins the F15 split: only the
+// turn-machinery record families prove progress; the extension UI
+// chatter stream (and any other unclassified record) is noise and never
+// refreshes the progress clock the watchdogs anchor on.
+func TestStreamNoiseVsProgressClassification(t *testing.T) {
+	s := newStreamState()
+
+	// The pilot's double-blind ingredient: extension_ui_request records
+	// streaming continuously out of a background-task extension.
+	const fxExtUI = `{"type":"extension_ui_request","request":{"method":"setStatus"},"seq":1}`
+	s.note([]byte(fxExtUI))
+	hb := s.heartbeat()
+	if hb.LastNoiseAt.IsZero() {
+		t.Fatal("extension UI chatter must set the noise clock")
+	}
+	if !hb.LastProgressAt.IsZero() {
+		t.Fatal("extension UI chatter must NEVER set the progress clock")
+	}
+	if hb.Records != 0 || hb.Noise != 1 {
+		t.Fatalf("classification counts: records=%d noise=%d, want 0/1", hb.Records, hb.Noise)
+	}
+	if !hb.Observable {
+		t.Fatal("a noise-only stream is still observable")
+	}
+	// Noise alone never arms the hang criterion — but with a turn in
+	// flight it must not hold it off either (the double-blind shape).
+	s.note([]byte(fxTurnStart))
+	before := s.heartbeat().LastProgressAt
+	for i := 0; i < 20; i++ {
+		s.note([]byte(fxExtUI))
+	}
+	hb = s.heartbeat()
+	if !hb.InFlight {
+		t.Fatal("turn must be in flight")
+	}
+	if !hb.LastProgressAt.Equal(before) {
+		t.Fatal("a flood of UI noise must not refresh lastProgressAt")
+	}
+	// Silent is time-based; the pin here is that the effective anchor
+	// stayed at the turn-open moment, not at the newest noise record
+	// (the noise flood landed AFTER the turn opened — if it counted,
+	// neither check below would hold).
+	if hb.Silent(before.Add(20*time.Minute), 30*time.Minute, time.Time{}) {
+		t.Fatal("sanity: within the window from the true anchor it is not silent yet")
+	}
+	if !hb.Silent(before.Add(time.Hour), 30*time.Minute, time.Time{}) {
+		t.Fatal("past the window from the true anchor it must be silent despite the noise flood")
+	}
+
+	// Unclassified JSON record types and unparseable lines are noise too.
+	for _, raw := range []string{
+		`{"type":"some_future_record","x":1}`,
+		`not json at all`,
+	} {
+		s.note([]byte(raw))
+	}
+	if got := s.heartbeat().Noise; got != 23 {
+		t.Fatalf("noise count: got %d, want 23", got)
+	}
+	if got := s.heartbeat().Records; got != 1 {
+		t.Fatalf("progress count: got %d, want 1 (turn_start only)", got)
+	}
+
+	// The progress families all move the progress clock.
+	for _, rec := range []string{
+		fxResponse, fxMsgStart, fxTextDelta, fxMsgEndStop, fxTurnEndStop,
+		fxAgentEnd, fxSettled,
+		`{"type":"toolResult","id":"t1"}`,
+	} {
+		s.note([]byte(rec))
+	}
+	hb = s.heartbeat()
+	if hb.Records != 9 {
+		t.Fatalf("progress count: got %d, want 9", hb.Records)
+	}
+	if hb.LastProgressAt.Before(before) || hb.LastProgressAt.IsZero() {
+		t.Fatal("progress records must refresh lastProgressAt")
+	}
+	if hb.InFlight {
+		t.Fatal("turn_end/agent_end/agent_settled must close the turn")
 	}
 }

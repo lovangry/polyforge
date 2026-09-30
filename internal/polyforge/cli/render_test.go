@@ -230,7 +230,8 @@ func TestGoldenStatus(t *testing.T) {
 		MachineID: "m1",
 		Mode:      protocol.ModeDrain,
 		Jobs: []StatusJob{
-			{WorkItemID: "wi_abc", Status: "running", AttemptID: "ra_1", AgentPID: 42},
+			{WorkItemID: "wi_abc", Status: "running", AttemptID: "ra_1", AgentPID: 42,
+				LastProgressAgoSec: int64Ptr(754)},
 			// D6: a job presented as needs_input shows its pending
 			// question's id in the QUESTION column.
 			{WorkItemID: "wi_ask", Status: "needs_input", AttemptID: "ra_2", AgentPID: 43,
@@ -243,10 +244,10 @@ func TestGoldenStatus(t *testing.T) {
 	golden(t, "Status", b.String(),
 		`machine: m1  mode: drain  queue: 1 pending / 2 running / max 2
 
-WORK ITEM  STATUS       ATTEMPT  AGENT PID  QUESTION
----------  -----------  -------  ---------  --------
-wi_abc     running      ra_1     42         -
-wi_ask     needs_input  ra_2     43         q_zz9
+WORK ITEM  STATUS       ATTEMPT  AGENT PID  QUESTION  LAST-PROGRESS
+---------  -----------  -------  ---------  --------  -------------
+wi_abc     running      ra_1     42         -         12:34
+wi_ask     needs_input  ra_2     43         q_zz9     -
 `)
 }
 
@@ -304,3 +305,6 @@ func TestGoldenMemories(t *testing.T) {
 mem_1  experience.debug  first line  t1       go
 `)
 }
+
+// int64Ptr is the LAST-PROGRESS golden helper (a *int64 field).
+func int64Ptr(v int64) *int64 { return &v }

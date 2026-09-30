@@ -30,9 +30,10 @@ type planAction struct {
 	ID       string `json:"id"`       // step id / question id
 	Question string `json:"question"` // ask: the question text
 	Count    int    `json:"count"`    // provider_error: number of error turns
-	MS       int    `json:"ms"`       // sleep: milliseconds
+	MS       int    `json:"ms"`       // sleep / ui_noise: milliseconds
 	Name     string `json:"name"`     // repo: the repos/ subdirectory
 	Origin   string `json:"origin"`   // repo: the origin remote URL
+	Kind     string `json:"kind"`     // ui_noise: "ui" (default) | "progress"
 }
 
 // plan is the whole scripted behavior of one derivation.
@@ -279,8 +280,23 @@ func runDriveLoop(d *driveEnv) {
 			d.flushWrap("failed")
 			parkForever()
 		case "hang":
-			d.beginHang()
+			d.beginOpenTurn("hang")
 			parkForever()
+		case "open_turn":
+			// The F15 shape composer: open a turn and leave it open, but
+			// CONTINUE the plan (unlike "hang", which parks) — the pilot's
+			// stuck-subagent shape composes it with ui_noise / periodic
+			// progress below.
+			d.beginOpenTurn("open_turn")
+		case "ui_noise":
+			// The F15 double-blind ingredient: keep producing records of
+			// the chosen family. kind ""/"ui" (default) — the
+			// extension_ui_request shape the pilot probe measured streaming
+			// continuously out of a background-task extension's UI updates;
+			// kind "progress" — ordinary message_update deltas of the open
+			// turn (legal slow work). The emitter runs in the background for
+			// the rest of the derivation's life.
+			d.startNoise(act.Kind, act.MS)
 		case "provider_error":
 			n := act.Count
 			if n <= 0 {
@@ -496,14 +512,52 @@ func (d *driveEnv) consumeAnswer(qid, answer string) {
 	d.mu.Unlock()
 }
 
-// beginHang opens a turn and goes silent: the in-flight silence the hang
-// watchdog probes.
-func (d *driveEnv) beginHang() {
+// beginOpenTurn opens a turn and never closes it, and marks the
+// derivation as one whose model call is stuck: no assistant message can
+// ever be produced, so probe acks are suppressed exactly as in the hang
+// shape (a liveness probe must time out against it). journalKind names
+// the plan action that opened it ("hang" / "open_turn").
+func (d *driveEnv) beginOpenTurn(journalKind string) {
 	d.mu.Lock()
 	d.hanging = true
 	d.mu.Unlock()
-	d.journal("hang", map[string]any{"at": nowStamp()})
+	d.journal(journalKind, map[string]any{"at": nowStamp()})
 	emitOpenTurn()
+}
+
+// startNoise launches the F15 background record emitter: every interval
+// milliseconds one record of the chosen family lands on stdout — kind
+// ""/"ui" (default): the extension_ui_request shape a background-task
+// extension's UI updates produce continuously (the pilot probe measured
+// it dominating a stuck window's record stream — under the old progress
+// semantics it kept the stream forever fresh); kind "progress": an
+// ordinary message_update delta of the open turn — legal slow work
+// (shape B: a turn streaming for a long time keeps proving life).
+func (d *driveEnv) startNoise(kind string, intervalMS int) {
+	if kind == "" {
+		kind = "ui"
+	}
+	if intervalMS <= 0 {
+		intervalMS = 100
+	}
+	d.journal("ui_noise", map[string]any{"kind": kind, "interval_ms": intervalMS})
+	go func() {
+		seq := 0
+		for {
+			if kind == "progress" {
+				emitRecord(map[string]any{"type": "message_update",
+					"assistantMessageEvent": map[string]any{
+						"type": "text_delta", "contentIndex": 0, "delta": " still working",
+					}})
+			} else {
+				emitRecord(map[string]any{"type": "extension_ui_request",
+					"request": map[string]any{"method": "setStatus", "payload": "tick"},
+					"seq":     seq})
+			}
+			seq++
+			sleepMS(intervalMS)
+		}
+	}()
 }
 
 // suppressProbeAck reports whether the plan wants probes ignored.
