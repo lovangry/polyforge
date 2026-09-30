@@ -683,3 +683,68 @@ func TestMemorySearchExcerpt(t *testing.T) {
 		t.Fatalf("POST excerpt search: %d %s (%+v)", code, raw, with.Items)
 	}
 }
+
+// TestMemorySearchTypeWildcard: the type filter's trailing-".*" prefix
+// interpretation (X.* → prefix "X.") is shared by the GET and POST faces
+// of the search endpoint; non-wildcard values keep exact matching.
+func TestMemorySearchTypeWildcard(t *testing.T) {
+	e := newSrvEnv(t)
+	mk := func(memType string) {
+		t.Helper()
+		if code, raw := e.do(t, "POST", "/api/v1/memories", e.key, map[string]any{
+			"project": "alpha", "type": memType, "visibility": "project",
+			"content": "the shared xylophone token",
+		}, nil); code != 201 {
+			t.Fatalf("create %s: %d %s", memType, code, raw)
+		}
+	}
+	mk("experience.debug")
+	mk("experience.approach")
+	mk("fact.note")
+
+	var res struct {
+		Items []struct {
+			Type string `json:"type"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	// GET face: experience.* returns both experience.* rows, not fact.note.
+	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=xylophone&type=experience.*", e.key, nil, &res); code != 200 || len(res.Items) != 2 {
+		t.Fatalf("GET experience.*: %d %s (%d items)", code, raw, len(res.Items))
+	}
+	for _, it := range res.Items {
+		if !strings.HasPrefix(it.Type, "experience.") {
+			t.Fatalf("GET experience.* matched type %q", it.Type)
+		}
+	}
+	// POST face: the same interpretation.
+	if code, raw := e.do(t, "POST", "/api/v1/memories/search", e.key, map[string]any{
+		"q": "xylophone", "type": "experience.*",
+	}, &res); code != 200 || len(res.Items) != 2 {
+		t.Fatalf("POST experience.*: %d %s (%d items)", code, raw, len(res.Items))
+	}
+	for _, it := range res.Items {
+		if !strings.HasPrefix(it.Type, "experience.") {
+			t.Fatalf("POST experience.* matched type %q", it.Type)
+		}
+	}
+	// GET face, non-wildcard: exact type only.
+	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=xylophone&type=experience.debug", e.key, nil, &res); code != 200 || len(res.Items) != 1 || res.Items[0].Type != "experience.debug" {
+		t.Fatalf("GET exact: %d %s (%+v)", code, raw, res.Items)
+	}
+	// POST face, non-wildcard: exact type only.
+	if code, raw := e.do(t, "POST", "/api/v1/memories/search", e.key, map[string]any{
+		"q": "xylophone", "type": "experience.debug",
+	}, &res); code != 200 || len(res.Items) != 1 || res.Items[0].Type != "experience.debug" {
+		t.Fatalf("POST exact: %d %s (%+v)", code, raw, res.Items)
+	}
+	// fact.* never matches experience.* rows, on either face.
+	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=xylophone&type=fact.*", e.key, nil, &res); code != 200 || len(res.Items) != 1 || res.Items[0].Type != "fact.note" {
+		t.Fatalf("GET fact.*: %d %s (%+v)", code, raw, res.Items)
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/memories/search", e.key, map[string]any{
+		"q": "xylophone", "type": "fact.*",
+	}, &res); code != 200 || len(res.Items) != 1 || res.Items[0].Type != "fact.note" {
+		t.Fatalf("POST fact.*: %d %s (%+v)", code, raw, res.Items)
+	}
+}
