@@ -407,6 +407,7 @@ type v1Daemon struct {
 	extraEnv    []string
 	client      *cli.DaemonClient
 	waitedExit  chan error
+	serverURL   string // --server override (optServerURL)
 }
 
 type daemonOpt func(*v1Daemon)
@@ -419,6 +420,15 @@ func optMachineID(id string) daemonOpt {
 // boot; used to start straight in drain).
 func optMode(mode string) daemonOpt {
 	return func(d *v1Daemon) { d.extraEnv = append(d.extraEnv, "__PFV1_MODE__="+mode) }
+}
+
+// optServerURL points the daemon's aihub API face (--server) at url
+// instead of the install itself — the s17 hold-proxy front. In that
+// case git pushes are pinned DIRECT to the install via --git-remote-base
+// so the proxy only ever sees the API client's traffic. Without the opt
+// the daemon args are exactly today's.
+func optServerURL(url string) daemonOpt {
+	return func(d *v1Daemon) { d.serverURL = url }
 }
 
 // shortTmp makes a short temp path (unix socket paths are bound to ~104
@@ -476,10 +486,19 @@ func (d *v1Daemon) start() {
 	if err != nil {
 		d.t.Fatal(err)
 	}
+	// --server: the install itself, or the test's hold-proxy front
+	// (optServerURL) — in the latter case git pushes are pinned direct
+	// to the install so only the API client is proxied.
+	serverURL := d.inst.url
+	gitRemoteBase := ""
+	if d.serverURL != "" {
+		serverURL = d.serverURL
+		gitRemoteBase = d.inst.url + "/git"
+	}
 	args := []string{
 		"daemon",
 		"--socket", d.sock,
-		"--server", d.inst.url,
+		"--server", serverURL,
 		"--api-key", d.inst.adminKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
@@ -488,6 +507,9 @@ func (d *v1Daemon) start() {
 		"--workflows-dir", filepath.Join(d.inst.root, "workflows"),
 		"--executor-prompt", filepath.Join(d.inst.root, "skills", "pf-execute", "SKILL.md"),
 		"--pi-bin", d.inst.fakepiPath,
+	}
+	if gitRemoteBase != "" {
+		args = append(args, "--git-remote-base", gitRemoteBase)
 	}
 	cmd := exec.Command(d.inst.pfPath, args...)
 	cmd.Env = append(os.Environ(),
