@@ -110,7 +110,12 @@ const (
 )
 
 type Step struct {
-	Status             string             `json:"status"`
+	Status string `json:"status"`
+	// Model is the effective model id the step's dispatches currently
+	// run under (the F4 lane: the executor records the candidate it
+	// dispatched with into every step-starting execution.json write, so
+	// the observe face can render it — the daemon never derives it).
+	Model              string             `json:"model,omitempty"`
 	Output             map[string]any     `json:"output,omitempty"`
 	StepStartedAt      string             `json:"step_started_at,omitempty"`
 	StepStartRefs      map[string]RepoRef `json:"step_start_refs,omitempty"`

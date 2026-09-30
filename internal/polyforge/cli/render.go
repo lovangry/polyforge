@@ -258,6 +258,10 @@ func renderObserve(w io.Writer, jv *protocol.JobView) {
 }
 
 // renderStatus renders the daemon status() bookkeeping list.
+// renderStatus renders the daemon status() bookkeeping list. The
+// QUESTION column is the D6 owner face: any job the daemon reports with a
+// pending question shows its question id ("-" otherwise), so an agent
+// blocked on a human is impossible to miss at a glance.
 func renderStatus(w io.Writer, s *StatusResponse) {
 	fmt.Fprintf(w, "machine: %s  mode: %s", s.MachineID, s.Mode)
 	if s.ShuttingDown {
@@ -271,9 +275,13 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 		if j.AgentPID > 0 {
 			pid = strconv.Itoa(j.AgentPID)
 		}
-		rows = append(rows, []string{j.WorkItemID, j.Status, j.AttemptID, pid})
+		question := "-"
+		if j.QuestionID != "" {
+			question = j.QuestionID
+		}
+		rows = append(rows, []string{j.WorkItemID, j.Status, j.AttemptID, pid, question})
 	}
-	printTable(w, []string{"WORK ITEM", "STATUS", "ATTEMPT", "AGENT PID"}, rows)
+	printTable(w, []string{"WORK ITEM", "STATUS", "ATTEMPT", "AGENT PID", "QUESTION"}, rows)
 }
 
 // renderShip renders the ship answer: the fixed-name branch plus one

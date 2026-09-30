@@ -74,6 +74,18 @@ no active execution). "Ship / deliver / push it" routes to `ship` — the git
 delivery of an already-closed WI's sealed commits — never to `submit`
 (which starts execution).
 
+## Turn-start obligation: surface pending questions (needs_input)
+
+At the start of **every execution-plane verb turn** — and once at session
+start — run `pf ops status` first. Any job shown with status `needs_input`
+(the QUESTION column carries its question id) is an agent **blocked on a
+human**: present the question to the user (question id, step and text — the
+full text comes from `pf observe <wi>`) **before** carrying out whatever
+else they asked. A pending question must never wait for the user to happen
+to ask for status: v0's known gap was exactly that needs_input had no
+proactive owner notification, and jobs sat blocked for hours. Answering
+routes to `verbs/answer.md` as usual.
+
 ## The `pf` CLI: shared invocation contract
 
 Every fragment below assumes this shared shape:

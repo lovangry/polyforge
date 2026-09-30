@@ -607,3 +607,75 @@ func TestFlushStaleAttemptRefused(t *testing.T) {
 		t.Fatalf("end-generation calls = %d, want 1", td.hub.endCount())
 	}
 }
+
+// TestStatusShowsNeedsInput pins the D6 owner face: a job the runtime
+// state machine calls running while its monitor holds a pending question
+// is presented as needs_input on GET /status, carrying the question id —
+// the operator's one-glance surface for "the agent is blocked on you".
+func TestStatusShowsNeedsInput(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.submitClaim(t, "wi_askst")
+	td.waitMonitored(t, "wi_askst")
+
+	// before the question: plain running bookkeeping, no QUESTION cell
+	st := td.statusOf(t)
+	if j := statusJobOf(&st, "wi_askst"); j == nil || j.Status != "running" || j.NeedsInput {
+		t.Fatalf("pre-question status = %+v", j)
+	}
+
+	// the agent blocks on a human (ruling C2 lifeline)
+	raw, err := td.client.Observe("wi_askst", 0)
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	var jv protocol.JobView
+	if err := json.Unmarshal(raw, &jv); err != nil {
+		t.Fatalf("observe undecodable: %v", err)
+	}
+	if _, err := td.client.Flush("wi_askst", protocol.FlushRequest{
+		WorkItem: "wi_askst", AttemptID: jv.AttemptID,
+		Reason: protocol.FlushNeedsInput, QuestionID: "q_d6001",
+		Question: "pick one", Step: "spec",
+	}); err != nil {
+		t.Fatalf("flush(needs_input): %v", err)
+	}
+
+	// /status presents needs_input + the question id (the monitor's
+	// projection is applied on the read, so a small poll window is legal)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st := td.statusOf(t)
+		j := statusJobOf(&st, "wi_askst")
+		if j != nil && j.NeedsInput && j.Status == protocol.JobNeedsInput && j.QuestionID == "q_d6001" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("needs_input never surfaced on /status: %+v", st.Jobs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// statusOf reads GET /status once, decoded.
+func (td *testDaemon) statusOf(t *testing.T) cli.StatusResponse {
+	t.Helper()
+	raw, err := td.client.Status()
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	var st cli.StatusResponse
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("status undecodable: %v", err)
+	}
+	return st
+}
+
+// statusJobOf finds one jobs[] entry by work item id.
+func statusJobOf(s *cli.StatusResponse, wi string) *cli.StatusJob {
+	for i := range s.Jobs {
+		if s.Jobs[i].WorkItemID == wi {
+			return &s.Jobs[i]
+		}
+	}
+	return nil
+}

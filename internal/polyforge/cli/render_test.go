@@ -94,17 +94,22 @@ func TestGoldenStatus(t *testing.T) {
 		Mode:      protocol.ModeDrain,
 		Jobs: []StatusJob{
 			{WorkItemID: "wi_abc", Status: "running", AttemptID: "ra_1", AgentPID: 42},
+			// D6: a job presented as needs_input shows its pending
+			// question's id in the QUESTION column.
+			{WorkItemID: "wi_ask", Status: "needs_input", AttemptID: "ra_2", AgentPID: 43,
+				NeedsInput: true, QuestionID: "q_zz9"},
 		},
-		Queue: QueueStats{Pending: 1, Running: 1, MaxConcurrent: 2},
+		Queue: QueueStats{Pending: 1, Running: 2, MaxConcurrent: 2},
 	}
 	var b bytes.Buffer
 	renderStatus(&b, &s)
 	golden(t, "Status", b.String(),
-		`machine: m1  mode: drain  queue: 1 pending / 1 running / max 2
+		`machine: m1  mode: drain  queue: 1 pending / 2 running / max 2
 
-WORK ITEM  STATUS   ATTEMPT  AGENT PID
----------  -------  -------  ---------
-wi_abc     running  ra_1     42
+WORK ITEM  STATUS       ATTEMPT  AGENT PID  QUESTION
+---------  -----------  -------  ---------  --------
+wi_abc     running      ra_1     42         -
+wi_ask     needs_input  ra_2     43         q_zz9
 `)
 }
 

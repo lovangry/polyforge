@@ -45,6 +45,16 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	if err := j.transition(StateRecovering); err != nil {
 		return // lost the race to SEALING/DONE: the fence did its job
 	}
+	// Candidate-chain advancement (I2/INV-1g): ONLY a provider-class
+	// recovery moves the ordinal — business FAIL, rewind, hang, plain
+	// death and daemon restart never do (the mirror rule of
+	// v0/internal/workflow/drive/drive.go:70 CandidateOrdinal: the count
+	// advances on infra failures alone, gate-fail rewind resets it).
+	// Bounded and crash-safe: the advance is persisted in the job record
+	// BEFORE the re-derivation, and exhausting the list is NOT a terminal
+	// condition — the ordinal wraps to 0 (the storm guard owns
+	// terminality, not the candidate list).
+	r.advanceCandidate(j, cause)
 
 	// Kill the old tree first (§一 Recover): six layers, no writer may
 	// survive next to the re-derivation.
@@ -186,6 +196,40 @@ func (r *Runtime) recovered(j *job, h AgentHandle, cause string, resumed bool) {
 	})
 }
 
+// advanceCandidate moves the effective model-candidate ordinal one
+// step when — and only when — the recovery cause is provider-class.
+// See recoverCore for the full rule statement.
+func (r *Runtime) advanceCandidate(j *job, cause string) {
+	j.mu.Lock()
+	n := len(j.candidates)
+	if n == 0 || cause != protocol.RecoverProviderError {
+		j.mu.Unlock()
+		return
+	}
+	j.candidateOrdinal = (j.candidateOrdinal + 1) % n
+	ord := j.candidateOrdinal
+	j.mu.Unlock()
+	// crash-safe (I2): the advanced ordinal is durable before any
+	// re-derivation is attempted, so a crash mid-recovery resumes the
+	// SAME effective candidate.
+	if err := r.persist(); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
+	}
+	fmt.Fprintf(os.Stderr, "runtime: %s: provider failure advances the candidate chain to ordinal %d\n", j.wi, ord)
+}
+
+// effectiveModel answers the harness model id the next derivation of j
+// must be pinned to ("" = no chain: the harness adapter's default).
+func (j *job) effectiveModel() string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	n := len(j.candidates)
+	if n == 0 {
+		return ""
+	}
+	return j.candidates[j.candidateOrdinal%n]
+}
+
 // boundedFail terminates the WI without a relaunch: end-generation blocked,
 // RTFinished(blocked). The aihub side then shows blocked and the restart
 // reconciliation leaves the WI untouched (§十一).
@@ -309,6 +353,9 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcrip
 		// The derivation's own lineage id rides the env as PF_INSTANCE_ID
 		// (the agent's flush fence identity) and the journal alike.
 		InstanceID: nextInst,
+		// F4: the spawn is pinned to the effective candidate of the
+		// persisted chain (spawn.go documents why this rides argv).
+		Model: j.effectiveModel(),
 	}
 	p.Journal = func(pid int, startedAt string) error {
 		return writeSpawnJournal(p, pid, startedAt, nextInst)
