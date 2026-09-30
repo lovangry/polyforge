@@ -67,7 +67,7 @@ func TestDrainDegradedEdgeSemantics(t *testing.T) {
 			continue
 		}
 		var e struct {
-			WI   string          `json:"wi"`
+			WI   string          `json:"work_item"`
 			Kind string          `json:"kind"`
 			Body json.RawMessage `json:"body"`
 		}

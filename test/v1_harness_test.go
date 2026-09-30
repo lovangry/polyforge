@@ -404,6 +404,7 @@ type v1Daemon struct {
 	dataDir     string
 	workspace   string
 	machineID   string
+	apiKey      string // optional dedicated aihub key (optAPIKey); "" = bootstrap admin key
 	extraEnv    []string
 	client      *cli.DaemonClient
 	waitedExit  chan error
@@ -413,6 +414,13 @@ type daemonOpt func(*v1Daemon)
 
 func optMachineID(id string) daemonOpt {
 	return func(d *v1Daemon) { d.machineID = id }
+}
+
+// optAPIKey boots the daemon on a dedicated aihub api key (e.g. a
+// machine user's key the scenario revokes mid-run) instead of the
+// install's bootstrap admin key.
+func optAPIKey(key string) daemonOpt {
+	return func(d *v1Daemon) { d.apiKey = key }
 }
 
 // optMode pre-seeds the daemon state file with an initial mode (read at
@@ -476,11 +484,15 @@ func (d *v1Daemon) start() {
 	if err != nil {
 		d.t.Fatal(err)
 	}
+	apiKey := d.apiKey
+	if apiKey == "" {
+		apiKey = d.inst.adminKey
+	}
 	args := []string{
 		"daemon",
 		"--socket", d.sock,
 		"--server", d.inst.url,
-		"--api-key", d.inst.adminKey,
+		"--api-key", apiKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
 		"--workspace-root", d.workspace,
