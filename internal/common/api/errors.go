@@ -70,6 +70,7 @@ const (
 	ErrAuthForbidden    = "AUTH-403"
 
 	// GIT — v1 git proxy surface (pre-receive rejects, auth, protocol)
+	ErrGitBadRequest   = "GIT-400" // smart-HTTP method/target mismatch at the proxy
 	ErrGitUnauthorized = "GIT-401" // attempt-scoped credential rejected (takeover fencing)
 	ErrGitForbidden    = "GIT-403"
 	ErrGitNotFound     = "GIT-404"
@@ -79,7 +80,6 @@ const (
 	ErrGitTooLarge     = "GIT-413" // blob size limit
 	ErrGitSeqViolation = "GIT-422" // seq trailer not monotonically increasing
 	ErrGitInternal     = "GIT-500"
-
 	// DAEMON — pf daemon UDS surface (04 §5)
 	ErrDaemonBadInput            = "DAEMON-400"
 	ErrDaemonForbidden           = "DAEMON-403"
