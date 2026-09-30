@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
@@ -217,7 +218,7 @@ func TestFlushSameIDRefreshesAskedAtWithoutNewEvent(t *testing.T) {
 // the pending projection nor clobber a valid pending the flush face already
 // recorded.
 func TestApplyPendingFromExecIgnoresInvalidID(t *testing.T) {
-	m := newTestMonitor(t)
+	m, _ := newTestMonitor(t, &fakeHandle{}, nil)
 	// flush face recorded a valid pending
 	m.applyPending(&protocol.PendingView{ID: "q_good", Step: "grill", Question: "valid", AskedAt: "t1"})
 	// execution.json carries an invalid pending (id missing)
