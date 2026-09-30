@@ -42,11 +42,11 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 		t.Fatalf("capsule.json: %v", err)
 	}
 	var idn struct {
-		WorkItemID   string            `json:"work_item_id"`
-		Generation   int64             `json:"generation"`
-		AttemptID    string            `json:"attempt_id"`
-		BundleName   string            `json:"bundle_name"`
-		Repos        map[string]string `json:"repos"`
+		WorkItemID string            `json:"work_item_id"`
+		Generation int64             `json:"generation"`
+		AttemptID  string            `json:"attempt_id"`
+		BundleName string            `json:"bundle_name"`
+		Repos      map[string]string `json:"repos"`
 	}
 	if err := json.Unmarshal(rawID, &idn); err != nil {
 		t.Fatalf("capsule.json unparsable: %v", err)
