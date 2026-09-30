@@ -49,7 +49,7 @@ type migResolver struct {
 	usersDone map[string]string // old identifier → target user id
 	// ownerOverride: when set, EVERY old identity maps to this target user
 	// (validated once against the target's user list).
-	ownerOverride  string
+	ownerOverride   string
 	overrideChecked bool
 }
 
