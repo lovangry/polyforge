@@ -501,10 +501,21 @@ func opsMode(ctx *Context, d *DaemonClient, args []string) error {
 // (Runtime + Observe composition).
 // ---------------------------------------------------------------------------
 
+// daemonWindowFlagsHelp is the #12 observe supervision-window flag
+// block, appended to the `pf daemon` help surface (usage + the
+// placeholder text). Go duration strings; omitted or 0 keeps observe's
+// own default.
+const daemonWindowFlagsHelp = `observe supervision windows (Go duration strings; omitted or 0 keeps the default):
+  --hang-window D        stream silence while a turn is in flight before the liveness probe arms (10m)
+  --idle-window D        no progress record and no turn in flight before the idle watchdog probes (10m)
+  --probe-timeout D      one liveness probe's ack bound (2m)
+  --answer-ack-window D  the agent's pf/answer consumption-ack bound (2m)
+The full ` + "`pf daemon --help`" + ` flag surface is documented in the README.`
+
 var cmdDaemon = &Command{
 	Name:    "daemon",
 	Summary: "Run the local pf daemon (placeholder: assembled in phase 3)",
-	Usage:   "pf daemon",
+	Usage:   "pf daemon [flags]\n\n" + daemonWindowFlagsHelp,
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintln(ctx.Stdout, "pf daemon: not assembled in this phase.")
@@ -514,6 +525,10 @@ var cmdDaemon = &Command{
 		fmt.Fprintln(ctx.Stdout, "this CLI already speaks (internal/common/protocol; routes in")
 		fmt.Fprintln(ctx.Stdout, "internal/polyforge/cli/daemon.go). Until then `pf ops status` reports")
 		fmt.Fprintln(ctx.Stdout, "the same: no daemon is listening on the configured socket.")
+		// #12: the observe supervision windows are settable per daemon
+		// process (the real entry is internal/polyforge/daemon.Main).
+		fmt.Fprintln(ctx.Stdout, "")
+		fmt.Fprintln(ctx.Stdout, daemonWindowFlagsHelp)
 		return nil
 	},
 }
