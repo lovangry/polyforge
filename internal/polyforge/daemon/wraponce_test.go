@@ -32,8 +32,8 @@ import (
 func TestWrapDualPathPushesOnce(t *testing.T) {
 	var pushes int32
 	td := newTestDaemon(t, func(c *Config) {
-		c.PushFunc = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
-			sha, pushed, err := gitops.CommitPush(o, msg)
+		c.PushFunc = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
+			sha, pushed, pt, err := gitops.CommitPush(o, msg)
 			if err == nil && pushed && atomic.AddInt32(&pushes, 1) == 1 {
 				// The flush path's seal push just landed. From this moment
 				// the attempt credential is spent (the real machine: the
@@ -42,7 +42,7 @@ func TestWrapDualPathPushesOnce(t *testing.T) {
 				// push by stopOp fails observably.
 				_ = os.RemoveAll(filepath.Join(c.GitRemoteBase, "wi_once.git"))
 			}
-			return sha, pushed, err
+			return sha, pushed, pt, err
 		}
 	})
 	td.submitClaim(t, "wi_once")

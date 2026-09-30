@@ -60,11 +60,11 @@ func adopt(m *Monitor, h Handle, wi WIInfo) {
 // ordering pin: the copy must precede the commit. The flag is atomic: the
 // push runs in the monitor's sub-goroutine, the poller in the test.
 func pushOnceRecorded(f liveFixture, sawCopy *atomic.Bool) PushFunc {
-	return func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+	return func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 		if raw, err := os.ReadFile(f.dst); err == nil && string(raw) == string(f.body) {
 			sawCopy.Store(true)
 		}
-		return "sha_sync", true, nil
+		return "sha_sync", true, gitops.PushTimings{}, nil
 	}
 }
 
@@ -176,9 +176,9 @@ func TestTranscriptMissingWarnsOnceAndPushProceeds(t *testing.T) {
 			located++
 			return ""
 		}
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			pushed.Store(true)
-			return "sha_nomiss", true, nil
+			return "sha_nomiss", true, gitops.PushTimings{}, nil
 		}
 	})
 	adopt(m, h, WIInfo{
@@ -229,9 +229,9 @@ func TestResumedDerivationWritingInCapsuleIsNotReCopied(t *testing.T) {
 	h := newFakeHandle("ra_wi_test")
 	var pushed atomic.Bool
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			pushed.Store(true)
-			return "sha_resume", true, nil
+			return "sha_resume", true, gitops.PushTimings{}, nil
 		}
 	})
 	adopt(m, h, WIInfo{

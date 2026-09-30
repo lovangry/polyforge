@@ -37,8 +37,8 @@ func TestFlushWrapAckSeparatesLocalCommitAndPush(t *testing.T) {
 
 	// Case 1: commit landed AND reached the server.
 	m1, ob1 := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
-			return "sha_full", true, nil
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
+			return "sha_full", true, gitops.PushTimings{CommitMS: 3, PushMS: 7}, nil
 		}
 	})
 	ack := doFlush(m1, flushReq(protocol.FlushWrap))
@@ -49,13 +49,22 @@ func TestFlushWrapAckSeparatesLocalCommitAndPush(t *testing.T) {
 	if msg.Kind != protocol.OBCompleted || msg.Reason != protocol.FinishWrapped {
 		t.Fatalf("WICompleted: %+v", msg)
 	}
+	// The seal's published event carries the attempt's latency samples
+	// (the M8 timing fields ride every published variant).
+	seal := eventsOf(m1, EvPublished)
+	if len(seal) != 1 {
+		t.Fatalf("published events: %d", len(seal))
+	}
+	if c, p := eventBodyInt64(t, seal[0], "commit_ms"), eventBodyInt64(t, seal[0], "push_ms"); c != 3 || p != 7 {
+		t.Fatalf("published timings: commit_ms=%d push_ms=%d", c, p)
+	}
 
 	// Case 2: commit landed locally, push did not (no error — e.g.
 	// nothing to commit / server deferral). The two fields are asserted
 	// SEPARATELY: LocalCommit set, Pushed false.
 	m2, ob2 := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
-			return "sha_local", false, nil
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
+			return "sha_local", false, gitops.PushTimings{}, nil
 		}
 	})
 	ack2 := doFlush(m2, flushReq(protocol.FlushWrap))
@@ -77,9 +86,9 @@ func TestFlushWrapRetriesThreeThenBlocks(t *testing.T) {
 	h := newFakeHandle("att_1")
 	attempts := 0
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
 			attempts++
-			return "sha_partial", false, errors.New("GIT-500: upstream refused")
+			return "sha_partial", false, gitops.PushTimings{}, errors.New("GIT-500: upstream refused")
 		}
 	})
 	ack := doFlush(m, flushReq(protocol.FlushWrap))
@@ -114,9 +123,9 @@ func TestFlushWrapSecondCallWhileSealingRefused(t *testing.T) {
 	h := newFakeHandle("att_1")
 	release := make(chan struct{})
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
 			<-release
-			return "sha_w", true, nil
+			return "sha_w", true, gitops.PushTimings{}, nil
 		}
 	})
 	first := flushReq(protocol.FlushWrap)
@@ -159,8 +168,8 @@ func TestFlushNeedsInputIdempotentByQuestionID(t *testing.T) {
 func TestFlushShutdownAcksFastAndReportsFailure(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
-			return "sha_s", true, nil
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
+			return "sha_s", true, gitops.PushTimings{}, nil
 		}
 	})
 	start := time.Now()
@@ -171,10 +180,17 @@ func TestFlushShutdownAcksFastAndReportsFailure(t *testing.T) {
 	if time.Since(start) > time.Second {
 		t.Fatal("shutdown flush must settle immediately-ish")
 	}
+	// The shutdown published variant carries the timing fields too.
+	sync := eventsOf(m, EvPublished)
+	if len(sync) != 1 {
+		t.Fatalf("shutdown published events: %d", len(sync))
+	}
+	eventBodyInt64(t, sync[0], "commit_ms")
+	eventBodyInt64(t, sync[0], "push_ms")
 
 	m2, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
-			return "", false, errors.New("GIT-500: refused")
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
+			return "", false, gitops.PushTimings{}, errors.New("GIT-500: refused")
 		}
 	})
 	ack2 := doFlush(m2, flushReq(protocol.FlushShutdown))

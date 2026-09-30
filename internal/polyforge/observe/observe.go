@@ -130,23 +130,25 @@ func (c *Config) fill() {
 // deadline the caller learns failure while the underlying git keeps
 // running — the per-WI git lock serializes any successor push. The seq
 // trailer is derived INSIDE gitops (single authority); nothing seq-wise
-// flows through here.
-func defaultPush(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+// flows through here, and the commit/push timings ride the result path
+// out untouched (observed-only latency samples).
+func defaultPush(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 	type res struct {
 		sha    string
 		pushed bool
+		t      gitops.PushTimings
 		err    error
 	}
 	done := make(chan res, 1)
 	go func() {
-		sha, pushed, err := gitops.CommitPush(o, message)
-		done <- res{sha, pushed, err}
+		sha, pushed, t, err := gitops.CommitPush(o, message)
+		done <- res{sha, pushed, t, err}
 	}()
 	select {
 	case r := <-done:
-		return r.sha, r.pushed, r.err
+		return r.sha, r.pushed, r.t, r.err
 	case <-ctx.Done():
-		return "", false, ctx.Err()
+		return "", false, gitops.PushTimings{}, ctx.Err()
 	}
 }
 
