@@ -89,7 +89,7 @@ X4  The memory ledger exists precisely to prevent re-hits — every
     implementation/review lane MUST recall it first (v1 lanes did not;
     that is why F1/F3/F4 happened).
 
-## v1 pilot findings (F1–F7, F11–F14) — the lessons the ledger itself predicted
+## v1 pilot findings (F1–F7, F11–F20) — the lessons the ledger itself predicted
 
 X4 said every implementation/review lane MUST recall this ledger first; the
 v1 pilot lanes did not, and every one of these findings is a re-hit of an
@@ -189,3 +189,65 @@ F14 boot.sh 全栈重启误伤：2026-09-30 操作员想重启单个 daemon，�
     11:46 创建——只 kill daemon-b、轮询 ≤120s 等 `b/daemon.sock`
     释放、setsid 单独重启 daemon-b；仓库内已录于
     `docs/pilot/ops-scripts.md` 运维注意事项，lines 75–77）。
+
+编号对账（polyforge#51 追加批）：本 WI goal 写作「台账补 F13-F17」时
+F13/F14 尚不存在，其后 #47（commit `c1c55be`）已追加 F13/F14，故本批
+自 F15（下一空号）起连续编号；F8–F10 仍按上台账原注刻意保留、不回填。
+phase-0 观测窗真机发现实际共 6 条（F15–F20），多于 goal 暗示的 5 个
+槽位——按证据如实登记，不为凑数增删。
+
+F15 watchdog 进度语义盲区「UI noise is not progress」（F5 引入的看门狗
+    自身的新失败形状，非 v0 条目再命中）：真机两连击——subagent 派发在
+    双盲看门狗下楔死 2.7 小时（hang 判据要求静默，被 streaming
+    extension_ui 噪声持续刷新 lastRecordAt 挡住；idle 判据要求无开放
+    turn，被真实开放的 turn 挡住——两判据互盲，谁都不开火）。修复：
+    记录分流 progress（message_*/toolResult/lifecycle/response）vs noise
+    （extension_ui_request/未分类/不可解析），Silent() 与 idle 判据锚定
+    LastProgressAt（shape A/B/C 三形 + s21 e2e 对真 daemon 钉死；另加
+    no_progress owner 可见事件、ops status 的 LAST-PROGRESS 列）。
+    状态注记：已修（main `ef67aa7`，分支 v1-f15 merge `d485c72`；修复
+    落地前 #46 期间由手动 shim `/root/polyforge-pilot-v1/f15-shim.sh`
+    补位——capsule transcript 静默 >15min 且 WI 仍在跑即杀进程树交恢复
+    接管，WI 终态自退出）。
+
+F16 flush 栅栏收养窗洞（S3 同型：被取代的世代必须被栅栏挡住）：monitor
+    滞后的 current-id 若仍等于 flush 方 id，在 hub 最新已知已指向后继时
+    其实早已 stale——只有僵尸会用前代的名字说话，旧栅栏却放行这种
+    「current-id 命中」的 zombie flush。由 F15 修复引入的时间扰动暴露
+    （s10 红，wait 修复后确定性复现）。状态注记：已修（main `a91ef69`：
+    flush fence 增加 hub 最新已知的收养窗 cross-check；s10 改等 monitor
+    收养事件（wi_agent_rederived）而非 spawn journal；
+    flush_recovery_window HTTP 测试钉死收紧语义；同 commit 另将 s19
+    ShipPR 的 gh 建仓限流按可用性门处理——skip 不 fail）。
+
+F17 M4 证据链断裂（C3' 同型：执行权威文件里该有的证据从未落进）：39 个
+    已执行 verification step 中 17 个无结构化命令证据（12 个旧 schema
+    execution.json 无 commands 字段 + 5 个 commands 无可读条目），
+    M4 = 22/39 = 56.41%，PILOT-V4 否决触发——触发的主体是证据面缺口
+    而非谎报证实，且旧 schema 票无法追溯补分。状态注记：未修——已登记
+    为 phase-1 输入（`docs/pilot/v1-phase-0-report.md` §5.2「M4 旧
+    schema 分子排除」：新票须全部携带结构化命令证据，M4 读数才能归因
+    到真实验证承载面）。
+
+F18 持续类拒绝下的 push 风暴（S4 有界性裁定在发布重试面的缺失）：
+    wi_VCyBYf7uYeb2（polyforge#48）对同一 capsule 以 ~10s 固定节奏连推
+    185 次全部 push_failed（前段 aihub gitlink mode-160000 拒绝、后段
+    commit c82791fd… 拒绝，另 2 次 wrap_blocked），无退避、无熔断、无
+    上报升级，风暴持续约 1 小时；该批样本直接把 M8 推到 188/647 =
+    29.06% > 1%，PILOT-V8 否决触发（M7 仅计 1 段 ≤ 3，未触发）。
+    状态注记：未修——窗口读数照实计入（v1 偏差登记表明示不豁免历史
+    失败样本）；持续类失败的退避/熔断/升级面由本条登记为 phase-1 输入。
+
+F19 M6 观测字段从未随事件面发出：整个窗口 events.log 共 33 条
+    memory_remember 事件、携带 write_ms 字段 0 条（旧 schema 事件面未含
+    该观测字段；迁移 CLI 直写与服务端 reconcile 回写不产生事件——已
+    登记的样本集边界），PILOT-V6 本窗口无样本、不参与判定：检索实时性
+    面（`06-memory-search.md#§4.5` p99 ≤ 5s）全程不可观测。状态注记：
+    未修——已登记为 phase-1 输入（`docs/pilot/v1-phase-0-report.md`
+    §5.2「M6 样本集边界」：需新事件 kind 或样本面补齐，未获授权前不动）。
+
+F20 M3 心跳面未接线：整个窗口 aihub.db machines 表 0 行——机器心跳面
+    从未被写入，M3 只剩 step 时长面（in_progress > 24h）可判，机器失联
+    面（last_heartbeat_at 超存活阈值）无数据，`--m3-heartbeat-max-age`
+    无真实数据可配。状态注记：未修——已登记为 phase-1 输入
+    （`docs/pilot/v1-phase-0-report.md` §5.2「M3 心跳面未接线」）。
