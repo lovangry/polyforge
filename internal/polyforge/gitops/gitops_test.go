@@ -212,7 +212,7 @@ func TestCommitPushSeqMonotonicAndPushLands(t *testing.T) {
 
 	for i := 1; i <= 3; i++ {
 		writeDirty(t, o, fmt.Sprintf("f%d.txt", i), fmt.Sprintf("round %d\n", i))
-		sha, pushed, err := CommitPush(o, fmt.Sprintf("observe: execution v%d", i))
+		sha, pushed, _, err := CommitPush(o, fmt.Sprintf("observe: execution v%d", i))
 		if err != nil || !pushed {
 			t.Fatalf("round %d: CommitPush = (%q, %v, %v)", i, sha, pushed, err)
 		}
@@ -238,7 +238,7 @@ func TestCommitPushRetryKeepsSeqConsistent(t *testing.T) {
 	dead := o
 	dead.RemoteURL = filepath.Join(t.TempDir(), "nowhere.git")
 	writeDirty(t, o, "a.txt", "a\n")
-	sha1, pushed, err := CommitPush(dead, "first")
+	sha1, pushed, _, err := CommitPush(dead, "first")
 	if err == nil || pushed {
 		t.Fatalf("push to a dead remote must fail: (%q, %v, %v)", sha1, pushed, err)
 	}
@@ -249,7 +249,7 @@ func TestCommitPushRetryKeepsSeqConsistent(t *testing.T) {
 	// above the standing commit, and the push carries BOTH commits
 	// through the hook's strict-increase check.
 	writeDirty(t, o, "b.txt", "b\n")
-	sha2, pushed, err := CommitPush(o, "second")
+	sha2, pushed, _, err := CommitPush(o, "second")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush = (%q, %v, %v)", sha2, pushed, err)
 	}
@@ -268,7 +268,7 @@ func TestCommitPushCleanTreePushesStandingHead(t *testing.T) {
 	mkCapsule(t, o)
 
 	writeDirty(t, o, "a.txt", "a\n")
-	sha, pushed, err := CommitPush(o, "one")
+	sha, pushed, _, err := CommitPush(o, "one")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush = (%q, %v, %v)", sha, pushed, err)
 	}
@@ -279,12 +279,20 @@ func TestCommitPushCleanTreePushesStandingHead(t *testing.T) {
 	// no-op ("Everything up-to-date": the hook saw nothing more), but
 	// pushed reports the truthful server-reached state, not a
 	// presumed one.
-	sha2, pushed, err := CommitPush(o, "wrap: wrapped")
+	sha2, pushed, pt, err := CommitPush(o, "wrap: wrapped")
 	if err != nil {
 		t.Fatalf("clean tree must not error: %v", err)
 	}
 	if !pushed {
 		t.Fatal("clean tree must report the standing HEAD's push honestly (pushed=true)")
+	}
+	// Clean tree performs no commit call: commit_ms is the honest zero,
+	// while the push round-trip is timed just the same.
+	if pt.CommitMS != 0 {
+		t.Fatalf("clean tree must carry commit_ms=0 (no commit call), got %d", pt.CommitMS)
+	}
+	if pt.PushMS < 0 {
+		t.Fatalf("push_ms must be non-negative, got %d", pt.PushMS)
 	}
 	if sha2 != sha {
 		t.Fatalf("clean tree must answer the standing HEAD: %q vs %q", sha2, sha)
@@ -310,7 +318,7 @@ func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
 	dead := o
 	dead.RemoteURL = filepath.Join(t.TempDir(), "nowhere.git")
 	writeDirty(t, o, "a.txt", "a\n")
-	sha1, pushed, err := CommitPush(dead, "first")
+	sha1, pushed, _, err := CommitPush(dead, "first")
 	if err == nil || pushed {
 		t.Fatalf("push to a dead remote must fail: (%q, %v, %v)", sha1, pushed, err)
 	}
@@ -321,7 +329,7 @@ func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
 	// Round 2: the tree is clean, the remote STILL dead — the retry
 	// must NOT fake success. It pushes the standing HEAD, fails, and
 	// reports the error.
-	sha2, pushed, err := CommitPush(dead, "retry on clean tree")
+	sha2, pushed, _, err := CommitPush(dead, "retry on clean tree")
 	if err == nil {
 		t.Fatal("a clean-tree retry against a dead remote must surface the push error")
 	}
@@ -337,7 +345,7 @@ func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
 
 	// Round 3: the tree is still clean, the server is back — the retry
 	// pushes the standing HEAD through and reports pushed=true.
-	sha3, pushed, err := CommitPush(o, "retry once the server is back")
+	sha3, pushed, _, err := CommitPush(o, "retry once the server is back")
 	if err != nil || !pushed {
 		t.Fatalf("clean-tree retry against the live remote = (%q, %v, %v)", sha3, pushed, err)
 	}
@@ -359,7 +367,7 @@ func TestCommitPushCleanTreeWithNoHistoryIsTyped(t *testing.T) {
 	mkBare(t, barePath, false)
 	mkCapsule(t, o) // initialized, unborn branch, empty tree: clean porcelain
 
-	sha, pushed, err := CommitPush(o, "nothing anywhere")
+	sha, pushed, _, err := CommitPush(o, "nothing anywhere")
 	if err == nil {
 		t.Fatalf("clean tree with no history must error: (%q, %v)", sha, pushed)
 	}
@@ -375,7 +383,7 @@ func TestCommitPushFirstCommitIsSeqOneOnUnbornBranch(t *testing.T) {
 	mkCapsule(t, o)
 
 	writeDirty(t, o, "first.txt", "first\n")
-	if _, pushed, err := CommitPush(o, "first"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(o, "first"); err != nil || !pushed {
 		t.Fatalf("first CommitPush = (%v, %v)", pushed, err)
 	}
 	if got := bare.tipSeq(t); got != 1 {
@@ -390,7 +398,7 @@ func TestPushOptionAttemptIDReachedServer(t *testing.T) {
 	mkCapsule(t, o)
 
 	writeDirty(t, o, "a.txt", "a\n")
-	if _, pushed, err := CommitPush(o, "one"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(o, "one"); err != nil || !pushed {
 		t.Fatalf("CommitPush = (%v, %v)", pushed, err)
 	}
 	seen := bare.pushesSeen(t)
@@ -548,7 +556,7 @@ func TestPushArgsNeverCarrySecret(t *testing.T) {
 	t.Cleanup(func() { gitArgsProbe = nil })
 
 	writeDirty(t, o, "a.txt", "a\n")
-	if _, pushed, err := CommitPush(o, "one"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(o, "one"); err != nil || !pushed {
 		t.Fatalf("CommitPush = (%v, %v)", pushed, err)
 	}
 	var sawPush bool
@@ -612,7 +620,7 @@ func TestPushAndCloneOverHTTPWithCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeDirty(t, o, "http.txt", "over http\n")
-	sha, pushed, err := CommitPush(o, "http push")
+	sha, pushed, _, err := CommitPush(o, "http push")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush over http:// = (%q, %v, %v)", sha, pushed, err)
 	}
@@ -718,7 +726,7 @@ func TestCleanStaleLocksAges(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeDirty(t, o, "a.txt", "a\n")
-	_, _, err := CommitPush(o, "one")
+	_, _, _, err := CommitPush(o, "one")
 	if err == nil {
 		t.Fatal("a live young lock must surface as a push failure, not be deleted")
 	}
@@ -732,7 +740,7 @@ func TestCleanStaleLocksAges(t *testing.T) {
 	if err := os.Chtimes(lock, past, past); err != nil {
 		t.Fatal(err)
 	}
-	sha, pushed, err := CommitPush(o, "one")
+	sha, pushed, _, err := CommitPush(o, "one")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush after stale-lock removal = (%q, %v, %v)", sha, pushed, err)
 	}

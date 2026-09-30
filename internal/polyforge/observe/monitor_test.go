@@ -427,10 +427,10 @@ func TestMonitorNotBlockedByPushInFlight(t *testing.T) {
 	release := make(chan struct{})
 	pushes := make(chan struct{}, 16)
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			pushes <- struct{}{}
 			<-release // the "long" push
-			return "sha_slow", true, nil
+			return "sha_slow", true, gitops.PushTimings{}, nil
 		}
 	})
 
@@ -530,9 +530,9 @@ func TestPollVersionStagnantSchedulesFallbackCommit(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.VersionStagnantTicks = 3
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			pushes.Add(1)
-			return "sha_stag", true, nil
+			return "sha_stag", true, gitops.PushTimings{}, nil
 		}
 	})
 
@@ -569,9 +569,9 @@ func TestPollVersionBumpClearsStagnation(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.VersionStagnantTicks = 3
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			pushes.Add(1)
-			return "sha_bump", true, nil
+			return "sha_bump", true, gitops.PushTimings{}, nil
 		}
 	})
 
@@ -588,6 +588,12 @@ func TestPollVersionBumpClearsStagnation(t *testing.T) {
 	soon(t, 2*time.Second, "version-driven publish of v2", func() bool {
 		return pushes.Load() == 2
 	})
+	// The async observe-flush published variant carries the timing fields
+	// (here the fake's zero timings — presence is the assertion).
+	for _, e := range eventsOf(m, EvPublished) {
+		eventBodyInt64(t, e, "commit_ms")
+		eventBodyInt64(t, e, "push_ms")
+	}
 	if evs := eventsOf(m, EvVersionStagnant); len(evs) != 0 {
 		t.Fatalf("a resolved episode must leave no event, got %d", len(evs))
 	}
