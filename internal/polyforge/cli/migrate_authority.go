@@ -244,20 +244,20 @@ func migOrderMatches(seen []string) bool {
 // migSourceMem is one parsed source memory, uniform over both input
 // paths (dir file or JSONL record).
 type migSourceMem struct {
-	ID         string
-	Type       string
-	Title      *string
-	Tags       []string
-	Visibility string
-	Content    string // body markdown (frontmatter stripped in dir mode)
-	OldProject string // old identifier, informational
-	OldOwner   string // old identifier (old usr_/mac_ id or email/actor)
-	OwnerKind  string // human|machine|"" (inferred)
-	WorkItemID *string
-	Related    []string
-	CreatedAt  string
-	UpdatedAt  string
-	Status     string // active|redacted
+	ID          string
+	Type        string
+	Title       *string
+	Tags        []string
+	Visibility  string
+	Content     string // body markdown (frontmatter stripped in dir mode)
+	OldProject  string // old identifier, informational
+	OldOwner    string // old identifier (old usr_/mac_ id or email/actor)
+	OwnerKind   string // human|machine|"" (inferred)
+	WorkItemID  *string
+	Related     []string
+	CreatedAt   string
+	UpdatedAt   string
+	Status      string // active|redacted
 	FormatDiffs []migFormatDiff
 }
 

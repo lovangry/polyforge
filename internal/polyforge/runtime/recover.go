@@ -278,7 +278,7 @@ func endGenerationReq(j *job, status string) aihubclient.EndGenerationRequest {
 func commitDirty(r *Runtime, j *job) {
 	// F3: the dead agent's live transcript rides this dirty commit too.
 	r.syncTranscriptBeforeSeal(j)
-	sha, _, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
+	sha, _, _, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)
 	}

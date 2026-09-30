@@ -60,15 +60,15 @@ const (
 
 // Project (02 §3).
 type Project struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Description  string          `json:"description"`
-	Repos        []ProjectRepo   `json:"repos"`
-	Visible      bool            `json:"visible"`
-	Members      []ProjectMember `json:"members"`
-	Identifier   string          `json:"identifier"`
-	CreatedAt    string          `json:"created_at"`
-	UpdatedAt    string          `json:"updated_at"`
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Repos       []ProjectRepo   `json:"repos"`
+	Visible     bool            `json:"visible"`
+	Members     []ProjectMember `json:"members"`
+	Identifier  string          `json:"identifier"`
+	CreatedAt   string          `json:"created_at"`
+	UpdatedAt   string          `json:"updated_at"`
 }
 
 type ProjectRepo struct {
@@ -84,13 +84,13 @@ type ProjectMember struct {
 
 // User (02 §2).
 type User struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name"`
-	Email       string `json:"email"`
-	Role        string `json:"role"` // admin|writer
-	UserType    string `json:"user_type"` // human|machine
+	ID          string     `json:"id"`
+	DisplayName string     `json:"display_name"`
+	Email       string     `json:"email"`
+	Role        string     `json:"role"`      // admin|writer
+	UserType    string     `json:"user_type"` // human|machine
 	APITokens   []APIToken `json:"api_tokens"`
-	CreatedAt   string `json:"created_at"`
+	CreatedAt   string     `json:"created_at"`
 }
 
 type APIToken struct {
@@ -101,15 +101,15 @@ type APIToken struct {
 
 // Claim records a machine taking ownership of a work item (02 §6).
 type Claim struct {
-	WorkItemID  string `json:"work_item_id"`
-	AttemptID   string `json:"attempt_id"`
-	MachineID   string `json:"machine_id"`
-	Owner       string `json:"owner"`
-	Generation int64  `json:"generation"`
-	BundleName  string `json:"bundle_name"`
+	WorkItemID   string `json:"work_item_id"`
+	AttemptID    string `json:"attempt_id"`
+	MachineID    string `json:"machine_id"`
+	Owner        string `json:"owner"`
+	Generation   int64  `json:"generation"`
+	BundleName   string `json:"bundle_name"`
 	BundleDigest string `json:"bundle_digest"`
 	ClaimedAt    string `json:"claimed_at"`
-	Token       string `json:"token"`          // attempt-scoped push credential
+	Token        string `json:"token"`         // attempt-scoped push credential
 	TokenExpires string `json:"token_expires"` // RFC3339
 
 	// Repos is the project's task-repo inventory (v0 claim semantics):
@@ -130,25 +130,45 @@ type PushCredential struct {
 	ExpiresAt string `json:"expires_at"`
 }
 
+// ProgressResponse is the §5.2 read-through answer (02-aihub-core.md):
+// HEAD metadata plus the verbatim runtime-state/execution.json content
+// of the WI's last published revision. Progress passes through
+// unchanged — Core never re-represents execution state in its own data
+// model (INV-1); only the single top-level `generation` field is read
+// out of it to fill HeadGeneration.
+type ProgressResponse struct {
+	WorkItemID     string          `json:"work_item_id"`
+	HeadSeq        int64           `json:"head_seq"`
+	HeadGeneration int64           `json:"head_generation"`
+	Progress       json.RawMessage `json:"progress"`
+	HeadUpdatedAt  string          `json:"head_updated_at"`
+	FreshnessNote  string          `json:"freshness_note"`
+}
+
+// ProgressFreshnessNote marks read-through data as as-of the most
+// recent publish (02 §5.2: freshness = HEAD update time; AIHub never
+// pulls live state from a daemon or agent).
+const ProgressFreshnessNote = "data is as of the most recent publish"
+
 // Memory (06).
 type Memory struct {
-	ID            string          `json:"id"`
-	Project       string          `json:"project"`
-	Type          string          `json:"type"`
-	Content       string          `json:"content"`
-	ContextSnippet string         `json:"context_snippet"`
-	Tags          []string        `json:"tags"`
-	Visibility    string          `json:"visibility"` // admin|private|project|team|public
-	BaseStrength  int             `json:"base_strength"`
-	CreatedAt     string          `json:"created_at"`
-	UpdatedAt     string          `json:"updated_at"`
-	Related       []string        `json:"related_memory_ids"`
-	WorkItemID    string          `json:"work_item_id,omitempty"`
+	ID             string   `json:"id"`
+	Project        string   `json:"project"`
+	Type           string   `json:"type"`
+	Content        string   `json:"content"`
+	ContextSnippet string   `json:"context_snippet"`
+	Tags           []string `json:"tags"`
+	Visibility     string   `json:"visibility"` // admin|private|project|team|public
+	BaseStrength   int      `json:"base_strength"`
+	CreatedAt      string   `json:"created_at"`
+	UpdatedAt      string   `json:"updated_at"`
+	Related        []string `json:"related_memory_ids"`
+	WorkItemID     string   `json:"work_item_id,omitempty"`
 }
 
 // ListResponse is the envelope for list endpoints.
 type ListResponse[T any] struct {
-	Items    []T     `json:"items"`
-	Total    int     `json:"total"`
-	Cursor   *string `json:"cursor,omitempty"`
+	Items  []T     `json:"items"`
+	Total  int     `json:"total"`
+	Cursor *string `json:"cursor,omitempty"`
 }

@@ -1,6 +1,6 @@
 ---
 name: polyforge
-description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of 13 user verbs, each carried by a fragment under verbs/; data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
+description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, submit, observe, answer, batch-confirm, pause, resume, wrap, ops) or the ship delivery bridge, each carried by a fragment under verbs/; data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
 license: proprietary
 compatibility:
   harnesses: [pi, claude]
@@ -9,19 +9,23 @@ compatibility:
 # polyforge routing skill
 
 You are the routing layer of a user's harness session. Your whole job: read the
-user's request, decide which of the 13 verbs it is, and run the `pf` CLI verb
-that carries it. Nothing else. The split between the two target faces is fixed
-(the v1 architecture's routing table):
+user's request, decide which of the 13 routing verbs it is (or whether it is
+the `ship` delivery bridge), and run the `pf` CLI verb that carries it.
+Nothing else. The split between the target faces is fixed (the v1
+architecture's routing table):
 
-- **Data-plane verbs** (`file`, `queue`, `cancel`, `recall`): pure Core data
-  reads/writes that do not touch any execution scene. The `pf` CLI talks HTTP
-  **direct to AIHub** (single port, `Authorization: Bearer <api_key>`); the
-  daemon is not involved.
+- **Data-plane verbs** (`file`, `queue`, `cancel`, `recall`, `remember`): pure
+  Core data reads/writes that do not touch any execution scene. The `pf` CLI
+  talks HTTP **direct to AIHub** (single port, `Authorization: Bearer
+  <api_key>`); the daemon is not involved.
 - **Execution-plane verbs** (`submit`, `observe`, `answer`, `batch-confirm`,
-  `pause`, `resume`, `wrap`, `ship`, `ops`): semantically bound to this machine's local
+  `pause`, `resume`, `wrap`, `ops`): semantically bound to this machine's local
   execution scene. The `pf` CLI talks to the **local daemon over its unix
   domain socket** (default `/run/polyforge.sock`); the daemon translates each
   route into its Runtime (lifecycle) and Observe (supervision) modules.
+- **The delivery bridge** (`ship`): pushes an already-closed WI's sealed
+  capsule commits to git origin — also the local daemon's unix-socket face,
+  but not one of the 13 routing verbs; it is the step after `wrap`.
 
 Direct connection does not bypass any permission boundary: the `pf` CLI passes
 through the same AIHub authentication as any other HTTP client, and daemon
@@ -55,6 +59,7 @@ accepts an id.
 | list work items / filter by status / 列一下所有票 / 按状态筛 | `verbs/queue.md` | AIHub |
 | cancel it / drop it / don't want it anymore / 不要了 / 取消这个票 / 作废 | `verbs/cancel.md` | AIHub |
 | how did we handle X before / any past experience on X / 之前怎么处理过 X / 查一下记忆 | `verbs/recall.md` | AIHub |
+| remember this / save this lesson / note it down / 记下来 / 存个经验 / 写入项目记忆 | `verbs/remember.md` | AIHub |
 | run it / submit it / start this work item / execute / 跑起来 / 执行这个 WI / 提交执行 | `verbs/submit.md` | daemon |
 | take it over / force takeover / 接管 / 强制接管 | `verbs/submit.md` (--takeover) | daemon |
 | how's it going / show progress / what step is it on / 看看进度 / 跑到哪了 / 观察一下 | `verbs/observe.md` | daemon |
@@ -112,8 +117,10 @@ pf [global flags] <verb> [verb flags] [positional args]
   `internal/polyforge/cli/daemon.go` is the authority). Human mode prints
   `pf: CORE-409: <detail>` — the typed code prominent, never doubled, never
   a stack trace; `--json` prints the raw envelope on stderr. Exit codes: 0
-  success, 1 client-class failure (4xx wire answers, local validation), 2
-  server-class failure (5xx) and usage errors.
+  success, 1 client-class failure (4xx wire answers, local validation, and
+  transport failure — an unreachable AIHub server or daemon socket is a
+  retryable client-side condition, same family as 4xx), 2 server-class
+  failure (5xx) and usage errors.
 - **Error code families** (the closed registry, `internal/common/api/errors.go`):
   `CORE-*` work-item/project/user business errors, `MEM-*` memory search,
   `AUTH-*` HTTP-boundary auth, `GIT-*` the git push-proxy surface

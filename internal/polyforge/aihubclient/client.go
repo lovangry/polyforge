@@ -134,6 +134,21 @@ func (c *Client) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	return &wi, nil
 }
 
+// GetProgress reads the §5.2 progress read-through projection.
+func (c *Client) GetProgress(idOrSlug string) (*api.ProgressResponse, error) {
+	var p api.ProgressResponse
+	if err := c.Do("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/progress", nil, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// GetProgressRaw reads the progress projection undecoded (--json
+// passthrough: the server body reaches the caller verbatim).
+func (c *Client) GetProgressRaw(idOrSlug string) (json.RawMessage, error) {
+	return c.raw("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/progress", nil)
+}
+
 // ListWorkItems filters by project and status (queue views).
 func (c *Client) ListWorkItems(project string, status string) ([]api.WorkItem, error) {
 	q := url.Values{}
@@ -161,8 +176,8 @@ func (c *Client) ListWorkItems(project string, status string) ([]api.WorkItem, e
 // NEVER included — a human session is a claim precondition there.
 func (c *Client) Queue(project string) ([]api.WorkItem, error) {
 	var resp struct {
-		Items    []api.WorkItem `json:"items"`
-		Unknown  []api.WorkItem `json:"unclassified"`
+		Items   []api.WorkItem `json:"items"`
+		Unknown []api.WorkItem `json:"unclassified"`
 	}
 	if err := c.Do("GET", "/api/v1/projects/"+url.PathEscape(project)+"/ready-queue", nil, &resp); err != nil {
 		return nil, err

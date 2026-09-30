@@ -34,6 +34,31 @@ pf-2  queued   normal    -         a goal that is definitely longer than sixty c
 `)
 }
 
+func TestGoldenReadyWITable(t *testing.T) {
+	bundle := "bundle-x"
+	items := []api.WorkItem{
+		{Slug: "pf-1", Status: "queued", Priority: "normal", BundleName: &bundle, Goal: "fix the thing"},
+	}
+	unclassified := []api.WorkItem{
+		{Slug: "pf-2", Status: "queued", Priority: "normal", Goal: "another goal"},
+	}
+	var b bytes.Buffer
+	renderReadyWITable(&b, items, unclassified)
+	golden(t, "ReadyWITable", b.String(),
+		`SLUG  STATUS  PRIORITY  BUNDLE    GOAL           SEGMENT
+----  ------  --------  --------  -------------  ------------
+pf-1  queued  normal    bundle-x  fix the thing  items
+pf-2  queued  normal    -         another goal   unclassified
+`)
+
+	b.Reset()
+	renderReadyWITable(&b, nil, nil)
+	golden(t, "ReadyWITableEmpty", b.String(),
+		`SLUG  STATUS  PRIORITY  BUNDLE  GOAL  SEGMENT
+----  ------  --------  ------  ----  -------
+`)
+}
+
 func TestGoldenObserve(t *testing.T) {
 	jv := protocol.JobView{
 		WorkItem:    "wi_abc",
@@ -86,6 +111,118 @@ t3  step_started  {"step":"implement"}
 t4  needs_input
 next cursor: pf observe wi_abc --after 8
 `)
+}
+
+func TestGoldenObserveEventLatency(t *testing.T) {
+	jv := protocol.JobView{
+		WorkItem: "wi_lat",
+		Project:  "polyforge",
+		Status:   protocol.JobRunning,
+		Events: []protocol.EventEntry{
+			// Both keys: full latency segment.
+			{At: "t1", Kind: "commit_push", Body: json.RawMessage(`{"commit_ms":1234,"push_ms":567,"repo":"polyforge"}`), Seq: 1},
+			// Only commit_ms: push segment stays blank.
+			{At: "t2", Kind: "commit_push", Body: json.RawMessage(`{"commit_ms":42}`), Seq: 2},
+			// Only push_ms: commit segment stays blank.
+			{At: "t3", Kind: "commit_push", Body: json.RawMessage(`{"push_ms":7}`), Seq: 3},
+			// Neither key: renders exactly as before (truncated raw JSON).
+			{At: "t4", Kind: "step_started", Body: json.RawMessage(`{"step":"implement"}`), Seq: 4},
+			// Invalid JSON: falls back to raw, no error.
+			{At: "t5", Kind: "noise", Body: json.RawMessage(`{not json`), Seq: 5},
+			// Null body: blank cell, exactly as before.
+			{At: "t6", Kind: "needs_input", Body: json.RawMessage(`null`), Seq: 6},
+		},
+	}
+	var b bytes.Buffer
+	renderObserve(&b, &jv)
+	golden(t, "ObserveEventLatency", b.String(),
+		`wi_lat (polyforge) — running
+attempt:   generation: 0
+
+events:
+AT  KIND          BODY
+--  ------------  ---------------------------
+t1  commit_push   commit 1234ms · push 567ms
+t2  commit_push   commit 42ms
+t3  commit_push   push 7ms
+t4  step_started  {"step":"implement"}
+t5  noise         {not json
+t6  needs_input
+next cursor: pf observe wi_lat --after 6
+`)
+}
+
+func TestGoldenObserveHeaderWall(t *testing.T) {
+	base := func() protocol.JobView {
+		return protocol.JobView{WorkItem: "wi_w", Project: "polyforge", Status: protocol.JobRunning}
+	}
+
+	// Budget carrying wall_ms: header gains the cumulative wall figure.
+	jv := base()
+	jv.Budget = json.RawMessage(`{"usd":1.5,"wall_ms":11520000,"tokens":9000}`)
+	var b bytes.Buffer
+	renderObserve(&b, &jv)
+	golden(t, "ObserveHeaderWall", b.String(),
+		`wi_w (polyforge) — running · wall 3.2h
+attempt:   generation: 0
+
+budget:
+{
+  "usd": 1.5,
+  "wall_ms": 11520000,
+  "tokens": 9000
+}
+`)
+
+	// Sub-minute wall renders in seconds.
+	jv = base()
+	jv.Budget = json.RawMessage(`{"wall_ms":12345}`)
+	b.Reset()
+	renderObserve(&b, &jv)
+	golden(t, "ObserveHeaderWallSeconds", b.String(),
+		`wi_w (polyforge) — running · wall 12.3s
+attempt:   generation: 0
+
+budget:
+{
+  "wall_ms": 12345
+}
+`)
+
+	// Budget without wall_ms: header exactly as today (no wall segment).
+	jv = base()
+	jv.Budget = json.RawMessage(`{"requests":{"used":3,"ceiling":50}}`)
+	b.Reset()
+	renderObserve(&b, &jv)
+	golden(t, "ObserveHeaderNoWall", b.String(),
+		`wi_w (polyforge) — running
+attempt:   generation: 0
+
+budget:
+{
+  "requests": {
+    "used": 3,
+    "ceiling": 50
+  }
+}
+`)
+
+	// Null / empty / zero wall_ms budgets: no wall segment, no "0ms" artifact.
+	for name, budget := range map[string]json.RawMessage{
+		"null": json.RawMessage(`null`),
+		"empty": json.RawMessage(``),
+		"zero": json.RawMessage(`{"wall_ms":0}`),
+	} {
+		jv = base()
+		jv.Budget = budget
+		b.Reset()
+		renderObserve(&b, &jv)
+		want := "wi_w (polyforge) — running\nattempt:   generation: 0\n"
+		if name == "zero" {
+			want += "\nbudget:\n{\n  \"wall_ms\": 0\n}\n"
+		}
+		golden(t, "ObserveHeader"+name, b.String(), want)
+	}
 }
 
 func TestGoldenStatus(t *testing.T) {

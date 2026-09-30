@@ -139,7 +139,7 @@ func TestWrapDualPathArbitration(t *testing.T) {
 	// (a) flush(wrap) first, its commit+push deliberately slow so the
 	// seal guard is observably held; the CLI wrap must get DAEMON-409.
 	td := newTestDaemon(t, func(c *Config) {
-		c.PushFunc = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
+		c.PushFunc = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
 			time.Sleep(400 * time.Millisecond)
 			return gitops.CommitPush(o, msg)
 		}

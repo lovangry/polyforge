@@ -22,12 +22,12 @@ func TestBackpressureFiveFailedPushesWriteDegradationEvent(t *testing.T) {
 	var fail atomic.Bool
 	fail.Store(true)
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
 			if fail.Load() {
 				failures.Add(1)
-				return "sha_local", false, errors.New("GIT-500: upstream refused")
+				return "sha_local", false, gitops.PushTimings{}, errors.New("GIT-500: upstream refused")
 			}
-			return "sha_ok", true, nil
+			return "sha_ok", true, gitops.PushTimings{}, nil
 		}
 	})
 
@@ -65,8 +65,8 @@ func TestBackpressureTimeBoundWritesDegradationEvent(t *testing.T) {
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.BackpressureSteps = 1000 // keep the steps bound out of this test
 		c.BackpressureAfter = 40 * time.Millisecond
-		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, error) {
-			return "sha_local", false, errors.New("GIT-500: upstream refused")
+		c.push = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
+			return "sha_local", false, gitops.PushTimings{}, errors.New("GIT-500: upstream refused")
 		}
 	})
 

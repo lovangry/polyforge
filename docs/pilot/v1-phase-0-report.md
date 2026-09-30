@@ -42,6 +42,20 @@
 | M8 发布时延与结果 | §9.2（B13 口径修订） | **仅对已真实发生的边界同步请求计分**，不使用任何「无活动时间窗口」判定：分子 = 以非幂等失败终止或耗时超过运维告警阈值（复用 `05-sync-revision-recovery.md#§9` 已定义口径）的请求次数；分母 = 同一 Pilot 观测窗口内全部实际发生的边界同步请求次数；分母为 0 时该次计算不参与否决判定。 | 待填 |
 | M9 rewind 收敛 | §9.2 | 数据源 = `runtime-state/execution.json` 的 `rewind_stats`（`{total, by_step}`），经 `02-aihub-core.md#§5.2` read-through 逐字读取；窗口 = 单 WI 生命周期内累计值，不做跨 WI 聚合比例。**观测项，不设否决门槛**（§9.3 收尾注，见上文）。 | 待填 |
 
+## 2a. M1–M9 在 v1 实栈上的机械计算式（收官填数操作口径）
+
+本节把每条指标在 **v1 实栈**上的机械计算式写死：数据来源 ∈ {events.log（daemon 数据目录 `<DataDir>/events.log`，JSONL）、aihub（Core API 状态面）、裸仓、`runtime-state/execution.json`（read-through）}，收官填数者从哪读、怎么算，以本节为准；口径锚点仍以 `07-deployment-pilot.md#§9.2`/`§9.2a` 原文为权威，本节不替代、不修改任何门槛公式（§12 第 1 条：校准不改判定式）。其中 M6/M8 的两个耗时样本字段（`write_ms`、`commit_ms`/`push_ms`）是本底稿配套的事件体观测增量（daemon/observe 代码已携带，见各条「数据源 = 事件体新字段」标注）：**观测字段增量不构成行为/判定/线协议变更**，与 #11 登记表「不在观测数据之外认证任何 Pilot 通过」立场一致——收官前本节不产生任何实测读数。
+
+- **M1 现场一致性**（数据源 = 裸仓 + events.log）：沿窗口内每张 WI 裸仓 first-parent 链逐提交读 `Polyforge-Seq` trailer，计数任何 seq 回退 / HEAD 后移点。v1 pre-receive hook（FF-only、禁 ref 删除、seq 严格单调）使实际回退结构上恒为 0；未遂回退以 hook 拒绝的形式落在 `push_failed.error`，记为佐证，不计入事故数。计数型，无分母；窗口 = Pilot 累计运行以来。
+- **M2 误删**（数据源 = v1 栈删除面本身）：v1 无删除面（13 个路由 verb 无 delete；无 `DELETE capsule-data`/tombstone；runtime `RemoveAll` 限于本 WI staging/swap 与异代隔离）⇒ 分子 = 分母 = 0——这是删除面缺席下的**机械真读**，不是豁免；公式如实写明，PILOT-V2 以分子 > 0 判，不受影响（未来若引入删除面，读数自然受判）。
+- **M3 卡死步**（数据源 = aihub）：计数「step `in_progress` 超 24h 且所属 machine `last_heartbeat_at` 超存活阈值」的 step 数。计数型，无分母；窗口 = Pilot 累计运行以来。
+- **M4 校验真实性**（数据源 = `runtime-state/execution.json`，read-through）：分子 = verification step 中 `output.commands` 至少含一条可读 `{argv, exit_code, duration_ms}` 者的次数；分母 = 全部已执行 verification step 次数；旧版 schema（无 `commands` 字段）不计分子；窗口 = Pilot 累计运行以来。
+- **M5 谎报逃逸**（数据源 = execution.json `step_start_refs` + 工作树 diff + `artifacts/` + `output`）：§9.2a 三条件同时成立（对起始基线的工作树 diff 为空、`artifacts/` 无新增、`output` 为空）的 `kind ∈ {code, author}` step 计数。计数型，无分母；窗口 = Pilot 累计运行以来。
+- **M6 检索实时性**（数据源 = events.log，**事件体新字段 `write_ms`**）：滚动 24h 窗口内全部 `memory_remember.write_ms` 样本的 p99；样本数为 0 的窗口不参与否决判定；阈值逐字引用 `06-memory-search.md#§4.5` 的 p99 ≤ 5000 ms，不新造数值。**样本集边界如实登记**：迁移（CLI 直写）与服务端 reconcile 自愈回写不产生事件、不入样本集；覆盖该路径需新事件 kind，未获授权，不在本 fix 内。窗口内样本集 = 全部 `memory_remember` 事件。
+- **M7 同步收敛**（数据源 = events.log）：一次全扫描发布失败后，同一 WI 连续 ≥3 次发布尝试（每次尝试恰产生一条 `published` 或 `push_failed`）仍存在「本地提交未达已发布 HEAD」未收敛差异，计 1 次；任一 `published` 即收敛、终结该段。**聚合口径（公式注明）**：`push_backpressure` 为降级段标记，不计入；seal 路径 ≤3 次内部重试聚合为一条 `wrap_blocked`，不产生逐次扫描样本。计数型，无比例分母；窗口 = Pilot 累计运行以来。
+- **M8 发布时延与结果**（数据源 = events.log，**事件体新字段 `commit_ms`/`push_ms`**）：请求单位 = 每次实际发生的发布尝试（v1 对 §9.2「边界同步请求」的机械实现；wrap_blocked 聚合的内部重试按 1 计并注明）。分母 = count(`published`) + count(`push_failed`) + count(`wrap_blocked`)，分母为 0 不参与否决判定。分子 = ① 耗时超阈值分量：`published` 中 `commit_ms + push_ms > T` 的条数；② 失败分量：以持续类（非幂等）错误终止的尝试数——error 串属 pre-receive 拒绝（非 FF / ref 删除 / gitlink / blob 超限 / seq 违规 / attempt-id 不匹配）、裸仓 404、鉴权/凭证类；排除瞬时网络/超时类（#11 登记表 F2 的 404 样本按既有口径计入分子与分母，不预先豁免）。`push_backpressure` 不计入分子与分母。**阈值 T 状态**：T = `05-sync-revision-recovery.md#§9` 运维告警口径的运维配置值；v1 装机至今未配置——**T 待 Pilot 运维配置（属 §12 校准议题，校准不改判定式），本底稿不发明数值**。
+- **M9 rewind 收敛**（数据源 = execution.json `rewind_stats`，read-through）：单 WI 生命周期累计 `{total, by_step}` 逐字读取，不跨 WI 聚合；观测项，无门槛。
+
 ## 3. 观测窗与计数口径
 
 - **观测窗口**（`07-deployment-pilot.md#§9.1`）：30 天，或累计 ≥ 40 张 wrapped WI，以先满足者为准（两者均为 Pilot 设计参数，校准议题见 §12 第 1 条——校准不改变 §9.3 判定公式）。
@@ -53,5 +67,5 @@
 ## 4. 当前读数占位
 
 - 上文 M1–M9 的「当前读数」与门槛表 `PILOT-V1`…`PILOT-V8` 的「判定读数」**全部为「待填」**，待 pilot 收官（观测窗口按 §9.1 先满足者为准）后填入；本文不含任何实测数值，收官填数前任何一格不得被解释为通过或失败。
-- 收官填数时的读数来源（机械，§9.2 / #11 登记表总结）：Core API 状态与事件面（M1/M2/M3/M7）、`runtime-state/execution.json`（M4 的结构化命令证据、M9 的 `rewind_stats`）、§9.2a 机械信号（M5）、vNext 自身 Memory 索引的写入→可检索时延样本（M6）、已发生边界同步请求的耗时与结果（M8）。
+- 收官填数时的读数来源（机械，§9.2 / #11 登记表总结；逐条操作口径见 §2a）：Core API 状态与事件面（M1/M2/M3/M7）、`runtime-state/execution.json`（M4 的结构化命令证据、M9 的 `rewind_stats`）、§9.2a 机械信号（M5）、events.log `memory_remember` 事件体的新字段 `write_ms`（M6——**数据源 = 事件体新字段**，公式见 §2a）、events.log 的发布尝试事件，`published` 事件体携带新字段 `commit_ms`/`push_ms`（M8——**数据源 = 事件体新字段**，公式见 §2a）。
 - 填数属另一个工作项；本底稿只建结构，不改门槛公式、不改指标口径、不改任何权威文档。

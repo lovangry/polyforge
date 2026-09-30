@@ -85,6 +85,17 @@ func newFakeDaemon(t *testing.T, handler http.Handler) string {
 	return sock
 }
 
+// deadAihubURL returns a server URL whose listener is already closed:
+// dialing it is a guaranteed connection-refused, for transport-failure
+// goldens on the aihub face.
+func deadAihubURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	return url
+}
+
 // runPf drives the full CLI the way main does; returns the exit code.
 // env pairs are applied with t.Setenv for the duration of the test.
 func runPf(t *testing.T, env map[string]string, args ...string) (int, string, string) {

@@ -42,7 +42,7 @@ requester, so whatever `fix` needs to know must end up in your memo.
    wrong or missing, what "fixed" looks like, edge cases the requester cares about, and
    anything that smells like an unstated assumption.
 2. For each material ambiguity, ask ONE focused question at a time via the interactive
-   needs_input mechanism your WI Agent drives (`01-workflow-skills.md` §4.3). Do not
+   needs_input mechanism your WI Agent drives (pf-execute §7). Do not
    fabricate or guess an answer you did not receive. Append every question and answer to
    `artifacts/grill-qa.md` under a `## grill` heading as they come in.
 3. Do not over-interrogate. This lane exists for small, well-understood changes: if after

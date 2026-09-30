@@ -14,24 +14,61 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
+// wiRepoSegment pins the repo segment of the git face: the canonical
+// remote is /git/<wi_id>.git where the id body matches the imported id
+// domain (core's wiIDPattern: "wi_" + identifier body). The single exact
+// ".git" suffix is required — the suffix-less, doubled-suffix, empty and
+// garbage segment shapes all fail here in one stroke — and no dot can
+// appear inside the id, so the TrimSuffix below is exact.
+var wiRepoSegment = regexp.MustCompile(`^wi_[A-Za-z0-9_-]+\.git$`)
+
 // HandleGit is the http.Handler for the /git/ prefix.
 func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
-	// Path shape after /git/: "<wi_id>.git[/…]".
+	// Path shape after /git/: "<wi_id>.git[/<endpoint>]". Shape first
+	// (404): a malformed path names no repo to authenticate against.
 	rest := strings.TrimPrefix(r.URL.Path, "/git/")
 	rest = strings.TrimPrefix(rest, "/")
-	wiID := rest
+	segment := rest
 	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		wiID = rest[:i]
+		segment = rest[:i]
 	}
-	wiID = strings.TrimSuffix(wiID, ".git")
-	if !strings.HasPrefix(wiID, "wi_") {
+	if !wiRepoSegment.MatchString(segment) {
 		writeGitErr(w, api.ErrGitNotFound, "unknown git path %q", r.URL.Path)
+		return
+	}
+	wiID := strings.TrimSuffix(segment, ".git")
+	// Traversal never reaches CGI: any dot-segment — or a component
+	// embedding ".." — is refused here with a typed 404. Encoded forms
+	// (%2e%2e and friends) are already decoded into r.URL.Path by the
+	// time the proxy sees them, so they hit this fence too.
+	for _, comp := range strings.Split(rest, "/") {
+		if comp == "." || strings.Contains(comp, "..") {
+			writeGitErr(w, api.ErrGitNotFound, "path traversal rejected: %q", r.URL.Path)
+			return
+		}
+	}
+	// Method/target coherence (400) — needs a well-formed path to reason
+	// about its endpoint. Smart HTTP has exactly three targets: GET
+	// advertises at info/refs, POST drives git-upload-pack and
+	// git-receive-pack; anything else has no valid smart-HTTP method and
+	// is refused before CGI.
+	endpoint := ""
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		endpoint = rest[i+1:]
+	}
+	switch {
+	case endpoint == "info/refs" && r.Method == http.MethodGet,
+		endpoint == "git-upload-pack" && r.Method == http.MethodPost,
+		endpoint == "git-receive-pack" && r.Method == http.MethodPost:
+	default:
+		writeGitErr(w, api.ErrGitBadRequest, "method %s is not valid for %q", r.Method, r.URL.Path)
 		return
 	}
 

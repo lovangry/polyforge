@@ -113,6 +113,18 @@ var git = func(env []string, dir string, args ...string) (string, error) {
 // retry-worthy: a retry cannot conjure a history.
 var ErrEmptyHistory = errors.New("gitops: empty capsule history (clean tree with no standing HEAD)")
 
+// PushTimings carries the wall-clock durations of the underlying git
+// invocations a publish attempt is made of (integer milliseconds, as
+// seen by this process around the raw git calls): CommitMS spans the
+// git commit call, PushMS spans the git push call. Zero is the honest
+// reading for a call that did not happen on this path (a clean-tree
+// publish performs no commit). Observed-only bookkeeping (M8 latency
+// samples in the published event bodies); no judgment consumes it here.
+type PushTimings struct {
+	CommitMS int64 `json:"commit_ms"`
+	PushMS   int64 `json:"push_ms"`
+}
+
 // CommitPush stages everything, commits with the seq trailer (derived
 // here — the single authority) and pushes to the aihub bare repo. It
 // takes the per-WI git lock itself; callers must not hold it. A clean
@@ -122,14 +134,16 @@ var ErrEmptyHistory = errors.New("gitops: empty capsule history (clean tree with
 // including the retry-after-failed-push one a wrap/seal re-drive needs:
 // a commit that landed locally on a failed push finally reaches the
 // server HERE, and a still-dead server answers with its error, not a
-// fake success. Returns the local commit SHA and whether the push
-// reached the server.
-func CommitPush(o Opts, message string) (localSHA string, pushed bool, err error) {
+// fake success. Returns the local commit SHA, whether the push reached
+// the server, and the commit/push wall-clock timings.
+func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 	release := Lock(o.WorkItemID)
 	defer release()
 
+	var timings PushTimings
+
 	if err := cleanStaleLocks(o.GitDir); err != nil {
-		return "", false, err
+		return "", false, timings, err
 	}
 	env := o.Env()
 	// Clean-tree check BEFORE committing: git reports "nothing to commit"
@@ -138,7 +152,7 @@ func CommitPush(o Opts, message string) (localSHA string, pushed bool, err error
 	// signal: empty output means the standing HEAD is already the answer.
 	status, err := git(env, o.CapsuleDir, "status", "--porcelain")
 	if err != nil {
-		return "", false, err
+		return "", false, timings, err
 	}
 	if strings.TrimSpace(status) == "" {
 		// Clean tree: the standing HEAD is the answer — and it is
@@ -148,30 +162,35 @@ func CommitPush(o Opts, message string) (localSHA string, pushed bool, err error
 		// server unreachability) it exists for.
 		sha, serr := git(env, o.CapsuleDir, "rev-parse", "HEAD")
 		if serr != nil {
-			return "", false, fmt.Errorf("%w: %v", ErrEmptyHistory, serr)
+			return "", false, timings, fmt.Errorf("%w: %v", ErrEmptyHistory, serr)
 		}
-		localSHA = strings.TrimSpace(sha)
-		pushed, perr := pushLocked(o)
-		return localSHA, pushed, perr
+		localSHA := strings.TrimSpace(sha)
+		pushed, pushMS, perr := pushLocked(o)
+		timings.PushMS = pushMS
+		return localSHA, pushed, timings, perr
 	}
 	seq, err := nextSeq(env, o.CapsuleDir)
 	if err != nil {
-		return "", false, err
+		return "", false, timings, err
 	}
 	if _, err := git(env, o.CapsuleDir, "add", "-A"); err != nil {
-		return "", false, err
+		return "", false, timings, err
 	}
 	msg := fmt.Sprintf("%s\n\n%s: %d", message, capsule.SeqTrailer, seq)
-	if _, err := git(env, o.CapsuleDir, "commit", "-m", msg); err != nil {
-		return "", false, err
+	commitStart := time.Now()
+	_, cerr := git(env, o.CapsuleDir, "commit", "-m", msg)
+	timings.CommitMS = time.Since(commitStart).Milliseconds()
+	if cerr != nil {
+		return "", false, timings, cerr
 	}
 	sha, err := git(env, o.CapsuleDir, "rev-parse", "HEAD")
 	if err != nil {
-		return "", false, err
+		return "", false, timings, err
 	}
-	localSHA = strings.TrimSpace(sha)
-	pushed, perr := pushLocked(o)
-	return localSHA, pushed, perr
+	localSHA := strings.TrimSpace(sha)
+	pushed, pushMS, perr := pushLocked(o)
+	timings.PushMS = pushMS
+	return localSHA, pushed, timings, perr
 }
 
 // nextSeq derives the next Polyforge-Seq trailer value from the capsule's
@@ -195,17 +214,22 @@ func nextSeq(env []string, dir string) (int64, error) {
 
 // Push sends the capsule's standing HEAD to the aihub bare repo's main
 // branch (the retry path for a commit that landed locally but never
-// reached the server). Takes the per-WI lock.
+// reached the server). Takes the per-WI lock. The push timing is
+// measured but not answered: this entry point serves the runtime seal
+// retry, which emits no published event and has no consumer for it.
 func Push(o Opts) (bool, error) {
 	release := Lock(o.WorkItemID)
 	defer release()
-	return pushLocked(o)
+	pushed, _, err := pushLocked(o)
+	return pushed, err
 }
 
-// pushLocked is push under an already-held per-WI lock.
-func pushLocked(o Opts) (bool, error) {
+// pushLocked is push under an already-held per-WI lock. The returned
+// pushMS is the wall-clock duration of the git push invocation,
+// measured honestly on failure too (the observed-only latency sample).
+func pushLocked(o Opts) (bool, int64, error) {
 	if o.RemoteURL == "" {
-		return false, &api.Error{Code: api.ErrGitUnauthorized, Detail: "no push remote configured"}
+		return false, 0, &api.Error{Code: api.ErrGitUnauthorized, Detail: "no push remote configured"}
 	}
 	args := []string{"push"}
 	if o.AttemptID != "" {
@@ -216,15 +240,17 @@ func pushLocked(o Opts) (bool, error) {
 	args = append(args, o.RemoteURL, "HEAD:refs/heads/main")
 	additions, cleanup, err := credentialEnv(o)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	defer cleanup()
 	env := append(o.Env(), additions...)
+	pushStart := time.Now()
 	out, err := git(env, o.CapsuleDir, args...)
+	pushMS := time.Since(pushStart).Milliseconds()
 	if err != nil {
-		return false, &api.Error{Code: api.ErrGitInternal, Detail: strings.TrimSpace(out) + ": " + err.Error()}
+		return false, pushMS, &api.Error{Code: api.ErrGitInternal, Detail: strings.TrimSpace(out) + ": " + err.Error()}
 	}
-	return true, nil
+	return true, pushMS, nil
 }
 
 // Clone materializes a fresh capsule worktree from the aihub bare repo

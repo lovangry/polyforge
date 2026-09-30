@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -191,6 +192,16 @@ func (o *Observe) serveRemember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, api.ErrDaemonInternal, "memory face is not configured on this daemon")
 		return
 	}
+	// The face receives the CANONICAL id (F2): a slug spelling that
+	// reached the monitor through lookup is an alias, never an authority
+	// for attribution or server calls.
+	//
+	// write_ms (M6's latency sample) is the wall-clock duration of the
+	// WHOLE face call as seen from this append site — the Store.Create
+	// commit round-trip (row + FTS5 trigram in one Core tx, INV-7a: the
+	// write's return means retrievable), idempotent replays (the same
+	// key's early-exit answer) timed just as honestly as fresh writes.
+	start := time.Now()
 	stored, err := o.cfg.MemoryFace.Remember(m.canonicalWI(), MemoryRemember{
 		Type:       req.Type,
 		Title:      req.Title,
@@ -198,12 +209,14 @@ func (o *Observe) serveRemember(w http.ResponseWriter, r *http.Request) {
 		Visibility: req.Visibility,
 		Tags:       req.Tags,
 	})
+	writeMS := time.Since(start).Milliseconds()
 	if err != nil {
 		writeMemoryFaceErr(w, err)
 		return
 	}
 	_ = o.log.Append(wi, EvMemoryRemember, map[string]any{
 		"id": stored.ID, "type": req.Type, "visibility": req.Visibility,
+		"write_ms": writeMS,
 	})
 	writeJSON(w, http.StatusOK, stored)
 }

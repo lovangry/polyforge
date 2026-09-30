@@ -48,22 +48,22 @@ type MigMemoriesOptions struct {
 
 // MigConversion is one logged frontmatter conversion of the run.
 type MigConversion struct {
-	MemID   string `json:"mem_id"`
-	Field   string `json:"field"`
-	Old     string `json:"old,omitempty"`
-	New     string `json:"new,omitempty"`
-	Note    string `json:"note,omitempty"`
+	MemID string `json:"mem_id"`
+	Field string `json:"field"`
+	Old   string `json:"old,omitempty"`
+	New   string `json:"new,omitempty"`
+	Note  string `json:"note,omitempty"`
 }
 
 // MigMemoriesReport is the migration report the verb prints.
 type MigMemoriesReport struct {
-	Mode           string // "dir" | "jsonl"
-	InputLines     int    // JSONL: non-blank input lines; dir: files found
+	Mode            string // "dir" | "jsonl"
+	InputLines      int    // JSONL: non-blank input lines; dir: files found
 	FilteredBySince int
-	Migrated       int
+	Migrated        int
 	Unchanged       int // re-placed byte-identical (idempotent re-run evidence)
 	ActiveCount     int
-	RedactedCount    int
+	RedactedCount   int
 	Rebuilt         int
 	Source          string
 	TargetProject   string
@@ -233,7 +233,7 @@ func RunMigrateMemories(opts MigMemoriesOptions, client *aihubclient.Client) (*M
 	// ③ the live server's reconcile backfills rows + FTS from the files.
 	rep.Rebuilt, err = client.RebuildMemoryIndex()
 	if err != nil {
-		return nil, resolveErrf("rebuild-index: %v (start the server first — the file-wins reconcile is the only backfill path)", err)
+		return nil, resolveWrapErrf(err, "rebuild-index: %v (start the server first — the file-wins reconcile is the only backfill path)", err)
 	}
 
 	// ④ the four-step verification.

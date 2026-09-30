@@ -193,7 +193,7 @@ func (d *Daemon) awaitShutdownFlushes(ctx context.Context, live []runtime.JobInf
 		return nil
 	}
 	type res struct {
-		wi   string
+		wi      string
 		flushed bool
 	}
 	resCh := make(chan res, len(live))
