@@ -404,6 +404,12 @@ type v1Daemon struct {
 	dataDir     string
 	workspace   string
 	machineID   string
+	// execPrompt is the --executor-prompt file this daemon spawns its
+	// agents with. Empty means the default (the real
+	// skills/pf-execute/SKILL.md) — resolved in start(), not at
+	// construction, because the restart scenarios build a v1Daemon by
+	// struct literal and must keep getting the default for free.
+	execPrompt  string
 	extraEnv    []string
 	client      *cli.DaemonClient
 	waitedExit  chan error
@@ -413,6 +419,16 @@ type daemonOpt func(*v1Daemon)
 
 func optMachineID(id string) daemonOpt {
 	return func(d *v1Daemon) { d.machineID = id }
+}
+
+// optExecutorPrompt points --executor-prompt at another file. The
+// initial prompt the daemon injects into every derivation is built from
+// it (runtime.buildPrompt), so a scenario that needs a prompt of a
+// particular SIZE — s17's must-fail-at-spawn ladder needs one larger
+// than a pipe buffer — sets it here instead of touching the real
+// executor skill.
+func optExecutorPrompt(path string) daemonOpt {
+	return func(d *v1Daemon) { d.execPrompt = path }
 }
 
 // optMode pre-seeds the daemon state file with an initial mode (read at
@@ -476,6 +492,10 @@ func (d *v1Daemon) start() {
 	if err != nil {
 		d.t.Fatal(err)
 	}
+	execPrompt := d.execPrompt
+	if execPrompt == "" {
+		execPrompt = filepath.Join(d.inst.root, "skills", "pf-execute", "SKILL.md")
+	}
 	args := []string{
 		"daemon",
 		"--socket", d.sock,
@@ -486,7 +506,7 @@ func (d *v1Daemon) start() {
 		"--workspace-root", d.workspace,
 		"--project", v1Project,
 		"--workflows-dir", filepath.Join(d.inst.root, "workflows"),
-		"--executor-prompt", filepath.Join(d.inst.root, "skills", "pf-execute", "SKILL.md"),
+		"--executor-prompt", execPrompt,
 		"--pi-bin", d.inst.fakepiPath,
 	}
 	cmd := exec.Command(d.inst.pfPath, args...)

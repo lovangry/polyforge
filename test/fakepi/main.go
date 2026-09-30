@@ -37,6 +37,16 @@
 // agent does. Actions: step / ask / wrap / fail / hang / provider_error /
 // park / exit / sleep / repo (see drive.go).
 //
+// Besides the action list the plan carries per-derivation-kind modes.
+// fail_spawn_resume / fail_spawn_fresh are the must-fail-AT-SPAWN mode:
+// the selected derivation exits before reading one byte of stdin, so the
+// daemon's initial-prompt injection breaks the pipe and Spawn returns an
+// error — the spawn-failure ladder, as opposed to the observe lane's
+// agent-death lane that every other death here produces. The original
+// derivation is never selected (the flags key on `--session` and on the
+// `#N` lineage suffix in PF_INSTANCE_ID). drive.go states the mode's
+// pipe-capacity contract; it is not optional.
+//
 // Known deviation from the real harness (inherited from the v0 double):
 // stdin EOF does not exit — the process parks alive, which the
 // daemon-crash scenarios need (the WI agent must survive its parent's
@@ -76,6 +86,25 @@ func main() {
 	drv = newDriveEnv()
 	if drv == nil {
 		parkForever()
+	}
+	if drv.mustFail {
+		// The must-fail-at-spawn mode (plan.FailSpawnResume /
+		// plan.FailSpawnFresh): die at birth. Nothing of this derivation
+		// may be observable as a LIVE agent — no agent_settled record, no
+		// transcript line, no stdin read — because the daemon's Spawn must
+		// fail at prompt injection rather than hand back a working handle.
+		// The journal line is the one exception and it is safe: the parent
+		// already wrote this derivation's spawn-journal entry BEFORE the
+		// prompt, so the failed derivation is on the record either way,
+		// and a scenario needs to see that the mode really engaged.
+		drv.journal("spawn_fail", map[string]any{
+			"pid":      os.Getpid(),
+			"instance": drv.instance,
+			"resume":   drv.resumed,
+			"wi":       drv.wi,
+			"mode":     "must_fail_at_spawn",
+		})
+		os.Exit(9)
 	}
 	drv.journal("spawn", map[string]any{
 		"pid":      os.Getpid(),

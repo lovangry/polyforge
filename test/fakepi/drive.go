@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"strconv"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -52,6 +53,41 @@ type plan struct {
 	// derivation re-reads the plan file, so a scenario clears the flag
 	// to let the successor consume normally.
 	AckAnswer *bool `json:"ack_answer"`
+	// FailSpawnResume true makes every RESUME derivation die AT BIRTH:
+	// the process exits before it reads one byte of stdin, so the
+	// daemon's initial-prompt injection finds no reader, the pipe write
+	// fails and Spawn itself returns an error. That is the ONLY shape the
+	// spawn-failure ladder counts as a failed resume
+	// (runtime.Runtime.cascade increments resumeFails on a spawnAgent
+	// error and nothing else). A derivation that accepts the prompt and
+	// dies AFTERWARDS is a materially different lane — a new agent_death
+	// recovery, which RESETS the budgets — so this mode must never
+	// degrade into that one; see the pipe-capacity contract below.
+	FailSpawnResume bool `json:"fail_spawn_resume"`
+	// FailSpawnFresh true makes every fresh RE-derivation die the same
+	// way. "Re-derivation" is discriminated on the lineage suffix the
+	// runtime mints into PF_INSTANCE_ID (`<attempt>#N`): the ORIGINAL
+	// derivation carries the bare attempt id and is NEVER affected by
+	// this flag. One plan file therefore scripts a healthy first run AND
+	// a must-fail recovery ladder with no rewrite race against the
+	// recovery spawn.
+	//
+	// PIPE-CAPACITY CONTRACT (both flags). "Dies before the prompt
+	// lands" is not something this process can win by racing: the daemon
+	// writes the prompt a few hundred microseconds after fork/exec,
+	// while a Go binary spends about as long in runtime start-up
+	// (measured on the ladder's own shape: a child that exits
+	// immediately loses the race ~93% of the time against a ~27 KiB
+	// prompt). The mode is deterministic only when the daemon's prompt
+	// write CANNOT complete into the stdin pipe buffer — i.e. the
+	// initial prompt exceeds the pipe capacity (64 KiB on Linux). Then
+	// both orderings converge on the same answer: the parent blocks
+	// mid-write and this process's exit breaks the pipe (EPIPE), or this
+	// process is gone first and the very first write breaks it. A
+	// scenario using these flags MUST size the daemon's executor prompt
+	// accordingly (test/v1_s17_recovery_budget_test.go does, and asserts
+	// it).
+	FailSpawnFresh bool `json:"fail_spawn_fresh"`
 }
 
 // execState mirrors the execution.json contract (03 §4.2 wire shape; the
@@ -110,6 +146,9 @@ type driveEnv struct {
 	// ackAnswer false: land pf/answer on the journal but neither consume
 	// nor ack it (the died-mid-consumption shape; see plan.AckAnswer).
 	ackAnswer bool
+	// mustFail: this derivation is scripted to die at birth, before it
+	// reads the daemon's initial prompt (see plan.FailSpawnResume).
+	mustFail bool
 
 	shutOnce sync.Once
 }
@@ -162,8 +201,25 @@ func newDriveEnv() *driveEnv {
 	if d.resumed && len(pl.ResumeActions) > 0 {
 		pl.Actions = pl.ResumeActions
 	}
+	d.mustFail = mustFailSpawn(pl, d.resumed, inst)
 	d.plan = pl
 	return d
+}
+
+// isRederivation reports whether a lineage id carries the recovery
+// suffix the runtime mints for every derivation after the first
+// (`<attempt>#N`). The ORIGINAL derivation carries the bare attempt id.
+func isRederivation(instance string) bool { return strings.Contains(instance, "#") }
+
+// mustFailSpawn decides whether THIS derivation is the scripted
+// must-fail-at-spawn kind: a resume derivation under FailSpawnResume, or
+// a fresh RE-derivation under FailSpawnFresh. The original derivation is
+// never selected by either flag.
+func mustFailSpawn(pl *plan, resumed bool, instance string) bool {
+	if resumed {
+		return pl.FailSpawnResume
+	}
+	return pl.FailSpawnFresh && isRederivation(instance)
 }
 func hasSessionArg() bool {
 	for i, a := range os.Args {
