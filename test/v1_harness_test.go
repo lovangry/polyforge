@@ -103,18 +103,18 @@ const v1Project = "e2e"
 
 // v1Install is a scratch install of the real system.
 type v1Install struct {
-	t         *testing.T
-	binDir    string
-	root      string
-	dataDir   string // aihub data dir (bare repos under dataDir/git)
-	url       string
-	port      int
-	adminKey  string
-	aihubLog  string
-	aihubCmd  *exec.Cmd
-	client    *aihubclient.Client
-	planDir   string
-	pfPath    string
+	t          *testing.T
+	binDir     string
+	root       string
+	dataDir    string // aihub data dir (bare repos under dataDir/git)
+	url        string
+	port       int
+	adminKey   string
+	aihubLog   string
+	aihubCmd   *exec.Cmd
+	client     *aihubclient.Client
+	planDir    string
+	pfPath     string
 	fakepiPath string
 }
 
@@ -453,24 +453,46 @@ func strPtr(s string) *string { return &s }
 
 // v1Daemon is one `pf daemon` OS process.
 type v1Daemon struct {
-	t           *testing.T
-	inst        *v1Install
-	cmd         *exec.Cmd
-	logPath     string
-	sock        string
-	dataDir     string
-	workspace   string
-	machineID   string
-	extraEnv    []string
-	client      *cli.DaemonClient
-	waitedExit  chan error
-	serverURL   string // --server override (optServerURL)
+	t          *testing.T
+	inst       *v1Install
+	cmd        *exec.Cmd
+	logPath    string
+	sock       string
+	dataDir    string
+	workspace  string
+	machineID  string
+	extraEnv   []string
+	extraArgs  []string // extra `pf daemon` flags appended to the argv
+	client     *cli.DaemonClient
+	waitedExit chan error
+	serverURL  string // --server override (optServerURL)
 }
 
 type daemonOpt func(*v1Daemon)
 
 func optMachineID(id string) daemonOpt {
 	return func(d *v1Daemon) { d.machineID = id }
+}
+
+// optObserveWindows injects the observe supervision windows through the
+// real `pf daemon` flags (#12). A zero duration omits its flag, leaving
+// that window at the production default.
+func optObserveWindows(hang, idle, probe, answerAck time.Duration) daemonOpt {
+	return func(d *v1Daemon) {
+		for _, f := range []struct {
+			name string
+			val  time.Duration
+		}{
+			{"--hang-window", hang},
+			{"--idle-window", idle},
+			{"--probe-timeout", probe},
+			{"--answer-ack-window", answerAck},
+		} {
+			if f.val > 0 {
+				d.extraArgs = append(d.extraArgs, f.name, f.val.String())
+			}
+		}
+	}
 }
 
 // optMode pre-seeds the daemon state file with an initial mode (read at
@@ -568,6 +590,7 @@ func (d *v1Daemon) start() {
 	if gitRemoteBase != "" {
 		args = append(args, "--git-remote-base", gitRemoteBase)
 	}
+	args = append(args, d.extraArgs...)
 	cmd := exec.Command(d.inst.pfPath, args...)
 	cmd.Env = append(os.Environ(),
 		"FAKEPI_PLANS="+d.inst.planDir,

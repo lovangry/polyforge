@@ -557,8 +557,21 @@ Launch flags (with environment variable and default, where one exists):
   --mode interactive|batch|drain
       initial mode (default interactive)
 
-Note: supervision-window flags are intentionally absent here; they belong
-to work item #12, whose merge takes precedence for them.`
+Supervision-window flags (#12; Go duration strings; omitted or 0 keeps
+observe's own default):
+
+  --hang-window D
+      stream silence while a turn is in flight before the liveness probe
+      arms (10m)
+  --idle-window D
+      no progress record and no turn in flight before the idle watchdog
+      probes (10m)
+  --probe-timeout D
+      one liveness probe's ack bound (2m)
+  --answer-ack-window D
+      the agent's pf/answer consumption-ack bound (2m)
+
+The full ` + "`pf daemon --help`" + ` flag surface is documented in the README.`
 
 var cmdDaemon = &Command{
 	Name:    "daemon",

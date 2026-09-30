@@ -1,13 +1,13 @@
 package test
 
-// v1_inproc_harness_test.go: the in-process runtime+observe rig for the
+// v1_inproc_harness_test.go: the in-process runtime+observe rig for
 // fault-injection scenarios whose detection windows must be shrunk
-// (hang watchdog, probe bound). The REAL `pf daemon` binary keeps the
-// production windows (10min hang / 2min probe) — the daemon.Config
-// Observe seam (Bug 4) makes them injectable for IN-PROCESS assemblies,
-// but the e2e harness drives the daemon as an OS process whose CLI has
-// no window flags — so these scenarios assemble the SAME production
-// components — runtime.New (lifecycle + recovery engine), observe.New
+// (hang watchdog, probe bound). Since #12 the `pf daemon` CLI takes the
+// window flags itself (--hang-window / --idle-window / --probe-timeout /
+// --answer-ack-window), so s06 — the last scenario on this rig — now
+// runs against the real daemon process and no scenario needs the rig
+// today; it stays as the in-process injection seam, assembling the SAME
+// production components — runtime.New (lifecycle + recovery engine), observe.New
 // (per-WI monitor + detection faces), runtime.DefaultSpawner (the real
 // pi-spawner that derives the real fakepi process) and observe.Handler
 // (the real UDS flush/answer/observe routes) — with the observe config
