@@ -491,10 +491,10 @@ func TestMigrateVerbsOverRealServer(t *testing.T) {
 		t.Errorf("report: %s", out)
 	}
 	// the --json mode emits the machine report
-	code, out, _ = runPf(t, env, "--json", "migrate-work-items", "--from", from,
+	code, out, stderr = runPf(t, env, "--json", "migrate-work-items", "--from", from,
 		"--project", "mig", "--reporter", s.adminID)
 	if code != 0 {
-		t.Fatalf("json re-run code=%d", code)
+		t.Fatalf("json re-run code=%d stderr=%s out=%s", code, stderr, out)
 	}
 	if !strings.Contains(out, `"skipped": 4`) && !strings.Contains(out, `"skipped":4`) {
 		t.Errorf("json report: %s", out)
@@ -507,5 +507,76 @@ func TestMigrateVerbsOverRealServer(t *testing.T) {
 	}
 	if !strings.Contains(out, "verification") || strings.Contains(out, "FAIL") {
 		t.Errorf("memories report: %s", out)
+	}
+}
+
+// The all-field skip-check: a divergence in a field the old check never
+// looked at (priority — previously a silent skip) now hard-fails the run
+// with a per-field diff.
+func TestMigrateWorkItemsAllFieldSkipCheck(t *testing.T) {
+	s := newMigSrv(t, "mig")
+	if _, err := RunMigrateWorkItems(s.optsWI(writeTemp(t, wiLines())), s.client); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	diverged := strings.Replace(wiLines(), `"priority":"high"`, `"priority":"urgent"`, 1)
+	_, err := RunMigrateWorkItems(s.optsWI(writeTemp(t, diverged)), s.client)
+	if err == nil {
+		t.Fatal("a changed priority silently skipped")
+	}
+	if !strings.Contains(err.Error(), "priority") || !strings.Contains(err.Error(), `"urgent"`) {
+		t.Fatalf("per-field diff missing the divergent field: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--accept-changed") {
+		t.Errorf("the failure does not point at --accept-changed: %v", err)
+	}
+}
+
+// --accept-changed: the changed same-id record is applied in place (new
+// version wins) and counted as changed; the follow-up re-run without the
+// flag is then a pure skip — the rows now carry the record.
+func TestMigrateWorkItemsAcceptChanged(t *testing.T) {
+	s := newMigSrv(t, "mig")
+	if _, err := RunMigrateWorkItems(s.optsWI(writeTemp(t, wiLines())), s.client); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	diverged := strings.Replace(wiLines(), "wrapped record", "wrapped record EDITED", 1)
+	opts := s.optsWI(writeTemp(t, diverged))
+	opts.AcceptChanged = true
+	rep, err := RunMigrateWorkItems(opts, s.client)
+	if err != nil {
+		t.Fatalf("accept-changed run: %v", err)
+	}
+	// With the flag the admin face rewrites EVERY same-id record in place
+	// and answers overwritten — in the seeded flow the input file carries
+	// only genuinely changed records, so every overwritten row is a real
+	// change counted as changed in the report.
+	if rep.Overwritten != 4 || rep.Skipped != 0 || rep.Imported != 0 {
+		t.Fatalf("overwritten=%d skipped=%d imported=%d, want 4/0/0", rep.Overwritten, rep.Skipped, rep.Imported)
+	}
+	wi, err := s.client.GetWorkItem("wi_wrap00000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wi.Goal != "wrapped record EDITED" {
+		t.Errorf("the new version did not win: %q", wi.Goal)
+	}
+	// one audit event per overwritten row, with the old/new summary
+	events, err := core.NewWIManager(s.db).Events("wi_wrap00000001")
+	if err != nil || len(events) != 2 {
+		t.Fatalf("events = %v (%v), want imported + overwritten", events, err)
+	}
+	if events[1].Type != "work_item_import_overwritten" ||
+		!strings.Contains(string(events[1].Payload), "wrapped record") {
+		t.Errorf("overwritten audit event wrong: %+v", events[1])
+	}
+	// D5: after --accept-changed, the plain re-run's all-field skip-check
+	// passes — a pure skip, zero delta.
+	rep2, err := RunMigrateWorkItems(s.optsWI(writeTemp(t, diverged)), s.client)
+	if err != nil {
+		t.Fatalf("post-accept re-run: %v", err)
+	}
+	if rep2.Imported != 0 || rep2.Overwritten != 0 || rep2.Skipped != 4 {
+		t.Fatalf("re-run imported=%d overwritten=%d skipped=%d, want 0/0/4",
+			rep2.Imported, rep2.Overwritten, rep2.Skipped)
 	}
 }

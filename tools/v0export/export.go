@@ -40,6 +40,10 @@ type Options struct {
 	DataDir      string // v0 aihub data dir (authority memory/ tree, capsules/)
 	Out          string // output directory (created)
 	SkipCapsules bool
+	// Delta mode: emit only new/changed records vs the baseline state
+	// file (the seed-v1 state promoted by the last successful run).
+	Delta        bool
+	BaselineFile string
 	OnlyWI       string // --only-wi: export ONLY this work item's capsule snapshot ("" = all)
 }
 
@@ -52,6 +56,8 @@ type Report struct {
 	RedactedMemories    int      `json:"redacted_memories"`
 	CapsuleSnapshots    []string `json:"capsule_snapshots"` // "<wi>@seq<n> (x files)"
 	ManifestShaMismatch []string `json:"manifest_sha_mismatch"`
+	// Delta mode: the since-last-run counts (nil in a full export).
+	Delta *DeltaCounts `json:"delta,omitempty"`
 }
 
 // Run executes the export.
@@ -65,9 +71,30 @@ func Run(opts Options) (*Report, error) {
 	if strings.TrimSpace(opts.Out) == "" {
 		return nil, fmt.Errorf("--out (the output dir) is required")
 	}
+	// Delta mode needs the baseline state file; a missing baseline is a
+	// hard error (never a silent full export labeled as delta).
+	var base *HashState
+	if opts.Delta {
+		if strings.TrimSpace(opts.BaselineFile) == "" {
+			return nil, fmt.Errorf("--baseline (the seed-v1 state file) is required in --delta mode")
+		}
+		b, berr := loadHashState(opts.BaselineFile)
+		if berr != nil {
+			return nil, berr
+		}
+		base = b
+	}
+	// The candidate FULL hash set: every record the source carries now,
+	// regardless of delta filtering (the script promotes it to the state
+	// file only after all four steps pass).
+	cand := &HashState{Version: hashStateVersion,
+		WorkItems: map[string]string{}, Memories: map[string]string{}}
 	if opts.OnlyWI != "" {
 		if opts.SkipCapsules {
 			return nil, fmt.Errorf("--only-wi %s conflicts with --skip-capsules: the filter selects capsule snapshots to replay, but the replay is disabled", opts.OnlyWI)
+		}
+		if opts.Delta {
+			return nil, fmt.Errorf("--only-wi %s conflicts with --delta: the filter selects capsule snapshots to replay, but delta mode skips the replay", opts.OnlyWI)
 		}
 	}
 	db, err := openReadOnly(opts.DBPath)
@@ -79,16 +106,24 @@ func Run(opts Options) (*Report, error) {
 		return nil, err
 	}
 	rep := &Report{}
-	if err := exportWorkItems(db, opts, rep); err != nil {
+	if opts.Delta {
+		rep.Delta = &DeltaCounts{CapsulesSkipped: true}
+	}
+	if err := exportWorkItems(db, opts, rep, base, cand); err != nil {
 		return nil, err
 	}
-	if err := exportMemories(db, opts, rep); err != nil {
+	if err := exportMemories(db, opts, rep, base, cand); err != nil {
 		return nil, err
 	}
-	if !opts.SkipCapsules {
+	// Capsule snapshot export is skipped in delta mode (reported as
+	// skipped; nothing downstream consumes it).
+	if !opts.SkipCapsules && !opts.Delta {
 		if err := exportCapsuleSnapshots(db, opts, rep); err != nil {
 			return nil, err
 		}
+	}
+	if err := writeHashState(filepath.Join(opts.Out, CandidateStateFile), cand); err != nil {
+		return nil, err
 	}
 	raw, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
@@ -146,7 +181,7 @@ type WIRecord struct {
 	ClosedAt       *string         `json:"closed_at"`
 }
 
-func exportWorkItems(db *sql.DB, opts Options, rep *Report) error {
+func exportWorkItems(db *sql.DB, opts Options, rep *Report, base *HashState, cand *HashState) error {
 	rows, err := db.Query(`SELECT w.id, w.seq, p.name, w.goal, w.content, w.status, w.priority,
 		w.milestone, w.labels, w.attrs, w.reporter, w.assignee, w.waiting_on,
 		w.bundle_name, w.bundle_digest, w.workflow_budget_baseline,
@@ -156,7 +191,7 @@ func exportWorkItems(db *sql.DB, opts Options, rep *Report) error {
 		return err
 	}
 	defer rows.Close()
-	var out []string
+	var out []emittedLine
 	for rows.Next() {
 		var r WIRecord
 		var seq int64
@@ -188,12 +223,18 @@ func exportWorkItems(db *sql.DB, opts Options, rep *Report) error {
 		if err != nil {
 			return err
 		}
-		out = append(out, string(line))
+		out = append(out, emittedLine{id: r.ID, hash: lineHash(string(line)), line: string(line)})
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if err := writeJSONL(filepath.Join(opts.Out, "work-items.jsonl"), out); err != nil {
+	for _, l := range out {
+		cand.WorkItems[l.id] = l.hash
+	}
+	if opts.Delta {
+		out = deltaFilter(out, base.WorkItems, &rep.Delta.NewWorkItems, &rep.Delta.ChangedWorkItems)
+	}
+	if err := writeJSONL(filepath.Join(opts.Out, "work-items.jsonl"), linesOf(out)); err != nil {
 		return err
 	}
 	rep.WorkItems = len(out)
@@ -242,7 +283,7 @@ func usersHaveEmail(db *sql.DB) bool {
 	return false
 }
 
-func exportMemories(db *sql.DB, opts Options, rep *Report) error {
+func exportMemories(db *sql.DB, opts Options, rep *Report, base *HashState, cand *HashState) error {
 	withEmail := usersHaveEmail(db)
 	ownerExpr := "u.display_name"
 	if withEmail {
@@ -303,7 +344,7 @@ func exportMemories(db *sql.DB, opts Options, rep *Report) error {
 		return err
 	}
 	byID := map[string]bool{}
-	var out []string
+	var out []emittedLine
 	for _, s := range srcs {
 		// The authority file is the content source (INV-7c: the file wins);
 		// the row carries status and identity.
@@ -333,7 +374,7 @@ func exportMemories(db *sql.DB, opts Options, rep *Report) error {
 		if err != nil {
 			return err
 		}
-		out = append(out, string(line))
+		out = append(out, emittedLine{id: s.rec.ID, hash: lineHash(string(line)), line: string(line)})
 	}
 
 	// Orphan authority files (no table row): exported from the file's own
@@ -356,10 +397,16 @@ func exportMemories(db *sql.DB, opts Options, rep *Report) error {
 		if err != nil {
 			return err
 		}
-		out = append(out, string(line))
+		out = append(out, emittedLine{id: rec.ID, hash: lineHash(string(line)), line: string(line)})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	if err := writeJSONL(filepath.Join(memDir, "memories.jsonl"), out); err != nil {
+	sort.Slice(out, func(i, j int) bool { return out[i].line < out[j].line })
+	for _, l := range out {
+		cand.Memories[l.id] = l.hash
+	}
+	if opts.Delta {
+		out = deltaFilter(out, base.Memories, &rep.Delta.NewMemories, &rep.Delta.ChangedMemories)
+	}
+	if err := writeJSONL(filepath.Join(memDir, "memories.jsonl"), linesOf(out)); err != nil {
 		return err
 	}
 	rep.Memories = len(out)

@@ -5,6 +5,7 @@ package core
 // idempotent skip.
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -149,3 +150,107 @@ func TestImportRejectsLiveStateAndBadFields(t *testing.T) {
 
 func strPtr(s string) *string { return &s }
 func strPtrI(i int64) *int64  { return &i }
+
+// The overwrite path: overwrite:true rewrites a same-id record in place
+// (new version wins), answers outcome=overwritten and appends one audit
+// event per row with an old/new summary; without the flag the skip is
+// unchanged.
+func TestImportOverwrite(t *testing.T) {
+	m, _, reporter, project := newImportEnv(t)
+	base := ImportRequest{
+		Project: project, ID: "wi_old00000001", Seq: strPtrI(7),
+		Goal: "the old goal", Status: api.StatusWrapped, Priority: api.PriorityNormal,
+		Labels: []string{"old"}, Reporter: reporter,
+		CreatedAt: "2026-09-28T08:00:00Z", UpdatedAt: "2026-09-28T10:00:00Z",
+		ClosedAt: strPtr("2026-09-28T10:00:00Z"),
+	}
+	if _, err := m.Import(base); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	// Same-id without overwrite: the skip is unchanged.
+	res, err := m.Import(base)
+	if !IsImportAlreadyExists(err) || res.Outcome != ImportSkipped {
+		t.Fatalf("no-overwrite re-import: res=%+v err=%v (want the skip signal)", res, err)
+	}
+	// Overwrite: all record fields rewritten in place.
+	chg := base
+	chg.Goal = "the CHANGED goal"
+	chg.Status = api.StatusFailed
+	chg.Priority = api.PriorityUrgent
+	chg.Labels = []string{"new"}
+	chg.UpdatedAt = "2026-09-28T12:00:00Z"
+	chg.ClosedAt = strPtr("2026-09-28T12:00:00Z")
+	chg.Overwrite = true
+	res, err = m.Import(chg)
+	if err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if res.Outcome != ImportOverwritten {
+		t.Fatalf("outcome %q, want overwritten", res.Outcome)
+	}
+	wi := res.WorkItem
+	if wi.Goal != "the CHANGED goal" || wi.Status != api.StatusFailed ||
+		wi.Priority != api.PriorityUrgent || len(wi.Labels) != 1 || wi.Labels[0] != "new" {
+		t.Errorf("row not rewritten per the new record: %+v", wi)
+	}
+	if wi.Seq != 7 || wi.ClosedAt == nil || *wi.ClosedAt != "2026-09-28T12:00:00Z" {
+		t.Errorf("identity drifted on overwrite: seq=%d closed_at=%v", wi.Seq, wi.ClosedAt)
+	}
+	// One audit event per overwritten row, carrying the old/new summary.
+	events, err := m.Events(base.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2 (imported + overwritten)", len(events))
+	}
+	ev := events[1]
+	if ev.Type != "work_item_import_overwritten" {
+		t.Fatalf("second event type %q", ev.Type)
+	}
+	var payload struct {
+		Old struct {
+			Status string `json:"status"`
+			Goal   string `json:"goal"`
+		} `json:"old"`
+		New struct {
+			Status string `json:"status"`
+			Goal   string `json:"goal"`
+		} `json:"new"`
+	}
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if payload.Old.Goal != "the old goal" || payload.Old.Status != api.StatusWrapped {
+		t.Errorf("old summary wrong: %+v", payload.Old)
+	}
+	if payload.New.Goal != "the CHANGED goal" || payload.New.Status != api.StatusFailed {
+		t.Errorf("new summary wrong: %+v", payload.New)
+	}
+	// Seq handling: absent keeps the existing seq; a collision with a
+	// DIFFERENT row is refused; a fresh value moves the row.
+	chg.Seq = nil
+	if _, err := m.Import(chg); err != nil {
+		t.Fatalf("seq-less overwrite: %v", err)
+	}
+	if wi, err := m.Get(base.ID, GetOptions{}); err != nil || wi.Seq != 7 {
+		t.Errorf("seq-less overwrite changed seq: %d (%v)", wi.Seq, err)
+	}
+	if _, err := m.Create(CreateRequest{Project: project, Goal: "fresh", Reporter: reporter}); err != nil {
+		t.Fatal(err)
+	}
+	coll := chg
+	coll.Seq = strPtrI(8) // the fresh ticket took seq 8
+	if _, err := m.Import(coll); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "IMPORT_SEQ_TAKEN" {
+		t.Errorf("overwrite seq collision: %v", err)
+	}
+	move := chg
+	move.Seq = strPtrI(21)
+	if _, err := m.Import(move); err != nil {
+		t.Fatalf("overwrite seq move: %v", err)
+	}
+	if wi, err := m.Get(base.ID, GetOptions{}); err != nil || wi.Seq != 21 {
+		t.Errorf("seq move lost: %d (%v)", wi.Seq, err)
+	}
+	// The overwrite answer also rides the admin HTTP face with 200.
+}

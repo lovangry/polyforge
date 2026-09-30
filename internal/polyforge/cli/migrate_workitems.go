@@ -13,8 +13,12 @@ package cli
 // carries the same record, a divergence is a hard failure.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -29,7 +33,11 @@ type MigWorkItemsOptions struct {
 	Project   string // target project name or id (required)
 	Reporter  string // optional: map every old reporter to this target user id
 	UserMap   map[string]string
-	DryRun    bool
+	// AcceptChanged: apply changed same-id records in place
+	// (overwrite:true on the admin import; new version wins). Without
+	// it a divergent record hard-fails the run with a per-field diff.
+	AcceptChanged bool
+	DryRun        bool
 }
 
 // MigWIReport is the import report the verb prints.
@@ -37,7 +45,8 @@ type MigWIReport struct {
 	Source            string          `json:"source"`
 	InputLines        int             `json:"input_lines"`
 	Imported          int             `json:"imported"`
-	Skipped           int             `json:"skipped"` // same-id re-import, record matches
+	Skipped           int             `json:"skipped"`     // same-id re-import, record matches
+	Overwritten       int             `json:"overwritten"` // same-id re-import, --accept-changed applied (counted as changed)
 	StatusCounts      map[string]int  `json:"status_counts"`
 	TargetProject     string          `json:"target_project"`
 	ReporterOverride  string          `json:"reporter_override,omitempty"`
@@ -126,6 +135,7 @@ func RunMigrateWorkItems(opts MigWorkItemsOptions, client *aihubclient.Client) (
 			WaitingOn: r.WaitingOn, BundleName: r.BundleName, BundleDigest: r.BundleDigest,
 			BudgetBaseline: r.BudgetBaseline,
 			CreatedAt:      r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt,
+			Overwrite:   opts.AcceptChanged,
 		}
 		if opts.DryRun {
 			continue
@@ -138,22 +148,27 @@ func RunMigrateWorkItems(opts MigWorkItemsOptions, client *aihubclient.Client) (
 		case string(coreImportDone):
 			importedIDs = append(importedIDs, r.ID)
 			rep.Imported++
+		case string(coreImportOverwritten):
+			// --accept-changed applied a changed record: the row now
+			// carries the record; count it as changed.
+			importedIDs = append(importedIDs, r.ID)
+			rep.Overwritten++
 		case string(coreImportSkipped):
 			// Idempotent re-run: verify the existing row carries the same
-			// record before counting the skip.
+			// record (ALL fields) before counting the skip.
 			existing, gerr := client.GetWorkItem(r.ID)
 			if gerr != nil {
 				return nil, fmt.Errorf("skip-check %s: %w", r.ID, gerr)
 			}
-			if werr := migCompareWIRecord(existing, &r, status); werr != nil {
-				return nil, fmt.Errorf("idempotency check on %s: %v", r.ID, werr)
+			if werr := migCompareWIRecord(existing, &r, status, reporter, assignee); werr != nil {
+				return nil, fmt.Errorf("idempotency check on %s: %v (re-run with --accept-changed to apply the new version)", r.ID, werr)
 			}
 			rep.Skipped++
 		default:
 			return nil, fmt.Errorf("import %s: unknown outcome %q", r.ID, res.Outcome)
 		}
 	}
-	if !opts.DryRun && rep.Imported+rep.Skipped != len(records) {
+	if !opts.DryRun && rep.Imported+rep.Overwritten+rep.Skipped != len(records) {
 		return nil, fmt.Errorf("bookkeeping: imported %d + skipped %d != records %d",
 			rep.Imported, rep.Skipped, len(records))
 	}
@@ -169,30 +184,125 @@ func RunMigrateWorkItems(opts MigWorkItemsOptions, client *aihubclient.Client) (
 	return rep, nil
 }
 
-// coreImportDone/Skipped mirror core's outcome strings without importing
-// the server-side package into the CLI.
+// coreImportDone/Skipped/Overwritten mirror core's outcome strings without
+// importing the server-side package into the CLI.
 const (
-	coreImportDone    = "imported"
-	coreImportSkipped = "skipped-existing"
+	coreImportDone        = "imported"
+	coreImportSkipped     = "skipped-existing"
+	coreImportOverwritten = "overwritten"
 )
 
 // migCompareWIRecord checks that an existing target row carries the same
-// record as the JSONL line (the idempotency contract: a skip is only a
-// skip when the row already IS this record).
-func migCompareWIRecord(wi *api.WorkItem, r *migWIRecord, status string) error {
+// record as the JSONL line across ALL record fields — the idempotency
+// contract: a skip is only a skip when the row already IS this record.
+// reporter/assignee are the RESOLVED target identities (the import remaps
+// them); priority falls back to normal like the import does; an absent
+// seq means "auto" and is not compared. Every divergent field is listed —
+// a per-field diff, never a silent skip.
+func migCompareWIRecord(wi *api.WorkItem, r *migWIRecord, status, reporter string, assignee *string) error {
+	var diffs []string
+	priority := r.Priority
+	if priority == "" {
+		priority = api.PriorityNormal
+	}
 	if wi.Status != status {
-		return fmt.Errorf("status %q, want %q", wi.Status, status)
+		diffs = append(diffs, fmt.Sprintf("status: target %q != record %q", wi.Status, status))
 	}
 	if strings.TrimSpace(wi.Goal) != strings.TrimSpace(r.Goal) {
-		return fmt.Errorf("goal differs")
+		diffs = append(diffs, fmt.Sprintf("goal differs: target %q != record %q",
+			strings.TrimSpace(wi.Goal), strings.TrimSpace(r.Goal)))
 	}
-	if (wi.ClosedAt == nil) != (r.ClosedAt == nil) {
-		return fmt.Errorf("closed_at %v != %v", wi.ClosedAt, r.ClosedAt)
+	if !migPtrEq(wi.Content, r.Content) {
+		diffs = append(diffs, fmt.Sprintf("content: target %s != record %s",
+			migPtrDesc(wi.Content), migPtrDesc(r.Content)))
 	}
-	if wi.ClosedAt != nil && *wi.ClosedAt != *r.ClosedAt {
-		return fmt.Errorf("closed_at %s != %s", *wi.ClosedAt, *r.ClosedAt)
+	if r.Seq != nil && wi.Seq != *r.Seq {
+		diffs = append(diffs, fmt.Sprintf("seq: target %d != record %d", wi.Seq, *r.Seq))
 	}
-	return nil
+	if wi.Priority != priority {
+		diffs = append(diffs, fmt.Sprintf("priority: target %q != record %q", wi.Priority, priority))
+	}
+	if !migPtrEq(wi.Milestone, r.Milestone) {
+		diffs = append(diffs, fmt.Sprintf("milestone: target %s != record %s",
+			migPtrDesc(wi.Milestone), migPtrDesc(r.Milestone)))
+	}
+	if !migSliceEq(wi.Labels, orEmpty(r.Labels)) {
+		diffs = append(diffs, fmt.Sprintf("labels: target %v != record %v", wi.Labels, orEmpty(r.Labels)))
+	}
+	attrs := r.Attrs
+	if attrs == nil {
+		attrs = map[string]any{}
+	}
+	if !reflect.DeepEqual(wi.Attrs, attrs) {
+		diffs = append(diffs, fmt.Sprintf("attrs: target %v != record %v", wi.Attrs, attrs))
+	}
+	if wi.Reporter != reporter {
+		diffs = append(diffs, fmt.Sprintf("reporter: target %q != record %q", wi.Reporter, reporter))
+	}
+	if !migPtrEq(wi.Assignee, assignee) {
+		diffs = append(diffs, fmt.Sprintf("assignee: target %s != record %s",
+			migPtrDesc(wi.Assignee), migPtrDesc(assignee)))
+	}
+	if !migPtrEq(wi.WaitingOn, r.WaitingOn) {
+		diffs = append(diffs, fmt.Sprintf("waiting_on: target %s != record %s",
+			migPtrDesc(wi.WaitingOn), migPtrDesc(r.WaitingOn)))
+	}
+	if !migPtrEq(wi.BundleName, r.BundleName) {
+		diffs = append(diffs, fmt.Sprintf("bundle_name: target %s != record %s",
+			migPtrDesc(wi.BundleName), migPtrDesc(r.BundleName)))
+	}
+	// The import face derives a stand-in bundle digest when the record
+	// carries a bundle_name without one (core's §4.5 stand-in rule) — the
+	// row therefore carries it even though the record does not.
+	expBundleDigest := r.BundleDigest
+	if expBundleDigest == nil && r.BundleName != nil && *r.BundleName != "" {
+		sum := sha256.Sum256([]byte("bundle-name:" + *r.BundleName))
+		d := hex.EncodeToString(sum[:])
+		expBundleDigest = &d
+	}
+	if !migPtrEq(wi.BundleDigest, expBundleDigest) {
+		diffs = append(diffs, fmt.Sprintf("bundle_digest: target %s != record %s",
+			migPtrDesc(wi.BundleDigest), migPtrDesc(expBundleDigest)))
+	}
+	if !migRawJSONEq(wi.BudgetBaseline, r.BudgetBaseline) {
+		diffs = append(diffs, fmt.Sprintf("workflow_budget_baseline: target %s != record %s",
+			string(wi.BudgetBaseline), string(r.BudgetBaseline)))
+	}
+	if wi.CreatedAt != r.CreatedAt {
+		diffs = append(diffs, fmt.Sprintf("created_at: target %q != record %q", wi.CreatedAt, r.CreatedAt))
+	}
+	if wi.UpdatedAt != r.UpdatedAt {
+		diffs = append(diffs, fmt.Sprintf("updated_at: target %q != record %q", wi.UpdatedAt, r.UpdatedAt))
+	}
+	if !migPtrEq(wi.ClosedAt, r.ClosedAt) {
+		diffs = append(diffs, fmt.Sprintf("closed_at: target %s != record %s",
+			migPtrDesc(wi.ClosedAt), migPtrDesc(r.ClosedAt)))
+	}
+	if len(diffs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d record field(s) diverge: %s", len(diffs), strings.Join(diffs, "; "))
+}
+
+func migPtrDesc(p *string) string {
+	if p == nil {
+		return "(none)"
+	}
+	return fmt.Sprintf("%q", *p)
+}
+
+// migRawJSONEq compares two raw JSON payloads. Absent is nil, empty
+// or the JSON null (the wire marshals a nil RawMessage as null, which
+// the import stores verbatim) — all three mean "no baseline".
+func migRawJSONEq(a, b json.RawMessage) bool {
+	norm := func(r json.RawMessage) string {
+		s := strings.TrimSpace(string(r))
+		if s == "null" {
+			return ""
+		}
+		return s
+	}
+	return norm(a) == norm(b)
 }
 
 // migVerifyWorkItems is the work-item verification: ① every record's row
@@ -303,8 +413,8 @@ func (rep *MigWIReport) Render(w io.Writer) {
 		mode += " (dry-run)"
 	}
 	fmt.Fprintf(w, "migrate-work-items [%s]: %d record(s) from %s\n", mode, rep.InputLines, rep.Source)
-	fmt.Fprintf(w, "  target project %s; imported %d, skipped %d; statuses: %s\n",
-		rep.TargetProject, rep.Imported, rep.Skipped, migStatusLine(rep.StatusCounts))
+	fmt.Fprintf(w, "  target project %s; imported %d, skipped %d, overwritten %d (changed); statuses: %s\n",
+		rep.TargetProject, rep.Imported, rep.Skipped, rep.Overwritten, migStatusLine(rep.StatusCounts))
 	if rep.ReporterOverride != "" {
 		fmt.Fprintf(w, "  --reporter override: all imported as %s\n", rep.ReporterOverride)
 	}

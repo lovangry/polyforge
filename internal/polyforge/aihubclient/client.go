@@ -419,11 +419,14 @@ type ImportWorkItemRequest struct {
 	CreatedAt      string          `json:"created_at"`
 	UpdatedAt      string          `json:"updated_at"`
 	ClosedAt       *string         `json:"closed_at"`
+	// Overwrite: a same-id record is rewritten in place (new version
+	// wins) and the answer carries outcome=overwritten.
+	Overwrite bool `json:"overwrite"`
 }
 
 // ImportResult is the import answer.
 type ImportResult struct {
-	Outcome  string        `json:"outcome"` // imported | skipped-existing
+	Outcome  string        `json:"outcome"` // imported | skipped-existing | overwritten
 	WorkItem *api.WorkItem `json:"work_item"`
 }
 

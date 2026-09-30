@@ -16,11 +16,13 @@ import (
 
 func main() {
 	var (
-		dbPath  = flag.String("db", "", "v0 aihub.db (opened read-only; required)")
-		dataDir = flag.String("data-dir", "", "v0 aihub data dir (authority memory/ tree, capsules/; required)")
-		out     = flag.String("out", "", "output directory (created; required)")
-		noCaps  = flag.Bool("skip-capsules", false, "skip the capsule snapshot replay")
-		onlyWI  = flag.String("only-wi", "", "export ONLY this work item's capsule snapshot (work-items and memories stay full exports)")
+		dbPath   = flag.String("db", "", "v0 aihub.db (opened read-only; required)")
+		dataDir  = flag.String("data-dir", "", "v0 aihub data dir (authority memory/ tree, capsules/; required)")
+		out      = flag.String("out", "", "output directory (created; required)")
+		noCaps   = flag.Bool("skip-capsules", false, "skip the capsule snapshot replay")
+		delta    = flag.Bool("delta", false, "top-up mode: emit only records new or changed since the baseline")
+		baseline = flag.String("baseline", "", "delta mode: the seed-v1 state file (per-record hash baseline) from the last successful run; required with --delta")
+		onlyWI   = flag.String("only-wi", "", "export ONLY this work item's capsule snapshot (work-items and memories stay full exports)")
 	)
 	flag.Parse()
 	rep, err := v0export.Run(v0export.Options{
@@ -28,6 +30,8 @@ func main() {
 		DataDir:      *dataDir,
 		Out:          *out,
 		SkipCapsules: *noCaps,
+		Delta:        *delta,
+		BaselineFile: *baseline,
 		OnlyWI:       *onlyWI,
 	})
 	if err != nil {
@@ -36,6 +40,11 @@ func main() {
 	}
 	fmt.Printf("v0-export: %d work item(s), %d memor(ies) (%d redacted), %d capsule snapshot(s) → %s\n",
 		rep.WorkItems, rep.Memories, rep.RedactedMemories, len(rep.CapsuleSnapshots), *out)
+	if rep.Delta != nil {
+		fmt.Printf("v0-export: delta: %d new + %d changed work item(s), %d new + %d changed memor(ies); capsule snapshots skipped (delta mode)\n",
+			rep.Delta.NewWorkItems, rep.Delta.ChangedWorkItems,
+			rep.Delta.NewMemories, rep.Delta.ChangedMemories)
+	}
 	for _, o := range rep.OrphanFiles {
 		fmt.Printf("  orphan authority file (exported from the file): %s\n", o)
 	}
