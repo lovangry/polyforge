@@ -1,0 +1,315 @@
+package test
+
+// v1_s19: the long-run leak probe — scenario A of the dual-scenario
+// split the owner confirmed (grill q_f17c2e). Every existing scenario
+// runs one or a handful of jobs and never checks the daemon's
+// steady-state hygiene after MANY consecutive work items; a per-job fd
+// leak (sockets or spawn handles never closed) or duplicate writes to
+// the durable events log would pass today's suite unnoticed. This
+// scenario closes that gap at PROCESS level, against the REAL
+// `pf daemon` binary:
+//
+//   - fd count does not grow: the number of entries in
+//     /proc/<daemon-pid>/fd, measured after all 20 jobs are wrapped
+//     plus a bounded settle window for async teardown, must not exceed
+//     the baseline captured after daemon start-up idle-settle and
+//     BEFORE job 1.
+//   - events.log is clean: every line of <dataDir>/events.log is one
+//     valid protocol.EventEntry, the total line count equals the
+//     number of events this run actually produced (counted after
+//     settle), and no event occurrence is written twice — a
+//     re-written/duplicated event line is the failure signal.
+//
+// Division of labor (the dual-scenario split): fd leaks and event
+// duplication are process-level realities, so the real binary is the
+// most convincing carrier and this file carries them with ZERO
+// production changes — /proc is read from outside, and the owner
+// explicitly rejected test-only introspection hooks in the shipped
+// binary (option B). The GOROUTINE half of the probe cannot run here:
+// the daemon is a separate process runtime.NumGoroutine cannot see, so
+// it lives in the companion scenario v1_s20_longrun_goroutines_test.go,
+// which runs the same 20-job flow through the in-process rig (the
+// faithful already-existing carrier of in-process semantics).
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/silgrid/polyforge/internal/common/protocol"
+)
+
+// Probe constants. The settle windows are pinned deliberately generous
+// for a suite that runs on this machine: 2s of start-up idle-settle
+// lets the daemon's boot goroutines and the UDS listener reach steady
+// state before the baseline, and 3s of post-run settle lets the last
+// job's async teardown (agent pipe close, monitor exit, transport
+// teardown) finish before the final measurement. The fd sample takes
+// the MINIMUM of 5 reads 200ms apart so a transient fd (a just-closed
+// socket not yet reaped, a concurrent status connection) can only make
+// a measurement MORE conservative, never mask growth: a real leak is
+// present in every read, so the minimum still carries it.
+const (
+	s19Jobs          = 20
+	s19StartupSettle = 2 * time.Second
+	s19FinalSettle   = 3 * time.Second
+	s19FDSamples     = 5
+	s19FDGap         = 200 * time.Millisecond
+)
+
+// s19FDCountOf returns the number of entries in /proc/<pid>/fd — the
+// process's open file descriptors (sockets, pipes and files alike).
+func s19FDCountOf(pid int) (int, error) {
+	ents, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+	if err != nil {
+		return 0, err
+	}
+	return len(ents), nil
+}
+
+// s19FDList returns the symlink targets of the process's open fds
+// (readlink of every /proc/<pid>/fd entry) — the diagnosable face of a
+// leak: WHICH descriptor grew, not just how many.
+func s19FDList(pid int) []string {
+	ents, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+	if err != nil {
+		return []string{fmt.Sprintf("(fd list unreadable: %v)", err)}
+	}
+	out := make([]string, 0, len(ents))
+	for _, e := range ents {
+		tgt, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, e.Name()))
+		if err != nil {
+			tgt = "(unreadable)"
+		}
+		if strings.HasPrefix(tgt, "socket:[") {
+			tgt += " (" + s19SocketPeer(tgt) + ")"
+		}
+		out = append(out, e.Name()+" -> "+tgt)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// s19SocketPeer classifies one socket inode against the net-namespace
+// tables (tcp / tcp6 / unix) so a leak names its socket, not just a
+// count. Best-effort: "unknown" when no table row matches.
+func s19SocketPeer(inode string) string {
+	inode = strings.TrimSuffix(strings.TrimPrefix(inode, "socket:["), "]")
+	for _, spec := range []struct{ path string; kind string }{
+		{"/proc/self/net/tcp", "tcp"},
+		{"/proc/self/net/tcp6", "tcp6"},
+		{"/proc/self/net/unix", "unix"},
+		{"/proc/self/net/udp", "udp"},
+	} {
+		raw, err := os.ReadFile(spec.path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if s19LineHasField(line, inode) {
+				return spec.kind + " " + strings.Join(strings.Fields(line)[1:], " ")
+			}
+		}
+	}
+	return "unknown"
+}
+
+func s19LineHasField(line, field string) bool {
+	for _, f := range strings.Fields(line) {
+		if f == field {
+			return true
+		}
+	}
+	return false
+}
+
+// s19MinFDCount samples the daemon's fd count n times, gap apart, and
+// returns the minimum (see the constants block for why the minimum).
+func s19MinFDCount(t *testing.T, pid int, n int, gap time.Duration) int {
+	t.Helper()
+	min := -1
+	for i := 0; i < n; i++ {
+		c, err := s19FDCountOf(pid)
+		if err != nil {
+			t.Fatalf("fd count of daemon pid %d: %v", pid, err)
+		}
+		if min < 0 || c < min {
+			min = c
+		}
+		if i < n-1 {
+			time.Sleep(gap)
+		}
+	}
+	return min
+}
+
+// s19AssertEventsLogClean reads the daemon's whole durable events log
+// and asserts the run's event hygiene:
+//
+//   - every non-empty line is one valid protocol.EventEntry (decodable
+//     JSON object with a non-empty kind and an RFC3339Nano timestamp);
+//   - no event occurrence is written twice. EventLog.Append is the only
+//     writer and marshals the entry deterministically, so a re-written
+//     event reproduces its line byte-for-byte: byte-identical duplicate
+//     lines are exactly the failure signal, and two DISTINCT appends
+//     can never collide because each carries its own nanosecond-precision
+//     `at`. With every line valid and every line distinct, the total
+//     line count equals the number of events this run actually produced;
+//   - the per-work-item accounting is the healthy-run shape: every one
+//     of the run's work items is present with exactly one job_started
+//     and one job_stopped (a re-derivation or a double stop would be
+//     per-job debris the probe must surface), and no line names a work
+//     item outside the run.
+func s19AssertEventsLogClean(t *testing.T, dataDir string, wis []string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dataDir, "events.log"))
+	if err != nil {
+		t.Fatalf("events.log: %v", err)
+	}
+	run := map[string]bool{}
+	for _, wi := range wis {
+		run[wi] = true
+	}
+	lines := 0
+	daemonScope := 0
+	perWI := map[string]int{}
+	started := map[string]int{}
+	stopped := map[string]int{}
+	seenLine := map[string]int{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lines++
+		var e protocol.EventEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("events.log line %d is not a valid protocol.EventEntry: %v (%q)", lines, err, line)
+		}
+		if e.Kind == "" {
+			t.Fatalf("events.log line %d carries no kind: %q", lines, line)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, e.At); err != nil {
+			t.Fatalf("events.log line %d carries an invalid timestamp %q: %v", lines, e.At, err)
+		}
+		seenLine[line]++
+		if e.WI == "" {
+			daemonScope++ // daemon-scope bookkeeping (wi="" rows); whole-file by design
+			continue
+		}
+		if !run[e.WI] {
+			t.Fatalf("events.log names a work item outside this run: %q", e.WI)
+		}
+		perWI[e.WI]++
+		switch e.Kind {
+		case "job_started":
+			started[e.WI]++
+		case "job_stopped":
+			stopped[e.WI]++
+		}
+	}
+	for line, n := range seenLine {
+		if n > 1 {
+			t.Fatalf("event occurrence written %d times (re-written/duplicated event line): %q", n, line)
+		}
+	}
+	for _, wi := range wis {
+		if perWI[wi] == 0 {
+			t.Fatalf("work item %s produced no events", wi)
+		}
+		if started[wi] != 1 {
+			t.Fatalf("work item %s saw %d job_started events, want exactly 1 (one attempt per job)", wi, started[wi])
+		}
+		if stopped[wi] != 1 {
+			t.Fatalf("work item %s saw %d job_stopped events, want exactly 1 (one monitor lifecycle per job)", wi, stopped[wi])
+		}
+	}
+	// Line count equals event count: every line above was a valid, unique
+	// occurrence, so the produced-event count IS the line count.
+	t.Logf("s19: events.log clean: %d lines, %d per-WI + %d daemon-scope, no duplicates", lines, lines-daemonScope, daemonScope)
+}
+
+func TestV1S19LongRunLeakProbe(t *testing.T) {
+	inst := newV1Install(t)
+	d := newV1Daemon(t, inst)
+	d.start()
+	pid := d.cmd.Process.Pid
+
+	// Warm BOTH standing client paths BEFORE the baseline, so the
+	// baseline captures the daemon's real steady state including the
+	// connections an operator's session keeps open, and the only fd
+	// deltas left after 20 jobs are real per-job leaks:
+	//
+	//   - the daemon's hub client shares one http.Transport whose
+	//     keep-alive connection to the aihub is a persistent fd; if the
+	//     first claim opened it after the baseline, that legitimate
+	//     steady-state fd would read as post-run growth. `pf
+	//     batch-confirm` (read-only recommendation fetch — no job is
+	//     created) exercises the same hub client.
+	//   - the test's own in-process DaemonClient keeps its idle
+	//     keep-alive connection open on the CLIENT side, which pins the
+	//     daemon-side ACCEPTED socket open too (the server has no idle
+	//     timeout); a first post-run status call would open it after the
+	//     baseline. One status call now pins that accepted fd in the
+	//     baseline instead.
+	d.pf(t, "batch-confirm")
+	d.status(t)
+
+	// Baseline: after start-up idle-settle, before job 1.
+	time.Sleep(s19StartupSettle)
+	baseline := s19MinFDCount(t, pid, s19FDSamples, s19FDGap)
+	baselineList := s19FDList(pid) // captured at baseline time for failure diagnosis
+	t.Logf("s19: daemon fd baseline after start-up settle: %d", baseline)
+
+	// 20 strictly consecutive jobs: each is a fake single-step short
+	// task that wraps itself, and the next one starts only after this
+	// one reached its terminal state.
+	wis := make([]string, 0, s19Jobs)
+	for i := 0; i < s19Jobs; i++ {
+		wi := inst.newWI(t, fmt.Sprintf("s19: long-run leak probe job %02d", i+1),
+			[]map[string]any{
+				{"do": "step", "id": "code"},
+				{"do": "wrap"},
+			}, nil)
+		wis = append(wis, wi)
+		d.pf(t, "submit", wi)
+		inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	}
+
+	// The daemon holds no job any more.
+	if st := d.status(t); len(st.Jobs) != 0 {
+		t.Fatalf("daemon still holds jobs after the run: %+v", st.Jobs)
+	}
+
+	// Every job's monitor reached its job_stopped event: the wrap
+	// status is set by end-generation, which precedes RTFinished, so
+	// this waits out the last async event writes before measuring.
+	waitUntil(t, 30*time.Second, "not every job reached its job_stopped event", func() bool {
+		for _, wi := range wis {
+			if !contains(d.eventKinds(t, wi), "job_stopped") {
+				return false
+			}
+		}
+		return true
+	})
+
+	// Final measurement: post-run settle, then the same min-of-samples
+	// read. The bar is "does not grow": final must not exceed baseline.
+	time.Sleep(s19FinalSettle)
+	final := s19MinFDCount(t, pid, s19FDSamples, s19FDGap)
+	if final > baseline {
+		t.Logf("s19: baseline fd table:\n  %s", strings.Join(baselineList, "\n  "))
+		t.Logf("s19: final fd table:\n  %s", strings.Join(s19FDList(pid), "\n  "))
+		t.Fatalf("daemon fd count grew across %d consecutive jobs: baseline %d, final %d",
+			s19Jobs, baseline, final)
+	}
+	t.Logf("s19: daemon fd final after settle: %d (baseline %d)", final, baseline)
+
+	// The durable events log tells the whole run with no duplicates.
+	s19AssertEventsLogClean(t, d.dataDir, wis)
+}
