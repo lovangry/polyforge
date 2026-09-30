@@ -134,9 +134,7 @@ func (d *Daemon) runShutdown(ctx context.Context) error {
 	// Step 5: close the UDS face, stop the loops, and wait for the
 	// runtime message loop to drain — an in-flight recovery triggered
 	// before the monitors stopped must never outlive the process.
-	if d.srv != nil {
-		_ = d.srv.Close()
-	}
+	d.closeFace()
 	if d.cancelRun != nil {
 		d.cancelRun()
 	}
