@@ -497,23 +497,81 @@ func opsMode(ctx *Context, d *DaemonClient, args []string) error {
 }
 
 // ---------------------------------------------------------------------------
-// daemon — process placeholder: the daemon assembly lands in phase 3
-// (Runtime + Observe composition).
+// daemon — help-only CLI registration. The daemon IS assembled: cmd/pf/
+// main.go intercepts `pf daemon` argv before CLI dispatch and calls
+// internal/polyforge/daemon.Main directly. This command registration
+// exists only so `pf help daemon` presents the real launch surface; its
+// Run is unreachable in a correct build and merely reprints the help.
 // ---------------------------------------------------------------------------
+
+// daemonUsage is the STATIC help text for `pf help daemon`. It documents
+// the daemon launch surface (flags, env vars, defaults) as defined in
+// internal/polyforge/daemon/main.go. It is NOT generated from the daemon
+// flag set — keep it in sync manually.
+const daemonUsage = `pf daemon [--flag value] ...
+
+Starts the local polyforge daemon (a UDS server hosting the runtime and
+observe projections). The real entry is assembled: cmd/pf/main.go
+intercepts ` + "`pf daemon`" + ` argv before CLI dispatch and calls
+internal/polyforge/daemon.Main. This CLI registration exists only to
+serve ` + "`pf help daemon`" + ` presentation.
+
+Launch flags (with environment variable and default, where one exists):
+
+  --config PATH
+      shared config file (default ~/.config/polyforge/cli.toml)
+  --socket PATH
+      unix socket path to listen on (env PF_DAEMON_SOCKET;
+      default /run/polyforge.sock)
+  --server URL
+      aihub base URL (env PF_SERVER)
+  --api-key KEY
+      machine aihub api key (env PF_API_KEY)
+  --machine-id ID
+      machine identity (env POLYFORGE_MACHINE_ID; default m-<hostname>)
+  --workspace-root PATH
+      capsule workspace root (env POLYFORGE_WORKSPACE_ROOT)
+  --data-dir PATH
+      daemon data dir (env POLYFORGE_DATA_DIR)
+  --project NAME
+      ready-queue project scope for batch/drain (env PF_PROJECT)
+  --workflows-dir PATH
+      workflows/ checkout dir (default ./workflows)
+  --executor-prompt PATH
+      executor skill file injected into every agent
+      (default ./skills/pf-execute/SKILL.md)
+  --pi-bin PATH
+      harness binary (default pi)
+  --harness-sessions-root PATH
+      harness session store root for the live-transcript sync
+      (env POLYFORGE_HARNESS_SESSIONS_ROOT; default ~/.pi/agent/sessions)
+  --cgroup-root PATH
+      cgroup v2 root for layer-0 cleanup (env POLYFORGE_CGROUP_ROOT)
+  --git-remote-base URL
+      aihub bare-repo base URL (default <server>/git)
+  --max-concurrent-jobs N
+      max concurrent jobs on this machine (default 4)
+  --recall-topk N
+      claim-time memory snapshot hit count
+      (env POLYFORGE_RECALL_TOPK; default 10, max 50)
+  --mode interactive|batch|drain
+      initial mode (default interactive)
+
+Note: supervision-window flags are intentionally absent here; they belong
+to work item #12, whose merge takes precedence for them.`
 
 var cmdDaemon = &Command{
 	Name:    "daemon",
-	Summary: "Run the local pf daemon (placeholder: assembled in phase 3)",
-	Usage:   "pf daemon",
+	Summary: "Run the local pf daemon (assembled: main.go intercepts `pf daemon` before CLI dispatch; this verb serves `pf help daemon` only)",
+	Usage:   daemonUsage,
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		fmt.Fprintln(ctx.Stdout, "pf daemon: not assembled in this phase.")
-		fmt.Fprintln(ctx.Stdout, "The daemon hosts Runtime (Start/Stop/Recover/Restart) and Observe")
-		fmt.Fprintln(ctx.Stdout, "(per-WI monitor goroutines), composed in phase 3 from the")
-		fmt.Fprintln(ctx.Stdout, "internal/polyforge runtime + observe modules over the UDS surface")
-		fmt.Fprintln(ctx.Stdout, "this CLI already speaks (internal/common/protocol; routes in")
-		fmt.Fprintln(ctx.Stdout, "internal/polyforge/cli/daemon.go). Until then `pf ops status` reports")
-		fmt.Fprintln(ctx.Stdout, "the same: no daemon is listening on the configured socket.")
+		// In a correct build this Run is unreachable: cmd/pf/main.go
+		// intercepts `pf daemon` argv and calls daemon.Main. If it is
+		// ever reached, do not lie about the daemon — reprint the help.
+		fmt.Fprintln(ctx.Stdout, daemonUsage)
+		fmt.Fprintln(ctx.Stdout, "\n(this path is help-only: cmd/pf/main.go intercepts `pf daemon` and")
+		fmt.Fprintln(ctx.Stdout, "runs internal/polyforge/daemon.Main directly)")
 		return nil
 	},
 }
