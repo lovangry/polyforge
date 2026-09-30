@@ -40,6 +40,9 @@ func TestV1S12BatchWave(t *testing.T) {
 	}
 	wiBHigh := wiB.ID
 	inst.setPlan(t, wiBHigh, []map[string]any{{"do": "step", "id": "code"}, {"do": "wrap"}})
+	// filed through the raw client (priority), so register it for the
+	// harness's post-teardown orphan sweep by hand.
+	inst.trackWI(wiBHigh)
 
 	d := newV1Daemon(t, inst)
 	d.start()
