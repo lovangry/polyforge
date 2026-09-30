@@ -46,6 +46,14 @@ import (
 // the work item is transitioned to blocked.
 const wrapRetries = 3
 
+// defaultVersionStagnantTicks is the belt-and-braces bound for C3': the
+// number of consecutive execution.json REWRITES (mtime advanced) that
+// carry an unchanged top-level Version before the monitor also treats
+// the capsule as dirty and schedules a commit anyway — plus one
+// version_stagnant event per episode. The Version-driven rule stays the
+// primary archival semantic; this only catches an agent that violates it.
+const defaultVersionStagnantTicks = 3
+
 // PushFunc is the injectable capsule commit+push operation (the seam the
 // tests use; production binds gitops.CommitPush). ctx bounds the call;
 // returning ctx.Err() reports the attempt as failed while the underlying
@@ -110,10 +118,11 @@ type FlushCall struct {
 }
 
 type pushResult struct {
-	version int64
-	sha     string
-	pushed  bool
-	err     error
+	version  int64
+	sha      string
+	pushed   bool
+	stagnant bool // the push was scheduled by the stagnation fallback
+	err      error
 }
 
 type probeResult struct {
@@ -141,7 +150,11 @@ type monitorCfg struct {
 	BackpressureSteps int
 	BackpressureAfter time.Duration
 	FlushBound        time.Duration
-	push              PushFunc
+	// VersionStagnantTicks is the C3' belt-and-braces bound (0 = the
+	// default 3): consecutive same-Version rewrites before a fallback
+	// commit. Injectable so tests shrink the window.
+	VersionStagnantTicks int
+	push                 PushFunc
 	// locateLive resolves the live harness transcript on demand (F3);
 	// nil = the transcript sync is disabled.
 	locateLive func(capsuleDir string, spawnAt time.Time) string
@@ -181,6 +194,14 @@ type Monitor struct {
 	currentStep   string
 	dirtyVersion  int64 // latest Version seen that has no confirmed push
 	pushedVersion int64
+	// C3' belt-and-braces stagnation tracking: lastVersion/lastSeen are the
+	// latest Version observed in the file and whether one was seen at
+	// all; stagnantTicks counts consecutive rewrites that did not bump
+	// it; stagnantDirty arms the fallback commit once the bound is hit.
+	lastSeen      bool
+	lastVersion   int64
+	stagnantTicks int
+	stagnantDirty bool
 
 	// the single-in-flight push gate.
 	gate     chan struct{}
@@ -526,7 +547,40 @@ func (m *Monitor) pollExecution() {
 	if exec.Version > m.dirtyVersion {
 		m.dirtyVersion = exec.Version
 	}
+	// C3' belt-and-braces: the Version bump is the archival contract, but
+	// an agent that rewrites the file WITHOUT bumping it must not starve
+	// the capsule chain either. N consecutive same-Version rewrites (mtime
+	// advanced, Version stagnant) arm one fallback commit and leave one
+	// version_stagnant event; a real Version bump clears the episode. The
+	// Version-driven rule above stays the primary semantic.
+	if m.lastSeen && exec.Version == m.lastVersion {
+		m.stagnantTicks++
+		if m.stagnantTicks >= m.stagnantBound() {
+			m.stagnantTicks = 0
+			m.stagnantDirty = true
+			_ = m.log.Append(m.wi.WorkItem, EvVersionStagnant, map[string]any{
+				"version":    exec.Version,
+				"detail":     fmt.Sprintf("execution.json rewritten %d times without a Version bump; scheduling a fallback commit", m.stagnantBound()),
+				"attempt_id": m.currentAttempt(),
+			})
+		}
+	} else {
+		m.stagnantTicks = 0
+		if m.lastSeen && exec.Version > m.lastVersion {
+			m.stagnantDirty = false // the primary semantic resumed
+		}
+	}
+	m.lastSeen = true
+	m.lastVersion = exec.Version
 	m.applyPendingFromExec(&exec)
+}
+
+// stagnantBound answers the injectable stagnation bound (default 3).
+func (m *Monitor) stagnantBound() int {
+	if m.cfg.VersionStagnantTicks > 0 {
+		return m.cfg.VersionStagnantTicks
+	}
+	return defaultVersionStagnantTicks
 }
 
 // applyPendingFromExec reconciles the pending-question projection with
@@ -665,9 +719,12 @@ func copyFileReadonly(src, dst string) error {
 
 // schedulePush starts one async commit+push sub-goroutine when a newer
 // execution Version exists, the retry backoff has elapsed, and the
-// single-in-flight gate is free.
+// single-in-flight gate is free. The C3' stagnation fallback rides the
+// same gate: a stagnant episode (mtime advanced, Version frozen) also
+// arms a commit, so a contract-violating agent cannot starve the chain.
 func (m *Monitor) schedulePush() {
-	if m.dirtyVersion <= m.pushedVersion {
+	stagnant := m.stagnantDirty
+	if m.dirtyVersion <= m.pushedVersion && !stagnant {
 		return
 	}
 	if !m.retryAt.IsZero() && !time.Now().After(m.retryAt) {
@@ -680,6 +737,7 @@ func (m *Monitor) schedulePush() {
 		return // one already in flight; the next tick retries
 	}
 	m.retryAt = time.Time{}
+	m.stagnantDirty = false      // consumed by this scheduling pass
 	version := m.dirtyVersion    // the seq trailer is gitops' single authority (derived in-lock)
 	tr := m.transcriptSnapshot() // captured BEFORE the spawn: no shared-field reads
 	go func() {
@@ -689,9 +747,14 @@ func (m *Monitor) schedulePush() {
 		m.syncTranscript(tr)
 		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.FlushBound)
 		defer cancel()
-		sha, pushed, err := m.cfg.push(ctx, m.wi.Git,
-			fmt.Sprintf("observe: execution v%d", version))
-		m.pushDone <- pushResult{version: version, sha: sha, pushed: pushed, err: err}
+		message := fmt.Sprintf("observe: execution v%d", version)
+		if stagnant {
+			// never a lie about the version: the message names the
+			// contract violation this commit compensates for
+			message = fmt.Sprintf("observe: execution v%d (mtime advanced without a Version bump)", version)
+		}
+		sha, pushed, err := m.cfg.push(ctx, m.wi.Git, message)
+		m.pushDone <- pushResult{version: version, sha: sha, pushed: pushed, stagnant: stagnant, err: err}
 	}()
 }
 
@@ -719,6 +782,12 @@ func (m *Monitor) onPushResult(res pushResult) {
 			"version": res.version, "local_commit": res.sha, "pushed": res.pushed,
 		})
 		return
+	}
+	// A failed stagnation fallback re-arms itself: the Version-driven
+	// condition alone would never retry it (dirtyVersion never moved
+	// past pushedVersion on that path).
+	if res.stagnant {
+		m.stagnantDirty = true
 	}
 	m.failedPushes++
 	if m.firstFailAt.IsZero() {

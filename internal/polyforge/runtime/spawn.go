@@ -147,7 +147,13 @@ type SpawnParams struct {
 	// Injected as PF_INSTANCE_ID so the agent reads its own identity from
 	// the environment instead of scraping the spawn journal.
 	InstanceID string
-	Journal    func(pid int, startedAt string) error
+	// Model pins this derivation's harness model: the effective candidate
+	// of the bundle's defaults model_candidates chain (F4/P6). "" = no
+	// chain: the harness adapter's default stays in effect. Carried as
+	// SPAWN ARGV, not capsule settings — see buildCmd for the measured
+	// reasoning.
+	Model   string
+	Journal func(pid int, startedAt string) error
 }
 
 // AgentHandle is the supervised face over one derived agent process.
@@ -205,16 +211,54 @@ func (s *piSpawner) bin() string {
 
 // buildCmd constructs (without starting) the argv/env/cwd of one
 // derivation. Exported shape for the isolation regression: argv carries
-// the transport first, then the isolation flags, then the resume session.
+// the transport first, then the isolation flags, then the resume session,
+// then — when the bundle pinned a candidate chain — the model pin.
+//
+// WHY ARGV, NOT CAPSULE-LOCAL PROJECT SETTINGS (measured, F4/P6): the
+// harness's project-level settings file (<CapsuleDir>/.pi/settings.json)
+// is NOT disabled by --no-context-files (that flag only stops the
+// agent-instruction context files' discovery) — it is gated by PROJECT
+// TRUST instead. In rpc
+// mode the harness has no UI, and with the default trust policy ("ask"),
+// no --approve override and no saved decision, protected project settings
+// are SKIPPED ENTIRELY (verified live: a bogus defaultModel in the
+// capsule's .pi/settings.json was ignored; harness source: the trust
+// resolver answers false when it cannot prompt). Even when trusted and
+// loaded, a settings defaultModel that fails to resolve SILENTLY falls
+// back to automatic selection, while argv --model fails LOUDLY — and a
+// pinned bundle candidate that cannot resolve is exactly the visible
+// infrastructure failure the recovery engine should see. So the pin
+// rides argv.
+//
+// Residual settings pollution, deliberately accepted and documented: the
+// operator's agent-directory settings (per-model max_tokens-style
+// overrides, thinking budgets, models.json entries) remain inherited —
+// relocating the agent dir would also relocate the operator's PROVIDER
+// CREDENTIALS (they live in the same directory), leaving the WI agent
+// unable to call any model; copying them into the capsule is forbidden.
+// The argv pin removes the defaultModel inheritance vector; every other
+// operator preference keeps applying at the harness's own defaults. No
+// max_tokens is set here — the pinned model's own default is the
+// conservative choice (an invented cap is exactly the v0 settings-
+// pollution failure shape, from the other side).
 func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 	args := []string{"--mode", "rpc"}
 	args = append(args, piIsolationFlags...)
 	if p.Resume {
 		args = append(args, "--session", p.TranscriptPath)
 	}
+	if p.Model != "" {
+		// the candidate ids are provider-qualified "<provider>/<model>",
+		// exactly the form the harness's --model pattern accepts
+		args = append(args, "--model", p.Model)
+	}
 	cmd := exec.Command(s.bin(), args...)
 	cmd.Dir = p.CapsuleDir // cwd = capsule root
 	additions := []string{
+		// DEAD MARKER: the harness IGNORES this variable for transcript
+		// placement (its session store answers to its own *_SESSION_DIR
+		// name); kept only for harness-internal use — the daemon-side
+		// compensation lives in pitranscript.go (F3).
 		"PI_SESSION_DIR=" + filepath.Join(p.CapsuleDir, capsule.DirSession),
 		"PF_WI_ID=" + p.WorkItemID, // layer-4 cleanup marker (deliberate addition)
 		"PF_SESSION_ID=" + p.SessionID,

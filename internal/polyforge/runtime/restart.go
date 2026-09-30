@@ -45,6 +45,13 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		r.jobs[rec.WorkItemID] = jobFromRecord(rec)
 		r.mu.Unlock()
 	}
+	// D5, after seeding: replay every claim that crashed between the
+	// aihub call and the spawn (a claiming-journal entry predates any
+	// state.json record for that work item, but the replay's
+	// already-active check must see the seeded records). The SAME
+	// idempotency key hands back the SAME attempt, so the replay either
+	// finishes the start or closes the generation blocked.
+	r.resumeClaiming(ctx)
 	for _, rec := range st.Jobs {
 		if j := r.jobOf(rec.WorkItemID); j != nil && j.liveAgent() {
 			continue // already running under this daemon: not a restart case

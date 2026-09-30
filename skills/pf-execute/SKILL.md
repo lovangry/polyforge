@@ -113,7 +113,9 @@ For the selected step:
 3. **Dispatch a harness-native subagent** — never an independent headless agent process.
    Pick the model from the step's effective `model_candidates` list at the currently
    effective candidate index (§6). When both levels are absent, keep the harness
-   adapter's default model for every dispatch.
+   adapter's default model for every dispatch. Record the effective model id you
+   dispatched with into `steps.<id>.model` in the same write that starts the step —
+   the observe face renders exactly what you record there.
 4. **Command audit (obligation).** Every command executed for this step must append one
    record to `steps.<id>.output.commands` in the same write that records the step's
    result: `{argv, exit_code, duration_ms, started_at}`, taken directly from the
@@ -131,7 +133,9 @@ For the selected step:
    - **Invalid** (malformed JSON, missing fields, wrong types): an infrastructure
      failure of this step, never a gate FAIL — handle via §6, not §5.
 6. **Write the result into `execution.json`** via the tmp+fsync+rename sequence — you
-   are the only writer of `runtime-state/`.
+   are the only writer of `runtime-state/`. Every such write — like every
+   `execution.json` write — MUST increment the top-level `version` by exactly 1;
+   the daemon's archival is keyed on it.
 7. **Continue.** No archival action follows the write (ruling C3, §8).
 
 ## 5. Gate semantics: business verdicts and bounded rewind
@@ -164,7 +168,8 @@ infrastructure failure, never a gate FAIL:
 3. Recompute the effective model-candidate ordinal — a 1-BASED ordinal mapping directly
    to list position: ordinal = 1 + the count of `infra_failure` entries in
    `attempts[]` after the last `gate_fail_rewind` entry, capped by the list length.
-   Re-dispatch with that candidate. This recomputation must be derivable purely from
+   Re-dispatch with that candidate, updating `steps.<id>.model` in the same atomic
+   write. This recomputation must be derivable purely from
    `execution.json`; never keep the pointer only in memory.
 4. A step already `done` never gets resumed for a failure that happened elsewhere; only
    the step actually mid-flight resumes.
@@ -177,7 +182,9 @@ When a step marked `interactive: true` needs a human answer:
 2. In one atomic write, place the step into its waiting state and persist
    `steps.<id>.pending_question = {question_id, step, question, asked_at}`. Persisting
    the question BEFORE calling flush is what makes a crash between the two recoverable:
-   the replacement process re-presents the same question from the file.
+   the replacement process re-presents the same question from the file. That write —
+   like every `execution.json` write — MUST increment the top-level `version` by
+   exactly 1; the daemon's archival is keyed on it.
 3. Call `flush(needs_input)` over the UDS proxy (§12), carrying the `question_id`,
    the question text and the step id. The daemon acks immediately — that ack is your
    license to block on the human. You then become idle for this step.
@@ -222,6 +229,10 @@ Every step execution attempt is checked against the step-level budget (its own
 `budget_consumed` window since `step_started_at`) and the workflow-level cumulative
 budget (the top-level `budget_consumed` in `execution.json`) independently, per
 dimension (`requests`/`tokens`/`wall_minutes`). Whichever bound is hit first wins.
+Dimension units are NOT uniform: the workflow declares `wall_minutes`, while
+`execution.json`'s `budget_consumed` records `wall_ms` — convert explicitly
+(minutes × 60000) and never compare a minutes-scale number against a ms-scale
+field (the v0 #46 lesson: a float-vs-integer mismatch silently disarmed the gates).
 The baselines come from the materialized `workflow.md`'s budget declarations — you read
 them locally; you hold no server credentials of any kind. If a bound is hit: stop the
 current step, record the breach (`workflow_status: "failed"` with the cause in the
@@ -239,6 +250,12 @@ execution state is worthless; never trust or relay it.
 
 ## 11. Crash and self-recovery: what you never do
 
+- **Never write `execution.json` without bumping `version`.** Every write — step
+  transitions, pending questions, answers, attempt records — increments the top-level
+  `version` by exactly 1; the daemon's archival is keyed on it. A rewrite that leaves
+  the version frozen starves the capsule's revision chain and is flagged as a
+  contract violation (the daemon's belt-and-braces commits a fallback and records a
+  `version_stagnant` event, but the primary archival semantic is the bump).
 - **Never call any server directly.** You hold no credentials. Your entire contact
   surface with the outside world is: the three stdio control methods you ACK (§12) and
   the one `flush(reason)` call you INITIATE (§12). There is no proxy whitelist, no

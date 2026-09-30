@@ -116,35 +116,45 @@ type jobRecord struct {
 	RecoverFails   int    `json:"recover_fails"` // consecutive failed recoveries
 	ResumeFails    int    `json:"resume_fails"`
 	ResumeDead     bool   `json:"resume_dead"`
+	// Candidates is the bundle's workflow-level defaults model_candidates
+	// chain (the F4 lane): every derivation spawn pins the candidate at
+	// CandidateOrdinal. Both are persisted so a restart resumes the SAME
+	// effective candidate (I2: the ordinal is crash-safe bookkeeping, not
+	// in-memory state). Empty Candidates = no chain: the harness adapter's
+	// default model stays in effect.
+	Candidates       []string `json:"candidates,omitempty"`
+	CandidateOrdinal int      `json:"candidate_ordinal,omitempty"`
 }
 
 func (j *job) record() *jobRecord {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return &jobRecord{
-		WorkItemID:     j.wi,
-		Project:        j.project,
-		AttemptID:      j.attempt,
-		InstanceID:     j.instance,
-		Generation:     j.generation,
-		State:          string(j.state),
-		StopReason:     j.stopReason,
-		CapsuleDir:     j.capsuleDir,
-		GitDir:         j.git.GitDir,
-		RemoteURL:      j.git.RemoteURL,
-		Username:       j.git.Username,
-		Secret:         j.git.Secret,
-		SessionID:      j.sessionID,
-		Transcript:     j.transcript,
-		LiveTranscript: j.liveTranscript,
-		BundleName:     j.bundleName,
-		BundleDigest:   j.bundleDigest,
-		AgentPID:       j.agentPID,
-		AgentStart:     j.agentStartedAt,
-		SpawnN:         j.spawnN,
-		RecoverFails:   j.recoverFails,
-		ResumeFails:    j.resumeFails,
-		ResumeDead:     j.resumeDead,
+		WorkItemID:       j.wi,
+		Project:          j.project,
+		AttemptID:        j.attempt,
+		InstanceID:       j.instance,
+		Generation:       j.generation,
+		State:            string(j.state),
+		StopReason:       j.stopReason,
+		CapsuleDir:       j.capsuleDir,
+		GitDir:           j.git.GitDir,
+		RemoteURL:        j.git.RemoteURL,
+		Username:         j.git.Username,
+		Secret:           j.git.Secret,
+		SessionID:        j.sessionID,
+		Transcript:       j.transcript,
+		LiveTranscript:   j.liveTranscript,
+		BundleName:       j.bundleName,
+		BundleDigest:     j.bundleDigest,
+		AgentPID:         j.agentPID,
+		AgentStart:       j.agentStartedAt,
+		SpawnN:           j.spawnN,
+		RecoverFails:     j.recoverFails,
+		ResumeFails:      j.resumeFails,
+		ResumeDead:       j.resumeDead,
+		Candidates:       j.candidates,
+		CandidateOrdinal: j.candidateOrdinal,
 	}
 }
 
@@ -167,17 +177,19 @@ func jobFromRecord(rec *jobRecord) *job {
 			Username:   rec.Username,
 			Secret:     rec.Secret,
 		},
-		sessionID:      rec.SessionID,
-		transcript:     rec.Transcript,
-		liveTranscript: rec.LiveTranscript,
-		bundleName:     rec.BundleName,
-		bundleDigest:   rec.BundleDigest,
-		agentPID:       rec.AgentPID,
-		agentStartedAt: rec.AgentStart,
-		spawnN:         rec.SpawnN,
-		recoverFails:   rec.RecoverFails,
-		resumeFails:    rec.ResumeFails,
-		resumeDead:     rec.ResumeDead,
+		sessionID:        rec.SessionID,
+		transcript:       rec.Transcript,
+		liveTranscript:   rec.LiveTranscript,
+		bundleName:       rec.BundleName,
+		bundleDigest:     rec.BundleDigest,
+		agentPID:         rec.AgentPID,
+		agentStartedAt:   rec.AgentStart,
+		spawnN:           rec.SpawnN,
+		recoverFails:     rec.RecoverFails,
+		resumeFails:      rec.ResumeFails,
+		resumeDead:       rec.ResumeDead,
+		candidates:       rec.Candidates,
+		candidateOrdinal: rec.CandidateOrdinal,
 	}
 }
 

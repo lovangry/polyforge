@@ -158,6 +158,10 @@ type StatusJob struct {
 	Status     string `json:"status"`
 	AttemptID  string `json:"attempt_id,omitempty"`
 	AgentPID   int    `json:"agent_pid,omitempty"`
+	// NeedsInput/QuestionID are the D6 owner face: a job presented as
+	// needs_input carries its pending question's id.
+	NeedsInput bool   `json:"needs_input,omitempty"`
+	QuestionID string `json:"question_id,omitempty"`
 }
 
 // QueueStats is the local job queue counters.

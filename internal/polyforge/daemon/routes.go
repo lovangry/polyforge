@@ -34,6 +34,13 @@ type statusJob struct {
 	Status     string `json:"status"`
 	AttemptID  string `json:"attempt_id,omitempty"`
 	AgentPID   int    `json:"agent_pid,omitempty"`
+	// NeedsInput/QuestionID carry the D6 owner face: the monitor's
+	// pending-question projection merged over the runtime state machine
+	// (a job the runtime calls running but the monitor holds a pending
+	// question for is presented as needs_input — an agent blocked on a
+	// human must never read as merely busy).
+	NeedsInput bool   `json:"needs_input,omitempty"`
+	QuestionID string `json:"question_id,omitempty"`
 }
 
 type queueStats struct {
@@ -338,14 +345,30 @@ func (d *Daemon) flushGate(next http.Handler) http.Handler {
 // ops face: status / mode / batch_submit / shutdown.
 
 func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
+	// D6: the per-job needs_input projection, derived from the observe
+	// lane's monitors (keyed by the canonical id — the same key
+	// rt.List() reports).
+	pending := d.obs.PendingInputs()
 	jobs := make([]statusJob, 0, 8)
 	for _, ji := range d.rt.List() {
-		jobs = append(jobs, statusJob{
+		sj := statusJob{
 			WorkItemID: ji.WorkItem,
-			Status:      string(ji.State),
-			AttemptID:   ji.AttemptID,
-			AgentPID:    ji.AgentPID,
-		})
+			Status:     string(ji.State),
+			AttemptID:  ji.AttemptID,
+			AgentPID:   ji.AgentPID,
+		}
+		if pi, ok := pending[ji.WorkItem]; ok {
+			sj.QuestionID = pi.QuestionID
+			// the presentation rule: runtime says running but the monitor
+			// holds a pending question → needs_input wins. Any other
+			// runtime state (sealing, recovering) keeps its own name — a
+			// close in progress outranks the question it may carry.
+			if ji.State == runtime.StateRunning {
+				sj.Status = protocol.JobNeedsInput
+				sj.NeedsInput = true
+			}
+		}
+		jobs = append(jobs, sj)
 	}
 	writeJSON(w, http.StatusOK, statusResponse{
 		MachineID:    d.cfg.MachineID,

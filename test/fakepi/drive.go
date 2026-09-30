@@ -63,6 +63,7 @@ type execState struct {
 
 type execStep struct {
 	Status          string           `json:"status"`
+	Model           string           `json:"model,omitempty"` // the pinned candidate this derivation was spawned with
 	StepStartedAt   string           `json:"step_started_at,omitempty"`
 	Attempts        []any            `json:"attempts"`
 	Answers         []archivedAnswer `json:"answers"`
@@ -248,6 +249,18 @@ func sleepMS(n int) {
 	time.Sleep(time.Duration(n) * time.Millisecond)
 }
 
+// pinnedModelOf reads the --model argv the runtime pinned this derivation
+// with ("" when the spawn carried no pin — the no-chain shape).
+func pinnedModelOf() string {
+	args := os.Args
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--model" {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 // runStep writes one step through execution.json: in_progress, then done
 // — two atomic writes, Version increasing each time (the async push
 // surface the observe lane polls).
@@ -258,6 +271,7 @@ func (d *driveEnv) runStep(stepID string) {
 	d.commit(func(x *execState) {
 		st := x.step(stepID)
 		st.Status = "in_progress"
+		st.Model = pinnedModelOf() // mirror the executor contract: record the effective model
 		st.StepStartedAt = nowStamp()
 		st.PendingQuestion = nil
 		x.CurrentStep = stepID

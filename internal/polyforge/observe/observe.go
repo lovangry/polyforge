@@ -66,6 +66,10 @@ type Config struct {
 	FlushBound        time.Duration // per-flush bound (protocol.FlushTimeout, 60s)
 	CallTimeout       time.Duration // HTTP-face wait for a monitor answer (65s)
 	OBCapacity        int           // OB channel buffer check (64)
+	// VersionStagnantTicks is the C3' belt-and-braces bound: consecutive
+	// same-Version execution.json rewrites before a fallback commit + one
+	// version_stagnant event. 0 = the default (3). Injectable for tests.
+	VersionStagnantTicks int
 }
 
 func (c *Config) fill() {
@@ -98,6 +102,9 @@ func (c *Config) fill() {
 	}
 	if c.OBCapacity == 0 {
 		c.OBCapacity = 64
+	}
+	if c.VersionStagnantTicks == 0 {
+		c.VersionStagnantTicks = defaultVersionStagnantTicks
 	}
 	if c.PushFunc == nil {
 		c.PushFunc = defaultPush
@@ -339,16 +346,17 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 	m := &Monitor{
 		wi: at.WI,
 		cfg: monitorCfg{
-			PollInterval:      o.cfg.PollInterval,
-			HangWindow:        o.cfg.HangWindow,
-			ProbeTimeout:      o.cfg.ProbeTimeout,
-			AnswerAckWindow:   o.cfg.AnswerAckWindow,
-			PushRetryBackoff:  o.cfg.PushRetryBackoff,
-			BackpressureSteps: o.cfg.BackpressureSteps,
-			BackpressureAfter: o.cfg.BackpressureAfter,
-			FlushBound:        o.cfg.FlushBound,
-			push:              o.cfg.PushFunc,
-			locateLive:        o.cfg.LocateLive,
+			PollInterval:         o.cfg.PollInterval,
+			HangWindow:           o.cfg.HangWindow,
+			ProbeTimeout:         o.cfg.ProbeTimeout,
+			AnswerAckWindow:      o.cfg.AnswerAckWindow,
+			PushRetryBackoff:     o.cfg.PushRetryBackoff,
+			BackpressureSteps:    o.cfg.BackpressureSteps,
+			BackpressureAfter:    o.cfg.BackpressureAfter,
+			FlushBound:           o.cfg.FlushBound,
+			VersionStagnantTicks: o.cfg.VersionStagnantTicks,
+			push:                 o.cfg.PushFunc,
+			locateLive:           o.cfg.LocateLive,
 		},
 		log:    o.log,
 		ob:     o.cfg.OB,

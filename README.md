@@ -23,4 +23,10 @@ cmd/pf          work-machine binary (13 verbs + `pf daemon`)
     go build ./...
     go test ./...
 
+Before starting ANY implementation or review lane: recall the v0 lessons
+ledger (`docs/design/polyforge-vnext/v0-lessons-ledger.md`, now including
+the v1 pilot findings F1–F4) and declare, item by item, how your change
+covers the entries it touches — the ledger only prevents re-hits if it is
+actually read first.
+
 Minimal external dependencies: pure-Go SQLite (modernc.org/sqlite), yaml.v3, goldmark, jsonschema, x/sys.

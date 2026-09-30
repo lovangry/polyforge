@@ -42,16 +42,27 @@ type fakeHub struct {
 	// input echoes itself (the pre-F2 behavior).
 	canonical map[string]string
 	items     map[string]*api.WorkItem // canonical id → claim answer record (F1 tests)
+	// keyClaims implements the aihub idempotency contract for tests (D4/
+	// D5): a repeated claim with the SAME IdempotencyKey hands back the
+	// SAME claim answer (same attempt id, same generation) instead of
+	// opening a new generation.
+	keyClaims map[string]*aihubclient.ClaimResponse
 }
 
 func newFakeHub() *fakeHub {
-	return &fakeHub{status: map[string]string{}, lookupErr: map[string]error{}, gen: 1}
+	return &fakeHub{status: map[string]string{}, lookupErr: map[string]error{}, gen: 1, keyClaims: map[string]*aihubclient.ClaimResponse{}}
 }
 
 func (h *fakeHub) Claim(req aihubclient.ClaimRequest) (*aihubclient.ClaimResponse, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.claims = append(h.claims, req)
+	// idempotent replay (the aihub contract): same key → same attempt
+	if req.IdempotencyKey != "" {
+		if prev, ok := h.keyClaims[req.IdempotencyKey]; ok {
+			return prev, nil
+		}
+	}
 	if !h.stickyGen {
 		h.gen++
 	}
@@ -69,7 +80,7 @@ func (h *fakeHub) Claim(req aihubclient.ClaimRequest) (*aihubclient.ClaimRespons
 			item = *it
 		}
 	}
-	return &aihubclient.ClaimResponse{
+	resp := &aihubclient.ClaimResponse{
 		Claim: api.Claim{
 			WorkItemID:   id,
 			AttemptID:    "ra_" + id,
@@ -80,7 +91,11 @@ func (h *fakeHub) Claim(req aihubclient.ClaimRequest) (*aihubclient.ClaimRespons
 		},
 		Credential: api.PushCredential{AttemptID: "ra_" + id, Username: id, Secret: "push-secret"},
 		WorkItem:   item,
-	}, nil
+	}
+	if req.IdempotencyKey != "" {
+		h.keyClaims[req.IdempotencyKey] = resp
+	}
+	return resp, nil
 }
 
 func (h *fakeHub) EndGeneration(wi string, req aihubclient.EndGenerationRequest) error {

@@ -164,6 +164,12 @@ type job struct {
 	recoverFails int // consecutive FAILED recoveries; reset on success
 	resumeFails  int
 	resumeDead   bool
+	// candidates is the bundle's defaults model_candidates chain (F4):
+	// spawnAgent pins the derivation to candidates[candidateOrdinal]. The
+	// ordinal advances ONLY on provider-class recovery (INV-1g; see
+	// recover.go advanceCandidate) and is persisted in the job record.
+	candidates       []string
+	candidateOrdinal int
 
 	mu sync.Mutex
 }
@@ -387,33 +393,59 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 // StartIntent claims wi with an explicit claim intent (claim|resume|
 // takeover — the aihub claim-endpoint semantics differ per intent) and
 // runs it to a live agent. The phase-3 daemon routes the CLI's
-// submit/resume/takeover verbs here.
-//
-// wi may arrive as the canonical id OR any id-or-slug form the aihub
-// claim endpoint accepts ("<project>#<seq>"): the job and every path
-// derived from it — capsule directory, external git-dir, push remote,
-// session id, spawn journal — are keyed by the CANONICAL work-item id
-// the claim answer carries (F2). A slug contains "#", the URL
-// fragment separator: a slug-built push remote answers 404 and a
-// slug-named directory leaks the separator into the harness's session
-// directory naming, so slugs never reach any path. The submitted
-// spelling is registered as an alias so lookups by it still resolve.
+// submit/resume/takeover verbs here. Idempotency rides on the claim
+// idempotency key, journaled before the call (D5, see claiming.go); the
+// post-claim continuation and the F2 canonical-id rules live in
+// startClaimed.
 func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	if j := r.jobOf(wi); j != nil {
 		return fmt.Errorf("runtime: %s already active (state %s)", wi, j.state)
 	}
+	// D5: the claim's idempotency key is journaled durably BEFORE the
+	// claim call. A crash anywhere between the claim and the spawn would
+	// otherwise orphan a running generation nobody can name again — the
+	// journal lets Restart replay the SAME claim (same key → same attempt,
+	// the server's idempotency contract) and either finish the start or
+	// close the generation blocked.
+	key := randomKey()
+	if err := r.noteClaiming(wi, intent, key); err != nil {
+		return fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", wi, err)
+	}
 	resp, err := r.hub.Claim(aihubclient.ClaimRequest{
 		WorkItemID:     wi,
 		Intent:         intent,
 		MachineID:      r.cfg.MachineID,
 		Owner:          r.cfg.MachineID,
-		IdempotencyKey: randomKey(),
+		IdempotencyKey: key,
 	})
 	if err != nil {
+		// the claim never opened: nothing can dangle, drop the journal
+		// entry so a restart does not replay a dead intention.
+		r.clearClaiming(wi)
 		return err
 	}
+	return r.startClaimed(ctx, wi, resp)
+}
+
+// startClaimed carries one OPEN claim (fresh or replayed) to a live agent.
+// Every failure after this point is compensated with EndGeneration
+// (blocked) — the D5 rule: a post-claim failure must never leave an
+// orphaned running generation; the ticket needs human attention, and the
+// generation fence revokes the credential either way. The claiming
+// journal entry is cleared on every settled outcome.
+//
+// wi may arrive as the canonical id OR any id-or-slug form the aihub claim
+// endpoint accepts ("<project>#<seq>"): the job and every path derived
+// from it — capsule directory, external git-dir, push remote, session id,
+// spawn journal — are keyed by the CANONICAL work-item id the claim
+// answer carries (F2). A slug contains "#", the URL fragment separator:
+// a slug-built push remote answers 404 and a slug-named directory leaks
+// the separator into the harness's session directory naming, so slugs
+// never reach any path. The submitted spelling is registered as an alias
+// so lookups by it still resolve.
+func (r *Runtime) startClaimed(ctx context.Context, wi string, resp *aihubclient.ClaimResponse) error {
 	c := resp.Claim
 	// canonical id resolution (F2): the claim answer's work item is the
 	// authority; the claim's own WorkItemID and the answered record's ID
@@ -424,7 +456,12 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		id = c.WorkItemID
 	}
 	r.NoteAlias(wi, id)
-	if existing := r.jobOf(id); existing != nil && id != wi {
+	if existing := r.jobOf(id); existing != nil {
+		// an already-live job (same spelling or canonical): the start is a
+		// duplicate — for a Restart replay of the claiming journal this
+		// means the original start registered the job before the crash
+		// (the state.json record reconciles it), so only the journal is stale.
+		r.clearClaiming(wi)
 		return fmt.Errorf("runtime: %s already active (state %s)", id, existing.state)
 	}
 	j := &job{
@@ -452,30 +489,21 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 	j.transcript = sessionPathFor(j.capsuleDir, j.attempt)
 
 	if err := r.prepareCapsule(j); err != nil {
-		return err
+		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
 	}
 	if err := r.materialize(ctx, j); err != nil {
-		// A typed task-repo clone failure (DAEMON-507) closes the fresh
-		// attempt as BLOCKED on the spot: the ticket needs human
-		// attention (bad remote, missing credential), never an orphaned
-		// running generation and never a daemon crash. A best-effort
-		// close failure is loud but leaves the typed error as the answer
-		// — the generation fence still revokes the credential.
+		// A typed task-repo clone failure (DAEMON-507) keeps its detail as
+		// the close note; every other materialization failure (CAP-405
+		// digest divergence included) names itself.
+		note := err.Error()
 		var ae *api.Error
-		if errors.As(err, &ae) && ae.Code == api.ErrDaemonSpawnFail {
-			if eerr := r.hub.EndGeneration(wi, aihubclient.EndGenerationRequest{
-				AttemptID:  j.attempt,
-				Generation: j.generation,
-				Status:     api.StatusBlocked,
-				Note:       ae.Detail,
-			}); eerr != nil {
-				fmt.Fprintf(os.Stderr, "runtime: %s: end-generation(blocked) after clone failure failed: %v\n", wi, eerr)
-			}
+		if errors.As(err, &ae) && ae.Code == api.ErrDaemonSpawnFail && ae.Detail != "" {
+			note = ae.Detail
 		}
-		return err
+		return r.abandonClaim(j, wi, err, note)
 	}
 	if _, err := r.spawnAgent(ctx, j, false, ""); err != nil {
-		return err
+		return r.abandonClaim(j, wi, err, "spawn agent: "+err.Error())
 	}
 	r.mu.Lock()
 	r.jobs[id] = j
@@ -483,12 +511,36 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", id, err)
 	}
+	// The start settled: the claiming journal entry has done its job.
+	r.clearClaiming(wi)
 	j.mu.Lock()
 	pid := j.agentPID
 	inst := j.instance
 	j.mu.Unlock()
 	r.send(protocol.RTMsg{Kind: protocol.RTStarted, AttemptID: inst, WorkItem: id, AgentPID: pid})
 	return nil
+}
+
+// abandonClaim is the D5 compensation: every post-claim failure closes
+// the generation BLOCKED at aihub and clears the claiming journal, then
+// hands the original error back to the caller — a bad remote, a diverged
+// bundle, a spawn refusal all need human attention, never an orphaned
+// running generation and never a daemon crash. A failed CLOSE keeps the
+// journal entry (a later restart replays the same key and retries the
+// compensation); it is loud but never masks the original error. The
+// generation fence (credential revocation) still runs server-side.
+func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note string) error {
+	if cerr := r.hub.EndGeneration(j.wi, aihubclient.EndGenerationRequest{
+		AttemptID:  j.attempt,
+		Generation: j.generation,
+		Status:     api.StatusBlocked,
+		Note:       note,
+	}); cerr != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: end-generation(blocked) after failed start failed (claiming entry kept for the next restart): %v\n", j.wi, cerr)
+		return origErr
+	}
+	r.clearClaiming(submitted)
+	return origErr
 }
 
 // prepareCapsule makes CapsuleDir a git worktree whose git-dir is EXTERNAL
@@ -661,6 +713,20 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 		}
 	} else {
 		fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s carries no pinned content digest; materialized without verification\n", j.wi, j.bundleName)
+	}
+	// Candidate-chain extraction (F4): the materialized bundle's
+	// workflow-level defaults model_candidates are read here and pinned
+	// onto the job — spawnAgent pins the derivation to the candidate at
+	// the (persisted) ordinal, so the WI agent never silently runs on the
+	// operator's global default model. Best-effort by design: a missing
+	// or torn frontmatter leaves the chain absent and the spawn unpinned
+	// (the harness adapter's default), never a failed start.
+	if fm, ferr := workflow.ReadFrontmatter(filepath.Join(dst, "workflow.md")); ferr != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: workflow frontmatter unreadable; spawn stays unpinned: %v\n", j.wi, ferr)
+	} else if fm != nil && fm.Defaults != nil {
+		j.mu.Lock()
+		j.candidates = fm.Defaults.ModelCandidates
+		j.mu.Unlock()
 	}
 	// step-agent definitions ride the bundle's agents/ subdir
 	if dirExists(filepath.Join(src, "agents")) {

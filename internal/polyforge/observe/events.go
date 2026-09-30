@@ -43,7 +43,14 @@ const (
 	// Advisory only — the commit/push proceed without the transcript;
 	// one event per attempt, never a spam loop.
 	EvTranscriptMissing = "transcript_missing"
-	EvJobStopped        = "job_stopped"
+	// EvVersionStagnant is the C3' belt-and-braces warning: execution.json
+	// was rewritten (mtime advanced) N consecutive times WITHOUT a
+	// top-level Version bump — the archival contract is violated, the
+	// monitor schedules a fallback commit anyway, and the event names the
+	// violation so the operator can fix the agent's write path. Version
+	// stays the primary archival semantic.
+	EvVersionStagnant = "version_stagnant"
+	EvJobStopped      = "job_stopped"
 )
 
 // Infra-incident payload kinds (04 §5.1a tenth-event family).

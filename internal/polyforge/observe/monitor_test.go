@@ -332,3 +332,82 @@ func TestMonitorNotBlockedByProbeWait(t *testing.T) {
 	close(release)
 	expectNoOB(t, ob, 200*time.Millisecond, "a cleared probe never recovers")
 }
+
+// TestPollVersionStagnantSchedulesFallbackCommit pins the C3'
+// belt-and-braces: an agent that rewrites execution.json (mtime advances)
+// while leaving the top-level Version frozen must not starve the capsule
+// chain — after the stagnation bound (3 rewrites here) the monitor
+// schedules a commit anyway and records one version_stagnant event.
+// The Version-driven rule stays primary: a proper Version bump publishes
+// without any stagnation episode.
+func TestPollVersionStagnantSchedulesFallbackCommit(t *testing.T) {
+	var pushes atomic.Int64
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.VersionStagnantTicks = 3
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+			pushes.Add(1)
+			return "sha_stag", true, nil
+		}
+	})
+
+	// v1 published normally: the primary Version-driven semantic.
+	m.writeExec(t, 1, "s1")
+	soon(t, 2*time.Second, "version-driven publish", func() bool {
+		return pushes.Load() == 1
+	})
+
+	// The agent now violates the contract: four rewrites, Version stays 1.
+	for i := 0; i < 4; i++ {
+		m.writeExec(t, 1, "s1")
+		time.Sleep(5 * time.Millisecond) // let a poll tick observe each mtime
+	}
+	soon(t, 2*time.Second, "stagnation fallback commit", func() bool {
+		return pushes.Load() == 2
+	})
+	if evs := eventsOf(m, EvVersionStagnant); len(evs) != 1 {
+		t.Fatalf("exactly one version_stagnant event per episode, got %d", len(evs))
+	}
+	// The fallback stops after one commit until a NEW episode: no push
+	// storm while the file is left alone.
+	time.Sleep(60 * time.Millisecond)
+	if n := pushes.Load(); n != 2 {
+		t.Fatalf("stale stagnant episode must not keep pushing, pushes=%d", n)
+	}
+}
+
+// TestPollVersionBumpClearsStagnation: a real Version bump in the middle
+// of a stagnation episode re-arms the primary semantic — the episode's
+// partial count is discarded, no fallback commit fires, no event lands.
+func TestPollVersionBumpClearsStagnation(t *testing.T) {
+	var pushes atomic.Int64
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.VersionStagnantTicks = 3
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, error) {
+			pushes.Add(1)
+			return "sha_bump", true, nil
+		}
+	})
+
+	m.writeExec(t, 1, "s1")
+	soon(t, 2*time.Second, "initial publish", func() bool {
+		return pushes.Load() == 1
+	})
+	// two stagnant rewrites (below the bound), then a proper bump
+	m.writeExec(t, 1, "s1")
+	time.Sleep(5 * time.Millisecond)
+	m.writeExec(t, 1, "s1")
+	time.Sleep(5 * time.Millisecond)
+	m.writeExec(t, 2, "s2") // the agent fixes its write path
+	soon(t, 2*time.Second, "version-driven publish of v2", func() bool {
+		return pushes.Load() == 2
+	})
+	if evs := eventsOf(m, EvVersionStagnant); len(evs) != 0 {
+		t.Fatalf("a resolved episode must leave no event, got %d", len(evs))
+	}
+	time.Sleep(40 * time.Millisecond)
+	if n := pushes.Load(); n != 2 {
+		t.Fatalf("no fallback commit may fire after a bump, pushes=%d", n)
+	}
+}

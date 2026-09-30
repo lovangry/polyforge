@@ -50,6 +50,7 @@ func (m *Monitor) JobView() *protocol.JobView {
 		for id, s := range exec.Steps {
 			sv := &protocol.StepView{
 				Status:    s.Status,
+				Model:     s.Model,
 				Attempts:  len(s.Attempts),
 				StartedAt: s.StepStartedAt,
 			}
@@ -87,6 +88,47 @@ func (m *Monitor) JobView() *protocol.JobView {
 		view.Status = protocol.JobRunning
 	}
 	return view
+}
+
+// PendingInput is one work item's owner-facing needs_input projection
+// (D6): the pending question's id, step and ask moment, derived from the
+// per-WI monitor's pending state — the /status face merges it over the
+// runtime's own bookkeeping so an agent blocked on a human is never
+// presented as merely "running".
+type PendingInput struct {
+	QuestionID string
+	Step       string
+	AskedAt    string
+}
+
+// pendingQuestion answers the monitor's current pending-question
+// projection (stateMu-guarded; nil = none).
+func (m *Monitor) pendingQuestion() *protocol.PendingView {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	return m.pending
+}
+
+// PendingInputs answers the needs_input state of every monitored work
+// item (D6): canonical work-item id → pending question. Monitors are
+// keyed by the canonical id the runtime announced; the caller merges by
+// the same key.
+func (o *Observe) PendingInputs() map[string]PendingInput {
+	o.mu.Lock()
+	monitors := make([]*Monitor, 0, len(o.monitors))
+	for _, m := range o.monitors {
+		monitors = append(monitors, m)
+	}
+	o.mu.Unlock()
+	out := map[string]PendingInput{}
+	for _, m := range monitors {
+		if pv := m.pendingQuestion(); pv != nil {
+			out[m.wi.WorkItem] = PendingInput{
+				QuestionID: pv.ID, Step: pv.Step, AskedAt: pv.AskedAt,
+			}
+		}
+	}
+	return out
 }
 
 // isTerminalStatus reports whether execution.json's workflow_status is
