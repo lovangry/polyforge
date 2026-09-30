@@ -184,6 +184,13 @@ type Daemon struct {
 
 	lst net.Listener
 	srv *http.Server
+
+	// faceOwned latches once this process bound the UDS face (the
+	// single-instance guard passed): only a daemon that owns the socket
+	// may rewrite the shared on-disk bookkeeping — a startup abort must
+	// never persist its (never-seeded) view over the running daemon's
+	// state.
+	faceOwned bool
 }
 
 // New validates and assembles the daemon. Restart reconciliation is NOT
@@ -321,22 +328,41 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go func() { d.obs.Run(d.obsCtx); close(d.obsDone) }()
 	go d.bridge()
 
-	// Restart reconciliation (§十一): every recorded job is re-derived
-	// against aihub's own verdict BEFORE the daemon serves anything.
-	if err := d.rt.Restart(d.runCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon: restart reconciliation failed: %v\n", err)
-	}
-	d.reattachRecovered()
-
+	// Single-instance guard FIRST — before ANY push lane can open. The
+	// UDS face is the one cross-process serialization point this data-dir
+	// has: an old daemon mid-graceful-shutdown keeps its listener (it
+	// closes only at step 5 of the sequence) while its in-flight
+	// recovery pushes are still running, so dialing the socket here is
+	// the only reliable "is the old process gone yet?" check. Restart
+	// reconciliation used to run BEFORE this guard, which let a daemon
+	// started in that window push the same work items from a second
+	// process — the per-WI git mutex is process-local, so nothing
+	// serialized the two lanes and the server's ref compare-and-swap
+	// rejected the duplicate pushes. Guarding first makes the new
+	// process abort before it can open a push lane at all.
 	lst, err := d.listenUDS()
 	if err != nil {
-		_ = d.Shutdown(context.Background())
+		// Startup abort: unwind the lanes this process already started,
+		// but persist NOTHING — this process never owned the socket, so
+		// the shared on-disk bookkeeping (state.json) belongs to the
+		// daemon that still holds it.
+		d.abortStartup()
 		return err
 	}
+	d.faceOwned = true
 	d.lst = lst
 	d.srv = &http.Server{Handler: d.handler()}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- d.srv.Serve(lst) }()
+
+	// Restart reconciliation (§十一): every recorded job is re-derived
+	// against aihub's own verdict — strictly after this process owns
+	// the socket, i.e. after any previous process of this data-dir is
+	// gone (see the guard note above).
+	if err := d.rt.Restart(d.runCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: restart reconciliation failed: %v\n", err)
+	}
+	d.reattachRecovered()
 
 	dispatch := time.NewTicker(d.cfg.DispatchTick)
 	defer dispatch.Stop()
@@ -360,6 +386,25 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-drain.C:
 			d.fetchDrainWave()
 		}
+	}
+}
+
+// abortStartup unwinds a daemon whose single-instance guard refused
+// the UDS face: stop the already-started lanes and wait for them, but
+// persist nothing (see faceOwned). Run returns the guard error right
+// after; the process exits without ever having touched a push lane.
+func (d *Daemon) abortStartup() {
+	if d.cancelObs != nil {
+		d.cancelObs()
+	}
+	if d.obsDone != nil {
+		<-d.obsDone
+	}
+	if d.cancelRun != nil {
+		d.cancelRun()
+	}
+	if d.rtDone != nil {
+		<-d.rtDone
 	}
 }
 

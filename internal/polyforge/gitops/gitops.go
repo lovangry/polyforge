@@ -227,6 +227,18 @@ func Push(o Opts) (bool, error) {
 // pushLocked is push under an already-held per-WI lock. The returned
 // pushMS is the wall-clock duration of the git push invocation,
 // measured honestly on failure too (the observed-only latency sample).
+//
+// Same-WI push idempotency (the shutdown-window push race): the receive
+// protocol compare-and-swaps every push against the ref value its
+// client saw at advertisement time, so a duplicate push of an
+// already-published commit — e.g. a recovery push of one work item
+// racing an overlapping push of the same WI across a stop+restart
+// boundary — is rejected with "cannot lock ref" even though the server
+// already holds the exact state being pushed. That rejection shape is
+// retried a bounded number of times: each retry re-advertises, and a
+// server already holding the standing HEAD answers "Everything
+// up-to-date" (success). Anything still failing — or failing for a
+// different reason — surfaces as the honest error.
 func pushLocked(o Opts) (bool, int64, error) {
 	if o.RemoteURL == "" {
 		return false, 0, &api.Error{Code: api.ErrGitUnauthorized, Detail: "no push remote configured"}
@@ -244,13 +256,43 @@ func pushLocked(o Opts) (bool, int64, error) {
 	}
 	defer cleanup()
 	env := append(o.Env(), additions...)
-	pushStart := time.Now()
-	out, err := git(env, o.CapsuleDir, args...)
-	pushMS := time.Since(pushStart).Milliseconds()
-	if err != nil {
-		return false, pushMS, &api.Error{Code: api.ErrGitInternal, Detail: strings.TrimSpace(out) + ": " + err.Error()}
+	for attempt := 1; ; attempt++ {
+		pushStart := time.Now()
+		out, perr := git(env, o.CapsuleDir, args...)
+		pushMS := time.Since(pushStart).Milliseconds()
+		if perr == nil {
+			return true, pushMS, nil
+		}
+		detail := strings.TrimSpace(out) + ": " + perr.Error()
+		if !refCasRejected(detail) || attempt >= pushRaceAttempts {
+			return false, pushMS, &api.Error{Code: api.ErrGitInternal, Detail: detail}
+		}
+		// The ref moved (or appeared) between this push's advertisement
+		// and its ref transaction: re-advertise and try again — the
+		// winner of the overlap usually delivered this very commit, so
+		// the retry answers up-to-date.
+		time.Sleep(pushRaceBackoff)
 	}
-	return true, pushMS, nil
+}
+
+// pushRaceAttempts bounds how many times a ref-transaction CAS rejection
+// is re-advertised before the push surfaces its error, and
+// pushRaceBackoff spaces the retries (the overlapping winner's
+// transaction needs a moment to land).
+const (
+	pushRaceAttempts = 3
+	pushRaceBackoff  = 250 * time.Millisecond
+)
+
+// refCasRejected reports whether a failed push's combined output is the
+// ref-transaction compare-and-swap rejection: git-receive-pack refuses
+// the whole push when the ref moved ("cannot lock ref ... is at X but
+// expected Y") or came into existence ("reference already exists")
+// after the client fixed its expected-old value at advertisement time.
+// Those shapes mean an overlapping push of the same ref won the race —
+// a duplicate-publish condition, not a wrong push.
+func refCasRejected(out string) bool {
+	return strings.Contains(out, "cannot lock ref") && strings.Contains(out, "failed to update ref")
 }
 
 // Clone materializes a fresh capsule worktree from the aihub bare repo

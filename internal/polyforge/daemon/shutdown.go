@@ -118,12 +118,17 @@ func (d *Daemon) runShutdown(ctx context.Context) error {
 	}
 
 	// Step 4c: persist the bookkeeping (jobs/attempts ride Runtime's
-	// state.json; mode/concurrency ride the daemon state file).
-	if err := d.rt.Persist(); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon: state.json persist failed: %v\n", err)
-	}
-	if err := d.persistDaemonState(); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon: daemon-state persist failed: %v\n", err)
+	// state.json; mode/concurrency ride the daemon state file) — but
+	// only if this process ever owned the UDS face: a startup abort
+	// (another daemon still holds the socket) must never rewrite the
+	// shared bookkeeping of the daemon that does.
+	if d.faceOwned {
+		if err := d.rt.Persist(); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: state.json persist failed: %v\n", err)
+		}
+		if err := d.persistDaemonState(); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: daemon-state persist failed: %v\n", err)
+		}
 	}
 
 	// Step 5: close the UDS face, stop the loops, and wait for the
