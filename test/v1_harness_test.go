@@ -462,6 +462,7 @@ type v1Daemon struct {
 	workspace  string
 	machineID  string
 	apiKey     string // optional dedicated aihub key (optAPIKey); "" = bootstrap admin key
+	execPrompt string
 	extraEnv   []string
 	extraArgs  []string // extra `pf daemon` flags appended to the argv
 	client     *cli.DaemonClient
@@ -473,6 +474,18 @@ type daemonOpt func(*v1Daemon)
 
 func optMachineID(id string) daemonOpt {
 	return func(d *v1Daemon) { d.machineID = id }
+}
+
+// optExecutorPrompt points --executor-prompt at another file. The
+// initial prompt the daemon injects into every derivation is built from
+// it (runtime.buildPrompt), so a scenario that needs a prompt of a
+// particular SIZE — s17's must-fail-at-spawn ladder needs one larger
+// than a pipe buffer — sets it here instead of touching the real
+// executor skill. Empty means the default (the real
+// skills/pf-execute/SKILL.md), resolved in start() rather than at
+// construction so struct-literal builders keep the default for free.
+func optExecutorPrompt(path string) daemonOpt {
+	return func(d *v1Daemon) { d.execPrompt = path }
 }
 
 // optAPIKey boots the daemon on a dedicated aihub api key (e.g. a
@@ -588,6 +601,11 @@ func (d *v1Daemon) start() {
 	if apiKey == "" {
 		apiKey = d.inst.adminKey
 	}
+	// optExecutorPrompt: the opt-set file, or the real executor skill.
+	execPrompt := d.execPrompt
+	if execPrompt == "" {
+		execPrompt = filepath.Join(d.inst.root, "skills", "pf-execute", "SKILL.md")
+	}
 	args := []string{
 		"daemon",
 		"--socket", d.sock,
@@ -598,7 +616,7 @@ func (d *v1Daemon) start() {
 		"--workspace-root", d.workspace,
 		"--project", v1Project,
 		"--workflows-dir", filepath.Join(d.inst.root, "workflows"),
-		"--executor-prompt", filepath.Join(d.inst.root, "skills", "pf-execute", "SKILL.md"),
+		"--executor-prompt", execPrompt,
 		"--pi-bin", d.inst.fakepiPath,
 	}
 	if gitRemoteBase != "" {
