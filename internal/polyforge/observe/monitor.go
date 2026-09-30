@@ -228,14 +228,28 @@ type Monitor struct {
 	// hang detection.
 	probeInFlight bool
 	probeDone     chan probeResult
-	hangAnchor    time.Time // probe-cleared window restart
+	// hangAnchor is the hang window's probe-cleared restart point: the
+	// moment the last ACKED liveness probe answered while a turn was in
+	// flight. The criterion itself is anchored on lastProgressAt (the
+	// F15 semantics: UI-noise records never count as life), so an anchor
+	// is only needed to restart the window after a probe the agent
+	// survived.
+	hangAnchor time.Time
 	// idle detection (F5). idleAnchor is the idle window's baseline
 	// when the stream has produced no progress record yet (set at
 	// attach/recovery adoption) and its restart point after a probe the
-	// agent answered; probeIdle remembers WHICH criterion armed the
-	// in-flight probe so the result lands as the right recovery reason.
+	// agent answered; like the hang criterion, the measured clock is
+	// lastProgressAt, never the noise clock. probeIdle remembers WHICH
+	// criterion armed the in-flight probe so the result lands as the
+	// right recovery reason.
 	idleAnchor time.Time
 	probeIdle  bool
+	// noProgressAt is the F15c no_progress event's throttle stamp: the
+	// last emission of the owner-facing progress-silence event (zero =
+	// none this attempt). At most one event per idle window; cleared by
+	// a probe round and by recovery adoption (resumed progress clears it
+	// implicitly — the gate reads lastProgressAt first).
+	noProgressAt time.Time
 
 	// live-transcript sync state (F3; monitor goroutine only — the push
 	// sub-goroutines receive the values as arguments, never over m).
@@ -321,6 +335,7 @@ func (m *Monitor) onTick() {
 	m.drainIncidents()
 	m.checkHang()
 	m.checkIdle()
+	m.checkNoProgress()
 	m.pollExecution()
 	m.schedulePush()
 	m.checkBackpressure()
@@ -483,7 +498,7 @@ func (m *Monitor) checkHang() {
 	m.probeIdle = false
 	_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
 		"kind": HangSuspected,
-		"detail": fmt.Sprintf("stream silent past the %.0fs window with a turn in flight; sending liveness probe",
+		"detail": fmt.Sprintf("progress-silent past the %.0fs window with a turn in flight; sending liveness probe",
 			m.cfg.HangWindow.Seconds()),
 	})
 	handle := m.handle // captured: no race with a concurrent recovery
@@ -511,14 +526,14 @@ func (m *Monitor) checkHang() {
 // leaves the session running with no open turn and no arriving prompt
 // — a wrongly-terminated turn, a lost driver — leaves the stream
 // quiet with turnDepth 0, which no in-flight window ever covers.
-// Criterion: no progress record AND no in-flight turn for longer than
-// IdleWindow ⇒ liveness probe (the same probe mechanism, the same
-// ProbeTimeout bound) ⇒ no ack ⇒ WINeedsRecovery(idle); ack ⇒ the
-// window restarts and nothing recovers (the agent is on legal slow
-// work). Exemptions: a pending question (needs_input is a designed
-// standstill — waiting for a human answer is not idleness) and every
-// suppressed state (RECOVERING already shipped its one signal; the
-// storm semantics are unchanged).
+// Criterion: no PROGRESS record (the F15 semantics: UI noise never
+// counts) AND no in-flight turn for longer than IdleWindow ⇒ liveness
+// probe (the same probe mechanism, the same ProbeTimeout bound) ⇒ no
+// ack ⇒ WINeedsRecovery(idle); ack ⇒ the window restarts and nothing
+// recovers (the agent is on legal slow work). Exemptions: a pending
+// question (needs_input is a designed standstill — waiting for a human
+// answer is not idleness) and every suppressed state (RECOVERING
+// already shipped its one signal; the storm semantics are unchanged).
 func (m *Monitor) checkIdle() {
 	if m.cfg.IdleWindow <= 0 {
 		return // disabled: a zero window would fire on every tick
@@ -530,7 +545,7 @@ func (m *Monitor) checkIdle() {
 	if hb.InFlight {
 		return // a turn is open: the hang criterion owns that silence
 	}
-	eff := hb.LastRecordAt
+	eff := hb.LastProgressAt
 	if m.idleAnchor.After(eff) {
 		eff = m.idleAnchor // pre-first-record baseline / probe-cleared restart
 	}
@@ -551,7 +566,7 @@ func (m *Monitor) checkIdle() {
 	m.probeIdle = true
 	_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
 		"kind": IdleSuspected,
-		"detail": fmt.Sprintf("no stream record and no turn in flight past the %.0fs idle window; sending liveness probe",
+		"detail": fmt.Sprintf("no progress record and no turn in flight past the %.0fs idle window; sending liveness probe",
 			m.cfg.IdleWindow.Seconds()),
 	})
 	handle := m.handle // captured: no race with a concurrent recovery
@@ -567,10 +582,60 @@ func (m *Monitor) checkIdle() {
 	}()
 }
 
+// checkNoProgress is the F15c owner face: the same progress-silence
+// signal the hang/idle watchdogs judge (no PROGRESS record for longer
+// than the idle window, REGARDLESS of whether a turn is open — an open
+// turn hands the silence to the hang watchdog, a closed one to the
+// idle watchdog, and the event covers both) also lands in the events
+// log, so the owner's observe face shows a stalled job even while the
+// watchdogs are still inside their probe/confirmation cycle — the
+// pilot's wedge produced ZERO events and no owner-visible surface for
+// 2.7 hours. Throttled to at most one event per idle window; cleared
+// by a probe round and by recovery adoption, and resumed progress
+// clears it implicitly (the gate reads lastProgressAt first). Exempt
+// while a question is pending (needs_input already owns the QUESTION
+// face) and in every suppressed state.
+func (m *Monitor) checkNoProgress() {
+	if m.cfg.IdleWindow <= 0 {
+		return // disabled with the idle watchdog it shares the window with
+	}
+	hb := m.stream.heartbeat()
+	eff := hb.LastProgressAt
+	if m.idleAnchor.After(eff) {
+		eff = m.idleAnchor // pre-first-record baseline / probe-cleared restart
+	}
+	if eff.IsZero() || time.Since(eff) < m.cfg.IdleWindow {
+		return
+	}
+	m.stateMu.Lock()
+	pending := m.pending != nil
+	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing
+	m.stateMu.Unlock()
+	if pending || suppressed {
+		return
+	}
+	if !m.noProgressAt.IsZero() && time.Since(m.noProgressAt) < m.cfg.IdleWindow {
+		return // throttle: at most one no_progress event per window
+	}
+	m.noProgressAt = time.Now()
+	_ = m.log.Append(m.wi.WorkItem, EvNoProgress, map[string]any{
+		"silent_for_ms": time.Since(eff).Milliseconds(),
+		"window_ms":     m.cfg.IdleWindow.Milliseconds(),
+		"in_flight":     hb.InFlight,
+		"detail": fmt.Sprintf("no agent progress record for %.0fs (turn in flight: %v); UI noise is not progress",
+			time.Since(eff).Seconds(), hb.InFlight),
+		"attempt_id": m.currentAttempt(),
+	})
+}
+
 func (m *Monitor) onProbeResult(pr probeResult) {
 	m.probeInFlight = false
 	idleProbe := m.probeIdle
 	m.probeIdle = false
+	// A probe round clears the no_progress throttle (F15c): the probe
+	// itself was an intervention on the same silence the event reports,
+	// and a fresh episode deserves a fresh event.
+	m.noProgressAt = time.Time{}
 	if pr.err == nil && pr.ack.OK {
 		if idleProbe {
 			// The agent answered with no turn open: legal slow work or
@@ -618,11 +683,17 @@ func (m *Monitor) onRecovered(at Attach) {
 	m.handle = at.Handle
 	m.records = at.Handle.Records()
 	m.exitCh = at.Handle.Exit()
+	// The stream pointer is swapped under stateMu: the HTTP/status read
+	// face reads it cross-goroutine (see lastProgressAt), and every other
+	// use stays on this goroutine.
+	m.stateMu.Lock()
 	m.stream = newStreamState()
+	m.stateMu.Unlock()
 	m.probeInFlight = false
 	m.probeIdle = false
 	m.hangAnchor = time.Now()
-	m.idleAnchor = time.Now() // the successor derivation gets a fresh idle baseline
+	m.idleAnchor = time.Now()    // the successor derivation gets a fresh idle baseline
+	m.noProgressAt = time.Time{} // ...and a fresh no_progress episode
 	// The successor derivation carries its own transcript facts (its
 	// declared capsule path, its live file, its spawn moment): adopt
 	// them for the sync points that follow (F3).

@@ -13,6 +13,7 @@ package observe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -600,5 +601,230 @@ func TestPollVersionBumpClearsStagnation(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	if n := pushes.Load(); n != 2 {
 		t.Fatalf("no fallback commit may fire after a bump, pushes=%d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F15 progress semantics: UI noise is not life. The three pinned shapes
+// of the pilot's double-blind wedge.
+
+// fxExtUI is the extension-UI chatter record the pilot probe measured
+// streaming continuously out of a background-task extension while the
+// agent's turn was stuck.
+const fxExtUI = `{"type":"extension_ui_request","request":{"method":"setStatus","payload":"…"},"seq":0}`
+
+// TestHangDetectionSurvivesUINoise is shape A — the on-machine incident:
+// a turn is open, NO progress record arrives, but the extension UI keeps
+// streaming records continuously. Under the old "any record is life"
+// rule the hang window never armed (and the turn being open held off the
+// idle watchdog too — the double blind). Under the F15 rule the noise is
+// invisible to the watchdogs: hang suspects, probes, the probe fails,
+// one WINeedsRecovery(hang).
+func TestHangDetectionSurvivesUINoise(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, nil)
+	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
+		return protocol.ControlAck{}, errors.New("no ack: agent wedged")
+	})
+
+	// The turn opens (progress stops here), then the UI chatter floods.
+	feed(h, fxTurnStart)
+	feed(h, fxMsgStart)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				feed(h, fxExtUI)
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	}()
+
+	msg := waitOB(t, ob, "WINeedsRecovery(hang) through UI noise")
+	if msg.Reason != protocol.RecoverHang {
+		t.Fatalf("reason: got %s, want %s", msg.Reason, protocol.RecoverHang)
+	}
+	if !hasIncidentKind(m, HangSuspected) {
+		t.Fatal("hang_suspected must be written")
+	}
+}
+
+// TestSlowProgressTurnNotHang is shape B — legal slow work: a turn is
+// open and ordinary progress records keep arriving. No watchdog fires,
+// no probe is sent, nothing recovers.
+func TestSlowProgressTurnNotHang(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, nil)
+	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
+		t.Errorf("no probe may be sent while progress flows, got %s", msg.Method)
+		return protocol.ControlAck{Method: msg.Method, OK: true}, nil
+	})
+
+	feed(h, fxTurnStart)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				feed(h, fxTextDelta) // message_update: real turn progress
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+	}()
+
+	expectNoOB(t, ob, 250*time.Millisecond, "a progressing turn never recovers")
+	if h.sentCount() != 0 {
+		t.Fatalf("no probe while progress flows, got %d", h.sentCount())
+	}
+	for _, kind := range incidentKinds(m) {
+		if kind == HangSuspected || kind == IdleSuspected {
+			t.Fatalf("no watchdog may suspect a progressing turn, saw %s", kind)
+		}
+	}
+}
+
+// TestIdleFiresThroughUINoise is shape C — the idle backstop with the
+// noise ingredient: no turn in flight, no progress record, but the
+// extension UI keeps chattering. The idle watchdog (anchored on
+// lastProgressAt since F15) still arms, probes and recovers; the noise
+// cannot hold the window open the way it held the old lastRecordAt.
+func TestIdleFiresThroughUINoise(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.IdleWindow = 40 * time.Millisecond
+	})
+	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
+		return protocol.ControlAck{}, errors.New("no ack: session wedged")
+	})
+
+	// A turn completes cleanly, then only UI chatter arrives.
+	feed(h, fxTurnStart)
+	feed(h, fxMsgEndStop)
+	feed(h, fxTurnEndStop)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				feed(h, fxExtUI)
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	}()
+
+	msg := waitOB(t, ob, "WINeedsRecovery(idle) through UI noise")
+	if msg.Reason != protocol.RecoverIdle {
+		t.Fatalf("reason: got %s, want %s", msg.Reason, protocol.RecoverIdle)
+	}
+	if !hasIncidentKind(m, IdleSuspected) {
+		t.Fatal("idle_suspect must be written")
+	}
+}
+
+// TestNoProgressEventAndThrottle pins the F15c owner face: progress
+// silence past the idle window lands ONE no_progress event per window in
+// the events log (whatever the turn state), keeps reporting at window
+// cadence while the stall continues, goes quiet while progress flows,
+// and reports again when a fresh silent episode begins.
+func TestNoProgressEventAndThrottle(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.IdleWindow = 40 * time.Millisecond
+		c.HangWindow = time.Hour // keep the hang lane out of this test
+		h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
+			return protocol.ControlAck{Method: msg.Method, OK: true}, nil
+		})
+	})
+
+	// A clean turn, then silence. The first no_progress lands once...
+	feed(h, fxTurnStart)
+	feed(h, fxMsgEndStop)
+	feed(h, fxTurnEndStop)
+	soon(t, 500*time.Millisecond, "first no_progress event", func() bool {
+		return len(eventsOf(m, EvNoProgress)) == 1
+	})
+	// ...and a continuing stall keeps reporting at window cadence (the
+	// idle probe acks restart the window; the throttle spaces the
+	// events), never more than one per window.
+	time.Sleep(150 * time.Millisecond)
+	if n := len(eventsOf(m, EvNoProgress)); n < 2 || n > 5 {
+		t.Fatalf("no_progress cadence: %d events over ~4 windows, want 2..5", n)
+	}
+
+	// Progress resumes and keeps flowing: the gate reads lastProgressAt,
+	// so no further event lands while the stream proves life.
+	base := len(eventsOf(m, EvNoProgress))
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				feed(h, fxTextDelta)
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+	}()
+	time.Sleep(150 * time.Millisecond)
+	if n := len(eventsOf(m, EvNoProgress)); n != base {
+		t.Fatalf("no no_progress while progress flows: %d -> %d", base, n)
+	}
+	close(stop)
+
+	// Silence again: a fresh episode reports again.
+	soon(t, 500*time.Millisecond, "no_progress after the fresh episode", func() bool {
+		return len(eventsOf(m, EvNoProgress)) > base
+	})
+	// The event body carries the facts the owner face renders.
+	e := eventsOf(m, EvNoProgress)[0]
+	var body map[string]any
+	if err := json.Unmarshal(e.Body, &body); err != nil {
+		t.Fatalf("no_progress body: %v", err)
+	}
+	for _, key := range []string{"silent_for_ms", "window_ms", "in_flight", "attempt_id"} {
+		if _, ok := body[key]; !ok {
+			t.Fatalf("no_progress body must carry %q: %s", key, e.Body)
+		}
+	}
+}
+
+// TestNoProgressExemptWhilePendingQuestion: needs_input is designed
+// stillness — the no_progress owner face stays quiet while a human
+// answer is pending (the QUESTION column already owns that signal).
+func TestNoProgressExemptWhilePendingQuestion(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.IdleWindow = 40 * time.Millisecond
+		c.HangWindow = time.Hour
+	})
+
+	resp := make(chan protocol.FlushAck, 1)
+	m.flushCh <- FlushCall{
+		Req: protocol.FlushRequest{
+			WorkItem: "wi_test", AttemptID: "att_1", Reason: protocol.FlushNeedsInput,
+			QuestionID: "q_np", Question: "which way?", Step: "code",
+		},
+		Resp: resp,
+	}
+	select {
+	case <-resp:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flush(needs_input) was never answered")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	if n := len(eventsOf(m, EvNoProgress)); n != 0 {
+		t.Fatalf("no no_progress while a question is pending, got %d", n)
 	}
 }

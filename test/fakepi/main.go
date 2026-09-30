@@ -34,8 +34,8 @@
 // (FAKEPI_PLANS/<PF_WI_ID>.json, falling back to
 // FAKEPI_PLANS/default.json). The plan is re-read on every process
 // start, so a scenario rewrites the file to change what a RE-DERIVED
-// agent does. Actions: step / ask / wrap / fail / hang / provider_error /
-// park / exit / sleep / repo (see drive.go).
+// agent does. Actions: step / ask / wrap / fail / hang / open_turn /
+// ui_noise / provider_error / park / exit / sleep / repo (see drive.go).
 //
 // Besides the action list the plan carries per-derivation-kind modes.
 // fail_spawn_resume / fail_spawn_fresh are the must-fail-AT-SPAWN mode:

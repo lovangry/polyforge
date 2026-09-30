@@ -30,9 +30,15 @@ pf ops shutdown                                      # graceful shutdown
 
 - `status`: `machine: <id>  mode: <mode>` (plus `(shutting down)` when set),
   the queue counters (`pending / running / max`), and a jobs table (WORK
-  ITEM, STATUS, ATTEMPT, AGENT PID). This is bookkeeping about what this
-  machine manages — not workflow execution progress (observe is the
-  progress verb).
+  ITEM, STATUS, ATTEMPT, AGENT PID, QUESTION, LAST-PROGRESS). This is
+  bookkeeping about what this machine manages — not workflow execution
+  progress (observe is the progress verb) — with one deliberately
+  progress-shaped exception: LAST-PROGRESS is mm:ss since the job's
+  stream last proved **agent progress** (`-` when no progress record
+  exists). UI noise never refreshes it, so a job that is chattering but
+  wedged reads as STALE, not fresh. A LAST-PROGRESS over ~10 minutes on
+  a non-`needs_input` job is a stalled job — report it to the owner
+  before anything else (see SKILL.md's turn-start obligation).
 - `mode` bare: `mode: <current>`; every mode transition answers with the
   new mode (and the effective concurrency on `set`).
 - `shutdown`: `graceful shutdown requested; the daemon quiesces and exits`

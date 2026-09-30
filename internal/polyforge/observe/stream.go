@@ -3,12 +3,30 @@ package observe
 // stream.go: classification of the agent stdout record stream — the
 // observe lane's half of the stream-heartbeat criterion (the per-WI
 // monitor consumes the records Runtime's stdout reader feeds it and
-// derives the three observations the hang watchdog needs):
+// derives the observations the hang/idle watchdogs need):
 //
-//  1. lastRecordAt — when the stream last proved AGENT PROGRESS;
-//  2. turnDepth    — whether a turn is open right now;
-//  3. incidents    — provider errors riding the ordinary records,
+//  1. lastProgressAt — when the stream last proved AGENT PROGRESS;
+//  2. lastNoiseAt    — when it last carried a NON-progress record
+//     (extension UI chatter and every unclassified line);
+//  3. turnDepth      — whether a turn is open right now;
+//  4. incidents      — provider errors riding the ordinary records,
 //     surfaced immediately instead of being counted as bulk.
+//
+// PROGRESS vs NOISE (the F15 ruling): a record proves agent progress
+// only when it belongs to the agent's own turn machinery — the message
+// family (message_start / message_update / message_end), the
+// toolResult family, the lifecycle records (agent_start / agent_end /
+// agent_settled, turn_start / turn_end) and the `response` echo. Every
+// other record is NOISE: the extension_ui_request stream a background-
+// task extension emits continuously (setStatus/setWidget UI updates),
+// plus any unclassified or unparseable line. The split exists because
+// of the pilot's double-blind wedge: a turn stuck on an in-flight
+// model call while the extension UI kept streaming records made the
+// old "any record refreshes the heartbeat" rule keep the stream
+// forever fresh — the hang criterion (silence WITH a turn open) never
+// armed, and the idle criterion (no record, no turn) never armed
+// either because the turn was open. UI chatter is not life; only
+// progress is.
 //
 // PINNED REAL RECORD SHAPES (frozen v0 reference capture; the v0 test double emits the same twins): one prompt turn emits, in order
 //
@@ -59,6 +77,35 @@ const (
 	recMessageEnd   = "message_end"
 )
 
+// recMessageUpdate is the streaming delta record of the message family;
+// recToolResult is the tool-result family the harness carries alongside
+// turn_end's inline toolResults (classified as progress so a tool-heavy
+// turn keeps proving life between message bursts).
+const (
+	recMessageUpdate = "message_update"
+	recToolResult    = "toolResult"
+)
+
+// recExtUI is the extension-UI chatter record the pilot probe measured
+// flowing continuously out of a background-task extension (253 records
+// in one stuck window, the large majority of them this type). It is the
+// canonical NOISE shape: it proves the extension event loop is alive,
+// never that the agent's turn is moving.
+const recExtUI = "extension_ui_request"
+
+// isProgressType answers whether one record type proves agent progress
+// (the F15 closed whitelist; everything else — including the empty type
+// of an unparseable line and the recExtUI chatter — is noise).
+func isProgressType(typ string) bool {
+	switch typ {
+	case recResponse, recAgentStart, recAgentEnd, recAgentSettled,
+		recTurnStart, recTurnEnd, recMessageStart, recMessageEnd,
+		recMessageUpdate, recToolResult:
+		return true
+	}
+	return false
+}
+
 // maxStreamIncidents bounds the queued incidents: a provider failing
 // every retry could queue one entry per record. The queue keeps the
 // OLDEST entries and counts the drops.
@@ -67,14 +114,27 @@ const maxStreamIncidents = 64
 // StreamHeartbeat is one point-in-time reading of the supervised agent's
 // record stream.
 type StreamHeartbeat struct {
-	// Observable reports whether any record has been seen at all.
+	// Observable reports whether any record — progress OR noise — has
+	// been seen at all (the stream itself is being received).
 	Observable bool
-	// LastRecordAt is when the reader last classified a record that
-	// represents AGENT progress. The `response` echo of a command the
-	// DAEMON itself just sent is excluded on purpose: counting it would
-	// let the daemon's own probe traffic reset the hang window it is
-	// trying to measure.
+	// LastRecordAt is when the reader last classified ANY record,
+	// progress or noise (diagnostics; never a detection anchor).
 	LastRecordAt time.Time
+	// LastProgressAt is when the reader last classified a record that
+	// represents AGENT progress (the F15 whitelist above). This is the
+	// ONLY anchor the hang and idle watchdogs judge: UI noise never
+	// refreshes it. The `response` echo counts as progress — the F15
+	// ruling — because a response echo can only follow a command the
+	// harness accepted, and the watchdogs' probe decision rides the
+	// probe RESULT (ack vs timeout), never the window age: a daemon-side
+	// echo refreshing the window can no longer mask a wedged agent the
+	// way the old exclusion feared, and a probe ack's own assistant
+	// message burst refreshes progress anyway.
+	LastProgressAt time.Time
+	// LastNoiseAt is when the reader last classified a NON-progress
+	// record: extension UI chatter or any unclassified line. Never a
+	// detection anchor — carried for the owner face and diagnostics.
+	LastNoiseAt time.Time
 	// InFlight reports whether a TURN is open: the stream carried
 	// turn_start (or agent_start) and no matching turn_end / agent_end /
 	// agent_settled yet. Silence with NO turn in flight is an idle agent
@@ -84,17 +144,20 @@ type StreamHeartbeat struct {
 	InFlight bool
 	// Records is the total progress-record count (diagnostics).
 	Records int64
+	// Noise is the total non-progress record count (diagnostics).
+	Noise int64
 }
 
-// Silent reports whether the stream has been silent for at least window
-// WHILE A TURN IS IN FLIGHT — the ruled hang criterion. anchor is the
-// probe-cleared window restart (zero = none). An unobservable or idle
-// stream is never silent in this sense.
+// Silent reports whether the stream has been PROGRESS-silent for at
+// least window WHILE A TURN IS IN FLIGHT — the ruled hang criterion.
+// Progress-silent means lastProgressAt (UI noise never counts as life);
+// anchor is the probe-cleared window restart (zero = none). An
+// unobservable or idle stream is never silent in this sense.
 func (h StreamHeartbeat) Silent(now time.Time, window time.Duration, anchor time.Time) bool {
-	if !h.Observable || !h.InFlight || h.LastRecordAt.IsZero() {
+	if !h.Observable || !h.InFlight || h.LastProgressAt.IsZero() {
 		return false
 	}
-	eff := h.LastRecordAt
+	eff := h.LastProgressAt
 	if anchor.After(eff) {
 		eff = anchor
 	}
@@ -117,13 +180,18 @@ type StreamIncident struct {
 // and view sub-goroutines only read snapshots.
 type streamState struct {
 	mu sync.Mutex
-	// lastRecordAt is the heartbeat (response echoes excluded).
-	lastRecordAt time.Time
+	// lastProgressAt is the heartbeat anchor: the newest record that
+	// proved AGENT progress (the F15 whitelist; UI noise excluded).
+	lastProgressAt time.Time
+	// lastNoiseAt is the newest NON-progress record (extension UI
+	// chatter / unclassified lines) — never a detection input.
+	lastNoiseAt time.Time
 	// turnDepth > 0 means a turn is open. A counter rather than a bool
 	// because agent_start and turn_start both open; it saturates at 0 so
 	// a stray close can never wedge the flag negative.
 	turnDepth int
-	records   int64
+	records   int64 // progress-record count
+	noise     int64 // non-progress record count
 	incidents []StreamIncident
 	dropped   int64
 	// lastIncidentKey suppresses the triple-report of ONE provider
@@ -150,8 +218,10 @@ type streamState struct {
 
 func newStreamState() *streamState { return &streamState{} }
 
-// note classifies ONE raw record blob. A non-JSON line still counts as
-// progress: it is output the harness produced.
+// note classifies ONE raw record blob into progress or noise (the F15
+// split). A non-JSON or otherwise unclassified line is NOISE: the
+// pilot proved that "any output is life" is exactly the assumption a
+// chattering extension UI weaponizes against the watchdogs.
 func (s *streamState) note(raw []byte) {
 	var rec struct {
 		Type    string          `json:"type"`
@@ -163,13 +233,16 @@ func (s *streamState) note(raw []byte) {
 	}
 	now := time.Now()
 	s.mu.Lock()
-	if typ == recResponse {
-		// The daemon's own command echo: the RPC reader is alive, which
-		// proves nothing about the agent turn.
+	if !isProgressType(typ) {
+		// Noise: extension UI chatter, unclassified record types,
+		// unparseable lines. It refreshes only the noise clock — the
+		// watchdogs never read it.
+		s.lastNoiseAt = now
+		s.noise++
 		s.mu.Unlock()
 		return
 	}
-	s.lastRecordAt = now
+	s.lastProgressAt = now
 	s.records++
 	switch typ {
 	case recAgentStart, recTurnStart:
@@ -293,11 +366,22 @@ func (s *streamState) heartbeat() StreamHeartbeat {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return StreamHeartbeat{
-		Observable:   s.records > 0 || !s.lastRecordAt.IsZero(),
-		LastRecordAt: s.lastRecordAt,
-		InFlight:     s.turnDepth > 0,
-		Records:      s.records,
+		Observable:     s.records > 0 || s.noise > 0,
+		LastRecordAt:   latestOf(s.lastProgressAt, s.lastNoiseAt),
+		LastProgressAt: s.lastProgressAt,
+		LastNoiseAt:    s.lastNoiseAt,
+		InFlight:       s.turnDepth > 0,
+		Records:        s.records,
+		Noise:          s.noise,
 	}
+}
+
+// latestOf answers the newer of two timestamps (zero when both are).
+func latestOf(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 // cleanTurnCount reads the completed-clean-turn counter.

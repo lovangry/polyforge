@@ -65,7 +65,17 @@ const (
 	// violation so the operator can fix the agent's write path. Version
 	// stays the primary archival semantic.
 	EvVersionStagnant = "version_stagnant"
-	EvJobStopped      = "job_stopped"
+	// EvNoProgress is the F15c owner face: the agent's stream has
+	// carried NO progress record for longer than the idle window — the
+	// same progress-silence signal the hang/idle watchdogs judge, landed
+	// in the events log so the owner can see a stalled job even while
+	// the watchdogs are still inside their probe/confirmation cycle.
+	// Throttled to at most one event per window; cleared by resumed
+	// progress, a probe round and recovery adoption. Exempt while a
+	// question is pending (needs_input is designed stillness and already
+	// owns the QUESTION face) and in every suppressed state.
+	EvNoProgress = "no_progress"
+	EvJobStopped = "job_stopped"
 	// The F6-B memory channel bookkeeping: one event per UDS recall /
 	// remember the daemon proxied (payload: top_k + hit count, or the
 	// stored id/type/visibility — plus the write_ms timing on remember,

@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -115,6 +116,49 @@ func (m *Monitor) pendingQuestion() *protocol.PendingView {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
 	return m.pending
+}
+
+// lastProgressAt answers when this job's stream last proved AGENT
+// progress (the F15c owner face's source; zero = no progress record
+// yet — the caller renders "-"). The stream pointer is read under
+// stateMu because recovery swaps it on the monitor goroutine while
+// this runs on the HTTP/status face's goroutine; the heartbeat itself
+// locks the stream's own mutex. UI-noise records never move this clock
+// (stream.go's F15 whitelist).
+func (m *Monitor) lastProgressAt() time.Time {
+	m.stateMu.Lock()
+	s := m.stream
+	m.stateMu.Unlock()
+	if s == nil {
+		return time.Time{}
+	}
+	return s.heartbeat().LastProgressAt
+}
+
+// ProgressAge is one work item's owner-facing progress staleness (F15c):
+// when the job's stream last proved agent progress. Zero = never.
+type ProgressAge struct {
+	LastProgressAt time.Time
+}
+
+// ProgressAges answers the progress staleness of every monitored work
+// item (F15c): canonical work-item id → last agent-progress moment.
+// Monitors are keyed by the canonical id the runtime announced; the
+// caller merges by the same key (the ops status face renders it as the
+// LAST-PROGRESS column — the pilot's 2.7-hour wedge had NO owner-
+// visible surface while it ran).
+func (o *Observe) ProgressAges() map[string]ProgressAge {
+	o.mu.Lock()
+	monitors := make([]*Monitor, 0, len(o.monitors))
+	for _, m := range o.monitors {
+		monitors = append(monitors, m)
+	}
+	o.mu.Unlock()
+	out := map[string]ProgressAge{}
+	for _, m := range monitors {
+		out[m.wi.WorkItem] = ProgressAge{LastProgressAt: m.lastProgressAt()}
+	}
+	return out
 }
 
 // PendingInputs answers the needs_input state of every monitored work

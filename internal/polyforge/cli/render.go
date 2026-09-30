@@ -378,11 +378,14 @@ func renderReadThrough(w io.Writer, p *api.ProgressResponse) {
 	printJSON(w, p.Progress)
 }
 
-// renderStatus renders the daemon status() bookkeeping list.
 // renderStatus renders the daemon status() bookkeeping list. The
 // QUESTION column is the D6 owner face: any job the daemon reports with a
 // pending question shows its question id ("-" otherwise), so an agent
-// blocked on a human is impossible to miss at a glance.
+// blocked on a human is impossible to miss at a glance. The LAST-PROGRESS
+// column is the F15c owner face: mm:ss since the job's stream last proved
+// agent progress ("-" when no progress record exists). UI-noise records
+// never refresh it, so a wedged-but-chattering job reads as stale — the
+// pilot's 2.7-hour double-blind wedge had no such surface.
 func renderStatus(w io.Writer, s *StatusResponse) {
 	fmt.Fprintf(w, "machine: %s  mode: %s", s.MachineID, s.Mode)
 	if s.ShuttingDown {
@@ -400,9 +403,23 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 		if j.QuestionID != "" {
 			question = j.QuestionID
 		}
-		rows = append(rows, []string{j.WorkItemID, j.Status, j.AttemptID, pid, question})
+		progress := "-"
+		if j.LastProgressAgoSec != nil {
+			progress = mmssAgo(*j.LastProgressAgoSec)
+		}
+		rows = append(rows, []string{j.WorkItemID, j.Status, j.AttemptID, pid, question, progress})
 	}
-	printTable(w, []string{"WORK ITEM", "STATUS", "ATTEMPT", "AGENT PID", "QUESTION"}, rows)
+	printTable(w, []string{"WORK ITEM", "STATUS", "ATTEMPT", "AGENT PID", "QUESTION", "LAST-PROGRESS"}, rows)
+}
+
+// mmssAgo renders whole seconds as the mm:ss staleness figure the
+// LAST-PROGRESS column carries (minutes grow unbounded past an hour —
+// 97:30 reads faster than 1h37m on a scan).
+func mmssAgo(sec int64) string {
+	if sec < 0 {
+		sec = 0
+	}
+	return fmt.Sprintf("%02d:%02d", sec/60, sec%60)
 }
 
 // renderShip renders the ship answer: the fixed-name branch plus one
