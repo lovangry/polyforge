@@ -16,7 +16,7 @@ import (
 // wrapped state, and the sealed chain carrying the transcript — plus the
 // no-orphan invariant.
 func TestV1S01DefaultInstallSmoke(t *testing.T) {
-	inst := newV1Install(t)
+	inst, remote := newV1InstallTaskRepo(t)
 	wi := inst.newWI(t, "s01: smoke the default install end to end",
 		[]map[string]any{
 			{"do": "step", "id": "code"},
@@ -42,16 +42,35 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 		t.Fatalf("capsule.json: %v", err)
 	}
 	var idn struct {
-		WorkItemID   string `json:"work_item_id"`
-		Generation   int64  `json:"generation"`
-		AttemptID    string `json:"attempt_id"`
-		BundleName   string `json:"bundle_name"`
+		WorkItemID   string            `json:"work_item_id"`
+		Generation   int64             `json:"generation"`
+		AttemptID    string            `json:"attempt_id"`
+		BundleName   string            `json:"bundle_name"`
+		Repos        map[string]string `json:"repos"`
 	}
 	if err := json.Unmarshal(rawID, &idn); err != nil {
 		t.Fatalf("capsule.json unparsable: %v", err)
 	}
 	if idn.WorkItemID != wi || idn.Generation != 1 || idn.AttemptID == "" || idn.BundleName != "quick-fix" {
 		t.Fatalf("capsule identity wrong: %+v", idn)
+	}
+	// The claim's task-repo inventory was cloned before the agent
+	// spawned: repos/demo-src is a real clone of the local fake remote,
+	// its own .git, the remote's content, and the claim-time HEAD
+	// recorded as the capsule baseline.
+	repoDir := filepath.Join(capDir, "repos", "demo-src")
+	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
+		t.Fatalf("task repo not cloned into the capsule: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(repoDir, "hello.txt")); err != nil || string(b) != "hello\n" {
+		t.Fatalf("cloned task repo content wrong: %q, %v", b, err)
+	}
+	if got := idn.Repos["demo-src"]; got != remote.head {
+		t.Fatalf("capsule baseline for demo-src = %q, want remote HEAD %q", got, remote.head)
+	}
+	// The task repo stays outside the capsule's own git history.
+	if inst.bareHasPath(t, wi, "repos") {
+		t.Fatal("capsule chain must not carry repos/ (gitignored, own .git)")
 	}
 	// The materialized bundle rides the capsule.
 	if _, err := os.Stat(filepath.Join(capDir, "workflows", "quick-fix", "workflow.md")); err != nil {

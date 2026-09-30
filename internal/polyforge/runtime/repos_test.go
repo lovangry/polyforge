@@ -1,0 +1,222 @@
+package runtime
+
+// repos_test: the claim→capsule task-repo lane. A claim carrying the
+// project's repo inventory clones each repo into repos/<name> with real
+// git (a local file:// fake remote — no network), records the claim-time
+// HEAD SHA as the capsule.json baseline, leaves the clone outside the
+// capsule's own git (gitignored, independent .git), keeps an existing
+// worktree's uncommitted scene untouched on a re-materialize (the
+// crashed-Start replay shape), and fails a bad clone as the typed
+// DAEMON-507 error with the ticket closed blocked — never a live job.
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/protocol"
+)
+
+// fakeTaskRemote builds a real local git repo (one commit on main) to
+// serve as the task repo's remote. Answers the remote's directory, its
+// file:// URL and the initial HEAD SHA.
+func fakeTaskRemote(t *testing.T) (dir, url, head string) {
+	t.Helper()
+	setGitIdentity(t)
+	dir = t.TempDir()
+	if out, err := exec.Command("git", "init", "-b", "main", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "init"}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	return dir, "file://" + dir, strings.TrimSpace(string(out))
+}
+
+func capsuleReposOf(t *testing.T, capDir string) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(capDir, capsule.CapsuleJSON))
+	if err != nil {
+		t.Fatalf("capsule.json: %v", err)
+	}
+	var idn capsule.Identity
+	if err := json.Unmarshal(raw, &idn); err != nil {
+		t.Fatalf("capsule.json: %v", err)
+	}
+	return idn.Repos
+}
+
+// A claim with a repo inventory clones each repo into repos/<name> as a
+// real independent worktree, records its HEAD as the capsule baseline,
+// and keeps it out of the capsule's own git.
+func TestStartClonesTaskRepos(t *testing.T) {
+	setGitIdentity(t)
+	_, url, head := fakeTaskRemote(t)
+	hub := newFakeHub()
+	hub.repos = []api.ProjectRepo{{Name: "app", URL: url}}
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+
+	if err := r.Start(context.Background(), "wi_repo1"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	capDir := r.capsuleDir("wi_repo1")
+	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
+
+	// A real clone: its own .git and the remote's content.
+	if !dirExists(filepath.Join(repoDir, ".git")) {
+		t.Fatal("repos/app is not a git clone (no .git)")
+	}
+	if b, err := os.ReadFile(filepath.Join(repoDir, "hello.txt")); err != nil || string(b) != "hello\n" {
+		t.Fatalf("cloned content wrong: %q, %v", b, err)
+	}
+	// The claim-time HEAD is recorded as the baseline.
+	if got := capsuleReposOf(t, capDir)["app"]; got != head {
+		t.Fatalf("capsule baseline = %q, want remote HEAD %q", got, head)
+	}
+	// The clone stays out of the capsule's own git: repos/ is ignored
+	// and nothing under it is tracked or listed as untracked.
+	gi, _ := os.ReadFile(filepath.Join(capDir, ".gitignore"))
+	if !strings.Contains(string(gi), "/repos/") {
+		t.Fatalf("capsule .gitignore must exclude repos/: %q", gi)
+	}
+	out, err := exec.Command("git", "-C", capDir, "status", "--porcelain", "-uall").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status in capsule: %v: %s", err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "repos/") {
+			t.Fatalf("capsule git sees repos/: %s", line)
+		}
+	}
+	if err := r.Stop(context.Background(), "wi_repo1", protocol.FinishWrapped); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	unseal(t, capDir)
+	unseal(t, repoDir)
+}
+
+// A re-materialize of a same-generation capsule (the crashed-Start
+// replay shape) must not touch the existing task-repo worktree: the
+// agent's uncommitted edits survive, no fetch/reset happens (the remote
+// moving forward changes nothing), and the recorded claim-time baseline
+// is carried forward verbatim.
+func TestRematerializePreservesRepoScene(t *testing.T) {
+	setGitIdentity(t)
+	remoteDir, url, head := fakeTaskRemote(t)
+	hub := newFakeHub()
+	hub.repos = []api.ProjectRepo{{Name: "app", URL: url}}
+	hub.stickyGen = true // the replay keeps generation (and the attempt)
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+
+	if err := r.Start(context.Background(), "wi_repo2"); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	capDir := r.capsuleDir("wi_repo2")
+	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
+
+	// Simulate a daemon crash between spawn and any further step: the
+	// agent tree dies, the bookkeeping is gone, the scene stays.
+	j := r.jobOf("wi_repo2")
+	r.killAgentTree(j)
+	r.mu.Lock()
+	delete(r.jobs, "wi_repo2")
+	r.mu.Unlock()
+
+	// The agent's uncommitted scene in the task repo.
+	if err := os.WriteFile(filepath.Join(repoDir, "dirty.txt"), []byte("uncommitted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The remote moves forward AFTER the claim: the recovery contract
+	// forbids fetching/resetting it into the worktree.
+	if out, err := exec.Command("git", "-C", remoteDir, "commit", "--allow-empty", "-m", "remote moved").CombinedOutput(); err != nil {
+		t.Fatalf("remote commit: %v: %s", err, out)
+	}
+
+	// Second Start of the same generation: the capsule husk is reused
+	// and materialize re-runs without touching repos/app.
+	if err := r.Start(context.Background(), "wi_repo2"); err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(repoDir, "dirty.txt")); err != nil || string(b) != "uncommitted\n" {
+		t.Fatalf("uncommitted scene lost: %q, %v", b, err)
+	}
+	got, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	if err != nil || strings.TrimSpace(string(got)) != head {
+		t.Fatalf("worktree HEAD moved: %q, want %q, %v", got, head, err)
+	}
+	if b := capsuleReposOf(t, capDir)["app"]; b != head {
+		t.Fatalf("baseline not carried forward: %q, want %q", b, head)
+	}
+	// The dirty file is still uncommitted (nothing staged or committed it).
+	st, err := exec.Command("git", "-C", repoDir, "status", "--porcelain").CombinedOutput()
+	if err != nil || !strings.Contains(string(st), "dirty.txt") {
+		t.Fatalf("dirty file not uncommitted anymore: %s, %v", st, err)
+	}
+	if err := r.Stop(context.Background(), "wi_repo2", protocol.FinishWrapped); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	unseal(t, capDir)
+	unseal(t, repoDir)
+}
+
+// A clone failure is the typed DAEMON-507 error; the fresh attempt is
+// closed blocked on the spot (never an orphaned running generation, never
+// a live job), and an unsafe inventory name fails the same way.
+func TestCloneFailureBlocksTicket(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	hub.repos = []api.ProjectRepo{{Name: "app", URL: "file:///nonexistent/nope.git"}}
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+
+	err := r.Start(context.Background(), "wi_repo3")
+	ae, ok := err.(*api.Error)
+	if !ok || ae.Code != api.ErrDaemonSpawnFail {
+		t.Fatalf("expected typed %s, got %v", api.ErrDaemonSpawnFail, err)
+	}
+	if !strings.Contains(ae.Detail, "app") {
+		t.Fatalf("error detail must name the repo: %q", ae.Detail)
+	}
+	if r.jobOf("wi_repo3") != nil {
+		t.Fatal("a blocked clone must leave no live job")
+	}
+	if n := hub.endCount(); n != 1 {
+		t.Fatalf("end-generation calls = %d, want 1", n)
+	}
+	end := hub.lastEnd()
+	if end.Status != api.StatusBlocked || end.AttemptID != "ra_wi_repo3" || end.Note == "" {
+		t.Fatalf("blocked close wrong: %+v", end)
+	}
+	if dirExists(filepath.Join(r.capsuleDir("wi_repo3"), capsule.DirRepos, "app")) {
+		t.Fatal("failed clone left a worktree behind")
+	}
+
+	// A repo name that would escape repos/ is refused before any clone.
+	hub2 := newFakeHub()
+	hub2.repos = []api.ProjectRepo{{Name: "../escape", URL: "file:///nonexistent/x.git"}}
+	r2, _, _ := newTestRuntime(t, hub2, &scriptedSpawner{})
+	if err := r2.Start(context.Background(), "wi_repo4"); err == nil {
+		t.Fatal("unsafe repo name must fail Start")
+	} else if ae, ok := err.(*api.Error); !ok || ae.Code != api.ErrDaemonSpawnFail {
+		t.Fatalf("unsafe name must be typed %s, got %v", api.ErrDaemonSpawnFail, err)
+	} else if hub2.lastEnd().Status != api.StatusBlocked {
+		t.Fatalf("unsafe name must close blocked, got %+v", hub2.lastEnd())
+	}
+	if r2.jobOf("wi_repo4") != nil {
+		t.Fatal("unsafe-name start left a live job")
+	}
+}

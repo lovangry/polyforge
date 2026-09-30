@@ -34,7 +34,9 @@ type fakeHub struct {
 	claims    []aihubclient.ClaimRequest
 	ends      []aihubclient.EndGenerationRequest
 	gen       int64
-	digest    string // claim-time bundle digest (default "deadbeef")
+	digest    string            // claim-time bundle digest (default "deadbeef")
+	repos     []api.ProjectRepo // claim-served task-repo inventory (nil = none)
+	stickyGen bool              // keep the generation fixed across claims (crashed-Start replay shape)
 }
 
 func newFakeHub() *fakeHub {
@@ -45,7 +47,9 @@ func (h *fakeHub) Claim(req aihubclient.ClaimRequest) (*aihubclient.ClaimRespons
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.claims = append(h.claims, req)
-	h.gen++
+	if !h.stickyGen {
+		h.gen++
+	}
 	digest := h.digest
 	if digest == "" {
 		digest = "deadbeef"
@@ -57,6 +61,7 @@ func (h *fakeHub) Claim(req aihubclient.ClaimRequest) (*aihubclient.ClaimRespons
 			Generation:   h.gen,
 			BundleName:   "demo-bundle",
 			BundleDigest: digest,
+			Repos:        h.repos,
 		},
 		Credential: api.PushCredential{AttemptID: "ra_" + req.WorkItemID, Username: req.WorkItemID, Secret: "push-secret"},
 		WorkItem:   api.WorkItem{ID: req.WorkItemID, ProjectName: "proj"},
