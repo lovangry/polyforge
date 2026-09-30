@@ -64,7 +64,7 @@ func newMigResolver(client *aihubclient.Client, userMap map[string]string, owner
 func (r *migResolver) preload() error {
 	raw, err := r.client.ListUsers()
 	if err != nil {
-		return resolveErrf("list users: %v", err)
+		return resolveWrapErrf(err, "list users: %v", err)
 	}
 	var l struct {
 		Items []migUserView `json:"items"`
@@ -118,7 +118,7 @@ func (r *migResolver) user(oldIdentifier string, human bool) (string, error) {
 		DisplayName: phName, UserType: "machine", Role: "writer",
 	})
 	if err != nil {
-		return "", resolveErrf("create placeholder user for %q: %v", oldIdentifier, err)
+		return "", resolveWrapErrf(err, "create placeholder user for %q: %v", oldIdentifier, err)
 	}
 	var u migUserView
 	if err := unmarshalStrict(created, &u); err != nil {
@@ -161,7 +161,7 @@ func (r *migResolver) userOptional(oldID string) (*string, error) {
 func migResolveProject(client *aihubclient.Client, project string) (migProjectView, error) {
 	raw, err := client.GetProject(project)
 	if err != nil {
-		return migProjectView{}, resolveErrf("target project %q: %v (create it first — the migration never invents projects)", project, err)
+		return migProjectView{}, resolveWrapErrf(err, "target project %q: %v (create it first — the migration never invents projects)", project, err)
 	}
 	var p migProjectView
 	if err := unmarshalStrict(raw, &p); err != nil {
