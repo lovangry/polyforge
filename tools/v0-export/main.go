@@ -20,6 +20,7 @@ func main() {
 		dataDir  = flag.String("data-dir", "", "v0 aihub data dir (authority memory/ tree, capsules/; required)")
 		out      = flag.String("out", "", "output directory (created; required)")
 		noCaps   = flag.Bool("skip-capsules", false, "skip the capsule snapshot replay")
+		onlyWI   = flag.String("only-wi", "", "export ONLY this work item's capsule snapshot (work-items and memories stay full exports)")
 	)
 	flag.Parse()
 	rep, err := v0export.Run(v0export.Options{
@@ -27,6 +28,7 @@ func main() {
 		DataDir:     *dataDir,
 		Out:         *out,
 		SkipCapsules: *noCaps,
+		OnlyWI:      *onlyWI,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "v0-export: %v\n", err)
