@@ -16,6 +16,7 @@ package observe
 import (
 	"encoding/json"
 	"os"
+	"sort"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -68,6 +69,13 @@ func (m *Monitor) JobView() *protocol.JobView {
 
 	// layer 2: events.
 	ring := m.log.Since(m.wi.WorkItem)
+	// Daemon-scope entries (wi="" — e.g. the drain degraded signal)
+	// ride every live monitor's view: the drain fetch owns no job, and
+	// the owner's ruling requires the degraded signal to be readable
+	// from the observe projection. Chronological merge; daemon-scope
+	// events are rare, so the sort stays trivial.
+	ring = append(ring, m.log.Since("")...)
+	sort.SliceStable(ring, func(i, j int) bool { return ring[i].At < ring[j].At })
 	view.Events = make([]protocol.EventEntry, 0, len(ring))
 	for _, e := range ring {
 		view.Events = append(view.Events, e)

@@ -461,6 +461,7 @@ type v1Daemon struct {
 	dataDir    string
 	workspace  string
 	machineID  string
+	apiKey     string // optional dedicated aihub key (optAPIKey); "" = bootstrap admin key
 	extraEnv   []string
 	extraArgs  []string // extra `pf daemon` flags appended to the argv
 	client     *cli.DaemonClient
@@ -472,6 +473,13 @@ type daemonOpt func(*v1Daemon)
 
 func optMachineID(id string) daemonOpt {
 	return func(d *v1Daemon) { d.machineID = id }
+}
+
+// optAPIKey boots the daemon on a dedicated aihub api key (e.g. a
+// machine user's key the scenario revokes mid-run) instead of the
+// install's bootstrap admin key.
+func optAPIKey(key string) daemonOpt {
+	return func(d *v1Daemon) { d.apiKey = key }
 }
 
 // optObserveWindows injects the observe supervision windows through the
@@ -574,11 +582,17 @@ func (d *v1Daemon) start() {
 		serverURL = d.serverURL
 		gitRemoteBase = d.inst.url + "/git"
 	}
+	// optAPIKey: a dedicated aihub key (e.g. a machine user's key the
+	// scenario revokes mid-run) instead of the bootstrap admin key.
+	apiKey := d.apiKey
+	if apiKey == "" {
+		apiKey = d.inst.adminKey
+	}
 	args := []string{
 		"daemon",
 		"--socket", d.sock,
 		"--server", serverURL,
-		"--api-key", d.inst.adminKey,
+		"--api-key", apiKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
 		"--workspace-root", d.workspace,
