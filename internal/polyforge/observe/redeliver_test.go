@@ -210,3 +210,34 @@ func TestFlushSameIDRefreshesAskedAtWithoutNewEvent(t *testing.T) {
 		t.Fatalf("asked_at must refresh on the same-id re-present: %q vs %q", first, second)
 	}
 }
+
+// TestApplyPendingFromExecIgnoresInvalidID pins F10: an execution.json
+// pending_question whose id is missing (schema violation — e.g. the wire
+// field name was written instead of the schema's `id`) must neither become
+// the pending projection nor clobber a valid pending the flush face already
+// recorded.
+func TestApplyPendingFromExecIgnoresInvalidID(t *testing.T) {
+	m := newTestMonitor(t)
+	// flush face recorded a valid pending
+	m.applyPending(&protocol.PendingView{ID: "q_good", Step: "grill", Question: "valid", AskedAt: "t1"})
+	// execution.json carries an invalid pending (id missing)
+	exec := &capsule.Execution{CurrentStep: "grill", Steps: map[string]*capsule.Step{
+		"grill": {PendingQuestion: &capsule.PendingQuestion{Step: "grill", Question: "invalid"}},
+	}}
+	m.applyPendingFromExec(exec)
+	m.stateMu.Lock()
+	got := m.pending
+	m.stateMu.Unlock()
+	if got == nil || got.ID != "q_good" {
+		t.Fatalf("invalid exec pending must not clobber the valid one; got %+v", got)
+	}
+	// a nil pending in exec (consumed) still clears quietly
+	exec.Steps["grill"].PendingQuestion = nil
+	m.applyPendingFromExec(exec)
+	m.stateMu.Lock()
+	got = m.pending
+	m.stateMu.Unlock()
+	if got != nil {
+		t.Fatalf("consumed pending must clear the projection; got %+v", got)
+	}
+}

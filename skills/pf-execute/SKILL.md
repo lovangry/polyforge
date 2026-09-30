@@ -197,7 +197,9 @@ When a step marked `interactive: true` needs a human answer:
    the question — never an id held only in memory, never a second mint for the
    same wait. The id is the question's stable identity across every re-derivation.
 2. In one atomic write, place the step into its waiting state and persist
-   `steps.<id>.pending_question = {question_id, step, question, asked_at}`. Persisting
+   `steps.<id>.pending_question = {id, step, question, asked_at}` — the execution.json
+   field name is `id` (the capsule schema); the WIRE field on the flush call is
+   `question_id`. Same value, two names: in the FILE it is `id`. Persisting
    the question BEFORE calling flush is what makes a crash between the two recoverable:
    the replacement process re-presents the same question from the file. That write —
    like every `execution.json` write — MUST increment the top-level `version` by

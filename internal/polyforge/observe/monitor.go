@@ -728,6 +728,17 @@ func (m *Monitor) applyPendingFromExec(exec *capsule.Execution) {
 	var pv *protocol.PendingView
 	if s := exec.Steps[exec.CurrentStep]; s != nil && s.PendingQuestion != nil {
 		q := s.PendingQuestion
+		if q.ID == "" {
+			// F10: a schema-invalid pending (id missing — e.g. the agent wrote
+			// the wire field name instead of the schema's `id`) must NOT
+			// clobber a valid pending the flush face already recorded, and
+			// must not become an unanswerable projection: ignore it for the
+			// pending projection, one event per invalid sighting.
+			_ = m.log.Append(m.wi.WorkItem, "pending_invalid", map[string]any{
+				"step": q.Step, "hint": "execution.json pending_question.id missing; see skill §7.2",
+			})
+			return
+		}
 		pv = &protocol.PendingView{
 			ID: q.ID, Step: q.Step, Question: q.Question, AskedAt: q.AskedAt,
 		}
