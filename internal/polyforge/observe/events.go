@@ -39,6 +39,15 @@ const (
 	// per attempt; a failed re-delivery carries its error and the ledger
 	// keeps the answer re-deliverable.
 	EvAnswerRedelivery = "answer_redelivery"
+	// EvAnswerLedger is the persisted-answer-ledger bookkeeping record
+	// (answers.json under the daemon data directory). Payload `detail`
+	// is a closed set: "quarantine" (an unreadable/unparsable/unknown
+	// -version file was moved aside to answers.json.corrupt-<ts> and the
+	// daemon started with an empty ledger) and "write_failed" (one
+	// best-effort persist did not reach disk). Daemon-scope: appended
+	// with wi="" — the ledger spans every work item, and a load-time
+	// quarantine happens before any monitor exists.
+	EvAnswerLedger     = "answer_ledger"
 	EvPublished        = "published"
 	EvPushFailed       = "push_failed"
 	EvPushBackpressure = "push_backpressure"
