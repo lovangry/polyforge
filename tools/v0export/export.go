@@ -36,20 +36,20 @@ import (
 
 // Options is the resolved v0-export invocation.
 type Options struct {
-	DBPath   string // v0 aihub.db (opened read-only)
-	DataDir  string // v0 aihub data dir (authority memory/ tree, capsules/)
-	Out      string // output directory (created)
+	DBPath       string // v0 aihub.db (opened read-only)
+	DataDir      string // v0 aihub data dir (authority memory/ tree, capsules/)
+	Out          string // output directory (created)
 	SkipCapsules bool
 }
 
 // Report is the export report (also written as export-report.json).
 type Report struct {
-	WorkItems        int      `json:"work_items"`
-	Memories         int      `json:"memories"`
-	OrphanFiles      []string `json:"orphan_files"`       // authority files with no table row (exported from the file)
-	ShaMismatches    []string `json:"sha_mismatches"`      // row content_sha != live file digest (the FILE body exported)
-	RedactedMemories int      `json:"redacted_memories"`
-	CapsuleSnapshots []string `json:"capsule_snapshots"`  // "<wi>@seq<n> (x files)"
+	WorkItems           int      `json:"work_items"`
+	Memories            int      `json:"memories"`
+	OrphanFiles         []string `json:"orphan_files"`   // authority files with no table row (exported from the file)
+	ShaMismatches       []string `json:"sha_mismatches"` // row content_sha != live file digest (the FILE body exported)
+	RedactedMemories    int      `json:"redacted_memories"`
+	CapsuleSnapshots    []string `json:"capsule_snapshots"` // "<wi>@seq<n> (x files)"
 	ManifestShaMismatch []string `json:"manifest_sha_mismatch"`
 }
 
