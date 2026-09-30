@@ -25,8 +25,10 @@ cmd/pf          work-machine binary (13 verbs + `pf daemon`)
 
 Before starting ANY implementation or review lane: recall the v0 lessons
 ledger (`docs/design/polyforge-vnext/v0-lessons-ledger.md`, now including
-the v1 pilot findings F1–F4) and declare, item by item, how your change
+the v1 pilot findings F1–F7) and declare, item by item, how your change
 covers the entries it touches — the ledger only prevents re-hits if it is
-actually read first.
+actually read first. After a fix lands, write its status back: append the
+「已修」/Fixed annotation (with commit reference) to the ledger entry the
+change fixes, so the ledger the next lane recalls is never stale.
 
 Minimal external dependencies: pure-Go SQLite (modernc.org/sqlite), yaml.v3, goldmark, jsonschema, x/sys.

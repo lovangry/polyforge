@@ -89,10 +89,10 @@ X4  The memory ledger exists precisely to prevent re-hits — every
     implementation/review lane MUST recall it first (v1 lanes did not;
     that is why F1/F3/F4 happened).
 
-## v1 pilot findings (F1–F4) — the lessons the ledger itself predicted
+## v1 pilot findings (F1–F7) — the lessons the ledger itself predicted
 
 X4 said every implementation/review lane MUST recall this ledger first; the
-v1 pilot lanes did not, and every one of these four findings is a re-hit of an
+v1 pilot lanes did not, and every one of these findings is a re-hit of an
 entry above. Recorded here so no future lane re-derives them.
 
 F1  Goal never reached the agent. v1 deleted v0's daemon proxy_call
@@ -135,3 +135,21 @@ F4  The candidate chain was a decoration and settings pollution was open
     state.json; the executor records the effective model into
     steps.<id>.model and the observe face renders it.
     Fixed in this lane (v1-lessons-fix, base 1059da5).
+
+F5  Fatal provider error 处置与 idle 看门狗（I1 re-hit）：fatal 级 provider
+    错误此前按普通中断处理（不自恢复、不能及时判死），长静默步无看门狗。
+    Fixed: fatal provider error 即刻恢复 + idle watchdog（10 分钟窗口 +
+    probe）。已修，main d84115b（分支 v1-f5-watchdog，branch commit
+    2a0ab4a）。
+
+F6  Goal 携带的 recall 指令不可执行（X4 re-hit）：agent 无 agent→server
+    memory 读路径，无法先读台账再动手。Fixed: materialize 时静态记忆快照 +
+    UDS 窄通道 recall/remember + CLI memory 动词（`pf recall` /
+    `pf remember`）。已修，main c740fb0（分支 v1-f6f7，commit e0db578）。
+
+F7  步定义物化错位与完成标记缺失（03-execution-capsule §4.5 re-hit）：
+    物化把步定义复制到 capsule `agents/` 而非 Pi 发现目录 `.pi/agents/`，
+    且未写完成标记。Fixed: `.pi/agents` 物化目标目录 + 完成标记
+    `sync/materialized.json`（RelMaterializeMarker）+ trust gate
+    （snapshot 仅在 marker 完整且匹配 pinned bundle 身份时可信）。已修，
+    main c740fb0（分支 v1-f6f7，commit e0db578）。
