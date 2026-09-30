@@ -380,9 +380,9 @@ var cmdRecall = &Command{
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("project", "", "project name")
 		fs.String("q", "", "query text (alternative to the positional argument)")
-		fs.String("type", "", "memory type filter (e.g. experience.debug)")
+		fs.String("type", "", "memory type filter: exact (experience.debug), prefix (experience.*), or * (all types)")
 		fs.String("tags", "", "comma-separated tags")
-		fs.Int("limit", 0, "max results")
+		fs.Int("limit", 20, "max results (1..200; default 20)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		q := stringFlag(fs, "q")
@@ -391,6 +391,18 @@ var cmdRecall = &Command{
 		}
 		if strings.TrimSpace(q) == "" {
 			return fmt.Errorf("recall: a query is required (positional or --q)")
+		}
+		// Local flag validation, ahead of any config resolution or wire
+		// call: a typo fails loudly here and no request is sent. The
+		// default-20 limit is the CLI's product choice; the endpoint's
+		// own 50 default stays a wire backstop for other callers.
+		limit := intFlag(fs, "limit")
+		if limit < 1 || limit > 200 {
+			return fmt.Errorf("recall: --limit must be 1..200")
+		}
+		memType, err := recallTypeFilter(stringFlag(fs, "type"))
+		if err != nil {
+			return err
 		}
 		proj := stringFlag(fs, "project")
 		if proj == "" {
@@ -403,7 +415,7 @@ var cmdRecall = &Command{
 		if tags := stringFlag(fs, "tags"); tags != "" {
 			tagList = strings.Split(tags, ",")
 		}
-		raw, err := ctx.aihub().SearchMemories(proj, q, stringFlag(fs, "type"), tagList, intFlag(fs, "limit"))
+		raw, err := ctx.aihub().SearchMemories(proj, q, memType, tagList, limit)
 		if err != nil {
 			return err
 		}
@@ -418,6 +430,32 @@ var cmdRecall = &Command{
 		})
 		return nil
 	},
+}
+
+// recallTypeFilter validates the --type form and returns the value to
+// send on the wire. Exactly three forms are legal: a plain value
+// (exact match), a trailing ".*" (prefix match — experience.* is
+// interpreted by the store as the prefix "experience."), and a lone
+// "*" (all types, normalized to no filter at all, exactly as if --type
+// had been omitted). Any other "*" placement (*.debug, exp*rience,
+// experience*, an empty prefix in .*) is a typo we refuse loudly
+// instead of sending.
+func recallTypeFilter(memType string) (string, error) {
+	bad := fmt.Errorf("recall: --type must be a plain value (e.g. experience.debug), "+
+		"a trailing .* prefix (e.g. experience.*), or * for all types; got %q", memType)
+	switch {
+	case memType == "" || memType == "*":
+		return "", nil
+	case strings.HasSuffix(memType, ".*"):
+		if prefix := strings.TrimSuffix(memType, ".*"); prefix != "" && !strings.Contains(prefix, "*") {
+			return memType, nil
+		}
+		return "", bad
+	case strings.Contains(memType, "*"):
+		return "", bad
+	default:
+		return memType, nil
+	}
 }
 
 // ---------------------------------------------------------------------------

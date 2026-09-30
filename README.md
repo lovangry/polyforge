@@ -32,3 +32,36 @@ actually read first. After a fix lands, write its status back: append the
 change fixes, so the ledger the next lane recalls is never stale.
 
 Minimal external dependencies: pure-Go SQLite (modernc.org/sqlite), yaml.v3, goldmark, jsonschema, x/sys.
+
+## `pf recall` — memory search
+
+Searches a project's memories on the aihub memory face (trigram-indexed
+full-text search):
+
+    pf recall [--project P] <query> [--type T] [--tags a,b] [--limit N]
+
+`<query>` is required (positional or `--q`); `--project` defaults to the
+configured project. Flags:
+
+- `--limit N` — max results. **Default 20** when the flag is omitted
+  (the CLI's product choice, sent explicitly); values must satisfy
+  `1 ≤ N ≤ 200` — anything else fails loudly before a request is sent
+  (`pf: recall: --limit must be 1..200`). The endpoint's own default of
+  50 is a wire backstop for other callers, not this verb's contract.
+- `--type T` — memory type filter, exactly three legal forms:
+  - exact — `--type experience.debug` matches only that type;
+  - prefix — `--type experience.*` matches every type under the
+    `experience.` prefix (`experience.debug`, `experience.approach`, …;
+    `fact.*` does not match `experience.*` types);
+  - all — `--type *` is equivalent to omitting the flag.
+
+  Any other `*` placement (`*.debug`, `exp*rience`, `experience*`) is
+  rejected locally with no request sent. Both the GET and POST faces of
+  `/api/v1/memories/search` interpret a trailing `.*` the same way.
+- `--tags a,b` — comma-separated tag filter (a hit carries all of them).
+
+Examples:
+
+    pf recall flaky build
+    pf recall flaky build --type experience.* --limit 50
+    pf recall "retry ladder" --type fact.note --tags postgres,backoff
