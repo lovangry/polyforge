@@ -168,6 +168,13 @@ type Daemon struct {
 	shutMu      sync.Mutex
 	shutdownErr error
 
+	// drainDegraded is the drain degraded-signal episode flag: set when
+	// the first drain_degraded event of a silent→degraded transition has
+	// been emitted, cleared on the next successful wave fetch. Only the
+	// drain ticker goroutine touches it (fetchDrainWave), so it carries
+	// no lock.
+	drainDegraded bool
+
 	adapMu   sync.Mutex
 	adapters map[string]*agentAdapter
 
@@ -601,7 +608,10 @@ func (d *Daemon) dispatch() {
 // fetchDrainWave pulls the ready queue and enqueues what is claimable
 // (04 §6.1c): only in drain mode, never once shutting_down latched, and
 // only while a concurrency slot is free. Authorization-class denials
-// raise the degraded signal; transport-class losses stay silent idle.
+// raise the degraded signal — a typed drain_degraded event in the
+// observe lane's durable log, once per silent→degraded episode (the
+// flag clears on the next successful fetch); transport-class losses
+// stay silent idle.
 func (d *Daemon) fetchDrainWave() {
 	if !d.modes.AdmitDrainWave() || !d.q.SlotFree() {
 		return
@@ -610,9 +620,18 @@ func (d *Daemon) fetchDrainWave() {
 	if err != nil {
 		if authDenied(err) {
 			fmt.Fprintf(os.Stderr, "daemon: drain fetch degraded: ready queue of project %q denied (%v)\n", d.cfg.Project, err)
+			if !d.drainDegraded && d.obs != nil {
+				d.drainDegraded = true
+				_ = d.obs.Events().Append("", observe.EvDrainDegraded, map[string]any{
+					"project": d.cfg.Project,
+					"class":   "authorization",
+					"error":   err.Error(),
+				})
+			}
 		}
 		return
 	}
+	d.drainDegraded = false // episode cleared: this fetch succeeded
 	for _, it := range items {
 		if it.BundleName == nil {
 			continue // registration tickets never execute

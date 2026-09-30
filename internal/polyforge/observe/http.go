@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -72,6 +73,13 @@ func (o *Observe) serveObserve(w http.ResponseWriter, r *http.Request) {
 		}
 		if after > 0 {
 			ring := o.log.SinceAfter(wi, after)
+			// Daemon-scope entries (wi="") merge into the cursor answer
+			// too, same as the full view — a cursor poll must not silently
+			// drop the drain degraded signal. The cursor applies to each
+			// counter independently (per-WI and daemon-scope seqs are
+			// separate counters).
+			ring = append(ring, o.log.SinceAfter("", after)...)
+			sort.SliceStable(ring, func(i, j int) bool { return ring[i].At < ring[j].At })
 			view.Events = make([]protocol.EventEntry, 0, len(ring))
 			for _, e := range ring {
 				view.Events = append(view.Events, e)
