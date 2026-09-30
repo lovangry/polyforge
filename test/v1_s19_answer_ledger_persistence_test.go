@@ -195,6 +195,9 @@ func TestV1S19AwaitingAnswerIsPersistedToDisk(t *testing.T) {
 func TestV1S19AwaitingAnswerRedeliveredAfterDaemonCrash(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_s19b"
+	// The resume plan's ask carries a DIFFERENT id on purpose: it must
+	// never reach the capsule or a pf/answer correlation.
+	const decoyQID = "q_s19b_decoy"
 	actions := []map[string]any{
 		{"do": "step", "id": "code"},
 		{"do": "ask", "id": qid, "question": "Which variant should the recovery take?"},
@@ -204,7 +207,7 @@ func TestV1S19AwaitingAnswerRedeliveredAfterDaemonCrash(t *testing.T) {
 	// The resume derivation re-presents the PERSISTED question id (the
 	// decoy id must lose) and then finishes the run.
 	resume := []map[string]any{
-		{"do": "ask", "id": "q_s19b_decoy", "question": "Which variant should the recovery take?"},
+		{"do": "ask", "id": decoyQID, "question": "Which variant should the recovery take?"},
 		{"do": "step", "id": "polish"},
 		{"do": "wrap"},
 	}
@@ -254,16 +257,46 @@ func TestV1S19AwaitingAnswerRedeliveredAfterDaemonCrash(t *testing.T) {
 	// The relay reached the successor verbatim and was archived in the
 	// capsule (the persistent authority), pending question cleared.
 	exec := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
-	// Only the answer TEXT is asserted here: the capsule archive record
-	// (capsule.ArchivedAnswer) carries question_id/answer/answered_by/
-	// answered_at and deliberately no answer_id — that identifier is
-	// daemon-ledger scoped and is asserted against answers.json above
-	// (answersFileHas). Same contract as the S02 reference scenario.
+	// The answer TEXT and the QUESTION ID are the relay fields the
+	// capsule archive can carry: capsule.ArchivedAnswer is
+	// question_id/answer/answered_by/answered_at and deliberately has no
+	// answer_id — that identifier is daemon-ledger scoped (the pf/answer
+	// control envelope does not carry it either, protocol.ControlMsg is
+	// method/seq/id=question_id/answer), so it is asserted against
+	// answers.json above (answersFileHas) and below (the prune). Same
+	// contract as the S02 reference scenario.
 	if !strings.Contains(exec, answerText) {
 		t.Fatalf("sealed execution.json misses the re-delivered answer:\n%s", exec)
 	}
+	// The re-delivery was bound to the PERSISTED question id, never to
+	// the resume plan's decoy (mint once, re-present verbatim): the decoy
+	// must appear nowhere, and the persisted id must be archived with the
+	// answer.
+	if strings.Contains(exec, decoyQID) {
+		t.Fatalf("sealed execution.json carries the resume plan's decoy question id %s:\n%s", decoyQID, exec)
+	}
+	if !strings.Contains(exec, qid) {
+		t.Fatalf("sealed execution.json misses the persisted question id %s of the archived answer:\n%s", qid, exec)
+	}
 	if strings.Contains(exec, `"pending_question"`) {
 		t.Fatalf("sealed execution.json still carries a pending question:\n%s", exec)
+	}
+	// The agent journal: the LAST pf/answer landing is the post-restart
+	// re-delivery, consumed (not suppressed) and correlated to the same
+	// question id — i.e. the restored entry was re-sent verbatim, and no
+	// landing ever carried the decoy.
+	lands := answerControls(t, d2.capsuleDir(wi))
+	if len(lands) < 2 {
+		t.Fatalf("pf/answer landings: got %d, want at least 2 (one suppressed pre-crash, one re-delivered after the restart): %+v", len(lands), lands)
+	}
+	last := lands[len(lands)-1]
+	if last["suppressed"] == true || last["ref"] != qid {
+		t.Fatalf("the post-restart landing must be a normal consumption correlated to %s: %+v", qid, last)
+	}
+	for i, rec := range lands {
+		if rec["ref"] == decoyQID {
+			t.Fatalf("pf/answer landing #%d was bound to the decoy question id %s: %+v", i, decoyQID, rec)
+		}
 	}
 	// Exactly one needs_input across the whole run: the re-delivery is
 	// not a second question.
