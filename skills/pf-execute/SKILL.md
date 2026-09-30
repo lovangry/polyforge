@@ -191,13 +191,19 @@ infrastructure failure, never a gate FAIL:
 
 When a step marked `interactive: true` needs a human answer:
 
-1. Generate a `question_id` (`q_` + 6 random characters).
+1. **Mint the `question_id` ONCE** (`q_` + 6 random characters). The mint and the
+   persistence are one event: the id exists only as
+   `steps.<id>.pending_question.id`, written in the same atomic write that opens
+   the question — never an id held only in memory, never a second mint for the
+   same wait. The id is the question's stable identity across every re-derivation.
 2. In one atomic write, place the step into its waiting state and persist
    `steps.<id>.pending_question = {question_id, step, question, asked_at}`. Persisting
    the question BEFORE calling flush is what makes a crash between the two recoverable:
    the replacement process re-presents the same question from the file. That write —
    like every `execution.json` write — MUST increment the top-level `version` by
-   exactly 1; the daemon's archival is keyed on it.
+   exactly 1; the daemon's archival is keyed on it. The `question_id` you put on the
+   flush call is READ BACK from this persisted `pending_question` — the file is the
+   id's only home.
 3. Call `flush(needs_input)` over the UDS proxy (§12), carrying the `question_id`,
    the question text and the step id. The daemon acks immediately — that ack is your
    license to block on the human. You then become idle for this step.
@@ -209,8 +215,14 @@ When a step marked `interactive: true` needs a human answer:
    back into the still-running step's context; do not re-dispatch it as a new step.
 5. If you crash while a question is pending, your successor must re-present the exact
    same `question_id`/question from `pending_question` — never regenerate a new
-   question for the same wait. If the persisted answer slot is already filled on
-   resume, consume it immediately without re-asking.
+   question for the same wait. A question id is terminated ONLY by consumption: the
+   answer archived into `steps.<id>.answers[]` AND `pending_question` cleared to null.
+   Until that happens the id stays the question's identity no matter how many times
+   you are re-derived. A re-present that mints a fresh id strands every answer the
+   daemon already delivered against the old id (the daemon's relay binds on the id —
+   it will refuse the mismatch, and the stranded answer is never applied), and an
+   empty id is fail-closed with `DAEMON-400`. If the persisted answer slot is already
+   filled on resume, consume it immediately without re-asking.
 
 ## 8. Archival is not your job (ruling C3: zero-blocking)
 
@@ -327,7 +339,12 @@ by the transport.
   follow §7 step 4 exactly: persist the answer slot first, then consume, then ack
   (with `ref` = that same question id) after
   the relay is durably recorded — never before the persist, never after the whole
-  consumption finishes.
+  consumption finishes. The daemon RE-DELIVERS: an answer it delivered to a dead
+  predecessor is re-sent to you automatically at your attach, so you may receive a
+  `pf/answer` very early — before you have re-presented the question. The handling is
+  the same §7 step 4 path keyed on the persisted `pending_question`; if the answer for
+  `id` is already archived (you or a predecessor consumed it), do not archive twice —
+  ack with `ref` = `id` and continue.
 - **`pf/stop_notice`** — the daemon is closing. Ack it, drive the current step to its
   next safe boundary (a step boundary: finish or abandon the in-flight write cleanly),
   then call `flush(shutdown)` (below), then stop advancing. You pick the boundary; the
@@ -368,7 +385,11 @@ the ack distinguishes the local commit from the server push:
 ```
 
 - **`needs_input`** — the human answer gate. The daemon records the question and acks
-  immediately; the ack is your license to block (§7).
+  immediately; the ack is your license to block (§7). Carry the `question_id` READ FROM
+  the persisted `pending_question` (§7: minted once, re-presented verbatim on every
+  recovery — a re-mint strands answers, and an empty id is refused `DAEMON-400`).
+  A repeated flush with the same id is idempotent: it refreshes `asked_at`, never
+  opens a second pending, never re-announces.
 - **`wrap`** — the terminal flush: seal + push before the ack. Call it when the workflow
   is finished (`final_status: "wrapped"`) or terminally failed (`final_status:
   "failed"`) with the final result attached. An `ok:true` ack means the daemon has

@@ -119,6 +119,13 @@ func main() {
 		}
 		switch ctl.Method {
 		case "pf/answer":
+			if !drv.ackAnswer {
+				// The died-mid-consumption shape: the relay reached stdin but
+				// this instance never consumes or acks it — the daemon's ledger
+				// keeps the answer re-deliverable (F9).
+				drv.journal("control", map[string]any{"method": "pf/answer", "ref": ctl.ID, "suppressed": true})
+				continue
+			}
 			drv.consumeAnswer(ctl.ID, ctl.Answer)
 			ackViaAssistantMessage(map[string]any{"method": "pf/answer", "ref": ctl.ID, "ok": true})
 			drv.journal("control", map[string]any{"method": "pf/answer", "ref": ctl.ID})

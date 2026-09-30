@@ -29,6 +29,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -644,6 +645,9 @@ func (m *Monitor) onRecovered(at Attach) {
 			}
 		}
 	}
+	// F9: the successor may inherit answers that were delivered to its
+	// dead predecessor but never consumed — re-send them now.
+	m.redeliverAwaiting()
 }
 
 // ---------------------------------------------------------------------------
@@ -739,18 +743,35 @@ func (m *Monitor) applyPendingFromExec(exec *capsule.Execution) {
 func (m *Monitor) applyPending(pv *protocol.PendingView) {
 	m.stateMu.Lock()
 	switch {
-	case pv != nil && m.pending == nil:
-		m.pending = pv
-	case pv != nil && m.pending != nil && m.pending.ID != pv.ID:
-		m.pending = pv
-	case pv == nil && m.pending != nil:
-		m.ledger.clearAwaitingQuestion(m.wi.WorkItem, m.pending.ID)
-		m.pending = nil
+	case pv == nil:
+		if m.pending != nil {
+			// The agent consumed the question itself: clear the projection
+			// quietly (the answered event belongs to the answer path).
+			m.ledger.clearAwaitingQuestion(m.wi.WorkItem, m.pending.ID)
+			m.pending = nil
+		}
+		m.stateMu.Unlock()
+		return
+	case m.pending != nil && m.pending.ID == pv.ID:
+		// Idempotent re-present of the SAME question id (a recovered
+		// derivation re-flushing its persisted pending question, or the
+		// execution.json poll reconciling): refresh the asked_at — the one
+		// observable a repeated flush moves — but never open a second
+		// pending, never re-announce, and never let a text-less re-present
+		// erase the recorded question. One question id is one needs_input,
+		// minted once (F9).
+		m.pending.AskedAt = pv.AskedAt
+		if pv.Question != "" {
+			m.pending.Question = pv.Question
+		}
+		if pv.Step != "" {
+			m.pending.Step = pv.Step
+		}
 		m.stateMu.Unlock()
 		return
 	default:
-		m.stateMu.Unlock()
-		return
+		// First sight of this question id, or a genuinely new question.
+		m.pending = pv
 	}
 	m.stateMu.Unlock()
 	_ = m.log.Append(m.wi.WorkItem, EvNeedsInput, map[string]any{
@@ -978,24 +999,7 @@ func (m *Monitor) onAnswer(call AnswerCall) {
 	wi := m.wi.WorkItem
 	ledger := m.ledger
 	go func() {
-		delivered, err := ledger.SubmitFor(wi, call.Relay, call.Caller, fp, func(relay AnswerRelay) error {
-			ctx, cancel := context.WithTimeout(context.Background(), m.cfg.AnswerAckWindow)
-			defer cancel()
-			seq := atomic.AddInt64(&m.ctrl, 1) // control sequence, monotonic per monitor
-			ack, serr := handle.SendControl(ctx, protocol.ControlMsg{
-				Method: protocol.ControlAnswer,
-				Seq:    seq,
-				ID:     relay.QuestionID,
-				Answer: relay.AnswerText,
-			})
-			if serr != nil {
-				return serr // ErrAnswerAckPending passes through by contract
-			}
-			if !ack.OK {
-				return fmt.Errorf("agent refused pf/answer: %s", ack.Error)
-			}
-			return nil
-		})
+		delivered, err := ledger.SubmitFor(wi, call.Relay, call.Caller, fp, m.deliverVia(handle))
 		if err == nil {
 			if delivered {
 				// A fresh consumption (never an idempotent replay): announce
@@ -1018,6 +1022,120 @@ func (m *Monitor) clearPendingByID(questionID string) {
 	if m.pending != nil && m.pending.ID == questionID {
 		m.pending = nil
 	}
+}
+
+// ---------------------------------------------------------------------------
+// attach-time answer redelivery (F9)
+
+// deliverVia builds the stdio pf/answer delivery closure for one handle
+// (the shared body of the manual answer path and the attach-time
+// redelivery — the only two legal senders of an answer relay).
+func (m *Monitor) deliverVia(handle Handle) Deliver {
+	return func(relay AnswerRelay) error {
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.AnswerAckWindow)
+		defer cancel()
+		seq := atomic.AddInt64(&m.ctrl, 1) // control sequence, monotonic per monitor
+		ack, serr := handle.SendControl(ctx, protocol.ControlMsg{
+			Method: protocol.ControlAnswer,
+			Seq:    seq,
+			ID:     relay.QuestionID,
+			Answer: relay.AnswerText,
+		})
+		if serr != nil {
+			return serr // ErrAnswerAckPending passes through by contract
+		}
+		if !ack.OK {
+			return fmt.Errorf("agent refused pf/answer: %s", ack.Error)
+		}
+		return nil
+	}
+}
+
+// redeliverAwaiting closes the answer relay's recovery gap: an answer
+// that was DELIVERED but never acked/consumed stays in the ledger as
+// re-deliverable, and the agent instance that held it may have died.
+// When a new instance attaches (RTStarted/RTRecovered landing), every
+// such answer whose question is STILL the open pending question (the
+// execution.json projection — the id is minted once and lives there) is
+// re-sent to the new handle from a sub-goroutine — the select loop never
+// blocks, the attempt is recorded, and a failed re-delivery stays in the
+// ledger untouched (the manual answer path and the NEXT attachment both
+// re-try it). Answers bound to older, consumed questions are not resent.
+func (m *Monitor) redeliverAwaiting() {
+	if m.handle == nil {
+		return
+	}
+	qid, step := m.openQuestionID()
+	if qid == "" {
+		return
+	}
+	for _, relay := range m.ledger.Awaiting(m.wi.WorkItem) {
+		if relay.QuestionID != qid {
+			continue // bound to a different (older) question: not this attach's business
+		}
+		m.spawnRedelivery(relay, qid, step)
+	}
+}
+
+// openQuestionID answers the currently open pending question's id and
+// step: the capsule's execution.json is the authority (the id is minted
+// once and persists there; a recovered derivation re-presents from it),
+// the monitor's projection the fallback when the file cannot be read.
+// "" when no question is open.
+func (m *Monitor) openQuestionID() (string, string) {
+	if data, err := os.ReadFile(m.execPath); err == nil {
+		var exec capsule.Execution
+		if json.Unmarshal(data, &exec) == nil {
+			if s := exec.Steps[exec.CurrentStep]; s != nil && s.PendingQuestion != nil && s.PendingQuestion.ID != "" {
+				return s.PendingQuestion.ID, s.PendingQuestion.Step
+			}
+		}
+	}
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	if m.pending != nil {
+		return m.pending.ID, m.pending.Step
+	}
+	return "", ""
+}
+
+// spawnRedelivery re-delivers one awaiting answer to the currently
+// attached handle. The attempt is recorded before the send; the ledger's
+// own SubmitFor owns the idempotency semantics (a retryable entry
+// re-delivers, an in-flight one is refused for now, a finalized one no
+// longer sits in the awaiting set).
+func (m *Monitor) spawnRedelivery(relay AnswerRelay, qid, step string) {
+	handle := m.handle
+	wi := m.wi.WorkItem
+	ledger := m.ledger
+	log := m.log
+	_ = log.Append(wi, EvAnswerRedelivery, map[string]any{
+		"question_id": relay.QuestionID, "answer_id": relay.AnswerID,
+		"attempt_id": m.currentAttempt(),
+		"detail":     "re-delivering the delivered-but-unconsumed answer to the newly attached instance",
+	})
+	go func() {
+		delivered, err := ledger.SubmitFor(wi, relay, relay.AnsweredBy,
+			frozenPending{id: qid, step: step}, m.deliverVia(handle))
+		if err == nil {
+			if delivered {
+				_ = log.Append(wi, EvAnswered, map[string]any{
+					"question_id": relay.QuestionID, "answer_id": relay.AnswerID,
+					"redelivered": true,
+				})
+				m.clearPendingByID(relay.QuestionID)
+			}
+			return
+		}
+		if !errors.Is(err, ErrAnswerAckPending) && !errors.Is(err, ErrAnswerInFlight) {
+			// Delivery failed (agent dead pre-ack, control path lost): the
+			// entry stays re-deliverable in the ledger — record why.
+			_ = log.Append(wi, EvAnswerRedelivery, map[string]any{
+				"question_id": relay.QuestionID, "answer_id": relay.AnswerID,
+				"error": err.Error(),
+			})
+		}
+	}()
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,8 +1180,9 @@ func (m *Monitor) onFlush(call FlushCall) {
 // other change).
 //
 // Degrade semantics (§五): this path cannot fail the agent. A malformed
-// request is the only refusal; any daemon-side trouble degrades to an
-// events-file entry with no sync push.
+// request is the only refusal — and since F9 the HTTP face fail-closes
+// an empty question_id with DAEMON-400 before the call ever reaches
+// here, so this guard is the belt-and-braces for direct-channel callers.
 func (m *Monitor) flushNeedsInput(call FlushCall) {
 	req := call.Req
 	if req.QuestionID == "" {

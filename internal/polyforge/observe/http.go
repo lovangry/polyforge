@@ -184,6 +184,18 @@ func (o *Observe) serveFlush(w http.ResponseWriter, r *http.Request) {
 				"; the current instance is "+cur)
 		return
 	}
+	// F9 fail-closed gate: a needs_input flush without a question id can
+	// never be answered — the answer relay binds on the id — and an empty
+	// id accepted here mints an unanswerable hanging pending (the pilot
+	// measured exactly that). The question id is minted once by the
+	// agent, persisted in pending_question and re-presented verbatim; an
+	// empty one is a contract violation and is refused at the entry with
+	// DAEMON-400, never reaching the monitor.
+	if req.Reason == protocol.FlushNeedsInput && req.QuestionID == "" {
+		writeErr(w, api.ErrDaemonBadInput,
+			"flush(needs_input) requires a non-empty question_id (minted once, persisted in pending_question, re-presented verbatim; an empty id can never be answered)")
+		return
+	}
 	call := FlushCall{Req: req, Resp: make(chan protocol.FlushAck, 1)}
 	select {
 	case m.flushCh <- call:
