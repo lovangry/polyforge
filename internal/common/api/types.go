@@ -60,15 +60,15 @@ const (
 
 // Project (02 §3).
 type Project struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Description  string          `json:"description"`
-	Repos        []ProjectRepo   `json:"repos"`
-	Visible      bool            `json:"visible"`
-	Members      []ProjectMember `json:"members"`
-	Identifier   string          `json:"identifier"`
-	CreatedAt    string          `json:"created_at"`
-	UpdatedAt    string          `json:"updated_at"`
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Repos       []ProjectRepo   `json:"repos"`
+	Visible     bool            `json:"visible"`
+	Members     []ProjectMember `json:"members"`
+	Identifier  string          `json:"identifier"`
+	CreatedAt   string          `json:"created_at"`
+	UpdatedAt   string          `json:"updated_at"`
 }
 
 type ProjectRepo struct {
@@ -84,13 +84,13 @@ type ProjectMember struct {
 
 // User (02 §2).
 type User struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name"`
-	Email       string `json:"email"`
-	Role        string `json:"role"` // admin|writer
-	UserType    string `json:"user_type"` // human|machine
+	ID          string     `json:"id"`
+	DisplayName string     `json:"display_name"`
+	Email       string     `json:"email"`
+	Role        string     `json:"role"`      // admin|writer
+	UserType    string     `json:"user_type"` // human|machine
 	APITokens   []APIToken `json:"api_tokens"`
-	CreatedAt   string `json:"created_at"`
+	CreatedAt   string     `json:"created_at"`
 }
 
 type APIToken struct {
@@ -101,15 +101,15 @@ type APIToken struct {
 
 // Claim records a machine taking ownership of a work item (02 §6).
 type Claim struct {
-	WorkItemID  string `json:"work_item_id"`
-	AttemptID   string `json:"attempt_id"`
-	MachineID   string `json:"machine_id"`
-	Owner       string `json:"owner"`
-	Generation int64  `json:"generation"`
-	BundleName  string `json:"bundle_name"`
+	WorkItemID   string `json:"work_item_id"`
+	AttemptID    string `json:"attempt_id"`
+	MachineID    string `json:"machine_id"`
+	Owner        string `json:"owner"`
+	Generation   int64  `json:"generation"`
+	BundleName   string `json:"bundle_name"`
 	BundleDigest string `json:"bundle_digest"`
 	ClaimedAt    string `json:"claimed_at"`
-	Token       string `json:"token"`          // attempt-scoped push credential
+	Token        string `json:"token"`         // attempt-scoped push credential
 	TokenExpires string `json:"token_expires"` // RFC3339
 
 	// Repos is the project's task-repo inventory (v0 claim semantics):
@@ -132,23 +132,23 @@ type PushCredential struct {
 
 // Memory (06).
 type Memory struct {
-	ID            string          `json:"id"`
-	Project       string          `json:"project"`
-	Type          string          `json:"type"`
-	Content       string          `json:"content"`
-	ContextSnippet string         `json:"context_snippet"`
-	Tags          []string        `json:"tags"`
-	Visibility    string          `json:"visibility"` // admin|private|project|team|public
-	BaseStrength  int             `json:"base_strength"`
-	CreatedAt     string          `json:"created_at"`
-	UpdatedAt     string          `json:"updated_at"`
-	Related       []string        `json:"related_memory_ids"`
-	WorkItemID    string          `json:"work_item_id,omitempty"`
+	ID             string   `json:"id"`
+	Project        string   `json:"project"`
+	Type           string   `json:"type"`
+	Content        string   `json:"content"`
+	ContextSnippet string   `json:"context_snippet"`
+	Tags           []string `json:"tags"`
+	Visibility     string   `json:"visibility"` // admin|private|project|team|public
+	BaseStrength   int      `json:"base_strength"`
+	CreatedAt      string   `json:"created_at"`
+	UpdatedAt      string   `json:"updated_at"`
+	Related        []string `json:"related_memory_ids"`
+	WorkItemID     string   `json:"work_item_id,omitempty"`
 }
 
 // ListResponse is the envelope for list endpoints.
 type ListResponse[T any] struct {
-	Items    []T     `json:"items"`
-	Total    int     `json:"total"`
-	Cursor   *string `json:"cursor,omitempty"`
+	Items  []T     `json:"items"`
+	Total  int     `json:"total"`
+	Cursor *string `json:"cursor,omitempty"`
 }

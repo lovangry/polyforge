@@ -47,19 +47,19 @@ var importableStatuses = map[string]bool{
 
 // ImportRequest is the POST /api/v1/admin/import-work-item body.
 type ImportRequest struct {
-	Project   string `json:"project"` // target project name or id
-	ID        string `json:"id"`      // old-world id, kept verbatim
-	Seq       *int64 `json:"seq"`     // old display seq; nil = auto
-	Goal      string `json:"goal"`
-	Content   *string `json:"content"`
-	Status    string `json:"status"`
-	Priority  string `json:"priority"`
-	Milestone *string `json:"milestone"`
-	Labels    []string `json:"labels"`
+	Project   string         `json:"project"` // target project name or id
+	ID        string         `json:"id"`      // old-world id, kept verbatim
+	Seq       *int64         `json:"seq"`     // old display seq; nil = auto
+	Goal      string         `json:"goal"`
+	Content   *string        `json:"content"`
+	Status    string         `json:"status"`
+	Priority  string         `json:"priority"`
+	Milestone *string        `json:"milestone"`
+	Labels    []string       `json:"labels"`
 	Attrs     map[string]any `json:"attrs"`
-	Reporter  string `json:"reporter"` // TARGET user id (the tool resolves old→new)
-	Assignee  *string `json:"assignee"`
-	WaitingOn *string `json:"waiting_on"`
+	Reporter  string         `json:"reporter"` // TARGET user id (the tool resolves old→new)
+	Assignee  *string        `json:"assignee"`
+	WaitingOn *string        `json:"waiting_on"`
 	// Bundle reference triple, carried like Create does (02 §4.4/§4.5).
 	BundleName     *string         `json:"bundle_name"`
 	BundleDigest   *string         `json:"bundle_digest"`
@@ -250,7 +250,7 @@ func (m *WIManager) Import(req ImportRequest) (*ImportResult, error) {
 	// NOT migrated history — the old world's wi_events stay behind.
 	if err := appendEventTx(tx, req.ID, Now(), "", "work_item_imported", map[string]any{
 		"imported_status": req.Status,
-		"imported_seq":     seq,
+		"imported_seq":    seq,
 	}); err != nil {
 		return nil, err
 	}

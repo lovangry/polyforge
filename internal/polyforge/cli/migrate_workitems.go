@@ -34,17 +34,17 @@ type MigWorkItemsOptions struct {
 
 // MigWIReport is the import report the verb prints.
 type MigWIReport struct {
-	Source          string         `json:"source"`
-	InputLines      int            `json:"input_lines"`
-	Imported        int            `json:"imported"`
-	Skipped         int            `json:"skipped"` // same-id re-import, record matches
-	StatusCounts    map[string]int `json:"status_counts"`
-	TargetProject   string         `json:"target_project"`
-	ReporterOverride string        `json:"reporter_override,omitempty"`
+	Source            string          `json:"source"`
+	InputLines        int             `json:"input_lines"`
+	Imported          int             `json:"imported"`
+	Skipped           int             `json:"skipped"` // same-id re-import, record matches
+	StatusCounts      map[string]int  `json:"status_counts"`
+	TargetProject     string          `json:"target_project"`
+	ReporterOverride  string          `json:"reporter_override,omitempty"`
 	ResolvedReporters []MigConversion `json:"resolved_reporters"`
-	Verification    []StepResult   `json:"verification"`
-	SampledIDs      []string       `json:"sampled_ids"`
-	DryRun          bool           `json:"dry_run"`
+	Verification      []StepResult    `json:"verification"`
+	SampledIDs        []string        `json:"sampled_ids"`
+	DryRun            bool            `json:"dry_run"`
 }
 
 // RunMigrateWorkItems executes the import + verification.
@@ -125,7 +125,7 @@ func RunMigrateWorkItems(opts MigWorkItemsOptions, client *aihubclient.Client) (
 			Attrs: r.Attrs, Reporter: reporter, Assignee: assignee,
 			WaitingOn: r.WaitingOn, BundleName: r.BundleName, BundleDigest: r.BundleDigest,
 			BudgetBaseline: r.BudgetBaseline,
-			CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt,
+			CreatedAt:      r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt,
 		}
 		if opts.DryRun {
 			continue

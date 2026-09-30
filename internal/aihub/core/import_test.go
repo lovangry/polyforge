@@ -148,4 +148,4 @@ func TestImportRejectsLiveStateAndBadFields(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
-func strPtrI(i int64) *int64 { return &i }
+func strPtrI(i int64) *int64  { return &i }

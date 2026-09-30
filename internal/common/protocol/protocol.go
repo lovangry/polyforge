@@ -32,14 +32,14 @@ type OBMsg struct {
 	Kind      OBMsgKind `json:"kind"`
 	AttemptID string    `json:"attempt_id"`
 	WorkItem  string    `json:"work_item"`
-	Reason    string    `json:"reason"`  // WINeedsRecovery: death|hang|provider_error|idle|...
+	Reason    string    `json:"reason"` // WINeedsRecovery: death|hang|provider_error|idle|...
 	Detail    string    `json:"detail,omitempty"`
 }
 
 type RTMsgKind string
 
 const (
-	RTStarted  RTMsgKind = "wi_started"   // new attempt began; carries agent handle
+	RTStarted   RTMsgKind = "wi_started"   // new attempt began; carries agent handle
 	RTRecovered RTMsgKind = "wi_recovered" // recovery succeeded; new handle, same attempt lineage
 	RTFinished  RTMsgKind = "wi_finished"  // terminal: stop monitoring
 )
@@ -167,25 +167,25 @@ const (
 
 // JobView is the observe projection served over UDS (04 §5.1a).
 type JobView struct {
-	WorkItem    string          `json:"work_item"`
-	Project     string          `json:"project"`
-	Status      string          `json:"status"`
-	Generation  int64           `json:"generation"`
-	AttemptID   string          `json:"attempt_id"`
-	BundleName  string          `json:"bundle_name"`
-	CurrentStep string          `json:"current_step"`
+	WorkItem    string               `json:"work_item"`
+	Project     string               `json:"project"`
+	Status      string               `json:"status"`
+	Generation  int64                `json:"generation"`
+	AttemptID   string               `json:"attempt_id"`
+	BundleName  string               `json:"bundle_name"`
+	CurrentStep string               `json:"current_step"`
 	Steps       map[string]*StepView `json:"steps"`
-	Budget      json.RawMessage `json:"budget,omitempty"`
-	Pending     *PendingView    `json:"pending_question,omitempty"`
-	Events      []EventEntry    `json:"events"`
+	Budget      json.RawMessage      `json:"budget,omitempty"`
+	Pending     *PendingView         `json:"pending_question,omitempty"`
+	Events      []EventEntry         `json:"events"`
 }
 
 type StepView struct {
-	Status    string   `json:"status"`
-	Attempts  int      `json:"attempts"`
-	StartedAt string   `json:"started_at,omitempty"`
-	Model     string   `json:"model,omitempty"`
-	Output    string   `json:"output,omitempty"`
+	Status    string `json:"status"`
+	Attempts  int    `json:"attempts"`
+	StartedAt string `json:"started_at,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Output    string `json:"output,omitempty"`
 }
 
 type PendingView struct {
@@ -213,6 +213,6 @@ type EventEntry struct {
 // Daemon modes (04 §3).
 const (
 	ModeInteractive = "interactive" // claim nothing on its own
-	ModeBatch       = "batch"        // recommendation → confirm → execute
-	ModeDrain       = "drain"        // autonomously claims queued work
+	ModeBatch       = "batch"       // recommendation → confirm → execute
+	ModeDrain       = "drain"       // autonomously claims queued work
 )

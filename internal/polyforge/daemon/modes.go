@@ -276,10 +276,10 @@ func (q *jobQueue) Reconcile(live map[string]bool) {
 const daemonStateFile = "daemon-state.json"
 
 type daemonState struct {
-	Version          int    `json:"version"`
-	MachineID        string `json:"machine_id"`
-	Mode             string `json:"mode"`
-	MaxConcurrentJobs int   `json:"max_concurrent_jobs"`
+	Version           int    `json:"version"`
+	MachineID         string `json:"machine_id"`
+	Mode              string `json:"mode"`
+	MaxConcurrentJobs int    `json:"max_concurrent_jobs"`
 }
 
 func (d *Daemon) statePath() string {

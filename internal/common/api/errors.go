@@ -94,8 +94,8 @@ const (
 	// CAP — capsule lifecycle errors (03 §5.3)
 	ErrCapBadInput      = "CAP-400"
 	ErrCapNotFound      = "CAP-404"
-	ErrCapCheckoutDiver  = "CAP-405"
+	ErrCapCheckoutDiver = "CAP-405"
 	ErrCapSymlinkEscape = "CAP-406"
-	ErrCapFenced         = "CAP-409"
+	ErrCapFenced        = "CAP-409"
 	ErrCapRunnerCrash   = "CAP-500"
 )

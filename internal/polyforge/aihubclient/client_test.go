@@ -13,10 +13,10 @@ import (
 func TestQueueMergesUnclassified(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"project":              "p",
-			"items":                []map[string]any{{"id": "wi_a", "status": "queued", "goal": "a"}},
-			"needs_human_session":  []map[string]any{{"id": "wi_h", "status": "queued", "goal": "h"}},
-			"unclassified":         []map[string]any{{"id": "wi_u", "status": "queued", "goal": "u"}},
+			"project":             "p",
+			"items":               []map[string]any{{"id": "wi_a", "status": "queued", "goal": "a"}},
+			"needs_human_session": []map[string]any{{"id": "wi_h", "status": "queued", "goal": "h"}},
+			"unclassified":        []map[string]any{{"id": "wi_u", "status": "queued", "goal": "u"}},
 		})
 	}))
 	defer srv.Close()

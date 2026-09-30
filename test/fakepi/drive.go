@@ -17,8 +17,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,12 +27,12 @@ import (
 // planAction is one scripted step of a derivation.
 type planAction struct {
 	Do       string `json:"do"`
-	ID       string `json:"id"`                 // step id / question id
-	Question string `json:"question"`           // ask: the question text
-	Count    int    `json:"count"`              // provider_error: number of error turns
-	MS       int    `json:"ms"`                 // sleep: milliseconds
-	Name     string `json:"name"`               // repo: the repos/ subdirectory
-	Origin   string `json:"origin"`             // repo: the origin remote URL
+	ID       string `json:"id"`       // step id / question id
+	Question string `json:"question"` // ask: the question text
+	Count    int    `json:"count"`    // provider_error: number of error turns
+	MS       int    `json:"ms"`       // sleep: milliseconds
+	Name     string `json:"name"`     // repo: the repos/ subdirectory
+	Origin   string `json:"origin"`   // repo: the origin remote URL
 }
 
 // plan is the whole scripted behavior of one derivation.
@@ -94,14 +94,14 @@ type plan struct {
 // observe lane unmarshals the real capsule.Execution, so the fields here
 // are a subset that keeps every unmarshal honest).
 type execState struct {
-	CapsuleID      string                `json:"capsule_id"`
-	WorkItemID     string                `json:"work_item_id"`
-	Generation     int64                 `json:"generation"`
-	CurrentStep    string                `json:"current_step"`
-	WorkflowStatus string                `json:"workflow_status"`
-	Steps          map[string]*execStep  `json:"steps"`
-	UpdatedAt      string                `json:"updated_at"`
-	Version        int64                 `json:"version"`
+	CapsuleID      string               `json:"capsule_id"`
+	WorkItemID     string               `json:"work_item_id"`
+	Generation     int64                `json:"generation"`
+	CurrentStep    string               `json:"current_step"`
+	WorkflowStatus string               `json:"workflow_status"`
+	Steps          map[string]*execStep `json:"steps"`
+	UpdatedAt      string               `json:"updated_at"`
+	Version        int64                `json:"version"`
 }
 
 type execStep struct {
@@ -129,20 +129,20 @@ type archivedAnswer struct {
 
 // driveEnv is the shared state of one fake agent process.
 type driveEnv struct {
-	wi        string
-	gen       int64
-	instance  string // PF_INSTANCE_ID: the flush attempt-id fence value
-	socket    string // PF_DAEMON_SOCKET
+	wi         string
+	gen        int64
+	instance   string // PF_INSTANCE_ID: the flush attempt-id fence value
+	socket     string // PF_DAEMON_SOCKET
 	sessionArg string
-	resumed   bool
+	resumed    bool
 
-	mu        sync.Mutex // guards exec, journal, transcript, askWaiters
-	exec      *execState
-	plan      *plan
+	mu         sync.Mutex // guards exec, journal, transcript, askWaiters
+	exec       *execState
+	plan       *plan
 	transcript string
-	askWait   map[string]chan struct{}
-	hanging   bool
-	ackProbe  bool
+	askWait    map[string]chan struct{}
+	hanging    bool
+	ackProbe   bool
 	// ackAnswer false: land pf/answer on the journal but neither consume
 	// nor ack it (the died-mid-consumption shape; see plan.AckAnswer).
 	ackAnswer bool

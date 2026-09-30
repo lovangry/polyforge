@@ -161,8 +161,8 @@ func (c *Client) ListWorkItems(project string, status string) ([]api.WorkItem, e
 // NEVER included — a human session is a claim precondition there.
 func (c *Client) Queue(project string) ([]api.WorkItem, error) {
 	var resp struct {
-		Items    []api.WorkItem `json:"items"`
-		Unknown  []api.WorkItem `json:"unclassified"`
+		Items   []api.WorkItem `json:"items"`
+		Unknown []api.WorkItem `json:"unclassified"`
 	}
 	if err := c.Do("GET", "/api/v1/projects/"+url.PathEscape(project)+"/ready-queue", nil, &resp); err != nil {
 		return nil, err
