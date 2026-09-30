@@ -113,13 +113,14 @@ type AnswerLedger struct {
 	// with an answer in flight, the entry stays here and the pending
 	// question stays visible in the JobView (execution.json carries
 	// pending_question, which the NEW attempt's first turn sees through
-	// Runtime's context injection — the new agent reads the capsule's
-	// execution.json, so no daemon-side re-delivery is needed or
-	// performed; the CLI may re-submit the same answer_id and this
-	// ledger re-delivers it idempotently). In-memory only, deliberately:
-	// the capsule already owns the durable data; a second durable
-	// record of what the capsule owns is exactly the shape 00 §3.4a
-	// rules out.
+	// Runtime's context injection). Since F9 the monitor closes the loop:
+	// at every instance attachment (RTStarted/RTRecovered landing) the
+	// entries whose question is still the open pending one are re-sent
+	// to the new handle automatically (monitor.redeliverAwaiting), and
+	// the manual CLI re-submit of the same answer_id re-delivers
+	// idempotently on top. In-memory only, deliberately: the capsule
+	// already owns the durable data; a second durable record of what
+	// the capsule owns is exactly the shape 00 §3.4a rules out.
 	awaiting map[string]map[string]AnswerRelay
 }
 

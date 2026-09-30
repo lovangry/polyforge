@@ -27,12 +27,18 @@ import (
 // family, payload kind ∈ {provider_error, retry, hang_suspected,
 // hang_cleared, idle_suspect, idle_cleared}) and the push bookkeeping.
 const (
-	EvJobStarted       = "job_started"
-	EvAgentRecovered   = "wi_agent_rederived"
-	EvNeedsRecovery    = "needs_recovery"
-	EvInfraIncident    = "infra_incident"
-	EvNeedsInput       = "needs_input"
-	EvAnswered         = "answered"
+	EvJobStarted     = "job_started"
+	EvAgentRecovered = "wi_agent_rederived"
+	EvNeedsRecovery  = "needs_recovery"
+	EvInfraIncident  = "infra_incident"
+	EvNeedsInput     = "needs_input"
+	EvAnswered       = "answered"
+	// EvAnswerRedelivery is the F9 attach-time re-delivery record: an
+	// answer that was delivered but never consumed is re-sent to a newly
+	// attached agent instance (RTStarted/RTRecovered landing). One event
+	// per attempt; a failed re-delivery carries its error and the ledger
+	// keeps the answer re-deliverable.
+	EvAnswerRedelivery = "answer_redelivery"
 	EvPublished        = "published"
 	EvPushFailed       = "push_failed"
 	EvPushBackpressure = "push_backpressure"

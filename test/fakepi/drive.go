@@ -45,6 +45,13 @@ type plan struct {
 	// AckProbe false makes the agent ignore liveness probes (the hang
 	// scenario: silence must extend to the probe channel).
 	AckProbe *bool `json:"ack_probe"`
+	// AckAnswer false makes the agent land pf/answer on its journal
+	// WITHOUT consuming or acking it (the F9 recovery scenario: the relay
+	// reached stdin, then the instance died mid-consumption — the
+	// daemon's ledger keeps the answer re-deliverable). A RESUME
+	// derivation re-reads the plan file, so a scenario clears the flag
+	// to let the successor consume normally.
+	AckAnswer *bool `json:"ack_answer"`
 }
 
 // execState mirrors the execution.json contract (03 §4.2 wire shape; the
@@ -100,6 +107,9 @@ type driveEnv struct {
 	askWait   map[string]chan struct{}
 	hanging   bool
 	ackProbe  bool
+	// ackAnswer false: land pf/answer on the journal but neither consume
+	// nor ack it (the died-mid-consumption shape; see plan.AckAnswer).
+	ackAnswer bool
 
 	shutOnce sync.Once
 }
@@ -134,6 +144,7 @@ func newDriveEnv() *driveEnv {
 		resumed:    hasSessionArg(),
 		askWait:    map[string]chan struct{}{},
 		ackProbe:   pl.AckProbe == nil || *pl.AckProbe,
+		ackAnswer:  pl.AckAnswer == nil || *pl.AckAnswer,
 		transcript: transcriptPathOf(),
 	}
 	d.exec = d.loadExec()
@@ -306,6 +317,15 @@ func (x *execState) step(id string) *execStep {
 // consumption signals this question id. The SAME step continues in
 // place once the answer lands (the interactive contract: the step is
 // started, parks on its open question, never re-dispatches).
+//
+// F9 contract behavior (mirroring the executor skill): the question id
+// is MINTED ONCE and lives in execution.json — whatever the plan says,
+// a pending question already persisted for this step IS the question's
+// identity, and a re-derived instance re-presents that id verbatim,
+// never a fresh one. An answer that already landed for that id (the
+// daemon re-delivers delivered-but-unconsumed answers at attachment,
+// and the re-delivery can outrun the plan) is consumed silently, with
+// no re-ask.
 func (d *driveEnv) askAndWait(qid, question string) {
 	if qid == "" {
 		qid = "q_anon"
@@ -313,17 +333,64 @@ func (d *driveEnv) askAndWait(qid, question string) {
 	if question == "" {
 		question = "Which shape should the work take: A or B?"
 	}
-	stepID := ""
 	d.mu.Lock()
+	stepID := "interactive"
 	if d.exec != nil && d.exec.CurrentStep != "" {
 		stepID = d.exec.CurrentStep
-	} else {
-		stepID = "interactive"
+	}
+	answered := false
+	// The once-minted id: a persisted pending question for this step wins
+	// over the plan's id (re-present verbatim, never re-mint). A step
+	// whose interactive question was already CONSUMED (the answer is
+	// archived — possibly by this derivation's own control loop moments
+	// after the attach-time re-delivery) is a finished ask: consume
+	// without re-asking, whatever id the plan carries.
+	if d.exec != nil {
+		st := d.exec.Steps[stepID]
+		if st != nil && st.PendingQuestion != nil && st.PendingQuestion.ID != "" {
+			qid = st.PendingQuestion.ID
+			if st.PendingQuestion.Question != "" {
+				question = st.PendingQuestion.Question
+			}
+			for _, a := range st.Answers {
+				if a.QuestionID == qid {
+					answered = true
+				}
+			}
+		} else if st != nil && len(st.Answers) > 0 {
+			qid = st.Answers[len(st.Answers)-1].QuestionID
+			answered = true
+		}
+	}
+	var ch chan struct{}
+	if !answered {
+		// Register the waiter under the SAME lock as the decision, so a
+		// concurrent consumeAnswer either lands before the check (seen
+		// above) or closes exactly the channel registered here.
+		ch = make(chan struct{})
+		d.askWait[qid] = ch
 	}
 	d.mu.Unlock()
+	d.journal("ask", map[string]any{
+		"question_id": qid, "question": question, "step": stepID,
+		"already_answered": answered,
+	})
+	if answered {
+		return
+	}
+	var stale bool
 	d.commit(func(x *execState) {
-		x.CurrentStep = stepID
+		// Re-check atomically with the persist: the answer may have been
+		// consumed in the window since the check above — then there is
+		// nothing to re-present and nothing to park on.
 		st := x.step(stepID)
+		for _, a := range st.Answers {
+			if a.QuestionID == qid {
+				stale = true
+				return
+			}
+		}
+		x.CurrentStep = stepID
 		if st.Status != "in_progress" {
 			st.Status = "in_progress"
 			st.StepStartedAt = nowStamp()
@@ -332,11 +399,12 @@ func (d *driveEnv) askAndWait(qid, question string) {
 			ID: qid, Step: stepID, Question: question, AskedAt: nowStamp(),
 		}
 	})
-	d.mu.Lock()
-	ch := make(chan struct{})
-	d.askWait[qid] = ch
-	d.mu.Unlock()
-	d.journal("ask", map[string]any{"question_id": qid, "question": question, "step": stepID})
+	if stale {
+		d.journal("ask_skip", map[string]any{
+			"question_id": qid, "reason": "answer landed before the re-present",
+		})
+		return
+	}
 	ack := d.flush("needs_input", map[string]any{
 		"question_id": qid, "question": question, "step": stepID,
 	})
