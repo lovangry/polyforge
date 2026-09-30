@@ -18,6 +18,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/aihub/core"
 	"github.com/silgrid/polyforge/internal/aihub/git"
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 )
 
@@ -604,3 +605,35 @@ func TestApiKeyScopeFieldCompat(t *testing.T) {
 }
 
 func strPtrTest(s string) *string { return &s }
+
+// TestClaimResponseCarriesProjectRepos: the claim endpoint serves the
+// project's task-repo inventory on the claim object (the runtime's
+// claim→clone lane reads it from resp.Claim).
+func TestClaimResponseCarriesProjectRepos(t *testing.T) {
+	e := newSrvEnv(t)
+	if _, err := e.admin.CreateProject(core.CreateProjectRequest{
+		Name:  "bravo",
+		Repos: []api.ProjectRepo{{Name: "app", URL: "file:///srv/app.git"}},
+	}); err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	var wi struct {
+		ID string `json:"id"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items", e.key,
+		map[string]any{"project": "bravo", "goal": "repos over http", "bundle_name": "demo-bundle"}, &wi); code != 201 || wi.ID == "" {
+		t.Fatalf("create: %d %s", code, raw)
+	}
+	var resp struct {
+		Claim struct {
+			Repos []api.ProjectRepo `json:"repos"`
+		} `json:"claim"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/claim", e.key,
+		map[string]string{"intent": "claim"}, &resp); code != 200 {
+		t.Fatalf("claim: %d %s", code, raw)
+	}
+	if len(resp.Claim.Repos) != 1 || resp.Claim.Repos[0].Name != "app" || resp.Claim.Repos[0].URL != "file:///srv/app.git" {
+		t.Fatalf("claim repos wrong over HTTP: %+v", resp.Claim.Repos)
+	}
+}

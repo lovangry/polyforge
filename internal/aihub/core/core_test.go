@@ -192,6 +192,11 @@ func TestClaimIdempotency(t *testing.T) {
 	if res1.Claim.BundleName != "demo-bundle" || res1.Claim.BundleDigest != "digest-of-demo-bundle" {
 		t.Fatalf("claim bundle fields wrong: %+v", res1.Claim)
 	}
+	// A project without task repos answers an empty inventory (never
+	// nil on the wire semantics the runtime relies on).
+	if len(res1.Claim.Repos) != 0 {
+		t.Fatalf("claim repos should be empty: %+v", res1.Claim.Repos)
+	}
 	if res1.Credential.Username != id {
 		t.Fatalf("credential username = %q, want %q", res1.Credential.Username, id)
 	}
@@ -527,5 +532,39 @@ func TestAdminFaces(t *testing.T) {
 	}
 	if _, err := env.Admin.RotateIdentifier("nope"); !IsCode(err, api.ErrCoreNotFound) {
 		t.Fatalf("rotate unknown: %v", err)
+	}
+}
+
+// TestClaimCarriesProjectRepos pins the v0 claim semantics restored for
+// v1: the claim response carries the project's task-repo inventory,
+// served from the projects row the generation is minted on.
+func TestClaimCarriesProjectRepos(t *testing.T) {
+	env := newEnv(t)
+	if _, err := env.Admin.CreateProject(CreateProjectRequest{
+		Name: "bravo",
+		Repos: []api.ProjectRepo{
+			{Name: "app", URL: "file:///srv/app.git"},
+			{Name: "lib", URL: "file:///srv/lib.git"},
+		},
+	}); err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	wi, err := env.WIs.Create(CreateRequest{
+		Project:    "bravo",
+		Goal:       "repos ride the claim",
+		Reporter:   env.UserID,
+		BundleName: strPtrTest("demo-bundle"),
+	})
+	if err != nil {
+		t.Fatalf("create wi: %v", err)
+	}
+	res, err := env.Owners.Claim(wi.ID, ClaimRequest{Intent: IntentClaim}, env.UserID)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if len(res.Claim.Repos) != 2 ||
+		res.Claim.Repos[0].Name != "app" || res.Claim.Repos[0].URL != "file:///srv/app.git" ||
+		res.Claim.Repos[1].Name != "lib" || res.Claim.Repos[1].URL != "file:///srv/lib.git" {
+		t.Fatalf("claim repos wrong: %+v", res.Claim.Repos)
 	}
 }

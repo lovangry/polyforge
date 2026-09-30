@@ -111,6 +111,13 @@ type Claim struct {
 	ClaimedAt    string `json:"claimed_at"`
 	Token       string `json:"token"`          // attempt-scoped push credential
 	TokenExpires string `json:"token_expires"` // RFC3339
+
+	// Repos is the project's task-repo inventory (v0 claim semantics):
+	// the runtime clones each entry into the capsule's repos/<name>
+	// before the agent starts and records the claim-time HEAD SHA of
+	// each clone in capsule.json's Repos map. Empty for projects without
+	// task repos.
+	Repos []ProjectRepo `json:"repos,omitempty"`
 }
 
 // PushCredential is the attempt-scoped git credential minted at claim time

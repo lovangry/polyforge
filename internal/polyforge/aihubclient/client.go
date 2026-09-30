@@ -273,9 +273,10 @@ type ApiKeyCreateRequest struct {
 
 // ProjectCreateRequest is the M3 create body.
 type ProjectCreateRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Visible     *bool  `json:"visible,omitempty"`
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	Repos       []api.ProjectRepo `json:"repos,omitempty"` // task-repo inventory (served back on every claim)
+	Visible     *bool             `json:"visible,omitempty"`
 }
 
 // ProjectMember is one membership row (role: viewer|writer|maintainer).

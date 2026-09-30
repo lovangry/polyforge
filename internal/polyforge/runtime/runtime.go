@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -120,6 +121,11 @@ type job struct {
 	transcript   string
 	bundleName   string
 	bundleDigest string
+	// repos is the claim-served task-repo inventory (api.Claim.Repos):
+	// materialize clones each entry into repos/<name> before the agent
+	// starts. In-memory only — recovery never re-materializes, so it is
+	// not part of the persisted job record.
+	repos []api.ProjectRepo
 
 	agent          AgentHandle
 	agentPID       int
@@ -326,6 +332,7 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		generation:   c.Generation,
 		bundleName:   c.BundleName,
 		bundleDigest: c.BundleDigest,
+		repos:        c.Repos,
 	}
 	j.sessionID = fmt.Sprintf("sess_%s_%d", wi, c.Generation)
 	j.transcript = filepath.Join(j.capsuleDir, capsule.DirSession, "session-"+c.AttemptID+".jsonl")
@@ -333,7 +340,24 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 	if err := r.prepareCapsule(j); err != nil {
 		return err
 	}
-	if err := r.materialize(j); err != nil {
+	if err := r.materialize(ctx, j); err != nil {
+		// A typed task-repo clone failure (DAEMON-507) closes the fresh
+		// attempt as BLOCKED on the spot: the ticket needs human
+		// attention (bad remote, missing credential), never an orphaned
+		// running generation and never a daemon crash. A best-effort
+		// close failure is loud but leaves the typed error as the answer
+		// — the generation fence still revokes the credential.
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.Code == api.ErrDaemonSpawnFail {
+			if eerr := r.hub.EndGeneration(wi, aihubclient.EndGenerationRequest{
+				AttemptID:  j.attempt,
+				Generation: j.generation,
+				Status:     api.StatusBlocked,
+				Note:       ae.Detail,
+			}); eerr != nil {
+				fmt.Fprintf(os.Stderr, "runtime: %s: end-generation(blocked) after clone failure failed: %v\n", wi, eerr)
+			}
+		}
 		return err
 	}
 	if _, err := r.spawnAgent(ctx, j, false); err != nil {
@@ -428,8 +452,10 @@ func quarantineCapsule(capsuleDir string) error {
 // session.json, .gitignore and the runtime-state/ tree. The bundle is
 // copied read-only from the daemon checkout when configured; a pinned
 // bundle digest is verified against the copied tree (CAP-405 on
-// divergence, name-derived stand-ins excepted).
-func (r *Runtime) materialize(j *job) error {
+// divergence, name-derived stand-ins excepted). The claim's task-repo
+// inventory is cloned into repos/<name> BEFORE the capsule identity is
+// written, so the recorded baselines are the true claim-time SHAs.
+func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	for _, d := range []string{
 		capsule.DirAgents, capsule.DirArtifacts, capsule.DirLogs, capsule.DirRepos,
 		capsule.DirRuntimeState, capsule.DirSession, capsule.DirWorkflows,
@@ -442,6 +468,19 @@ func (r *Runtime) materialize(j *job) error {
 	if err := os.WriteFile(filepath.Join(j.capsuleDir, ".gitignore"), []byte(capsule.GitignoreContent), 0o644); err != nil {
 		return err
 	}
+	// Task repos land before capsule.json so the identity below can
+	// record their claim-time HEAD SHAs. The clones carry their own
+	// independent .git directories and repos/ is capsule-gitignored,
+	// so the capsule's history never absorbs them.
+	repoSHAs, err := r.cloneTaskRepos(ctx, j)
+	if err != nil {
+		return err
+	}
+	// BaseCommit semantics (aligned with v0, multi-repo shape): the
+	// per-repo claim-time baselines live in the Repos map above and are
+	// authoritative; BaseCommit stays EMPTY rather than singling out one
+	// repo's SHA as "the" baseline — with several task repos there is no
+	// single main repo to pick, and any choice would silently lie.
 	idn := capsule.Identity{
 		WorkItemID:   j.wi,
 		CapsuleID:    "cap_" + j.wi,
@@ -450,7 +489,8 @@ func (r *Runtime) materialize(j *job) error {
 		AttemptID:    j.attempt,
 		BundleName:   j.bundleName,
 		BundleDigest: j.bundleDigest,
-		Repos:        map[string]string{},
+		BaseCommit:   "",
+		Repos:        repoSHAs,
 		CreatedAt:    nowStamp(),
 	}
 	blob, _ := json.MarshalIndent(idn, "", "  ")

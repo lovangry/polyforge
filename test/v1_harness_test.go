@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
@@ -120,6 +121,44 @@ type v1Install struct {
 // newV1Install boots a real aihub on a free loopback port, harvests the
 // first-boot bootstrap admin key, and creates the e2e project.
 func newV1Install(t *testing.T) *v1Install {
+	return newV1InstallRepos(t, nil)
+}
+
+// taskRemote is one local fake task-repo remote: a real git repo (one
+// commit on main) the daemon can clone over file:// — no network.
+type taskRemote struct {
+	dir  string
+	url  string
+	head string
+}
+
+func newTaskRemote(t *testing.T) taskRemote {
+	t.Helper()
+	dir := t.TempDir()
+	gitRun(t, dir, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-m", "init")
+	head := strings.TrimSpace(gitRun(t, dir, "rev-parse", "HEAD"))
+	return taskRemote{dir: dir, url: "file://" + dir, head: head}
+}
+
+// newV1InstallTaskRepo boots the standard install with the e2e project
+// configured with one local fake task-repo remote, so a scenario can
+// exercise the claim→clone lane (repos land in the capsule before the
+// agent spawns).
+func newV1InstallTaskRepo(t *testing.T) (*v1Install, taskRemote) {
+	t.Helper()
+	remote := newTaskRemote(t)
+	inst := newV1InstallRepos(t, []api.ProjectRepo{{Name: "demo-src", URL: remote.url}})
+	return inst, remote
+}
+
+// newV1InstallRepos is newV1Install with an explicit task-repo inventory
+// on the e2e project (nil = none).
+func newV1InstallRepos(t *testing.T, repos []api.ProjectRepo) *v1Install {
 	t.Helper()
 	bins := v1Bins(t)
 	inst := &v1Install{
@@ -171,7 +210,7 @@ func newV1Install(t *testing.T) *v1Install {
 	inst.adminKey = v1HarvestBootstrapKey(t, inst.aihubLog)
 	inst.client = aihubclient.New(inst.url, inst.adminKey)
 	if _, err := inst.client.CreateProject(aihubclient.ProjectCreateRequest{
-		Name: v1Project, Description: "v1 e2e scratch project",
+		Name: v1Project, Description: "v1 e2e scratch project", Repos: repos,
 	}); err != nil {
 		t.Fatalf("create project: %v", err)
 	}

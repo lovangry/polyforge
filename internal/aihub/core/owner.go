@@ -265,8 +265,9 @@ func (m *OwnerManager) claimNew(wiID string, req ClaimRequest, callerIdentity st
 	// registration ticket must not open an execution generation (takeover
 	// excepted — it seizes an existing one).
 	var bundleName, bundleDigest sql.NullString
-	if err := tx.QueryRow(`SELECT bundle_name, bundle_digest FROM work_items WHERE id=?1`, wiID).
-		Scan(&bundleName, &bundleDigest); err != nil {
+	var projectID string
+	if err := tx.QueryRow(`SELECT bundle_name, bundle_digest, project_id FROM work_items WHERE id=?1`, wiID).
+		Scan(&bundleName, &bundleDigest, &projectID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
 		}
@@ -275,6 +276,28 @@ func (m *OwnerManager) claimNew(wiID string, req ClaimRequest, callerIdentity st
 	if req.Intent != IntentTakeover && !bundleName.Valid {
 		return nil, Fail(api.ErrCoreConflict, "NOT_CLAIMABLE",
 			"registration-only work item (no workflow bundle) is not claimable")
+	}
+
+	// The project's task-repo inventory rides the claim response too (v0
+	// claim semantics): the runtime clones each repo into the capsule's
+	// repos/<name> before the agent starts and records the claim-time
+	// HEAD SHA as the baseline. Read on the same transaction snapshot the
+	// generation is minted on, so the inventory cannot shift mid-claim.
+	var reposJSON string
+	if err := tx.QueryRow(`SELECT repos FROM projects WHERE id=?1`, projectID).Scan(&reposJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, Fail(api.ErrCoreNotFound, "", "project %s of work item %s not found", projectID, wiID)
+		}
+		return nil, err
+	}
+	repos := []api.ProjectRepo{}
+	if reposJSON != "" {
+		if err := json.Unmarshal([]byte(reposJSON), &repos); err != nil {
+			return nil, err
+		}
+		if repos == nil {
+			repos = []api.ProjectRepo{}
+		}
 	}
 
 	now := Now()
@@ -350,6 +373,7 @@ func (m *OwnerManager) claimNew(wiID string, req ClaimRequest, callerIdentity st
 			ClaimedAt:    now,
 			Token:        secret,
 			TokenExpires: expires,
+			Repos:        repos,
 		},
 		Credential: api.PushCredential{
 			AttemptID: attemptID,
