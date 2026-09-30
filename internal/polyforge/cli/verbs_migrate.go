@@ -92,7 +92,8 @@ var cmdMigrateMemories = &Command{
 var cmdMigrateWorkItems = &Command{
 	Name:    "migrate-work-items",
 	Summary: "Terminal work-item record import (JSONL → target aihub, admin)",
-	Usage: "pf migrate-work-items --from FILE --project P [--reporter U] [--user-map FILE] [--dry-run]\n" +
+	Usage: "pf migrate-work-items --from FILE --project P [--reporter U] [--user-map FILE]\n" +
+		"                        [--accept-changed] [--dry-run]\n" +
 		"\n" +
 		"One JSON object per line: id, seq, project (old, informational), goal,\n" +
 		"content, status (wrapped|failed|canceled|cancelled|blocked), priority,\n" +
@@ -101,12 +102,17 @@ var cmdMigrateWorkItems = &Command{
 		"updated_at, closed_at. Terminal records only: execution history never\n" +
 		"migrates (no events, no generations, no capsules). Ids and seqs are kept\n" +
 		"verbatim (the old slug number survives as targetproj#seq). Idempotent:\n" +
-		"a same-id re-run skips and re-verifies each row.",
+		"a same-id re-run skips and re-verifies each row. A same-id record whose\n" +
+		"fields diverge hard-fails with a per-field diff (a changed record is a\n" +
+		"cutover conflict that needs eyes, never silently applied or skipped);\n" +
+		"--accept-changed applies the new version in place (overwrite, admin\n" +
+		"migration face only) and counts the row as changed in the report.",
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("from", "", "work-items JSONL export (required)")
 		fs.String("project", "", "TARGET project name or id (required; must exist)")
 		fs.String("reporter", "", "map every old reporter to this target user id")
 		fs.String("user-map", "", "JSON file {\"old reporter id\": \"new user id\"}")
+		fs.Bool("accept-changed", false, "apply changed same-id records in place (new version wins; counted as changed)")
 		fs.Bool("dry-run", false, "parse, resolve and report; import nothing")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -118,11 +124,12 @@ var cmdMigrateWorkItems = &Command{
 			return fmt.Errorf("--user-map: %v", err)
 		}
 		opts := MigWorkItemsOptions{
-			FromJSONL: stringFlag(fs, "from"),
-			Project:   stringFlag(fs, "project"),
-			Reporter:  stringFlag(fs, "reporter"),
-			UserMap:   userMap,
-			DryRun:    boolFlag(fs, "dry-run"),
+			FromJSONL:     stringFlag(fs, "from"),
+			Project:       stringFlag(fs, "project"),
+			Reporter:      stringFlag(fs, "reporter"),
+			UserMap:       userMap,
+			AcceptChanged: boolFlag(fs, "accept-changed"),
+			DryRun:        boolFlag(fs, "dry-run"),
 		}
 		opts.AihubURL = ctx.Cfg.Server
 		opts.APIKey = ctx.Cfg.APIKey
