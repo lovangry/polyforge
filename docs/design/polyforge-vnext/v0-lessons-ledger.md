@@ -89,11 +89,13 @@ X4  The memory ledger exists precisely to prevent re-hits — every
     implementation/review lane MUST recall it first (v1 lanes did not;
     that is why F1/F3/F4 happened).
 
-## v1 pilot findings (F1–F7) — the lessons the ledger itself predicted
+## v1 pilot findings (F1–F7, F11–F14) — the lessons the ledger itself predicted
 
 X4 said every implementation/review lane MUST recall this ledger first; the
 v1 pilot lanes did not, and every one of these findings is a re-hit of an
-entry above. Recorded here so no future lane re-derives them.
+entry above. Recorded here so no future lane re-derives them. F8–F10 are
+spent in git history and reserved for a future backfill — the numbering gap
+is deliberate, not an error.
 
 F1  Goal never reached the agent. v1 deleted v0's daemon proxy_call
     (read_workflow_ref) without enumerating the business it carried (C2):
@@ -153,3 +155,37 @@ F7  步定义物化错位与完成标记缺失（03-execution-capsule §4.5 re-h
     `sync/materialized.json`（RelMaterializeMarker）+ trust gate
     （snapshot 仅在 marker 完整且匹配 pinned bundle 身份时可信）。已修，
     main c740fb0（分支 v1-f6f7，commit e0db578）。
+
+F11 e2e daemon 拆除泄漏 fakepi 孤儿（D1/X3 re-hit）：e2e 各拆除路径
+    （graceful stop、crash、SIGKILL fallback 等）拆除 daemon 后，带场景
+    `PF_WI_ID` 标记的 fakepi 孤儿进程仍可存活。修复：拆除后扫描 /proc 中带
+    该场景 PF_WI_ID 标记的存活进程，SIGKILL 全部幸存者，并以有界轮询断言
+    零残留（作为场景 FIRST cleanup 注册，LIFO 保证在所有拆除 cleanup 之后
+    运行）。状态注记：已修（main d586396，in HEAD feaf127；测试改动
+    test/v1_harness_test.go +70、s12/s13 各 +3）。
+
+F12 停机 push 竞态（S1/#46 re-hit）：daemon 停机时 flush(shutdown) push
+    （observe/monitor.go flushShutdown，~line 1333）与异步 archival push
+    （schedulePush，~line 901）/ 进程退出竞速，远端可落后于本地 sealed
+    head——v0 #46「push 必须终于 sealed HEAD，绝非 stale/base sha」
+    教训类的 v1 再命中。状态注记：已补偿（由 #46 修复的校验面兜底：
+    ship.go ls-remote 校验 remote==sealed commit、绝不 force-push 已移动
+    的分支（~lines 160–200）；重启和解补完 seal——测试 fa9ed17「s17
+    SIGKILL inside the SEALING window」）。
+
+F13 maxTokens 双事故（P6 re-hit ×2）：操作员全局模型配置两起分别设
+    maxTokens 超过/等于模型 contextWindow（163840 > 131072、
+    131072 = 131072），继承 provider 均以 400 崩——settings 污染两连击。
+    纪律：操作员模型配置须 maxTokens << contextWindow。状态注记：已补偿
+    （spawn.go 刻意不设 max_tokens——被 pin 模型自身默认即保守选择，自造
+    上限恰是 v0 settings 污染失败形状的另一面（注释块 ~line 234）；F4 的
+    argv 模型 pin 移除 defaultModel 继承向量；残余 per-model 操作员覆盖
+    为文档化故意接受）。
+
+F14 boot.sh 全栈重启误伤：2026-09-30 操作员想重启单个 daemon，跑了
+    `/root/polyforge-pilot-v1/boot.sh`（全栈幂等重启器：kill 旧 aihub +
+    双 daemon 后三者全部重拉），整个 v1 pilot 栈被一并停掉。
+    状态注记：已补偿（单点重启脚本已建：`boot-b-only.sh`，2026-09-30
+    11:46 创建——只 kill daemon-b、轮询 ≤120s 等 `b/daemon.sock`
+    释放、setsid 单独重启 daemon-b；仓库内已录于
+    `docs/pilot/ops-scripts.md` 运维注意事项，lines 75–77）。
