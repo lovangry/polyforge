@@ -34,6 +34,31 @@ pf-2  queued   normal    -         a goal that is definitely longer than sixty c
 `)
 }
 
+func TestGoldenReadyWITable(t *testing.T) {
+	bundle := "bundle-x"
+	items := []api.WorkItem{
+		{Slug: "pf-1", Status: "queued", Priority: "normal", BundleName: &bundle, Goal: "fix the thing"},
+	}
+	unclassified := []api.WorkItem{
+		{Slug: "pf-2", Status: "queued", Priority: "normal", Goal: "another goal"},
+	}
+	var b bytes.Buffer
+	renderReadyWITable(&b, items, unclassified)
+	golden(t, "ReadyWITable", b.String(),
+		`SLUG  STATUS  PRIORITY  BUNDLE    GOAL           SEGMENT
+----  ------  --------  --------  -------------  ------------
+pf-1  queued  normal    bundle-x  fix the thing  items
+pf-2  queued  normal    -         another goal   unclassified
+`)
+
+	b.Reset()
+	renderReadyWITable(&b, nil, nil)
+	golden(t, "ReadyWITableEmpty", b.String(),
+		`SLUG  STATUS  PRIORITY  BUNDLE  GOAL  SEGMENT
+----  ------  --------  ------  ----  -------
+`)
+}
+
 func TestGoldenObserve(t *testing.T) {
 	jv := protocol.JobView{
 		WorkItem:    "wi_abc",
