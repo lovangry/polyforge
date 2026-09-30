@@ -132,7 +132,7 @@ func RunMigrateWorkItems(opts MigWorkItemsOptions, client *aihubclient.Client) (
 		}
 		res, ierr := client.ImportWorkItem(req)
 		if ierr != nil {
-			return nil, fmt.Errorf("import %s: %v", r.ID, ierr)
+			return nil, fmt.Errorf("import %s: %w", r.ID, ierr)
 		}
 		switch res.Outcome {
 		case string(coreImportDone):
@@ -143,7 +143,7 @@ func RunMigrateWorkItems(opts MigWorkItemsOptions, client *aihubclient.Client) (
 			// record before counting the skip.
 			existing, gerr := client.GetWorkItem(r.ID)
 			if gerr != nil {
-				return nil, fmt.Errorf("skip-check %s: %v", r.ID, gerr)
+				return nil, fmt.Errorf("skip-check %s: %w", r.ID, gerr)
 			}
 			if werr := migCompareWIRecord(existing, &r, status); werr != nil {
 				return nil, fmt.Errorf("idempotency check on %s: %v", r.ID, werr)

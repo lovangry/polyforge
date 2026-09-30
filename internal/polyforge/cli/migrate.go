@@ -40,12 +40,28 @@ type StepResult struct {
 // ResolveError is a fatal resolution/config failure (map naming a
 // nonexistent id, unreachable server) — distinct from verification
 // failures, which only surface after the import landed.
-type ResolveError struct{ msg string }
+type ResolveError struct {
+	msg string
+	// err is the wrapped wire cause, when the failure came from the
+	// server: the typed error class (4xx/5xx) must survive the wrap so
+	// Run's exit code keeps its contract (4xx → 1, 5xx → 2, #40).
+	err error
+}
 
 func (e *ResolveError) Error() string { return e.msg }
 
+// Unwrap preserves the typed error chain for exitCode classification.
+func (e *ResolveError) Unwrap() error { return e.err }
+
 func resolveErrf(format string, args ...any) error {
 	return &ResolveError{msg: fmt.Sprintf(format, args...)}
+}
+
+// resolveWrapErrf is resolveErrf for a failure whose CAUSE is a wire
+// error: the cause stays wrapped (Unwrap) so a typed 5xx still maps to
+// exit 2 instead of degrading to the generic client-class 1.
+func resolveWrapErrf(cause error, format string, args ...any) error {
+	return &ResolveError{msg: fmt.Sprintf(format, args...), err: cause}
 }
 
 // verifyError aggregates the failed verification steps.
