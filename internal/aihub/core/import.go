@@ -47,19 +47,19 @@ var importableStatuses = map[string]bool{
 
 // ImportRequest is the POST /api/v1/admin/import-work-item body.
 type ImportRequest struct {
-	Project   string `json:"project"` // target project name or id
-	ID        string `json:"id"`      // old-world id, kept verbatim
-	Seq       *int64 `json:"seq"`     // old display seq; nil = auto
-	Goal      string `json:"goal"`
-	Content   *string `json:"content"`
-	Status    string `json:"status"`
-	Priority  string `json:"priority"`
-	Milestone *string `json:"milestone"`
-	Labels    []string `json:"labels"`
+	Project   string         `json:"project"` // target project name or id
+	ID        string         `json:"id"`      // old-world id, kept verbatim
+	Seq       *int64         `json:"seq"`     // old display seq; nil = auto
+	Goal      string         `json:"goal"`
+	Content   *string        `json:"content"`
+	Status    string         `json:"status"`
+	Priority  string         `json:"priority"`
+	Milestone *string        `json:"milestone"`
+	Labels    []string       `json:"labels"`
 	Attrs     map[string]any `json:"attrs"`
-	Reporter  string `json:"reporter"` // TARGET user id (the tool resolves old→new)
-	Assignee  *string `json:"assignee"`
-	WaitingOn *string `json:"waiting_on"`
+	Reporter  string         `json:"reporter"` // TARGET user id (the tool resolves old→new)
+	Assignee  *string        `json:"assignee"`
+	WaitingOn *string        `json:"waiting_on"`
 	// Bundle reference triple, carried like Create does (02 §4.4/§4.5).
 	BundleName     *string         `json:"bundle_name"`
 	BundleDigest   *string         `json:"bundle_digest"`
@@ -67,14 +67,21 @@ type ImportRequest struct {
 	CreatedAt      string          `json:"created_at"` // RFC3339, old world's
 	UpdatedAt      string          `json:"updated_at"`
 	ClosedAt       *string         `json:"closed_at"`
+	// Overwrite: a same-id re-import rewrites the record in place (new
+	// version wins) and answers outcome=overwritten. Without it the
+	// same-id answer stays skipped-existing. This is the admin
+	// migration face only — the business face's terminal-record
+	// immutability (PATCH refusals) is untouched.
+	Overwrite bool `json:"overwrite"`
 }
 
 // ImportOutcome says what the import did.
 type ImportOutcome string
 
 const (
-	ImportDone    ImportOutcome = "imported"
-	ImportSkipped ImportOutcome = "skipped-existing"
+	ImportDone        ImportOutcome = "imported"
+	ImportSkipped     ImportOutcome = "skipped-existing"
+	ImportOverwritten ImportOutcome = "overwritten"
 )
 
 // ImportResult is the import answer.
@@ -104,9 +111,11 @@ func parseImportTimestamp(s, field string) error {
 	return nil
 }
 
-// Import inserts one migration record. See the file comment for the face
-// constraints. Same-id re-import skips (the caller counts it); seq
-// collisions are refused, never silently re-assigned.
+// Import inserts one migration record — or, with req.Overwrite, rewrites
+// a same-id record in place (new version wins). See the file comment for
+// the face constraints. A same-id re-import without Overwrite skips (the
+// caller counts it); seq collisions are refused, never silently
+// re-assigned.
 func (m *WIManager) Import(req ImportRequest) (*ImportResult, error) {
 	req.Goal = strings.TrimSpace(req.Goal)
 	if !wiIDPattern.MatchString(req.ID) {
@@ -188,11 +197,15 @@ func (m *WIManager) Import(req ImportRequest) (*ImportResult, error) {
 		return nil, err
 	}
 	// Idempotency: an existing id skips; the caller decides whether the
-	// existing row matches the record (the tool samples it).
+	// existing row matches the record (the tool samples it). With
+	// Overwrite the same-id record is rewritten in place instead.
 	var existing string
 	err = tx.QueryRow(`SELECT id FROM work_items WHERE id=?1`, req.ID).Scan(&existing)
 	if err == nil {
-		return &ImportResult{Outcome: ImportSkipped}, &errImportAlreadyExists{id: req.ID}
+		if !req.Overwrite {
+			return &ImportResult{Outcome: ImportSkipped}, &errImportAlreadyExists{id: req.ID}
+		}
+		return m.importOverwriteTx(tx, req, projectID)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
@@ -221,15 +234,7 @@ func (m *WIManager) Import(req ImportRequest) (*ImportResult, error) {
 		seq = maxSeq.Int64 + 1
 	}
 	// Bundle reference triple, mirroring Create's stand-in rule.
-	var bundleName, bundleDigest any
-	if req.BundleName != nil && *req.BundleName != "" {
-		bundleName = *req.BundleName
-		if req.BundleDigest != nil && *req.BundleDigest != "" {
-			bundleDigest = *req.BundleDigest
-		} else {
-			bundleDigest = Sha256Hex("bundle-name:" + *req.BundleName)
-		}
-	}
+	bundleName, bundleDigest := importBundleRef(req)
 	var budget any
 	if len(req.BudgetBaseline) > 0 {
 		budget = string(req.BudgetBaseline)
@@ -250,7 +255,7 @@ func (m *WIManager) Import(req ImportRequest) (*ImportResult, error) {
 	// NOT migrated history — the old world's wi_events stay behind.
 	if err := appendEventTx(tx, req.ID, Now(), "", "work_item_imported", map[string]any{
 		"imported_status": req.Status,
-		"imported_seq":     seq,
+		"imported_seq":    seq,
 	}); err != nil {
 		return nil, err
 	}
@@ -262,4 +267,102 @@ func (m *WIManager) Import(req ImportRequest) (*ImportResult, error) {
 		return nil, err
 	}
 	return &ImportResult{Outcome: ImportDone, WorkItem: wi}, nil
+}
+
+// importBundleRef resolves the bundle reference triple, mirroring
+// Create's stand-in rule (02 §4.4/§4.5): a non-empty bundle_name makes an
+// execution ticket; a missing digest gets the deterministic stand-in so
+// the reference triple is never half-empty.
+func importBundleRef(req ImportRequest) (bundleName, bundleDigest any) {
+	if req.BundleName != nil && *req.BundleName != "" {
+		bundleName = *req.BundleName
+		if req.BundleDigest != nil && *req.BundleDigest != "" {
+			bundleDigest = *req.BundleDigest
+		} else {
+			bundleDigest = Sha256Hex("bundle-name:" + *req.BundleName)
+		}
+	}
+	return bundleName, bundleDigest
+}
+
+// importOverwriteTx rewrites an existing same-id record in place per the
+// new record (new version wins — the Overwrite path of the admin
+// migration face). All record fields are rewritten; seq is taken from
+// the request when given (a collision with a DIFFERENT row is refused,
+// never silently bumped) and kept when absent. One audit event per row
+// records the old/new summary.
+func (m *WIManager) importOverwriteTx(tx *sql.Tx, req ImportRequest, projectID string) (*ImportResult, error) {
+	// The old row's summary, for the audit event.
+	var old struct {
+		Status   sql.NullString
+		Goal     sql.NullString
+		Priority sql.NullString
+		ClosedAt sql.NullString
+	}
+	if err := tx.QueryRow(`SELECT status, goal, priority, closed_at FROM work_items WHERE id=?1`,
+		req.ID).Scan(&old.Status, &old.Goal, &old.Priority, &old.ClosedAt); err != nil {
+		return nil, err
+	}
+	var seqVal any
+	if req.Seq != nil {
+		if *req.Seq <= 0 {
+			return nil, Fail(api.ErrCoreBadInput, "IMPORT_BAD_SEQ", "seq must be > 0")
+		}
+		var taken int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM work_items WHERE seq=?1 AND id<>?2`,
+			*req.Seq, req.ID).Scan(&taken); err != nil {
+			return nil, err
+		}
+		if taken > 0 {
+			return nil, Fail(api.ErrCoreConflict, "IMPORT_SEQ_TAKEN",
+				"seq %d already exists", *req.Seq)
+		}
+		seqVal = *req.Seq
+	}
+	bundleName, bundleDigest := importBundleRef(req)
+	var budget any
+	if len(req.BudgetBaseline) > 0 {
+		budget = string(req.BudgetBaseline)
+	}
+	labels, _ := json.Marshal(req.Labels)
+	attrs, _ := json.Marshal(req.Attrs)
+	if _, err := tx.Exec(`UPDATE work_items SET seq=COALESCE(?2,seq), project_id=?3, goal=?4,
+		content=?5, status=?6, priority=?7, milestone=?8, labels=?9, attrs=?10, reporter=?11,
+		assignee=?12, waiting_on=?13, bundle_name=?14, bundle_digest=?15,
+		workflow_budget_baseline=?16, created_at=?17, updated_at=?18, closed_at=?19
+		WHERE id=?1`,
+		req.ID, seqVal, projectID, req.Goal, nullableString(req.Content),
+		req.Status, req.Priority, nullableString(req.Milestone), string(labels), string(attrs),
+		req.Reporter, nullableString(req.Assignee), nullableString(req.WaitingOn),
+		bundleName, bundleDigest, budget, req.CreatedAt, req.UpdatedAt, nullableString(req.ClosedAt)); err != nil {
+		return nil, err
+	}
+	newClosed := ""
+	if req.ClosedAt != nil {
+		newClosed = *req.ClosedAt
+	}
+	if err := appendEventTx(tx, req.ID, Now(), "", "work_item_import_overwritten", map[string]any{
+		"old": map[string]any{
+			"status":    old.Status.String,
+			"goal":      old.Goal.String,
+			"priority":  old.Priority.String,
+			"closed_at": old.ClosedAt.String,
+		},
+		"new": map[string]any{
+			"status":    req.Status,
+			"goal":      req.Goal,
+			"priority":  req.Priority,
+			"closed_at": newClosed,
+		},
+	}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	wi, err := m.Get(req.ID, GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return &ImportResult{Outcome: ImportOverwritten, WorkItem: wi}, nil
 }

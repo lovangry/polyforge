@@ -1137,7 +1137,8 @@ func (s *Server) hBackup(w http.ResponseWriter, r *http.Request, idn *identity) 
 // hImportWorkItem is the migration-only record import (admin face; see
 // core/import.go for the face constraints). A same-id re-import answers
 // 200 with outcome=skipped-existing — idempotent re-runs count skips, they
-// do not error.
+// do not error. With overwrite:true a same-id record is rewritten in
+// place and the answer carries outcome=overwritten.
 func (s *Server) hImportWorkItem(w http.ResponseWriter, r *http.Request, idn *identity) {
 	var req core.ImportRequest
 	if err := decodeBody(r, &req); err != nil {
@@ -1151,6 +1152,10 @@ func (s *Server) hImportWorkItem(w http.ResponseWriter, r *http.Request, idn *id
 			return
 		}
 		writeErr(w, err)
+		return
+	}
+	if res.Outcome == core.ImportOverwritten {
+		writeJSON(w, http.StatusOK, res) // a rewrite, not a creation
 		return
 	}
 	writeJSON(w, http.StatusCreated, res)
