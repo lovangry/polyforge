@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -55,6 +56,16 @@ func (r *Runtime) Restart(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "runtime: %s: aihub lookup failed, record kept: %v\n", rec.WorkItemID, err)
 			continue
 		}
+		// Pre-F2 residue: a record keyed by a slug ("<project>#<seq>") or
+		// any other non-canonical id form predates the canonical-id
+		// ruling. Migrate it in place — re-key by the canonical id, fix
+		// the push remote (the aihub bare repo is canonical-named; the
+		// slug-built remote URL was a 404) and rename the on-disk capsule
+		// and git-dir when both exist — so the reconciliation below and
+		// every later push run on the canonical id.
+		if wi.ID != "" && wi.ID != rec.WorkItemID {
+			rec = r.migrateRecord(rec, wi.ID)
+		}
 		switch wi.Status {
 		case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
 			r.restartDrop(rec)
@@ -71,6 +82,79 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		}
 	}
 	return r.persist()
+}
+
+// migrateRecord re-keys one pre-F2 record under its canonical work-item id
+// (in-place restart migration, §十一 + F2):
+//
+//   - the push remote is ALWAYS re-derived from the canonical id — the
+//     aihub bare repo is canonical-named and a slug-built remote URL was
+//     a 404 (the "#" fragment separator), so this one fix is what makes
+//     a resumed seal push reach the server at all;
+//   - the on-disk capsule and external git-dir are renamed onto their
+//     canonical-derived paths when the old ones exist and the new ones
+//     do not (best-effort: a rename failure keeps the old paths, which
+//     stay valid — the remote URL and the local git-dir name are
+//     independent);
+//   - the capsule's .git pointer is rewritten when the git-dir moved;
+//   - the record's session/transcript paths are re-derived from the
+//     (possibly renamed) capsule root;
+//   - the job map entry is re-keyed and the old spelling registered as
+//     an alias, so route-level lookups by the operator's spelling still
+//     resolve.
+//
+// The returned record is the migrated one; the caller's switch runs on it.
+func (r *Runtime) migrateRecord(rec *jobRecord, canonical string) *jobRecord {
+	old := rec.WorkItemID
+	out := *rec
+	capDir, gitDir := rec.CapsuleDir, rec.GitDir
+	n := func(err error, what string) {
+		fmt.Fprintf(os.Stderr, "runtime: %s: %s migration kept the old path: %v\n", old, what, err)
+	}
+	if rec.CapsuleDir != "" {
+		newCapsule := r.capsuleDir(canonical)
+		if dirExists(rec.CapsuleDir) && !dirExists(newCapsule) {
+			if err := os.Rename(rec.CapsuleDir, newCapsule); err != nil {
+				n(err, "capsule dir")
+			} else {
+				capDir = newCapsule
+			}
+		}
+	}
+	if rec.GitDir != "" {
+		newGit := r.gitDirFor(canonical)
+		if dirExists(rec.GitDir) && !dirExists(newGit) {
+			if err := os.Rename(rec.GitDir, newGit); err != nil {
+				n(err, "git dir")
+			} else {
+				gitDir = newGit
+				// the capsule's .git pointer names the git-dir absolutely;
+				// keep it honest after the move (gitops works from GIT_DIR env
+				// anyway — the pointer is for humans and tools in the scene).
+				if capDir != rec.CapsuleDir || dirExists(capDir) {
+					_ = os.WriteFile(filepath.Join(capDir, ".git"),
+						[]byte("gitdir: "+gitDir+"\n"), 0o644)
+				}
+			}
+		}
+	}
+	out.WorkItemID = canonical
+	out.CapsuleDir = capDir
+	out.GitDir = gitDir
+	out.RemoteURL = r.remoteURLFor(canonical)
+	out.Username = canonical
+	out.SessionID = fmt.Sprintf("sess_%s_%d", canonical, rec.Generation)
+	if capDir != "" && rec.AttemptID != "" {
+		out.Transcript = sessionPathFor(capDir, rec.AttemptID)
+	}
+	fmt.Fprintf(os.Stderr, "runtime: migrated pre-canonical record %q → %q (capsule %s, remote %s)\n",
+		old, canonical, out.CapsuleDir, out.RemoteURL)
+	r.mu.Lock()
+	delete(r.jobs, old)
+	r.jobs[canonical] = jobFromRecord(&out)
+	r.mu.Unlock()
+	r.NoteAlias(old, canonical)
+	return &out
 }
 
 // restartDrop handles aihub's terminal verdicts: no revival. A local agent

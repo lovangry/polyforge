@@ -444,3 +444,89 @@ func TestOldCredentialRejectedAfterTakeover(t *testing.T) {
 		t.Fatalf("clone with the revoked credential accepted: %s", out)
 	}
 }
+
+// TestSlugClaimedTicketPushesToCanonicalBareRepo (pilot F2): a ticket may
+// be CLAIMED by its "<project>#<seq>" slug — the id-or-slug face accepts
+// it — but the git surface is keyed by the CANONICAL id alone: the bare
+// repo is <data>/git/<wi_id>.git and the push remote must be built from
+// the canonical id. A slug-built remote is not merely wrong, it is
+// silently truncated: "#" is the URL fragment separator, so
+// .../git/alpha#9.git asks the proxy for .../git/alpha and the push
+// 404s. This pins both sides: the canonical URL pushes, the slug URL
+// does not.
+func TestSlugClaimedTicketPushesToCanonicalBareRepo(t *testing.T) {
+	e := newGitEnv(t)
+	// Create the ticket and resolve its slug ("<project>#<seq>").
+	wi, err := e.wis.Create(core.CreateRequest{
+		Project: "alpha", Goal: "slug push test", Reporter: e.userID,
+		BundleName: &bundleNameTest,
+	})
+	if err != nil {
+		t.Fatalf("create wi: %v", err)
+	}
+	if wi.Slug == "" || !strings.Contains(wi.Slug, "#") {
+		t.Fatalf("expected a # slug, got %q", wi.Slug)
+	}
+	// The id-or-slug resolution the API endpoint performs: the slug maps
+	// to the canonical id (the core claim face is id-keyed; the HTTP
+	// layer resolves before it).
+	resolved, err := e.wis.Resolve(wi.Slug)
+	if err != nil {
+		t.Fatalf("resolve slug %s: %v", wi.Slug, err)
+	}
+	if resolved != wi.ID {
+		t.Fatalf("slug %s resolved to %q, want canonical %q", wi.Slug, resolved, wi.ID)
+	}
+	res, err := e.owners.Claim(resolved, core.ClaimRequest{Intent: core.IntentClaim, IdempotencyKey: "idem-" + wi.ID}, e.userID)
+	if err != nil {
+		t.Fatalf("claim %s: %v", resolved, err)
+	}
+	if res.Claim.WorkItemID != wi.ID {
+		t.Fatalf("claim answered work item %q, want canonical %q", res.Claim.WorkItemID, wi.ID)
+	}
+	if err := e.mgr.EnsureBare(wi.ID); err != nil {
+		t.Fatalf("ensure bare: %v", err)
+	}
+
+	// The remote built from the CANONICAL id matches the bare repo and
+	// the push lands.
+	cred := e.credURL(wi.ID, res.Credential.Secret)
+	if !strings.HasSuffix(cred, "/git/"+wi.ID+".git") {
+		t.Fatalf("canonical remote URL %q must name the bare repo /git/%s.git", cred, wi.ID)
+	}
+	wt := newWorktree(t)
+	commitSeq(t, wt, "a.txt", "one\n", 1)
+	if out, perr := pushWithAttempt(t, wt, cred, res.Claim.AttemptID); perr != nil {
+		t.Fatalf("push to the canonical remote failed: %v (%s)", perr, out)
+	}
+	head := strings.TrimSpace(mustGit(t, wt, "rev-parse", "HEAD"))
+	remoteHead := strings.TrimSpace(firstFieldOf(mustGit(t, e.mgr.RepoDir(wi.ID), "rev-parse", "refs/heads/main")))
+	if head != remoteHead {
+		t.Fatalf("canonical push did not land: local %s, remote %s", head, remoteHead)
+	}
+
+	// The remote built from the SLUG (the pilot's failure shape) can never
+	// reach the bare repo: "#" cuts the URL at the fragment.
+	slugURL := e.ts.URL + "/git/" + wi.Slug + ".git"
+	commitSeq(t, wt, "b.txt", "two\n", 2)
+	out, perr := pushWithAttempt(t, wt, slugURL, res.Claim.AttemptID)
+	if perr == nil {
+		t.Fatalf("push to the slug-built remote %q must fail", slugURL)
+	}
+	if !strings.Contains(out, "not found") && !strings.Contains(out, "404") && !strings.Contains(out, "does not appear to be a git") {
+		t.Logf("slug push failure detail: %s", out)
+	}
+	// and it moved nothing: the remote tip is still the first commit.
+	remoteHead2 := strings.TrimSpace(firstFieldOf(mustGit(t, e.mgr.RepoDir(wi.ID), "rev-parse", "refs/heads/main")))
+	if remoteHead2 != remoteHead {
+		t.Fatalf("the slug push moved the bare repo tip: %s -> %s", remoteHead, remoteHead2)
+	}
+}
+
+func firstFieldOf(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, " \t"); i >= 0 {
+		return s[:i]
+	}
+	return s
+}

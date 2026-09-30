@@ -19,16 +19,17 @@ import "encoding/json"
 
 // Capsule directory layout (relative to capsule root).
 const (
-	DirAgents        = "agents"          // materialized step-agent definitions
-	DirArtifacts     = "artifacts"       // step outputs; release trees under artifacts/release-*/
-	DirLogs          = "logs"            // daemons logs, step journals
-	DirRepos         = "repos"           // task repo checkouts (own git histories)
-	DirRuntimeState  = "runtime-state"   // execution.json, journal, spawn.log
-	DirSession       = "session"         // harness transcripts synced at boundaries
-	DirWorkflows     = "workflows"       // materialized workflow bundle
-	CapsuleJSON      = "capsule.json"    // capsule identity
-	SessionJSON      = "session.json"    // per-attempt session/harness state
-	ExecutionJSON    = "runtime-state/execution.json"
+	DirAgents       = "agents"        // materialized step-agent definitions
+	DirArtifacts    = "artifacts"     // step outputs; release trees under artifacts/release-*/
+	DirLogs         = "logs"          // daemons logs, step journals
+	DirRepos        = "repos"         // task repo checkouts (own git histories)
+	DirRuntimeState = "runtime-state" // execution.json, journal, spawn.log
+	DirSession      = "session"       // harness transcripts synced at boundaries
+	DirWorkflows    = "workflows"     // materialized workflow bundle
+	CapsuleJSON     = "capsule.json"  // capsule identity
+	SessionJSON     = "session.json"  // per-attempt session/harness state
+	WorkItemJSON    = "runtime-state/work-item.json"
+	ExecutionJSON   = "runtime-state/execution.json"
 )
 
 // GitignoreContent is the .gitignore written at capsule init (ruling C1).
@@ -37,25 +38,48 @@ const GitignoreContent = "/repos/\n/artifacts/release-*/\n"
 // Identity is capsule.json (03 §2.2). The declared BaseCommit pins the task
 // repos; CapsuleRepo is the bare repo this worktree pushes to.
 type Identity struct {
-	WorkItemID  string            `json:"work_item_id"`
-	CapsuleID   string            `json:"capsule_id"`
-	Project     string            `json:"project"`
-	Generation  int64             `json:"generation"`
-	AttemptID   string            `json:"attempt_id"`
-	BundleName  string            `json:"bundle_name"`
-	BundleDigest string           `json:"bundle_digest"`
-	BaseCommit  string            `json:"base_commit"`  // task repo baseline each step starts from
-	Repos       map[string]string `json:"repos"`       // repo name -> checked-out SHA at claim
-	CreatedAt   string            `json:"created_at"`
+	WorkItemID   string            `json:"work_item_id"`
+	CapsuleID    string            `json:"capsule_id"`
+	Project      string            `json:"project"`
+	Generation   int64             `json:"generation"`
+	AttemptID    string            `json:"attempt_id"`
+	BundleName   string            `json:"bundle_name"`
+	BundleDigest string            `json:"bundle_digest"`
+	BaseCommit   string            `json:"base_commit"` // task repo baseline each step starts from
+	Repos        map[string]string `json:"repos"`       // repo name -> checked-out SHA at claim
+	CreatedAt    string            `json:"created_at"`
 }
 
-// Session is session.json: per-attempt harness session bookkeeping used by
-// the recovery engine (v1-spec-full §七; discriminator = transcript exists).
+// WorkItemDoc is runtime-state/work-item.json: the daemon-materialized
+// copy of the work item's task definition (goal, content, labels,
+// priority, milestone, bundle pin and project name). v1 has NO
+// agent→server read path (ruling C3: the whole agent contact surface is
+// the capsule plus the flush control channel), so this file is the ONE
+// authoritative statement of what the WI agent is working on — the
+// claim answer is its only source, and recovery re-materializes it from
+// aihub when a legacy capsule predates it.
+type WorkItemDoc struct {
+	ID           string   `json:"id"`
+	Slug         string   `json:"slug,omitempty"`
+	Project      string   `json:"project"`
+	Goal         string   `json:"goal"`
+	Content      *string  `json:"content"`
+	Labels       []string `json:"labels"`
+	Priority     string   `json:"priority"`
+	Milestone    *string  `json:"milestone"`
+	BundleName   string   `json:"bundle_name"`
+	BundleDigest string   `json:"bundle_digest"`
+	Generation   int64    `json:"generation"`
+	UpdatedAt    string   `json:"updated_at"`
+}
+
+// Session is session.json: per-attempt harness session bookkeeping used
+// by the recovery engine (v1-spec-full §七; discriminator = transcript exists).
 type Session struct {
 	AttemptID      string `json:"attempt_id"`
 	Generation     int64  `json:"generation"`
 	Harness        string `json:"harness"`         // pi|cc
-	SessionID      string `json:"session_id"`     // harness-native session identifier
+	SessionID      string `json:"session_id"`      // harness-native session identifier
 	TranscriptPath string `json:"transcript_path"` // absolute path to the .jsonl transcript
 	UpdatedAt      string `json:"updated_at"`
 }
@@ -73,7 +97,7 @@ type Execution struct {
 	Steps          map[string]*Step `json:"steps"`
 	ReviewRounds   map[string]int64 `json:"review_rounds"`
 	RewindStats    RewindStats      `json:"rewind_stats"`
-	BudgetConsumed Budget            `json:"budget_consumed"`
+	BudgetConsumed Budget           `json:"budget_consumed"`
 	UpdatedAt      string           `json:"updated_at"`
 	Version        int64            `json:"version"`
 }
@@ -93,7 +117,7 @@ type Step struct {
 	BudgetConsumed     Budget             `json:"budget_consumed"`
 	Attempts           []Attempt          `json:"attempts"`
 	Answers            []ArchivedAnswer   `json:"answers"`
-	PendingQuestion    *PendingQuestion    `json:"pending_question,omitempty"`
+	PendingQuestion    *PendingQuestion   `json:"pending_question,omitempty"`
 	PendingRewindInput *RewindInput       `json:"pending_rewind_input,omitempty"`
 }
 
@@ -121,18 +145,18 @@ type RepoRef struct {
 }
 
 type RewindInput struct {
-	ToStep  string          `json:"to_step"`
-	Note    string          `json:"note"`
-	Refs    map[string]RepoRef `json:"refs"`
-	Reason  string          `json:"reason"`
+	ToStep string             `json:"to_step"`
+	Note   string             `json:"note"`
+	Refs   map[string]RepoRef `json:"refs"`
+	Reason string             `json:"reason"`
 }
 
 type PendingQuestion struct {
-	ID        string          `json:"id"`
-	Step      string          `json:"step"`
-	Question  string          `json:"question"`
-	Context   json.RawMessage `json:"context,omitempty"`
-	AskedAt   string          `json:"asked_at"`
+	ID       string          `json:"id"`
+	Step     string          `json:"step"`
+	Question string          `json:"question"`
+	Context  json.RawMessage `json:"context,omitempty"`
+	AskedAt  string          `json:"asked_at"`
 }
 
 type ArchivedAnswer struct {

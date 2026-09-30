@@ -85,7 +85,7 @@ func neverPushTarget(branch string) bool {
 }
 
 func (d *Daemon) shipRoute(w http.ResponseWriter, r *http.Request) {
-	wi := r.PathValue("wi")
+	wi := d.canonWI(r.PathValue("wi")) // F2: the sealed capsule is canonical-named
 	initiator := r.Header.Get("X-PF-User")
 	out, err := d.Ship(r.Context(), wi, initiator)
 	if err != nil {

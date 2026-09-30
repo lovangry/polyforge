@@ -333,6 +333,44 @@ func (o *optBool) Ptr() *bool {
 	return &v
 }
 
+// flagChanged reports whether the named flag was explicitly set on the
+// command line (PATCH semantics: absent must be distinguishable from a
+// set-to-zero-value spelling).
+func flagChanged(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+// parseRepoRefs parses the -repos spelling "name=url[,name=url...]" into
+// the wire's full-replacement inventory list. An EMPTY string answers an
+// empty non-nil list (the explicit clear); a malformed entry is an error,
+// never a silent drop.
+func parseRepoRefs(s string) ([]aihubclient.RepoRef, error) {
+	out := []aihubclient.RepoRef{}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return out, nil
+	}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		name, url, ok := strings.Cut(pair, "=")
+		name, url = strings.TrimSpace(name), strings.TrimSpace(url)
+		if !ok || name == "" || url == "" {
+			return nil, fmt.Errorf("-repos entry %q must be name=url", pair)
+		}
+		out = append(out, aihubclient.RepoRef{Name: name, URL: url})
+	}
+	return out, nil
+}
+
 // stringList collects a repeatable string flag (--label a --label b).
 type stringList []string
 

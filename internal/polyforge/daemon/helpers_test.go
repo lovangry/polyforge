@@ -140,6 +140,9 @@ type fakeHub struct {
 	queues   []api.WorkItem
 	blockEnd chan struct{} // non-nil: EndGeneration parks until closed
 	gen      int64
+	// canonical maps an id-or-slug form ("proj#7") to the canonical id
+	// (F2 route tests); an unmapped input echoes itself.
+	canonical map[string]string
 }
 
 type endCall struct {
@@ -185,11 +188,15 @@ func (h *fakeHub) EndGeneration(wi string, req aihubclient.EndGenerationRequest)
 func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	st := h.status[idOrSlug]
+	id := idOrSlug
+	if c, ok := h.canonical[idOrSlug]; ok {
+		id = c
+	}
+	st := h.status[id]
 	if st == "" {
 		st = api.StatusRunning
 	}
-	return &api.WorkItem{ID: idOrSlug, Status: st, ProjectName: "proj"}, nil
+	return &api.WorkItem{ID: id, Status: st, ProjectName: "proj"}, nil
 }
 
 func (h *fakeHub) Queue(project string) ([]api.WorkItem, error) {

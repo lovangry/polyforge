@@ -56,6 +56,11 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	// boundary; the local commit already keeps the bytes.
 	commitDirty(r, j)
 
+	// F1 repair: a capsule without runtime-state/work-item.json (a legacy
+	// pre-F1 scene) gets it re-materialized before the next derivation
+	// wakes up blind to its own goal. Best-effort, idempotent.
+	r.ensureWorkItemFile(j)
+
 	// The storm guard (§三): each FAILED recovery ladder spends one unit
 	// of the budget; a successful recovery RESETS it (a healthy relaunch
 	// must never inherit earlier failures). Only when MaxRecoveries
@@ -84,13 +89,24 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 // answers true when a re-derivation went live (the caller's budget is
 // reset inside); false when the ladder failed outright and the caller
 // must spend budget / retry.
+//
+// The resume discriminator (§七) is transcript readability of the DEAD
+// instance's session record — with F3 there are two physical sources:
+// the capsule's declared copy (session/session-<instance>.jsonl, synced
+// by the daemon at every commit boundary) and, when that is missing, the
+// harness-store live file (the recorded live transcript, or a fresh
+// scan keyed by the dead instance's spawn moment). The resume derivation
+// hands the harness --session pointing at the capsule copy when it is
+// readable — the resumed agent then appends straight into the capsule —
+// and at the live file otherwise (v0's measured finding: the harness
+// resumes from any .jsonl path).
 func (r *Runtime) cascade(ctx context.Context, j *job, cause string) bool {
 	j.mu.Lock()
 	resumeDead := j.resumeDead
 	j.mu.Unlock()
-	if !resumeDead && transcriptReadable(j.transcript) {
+	if src := r.resumeSource(j); !resumeDead && src != "" {
 		for {
-			h, err := r.spawnAgent(ctx, j, true)
+			h, err := r.spawnAgent(ctx, j, true, src)
 			if err == nil {
 				r.recovered(j, h, cause, true)
 				return true
@@ -108,13 +124,40 @@ func (r *Runtime) cascade(ctx context.Context, j *job, cause string) bool {
 			}
 		}
 	}
-	h, err := r.spawnAgent(ctx, j, false)
+	h, err := r.spawnAgent(ctx, j, false, "")
 	if err == nil {
 		r.recovered(j, h, cause, false)
 		return true
 	}
 	fmt.Fprintf(os.Stderr, "runtime: %s: fresh derivation failed: %v\n", j.wi, err)
 	return false
+}
+
+// resumeSource answers the session file a resume derivation should
+// continue from ("" = nothing resumable, go fresh): the capsule's
+// declared copy first, the harness-store live file as the fallback.
+func (r *Runtime) resumeSource(j *job) string {
+	j.mu.Lock()
+	transcript := j.transcript
+	live := j.liveTranscript
+	startedAt := j.agentStartedAt
+	capsuleDir := j.capsuleDir
+	j.mu.Unlock()
+	if transcriptReadable(transcript) {
+		return transcript
+	}
+	if live != "" && transcriptReadable(live) {
+		return live
+	}
+	// Not recorded (the spawn-moment scan raced the harness's file
+	// creation) — scan now: at recovery time the dead instance's live
+	// file has long existed, so a hit here is its transcript.
+	if spawnAt, err := time.Parse(time.RFC3339Nano, startedAt); err == nil {
+		if scanned := r.locateLive(capsuleDir, spawnAt); scanned != "" && transcriptReadable(scanned) {
+			return scanned
+		}
+	}
+	return ""
 }
 
 // recovered finishes a successful re-derivation. A successful recovery
@@ -181,6 +224,8 @@ func endGenerationReq(j *job, status string) aihubclient.EndGenerationRequest {
 // are the caller's to log; the LOCAL commit is the durable half and it
 // stands on its own.
 func commitDirty(r *Runtime, j *job) {
+	// F3: the dead agent's live transcript rides this dirty commit too.
+	r.syncTranscriptBeforeSeal(j)
 	sha, _, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)
@@ -215,7 +260,15 @@ func transcriptReadable(path string) bool {
 // spawnAgent derives one agent instance (resume or fresh), journals the
 // spawn identity and installs the handle under the job lock, minting the
 // next lineage id (the attempt-id fence).
-func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool) (AgentHandle, error) {
+//
+// transcript is the resume source (the file the resumed derivation
+// continues); "" for a fresh derivation, which declares its own
+// instance-named capsule copy path instead (sessionPathFor). The live
+// transcript — the file this derivation actually appends to — is
+// recorded on the job: the resume source verbatim, or the located
+// harness-store file for a fresh derivation ("" while the harness has
+// not created it yet; observe re-locates at its sync points).
+func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcript string) (AgentHandle, error) {
 	j.mu.Lock()
 	spawnN := j.spawnN
 	capsuleDir := j.capsuleDir
@@ -226,11 +279,29 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool) (AgentHan
 	if spawnN >= 1 {
 		nextInst = fmt.Sprintf("%s#%d", j.attempt, spawnN)
 	}
+	var live string
+	if resume {
+		live = transcript
+		// A resumed derivation CONTINUES the resume source: the declared
+		// transcript stays that file (for a capsule-copy resume the agent
+		// appends straight into the capsule — the C1 win — and a live-file
+		// resume keeps the harness store as its session file).
+		j.mu.Lock()
+		j.transcript = transcript
+		j.mu.Unlock()
+	} else {
+		j.mu.Lock()
+		j.transcript = sessionPathFor(capsuleDir, nextInst)
+		j.mu.Unlock()
+	}
+	j.mu.Lock()
+	declared := j.transcript
+	j.mu.Unlock()
 	p := SpawnParams{
 		WorkItemID:     j.wi,
 		CapsuleDir:     capsuleDir,
 		SessionID:      j.sessionID,
-		TranscriptPath: j.transcript,
+		TranscriptPath: declared,
 		Resume:         resume,
 		Generation:     j.generation,
 		InitialPrompt:  r.buildPrompt(j, resume),
@@ -246,11 +317,22 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool) (AgentHan
 	if err != nil {
 		return nil, err
 	}
+	// F3: record the live transcript after the derivation is live. For a
+	// fresh derivation this is a best-effort one-shot scan — the harness
+	// may not have created the file yet (the first turn creates it), in
+	// which case the record stays empty and every consumer re-locates on
+	// demand. Never fatal, never blocking.
+	if !resume {
+		if spawnAt, perr := time.Parse(time.RFC3339Nano, h.StartedAt()); perr == nil {
+			live = r.locateLive(capsuleDir, spawnAt)
+		}
+	}
 	j.mu.Lock()
 	j.spawnN++
 	j.agent = h
 	j.agentPID = h.PID()
 	j.agentStartedAt = h.StartedAt()
+	j.liveTranscript = live
 	// nextInst (minted from the pre-increment spawnN above) IS the
 	// post-increment lineage id: with spawnN'=n+1, the old
 	// newInstanceLocked() answered attempt (n==0) or attempt#n (n>=1)

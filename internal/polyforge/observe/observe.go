@@ -23,7 +23,10 @@ import (
 type Attach struct {
 	Msg    protocol.RTMsg
 	Handle Handle // nil for RTFinished
-	WI     WIInfo // required on RTStarted; ignored afterwards
+	// WI is required on RTStarted and re-read on RTRecovered: the
+	// successor derivation carries its own per-derivation facts (F3
+	// transcript info), which the monitor adopts alongside the handle.
+	WI WIInfo
 }
 
 // Config wires the hub. Zero fields take the defaults in fill().
@@ -39,6 +42,19 @@ type Config struct {
 	DataDir string
 	// PushFunc overrides the capsule commit+push operation (tests).
 	PushFunc PushFunc
+	// LocateLive, when non-nil, resolves the live harness transcript of a
+	// derivation (capsuleDir + spawn moment → absolute .jsonl path; "" =
+	// not found). The monitor calls it at its commit-boundary sync points
+	// when the runtime-attached WIInfo carries no recorded live path —
+	// the F3 daemon-side transcript sync. nil disables the sync entirely
+	// (unit tests that never exercise it).
+	LocateLive func(capsuleDir string, spawnAt time.Time) string
+	// Resolve maps a non-canonical work-item id form (a "<project>#<seq>"
+	// slug) to the canonical id the monitors are keyed by; "" = unknown.
+	// The daemon binds it to its own canonicalizer so CLI-side route
+	// calls by the operator's submitted spelling find the monitor.
+	// nil = no resolution (the route id must already be canonical).
+	Resolve func(wi string) string
 
 	PollInterval      time.Duration // execution.json poll tick (500ms)
 	HangWindow        time.Duration // stream-silence window while a turn is in flight (10min)
@@ -248,8 +264,24 @@ func (o *Observe) stopAll() {
 
 func (o *Observe) lookup(wi string) *Monitor {
 	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.monitors[wi]
+	m := o.monitors[wi]
+	o.mu.Unlock()
+	if m != nil {
+		return m
+	}
+	// a non-canonical spelling (the operator's slug): resolve and retry.
+	// The monitors are keyed by the canonical id the runtime announced.
+	if o.cfg.Resolve == nil {
+		return nil
+	}
+	canonical := o.cfg.Resolve(wi)
+	if canonical == "" || canonical == wi {
+		return nil
+	}
+	o.mu.Lock()
+	m = o.monitors[canonical]
+	o.mu.Unlock()
+	return m
 }
 
 // NoteInstance records the latest KNOWN instance id of a work item at
@@ -316,6 +348,7 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 			BackpressureAfter: o.cfg.BackpressureAfter,
 			FlushBound:        o.cfg.FlushBound,
 			push:              o.cfg.PushFunc,
+			locateLive:        o.cfg.LocateLive,
 		},
 		log:    o.log,
 		ob:     o.cfg.OB,
@@ -348,6 +381,7 @@ func (m *Monitor) attach(at Attach) {
 	m.stateMu.Lock()
 	m.attemptID = at.Msg.AttemptID
 	m.stateMu.Unlock()
+	m.setTranscriptInfo(at.WI)
 }
 
 // Events exposes the log (diagnostic/tests).

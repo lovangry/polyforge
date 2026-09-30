@@ -193,7 +193,7 @@ var cmdProjects = &Command{
 	Usage: "pf projects create --name N [--visible]\n" +
 		"pf projects list\n" +
 		"pf projects get <id-or-name>\n" +
-		"pf projects patch <id-or-name> [--visible[=true|false]]\n" +
+		"pf projects patch <id-or-name> [--visible[=true|false]] [--repos name=url[,name=url...]]\n" +
 		"pf projects members add <id-or-name> --user U --role viewer|writer|maintainer\n" +
 		"pf projects members remove <id-or-name> --user U [--user U ...]",
 	Setup: func(fs *flag.FlagSet) {},
@@ -262,6 +262,11 @@ var cmdProjects = &Command{
 			// visible.
 			visible := optBool{}
 			f.Var(&visible, "visible", "directory-listing visibility (omit to leave unchanged)")
+			// -repos is the task-repo inventory as an EXPLICIT FULL
+			// REPLACEMENT (the wire face's semantics): omit to leave
+			// unchanged, -repos "" clears, and every spelling is
+			// name=url pairs, comma-separated.
+			repos := f.String("repos", "", "task-repo inventory (explicit full replacement): name=url[,name=url...]")
 			ids, err := parseCommandArgs(f, rest)
 			if err != nil {
 				return err
@@ -269,7 +274,15 @@ var cmdProjects = &Command{
 			if len(ids) != 1 {
 				return fmt.Errorf("projects patch: expected one project id or name")
 			}
-			raw, err := client.PatchProject(ids[0], aihubclient.ProjectPatchRequest{Visible: visible.Ptr()})
+			req := aihubclient.ProjectPatchRequest{Visible: visible.Ptr()}
+			if flagChanged(f, "repos") {
+				refs, perr := parseRepoRefs(*repos)
+				if perr != nil {
+					return fmt.Errorf("projects patch: %v", perr)
+				}
+				req.Repos = &refs
+			}
+			raw, err := client.PatchProject(ids[0], req)
 			if err != nil {
 				return err
 			}

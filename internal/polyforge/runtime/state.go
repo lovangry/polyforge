@@ -89,56 +89,62 @@ type stateFile struct {
 }
 
 type jobRecord struct {
-	WorkItemID   string `json:"work_item_id"`
-	Project      string `json:"project"`
-	AttemptID    string `json:"attempt_id"`
-	InstanceID   string `json:"instance_id"`
-	Generation   int64  `json:"generation"`
-	State        string `json:"state"`
-	StopReason   string `json:"stop_reason,omitempty"`
-	CapsuleDir   string `json:"capsule_dir"`
-	GitDir       string `json:"git_dir"`
-	RemoteURL    string `json:"remote_url"`
-	Username     string `json:"username"`
-	Secret       string `json:"secret"` // attempt-scoped push credential
-	SessionID    string `json:"session_id"`
-	Transcript   string `json:"transcript"`
-	BundleName   string `json:"bundle_name"`
-	BundleDigest string `json:"bundle_digest"`
-	AgentPID     int    `json:"agent_pid"`
-	AgentStart   string `json:"agent_started_at"`
-	SpawnN       int    `json:"spawn_n"`
-	RecoverFails int    `json:"recover_fails"` // consecutive failed recoveries
-	ResumeFails  int    `json:"resume_fails"`
-	ResumeDead   bool   `json:"resume_dead"`
+	WorkItemID string `json:"work_item_id"`
+	Project    string `json:"project"`
+	AttemptID  string `json:"attempt_id"`
+	InstanceID string `json:"instance_id"`
+	Generation int64  `json:"generation"`
+	State      string `json:"state"`
+	StopReason string `json:"stop_reason,omitempty"`
+	CapsuleDir string `json:"capsule_dir"`
+	GitDir     string `json:"git_dir"`
+	RemoteURL  string `json:"remote_url"`
+	Username   string `json:"username"`
+	Secret     string `json:"secret"` // attempt-scoped push credential
+	SessionID  string `json:"session_id"`
+	Transcript string `json:"transcript"`
+	// LiveTranscript is the file the current derivation appends to (a
+	// fresh pi derivation's harness-store live path, or the resume
+	// source); "" while not located. Restart keeps it so the resume
+	// discriminator's live fallback survives a daemon restart.
+	LiveTranscript string `json:"live_transcript,omitempty"`
+	BundleName     string `json:"bundle_name"`
+	BundleDigest   string `json:"bundle_digest"`
+	AgentPID       int    `json:"agent_pid"`
+	AgentStart     string `json:"agent_started_at"`
+	SpawnN         int    `json:"spawn_n"`
+	RecoverFails   int    `json:"recover_fails"` // consecutive failed recoveries
+	ResumeFails    int    `json:"resume_fails"`
+	ResumeDead     bool   `json:"resume_dead"`
 }
 
 func (j *job) record() *jobRecord {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return &jobRecord{
-		WorkItemID:   j.wi,
-		Project:      j.project,
-		AttemptID:    j.attempt,
-		InstanceID:   j.instance,
-		Generation:   j.generation,
-		State:        string(j.state),
-		StopReason:   j.stopReason,
-		CapsuleDir:   j.capsuleDir,
-		GitDir:       j.git.GitDir,
-		RemoteURL:    j.git.RemoteURL,
-		Username:     j.git.Username,
-		Secret:       j.git.Secret,
-		SessionID:    j.sessionID,
-		Transcript:   j.transcript,
-		BundleName:   j.bundleName,
-		BundleDigest: j.bundleDigest,
-		AgentPID:     j.agentPID,
-		AgentStart:   j.agentStartedAt,
-		SpawnN:       j.spawnN,
-		RecoverFails: j.recoverFails,
-		ResumeFails:  j.resumeFails,
-		ResumeDead:   j.resumeDead,
+		WorkItemID:     j.wi,
+		Project:        j.project,
+		AttemptID:      j.attempt,
+		InstanceID:     j.instance,
+		Generation:     j.generation,
+		State:          string(j.state),
+		StopReason:     j.stopReason,
+		CapsuleDir:     j.capsuleDir,
+		GitDir:         j.git.GitDir,
+		RemoteURL:      j.git.RemoteURL,
+		Username:       j.git.Username,
+		Secret:         j.git.Secret,
+		SessionID:      j.sessionID,
+		Transcript:     j.transcript,
+		LiveTranscript: j.liveTranscript,
+		BundleName:     j.bundleName,
+		BundleDigest:   j.bundleDigest,
+		AgentPID:       j.agentPID,
+		AgentStart:     j.agentStartedAt,
+		SpawnN:         j.spawnN,
+		RecoverFails:   j.recoverFails,
+		ResumeFails:    j.resumeFails,
+		ResumeDead:     j.resumeDead,
 	}
 }
 
@@ -163,6 +169,7 @@ func jobFromRecord(rec *jobRecord) *job {
 		},
 		sessionID:      rec.SessionID,
 		transcript:     rec.Transcript,
+		liveTranscript: rec.LiveTranscript,
 		bundleName:     rec.BundleName,
 		bundleDigest:   rec.BundleDigest,
 		agentPID:       rec.AgentPID,
