@@ -60,10 +60,22 @@ sequence, and what a §6.4 rollback restores from. `skills/` and `workflows/` ar
 released separately; they travel with the repo itself. Concretely:
 
 1. **Determine the version.** The version is the git tag and nothing else — no
-   per-artifact versioning, no build or step numbers. Take the current floor from
-   `git tag -l 'v*' | sort -V | tail -1` and bump one segment of it: patch for a fix,
-   minor for new capability. Record the decided version and its notes in
-   `artifacts/release-notes.md`; do not invent a version ad hoc each run.
+   per-artifact versioning, no build or step numbers. Take the current floor from the
+   union of this worktree's tags and the versions already published to the intranet
+   releases root: every capsule is its own clone, so a release tag created in a
+   sibling capsule never appears in this clone's `git tag -l`, while the publish
+   root carries every version any capsule has shipped. Set `RELEASES_ROOT` to the
+   intranet `releases/` directory (the same publish root step 5 publishes into)
+   and compute the floor with:
+
+   ```
+   RELEASES_ROOT=<the intranet releases directory>
+   { git tag -l 'v*'; ls "$RELEASES_ROOT"; } | grep -E '^v[0-9]' | sort -Vu | tail -1
+   ```
+
+   Bump one segment of that floor: patch for a fix, minor for new capability. Record
+   the decided version and its notes in `artifacts/release-notes.md`; do not invent a
+   version ad hoc each run.
 2. **Build the two artifacts.** Build from the exact commit `fix`'s last commit produced
    (read it from `execution.json`'s `steps.fix.output.commits` rather than assuming
    HEAD):
@@ -88,12 +100,23 @@ released separately; they travel with the repo itself. Concretely:
 4. **Tag.** Create a single annotated tag named exactly the version (`v<semver>`) on the
    commit from step 2. The tag is the version — there is no second numbering scheme
    anywhere in the release.
-5. **Publish.** Place `aihub`, `pf` and `SHA256SUMS` into the intranet `releases/<tag>/`
-   directory — one directory per tag holding the two binaries and their checksum
-   manifest (`00-architecture.md` §3.3 placement). That directory is v1's only
-   distribution channel: there are no alpha/stable channel promotions, so publishing
-   into the per-tag directory is the whole promotion. `artifacts_published` is the
-   published path list: `releases/<tag>/aihub`, `releases/<tag>/pf`,
+5. **Publish.** Claim the version before placing anything: create the per-tag
+   directory in the intranet releases root with a plain `mkdir` (never `mkdir -p`)
+   — the mkdir is the atomic version claim, and it fails loudly if a parallel
+   capsule already published this version:
+
+   ```
+   mkdir "$RELEASES_ROOT/<tag>"
+   ```
+
+   If the mkdir fails because `releases/<tag>/` already exists, fail the release
+   with a `fail_reason` naming the taken version — never publish into or over an
+   existing version directory. On success, place `aihub`, `pf` and `SHA256SUMS`
+   into the claimed directory — one directory per tag holding the two binaries and
+   their checksum manifest (`00-architecture.md` §3.3 placement). That directory is
+   v1's only distribution channel: there are no alpha/stable channel promotions, so
+   publishing into the per-tag directory is the whole promotion. `artifacts_published`
+   is the published path list: `releases/<tag>/aihub`, `releases/<tag>/pf`,
    `releases/<tag>/SHA256SUMS`.
 
 ## Rewind contract
