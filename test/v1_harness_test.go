@@ -103,18 +103,18 @@ const v1Project = "e2e"
 
 // v1Install is a scratch install of the real system.
 type v1Install struct {
-	t         *testing.T
-	binDir    string
-	root      string
-	dataDir   string // aihub data dir (bare repos under dataDir/git)
-	url       string
-	port      int
-	adminKey  string
-	aihubLog  string
-	aihubCmd  *exec.Cmd
-	client    *aihubclient.Client
-	planDir   string
-	pfPath    string
+	t          *testing.T
+	binDir     string
+	root       string
+	dataDir    string // aihub data dir (bare repos under dataDir/git)
+	url        string
+	port       int
+	adminKey   string
+	aihubLog   string
+	aihubCmd   *exec.Cmd
+	client     *aihubclient.Client
+	planDir    string
+	pfPath     string
 	fakepiPath string
 }
 
@@ -259,6 +259,63 @@ func v1HarvestBootstrapKey(t *testing.T, logPath string) string {
 	}
 }
 
+// stopAihub terminates the REAL aihub process: SIGTERM (the server's
+// own graceful shutdown path) with a hard-kill fallback. Idempotent.
+// The data dir survives, so the bare repos and the whole hub state are
+// exactly what the restart re-opens.
+func (u *v1Install) stopAihub() {
+	if u.aihubCmd == nil || u.aihubCmd.Process == nil {
+		return
+	}
+	_ = u.aihubCmd.Process.Signal(syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() { _, _ = u.aihubCmd.Process.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		_ = u.aihubCmd.Process.Kill()
+		<-done
+	}
+	u.aihubCmd = nil
+}
+
+// restartAihub re-execs the aihub on the SAME data dir and port (the
+// outage-scenario recovery lever) and waits for its HTTP face. The data
+// dir persists across stopAihub, so the bare repos the agents push to
+// keep their history and their pre-receive seq bookkeeping.
+func (u *v1Install) restartAihub() {
+	u.t.Helper()
+	if u.aihubCmd != nil && u.aihubCmd.Process != nil {
+		u.t.Fatal("restartAihub: aihub still running; stopAihub first")
+	}
+	logf, err := os.OpenFile(u.aihubLog, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		u.t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(u.binDir, "aihub"),
+		"--data-dir", u.dataDir, "--listen", "127.0.0.1:"+strconv.Itoa(u.port))
+	cmd.Stdout, cmd.Stderr = logf, logf
+	if err := cmd.Start(); err != nil {
+		u.t.Fatal(err)
+	}
+	u.aihubCmd = cmd
+	u.t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			done := make(chan struct{})
+			go func() { _, _ = cmd.Process.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+				<-done
+			}
+		}
+		logf.Close()
+	})
+	u.waitHTTP(u.t)
+}
+
 // pf runs the REAL pf CLI against this install (env overrides carry the
 // configuration; no config file is involved). wantExit < 0 means the
 // command must succeed.
@@ -396,18 +453,20 @@ func strPtr(s string) *string { return &s }
 
 // v1Daemon is one `pf daemon` OS process.
 type v1Daemon struct {
-	t           *testing.T
-	inst        *v1Install
-	cmd         *exec.Cmd
-	logPath     string
-	sock        string
-	dataDir     string
-	workspace   string
-	machineID   string
-	apiKey      string // optional dedicated aihub key (optAPIKey); "" = bootstrap admin key
-	extraEnv    []string
-	client      *cli.DaemonClient
-	waitedExit  chan error
+	t          *testing.T
+	inst       *v1Install
+	cmd        *exec.Cmd
+	logPath    string
+	sock       string
+	dataDir    string
+	workspace  string
+	machineID  string
+	apiKey     string // optional dedicated aihub key (optAPIKey); "" = bootstrap admin key
+	extraEnv   []string
+	extraArgs  []string // extra `pf daemon` flags appended to the argv
+	client     *cli.DaemonClient
+	waitedExit chan error
+	serverURL  string // --server override (optServerURL)
 }
 
 type daemonOpt func(*v1Daemon)
@@ -423,10 +482,40 @@ func optAPIKey(key string) daemonOpt {
 	return func(d *v1Daemon) { d.apiKey = key }
 }
 
+// optObserveWindows injects the observe supervision windows through the
+// real `pf daemon` flags (#12). A zero duration omits its flag, leaving
+// that window at the production default.
+func optObserveWindows(hang, idle, probe, answerAck time.Duration) daemonOpt {
+	return func(d *v1Daemon) {
+		for _, f := range []struct {
+			name string
+			val  time.Duration
+		}{
+			{"--hang-window", hang},
+			{"--idle-window", idle},
+			{"--probe-timeout", probe},
+			{"--answer-ack-window", answerAck},
+		} {
+			if f.val > 0 {
+				d.extraArgs = append(d.extraArgs, f.name, f.val.String())
+			}
+		}
+	}
+}
+
 // optMode pre-seeds the daemon state file with an initial mode (read at
 // boot; used to start straight in drain).
 func optMode(mode string) daemonOpt {
 	return func(d *v1Daemon) { d.extraEnv = append(d.extraEnv, "__PFV1_MODE__="+mode) }
+}
+
+// optServerURL points the daemon's aihub API face (--server) at url
+// instead of the install itself — the s17 hold-proxy front. In that
+// case git pushes are pinned DIRECT to the install via --git-remote-base
+// so the proxy only ever sees the API client's traffic. Without the opt
+// the daemon args are exactly today's.
+func optServerURL(url string) daemonOpt {
+	return func(d *v1Daemon) { d.serverURL = url }
 }
 
 // shortTmp makes a short temp path (unix socket paths are bound to ~104
@@ -484,6 +573,17 @@ func (d *v1Daemon) start() {
 	if err != nil {
 		d.t.Fatal(err)
 	}
+	// --server: the install itself, or the test's hold-proxy front
+	// (optServerURL) — in the latter case git pushes are pinned direct
+	// to the install so only the API client is proxied.
+	serverURL := d.inst.url
+	gitRemoteBase := ""
+	if d.serverURL != "" {
+		serverURL = d.serverURL
+		gitRemoteBase = d.inst.url + "/git"
+	}
+	// optAPIKey: a dedicated aihub key (e.g. a machine user's key the
+	// scenario revokes mid-run) instead of the bootstrap admin key.
 	apiKey := d.apiKey
 	if apiKey == "" {
 		apiKey = d.inst.adminKey
@@ -491,7 +591,7 @@ func (d *v1Daemon) start() {
 	args := []string{
 		"daemon",
 		"--socket", d.sock,
-		"--server", d.inst.url,
+		"--server", serverURL,
 		"--api-key", apiKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
@@ -501,6 +601,10 @@ func (d *v1Daemon) start() {
 		"--executor-prompt", filepath.Join(d.inst.root, "skills", "pf-execute", "SKILL.md"),
 		"--pi-bin", d.inst.fakepiPath,
 	}
+	if gitRemoteBase != "" {
+		args = append(args, "--git-remote-base", gitRemoteBase)
+	}
+	args = append(args, d.extraArgs...)
 	cmd := exec.Command(d.inst.pfPath, args...)
 	cmd.Env = append(os.Environ(),
 		"FAKEPI_PLANS="+d.inst.planDir,
@@ -805,6 +909,34 @@ func (u *v1Install) waitBareCommits(t *testing.T, wi string, n int, bound time.D
 	t.Helper()
 	waitUntil(t, bound, fmt.Sprintf("bare repo of %s never reached %d commits (has %d)", wi, n, u.bareCommitCount(t, wi)),
 		func() bool { return u.bareCommitCount(t, wi) >= n })
+}
+
+// capsuleCommitCount is the LOCAL chain length of one capsule: commits
+// on main of the daemon-side external git dir (<dataDir>/git/<wi>.git).
+// A failed push leaves its commit here — the backpressure scenarios'
+// catch-up baseline (what the server-side bare repo must reach once the
+// aihub is back).
+func capsuleCommitCount(t *testing.T, dataDir, wi string) int {
+	t.Helper()
+	gitDir := filepath.Join(dataDir, "git", wi+".git")
+	if _, err := os.Stat(filepath.Join(gitDir, "HEAD")); err != nil {
+		return 0
+	}
+	cmd := exec.Command("git", "--git-dir", gitDir, "rev-list", "--count", "main")
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "ambiguous argument") ||
+			strings.Contains(string(out), "unknown revision") {
+			return 0 // unborn branch: the chain has not started yet
+		}
+		t.Fatalf("capsule rev-list count: %v: %s", err, out)
+	}
+	n, perr := strconv.Atoi(strings.TrimSpace(string(out)))
+	if perr != nil {
+		t.Fatalf("capsule rev-list count %q: %v", out, perr)
+	}
+	return n
 }
 
 // bareSeqTrailers returns the Polyforge-Seq trailer values of main, in

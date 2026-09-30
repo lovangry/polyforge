@@ -1,13 +1,13 @@
 package test
 
-// v1_inproc_harness_test.go: the in-process runtime+observe rig for the
+// v1_inproc_harness_test.go: the in-process runtime+observe rig for
 // fault-injection scenarios whose detection windows must be shrunk
-// (hang watchdog, probe bound). The REAL `pf daemon` binary keeps the
-// production windows (10min hang / 2min probe) — the daemon.Config
-// Observe seam (Bug 4) makes them injectable for IN-PROCESS assemblies,
-// but the e2e harness drives the daemon as an OS process whose CLI has
-// no window flags — so these scenarios assemble the SAME production
-// components — runtime.New (lifecycle + recovery engine), observe.New
+// (hang watchdog, probe bound). Since #12 the `pf daemon` CLI takes the
+// window flags itself (--hang-window / --idle-window / --probe-timeout /
+// --answer-ack-window), so s06 — the last scenario on this rig — now
+// runs against the real daemon process and no scenario needs the rig
+// today; it stays as the in-process injection seam, assembling the SAME
+// production components — runtime.New (lifecycle + recovery engine), observe.New
 // (per-WI monitor + detection faces), runtime.DefaultSpawner (the real
 // pi-spawner that derives the real fakepi process) and observe.Handler
 // (the real UDS flush/answer/observe routes) — with the observe config
@@ -115,9 +115,30 @@ type inprocRig struct {
 	adapters map[string]*inprocAdapter
 }
 
+// inprocObsTune is one injected tweak of the rig's observe.Config
+// (the rig's whole point: production components, injectable windows).
+type inprocObsTune func(*observe.Config)
+
+// optBackpressure tunes the observe backpressure ladder: after is the
+// TIME trigger's window (production default 30min), steps the
+// consecutive-failure trigger's threshold (production default 5).
+// The time-trigger scenario shrinks after to seconds and raises steps
+// so the time bound always fires first.
+func optBackpressure(after time.Duration, steps int) inprocObsTune {
+	return func(c *observe.Config) {
+		c.BackpressureAfter = after
+		if steps != 0 {
+			c.BackpressureSteps = steps
+		}
+	}
+}
+
 // newInprocRig assembles and runs the rig. hangWindow/probeTimeout are
 // the injected detection bounds; zero keeps the production defaults.
-func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.Duration) *inprocRig {
+// obsTune carries additional observe.Config tweaks (e.g. the
+// backpressure windows), so a scenario extends the assembly instead of
+// forking the helper.
+func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.Duration, obsTune ...inprocObsTune) *inprocRig {
 	t.Helper()
 	sockBase := shortTmp("/tmp", "pfv1inproc")
 	sock := filepath.Join(sockBase, "o.sock")
@@ -167,7 +188,7 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 	attachCh := make(chan observe.Attach, 64)
 
 	rig.rt = runtime.New(rtCfg, inst.client, sp, rtMsgs, obMsgs)
-	obs, err := observe.New(observe.Config{
+	obCfg := observe.Config{
 		RT:              attachCh,
 		OB:              obMsgs,
 		DataDir:         dataDir,
@@ -175,7 +196,11 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 		HangWindow:      hangWindow,
 		ProbeTimeout:    probeTimeout,
 		AnswerAckWindow: 3 * time.Second,
-	})
+	}
+	for _, tune := range obsTune {
+		tune(&obCfg)
+	}
+	obs, err := observe.New(obCfg)
 	if err != nil {
 		t.Fatalf("observe.New: %v", err)
 	}

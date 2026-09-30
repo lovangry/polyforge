@@ -13,11 +13,13 @@ import (
 // the work item wraps. The idle agent (s01's parked one) is never a
 // hang — only the in-flight silence is.
 //
-// The detection windows are injected small through the in-process rig:
-// the daemon.Config Observe seam exists for in-process assemblies, but
-// the e2e harness drives the daemon as an OS process whose CLI exposes
-// no window flags, and the production defaults (10min hang window, 2min
-// probe bound) are unusable in a test — so s06 stays on the rig.
+// This scenario runs against the REAL `pf daemon` process: the detection
+// windows are injected purely through the CLI's observe-window flags
+// (#12: --hang-window / --probe-timeout), so the whole production path —
+// the spawner's record tap, the daemon's observe binding, the control
+// channel the liveness probe rides, the recovery engine's resume spawn —
+// is the thing under test. The idle and answer-ack windows are left at
+// their production defaults (no flag): only the hang lane may fire here.
 func TestV1S06HangRecovery(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s06: hung agent (in-flight silence)",
@@ -26,13 +28,14 @@ func TestV1S06HangRecovery(t *testing.T) {
 			{"do": "hang"},
 		},
 		[]map[string]any{{"do": "wrap"}})
-	// Injected windows: 700ms of in-flight silence arms the watchdog,
-	// the probe gets 700ms to prove liveness.
-	rig := newInprocRig(t, inst, 700*time.Millisecond, 700*time.Millisecond)
+	// Injected windows: 1s of in-flight silence arms the watchdog, the
+	// probe gets 1s to prove liveness.
+	d := newV1Daemon(t, inst, optObserveWindows(time.Second, 0, time.Second, 0))
+	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
-	rig.start(wi)
+	d.pf(t, "submit", wi)
 
-	capDir := rig.capsuleDir(wi)
+	capDir := d.capsuleDir(wi)
 	waitUntil(t, 30*time.Second, "first step never landed", func() bool {
 		for _, rec := range fakeJournal(t, capDir) {
 			if rec["type"] == "step" && rec["phase"] == "done" {
@@ -44,7 +47,7 @@ func TestV1S06HangRecovery(t *testing.T) {
 
 	// The watchdog suspects, probes, and the probe times out (the fake
 	// suppresses probe acks while hanging — journaled).
-	suspect := rig.waitEvent(t, wi, "infra_incident", 30*time.Second)
+	suspect := waitForEvent(t, d, wi, "infra_incident", 30*time.Second)
 	var sb struct {
 		Kind   string `json:"kind"`
 		Detail string `json:"detail"`
@@ -64,7 +67,7 @@ func TestV1S06HangRecovery(t *testing.T) {
 	})
 
 	// Exactly one hang recovery fires and its reason names the hang.
-	rec := rig.waitEvent(t, wi, "needs_recovery", 30*time.Second)
+	rec := waitForEvent(t, d, wi, "needs_recovery", 30*time.Second)
 	var body struct {
 		Reason string `json:"reason"`
 	}
@@ -83,7 +86,7 @@ func TestV1S06HangRecovery(t *testing.T) {
 	// The whole episode fired ONE recovery (the recovered agent's new
 	// stream resets the detection surfaces).
 	var recoveries int
-	for _, e := range rig.eventsOf(t, wi) {
+	for _, e := range d.eventsOf(t, wi) {
 		if e.Kind == "needs_recovery" {
 			recoveries++
 		}
