@@ -239,6 +239,12 @@ type Monitor struct {
 	trSpawnAt        time.Time // the derivation's birth moment
 	transcriptWarned bool      // one transcript_missing event per attempt
 
+	// ledger is the hub's SHARED, daemon-wide answer ledger (one
+	// answers.json for the whole daemon, keyed per work item inside),
+	// handed down by Observe.newMonitor. A monitor never owns one: an
+	// answer accepted before a daemon restart must still be visible to
+	// the monitor that comes back for the same work item. Unit tests
+	// that build a monitor directly hand it a memory-only ledger.
 	ledger *AnswerLedger
 
 	// stateMu guards the fields every goroutine (HTTP view, flush/answer
