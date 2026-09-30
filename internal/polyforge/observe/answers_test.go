@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -199,8 +200,8 @@ func TestAnswerSurvivesAgentDeathForRecoveredAttempt(t *testing.T) {
 // a fresh ledger over the same directory behaves like the one that
 // never left memory.
 
-// openQ is a PendingSource fixed on one open question id.
-func openQ(id string) PendingSource { return frozenPending{id: id, step: "code"} }
+// pendingAt is a PendingSource fixed on one open question id.
+func pendingAt(id string) PendingSource { return frozenPending{id: id, step: "code"} }
 
 // recordingDeliver counts deliveries and returns a fixed outcome.
 type recordingDeliver struct {
@@ -245,13 +246,13 @@ func TestLedgerPersistsBothHalvesAcrossAFreshLedger(t *testing.T) {
 
 	// a0: a definitive binding refusal — final, never awaiting.
 	refused := relayFor("q_old", "a0")
-	if _, err := l.SubmitFor("wi_a", refused, "alice", openQ("q1"), (&recordingDeliver{}).fn()); !errors.Is(err, ErrAnswerConsumed) {
+	if _, err := l.SubmitFor("wi_a", refused, "alice", pendingAt("q1"), (&recordingDeliver{}).fn()); !errors.Is(err, ErrAnswerConsumed) {
 		t.Fatalf("binding refusal: %v", err)
 	}
 	// a1: delivered, consumption never observed — retryable + awaiting.
 	pending := relayFor("q1", "a1")
 	d1 := &recordingDeliver{err: ErrAnswerAckPending}
-	if _, err := l.SubmitFor("wi_a", pending, "alice", openQ("q1"), d1.fn()); !errors.Is(err, ErrAnswerAckPending) {
+	if _, err := l.SubmitFor("wi_a", pending, "alice", pendingAt("q1"), d1.fn()); !errors.Is(err, ErrAnswerAckPending) {
 		t.Fatalf("ack-pending submission: %v", err)
 	}
 
@@ -270,7 +271,7 @@ func TestLedgerPersistsBothHalvesAcrossAFreshLedger(t *testing.T) {
 	// The refused id replays its recorded outcome verbatim and never
 	// delivers.
 	d2 := &recordingDeliver{}
-	delivered, err := l2.SubmitFor("wi_a", refused, "alice", openQ("q1"), d2.fn())
+	delivered, err := l2.SubmitFor("wi_a", refused, "alice", pendingAt("q1"), d2.fn())
 	if delivered || !errors.Is(err, ErrAnswerConsumed) {
 		t.Fatalf("refusal replay after reload: delivered=%v err=%v", delivered, err)
 	}
@@ -279,7 +280,7 @@ func TestLedgerPersistsBothHalvesAcrossAFreshLedger(t *testing.T) {
 	}
 	// The retryable id re-delivers.
 	d3 := &recordingDeliver{}
-	delivered, err = l2.SubmitFor("wi_a", pending, "alice", openQ("q1"), d3.fn())
+	delivered, err = l2.SubmitFor("wi_a", pending, "alice", pendingAt("q1"), d3.fn())
 	if !delivered || err != nil {
 		t.Fatalf("retryable re-delivery after reload: delivered=%v err=%v", delivered, err)
 	}
@@ -297,12 +298,12 @@ func TestLedgerReplaysFinalNilOutcomeAfterReload(t *testing.T) {
 	l := NewAnswerLedgerAt(dir, nil)
 	relay := relayFor("q1", "a1")
 	d := &recordingDeliver{}
-	if delivered, err := l.SubmitFor("wi_a", relay, "alice", openQ("q1"), d.fn()); !delivered || err != nil {
+	if delivered, err := l.SubmitFor("wi_a", relay, "alice", pendingAt("q1"), d.fn()); !delivered || err != nil {
 		t.Fatalf("first submission: delivered=%v err=%v", delivered, err)
 	}
 	l2 := NewAnswerLedgerAt(dir, nil)
 	d2 := &recordingDeliver{}
-	delivered, err := l2.SubmitFor("wi_a", relay, "alice", openQ("q1"), d2.fn())
+	delivered, err := l2.SubmitFor("wi_a", relay, "alice", pendingAt("q1"), d2.fn())
 	if delivered || err != nil {
 		t.Fatalf("post-reload replay must be (false, nil): delivered=%v err=%v", delivered, err)
 	}
@@ -331,7 +332,7 @@ func TestLedgerLoadNeverYieldsInflight(t *testing.T) {
 		t.Fatal("no loaded entry may be in-flight")
 	}
 	d := &recordingDeliver{}
-	delivered, err := l.SubmitFor("wi_a", relayFor("q1", "a1"), "alice", openQ("q1"), d.fn())
+	delivered, err := l.SubmitFor("wi_a", relayFor("q1", "a1"), "alice", pendingAt("q1"), d.fn())
 	if errors.Is(err, ErrAnswerInFlight) {
 		t.Fatal("a loaded entry must never refuse a re-submission as in-flight")
 	}
@@ -344,11 +345,11 @@ func TestLedgerForgetWorkItemEmptiesTheFileForThatWorkItem(t *testing.T) {
 	dir := t.TempDir()
 	l := NewAnswerLedgerAt(dir, nil)
 	dA := &recordingDeliver{err: ErrAnswerAckPending}
-	if _, err := l.SubmitFor("wi_a", relayFor("q1", "a1"), "alice", openQ("q1"), dA.fn()); !errors.Is(err, ErrAnswerAckPending) {
+	if _, err := l.SubmitFor("wi_a", relayFor("q1", "a1"), "alice", pendingAt("q1"), dA.fn()); !errors.Is(err, ErrAnswerAckPending) {
 		t.Fatalf("wi_a submission: %v", err)
 	}
 	dB := &recordingDeliver{err: ErrAnswerAckPending}
-	if _, err := l.SubmitFor("wi_b", relayFor("q2", "b1"), "alice", openQ("q2"), dB.fn()); !errors.Is(err, ErrAnswerAckPending) {
+	if _, err := l.SubmitFor("wi_b", relayFor("q2", "b1"), "alice", pendingAt("q2"), dB.fn()); !errors.Is(err, ErrAnswerAckPending) {
 		t.Fatalf("wi_b submission: %v", err)
 	}
 
@@ -379,7 +380,7 @@ func TestMemoryOnlyLedgerWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	l := NewAnswerLedger() // no backend: every persist is a no-op
 	d := &recordingDeliver{err: ErrAnswerAckPending}
-	if _, err := l.SubmitFor("wi_a", relayFor("q1", "a1"), "alice", openQ("q1"), d.fn()); !errors.Is(err, ErrAnswerAckPending) {
+	if _, err := l.SubmitFor("wi_a", relayFor("q1", "a1"), "alice", pendingAt("q1"), d.fn()); !errors.Is(err, ErrAnswerAckPending) {
 		t.Fatalf("submission: %v", err)
 	}
 	if len(l.Awaiting("wi_a")) != 1 {
@@ -387,5 +388,141 @@ func TestMemoryOnlyLedgerWritesNothing(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Fatalf("a memory-only ledger must write nothing: %v %v", entries, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// the persist point (plan step persist_before_delivery): the entry is
+// on disk as retryable + awaiting BEFORE the delivery function is
+// entered. Everything below asserts from INSIDE deliver, which is the
+// only place that can observe the invariant.
+
+func TestPersistedEntryExistsBeforeDeliveryStarts(t *testing.T) {
+	dir := t.TempDir()
+	l := NewAnswerLedgerAt(dir, nil)
+	relay := relayFor("q1", "a1")
+
+	var (
+		sawEntry  bool
+		sawState  string
+		sawRelay  AnswerRelay
+		sawErrors []string
+	)
+	deliver := func(r AnswerRelay) error {
+		// The first thing the delivery does is read the file.
+		raw, err := os.ReadFile(answerFilePath(dir))
+		if err != nil {
+			sawErrors = append(sawErrors, err.Error())
+			return nil
+		}
+		var doc answerFileDoc
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			sawErrors = append(sawErrors, err.Error())
+			return nil
+		}
+		doc.normalize()
+		e, ok := doc.Applied[r.AnswerID]
+		sawEntry = ok
+		sawState = e.State
+		sawRelay = doc.Awaiting["wi_a"][r.AnswerID]
+		// No in-flight marker may appear anywhere in the file.
+		if strings.Contains(string(raw), "inflight") || strings.Contains(string(raw), "in_flight") {
+			sawErrors = append(sawErrors, "file carries an in-flight marker: "+string(raw))
+		}
+		return nil
+	}
+	if _, err := l.SubmitFor("wi_a", relay, "alice", pendingAt("q1"), deliver); err != nil {
+		t.Fatalf("submission: %v", err)
+	}
+	if len(sawErrors) != 0 {
+		t.Fatalf("delivery-entry observations: %v", sawErrors)
+	}
+	if !sawEntry {
+		t.Fatal("a persisted entry MUST exist before delivery starts")
+	}
+	if sawState != stateNameRetryable {
+		t.Fatalf("the pre-delivery entry must be retryable, got %q", sawState)
+	}
+	if sawRelay != relay {
+		t.Fatalf("the pre-delivery awaiting relay must be the verbatim submission:\n got %+v\nwant %+v", sawRelay, relay)
+	}
+}
+
+func TestConcurrentDuplicateIsInflightInMemoryOnly(t *testing.T) {
+	dir := t.TempDir()
+	l := NewAnswerLedgerAt(dir, nil)
+	relay := relayFor("q1", "a1")
+
+	release := make(chan struct{})
+	var dupErr error
+	var fileRaw []byte
+	deliver := func(r AnswerRelay) error {
+		// A concurrent duplicate lands while this delivery is running.
+		_, dupErr = l.SubmitFor("wi_a", relay, "alice", pendingAt("q1"), func(AnswerRelay) error {
+			t.Error("the concurrent duplicate must never enter delivery")
+			return nil
+		})
+		fileRaw, _ = os.ReadFile(answerFilePath(dir))
+		close(release)
+		return nil
+	}
+	if _, err := l.SubmitFor("wi_a", relay, "alice", pendingAt("q1"), deliver); err != nil {
+		t.Fatalf("submission: %v", err)
+	}
+	<-release
+	if !errors.Is(dupErr, ErrAnswerInFlight) {
+		t.Fatalf("the concurrent duplicate must be refused in-flight FROM MEMORY, got %v", dupErr)
+	}
+	var doc answerFileDoc
+	if err := json.Unmarshal(fileRaw, &doc); err != nil {
+		t.Fatalf("parse mid-delivery file: %v", err)
+	}
+	doc.normalize()
+	if e := doc.Applied["a1"]; e.State != stateNameRetryable {
+		t.Fatalf("the file must show retryable, never an in-flight marker: %+v", e)
+	}
+}
+
+func TestBindingRefusalPersistsFinalOnlyNeverAwaiting(t *testing.T) {
+	dir := t.TempDir()
+	l := NewAnswerLedgerAt(dir, nil)
+	d := &recordingDeliver{}
+	if _, err := l.SubmitFor("wi_a", relayFor("q_old", "a_x"), "alice", pendingAt("q1"), d.fn()); !errors.Is(err, ErrAnswerConsumed) {
+		t.Fatalf("binding refusal: %v", err)
+	}
+	if d.count() != 0 {
+		t.Fatalf("a refused binding must never deliver: %d", d.count())
+	}
+	doc := readLedgerFile(t, dir)
+	if len(doc.Awaiting) != 0 {
+		t.Fatalf("a refusal must persist NO awaiting relay: %+v", doc.Awaiting)
+	}
+	e, ok := doc.Applied["a_x"]
+	if !ok || e.State != stateNameFinal || e.ErrorCode != errCodeConsumed {
+		t.Fatalf("a refusal must persist exactly one final outcome: ok=%v %+v", ok, e)
+	}
+}
+
+func TestValidationAndIdentityFailuresPersistNothing(t *testing.T) {
+	dir := t.TempDir()
+	l := NewAnswerLedgerAt(dir, nil)
+	d := &recordingDeliver{}
+
+	bad := relayFor("q1", "a1")
+	bad.AnswerText = ""
+	if _, err := l.SubmitFor("wi_a", bad, "alice", pendingAt("q1"), d.fn()); err == nil {
+		t.Fatal("a malformed relay must be refused")
+	}
+	if _, err := l.SubmitFor("wi_a", relayFor("q1", "a2"), "mallory", pendingAt("q1"), d.fn()); !errors.Is(err, ErrAnswerIdentity) {
+		t.Fatal("an identity mismatch must be refused")
+	}
+	if d.count() != 0 {
+		t.Fatalf("neither refusal may deliver: %d", d.count())
+	}
+	// Both return BEFORE the slot reservation, so nothing was ever
+	// written — the file does not even exist yet.
+	if _, err := os.Stat(answerFilePath(dir)); !os.IsNotExist(err) {
+		doc := readLedgerFile(t, dir)
+		t.Fatalf("a pre-reservation refusal must persist nothing, file holds %+v", doc)
 	}
 }

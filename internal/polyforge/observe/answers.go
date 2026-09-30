@@ -467,13 +467,25 @@ func (l *AnswerLedger) SubmitFor(wi string, relay AnswerRelay, callerID string, 
 	l.mu.Unlock()
 
 	outcome := answerOutcome{state: answerFinal}
-	openQ, _ := src.OpenQuestion()
+	openQuestion, _ := src.OpenQuestion()
 	switch {
-	case openQ == "" || openQ != relay.QuestionID:
+	case openQuestion == "" || openQuestion != relay.QuestionID:
 		// A binding refusal is definitive: question ids are freshly
 		// generated, so this answer can never match a later question.
+		// It settles FINAL below and is persisted as such (so the
+		// verbatim replay survives a restart) but NEVER as an awaiting
+		// relay — nothing was accepted for delivery.
 		outcome.err = ErrAnswerConsumed
 	default:
+		// THE GOVERNING INVARIANT: the answer is now ACCEPTED — validated,
+		// identity-checked, bound to the open question and holding the
+		// delivery slot. Persist it BEFORE the first byte of delivery, so
+		// a crash anywhere inside deliver() cannot lose the owner's
+		// answer. The in-flight reservation is projected onto disk as
+		// retryable + awaiting (see snapshot): no delivery attempt ever
+		// begins for an answer_id with no persisted entry, and the file
+		// still never carries an in-flight marker.
+		l.persist()
 		delivered = true
 		derr := deliver(relay)
 		switch {
