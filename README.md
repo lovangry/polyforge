@@ -3,6 +3,116 @@
 Work-item orchestration platform: an aihub server (WI store, memory, git
 revision chain) and a pf work-machine binary (Runtime + Observe + CLI).
 
+## Quickstart
+
+A from-zero smoke run on one machine: start a local aihub, set up a
+project and a machine identity, file a minimal work item, and drive it
+through file → submit → observe → wrap on a local `pf daemon`.
+
+Prerequisites: a Go toolchain; `git` with a configured
+`user.name`/ `user.email` (capsule commits need it); and the `pi` agent
+harness on `PATH` with a model configured — the daemon spawns real WI
+agents through it. All commands below run from the repo root; everything
+local lands under `/tmp/pf-quickstart` (substitute your own paths).
+
+**1. Build the two binaries:**
+
+```
+go build -o bin/aihub ./cmd/aihub
+go build -o bin/pf ./cmd/pf
+```
+
+**2. Start aihub on a scratch data dir and port.** On first start over an
+empty data dir, aihub seeds a bootstrap admin (`usr_root`) and prints a
+one-time API key to its log — copy it now, it is never shown again:
+
+```
+mkdir -p /tmp/pf-quickstart/aihub-data
+bin/aihub --data-dir /tmp/pf-quickstart/aihub-data --listen 127.0.0.1:18420 \
+  > /tmp/pf-quickstart/aihub.log 2>&1 &
+grep "one-time api key" /tmp/pf-quickstart/aihub.log
+```
+
+**3. Point `pf` at the server with a config file** (the flat `cli.toml`
+subset; every entry can also be given per-command via the global
+`--server` / `--api-key` / `--socket` flags):
+
+```
+cat > /tmp/pf-quickstart/cli.toml <<'EOF'
+server = "http://127.0.0.1:18420"
+api_key = "<BOOTSTRAP_KEY>"
+daemon_socket = "/tmp/pf-quickstart/pf.sock"
+project = "demo"
+EOF
+```
+
+**4. Create the project and a machine identity.** The machine user's API
+key is the daemon's credential below; its plaintext is shown exactly
+once:
+
+```
+bin/pf --config /tmp/pf-quickstart/cli.toml projects create --name demo
+bin/pf --config /tmp/pf-quickstart/cli.toml users create --display-name smoke-machine --user-type machine
+bin/pf --config /tmp/pf-quickstart/cli.toml api-keys create --user <MACHINE_USER_ID>
+```
+
+**5. File a minimal smoke work item.** `--bundle` makes it an execution
+ticket — only execution tickets can be claimed; `quick-fix` is one of
+the workflow bundles shipped in `workflows/`:
+
+```
+bin/pf --config /tmp/pf-quickstart/cli.toml file create --project demo \
+  --bundle quick-fix \
+  --goal "Quickstart smoke: exercise the file -> submit -> observe -> wrap chain." \
+  --content "Minimal smoke work item; no product change is expected." \
+  --label smoke
+```
+
+**6. Start the local daemon** (Runtime + Observe over its own UDS
+socket; keep it running in a second terminal):
+
+```
+bin/pf daemon --config /tmp/pf-quickstart/cli.toml \
+  --api-key <MACHINE_KEY> \
+  --data-dir /tmp/pf-quickstart/daemon-data \
+  --workspace-root /tmp/pf-quickstart/workspace \
+  --machine-id m-smoke
+```
+
+**7. Submit the work item and watch the agent work:**
+
+```
+bin/pf --config /tmp/pf-quickstart/cli.toml submit <WI_ID>
+bin/pf --config /tmp/pf-quickstart/cli.toml observe <WI_ID>
+```
+
+The submit claims the work item and the daemon spawns a WI agent (a
+`pi --mode rpc` process) that starts driving the workflow; observe shows
+the live projection — current step, step table, budget and the event
+log. Give the agent a few minutes for its first turn: once it commits
+the first `runtime-state/execution.json` version, observe shows a
+`current step:` line and a `published` event.
+
+**8. Wrap the run.** Wrap seals the capsule's current state and closes
+the generation as terminal success:
+
+```
+bin/pf --config /tmp/pf-quickstart/cli.toml wrap <WI_ID>
+bin/pf --config /tmp/pf-quickstart/cli.toml queue --project demo
+```
+
+The queue now lists the work item as `wrapped`. Note: wrapping before the
+capsule's first commit lands leaves no revision to seal — the close
+degrades to `blocked`; `pf resume <WI_ID>` claims a fresh generation and
+continues.
+
+**9. Tear down:**
+
+```
+bin/pf --config /tmp/pf-quickstart/cli.toml ops shutdown
+kill <AIHUB_PID>
+```
+
 ## Architecture
 
 Design record: `docs/design/polyforge-vnext/v1-architecture-spec.md`
