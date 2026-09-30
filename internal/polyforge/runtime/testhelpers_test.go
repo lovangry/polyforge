@@ -37,6 +37,11 @@ type fakeHub struct {
 	digest    string            // claim-time bundle digest (default "deadbeef")
 	repos     []api.ProjectRepo // claim-served task-repo inventory (nil = none)
 	stickyGen bool              // keep the generation fixed across claims (crashed-Start replay shape)
+	// canonical maps an id-or-slug form (e.g. "proj#7") to the canonical
+	// work-item id the claim answer carries (F2 tests); nil entry = the
+	// input echoes itself (the pre-F2 behavior).
+	canonical map[string]string
+	items     map[string]*api.WorkItem // canonical id → claim answer record (F1 tests)
 }
 
 func newFakeHub() *fakeHub {
@@ -50,21 +55,31 @@ func (h *fakeHub) Claim(req aihubclient.ClaimRequest) (*aihubclient.ClaimRespons
 	if !h.stickyGen {
 		h.gen++
 	}
+	id := req.WorkItemID
+	if c, ok := h.canonical[req.WorkItemID]; ok {
+		id = c
+	}
 	digest := h.digest
 	if digest == "" {
 		digest = "deadbeef"
 	}
+	item := api.WorkItem{ID: id, ProjectName: "proj"}
+	if h.items != nil {
+		if it, ok := h.items[id]; ok && it != nil {
+			item = *it
+		}
+	}
 	return &aihubclient.ClaimResponse{
 		Claim: api.Claim{
-			WorkItemID:   req.WorkItemID,
-			AttemptID:    "ra_" + req.WorkItemID,
+			WorkItemID:   id,
+			AttemptID:    "ra_" + id,
 			Generation:   h.gen,
 			BundleName:   "demo-bundle",
 			BundleDigest: digest,
 			Repos:        h.repos,
 		},
-		Credential: api.PushCredential{AttemptID: "ra_" + req.WorkItemID, Username: req.WorkItemID, Secret: "push-secret"},
-		WorkItem:   api.WorkItem{ID: req.WorkItemID, ProjectName: "proj"},
+		Credential: api.PushCredential{AttemptID: "ra_" + id, Username: id, Secret: "push-secret"},
+		WorkItem:   item,
 	}, nil
 }
 
@@ -84,11 +99,21 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	if err, ok := h.lookupErr[idOrSlug]; ok {
 		return nil, err
 	}
-	st := h.status[idOrSlug]
+	id := idOrSlug
+	if c, ok := h.canonical[idOrSlug]; ok {
+		id = c
+	}
+	st := h.status[id]
 	if st == "" {
 		st = api.StatusRunning
 	}
-	return &api.WorkItem{ID: idOrSlug, Status: st, ProjectName: "proj"}, nil
+	item := api.WorkItem{ID: id, Status: st, ProjectName: "proj"}
+	if it, ok := h.items[id]; ok && it != nil {
+		clone := *it
+		clone.Status = st
+		item = clone
+	}
+	return &item, nil
 }
 
 func (h *fakeHub) endCount() int {

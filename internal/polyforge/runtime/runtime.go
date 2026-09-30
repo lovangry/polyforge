@@ -44,21 +44,32 @@ type Aihub interface {
 
 // Config is the daemon-supplied runtime configuration.
 type Config struct {
-	MachineID      string        // registered machine identity
-	WorkspaceRoot  string        // <root>/capsules/<wi> are the capsule worktrees
-	DataDir        string        // state.json + external git-dirs live here
-	GitRemoteBase  string        // e.g. https://aihub.example/git → <base>/<wi>.git
-	WorkflowsDir   string        // daemon checkout's workflows/ (materialization source)
-	Harness        string        // harness adapter name ("pi")
-	PiBin          string        // harness binary (default "pi")
-	CgroupRoot     string        // cgroup v2 root; empty ⇒ layer-0 unavailable
-	MaxResumeFails int           // consecutive resume failures before fresh (default 2)
-	MaxRecoveries  int           // consecutive FAILED recoveries before bounded fail (default 2)
-	SendBound      time.Duration // bound on one RT→OB send (default 5s)
+	MachineID     string // registered machine identity
+	WorkspaceRoot string // <root>/capsules/<wi> are the capsule worktrees
+	DataDir       string // state.json + external git-dirs live here
+	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
+	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
+	Harness       string // harness adapter name ("pi")
+	PiBin         string // harness binary (default "pi")
+	// HarnessSessionsRoot overrides the harness's default session store
+	// (~/.pi/agent/sessions) for the live-transcript locator (F3): the
+	// production default is right; tests and relocated installs point
+	// it at a scratch tree. Empty = the default.
+	HarnessSessionsRoot string
+	CgroupRoot          string        // cgroup v2 root; empty ⇒ layer-0 unavailable
+	MaxResumeFails      int           // consecutive resume failures before fresh (default 2)
+	MaxRecoveries       int           // consecutive FAILED recoveries before bounded fail (default 2)
+	SendBound           time.Duration // bound on one RT→OB send (default 5s)
 	// SocketPath is the daemon's UDS listen path, injected into every
 	// spawned agent as PF_DAEMON_SOCKET so the agent can call
 	// flush(reason) on the proxy (§五).
 	SocketPath string
+	// EventTap, when non-nil, receives runtime-sourced diagnostic events
+	// (kind "push_failed" on a seal push that failed after its retries)
+	// so they land in the daemon's durable events log next to the
+	// observe lane's own entries. The daemon binds it to the observe
+	// EventLog; nil (tests) disables it.
+	EventTap func(wi, kind string, body map[string]any)
 	// ExecutorPromptFile, when set, is prepended verbatim to every agent's
 	// initial prompt (the executor skill shipped with the daemon release).
 	ExecutorPromptFile string
@@ -96,6 +107,12 @@ type Runtime struct {
 
 	mu   sync.Mutex
 	jobs map[string]*job
+	// aliases maps every NON-canonical id form the runtime has ever been
+	// asked to run (a "<project>#<seq>" slug, most often) to the
+	// canonical work-item id the claim resolved it to. In-memory only:
+	// Resolve's unknown-input answer is "", and the daemon's resolver
+	// falls back to aihub for those (a restart re-learns on demand).
+	aliases map[string]string
 
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
@@ -110,17 +127,29 @@ type job struct {
 	project string
 	// attempt is the aihub claim attempt id; instance is the current agent
 	// lineage id used as the protocol attempt-id fence.
-	attempt      string
-	instance     string
-	generation   int64
-	state        JobState
-	stopReason   string // sealed-in reason while SEALING (restart can finish the stop)
-	capsuleDir   string
-	git          gitops.Opts
-	sessionID    string
-	transcript   string
-	bundleName   string
-	bundleDigest string
+	attempt    string
+	instance   string
+	generation int64
+	state      JobState
+	stopReason string // sealed-in reason while SEALING (restart can finish the stop)
+	capsuleDir string
+	git        gitops.Opts
+	sessionID  string
+	transcript string
+	// liveTranscript is the file the CURRENT derivation appends to: the
+	// harness-store path a fresh pi derivation really writes (the harness
+	// ignores PI_SESSION_DIR), or — for a resumed derivation — the very
+	// file --session points at. Empty while not yet located (the observe
+	// lane re-locates at its sync points; the recovery engine at its
+	// resume decision).
+	liveTranscript string
+	bundleName     string
+	bundleDigest   string
+	// item is the claim answer's work-item snapshot (the F1 materializer
+	// input). In-memory only: the durable copy is the capsule's
+	// runtime-state/work-item.json, which recovery re-derives from aihub
+	// (GetWorkItem) when a legacy capsule predates it.
+	item *api.WorkItem
 	// repos is the claim-served task-repo inventory (api.Claim.Repos):
 	// materialize clones each entry into repos/<name> before the agent
 	// starts. In-memory only — recovery never re-materializes, so it is
@@ -150,6 +179,7 @@ func New(cfg Config, hub Aihub, spawner Spawner, toOB chan<- protocol.RTMsg, fro
 		toOB:      toOB,
 		fromOB:    fromOB,
 		jobs:      map[string]*job{},
+		aliases:   map[string]string{},
 		statePath: filepath.Join(cfg.DataDir, "runtime-state.json"),
 	}
 }
@@ -246,7 +276,44 @@ func (r *Runtime) persist() error {
 func (r *Runtime) dropJob(j *job) {
 	r.mu.Lock()
 	delete(r.jobs, j.wi)
+	// an alias outlives its job harmlessly (Resolve then answers "" and
+	// the daemon falls back to aihub), but dropping it keeps the map
+	// honest about what is live under this daemon.
+	for a, id := range r.aliases {
+		if id == j.wi {
+			delete(r.aliases, a)
+		}
+	}
 	r.mu.Unlock()
+}
+
+// NoteAlias records that alias (a slug or any other non-canonical id
+// form) names the canonical work item — the daemon registers the
+// operator's submit-time spelling so later route lookups by the same
+// spelling resolve locally without an aihub round-trip.
+func (r *Runtime) NoteAlias(alias, canonical string) {
+	if alias == "" || canonical == "" || alias == canonical {
+		return
+	}
+	r.mu.Lock()
+	r.aliases[alias] = canonical
+	r.mu.Unlock()
+}
+
+// Resolve maps any id form this runtime knows — a live job key (already
+// canonical) or a registered alias — to the canonical work-item id;
+// "" when the form is unknown to this daemon (the daemon's resolver
+// then falls back to aihub's id-or-slug endpoint).
+func (r *Runtime) Resolve(id string) string {
+	if id == "" {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.jobs[id]; ok {
+		return id // a job key is canonical by construction (F2)
+	}
+	return r.aliases[id]
 }
 
 // cgroupPathFor returns the per-WI cgroup v2 directory (layer 0); empty
@@ -273,6 +340,30 @@ func (r *Runtime) remoteURLFor(wi string) string {
 	return strings.TrimSuffix(r.cfg.GitRemoteBase, "/") + "/" + wi + ".git"
 }
 
+// sessionPathFor is the capsule-side session copy path every derivation
+// declares in its spawn journal (session/session-<instance>.jsonl): a
+// fresh derivation gets its own instance-named file, so a re-derivation
+// never clobbers a dead instance's transcript, while a resumed derivation
+// keeps the file it continues.
+func sessionPathFor(capsuleDir, instance string) string {
+	return filepath.Join(capsuleDir, capsule.DirSession, "session-"+instance+".jsonl")
+}
+
+// harnessSessionsRoot answers the configured harness session store.
+func (r *Runtime) harnessSessionsRoot() string {
+	if r.cfg.HarnessSessionsRoot != "" {
+		return r.cfg.HarnessSessionsRoot
+	}
+	return HarnessSessionsRootDefault()
+}
+
+// locateLive locates the live transcript of a derivation born at
+// spawnAt (the F3 face over the shared helper; "" = not there yet or
+// never — a typed warning condition, never an error).
+func (r *Runtime) locateLive(capsuleDir string, spawnAt time.Time) string {
+	return LocateLiveTranscript(r.harnessSessionsRoot(), capsuleDir, spawnAt)
+}
+
 func randomKey() string {
 	b := make([]byte, 12)
 	if _, err := rand.Read(b); err != nil {
@@ -297,6 +388,16 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 // takeover — the aihub claim-endpoint semantics differ per intent) and
 // runs it to a live agent. The phase-3 daemon routes the CLI's
 // submit/resume/takeover verbs here.
+//
+// wi may arrive as the canonical id OR any id-or-slug form the aihub
+// claim endpoint accepts ("<project>#<seq>"): the job and every path
+// derived from it — capsule directory, external git-dir, push remote,
+// session id, spawn journal — are keyed by the CANONICAL work-item id
+// the claim answer carries (F2). A slug contains "#", the URL
+// fragment separator: a slug-built push remote answers 404 and a
+// slug-named directory leaks the separator into the harness's session
+// directory naming, so slugs never reach any path. The submitted
+// spelling is registered as an alias so lookups by it still resolve.
 func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
@@ -314,28 +415,41 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		return err
 	}
 	c := resp.Claim
+	// canonical id resolution (F2): the claim answer's work item is the
+	// authority; the claim's own WorkItemID and the answered record's ID
+	// agree server-side, the record wins here because it also feeds the
+	// materialized task-definition file.
+	id := resp.WorkItem.ID
+	if id == "" {
+		id = c.WorkItemID
+	}
+	r.NoteAlias(wi, id)
+	if existing := r.jobOf(id); existing != nil && id != wi {
+		return fmt.Errorf("runtime: %s already active (state %s)", id, existing.state)
+	}
 	j := &job{
-		wi:         wi,
+		wi:         id,
 		project:    resp.WorkItem.ProjectName,
 		attempt:    c.AttemptID,
 		state:      StateRunning,
-		capsuleDir: r.capsuleDir(wi),
+		capsuleDir: r.capsuleDir(id),
 		git: gitops.Opts{
-			WorkItemID: wi,
+			WorkItemID: id,
 			AttemptID:  c.AttemptID,
-			CapsuleDir: r.capsuleDir(wi),
-			GitDir:     r.gitDirFor(wi),
-			RemoteURL:  r.remoteURLFor(wi),
-			Username:   c.WorkItemID,
+			CapsuleDir: r.capsuleDir(id),
+			GitDir:     r.gitDirFor(id),
+			RemoteURL:  r.remoteURLFor(id),
+			Username:   id,
 			Secret:     resp.Credential.Secret,
 		},
 		generation:   c.Generation,
 		bundleName:   c.BundleName,
 		bundleDigest: c.BundleDigest,
 		repos:        c.Repos,
+		item:         &resp.WorkItem,
 	}
-	j.sessionID = fmt.Sprintf("sess_%s_%d", wi, c.Generation)
-	j.transcript = filepath.Join(j.capsuleDir, capsule.DirSession, "session-"+c.AttemptID+".jsonl")
+	j.sessionID = fmt.Sprintf("sess_%s_%d", id, c.Generation)
+	j.transcript = sessionPathFor(j.capsuleDir, j.attempt)
 
 	if err := r.prepareCapsule(j); err != nil {
 		return err
@@ -360,20 +474,20 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		}
 		return err
 	}
-	if _, err := r.spawnAgent(ctx, j, false); err != nil {
+	if _, err := r.spawnAgent(ctx, j, false, ""); err != nil {
 		return err
 	}
 	r.mu.Lock()
-	r.jobs[wi] = j
+	r.jobs[id] = j
 	r.mu.Unlock()
 	if err := r.persist(); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", wi, err)
+		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", id, err)
 	}
 	j.mu.Lock()
 	pid := j.agentPID
 	inst := j.instance
 	j.mu.Unlock()
-	r.send(protocol.RTMsg{Kind: protocol.RTStarted, AttemptID: inst, WorkItem: wi, AgentPID: pid})
+	r.send(protocol.RTMsg{Kind: protocol.RTStarted, AttemptID: inst, WorkItem: id, AgentPID: pid})
 	return nil
 }
 
@@ -509,6 +623,14 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	if err := atomicWrite(filepath.Join(j.capsuleDir, capsule.SessionJSON), sblob, 0o644); err != nil {
 		return err
 	}
+	// Task-repo inventory and the F1 task-definition file land before
+	// the bundle copy; the materialized work-item.json is the ONE
+	// authoritative statement of the ask inside the capsule (v1 has no
+	// agent→server read path, so without this file the agent cannot even
+	// know its goal).
+	if err := r.writeWorkItemFile(j); err != nil {
+		return err
+	}
 	if r.cfg.WorkflowsDir == "" || j.bundleName == "" {
 		return nil
 	}
@@ -545,6 +667,74 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 		return copyTree(filepath.Join(src, "agents"), filepath.Join(j.capsuleDir, capsule.DirAgents))
 	}
 	return nil
+}
+
+// writeWorkItemFile materializes runtime-state/work-item.json (F1): the
+// claim answer's task definition — goal, content, labels, priority,
+// milestone, bundle pin, project — written in full at Start. Idempotent
+// in the recovery direction: a re-materialize of the same generation
+// writes the same claim-time facts (goal semantics never change inside a
+// generation), and ensureWorkItemFile below is the missing-file variant
+// the recovery engine uses.
+func (r *Runtime) writeWorkItemFile(j *job) error {
+	return r.writeWorkItemDoc(j, j.item)
+}
+
+// ensureWorkItemFile repairs a capsule whose work-item.json is missing
+// (a legacy pre-F1 capsule, or a torn scene): the in-memory claim
+// snapshot answers when present, aihub does otherwise. Best-effort — a
+// repair failure is loud but never blocks recovery.
+func (r *Runtime) ensureWorkItemFile(j *job) {
+	path := filepath.Join(j.capsuleDir, filepath.FromSlash(capsule.WorkItemJSON))
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	item := j.item
+	if item == nil {
+		fetched, err := r.hub.GetWorkItem(j.wi)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: work-item.json missing and aihub lookup failed: %v\n", j.wi, err)
+			return
+		}
+		item = fetched
+	}
+	if err := r.writeWorkItemDoc(j, item); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: work-item.json repair failed: %v\n", j.wi, err)
+	}
+}
+
+func (r *Runtime) writeWorkItemDoc(j *job, item *api.WorkItem) error {
+	if item == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Join(j.capsuleDir, capsule.DirRuntimeState), 0o755); err != nil {
+		return err
+	}
+	doc := &capsule.WorkItemDoc{
+		ID:           j.wi,
+		Slug:         item.Slug,
+		Project:      j.project,
+		Goal:         item.Goal,
+		Content:      item.Content,
+		Labels:       item.Labels,
+		Priority:     item.Priority,
+		Milestone:    item.Milestone,
+		BundleName:   j.bundleName,
+		BundleDigest: j.bundleDigest,
+		Generation:   j.generation,
+		UpdatedAt:    nowStamp(),
+	}
+	if doc.Labels == nil {
+		doc.Labels = []string{}
+	}
+	if doc.Priority == "" {
+		doc.Priority = api.PriorityNormal
+	}
+	blob, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(j.capsuleDir, filepath.FromSlash(capsule.WorkItemJSON)), blob, 0o644)
 }
 
 // nameDerivedDigest is the name-derived stand-in aihub stores when a work
@@ -650,7 +840,7 @@ func atomicWriteFileMode(dst string, in io.Reader, perm os.FileMode) error {
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
-	j := r.jobOf(wi)
+	j := r.resolveJob(wi)
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
@@ -670,6 +860,10 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// Six-layer teardown: no writer survives into the sealed scene.
 	r.killAgentTree(j)
 
+	// F3: the dead derivation's live transcript rides the seal commit
+	// (C1) — sync before the push, best-effort.
+	r.syncTranscriptBeforeSeal(j)
+
 	// Final push (flush(wrap) semantics, §五). The seq trailer is
 	// gitops' business (derived in-lock). CommitPush is honest on every
 	// path — including a clean tree, where it pushes the standing HEAD —
@@ -684,6 +878,16 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	}
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: final push failed after retries: %v\n", j.wi, perr)
+		// Degrade to blocked (kept semantics: the local commit keeps the
+		// bytes; the server never heard the final state) — but leave a
+		// durable, field-diagnosable trace in the daemon events log too:
+		// the pause/wrap close path's seal failure is otherwise visible
+		// only in this process's stderr.
+		if r.cfg.EventTap != nil {
+			r.cfg.EventTap(j.wi, "push_failed", map[string]any{
+				"phase": "seal", "reason": reason, "error": perr.Error(),
+			})
+		}
 		finalReason = protocol.FinishBlocked
 	}
 	if err := r.hub.EndGeneration(j.wi, aihubclient.EndGenerationRequest{

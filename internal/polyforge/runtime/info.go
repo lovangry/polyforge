@@ -7,7 +7,11 @@ package runtime
 // sequence's live-job enumeration and the stop_notice delivery. Purely
 // additive: the state machine and every writer stay untouched.
 
-import "github.com/silgrid/polyforge/internal/polyforge/gitops"
+import (
+	"time"
+
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+)
 
 // JobInfo is a point-in-time snapshot of one locally managed job.
 // Agent is the live supervised handle (nil when the job holds none —
@@ -15,17 +19,23 @@ import "github.com/silgrid/polyforge/internal/polyforge/gitops"
 // mirrors the persisted jobRecord fields (state.go), which is what the
 // restart reconciliation and the daemon bookkeeping share.
 type JobInfo struct {
-	WorkItem       string
-	Project        string
-	AttemptID      string
-	InstanceID     string // the protocol attempt-id fence (agent lineage)
-	Generation     int64
-	State          JobState
-	StopReason     string
-	CapsuleDir     string
-	Git            gitops.Opts
-	SessionID      string
-	Transcript     string
+	WorkItem   string
+	Project    string
+	AttemptID  string
+	InstanceID string // the protocol attempt-id fence (agent lineage)
+	Generation int64
+	State      JobState
+	StopReason string
+	CapsuleDir string
+	Git        gitops.Opts
+	SessionID  string
+	Transcript string
+	// LiveTranscript is the file the current derivation appends to (the
+	// F3 live-transcript face; "" while not located). SpawnAt is its
+	// agentStartedAt parsed once, for the observe lane's on-demand
+	// live-transcript location.
+	LiveTranscript string
+	SpawnAt        time.Time
 	BundleName     string
 	Agent          AgentHandle
 	AgentPID       int
@@ -36,7 +46,7 @@ type JobInfo struct {
 // no locally managed job (never claimed here, or already sealed and
 // dropped).
 func (r *Runtime) Info(wi string) (JobInfo, bool) {
-	j := r.jobOf(wi)
+	j := r.resolveJob(wi)
 	if j == nil {
 		return JobInfo{}, false
 	}
@@ -61,6 +71,12 @@ func (r *Runtime) List() []JobInfo {
 func (j *job) info() JobInfo {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	spawnAt := time.Time{}
+	if j.agentStartedAt != "" {
+		if at, err := time.Parse(time.RFC3339Nano, j.agentStartedAt); err == nil {
+			spawnAt = at
+		}
+	}
 	return JobInfo{
 		WorkItem:       j.wi,
 		Project:        j.project,
@@ -73,6 +89,8 @@ func (j *job) info() JobInfo {
 		Git:            j.git,
 		SessionID:      j.sessionID,
 		Transcript:     j.transcript,
+		LiveTranscript: j.liveTranscript,
+		SpawnAt:        spawnAt,
 		BundleName:     j.bundleName,
 		Agent:          j.agent,
 		AgentPID:       j.agentPID,
@@ -84,3 +102,20 @@ func (j *job) info() JobInfo {
 // sequence calls it as its final durability step (04 §6.5: the persisted
 // bookkeeping must reflect reality before the process exits).
 func (r *Runtime) Persist() error { return r.persist() }
+
+// resolveJob answers the job behind any id form: the canonical key first,
+// then the alias table — so daemon-side route lookups by the operator's
+// submitted spelling (a slug, most often) find the live job without an
+// aihub round-trip.
+func (r *Runtime) resolveJob(wi string) *job {
+	if j := r.jobOf(wi); j != nil {
+		return j
+	}
+	r.mu.Lock()
+	canonical := r.aliases[wi]
+	r.mu.Unlock()
+	if canonical == "" {
+		return nil
+	}
+	return r.jobOf(canonical)
+}

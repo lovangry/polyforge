@@ -135,6 +135,16 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 	// own launch env).
 	os.Setenv("FAKEPI_PLANS", inst.planDir)
 
+	// ORPHAN PIN (pilot finding): every rig in this tree must derive the
+	// FAKE harness binary, never the PiBin default ("pi" on PATH) — a
+	// rig that silently dropped the field would spawn the operator's REAL
+	// harness as an orphan that outlives the test binary and whose cwd
+	// (the capsule temp dir) is deleted under it. The pin is structural:
+	// fail the assembly, not the run.
+	if inst.fakepiPath == "" {
+		t.Fatalf("inproc rig: no fake harness binary built; refusing the PiBin default (a real harness would be spawned)")
+	}
+
 	rtCfg := runtime.Config{
 		MachineID:         "m-inproc",
 		WorkspaceRoot:     workspace,
@@ -188,7 +198,19 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 	go func() { _ = rig.srv.Serve(lst) }()
 
 	t.Cleanup(func() {
+		// Teardown order: cancel the loops, then TERMINATE every live
+		// agent handle the runtime still holds — the in-process runtime
+		// does not kill agents on ctx end (Run just returns; only the
+		// daemon's shutdown sequence does), so without this sweep every
+		// still-live fake harness child would outlive the test binary as
+		// an orphan whose cwd is deleted under it (the pilot's orphan
+		// finding, pinned here for the rig itself).
 		rig.cancel()
+		for _, ji := range rig.rt.List() {
+			if ji.Agent != nil {
+				_ = ji.Agent.Terminate(5 * time.Second)
+			}
+		}
 		_ = rig.srv.Close()
 		select {
 		case <-rig.done:

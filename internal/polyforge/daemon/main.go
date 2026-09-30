@@ -36,6 +36,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
 	executorPrompt := fs.String("executor-prompt", "", "executor skill file injected into every agent (default ./skills/pf-execute/SKILL.md)")
 	piBin := fs.String("pi-bin", "", "harness binary (default pi)")
+	sessionsRoot := fs.String("harness-sessions-root", "", "harness session store root for the live-transcript sync (env POLYFORGE_HARNESS_SESSIONS_ROOT; default ~/.pi/agent/sessions)")
 	cgroupRoot := fs.String("cgroup-root", "", "cgroup v2 root for layer-0 cleanup (env POLYFORGE_CGROUP_ROOT)")
 	gitRemoteBase := fs.String("git-remote-base", "", "aihub bare-repo base URL (default <server>/git)")
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
@@ -103,25 +104,29 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *cgroupRoot == "" {
 		*cgroupRoot = os.Getenv("POLYFORGE_CGROUP_ROOT")
 	}
+	if *sessionsRoot == "" {
+		*sessionsRoot = os.Getenv("POLYFORGE_HARNESS_SESSIONS_ROOT")
+	}
 	if *gitRemoteBase == "" {
 		*gitRemoteBase = strings.TrimSuffix(*server, "/") + "/git"
 	}
 
 	cfg := Config{
-		MachineID:          *machineID,
-		SocketPath:         *socket,
-		WorkspaceRoot:      *workspaceRoot,
-		DataDir:            *dataDir,
-		Project:            *project,
-		GitRemoteBase:      *gitRemoteBase,
-		WorkflowsDir:       *workflowsDir,
-		ExecutorPromptFile: *executorPrompt,
-		PiBin:              *piBin,
-		CgroupRoot:         *cgroupRoot,
-		APIKey:             *apiKey,
-		MaxConcurrent:      *maxConcurrent,
-		Mode:               *mode,
-		Hub:                aihubclient.New(*server, *apiKey),
+		MachineID:           *machineID,
+		SocketPath:          *socket,
+		WorkspaceRoot:       *workspaceRoot,
+		DataDir:             *dataDir,
+		Project:             *project,
+		GitRemoteBase:       *gitRemoteBase,
+		WorkflowsDir:        *workflowsDir,
+		ExecutorPromptFile:  *executorPrompt,
+		PiBin:               *piBin,
+		HarnessSessionsRoot: *sessionsRoot,
+		CgroupRoot:          *cgroupRoot,
+		APIKey:              *apiKey,
+		MaxConcurrent:       *maxConcurrent,
+		Mode:                *mode,
+		Hub:                 aihubclient.New(*server, *apiKey),
 	}
 	d, err := New(cfg)
 	if err != nil {

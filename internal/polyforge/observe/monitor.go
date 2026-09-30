@@ -60,6 +60,17 @@ type WIInfo struct {
 	CapsuleDir string
 	BundleName string
 	Git        gitops.Opts
+	// Transcript is the capsule-side declared session path of the
+	// current derivation (session/session-<instance>.jsonl): the
+	// live-transcript sync's destination and the recovery engine's
+	// resume source.
+	Transcript string
+	// LiveTranscript is the file the current derivation appends to (the
+	// runtime's recorded live path; "" = locate on demand below).
+	LiveTranscript string
+	// SpawnAt is the current derivation's birth moment (the on-demand
+	// locator's floor).
+	SpawnAt time.Time
 }
 
 // Handle is the agent face a monitor watches. Implemented by the Runtime
@@ -131,6 +142,9 @@ type monitorCfg struct {
 	BackpressureAfter time.Duration
 	FlushBound        time.Duration
 	push              PushFunc
+	// locateLive resolves the live harness transcript on demand (F3);
+	// nil = the transcript sync is disabled.
+	locateLive func(capsuleDir string, spawnAt time.Time) string
 }
 
 // Monitor supervises one work item.
@@ -185,6 +199,13 @@ type Monitor struct {
 	probeInFlight bool
 	probeDone     chan probeResult
 	hangAnchor    time.Time // probe-cleared window restart
+
+	// live-transcript sync state (F3; monitor goroutine only — the push
+	// sub-goroutines receive the values as arguments, never over m).
+	trDst            string    // the capsule's declared session path
+	trSrc            string    // the runtime-recorded live path (may be "")
+	trSpawnAt        time.Time // the derivation's birth moment
+	transcriptWarned bool      // one transcript_missing event per attempt
 
 	ledger *AnswerLedger
 
@@ -436,6 +457,16 @@ func (m *Monitor) onRecovered(at Attach) {
 	m.stream = newStreamState()
 	m.probeInFlight = false
 	m.hangAnchor = time.Now()
+	// The successor derivation carries its own transcript facts (its
+	// declared capsule path, its live file, its spawn moment): adopt
+	// them for the sync points that follow (F3).
+	if at.WI.WorkItem != "" {
+		m.setTranscriptInfo(at.WI)
+	} else {
+		m.stateMu.Lock()
+		m.transcriptWarned = false
+		m.stateMu.Unlock()
+	}
 	m.stateMu.Lock()
 	m.recovering = false
 	m.attemptID = at.Msg.AttemptID
@@ -540,6 +571,98 @@ func (m *Monitor) applyPending(pv *protocol.PendingView) {
 	})
 }
 
+// transcriptSnapshot captures the current derivation's transcript-sync
+// inputs (monitor goroutine only); the push sub-goroutines receive the
+// VALUES, never the monitor fields — no cross-goroutine reads.
+type transcriptSnapshot struct {
+	dst     string
+	src     string
+	spawnAt time.Time
+}
+
+func (m *Monitor) transcriptSnapshot() transcriptSnapshot {
+	return transcriptSnapshot{dst: m.trDst, src: m.trSrc, spawnAt: m.trSpawnAt}
+}
+
+// setTranscriptInfo adopts the per-derivation transcript facts of an
+// attachment (monitor goroutine only; observe.attach and onRecovered).
+// transcriptWarned is stateMu-guarded: a push sub-goroutine claims the
+// once-per-attempt warning concurrently with this reset.
+func (m *Monitor) setTranscriptInfo(wi WIInfo) {
+	m.trDst = wi.Transcript
+	m.trSrc = wi.LiveTranscript
+	m.trSpawnAt = wi.SpawnAt
+	m.stateMu.Lock()
+	m.transcriptWarned = false
+	m.stateMu.Unlock()
+}
+
+// claimTranscriptWarning claims the once-per-attempt transcript_missing
+// warning (push sub-goroutines): true exactly once per derivation.
+func (m *Monitor) claimTranscriptWarning() bool {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	if m.transcriptWarned {
+		return false
+	}
+	m.transcriptWarned = true
+	return true
+}
+
+// syncTranscript is the F3 commit-boundary transcript sync: copy the
+// current derivation's live harness transcript onto the capsule's
+// declared session path, READ-ONLY w.r.t. the source, so the transcript
+// rides the very commit the caller is about to make (ruling C1). Runs in
+// the push sub-goroutines BEFORE the push itself; a missing source is
+// the typed advisory transcript_missing (once per attempt), never an
+// error — the commit proceeds without the transcript.
+func (m *Monitor) syncTranscript(s transcriptSnapshot) {
+	if s.dst == "" {
+		return // no declared session path: nothing to sync onto
+	}
+	src := s.src
+	if src == "" && m.cfg.locateLive != nil {
+		src = m.cfg.locateLive(m.wi.CapsuleDir, s.spawnAt)
+	}
+	if src == "" {
+		if m.claimTranscriptWarning() {
+			_ = m.log.Append(m.wi.WorkItem, EvTranscriptMissing, map[string]any{
+				"detail":     "live harness transcript not found at the commit boundary; committing without it",
+				"attempt_id": m.currentAttempt(),
+			})
+		}
+		return
+	}
+	if src == s.dst {
+		return // a resumed derivation already writes into the capsule
+	}
+	if err := copyFileReadonly(src, s.dst); err != nil {
+		if m.claimTranscriptWarning() {
+			_ = m.log.Append(m.wi.WorkItem, EvTranscriptMissing, map[string]any{
+				"detail":     fmt.Sprintf("transcript sync failed: %v", err),
+				"attempt_id": m.currentAttempt(),
+			})
+		}
+	}
+}
+
+// copyFileReadonly copies src onto dst without ever opening the source
+// for writing (the source is the harness's own session store).
+func copyFileReadonly(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp := dst + ".tsync.tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
 // schedulePush starts one async commit+push sub-goroutine when a newer
 // execution Version exists, the retry backoff has elapsed, and the
 // single-in-flight gate is free.
@@ -557,8 +680,13 @@ func (m *Monitor) schedulePush() {
 		return // one already in flight; the next tick retries
 	}
 	m.retryAt = time.Time{}
-	version := m.dirtyVersion // the seq trailer is gitops' single authority (derived in-lock)
+	version := m.dirtyVersion    // the seq trailer is gitops' single authority (derived in-lock)
+	tr := m.transcriptSnapshot() // captured BEFORE the spawn: no shared-field reads
 	go func() {
+		// The transcript sync rides the commit pipeline (F3): the copy
+		// precedes the push in THIS goroutine, so the transcript lands in
+		// the commit it belongs to — and never blocks the select loop.
+		m.syncTranscript(tr)
 		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.FlushBound)
 		defer cancel()
 		sha, pushed, err := m.cfg.push(ctx, m.wi.Git,
@@ -767,7 +895,11 @@ func (m *Monitor) flushWrap(call FlushCall) {
 
 	version := m.dirtyVersion
 	finalStatus := call.Req.FinalStatus
+	tr := m.transcriptSnapshot() // captured before the goroutine (F3)
 	go func() {
+		// seal flush: the transcript copy must ride the seal commit (C1)
+		// — sync before the first push attempt, inside the gate.
+		m.syncTranscript(tr)
 		deadline := time.Now().Add(m.cfg.FlushBound)
 		var (
 			lastSHA, lastErr string
@@ -856,8 +988,12 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 // result, never wait (§五: a failed shutdown flush does not hold the
 // agent — the data is in the local commit).
 func (m *Monitor) flushShutdown(call FlushCall) {
+	tr := m.transcriptSnapshot() // captured before the goroutine (F3)
 	go func() {
 		m.gate <- struct{}{}
+		// the closing flush commits what exists — the transcript included
+		// (F3): copy before the push, inside the gate.
+		m.syncTranscript(tr)
 		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.FlushBound)
 		sha, pushed, err := m.cfg.push(ctx, m.wi.Git, "shutdown flush")
 		cancel()

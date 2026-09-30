@@ -242,6 +242,29 @@ func TestAdminVerbsRequestShapes(t *testing.T) {
 		t.Errorf("projects patch body = %s, want {}", got.Body)
 	}
 
+	// -repos is the explicit full replacement of the task-repo
+	// inventory (pilot item: the wire face was already there, the CLI
+	// flag was not). Omitted → key absent; spelled → the full list.
+	if code, _, stderr := runPf(t, env, "projects", "patch", "prj_1",
+		"--repos", "demo-src=file:///x/demo.git,other=https://h/o.git"); code != 0 {
+		t.Fatalf("projects patch --repos: %d %s", code, stderr)
+	}
+	if got := rec.last(); !strings.Contains(got.Body,
+		`"repos":[{"name":"demo-src","url":"file:///x/demo.git"},{"name":"other","url":"https://h/o.git"}]`) {
+		t.Errorf("projects patch --repos body = %s", got.Body)
+	}
+	// the explicit clear: -repos "" carries an empty list.
+	if code, _, stderr := runPf(t, env, "projects", "patch", "prj_1", "--repos", ""); code != 0 {
+		t.Fatalf("projects patch --repos clear: %d %s", code, stderr)
+	}
+	if got := rec.last(); !strings.Contains(got.Body, `"repos":[]`) {
+		t.Errorf("projects patch --repos clear body = %s", got.Body)
+	}
+	// a malformed entry is refused client-side, never silently dropped.
+	if code, _, _ := runPf(t, env, "projects", "patch", "prj_1", "--repos", "no-url-here"); code == 0 {
+		t.Fatal("malformed -repos entry must fail")
+	}
+
 	if code, _, stderr := runPf(t, env, "backup"); code != 0 {
 		t.Fatalf("backup: %d %s", code, stderr)
 	}

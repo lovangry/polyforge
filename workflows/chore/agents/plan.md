@@ -28,8 +28,9 @@ output:
 
 # plan
 
-Write the maintenance plan for this work item, grounded in the WI's `goal` and `content`
-(read both in full — do not plan against your own recollection of the ask).
+Write the maintenance plan for this work item, grounded in `runtime-state/work-item.json`
+(the daemon-materialized task definition — read it in full; do not plan against your own
+recollection of the ask).
 
 ## Proportionality is the contract
 
@@ -45,7 +46,7 @@ whether it exists:
 
 ## What to do
 
-1. Read the WI's `goal` and `content`.
+1. Read `runtime-state/work-item.json` in full.
 2. Determine the unit structure: if the change cannot land in one compilable unit, order
    the steps so each leaves the tree buildable — same discipline as feature-full's
    `plan`, minus the spec input (chores carry no product spec).

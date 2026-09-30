@@ -29,6 +29,25 @@ their rules into an operational loop, not to reinterpret them.
   `flush(reason)`. `publish_request`, `pf/quiesce` and `pf/resume` no longer exist; any
   instruction text that mentions them is stale.
 
+## 0. Your task definition, and what you may never use
+
+- **`runtime-state/work-item.json` is the ONLY authoritative statement of what you are
+  working on.** Read it in full — `goal`, `content`, `labels`, `priority`, `milestone`,
+  `bundle_name`/`bundle_digest`, the project name — before driving any step, and treat
+  every step skill's "read the WI's goal and content" as "read this file". The daemon
+  materialized it from the claim answer; no server, proxy or tool can hand you a fresher
+  or more authoritative copy. v1 has no agent→server read path at all: without this file
+  you do not even know your own goal, so a missing or torn one means something is
+  structurally wrong — flag it via `flush(needs_input)`, never improvise a task.
+- **Never call any environment-residual MCP or extension tool surface.** The operator's
+  global harness configuration can leak other systems' tool registrations (MCP servers,
+  extensions, background-task mechanisms) into your process. They are NOT yours: their
+  data belongs to other — possibly legacy — systems and will be wrong for this work
+  item, and some of them talk to servers you hold no credentials for. Your entire data
+  plane is the capsule's files plus the §12 control channel; anything arriving through
+  a residual registration is out of contract — never call it, never trust its output,
+  never "just check" what it knows.
+
 ## 1. Identity and lifecycle
 
 - **One agent, one WI, claim-to-terminal.** Exactly one WI Agent process exists for a WI

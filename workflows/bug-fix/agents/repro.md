@@ -35,8 +35,9 @@ non-reproducible record poisons the whole lane.
 
 ## What to do
 
-1. Read the WI's `goal` and `content` in full. Extract the claimed failure: what was
-   done, what was expected, what happened instead.
+1. Read `runtime-state/work-item.json` in full (the daemon-materialized task
+   definition: goal, content, labels, priority, milestone). Extract the claimed failure:
+   what was done, what was expected, what happened instead.
 2. Reproduce it. Prefer, in order:
    - **A failing test** under `repos/<name>/**` in the project's existing test
      framework, asserted to fail for the *reported* reason (not merely to fail) — this

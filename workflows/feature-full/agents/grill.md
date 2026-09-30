@@ -21,13 +21,14 @@ output:
 # grill
 
 You are the first step in the flow. Your job is not to write a spec — it is to make sure
-nobody has to guess at intent later. The WI's `goal` and `content` are almost always
+nobody has to guess at intent later. The work item's task definition
+(`runtime-state/work-item.json`: `goal` plus `content`) is almost always
 under-specified: a one-line ask, a bug title, a "we should probably also..." aside. Treat
 every ambiguity you can find as a question, not an assumption.
 
 ## What to do
 
-1. Read the WI's `goal` and `content` in full. List every point where a reasonable
+1. Read `runtime-state/work-item.json` in full. List every point where a reasonable
    implementer could make two different, materially different choices: scope boundaries
    ("does this include the admin UI or just the API"), edge-case behavior ("what happens
    on an empty list"), non-functional constraints ("does this need to be backward

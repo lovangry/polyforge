@@ -37,7 +37,13 @@ const (
 	EvPushFailed       = "push_failed"
 	EvPushBackpressure = "push_backpressure"
 	EvWrapBlocked      = "wrap_blocked"
-	EvJobStopped       = "job_stopped"
+	// EvTranscriptMissing is the F3 typed warning: a commit-boundary
+	// transcript sync could not locate the derivation's live harness
+	// transcript (the harness wrote nothing under its session store).
+	// Advisory only — the commit/push proceed without the transcript;
+	// one event per attempt, never a spam loop.
+	EvTranscriptMissing = "transcript_missing"
+	EvJobStopped        = "job_stopped"
 )
 
 // Infra-incident payload kinds (04 §5.1a tenth-event family).

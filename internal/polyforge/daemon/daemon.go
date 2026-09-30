@@ -52,6 +52,9 @@ type Config struct {
 	WorkflowsDir      string // daemon checkout's workflows/
 	ExecutorPromptFile string
 	PiBin             string
+	// HarnessSessionsRoot overrides the harness's default session store
+	// for the live-transcript locator (F3); "" = ~/.pi/agent/sessions.
+	HarnessSessionsRoot string
 	CgroupRoot        string
 	APIKey            string // machine credential; NEVER reaches an agent env
 	MaxConcurrent     int    // cross-mode concurrency cap (default 4)
@@ -182,11 +185,17 @@ func New(cfg Config) (*Daemon, error) {
 		WorkflowsDir:   cfg.WorkflowsDir,
 		Harness:        cfg.Harness,
 		PiBin:          cfg.PiBin,
+		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
 		CgroupRoot:     cfg.CgroupRoot,
 		SocketPath:     cfg.SocketPath, // the spawned agent's PF_DAEMON_SOCKET (flush proxy, §五)
 		EnvSecrets:     []string{cfg.APIKey},
 		ExecutorPromptFile: cfg.ExecutorPromptFile,
 	}
+	// Runtime-sourced diagnostic events (a seal push that failed after
+	// its retries, pilot item 3) land in the observe lane's durable
+	// events log next to its own entries; the tap reads d.obs at call
+	// time, so it is bound below, once the Daemon value is live and
+	// before runtime.New consumes the cfg.
 	// The production spawner takes the runtime config BY POINTER
 	// (runtime.DefaultSpawner): fields bound after assembly (the
 	// RecordTap binding below included) are read at spawn time from the
@@ -208,6 +217,7 @@ func New(cfg Config) (*Daemon, error) {
 		adapters: map[string]*agentAdapter{},
 		shutDone: make(chan struct{}),
 	}
+	rtCfg.EventTap = d.tapRuntimeEvent
 
 	rtCfg.RecordTap = d.tapRecord
 	rt := runtime.New(rtCfg, cfg.Hub, sp, d.rtMsgs, d.obMsgs)
@@ -217,6 +227,14 @@ func New(cfg Config) (*Daemon, error) {
 		DataDir:      cfg.DataDir,
 		PollInterval: cfg.ObservePoll,
 		PushFunc:     cfg.PushFunc,
+		// F3: the live-transcript locator the monitor's commit-boundary
+		// sync calls when the runtime recorded no live path; the F2 slug
+		// resolver lets CLI-side route calls by the operator's spelling
+		// (a "<project>#<seq>") find the canonically-keyed monitor.
+		LocateLive: func(capsuleDir string, spawnAt time.Time) string {
+			return runtime.LocateLiveTranscript(cfg.HarnessSessionsRoot, capsuleDir, spawnAt)
+		},
+		Resolve: d.resolveWI,
 		// Bug-4 seam: the supervision windows pass through; zero fields
 		// keep the observe defaults.
 		HangWindow:      cfg.Observe.HangWindow,
@@ -337,18 +355,59 @@ func (d *Daemon) reattachRecovered() {
 
 // buildAttach turns one runtime snapshot into an observe attachment:
 // the protocol message plus the agent handle adapted to observe's face.
+// The per-derivation transcript facts (F3: the capsule copy path, the
+// live file, the spawn moment) ride the WIInfo the monitor's
+// commit-boundary transcript sync reads.
 func (d *Daemon) buildAttach(msg protocol.RTMsg, ji runtime.JobInfo) observe.Attach {
 	return observe.Attach{
 		Msg: msg,
 		Handle: d.installAdapter(ji),
 		WI: observe.WIInfo{
-			WorkItem:   ji.WorkItem,
-			Project:    ji.Project,
-			CapsuleDir: ji.CapsuleDir,
-			BundleName: ji.BundleName,
-			Git:        ji.Git,
+			WorkItem:       ji.WorkItem,
+			Project:        ji.Project,
+			CapsuleDir:     ji.CapsuleDir,
+			BundleName:     ji.BundleName,
+			Git:            ji.Git,
+			Transcript:     ji.Transcript,
+			LiveTranscript: ji.LiveTranscript,
+			SpawnAt:        ji.SpawnAt,
 		},
 	}
+}
+
+// tapRuntimeEvent lands one runtime-sourced diagnostic event in the
+// observe lane's durable events log (the seal push_failed trace).
+func (d *Daemon) tapRuntimeEvent(wi, kind string, body map[string]any) {
+	if d.obs == nil {
+		return
+	}
+	_ = d.obs.Events().Append(wi, kind, body)
+}
+
+// resolveWI maps any work-item id form to the canonical id the runtime
+// and observe key everything by (F2): the runtime's alias table first
+// (live jobs), aihub's id-or-slug endpoint otherwise (sealed or unknown
+// work items). "" only when both paths fail — callers degrade to the
+// input spelling, which is the pre-F2 behavior.
+func (d *Daemon) resolveWI(wi string) string {
+	if c := d.rt.Resolve(wi); c != "" {
+		return c
+	}
+	item, err := d.hub.GetWorkItem(wi)
+	if err != nil || item == nil || item.ID == "" {
+		return ""
+	}
+	return item.ID
+}
+
+// canonWI is resolveWI with the pass-through fallback: an unresolvable
+// spelling keeps flowing exactly as it did before F2 (the claim path
+// resolves it server-side).
+func (d *Daemon) canonWI(wi string) string {
+	if c := d.resolveWI(wi); c != "" {
+		return c
+	}
+	return wi
 }
 
 // bridge translates Runtime's RTMsg stream into observe.Attach values:

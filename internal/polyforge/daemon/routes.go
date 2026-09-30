@@ -164,21 +164,31 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 			writeAdmissionErr(w, err)
 			return
 		}
+		// Canonical id (F2): the queue, the dispatcher and the runtime
+		// bookkeeping all key by the canonical id the claim resolves to;
+		// a slug spelling would leave the queue's slot marks unable to
+		// reconcile against the runtime's canonical job keys. The
+		// operator's spelling is registered as an alias so later route
+		// calls by it resolve without another aihub round-trip. An
+		// unresolvable spelling passes through unchanged — the claim
+		// path resolves (or refuses) server-side, exactly as before.
+		canonical := d.canonWI(wi)
+		d.rt.NoteAlias(wi, canonical)
 		// The live check is the runtime's own job set (the queue's slot
 		// marks are accounting, reconciled a tick later); a pending
 		// duplicate is refused on the queue.
-		if _, live := d.rt.Info(wi); live {
+		if _, live := d.rt.Info(canonical); live {
 			writeErr(w, api.ErrDaemonConflict, "work item is already active on this daemon")
 			return
 		}
-		if d.q.IsPending(wi) {
+		if d.q.IsPending(canonical) {
 			writeErr(w, api.ErrDaemonConflict, "work item is already queued on this daemon")
 			return
 		}
 		// Accepted = enqueued; the dispatcher spawns within one tick,
 		// priority-desc against the machine's concurrency cap.
-		d.q.Enqueue(qEntry{WorkItemID: wi, Priority: body.Priority, Intent: intent})
-		writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: wi})
+		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent})
+		writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
 	}
 }
 
@@ -190,6 +200,7 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 
 // closeJob runs one CLI-side close through Runtime.Stop.
 func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason string) {
+	wi = d.canonWI(wi) // a slug spelling closes the canonical job (F2)
 	ji, ok := d.rt.Info(wi)
 	if !ok {
 		if st, terr := d.terminalOf(wi); terr == nil {
@@ -285,7 +296,7 @@ func (d *Daemon) wrapRoute(w http.ResponseWriter, r *http.Request) {
 // progress" refusal: no close is in progress there.
 func (d *Daemon) flushGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wi := r.PathValue("wi")
+		wi := d.canonWI(r.PathValue("wi")) // F2: gate on the canonical job
 		raw, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 		if err != nil {
 			writeErr(w, api.ErrDaemonBadInput, "body read: "+err.Error())
@@ -430,18 +441,24 @@ func (d *Daemon) batchRoute(w http.ResponseWriter, r *http.Request) {
 	// The whole confirmed wave is enqueued (04 §12 ruling 0: never
 	// refuse the batch for exceeding the cap — pending entries
 	// backfill as slots open); duplicates of locally active/pending
-	// ids are skipped, the wave is never widened.
+	// ids are skipped, the wave is never widened. Every entry is
+	// canonicalized (F2) so the queue and the runtime agree on keys.
 	submitted := make([]string, 0, len(body.WIIDs))
 	for _, wi := range body.WIIDs {
-		if _, live := d.rt.Info(wi); live || d.q.IsPending(wi) {
-			continue
-		}
+		canonical := wi
 		priority := "normal"
-		if item, err := d.hub.GetWorkItem(wi); err == nil {
+		if item, err := d.hub.GetWorkItem(wi); err == nil && item != nil {
+			if item.ID != "" {
+				canonical = item.ID
+			}
 			priority = item.Priority
 		}
-		d.q.Enqueue(qEntry{WorkItemID: wi, Priority: priority, Intent: "claim"})
-		submitted = append(submitted, wi)
+		d.rt.NoteAlias(wi, canonical)
+		if _, live := d.rt.Info(canonical); live || d.q.IsPending(canonical) {
+			continue
+		}
+		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: priority, Intent: "claim"})
+		submitted = append(submitted, canonical)
 	}
 	writeJSON(w, http.StatusOK, batchResponse{Submitted: len(submitted), WorkItemIDs: submitted})
 }
