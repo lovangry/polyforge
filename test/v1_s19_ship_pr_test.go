@@ -50,7 +50,17 @@ func ghScratchRepo(t *testing.T) (owner, repo, originURL string) {
 	owner = ghRun(t, "api", "user", "--jq", ".login")
 	repo = fmt.Sprintf("pf-e2e-%d", time.Now().UnixNano())
 	full := owner + "/" + repo
-	ghRun(t, "repo", "create", full, "--private")
+	// Rate limiting is an availability gate, not a failure: repeated CI
+	// runs trip github's repo-creation quota ("You have created too many
+	// repositories, too quickly") — same skip-not-fail contract as a
+	// missing gh binary or auth.
+	if out, err := exec.Command("gh", "repo", "create", full, "--private").CombinedOutput(); err != nil {
+		if strings.Contains(strings.ToLower(string(out)), "too many repositories") ||
+			strings.Contains(strings.ToLower(string(out)), "rate limit") {
+			t.Skipf("gh repo creation rate-limited (availability gate): %s", out)
+		}
+		t.Fatalf("gh repo create %s: %v: %s", full, err, out)
+	}
 	// Delete the scratch repo no matter how the test ends. Best effort:
 	// a token without the delete_repo scope cannot delete (loud log, so
 	// a leak is visible in the test output rather than silent).

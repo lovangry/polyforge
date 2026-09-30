@@ -185,11 +185,18 @@ func (o *Observe) serveFlush(w http.ResponseWriter, r *http.Request) {
 	// adoption completes (onFlush), so an old-generation id can still
 	// never reach the flush paths.
 	cur := m.currentAttempt()
+	known := o.instanceKnown(wi)
 	if req.AttemptID == "" ||
-		(req.AttemptID != cur && req.AttemptID != o.instanceKnown(wi)) {
+		(req.AttemptID != cur && req.AttemptID != known) ||
+		// Adoption-window cross-check (the s10 fence's real hole, exposed
+		// by F15 timing): a successor announcement (RTStarted/RTRecovered
+		// emission registers the hub's latest-known) supersedes the
+		// predecessor IMMEDIATELY — an id that still equals the monitor's
+		// lagging cur is already stale when known names someone else.
+		(req.AttemptID == cur && known != "" && req.AttemptID != known) {
 		writeErr(w, api.ErrDaemonConflict,
 			"STALE_ATTEMPT: flush carries attempt_id "+req.AttemptID+
-				"; the current instance is "+cur)
+				"; the current instance is "+cur+" (latest announced: "+known+")")
 		return
 	}
 	// F9 fail-closed gate: a needs_input flush without a question id can

@@ -47,10 +47,12 @@ func TestV1S10FlushAttemptFence(t *testing.T) {
 	if err := syscall.Kill(d.agentPIDOf(t, wi), syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
-	waitUntil(t, 30*time.Second, "lineage never advanced to #1", func() bool {
-		spawns := spawnJournal(t, d.capsuleDir(wi))
-		return len(spawns) == 2
-	})
+	// Wait for the ANNOUNCEMENT to be fully processed (monitor adoption),
+	// not merely the spawn journal: the fence's supersession point is the
+	// RTRecovered emission — before it, the old id is genuinely current
+	// (no successor announced) and a flush under it is legitimate. Waiting
+	// on the journal alone races the announcement.
+	waitForEvent(t, d, wi, "wi_agent_rederived", 30*time.Second)
 	currentInstance := oldInstance + "#1"
 
 	// The stale flush: wrap in the OLD instance's name → DAEMON-409.

@@ -163,19 +163,22 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 		windowRes <- result{code, body}
 	}()
 	time.Sleep(100 * time.Millisecond) // let the window flush reach the monitor
-	// Sentinel through the same fence + flushCh FIFO: when it settles,
-	// the window flush has been processed — and parked.
-	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_cur",
-		Reason: protocol.FlushNeedsInput, QuestionID: "q_fence", Question: "fence?",
-	}, nil)
-	if code != http.StatusOK {
-		t.Fatalf("sentinel (current id) flush: %d %s", code, body)
-	}
 	select {
 	case r := <-windowRes:
 		t.Fatalf("pre-adoption window flush answered too early — it must be queued, not refused: %d %s", r.code, r.body)
 	default:
+	}
+	// Fence cross-check (the s10 hole, now pinned here too): once a
+	// successor is ANNOUNCED, the monitor's still-lagging current id is
+	// ALREADY stale — a flush carrying it is refused at the fence, never
+	// reaching the monitor. (The runtime superseded that agent before
+	// the announcement was emitted; only a zombie speaks in its name.)
+	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
+		WorkItem: "wi_http", AttemptID: "att_cur",
+		Reason: protocol.FlushNeedsInput, QuestionID: "q_fence", Question: "fence?",
+	}, nil)
+	if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_ATTEMPT")) {
+		t.Fatalf("zombie (lagging-current) flush must be refused at the fence: %d %s", code, body)
 	}
 
 	// (2) adoption lands under a SUPERSEDING id: the parked call is
