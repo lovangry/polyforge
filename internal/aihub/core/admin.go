@@ -522,6 +522,10 @@ type ProjectPatchRequest struct {
 	Members       *[]api.ProjectMember `json:"members,omitempty"`
 	RemoveMembers *[]string            `json:"remove_members,omitempty"`
 	Visible       *bool                `json:"visible,omitempty"`
+	// Repos replaces the whole task-repo inventory (explicit full
+	// replacement; every entry is named by the caller, same tradeoff as
+	// the membership rows below).
+	Repos *[]api.ProjectRepo `json:"repos,omitempty"`
 }
 
 // PatchProject applies a project patch. Membership CAS tradeoff vs v0:
@@ -579,6 +583,14 @@ func (m *AdminManager) PatchProject(idOrName string, req ProjectPatchRequest) (*
 	if req.Visible != nil {
 		sets = append(sets, "visible=?")
 		args = append(args, *req.Visible)
+	}
+	if req.Repos != nil {
+		blob, err := json.Marshal(*req.Repos)
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, "repos=?")
+		args = append(args, string(blob))
 	}
 	args = append(args, projectID)
 	if _, err := m.db.Exec(`UPDATE projects SET `+strings.Join(sets, ",")+` WHERE id=?`, args...); err != nil {

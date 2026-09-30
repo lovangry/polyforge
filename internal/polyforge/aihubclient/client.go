@@ -292,6 +292,13 @@ type ProjectPatchRequest struct {
 	Members       *[]ProjectMember `json:"members,omitempty"`
 	RemoveMembers *[]string        `json:"remove_members,omitempty"`
 	Visible       *bool            `json:"visible,omitempty"`
+	Repos         *[]RepoRef       `json:"repos,omitempty"`
+}
+
+// RepoRef is one task-repo inventory entry (name + clone URL).
+type RepoRef struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
 }
 
 // RotateSecretRequest is the M5 body (grace | rollback).
