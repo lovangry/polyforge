@@ -11,10 +11,8 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,7 +28,6 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
@@ -83,9 +80,25 @@ type Config struct {
 	// to its observe adapter so the Observe lane's stream monitoring sees
 	// the record stream; nil (tests, non-pi spawners) disables it.
 	RecordTap func(wi string, line []byte)
+	// RecallTopK bounds the F6-A claim-time memory snapshot: how many
+	// semantic hits over the goal+content query land in the capsule's
+	// runtime-state/recalled-memories.json (default 10, capped at 50).
+	RecallTopK int
+	// MemoryRecall, when non-nil, is the F6-A claim-time semantic-recall
+	// seam: materialize calls it with the claim's goal+content and writes
+	// the answer as a static snapshot for the agent. The daemon binds it
+	// to aihub's memory search face (the machine credential stays with the
+	// daemon — agents hold no aihub credential of any kind); nil disables
+	// the snapshot entirely (slim installs, most unit tests).
+	MemoryRecall func(query string, topK int) ([]RecalledMemory, error)
 }
 
 func (c *Config) fill() {
+	// The harness adapter defaults to the only one that exists today
+	// (the pi spawner); it decides the F7 discovery-copy directory.
+	if c.Harness == "" {
+		c.Harness = "pi"
+	}
 	if c.MaxResumeFails <= 0 {
 		c.MaxResumeFails = 2
 	}
@@ -94,6 +107,9 @@ func (c *Config) fill() {
 	}
 	if c.SendBound <= 0 {
 		c.SendBound = 5 * time.Second
+	}
+	if c.RecallTopK <= 0 {
+		c.RecallTopK = defaultRecallTopK
 	}
 }
 
@@ -132,6 +148,13 @@ type job struct {
 	generation int64
 	state      JobState
 	stopReason string // sealed-in reason while SEALING (restart can finish the stop)
+	// sealedPush records that the final capsule state was ALREADY
+	// committed and pushed by the flush(wrap) half of the dual close
+	// (the flaw fix): the stopOp half then skips its own seal push. It is
+	// set when the SEALING transition records the reason and persisted
+	// with it, so a crash between the flush's push and EndGeneration
+	// keeps the restart's stop finisher from re-pushing either.
+	sealedPush bool
 	capsuleDir string
 	git        gitops.Opts
 	sessionID  string
@@ -242,7 +265,19 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 		// The terminal vocabulary (wrapped|failed|blocked) passes through
 		// VERBATIM: flush(wrap)'s blocked outcome (3 failed seals) must
 		// reach aihub as blocked, not be silently upgraded to wrapped.
-		if err := r.Stop(ctx, msg.WorkItem, msg.Reason); err != nil {
+		//
+		// wrapped|failed additionally mean the monitor's flushWrap has
+		// ALREADY committed and pushed the final state ("wrap: <status>",
+		// its EvPublished) — the dual-path close's other half, this very
+		// Stop, must not push a second time: the attempt credential is
+		// revoked once the sealed state settles, and a redundant seal push
+		// fails against it (the real-machine push_failed: a successful
+		// wrap push followed one second later by a seal push refused with
+		// GIT-500). The blocked vocabulary is the exception: the flush
+		// itself failed to push, so the stop retries the push before
+		// degrading — exactly the pre-existing semantics.
+		sealedByFlush := msg.Reason != protocol.FinishBlocked
+		if err := r.stopWith(ctx, msg.WorkItem, msg.Reason, sealedByFlush); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: stop after completion failed: %v\n", msg.WorkItem, err)
 		}
 	}
@@ -614,11 +649,12 @@ func quarantineCapsule(capsuleDir string) error {
 	return os.Rename(capsuleDir, dst)
 }
 
-// materialize lays out the capsule: workflows/, agents/, capsule.json,
-// session.json, .gitignore and the runtime-state/ tree. The bundle is
-// copied read-only from the daemon checkout when configured; a pinned
-// bundle digest is verified against the copied tree (CAP-405 on
-// divergence, name-derived stand-ins excepted). The claim's task-repo
+// materialize lays out the capsule: workflows/, agents/, .pi/agents/,
+// capsule.json, session.json, .gitignore and the runtime-state/ tree.
+// The bundle is materialized as ONE atomic set with a completion marker
+// (F7, materialize.go): a pinned bundle digest is verified against the
+// STAGED tree before any live target is touched (CAP-405 on divergence,
+// name-derived stand-ins excepted). The claim's task-repo
 // inventory is cloned into repos/<name> BEFORE the capsule identity is
 // written, so the recorded baselines are the true claim-time SHAs.
 func (r *Runtime) materialize(ctx context.Context, j *job) error {
@@ -631,7 +667,8 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 			return err
 		}
 	}
-	if err := os.WriteFile(filepath.Join(j.capsuleDir, ".gitignore"), []byte(capsule.GitignoreContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(j.capsuleDir, ".gitignore"),
+		[]byte(capsule.GitignoreContent+gitignoreSyncLine), 0o644); err != nil {
 		return err
 	}
 	// Task repos land before capsule.json so the identity below can
@@ -683,56 +720,16 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	if err := r.writeWorkItemFile(j); err != nil {
 		return err
 	}
-	if r.cfg.WorkflowsDir == "" || j.bundleName == "" {
-		return nil
-	}
-	src := filepath.Join(r.cfg.WorkflowsDir, j.bundleName)
-	if !dirExists(src) {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s not in checkout; capsule materialized without it\n", j.wi, j.bundleName)
-		return nil
-	}
-	dst := filepath.Join(j.capsuleDir, capsule.DirWorkflows, j.bundleName)
-	if err := copyTree(src, dst); err != nil {
-		return err
-	}
-	// Digest verification (§4.5): the COPIED tree is walked and hashed,
-	// and the aggregate must equal the pinned digest — a bundle whose
-	// checkout diverged from its pin is refused materialization. The
-	// name-derived stand-in (and an absent digest) was never a content
-	// pin: verification is skipped with a notice instead of a refusal.
-	if j.bundleDigest != "" && j.bundleDigest != nameDerivedDigest(j.bundleName) {
-		entries, err := bundleEntries(dst)
-		if err != nil {
-			return err
-		}
-		if got := workflow.Digest(entries); got != j.bundleDigest {
-			return &api.Error{
-				Code:   api.ErrCapCheckoutDiver,
-				Detail: fmt.Sprintf("bundle %s digest mismatch: pinned %s, materialized tree %s", j.bundleName, j.bundleDigest, got),
-			}
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s carries no pinned content digest; materialized without verification\n", j.wi, j.bundleName)
-	}
-	// Candidate-chain extraction (F4): the materialized bundle's
-	// workflow-level defaults model_candidates are read here and pinned
-	// onto the job — spawnAgent pins the derivation to the candidate at
-	// the (persisted) ordinal, so the WI agent never silently runs on the
-	// operator's global default model. Best-effort by design: a missing
-	// or torn frontmatter leaves the chain absent and the spawn unpinned
-	// (the harness adapter's default), never a failed start.
-	if fm, ferr := workflow.ReadFrontmatter(filepath.Join(dst, "workflow.md")); ferr != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: workflow frontmatter unreadable; spawn stays unpinned: %v\n", j.wi, ferr)
-	} else if fm != nil && fm.Defaults != nil {
-		j.mu.Lock()
-		j.candidates = fm.Defaults.ModelCandidates
-		j.mu.Unlock()
-	}
-	// step-agent definitions ride the bundle's agents/ subdir
-	if dirExists(filepath.Join(src, "agents")) {
-		return copyTree(filepath.Join(src, "agents"), filepath.Join(j.capsuleDir, capsule.DirAgents))
-	}
-	return nil
+	// F6-A: the claim-time memory snapshot — a static recall answer the
+	// agent reads like any other capsule input. Best-effort by design:
+	// an unreachable aihub or a zero-hit query degrades to an empty list
+	// plus a notice, never a failed spawn (see recall.go).
+	r.writeRecalledMemories(j)
+	// F7: the bundle copy is ONE atomic set with a completion marker
+	// (materialize.go): the authority copy lands under workflows/<bundle>
+	// and agents/, the harness DISCOVERY copies under .pi/agents/, and
+	// sync/materialized.json gates every later consumer.
+	return r.materializeBundle(j)
 }
 
 // writeWorkItemFile materializes runtime-state/work-item.json (F1): the
@@ -803,48 +800,6 @@ func (r *Runtime) writeWorkItemDoc(j *job, item *api.WorkItem) error {
 	return atomicWrite(filepath.Join(j.capsuleDir, filepath.FromSlash(capsule.WorkItemJSON)), blob, 0o644)
 }
 
-// nameDerivedDigest is the name-derived stand-in aihub stores when a work
-// item pins a bundle by name only (core/workitem.go's default:
-// sha256Hex("bundle-name:"+name)). A pinned digest equal to it is not a
-// content pin, so materialization cannot verify against it.
-func nameDerivedDigest(name string) string {
-	sum := sha256.Sum256([]byte("bundle-name:" + name))
-	return hex.EncodeToString(sum[:])
-}
-
-// bundleEntries walks the copied bundle tree and derives the digest input
-// set: one FileEntry per regular file, path slash-separated relative to
-// the bundle root, SHA-256 over the LF-normalized content, byte length of
-// the normalized content.
-func bundleEntries(root string) ([]workflow.FileEntry, error) {
-	var out []workflow.FileEntry
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, werr error) error {
-		if werr != nil {
-			return werr
-		}
-		if d.IsDir() || !d.Type().IsRegular() {
-			return nil
-		}
-		rel, rerr := filepath.Rel(root, p)
-		if rerr != nil {
-			return rerr
-		}
-		raw, rerr := os.ReadFile(p)
-		if rerr != nil {
-			return rerr
-		}
-		norm := bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
-		sum := sha256.Sum256(norm)
-		out = append(out, workflow.FileEntry{
-			Path:   filepath.ToSlash(rel),
-			Sha256: hex.EncodeToString(sum[:]),
-			Bytes:  uint64(len(norm)),
-		})
-		return nil
-	})
-	return out, err
-}
-
 func copyTree(src, dst string) error {
 	return filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -904,57 +859,78 @@ func atomicWriteFileMode(dst string, in io.Reader, perm os.FileMode) error {
 // SEALING (persisted with its reason) so a restart finishes the close —
 // never a silent half-seal.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
+	return r.stopWith(ctx, wi, reason, false)
+}
+
+// stopWith is Stop plus the dual-close seal knowledge: sealedByFlush
+// names a close whose final capsule state the agent's flush(wrap) path
+// has ALREADY committed and pushed, so stopOp skips its own seal push
+// (see handleOB's OBCompleted branch). The CLI close paths pass false
+// there: their seal push is the only one that ever ran.
+func (r *Runtime) stopWith(ctx context.Context, wi, reason string, sealedByFlush bool) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	j := r.resolveJob(wi)
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
-	return r.stopOp(ctx, j, reason, false)
+	return r.stopOp(ctx, j, reason, false, sealedByFlush)
 }
 
-func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool) error {
+func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, sealedByFlush bool) error {
 	if !alreadySealing {
 		if err := j.transition(StateSealing); err != nil {
 			return err
 		}
 		j.mu.Lock()
 		j.stopReason = reason
+		// Persisted with the reason: a daemon crash between the flush's
+		// push and EndGeneration must not make the restart's stop finisher
+		// re-push either.
+		j.sealedPush = sealedByFlush
 		j.mu.Unlock()
 		r.persist()
 	}
 	// Six-layer teardown: no writer survives into the sealed scene.
 	r.killAgentTree(j)
 
-	// F3: the dead derivation's live transcript rides the seal commit
-	// (C1) — sync before the push, best-effort.
-	r.syncTranscriptBeforeSeal(j)
-
-	// Final push (flush(wrap) semantics, §五). The seq trailer is
-	// gitops' business (derived in-lock). CommitPush is honest on every
-	// path — including a clean tree, where it pushes the standing HEAD —
-	// so a failed first push is retried directly via gitops.Push below.
-	// A persistently failed push degrades the terminal reason to blocked
-	// — the local commit keeps the bytes, but the server never heard the
-	// final state.
+	// Final push (flush(wrap) semantics, §五) — UNLESS the flush path
+	// already sealed: then the final state is committed, pushed and
+	// published, the transcript rode that push, and a second push can
+	// only fail against the revoked attempt credential (the real-machine
+	// push_failed one second after a successful wrap push). Only the
+	// read-only seal and the terminal close remain for this half of the
+	// dual path.
 	finalReason := reason
-	_, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
-	for i := 0; i < 2 && perr != nil; i++ {
-		_, perr = gitops.Push(j.git)
-	}
-	if perr != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: final push failed after retries: %v\n", j.wi, perr)
-		// Degrade to blocked (kept semantics: the local commit keeps the
-		// bytes; the server never heard the final state) — but leave a
-		// durable, field-diagnosable trace in the daemon events log too:
-		// the pause/wrap close path's seal failure is otherwise visible
-		// only in this process's stderr.
-		if r.cfg.EventTap != nil {
-			r.cfg.EventTap(j.wi, "push_failed", map[string]any{
-				"phase": "seal", "reason": reason, "error": perr.Error(),
-			})
+	if !sealedByFlush {
+		// F3: the dead derivation's live transcript rides the seal commit
+		// (C1) — sync before the push, best-effort.
+		r.syncTranscriptBeforeSeal(j)
+
+		// The seq trailer is gitops' business (derived in-lock).
+		// CommitPush is honest on every path — including a clean tree,
+		// where it pushes the standing HEAD — so a failed first push is
+		// retried directly via gitops.Push below. A persistently failed
+		// push degrades the terminal reason to blocked — the local commit
+		// keeps the bytes, but the server never heard the final state.
+		_, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
+		for i := 0; i < 2 && perr != nil; i++ {
+			_, perr = gitops.Push(j.git)
 		}
-		finalReason = protocol.FinishBlocked
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: final push failed after retries: %v\n", j.wi, perr)
+			// Degrade to blocked (kept semantics: the local commit keeps the
+			// bytes; the server never heard the final state) — but leave a
+			// durable, field-diagnosable trace in the daemon events log too:
+			// the pause/wrap close path's seal failure is otherwise visible
+			// only in this process's stderr.
+			if r.cfg.EventTap != nil {
+				r.cfg.EventTap(j.wi, "push_failed", map[string]any{
+					"phase": "seal", "reason": reason, "error": perr.Error(),
+				})
+			}
+			finalReason = protocol.FinishBlocked
+		}
 	}
 	if err := r.hub.EndGeneration(j.wi, aihubclient.EndGenerationRequest{
 		AttemptID:  j.attempt,

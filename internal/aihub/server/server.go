@@ -820,24 +820,46 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 		tags = strings.Split(t, ",")
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	s.hSearchRun(w, q.Get("q"), q.Get("type"), tags, limit, idn)
+	excerpt, _ := strconv.Atoi(q.Get("excerpt"))
+	s.hSearchRun(w, q.Get("q"), q.Get("type"), tags, limit, excerpt, idn)
 }
 
 func (s *Server) hSearchMemoryPOST(w http.ResponseWriter, r *http.Request, idn *identity) {
 	var req struct {
-		Q     string   `json:"q"`
-		Type  string   `json:"type,omitempty"`
-		Tags  []string `json:"tags,omitempty"`
-		Limit int      `json:"limit,omitempty"`
+		Q       string   `json:"q"`
+		Type    string   `json:"type,omitempty"`
+		Tags    []string `json:"tags,omitempty"`
+		Limit   int      `json:"limit,omitempty"`
+		Excerpt int      `json:"excerpt,omitempty"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
 	}
-	s.hSearchRun(w, req.Q, req.Type, req.Tags, req.Limit, idn)
+	s.hSearchRun(w, req.Q, req.Type, req.Tags, req.Limit, req.Excerpt, idn)
 }
 
-func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags []string, limit int, idn *identity) {
+// maxMemoryExcerptRunes bounds the content excerpt a search answer may
+// carry (the F6 recall faces ask for bounded excerpts; the cap keeps a
+// hostile/absent caller from turning search into a full-content dump).
+const maxMemoryExcerptRunes = 8192
+
+// memoryHit is one search answer row with a content excerpt attached:
+// every memory.Entry field (embedded, marshaled flat) plus the first
+// excerpt runes of the authority content. Only served when the caller
+// asked for an excerpt — the plain search answer stays the v0 shape.
+type memoryHit struct {
+	memory.Entry
+	ContentExcerpt string `json:"content_excerpt,omitempty"`
+}
+
+// memoryHitList is the excerpt search answer (ListResponse shape).
+type memoryHitList struct {
+	Items []memoryHit `json:"items"`
+	Total int         `json:"total"`
+}
+
+func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags []string, limit, excerpt int, idn *identity) {
 	// Membership-first filtering: restrict to the projects the caller can
 	// read before visibility tiers apply.
 	allowed := s.memAllowed(idn)
@@ -859,7 +881,55 @@ func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags [
 	if items == nil {
 		items = []memory.Entry{}
 	}
+	// The excerpt extension (F6): a caller that names an excerpt length
+	// gets each hit with a bounded content prefix attached. Purely
+	// additive — an absent/zero excerpt keeps the exact v0 answer shape.
+	if excerpt > 0 {
+		if excerpt > maxMemoryExcerptRunes {
+			excerpt = maxMemoryExcerptRunes
+		}
+		hits := make([]memoryHit, 0, len(items))
+		for i := range items {
+			h := memoryHit{Entry: items[i]}
+			if content, cerr := s.Mems.Content(items[i].ID); cerr == nil {
+				h.ContentExcerpt = excerptBody(string(content), excerpt)
+			}
+			hits = append(hits, h)
+		}
+		writeJSON(w, http.StatusOK, memoryHitList{Items: hits, Total: len(hits)})
+		return
+	}
 	writeJSON(w, http.StatusOK, api.ListResponse[memory.Entry]{Items: items, Total: len(items)})
+}
+
+// excerptBody answers the first n runes of the memory's BODY: the
+// authority file's leading frontmatter block (the id/type/title rows
+// the hit already carries as fields) is skipped, so the excerpt is
+// content, not metadata echo.
+func excerptBody(authority string, n int) string {
+	body := authority
+	if strings.HasPrefix(body, "---\n") {
+		if i := strings.Index(body[4:], "\n---"); i >= 0 {
+			body = strings.TrimLeft(body[4+i+4:], "\n")
+		}
+	}
+	return firstRunes(body, n)
+}
+
+// firstRunes answers the first n runes of s (shorter strings pass
+// through; n <= 0 answers "").
+func firstRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	c := 0
+	for i := range s {
+		if c == n {
+			return s[:i]
+		}
+		c++
+	}
+	return s
 }
 
 func (s *Server) hRebuildIndex(w http.ResponseWriter, r *http.Request, idn *identity) {

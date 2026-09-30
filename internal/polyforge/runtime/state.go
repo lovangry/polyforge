@@ -96,6 +96,9 @@ type jobRecord struct {
 	Generation int64  `json:"generation"`
 	State      string `json:"state"`
 	StopReason string `json:"stop_reason,omitempty"`
+	// SealedPush: the SEALING record's seal-knowledge (see job.sealedPush)
+	// — the restart's stop finisher skips its own seal push when set.
+	SealedPush bool   `json:"sealed_push,omitempty"`
 	CapsuleDir string `json:"capsule_dir"`
 	GitDir     string `json:"git_dir"`
 	RemoteURL  string `json:"remote_url"`
@@ -137,6 +140,7 @@ func (j *job) record() *jobRecord {
 		Generation:       j.generation,
 		State:            string(j.state),
 		StopReason:       j.stopReason,
+		SealedPush:       j.sealedPush,
 		CapsuleDir:       j.capsuleDir,
 		GitDir:           j.git.GitDir,
 		RemoteURL:        j.git.RemoteURL,
@@ -167,6 +171,7 @@ func jobFromRecord(rec *jobRecord) *job {
 		generation: rec.Generation,
 		state:      JobState(rec.State),
 		stopReason: rec.StopReason,
+		sealedPush: rec.SealedPush,
 		capsuleDir: rec.CapsuleDir,
 		git: gitops.Opts{
 			WorkItemID: rec.WorkItemID,

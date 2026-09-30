@@ -34,49 +34,58 @@ import (
 
 // Hub is the aihub face the daemon itself needs beyond Runtime's claim/
 // end-generation use: the ready-queue projection (batch recommendation,
-// drain loop) and the terminal-state check of the wrap/pause arbitration.
-// *aihubclient.Client satisfies it.
+// drain loop), the terminal-state check of the wrap/pause arbitration,
+// and — through the generic Do — the memory faces the F6 lanes proxy
+// through (search with an excerpt, memory create). *aihubclient.Client
+// satisfies it.
 type Hub interface {
 	runtime.Aihub
 	Queue(project string) ([]api.WorkItem, error)
+	// Do performs one typed request against aihub (the client's own
+	// generic entry): the F6 memory adapters use it for the calls the
+	// shared client carries no typed method for.
+	Do(method, path string, body, out any) error
 }
 
 // Config wires the daemon. Zero fields take the defaults in fill().
 type Config struct {
-	MachineID         string
-	SocketPath        string // UDS listen path (default /run/polyforge.sock)
-	WorkspaceRoot     string // <root>/capsules/<wi> are the capsule worktrees
-	DataDir           string // runtime state.json + events.log + daemon-state.json
-	Project           string // ready-queue scope for batch/drain
-	GitRemoteBase     string // <base>/<wi>.git are the aihub bare repos
-	WorkflowsDir      string // daemon checkout's workflows/
+	MachineID          string
+	SocketPath         string // UDS listen path (default /run/polyforge.sock)
+	WorkspaceRoot      string // <root>/capsules/<wi> are the capsule worktrees
+	DataDir            string // runtime state.json + events.log + daemon-state.json
+	Project            string // ready-queue scope for batch/drain
+	GitRemoteBase      string // <base>/<wi>.git are the aihub bare repos
+	WorkflowsDir       string // daemon checkout's workflows/
 	ExecutorPromptFile string
-	PiBin             string
+	PiBin              string
 	// HarnessSessionsRoot overrides the harness's default session store
 	// for the live-transcript locator (F3); "" = ~/.pi/agent/sessions.
 	HarnessSessionsRoot string
-	CgroupRoot        string
-	APIKey            string // machine credential; NEVER reaches an agent env
-	MaxConcurrent     int    // cross-mode concurrency cap (default 4)
-	Mode              string // initial mode; "" = not specified (persisted mode wins; default interactive)
-	Harness           string // harness adapter name (default "pi")
+	CgroupRoot          string
+	APIKey              string // machine credential; NEVER reaches an agent env
+	MaxConcurrent       int    // cross-mode concurrency cap (default 4)
+	// RecallTopK is the F6-A claim-time memory snapshot's hit count
+	// (0 = the runtime default, 10; bounded at 50 there).
+	RecallTopK int
+	Mode       string // initial mode; "" = not specified (persisted mode wins; default interactive)
+	Harness    string // harness adapter name (default "pi")
 
 	// Test/ops knobs.
-	Spawner           runtime.Spawner   // nil = the production pi spawner
-	Hub               Hub               // required; aihubclient.Client satisfies
-	PushFunc          observe.PushFunc  // nil = the shared gitops choke point
-	ObservePoll       time.Duration   // observe execution.json poll tick
+	Spawner     runtime.Spawner  // nil = the production pi spawner
+	Hub         Hub              // required; aihubclient.Client satisfies
+	PushFunc    observe.PushFunc // nil = the shared gitops choke point
+	ObservePoll time.Duration    // observe execution.json poll tick
 	// Observe carries the observe lane's supervision windows into the
 	// assembly — the injection seam the fault-injection scenarios shrink
 	// (hang watchdog, liveness-probe bound, answer-ack window). Zero
 	// fields keep the observe defaults (10min / 2min / 2min).
 	Observe           ObserveWindows
-	DrainInterval     time.Duration   // drain wave-fetch period (5s)
-	DispatchTick      time.Duration   // dispatcher/backfill period (200ms)
-	NoticeAckBound    time.Duration   // stop_notice ack wait (30s)
-	ShutdownFlushWait time.Duration  // per-job flush(shutdown) wait (60s)
-	ShutdownBudget    time.Duration  // whole-shutdown ceiling (5min)
-	ExitPoll          time.Duration  // adapter exit-poll period (200ms)
+	DrainInterval     time.Duration // drain wave-fetch period (5s)
+	DispatchTick      time.Duration // dispatcher/backfill period (200ms)
+	NoticeAckBound    time.Duration // stop_notice ack wait (30s)
+	ShutdownFlushWait time.Duration // per-job flush(shutdown) wait (60s)
+	ShutdownBudget    time.Duration // whole-shutdown ceiling (5min)
+	ExitPoll          time.Duration // adapter exit-poll period (200ms)
 }
 
 // ObserveWindows is the observe-lane supervision-window subset of the
@@ -137,8 +146,8 @@ type Daemon struct {
 	rt  *runtime.Runtime
 	obs *observe.Observe
 
-	rtMsgs  chan protocol.RTMsg
-	obMsgs  chan protocol.OBMsg
+	rtMsgs   chan protocol.RTMsg
+	obMsgs   chan protocol.OBMsg
 	attachCh chan observe.Attach
 
 	// sealGuard serializes the two close paths (CLI wrap/pause vs the
@@ -154,13 +163,13 @@ type Daemon struct {
 	cancelRun context.CancelFunc
 	rtDone    chan struct{} // closed when the runtime message loop exited
 
-	shutOnce  sync.Once
-	shutDone  chan struct{} // closed when the FIRST shutdown sequence finished
-	shutMu    sync.Mutex
+	shutOnce    sync.Once
+	shutDone    chan struct{} // closed when the FIRST shutdown sequence finished
+	shutMu      sync.Mutex
 	shutdownErr error
 
-	adapMu    sync.Mutex
-	adapters  map[string]*agentAdapter
+	adapMu   sync.Mutex
+	adapters map[string]*agentAdapter
 
 	lst net.Listener
 	srv *http.Server
@@ -178,18 +187,18 @@ func New(cfg Config) (*Daemon, error) {
 	cfg.fill()
 
 	rtCfg := runtime.Config{
-		MachineID:      cfg.MachineID,
-		WorkspaceRoot: cfg.WorkspaceRoot,
-		DataDir:        cfg.DataDir,
-		GitRemoteBase:  cfg.GitRemoteBase,
-		WorkflowsDir:   cfg.WorkflowsDir,
-		Harness:        cfg.Harness,
-		PiBin:          cfg.PiBin,
+		MachineID:           cfg.MachineID,
+		WorkspaceRoot:       cfg.WorkspaceRoot,
+		DataDir:             cfg.DataDir,
+		GitRemoteBase:       cfg.GitRemoteBase,
+		WorkflowsDir:        cfg.WorkflowsDir,
+		Harness:             cfg.Harness,
+		PiBin:               cfg.PiBin,
 		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
-		CgroupRoot:     cfg.CgroupRoot,
-		SocketPath:     cfg.SocketPath, // the spawned agent's PF_DAEMON_SOCKET (flush proxy, §五)
-		EnvSecrets:     []string{cfg.APIKey},
-		ExecutorPromptFile: cfg.ExecutorPromptFile,
+		CgroupRoot:          cfg.CgroupRoot,
+		SocketPath:          cfg.SocketPath, // the spawned agent's PF_DAEMON_SOCKET (flush proxy, §五)
+		EnvSecrets:          []string{cfg.APIKey},
+		ExecutorPromptFile:  cfg.ExecutorPromptFile,
 	}
 	// Runtime-sourced diagnostic events (a seal push that failed after
 	// its retries, pilot item 3) land in the observe lane's durable
@@ -220,6 +229,12 @@ func New(cfg Config) (*Daemon, error) {
 	rtCfg.EventTap = d.tapRuntimeEvent
 
 	rtCfg.RecordTap = d.tapRecord
+	// F6-A: the claim-time memory snapshot seam — the daemon binds it to
+	// aihub's memory search (bounded excerpts; the machine credential
+	// stays here, never in an agent env). See memface.go. The hit count
+	// rides the runtime config (RecallTopK; 0 keeps the default 10).
+	rtCfg.RecallTopK = cfg.RecallTopK
+	rtCfg.MemoryRecall = recallSnapshot(cfg.Hub)
 	rt := runtime.New(rtCfg, cfg.Hub, sp, d.rtMsgs, d.obMsgs)
 	obs, err := observe.New(observe.Config{
 		RT:           d.attachCh,
@@ -235,6 +250,9 @@ func New(cfg Config) (*Daemon, error) {
 			return runtime.LocateLiveTranscript(cfg.HarnessSessionsRoot, capsuleDir, spawnAt)
 		},
 		Resolve: d.resolveWI,
+		// F6-B: the narrow memory channel's proxy seam — recall/remember
+		// over the UDS face, all daemon-side against aihub (memface.go).
+		MemoryFace: memFace{hub: cfg.Hub},
 		// Bug-4 seam: the supervision windows pass through; zero fields
 		// keep the observe defaults.
 		HangWindow:      cfg.Observe.HangWindow,
@@ -360,7 +378,7 @@ func (d *Daemon) reattachRecovered() {
 // commit-boundary transcript sync reads.
 func (d *Daemon) buildAttach(msg protocol.RTMsg, ji runtime.JobInfo) observe.Attach {
 	return observe.Attach{
-		Msg: msg,
+		Msg:    msg,
 		Handle: d.installAdapter(ji),
 		WI: observe.WIInfo{
 			WorkItem:       ji.WorkItem,
@@ -454,10 +472,10 @@ func (d *Daemon) bridge() {
 // the two exported faces without either lane knowing the other.
 
 type agentAdapter struct {
-	h       runtime.AgentHandle
-	attempt string
-	records chan []byte
-	exit    chan struct{}
+	h        runtime.AgentHandle
+	attempt  string
+	records  chan []byte
+	exit     chan struct{}
 	pollStop chan struct{}
 	retire   sync.Once
 }

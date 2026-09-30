@@ -336,3 +336,41 @@ func TestDaemonVerbJSONPassthrough(t *testing.T) {
 		t.Errorf("--json passthrough altered the body: %s", stdout)
 	}
 }
+
+func TestVerbRememberRequestShape(t *testing.T) {
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"id":"mem_new","type":"experience.debug","visibility":"project","created_at":"t","updated_at":"t"}`)
+	})
+	code, stdout, stderr := runPf(t, map[string]string{"PF_SERVER": srv.URL, "PF_API_KEY": "k_cli", "PF_PROJECT": "polyforge"},
+		"remember", "--type", "experience.debug", "--title", "ladders",
+		"--tags", "infra,flaky", "--work-item", "wi_abc",
+		"the lesson about bounded retry ladders")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	got := rec.last()
+	if got.Method != "POST" || got.Path != "/api/v1/memories" {
+		t.Errorf("request = %s %s", got.Method, got.Path)
+	}
+	for _, want := range []string{
+		`"project":"polyforge"`, `"type":"experience.debug"`,
+		`"title":"ladders"`, `"visibility":"project"`,
+		`"tags":["infra","flaky"]`, `"work_item_id":"wi_abc"`,
+		`"content":"the lesson about bounded retry ladders"`,
+	} {
+		if !strings.Contains(got.Body, want) {
+			t.Errorf("body missing %s: %s", want, got.Body)
+		}
+	}
+	if !strings.Contains(stdout, "stored mem_new") {
+		t.Errorf("stdout = %q", stdout)
+	}
+
+	// Validation: a missing --type is a client-side refusal (no wire call).
+	srv2 := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {})
+	if code, _, _ := runPf(t, map[string]string{"PF_SERVER": srv2.URL, "PF_PROJECT": "polyforge"},
+		"remember", "content only"); code != 1 {
+		t.Fatalf("missing --type: code=%d, want 1", code)
+	}
+}

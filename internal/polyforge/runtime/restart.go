@@ -205,7 +205,10 @@ func (r *Runtime) restartRunning(ctx context.Context, rec *jobRecord) error {
 			reason != protocol.FinishBlocked {
 			reason = protocol.FinishWrapped
 		}
-		return r.stopOp(ctx, j, reason, true)
+		j.mu.Lock()
+		sealed := j.sealedPush
+		j.mu.Unlock()
+		return r.stopOp(ctx, j, reason, true, sealed)
 	}
 	if state == StateDone {
 		r.forgetRecord(rec)

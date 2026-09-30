@@ -55,6 +55,12 @@ type Config struct {
 	// calls by the operator's submitted spelling find the monitor.
 	// nil = no resolution (the route id must already be canonical).
 	Resolve func(wi string) string
+	// MemoryFace is the F6-B narrow aihub memory proxy the recall/remember
+	// UDS routes call behind the flush-mode attempt fence. The daemon
+	// binds it to the shared aihub client (agents hold no aihub
+	// credential — every server call is the daemon's); nil disables both
+	// routes with the typed not-configured refusal. See memory.go.
+	MemoryFace MemoryFace
 
 	PollInterval time.Duration // execution.json poll tick (500ms)
 	HangWindow   time.Duration // stream-silence window while a turn is in flight (10min)

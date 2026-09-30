@@ -49,6 +49,7 @@ var commands = []*Command{
 	cmdQueue,
 	cmdCancel,
 	cmdRecall,
+	cmdRemember,
 	cmdSubmit,
 	cmdObserve,
 	cmdAnswer,
