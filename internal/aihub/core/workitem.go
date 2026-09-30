@@ -365,9 +365,11 @@ func (m *WIManager) Events(wiID string) ([]Event, error) {
 	var out []Event
 	for rows.Next() {
 		var e Event
-		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.Actor, &e.Type, &e.Payload); err != nil {
+		var payload string
+		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.Actor, &e.Type, &payload); err != nil {
 			return nil, err
 		}
+		e.Payload = json.RawMessage(payload)
 		out = append(out, e)
 	}
 	return out, rows.Err()

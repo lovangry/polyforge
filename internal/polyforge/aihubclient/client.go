@@ -363,3 +363,57 @@ func (c *Client) Backup() (json.RawMessage, error) {
 func (c *Client) RotateSecret(req RotateSecretRequest) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/service/rotate-secret", req)
 }
+
+// ---------------------------------------------------------------------------
+// Migration face (admin): the one-shot record import paths.
+// ---------------------------------------------------------------------------
+
+// ImportWorkItemRequest is the POST /api/v1/admin/import-work-item body;
+// it mirrors core.ImportRequest (the target server owns the domain).
+type ImportWorkItemRequest struct {
+	Project        string          `json:"project"`
+	ID             string          `json:"id"`
+	Seq            *int64          `json:"seq"`
+	Goal           string          `json:"goal"`
+	Content        *string         `json:"content"`
+	Status         string          `json:"status"`
+	Priority       string          `json:"priority"`
+	Milestone      *string         `json:"milestone"`
+	Labels         []string        `json:"labels"`
+	Attrs          map[string]any  `json:"attrs"`
+	Reporter       string          `json:"reporter"`
+	Assignee       *string         `json:"assignee"`
+	WaitingOn      *string         `json:"waiting_on"`
+	BundleName     *string         `json:"bundle_name"`
+	BundleDigest   *string         `json:"bundle_digest"`
+	BudgetBaseline json.RawMessage `json:"workflow_budget_baseline"`
+	CreatedAt      string          `json:"created_at"`
+	UpdatedAt      string          `json:"updated_at"`
+	ClosedAt       *string         `json:"closed_at"`
+}
+
+// ImportResult is the import answer.
+type ImportResult struct {
+	Outcome  string        `json:"outcome"` // imported | skipped-existing
+	WorkItem *api.WorkItem `json:"work_item"`
+}
+
+// ImportWorkItem imports one migration record (admin face).
+func (c *Client) ImportWorkItem(req ImportWorkItemRequest) (*ImportResult, error) {
+	var out ImportResult
+	if err := c.Do("POST", "/api/v1/admin/import-work-item", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RebuildMemoryIndex triggers the explicit reconcile/backfill (admin).
+func (c *Client) RebuildMemoryIndex() (int, error) {
+	var out struct {
+		Reindexed int `json:"reindexed"`
+	}
+	if err := c.Do("POST", "/api/v1/memories/rebuild-index", map[string]any{}, &out); err != nil {
+		return 0, err
+	}
+	return out.Reindexed, nil
+}
