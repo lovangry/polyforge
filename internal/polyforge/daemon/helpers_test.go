@@ -26,11 +26,11 @@ import (
 // fake agent handle
 
 type fakeAgent struct {
-	mu        sync.Mutex
-	done      bool
+	mu         sync.Mutex
+	done       bool
 	terminated bool
-	sent      []protocol.ControlMsg
-	ackFn     func(method string) error
+	sent       []protocol.ControlMsg
+	ackFn      func(method string) error
 }
 
 func (a *fakeAgent) PID() int          { return 0 } // runtime's kill guard no-ops on pid<=0
@@ -90,9 +90,9 @@ func (a *fakeAgent) sentAnswer(id, text string) bool {
 // fake spawner
 
 type fakeSpawner struct {
-	mu       sync.Mutex
-	calls    []runtime.SpawnParams
-	spawned  []*fakeAgent // one entry per Spawn, in order
+	mu      sync.Mutex
+	calls   []runtime.SpawnParams
+	spawned []*fakeAgent // one entry per Spawn, in order
 }
 
 func (s *fakeSpawner) Spawn(ctx context.Context, p runtime.SpawnParams) (runtime.AgentHandle, error) {
@@ -143,6 +143,10 @@ type fakeHub struct {
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string
+	// memDo, when non-nil, serves the generic Do calls the F6 memory
+	// adapters make (search + memory create); nil answers a typed
+	// refusal. The tests that exercise the memory lanes script it.
+	memDo func(method, path string, body, out any) error
 }
 
 type endCall struct {
@@ -205,6 +209,17 @@ func (h *fakeHub) Queue(project string) ([]api.WorkItem, error) {
 	out := make([]api.WorkItem, 0, len(h.queues))
 	out = append(out, h.queues...)
 	return out, nil
+}
+
+// Do serves the generic typed-request face the F6 memory adapters use.
+func (h *fakeHub) Do(method, path string, body, out any) error {
+	h.mu.Lock()
+	fn := h.memDo
+	h.mu.Unlock()
+	if fn == nil {
+		return &api.Error{Code: api.ErrDaemonInternal, Detail: "fakeHub: Do call not scripted"}
+	}
+	return fn(method, path, body, out)
 }
 
 func (h *fakeHub) endCount() int {
@@ -329,21 +344,21 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 	hub := newFakeHub()
 	sp := &fakeSpawner{}
 	cfg := Config{
-		MachineID:     "m-test",
-		SocketPath:    filepath.Join(dir, "s.sock"),
-		WorkspaceRoot: ws,
-		DataDir:       data,
-		Project:       "proj",
-		GitRemoteBase: hubBase,
-		MaxConcurrent: 4,
-		Hub:           hub,
-		Spawner:       sp,
-		ObservePoll:   10 * time.Millisecond,
-		DrainInterval: 10 * time.Millisecond,
-		DispatchTick:  10 * time.Millisecond,
-		NoticeAckBound: 100 * time.Millisecond,
+		MachineID:         "m-test",
+		SocketPath:        filepath.Join(dir, "s.sock"),
+		WorkspaceRoot:     ws,
+		DataDir:           data,
+		Project:           "proj",
+		GitRemoteBase:     hubBase,
+		MaxConcurrent:     4,
+		Hub:               hub,
+		Spawner:           sp,
+		ObservePoll:       10 * time.Millisecond,
+		DrainInterval:     10 * time.Millisecond,
+		DispatchTick:      10 * time.Millisecond,
+		NoticeAckBound:    100 * time.Millisecond,
 		ShutdownFlushWait: 100 * time.Millisecond,
-		ExitPoll:      10 * time.Millisecond,
+		ExitPoll:          10 * time.Millisecond,
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -438,4 +453,3 @@ func (td *testDaemon) waitMonitored(t *testing.T, wi string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
-

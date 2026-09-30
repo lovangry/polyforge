@@ -51,6 +51,12 @@ const (
 	// stays the primary archival semantic.
 	EvVersionStagnant = "version_stagnant"
 	EvJobStopped      = "job_stopped"
+	// The F6-B memory channel bookkeeping: one event per UDS recall /
+	// remember the daemon proxied (payload: top_k + hit count, or the
+	// stored id/type/visibility). Observability only — the routes are
+	// stateless proxies and carry no monitor state.
+	EvMemoryRecall   = "memory_recall"
+	EvMemoryRemember = "memory_remember"
 )
 
 // Infra-incident payload kinds (04 §5.1a tenth-event family).

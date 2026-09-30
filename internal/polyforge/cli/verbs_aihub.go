@@ -419,3 +419,86 @@ var cmdRecall = &Command{
 		return nil
 	},
 }
+
+// ---------------------------------------------------------------------------
+// remember — memory write face (the v1 CLI's read verb is `recall`; this
+// is its missing write counterpart — the hole the F6 lane closes on the
+// human side too).
+// ---------------------------------------------------------------------------
+
+var cmdRemember = &Command{
+	Name:    "remember",
+	Summary: "Store a project memory (the write face of `recall`)",
+	Usage: "pf remember [--project P] --type T [--title S] [--visibility V] [--tags a,b] " +
+		"[--work-item ID] <content | - (stdin) | @file>",
+	Setup: func(fs *flag.FlagSet) {
+		fs.String("project", "", "project name (default: the configured project)")
+		fs.String("type", "", "memory type (required, e.g. experience.debug, fact.note)")
+		fs.String("title", "", "memory title")
+		fs.String("visibility", "project", "admin|private|project|team|public")
+		fs.String("tags", "", "comma-separated tags")
+		fs.String("work-item", "", "attributing work item id (optional)")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		memType := stringFlag(fs, "type")
+		if strings.TrimSpace(memType) == "" {
+			return fmt.Errorf("remember: --type is required (e.g. experience.debug)")
+		}
+		proj := stringFlag(fs, "project")
+		if proj == "" {
+			proj = ctx.Cfg.Project
+		}
+		if proj == "" {
+			return fmt.Errorf("remember: --project is required (or set project in the config)")
+		}
+		// The content: positional text, '-' for stdin, '@file' for a file.
+		var content string
+		switch {
+		case len(args) == 1 && args[0] == "-":
+			raw, err := io.ReadAll(ctx.Stdin)
+			if err != nil {
+				return err
+			}
+			content = string(raw)
+		case len(args) == 1 && strings.HasPrefix(args[0], "@"):
+			raw, err := os.ReadFile(strings.TrimPrefix(args[0], "@"))
+			if err != nil {
+				return err
+			}
+			content = string(raw)
+		case len(args) >= 1:
+			content = strings.Join(args, " ")
+		default:
+			return fmt.Errorf("remember: content is required (positional, '-' for stdin or '@file')")
+		}
+		if strings.TrimSpace(content) == "" {
+			return fmt.Errorf("remember: content is required")
+		}
+		body := map[string]any{
+			"project":    proj,
+			"type":       memType,
+			"content":    content,
+			"visibility": stringFlag(fs, "visibility"),
+		}
+		if t := stringFlag(fs, "title"); t != "" {
+			body["title"] = t
+		}
+		if tags := stringFlag(fs, "tags"); tags != "" {
+			body["tags"] = strings.Split(tags, ",")
+		}
+		if wi := stringFlag(fs, "work-item"); wi != "" {
+			body["work_item_id"] = wi
+		}
+		var raw json.RawMessage
+		if err := ctx.aihub().Do("POST", "/api/v1/memories", body, &raw); err != nil {
+			return err
+		}
+		ctx.finish(raw, func() {
+			var m api.Memory
+			if err := json.Unmarshal(raw, &m); err == nil && m.ID != "" {
+				fmt.Fprintf(ctx.Stdout, "stored %s (type %s, visibility %s)\n", m.ID, m.Type, m.Visibility)
+			}
+		})
+		return nil
+	},
+}

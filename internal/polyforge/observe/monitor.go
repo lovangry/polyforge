@@ -1224,6 +1224,14 @@ func (m *Monitor) currentAttempt() string {
 	return m.attemptID
 }
 
+// canonicalWI answers the CANONICAL work-item id this monitor is keyed
+// by (the F2 authority: a slug or any other submitted spelling that
+// reached the monitor through lookup is an alias only — memory
+// attribution must never record it).
+func (m *Monitor) canonicalWI() string {
+	return m.wi.WorkItem
+}
+
 // markClosing arms the expected-exit suppression (the daemon-initiated
 // close path; see Observe.MarkClosing). The flag is the same one the
 // flush(wrap) path arms, so onExit's suppression set needs no new

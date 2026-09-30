@@ -637,3 +637,49 @@ func TestClaimResponseCarriesProjectRepos(t *testing.T) {
 		t.Fatalf("claim repos wrong over HTTP: %+v", resp.Claim.Repos)
 	}
 }
+
+// TestMemorySearchExcerpt (F6): the search face's additive excerpt
+// extension — a caller that names an excerpt length gets each hit with a
+// bounded content prefix attached (content_excerpt); a plain search
+// keeps the exact v0 answer shape (no excerpt key at all).
+func TestMemorySearchExcerpt(t *testing.T) {
+	e := newSrvEnv(t)
+	if code, raw := e.do(t, "POST", "/api/v1/memories", e.key, map[string]any{
+		"project": "alpha", "type": "experience.debug", "visibility": "project",
+		"content": "the lesson about bounded retry ladders",
+	}, nil); code != 201 {
+		t.Fatalf("create memory: %d %s", code, raw)
+	}
+
+	// Plain search: the v0 shape, no excerpt key on the row.
+	var plain struct {
+		Items []map[string]any `json:"items"`
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=ladders", e.key, nil, &plain); code != 200 || len(plain.Items) != 1 {
+		t.Fatalf("plain search: %d %s", code, raw)
+	}
+	if _, has := plain.Items[0]["content_excerpt"]; has {
+		t.Fatalf("plain search must not carry an excerpt: %v", plain.Items[0])
+	}
+
+	// GET with an excerpt: a bounded rune prefix of the authority content.
+	var with struct {
+		Items []struct {
+			ID             string `json:"id"`
+			ContentExcerpt string `json:"content_excerpt"`
+		} `json:"items"`
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=ladders&excerpt=9", e.key, nil, &with); code != 200 || len(with.Items) != 1 {
+		t.Fatalf("excerpt search: %d %s", code, raw)
+	}
+	if with.Items[0].ContentExcerpt != "the lesso" {
+		t.Fatalf("content_excerpt = %q, want the first 9 runes", with.Items[0].ContentExcerpt)
+	}
+
+	// POST with an excerpt: the same extension on the POST face.
+	if code, raw := e.do(t, "POST", "/api/v1/memories/search", e.key, map[string]any{
+		"q": "ladders", "excerpt": 40,
+	}, &with); code != 200 || len(with.Items) != 1 || with.Items[0].ContentExcerpt != "the lesson about bounded retry ladders" {
+		t.Fatalf("POST excerpt search: %d %s (%+v)", code, raw, with.Items)
+	}
+}

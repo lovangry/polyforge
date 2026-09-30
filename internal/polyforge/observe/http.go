@@ -1,13 +1,16 @@
 package observe
 
-// http.go: the observe lane's three UDS routes (04 §5.1; the agent UDS
-// flush entry per ruling C2). The handler owns ONLY these routes — mux
+// http.go: the observe lane's UDS routes (04 §5.1; the agent UDS
+// flush entry per ruling C2, plus the F6-B memory channel on the same
+// face). The handler owns ONLY these routes — mux
 // assembly into the daemon's socket server happens in phase 3.
 //
 //	GET  /jobs/{id}/observe — the JobView projection (two layers:
 //	                            execution.json direct read + events ring)
 //	POST /jobs/{id}/answer   — the interactive answer relay
 //	POST /jobs/{id}/flush    — the agent's flush(reason) entry
+//	POST /jobs/{id}/recall   — F6-B: narrow memory search proxy
+//	POST /jobs/{id}/remember — F6-B: narrow memory write-back proxy
 //
 // Every handler routes the request to the per-WI monitor over a buffered
 // channel and waits bounded (CallTimeout); the monitor's select loop is
@@ -31,6 +34,10 @@ func (o *Observe) Handler() http.Handler {
 	mux.HandleFunc("GET /jobs/{wi}/observe", o.serveObserve)
 	mux.HandleFunc("POST /jobs/{wi}/answer", o.serveAnswer)
 	mux.HandleFunc("POST /jobs/{wi}/flush", o.serveFlush)
+	// F6-B: the narrow memory channel, same face and same attempt-id
+	// fence as flush (memory.go). Stateless proxies — no monitor state.
+	mux.HandleFunc("POST /jobs/{wi}/recall", o.serveRecall)
+	mux.HandleFunc("POST /jobs/{wi}/remember", o.serveRemember)
 	return mux
 }
 

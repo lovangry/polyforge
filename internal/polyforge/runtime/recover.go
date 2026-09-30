@@ -71,6 +71,14 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	// wakes up blind to its own goal. Best-effort, idempotent.
 	r.ensureWorkItemFile(j)
 
+	// F7 repair: a capsule whose materialized bundle set is missing its
+	// completion marker (a crash-torn snapshot) — or predates the product
+	// fix entirely — gets the set idempotently rebuilt, discovery copies
+	// and marker included, before the next derivation wakes up. The
+	// rebuild never breaks a scene the dead agents already read (staged
+	// renames, identical content). Best-effort, never blocks recovery.
+	r.ensureMaterialized(j)
+
 	// The storm guard (§三): each FAILED recovery ladder spends one unit
 	// of the budget; a successful recovery RESETS it (a healthy relaunch
 	// must never inherit earlier failures). Only when MaxRecoveries

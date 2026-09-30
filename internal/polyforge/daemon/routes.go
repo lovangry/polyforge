@@ -124,6 +124,13 @@ func (d *Daemon) handler() http.Handler {
 	mux.Handle("GET /jobs/{wi}/observe", obs)
 	mux.Handle("POST /jobs/{wi}/answer", obs)
 	mux.Handle("POST /jobs/{wi}/flush", d.flushGate(obs))
+	// F6-B: the narrow memory channel — mounted verbatim from the
+	// observe lane, whose serveFlush fence semantics the two routes
+	// share (the flush route alone passes through the wrap arbitration
+	// gate first; recall/remember are stateless proxies and carry no
+	// close semantics at all).
+	mux.Handle("POST /jobs/{wi}/recall", obs)
+	mux.Handle("POST /jobs/{wi}/remember", obs)
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute("claim"))
 	mux.HandleFunc("POST /jobs/{wi}/resume", d.submitRoute("resume"))
 	mux.HandleFunc("POST /jobs/{wi}/takeover", d.submitRoute("takeover"))

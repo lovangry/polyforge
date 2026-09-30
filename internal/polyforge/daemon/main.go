@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -40,6 +41,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cgroupRoot := fs.String("cgroup-root", "", "cgroup v2 root for layer-0 cleanup (env POLYFORGE_CGROUP_ROOT)")
 	gitRemoteBase := fs.String("git-remote-base", "", "aihub bare-repo base URL (default <server>/git)")
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
+	recallTopK := fs.Int("recall-topk", 0, "claim-time memory snapshot hit count (env POLYFORGE_RECALL_TOPK; default 10, max 50)")
 	mode := fs.String("mode", "", "initial mode: interactive|batch|drain (default interactive)")
 	if err := fs.Parse(argv); err != nil {
 		return 2
@@ -110,6 +112,13 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *gitRemoteBase == "" {
 		*gitRemoteBase = strings.TrimSuffix(*server, "/") + "/git"
 	}
+	if *recallTopK == 0 {
+		if v := os.Getenv("POLYFORGE_RECALL_TOPK"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				*recallTopK = n
+			}
+		}
+	}
 
 	cfg := Config{
 		MachineID:           *machineID,
@@ -125,6 +134,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		CgroupRoot:          *cgroupRoot,
 		APIKey:              *apiKey,
 		MaxConcurrent:       *maxConcurrent,
+		RecallTopK:          *recallTopK,
 		Mode:                *mode,
 		Hub:                 aihubclient.New(*server, *apiKey),
 	}
