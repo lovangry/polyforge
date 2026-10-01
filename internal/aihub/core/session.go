@@ -23,9 +23,9 @@ package core
 //     session row is cleared entirely (M2: blocked = status blocked +
 //     cleared session, excluded from the claim gate).
 //   - Pause: the M3 pause transition for session-held WIs (session KEPT,
-//     status=paused, clean_pause set). Reached through the legacy
-//     /end-generation handler with a session_id in the body — the frozen
-//     contract defines no pause endpoint of its own.
+//     status=paused, clean_pause set), reached as session-end's 4th
+//     verdict ("paused", the merge amend) — the deleted legacy
+//     /end-generation route no longer carries it.
 //
 // The git push credential's session path (fencing-on-use, §1.6) lives in
 // owner.go's CheckPushCredential and validates against the SAME stored
@@ -680,11 +680,10 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 	return tx.Commit()
 }
 
-// Pause is the M3 pause transition for session-held WIs, reached through
-// the legacy /end-generation body carrying a session_id (the frozen
-// contract defines no pause endpoint): the session is KEPT (a same-machine
-// restart attaches back through it), status becomes paused, and
-// clean_pause records WHO paused — 1 = operator pause (never auto-resumed;
+// Pause is the M3 pause transition for session-held WIs, reached as
+// session-end's "paused" verdict (the merge amend): the session is KEPT
+// (a same-machine restart attaches back through it), status becomes
+// paused, and clean_pause records WHO paused — 1 = operator pause (never auto-resumed;
 // only force-takeover or a CLI unpause may resume), 0 = daemon shutdown.
 func (m *SessionManager) Pause(wiID, sessionID string, cleanPause bool, note, callerIdentity string) error {
 	if strings.TrimSpace(sessionID) == "" {

@@ -137,15 +137,15 @@ func (s *fakeSpawner) lastParams() runtime.SpawnParams {
 // tests need; a HELD wi answers matches only for its own secret.
 
 type fakeHub struct {
-	mu       sync.Mutex
-	status   map[string]string
-	held     map[string]string
+	mu        sync.Mutex
+	status    map[string]string
+	held      map[string]string
 	claims    []api.SessionClaimRequest
 	takeovers []api.SessionClaimRequest
 	ends      []endCall
-	attaches []api.SessionAttachRequest
-	queues   []api.WorkItem
-	blockEnd chan struct{} // non-nil: SessionEnd parks until closed
+	attaches  []api.SessionAttachRequest
+	queues    []api.WorkItem
+	blockEnd  chan struct{} // non-nil: SessionEnd parks until closed
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string

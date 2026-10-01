@@ -396,7 +396,7 @@ var cmdWrap = &Command{
 	Summary: "Wrap a running WI as terminal success (--fail for terminal failure)",
 	Usage:   "pf wrap <id> [--fail]",
 	Setup: func(fs *flag.FlagSet) {
-		fs.Bool("fail", false, "close the generation with reason=fail instead of wrap")
+		fs.Bool("fail", false, "end the session with reason=fail instead of wrap")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {

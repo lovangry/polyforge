@@ -76,7 +76,7 @@ func TestDaemonClientObserveRoundtrip(t *testing.T) {
 		Project:     "polyforge",
 		Status:      protocol.JobRunning,
 		Generation:  2,
-		AttemptID:   "ra_1",
+		SpawnN:      1,
 		BundleName:  "bundle-x",
 		CurrentStep: "implement",
 		Steps: map[string]*protocol.StepView{
@@ -261,9 +261,9 @@ func TestDaemonClientFlushRoute(t *testing.T) {
 	d.answer("POST", "/jobs/wi_abc/flush", `{"ok":true,"local_commit":"sha1","pushed":true}`)
 	c := NewDaemonClient(d.sock)
 	req := protocol.FlushRequest{
-		WorkItem:  "wi_abc",
-		AttemptID: "ra_1",
-		Reason:    protocol.FlushWrap,
+		WorkItem: "wi_abc",
+		SpawnN:   1,
+		Reason:   protocol.FlushWrap,
 	}
 	if _, err := c.Flush("wi_abc", req); err != nil {
 		t.Fatalf("Flush: %v", err)
@@ -336,7 +336,7 @@ func TestAnswerUniquePendingResolution(t *testing.T) {
 func TestObserveRenderedOutput(t *testing.T) {
 	jv := protocol.JobView{
 		WorkItem: "wi_abc", Project: "polyforge", Status: protocol.JobRunning,
-		Generation: 1, AttemptID: "ra_1", CurrentStep: "implement",
+		Generation: 1, SpawnN: 1, CurrentStep: "implement",
 		Steps: map[string]*protocol.StepView{"implement": {Status: "in_progress", Attempts: 1}},
 	}
 	d := newDaemonFixture(t)

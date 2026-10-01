@@ -54,11 +54,11 @@ func TestWrapDualPathPushesOnce(t *testing.T) {
 		t.Fatalf("observe: %v", err)
 	}
 	var jv protocol.JobView
-	if err := json.Unmarshal(raw, &jv); err != nil || jv.AttemptID == "" {
+	if err := json.Unmarshal(raw, &jv); err != nil || jv.SpawnN == 0 {
 		t.Fatalf("view undecodable: %v (%s)", err, raw)
 	}
 	fraw, err := td.client.Flush("wi_once", protocol.FlushRequest{
-		WorkItem: "wi_once", AttemptID: jv.AttemptID, SpawnN: jv.SpawnN,
+		WorkItem: "wi_once", SpawnN: jv.SpawnN,
 		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
 	})
 	if err != nil {

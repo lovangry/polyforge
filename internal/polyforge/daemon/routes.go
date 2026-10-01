@@ -33,8 +33,12 @@ type submitResponse struct {
 type statusJob struct {
 	WorkItemID string `json:"work_item_id"`
 	Status     string `json:"status"`
-	AttemptID  string `json:"attempt_id,omitempty"`
-	AgentPID   int    `json:"agent_pid,omitempty"`
+	// SpawnN is the v1.5 B2 derivation counter; SessionFingerprint is
+	// the PUBLIC session handle (B3) — together they replace the deleted
+	// attempt-id lineage handle.
+	SpawnN             int    `json:"spawn_n,omitempty"`
+	SessionFingerprint string `json:"session_fingerprint,omitempty"`
+	AgentPID           int    `json:"agent_pid,omitempty"`
 	// NeedsInput/QuestionID carry the D6 owner face: the monitor's
 	// pending-question projection merged over the runtime state machine
 	// (a job the runtime calls running but the monitor holds a pending
@@ -370,10 +374,11 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 		sj := statusJob{
 			WorkItemID: ji.WorkItem,
 			Status:     string(ji.State),
-			// the rendered id is the derivation fence token — the session
-			// fingerprint ("#N" after re-derivations), a PUBLIC value (B3)
-			AttemptID: ji.InstanceID,
-			AgentPID:   ji.AgentPID,
+			// the rendered identity is the PUBLIC session handle plus the
+			// derivation counter (B2/B3) — never the secret.
+			SpawnN:             ji.SpawnN,
+			SessionFingerprint: ji.SessionFingerprint,
+			AgentPID:           ji.AgentPID,
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID

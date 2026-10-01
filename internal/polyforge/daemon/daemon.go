@@ -34,8 +34,8 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
-// Hub is the aihub face the daemon itself needs beyond Runtime's claim/
-// end-generation use: the ready-queue projection (batch recommendation,
+// Hub is the aihub face the daemon itself needs beyond Runtime's
+// session-claim/end use: the ready-queue projection (batch recommendation,
 // drain loop), the terminal-state check of the wrap/pause arbitration,
 // and — through the generic Do — the memory faces the F6 lanes proxy
 // through (search with an excerpt, memory create). *aihubclient.Client
@@ -501,8 +501,11 @@ func (d *Daemon) reattachRecovered() {
 		}
 		select {
 		case d.attachCh <- d.buildAttach(protocol.RTMsg{
-			Kind: protocol.RTStarted, AttemptID: ji.InstanceID,
+			Kind: protocol.RTStarted, SpawnN: ji.SpawnN,
 			WorkItem: ji.WorkItem, AgentPID: ji.AgentPID,
+			// the in-process secret re-arms the M4 revalidation for
+			// reattached jobs (it rides RTMsg, never a log surface).
+			SessionID: ji.SessionID,
 		}, ji):
 		case <-d.runCtx.Done():
 			return
@@ -582,16 +585,14 @@ func (d *Daemon) bridge() {
 			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
-				// Emission-time instance registration (the flush fence's
-				// recovery window, #8): the hub records the new lineage id
-				// the moment Runtime announces it — before the monitor
-				// adopts the attachment — so a just-resumed agent's
-				// flush(reason) never eats a STALE_ATTEMPT refusal in the
-				// window between the RTRecovered emission and the
+				// Emission-time counter registration (the flush fence's
+				// recovery window, #8): the hub records the new derivation
+				// counter the moment Runtime announces it — before the
+				// monitor adopts the attachment — so a just-resumed
+				// agent's flush(reason) never eats a STALE_SPAWN refusal
+				// in the window between the RTRecovered emission and the
 				// monitor's adoption.
-				if msg.AttemptID != "" {
-					d.obs.NoteInstance(msg.WorkItem, msg.AttemptID)
-				}
+				d.obs.NoteSpawn(msg.WorkItem, msg.SpawnN)
 				if ji, live := d.rt.Info(msg.WorkItem); live && ji.Agent != nil {
 					at = d.buildAttach(msg, ji)
 				}
@@ -612,7 +613,6 @@ func (d *Daemon) bridge() {
 
 type agentAdapter struct {
 	h        runtime.AgentHandle
-	attempt  string
 	records  chan []byte
 	exit     chan struct{}
 	pollStop chan struct{}
@@ -625,7 +625,6 @@ type agentAdapter struct {
 func (d *Daemon) installAdapter(ji runtime.JobInfo) *agentAdapter {
 	a := &agentAdapter{
 		h:        ji.Agent,
-		attempt:  ji.InstanceID,
 		records:  make(chan []byte, 1024),
 		exit:     make(chan struct{}),
 		pollStop: make(chan struct{}),
@@ -663,7 +662,6 @@ func (a *agentAdapter) pollDone(interval time.Duration) {
 	}
 }
 
-func (a *agentAdapter) AttemptID() string      { return a.attempt }
 func (a *agentAdapter) Exit() <-chan struct{}  { return a.exit }
 func (a *agentAdapter) Records() <-chan []byte { return a.records }
 

@@ -45,7 +45,7 @@ func TestSubmitAndStatus(t *testing.T) {
 		t.Fatalf("jobs = %+v, want 1", st.Jobs)
 	}
 	j := st.Jobs[0]
-	if j.WorkItemID != "wi_a" || j.Status != "running" || j.AgentPID != 0 || j.AttemptID == "" {
+	if j.WorkItemID != "wi_a" || j.Status != "running" || j.AgentPID != 0 || j.SpawnN == 0 || j.SessionFingerprint == "" {
 		t.Fatalf("status job = %+v", j)
 	}
 	if st.Queue.Running != 1 || st.Queue.MaxConcurrent != 4 || st.Queue.Pending != 0 {
@@ -72,13 +72,13 @@ func TestObserveAnswerFlush(t *testing.T) {
 	if jv.WorkItem != "wi_b" || jv.Project != "proj" || jv.Status != protocol.JobRunning {
 		t.Fatalf("job view = %+v", jv)
 	}
-	if jv.AttemptID == "" || len(jv.Events) == 0 {
-		t.Fatalf("job view missing attempt/events: %+v", jv)
+	if jv.SpawnN == 0 || len(jv.Events) == 0 {
+		t.Fatalf("job view missing spawn/events: %+v", jv)
 	}
 
 	// The agent's needs_input lifeline (ruling C2: UDS proxy).
 	fraw, err := td.client.Flush("wi_b", protocol.FlushRequest{
-		WorkItem: "wi_b", AttemptID: jv.AttemptID, SpawnN: jv.SpawnN,
+		WorkItem: "wi_b", SpawnN: jv.SpawnN,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_abc123",
 		Question: "which flavor?", Step: "spec",
 	})
@@ -152,14 +152,14 @@ func TestWrapDualPathArbitration(t *testing.T) {
 		t.Fatalf("observe wi_c: %v", err)
 	}
 	var cjv protocol.JobView
-	if err := json.Unmarshal(craw, &cjv); err != nil || cjv.AttemptID == "" {
+	if err := json.Unmarshal(craw, &cjv); err != nil || cjv.SpawnN == 0 {
 		t.Fatalf("wi_c view undecodable: %v (%s)", err, craw)
 	}
 
 	flushDone := make(chan error, 1)
 	go func() {
 		_, err := td.client.Flush("wi_c", protocol.FlushRequest{
-			WorkItem: "wi_c", AttemptID: cjv.AttemptID, SpawnN: cjv.SpawnN,
+			WorkItem: "wi_c", SpawnN: cjv.SpawnN,
 			Reason: protocol.FlushWrap, FinalStatus: "wrapped",
 		})
 		flushDone <- err
@@ -208,11 +208,11 @@ func TestWrapDualPathArbitration(t *testing.T) {
 		t.Fatalf("observe wi_d: %v", err)
 	}
 	var djv protocol.JobView
-	if err := json.Unmarshal(draw, &djv); err != nil || djv.AttemptID == "" {
+	if err := json.Unmarshal(draw, &djv); err != nil || djv.SpawnN == 0 {
 		t.Fatalf("wi_d view undecodable: %v (%s)", err, draw)
 	}
 	if _, err := td2.client.Flush("wi_d", protocol.FlushRequest{
-		WorkItem: "wi_d", AttemptID: djv.AttemptID, SpawnN: djv.SpawnN,
+		WorkItem: "wi_d", SpawnN: djv.SpawnN,
 		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
 	}); err == nil {
 		t.Fatal("flush(wrap) during the CLI close succeeded; want DAEMON-409")
@@ -583,7 +583,7 @@ func TestFlushStaleAttemptRefused(t *testing.T) {
 		t.Fatalf("observe wi_f: %v", err)
 	}
 	var fjv protocol.JobView
-	if err := json.Unmarshal(fraw, &fjv); err != nil || fjv.AttemptID == "" {
+	if err := json.Unmarshal(fraw, &fjv); err != nil || fjv.SpawnN == 0 {
 		t.Fatalf("wi_f view undecodable: %v (%s)", err, fraw)
 	}
 
@@ -635,7 +635,7 @@ func TestStatusShowsNeedsInput(t *testing.T) {
 		t.Fatalf("observe undecodable: %v", err)
 	}
 	if _, err := td.client.Flush("wi_askst", protocol.FlushRequest{
-		WorkItem: "wi_askst", AttemptID: jv.AttemptID, SpawnN: jv.SpawnN,
+		WorkItem: "wi_askst", SpawnN: jv.SpawnN,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_d6001",
 		Question: "pick one", Step: "spec",
 	}); err != nil {

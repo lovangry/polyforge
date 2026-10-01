@@ -156,10 +156,10 @@ type StatusResponse struct {
 type StatusJob struct {
 	WorkItemID string `json:"work_item_id"`
 	Status     string `json:"status"`
-	AttemptID  string `json:"attempt_id,omitempty"` // legacy lineage handle (deleted in the cleanup commit)
-	// SessionFingerprint is the v1.5 PUBLIC session handle of the job's
-	// session (additive; the daemon populates it once Lane B wires the
-	// claim answer's fingerprint through).
+	// SpawnN is the v1.5 B2 derivation counter; SessionFingerprint is
+	// the PUBLIC session handle (B3) — the session model's identity
+	// pair, replacing the deleted attempt-id lineage handle.
+	SpawnN            int    `json:"spawn_n,omitempty"`
 	SessionFingerprint string `json:"session_fingerprint,omitempty"`
 	AgentPID           int    `json:"agent_pid,omitempty"`
 	// NeedsInput/QuestionID are the D6 owner face: a job presented as
@@ -210,7 +210,9 @@ func (d *DaemonClient) Claim(wiID, priority string) (json.RawMessage, error) {
 	return d.submit(wiID, "claim", priority)
 }
 
-// Resume submits a resume request — always a fresh claim, generation+1.
+// Resume submits a resume request — the daemon claims the paused WI
+// into a new session (attach semantics belong to the daemon restart
+// path, not the CLI).
 func (d *DaemonClient) Resume(wiID, priority string) (json.RawMessage, error) {
 	return d.submit(wiID, "resume", priority)
 }
