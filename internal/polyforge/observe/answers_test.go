@@ -19,7 +19,7 @@ import (
 
 func armQuestion(t *testing.T, m *Monitor, qid string) {
 	t.Helper()
-	fc := FlushCall{Req: protocol.FlushRequest{Reason: protocol.FlushNeedsInput, QuestionID: qid, Question: "pick one"}, Resp: make(chan protocol.FlushAck, 1)}
+	fc := FlushCall{Req: protocol.FlushRequest{SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: qid, Question: "pick one"}, Resp: make(chan protocol.FlushAck, 1)}
 	m.flushCh <- fc
 	if ack := <-fc.Resp; !ack.OK {
 		t.Fatalf("needs_input ack: %+v", ack)

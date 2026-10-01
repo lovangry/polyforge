@@ -132,33 +132,64 @@ func nullable(v *string) string {
 // Human renderers.
 // ---------------------------------------------------------------------------
 
-// wiRow renders the shared per-WI cells (no segment).
-func wiRow(it api.WorkItem) []string {
+// WIView is one rendered WI record: the wire work item plus the v1.5
+// session audit fields, decoded ADDITIVELY from the raw server body
+// (api.WorkItem does not carry them until Lane A's server lands; the
+// additive decode means the CLI renders them the moment they appear,
+// and "-" before that). Rendering uses the session fingerprint — the
+// PUBLIC handle — never the secret or its hash.
+type WIView struct {
+	api.WorkItem
+	SessionFingerprint string `json:"session_fingerprint,omitempty"`
+	SessionMachine     string `json:"session_machine,omitempty"`
+	SessionOwner       string `json:"session_owner,omitempty"`
+	SessionStartedAt   string `json:"session_started_at,omitempty"`
+	CleanPause         bool   `json:"clean_pause,omitempty"`
+}
+
+// wiViewsOf wraps plain wire records as views with no session fields
+// (sources that cannot carry them: the daemon's recommendation body).
+func wiViewsOf(items []api.WorkItem) []WIView {
+	out := make([]WIView, len(items))
+	for i, it := range items {
+		out[i] = WIView{WorkItem: it}
+	}
+	return out
+}
+
+// wiRow renders the shared per-WI cells (no segment). The SESSION
+// column is the v1.5 public fingerprint of the current holder ("-"
+// when unheld).
+func wiRow(it WIView) []string {
 	slug := it.Slug
 	if slug == "" {
 		slug = it.ID
 	}
+	sess := "-"
+	if it.SessionFingerprint != "" {
+		sess = it.SessionFingerprint
+	}
 	return []string{
-		slug, it.Status, it.Priority, nullable(it.BundleName), truncate(it.Goal, 60),
+		slug, it.Status, sess, it.Priority, nullable(it.BundleName), truncate(it.Goal, 60),
 	}
 }
 
 // renderWITable renders a WI list table.
-func renderWITable(w io.Writer, items []api.WorkItem) {
+func renderWITable(w io.Writer, items []WIView) {
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
 		rows = append(rows, wiRow(it))
 	}
-	printTable(w, []string{"SLUG", "STATUS", "PRIORITY", "BUNDLE", "GOAL"}, rows)
+	printTable(w, []string{"SLUG", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "GOAL"}, rows)
 }
 
 // renderReadyWITable renders the ready-queue table: items first, then
 // unclassified, with a SEGMENT column carrying the wire segment key
 // ("items" / "unclassified"). Both segments are takeable.
-func renderReadyWITable(w io.Writer, items, unclassified []api.WorkItem) {
+func renderReadyWITable(w io.Writer, items, unclassified []WIView) {
 	segments := []struct {
 		key string
-		wis []api.WorkItem
+		wis []WIView
 	}{{"items", items}, {"unclassified", unclassified}}
 	rows := make([][]string, 0, len(items)+len(unclassified))
 	for _, seg := range segments {
@@ -166,11 +197,13 @@ func renderReadyWITable(w io.Writer, items, unclassified []api.WorkItem) {
 			rows = append(rows, append(wiRow(it), seg.key))
 		}
 	}
-	printTable(w, []string{"SLUG", "STATUS", "PRIORITY", "BUNDLE", "GOAL", "SEGMENT"}, rows)
+	printTable(w, []string{"SLUG", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "GOAL", "SEGMENT"}, rows)
 }
 
-// renderWIDetail renders the detail record.
-func renderWIDetail(w io.Writer, wi *api.WorkItem) {
+// renderWIDetail renders the detail record. The v1.5 session block
+// (fingerprint, machine, owner, started-at, clean_pause — the m4 public
+// audit fields) renders whenever the server body carries them.
+func renderWIDetail(w io.Writer, wi *WIView) {
 	name := wi.Slug
 	if name == "" {
 		name = wi.ID
@@ -192,10 +225,30 @@ func renderWIDetail(w io.Writer, wi *api.WorkItem) {
 	if wi.WaitingOn != nil {
 		fmt.Fprintf(w, "  waiting:  %s\n", *wi.WaitingOn)
 	}
+	if wi.SessionFingerprint != "" {
+		fmt.Fprintf(w, "  session:  %s", wi.SessionFingerprint)
+		if wi.SessionMachine != "" || wi.SessionOwner != "" {
+			fmt.Fprintf(w, " (machine %s, owner %s)", orDash(wi.SessionMachine), orDash(wi.SessionOwner))
+		}
+		if wi.SessionStartedAt != "" {
+			fmt.Fprintf(w, " since %s", wi.SessionStartedAt)
+		}
+		fmt.Fprintln(w)
+	}
+	if wi.CleanPause {
+		fmt.Fprintf(w, "  clean-pause: yes (operator pause; restart will not auto-resume)\n")
+	}
 	fmt.Fprintf(w, "  created:  %s\n", wi.CreatedAt)
 	if wi.ClosedAt != nil {
 		fmt.Fprintf(w, "  closed:   %s\n", *wi.ClosedAt)
 	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // renderMemories renders a memory search result.
@@ -296,17 +349,39 @@ func formatWallFigure(v float64) string {
 	return strings.TrimSuffix(s, ".0")
 }
 
-func renderObserve(w io.Writer, jv *protocol.JobView) {
+func renderObserve(w io.Writer, jv *protocol.JobView, sess *WIView) {
 	fmt.Fprintf(w, "%s (%s) — %s", jv.WorkItem, jv.Project, jv.Status)
 	if wall := humanWall(wallFromBudget(jv.Budget)); wall != "" {
 		fmt.Fprintf(w, " · wall %s", wall)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "attempt: %s  generation: %s", jv.AttemptID, strconv.FormatInt(jv.Generation, 10))
-	if jv.BundleName != "" {
-		fmt.Fprintf(w, "  bundle: %s", jv.BundleName)
+	// The v1.5 ownership face renders the session fingerprint — the
+	// PUBLIC handle of the current holder — instead of the deleted
+	// lineage's attempt/generation fields. sess is the additive
+	// aihub WI read (nil when the daemon layer answered but the hub
+	// read was not available: the session line is simply skipped, never
+	// fabricated); "-" means the hub answered and nobody holds it.
+	if sess != nil {
+		fp := sess.SessionFingerprint
+		if fp == "" {
+			fp = "-"
+		}
+		fmt.Fprintf(w, "session: %s", fp)
+		if sess.SessionFingerprint != "" {
+			if sess.SessionMachine != "" || sess.SessionOwner != "" {
+				fmt.Fprintf(w, " (machine %s, owner %s)", orDash(sess.SessionMachine), orDash(sess.SessionOwner))
+			}
+			if sess.CleanPause {
+				fmt.Fprint(w, "  clean-pause: yes")
+			}
+		}
+		if jv.BundleName != "" {
+			fmt.Fprintf(w, "  bundle: %s", jv.BundleName)
+		}
+		fmt.Fprintln(w)
+	} else if jv.BundleName != "" {
+		fmt.Fprintf(w, "bundle: %s\n", jv.BundleName)
 	}
-	fmt.Fprintln(w)
 	if jv.CurrentStep != "" {
 		fmt.Fprintf(w, "current step: %s\n", jv.CurrentStep)
 	}
@@ -381,11 +456,14 @@ func renderReadThrough(w io.Writer, p *api.ProgressResponse) {
 // renderStatus renders the daemon status() bookkeeping list. The
 // QUESTION column is the D6 owner face: any job the daemon reports with a
 // pending question shows its question id ("-" otherwise), so an agent
-// blocked on a human is impossible to miss at a glance. The LAST-PROGRESS
-// column is the F15c owner face: mm:ss since the job's stream last proved
-// agent progress ("-" when no progress record exists). UI-noise records
-// never refresh it, so a wedged-but-chattering job reads as stale — the
-// pilot's 2.7-hour double-blind wedge had no such surface.
+// blocked on a human is impossible to miss at a glance. The SESSION
+// column is the v1.5 public fingerprint of the job's session (the
+// daemon populates it at merge; "-" until then or when unheld). The
+// LAST-PROGRESS column is the F15c owner face: mm:ss since the job's
+// stream last proved agent progress ("-" when no progress record
+// exists). UI-noise records never refresh it, so a wedged-but-chattering
+// job reads as stale — the pilot's 2.7-hour double-blind wedge had no
+// such surface.
 func renderStatus(w io.Writer, s *StatusResponse) {
 	fmt.Fprintf(w, "machine: %s  mode: %s", s.MachineID, s.Mode)
 	if s.ShuttingDown {
@@ -403,13 +481,17 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 		if j.QuestionID != "" {
 			question = j.QuestionID
 		}
+		sess := "-"
+		if j.SessionFingerprint != "" {
+			sess = j.SessionFingerprint
+		}
 		progress := "-"
 		if j.LastProgressAgoSec != nil {
 			progress = mmssAgo(*j.LastProgressAgoSec)
 		}
-		rows = append(rows, []string{j.WorkItemID, j.Status, j.AttemptID, pid, question, progress})
+		rows = append(rows, []string{j.WorkItemID, j.Status, sess, pid, question, progress})
 	}
-	printTable(w, []string{"WORK ITEM", "STATUS", "ATTEMPT", "AGENT PID", "QUESTION", "LAST-PROGRESS"}, rows)
+	printTable(w, []string{"WORK ITEM", "STATUS", "SESSION", "AGENT PID", "QUESTION", "LAST-PROGRESS"}, rows)
 }
 
 // mmssAgo renders whole seconds as the mm:ss staleness figure the

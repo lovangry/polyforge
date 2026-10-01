@@ -184,9 +184,6 @@ func TestDaemonFaceVerbExitCodeGoldens(t *testing.T) {
 			`{"items":[]}`, false, nil, []string{"batch-confirm", "--no-such-flag"}},
 		{"pause", []string{"pause", "wi_x"}, "POST /jobs/wi_x/pause", `{}`, false,
 			[]string{"pause"}, []string{"pause", "--no-such-flag"}},
-		{"resume", []string{"resume", "wi_x"}, "POST /jobs/wi_x/resume",
-			`{"accepted":true,"work_item_id":"wi_x"}`, true,
-			[]string{"resume"}, []string{"resume", "--no-such-flag"}},
 		{"wrap", []string{"wrap", "wi_x"}, "POST /jobs/wi_x/wrap", `{}`, false,
 			[]string{"wrap"}, []string{"wrap", "--no-such-flag"}},
 		{"ship", []string{"ship", "wi_x"}, "POST /jobs/wi_x/ship",
@@ -318,13 +315,13 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 	if code, _, _ := runPf(t, nil, "daemon", "--no-such-flag"); code != 2 {
 		t.Errorf("flag parse: exit = %d, want 2", code)
 	}
-	// Sanity: the registry really is the full 22-verb set the audit
-	// covered (13 routing + ship + 5 admin + 2 migrations + daemon).
+	// Sanity: the registry really is the full 23-verb set the audit
+	// covered (14 routing + ship + 5 admin + 2 migrations + daemon).
 	want := []string{
-		"file", "queue", "cancel", "recall", "remember", "submit", "observe",
-		"answer", "batch-confirm", "pause", "resume", "wrap", "ops", "ship",
-		"users", "api-keys", "projects", "backup", "rotate-secret",
-		"migrate-memories", "migrate-work-items", "daemon",
+		"file", "queue", "cancel", "recall", "remember", "takeover",
+		"submit", "observe", "answer", "batch-confirm", "pause", "resume",
+		"wrap", "ops", "ship", "users", "api-keys", "projects", "backup",
+		"rotate-secret", "migrate-memories", "migrate-work-items", "daemon",
 	}
 	if len(commands) != len(want) {
 		t.Fatalf("registry has %d commands, want %d", len(commands), len(want))

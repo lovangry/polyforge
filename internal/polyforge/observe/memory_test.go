@@ -1,7 +1,7 @@
 package observe
 
 // memory_test.go: the F6-B UDS memory channel — the two routes behind the
-// flush-mode attempt fence: the happy paths, the STALE_ATTEMPT refusals
+// flush-mode fence: the happy paths, the STALE_SPAWN refusals
 // (a zombie survivor, an absent id), the closed field-set validation,
 // the 404 for an unmonitored work item, and the not-configured refusal
 // when no MemoryFace is bound.
@@ -99,11 +99,11 @@ func TestMemoryRecallRoute(t *testing.T) {
 	})
 
 	// A stale attempt id (a zombie survivor) is refused exactly like a
-	// flush: DAEMON-409 STALE_ATTEMPT, and the face never sees the call.
+	// flush: DAEMON-409 STALE_SPAWN, and the face never sees the call.
 	code, body := hs.post(t, "/jobs/wi_http/recall", map[string]any{
 		"attempt_id": "att_old", "query": "lessons", "top_k": 3,
 	}, nil)
-	if code != http.StatusConflict || !jsonContains(body, "STALE_ATTEMPT") {
+	if code != http.StatusConflict || !jsonContains(body, "STALE_SPAWN") {
 		t.Fatalf("stale recall: %d %s", code, body)
 	}
 	// An absent attempt id is stale too.
@@ -186,7 +186,7 @@ func TestMemoryRememberRoute(t *testing.T) {
 	code, body := hs.post(t, "/jobs/wi_http/remember", map[string]any{
 		"attempt_id": "att_old", "type": "experience.debug", "content": "c",
 	}, nil)
-	if code != http.StatusConflict || !jsonContains(body, "STALE_ATTEMPT") {
+	if code != http.StatusConflict || !jsonContains(body, "STALE_SPAWN") {
 		t.Fatalf("stale remember: %d %s", code, body)
 	}
 
@@ -266,4 +266,58 @@ func TestMemoryRoutesNotConfigured(t *testing.T) {
 
 func jsonContains(raw []byte, needle string) bool {
 	return strings.Contains(string(raw), needle)
+}
+
+// TestMemoryFenceSpawnProof: the v1.5 B2 proof — a recall/remember may
+// identify the current derivation by its spawn_n counter (the same
+// dual-match as the flush fence) instead of the legacy attempt id. A
+// counter that names neither the current nor the latest announced
+// derivation is refused STALE_SPAWN; an absent counter falls back to
+// the attempt-id proof (deleted in the cleanup commit).
+func TestMemoryFenceSpawnProof(t *testing.T) {
+	face := &fakeMemFace{}
+	hs := newMemHarness(t, face)
+	h := newFakeHandle("att_mem")
+	hs.start(t, h)
+	soon(t, time.Second, "job registered", func() bool {
+		code, _ := hs.get(t, "/jobs/wi_http/observe")
+		return code == http.StatusOK
+	})
+
+	// The current derivation's counter (spawn_n 1): passes.
+	code, _ := hs.post(t, "/jobs/wi_http/recall", map[string]any{
+		"spawn_n": 1, "query": "lessons",
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("current-counter recall: %d", code)
+	}
+	// The latest ANNOUNCED counter (a recovery the monitor has not
+	// adopted yet): passes — the just-resumed agent's lifeline.
+	hs.o.NoteSpawn("wi_http", 2)
+	code, _ = hs.post(t, "/jobs/wi_http/remember", map[string]any{
+		"spawn_n": 2, "type": "experience.debug", "content": "c",
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("announced-counter remember: %d", code)
+	}
+	// A counter naming neither: STALE_SPAWN, the face never sees it.
+	before := len(face.recalls)
+	code, body := hs.post(t, "/jobs/wi_http/recall", map[string]any{
+		"spawn_n": 7, "query": "lessons",
+	}, nil)
+	if code != http.StatusConflict || !jsonContains(body, "STALE_SPAWN") {
+		t.Fatalf("zombie-counter recall: %d %s", code, body)
+	}
+	if len(face.recalls) != before {
+		t.Fatalf("fenced recall reached the face: %+v", face.recalls)
+	}
+	// Once a successor is announced, the monitor's lagging current
+	// counter is already stale (the adoption-window cross-check): a
+	// request still speaking in counter 1's name is refused.
+	code, _ = hs.post(t, "/jobs/wi_http/recall", map[string]any{
+		"spawn_n": 1, "query": "lessons",
+	}, nil)
+	if code != http.StatusConflict {
+		t.Fatalf("lagging-current recall after an announcement: %d, want 409", code)
+	}
 }

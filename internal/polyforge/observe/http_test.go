@@ -61,7 +61,7 @@ func newHarness(t *testing.T) *harness {
 func (hs *harness) start(t *testing.T, h Handle) {
 	t.Helper()
 	hs.rt <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_http", AttemptID: h.AttemptID()},
+		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_http", AttemptID: h.AttemptID(), SpawnN: 1},
 		Handle: h,
 		WI: WIInfo{
 			WorkItem: "wi_http", Project: "proj", CapsuleDir: hs.capsuleDir,
@@ -126,7 +126,7 @@ func TestHTTPRoutesEndToEnd(t *testing.T) {
 
 	// flush(needs_input): the agent UDS face entry.
 	flushBody := protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_http",
+		WorkItem: "wi_http", AttemptID: "att_http", SpawnN: 1,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_http", Question: "proceed?",
 	}
 	code, body = hs.post(t, "/jobs/wi_http/flush", flushBody, nil)
@@ -179,7 +179,7 @@ func TestHTTPRoutesEndToEnd(t *testing.T) {
 
 	// flush(wrap): the ack distinguishes local commit and push.
 	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_http",
+		WorkItem: "wi_http", AttemptID: "att_http", SpawnN: 1,
 		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
 	}, nil)
 	if code != http.StatusOK {
@@ -238,12 +238,12 @@ func TestHTTPFlushRejectsBadReason(t *testing.T) {
 	}
 }
 
-// TestHTTPFlushStaleAttemptRefused (#8): the flush face is attempt-fenced.
-// A zombie survivor of a superseded instance — or any request not naming
-// the monitor's CURRENT instance — answers DAEMON-409 STALE_ATTEMPT and
-// never reaches the monitor: no seal, no OBCompleted, and the live
-// attempt's own flush still works afterwards.
-func TestHTTPFlushStaleAttemptRefused(t *testing.T) {
+// TestHTTPFlushStaleSpawnRefused (#8/B2): the flush face is spawn-fenced.
+// A zombie survivor of a superseded derivation — or any request not
+// naming the monitor's CURRENT derivation counter — answers DAEMON-409
+// STALE_SPAWN and never reaches the monitor: no seal, no OBCompleted,
+// and the live derivation's own flush still works afterwards.
+func TestHTTPFlushStaleSpawnRefused(t *testing.T) {
 	h := newFakeHandle("att_cur")
 	hs := newHarness(t)
 	hs.start(t, h)
@@ -252,29 +252,35 @@ func TestHTTPFlushStaleAttemptRefused(t *testing.T) {
 		return code == http.StatusOK
 	})
 
-	// (1) flush(wrap) from a superseded instance's id: 409 STALE_ATTEMPT.
+	// (1) flush(wrap) from a superseded derivation's counter: 409
+	// STALE_SPAWN, naming the carried and current counters.
 	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
 		WorkItem: "wi_http", AttemptID: "att_old", // a zombie of the same claim
-		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
+		SpawnN:   7, // an older derivation's counter
+		Reason:   protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
 	}, nil)
 	if code != http.StatusConflict {
 		t.Fatalf("stale wrap flush: %d %s", code, body)
 	}
-	if !bytes.Contains(body, []byte("STALE_ATTEMPT")) {
-		t.Fatalf("stale wrap flush detail must name STALE_ATTEMPT: %s", body)
+	for _, want := range []string{"STALE_SPAWN", "spawn_n 7"} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Fatalf("stale wrap flush detail must carry %q: %s", want, body)
+		}
 	}
 
-	// (2) a flush with NO attempt id is stale too (the fence requires it).
+	// (2) a flush with NO spawn counter is stale too (the fence requires
+	// it — fail-closed, mirroring the old absent-attempt-id refusal).
 	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", Reason: protocol.FlushNeedsInput,
+		WorkItem: "wi_http", AttemptID: "att_cur",
+		Reason: protocol.FlushNeedsInput,
 		QuestionID: "q_stale", Question: "which?",
 	}, nil)
 	if code != http.StatusConflict {
 		t.Fatalf("anonymous needs_input flush: %d %s", code, body)
 	}
 
-	// (3) the current attempt was untouched: no OB message, no seal, no
-	// pending question from the refused flush, job still running.
+	// (3) the current derivation was untouched: no OB message, no seal,
+	// no pending question from the refused flush, job still running.
 	expectNoOB(t, hs.ob, 150*time.Millisecond, "OBCompleted from a stale flush")
 	_, body = hs.get(t, "/jobs/wi_http/observe")
 	var view protocol.JobView
@@ -290,17 +296,17 @@ func TestHTTPFlushStaleAttemptRefused(t *testing.T) {
 		}
 	}
 
-	// (4) the LIVE attempt's flushes still work: needs_input lands, and
-	// the wrap seals exactly once for the current instance.
+	// (4) the LIVE derivation's flushes still work: needs_input lands,
+	// and the wrap seals exactly once for the current counter.
 	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_cur",
+		WorkItem: "wi_http", AttemptID: "att_cur", SpawnN: 1,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_live", Question: "which?",
 	}, nil)
 	if code != http.StatusOK {
 		t.Fatalf("live needs_input flush: %d %s", code, body)
 	}
 	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_cur",
+		WorkItem: "wi_http", AttemptID: "att_cur", SpawnN: 1,
 		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
 	}, nil)
 	if code != http.StatusOK {
@@ -316,13 +322,13 @@ func TestHTTPFlushStaleAttemptRefused(t *testing.T) {
 	}
 }
 
-// TestHTTPFlushRecoveryWindowNotStale (the #8 fence's recovery window): a
-// flush whose attempt id names the hub's LATEST KNOWN instance — the id
-// RTRecovered announced, which the monitor's adoption lags — must NOT be
-// refused as STALE_ATTEMPT: it is the just-resumed agent's own lifeline.
-// The call is queued by the monitor until the adoption completes (or
-// answered once the id is current), while every OLDER generation's id
-// stays fenced exactly as before.
+// TestHTTPFlushRecoveryWindowNotStale (the B2 fence's recovery window):
+// a flush whose spawn_n names the hub's LATEST ANNOUNCED derivation —
+// the counter RTRecovered announced, which the monitor's adoption lags —
+// must NOT be refused as STALE_SPAWN: it is the just-resumed agent's
+// own lifeline. The call is queued by the monitor until the adoption
+// completes (or answered once the counter is current), while every
+// OLDER counter stays fenced exactly as before.
 func TestHTTPFlushRecoveryWindowNotStale(t *testing.T) {
 	h := newFakeHandle("att_cur")
 	hs := newHarness(t)
@@ -333,17 +339,18 @@ func TestHTTPFlushRecoveryWindowNotStale(t *testing.T) {
 	})
 
 	// (1) the recovery window, adoption NOT yet delivered: the hub knows
-	// the announced id (emission-time registration), the monitor does
-	// not. The flush is queued, not refused — it must not answer the
-	// instant STALE_ATTEMPT 409; it settles only after adoption, so the
-	// bounded caller sees the settle-timeout instead (CallTimeout here).
-	hs.o.NoteInstance("wi_http", "att_next")
+	// the announced counter (emission-time registration), the monitor
+	// does not. The flush is queued, not refused — it must not answer
+	// the instant STALE_SPAWN 409; it settles only after adoption, so
+	// the bounded caller sees the settle-timeout instead (CallTimeout
+	// here).
+	hs.o.NoteSpawn("wi_http", 2)
 	start := time.Now()
 	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_next",
+		WorkItem: "wi_http", AttemptID: "att_next", SpawnN: 2,
 		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
 	}, nil)
-	if code == http.StatusConflict && bytes.Contains(body, []byte("STALE_ATTEMPT")) {
+	if code == http.StatusConflict && bytes.Contains(body, []byte("STALE_SPAWN")) {
 		t.Fatalf("recovery-window flush was refused as stale: %d %s", code, body)
 	}
 	if code != http.StatusInternalServerError || !bytes.Contains(body, []byte("settle")) {
@@ -353,30 +360,30 @@ func TestHTTPFlushRecoveryWindowNotStale(t *testing.T) {
 		t.Fatalf("queued flush answered too fast (%v): it must wait out the adoption window", time.Since(start))
 	}
 
-	// (2) the adoption lands: from here the announced id is current, and
-	// its flushes take the ordinary path.
+	// (2) the adoption lands: from here the announced counter is
+	// current, and its flushes take the ordinary path.
 	h2 := newFakeHandle("att_next")
 	hs.rt <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_http", AttemptID: "att_next"},
+		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_http", AttemptID: "att_next", SpawnN: 2},
 		Handle: h2,
 	}
 	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_next",
+		WorkItem: "wi_http", AttemptID: "att_next", SpawnN: 2,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_next", Question: "which?",
 	}, nil)
 	if code != http.StatusOK {
 		t.Fatalf("post-adoption needs_input flush: %d %s", code, body)
 	}
 
-	// (3) the fence did not widen: every OLDER generation — the
-	// pre-recovery current id included — is still refused.
-	for _, stale := range []string{"att_old", "att_cur"} {
+	// (3) the fence did not widen: every OLDER counter — the
+	// pre-recovery current counter included — is still refused.
+	for _, stale := range []int{0, 1} {
 		code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-			WorkItem: "wi_http", AttemptID: stale,
-			Reason: protocol.FlushNeedsInput, QuestionID: "q_z_" + stale, Question: "which?",
+			WorkItem: "wi_http", AttemptID: "att_old", SpawnN: stale,
+			Reason: protocol.FlushNeedsInput, QuestionID: "q_z", Question: "which?",
 		}, nil)
-		if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_ATTEMPT")) {
-			t.Fatalf("older id %q after recovery: %d %s, want 409 STALE_ATTEMPT", stale, code, body)
+		if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_SPAWN")) {
+			t.Fatalf("older counter %d after recovery: %d %s, want 409 STALE_SPAWN", stale, code, body)
 		}
 	}
 }
@@ -396,7 +403,7 @@ func TestHTTPFlushNeedsInputEmptyQuestionIDFailClosed(t *testing.T) {
 	})
 
 	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_cur",
+		WorkItem: "wi_http", AttemptID: "att_cur", SpawnN: 1,
 		Reason: protocol.FlushNeedsInput, QuestionID: "", Question: "which?",
 	}, nil)
 	if code != http.StatusBadRequest {
@@ -417,7 +424,7 @@ func TestHTTPFlushNeedsInputEmptyQuestionIDFailClosed(t *testing.T) {
 		t.Fatalf("the refused flush must not mint a pending: %+v", view.Pending)
 	}
 	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_cur",
+		WorkItem: "wi_http", AttemptID: "att_cur", SpawnN: 1,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_live", Question: "which?",
 	}, nil)
 	if code != http.StatusOK {

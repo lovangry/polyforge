@@ -171,32 +171,33 @@ func (o *Observe) serveFlush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, api.ErrDaemonBadInput, "unknown flush reason: "+req.Reason)
 		return
 	}
-	// The attempt-id fence (§二: every message carries the current
-	// attempt-id — the agent→daemon flush face included, #8). The
-	// request's AttemptID must name the monitor's CURRENT instance: a
-	// zombie survivor of a superseded instance (the six-layer cleanup
-	// admits residue) or an older generation must never seal work that
-	// belongs to the live attempt. Mismatch — including an absent id —
-	// answers DAEMON-409 STALE_ATTEMPT and never reaches the monitor.
-	// EXCEPT the recovery window: an id that matches the hub's LATEST
-	// KNOWN instance (registered at RTRecovered emission time, which the
-	// monitor's adoption lags) passes — the just-resumed agent's own
-	// flush is never stale. The monitor queues such a call until its
-	// adoption completes (onFlush), so an old-generation id can still
-	// never reach the flush paths.
-	cur := m.currentAttempt()
-	known := o.instanceKnown(wi)
-	if req.AttemptID == "" ||
-		(req.AttemptID != cur && req.AttemptID != known) ||
-		// Adoption-window cross-check (the s10 fence's real hole, exposed
-		// by F15 timing): a successor announcement (RTStarted/RTRecovered
-		// emission registers the hub's latest-known) supersedes the
-		// predecessor IMMEDIATELY — an id that still equals the monitor's
-		// lagging cur is already stale when known names someone else.
-		(req.AttemptID == cur && known != "" && req.AttemptID != known) {
+	// The B2 spawn fence (v1.5 §4.3): the request's SpawnN must name the
+	// monitor's CURRENT derivation — a zombie survivor of a superseded
+	// derivation (the six-layer cleanup admits residue) must never seal
+	// work that belongs to the live one. Mismatch — including an absent
+	// counter (0), the fail-closed mirror of the old absent-attempt-id
+	// refusal — answers DAEMON-409 STALE_SPAWN and never reaches the
+	// monitor. EXCEPT the recovery window: a counter that matches the
+	// hub's LATEST ANNOUNCED derivation (registered at RTStarted/
+	// RTRecovered emission time, which the monitor's adoption lags)
+	// passes — the just-resumed agent's own flush is never stale. The
+	// monitor queues such a call until its adoption completes (onFlush),
+	// so an older counter can still never reach the flush paths.
+	cur := m.currentSpawn()
+	known := o.spawnKnown(wi)
+	if req.SpawnN == 0 ||
+		(req.SpawnN != cur && req.SpawnN != known) ||
+		// Adoption-window cross-check (the s10 hole, carried over from
+		// the attempt-id fence): a successor announcement supersedes the
+		// predecessor IMMEDIATELY — a counter that still equals the
+		// monitor's lagging cur is already stale when known names a
+		// DIFFERENT (newer) derivation; only a zombie speaks in the
+		// predecessor's name.
+		(req.SpawnN == cur && known != 0 && req.SpawnN != known) {
 		writeErr(w, api.ErrDaemonConflict,
-			"STALE_ATTEMPT: flush carries attempt_id "+req.AttemptID+
-				"; the current instance is "+cur+" (latest announced: "+known+")")
+			"STALE_SPAWN: flush carries spawn_n "+strconv.Itoa(req.SpawnN)+
+				"; the current derivation is "+strconv.Itoa(cur)+
+				" (latest announced: "+strconv.Itoa(known)+")")
 		return
 	}
 	// F9 fail-closed gate: a needs_input flush without a question id can

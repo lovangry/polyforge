@@ -20,42 +20,43 @@ func golden(t *testing.T, name string, got, want string) {
 
 func TestGoldenWITable(t *testing.T) {
 	bundle := "bundle-x"
-	items := []api.WorkItem{
-		{Slug: "pf-1", Status: "running", Priority: "high", BundleName: &bundle, Goal: "fix the thing"},
-		{Slug: "pf-2", Status: "queued", Priority: "normal", Goal: "a goal that is definitely longer than sixty characters in total"},
+	items := []WIView{
+		{WorkItem: api.WorkItem{Slug: "pf-1", Status: "running", Priority: "high", BundleName: &bundle, Goal: "fix the thing"},
+			SessionFingerprint: "ab12cd34ef56aa00"},
+		{WorkItem: api.WorkItem{Slug: "pf-2", Status: "queued", Priority: "normal", Goal: "a goal that is definitely longer than sixty characters in total"}},
 	}
 	var b bytes.Buffer
 	renderWITable(&b, items)
 	golden(t, "WITable", b.String(),
-		`SLUG  STATUS   PRIORITY  BUNDLE    GOAL
-----  -------  --------  --------  --------------------------------------------------------------
-pf-1  running  high      bundle-x  fix the thing
-pf-2  queued   normal    -         a goal that is definitely longer than sixty characters in t…
+		`SLUG  STATUS   SESSION           PRIORITY  BUNDLE    GOAL
+----  -------  ----------------  --------  --------  --------------------------------------------------------------
+pf-1  running  ab12cd34ef56aa00  high      bundle-x  fix the thing
+pf-2  queued   -                 normal    -         a goal that is definitely longer than sixty characters in t…
 `)
 }
 
 func TestGoldenReadyWITable(t *testing.T) {
 	bundle := "bundle-x"
-	items := []api.WorkItem{
-		{Slug: "pf-1", Status: "queued", Priority: "normal", BundleName: &bundle, Goal: "fix the thing"},
+	items := []WIView{
+		{WorkItem: api.WorkItem{Slug: "pf-1", Status: "queued", Priority: "normal", BundleName: &bundle, Goal: "fix the thing"}},
 	}
-	unclassified := []api.WorkItem{
-		{Slug: "pf-2", Status: "queued", Priority: "normal", Goal: "another goal"},
+	unclassified := []WIView{
+		{WorkItem: api.WorkItem{Slug: "pf-2", Status: "queued", Priority: "normal", Goal: "another goal"}},
 	}
 	var b bytes.Buffer
 	renderReadyWITable(&b, items, unclassified)
 	golden(t, "ReadyWITable", b.String(),
-		`SLUG  STATUS  PRIORITY  BUNDLE    GOAL           SEGMENT
-----  ------  --------  --------  -------------  ------------
-pf-1  queued  normal    bundle-x  fix the thing  items
-pf-2  queued  normal    -         another goal   unclassified
+		`SLUG  STATUS  SESSION  PRIORITY  BUNDLE    GOAL           SEGMENT
+----  ------  -------  --------  --------  -------------  ------------
+pf-1  queued  -        normal    bundle-x  fix the thing  items
+pf-2  queued  -        normal    -         another goal   unclassified
 `)
 
 	b.Reset()
 	renderReadyWITable(&b, nil, nil)
 	golden(t, "ReadyWITableEmpty", b.String(),
-		`SLUG  STATUS  PRIORITY  BUNDLE  GOAL  SEGMENT
-----  ------  --------  ------  ----  -------
+		`SLUG  STATUS  SESSION  PRIORITY  BUNDLE  GOAL  SEGMENT
+----  ------  -------  --------  ------  ----  -------
 `)
 }
 
@@ -80,10 +81,10 @@ func TestGoldenObserve(t *testing.T) {
 		},
 	}
 	var b bytes.Buffer
-	renderObserve(&b, &jv)
+	renderObserve(&b, &jv, nil)
 	golden(t, "Observe", b.String(),
 		`wi_abc (polyforge) — needs_input
-attempt: ra_9  generation: 2  bundle: bundle-x
+bundle: bundle-x
 current step: implement
 
 steps:
@@ -134,10 +135,9 @@ func TestGoldenObserveEventLatency(t *testing.T) {
 		},
 	}
 	var b bytes.Buffer
-	renderObserve(&b, &jv)
+	renderObserve(&b, &jv, nil)
 	golden(t, "ObserveEventLatency", b.String(),
 		`wi_lat (polyforge) — running
-attempt:   generation: 0
 
 events:
 AT  KIND          BODY
@@ -161,10 +161,9 @@ func TestGoldenObserveHeaderWall(t *testing.T) {
 	jv := base()
 	jv.Budget = json.RawMessage(`{"usd":1.5,"wall_ms":11520000,"tokens":9000}`)
 	var b bytes.Buffer
-	renderObserve(&b, &jv)
+	renderObserve(&b, &jv, nil)
 	golden(t, "ObserveHeaderWall", b.String(),
 		`wi_w (polyforge) — running · wall 3.2h
-attempt:   generation: 0
 
 budget:
 {
@@ -178,10 +177,9 @@ budget:
 	jv = base()
 	jv.Budget = json.RawMessage(`{"wall_ms":12345}`)
 	b.Reset()
-	renderObserve(&b, &jv)
+	renderObserve(&b, &jv, nil)
 	golden(t, "ObserveHeaderWallSeconds", b.String(),
 		`wi_w (polyforge) — running · wall 12.3s
-attempt:   generation: 0
 
 budget:
 {
@@ -193,10 +191,9 @@ budget:
 	jv = base()
 	jv.Budget = json.RawMessage(`{"requests":{"used":3,"ceiling":50}}`)
 	b.Reset()
-	renderObserve(&b, &jv)
+	renderObserve(&b, &jv, nil)
 	golden(t, "ObserveHeaderNoWall", b.String(),
 		`wi_w (polyforge) — running
-attempt:   generation: 0
 
 budget:
 {
@@ -216,8 +213,8 @@ budget:
 		jv = base()
 		jv.Budget = budget
 		b.Reset()
-		renderObserve(&b, &jv)
-		want := "wi_w (polyforge) — running\nattempt:   generation: 0\n"
+		renderObserve(&b, &jv, nil)
+		want := "wi_w (polyforge) — running\n"
 		if name == "zero" {
 			want += "\nbudget:\n{\n  \"wall_ms\": 0\n}\n"
 		}
@@ -230,11 +227,12 @@ func TestGoldenStatus(t *testing.T) {
 		MachineID: "m1",
 		Mode:      protocol.ModeDrain,
 		Jobs: []StatusJob{
-			{WorkItemID: "wi_abc", Status: "running", AttemptID: "ra_1", AgentPID: 42,
+			{WorkItemID: "wi_abc", Status: "running", SessionFingerprint: "ab12cd34ef56aa00", AgentPID: 42,
 				LastProgressAgoSec: int64Ptr(754)},
 			// D6: a job presented as needs_input shows its pending
-			// question's id in the QUESTION column.
-			{WorkItemID: "wi_ask", Status: "needs_input", AttemptID: "ra_2", AgentPID: 43,
+			// question's id in the QUESTION column. A job whose session
+			// fingerprint is not (yet) wired renders "-" in SESSION.
+			{WorkItemID: "wi_ask", Status: "needs_input", AgentPID: 43,
 				NeedsInput: true, QuestionID: "q_zz9"},
 		},
 		Queue: QueueStats{Pending: 1, Running: 2, MaxConcurrent: 2},
@@ -244,10 +242,10 @@ func TestGoldenStatus(t *testing.T) {
 	golden(t, "Status", b.String(),
 		`machine: m1  mode: drain  queue: 1 pending / 2 running / max 2
 
-WORK ITEM  STATUS       ATTEMPT  AGENT PID  QUESTION  LAST-PROGRESS
----------  -----------  -------  ---------  --------  -------------
-wi_abc     running      ra_1     42         -         12:34
-wi_ask     needs_input  ra_2     43         q_zz9     -
+WORK ITEM  STATUS       SESSION           AGENT PID  QUESTION  LAST-PROGRESS
+---------  -----------  ----------------  ---------  --------  -------------
+wi_abc     running      ab12cd34ef56aa00  42         -         12:34
+wi_ask     needs_input  -                 43         q_zz9     -
 `)
 }
 
@@ -274,11 +272,11 @@ func TestGoldenShip(t *testing.T) {
 func TestGoldenWIDetail(t *testing.T) {
 	milestone := "m1"
 	labels := []string{"infra"}
-	wi := api.WorkItem{
+	wi := WIView{WorkItem: api.WorkItem{
 		ID: "wi_abc", Slug: "pf-42", ProjectName: "polyforge",
 		Goal: "do the thing", Status: "queued", Priority: "high",
 		Milestone: &milestone, Labels: labels, CreatedAt: "t0",
-	}
+	}}
 	var b bytes.Buffer
 	renderWIDetail(&b, &wi)
 	golden(t, "WIDetail", b.String(),
@@ -289,6 +287,29 @@ func TestGoldenWIDetail(t *testing.T) {
   milestone: m1
   labels:   infra
   bundle:   -
+  created:  t0
+`)
+
+	// The v1.5 session audit fields render when the server body carries
+	// them (additive decode): fingerprint, machine, owner, started-at,
+	// clean_pause — the public handle only, never the secret.
+	wi.SessionFingerprint = "ab12cd34ef56aa00"
+	wi.SessionMachine = "m-b"
+	wi.SessionOwner = "op"
+	wi.SessionStartedAt = "2026-10-01T00:00:00Z"
+	wi.CleanPause = true
+	b.Reset()
+	renderWIDetail(&b, &wi)
+	golden(t, "WIDetailSession", b.String(),
+		`pf-42 (wi_abc)
+  status:   queued (priority high)
+  project:  polyforge
+  goal:     do the thing
+  milestone: m1
+  labels:   infra
+  bundle:   -
+  session:  ab12cd34ef56aa00 (machine m-b, owner op) since 2026-10-01T00:00:00Z
+  clean-pause: yes (operator pause; restart will not auto-resume)
   created:  t0
 `)
 }

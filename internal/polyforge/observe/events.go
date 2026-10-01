@@ -118,6 +118,17 @@ const (
 	// MUST surface as this event, never as silent idling; transport-class
 	// losses (network/5xx) stay silent idle, unchanged.
 	EvDrainDegraded = "drain_degraded"
+	// EvSessionSuperseded is the v1.5 M4 verdict record: the periodic
+	// session revalidation learned another daemon holds this work item
+	// (matches=false). Payload carries the CURRENT holder's public
+	// fingerprint — never a secret. The monitor stops supervising and
+	// the runtime kills/quarantines/releases; no hub transition happens
+	// (superseded is not terminal).
+	EvSessionSuperseded = "session_superseded"
+	// EvSessionVerifyFailed is the M4 transport-class record: a periodic
+	// session-verify could not reach aihub. Log-only by contract — no
+	// action is ever taken on a transport error; the retry is bounded.
+	EvSessionVerifyFailed = "session_verify_failed"
 )
 
 // Infra-incident payload kinds (04 §5.1a tenth-event family).
