@@ -355,7 +355,7 @@ func TestOBSupersededFingerprintFence(t *testing.T) {
 	r.handleOB(context.Background(), protocol.OBMsg{
 		Kind: protocol.OBSuperseded, SpawnN: j2.spawnN,
 		WorkItem: wi,
-		Detail: "verify mismatch (legacy emission, no session_fp)",
+		Detail:   "verify mismatch (legacy emission, no session_fp)",
 	})
 	waitDead(t, old2PID)
 	if r.jobOf(wi) != nil {
