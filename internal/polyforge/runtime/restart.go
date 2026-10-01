@@ -172,9 +172,9 @@ func (r *Runtime) restartRelease(rec *jobRecord, currentFingerprint string) {
 	r.forgetRecord(rec)
 	if r.cfg.EventTap != nil {
 		r.cfg.EventTap(rec.WorkItemID, "session_released", map[string]any{
-			"session_fingerprint":  j.sessionFingerprint,
-			"current_fingerprint":  currentFingerprint,
-			"note":                 "answers may be lost; question re-opened",
+			"session_fingerprint": j.sessionFingerprint,
+			"current_fingerprint": currentFingerprint,
+			"note":                "answers may be lost; question re-opened",
 		})
 	}
 	fmt.Fprintf(os.Stderr, "runtime: %s: held by session %q — local tree killed, capsule quarantined, record dropped (no hub transition)\n",

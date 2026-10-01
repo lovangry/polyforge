@@ -67,10 +67,12 @@ func (j *job) transition(to JobState) error {
 	return nil
 }
 
-func (j *job) snapshot() (state JobState, fence string) {
+// snapshot answers the job's state plus the derivation counter the OB
+// fence compares against (B2).
+func (j *job) snapshot() (state JobState, spawn int) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.state, j.instance
+	return j.state, j.spawnN
 }
 
 // liveAgent reports whether this job currently has a live agent handle
@@ -193,25 +195,21 @@ func jobFromRecord(rec *jobRecord) *job {
 		// stored copy is empty (defensive: the two are redundant by
 		// construction).
 		sessionFingerprint: fp,
-		// the derivation fence token during the transition: records seed
-		// the bare fingerprint; the first re-derivation mints fp#N on it.
-		instance:   fp,
-		state:      JobState(rec.State),
-		stopReason: rec.StopReason,
-		sealedPush: rec.SealedPush,
-		capsuleDir: rec.CapsuleDir,
+		state:              JobState(rec.State),
+		stopReason:         rec.StopReason,
+		sealedPush:         rec.SealedPush,
+		capsuleDir:         rec.CapsuleDir,
 		git: gitops.Opts{
 			// v1.5 gitops call sites: Username = the work-item id,
-			// Secret = the session id (the push password). AttemptID
-			// carries the session fingerprint as the push-option backup
-			// layer's value until Lane C renames the option (§1.6).
-			WorkItemID: rec.WorkItemID,
-			AttemptID:  fp,
-			CapsuleDir: rec.CapsuleDir,
-			GitDir:     rec.GitDir,
-			RemoteURL:  rec.RemoteURL,
-			Username:   rec.WorkItemID,
-			Secret:     rec.SessionID,
+			// Secret = the session id (the push password),
+			// Fingerprint = the PUBLIC handle (§1.6 backup layer).
+			WorkItemID:  rec.WorkItemID,
+			Fingerprint: fp,
+			CapsuleDir:  rec.CapsuleDir,
+			GitDir:      rec.GitDir,
+			RemoteURL:   rec.RemoteURL,
+			Username:    rec.WorkItemID,
+			Secret:      rec.SessionID,
 		},
 		cleanPause:       rec.CleanPause,
 		spawnN:           rec.SpawnN,

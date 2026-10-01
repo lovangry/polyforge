@@ -164,7 +164,7 @@ func TestOBSupersededKillsAndQuarantines(t *testing.T) {
 	}
 
 	r.handleOB(context.Background(), protocol.OBMsg{
-		Kind: protocol.OBSuperseded, AttemptID: j.instance,
+		Kind: protocol.OBSuperseded, SpawnN: j.spawnN,
 		WorkItem: wi, Detail: "verify mismatch: held by fp abc123",
 	})
 

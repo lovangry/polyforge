@@ -151,14 +151,8 @@ type job struct {
 	sessionID string
 	// sessionFingerprint is the PUBLIC handle (api.SessionFingerprint).
 	sessionFingerprint string
-	// instance is the derivation fence token carried on RTMsg.AttemptID
-	// during the v1→v1.5 transition: the fingerprint for the first
-	// derivation, "fingerprint#N" for later ones (the v1 attempt#N
-	// shape, keyed on the spawn counter). The cleanup commit deletes the
-	// protocol field and this collapses to SpawnN.
-	instance string
-	state      JobState
-	stopReason string // sealed-in reason while SEALING (restart can finish the stop)
+	state              JobState
+	stopReason         string // sealed-in reason while SEALING (restart can finish the stop)
 	// sealedPush records that the final capsule state was ALREADY
 	// committed and pushed by the flush(wrap) half of the dual close
 	// (the flaw fix): the stopOp half then skips its own seal push. It is
@@ -235,9 +229,9 @@ func DefaultSpawner(cfg *Config) Spawner {
 }
 
 // Run is the OB-message loop: it consumes Observe messages until ctx ends.
-// Every message is fenced by attempt-id; the fencing and per-state drops
-// live here (§二: attempt-id ≠ current ⇒ dropped; SEALING drops a
-// same-attempt WINeedsRecovery).
+// Every message is fenced by the derivation counter; the fencing and
+// per-state drops live here (§二: spawn_n ≠ current ⇒ dropped; SEALING
+// drops a same-derivation WINeedsRecovery).
 func (r *Runtime) Run(ctx context.Context) error {
 	for {
 		select {
@@ -259,8 +253,8 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	if j == nil {
 		return // unknown WI: nothing to fence on, drop
 	}
-	state, fence := j.snapshot()
-	if msg.AttemptID != fence {
+	state, spawn := j.snapshot()
+	if msg.SpawnN != spawn {
 		return // stale handle: dropped (recovery-loop guard, §二)
 	}
 	switch msg.Kind {
@@ -293,8 +287,8 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 		// wrapped|failed additionally mean the monitor's flushWrap has
 		// ALREADY committed and pushed the final state ("wrap: <status>",
 		// its EvPublished) — the dual-path close's other half, this very
-		// Stop, must not push a second time: the attempt credential is
-		// revoked once the sealed state settles, and a redundant seal push
+		// Stop, must not push a second time: the session row is cleared
+		// once the sealed state settles, and a redundant seal push
 		// fails against it (the real-machine push_failed: a successful
 		// wrap push followed one second later by a seal push refused with
 		// GIT-500). The blocked vocabulary is the exception: the flush
@@ -568,19 +562,17 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		project:            resp.WorkItem.ProjectName,
 		sessionID:          sessionID,
 		sessionFingerprint: fp,
-		instance:           fp, // derivation 1's fence token
 		state:              StateRunning,
 		capsuleDir:         r.capsuleDir(id),
 		git: gitops.Opts{
 			WorkItemID: id,
-			// the push-option backup layer's value until Lane C renames
-			// the option: the session fingerprint (contract §1.6).
-			AttemptID:  fp,
-			CapsuleDir: r.capsuleDir(id),
-			GitDir:     r.gitDirFor(id),
-			RemoteURL:  r.remoteURLFor(id),
-			Username:   id,
-			Secret:     sessionID, // v1.5: the session secret IS the push password
+			// §1.6 fencing-on-use backup layer: the PUBLIC fingerprint.
+			Fingerprint: fp,
+			CapsuleDir:  r.capsuleDir(id),
+			GitDir:      r.gitDirFor(id),
+			RemoteURL:   r.remoteURLFor(id),
+			Username:    id,
+			Secret:      sessionID, // v1.5: the session secret IS the push password
 		},
 		bundleName:   c.BundleName,
 		bundleDigest: c.BundleDigest,
@@ -624,15 +616,13 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	r.clearClaiming(wi)
 	j.mu.Lock()
 	pid := j.agentPID
-	inst := j.instance
 	spawnN := j.spawnN
 	j.mu.Unlock()
 	r.send(protocol.RTMsg{
-		Kind:      protocol.RTStarted,
-		AttemptID: inst,
-		SpawnN:    spawnN,
-		WorkItem:  id,
-		AgentPID:  pid,
+		Kind:     protocol.RTStarted,
+		SpawnN:   spawnN,
+		WorkItem: id,
+		AgentPID: pid,
 		// the secret rides in-process to the observe lane only (its M4
 		// session revalidation needs it); never a log, never the capsule.
 		SessionID: j.sessionID,
@@ -1019,8 +1009,8 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	if r.cfg.EventTap != nil {
 		r.cfg.EventTap(j.wi, "session_superseded", map[string]any{
 			"session_fingerprint": j.sessionFingerprint,
-			"note":               "answers may be lost; question re-opened",
-			"detail":             detail,
+			"note":                "answers may be lost; question re-opened",
+			"detail":              detail,
 		})
 	}
 	_ = ctx
@@ -1109,7 +1099,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	r.send(protocol.RTMsg{Kind: protocol.RTFinished, AttemptID: j.instance, WorkItem: j.wi, Reason: finalReason})
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: finalReason})
 	return nil
 }
 

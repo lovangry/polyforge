@@ -189,7 +189,6 @@ func (r *Runtime) recovered(j *job, h AgentHandle, cause string, resumed bool) {
 	if resumed {
 		j.resumeFails = 0 // a successful resume breaks the failure streak
 	}
-	inst := j.instance
 	spawnN := j.spawnN
 	pid := j.agentPID
 	j.mu.Unlock()
@@ -201,7 +200,6 @@ func (r *Runtime) recovered(j *job, h AgentHandle, cause string, resumed bool) {
 	}
 	r.send(protocol.RTMsg{
 		Kind:      protocol.RTRecovered,
-		AttemptID: inst,
 		SpawnN:    spawnN,
 		WorkItem:  j.wi,
 		AgentPID:  pid,
@@ -265,11 +263,10 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
 	r.send(protocol.RTMsg{
-		Kind:      protocol.RTFinished,
-		AttemptID: j.instance,
-		WorkItem:  j.wi,
-		Reason:    protocol.FinishBlocked,
-		Detail:    detail,
+		Kind:     protocol.RTFinished,
+		WorkItem: j.wi,
+		Reason:   protocol.FinishBlocked,
+		Detail:   detail,
 	})
 	_ = ctx
 }
@@ -338,9 +335,12 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcrip
 	capsuleDir := j.capsuleDir
 	sessionFp := j.sessionFingerprint
 	j.mu.Unlock()
-	// the derivation ordinal and fence token this derivation will carry
-	// once installed — the journal must name the process that is live when
-	// Spawn returns
+	// the derivation ordinal this derivation will carry once installed
+	// — the journal must name the process that is live when Spawn
+	// returns. token is the LOCAL display name (the public fingerprint,
+	// "#N"-suffixed after re-derivations) used only for the capsule-side
+	// transcript path and the spawn journal; the protocol fence is the
+	// counter itself.
 	ordinal := spawnN + 1
 	token := sessionFp
 	if ordinal > 1 {
@@ -373,9 +373,6 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcrip
 		Resume:         resume,
 		InitialPrompt:  r.buildPrompt(j, resume),
 		CgroupPath:     r.cgroupPathFor(j.wi),
-		// The derivation's fence token rides the journal (and, during the
-		// transition, RTMsg.AttemptID) — never the secret.
-		InstanceID: token,
 		// F4: the spawn is pinned to the effective candidate of the
 		// persisted chain (spawn.go documents why this rides argv).
 		Model: j.effectiveModel(),
@@ -403,7 +400,6 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcrip
 	j.agentPID = h.PID()
 	j.agentStartedAt = h.StartedAt()
 	j.liveTranscript = live
-	j.instance = token
 	j.mu.Unlock()
 	return h, nil
 }

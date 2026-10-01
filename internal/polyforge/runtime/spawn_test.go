@@ -128,7 +128,6 @@ func TestSpawnSessionIdentityEnvReachesChild(t *testing.T) {
 		SessionHandle: api.SessionFingerprint(secret),
 		SpawnN:        2,
 		InitialPrompt: "begin",
-		InstanceID:    api.SessionFingerprint(secret) + "#1",
 		Journal:       func(pid int, startedAt string) error { return nil },
 	})
 	if err != nil {
