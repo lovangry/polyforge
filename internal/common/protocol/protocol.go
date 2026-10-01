@@ -127,7 +127,11 @@ const (
 type FlushRequest struct {
 	WorkItem  string `json:"work_item"`
 	AttemptID string `json:"attempt_id"`
-	Reason    string `json:"reason"` // one of the Flush* constants
+	// v1.5 B2: the per-WI monotonic derivation counter. The flush fence
+	// validates spawn_n against the monitor's current/latest-announced
+	// derivation; attempt_id is deleted in the cleanup commit.
+	SpawnN int `json:"spawn_n"`
+	Reason  string `json:"reason"` // one of the Flush* constants
 	// needs_input only:
 	QuestionID string `json:"question_id,omitempty"`
 	Question   string `json:"question,omitempty"`

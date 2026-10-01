@@ -10,7 +10,11 @@
 //   - DAEMON-* codes retained; publish_request becomes flush(reason).
 package api
 
-import "encoding/json"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+)
 
 // WorkItem is the server-side work item record (02 §4). Field semantics are
 // inherited from the v0 contract; JSON tags are wire-stable.
@@ -171,4 +175,87 @@ type ListResponse[T any] struct {
 	Items  []T     `json:"items"`
 	Total  int     `json:"total"`
 	Cursor *string `json:"cursor,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// v1.5 session model wire types (docs/design/polyforge-vnext/v1.5-api-contract.md).
+// Additive: the generation/attempt types above remain until the cleanup commit.
+
+// SessionClaim is the v1.5 claim/attach/takeover response envelope. The
+// session_id is a SECRET minted by the daemon; it is never echoed here —
+// only its public fingerprint travels (B3 identity/credential split).
+type SessionClaim struct {
+	WorkItemID         string        `json:"work_item_id"`
+	SessionFingerprint string        `json:"session_fingerprint"`
+	MachineID          string        `json:"machine_id"`
+	Owner              string        `json:"owner"`
+	BundleName         string        `json:"bundle_name"`
+	BundleDigest       string        `json:"bundle_digest"`
+	ClaimedAt          string        `json:"claimed_at"`
+	Repos              []ProjectRepo `json:"repos,omitempty"`
+}
+
+// SessionClaimResponse wraps SessionClaim plus the full WorkItem.
+type SessionClaimResponse struct {
+	Claim    SessionClaim `json:"claim"`
+	WorkItem WorkItem     `json:"work_item"`
+}
+
+// SessionClaimRequest is the CAS claim body (also force-takeover, where
+// Reason is required). session_id is the client-minted secret, journaled
+// durably BEFORE this call (B1).
+type SessionClaimRequest struct {
+	WorkItemID     string `json:"work_item_id"`
+	SessionID      string `json:"session_id"`
+	MachineID      string `json:"machine_id"`
+	Owner          string `json:"owner"`
+	Reason         string `json:"reason,omitempty"` // takeover only; required there
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+// SessionAttachRequest resumes a paused WI under the SAME session (M3:
+// same-machine restart resume; clean_pause WIs refuse attach).
+type SessionAttachRequest struct {
+	WorkItemID string `json:"work_item_id"`
+	SessionID  string `json:"session_id"`
+	MachineID  string `json:"machine_id"`
+	Owner      string `json:"owner"`
+}
+
+// SessionVerifyRequest is the compare-only body (B3: the hub stores only
+// the hash and never returns the secret).
+type SessionVerifyRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+// SessionVerifyResponse answers "is this session still the holder" plus
+// the public audit fields a superseded daemon needs to self-diagnose.
+type SessionVerifyResponse struct {
+	WorkItemID         string `json:"work_item_id"`
+	Matches            bool   `json:"matches"`
+	Status             string `json:"status"`
+	CurrentFingerprint string `json:"current_fingerprint,omitempty"`
+	CleanPause         bool   `json:"clean_pause"`
+}
+
+// SessionEndRequest replaces end-generation: fenced on the session hash,
+// terminal verdict sets the status and clears the session row entirely.
+type SessionEndRequest struct {
+	SessionID string `json:"session_id"`
+	Status    string `json:"status"` // wrapped|failed|blocked
+	Note      string `json:"note,omitempty"`
+}
+
+// SessionFingerprint derives the public handle from the secret:
+// hex(sha256(session_id))[:16]. Both sides compute it identically; the hub
+// stores the full hash and serves only the prefix on public surfaces.
+func SessionFingerprint(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// SessionHashHex is the at-rest form: hex(sha256(session_id)).
+func SessionHashHex(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:])
 }

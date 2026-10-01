@@ -449,3 +449,50 @@ func (c *Client) RebuildMemoryIndex() (int, error) {
 	}
 	return out.Reindexed, nil
 }
+
+// ---------------------------------------------------------------------------
+// v1.5 session model client (v1.5-api-contract.md §3). Additive: the
+// generation-era Claim/EndGeneration above remain until the cleanup commit.
+
+// SessionClaim performs the CAS claim: set the session only if the WI is
+// queued and unheld (M1 joint gate). Idempotent on idempotency_key.
+func (c *Client) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
+	var out api.SessionClaimResponse
+	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(req.WorkItemID)+"/claim", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SessionAttach resumes a paused WI under the same session (M3).
+func (c *Client) SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error) {
+	var out api.SessionClaimResponse
+	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/session-attach", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ForceTakeover atomically swaps the session to this daemon's new secret.
+func (c *Client) ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
+	var out api.SessionClaimResponse
+	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/force-takeover", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SessionVerify is the compare-only holder check (B3: no secret echo).
+func (c *Client) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error) {
+	var out api.SessionVerifyResponse
+	req := api.SessionVerifyRequest{SessionID: sessionID}
+	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/session-verify", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SessionEnd replaces EndGeneration: session-fenced terminal verdict.
+func (c *Client) SessionEnd(wi string, req api.SessionEndRequest) error {
+	return c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/session-end", req, nil)
+}
