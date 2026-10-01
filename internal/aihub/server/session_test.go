@@ -1,9 +1,9 @@
 package server
 
 // session_test.go — the v1.5 session endpoints over real HTTP: the five
-// contract §1 routes, their typed refusals, the pause path through the
-// legacy end-generation body, and the m4 read surface (public session
-// block on every WorkItem JSON; never a hash, never the secret).
+// contract §1 routes, their typed refusals, the paused verdict on
+// session-end (the M3 pause transition), and the m4 read surface (public
+// session block on every WorkItem JSON; never a hash, never the secret).
 
 import (
 	"encoding/json"
@@ -123,9 +123,9 @@ func TestSessionAttachOverHTTP(t *testing.T) {
 	if code, raw, _ := sessClaim(t, e, id, secret, "sa-1"); code != 200 {
 		t.Fatalf("claim: %d %s", code, raw)
 	}
-	// Pause via the session-fenced end-generation (daemon shutdown shape:
-	// clean_pause stays false).
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/end-generation", e.key,
+	// Pause via session-end's paused verdict (the merge amend; daemon
+	// shutdown shape: clean_pause stays false).
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
 		map[string]any{"status": "paused", "session_id": secret, "clean_pause": false}, nil); code != 200 {
 		t.Fatalf("session pause: %d %s", code, raw)
 	}
@@ -139,7 +139,7 @@ func TestSessionAttachOverHTTP(t *testing.T) {
 		t.Fatalf("attach response wrong: %+v", resp)
 	}
 	// Pause again with clean_pause=true (operator pause): attach refuses.
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/end-generation", e.key,
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
 		map[string]any{"status": "paused", "session_id": secret, "clean_pause": true}, nil); code != 200 {
 		t.Fatalf("operator pause: %d %s", code, raw)
 	}

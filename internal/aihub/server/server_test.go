@@ -2,7 +2,7 @@ package server
 
 // Server tests: the auth matrix (no key / wrong key / right key), the
 // typed error-envelope shape, and the claim → git-credential →
-// end-generation flow over real HTTP.
+// session-end flow over real HTTP.
 
 import (
 	"bytes"

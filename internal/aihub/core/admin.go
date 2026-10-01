@@ -635,10 +635,10 @@ func (m *AdminManager) Backup(dataDir string) (string, error) {
 }
 
 // RotateSecret records a service-secret epoch rotation (M5, 02 §6.6).
-// v1 minted credentials are per-attempt random secrets (hash-only in
-// owner_generations) — no validation path consumes a shared service
-// secret — so rotation maintains the epoch LEDGER only: the M5 wire
-// contract and its audit trail. mode=grace requires grace_seconds > 0
+// Session-model pushes are fenced by the per-WI session hash on
+// work_items — no validation path consumes a shared service secret — so
+// rotation maintains the epoch LEDGER only: the M5 wire contract and
+// its audit trail. mode=grace requires grace_seconds > 0
 // and retires the superseded epoch at now+grace; mode=rollback forces
 // grace to zero and retires every older live epoch immediately.
 func (m *AdminManager) RotateSecret(mode string, graceSeconds int64, rotatedBy string) (int, error) {

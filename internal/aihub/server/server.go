@@ -67,7 +67,6 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-attach", s.auth(s.hSessionAttach))
 	m.HandleFunc("POST /api/v1/work-items/{id}/force-takeover", s.auth(s.hForceTakeover))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-end", s.auth(s.hSessionEnd))
-	m.HandleFunc("POST /api/v1/work-items/{id}/end-generation", s.auth(s.hEndGeneration))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
 	m.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.auth(s.hDeps))
 	m.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking}/{kind}", s.auth(s.hDelDep))
@@ -101,7 +100,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/admin/import-work-item", s.authAdmin(s.hImportWorkItem))
 	m.HandleFunc("POST /api/v1/service/rotate-secret", s.authAdmin(s.hRotateSecret))
 
-	// Git proxy (own auth: attempt-scoped Basic credential).
+	// Git proxy (own auth: session-scoped Basic credential).
 	m.Handle("/git/", http.HandlerFunc(s.Git.HandleGit))
 
 	s.mux = m
@@ -558,9 +557,9 @@ func (s *Server) sessionClaimResponse(w http.ResponseWriter, id string, claim *a
 	writeJSON(w, http.StatusOK, sessionClaimEnvelope{Claim: *claim, WorkItem: *view})
 }
 
-// hSessionClaim serves POST /api/v1/work-items/{id}/claim (v1.5: the CAS
-// session claim; the v1 generation-era intent handler it replaces is
-// deleted in the cleanup commit).
+// hSessionClaim serves POST /api/v1/work-items/{id}/claim (the v1.5 CAS
+// session claim; it replaced the deleted v1 generation-era intent
+// handler).
 func (s *Server) hSessionClaim(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -657,8 +656,10 @@ func (s *Server) hForceTakeover(w http.ResponseWriter, r *http.Request, idn *ide
 	s.sessionClaimResponse(w, id, claim, err)
 }
 
-// hSessionEnd serves the session-fenced terminal verdict (replaces
-// end-generation for session-held WIs).
+// hSessionEnd serves the session-fenced terminal verdict (wrapped|
+// failed|blocked) and — the merge amend — the M3 pause transition
+// ("paused": the session is KEPT, clean_pause rides the same fenced
+// update). It fully replaces the deleted v1 /end-generation endpoint.
 func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -675,62 +676,6 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 		return
 	}
 	if err := s.Sessions.End(id, req, idn.UserID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	wi, err := s.WIs.Get(id, core.GetOptions{})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
-}
-
-func (s *Server) hEndGeneration(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	var req struct {
-		AttemptID  string `json:"attempt_id"`
-		Generation int64  `json:"generation"`
-		Status     string `json:"status"`
-		Note       string `json:"note,omitempty"`
-		// v1.5 additive fields. session_id routes the request to the
-		// session-fenced PAUSE path (M3: the session is kept; the frozen
-		// contract defines no pause endpoint, so this legacy endpoint
-		// carries the transition until the cleanup commit reshuffles the
-		// routes). clean_pause distinguishes the two pausers: true =
-		// operator pause (a restart must NOT auto-resume it), false =
-		// the daemon's own graceful-shutdown pause.
-		SessionID  string `json:"session_id,omitempty"`
-		CleanPause bool   `json:"clean_pause,omitempty"`
-	}
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if req.SessionID != "" {
-		if req.Status != api.StatusPaused {
-			writeErr(w, core.Fail(api.ErrCoreBadInput, "",
-				"the session-fenced end-generation serves the pause transition only; terminal verdicts use session-end"))
-			return
-		}
-		if err := s.Sessions.Pause(id, req.SessionID, req.CleanPause, req.Note, idn.UserID); err != nil {
-			writeErr(w, err)
-			return
-		}
-	} else if err := s.Owners.EndGeneration(id, req.AttemptID, req.Generation, req.Status, req.Note, req.CleanPause); err != nil {
 		writeErr(w, err)
 		return
 	}

@@ -1,7 +1,7 @@
-// Package git is the v1 aihub git surface: per-WI bare-repo lifecycle,
-// the git-http-backend smart-protocol proxy, attempt-scoped credential
-// auth (Generation fencing main layer, v1-spec-full §六) and the
-// pre-receive hook that enforces the capsule-chain invariants.
+// Package git is the aihub git surface: per-WI bare-repo lifecycle,
+// the git-http-backend smart-protocol proxy, session-scoped credential
+// auth (v1.5 fencing-on-use, contract §1.6) and the pre-receive hook
+// that enforces the capsule-chain invariants.
 //
 // All git access goes through the real git binary (no embedded library).
 package git
@@ -18,11 +18,10 @@ import (
 )
 
 // CredentialChecker validates a Basic pair (username = WI id) against
-// the WI's live ownership: the v1.5 session hash when the WI is
-// session-held (returning the session's PUBLIC fingerprint), or the
-// legacy current ACTIVE attempt's push credential (returning the
-// attempt id). Implemented by *core.OwnerManager.CheckPushCredential;
-// the returned handle is the pre-receive backup fence's expected value.
+// the WI's live ownership: the password must be the current session
+// secret, and the check returns the session's PUBLIC fingerprint.
+// Implemented by *core.OwnerManager.CheckPushCredential; the returned
+// handle is the pre-receive backup fence's expected value.
 type CredentialChecker interface {
 	CheckPushCredential(wiID, username, secret string) (string, error)
 }
