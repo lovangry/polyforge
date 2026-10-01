@@ -303,3 +303,90 @@ release 授权批量（alpha.4-30，只新建不覆盖不升级）、tag 不推 
 e2e 缺口全开真票、M6/M8 最小仪器化、V4 wrap 证据硬门、V8 毒链本地
 预检+防御不计失败、needs_input 代理答题（自本条起改为 owner 亲自答）、
 #52 takeover 提前。
+
+## v1.5 附录（2026-10-01，session-model 实施轨迹）
+
+v1.5 session-model 实施期间的设计裁定、评审轨迹与残余未修项，按
+本台账 house style 追记（append-only；不触动上台账任何条目）。
+
+1. 总述：v1.5 session-ID ownership model（session_id CAS claim、
+   fencing-on-use、spawn_n、quarantine）取代 generation/attempt/
+   instance lineage，作为协调层替换合入 main @ b5ab060；lineage 全删
+   ——aihub（b1dba93）、wire types（03dc291）、runtime（5e440db）、
+   observe re-key onto spawn_n（41da6e7）、daemon/cli render spawn_n
+   + session_fingerprint（da250ef）。设计权威记录指向
+   `v1.5-session-model.md`（含 industry-research appendix：epoch+
+   fencing 家族、invalidation-on-claim vs fencing-on-use、ZooKeeper
+   GUID ambiguous-claim 教训）与 `v1.5-api-contract.md` §1.5 AMEND。
+   状态注记：已落地。
+
+2. B1/B2/B3 裁定与解决：三条 fable BLOCKER 强制追加项，在实施评审
+   （commit 3158d25，verdict APPROVE-WITH-FINDINGS）全部 RESOLVED
+   with evidence——B1 pre-claim durable journal（崩溃安全，D5
+   #Start-crash 修复兼 CAS retry-idempotency 锚，正面回答 ZooKeeper
+   GUID ambiguous-claim 教训）；B2 flush fence = (session_id,
+   spawn_n) 双键（取代收养窗栅栏，F16 修复的接棒者）；B3
+   identity/credential split（PF_SESSION_HANDLE 仅展示指纹 vs 受
+   栅栏保护的 push 凭据，GIT_ASKPASS 单次投递）。状态注记：已落地。
+
+3. M1–M5 裁定落地（逐条短条目）：
+   - M1 空会话既终态又可领 → CAS 改 (status, session) 联合判定，
+     claim gates 恢复。状态注记：已落地。
+   - M2 bounded fail：session 清空 + status=blocked，restart 不动，
+     blocked 排除出 CAS 可领集合直至 unblock。状态注记：已落地。
+   - M3 paused-with-session：SessionEnd 第 4 态 `paused`、
+     StatePaused 加入 runtime 状态机、clean_pause 标记、operator
+     pause 保留 job record（secret 本地存活，pf resume 兑现续跑
+     承诺）。状态注记：已落地。
+   - M4 周期性会话重验：monitor tick 上重验（~5 分钟；常量见
+     `internal/polyforge/observe/session.go`：defaultRevalidateEvery
+     5m / verifyErrorBackoff 30s / verifyCallBound 70s），由
+     3158d25 补上 Lane D 缺口接线；`--revalidate-every` 旗标由姊妹
+     胶囊 wi_brFjFISWrAFC 落地（fa2e091、4045576、0b6ac8a）。
+     状态注记：已落地。
+   - M5 同机双 daemon TOCTOU → daemon data dir 上 flock。
+     状态注记：已落地。
+
+   追记 §1.5 AMEND 批准的实施后 delta：paused 第 4 态、StatePaused
+   retain、POST /work-items/{id}/unblock + `pf unblock`
+   （admin-or-maintainer，M2 的出口门）。
+
+4. 评审轨迹（三轮回合）：先 fable 设计评审——REQUEST-CHANGES，强制
+   B1/B2/B3 + M1–M5；实施评审 @ 3158d25——APPROVE-WITH-FINDINGS
+   （B1/B2/B3 全 RESOLVED；3 新 MAJOR：OBSuperseded 丢失、pause
+   摧毁 record、无 unblock 门；另 2 MINOR）；修复 lane e2137f5 +
+   合入 856ff5c——CONFIRM-APPROVE。
+
+5. NEW-1：陈旧 OBSuperseded 对后继 job 的会话指纹栅栏修复——commit
+   3114915「v1.5 NEW-1: OBSuperseded fenced on the session
+   fingerprint」（+ gofmt b5ab060）。状态注记：已修。
+
+6. NEW-2：姊妹胶囊 wi_y50ZfykBewso（已 wrap）——commits 7786e99
+   「runtime: bounded release lane for observe releases (NEW-2)」+
+   f1fb1ee「daemon: close the runtime release lane at shutdown」，
+   随 v0.3.2 发布（tag 在 f1fb1ee）。界定 terminal RTFinished
+   observe release 的重发上限——observe 通道满时推迟而非摧毁被
+   取代/暂停的 release。状态注记：已修——但留一条非阻塞残余（未修
+   候选跟进）：observe 侧 RTFinished handler
+   （internal/polyforge/observe/observe.go ~296-307）不感知
+   spawnN，复合竞态窗内延后的 RTFinished(paused) 可能在后继
+   RTStarted 之后送达并无条件删 latestSpawn、Forget 答案台账、
+   停掉新 monitor；另注：长寿非 daemon Runtime 不 Close 则 lane
+   goroutine 泊住。
+
+7. NEW-3：姊妹胶囊 wi_YONafuu9hiy9（已 wrap）——commits 01ddc26
+   「runtime: replay a pending terminal close of a retained Paused
+   record at restart (NEW-3)」+ c297133「docs: mark NEW-3 resolved
+   in the v1.5 session-model record」，随 v0.3.3 发布。
+   状态注记：已修——但留一条非阻塞 SIBLING 窗（未修候选跟进）：
+   restartResume 的 StatePaused 分支仍忽略 pending terminal close
+   （需仿 retain 分支的修复、咨询 isTerminalStopReason）；FAILED
+   pending-close 回放无独立失败事件（仅 stderr 呈现）。
+
+8. NEW-9：跨机 spawn_n ordinal 碰撞，保持 open，cosmetic/audit-only。
+   状态注记：未修（故意接受，仅审计面）。
+
+9. 收尾注记：运维演练 D1–D5 全 PASS（commit 8b2a249，报告在
+   docs/design/polyforge-vnext/，runbook
+   docs/pilot/v1.5-drills-runbook.md af3e4a5）；本台账仍是唯一失败
+   记忆权威——正是本附录存在的理由（X4 纪律的延续）。
