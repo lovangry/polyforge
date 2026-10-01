@@ -454,6 +454,17 @@ func (c *Client) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse
 	return &out, nil
 }
 
+// SessionHolder is the §1.7 public holder read: who holds this WI
+// right now, in PUBLIC fields only (any project viewer may ask; the
+// unheld state is an ordinary answer with the holder fields omitted).
+func (c *Client) SessionHolder(wi string) (*api.SessionHolderResponse, error) {
+	var out api.SessionHolderResponse
+	if err := c.Do("GET", "/api/v1/work-items/"+url.PathEscape(wi)+"/session", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SessionEnd is the session-fenced terminal verdict (and the paused
 // transition — the merge amend).
 func (c *Client) SessionEnd(wi string, req api.SessionEndRequest) error {
