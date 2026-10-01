@@ -267,6 +267,16 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	if msg.Kind != protocol.OBSuperseded && msg.SpawnN != spawn {
 		return // stale handle: dropped (recovery-loop guard, §二)
 	}
+	// NEW-1 (delta review): OBSuperseded bypasses the spawn fence but is
+	// fenced on the SESSION fingerprint instead — a stale message buffered
+	// in the OB channel must never kill a successor job of the same WI
+	// (takeover-back inside the message-residence window). An empty
+	// SessionFP (legacy/test emission) keeps the old behavior: processed.
+	if msg.Kind == protocol.OBSuperseded && msg.SessionFP != "" {
+		if fp := j.fingerprint(); fp != "" && fp != msg.SessionFP {
+			return // a DIFFERENT session's supersession verdict: not ours
+		}
+	}
 	switch msg.Kind {
 	case protocol.OBSuperseded:
 		// v1.5 M4: the observe lane's periodic session revalidation

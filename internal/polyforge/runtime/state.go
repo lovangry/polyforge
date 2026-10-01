@@ -86,6 +86,14 @@ func (j *job) snapshot() (state JobState, spawn int) {
 	return j.state, j.spawnN
 }
 
+// fingerprint answers the job's PUBLIC session handle (the NEW-1 fence
+// payload OBSuperseded is compared against).
+func (j *job) fingerprint() string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.sessionFingerprint
+}
+
 // liveAgent reports whether this job currently has a live agent handle
 // under supervision (the Restart skip condition for records already
 // running under this daemon).

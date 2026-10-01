@@ -43,6 +43,11 @@ type OBMsg struct {
 	WorkItem string    `json:"work_item"`
 	Reason   string    `json:"reason"` // WINeedsRecovery: death|hang|provider_error|idle|...
 	Detail   string    `json:"detail,omitempty"`
+	// SessionFP (v1.5 NEW-1 fence): OBSuperseded carries the SUPERSEDED
+	// session's public fingerprint. The runtime fences the message on it
+	// (session-level verdict): a stale buffered message must never kill a
+	// successor job of the same WI claimed after a takeover-back.
+	SessionFP string `json:"session_fp,omitempty"`
 }
 
 type RTMsgKind string

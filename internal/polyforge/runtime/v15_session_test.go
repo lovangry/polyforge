@@ -308,3 +308,57 @@ func TestPauseCloseRetainsRecord(t *testing.T) {
 	assertNoRT(t, toOB)
 	unseal(t, r.cfg.WorkspaceRoot)
 }
+
+// TestOBSupersededFingerprintFence (NEW-1, delta review): a stale
+// OBSuperseded buffered in the OB channel must never kill a SUCCESSOR
+// job of the same WI claimed after a takeover-back. The message carries
+// the superseded session's fingerprint; the runtime drops it when it
+// names a session that is not the live job's.
+func TestOBSupersededFingerprintFence(t *testing.T) {
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, newFakeHub(), sp)
+	wi := "wi_new1"
+	j := seedJob(r, wi)
+	old := installOldAgent(t, sp, j)
+	oldPID := old.PID()
+	_ = oldPID
+
+	// A buffered verdict naming a DIFFERENT session (the pre-takeover
+	// holder's fingerprint): dropped — this job is legitimate.
+	r.handleOB(context.Background(), protocol.OBMsg{
+		Kind: protocol.OBSuperseded, SpawnN: j.spawnN,
+		WorkItem: wi, SessionFP: "deadbeefdeadbeef",
+		Detail: "verify mismatch: held by fp someone-else",
+	})
+	if r.jobOf(wi) == nil {
+		t.Fatal("a foreign session's supersession verdict killed the successor job")
+	}
+	if !old.Alive() {
+		t.Fatal("the successor job's agent must be untouched")
+	}
+
+	// The same verdict naming THIS session's fingerprint: processed.
+	r.handleOB(context.Background(), protocol.OBMsg{
+		Kind: protocol.OBSuperseded, SpawnN: j.spawnN,
+		WorkItem: wi, SessionFP: j.sessionFingerprint,
+		Detail: "verify mismatch: held by fp someone-else",
+	})
+	waitDead(t, oldPID)
+	if r.jobOf(wi) != nil {
+		t.Fatal("the own-session supersession verdict must release the job")
+	}
+
+	// Legacy emission (no fingerprint): keeps the old behavior — processed.
+	j2 := seedJob(r, wi)
+	old2 := installOldAgent(t, sp, j2)
+	old2PID := old2.PID()
+	r.handleOB(context.Background(), protocol.OBMsg{
+		Kind: protocol.OBSuperseded, SpawnN: j2.spawnN,
+		WorkItem: wi,
+		Detail: "verify mismatch (legacy emission, no session_fp)",
+	})
+	waitDead(t, old2PID)
+	if r.jobOf(wi) != nil {
+		t.Fatal("a legacy (fingerprint-less) supersession verdict must still be processed")
+	}
+}

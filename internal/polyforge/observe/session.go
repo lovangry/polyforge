@@ -90,6 +90,19 @@ type verifyResult struct {
 // set — its latch suppresses detection/push/flush, but the periodic
 // verify must keep running so the OBSuperseded emission stays retryable
 // until the runtime's release (RTFinished, Finding 4) stops the loop.
+// sessionFingerprint derives the PUBLIC handle of this monitor's
+// session secret (NEW-1 fence payload; stateMu-guarded read of the
+// in-process secret — the fingerprint itself is public).
+func (m *Monitor) sessionFingerprint() string {
+	m.stateMu.Lock()
+	id := m.sessionID
+	m.stateMu.Unlock()
+	if id == "" {
+		return ""
+	}
+	return api.SessionFingerprint(id)
+}
+
 func (m *Monitor) checkRevalidate() {
 	if m.cfg.verify == nil || m.cfg.revalidate <= 0 || m.verifyInFlight {
 		return
@@ -192,6 +205,10 @@ func (m *Monitor) onVerifyResult(res verifyResult) {
 		Reason:   "session_superseded",
 		Detail: "periodic session-verify answered matches=false; the current holder fingerprint is " +
 			res.currentFingerprint,
+		// NEW-1 (delta review): carry the SUPERSEDED session's public
+		// fingerprint so the runtime can fence a stale buffered message
+		// against a successor job of the same WI (takeover-back race).
+		SessionFP: m.sessionFingerprint(),
 	})
 	// Bound the retry cadence like the transport-error path: the next
 	// re-verify fires after verifyErrorBackoff (never longer than the
