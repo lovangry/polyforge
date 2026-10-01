@@ -99,12 +99,42 @@ func (m *OwnerManager) ActiveAttempt(wiID string) (string, error) {
 }
 
 // CheckPushCredential validates a git-face Basic pair: username must be
-// the work-item id and the secret must belong to the CURRENT active
-// generation's attempt (takeover/ended generations fail here — the
-// fencing main layer). Returns the active attempt id on success.
+// the work-item id. v1.5 session path first (contract §1.6): when the WI
+// carries a session, the password is the session secret — validated as
+// hex(sha256(password)) == work_items.session_hash AND status == running
+// (M3: pushes are refused while paused). The returned handle is the
+// session's PUBLIC fingerprint, which the proxy hands the pre-receive
+// hook as the push-option backup fence's expected value.
+// A WI with no session falls back to the generation-era path (kept
+// compiling until the cleanup commit): the secret must belong to the
+// CURRENT active generation's attempt.
 func (m *OwnerManager) CheckPushCredential(wiID, username, secret string) (string, error) {
 	if wiID == "" || username != wiID || secret == "" {
 		return "", Fail(api.ErrGitUnauthorized, "BAD_CREDENTIAL", "credential rejected")
+	}
+	var hash, fp sql.NullString
+	var status string
+	err := m.db.QueryRow(`SELECT session_hash, session_fingerprint, status FROM work_items WHERE id=?1`, wiID).
+		Scan(&hash, &fp, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", Fail(api.ErrGitUnauthorized, "NO_ACTIVE_ATTEMPT", "credential rejected: no active attempt")
+	}
+	if err != nil {
+		return "", err
+	}
+	if hash.Valid && hash.String != "" {
+		// Session model: fencing-on-use. A mismatch names the CURRENT
+		// holder's public fingerprint so a superseded daemon can
+		// self-diagnose from the rejection alone.
+		if api.SessionHashHex(secret) != hash.String {
+			return "", Fail(api.ErrGitUnauthorized, "BAD_CREDENTIAL",
+				"credential rejected: the work item is held by session %s", fp.String)
+		}
+		if status != api.StatusRunning {
+			return "", Fail(api.ErrGitForbidden, "PAUSED",
+				"pushes are refused while the work item is %s (session holder %s)", status, fp.String)
+		}
+		return fp.String, nil
 	}
 	g, ok, err := m.activeGeneration(m.db, wiID)
 	if err != nil {
@@ -405,8 +435,10 @@ func (m *OwnerManager) claimNew(wiID string, req ClaimRequest, callerIdentity st
 // EndGeneration closes the active attempt and applies the terminal or
 // pause transition. status ∈ wrapped|failed|blocked|paused. attempt fencing:
 // the caller must name the active attempt (old attempts cannot close what
-// they no longer hold).
-func (m *OwnerManager) EndGeneration(wiID, attemptID string, generation int64, status, note string) error {
+// they no longer hold). cleanPause marks an OPERATOR pause (M3): the
+// paused transition records it so a restart never auto-resumes an
+// operator-paused WI; the daemon's own shutdown pause passes false.
+func (m *OwnerManager) EndGeneration(wiID, attemptID string, generation int64, status, note string, cleanPause bool) error {
 	switch status {
 	case "wrapped", api.StatusFailed, api.StatusBlocked, api.StatusPaused:
 	default:
@@ -449,19 +481,26 @@ func (m *OwnerManager) EndGeneration(wiID, attemptID string, generation int64, s
 	if n, _ := res.RowsAffected(); n == 0 {
 		return Fail(api.ErrCoreForbidden, "STALE_ATTEMPT", "generation ended concurrently")
 	}
-	closedExpr := "closed_at=closed_at"
-	waiting := "waiting_on=waiting_on"
+	sets := []string{"status=?", "updated_at=?", "closed_at=closed_at", "waiting_on=waiting_on"}
 	var setArgs []any
 	setArgs = append(setArgs, status, now)
 	if status == "wrapped" || status == api.StatusFailed {
-		closedExpr = "closed_at=?"
+		sets[len(sets)-2] = "closed_at=?"
 		setArgs = append(setArgs, now)
 	}
 	if status == api.StatusBlocked {
-		waiting = "waiting_on='owner'"
+		sets[len(sets)-1] = "waiting_on='owner'"
+	}
+	if status == api.StatusPaused {
+		var cp int
+		if cleanPause {
+			cp = 1
+		}
+		sets = append(sets, "clean_pause=?")
+		setArgs = append(setArgs, cp)
 	}
 	setArgs = append(setArgs, wiID)
-	if _, err := tx.Exec(`UPDATE work_items SET status=?, updated_at=?, `+closedExpr+`, `+waiting+`
+	if _, err := tx.Exec(`UPDATE work_items SET `+strings.Join(sets, ", ")+`
 		WHERE id=?`, setArgs...); err != nil {
 		return err
 	}
@@ -484,10 +523,12 @@ func (m *WIManager) hasUnfinishedBlockers(wiID string) (bool, error) {
 }
 
 // unfinishedBlockers is the shared query (owner must not depend on the
-// WIManager instance; both reach the same single-writer connection).
-func unfinishedBlockers(db *DB, wiID string) (bool, error) {
+// WIManager instance; both reach the same single-writer connection, and
+// the queryRower surface lets the session claim recheck it inside its own
+// transaction snapshot).
+func unfinishedBlockers(q queryRower, wiID string) (bool, error) {
 	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM wi_dependencies d
+	err := q.QueryRow(`SELECT COUNT(*) FROM wi_dependencies d
 		JOIN work_items b ON b.id = d.blocking_wi_id
 		WHERE d.blocked_wi_id=?1 AND d.kind='blocks'
 		AND b.status NOT IN ('wrapped','failed','canceled')`, wiID).Scan(&n)

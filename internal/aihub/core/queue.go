@@ -15,12 +15,12 @@ import (
 
 // ReadyQueue is the response shape of GET /api/v1/projects/{p}/ready-queue.
 type ReadyQueue struct {
-	Project           string         `json:"project"`
-	Items             []api.WorkItem `json:"items"`               // executable, no human session needed
-	NeedsHumanSession []api.WorkItem `json:"needs_human_session"` // executable, needs a human
-	Unknown           []api.WorkItem `json:"unclassified"`        // executable, classification missing
-	Running           []api.WorkItem `json:"running"`
-	Paused            []api.WorkItem `json:"paused"`
+	Project           string   `json:"project"`
+	Items             []WIView `json:"items"`               // executable, no human session needed
+	NeedsHumanSession []WIView `json:"needs_human_session"` // executable, needs a human
+	Unknown           []WIView `json:"unclassified"`        // executable, classification missing
+	Running           []WIView `json:"running"`
+	Paused            []WIView `json:"paused"`
 }
 
 // rhs classification of a queued WI: true / false / missing.
@@ -51,7 +51,7 @@ var priorityRank = map[string]int{
 	api.PriorityUrgent: 0, api.PriorityHigh: 1, api.PriorityNormal: 2, api.PriorityLow: 3,
 }
 
-func queueLess(a, b *api.WorkItem) bool {
+func queueLess(a, b *WIView) bool {
 	ra, rb := priorityRank[a.Priority], priorityRank[b.Priority]
 	if ra != rb {
 		return ra < rb
@@ -74,11 +74,11 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	}
 	q := &ReadyQueue{
 		Project:           projectName,
-		Items:             []api.WorkItem{},
-		NeedsHumanSession: []api.WorkItem{},
-		Unknown:           []api.WorkItem{},
-		Running:           []api.WorkItem{},
-		Paused:            []api.WorkItem{},
+		Items:             []WIView{},
+		NeedsHumanSession: []WIView{},
+		Unknown:           []WIView{},
+		Running:           []WIView{},
+		Paused:            []WIView{},
 	}
 	// Loaded per candidate below: bundle_name decides execution vs
 	// registration ticket (02 §5.1b: the executable segments always exclude
@@ -90,6 +90,7 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	}
 	type cand struct {
 		wi           *api.WorkItem
+		view         *WIView
 		waitingOn    string
 		registration bool
 	}
@@ -109,14 +110,21 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// One batched session-public read (m4): the running/paused segments
+	// expose their holder audit fields like every other WorkItem view.
+	sessionBlocks, err := m.db.sessionPublicBatch(ids)
+	if err != nil {
+		return nil, err
+	}
 	for i := range cands {
 		wi, err := m.load(ids[i])
 		if err != nil {
 			return nil, err
 		}
 		cands[i].wi = wi
+		cands[i].view = &WIView{WorkItem: *wi, SessionPublic: sessionBlocks[ids[i]]}
 	}
-	sortBy := func(list *[]api.WorkItem) {
+	sortBy := func(list *[]WIView) {
 		// stable priority→created_at ordering
 		for i := 1; i < len(*list); i++ {
 			for j := i; j > 0 && queueLess(&(*list)[j], &(*list)[j-1]); j-- {
@@ -127,9 +135,9 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	for _, c := range cands {
 		switch c.wi.Status {
 		case api.StatusRunning:
-			q.Running = append(q.Running, *c.wi)
+			q.Running = append(q.Running, *c.view)
 		case api.StatusPaused:
-			q.Paused = append(q.Paused, *c.wi)
+			q.Paused = append(q.Paused, *c.view)
 		case api.StatusQueued:
 			if c.registration {
 				continue // registration tickets never execute (#17)
@@ -146,11 +154,11 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 			}
 			switch classifyRHS(c.wi) {
 			case rhsTrue:
-				q.NeedsHumanSession = append(q.NeedsHumanSession, *c.wi)
+				q.NeedsHumanSession = append(q.NeedsHumanSession, *c.view)
 			case rhsFalse:
-				q.Items = append(q.Items, *c.wi)
+				q.Items = append(q.Items, *c.view)
 			default:
-				q.Unknown = append(q.Unknown, *c.wi)
+				q.Unknown = append(q.Unknown, *c.view)
 			}
 		}
 	}

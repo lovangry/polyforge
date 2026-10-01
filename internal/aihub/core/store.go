@@ -107,7 +107,19 @@ CREATE TABLE IF NOT EXISTS work_items (
   workflow_budget_baseline TEXT,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
-  closed_at    TEXT
+  closed_at    TEXT,
+  -- v1.5 session model (v1.5-session-model.md / v1.5-api-contract.md):
+  -- the ownership epoch lives ON the row. session_hash is
+  -- hex(sha256(session_id)) — the SECRET itself never lands here;
+  -- session_fingerprint is its 16-hex public prefix (B3 split).
+  -- clean_pause marks an OPERATOR pause (M3): a restart must not
+  -- auto-resume it, unlike a daemon-shutdown pause (0).
+  session_hash        TEXT,
+  session_fingerprint TEXT,
+  session_machine     TEXT,
+  session_owner       TEXT,
+  session_started_at  TEXT,
+  clean_pause         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_wi_status     ON work_items(status, priority DESC, created_at);
@@ -218,7 +230,46 @@ func Open(dataDir string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("core: schema: %w", err)
 	}
+	// v1.5 additive migration: a database created by a v1 server gains
+	// the session-model columns in place (nothing is ever dropped here —
+	// the post-merge cleanup commit owns the deletions).
+	if err := migrateSessions(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("core: migrate sessions: %w", err)
+	}
 	return &DB{sqlDB}, nil
+}
+
+// sessionColumns are the v1.5 work_items additions (schema section in the
+// DDL above). Fresh installs get them from the DDL; existing v1 databases
+// get them from migrateSessions' guarded ALTER TABLE.
+var sessionColumns = []struct{ name, decl string }{
+	{"session_hash", "TEXT"},
+	{"session_fingerprint", "TEXT"},
+	{"session_machine", "TEXT"},
+	{"session_owner", "TEXT"},
+	{"session_started_at", "TEXT"},
+	{"clean_pause", "INTEGER NOT NULL DEFAULT 0"},
+}
+
+// migrateSessions adds the v1.5 session columns when missing. ALTER TABLE
+// ADD COLUMN cannot add an un-DEFAULTed NOT NULL column, so clean_pause
+// carries its default in the declaration; every guard makes re-runs (and
+// fresh DDL installs) no-ops.
+func migrateSessions(db *sql.DB) error {
+	for _, c := range sessionColumns {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name=?1`, c.name).Scan(&n); err != nil {
+			return fmt.Errorf("probe column %s: %w", c.name, err)
+		}
+		if n != 0 {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE work_items ADD COLUMN ` + c.name + ` ` + c.decl); err != nil {
+			return fmt.Errorf("add column %s: %w", c.name, err)
+		}
+	}
+	return nil
 }
 
 // Now returns the canonical RFC3339 UTC timestamp for all Core columns.

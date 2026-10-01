@@ -17,9 +17,12 @@ import (
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
-// CredentialChecker validates a Basic pair (username = WI id) against the
-// current ACTIVE attempt's push credential. Implemented by
-// *core.OwnerManager.CheckPushCredential.
+// CredentialChecker validates a Basic pair (username = WI id) against
+// the WI's live ownership: the v1.5 session hash when the WI is
+// session-held (returning the session's PUBLIC fingerprint), or the
+// legacy current ACTIVE attempt's push credential (returning the
+// attempt id). Implemented by *core.OwnerManager.CheckPushCredential;
+// the returned handle is the pre-receive backup fence's expected value.
 type CredentialChecker interface {
 	CheckPushCredential(wiID, username, secret string) (string, error)
 }
@@ -120,10 +123,11 @@ func (m *Manager) EnsureBare(wiID string) error {
 // ensurePushOptions idempotently sets receive.advertisePushOptions=true on
 // a bare repo. git's protocol rule: a server that does not advertise push
 // options REJECTS any push that carries them — and the pf gitops choke
-// point now sends --push-option=attempt-id=<id> on EVERY push (§六 备层),
-// so without this config every push to an aihub bare repo fails. Both the
-// fresh-creation and the pre-existing-repo paths run it, so repos created
-// by older server builds are repaired at their next EnsureBare.
+// point sends --push-option=session-fingerprint=<fp> on EVERY push
+// (v1.5 §1.6 backup layer), so without this config every push to an aihub
+// bare repo fails. Both the fresh-creation and the pre-existing-repo
+// paths run it, so repos created by older server builds are repaired at
+// their next EnsureBare.
 func (m *Manager) ensurePushOptions(dir string) error {
 	_, err := git(dir, nil, "config", "receive.advertisePushOptions", "true")
 	return err

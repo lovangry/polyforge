@@ -72,19 +72,21 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Basic auth against the active attempt's credential. The returned
-	// attempt id is the Generation fencing 备层's expected value (§六):
-	// it rides the CGI environment as PF_EXPECTED_ATTEMPT so the
-	// pre-receive hook can compare it with the push's
-	// --push-option=attempt-id=<id> (http-backend passes its env through
-	// to receive-pack and thus to the hook).
+	// Basic auth against the session (v1.5 §1.6) or, for a session-less WI,
+	// the legacy active attempt's credential. The returned handle is the
+	// push-option backup layer's expected value: the session's PUBLIC
+	// fingerprint (session model) or the attempt id (legacy). It rides the
+	// CGI environment as PF_EXPECTED_FINGERPRINT so the pre-receive hook
+	// can compare it with the push's --push-option=session-fingerprint=<fp>
+	// (http-backend passes its env through to receive-pack and thus to the
+	// hook).
 	user, secret, ok := r.BasicAuth()
 	if !ok {
 		w.Header().Set("WWW-Authenticate", `Basic realm="polyforge"`)
-		writeGitErr(w, api.ErrGitUnauthorized, "git access requires an attempt-scoped credential")
+		writeGitErr(w, api.ErrGitUnauthorized, "git access requires a session-scoped credential")
 		return
 	}
-	expectedAttempt, err := m.checker.CheckPushCredential(wiID, user, secret)
+	expectedHandle, err := m.checker.CheckPushCredential(wiID, user, secret)
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Basic realm="polyforge"`)
 		// The git client only understands the 401; the typed code rides in
@@ -124,7 +126,7 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		"REMOTE_ADDR="+remoteAddr(r),
 		"CONTENT_TYPE="+r.Header.Get("Content-Type"),
 		"GIT_PF_MAX_BLOB="+strconv.FormatInt(m.MaxBlobBytes, 10),
-		"PF_EXPECTED_ATTEMPT="+expectedAttempt,
+		"PF_EXPECTED_FINGERPRINT="+expectedHandle,
 	)
 	if n := r.Header.Get("Content-Length"); n != "" {
 		env = append(env, "CONTENT_LENGTH="+n)
