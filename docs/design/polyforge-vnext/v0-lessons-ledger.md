@@ -89,7 +89,7 @@ X4  The memory ledger exists precisely to prevent re-hits — every
     implementation/review lane MUST recall it first (v1 lanes did not;
     that is why F1/F3/F4 happened).
 
-## v1 pilot findings (F1–F7, F11–F20) — the lessons the ledger itself predicted
+## v1 pilot findings (F1–F7, F11–F22) — the lessons the ledger itself predicted
 
 X4 said every implementation/review lane MUST recall this ledger first; the
 v1 pilot lanes did not, and every one of these findings is a re-hit of an
@@ -224,10 +224,9 @@ F17 M4 证据链断裂（C3' 同型：执行权威文件里该有的证据从未
     已执行 verification step 中 17 个无结构化命令证据（12 个旧 schema
     execution.json 无 commands 字段 + 5 个 commands 无可读条目），
     M4 = 22/39 = 56.41%，PILOT-V4 否决触发——触发的主体是证据面缺口
-    而非谎报证实，且旧 schema 票无法追溯补分。状态注记：未修——已登记
-    为 phase-1 输入（`docs/pilot/v1-phase-0-report.md` §5.2「M4 旧
-    schema 分子排除」：新票须全部携带结构化命令证据，M4 读数才能归因
-    到真实验证承载面）。
+    而非谎报证实，且旧 schema 票无法追溯补分。状态注记：已修（V4/V8
+    修复 lane，台账 F21：verification 证据契约三层硬强制 + wrap 侧
+    fail-closed；分支 v1-v4v8，合入后回填 commit）。
 
 F18 持续类拒绝下的 push 风暴（S4 有界性裁定在发布重试面的缺失）：
     wi_VCyBYf7uYeb2（polyforge#48）对同一 capsule 以 ~10s 固定节奏连推
@@ -235,8 +234,9 @@ F18 持续类拒绝下的 push 风暴（S4 有界性裁定在发布重试面的�
     commit c82791fd… 拒绝，另 2 次 wrap_blocked），无退避、无熔断、无
     上报升级，风暴持续约 1 小时；该批样本直接把 M8 推到 188/647 =
     29.06% > 1%，PILOT-V8 否决触发（M7 仅计 1 段 ≤ 3，未触发）。
-    状态注记：未修——窗口读数照实计入（v1 偏差登记表明示不豁免历史
-    失败样本）；持续类失败的退避/熔断/升级面由本条登记为 phase-1 输入。
+    状态注记：已修（V4/V8 修复 lane，台账 F22：毒链本地预检
+    GIT-412 + push_poisoned_local 分类 + 同错误重试上限；分支
+    v1-v4v8，合入后回填 commit）。
 
 F19 M6 观测字段从未随事件面发出：整个窗口 events.log 共 33 条
     memory_remember 事件、携带 write_ms 字段 0 条（旧 schema 事件面未含
@@ -251,3 +251,44 @@ F20 M3 心跳面未接线：整个窗口 aihub.db machines 表 0 行——机器
     面（last_heartbeat_at 超存活阈值）无数据，`--m3-heartbeat-max-age`
     无真实数据可配。状态注记：未修——已登记为 phase-1 输入
     （`docs/pilot/v1-phase-0-report.md` §5.2「M3 心跳面未接线」）。
+
+F21 V4 证据契约机械强制（PILOT-V4 否决门槛的修复面；对应发现 F17）：
+    三层同一谓词硬强制 verification 步的结构化命令证据——驱动契约
+    （`skills/pf-execute/SKILL.md` §4：verification 步标 `done` 的同一次
+    写入必须已携带至少一条可读 `{argv, exit_code, duration_ms}`，无证据
+    不许写 done；中译镜像 `references/agent-contract.md` §十一同步；四个
+    参考包的 `agents/verification.md` 补「Evidence obligation (hard
+    gate)」硬约束）、daemon 侧 fail-closed（observe 的 flush(wrap) 子协程
+    校验 execution.json 全部已执行 verification 步，缺证据的 seal 答
+    `DAEMON-400 VERIFICATION_EVIDENCE_MISSING`（引票 + step 名），非终局、
+    补证据后重 flush 过；事件面 `wrap_evidence_refused` 留痕），谓词与
+    M4 读数器（`tools/gate-metrics.go` 的 `commandEvidence`）逐位一致
+    （step id `verification`、已执行 = 非 pending/非空、argv 非空 +
+    exit_code/duration_ms 可读）——门与指标判定同一张脸，未来无证据
+    verification 不可能再通过 wrap。回归：observe 单测 + e2e
+    `v1_s22_evidence_gitlink_test.go` S22a。状态注记：已修
+    （分支 v1-v4v8；合入后回填 commit）。
+
+F22 毒链本地预检 + 同错误重试上限（PILOT-V8 否决门槛的修复面；对应
+    发现 F18）：gitops 的 CommitPush 在 `git add -A` 后、commit 前扫描
+    `git ls-files --stage`，出现 mode 160000 条目即类型化错误
+    `GIT-412 LOCAL_GITLINK_DETECTED`（不产生 commit——毒链根本进不了
+    本地历史，#48 事故的「毒 commit 已产生只能反复推」形状从源头消
+    除；错误信息给出污染路径与清除指引：删嵌套 .git + `git rm --cached`；
+    嵌套 .git 无 commit 时 add 直接失败的同型错误同样归类）；observe
+    的 push 路径把它归类为新事件 `push_poisoned_local`（与 push_failed
+    分开——本地预检拒绝的是「从未合法存在的 commit」，不是「已发生的
+    边界同步请求失败」，不进 M8 分子分母；钩子端拒收若仍发生照旧计
+    push_failed），同时自动重试加上界：连续 5 次同错误即停本轮重试、落
+    `push_backpressure(reason=same_error)` 降级事件，等下一个边界
+    （execution.json Version bump）或一次成功 push 再续——防 185 次风
+    暴再现。回归：gitops 单测（本地嵌套 .git → GIT-412 不产生 commit）
+    + e2e `v1_s22_evidence_gitlink_test.go` S22b（5 次拒绝后停，清理后
+    链恢复、裸仓历史无 gitlink）。状态注记：已修（分支 v1-v4v8；
+    合入后回填 commit）。
+
+编号对账（V4/V8 修复 lane 追加批）：本批 goal 原写「F18/F19」时 F18
+    （push 风暴）与 F19（M6 观测字段）已由 #51 追加批占用（F15–F20 连
+    续编号），故本批自 F21（下一空号）起登记，并把两条修复面分别对应
+    到其真正修复的发现：F21 修 F17（M4 证据链断裂）、F22 修 F18
+    （push 风暴）；F17/F18 的状态注记同步指向本批。

@@ -34,6 +34,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,6 +47,17 @@ import (
 // wrapRetries is the §五 bound: a wrap flush retries three times before
 // the work item is transitioned to blocked.
 const wrapRetries = 3
+
+// sameErrorCap is the V8-repair retry bound: after this many consecutive
+// async push failures carrying the IDENTICAL error, the retry round is
+// halted (one degraded push_backpressure event with reason "same_error")
+// until the next commit boundary — an execution.json Version bump — or a
+// successful push re-arms it. The pilot's poison-chain storm (#48) was
+// 185 consecutive identical failures at a ~10s cadence with no bound;
+// the cap turns every such deterministic-failure shape into at most
+// sameErrorCap attempts per round. Wrap/seal pushes are already bounded
+// (wrapRetries) and are not affected.
+const sameErrorCap = 5
 
 // defaultVersionStagnantTicks is the belt-and-braces bound for C3': the
 // number of consecutive execution.json REWRITES (mtime advanced) that
@@ -137,6 +149,7 @@ type probeResult struct {
 
 type wrapResult struct {
 	ok          bool
+	refused     bool // the V4 evidence gate refused the seal before any push attempt
 	sha         string
 	pushed      bool
 	timings     gitops.PushTimings // the settled (successful, or last) attempt's latency samples
@@ -224,6 +237,15 @@ type Monitor struct {
 	pushDegraded bool
 	timeDegraded bool
 	retryAt      time.Time
+	// same-error retry-cap bookkeeping (V8 repair; monitor goroutine
+	// only): lastPushErr/sameErrStreak count consecutive failures with
+	// the identical error text; retryHalted/retryHaltedAt mark the
+	// halted round and the Version it halted at (a later dirtyVersion is
+	// the next commit boundary that re-arms the round).
+	lastPushErr    string
+	sameErrStreak  int
+	retryHalted    bool
+	retryHaltedAt  int64
 
 	// hang detection.
 	probeInFlight bool
@@ -977,6 +999,20 @@ func (m *Monitor) schedulePush() {
 	if !m.retryAt.IsZero() && !time.Now().After(m.retryAt) {
 		return
 	}
+	// Same-error retry cap (V8 repair): a halted round stays halted
+	// until the next commit boundary — an execution.json Version the
+	// round did NOT already see — re-arms it. dirtyVersion only moves
+	// forward on fresh agent work (pollExecution), so a frozen poisoned
+	// tree cannot spin the retry loop; the wrap/seal path stays
+	// available (bounded by wrapRetries) and is not gated here.
+	if m.retryHalted {
+		if m.dirtyVersion <= m.retryHaltedAt {
+			return
+		}
+		m.retryHalted = false
+		m.sameErrStreak = 0
+		m.lastPushErr = ""
+	}
 	// try-acquire the gate: at most ONE push in flight per WI.
 	select {
 	case m.gate <- struct{}{}:
@@ -1025,6 +1061,9 @@ func (m *Monitor) onPushResult(res pushResult) {
 		m.firstFailAt = time.Time{}
 		m.pushDegraded = false
 		m.timeDegraded = false
+		m.lastPushErr = ""
+		m.sameErrStreak = 0
+		m.retryHalted = false
 		_ = m.log.Append(m.wi.WorkItem, EvPublished, map[string]any{
 			"version": res.version, "local_commit": res.sha, "pushed": res.pushed,
 			"commit_ms": res.timings.CommitMS, "push_ms": res.timings.PushMS,
@@ -1042,6 +1081,43 @@ func (m *Monitor) onPushResult(res pushResult) {
 		m.firstFailAt = time.Now()
 	}
 	m.retryAt = time.Now().Add(m.cfg.PushRetryBackoff)
+	// Same-error streak (V8 repair): identical error text N times in a
+	// row halts this round's async retries (one degraded event) — a
+	// deterministic failure (dead server config, poisoned tree) answers
+	// every retry with the same words, and no backoff cadence can bound
+	// that on its own (#48: 185 identical failures, ~1h).
+	if key := res.err.Error(); key == m.lastPushErr {
+		m.sameErrStreak++
+	} else {
+		m.lastPushErr = key
+		m.sameErrStreak = 1
+	}
+	if m.sameErrStreak >= sameErrorCap && !m.retryHalted {
+		m.retryHalted = true
+		m.retryHaltedAt = m.dirtyVersion
+		_ = m.log.Append(m.wi.WorkItem, EvPushBackpressure, map[string]any{
+			"reason": "same_error", "failed_pushes": m.failedPushes,
+			"streak": m.sameErrStreak, "error": m.lastPushErr,
+			"note": "async push retry halted for this round (" +
+				strconv.Itoa(sameErrorCap) + " consecutive identical errors); " +
+				"resumes at the next execution.json Version bump (commit boundary) or a successful push; " +
+				"wrap/seal pushes stay available and bounded",
+		})
+	}
+	// V8 classification: the LOCAL gitlink precheck refusal is its own
+	// event kind — see EvPushPoisonedLocal for why it stays out of the
+	// push_failed family. It still feeds the bookkeeping above (the
+	// streak, the backoff, the steps ladder): a poisoned tree is a
+	// persistent failure and the same-error cap must bound its retries
+	// exactly like any other deterministic shape.
+	if gitops.IsLocalGitlink(res.err) {
+		_ = m.log.Append(m.wi.WorkItem, EvPushPoisonedLocal, map[string]any{
+			"version": res.version, "error": res.err.Error(),
+			"detail": "local gitlink precheck refused to create the commit (GIT-412 LOCAL_GITLINK_DETECTED); " +
+				"not an occurred boundary-sync failure — excluded from push_failed and the M8 read-through by design",
+		})
+		return
+	}
 	_ = m.log.Append(m.wi.WorkItem, EvPushFailed, map[string]any{
 		"version": res.version, "error": res.err.Error(),
 	})
@@ -1312,6 +1388,21 @@ func (m *Monitor) flushWrap(call FlushCall) {
 	finalStatus := call.Req.FinalStatus
 	tr := m.transcriptSnapshot() // captured before the goroutine (F3)
 	go func() {
+		// V4 evidence gate (fail-closed, in THIS sub-goroutine — the
+		// select never blocks): a seal attempt whose executed
+		// verification step carries no structured command evidence is
+		// refused before any commit/push is attempted, with the typed
+		// DAEMON-400 VERIFICATION_EVIDENCE_MISSING ack naming the work
+		// item and the step. The refusal is NOT terminal: the agent
+		// appends the evidence (taken from the actual command results)
+		// and re-flushes. See wrapEvidenceMissing for the predicate.
+		if missing, detail := m.wrapEvidenceMissing(); missing {
+			m.wrapDone <- wrapResult{
+				ok: false, refused: true, err: detail,
+				version: version, finalStatus: finalStatus, call: call,
+			}
+			return
+		}
 		// seal flush: the transcript copy must ride the seal commit (C1)
 		// — sync before the first push attempt, inside the gate.
 		m.syncTranscript(tr)
@@ -1352,7 +1443,112 @@ func pickSHA(ok bool, a, b string) string {
 	return b
 }
 
+// ---------------------------------------------------------------------------
+// V4 wrap gate: verification evidence (fail-closed)
+
+// verificationStepID is the step id every reference bundle's verification
+// gate carries (bug-fix / chore / feature-full / quick-fix), and the exact
+// steps key the M4 read-through (tools/gate-metrics.go) hardcodes — the
+// wrap gate and the metric must judge the same face, or the gate would
+// seal exactly what the metric then counts as evidence-less.
+const verificationStepID = "verification"
+
+// wrapEvidenceMissing answers whether the seal must be refused: some
+// EXECUTED verification step in the capsule's execution.json carries no
+// structured command evidence — no readable {argv, exit_code, duration_ms}
+// entry in steps.verification.output.commands. "Executed" matches the M4
+// denominator exactly (any status other than empty/pending); an absent
+// or unexecuted verification step is outside both the metric and this
+// gate. An unreadable/unparsable file fails OPEN here (same tolerance as
+// pollExecution's torn-read path: the write is tmp+rename atomic, so a
+// persistent read failure means no step was ever observed — nothing to
+// gate). Reads happen in the flushWrap sub-goroutine; the select loop
+// never blocks on this check.
+func (m *Monitor) wrapEvidenceMissing() (bool, string) {
+	data, err := os.ReadFile(m.execPath)
+	if err != nil {
+		return false, ""
+	}
+	var exec capsule.Execution
+	if json.Unmarshal(data, &exec) != nil {
+		return false, ""
+	}
+	st := exec.Steps[verificationStepID]
+	if st == nil || st.Status == "" || st.Status == capsule.StepPending {
+		return false, "" // not executed: outside the M4 denominator, outside the gate
+	}
+	if stepHasCommandEvidence(st.Output) {
+		return false, ""
+	}
+	detail := fmt.Sprintf("work item %s: step %q (status %s) records no structured command evidence in steps.%s.output.commands — append at least one readable {argv, exit_code, duration_ms} entry taken directly from the command result (pf-execute §4 command audit), then re-flush",
+		m.wi.WorkItem, verificationStepID, st.Status, verificationStepID)
+	return true, detail
+}
+
+// stepHasCommandEvidence reports whether the step's output carries at
+// least one readable command-audit entry — the M4 evidence predicate,
+// mirrored bit for bit from tools/gate-metrics.go's commandEvidence
+// (INV-D3: exit_code readable; any non-empty output is NOT evidence).
+func stepHasCommandEvidence(output map[string]any) bool {
+	if output == nil {
+		return false
+	}
+	cmds, ok := output["commands"].([]any)
+	if !ok {
+		return false // old schema: no commands field at all
+	}
+	for _, c := range cmds {
+		if commandEvidenceReadable(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// commandEvidenceReadable judges ONE output.commands entry: a readable
+// {argv, exit_code, duration_ms} record — argv a non-empty argv array or
+// a non-blank command string, exit_code and duration_ms both present.
+func commandEvidenceReadable(v any) bool {
+	e, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	switch argv := e["argv"].(type) {
+	case []any:
+		if len(argv) == 0 {
+			return false
+		}
+	case string:
+		if strings.TrimSpace(argv) == "" {
+			return false
+		}
+	default:
+		return false
+	}
+	return e["exit_code"] != nil && e["duration_ms"] != nil
+}
+
 func (m *Monitor) onWrapResult(wr wrapResult) {
+	if wr.refused {
+		// The V4 gate's refusal: un-arm the seal guard, answer the typed
+		// DAEMON-400, and leave the attempt RUNNING — no blocked transition,
+		// no OBCompleted, no push bookkeeping (no commit was attempted).
+		// The agent's contract (pf-execute §4) is to append the missing
+		// evidence and re-flush.
+		m.stateMu.Lock()
+		m.sealing = false
+		m.stateMu.Unlock()
+		ack := protocol.FlushAck{
+			OK:    false,
+			Error: "DAEMON-400 VERIFICATION_EVIDENCE_MISSING: " + wr.err,
+		}
+		_ = m.log.Append(m.wi.WorkItem, EvWrapEvidenceRefused, map[string]any{
+			"error": ack.Error, "final_status": wr.finalStatus,
+			"attempt_id": m.currentAttempt(),
+		})
+		wr.call.Resp <- ack
+		return
+	}
 	ack := protocol.FlushAck{OK: wr.ok, LocalCommit: wr.sha, Pushed: wr.pushed && wr.ok}
 	if wr.ok {
 		m.stateMu.Lock()
@@ -1368,6 +1564,9 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 		m.failedPushes = 0
 		m.pushDegraded = false
 		m.timeDegraded = false
+		m.lastPushErr = ""
+		m.sameErrStreak = 0
+		m.retryHalted = false
 		_ = m.log.Append(m.wi.WorkItem, EvPublished, map[string]any{
 			"wrap": true, "local_commit": wr.sha, "pushed": wr.pushed, "final_status": wr.finalStatus,
 			"commit_ms": wr.timings.CommitMS, "push_ms": wr.timings.PushMS,

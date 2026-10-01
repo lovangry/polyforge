@@ -132,12 +132,22 @@ For the selected step:
 4. **Command audit (obligation).** Every command executed for this step must append one
    record to `steps.<id>.output.commands` in the same write that records the step's
    result: `{argv, exit_code, duration_ms, started_at}`, taken directly from the
-   command result, never relayed or summarized.
+   command result, never relayed or summarized. For a step whose id is `verification`
+   this is a HARD gate on `done`, not just an obligation: the write that marks the
+   verification step `done` is FORBIDDEN unless `steps.verification.output.commands`
+   already carries at least one readable `{argv, exit_code, duration_ms}` entry
+   (argv non-empty, exit_code present and readable). A verification step that ran
+   commands but cannot show that record has a broken audit path — fix the recording
+   (from the actual command results) before writing `done`; never write a silent
+   evidence-less `done`. The daemon enforces the same contract fail-closed at the
+   seal: a `flush(wrap)` whose executed verification step carries no structured
+   command evidence is refused (§12).
 5. **Collect the subagent's final JSON output** and validate it against the step skill's
    `output` JSON Schema.
    - **Valid and `gate: true`**: this is a business verdict — proceed to §5.
    - **Valid and not a gate**: mark the step `done`, write its `output`, and loop back to
-     `next_step_by_order`.
+     `next_step_by_order`. For the `verification` step this transition is evidence-gated
+     (see item 4): no readable command-evidence entry, no `done`.
    - **Echoed-field cross-check (done-handling).** When the output schema requires
      echoing a field of a referenced prior step's output, compare element for element
      before marking `done`. A mismatch means the step did not exercise what the upstream
@@ -400,6 +410,15 @@ the ack distinguishes the local commit from the server push:
   WI status says (a post-ack push failure can still land the work item blocked). After
   the ack you stop either way — do not loop; if the daemon reports failure after its
   retries, the work item lands `blocked` — stop.
+  One refusal is NOT a failure: an `ok:false` ack whose error begins
+  `DAEMON-400 VERIFICATION_EVIDENCE_MISSING` means the fail-closed evidence gate
+  found an executed `verification` step with no readable command evidence in
+  `steps.verification.output.commands` (§4 item 4). It is a correctable contract
+  violation, not a terminal outcome: append the missing evidence entries — taken
+  from the commands the step actually ran, never fabricated — in one atomic
+  `execution.json` write (Version +1), then call `flush(wrap)` again. If the step
+  genuinely ran nothing recordable, that is a broken step: resolve it through the
+  step's own failure handling (§5/§6), never by re-flushing unchanged.
 - **`shutdown`** — the closing flush after a `pf/stop_notice`: commit what exists. A
   failure here never holds you: the data stays in the local commit and the recovery
   engine picks it up; proceed to idle.

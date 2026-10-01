@@ -20,7 +20,13 @@
 //     the aihub lane's obligation;
 //   - an index.lock that has outlived the stale bound is removed at
 //     acquisition (see cleanStaleLocks for why age, not PID, is the only
-//     safe signal).
+//     safe signal);
+//   - NO gitlink ever enters local history: `git add -A` followed by a
+//     `git ls-files --stage` scan refuses mode-160000 entries with the
+//     typed GIT-412 LOCAL_GITLINK_DETECTED error BEFORE the commit is
+//     created (the pilot's #48 poison chain made every later push of the
+//     standing HEAD unfetchable; the precheck keeps the poison out of
+//     history entirely).
 //
 // git-dir is ALWAYS external to the capsule (never inside agent-writable
 // space). All git access goes through the real git binary.
@@ -113,6 +119,74 @@ var git = func(env []string, dir string, args ...string) (string, error) {
 // retry-worthy: a retry cannot conjure a history.
 var ErrEmptyHistory = errors.New("gitops: empty capsule history (clean tree with no standing HEAD)")
 
+// localGitlinkPrefix marks the LOCAL precheck's typed refusal (the
+// sentinel observe classifies push_poisoned_local; a server-side
+// pre-receive gitlink rejection never carries it). The refusal is
+// returned as an api.Error carrying code GIT-412 with this sentinel at
+// the head of its Detail; see checkLocalGitlink for the full shape.
+//
+// Why the precheck exists: the pilot's poison-chain incident (#48) was
+// this shape discovered too late — the gitlink had already been
+// committed, and every push of the standing HEAD was then rejected by
+// aihub's pre-receive hook (185 consecutive push_failed events, ~1h
+// storm). The precheck moves the refusal BEFORE the commit: the poison
+// never enters local history, so no retry loop can ever re-offer it to
+// the server. NOT retry-worthy: the identical error would answer every
+// retry until the tree is cleaned.
+const localGitlinkPrefix = "LOCAL_GITLINK_DETECTED"
+
+// IsLocalGitlink reports whether err is the local precheck's typed
+// gitlink refusal (as opposed to a server-side hook rejection of an
+// already-committed gitlink, which stays an ordinary push error).
+func IsLocalGitlink(err error) bool {
+	var ae *api.Error
+	return errors.As(err, &ae) &&
+		ae.Code == api.ErrGitGitlink &&
+		strings.HasPrefix(ae.Detail, localGitlinkPrefix)
+}
+
+// checkLocalGitlink scans the staged index for gitlink (mode 160000)
+// entries and, when any exist, unstages everything (best-effort `git
+// reset -q` — the worktree is untouched, only the index is dropped, and
+// the next healthy CommitPush re-stages it) and answers the typed
+// GIT-412 LOCAL_GITLINK_DETECTED refusal (an *api.Error, so observe's
+// IsLocalGitlink classification sees the code + sentinel pair): the
+// error names the polluted paths and the cleanup recipe (delete the
+// nested .git, git rm --cached) so the operator can act on it. Repos
+// under the capsule's ignored trees (repos/, artifacts/release-*/)
+// never reach the index, so ANY staged gitlink is poison by definition.
+func checkLocalGitlink(env []string, dir string) error {
+	out, err := git(env, dir, "ls-files", "--stage")
+	if err != nil {
+		return err
+	}
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		meta, path, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(meta)
+		if len(fields) > 0 && fields[0] == "160000" {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	// Drop the index so the poison does not linger staged for any other
+	// commit path; a failure here is ignored — the refusal below is the
+	// load-bearing half either way.
+	_, _ = git(env, dir, "reset", "-q")
+	detail := localGitlinkPrefix + ": staged gitlink (mode 160000) at " +
+		strings.Join(paths, ", ") +
+		" — an embedded git repository would poison the capsule chain (aihub's pre-receive rejects mode 160000 on every push, forever). " +
+		"No commit was created. Clean it: delete the embedded repository's .git directory (" +
+		filepath.Join(paths[0], ".git") + "), then `git rm --cached " + paths[0] + "`, then retry; " +
+		"verify with `git ls-files --stage | grep ^160000` (must be empty)."
+	return &api.Error{Code: api.ErrGitGitlink, Detail: detail}
+}
+
 // PushTimings carries the wall-clock durations of the underlying git
 // invocations a publish attempt is made of (integer milliseconds, as
 // seen by this process around the raw git calls): CommitMS spans the
@@ -174,6 +248,25 @@ func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 		return "", false, timings, err
 	}
 	if _, err := git(env, o.CapsuleDir, "add", "-A"); err != nil {
+		// An embedded repository with no commit checked out fails the add
+		// itself ("'x/' does not have a commit checked out") — the same
+		// poison shape one step earlier. Type it identically so the
+		// operator sees the actionable refusal, not a bare git error.
+		if strings.Contains(err.Error(), "does not have a commit checked out") {
+			_, _ = git(env, o.CapsuleDir, "reset", "-q")
+			return "", false, timings, &api.Error{
+				Code:   api.ErrGitGitlink,
+				Detail: localGitlinkPrefix + ": embedded git repository without a commit checked out — " + err.Error() + ". No commit was created. Clean it: delete the embedded repository's .git directory, then retry.",
+			}
+		}
+		return "", false, timings, err
+	}
+	// LOCAL gitlink precheck (BEFORE the commit is created): an embedded
+	// git repository staged by the add above must never reach local
+	// history — see ErrLocalGitlink. Runs after `add -A` because
+	// ls-files reads the index: this placement catches both a standing
+	// poisoned index and the fresh nested .git the add just staged.
+	if err := checkLocalGitlink(env, o.CapsuleDir); err != nil {
 		return "", false, timings, err
 	}
 	msg := fmt.Sprintf("%s\n\n%s: %d", message, capsule.SeqTrailer, seq)
