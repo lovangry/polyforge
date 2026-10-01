@@ -52,6 +52,11 @@ type OBMsgKind string
 const (
 	OBNeedsRecovery OBMsgKind = "wi_needs_recovery" // agent died/hung; Runtime recovers
 	OBCompleted     OBMsgKind = "wi_completed"      // flush(wrap) landed; final state attached
+	// OBSuperseded (v1.5 M4): the periodic session revalidation learned
+	// this WI is held by another daemon. Runtime's response is NOT a
+	// recovery — it kills the tree, quarantines the capsule and drops the
+	// record; the daemon makes no hub transition (the new owner owns it).
+	OBSuperseded OBMsgKind = "wi_superseded"
 )
 
 // Recovery causes carried by WINeedsRecovery.
