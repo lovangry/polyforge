@@ -201,9 +201,16 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// The live check is the runtime's own job set (the queue's slot
 		// marks are accounting, reconciled a tick later); a pending
 		// duplicate is refused on the queue.
-		if _, live := d.rt.Info(canonical); live {
-			writeErr(w, api.ErrDaemonConflict, "work item is already active on this daemon")
-			return
+		if ji, live := d.rt.Info(canonical); live {
+			// Finding 2 (v1.5 review): a RETAINED paused job is not an active
+			// run — a submit over it flows to the hub's own gate. A plain
+			// claim answers ALREADY_HELD there (the paused session still
+			// holds the work item); a takeover replaces the paused record
+			// (the s11 continuation shape) and proceeds.
+			if ji.State != runtime.StatePaused {
+				writeErr(w, api.ErrDaemonConflict, "work item is already active on this daemon")
+				return
+			}
 		}
 		if d.q.IsPending(canonical) {
 			writeErr(w, api.ErrDaemonConflict, "work item is already queued on this daemon")
@@ -238,6 +245,15 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	}
 	if ji.State == runtime.StateSealing || ji.State == runtime.StateRecovering {
 		writeErr(w, api.ErrDaemonConflict, "work item is "+string(ji.State)+"; a close is already in progress")
+		return
+	}
+	// Finding 2 (v1.5 review): a repeat pause of a RETAINED paused job is
+	// the graceful idempotency answer, not a conflict — the close already
+	// happened and the record is exactly where the contract wants it.
+	if reason == reasonPaused && ji.State == runtime.StatePaused {
+		writeJSON(w, http.StatusOK, closeResponse{
+			WorkItemID: wi, Outcome: "already_paused", Status: string(ji.State),
+		})
 		return
 	}
 	if !d.claimSeal(wi) {
@@ -281,9 +297,11 @@ func (d *Daemon) terminalOf(wi string) (string, error) {
 
 // reasonPaused is the pause close reason, passed through SessionEnd's
 // status field: the hub marks the work item paused (the operator pause —
-// clean_pause semantics live hub-side; the v1.5 contract has no pause
-// transition, see the lane report). A later resume re-opens the work.
-const reasonPaused = "paused"
+// clean_pause semantics live hub-side). Since the v1.5 review Finding 2
+// the pause close RETAINS the runtime record (StatePaused): the session
+// secret survives locally so the holder daemon's restart can attach
+// once the operator clears clean_pause (see runtime.pauseOp).
+const reasonPaused = protocol.FinishPaused
 
 func (d *Daemon) pauseRoute(w http.ResponseWriter, r *http.Request) {
 	var body struct{}
@@ -370,7 +388,13 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	pending := d.obs.PendingInputs()
 	progress := d.obs.ProgressAges()
 	jobs := make([]statusJob, 0, 8)
+	// running slots: a retained PAUSED job (Finding 2) holds no agent and
+	// no queue slot — the ops face must not count it as running work.
+	running := 0
 	for _, ji := range d.rt.List() {
+		if ji.State != runtime.StatePaused {
+			running++
+		}
 		sj := statusJob{
 			WorkItemID: ji.WorkItem,
 			Status:     string(ji.State),
@@ -404,7 +428,7 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 		Jobs:         jobs,
 		Queue: queueStats{
 			Pending:       d.q.LenPending(),
-			Running:       len(jobs),
+			Running:       running,
 			MaxConcurrent: d.q.MaxConcurrent(),
 		},
 	})

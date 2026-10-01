@@ -67,6 +67,9 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-attach", s.auth(s.hSessionAttach))
 	m.HandleFunc("POST /api/v1/work-items/{id}/force-takeover", s.auth(s.hForceTakeover))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-end", s.auth(s.hSessionEnd))
+	// Finding 3 (v1.5 review): the blocked state's exit door — the human
+	// unblock that returns a bounded-fail verdict to the queued pool.
+	m.HandleFunc("POST /api/v1/work-items/{id}/unblock", s.auth(s.hUnblockWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
 	m.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.auth(s.hDeps))
 	m.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking}/{kind}", s.auth(s.hDelDep))
@@ -680,6 +683,41 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 		return
 	}
 	wi, err := s.WIs.Get(id, core.GetOptions{})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, err := s.WIs.View(wi)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// hUnblockWI serves the blocked exit door (v1.5 review Finding 3):
+// status blocked → queued, waiting_on cleared, event wi_unblocked. The
+// authorization mirrors force-takeover — a human decision gate, admin
+// or project maintainer — because unblock overrides what the runtime
+// judged a terminal-enough verdict to stop work for.
+func (s *Server) hUnblockWI(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if idn.Role != "admin" {
+		role, merr := s.memberRole(projectID, idn.UserID)
+		if merr != nil || role != "maintainer" {
+			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "unblock requires admin or project maintainer"))
+			return
+		}
+	}
+	wi, err := s.WIs.Unblock(id, idn.UserID)
 	if err != nil {
 		writeErr(w, err)
 		return

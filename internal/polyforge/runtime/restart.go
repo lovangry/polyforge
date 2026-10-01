@@ -12,10 +12,19 @@ package runtime
 //	verify matches + status=paused + clean_pause=false → SessionAttach
 //	  and resume from the local capsule (the graceful-shutdown shape:
 //	  the hub's paused-with-session + clean_pause=false IS "daemon shut
-//	  down gracefully, will attach on restart", M3).
+//	  down gracefully, will attach on restart", M3). The RETAINED
+//	  operator-paused record (v1.5 review Finding 2) reaches the same
+//	  branch once the operator clears clean_pause (pf resume): its state
+//	  is Paused and restartResume transitions it back to RUNNING before
+//	  the recovery engine resumes.
+//	verify matches + status=paused + clean_pause=true → KEEP the
+//	  record, do nothing (Finding 2: the retained Paused record is the
+//	  pause's whole point — the secret survives locally for the later
+//	  attach).
 //	verify matches + status=running → crash-mid-run: the local capsule
 //	  recover-resumes through the recovery engine (a record caught
-//	  mid-seal finishes the interrupted stop instead).
+//	  mid-seal finishes the interrupted stop instead; a Paused record
+//	  whose pause close never reached the hub resumes the same way).
 //	verify does NOT match (current_fingerprint differs, or the session
 //	  row is gone and the WI is queued/running elsewhere) → release:
 //	  kill any local tree, quarantine the capsule
@@ -26,8 +35,8 @@ package runtime
 //	verify does not match + blocked → leave everything untouched (M2:
 //	  the bounded-fail verdict stands; the storm guard's "never a third
 //	  relaunch" is exactly this).
-//	verify does not match + paused/clean_pause (operator pause) → drop
-//	  the record: restart must NOT auto-resume it.
+//	verify does not match + paused/clean_pause under another session →
+//	  drop the record: restart must NOT auto-resume it.
 //	aihub unreachable → keep the record, try again on the next restart —
 //	  never guess a verdict.
 
@@ -101,12 +110,23 @@ func (r *Runtime) Restart(ctx context.Context) error {
 				}
 			case api.StatusPaused:
 				if v.CleanPause {
-					// operator pause: never auto-resume (M3). Drop the
-					// record — the capsule scene stays on disk and the
-					// resume belongs to the operator (CLI unpause or a
-					// force-takeover).
-					fmt.Fprintf(os.Stderr, "runtime: %s: cleanly paused; record dropped (no auto-resume)\n", rec.WorkItemID)
-					r.forgetRecord(rec)
+					// Operator pause (Finding 2, v1.5 review): the record is
+					// RETAINED, never auto-resumed. Its state is reconciled to
+					// Paused (a torn record from a crash window is the only way
+					// it can disagree — the pause close persists Paused first)
+					// and nothing else happens: no attach, no spawn, no hub
+					// transition. The operator's `pf resume` clears the hub
+					// flag and the NEXT restart attaches through the branch
+					// below.
+					if j := r.jobOf(rec.WorkItemID); j != nil {
+						j.mu.Lock()
+						if j.state != StatePaused {
+							j.state = StatePaused // crash-window reconcile (direct set: the hub is the authority)
+						}
+						j.cleanPause = true
+						j.mu.Unlock()
+					}
+					fmt.Fprintf(os.Stderr, "runtime: %s: cleanly paused; record retained (no auto-resume until the operator clears clean_pause)\n", rec.WorkItemID)
 				} else if aerr := r.restartAttach(ctx, rec); aerr != nil {
 					// attach refused (taken over in the window, or the hub
 					// disagree): keep the record — the next restart
@@ -257,10 +277,22 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job) err
 		r.forgetRecord(rec)
 		return nil
 	}
-	// RUNNING or a crash mid-RECOVERING: both recover through the engine
-	// (recoverCore kills the old tree itself — with the pid-identity guard
-	// when the recorded agent still lives, or its orphaned group when it
-	// does not).
+	if state == StatePaused {
+		// Finding 2 (v1.5 review): a RETAINED paused record returns to
+		// RUNNING through the legal edge before the engine resumes it —
+		// reached from the attach path (the hub said paused +
+		// clean_pause=false after the operator's resume) and as the
+		// self-heal of a pause close whose SessionEnd never reached the
+		// hub (verify answered running: the hub is the authority and
+		// still wants the work item run).
+		if err := j.transition(StateRunning); err != nil {
+			return err
+		}
+	}
+	// RUNNING, the just-resumed Paused record, or a crash mid-RECOVERING:
+	// all recover through the engine (recoverCore kills the old tree
+	// itself — with the pid-identity guard when the recorded agent still
+	// lives, or its orphaned group when it does not).
 	j.mu.Lock()
 	j.state = StateRunning
 	j.mu.Unlock()

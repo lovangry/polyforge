@@ -135,7 +135,7 @@ func RunMigrateWorkItems(opts MigWorkItemsOptions, client *aihubclient.Client) (
 			WaitingOn: r.WaitingOn, BundleName: r.BundleName, BundleDigest: r.BundleDigest,
 			BudgetBaseline: r.BudgetBaseline,
 			CreatedAt:      r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt,
-			Overwrite:   opts.AcceptChanged,
+			Overwrite: opts.AcceptChanged,
 		}
 		if opts.DryRun {
 			continue

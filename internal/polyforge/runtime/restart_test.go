@@ -196,8 +196,12 @@ func TestRestartAttachResumesPausedSession(t *testing.T) {
 	}
 }
 
-// matches + paused + clean_pause=true (operator pause): NEVER auto-resumed
-// — no attach, no spawn; the record is dropped and the capsule stays.
+// matches + paused + clean_pause=true (operator pause): NEVER auto-
+// resumed — no attach, no spawn. Finding 2 (v1.5 review): the record is
+// RETAINED (the old contract dropped it, which destroyed the session
+// secret locally and made `pf resume`'s attach promise a lie); it sits
+// in the Paused state with the clean_pause marker until the operator
+// clears the hub flag, and the capsule stays.
 func TestRestartCleanPauseNotAutoResumed(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
@@ -205,6 +209,8 @@ func TestRestartCleanPauseNotAutoResumed(t *testing.T) {
 	wi := "wi_cleanpause"
 	pid, startedAt := spawnSleeper(t, wi)
 	rec := matrixRecord(r, wi, pid, startedAt)
+	rec.State = string(StatePaused) // the pause close retains this shape
+	rec.CleanPause = true
 	hub.hold(wi, rec.SessionID, api.StatusPaused)
 	hub.cleanPause[wi] = true
 	if err := os.MkdirAll(rec.CapsuleDir, 0o755); err != nil {
@@ -222,13 +228,73 @@ func TestRestartCleanPauseNotAutoResumed(t *testing.T) {
 		t.Fatal("a clean pause must never auto-resume")
 	}
 	assertNoRT(t, toOB)
-	if recs := loadRecords(t, r); len(recs) != 0 {
-		t.Fatalf("the cleanly-paused record must be dropped, got %+v", recs)
+	// Finding 2: the record is KEPT (the secret survives locally for the
+	// later attach), its state reconciled to Paused.
+	recs := loadRecords(t, r)
+	if len(recs) != 1 || recs[0].WorkItemID != wi {
+		t.Fatalf("the cleanly-paused record must be retained, got %+v", recs)
+	}
+	if recs[0].State != string(StatePaused) {
+		t.Fatalf("the retained record must be in the paused state, got %q", recs[0].State)
+	}
+	if recs[0].SessionID != rec.SessionID {
+		t.Fatalf("the retained record must carry the session secret, got %q", recs[0].SessionID)
 	}
 	if _, err := os.Stat(r.capsuleDir(wi)); err != nil {
 		t.Fatalf("the capsule scene must stay on disk: %v", err)
 	}
 	_ = killFn(-pid, 9) // tidy
+}
+
+// TestRestartAttachesRetainedPausedRecord (Finding 2, v1.5 review): the
+// retained Paused record of an operator pause, once the operator cleared
+// clean_pause on the hub (`pf resume`), attaches on the holder daemon's
+// next start: SessionAttach flips the hub to running and the recovery
+// engine resumes the local capsule — the exact flow the CLI's resume
+// help promises.
+func TestRestartAttachesRetainedPausedRecord(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, hub, sp)
+	wi := "wi_attachretained"
+	rec := matrixRecord(r, wi, 0, "") // the pause close already killed the tree
+	rec.State = string(StatePaused)
+	rec.CleanPause = true
+	hub.hold(wi, rec.SessionID, api.StatusPaused) // clean_pause cleared by `pf resume`
+	writeStateFile(t, r, []*jobRecord{rec})
+	if err := os.MkdirAll(rec.CapsuleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTranscript(t, jobFromRecord(rec))
+
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if n := len(hub.attaches); n != 1 {
+		t.Fatalf("the retained paused record must attach exactly once, got %d", n)
+	}
+	if got := hub.attaches[0].SessionID; got != rec.SessionID {
+		t.Fatalf("attach must present the record's session, got %q", got)
+	}
+	if n := sp.callCount(); n != 1 || !sp.call(0).Resume {
+		t.Fatalf("the attach must resume the capsule transcript, got %d calls resume=%v", sp.callCount(), sp.call(0).Resume)
+	}
+	msg := recvRT(t, toOB)
+	if msg.Kind != protocol.RTRecovered || msg.WorkItem != wi {
+		t.Fatalf("expected RTRecovered after the retained-pause attach, got %+v", msg)
+	}
+	if hub.status[wi] != api.StatusRunning {
+		t.Fatalf("attach must have flipped the hub status to running, got %q", hub.status[wi])
+	}
+	if j2 := r.jobOf(wi); j2 == nil {
+		t.Fatal("the resumed job must be live")
+	} else if h := func() AgentHandle {
+		j2.mu.Lock()
+		defer j2.mu.Unlock()
+		return j2.agent
+	}(); h != nil {
+		_ = h.Terminate(2e9)
+	}
 }
 
 // matches=false + the WI held by ANOTHER session → release: kill the

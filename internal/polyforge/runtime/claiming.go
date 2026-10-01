@@ -28,6 +28,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -54,17 +56,36 @@ func (r *Runtime) claimingPath() string {
 	return filepath.Join(r.cfg.DataDir, "claiming.json")
 }
 
-// loadClaiming reads the journal; a missing file is an empty one.
+// loadClaiming reads the journal; a missing file is an empty one. A
+// journal that exists but will not parse is QUARANTINED and logged
+// (NOTE 6, v1.5 review): a torn/corrupt pre-registration journal is
+// LOST — D5's window, which requires fs corruption to hit at all —
+// and pretending nothing happened would hide it. The entries it
+// carried cannot be replayed, but the session fence (restart
+// reconciliation) still closes whatever aihub knows as ours, so a
+// quarantined journal never blocks a start and never orphans a session
+// the hub can still name.
 func (r *Runtime) loadClaiming() map[string]*claimingRec {
 	raw, err := os.ReadFile(r.claimingPath())
 	if err != nil {
+		if !os.IsNotExist(err) {
+			// an unreadable-but-present journal is the same corruption
+			// class as an unparsable one: loud, never silent.
+			fmt.Fprintf(os.Stderr, "runtime: claiming journal unreadable (%v); starting empty\n", err)
+		}
 		return map[string]*claimingRec{}
 	}
 	var cf claimingFile
 	if json.Unmarshal(raw, &cf) != nil || cf.Items == nil {
-		// a torn journal never blocks a start: the entries it carried
-		// are lost, but the session fence (restart reconciliation) still
-		// closes whatever aihub knows as ours.
+		fmt.Fprintf(os.Stderr, "runtime: claiming journal unparsable (%d bytes): the pre-claim entries it carried are LOST (D5's window; requires fs corruption)\n", len(raw))
+		// quarantine beside the journal so the operator can inspect the
+		// corruption while the next start runs on an empty one.
+		ts := strconv.FormatInt(time.Now().UnixNano(), 36)
+		if qerr := os.Rename(r.claimingPath(), r.claimingPath()+".corrupt."+ts); qerr != nil {
+			fmt.Fprintf(os.Stderr, "runtime: claiming journal quarantine failed: %v\n", qerr)
+		} else {
+			fmt.Fprintf(os.Stderr, "runtime: corrupt claiming journal quarantined as claiming.json.corrupt.%s\n", ts)
+		}
 		return map[string]*claimingRec{}
 	}
 	return cf.Items

@@ -252,23 +252,36 @@ func TestWrapAlreadyTerminalGraceful(t *testing.T) {
 	}
 }
 
-// TestPauseResume: pause closes the generation with reason paused (aihub
-// marks the work item paused); resume is a fresh claim that goes live.
+// TestPauseResume (Finding 2, v1.5 review): the operator pause RETAINS
+// the job record — the hub hears SessionEnd(paused, clean_pause=true)
+// and the local job transitions to the paused state instead of being
+// dropped (the old contract destroyed the secret locally, so the M3
+// attach could never fire). A repeat pause answers the graceful
+// already-paused shape. The resume flow itself (clear clean_pause,
+// holder daemon attaches on its next start) is pinned by the runtime
+// restart tests and the s03 e2e.
 func TestPauseResume(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_f")
 	if _, err := td.client.Pause("wi_f"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	waitGone(t, td, "wi_f")
+	waitState(t, td, "wi_f", "paused")
 	if st := td.hub.lastEnd().Status; st != "paused" {
 		t.Fatalf("pause end status = %q, want paused", st)
 	}
-	// resume: a fresh claim (generation+1) — same route family, live again.
-	if _, err := td.client.Resume("wi_f", "normal"); err != nil {
-		t.Fatalf("resume: %v", err)
+	if !td.hub.lastEnd().CleanPause {
+		t.Fatal("the operator pause must carry clean_pause=true")
 	}
-	td.waitLive(t, "wi_f")
+	// A repeat pause is the graceful idempotency answer, not a conflict.
+	raw, err := td.client.Pause("wi_f")
+	if err != nil {
+		t.Fatalf("second pause: %v", err)
+	}
+	var cr closeResponse
+	if err := json.Unmarshal(raw, &cr); err != nil || cr.Outcome != "already_paused" {
+		t.Fatalf("second pause answer = %s (%v)", raw, err)
+	}
 }
 
 // TestTakeoverAndErrorEnvelope: the takeover intent reaches the claim

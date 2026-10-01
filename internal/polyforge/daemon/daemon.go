@@ -728,6 +728,12 @@ func (d *Daemon) dispatch() {
 	}
 	live := map[string]bool{}
 	for _, ji := range d.rt.List() {
+		// Finding 2 (v1.5 review): a RETAINED paused job holds no agent
+		// and no writer — it must not pin a concurrency slot (four
+		// operator-paused jobs would otherwise starve the whole daemon).
+		if ji.State == runtime.StatePaused {
+			continue
+		}
 		live[ji.WorkItem] = true
 	}
 	d.q.Reconcile(live)

@@ -6,7 +6,12 @@ package observe
 //   - matches == false → OBSuperseded reaches the runtime channel, an
 //     event records the new holder's fingerprint, and the monitor
 //     stops supervising (detection suppressed, flushes refused with
-//     the STALE_SPAWN shape) while making NO hub transition;
+//     the STALE_SPAWN shape) while making NO hub transition. Since
+//     Finding 1(b) (v1.5 review) the emission is RETRYABLE: while the
+//     supersession latch is set the revalidation keeps running and
+//     every unmatched verdict re-emits OBSuperseded (the event face
+//     stays once), until the runtime's release (RTFinished, Finding 4)
+//     stops the monitor loop;
 //   - matches == true → nothing happens (still the holder);
 //   - transport error → NO action (never act on a network error), one
 //     event, and the retry is bounded.
@@ -61,11 +66,11 @@ func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, c
 }
 
 // TestRevalidateMismatchSupersedes: matches=false → OBSuperseded is
-// emitted (carrying the new holder's fingerprint as the m4 audit),
-// one session_superseded event lands, and the monitor refuses further
-// flushes with the stale shape — superseded, not terminal: no
-// OBCompleted and no hub transition (the fake verifier's call log is
-// the only server contact).
+// emitted (carrying the new holder's fingerprint as the m4 audit), the
+// session_superseded VERDICT event lands exactly once, and the monitor
+// refuses further flushes with the stale shape — superseded, not
+// terminal: no OBCompleted and no hub transition (the fake verifier's
+// call log is the only server contact).
 func TestRevalidateMismatchSupersedes(t *testing.T) {
 	verifier := &fakeVerifier{ans: func(wi, sid string) (*api.SessionVerifyResponse, error) {
 		return &api.SessionVerifyResponse{WorkItemID: wi, Matches: false, Status: "running", CurrentFingerprint: "ab12cd34ef56aa00"}, nil
@@ -83,34 +88,51 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 		t.Fatalf("OBSuperseded detail must carry the current holder fingerprint: %+v", msg)
 	}
 
-	// The event face records the supersession with the PUBLIC
-	// fingerprint — never the secret.
-	evs := eventsOf(m, EvSessionSuperseded)
-	if len(evs) != 1 {
-		t.Fatalf("session_superseded events: %d, want 1", len(evs))
-	}
-	if !contains(string(evs[0].Body), "ab12cd34ef56aa00") {
-		t.Fatalf("event must carry the current fingerprint: %s", evs[0].Body)
-	}
-	if contains(string(evs[0].Body), "sess_secret_1") {
-		t.Fatalf("event must NEVER carry the session secret: %s", evs[0].Body)
+	// Finding 1(b) (v1.5 review): the emission is RETRYABLE. While the
+	// latch is set the revalidation KEEPS RUNNING and every unmatched
+	// verdict re-emits OBSuperseded — the old contract fired exactly
+	// once, so a delivery dropped on a full OB channel (or fenced out
+	// at the runtime's spawn counter) was lost forever and the agent of
+	// a WI held elsewhere ran unsupervised. The re-emissions keep
+	// arriving until the runtime's release (RTFinished, Finding 4)
+	// stops this loop — nothing releases this monitor, so they must
+	// keep coming.
+	for range 3 {
+		remsg := waitOB(t, ob, "a re-emitted OBSuperseded")
+		if remsg.Kind != protocol.OBSuperseded {
+			t.Fatalf("only OBSuperseded re-emissions may arrive, got %+v", remsg)
+		}
 	}
 
-	// Superseded, not terminal: no OBCompleted, and a later flush is
-	// answered with the STALE_SPAWN refusal instead of sealing.
-	expectNoOB(t, ob, 150*time.Millisecond, "OBCompleted after supersession")
+	// The event face stays ONCE: the supersession VERDICT is latched
+	// (the PUBLIC fingerprint — never the secret); only the OB emission
+	// repeats.
+	if evs := eventsOf(m, EvSessionSuperseded); len(evs) != 1 {
+		t.Fatalf("session_superseded events: %d, want exactly 1 (the verdict latches once)", len(evs))
+	} else {
+		if !contains(string(evs[0].Body), "ab12cd34ef56aa00") {
+			t.Fatalf("event must carry the current fingerprint: %s", evs[0].Body)
+		}
+		if contains(string(evs[0].Body), "sess_secret_1") {
+			t.Fatalf("event must NEVER carry the session secret: %s", evs[0].Body)
+		}
+	}
+
+	// The revalidation really is still running: the verify calls grew
+	// past one (the old contract asserted exactly 1 here — the fire-once
+	// shape the review's Finding 1 deleted).
+	if verifier.calls < 2 {
+		t.Fatalf("verify calls after supersession: %d, want >= 2 (the re-emission engine)", verifier.calls)
+	}
+
+	// Superseded, not terminal: a flush is answered with the
+	// STALE_SPAWN refusal instead of sealing.
 	ack := doFlush(m, FlushCall{
 		Req:  protocol.FlushRequest{WorkItem: "wi_test", SpawnN: 1, Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped},
 		Resp: make(chan protocol.FlushAck, 1),
 	})
 	if ack.OK || !contains(ack.Error, "STALE_SPAWN") {
 		t.Fatalf("a superseded session's flush must be refused with the stale shape: %+v", ack)
-	}
-	// Exactly one verify call per revalidation slot — the superseded
-	// monitor stops revalidating.
-	time.Sleep(120 * time.Millisecond)
-	if verifier.calls != 1 {
-		t.Fatalf("verify calls after supersession: %d, want 1", verifier.calls)
 	}
 }
 

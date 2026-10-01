@@ -459,3 +459,10 @@ func (c *Client) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse
 func (c *Client) SessionEnd(wi string, req api.SessionEndRequest) error {
 	return c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/session-end", req, nil)
 }
+
+// UnblockWorkItem is the blocked state's exit door (v1.5 review
+// Finding 3): status blocked → queued. Authorization is server-side
+// (admin or project maintainer — the force-takeover gate).
+func (c *Client) UnblockWorkItem(idOrSlug string) (json.RawMessage, error) {
+	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/unblock", map[string]any{})
+}

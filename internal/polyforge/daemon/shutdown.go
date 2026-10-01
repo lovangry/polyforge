@@ -22,10 +22,14 @@ package daemon
 // pathological combination of slow windows cannot outlive it. Jobs are
 // NOT session-ended here: the WIs stay running server-side (our session
 // row intact, the records keep clean_pause=false — exactly the
-// "paused-with-session, will attach on restart" marker of M3 once the
-// hub grows the pause transition) so the next daemon start's restart
-// reconciliation recovers them through the recovery engine (transcript
-// resume, seconds — the v1 recovery model, unchanged in v1.5).
+// "paused-with-session, will attach on restart" marker of M3; the hub's
+// pause transition exists and is reached through session-end's paused
+// verdict, but the shutdown deliberately does not use it) so the next
+// daemon start's restart reconciliation recovers them through the
+// recovery engine (transcript resume, seconds — the v1 recovery model,
+// unchanged in v1.5). A RETAINED operator-paused job (Finding 2) is
+// already StatePaused with no live agent: it is outside liveJobs below
+// and its record simply persists through step 4c.
 
 import (
 	"context"
