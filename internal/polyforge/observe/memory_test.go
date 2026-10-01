@@ -98,15 +98,15 @@ func TestMemoryRecallRoute(t *testing.T) {
 		return code == http.StatusOK
 	})
 
-	// A stale attempt id (a zombie survivor) is refused exactly like a
+	// A stale counter (a zombie survivor) is refused exactly like a
 	// flush: DAEMON-409 STALE_SPAWN, and the face never sees the call.
 	code, body := hs.post(t, "/jobs/wi_http/recall", map[string]any{
-		"attempt_id": "att_old", "query": "lessons", "top_k": 3,
+		"spawn_n": 9, "query": "lessons", "top_k": 3,
 	}, nil)
 	if code != http.StatusConflict || !jsonContains(body, "STALE_SPAWN") {
 		t.Fatalf("stale recall: %d %s", code, body)
 	}
-	// An absent attempt id is stale too.
+	// An absent counter is stale too (fail-closed).
 	code, body = hs.post(t, "/jobs/wi_http/recall", map[string]any{
 		"query": "lessons",
 	}, nil)
@@ -117,9 +117,9 @@ func TestMemoryRecallRoute(t *testing.T) {
 		t.Fatalf("fenced recalls reached the face: %+v", face.recalls)
 	}
 
-	// The live attempt's recall answers the hits and defaults top_k.
+	// The live derivation's recall answers the hits and defaults top_k.
 	code, body = hs.post(t, "/jobs/wi_http/recall", map[string]any{
-		"attempt_id": "att_mem", "query": "flaky retry ladder",
+		"spawn_n": 1, "query": "flaky retry ladder",
 	}, nil)
 	if code != http.StatusOK {
 		t.Fatalf("live recall: %d %s", code, body)
@@ -140,13 +140,13 @@ func TestMemoryRecallRoute(t *testing.T) {
 
 	// An empty query is DAEMON-400, and an unmonitored work item is 404.
 	code, _ = hs.post(t, "/jobs/wi_http/recall", map[string]any{
-		"attempt_id": "att_mem", "query": "  ",
+		"spawn_n": 1, "query": "  ",
 	}, nil)
 	if code != http.StatusBadRequest {
 		t.Fatalf("empty-query recall: %d", code)
 	}
 	code, _ = hs.post(t, "/jobs/wi_none/recall", map[string]any{
-		"attempt_id": "att_mem", "query": "x",
+		"spawn_n": 1, "query": "x",
 	}, nil)
 	if code != http.StatusNotFound {
 		t.Fatalf("unmonitored recall: %d", code)
@@ -156,7 +156,7 @@ func TestMemoryRecallRoute(t *testing.T) {
 	// transparency) and the bookkeeping event landed either way.
 	face.fail = &api.Error{Code: api.ErrMemForbidden, Detail: "no access"}
 	code, body = hs.post(t, "/jobs/wi_http/recall", map[string]any{
-		"attempt_id": "att_mem", "query": "again",
+		"spawn_n": 1, "query": "again",
 	}, nil)
 	if code != http.StatusForbidden || !jsonContains(body, api.ErrMemForbidden) {
 		t.Fatalf("typed face error must surface verbatim: %d %s", code, body)
@@ -182,9 +182,9 @@ func TestMemoryRememberRoute(t *testing.T) {
 		return code == http.StatusOK
 	})
 
-	// The fence first: a stale id never reaches the face.
+	// The fence first: a stale counter never reaches the face.
 	code, body := hs.post(t, "/jobs/wi_http/remember", map[string]any{
-		"attempt_id": "att_old", "type": "experience.debug", "content": "c",
+		"spawn_n": 9, "type": "experience.debug", "content": "c",
 	}, nil)
 	if code != http.StatusConflict || !jsonContains(body, "STALE_SPAWN") {
 		t.Fatalf("stale remember: %d %s", code, body)
@@ -193,9 +193,9 @@ func TestMemoryRememberRoute(t *testing.T) {
 	// The closed field set: content and type are required, visibility is
 	// validated against the closed set.
 	for name, bad := range map[string]map[string]any{
-		"no content":  {"attempt_id": "att_mem", "type": "experience.debug"},
-		"no type":     {"attempt_id": "att_mem", "content": "c"},
-		"bad visible": {"attempt_id": "att_mem", "type": "t", "content": "c", "visibility": "everyone"},
+		"no content":  {"spawn_n": 1, "type": "experience.debug"},
+		"no type":     {"spawn_n": 1, "content": "c"},
+		"bad visible": {"spawn_n": 1, "type": "t", "content": "c", "visibility": "everyone"},
 	} {
 		code, _ := hs.post(t, "/jobs/wi_http/remember", bad, nil)
 		if code != http.StatusBadRequest {
@@ -206,10 +206,10 @@ func TestMemoryRememberRoute(t *testing.T) {
 		t.Fatalf("invalid remembers reached the face: %+v", face.remembers)
 	}
 
-	// The live attempt's remember stores and answers the id; visibility
+	// The live derivation's remember stores and answers the id; visibility
 	// defaults to project.
 	code, body = hs.post(t, "/jobs/wi_http/remember", map[string]any{
-		"attempt_id": "att_mem", "type": "experience.debug",
+		"spawn_n": 1, "type": "experience.debug",
 		"content": "the retry ladder must be bounded", "tags": []string{"infra"},
 	}, nil)
 	if code != http.StatusOK {
@@ -251,13 +251,13 @@ func TestMemoryRoutesNotConfigured(t *testing.T) {
 		return code == http.StatusOK
 	})
 	code, _ := hs.post(t, "/jobs/wi_http/recall", map[string]any{
-		"attempt_id": "att_mem", "query": "q",
+		"spawn_n": 1, "query": "q",
 	}, nil)
 	if code != http.StatusInternalServerError {
 		t.Fatalf("recall without a face: %d", code)
 	}
 	code, _ = hs.post(t, "/jobs/wi_http/remember", map[string]any{
-		"attempt_id": "att_mem", "type": "t", "content": "c",
+		"spawn_n": 1, "type": "t", "content": "c",
 	}, nil)
 	if code != http.StatusInternalServerError {
 		t.Fatalf("remember without a face: %d", code)

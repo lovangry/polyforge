@@ -96,7 +96,7 @@ func TestShutdownFlushPositive(t *testing.T) {
 		t.Fatalf("observe wi_s3: %v", err)
 	}
 	var sjv protocol.JobView
-	if err := json.Unmarshal(sraw, &sjv); err != nil || sjv.AttemptID == "" {
+	if err := json.Unmarshal(sraw, &sjv); err != nil || sjv.SpawnN == 0 {
 		t.Fatalf("wi_s3 view undecodable: %v (%s)", err, sraw)
 	}
 
@@ -115,7 +115,7 @@ func TestShutdownFlushPositive(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if _, err := td.client.Flush("wi_s3", protocol.FlushRequest{
-		WorkItem: "wi_s3", AttemptID: sjv.AttemptID, SpawnN: sjv.SpawnN, Reason: protocol.FlushShutdown,
+		WorkItem: "wi_s3", SpawnN: sjv.SpawnN, Reason: protocol.FlushShutdown,
 	}); err != nil {
 		t.Fatalf("flush(shutdown): %v", err)
 	}
@@ -210,7 +210,7 @@ func TestRestartWiring(t *testing.T) {
 	if err := json.Unmarshal(raw, &jv); err != nil {
 		t.Fatalf("observe undecodable: %v", err)
 	}
-	if jv.WorkItem != wi || jv.AttemptID == "" || jv.Status != protocol.JobRunning {
+	if jv.WorkItem != wi || jv.SpawnN == 0 || jv.Status != protocol.JobRunning {
 		t.Fatalf("restarted job view = %+v", jv)
 	}
 }

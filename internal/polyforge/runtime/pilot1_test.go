@@ -183,7 +183,7 @@ func TestWorkItemFileRepairOnRecover(t *testing.T) {
 // recoveryMsgFor is recoveryMsg with an explicit cause string.
 func recoveryMsgFor(j *job, cause string) protocol.OBMsg {
 	return protocol.OBMsg{
-		Kind: protocol.OBNeedsRecovery, AttemptID: j.instance,
+		Kind: protocol.OBNeedsRecovery, SpawnN: j.spawnN,
 		WorkItem: j.wi, Reason: cause,
 	}
 }

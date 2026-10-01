@@ -18,8 +18,7 @@ import (
 
 func TestGitFaceMalformedRequestClasses(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, res := e.claimWI(t, e.userID)
-	secret := res.Credential.Secret
+	wiID, secret := e.claimWI(t)
 
 	// The traversal class is asserted against a direct handler mount.
 	// http.ServeMux (which the harness and production mount under) folds
@@ -143,14 +142,14 @@ func TestGitFaceMalformedRequestClasses(t *testing.T) {
 // text, never the {"code":"GIT-404",...} JSON envelope.
 func TestGitFaceTraversalNeverReachesCGI(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, res := e.claimWI(t, e.userID)
+	wiID, secret := e.claimWI(t)
 	raw := httptest.NewServer(http.HandlerFunc(e.mgr.HandleGit))
 	t.Cleanup(raw.Close)
 	req, err := http.NewRequest("GET", raw.URL+"/git/"+wiID+".git/../../etc/info/refs", nil)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	req.SetBasicAuth(wiID, res.Credential.Secret)
+	req.SetBasicAuth(wiID, secret)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)

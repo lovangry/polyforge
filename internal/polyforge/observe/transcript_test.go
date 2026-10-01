@@ -49,7 +49,7 @@ func newLiveFixture(t *testing.T, capsuleDir, liveDir string) liveFixture {
 // production path: an RTRecovered attachment on rtCh.
 func adopt(m *Monitor, h Handle, wi WIInfo) {
 	m.rtCh <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: wi.WorkItem, AttemptID: h.AttemptID()},
+		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: wi.WorkItem, SpawnN: 1},
 		Handle: h,
 		WI:     wi,
 	}
@@ -143,7 +143,7 @@ func TestFlushWrapSyncsTranscriptBeforePush(t *testing.T) {
 	})
 
 	call := FlushCall{Req: protocol.FlushRequest{
-		WorkItem: "wi_test", AttemptID: "ra_wi_test",
+		WorkItem: "wi_test", SpawnN: 1,
 		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
 	}, Resp: make(chan protocol.FlushAck, 1)}
 	m.flushCh <- call

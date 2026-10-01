@@ -178,13 +178,6 @@ type Observe struct {
 
 	mu       sync.Mutex
 	monitors map[string]*Monitor
-	// latest holds, per work item, the newest instance id the hub has
-	// HEARD announced (RTStarted/RTRecovered emission time) — the legacy
-	// attempt-id fence input (memory.go; deleted with the cleanup
-	// commit). The monitor adopts the id only after its select loop
-	// processes the attachment; in that window the flush fence compares
-	// against this map instead of refusing.
-	latest map[string]string
 	// latestSpawn holds, per work item, the newest DERIVATION COUNTER the
 	// hub has heard announced (RTMsg.SpawnN at RTStarted/RTRecovered
 	// emission time) — the v1.5 B2 flush fence's recovery-window input
@@ -224,8 +217,7 @@ func New(cfg Config) (*Observe, error) {
 		return nil, errConfig("OB channel must be buffered")
 	}
 	return &Observe{cfg: cfg, log: log, ledger: ledger,
-		monitors: map[string]*Monitor{}, latest: map[string]string{},
-		latestSpawn: map[string]int{}}, nil
+		monitors: map[string]*Monitor{}, latestSpawn: map[string]int{}}, nil
 }
 
 type errConfig string
@@ -258,21 +250,19 @@ func (o *Observe) onAttach(at Attach) {
 	wi := at.Msg.WorkItem
 	switch at.Msg.Kind {
 	case protocol.RTStarted:
-		// Emission-time registration (the recovery-window fence input,
-		// #8): even when the attachment below is malformed and never
-		// yields a monitor, the announced id is the newest the hub knows.
-		o.NoteInstance(wi, at.Msg.AttemptID)
-		// v1.5 B2: same emission-time registration for the derivation
-		// counter — the flush fence's recovery-window alternate identity.
+		// v1.5 B2 emission-time registration (the recovery-window fence
+		// input, #8): even when the attachment below is malformed and
+		// never yields a monitor, the announced counter is the newest
+		// the hub knows.
 		o.NoteSpawn(wi, at.Msg.SpawnN)
 		if old := o.takeMonitor(wi); old != nil {
 			// A stale monitor for the same WI (Runtime restarted the WI
-			// without a WIFinished): stop it, the new attempt wins.
+			// without a WIFinished): stop it, the new derivation wins.
 			old.requestStop()
 		}
-		if at.Handle == nil || at.Msg.AttemptID == "" || at.WI.WorkItem == "" {
+		if at.Handle == nil || at.Msg.SpawnN <= 0 || at.WI.WorkItem == "" {
 			_ = o.log.Append(wi, EvJobStopped, map[string]any{
-				"error": "RTStarted without handle/attempt-id/wi-info; not monitored",
+				"error": "RTStarted without handle/spawn_n/wi-info; not monitored",
 			})
 			return
 		}
@@ -285,10 +275,9 @@ func (o *Observe) onAttach(at Attach) {
 		}()
 	case protocol.RTRecovered:
 		// Same emission-time registration as RTStarted: the monitor adopts
-		// the new instance only when its select loop reaches the rtCh
-		// delivery — the flush fence must accept the announced id for the
-		// whole window.
-		o.NoteInstance(wi, at.Msg.AttemptID)
+		// the new derivation only when its select loop reaches the rtCh
+		// delivery — the flush fence must accept the announced counter
+		// for the whole window.
 		o.NoteSpawn(wi, at.Msg.SpawnN)
 		m := o.lookup(wi)
 		if m == nil {
@@ -306,8 +295,7 @@ func (o *Observe) onAttach(at Attach) {
 		}
 	case protocol.RTFinished:
 		o.mu.Lock()
-		delete(o.latest, wi)     // the instance lineage ended with the job
-		delete(o.latestSpawn, wi) // ...and so did the derivation counter
+		delete(o.latestSpawn, wi) // the derivation lineage ended with the job
 		o.mu.Unlock()
 		// Retention (spec A4): a finished work item can neither receive a
 		// re-delivery nor be re-answered, so its ledger entries — both
@@ -360,36 +348,10 @@ func (o *Observe) lookup(wi string) *Monitor {
 	return m
 }
 
-// NoteInstance records the latest KNOWN instance id of a work item at
-// the moment Runtime announces it (the daemon bridge calls this at
-// RTStarted/RTRecovered emission time; onAttach repeats it as the
-// structural backstop). The monitor's current-attempt read lags this by
-// the whole attachment pipeline — the hub loop, the rtCh handoff and the
-// monitor's select adoption — and a just-resumed agent's flush(reason)
-// must not eat a STALE_ATTEMPT refusal in that window (#8's fence keeps
-// refusing every OLDER id). A nil/empty id is ignored.
-func (o *Observe) NoteInstance(wi, attemptID string) {
-	if wi == "" || attemptID == "" {
-		return
-	}
-	o.mu.Lock()
-	o.latest[wi] = attemptID
-	o.mu.Unlock()
-}
-
-// instanceKnown returns the latest known instance id of wi ("" when
-// none was ever announced). The serveFlush fence accepts it as the
-// recovery window's alternate identity — see NoteInstance.
-func (o *Observe) instanceKnown(wi string) string {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.latest[wi]
-}
-
 // NoteSpawn records the latest ANNOUNCED derivation counter of a work
 // item (RTMsg.SpawnN at RTStarted/RTRecovered emission time; onAttach
 // repeats it as the structural backstop, and the daemon bridge calls it
-// at emission time exactly like NoteInstance). The monitor adopts the
+// at emission time). The monitor adopts the
 // counter only after its select loop processes the attachment; in that
 // window the B2 flush fence compares against this map instead of
 // refusing — the just-resumed agent's own flush(reason) must never eat
@@ -468,10 +430,10 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 		answerCh: make(chan AnswerCall, 8),
 		flushCh:  make(chan FlushCall, 8),
 
-		gate:      make(chan struct{}, 1),
-		pushDone:  make(chan pushResult, 1),
-		wrapDone:  make(chan wrapResult, 1),
-		probeDone: make(chan probeResult, 1),
+		gate:       make(chan struct{}, 1),
+		pushDone:   make(chan pushResult, 1),
+		wrapDone:   make(chan wrapResult, 1),
+		probeDone:  make(chan probeResult, 1),
 		verifyDone: make(chan verifyResult, 1),
 
 		hangAnchor: time.Now(),
@@ -490,7 +452,6 @@ func (m *Monitor) attach(at Attach) {
 	m.exitCh = at.Handle.Exit()
 	m.idleAnchor = time.Now() // the idle window's pre-first-record baseline
 	m.stateMu.Lock()
-	m.attemptID = at.Msg.AttemptID
 	m.spawnN = at.Msg.SpawnN
 	m.sessionID = at.Msg.SessionID
 	m.stateMu.Unlock()

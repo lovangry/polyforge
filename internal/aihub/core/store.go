@@ -27,11 +27,13 @@ type DB struct {
 	*sql.DB
 }
 
-// DDL is the v1 Core schema. First boot installs it as-is; no migrations
-// (fresh product, no stock). Compared to v0: capsule revision tables and
-// the service-secret machinery are gone; owner_generations gains the
-// attempt identity and the push-credential digest (v1 generation fencing,
-// main layer).
+// DDL is the v1.5 Core schema. First boot installs it as-is; the one
+// additive migration (the session columns on work_items) runs in Open for
+// pre-v1.5 databases. Compared to v0: capsule revision tables and the
+// service-secret machinery are gone; ownership lives ON the work_items
+// row itself (the v1.5 session model — session_hash/session_fingerprint/
+// clean_pause; the v1 owner_generations table was deleted with the model
+// it served).
 const DDL = `
 CREATE TABLE IF NOT EXISTS core_meta (
   key   TEXT PRIMARY KEY,
@@ -137,25 +139,6 @@ CREATE TABLE IF NOT EXISTS wi_dependencies (
   CHECK (blocking_wi_id <> blocked_wi_id)
 );
 
-CREATE TABLE IF NOT EXISTS owner_generations (
-  work_item_id TEXT NOT NULL REFERENCES work_items(id),
-  generation   INTEGER NOT NULL,
-  attempt_id   TEXT NOT NULL,
-  owner        TEXT NOT NULL,
-  -- owner/machine_id carry the v1 wire strings (display owner, daemon
-  -- machine id); they are deliberately NOT FK columns: the claim face
-  -- accepts a display owner and machines may not be registered yet.
-  machine_id   TEXT,
-  secret_hash  TEXT NOT NULL,
-  started_at   TEXT NOT NULL,
-  ended_at     TEXT,
-  end_reason   TEXT
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_owner_gen_active
-  ON owner_generations(work_item_id) WHERE ended_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_owner_gen_seq
-  ON owner_generations(work_item_id, generation);
-
 CREATE TABLE IF NOT EXISTS claim_idempotency (
   idempotency_key TEXT PRIMARY KEY,
   work_item_id    TEXT NOT NULL REFERENCES work_items(id),
@@ -164,10 +147,10 @@ CREATE TABLE IF NOT EXISTS claim_idempotency (
   created_at      TEXT NOT NULL
 );
 
--- M5 service-secret epoch ledger (02 §4.10/§6.6). v1 minted credentials
--- are per-attempt random secrets (hash-only in owner_generations), so no
--- validation path consumes a shared service secret; the ledger exists for
--- the rotate-secret wire contract and its audit trail.
+-- M5 service-secret epoch ledger (02 §4.10/§6.6). Session-model pushes
+-- are fenced by the per-WI session hash on work_items, so no validation
+-- path consumes a shared service secret; the ledger exists for the
+-- rotate-secret wire contract and its audit trail.
 CREATE TABLE IF NOT EXISTS service_secret_epochs (
   epoch       INTEGER PRIMARY KEY,
   mode        TEXT NOT NULL,

@@ -58,9 +58,6 @@ func TestStartStopEndToEnd(t *testing.T) {
 	if started.SessionID == "" || len(started.SessionID) != 64 {
 		t.Fatalf("RTStarted must carry the 64-hex session secret in-process: %+v", started)
 	}
-	if started.AttemptID != api.SessionFingerprint(started.SessionID) {
-		t.Fatalf("RTStarted fence token must be the session fingerprint, got %+v", started)
-	}
 
 	capDir := r.capsuleDir(wi)
 	// capsule layout materialized
@@ -111,7 +108,7 @@ func TestStartStopEndToEnd(t *testing.T) {
 		t.Fatalf("state.json should hold one record, got %+v", recs)
 	}
 	rec := recs[0]
-	if rec.SessionID != started.SessionID || rec.SessionFingerprint != started.AttemptID ||
+	if rec.SessionID != started.SessionID || rec.SessionFingerprint != api.SessionFingerprint(started.SessionID) ||
 		rec.SpawnN != 1 || rec.CleanPause {
 		t.Fatalf("record must carry the session identity: %+v", rec)
 	}
@@ -119,7 +116,7 @@ func TestStartStopEndToEnd(t *testing.T) {
 	// from the record shape entirely — the jobRecord type has no such
 	// fields to assert absent)
 
-	// Stop: seal → push → end-generation → RTFinished(wrapped)
+	// Stop: seal → push → session-end → RTFinished(wrapped)
 	if err := os.WriteFile(filepath.Join(capDir, "final.txt"), []byte("done\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

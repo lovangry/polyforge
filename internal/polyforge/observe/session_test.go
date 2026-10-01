@@ -48,7 +48,7 @@ func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, c
 	// production; re-attach through rtCh so the monitor goroutine
 	// adopts it under the same lock discipline as a real recovery.
 	m.rtCh <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", AttemptID: "att_s", SpawnN: 1, SessionID: sid},
+		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 1, SessionID: sid},
 		Handle: h,
 		WI:     m.wi,
 	}
@@ -76,7 +76,7 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 	if msg.Kind != protocol.OBSuperseded {
 		t.Fatalf("OB message: %+v", msg)
 	}
-	if msg.WorkItem != "wi_test" || msg.AttemptID != "att_s" {
+	if msg.WorkItem != "wi_test" || msg.SpawnN != 1 {
 		t.Fatalf("OBSuperseded identity: %+v", msg)
 	}
 	if msg.Detail == "" || !contains(msg.Detail, "ab12cd34ef56aa00") {

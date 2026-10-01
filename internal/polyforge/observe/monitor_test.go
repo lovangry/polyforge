@@ -36,8 +36,8 @@ func TestDeathDetectionSendsNeedsRecovery(t *testing.T) {
 	if msg.Reason != protocol.RecoverDeath {
 		t.Fatalf("reason: got %s, want %s", msg.Reason, protocol.RecoverDeath)
 	}
-	if msg.AttemptID != "att_1" {
-		t.Fatalf("attempt-id fencing: got %s", msg.AttemptID)
+	if msg.SpawnN != 1 {
+		t.Fatalf("spawn fencing: got %d", msg.SpawnN)
 	}
 	if msg.WorkItem != "wi_test" {
 		t.Fatalf("work item: got %s", msg.WorkItem)
@@ -73,14 +73,14 @@ func TestStormGuardSingleNeedsRecoveryPerAttempt(t *testing.T) {
 	// Recovery: a NEW attempt re-arms the guard. Its death is reported
 	// again — with the new attempt-id.
 	h2 := newFakeHandle("att_2")
-	m.rtCh <- Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", AttemptID: "att_2"}, Handle: h2}
+	m.rtCh <- Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 2}, Handle: h2}
 	soon(t, 500*time.Millisecond, "recovery adopted", func() bool {
-		return m.currentAttempt() == "att_2"
+		return m.currentSpawn() == 2
 	})
 	h2.die()
 	msg2 := waitOB(t, ob, "WINeedsRecovery for the new attempt")
-	if msg2.AttemptID != "att_2" {
-		t.Fatalf("new attempt must fence its own messages: %+v", msg2)
+	if msg2.SpawnN != 2 {
+		t.Fatalf("new derivation must fence its own messages: %+v", msg2)
 	}
 	// Exactly two messages total for the whole scenario.
 	expectNoOB(t, ob, 250*time.Millisecond, "no third message")
@@ -321,7 +321,6 @@ func TestIdleExemptWhilePendingQuestion(t *testing.T) {
 	m.flushCh <- FlushCall{
 		Req: protocol.FlushRequest{
 			WorkItem:   "wi_test",
-			AttemptID:  "att_1",
 			SpawnN:     1,
 			Reason:     protocol.FlushNeedsInput,
 			QuestionID: "q_1",
@@ -793,7 +792,7 @@ func TestNoProgressEventAndThrottle(t *testing.T) {
 	if err := json.Unmarshal(e.Body, &body); err != nil {
 		t.Fatalf("no_progress body: %v", err)
 	}
-	for _, key := range []string{"silent_for_ms", "window_ms", "in_flight", "attempt_id"} {
+	for _, key := range []string{"silent_for_ms", "window_ms", "in_flight", "spawn_n"} {
 		if _, ok := body[key]; !ok {
 			t.Fatalf("no_progress body must carry %q: %s", key, e.Body)
 		}
@@ -813,7 +812,7 @@ func TestNoProgressExemptWhilePendingQuestion(t *testing.T) {
 	resp := make(chan protocol.FlushAck, 1)
 	m.flushCh <- FlushCall{
 		Req: protocol.FlushRequest{
-			WorkItem: "wi_test", AttemptID: "att_1", SpawnN: 1, Reason: protocol.FlushNeedsInput,
+			WorkItem: "wi_test", SpawnN: 1, Reason: protocol.FlushNeedsInput,
 			QuestionID: "q_np", Question: "which way?", Step: "code",
 		},
 		Resp: resp,

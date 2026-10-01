@@ -38,14 +38,14 @@ type fakeHub struct {
 	status     map[string]string
 	held       map[string]string // wi → session secret ("" = unheld)
 	cleanPause map[string]bool
-	lookupErr map[string]error
-	claims    []api.SessionClaimRequest
-	takeovers []api.SessionClaimRequest
-	attaches  []api.SessionAttachRequest
-	ends      []api.SessionEndRequest
-	end       map[string]error // wi → end-error scripting (per wi)
-	digest    string            // claim-time bundle digest (default "deadbeef")
-	repos     []api.ProjectRepo // claim-served task-repo inventory (nil = none)
+	lookupErr  map[string]error
+	claims     []api.SessionClaimRequest
+	takeovers  []api.SessionClaimRequest
+	attaches   []api.SessionAttachRequest
+	ends       []api.SessionEndRequest
+	end        map[string]error  // wi → end-error scripting (per wi)
+	digest     string            // claim-time bundle digest (default "deadbeef")
+	repos      []api.ProjectRepo // claim-served task-repo inventory (nil = none)
 	// canonical maps an id-or-slug form (e.g. "proj#7") to the canonical
 	// work-item id the claim answer carries (F2 tests); nil entry = the
 	// input echoes itself (the pre-F2 behavior).
@@ -64,8 +64,8 @@ func newFakeHub() *fakeHub {
 		held:       map[string]string{},
 		cleanPause: map[string]bool{},
 		lookupErr:  map[string]error{},
-		end:       map[string]error{},
-		keyClaims: map[string]*api.SessionClaimResponse{},
+		end:        map[string]error{},
+		keyClaims:  map[string]*api.SessionClaimResponse{},
 	}
 }
 
@@ -362,10 +362,9 @@ func seedJob(r *Runtime, wi string) *job {
 		project:            "proj",
 		sessionID:          sess,
 		sessionFingerprint: fp,
-		instance:           fp,
 		state:              StateRunning,
 		capsuleDir:         capDir,
-		git:                gitops.Opts{WorkItemID: wi, AttemptID: fp, Username: wi, Secret: sess, CapsuleDir: capDir, GitDir: filepath.Join(r.cfg.DataDir, "git", wi+".git")},
+		git:                gitops.Opts{WorkItemID: wi, Fingerprint: fp, Username: wi, Secret: sess, CapsuleDir: capDir, GitDir: filepath.Join(r.cfg.DataDir, "git", wi+".git")},
 		transcript:         sessionPathFor(capDir, fp),
 		bundleName:         "demo-bundle",
 		spawnN:             1,
@@ -379,12 +378,12 @@ func seedJob(r *Runtime, wi string) *job {
 func installOldAgent(t *testing.T, sp Spawner, j *job) AgentHandle {
 	t.Helper()
 	h, err := sp.Spawn(context.Background(), SpawnParams{
-		WorkItemID:    j.wi,
-		CapsuleDir:    j.capsuleDir,
-		SessionHandle: j.sessionFingerprint,
-		SpawnN:        j.spawnN + 1,
+		WorkItemID:     j.wi,
+		CapsuleDir:     j.capsuleDir,
+		SessionHandle:  j.sessionFingerprint,
+		SpawnN:         j.spawnN + 1,
 		TranscriptPath: j.transcript,
-		InitialPrompt: "initial",
+		InitialPrompt:  "initial",
 	})
 	if err != nil {
 		t.Fatalf("installOldAgent: %v", err)

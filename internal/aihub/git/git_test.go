@@ -3,8 +3,8 @@ package git
 // Full-chain tests through the real git binary: httptest server + the
 // git-http-backend proxy + clone/push. Each pre-receive violation gets a
 // dedicated test: non-FF, ref deletion, gitlink, seq regression, blob
-// over-limit; plus legal push/clone and credential fencing (old
-// credential rejected after takeover).
+// over-limit; plus legal push/clone and session fencing (the superseded
+// session's secret rejected after force takeover).
 
 import (
 	"bytes"
@@ -78,9 +78,10 @@ func newGitEnv(t *testing.T) *gitEnv {
 // (registration tickets are not claimable).
 var bundleNameTest = "git-chain-bundle"
 
-// claimWI creates + claims a WI, installs the bare repo, and returns the
-// claim result.
-func (e *gitEnv) claimWI(t *testing.T, caller string) (wiID string, res *core.ClaimResult) {
+// claimWI creates + CAS-claims a WI under the session model, installs
+// the bare repo, and returns the WI id with the client-minted session
+// secret (the push password).
+func (e *gitEnv) claimWI(t *testing.T) (wiID, secret string) {
 	t.Helper()
 	wi, err := e.wis.Create(core.CreateRequest{
 		Project: "alpha", Goal: "git chain test", Reporter: e.userID,
@@ -89,14 +90,16 @@ func (e *gitEnv) claimWI(t *testing.T, caller string) (wiID string, res *core.Cl
 	if err != nil {
 		t.Fatalf("create wi: %v", err)
 	}
-	res, err = e.owners.Claim(wi.ID, core.ClaimRequest{Intent: core.IntentClaim, IdempotencyKey: "idem-" + wi.ID}, caller)
-	if err != nil {
-		t.Fatalf("claim: %v", err)
+	secret = "git-session-secret-" + wi.ID
+	if _, err := e.sessions.Claim(wi.ID, api.SessionClaimRequest{
+		SessionID: secret, MachineID: "m1", IdempotencyKey: "idem-" + wi.ID,
+	}, e.userID); err != nil {
+		t.Fatalf("session claim: %v", err)
 	}
 	if err := e.mgr.EnsureBare(wi.ID); err != nil {
 		t.Fatalf("ensure bare: %v", err)
 	}
-	return wi.ID, res
+	return wi.ID, secret
 }
 
 // credURL embeds the credential the way the pf gitops layer does.
@@ -273,8 +276,8 @@ func TestPushOptionFenceAbsentExpected(t *testing.T) {
 
 func TestLegalPushAndClone(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, res := e.claimWI(t, e.userID)
-	cred := e.credURL(wiID, res.Credential.Secret)
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
 
 	// Clone the empty bare repo (clone works while empty).
 	wt := newWorktree(t)
@@ -312,7 +315,7 @@ func TestLegalPushAndClone(t *testing.T) {
 
 func TestPushWithoutCredentialRejected(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, _ := e.claimWI(t, e.userID)
+	wiID, _ := e.claimWI(t)
 	anon := fmt.Sprintf("%s/git/%s.git", e.ts.URL, wiID)
 	wt := newWorktree(t)
 	commitSeq(t, wt, "f.txt", "x\n", 1)
@@ -323,8 +326,8 @@ func TestPushWithoutCredentialRejected(t *testing.T) {
 
 func TestNonFastForwardRejected(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, res := e.claimWI(t, e.userID)
-	cred := e.credURL(wiID, res.Credential.Secret)
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
 	commitSeq(t, wt, "a.txt", "one\n", 1)
 	if err := push(t, wt, cred); err != nil {
@@ -345,8 +348,8 @@ func TestNonFastForwardRejected(t *testing.T) {
 
 func TestRefDeletionRejected(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, res := e.claimWI(t, e.userID)
-	cred := e.credURL(wiID, res.Credential.Secret)
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
 	commitSeq(t, wt, "a.txt", "one\n", 1)
 	if err := push(t, wt, cred); err != nil {
@@ -363,8 +366,8 @@ func TestRefDeletionRejected(t *testing.T) {
 
 func TestGitlinkRejected(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, res := e.claimWI(t, e.userID)
-	cred := e.credURL(wiID, res.Credential.Secret)
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
 	commitSeq(t, wt, "a.txt", "one\n", 1)
 	if err := push(t, wt, cred); err != nil {
@@ -387,8 +390,8 @@ func TestGitlinkRejected(t *testing.T) {
 
 func TestSeqRegressionRejected(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, res := e.claimWI(t, e.userID)
-	cred := e.credURL(wiID, res.Credential.Secret)
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
 	commitSeq(t, wt, "a.txt", "one\n", 1)
 	if err := push(t, wt, cred); err != nil {
@@ -424,8 +427,8 @@ func TestBlobOverLimitRejected(t *testing.T) {
 	// Shrink the limit so the test stays fast; the hook reads it via the
 	// env the proxy sets.
 	e.mgr.MaxBlobBytes = 512
-	wiID, res := e.claimWI(t, e.userID)
-	cred := e.credURL(wiID, res.Credential.Secret)
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
 	if err := os.WriteFile(filepath.Join(wt, "big.bin"), bytes.Repeat([]byte{0}, 2048), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -441,38 +444,40 @@ func TestBlobOverLimitRejected(t *testing.T) {
 	}
 }
 
-func TestOldCredentialRejectedAfterTakeover(t *testing.T) {
+func TestOldSecretRejectedAfterTakeover(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, res1 := e.claimWI(t, e.userID)
-	cred1 := e.credURL(wiID, res1.Credential.Secret)
+	wiID, secret1 := e.claimWI(t)
+	cred1 := e.credURL(wiID, secret1)
 	wt := newWorktree(t)
 	commitSeq(t, wt, "a.txt", "one\n", 1)
 	if err := push(t, wt, cred1); err != nil {
-		t.Fatalf("push with the live credential failed: %v", err)
+		t.Fatalf("push with the live session secret failed: %v", err)
 	}
-	// Takeover: generation 2, new credential; the old one must be dead
-	// at the git face (main fencing layer).
-	res2, err := e.owners.Claim(wiID, core.ClaimRequest{Intent: core.IntentTakeover, MachineID: "machine-2"}, e.userID)
-	if err != nil {
-		t.Fatalf("takeover: %v", err)
+	// Force takeover: the session swaps atomically to a NEW secret; the
+	// old one must be dead at the git face (fencing-on-use, §1.6).
+	secret2 := "git-session-secret-2-" + wiID
+	if _, err := e.sessions.Takeover(wiID, api.SessionClaimRequest{
+		SessionID: secret2, MachineID: "machine-2", Reason: "machine lost",
+	}, e.userID); err != nil {
+		t.Fatalf("force takeover: %v", err)
 	}
 	commitSeq(t, wt, "b.txt", "two\n", 2)
 	out, perr := runGit(t, wt, "push", cred1, "HEAD:refs/heads/main")
 	if perr == nil {
-		t.Fatalf("push with the REVOKED credential accepted: %s", out)
+		t.Fatalf("push with the SUPERSEDED session secret accepted: %s", out)
 	}
 	if !strings.Contains(out, "Authentication") && !strings.Contains(out, "401") {
-		t.Fatalf("wrong rejection for revoked credential: %s", out)
+		t.Fatalf("wrong rejection for the superseded secret: %s", out)
 	}
-	// The new credential works and continues the seq chain.
-	cred2 := e.credURL(wiID, res2.Credential.Secret)
+	// The new secret works and continues the seq chain.
+	cred2 := e.credURL(wiID, secret2)
 	if err := push(t, wt, cred2); err != nil {
-		t.Fatalf("push with the new credential failed: %v", err)
+		t.Fatalf("push with the new session secret failed: %v", err)
 	}
-	// And a fetch with the old credential is refused too.
+	// And a fetch with the old secret is refused too.
 	out, cerr := runGit(t, t.TempDir(), "clone", cred1, filepath.Join(t.TempDir(), "x"))
 	if cerr == nil {
-		t.Fatalf("clone with the revoked credential accepted: %s", out)
+		t.Fatalf("clone with the superseded session secret accepted: %s", out)
 	}
 }
 
@@ -508,12 +513,15 @@ func TestSlugClaimedTicketPushesToCanonicalBareRepo(t *testing.T) {
 	if resolved != wi.ID {
 		t.Fatalf("slug %s resolved to %q, want canonical %q", wi.Slug, resolved, wi.ID)
 	}
-	res, err := e.owners.Claim(resolved, core.ClaimRequest{Intent: core.IntentClaim, IdempotencyKey: "idem-" + wi.ID}, e.userID)
+	secret := "git-session-secret-" + wi.ID
+	claim, err := e.sessions.Claim(resolved, api.SessionClaimRequest{
+		SessionID: secret, MachineID: "m1", IdempotencyKey: "idem-" + wi.ID,
+	}, e.userID)
 	if err != nil {
 		t.Fatalf("claim %s: %v", resolved, err)
 	}
-	if res.Claim.WorkItemID != wi.ID {
-		t.Fatalf("claim answered work item %q, want canonical %q", res.Claim.WorkItemID, wi.ID)
+	if claim.WorkItemID != wi.ID {
+		t.Fatalf("claim answered work item %q, want canonical %q", claim.WorkItemID, wi.ID)
 	}
 	if err := e.mgr.EnsureBare(wi.ID); err != nil {
 		t.Fatalf("ensure bare: %v", err)
@@ -521,7 +529,7 @@ func TestSlugClaimedTicketPushesToCanonicalBareRepo(t *testing.T) {
 
 	// The remote built from the CANONICAL id matches the bare repo and
 	// the push lands.
-	cred := e.credURL(wi.ID, res.Credential.Secret)
+	cred := e.credURL(wi.ID, secret)
 	if !strings.HasSuffix(cred, "/git/"+wi.ID+".git") {
 		t.Fatalf("canonical remote URL %q must name the bare repo /git/%s.git", cred, wi.ID)
 	}

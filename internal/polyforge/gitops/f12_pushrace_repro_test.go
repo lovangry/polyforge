@@ -48,20 +48,20 @@ import (
 )
 
 const (
-	reproAttempt = "attempt-race"
-	reproSecret  = "race-secret"
+	reproFingerprint = "0123456789abcdef"
+	reproSecret      = "race-secret"
 )
 
 // reproChecker is a CredentialChecker stub: username must be the WI id,
-// the secret must match. It answers the attempt id the pre-receive
-// fence expects.
+// the secret must match. It answers the session's public fingerprint the
+// pre-receive fence expects.
 type reproChecker struct{}
 
 func (reproChecker) CheckPushCredential(wiID, username, secret string) (string, error) {
 	if username != wiID || secret != reproSecret {
 		return "", fmt.Errorf("bad push credential for %s", wiID)
 	}
-	return reproAttempt, nil
+	return reproFingerprint, nil
 }
 
 // reproEnv wires the real aihub git surface: Manager (bare-repo tree +
@@ -118,16 +118,15 @@ func (e *reproEnv) reproOpts(t *testing.T, wi string) Opts {
 	t.Helper()
 	base := t.TempDir()
 	return Opts{
-		WorkItemID: wi,
-		AttemptID:  reproAttempt,
-		CapsuleDir: filepath.Join(base, "capsules", wi),
-		GitDir:     filepath.Join(base, "git", wi+".git"),
-		RemoteURL:  e.ts.URL + "/git/" + wi + ".git",
-		Username:   wi,
-		Secret:     reproSecret,
+		WorkItemID:  wi,
+		Fingerprint: reproFingerprint,
+		CapsuleDir:  filepath.Join(base, "capsules", wi),
+		GitDir:      filepath.Join(base, "git", wi+".git"),
+		RemoteURL:   e.ts.URL + "/git/" + wi + ".git",
+		Username:    wi,
+		Secret:      reproSecret,
 	}
 }
-
 
 // lanePushResult is one lane's outcome.
 type lanePushResult struct {
@@ -137,16 +136,16 @@ type lanePushResult struct {
 	out   string
 }
 
-// rawPush execs the EXACT argv pushLocked builds (push, attempt-id push
-// option, remote URL, HEAD:refs/heads/main) with gitops' env shape
+// rawPush execs the EXACT argv pushLocked builds (push, session-fingerprint
+// push option, remote URL, HEAD:refs/heads/main) with gitops' env shape
 // (external GIT_DIR/GIT_WORK_TREE + one-shot GIT_ASKPASS credential).
 // It bypasses the in-process per-WI mutex the way an overlapping push
 // lane does on the wire.
 func rawPush(t *testing.T, o Opts) lanePushResult {
 	t.Helper()
 	args := []string{"push"}
-	if o.AttemptID != "" {
-		args = append(args, "--push-option=attempt-id="+o.AttemptID)
+	if o.Fingerprint != "" {
+		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
 	}
 	args = append(args, o.RemoteURL, "HEAD:refs/heads/main")
 	additions, cleanup, err := credentialEnv(o)

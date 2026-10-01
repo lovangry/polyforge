@@ -17,7 +17,8 @@ package git
 //     fencing backup layer, contract §1.6: the proxy derives it from the
 //     session the Basic credential authenticated against, so a superseded
 //     session's fingerprint can never push even with a leaked secret).
-//     Same structure as the v1 attempt-id backup layer, values renamed.
+//     (the same structure the v1 attempt-id backup layer used; the
+//     values are the session model's).
 //
 // The hook is a bash script exec'd by the real git receive-pack; the
 // server process never interprets pack data itself.

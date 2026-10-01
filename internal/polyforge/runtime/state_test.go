@@ -66,7 +66,7 @@ func TestStateMachineIllegalEdges(t *testing.T) {
 	}
 }
 
-func TestStaleAttemptIDDropped(t *testing.T) {
+func TestStaleSpawnNDropped(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, toOB, fromOB := newTestRuntime(t, hub, sp)
@@ -76,9 +76,9 @@ func TestStaleAttemptIDDropped(t *testing.T) {
 	defer old.Terminate(2e9)
 	baseline := sp.callCount() // the install itself is one derivation
 
-	// stale attempt-id: Observe still watching a handle we replaced
+	// stale counter: Observe still watching a derivation we replaced
 	r.handleOB(context.Background(), protocol.OBMsg{
-		Kind: protocol.OBNeedsRecovery, AttemptID: "ra_" + wi + "#9",
+		Kind: protocol.OBNeedsRecovery, SpawnN: 99,
 		WorkItem: wi, Reason: protocol.RecoverDeath,
 	})
 	state, _ := j.snapshot()
@@ -92,10 +92,10 @@ func TestStaleAttemptIDDropped(t *testing.T) {
 
 	// stale completion is equally fenced
 	r.handleOB(context.Background(), protocol.OBMsg{
-		Kind: protocol.OBCompleted, AttemptID: "ra_old_handle", WorkItem: wi, Reason: "wrapped",
+		Kind: protocol.OBCompleted, SpawnN: 42, WorkItem: wi, Reason: "wrapped",
 	})
 	if hub.endCount() != 0 {
-		t.Fatal("stale completion must not end the generation")
+		t.Fatal("stale completion must not end the session")
 	}
 	_ = fromOB
 }
@@ -110,7 +110,7 @@ func TestSealingDropsSameAttemptNeedsRecovery(t *testing.T) {
 	}
 	// a duplicate death signal for the very handle being sealed
 	r.handleOB(context.Background(), protocol.OBMsg{
-		Kind: protocol.OBNeedsRecovery, AttemptID: j.instance, WorkItem: wi, Reason: protocol.RecoverDeath,
+		Kind: protocol.OBNeedsRecovery, SpawnN: j.spawnN, WorkItem: wi, Reason: protocol.RecoverDeath,
 	})
 	if st, _ := j.snapshot(); st != StateSealing {
 		t.Fatalf("SEALING must drop same-attempt WINeedsRecovery, got %s", st)
@@ -130,7 +130,7 @@ func TestRecoveringDropsDuplicateDeathSignal(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.handleOB(context.Background(), protocol.OBMsg{
-		Kind: protocol.OBNeedsRecovery, AttemptID: j.instance, WorkItem: wi, Reason: protocol.RecoverDeath,
+		Kind: protocol.OBNeedsRecovery, SpawnN: j.spawnN, WorkItem: wi, Reason: protocol.RecoverDeath,
 	})
 	if st, _ := j.snapshot(); st != StateRecovering {
 		t.Fatalf("RECOVERING must drop duplicate signals, got %s", st)
@@ -160,7 +160,7 @@ func TestRunLoopDrivesRecovery(t *testing.T) {
 		close(done)
 	}()
 	fromOB <- protocol.OBMsg{
-		Kind: protocol.OBNeedsRecovery, AttemptID: j.instance, WorkItem: wi, Reason: protocol.RecoverDeath,
+		Kind: protocol.OBNeedsRecovery, SpawnN: j.spawnN, WorkItem: wi, Reason: protocol.RecoverDeath,
 	}
 	msg := recvRT(t, toOB)
 	if msg.Kind != protocol.RTRecovered {
@@ -195,7 +195,7 @@ func TestOBCompletedDrivesStop(t *testing.T) {
 	installOldAgent(t, &scriptedSpawner{ /* separate spawner: no derivation here */ }, j)
 
 	r.handleOB(context.Background(), protocol.OBMsg{
-		Kind: protocol.OBCompleted, AttemptID: j.instance, WorkItem: wi, Reason: "wrapped",
+		Kind: protocol.OBCompleted, SpawnN: j.spawnN, WorkItem: wi, Reason: "wrapped",
 	})
 
 	msg := recvRT(t, toOB)
@@ -221,7 +221,7 @@ func TestOBCompletedFailedReason(t *testing.T) {
 	initGitCapsule(t, j)
 
 	r.handleOB(context.Background(), protocol.OBMsg{
-		Kind: protocol.OBCompleted, AttemptID: j.instance, WorkItem: wi, Reason: "failed",
+		Kind: protocol.OBCompleted, SpawnN: j.spawnN, WorkItem: wi, Reason: "failed",
 	})
 	msg := recvRT(t, toOB)
 	if msg.Reason != protocol.FinishFailed {

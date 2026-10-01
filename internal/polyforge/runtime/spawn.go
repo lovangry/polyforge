@@ -134,12 +134,12 @@ func (e *envSanitizer) childEnv(additions ...string) []string {
 
 // SpawnParams describes one agent derivation.
 type SpawnParams struct {
-	WorkItemID     string
-	CapsuleDir     string
+	WorkItemID string
+	CapsuleDir string
 	// SessionHandle is the PUBLIC session fingerprint (B3): injected as
 	// PF_SESSION_HANDLE. The SECRET session id never rides SpawnParams
 	// at all — it must not reach the capsule journal, the env or argv.
-	SessionHandle   string
+	SessionHandle string
 	// SpawnN is this derivation's ordinal (B2): the per-WI monotonic
 	// counter value AFTER this derivation (state.json spawn_n + 1
 	// locally; capsule spawn-journal max + 1 across a fresh clone).
@@ -149,12 +149,6 @@ type SpawnParams struct {
 	Resume         bool   // attach to TranscriptPath instead of a new session
 	InitialPrompt  string
 	CgroupPath     string // per-WI cgroup v2 dir; "" = layer 0 unavailable
-	// InstanceID is THIS derivation's fence token for the v1→v1.5
-	// transition: the session fingerprint ("#N" appended after
-	// re-derivations, mirroring the v1 attempt#N shape). It rides the
-	// spawn journal and RTMsg.AttemptID; the cleanup commit deletes the
-	// protocol field and this collapses to SpawnN.
-	InstanceID string
 	// Model pins this derivation's harness model: the effective candidate
 	// of the bundle's defaults model_candidates chain (F4/P6). "" = no
 	// chain: the harness adapter's default stays in effect. Carried as
@@ -272,8 +266,7 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		// v1.5 B2/B3 identity: the PUBLIC session handle and the monotonic
 		// derivation counter — the agent's flush fence keys. The SECRET
 		// session id is deliberately ABSENT (it must never reach agent
-		// env; it lives only in state.json and the one-shot askpass), and
-		// so are the deleted PF_SESSION_ID / PF_GENERATION / PF_INSTANCE_ID.
+		// env; it lives only in state.json and the one-shot askpass).
 		"PF_SESSION_HANDLE=" + p.SessionHandle,
 		"PF_SPAWN_N=" + strconv.Itoa(p.SpawnN),
 	}
@@ -345,15 +338,15 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 // SECRET, which must never land in the capsule (B3).
 func writeSpawnJournal(p SpawnParams, pid int, startedAt string, instance string) error {
 	entry := map[string]any{
-		"at":            nowStamp(),
-		"work_item":     p.WorkItemID,
-		"instance":      instance,
-		"pid":           pid,
-		"started_at":    startedAt,
+		"at":             nowStamp(),
+		"work_item":      p.WorkItemID,
+		"instance":       instance,
+		"pid":            pid,
+		"started_at":     startedAt,
 		"session_handle": p.SessionHandle,
-		"spawn_n":       p.SpawnN,
-		"resume":        p.Resume,
-		"transcript":    p.TranscriptPath,
+		"spawn_n":        p.SpawnN,
+		"resume":         p.Resume,
+		"transcript":     p.TranscriptPath,
 	}
 	blob, err := json.Marshal(entry)
 	if err != nil {

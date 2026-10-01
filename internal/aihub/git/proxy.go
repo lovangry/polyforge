@@ -2,9 +2,9 @@ package git
 
 // The git-http-backend smart-protocol proxy: aihub mounts /git/{wi}.git/…
 // and execs the real `git http-backend` CGI. Basic auth: username must be
-// the work-item id and the secret must equal the current ACTIVE attempt's
-// push credential — an ended generation's credential is rejected here
-// (takeover fencing main layer; GIT-401).
+// the work-item id and the password must be the WI's LIVE session secret
+// (v1.5 §1.6 fencing-on-use) — a superseded or ended session's secret is
+// rejected here (GIT-401).
 
 import (
 	"bufio"
@@ -72,10 +72,9 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Basic auth against the session (v1.5 §1.6) or, for a session-less WI,
-	// the legacy active attempt's credential. The returned handle is the
-	// push-option backup layer's expected value: the session's PUBLIC
-	// fingerprint (session model) or the attempt id (legacy). It rides the
+	// Basic auth against the session (v1.5 §1.6): the password is the
+	// session secret. The returned handle is the push-option backup
+	// layer's expected value: the session's PUBLIC fingerprint. It rides the
 	// CGI environment as PF_EXPECTED_FINGERPRINT so the pre-receive hook
 	// can compare it with the push's --push-option=session-fingerprint=<fp>
 	// (http-backend passes its env through to receive-pack and thus to the

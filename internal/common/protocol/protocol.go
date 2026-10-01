@@ -2,7 +2,8 @@
 // (design authority: docs/design/polyforge-vnext/v1-architecture-spec.md +
 // v1-spec-full.md §二 §五, rulings C2/C3):
 //
-//  1. Runtime ↔ Observe messages (5 kinds, every message carries attempt-id).
+//  1. Runtime ↔ Observe messages (5 kinds, every message carries the
+//     per-WI derivation counter spawn_n).
 //  2. The agent-side control surface, split across two transports (ruling C2):
 //     - stdio control channel (daemon→agent): answer, stop_notice, probe
 //     - UDS proxy (agent→daemon): flush(reason)  [replaces publish_request]
@@ -17,31 +18,31 @@ import "encoding/json"
 
 // RTMsg is a Runtime→Observe message.
 type RTMsg struct {
-	Kind      RTMsgKind `json:"kind"`
-	AttemptID string    `json:"attempt_id"` // fences stale messages (deleted in cleanup)
-	// v1.5 B2: the per-WI monotonic derivation counter. SpawnN is the
-	// session-model fence key (replaces AttemptID in the cleanup commit).
-	SpawnN    int       `json:"spawn_n"`
-	WorkItem  string    `json:"work_item"`
-	AgentPID  int       `json:"agent_pid,omitempty"`
-	Reason    string    `json:"reason,omitempty"` // WIFinished: wrapped|failed
-	Detail    string    `json:"detail,omitempty"`
+	Kind RTMsgKind `json:"kind"`
+	// v1.5 B2: the per-WI monotonic derivation counter — the
+	// session-model fence key.
+	SpawnN   int    `json:"spawn_n"`
+	WorkItem string `json:"work_item"`
+	AgentPID int    `json:"agent_pid,omitempty"`
+	Reason   string `json:"reason,omitempty"` // WIFinished: wrapped|failed
+	Detail   string `json:"detail,omitempty"`
 	// SessionID (v1.5): the WI session secret, passed runtime→observe
 	// IN-PROCESS so the monitor can run the periodic session-verify (M4).
 	// It never leaves the daemon: not in logs, not in capsule, not in
-	// agent env. Absent on legacy messages during the transition.
-	SessionID string    `json:"session_id,omitempty"`
+	// agent env.
+	SessionID string `json:"session_id,omitempty"`
 }
 
-// OBMsg is an Observe→Runtime message. Observe must attach the attempt-id of
-// the agent handle it was monitoring when the event fired; Runtime drops
-// messages whose attempt-id no longer matches the current attempt.
+// OBMsg is an Observe→Runtime message. Observe must attach the derivation
+// counter (spawn_n) of the agent handle it was monitoring when the event
+// fired; Runtime drops messages whose counter no longer matches the
+// current derivation.
 type OBMsg struct {
-	Kind      OBMsgKind `json:"kind"`
-	AttemptID string    `json:"attempt_id"`
-	WorkItem  string    `json:"work_item"`
-	Reason    string    `json:"reason"` // WINeedsRecovery: death|hang|provider_error|idle|...
-	Detail    string    `json:"detail,omitempty"`
+	Kind     OBMsgKind `json:"kind"`
+	SpawnN   int       `json:"spawn_n"`
+	WorkItem string    `json:"work_item"`
+	Reason   string    `json:"reason"` // WINeedsRecovery: death|hang|provider_error|idle|...
+	Detail   string    `json:"detail,omitempty"`
 }
 
 type RTMsgKind string
@@ -138,13 +139,12 @@ const (
 
 // FlushRequest is the agent→daemon flush(reason) call on the UDS proxy.
 type FlushRequest struct {
-	WorkItem  string `json:"work_item"`
-	AttemptID string `json:"attempt_id"`
+	WorkItem string `json:"work_item"`
 	// v1.5 B2: the per-WI monotonic derivation counter. The flush fence
 	// validates spawn_n against the monitor's current/latest-announced
-	// derivation; attempt_id is deleted in the cleanup commit.
-	SpawnN int `json:"spawn_n"`
-	Reason  string `json:"reason"` // one of the Flush* constants
+	// derivation; an absent counter (0) is refused fail-closed.
+	SpawnN int    `json:"spawn_n"`
+	Reason string `json:"reason"` // one of the Flush* constants
 	// needs_input only:
 	QuestionID string `json:"question_id,omitempty"`
 	Question   string `json:"question,omitempty"`
@@ -183,23 +183,24 @@ const (
 )
 
 // JobView is the observe projection served over UDS (04 §5.1a).
+// Generation is the CAPSULE execution.json's workflow generation (the
+// read-through layer surfaces the capsule's own field verbatim — it is
+// NOT hub lineage). SessionFingerprint is the PUBLIC session handle
+// (B3: never the secret). The v1 attempt_id field is deleted with the
+// lineage it named.
 type JobView struct {
-	WorkItem    string               `json:"work_item"`
-	Project     string               `json:"project"`
-	Status      string               `json:"status"`
-	Generation  int64                `json:"generation"`
-	AttemptID   string               `json:"attempt_id"`
-	// v1.5 B2/B3 faces: the per-WI derivation counter (the flush fence
-	// key a caller must echo) and the PUBLIC session handle (never the
-	// secret). Additive; cleanup deletes Generation/AttemptID.
-	SpawnN            int    `json:"spawn_n"`
-	SessionFingerprint string `json:"session_fingerprint,omitempty"`
-	BundleName  string               `json:"bundle_name"`
-	CurrentStep string               `json:"current_step"`
-	Steps       map[string]*StepView `json:"steps"`
-	Budget      json.RawMessage      `json:"budget,omitempty"`
-	Pending     *PendingView         `json:"pending_question,omitempty"`
-	Events      []EventEntry         `json:"events"`
+	WorkItem           string               `json:"work_item"`
+	Project            string               `json:"project"`
+	Status             string               `json:"status"`
+	Generation         int64                `json:"generation"`
+	SpawnN             int                  `json:"spawn_n"`
+	SessionFingerprint string               `json:"session_fingerprint,omitempty"`
+	BundleName         string               `json:"bundle_name"`
+	CurrentStep        string               `json:"current_step"`
+	Steps              map[string]*StepView `json:"steps"`
+	Budget             json.RawMessage      `json:"budget,omitempty"`
+	Pending            *PendingView         `json:"pending_question,omitempty"`
+	Events             []EventEntry         `json:"events"`
 }
 
 type StepView struct {

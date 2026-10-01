@@ -66,7 +66,7 @@ func TestGoldenObserve(t *testing.T) {
 		Project:     "polyforge",
 		Status:      protocol.JobNeedsInput,
 		Generation:  2,
-		AttemptID:   "ra_9",
+		SpawnN:      3,
 		BundleName:  "bundle-x",
 		CurrentStep: "implement",
 		Steps: map[string]*protocol.StepView{
@@ -227,11 +227,12 @@ func TestGoldenStatus(t *testing.T) {
 		MachineID: "m1",
 		Mode:      protocol.ModeDrain,
 		Jobs: []StatusJob{
-			{WorkItemID: "wi_abc", Status: "running", SessionFingerprint: "ab12cd34ef56aa00", AgentPID: 42,
+			{WorkItemID: "wi_abc", Status: "running", SpawnN: 3, SessionFingerprint: "ab12cd34ef56aa00", AgentPID: 42,
 				LastProgressAgoSec: int64Ptr(754)},
 			// D6: a job presented as needs_input shows its pending
-			// question's id in the QUESTION column. A job whose session
-			// fingerprint is not (yet) wired renders "-" in SESSION.
+			// question's id in the QUESTION column. A job with no session
+			// fingerprint renders "-" in SESSION (and "-" in SPAWN while
+			// no derivation was announced).
 			{WorkItemID: "wi_ask", Status: "needs_input", AgentPID: 43,
 				NeedsInput: true, QuestionID: "q_zz9"},
 		},
@@ -242,10 +243,10 @@ func TestGoldenStatus(t *testing.T) {
 	golden(t, "Status", b.String(),
 		`machine: m1  mode: drain  queue: 1 pending / 2 running / max 2
 
-WORK ITEM  STATUS       SESSION           AGENT PID  QUESTION  LAST-PROGRESS
----------  -----------  ----------------  ---------  --------  -------------
-wi_abc     running      ab12cd34ef56aa00  42         -         12:34
-wi_ask     needs_input  -                 43         q_zz9     -
+WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  LAST-PROGRESS
+---------  -----------  ----------------  -----  ---------  --------  -------------
+wi_abc     running      ab12cd34ef56aa00  #3     42         -         12:34
+wi_ask     needs_input  -                 -      43         q_zz9     -
 `)
 }
 

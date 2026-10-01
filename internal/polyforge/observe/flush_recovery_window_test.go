@@ -52,7 +52,7 @@ func TestFlushRecoveryWindowQueuesMismatchedThenRefusesAtAdoption(t *testing.T) 
 	// queued.
 	queued := FlushCall{
 		Req: protocol.FlushRequest{
-			WorkItem: "wi_test", AttemptID: "att_2", SpawnN: 2,
+			WorkItem: "wi_test", SpawnN: 2,
 			Reason: protocol.FlushNeedsInput, QuestionID: "q_win", Question: "which?", Step: "code",
 		},
 		Resp: make(chan protocol.FlushAck, 1),
@@ -64,7 +64,7 @@ func TestFlushRecoveryWindowQueuesMismatchedThenRefusesAtAdoption(t *testing.T) 
 	// ahead.
 	sentinel := FlushCall{
 		Req: protocol.FlushRequest{
-			WorkItem: "wi_test", AttemptID: "att_1", SpawnN: 1,
+			WorkItem: "wi_test", SpawnN: 1,
 			Reason: protocol.FlushNeedsInput, QuestionID: "q_fence", Question: "fence?", Step: "code",
 		},
 		Resp: make(chan protocol.FlushAck, 1),
@@ -90,7 +90,7 @@ func TestFlushRecoveryWindowQueuesMismatchedThenRefusesAtAdoption(t *testing.T) 
 	// announcement won the race): the parked flush's counter can never
 	// become current, so the release answers the stale refusal.
 	h3 := newFakeHandle("att_3")
-	recoverMonitor(m, h3, "att_3", 3)
+	recoverMonitor(m, h3, 3)
 	var ack protocol.FlushAck
 	select {
 	case ack = <-queued.Resp:
@@ -159,7 +159,7 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 	windowRes := make(chan result, 1)
 	go func() {
 		code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-			WorkItem: "wi_http", AttemptID: "att_next", SpawnN: 2,
+			WorkItem: "wi_http", SpawnN: 2,
 			Reason: protocol.FlushNeedsInput, QuestionID: "q_win", Question: "which?",
 		}, nil)
 		windowRes <- result{code, body}
@@ -177,7 +177,7 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 	// agent before the announcement was emitted; only a zombie speaks
 	// in its name.)
 	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_cur", SpawnN: 1,
+		WorkItem: "wi_http", SpawnN: 1,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_fence", Question: "fence?",
 	}, nil)
 	if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_SPAWN")) {
@@ -189,7 +189,7 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 	// refusal (in the ack, per the flush contract).
 	h2 := newFakeHandle("att_next2")
 	hs.rt <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_http", AttemptID: "att_next2", SpawnN: 3},
+		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_http", SpawnN: 3},
 		Handle: h2,
 		WI: WIInfo{
 			WorkItem: "wi_http", Project: "proj", CapsuleDir: hs.capsuleDir,
@@ -219,7 +219,7 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 	soon(t, 2*time.Second, "adoption never landed", func() bool {
 		_, body := hs.get(t, "/jobs/wi_http/observe")
 		var view protocol.JobView
-		return json.Unmarshal(body, &view) == nil && view.AttemptID == "att_next2"
+		return json.Unmarshal(body, &view) == nil && view.SpawnN == 3
 	})
 
 	// (3) a SECOND flush within the window AFTER adoption: every
@@ -228,7 +228,7 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 	// STALE_SPAWN and never reaches the monitor.
 	for _, stale := range []int{1, 2} {
 		code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-			WorkItem: "wi_http", AttemptID: "att_z", SpawnN: stale,
+			WorkItem: "wi_http", SpawnN: stale,
 			Reason: protocol.FlushNeedsInput, QuestionID: "q_z", Question: "which?",
 		}, nil)
 		if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_SPAWN")) {
@@ -245,7 +245,7 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 		t.Fatalf("the refused window flush must not mint a pending: %+v", view.Pending)
 	}
 	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_next2", SpawnN: 3,
+		WorkItem: "wi_http", SpawnN: 3,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_live", Question: "which?",
 	}, nil)
 	if code != http.StatusOK {

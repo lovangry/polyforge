@@ -28,8 +28,8 @@ func TestJobViewProjectionFromExecutionFile(t *testing.T) {
 	if v.WorkItem != "wi_test" || v.Project != "proj" || v.BundleName != "bundle-a" {
 		t.Fatalf("wi identity: %+v", v)
 	}
-	if v.AttemptID != "att_7" {
-		t.Fatalf("attempt: %s", v.AttemptID)
+	if v.SpawnN != 1 {
+		t.Fatalf("spawn: %d", v.SpawnN)
 	}
 	if v.Status != protocol.JobNeedsInput {
 		t.Fatalf("status: got %s, want %s (open pending question)", v.Status, protocol.JobNeedsInput)

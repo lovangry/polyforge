@@ -138,9 +138,9 @@ func (m *Monitor) onVerifyResult(res verifyResult) {
 		_ = m.log.Append(m.wi.WorkItem, EvSessionVerifyFailed, map[string]any{
 			"error":  res.err.Error(),
 			"detail": "session revalidation could not reach aihub; no action taken (transport error); retrying",
-			// attempt_id is the audit handle; the session SECRET never
+			// spawn_n is the audit handle; the session SECRET never
 			// reaches an event body.
-			"attempt_id": m.currentAttempt(),
+			"spawn_n": m.currentSpawn(),
 		})
 		return
 	}
@@ -156,10 +156,10 @@ func (m *Monitor) onVerifyResult(res verifyResult) {
 		"current_fingerprint": res.currentFingerprint,
 		"detail": "session revalidation learned another daemon holds this work item; " +
 			"local supervision stopped, runtime notified (no hub transition — superseded is not terminal)",
-		"attempt_id": m.currentAttempt(),
+		"spawn_n": m.currentSpawn(),
 	})
 	m.sendOB(protocol.OBMsg{
-		Kind: protocol.OBSuperseded, AttemptID: m.currentAttempt(),
+		Kind: protocol.OBSuperseded, SpawnN: m.currentSpawn(),
 		WorkItem: m.wi.WorkItem,
 		Reason:   "session_superseded",
 		Detail: "periodic session-verify answered matches=false; the current holder fingerprint is " +

@@ -19,7 +19,7 @@ package observe
 //
 // RECOVERING: after WINeedsRecovery is sent the monitor enters the
 // RECOVERING state and suppresses every further recovery signal of the
-// same attempt-id (storm guard) until WIRecovered arrives with a new
+// same derivation (storm guard) until RTRecovered arrives with a new
 // handle. The select keeps running — the old handle's channels must
 // keep being drained or Runtime's stdout reader would block forever —
 // but no detection consequence fires.
@@ -103,8 +103,6 @@ type WIInfo struct {
 // five messages stay the only control vocabulary, and the handle is the
 // attachment Observe needs to observe and control.
 type Handle interface {
-	// AttemptID is the attempt this handle belongs to.
-	AttemptID() string
 	// Exit fires ONCE when the underlying agent process has exited. The
 	// adapter waits on the process first, so the signal is ALREADY the
 	// confirmed death ("确认后" — no second confirmation needed).
@@ -181,7 +179,7 @@ type monitorCfg struct {
 	revalidate time.Duration
 	// verify is the M4 aihub seam (nil = revalidation disabled).
 	verify SessionVerifier
-	push                 PushFunc
+	push   PushFunc
 	// locateLive resolves the live harness transcript on demand (F3);
 	// nil = the transcript sync is disabled.
 	locateLive func(capsuleDir string, spawnAt time.Time) string
@@ -197,8 +195,7 @@ type Monitor struct {
 
 	// handle attachment (monitor-goroutine only; captured into spawned
 	// sub-goroutines at spawn time).
-	handle    Handle
-	attemptID string // guarded by stateMu for the HTTP read face
+	handle Handle
 	// spawnN is the v1.5 B2 derivation counter of the CURRENTLY ADOPTED
 	// derivation (guarded by stateMu for the HTTP fence's read). It is
 	// fed from RTMsg.SpawnN at RTStarted/RTRecovered adoption; the flush
@@ -259,10 +256,10 @@ type Monitor struct {
 	// the identical error text; retryHalted/retryHaltedAt mark the
 	// halted round and the Version it halted at (a later dirtyVersion is
 	// the next commit boundary that re-arms the round).
-	lastPushErr    string
-	sameErrStreak  int
-	retryHalted    bool
-	retryHaltedAt  int64
+	lastPushErr   string
+	sameErrStreak int
+	retryHalted   bool
+	retryHaltedAt int64
 
 	// hang detection.
 	probeInFlight bool
@@ -340,11 +337,11 @@ func (m *Monitor) execJSONPath() string {
 func (m *Monitor) run() {
 	defer func() {
 		_ = m.log.Append(m.wi.WorkItem, EvJobStopped, map[string]any{
-			"attempt_id": m.currentAttempt(),
+			"spawn_n": m.currentSpawn(),
 		})
 	}()
 	_ = m.log.Append(m.wi.WorkItem, EvJobStarted, map[string]any{
-		"attempt_id": m.attemptID,
+		"spawn_n": m.spawnN,
 	})
 	ticker := time.NewTicker(m.cfg.PollInterval)
 	defer ticker.Stop()
@@ -512,10 +509,10 @@ func (m *Monitor) needRecovery(reason, detail string) {
 	m.recovering = true
 	m.stateMu.Unlock()
 	_ = m.log.Append(m.wi.WorkItem, EvNeedsRecovery, map[string]any{
-		"reason": reason, "detail": detail, "attempt_id": m.currentAttempt(),
+		"reason": reason, "detail": detail, "spawn_n": m.currentSpawn(),
 	})
 	m.sendOB(protocol.OBMsg{
-		Kind: protocol.OBNeedsRecovery, AttemptID: m.currentAttempt(),
+		Kind: protocol.OBNeedsRecovery, SpawnN: m.currentSpawn(),
 		WorkItem: m.wi.WorkItem, Reason: reason, Detail: detail,
 	})
 }
@@ -681,7 +678,7 @@ func (m *Monitor) checkNoProgress() {
 		"in_flight":     hb.InFlight,
 		"detail": fmt.Sprintf("no agent progress record for %.0fs (turn in flight: %v); UI noise is not progress",
 			time.Since(eff).Seconds(), hb.InFlight),
-		"attempt_id": m.currentAttempt(),
+		"spawn_n": m.currentSpawn(),
 	})
 }
 
@@ -730,12 +727,12 @@ func randomNonce() (string, error) {
 // ---------------------------------------------------------------------------
 // recovery lifecycle
 
-// onRecovered adopts the new handle Runtime derived (WIRecovered). The
+// onRecovered adopts the new handle Runtime derived (RTRecovered). The
 // monitor leaves RECOVERING, resets the detection surfaces and re-arms
-// them against the new attempt.
+// them against the new derivation.
 func (m *Monitor) onRecovered(at Attach) {
-	if at.Handle == nil || at.Msg.AttemptID == "" {
-		return
+	if at.Handle == nil || at.Msg.SpawnN <= 0 {
+		return // malformed attachment (no announced derivation): never adopted
 	}
 	m.handle = at.Handle
 	m.records = at.Handle.Records()
@@ -763,13 +760,11 @@ func (m *Monitor) onRecovered(at Attach) {
 	}
 	m.stateMu.Lock()
 	m.recovering = false
-	m.attemptID = at.Msg.AttemptID
 	m.spawnN = at.Msg.SpawnN
 	m.sessionID = at.Msg.SessionID
 	m.stateMu.Unlock()
 	_ = m.log.Append(m.wi.WorkItem, EvAgentRecovered, map[string]any{
-		"attempt_id": at.Msg.AttemptID,
-		"spawn_n":   at.Msg.SpawnN,
+		"spawn_n": at.Msg.SpawnN,
 	})
 	// Release the flush that arrived during the adoption window: the
 	// counter it carries is now current, so it takes the ordinary path; a
@@ -838,9 +833,9 @@ func (m *Monitor) pollExecution() {
 			m.stagnantTicks = 0
 			m.stagnantDirty = true
 			_ = m.log.Append(m.wi.WorkItem, EvVersionStagnant, map[string]any{
-				"version":    exec.Version,
-				"detail":     fmt.Sprintf("execution.json rewritten %d times without a Version bump; scheduling a fallback commit", m.stagnantBound()),
-				"attempt_id": m.currentAttempt(),
+				"version": exec.Version,
+				"detail":  fmt.Sprintf("execution.json rewritten %d times without a Version bump; scheduling a fallback commit", m.stagnantBound()),
+				"spawn_n": m.currentSpawn(),
 			})
 		}
 	} else {
@@ -988,8 +983,8 @@ func (m *Monitor) syncTranscript(s transcriptSnapshot) {
 	if src == "" {
 		if m.claimTranscriptWarning() {
 			_ = m.log.Append(m.wi.WorkItem, EvTranscriptMissing, map[string]any{
-				"detail":     "live harness transcript not found at the commit boundary; committing without it",
-				"attempt_id": m.currentAttempt(),
+				"detail":  "live harness transcript not found at the commit boundary; committing without it",
+				"spawn_n": m.currentSpawn(),
 			})
 		}
 		return
@@ -1000,8 +995,8 @@ func (m *Monitor) syncTranscript(s transcriptSnapshot) {
 	if err := copyFileReadonly(src, s.dst); err != nil {
 		if m.claimTranscriptWarning() {
 			_ = m.log.Append(m.wi.WorkItem, EvTranscriptMissing, map[string]any{
-				"detail":     fmt.Sprintf("transcript sync failed: %v", err),
-				"attempt_id": m.currentAttempt(),
+				"detail":  fmt.Sprintf("transcript sync failed: %v", err),
+				"spawn_n": m.currentSpawn(),
 			})
 		}
 	}
@@ -1326,8 +1321,8 @@ func (m *Monitor) spawnRedelivery(relay AnswerRelay, qid, step string) {
 	log := m.log
 	_ = log.Append(wi, EvAnswerRedelivery, map[string]any{
 		"question_id": relay.QuestionID, "answer_id": relay.AnswerID,
-		"attempt_id": m.currentAttempt(),
-		"detail":     "re-delivering the delivered-but-unconsumed answer to the newly attached instance",
+		"spawn_n": m.currentSpawn(),
+		"detail":  "re-delivering the delivered-but-unconsumed answer to the newly attached instance",
 	})
 	go func() {
 		delivered, err := ledger.SubmitFor(wi, relay, relay.AnsweredBy,
@@ -1615,7 +1610,7 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 		}
 		_ = m.log.Append(m.wi.WorkItem, EvWrapEvidenceRefused, map[string]any{
 			"error": ack.Error, "final_status": wr.finalStatus,
-			"attempt_id": m.currentAttempt(),
+			"spawn_n": m.currentSpawn(),
 		})
 		wr.call.Resp <- ack
 		return
@@ -1647,7 +1642,7 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 			reason = protocol.FinishWrapped
 		}
 		m.sendOB(protocol.OBMsg{
-			Kind: protocol.OBCompleted, AttemptID: m.currentAttempt(),
+			Kind: protocol.OBCompleted, SpawnN: m.currentSpawn(),
 			WorkItem: m.wi.WorkItem, Reason: reason,
 		})
 	} else {
@@ -1663,7 +1658,7 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 			"error": wr.err, "local_commit": wr.sha,
 		})
 		m.sendOB(protocol.OBMsg{
-			Kind: protocol.OBCompleted, AttemptID: m.currentAttempt(),
+			Kind: protocol.OBCompleted, SpawnN: m.currentSpawn(),
 			WorkItem: m.wi.WorkItem, Reason: protocol.FinishBlocked,
 			Detail: "wrap flush failed 3 times; transitioned to blocked",
 		})
@@ -1704,15 +1699,9 @@ func (m *Monitor) flushShutdown(call FlushCall) {
 // ---------------------------------------------------------------------------
 // state read face (HTTP view + sub-goroutines)
 
-func (m *Monitor) currentAttempt() string {
-	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
-	return m.attemptID
-}
-
 // currentSpawn answers the derivation counter the monitor has ADOPTED
-// (B2 fence input for the HTTP read face; stateMu-guarded like
-// attemptID — serveFlush reads it cross-goroutine).
+// (B2 fence input for the HTTP read face; stateMu-guarded — serveFlush
+// reads it cross-goroutine).
 func (m *Monitor) currentSpawn() int {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()

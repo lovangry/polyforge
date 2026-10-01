@@ -70,8 +70,7 @@ func TestTapRecordUnknownWorkItemDrops(t *testing.T) {
 // jobInfoFor builds the runtime.JobInfo installAdapter needs.
 func jobInfoFor(wi string, agent *fakeAgent) pfruntime.JobInfo {
 	return pfruntime.JobInfo{
-		WorkItem:   wi,
-		InstanceID: "ra_" + wi, // the derivation fence token
-		Agent:      agent,
+		WorkItem: wi,
+		Agent:    agent,
 	}
 }

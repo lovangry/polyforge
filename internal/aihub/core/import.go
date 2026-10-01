@@ -13,9 +13,9 @@ package core
 //     state behind the state machine's back;
 //   - the caller is the admin face only (server mounts it under
 //     /api/v1/admin/import-work-item), never the business face;
-//   - execution history never enters: no owner_generations row, no
-//     dependencies, no claim idempotency — one audit event records that
-//     the row arrived by import, not by migration of history;
+//   - execution history never enters: no dependencies, no claim
+//     idempotency — one audit event records that the row arrived by
+//     import, not by migration of history;
 //   - the id must match the wi_ domain but its exact shape is the old
 //     world's (old ids migrate verbatim; NewID's length is not imposed).
 

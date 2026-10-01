@@ -2,11 +2,11 @@ package core
 
 // Work items: CRUD, WI state machine, dependencies and events.
 //
-// v1 state machine (statuses in common/api): queued → running (claim),
-// running → paused/blocked (end-generation), paused/blocked → running
-// (claim intent=resume), running → wrapped/failed (end-generation),
-// queued/paused/blocked → canceled (cancel). Terminal states are
-// read-only (CORE-410).
+// v1.5 state machine (statuses in common/api): queued → running (the
+// session CAS claim), running → paused/blocked (session-end), paused →
+// running (session-attach, M3), running/paused → running (force-
+// takeover), running → wrapped/failed (session-end), queued/paused/
+// blocked → canceled (cancel). Terminal states are read-only (CORE-410).
 
 import (
 	"database/sql"
@@ -520,7 +520,7 @@ func validWaitingOn(wo string) bool {
 }
 
 // Cancel terminates a non-active WI (queued/paused/blocked); a running WI
-// must first end its generation.
+// must first end its session.
 func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error) {
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
@@ -542,7 +542,7 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error)
 		return nil, Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is already terminal (%s)", status)
 	}
 	if status == api.StatusRunning {
-		return nil, Fail(api.ErrCoreConflict, "", "running work item: end its generation (pause/block/takeover) before cancelling")
+		return nil, Fail(api.ErrCoreConflict, "", "running work item: end its session (pause/block/takeover) before cancelling")
 	}
 	now := Now()
 	// Guarded: only a cancelable row flips; 0 rows = concurrent transition.

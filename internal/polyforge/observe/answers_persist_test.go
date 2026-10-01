@@ -214,7 +214,7 @@ func TestHubSharesOneLedgerAcrossMonitors(t *testing.T) {
 	}
 	h := newFakeHandle("att_1")
 	rt <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_share", AttemptID: "att_1"},
+		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_share", SpawnN: 1},
 		Handle: h,
 		WI:     WIInfo{WorkItem: "wi_share", Project: "p", CapsuleDir: capsuleDir},
 	}
@@ -292,7 +292,7 @@ func newCapsule(t *testing.T, qid string) string {
 // work item it picks up.
 func attachStart(rt chan Attach, wi, capsuleDir string, h Handle) {
 	rt <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: wi, AttemptID: h.AttemptID()},
+		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: wi, SpawnN: 1},
 		Handle: h,
 		WI:     WIInfo{WorkItem: wi, Project: "proj", CapsuleDir: capsuleDir, BundleName: "b"},
 	}
@@ -613,7 +613,7 @@ func runAnswerScenario(t *testing.T, restart bool) restartObservation {
 		attachStart(rt, "wi_r", capsuleDir, h2)
 	} else {
 		rt <- Attach{
-			Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_r", AttemptID: "att_2"},
+			Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_r", SpawnN: 2},
 			Handle: h2,
 			WI:     WIInfo{WorkItem: "wi_r", Project: "proj", CapsuleDir: capsuleDir, BundleName: "b"},
 		}

@@ -87,9 +87,9 @@ func TestFlushWrapDuringRecoveryWindowAnswersRetryableTransient(t *testing.T) {
 	// end-generation, terminal.
 	close(park)
 	waitState(t, td, "wi_rw", "running")
-	// The monitor's adoption of the new instance lags the RUNNING flip
-	// by the attachment pipeline; the flush must name the ADOPTED id, so
-	// wait for the view to carry it before playing the agent's retry.
+	// The monitor's adoption of the new derivation lags the RUNNING flip
+	// by the attachment pipeline; the flush must name the ADOPTED counter,
+	// so wait for the view to carry it before playing the agent's retry.
 	var rjv protocol.JobView
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -97,26 +97,26 @@ func TestFlushWrapDuringRecoveryWindowAnswersRetryableTransient(t *testing.T) {
 		if rerr != nil {
 			t.Fatalf("observe wi_rw: %v", rerr)
 		}
-		if err := json.Unmarshal(rraw, &rjv); err != nil || rjv.AttemptID == "" {
+		if err := json.Unmarshal(rraw, &rjv); err != nil || rjv.SpawnN == 0 {
 			t.Fatalf("wi_rw view undecodable: %v (%s)", err, rraw)
 		}
-		if rjv.AttemptID != "ra_wi_rw" { // adopted: the #1 lineage id
+		if rjv.SpawnN == 2 { // adopted: the recovered derivation's counter
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("monitor never adopted the recovered instance (view id %q)", rjv.AttemptID)
+			t.Fatalf("monitor never adopted the recovered derivation (view spawn_n %d)", rjv.SpawnN)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if _, err := td.client.Flush("wi_rw", protocol.FlushRequest{
-		WorkItem: "wi_rw", AttemptID: rjv.AttemptID, SpawnN: rjv.SpawnN,
+		WorkItem: "wi_rw", SpawnN: rjv.SpawnN,
 		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
 	}); err != nil {
 		t.Fatalf("post-window flush(wrap): %v", err)
 	}
 	waitGone(t, td, "wi_rw")
 	if td.hub.endCount() != 1 {
-		t.Fatalf("end-generation calls = %d, want 1", td.hub.endCount())
+		t.Fatalf("session-end calls = %d, want 1", td.hub.endCount())
 	}
 	if st := td.hub.lastEnd().Status; st != protocol.FinishWrapped {
 		t.Fatalf("end status = %q, want wrapped", st)

@@ -51,7 +51,6 @@ func feed(h *fakeHandle, rec string) {
 // --- fakeHandle ---
 
 type fakeHandle struct {
-	attempt string
 	records chan []byte
 	exit    chan struct{}
 
@@ -60,15 +59,17 @@ type fakeHandle struct {
 	sendFn func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error)
 }
 
-func newFakeHandle(attempt string) *fakeHandle {
+// newFakeHandle builds one fake agent handle. The label argument is
+// documentation only (which derivation the handle plays in the test) —
+// the v1.5 fence key is the spawn counter carried on the RT messages,
+// not anything the handle owns.
+func newFakeHandle(label string) *fakeHandle {
 	return &fakeHandle{
-		attempt: attempt,
 		records: make(chan []byte, 256),
 		exit:    make(chan struct{}),
 	}
 }
 
-func (h *fakeHandle) AttemptID() string      { return h.attempt }
 func (h *fakeHandle) Exit() <-chan struct{}  { return h.exit }
 func (h *fakeHandle) Records() <-chan []byte { return h.records }
 
@@ -162,7 +163,7 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, ch
 	}
 	m.execPath = m.execJSONPath()
 	m.attach(Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_test", AttemptID: h.AttemptID(), SpawnN: 1},
+		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_test", SpawnN: 1},
 		Handle: h,
 		WI:     m.wi,
 	})

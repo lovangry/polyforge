@@ -21,18 +21,18 @@ import (
 func matrixRecord(r *Runtime, wi string, pid int, startedAt string) *jobRecord {
 	sess := fakeSession(wi)
 	return &jobRecord{
-		WorkItemID:        wi,
-		Project:           "proj",
-		SessionID:         sess,
+		WorkItemID:         wi,
+		Project:            "proj",
+		SessionID:          sess,
 		SessionFingerprint: api.SessionFingerprint(sess),
-		State:             "running",
-		CapsuleDir:        r.capsuleDir(wi),
-		GitDir:            r.gitDirFor(wi),
-		BundleName:        "demo-bundle",
-		AgentPID:          pid,
-		AgentStart:        startedAt,
-		Transcript:        sessionPathFor(r.capsuleDir(wi), api.SessionFingerprint(sess)),
-		SpawnN:            1,
+		State:              "running",
+		CapsuleDir:         r.capsuleDir(wi),
+		GitDir:             r.gitDirFor(wi),
+		BundleName:         "demo-bundle",
+		AgentPID:           pid,
+		AgentStart:         startedAt,
+		Transcript:         sessionPathFor(r.capsuleDir(wi), api.SessionFingerprint(sess)),
+		SpawnN:             1,
 	}
 }
 

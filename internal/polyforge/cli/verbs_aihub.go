@@ -366,7 +366,7 @@ var cmdQueue = &Command{
 
 var cmdCancel = &Command{
 	Name:    "cancel",
-	Summary: "Cancel a queued/paused/blocked work item (no active generation)",
+	Summary: "Cancel a queued/paused/blocked work item (no live session)",
 	Usage:   "pf cancel <id>",
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {

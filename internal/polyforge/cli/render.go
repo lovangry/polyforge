@@ -456,9 +456,9 @@ func renderReadThrough(w io.Writer, p *api.ProgressResponse) {
 // renderStatus renders the daemon status() bookkeeping list. The
 // QUESTION column is the D6 owner face: any job the daemon reports with a
 // pending question shows its question id ("-" otherwise), so an agent
-// blocked on a human is impossible to miss at a glance. The SESSION
-// column is the v1.5 public fingerprint of the job's session (the
-// daemon populates it at merge; "-" until then or when unheld). The
+// blocked on a human is impossible to miss at a glance. The SPAWN column
+// is the v1.5 B2 derivation counter and SESSION the public fingerprint of
+// the job's session ("-" when unheld). The
 // LAST-PROGRESS column is the F15c owner face: mm:ss since the job's
 // stream last proved agent progress ("-" when no progress record
 // exists). UI-noise records never refresh it, so a wedged-but-chattering
@@ -485,13 +485,17 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 		if j.SessionFingerprint != "" {
 			sess = j.SessionFingerprint
 		}
+		spawn := "-"
+		if j.SpawnN > 0 {
+			spawn = "#" + strconv.Itoa(j.SpawnN)
+		}
 		progress := "-"
 		if j.LastProgressAgoSec != nil {
 			progress = mmssAgo(*j.LastProgressAgoSec)
 		}
-		rows = append(rows, []string{j.WorkItemID, j.Status, sess, pid, question, progress})
+		rows = append(rows, []string{j.WorkItemID, j.Status, sess, spawn, pid, question, progress})
 	}
-	printTable(w, []string{"WORK ITEM", "STATUS", "SESSION", "AGENT PID", "QUESTION", "LAST-PROGRESS"}, rows)
+	printTable(w, []string{"WORK ITEM", "STATUS", "SESSION", "SPAWN", "AGENT PID", "QUESTION", "LAST-PROGRESS"}, rows)
 }
 
 // mmssAgo renders whole seconds as the mm:ss staleness figure the

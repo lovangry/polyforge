@@ -1,13 +1,15 @@
 package core
 
-// Core tests: CRUD, claim idempotency, takeover revocation, terminal
-// transitions, ready-queue ordering, dependencies and admin faces.
-// Every assertion is red when the behavior it names is broken.
+// Core tests: CRUD, terminal transitions, ready-queue ordering,
+// dependencies and admin faces. The claim/ownership red lines live in
+// session_test.go (the v1.5 session model replaced the generation-era
+// machinery these tests once exercised); this file keeps the WI-manager
+// behaviors that are model-agnostic. Every assertion is red when the
+// behavior it names is broken.
 
 import (
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -173,175 +175,19 @@ func TestWorkItemCRUD(t *testing.T) {
 	}
 }
 
-func TestClaimIdempotency(t *testing.T) {
-	env := newEnv(t)
-	id := mustCreateExecWI(t, env, "goal one", nil, "")
-
-	res1, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentClaim, IdempotencyKey: "key-1"}, env.UserID)
-	if err != nil {
-		t.Fatalf("claim: %v", err)
-	}
-	if res1.Claim.Generation != 1 {
-		t.Fatalf("generation = %d, want 1", res1.Claim.Generation)
-	}
-	if res1.Claim.AttemptID == "" || res1.Credential.Secret == "" {
-		t.Fatalf("attempt/credential not minted")
-	}
-	// #5: the claim response carries the WI's pinned bundle — the runtime
-	// materializes the workflow from resp.Claim, not resp.WorkItem.
-	if res1.Claim.BundleName != "demo-bundle" || res1.Claim.BundleDigest != "digest-of-demo-bundle" {
-		t.Fatalf("claim bundle fields wrong: %+v", res1.Claim)
-	}
-	// A project without task repos answers an empty inventory (never
-	// nil on the wire semantics the runtime relies on).
-	if len(res1.Claim.Repos) != 0 {
-		t.Fatalf("claim repos should be empty: %+v", res1.Claim.Repos)
-	}
-	if res1.Credential.Username != id {
-		t.Fatalf("credential username = %q, want %q", res1.Credential.Username, id)
-	}
-	// Same key + caller + WI: the same attempt, no new generation.
-	res2, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentClaim, IdempotencyKey: "key-1"}, env.UserID)
-	if err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-	if res2.Claim.AttemptID != res1.Claim.AttemptID || res2.Credential.Secret != res1.Credential.Secret {
-		t.Fatalf("idempotent replay returned a different attempt")
-	}
-	// Same key, different caller: rejected.
-	if _, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentClaim, IdempotencyKey: "key-1"}, env.UserIDB); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "IDEMPOTENCY_KEY_REUSED" {
-		t.Fatalf("key reuse not rejected: %v", err)
-	}
-	// Second claim without a key: already claimed.
-	if _, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentClaim}, env.UserIDB); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "ALREADY_CLAIMED" {
-		t.Fatalf("double claim not rejected: %v", err)
-	}
-	// Credential checks.
-	if attempt, err := env.Owners.CheckPushCredential(id, id, res1.Credential.Secret); err != nil || attempt != res1.Claim.AttemptID {
-		t.Fatalf("valid credential rejected: %v", err)
-	}
-	if _, err := env.Owners.CheckPushCredential(id, id, "wrong-secret"); !IsCode(err, api.ErrGitUnauthorized) {
-		t.Fatalf("wrong secret accepted: %v", err)
-	}
-	if _, err := env.Owners.CheckPushCredential(id, "otheruser", res1.Credential.Secret); !IsCode(err, api.ErrGitUnauthorized) {
-		t.Fatalf("wrong username accepted: %v", err)
-	}
-}
-
-// TestRegistrationTicketNotClaimable pins #17: bundle_name IS NULL is a
-// pure registration ticket — claim and resume both answer CORE-409
-// NOT_CLAIMABLE, and it never appears in the queue's executable segments.
-func TestRegistrationTicketNotClaimable(t *testing.T) {
-	env := newEnv(t)
-	id := mustCreateWI(t, env, "registry only", nil, "")
-	if _, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentClaim}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_CLAIMABLE" {
-		t.Fatalf("claim of registration ticket allowed: %v", err)
-	}
-	// resume path: a paused/blocked registration ticket (only reachable
-	// through legacy data) is equally refused.
-	if _, err := env.DB.Exec(`UPDATE work_items SET status='paused' WHERE id=?1`, id); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentResume}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_CLAIMABLE" {
-		t.Fatalf("resume of registration ticket allowed: %v", err)
-	}
-	// The dependency-blocked diagnosis still wins for an edge case that
-	// has both problems (order: blockers, then bundle).
-	blocker := mustCreateExecWI(t, env, "blocker exec", nil, "")
-	blockedReg := mustCreateWI(t, env, "blocked registry", nil, "")
-	if err := env.WIs.AddDependency(blocker, blockedReg, "blocks"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := env.Owners.Claim(blockedReg, ClaimRequest{Intent: IntentClaim}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "DEPENDENCY_BLOCKED" {
-		t.Fatalf("dependency diagnosis lost: %v", err)
-	}
-	// The queue's executable segments never list registration tickets.
-	exec := mustCreateExecWI(t, env, "queue exec", map[string]any{"requires_human_session": false}, "")
-	mustCreateWI(t, env, "queue registry", map[string]any{"requires_human_session": false}, "")
-	q, err := env.WIs.ReadyQueue("alpha")
-	if err != nil {
-		t.Fatalf("queue: %v", err)
-	}
-	if len(q.Items) != 1 || q.Items[0].ID != exec {
-		t.Fatalf("executable segment = %+v, want only %s", q.Items, exec)
-	}
-}
-
-// TestClaimIdempotencyReplayTTL pins #22: the cached response carries the
-// attempt's plaintext credential; past the TTL a replay is refused and the
-// caller must re-claim with a fresh key.
-func TestClaimIdempotencyReplayTTL(t *testing.T) {
-	env := newEnv(t)
-	id := mustCreateExecWI(t, env, "ttl goal", nil, "")
-	res1, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentClaim, IdempotencyKey: "ttl-1"}, env.UserID)
-	if err != nil {
-		t.Fatalf("claim: %v", err)
-	}
-	old := idempotencyTTL
-	idempotencyTTL = time.Nanosecond
-	defer func() { idempotencyTTL = old }()
-	// Age the cache row past the window and replay: refused.
-	if _, err := env.DB.Exec(`UPDATE claim_idempotency SET created_at=?1 WHERE idempotency_key='ttl-1'`,
-		time.Now().UTC().Add(-2*idempotencyTTL).Format(time.RFC3339Nano)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentClaim, IdempotencyKey: "ttl-1"}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "IDEMPOTENCY_KEY_EXPIRED" {
-		t.Fatalf("expired replay not refused: %v", err)
-	}
-	// A FRESH key claims a new attempt (generation 2).
-	idempotencyTTL = 24 * time.Hour
-	res2, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentTakeover, IdempotencyKey: "ttl-2"}, env.UserID)
-	if err != nil {
-		t.Fatalf("re-claim: %v", err)
-	}
-	if res2.Claim.Generation != 2 || res2.Claim.AttemptID == res1.Claim.AttemptID {
-		t.Fatalf("re-claim did not mint a new attempt: %+v", res2.Claim)
-	}
-}
-
-func TestTakeoverRevokesOldCredential(t *testing.T) {
-	env := newEnv(t)
-	id := mustCreateExecWI(t, env, "goal two", nil, "")
-	res1, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentClaim, MachineID: "mac-1"}, env.UserID)
-	if err != nil {
-		t.Fatalf("claim: %v", err)
-	}
-	res2, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentTakeover, MachineID: "mac-2"}, env.UserIDB)
-	if err != nil {
-		t.Fatalf("takeover: %v", err)
-	}
-	if res2.Claim.Generation != 2 {
-		t.Fatalf("takeover generation = %d, want 2", res2.Claim.Generation)
-	}
-	if res2.Claim.AttemptID == res1.Claim.AttemptID {
-		t.Fatalf("takeover reused the attempt id")
-	}
-	// THE fencing main layer: the old credential dies at the git face.
-	if _, err := env.Owners.CheckPushCredential(id, id, res1.Credential.Secret); !IsCode(err, api.ErrGitUnauthorized) {
-		t.Fatalf("OLD credential still valid after takeover: %v", err)
-	}
-	if _, err := env.Owners.CheckPushCredential(id, id, res2.Credential.Secret); err != nil {
-		t.Fatalf("new credential rejected: %v", err)
-	}
-	// Takeover of a non-running WI is refused.
-	id2 := mustCreateWI(t, env, "goal three", nil, "")
-	if _, err := env.Owners.Claim(id2, ClaimRequest{Intent: IntentTakeover}, env.UserIDB); !IsCode(err, api.ErrCoreConflict) {
-		t.Fatalf("takeover of queued WI allowed: %v", err)
-	}
-	// The superseded attempt cannot close the WI.
-	if err := env.Owners.EndGeneration(id, res1.Claim.AttemptID, 1, "wrapped", "", false); !IsCode(err, api.ErrCoreForbidden) {
-		t.Fatalf("superseded attempt could close the WI: %v", err)
-	}
-}
-
+// TestTerminalTransitions walks the non-claim state machine over the
+// session model: session-end wrap terminalizes (and the session row is
+// cleared), a terminal WI is read-only, the pause → attach → blocked →
+// cancel cycle holds, and a running WI cannot be cancelled directly.
 func TestTerminalTransitions(t *testing.T) {
 	env := newEnv(t)
+	m := NewSessionManager(env.DB)
 	id := mustCreateExecWI(t, env, "goal four", nil, "")
-	res, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentClaim}, env.UserID)
-	if err != nil {
+	secret := "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: secret}, env.UserID); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := env.Owners.EndGeneration(id, res.Claim.AttemptID, 1, "wrapped", "done", false); err != nil {
+	if err := m.End(id, api.SessionEndRequest{SessionID: secret, Status: api.StatusWrapped, Note: "done"}, env.UserID); err != nil {
 		t.Fatalf("wrap: %v", err)
 	}
 	wi, err := env.WIs.Get(id, GetOptions{})
@@ -351,38 +197,35 @@ func TestTerminalTransitions(t *testing.T) {
 	if wi.Status != api.StatusWrapped || wi.ClosedAt == nil {
 		t.Fatalf("wrap did not terminalize: %+v", wi)
 	}
-	if attempt, _ := env.Owners.ActiveAttempt(id); attempt != "" {
-		t.Fatalf("active attempt survived wrap")
+	status, hash, _, _, _, _, _ := rowSession(t, env, id)
+	if status != api.StatusWrapped || hash != nil {
+		t.Fatalf("wrap did not clear the session row: status=%s hash=%v", status, hash)
 	}
 	// Terminal is read-only.
 	if _, err := env.WIs.Patch(id, map[string]json.RawMessage{"goal": json.RawMessage(`"x"`)}); !IsCode(err, api.ErrCoreGone) {
 		t.Fatalf("terminal patch allowed: %v", err)
 	}
-	if _, err := env.Owners.Claim(id, ClaimRequest{Intent: IntentResume}, env.UserID); !IsCode(err, api.ErrCoreGone) {
+	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"}, env.UserID); !IsCode(err, api.ErrCoreGone) {
 		t.Fatalf("claim on terminal allowed: %v", err)
 	}
 
-	// pause → resume → block → cancel cycle on a second WI.
+	// pause → attach → block → cancel cycle on a second WI.
 	id2 := mustCreateExecWI(t, env, "goal five", nil, "")
-	res2, err := env.Owners.Claim(id2, ClaimRequest{Intent: IntentClaim}, env.UserID)
-	if err != nil {
+	secret2 := "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+	if _, err := m.Claim(id2, api.SessionClaimRequest{SessionID: secret2}, env.UserID); err != nil {
 		t.Fatalf("claim2: %v", err)
 	}
-	if err := env.Owners.EndGeneration(id2, res2.Claim.AttemptID, 1, "paused", "", false); err != nil {
+	if err := m.End(id2, api.SessionEndRequest{SessionID: secret2, Status: api.StatusPaused}, env.UserID); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	wi2, _ := env.WIs.Get(id2, GetOptions{})
 	if wi2.Status != api.StatusPaused {
 		t.Fatalf("pause status = %q", wi2.Status)
 	}
-	res3, err := env.Owners.Claim(id2, ClaimRequest{Intent: IntentResume}, env.UserID)
-	if err != nil {
-		t.Fatalf("resume: %v", err)
+	if _, err := m.Attach(id2, api.SessionAttachRequest{SessionID: secret2}, env.UserID); err != nil {
+		t.Fatalf("attach: %v", err)
 	}
-	if res3.Claim.Generation != 2 {
-		t.Fatalf("resume generation = %d", res3.Claim.Generation)
-	}
-	if err := env.Owners.EndGeneration(id2, res3.Claim.AttemptID, 2, api.StatusBlocked, "gate failed", false); err != nil {
+	if err := m.End(id2, api.SessionEndRequest{SessionID: secret2, Status: api.StatusBlocked, Note: "gate failed"}, env.UserID); err != nil {
 		t.Fatalf("block: %v", err)
 	}
 	wi2, _ = env.WIs.Get(id2, GetOptions{})
@@ -395,7 +238,8 @@ func TestTerminalTransitions(t *testing.T) {
 	}
 	// Running WI cannot be cancelled directly.
 	id3 := mustCreateExecWI(t, env, "goal six", nil, "")
-	if _, err := env.Owners.Claim(id3, ClaimRequest{Intent: IntentClaim}, env.UserID); err != nil {
+	secret3 := "10101010101010101010101010101010"
+	if _, err := m.Claim(id3, api.SessionClaimRequest{SessionID: secret3}, env.UserID); err != nil {
 		t.Fatalf("claim3: %v", err)
 	}
 	if _, err := env.WIs.Cancel(id3, env.UserID); !IsCode(err, api.ErrCoreConflict) {
@@ -403,8 +247,33 @@ func TestTerminalTransitions(t *testing.T) {
 	}
 }
 
+// TestRegistrationTicketNeverQueued pins #17's queue half: a
+// registration ticket (bundle_name IS NULL) never appears in the
+// queue's executable segments. (The claim-gate half — NOT_CLAIMABLE —
+// is pinned in session_test.go's TestSessionClaimGates.)
+func TestRegistrationTicketNeverQueued(t *testing.T) {
+	env := newEnv(t)
+	exec := mustCreateExecWI(t, env, "queue exec", map[string]any{"requires_human_session": false}, "")
+	reg := mustCreateWI(t, env, "queue registry", map[string]any{"requires_human_session": false}, "")
+	q, err := env.WIs.ReadyQueue("alpha")
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if len(q.Items) != 1 || q.Items[0].ID != exec {
+		t.Fatalf("executable segment = %+v, want only %s", q.Items, exec)
+	}
+	for _, seg := range [][]WIView{q.Items, q.NeedsHumanSession, q.Unknown} {
+		for _, wi := range seg {
+			if wi.ID == reg {
+				t.Fatalf("registration ticket appeared in an executable segment")
+			}
+		}
+	}
+}
+
 func TestReadyQueueOrdering(t *testing.T) {
 	env := newEnv(t)
+	m := NewSessionManager(env.DB)
 	// Created in an order that does NOT match priority order; each gets a
 	// requires_human_session classification. These are EXECUTION tickets:
 	// registration tickets never appear in the executable segments.
@@ -415,13 +284,15 @@ func TestReadyQueueOrdering(t *testing.T) {
 	mustCreateExecWI(t, env, "unclassified", nil, "")
 	// A running and a paused WI for the visibility segments.
 	rid := mustCreateExecWI(t, env, "running one", map[string]any{"requires_human_session": false}, "")
-	if _, err := env.Owners.Claim(rid, ClaimRequest{Intent: IntentClaim}, env.UserID); err != nil {
+	if _, err := m.Claim(rid, api.SessionClaimRequest{SessionID: "20202020202020202020202020202020"}, env.UserID); err != nil {
 		t.Fatalf("claim running: %v", err)
 	}
 	pid := mustCreateExecWI(t, env, "paused one", map[string]any{"requires_human_session": false}, "")
-	if res, err := env.Owners.Claim(pid, ClaimRequest{Intent: IntentClaim}, env.UserID); err != nil {
+	psecret := "21212121212121212121212121212121"
+	if _, err := m.Claim(pid, api.SessionClaimRequest{SessionID: psecret}, env.UserID); err != nil {
 		t.Fatalf("claim paused: %v", err)
-	} else if err := env.Owners.EndGeneration(pid, res.Claim.AttemptID, 1, "paused", "", false); err != nil {
+	}
+	if err := m.End(pid, api.SessionEndRequest{SessionID: psecret, Status: api.StatusPaused}, env.UserID); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	// A waiting_on-tagged queued WI is not executable.
@@ -470,8 +341,8 @@ func TestReadyQueueOrdering(t *testing.T) {
 
 func TestDependencyBlocksClaimAndQueue(t *testing.T) {
 	env := newEnv(t)
-	blocker := mustCreateWI(t, env, "blocker", nil, "")
-	blocked := mustCreateWI(t, env, "blocked", nil, "")
+	blocker := mustCreateExecWI(t, env, "blocker", nil, "")
+	blocked := mustCreateExecWI(t, env, "blocked", nil, "")
 	if err := env.WIs.AddDependency(blocker, blocked, "blocks"); err != nil {
 		t.Fatalf("add dep: %v", err)
 	}
@@ -484,14 +355,11 @@ func TestDependencyBlocksClaimAndQueue(t *testing.T) {
 			t.Fatalf("dependency-blocked WI appeared in items")
 		}
 	}
-	if _, err := env.Owners.Claim(blocked, ClaimRequest{Intent: IntentClaim}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "DEPENDENCY_BLOCKED" {
-		t.Fatalf("claim of dependency-blocked WI allowed: %v", err)
-	}
 	// Cycle detection.
 	if err := env.WIs.AddDependency(blocked, blocker, "blocks"); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "DEPENDENCY_CYCLE" {
 		t.Fatalf("cycle not detected: %v", err)
 	}
-	third := mustCreateWI(t, env, "third", nil, "")
+	third := mustCreateExecWI(t, env, "third", nil, "")
 	if err := env.WIs.AddDependency(third, blocker, "blocks"); err != nil {
 		t.Fatalf("legit edge rejected: %v", err)
 	}
@@ -535,10 +403,11 @@ func TestAdminFaces(t *testing.T) {
 	}
 }
 
-// TestClaimCarriesProjectRepos pins the v0 claim semantics restored for
-// v1: the claim response carries the project's task-repo inventory,
-// served from the projects row the generation is minted on.
-func TestClaimCarriesProjectRepos(t *testing.T) {
+// TestSessionClaimCarriesProjectRepos pins the v0 claim semantics
+// restored for v1.5: the session claim response carries the project's
+// task-repo inventory, served from the projects row the claim
+// transaction reads.
+func TestSessionClaimCarriesProjectRepos(t *testing.T) {
 	env := newEnv(t)
 	if _, err := env.Admin.CreateProject(CreateProjectRequest{
 		Name: "bravo",
@@ -558,13 +427,14 @@ func TestClaimCarriesProjectRepos(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create wi: %v", err)
 	}
-	res, err := env.Owners.Claim(wi.ID, ClaimRequest{Intent: IntentClaim}, env.UserID)
+	m := NewSessionManager(env.DB)
+	res, err := m.Claim(wi.ID, api.SessionClaimRequest{SessionID: "30303030303030303030303030303030"}, env.UserID)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if len(res.Claim.Repos) != 2 ||
-		res.Claim.Repos[0].Name != "app" || res.Claim.Repos[0].URL != "file:///srv/app.git" ||
-		res.Claim.Repos[1].Name != "lib" || res.Claim.Repos[1].URL != "file:///srv/lib.git" {
-		t.Fatalf("claim repos wrong: %+v", res.Claim.Repos)
+	if len(res.Repos) != 2 ||
+		res.Repos[0].Name != "app" || res.Repos[0].URL != "file:///srv/app.git" ||
+		res.Repos[1].Name != "lib" || res.Repos[1].URL != "file:///srv/lib.git" {
+		t.Fatalf("claim repos wrong: %+v", res.Repos)
 	}
 }
