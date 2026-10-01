@@ -3,7 +3,7 @@ package gitops
 // gitops_test.go: REAL-git regressions for the capsule chain choke point —
 // init→commit→push against a local bare repo, seq trailer monotonicity
 // (validated by a pre-receive hook shaped like aihub's), the clean-tree
-// path, the attempt-id push option, credential delivery over http via the
+// path, the session-fingerprint push option, credential delivery over http via the
 // one-shot askpass helper (never argv), and stale-lock aging.
 
 import (
@@ -188,7 +188,6 @@ func testOpts(t *testing.T, wi string) (Opts, string) {
 	base := t.TempDir()
 	o := Opts{
 		WorkItemID: wi,
-		AttemptID:  "ra_" + wi,
 		CapsuleDir: filepath.Join(base, "capsules", wi),
 		GitDir:     filepath.Join(base, "git", wi+".git"),
 		RemoteURL:  filepath.Join(base, "hub", wi+".git"),
@@ -393,14 +392,12 @@ func TestCommitPushFirstCommitIsSeqOneOnUnbornBranch(t *testing.T) {
 
 // TestPushOptionSessionFingerprintReachedServer (v1.5 §1.6): when the
 // opts carry the PUBLIC session fingerprint, the push option becomes
-// session-fingerprint=<fp> — the fencing-on-use backup layer — and the
-// legacy attempt-id option is NOT sent alongside it.
+// session-fingerprint=<fp> — the fencing-on-use backup layer.
 func TestPushOptionSessionFingerprintReachedServer(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_fp")
 	bare := mkBare(t, barePath, true)
 	mkCapsule(t, o)
-	o.AttemptID = "ra_wi_fp" // legacy value must NOT ride once a fingerprint is set
 	o.Fingerprint = "ab12cd34ef56aa00"
 
 	writeDirty(t, o, "a.txt", "a\n")
@@ -416,7 +413,10 @@ func TestPushOptionSessionFingerprintReachedServer(t *testing.T) {
 	}
 }
 
-func TestPushOptionAttemptIDReachedServer(t *testing.T) {
+// TestPushOptionAbsentFingerprintSendsNoOption: with no fingerprint
+// set (a pre-session push of a non-WI repo, or a local push the hook
+// must not fence), the push carries NO push option at all.
+func TestPushOptionAbsentFingerprintSendsNoOption(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_popt")
 	bare := mkBare(t, barePath, true)
@@ -430,8 +430,8 @@ func TestPushOptionAttemptIDReachedServer(t *testing.T) {
 	if len(seen) != 1 {
 		t.Fatalf("hook invocations: %d, want 1", len(seen))
 	}
-	if seen[0] != "1|attempt-id=ra_wi_popt" {
-		t.Fatalf("push options seen: %q, want count=1 option attempt-id=ra_wi_popt", seen[0])
+	if seen[0] != "0|" {
+		t.Fatalf("push options seen: %q, want none", seen[0])
 	}
 }
 
@@ -591,13 +591,13 @@ func TestPushArgsNeverCarrySecret(t *testing.T) {
 			if strings.Contains(a, o.Secret) {
 				t.Fatalf("secret found in git argv %q", args)
 			}
-			if strings.Contains(a, "attempt-id=ra_wi_argv") {
+			if strings.Contains(a, "HEAD:refs/heads/main") {
 				sawPush = true
 			}
 		}
 	}
 	if !sawPush {
-		t.Fatal("the push must carry --push-option=attempt-id=…")
+		t.Fatal("the push must carry the refspec")
 	}
 }
 
@@ -623,7 +623,6 @@ func TestPushAndCloneOverHTTPWithCredential(t *testing.T) {
 	base := t.TempDir()
 	o := Opts{
 		WorkItemID: "wi_http",
-		AttemptID:  "ra_wi_http",
 		CapsuleDir: filepath.Join(base, "capsules", "wi_http"),
 		GitDir:     filepath.Join(base, "git", "wi_http.git"),
 		RemoteURL:  url + "/wi_http.git",

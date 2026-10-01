@@ -1,7 +1,7 @@
 // Package aihubclient is the shared HTTP client for the aihub server, used
-// by runtime (claim/end-generation), observe (read-through) and the CLI
-// verbs. Wire types come from internal/common/api; error decoding maps the
-// typed errStatus envelope back into *api.Error.
+// by runtime (session claim/attach/takeover/end), observe (read-through)
+// and the CLI verbs. Wire types come from internal/common/api; error
+// decoding maps the typed errStatus envelope back into *api.Error.
 package aihubclient
 
 import (
@@ -87,43 +87,6 @@ func (c *Client) raw(method, path string, body any) (json.RawMessage, error) {
 		return nil, err
 	}
 	return raw, nil
-}
-
-// ClaimRequest asks aihub to open a generation on a work item.
-type ClaimRequest struct {
-	WorkItemID     string `json:"work_item_id"`
-	Intent         string `json:"intent"` // claim|resume|takeover
-	MachineID      string `json:"machine_id"`
-	Owner          string `json:"owner"`
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
-}
-
-// ClaimResponse carries the attempt identity and the attempt-scoped git push
-// credential (generation fencing, main layer).
-type ClaimResponse struct {
-	Claim      api.Claim          `json:"claim"`
-	Credential api.PushCredential `json:"credential"`
-	WorkItem   api.WorkItem       `json:"work_item"`
-}
-
-func (c *Client) Claim(req ClaimRequest) (*ClaimResponse, error) {
-	var out ClaimResponse
-	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(req.WorkItemID)+"/claim", req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-// EndGeneration closes the current generation with a terminal verdict.
-type EndGenerationRequest struct {
-	AttemptID  string `json:"attempt_id"`
-	Generation int64  `json:"generation"`
-	Status     string `json:"status"` // wrapped|failed|blocked
-	Note       string `json:"note,omitempty"`
-}
-
-func (c *Client) EndGeneration(wi string, req EndGenerationRequest) error {
-	return c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/end-generation", req, nil)
 }
 
 func (c *Client) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
@@ -451,8 +414,7 @@ func (c *Client) RebuildMemoryIndex() (int, error) {
 }
 
 // ---------------------------------------------------------------------------
-// v1.5 session model client (v1.5-api-contract.md §3). Additive: the
-// generation-era Claim/EndGeneration above remain until the cleanup commit.
+// v1.5 session model client (v1.5-api-contract.md §3).
 
 // SessionClaim performs the CAS claim: set the session only if the WI is
 // queued and unheld (M1 joint gate). Idempotent on idempotency_key.
@@ -492,7 +454,8 @@ func (c *Client) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse
 	return &out, nil
 }
 
-// SessionEnd replaces EndGeneration: session-fenced terminal verdict.
+// SessionEnd is the session-fenced terminal verdict (and the paused
+// transition — the merge amend).
 func (c *Client) SessionEnd(wi string, req api.SessionEndRequest) error {
 	return c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/session-end", req, nil)
 }

@@ -1,8 +1,8 @@
 // Package api defines the shared business contract between the aihub server
-// and the pf client: work items, projects, users, generations, memories and
-// the typed error-code registry (v1 architecture: docs/design/polyforge-vnext/
-// v1-architecture-spec.md + v1-spec-full.md §一, plus the 00–07 baseline docs
-// for business semantics).
+// and the pf client: work items, projects, users, sessions, memories and
+// the typed error-code registry (v1.5 session model:
+// docs/design/polyforge-vnext/v1.5-api-contract.md, over the v1
+// architecture baseline).
 //
 // v1 deltas vs v0 (frozen under /v0):
 //   - SYNC-* and revision-chain endpoints are deleted (git IS the chain).
@@ -103,37 +103,6 @@ type APIToken struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// Claim records a machine taking ownership of a work item (02 §6).
-type Claim struct {
-	WorkItemID   string `json:"work_item_id"`
-	AttemptID    string `json:"attempt_id"`
-	MachineID    string `json:"machine_id"`
-	Owner        string `json:"owner"`
-	Generation   int64  `json:"generation"`
-	BundleName   string `json:"bundle_name"`
-	BundleDigest string `json:"bundle_digest"`
-	ClaimedAt    string `json:"claimed_at"`
-	Token        string `json:"token"`         // attempt-scoped push credential
-	TokenExpires string `json:"token_expires"` // RFC3339
-
-	// Repos is the project's task-repo inventory (v0 claim semantics):
-	// the runtime clones each entry into the capsule's repos/<name>
-	// before the agent starts and records the claim-time HEAD SHA of
-	// each clone in capsule.json's Repos map. Empty for projects without
-	// task repos.
-	Repos []ProjectRepo `json:"repos,omitempty"`
-}
-
-// PushCredential is the attempt-scoped git credential minted at claim time
-// (v1 spec §六 Generation fencing, main layer). Takeover revokes it, which
-// makes an old daemon's pushes fail at auth.
-type PushCredential struct {
-	AttemptID string `json:"attempt_id"`
-	Username  string `json:"username"` // = work item id
-	Secret    string `json:"secret"`
-	ExpiresAt string `json:"expires_at"`
-}
-
 // ProgressResponse is the §5.2 read-through answer (02-aihub-core.md):
 // HEAD metadata plus the verbatim runtime-state/execution.json content
 // of the WI's last published revision. Progress passes through
@@ -179,7 +148,6 @@ type ListResponse[T any] struct {
 
 // ---------------------------------------------------------------------------
 // v1.5 session model wire types (docs/design/polyforge-vnext/v1.5-api-contract.md).
-// Additive: the generation/attempt types above remain until the cleanup commit.
 
 // SessionClaim is the v1.5 claim/attach/takeover response envelope. The
 // session_id is a SECRET minted by the daemon; it is never echoed here —

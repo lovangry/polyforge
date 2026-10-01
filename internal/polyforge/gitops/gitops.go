@@ -17,9 +17,10 @@
 //     http:// and https:// remotes;
 //   - pushes carry --push-option=session-fingerprint=<fp> (v1.5 §1.6
 //     fencing-on-use backup layer: Opts.Fingerprint, the PUBLIC
-//     session handle); the legacy --push-option=attempt-id=<attempt>
-//     (generation fencing 备层) still rides when no fingerprint is set
-//     and is deleted with the cleanup commit;
+//     session handle). An absent fingerprint sends NO push option —
+//     correct for pre-session pushes of non-WI repos and for local
+//     pushes the hook must not fence; the hook only compares when both
+//     sides of the fence exist;
 //   - an index.lock that has outlived the stale bound is removed at
 //     acquisition (see cleanStaleLocks for why age, not PID, is the only
 //     safe signal);
@@ -73,12 +74,11 @@ func Lock(workItemID string) func() {
 // Opts describe one capsule worktree + its external git-dir.
 type Opts struct {
 	WorkItemID string // mutex key and push identity
-	AttemptID  string // legacy claim attempt id; rides pushes as --push-option=attempt-id=<id> until the cleanup commit
 	// Fingerprint is the v1.5 PUBLIC session fingerprint
 	// (hex(sha256(session_id))[:16]); rides pushes as
 	// --push-option=session-fingerprint=<fp> (§1.6 fencing-on-use
 	// backup layer). The runtime sets it from the claim answer; empty
-	// falls back to the legacy attempt-id option above.
+	// sends no push option at all.
 	Fingerprint string
 	CapsuleDir  string // worktree root (agent-writable)
 	GitDir      string // external git-dir (e.g. <data>/git/wi_xxx.git)
@@ -351,10 +351,6 @@ func pushLocked(o Opts) (bool, int64, error) {
 		// push whose option differs from the credential's fingerprint,
 		// naming the CURRENT holder so a superseded daemon self-diagnoses.
 		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
-	} else if o.AttemptID != "" {
-		// Legacy generation fencing 备层 (deleted in the cleanup commit):
-		// pre-receive validates the attempt-id push option server-side.
-		args = append(args, "--push-option=attempt-id="+o.AttemptID)
 	}
 	args = append(args, o.RemoteURL, "HEAD:refs/heads/main")
 	additions, cleanup, err := credentialEnv(o)
