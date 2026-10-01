@@ -621,8 +621,14 @@ func (m *SessionManager) Takeover(wiID string, req api.SessionClaimRequest, call
 func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdentity string) error {
 	switch req.Status {
 	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked:
+	case api.StatusPaused:
+		// Merge amend (Lane B/C complaint): "paused" routes to the M3
+		// pause transition — the session is KEPT (restart attaches), the
+		// clean_pause flag rides the same atomic fenced UPDATE. Only the
+		// three terminal verdicts clear the session row.
+		return m.Pause(wiID, req.SessionID, req.CleanPause, req.Note, callerIdentity)
 	default:
-		return Fail(api.ErrCoreBadInput, "", "status must be one of wrapped|failed|blocked")
+		return Fail(api.ErrCoreBadInput, "", "status must be one of wrapped|failed|blocked|paused")
 	}
 	tx, err := m.db.Begin()
 	if err != nil {

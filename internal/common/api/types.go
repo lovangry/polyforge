@@ -242,8 +242,12 @@ type SessionVerifyResponse struct {
 // terminal verdict sets the status and clears the session row entirely.
 type SessionEndRequest struct {
 	SessionID string `json:"session_id"`
-	Status    string `json:"status"` // wrapped|failed|blocked
+	Status    string `json:"status"` // wrapped|failed|blocked|paused
 	Note      string `json:"note,omitempty"`
+	// CleanPause rides the paused verdict only (merge amend: the atomic
+	// pause transition — session KEPT, clean_pause set — is the M3 pause;
+	// true = operator pause, restart must not auto-resume).
+	CleanPause bool `json:"clean_pause,omitempty"`
 }
 
 // SessionFingerprint derives the public handle from the secret:

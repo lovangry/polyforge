@@ -322,30 +322,18 @@ var cmdPause = &Command{
 		if len(args) != 1 {
 			return fmt.Errorf("pause: expected exactly one work item id")
 		}
-		// Set clean_pause on the hub FIRST (fail-safe ordering: the flag
-		// landing early is benign — only paused work items consult it —
-		// while a crash between the two calls would otherwise leave an
-		// operator-paused WI auto-resumable, exactly what the flag exists
-		// to prevent). The PATCH carries the field additively; the aihub
-		// server ignores unknown keys until Lane A lands its side. A
-		// failed flag write degrades to a stderr warning, never a refused
-		// pause: the daemon request body repeats the flag (the daemon's
-		// own hub transition sets it at merge).
-		flagWarn := setCleanPause(ctx, args[0], true)
+		// Merge amend: the early hub PATCH + undo dance is GONE — the
+		// pause is one atomic fenced transition now. The daemon's pause
+		// close carries Status=paused + CleanPause=true on the SAME
+		// SessionEnd that flips the status, so there is no crash window
+		// in which an operator-paused WI could be auto-resumed, and no
+		// undo path that could strand a stale marker on a non-paused WI.
 		raw, err := ctx.daemon().Pause(args[0])
 		if err != nil {
-			// The daemon refused: undo the early flag write (best-effort)
-			// so a non-paused WI does not carry a stale marker.
-			if undoErr := patchCleanPause(ctx, args[0], false); undoErr != nil {
-				fmt.Fprintf(ctx.Stderr, "pf: pause refused; clearing clean_pause also failed: %v\n", undoErr)
-			}
 			return err
 		}
 		ctx.finish(raw, func() {
 			fmt.Fprintf(ctx.Stdout, "pause requested for %s (clean_pause set on the hub; restart will not auto-resume it)\n", args[0])
-			if flagWarn != "" {
-				fmt.Fprintf(ctx.Stderr, "pf: warning: %s\n", flagWarn)
-			}
 		})
 		return nil
 	},

@@ -1086,11 +1086,14 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// the seal push and here) surfaces as the error below and leaves the
 	// job SEALING, exactly like a hub outage: never a silent half-seal.
 	// The status vocabulary is wrapped|failed|blocked — plus "paused",
-	// which the CLI pause path passes through (contract complaint: §1.5
-	// has no pause transition; see the lane report).
+	// which the CLI pause path passes through (merge amend: paused routes
+	// to the M3 pause transition; the session is KEPT and clean_pause=true
+	// rides the same atomic fenced update — the ONLY pause producer is
+	// the operator CLI, so it is always a clean pause).
 	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
-		SessionID: j.sessionID,
-		Status:    finalReason,
+		SessionID:  j.sessionID,
+		Status:     finalReason,
+		CleanPause: finalReason == api.StatusPaused,
 	}); err != nil {
 		return fmt.Errorf("runtime: %s: session-end failed (job left sealing): %w", j.wi, err)
 	}

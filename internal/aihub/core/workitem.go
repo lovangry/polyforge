@@ -427,9 +427,21 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 
 	sets := []string{"updated_at=?"}
 	args := []any{Now()}
-	for _, field := range []string{"goal", "content", "labels", "priority", "milestone", "waiting_on"} {
+	for _, field := range []string{"goal", "content", "labels", "priority", "milestone", "waiting_on", "clean_pause"} {
 		raw, ok := fields[field]
 		if !ok {
+			continue
+		}
+		if field == "clean_pause" {
+			// Merge amend: the operator resume face. clean_pause=false
+			// re-enables the holder daemon's restart auto-attach; a pause
+			// sets it through the atomic SessionEnd, not PATCH.
+			var v bool
+			if json.Unmarshal(raw, &v) != nil {
+				return nil, Fail(api.ErrCoreBadInput, "", "clean_pause must be a boolean")
+			}
+			sets = append(sets, "clean_pause=?")
+			args = append(args, v)
 			continue
 		}
 		switch field {
