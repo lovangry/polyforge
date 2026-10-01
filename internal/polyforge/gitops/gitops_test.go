@@ -391,6 +391,31 @@ func TestCommitPushFirstCommitIsSeqOneOnUnbornBranch(t *testing.T) {
 	}
 }
 
+// TestPushOptionSessionFingerprintReachedServer (v1.5 §1.6): when the
+// opts carry the PUBLIC session fingerprint, the push option becomes
+// session-fingerprint=<fp> — the fencing-on-use backup layer — and the
+// legacy attempt-id option is NOT sent alongside it.
+func TestPushOptionSessionFingerprintReachedServer(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_fp")
+	bare := mkBare(t, barePath, true)
+	mkCapsule(t, o)
+	o.AttemptID = "ra_wi_fp" // legacy value must NOT ride once a fingerprint is set
+	o.Fingerprint = "ab12cd34ef56aa00"
+
+	writeDirty(t, o, "a.txt", "a\n")
+	if _, pushed, _, err := CommitPush(o, "one"); err != nil || !pushed {
+		t.Fatalf("CommitPush = (%v, %v)", pushed, err)
+	}
+	seen := bare.pushesSeen(t)
+	if len(seen) != 1 {
+		t.Fatalf("hook invocations: %d, want 1", len(seen))
+	}
+	if seen[0] != "1|session-fingerprint=ab12cd34ef56aa00" {
+		t.Fatalf("push options seen: %q, want count=1 option session-fingerprint=ab12cd34ef56aa00", seen[0])
+	}
+}
+
 func TestPushOptionAttemptIDReachedServer(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_popt")

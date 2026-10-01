@@ -11,13 +11,15 @@
 //     value monotonic, restart-safe and retry-safe (a failed push leaves
 //     no commit, so a retry recomputes the same number), which aihub's
 //     pre-receive hook requires (strictly increasing per commit);
-//   - pushes carry the attempt-scoped credential and go through aihub's
+//   - pushes carry the session-scoped credential and go through aihub's
 //     git HTTP proxy; the credential travels via a one-shot GIT_ASKPASS
 //     helper (never in argv, never in persistent env) and reaches both
 //     http:// and https:// remotes;
-//   - pushes carry --push-option=attempt-id=<attempt> (generation fencing
-//     备层, §六); the server-side pre-receive validation of that option is
-//     the aihub lane's obligation;
+//   - pushes carry --push-option=session-fingerprint=<fp> (v1.5 §1.6
+//     fencing-on-use backup layer: Opts.Fingerprint, the PUBLIC
+//     session handle); the legacy --push-option=attempt-id=<attempt>
+//     (generation fencing 备层) still rides when no fingerprint is set
+//     and is deleted with the cleanup commit;
 //   - an index.lock that has outlived the stale bound is removed at
 //     acquisition (see cleanStaleLocks for why age, not PID, is the only
 //     safe signal);
@@ -71,12 +73,18 @@ func Lock(workItemID string) func() {
 // Opts describe one capsule worktree + its external git-dir.
 type Opts struct {
 	WorkItemID string // mutex key and push identity
-	AttemptID  string // claim attempt id; rides pushes as --push-option=attempt-id=<id> (§六 备层)
-	CapsuleDir string // worktree root (agent-writable)
-	GitDir     string // external git-dir (e.g. <data>/git/wi_xxx.git)
-	RemoteURL  string // aihub git proxy URL, e.g. http://host:8420/git/wi_xxx.git
-	Username   string // push credential username (= work item id)
-	Secret     string // attempt-scoped push credential secret
+	AttemptID  string // legacy claim attempt id; rides pushes as --push-option=attempt-id=<id> until the cleanup commit
+	// Fingerprint is the v1.5 PUBLIC session fingerprint
+	// (hex(sha256(session_id))[:16]); rides pushes as
+	// --push-option=session-fingerprint=<fp> (§1.6 fencing-on-use
+	// backup layer). The runtime sets it from the claim answer; empty
+	// falls back to the legacy attempt-id option above.
+	Fingerprint string
+	CapsuleDir  string // worktree root (agent-writable)
+	GitDir      string // external git-dir (e.g. <data>/git/wi_xxx.git)
+	RemoteURL   string // aihub git proxy URL, e.g. http://host:8420/git/wi_xxx.git
+	Username    string // push credential username (= work item id)
+	Secret      string // push credential secret (v1.5: the session id; askpass only — never argv, never env)
 }
 
 // Env returns the environment every raw git invocation against this
@@ -337,9 +345,15 @@ func pushLocked(o Opts) (bool, int64, error) {
 		return false, 0, &api.Error{Code: api.ErrGitUnauthorized, Detail: "no push remote configured"}
 	}
 	args := []string{"push"}
-	if o.AttemptID != "" {
-		// Generation fencing 备层 (§六): pre-receive validates the
-		// attempt-id push option server-side.
+	if o.Fingerprint != "" {
+		// v1.5 §1.6 fencing-on-use backup layer: the push option carries
+		// the PUBLIC session fingerprint; the pre-receive hook rejects a
+		// push whose option differs from the credential's fingerprint,
+		// naming the CURRENT holder so a superseded daemon self-diagnoses.
+		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
+	} else if o.AttemptID != "" {
+		// Legacy generation fencing 备层 (deleted in the cleanup commit):
+		// pre-receive validates the attempt-id push option server-side.
 		args = append(args, "--push-option=attempt-id="+o.AttemptID)
 	}
 	args = append(args, o.RemoteURL, "HEAD:refs/heads/main")
