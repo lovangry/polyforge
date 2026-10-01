@@ -1,22 +1,22 @@
 package observe
 
-// flush_recovery_window_test.go: the F9 semantic boundary of the flush
-// attempt-id fence across the recovery-adoption window (memo item (a)).
+// flush_recovery_window_test.go: the semantic boundary of the flush
+// spawn fence (v1.5 B2) across the recovery-adoption window.
 //
-// The hub announces a successor instance (RTRecovered emission-time
-// registration — NoteInstance) BEFORE the monitor adopts it. In that
+// The hub announces a successor derivation (RTRecovered emission-time
+// registration — NoteSpawn) BEFORE the monitor adopts it. In that
 // window a flush carrying the announced (for the monitor: mismatched)
-// attempt_id is a legitimate pre-adoption instance: it must be QUEUED,
-// never refused with the STALE_ATTEMPT rejection. The complements are
+// spawn_n is a legitimate pre-adoption derivation: it must be QUEUED,
+// never refused with the STALE_SPAWN rejection. The complements are
 // pinned with it:
 //
-//   - at adoption under a SUPERSEDING id, the queued deferred flush is
-//     released and, still mismatched, answered with the stale refusal
-//     (the DAEMON-409 STALE_ATTEMPT shape — "STALE_ATTEMPT: flush
-//     carries attempt_id X; the current instance is Y");
+//   - at adoption under a SUPERSEDING counter, the queued deferred
+//     flush is released and, still mismatched, answered with the stale
+//     refusal (the STALE_SPAWN shape — "STALE_SPAWN: flush carries
+//     spawn_n X; the current derivation is Y");
 //   - a second flush arriving within the window AFTER adoption, with a
-//     mismatched attempt_id, is refused DAEMON-409 STALE_ATTEMPT at the
-//     fence, while a matching one is accepted.
+//     mismatched counter, is refused 409 STALE_SPAWN at the fence,
+//     while a matching one is accepted.
 //
 // Two levels: the monitor's own queue/release contract (fake handle,
 // deterministic via the flushCh FIFO), and the HTTP face's fence
@@ -35,11 +35,11 @@ import (
 // TestFlushRecoveryWindowQueuesMismatchedThenRefusesAtAdoption pins the
 // monitor's recovery-window contract on the fake handle:
 //
-//  1. a flush naming a not-yet-adopted instance is parked in the
-//     adoption window (no answer reaches its sender — in particular no
-//     STALE_ATTEMPT refusal);
-//  2. when adoption lands under a SUPERSEDING id, the parked call is
-//     released and, still mismatched, answered with the STALE_ATTEMPT
+//  1. a flush naming a not-yet-adopted derivation counter is parked in
+//     the adoption window (no answer reaches its sender — in
+//     particular no STALE_SPAWN refusal);
+//  2. when adoption lands under a SUPERSEDING counter, the parked call
+//     is released and, still mismatched, answered with the STALE_SPAWN
 //     refusal shape;
 //  3. the refusal sealed nothing: no pending question was minted from
 //     the refused call.
@@ -47,22 +47,24 @@ func TestFlushRecoveryWindowQueuesMismatchedThenRefusesAtAdoption(t *testing.T) 
 	h1 := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h1, nil)
 
-	// (1) pre-adoption: the flush names an instance the monitor has not
-	// adopted (the hub's latest known announcement). It must be queued.
+	// (1) pre-adoption: the flush names a derivation counter the monitor
+	// has not adopted (the hub's latest known announcement). It must be
+	// queued.
 	queued := FlushCall{
 		Req: protocol.FlushRequest{
-			WorkItem: "wi_test", AttemptID: "att_2",
+			WorkItem: "wi_test", AttemptID: "att_2", SpawnN: 2,
 			Reason: protocol.FlushNeedsInput, QuestionID: "q_win", Question: "which?", Step: "code",
 		},
 		Resp: make(chan protocol.FlushAck, 1),
 	}
 	m.flushCh <- queued
 	// Sentinel on the SAME channel: flushCh is FIFO, so once the
-	// sentinel (carrying the CURRENT id) settles, the queued call has
-	// already been processed — and parked, since its id is ahead.
+	// sentinel (carrying the CURRENT counter) settles, the queued call
+	// has already been processed — and parked, since its counter is
+	// ahead.
 	sentinel := FlushCall{
 		Req: protocol.FlushRequest{
-			WorkItem: "wi_test", AttemptID: "att_1",
+			WorkItem: "wi_test", AttemptID: "att_1", SpawnN: 1,
 			Reason: protocol.FlushNeedsInput, QuestionID: "q_fence", Question: "fence?", Step: "code",
 		},
 		Resp: make(chan protocol.FlushAck, 1),
@@ -76,7 +78,7 @@ func TestFlushRecoveryWindowQueuesMismatchedThenRefusesAtAdoption(t *testing.T) 
 	case <-time.After(2 * time.Second):
 		t.Fatal("sentinel flush never settled")
 	}
-	// Queued, not refused: no answer — in particular no STALE_ATTEMPT
+	// Queued, not refused: no answer — in particular no STALE_SPAWN
 	// error — was surfaced to the parked call's sender.
 	select {
 	case ack := <-queued.Resp:
@@ -84,11 +86,11 @@ func TestFlushRecoveryWindowQueuesMismatchedThenRefusesAtAdoption(t *testing.T) 
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	// (2) adoption lands under a SUPERSEDING id (a second, newer
-	// announcement won the race): the parked flush's id can never become
-	// current, so the release answers the stale refusal.
+	// (2) adoption lands under a SUPERSEDING counter (a second, newer
+	// announcement won the race): the parked flush's counter can never
+	// become current, so the release answers the stale refusal.
 	h3 := newFakeHandle("att_3")
-	recoverMonitor(m, h3, "att_3")
+	recoverMonitor(m, h3, "att_3", 3)
 	var ack protocol.FlushAck
 	select {
 	case ack = <-queued.Resp:
@@ -98,11 +100,11 @@ func TestFlushRecoveryWindowQueuesMismatchedThenRefusesAtAdoption(t *testing.T) 
 	if ack.OK {
 		t.Fatalf("a still-mismatched deferred flush must be refused, not accepted: %+v", ack)
 	}
-	if !bytes.Contains([]byte(ack.Error), []byte("STALE_ATTEMPT")) {
-		t.Fatalf("the refusal must carry the STALE_ATTEMPT shape: %q", ack.Error)
+	if !bytes.Contains([]byte(ack.Error), []byte("STALE_SPAWN")) {
+		t.Fatalf("the refusal must carry the STALE_SPAWN shape: %q", ack.Error)
 	}
-	if !bytes.Contains([]byte(ack.Error), []byte("att_2")) {
-		t.Fatalf("the refusal must name the flush's own attempt id: %q", ack.Error)
+	if !bytes.Contains([]byte(ack.Error), []byte("spawn_n 2")) {
+		t.Fatalf("the refusal must name the flush's own counter: %q", ack.Error)
 	}
 
 	// (3) the refusal sealed nothing: the only pending question is the
@@ -123,16 +125,16 @@ func TestFlushRecoveryWindowQueuesMismatchedThenRefusesAtAdoption(t *testing.T) 
 // TestHTTPFlushRecoveryWindowMismatchedRefused walks the whole episode
 // through the UDS fence (the DAEMON-409 grading face):
 //
-//  1. inside the pre-adoption window, a flush carrying the announced id
-//     passes the fence and is QUEUED — the sender sees no instant
-//     STALE_ATTEMPT 409;
-//  2. adoption under a superseding id releases the queued flush and the
-//     sender receives the stale refusal in its ack (the flush contract:
-//     the ack — even an OK=false one — is the response, never an HTTP
-//     error);
+//  1. inside the pre-adoption window, a flush carrying the announced
+//     counter passes the fence and is QUEUED — the sender sees no
+//     instant STALE_SPAWN 409;
+//  2. adoption under a superseding counter releases the queued flush
+//     and the sender receives the stale refusal in its ack (the flush
+//     contract: the ack — even an OK=false one — is the response, never
+//     an HTTP error);
 //  3. after adoption, a second flush within the window with a
-//     mismatched id is refused DAEMON-409 STALE_ATTEMPT at the fence,
-//     while the matching id is accepted.
+//     mismatched counter is refused DAEMON-409 STALE_SPAWN at the
+//     fence, while the matching counter is accepted.
 func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 	h := newFakeHandle("att_cur")
 	hs := newHarness(t)
@@ -142,12 +144,12 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 		return code == http.StatusOK
 	})
 
-	// The successor instance is ANNOUNCED (emission-time registration,
+	// The successor derivation is ANNOUNCED (emission-time registration,
 	// as the daemon bridge does at RTRecovered emission) but not yet
 	// adopted by the monitor.
-	hs.o.NoteInstance("wi_http", "att_next")
+	hs.o.NoteSpawn("wi_http", 2)
 
-	// (1) the window flush: it names the announced id, so the fence
+	// (1) the window flush: it names the announced counter, so the fence
 	// must not refuse it — the monitor queues it. Its HTTP caller stays
 	// open until the call settles.
 	type result struct {
@@ -157,7 +159,7 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 	windowRes := make(chan result, 1)
 	go func() {
 		code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-			WorkItem: "wi_http", AttemptID: "att_next",
+			WorkItem: "wi_http", AttemptID: "att_next", SpawnN: 2,
 			Reason: protocol.FlushNeedsInput, QuestionID: "q_win", Question: "which?",
 		}, nil)
 		windowRes <- result{code, body}
@@ -169,24 +171,25 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 	default:
 	}
 	// Fence cross-check (the s10 hole, now pinned here too): once a
-	// successor is ANNOUNCED, the monitor's still-lagging current id is
-	// ALREADY stale — a flush carrying it is refused at the fence, never
-	// reaching the monitor. (The runtime superseded that agent before
-	// the announcement was emitted; only a zombie speaks in its name.)
+	// successor is ANNOUNCED, the monitor's still-lagging current
+	// counter is ALREADY stale — a flush carrying it is refused at the
+	// fence, never reaching the monitor. (The runtime superseded that
+	// agent before the announcement was emitted; only a zombie speaks
+	// in its name.)
 	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_cur",
+		WorkItem: "wi_http", AttemptID: "att_cur", SpawnN: 1,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_fence", Question: "fence?",
 	}, nil)
-	if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_ATTEMPT")) {
+	if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_SPAWN")) {
 		t.Fatalf("zombie (lagging-current) flush must be refused at the fence: %d %s", code, body)
 	}
 
-	// (2) adoption lands under a SUPERSEDING id: the parked call is
+	// (2) adoption lands under a SUPERSEDING counter: the parked call is
 	// released still-mismatched and its sender receives the stale
 	// refusal (in the ack, per the flush contract).
 	h2 := newFakeHandle("att_next2")
 	hs.rt <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_http", AttemptID: "att_next2"},
+		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_http", AttemptID: "att_next2", SpawnN: 3},
 		Handle: h2,
 		WI: WIInfo{
 			WorkItem: "wi_http", Project: "proj", CapsuleDir: hs.capsuleDir,
@@ -205,8 +208,8 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 		if ack.OK {
 			t.Fatalf("a still-mismatched deferred flush must be refused: %+v (%s)", ack, r.body)
 		}
-		if !bytes.Contains(r.body, []byte("STALE_ATTEMPT")) {
-			t.Fatalf("the refusal must carry the STALE_ATTEMPT shape: %s", r.body)
+		if !bytes.Contains(r.body, []byte("STALE_SPAWN")) {
+			t.Fatalf("the refusal must carry the STALE_SPAWN shape: %s", r.body)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the deferred flush was never released at adoption")
@@ -220,16 +223,16 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 	})
 
 	// (3) a SECOND flush within the window AFTER adoption: every
-	// mismatched id — the superseded announcement and the
-	// pre-recovery current id included — is refused DAEMON-409
-	// STALE_ATTEMPT and never reaches the monitor.
-	for _, stale := range []string{"att_next", "att_cur"} {
+	// mismatched counter — the superseded announcement and the
+	// pre-recovery current counter included — is refused DAEMON-409
+	// STALE_SPAWN and never reaches the monitor.
+	for _, stale := range []int{1, 2} {
 		code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-			WorkItem: "wi_http", AttemptID: stale,
-			Reason: protocol.FlushNeedsInput, QuestionID: "q_z_" + stale, Question: "which?",
+			WorkItem: "wi_http", AttemptID: "att_z", SpawnN: stale,
+			Reason: protocol.FlushNeedsInput, QuestionID: "q_z", Question: "which?",
 		}, nil)
-		if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_ATTEMPT")) {
-			t.Fatalf("post-adoption mismatched id %q: %d %s, want 409 STALE_ATTEMPT", stale, code, body)
+		if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_SPAWN")) {
+			t.Fatalf("post-adoption mismatched counter %d: %d %s, want 409 STALE_SPAWN", stale, code, body)
 		}
 	}
 	// The refused flushes minted nothing; the MATCHING id is accepted.
@@ -242,7 +245,7 @@ func TestHTTPFlushRecoveryWindowMismatchedRefused(t *testing.T) {
 		t.Fatalf("the refused window flush must not mint a pending: %+v", view.Pending)
 	}
 	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", AttemptID: "att_next2",
+		WorkItem: "wi_http", AttemptID: "att_next2", SpawnN: 3,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_live", Question: "which?",
 	}, nil)
 	if code != http.StatusOK {

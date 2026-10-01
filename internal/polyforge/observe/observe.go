@@ -62,6 +62,14 @@ type Config struct {
 	// credential — every server call is the daemon's); nil disables both
 	// routes with the typed not-configured refusal. See memory.go.
 	MemoryFace MemoryFace
+	// SessionVerify is the v1.5 M4 revalidation seam: the periodic
+	// per-RUNNING-job session-verify the monitor tick piggybacks
+	// (session.go). The daemon binds the shared aihub client; nil — the
+	// unit-test default — disables revalidation entirely.
+	SessionVerify SessionVerifier
+	// SessionRevalidateEvery is the M4 cadence (0 = the default ~5min;
+	// negative = disabled).
+	SessionRevalidateEvery time.Duration
 
 	PollInterval time.Duration // execution.json poll tick (500ms)
 	HangWindow   time.Duration // stream-silence window while a turn is in flight (10min)
@@ -122,6 +130,9 @@ func (c *Config) fill() {
 	if c.VersionStagnantTicks == 0 {
 		c.VersionStagnantTicks = defaultVersionStagnantTicks
 	}
+	if c.SessionRevalidateEvery == 0 {
+		c.SessionRevalidateEvery = defaultRevalidateEvery
+	}
 	if c.PushFunc == nil {
 		c.PushFunc = defaultPush
 	}
@@ -168,11 +179,17 @@ type Observe struct {
 	mu       sync.Mutex
 	monitors map[string]*Monitor
 	// latest holds, per work item, the newest instance id the hub has
-	// HEARD announced (RTStarted/RTRecovered emission time) — the recovery
-	// window's fence input. The monitor adopts the id only after its
-	// select loop processes the attachment; in that window the flush
-	// fence compares against this map instead of refusing.
+	// HEARD announced (RTStarted/RTRecovered emission time) — the legacy
+	// attempt-id fence input (memory.go; deleted with the cleanup
+	// commit). The monitor adopts the id only after its select loop
+	// processes the attachment; in that window the flush fence compares
+	// against this map instead of refusing.
 	latest map[string]string
+	// latestSpawn holds, per work item, the newest DERIVATION COUNTER the
+	// hub has heard announced (RTMsg.SpawnN at RTStarted/RTRecovered
+	// emission time) — the v1.5 B2 flush fence's recovery-window input
+	// (http.go serveFlush). 0 = none announced.
+	latestSpawn map[string]int
 
 	wg sync.WaitGroup
 }
@@ -207,7 +224,8 @@ func New(cfg Config) (*Observe, error) {
 		return nil, errConfig("OB channel must be buffered")
 	}
 	return &Observe{cfg: cfg, log: log, ledger: ledger,
-		monitors: map[string]*Monitor{}, latest: map[string]string{}}, nil
+		monitors: map[string]*Monitor{}, latest: map[string]string{},
+		latestSpawn: map[string]int{}}, nil
 }
 
 type errConfig string
@@ -244,6 +262,9 @@ func (o *Observe) onAttach(at Attach) {
 		// #8): even when the attachment below is malformed and never
 		// yields a monitor, the announced id is the newest the hub knows.
 		o.NoteInstance(wi, at.Msg.AttemptID)
+		// v1.5 B2: same emission-time registration for the derivation
+		// counter — the flush fence's recovery-window alternate identity.
+		o.NoteSpawn(wi, at.Msg.SpawnN)
 		if old := o.takeMonitor(wi); old != nil {
 			// A stale monitor for the same WI (Runtime restarted the WI
 			// without a WIFinished): stop it, the new attempt wins.
@@ -268,6 +289,7 @@ func (o *Observe) onAttach(at Attach) {
 		// delivery — the flush fence must accept the announced id for the
 		// whole window.
 		o.NoteInstance(wi, at.Msg.AttemptID)
+		o.NoteSpawn(wi, at.Msg.SpawnN)
 		m := o.lookup(wi)
 		if m == nil {
 			_ = o.log.Append(wi, EvJobStopped, map[string]any{
@@ -284,7 +306,8 @@ func (o *Observe) onAttach(at Attach) {
 		}
 	case protocol.RTFinished:
 		o.mu.Lock()
-		delete(o.latest, wi) // the instance lineage ended with the job
+		delete(o.latest, wi)     // the instance lineage ended with the job
+		delete(o.latestSpawn, wi) // ...and so did the derivation counter
 		o.mu.Unlock()
 		// Retention (spec A4): a finished work item can neither receive a
 		// re-delivery nor be re-answered, so its ledger entries — both
@@ -363,6 +386,33 @@ func (o *Observe) instanceKnown(wi string) string {
 	return o.latest[wi]
 }
 
+// NoteSpawn records the latest ANNOUNCED derivation counter of a work
+// item (RTMsg.SpawnN at RTStarted/RTRecovered emission time; onAttach
+// repeats it as the structural backstop, and the daemon bridge calls it
+// at emission time exactly like NoteInstance). The monitor adopts the
+// counter only after its select loop processes the attachment; in that
+// window the B2 flush fence compares against this map instead of
+// refusing — the just-resumed agent's own flush(reason) must never eat
+// a STALE_SPAWN refusal for its own derivation. A zero counter (legacy
+// message, nothing announced) is ignored.
+func (o *Observe) NoteSpawn(wi string, spawnN int) {
+	if wi == "" || spawnN <= 0 {
+		return
+	}
+	o.mu.Lock()
+	o.latestSpawn[wi] = spawnN
+	o.mu.Unlock()
+}
+
+// spawnKnown returns the latest announced derivation counter of wi (0
+// when none was ever announced). The serveFlush fence accepts it as the
+// recovery window's alternate identity — see NoteSpawn.
+func (o *Observe) spawnKnown(wi string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.latestSpawn[wi]
+}
+
 func (o *Observe) setMonitor(wi string, m *Monitor) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -402,6 +452,8 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 			BackpressureAfter:    o.cfg.BackpressureAfter,
 			FlushBound:           o.cfg.FlushBound,
 			VersionStagnantTicks: o.cfg.VersionStagnantTicks,
+			revalidate:           o.cfg.SessionRevalidateEvery,
+			verify:               o.cfg.SessionVerify,
 			push:                 o.cfg.PushFunc,
 			locateLive:           o.cfg.LocateLive,
 		},
@@ -420,6 +472,7 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 		pushDone:  make(chan pushResult, 1),
 		wrapDone:  make(chan wrapResult, 1),
 		probeDone: make(chan probeResult, 1),
+		verifyDone: make(chan verifyResult, 1),
 
 		hangAnchor: time.Now(),
 		stream:     newStreamState(),
@@ -438,6 +491,8 @@ func (m *Monitor) attach(at Attach) {
 	m.idleAnchor = time.Now() // the idle window's pre-first-record baseline
 	m.stateMu.Lock()
 	m.attemptID = at.Msg.AttemptID
+	m.spawnN = at.Msg.SpawnN
+	m.sessionID = at.Msg.SessionID
 	m.stateMu.Unlock()
 	m.setTranscriptInfo(at.WI)
 	// F9: the attach-time answer redelivery (a no-op for a fresh

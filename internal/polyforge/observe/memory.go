@@ -1,15 +1,20 @@
 package observe
 
 // memory.go: the F6-B lane — the UDS narrow memory channel, mounted on
-// the same face and behind the same attempt-id fence as flush
+// the same face and behind the same fence as flush
 // (ruling C2's "you → daemon" transport; the F6 ruling adds the two
 // memory verbs to it):
 //
-//	POST /jobs/{wi}/recall    body {attempt_id, query, top_k}
+//	POST /jobs/{wi}/recall    body {attempt_id|spawn_n, query, top_k}
 //	                                → {items:[...]}
-//	POST /jobs/{wi}/remember  body {attempt_id, type, content,
+//	POST /jobs/{wi}/remember  body {attempt_id|spawn_n, type, content,
 //	                                visibility, title?, tags?}
 //	                                → {id, status}
+//
+// The fence accepts EITHER proof of current-derivation identity: the
+// v1.5 spawn_n counter (B2, preferred — the same dual-match as the
+// flush fence) or the legacy attempt id (deleted in the cleanup
+// commit). A request carrying NEITHER is refused.
 //
 // The agent holds NO aihub credential and no aihub URL — every server
 // call is made BY THE DAEMON, whose machine credential never reaches an
@@ -23,6 +28,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,16 +78,20 @@ type MemoryStored struct {
 	Status string `json:"status"`
 }
 
-// The UDS memory request bodies (the fence field is route business, the
-// rest is the agent's payload).
+// The UDS memory request bodies (the fence fields are route business,
+// the rest is the agent's payload). AttemptID is the legacy fence
+// proof; SpawnN is the v1.5 B2 proof — one of the two must name the
+// current derivation.
 type memoryRecallRequest struct {
 	AttemptID string `json:"attempt_id"`
+	SpawnN    int    `json:"spawn_n"`
 	Query     string `json:"query"`
 	TopK      int    `json:"top_k"`
 }
 
 type memoryRememberRequest struct {
 	AttemptID  string   `json:"attempt_id"`
+	SpawnN     int      `json:"spawn_n"`
 	Type       string   `json:"type"`
 	Title      string   `json:"title,omitempty"`
 	Content    string   `json:"content"`
@@ -117,7 +127,7 @@ func (o *Observe) serveRecall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, api.ErrDaemonBadInput, "recall request body: "+err.Error())
 		return
 	}
-	if !o.memoryFence(w, m, wi, req.AttemptID, "recall") {
+	if !o.memoryFence(w, m, wi, req.SpawnN, req.AttemptID, "recall") {
 		return
 	}
 	if strings.TrimSpace(req.Query) == "" {
@@ -170,7 +180,7 @@ func (o *Observe) serveRemember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, api.ErrDaemonBadInput, "remember request body: "+err.Error())
 		return
 	}
-	if !o.memoryFence(w, m, wi, req.AttemptID, "remember") {
+	if !o.memoryFence(w, m, wi, req.SpawnN, req.AttemptID, "remember") {
 		return
 	}
 	if strings.TrimSpace(req.Content) == "" {
@@ -221,21 +231,36 @@ func (o *Observe) serveRemember(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stored)
 }
 
-// memoryFence is the flush-mode attempt-id fence (§二): the request's
-// attempt id must name the monitor's CURRENT instance — or the hub's
-// latest ANNOUNCED one, the recovery window's alternate identity a
-// just-resumed agent still carries. Anything else, including an absent
-// id, answers DAEMON-409 STALE_ATTEMPT and never reaches the face: a
-// zombie survivor of a superseded instance must never read or write the
-// live attempt's memory. Answers false when the caller already wrote
-// the refusal.
-func (o *Observe) memoryFence(w http.ResponseWriter, m *Monitor, wi, attemptID, verb string) bool {
+// memoryFence is the memory routes' share of the flush-mode fence (§二):
+// the request must prove it speaks for the monitor's CURRENT
+// derivation — either with the v1.5 spawn_n counter (B2, the same
+// dual-match as serveFlush: current, or the hub's latest ANNOUNCED
+// counter during the recovery-adoption window, with the same
+// lagging-current cross-check) or with the legacy attempt id (the
+// pre-v1.5 proof, deleted in the cleanup commit). A request carrying
+// NEITHER proof answers DAEMON-409 and never reaches the face: a zombie
+// survivor of a superseded derivation must never read or write the
+// live one's memory. Answers false when the caller already wrote the
+// refusal.
+func (o *Observe) memoryFence(w http.ResponseWriter, m *Monitor, wi string, spawnN int, attemptID, verb string) bool {
+	if spawnN > 0 {
+		cur := m.currentSpawn()
+		known := o.spawnKnown(wi)
+		if (spawnN == cur && (known == 0 || spawnN == known)) || spawnN == known {
+			return true
+		}
+		writeErr(w, api.ErrDaemonConflict,
+			"STALE_SPAWN: "+verb+" carries spawn_n "+strconv.Itoa(spawnN)+
+				"; the current derivation is "+strconv.Itoa(cur)+
+				" (latest announced: "+strconv.Itoa(known)+")")
+		return false
+	}
 	cur := m.currentAttempt()
 	if attemptID == "" ||
 		(attemptID != cur && attemptID != o.instanceKnown(wi)) {
 		writeErr(w, api.ErrDaemonConflict,
-			"STALE_ATTEMPT: "+verb+" carries attempt_id "+attemptID+
-				"; the current instance is "+cur)
+			"STALE_SPAWN: "+verb+" carries no current-derivation proof "+
+				"(spawn_n absent, attempt_id "+attemptID+"); the current instance is "+cur)
 		return false
 	}
 	return true

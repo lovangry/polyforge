@@ -176,6 +176,11 @@ type monitorCfg struct {
 	// default 3): consecutive same-Version rewrites before a fallback
 	// commit. Injectable so tests shrink the window.
 	VersionStagnantTicks int
+	// revalidate is the v1.5 M4 session-verify cadence (0 = disabled:
+	// no verifier, no checks — the unit-test default).
+	revalidate time.Duration
+	// verify is the M4 aihub seam (nil = revalidation disabled).
+	verify SessionVerifier
 	push                 PushFunc
 	// locateLive resolves the live harness transcript on demand (F3);
 	// nil = the transcript sync is disabled.
@@ -194,6 +199,18 @@ type Monitor struct {
 	// sub-goroutines at spawn time).
 	handle    Handle
 	attemptID string // guarded by stateMu for the HTTP read face
+	// spawnN is the v1.5 B2 derivation counter of the CURRENTLY ADOPTED
+	// derivation (guarded by stateMu for the HTTP fence's read). It is
+	// fed from RTMsg.SpawnN at RTStarted/RTRecovered adoption; the flush
+	// fence (http.go serveFlush) compares FlushRequest.SpawnN against it
+	// and against the hub's latest ANNOUNCED counter (Observe.spawnKnown).
+	spawnN int
+	// sessionID is the v1.5 session secret carried in-process on the
+	// RTStarted/RTRecovered message (M4 revalidation input). It lives
+	// ONLY here — never in events, never in the capsule, never in a log
+	// line — and is read solely by checkRevalidate on this goroutine
+	// (set at attach/onRecovered, both monitor-goroutine contexts).
+	sessionID string
 	records   <-chan []byte
 	exitCh    <-chan struct{}
 	stream    *streamState
@@ -204,10 +221,10 @@ type Monitor struct {
 	answerCh chan AnswerCall
 	flushCh  chan FlushCall
 	// deferredFlush holds one flush call whose (serveFlush-validated)
-	// attempt id names the hub's LATEST KNOWN instance while the monitor
-	// still holds its predecessor — the recovery-adoption window. The
-	// call is released by onRecovered once the announced id is adopted;
-	// the fence never lets an OLD-generation id reach this field.
+	// spawn_n names the hub's LATEST ANNOUNCED derivation while the
+	// monitor still holds its predecessor — the recovery-adoption window.
+	// The call is released by onRecovered once the announced counter is
+	// adopted; the fence never lets an OLDER counter reach this field.
 	deferredFlush *FlushCall
 
 	// execution.json polling state (monitor goroutine only).
@@ -296,6 +313,21 @@ type Monitor struct {
 	wrapped    bool // attempt reached a terminal state via flush(wrap)
 	blocked    bool
 	recovering bool
+	// superseded is the v1.5 M4 state: the periodic session-verify
+	// answered matches=false — another daemon holds the work item. The
+	// monitor stops supervising (detection, pushes and revalidation are
+	// suppressed; flushes are answered with the STALE_SPAWN refusal) but
+	// keeps draining its channels until Runtime's release (RTFinished)
+	// stops the loop. Observe makes NO hub transition (the new owner
+	// owns it). stateMu-guarded like the rest of the suppression set.
+	superseded bool
+
+	// revalidation bookkeeping (M4; monitor goroutine only except where
+	// noted). verifyDone is created with the monitor (never nil) so the
+	// select case below is always backed by a real channel.
+	lastVerifyAt   time.Time
+	verifyInFlight bool
+	verifyDone     chan verifyResult
 }
 
 func (m *Monitor) execJSONPath() string {
@@ -338,6 +370,8 @@ func (m *Monitor) run() {
 			m.onWrapResult(wr)
 		case pr := <-m.probeDone:
 			m.onProbeResult(pr)
+		case res := <-m.verifyDone:
+			m.onVerifyResult(res)
 		case call := <-m.answerCh:
 			m.onAnswer(call)
 		case call := <-m.flushCh:
@@ -361,21 +395,22 @@ func (m *Monitor) onTick() {
 	m.pollExecution()
 	m.schedulePush()
 	m.checkBackpressure()
+	m.checkRevalidate()
 }
 
 // releaseDeferredFlush re-examines a flush parked in the adoption window:
 // the adoption it waits for may have completed between the serveFlush
-// fence and this monitor pass (the fence read the OLD current attempt,
+// fence and this monitor pass (the fence read the OLD current counter,
 // onRecovered ran, and only then did the call reach onFlush) — a
 // deferred call stranded that way is released here within one poll
-// tick instead of waiting out the flush bound. A call whose id is still
-// ahead stays parked; onRecovered owns the immediate release path.
+// tick instead of waiting out the flush bound. A call whose counter is
+// still ahead stays parked; onRecovered owns the immediate release path.
 func (m *Monitor) releaseDeferredFlush() {
 	if m.deferredFlush == nil {
 		return
 	}
 	call := *m.deferredFlush
-	if call.Req.AttemptID == m.attemptID {
+	if call.Req.SpawnN == m.spawnN {
 		m.deferredFlush = nil
 		m.onFlush(call)
 	}
@@ -455,7 +490,7 @@ func (m *Monitor) drainIncidents() {
 func (m *Monitor) onExit() {
 	m.exitCh = nil // fires once per handle
 	m.stateMu.Lock()
-	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing
+	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if suppressed {
 		return
@@ -470,7 +505,7 @@ func (m *Monitor) onExit() {
 // same-attempt signals (§三).
 func (m *Monitor) needRecovery(reason, detail string) {
 	m.stateMu.Lock()
-	if m.recovering || m.wrapped || m.blocked || m.sealing {
+	if m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded {
 		m.stateMu.Unlock()
 		return
 	}
@@ -511,7 +546,7 @@ func (m *Monitor) checkHang() {
 		return
 	}
 	m.stateMu.Lock()
-	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing
+	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if suppressed {
 		return
@@ -576,7 +611,7 @@ func (m *Monitor) checkIdle() {
 	}
 	m.stateMu.Lock()
 	pending := m.pending != nil
-	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing
+	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if pending {
 		return // needs_input: waiting for a human answer is designed stillness
@@ -631,7 +666,7 @@ func (m *Monitor) checkNoProgress() {
 	}
 	m.stateMu.Lock()
 	pending := m.pending != nil
-	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing
+	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if pending || suppressed {
 		return
@@ -729,23 +764,26 @@ func (m *Monitor) onRecovered(at Attach) {
 	m.stateMu.Lock()
 	m.recovering = false
 	m.attemptID = at.Msg.AttemptID
+	m.spawnN = at.Msg.SpawnN
+	m.sessionID = at.Msg.SessionID
 	m.stateMu.Unlock()
 	_ = m.log.Append(m.wi.WorkItem, EvAgentRecovered, map[string]any{
 		"attempt_id": at.Msg.AttemptID,
+		"spawn_n":   at.Msg.SpawnN,
 	})
-	// Release the flush that arrived during the adoption window: the id
-	// it carries is now current, so it takes the ordinary path; an id
-	// that STILL does not match (a superseded announcement) is answered
-	// with the stale-refusal shape — the fence's promise holds.
+	// Release the flush that arrived during the adoption window: the
+	// counter it carries is now current, so it takes the ordinary path; a
+	// counter that STILL does not match (a superseded announcement) is
+	// answered with the stale-refusal shape — the fence's promise holds.
 	if m.deferredFlush != nil {
 		call := *m.deferredFlush
 		m.deferredFlush = nil
-		if call.Req.AttemptID == at.Msg.AttemptID {
+		if call.Req.SpawnN == at.Msg.SpawnN {
 			m.onFlush(call)
 		} else {
 			call.Resp <- protocol.FlushAck{
-				OK: false, Error: "STALE_ATTEMPT: flush carries attempt_id " + call.Req.AttemptID +
-					"; the current instance is " + at.Msg.AttemptID,
+				OK: false, Error: "STALE_SPAWN: flush carries spawn_n " + strconv.Itoa(call.Req.SpawnN) +
+					"; the current derivation is " + strconv.Itoa(at.Msg.SpawnN),
 			}
 		}
 	}
@@ -992,6 +1030,13 @@ func copyFileReadonly(src, dst string) error {
 // same gate: a stagnant episode (mtime advanced, Version frozen) also
 // arms a commit, so a contract-violating agent cannot starve the chain.
 func (m *Monitor) schedulePush() {
+	m.stateMu.Lock()
+	superseded := m.superseded
+	m.stateMu.Unlock()
+	if superseded {
+		return // M4: a superseded daemon's pushes are fenced server-side;
+		// observe does not keep offering them either
+	}
 	stagnant := m.stagnantDirty
 	if m.dirtyVersion <= m.pushedVersion && !stagnant {
 		return
@@ -1312,21 +1357,47 @@ func (m *Monitor) spawnRedelivery(relay AnswerRelay, qid, step string) {
 // flush(reason) handling (the UDS face entry)
 
 func (m *Monitor) onFlush(call FlushCall) {
-	// The recovery-adoption window: the request names an instance the
+	// M4: a superseded session's flushes are refused with the stale
+	// shape — the work item belongs to another daemon now, and no local
+	// seal may speak for it.
+	m.stateMu.Lock()
+	superseded := m.superseded
+	m.stateMu.Unlock()
+	if superseded {
+		call.Resp <- protocol.FlushAck{
+			OK: false, Error: "STALE_SPAWN: this session was superseded (another daemon holds the work item); the flush is refused",
+		}
+		return
+	}
+	// The B2 spawn fence, monitor half: a request that carries NO counter
+	// while the monitor runs a session-model derivation (spawnN > 0)
+	// names nothing and is refused fail-closed — the belt-and-braces
+	// twin of the serveFlush fence for direct-channel callers. A monitor
+	// that never adopted a counter (legacy attach, spawnN == 0) keeps
+	// serving legacy callers unchanged until the cleanup commit.
+	if n := call.Req.SpawnN; m.spawnN > 0 && n == 0 {
+		call.Resp <- protocol.FlushAck{
+			OK: false, Error: "STALE_SPAWN: flush carries no spawn_n; the current derivation is " +
+				strconv.Itoa(m.spawnN),
+		}
+		return
+	}
+	// The recovery-adoption window: the request names a derivation the
 	// monitor has not adopted yet (the serveFlush fence has already
-	// proven it is the hub's latest known id, never a stale generation).
-	// Queue it — the RTRecovered attachment this id belongs to is
-	// already in flight on rtCh; onRecovered releases the call the
-	// moment the id becomes current. Only one such call can exist (the
-	// window is one spawn deep); a second answers an explicit refusal.
-	if id := call.Req.AttemptID; id != "" && id != m.attemptID {
+	// proven it is the hub's latest announced counter, never an older
+	// one). Queue it — the RTRecovered attachment this counter belongs to
+	// is already in flight on rtCh; onRecovered releases the call the
+	// moment the counter becomes current. Only one such call can exist
+	// (the window is one spawn deep); a second answers an explicit
+	// refusal.
+	if n := call.Req.SpawnN; n != 0 && n != m.spawnN {
 		if m.deferredFlush == nil {
 			m.deferredFlush = &call
 			return
 		}
 		call.Resp <- protocol.FlushAck{
-			OK: false, Error: "flush adoption window busy; retry: attempt_id " + id +
-				" is still ahead of the monitor (holding " + m.attemptID + ")",
+			OK: false, Error: "flush adoption window busy; retry: spawn_n " + strconv.Itoa(n) +
+				" is still ahead of the monitor (holding " + strconv.Itoa(m.spawnN) + ")",
 		}
 		return
 	}
@@ -1637,6 +1708,15 @@ func (m *Monitor) currentAttempt() string {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
 	return m.attemptID
+}
+
+// currentSpawn answers the derivation counter the monitor has ADOPTED
+// (B2 fence input for the HTTP read face; stateMu-guarded like
+// attemptID — serveFlush reads it cross-goroutine).
+func (m *Monitor) currentSpawn() int {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	return m.spawnN
 }
 
 // canonicalWI answers the CANONICAL work-item id this monitor is keyed

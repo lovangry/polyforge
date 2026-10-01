@@ -156,12 +156,13 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, ch
 		pushDone:   make(chan pushResult, 1),
 		wrapDone:   make(chan wrapResult, 1),
 		probeDone:  make(chan probeResult, 1),
+		verifyDone: make(chan verifyResult, 1),
 		hangAnchor: time.Now(),
 		stream:     newStreamState(),
 	}
 	m.execPath = m.execJSONPath()
 	m.attach(Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_test", AttemptID: h.AttemptID()},
+		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_test", AttemptID: h.AttemptID(), SpawnN: 1},
 		Handle: h,
 		WI:     m.wi,
 	})

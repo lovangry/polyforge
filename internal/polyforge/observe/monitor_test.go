@@ -322,6 +322,7 @@ func TestIdleExemptWhilePendingQuestion(t *testing.T) {
 		Req: protocol.FlushRequest{
 			WorkItem:   "wi_test",
 			AttemptID:  "att_1",
+			SpawnN:     1,
 			Reason:     protocol.FlushNeedsInput,
 			QuestionID: "q_1",
 			Question:   "which way?",
@@ -385,7 +386,7 @@ func TestMonitorNotBlockedByAnswerAckWait(t *testing.T) {
 	})
 
 	// Arm a pending question.
-	fc := FlushCall{Req: protocol.FlushRequest{Reason: protocol.FlushNeedsInput, QuestionID: "q1", Question: "A or B?"}, Resp: make(chan protocol.FlushAck, 1)}
+	fc := FlushCall{Req: protocol.FlushRequest{SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: "q1", Question: "A or B?"}, Resp: make(chan protocol.FlushAck, 1)}
 	m.flushCh <- fc
 	if ack := <-fc.Resp; !ack.OK {
 		t.Fatalf("needs_input ack: %+v", ack)
@@ -468,7 +469,7 @@ func TestExpectedExitAfterWrapIsSilent(t *testing.T) {
 	m, ob := newTestMonitor(t, h, nil)
 
 	// A successful wrap seals the attempt...
-	fc := FlushCall{Req: protocol.FlushRequest{Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped}, Resp: make(chan protocol.FlushAck, 1)}
+	fc := FlushCall{Req: protocol.FlushRequest{SpawnN: 1, Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped}, Resp: make(chan protocol.FlushAck, 1)}
 	m.flushCh <- fc
 	ack := <-fc.Resp
 	if !ack.OK {
@@ -812,7 +813,7 @@ func TestNoProgressExemptWhilePendingQuestion(t *testing.T) {
 	resp := make(chan protocol.FlushAck, 1)
 	m.flushCh <- FlushCall{
 		Req: protocol.FlushRequest{
-			WorkItem: "wi_test", AttemptID: "att_1", Reason: protocol.FlushNeedsInput,
+			WorkItem: "wi_test", AttemptID: "att_1", SpawnN: 1, Reason: protocol.FlushNeedsInput,
 			QuestionID: "q_np", Question: "which way?", Step: "code",
 		},
 		Resp: resp,

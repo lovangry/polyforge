@@ -17,7 +17,7 @@ import (
 
 func flushReq(reason string) FlushCall {
 	return FlushCall{
-		Req:  protocol.FlushRequest{WorkItem: "wi_test", AttemptID: "att_1", Reason: reason},
+		Req:  protocol.FlushRequest{WorkItem: "wi_test", AttemptID: "att_1", SpawnN: 1, Reason: reason},
 		Resp: make(chan protocol.FlushAck, 1),
 	}
 }
@@ -146,7 +146,7 @@ func TestFlushNeedsInputIdempotentByQuestionID(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, nil)
 
-	call := FlushCall{Req: protocol.FlushRequest{Reason: protocol.FlushNeedsInput, QuestionID: "q9", Question: "which?", Step: "code"}, Resp: make(chan protocol.FlushAck, 1)}
+	call := FlushCall{Req: protocol.FlushRequest{SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: "q9", Question: "which?", Step: "code"}, Resp: make(chan protocol.FlushAck, 1)}
 	if ack := doFlush(m, call); !ack.OK {
 		t.Fatalf("first needs_input ack: %+v", ack)
 	}
@@ -159,7 +159,7 @@ func TestFlushNeedsInputIdempotentByQuestionID(t *testing.T) {
 		t.Fatalf("needs_input events: got %d, want 1", got)
 	}
 	// A malformed flush is the only refusal on this path.
-	bad := FlushCall{Req: protocol.FlushRequest{Reason: protocol.FlushNeedsInput}, Resp: make(chan protocol.FlushAck, 1)}
+	bad := FlushCall{Req: protocol.FlushRequest{SpawnN: 1, Reason: protocol.FlushNeedsInput}, Resp: make(chan protocol.FlushAck, 1)}
 	if ack := doFlush(m, bad); ack.OK {
 		t.Fatalf("needs_input without question_id must be refused: %+v", ack)
 	}

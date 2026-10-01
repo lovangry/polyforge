@@ -134,7 +134,7 @@ func TestHTTPObserveAfterCursor(t *testing.T) {
 	// distinct question_id is one needs_input event).
 	for i := 0; i < 3; i++ {
 		code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-			WorkItem: "wi_http", AttemptID: "att_cur",
+			WorkItem: "wi_http", AttemptID: "att_cur", SpawnN: 1,
 			Reason: protocol.FlushNeedsInput, QuestionID: "q_http_" + strconv.Itoa(i), Question: "again?",
 		}, nil)
 		if code != 200 {
