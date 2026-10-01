@@ -19,6 +19,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
@@ -32,12 +33,19 @@ func (m *Monitor) JobView() *protocol.JobView {
 	pending := m.pending
 	sealing, wrapped, blocked := m.sealing, m.wrapped, m.blocked
 	attempt := m.attemptID
+	spawn := m.spawnN
+	fp := ""
+	if m.sessionID != "" {
+		fp = api.SessionFingerprint(m.sessionID) // public handle (B3)
+	}
 	m.stateMu.Unlock()
 
 	view := &protocol.JobView{
 		WorkItem:   m.wi.WorkItem,
 		Project:    m.wi.Project,
 		AttemptID:  attempt,
+		SpawnN:     spawn,
+		SessionFingerprint: fp,
 		BundleName: m.wi.BundleName,
 		Pending:    pending,
 	}

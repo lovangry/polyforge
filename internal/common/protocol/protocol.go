@@ -189,6 +189,11 @@ type JobView struct {
 	Status      string               `json:"status"`
 	Generation  int64                `json:"generation"`
 	AttemptID   string               `json:"attempt_id"`
+	// v1.5 B2/B3 faces: the per-WI derivation counter (the flush fence
+	// key a caller must echo) and the PUBLIC session handle (never the
+	// secret). Additive; cleanup deletes Generation/AttemptID.
+	SpawnN            int    `json:"spawn_n"`
+	SessionFingerprint string `json:"session_fingerprint,omitempty"`
 	BundleName  string               `json:"bundle_name"`
 	CurrentStep string               `json:"current_step"`
 	Steps       map[string]*StepView `json:"steps"`

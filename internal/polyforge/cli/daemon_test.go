@@ -199,22 +199,16 @@ func TestDaemonClientPauseWrapResumeEndToEnd(t *testing.T) {
 	if code, _, stderr := runPf(t, env, "pause", "wi_abc"); code != 0 {
 		t.Fatalf("pause: code=%d stderr=%s", code, stderr)
 	}
-	// The daemon pause request carries the clean_pause flag (the
-	// daemon-side hub transition sets it at merge).
-	if got := d.rec.last(); got.Method != "POST" || got.Path != "/jobs/wi_abc/pause" || got.Body != `{"clean_pause":true}` {
+	// Merge amend: the pause is ATOMIC — only the daemon route is
+	// contacted; the clean_pause flag rides the daemon's own fenced
+	// SessionEnd (status=paused), so there is no early hub PATCH.
+	if got := d.rec.last(); got.Method != "POST" || got.Path != "/jobs/wi_abc/pause" {
 		t.Errorf("pause request = %s %s %q", got.Method, got.Path, got.Body)
 	}
-	// ...and the hub-side flag landed BEFORE the daemon call (fail-safe
-	// ordering: a crash between the two must not leave an
-	// operator-paused WI auto-resumable).
-	var patchSeen *capturedRequest
 	for _, r := range aihubRec.all() {
-		if r.Method == "PATCH" && strings.Contains(r.Body, `"clean_pause":true`) {
-			patchSeen = &r
+		if r.Method == "PATCH" {
+			t.Errorf("atomic pause must not PATCH the hub first; saw %s %s %q", r.Method, r.Path, r.Body)
 		}
-	}
-	if patchSeen == nil {
-		t.Errorf("pause must PATCH clean_pause=true on the hub first; saw %v", aihubRec.all())
 	}
 	if code, _, stderr := runPf(t, env, "wrap", "wi_abc", "--fail"); code != 0 {
 		t.Fatalf("wrap --fail: code=%d stderr=%s", code, stderr)

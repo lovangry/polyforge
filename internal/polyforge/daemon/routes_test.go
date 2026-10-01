@@ -78,7 +78,7 @@ func TestObserveAnswerFlush(t *testing.T) {
 
 	// The agent's needs_input lifeline (ruling C2: UDS proxy).
 	fraw, err := td.client.Flush("wi_b", protocol.FlushRequest{
-		WorkItem: "wi_b", AttemptID: jv.AttemptID,
+		WorkItem: "wi_b", AttemptID: jv.AttemptID, SpawnN: jv.SpawnN,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_abc123",
 		Question: "which flavor?", Step: "spec",
 	})
@@ -159,7 +159,7 @@ func TestWrapDualPathArbitration(t *testing.T) {
 	flushDone := make(chan error, 1)
 	go func() {
 		_, err := td.client.Flush("wi_c", protocol.FlushRequest{
-			WorkItem: "wi_c", AttemptID: cjv.AttemptID,
+			WorkItem: "wi_c", AttemptID: cjv.AttemptID, SpawnN: cjv.SpawnN,
 			Reason: protocol.FlushWrap, FinalStatus: "wrapped",
 		})
 		flushDone <- err
@@ -212,7 +212,7 @@ func TestWrapDualPathArbitration(t *testing.T) {
 		t.Fatalf("wi_d view undecodable: %v (%s)", err, draw)
 	}
 	if _, err := td2.client.Flush("wi_d", protocol.FlushRequest{
-		WorkItem: "wi_d", AttemptID: djv.AttemptID,
+		WorkItem: "wi_d", AttemptID: djv.AttemptID, SpawnN: djv.SpawnN,
 		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
 	}); err == nil {
 		t.Fatal("flush(wrap) during the CLI close succeeded; want DAEMON-409")
@@ -587,17 +587,17 @@ func TestFlushStaleAttemptRefused(t *testing.T) {
 		t.Fatalf("wi_f view undecodable: %v (%s)", err, fraw)
 	}
 
-	// A zombie's wrap flush (a stale instance id): refused at the fence.
+	// A zombie's wrap flush (a stale derivation counter): refused at the fence.
 	_, err = td.client.Flush("wi_f", protocol.FlushRequest{
-		WorkItem: "wi_f", AttemptID: "ra_stale",
+		WorkItem: "wi_f", SpawnN: fjv.SpawnN + 1,
 		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
 	})
 	if err == nil {
-		t.Fatal("stale flush(wrap) succeeded; want DAEMON-409 STALE_ATTEMPT")
+		t.Fatal("stale flush(wrap) succeeded; want DAEMON-409 STALE_SPAWN")
 	}
 	var ae *api.Error
-	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "STALE_ATTEMPT") {
-		t.Fatalf("stale flush error = %v, want DAEMON-409 STALE_ATTEMPT", err)
+	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "STALE_SPAWN") {
+		t.Fatalf("stale flush error = %v, want DAEMON-409 STALE_SPAWN", err)
 	}
 
 	// The live attempt was untouched: the CLI close still wins.
@@ -635,7 +635,7 @@ func TestStatusShowsNeedsInput(t *testing.T) {
 		t.Fatalf("observe undecodable: %v", err)
 	}
 	if _, err := td.client.Flush("wi_askst", protocol.FlushRequest{
-		WorkItem: "wi_askst", AttemptID: jv.AttemptID,
+		WorkItem: "wi_askst", AttemptID: jv.AttemptID, SpawnN: jv.SpawnN,
 		Reason: protocol.FlushNeedsInput, QuestionID: "q_d6001",
 		Question: "pick one", Step: "spec",
 	}); err != nil {

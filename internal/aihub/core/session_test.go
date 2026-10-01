@@ -318,8 +318,9 @@ func TestSessionEndFenceAndClear(t *testing.T) {
 	if err := m.End(id, api.SessionEndRequest{SessionID: "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b", Status: api.StatusWrapped}, env.UserID); !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
 		t.Fatalf("session-end fence broken: %v", err)
 	}
-	// Bad status: 400.
-	if err := m.End(id, api.SessionEndRequest{SessionID: secret, Status: api.StatusPaused}, env.UserID); !IsCode(err, api.ErrCoreBadInput) {
+	// Bad status: 400 (paused is LEGAL now — merge amend: it routes to the
+	// M3 pause transition; use a genuinely illegal status).
+	if err := m.End(id, api.SessionEndRequest{SessionID: secret, Status: "queued"}, env.UserID); !IsCode(err, api.ErrCoreBadInput) {
 		t.Fatalf("bad status accepted: %v", err)
 	}
 	// Blocked (M2): session cleared + status blocked.

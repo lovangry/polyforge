@@ -115,7 +115,7 @@ func TestShutdownFlushPositive(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if _, err := td.client.Flush("wi_s3", protocol.FlushRequest{
-		WorkItem: "wi_s3", AttemptID: sjv.AttemptID, Reason: protocol.FlushShutdown,
+		WorkItem: "wi_s3", AttemptID: sjv.AttemptID, SpawnN: sjv.SpawnN, Reason: protocol.FlushShutdown,
 	}); err != nil {
 		t.Fatalf("flush(shutdown): %v", err)
 	}

@@ -58,7 +58,7 @@ func TestWrapDualPathPushesOnce(t *testing.T) {
 		t.Fatalf("view undecodable: %v (%s)", err, raw)
 	}
 	fraw, err := td.client.Flush("wi_once", protocol.FlushRequest{
-		WorkItem: "wi_once", AttemptID: jv.AttemptID,
+		WorkItem: "wi_once", AttemptID: jv.AttemptID, SpawnN: jv.SpawnN,
 		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
 	})
 	if err != nil {

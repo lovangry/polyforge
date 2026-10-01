@@ -109,7 +109,7 @@ func TestFlushWrapDuringRecoveryWindowAnswersRetryableTransient(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if _, err := td.client.Flush("wi_rw", protocol.FlushRequest{
-		WorkItem: "wi_rw", AttemptID: rjv.AttemptID,
+		WorkItem: "wi_rw", AttemptID: rjv.AttemptID, SpawnN: rjv.SpawnN,
 		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
 	}); err != nil {
 		t.Fatalf("post-window flush(wrap): %v", err)

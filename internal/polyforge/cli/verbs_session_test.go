@@ -240,58 +240,30 @@ func TestResumeWireErrorClasses(t *testing.T) {
 	}
 }
 
-// TestPauseFlagLandFailureDegradesToWarning: when the hub-side flag
-// write cannot land — a dead server OR the v1 server's typed
-// IMMUTABLE refusal for the not-yet-implemented clean_pause field —
-// the pause still proceeds (the daemon request body repeats the flag)
-// with a stderr warning, never a refused pause.
-func TestPauseFlagLandFailureDegradesToWarning(t *testing.T) {
+// TestPauseNeedsNoHub: the atomic pause (merge amend 724c5e4) touches
+// ONLY the daemon route — the clean_pause flag rides the daemon's own
+// fenced SessionEnd, so a CLI with no hub configured pauses fine, and
+// nothing is written anywhere before the daemon accepts.
+func TestPauseNeedsNoHub(t *testing.T) {
 	d := newDaemonFixture(t)
 	d.answer("POST", "/jobs/wi_abc/pause", `{}`)
 	code, _, stderr := runPf(t, map[string]string{
-		// No PF_SERVER: the PATCH dials the default (dead) local address.
+		// No PF_SERVER: nothing outside the daemon route is dialed.
 		"PF_DAEMON_SOCKET": d.sock,
 	}, "pause", "wi_abc")
 	if code != 0 {
-		t.Fatalf("pause must degrade, not fail: code=%d stderr=%s", code, stderr)
+		t.Fatalf("pause: code=%d stderr=%s", code, stderr)
 	}
-	if !strings.Contains(stderr, "could not set clean_pause") {
-		t.Errorf("stderr must carry the flag warning: %s", stderr)
-	}
-	// The daemon pause still happened, and its body carries the flag.
 	got := d.rec.last()
-	if got.Path != "/jobs/wi_abc/pause" || !strings.Contains(got.Body, `"clean_pause":true`) {
+	if got.Method != "POST" || got.Path != "/jobs/wi_abc/pause" {
 		t.Errorf("pause request = %s %s %q", got.Method, got.Path, got.Body)
-	}
-
-	// The transition shape specifically: today's aihub answers the
-	// clean_pause PATCH with CORE-400 IMMUTABLE (the field is not
-	// patchable until Lane A lands). The pause still succeeds.
-	d2 := newDaemonFixture(t)
-	d2.answer("POST", "/jobs/wi_abc/pause", `{}`)
-	aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "PATCH" {
-			w.WriteHeader(http.StatusBadRequest)
-			io.WriteString(w, `{"code":"CORE-400","extra":"IMMUTABLE","detail":"field \"clean_pause\" is not patchable"}`)
-			return
-		}
-		io.WriteString(w, cannedWI)
-	})
-	code, _, stderr = runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d2.sock,
-	}, "pause", "wi_abc")
-	if code != 0 {
-		t.Fatalf("pause must tolerate the pre-Lane-A IMMUTABLE refusal: code=%d stderr=%s", code, stderr)
-	}
-	if !strings.Contains(stderr, "could not set clean_pause") {
-		t.Errorf("stderr must carry the flag warning: %s", stderr)
 	}
 }
 
-// TestPauseRefusalUndoesTheFlag: when the daemon refuses the pause, the
-// early flag write is undone (PATCH clean_pause=false) so a non-paused
-// work item does not carry a stale marker.
-func TestPauseRefusalUndoesTheFlag(t *testing.T) {
+// TestPauseRefusalWritesNothing: a refused pause makes NO hub write at
+// all — the flag lands atomically with the pause transition, so there
+// is no early write to undo and no stale marker can survive a refusal.
+func TestPauseRefusalWritesNothing(t *testing.T) {
 	var aihubRec reqRecorder
 	aihub := newFakeAihub(t, &aihubRec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, cannedWI)
@@ -304,14 +276,7 @@ func TestPauseRefusalUndoesTheFlag(t *testing.T) {
 	if code != 1 || !strings.Contains(stderr, "DAEMON-404") {
 		t.Fatalf("pause refusal: code=%d stderr=%s", code, stderr)
 	}
-	// The undo PATCH landed.
-	sawUndo := false
-	for _, r := range aihubRec.all() {
-		if r.Method == "PATCH" && strings.Contains(r.Body, `"clean_pause":false`) {
-			sawUndo = true
-		}
-	}
-	if !sawUndo {
-		t.Errorf("the refused pause must undo the early flag write; saw %v", aihubRec.all())
+	if n := len(aihubRec.all()); n != 0 {
+		t.Errorf("the refused pause must write nothing to the hub; saw %d calls: %v", n, aihubRec.all())
 	}
 }

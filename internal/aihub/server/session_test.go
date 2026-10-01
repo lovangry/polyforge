@@ -243,9 +243,10 @@ func TestSessionEndOverHTTP(t *testing.T) {
 	} else if c, r := errEnvelope(t, raw); c != "CORE-403" || r != "STALE_SESSION" {
 		t.Fatalf("wrong refusal: %s %s", c, r)
 	}
-	// Bad status: 400.
+	// Bad status: 400 (paused is legal since the merge amend — use an
+	// illegal one).
 	if code, _ := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
-		map[string]string{"session_id": secret, "status": "paused"}, nil); code != 400 {
+		map[string]string{"session_id": secret, "status": "queued"}, nil); code != 400 {
 		t.Fatalf("bad status accepted: %d", code)
 	}
 	// Real end: wrapped, session fields cleared on the read surface.
