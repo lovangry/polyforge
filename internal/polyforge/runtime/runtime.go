@@ -963,14 +963,15 @@ func atomicWriteFileMode(dst string, in io.Reader, perm os.FileMode) error {
 }
 
 // ---------------------------------------------------------------------------
-// Stop (§一): seal → final push → EndGeneration → RTFinished.
+// Stop (§一): seal → final push → SessionEnd → RTFinished.
 
-// Stop seals wi with a terminal reason (protocol.FinishWrapped | -Failed).
-// The agent tree is torn down, the capsule's final state is committed and
-// pushed, the generation is ended server-side, the scene is made read-only
-// and Observe hears WIFinished. An EndGeneration failure leaves the job in
-// SEALING (persisted with its reason) so a restart finishes the close —
-// never a silent half-seal.
+// Stop seals wi with a terminal reason (protocol.FinishWrapped | -Failed,
+// plus "paused" from the CLI pause route). The agent tree is torn down,
+// the capsule's final state is committed and pushed, the session is ended
+// server-side (SessionEnd, fenced on our secret), the scene is made
+// read-only and Observe hears WIFinished. A SessionEnd failure leaves the
+// job in SEALING (persisted with its reason) so a restart finishes the
+// close — never a silent half-seal.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	return r.stopWith(ctx, wi, reason, false)
 }
@@ -1033,7 +1034,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		j.mu.Lock()
 		j.stopReason = reason
 		// Persisted with the reason: a daemon crash between the flush's
-		// push and EndGeneration must not make the restart's stop finisher
+		// push and SessionEnd must not make the restart's stop finisher
 		// re-push either.
 		j.sealedPush = sealedByFlush
 		j.mu.Unlock()
