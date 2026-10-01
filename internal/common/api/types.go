@@ -218,6 +218,24 @@ type SessionEndRequest struct {
 	CleanPause bool `json:"clean_pause,omitempty"`
 }
 
+// SessionHolderResponse is the §1.7 public holder read
+// (GET /api/v1/work-items/{id}/session): who holds the WI now, in PUBLIC
+// fields only — the same audit set as the m4 SessionPublic block, with
+// machine_id spelled per the endpoint contract. The holder fields are
+// flat-omitted when nobody holds the WI (the §1.2 precedent of simply
+// omitting the fingerprint when unheld); the tri-state
+// (unheld / held-paused / held-running) is three ordinary 200 answers.
+// NEVER session_hash, never the secret (B3).
+type SessionHolderResponse struct {
+	WorkItemID         string `json:"work_item_id"`
+	Status             string `json:"status"`
+	SessionFingerprint string `json:"session_fingerprint,omitempty"`
+	MachineID          string `json:"machine_id,omitempty"`
+	SessionOwner       string `json:"session_owner,omitempty"`
+	SessionStartedAt   string `json:"session_started_at,omitempty"`
+	CleanPause         bool   `json:"clean_pause"`
+}
+
 // SessionFingerprint derives the public handle from the secret:
 // hex(sha256(session_id))[:16]. Both sides compute it identically; the hub
 // stores the full hash and serves only the prefix on public surfaces.
