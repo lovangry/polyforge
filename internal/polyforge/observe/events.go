@@ -52,6 +52,25 @@ const (
 	EvPushFailed       = "push_failed"
 	EvPushBackpressure = "push_backpressure"
 	EvWrapBlocked      = "wrap_blocked"
+	// EvPushPoisonedLocal is the V8-repair classification of the LOCAL
+	// gitlink precheck refusal (gitops' typed GIT-412
+	// LOCAL_GITLINK_DETECTED — the poison never entered local history).
+	// Deliberately a SEPARATE kind from push_failed: the M8 read-through
+	// counts push_failed/published/wrap_blocked only, and a local
+	// precheck refusal is not "an already-occurred boundary sync request
+	// that failed" — it is the daemon declining to CREATE a commit that
+	// never legally existed, so it belongs in neither M8's numerator nor
+	// its denominator. A server-side pre-receive rejection of an
+	// already-committed gitlink (should one ever occur again) stays an
+	// ordinary push_failed and is counted, unchanged.
+	EvPushPoisonedLocal = "push_poisoned_local"
+	// EvWrapEvidenceRefused is the V4 fail-closed gate's record: a
+	// flush(wrap) was refused with DAEMON-400 VERIFICATION_EVIDENCE_MISSING
+	// because an executed verification step carries no structured command
+	// evidence. The attempt is NOT terminal — the agent appends the
+	// evidence and re-flushes — so this is neither wrap_blocked nor any
+	// push bookkeeping; the refusal happened before any commit attempt.
+	EvWrapEvidenceRefused = "wrap_evidence_refused"
 	// EvTranscriptMissing is the F3 typed warning: a commit-boundary
 	// transcript sync could not locate the derivation's live harness
 	// transcript (the harness wrote nothing under its session store).

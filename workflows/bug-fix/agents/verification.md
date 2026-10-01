@@ -83,6 +83,26 @@ quality belongs here (`review` handles that next).
 Do not report `pass` on a check you skipped because it seemed slow — mark it `skipped`
 with a reason. A false `pass` here hands a broken fix to `review` and `release`.
 
+## Evidence obligation (hard gate)
+
+This step cannot be marked `done` without structured command evidence: the driver
+records every command this step runs into `steps.verification.output.commands` as
+`{argv, exit_code, duration_ms, started_at}` entries, and the done-write is forbidden
+unless at least one readable entry (non-empty `argv`, readable `exit_code`) exists.
+Your obligations that make that possible:
+
+- Run every check — the standard set AND the original repro — through the driver's
+  command execution (never summarize a command you did not actually run through it)
+  and report the exact argv of each check in your output, so the audit record matches
+  what ran.
+- Never claim a check ran without its command having run — an evidence-less `done` is
+  a contract violation, and the daemon enforces the same rule fail-closed at the seal:
+  a `flush(wrap)` with no readable command evidence for an executed verification step
+  is refused with `DAEMON-400 VERIFICATION_EVIDENCE_MISSING` until the evidence is
+  appended.
+- If you genuinely ran nothing recordable (no build/lint/test command applies at all),
+  say so explicitly in `checks` — never fabricate an argv to satisfy the gate.
+
 ## Output
 
 Emit the final JSON object per the schema above.

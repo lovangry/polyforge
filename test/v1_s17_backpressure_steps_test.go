@@ -26,13 +26,16 @@ import (
 
 func TestV1S17BackpressureSteps(t *testing.T) {
 	inst := newV1Install(t)
-	// The plan keeps producing versions through the outage window:
-	// steps spaced by sleeps (~22x2.5s = ~55s), longer than the 5x10s
-	// failed-push ladder needs, then parks (the agent stays alive --
-	// degradation never kills, and the WI is closed by the scenario,
-	// not by the plan).
+	// The plan keeps producing versions through the outage window and
+	// WELL PAST the catch-up assertion: with the same-error retry cap,
+	// a halted round re-arms at the next commit boundary (an execution.json
+	// Version bump), so the version stream is what carries the retry
+	// ladder — ~60x2.5s = 150s of steps, longer than the outage ladder
+	// AND the post-restart catch-up need, then parks (the agent stays
+	// alive -- degradation never kills, and the WI is closed by the
+	// scenario, not by the plan).
 	actions := []map[string]any{{"do": "step", "id": "warm"}}
-	for i := 0; i < 22; i++ {
+	for i := 0; i < 60; i++ {
 		actions = append(actions,
 			map[string]any{"do": "step", "id": fmt.Sprintf("outage-%02d", i)},
 			map[string]any{"do": "sleep", "ms": 2500},
@@ -61,16 +64,34 @@ func TestV1S17BackpressureSteps(t *testing.T) {
 	// fires with reason "steps".
 	inst.stopAihub()
 	waitForEvent(t, d, wi, "push_failed", 30*time.Second)
-	bp := waitForEvent(t, d, wi, "push_backpressure", 150*time.Second)
+	// The same-error retry cap writes its own reason="same_error"
+	// event at the same failure count (the versions the plan keeps
+	// producing re-arm the round each boundary, so the failure ladder
+	// itself is unaffected) — wait for the STEPS event specifically,
+	// not whichever degradation event lands first.
+	deadline := time.Now().Add(150 * time.Second)
 	var body struct {
 		Reason       string `json:"reason"`
 		FailedPushes int    `json:"failed_pushes"`
 	}
-	if err := json.Unmarshal(bp.Body, &body); err != nil {
-		t.Fatalf("push_backpressure body: %v (%s)", err, bp.Body)
+	for {
+		for _, e := range d.eventsOf(t, wi) {
+			if e.Kind != "push_backpressure" {
+				continue
+			}
+			body.Reason = ""
+			_ = json.Unmarshal(e.Body, &body)
+			if body.Reason == "steps" {
+				break
+			}
+		}
+		if body.Reason == "steps" || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	if body.Reason != "steps" {
-		t.Fatalf("backpressure reason %q, want steps (body %s)", body.Reason, bp.Body)
+		t.Fatalf("no steps-reason backpressure event in bound (last reason %q)", body.Reason)
 	}
 	if body.FailedPushes < 5 {
 		t.Fatalf("failed_pushes %d, want >= 5 (the production default threshold)", body.FailedPushes)

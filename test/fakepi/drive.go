@@ -34,6 +34,10 @@ type planAction struct {
 	Name     string `json:"name"`     // repo: the repos/ subdirectory
 	Origin   string `json:"origin"`   // repo: the origin remote URL
 	Kind     string `json:"kind"`     // ui_noise: "ui" (default) | "progress"
+	// NoEvidence suppresses the step's structured command evidence (the
+	// wrap-evidence-gate scenario scripts a verification step whose
+	// output carries no commands record, then repairs it).
+	NoEvidence bool `json:"no_evidence,omitempty"`
 }
 
 // plan is the whole scripted behavior of one derivation.
@@ -109,6 +113,7 @@ type execStep struct {
 	Status          string           `json:"status"`
 	Model           string           `json:"model,omitempty"` // the pinned candidate this derivation was spawned with
 	StepStartedAt   string           `json:"step_started_at,omitempty"`
+	Output          map[string]any   `json:"output,omitempty"` // the step result + the command-audit evidence array
 	Attempts        []any            `json:"attempts"`
 	Answers         []archivedAnswer `json:"answers"`
 	PendingQuestion *pendingQuestion `json:"pending_question,omitempty"`
@@ -270,12 +275,21 @@ func runDriveLoop(d *driveEnv) {
 	for _, act := range d.plan.Actions {
 		switch act.Do {
 		case "step":
-			d.runStep(act.ID)
+			d.runStep(act.ID, act.NoEvidence)
 		case "ask":
 			d.askAndWait(act.ID, act.Question)
 		case "wrap":
 			d.flushWrap("wrapped")
 			parkForever()
+		case "wrap_unless_refused":
+			// The wrap-evidence-gate scenario shape: flush(wrap), and when
+			// the daemon REFUSES the seal (the typed evidence-missing
+			// DAEMON-400), continue the plan — the scripted repair that
+			// follows appends the evidence and wraps again. An accepted
+			// wrap parks like the plain "wrap" action.
+			if d.flushWrap("wrapped") {
+				parkForever()
+			}
 		case "fail":
 			d.flushWrap("failed")
 			parkForever()
@@ -316,6 +330,18 @@ func runDriveLoop(d *driveEnv) {
 			sleepMS(act.MS)
 		case "repo":
 			d.makeRepo(act.Name, act.Origin)
+		case "poison_gitlink":
+			// The V8 poison shape: an embedded git repository OUTSIDE the
+			// gitignored repos/ tree — `git add -A` would stage it as a
+			// mode-160000 gitlink. The version bump in the same action
+			// arms the observe push, whose CommitPush must refuse the
+			// poison locally (GIT-412) instead of committing it.
+			d.poisonGitlink()
+		case "unpoison_gitlink":
+			// The documented cleanup, scripted: delete the nested .git and
+			// bump the Version — the next commit boundary re-arms the
+			// (same-error-capped) push round and the chain must recover.
+			d.unpoisonGitlink()
 		default:
 			fmt.Fprintf(os.Stderr, "fakepi: unknown plan action %q; parking\n", act.Do)
 			parkForever()
@@ -346,11 +372,16 @@ func pinnedModelOf() string {
 
 // runStep writes one step through execution.json: in_progress, then done
 // — two atomic writes, Version increasing each time (the async push
-// surface the observe lane polls).
-func (d *driveEnv) runStep(stepID string) {
+// surface the observe lane polls). The done write carries the step's
+// structured command evidence (output.commands) — the #29 command-audit
+// contract every real driver honors and the wrap gate enforces — unless
+// the plan action suppressed it (the evidence-gate scenario's broken
+// shape).
+func (d *driveEnv) runStep(stepID string, noEvidence bool) {
 	if stepID == "" {
 		stepID = "step-anon"
 	}
+	started := time.Now()
 	d.commit(func(x *execState) {
 		st := x.step(stepID)
 		st.Status = "in_progress"
@@ -363,14 +394,26 @@ func (d *driveEnv) runStep(stepID string) {
 	d.journal("step", map[string]any{"step": stepID, "phase": "in_progress"})
 	sleepMS(80)
 	d.commit(func(x *execState) {
-		x.step(stepID).Status = "done"
+		st := x.step(stepID)
+		st.Status = "done"
+		if !noEvidence {
+			st.Output = map[string]any{
+				"verdict": "pass",
+				"commands": []any{map[string]any{
+					"argv":        []any{"fakepi", "step", stepID},
+					"exit_code":   0,
+					"duration_ms": time.Since(started).Milliseconds(),
+					"started_at":  nowStamp(),
+				}},
+			}
+		}
 	})
 	// a step artifact: proves the capsule chain carries agent-written bytes
 	if err := os.MkdirAll("artifacts", 0o755); err == nil {
 		_ = os.WriteFile(filepath.Join("artifacts", stepID+".md"),
 			[]byte("# "+stepID+"\n\nfake agent output of step "+stepID+"\n"), 0o644)
 	}
-	d.journal("step", map[string]any{"step": stepID, "phase": "done"})
+	d.journal("step", map[string]any{"step": stepID, "phase": "done", "evidence": !noEvidence})
 	sleepMS(60)
 }
 
@@ -585,9 +628,10 @@ func (d *driveEnv) beginShutdownFlush() {
 // ---------------------------------------------------------------------------
 // flush(reason): the agent→daemon UDS proxy call (ruling C2).
 
-func (d *driveEnv) flushWrap(finalStatus string) {
+func (d *driveEnv) flushWrap(finalStatus string) bool {
 	ack := d.flush("wrap", map[string]any{"final_status": finalStatus})
 	d.journal("flush", map[string]any{"reason": "wrap", "final_status": finalStatus, "ok": ack})
+	return ack
 }
 
 // flush delivers the agent→daemon proxy call with a bounded retry: the
@@ -766,6 +810,51 @@ func withKind(body map[string]any, kind string) map[string]any {
 	out["type"] = kind
 	out["at"] = nowStamp()
 	return out
+}
+
+// poisonGitlink lays an embedded git repository (with its own commit —
+// the shape `git add -A` stages as a mode-160000 gitlink) OUTSIDE the
+// gitignored repos/ tree, and bumps the Version so the observe lane's
+// async push picks the change up on the next tick.
+func (d *driveEnv) poisonGitlink() {
+	dir := filepath.Join("poison")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	run := func(args ...string) error {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fakepi: poison: git %v: %v: %s\n", args, err, out)
+			return err
+		}
+		return nil
+	}
+	ok := run("init", "-q", "-b", "main", ".") == nil &&
+		os.WriteFile(filepath.Join(dir, "inner.txt"), []byte("embedded history for "+d.wi+"\n"), 0o644) == nil &&
+		run("-c", "user.name=fake-agent", "-c", "user.email=fake-agent@invalid", "add", "-A") == nil &&
+		run("-c", "user.name=fake-agent", "-c", "user.email=fake-agent@invalid", "commit", "-q", "-m", "embedded history") == nil
+	d.commit(func(x *execState) {}) // Version bump: the next commit boundary
+	d.journal("poison_gitlink", map[string]any{"path": "poison", "laid": ok})
+}
+
+// unpoisonGitlink performs the refusal message's documented cleanup —
+// delete the embedded repository's .git — and bumps the Version: the
+// formerly embedded files become plain untracked work, and the next
+// commit boundary re-arms the halted push round.
+func (d *driveEnv) unpoisonGitlink() {
+	err := os.RemoveAll(filepath.Join("poison", ".git"))
+	// the staged gitlink (if the index still carried one) goes with it
+	d.commit(func(x *execState) {})
+	d.journal("unpoison_gitlink", map[string]any{"path": "poison", "err": errString(err)})
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // makeRepo lays a real git worktree under repos/<name> with an origin

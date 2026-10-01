@@ -242,6 +242,12 @@
   请求且本地提交已记录——**它本身不是终态证书**：最终结局以服务端 WI status 为准（ack 后的 push
   失败仍可能把 work item 落到 `blocked`）。ack 之后无论哪种情况都停——不要循环；daemon 在自己重试
   后仍报告失败时，work item 落 `blocked`——停。
+  有一种拒绝**不是**失败：`ok:false` 且 error 以 `DAEMON-400 VERIFICATION_EVIDENCE_MISSING` 开头的
+  ack，是 fail-closed 证据门发现已执行的 `verification` step 在 `steps.verification.output.commands`
+  里无可读命令证据（§十一第 4 条）。这是可修正的契约违规，不是终局：把缺失的证据条目补进同一原子
+  `execution.json` 写入（Version +1）——条目取自该 step 真实跑过的命令，绝不伪造——然后再次
+  `flush(wrap)`。若该 step 确实没有可记录的命令，那是 step 自身损坏：走该 step 自己的失败处理
+  （§十二/§十三），绝不原样重 flush。
 - **`shutdown`**：`pf/stop_notice` 之后的收尾 flush：提交现有内容。此处失败绝不挽留你：数据留在本地
   提交里，恢复引擎会接手；转入 idle。
 
@@ -315,12 +321,18 @@
    `model_candidates` 列表在当前生效候选索引（§6/§十三）处的候选；两级都缺席时每次派发保持 harness
    adapter 的缺省 model。把实际派发所用生效 model id 记进 `steps.<id>.model`——与启动 step 的同一
    次写入；observe face 渲染的正是这个记录。
-4. **命令审计（义务）**：为本 step 执行的每条命令，都必须在记录 step 结果的同一写入内、向
+4. **命令审计（义务；verification 步为硬门）**：为本 step 执行的每条命令，都必须在记录 step 结果的同一写入内、向
    `steps.<id>.output.commands` 追加一条记录：`{argv, exit_code, duration_ms, started_at}`——
-   直接取自命令结果，**绝不中转、绝不负载摘要**。
+   直接取自命令结果，**绝不中转、绝不负载摘要**。对 id 为 `verification` 的 step，这不止是义务，而是
+   `done` 的硬门：标 `done` 的那次写入，**必须**已使 `steps.verification.output.commands` 携带至少
+   一条可读的 `{argv, exit_code, duration_ms}`（argv 非空、exit_code 可读）——没有这条证据，不许写
+   `done`；跑了命令却拿不出记录，是审计路径自身损坏——先修记录（取自真实命令结果）再写 `done`，
+   绝不静默落一个无证据的 `done`。daemon 在 seal 处对同一契约 fail-closed：已执行的 verification
+   step 无结构化命令证据时，`flush(wrap)` 会被拒（§六 wrap 拒绝形状）。
 5. **收集 subagent 的最终 JSON 输出**并按 step skill 的 `output` JSON Schema 校验：
    - **有效且 `gate: true`**：业务判定——走 §5/§十二。
-   - **有效且非 gate**：把 step 标 `done`、写入其 `output`、回到 `next_step_by_order` 循环。
+   - **有效且非 gate**：把 step 标 `done`、写入其 `output`、回到 `next_step_by_order` 循环。对 `verification` 步，
+     这个转场受证据门约束（见第 4 条）：无可读命令证据，即无 `done`。
    - **echoed-field cross-check（done 处理）**：当 output schema 要求 echo 被引用上游 step 输出的
      某字段时，标 `done` 前逐元素比对。失配意味着本 step 没有真正行使上游 step 的产出——按本 step
      的基础设施失败处理（§6/§十三），**绝不静默 `done`**。

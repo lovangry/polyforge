@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -37,8 +38,8 @@ func TestBackpressureFiveFailedPushesWriteDegradationEvent(t *testing.T) {
 	soon(t, 3*time.Second, "5 failed pushes", func() bool {
 		return failures.Load() >= 5
 	})
-	soon(t, time.Second, "backpressure degradation event", func() bool {
-		return len(eventsOf(m, EvPushBackpressure)) >= 1
+	soon(t, time.Second, "steps-reason degradation event", func() bool {
+		return len(backpressureByReason(m, "steps")) >= 1
 	})
 	// The agent is NOT killed and the monitor still classifies records.
 	feed(h, fxTextDelta)
@@ -47,16 +48,18 @@ func TestBackpressureFiveFailedPushesWriteDegradationEvent(t *testing.T) {
 	})
 
 	// Recovery of the push path resets the episode: no further
-	// degradation events fire even as pushes continue.
-	before := len(eventsOf(m, EvPushBackpressure))
+	// steps-reason degradation events fire even as pushes continue. (The
+	// same-error cap may add its own reason="same_error" event at the
+	// streak bound — a different signal, counted separately below.)
+	before := len(backpressureByReason(m, "steps"))
 	fail.Store(false)
 	m.writeExec(t, 2, "code")
 	soon(t, time.Second, "successful push after degradation", func() bool {
 		return len(eventsOf(m, EvPublished)) >= 1
 	})
 	time.Sleep(100 * time.Millisecond)
-	if got := len(eventsOf(m, EvPushBackpressure)); got != before {
-		t.Fatalf("degradation events after recovery: got %d, want %d", got, before)
+	if got := len(backpressureByReason(m, "steps")); got != before {
+		t.Fatalf("steps-reason degradation events after recovery: got %d, want %d", got, before)
 	}
 }
 
@@ -87,4 +90,17 @@ func reasonOf(body []byte) string {
 	}
 	_ = json.Unmarshal(body, &b)
 	return b.Reason
+}
+
+// backpressureByReason reads the monitor's push_backpressure events
+// filtered by reason (steps / time / same_error are different signals
+// over the same event kind).
+func backpressureByReason(m *Monitor, reason string) []protocol.EventEntry {
+	var out []protocol.EventEntry
+	for _, e := range eventsOf(m, EvPushBackpressure) {
+		if reasonOf(e.Body) == reason {
+			out = append(out, e)
+		}
+	}
+	return out
 }
