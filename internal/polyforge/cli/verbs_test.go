@@ -136,6 +136,55 @@ func TestVerbQueueReadyHumanOutput(t *testing.T) {
 	}
 }
 
+// TestVerbQueueSessionColumnDecodeRender: a RAW aihub WI body carrying
+// session_fingerprint — a key api.WorkItem does not define — decodes
+// additively into WIView and renders in the SESSION column of the pf
+// queue table, both the plain list form and the --ready form; a body
+// WITHOUT the key renders "-" there, exactly as before the v1.5 keys
+// existed.
+func TestVerbQueueSessionColumnDecodeRender(t *testing.T) {
+	held := `{"id":"wi_1","slug":"pf-1","status":"running","priority":"high",` +
+		`"project":"polyforge","goal":"fix the thing","created_at":"t0",` +
+		`"session_fingerprint":"ab12cd34ef56aa00"}`
+	unheld := `{"id":"wi_2","slug":"pf-2","status":"queued","priority":"normal",` +
+		`"project":"polyforge","goal":"another goal","created_at":"t0"}`
+
+	// Plain list form: the fingerprint lands in the SESSION column.
+	srv := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"items":[`+held+`,`+unheld+`],"total":2}`)
+	})
+	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+	code, stdout, stderr := runPf(t, env, "queue")
+	if code != 0 {
+		t.Fatalf("queue: code=%d stderr=%s", code, stderr)
+	}
+	golden(t, "QueueListSessionColumn", stdout,
+		`2 work item(s)
+SLUG  STATUS   SESSION           PRIORITY  BUNDLE  GOAL
+----  -------  ----------------  --------  ------  -------------
+pf-1  running  ab12cd34ef56aa00  high      -       fix the thing
+pf-2  queued   -                 normal    -       another goal
+`)
+
+	// --ready form: same additive decode, same SESSION column, across
+	// both takeable segments.
+	srv = newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"items":[`+held+`],"unclassified":[`+unheld+`]}`)
+	})
+	env = map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+	code, stdout, stderr = runPf(t, env, "queue", "--ready")
+	if code != 0 {
+		t.Fatalf("queue --ready: code=%d stderr=%s", code, stderr)
+	}
+	golden(t, "QueueReadySessionColumn", stdout,
+		`2 work item(s)
+SLUG  STATUS   SESSION           PRIORITY  BUNDLE  GOAL           SEGMENT
+----  -------  ----------------  --------  ------  -------------  ------------
+pf-1  running  ab12cd34ef56aa00  high      -       fix the thing  items
+pf-2  queued   -                 normal    -       another goal   unclassified
+`)
+}
+
 func TestVerbCancelRequestShape(t *testing.T) {
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
