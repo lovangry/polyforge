@@ -64,6 +64,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/v1/work-items/{id}/progress", s.auth(s.hProgress))
 	m.HandleFunc("POST /api/v1/work-items/{id}/claim", s.auth(s.hSessionClaim))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-verify", s.auth(s.hSessionVerify))
+	m.HandleFunc("GET /api/v1/work-items/{id}/session", s.auth(s.hSessionHolder))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-attach", s.auth(s.hSessionAttach))
 	m.HandleFunc("POST /api/v1/work-items/{id}/force-takeover", s.auth(s.hForceTakeover))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-end", s.auth(s.hSessionEnd))
@@ -601,6 +602,30 @@ func (s *Server) hSessionVerify(w http.ResponseWriter, r *http.Request, idn *ide
 		return
 	}
 	resp, err := s.Sessions.Verify(id, req.SessionID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// hSessionHolder serves the §1.7 public holder read: who holds this
+// WI right now, in PUBLIC fields only. It deliberately uses the WI
+// read gate (wiProject + requireRead), not scopeCheck — any project
+// viewer may ask (the operator's takeover-decision input); non-members
+// get the standard hidden-not-found answer. All three holder states
+// (unheld / held-paused / held-running) are ordinary 200 answers;
+// the hash and secret never appear in any response.
+func (s *Server) hSessionHolder(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !s.requireRead(w, idn, projectID, "work item %s", r.PathValue("id")) {
+		return
+	}
+	resp, err := s.Sessions.Holder(id)
 	if err != nil {
 		writeErr(w, err)
 		return
