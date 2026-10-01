@@ -238,6 +238,7 @@ func (c *Client) SearchMemories(project, q, memType string, tags []string, limit
 // (human|machine), not v0's "kind".
 type UserCreateRequest struct {
 	DisplayName string `json:"display_name"`
+	Email       string `json:"email,omitempty"` // required for human users (CORE-400 otherwise)
 	UserType    string `json:"user_type,omitempty"`
 	Role        string `json:"role,omitempty"` // writer|admin
 }
