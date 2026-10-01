@@ -18,7 +18,10 @@ import "encoding/json"
 // RTMsg is a Runtime→Observe message.
 type RTMsg struct {
 	Kind      RTMsgKind `json:"kind"`
-	AttemptID string    `json:"attempt_id"` // fences stale messages
+	AttemptID string    `json:"attempt_id"` // fences stale messages (deleted in cleanup)
+	// v1.5 B2: the per-WI monotonic derivation counter. SpawnN is the
+	// session-model fence key (replaces AttemptID in the cleanup commit).
+	SpawnN    int       `json:"spawn_n"`
 	WorkItem  string    `json:"work_item"`
 	AgentPID  int       `json:"agent_pid,omitempty"`
 	Reason    string    `json:"reason,omitempty"` // WIFinished: wrapped|failed
