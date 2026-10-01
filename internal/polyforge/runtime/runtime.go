@@ -735,10 +735,13 @@ func (r *Runtime) prepareCapsule(j *job) error {
 		// No usable remote (or a torn local state): fall back to a purely
 		// local init — gitops owns the single implementation of the
 		// init/externalize pair (the old gitops.Init was removed: it
-		// wrote the .git pointer over a live directory).
+		// wrote the .git pointer over a live directory). The clone's own
+		// failure must not vanish with the fallback (the window rig
+		// measured exactly this: every real diagnosis lost).
 		if lerr := gitops.InitLocal(o); lerr != nil {
 			return fmt.Errorf("runtime: %s: capsule clone failed: %w", j.wi, err)
 		}
+		fmt.Fprintf(os.Stderr, "runtime: %s: capsule clone failed (%v); fell back to local init\n", j.wi, err)
 	}
 	return gitops.ExternalizeGitDir(o)
 }

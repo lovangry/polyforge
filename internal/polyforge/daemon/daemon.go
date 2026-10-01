@@ -224,6 +224,15 @@ func New(cfg Config) (*Daemon, error) {
 	if cfg.DataDir == "" || cfg.WorkspaceRoot == "" {
 		return nil, errors.New("daemon: DataDir and WorkspaceRoot are required")
 	}
+	// Relative paths are a footgun measured live on the window rig: the
+	// spawned git commands run with cmd.Dir = the capsule, so a relative
+	// DataDir resolves GIT_DIR under the capsule ('not a git repository').
+	// Absolutize both roots before anything derives paths from them.
+	for _, root := range []*string{&cfg.DataDir, &cfg.WorkspaceRoot} {
+		if abs, aerr := filepath.Abs(*root); aerr == nil {
+			*root = abs
+		}
+	}
 	cfg.fill()
 
 	rtCfg := runtime.Config{
