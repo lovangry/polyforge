@@ -344,7 +344,7 @@ var cmdPause = &Command{
 // Lane A implements the pause face).
 func patchCleanPause(ctx *Context, wiID string, value bool) error {
 	_, err := ctx.aihub().PatchWorkItem(wiID, map[string]any{"clean_pause": value})
-		return err
+	return err
 }
 
 // setCleanPause wraps patchCleanPause with the warning-only error
@@ -353,22 +353,27 @@ func setCleanPause(ctx *Context, wiID string, value bool) string {
 	if err := patchCleanPause(ctx, wiID, value); err != nil {
 		return fmt.Sprintf("could not set clean_pause=%v on the hub (%v); the daemon pause request still carries the flag", value, err)
 	}
-		return ""
+	return ""
 }
 
 // ---------------------------------------------------------------------------
 // resume — clear the operator pause: flips clean_pause back to false on
 // the hub and leaves the paused work item to its HOLDER daemon (the
-// session's machine re-attaches on its next start via session-attach;
+// session's machine attaches on its next start via session-attach;
 // a work item whose holder is gone moves with `pf takeover`). This
 // deliberately replaces v1's “fresh local claim via the daemon”
 // behavior — the v1.5 pause keeps the session on the hub, and only the
-// holder may resume it.
+// holder may resume it. Since the v1.5 review Finding 2 the pause also
+// RETAINS the holder daemon's local record, so the attach promised
+// below really can fire. If the holder daemon is LIVE when the resume
+// lands there is deliberately NO auto-pickup this phase: the retained
+// paused record sits until that daemon's next start (whose restart
+// reconciliation attaches); to continue immediately use `pf takeover`.
 // ---------------------------------------------------------------------------
 
 var cmdResume = &Command{
 	Name:    "resume",
-	Summary: "Clear the operator pause of a WI (clean_pause=false; the holder daemon resumes it)",
+	Summary: "Clear the operator pause of a WI (clean_pause=false; the holder daemon attaches on its next start)",
 	Usage:   "pf resume <id>",
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -383,6 +388,7 @@ var cmdResume = &Command{
 		}
 		fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the paused work item stays with its holder daemon\n", args[0])
 		fmt.Fprintln(ctx.Stdout, "(its machine re-attaches on the next daemon start; a work item whose holder is gone moves with `pf takeover <id> --reason ...`)")
+		fmt.Fprintln(ctx.Stdout, "(a live holder daemon does NOT pick this up until its next start; to continue immediately use `pf takeover`)")
 		return nil
 	},
 }

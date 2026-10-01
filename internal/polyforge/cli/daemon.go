@@ -159,7 +159,7 @@ type StatusJob struct {
 	// SpawnN is the v1.5 B2 derivation counter; SessionFingerprint is
 	// the PUBLIC session handle (B3) — the session model's identity
 	// pair, replacing the deleted attempt-id lineage handle.
-	SpawnN            int    `json:"spawn_n,omitempty"`
+	SpawnN             int    `json:"spawn_n,omitempty"`
 	SessionFingerprint string `json:"session_fingerprint,omitempty"`
 	AgentPID           int    `json:"agent_pid,omitempty"`
 	// NeedsInput/QuestionID are the D6 owner face: a job presented as

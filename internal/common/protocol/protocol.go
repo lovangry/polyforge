@@ -83,6 +83,18 @@ const (
 	FinishBlocked = "blocked"
 )
 
+// Non-terminal release reasons carried by WIFinished (v1.5 review
+// Findings 2 and 4): the runtime's OBSERVE RELEASE. RTFinished is not a
+// terminal-only message — it is also the "this daemon no longer
+// supervises the work item" signal that stops the monitor loop, prunes
+// the latestSpawn entry and makes the answer ledger forget the work
+// item. FinishPaused rides the operator pause close (session-end's 4th
+// verdict, M3); FinishSuperseded rides the OBSuperseded response (M4).
+const (
+	FinishPaused     = "paused"
+	FinishSuperseded = "superseded"
+)
+
 // ---------------------------------------------------------------------------
 // 2. Agent-side control surface (ruling C2: two transports, two method sets)
 // ---------------------------------------------------------------------------

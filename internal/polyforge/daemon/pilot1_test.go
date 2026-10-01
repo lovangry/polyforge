@@ -55,11 +55,13 @@ func TestSlugLifecycleEndToEnd(t *testing.T) {
 	}
 
 	// pause BY SLUG closes the canonical job: the pilot's exact flow
-	// (pause after submit) must keep working end to end.
+	// (pause after submit) must keep working end to end. Since the v1.5
+	// review Finding 2 the pause RETAINS the record (state paused) —
+	// the slug spelling must reach the canonical job for that too.
 	if _, err := td.client.Pause("proj#7"); err != nil {
 		t.Fatalf("pause by slug: %v", err)
 	}
-	waitGone(t, td, canonical)
+	waitState(t, td, canonical, "paused")
 	if st := hub.lastEnd().Status; st != "paused" {
 		t.Fatalf("pause end status = %q, want paused", st)
 	}

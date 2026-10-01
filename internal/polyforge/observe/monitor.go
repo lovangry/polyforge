@@ -312,11 +312,14 @@ type Monitor struct {
 	recovering bool
 	// superseded is the v1.5 M4 state: the periodic session-verify
 	// answered matches=false — another daemon holds the work item. The
-	// monitor stops supervising (detection, pushes and revalidation are
-	// suppressed; flushes are answered with the STALE_SPAWN refusal) but
-	// keeps draining its channels until Runtime's release (RTFinished)
-	// stops the loop. Observe makes NO hub transition (the new owner
-	// owns it). stateMu-guarded like the rest of the suppression set.
+	// monitor stops supervising (detection and pushes are suppressed;
+	// flushes are answered with the STALE_SPAWN refusal) but keeps
+	// draining its channels and KEEPS REVALIDATING until Runtime's
+	// release (RTFinished, sent by supersedeOp — v1.5 review Finding 4)
+	// stops the loop: the OBSuperseded emission is retryable (Finding
+	// 1(b)), so the periodic verify is the re-emission engine. Observe
+	// makes NO hub transition (the new owner owns it). stateMu-guarded
+	// like the rest of the suppression set.
 	superseded bool
 
 	// revalidation bookkeeping (M4; monitor goroutine only except where

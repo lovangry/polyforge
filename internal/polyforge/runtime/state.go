@@ -23,11 +23,14 @@ import (
 // JobState is one per-WI Runtime state.
 type JobState string
 
-// The v1 state machine:
+// The v1 state machine, plus the v1.5 review Finding 2 pause edges:
 //
 //	RUNNING → SEALING → DONE                  (stop path)
 //	RUNNING → RECOVERING → RUNNING            (recovery succeeded)
 //	RUNNING → RECOVERING → DONE               (bounded fail, storm guard)
+//	RUNNING → PAUSED                          (operator pause close, Finding 2)
+//	PAUSED → RUNNING                          (restart attach/resume, M3)
+//	PAUSED → DONE                             (later close of a retained record)
 //
 // Every other edge is illegal and transition() refuses it.
 const (
@@ -35,12 +38,20 @@ const (
 	StateRecovering JobState = "recovering"
 	StateSealing    JobState = "sealing"
 	StateDone       JobState = "done"
+	// StatePaused is the OPERATOR-pause retention state (v1.5 review
+	// Finding 2): a pause close KILLS the tree and seals the dirty
+	// capsule state server-side (SessionEnd paused, clean_pause=true)
+	// but RETAINS the job record — the session secret survives locally
+	// so the holder daemon's restart can attach (M3) once the operator
+	// clears clean_pause. No read-only seal, no dropJob, no DONE.
+	StatePaused JobState = "paused"
 )
 
 var legalEdges = map[JobState][]JobState{
-	StateRunning:    {StateSealing, StateRecovering},
+	StateRunning:    {StateSealing, StateRecovering, StatePaused},
 	StateSealing:    {StateDone},
 	StateRecovering: {StateRunning, StateDone},
+	StatePaused:     {StateRunning, StateDone},
 }
 
 // can reports whether s → to is a legal edge of the state machine.
@@ -120,9 +131,12 @@ type jobRecord struct {
 	GitDir     string `json:"git_dir"`
 	RemoteURL  string `json:"remote_url"`
 	// CleanPause mirrors the hub's operator-pause flag (contract §4.1).
-	// Always false while this daemon owns the job: a CLI pause DROPS the
-	// record, and a graceful shutdown leaves it false — exactly the
-	// "paused-with-session, will attach on restart" marker (M3).
+	// Since the v1.5 review Finding 2 an operator pause RETAINS the
+	// record (StatePaused): the flag is latched true at the pause close
+	// — exactly the marker the restart reconciliation reads alongside
+	// the hub's own clean_pause verdict. A graceful shutdown leaves it
+	// false — the "paused-with-session, will attach on restart" shape
+	// (M3).
 	CleanPause bool `json:"clean_pause"`
 	// SpawnN is the per-WI monotonic derivation counter (B2): the number
 	// of derivations this session has run. Same-machine restarts and

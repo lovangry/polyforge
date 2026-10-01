@@ -191,8 +191,10 @@ type job struct {
 	recoverFails int // consecutive FAILED recoveries; reset on success
 	resumeFails  int
 	resumeDead   bool
-	// cleanPause mirrors the hub's operator-pause flag; always false
-	// while this daemon owns the job (see jobRecord.CleanPause).
+	// cleanPause mirrors the hub's operator-pause flag: latched true by
+	// the pause close (Finding 2) so the retained Paused record carries
+	// the same marker the hub does; false everywhere else (a graceful
+	// shutdown keeps it false — the attach-on-restart shape, M3).
 	cleanPause bool
 	// candidates is the bundle's defaults model_candidates chain (F4):
 	// spawnAgent pins the derivation to candidates[candidateOrdinal]. The
@@ -254,7 +256,15 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 		return // unknown WI: nothing to fence on, drop
 	}
 	state, spawn := j.snapshot()
-	if msg.SpawnN != spawn {
+	// Finding 1(a) (v1.5 review, MAJOR): OBSuperseded is a SESSION-level
+	// verdict, not a derivation-level one — it is EXEMPT from the
+	// spawn-equality fence. The exact loss the fence used to cause: a
+	// verify in flight while a recovery bumps spawn N→N+1 emitted
+	// OBSuperseded(N), the fence dropped it at the counter mismatch, and
+	// the freshly-derived agent of a WI held elsewhere ran unsupervised
+	// forever (detection/push/flush/revalidation all suppressed, the
+	// monitor latched). Every other OB kind stays fenced (B2).
+	if msg.Kind != protocol.OBSuperseded && msg.SpawnN != spawn {
 		return // stale handle: dropped (recovery-loop guard, §二)
 	}
 	switch msg.Kind {
@@ -265,6 +275,7 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 		// record — and make NO hub transition (fencing-on-use already
 		// rejects our writes; a SessionEnd would be refused as stale
 		// anyway, and a blocked verdict would sabotage the new owner).
+		// Reached regardless of the derivation counter (Finding 1(a)).
 		if state == StateDone {
 			return
 		}
@@ -472,7 +483,14 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	if j := r.jobOf(wi); j != nil {
-		return fmt.Errorf("runtime: %s already active (state %s)", wi, j.state)
+		if st, _ := j.snapshot(); st != StatePaused {
+			return fmt.Errorf("runtime: %s already active (state %s)", wi, st)
+		}
+		// Finding 2 (v1.5 review): a RETAINED paused record is not an
+		// active run — the start may proceed over it (startClaimed drops
+		// the dead record once the hub accepted the new claim/takeover; a
+		// plain claim of the paused-held WI is refused by the hub's own
+		// ALREADY_HELD gate).
 	}
 	sessionID, err := mintSessionID()
 	if err != nil {
@@ -543,12 +561,28 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	}
 	r.NoteAlias(wi, id)
 	if existing := r.jobOf(id); existing != nil {
-		// an already-live job (same spelling or canonical): the start is a
-		// duplicate — for a Restart replay of the claiming journal this
+		// Finding 2 (v1.5 review): a RETAINED paused record is not an
+		// active run — a successful takeover over it (the s11 continuation
+		// shape: the holder daemon keeps the paused record and re-takes
+		// over locally) replaces the dead record: the new session owns
+		// the WI, and prepareCapsule quarantines the old scene on the
+		// session-marker mismatch exactly as it would have after a
+		// restart release. Every other live state keeps the duplicate
+		// refusal — for a Restart replay of the claiming journal this
 		// means the original start registered the job before the crash
-		// (the state.json record reconciles it), so only the journal is stale.
-		r.clearClaiming(wi)
-		return fmt.Errorf("runtime: %s already active (state %s)", id, existing.state)
+		// (the state.json record reconciles it), so only the journal is
+		// stale.
+		if existing.state != StatePaused {
+			r.clearClaiming(wi)
+			return fmt.Errorf("runtime: %s already active (state %s)", id, existing.state)
+		}
+		r.dropJob(existing)
+		// the alias registered above died with the record; re-note it so
+		// later route lookups by the submitted spelling still resolve.
+		r.NoteAlias(wi, id)
+		if err := r.persist(); err != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", id, err)
+		}
 	}
 	fp := api.SessionFingerprint(sessionID)
 	if c.SessionFingerprint != "" && c.SessionFingerprint != fp {
@@ -955,13 +989,16 @@ func atomicWriteFileMode(dst string, in io.Reader, perm os.FileMode) error {
 // ---------------------------------------------------------------------------
 // Stop (§一): seal → final push → SessionEnd → RTFinished.
 
-// Stop seals wi with a terminal reason (protocol.FinishWrapped | -Failed,
-// plus "paused" from the CLI pause route). The agent tree is torn down,
-// the capsule's final state is committed and pushed, the session is ended
-// server-side (SessionEnd, fenced on our secret), the scene is made
-// read-only and Observe hears WIFinished. A SessionEnd failure leaves the
-// job in SEALING (persisted with its reason) so a restart finishes the
-// close — never a silent half-seal.
+// Stop seals wi with a terminal reason (protocol.FinishWrapped | -Failed)
+// — or performs the operator pause close when reason is
+// protocol.FinishPaused (Finding 2: the record is RETAINED in StatePaused,
+// no read-only seal, observe released; see pauseOp). The agent tree is
+// torn down, the capsule's final state is committed and pushed, and the
+// session is ended server-side (SessionEnd, fenced on our secret). For
+// a terminal reason the scene is made read-only and Observe hears
+// WIFinished; a SessionEnd failure leaves the job in SEALING (persisted
+// with its reason) so a restart finishes the close — never a silent
+// half-seal.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	return r.stopWith(ctx, wi, reason, false)
 }
@@ -1013,22 +1050,57 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 			"detail":              detail,
 		})
 	}
+	// Finding 4 (v1.5 review, MINOR): the observe release. Without it the
+	// superseded monitor loop never stops (a 500ms goroutine leaked per
+	// takeover), the latestSpawn entry is never pruned and the answer
+	// ledger never forgets the work item. RTFinished(superseded) is the
+	// same release message stopOp sends — observe stops the monitor,
+	// prunes the fence map and drops the ledger entries. It also closes
+	// Finding 1(b)'s re-emit loop: the superseded monitor keeps
+	// re-emitting OBSuperseded until exactly this release arrives.
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishSuperseded})
 	_ = ctx
 }
 
 func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, sealedByFlush bool) error {
+	// Finding 2 (v1.5 review, MAJOR): the operator pause is its own close.
+	// It does NOT pass through SEALING (no terminal verdict follows), it
+	// retains the record (the secret must survive locally for the M3
+	// attach) and it releases observe with RTFinished(paused). Only the
+	// CLI pause route produces the paused reason, and only for a RUNNING
+	// job — a repeat pause is answered by the daemon's already-paused
+	// graceful path before it ever gets here.
+	if reason == protocol.FinishPaused && !alreadySealing {
+		return r.pauseOp(ctx, j, sealedByFlush)
+	}
 	if !alreadySealing {
-		if err := j.transition(StateSealing); err != nil {
-			return err
-		}
+		// Closing a RETAINED paused record (wrap/fail after an operator
+		// pause, Finding 2): no SEALING hop — the record transitions
+		// Paused → Done directly at the end. The agent is already gone
+		// (the pause close killed it); everything else is the ordinary
+		// terminal close.
 		j.mu.Lock()
-		j.stopReason = reason
-		// Persisted with the reason: a daemon crash between the flush's
-		// push and SessionEnd must not make the restart's stop finisher
-		// re-push either.
-		j.sealedPush = sealedByFlush
+		fromPaused := j.state == StatePaused
 		j.mu.Unlock()
-		r.persist()
+		if fromPaused {
+			j.mu.Lock()
+			j.stopReason = reason
+			j.sealedPush = sealedByFlush
+			j.mu.Unlock()
+			r.persist()
+		} else {
+			if err := j.transition(StateSealing); err != nil {
+				return err
+			}
+			j.mu.Lock()
+			j.stopReason = reason
+			// Persisted with the reason: a daemon crash between the flush's
+			// push and SessionEnd must not make the restart's stop finisher
+			// re-push either.
+			j.sealedPush = sealedByFlush
+			j.mu.Unlock()
+			r.persist()
+		}
 	}
 	// Six-layer teardown: no writer survives into the sealed scene.
 	r.killAgentTree(j)
@@ -1100,6 +1172,93 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
 	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: finalReason})
+	return nil
+}
+
+// pauseOp is the operator pause close (v1.5 review Finding 2, MAJOR):
+// the M3 pause transition WITH record retention. The old contract
+// (a CLI pause sealed the capsule read-only, transitioned DONE and
+// dropped the record) destroyed the session secret locally — nobody
+// could ever attach again, `pf resume` printed a promise no restart
+// could fulfill, and a plain claim answered ALREADY_HELD. The new
+// contract:
+//
+//	RUNNING → PAUSED, persisted FIRST (a crash anywhere after the
+//	transition leaves a Paused record the restart reconciles);
+//	six-layer kill of the tree; commit+push the dirty capsule state
+//	(the same seal-commit semantics as stopOp — the bytes must survive
+//	the pause, and a failed push is LOG-ONLY here: the verdict is not
+//	terminal, so it never degrades to blocked — the next attach's
+//	commit-dirty/observe pushes carry the state);
+//	SessionEnd(paused, CleanPause=true) — the hub keeps the session
+//	row and marks the operator pause (the only pause producer is the
+//	operator CLI, so it is always a clean pause);
+//	RTFinished(paused) — the observe release (Finding 4): the monitor
+//	stops, latestSpawn is pruned, the ledger forgets the work item;
+//	NO read-only seal, NO dropJob, NO DONE — the record and its secret
+//	stay so the holder daemon's restart can attach once the operator
+//	clears clean_pause (M3).
+//
+// A SessionEnd failure leaves the record PAUSED against a hub that
+// still says running: the restart reconciliation self-heals exactly
+// that shape (verify matches + running + a local Paused record →
+// resume through the recovery engine), so the error is loud but never
+// a dangling half-close.
+func (r *Runtime) pauseOp(ctx context.Context, j *job, sealedByFlush bool) error {
+	if err := j.transition(StatePaused); err != nil {
+		return err
+	}
+	j.mu.Lock()
+	j.stopReason = protocol.FinishPaused
+	j.sealedPush = sealedByFlush
+	j.cleanPause = true
+	j.mu.Unlock()
+	r.persist()
+	// Six-layer teardown: no writer survives into the retained scene.
+	r.killAgentTree(j)
+	// The retained record carries no live agent: clear the pid so the
+	// status face (and the restart's kill pass) read the paused job as
+	// agentless — the tree is collected, and the later attach derives a
+	// fresh pid of its own.
+	j.mu.Lock()
+	j.agentPID = 0
+	j.agentStartedAt = ""
+	j.mu.Unlock()
+	if err := r.persist(); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
+	}
+	if !sealedByFlush {
+		// F3: the dead derivation's live transcript rides the pause commit
+		// (C1) — sync before the push, best-effort.
+		r.syncTranscriptBeforeSeal(j)
+		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+protocol.FinishPaused)
+		for i := 0; i < 2 && perr != nil; i++ {
+			_, perr = gitops.Push(j.git)
+		}
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: pause seal push failed after retries (local commit stands): %v\n", j.wi, perr)
+			// Log-only (never a blocked degrade — see the doc comment). The
+			// durable trace rides the same push_failed event face stopOp uses.
+			if r.cfg.EventTap != nil {
+				r.cfg.EventTap(j.wi, "push_failed", map[string]any{
+					"phase": "pause-seal", "reason": protocol.FinishPaused, "error": perr.Error(),
+				})
+			}
+		}
+	}
+	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
+		SessionID: j.sessionID,
+		Status:    api.StatusPaused,
+		// always true: the operator CLI is the only pause producer (M3)
+		CleanPause: true,
+	}); err != nil {
+		return fmt.Errorf("runtime: %s: session-end(paused) failed (record left paused; the next restart reconciles): %w", j.wi, err)
+	}
+	// The observe release (Finding 4): stops the monitor loop, prunes the
+	// latestSpawn entry, forgets the ledger. The retained record keeps
+	// its bookkeeping only.
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishPaused})
+	_ = ctx
 	return nil
 }
 

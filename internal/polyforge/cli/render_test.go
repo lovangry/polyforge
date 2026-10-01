@@ -206,9 +206,9 @@ budget:
 
 	// Null / empty / zero wall_ms budgets: no wall segment, no "0ms" artifact.
 	for name, budget := range map[string]json.RawMessage{
-		"null": json.RawMessage(`null`),
+		"null":  json.RawMessage(`null`),
 		"empty": json.RawMessage(``),
-		"zero": json.RawMessage(`{"wall_ms":0}`),
+		"zero":  json.RawMessage(`{"wall_ms":0}`),
 	} {
 		jv = base()
 		jv.Budget = budget

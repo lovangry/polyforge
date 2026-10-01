@@ -37,6 +37,22 @@ func TestStateMachineLegalEdges(t *testing.T) {
 	if err := j.transition(StateDone); err != nil {
 		t.Fatalf("recovering→done: %v", err)
 	}
+	// Finding 2 (v1.5 review): the operator-pause retention edges —
+	// RUNNING → PAUSED (pause close), PAUSED → RUNNING (attach/resume),
+	// PAUSED → DONE (later close of the retained record).
+	j = &job{wi: "wi_sm1", state: StateRunning}
+	if err := j.transition(StatePaused); err != nil {
+		t.Fatalf("running→paused: %v", err)
+	}
+	if err := j.transition(StateRunning); err != nil {
+		t.Fatalf("paused→running: %v", err)
+	}
+	if err := j.transition(StatePaused); err != nil {
+		t.Fatalf("running→paused (2): %v", err)
+	}
+	if err := j.transition(StateDone); err != nil {
+		t.Fatalf("paused→done: %v", err)
+	}
 }
 
 func TestStateMachineIllegalEdges(t *testing.T) {
@@ -48,11 +64,19 @@ func TestStateMachineIllegalEdges(t *testing.T) {
 		{StateSealing, StateRunning}, // a seal is not reversible
 		{StateSealing, StateSealing},
 		{StateSealing, StateRecovering}, // §三: SEALING drops recovery
+		{StateSealing, StatePaused},     // a seal is not a pause (Finding 2)
 		{StateRecovering, StateSealing},
 		{StateRecovering, StateRecovering},
+		// Finding 2: the retained paused record cannot re-pause, seal or
+		// recover directly — a resume goes through PAUSED → RUNNING, a
+		// later close goes through PAUSED → DONE.
+		{StatePaused, StateSealing},
+		{StatePaused, StateRecovering},
+		{StatePaused, StatePaused},
 		{StateDone, StateRunning},
 		{StateDone, StateSealing},
 		{StateDone, StateRecovering},
+		{StateDone, StatePaused},
 		{StateDone, StateDone},
 	}
 	for _, c := range cases {

@@ -18,7 +18,9 @@ import (
 // the work item bounded-fails — RTFinished(blocked), the aihub side
 // blocked with waiting_on=owner and NO closed_at (blocked is
 // resumable-by-owner, not closed), the job dropped from the daemon's
-// live set. The whole ladder lives inside ONE recovery event: exactly
+// live set. The scenario's TAIL (v1.5 review Finding 3) then walks the
+// blocked exit door end to end: `pf unblock` requeues the verdict and
+// a healthy daemon re-claims and wraps it. The whole ladder lives inside ONE recovery event: exactly
 // one needs_recovery and ZERO wi_agent_rederived, because no
 // re-derivation ever went live. It is the e2e half of the semantics
 // runtime/recover_test.go pins in-process
@@ -206,6 +208,52 @@ func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 	}
 	if live != 1 {
 		t.Fatalf("%d live derivations, want 1 (only the original)", live)
+	}
+
+	// -----------------------------------------------------------------
+	// Finding 3 (v1.5 review): the T5 tail — blocked has an exit door.
+	// `pf unblock` returns the verdict to the queued pool (admin or
+	// project maintainer; this install's bootstrap key is admin), and a
+	// FRESH daemon (the first one's executor prompt is deliberately
+	// oversized for the must-fail ladder — a re-claim there would
+	// bounded-fail again) claims the ticket through the ordinary CAS
+	// gate and runs it to wrap. The runtime needs no change: queued is
+	// queued.
+	inst.pf(t, "unblock", wi)
+	if st := inst.wiStatus(t, wi); st != "queued" {
+		t.Fatalf("unblock did not requeue the work item: %q", st)
+	}
+	unblockedItem, err := inst.client.GetWorkItem(wi)
+	if err != nil {
+		t.Fatalf("get work item: %v", err)
+	}
+	if unblockedItem.WaitingOn != nil {
+		t.Fatalf("unblock must clear waiting_on, got %v", *unblockedItem.WaitingOn)
+	}
+	// A second unblock of the now-queued work item answers the typed
+	// NOT_BLOCKED refusal (the gate, on the wire, through the real CLI).
+	inst.pfCombined(t, 1, "", "unblock", wi)
+
+	// A healthy daemon picks the ticket up and wraps it.
+	inst.setPlan(t, wi, []map[string]any{
+		{"do": "step", "id": "polish"},
+		{"do": "wrap"},
+	})
+	d2 := newV1Daemon(t, inst, optMachineID("m-e2e-reclaim"))
+	d2.start()
+	d2.pf(t, "submit", wi)
+	inst.waitWIStatus(t, wi, "running", 30*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
+	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {
+		t.Fatalf("wrapped work item still names session %q (the wrap must clear it)", sess.Fingerprint)
+	}
+	// The re-claimed chain grew above the bounded-fail tip.
+	if n := inst.bareCommitCount(t, wi); n <= 1 {
+		t.Fatalf("the re-claim never pushed (bare commits: %d)", n)
+	}
+	exec := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
+	if !strings.Contains(exec, "\"polish\"") {
+		t.Fatalf("the re-claimed work missing from the chain:\n%s", exec)
 	}
 }
 

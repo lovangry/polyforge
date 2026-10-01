@@ -337,13 +337,13 @@ var cmdQueue = &Command{
 			// passthrough of the full server body (all 7 sections).
 			ctx.finish(raw, func() {
 				var l struct {
-					Items       []WIView `json:"items"`
+					Items        []WIView `json:"items"`
 					Unclassified []WIView `json:"unclassified"`
 				}
 				if err := json.Unmarshal(raw, &l); err == nil {
-						fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items)+len(l.Unclassified))
-						renderReadyWITable(ctx.Stdout, l.Items, l.Unclassified)
-					}
+					fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items)+len(l.Unclassified))
+					renderReadyWITable(ctx.Stdout, l.Items, l.Unclassified)
+				}
 			})
 			return nil
 		}
@@ -381,6 +381,37 @@ var cmdCancel = &Command{
 			var wi api.WorkItem
 			if err := json.Unmarshal(raw, &wi); err == nil {
 				fmt.Fprintf(ctx.Stdout, "cancelled %s (status %s)\n", wi.Slug, wi.Status)
+			}
+		})
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
+// unblock — the blocked state's exit door (v1.5 review Finding 3, direct
+// to aihub): returns a bounded-fail verdict to the queued pool. The
+// daemon needs no runtime change — a queued WI is claimable again
+// through the ordinary drain/submit flow. Authorization mirrors
+// force-takeover (admin or project maintainer).
+// ---------------------------------------------------------------------------
+
+var cmdUnblock = &Command{
+	Name:    "unblock",
+	Summary: "Return a blocked WI to the queued pool (the bounded-fail exit door; admin or maintainer)",
+	Usage:   "pf unblock <id>",
+	Setup:   func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("unblock: expected exactly one work item id")
+		}
+		raw, err := ctx.aihub().UnblockWorkItem(args[0])
+		if err != nil {
+			return err
+		}
+		ctx.finish(raw, func() {
+			var wi api.WorkItem
+			if err := json.Unmarshal(raw, &wi); err == nil {
+				fmt.Fprintf(ctx.Stdout, "unblocked %s (status %s; claimable again)\n", wi.Slug, wi.Status)
 			}
 		})
 		return nil
@@ -675,6 +706,10 @@ var cmdTakeover = &Command{
 			resp.Claim.SessionFingerprint, resp.Claim.MachineID, resp.Claim.Owner)
 		fmt.Fprintf(ctx.Stdout, "  bundle:  %s\n", resp.Claim.BundleName)
 		fmt.Fprintln(ctx.Stdout, "  the previous holder is fenced at its next push or session revalidation")
+		// NOTE 8 (v1.5 review): a CLI-side takeover swaps the hub session
+		// but starts nothing — the WI is held by an orphan session until a
+		// daemon-side takeover picks it up.
+		fmt.Fprintln(ctx.Stdout, "  note: the WI is held by an orphan session after this; a daemon-side takeover (`pf submit <id> --takeover`) must follow for it to run")
 		return nil
 	},
 }
