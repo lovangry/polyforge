@@ -1,7 +1,9 @@
 // Package server is the v1 AIHub HTTP face: the business endpoints
-// (v0 openapi surface minus every SYNC-*/revision-chain route), the admin
-// face, and the /git/{wi}.git/... proxy mount. Every error is the typed
-// common/api errStatus envelope; auth is the Bearer API key.
+// (v0 openapi surface minus every SYNC-*/revision-chain route), the
+// admin face, the v1.5 session endpoints (claim/session-verify/
+// session-attach/force-takeover/session-end), and the /git/{wi}.git/...
+// proxy mount. Every error is the typed common/api errStatus envelope;
+// auth is the Bearer API key.
 package server
 
 import (
@@ -22,13 +24,14 @@ import (
 
 // Server wires the domain managers behind one mux.
 type Server struct {
-	DB      *core.DB
-	WIs     *core.WIManager
-	Owners  *core.OwnerManager
-	Admin   *core.AdminManager
-	Mems    *memory.Store
-	Git     *git.Manager
-	DataDir string
+	DB       *core.DB
+	WIs      *core.WIManager
+	Owners   *core.OwnerManager
+	Sessions *core.SessionManager
+	Admin    *core.AdminManager
+	Mems     *memory.Store
+	Git      *git.Manager
+	DataDir  string
 
 	mux *http.ServeMux
 }
@@ -36,13 +39,14 @@ type Server struct {
 // New assembles the server.
 func New(db *core.DB, dataDir string, gitMgr *git.Manager) *Server {
 	s := &Server{
-		DB:      db,
-		WIs:     core.NewWIManager(db),
-		Owners:  core.NewOwnerManager(db),
-		Admin:   core.NewAdminManager(db),
-		Mems:    memory.NewStore(db, dataDir),
-		Git:     gitMgr,
-		DataDir: dataDir,
+		DB:       db,
+		WIs:      core.NewWIManager(db),
+		Owners:   core.NewOwnerManager(db),
+		Sessions: core.NewSessionManager(db),
+		Admin:    core.NewAdminManager(db),
+		Mems:     memory.NewStore(db, dataDir),
+		Git:      gitMgr,
+		DataDir:  dataDir,
 	}
 	s.routes()
 	return s
@@ -58,7 +62,11 @@ func (s *Server) routes() {
 	m.HandleFunc("PATCH /api/v1/work-items/{id}", s.auth(s.hPatchWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/cancel", s.auth(s.hCancelWI))
 	m.HandleFunc("GET /api/v1/work-items/{id}/progress", s.auth(s.hProgress))
-	m.HandleFunc("POST /api/v1/work-items/{id}/claim", s.auth(s.hClaim))
+	m.HandleFunc("POST /api/v1/work-items/{id}/claim", s.auth(s.hSessionClaim))
+	m.HandleFunc("POST /api/v1/work-items/{id}/session-verify", s.auth(s.hSessionVerify))
+	m.HandleFunc("POST /api/v1/work-items/{id}/session-attach", s.auth(s.hSessionAttach))
+	m.HandleFunc("POST /api/v1/work-items/{id}/force-takeover", s.auth(s.hForceTakeover))
+	m.HandleFunc("POST /api/v1/work-items/{id}/session-end", s.auth(s.hSessionEnd))
 	m.HandleFunc("POST /api/v1/work-items/{id}/end-generation", s.auth(s.hEndGeneration))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
 	m.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.auth(s.hDeps))
@@ -329,7 +337,20 @@ func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, wi)
+	s.writeWI(w, http.StatusCreated, wi)
+}
+
+// writeWI wraps a WorkItem with its public session audit block (m4:
+// session_fingerprint / session_machine / session_owner /
+// session_started_at / clean_pause; NEVER session_hash, never the
+// secret) and writes it.
+func (s *Server) writeWI(w http.ResponseWriter, status int, wi *api.WorkItem) {
+	view, err := s.WIs.View(wi)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, status, view)
 }
 
 func (s *Server) hListWIs(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -346,13 +367,22 @@ func (s *Server) hListWIs(w http.ResponseWriter, r *http.Request, idn *identity)
 		return
 	}
 	// Permission trim: non-admins see only their projects.
-	out := make([]api.WorkItem, 0, len(items))
+	trimmed := make([]api.WorkItem, 0, len(items))
 	for i := range items {
 		if ok, err := s.canRead(idn, items[i].ProjectID); err == nil && ok {
-			out = append(out, items[i])
+			trimmed = append(trimmed, items[i])
 		}
 	}
-	writeJSON(w, http.StatusOK, api.ListResponse[api.WorkItem]{Items: out, Total: len(out)})
+	// m4: each row carries the public session audit block.
+	views, err := s.WIs.Views(trimmed)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Items []core.WIView `json:"items"`
+		Total int           `json:"total"`
+	}{Items: views, Total: len(views)})
 }
 
 func (s *Server) hGetWI(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -382,7 +412,7 @@ func (s *Server) hGetWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, wi)
+	s.writeWI(w, http.StatusOK, wi)
 }
 
 func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -404,7 +434,7 @@ func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request, idn *identity)
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, wi)
+	s.writeWI(w, http.StatusOK, wi)
 }
 
 func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -434,7 +464,7 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, wi)
+	s.writeWI(w, http.StatusOK, wi)
 }
 
 // hProgress serves GET /api/v1/work-items/{id}/progress (02 §5.2): the
@@ -490,37 +520,27 @@ func (s *Server) hProgress(w http.ResponseWriter, r *http.Request, idn *identity
 	})
 }
 
-// hClaim serves claim/resume/takeover. claim and resume are the machine
-// execution surface (any valid key, scope-checked); takeover requires
-// admin or project maintainer (a human decision, v0 §7).
-func (s *Server) hClaim(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+// ---------------------------------------------------------------------------
+// v1.5 session endpoints (contract §1). The claim path is the machine
+// execution surface (any valid key, scope-checked); force-takeover keeps
+// the v1 human decision gate (admin or project maintainer).
+
+// sessionClaimEnvelope is the claim/attach/takeover response: the SAME
+// shape as api.SessionClaimResponse (which cannot gain fields — Phase 0
+// owns it), with the work item served as the m4 audit view so its JSON
+// carries the public session block.
+type sessionClaimEnvelope struct {
+	Claim    api.SessionClaim `json:"claim"`
+	WorkItem core.WIView      `json:"work_item"`
+}
+
+// sessionClaimResponse runs the claim half, ensures the bare repo (the
+// chain begins here, as in v1) and assembles the envelope.
+func (s *Server) sessionClaimResponse(w http.ResponseWriter, id string, claim *api.SessionClaim, err error) {
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	var req core.ClaimRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if req.Intent == core.IntentTakeover && idn.Role != "admin" {
-		role, merr := s.memberRole(projectID, idn.UserID)
-		if merr != nil || role != "maintainer" {
-			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "takeover requires admin or project maintainer"))
-			return
-		}
-	}
-	res, err := s.Owners.Claim(id, req, idn.UserID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	// The bare repo is part of the claim contract: the chain begins here.
 	if err := s.Git.EnsureBare(id); err != nil {
 		writeErr(w, core.Fail(api.ErrCoreInternal, "", "create bare repo: %v", err))
 		return
@@ -530,11 +550,145 @@ func (s *Server) hClaim(w http.ResponseWriter, r *http.Request, idn *identity) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
-		Claim      api.Claim          `json:"claim"`
-		Credential api.PushCredential `json:"credential"`
-		WorkItem   api.WorkItem       `json:"work_item"`
-	}{res.Claim, res.Credential, *wi})
+	view, err := s.WIs.View(wi)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionClaimEnvelope{Claim: *claim, WorkItem: *view})
+}
+
+// hSessionClaim serves POST /api/v1/work-items/{id}/claim (v1.5: the CAS
+// session claim; the v1 generation-era intent handler it replaces is
+// deleted in the cleanup commit).
+func (s *Server) hSessionClaim(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var req api.SessionClaimRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	req.WorkItemID = id
+	claim, err := s.Sessions.Claim(id, req, idn.UserID)
+	s.sessionClaimResponse(w, id, claim, err)
+}
+
+// hSessionVerify serves the compare-only holder check (B3: the hub
+// stores only the hash; the secret never echoes, not even on a match).
+func (s *Server) hSessionVerify(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var req api.SessionVerifyRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	resp, err := s.Sessions.Verify(id, req.SessionID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// hSessionAttach serves the same-session resume of a paused WI (M3).
+func (s *Server) hSessionAttach(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var req api.SessionAttachRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	req.WorkItemID = id
+	claim, err := s.Sessions.Attach(id, req, idn.UserID)
+	s.sessionClaimResponse(w, id, claim, err)
+}
+
+// hForceTakeover serves the atomic session swap. Takeover is a
+// privileged operation: admin or project maintainer (the v1 human
+// decision gate, kept for v1.5).
+func (s *Server) hForceTakeover(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if idn.Role != "admin" {
+		role, merr := s.memberRole(projectID, idn.UserID)
+		if merr != nil || role != "maintainer" {
+			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "force-takeover requires admin or project maintainer"))
+			return
+		}
+	}
+	var req api.SessionClaimRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	req.WorkItemID = id
+	claim, err := s.Sessions.Takeover(id, req, idn.UserID)
+	s.sessionClaimResponse(w, id, claim, err)
+}
+
+// hSessionEnd serves the session-fenced terminal verdict (replaces
+// end-generation for session-held WIs).
+func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var req api.SessionEndRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := s.Sessions.End(id, req, idn.UserID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	wi, err := s.WIs.Get(id, core.GetOptions{})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, err := s.WIs.View(wi)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) hEndGeneration(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -552,12 +706,31 @@ func (s *Server) hEndGeneration(w http.ResponseWriter, r *http.Request, idn *ide
 		Generation int64  `json:"generation"`
 		Status     string `json:"status"`
 		Note       string `json:"note,omitempty"`
+		// v1.5 additive fields. session_id routes the request to the
+		// session-fenced PAUSE path (M3: the session is kept; the frozen
+		// contract defines no pause endpoint, so this legacy endpoint
+		// carries the transition until the cleanup commit reshuffles the
+		// routes). clean_pause distinguishes the two pausers: true =
+		// operator pause (a restart must NOT auto-resume it), false =
+		// the daemon's own graceful-shutdown pause.
+		SessionID  string `json:"session_id,omitempty"`
+		CleanPause bool   `json:"clean_pause,omitempty"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
 	}
-	if err := s.Owners.EndGeneration(id, req.AttemptID, req.Generation, req.Status, req.Note); err != nil {
+	if req.SessionID != "" {
+		if req.Status != api.StatusPaused {
+			writeErr(w, core.Fail(api.ErrCoreBadInput, "",
+				"the session-fenced end-generation serves the pause transition only; terminal verdicts use session-end"))
+			return
+		}
+		if err := s.Sessions.Pause(id, req.SessionID, req.CleanPause, req.Note, idn.UserID); err != nil {
+			writeErr(w, err)
+			return
+		}
+	} else if err := s.Owners.EndGeneration(id, req.AttemptID, req.Generation, req.Status, req.Note, req.CleanPause); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -566,7 +739,12 @@ func (s *Server) hEndGeneration(w http.ResponseWriter, r *http.Request, idn *ide
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, wi)
+	view, err := s.WIs.View(wi)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 // ---------------------------------------------------------------------------
