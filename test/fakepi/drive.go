@@ -18,8 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -70,12 +68,12 @@ type plan struct {
 	// degrade into that one; see the pipe-capacity contract below.
 	FailSpawnResume bool `json:"fail_spawn_resume"`
 	// FailSpawnFresh true makes every fresh RE-derivation die the same
-	// way. "Re-derivation" is discriminated on the lineage suffix the
-	// runtime mints into PF_INSTANCE_ID (`<attempt>#N`): the ORIGINAL
-	// derivation carries the bare attempt id and is NEVER affected by
-	// this flag. One plan file therefore scripts a healthy first run AND
-	// a must-fail recovery ladder with no rewrite race against the
-	// recovery spawn.
+	// way. "Re-derivation" is discriminated on the derivation counter the
+	// runtime injects as PF_SPAWN_N (> 1 on every derivation after the
+	// first): the ORIGINAL derivation carries counter 1 and is NEVER
+	// affected by this flag. One plan file therefore scripts a healthy
+	// first run AND a must-fail recovery ladder with no rewrite race
+	// against the recovery spawn.
 	//
 	// PIPE-CAPACITY CONTRACT (both flags). "Dies before the prompt
 	// lands" is not something this process can win by racing: the daemon
@@ -135,9 +133,12 @@ type archivedAnswer struct {
 
 // driveEnv is the shared state of one fake agent process.
 type driveEnv struct {
-	wi         string
-	gen        int64
-	instance   string // PF_INSTANCE_ID: the flush attempt-id fence value
+	wi string
+	// handle is the PUBLIC session fingerprint (PF_SESSION_HANDLE,
+	// display only); spawnN is the v1.5 B2 derivation counter
+	// (PF_SPAWN_N) — the flush fence identity.
+	handle     string
+	spawnN     int
 	socket     string // PF_DAEMON_SOCKET
 	sessionArg string
 	resumed    bool
@@ -164,16 +165,10 @@ type driveEnv struct {
 // bounded wait — never a silent no-op).
 func newDriveEnv() *driveEnv {
 	wi := os.Getenv("PF_WI_ID")
-	inst := os.Getenv("PF_INSTANCE_ID")
-	if wi == "" || inst == "" {
-		fmt.Fprintln(os.Stderr, "fakepi: PF_WI_ID/PF_INSTANCE_ID not set; parking")
+	spawnN := spawnNOf()
+	if wi == "" || spawnN <= 0 {
+		fmt.Fprintln(os.Stderr, "fakepi: PF_WI_ID/PF_SPAWN_N not set; parking")
 		return nil
-	}
-	gen := int64(0)
-	if g := os.Getenv("PF_GENERATION"); g != "" {
-		if n, err := strconv.ParseInt(g, 10, 64); err == nil {
-			gen = n
-		}
 	}
 	pl, path := loadPlan(wi)
 	if pl == nil {
@@ -182,8 +177,8 @@ func newDriveEnv() *driveEnv {
 	}
 	d := &driveEnv{
 		wi:         wi,
-		gen:        gen,
-		instance:   inst,
+		handle:     capsuleSessionHandle(),
+		spawnN:     spawnN,
 		socket:     os.Getenv("PF_DAEMON_SOCKET"),
 		sessionArg: transcriptPathOf(),
 		resumed:    hasSessionArg(),
@@ -198,7 +193,6 @@ func newDriveEnv() *driveEnv {
 		d.exec = &execState{
 			CapsuleID:      capID,
 			WorkItemID:     wi,
-			Generation:     gen,
 			WorkflowStatus: "running",
 			Steps:          map[string]*execStep{},
 			Version:        0,
@@ -207,25 +201,20 @@ func newDriveEnv() *driveEnv {
 	if d.resumed && len(pl.ResumeActions) > 0 {
 		pl.Actions = pl.ResumeActions
 	}
-	d.mustFail = mustFailSpawn(pl, d.resumed, inst)
+	d.mustFail = mustFailSpawn(pl, d.resumed, spawnN)
 	d.plan = pl
 	return d
 }
 
-// isRederivation reports whether a lineage id carries the recovery
-// suffix the runtime mints for every derivation after the first
-// (`<attempt>#N`). The ORIGINAL derivation carries the bare attempt id.
-func isRederivation(instance string) bool { return strings.Contains(instance, "#") }
-
 // mustFailSpawn decides whether THIS derivation is the scripted
 // must-fail-at-spawn kind: a resume derivation under FailSpawnResume, or
-// a fresh RE-derivation under FailSpawnFresh. The original derivation is
-// never selected by either flag.
-func mustFailSpawn(pl *plan, resumed bool, instance string) bool {
+// a fresh RE-derivation (counter > 1) under FailSpawnFresh. The original
+// derivation (counter 1) is never selected by either flag.
+func mustFailSpawn(pl *plan, resumed bool, spawnN int) bool {
 	if resumed {
 		return pl.FailSpawnResume
 	}
-	return pl.FailSpawnFresh && isRederivation(instance)
+	return pl.FailSpawnFresh && spawnN > 1
 }
 func hasSessionArg() bool {
 	for i, a := range os.Args {
@@ -648,9 +637,9 @@ func (d *driveEnv) flush(reason string, extra map[string]any) bool {
 		return false
 	}
 	body := map[string]any{
-		"work_item":  d.wi,
-		"attempt_id": d.instance,
-		"reason":     reason,
+		"work_item": d.wi,
+		"spawn_n":   d.spawnN,
+		"reason":    reason,
 	}
 	for k, v := range extra {
 		body[k] = v
@@ -697,10 +686,11 @@ func (d *driveEnv) flushOnce(reason string, raw []byte) (ok, retry bool) {
 	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 {
 		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): HTTP %d: %s\n", reason, resp.StatusCode, out)
-		// a close/recovery race is transient; a stale attempt is forever.
+		// a close/recovery race is transient; a stale counter is forever.
 		// "instance just spawned" is the flushGate's typed RECOVERING
-		// transient (the recovery window); "already in progress" is a
-		// close genuinely holding the seal guard.
+		// transient (the recovery window — the wording is the daemon's,
+		// unchanged in v1.5); "already in progress" is a close genuinely
+		// holding the seal guard.
 		return false, bytes.Contains(out, []byte("already in progress")) ||
 			bytes.Contains(out, []byte("instance just spawned")) ||
 			resp.StatusCode >= 500

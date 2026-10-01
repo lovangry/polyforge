@@ -392,9 +392,14 @@ func appendEventTx(tx *sql.Tx, wiID, at, actor, eventType string, payload map[st
 }
 
 // Patchable fields (02 §5.1 row 3). Workflow refs and parent are immutable.
+// clean_pause rides the whitelist per the v1.5 contract §1.5 AMEND
+// ("pf resume clears the flag via WI PATCH (whitelist gained
+// clean_pause)") — the operator resume face; the update half below was
+// wired at merge, the whitelist entry was missed there (found by the
+// Lane D e2e s03 pause/resume scenario).
 var patchableFields = map[string]bool{
 	"goal": true, "content": true, "labels": true, "priority": true,
-	"milestone": true, "waiting_on": true,
+	"milestone": true, "waiting_on": true, "clean_pause": true,
 }
 
 // Patch updates the mutable field set. fields maps field name → raw JSON.

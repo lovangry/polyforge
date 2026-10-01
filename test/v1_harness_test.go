@@ -15,6 +15,8 @@ package test
 // default ports, no shared state, no network beyond loopback.
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -458,6 +460,87 @@ func (u *v1Install) wiStatus(t *testing.T, wi string) string {
 		t.Fatalf("get work item %s: %v", wi, err)
 	}
 	return item.Status
+}
+
+// wiSession is the v1.5 m4 PUBLIC session audit block of one work item
+// (read through the raw wire: Phase 0's api.WorkItem struct is frozen
+// and carries none of these fields — the block rides alongside it at
+// the server boundary as core.WIView). NEVER a hash, never the secret.
+type wiSession struct {
+	Fingerprint string `json:"session_fingerprint"`
+	Machine     string `json:"session_machine"`
+	Owner       string `json:"session_owner"`
+	StartedAt   string `json:"session_started_at"`
+	CleanPause  bool   `json:"clean_pause"`
+}
+
+// sessionOf reads the work item's public session block.
+func (u *v1Install) sessionOf(t *testing.T, wi string) wiSession {
+	t.Helper()
+	raw, err := u.client.GetWorkItemRaw(wi)
+	if err != nil {
+		t.Fatalf("get work item (raw) %s: %v", wi, err)
+	}
+	var view struct {
+		wiSession
+	}
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatalf("work item view undecodable: %v (%s)", err, raw)
+	}
+	return view.wiSession
+}
+
+// sessionClaimReq builds a well-formed claim request for wire-level
+// gate assertions (a fresh random 64-hex secret + idempotency key; the
+// caller only ever inspects the typed refusal, never a success).
+func sessionClaimReq(wi string) api.SessionClaimRequest {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	k := make([]byte, 12)
+	_, _ = rand.Read(k)
+	return api.SessionClaimRequest{
+		WorkItemID:     wi,
+		SessionID:      hex.EncodeToString(b),
+		MachineID:      "m-e2e-probe",
+		Owner:          "m-e2e-probe",
+		IdempotencyKey: hex.EncodeToString(k),
+	}
+}
+
+// apiReason extracts the typed refusal REASON (the server's Fail(code,
+// reason, ...) tag — e.g. ALREADY_HELD / NOT_CLAIMABLE) out of a
+// client-side *api.Error; the wire Error struct carries it in Extra.
+func apiReason(t *testing.T, err error) string {
+	t.Helper()
+	if err == nil {
+		t.Fatal("apiReason: nil error")
+	}
+	ae, ok := err.(*api.Error)
+	if !ok {
+		t.Fatalf("error is not a typed *api.Error: %v", err)
+	}
+	var r struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.Unmarshal(ae.Extra, &r)
+	return r.Reason
+}
+
+// refuseClaim asserts the claim endpoint's typed refusal of wi: the
+// HTTP code family and the reason tag (the M1 gate's vocabulary).
+func refuseClaim(t *testing.T, inst *v1Install, wi, wantReason string) {
+	t.Helper()
+	_, err := inst.client.SessionClaim(sessionClaimReq(wi))
+	if err == nil {
+		t.Fatalf("claim of %s was accepted, want the typed %s refusal", wi, wantReason)
+	}
+	ae, ok := err.(*api.Error)
+	if !ok || ae.Code != api.ErrCoreConflict {
+		t.Fatalf("claim refusal of %s wrong: %v (want %s)", wi, err, api.ErrCoreConflict)
+	}
+	if got := apiReason(t, err); got != wantReason {
+		t.Fatalf("claim refusal of %s reason %q, want %q (%v)", wi, got, wantReason, err)
+	}
 }
 
 func strPtr(s string) *string { return &s }

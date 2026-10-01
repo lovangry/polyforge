@@ -22,13 +22,17 @@
 //     write — the v1 zero-blocking agent contract (ruling C3) the
 //     observe lane polls;
 //   - the agent-side UDS proxy: flush(reason) rides
-//     POST /jobs/<wi>/flush on PF_DAEMON_SOCKET with the v1
-//     protocol.FlushRequest shape; the attempt-id fence value is read
-//     from PF_INSTANCE_ID (the spawn env injection);
+//     POST /jobs/<wi>/flush on PF_DAEMON_SOCKET with the v1.5
+//     protocol.FlushRequest shape; the flush fence value is the
+//     derivation counter read from PF_SPAWN_N (the v1.5 B2 spawn env
+//     injection — there is no PF_INSTANCE_ID and no attempt id
+//     anywhere; PF_SESSION_HANDLE carries the PUBLIC session
+//     fingerprint, display only, never a credential);
 //   - a harness transcript is appended at the session path the recovery
 //     engine discriminates on (the --session argv on resume, the
-//     capsule.json attempt_id otherwise), so crash-recovery scenarios
-//     exercise the real resume path.
+//     token-named capsule copy session/session-<handle>[#N].jsonl
+//     otherwise), so crash-recovery scenarios exercise the real resume
+//     path.
 //
 // Scripted behavior: the process reads a JSON plan file at startup
 // (FAKEPI_PLANS/<PF_WI_ID>.json, falling back to
@@ -43,8 +47,9 @@
 // daemon's initial-prompt injection breaks the pipe and Spawn returns an
 // error — the spawn-failure ladder, as opposed to the observe lane's
 // agent-death lane that every other death here produces. The original
-// derivation is never selected (the flags key on `--session` and on the
-// `#N` lineage suffix in PF_INSTANCE_ID). drive.go states the mode's
+// derivation is never selected (the flags key on `--session` and on
+// the derivation counter PF_SPAWN_N: a fresh RE-derivation carries a
+// counter > 1, the original carries 1). drive.go states the mode's
 // pipe-capacity contract; it is not optional.
 //
 // Known deviation from the real harness (inherited from the v0 double):
@@ -62,6 +67,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -98,27 +104,29 @@ func main() {
 		// prompt, so the failed derivation is on the record either way,
 		// and a scenario needs to see that the mode really engaged.
 		drv.journal("spawn_fail", map[string]any{
-			"pid":      os.Getpid(),
-			"instance": drv.instance,
-			"resume":   drv.resumed,
-			"wi":       drv.wi,
-			"mode":     "must_fail_at_spawn",
+			"pid":     os.Getpid(),
+			"handle":  drv.handle,
+			"spawn_n": drv.spawnN,
+			"resume":  drv.resumed,
+			"wi":      drv.wi,
+			"mode":    "must_fail_at_spawn",
 		})
 		os.Exit(9)
 	}
 	drv.journal("spawn", map[string]any{
-		"pid":      os.Getpid(),
-		"instance": drv.instance,
-		"resume":   drv.resumed,
-		"session":  drv.sessionArg,
-		"wi":       drv.wi,
+		"pid":     os.Getpid(),
+		"handle":  drv.handle,
+		"spawn_n": drv.spawnN,
+		"resume":  drv.resumed,
+		"session": drv.sessionArg,
+		"wi":      drv.wi,
 	})
 	go runDriveLoop(drv)
 
 	// RPC startup: the real harness emits agent_settled for the fresh
 	// session before any prompt arrives.
 	emitRecord(map[string]any{"type": "agent_settled"})
-	drv.appendTranscript(map[string]any{"t": "spawn", "at": nowStamp(), "instance": drv.instance, "resume": drv.resumed})
+	drv.appendTranscript(map[string]any{"t": "spawn", "at": nowStamp(), "handle": drv.handle, "spawn_n": drv.spawnN, "resume": drv.resumed})
 
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 1<<20), 8<<20)
@@ -272,26 +280,30 @@ func parkForever() {
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
-// capsuleAttemptID reads the aihub attempt id from the materialized
-// capsule identity (the fresh-derivation transcript path derives from
-// it; a resumed derivation gets the path from its --session argv).
-func capsuleAttemptID() string {
-	raw, err := os.ReadFile("capsule.json")
+// capsuleSessionHandle reads the PUBLIC session fingerprint from the
+// spawn env (PF_SESSION_HANDLE, the v1.5 B3 identity: display only,
+// NEVER a credential — the session secret never reaches agent env).
+func capsuleSessionHandle() string {
+	return os.Getenv("PF_SESSION_HANDLE")
+}
+
+// spawnNOf reads the derivation counter from the spawn env (0 when
+// absent — never a legal derivation, which is exactly the fail-closed
+// fence value the daemon refuses).
+func spawnNOf() int {
+	n, err := strconv.Atoi(os.Getenv("PF_SPAWN_N"))
 	if err != nil {
-		return ""
+		return 0
 	}
-	var idn struct {
-		AttemptID string `json:"attempt_id"`
-	}
-	if json.Unmarshal(raw, &idn) != nil {
-		return ""
-	}
-	return idn.AttemptID
+	return n
 }
 
 // transcriptPathOf resolves this process's transcript file: the --session
-// argv on a resume derivation, else session/session-<attempt_id>.jsonl
-// under the capsule (the path the runtime records in session.json).
+// argv on a resume derivation, else the token-named capsule copy the
+// runtime declared for this derivation (session/session-<handle>.jsonl
+// for the first derivation, session/session-<handle>#<N-1>.jsonl for a
+// fresh re-derivation #N — the path the runtime records in session.json
+// and the spawn journal, rekeyed onto the session handle in v1.5).
 func transcriptPathOf() string {
 	args := os.Args
 	for i := 0; i+1 < len(args); i++ {
@@ -299,8 +311,13 @@ func transcriptPathOf() string {
 			return args[i+1]
 		}
 	}
-	if a := capsuleAttemptID(); a != "" {
-		return filepath.Join("session", "session-"+a+".jsonl")
+	handle := capsuleSessionHandle()
+	if handle == "" {
+		return ""
 	}
-	return ""
+	token := handle
+	if n := spawnNOf(); n > 1 {
+		token = fmt.Sprintf("%s#%d", handle, n-1)
+	}
+	return filepath.Join("session", "session-"+token+".jsonl")
 }

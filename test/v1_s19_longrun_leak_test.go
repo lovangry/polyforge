@@ -100,7 +100,10 @@ func s19FDList(pid int) []string {
 // count. Best-effort: "unknown" when no table row matches.
 func s19SocketPeer(inode string) string {
 	inode = strings.TrimSuffix(strings.TrimPrefix(inode, "socket:["), "]")
-	for _, spec := range []struct{ path string; kind string }{
+	for _, spec := range []struct {
+		path string
+		kind string
+	}{
 		{"/proc/self/net/tcp", "tcp"},
 		{"/proc/self/net/tcp6", "tcp6"},
 		{"/proc/self/net/unix", "unix"},
@@ -287,7 +290,7 @@ func TestV1S19LongRunLeakProbe(t *testing.T) {
 	}
 
 	// Every job's monitor reached its job_stopped event: the wrap
-	// status is set by end-generation, which precedes RTFinished, so
+	// status is set by session-end, which precedes RTFinished, so
 	// this waits out the last async event writes before measuring.
 	waitUntil(t, 30*time.Second, "not every job reached its job_stopped event", func() bool {
 		for _, wi := range wis {
