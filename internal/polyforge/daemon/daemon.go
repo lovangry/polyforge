@@ -43,6 +43,10 @@ import (
 type Hub interface {
 	runtime.Aihub
 	Queue(project string) ([]api.WorkItem, error)
+	// SessionVerify is the v1.5 M4 compare-only holder check — the
+	// periodic per-RUNNING-job revalidation the observe monitor
+	// piggybacks on its tick. *aihubclient.Client satisfies it.
+	SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error)
 	// Do performs one typed request against aihub (the client's own
 	// generic entry): the F6 memory adapters use it for the calls the
 	// shared client carries no typed method for.
@@ -286,6 +290,11 @@ func New(cfg Config) (*Daemon, error) {
 			return runtime.LocateLiveTranscript(cfg.HarnessSessionsRoot, capsuleDir, spawnAt)
 		},
 		Resolve: d.resolveWI,
+		// M4 wiring: the periodic session revalidation rides the monitor
+		// tick against the shared aihub client (fencing-on-use discovery —
+		// a superseded daemon learns within ~5min even with zero push
+		// traffic; unit-tested in observe, daemon-wired here).
+		SessionVerify: cfg.Hub,
 		// F6-B: the narrow memory channel's proxy seam — recall/remember
 		// over the UDS face, all daemon-side against aihub (memface.go).
 		MemoryFace: memFace{hub: cfg.Hub},
