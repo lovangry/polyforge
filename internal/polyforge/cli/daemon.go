@@ -156,8 +156,12 @@ type StatusResponse struct {
 type StatusJob struct {
 	WorkItemID string `json:"work_item_id"`
 	Status     string `json:"status"`
-	AttemptID  string `json:"attempt_id,omitempty"`
-	AgentPID   int    `json:"agent_pid,omitempty"`
+	AttemptID  string `json:"attempt_id,omitempty"` // legacy lineage handle (deleted in the cleanup commit)
+	// SessionFingerprint is the v1.5 PUBLIC session handle of the job's
+	// session (additive; the daemon populates it once Lane B wires the
+	// claim answer's fingerprint through).
+	SessionFingerprint string `json:"session_fingerprint,omitempty"`
+	AgentPID           int    `json:"agent_pid,omitempty"`
 	// NeedsInput/QuestionID are the D6 owner face: a job presented as
 	// needs_input carries its pending question's id.
 	NeedsInput bool   `json:"needs_input,omitempty"`
@@ -246,10 +250,12 @@ func (d *DaemonClient) Flush(wiID string, req protocol.FlushRequest) (json.RawMe
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/flush", "", req, nil)
 }
 
-// Pause asks the daemon to pause a running WI (daemon closes the
-// generation itself).
+// Pause asks the daemon to pause a running WI. The v1.5 operator pause
+// carries clean_pause=true in the body as well: the daemon's own hub
+// transition can set the flag from it (wired at merge), independent of
+// the CLI-side PATCH the pause verb also issues.
 func (d *DaemonClient) Pause(wiID string) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/pause", "", map[string]any{}, nil)
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/pause", "", map[string]any{"clean_pause": true}, nil)
 }
 
 // Wrap asks the daemon to wrap (or fail, when reason=="fail") a running

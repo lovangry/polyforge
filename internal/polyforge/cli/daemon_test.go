@@ -183,8 +183,10 @@ func TestDaemonClientAnswerRoundtrip(t *testing.T) {
 }
 
 func TestDaemonClientPauseWrapResumeEndToEnd(t *testing.T) {
-	// End-to-end through Run: pause, resume (submit precheck answered by
-	// the fake aihub) and wrap hit the right UDS routes.
+	// End-to-end through Run: pause (clean_pause flag on the hub AND in
+	// the daemon request body), wrap, and the v1.5 resume (clear the
+	// clean_pause flag on the hub; the paused WI stays with its holder
+	// daemon — no local claim).
 	var aihubRec reqRecorder
 	aihub := newFakeAihub(t, &aihubRec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"id":"wi_abc","slug":"pf-1","status":"paused","project":"polyforge","goal":"g","created_at":"t"}`)
@@ -192,14 +194,27 @@ func TestDaemonClientPauseWrapResumeEndToEnd(t *testing.T) {
 	d := newDaemonFixture(t)
 	d.answer("POST", "/jobs/wi_abc/pause", `{}`)
 	d.answer("POST", "/jobs/wi_abc/wrap", `{"sealed":true}`)
-	d.answer("POST", "/jobs/wi_abc/resume", `{"accepted":true,"work_item_id":"wi_abc"}`)
 
 	env := map[string]string{"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock}
 	if code, _, stderr := runPf(t, env, "pause", "wi_abc"); code != 0 {
 		t.Fatalf("pause: code=%d stderr=%s", code, stderr)
 	}
-	if got := d.rec.last(); got.Method != "POST" || got.Path != "/jobs/wi_abc/pause" || got.Body != "{}" {
+	// The daemon pause request carries the clean_pause flag (the
+	// daemon-side hub transition sets it at merge).
+	if got := d.rec.last(); got.Method != "POST" || got.Path != "/jobs/wi_abc/pause" || got.Body != `{"clean_pause":true}` {
 		t.Errorf("pause request = %s %s %q", got.Method, got.Path, got.Body)
+	}
+	// ...and the hub-side flag landed BEFORE the daemon call (fail-safe
+	// ordering: a crash between the two must not leave an
+	// operator-paused WI auto-resumable).
+	var patchSeen *capturedRequest
+	for _, r := range aihubRec.all() {
+		if r.Method == "PATCH" && strings.Contains(r.Body, `"clean_pause":true`) {
+			patchSeen = &r
+		}
+	}
+	if patchSeen == nil {
+		t.Errorf("pause must PATCH clean_pause=true on the hub first; saw %v", aihubRec.all())
 	}
 	if code, _, stderr := runPf(t, env, "wrap", "wi_abc", "--fail"); code != 0 {
 		t.Fatalf("wrap --fail: code=%d stderr=%s", code, stderr)
@@ -210,12 +225,15 @@ func TestDaemonClientPauseWrapResumeEndToEnd(t *testing.T) {
 	if code, _, stderr := runPf(t, env, "resume", "wi_abc"); code != 0 {
 		t.Fatalf("resume: code=%d stderr=%s", code, stderr)
 	}
-	// resume runs the aihub precheck first, then the daemon route.
-	if got := d.rec.last(); got.Path != "/jobs/wi_abc/resume" {
-		t.Errorf("resume request path = %s", got.Path)
+	// v1.5 resume flips the hub flag only: the LAST aihub call is the
+	// clean_pause=false PATCH, and NO daemon route was contacted.
+	last := aihubRec.last()
+	if last.Method != "PATCH" || !strings.Contains(last.Body, `"clean_pause":false`) {
+		t.Errorf("resume must PATCH clean_pause=false on the hub; last aihub call = %s %s %q",
+			last.Method, last.Path, last.Body)
 	}
-	if last := aihubRec.last(); last.Path != "/api/v1/work-items/wi_abc" {
-		t.Errorf("precheck path = %s", last.Path)
+	if got := d.rec.last(); got.Path == "/jobs/wi_abc/resume" {
+		t.Errorf("v1.5 resume must not claim locally; the daemon saw %s", got.Path)
 	}
 }
 

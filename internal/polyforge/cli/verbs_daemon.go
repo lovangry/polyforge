@@ -57,40 +57,6 @@ var cmdSubmit = &Command{
 	},
 }
 
-// ---------------------------------------------------------------------------
-// resume — resume a paused WI (always a fresh claim, generation+1).
-// ---------------------------------------------------------------------------
-
-var cmdResume = &Command{
-	Name:    "resume",
-	Summary: "Resume a paused WI on this machine (fresh generation)",
-	Usage:   "pf resume <id> [--priority low|normal|high|urgent]",
-	Setup: func(fs *flag.FlagSet) {
-		fs.String("priority", "normal", "queue priority (low|normal|high|urgent)")
-	},
-	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		if len(args) != 1 {
-			return fmt.Errorf("resume: expected exactly one work item id")
-		}
-		if err := submitPrecheck(ctx, args[0]); err != nil {
-			return err
-		}
-		raw, err := ctx.daemon().Resume(args[0], stringFlag(fs, "priority"))
-		if err != nil {
-			return err
-		}
-		ctx.finish(raw, func() {
-			var sr SubmitResponse
-			if err := json.Unmarshal(raw, &sr); err == nil && sr.Accepted {
-				fmt.Fprintf(ctx.Stdout, "resumed %s (fresh claim accepted by the local daemon)\n", sr.WorkItemID)
-			} else {
-				printJSON(ctx.Stdout, raw)
-			}
-		})
-		return nil
-	},
-}
-
 // submitPrecheck asks aihub — with the CALLER's own api key, not the
 // daemon's machine key — for the work item before the local daemon is
 // involved: a typed CORE-404 (unknown or hidden id) and an explicit
@@ -142,10 +108,16 @@ var cmdObserve = &Command{
 		}
 		ctx.finish(raw, func() {
 			var jv protocol.JobView
-			if err := json.Unmarshal(raw, &jv); err == nil {
-				renderObserve(ctx.Stdout, &jv)
-			} else {
+			if err := json.Unmarshal(raw, &jv); err != nil {
 				printJSON(ctx.Stdout, raw)
+			} else {
+				// v1.5: render the session fingerprint (the PUBLIC holder
+				// handle) instead of the deleted lineage's attempt/
+				// generation fields. Best-effort aihub WI read: the daemon
+				// layer's projection carries no session fields (protocol.
+				// JobView is frozen), so the additive WI read supplies them;
+				// on failure the session line is skipped, never fabricated.
+				renderObserve(ctx.Stdout, &jv, wiSessionView(ctx, args[0]))
 			}
 		})
 		return nil
@@ -309,7 +281,7 @@ var cmdBatchConfirm = &Command{
 			// Read-only recommendation display; NO Job is created.
 			ctx.finish(raw, func() {
 				fmt.Fprintf(ctx.Stdout, "%d recommended work item(s)\n", len(rec.Items))
-				renderWITable(ctx.Stdout, rec.Items)
+				renderWITable(ctx.Stdout, wiViewsOf(rec.Items))
 				fmt.Fprintln(ctx.Stdout, "\nconfirm with: pf batch-confirm --all  or  pf batch-confirm <id> ...")
 			})
 			return nil
@@ -336,25 +308,93 @@ var cmdBatchConfirm = &Command{
 }
 
 // ---------------------------------------------------------------------------
-// pause — pause a running WI via the daemon.
+// pause — operator pause of a running WI: the daemon closes the job
+// locally AND the hub record is marked clean_pause=true so a daemon
+// restart never auto-resumes an operator-paused work item (M3).
 // ---------------------------------------------------------------------------
 
 var cmdPause = &Command{
 	Name:    "pause",
-	Summary: "Pause a running WI at the next safe boundary",
+	Summary: "Pause a running WI at the next safe boundary (operator pause: clean_pause on the hub)",
 	Usage:   "pf pause <id>",
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
 			return fmt.Errorf("pause: expected exactly one work item id")
 		}
+		// Set clean_pause on the hub FIRST (fail-safe ordering: the flag
+		// landing early is benign — only paused work items consult it —
+		// while a crash between the two calls would otherwise leave an
+		// operator-paused WI auto-resumable, exactly what the flag exists
+		// to prevent). The PATCH carries the field additively; the aihub
+		// server ignores unknown keys until Lane A lands its side. A
+		// failed flag write degrades to a stderr warning, never a refused
+		// pause: the daemon request body repeats the flag (the daemon's
+		// own hub transition sets it at merge).
+		flagWarn := setCleanPause(ctx, args[0], true)
 		raw, err := ctx.daemon().Pause(args[0])
 		if err != nil {
+			// The daemon refused: undo the early flag write (best-effort)
+			// so a non-paused WI does not carry a stale marker.
+			if undoErr := patchCleanPause(ctx, args[0], false); undoErr != nil {
+				fmt.Fprintf(ctx.Stderr, "pf: pause refused; clearing clean_pause also failed: %v\n", undoErr)
+			}
 			return err
 		}
 		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "pause requested for %s\n", args[0])
+			fmt.Fprintf(ctx.Stdout, "pause requested for %s (clean_pause set on the hub; restart will not auto-resume it)\n", args[0])
+			if flagWarn != "" {
+				fmt.Fprintf(ctx.Stderr, "pf: warning: %s\n", flagWarn)
+			}
 		})
+		return nil
+	},
+}
+
+// patchCleanPause PATCHes the work item with the additive clean_pause
+// field (the aihub server accepts-and-ignores unknown PATCH keys until
+// Lane A implements the pause face).
+func patchCleanPause(ctx *Context, wiID string, value bool) error {
+	_, err := ctx.aihub().PatchWorkItem(wiID, map[string]any{"clean_pause": value})
+		return err
+}
+
+// setCleanPause wraps patchCleanPause with the warning-only error
+// policy of the pause verb; "" means the flag landed.
+func setCleanPause(ctx *Context, wiID string, value bool) string {
+	if err := patchCleanPause(ctx, wiID, value); err != nil {
+		return fmt.Sprintf("could not set clean_pause=%v on the hub (%v); the daemon pause request still carries the flag", value, err)
+	}
+		return ""
+}
+
+// ---------------------------------------------------------------------------
+// resume — clear the operator pause: flips clean_pause back to false on
+// the hub and leaves the paused work item to its HOLDER daemon (the
+// session's machine re-attaches on its next start via session-attach;
+// a work item whose holder is gone moves with `pf takeover`). This
+// deliberately replaces v1's “fresh local claim via the daemon”
+// behavior — the v1.5 pause keeps the session on the hub, and only the
+// holder may resume it.
+// ---------------------------------------------------------------------------
+
+var cmdResume = &Command{
+	Name:    "resume",
+	Summary: "Clear the operator pause of a WI (clean_pause=false; the holder daemon resumes it)",
+	Usage:   "pf resume <id>",
+	Setup:   func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("resume: expected exactly one work item id")
+		}
+		if err := submitPrecheck(ctx, args[0]); err != nil {
+			return err
+		}
+		if err := patchCleanPause(ctx, args[0], false); err != nil {
+			return err
+		}
+		fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the paused work item stays with its holder daemon\n", args[0])
+		fmt.Fprintln(ctx.Stdout, "(its machine re-attaches on the next daemon start; a work item whose holder is gone moves with `pf takeover <id> --reason ...`)")
 		return nil
 	},
 }

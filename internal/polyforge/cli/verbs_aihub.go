@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -131,7 +133,7 @@ func fileCreate(ctx *Context, args []string) error {
 		return err
 	}
 	ctx.finish(raw, func() {
-		var wi api.WorkItem
+		var wi WIView
 		if err := json.Unmarshal(raw, &wi); err == nil {
 			fmt.Fprintln(ctx.Stdout)
 			renderWIDetail(ctx.Stdout, &wi)
@@ -228,7 +230,7 @@ func fileEdit(ctx *Context, args []string) error {
 		return err
 	}
 	ctx.finish(raw, func() {
-		var wi api.WorkItem
+		var wi WIView
 		if err := json.Unmarshal(raw, &wi); err == nil {
 			fmt.Fprintln(ctx.Stdout)
 			renderWIDetail(ctx.Stdout, &wi)
@@ -252,7 +254,7 @@ func fileShow(ctx *Context, args []string) error {
 		return err
 	}
 	ctx.finish(raw, func() {
-		var wi api.WorkItem
+		var wi WIView
 		if err := json.Unmarshal(raw, &wi); err == nil {
 			fmt.Fprintln(ctx.Stdout)
 			renderWIDetail(ctx.Stdout, &wi)
@@ -335,8 +337,8 @@ var cmdQueue = &Command{
 			// passthrough of the full server body (all 7 sections).
 			ctx.finish(raw, func() {
 				var l struct {
-					Items       []api.WorkItem `json:"items"`
-					Unclassified []api.WorkItem `json:"unclassified"`
+					Items       []WIView `json:"items"`
+					Unclassified []WIView `json:"unclassified"`
 				}
 				if err := json.Unmarshal(raw, &l); err == nil {
 						fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items)+len(l.Unclassified))
@@ -347,7 +349,7 @@ var cmdQueue = &Command{
 		}
 		ctx.finish(raw, func() {
 			var l struct {
-				Items []api.WorkItem `json:"items"`
+				Items []WIView `json:"items"`
 			}
 			if err := json.Unmarshal(raw, &l); err == nil {
 				fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items))
@@ -553,6 +555,126 @@ var cmdRemember = &Command{
 				fmt.Fprintf(ctx.Stdout, "stored %s (type %s, visibility %s)\n", m.ID, m.Type, m.Visibility)
 			}
 		})
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
+// v1.5 session-model faces.
+// ---------------------------------------------------------------------------
+
+// wiSessionView reads the work item's v1.5 PUBLIC session audit fields
+// from aihub (additive decode: api.WorkItem carries them only once Lane
+// A's server lands; the raw body already can). nil when the read fails —
+// the renderers skip the session line rather than fabricate one.
+func wiSessionView(ctx *Context, wiID string) *WIView {
+	raw, err := ctx.aihub().GetWorkItemRaw(wiID)
+	if err != nil {
+		return nil
+	}
+	var v WIView
+	if json.Unmarshal(raw, &v) != nil {
+		return nil
+	}
+	return &v
+}
+
+// mintSessionSecret mints the v1.5 session secret: 32 crypto/rand
+// bytes, hex (contract §0). It is presented once, never logged, never
+// echoed by the server.
+func mintSessionSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// takeoverMachineID resolves the machine identity a CLI-side takeover
+// reports: --machine, then POLYFORGE_MACHINE_ID (the daemon's own env
+// spelling), then the cli-<hostname> default.
+func takeoverMachineID(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if v := os.Getenv("POLYFORGE_MACHINE_ID"); v != "" {
+		return v
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown"
+	}
+	return "cli-" + host
+}
+
+// takeoverIdempotencyKey mints a fresh takeover idempotency key so a
+// network retry of the same invocation cannot double-swap (the server
+// keys the cached answer on it, D4).
+func takeoverIdempotencyKey() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return "tk_" + hex.EncodeToString(b)
+}
+
+// cmdTakeover is the v1.5 §1.4 force-takeover verb: atomically swap the
+// work item's session to a freshly minted secret presented by THIS
+// invocation. The old holder learns at its next fenced use (push or the
+// M4 revalidation). The response carries the PUBLIC fingerprint only —
+// never the secret.
+var cmdTakeover = &Command{
+	Name:    "takeover",
+	Summary: "Force-takeover a running/paused WI to a fresh session (v1.5 §1.4; fences the old holder)",
+	Usage:   "pf takeover <id> --reason <text> [--machine ID] [--owner ID] [--json]",
+	Setup: func(fs *flag.FlagSet) {
+		fs.String("reason", "", "why the takeover is justified (required; recorded in the session_superseded event)")
+		fs.String("machine", "", "machine identity reported to the hub (env POLYFORGE_MACHINE_ID; default cli-<hostname>)")
+		fs.String("owner", "", "owner identity reported to the hub (default the configured user_id)")
+	},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("takeover: expected exactly one work item id")
+		}
+		reason := strings.TrimSpace(stringFlag(fs, "reason"))
+		if reason == "" {
+			return fmt.Errorf("takeover: --reason is required (recorded in the takeover audit event)")
+		}
+		secret, err := mintSessionSecret()
+		if err != nil {
+			return fmt.Errorf("takeover: minting the session secret: %w", err)
+		}
+		owner := stringFlag(fs, "owner")
+		if owner == "" {
+			owner = ctx.Cfg.UserID
+		}
+		if owner == "" {
+			owner = "cli"
+		}
+		req := api.SessionClaimRequest{
+			WorkItemID:     args[0],
+			SessionID:      secret,
+			MachineID:      takeoverMachineID(stringFlag(fs, "machine")),
+			Owner:          owner,
+			Reason:         reason,
+			IdempotencyKey: takeoverIdempotencyKey(),
+		}
+		resp, err := ctx.aihub().ForceTakeover(args[0], req)
+		if err != nil {
+			return err
+		}
+		if ctx.JSON {
+			// --json: the response envelope as-is.
+			raw, merr := json.Marshal(resp)
+			if merr != nil {
+				return merr
+			}
+			ctx.Out(raw)
+			return nil
+		}
+		fmt.Fprintf(ctx.Stdout, "took over %s\n", resp.Claim.WorkItemID)
+		fmt.Fprintf(ctx.Stdout, "  session: %s (machine %s, owner %s)\n",
+			resp.Claim.SessionFingerprint, resp.Claim.MachineID, resp.Claim.Owner)
+		fmt.Fprintf(ctx.Stdout, "  bundle:  %s\n", resp.Claim.BundleName)
+		fmt.Fprintln(ctx.Stdout, "  the previous holder is fenced at its next push or session revalidation")
 		return nil
 	},
 }
