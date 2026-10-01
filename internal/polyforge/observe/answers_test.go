@@ -165,8 +165,8 @@ func TestAnswerSurvivesAgentDeathForRecoveredAttempt(t *testing.T) {
 	_ = submitAnswer(m, relayFor("q1", "a1")) // failure: stays redeliverable
 
 	h2 := newFakeHandle("att_2")
-	m.rtCh <- Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", AttemptID: "att_2"}, Handle: h2}
-	soon(t, 500*time.Millisecond, "recovery adopted", func() bool { return m.currentAttempt() == "att_2" })
+	m.rtCh <- Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 2}, Handle: h2}
+	soon(t, 500*time.Millisecond, "recovery adopted", func() bool { return m.currentSpawn() == 2 })
 
 	// The awaiting answer was re-delivered to the NEW handle automatically
 	// and consumed there: the pending question clears with it.

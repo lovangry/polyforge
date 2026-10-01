@@ -17,7 +17,7 @@ import (
 
 func flushReq(reason string) FlushCall {
 	return FlushCall{
-		Req:  protocol.FlushRequest{WorkItem: "wi_test", AttemptID: "att_1", SpawnN: 1, Reason: reason},
+		Req:  protocol.FlushRequest{WorkItem: "wi_test", SpawnN: 1, Reason: reason},
 		Resp: make(chan protocol.FlushAck, 1),
 	}
 }

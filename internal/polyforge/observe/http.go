@@ -35,7 +35,7 @@ func (o *Observe) Handler() http.Handler {
 	mux.HandleFunc("GET /jobs/{wi}/observe", o.serveObserve)
 	mux.HandleFunc("POST /jobs/{wi}/answer", o.serveAnswer)
 	mux.HandleFunc("POST /jobs/{wi}/flush", o.serveFlush)
-	// F6-B: the narrow memory channel, same face and same attempt-id
+	// F6-B: the narrow memory channel, same face and same spawn-n
 	// fence as flush (memory.go). Stateless proxies — no monitor state.
 	mux.HandleFunc("POST /jobs/{wi}/recall", o.serveRecall)
 	mux.HandleFunc("POST /jobs/{wi}/remember", o.serveRemember)
@@ -175,9 +175,8 @@ func (o *Observe) serveFlush(w http.ResponseWriter, r *http.Request) {
 	// monitor's CURRENT derivation — a zombie survivor of a superseded
 	// derivation (the six-layer cleanup admits residue) must never seal
 	// work that belongs to the live one. Mismatch — including an absent
-	// counter (0), the fail-closed mirror of the old absent-attempt-id
-	// refusal — answers DAEMON-409 STALE_SPAWN and never reaches the
-	// monitor. EXCEPT the recovery window: a counter that matches the
+	// counter (0), refused fail-closed — answers DAEMON-409 STALE_SPAWN
+	// and never reaches the monitor. EXCEPT the recovery window: a counter that matches the
 	// hub's LATEST ANNOUNCED derivation (registered at RTStarted/
 	// RTRecovered emission time, which the monitor's adoption lags)
 	// passes — the just-resumed agent's own flush is never stale. The
@@ -187,8 +186,7 @@ func (o *Observe) serveFlush(w http.ResponseWriter, r *http.Request) {
 	known := o.spawnKnown(wi)
 	if req.SpawnN == 0 ||
 		(req.SpawnN != cur && req.SpawnN != known) ||
-		// Adoption-window cross-check (the s10 hole, carried over from
-		// the attempt-id fence): a successor announcement supersedes the
+		// Adoption-window cross-check (the s10 hole): a successor announcement supersedes the
 		// predecessor IMMEDIATELY — a counter that still equals the
 		// monitor's lagging cur is already stale when known names a
 		// DIFFERENT (newer) derivation; only a zombie speaks in the

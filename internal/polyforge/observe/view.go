@@ -32,7 +32,6 @@ func (m *Monitor) JobView() *protocol.JobView {
 	m.stateMu.Lock()
 	pending := m.pending
 	sealing, wrapped, blocked := m.sealing, m.wrapped, m.blocked
-	attempt := m.attemptID
 	spawn := m.spawnN
 	fp := ""
 	if m.sessionID != "" {
@@ -41,13 +40,12 @@ func (m *Monitor) JobView() *protocol.JobView {
 	m.stateMu.Unlock()
 
 	view := &protocol.JobView{
-		WorkItem:   m.wi.WorkItem,
-		Project:    m.wi.Project,
-		AttemptID:  attempt,
-		SpawnN:     spawn,
+		WorkItem:    m.wi.WorkItem,
+		Project:     m.wi.Project,
+		SpawnN:      spawn,
 		SessionFingerprint: fp,
-		BundleName: m.wi.BundleName,
-		Pending:    pending,
+		BundleName:  m.wi.BundleName,
+		Pending:     pending,
 	}
 
 	// layer 1: execution.json direct read (authoritative).
@@ -90,7 +88,7 @@ func (m *Monitor) JobView() *protocol.JobView {
 		view.Events = append(view.Events, e)
 	}
 
-	// status derivation, most specific first. A terminal attempt
+	// status derivation, most specific first. A terminal derivation
 	// (wrap acked or wrap-blocked) or a terminal workflow_status in the
 	// authoritative file wins; then the seal-in-progress window; then the
 	// needs_input exemption; otherwise the job is running.

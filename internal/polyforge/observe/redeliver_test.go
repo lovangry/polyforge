@@ -34,9 +34,9 @@ func sentAnswers(h *fakeHandle) []protocol.ControlMsg {
 
 // recoverMonitor adopts a successor handle the way Runtime's RTRecovered
 // attachment does. spawnN is the successor's B2 derivation counter.
-func recoverMonitor(m *Monitor, h Handle, attempt string, spawnN int) {
+func recoverMonitor(m *Monitor, h Handle, spawnN int) {
 	m.rtCh <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: m.wi.WorkItem, AttemptID: attempt, SpawnN: spawnN},
+		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: m.wi.WorkItem, SpawnN: spawnN},
 		Handle: h,
 		WI:     m.wi,
 	}
@@ -62,7 +62,7 @@ func TestRedeliveryOnRecoveryResendsAwaitingAnswer(t *testing.T) {
 	// The successor instance attaches: the awaiting answer is re-sent
 	// automatically, bound to the SAME question id.
 	h2 := newFakeHandle("att_2")
-	recoverMonitor(m, h2, "att_2", 2)
+	recoverMonitor(m, h2, 2)
 	soon(t, 2*time.Second, "redelivery never reached the successor", func() bool {
 		return len(sentAnswers(h2)) == 1
 	})
@@ -109,7 +109,7 @@ func TestRedeliverySkipsAnswersBoundToOtherQuestions(t *testing.T) {
 	m.ledger.noteAwaiting(m.wi.WorkItem, relayFor("q_old", "a_old"))
 
 	h2 := newFakeHandle("att_2")
-	recoverMonitor(m, h2, "att_2", 2)
+	recoverMonitor(m, h2, 2)
 	// Give the monitor a moment to (wrongly) send, then assert it did not.
 	time.Sleep(150 * time.Millisecond)
 	if n := len(sentAnswers(h2)); n != 0 {
@@ -136,7 +136,7 @@ func TestRedeliveryFailureStaysInLedgerForNextAttach(t *testing.T) {
 	h2.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
 		return protocol.ControlAck{}, errors.New("agent dead pre-ack")
 	})
-	recoverMonitor(m, h2, "att_2", 2)
+	recoverMonitor(m, h2, 2)
 	soon(t, 2*time.Second, "failed redelivery never attempted", func() bool {
 		return len(sentAnswers(h2)) == 1
 	})
@@ -155,7 +155,7 @@ func TestRedeliveryFailureStaysInLedgerForNextAttach(t *testing.T) {
 
 	// The third instance attaches and consumes: the entry finalizes.
 	h3 := newFakeHandle("att_3")
-	recoverMonitor(m, h3, "att_3", 3)
+	recoverMonitor(m, h3, 3)
 	soon(t, 2*time.Second, "second redelivery never reached the third instance", func() bool {
 		return len(sentAnswers(h3)) == 1
 	})
