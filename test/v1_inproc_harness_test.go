@@ -40,14 +40,12 @@ import (
 // shape as the daemon's agentAdapter, which is unexported).
 type inprocAdapter struct {
 	h        runtime.AgentHandle
-	attempt  string
 	recs     chan []byte
 	exit     chan struct{}
 	pollStop chan struct{}
 	retire   sync.Once
 }
 
-func (a *inprocAdapter) AttemptID() string      { return a.attempt }
 func (a *inprocAdapter) Exit() <-chan struct{}  { return a.exit }
 func (a *inprocAdapter) Records() <-chan []byte { return a.recs }
 
@@ -264,7 +262,6 @@ func (r *inprocRig) tapRecord(wi string, line []byte) {
 func (r *inprocRig) installAdapter(ji runtime.JobInfo) *inprocAdapter {
 	a := &inprocAdapter{
 		h:        ji.Agent,
-		attempt:  ji.InstanceID,
 		recs:     make(chan []byte, 1024),
 		exit:     make(chan struct{}),
 		pollStop: make(chan struct{}),

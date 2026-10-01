@@ -9,10 +9,12 @@ import (
 // v1_s08: daemon crash with a running work item. The daemon process is
 // SIGKILLed (the WI agent deliberately survives — it parks on stdin
 // EOF). The restarted daemon runs the §十一 reconciliation against
-// aihub's own verdict (running), routes the job through the recovery
-// engine, kills the SURVIVING old agent tree, resumes from the
-// transcript and finishes the work item. No orphan of the old daemon
-// survives the reconciliation.
+// aihub's own verdict — the compare-only session verify (B3) says the
+// crashed daemon's session still holds it, status running — routes the
+// job through the recovery engine, kills the SURVIVING old agent tree,
+// resumes from the transcript and finishes the work item inside the
+// SAME session (T4: the fingerprint never moves). No orphan of the
+// old daemon survives the reconciliation.
 func TestV1S08DaemonRestart(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s08: daemon crash mid-run",
@@ -38,6 +40,12 @@ func TestV1S08DaemonRestart(t *testing.T) {
 	})
 	t.Cleanup(func() { killOrphans(wi) })
 
+	// The session fingerprint BEFORE the crash — T4's identity contract.
+	sessBefore := inst.sessionOf(t, wi)
+	if sessBefore.Fingerprint == "" {
+		t.Fatal("running work item carries no session")
+	}
+
 	// Crash the daemon hard. The agent survives (parked on EOF).
 	oldPID := d.agentPIDOf(t, wi)
 	d.crash()
@@ -62,8 +70,15 @@ func TestV1S08DaemonRestart(t *testing.T) {
 	waitUntil(t, 30*time.Second, "the crash survivor was never collected", func() bool {
 		return len(orphanPIDs(wi)) <= 1 // the new derivation may hold the marker briefly
 	})
-	// The re-derivation is a RESUME of the same attempt (the transcript
-	// survived the crash in the capsule).
+	// T4 (B2): the re-derivation advanced the counter but kept the SAME
+	// session — daemon restart reconciliation attaches to the session
+	// that survived the crash at aihub.
+	if sessAfter := inst.sessionOf(t, wi); sessAfter.Fingerprint != sessBefore.Fingerprint {
+		t.Fatalf("daemon-restart recovery changed the session: %q -> %q",
+			sessBefore.Fingerprint, sessAfter.Fingerprint)
+	}
+	// The re-derivation is a RESUME (the transcript survived the crash in
+	// the capsule), under the next derivation counter.
 	spawns := spawnJournal(t, capDir)
 	if len(spawns) != 2 {
 		t.Fatalf("spawn journal has %d entries after restart, want 2", len(spawns))
@@ -76,8 +91,11 @@ func TestV1S08DaemonRestart(t *testing.T) {
 	}
 
 	// The resumed agent (scripted by resume_actions) finished the work
-	// item inside the SAME generation.
+	// item inside the SAME session, and the wrap cleared it.
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {
+		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
+	}
 
 	// And no orphan of the old daemon's tree survived the whole cycle.
 	waitUntil(t, 10*time.Second, "orphan agents survived the restart cycle", func() bool {

@@ -54,7 +54,7 @@ func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 	// ONE plan for the whole run: the original derivation executes the
 	// actions above, and every derivation the recovery ladder mints
 	// afterwards dies at birth. The flags key on the derivation KIND
-	// (--session for a resume, the #N lineage suffix for a fresh
+	// (--session for a resume, the PF_SPAWN_N counter > 1 for a fresh
 	// re-derivation), so nothing has to be rewritten mid-run and there
 	// is no race against the recovery spawn.
 	setFailSpawnPlan(t, inst, wi, []map[string]any{
@@ -120,6 +120,18 @@ func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 		t.Fatalf("blocked work item must not be closed, got closed_at %q", *item.ClosedAt)
 	}
 
+	// T5 (M2): the bounded fail CLEARED the session row — blocked with a
+	// live session would be revivable by a restart and the storm guard
+	// would be a lie. The public audit block names no holder.
+	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {
+		t.Fatalf("blocked work item still names session %q (M2: bounded fail must clear the session)", sess.Fingerprint)
+	}
+	// And the cleared row keeps the work item OUT of the claimable set:
+	// the CAS gate answers the typed NOT_CLAIMABLE refusal on the wire
+	// (a queued status is required; blocked is excluded until a human
+	// unblocks it).
+	refuseClaim(t, inst, wi, "NOT_CLAIMABLE")
+
 	// The daemon dropped the job: no relaunch storm, nothing live.
 	waitUntil(t, 30*time.Second, "the bounded-failed job never left the daemon's live set", func() bool {
 		for _, j := range d.status(t).Jobs {
@@ -157,14 +169,19 @@ func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 		}
 	}
 	// spawnN advances only on a SUCCESSFUL spawn, so all four failures
-	// carry the same lineage id: the original's attempt id plus #1.
+	// carry the same local display token AND the same pending counter
+	// (2 — the ordinal the ladder kept retrying): the original's handle
+	// plus #1.
 	attempt, _ := spawns[0]["instance"].(string)
 	if attempt == "" || strings.Contains(attempt, "#") {
-		t.Fatalf("original derivation instance %q, want the bare attempt id", attempt)
+		t.Fatalf("original derivation instance %q, want the bare session handle", attempt)
 	}
 	for i := 1; i < len(spawns); i++ {
 		if got, _ := spawns[i]["instance"].(string); got != attempt+"#1" {
 			t.Fatalf("failed derivation %d instance %q, want %q", i, got, attempt+"#1")
+		}
+		if n, _ := spawns[i]["spawn_n"].(float64); int(n) != 2 {
+			t.Fatalf("failed derivation %d spawn_n %v, want 2 (the counter advances only on a successful spawn)", i, spawns[i]["spawn_n"])
 		}
 	}
 

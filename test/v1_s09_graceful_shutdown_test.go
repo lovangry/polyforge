@@ -13,8 +13,11 @@ import (
 // acks it — the correlation contract), waits for the agent's
 // flush(shutdown) commit, stops the observe lane, tears down every
 // agent tree, and the daemon PROCESS exits. The work item is NOT
-// end-generation'd: aihub still shows running, and a restarted daemon
-// reconciles + resumes it. No orphan process survives (PF_WI_ID scan).
+// closed: aihub still shows running under the SAME session (M3 — the
+// record keeps clean_pause=false, the "paused-with-session, will
+// attach on restart" marker), and a restarted daemon reconciles
+// (session verify matches) and resumes through the recovery engine.
+// No orphan process survives (PF_WI_ID scan).
 func TestV1S09GracefulShutdown(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s09: graceful shutdown with a running job",
@@ -38,6 +41,13 @@ func TestV1S09GracefulShutdown(t *testing.T) {
 		}
 		return false
 	})
+
+	// The session fingerprint BEFORE the shutdown (T4's identity pair
+	// with the one captured below).
+	sessBefore := inst.sessionOf(t, wi)
+	if sessBefore.Fingerprint == "" {
+		t.Fatal("running work item carries no session")
+	}
 
 	// Graceful shutdown through the real CLI. The daemon answers, then
 	// runs the bounded sequence and the process exits.
@@ -95,10 +105,18 @@ func TestV1S09GracefulShutdown(t *testing.T) {
 		t.Fatalf("orphan agents survived the graceful shutdown: %v", pids)
 	}
 
-	// The work item is NOT closed server-side: shutdown leaves it
-	// running for the next start's reconciliation.
+	// The work item is NOT closed server-side: shutdown leaves the
+	// session row in place (status running, clean_pause=false — the
+	// M3 marker the next start attaches to).
 	if st := inst.wiStatus(t, wi); st != "running" {
 		t.Fatalf("work item status after shutdown: %q, want running", st)
+	}
+	sessShutdown := inst.sessionOf(t, wi)
+	if sessShutdown.Fingerprint != sessBefore.Fingerprint {
+		t.Fatalf("shutdown changed the session: %q -> %q", sessBefore.Fingerprint, sessShutdown.Fingerprint)
+	}
+	if sessShutdown.CleanPause {
+		t.Fatalf("shutdown must not set the operator-pause flag: %+v", sessShutdown)
 	}
 
 	// A restarted daemon reconciles + resumes, and the resumed agent
@@ -110,6 +128,12 @@ func TestV1S09GracefulShutdown(t *testing.T) {
 	t.Cleanup(func() { d2.stop() })
 	d2.start()
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+
+	// T4: the restart attached to the SAME session the shutdown kept
+	// (verify matches → recover-resume), and the wrap cleared it.
+	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {
+		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
+	}
 
 	spawns := spawnJournal(t, capDir)
 	if len(spawns) != 2 || spawns[1]["resume"] != true {

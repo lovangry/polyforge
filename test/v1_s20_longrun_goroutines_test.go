@@ -145,7 +145,7 @@ func TestV1S20LongRunGoroutines(t *testing.T) {
 		rig.start(wi)
 
 		// Terminal state first: the agent's flush(wrap) sealed and
-		// end-generation marked the work item wrapped at aihub.
+		// session-end marked the work item wrapped at aihub.
 		inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 
 		// The runtime dropped the job from its live set.

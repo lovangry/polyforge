@@ -50,8 +50,10 @@ import (
 // udsFlushRaw performs one raw flush round trip on the daemon's UDS face
 // (the same transport the agent's proxy uses), returning the HTTP status
 // and body. questionID == "" sends the field explicitly empty — the F9
-// fail-closed shape under test.
-func udsFlushRaw(t *testing.T, d *v1Daemon, wi, attempt, questionID string) (int, string) {
+// fail-closed shape under test. spawnN is the v1.5 B2 fence value; 0
+// would be refused STALE_SPAWN before the question-id gate, so callers
+// always pass the current derivation's counter.
+func udsFlushRaw(t *testing.T, d *v1Daemon, wi string, spawnN int, questionID string) (int, string) {
 	t.Helper()
 	conn, err := net.Dial("unix", d.sock)
 	if err != nil {
@@ -59,10 +61,10 @@ func udsFlushRaw(t *testing.T, d *v1Daemon, wi, attempt, questionID string) (int
 	}
 	defer conn.Close()
 	body := map[string]any{
-		"work_item":  wi,
-		"attempt_id": attempt,
-		"reason":     "needs_input",
-		"step":       "code",
+		"work_item": wi,
+		"spawn_n":   spawnN,
+		"reason":    "needs_input",
+		"step":      "code",
 	}
 	// no question text: a bare re-present must not be able to rewrite the
 	// recorded question (the same-id path refreshes asked_at only)
@@ -92,21 +94,22 @@ func udsFlushRaw(t *testing.T, d *v1Daemon, wi, attempt, questionID string) (int
 	return resp.StatusCode, string(out)
 }
 
-// currentInstance reads the newest derivation's instance id (the flush
-// fence value) off the capsule's spawn journal.
-func currentInstance(t *testing.T, d *v1Daemon, wi string) string {
+// currentSpawnN reads the newest derivation's counter (the flush fence
+// value) off the capsule's spawn journal — the same re-seeding source
+// the runtime itself uses across a fresh clone.
+func currentSpawnN(t *testing.T, d *v1Daemon, wi string) int {
 	t.Helper()
 	entries := spawnJournal(t, d.capsuleDir(wi))
-	inst := ""
+	max := 0
 	for _, rec := range entries {
-		if s, ok := rec["instance"].(string); ok && s != "" {
-			inst = s
+		if n, ok := rec["spawn_n"].(float64); ok && int(n) > max {
+			max = int(n)
 		}
 	}
-	if inst == "" {
-		t.Fatalf("no instance id in the spawn journal of %s (%d entries)", wi, len(entries))
+	if max == 0 {
+		t.Fatalf("no spawn_n in the spawn journal of %s (%d entries)", wi, len(entries))
 	}
-	return inst
+	return max
 }
 
 // writePlanExtra rewrites the fake agent's plan file with extra top-level
@@ -303,11 +306,11 @@ func TestV1S16EmptyQuestionIDFlushRefused(t *testing.T) {
 	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
 		return d.agentPIDOf(t, wi) > 0
 	})
-	attempt := currentInstance(t, d, wi)
+	spawnN := currentSpawnN(t, d, wi)
 
 	// The flush entry refuses the empty id with DAEMON-400 — never the
 	// monitor, never a pending.
-	status, body := udsFlushRaw(t, d, wi, attempt, "")
+	status, body := udsFlushRaw(t, d, wi, spawnN, "")
 	if status != 400 || !strings.Contains(body, "DAEMON-400") {
 		t.Fatalf("empty question_id flush: status %d body %s, want 400 DAEMON-400", status, body)
 	}
@@ -325,7 +328,7 @@ func TestV1S16EmptyQuestionIDFlushRefused(t *testing.T) {
 	}
 
 	// And the live attempt's own well-formed flush still works.
-	status, body = udsFlushRaw(t, d, wi, attempt, "q_f9b_live")
+	status, body = udsFlushRaw(t, d, wi, spawnN, "q_f9b_live")
 	if status != 200 || !strings.Contains(body, `"ok":true`) {
 		t.Fatalf("live needs_input flush after the refusal: %d %s", status, body)
 	}
@@ -359,12 +362,12 @@ func TestV1S16DuplicateFlushSameIDIsIdempotent(t *testing.T) {
 		jv := d.observe(t, wi)
 		return jv.Pending != nil && jv.Pending.ID == qid
 	})
-	attempt := currentInstance(t, d, wi)
+	spawnN := currentSpawnN(t, d, wi)
 
 	// A second flush with the SAME id — the recovered re-present shape:
 	// acked OK, still exactly one pending, still exactly one
 	// needs_input event.
-	status, body := udsFlushRaw(t, d, wi, attempt, qid)
+	status, body := udsFlushRaw(t, d, wi, spawnN, qid)
 	if status != 200 || !strings.Contains(body, `"ok":true`) {
 		t.Fatalf("duplicate same-id flush: %d %s", status, body)
 	}

@@ -4,17 +4,17 @@ package test
 // startup reconciliation. The agent-driven flush(wrap) has ALREADY
 // pushed the sealed capsule state (its git push goes direct to aihub,
 // never through the proxy), the runtime is inside stopOp with the job
-// persisted sealing (sealed_push=true), and EndGeneration has NOT yet
+// persisted sealing (sealed_push=true), and SessionEnd has NOT yet
 // reached aihub when the daemon process is kill -9ed. The window is
 // milliseconds wide in real time, so the test makes it deterministic:
 // a test-side hold-proxy fronts the daemon's aihub API face, forwards
-// everything untouched, and intercepts the POST */end-generation —
+// everything untouched, and intercepts the POST */session-end —
 // registering it and blocking the handler until the test says so. The
 // kill happens only once the proxy holds the request in hand.
 //
 // The restarted daemon (same socket/dataDir/workspace, direct aihub)
 // must finish the interrupted close through the reconciliation's
-// sealed_push=true skip-push branch: EndGeneration lands (aihub
+// sealed_push=true skip-push branch: SessionEnd lands (aihub
 // wrapped), the capsule goes read-only, the local bookkeeping loses
 // the sealing record, and no agent is ever re-derived — the run never
 // stalls in a half-sealed state.
@@ -37,8 +37,8 @@ import (
 // The hold-proxy: the s17 determinism mechanism.
 
 // holdProxy is a reverse proxy in front of aihub that forwards every
-// request untouched but intercepts the runtime's EndGeneration call
-// (POST /api/v1/work-items/{id}/end-generation): the hit is registered
+// request untouched but intercepts the runtime's SessionEnd call
+// (POST /api/v1/work-items/{id}/session-end): the hit is registered
 // and the handler BLOCKS until the test drops the proxy — the request is
 // never forwarded, so aihub cannot hear a verdict from the doomed
 // daemon. The daemon's git pushes bypass the proxy entirely (they are
@@ -46,7 +46,7 @@ import (
 // client's traffic passes through.
 type holdProxy struct {
 	proxy       *httputil.ReverseProxy
-	held        chan struct{} // closed on the first held end-generation
+	held        chan struct{} // closed on the first held session-end
 	heldOnce    sync.Once
 	release     chan struct{} // closed to unblock held handlers
 	releaseOnce sync.Once
@@ -78,7 +78,7 @@ func newHoldProxy(t *testing.T, target string) *holdProxy {
 
 func (p *holdProxy) url() string { return "http://" + p.ln.Addr().String() }
 
-// isHeld reports whether the proxy has an end-generation in hand.
+// isHeld reports whether the proxy has a session-end in hand.
 func (p *holdProxy) isHeld() bool {
 	select {
 	case <-p.held:
@@ -88,7 +88,7 @@ func (p *holdProxy) isHeld() bool {
 	}
 }
 
-// drop unblocks the held end-generation handler: the request was never
+// drop unblocks the held session-end handler: the request was never
 // forwarded, and the released handler answers 503 so no caller can
 // mistake the release for a verdict.
 func (p *holdProxy) drop() { p.releaseOnce.Do(func() { close(p.release) }) }
@@ -102,11 +102,11 @@ func (p *holdProxy) close() {
 func (p *holdProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost &&
 		strings.Contains(r.URL.Path, "/api/v1/work-items/") &&
-		strings.HasSuffix(r.URL.Path, "/end-generation") {
+		strings.HasSuffix(r.URL.Path, "/session-end") {
 		p.heldOnce.Do(func() { close(p.held) })
 		select {
 		case <-p.release:
-			http.Error(w, "end-generation held by the s17 test proxy (never forwarded)",
+			http.Error(w, "session-end held by the s17 test proxy (never forwarded)",
 				http.StatusServiceUnavailable)
 		case <-r.Context().Done():
 		}
@@ -220,9 +220,9 @@ func TestV1S17SealCrashResume(t *testing.T) {
 	// Deterministic SEALING window: the agent's flush(wrap) was acked —
 	// its seal push landed on aihub's git chain DIRECT (bypassing the
 	// proxy, which never sees git traffic) — and the runtime is now
-	// blocked inside stopOp at EndGeneration, which the proxy holds in
+	// blocked inside stopOp at SessionEnd, which the proxy holds in
 	// hand. The kill below cannot land anywhere else.
-	waitUntil(t, 60*time.Second, "daemon never reached EndGeneration (the proxy saw no end-generation POST)", func() bool {
+	waitUntil(t, 60*time.Second, "daemon never reached SessionEnd (the proxy saw no session-end POST)", func() bool {
 		return proxy.isHeld()
 	})
 	waitUntil(t, 30*time.Second, "the wrap flush was never acked", func() bool {
@@ -242,13 +242,13 @@ func TestV1S17SealCrashResume(t *testing.T) {
 			rec["stop_reason"] == "wrapped" && rec["sealed_push"] == true
 	})
 
-	// The kill lands strictly before EndGeneration: aihub (asked direct)
+	// The kill lands strictly before SessionEnd: aihub (asked direct)
 	// still says running, and stopOp's killAgentTree — which runs before
-	// EndGeneration — has already collected the agent tree.
+	// SessionEnd — has already collected the agent tree.
 	if st := inst.wiStatus(t, wi); st != "running" {
-		t.Fatalf("aihub status while the end-generation is held: %q, want running", st)
+		t.Fatalf("aihub status while the session-end is held: %q, want running", st)
 	}
-	waitUntil(t, 15*time.Second, "the agent tree was not collected before EndGeneration", func() bool {
+	waitUntil(t, 15*time.Second, "the agent tree was not collected before SessionEnd", func() bool {
 		return len(orphanPIDs(wi)) == 0
 	})
 
@@ -266,7 +266,7 @@ func TestV1S17SealCrashResume(t *testing.T) {
 	t.Cleanup(func() { d2.stop() })
 	d2.start()
 
-	// The reconciliation finished the interrupted close: EndGeneration
+	// The reconciliation finished the interrupted close: SessionEnd
 	// landed and aihub reached the terminal verdict.
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 

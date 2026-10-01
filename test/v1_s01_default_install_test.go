@@ -51,8 +51,21 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	if err := json.Unmarshal(rawID, &idn); err != nil {
 		t.Fatalf("capsule.json unparsable: %v", err)
 	}
-	if idn.WorkItemID != wi || idn.Generation != 1 || idn.AttemptID == "" || idn.BundleName != "quick-fix" {
+	// v1.5 ASSERTION CHANGE: the capsule Identity shape is frozen in
+	// common/ but the generation/attempt lineage it carried is DELETED —
+	// the runtime writes the zero values and session ownership lives in
+	// the daemon-private sync/session-handle marker (contract §5). The
+	// v1 assertion (Generation==1, AttemptID!="") pinned the deleted
+	// lineage; the v1.5-correct pin is its absence.
+	if idn.WorkItemID != wi || idn.Generation != 0 || idn.AttemptID != "" || idn.BundleName != "quick-fix" {
 		t.Fatalf("capsule identity wrong: %+v", idn)
+	}
+	// T1 session trail, first half: the claim set the hub's session row
+	// — the public audit block names this machine and a fingerprint,
+	// never a hash and never the secret.
+	sess := inst.sessionOf(t, wi)
+	if sess.Fingerprint == "" || sess.Machine != "m-e2e" {
+		t.Fatalf("running work item carries no session block: %+v", sess)
 	}
 	// The claim's task-repo inventory was cloned before the agent
 	// spawned: repos/demo-src is a real clone of the local fake remote,
@@ -92,6 +105,11 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	// Close through the real CLI.
 	d.pf(t, "wrap", wi)
 	inst.waitWIStatus(t, wi, "wrapped", 30*time.Second)
+	// T1 session trail, second half: the wrap CLEARED the session row —
+	// a terminal work item names no holder (m4).
+	if sess2 := inst.sessionOf(t, wi); sess2.Fingerprint != "" {
+		t.Fatalf("wrapped work item still names session %q", sess2.Fingerprint)
+	}
 
 	// The sealed chain: seq trailers strictly increasing from 1, the
 	// transcript and the execution state committed, the final push done.
