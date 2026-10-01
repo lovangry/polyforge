@@ -36,18 +36,25 @@ func TestRecoverTranscriptPresentResumes(t *testing.T) {
 	if c := sp.call(1); !c.Resume || c.TranscriptPath != j.transcript {
 		t.Fatalf("derivation must be a resume of the transcript, got %+v", c)
 	}
-	// The resume derivation carries its OWN lineage id in its spawn params
-	// (injected as PF_INSTANCE_ID): the re-derivation is instance #1 of the
-	// claim's attempt, not the bare attempt id.
-	if id := sp.call(1).InstanceID; id != "ra_"+wi+"#1" {
-		t.Fatalf("resume derivation instance id: got %q, want ra_%s#1", id, wi)
+	// The resume derivation carries its OWN fence token in its spawn
+	// params: the re-derivation is derivation #2 of the session, so the
+	// token is the fingerprint with the #1 suffix (the v1 attempt#N
+	// shape keyed on the spawn counter). The spawn ordinal itself is 2.
+	if id := sp.call(1).InstanceID; id != j.sessionFingerprint+"#1" {
+		t.Fatalf("resume derivation fence token: got %q, want %s#1", id, j.sessionFingerprint)
+	}
+	if n := sp.call(1).SpawnN; n != 2 {
+		t.Fatalf("resume derivation spawn ordinal: got %d, want 2", n)
 	}
 	msg := recvRT(t, toOB)
 	if msg.Kind != protocol.RTRecovered || msg.WorkItem != wi {
 		t.Fatalf("expected RTRecovered, got %+v", msg)
 	}
-	if msg.AttemptID != "ra_"+wi+"#1" {
-		t.Fatalf("recovered agent must carry a fresh lineage id, got %q", msg.AttemptID)
+	if msg.AttemptID != j.sessionFingerprint+"#1" {
+		t.Fatalf("recovered agent must carry a fresh fence token, got %q", msg.AttemptID)
+	}
+	if msg.SpawnN != 2 {
+		t.Fatalf("RTRecovered must announce spawn_n 2, got %d", msg.SpawnN)
 	}
 	if msg.AgentPID == oldPID || msg.AgentPID <= 0 {
 		t.Fatalf("RTRecovered must carry the NEW handle: old=%d new=%d", oldPID, msg.AgentPID)

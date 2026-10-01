@@ -21,14 +21,21 @@ import (
 type JobInfo struct {
 	WorkItem   string
 	Project    string
-	AttemptID  string
-	InstanceID string // the protocol attempt-id fence (agent lineage)
-	Generation int64
+	// SessionFingerprint is the PUBLIC session handle (B3); the secret
+	// never leaves state.json and the one-shot askpass, but it is exposed
+	// here for the daemon's in-process faces (the M4 revalidation seam
+	// rides RTMsg, not this struct).
+	SessionFingerprint string
+	// InstanceID is the derivation fence token carried on the protocol
+	// attempt-id field during the v1→v1.5 transition: the session
+	// fingerprint, "#N"-suffixed after re-derivations.
+	InstanceID string
 	State      JobState
 	StopReason string
 	CapsuleDir string
 	Git        gitops.Opts
-	SessionID  string
+	SessionID  string // the SECRET — in-process consumers only, never a log surface
+	SpawnN     int
 	Transcript string
 	// LiveTranscript is the file the current derivation appends to (the
 	// F3 live-transcript face; "" while not located). SpawnAt is its
@@ -78,17 +85,17 @@ func (j *job) info() JobInfo {
 		}
 	}
 	return JobInfo{
-		WorkItem:       j.wi,
-		Project:        j.project,
-		AttemptID:      j.attempt,
-		InstanceID:     j.instance,
-		Generation:     j.generation,
-		State:          j.state,
-		StopReason:     j.stopReason,
-		CapsuleDir:     j.capsuleDir,
-		Git:            j.git,
-		SessionID:      j.sessionID,
-		Transcript:     j.transcript,
+		WorkItem:           j.wi,
+		Project:            j.project,
+		SessionFingerprint: j.sessionFingerprint,
+		InstanceID:         j.instance,
+		State:              j.state,
+		StopReason:         j.stopReason,
+		CapsuleDir:         j.capsuleDir,
+		Git:                j.git,
+		SessionID:          j.sessionID,
+		SpawnN:             j.spawnN,
+		Transcript:         j.transcript,
 		LiveTranscript: j.liveTranscript,
 		SpawnAt:        spawnAt,
 		BundleName:     j.bundleName,

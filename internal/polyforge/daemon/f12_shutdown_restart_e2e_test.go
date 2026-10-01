@@ -31,6 +31,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -42,6 +44,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
@@ -80,27 +83,36 @@ func slowPreReceive(t *testing.T, bare string, d time.Duration) {
 	}
 }
 
-// e2eRecord builds one runtime state.json record (the same field shape
-// TestRestartWiring seeds).
+// e2eRecord builds one runtime state.json record in the v1.5 §4.1 shape:
+// the session secret plus its public fingerprint, the derivation counter,
+// and none of the deleted attempt/generation/instance/credential fields.
 func e2eRecord(wi, capDir, gitDir, bare string) map[string]any {
+	session := e2eSession(wi)
 	return map[string]any{
-		"work_item_id": wi,
-		"project":      "proj",
-		"attempt_id":   "ra_" + wi,
-		"instance_id":  "ra_" + wi,
-		"generation":   int64(1),
-		"state":        "running",
-		"capsule_dir":  capDir,
-		"git_dir":      gitDir,
-		"remote_url":   bare,
-		"username":     wi,
-		"secret":       "push-secret",
-		"session_id":   "sess_" + wi + "_1",
-		"transcript":   filepath.Join(capDir, "session", "session-ra_"+wi+".jsonl"),
-		"bundle_name":  "demo-bundle",
-		"agent_pid":    0,
-		"spawn_n":      1,
+		"work_item_id":        wi,
+		"project":             "proj",
+		"session_id":          session,
+		"session_fingerprint": apiSessionFingerprint(session),
+		"state":               "running",
+		"capsule_dir":         capDir,
+		"git_dir":             gitDir,
+		"remote_url":          bare,
+		"clean_pause":         false,
+		"transcript":          filepath.Join(capDir, "session", "session-"+apiSessionFingerprint(session)+".jsonl"),
+		"bundle_name":         "demo-bundle",
+		"agent_pid":           0,
+		"spawn_n":             1,
 	}
+}
+
+// e2eSession mints the deterministic per-WI test secret (64-hex).
+func e2eSession(wi string) string {
+	sum := sha256.Sum256([]byte("daemon-e2e-session:" + wi))
+	return hex.EncodeToString(sum[:])
+}
+
+func apiSessionFingerprint(sessionID string) string {
+	return api.SessionFingerprint(sessionID)
 }
 
 func seedStateJobs(t *testing.T, dataDir, machineID string, recs ...map[string]any) {
@@ -224,12 +236,12 @@ func TestShutdownRestartFullChainPushIdempotency(t *testing.T) {
 	capLive := filepath.Join(ws, "capsules", wiLive)
 	gitLive := filepath.Join(data, "git", wiLive+".git")
 	seedCapsuleGit(t, capLive, gitLive, bareLive)
-	seedTranscript(t, capLive, "ra_"+wiLive)
+	seedTranscript(t, capLive, apiSessionFingerprint(e2eSession(wiLive)))
 
 	capPush := filepath.Join(ws, "capsules", wiPush)
 	gitPush := filepath.Join(data, "git", wiPush+".git")
 	seedCapsuleGit(t, capPush, gitPush, barePush)
-	seedTranscript(t, capPush, "ra_"+wiPush)
+	seedTranscript(t, capPush, apiSessionFingerprint(e2eSession(wiPush)))
 	// The unflushed state the old process must commit and publish
 	// mid-shutdown (the commit-dirty capsule of the incident).
 	if err := os.WriteFile(filepath.Join(capPush, "dirty.txt"), []byte("unflushed\n"), 0o644); err != nil {
@@ -301,7 +313,10 @@ func TestShutdownRestartFullChainPushIdempotency(t *testing.T) {
 	}
 	sp2Calls := sp2.callCount()
 	restore()
-	if runErr2 == nil || !strings.Contains(runErr2.Error(), "another daemon is listening") {
+	// v1.5 M5: the guard now has TWO halves — the data-dir flock (which
+	// fires first here: the old process still holds it) and the socket
+	// dial probe. Either refusal is the guard doing its job.
+	if runErr2 == nil || !strings.Contains(runErr2.Error(), "another daemon") {
 		t.Fatalf("new daemon Run = %v, want the single-instance guard refusal", runErr2)
 	}
 	if sp2Calls != 0 {
@@ -443,7 +458,7 @@ func TestShutdownDuringStartupReconciliationNeverServesFace(t *testing.T) {
 	capDir := filepath.Join(ws, "capsules", wi)
 	gitDir := filepath.Join(data, "git", wi+".git")
 	seedCapsuleGit(t, capDir, gitDir, bare)
-	seedTranscript(t, capDir, "ra_"+wi)
+	seedTranscript(t, capDir, apiSessionFingerprint(e2eSession(wi)))
 	baseline := gitHead(t, gitDir, "HEAD")
 	if baseline == "" {
 		t.Fatal("no baseline commit after seeding")

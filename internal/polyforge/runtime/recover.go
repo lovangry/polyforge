@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -180,6 +180,9 @@ func (r *Runtime) resumeSource(j *job) string {
 
 // recovered finishes a successful re-derivation. A successful recovery
 // RESETS the failure budget — the counter is spent by failures only.
+// v1.5: RTRecovered carries SpawnN (the B2 fence key) and the in-process
+// session secret (the observe lane's M4 revalidation reads it); identity
+// otherwise changes NOT AT ALL — no new attempt, no generation bump.
 func (r *Runtime) recovered(j *job, h AgentHandle, cause string, resumed bool) {
 	j.mu.Lock()
 	j.recoverFails = 0
@@ -187,6 +190,7 @@ func (r *Runtime) recovered(j *job, h AgentHandle, cause string, resumed bool) {
 		j.resumeFails = 0 // a successful resume breaks the failure streak
 	}
 	inst := j.instance
+	spawnN := j.spawnN
 	pid := j.agentPID
 	j.mu.Unlock()
 	if err := j.transition(StateRunning); err != nil {
@@ -198,9 +202,11 @@ func (r *Runtime) recovered(j *job, h AgentHandle, cause string, resumed bool) {
 	r.send(protocol.RTMsg{
 		Kind:      protocol.RTRecovered,
 		AttemptID: inst,
+		SpawnN:    spawnN,
 		WorkItem:  j.wi,
 		AgentPID:  pid,
 		Detail:    cause,
+		SessionID: j.sessionID,
 	})
 }
 
@@ -238,12 +244,18 @@ func (j *job) effectiveModel() string {
 	return j.candidates[j.candidateOrdinal%n]
 }
 
-// boundedFail terminates the WI without a relaunch: end-generation blocked,
-// RTFinished(blocked). The aihub side then shows blocked and the restart
-// reconciliation leaves the WI untouched (§十一).
+// boundedFail terminates the WI without a relaunch: SessionEnd(blocked)
+// — the hub clears the session row and marks the WI blocked, which the
+// claim gate excludes until a human intervenes (M2). The storm guard's
+// "never a third relaunch" contract is preserved: restart sees blocked
+// and leaves the record untouched. RTFinished(blocked) follows.
 func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
-	if err := r.hub.EndGeneration(j.wi, endGenerationReq(j, protocol.FinishBlocked)); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bounded-fail end-generation failed (restart will reconcile): %v\n", j.wi, err)
+	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
+		SessionID: j.sessionID,
+		Status:    api.StatusBlocked,
+		Note:      detail,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: bounded-fail session-end failed (restart will reconcile): %v\n", j.wi, err)
 	}
 	if err := j.transition(StateDone); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: bounded fail could not reach DONE: %v\n", j.wi, err)
@@ -259,14 +271,7 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 		Reason:    protocol.FinishBlocked,
 		Detail:    detail,
 	})
-}
-
-func endGenerationReq(j *job, status string) aihubclient.EndGenerationRequest {
-	return aihubclient.EndGenerationRequest{
-		AttemptID:  j.attempt,
-		Generation: j.generation,
-		Status:     status,
-	}
+	_ = ctx
 }
 
 // commitDirty is the commit-dirty-on-recover step (§六): stage everything,
@@ -310,12 +315,19 @@ func transcriptReadable(path string) bool {
 }
 
 // spawnAgent derives one agent instance (resume or fresh), journals the
-// spawn identity and installs the handle under the job lock, minting the
-// next lineage id (the attempt-id fence).
+// spawn identity and installs the handle under the job lock.
+//
+// v1.5 identity rule (B2): the ONLY identity change across a recovery is
+// spawn_n++ — no new attempt, no generation. The derivation ordinal is
+// state.json's spawn_n + 1 (the fresh-clone seeding happened at
+// startClaimed); the fence token for the transition protocol is the
+// session fingerprint ("#N" appended for re-derivations, mirroring the
+// v1 attempt#N shape), and the journal line records the ordinal so a
+// later fresh clone continues the counter.
 //
 // transcript is the resume source (the file the resumed derivation
 // continues); "" for a fresh derivation, which declares its own
-// instance-named capsule copy path instead (sessionPathFor). The live
+// token-named capsule copy path instead (sessionPathFor). The live
 // transcript — the file this derivation actually appends to — is
 // recorded on the job: the resume source verbatim, or the located
 // harness-store file for a fresh derivation ("" while the harness has
@@ -324,12 +336,15 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcrip
 	j.mu.Lock()
 	spawnN := j.spawnN
 	capsuleDir := j.capsuleDir
+	sessionFp := j.sessionFingerprint
 	j.mu.Unlock()
-	// the lineage id this derivation will carry once installed — the
-	// journal must name the process that is live when Spawn returns
-	nextInst := j.attempt
-	if spawnN >= 1 {
-		nextInst = fmt.Sprintf("%s#%d", j.attempt, spawnN)
+	// the derivation ordinal and fence token this derivation will carry
+	// once installed — the journal must name the process that is live when
+	// Spawn returns
+	ordinal := spawnN + 1
+	token := sessionFp
+	if ordinal > 1 {
+		token = fmt.Sprintf("%s#%d", sessionFp, ordinal-1)
 	}
 	var live string
 	if resume {
@@ -343,7 +358,7 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcrip
 		j.mu.Unlock()
 	} else {
 		j.mu.Lock()
-		j.transcript = sessionPathFor(capsuleDir, nextInst)
+		j.transcript = sessionPathFor(capsuleDir, token)
 		j.mu.Unlock()
 	}
 	j.mu.Lock()
@@ -352,21 +367,21 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcrip
 	p := SpawnParams{
 		WorkItemID:     j.wi,
 		CapsuleDir:     capsuleDir,
-		SessionID:      j.sessionID,
+		SessionHandle:  sessionFp,
+		SpawnN:         ordinal,
 		TranscriptPath: declared,
 		Resume:         resume,
-		Generation:     j.generation,
 		InitialPrompt:  r.buildPrompt(j, resume),
 		CgroupPath:     r.cgroupPathFor(j.wi),
-		// The derivation's own lineage id rides the env as PF_INSTANCE_ID
-		// (the agent's flush fence identity) and the journal alike.
-		InstanceID: nextInst,
+		// The derivation's fence token rides the journal (and, during the
+		// transition, RTMsg.AttemptID) — never the secret.
+		InstanceID: token,
 		// F4: the spawn is pinned to the effective candidate of the
 		// persisted chain (spawn.go documents why this rides argv).
 		Model: j.effectiveModel(),
 	}
 	p.Journal = func(pid int, startedAt string) error {
-		return writeSpawnJournal(p, pid, startedAt, nextInst)
+		return writeSpawnJournal(p, pid, startedAt, token)
 	}
 	h, err := r.spawner.Spawn(ctx, p)
 	if err != nil {
@@ -383,16 +398,12 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcrip
 		}
 	}
 	j.mu.Lock()
-	j.spawnN++
+	j.spawnN = ordinal
 	j.agent = h
 	j.agentPID = h.PID()
 	j.agentStartedAt = h.StartedAt()
 	j.liveTranscript = live
-	// nextInst (minted from the pre-increment spawnN above) IS the
-	// post-increment lineage id: with spawnN'=n+1, the old
-	// newInstanceLocked() answered attempt (n==0) or attempt#n (n>=1)
-	// — exactly nextInst — so the derivation installs it directly.
-	j.instance = nextInst
+	j.instance = token
 	j.mu.Unlock()
 	return h, nil
 }
@@ -408,8 +419,8 @@ func (r *Runtime) buildPrompt(j *job, resume bool) string {
 			b.WriteString("\n\n")
 		}
 	}
-	fmt.Fprintf(&b, "Work item %s (project %s, generation %d). Capsule root: %s. ",
-		j.wi, j.project, j.generation, j.capsuleDir)
+	fmt.Fprintf(&b, "Work item %s (project %s, session %s). Capsule root: %s. ",
+		j.wi, j.project, j.sessionFingerprint, j.capsuleDir)
 	if j.bundleName != "" {
 		fmt.Fprintf(&b, "Workflow bundle %s (digest %s). ", j.bundleName, j.bundleDigest)
 	}

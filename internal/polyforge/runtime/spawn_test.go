@@ -21,13 +21,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
 func TestSpawnIsolationFlags(t *testing.T) {
 	sp := newPiSpawner(&Config{PiBin: "/nonexistent-pi"})
 	cmd := sp.buildCmd(SpawnParams{
-		WorkItemID: "wi_iso", CapsuleDir: "/caps", SessionID: "s1", Generation: 7,
+		WorkItemID: "wi_iso", CapsuleDir: "/caps", SessionHandle: "ab12cd34", SpawnN: 7,
 	})
 	args := cmd.Args
 	if args[0] != "/nonexistent-pi" {
@@ -68,7 +69,7 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	t.Setenv("PLAIN_VAR", "keep-me")
 	t.Setenv("SOME_OTHER_NAME", "machine-key") // renamed secret: value match
 	sp := newPiSpawner(&Config{EnvSecrets: []string{"machine-key"}, SocketPath: "/run/polyforge.sock"})
-	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionID: "s", Generation: 1, InstanceID: "ra_wi_env#2"})
+	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionHandle: "ab12cd34", SpawnN: 2})
 	env := strings.Join(cmd.Env, "\n")
 	if strings.Contains(env, "POLYFORGE_API_KEY") || strings.Contains(env, "PF_LEAK=") {
 		t.Fatalf("POLYFORGE_*/PF_* must be stripped, got:\n%s", env)
@@ -80,14 +81,15 @@ func TestSpawnEnvSanitized(t *testing.T) {
 		t.Fatal("the blacklist must not strip unrelated variables")
 	}
 	for _, want := range []string{
-		"PF_WI_ID=wi_env", "PF_SESSION_ID=s", "PI_SESSION_DIR=/caps/session", "PF_GENERATION=1",
+		"PF_WI_ID=wi_env", "PI_SESSION_DIR=/caps/session",
 		// the daemon's UDS path is a DELIBERATE addition (the agent's
 		// flush(reason) proxy): stripped as an inherited PF_* only to be
 		// handed back explicitly
 		"PF_DAEMON_SOCKET=/run/polyforge.sock",
-		// the derivation's own lineage id is a DELIBERATE addition too
-		// (same mechanism): the agent's flush fence identity
-		"PF_INSTANCE_ID=ra_wi_env#2",
+		// v1.5 B2/B3: the PUBLIC session handle and the monotonic
+		// derivation counter are the agent's flush fence identity
+		"PF_SESSION_HANDLE=ab12cd34",
+		"PF_SPAWN_N=2",
 	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env must carry %q, got:\n%s", want, env)
@@ -97,31 +99,36 @@ func TestSpawnEnvSanitized(t *testing.T) {
 
 func TestSpawnEnvNoSocketPathOmitted(t *testing.T) {
 	sp := newPiSpawner(&Config{})
-	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionID: "s", Generation: 1})
+	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps"})
 	env := strings.Join(cmd.Env, "\n")
 	if strings.Contains(env, "PF_DAEMON_SOCKET") {
 		t.Fatal("an unconfigured socket path must not inject an empty PF_DAEMON_SOCKET")
 	}
-	if strings.Contains(env, "PF_INSTANCE_ID") {
-		t.Fatal("an unknown lineage id must not inject an empty PF_INSTANCE_ID")
+	// the deleted v1 identity vars must never come back
+	for _, gone := range []string{"PF_INSTANCE_ID", "PF_SESSION_ID", "PF_GENERATION"} {
+		if strings.Contains(env, gone) {
+			t.Fatalf("the deleted %s must not be injected, got:\n%s", gone, env)
+		}
 	}
 }
 
-// TestSpawnInstanceIDEnvReachesChild drives the REAL spawn path (scripted
-// harness) with a lineage id and proves the child's environment carries
-// PF_INSTANCE_ID with exactly that value: the agent reads its flush
-// identity from env, not from scraping the spawn journal.
-func TestSpawnInstanceIDEnvReachesChild(t *testing.T) {
+// TestSpawnSessionIdentityEnvReachesChild drives the REAL spawn path
+// (scripted harness) and proves the child's environment carries the v1.5
+// identity pair — PF_SESSION_HANDLE (the public fingerprint) and
+// PF_SPAWN_N (the derivation counter) — and NOT the session secret: the
+// agent reads its flush fence identity from env, never the credential.
+func TestSpawnSessionIdentityEnvReachesChild(t *testing.T) {
 	capDir, sp := scriptedHarness(t)
 	envDump := filepath.Join(capDir, "child-env.txt")
 	t.Setenv("GO_BE_ENV", envDump)
+	secret := fakeSession("wi_inst")
 	h, err := sp.Spawn(context.Background(), SpawnParams{
 		WorkItemID:    "wi_inst",
 		CapsuleDir:    capDir,
-		SessionID:     "s1",
-		Generation:    1,
+		SessionHandle: api.SessionFingerprint(secret),
+		SpawnN:        2,
 		InitialPrompt: "begin",
-		InstanceID:    "ra_wi_inst#2",
+		InstanceID:    api.SessionFingerprint(secret) + "#1",
 		Journal:       func(pid int, startedAt string) error { return nil },
 	})
 	if err != nil {
@@ -137,8 +144,15 @@ func TestSpawnInstanceIDEnvReachesChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the harness never dumped its env: %v", err)
 	}
-	if !strings.Contains(string(raw), `"PF_INSTANCE_ID=ra_wi_inst#2"`) {
-		t.Fatalf("child env must carry the derivation's lineage id, got:\n%s", raw)
+	fp := api.SessionFingerprint(secret)
+	if !strings.Contains(string(raw), `"PF_SESSION_HANDLE=`+fp+`"`) {
+		t.Fatalf("child env must carry the public session handle, got:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), `"PF_SPAWN_N=2"`) {
+		t.Fatalf("child env must carry the derivation counter, got:\n%s", raw)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Fatalf("the session SECRET must never reach the child env, got:\n%s", raw)
 	}
 }
 
@@ -160,8 +174,8 @@ func TestEnvSanitizerUnit(t *testing.T) {
 
 func TestSpawnJournalWritten(t *testing.T) {
 	capDir := t.TempDir()
-	p := SpawnParams{WorkItemID: "wi_j", CapsuleDir: capDir, SessionID: "s", TranscriptPath: "/t"}
-	if err := writeSpawnJournal(p, 4242, "then", "ra_wi_j"); err != nil {
+	p := SpawnParams{WorkItemID: "wi_j", CapsuleDir: capDir, SessionHandle: "ab12cd34", SpawnN: 1, TranscriptPath: "/t"}
+	if err := writeSpawnJournal(p, 4242, "then", "ab12cd34"); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(capDir, capsuleDirRuntimeState, "spawn-journal.jsonl"))
@@ -172,16 +186,51 @@ func TestSpawnJournalWritten(t *testing.T) {
 	if err := json.Unmarshal(raw[:len(raw)-1], &entry); err != nil {
 		t.Fatalf("journal line must be JSON: %v (%s)", err, raw)
 	}
-	if entry["pid"].(float64) != 4242 || entry["instance"] != "ra_wi_j" || entry["work_item"] != "wi_j" {
+	if entry["pid"].(float64) != 4242 || entry["instance"] != "ab12cd34" || entry["work_item"] != "wi_j" {
 		t.Fatalf("journal entry wrong: %+v", entry)
 	}
-	// appends, not truncates
-	if err := writeSpawnJournal(p, 4243, "then2", "ra_wi_j#1"); err != nil {
+	// v1.5 additive fields: the derivation counter and the PUBLIC handle
+	if entry["spawn_n"].(float64) != 1 || entry["session_handle"] != "ab12cd34" {
+		t.Fatalf("journal entry must carry spawn_n and session_handle: %+v", entry)
+	}
+	// the SECRET never lands in the capsule journal (B3)
+	if _, ok := entry["session_id"]; ok {
+		t.Fatalf("the journal must not carry a session_id key: %+v", entry)
+	}
+	// appends, not truncates — and the second line's spawn_n is the max
+	if err := writeSpawnJournal(p, 4243, "then2", "ab12cd34#1"); err != nil {
 		t.Fatal(err)
 	}
 	raw2, _ := os.ReadFile(filepath.Join(capDir, capsuleDirRuntimeState, "spawn-journal.jsonl"))
 	if n := strings.Count(string(raw2), "\n"); n != 2 {
 		t.Fatalf("journal must append, found %d lines", n)
+	}
+	if got := maxSpawnNFromJournal(capDir); got != 1 {
+		t.Fatalf("maxSpawnNFromJournal = %d, want 1", got)
+	}
+}
+
+// maxSpawnNFromJournal: the B2 fresh-clone source — the highest recorded
+// spawn_n wins, missing/unparsable journals answer 0.
+func TestMaxSpawnNFromJournal(t *testing.T) {
+	capDir := t.TempDir()
+	if got := maxSpawnNFromJournal(capDir); got != 0 {
+		t.Fatalf("absent journal must answer 0, got %d", got)
+	}
+	path := filepath.Join(capDir, capsuleDirRuntimeState, "spawn-journal.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []byte(
+		`{"work_item":"wi","spawn_n":1,"pid":1}` + "\n" +
+			`{"work_item":"wi","spawn_n":5,"pid":2}` + "\n" +
+			`{"work_item":"wi","pid":3}` + "\n" + // pre-v1.5 line: no spawn_n
+			`not json` + "\n")
+	if err := os.WriteFile(path, lines, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := maxSpawnNFromJournal(capDir); got != 5 {
+		t.Fatalf("maxSpawnNFromJournal = %d, want 5", got)
 	}
 }
 
@@ -195,8 +244,8 @@ func TestPiRPCEnvelopeAndAck(t *testing.T) {
 	h, err := sp.Spawn(context.Background(), SpawnParams{
 		WorkItemID:    "wi_rpc",
 		CapsuleDir:    capDir,
-		SessionID:     "s1",
-		Generation:    1,
+		SessionHandle: "ab12cd34",
+		SpawnN:        1,
 		InitialPrompt: "begin the work item",
 		Journal:       func(pid int, startedAt string) error { return nil },
 	})
@@ -267,8 +316,8 @@ func TestSpawnRecordTapFeedsEveryStdoutRecord(t *testing.T) {
 	h, err := sp.Spawn(context.Background(), SpawnParams{
 		WorkItemID:    "wi_tap",
 		CapsuleDir:    capDir,
-		SessionID:     "s1",
-		Generation:    1,
+		SessionHandle: "ab12cd34",
+		SpawnN:        1,
 		InitialPrompt: "begin",
 		Journal:       func(pid int, startedAt string) error { return nil },
 	})
@@ -323,8 +372,8 @@ func TestSpawnRecordTapBoundAfterSpawnerBuild(t *testing.T) {
 	h, err := sp.Spawn(context.Background(), SpawnParams{
 		WorkItemID:    "wi_tap_order",
 		CapsuleDir:    capDir,
-		SessionID:     "s1",
-		Generation:    1,
+		SessionHandle: "ab12cd34",
+		SpawnN:        1,
 		InitialPrompt: "begin",
 		Journal:       func(pid int, startedAt string) error { return nil },
 	})
@@ -357,8 +406,8 @@ func TestAckRoutingByMethodAndCorrelation(t *testing.T) {
 	h, err := sp.Spawn(context.Background(), SpawnParams{
 		WorkItemID:    "wi_ack",
 		CapsuleDir:    capDir,
-		SessionID:     "s1",
-		Generation:    1,
+		SessionHandle: "ab12cd34",
+		SpawnN:        1,
 		InitialPrompt: "begin",
 		Journal:       func(pid int, startedAt string) error { return nil },
 	})
@@ -394,8 +443,8 @@ func TestAckRefusalReachedTheWaiter(t *testing.T) {
 	h, err := sp.Spawn(context.Background(), SpawnParams{
 		WorkItemID:    "wi_refuse",
 		CapsuleDir:    capDir,
-		SessionID:     "s1",
-		Generation:    1,
+		SessionHandle: "ab12cd34",
+		SpawnN:        1,
 		InitialPrompt: "begin",
 		Journal:       func(pid int, startedAt string) error { return nil },
 	})

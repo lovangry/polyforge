@@ -1,20 +1,40 @@
-// restart.go: daemon-startup reconciliation (v1-spec-full §十一). The
-// Runtime never revives from state.json alone — every recorded job is
-// reconciled against aihub's own verdict first:
-//
-//	aihub says wrapped/failed/canceled → do NOT revive; collect any local
-//	  residue and drop the record.
-//	aihub says running → the old agent tree is killed and the WI runs
-//	  through the recovery engine (RTRecovered), unless the local record
-//	  was mid-seal, in which case the interrupted stop is finished.
-//	aihub says blocked → leave everything untouched (human attention).
 package runtime
+
+// restart.go: daemon-startup reconciliation (v1-spec-full §十一, re-keyed
+// onto the v1.5 session model — contract §1.2/§1.3). The Runtime never
+// revives from state.json alone — every recorded job is reconciled
+// against aihub's own verdict first, and the verdict is the SESSION
+// verify (compare-only, B3: the hub stores only the hash of our secret):
+//
+//	claiming-journal replay runs FIRST (B1): an uncleared entry whose
+//	  journaled session still holds the WI is adopted and its start
+//	  finished; anything else is dropped.
+//	verify matches + status=paused + clean_pause=false → SessionAttach
+//	  and resume from the local capsule (the graceful-shutdown shape:
+//	  the hub's paused-with-session + clean_pause=false IS "daemon shut
+//	  down gracefully, will attach on restart", M3).
+//	verify matches + status=running → crash-mid-run: the local capsule
+//	  recover-resumes through the recovery engine (a record caught
+//	  mid-seal finishes the interrupted stop instead).
+//	verify does NOT match (current_fingerprint differs, or the session
+//	  row is gone and the WI is queued/running elsewhere) → release:
+//	  kill any local tree, quarantine the capsule
+//	  (capsules/<id>.quarantined.<ts>), drop the record. NO hub
+//	  transition — superseded, not terminal.
+//	verify does not match + terminal status → drop the record: the
+//	  close settled server-side before the crash.
+//	verify does not match + blocked → leave everything untouched (M2:
+//	  the bounded-fail verdict stands; the storm guard's "never a third
+//	  relaunch" is exactly this).
+//	verify does not match + paused/clean_pause (operator pause) → drop
+//	  the record: restart must NOT auto-resume it.
+//	aihub unreachable → keep the record, try again on the next restart —
+//	  never guess a verdict.
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -22,9 +42,9 @@ import (
 
 // Restart loads state.json, reconciles every recorded job with aihub and
 // recovers what is still ours to run. Jobs aihub no longer knows as ours
-// are dropped; a job with no local record needs no reconciliation (a
-// running WI whose capsule lives on another machine is that machine's
-// business).
+// are dropped or released; a job with no local record needs no
+// reconciliation (a running WI whose capsule lives on another machine is
+// that machine's business).
 func (r *Runtime) Restart(ctx context.Context) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
@@ -32,141 +52,159 @@ func (r *Runtime) Restart(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// B1 journal replay FIRST, before the state.json records: a journaled
+	// start (crash between the claim call and the spawn) must win over any
+	// stale record of the same WI — the replay carries the secret the
+	// record may predate. startClaimed's sessionIsRecorded guard keeps the
+	// crash-past-registration window honest (see claiming.go).
+	r.resumeClaiming(ctx)
 	// Seed every recorded job into the live map first: persist() rewrites
 	// state.json from the map, so records that must SURVIVE the
 	// reconciliation (blocked, aihub-unreachable) are preserved by simply
-	// staying in it. A record whose WI is already live (Start ran before
-	// Restart) is left entirely alone.
+	// staying in it. A record whose WI is already live (the journal replay
+	// just adopted it, or Start ran before Restart) is left alone.
 	for _, rec := range st.Jobs {
 		if r.jobOf(rec.WorkItemID) != nil {
+			continue
+		}
+		if rec.SessionID == "" {
+			// a pre-v1.5 record (or a torn write): no session to verify,
+			// nothing to reconcile — drop it rather than guess.
+			fmt.Fprintf(os.Stderr, "runtime: %s: record without a session dropped\n", rec.WorkItemID)
 			continue
 		}
 		r.mu.Lock()
 		r.jobs[rec.WorkItemID] = jobFromRecord(rec)
 		r.mu.Unlock()
 	}
-	// D5, after seeding: replay every claim that crashed between the
-	// aihub call and the spawn (a claiming-journal entry predates any
-	// state.json record for that work item, but the replay's
-	// already-active check must see the seeded records). The SAME
-	// idempotency key hands back the SAME attempt, so the replay either
-	// finishes the start or closes the generation blocked.
-	r.resumeClaiming(ctx)
 	for _, rec := range st.Jobs {
+		if rec.SessionID == "" {
+			continue
+		}
 		if j := r.jobOf(rec.WorkItemID); j != nil && j.liveAgent() {
 			continue // already running under this daemon: not a restart case
 		}
-		wi, err := r.hub.GetWorkItem(rec.WorkItemID)
+		v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
 		if err != nil {
 			// aihub unreachable for this WI: keep the record, try again on
 			// the next restart — never guess a verdict.
-			fmt.Fprintf(os.Stderr, "runtime: %s: aihub lookup failed, record kept: %v\n", rec.WorkItemID, err)
+			fmt.Fprintf(os.Stderr, "runtime: %s: session verify failed, record kept: %v\n", rec.WorkItemID, err)
 			continue
 		}
-		// Pre-F2 residue: a record keyed by a slug ("<project>#<seq>") or
-		// any other non-canonical id form predates the canonical-id
-		// ruling. Migrate it in place — re-key by the canonical id, fix
-		// the push remote (the aihub bare repo is canonical-named; the
-		// slug-built remote URL was a 404) and rename the on-disk capsule
-		// and git-dir when both exist — so the reconciliation below and
-		// every later push run on the canonical id.
-		if wi.ID != "" && wi.ID != rec.WorkItemID {
-			rec = r.migrateRecord(rec, wi.ID)
+		if v.Matches {
+			switch v.Status {
+			case api.StatusRunning:
+				// crash-mid-run under this session: recover-resume the
+				// local capsule (a mid-seal record finishes its stop).
+				if serr := r.restartRunning(ctx, rec); serr != nil {
+					fmt.Fprintf(os.Stderr, "runtime: %s: restart recovery failed: %v\n", rec.WorkItemID, serr)
+				}
+			case api.StatusPaused:
+				if v.CleanPause {
+					// operator pause: never auto-resume (M3). Drop the
+					// record — the capsule scene stays on disk and the
+					// resume belongs to the operator (CLI unpause or a
+					// force-takeover).
+					fmt.Fprintf(os.Stderr, "runtime: %s: cleanly paused; record dropped (no auto-resume)\n", rec.WorkItemID)
+					r.forgetRecord(rec)
+				} else if aerr := r.restartAttach(ctx, rec); aerr != nil {
+					// attach refused (taken over in the window, or the hub
+					// disagree): keep the record — the next restart
+					// re-verifies with a fresh verdict.
+					fmt.Fprintf(os.Stderr, "runtime: %s: session attach failed, record kept: %v\n", rec.WorkItemID, aerr)
+				}
+			case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
+				r.restartDrop(rec)
+			default:
+				// queued/blocked while our session still matches (a torn
+				// server state): treat as not-ours, drop the record.
+				fmt.Fprintf(os.Stderr, "runtime: %s: hub says %s with our session; record dropped\n", rec.WorkItemID, v.Status)
+				r.forgetRecord(rec)
+			}
+			continue
 		}
-		switch wi.Status {
+		// verify does NOT match: our session is no longer the holder (or
+		// the row is gone entirely).
+		switch v.Status {
 		case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
+			// the close settled server-side before the crash: collect any
+			// local residue and drop the record — no quarantine, the
+			// terminal scene is the preserved artifact.
 			r.restartDrop(rec)
 		case api.StatusBlocked:
-			// 不动: the bounded-fail verdict stands; no revival, no kill.
-		case api.StatusRunning:
-			if serr := r.restartRunning(ctx, rec); serr != nil {
-				fmt.Fprintf(os.Stderr, "runtime: %s: restart recovery failed: %v\n", rec.WorkItemID, serr)
-			}
+			// M2 storm guard: the bounded-fail verdict stands — no
+			// revival, no kill, no quarantine; the record is kept so the
+			// next boot re-checks (the unblock path re-claims through the
+			// normal start, which quarantines the old scene itself).
+		case api.StatusQueued:
+			// back in the pool: our claim is gone. A local tree (if any)
+			// is a writer of a session nobody holds — collect it and drop
+			// the record; the capsule stays for the next claim's
+			// quarantine-or-clone decision.
+			fmt.Fprintf(os.Stderr, "runtime: %s: session ended server-side (queued); record dropped\n", rec.WorkItemID)
+			r.restartDrop(rec)
 		default:
-			// queued/paused: the generation is no longer ours; drop the
-			// bookkeeping (the capsule scene stays on disk).
-			r.forgetRecord(rec)
+			// running or paused under ANOTHER session (the takeover
+			// happened while we were down): release — kill any local
+			// tree, quarantine the capsule, drop the record. NO hub
+			// transition: the new owner owns the work.
+			r.restartRelease(rec, v.CurrentFingerprint)
 		}
 	}
 	return r.persist()
 }
 
-// migrateRecord re-keys one pre-F2 record under its canonical work-item id
-// (in-place restart migration, §十一 + F2):
-//
-//   - the push remote is ALWAYS re-derived from the canonical id — the
-//     aihub bare repo is canonical-named and a slug-built remote URL was
-//     a 404 (the "#" fragment separator), so this one fix is what makes
-//     a resumed seal push reach the server at all;
-//   - the on-disk capsule and external git-dir are renamed onto their
-//     canonical-derived paths when the old ones exist and the new ones
-//     do not (best-effort: a rename failure keeps the old paths, which
-//     stay valid — the remote URL and the local git-dir name are
-//     independent);
-//   - the capsule's .git pointer is rewritten when the git-dir moved;
-//   - the record's session/transcript paths are re-derived from the
-//     (possibly renamed) capsule root;
-//   - the job map entry is re-keyed and the old spelling registered as
-//     an alias, so route-level lookups by the operator's spelling still
-//     resolve.
-//
-// The returned record is the migrated one; the caller's switch runs on it.
-func (r *Runtime) migrateRecord(rec *jobRecord, canonical string) *jobRecord {
-	old := rec.WorkItemID
-	out := *rec
-	capDir, gitDir := rec.CapsuleDir, rec.GitDir
-	n := func(err error, what string) {
-		fmt.Fprintf(os.Stderr, "runtime: %s: %s migration kept the old path: %v\n", old, what, err)
+// restartRelease is the superseded-at-restart path: the WI is held by
+// another session (currentFingerprint names the public holder). The local
+// tree is a zombie writer and the capsule a foreign scene — kill,
+// quarantine in place, drop the record, leave a durable trace.
+func (r *Runtime) restartRelease(rec *jobRecord, currentFingerprint string) {
+	j := r.jobOf(rec.WorkItemID)
+	if j == nil {
+		j = jobFromRecord(rec)
 	}
-	if rec.CapsuleDir != "" {
-		newCapsule := r.capsuleDir(canonical)
-		if dirExists(rec.CapsuleDir) && !dirExists(newCapsule) {
-			if err := os.Rename(rec.CapsuleDir, newCapsule); err != nil {
-				n(err, "capsule dir")
-			} else {
-				capDir = newCapsule
-			}
-		}
+	if j.agentPID > 0 {
+		r.killAgentTree(j)
 	}
-	if rec.GitDir != "" {
-		newGit := r.gitDirFor(canonical)
-		if dirExists(rec.GitDir) && !dirExists(newGit) {
-			if err := os.Rename(rec.GitDir, newGit); err != nil {
-				n(err, "git dir")
-			} else {
-				gitDir = newGit
-				// the capsule's .git pointer names the git-dir absolutely;
-				// keep it honest after the move (gitops works from GIT_DIR env
-				// anyway — the pointer is for humans and tools in the scene).
-				if capDir != rec.CapsuleDir || dirExists(capDir) {
-					_ = os.WriteFile(filepath.Join(capDir, ".git"),
-						[]byte("gitdir: "+gitDir+"\n"), 0o644)
-				}
-			}
-		}
+	if err := quarantineCapsule(j.capsuleDir); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: release quarantine failed (scene left in place): %v\n", rec.WorkItemID, err)
 	}
-	out.WorkItemID = canonical
-	out.CapsuleDir = capDir
-	out.GitDir = gitDir
-	out.RemoteURL = r.remoteURLFor(canonical)
-	out.Username = canonical
-	out.SessionID = fmt.Sprintf("sess_%s_%d", canonical, rec.Generation)
-	if capDir != "" && rec.AttemptID != "" {
-		out.Transcript = sessionPathFor(capDir, rec.AttemptID)
+	r.forgetRecord(rec)
+	if r.cfg.EventTap != nil {
+		r.cfg.EventTap(rec.WorkItemID, "session_released", map[string]any{
+			"session_fingerprint":  j.sessionFingerprint,
+			"current_fingerprint":  currentFingerprint,
+			"note":                 "answers may be lost; question re-opened",
+		})
 	}
-	fmt.Fprintf(os.Stderr, "runtime: migrated pre-canonical record %q → %q (capsule %s, remote %s)\n",
-		old, canonical, out.CapsuleDir, out.RemoteURL)
-	r.mu.Lock()
-	delete(r.jobs, old)
-	r.jobs[canonical] = jobFromRecord(&out)
-	r.mu.Unlock()
-	r.NoteAlias(old, canonical)
-	return &out
+	fmt.Fprintf(os.Stderr, "runtime: %s: held by session %q — local tree killed, capsule quarantined, record dropped (no hub transition)\n",
+		rec.WorkItemID, currentFingerprint)
 }
 
-// restartDrop handles aihub's terminal verdicts: no revival. A local agent
-// still alive is a writer of a dead generation — its tree is collected and
-// the record dropped.
+// restartAttach is the same-session paused resume (M3): SessionAttach
+// flips the WI back to running under the SAME secret, then the recovery
+// engine resumes the local capsule (its resume-first cascade continues
+// the transcript the graceful shutdown synced; a mid-seal record finishes
+// its interrupted stop instead).
+func (r *Runtime) restartAttach(ctx context.Context, rec *jobRecord) error {
+	j := r.jobOf(rec.WorkItemID)
+	if j == nil {
+		return fmt.Errorf("runtime: %s: no seeded record", rec.WorkItemID)
+	}
+	if _, err := r.hub.SessionAttach(rec.WorkItemID, api.SessionAttachRequest{
+		WorkItemID: rec.WorkItemID,
+		SessionID:  rec.SessionID,
+		MachineID:  r.cfg.MachineID,
+		Owner:      r.cfg.MachineID,
+	}); err != nil {
+		return err
+	}
+	return r.restartResume(ctx, rec, j)
+}
+
+// restartDrop handles aihub's terminal verdicts: no revival. A local
+// agent still alive is a writer of a dead session — its tree is collected
+// and the record dropped.
 func (r *Runtime) restartDrop(rec *jobRecord) {
 	j := r.jobOf(rec.WorkItemID)
 	if j == nil {
@@ -186,15 +224,20 @@ func (r *Runtime) forgetRecord(rec *jobRecord) {
 	r.mu.Unlock()
 }
 
-// restartRunning handles aihub's running verdict for a locally recorded
-// job: kill the old tree and run the recovery engine. A record caught
-// mid-seal (the daemon died between SEALING and EndGeneration) finishes
-// the interrupted stop instead of reviving.
+// restartRunning handles the verify-matches running verdict for a locally
+// recorded job (the crash-mid-run shape): kill the old tree and run the
+// recovery engine. A record caught mid-seal (the daemon died between
+// SEALING and SessionEnd) finishes the interrupted stop instead.
 func (r *Runtime) restartRunning(ctx context.Context, rec *jobRecord) error {
 	j := r.jobOf(rec.WorkItemID)
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no seeded record", rec.WorkItemID)
 	}
+	return r.restartResume(ctx, rec, j)
+}
+
+// restartResume is the shared tail of the attach and crash-resume paths.
+func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job) error {
 	state, _ := j.snapshot()
 	if state == StateSealing {
 		// finish the interrupted close — the sealed reason passes through

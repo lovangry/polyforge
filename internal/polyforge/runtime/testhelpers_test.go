@@ -6,6 +6,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,114 +22,212 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
 // ---------------------------------------------------------------------------
-// fake aihub
+// fake aihub (v1.5 session model): a tiny in-memory hub. `held` maps a
+// canonical wi → the session SECRET currently holding it ("" = unheld);
+// SessionVerify compares against it, SessionClaim/ForceTakeover install,
+// SessionEnd clears (terminal) or keeps (paused) it, SessionAttach
+// re-opens a paused+not-clean-pause row. `status` scripts the WI status
+// verify answers; `lookupErr` scripts outages per wi.
 
 type fakeHub struct {
-	mu        sync.Mutex
-	status    map[string]string
+	mu         sync.Mutex
+	status     map[string]string
+	held       map[string]string // wi → session secret ("" = unheld)
+	cleanPause map[string]bool
 	lookupErr map[string]error
-	claims    []aihubclient.ClaimRequest
-	ends      []aihubclient.EndGenerationRequest
-	gen       int64
+	claims    []api.SessionClaimRequest
+	takeovers []api.SessionClaimRequest
+	attaches  []api.SessionAttachRequest
+	ends      []api.SessionEndRequest
+	end       map[string]error // wi → end-error scripting (per wi)
 	digest    string            // claim-time bundle digest (default "deadbeef")
 	repos     []api.ProjectRepo // claim-served task-repo inventory (nil = none)
-	stickyGen bool              // keep the generation fixed across claims (crashed-Start replay shape)
 	// canonical maps an id-or-slug form (e.g. "proj#7") to the canonical
 	// work-item id the claim answer carries (F2 tests); nil entry = the
 	// input echoes itself (the pre-F2 behavior).
 	canonical map[string]string
 	items     map[string]*api.WorkItem // canonical id → claim answer record (F1 tests)
 	// keyClaims implements the aihub idempotency contract for tests (D4/
-	// D5): a repeated claim with the SAME IdempotencyKey hands back the
-	// SAME claim answer (same attempt id, same generation) instead of
-	// opening a new generation.
-	keyClaims map[string]*aihubclient.ClaimResponse
+	// B1): a repeated claim with the SAME IdempotencyKey hands back the
+	// SAME claim answer (same session, same bundle pin) instead of
+	// opening a new one.
+	keyClaims map[string]*api.SessionClaimResponse
 }
 
 func newFakeHub() *fakeHub {
-	return &fakeHub{status: map[string]string{}, lookupErr: map[string]error{}, gen: 1, keyClaims: map[string]*aihubclient.ClaimResponse{}}
+	return &fakeHub{
+		status:     map[string]string{},
+		held:       map[string]string{},
+		cleanPause: map[string]bool{},
+		lookupErr:  map[string]error{},
+		end:       map[string]error{},
+		keyClaims: map[string]*api.SessionClaimResponse{},
+	}
 }
 
-func (h *fakeHub) Claim(req aihubclient.ClaimRequest) (*aihubclient.ClaimResponse, error) {
+// hold scripts the hub: wi is held by sessionID in the given status.
+func (h *fakeHub) hold(wi, sessionID, status string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.claims = append(h.claims, req)
-	// idempotent replay (the aihub contract): same key → same attempt
-	if req.IdempotencyKey != "" {
-		if prev, ok := h.keyClaims[req.IdempotencyKey]; ok {
-			return prev, nil
-		}
+	h.held[wi] = sessionID
+	if status != "" {
+		h.status[wi] = status
 	}
-	if !h.stickyGen {
-		h.gen++
+}
+
+func (h *fakeHub) canonicalID(idOrSlug string) string {
+	if c, ok := h.canonical[idOrSlug]; ok {
+		return c
 	}
-	id := req.WorkItemID
-	if c, ok := h.canonical[req.WorkItemID]; ok {
-		id = c
-	}
-	digest := h.digest
-	if digest == "" {
-		digest = "deadbeef"
-	}
+	return idOrSlug
+}
+
+func (h *fakeHub) itemFor(id string) api.WorkItem {
 	item := api.WorkItem{ID: id, ProjectName: "proj"}
 	if h.items != nil {
 		if it, ok := h.items[id]; ok && it != nil {
 			item = *it
 		}
 	}
-	resp := &aihubclient.ClaimResponse{
-		Claim: api.Claim{
-			WorkItemID:   id,
-			AttemptID:    "ra_" + id,
-			Generation:   h.gen,
-			BundleName:   "demo-bundle",
-			BundleDigest: digest,
-			Repos:        h.repos,
-		},
-		Credential: api.PushCredential{AttemptID: "ra_" + id, Username: id, Secret: "push-secret"},
-		WorkItem:   item,
+	return item
+}
+
+func (h *fakeHub) claimResponse(wi, sessionID string) *api.SessionClaimResponse {
+	digest := h.digest
+	if digest == "" {
+		digest = "deadbeef"
 	}
+	return &api.SessionClaimResponse{
+		Claim: api.SessionClaim{
+			WorkItemID:         wi,
+			SessionFingerprint: api.SessionFingerprint(sessionID),
+			BundleName:         "demo-bundle",
+			BundleDigest:       digest,
+			Repos:              h.repos,
+		},
+		WorkItem: h.itemFor(wi),
+	}
+}
+
+func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.claims = append(h.claims, req)
+	// idempotent replay (the aihub contract): same key → same answer,
+	// provided the cached session is still the live one (D4)
+	if req.IdempotencyKey != "" {
+		if prev, ok := h.keyClaims[req.IdempotencyKey]; ok {
+			if prev.Claim.SessionFingerprint == api.SessionFingerprint(req.SessionID) {
+				return prev, nil
+			}
+			return nil, &api.Error{Code: "CORE-403", Detail: "STALE_SESSION: idempotency cache holds another session"}
+		}
+	}
+	id := h.canonicalID(req.WorkItemID)
+	if cur := h.held[id]; cur != "" && cur != req.SessionID {
+		return nil, &api.Error{Code: "CORE-409", Detail: "ALREADY_HELD"}
+	}
+	resp := h.claimResponse(id, req.SessionID)
 	if req.IdempotencyKey != "" {
 		h.keyClaims[req.IdempotencyKey] = resp
 	}
+	h.held[id] = req.SessionID
+	h.status[id] = api.StatusRunning
 	return resp, nil
 }
 
-func (h *fakeHub) EndGeneration(wi string, req aihubclient.EndGenerationRequest) error {
+func (h *fakeHub) ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if err, ok := h.lookupErr[wi]; ok {
+	h.takeovers = append(h.takeovers, req)
+	id := h.canonicalID(wi)
+	resp := h.claimResponse(id, req.SessionID)
+	h.held[id] = req.SessionID
+	h.status[id] = api.StatusRunning
+	h.cleanPause[id] = false
+	return resp, nil
+}
+
+func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.attaches = append(h.attaches, req)
+	id := h.canonicalID(wi)
+	if err, ok := h.lookupErr[id]; ok {
+		return nil, err
+	}
+	if h.held[id] != req.SessionID {
+		return nil, &api.Error{Code: "CORE-403", Detail: "STALE_SESSION"}
+	}
+	if h.status[id] != api.StatusPaused || h.cleanPause[id] {
+		return nil, &api.Error{Code: "CORE-409", Detail: "NOT_ATTACHABLE"}
+	}
+	h.status[id] = api.StatusRunning
+	return h.claimResponse(id, req.SessionID), nil
+}
+
+func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id := h.canonicalID(wi)
+	if err, ok := h.lookupErr[id]; ok {
+		return nil, err
+	}
+	st := h.status[id]
+	if st == "" {
+		st = api.StatusRunning
+	}
+	out := &api.SessionVerifyResponse{WorkItemID: id, Status: st, CleanPause: h.cleanPause[id]}
+	if h.held[id] == sessionID && sessionID != "" {
+		out.Matches = true
+	} else if h.held[id] != "" {
+		out.CurrentFingerprint = api.SessionFingerprint(h.held[id])
+	}
+	return out, nil
+}
+
+func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id := h.canonicalID(wi)
+	if err, ok := h.lookupErr[id]; ok {
 		return err
 	}
+	if err, ok := h.end[id]; ok {
+		return err
+	}
+	// fenced: another session's row is not ours to end
+	if cur := h.held[id]; cur != "" && cur != req.SessionID {
+		return &api.Error{Code: "CORE-403", Detail: "STALE_SESSION"}
+	}
 	h.ends = append(h.ends, req)
+	switch req.Status {
+	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked:
+		h.held[id] = "" // terminal + blocked clear the session (M2)
+	default:
+		// paused keeps the session (the design's paused-with-session)
+	}
+	h.status[id] = req.Status
 	return nil
 }
 
 func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if err, ok := h.lookupErr[idOrSlug]; ok {
+	id := h.canonicalID(idOrSlug)
+	if err, ok := h.lookupErr[id]; ok {
 		return nil, err
-	}
-	id := idOrSlug
-	if c, ok := h.canonical[idOrSlug]; ok {
-		id = c
 	}
 	st := h.status[id]
 	if st == "" {
 		st = api.StatusRunning
 	}
-	item := api.WorkItem{ID: id, Status: st, ProjectName: "proj"}
-	if it, ok := h.items[id]; ok && it != nil {
-		clone := *it
-		clone.Status = st
-		item = clone
-	}
+	item := h.itemFor(id)
+	item.Status = st
 	return &item, nil
 }
 
@@ -137,13 +237,19 @@ func (h *fakeHub) endCount() int {
 	return len(h.ends)
 }
 
-func (h *fakeHub) lastEnd() aihubclient.EndGenerationRequest {
+func (h *fakeHub) lastEnd() api.SessionEndRequest {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.ends) == 0 {
-		return aihubclient.EndGenerationRequest{}
+		return api.SessionEndRequest{}
 	}
 	return h.ends[len(h.ends)-1]
+}
+
+func (h *fakeHub) claimCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.claims)
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +294,15 @@ func (s *scriptedSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	// fidelity with the production spawner: the identity journal runs
+	// before Spawn answers (its failure tears the fresh process down).
+	if p.Journal != nil {
+		startedAt := nowStamp()
+		if jerr := p.Journal(cmd.Process.Pid, startedAt); jerr != nil {
+			_ = killGroup(cmd.Process.Pid, cleanupBound)
+			return nil, fmt.Errorf("scripted spawn journal failed: %w", jerr)
+		}
+	}
 	return newProc(cmd, stdin, stdout), nil
 }
 
@@ -230,22 +345,30 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protoco
 	return r, toOB, fromOB
 }
 
+// fakeSession mints a deterministic per-WI session SECRET for tests
+// (64-hex, the real shape — sha256 of the wi id).
+func fakeSession(wi string) string {
+	sum := sha256.Sum256([]byte("test-session:" + wi))
+	return hex.EncodeToString(sum[:])
+}
+
 func seedJob(r *Runtime, wi string) *job {
 	capDir := filepath.Join(r.cfg.WorkspaceRoot, "capsules", wi)
 	_ = os.MkdirAll(capDir, 0o755)
+	sess := fakeSession(wi)
+	fp := api.SessionFingerprint(sess)
 	j := &job{
-		wi:         wi,
-		project:    "proj",
-		attempt:    "ra_" + wi,
-		instance:   "ra_" + wi,
-		generation: 1,
-		state:      StateRunning,
-		capsuleDir: capDir,
-		git:        gitops.Opts{WorkItemID: wi, AttemptID: "ra_" + wi, CapsuleDir: capDir, GitDir: filepath.Join(r.cfg.DataDir, "git", wi+".git")},
-		sessionID:  "sess_" + wi + "_1",
-		transcript: filepath.Join(capDir, "session", "session-ra_"+wi+".jsonl"),
-		bundleName: "demo-bundle",
-		spawnN:     1,
+		wi:                 wi,
+		project:            "proj",
+		sessionID:          sess,
+		sessionFingerprint: fp,
+		instance:           fp,
+		state:              StateRunning,
+		capsuleDir:         capDir,
+		git:                gitops.Opts{WorkItemID: wi, AttemptID: fp, Username: wi, Secret: sess, CapsuleDir: capDir, GitDir: filepath.Join(r.cfg.DataDir, "git", wi+".git")},
+		transcript:         sessionPathFor(capDir, fp),
+		bundleName:         "demo-bundle",
+		spawnN:             1,
 	}
 	r.mu.Lock()
 	r.jobs[wi] = j
@@ -256,12 +379,12 @@ func seedJob(r *Runtime, wi string) *job {
 func installOldAgent(t *testing.T, sp Spawner, j *job) AgentHandle {
 	t.Helper()
 	h, err := sp.Spawn(context.Background(), SpawnParams{
-		WorkItemID:     j.wi,
-		CapsuleDir:     j.capsuleDir,
-		SessionID:      j.sessionID,
+		WorkItemID:    j.wi,
+		CapsuleDir:    j.capsuleDir,
+		SessionHandle: j.sessionFingerprint,
+		SpawnN:        j.spawnN + 1,
 		TranscriptPath: j.transcript,
-		Generation:     j.generation,
-		InitialPrompt:  "initial",
+		InitialPrompt: "initial",
 	})
 	if err != nil {
 		t.Fatalf("installOldAgent: %v", err)

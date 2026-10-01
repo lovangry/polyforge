@@ -110,17 +110,17 @@ func TestStartClonesTaskRepos(t *testing.T) {
 	unseal(t, repoDir)
 }
 
-// A re-materialize of a same-generation capsule (the crashed-Start
-// replay shape) must not touch the existing task-repo worktree: the
-// agent's uncommitted edits survive, no fetch/reset happens (the remote
-// moving forward changes nothing), and the recorded claim-time baseline
-// is carried forward verbatim.
+// A re-materialize of the SAME session's capsule (the crashed-Start
+// journal-replay shape — same secret, so the sync/session-handle marker
+// matches and the husk is reused) must not touch the existing task-repo
+// worktree: the agent's uncommitted edits survive, no fetch/reset happens
+// (the remote moving forward changes nothing), and the recorded
+// claim-time baseline is carried forward verbatim.
 func TestRematerializePreservesRepoScene(t *testing.T) {
 	setGitIdentity(t)
 	remoteDir, url, head := fakeTaskRemote(t)
 	hub := newFakeHub()
 	hub.repos = []api.ProjectRepo{{Name: "app", URL: url}}
-	hub.stickyGen = true // the replay keeps generation (and the attempt)
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 
 	if err := r.Start(context.Background(), "wi_repo2"); err != nil {
@@ -130,12 +130,21 @@ func TestRematerializePreservesRepoScene(t *testing.T) {
 	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
 
 	// Simulate a daemon crash between spawn and any further step: the
-	// agent tree dies, the bookkeeping is gone, the scene stays.
+	// agent tree dies, the job leaves the map, the bookkeeping is wiped
+	// (the crash predates registration) and the journal still names the
+	// unsettled start of the SAME session.
 	j := r.jobOf("wi_repo2")
+	j.mu.Lock()
+	session := j.sessionID
+	j.mu.Unlock()
 	r.killAgentTree(j)
 	r.mu.Lock()
 	delete(r.jobs, "wi_repo2")
 	r.mu.Unlock()
+	writeStateFile(t, r, nil)
+	if err := r.noteClaiming("wi_repo2", session, randomKey()); err != nil {
+		t.Fatal(err)
+	}
 
 	// The agent's uncommitted scene in the task repo.
 	if err := os.WriteFile(filepath.Join(repoDir, "dirty.txt"), []byte("uncommitted\n"), 0o644); err != nil {
@@ -147,10 +156,11 @@ func TestRematerializePreservesRepoScene(t *testing.T) {
 		t.Fatalf("remote commit: %v: %s", err, out)
 	}
 
-	// Second Start of the same generation: the capsule husk is reused
-	// and materialize re-runs without touching repos/app.
-	if err := r.Start(context.Background(), "wi_repo2"); err != nil {
-		t.Fatalf("second Start: %v", err)
+	// The journal replay (Restart) re-runs the start of the SAME session:
+	// the capsule husk is reused and materialize re-runs without
+	// touching repos/app.
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart (journal replay): %v", err)
 	}
 	if b, err := os.ReadFile(filepath.Join(repoDir, "dirty.txt")); err != nil || string(b) != "uncommitted\n" {
 		t.Fatalf("uncommitted scene lost: %q, %v", b, err)
@@ -198,7 +208,7 @@ func TestCloneFailureBlocksTicket(t *testing.T) {
 		t.Fatalf("end-generation calls = %d, want 1", n)
 	}
 	end := hub.lastEnd()
-	if end.Status != api.StatusBlocked || end.AttemptID != "ra_wi_repo3" || end.Note == "" {
+	if end.Status != api.StatusBlocked || end.SessionID == "" || end.Note == "" {
 		t.Fatalf("blocked close wrong: %+v", end)
 	}
 	if dirExists(filepath.Join(r.capsuleDir("wi_repo3"), capsule.DirRepos, "app")) {

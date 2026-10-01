@@ -17,7 +17,6 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -130,16 +129,23 @@ func (s *fakeSpawner) lastParams() runtime.SpawnParams {
 }
 
 // ---------------------------------------------------------------------------
-// fake aihub
+// fake aihub (v1.5 session model): the daemon-facing subset of the hub —
+// session claim/verify/attach/end plus the queue and the generic Do the
+// memory lanes proxy through. `held` maps wi → session secret; an UNHELD
+// running WI answers verify matches=true for ANY secret (the reconciling
+// daemon's own record), which is exactly what the seeded-record restart
+// tests need; a HELD wi answers matches only for its own secret.
 
 type fakeHub struct {
 	mu       sync.Mutex
 	status   map[string]string
-	claims   []aihubclient.ClaimRequest
-	ends     []endCall
+	held     map[string]string
+	claims    []api.SessionClaimRequest
+	takeovers []api.SessionClaimRequest
+	ends      []endCall
+	attaches []api.SessionAttachRequest
 	queues   []api.WorkItem
-	blockEnd chan struct{} // non-nil: EndGeneration parks until closed
-	gen      int64
+	blockEnd chan struct{} // non-nil: SessionEnd parks until closed
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string
@@ -155,32 +161,81 @@ type fakeHub struct {
 
 type endCall struct {
 	WI  string
-	Req aihubclient.EndGenerationRequest
+	Req api.SessionEndRequest
 }
 
 func newFakeHub() *fakeHub {
-	return &fakeHub{status: map[string]string{}, gen: 1}
+	return &fakeHub{status: map[string]string{}, held: map[string]string{}}
 }
 
-func (h *fakeHub) Claim(req aihubclient.ClaimRequest) (*aihubclient.ClaimResponse, error) {
+func (h *fakeHub) canonicalID(in string) string {
+	if c, ok := h.canonical[in]; ok {
+		return c
+	}
+	return in
+}
+
+func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.claims = append(h.claims, req)
-	h.gen++
-	return &aihubclient.ClaimResponse{
-		Claim: api.Claim{
-			WorkItemID:   req.WorkItemID,
-			AttemptID:    "ra_" + req.WorkItemID,
-			Generation:   h.gen,
-			BundleName:   "demo-bundle",
-			BundleDigest: "deadbeef",
+	id := h.canonicalID(req.WorkItemID)
+	h.held[id] = req.SessionID
+	h.status[id] = api.StatusRunning
+	return &api.SessionClaimResponse{
+		Claim: api.SessionClaim{
+			WorkItemID:         id,
+			SessionFingerprint: api.SessionFingerprint(req.SessionID),
+			BundleName:         "demo-bundle",
+			BundleDigest:       "deadbeef",
 		},
-		Credential: api.PushCredential{AttemptID: "ra_" + req.WorkItemID, Username: req.WorkItemID, Secret: "push-secret"},
-		WorkItem:   api.WorkItem{ID: req.WorkItemID, ProjectName: "proj"},
+		WorkItem: api.WorkItem{ID: id, ProjectName: "proj"},
 	}, nil
 }
 
-func (h *fakeHub) EndGeneration(wi string, req aihubclient.EndGenerationRequest) error {
+func (h *fakeHub) ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
+	h.mu.Lock()
+	h.takeovers = append(h.takeovers, req)
+	h.mu.Unlock()
+	return h.SessionClaim(req)
+}
+
+func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.attaches = append(h.attaches, req)
+	id := h.canonicalID(wi)
+	h.status[id] = api.StatusRunning
+	return &api.SessionClaimResponse{
+		Claim:    api.SessionClaim{WorkItemID: id, SessionFingerprint: api.SessionFingerprint(req.SessionID)},
+		WorkItem: api.WorkItem{ID: id, ProjectName: "proj"},
+	}, nil
+}
+
+func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id := h.canonicalID(wi)
+	st := h.status[id]
+	if st == "" {
+		st = api.StatusRunning
+	}
+	out := &api.SessionVerifyResponse{WorkItemID: id, Status: st}
+	if cur := h.held[id]; cur != "" {
+		if cur == sessionID {
+			out.Matches = true
+		} else {
+			out.CurrentFingerprint = api.SessionFingerprint(cur)
+		}
+	} else if st == api.StatusRunning && sessionID != "" {
+		// unheld-but-running: the reconciling record's own session (the
+		// seeded-restart tests' shape)
+		out.Matches = true
+	}
+	return out, nil
+}
+
+func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 	h.mu.Lock()
 	block := h.blockEnd
 	h.mu.Unlock()
@@ -189,17 +244,20 @@ func (h *fakeHub) EndGeneration(wi string, req aihubclient.EndGenerationRequest)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.ends = append(h.ends, endCall{WI: wi, Req: req})
+	id := h.canonicalID(wi)
+	h.ends = append(h.ends, endCall{WI: id, Req: req})
+	switch req.Status {
+	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked:
+		h.held[id] = ""
+	}
+	h.status[id] = req.Status
 	return nil
 }
 
 func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	id := idOrSlug
-	if c, ok := h.canonical[idOrSlug]; ok {
-		id = c
-	}
+	id := h.canonicalID(idOrSlug)
 	st := h.status[id]
 	if st == "" {
 		st = api.StatusRunning
@@ -235,13 +293,22 @@ func (h *fakeHub) endCount() int {
 	return len(h.ends)
 }
 
-func (h *fakeHub) lastEnd() aihubclient.EndGenerationRequest {
+func (h *fakeHub) lastEnd() api.SessionEndRequest {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.ends) == 0 {
-		return aihubclient.EndGenerationRequest{}
+		return api.SessionEndRequest{}
 	}
 	return h.ends[len(h.ends)-1].Req
+}
+
+func (h *fakeHub) lastEndWI() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.ends) == 0 {
+		return ""
+	}
+	return h.ends[len(h.ends)-1].WI
 }
 
 // ---------------------------------------------------------------------------

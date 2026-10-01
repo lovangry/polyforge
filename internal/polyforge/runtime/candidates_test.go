@@ -133,9 +133,10 @@ func TestRestartRestoresCandidateOrdinal(t *testing.T) {
 	}
 
 	// the fresh runtime re-reads the persisted ordinal and re-derives
-	// under the same effective candidate
+	// under the same effective candidate (the record's session must be
+	// the holder, or the restart releases instead of recovering)
 	hub2 := newFakeHub()
-	hub2.status[wi] = api.StatusRunning
+	hub2.hold(wi, fakeSession(wi), api.StatusRunning)
 	sp2 := &countingSpawner{}
 	r2, _, _ := newTestRuntimeAt(t, hub2, sp2, dataDir)
 	if err := r2.Restart(context.Background()); err != nil {
@@ -228,7 +229,7 @@ func TestSpawnModelPinRidesArgv(t *testing.T) {
 	sp := newPiSpawner(&Config{PiBin: "/nonexistent-pi"})
 
 	pinned := sp.buildCmd(SpawnParams{
-		WorkItemID: "wi_pin", CapsuleDir: "/caps", SessionID: "s1", Generation: 1,
+		WorkItemID: "wi_pin", CapsuleDir: "/caps", SessionHandle: "ab12", SpawnN: 1,
 		Model: "prov-a/model-a2",
 	})
 	joined := joinArgs(pinned.Args)
@@ -241,7 +242,7 @@ func TestSpawnModelPinRidesArgv(t *testing.T) {
 	}
 
 	plain := sp.buildCmd(SpawnParams{
-		WorkItemID: "wi_pin2", CapsuleDir: "/caps", SessionID: "s1", Generation: 1,
+		WorkItemID: "wi_pin2", CapsuleDir: "/caps", SessionHandle: "ab12", SpawnN: 1,
 	})
 	if contains(joinArgs(plain.Args), "--model") {
 		t.Fatalf("an absent chain must not invent a pin: %v", plain.Args)
@@ -274,8 +275,8 @@ func TestMaterializeFailureBlocksGeneration(t *testing.T) {
 		t.Fatalf("the failed start must close the generation exactly once, got %d", n)
 	}
 	end := hub.lastEnd()
-	if end.Status != api.StatusBlocked || end.AttemptID != "ra_wi_cap405" {
-		t.Fatalf("CAP-405 must close blocked, got %+v", end)
+	if end.Status != api.StatusBlocked || end.SessionID == "" || end.Note == "" {
+		t.Fatalf("CAP-405 must close blocked on the session, got %+v", end)
 	}
 	if end.Note == "" {
 		t.Fatalf("the blocked close must carry a note, got %+v", end)
@@ -310,9 +311,10 @@ func TestSpawnFailureBlocksGeneration(t *testing.T) {
 	}
 }
 
-// A crash between the claim and the spawn leaves a durable claiming
-// record; Restart replays the claim with the SAME idempotency key, gets
-// the SAME attempt back, and finishes the start.
+// A crash between the claim call and the spawn leaves a durable claiming
+// record; Restart verifies the journaled session, replays the claim with
+// the SAME idempotency key (D4: the same answer), adopts the session and
+// finishes the start.
 func TestClaimCrashRestartReplaysSameKey(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -320,32 +322,40 @@ func TestClaimCrashRestartReplaysSameKey(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "data")
 	r, _, _ := newTestRuntimeAt(t, hub, sp, dataDir)
 
-	// the crash shape: the journal holds an unsettled claim intention,
-	// state.json holds no job for it (the crash predates registration)
+	// the crash shape: the journal holds an unsettled claim intention
+	// (the minted secret and the key), state.json holds no job for it
+	// (the crash predates registration) — but the claim DID land on the
+	// hub, so the hub reports the journaled session as the holder.
 	key := randomKey()
-	if err := r.noteClaiming("wi_crashd", "claim", key); err != nil {
+	session := fakeSession("wi_crashd")
+	if err := r.noteClaiming("wi_crashd", session, key); err != nil {
 		t.Fatal(err)
 	}
+	hub.hold("wi_crashd", session, api.StatusRunning)
 
 	// a FRESH runtime over the same data dir replays it
 	hub2 := newFakeHub()
+	hub2.hold("wi_crashd", session, api.StatusRunning)
 	sp2 := &countingSpawner{}
 	r2, _, _ := newTestRuntimeAt(t, hub2, sp2, dataDir)
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	if n := len(hub2.claims); n != 1 {
+	if n := hub2.claimCount(); n != 1 {
 		t.Fatalf("the replay must issue exactly one claim, got %d", n)
 	}
 	if got := hub2.claims[0].IdempotencyKey; got != key {
 		t.Fatalf("the replay must carry the journaled key %q, got %q", key, got)
 	}
+	if got := hub2.claims[0].SessionID; got != session {
+		t.Fatalf("the replay must carry the journaled session secret, got %q", got)
+	}
 	j := r2.jobOf("wi_crashd")
 	if j == nil {
 		t.Fatal("the replayed claim must run to a live agent")
 	}
-	if j.attempt != "ra_wi_crashd" {
-		t.Fatalf("the replay must resume the SAME attempt, got %q", j.attempt)
+	if j.sessionID != session {
+		t.Fatalf("the replay must adopt the SAME session, got %q", j.sessionID)
 	}
 	if n := sp2.spawnCount(); n != 1 {
 		t.Fatalf("the replay must derive exactly one agent, got %d", n)
@@ -359,22 +369,22 @@ func TestClaimCrashRestartReplaysSameKey(t *testing.T) {
 	}
 }
 
-// A stale journal entry (the generation settled server-side before the
-// crash — e.g. the blocked close landed but the journal clear did not) is
-// dropped, not replayed.
+// A stale journal entry (the session is no longer ours — e.g. the blocked
+// close landed but the journal clear did not) is dropped, not replayed:
+// SessionVerify answers matches=false and the entry goes.
 func TestStaleClaimingEntryDropped(t *testing.T) {
 	hub := newFakeHub()
 	hub.status["wi_stalec"] = api.StatusBlocked
 	sp := &countingSpawner{}
 	r, _, _ := newTestRuntime(t, hub, sp)
 
-	if err := r.noteClaiming("wi_stalec", "claim", randomKey()); err != nil {
+	if err := r.noteClaiming("wi_stalec", fakeSession("wi_stalec"), randomKey()); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	if n := len(hub.claims); n != 0 {
+	if n := hub.claimCount(); n != 0 {
 		t.Fatalf("a stale entry must not be re-claimed, got %d claims", n)
 	}
 	if items := r.loadClaiming(); len(items) != 0 {

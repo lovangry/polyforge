@@ -275,9 +275,10 @@ func (d *Daemon) terminalOf(wi string) (string, error) {
 	return "", errors.New("work item is " + item.Status + " elsewhere")
 }
 
-// reasonPaused is the pause close reason: aihub's end-generation accepts
-// it and marks the work item paused, which makes resume a fresh claim
-// (generation+1) — the 04 §5.1 pause row's contract.
+// reasonPaused is the pause close reason, passed through SessionEnd's
+// status field: the hub marks the work item paused (the operator pause —
+// clean_pause semantics live hub-side; the v1.5 contract has no pause
+// transition, see the lane report). A later resume re-opens the work.
 const reasonPaused = "paused"
 
 func (d *Daemon) pauseRoute(w http.ResponseWriter, r *http.Request) {
@@ -369,7 +370,9 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 		sj := statusJob{
 			WorkItemID: ji.WorkItem,
 			Status:     string(ji.State),
-			AttemptID:  ji.AttemptID,
+			// the rendered id is the derivation fence token — the session
+			// fingerprint ("#N" after re-derivations), a PUBLIC value (B3)
+			AttemptID: ji.InstanceID,
 			AgentPID:   ji.AgentPID,
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {

@@ -71,8 +71,7 @@ func TestTapRecordUnknownWorkItemDrops(t *testing.T) {
 func jobInfoFor(wi string, agent *fakeAgent) pfruntime.JobInfo {
 	return pfruntime.JobInfo{
 		WorkItem:   wi,
-		AttemptID:  "ra_" + wi,
-		InstanceID: "ra_" + wi,
+		InstanceID: "ra_" + wi, // the derivation fence token
 		Agent:      agent,
 	}
 }

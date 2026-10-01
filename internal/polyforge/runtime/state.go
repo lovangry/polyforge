@@ -2,6 +2,11 @@
 // own bookkeeping file (state.json). Daemon state is BOOKKEEPING ONLY —
 // workflow execution progress lives in the capsule's
 // runtime-state/execution.json and is never mirrored here.
+//
+// v1.5 (session model): the record carries the session identity — the
+// SECRET session_id plus its public fingerprint — and the per-WI monotonic
+// derivation counter spawn_n. The v1 attempt/generation/instance/credential
+// fields are deleted; the JobState machine is UNCHANGED.
 package runtime
 
 import (
@@ -11,6 +16,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -49,7 +55,7 @@ func (s JobState) can(to JobState) bool {
 
 // transition moves the job's state along one legal edge. Illegal edges are
 // refused with an error naming both states — the fencing rule (SEALING
-// drops same-attempt WINeedsRecovery, RECOVERING ignores duplicates) rides
+// drops same-fence WINeedsRecovery, RECOVERING ignores duplicates) rides
 // on these refusals.
 func (j *job) transition(to JobState) error {
 	j.mu.Lock()
@@ -61,7 +67,7 @@ func (j *job) transition(to JobState) error {
 	return nil
 }
 
-func (j *job) snapshot() (state JobState, instance string) {
+func (j *job) snapshot() (state JobState, fence string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.state, j.instance
@@ -88,24 +94,43 @@ type stateFile struct {
 	Jobs      []*jobRecord `json:"jobs"`
 }
 
+// jobRecord is one persisted job (v1.5 contract §4.1): the session
+// identity replaces the v1 attempt/generation/instance/credential
+// lineage. The SECRET never leaves this file (0600) and the one-shot
+// GIT_ASKPASS.
 type jobRecord struct {
 	WorkItemID string `json:"work_item_id"`
 	Project    string `json:"project"`
-	AttemptID  string `json:"attempt_id"`
-	InstanceID string `json:"instance_id"`
-	Generation int64  `json:"generation"`
-	State      string `json:"state"`
-	StopReason string `json:"stop_reason,omitempty"`
+	// SessionID is the v1.5 SECRET (B3): 64-hex, minted by this daemon
+	// at claim, the git push password. It lives ONLY here and in the
+	// one-shot GIT_ASKPASS — never in the capsule, never in agent env,
+	// never in logs or events.
+	SessionID string `json:"session_id"`
+	// SessionFingerprint is the PUBLIC handle (hex(sha256(secret))[:16]):
+	// the value logs, events and PF_SESSION_HANDLE carry.
+	SessionFingerprint string `json:"session_fingerprint"`
+	State              string `json:"state"`
+	StopReason         string `json:"stop_reason,omitempty"`
 	// SealedPush: the SEALING record's seal-knowledge (see job.sealedPush)
 	// — the restart's stop finisher skips its own seal push when set.
 	SealedPush bool   `json:"sealed_push,omitempty"`
 	CapsuleDir string `json:"capsule_dir"`
 	GitDir     string `json:"git_dir"`
 	RemoteURL  string `json:"remote_url"`
-	Username   string `json:"username"`
-	Secret     string `json:"secret"` // attempt-scoped push credential
-	SessionID  string `json:"session_id"`
-	Transcript string `json:"transcript"`
+	// CleanPause mirrors the hub's operator-pause flag (contract §4.1).
+	// Always false while this daemon owns the job: a CLI pause DROPS the
+	// record, and a graceful shutdown leaves it false — exactly the
+	// "paused-with-session, will attach on restart" marker (M3).
+	CleanPause bool `json:"clean_pause"`
+	// SpawnN is the per-WI monotonic derivation counter (B2): the number
+	// of derivations this session has run. Same-machine restarts and
+	// recoveries continue from it; a fresh clone (takeover) re-seeds it
+	// from the capsule's spawn journal.
+	SpawnN       int    `json:"spawn_n"`
+	RecoverFails int    `json:"recover_fails"` // consecutive failed recoveries
+	ResumeFails  int    `json:"resume_fails"`
+	ResumeDead   bool   `json:"resume_dead"`
+	Transcript   string `json:"transcript"`
 	// LiveTranscript is the file the current derivation appends to (a
 	// fresh pi derivation's harness-store live path, or the resume
 	// source); "" while not located. Restart keeps it so the resume
@@ -115,10 +140,6 @@ type jobRecord struct {
 	BundleDigest   string `json:"bundle_digest"`
 	AgentPID       int    `json:"agent_pid"`
 	AgentStart     string `json:"agent_started_at"`
-	SpawnN         int    `json:"spawn_n"`
-	RecoverFails   int    `json:"recover_fails"` // consecutive failed recoveries
-	ResumeFails    int    `json:"resume_fails"`
-	ResumeDead     bool   `json:"resume_dead"`
 	// Candidates is the bundle's workflow-level defaults model_candidates
 	// chain (the F4 lane): every derivation spawn pins the candidate at
 	// CandidateOrdinal. Both are persisted so a restart resumes the SAME
@@ -133,66 +154,76 @@ func (j *job) record() *jobRecord {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return &jobRecord{
-		WorkItemID:       j.wi,
-		Project:          j.project,
-		AttemptID:        j.attempt,
-		InstanceID:       j.instance,
-		Generation:       j.generation,
-		State:            string(j.state),
-		StopReason:       j.stopReason,
-		SealedPush:       j.sealedPush,
-		CapsuleDir:       j.capsuleDir,
-		GitDir:           j.git.GitDir,
-		RemoteURL:        j.git.RemoteURL,
-		Username:         j.git.Username,
-		Secret:           j.git.Secret,
-		SessionID:        j.sessionID,
-		Transcript:       j.transcript,
-		LiveTranscript:   j.liveTranscript,
-		BundleName:       j.bundleName,
-		BundleDigest:     j.bundleDigest,
-		AgentPID:         j.agentPID,
-		AgentStart:       j.agentStartedAt,
-		SpawnN:           j.spawnN,
-		RecoverFails:     j.recoverFails,
-		ResumeFails:      j.resumeFails,
-		ResumeDead:       j.resumeDead,
-		Candidates:       j.candidates,
-		CandidateOrdinal: j.candidateOrdinal,
+		WorkItemID:         j.wi,
+		Project:            j.project,
+		SessionID:          j.sessionID,
+		SessionFingerprint: j.sessionFingerprint,
+		State:              string(j.state),
+		StopReason:         j.stopReason,
+		SealedPush:         j.sealedPush,
+		CapsuleDir:         j.capsuleDir,
+		GitDir:             j.git.GitDir,
+		RemoteURL:          j.git.RemoteURL,
+		CleanPause:         j.cleanPause,
+		SpawnN:             j.spawnN,
+		RecoverFails:       j.recoverFails,
+		ResumeFails:        j.resumeFails,
+		ResumeDead:         j.resumeDead,
+		Transcript:         j.transcript,
+		LiveTranscript:     j.liveTranscript,
+		BundleName:         j.bundleName,
+		BundleDigest:       j.bundleDigest,
+		AgentPID:           j.agentPID,
+		AgentStart:         j.agentStartedAt,
+		Candidates:         j.candidates,
+		CandidateOrdinal:   j.candidateOrdinal,
 	}
 }
 
 func jobFromRecord(rec *jobRecord) *job {
+	fp := rec.SessionFingerprint
+	if fp == "" && rec.SessionID != "" {
+		fp = api.SessionFingerprint(rec.SessionID)
+	}
 	return &job{
-		wi:         rec.WorkItemID,
-		project:    rec.Project,
-		attempt:    rec.AttemptID,
-		instance:   rec.InstanceID,
-		generation: rec.Generation,
+		wi:        rec.WorkItemID,
+		project:   rec.Project,
+		sessionID: rec.SessionID,
+		// SessionFingerprint is recomputed from the secret when the
+		// stored copy is empty (defensive: the two are redundant by
+		// construction).
+		sessionFingerprint: fp,
+		// the derivation fence token during the transition: records seed
+		// the bare fingerprint; the first re-derivation mints fp#N on it.
+		instance:   fp,
 		state:      JobState(rec.State),
 		stopReason: rec.StopReason,
 		sealedPush: rec.SealedPush,
 		capsuleDir: rec.CapsuleDir,
 		git: gitops.Opts{
+			// v1.5 gitops call sites: Username = the work-item id,
+			// Secret = the session id (the push password). AttemptID
+			// carries the session fingerprint as the push-option backup
+			// layer's value until Lane C renames the option (§1.6).
 			WorkItemID: rec.WorkItemID,
-			AttemptID:  rec.AttemptID,
+			AttemptID:  fp,
 			CapsuleDir: rec.CapsuleDir,
 			GitDir:     rec.GitDir,
 			RemoteURL:  rec.RemoteURL,
-			Username:   rec.Username,
-			Secret:     rec.Secret,
+			Username:   rec.WorkItemID,
+			Secret:     rec.SessionID,
 		},
-		sessionID:        rec.SessionID,
+		cleanPause:       rec.CleanPause,
+		spawnN:           rec.SpawnN,
+		recoverFails:     rec.RecoverFails,
+		resumeFails:      rec.ResumeFails,
+		resumeDead:       rec.ResumeDead,
 		transcript:       rec.Transcript,
 		liveTranscript:   rec.LiveTranscript,
 		bundleName:       rec.BundleName,
 		bundleDigest:     rec.BundleDigest,
 		agentPID:         rec.AgentPID,
 		agentStartedAt:   rec.AgentStart,
-		spawnN:           rec.SpawnN,
-		recoverFails:     rec.RecoverFails,
-		resumeFails:      rec.ResumeFails,
-		resumeDead:       rec.ResumeDead,
 		candidates:       rec.Candidates,
 		candidateOrdinal: rec.CandidateOrdinal,
 	}

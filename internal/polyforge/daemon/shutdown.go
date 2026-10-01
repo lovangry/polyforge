@@ -20,9 +20,12 @@ package daemon
 //
 // The whole sequence is bounded by ShutdownBudget (5 minutes) — a
 // pathological combination of slow windows cannot outlive it. Jobs are
-// NOT end-generation'd here: the WIs stay running server-side so the
-// next daemon start's restart reconciliation recovers them through the
-// recovery engine (transcript resume, seconds — the v1 recovery model).
+// NOT session-ended here: the WIs stay running server-side (our session
+// row intact, the records keep clean_pause=false — exactly the
+// "paused-with-session, will attach on restart" marker of M3 once the
+// hub grows the pause transition) so the next daemon start's restart
+// reconciliation recovers them through the recovery engine (transcript
+// resume, seconds — the v1 recovery model, unchanged in v1.5).
 
 import (
 	"context"
