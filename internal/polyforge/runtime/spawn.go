@@ -136,16 +136,24 @@ func (e *envSanitizer) childEnv(additions ...string) []string {
 type SpawnParams struct {
 	WorkItemID     string
 	CapsuleDir     string
-	SessionID      string
+	// SessionHandle is the PUBLIC session fingerprint (B3): injected as
+	// PF_SESSION_HANDLE. The SECRET session id never rides SpawnParams
+	// at all — it must not reach the capsule journal, the env or argv.
+	SessionHandle   string
+	// SpawnN is this derivation's ordinal (B2): the per-WI monotonic
+	// counter value AFTER this derivation (state.json spawn_n + 1
+	// locally; capsule spawn-journal max + 1 across a fresh clone).
+	// Injected as PF_SPAWN_N — the agent's flush fence identity.
+	SpawnN         int
 	TranscriptPath string // resume source; empty for a fresh derivation
 	Resume         bool   // attach to TranscriptPath instead of a new session
-	Generation     int64
 	InitialPrompt  string
 	CgroupPath     string // per-WI cgroup v2 dir; "" = layer 0 unavailable
-	// InstanceID is THIS derivation's lineage id (the attempt id, or
-	// attempt#N after a re-derivation) — the protocol attempt-id fence.
-	// Injected as PF_INSTANCE_ID so the agent reads its own identity from
-	// the environment instead of scraping the spawn journal.
+	// InstanceID is THIS derivation's fence token for the v1→v1.5
+	// transition: the session fingerprint ("#N" appended after
+	// re-derivations, mirroring the v1 attempt#N shape). It rides the
+	// spawn journal and RTMsg.AttemptID; the cleanup commit deletes the
+	// protocol field and this collapses to SpawnN.
 	InstanceID string
 	// Model pins this derivation's harness model: the effective candidate
 	// of the bundle's defaults model_candidates chain (F4/P6). "" = no
@@ -261,22 +269,19 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		// compensation lives in pitranscript.go (F3).
 		"PI_SESSION_DIR=" + filepath.Join(p.CapsuleDir, capsule.DirSession),
 		"PF_WI_ID=" + p.WorkItemID, // layer-4 cleanup marker (deliberate addition)
-		"PF_SESSION_ID=" + p.SessionID,
-		"PF_GENERATION=" + strconv.FormatInt(p.Generation, 10),
+		// v1.5 B2/B3 identity: the PUBLIC session handle and the monotonic
+		// derivation counter — the agent's flush fence keys. The SECRET
+		// session id is deliberately ABSENT (it must never reach agent
+		// env; it lives only in state.json and the one-shot askpass), and
+		// so are the deleted PF_SESSION_ID / PF_GENERATION / PF_INSTANCE_ID.
+		"PF_SESSION_HANDLE=" + p.SessionHandle,
+		"PF_SPAWN_N=" + strconv.Itoa(p.SpawnN),
 	}
 	if s.cfg.SocketPath != "" {
 		// deliberate addition, same mechanism as PF_WI_ID: the env sanitize
 		// point strips every inherited PF_*, so the daemon's UDS path (the
 		// agent's flush(reason) proxy, §五) is handed back explicitly.
 		additions = append(additions, "PF_DAEMON_SOCKET="+s.cfg.SocketPath)
-	}
-	if p.InstanceID != "" {
-		// deliberate addition, same mechanism as PF_DAEMON_SOCKET: the
-		// agent's OWN lineage id (attempt or attempt#N) — the attempt-id it
-		// must put in every flush(reason) call. Handed back explicitly so
-		// the agent reads identity from env instead of scraping the spawn
-		// journal (§五 flush fence).
-		additions = append(additions, "PF_INSTANCE_ID="+p.InstanceID)
 	}
 	cmd.Env = newEnvSanitizer(s.cfg.EnvSecrets...).childEnv(additions...)
 	return cmd
@@ -332,17 +337,23 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 }
 
 // writeSpawnJournal appends one spawn identity line to the capsule's
-// runtime-state/spawn-journal.jsonl.
+// runtime-state/spawn-journal.jsonl. v1.5 (contract §4.3): the line gains
+// the additive spawn_n field (the derivation ordinal — the last line
+// carries the latest derivation, so a fresh clone on another machine
+// re-seeds its counter from the max) and the public session_handle. The
+// v1 synthetic session_id value is DROPPED: in v1.5 that name means the
+// SECRET, which must never land in the capsule (B3).
 func writeSpawnJournal(p SpawnParams, pid int, startedAt string, instance string) error {
 	entry := map[string]any{
-		"at":         nowStamp(),
-		"work_item":  p.WorkItemID,
-		"instance":   instance,
-		"pid":        pid,
-		"started_at": startedAt,
-		"session_id": p.SessionID,
-		"resume":     p.Resume,
-		"transcript": p.TranscriptPath,
+		"at":            nowStamp(),
+		"work_item":     p.WorkItemID,
+		"instance":      instance,
+		"pid":           pid,
+		"started_at":    startedAt,
+		"session_handle": p.SessionHandle,
+		"spawn_n":       p.SpawnN,
+		"resume":        p.Resume,
+		"transcript":    p.TranscriptPath,
 	}
 	blob, err := json.Marshal(entry)
 	if err != nil {
@@ -361,6 +372,31 @@ func writeSpawnJournal(p SpawnParams, pid int, startedAt string, instance string
 		return err
 	}
 	return f.Sync()
+}
+
+// maxSpawnNFromJournal answers the highest spawn_n the capsule's spawn
+// journal records (0 when absent/unreadable): the B2 fresh-clone source —
+// a takeover or attach that cloned this capsule from the bare repo
+// continues the derivation counter where the capsule's history left off.
+func maxSpawnNFromJournal(capsuleDir string) int {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.DirRuntimeState, "spawn-journal.jsonl"))
+	if err != nil {
+		return 0
+	}
+	max := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e struct {
+			SpawnN int `json:"spawn_n"`
+		}
+		if json.Unmarshal([]byte(line), &e) == nil && e.SpawnN > max {
+			max = e.SpawnN
+		}
+	}
+	return max
 }
 
 // ---------------------------------------------------------------------------

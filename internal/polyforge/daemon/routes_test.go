@@ -20,7 +20,6 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
@@ -283,14 +282,17 @@ func TestTakeoverAndErrorEnvelope(t *testing.T) {
 		t.Fatalf("takeover: %v", err)
 	}
 	td.waitLive(t, "wi_g")
+	// v1.5: the takeover intent reaches the ForceTakeover endpoint with a
+	// freshly minted session secret and a reason.
 	td.hub.mu.Lock()
-	var last aihubclient.ClaimRequest
-	if len(td.hub.claims) > 0 {
-		last = td.hub.claims[len(td.hub.claims)-1]
+	var last api.SessionClaimRequest
+	if len(td.hub.takeovers) > 0 {
+		last = td.hub.takeovers[len(td.hub.takeovers)-1]
 	}
+	nTakeovers := len(td.hub.takeovers)
 	td.hub.mu.Unlock()
-	if last.Intent != "takeover" {
-		t.Fatalf("last claim intent = %+v, want takeover", last)
+	if nTakeovers != 1 || last.Reason == "" || len(last.SessionID) != 64 {
+		t.Fatalf("takeover must reach ForceTakeover with a reason and a fresh 64-hex secret, got %d calls %+v", nTakeovers, last)
 	}
 
 	// Typed 404 for an unknown work item (the envelope shape the CLI

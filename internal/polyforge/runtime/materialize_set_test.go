@@ -243,15 +243,15 @@ func TestMaterializeSetAdoptsPilotCompensation(t *testing.T) {
 	}
 }
 
-// The claim path re-materializes only what is missing: a second Start on
-// the same generation (the crashed-Start husk replay) reuses the trusted
-// snapshot instead of churning it.
+// The claim path re-materializes only what is missing: a journal-replayed
+// start of the SAME session (the crashed-Start husk shape — B1 replay,
+// same secret, so the capsule marker matches and the husk is reused)
+// reuses the trusted snapshot instead of churning it.
 func TestMaterializeSetClaimReplayReusesTrustedSnapshot(t *testing.T) {
 	setGitIdentity(t)
 	wfDir, pinned := pristineBundle(t)
 	hub := newFakeHub()
 	hub.digest = pinned
-	hub.stickyGen = true // the claim replay hands back the same generation
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
 
@@ -260,12 +260,25 @@ func TestMaterializeSetClaimReplayReusesTrustedSnapshot(t *testing.T) {
 	}
 	capDir := r.capsuleDir("wi_f7e")
 	before := readMarker(t, capDir)
-	if err := r.Stop(context.Background(), "wi_f7e", protocol.FinishWrapped); err != nil {
-		t.Fatalf("Stop: %v", err)
+	j := r.jobOf("wi_f7e")
+	j.mu.Lock()
+	session := j.sessionID
+	j.mu.Unlock()
+
+	// the crash shape: the tree dies, the job leaves the map, the
+	// bookkeeping is wiped (the crash predates registration), and the
+	// journal still names the unsettled start.
+	r.killAgentTree(j)
+	r.mu.Lock()
+	delete(r.jobs, "wi_f7e")
+	r.mu.Unlock()
+	writeStateFile(t, r, nil)
+	if err := r.noteClaiming("wi_f7e", session, randomKey()); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := r.Start(context.Background(), "wi_f7e"); err != nil {
-		t.Fatalf("second Start (claim replay): %v", err)
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart (journal replay): %v", err)
 	}
 	t.Cleanup(func() {
 		_ = r.Stop(context.Background(), "wi_f7e", protocol.FinishWrapped)

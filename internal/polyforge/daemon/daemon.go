@@ -21,8 +21,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -200,6 +202,13 @@ type Daemon struct {
 	// never persist its (never-seeded) view over the running daemon's
 	// state.
 	faceOwned bool
+
+	// dataLock is the M5 flock on the daemon data dir (held for the
+	// process's lifetime, released by the kernel at exit): the
+	// same-machine dual-daemon TOCTOU guard ALONGSIDE the socket probe.
+	// The probe alone races (both processes can observe a dead socket
+	// and both bind); the flock is the kernel-serialized half.
+	dataLock *os.File
 }
 
 // New validates and assembles the daemon. Restart reconciliation is NOT
@@ -336,6 +345,20 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.obsDone = make(chan struct{})
 	go func() { d.obs.Run(d.obsCtx); close(d.obsDone) }()
 	go d.bridge()
+
+	// M5: flock the daemon data dir BEFORE the socket probe — the two
+	// together are the single-instance guard. The dial probe alone is a
+	// TOCTOU: two daemons started in the same window can both observe a
+	// dead socket and both bind it; the flock is the kernel-serialized
+	// half (LOCK_EX|LOCK_NB on DataDir/daemon.lock), held for Run's
+	// lifetime and released when Run returns.
+	lock, lerr := acquireDataDirLock(d.cfg.DataDir)
+	if lerr != nil {
+		d.abortStartup()
+		return lerr
+	}
+	d.dataLock = lock
+	defer d.releaseDataLock()
 
 	// Single-instance guard FIRST — before ANY push lane can open. The
 	// UDS face is the one cross-process serialization point this data-dir
@@ -844,4 +867,44 @@ func (d *Daemon) mapCloseErr(err error) (graceful bool, ae *api.Error) {
 		return false, ae
 	}
 	return false, &api.Error{Code: api.ErrDaemonInternal, Detail: err.Error()}
+}
+
+// ---------------------------------------------------------------------------
+// M5: the data-dir flock (single-instance guard, kernel half).
+
+// releaseDataLock drops the data-dir flock (Run returning is the
+// daemon's end; the next process may take over the data dir).
+func (d *Daemon) releaseDataLock() {
+	d.faceMu.Lock()
+	defer d.faceMu.Unlock()
+	if d.dataLock != nil {
+		_ = d.dataLock.Close()
+		d.dataLock = nil
+	}
+}
+
+// acquireDataDirLock takes an exclusive non-blocking flock on
+// <DataDir>/daemon.lock and answers the held file (the caller keeps it
+// open for the daemon's lifetime; the kernel releases it at exit). A
+// held lock is another daemon on this data dir — the same machine's
+// second instance, the TOCTOU the socket probe alone cannot close.
+func acquireDataDirLock(dataDir string) (*os.File, error) {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dataDir, "daemon.lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		pid, _ := os.ReadFile(path)
+		_ = pid
+		f.Close()
+		return nil, fmt.Errorf("daemon: another daemon holds the data-dir lock %s", path)
+	}
+	// best-effort pid stamp (diagnostics; the lock itself is the guard)
+	_ = f.Truncate(0)
+	_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	return f, nil
 }

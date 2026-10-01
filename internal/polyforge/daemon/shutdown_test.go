@@ -149,7 +149,8 @@ func TestRestartWiring(t *testing.T) {
 	capDir := filepath.Join(ws, "capsules", wi)
 	gitDir := filepath.Join(data, "git", wi+".git")
 	seedCapsuleGit(t, capDir, gitDir, bare)
-	transcript := filepath.Join(capDir, "session", "session-ra_wi_r1.jsonl")
+	session := e2eSession(wi)
+	transcript := filepath.Join(capDir, "session", "session-"+apiSessionFingerprint(session)+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -157,22 +158,19 @@ func TestRestartWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedStateFile(t, data, "m-test", map[string]any{
-		"work_item_id": wi,
-		"project":      "proj",
-		"attempt_id":   "ra_wi_r1",
-		"instance_id":  "ra_wi_r1",
-		"generation":   int64(1),
-		"state":        "running",
-		"capsule_dir":  capDir,
-		"git_dir":      gitDir,
-		"remote_url":   bare,
-		"username":     wi,
-		"secret":       "push-secret",
-		"session_id":   "sess_wi_r1_1",
-		"transcript":   transcript,
-		"bundle_name":  "demo-bundle",
-		"agent_pid":    0,
-		"spawn_n":      1,
+		"work_item_id":        wi,
+		"project":             "proj",
+		"session_id":          session,
+		"session_fingerprint": apiSessionFingerprint(session),
+		"state":               "running",
+		"capsule_dir":         capDir,
+		"git_dir":             gitDir,
+		"remote_url":          bare,
+		"clean_pause":         false,
+		"transcript":          transcript,
+		"bundle_name":         "demo-bundle",
+		"agent_pid":           0,
+		"spawn_n":             1,
 	})
 
 	td := newTestDaemon(t, func(c *Config) {

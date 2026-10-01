@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
@@ -43,13 +45,21 @@ func TestStartStopEndToEnd(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// RTStarted carries the agent handle + attempt-id
+	// RTStarted carries the agent handle, the derivation counter and the
+	// session identity: the fence token is the public fingerprint of the
+	// in-process secret, spawn_n is 1 (the first derivation).
 	started := recvRT(t, toOB)
 	if started.Kind != protocol.RTStarted || started.WorkItem != wi {
 		t.Fatalf("expected RTStarted for %s, got %+v", wi, started)
 	}
-	if started.AttemptID != "ra_"+wi || started.AgentPID <= 0 {
-		t.Fatalf("RTStarted missing handle/attempt: %+v", started)
+	if started.AgentPID <= 0 || started.SpawnN != 1 {
+		t.Fatalf("RTStarted missing handle/spawn_n: %+v", started)
+	}
+	if started.SessionID == "" || len(started.SessionID) != 64 {
+		t.Fatalf("RTStarted must carry the 64-hex session secret in-process: %+v", started)
+	}
+	if started.AttemptID != api.SessionFingerprint(started.SessionID) {
+		t.Fatalf("RTStarted fence token must be the session fingerprint, got %+v", started)
 	}
 
 	capDir := r.capsuleDir(wi)
@@ -62,14 +72,28 @@ func TestStartStopEndToEnd(t *testing.T) {
 			t.Fatalf("materialized %s missing: %v", rel, err)
 		}
 	}
-	// capsule.json / session.json parse and carry the attempt identity
+	// capsule.json parses and carries the canonical identity (the
+	// generation/attempt lineage fields stay zero — v1.5 deleted the
+	// lineage, the capsule shape is frozen)
 	raw, err := os.ReadFile(filepath.Join(capDir, capsule.CapsuleJSON))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var idn capsule.Identity
-	if err := json.Unmarshal(raw, &idn); err != nil || idn.WorkItemID != wi || idn.Generation == 0 {
+	if err := json.Unmarshal(raw, &idn); err != nil || idn.WorkItemID != wi || idn.Generation != 0 {
 		t.Fatalf("capsule.json wrong: %v %+v", err, idn)
+	}
+	// session.json carries the PUBLIC fingerprint, never the secret
+	sraw, err := os.ReadFile(filepath.Join(capDir, capsule.SessionJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(sraw), started.SessionID) {
+		t.Fatalf("session.json must never carry the session secret:\n%s", sraw)
+	}
+	var sess capsule.Session
+	if err := json.Unmarshal(sraw, &sess); err != nil || sess.SessionID != api.SessionFingerprint(started.SessionID) {
+		t.Fatalf("session.json must carry the public fingerprint: %v %+v", err, sess)
 	}
 	// git-dir is EXTERNAL: .git is a one-line pointer, not a directory
 	pointer := filepath.Join(capDir, ".git")
@@ -79,10 +103,21 @@ func TestStartStopEndToEnd(t *testing.T) {
 	if !dirExists(r.gitDirFor(wi)) {
 		t.Fatalf("external git-dir missing at %s", r.gitDirFor(wi))
 	}
-	// state.json recorded the job
-	if recs := loadRecords(t, r); len(recs) != 1 || recs[0].WorkItemID != wi {
+	// state.json recorded the job: the v1.5 §4.1 shape — the secret, the
+	// fingerprint, the derivation counter, and NO attempt/generation/
+	// instance/credential fields.
+	recs := loadRecords(t, r)
+	if len(recs) != 1 || recs[0].WorkItemID != wi {
 		t.Fatalf("state.json should hold one record, got %+v", recs)
 	}
+	rec := recs[0]
+	if rec.SessionID != started.SessionID || rec.SessionFingerprint != started.AttemptID ||
+		rec.SpawnN != 1 || rec.CleanPause {
+		t.Fatalf("record must carry the session identity: %+v", rec)
+	}
+	// (the deleted attempt/generation/instance/credential fields are gone
+	// from the record shape entirely — the jobRecord type has no such
+	// fields to assert absent)
 
 	// Stop: seal → push → end-generation → RTFinished(wrapped)
 	if err := os.WriteFile(filepath.Join(capDir, "final.txt"), []byte("done\n"), 0o644); err != nil {
@@ -96,7 +131,10 @@ func TestStartStopEndToEnd(t *testing.T) {
 		t.Fatalf("expected RTFinished(wrapped), got %+v", fin)
 	}
 	if hub.endCount() != 1 || hub.lastEnd().Status != protocol.FinishWrapped {
-		t.Fatalf("end-generation not called with wrapped: %+v", hub.lastEnd())
+		t.Fatalf("session-end not called with wrapped: %+v", hub.lastEnd())
+	}
+	if hub.lastEnd().SessionID != started.SessionID {
+		t.Fatalf("session-end must be fenced on our secret: %+v", hub.lastEnd())
 	}
 	if !bareHasMain(t, bare) {
 		t.Fatal("final push never landed on the bare repo")

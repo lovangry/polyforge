@@ -74,7 +74,10 @@ func TestStartSlugClaimRunsUnderCanonicalID(t *testing.T) {
 		t.Fatalf("remote URL %q must be canonical-named", got)
 	}
 	if strings.ContainsAny(ji.SessionID, "#") {
-		t.Fatalf("session id %q must not carry the slug separator", ji.SessionID)
+		t.Fatalf("session secret %q must not carry the slug separator", ji.SessionID)
+	}
+	if len(ji.SessionID) != 64 {
+		t.Fatalf("the session secret must be 64-hex (32 bytes), got %q", ji.SessionID)
 	}
 	// the capsule identity and the task-definition file carry the
 	// canonical id (and the spawn journal's work_item field follows
@@ -87,8 +90,8 @@ func TestStartSlugClaimRunsUnderCanonicalID(t *testing.T) {
 	if err := json.Unmarshal(raw, &idn); err != nil || idn.WorkItemID != canonical {
 		t.Fatalf("capsule identity must carry the canonical id: %v %+v", err, idn)
 	}
-	if c := sp.call(0); c.WorkItemID != canonical || strings.Contains(c.SessionID, "#") {
-		t.Fatalf("spawn params must be canonical: %+v", c)
+	if c := sp.call(0); c.WorkItemID != canonical || c.SessionHandle == "" || strings.Contains(c.SessionHandle, "#") {
+		t.Fatalf("spawn params must be canonical with a public handle: %+v", c)
 	}
 	// state.json is keyed canonically too.
 	recs := loadRecords(t, r)
@@ -185,45 +188,30 @@ func recoveryMsgFor(j *job, cause string) protocol.OBMsg {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// F2: restart migration of pre-F2 slug-keyed state.json records.
-
-func TestRestartMigratesSlugKeyedRecord(t *testing.T) {
-	setGitIdentity(t)
+// A pre-v1.5 state.json record (slug-keyed, generation-era fields, no
+// session secret) has nothing to reconcile against: the record is
+// dropped with a log line, never revived, never migrated — the session
+// model's reconciliation key is the secret, and a record without one
+// names nothing this daemon can prove ownership of.
+func TestRestartDropsPreSessionRecord(t *testing.T) {
 	hub := newFakeHub()
-	hub.canonical = map[string]string{"proj#3": "wi_migrated"}
-	hub.gen = 4
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, hub, sp)
-	r.cfg.GitRemoteBase = "http://hub.example/git"
 
+	// a pre-v1.5 record: keyed by a slug, generation-era fields, and NO
+	// session secret — there is nothing to verify against.
 	slug := "proj#3"
-	canonical := "wi_migrated"
-	// a pre-F2 record: keyed by the slug, slug-named capsule + git dir on
-	// disk (with the .git pointer), and the broken slug-built remote.
 	oldCapsule := filepath.Join(r.cfg.WorkspaceRoot, "capsules", slug)
 	if err := os.MkdirAll(filepath.Join(oldCapsule, capsule.DirRuntimeState), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	oldGit := r.gitDirFor(slug)
-	if out, err := run(t, "git", "init", "--bare", oldGit); err != nil {
-		t.Fatalf("git init --bare: %s", out)
-	}
-	if err := os.WriteFile(filepath.Join(oldCapsule, ".git"), []byte("gitdir: "+oldGit+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	rec := &jobRecord{
 		WorkItemID: slug,
 		Project:    "proj",
-		AttemptID:  "ra_" + canonical,
-		InstanceID: "ra_" + canonical,
-		Generation: 1,
 		State:      string(StateRunning),
 		CapsuleDir: oldCapsule,
-		GitDir:     oldGit,
+		GitDir:     r.gitDirFor(slug),
 		RemoteURL:  "http://hub/git/" + slug + ".git",
-		SessionID:  "sess_" + slug + "_1",
-		Transcript: filepath.Join(oldCapsule, "session", "session-ra_"+canonical+".jsonl"),
 		SpawnN:     1,
 	}
 	blob, _ := json.MarshalIndent(&stateFile{Version: 1, MachineID: r.cfg.MachineID, Jobs: []*jobRecord{rec}}, "", "  ")
@@ -234,49 +222,19 @@ func TestRestartMigratesSlugKeyedRecord(t *testing.T) {
 	if err := r.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-
-	// the record is re-keyed under the canonical id; the slug answers as
-	// an alias, and the on-disk dirs moved to their canonical names.
-	if r.jobOf(canonical) == nil {
-		t.Fatal("restart must re-key the record under the canonical id")
-	}
 	if r.jobOf(slug) != nil {
-		t.Fatal("the slug must no longer be a job key after migration")
+		t.Fatal("a pre-session record must not be seeded")
 	}
-	if c := r.Resolve(slug); c != canonical {
-		t.Fatalf("the slug must resolve as an alias, got %q", c)
+	if r.jobOf("wi_migrated") != nil {
+		t.Fatal("a pre-session record must not be migrated into a live job")
 	}
-	ji, ok := r.Info(canonical)
-	if !ok {
-		t.Fatal("no canonical job after migration")
+	if recs := loadRecords(t, r); len(recs) != 0 {
+		t.Fatalf("a pre-session record must be dropped, got %+v", recs)
 	}
-	if !strings.HasSuffix(ji.CapsuleDir, filepath.Join("capsules", canonical)) {
-		t.Fatalf("capsule dir must be renamed canonical: %q", ji.CapsuleDir)
+	if sp.callCount() != 0 {
+		t.Fatal("a pre-session record must never be revived")
 	}
-	if dirExists(oldCapsule) {
-		t.Fatalf("the slug-named capsule dir must be gone, still at %q", oldCapsule)
-	}
-	if !strings.HasSuffix(ji.Git.RemoteURL, "/"+canonical+".git") || strings.Contains(ji.Git.RemoteURL, "#") {
-		t.Fatalf("the migrated remote URL must be canonical: %q", ji.Git.RemoteURL)
-	}
-	// the .git pointer was rewritten to the moved git dir.
-	pointer, err := os.ReadFile(filepath.Join(ji.CapsuleDir, ".git"))
-	if err != nil || strings.TrimSpace(string(pointer)) != "gitdir: "+ji.Git.GitDir {
-		t.Fatalf("capsule .git pointer must name the moved git dir: %q (%v)", pointer, err)
-	}
-	// state.json now holds the canonical record.
-	recs := loadRecords(t, r)
-	if len(recs) != 1 || recs[0].WorkItemID != canonical {
-		t.Fatalf("persisted record must be canonical after migration, got %+v", recs)
-	}
-	// the reconciliation recovered the running job (aihub says running).
-	msg := recvRT(t, toOB)
-	if msg.Kind != protocol.RTRecovered || msg.WorkItem != canonical {
-		t.Fatalf("expected RTRecovered for the canonical id, got %+v", msg)
-	}
-	if h := r.jobOf(canonical).agent; h != nil {
-		_ = h.Terminate(2e9)
-	}
+	assertNoRT(t, toOB)
 }
 
 // ---------------------------------------------------------------------------
@@ -481,7 +439,7 @@ func TestStopSealSyncsLiveTranscriptIntoTheChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "session/session-ra_"+wi+".jsonl") {
+	if !strings.Contains(out, "session/session-"+j.sessionFingerprint+".jsonl") {
 		t.Fatalf("the pushed chain misses the transcript:\n%s", out)
 	}
 }

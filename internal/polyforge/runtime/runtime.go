@@ -28,14 +28,18 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
-// Aihub is the server face Runtime needs. *aihubclient.Client satisfies it.
+// Aihub is the server face Runtime needs (v1.5 session model: the
+// generation-era Claim/EndGeneration are replaced by the session
+// endpoints). *aihubclient.Client satisfies it.
 type Aihub interface {
-	Claim(req aihubclient.ClaimRequest) (*aihubclient.ClaimResponse, error)
-	EndGeneration(wi string, req aihubclient.EndGenerationRequest) error
+	SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimResponse, error)
+	ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error)
+	SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error)
+	SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error)
+	SessionEnd(wi string, req api.SessionEndRequest) error
 	GetWorkItem(idOrSlug string) (*api.WorkItem, error)
 }
 
@@ -141,23 +145,29 @@ type Runtime struct {
 type job struct {
 	wi      string
 	project string
-	// attempt is the aihub claim attempt id; instance is the current agent
-	// lineage id used as the protocol attempt-id fence.
-	attempt    string
-	instance   string
-	generation int64
+	// sessionID is the v1.5 SECRET (B3): 64-hex minted at claim, the git
+	// push password. It never reaches the capsule, agent env, argv or
+	// any log/event surface — only state.json and the one-shot askpass.
+	sessionID string
+	// sessionFingerprint is the PUBLIC handle (api.SessionFingerprint).
+	sessionFingerprint string
+	// instance is the derivation fence token carried on RTMsg.AttemptID
+	// during the v1→v1.5 transition: the fingerprint for the first
+	// derivation, "fingerprint#N" for later ones (the v1 attempt#N
+	// shape, keyed on the spawn counter). The cleanup commit deletes the
+	// protocol field and this collapses to SpawnN.
+	instance string
 	state      JobState
 	stopReason string // sealed-in reason while SEALING (restart can finish the stop)
 	// sealedPush records that the final capsule state was ALREADY
 	// committed and pushed by the flush(wrap) half of the dual close
 	// (the flaw fix): the stopOp half then skips its own seal push. It is
 	// set when the SEALING transition records the reason and persisted
-	// with it, so a crash between the flush's push and EndGeneration
-	// keeps the restart's stop finisher from re-pushing either.
+	// with it, so a crash between the flush's push and SessionEnd keeps
+	// the restart's stop finisher from re-pushing either.
 	sealedPush bool
 	capsuleDir string
-	git        gitops.Opts
-	sessionID  string
+	git        gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
 	transcript string
 	// liveTranscript is the file the CURRENT derivation appends to: the
 	// harness-store path a fresh pi derivation really writes (the harness
@@ -187,6 +197,9 @@ type job struct {
 	recoverFails int // consecutive FAILED recoveries; reset on success
 	resumeFails  int
 	resumeDead   bool
+	// cleanPause mirrors the hub's operator-pause flag; always false
+	// while this daemon owns the job (see jobRecord.CleanPause).
+	cleanPause bool
 	// candidates is the bundle's defaults model_candidates chain (F4):
 	// spawnAgent pins the derivation to candidates[candidateOrdinal]. The
 	// ordinal advances ONLY on provider-class recovery (INV-1g; see
@@ -246,11 +259,22 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	if j == nil {
 		return // unknown WI: nothing to fence on, drop
 	}
-	state, instance := j.snapshot()
-	if msg.AttemptID != instance {
+	state, fence := j.snapshot()
+	if msg.AttemptID != fence {
 		return // stale handle: dropped (recovery-loop guard, §二)
 	}
 	switch msg.Kind {
+	case protocol.OBSuperseded:
+		// v1.5 M4: the observe lane's periodic session revalidation
+		// learned the WI is held elsewhere. NOT a recovery: the new owner
+		// owns the work. Kill the tree, quarantine the capsule, drop the
+		// record — and make NO hub transition (fencing-on-use already
+		// rejects our writes; a SessionEnd would be refused as stale
+		// anyway, and a blocked verdict would sabotage the new owner).
+		if state == StateDone {
+			return
+		}
+		r.supersedeOp(ctx, j, msg.Detail)
 	case protocol.OBNeedsRecovery:
 		if state != StateRunning {
 			// SEALING: push already landed, drop; RECOVERING: duplicate
@@ -382,12 +406,13 @@ func (r *Runtime) remoteURLFor(wi string) string {
 }
 
 // sessionPathFor is the capsule-side session copy path every derivation
-// declares in its spawn journal (session/session-<instance>.jsonl): a
-// fresh derivation gets its own instance-named file, so a re-derivation
-// never clobbers a dead instance's transcript, while a resumed derivation
-// keeps the file it continues.
-func sessionPathFor(capsuleDir, instance string) string {
-	return filepath.Join(capsuleDir, capsule.DirSession, "session-"+instance+".jsonl")
+// declares in its spawn journal (session/session-<fence-token>.jsonl): a
+// fresh derivation gets its own token-named file, so a re-derivation
+// never clobbers a dead derivation's transcript, while a resumed
+// derivation keeps the file it continues. The token is the session
+// fingerprint (+#N after re-derivations) — public, never the secret.
+func sessionPathFor(capsuleDir, token string) string {
+	return filepath.Join(capsuleDir, capsule.DirSession, "session-"+token+".jsonl")
 }
 
 // harnessSessionsRoot answers the configured harness session store.
@@ -405,6 +430,8 @@ func (r *Runtime) locateLive(capsuleDir string, spawnAt time.Time) string {
 	return LocateLiveTranscript(r.harnessSessionsRoot(), capsuleDir, spawnAt)
 }
 
+// randomKey mints an idempotency key (NOT a secret: it only needs
+// uniqueness for the server's D4 replay dedup).
 func randomKey() string {
 	b := make([]byte, 12)
 	if _, err := rand.Read(b); err != nil {
@@ -413,74 +440,104 @@ func randomKey() string {
 	return hex.EncodeToString(b)
 }
 
+// mintSessionID mints the v1.5 SECRET (contract §0): 32 crypto-random
+// bytes, hex — 64 chars. A CSPRNG failure is FATAL to the start: a
+// session secret must never fall back to a clock (that would be a
+// guessable credential, the exact failure B3 exists to prevent).
+func mintSessionID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("runtime: session secret mint failed: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // ---------------------------------------------------------------------------
 // Start (§一 Runtime): claim → clone/init capsule → materialize → spawn →
 // RTStarted.
 
 // Start claims wi and runs it to a live agent (a plain claim). Idempotency
 // rides on the claim idempotency key: a retry after a lost response
-// re-claims the same attempt server-side. See StartIntent for the
+// re-claims the same session server-side (D4). See StartIntent for the
 // resume/takeover intents.
 func (r *Runtime) Start(ctx context.Context, wi string) error {
 	return r.StartIntent(ctx, wi, "claim")
 }
 
 // StartIntent claims wi with an explicit claim intent (claim|resume|
-// takeover — the aihub claim-endpoint semantics differ per intent) and
-// runs it to a live agent. The phase-3 daemon routes the CLI's
-// submit/resume/takeover verbs here. Idempotency rides on the claim
-// idempotency key, journaled before the call (D5, see claiming.go); the
-// post-claim continuation and the F2 canonical-id rules live in
-// startClaimed.
+// takeover) and runs it to a live agent. v1.5 maps the intents onto the
+// session endpoints: "takeover" → ForceTakeover (an atomic session
+// swap, a NEW secret), everything else → the CAS SessionClaim (a paused
+// WI answers NOT_CLAIMABLE until the hub side grows an operator-unpause
+// transition — the honest refusal, never a guess; contract complaint
+// filed). The secret is minted HERE and journaled durably BEFORE the
+// call (B1): a crash between journal and call is recoverable by replay,
+// a crash after the call by verify — the ambiguous-claim window is
+// closed from both sides.
 func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	if j := r.jobOf(wi); j != nil {
 		return fmt.Errorf("runtime: %s already active (state %s)", wi, j.state)
 	}
-	// D5: the claim's idempotency key is journaled durably BEFORE the
-	// claim call. A crash anywhere between the claim and the spawn would
-	// otherwise orphan a running generation nobody can name again — the
-	// journal lets Restart replay the SAME claim (same key → same attempt,
-	// the server's idempotency contract) and either finish the start or
-	// close the generation blocked.
+	sessionID, err := mintSessionID()
+	if err != nil {
+		return err
+	}
+	// B1: the claim's idempotency key AND the session secret are
+	// journaled durably BEFORE the claim call. A crash anywhere between
+	// the claim and the spawn would otherwise orphan a running session
+	// nobody can name again — the journal lets Restart verify the
+	// journaled session, replay the SAME claim (same key → same response,
+	// D4) and either finish the start or compensate with
+	// SessionEnd(blocked).
 	key := randomKey()
-	if err := r.noteClaiming(wi, intent, key); err != nil {
+	if err := r.noteClaiming(wi, sessionID, key); err != nil {
 		return fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", wi, err)
 	}
-	resp, err := r.hub.Claim(aihubclient.ClaimRequest{
+	req := api.SessionClaimRequest{
 		WorkItemID:     wi,
-		Intent:         intent,
+		SessionID:      sessionID,
 		MachineID:      r.cfg.MachineID,
 		Owner:          r.cfg.MachineID,
 		IdempotencyKey: key,
-	})
+	}
+	var resp *api.SessionClaimResponse
+	if intent == "takeover" {
+		req.Reason = "operator takeover"
+		resp, err = r.hub.ForceTakeover(wi, req)
+	} else {
+		resp, err = r.hub.SessionClaim(req)
+	}
 	if err != nil {
 		// the claim never opened: nothing can dangle, drop the journal
 		// entry so a restart does not replay a dead intention.
 		r.clearClaiming(wi)
 		return err
 	}
-	return r.startClaimed(ctx, wi, resp)
+	return r.startClaimed(ctx, wi, sessionID, resp)
 }
 
 // startClaimed carries one OPEN claim (fresh or replayed) to a live agent.
-// Every failure after this point is compensated with EndGeneration
-// (blocked) — the D5 rule: a post-claim failure must never leave an
-// orphaned running generation; the ticket needs human attention, and the
-// generation fence revokes the credential either way. The claiming
-// journal entry is cleared on every settled outcome.
+// Every failure after this point is compensated with SessionEnd(blocked)
+// — the D5 rule carried into the session model: a post-claim failure must
+// never leave an orphaned running session; the ticket needs human
+// attention, and the hub's session row is cleared either way. The
+// claiming journal entry is cleared on every settled outcome.
+//
+// sessionID is THIS daemon's minted secret (the journal replay path passes
+// the journaled one back; the claim answer's fingerprint must agree).
 //
 // wi may arrive as the canonical id OR any id-or-slug form the aihub claim
 // endpoint accepts ("<project>#<seq>"): the job and every path derived
-// from it — capsule directory, external git-dir, push remote, session id,
-// spawn journal — are keyed by the CANONICAL work-item id the claim
-// answer carries (F2). A slug contains "#", the URL fragment separator:
-// a slug-built push remote answers 404 and a slug-named directory leaks
-// the separator into the harness's session directory naming, so slugs
-// never reach any path. The submitted spelling is registered as an alias
-// so lookups by it still resolve.
-func (r *Runtime) startClaimed(ctx context.Context, wi string, resp *aihubclient.ClaimResponse) error {
+// from it — capsule directory, external git-dir, push remote, spawn
+// journal — are keyed by the CANONICAL work-item id the claim answer
+// carries (F2). A slug contains "#", the URL fragment separator: a
+// slug-built push remote answers 404 and a slug-named directory leaks the
+// separator into the harness's session directory naming, so slugs never
+// reach any path. The submitted spelling is registered as an alias so
+// lookups by it still resolve.
+func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse) error {
 	c := resp.Claim
 	// canonical id resolution (F2): the claim answer's work item is the
 	// authority; the claim's own WorkItemID and the answered record's ID
@@ -499,33 +556,50 @@ func (r *Runtime) startClaimed(ctx context.Context, wi string, resp *aihubclient
 		r.clearClaiming(wi)
 		return fmt.Errorf("runtime: %s already active (state %s)", id, existing.state)
 	}
+	fp := api.SessionFingerprint(sessionID)
+	if c.SessionFingerprint != "" && c.SessionFingerprint != fp {
+		// the server computed a different fingerprint for our secret: the
+		// answer belongs to another session (a stale idempotency cache on
+		// the server side). Refuse rather than adopt someone else's claim.
+		return fmt.Errorf("runtime: %s: claim answer fingerprint %s does not match this session (%s)", id, c.SessionFingerprint, fp)
+	}
 	j := &job{
-		wi:         id,
-		project:    resp.WorkItem.ProjectName,
-		attempt:    c.AttemptID,
-		state:      StateRunning,
-		capsuleDir: r.capsuleDir(id),
+		wi:                 id,
+		project:            resp.WorkItem.ProjectName,
+		sessionID:          sessionID,
+		sessionFingerprint: fp,
+		instance:           fp, // derivation 1's fence token
+		state:              StateRunning,
+		capsuleDir:         r.capsuleDir(id),
 		git: gitops.Opts{
 			WorkItemID: id,
-			AttemptID:  c.AttemptID,
+			// the push-option backup layer's value until Lane C renames
+			// the option: the session fingerprint (contract §1.6).
+			AttemptID:  fp,
 			CapsuleDir: r.capsuleDir(id),
 			GitDir:     r.gitDirFor(id),
 			RemoteURL:  r.remoteURLFor(id),
 			Username:   id,
-			Secret:     resp.Credential.Secret,
+			Secret:     sessionID, // v1.5: the session secret IS the push password
 		},
-		generation:   c.Generation,
 		bundleName:   c.BundleName,
 		bundleDigest: c.BundleDigest,
 		repos:        c.Repos,
 		item:         &resp.WorkItem,
 	}
-	j.sessionID = fmt.Sprintf("sess_%s_%d", id, c.Generation)
-	j.transcript = sessionPathFor(j.capsuleDir, j.attempt)
+	j.transcript = sessionPathFor(j.capsuleDir, fp)
 
 	if err := r.prepareCapsule(j); err != nil {
 		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
 	}
+	// B2 spawn_n source: a FRESHLY CLAIMED capsule may carry another
+	// session's spawn journal (the takeover/attach clone path — the
+	// journal rides capsule git), so the derivation counter continues
+	// where the capsule's history left off; a brand-new capsule answers
+	// 0 and the first derivation is #1.
+	j.mu.Lock()
+	j.spawnN = maxSpawnNFromJournal(j.capsuleDir)
+	j.mu.Unlock()
 	if err := r.materialize(ctx, j); err != nil {
 		// A typed task-repo clone failure (DAEMON-507) keeps its detail as
 		// the close note; every other materialization failure (CAP-405
@@ -551,27 +625,37 @@ func (r *Runtime) startClaimed(ctx context.Context, wi string, resp *aihubclient
 	j.mu.Lock()
 	pid := j.agentPID
 	inst := j.instance
+	spawnN := j.spawnN
 	j.mu.Unlock()
-	r.send(protocol.RTMsg{Kind: protocol.RTStarted, AttemptID: inst, WorkItem: id, AgentPID: pid})
+	r.send(protocol.RTMsg{
+		Kind:      protocol.RTStarted,
+		AttemptID: inst,
+		SpawnN:    spawnN,
+		WorkItem:  id,
+		AgentPID:  pid,
+		// the secret rides in-process to the observe lane only (its M4
+		// session revalidation needs it); never a log, never the capsule.
+		SessionID: j.sessionID,
+	})
 	return nil
 }
 
-// abandonClaim is the D5 compensation: every post-claim failure closes
-// the generation BLOCKED at aihub and clears the claiming journal, then
-// hands the original error back to the caller — a bad remote, a diverged
-// bundle, a spawn refusal all need human attention, never an orphaned
-// running generation and never a daemon crash. A failed CLOSE keeps the
-// journal entry (a later restart replays the same key and retries the
-// compensation); it is loud but never masks the original error. The
-// generation fence (credential revocation) still runs server-side.
+// abandonClaim is the D5 compensation carried into the session model:
+// every post-claim failure ends the session BLOCKED at aihub (the hub
+// clears the session row; the WI leaves the claimable set until a human
+// intervenes) and clears the claiming journal, then hands the original
+// error back to the caller — a bad remote, a diverged bundle, a spawn
+// refusal all need human attention, never an orphaned running session
+// and never a daemon crash. A failed CLOSE keeps the journal entry (a
+// later restart replays the same key and retries the compensation); it
+// is loud but never masks the original error.
 func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note string) error {
-	if cerr := r.hub.EndGeneration(j.wi, aihubclient.EndGenerationRequest{
-		AttemptID:  j.attempt,
-		Generation: j.generation,
-		Status:     api.StatusBlocked,
-		Note:       note,
+	if cerr := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
+		SessionID: j.sessionID,
+		Status:    api.StatusBlocked,
+		Note:      note,
 	}); cerr != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: end-generation(blocked) after failed start failed (claiming entry kept for the next restart): %v\n", j.wi, cerr)
+		fmt.Fprintf(os.Stderr, "runtime: %s: session-end(blocked) after failed start failed (claiming entry kept for the next restart): %v\n", j.wi, cerr)
 		return origErr
 	}
 	r.clearClaiming(submitted)
@@ -583,21 +667,29 @@ func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note str
 // cloned (an empty-history clone succeeds with a warning); the shared
 // gitops.Clone puts the git-dir inside the worktree, so it is relocated to
 // the external location right after, leaving a one-line .git pointer file.
-// A leftover capsule of a different generation is quarantined, never
-// reused in place.
+//
+// v1.5 capsule ownership: generations no longer discriminate a reusable
+// husk from a foreign scene — the session does. materialize stamps the
+// owning session's FINGERPRINT into sync/session-handle (daemon-private,
+// gitignored: it deliberately does NOT travel with a takeover clone), so:
+//
+//	amarker == this session's fingerprint → this session's own
+//	  crashed-Start husk (or attach-resume scene): reuse in place;
+//	anything else (another session's scene, a sealed close, a pre-v1.5
+//	  capsule with no marker) → quarantine, never reuse.
 func (r *Runtime) prepareCapsule(j *job) error {
 	o := j.git
 	pointer := filepath.Join(o.CapsuleDir, ".git")
 	if isRegularFile(pointer) && dirExists(o.GitDir) {
-		if gen := readCapsuleGeneration(o.CapsuleDir); gen == j.generation {
-			return nil // same-generation husk from a crashed Start: reuse
+		if readSessionMarker(o.CapsuleDir) == j.sessionFingerprint {
+			return nil // this session's own crashed-Start husk: reuse
 		}
 		if err := quarantineCapsule(o.CapsuleDir); err != nil {
 			return err
 		}
 	}
 	if dirExists(o.CapsuleDir) && !isRegularFile(pointer) {
-		// unprepared husk or an older generation's sealed scene
+		// unprepared husk or another session's sealed scene
 		if err := quarantineCapsule(o.CapsuleDir); err != nil {
 			return err
 		}
@@ -627,26 +719,42 @@ func dirExists(p string) bool {
 	return err == nil && st.IsDir()
 }
 
-func readCapsuleGeneration(capsuleDir string) int64 {
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.CapsuleJSON))
-	if err != nil {
-		return -1
-	}
-	var idn capsule.Identity
-	if json.Unmarshal(raw, &idn) != nil {
-		return -1
-	}
-	return idn.Generation
-}
+// relSessionMarker is the capsule-local session ownership tag: the
+// fingerprint of the session that owns this worktree, under sync/ —
+// daemon-private, gitignored, so it never travels with a takeover clone
+// and never reaches the revision chain.
+const relSessionMarker = "sync/session-handle"
 
-// quarantineCapsule moves a stale/foreign capsule aside, never deleting it.
-func quarantineCapsule(capsuleDir string) error {
-	qdir := filepath.Join(filepath.Dir(capsuleDir), "_quarantine")
-	if err := os.MkdirAll(qdir, 0o755); err != nil {
+// writeSessionMarker stamps the owning session's fingerprint (B3 public
+// handle; the secret itself never lands in the capsule).
+func writeSessionMarker(capsuleDir, fingerprint string) error {
+	path := filepath.Join(capsuleDir, filepath.FromSlash(relSessionMarker))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	dst := filepath.Join(qdir, filepath.Base(capsuleDir)+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
-	return os.Rename(capsuleDir, dst)
+	return os.WriteFile(path, []byte(fingerprint+"\n"), 0o644)
+}
+
+// readSessionMarker answers the owning session's fingerprint ("" when
+// absent or unreadable).
+func readSessionMarker(capsuleDir string) string {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, filepath.FromSlash(relSessionMarker)))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// quarantineCapsule moves a stale/foreign/superseded capsule aside, never
+// deleting it (v1.5 naming, contract §4.4: capsules/<id> →
+// capsules/<id>.quarantined.<ts> — a sibling, so the scene sits next to
+// whatever replaces it and the bytes always survive).
+func quarantineCapsule(capsuleDir string) error {
+	if !dirExists(capsuleDir) {
+		return nil // nothing to move (a capsule never materialized)
+	}
+	ts := strconv.FormatInt(time.Now().UnixNano(), 36)
+	return os.Rename(capsuleDir, capsuleDir+".quarantined."+ts)
 }
 
 // materialize lays out the capsule: workflows/, agents/, .pi/agents/,
@@ -684,12 +792,13 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// authoritative; BaseCommit stays EMPTY rather than singling out one
 	// repo's SHA as "the" baseline — with several task repos there is no
 	// single main repo to pick, and any choice would silently lie.
+	// v1.5: the generation/attempt lineage fields stay at their zero
+	// values (the capsule Identity shape is frozen in common/); session
+	// ownership lives in the daemon-private sync/session-handle marker.
 	idn := capsule.Identity{
 		WorkItemID:   j.wi,
 		CapsuleID:    "cap_" + j.wi,
 		Project:      j.project,
-		Generation:   j.generation,
-		AttemptID:    j.attempt,
 		BundleName:   j.bundleName,
 		BundleDigest: j.bundleDigest,
 		BaseCommit:   "",
@@ -700,11 +809,16 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	if err := atomicWrite(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
 		return err
 	}
+	// v1.5: the session ownership marker — this session's fingerprint,
+	// under gitignored sync/ so a takeover clone re-stamps its own.
+	if err := writeSessionMarker(j.capsuleDir, j.sessionFingerprint); err != nil {
+		return err
+	}
+	// SessionID carries the PUBLIC fingerprint (B3): session.json is a
+	// capsule-committed file, so the secret must never ride it.
 	sess := capsule.Session{
-		AttemptID:      j.attempt,
-		Generation:     j.generation,
 		Harness:        r.cfg.Harness,
-		SessionID:      j.sessionID,
+		SessionID:      j.sessionFingerprint,
 		TranscriptPath: j.transcript,
 		UpdatedAt:      nowStamp(),
 	}
@@ -784,7 +898,6 @@ func (r *Runtime) writeWorkItemDoc(j *job, item *api.WorkItem) error {
 		Milestone:    item.Milestone,
 		BundleName:   j.bundleName,
 		BundleDigest: j.bundleDigest,
-		Generation:   j.generation,
 		UpdatedAt:    nowStamp(),
 	}
 	if doc.Labels == nil {
@@ -850,14 +963,15 @@ func atomicWriteFileMode(dst string, in io.Reader, perm os.FileMode) error {
 }
 
 // ---------------------------------------------------------------------------
-// Stop (§一): seal → final push → EndGeneration → RTFinished.
+// Stop (§一): seal → final push → SessionEnd → RTFinished.
 
-// Stop seals wi with a terminal reason (protocol.FinishWrapped | -Failed).
-// The agent tree is torn down, the capsule's final state is committed and
-// pushed, the generation is ended server-side, the scene is made read-only
-// and Observe hears WIFinished. An EndGeneration failure leaves the job in
-// SEALING (persisted with its reason) so a restart finishes the close —
-// never a silent half-seal.
+// Stop seals wi with a terminal reason (protocol.FinishWrapped | -Failed,
+// plus "paused" from the CLI pause route). The agent tree is torn down,
+// the capsule's final state is committed and pushed, the session is ended
+// server-side (SessionEnd, fenced on our secret), the scene is made
+// read-only and Observe hears WIFinished. A SessionEnd failure leaves the
+// job in SEALING (persisted with its reason) so a restart finishes the
+// close — never a silent half-seal.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	return r.stopWith(ctx, wi, reason, false)
 }
@@ -877,6 +991,41 @@ func (r *Runtime) stopWith(ctx context.Context, wi, reason string, sealedByFlush
 	return r.stopOp(ctx, j, reason, false, sealedByFlush)
 }
 
+// supersedeOp is the OBSuperseded response (v1.5 M4 + m3): the periodic
+// session revalidation learned this WI is held by another daemon. The
+// other owner now owns the work, so this daemon makes NO hub transition
+// (fencing-on-use rejects our writes; a SessionEnd would be refused as
+// STALE and a blocked verdict would sabotage the new owner), runs NO
+// recovery, and instead: kills the local tree, quarantines the capsule
+// in place (capsules/<id>.quarantined.<ts>), drops the state.json record
+// and emits the owner-visible event — the answer ledger did not travel,
+// so "answers may be lost; question re-opened" (m3).
+func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	// The job may have settled (Stop finished, bounded fail) between
+	// handleOB's fetch and this lock: a gone job needs nothing.
+	if r.jobOf(j.wi) != j {
+		return
+	}
+	r.killAgentTree(j)
+	if err := quarantineCapsule(j.capsuleDir); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: superseded capsule quarantine failed (scene left in place): %v\n", j.wi, err)
+	}
+	r.dropJob(j)
+	if err := r.persist(); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
+	}
+	if r.cfg.EventTap != nil {
+		r.cfg.EventTap(j.wi, "session_superseded", map[string]any{
+			"session_fingerprint": j.sessionFingerprint,
+			"note":               "answers may be lost; question re-opened",
+			"detail":             detail,
+		})
+	}
+	_ = ctx
+}
+
 func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, sealedByFlush bool) error {
 	if !alreadySealing {
 		if err := j.transition(StateSealing); err != nil {
@@ -885,7 +1034,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		j.mu.Lock()
 		j.stopReason = reason
 		// Persisted with the reason: a daemon crash between the flush's
-		// push and EndGeneration must not make the restart's stop finisher
+		// push and SessionEnd must not make the restart's stop finisher
 		// re-push either.
 		j.sealedPush = sealedByFlush
 		j.mu.Unlock()
@@ -932,12 +1081,18 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 			finalReason = protocol.FinishBlocked
 		}
 	}
-	if err := r.hub.EndGeneration(j.wi, aihubclient.EndGenerationRequest{
-		AttemptID:  j.attempt,
-		Generation: j.generation,
-		Status:     finalReason,
+	// v1.5: the terminal close is SessionEnd — fenced on the session
+	// hash. A STALE_SESSION refusal (this daemon was superseded between
+	// the seal push and here) surfaces as the error below and leaves the
+	// job SEALING, exactly like a hub outage: never a silent half-seal.
+	// The status vocabulary is wrapped|failed|blocked — plus "paused",
+	// which the CLI pause path passes through (contract complaint: §1.5
+	// has no pause transition; see the lane report).
+	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
+		SessionID: j.sessionID,
+		Status:    finalReason,
 	}); err != nil {
-		return fmt.Errorf("runtime: %s: end-generation failed (job left sealing): %w", j.wi, err)
+		return fmt.Errorf("runtime: %s: session-end failed (job left sealing): %w", j.wi, err)
 	}
 	if err := sealReadOnly(j.capsuleDir); err != nil {
 		// The generation is closed; a chmod failure is a scene-preservation
