@@ -151,6 +151,10 @@ func (d *Daemon) runShutdown(ctx context.Context) error {
 		case <-ctx.Done():
 		}
 	}
+	// The runtime's release lane goes down with it: any observe release
+	// still parked on the lane (NEW-2) is abandoned — the observe lane is
+	// already stopped above, so nothing could consume it anyway.
+	d.rt.Close()
 	// Final sweep: no writer survives the shutdown — a recovery that was
 	// mid-cascade when the monitors stopped may have installed a fresh
 	// handle after the terminate pass above read the job set.
