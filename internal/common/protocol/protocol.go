@@ -26,6 +26,11 @@ type RTMsg struct {
 	AgentPID  int       `json:"agent_pid,omitempty"`
 	Reason    string    `json:"reason,omitempty"` // WIFinished: wrapped|failed
 	Detail    string    `json:"detail,omitempty"`
+	// SessionID (v1.5): the WI session secret, passed runtime→observe
+	// IN-PROCESS so the monitor can run the periodic session-verify (M4).
+	// It never leaves the daemon: not in logs, not in capsule, not in
+	// agent env. Absent on legacy messages during the transition.
+	SessionID string    `json:"session_id,omitempty"`
 }
 
 // OBMsg is an Observe→Runtime message. Observe must attach the attempt-id of
