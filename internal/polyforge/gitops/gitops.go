@@ -422,9 +422,8 @@ func InitLocal(o Opts) error {
 	if err := os.MkdirAll(o.CapsuleDir, 0o755); err != nil {
 		return err
 	}
-	out, err := git(nil, "", "init", o.CapsuleDir)
-	if err != nil {
-		return fmt.Errorf("git init: %s", strings.TrimSpace(out))
+	if _, err := git(nil, "", "init", o.CapsuleDir); err != nil {
+		return fmt.Errorf("git init: %s", err.Error())
 	}
 	return nil
 }
@@ -462,8 +461,10 @@ func ExternalizeGitDir(o Opts) error {
 		"GIT_DIR="+o.GitDir,
 		"GIT_WORK_TREE="+o.CapsuleDir,
 	)
-	if out, err := git(env, o.CapsuleDir, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
-		return fmt.Errorf("git symbolic-ref: %s", strings.TrimSpace(out))
+	if _, err := git(env, o.CapsuleDir, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
+		// The real diagnosis lives in the error (stderr); stdout is empty
+		// on failure — wrapping `out` swallowed every real cause.
+		return fmt.Errorf("git symbolic-ref: %s", err.Error())
 	}
 	return nil
 }
