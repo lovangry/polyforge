@@ -40,12 +40,12 @@ func (m *Monitor) JobView() *protocol.JobView {
 	m.stateMu.Unlock()
 
 	view := &protocol.JobView{
-		WorkItem:    m.wi.WorkItem,
-		Project:     m.wi.Project,
-		SpawnN:      spawn,
+		WorkItem:           m.wi.WorkItem,
+		Project:            m.wi.Project,
+		SpawnN:             spawn,
 		SessionFingerprint: fp,
-		BundleName:  m.wi.BundleName,
-		Pending:     pending,
+		BundleName:         m.wi.BundleName,
+		Pending:            pending,
 	}
 
 	// layer 1: execution.json direct read (authoritative).

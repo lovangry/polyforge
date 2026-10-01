@@ -430,10 +430,10 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 		answerCh: make(chan AnswerCall, 8),
 		flushCh:  make(chan FlushCall, 8),
 
-		gate:      make(chan struct{}, 1),
-		pushDone:  make(chan pushResult, 1),
-		wrapDone:  make(chan wrapResult, 1),
-		probeDone: make(chan probeResult, 1),
+		gate:       make(chan struct{}, 1),
+		pushDone:   make(chan pushResult, 1),
+		wrapDone:   make(chan wrapResult, 1),
+		probeDone:  make(chan probeResult, 1),
 		verifyDone: make(chan verifyResult, 1),
 
 		hangAnchor: time.Now(),

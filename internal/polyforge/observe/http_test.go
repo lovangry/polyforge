@@ -271,8 +271,8 @@ func TestHTTPFlushStaleSpawnRefused(t *testing.T) {
 	// (2) a flush with NO spawn counter is stale too (the fence requires
 	// it — fail-closed).
 	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http",
-		Reason: protocol.FlushNeedsInput,
+		WorkItem:   "wi_http",
+		Reason:     protocol.FlushNeedsInput,
 		QuestionID: "q_stale", Question: "which?",
 	}, nil)
 	if code != http.StatusConflict {

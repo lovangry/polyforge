@@ -118,16 +118,15 @@ func (e *reproEnv) reproOpts(t *testing.T, wi string) Opts {
 	t.Helper()
 	base := t.TempDir()
 	return Opts{
-		WorkItemID: wi,
+		WorkItemID:  wi,
 		Fingerprint: reproFingerprint,
-		CapsuleDir: filepath.Join(base, "capsules", wi),
-		GitDir:     filepath.Join(base, "git", wi+".git"),
-		RemoteURL:  e.ts.URL + "/git/" + wi + ".git",
-		Username:   wi,
-		Secret:     reproSecret,
+		CapsuleDir:  filepath.Join(base, "capsules", wi),
+		GitDir:      filepath.Join(base, "git", wi+".git"),
+		RemoteURL:   e.ts.URL + "/git/" + wi + ".git",
+		Username:    wi,
+		Secret:      reproSecret,
 	}
 }
-
 
 // lanePushResult is one lane's outcome.
 type lanePushResult struct {
