@@ -97,7 +97,7 @@ Before driving any step:
 2. Load `workflow.md`'s Markdown body as the flow-level narrative. The frontmatter
    `steps` array is the only structural execution order; the body never overrides it.
 3. Read `runtime-state/execution.json`. `current_step` plus each `steps.<id>.status`
-   tell you exactly where you are. A brand-new generation starts at the first step of
+   tell you exactly where you are. A brand-new run starts at the first step of
    the frontmatter array.
 
 ## 3. Step sequencing (frontmatter is the only order)
@@ -371,21 +371,22 @@ by the transport.
 
 All three share one face (`POST http://daemon/jobs/<wi>/...` over the local daemon
 socket — the conventional `/run/polyforge.sock`, or the path in `PF_DAEMON_SOCKET`
-when set) and one fence: every call carries your `attempt_id`, and the daemon refuses
-any other value — including an absent one — with `DAEMON-409 STALE_ATTEMPT` (a
-superseded instance — even a zombie survivor of a replaced one — must never seal or
-speak for the live attempt's work). Read the value ONCE at startup: the
-`PF_INSTANCE_ID` environment variable, injected by the spawner with this derivation's
-lineage id (the attempt id for a first derivation, `attempt#N` after a re-derivation),
-and never re-read identity sources at call time. If `PF_INSTANCE_ID` is absent (older
-daemon build), fall back to the `instance` field of the last line of
-`runtime-state/spawn-journal.jsonl` (for a first-derivation agent it equals
-`capsule.json`'s `attempt_id`).
+when set) and one fence: every call carries your `spawn_n`, and the daemon refuses
+any other value — including an absent one — with `DAEMON-409 STALE_SPAWN` (a
+superseded derivation — even a zombie survivor of a replaced one — must never seal or
+speak for the live derivation's work). Read the value ONCE at startup: the
+`PF_SPAWN_N` environment variable, injected by the spawner with this derivation's
+monotonic counter (1 for a first derivation, N+1 after every re-derivation),
+and never re-read identity sources at call time. `PF_SESSION_HANDLE` is the
+public session fingerprint (display/identification only — it is NOT a
+credential and never fences anything). If `PF_SPAWN_N` is absent, fall back to
+the `spawn_n` field of the last line of `runtime-state/spawn-journal.jsonl`
+plus one.
 
 #### flush(reason) — the one blocking call
 
 ```
-{"work_item":"<wi>","attempt_id":"<your instance id>","reason":"needs_input|wrap|shutdown", ...}
+{"work_item":"<wi>","spawn_n":<your spawn counter>,"reason":"needs_input|wrap|shutdown", ...}
 ```
 
 with `question_id`/`question`/`step` on `needs_input`, and `final_status`
@@ -426,7 +427,7 @@ the ack distinguishes the local commit from the server push:
 #### recall — the narrow memory read channel (F6)
 
 `POST http://daemon/jobs/<wi>/recall`, body
-`{"attempt_id":"<id>","query":"<text>","top_k":<n>}` (top_k defaults to 10, ceiling
+`{"spawn_n":<your spawn counter>,"query":"<text>","top_k":<n>}` (top_k defaults to 10, ceiling
 50), answer `{"items":[{"id","type","title","excerpt","tags","created_at"},...]}`.
 The daemon holds the only credential and makes the server call itself — you never see
 an aihub URL or key. `excerpt` is a bounded content prefix; treat the hit list as a
@@ -436,7 +437,7 @@ never block, never seal, never carry close semantics — call, consume, continue
 #### remember — the narrow memory write-back channel (F6)
 
 `POST http://daemon/jobs/<wi>/remember`, body
-`{"attempt_id":"<id>","type":"<memory type>","content":"<markdown>","visibility":"project","title":"<optional>","tags":["optional"]}`,
+`{"spawn_n":<your spawn counter>,"type":"<memory type>","content":"<markdown>","visibility":"project","title":"<optional>","tags":["optional"]}`,
 answer `{"id":"<new memory id>","status":"created"}`. The visibility set is closed
 (`admin|private|project|team|public`, default `project`); the memory is stored in THIS
 work item's project and attributed to it — you cannot name another project, and never
