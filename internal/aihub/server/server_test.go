@@ -206,58 +206,87 @@ func TestClaimFlowOverHTTP(t *testing.T) {
 		Extra json.RawMessage `json:"extra"`
 	}
 	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+reg.ID+"/claim", e.key,
-		map[string]any{"intent": "claim"}, &envl); code != 409 || envl.Code != "CORE-409" || !strings.Contains(string(envl.Extra), "NOT_CLAIMABLE") {
+		map[string]any{"session_id": "aaaa1111bbbb2222cccc3333dddd4444"}, &envl); code != 409 || envl.Code != "CORE-409" || !strings.Contains(string(envl.Extra), "NOT_CLAIMABLE") {
 		t.Fatalf("registration claim: %d %s", code, raw)
 	}
-	// Claim over HTTP: the response carries claim + credential + work_item.
+	// Session claim over HTTP: the response carries claim + work_item and
+	// NEVER the secret (B3) nor any hash.
+	secret := "0123456789abcdef0123456789abcdef"
 	var resp struct {
 		Claim struct {
-			AttemptID    string `json:"attempt_id"`
-			Generation   int64  `json:"generation"`
-			Token        string `json:"token"`
-			BundleName   string `json:"bundle_name"`
-			BundleDigest string `json:"bundle_digest"`
+			WorkItemID         string `json:"work_item_id"`
+			SessionFingerprint string `json:"session_fingerprint"`
+			MachineID          string `json:"machine_id"`
+			Owner              string `json:"owner"`
+			BundleName         string `json:"bundle_name"`
+			BundleDigest       string `json:"bundle_digest"`
+			ClaimedAt          string `json:"claimed_at"`
 		} `json:"claim"`
-		Credential struct {
-			AttemptID string `json:"attempt_id"`
-			Username  string `json:"username"`
-			Secret    string `json:"secret"`
-		} `json:"credential"`
 		WorkItem struct {
-			Status string `json:"status"`
+			Status             string `json:"status"`
+			SessionFingerprint string `json:"session_fingerprint"`
+			SessionMachine     string `json:"session_machine"`
+			SessionOwner       string `json:"session_owner"`
+			SessionStartedAt   string `json:"session_started_at"`
+			CleanPause         bool   `json:"clean_pause"`
 		} `json:"work_item"`
 	}
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/claim", e.key,
-		map[string]string{"intent": "claim", "idempotency_key": "http-1"}, &resp); code != 200 {
+	code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/claim", e.key,
+		map[string]string{"session_id": secret, "machine_id": "m1", "owner": "op", "idempotency_key": "http-1"}, &resp)
+	if code != 200 {
 		t.Fatalf("claim: %d %s", code, raw)
 	}
-	if resp.Claim.AttemptID == "" || resp.Claim.Generation != 1 {
-		t.Fatalf("claim shape wrong: %+v", resp)
+	if resp.Claim.SessionFingerprint != api.SessionFingerprint(secret) || resp.Claim.WorkItemID != wi.ID {
+		t.Fatalf("claim shape wrong: %+v", resp.Claim)
+	}
+	if strings.Contains(string(raw), secret) || strings.Contains(string(raw), "session_hash") {
+		t.Fatalf("claim response leaks the secret or the hash: %s", raw)
 	}
 	// #5: the bundle pin rides the claim object itself (the runtime reads
 	// it from resp.Claim, never from resp.WorkItem).
 	if resp.Claim.BundleName != "demo-bundle" || resp.Claim.BundleDigest == "" {
 		t.Fatalf("claim bundle fields wrong: %+v", resp.Claim)
 	}
-	if resp.Credential.Username != wi.ID || resp.Credential.Secret == "" {
-		t.Fatalf("credential shape wrong: %+v", resp)
-	}
 	if resp.WorkItem.Status != "running" {
 		t.Fatalf("work item not running after claim: %+v", resp.WorkItem)
 	}
-	// The bare repo exists and the git face answers with the credential
-	// (info/refs over the same server).
+	// The WorkItem JSON carries the m4 public audit block (never a hash).
+	if resp.WorkItem.SessionFingerprint != resp.Claim.SessionFingerprint ||
+		resp.WorkItem.SessionMachine != "m1" || resp.WorkItem.SessionOwner != "op" ||
+		resp.WorkItem.SessionStartedAt == "" || resp.WorkItem.CleanPause {
+		t.Fatalf("work item session audit fields wrong: %+v", resp.WorkItem)
+	}
+	// Idempotent replay (D4): the SAME key answers the SAME claim.
+	var replay struct {
+		Claim struct {
+			SessionFingerprint string `json:"session_fingerprint"`
+		} `json:"claim"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/claim", e.key,
+		map[string]string{"session_id": secret, "machine_id": "m1", "owner": "op", "idempotency_key": "http-1"}, &replay); code != 200 {
+		t.Fatalf("idempotent replay: %d %s", code, raw)
+	}
+	if replay.Claim.SessionFingerprint != resp.Claim.SessionFingerprint {
+		t.Fatalf("idempotent replay returned a different session: %+v", replay.Claim)
+	}
+	// A second claim without a key: ALREADY_HELD.
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/claim", e.key,
+		map[string]string{"session_id": "ffffffffffffffffffffffffffffffff"}, &envl); code != 409 || !strings.Contains(string(envl.Extra), "ALREADY_HELD") {
+		t.Fatalf("double claim not refused: %d %s", code, raw)
+	}
+	// The bare repo exists and the git face answers with the session
+	// secret as the push password (info/refs over the same server).
 	gitURL := fmt.Sprintf("%s/git/%s.git/info/refs?service=git-upload-pack", e.ts.URL, wi.ID)
-	req, _ := http.NewRequest("GET", strings.Replace(gitURL, "http://", "http://"+wi.ID+":"+resp.Credential.Secret+"@", 1), nil)
+	req, _ := http.NewRequest("GET", strings.Replace(gitURL, "http://", "http://"+wi.ID+":"+secret+"@", 1), nil)
 	gresp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("git info/refs: %v", err)
 	}
 	gresp.Body.Close()
 	if gresp.StatusCode != http.StatusOK {
-		t.Fatalf("git info/refs with credential: %d", gresp.StatusCode)
+		t.Fatalf("git info/refs with session secret: %d", gresp.StatusCode)
 	}
-	// Wrong secret → 401.
+	// Wrong secret -> 401.
 	req, _ = http.NewRequest("GET", strings.Replace(gitURL, "http://", "http://"+wi.ID+":nope@", 1), nil)
 	gresp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -267,19 +296,28 @@ func TestClaimFlowOverHTTP(t *testing.T) {
 	if gresp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("git info/refs with bad secret: %d", gresp.StatusCode)
 	}
-	// end-generation: wrapped; then the git face refuses (no active attempt).
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/end-generation", e.key,
-		map[string]any{"attempt_id": resp.Claim.AttemptID, "generation": 1, "status": "wrapped", "note": "done"}, nil); code != 200 {
-		t.Fatalf("end-generation: %d %s", code, raw)
+	// session-end: wrapped; the session row is fully cleared, then the
+	// git face refuses (no live session).
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/session-end", e.key,
+		map[string]string{"session_id": secret, "status": "wrapped", "note": "done"}, nil); code != 200 {
+		t.Fatalf("session-end: %d %s", code, raw)
 	}
-	req, _ = http.NewRequest("GET", strings.Replace(gitURL, "http://", "http://"+wi.ID+":"+resp.Credential.Secret+"@", 1), nil)
+	var ended struct {
+		Status             string `json:"status"`
+		SessionFingerprint string `json:"session_fingerprint"`
+		CleanPause         bool   `json:"clean_pause"`
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/work-items/"+wi.ID, e.key, nil, &ended); code != 200 || ended.Status != "wrapped" || ended.SessionFingerprint != "" {
+		t.Fatalf("WI after session-end: %d %s %+v", code, raw, ended)
+	}
+	req, _ = http.NewRequest("GET", strings.Replace(gitURL, "http://", "http://"+wi.ID+":"+secret+"@", 1), nil)
 	gresp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("git after wrap: %v", err)
 	}
 	gresp.Body.Close()
 	if gresp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("git face alive after wrap: %d", gresp.StatusCode)
+		t.Fatalf("git face alive after session-end: %d", gresp.StatusCode)
 	}
 }
 
@@ -631,7 +669,7 @@ func TestClaimResponseCarriesProjectRepos(t *testing.T) {
 		} `json:"claim"`
 	}
 	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/claim", e.key,
-		map[string]string{"intent": "claim"}, &resp); code != 200 {
+		map[string]string{"session_id": "55556666777788885555666677778888"}, &resp); code != 200 {
 		t.Fatalf("claim: %d %s", code, raw)
 	}
 	if len(resp.Claim.Repos) != 1 || resp.Claim.Repos[0].Name != "app" || resp.Claim.Repos[0].URL != "file:///srv/app.git" {

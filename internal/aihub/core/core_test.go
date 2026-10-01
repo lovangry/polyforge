@@ -329,7 +329,7 @@ func TestTakeoverRevokesOldCredential(t *testing.T) {
 		t.Fatalf("takeover of queued WI allowed: %v", err)
 	}
 	// The superseded attempt cannot close the WI.
-	if err := env.Owners.EndGeneration(id, res1.Claim.AttemptID, 1, "wrapped", ""); !IsCode(err, api.ErrCoreForbidden) {
+	if err := env.Owners.EndGeneration(id, res1.Claim.AttemptID, 1, "wrapped", "", false); !IsCode(err, api.ErrCoreForbidden) {
 		t.Fatalf("superseded attempt could close the WI: %v", err)
 	}
 }
@@ -341,7 +341,7 @@ func TestTerminalTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := env.Owners.EndGeneration(id, res.Claim.AttemptID, 1, "wrapped", "done"); err != nil {
+	if err := env.Owners.EndGeneration(id, res.Claim.AttemptID, 1, "wrapped", "done", false); err != nil {
 		t.Fatalf("wrap: %v", err)
 	}
 	wi, err := env.WIs.Get(id, GetOptions{})
@@ -368,7 +368,7 @@ func TestTerminalTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim2: %v", err)
 	}
-	if err := env.Owners.EndGeneration(id2, res2.Claim.AttemptID, 1, "paused", ""); err != nil {
+	if err := env.Owners.EndGeneration(id2, res2.Claim.AttemptID, 1, "paused", "", false); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	wi2, _ := env.WIs.Get(id2, GetOptions{})
@@ -382,7 +382,7 @@ func TestTerminalTransitions(t *testing.T) {
 	if res3.Claim.Generation != 2 {
 		t.Fatalf("resume generation = %d", res3.Claim.Generation)
 	}
-	if err := env.Owners.EndGeneration(id2, res3.Claim.AttemptID, 2, api.StatusBlocked, "gate failed"); err != nil {
+	if err := env.Owners.EndGeneration(id2, res3.Claim.AttemptID, 2, api.StatusBlocked, "gate failed", false); err != nil {
 		t.Fatalf("block: %v", err)
 	}
 	wi2, _ = env.WIs.Get(id2, GetOptions{})
@@ -421,7 +421,7 @@ func TestReadyQueueOrdering(t *testing.T) {
 	pid := mustCreateExecWI(t, env, "paused one", map[string]any{"requires_human_session": false}, "")
 	if res, err := env.Owners.Claim(pid, ClaimRequest{Intent: IntentClaim}, env.UserID); err != nil {
 		t.Fatalf("claim paused: %v", err)
-	} else if err := env.Owners.EndGeneration(pid, res.Claim.AttemptID, 1, "paused", ""); err != nil {
+	} else if err := env.Owners.EndGeneration(pid, res.Claim.AttemptID, 1, "paused", "", false); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	// A waiting_on-tagged queued WI is not executable.
@@ -455,7 +455,7 @@ func TestReadyQueueOrdering(t *testing.T) {
 		t.Fatalf("paused segment wrong: %+v", q.Paused)
 	}
 	// The waiting_on-tagged WI is in NO executable segment.
-	for _, seg := range [][]api.WorkItem{q.Items, q.NeedsHumanSession, q.Unknown} {
+	for _, seg := range [][]WIView{q.Items, q.NeedsHumanSession, q.Unknown} {
 		for _, wi := range seg {
 			if wi.ID == wid {
 				t.Fatalf("waiting WI appeared in an executable segment")

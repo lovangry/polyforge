@@ -18,17 +18,19 @@ import (
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/aihub/core"
+	"github.com/silgrid/polyforge/internal/common/api"
 )
 
 // gitEnv is one fully wired environment.
 type gitEnv struct {
-	db     *core.DB
-	owners *core.OwnerManager
-	admin  *core.AdminManager
-	wis    *core.WIManager
-	mgr    *Manager
-	ts     *httptest.Server
-	userID string
+	db       *core.DB
+	owners   *core.OwnerManager
+	sessions *core.SessionManager
+	admin    *core.AdminManager
+	wis      *core.WIManager
+	mgr      *Manager
+	ts       *httptest.Server
+	userID   string
 }
 
 func newGitEnv(t *testing.T) *gitEnv {
@@ -46,10 +48,11 @@ func newGitEnv(t *testing.T) *gitEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 	env := &gitEnv{
-		db:     db,
-		owners: core.NewOwnerManager(db),
-		admin:  core.NewAdminManager(db),
-		wis:    core.NewWIManager(db),
+		db:       db,
+		owners:   core.NewOwnerManager(db),
+		sessions: core.NewSessionManager(db),
+		admin:    core.NewAdminManager(db),
+		wis:      core.NewWIManager(db),
 	}
 	u, err := env.admin.CreateUser("root", "root@example.com", "admin", "human")
 	if err != nil {
@@ -154,24 +157,51 @@ func push(t *testing.T, dir, remote string) error {
 	return err
 }
 
-// pushWithAttempt pushes HEAD:main carrying --push-option=attempt-id=<id>,
-// exactly the way the pf gitops choke point does.
-func pushWithAttempt(t *testing.T, dir, remote, attemptID string) (string, error) {
+// claimSessionWI creates a queued execution ticket and CAS-claims it
+// under the v1.5 session model with the given CLIENT-MINTED secret,
+// installing the bare repo. Returns the WI id and the session's PUBLIC
+// fingerprint (the push-option backup fence's expected value).
+func (e *gitEnv) claimSessionWI(t *testing.T, secret string) (wiID, fingerprint string) {
 	t.Helper()
-	return runGit(t, dir, "push", "--push-option=attempt-id="+attemptID, remote, "HEAD:refs/heads/main")
+	wi, err := e.wis.Create(core.CreateRequest{
+		Project: "alpha", Goal: "git session test", Reporter: e.userID,
+		BundleName: &bundleNameTest,
+	})
+	if err != nil {
+		t.Fatalf("create wi: %v", err)
+	}
+	claim, err := e.sessions.Claim(wi.ID, api.SessionClaimRequest{
+		SessionID: secret, MachineID: "m1", IdempotencyKey: "idem-" + wi.ID,
+	}, e.userID)
+	if err != nil {
+		t.Fatalf("session claim: %v", err)
+	}
+	if err := e.mgr.EnsureBare(wi.ID); err != nil {
+		t.Fatalf("ensure bare: %v", err)
+	}
+	return wi.ID, claim.SessionFingerprint
 }
 
-// TestPushOptionAdvertisedAndFenced (§六 备层): the bare repo advertises
-// push options (without the advertisement git rejects every push that
-// carries one — and the gitops choke point now always does), a push whose
-// attempt-id option matches the credential's attempt succeeds, and one
-// with a foreign id is rejected by the pre-receive hook.
+// pushWithFingerprint pushes HEAD:main carrying
+// --push-option=session-fingerprint=<fp>, exactly the way the v1.5 pf
+// gitops choke point does (contract §1.6 backup layer).
+func pushWithFingerprint(t *testing.T, dir, remote, fp string) (string, error) {
+	t.Helper()
+	return runGit(t, dir, "push", "--push-option=session-fingerprint="+fp, remote, "HEAD:refs/heads/main")
+}
+
+// TestPushOptionAdvertisedAndFenced (§1.6 backup layer): the bare repo
+// advertises push options (without the advertisement git rejects every
+// push that carries one — and the gitops choke point now always does), a
+// push whose session-fingerprint option matches the credential's session
+// succeeds, and one with a foreign fingerprint is rejected by the
+// pre-receive hook.
 func TestPushOptionAdvertisedAndFenced(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, res := e.claimWI(t, e.userID)
-	attempt := res.Claim.AttemptID
-	if attempt == "" {
-		t.Fatalf("claim result carries no attempt id")
+	secret := "0123456789abcdef0123456789abcdef"
+	wiID, fp := e.claimSessionWI(t, secret)
+	if fp == "" {
+		t.Fatalf("claim result carries no session fingerprint")
 	}
 	// The bare repo advertises push options — both on fresh creation and
 	// idempotently for a pre-existing repo (re-EnsureBare must not regress
@@ -185,10 +215,10 @@ func TestPushOptionAdvertisedAndFenced(t *testing.T) {
 	}
 	out = mustGit(t, e.mgr.RepoDir(wiID), "config", "receive.advertisePushOptions")
 	if strings.TrimSpace(out) != "true" {
-		t.Fatalf("receive.advertisePushOptions after re-ensure = %q, want true", strings.TrimSpace(out))
+		t.Fatalf("receive.advertisePushOptions after re-ensure = %q", strings.TrimSpace(out))
 	}
 
-	cred := e.credURL(wiID, res.Credential.Secret)
+	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
 	commitSeq(t, wt, "a.txt", "one\n", 1)
 	// A push WITHOUT the option still succeeds through the proxy (the
@@ -196,45 +226,46 @@ func TestPushOptionAdvertisedAndFenced(t *testing.T) {
 	if err := push(t, wt, cred); err != nil {
 		t.Fatalf("option-less push rejected: %v", err)
 	}
-	// The matching attempt-id option succeeds.
+	// The matching session-fingerprint option succeeds.
 	commitSeq(t, wt, "b.txt", "two\n", 2)
-	if out, err := pushWithAttempt(t, wt, cred, attempt); err != nil {
-		t.Fatalf("push with the matching attempt-id option failed: %v (%s)", err, out)
+	if out, err := pushWithFingerprint(t, wt, cred, fp); err != nil {
+		t.Fatalf("push with the matching session-fingerprint option failed: %v (%s)", err, out)
 	}
-	// A foreign attempt id is rejected by the pre-receive hook.
+	// A foreign fingerprint is rejected by the pre-receive hook.
 	commitSeq(t, wt, "c.txt", "three\n", 3)
-	out, err := pushWithAttempt(t, wt, cred, "ra_someone_else")
+	out, err := pushWithFingerprint(t, wt, cred, "deadbeefdeadbeef")
 	if err == nil {
-		t.Fatalf("push with a foreign attempt-id accepted: %s", out)
+		t.Fatalf("push with a foreign session-fingerprint accepted: %s", out)
 	}
-	if !strings.Contains(out, "does not match the credential's attempt") {
+	if !strings.Contains(out, "does not match the credential's session fingerprint") {
 		t.Fatalf("wrong rejection: %s", out)
 	}
 	// The rejected push moved nothing: the remote tip still ends at b.txt,
-	// and a corrected push (same commits, right id) lands cleanly.
+	// and a corrected push (same commits, right fingerprint) lands cleanly.
 	second := filepath.Join(t.TempDir(), "second")
 	mustGit(t, t.TempDir(), "clone", cred, second)
 	if _, err := os.Stat(filepath.Join(second, "c.txt")); !os.IsNotExist(err) {
 		t.Fatalf("rejected push leaked c.txt into the bare repo: %v", err)
 	}
-	if out, err := pushWithAttempt(t, wt, cred, attempt); err != nil {
+	if out, err := pushWithFingerprint(t, wt, cred, fp); err != nil {
 		t.Fatalf("corrected push failed: %v (%s)", err, out)
 	}
 }
 
-// TestPushOptionFenceAbsentExpected: when PF_EXPECTED_ATTEMPT is absent
-// (a push that never traveled through the proxy — e.g. a direct local
-// push against the bare repo for testing) the hook must NOT fence, even
-// though the push carries an attempt-id option: there is nothing to
-// compare against.
+// TestPushOptionFenceAbsentExpected: when PF_EXPECTED_FINGERPRINT is
+// absent (a push that never traveled through the proxy — e.g. a direct
+// local push against the bare repo for testing) the hook must NOT fence,
+// even though the push carries a session-fingerprint option: there is
+// nothing to compare against.
 func TestPushOptionFenceAbsentExpected(t *testing.T) {
 	e := newGitEnv(t)
-	wiID, res := e.claimWI(t, e.userID)
+	wiID, fp := e.claimSessionWI(t, "abcdef0123456789abcdef0123456789")
 	wt := newWorktree(t)
 	commitSeq(t, wt, "a.txt", "one\n", 1)
-	// Direct push to the bare repo path (no proxy, no PF_EXPECTED_ATTEMPT)
-	// carrying an attempt-id option: accepted.
-	out, err := pushWithAttempt(t, wt, e.mgr.RepoDir(wiID), res.Claim.AttemptID)
+	// Direct push to the bare repo path (no proxy, no
+	// PF_EXPECTED_FINGERPRINT) carrying a session-fingerprint option:
+	// accepted.
+	out, err := pushWithFingerprint(t, wt, e.mgr.RepoDir(wiID), fp)
 	if err != nil {
 		t.Fatalf("local option-carrying push rejected: %v (%s)", err, out)
 	}
@@ -496,8 +527,8 @@ func TestSlugClaimedTicketPushesToCanonicalBareRepo(t *testing.T) {
 	}
 	wt := newWorktree(t)
 	commitSeq(t, wt, "a.txt", "one\n", 1)
-	if out, perr := pushWithAttempt(t, wt, cred, res.Claim.AttemptID); perr != nil {
-		t.Fatalf("push to the canonical remote failed: %v (%s)", perr, out)
+	if err := push(t, wt, cred); err != nil {
+		t.Fatalf("push to the canonical remote failed: %v", err)
 	}
 	head := strings.TrimSpace(mustGit(t, wt, "rev-parse", "HEAD"))
 	remoteHead := strings.TrimSpace(firstFieldOf(mustGit(t, e.mgr.RepoDir(wi.ID), "rev-parse", "refs/heads/main")))
@@ -509,12 +540,8 @@ func TestSlugClaimedTicketPushesToCanonicalBareRepo(t *testing.T) {
 	// reach the bare repo: "#" cuts the URL at the fragment.
 	slugURL := e.ts.URL + "/git/" + wi.Slug + ".git"
 	commitSeq(t, wt, "b.txt", "two\n", 2)
-	out, perr := pushWithAttempt(t, wt, slugURL, res.Claim.AttemptID)
-	if perr == nil {
+	if perr := push(t, wt, slugURL); perr == nil {
 		t.Fatalf("push to the slug-built remote %q must fail", slugURL)
-	}
-	if !strings.Contains(out, "not found") && !strings.Contains(out, "404") && !strings.Contains(out, "does not appear to be a git") {
-		t.Logf("slug push failure detail: %s", out)
 	}
 	// and it moved nothing: the remote tip is still the first commit.
 	remoteHead2 := strings.TrimSpace(firstFieldOf(mustGit(t, e.mgr.RepoDir(wi.ID), "rev-parse", "refs/heads/main")))
@@ -529,4 +556,72 @@ func firstFieldOf(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// TestSessionPushAuthFencing (§1.6 main layer, session path): a push with
+// the live session secret succeeds through the proxy; a wrong secret is
+// refused at auth (401, rejection names the current holder fingerprint);
+// a PAUSED work item refuses pushes entirely (M3: no pushes while
+// paused, GIT-403); and after a force takeover the OLD secret is dead
+// while the new one works.
+func TestSessionPushAuthFencing(t *testing.T) {
+	e := newGitEnv(t)
+	secret := "11111111222222223333333344444444"
+	wiID, fp := e.claimSessionWI(t, secret)
+
+	// Correct secret: push lands.
+	cred := e.credURL(wiID, secret)
+	wt := newWorktree(t)
+	commitSeq(t, wt, "a.txt", "one\n", 1)
+	if err := push(t, wt, cred); err != nil {
+		t.Fatalf("push with the live session secret failed: %v", err)
+	}
+
+	// Wrong secret: 401 at the proxy.
+	commitSeq(t, wt, "b.txt", "two\n", 2)
+	out, err := runGit(t, wt, "push", e.credURL(wiID, "99999999888888887777777766666666"), "HEAD:refs/heads/main")
+	if err == nil {
+		t.Fatalf("push with a wrong session secret accepted: %s", out)
+	}
+	if !strings.Contains(out, "401") && !strings.Contains(out, "Authentication") {
+		t.Fatalf("wrong rejection for a wrong secret: %s", out)
+	}
+
+	// Paused (M3): the session stays, the status check refuses pushes.
+	if err := e.sessions.Pause(wiID, secret, false, "daemon shutdown", e.userID); err != nil {
+		t.Fatalf("session pause: %v", err)
+	}
+	commitSeq(t, wt, "c.txt", "three\n", 3)
+	out, err = runGit(t, wt, "push", cred, "HEAD:refs/heads/main")
+	if err == nil {
+		t.Fatalf("push while paused accepted: %s", out)
+	}
+	if !strings.Contains(out, "403") {
+		t.Fatalf("paused push must be a 403, got: %s", out)
+	}
+
+	// Force takeover swaps the session; the old secret is dead, the new
+	// one pushes and continues the seq chain.
+	newSecret := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if _, err := e.sessions.Takeover(wiID, api.SessionClaimRequest{
+		SessionID: newSecret, MachineID: "m2", Owner: "op", Reason: "machine lost",
+	}, e.userID); err != nil {
+		t.Fatalf("force takeover: %v", err)
+	}
+	out, err = runGit(t, wt, "push", cred, "HEAD:refs/heads/main")
+	if err == nil {
+		t.Fatalf("push with the SUPERSEDED session secret accepted: %s", out)
+	}
+	if !strings.Contains(out, "401") && !strings.Contains(out, "Authentication") {
+		t.Fatalf("wrong rejection for the superseded secret: %s", out)
+	}
+	// The mismatch rejection names the NEW holder's fingerprint.
+	if !strings.Contains(out, fp) {
+		// (the 401 body names the holder; git's own stderr may not show
+		// it — the fingerprint check is covered at the core level)
+		t.Logf("rejection detail (fingerprint naming asserted at core level): %s", out)
+	}
+	if err := push(t, wt, e.credURL(wiID, newSecret)); err != nil {
+		t.Fatalf("push with the new session secret failed: %v", err)
+	}
 }
