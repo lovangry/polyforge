@@ -301,16 +301,43 @@ func parseAttrValue(v string) (any, error) {
 var cmdQueue = &Command{
 	Name:    "queue",
 	Summary: "List work items / show the ready queue",
-	Usage: "pf queue [--project P] [--status S]\n" +
+	Usage: "pf queue [--project P] [--status S] [--limit N]\n" +
 		"pf queue --ready [--project P]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("project", "", "project name")
 		fs.Bool("ready", false, "show the ready queue instead of the list")
 		fs.String("status", "", "filter: queued|running|paused|blocked|wrapped|failed|canceled")
+		fs.Int("limit", 0, "cap the list at N items (1..200; default list mode only — "+
+			"cannot be combined with --ready; omitted = the server's default cap)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 0 {
 			return fmt.Errorf("queue: unexpected arguments %v", args)
+		}
+		// Local flag validation, ahead of any config resolution or wire
+		// call (same discipline as recall's --limit): a typo fails loudly
+		// here and no request is sent. Unlike recall there is no CLI-side
+		// default — an omitted --limit stays 0, so ?limit= is left off
+		// the wire and the server's own default cap applies. An explicit
+		// out-of-range value (including 0) is still refused loudly: Visit
+		// tells "user typed it" apart from "flag not passed".
+		limit := intFlag(fs, "limit")
+		var limitSet bool
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "limit" {
+				limitSet = true
+			}
+		})
+		if limitSet {
+			// The combination restriction is structural, so it is reported
+			// ahead of the value range.
+			if boolFlag(fs, "ready") {
+				return fmt.Errorf("queue: --limit cannot be combined with --ready " +
+					"(it caps the default list mode only)")
+			}
+			if limit < 1 || limit > 200 {
+				return fmt.Errorf("queue: --limit must be 1..200")
+			}
 		}
 		proj := stringFlag(fs, "project")
 		if proj == "" {
@@ -326,7 +353,7 @@ var cmdQueue = &Command{
 		if boolFlag(fs, "ready") {
 			raw, err = ctx.aihub().ReadyQueueRaw(proj)
 		} else {
-			raw, err = ctx.aihub().ListWorkItemsRaw(proj, stringFlag(fs, "status"))
+			raw, err = ctx.aihub().ListWorkItemsRawLimit(proj, stringFlag(fs, "status"), limit)
 		}
 		if err != nil {
 			return err
