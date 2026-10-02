@@ -713,3 +713,44 @@ var cmdTakeover = &Command{
 		return nil
 	},
 }
+
+// cmdVerifySession is the v1.5 §1.7 public holder read: who holds
+// this WI right now — the operator's takeover-decision input (held-
+// running / held-paused / unheld are three ordinary answers; exit 0 in
+// all three). It carries the PUBLIC audit fields only — no session
+// secret ever travels through this face, and never the hash.
+var cmdVerifySession = &Command{
+	Name:    "verify-session",
+	Summary: "Show who holds a WI right now (v1.5 §1.7 public holder read; takeover-decision input)",
+	Usage:   "pf verify-session <id> [--json]",
+	Setup:   func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("verify-session: expected exactly one work item id")
+		}
+		resp, err := ctx.aihub().SessionHolder(args[0])
+		if err != nil {
+			return err
+		}
+		if ctx.JSON {
+			// --json: the endpoint body (same wire type the server wrote,
+			// so the marshal is byte-identical to the §1.7 response).
+			raw, merr := json.Marshal(resp)
+			if merr != nil {
+				return merr
+			}
+			ctx.Out(raw)
+			return nil
+		}
+		if resp.SessionFingerprint == "" {
+			fmt.Fprintf(ctx.Stdout, "verify-session %s: nobody holds it (status %s)\n", resp.WorkItemID, resp.Status)
+			return nil
+		}
+		fmt.Fprintf(ctx.Stdout, "verify-session %s: held (status %s)\n", resp.WorkItemID, resp.Status)
+		fmt.Fprintf(ctx.Stdout, "  session: %s (machine %s, owner %s)\n",
+			resp.SessionFingerprint, resp.MachineID, resp.SessionOwner)
+		fmt.Fprintf(ctx.Stdout, "  started: %s\n", resp.SessionStartedAt)
+		fmt.Fprintf(ctx.Stdout, "  clean_pause: %t\n", resp.CleanPause)
+		return nil
+	},
+}

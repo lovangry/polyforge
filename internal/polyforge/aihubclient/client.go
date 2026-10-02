@@ -238,6 +238,7 @@ func (c *Client) SearchMemories(project, q, memType string, tags []string, limit
 // (human|machine), not v0's "kind".
 type UserCreateRequest struct {
 	DisplayName string `json:"display_name"`
+	Email       string `json:"email,omitempty"` // required for human users (CORE-400 otherwise)
 	UserType    string `json:"user_type,omitempty"`
 	Role        string `json:"role,omitempty"` // writer|admin
 }
@@ -449,6 +450,17 @@ func (c *Client) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse
 	var out api.SessionVerifyResponse
 	req := api.SessionVerifyRequest{SessionID: sessionID}
 	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/session-verify", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SessionHolder is the §1.7 public holder read: who holds this WI
+// right now, in PUBLIC fields only (any project viewer may ask; the
+// unheld state is an ordinary answer with the holder fields omitted).
+func (c *Client) SessionHolder(wi string) (*api.SessionHolderResponse, error) {
+	var out api.SessionHolderResponse
+	if err := c.Do("GET", "/api/v1/work-items/"+url.PathEscape(wi)+"/session", nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

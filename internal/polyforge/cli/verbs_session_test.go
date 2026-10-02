@@ -320,3 +320,116 @@ func TestUnblockRefusalClasses(t *testing.T) {
 		t.Errorf("stderr must carry the typed refusal: %s", stderr)
 	}
 }
+
+// §1.7 holder-read goldens: `pf verify-session <wi>` renders the held
+// tri-state's public fields, hands the unheld answer through as an
+// ordinary exit-0 answer, and rides GET /work-items/{id}/session with
+// the caller's bearer key. No secret ever appears — the verb only ever
+// sees the public audit fields.
+const cannedHeldHolder = `{"work_item_id":"wi_abc","status":"running",` +
+	`"session_fingerprint":"ab12cd34ef56aa00","machine_id":"m-b",` +
+	`"session_owner":"op","session_started_at":"t0","clean_pause":false}`
+
+const cannedUnheldHolder = `{"work_item_id":"wi_abc","status":"queued","clean_pause":false}`
+
+// TestVerifySessionHeldText: a held-running WI renders the holder's
+// public fields and exits 0; the request is the §1.7 GET on the
+// caller's bearer key.
+func TestVerifySessionHeldText(t *testing.T) {
+	var rec reqRecorder
+	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedHeldHolder)
+	})
+	code, stdout, stderr := runPf(t, map[string]string{
+		"PF_SERVER": aihub.URL, "PF_API_KEY": "key-admin",
+	}, "verify-session", "wi_abc")
+	if code != 0 {
+		t.Fatalf("verify-session: code=%d stderr=%s", code, stderr)
+	}
+	for _, want := range []string{
+		"verify-session wi_abc: held (status running)",
+		"session: ab12cd34ef56aa00 (machine m-b, owner op)",
+		"started: t0",
+		"clean_pause: false",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	// The request shape: GET /api/v1/work-items/{id}/session, bearer key.
+	got := rec.last()
+	if got.Method != "GET" || got.Path != "/api/v1/work-items/wi_abc/session" {
+		t.Errorf("request = %s %s, want GET /api/v1/work-items/wi_abc/session", got.Method, got.Path)
+	}
+	if got.Header.Get("Authorization") != "Bearer key-admin" {
+		t.Errorf("Authorization = %q", got.Header.Get("Authorization"))
+	}
+	if got.Body != "" {
+		t.Errorf("the holder read must send no body, got %q", got.Body)
+	}
+}
+
+// TestVerifySessionHeldJSON: --json emits the endpoint response
+// verbatim (decodes as the §1.7 wire type).
+func TestVerifySessionHeldJSON(t *testing.T) {
+	aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedHeldHolder)
+	})
+	code, stdout, _ := runPf(t, map[string]string{
+		"PF_SERVER": aihub.URL,
+	}, "--json", "verify-session", "wi_abc")
+	if code != 0 {
+		t.Fatalf("verify-session --json: code=%d", code)
+	}
+	var resp api.SessionHolderResponse
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		t.Fatalf("json output must be the SessionHolderResponse: %v (%s)", err, stdout)
+	}
+	if resp.WorkItemID != "wi_abc" || resp.Status != "running" ||
+		resp.SessionFingerprint != "ab12cd34ef56aa00" || resp.MachineID != "m-b" ||
+		resp.SessionOwner != "op" || resp.SessionStartedAt != "t0" || resp.CleanPause {
+		t.Fatalf("holder = %+v", resp)
+	}
+	if strings.Contains(stdout, "session_id") {
+		t.Fatalf("--json must never carry a session secret: %s", stdout)
+	}
+}
+
+// TestVerifySessionUnheldIsAnAnswer: the unheld state is an ordinary
+// exit-0 answer in BOTH renderings — never an error (the takeover-
+// decision script needs no error handling to tell free from taken).
+func TestVerifySessionUnheldIsAnAnswer(t *testing.T) {
+	// Text mode.
+	aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedUnheldHolder)
+	})
+	code, stdout, stderr := runPf(t, map[string]string{
+		"PF_SERVER": aihub.URL,
+	}, "verify-session", "wi_abc")
+	if code != 0 {
+		t.Fatalf("unheld text: code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "nobody holds it (status queued)") {
+		t.Errorf("unheld text = %q", stdout)
+	}
+
+	// --json mode: the unheld endpoint JSON, still exit 0.
+	aihub2 := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedUnheldHolder)
+	})
+	code, stdout, _ = runPf(t, map[string]string{
+		"PF_SERVER": aihub2.URL,
+	}, "--json", "verify-session", "wi_abc")
+	if code != 0 {
+		t.Fatalf("unheld --json: code=%d", code)
+	}
+	var resp api.SessionHolderResponse
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		t.Fatalf("unheld --json must decode: %v (%s)", err, stdout)
+	}
+	if resp.WorkItemID != "wi_abc" || resp.Status != "queued" || resp.CleanPause ||
+		resp.SessionFingerprint != "" || resp.MachineID != "" ||
+		resp.SessionOwner != "" || resp.SessionStartedAt != "" {
+		t.Fatalf("unheld holder = %+v", resp)
+	}
+}

@@ -528,3 +528,72 @@ func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 		t.Fatalf("unheld view block not empty: %+v", view2.SessionPublic)
 	}
 }
+
+// TestSessionHolderPublicRead (§1.7): the public holder read maps the
+// held, paused, and unheld (zero-block) rows into the additive wire
+// type — and never carries the hash or the secret.
+func TestSessionHolderPublicRead(t *testing.T) {
+	env, m := sessionEnv(t)
+	secret := "20202020202020202020202020202020"
+
+	// Unheld (queued): an ordinary answer with the empty block.
+	id := mustCreateExecWI(t, env, "holder goal", nil, "")
+	resp, err := m.Holder(id)
+	if err != nil {
+		t.Fatalf("holder unheld: %v", err)
+	}
+	if resp.WorkItemID != id || resp.Status != api.StatusQueued || resp.CleanPause ||
+		resp.SessionFingerprint != "" || resp.MachineID != "" ||
+		resp.SessionOwner != "" || resp.SessionStartedAt != "" {
+		t.Fatalf("unheld holder wrong: %+v", resp)
+	}
+	blob, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), "session_hash") || strings.Contains(string(blob), secret) {
+		t.Fatalf("unheld holder leaks: %s", blob)
+	}
+
+	// Held + running: the public audit fields map across.
+	claim := mustSessionClaim(t, m, env, id, secret, "h-1")
+	resp, err = m.Holder(id)
+	if err != nil {
+		t.Fatalf("holder held: %v", err)
+	}
+	if resp.Status != api.StatusRunning || resp.SessionFingerprint != api.SessionFingerprint(secret) ||
+		resp.SessionFingerprint != claim.SessionFingerprint ||
+		resp.MachineID != "m1" || resp.SessionOwner != "op" ||
+		resp.SessionStartedAt == "" || resp.CleanPause {
+		t.Fatalf("held holder wrong: %+v", resp)
+	}
+	blob, err = json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), "session_hash") || strings.Contains(string(blob), secret) ||
+		strings.Contains(string(blob), api.SessionHashHex(secret)) {
+		t.Fatalf("held holder leaks the hash or secret: %s", blob)
+	}
+
+	// Held + paused (the M3 transition keeps the row; §1.5 amend): the
+	// holder fields are retained and clean_pause rides along.
+	if err := m.Pause(id, secret, true, "operator", env.UserID); err != nil {
+		t.Fatalf("operator pause: %v", err)
+	}
+	resp, err = m.Holder(id)
+	if err != nil {
+		t.Fatalf("holder paused: %v", err)
+	}
+	if resp.Status != api.StatusPaused || !resp.CleanPause ||
+		resp.SessionFingerprint != api.SessionFingerprint(secret) ||
+		resp.MachineID != "m1" || resp.SessionOwner != "op" ||
+		resp.SessionStartedAt == "" {
+		t.Fatalf("paused holder wrong: %+v", resp)
+	}
+
+	// Unknown WI: the typed CORE-404.
+	if _, err := m.Holder("wi_nosuchthing"); !IsCode(err, api.ErrCoreNotFound) {
+		t.Fatalf("unknown WI holder: %v", err)
+	}
+}
