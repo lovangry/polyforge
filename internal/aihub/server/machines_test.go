@@ -153,10 +153,10 @@ func TestHeartbeatFirstRegistrationRequiresAdmin(t *testing.T) {
 
 	// The admin key performs the first registration (the privileged act).
 	type hbResp struct {
-		Registered bool `json:"registered"`
-		MachineID string `json:"machine_id"`
-		UserID    string `json:"user_id"`
-		APIKey    *struct {
+		Registered bool   `json:"registered"`
+		MachineID  string `json:"machine_id"`
+		UserID     string `json:"user_id"`
+		APIKey     *struct {
 			Plain string `json:"plain"`
 		} `json:"api_key"`
 	}
