@@ -7,6 +7,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 )
 
 // Golden tests: exact-output assertions for the human table renderers.
@@ -311,6 +312,42 @@ func TestGoldenWIDetail(t *testing.T) {
   session:  ab12cd34ef56aa00 (machine m-b, owner op) since 2026-10-01T00:00:00Z
   clean-pause: yes (operator pause; restart will not auto-resume)
   created:  t0
+`)
+}
+
+// TestGoldenMachines pins the machines list human render: RUNTIME set
+// (go1.99) and unset ("-"), LIVE WI as the bare count (2 and 0), the
+// server-computed stale projection visible at the CLI layer (STALE vs
+// alive), and heartbeat age rendered as Ns vs ? (nil).
+func TestGoldenMachines(t *testing.T) {
+	list := &aihubclient.MachinesList{
+		Count:             2,
+		StaleAfterSeconds: 120,
+		Machines: []aihubclient.MachineStatus{
+			{ID: "m_1", UserID: "usr_1", RuntimeVersion: "go1.99", Mode: "agent",
+				LiveWIIDs: []string{"wi_a", "wi_b"}, LastHeartbeatAt: "t1",
+				HeartbeatAgeSeconds: int64Ptr(42), Stale: false},
+			{ID: "m_2", UserID: "usr_2", Mode: "grace",
+				LiveWIIDs: []string{}, LastHeartbeatAt: "t2", Stale: true},
+		},
+	}
+	var b bytes.Buffer
+	renderMachines(&b, list)
+	golden(t, "Machines", b.String(),
+		`machines: 2 (stale threshold 120s)
+ID   MODE   RUNTIME  LIVE WI  HEARTBEAT AGE  LAST HEARTBEAT  STATE
+---  -----  -------  -------  -------------  --------------  -----
+m_1  agent  go1.99   2        42s            t1              alive
+m_2  grace  -        0        ?              t2              STALE
+`)
+
+	// The empty-machines case: header line plus bare table.
+	b.Reset()
+	renderMachines(&b, &aihubclient.MachinesList{StaleAfterSeconds: 120})
+	golden(t, "MachinesEmpty", b.String(),
+		`machines: 0 (stale threshold 120s)
+ID  MODE  RUNTIME  LIVE WI  HEARTBEAT AGE  LAST HEARTBEAT  STATE
+--  ----  -------  -------  -------------  --------------  -----
 `)
 }
 
