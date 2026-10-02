@@ -49,6 +49,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	idleWindow := fs.Duration("idle-window", 0, "no-record-no-turn quiet window before the idle watchdog probes (default 10m)")
 	probeTimeout := fs.Duration("probe-timeout", 0, "liveness-probe ack bound (default 2m)")
 	answerAckWindow := fs.Duration("answer-ack-window", 0, "pf/answer consumption-ack window (default 2m)")
+	revalidateEvery := fs.Duration("revalidate-every", 0, "M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}
@@ -146,10 +147,11 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// Zero fields fall through to observe's own fill() defaults, so a
 		// daemon started without these flags keeps the production windows.
 		Observe: ObserveWindows{
-			HangWindow:      *hangWindow,
-			IdleWindow:      *idleWindow,
-			ProbeTimeout:    *probeTimeout,
-			AnswerAckWindow: *answerAckWindow,
+			HangWindow:             *hangWindow,
+			IdleWindow:             *idleWindow,
+			ProbeTimeout:           *probeTimeout,
+			AnswerAckWindow:        *answerAckWindow,
+			SessionRevalidateEvery: *revalidateEvery,
 		},
 	}
 	d, err := New(cfg)

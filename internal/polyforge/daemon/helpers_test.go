@@ -144,8 +144,11 @@ type fakeHub struct {
 	takeovers []api.SessionClaimRequest
 	ends      []endCall
 	attaches  []api.SessionAttachRequest
-	queues    []api.WorkItem
-	blockEnd  chan struct{} // non-nil: SessionEnd parks until closed
+	// verifies records the wi of every SessionVerify call (the M4
+	// revalidation seam the -revalidate-every flag test pins).
+	verifies []string
+	queues   []api.WorkItem
+	blockEnd chan struct{} // non-nil: SessionEnd parks until closed
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string
@@ -215,6 +218,7 @@ func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.S
 func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.verifies = append(h.verifies, h.canonicalID(wi))
 	id := h.canonicalID(wi)
 	st := h.status[id]
 	if st == "" {
@@ -285,6 +289,12 @@ func (h *fakeHub) Do(method, path string, body, out any) error {
 		return &api.Error{Code: api.ErrDaemonInternal, Detail: "fakeHub: Do call not scripted"}
 	}
 	return fn(method, path, body, out)
+}
+
+func (h *fakeHub) verifyCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.verifies)
 }
 
 func (h *fakeHub) endCount() int {

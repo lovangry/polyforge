@@ -96,7 +96,7 @@ type Config struct {
 }
 
 // ObserveWindows is the observe-lane supervision-window subset of the
-// observe config that daemon.Config passes through. All four default
+// observe config that daemon.Config passes through. All five default
 // to zero — observe's own fill() then applies the production defaults —
 // so a production Config with an untouched Observe field assembles the
 // production windows.
@@ -111,6 +111,9 @@ type ObserveWindows struct {
 	ProbeTimeout time.Duration
 	// AnswerAckWindow bounds the agent's pf/answer consumption ack.
 	AnswerAckWindow time.Duration
+	// SessionRevalidateEvery is the M4 periodic session-revalidation
+	// cadence (0 = observe's default 5m; negative = disabled).
+	SessionRevalidateEvery time.Duration
 }
 
 func (c *Config) fill() {
@@ -313,6 +316,9 @@ func New(cfg Config) (*Daemon, error) {
 		IdleWindow:      cfg.Observe.IdleWindow,
 		ProbeTimeout:    cfg.Observe.ProbeTimeout,
 		AnswerAckWindow: cfg.Observe.AnswerAckWindow,
+		// M4 cadence rides the same pass-through (0 = the 5m default,
+		// negative = disabled).
+		SessionRevalidateEvery: cfg.Observe.SessionRevalidateEvery,
 	})
 	if err != nil {
 		return nil, err
