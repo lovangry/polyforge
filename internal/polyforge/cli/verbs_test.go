@@ -564,3 +564,102 @@ func TestVerbRememberRequestShape(t *testing.T) {
 		t.Fatalf("missing --type: code=%d, want 1", code)
 	}
 }
+
+// TestMachinesListRequestShapeAndHumanRender: `pf machines list` hits
+// GET /api/v1/machines with the Bearer key and renders the human table
+// (RUNTIME column, LIVE WI as the bare count, server-computed STATE).
+func TestMachinesListRequestShapeAndHumanRender(t *testing.T) {
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"count":1,"stale_after_seconds":120,"machines":[`+
+			`{"id":"m_1","user_id":"usr_1","runtime_version":"go1.99","mode":"agent",`+
+			`"live_wi_ids":["wi_a","wi_b"],"last_heartbeat_at":"t1",`+
+			`"heartbeat_age_seconds":42,"stale":false}]}`)
+	})
+	code, stdout, stderr := runPf(t, map[string]string{"PF_SERVER": srv.URL, "PF_API_KEY": "k_cli"},
+		"machines", "list")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	got := rec.last()
+	if got.Method != "GET" || got.Path != "/api/v1/machines" {
+		t.Errorf("request = %s %s", got.Method, got.Path)
+	}
+	if got.Header.Get("Authorization") != "Bearer k_cli" {
+		t.Errorf("auth = %q", got.Header.Get("Authorization"))
+	}
+	if !strings.Contains(stdout, "machines: 1 (stale threshold 120s)\n") {
+		t.Errorf("stdout header missing: %q", stdout)
+	}
+	// The full row: runtime rendered, LIVE WI the bare count 2 (never the
+	// ids themselves), age 42s, STATE alive.
+	if !strings.Contains(stdout,
+		"m_1  agent  go1.99   2        42s            t1              alive\n") {
+		t.Errorf("stdout row missing or malformed:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "wi_a") {
+		t.Errorf("live wi ids leaked into the human render:\n%s", stdout)
+	}
+}
+
+// TestMachinesListJSONPassthrough: --json emits the server body
+// byte-for-byte — pinned against a body that would FAIL under the old
+// typed re-marshal: runtime_version omitempty-elided, an unknown
+// top-level field, and non-alphabetical key order.
+func TestMachinesListJSONPassthrough(t *testing.T) {
+	const body = `{"stale_after_seconds":120,"machines":[` +
+		`{"id":"m_2","user_id":"usr_1","live_wi_ids":[],` +
+		`"last_heartbeat_at":"t2","stale":true}],` +
+		`"count":1,"unknown_top_level":{"kept":true}}`
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	})
+	code, stdout, stderr := runPf(t, map[string]string{"PF_SERVER": srv.URL}, "--json", "machines", "list")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != body {
+		t.Errorf("--json passthrough altered the body:\n got: %s\nwant: %s", stdout, body)
+	}
+}
+
+// TestMachinesListForbidden: the non-admin 403 surfacing — human mode
+// exits 1 with the code prominent (`pf: CODE: detail`); --json mode
+// re-emits the typed envelope on stderr instead.
+func TestMachinesListForbidden(t *testing.T) {
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		io.WriteString(w, `{"code":"AUTH-403","detail":"admin credential required"}`)
+	})
+	env := map[string]string{"PF_SERVER": srv.URL}
+
+	code, _, stderr := runPf(t, env, "machines", "list")
+	if code != 1 {
+		t.Fatalf("human exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "pf: AUTH-403: admin credential required") {
+		t.Errorf("stderr = %q, want the pf: CODE: detail line", stderr)
+	}
+
+	code, _, stderr = runPf(t, env, "--json", "machines", "list")
+	if code != 1 {
+		t.Fatalf("--json exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, `"code":"AUTH-403"`) || strings.Contains(stderr, "pf: AUTH-403") {
+		t.Errorf("stderr = %q, want the re-emitted typed envelope only", stderr)
+	}
+}
+
+// TestMachinesHelpStatesAdminOnly: `pf help machines` documents the
+// admin-credential requirement.
+func TestMachinesHelpStatesAdminOnly(t *testing.T) {
+	code, stdout, stderr := runPf(t, map[string]string{}, "help", "machines")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "admin") {
+		t.Errorf("help output must state the admin-only requirement:\n%s", stdout)
+	}
+}
