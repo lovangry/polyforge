@@ -37,6 +37,61 @@ func TestQueueMergesUnclassified(t *testing.T) {
 	}
 }
 
+// TestListMachinesPinsRouteAndDecoding: the machines list client call
+// hits GET /api/v1/machines with the bearer key; the typed decode covers
+// runtime_version / live_wi_ids / stale / heartbeat_age_seconds; and the
+// raw variant passes the server body through byte-for-byte.
+func TestListMachinesPinsRouteAndDecoding(t *testing.T) {
+	// Rows with and without runtime_version, live_wi_ids empty and
+	// non-empty, plus an unknown field and non-canonical key order — a
+	// body the raw variant must hand through untouched.
+	const body = `{"machines":[` +
+		`{"stale":false,"live_wi_ids":["wi_a","wi_b"],"mode":"agent","id":"m_1",` +
+		`"heartbeat_age_seconds":42,"last_heartbeat_at":"t1",` +
+		`"runtime_version":"go1.99","user_id":"usr_1","future_field":true},` +
+		`{"id":"m_2","user_id":"usr_2","live_wi_ids":[],` +
+		`"last_heartbeat_at":"t2","stale":true}` +
+		`],"count":2,"unknown_top":"kept","stale_after_seconds":120}`
+	var gotMethod, gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "k")
+
+	out, err := c.ListMachines()
+	if err != nil {
+		t.Fatalf("ListMachines: %v", err)
+	}
+	if gotMethod != "GET" || gotPath != "/api/v1/machines" || gotAuth != "Bearer k" {
+		t.Fatalf("request shape: %s %s auth=%q", gotMethod, gotPath, gotAuth)
+	}
+	if out.Count != 2 || out.StaleAfterSeconds != 120 || len(out.Machines) != 2 {
+		t.Fatalf("list decode: %+v", out)
+	}
+	m0 := out.Machines[0]
+	if m0.ID != "m_1" || m0.RuntimeVersion != "go1.99" || m0.Mode != "agent" ||
+		m0.UserID != "usr_1" || len(m0.LiveWIIDs) != 2 || m0.LiveWIIDs[0] != "wi_a" ||
+		m0.LiveWIIDs[1] != "wi_b" || m0.HeartbeatAgeSeconds == nil ||
+		*m0.HeartbeatAgeSeconds != 42 || m0.LastHeartbeatAt != "t1" || m0.Stale {
+		t.Fatalf("m_1 decode: %+v", m0)
+	}
+	m1 := out.Machines[1]
+	if m1.ID != "m_2" || m1.RuntimeVersion != "" || m1.Mode != "" ||
+		len(m1.LiveWIIDs) != 0 || m1.HeartbeatAgeSeconds != nil || !m1.Stale {
+		t.Fatalf("m_2 decode: %+v", m1)
+	}
+
+	raw, err := c.ListMachinesRaw()
+	if err != nil {
+		t.Fatalf("ListMachinesRaw: %v", err)
+	}
+	if string(raw) != body {
+		t.Fatalf("raw passthrough altered the body:\n got: %s\nwant: %s", raw, body)
+	}
+}
+
 // TestSessionHolderPinsRouteAndDecoding (§1.7): the client method hits
 // GET /api/v1/work-items/{wi}/session with the bearer key and decodes
 // both the held body and the unheld (flat-omitted) body.

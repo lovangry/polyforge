@@ -507,6 +507,13 @@ func (c *Client) ListMachines() (*MachinesList, error) {
 	return &out, nil
 }
 
+// ListMachinesRaw reads the machines liveness face undecoded (--json
+// passthrough: the server body byte-for-byte). The typed ListMachines
+// above stays for programmatic users.
+func (c *Client) ListMachinesRaw() (json.RawMessage, error) {
+	return c.raw("GET", "/api/v1/machines", nil)
+}
+
 // ---------------------------------------------------------------------------
 // v1.5 session model client (v1.5-api-contract.md §3).
 
