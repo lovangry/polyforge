@@ -17,7 +17,10 @@ package core
 //     idempotency — one audit event records that the row arrived by
 //     import, not by migration of history;
 //   - the id must match the wi_ domain but its exact shape is the old
-//     world's (old ids migrate verbatim; NewID's length is not imposed).
+//     world's (old ids migrate verbatim; NewID's length is not imposed);
+//   - seq is the PER-PROJECT display number (seq-fix lane): the old
+//     slug number survives scoped to the target project, matching the
+//     legacy library's per-project numbering.
 
 import (
 	"database/sql"
@@ -114,8 +117,11 @@ func parseImportTimestamp(s, field string) error {
 // Import inserts one migration record — or, with req.Overwrite, rewrites
 // a same-id record in place (new version wins). See the file comment for
 // the face constraints. A same-id re-import without Overwrite skips (the
-// caller counts it); seq collisions are refused, never silently
-// re-assigned.
+// caller counts it); seq collisions within the target project are
+// refused, never silently re-assigned. Over-long goals are truncated to
+// the 500-byte cap at a rune boundary with the full original preserved
+// under attrs.legacy_goal (fix 2) — the legacy library carries many
+// CJK-heavy goals whose BYTES exceed the cap.
 func (m *WIManager) Import(req ImportRequest) (*ImportResult, error) {
 	req.Goal = strings.TrimSpace(req.Goal)
 	if !wiIDPattern.MatchString(req.ID) {
@@ -125,8 +131,12 @@ func (m *WIManager) Import(req ImportRequest) (*ImportResult, error) {
 	if req.Goal == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "goal required")
 	}
-	if len(req.Goal) > 500 {
-		return nil, Fail(api.ErrCoreBadInput, "", "goal exceeds 500 characters")
+	if orig := req.Goal; len(orig) > api.MaxGoalBytes {
+		req.Goal = api.TruncateUTF8(orig, api.MaxGoalBytes)
+		if req.Attrs == nil {
+			req.Attrs = map[string]any{}
+		}
+		req.Attrs["legacy_goal"] = orig
 	}
 	if !importableStatuses[req.Status] {
 		return nil, Fail(api.ErrCoreBadInput, "IMPORT_BAD_STATUS",
@@ -180,8 +190,8 @@ func (m *WIManager) Import(req ImportRequest) (*ImportResult, error) {
 	}
 	defer tx.Rollback()
 
-	var projectID string
-	err = tx.QueryRow(`SELECT id FROM projects WHERE name=?1 OR id=?1`, req.Project).Scan(&projectID)
+	var projectID, projectName string
+	err = tx.QueryRow(`SELECT id, name FROM projects WHERE name=?1 OR id=?1`, req.Project).Scan(&projectID, &projectName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "project %q", req.Project)
 	}
@@ -205,30 +215,36 @@ func (m *WIManager) Import(req ImportRequest) (*ImportResult, error) {
 		if !req.Overwrite {
 			return &ImportResult{Outcome: ImportSkipped}, &errImportAlreadyExists{id: req.ID}
 		}
-		return m.importOverwriteTx(tx, req, projectID)
+		return m.importOverwriteTx(tx, req, projectID, projectName)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	// Seq: preserved when given (old display seq keeps the old slug
-	// numbers), auto when absent; a collision is refused, never bumped.
+	// Seq: PER-PROJECT (seq-fix lane owner ruling — the legacy library
+	// numbers per project, so aiterm#1 and defswitch#1 coexist). A given
+	// seq is preserved when free IN THE TARGET PROJECT (the old display
+	// seq keeps the old slug, now scoped per project), auto when absent
+	// (per-project MAX+1, not global); a collision within the target
+	// project is refused, never bumped, and the refusal names the
+	// project.
 	seq := int64(0)
 	if req.Seq != nil {
 		if *req.Seq <= 0 {
 			return nil, Fail(api.ErrCoreBadInput, "IMPORT_BAD_SEQ", "seq must be > 0")
 		}
 		var taken int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM work_items WHERE seq=?1`, *req.Seq).Scan(&taken); err != nil {
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM work_items WHERE project_id=?1 AND seq=?2`,
+			projectID, *req.Seq).Scan(&taken); err != nil {
 			return nil, err
 		}
 		if taken > 0 {
 			return nil, Fail(api.ErrCoreConflict, "IMPORT_SEQ_TAKEN",
-				"seq %d already exists", *req.Seq)
+				"seq %d already exists in project %q", *req.Seq, projectName)
 		}
 		seq = *req.Seq
 	} else {
 		var maxSeq sql.NullInt64
-		if err := tx.QueryRow(`SELECT MAX(seq) FROM work_items`).Scan(&maxSeq); err != nil {
+		if err := tx.QueryRow(`SELECT MAX(seq) FROM work_items WHERE project_id=?1`, projectID).Scan(&maxSeq); err != nil {
 			return nil, err
 		}
 		seq = maxSeq.Int64 + 1
@@ -288,10 +304,10 @@ func importBundleRef(req ImportRequest) (bundleName, bundleDigest any) {
 // importOverwriteTx rewrites an existing same-id record in place per the
 // new record (new version wins — the Overwrite path of the admin
 // migration face). All record fields are rewritten; seq is taken from
-// the request when given (a collision with a DIFFERENT row is refused,
-// never silently bumped) and kept when absent. One audit event per row
-// records the old/new summary.
-func (m *WIManager) importOverwriteTx(tx *sql.Tx, req ImportRequest, projectID string) (*ImportResult, error) {
+// the request when given (a collision with a DIFFERENT row of the same
+// project is refused, never silently bumped) and kept when absent. One
+// audit event per row records the old/new summary.
+func (m *WIManager) importOverwriteTx(tx *sql.Tx, req ImportRequest, projectID, projectName string) (*ImportResult, error) {
 	// The old row's summary, for the audit event.
 	var old struct {
 		Status   sql.NullString
@@ -309,13 +325,13 @@ func (m *WIManager) importOverwriteTx(tx *sql.Tx, req ImportRequest, projectID s
 			return nil, Fail(api.ErrCoreBadInput, "IMPORT_BAD_SEQ", "seq must be > 0")
 		}
 		var taken int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM work_items WHERE seq=?1 AND id<>?2`,
-			*req.Seq, req.ID).Scan(&taken); err != nil {
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM work_items WHERE project_id=?1 AND seq=?2 AND id<>?3`,
+			projectID, *req.Seq, req.ID).Scan(&taken); err != nil {
 			return nil, err
 		}
 		if taken > 0 {
 			return nil, Fail(api.ErrCoreConflict, "IMPORT_SEQ_TAKEN",
-				"seq %d already exists", *req.Seq)
+				"seq %d already exists in project %q", *req.Seq, projectName)
 		}
 		seqVal = *req.Seq
 	}

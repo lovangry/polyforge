@@ -1247,6 +1247,25 @@ func firstRunes(s string, n int) string {
 }
 
 func (s *Server) hRebuildIndex(w http.ResponseWriter, r *http.Request, idn *identity) {
+	// ?project=<id-or-name> scopes the reconcile to one project (seq-fix
+	// lane 3a/3c): the rebuild touches only that project's authority tree
+	// and answers its reindexed count — the migrate-memories path pairs
+	// the scope with the placed tree its count step compares against.
+	// Absent: the full rebuild (server boot reconcile semantics).
+	if project := r.URL.Query().Get("project"); project != "" {
+		projectID, err := s.projectIDOf(project)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		n, err := s.Mems.RebuildIndexProject(projectID)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"reindexed": n, "project": projectID})
+		return
+	}
 	n, err := s.Mems.RebuildIndex()
 	if err != nil {
 		writeErr(w, err)

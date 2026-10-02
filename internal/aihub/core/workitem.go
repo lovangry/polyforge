@@ -106,8 +106,8 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	if req.Goal == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "goal required")
 	}
-	if len(req.Goal) > 500 {
-		return nil, Fail(api.ErrCoreBadInput, "", "goal exceeds 500 characters")
+	if len(req.Goal) > api.MaxGoalBytes {
+		return nil, Fail(api.ErrCoreBadInput, "", "goal exceeds %d bytes", api.MaxGoalBytes)
 	}
 	if req.Priority == "" {
 		req.Priority = api.PriorityNormal
@@ -172,9 +172,13 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		req.ParentID = nil
 	}
 
-	// Display seq: global monotonic (aihub#<seq>).
+	// Display seq: PER-PROJECT monotonic (<project>#<seq>). The legacy
+	// library numbers WIs per project (aiterm#1 and defswitch#1 both
+	// exist) and slugs have always resolved by (project, seq); the seq-fix
+	// owner ruling makes the numbering match — MAX(seq) scoped to this
+	// project, not the whole table.
 	var maxSeq sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(seq) FROM work_items`).Scan(&maxSeq); err != nil {
+	if err := tx.QueryRow(`SELECT MAX(seq) FROM work_items WHERE project_id=?1`, projectID).Scan(&maxSeq); err != nil {
 		return nil, err
 	}
 	seq := maxSeq.Int64 + 1
@@ -456,7 +460,7 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 		switch field {
 		case "goal":
 			var v string
-			if json.Unmarshal(raw, &v) != nil || strings.TrimSpace(v) == "" || len(v) > 500 {
+			if json.Unmarshal(raw, &v) != nil || strings.TrimSpace(v) == "" || len(v) > api.MaxGoalBytes {
 				return nil, Fail(api.ErrCoreBadInput, "", "bad goal")
 			}
 			sets, args = append(sets, "goal=?"), append(args, v)

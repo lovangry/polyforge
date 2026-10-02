@@ -7,6 +7,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -579,4 +580,248 @@ func TestMigrateWorkItemsAcceptChanged(t *testing.T) {
 		t.Fatalf("re-run imported=%d overwritten=%d skipped=%d, want 0/0/4",
 			rep2.Imported, rep2.Overwritten, rep2.Skipped)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// seq-fix lane additions
+
+// Fix 2: a CJK goal of 300 runes (900 BYTES) imports with the goal
+// truncated at a rune boundary to the 500-byte cap and the FULL original
+// preserved under attrs.legacy_goal — and the idempotent re-run is a pure
+// skip (the CLI comparison mirrors the deterministic truncation).
+func TestMigrateWorkItemsCJKGoalTruncated(t *testing.T) {
+	s := newMigSrv(t, "mig")
+	big := strings.Repeat("调", 300) // 300 runes = 900 bytes
+	line := `{"id":"wi_cjk00000001","seq":21,"project":"oldp","goal":"` + big + `","status":"wrapped",
+"labels":[],"attrs":{},"reporter":"usr_oldroot","created_at":"2026-09-28T08:00:00Z",
+"updated_at":"2026-09-28T09:00:00Z","closed_at":"2026-09-28T09:00:00Z"}`
+	from := writeTemp(t, strings.ReplaceAll(line, "\n", "")+"\n")
+
+	rep, err := RunMigrateWorkItems(s.optsWI(from), s.client)
+	if err != nil {
+		t.Fatalf("cjk import: %v", err)
+	}
+	if rep.Imported != 1 {
+		t.Fatalf("imported=%d", rep.Imported)
+	}
+	wi, err := s.client.GetWorkItem("wi_cjk00000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wi.Goal) > 500 {
+		t.Fatalf("goal %d bytes, want <=500", len(wi.Goal))
+	}
+	if want := strings.Repeat("调", 166); wi.Goal != want { // 166*3 = 498 bytes, rune-aligned
+		t.Fatalf("goal not cut at the expected rune boundary: %d bytes", len(wi.Goal))
+	}
+	if legacy, _ := wi.Attrs["legacy_goal"].(string); legacy != big {
+		t.Fatalf("legacy_goal must carry the FULL 300-rune goal, got %d runes", len([]rune(legacy)))
+	}
+	// Pass 2: the record (raw long goal) matches the truncated+legacy
+	// target — a skip, not a divergence.
+	rep2, err := RunMigrateWorkItems(s.optsWI(from), s.client)
+	if err != nil {
+		t.Fatalf("cjk re-run must be an idempotent skip: %v", err)
+	}
+	if rep2.Imported != 0 || rep2.Skipped != 1 {
+		t.Fatalf("re-run imported=%d skipped=%d, want 0/1", rep2.Imported, rep2.Skipped)
+	}
+}
+
+// Fix 4: per-record failures are COUNTED, not run-fatal — one refused
+// record must not kill the import. The report carries every failure, the
+// count step speaks to the placed stock only, and the run answers
+// non-nil with the summary naming the failure.
+func TestMigrateWorkItemsFailureAccounting(t *testing.T) {
+	s := newMigSrv(t, "mig")
+	// Two records, same seq, different ids: the second is refused
+	// (IMPORT_SEQ_TAKEN within the target project); the first lands.
+	lines := strings.Replace(wiLines(), `"seq":11`, `"seq":31`, 1)
+	lines = strings.Replace(lines, `"seq":12`, `"seq":31`, 1)
+	from := writeTemp(t, lines)
+
+	rep, err := RunMigrateWorkItems(s.optsWI(from), s.client)
+	if err == nil {
+		t.Fatal("a run with a refused record must exit non-zero")
+	}
+	var fe *migFailuresError
+	if !errorsAsMigFailures(err, &fe) {
+		t.Fatalf("error must be the counted-failures error, got: %v", err)
+	}
+	if rep.Imported != 3 || rep.Failed != 1 || len(rep.Failures) != 1 {
+		t.Fatalf("imported=%d failed=%d (%+v), want 3/1", rep.Imported, rep.Failed, rep.Failures)
+	}
+	if !strings.Contains(rep.Failures[0].Error, "seq 31 already exists in project") {
+		t.Fatalf("failure must carry the project-naming refusal: %v", rep.Failures[0].Error)
+	}
+	// The rendered report ENDS with the summary line, verdict FAIL.
+	var sb strings.Builder
+	rep.Render(&sb)
+	got := sb.String()
+	last := lastRenderLine(got)
+	if !strings.HasPrefix(last, "  [FAIL] 3 imported / 0 already-exists / 1 failed") {
+		t.Fatalf("report must end with the FAIL summary, got last line %q", last)
+	}
+	if !strings.Contains(got, "failed wi_fail00000001: CORE-409") {
+		t.Fatalf("the refused record must be listed: %s", got)
+	}
+	// The count step speaks to the placed stock only (no phantom demand
+	// for the refused row).
+	for _, st := range rep.Verification {
+		if st.Step == "count-reconciliation" && !st.OK {
+			t.Fatalf("count step must exclude failed records: %s", st.Detail)
+		}
+	}
+}
+
+// Fix 4: a pass-2 idempotent re-run is a SUCCESS — exit-0 error (nil),
+// zero delta, and the summary "0 imported / N already-exists / 0 failed"
+// as the report's last line.
+func TestMigrateWorkItemsPass2ExitZeroSummary(t *testing.T) {
+	s := newMigSrv(t, "mig")
+	from := writeTemp(t, wiLines())
+	if _, err := RunMigrateWorkItems(s.optsWI(from), s.client); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	rep, err := RunMigrateWorkItems(s.optsWI(from), s.client)
+	if err != nil {
+		t.Fatalf("pass 2 must be a success (nil error): %v", err)
+	}
+	if rep.Imported != 0 || rep.Skipped != 4 || rep.Failed != 0 {
+		t.Fatalf("pass 2 imported=%d skipped=%d failed=%d, want 0/4/0", rep.Imported, rep.Skipped, rep.Failed)
+	}
+	var sb strings.Builder
+	rep.Render(&sb)
+	got := sb.String()
+	last := lastRenderLine(got)
+	if last != "  [PASS] 0 imported / 4 already-exists / 0 failed" {
+		t.Fatalf("pass-2 summary must close the report: got last line %q", last)
+	}
+}
+
+// Fix 3c: foreign projects' stock in the target rig must not break the
+// count reconciliation — the step is scoped to the target project (the
+// real-export failure was "global active rows 1165 != placed tree 139").
+func TestMigrateMemoriesCountScopedToProject(t *testing.T) {
+	s := newMigSrv(t, "mig")
+	if _, err := RunMigrateWorkItems(s.optsWI(writeTemp(t, wiLines())), s.client); err != nil {
+		t.Fatalf("work items: %v", err)
+	}
+	// Foreign stock: another project with 5 placed memories of its own
+	// (files + rows, consistent), invisible to the target project's
+	// reconciliation.
+	if _, err := s.db.Exec(`INSERT INTO projects(id, name, identifier_hash, created_at, updated_at)
+		VALUES ('pj_foreign000','foreign','h','t','t')`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		dir := filepath.Join(s.dataDir, "memory", "pj_foreign000", fmt.Sprintf("mem_foreign%03d", i))
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		raw := "---\nid: mem_foreign" + fmt.Sprintf("%03d", i) + "\ntype: experience.debug\nowner_user_id: " +
+			s.adminID + "\nvisibility: project\nproject_id: pj_foreign000\ncreated_at: \"2026-10-01T00:00:00Z\"\nupdated_at: \"2026-10-01T00:00:00Z\"\n---\nforeign body token ForeignToken" + fmt.Sprintf("%03d", i) + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "memory.md"), []byte(raw), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.client.RebuildMemoryIndex(); err != nil { // full reconcile backfills the foreign rows
+		t.Fatal(err)
+	}
+
+	opts := s.optsMem()
+	opts.FromJSONL = writeTemp(t, memLines())
+	rep, err := RunMigrateMemories(opts, s.client)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, st := range rep.Verification {
+		if !st.OK {
+			t.Fatalf("verification %s failed: %s", st.Step, st.Detail)
+		}
+	}
+	count := rep.Verification[0]
+	if !strings.Contains(count.Detail, "project-scoped") {
+		t.Fatalf("count step must be project-scoped: %s", count.Detail)
+	}
+}
+
+// Fix 3b unit: probe candidates are the longest alphanumeric runs,
+// longest first, capped; batch assignment prefers batch-unique runs and
+// leaves run-less bodies unprobeable.
+func TestMigSmokeProbes(t *testing.T) {
+	cands := migSmokeCandidates("short Err tiny 中文检索验证 plus ZebraUniquelyLongIdentifierForProbe")
+	if len(cands) == 0 || len(cands) > migProbeCandidates {
+		t.Fatalf("candidates: %v", cands)
+	}
+	if len(cands[0]) < len(cands[len(cands)-1]) {
+		t.Fatalf("candidates must be longest-first: %v", cands)
+	}
+	for _, c := range cands {
+		if len([]rune(c)) < migProbeMinRunes || len([]rune(c)) > migProbeMaxRunes {
+			t.Fatalf("candidate out of bounds: %q", c)
+		}
+	}
+	// The 3-rune past is gone: no candidate is a bare leading-3-rune
+	// fragment of a longer word.
+	if cands[0] == "Zeb" {
+		t.Fatalf("probe still the old 3-rune fragment: %v", cands)
+	}
+	// Long runs are capped at migProbeMaxRunes.
+	long := migSmokeCandidates(strings.Repeat("调", 300))
+	if len(long) != 1 || len([]rune(long[0])) != migProbeMaxRunes {
+		t.Fatalf("CJK run cap: %v (%d)", long, len(long))
+	}
+	// Batch assignment: two entries sharing their longest run fall back
+	// to their unique shorter one; a run-less body stays unprobeable.
+	placed := []placedMem{
+		{runs: migSmokeCandidates("shared AlphaFirst Body ZebraOne")},
+		{runs: migSmokeCandidates("shared AlphaFirst Body ZebraTwo")},
+		{runs: migSmokeCandidates("ab cd")},
+	}
+	migAssignProbes(placed)
+	if placed[0].probe != "ZebraOne" || placed[1].probe != "ZebraTwo" {
+		t.Fatalf("batch-unique selection failed: %q %q", placed[0].probe, placed[1].probe)
+	}
+	if placed[2].probe != "" {
+		t.Fatalf("run-less body must stay unprobeable: %q", placed[2].probe)
+	}
+	// No unique candidate at all: the longest run is the fallback for
+	// both (retrieval still answers — both bodies contain it).
+	placed2 := []placedMem{
+		{runs: migSmokeCandidates("OnlySharedRun")},
+		{runs: migSmokeCandidates("OnlySharedRun extra tail")},
+	}
+	migAssignProbes(placed2)
+	if placed2[0].probe == "" {
+		t.Fatalf("fallback lost: %q", placed2[0].probe)
+	}
+}
+
+// lastRenderLine answers the last non-empty line of a rendered report
+// (the renderers end with a trailing newline).
+func lastRenderLine(s string) string {
+	s = strings.TrimRight(s, "\n")
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
+// errorsAsMigFailures is a local errors.As for *migFailuresError (the
+// engine test file keeps its own helper so the import block stays
+// untouched).
+func errorsAsMigFailures(err error, target **migFailuresError) bool {
+	for err != nil {
+		if e, ok := err.(*migFailuresError); ok {
+			*target = e
+			return true
+		}
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = u.Unwrap()
+	}
+	return false
 }

@@ -162,15 +162,46 @@ func migParseRFC3339(s string) (time.Time, error) {
 	return t, nil
 }
 
-// migSmokeSubstring picks the retrieval probe: the leading 3 runes of the
-// longest alphanumeric word of the body (or the whole word when shorter).
-// Alphanumeric runs survive the structural strip verbatim, so the probe is
-// guaranteed to appear in the FTS-indexed body.
-func migSmokeSubstring(content string) (string, error) {
-	best, cur := "", ""
+// migProbeMinRunes is the shortest probeable run: FTS5 trigram answers
+// only ≥3-rune tokens (the CJK widening covers shorter queries but
+// cannot rank them), so a body without a ≥3-rune alphanumeric run is
+// unprobeable.
+const migProbeMinRunes = 3
+
+// migProbeMaxRunes caps a probe's length. v1 aihub retrieval is LEXICAL
+// (FTS5 trigram + substring widening) — there is no embedding provider
+// in the loop, so the "semantic recall" the old leading-3-rune probes
+// assumed never happens: 'Err'/'Tes' collide across the whole corpus,
+// and the rank-tied hit list misses the target (the measured 16 spurious
+// failures at 5915 entries). The fix is the exact content-match shape:
+// a LONG distinctive substring of the entry's own body (up to
+// migProbeMaxRunes of its longest alphanumeric run), preferring runs no
+// other entry in the batch shares (see migAssignProbes), so the probe
+// pinpoints the entry even in a 6000-entry corpus.
+const migProbeMaxRunes = 48
+
+// migProbeCandidates is how many runs per entry are kept as probe
+// candidates (longest first) — spares for when the longest run is not
+// batch-unique.
+const migProbeCandidates = 3
+
+// migSmokeCandidates picks an entry's probe candidates: the longest
+// alphanumeric runs of the body, longest first, each capped at
+// migProbeMaxRunes and required to be at least migProbeMinRunes long.
+// Alphanumeric runs survive the structural strip verbatim, so every
+// candidate is guaranteed to appear in the FTS-indexed body.
+func migSmokeCandidates(content string) []string {
+	var runs []string
+	cur := ""
 	flush := func() {
-		if len(cur) > len(best) {
-			best = cur
+		if cur != "" {
+			runes := []rune(cur)
+			if len(runes) >= migProbeMinRunes {
+				if len(runes) > migProbeMaxRunes {
+					runes = runes[:migProbeMaxRunes]
+				}
+				runs = append(runs, string(runes))
+			}
 		}
 		cur = ""
 	}
@@ -182,12 +213,50 @@ func migSmokeSubstring(content string) (string, error) {
 		}
 	}
 	flush()
-	if best == "" {
-		return "", fmt.Errorf("no alphanumeric run in body to probe retrieval with")
+	// Deduplicate and order longest-first; keep the top few.
+	seen := map[string]bool{}
+	uniq := runs[:0]
+	for _, r := range runs {
+		if !seen[r] {
+			seen[r] = true
+			uniq = append(uniq, r)
+		}
 	}
-	runes := []rune(best)
-	if len(runes) > 3 {
-		runes = runes[:3]
+	runs = uniq
+	for i := 1; i < len(runs); i++ {
+		for j := i; j > 0 && len(runs[j]) > len(runs[j-1]); j-- {
+			runs[j], runs[j-1] = runs[j-1], runs[j]
+		}
 	}
-	return string(runes), nil
+	if len(runs) > migProbeCandidates {
+		runs = runs[:migProbeCandidates]
+	}
+	return runs
+}
+
+// migAssignProbes picks each entry's retrieval probe from its
+// candidates: the longest candidate run no OTHER entry in the batch
+// carries (batch-unique — the search answer then pinpoints the entry
+// regardless of corpus size); fallback to the longest candidate.
+// Entries without any ≥3-rune run stay unprobeable ("") and are counted
+// as skipped by the retrieval step.
+func migAssignProbes(placed []placedMem) {
+	counts := map[string]int{}
+	for i := range placed {
+		for _, r := range placed[i].runs {
+			counts[r]++
+		}
+	}
+	for i := range placed {
+		placed[i].probe = ""
+		for _, r := range placed[i].runs {
+			if counts[r] == 1 {
+				placed[i].probe = r
+				break
+			}
+		}
+		if placed[i].probe == "" && len(placed[i].runs) > 0 {
+			placed[i].probe = placed[i].runs[0]
+		}
+	}
 }
