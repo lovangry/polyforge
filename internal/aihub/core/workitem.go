@@ -650,7 +650,18 @@ type ListFilters struct {
 	Assignee  string
 	Priority  string
 	Milestone string
+	// Limit caps the page. 0 = the production default (500, the queue
+	// views). Explicit values are clamped to maxListLimit (50000): the
+	// cutover target carries projects with 1000+ records and the
+	// migration count-reconciliation must see whole projects (the
+	// rehearsal measured a false "500 < 678" on exactly this cap).
+	Limit int
 }
+
+// maxListLimit clamps an explicit list page.
+const maxListLimit = 50000
+
+const defaultListLimit = 500
 
 // List returns work items matching the filters, newest first.
 func (m *WIManager) List(f ListFilters) ([]api.WorkItem, error) {
@@ -676,7 +687,15 @@ func (m *WIManager) List(f ListFilters) ([]api.WorkItem, error) {
 		q += ` AND w.milestone=?`
 		args = append(args, f.Milestone)
 	}
-	q += ` ORDER BY w.created_at DESC LIMIT 500`
+	q += ` ORDER BY w.created_at DESC LIMIT ?`
+	limit := f.Limit
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	if limit > maxListLimit {
+		limit = maxListLimit
+	}
+	args = append(args, limit)
 	rows, err := m.db.Query(q, args...)
 	if err != nil {
 		return nil, err

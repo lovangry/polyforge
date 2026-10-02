@@ -269,6 +269,10 @@ func migExpectedGoal(r *migWIRecord) (string, map[string]any) {
 // (the import remaps them); priority falls back to normal like the
 // import does; an absent seq means "auto" and is not compared. Every
 // divergent field is listed — a per-field diff, never a silent skip.
+// The goal is MIRRORED through the import's own normalization first
+// (TrimSpace → byte-cap truncate): a re-run against the raw export
+// would otherwise flag every trimmed-or-truncated record (the legacy
+// library's long CJK goals measured exactly this).
 func migCompareWIRecord(wi *api.WorkItem, expGoal string, expAttrs map[string]any,
 	status, reporter string, assignee *string, r *migWIRecord) error {
 	var diffs []string
@@ -276,6 +280,7 @@ func migCompareWIRecord(wi *api.WorkItem, expGoal string, expAttrs map[string]an
 	if priority == "" {
 		priority = api.PriorityNormal
 	}
+	expGoal = api.TruncateUTF8(strings.TrimSpace(expGoal), api.MaxGoalBytes)
 	if wi.Status != status {
 		diffs = append(diffs, fmt.Sprintf("status: target %q != record %q", wi.Status, status))
 	}
@@ -478,11 +483,20 @@ func orEmpty(s []string) []string {
 }
 
 func migCountWIs(client *aihubclient.Client, project, status string) (int, error) {
-	wis, err := client.ListWorkItems(project, status)
+	// Whole-project count: the list endpoint's default page (500) would
+	// silently undercount big legacy projects (aihub carried 678 wrapped
+	// — the rehearsal measured the false "500 < 678" on exactly this).
+	raw, err := client.ListWorkItemsRawLimit(project, status, 50000)
 	if err != nil {
 		return 0, err
 	}
-	return len(wis), nil
+	var resp struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return 0, err
+	}
+	return len(resp.Items), nil
 }
 
 // Render prints the human report.

@@ -201,12 +201,21 @@ func (c *Client) CancelWorkItem(id string) (json.RawMessage, error) {
 // ListWorkItemsRaw is the raw-body variant of ListWorkItems (same wire
 // filter keys).
 func (c *Client) ListWorkItemsRaw(project, status string) (json.RawMessage, error) {
+	return c.ListWorkItemsRawLimit(project, status, 0)
+}
+
+// ListWorkItemsRawLimit is the limit-aware variant (the migration
+// count-reconciliation needs whole projects; 0 = the server default).
+func (c *Client) ListWorkItemsRawLimit(project, status string, limit int) (json.RawMessage, error) {
 	q := url.Values{}
 	if project != "" {
 		q.Set("project", project)
 	}
 	if status != "" {
 		q.Set("status", status)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
 	}
 	return c.raw("GET", "/api/v1/work-items?"+q.Encode(), nil)
 }

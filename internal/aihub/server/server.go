@@ -365,12 +365,14 @@ func (s *Server) writeWI(w http.ResponseWriter, status int, wi *api.WorkItem) {
 
 func (s *Server) hListWIs(w http.ResponseWriter, r *http.Request, idn *identity) {
 	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit")) // 0/absent = core default; clamped there
 	items, err := s.WIs.List(core.ListFilters{
 		Project:   q.Get("project"),
 		Status:    q.Get("status"),
 		Assignee:  q.Get("assignee"),
 		Priority:  q.Get("priority"),
 		Milestone: q.Get("milestone"),
+		Limit:     limit,
 	})
 	if err != nil {
 		writeErr(w, err)
