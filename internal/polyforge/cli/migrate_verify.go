@@ -71,11 +71,15 @@ func migVerifyMemories(opts MigMemoriesOptions, rep *MigMemoriesReport, placed [
 }
 
 // migVerifyCounts is step ①: every migrated id has a row with the
-// expected status, the global row counts equal the placed authority
-// tree's counts and the reconcile statistic equals the tree's active
-// count. The placed tree (not this run's import count) is the global
-// stock: a delta run feeds a subset, and earlier runs' placements
-// persist — so the tree is what the global rows must add up to.
+// expected status, the TARGET PROJECT's row counts equal the placed
+// authority tree's counts and the (project-scoped) reconcile statistic
+// equals the tree's active count. Scoped, not global (seq-fix lane 3c):
+// the target carries OTHER projects' stock in a real cutover rig, and
+// comparing the whole memories table against ONE project's tree reported
+// 1165 != 139 on the real export. The placed tree (not this run's import
+// count) is the project's stock: a delta run feeds a subset, and earlier
+// runs' placements persist — so the tree is what the project's rows must
+// add up to.
 func migVerifyCounts(db *sql.DB, opts MigMemoriesOptions, rep *MigMemoriesReport, placed []placedMem) StepResult {
 	step := StepResult{Step: "count-reconciliation", OK: true}
 	var problems []string
@@ -92,7 +96,8 @@ func migVerifyCounts(db *sql.DB, opts MigMemoriesOptions, rep *MigMemoriesReport
 		}
 	}
 	counts := map[string]int{}
-	rows, err := db.Query(`SELECT status, COUNT(*) FROM memories GROUP BY status`)
+	rows, err := db.Query(`SELECT status, COUNT(*) FROM memories WHERE project_id=?1 GROUP BY status`,
+		rep.TargetProject)
 	if err != nil {
 		return StepResult{Step: step.Step, OK: false, Detail: "count rows: " + err.Error()}
 	}
@@ -111,10 +116,10 @@ func migVerifyCounts(db *sql.DB, opts MigMemoriesOptions, rep *MigMemoriesReport
 		return StepResult{Step: step.Step, OK: false, Detail: "count placed tree: " + terr.Error()}
 	}
 	if counts["active"] != treeActive {
-		problems = append(problems, fmt.Sprintf("global active rows %d != placed tree %d", counts["active"], treeActive))
+		problems = append(problems, fmt.Sprintf("project active rows %d != placed tree %d", counts["active"], treeActive))
 	}
 	if counts["redacted"] != treeRedacted {
-		problems = append(problems, fmt.Sprintf("global redacted rows %d != placed tree %d", counts["redacted"], treeRedacted))
+		problems = append(problems, fmt.Sprintf("project redacted rows %d != placed tree %d", counts["redacted"], treeRedacted))
 	}
 	if rep.Rebuilt != treeActive {
 		problems = append(problems, fmt.Sprintf("rebuild-index rebuilt %d != placed tree active %d", rep.Rebuilt, treeActive))
@@ -124,7 +129,7 @@ func migVerifyCounts(db *sql.DB, opts MigMemoriesOptions, rep *MigMemoriesReport
 		step.Detail = fmt.Sprintf("%d mismatch(es): %s", len(problems), joinNonEmpty(problems, "; "))
 		return step
 	}
-	step.Detail = fmt.Sprintf("%d row(s) reconciled; global active=%d redacted=%d; rebuilt=%d",
+	step.Detail = fmt.Sprintf("%d row(s) reconciled; project-scoped active=%d redacted=%d; rebuilt=%d",
 		len(placed), treeActive, treeRedacted, rep.Rebuilt)
 	return step
 }
@@ -212,9 +217,13 @@ func migVerifyContentSHA(dataDir string, db *sql.DB, rep *MigMemoriesReport, pla
 }
 
 // migVerifyRetrieval is step ③: for every sampled ACTIVE entry the admin
-// key can search, a 3-rune body substring must retrieve the entry over
-// the real HTTP search face. Redacted entries are unsearchable by design;
-// private ones are noted as skipped.
+// key can search, a LONG distinctive content substring must retrieve the
+// entry over the real HTTP search face. v1 aihub retrieval is lexical
+// (FTS5 trigram) — there is no embedding provider, so "semantic recall"
+// never happens and the verification is exact content-match by design
+// (seq-fix lane 3b): the probe is a up-to-48-rune run of the entry's own
+// body, batch-unique when one exists. Redacted entries are unsearchable
+// by design; private ones are noted as skipped.
 func migVerifyRetrieval(rep *MigMemoriesReport, placed []placedMem, client *aihubclient.Client) StepResult {
 	step := StepResult{Step: "retrieval-smoke", OK: true}
 	byID := map[string]placedMem{}
@@ -254,7 +263,7 @@ func migVerifyRetrieval(rep *MigMemoriesReport, placed []placedMem, client *aihu
 		step.Detail = fmt.Sprintf("%d failure(s): %s", len(problems), joinNonEmpty(problems, "; "))
 		return step
 	}
-	step.Detail = fmt.Sprintf("%d sampled entr(ies) retrieved via HTTP search", smoked)
+	step.Detail = fmt.Sprintf("%d sampled entr(ies) retrieved via HTTP search (long content-substring probes)", smoked)
 	if skipped > 0 {
 		step.Detail += fmt.Sprintf("; %d skipped (redacted, private or unprobeable)", skipped)
 	}

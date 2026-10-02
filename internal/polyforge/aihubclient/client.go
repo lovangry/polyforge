@@ -414,6 +414,24 @@ func (c *Client) RebuildMemoryIndex() (int, error) {
 	return out.Reindexed, nil
 }
 
+// RebuildMemoryIndexScoped triggers the reconcile/backfill scoped to ONE
+// project (admin; seq-fix lane 3a): the server walks only that project's
+// authority tree and answers the per-project reindexed count. At
+// real-library scale the work can outlast the default 60s exchange
+// timeout — the caller raises client.HTTP.Timeout for this one call
+// (migrate-memories' --rebuild-timeout) and never silently skips: a
+// timeout fails the run, because the rebuild is the only backfill path.
+func (c *Client) RebuildMemoryIndexScoped(project string) (int, error) {
+	var out struct {
+		Reindexed int `json:"reindexed"`
+	}
+	if err := c.Do("POST", "/api/v1/memories/rebuild-index?project="+url.QueryEscape(project),
+		map[string]any{}, &out); err != nil {
+		return 0, err
+	}
+	return out.Reindexed, nil
+}
+
 // ---------------------------------------------------------------------------
 // Machines faces (M3 heartbeat wiring).
 

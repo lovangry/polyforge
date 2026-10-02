@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 )
@@ -50,6 +51,8 @@ var cmdMigrateMemories = &Command{
 		fs.String("user-map", "", "JSON file {\"old identifier\": \"new user id\"}")
 		fs.String("since", "", "JSONL only: delta mode, records with updated_at >= this RFC3339")
 		fs.Bool("dry-run", false, "parse, resolve and report; place nothing, verify nothing")
+		fs.Duration("rebuild-timeout", 15*time.Minute,
+			"timeout for the rebuild-index call alone (the reconcile outlasts the default exchange timeout at real-library scale; a timeout fails the run — the rebuild is never skipped)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 0 {
@@ -60,14 +63,15 @@ var cmdMigrateMemories = &Command{
 			return fmt.Errorf("--user-map: %v", err)
 		}
 		opts := MigMemoriesOptions{
-			DataDir:   stringFlag(fs, "data-dir"),
-			FromDir:   stringFlag(fs, "from-dir"),
-			FromJSONL: stringFlag(fs, "from-jsonl"),
-			Project:   stringFlag(fs, "project"),
-			Owner:     stringFlag(fs, "owner"),
-			UserMap:   userMap,
-			Since:     stringFlag(fs, "since"),
-			DryRun:    boolFlag(fs, "dry-run"),
+			DataDir:        stringFlag(fs, "data-dir"),
+			FromDir:        stringFlag(fs, "from-dir"),
+			FromJSONL:      stringFlag(fs, "from-jsonl"),
+			Project:        stringFlag(fs, "project"),
+			Owner:          stringFlag(fs, "owner"),
+			UserMap:        userMap,
+			Since:          stringFlag(fs, "since"),
+			DryRun:         boolFlag(fs, "dry-run"),
+			RebuildTimeout: durationFlag(fs, "rebuild-timeout"),
 		}
 		if opts.AihubURL == "" {
 			opts.AihubURL = ctx.Cfg.Server

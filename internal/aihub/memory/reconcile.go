@@ -269,28 +269,68 @@ func (s *Store) sweepTransients() error {
 	})
 }
 
+// ftsRebuildBatch is how many FTS rows one rebuild transaction carries.
+// Every row is a DELETE+INSERT inside a shared transaction: at real-library
+// scale (thousands of entries) the old per-entry transaction made the
+// rebuild one fsync PER ENTRY and blew past any sane client timeout
+// (seq-fix lane 3a: the 3760-entry rebuild exceeded the CLI's 60s). The
+// batch holds Core's single write connection, so other writers queue
+// until it commits — acceptable for an admin maintenance path (server
+// boot reconcile, migrate-memories).
+const ftsRebuildBatch = 256
+
 // RebuildIndex runs the full reconcile: transient sweep, file-driven
 // backfill/correction, _redacted forward-completion, row-driven orphan
 // rollback and an unconditional per-entry FTS rebuild. Returns the
 // number of reindexed active entries.
-func (s *Store) RebuildIndex() (int, error) {
+func (s *Store) RebuildIndex() (int, error) { return s.rebuildIndex("") }
+
+// RebuildIndexProject scopes the reconcile to ONE project: only that
+// project's authority tree is walked and only its rows are
+// orphan-scanned. The migrate-memories path uses this so the rebuild's
+// work — and the reindexed count it answers — covers exactly the placed
+// tree the count reconciliation compares against (seq-fix lane 3a/3c).
+// The transient sweep and the dangling-FTS cleanup stay global: both are
+// cheap and benefit every project.
+func (s *Store) RebuildIndexProject(projectID string) (int, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return 0, errf("MEM-400", "", "project required")
+	}
+	return s.rebuildIndex(projectID)
+}
+
+// rebuildIndex is the shared reconcile body; scopedProject "" means
+// every project.
+func (s *Store) rebuildIndex(scopedProject string) (int, error) {
 	if err := s.sweepTransients(); err != nil {
 		return 0, errf("MEM-502", "", "sweep: %v", err)
 	}
-	projDirs, err := os.ReadDir(filepath.Join(s.dataDir, "memory"))
-	if err != nil {
-		if !os.IsNotExist(err) {
+	var projDirs []string
+	if scopedProject != "" {
+		if _, err := os.Stat(filepath.Join(s.dataDir, "memory", scopedProject)); err != nil {
+			if os.IsNotExist(err) {
+				return 0, errf("MEM-404", "", "project %s has no placed authority tree", scopedProject)
+			}
 			return 0, errf("MEM-502", "", "walk: %v", err)
 		}
-		projDirs = nil
-	}
-	n := 0
-	// Active tree: backfill or correct each entry, rebuild FTS.
-	for _, pd := range projDirs {
-		if !pd.IsDir() {
-			continue
+		projDirs = []string{scopedProject}
+	} else {
+		all, err := os.ReadDir(filepath.Join(s.dataDir, "memory"))
+		if err != nil && !os.IsNotExist(err) {
+			return 0, errf("MEM-502", "", "walk: %v", err)
 		}
-		memDirs, werr := os.ReadDir(filepath.Join(s.dataDir, "memory", pd.Name()))
+		for _, d := range all {
+			if d.IsDir() {
+				projDirs = append(projDirs, d.Name())
+			}
+		}
+	}
+	// Active tree: backfill or correct each entry (rows only — the FTS
+	// rebuild runs batched afterwards, one body re-read per entry under
+	// its per-mem lock).
+	var active []rebuildEntry
+	for _, dirProject := range projDirs {
+		memDirs, werr := os.ReadDir(filepath.Join(s.dataDir, "memory", dirProject))
 		if werr != nil {
 			return 0, errf("MEM-502", "", "walk: %v", werr)
 		}
@@ -298,22 +338,19 @@ func (s *Store) RebuildIndex() (int, error) {
 			if !md.IsDir() || md.Name() == "_redacted" {
 				continue
 			}
-			counted, cerr := s.rebuildActiveEntry(pd.Name(), md.Name())
+			counted, cerr := s.rebuildActiveEntry(dirProject, md.Name())
 			if cerr != nil {
 				return 0, errf("MEM-502", "", "rebuild %s: %v", md.Name(), cerr)
 			}
 			if counted {
-				n++
+				active = append(active, rebuildEntry{id: md.Name(), dirProject: dirProject})
 			}
 		}
 	}
 	// _redacted tree: backfill migrated stock; forward-complete crashed
 	// redacts.
-	for _, pd := range projDirs {
-		if !pd.IsDir() {
-			continue
-		}
-		redDirs, rerr := os.ReadDir(filepath.Join(s.dataDir, "memory", pd.Name(), "_redacted"))
+	for _, dirProject := range projDirs {
+		redDirs, rerr := os.ReadDir(filepath.Join(s.dataDir, "memory", dirProject, "_redacted"))
 		if rerr != nil {
 			if os.IsNotExist(rerr) {
 				continue
@@ -324,13 +361,20 @@ func (s *Store) RebuildIndex() (int, error) {
 			if !md.IsDir() {
 				continue
 			}
-			if cerr := s.rebuildRedactedEntry(pd.Name(), md.Name()); cerr != nil {
+			if cerr := s.rebuildRedactedEntry(dirProject, md.Name()); cerr != nil {
 				return 0, errf("MEM-502", "", "rebuild %s: %v", md.Name(), cerr)
 			}
 		}
 	}
-	// Row-driven scan: active rows whose authority file is missing.
-	rows, err := s.db.Query(`SELECT id FROM memories WHERE status='active'`)
+	// Row-driven scan: active rows whose authority file is missing
+	// (scoped to the project under RebuildIndexProject).
+	scanQ := `SELECT id FROM memories WHERE status='active'`
+	var scanArgs []any
+	if scopedProject != "" {
+		scanQ += ` AND project_id=?1`
+		scanArgs = append(scanArgs, scopedProject)
+	}
+	rows, err := s.db.Query(scanQ, scanArgs...)
 	if err != nil {
 		return 0, errf("MEM-502", "", "scan rows: %v", err)
 	}
@@ -362,6 +406,11 @@ func (s *Store) RebuildIndex() (int, error) {
 		}
 		unlock()
 	}
+	// The batched FTS rebuild for the whole active set.
+	n, err := s.rebuildFTSBatched(active)
+	if err != nil {
+		return 0, errf("MEM-502", "", "fts: %v", err)
+	}
 	// Dangling FTS rows die last.
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -373,6 +422,56 @@ func (s *Store) RebuildIndex() (int, error) {
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, errf("MEM-502", "", "commit: %v", err)
+	}
+	return n, nil
+}
+
+// rebuildEntry is one active-tree entry queued for the batched FTS
+// rebuild.
+type rebuildEntry struct{ id, dirProject string }
+
+// rebuildFTSBatched rewrites the FTS row of every given active entry,
+// ftsRebuildBatch rows per transaction. Each body is read under the
+// entry's per-mem lock immediately before its write — never a stale
+// pre-read — and an entry whose authority vanished mid-rebuild is
+// skipped (the row-driven scan owns that case). No store call runs
+// inside the open batch transaction: Core's pool is one connection, and
+// a nested write there would deadlock it.
+func (s *Store) rebuildFTSBatched(entries []rebuildEntry) (int, error) {
+	n := 0
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	// fail rolls back the CURRENT batch transaction (the closure captures
+	// the variable, so it stays correct across batch rotations).
+	fail := func(e error) (int, error) {
+		_ = tx.Rollback()
+		return 0, e
+	}
+	for _, e := range entries {
+		unlock := s.memLock(e.id)
+		raw, rerr := os.ReadFile(filepath.Join(s.dataDir, "memory", e.dirProject, e.id, "memory.md"))
+		unlock()
+		if rerr != nil {
+			continue
+		}
+		if err := ftsReplace(tx, e.id, extractBody(string(raw))); err != nil {
+			return fail(err)
+		}
+		n++
+		if n%ftsRebuildBatch == 0 {
+			if err := tx.Commit(); err != nil {
+				return fail(err)
+			}
+			tx, err = s.db.Begin()
+			if err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fail(err)
 	}
 	return n, nil
 }

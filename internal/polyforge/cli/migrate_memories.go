@@ -27,10 +27,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	_ "modernc.org/sqlite"
 )
+
+// migDefaultRebuildTimeout bounds the rebuild-index call when
+// --rebuild-timeout is not given: generous enough for a full project
+// reconcile at real-library scale (the batched server-side rebuild keeps
+// it minutes, not hours), bounded so a hung server still fails the run
+// instead of hanging it.
+const migDefaultRebuildTimeout = 15 * time.Minute
 
 // MigMemoriesOptions is the resolved `pf migrate-memories` invocation.
 type MigMemoriesOptions struct {
@@ -44,6 +52,12 @@ type MigMemoriesOptions struct {
 	UserMap   map[string]string
 	Since     string // JSONL only: delta filter on updated_at
 	DryRun    bool
+	// RebuildTimeout bounds the rebuild-index call alone (seq-fix lane
+	// 3a): at real-library scale (3760 entries) the server's file-wins
+	// reconcile outlasts the client's default 60s exchange timeout. Zero
+	// means the 15-minute default. A timeout FAILS the run — the rebuild
+	// is the only backfill path and is never silently skipped.
+	RebuildTimeout time.Duration
 }
 
 // MigConversion is one logged frontmatter conversion of the run.
@@ -80,12 +94,15 @@ type MigMemoriesReport struct {
 
 // placedMem carries one written entry's placement plus the expected
 // post-conversion frontmatter (kept independent from the file on disk so
-// step ④ judges the file, not the writer's intent).
+// step ④ judges the file, not the writer's intent). runs are the
+// retrieval-probe candidates (longest first); migAssignProbes picks the
+// probe from them batch-wide after placement.
 type placedMem struct {
 	rec        migSourceMem
 	relPath    string
 	expectedFM migFrontmatter
-	probe      string // retrieval-smoke probe ("" = unprobeable)
+	runs       []string // probe candidates (longest first)
+	probe      string   // retrieval-smoke probe ("" = unprobeable)
 }
 
 // RunMigrateMemories executes the full import. On success it returns the
@@ -229,11 +246,26 @@ func RunMigrateMemories(opts MigMemoriesOptions, client *aihubclient.Client) (*M
 		placed = append(placed, p)
 	}
 	rep.ActiveCount, rep.RedactedCount = migStatusCounts(placed)
+	migAssignProbes(placed)
 
 	// ③ the live server's reconcile backfills rows + FTS from the files.
-	rep.Rebuilt, err = client.RebuildMemoryIndex()
+	// The call is SCOPED to the target project (the walk — and the
+	// reindexed count — covers exactly the placed tree that verification
+	// step ① reconciles against) and runs under --rebuild-timeout (the
+	// default client timeout dies at real-library scale). A timeout or
+	// error fails the run loudly: the file-wins reconcile is the only
+	// backfill path; it is never silently skipped.
+	rebuildTimeout := opts.RebuildTimeout
+	if rebuildTimeout <= 0 {
+		rebuildTimeout = migDefaultRebuildTimeout
+	}
+	savedTimeout := client.HTTP.Timeout
+	client.HTTP.Timeout = rebuildTimeout
+	rep.Rebuilt, err = client.RebuildMemoryIndexScoped(proj.ID)
+	client.HTTP.Timeout = savedTimeout
 	if err != nil {
-		return nil, resolveWrapErrf(err, "rebuild-index: %v (start the server first — the file-wins reconcile is the only backfill path)", err)
+		return nil, resolveWrapErrf(err, "rebuild-index (project %s, timeout %s): %v (start the server first — the file-wins reconcile is the only backfill path)",
+			proj.ID, rebuildTimeout, err)
 	}
 
 	// ④ the four-step verification.
@@ -304,12 +336,12 @@ func migConvertOne(src *migSourceMem, resolver *migResolver, projectID string,
 	if fm.Related == nil {
 		fm.Related = []string{}
 	}
-	probe, _ := migSmokeSubstring(src.Content)
+	probeRuns := migSmokeCandidates(src.Content)
 	return placedMem{
 		rec:        *src,
 		relPath:    migRelPath(projectID, src.ID, src.Status == "redacted"),
 		expectedFM: fm,
-		probe:      probe,
+		runs:       probeRuns,
 	}, nil
 }
 

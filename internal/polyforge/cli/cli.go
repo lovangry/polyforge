@@ -8,6 +8,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
@@ -439,6 +440,9 @@ func int64Flag(fs *flag.FlagSet, name string) int64 {
 }
 func intFlag(fs *flag.FlagSet, name string) int {
 	return fs.Lookup(name).Value.(flag.Getter).Get().(int)
+}
+func durationFlag(fs *flag.FlagSet, name string) time.Duration {
+	return fs.Lookup(name).Value.(flag.Getter).Get().(time.Duration)
 }
 
 // strPtr wraps a plain string in a pointer.
