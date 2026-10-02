@@ -85,7 +85,7 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		writeGitErr(w, api.ErrGitUnauthorized, "git access requires a session-scoped credential")
 		return
 	}
-	expectedHandle, err := m.checker.CheckPushCredential(wiID, user, secret)
+	expectedHandle, err := m.checker.CheckSessionCredential(wiID, user, secret)
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Basic realm="polyforge"`)
 		// The git client only understands the 401; the typed code rides in

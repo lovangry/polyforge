@@ -900,7 +900,7 @@ func TestProgressReadThrough(t *testing.T) {
 	if code, raw = e.do(t, "GET", "/api/v1/work-items/"+wi.ID+"/progress", e.key, nil, &p); code != http.StatusOK {
 		t.Fatalf("after publish: %d %s", code, raw)
 	}
-	if p.WorkItemID != wi.ID || p.HeadSeq != 1 || p.HeadGeneration != 3 {
+	if p.WorkItemID != wi.ID || p.HeadSeq != 1 {
 		t.Errorf("head fields: %+v", p)
 	}
 	if p.HeadUpdatedAt != "2026-10-01T00:00:00Z" {

@@ -13,7 +13,7 @@ package daemon
 // The test spends the push credential exactly the way the real machine
 // did: the flush path's PushFunc removes the bare remote the moment its
 // own push lands, so any SECOND push by the other half fails loudly and
-// degrades EndGeneration to blocked — which is what the assertions pin
+// degrades the hub close to blocked — which is what the assertions pin
 // against.
 
 import (

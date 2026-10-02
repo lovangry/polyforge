@@ -99,7 +99,6 @@ type plan struct {
 type execState struct {
 	CapsuleID      string               `json:"capsule_id"`
 	WorkItemID     string               `json:"work_item_id"`
-	Generation     int64                `json:"generation"`
 	CurrentStep    string               `json:"current_step"`
 	WorkflowStatus string               `json:"workflow_status"`
 	Steps          map[string]*execStep `json:"steps"`

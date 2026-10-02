@@ -107,15 +107,15 @@ type APIToken struct {
 // HEAD metadata plus the verbatim runtime-state/execution.json content
 // of the WI's last published revision. Progress passes through
 // unchanged — Core never re-represents execution state in its own data
-// model (INV-1); only the single top-level `generation` field is read
-// out of it to fill HeadGeneration.
+// model (INV-1). The v1 head_generation field is deleted with the
+// capsule lineage it read out of the published file (v1.5 session
+// model).
 type ProgressResponse struct {
-	WorkItemID     string          `json:"work_item_id"`
-	HeadSeq        int64           `json:"head_seq"`
-	HeadGeneration int64           `json:"head_generation"`
-	Progress       json.RawMessage `json:"progress"`
-	HeadUpdatedAt  string          `json:"head_updated_at"`
-	FreshnessNote  string          `json:"freshness_note"`
+	WorkItemID    string          `json:"work_item_id"`
+	HeadSeq       int64           `json:"head_seq"`
+	Progress      json.RawMessage `json:"progress"`
+	HeadUpdatedAt string          `json:"head_updated_at"`
+	FreshnessNote string          `json:"freshness_note"`
 }
 
 // ProgressFreshnessNote marks read-through data as as-of the most

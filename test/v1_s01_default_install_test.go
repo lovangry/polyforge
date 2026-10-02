@@ -41,24 +41,23 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("capsule.json: %v", err)
 	}
-	var idn struct {
-		WorkItemID string            `json:"work_item_id"`
-		Generation int64             `json:"generation"`
-		AttemptID  string            `json:"attempt_id"`
-		BundleName string            `json:"bundle_name"`
-		Repos      map[string]string `json:"repos"`
-	}
-	if err := json.Unmarshal(rawID, &idn); err != nil {
+	var idnMap map[string]any
+	if err := json.Unmarshal(rawID, &idnMap); err != nil {
 		t.Fatalf("capsule.json unparsable: %v", err)
 	}
-	// v1.5 ASSERTION CHANGE: the capsule Identity shape is frozen in
-	// common/ but the generation/attempt lineage it carried is DELETED —
-	// the runtime writes the zero values and session ownership lives in
-	// the daemon-private sync/session-handle marker (contract §5). The
-	// v1 assertion (Generation==1, AttemptID!="") pinned the deleted
-	// lineage; the v1.5-correct pin is its absence.
-	if idn.WorkItemID != wi || idn.Generation != 0 || idn.AttemptID != "" || idn.BundleName != "quick-fix" {
-		t.Fatalf("capsule identity wrong: %+v", idn)
+	// v1.5 ASSERTION CHANGE: the v1 assertion (Generation==1, AttemptID!="")
+	// pinned the deleted lineage; the fossil round removed even the zero
+	// fields from the frozen Identity shape, so the correct pin is the
+	// KEYS' ABSENCE — the runtime no longer writes generation/attempt_id
+	// into capsule.json at all, and session ownership lives in the
+	// daemon-private sync/session-handle marker (contract §5).
+	for _, gone := range []string{"generation", "attempt_id"} {
+		if _, ok := idnMap[gone]; ok {
+			t.Fatalf("capsule.json still carries the deleted v1 lineage key %q: %v", gone, idnMap)
+		}
+	}
+	if idnMap["work_item_id"] != wi || idnMap["bundle_name"] != "quick-fix" {
+		t.Fatalf("capsule identity wrong: %v", idnMap)
 	}
 	// T1 session trail, first half: the claim set the hub's session row
 	// — the public audit block names this machine and a fingerprint,
@@ -78,7 +77,8 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(repoDir, "hello.txt")); err != nil || string(b) != "hello\n" {
 		t.Fatalf("cloned task repo content wrong: %q, %v", b, err)
 	}
-	if got := idn.Repos["demo-src"]; got != remote.head {
+	repos, _ := idnMap["repos"].(map[string]any)
+	if got, _ := repos["demo-src"].(string); got != remote.head {
 		t.Fatalf("capsule baseline for demo-src = %q, want remote HEAD %q", got, remote.head)
 	}
 	// The task repo stays outside the capsule's own git history.

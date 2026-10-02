@@ -99,7 +99,7 @@ func TestV1S05AgentKill9(t *testing.T) {
 
 	// The spawn journal: two derivations, the second a RESUME whose counter
 	// advanced (spawn_n 1 → 2 — the B2 fence key; the #1-suffixed
-	// "instance" value is the LOCAL display token the runtime keeps for
+	// spawn_token value is the LOCAL display token the runtime keeps for
 	// the transcript path only, never a protocol identity).
 	spawns := spawnJournal(t, capDir)
 	if len(spawns) != 2 {

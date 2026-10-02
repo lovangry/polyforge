@@ -57,7 +57,7 @@ const (
 // pre-receive fence expects.
 type reproChecker struct{}
 
-func (reproChecker) CheckPushCredential(wiID, username, secret string) (string, error) {
+func (reproChecker) CheckSessionCredential(wiID, username, secret string) (string, error) {
 	if username != wiID || secret != reproSecret {
 		return "", fmt.Errorf("bad push credential for %s", wiID)
 	}

@@ -76,7 +76,6 @@ func TestDaemonClientObserveRoundtrip(t *testing.T) {
 		WorkItem:    "wi_abc",
 		Project:     "polyforge",
 		Status:      protocol.JobRunning,
-		Generation:  2,
 		SpawnN:      1,
 		BundleName:  "bundle-x",
 		CurrentStep: "implement",
@@ -398,7 +397,7 @@ func TestAnswerUniquePendingResolution(t *testing.T) {
 func TestObserveRenderedOutput(t *testing.T) {
 	jv := protocol.JobView{
 		WorkItem: "wi_abc", Project: "polyforge", Status: protocol.JobRunning,
-		Generation: 1, SpawnN: 1, CurrentStep: "implement",
+		SpawnN: 1, CurrentStep: "implement",
 		Steps: map[string]*protocol.StepView{"implement": {Status: "in_progress", Attempts: 1}},
 	}
 	d := newDaemonFixture(t)
@@ -415,8 +414,8 @@ func TestObserveRenderedOutput(t *testing.T) {
 }
 
 // progressAnswer is a canned §5.2 read-through body for the fake aihub.
-const progressAnswer = `{"work_item_id":"wi_abc","head_seq":7,"head_generation":2,` +
-	`"progress":{"work_item_id":"wi_abc","generation":2,"current_step":"fix","workflow_status":"running","version":12},` +
+const progressAnswer = `{"work_item_id":"wi_abc","head_seq":7,` +
+	`"progress":{"work_item_id":"wi_abc","current_step":"fix","workflow_status":"running","version":12},` +
 	`"head_updated_at":"2026-10-01T00:00:00Z","freshness_note":"data is as of the most recent publish"}`
 
 // TestObserveReadThroughFallback: a daemon DAEMON-404 (not monitored) plus
@@ -437,7 +436,7 @@ func TestObserveReadThroughFallback(t *testing.T) {
 	}
 	for _, want := range []string{
 		"layer=read-through",
-		"seq 7  generation 2  updated 2026-10-01T00:00:00Z",
+		"seq 7  updated 2026-10-01T00:00:00Z",
 		"data is as of the most recent publish",
 		"current_step",
 	} {

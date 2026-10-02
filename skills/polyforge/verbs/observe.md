@@ -22,12 +22,14 @@ while the daemon runs the work item here.
 
 ## Success
 
-Human mode: the header line (`wi, project, status`), the attempt/generation/
+Human mode: the header line (`wi, project, status`), the spawn/fingerprint/
 bundle line, the current step, the step table (STEP, STATUS, ATTEMPTS,
 MODEL, STARTED), the budget block when present, the pending question when
 one is open, and the recent events table (AT, KIND, BODY). `--json`: the raw
-projection (`work_item`, `status`, `attempt_id`, `generation`, `steps`,
-`budget`, `pending_question`, `events`).
+projection (`work_item`, `status`, `spawn_n`, `session_fingerprint`, `steps`,
+`budget`, `pending_question`, `events`). The v1 `attempt_id`/`generation`
+projection fields are deleted with the lineage they named (v1.5 session
+model).
 
 A `needs_input` status means a question is waiting — route the user to the
 `answer` verb, quoting its `question_id`.

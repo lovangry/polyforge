@@ -513,22 +513,16 @@ func (s *Server) hProgress(w http.ResponseWriter, r *http.Request, idn *identity
 			"the published execution state of %s is not valid JSON", id))
 		return
 	}
-	// head_generation is not a git artifact: the capsule records its
-	// generation inside execution.json at every write, so the single
-	// top-level `generation` field is read out of the PUBLISHED file
-	// itself to fill the response header fields. The file body is still
-	// returned unchanged as `progress`.
-	var head struct {
-		Generation int64 `json:"generation"`
-	}
-	_ = json.Unmarshal(hp.Content, &head)
+	// The published file body passes through VERBATIM and is not
+	// re-represented: the v1 head_generation read-out (the published
+	// execution.json's top-level `generation` field) is deleted with the
+	// capsule lineage it surfaced (v1.5 session model).
 	writeJSON(w, http.StatusOK, &api.ProgressResponse{
-		WorkItemID:     id,
-		HeadSeq:        hp.Seq,
-		HeadGeneration: head.Generation,
-		Progress:       json.RawMessage(hp.Content),
-		HeadUpdatedAt:  hp.UpdatedAt.UTC().Format(time.RFC3339),
-		FreshnessNote:  api.ProgressFreshnessNote,
+		WorkItemID:    id,
+		HeadSeq:       hp.Seq,
+		Progress:      json.RawMessage(hp.Content),
+		HeadUpdatedAt: hp.UpdatedAt.UTC().Format(time.RFC3339),
+		FreshnessNote: api.ProgressFreshnessNote,
 	})
 }
 

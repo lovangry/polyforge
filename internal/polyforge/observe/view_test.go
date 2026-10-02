@@ -21,7 +21,7 @@ func TestJobViewProjectionFromExecutionFile(t *testing.T) {
 
 	soon(t, time.Second, "execution.json polled", func() bool {
 		v := m.JobView()
-		return v.Generation == 1 && v.CurrentStep == "code"
+		return v.CurrentStep == "code"
 	})
 
 	v := m.JobView()

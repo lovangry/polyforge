@@ -200,16 +200,13 @@ const (
 )
 
 // JobView is the observe projection served over UDS (04 §5.1a).
-// Generation is the CAPSULE execution.json's workflow generation (the
-// read-through layer surfaces the capsule's own field verbatim — it is
-// NOT hub lineage). SessionFingerprint is the PUBLIC session handle
-// (B3: never the secret). The v1 attempt_id field is deleted with the
-// lineage it named.
+// SessionFingerprint is the PUBLIC session handle (B3: never the
+// secret). The v1 attempt_id and workflow-generation fields are deleted
+// with the lineage they named (v1.5 session model).
 type JobView struct {
 	WorkItem           string               `json:"work_item"`
 	Project            string               `json:"project"`
 	Status             string               `json:"status"`
-	Generation         int64                `json:"generation"`
 	SpawnN             int                  `json:"spawn_n"`
 	SessionFingerprint string               `json:"session_fingerprint,omitempty"`
 	BundleName         string               `json:"bundle_name"`

@@ -42,6 +42,19 @@ import (
 // instance's transcript.
 const locateSlack = 2 * time.Second
 
+// Transcript FILE naming — deliberately NOT renamed with the v1 fossil
+// cleanup: the capsule-side transcript copies are named
+// session-<fingerprint>#N.jsonl, where the "#N" suffix is spawn_n's
+// file-level expression — it carries the "which derivation wrote this"
+// semantics (a re-derivation gets its own #-suffixed file and never
+// clobbers its predecessor's; see sessionPathFor and the spawn token in
+// recover.go). LocateLiveTranscript relies on that shape when it scans
+// the harness session store for a live transcript. Renaming the pattern
+// would orphan every existing sealed capsule's transcript files (the
+// resume path re-reads the declared path from the capsule), so the
+// naming stays frozen even though the spawn-journal line's display-key
+// fossil (instance → spawn_token) is cleaned up.
+
 // HarnessSessionsRootDefault is the harness's default session store.
 // A Config override exists for tests and relocated installs.
 func HarnessSessionsRootDefault() string {

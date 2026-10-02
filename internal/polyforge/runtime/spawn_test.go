@@ -185,7 +185,7 @@ func TestSpawnJournalWritten(t *testing.T) {
 	if err := json.Unmarshal(raw[:len(raw)-1], &entry); err != nil {
 		t.Fatalf("journal line must be JSON: %v (%s)", err, raw)
 	}
-	if entry["pid"].(float64) != 4242 || entry["instance"] != "ab12cd34" || entry["work_item"] != "wi_j" {
+	if entry["pid"].(float64) != 4242 || entry["spawn_token"] != "ab12cd34" || entry["work_item"] != "wi_j" {
 		t.Fatalf("journal entry wrong: %+v", entry)
 	}
 	// v1.5 additive fields: the derivation counter and the PUBLIC handle

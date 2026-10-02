@@ -446,8 +446,8 @@ func renderObserve(w io.Writer, jv *protocol.JobView, sess *WIView) {
 // is never fabricated here.
 func renderReadThrough(w io.Writer, p *api.ProgressResponse) {
 	fmt.Fprintf(w, "%s — layer=read-through (read-only projection of the last published revision)\n", p.WorkItemID)
-	fmt.Fprintf(w, "head: seq %d  generation %d  updated %s\n",
-		p.HeadSeq, p.HeadGeneration, p.HeadUpdatedAt)
+	fmt.Fprintf(w, "head: seq %d  updated %s\n",
+		p.HeadSeq, p.HeadUpdatedAt)
 	fmt.Fprintf(w, "freshness: %s\n", p.FreshnessNote)
 	fmt.Fprintln(w, "\nprogress:")
 	printJSON(w, p.Progress)
