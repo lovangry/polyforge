@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -292,6 +293,67 @@ func TestDaemonClientStatusRoundtrip(t *testing.T) {
 	if s.MachineID != "m1" || s.Mode != "interactive" || s.Queue.MaxConcurrent != 2 {
 		t.Errorf("StatusResponse = %+v", s)
 	}
+}
+
+// TestStatusSessionColumnsRawDecodeRender pins the v1.5 additive keys
+// on the status surface end to end: a RAW GET /status body whose jobs[]
+// carry `spawn_n` and `session_fingerprint` (keys the base StatusJob
+// bookkeeping predates) decodes into SpawnN / SessionFingerprint and
+// renders as the SPAWN cell `#<N>` and the SESSION fingerprint; a job
+// whose JSON LACKS the additive keys decodes to zero values and renders
+// "-" in both cells (additive decode must not break older bodies).
+func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
+	d := newDaemonFixture(t)
+	d.answer("GET", "/status",
+		`{"machine_id":"m1","mode":"interactive","shutting_down":false,`+
+			`"jobs":[`+
+			`{"work_item_id":"wi_run","status":"running","spawn_n":3,`+
+			`"session_fingerprint":"ab12cd34ef56aa00","agent_pid":42},`+
+			`{"work_item_id":"wi_old","status":"needs_input","agent_pid":43}`+
+			`],"queue":{"pending":1,"running":1,"max_concurrent":2}}`)
+
+	// Decode path: the raw socket body → StatusResponse carries the
+	// additive fields; the job without them reads as zero values.
+	c := NewDaemonClient(d.sock)
+	raw, err := c.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	var s StatusResponse
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(s.Jobs) != 2 {
+		t.Fatalf("jobs = %d, want 2", len(s.Jobs))
+	}
+	if s.Jobs[0].SpawnN != 3 || s.Jobs[0].SessionFingerprint != "ab12cd34ef56aa00" {
+		t.Errorf("additive decode: SpawnN=%d SessionFingerprint=%q, want 3 / ab12cd34ef56aa00",
+			s.Jobs[0].SpawnN, s.Jobs[0].SessionFingerprint)
+	}
+	if s.Jobs[1].SpawnN != 0 || s.Jobs[1].SessionFingerprint != "" {
+		t.Errorf("body without the additive keys must decode to zero values, got SpawnN=%d SessionFingerprint=%q",
+			s.Jobs[1].SpawnN, s.Jobs[1].SessionFingerprint)
+	}
+
+	// Render path: exact-output golden for the SPAWN / SESSION cells.
+	var b bytes.Buffer
+	renderStatus(&b, &s)
+	golden(t, "StatusSessionColumns", b.String(),
+		`machine: m1  mode: interactive  queue: 1 pending / 1 running / max 2
+
+WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  LAST-PROGRESS
+---------  -----------  ----------------  -----  ---------  --------  -------------
+wi_run     running      ab12cd34ef56aa00  #3     42         -         -
+wi_old     needs_input  -                 -      43         -         -
+`)
+
+	// Full verb drive: `pf ops status` runs the same raw-JSON → decode
+	// → render path against the same socket body.
+	code, stdout, stderr := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock}, "ops", "status")
+	if code != 0 {
+		t.Fatalf("ops status: code=%d stderr=%s", code, stderr)
+	}
+	golden(t, "OpsStatusSessionColumns", stdout, b.String())
 }
 
 // TestAnswerUniquePendingResolution: without --question, the answer verb
