@@ -864,9 +864,48 @@ func (s *Server) hReadyQueue(w http.ResponseWriter, r *http.Request, idn *identi
 // machine missing five consecutive heartbeats is stale.
 const defaultMachinesStaleAfter = 5 * time.Minute
 
+// authorizeMachineRegistration gates the FIRST-registration branch of the
+// heartbeat path (the M3 folded finding): minting a machine identity — a
+// machine_id with no machines row — is a privileged act, reserved for the
+// global admin or a maintainer of a configured project (the heartbeat body
+// carries no project context, so any project_members row with the
+// maintainer role qualifies). Refresh of an EXISTING machine row stays
+// open to any authenticated key: the gate fires only when the row is
+// absent, before core performs any write. This mirrors the admin-or-
+// project-maintainer convention of hPatchProject, but conditionally.
+func (s *Server) authorizeMachineRegistration(idn *identity, machineID string) error {
+	if strings.TrimSpace(machineID) == "" {
+		return nil // core rejects the empty id with bad input; nothing to gate
+	}
+	if idn.Role == "admin" {
+		return nil
+	}
+	var exists int
+	err := s.DB.QueryRow(`SELECT 1 FROM machines WHERE id=?1`, machineID).Scan(&exists)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if exists == 1 {
+		return nil // refresh path: open to any authenticated key, unchanged
+	}
+	var maintainer int
+	if err := s.DB.QueryRow(`SELECT 1 FROM project_members WHERE user_id=?1 AND role='maintainer' LIMIT 1`,
+		idn.UserID).Scan(&maintainer); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if maintainer == 1 {
+		return nil
+	}
+	return core.Fail(api.ErrAuthForbidden, "", "machine registration requires admin or project maintainer")
+}
+
 func (s *Server) hHeartbeat(w http.ResponseWriter, r *http.Request, idn *identity) {
 	var req core.MachineHeartbeat
 	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := s.authorizeMachineRegistration(idn, req.MachineID); err != nil {
 		writeErr(w, err)
 		return
 	}
