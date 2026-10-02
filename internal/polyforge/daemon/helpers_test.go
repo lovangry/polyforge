@@ -17,6 +17,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -160,6 +161,15 @@ type fakeHub struct {
 	// seeded list — the drain degraded-signal test scripts denials with
 	// it.
 	queueErr error
+	// heartbeats/heartbeatErr are the M3 liveness seam: heartbeats
+	// records every Heartbeat payload the daemon POSTed; heartbeatErr,
+	// when non-nil, fails every call (the backoff test's fault
+	// injector); heartbeatAttempts counts every call including failures
+	// (the disabled-mode test asserts on attempts, not successes). All
+	// guarded by mu.
+	heartbeats        []aihubclient.MachineHeartbeat
+	heartbeatErr      error
+	heartbeatAttempts int
 }
 
 type endCall struct {
@@ -278,6 +288,34 @@ func (h *fakeHub) Queue(project string) ([]api.WorkItem, error) {
 	out := make([]api.WorkItem, 0, len(h.queues))
 	out = append(out, h.queues...)
 	return out, nil
+}
+
+// Heartbeat records the M3 liveness POSTs; heartbeats carries the received
+// payloads (inspection seam for the heartbeat tests) and heartbeatErr, if
+// set, fails every call (the backoff test's fault injector).
+func (h *fakeHub) Heartbeat(req aihubclient.MachineHeartbeat) (*aihubclient.MachineHeartbeatResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.heartbeatAttempts++
+	if h.heartbeatErr != nil {
+		return nil, h.heartbeatErr
+	}
+	h.heartbeats = append(h.heartbeats, req)
+	return &aihubclient.MachineHeartbeatResult{MachineID: req.MachineID, UserID: "mac_test"}, nil
+}
+
+func (h *fakeHub) setHeartbeatErr(err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.heartbeatErr = err
+}
+
+func (h *fakeHub) heartbeatsSnapshot() []aihubclient.MachineHeartbeat {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]aihubclient.MachineHeartbeat, len(h.heartbeats))
+	copy(out, h.heartbeats)
+	return out
 }
 
 // Do serves the generic typed-request face the F6 memory adapters use.

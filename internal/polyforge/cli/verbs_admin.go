@@ -422,3 +422,43 @@ var cmdRotateSecret = &Command{
 		return nil
 	},
 }
+
+// ---------------------------------------------------------------------------
+// machines (M3 heartbeat wiring, lane hb-m3) — the machines liveness read
+// face; the operator half of GET /api/v1/machines (admin).
+
+var cmdMachines = &Command{
+	Name:    "machines",
+	Summary: "Machines liveness face (M3, admin only)",
+	Usage:   "pf machines list",
+	Setup:   func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) != 1 || args[0] != "list" {
+			return fmt.Errorf("machines: expected list")
+		}
+		out, err := ctx.aihub().ListMachines()
+		if err != nil {
+			return err
+		}
+		blob, err := json.Marshal(out)
+		if err != nil {
+			return err
+		}
+		ctx.finish(blob, func() {
+			fmt.Fprintf(ctx.Stdout, "machines: %d (stale threshold %ds)\n", out.Count, out.StaleAfterSeconds)
+			rows := make([][]string, 0, len(out.Machines))
+			for _, m := range out.Machines {
+				age := "?"
+				if m.HeartbeatAgeSeconds != nil {
+					age = fmt.Sprintf("%ds", *m.HeartbeatAgeSeconds)
+				}
+				rows = append(rows, []string{
+					m.ID, m.Mode, fmt.Sprintf("%v", m.LiveWIIDs), age, m.LastHeartbeatAt,
+					map[bool]string{true: "STALE", false: "alive"}[m.Stale],
+				})
+			}
+			printTable(ctx.Stdout, []string{"ID", "MODE", "LIVE WI", "HEARTBEAT AGE", "LAST HEARTBEAT", "STATE"}, rows)
+		})
+		return nil
+	},
+}

@@ -69,6 +69,7 @@ var commands = []*Command{
 	cmdShip,
 	cmdUsers,
 	cmdApiKeys,
+	cmdMachines,
 	cmdProjects,
 	cmdBackup,
 	cmdRotateSecret,

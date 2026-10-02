@@ -49,6 +49,10 @@ func main() {
 		dataDir     = flag.String("data-dir", "/var/lib/polyforge/aihub", "AIHub data directory")
 		listen      = flag.String("listen", ":8420", "HTTP listen address")
 		janitorFreq = flag.Duration("git-janitor-period", time.Hour, "bare-repo gc/repack period")
+		// Machines liveness threshold for GET /api/v1/machines: 5× the
+		// daemon heartbeat default (60s). Tune to ≥5× the actual
+		// -heartbeat-every the fleet runs with.
+		staleAfter = flag.Duration("machines-stale-after", 5*time.Minute, "machines liveness threshold for the stale projection (default 5m = 5× heartbeat default)")
 	)
 	flag.Parse()
 
@@ -89,6 +93,7 @@ func main() {
 	defer jan.Stop()
 
 	srv := server.New(db, *dataDir, gitMgr)
+	srv.StaleAfter = *staleAfter
 	httpSrv := &http.Server{Addr: *listen, Handler: srv}
 
 	go func() {

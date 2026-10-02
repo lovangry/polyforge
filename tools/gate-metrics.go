@@ -1381,7 +1381,22 @@ func readAihub(path string) aihubInfo {
 	if err := db.QueryRow("select count(*) from work_items").Scan(&ai.WITotal); err != nil {
 		ai.WITotal = 0
 	}
-	rows2, err := db.Query("select work_item_id, coalesce(machine_id,'') from owner_generations where ended_at is null")
+	// Active holder per WI. v1.5 schema: the session epoch lives ON the
+	// work_items row — session_machine is set on claim/attach and nulled
+	// by session-end and the terminal transitions, so `session_machine IS
+	// NOT NULL` is exactly "this WI's current holder" (the v1.5
+	// replacement for the deleted owner_generations table; the v1-era
+	// query here silently matched nothing on a v1.5 aihub.db, leaving the
+	// M3 heartbeat half permanently "无活跃 owner" even with live
+	// heartbeats). Verified 2026-10 (lane hb-m3) against a v1.5-shaped
+	// aihub.db built by internal/aihub/core.Open + AdminManager.Heartbeat:
+	//   go run ./tools/gate-metrics.go --m3-heartbeat-max-age 30m <root>
+	// with <root>/aihub-data/aihub.db carrying 1 machine + 1 held WI.
+	// The owner_generations fallback keeps v1-era pilot roots readable.
+	rows2, err := db.Query("select id, coalesce(session_machine,'') from work_items where session_machine is not null")
+	if err != nil {
+		rows2, err = db.Query("select work_item_id, coalesce(machine_id,'') from owner_generations where ended_at is null")
+	}
 	if err == nil {
 		for rows2.Next() {
 			var wi, m string
