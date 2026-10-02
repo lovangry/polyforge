@@ -41,8 +41,11 @@ requester, so whatever `fix` needs to know must end up in your memo.
    implementer could make two materially different choices: which behavior exactly is
    wrong or missing, what "fixed" looks like, edge cases the requester cares about, and
    anything that smells like an unstated assumption.
-2. For each material ambiguity, ask ONE focused question at a time via the interactive
-   needs_input mechanism your WI Agent drives (pf-execute §7). Do not
+2. BATCH your questions (owner ruling 2026-10-02): collect all material ambiguities
+   first, then ask them in ONE needs_input flush as a NUMBERED list (one focused
+   question per item, answerable in one line each) via the interactive needs_input
+   mechanism your WI Agent drives (pf-execute §7). Only a follow-up whose content
+   genuinely depends on an earlier answer waits. Do not
    fabricate or guess an answer you did not receive. Append every question and answer to
    `artifacts/grill-qa.md` under a `## grill` heading as they come in.
 3. Do not over-interrogate. This lane exists for small, well-understood changes: if after

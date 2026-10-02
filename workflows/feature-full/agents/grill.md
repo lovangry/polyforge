@@ -33,9 +33,15 @@ every ambiguity you can find as a question, not an assumption.
    ("does this include the admin UI or just the API"), edge-case behavior ("what happens
    on an empty list"), non-functional constraints ("does this need to be backward
    compatible with X"), and anything that smells like an unstated assumption.
-2. For each material ambiguity, ask ONE focused question at a time (not a wall of
-   questions in one message) via the interactive needs_input mechanism your WI Agent
-   drives (pf-execute §7): the WI Agent persists your question, waits, and
+2. BATCH your questions (owner ruling 2026-10-02): collect ALL material
+   ambiguities you can find first, then ask them in ONE needs_input flush as a
+   NUMBERED list (each item one focused question, answerable in one line each) —
+   the owner answers all of them in one reply (same numbering). Only a question
+   whose content GENUINELY depends on an earlier answer may wait for a
+   follow-up flush; do not drip independent questions one at a time.
+   Mechanism note: the pending-question slot is single, so the numbered list
+   rides in one question body with one question_id, and the combined answer
+   comes back as one relayed text (pf-execute §7).
    feeds the answer back to you when it arrives. Do not fabricate or guess at an answer
    you did not receive.
 3. Append every question and its answer to `artifacts/grill-qa.md` under a `## grill`
