@@ -257,7 +257,12 @@ func (m *AdminManager) ListAPIKeys() ([]APIKeyInfo, error) {
 
 // MachineHeartbeat is the machines/heartbeat body. First call registers
 // (creates the machine user + issues its key, plaintext once); repeats
-// only refresh the timestamp and the liveness projection. There is no
+// only refresh the timestamp and the liveness projection. Authorization
+// lives at the server face, not here: first registration is a privileged
+// act (global admin or a project maintainer — the hHeartbeat handler gates
+// it before calling this), while refresh of an existing machines row stays
+// open to any authenticated key. Core sees no caller identity, so direct
+// core calls register freely by design. There is no
 // client timestamp field: last_heartbeat_at is stamped by the SERVER
 // (core.Now, RFC3339Nano, single-writer SQLite) — client clocks are not
 // trusted for liveness. Mode/liveWIIDs are the M3 daemon liveness

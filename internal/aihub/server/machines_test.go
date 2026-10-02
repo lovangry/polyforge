@@ -110,6 +110,73 @@ func TestMachinesFaceAuth(t *testing.T) {
 	}
 }
 
+// TestHeartbeatFirstRegistrationRequiresAdmin pins the M3 folded finding:
+// first registration (a fresh machine_id minting a machine user + its first
+// key) is a privileged act. A non-admin writer api key must be refused with
+// 403 and must not mint anything; the admin key performs the first
+// registration; and refresh of an EXISTING machine row stays open to any
+// authenticated key (the refresh path is not a registration).
+func TestHeartbeatFirstRegistrationRequiresAdmin(t *testing.T) {
+	e := newSrvEnv(t)
+
+	// A plain human writer with a global (unscoped) api key — authenticated,
+	// but not admin.
+	wr, err := e.admin.CreateUser("wr", "wr-hb@example.com", "writer", "human")
+	if err != nil {
+		t.Fatalf("writer user: %v", err)
+	}
+	kwr, err := e.admin.CreateAPIKey(wr.ID, "wr-hb", "")
+	if err != nil {
+		t.Fatalf("writer key: %v", err)
+	}
+
+	// First registration under a FRESH machine_id with the writer key must
+	// be refused: minting a machine identity is not any-key territory.
+	code, body := e.do(t, "POST", "/api/v1/machines/heartbeat", kwr.Plain,
+		map[string]any{"machine_id": "m-writer-attempt", "runtime_version": "v1.5"}, nil)
+	if code != 403 {
+		t.Fatalf("writer first registration must be refused with 403, got %d: %s", code, body)
+	}
+
+	// The refusal must not have minted anything: no machines row, no machine
+	// user, no api key for a would-be machine identity.
+	var n int
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM machines WHERE id='m-writer-attempt'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("refused registration must not create a machines row: n=%d err=%v", n, err)
+	}
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM users WHERE kind='machine' AND display_name LIKE '%m-writer-attempt%'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("refused registration must not create a machine user: n=%d err=%v", n, err)
+	}
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM api_keys WHERE name='machine registration'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("refused registration must not mint a first key: n=%d err=%v", n, err)
+	}
+
+	// The admin key performs the first registration (the privileged act).
+	type hbResp struct {
+		Registered bool `json:"registered"`
+		MachineID string `json:"machine_id"`
+		UserID    string `json:"user_id"`
+		APIKey    *struct {
+			Plain string `json:"plain"`
+		} `json:"api_key"`
+	}
+	var admin1 hbResp
+	code, body = e.do(t, "POST", "/api/v1/machines/heartbeat", e.key,
+		map[string]any{"machine_id": "m-writer-attempt"}, &admin1)
+	if code != 200 || !admin1.Registered || admin1.APIKey == nil {
+		t.Fatalf("admin first registration: code=%d body=%s", code, body)
+	}
+
+	// Refresh of the existing row stays open to the writer key: no new
+	// registration, no key in the response, same identity.
+	var wrRefresh hbResp
+	code, body = e.do(t, "POST", "/api/v1/machines/heartbeat", kwr.Plain,
+		map[string]any{"machine_id": "m-writer-attempt"}, &wrRefresh)
+	if code != 200 || wrRefresh.Registered || wrRefresh.APIKey != nil || wrRefresh.UserID != admin1.UserID {
+		t.Fatalf("writer refresh of existing machine must stay open: code=%d body=%s", code, body)
+	}
+}
+
 func TestMachinesFaceUnparseableStamp(t *testing.T) {
 	e := newSrvEnv(t)
 	if _, body := e.do(t, "POST", "/api/v1/machines/heartbeat", e.key,
