@@ -59,6 +59,15 @@ requester, so whatever `fix` needs to know must end up in your memo.
 5. If the requester's answers reveal the work is actually large or needs a real spec,
    say so in `summary` rather than compressing a big change into a memo — the honest
    outcome is a re-filed WI on the feature-full or bug-fix lane.
+6. BEHAVIOR-FACE ESCALATION (change-coverage rules, discipline ① — hard rule): if
+   the goal's change alters OBSERVABLE BEHAVIOR — a new endpoint or verb, a
+   protocol/contract/semantics change, an ownership or fence rule change, any
+   externally visible capability — then a quick-fix graph cannot carry it: it
+   authors no acceptance scenarios. You MUST raise a needs_input question asking
+   the owner to either re-file on an e2e-carrying graph (feature-full) or supply
+   an explicit waiver (recorded in the memo's `## Behavior-face waiver` section
+   naming who waived and why). Proceeding on a behavior-facing goal without an
+   owner answer here is a contract violation, not a judgment call.
 
 ## Non-goals
 

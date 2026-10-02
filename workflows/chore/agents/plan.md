@@ -56,6 +56,16 @@ whether it exists:
    locks; an under-declared write is a real lock gap.
 4. Write `artifacts/plan.md` with an ordered `## Steps` section, then emit the ordered
    step ids and the deduplicated touched-files list.
+5. BEHAVIOR-FACE ESCALATION (change-coverage rules, discipline ① — hard rule): a
+   chore graph authors no acceptance scenarios. If reading the WI reveals the work
+   alters OBSERVABLE BEHAVIOR — new endpoint/verb, protocol/contract/semantics
+   change, ownership or fence rule change — you cannot proceed silently. The
+   chore graph has no interactive checkpoint, so the escalation routes through
+   the WI agent's needs_input channel: emit the plan anyway BUT set `out_of_scope:
+   "behavior-face: requires an e2e-carrying graph"` in your output summary, so
+   the WI agent raises the owner question before running `code`. A behavior-facing
+   change executed on the chore graph without an owner waiver on record is a
+   contract violation.
 
 ## Non-goals
 
