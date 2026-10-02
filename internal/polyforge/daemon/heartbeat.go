@@ -1,0 +1,129 @@
+package daemon
+
+// heartbeat.go: the M3 daemon liveness face (lane hb-m3). Every
+// cfg.HeartbeatEvery the daemon POSTs /api/v1/machines/heartbeat: machine
+// identity, current mode and the WI ids it holds live. The server stamps
+// last_heartbeat_at itself — the payload carries no client timestamp (one
+// clock, no skew; gate-metrics judges against the server-stamped value).
+// Failures are log-only with a bounded backoff: a liveness signal must
+// never take the daemon down, must never block Run, and must never
+// hot-loop against a dead aihub. Disabled entirely by
+// cfg.HeartbeatEvery <= 0 (flag -heartbeat-every 0).
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"sort"
+	"time"
+
+	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+)
+
+// heartbeatRuntimeVersion identifies the daemon's wire generation in
+// machines.runtime_version. Generation-scoped, not build-scoped: bump it
+// with the protocol generation, not per commit.
+const heartbeatRuntimeVersion = "v1.5"
+
+// heartbeatBackoffCap bounds the failure backoff at 16× the base cadence
+// (16m at the 60s default). The operator still sees every failure in the
+// log; only the retry pressure is throttled.
+const heartbeatBackoffCap = 16
+
+// heartbeatLoop sends one heartbeat per tick until ctx is canceled. The
+// interval doubles per consecutive failure (bounded above), resetting on
+// the first success — so a dead aihub costs one log line per backoff
+// window instead of one POST per second, and a healthy aihub costs
+// exactly one POST per HeartbeatEvery.
+func (d *Daemon) heartbeatLoop(ctx context.Context) {
+	base := d.cfg.HeartbeatEvery
+	if base <= 0 {
+		return // disabled
+	}
+	delay := base
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	failStreak := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if err := d.sendHeartbeat(); err != nil {
+				failStreak++
+				shift := failStreak
+				if shift > 4 {
+					shift = 4 // 16× base == heartbeatBackoffCap
+				}
+				delay = base << uint(shift)
+				if max := base * heartbeatBackoffCap; delay > max {
+					delay = max
+				}
+				fmt.Fprintf(os.Stderr, "daemon: heartbeat failed (%d consecutive): %v; retry in %s\n",
+					failStreak, err, delay)
+			} else {
+				if failStreak > 0 {
+					fmt.Fprintf(os.Stderr, "daemon: heartbeat recovered after %d failures\n", failStreak)
+				}
+				failStreak = 0
+				delay = base
+			}
+			timer.Reset(delay)
+		}
+	}
+}
+
+// sendHeartbeat posts one heartbeat with the daemon's current liveness
+// projection. Errors are returned (log-only at the caller); a first
+// registration is noted — WITHOUT the issued key: the registration
+// response carries the machine identity's plaintext api key once, and the
+// daemon runs on its operator-issued credential instead.
+func (d *Daemon) sendHeartbeat() error {
+	res, err := d.hub.Heartbeat(aihubclient.MachineHeartbeat{
+		MachineID:      d.cfg.MachineID,
+		RuntimeVersion: heartbeatRuntimeVersion,
+		Mode:           d.modes.Current(),
+		LiveWIIDs:      liveWIIDs(d.rt.List()),
+	})
+	if err != nil {
+		return err
+	}
+	if res.Registered {
+		fmt.Fprintf(os.Stderr, "daemon: heartbeat registered machine %s (user %s)\n", res.MachineID, res.UserID)
+	}
+	return nil
+}
+
+// nextHeartbeatDelay is the pure backoff kernel: delay after a tick that
+// failed failStreak consecutive times at base cadence. Exposed for the
+// unit test — the loop's timer arithmetic must not need a flaky sleep
+// ladder to be pinned.
+func nextHeartbeatDelay(base time.Duration, failStreak int) time.Duration {
+	shift := failStreak
+	if shift > 4 {
+		shift = 4
+	}
+	d := base << uint(shift)
+	if max := base * heartbeatBackoffCap; d > max {
+		d = max
+	}
+	return d
+}
+
+// liveWIIDs projects the runtime's job table to the WI ids the daemon
+// currently holds live: running, recovering or sealing. Paused jobs are
+// retained records whose session is closed server-side — not held live.
+// Never nil: an idle daemon states an empty list (see the client type's
+// live_wi_ids contract).
+func liveWIIDs(jobs []runtime.JobInfo) []string {
+	out := []string{}
+	for _, j := range jobs {
+		switch j.State {
+		case runtime.StateRunning, runtime.StateRecovering, runtime.StateSealing:
+			out = append(out, j.WorkItem)
+		}
+	}
+	sort.Strings(out)
+	return out
+}

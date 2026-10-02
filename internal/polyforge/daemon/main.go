@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
@@ -50,6 +51,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	probeTimeout := fs.Duration("probe-timeout", 0, "liveness-probe ack bound (default 2m)")
 	answerAckWindow := fs.Duration("answer-ack-window", 0, "pf/answer consumption-ack window (default 2m)")
 	revalidateEvery := fs.Duration("revalidate-every", 0, "M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
+	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "machines heartbeat cadence (0 = disabled)")
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}
@@ -143,6 +145,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		MaxConcurrent:       *maxConcurrent,
 		RecallTopK:          *recallTopK,
 		Mode:                *mode,
+		HeartbeatEvery:      *heartbeatEvery,
 		Hub:                 aihubclient.New(*server, *apiKey),
 		// Zero fields fall through to observe's own fill() defaults, so a
 		// daemon started without these flags keeps the production windows.

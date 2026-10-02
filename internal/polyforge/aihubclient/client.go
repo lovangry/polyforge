@@ -415,6 +415,72 @@ func (c *Client) RebuildMemoryIndex() (int, error) {
 }
 
 // ---------------------------------------------------------------------------
+// Machines faces (M3 heartbeat wiring).
+
+// MachineHeartbeat is the POST /api/v1/machines/heartbeat body: machine
+// identity plus the daemon's live projection. No client timestamp — the
+// server stamps last_heartbeat_at itself (single clock, no skew).
+// live_wi_ids carries NO omitempty: every heartbeat restates the full
+// projection (an idle daemon sends []), because the server treats an
+// absent field as keep-old and a held-back empty list would leave ghost
+// WI ids in the machines read face forever.
+type MachineHeartbeat struct {
+	MachineID      string   `json:"machine_id"`
+	RuntimeVersion string   `json:"runtime_version,omitempty"`
+	Mode           string   `json:"mode,omitempty"`
+	LiveWIIDs      []string `json:"live_wi_ids"`
+}
+
+// MachineHeartbeatResult is the heartbeat response. On first registration
+// the server also issues the machine identity's api key (plaintext shown
+// once, JSON field api_key) — this struct deliberately does not carry it:
+// the daemon heartbeats with its OPERATOR-issued credential, so a key it
+// never asked for must not flow through the client surface.
+type MachineHeartbeatResult struct {
+	Registered bool   `json:"registered"` // true only on the first call
+	MachineID  string `json:"machine_id"`
+	UserID     string `json:"user_id"`
+}
+
+// Heartbeat posts one machine heartbeat (upsert: first call registers).
+func (c *Client) Heartbeat(req MachineHeartbeat) (*MachineHeartbeatResult, error) {
+	var out MachineHeartbeatResult
+	if err := c.Do("POST", "/api/v1/machines/heartbeat", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// MachineStatus is one GET /api/v1/machines row (admin read face): the
+// stored liveness projection plus the server-computed stale boolean.
+type MachineStatus struct {
+	ID                  string   `json:"id"`
+	UserID              string   `json:"user_id"`
+	RuntimeVersion      string   `json:"runtime_version,omitempty"`
+	Mode                string   `json:"mode,omitempty"`
+	LiveWIIDs           []string `json:"live_wi_ids"`
+	LastHeartbeatAt     string   `json:"last_heartbeat_at"`
+	HeartbeatAgeSeconds *int64   `json:"heartbeat_age_seconds,omitempty"`
+	Stale               bool     `json:"stale"`
+}
+
+// MachinesList is the GET /api/v1/machines response.
+type MachinesList struct {
+	Machines          []MachineStatus `json:"machines"`
+	StaleAfterSeconds int64           `json:"stale_after_seconds"`
+	Count             int             `json:"count"`
+}
+
+// ListMachines reads the machines liveness face (admin credential).
+func (c *Client) ListMachines() (*MachinesList, error) {
+	var out MachinesList
+	if err := c.Do("GET", "/api/v1/machines", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ---------------------------------------------------------------------------
 // v1.5 session model client (v1.5-api-contract.md §3).
 
 // SessionClaim performs the CAS claim: set the session only if the WI is

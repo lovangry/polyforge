@@ -257,13 +257,21 @@ func (m *AdminManager) ListAPIKeys() ([]APIKeyInfo, error) {
 
 // MachineHeartbeat is the machines/heartbeat body. First call registers
 // (creates the machine user + issues its key, plaintext once); repeats
-// only refresh the timestamp.
+// only refresh the timestamp and the liveness projection. There is no
+// client timestamp field: last_heartbeat_at is stamped by the SERVER
+// (core.Now, RFC3339Nano, single-writer SQLite) — client clocks are not
+// trusted for liveness. Mode/liveWIIDs are the M3 daemon liveness
+// projection (mode empty = keep the stored value; live_wi_ids nil = keep,
+// non-nil including empty = replace).
 type MachineHeartbeat struct {
-	MachineID      string `json:"machine_id"`
-	RuntimeVersion string `json:"runtime_version,omitempty"`
-	DisplayName    string `json:"display_name,omitempty"`
+	MachineID      string   `json:"machine_id"`
+	RuntimeVersion string   `json:"runtime_version,omitempty"`
+	DisplayName    string   `json:"display_name,omitempty"`
+	Mode           string   `json:"mode,omitempty"`
+	LiveWIIDs      []string `json:"live_wi_ids,omitempty"`
 }
 
+// HeartbeatResult is the heartbeat response.
 type HeartbeatResult struct {
 	Registered bool       `json:"registered"` // first call created the identity
 	MachineID  string     `json:"machine_id"`
@@ -275,16 +283,21 @@ func (m *AdminManager) Heartbeat(req MachineHeartbeat) (*HeartbeatResult, error)
 	if strings.TrimSpace(req.MachineID) == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "machine_id required")
 	}
+	live := nullableJSON(req.LiveWIIDs)
 	// Existing machine: refresh only.
 	var userID string
 	err := m.db.QueryRow(`SELECT user_id FROM machines WHERE id=?1`, req.MachineID).Scan(&userID)
 	if err == nil {
-		var rv any
+		var rv, md any
 		if req.RuntimeVersion != "" {
 			rv = req.RuntimeVersion
 		}
-		if _, err := m.db.Exec(`UPDATE machines SET last_heartbeat_at=?, runtime_version=COALESCE(?, runtime_version)
-			WHERE id=?1`, Now(), rv, req.MachineID); err != nil {
+		if req.Mode != "" {
+			md = req.Mode
+		}
+		if _, err := m.db.Exec(`UPDATE machines SET last_heartbeat_at=?2, runtime_version=COALESCE(?3, runtime_version),
+			mode=COALESCE(?4, mode), live_wi_ids=COALESCE(?5, live_wi_ids)
+			WHERE id=?1`, req.MachineID, Now(), rv, md, live); err != nil {
 			return nil, err
 		}
 		return &HeartbeatResult{MachineID: req.MachineID, UserID: userID}, nil
@@ -311,8 +324,8 @@ func (m *AdminManager) Heartbeat(req MachineHeartbeat) (*HeartbeatResult, error)
 		VALUES (?1,?2,?3,'machine','writer',?4)`, uid, display, email, Now()); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`INSERT INTO machines(id, user_id, runtime_version, last_heartbeat_at)
-		VALUES (?1,?2,?3,?4)`, req.MachineID, uid, req.RuntimeVersion, Now()); err != nil {
+	if _, err := tx.Exec(`INSERT INTO machines(id, user_id, runtime_version, mode, live_wi_ids, last_heartbeat_at)
+		VALUES (?1,?2,?3,?4,?5,?6)`, req.MachineID, uid, req.RuntimeVersion, req.Mode, live, Now()); err != nil {
 		return nil, err
 	}
 	keyID, err := NewID("key_")
@@ -339,6 +352,54 @@ func (m *AdminManager) Heartbeat(req MachineHeartbeat) (*HeartbeatResult, error)
 			Plain: plain,
 		},
 	}, nil
+}
+
+// MachineRow is one machines read-model row (the admin machines face).
+type MachineRow struct {
+	ID              string   `json:"id"`
+	UserID          string   `json:"user_id"`
+	RuntimeVersion  string   `json:"runtime_version,omitempty"`
+	Mode            string   `json:"mode,omitempty"`
+	LiveWIIDs       []string `json:"live_wi_ids"`
+	LastHeartbeatAt string   `json:"last_heartbeat_at"`
+}
+
+// Machines lists every registered machine oldest-heartbeat-first (the
+// admin read face behind GET /api/v1/machines; the server computes the
+// stale projection — staleness is presentation, not storage).
+func (m *AdminManager) Machines() ([]MachineRow, error) {
+	rows, err := m.db.Query(`SELECT id, user_id, COALESCE(runtime_version,''), COALESCE(mode,''),
+		COALESCE(live_wi_ids,'[]'), last_heartbeat_at FROM machines ORDER BY last_heartbeat_at ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MachineRow
+	for rows.Next() {
+		var r MachineRow
+		var live string
+		if err := rows.Scan(&r.ID, &r.UserID, &r.RuntimeVersion, &r.Mode, &live, &r.LastHeartbeatAt); err != nil {
+			return nil, err
+		}
+		r.LiveWIIDs = []string{}
+		_ = json.Unmarshal([]byte(live), &r.LiveWIIDs)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// nullableJSON marshals ids for a nullable JSON-array column: nil stays
+// NULL ("keep the stored value" in the upsert's COALESCE), an empty slice
+// stores [] ("replace with nothing held live").
+func nullableJSON(ids []string) any {
+	if ids == nil {
+		return nil
+	}
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return nil // []string always marshals; defensive only
+	}
+	return string(b)
 }
 
 // ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
@@ -38,8 +39,9 @@ import (
 // session-claim/end use: the ready-queue projection (batch recommendation,
 // drain loop), the terminal-state check of the wrap/pause arbitration,
 // and — through the generic Do — the memory faces the F6 lanes proxy
-// through (search with an excerpt, memory create). *aihubclient.Client
-// satisfies it.
+// through (search with an excerpt, memory create). Heartbeat is the M3
+// machines liveness face the heartbeat loop POSTs on its own cadence.
+// *aihubclient.Client satisfies it.
 type Hub interface {
 	runtime.Aihub
 	Queue(project string) ([]api.WorkItem, error)
@@ -47,6 +49,8 @@ type Hub interface {
 	// periodic per-RUNNING-job revalidation the observe monitor
 	// piggybacks on its tick. *aihubclient.Client satisfies it.
 	SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error)
+	// Heartbeat posts one machines/heartbeat upsert (M3 liveness face).
+	Heartbeat(req aihubclient.MachineHeartbeat) (*aihubclient.MachineHeartbeatResult, error)
 	// Do performs one typed request against aihub (the client's own
 	// generic entry): the F6 memory adapters use it for the calls the
 	// shared client carries no typed method for.
@@ -75,6 +79,13 @@ type Config struct {
 	RecallTopK int
 	Mode       string // initial mode; "" = not specified (persisted mode wins; default interactive)
 	Harness    string // harness adapter name (default "pi")
+
+	// HeartbeatEvery is the machines liveness cadence (M3): how often the
+	// daemon POSTs /api/v1/machines/heartbeat. <= 0 disables the
+	// heartbeat loop entirely; `pf daemon` wires the flag -heartbeat-every
+	// whose default (60s) is the production cadence the aihub side's
+	// 5×-default stale window assumes.
+	HeartbeatEvery time.Duration
 
 	// Test/ops knobs.
 	Spawner     runtime.Spawner  // nil = the production pi spawner
@@ -436,6 +447,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer dispatch.Stop()
 	drain := time.NewTicker(d.cfg.DrainInterval)
 	defer drain.Stop()
+	// M3 heartbeat: its own goroutine on runCtx (canceled by the shutdown
+	// sequence's cancelRun) so liveness can never block or be blocked by
+	// the dispatch/drain loop. Log-only failures inside; never fatal.
+	go d.heartbeatLoop(d.runCtx)
 	for {
 		select {
 		case <-ctx.Done():

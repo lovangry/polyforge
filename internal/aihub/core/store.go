@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS machines (
   id          TEXT PRIMARY KEY,
   user_id     TEXT NOT NULL REFERENCES users(id),
   runtime_version TEXT,
+  -- M3 heartbeat wiring (lane hb-m3, additive): the daemon's liveness
+  -- payload carries its current mode and the WI ids it holds live, so the
+  -- machines read face (GET /api/v1/machines) answers not just "alive?"
+  -- but "alive and running what?". live_wi_ids is a JSON array string.
+  mode        TEXT,
+  live_wi_ids TEXT,
   last_heartbeat_at TEXT NOT NULL
 );
 
@@ -220,7 +226,39 @@ func Open(dataDir string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("core: migrate sessions: %w", err)
 	}
+	// M3 heartbeat wiring: machines gains mode/live_wi_ids in place for
+	// databases created before the daemon heartbeat face was wired.
+	if err := migrateMachines(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("core: migrate machines: %w", err)
+	}
 	return &DB{sqlDB}, nil
+}
+
+// machineColumns are the M3 heartbeat additions to machines (DDL above).
+// Fresh installs get them from the DDL; existing databases get them from
+// migrateMachines' guarded ALTER TABLE, same discipline as migrateSessions.
+var machineColumns = []struct{ name, decl string }{
+	{"mode", "TEXT"},
+	{"live_wi_ids", "TEXT"},
+}
+
+// migrateMachines adds the machines heartbeat columns when missing. Every
+// guard makes re-runs (and fresh DDL installs) no-ops.
+func migrateMachines(db *sql.DB) error {
+	for _, c := range machineColumns {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('machines') WHERE name=?1`, c.name).Scan(&n); err != nil {
+			return fmt.Errorf("probe column %s: %w", c.name, err)
+		}
+		if n != 0 {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE machines ADD COLUMN ` + c.name + ` ` + c.decl); err != nil {
+			return fmt.Errorf("add column %s: %w", c.name, err)
+		}
+	}
+	return nil
 }
 
 // sessionColumns are the v1.5 work_items additions (schema section in the

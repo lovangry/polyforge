@@ -33,6 +33,12 @@ type Server struct {
 	Git      *git.Manager
 	DataDir  string
 
+	// StaleAfter is the machines liveness threshold used by the machines
+	// read face: a machine whose last_heartbeat_at is older than this is
+	// reported stale. Zero keeps the default (5× the 60s heartbeat
+	// default = 5m); cmd/aihub wires it to -machines-stale-after.
+	StaleAfter time.Duration
+
 	mux *http.ServeMux
 }
 
@@ -76,6 +82,7 @@ func (s *Server) routes() {
 	m.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking}/{kind}", s.auth(s.hDelDep))
 	m.HandleFunc("GET /api/v1/projects/{project}/ready-queue", s.auth(s.hReadyQueue))
 	m.HandleFunc("POST /api/v1/machines/heartbeat", s.auth(s.hHeartbeat))
+	m.HandleFunc("GET /api/v1/machines", s.authAdmin(s.hListMachines))
 
 	// Memory face.
 	m.HandleFunc("POST /api/v1/memories", s.auth(s.hCreateMemory))
@@ -857,6 +864,10 @@ func (s *Server) hReadyQueue(w http.ResponseWriter, r *http.Request, idn *identi
 // ---------------------------------------------------------------------------
 // Machines
 
+// defaultMachinesStaleAfter is 5× the daemon heartbeat default (60s): a
+// machine missing five consecutive heartbeats is stale.
+const defaultMachinesStaleAfter = 5 * time.Minute
+
 func (s *Server) hHeartbeat(w http.ResponseWriter, r *http.Request, idn *identity) {
 	var req core.MachineHeartbeat
 	if err := decodeBody(r, &req); err != nil {
@@ -869,6 +880,68 @@ func (s *Server) hHeartbeat(w http.ResponseWriter, r *http.Request, idn *identit
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// machinesStaleAfter resolves the configured threshold (0 = default).
+func (s *Server) machinesStaleAfter() time.Duration {
+	if s.StaleAfter <= 0 {
+		return defaultMachinesStaleAfter
+	}
+	return s.StaleAfter
+}
+
+// machineStatus is one machines read-face row: the stored liveness
+// projection plus the server-computed stale boolean and age. An
+// unparseable last_heartbeat_at reports stale=false with no age —
+// "cannot judge" is not "dead" (gate-metrics reports it the same way).
+type machineStatus struct {
+	ID                  string   `json:"id"`
+	UserID              string   `json:"user_id"`
+	RuntimeVersion      string   `json:"runtime_version,omitempty"`
+	Mode                string   `json:"mode,omitempty"`
+	LiveWIIDs           []string `json:"live_wi_ids"`
+	LastHeartbeatAt     string   `json:"last_heartbeat_at"`
+	HeartbeatAgeSeconds *int64   `json:"heartbeat_age_seconds,omitempty"`
+	Stale               bool     `json:"stale"`
+}
+
+// hListMachines is the operators' liveness read face (admin): every
+// registered machine with its last_heartbeat_at and the stale projection
+// computed against StaleAfter. This is the read half the M3 gate metric
+// judges against (--m3-heartbeat-max-age reads the same table offline).
+func (s *Server) hListMachines(w http.ResponseWriter, r *http.Request, idn *identity) {
+	rows, err := s.Admin.Machines()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	staleAfter := s.machinesStaleAfter()
+	now := time.Now()
+	out := make([]machineStatus, 0, len(rows))
+	for _, m := range rows {
+		st := machineStatus{
+			ID:              m.ID,
+			UserID:          m.UserID,
+			RuntimeVersion:  m.RuntimeVersion,
+			Mode:            m.Mode,
+			LiveWIIDs:       m.LiveWIIDs,
+			LastHeartbeatAt: m.LastHeartbeatAt,
+		}
+		if hb, err := time.Parse(time.RFC3339, m.LastHeartbeatAt); err == nil {
+			age := int64(now.Sub(hb).Seconds())
+			if age < 0 {
+				age = 0
+			}
+			st.HeartbeatAgeSeconds = &age
+			st.Stale = time.Duration(age)*time.Second > staleAfter
+		}
+		out = append(out, st)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"machines":            out,
+		"stale_after_seconds": int64(staleAfter.Seconds()),
+		"count":               len(out),
+	})
 }
 
 // ---------------------------------------------------------------------------
