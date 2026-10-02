@@ -47,6 +47,16 @@ type CreateRequest struct {
 	// transaction (INV-2e); there is no UPDATE path.
 	BundleName   *string `json:"bundle_name"`
 	BundleDigest *string `json:"bundle_digest"` // optional client-supplied pin; defaulted below
+	// Repo-reference triple (02 §4.6, the surface the TODO(v1) §4.5
+	// checkout-hash comment guarded): the declaration (name/url/subdir)
+	// and the frozen base sha arrive as two arrays and are validated as
+	// ONE triple inside the create transaction — a count/name-set
+	// mismatch is INVENTORY_MISMATCH, a declared entry whose base is
+	// missing/blank is INVENTORY_BASE_MISSING, and the create fails
+	// whole with nothing persisted. The base is frozen at create and
+	// immutable after (no UPDATE path).
+	RepoInventory     []RepoDecl     `json:"repo_inventory"`
+	RepoInventoryBase []RepoBaseDecl `json:"repo_inventory_base"`
 }
 
 // terminal statuses (common/api vocabulary, single-l "canceled").
@@ -172,6 +182,15 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		req.ParentID = nil
 	}
 
+	// Repo-reference triple (02 §4.6): validated INSIDE the create
+	// transaction so a refused create persists nothing (fail whole). A
+	// declared repo whose base sha is missing/blank draws the typed
+	// CORE-400 INVENTORY_BASE_MISSING naming the offending repo.
+	baseByName, ivErr := validateRepoInventory(req.RepoInventory, req.RepoInventoryBase)
+	if ivErr != nil {
+		return nil, ivErr
+	}
+
 	// Display seq: PER-PROJECT monotonic (<project>#<seq>). The legacy
 	// library numbers WIs per project (aiterm#1 and defswitch#1 both
 	// exist) and slugs have always resolved by (project, seq); the seq-fix
@@ -215,6 +234,11 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		return nil, err
 	}
 	if err := appendEventTx(tx, id, now, req.Reporter, "work_item_filed", nil); err != nil {
+		return nil, err
+	}
+	// Freeze the validated repo inventory in the SAME transaction as
+	// the WI row (§4.6: base frozen at create, immutable after).
+	if err := insertRepoInventoryTx(tx, id, req.RepoInventory, baseByName); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -415,6 +439,34 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
 		return nil, err
+	}
+	// Repo-inventory keys (02 §4.6) are immutable after the create
+	// transaction, but the triple is validated FIRST: a half-empty
+	// entry (name+URL, missing/blank base) draws the base-naming
+	// INVENTORY_BASE_MISSING refusal — the same vocabulary as create —
+	// not the generic not-patchable/IMMUTABLE one. A well-formed triple
+	// is then refused as immutable (§4.6 has no UPDATE path; a changed
+	// inventory means a new WI). Nothing mutates either way.
+	if _, ok := fields["repo_inventory"]; ok {
+		var inv []RepoDecl
+		if json.Unmarshal(fields["repo_inventory"], &inv) != nil {
+			return nil, Fail(api.ErrCoreBadInput, "", "repo_inventory must be an array of {name,url,subdir?}")
+		}
+		var bases []RepoBaseDecl
+		if raw, ok := fields["repo_inventory_base"]; ok {
+			if json.Unmarshal(raw, &bases) != nil {
+				return nil, Fail(api.ErrCoreBadInput, "", "repo_inventory_base must be an array of {name,base}")
+			}
+		}
+		if _, ivErr := validateRepoInventory(inv, bases); ivErr != nil {
+			return nil, ivErr
+		}
+		return nil, Fail(api.ErrCoreBadInput, "IMMUTABLE",
+			"repo_inventory is frozen at create (02 §4.6, no UPDATE path); cancel and re-create the work item to change it")
+	}
+	if _, ok := fields["repo_inventory_base"]; ok {
+		return nil, Fail(api.ErrCoreBadInput, "IMMUTABLE",
+			"repo_inventory_base is frozen at create (02 §4.6, no UPDATE path); cancel and re-create the work item to change it")
 	}
 	for k := range fields {
 		if !patchableFields[k] {

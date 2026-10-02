@@ -106,9 +106,13 @@ type SessionPublic struct {
 // marshals as the api.WorkItem JSON plus the SessionPublic fields
 // (embedded structs flatten); Phase 0's api.WorkItem itself is frozen and
 // gains nothing, so the block rides alongside it at the server boundary.
+// The frozen §4.6 repo inventory (base included) rides the same way: a
+// well-formed create must be observable on the WI view, not silently
+// discarded; it is omitted when the WI declared none.
 type WIView struct {
 	api.WorkItem
 	SessionPublic
+	RepoInventory []WIRepoEntry `json:"repo_inventory,omitempty"`
 }
 
 // sessionPublicOf reads one WI's public session block.
@@ -129,13 +133,18 @@ func (db *DB) sessionPublicOf(wiID string) (SessionPublic, error) {
 	return sp, nil
 }
 
-// View wraps one WorkItem with its public session audit block.
+// View wraps one WorkItem with its public session audit block and its
+// frozen repo inventory (§4.6, base included).
 func (m *WIManager) View(wi *api.WorkItem) (*WIView, error) {
 	sp, err := m.db.sessionPublicOf(wi.ID)
 	if err != nil {
 		return nil, err
 	}
-	return &WIView{WorkItem: *wi, SessionPublic: sp}, nil
+	inv, err := m.repoInventoryOf(wi.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &WIView{WorkItem: *wi, SessionPublic: sp, RepoInventory: inv}, nil
 }
 
 // sessionPublicBatch reads many WIs' public session blocks in ONE query.
