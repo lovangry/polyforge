@@ -11,6 +11,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 )
 
 // Rendering rules:
@@ -560,6 +561,27 @@ func renderApiKeys(w io.Writer, raw json.RawMessage) {
 		rows = append(rows, []string{it.ID, it.UserID, nullable(it.ProjectID), nullable(it.RevokedAt)})
 	}
 	printTable(w, []string{"ID", "USER", "SCOPE", "REVOKED"}, rows)
+}
+
+// renderMachines renders the machines liveness list (M3, admin read
+// face): RUNTIME is the machine's reported go version ("-" when it has
+// none), LIVE WI the bare count of live work item ids, and STATE the
+// server-computed stale projection (STALE vs alive).
+func renderMachines(w io.Writer, list *aihubclient.MachinesList) {
+	fmt.Fprintf(w, "machines: %d (stale threshold %ds)\n", list.Count, list.StaleAfterSeconds)
+	rows := make([][]string, 0, len(list.Machines))
+	for _, m := range list.Machines {
+		age := "?"
+		if m.HeartbeatAgeSeconds != nil {
+			age = fmt.Sprintf("%ds", *m.HeartbeatAgeSeconds)
+		}
+		rows = append(rows, []string{
+			m.ID, m.Mode, orDash(m.RuntimeVersion), strconv.Itoa(len(m.LiveWIIDs)),
+			age, m.LastHeartbeatAt,
+			map[bool]string{true: "STALE", false: "alive"}[m.Stale],
+		})
+	}
+	printTable(w, []string{"ID", "MODE", "RUNTIME", "LIVE WI", "HEARTBEAT AGE", "LAST HEARTBEAT", "STATE"}, rows)
 }
 
 // renderProjects renders the M3 list.
