@@ -422,11 +422,26 @@ func (r *Runtime) rearmRelease(msg protocol.RTMsg) {
 // can consume the channel anymore).
 func (r *Runtime) runReleaseLane(queue <-chan protocol.RTMsg, done <-chan struct{}) {
 	for {
+		// done has PRIORITY: a closed lane abandons everything promptly.
+		// Without this pre-check the receive select below has both cases
+		// ready (a parked message + closed done) and Go picks randomly —
+		// the merge-suite run measured exactly that 50% race against the
+		// abandon-on-Close contract.
+		select {
+		case <-done:
+			return
+		default:
+		}
 		var msg protocol.RTMsg
 		select {
 		case msg = <-queue:
 		case <-done:
 			return
+		}
+		select {
+		case <-done:
+			return
+		default:
 		}
 		select {
 		case r.toOB <- msg:
