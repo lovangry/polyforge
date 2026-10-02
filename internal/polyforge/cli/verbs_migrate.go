@@ -100,7 +100,7 @@ var cmdMigrateWorkItems = &Command{
 		"milestone, labels, attrs, reporter (old user id), assignee, waiting_on,\n" +
 		"bundle_name, bundle_digest, workflow_budget_baseline, created_at,\n" +
 		"updated_at, closed_at. Terminal records only: execution history never\n" +
-		"migrates (no events, no generations, no capsules). Ids and seqs are kept\n" +
+		"migrates (no events, no sessions, no capsules). Ids and seqs are kept\n" +
 		"verbatim (the old slug number survives as targetproj#seq). Idempotent:\n" +
 		"a same-id re-run skips and re-verifies each row. A same-id record whose\n" +
 		"fields diverge hard-fails with a per-field diff (a changed record is a\n" +
