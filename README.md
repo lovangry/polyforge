@@ -87,24 +87,36 @@ bin/pf --config /tmp/pf-quickstart/cli.toml observe <WI_ID>
 ```
 
 The submit claims the work item and the daemon spawns a WI agent (a
-`pi --mode rpc` process) that starts driving the workflow; observe shows
-the live projection — current step, step table, budget and the event
-log. Give the agent a few minutes for its first turn: once it commits
+`pi --mode rpc` process) that starts driving the workflow; a plain
+submit is the ordinary claim — `pf submit <id> --takeover` is the admin
+force-takeover path. A WI whose holder is gone or superseded moves with
+`pf takeover <id> --reason <text>`, which swaps the session under it
+(the old holder is fenced at its next push). Observe shows the live
+projection, leading with the `session:` line — the current holder's
+public session fingerprint, never the secret — then current step, step
+table, budget and the event log. Give the agent a few minutes for its
+first turn: once it commits
 the first `runtime-state/execution.json` version, observe shows a
 `current step:` line and a `published` event.
 
-**8. Wrap the run.** Wrap seals the capsule's current state and closes
-the generation as terminal success:
+**8. Wrap the run.** Wrap seals the capsule's current state and ends
+the session as terminal success:
 
 ```
 bin/pf --config /tmp/pf-quickstart/cli.toml wrap <WI_ID>
 bin/pf --config /tmp/pf-quickstart/cli.toml queue --project demo
 ```
 
-The queue now lists the work item as `wrapped`. Note: wrapping before the
+The queue now lists the work item as `wrapped`; its SESSION column is
+`-` (unheld — while a session is live it shows the holder's public
+fingerprint). Note: wrapping before the
 capsule's first commit lands leaves no revision to seal — the close
-degrades to `blocked`; `pf resume <WI_ID>` claims a fresh generation and
-continues.
+degrades to `blocked`, and the WI is not claimable again until
+`pf unblock <WI_ID>` returns it to `queued` (admin or maintainer).
+`pf pause <WI_ID>` sets a clean_pause (a daemon restart will not
+auto-resume it); `pf resume <WI_ID>` clears the flag and the holder
+daemon re-attaches on its next start — to continue immediately, use
+`pf takeover`.
 
 **9. Tear down:**
 
