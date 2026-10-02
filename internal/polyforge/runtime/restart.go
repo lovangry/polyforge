@@ -20,7 +20,10 @@ package runtime
 //	verify matches + status=paused + clean_pause=true → KEEP the
 //	  record, do nothing (Finding 2: the retained Paused record is the
 //	  pause's whole point — the secret survives locally for the later
-//	  attach).
+//	  attach) — UNLESS the record carries a pending terminal close
+//	  (stop_reason wrapped|failed|blocked, the NEW-3 crash window: the
+//	  daemon died between the fromPaused persist and SessionEnd): the
+//	  close is replayed so the wrap/fail intent is never forgotten.
 //	verify matches + status=running → crash-mid-run: the local capsule
 //	  recover-resumes through the recovery engine (a record caught
 //	  mid-seal finishes the interrupted stop instead; a Paused record
@@ -110,6 +113,35 @@ func (r *Runtime) Restart(ctx context.Context) error {
 				}
 			case api.StatusPaused:
 				if v.CleanPause {
+					// NEW-3 (crash window): a TERMINAL stop_reason on the retained
+					// record is a pending close — stopOp's fromPaused branch
+					// persists the wrap/fail/blocked intent on the record BEFORE
+					// the terminal SessionEnd goes out, and a daemon crash in that
+					// window leaves the hub still answering paused+clean under our
+					// (matching) session. Replay the close instead of reconciling
+					// back to a plain retained pause: the SessionEnd is fenced on
+					// the session secret the verify just proved matches, so the
+					// terminal verdict lands (Paused → Done is a legal edge — the
+					// same alreadySealing=true shape the StateSealing finisher
+					// uses). A replay failure keeps the record and its intent —
+					// the next restart re-verifies and retries.
+					if j := r.jobOf(rec.WorkItemID); j != nil && isTerminalStopReason(rec.StopReason) {
+						if r.cfg.EventTap != nil {
+							r.cfg.EventTap(rec.WorkItemID, "pending_close_replay", map[string]any{
+								"reason":              rec.StopReason,
+								"session_fingerprint": j.fingerprint(),
+								"note":                "crash between the retained-record close persist and SessionEnd; terminal close replayed at restart",
+							})
+						}
+						fmt.Fprintf(os.Stderr, "runtime: %s: pending %s close of the retained paused record — replaying (crash window, NEW-3)\n", rec.WorkItemID, rec.StopReason)
+						j.mu.Lock()
+						sealed := j.sealedPush
+						j.mu.Unlock()
+						if err := r.stopOp(ctx, j, rec.StopReason, true, sealed); err != nil {
+							fmt.Fprintf(os.Stderr, "runtime: %s: pending close replay failed, record kept: %v\n", rec.WorkItemID, err)
+						}
+						continue
+					}
 					// Operator pause (Finding 2, v1.5 review): the record is
 					// RETAINED, never auto-resumed. Its state is reconciled to
 					// Paused (a torn record from a crash window is the only way
@@ -256,6 +288,17 @@ func (r *Runtime) restartRunning(ctx context.Context, rec *jobRecord) error {
 	return r.restartResume(ctx, rec, j)
 }
 
+// isTerminalStopReason reports whether a persisted stop_reason is a
+// TERMINAL close verdict (wrapped|failed|blocked) — as opposed to the
+// retained operator pause's own "paused" reason or an unset one. The
+// NEW-3 crash window (a pending close of a retained Paused record) is
+// told apart from a plain retained pause exactly here.
+func isTerminalStopReason(reason string) bool {
+	return reason == protocol.FinishWrapped ||
+		reason == protocol.FinishFailed ||
+		reason == protocol.FinishBlocked
+}
+
 // restartResume is the shared tail of the attach and crash-resume paths.
 func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job) error {
 	state, _ := j.snapshot()
@@ -264,8 +307,7 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job) err
 		// verbatim (wrapped|failed|blocked); anything a crashed stop never
 		// wrote reads as the safest default
 		reason := j.stopReason
-		if reason != protocol.FinishFailed && reason != protocol.FinishWrapped &&
-			reason != protocol.FinishBlocked {
+		if !isTerminalStopReason(reason) {
 			reason = protocol.FinishWrapped
 		}
 		j.mu.Lock()
