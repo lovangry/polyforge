@@ -233,7 +233,12 @@ func readWIRecords(path string) ([]migWIRecord, int, error) {
 // validateWIRecord enforces the record contract up front: terminal
 // records only (wrapped/failed/canceled[+v0 cancelled]/blocked — live
 // state is never migration input), the id domain, non-blank goal,
-// RFC3339 timestamps and a closed_at consistent with the status.
+// RFC3339 timestamps and a closed_at consistent with the status. The
+// goal is NOT length-capped here (seq-fix lane fix 2): the import face
+// truncates over-long goals to the 500-byte cap at a rune boundary and
+// preserves the original under attrs.legacy_goal — the legacy library
+// carries many CJK-heavy goals whose BYTES exceed the cap, and refusing
+// them at parse time would block whole real exports.
 func validateWIRecord(r *migWIRecord) error {
 	if !wiIDPattern.MatchString(r.ID) {
 		return fmt.Errorf("bad id %q: must match %s", r.ID, wiIDPattern.String())
@@ -244,9 +249,6 @@ func validateWIRecord(r *migWIRecord) error {
 	}
 	if strings.TrimSpace(r.Goal) == "" {
 		return fmt.Errorf("id %s: goal required", r.ID)
-	}
-	if len(r.Goal) > 500 {
-		return fmt.Errorf("id %s: goal exceeds 500 characters", r.ID)
 	}
 	if strings.TrimSpace(r.Reporter) == "" {
 		return fmt.Errorf("id %s: reporter required", r.ID)

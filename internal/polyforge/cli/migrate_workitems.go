@@ -40,6 +40,14 @@ type MigWorkItemsOptions struct {
 	DryRun        bool
 }
 
+// MigWIFailure is one record the import face refused: the run continues
+// (the whole file is accounted for), the report carries every failure
+// and the run exits non-zero.
+type MigWIFailure struct {
+	ID    string `json:"id"`
+	Error string `json:"error"`
+}
+
 // MigWIReport is the import report the verb prints.
 type MigWIReport struct {
 	Source            string          `json:"source"`
@@ -47,6 +55,8 @@ type MigWIReport struct {
 	Imported          int             `json:"imported"`
 	Skipped           int             `json:"skipped"`     // same-id re-import, record matches
 	Overwritten       int             `json:"overwritten"` // same-id re-import, --accept-changed applied (counted as changed)
+	Failed            int             `json:"failed"`      // refused by the import face (counted, run continues)
+	Failures          []MigWIFailure  `json:"failures,omitempty"`
 	StatusCounts      map[string]int  `json:"status_counts"`
 	TargetProject     string          `json:"target_project"`
 	ReporterOverride  string          `json:"reporter_override,omitempty"`
@@ -54,6 +64,22 @@ type MigWIReport struct {
 	Verification      []StepResult    `json:"verification"`
 	SampledIDs        []string        `json:"sampled_ids"`
 	DryRun            bool            `json:"dry_run"`
+}
+
+// migFailuresError reports counted per-record import failures: the file
+// is fully accounted for, but some records did not land. The report (with
+// the closing summary) is printed first; the error sets the non-zero exit
+// (client class).
+type migFailuresError struct{ failures []MigWIFailure }
+
+func (e *migFailuresError) Error() string {
+	n := len(e.failures)
+	first := e.failures[0]
+	more := ""
+	if n > 1 {
+		more = fmt.Sprintf(" (and %d more — see the report)", n-1)
+	}
+	return fmt.Sprintf("%d record(s) failed to import: %s: %s%s", n, first.ID, first.Error, more)
 }
 
 // RunMigrateWorkItems executes the import + verification.
@@ -137,12 +163,21 @@ func RunMigrateWorkItems(opts MigWorkItemsOptions, client *aihubclient.Client) (
 			CreatedAt:      r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt,
 			Overwrite: opts.AcceptChanged,
 		}
+		// The record as the import face will store it (the truncation is
+		// deterministic, so pass-2 comparisons must mirror it — see
+		// migCompareWIRecord).
+		expGoal, expAttrs := migExpectedGoal(&r)
 		if opts.DryRun {
 			continue
 		}
 		res, ierr := client.ImportWorkItem(req)
 		if ierr != nil {
-			return nil, fmt.Errorf("import %s: %w", r.ID, ierr)
+			// Counted, never run-fatal: one refused record must not kill a
+			// 3000-record import — the file is accounted for in the report
+			// and the summary carries the failure count.
+			rep.Failed++
+			rep.Failures = append(rep.Failures, MigWIFailure{ID: r.ID, Error: ierr.Error()})
+			continue
 		}
 		switch res.Outcome {
 		case string(coreImportDone):
@@ -158,19 +193,25 @@ func RunMigrateWorkItems(opts MigWorkItemsOptions, client *aihubclient.Client) (
 			// record (ALL fields) before counting the skip.
 			existing, gerr := client.GetWorkItem(r.ID)
 			if gerr != nil {
-				return nil, fmt.Errorf("skip-check %s: %w", r.ID, gerr)
+				rep.Failed++
+				rep.Failures = append(rep.Failures, MigWIFailure{ID: r.ID, Error: fmt.Sprintf("skip-check: %v", gerr)})
+				continue
 			}
-			if werr := migCompareWIRecord(existing, &r, status, reporter, assignee); werr != nil {
-				return nil, fmt.Errorf("idempotency check on %s: %v (re-run with --accept-changed to apply the new version)", r.ID, werr)
+			if werr := migCompareWIRecord(existing, expGoal, expAttrs, status, reporter, assignee, &r); werr != nil {
+				rep.Failed++
+				rep.Failures = append(rep.Failures, MigWIFailure{
+					ID: r.ID, Error: fmt.Sprintf("%v (re-run with --accept-changed to apply the new version)", werr)})
+				continue
 			}
 			rep.Skipped++
 		default:
-			return nil, fmt.Errorf("import %s: unknown outcome %q", r.ID, res.Outcome)
+			rep.Failed++
+			rep.Failures = append(rep.Failures, MigWIFailure{ID: r.ID, Error: fmt.Sprintf("unknown outcome %q", res.Outcome)})
 		}
 	}
-	if !opts.DryRun && rep.Imported+rep.Overwritten+rep.Skipped != len(records) {
-		return nil, fmt.Errorf("bookkeeping: imported %d + skipped %d != records %d",
-			rep.Imported, rep.Skipped, len(records))
+	if !opts.DryRun && rep.Imported+rep.Overwritten+rep.Skipped+rep.Failed != len(records) {
+		return nil, fmt.Errorf("bookkeeping: imported %d + overwritten %d + skipped %d + failed %d != records %d",
+			rep.Imported, rep.Overwritten, rep.Skipped, rep.Failed, len(records))
 	}
 
 	// Verification: count + sampled field comparison over the ordinary
@@ -180,6 +221,9 @@ func RunMigrateWorkItems(opts MigWorkItemsOptions, client *aihubclient.Client) (
 		if verr := migVerifyWorkItems(rep, records, client); verr != nil {
 			return rep, verr
 		}
+	}
+	if rep.Failed > 0 {
+		return rep, &migFailuresError{failures: rep.Failures}
 	}
 	return rep, nil
 }
@@ -192,14 +236,41 @@ const (
 	coreImportOverwritten = "overwritten"
 )
 
+// migExpectedGoal mirrors the import face's over-long-goal handling
+// (seq-fix lane fix 2): a goal over api.MaxGoalBytes is truncated at a
+// rune boundary and the FULL original preserved under attrs.legacy_goal.
+// The truncation is deterministic, so pass-2 field comparisons and the
+// sampled verification compare against THIS expected shape, never the
+// raw record.
+func migExpectedGoal(r *migWIRecord) (string, map[string]any) {
+	goal := strings.TrimSpace(r.Goal)
+	attrs := r.Attrs
+	if attrs == nil {
+		attrs = map[string]any{}
+	}
+	if len(goal) > api.MaxGoalBytes {
+		goal = api.TruncateUTF8(goal, api.MaxGoalBytes)
+		merged := make(map[string]any, len(r.Attrs)+1)
+		for k, v := range r.Attrs {
+			merged[k] = v
+		}
+		merged["legacy_goal"] = strings.TrimSpace(r.Goal)
+		attrs = merged
+	}
+	return goal, attrs
+}
+
 // migCompareWIRecord checks that an existing target row carries the same
 // record as the JSONL line across ALL record fields — the idempotency
 // contract: a skip is only a skip when the row already IS this record.
-// reporter/assignee are the RESOLVED target identities (the import remaps
-// them); priority falls back to normal like the import does; an absent
-// seq means "auto" and is not compared. Every divergent field is listed —
-// a per-field diff, never a silent skip.
-func migCompareWIRecord(wi *api.WorkItem, r *migWIRecord, status, reporter string, assignee *string) error {
+// expGoal/expAttrs are the expected post-import goal and attrs (the
+// import face may have truncated an over-long goal — see
+// migExpectedGoal); reporter/assignee are the RESOLVED target identities
+// (the import remaps them); priority falls back to normal like the
+// import does; an absent seq means "auto" and is not compared. Every
+// divergent field is listed — a per-field diff, never a silent skip.
+func migCompareWIRecord(wi *api.WorkItem, expGoal string, expAttrs map[string]any,
+	status, reporter string, assignee *string, r *migWIRecord) error {
 	var diffs []string
 	priority := r.Priority
 	if priority == "" {
@@ -208,9 +279,9 @@ func migCompareWIRecord(wi *api.WorkItem, r *migWIRecord, status, reporter strin
 	if wi.Status != status {
 		diffs = append(diffs, fmt.Sprintf("status: target %q != record %q", wi.Status, status))
 	}
-	if strings.TrimSpace(wi.Goal) != strings.TrimSpace(r.Goal) {
+	if strings.TrimSpace(wi.Goal) != expGoal {
 		diffs = append(diffs, fmt.Sprintf("goal differs: target %q != record %q",
-			strings.TrimSpace(wi.Goal), strings.TrimSpace(r.Goal)))
+			strings.TrimSpace(wi.Goal), expGoal))
 	}
 	if !migPtrEq(wi.Content, r.Content) {
 		diffs = append(diffs, fmt.Sprintf("content: target %s != record %s",
@@ -229,10 +300,7 @@ func migCompareWIRecord(wi *api.WorkItem, r *migWIRecord, status, reporter strin
 	if !migSliceEq(wi.Labels, orEmpty(r.Labels)) {
 		diffs = append(diffs, fmt.Sprintf("labels: target %v != record %v", wi.Labels, orEmpty(r.Labels)))
 	}
-	attrs := r.Attrs
-	if attrs == nil {
-		attrs = map[string]any{}
-	}
+	attrs := expAttrs
 	if !reflect.DeepEqual(wi.Attrs, attrs) {
 		diffs = append(diffs, fmt.Sprintf("attrs: target %v != record %v", wi.Attrs, attrs))
 	}
@@ -311,10 +379,20 @@ func migRawJSONEq(a, b json.RawMessage) bool {
 // imported rows field-compare against the record (goal, content, status,
 // closed_at, priority, labels, milestone, seq).
 func migVerifyWorkItems(rep *MigWIReport, records []migWIRecord, client *aihubclient.Client) error {
-	// ① count: list each status the report imported.
+	// ① count: list each status the records the run PLACED or verified
+	// carry. Records the import face refused are excluded — they are
+	// accounted as failed in the report's summary, and demanding a row
+	// for them here would just double-report the same failure.
 	problems := []string{}
+	failed := map[string]bool{}
+	for _, f := range rep.Failures {
+		failed[f.ID] = true
+	}
 	byStatus := map[string]int{}
 	for _, r := range records {
+		if failed[r.ID] {
+			continue
+		}
 		status, _ := migNormalizeWIStatus(r.Status)
 		byStatus[status]++
 	}
@@ -329,7 +407,7 @@ func migVerifyWorkItems(rep *MigWIReport, records []migWIRecord, client *aihubcl
 		}
 	}
 	stepCount := StepResult{Step: "count-reconciliation", OK: len(problems) == 0,
-		Detail: fmt.Sprintf("%d record(s) across %d status(es)", len(records), len(byStatus))}
+		Detail: fmt.Sprintf("%d record(s) across %d status(es)", len(records)-len(failed), len(byStatus))}
 	if !stepCount.OK {
 		stepCount.Detail = joinNonEmpty(problems, "; ")
 	}
@@ -358,7 +436,8 @@ func migVerifyWorkItems(rep *MigWIReport, records []migWIRecord, client *aihubcl
 		if wi.Status != status {
 			sampleProblems = append(sampleProblems, fmt.Sprintf("%s: status %q != %q", id, wi.Status, status))
 		}
-		if strings.TrimSpace(wi.Goal) != strings.TrimSpace(r.Goal) {
+		expGoal, _ := migExpectedGoal(&r)
+		if strings.TrimSpace(wi.Goal) != expGoal {
 			sampleProblems = append(sampleProblems, fmt.Sprintf("%s: goal differs", id))
 		}
 		if !migPtrEq(wi.ClosedAt, r.ClosedAt) {
@@ -431,6 +510,27 @@ func (rep *MigWIReport) Render(w io.Writer) {
 			fmt.Fprintf(w, "  [%s] %s: %s\n", status, s.Step, s.Detail)
 		}
 	}
+	// Every refused record is listed, then the summary — ALWAYS the last
+	// line (seq-fix lane fix 4): imported / already-exists / failed
+	// accounting for the whole file. A pass-2 idempotent re-run answers
+	// "0 imported / N already-exists / 0 failed" with exit 0 — a success,
+	// not an error.
+	for _, f := range rep.Failures {
+		fmt.Fprintf(w, "  failed %s: %s\n", f.ID, f.Error)
+	}
+	verdict := "PASS"
+	if rep.Failed > 0 {
+		verdict = "FAIL"
+	}
+	summary := fmt.Sprintf("  [%s] %d imported / %d already-exists / %d failed",
+		verdict, rep.Imported, rep.Skipped, rep.Failed)
+	if rep.Overwritten > 0 {
+		summary += fmt.Sprintf(" / %d changed", rep.Overwritten)
+	}
+	if rep.DryRun {
+		summary += " (dry-run: nothing imported)"
+	}
+	fmt.Fprintln(w, summary)
 }
 
 func migStatusLine(counts map[string]int) string {
