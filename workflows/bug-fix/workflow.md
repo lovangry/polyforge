@@ -71,7 +71,7 @@ convention, not by any declared edge:
 |---|---|---|
 | `repro` | `artifacts/repro.md` (commands, environment, observed vs expected), plus a failing test under `repos/<name>/**` when one is authored | `root-cause`, `verification` |
 | `root-cause` | `artifacts/root-cause.md` (verdict, cause, evidence) | `fix`, `review` |
-| `fix` | changes under `repos/<name>/**`, `artifacts/fix-summary.md` | `verification`, `review`, `release` |
+| `fix` | changes under `repos/<name>/**`, `artifacts/fix-summary.md`, and the repro pinned as a regression test (required output `regression_test`; waived only with a review-visible reason) | `verification`, `review`, `release` |
 | `verification` | `artifacts/verification-report.md` (verdict) | `review` |
 | `review` | `artifacts/review.md` (verdict) | `release` |
 | `release` | `artifacts/release-notes.md`, tag/version metadata | (terminal) |

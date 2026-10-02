@@ -4,8 +4,11 @@ description: Remove the confirmed root cause - implement the change that elimina
 tools: [read, edit, bash]
 output:
   type: object
-  required: [commits, build_status, root_cause_addressed]
+  required: [commits, build_status, root_cause_addressed, regression_test]
   properties:
+    regression_test:
+      type: string
+      description: "Repo-relative path(s) of the regression test that pins the repro from the `repro` step (comma-separated if several). REQUIRED: the fix's last line of defense is a test that fails on the pre-fix tree and passes after — a bug fixed without its repro pinned is not fixed, it is deferred. If the project genuinely has no test surface, an explicit waiver string `waived: <reason>` is accepted, but the waiver is visible to `review` and must justify why no test can exist. `verification` runs it; `review` challenges weak waivers."
     commits:
       type: array
       minItems: 1
