@@ -430,34 +430,24 @@ var cmdRotateSecret = &Command{
 var cmdMachines = &Command{
 	Name:    "machines",
 	Summary: "Machines liveness face (M3, admin only)",
-	Usage:   "pf machines list",
-	Setup:   func(fs *flag.FlagSet) {},
+	Usage: "pf machines list\n\n" +
+		"Requires an admin credential: the machines liveness face is admin-only.",
+	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 || args[0] != "list" {
 			return fmt.Errorf("machines: expected list")
 		}
-		out, err := ctx.aihub().ListMachines()
+		raw, err := ctx.aihub().ListMachinesRaw()
 		if err != nil {
 			return err
 		}
-		blob, err := json.Marshal(out)
-		if err != nil {
-			return err
-		}
-		ctx.finish(blob, func() {
-			fmt.Fprintf(ctx.Stdout, "machines: %d (stale threshold %ds)\n", out.Count, out.StaleAfterSeconds)
-			rows := make([][]string, 0, len(out.Machines))
-			for _, m := range out.Machines {
-				age := "?"
-				if m.HeartbeatAgeSeconds != nil {
-					age = fmt.Sprintf("%ds", *m.HeartbeatAgeSeconds)
-				}
-				rows = append(rows, []string{
-					m.ID, m.Mode, fmt.Sprintf("%v", m.LiveWIIDs), age, m.LastHeartbeatAt,
-					map[bool]string{true: "STALE", false: "alive"}[m.Stale],
-				})
+		// House rule: --json is byte-for-byte passthrough of the server
+		// body; human mode decodes the same body for the table render.
+		ctx.finish(raw, func() {
+			var out aihubclient.MachinesList
+			if err := json.Unmarshal(raw, &out); err == nil {
+				renderMachines(ctx.Stdout, &out)
 			}
-			printTable(ctx.Stdout, []string{"ID", "MODE", "LIVE WI", "HEARTBEAT AGE", "LAST HEARTBEAT", "STATE"}, rows)
 		})
 		return nil
 	},
