@@ -185,6 +185,117 @@ pf-2  queued   -                 normal    -       another goal   unclassified
 `)
 }
 
+// TestVerbQueueLimit: --limit is a passthrough of the server list cap.
+// On the wire it maps to ?limit=N (1..200, recall's validation style);
+// omitted it maps to NOTHING (unlike recall's explicit 20, the owner
+// chose omission so the server's own default applies). It is a default-
+// list-mode flag only: combining it with --ready is an explicit error,
+// never a silent ignore. The render of the capped list is pinned by
+// goldens, and --json stays a raw passthrough of the capped body.
+func TestVerbQueueLimit(t *testing.T) {
+	capped := `{"items":[` + cannedWI + `],"total":1}`
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, capped)
+	})
+	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+
+	// Omitted --limit: ?limit= is NOT sent; the server default applies.
+	if code, _, stderr := runPf(t, env, "queue"); code != 0 {
+		t.Fatalf("omitted --limit: code=%d stderr=%s", code, stderr)
+	}
+	if got := rec.last(); strings.Contains(got.Path, "limit=") {
+		t.Errorf("omitted --limit: path = %s, want no limit param", got.Path)
+	}
+
+	// Both ends of the in-range contract pass through unchanged.
+	for _, n := range []string{"1", "200"} {
+		if code, _, stderr := runPf(t, env, "queue", "--limit", n); code != 0 {
+			t.Fatalf("queue --limit %s: code=%d stderr=%s", n, code, stderr)
+		}
+		if got := rec.last(); !strings.Contains(got.Path, "limit="+n+"&") {
+			t.Errorf("--limit %s: path = %s", n, got.Path)
+		}
+	}
+
+	// Composes with --status on the same wire call.
+	if code, _, stderr := runPf(t, env, "queue", "--status", "queued", "--limit", "5"); code != 0 {
+		t.Fatalf("queue --status queued --limit 5: code=%d stderr=%s", code, stderr)
+	}
+	if got := rec.last(); got.Path != "/api/v1/work-items?limit=5&project=polyforge&status=queued" {
+		t.Errorf("--limit + --status: path = %s", got.Path)
+	}
+
+	// Out of range (0, negatives, >200): loud local error in recall's
+	// style, non-zero exit, and no request on the wire.
+	for _, n := range []string{"0", "-3", "201"} {
+		before := len(rec.all())
+		code, _, stderr := runPf(t, env, "queue", "--limit", n)
+		if code == 0 {
+			t.Fatalf("--limit %s must exit non-zero", n)
+		}
+		if !strings.Contains(stderr, "queue: --limit must be 1..200") {
+			t.Errorf("--limit %s stderr = %q", n, stderr)
+		}
+		if after := len(rec.all()); after != before {
+			t.Errorf("--limit %s sent a request (%d → %d)", n, before, after)
+		}
+	}
+
+	// --limit + --ready fails explicitly (never silently ignored), with
+	// no request on the wire — even for an in-range value.
+	for _, n := range []string{"5", "201"} {
+		before := len(rec.all())
+		code, _, stderr := runPf(t, env, "queue", "--ready", "--limit", n)
+		if code == 0 {
+			t.Fatalf("--ready --limit %s must exit non-zero", n)
+		}
+		if !strings.Contains(stderr, "queue: --limit cannot be combined with --ready") {
+			t.Errorf("--ready --limit %s stderr = %q", n, stderr)
+		}
+		if after := len(rec.all()); after != before {
+			t.Errorf("--ready --limit %s sent a request (%d → %d)", n, before, after)
+		}
+	}
+}
+
+// TestVerbQueueLimitRenderGoldens: the CLI render of the capped list.
+// The server already applies ?limit=; these goldens pin what the CLI
+// does with the (capped) body it gets back — the human table and the
+// verbatim --json passthrough.
+func TestVerbQueueLimitRenderGoldens(t *testing.T) {
+	held := `{"id":"wi_1","slug":"pf-1","status":"running","priority":"high",` +
+		`"project":"polyforge","goal":"fix the thing","created_at":"t0",` +
+		`"session_fingerprint":"ab12cd34ef56aa00"}`
+	unheld := `{"id":"wi_2","slug":"pf-2","status":"queued","priority":"normal",` +
+		`"project":"polyforge","goal":"another goal","created_at":"t0"}`
+	body := `{"items":[` + held + `,` + unheld + `],"total":2}`
+	srv := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	})
+	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+
+	// Human render of the capped list.
+	code, stdout, stderr := runPf(t, env, "queue", "--limit", "2")
+	if code != 0 {
+		t.Fatalf("queue --limit 2: code=%d stderr=%s", code, stderr)
+	}
+	golden(t, "QueueListCapped", stdout,
+		`2 work item(s)
+SLUG  STATUS   SESSION           PRIORITY  BUNDLE  GOAL
+----  -------  ----------------  --------  ------  -------------
+pf-1  running  ab12cd34ef56aa00  high      -       fix the thing
+pf-2  queued   -                 normal    -       another goal
+`)
+
+	// --json: raw passthrough of the capped server body, untouched.
+	code, stdout, stderr = runPf(t, env, "--json", "queue", "--limit", "2")
+	if code != 0 {
+		t.Fatalf("json: code=%d stderr=%s", code, stderr)
+	}
+	golden(t, "QueueListCappedJSON", stdout, body+"\n")
+}
+
 func TestVerbCancelRequestShape(t *testing.T) {
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
