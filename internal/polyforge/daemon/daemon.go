@@ -506,6 +506,7 @@ func (d *Daemon) abortStartup() {
 	if d.rtDone != nil {
 		<-d.rtDone
 	}
+	d.rt.Close()
 }
 
 // reattachRecovered synthesizes the observe attachments for jobs the

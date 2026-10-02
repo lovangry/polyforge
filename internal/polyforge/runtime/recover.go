@@ -246,7 +246,9 @@ func (j *job) effectiveModel() string {
 // — the hub clears the session row and marks the WI blocked, which the
 // claim gate excludes until a human intervenes (M2). The storm guard's
 // "never a third relaunch" contract is preserved: restart sees blocked
-// and leaves the record untouched. RTFinished(blocked) follows.
+// and leaves the record untouched. RTFinished(blocked) follows — on
+// sendRelease, so a full observe channel defers rather than drops it
+// (NEW-2: every RTFinished is a terminal release).
 func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
 		SessionID: j.sessionID,
@@ -262,7 +264,7 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	r.send(protocol.RTMsg{
+	r.sendRelease(protocol.RTMsg{
 		Kind:     protocol.RTFinished,
 		WorkItem: j.wi,
 		Reason:   protocol.FinishBlocked,
