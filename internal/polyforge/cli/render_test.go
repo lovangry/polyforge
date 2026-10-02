@@ -65,7 +65,6 @@ func TestGoldenObserve(t *testing.T) {
 		WorkItem:    "wi_abc",
 		Project:     "polyforge",
 		Status:      protocol.JobNeedsInput,
-		Generation:  2,
 		SpawnN:      3,
 		BundleName:  "bundle-x",
 		CurrentStep: "implement",

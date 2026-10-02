@@ -27,7 +27,7 @@ const (
 	DirSession      = "session"       // harness transcripts synced at boundaries
 	DirWorkflows    = "workflows"     // materialized workflow bundle
 	CapsuleJSON     = "capsule.json"  // capsule identity
-	SessionJSON     = "session.json"  // per-attempt session/harness state
+	SessionJSON     = "session.json"  // session/harness state
 	WorkItemJSON    = "runtime-state/work-item.json"
 	ExecutionJSON   = "runtime-state/execution.json"
 )
@@ -36,13 +36,14 @@ const (
 const GitignoreContent = "/repos/\n/artifacts/release-*/\n"
 
 // Identity is capsule.json (03 §2.2). The declared BaseCommit pins the task
-// repos; CapsuleRepo is the bare repo this worktree pushes to.
+// repos; CapsuleRepo is the bare repo this worktree pushes to. The v1
+// generation/attempt_id lineage fields are deleted (v1.5 session model):
+// legacy capsules still carrying those keys parse fine — encoding/json
+// ignores unknown keys (pinned by TestLooseParseLegacyCapsuleKeys).
 type Identity struct {
 	WorkItemID   string            `json:"work_item_id"`
 	CapsuleID    string            `json:"capsule_id"`
 	Project      string            `json:"project"`
-	Generation   int64             `json:"generation"`
-	AttemptID    string            `json:"attempt_id"`
 	BundleName   string            `json:"bundle_name"`
 	BundleDigest string            `json:"bundle_digest"`
 	BaseCommit   string            `json:"base_commit"` // task repo baseline each step starts from
@@ -69,15 +70,15 @@ type WorkItemDoc struct {
 	Milestone    *string  `json:"milestone"`
 	BundleName   string   `json:"bundle_name"`
 	BundleDigest string   `json:"bundle_digest"`
-	Generation   int64    `json:"generation"`
 	UpdatedAt    string   `json:"updated_at"`
 }
 
-// Session is session.json: per-attempt harness session bookkeeping used
-// by the recovery engine (v1-spec-full §七; discriminator = transcript exists).
+// Session is session.json: per-derivation harness session bookkeeping
+// used by the recovery engine (v1-spec-full §七; discriminator =
+// transcript exists). The v1 attempt_id/generation lineage fields are
+// deleted (v1.5 session model); legacy files carrying those keys parse
+// fine (TestLooseParseLegacyCapsuleKeys).
 type Session struct {
-	AttemptID      string `json:"attempt_id"`
-	Generation     int64  `json:"generation"`
 	Harness        string `json:"harness"`         // pi|cc
 	SessionID      string `json:"session_id"`      // harness-native session identifier
 	TranscriptPath string `json:"transcript_path"` // absolute path to the .jsonl transcript
@@ -90,7 +91,6 @@ type Session struct {
 type Execution struct {
 	CapsuleID      string           `json:"capsule_id"`
 	WorkItemID     string           `json:"work_item_id"`
-	Generation     int64            `json:"generation"`
 	BundleDigest   string           `json:"bundle_digest"`
 	CurrentStep    string           `json:"current_step"`
 	WorkflowStatus string           `json:"workflow_status"`

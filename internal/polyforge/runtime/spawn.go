@@ -335,12 +335,16 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 // carries the latest derivation, so a fresh clone on another machine
 // re-seeds its counter from the max) and the public session_handle. The
 // v1 synthetic session_id value is DROPPED: in v1.5 that name means the
-// SECRET, which must never land in the capsule (B3).
-func writeSpawnJournal(p SpawnParams, pid int, startedAt string, instance string) error {
+// SECRET, which must never land in the capsule (B3). The display token
+// rides the spawn_token key: the fossil `instance` key name is renamed
+// (value unchanged, pure display) — legacy capsules' old lines carrying
+// `instance` still parse fine, every reader is loose (map/struct with
+// only the keys it needs).
+func writeSpawnJournal(p SpawnParams, pid int, startedAt string, spawnToken string) error {
 	entry := map[string]any{
 		"at":             nowStamp(),
 		"work_item":      p.WorkItemID,
-		"instance":       instance,
+		"spawn_token":    spawnToken,
 		"pid":            pid,
 		"started_at":     startedAt,
 		"session_handle": p.SessionHandle,

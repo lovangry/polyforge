@@ -52,7 +52,6 @@ func (m *Monitor) JobView() *protocol.JobView {
 	var exec capsule.Execution
 	if data, err := os.ReadFile(m.execPath); err == nil &&
 		json.Unmarshal(data, &exec) == nil {
-		view.Generation = exec.Generation
 		view.CurrentStep = exec.CurrentStep
 		view.Steps = map[string]*protocol.StepView{}
 		for id, s := range exec.Steps {

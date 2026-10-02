@@ -70,14 +70,15 @@ func TestStartStopEndToEnd(t *testing.T) {
 		}
 	}
 	// capsule.json parses and carries the canonical identity (the
-	// generation/attempt lineage fields stay zero — v1.5 deleted the
-	// lineage, the capsule shape is frozen)
+	// generation/attempt lineage keys are GONE — the fossil round deleted
+	// the fields from the frozen shape, see capsule_test.go for the
+	// old-capsule loose-parse pin)
 	raw, err := os.ReadFile(filepath.Join(capDir, capsule.CapsuleJSON))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var idn capsule.Identity
-	if err := json.Unmarshal(raw, &idn); err != nil || idn.WorkItemID != wi || idn.Generation != 0 {
+	if err := json.Unmarshal(raw, &idn); err != nil || idn.WorkItemID != wi {
 		t.Fatalf("capsule.json wrong: %v %+v", err, idn)
 	}
 	// session.json carries the PUBLIC fingerprint, never the secret
@@ -167,10 +168,10 @@ func TestStopUnknownWorkItem(t *testing.T) {
 	}
 }
 
-// TestStopEndGenerationFailureLeavesSealing pins the §五 wrap semantics: a
-// failed end-generation must NOT silently half-seal — the job stays
+// TestStopHubCloseFailureLeavesSealing pins the §五 wrap semantics: a
+// failed hub close must NOT silently half-seal — the job stays
 // SEALING (persisted with its reason) for the restart path to finish.
-func TestStopEndGenerationFailureLeavesSealing(t *testing.T) {
+func TestStopHubCloseFailureLeavesSealing(t *testing.T) {
 	hub := newFakeHub()
 	hub.lookupErr["wi_seal"] = errLookupBoom
 	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
@@ -179,7 +180,7 @@ func TestStopEndGenerationFailureLeavesSealing(t *testing.T) {
 
 	err := r.Stop(context.Background(), "wi_seal", protocol.FinishWrapped)
 	if err == nil {
-		t.Fatal("Stop must fail when end-generation fails")
+		t.Fatal("Stop must fail when the hub close fails")
 	}
 	state, _ := j.snapshot()
 	if state != StateSealing {

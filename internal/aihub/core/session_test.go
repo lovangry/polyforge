@@ -259,10 +259,10 @@ func TestSessionTakeover(t *testing.T) {
 	if claim.SessionFingerprint != api.SessionFingerprint(newSecret) {
 		t.Fatalf("takeover answered the wrong fingerprint: %+v", claim)
 	}
-	if fp, err := env.Owners.CheckPushCredential(id, id, oldSecret); err == nil {
+	if fp, err := env.Owners.CheckSessionCredential(id, id, oldSecret); err == nil {
 		t.Fatalf("old secret still authenticates (fp=%s)", fp)
 	}
-	if fp, err := env.Owners.CheckPushCredential(id, id, newSecret); err != nil || fp != api.SessionFingerprint(newSecret) {
+	if fp, err := env.Owners.CheckSessionCredential(id, id, newSecret); err != nil || fp != api.SessionFingerprint(newSecret) {
 		t.Fatalf("new secret rejected: %v %q", err, fp)
 	}
 	// The audit event carries the OLD fingerprint.
@@ -393,10 +393,10 @@ func TestSessionClaimGates(t *testing.T) {
 	}
 }
 
-// TestCheckPushCredentialSessionPath: the git credential check validates
+// TestCheckSessionCredentialSessionPath: the git credential check validates
 // hex(sha256(password)) == session_hash AND status==running (M3); the
 // mismatch names the current holder fingerprint.
-func TestCheckPushCredentialSessionPath(t *testing.T) {
+func TestCheckSessionCredentialSessionPath(t *testing.T) {
 	env, m := sessionEnv(t)
 	secret := "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
 	id := mustCreateExecWI(t, env, "push auth", nil, "")
@@ -404,12 +404,12 @@ func TestCheckPushCredentialSessionPath(t *testing.T) {
 
 	// Match: returns the PUBLIC fingerprint (the hook backup fence's
 	// expected value).
-	fp, err := env.Owners.CheckPushCredential(id, id, secret)
+	fp, err := env.Owners.CheckSessionCredential(id, id, secret)
 	if err != nil || fp != api.SessionFingerprint(secret) {
 		t.Fatalf("valid session secret rejected: %v %q", err, fp)
 	}
 	// Mismatch: GIT-401, detail names the current holder.
-	_, err = env.Owners.CheckPushCredential(id, id, "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b")
+	_, err = env.Owners.CheckSessionCredential(id, id, "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b")
 	if !IsCode(err, api.ErrGitUnauthorized) || ErrorReason(err) != "BAD_CREDENTIAL" {
 		t.Fatalf("wrong secret accepted: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestCheckPushCredentialSessionPath(t *testing.T) {
 	if err := m.Pause(id, secret, false, "", env.UserID); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	_, err = env.Owners.CheckPushCredential(id, id, secret)
+	_, err = env.Owners.CheckSessionCredential(id, id, secret)
 	if !IsCode(err, api.ErrGitForbidden) || ErrorReason(err) != "PAUSED" {
 		t.Fatalf("paused push not refused: %v", err)
 	}
@@ -433,11 +433,11 @@ func TestCheckPushCredentialSessionPath(t *testing.T) {
 	}, env.UserID); err != nil {
 		t.Fatalf("takeover: %v", err)
 	}
-	if _, err := env.Owners.CheckPushCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) {
+	if _, err := env.Owners.CheckSessionCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) {
 		t.Fatalf("superseded secret still valid: %v", err)
 	}
 	// Wrong username never authenticates.
-	if _, err := env.Owners.CheckPushCredential(id, "otheruser", "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"); !IsCode(err, api.ErrGitUnauthorized) {
+	if _, err := env.Owners.CheckSessionCredential(id, "otheruser", "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"); !IsCode(err, api.ErrGitUnauthorized) {
 		t.Fatalf("wrong username accepted: %v", err)
 	}
 }

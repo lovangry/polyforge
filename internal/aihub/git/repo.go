@@ -20,10 +20,10 @@ import (
 // CredentialChecker validates a Basic pair (username = WI id) against
 // the WI's live ownership: the password must be the current session
 // secret, and the check returns the session's PUBLIC fingerprint.
-// Implemented by *core.OwnerManager.CheckPushCredential; the returned
+// Implemented by *core.OwnerManager.CheckSessionCredential; the returned
 // handle is the pre-receive backup fence's expected value.
 type CredentialChecker interface {
-	CheckPushCredential(wiID, username, secret string) (string, error)
+	CheckSessionCredential(wiID, username, secret string) (string, error)
 }
 
 // Manager owns the bare-repo tree <data>/git/wi_xxx.git.

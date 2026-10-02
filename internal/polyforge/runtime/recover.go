@@ -110,7 +110,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 //
 // The resume discriminator (§七) is transcript readability of the DEAD
 // instance's session record — with F3 there are two physical sources:
-// the capsule's declared copy (session/session-<instance>.jsonl, synced
+// the capsule's declared copy (session/session-<spawn-token>.jsonl, synced
 // by the daemon at every commit boundary) and, when that is missing, the
 // harness-store live file (the recorded live transcript, or a fresh
 // scan keyed by the dead instance's spawn moment). The resume derivation

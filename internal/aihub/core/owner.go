@@ -3,10 +3,10 @@ package core
 // owner.go — the git-face credential check of the v1.5 session model.
 // The v1 generation/attempt machinery (owner_generations, intent-gated
 // claims, minted push credentials, /end-generation) is deleted; the
-// only survivor is CheckPushCredential, which validates a push's Basic
-// pair against the WI's LIVE session (fencing-on-use, contract §1.6):
-// hex(sha256(password)) == work_items.session_hash AND status==running.
-// Claim/attach/takeover/end live in session.go.
+// only survivor is CheckSessionCredential, which validates a push's
+// Basic pair against the WI's LIVE session (fencing-on-use, contract
+// §1.6): hex(sha256(password)) == work_items.session_hash AND
+// status==running. Claim/attach/takeover/end live in session.go.
 
 import (
 	"database/sql"
@@ -21,7 +21,7 @@ type OwnerManager struct{ db *DB }
 
 func NewOwnerManager(db *DB) *OwnerManager { return &OwnerManager{db: db} }
 
-// CheckPushCredential validates a git-face Basic pair: username must be
+// CheckSessionCredential validates a git-face Basic pair: username must be
 // the work-item id, the password is the session secret — validated as
 // hex(sha256(password)) == work_items.session_hash AND status == running
 // (M3: pushes are refused while paused). The returned handle is the
@@ -29,7 +29,7 @@ func NewOwnerManager(db *DB) *OwnerManager { return &OwnerManager{db: db} }
 // hook as the push-option backup fence's expected value.
 // A WI with no live session answers GIT-401: only a session claim can
 // make a push valid.
-func (m *OwnerManager) CheckPushCredential(wiID, username, secret string) (string, error) {
+func (m *OwnerManager) CheckSessionCredential(wiID, username, secret string) (string, error) {
 	if wiID == "" || username != wiID || secret == "" {
 		return "", Fail(api.ErrGitUnauthorized, "BAD_CREDENTIAL", "credential rejected")
 	}

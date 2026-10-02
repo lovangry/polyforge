@@ -28,7 +28,7 @@ package core
 //     /end-generation route no longer carries it.
 //
 // The git push credential's session path (fencing-on-use, §1.6) lives in
-// owner.go's CheckPushCredential and validates against the SAME stored
+// owner.go's CheckSessionCredential and validates against the SAME stored
 // hash, so a claim here is the only thing that can make a push valid.
 
 import (

@@ -439,10 +439,10 @@ func idxOf(args []string, want string) int {
 
 func (s *countingSpawner) spawnCount() int { return len(s.models) }
 
-// When the compensation's EndGeneration itself fails (an aihub outage at
+// When the compensation's hub close itself fails (an aihub outage at
 // the worst moment), the claiming entry is KEPT: a later restart replays
-// the same key and retries the compensation — the dangling-generation
-// window stays closed even across a failing close.
+// the same key and retries the compensation — the dangling claim window
+// stays closed even across a failing close.
 func TestAbandonedClaimKeepsJournalWhenCloseFails(t *testing.T) {
 	setGitIdentity(t)
 	wfDir, pinned := pristineBundle(t)
@@ -452,7 +452,7 @@ func TestAbandonedClaimKeepsJournalWhenCloseFails(t *testing.T) {
 	}
 	hub := newFakeHub()
 	hub.digest = pinned
-	hub.lookupErr["wi_closefail"] = errLookupBoom // EndGeneration fails
+	hub.lookupErr["wi_closefail"] = errLookupBoom // the hub close fails
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
 
