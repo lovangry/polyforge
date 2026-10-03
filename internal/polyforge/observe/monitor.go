@@ -1517,7 +1517,7 @@ func pickSHA(ok bool, a, b string) string {
 
 // verificationStepID is the step id every reference bundle's verification
 // gate carries (bug-fix / chore / feature-full / quick-fix), and the exact
-// steps key the M4 read-through (tools/gate-metrics.go) hardcodes — the
+// steps key the M4 read-through (tools/gate-metrics) hardcodes — the
 // wrap gate and the metric must judge the same face, or the gate would
 // seal exactly what the metric then counts as evidence-less.
 const verificationStepID = "verification"
@@ -1556,7 +1556,7 @@ func (m *Monitor) wrapEvidenceMissing() (bool, string) {
 
 // stepHasCommandEvidence reports whether the step's output carries at
 // least one readable command-audit entry — the M4 evidence predicate,
-// mirrored bit for bit from tools/gate-metrics.go's commandEvidence
+// mirrored bit for bit from tools/gate-metrics's commandEvidence
 // (INV-D3: exit_code readable; any non-empty output is NOT evidence).
 func stepHasCommandEvidence(output map[string]any) bool {
 	if output == nil {

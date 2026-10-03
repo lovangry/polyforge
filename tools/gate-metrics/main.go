@@ -1,5 +1,3 @@
-//go:build ignore
-
 // gate-metrics computes the nine M1–M9 pilot gate-metric readings defined by
 // docs/pilot/v1-phase-0-report.md §2a (mechanical computation formulas on the
 // v1 live stack) and mechanically evaluates the PILOT-V1…PILOT-V8 veto gates
@@ -27,15 +25,11 @@
 //
 // Usage:
 //
-//	gate-metrics [--json] [--m8-threshold-ms T] [--m3-heartbeat-max-age D] <pilot-data-root>
+//	gate-metrics [--json] [--m8-threshold-ms T] [--m3-heartbeat-max-age D] [--window-since <RFC3339>] <pilot-data-root>
 //
 // Run from the repo root via:
 //
-//	go run ./tools/gate-metrics.go /root/polyforge-pilot-v1
-//
-// Kept out of the normal build path via the `ignore` build tag (same
-// convention as v0/api/openapi-lint.go) so it does not collide with the main
-// function of tools/capsule-audit.go in the same directory.
+//	go run ./tools/gate-metrics /root/polyforge-pilot-v1
 package main
 
 import (
@@ -236,14 +230,21 @@ type aihubInfo struct {
 	Machines     map[string]string // machine id -> last_heartbeat_at
 	WITotal      int
 	ActiveOwners map[string]string // wi id -> machine id
+	// --window-since faces (D1 fallback + D3 windowed M3 sample):
+	// per-WI created_at parsed per-row in Go (the db may carry mixed
+	// timestamp formats; no SQL string comparison). Unparseable rows are
+	// counted, never silently dropped.
+	WICreated            map[string]time.Time // wi id -> created_at
+	WICreatedUnparseable int
 }
 
 func main() {
 	jsonOut := flag.Bool("json", false, "JSON 输出到 stdout（默认输出人读表）")
 	m8T := flag.String("m8-threshold-ms", "", "M8 耗时阈值 T（毫秒；可选，无默认值；未提供时 M8 耗时分量输出为未配置/不参与判定，失败分量与分母仍计入）")
 	hbAge := flag.String("m3-heartbeat-max-age", "", "M3 心跳存活阈值（如 30m、24h；可选，无默认值；未提供时心跳数据不可用/未配置，不参与判定）")
+	winSince := flag.String("window-since", "", "窗口过滤：只计入创建时刻严格晚于该时间戳（RFC3339）的 WI（created_at == since 者不计入）；无创建面的 WI（裸仓 HEAD 的 capsule.json 无 created_at 且 aihub.db 无记录）如实排除并在窗口报告中具名；不设默认值——不带该 flag 时读数覆盖全部历史")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: gate-metrics [--json] [--m8-threshold-ms T] [--m3-heartbeat-max-age D] <pilot-data-root>")
+		fmt.Fprintln(os.Stderr, "usage: gate-metrics [--json] [--m8-threshold-ms T] [--m3-heartbeat-max-age D] [--window-since <RFC3339>] <pilot-data-root>")
 		fmt.Fprintln(os.Stderr, "计算 M1–M9 当前读数并按 07-deployment-pilot.md §9.3 机械判定 PILOT-V1…V8；纯只读，全部输出走 stdout")
 		flag.PrintDefaults()
 	}
@@ -272,7 +273,16 @@ func main() {
 		}
 		hbMax, hbConfigured = v, true
 	}
-	if err := run(flag.Arg(0), *jsonOut, m8Configured, m8Ms, hbConfigured, hbMax); err != nil {
+	var win *windowSpec
+	if *winSince != "" {
+		t, err := time.Parse(time.RFC3339, *winSince)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gate-metrics: --window-since: 无效时间戳 %q（RFC3339；不设默认值，绝不代填）\n", *winSince)
+			os.Exit(2)
+		}
+		win = &windowSpec{Since: t, Raw: *winSince}
+	}
+	if err := run(flag.Arg(0), *jsonOut, m8Configured, m8Ms, hbConfigured, hbMax, win); err != nil {
 		fmt.Fprintf(os.Stderr, "gate-metrics: %v\n", err)
 		os.Exit(1)
 	}
@@ -309,6 +319,9 @@ type report struct {
 	M9          M9            `json:"m9"`
 	Vetoes      []Veto        `json:"pilot_vetoes"`
 	M9Note      string        `json:"m9_note"`
+	// Window 仅在给出 --window-since 时出现（omitempty 指针）⇒ 无 flag 的
+	// JSON 输出逐字节不变。
+	Window *windowReport `json:"window,omitempty"`
 }
 
 type aihubJSON struct {
@@ -318,30 +331,50 @@ type aihubJSON struct {
 	Note         string `json:"note,omitempty"`
 }
 
-func run(root string, jsonOut, m8Configured bool, m8Ms float64, hbConfigured bool, hbMax time.Duration) error {
-	now := time.Now()
-	fi, err := os.Stat(root)
+func run(root string, jsonOut bool, m8Configured bool, m8Ms float64, hbConfigured bool, hbMax time.Duration, win *windowSpec) error {
+	rep, err := computeReport(root, time.Now(), m8Configured, m8Ms, hbConfigured, hbMax, win)
 	if err != nil {
 		return err
 	}
+	if jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.SetEscapeHTML(false)
+		return enc.Encode(rep)
+	}
+	printTable(rep)
+	return nil
+}
+
+// computeReport loads the pilot data root (strictly read-only) and
+// computes the full M1–M9 + PILOT-V1…V8 report. win != nil applies the
+// --window-since post-cutover window (D1–D4: WI-creation face
+// resolution, repos/events partitioned BEFORE metric computation, M3 WI
+// sample windowed); win == nil reads all history and the report carries
+// no window block.
+func computeReport(root string, now time.Time, m8Configured bool, m8Ms float64, hbConfigured bool, hbMax time.Duration, win *windowSpec) (report, error) {
+	fi, err := os.Stat(root)
+	if err != nil {
+		return report{}, err
+	}
 	if !fi.IsDir() {
-		return fmt.Errorf("%s: not a directory", root)
+		return report{}, fmt.Errorf("%s: not a directory", root)
 	}
 
 	// -- machine dirs & events ------------------------------------------------
 	machineDirs, err := discoverMachineDirs(root)
 	if err != nil {
-		return err
+		return report{}, err
 	}
 	if len(machineDirs) == 0 {
-		return fmt.Errorf("%s: no machine directories containing events.log", root)
+		return report{}, fmt.Errorf("%s: no machine directories containing events.log", root)
 	}
 	var events []event
 	var machineStats []machineStat
 	for _, dir := range machineDirs {
 		evs, parseErrs, err := readEvents(dir)
 		if err != nil {
-			return err
+			return report{}, err
 		}
 		events = append(events, evs...)
 		machineStats = append(machineStats, machineStat{Dir: filepath.Base(dir), Events: len(evs), ParseErrors: parseErrs})
@@ -358,7 +391,7 @@ func run(root string, jsonOut, m8Configured bool, m8Ms float64, hbConfigured boo
 	var emptyRepos int
 	for _, repo := range repos {
 		if err := loadRepoChain(repo); err != nil {
-			return err
+			return report{}, err
 		}
 		if repo.Empty {
 			emptyRepos++
@@ -369,20 +402,33 @@ func run(root string, jsonOut, m8Configured bool, m8Ms float64, hbConfigured boo
 	// -- aihub (read-only) -------------------------------------------------------
 	ai := readAihub(filepath.Join(root, "aihub-data", "aihub.db"))
 
+	// -- window (optional): partition repos/events BEFORE metric computation ----
+	metricRepos, metricEvents := repos, events
+	var winRep *windowReport
+	if win != nil {
+		winRep, metricRepos, metricEvents = buildWindow(repos, events, ai, win)
+	}
+
 	// -- metrics ---------------------------------------------------------------
-	m1 := computeM1(repos, events)
+	m1 := computeM1(metricRepos, metricEvents)
 	m2 := M2{
 		Numerator:   0,
 		Denominator: 0,
 		Note:        "v1 无删除面（13 路由 verb 无 delete）⇒ 分子=分母=0 为机械真读（结构读数，非豁免）；PILOT-V2 以分子>0 判，未来引入删除面后读数自然受判",
 	}
-	m3 := computeM3(repos, ai, now, hbConfigured, hbMax)
-	m4 := computeM4(repos)
-	m5 := computeM5(repos)
-	m6 := computeM6(events)
-	m7 := computeM7(events)
-	m8 := computeM8(events, m8Configured, m8Ms)
-	m9 := computeM9(repos)
+	m3 := computeM3(metricRepos, ai, now, hbConfigured, hbMax)
+	if winRep != nil {
+		// D3：M3 WI 样本是唯一需要新输入的读数 —— 窗口内 work_items 行数
+		//（created_at 可解析且 > since，在 Go 侧计数）。
+		m3.WISample = windowedWISample(ai, win.Since)
+		winRep.M3SampleUnparseable = ai.WICreatedUnparseable
+	}
+	m4 := computeM4(metricRepos)
+	m5 := computeM5(metricRepos)
+	m6 := computeM6(metricEvents)
+	m7 := computeM7(metricEvents)
+	m8 := computeM8(metricEvents, m8Configured, m8Ms)
+	m9 := computeM9(metricRepos)
 
 	rep := report{
 		DataRoot:    root,
@@ -394,18 +440,11 @@ func run(root string, jsonOut, m8Configured bool, m8Ms float64, hbConfigured boo
 		},
 		AIhub: aihubJSON{Available: ai.Available, MachinesRows: ai.MachinesRows, WITotal: ai.WITotal, Note: ai.Note},
 		M1:    m1, M2: m2, M3: m3, M4: m4, M5: m5, M6: m6, M7: m7, M8: m8, M9: m9,
+		Window: winRep,
 	}
 	rep.Vetoes = computeVetoes(rep)
 	rep.M9Note = "M9 不设否决门槛（观测项）：rewind 数量上界已由 01-workflow-skills.md §6.2 max_per_step/max_total 收敛（07 §9.3 收尾注）"
-
-	if jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.SetEscapeHTML(false)
-		return enc.Encode(rep)
-	}
-	printTable(rep)
-	return nil
+	return rep, nil
 }
 
 // discoverMachineDirs returns the subdirectories of root that contain an
@@ -1352,7 +1391,7 @@ func judge(triggered bool) string {
 // ---------------------------------------------------------------------------
 
 func readAihub(path string) aihubInfo {
-	ai := aihubInfo{Machines: map[string]string{}, ActiveOwners: map[string]string{}}
+	ai := aihubInfo{Machines: map[string]string{}, ActiveOwners: map[string]string{}, WICreated: map[string]time.Time{}}
 	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
 	if err != nil {
 		ai.Note = fmt.Sprintf("aihub.db 不可用（%v），心跳面与 WI 样本数不可读，如实呈现", err)
@@ -1381,6 +1420,24 @@ func readAihub(path string) aihubInfo {
 	if err := db.QueryRow("select count(*) from work_items").Scan(&ai.WITotal); err != nil {
 		ai.WITotal = 0
 	}
+	// --window-since faces (D1 fallback + D3 windowed M3 sample): per-row
+	// created_at parsed in Go (the db may carry mixed timestamp formats;
+	// no SQL string comparison). Unparseable rows are counted, never
+	// silently dropped.
+	rows3, err := db.Query("select id, created_at from work_items")
+	if err == nil {
+		for rows3.Next() {
+			var id, created string
+			if rows3.Scan(&id, &created) == nil {
+				if t, err := time.Parse(time.RFC3339Nano, created); err == nil {
+					ai.WICreated[id] = t
+				} else {
+					ai.WICreatedUnparseable++
+				}
+			}
+		}
+		rows3.Close()
+	}
 	// Active holder per WI. v1.5 schema: the session epoch lives ON the
 	// work_items row — session_machine is set on claim/attach and nulled
 	// by session-end and the terminal transitions, so `session_machine IS
@@ -1390,7 +1447,7 @@ func readAihub(path string) aihubInfo {
 	// M3 heartbeat half permanently "无活跃 owner" even with live
 	// heartbeats). Verified 2026-10 (lane hb-m3) against a v1.5-shaped
 	// aihub.db built by internal/aihub/core.Open + AdminManager.Heartbeat:
-	//   go run ./tools/gate-metrics.go --m3-heartbeat-max-age 30m <root>
+	//   go run ./tools/gate-metrics --m3-heartbeat-max-age 30m <root>
 	// with <root>/aihub-data/aihub.db carrying 1 machine + 1 held WI.
 	// The owner_generations fallback keeps v1-era pilot roots readable.
 	rows2, err := db.Query("select id, coalesce(session_machine,'') from work_items where session_machine is not null")
@@ -1410,6 +1467,170 @@ func readAihub(path string) aihubInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Window (--window-since): post-cutover reading filter (D1–D5).
+// ---------------------------------------------------------------------------
+
+// windowSpec carries the parsed --window-since flag: Since is the parsed
+// RFC3339 timestamp (D5), Raw the verbatim flag value (reported as-is in
+// the window report's since field).
+type windowSpec struct {
+	Since time.Time
+	Raw   string
+}
+
+// windowBoundaryRule is the D2 boundary semantics, stated verbatim in the
+// flag help and the window report's boundary field.
+const windowBoundaryRule = "严格 >：WI 计入窗口当且仅当创建时刻 > since（created_at == since 者不计入）"
+
+// windowReport is the self-describing face of a windowed reading (D4):
+// what the window included, excluded, could not judge, and retained.
+type windowReport struct {
+	Since                 string   `json:"since"`
+	Boundary              string   `json:"boundary"`
+	WIsIncluded           int      `json:"wis_included"`
+	WIsExcludedAtOrBefore int      `json:"wis_excluded_created_before_or_at"`
+	WIsNoFaceExcluded     int      `json:"wis_no_creation_face_excluded"`
+	WIsNoFaceNames        []string `json:"wis_no_creation_face_names"`
+	EventsTotal           int      `json:"events_total"`
+	EventsIncluded        int      `json:"events_included"`
+	EventsExcluded        int      `json:"events_excluded"`
+	EventsDaemonRetained  int      `json:"events_daemon_scope_retained"`
+	M3WISampleWindowed    bool     `json:"m3_wi_sample_windowed"`
+	M3SampleUnparseable   int      `json:"m3_wi_sample_created_at_unparseable,omitempty"`
+	Note                  string   `json:"note"`
+}
+
+// capsuleCreatedAt reads the WI's primary creation face (D1.1):
+// capsule.json created_at at HEAD of the canonical bare repo, parsed as
+// RFC3339Nano (plain RFC3339 also parses). ok=false when the file is
+// absent, the field is missing/empty, or the value is unparsable — the
+// caller then falls back or reports a face gap; a time is never invented.
+func capsuleCreatedAt(repo *bareRepo) (time.Time, bool) {
+	out, ok := gitShowPath(repo.Canonical, "HEAD", "capsule.json")
+	if !ok {
+		return time.Time{}, false
+	}
+	var doc struct {
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		return time.Time{}, false
+	}
+	if doc.CreatedAt == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, doc.CreatedAt)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// buildWindow resolves every WI's creation face with the D1 precedence
+// (capsule.json at the canonical bare repo's HEAD → aihub.db
+// work_items.created_at fallback for event-face WIs with no usable repo
+// face → no face), partitions repos/events per D3, and assembles the
+// self-describing window report. A no-face WI is excluded and
+// counted + named — never silently included (that would re-mix
+// pre-cutover history, the exact failure the flag exists to prevent)
+// and never silently dropped. Daemon-scope events (work_item == "") are
+// retained: they belong to no WI, so a per-WI-creation window cannot
+// filter them.
+func buildWindow(repos []*bareRepo, events []event, ai aihubInfo, win *windowSpec) (*windowReport, []*bareRepo, []event) {
+	w := &windowReport{Since: win.Raw, Boundary: windowBoundaryRule, M3WISampleWindowed: true}
+	repoByName := map[string]*bareRepo{}
+	for _, r := range repos {
+		repoByName[r.Name] = r
+	}
+	inEvents := map[string]bool{}
+	ids := map[string]bool{}
+	for _, e := range events {
+		if e.WorkItem == "" {
+			continue // daemon 域事件：不归属任何 WI，保留另计
+		}
+		inEvents[e.WorkItem] = true
+		ids[e.WorkItem] = true
+	}
+	for name := range repoByName {
+		ids[name] = true
+	}
+	include := map[string]bool{}
+	for _, id := range sortedIDs(ids) {
+		created, haveFace := time.Time{}, false
+		if r := repoByName[id]; r != nil && !r.Empty {
+			created, haveFace = capsuleCreatedAt(r)
+		}
+		if !haveFace && inEvents[id] {
+			if t, ok := ai.WICreated[id]; ok {
+				created, haveFace = t, true
+			}
+		}
+		switch {
+		case !haveFace:
+			// D1.3：创建时刻未知 —— 如实排除并具名，绝不静默计入或丢弃。
+			w.WIsNoFaceExcluded++
+			w.WIsNoFaceNames = append(w.WIsNoFaceNames, id)
+		case !created.After(win.Since):
+			w.WIsExcludedAtOrBefore++
+		default:
+			w.WIsIncluded++
+			include[id] = true
+		}
+	}
+	var metricRepos []*bareRepo
+	for _, r := range repos {
+		if include[r.Name] {
+			metricRepos = append(metricRepos, r)
+		}
+	}
+	var metricEvents []event
+	w.EventsTotal = len(events)
+	for _, e := range events {
+		switch {
+		case e.WorkItem == "":
+			w.EventsDaemonRetained++
+			metricEvents = append(metricEvents, e)
+		case include[e.WorkItem]:
+			w.EventsIncluded++
+			metricEvents = append(metricEvents, e)
+		default:
+			w.EventsExcluded++
+		}
+	}
+	w.Note = "WI 创建时刻优先取规范裸仓 HEAD 的 capsule.json created_at（RFC3339Nano），事件面 WI 无可用裸仓面时回退取 aihub.db work_items.created_at；无创建面的 WI 如实排除并具名，绝不静默计入或丢弃。M2 与 WI 创建无关，不受窗口影响"
+	if !ai.Available {
+		w.Note += "；aihub.db 不可用：窗口化 M3 WI 样本记 0（样本面缺口如实呈现），db 回退面亦不可用"
+	}
+	return w, metricRepos, metricEvents
+}
+
+// sortedIDs sorts a wi-id set for deterministic reporting.
+func sortedIDs(ids map[string]bool) []string {
+	out := make([]string, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// windowedWISample is the D3 windowed M3 WI sample: the count of
+// work_items rows whose created_at parses and is strictly > since,
+// computed in Go (never a SQL string comparison on possibly-mixed
+// timestamp formats). Unparseable rows are counted in readAihub and
+// surfaced via the window report. An unavailable db yields 0 (the face
+// gap is recorded in the window note).
+func windowedWISample(ai aihubInfo, since time.Time) int {
+	n := 0
+	for _, t := range ai.WICreated {
+		if t.After(since) {
+			n++
+		}
+	}
+	return n
+}
+
+// ---------------------------------------------------------------------------
 // Human-readable table.
 // ---------------------------------------------------------------------------
 
@@ -1426,6 +1647,18 @@ func printTable(rep report) {
 	fmt.Printf("  aihub.db: 可读=%v，machines 表 %d 行，work_items %d 张\n", rep.AIhub.Available, rep.AIhub.MachinesRows, rep.AIhub.WITotal)
 	if rep.AIhub.Note != "" {
 		fmt.Printf("    - %s\n", rep.AIhub.Note)
+	}
+	if rep.Window != nil {
+		w := rep.Window
+		fmt.Printf("  窗口 --window-since %s（边界：%s）\n", w.Since, w.Boundary)
+		fmt.Printf("    WI 计入 %d，排除（创建于边界时刻及之前）%d，无创建面排除 %d 个\n",
+			w.WIsIncluded, w.WIsExcludedAtOrBefore, w.WIsNoFaceExcluded)
+		for _, name := range w.WIsNoFaceNames {
+			fmt.Printf("      - 无创建面排除: %s\n", name)
+		}
+		fmt.Printf("    事件共 %d 条：计入 %d，排除 %d，daemon 域（无归属 WI）保留 %d 条\n",
+			w.EventsTotal, w.EventsIncluded, w.EventsExcluded, w.EventsDaemonRetained)
+		fmt.Printf("    M3 WI 样本已按窗口计数；%s\n", w.Note)
 	}
 	fmt.Println()
 
