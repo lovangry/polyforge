@@ -22,12 +22,16 @@ package test
 // with only --data-dir/--listen), the REAL pf CLI, no daemon involved.
 
 import (
+	"database/sql"
 	"encoding/json"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
+	_ "modernc.org/sqlite"
 )
 
 // TestV1S24MachinesListCLI walks the machines liveness face end to end:
@@ -146,15 +150,77 @@ func TestV1S24MachinesListCLI(t *testing.T) {
 	if !slices.Contains(cells, "alive") {
 		t.Fatalf("STATE cell: no exact \"alive\" cell in the row (cells %v):\n%s", cells, out)
 	}
+
+	// --- stale, forced deterministically (grill Q2 ruling): backdate
+	// last_heartbeat_at ~1h in the running aihub's on-disk aihub.db —
+	// no sleeps, no daemon loop; the production-default 5-minute
+	// window makes that unambiguously stale, in BOTH faces.
+	s24Backdate(t, inst, "m-s24", time.Hour)
+
+	jout = inst.pf(t, "--json", "machines", "list")
+	staleRow := s24Machine(t, jout, "m-s24")
+	if !staleRow.Stale {
+		t.Fatalf("backdated machine not stale in --json: %+v (%s)", staleRow, jout)
+	}
+	out = inst.pf(t, "machines", "list")
+	cells = s24RowCells(t, out, "m-s24")
+	if !slices.Contains(cells, "STALE") {
+		t.Fatalf("backdated machine not STALE in the text row (cells %v):\n%s", cells, out)
+	}
+	if slices.Contains(cells, "alive") {
+		t.Fatalf("stale text row still claims alive (cells %v):\n%s", cells, out)
+	}
+	staleStamp := s24StampCell(t, cells) // the backdated LAST HEARTBEAT
+
+	// --- fresh again: exactly ONE further real wire heartbeat flips the
+	// row (the refresh UPDATE: the server re-stamps last_heartbeat_at,
+	// runtime_version COALESCE keeps the stored NULL) — no sleeps, no
+	// window override. Observed in BOTH faces.
+	if _, err := inst.client.Heartbeat(aihubclient.MachineHeartbeat{
+		MachineID: "m-s24",
+		LiveWIIDs: []string{},
+	}); err != nil {
+		t.Fatalf("refresh heartbeat: %v", err)
+	}
+
+	jout = inst.pf(t, "--json", "machines", "list")
+	freshRow := s24Machine(t, jout, "m-s24")
+	if freshRow.Stale {
+		t.Fatalf("refreshed machine still stale in --json: %+v (%s)", freshRow, jout)
+	}
+	if freshRow.LastHeartbeatAt == staleRow.LastHeartbeatAt {
+		t.Fatalf("refresh did not move last_heartbeat_at: %q", freshRow.LastHeartbeatAt)
+	}
+	out = inst.pf(t, "machines", "list")
+	cells = s24RowCells(t, out, "m-s24")
+	if !slices.Contains(cells, "alive") {
+		t.Fatalf("refreshed machine not alive in the text row (cells %v):\n%s", cells, out)
+	}
+	if slices.Contains(cells, "STALE") {
+		t.Fatalf("fresh text row still claims STALE (cells %v):\n%s", cells, out)
+	}
+	freshStamp := s24StampCell(t, cells)
+	if freshStamp == staleStamp {
+		t.Fatalf("LAST HEARTBEAT cell did not move after the refresh heartbeat: %q", freshStamp)
+	}
+	stamped, err := time.Parse(time.RFC3339, freshStamp)
+	if err != nil {
+		t.Fatalf("refreshed LAST HEARTBEAT cell %q unparseable: %v", freshStamp, err)
+	}
+	if age := time.Since(stamped); age < -time.Minute || age > 2*time.Minute {
+		t.Fatalf("refreshed LAST HEARTBEAT not ~now (server-stamped): %s (age %s)", freshStamp, age)
+	}
 }
 
 // s24RowCells returns the non-empty cells of the machines row line that
 // carries id: printTable joins the padded cells with two spaces, so the
-// row line splits on "  " into cells (an empty MODE cell and the
-// inter-cell padding collapse to empty tokens; the salient cells
-// survive verbatim — including the exact "-" placeholder, which a raw
-// substring check could never pin because the LAST HEARTBEAT timestamp
-// also contains "-" characters).
+// row line splits on "  " into cells — but a column whose pad+separator
+// total is odd leaves one stray space glued to the next cell (e.g. the
+// LAST HEARTBEAT timestamp when the HEARTBEAT AGE cell is "0s"), so
+// tokens are trimmed before use; all-padding tokens collapse to empty
+// and are dropped. The salient cells survive verbatim — including the
+// exact "-" placeholder, which a raw substring check could never pin
+// because the LAST HEARTBEAT timestamp also contains "-" characters.
 func s24RowCells(t *testing.T, out, id string) []string {
 	t.Helper()
 	for _, line := range strings.Split(out, "\n") {
@@ -163,7 +229,7 @@ func s24RowCells(t *testing.T, out, id string) []string {
 		}
 		var cells []string
 		for _, c := range strings.Split(line, "  ") {
-			if c != "" {
+			if c = strings.TrimSpace(c); c != "" {
 				cells = append(cells, c)
 			}
 		}
@@ -171,4 +237,56 @@ func s24RowCells(t *testing.T, out, id string) []string {
 	}
 	t.Fatalf("no %q row line in output:\n%s", id, out)
 	return nil
+}
+
+// s24Machine decodes the --json machines body (the raw passthrough) and
+// returns id's row.
+func s24Machine(t *testing.T, jout, id string) aihubclient.MachineStatus {
+	t.Helper()
+	var list aihubclient.MachinesList
+	if err := json.Unmarshal([]byte(jout), &list); err != nil {
+		t.Fatalf("machines --json undecodable: %v (%s)", err, jout)
+	}
+	for _, m := range list.Machines {
+		if m.ID == id {
+			return m
+		}
+	}
+	t.Fatalf("no %q machine row in the --json body: %s", id, jout)
+	return aihubclient.MachineStatus{}
+}
+
+// s24StampCell returns the RFC3339 timestamp cell of a machines row
+// (the LAST HEARTBEAT value), located by parseability — not by column
+// position.
+func s24StampCell(t *testing.T, cells []string) string {
+	t.Helper()
+	for _, c := range cells {
+		if _, err := time.Parse(time.RFC3339, c); err == nil {
+			return c
+		}
+	}
+	t.Fatalf("no RFC3339 timestamp cell in %v", cells)
+	return ""
+}
+
+// s24Backdate forces the machine's staleness the grill-Q2 way: the
+// internal/aihub/core/machines_test.go UPDATE pattern, adapted to a
+// scenario-side write-open of the RUNNING aihub's on-disk aihub.db (the
+// s15 on-disk-access precedent; the server runs WAL with
+// busy_timeout(5000), so the scenario DSN carries the same pragma) —
+// age ~1h is far beyond the production-default 5-minute stale window.
+// No sleeps, no daemon heartbeat loop.
+func s24Backdate(t *testing.T, inst *v1Install, machineID string, age time.Duration) {
+	t.Helper()
+	db, err := sql.Open("sqlite",
+		"file:"+filepath.Join(inst.dataDir, "aihub.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open aihub.db for the backdate: %v", err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Add(-age).Format(time.RFC3339Nano)
+	if _, err := db.Exec(`UPDATE machines SET last_heartbeat_at=? WHERE id=?`, stamp, machineID); err != nil {
+		t.Fatalf("backdate %s: %v", machineID, err)
+	}
 }
