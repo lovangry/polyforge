@@ -1,5 +1,3 @@
-//go:build ignore
-
 // gate-metrics computes the nine M1–M9 pilot gate-metric readings defined by
 // docs/pilot/v1-phase-0-report.md §2a (mechanical computation formulas on the
 // v1 live stack) and mechanically evaluates the PILOT-V1…PILOT-V8 veto gates
@@ -31,11 +29,7 @@
 //
 // Run from the repo root via:
 //
-//	go run ./tools/gate-metrics.go /root/polyforge-pilot-v1
-//
-// Kept out of the normal build path via the `ignore` build tag (same
-// convention as v0/api/openapi-lint.go) so it does not collide with the main
-// function of tools/capsule-audit.go in the same directory.
+//	go run ./tools/gate-metrics /root/polyforge-pilot-v1
 package main
 
 import (
@@ -1390,7 +1384,7 @@ func readAihub(path string) aihubInfo {
 	// M3 heartbeat half permanently "无活跃 owner" even with live
 	// heartbeats). Verified 2026-10 (lane hb-m3) against a v1.5-shaped
 	// aihub.db built by internal/aihub/core.Open + AdminManager.Heartbeat:
-	//   go run ./tools/gate-metrics.go --m3-heartbeat-max-age 30m <root>
+	//   go run ./tools/gate-metrics --m3-heartbeat-max-age 30m <root>
 	// with <root>/aihub-data/aihub.db carrying 1 machine + 1 held WI.
 	// The owner_generations fallback keeps v1-era pilot roots readable.
 	rows2, err := db.Query("select id, coalesce(session_machine,'') from work_items where session_machine is not null")
