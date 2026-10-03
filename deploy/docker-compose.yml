@@ -1,0 +1,16 @@
+# Production shape for the v1.5 aihub (drop-in next to the legacy compose).
+# The volume carries SQLite + per-WI bare repos + the memory tree TOGETHER:
+# backup and restore are always whole-volume operations.
+services:
+  aihub:
+    build: { context: ., dockerfile: deploy/Dockerfile }
+    # or: image: <registry>/polyforge-aihub:v0.2.0
+    container_name: aihub
+    ports: ["8080:8080"]
+    volumes: ["/data/aihub:/data"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/aihub", "-data-dir", "/data", "-health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
