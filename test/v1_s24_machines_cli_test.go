@@ -24,6 +24,8 @@ package test
 import (
 	"database/sql"
 	"encoding/json"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -210,6 +212,31 @@ func TestV1S24MachinesListCLI(t *testing.T) {
 	if age := time.Since(stamped); age < -time.Minute || age > 2*time.Minute {
 		t.Fatalf("refreshed LAST HEARTBEAT not ~now (server-stamped): %s (age %s)", freshStamp, age)
 	}
+
+	// --- the admin gate: one non-admin refusal through the real CLI.
+	// s23MintKey (the s23 file, same package) mints a human writer user
+	// + API key — non-admin by construction. This s24-local exec runs the
+	// real pf with the same env recipe as inst.pf but that key: the
+	// server's authAdmin gate (role != "admin" ⇒ 403) answers before
+	// any row is rendered, surfacing as a CLI error with a non-zero
+	// exit, and the combined output carries no machine rows.
+	_, nonAdminKey := s23MintKey(t, inst, "s24-nonadmin")
+	refused := s24PfAs(t, inst, nonAdminKey, "machines", "list")
+	for _, leak := range []string{"m-s24", "alive", "STALE"} {
+		if strings.Contains(refused, leak) {
+			t.Fatalf("non-admin refusal leaked %q into its output:\n%s", leak, refused)
+		}
+	}
+	// No machines row (hence no exact "-" RUNTIME cell) may render —
+	// pinned per-cell, because the 403 error line itself carries "-"
+	// characters (AUTH-403) that a raw substring check would trip on.
+	for _, line := range strings.Split(refused, "\n") {
+		for _, c := range strings.Split(line, "  ") {
+			if c = strings.TrimSpace(c); c == "-" {
+				t.Fatalf("non-admin refusal rendered a machine row cell:\n%s", refused)
+			}
+		}
+	}
 }
 
 // s24RowCells returns the non-empty cells of the machines row line that
@@ -237,6 +264,33 @@ func s24RowCells(t *testing.T, out, id string) []string {
 	}
 	t.Fatalf("no %q row line in output:\n%s", id, out)
 	return nil
+}
+
+// s24PfAs runs the REAL pf CLI against the install with the same env
+// recipe as the harness pf helpers, but PF_API_KEY swapped to the given
+// non-admin credential (those helpers hardcode PF_API_KEY=inst.adminKey,
+// so the refusal arm needs this s24-local exec). Non-zero exit is
+// REQUIRED — the server's authAdmin 403 surfaces as a CLI error — and
+// the combined stdout+stderr is returned for the no-rows pin.
+func s24PfAs(t *testing.T, inst *v1Install, apiKey string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(inst.pfPath, args...)
+	cmd.Env = append(os.Environ(),
+		"PF_SERVER="+inst.url,
+		"PF_API_KEY="+apiKey,
+		"PF_USER_ID=usr_root",
+		"PF_PROJECT="+v1Project,
+	)
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			t.Fatalf("pf %v: %v", args, err)
+		}
+		return out.String() // the expected non-zero exit
+	}
+	t.Fatalf("non-admin pf %v unexpectedly succeeded (output %q)", args, out.String())
+	return ""
 }
 
 // s24Machine decodes the --json machines body (the raw passthrough) and
