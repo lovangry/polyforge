@@ -280,7 +280,10 @@ func migCompareWIRecord(wi *api.WorkItem, expGoal string, expAttrs map[string]an
 	if priority == "" {
 		priority = api.PriorityNormal
 	}
-	expGoal = api.TruncateUTF8(strings.TrimSpace(expGoal), api.MaxGoalBytes)
+	// Trim AFTER truncating too: a rune-boundary cut can land right after a
+	// space, re-introducing a trailing space the import-side store kept but
+	// the target-side compare trims away (measured live at cutover: 496B != 499B).
+	expGoal = strings.TrimSpace(api.TruncateUTF8(strings.TrimSpace(expGoal), api.MaxGoalBytes))
 	if wi.Status != status {
 		diffs = append(diffs, fmt.Sprintf("status: target %q != record %q", wi.Status, status))
 	}
