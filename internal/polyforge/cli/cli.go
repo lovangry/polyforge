@@ -12,6 +12,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
+	"github.com/silgrid/polyforge/internal/version"
 )
 
 // Context carries the resolved configuration and I/O for one command
@@ -96,9 +97,22 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	apiKeyFlag := gfs.String("api-key", "", "aihub api key (env PF_API_KEY)")
 	socketFlag := gfs.String("socket", "", "daemon unix socket (env PF_DAEMON_SOCKET)")
 	userFlag := gfs.String("user", "", "caller user id, e.g. for answer.answered_by (env PF_USER_ID)")
+	versionFlag := gfs.Bool("version", false, "print version and exit")
 
 	if err := gfs.Parse(argv); err != nil {
 		return 2
+	}
+	// --version is handled before verb dispatch (and before the
+	// empty-positional usage branch): with no verb left after the flag,
+	// Run would otherwise fall into the usage dump. Exit 0, print the
+	// build-injected version string, never usage.
+	if *versionFlag {
+		if *jsonFlag {
+			fmt.Fprintf(stdout, "{\"version\":%q}\n", version.Version)
+		} else {
+			fmt.Fprintln(stdout, version.Version)
+		}
+		return 0
 	}
 	args := gfs.Args()
 	if len(args) == 0 {
@@ -278,6 +292,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --api-key KEY   aihub api key (env PF_API_KEY)")
 	fmt.Fprintln(w, "  --socket PATH   daemon unix socket (env PF_DAEMON_SOCKET)")
 	fmt.Fprintln(w, "  --user ID       caller identity (env PF_USER_ID)")
+	fmt.Fprintln(w, "  --version      print version and exit")
 }
 
 // printCommandUsage prints one command's usage.

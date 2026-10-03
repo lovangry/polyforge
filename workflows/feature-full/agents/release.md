@@ -77,8 +77,14 @@ released separately; they travel with the repo itself. Concretely:
    HEAD, in case a later step also produced commits):
 
    ```
-   GOWORK=off go build -o artifacts/release-<tag>/ ./cmd/aihub ./cmd/pf
+   GOWORK=off make release VERSION=<tag>
    ```
+
+   The `release` Makefile target stamps the git tag into both binaries at
+   link time — `-ldflags "-X github.com/silgrid/polyforge/internal/version.Version=<tag>"`
+   — so `pf --version` and `aihub --version` print `<tag>` (never the
+   un-injected `dev` default). It echoes the injected value after the build;
+   that echo is the release record of the injection.
 
    Two binaries come out and nothing else is shipped: `aihub`, the AIHub service
    binary, and `pf`, the work-machine binary — one file carrying the `pf` CLI verbs plus

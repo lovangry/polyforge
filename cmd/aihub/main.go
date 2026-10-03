@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/silgrid/polyforge/internal/aihub/git"
 	"github.com/silgrid/polyforge/internal/aihub/memory"
 	"github.com/silgrid/polyforge/internal/aihub/server"
+	"github.com/silgrid/polyforge/internal/version"
 )
 
 // lockDataDir takes the exclusive single-active lock. Uses an open file
@@ -53,8 +55,17 @@ func main() {
 		// daemon heartbeat default (60s). Tune to ≥5× the actual
 		// -heartbeat-every the fleet runs with.
 		staleAfter = flag.Duration("machines-stale-after", 5*time.Minute, "machines liveness threshold for the stale projection (default 5m = 5× heartbeat default)")
+		// --version / -version: print the build-injected version string
+		// (internal/version.Version, the git tag at build; "dev" un-injected)
+		// and exit 0 — before any data-dir lock or server start.
+		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version.Version)
+		return
+	}
 
 	// Single-active guard: exclusive lock on the data dir (CORE-508).
 	release, err := lockDataDir(*dataDir)
