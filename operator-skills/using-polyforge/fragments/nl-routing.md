@@ -32,7 +32,7 @@ Some words route by context - a slug? a running/claimed wi? a flow mid-step?
   **not** resume. Only "resume `<slug>`" on a **paused** wi routes to
   `resume <slug>`.
 - **done / finished** - mid-step -> continue the flow; whole-wi ("wrap up" / "wrap") ->
-  `/pf-stop --wrap`.
+  `wrap` 动词。
 - **begin / start** - with a slug -> claim (Mode B); without -> new wi (Mode A).
 - **status** - inside a claimed wi -> its detail; else -> project ready queue.
 
