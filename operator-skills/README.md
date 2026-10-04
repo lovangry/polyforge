@@ -1,28 +1,24 @@
 # operator-skills/
 
-Two FACES live here — install the right one, not both.
+Two FACES — install the right one, not both.
 
-## 用户面(团队成员):只装一个技能
+## 用户面(团队成员):只装一个
 
-设计就是单一入口:用户 harness 只安装 **`polyforge/`**(意图路由技能),
-它自带 13 个动词的全部 fragments。配合 pf 二进制 + config 即完整可用。
+**`polyforge/`**(意图路由,自带 13 动词 fragments)+ pf 二进制即完整可用:
+`cp -r polyforge ~/.pi/agent/skills/`
 
-```sh
-# 团队成员机器(装完 /pf-init 或手工):
-cp -r polyforge  ~/.pi/agent/skills/
-# 日常:自然语言即可("看下队列""答这题""切 drain""这票交付了")
-```
+## 操作员面(AI 执行/维护 harness):9 个
 
-## 操作员面(AI 执行/维护 harness):19 件套
+`polyforge/` + `using-polyforge/`(IR 规则;per-WI 观察器纪律完整版)+ \
+`pf-init/`(装机/升级)+ `pf-doctor/` + `pf-help/` + `pf-status/` + \
+`pf-retro/` + `pf-crystallize/` + `pf-release/`
 
-pf-* 系列(pf-work/pf-status/pf-execute/pf-stop/pf-init/pf-doctor/…)
-+ using-polyforge(IR 规则、per-WI 观察器对账)是操作员/维护者的
-完整 harness,不是给普通用户的。同步方向:先改 harness 侧
-(~/.pi/agent/skills),变更后镜像回本目录。
+同步方向:先改 harness 侧(~/.pi/agent/skills),变更后镜像回本目录。
 
-## Inventory
+## 2026-10-03 精简(owner 裁定):19 → 9
 
-- `polyforge/`        ← 用户唯一入口(13 动词路由,含 ops)
-- `pf-init/`          ← 装机(用户机/执行机初始化,可选)
-- `pf-*/` 其余         ← 操作员 harness
-- `using-polyforge/`  ← 会话常驻规则(操作员 harness 用)
+砍掉的 10 个是 v0 工作树工作流的遗产,胶囊模型(v1.0.0)已取代其工作面:
+pf-work(领取=路由动词+hub;观察器纪律移入 using-polyforge)、
+pf-spec/pf-plan/pf-execute(执行在胶囊内)、pf-revise、pf-sync(v1 无此
+机制)、pf-update(v0 role 机制)、pf-project/pf-user(CLI 薄壳)、
+pf-stop(动词 fragments 已带)。git 历史可追溯。

@@ -1,8 +1,11 @@
 # Per-WI watcher reconcile (on-demand)
 
-The pf-work skill owns the claim-time discipline ("Per-WI watcher: 领取后必起").
-This file owns the RECONCILE: session exits kill every bg_run watcher; the daemon
-(setsid, session-independent) keeps the WIs running; the disk scripts survive.
+THIS FILE owns the whole per-WI watcher discipline (claim-time start AND
+reconcile): every successful claim/submit/takeover on this machine must
+start a per-WI watcher for that WI before doing anything else (one watcher
+per WI, 3s poll, disk script under ~/.polyforge/watchers/); session exits
+kill every bg_run watcher while the daemon (setsid, session-independent)
+keeps the WIs running, and the disk scripts survive for re-entry.
 
 ## When
 - Every session start (IR4), and any `/pf-status` run.
