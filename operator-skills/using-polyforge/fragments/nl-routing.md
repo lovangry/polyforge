@@ -9,18 +9,18 @@ classifier. Infer intent and route to the nearest match; if nothing fits or it's
 |---|---|
 | what's ready today / dispatch work / ready queue | `pf_get_ready_queue` |
 | what needs my decision / needs attention | `pf_get_ready_queue` -> `needs_human_session[]` |
-| begin / new task / new / start | `/pf-work` (Mode A) |
-| claim + slug | `/pf-work <slug>` (Mode B) |
-| resume + slug | `/pf-work <slug> --resume` (Mode C) |
-| takeover + slug | `/pf-work <slug> --force` (Mode D) |
-| pause / done / wrap / finished / fail / abandon | `/pf-stop --pause` \| `--wrap` \| `--fail` |
-| design / spec / brainstorm | `/pf-spec` |
-| this bug / debug | `/pf-spec` (debug variant) |
+| begin / new task / new / start | `polyforge` 路由:file(建票)|
+| claim + slug | `polyforge` 路由:submit <slug> |
+| resume + slug | `polyforge` 路由:resume <slug> |
+| takeover + slug | `polyforge` 路由:takeover <slug> |
+| pause / wrap / finished / fail | `polyforge` 路由:pause \| wrap |
+| design / spec / brainstorm | `polyforge` 路由:file(写进票的 goal/content)|
+| this bug / debug | 同上(file 建 bug 票;执行在胶囊内的 grill/spec 步)|
 | pinned-flow / stored steps | `pf_get_workflow` -> `workflow-v2.md` |
 | note / log | `pf_emit_event(event_type="note", ...)` |
 | doctor / can't connect | `/pf-doctor` |
 | release / cut | `/pf-release` |
-| sync Jira/GitHub / push to external | `/pf-sync` |
+| sync Jira/GitHub | (v1.0.0 暂无同步面——如需开票)|
 | user management / whoami / issue key / list users | `/pf-user` |
 | revise spec/plan per annotations / resolve review comments | `/pf-revise` |
 
