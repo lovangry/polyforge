@@ -21,8 +21,8 @@ classifier. Infer intent and route to the nearest match; if nothing fits or it's
 | doctor / can't connect | `/pf-doctor` |
 | release / cut | `/pf-release` |
 | sync Jira/GitHub | (v1.0.0 暂无同步面——如需开票)|
-| user management / whoami / issue key / list users | `/pf-user` |
-| revise spec/plan per annotations / resolve review comments | `/pf-revise` |
+| user management / whoami / list users | `pf` CLI 直达:users / api-keys |
+| revise spec/plan per review comments | (v0 批注流已不存在;胶囊步内处理)|
 
 ### Disambiguation
 
@@ -30,7 +30,7 @@ Some words route by context - a slug? a running/claimed wi? a flow mid-step?
 
 - **continue / go on / next** - mid-flow or mid-step -> proceed to the next step,
   **not** resume. Only "resume `<slug>`" on a **paused** wi routes to
-  `/pf-work <slug> --resume`.
+  `resume <slug>`.
 - **done / finished** - mid-step -> continue the flow; whole-wi ("wrap up" / "wrap") ->
   `/pf-stop --wrap`.
 - **begin / start** - with a slug -> claim (Mode B); without -> new wi (Mode A).
