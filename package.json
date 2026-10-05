@@ -1,0 +1,9 @@
+{
+  "name": "polyforge",
+  "version": "1.0.0",
+  "description": "Polyforge v1.0.0 — operator skills (polyforge routing + using-polyforge + pf-init/doctor/help/status/retro/crystallize/release)",
+  "keywords": ["pi-package"],
+  "pi": {
+    "skills": ["./operator-skills/*"]
+  }
+}
