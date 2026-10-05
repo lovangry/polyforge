@@ -9,8 +9,14 @@ One line, any machine, any harness(or none). Ask the admin for a personal
 API key(`pf_k1_…`), then:
 
 ```
-curl -s http://10.146.0.34:8090/install.sh | bash -s -- <your-api-key>
+curl -s -H "Authorization: token $(gh auth token)" \
+  https://raw.githubusercontent.com/silgrid/polyforge/main/tools/install.sh \
+  | bash -s -- <your-api-key>
 ```
+
+(requires `gh` authenticated — the repo is private. On the internal
+network without gh: `curl -s http://10.146.0.34:8090/install.sh | bash -s -- <your-api-key>`;
+override the server host with `PF_HOST=<host>`.)
 
 It installs the `pf` binary(SHA-verified from the release server), writes
 `~/.polyforge/config.toml`, installs the operator skills(pi harness → pi

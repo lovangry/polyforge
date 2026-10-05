@@ -4,7 +4,7 @@
 # (skills + binary + config; execution machines additionally follow pf-init Step 4)
 set -e
 KEY="${1:?usage: curl -s http://<host>:8090/install.sh | bash -s -- <api-key>}"
-HOST="__HOST__"   # baked at deploy time
+HOST="${PF_HOST:-10.146.0.34}"  # override with PF_HOST
 REL="http://$HOST:8090"; API="http://$HOST:8080"
 
 echo "== 1/4 pf binary"
