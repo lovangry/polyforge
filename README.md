@@ -3,7 +3,25 @@
 Work-item orchestration platform: an aihub server (WI store, memory, git
 revision chain) and a pf work-machine binary (Runtime + Observe + CLI).
 
-## Quickstart
+## Install(team machines — read this first)
+
+One line, any machine, any harness(or none). Ask the admin for a personal
+API key(`pf_k1_…`), then:
+
+```
+curl -s http://10.146.0.34:8090/install.sh | bash -s -- <your-api-key>
+```
+
+It installs the `pf` binary(SHA-verified from the release server), writes
+`~/.polyforge/config.toml`, installs the operator skills(pi harness → pi
+package;other harnesses with a skills dir → directory copy;otherwise
+CLI-only), and verifies connectivity. Execution machines(ones that run a
+pf daemon)add the daemon per `operator-skills/pf-init/` Step 4 — the
+admin registers the machine identity first. Daily use from a session is
+natural language via the `polyforge` routing skill;from a terminal it's
+`pf queue`, `pf submit`, `pf answer`, `pf ops status`, …
+
+## Quickstart(developers — from-zero smoke run)
 
 A from-zero smoke run on one machine: start a local aihub, set up a
 project and a machine identity, file a minimal work item, and drive it
