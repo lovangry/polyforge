@@ -12,12 +12,12 @@ SKILLS_OK() { [ -f "$PKG_DIR/package.json" ] && grep -q '"skills"' "$PKG_DIR/pac
   && [ -f "$PKG_DIR/operator-skills/polyforge/SKILL.md" ]; }
 
 echo "== 1/4 pf binary"
-mkdir -p "$HOME/bin"
+mkdir -p /usr/local/bin
 LATEST=$(curl -s "$REL/latest.txt"); VER=$(echo "$LATEST" | awk '{print $1}'); SHA=$(echo "$LATEST" | awk '{print $2}')
 [ -n "$VER" ] || { echo "ERROR: cannot read $REL/latest.txt (release server down?)"; exit 1; }
-curl -s -o "$HOME/bin/pf" "$REL/pf-$VER" && chmod +x "$HOME/bin/pf"
-GOT=$(sha256sum "$HOME/bin/pf" | awk '{print $1}')
-[ "$GOT" = "$SHA" ] || { echo "ERROR: pf binary SHA mismatch ($GOT != $SHA) — removed"; rm -f "$HOME/bin/pf"; exit 1; }
+curl -s -o /usr/local/bin/pf "$REL/pf-$VER" && chmod +x /usr/local/bin/pf
+GOT=$(sha256sum /usr/local/bin/pf | awk '{print $1}')
+[ "$GOT" = "$SHA" ] || { echo "ERROR: pf binary SHA mismatch ($GOT != $SHA) — removed"; rm -f /usr/local/bin/pf; exit 1; }
 echo "   pf $VER ok"
 
 echo "== 2/4 config"
@@ -59,6 +59,6 @@ else
 fi
 
 echo "== 4/4 connectivity"
-"$HOME/bin/pf" queue --project polyforge > /dev/null 2>&1 \
-  && echo "   OK — pf works. (path: add ~/bin to PATH; daemon setup: see /pf-init Step 4)" \
+/usr/local/bin/pf queue --project polyforge > /dev/null 2>&1 \
+  && echo "   OK — pf works. (path: add /usr/local/bin (already in PATH); daemon setup: see /pf-init Step 4)" \
   || { echo "   WARN: pf queue failed — check key/network (pf doctor)"; }
