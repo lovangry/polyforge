@@ -19,7 +19,7 @@ description: >
 ## Step 1 — 装 pf 二进制(从发布服务器,零认证)
 
 ```
-REL=<release_url,见 Step 2;还没配就先按 Step 2 写好再回来>
+REL=<GitHub Releases,见 Step 2;还没配就先按 Step 2 写好再回来>
 VER=$(curl -s "$REL/latest.txt" | awk '{print $1}')
 SHA=$(curl -s "$REL/latest.txt" | awk '{print $2}')
 curl -s -o ~/bin/pf "$REL/pf-$VER" && chmod +x ~/bin/pf
@@ -35,12 +35,11 @@ mkdir -p ~/.polyforge
 cat > ~/.polyforge/config.toml <<EOF
 url = "http://10.146.0.34:8080"
 api_key = "<你的个人 key>"
-release_url = "http://10.146.0.34:8090"
 EOF
 chmod 600 ~/.polyforge/config.toml
 ```
 
-读取规则:本 skill 的一切下载/版本比对只认 **`release_url`**;
+读取规则:本 skill 的一切下载/版本比对只认 **`GitHub Releases`**;
 config 缺该字段时,用 `url` 的主机部分 + `:8090` 推导,但正式装机
 应显式写明。
 
@@ -79,7 +78,7 @@ pf daemon -server $(grep ^url ~/.polyforge/config.toml | cut -d'"' -f2) \
 ## 升级循环(已装机机器)
 
 ```
-REL=<release_url from config>
+REL=<GitHub Releases from config>
 LATEST=$(curl -s "$REL/latest.txt"); VER=$(echo "$LATEST"|awk '{print $1}')
 RUNNING=$(pf --version)          # 旧二进制无此输出 = 需要升级
 if [ "$RUNNING" != "$VER" ]; then
