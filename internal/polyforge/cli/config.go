@@ -57,7 +57,18 @@ func DefaultConfigPath() string {
 		}
 		base = filepath.Join(home, ".config")
 	}
-	return filepath.Join(base, "polyforge", "cli.toml")
+	primary := filepath.Join(base, "polyforge", "cli.toml")
+	if _, err := os.Stat(primary); err == nil {
+		return primary
+	}
+	// Compat: the bootstrap installer originally wrote here; honor it
+	// if the primary location is absent.
+	hdir, _ := os.UserHomeDir()
+	legacy := filepath.Join(hdir, ".polyforge", "config.toml")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	return primary
 }
 
 // LoadConfig reads the config file (a missing file is not an error: the
