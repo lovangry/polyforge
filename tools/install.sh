@@ -26,9 +26,9 @@ VER=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName
 
 # Download + verify
 TMP=$(mktemp -d)
-gh release download "$VER" --repo "$REPO" --pattern "pf-linux-amd64" --output-dir "$TMP" 2>/dev/null \
+gh release download "$VER" --repo "$REPO" --pattern "pf-linux-amd64" --dir "$TMP" 2>/dev/null \
   || { echo "ERROR: binary asset 'pf-linux-amd64' not found on release $VER"; rm -rf "$TMP"; exit 1; }
-gh release download "$VER" --repo "$REPO" --pattern "SHA256SUMS" --output-dir "$TMP" 2>/dev/null
+gh release download "$VER" --repo "$REPO" --pattern "SHA256SUMS" --dir "$TMP" 2>/dev/null
 
 if [ -f "$TMP/SHA256SUMS" ]; then
   EXPECTED=$(grep "pf-linux-amd64" "$TMP/SHA256SUMS" | awk '{print $1}')
