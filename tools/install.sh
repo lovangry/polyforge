@@ -21,13 +21,14 @@ GOT=$(sha256sum "$HOME/bin/pf" | awk '{print $1}')
 echo "   pf $VER ok"
 
 echo "== 2/4 config"
-mkdir -p "$HOME/.polyforge"
-cat > "$HOME/.polyforge/config.toml" <<EOF
+CFG_DIR="$HOME/.config/polyforge"
+mkdir -p "$CFG_DIR"
+cat > "$CFG_DIR/cli.toml" <<EOF
 url = "$API"
 api_key = "$KEY"
 release_url = "$REL"
 EOF
-chmod 600 "$HOME/.polyforge/config.toml"
+chmod 600 "$CFG_DIR/cli.toml"
 
 echo "== 3/4 skills (pi harness)"
 if command -v pi >/dev/null 2>&1; then
