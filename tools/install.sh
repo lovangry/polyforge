@@ -24,7 +24,7 @@ echo "== 2/4 config"
 CFG_DIR="$HOME/.config/polyforge"
 mkdir -p "$CFG_DIR"
 cat > "$CFG_DIR/cli.toml" <<EOF
-url = "$API"
+server = "$API"
 api_key = "$KEY"
 release_url = "$REL"
 EOF

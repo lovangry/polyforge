@@ -109,7 +109,7 @@ func LoadConfig(path string) (Config, error) {
 func applyConfigFile(cfg *Config, kv map[string]string) {
 	for k, v := range kv {
 		switch k {
-		case "server":
+		case "server", "url": // "url" was the installer's original spelling
 			cfg.Server = v
 		case "api_key":
 			cfg.APIKey = v
