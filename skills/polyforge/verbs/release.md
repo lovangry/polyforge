@@ -1,9 +1,4 @@
----
-name: pf-release
-description: >
-  Use when the team is ready to cut a versioned alpha release, promote an alpha
-  channel to stable, or check the current release state.
----
+# release — from pf-release
 
 # pf-release - Release Management
 

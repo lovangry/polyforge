@@ -1,9 +1,4 @@
----
-name: pf-help
-description: >
-  Use when the user asks how to use a /pf-* skill, what flags it takes, or wants a
-  quick reference of the available polyforge skills.
----
+# help — from pf-help
 
 # pf-help - /pf-* Skill Quick Reference
 

@@ -1,9 +1,4 @@
----
-name: pf-status
-description: >
-  Use when the user wants to know what is happening: progress on a claimed wi, the
-  project ready queue, or which items are stalled, blocked, or need attention.
----
+# status — from pf-status
 
 # pf-status - Work Item Status & Ready Queue
 

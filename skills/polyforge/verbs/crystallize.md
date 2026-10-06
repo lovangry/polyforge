@@ -1,10 +1,4 @@
----
-name: pf-crystallize
-description: >
-  Use when a wi has just been wrapped via /pf-stop --wrap and its operation flow should
-  be captured as reusable, versioned SKILL BUNDLES for future wis of the same type.
-  Dispatched automatically by pf-stop --wrap, not invoked directly by the user.
----
+# crystallize — from pf-crystallize
 
 # pf-crystallize - Workflow Crystallization
 

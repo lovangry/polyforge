@@ -1,9 +1,14 @@
 {
   "name": "polyforge",
   "version": "1.0.0",
-  "description": "Polyforge v1.0.0 — operator skills (polyforge routing + using-polyforge + pf-init/doctor/help/status/retro/crystallize/release)",
-  "keywords": ["pi-package"],
+  "description": "Polyforge v1.0.0 \u2014 polyforge routing skill (20 verbs) + using-polyforge (resident rules)",
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "skills": ["./operator-skills/*"]
+    "skills": [
+      "./operator-skills/polyforge",
+      "./operator-skills/using-polyforge"
+    ]
   }
 }

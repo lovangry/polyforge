@@ -1,12 +1,4 @@
----
-name: pf-init
-description: >
-  Use when setting up a polyforge machine on v1.0.0 for the first time:
-  installing the pf binary, writing the client config, verifying server
-  connectivity, and optionally booting the local execution daemon.
-  Also use for binary upgrades (version check → download → graceful
-  restart) and repair when connectivity or daemon health checks fail.
----
+# init — from pf-init
 
 # pf-init — v1.0.0 机器安装 / 升级 / 修复
 

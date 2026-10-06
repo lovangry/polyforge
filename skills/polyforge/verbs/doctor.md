@@ -1,10 +1,4 @@
----
-name: pf-doctor
-description: >
-  Use when the user asks to diagnose or fix the polyforge workspace, MCP connection,
-  repo state, or version mismatch. Also use when any pf-* tool call fails unexpectedly
-  or when onboarding to a new machine.
----
+# doctor — from pf-doctor
 
 # pf-doctor - Workspace Health Check
 
