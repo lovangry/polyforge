@@ -203,10 +203,10 @@ type streamState struct {
 	// execution from the silence window (#83: large file edits routinely
 	// exceed HangWindow while the agent is actively working).
 	toolDispatchAt time.Time
-	records   int64 // progress-record count
-	noise     int64 // non-progress record count
-	incidents []StreamIncident
-	dropped   int64
+	records        int64 // progress-record count
+	noise          int64 // non-progress record count
+	incidents      []StreamIncident
+	dropped        int64
 	// lastIncidentKey suppresses the triple-report of ONE provider
 	// failure: the stream carries the same errorMessage on
 	// message_start, message_end and turn_end of the failed turn. The

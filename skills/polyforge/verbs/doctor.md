@@ -87,7 +87,10 @@ availability and server health - NOT `config.toml` validity: a load failure prin
 separately on stderr (`polyforge: … could not be loaded`) and execution continues
 with an empty config, so inspect that line yourself. Triage:
 1. `cat ~/.polyforge/config.toml` - verify `[server] url` and `[auth] api_key`
-2. `curl -s <url>/v1/health` - direct reachability test
+2. Rerun `polyforge doctor` and read Check-2's verdict - that check itself exercises
+   the endpoint+credential health path (GET `/v1/health`) with the configured auth, so
+   it IS the reachability test. Never a raw curl at the aihub server (IR6: the pf CLI
+   owns every aihub data-plane call).
 3. If API key missing: configure `[auth] api_key` in `~/.polyforge/config.toml` or
    export `POLYFORGE_API_KEY`, then rerun. `polyforge init` does NOT prompt for a
    key - it refuses without one and only prints the `[auth] api_key` instructions.
