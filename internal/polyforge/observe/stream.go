@@ -114,6 +114,12 @@ const maxStreamIncidents = 64
 // StreamHeartbeat is one point-in-time reading of the supervised agent's
 // record stream.
 type StreamHeartbeat struct {
+	// ToolDispatchAt is when the stream last saw a message_end with the
+	// turn still open — the signature of a tool call dispatched and
+	// executing. Zero means no tool is known to be executing. Tool
+	// execution (large edits, long builds) legitimately exceeds the
+	// HangWindow; the hang lane must treat it as live work, not silence.
+	ToolDispatchAt time.Time
 	// Observable reports whether any record — progress OR noise — has
 	// been seen at all (the stream itself is being received).
 	Observable bool
@@ -190,6 +196,13 @@ type streamState struct {
 	// because agent_start and turn_start both open; it saturates at 0 so
 	// a stray close can never wedge the flag negative.
 	turnDepth int
+	// toolDispatchAt is when the stream last saw message_end with the
+	// turn still open — the signature of a tool call dispatched and
+	// executing. Cleared when a toolResult arrives (the tool returned)
+	// or when the turn ends. The hang lane reads it to exempt live tool
+	// execution from the silence window (#83: large file edits routinely
+	// exceed HangWindow while the agent is actively working).
+	toolDispatchAt time.Time
 	records   int64 // progress-record count
 	noise     int64 // non-progress record count
 	incidents []StreamIncident
@@ -252,6 +265,16 @@ func (s *streamState) note(raw []byte) {
 		if s.turnDepth > 0 {
 			s.turnDepth--
 		}
+		s.toolDispatchAt = time.Time{} // turn closed: no tool in flight
+	case recMessageEnd:
+		if s.turnDepth > 0 {
+			// message ended with the turn still open: a tool call was
+			// dispatched and is executing (#83). Track it so the hang lane
+			// can exempt live tool execution from the silence window.
+			s.toolDispatchAt = now
+		}
+	case recToolResult:
+		s.toolDispatchAt = time.Time{} // tool returned: dispatch cleared
 	}
 	s.mu.Unlock()
 
@@ -371,6 +394,7 @@ func (s *streamState) heartbeat() StreamHeartbeat {
 		LastProgressAt: s.lastProgressAt,
 		LastNoiseAt:    s.lastNoiseAt,
 		InFlight:       s.turnDepth > 0,
+		ToolDispatchAt: s.toolDispatchAt,
 		Records:        s.records,
 		Noise:          s.noise,
 	}

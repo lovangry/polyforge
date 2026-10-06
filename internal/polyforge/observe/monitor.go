@@ -545,6 +545,16 @@ func (m *Monitor) checkHang() {
 	if !m.stream.heartbeat().Silent(time.Now(), m.cfg.HangWindow, m.hangAnchor) {
 		return
 	}
+	// #83 tool-execution exemption: a dispatched tool call that has not
+	// returned yet is live work, not a hang. Large file edits and long
+	// builds routinely exceed the 10-minute HangWindow; the pre-#83
+	// watchdog killed those deterministically (probe undeliverable
+	// mid-tool-call). Window: 30 minutes from the dispatch — a tool that
+	// takes longer than that is genuinely stuck and DESERVES the probe.
+	hb := m.stream.heartbeat()
+	if !hb.ToolDispatchAt.IsZero() && time.Since(hb.ToolDispatchAt) < 30*time.Minute {
+		return
+	}
 	m.stateMu.Lock()
 	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
 	m.stateMu.Unlock()
