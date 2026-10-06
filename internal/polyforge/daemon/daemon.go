@@ -30,6 +30,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
+	"github.com/silgrid/polyforge/internal/polyforge/bridge"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
@@ -59,12 +60,16 @@ type Hub interface {
 
 // Config wires the daemon. Zero fields take the defaults in fill().
 type Config struct {
-	MachineID          string
-	SocketPath         string // UDS listen path (default /run/polyforge.sock)
-	WorkspaceRoot      string // <root>/capsules/<wi> are the capsule worktrees
-	DataDir            string // runtime state.json + events.log + daemon-state.json
-	Project            string // ready-queue scope for batch/drain
-	GitRemoteBase      string // <base>/<wi>.git are the aihub bare repos
+	MachineID  string
+	SocketPath string
+	// UseDriver selects the v2 Go execution driver (bridge.Start) over
+	// the legacy WI-Agent spawn. Production main.go sets true; the
+	// e2e suite exercising the WI-Agent RPC model leaves it false.
+	UseDriver          bool
+	WorkspaceRoot      string
+	DataDir            string
+	Project            string
+	GitRemoteBase      string
 	WorkflowsDir       string // daemon checkout's workflows/
 	ExecutorPromptFile string
 	PiBin              string
@@ -276,6 +281,26 @@ func New(cfg Config) (*Daemon, error) {
 	if sp == nil {
 		sp = runtime.DefaultSpawner(&rtCfg)
 	}
+	// v2: bind the Go driver bridge as the execution engine. Only when
+	// UseDriver is set (production main.go); tests exercising the
+	// WI-Agent RPC model keep the legacy spawn path (AgentStarter nil).
+	if cfg.UseDriver {
+		rtCfg.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+			h, err := bridge.Start(ctx, bridge.Config{
+				WI:            in.WI,
+				CapsuleDir:    in.CapsuleDir,
+				BundleName:    in.BundleName,
+				BundleDigest:  in.BundleDigest,
+				SessionHandle: in.SessionHandle,
+				SpawnN:        in.SpawnN,
+				Spawner:       in.Spawner,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return h, nil
+		}
+	} // end UseDriver
 
 	d := &Daemon{
 		cfg:      cfg,

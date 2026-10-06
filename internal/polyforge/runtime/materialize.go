@@ -233,25 +233,39 @@ func (r *Runtime) materializeBundleSet(j *job, src string) error {
 	} else {
 		fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s carries no pinned content digest; materialized without verification\n", j.wi, j.bundleName)
 	}
-	// The agents pieces: the authority copy under agents/ plus the
-	// harness discovery copy under .pi/agents/, both from the bundle's
-	// own agents/ subdir. A bundle without one skips both.
+	// v2: the step definitions live under steps/ (no discovery copy —
+	// the Go driver reads them directly; no .pi/agents/ harness
+	// materialization). Legacy bundles with agents/ fall back to the
+	// old copy for the WI-Agent path.
 	pieces := []string{wfRel}
-	if dirExists(filepath.Join(src, "agents")) {
+	if dirExists(filepath.Join(src, "steps")) {
+		pieces = append(pieces, capsule.DirAgents) // capsule dir name unchanged (steps/ content)
+		for _, rel := range pieces {
+			srcDir := src
+			if rel == capsule.DirAgents {
+				srcDir = filepath.Join(src, "steps")
+			}
+			if err := copyTree(srcDir, filepath.Join(stage, filepath.FromSlash(rel))); err != nil {
+				os.RemoveAll(stage)
+				return err
+			}
+		}
+	} else if dirExists(filepath.Join(src, "agents")) {
+		// legacy bundle (agents/): old materialization + discovery copy
 		pieces = append(pieces, capsule.DirAgents)
 		if d := r.discoveryRel(); d != "" {
 			pieces = append(pieces, d)
 		}
-	}
-	for _, rel := range pieces {
-		srcDir := src
-		switch rel {
-		case capsule.DirAgents, r.discoveryRel():
-			srcDir = filepath.Join(src, "agents")
-		}
-		if err := copyTree(srcDir, filepath.Join(stage, filepath.FromSlash(rel))); err != nil {
-			os.RemoveAll(stage)
-			return err
+		for _, rel := range pieces {
+			srcDir := src
+			switch rel {
+			case capsule.DirAgents, r.discoveryRel():
+				srcDir = filepath.Join(src, "agents")
+			}
+			if err := copyTree(srcDir, filepath.Join(stage, filepath.FromSlash(rel))); err != nil {
+				os.RemoveAll(stage)
+				return err
+			}
 		}
 	}
 	// targets records every staged file, in sorted order for a stable

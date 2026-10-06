@@ -132,53 +132,6 @@ func (e *envSanitizer) childEnv(additions ...string) []string {
 // ---------------------------------------------------------------------------
 // SpawnParams / AgentHandle
 
-// SpawnParams describes one agent derivation.
-type SpawnParams struct {
-	WorkItemID string
-	CapsuleDir string
-	// SessionHandle is the PUBLIC session fingerprint (B3): injected as
-	// PF_SESSION_HANDLE. The SECRET session id never rides SpawnParams
-	// at all — it must not reach the capsule journal, the env or argv.
-	SessionHandle string
-	// SpawnN is this derivation's ordinal (B2): the per-WI monotonic
-	// counter value AFTER this derivation (state.json spawn_n + 1
-	// locally; capsule spawn-journal max + 1 across a fresh clone).
-	// Injected as PF_SPAWN_N — the agent's flush fence identity.
-	SpawnN         int
-	TranscriptPath string // resume source; empty for a fresh derivation
-	Resume         bool   // attach to TranscriptPath instead of a new session
-	InitialPrompt  string
-	CgroupPath     string // per-WI cgroup v2 dir; "" = layer 0 unavailable
-	// Model pins this derivation's harness model: the effective candidate
-	// of the bundle's defaults model_candidates chain (F4/P6). "" = no
-	// chain: the harness adapter's default stays in effect. Carried as
-	// SPAWN ARGV, not capsule settings — see buildCmd for the measured
-	// reasoning.
-	Model   string
-	Journal func(pid int, startedAt string) error
-}
-
-// AgentHandle is the supervised face over one derived agent process.
-type AgentHandle interface {
-	PID() int
-	StartedAt() string
-	Alive() bool
-	Done() bool
-	Terminate(bound time.Duration) error
-	SendControl(m protocol.ControlMsg) error
-	// WaitControlAck awaits the agent's ack of exactly the control
-	// message m, matching on (method, correlation) — not method alone, so
-	// concurrent waiters (stop notice, answer, probe) can never steal each
-	// other's acks.
-	WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error
-}
-
-// Spawner derives agent processes; tests substitute fakes that spawn real
-// but trivial child processes.
-type Spawner interface {
-	Spawn(ctx context.Context, p SpawnParams) (AgentHandle, error)
-}
-
 // piSpawner is the production spawner for the pi harness. It holds the
 // config BY POINTER (see DefaultSpawner): fields are read at spawn time
 // from the shared config, never from a copy.

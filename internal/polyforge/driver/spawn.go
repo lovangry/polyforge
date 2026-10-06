@@ -13,7 +13,7 @@ package driver
 //     plus the result-delivery contract. Fresh steps get the same
 //     assembly minus the handoff: a fresh context never carries one.
 //
-//   - PROCESS DERIVATION through runtime.SpawnParams → runtime.Spawner
+//   - PROCESS DERIVATION through spawn.Params → spawn.Spawner
 //     (the same mechanism the WI-agent lane uses): the model pin rides
 //     argv, the resume session rides the spawn journal's latest
 //     transcript, the spawn identity line is appended through
@@ -45,7 +45,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/workflow"
-	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/common/spawn"
 )
 
 const (
@@ -83,7 +83,7 @@ type StepSpawnAdapter struct {
 	// Spawner derives the step processes. Required; production binds
 	// runtime.DefaultSpawner(&runtime.Config{...}) so isolation, env
 	// sanitization and the model pin keep their single home.
-	Spawner runtime.Spawner
+	Spawner spawn.Spawner
 	// CgroupPath is the per-WI cgroup v2 dir ("" = layer 0
 	// unavailable) — passed through to SpawnParams.
 	CgroupPath string
@@ -181,7 +181,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 	} else {
 		transcript = filepath.Join(a.WI.CapsuleDir, capsule.DirSession, "session-"+spawnToken(handle, sp.SpawnN)+".jsonl")
 	}
-	p := runtime.SpawnParams{
+	p := spawn.Params{
 		WorkItemID:     a.WI.ID,
 		CapsuleDir:     a.WI.CapsuleDir,
 		SessionHandle:  handle,
@@ -583,7 +583,7 @@ func (a *StepSpawnAdapter) latestJournalTranscript() (string, error) {
 // session_handle, spawn_n, resume, transcript), so the B2 counter
 // stays continuous across both spawners and every reader (loose by
 // contract) keeps parsing.
-func (a *StepSpawnAdapter) appendSpawnJournal(p runtime.SpawnParams, token string, pid int, startedAt string) error {
+func (a *StepSpawnAdapter) appendSpawnJournal(p spawn.Params, token string, pid int, startedAt string) error {
 	now := time.Now()
 	if a.Now != nil {
 		now = a.Now()
@@ -651,7 +651,7 @@ type stepRun struct {
 	capsuleRoot string
 	wiID        string
 	sp          StepSpawn
-	handle      runtime.AgentHandle
+	handle      spawn.Handle
 	dropPath    string
 	poll        time.Duration
 }

@@ -3,7 +3,7 @@ package test
 // E2e pin for wi_MuyoyHwOewS7: the release step's version-base computation
 // must reflect every version already published by ANY capsule.
 //
-// The old release procedure (workflows/*/agents/release.md, step 1) computed
+// The old release procedure (workflows/*/steps/release.md, step 1) computed
 // the version floor inside the capsule's own worktree:
 //
 //	git tag -l 'v*' | sort -V | tail -1
@@ -164,7 +164,7 @@ func TestReleaseVersionBaseParallelCapsuleCollision(t *testing.T) {
 	}
 	for _, bundle := range releaseBundles {
 		t.Run(bundle, func(t *testing.T) {
-			template := filepath.Join("..", "workflows", bundle, "agents", "release.md")
+			template := filepath.Join("..", "workflows", bundle, "steps", "release.md")
 
 			root := t.TempDir()
 			origin := filepath.Join(root, "origin.git")

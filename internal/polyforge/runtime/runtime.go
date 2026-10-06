@@ -45,6 +45,11 @@ type Aihub interface {
 
 // Config is the daemon-supplied runtime configuration.
 type Config struct {
+	// AgentStarter replaces the legacy WI-Agent spawn with an external
+	// starter (the daemon binds bridge.Start here). nil = the legacy
+	// in-package spawnAgent path (kept for tests that exercise the
+	// WI-Agent RPC model directly).
+	AgentStarter  AgentStartFunc
 	MachineID     string // registered machine identity
 	WorkspaceRoot string // <root>/capsules/<wi> are the capsule worktrees
 	DataDir       string // state.json + external git-dirs live here
@@ -170,6 +175,26 @@ type Runtime struct {
 const releaseQueueCap = 256
 
 // job is one WI's runtime bookkeeping.
+
+// AgentStartInput carries the exported fields the execution engine
+// starter needs (the bridge cannot see the runtime's unexported job).
+type AgentStartInput struct {
+	WI            string
+	Project       string
+	CapsuleDir    string
+	BundleName    string
+	BundleDigest  string
+	SessionHandle string // public fingerprint
+	SpawnN        int64
+	// Spawner is the runtime's process spawner (production: pi).
+	Spawner Spawner
+}
+
+// AgentStartFunc starts the execution engine for a claimed work item
+// and returns a supervision handle. The daemon binds the Go driver
+// bridge here; nil falls back to the legacy WI-Agent spawn.
+type AgentStartFunc func(ctx context.Context, in AgentStartInput) (AgentHandle, error)
+
 type job struct {
 	wi      string
 	project string
@@ -787,9 +812,33 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		}
 		return r.abandonClaim(j, wi, err, note)
 	}
-	if _, err := r.spawnAgent(ctx, j, false, ""); err != nil {
-		return r.abandonClaim(j, wi, err, "spawn agent: "+err.Error())
+	// v2: the Go driver replaces the WI-Agent spawn. The daemon binds
+	// bridge.Start as AgentStarter at assembly; the driver owns the step
+	// state machine from here on.
+	var h AgentHandle
+	var err2 error
+	if r.cfg.AgentStarter != nil {
+		h, err2 = r.cfg.AgentStarter(ctx, AgentStartInput{
+			WI:            j.wi,
+			Project:       j.project,
+			CapsuleDir:    j.capsuleDir,
+			BundleName:    j.bundleName,
+			BundleDigest:  j.bundleDigest,
+			SessionHandle: j.sessionFingerprint,
+			SpawnN:        int64(j.spawnN),
+			Spawner:       r.spawner,
+		})
+		if err2 != nil {
+			return r.abandonClaim(j, wi, err2, "driver start: "+err2.Error())
+		}
+	} else {
+		// legacy path (tests exercising the WI-Agent RPC model directly)
+		h, err2 = r.spawnAgent(ctx, j, false, "")
+		if err2 != nil {
+			return r.abandonClaim(j, wi, err2, "spawn agent: "+err2.Error())
+		}
 	}
+	_ = h
 	r.mu.Lock()
 	r.jobs[id] = j
 	r.mu.Unlock()
