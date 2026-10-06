@@ -1,7 +1,7 @@
 ---
 name: using-polyforge
 description: >
-  Use at the start of any polyforge session and before any /pf-* skill, work-item, or
+  Use at the start of any polyforge session and before any polyforge skill, work-item, or
   memory operation; loaded automatically at session start.
 ---
 
@@ -16,7 +16,7 @@ description: >
   bought no reach and priced every direct invocation. Both arms are in the notes.
 
   Four things not to get wrong without going and reading it:
-    1. This file is a MANIFEST, assembled at SessionStart by hooks/pf-session-start.
+    1. This file is a MANIFEST: its @include fragments are the resident payload, read at session start.
        To edit the skill, edit a FRAGMENT, not this file. An include directive pulls a
        fragment into the RESIDENT tier; an on-demand directive declares one that ships
        as a file and is NEVER injected. A directive may be followed by an attribute
@@ -41,7 +41,6 @@ description: >
 @include: fragments/iron-rules.md
 kind: rule
 gate: none
-gate-partial: pf-commit-guard
 authority: self
 
 @include: fragments/output-format.md
@@ -62,8 +61,8 @@ authority: self
 @include: fragments/nl-routing.md
 kind: rule
 gate: none
-authority: each /pf-* skill's own NL Triggers section
-resident-because: it is the cross-skill index - a single skill's NL Triggers cannot tell you WHICH skill to open, and that is the decision made before any skill is read.
+authority: each polyforge verb's own Triggers section
+resident-because: it is the cross-verb index - a single verb's Triggers section cannot tell you WHICH verb to run, and that is the decision made before any skill is read.
 
 @include: fragments/repo-routing.md
 kind: rule
