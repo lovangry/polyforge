@@ -64,6 +64,7 @@ else
   cat > "$CFG" <<EOF
 server = "$API"
 api_key = "$KEY"
+daemon_socket = "$DAEMON_SOCKET"
 EOF
   chmod 600 "$CFG"
   echo "   config written"
