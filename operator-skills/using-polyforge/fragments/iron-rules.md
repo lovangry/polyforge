@@ -30,3 +30,15 @@ introduce a technical term only when it names something the owner must act on,
 and gloss it on first use. A jargon wall is a bug in the report, not a sign of
 rigor. If a two-line summary and a table both work, give both: table for the
 eyes, plain sentence for the decision.
+
+**IR6 - Aihub data plane: pf CLI only, never direct curl**
+Never make direct curl/HTTP calls against the aihub server; all aihub data-plane
+interaction goes through the pf CLI, which encapsulates auth, error handling, and
+request tracing - a raw curl bypasses all three. polyforge#72 is the failure mode:
+a registration-only work item created via curl without a workflow bundle, left
+unclaimable (a registration-only ticket cannot have a bundle attached later; the
+only path to execute its content is a child work item). Scope: the aihub data
+plane ONLY. The daemon status curl over the local unix socket
+(`fragments/watcher-reconcile.md`, `skills/polyforge/verbs/init.md` ops notes) and
+release-server binary downloads (`skills/polyforge/verbs/init.md`) are different
+surfaces - not aihub, no CLI-encapsulation bypass - and are NOT covered.

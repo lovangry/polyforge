@@ -546,3 +546,39 @@ A row that merely restates a skill's own name (`plan` -> `/pf-plan`) is omitted 
 purpose. That table indexes NON-OBVIOUS intent -> operation mappings; a row a reader could
 have guessed from the skill's own name spends resident budget to say nothing, and each
 `/pf-*` skill's own `NL Triggers` section is authoritative for its triggers anyway.
+
+## RESIDENT TIER - WHAT polyforge#75 ADDED, AND WHAT PAID FOR IT
+
+Added: IR6 to fragments/iron-rules.md (1,667 -> 2,510 chars, +843) - the FULL version,
+by owner ruling q_828aa9, not a trimmed one: the normative ban (never direct curl/HTTP
+against the aihub server; all aihub data-plane interaction goes through the pf CLI), the
+rationale (the pf CLI encapsulates auth, error handling, and request tracing - a raw curl
+bypasses all three), the polyforge#72 failure mode (a registration-only work item created
+via curl without a workflow bundle, unclaimable), and the explicit scope carve-outs (the
+daemon-UDS status curl in `fragments/watcher-reconcile.md` and
+`skills/polyforge/verbs/init.md` ops notes; the release-server downloads in
+`skills/polyforge/verbs/init.md`). IR1-IR5 are untouched and keep their numbers
+(`skills/polyforge/verbs/crystallize.md` cites IR1/IR3). The same change de-contradicts
+`skills/polyforge/verbs/doctor.md`: Check-2 triage step 2's `curl -s <url>/v1/health` is
+now the pf-CLI probe (rerun `polyforge doctor`, read Check-2's verdict). That file is a
+polyforge verb fragment, read at routing time - not a using-polyforge resident fragment -
+so it costs no band.
+
+WHAT PAID FOR IT: nothing, by the same ruling. The full IR6 was ruled in ahead of the
+budget; the headroom is to come from polyforge#76 (skill slimming, separate work item,
+not in this tree when this landed). No gate was raised, no rule fragment was demoted to
+on-demand, and no resident rule text was trimmed to force a fit.
+
+DECLARED BAND EXCESS, PENDING polyforge#76. The band cap is 8,497 characters, enforced
+by the payload gate in the aihub repo's `plugins/polyforge` copy - NOT present in the
+tree this change was made in, so no gate could run here and none did. The last ledgered
+assembled payload above is 8,485 (aihub#691), 12 characters of headroom under the cap.
+This tree's resident fragments have since diverged from that ledger (its own commits
+492054d, d9c994e, 17dc72a, 3e81e29, f971e5e), and a local manifest-order reassembly of
+the current eight resident fragments (per-fragment rstrip("\n") plus the 2-character
+separator, the same recipe the figures above use) sums to 8,868 BEFORE this change and
+9,711 after it: the resident tier is over the cap with or without IR6, and IR6's +843 is
+the owner-accepted addition on top. Declared here, not silently trimmed; the
+authoritative margin is whatever the aihub-tree gate prints when it is run, and
+polyforge#76 must pay this ledger back down inside the band. This entry itself sits in
+references/manifest-notes.md, which no directive injects - unbudgeted, no band cost.
