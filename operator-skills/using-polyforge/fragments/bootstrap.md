@@ -3,8 +3,8 @@
 On session start, before responding to any user message:
 
 **Step 0 - Repo map first.** The workspace root `CLAUDE.md` `## Workspace`
-managed block is already in context - consult it *before* anything else (Repo
-Routing below uses it); do **not** re-read the file. Absent -> `Read` it, or
+managed block is already in context - consult it *before* anything else; do
+**not** re-read the file. Absent -> `Read` it, or
 run `polyforge init` to write it.
 
 Then the daemon/wi scan:

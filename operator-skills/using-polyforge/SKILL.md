@@ -22,7 +22,7 @@ description: >
        as a file and is NEVER injected. A directive may be followed by an attribute
        block; `when:` makes an include conditional (no `when:` = always).
     2. HARD SIZE BUDGET. The assembled payload must stay inside the two-sided band recorded
-       in references/manifest-notes.md (currently ~5,973 chars across 7 resident fragments,
+       in references/manifest-notes.md (currently ~5,987 chars across 7 resident fragments,
        gate ≤8,497), well under the harness's 10,000-character limit - above which the
        payload is silently replaced by a ~2,000-char preview. If the band goes red because
        you ADDED content, move a fragment to the on-demand tier. Do NOT raise the gate. If

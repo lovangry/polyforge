@@ -19,8 +19,7 @@ report and stop - no raw curl, no routing around it. Diagnose via
 **IR4 - Session start: reconcile per-WI watchers**
 On session entry (and any status check), relaunch each claimed, non-terminal
 WI's missing watcher from
-`<workspace>/.polyforge/watchers/<wi>.sh` per `fragments/watcher-reconcile.md`
-- never leave a live WI unwatched.
+`<workspace>/.polyforge/watchers/<wi>.sh` per `fragments/watcher-reconcile.md`.
 
 **IR5 - Speak plainly**
 Lead with the answer; use everyday words and analogies (chef/restaurant beats
