@@ -1,7 +1,7 @@
 ---
 name: using-polyforge
 description: >
-  Use at the start of any polyforge session and before any /pf-* skill, work-item, or
+  Use at the start of any polyforge session and before any polyforge skill, work-item, or
   memory operation; loaded automatically at session start.
 ---
 
@@ -16,20 +16,20 @@ description: >
   bought no reach and priced every direct invocation. Both arms are in the notes.
 
   Four things not to get wrong without going and reading it:
-    1. This file is a MANIFEST, assembled at SessionStart by hooks/pf-session-start.
+    1. This file is a MANIFEST: its @include fragments are the resident payload, read at session start.
        To edit the skill, edit a FRAGMENT, not this file. An include directive pulls a
        fragment into the RESIDENT tier; an on-demand directive declares one that ships
        as a file and is NEVER injected. A directive may be followed by an attribute
        block; `when:` makes an include conditional (no `when:` = always).
-    2. HARD SIZE BUDGET. The assembled payload must stay inside the two-sided band in
-       tests/using-polyforge-payload.test.sh, well under the harness's 10,000-character
-       limit - above which the payload is silently replaced by a ~2,000-char preview.
-       If that test goes red because you ADDED content, move a fragment to the on-demand
-       tier. Do NOT raise the gate. If it goes red because you REMOVED content, lower
-       the gate to the number it prints.
+    2. HARD SIZE BUDGET. The assembled payload must stay inside the two-sided band recorded
+       in references/manifest-notes.md (currently ~5,987 chars across 7 resident fragments,
+       gate ≤8,497), well under the harness's 10,000-character limit - above which the
+       payload is silently replaced by a ~2,000-char preview. If the band goes red because
+       you ADDED content, move a fragment to the on-demand tier. Do NOT raise the gate. If
+       it goes red because you REMOVED content, lower the recorded gate to the new total.
     3. Every directive carries kind / gate / authority (plus resident-because, plus
-       `when:` as the FIRST attribute line). tests/using-polyforge-manifest.test.sh
-       enforces that schema and the TIER RULE: an unenforced rule must not leave the
+       `when:` as the FIRST attribute line). references/manifest-notes.md records
+       that schema and the TIER RULE: an unenforced rule must not leave the
        resident tier.
     4. Never start a line inside this comment with a bare directive verb - the parser
        strips each line before matching, so an indented example would be parsed for real.
@@ -41,15 +41,9 @@ description: >
 @include: fragments/iron-rules.md
 kind: rule
 gate: none
-gate-partial: pf-commit-guard
 authority: self
 
 @include: fragments/output-format.md
-kind: rule
-gate: none
-authority: self
-
-@include: fragments/post-claim-dispatch.md
 kind: rule
 gate: none
 authority: self
@@ -67,8 +61,8 @@ authority: self
 @include: fragments/nl-routing.md
 kind: rule
 gate: none
-authority: each /pf-* skill's own NL Triggers section
-resident-because: it is the cross-skill index - a single skill's NL Triggers cannot tell you WHICH skill to open, and that is the decision made before any skill is read.
+authority: each polyforge verb's own Triggers section
+resident-because: it is the cross-verb index - a single verb's Triggers section cannot tell you WHICH verb to run, and that is the decision made before any skill is read.
 
 @include: fragments/repo-routing.md
 kind: rule

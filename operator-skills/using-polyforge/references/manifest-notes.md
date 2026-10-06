@@ -298,6 +298,9 @@ attributes are also manifest-scoped by nature: whether a fragment is resident is
 property of THIS list, not of the file.
 
 ## SIZE BUDGET - READ BEFORE ADDING AN @include (aihub#285)
+
+**V1 OPERATIVE RECORD (2026-10-06, wi polyforge#76).** The resident payload is 5,987 characters across 7 @include fragments (post-claim-dispatch.md was merged into output-format.md and deleted; the on-demand triggers live in on-demand-index.md). The v0 gate constant PF_PAYLOAD_MAX_CHARS (8,497) lived in tests/using-polyforge-payload.test.sh, which does not exist in the v1 tree, so this file is now the gate's ONLY enforcement record. Per the ratchet below, the gate is lowered with the payload: 8,497 -> 5,987. A further slimming lowers it again; content that would bust it moves to the on-demand tier instead; never raise it above the historical 8,497 ceiling without a recorded transaction here. Everything after this record is the aihub#-era history of how the budget was measured and enforced, kept intact.
+
 The assembled payload is delivered as ONE `additionalContext` string. Claude
 Code replaces any single hook output over 10,000 CHARACTERS with a
 `<persisted-output>` wrapper: the full text is written to a file on disk and
@@ -341,9 +344,10 @@ never reached any model. Two rules keep it fixed:
 
 ON-DEMAND TIER (declared with the on-demand verb, never injected - see also
 fragments/on-demand-index.md). Rationale per fragment:
-  fragments/post-claim-routing.md    7,727 chars - the ROUTING TABLE section only
-                                     applies to a three-segment "Next steps" for
-                                     requires_human_session=true. Grew from 4,755 by
+
+(Figures and one-line descriptions updated 2026-10-06 for the v1 rewrite, wi polyforge#76. The aihub#-era paragraphs are retained as historical record and describe the v0 fragments - where they name v0 machinery, the current fragment is the corrected copy and fragments/on-demand-index.md carries its trigger.)
+
+  fragments/post-claim-routing.md    2,750 chars - the post-submit operator posture: who drives, what to watch, outcome-not-path prompting - the full reference behind output-format.md's resident short form. Grew from 4,755 by
                                      aihub#685, which appended two sections that are
                                      NOT scoped to rhs=true: the full argument for
                                      "claiming always walks the step graph, rhs picks
@@ -368,7 +372,7 @@ fragments/on-demand-index.md). Rationale per fragment:
                                      `steps=[]`) and deleted the same line outright from
                                      the resident copy in post-claim-dispatch.md rather
                                      than restate the caveat there.
-  fragments/memory-conventions.md    4,841 chars - its load-bearing rule ("all memory
+  fragments/memory-conventions.md    2,226 chars - its load-bearing rule ("all memory
                                      lives in aihub, local .md memory is deprecated
                                      here") is already stated - in fact stated more
                                      strictly - in memory-first.md, which stays in the
@@ -386,10 +390,7 @@ fragments/on-demand-index.md). Rationale per fragment:
                                      on-demand-index.md names the type vocabulary, the
                                      link-discipline and work_item_id rules in its
                                      trigger so an agent knows when to go read it.
-  fragments/platform-adaptation.md   1,425 chars - its most load-bearing fact, the
-                                     per-runtime MCP tool names for Claude Code /
-                                     Codex / Copilot, is already spelled out in the
-                                     hook's own preamble, which is always delivered.
+  fragments/platform-adaptation.md   1,268 chars - per-runtime delivery of the skill set (pi and Claude Code today): install paths and trust gates; Codex/Copilot are unsupported in v1.
                                      What does NOT survive is "there is no `Skill`
                                      tool under Codex/Copilot" - a skill-INVOCATION
                                      fact, not install detail, and the injected payload
@@ -397,8 +398,8 @@ fragments/on-demand-index.md). Rationale per fragment:
                                      Skill tool. on-demand-index.md's trigger says so
                                      explicitly. If this keeps biting non-Claude
                                      runtimes, move that one clause into the preamble.
-  fragments/diagram-convention.md      700 chars - only applies while authoring an artifact
-                                     that contains a diagram (/pf-spec, /pf-plan).
+  fragments/diagram-convention.md      689 chars - only applies while authoring an artifact
+                                     that contains a diagram (spec and plan output).
   fragments/repo-detail.md           2,157 chars - where a repo's main_modules /
                                      change_scenarios / tech_stack live now that the
                                      `## Workspace` block carries only a one-line

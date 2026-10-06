@@ -1,104 +1,34 @@
 ## Memory: unified to polyforge (local .md deprecated)
 
-In a polyforge workspace, **all memory lives in aihub** - write via `pf_remember`
-(facts/rules/experience) or `pf_save_artifact` (spec/plan/review/…), recall via `pf_recall`.
-The harness's local Claude memory (`~/.claude/projects/.../memory/*.md` + `MEMORY.md`,
-`[[wiki-link]]` syntax) is **deprecated here: do NOT create or maintain local `.md` memory
-files in a polyforge workspace.** (Non-polyforge projects may still use local memory; this
-override is scoped to polyforge workspaces.)
+In a polyforge workspace, **all memory lives in AIHub** - write via `pf remember`,
+recall via `pf recall`. The harness's local Claude memory (`~/.claude/projects/.../memory/*.md`
++ `MEMORY.md`, `[[wiki-link]]` syntax) is **deprecated here: do NOT create or maintain
+local `.md` memory files in a polyforge workspace.** (Non-polyforge projects may still
+use local memory; this override is scoped to polyforge workspaces.)
 
 Conventions:
 
-- **Cross-memory links** -> aihub-native `related` (the `related_memory_ids` param on
-  `pf_remember`, stored in `memory_relations`), NOT `[[name]]` wiki-links. aihub renders
-  `related` as clickable links.
-- **Owning wi** -> set `work_item_id` on the memory; the aihub UI renders it as a clickable
-  link. Do NOT hand-write "belongs to wi X" in the body - that metadata is surfaced by the UI.
-- **Memory type** -> a type STRING with an enforced prefix (`experience.*` /
-  `fact.*` / `rule.*` for `pf_remember`; `methodology.*` -> `pf_save_artifact`),
-  not the local `user/feedback/project/reference` vocabulary. NOT an enum: any
-  legal-prefix name passes, but `|` in the type is rejected (piped types are
-  unrecallable by a single-type filter).
-- **Updating a memory** -> use `pf_update_memory` to revise an existing memory: it creates a
-  new version superseding the current head and advances the `latest_id` cursor, so any id you
-  already hold still resolves to the latest. `pf_reinforce_memory` only appends context to the
-  same row (no new version); artifacts still revise via `pf_save_artifact(..., supersedes_memory_id=…)`.
-- **Cross-system link discipline** (keep separate): aihub artifacts/memories link via aihub
-  `related` + owning-wi; repo docs/PRs (e.g. ieops-doc) link via GitHub relative paths.
-  Never put an aihub `mem_…` ref in a repo doc, nor a repo path inside an aihub memory.
+- **Memory type** -> a type STRING with a prefix from the v1 domain - `experience.*` /
+  `fact.*` / `rule.*` - not the local `user/feedback/project/reference` vocabulary.
+  `--type` is required on `pf remember`; `pf recall --type` filters on it. Pick the
+  type by who will recall the memory, not by what it is about: `experience.*` entries
+  are typically filed by the retro verb, so a hand-written memory prefers `rule.*`
+  (operating rules) or `fact.*` (domain facts).
+- **Metadata over prose** -> use the flags, not the body: `--work-item` attributes the
+  memory to its owning work item (do NOT hand-write "belongs to wi X" in the body);
+  `--visibility` (default `project`; one of `admin|private|project|team|public`);
+  `--title` and `--tags` aid later filtering (`pf recall --tags` requires every
+  listed tag; `--limit` caps results).
+- **Cross-memory links** -> aihub-native `related` metadata, never `[[name]]`
+  wiki-links in memory content.
+- **Recallable content** -> retrieval is text search over the content plus type/tags
+  filters, so write the lesson in the words a future query would use; put the essence
+  in the first line and keep one memory per lesson.
+- **Cross-system link discipline** (keep separate): memories link via aihub `related`
+  + owning work item; repo docs/PRs link via GitHub relative paths. Never put an
+  aihub `mem_…` ref in a repo doc, nor a repo path inside an aihub memory.
 
-### Memory Type Reference
-
-Pick the type by **consumer** - which skill needs to recall it - not by what the content is
-about. `experience.*` is written automatically by `/pf-retro`; for a hand-written memory
-prefer `rule.*` / `fact.*`.
-
-| content | type | recalled by |
-|---|---|---|
-| init/setup experience | `experience.init` | pf-init |
-| bug patterns found during execution | `experience.debug` | pf-plan, pf-execute, pf-retro |
-| an approach that solved a class of problem | `experience.approach` | pf-plan, pf-execute, pf-retro |
-| pitfalls to avoid | `experience.pitfall` | pf-plan, pf-execute, pf-retro |
-| wi lifecycle operating rules | `rule.work` | using-polyforge, pf-spec |
-| init-phase operating rules | `rule.init` | pf-init |
-| scheduling rules | `rule.scheduling` | pf-init (managed block) |
-| domain facts | `fact.<subtopic>` | pf-spec |
-| spec output | `methodology.spec` | pf-plan, pf-execute, pf-retro |
-| plan output | `methodology.plan` | pf-execute, pf-retro |
-| release record | `methodology.release` | pf-release |
-
-**Six of those rows are off the curated list, in three different ways** - not
-interchangeable, so be precise about which:
-
-- `methodology.spec` / `methodology.plan` - **`pf_remember` refuses every `methodology.*`**
-  outright (`validatePfRememberArgs`, a hard prefix gate, aihub#210). Use `pf_save_artifact`.
-- `methodology.release` - refused by `pf_remember`, stored by `pf_save_artifact`, which
-  since aihub#499 publishes the rule it applies - the `methodology.` prefix plus the
-  aihub#210 credential gate, **never a name enum**; the six names
-  (`spec|plan|review|execute|retro|wrap_summary`) are convention examples.
-  (Corrected 2026-09-09 from "valid nowhere".)
-- `experience.init` / `rule.init` / the `fact.<subtopic>` placeholder - **accepted by the
-  server**, whose validation is a lenient four-prefix check (`experience.` / `fact.` /
-  `rule.` / `methodology.`) now mirrored by the `memories_type_check` DB constraint. Off
-  the curated list and nothing more: aihub#445 withdrew the JSON-Schema `enum`, so neither
-  the schema nor contract-lint refuses them. Usable, not blessed.
-
-The curated list is `experience.approach|code|debug|pitfall`,
-`fact.architecture|constraint|note|reference`,
-`rule.coding|convention|process|scheduling|work` - **suggestions. The four prefixes are
-the contract**, and since aihub#445 the schema says so in prose.
-
-`polyforge init` copied this table into `.polyforge/usage.md`, which is never regenerated
-once it exists - so that copy has been wrong since 2026-05-25 and no one could fix it.
-aihub#294 moved the table here, UNCHANGED plus these corrections rather than quietly
-rewritten, so the drift stays visible. This is now the only copy.
-
-This takes precedence over the harness's default local-memory instruction inside a polyforge
-workspace. Caveat: the harness may still auto-recall a pre-existing local `MEMORY.md` until
-those files are retired - retiring them and any global-config change are a separate
-follow-up (the data already lives in aihub, aihub#74 Stream C).
-
-### `fields="brief"` - the axis to choose it on (aihub#313)
-
-`pf_recall` accepts `fields="brief"`: it keeps `id`, `type`, `similarity`,
-`effective_strength`, `created_at` and the body's **first line** (≤120 runes, flagged with
-`content_truncated` + `content_full_len`), and drops the rest of `content` plus `related`,
-`tags`, `work_item_id` and `attrs`. `pf_get_memory(id)` returns any one in full.
-
-**The rule: brief a recall whose caller never reads a body - not the recalls that look big.**
-Volume is the wrong axis. The resident Memory-First recall is the highest-frequency one in
-the system and is safe to brief, because its display line needs exactly brief's field set;
-a single `top_k=1` artifact read is not, because grounding on an artifact means reading it.
-Item counts never change - trimming `top_k` instead would trade away recall breadth, which
-is the value of recall.
-
-Per-call-site decisions are recorded AT each call site, not tabulated here: every briefed
-recall in `plugins/` carries its reason inline and every deliberately-full one carries a
-`No fields="brief"` note saying which field it consumes. One table listing all of them
-would be a second copy to rot.
-
-Two cautions. Brief rounds `similarity`/`effective_strength` to **4** decimals - safe for
-`pf-retro`'s 0.85/0.65 branches and the `>= 0.3` display filter, but do not lower it. And
-the measured `pf_recall -> pf_get_memory` follow-up rate of **0** (659 recalls, 2,541 items)
-was observed under FULL mode, where callers already get 800-rune bodies: it shows they do
-not chase truncation, NOT that a first line is enough to decide on.
+This takes precedence over the harness's default local-memory instruction inside a
+polyforge workspace. Caveat: the harness may still auto-recall a pre-existing local
+`MEMORY.md` until those files are retired - retiring them and any global-config
+change are a separate follow-up (the data already lives in AIHub).

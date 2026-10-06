@@ -11,18 +11,24 @@ Every polyforge skill response MUST follow this format exactly. Violations = bug
 | field | value |
 |---|---|
 | wi | <project#seq> |
-| goal | <truncated to 60 chars> |
 | status | running |
-| owner | you (ra_8d2E4F1a) |
-| locks | file_scope ×2 |
-| blocked | - |
-| step | 2/4 review |
+| session_id | <wi-agent session> |
+| spawn_n | 3 |
+| step | fix |
+| machine | <this machine> |
 
 ## Next steps
-- `/pf-spec` - write spec, AI guides scope definition
-- `/pf-stop --pause` - pause and release locks
-(max 5 items; write _none_ if no actions available)
+- `pf observe <id>` - watch progress and pending questions
+(max 5 items; _none_ if none)
 ```
 
-For multi-wi lists, replace the status table with columns: `id / wi_type / priority / goal / status / owner_display`.
+Multi-wi lists replace the table with the live queue columns:
+`slug / status / priority / bundle / goal`.
 
+## After `pf submit`
+
+The daemon claims the job asynchronously and spawns the WI Agent - this
+session never executes the workflow; `pf observe <id>` is the follow-up. Hand
+an executor outcome and acceptance criteria only, never an execution path:
+`claim -> commit -> push -> PR` in a prompt is followed literally and skips
+the graph.

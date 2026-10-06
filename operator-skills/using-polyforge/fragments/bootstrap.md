@@ -2,21 +2,17 @@
 
 On session start, before responding to any user message:
 
-**Step 0 - Repo map first.** CLAUDE.md's `## Workspace` managed block is already in your
-context. Consult it *before* anything else - it is the repo map Repo Routing below uses -
-and do **not** re-read the file. Absent (a subagent without injection, or a member who
-hasn't run `polyforge init`) -> `Read` the workspace `CLAUDE.md`, or `/pf-init` to write it.
+**Step 0 - Repo map first.** The workspace root `CLAUDE.md` `## Workspace`
+managed block is already in context - consult it *before* anything else; do
+**not** re-read the file. Absent -> `Read` it, or
+run `polyforge init` to write it.
 
-Then run the state/wi scan:
+Then the daemon/wi scan:
 
-1. Scan `<workspace>/.polyforge/state/*.json`, not `~/` (holds none); skip `*.chain.json`.
-2. Read `wi_id` + `attempt_id` from each.
-3. `pf_get_work_item(wi_id)` for full wi detail including content.
-4. If attempt is still `running` -> surface:
-   ```
-   You have an in-progress wi: [slug] - resume?
-   Goal: [goal]
-   Background: [content[:200]]...   <- only if content is non-null
-   ```
-5. If attempt is `superseded`/`lost_lease` -> prompt: "Stale state file for [wi_id]. Delete it?"
-6. Call `pf_get_ready_queue(project)` to show the current ready queue summary.
+1. `pf ops status` - this machine's daemon: live jobs, mode, queue counters.
+   A `dial unix` failure = daemon down (IR3): report it, or start it with
+   `pf daemon` if that is your call.
+2. For each live job, `pf observe <id>` - step, attempts, budget, pending
+   question. Relay `needs_input` questions to the owner (the `answer` verb
+   carries the reply).
+3. `pf queue --ready` - the project's ready queue.
