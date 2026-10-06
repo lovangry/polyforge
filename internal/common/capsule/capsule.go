@@ -136,6 +136,12 @@ type Attempt struct {
 	RewindGate     string          `json:"rewind_gate,omitempty"`
 	InterruptedAt  string          `json:"interrupted_at,omitempty"`
 	Detail         string          `json:"detail,omitempty"`
+	// FaultClass records the classified failure category (R4):
+	// provider / host / operator / schema. Empty for non-infra attempts.
+	FaultClass string `json:"fault_class,omitempty"`
+	// AcceptedResultID is the R13 envelope result_id committed at the
+	// R14 commit point — populated only for accepted step results.
+	AcceptedResultID string `json:"accepted_result_id,omitempty"`
 }
 
 type Budget struct {
