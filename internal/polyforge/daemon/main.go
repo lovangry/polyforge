@@ -44,7 +44,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
 	recallTopK := fs.Int("recall-topk", 0, "claim-time memory snapshot hit count (env POLYFORGE_RECALL_TOPK; default 10, max 50)")
 	mode := fs.String("mode", "", "initial mode: interactive|batch|drain (default interactive)")
-	useDriver := fs.Bool("use-driver", false, "use the v2 Go execution driver (replaces the WI-Agent spawn)")
+	useDriver := fs.Bool("use-driver", true, "use the v2 Go execution driver (replaces the WI-Agent spawn)")
 	// Observe supervision windows (#12): Go duration strings, flags only
 	// (no env fallbacks). Omitted or zero keeps observe's own default.
 	hangWindow := fs.Duration("hang-window", 0, "stream-silence window while a turn is in flight before the liveness probe arms (default 10m)")
