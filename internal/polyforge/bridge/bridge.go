@@ -26,6 +26,17 @@ type Handle struct {
 	cancel  context.CancelFunc
 	pid     int
 	started string
+	// drv is the underlying Driver (Answer/Rewind/Terminate operator
+	// seams); set by Start.
+	drv *driver.Driver
+}
+
+// Answer delivers an owner answer to the driver's pending question.
+func (h *Handle) Answer(questionID, answer, answeredBy string) error {
+	if h.drv == nil {
+		return fmt.Errorf("bridge: driver not bound")
+	}
+	return h.drv.Answer(questionID, answer, answeredBy)
 }
 
 func (h *Handle) PID() int          { return h.pid }
@@ -102,6 +113,7 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 		started: fmt.Sprintf("driver-%d", cfg.SpawnN+1),
 	}
 
+	h.drv = drv
 	go func() {
 		err := drv.Run(dctx)
 		h.mu.Lock()

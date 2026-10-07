@@ -83,3 +83,13 @@ Example:
 Emit the final JSON object per the schema above: the artifact path, the ordered step ids
 (at least one), and the deduplicated touched-files list (at least one entry; each path
 once, `write` intent winning over `read` for the same path).
+
+## Handoff duty
+
+This step declares `handoff: true`. Before writing your result envelope:
+1. Write a handoff file at `artifacts/handoff-<step-id>.md` summarizing what
+   the next inherit step needs to know (decisions made, constraints
+   discovered, what was produced, where to find details).
+2. Compute its sha256 and byte count.
+3. Include it in your result envelope's `handoff_ref` field:
+   `"handoff_ref": {"path": "artifacts/handoff-<step-id>.md", "sha256": "<hash>", "bytes": <N>}`

@@ -364,13 +364,31 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 		}
 		d.exec.ReviewRounds[req.StepID]++
 	case OutcomeNeedsInput:
-		if res.QuestionID == "" || res.Question == "" {
-			return fmt.Errorf("driver: needs_input result without question_id/question")
+		// The question may live at envelope level (QuestionID/Question)
+		// or embedded in the output JSON (question_id/question) — step
+		// agents naturally put it in the output object. Try both.
+		qid, qtext := res.QuestionID, res.Question
+		if qid == "" || qtext == "" {
+			var embedded struct {
+				QuestionID string `json:"question_id"`
+				Question   string `json:"question"`
+			}
+			if len(res.Output) > 0 && json.Unmarshal(res.Output, &embedded) == nil {
+				if qid == "" {
+					qid = embedded.QuestionID
+				}
+				if qtext == "" {
+					qtext = embedded.Question
+				}
+			}
+		}
+		if qid == "" || qtext == "" {
+			return fmt.Errorf("driver: needs_input result without question_id/question (envelope or output)")
 		}
 		st.PendingQuestion = &capsule.PendingQuestion{
-			ID:       res.QuestionID,
+			ID:       qid,
 			Step:     req.StepID,
-			Question: res.Question,
+			Question: qtext,
 			Context:  res.Output,
 			AskedAt:  d.stamp(),
 		}

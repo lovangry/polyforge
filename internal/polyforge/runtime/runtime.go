@@ -839,6 +839,11 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		}
 	}
 	_ = h
+	// v2: bind the AgentStarter's handle as the job's agent so the
+	// supervision and answer surfaces can reach the bridge.
+	j.mu.Lock()
+	j.agent = h
+	j.mu.Unlock()
 	r.mu.Lock()
 	r.jobs[id] = j
 	r.mu.Unlock()
@@ -1487,4 +1492,29 @@ func sealReadOnly(root string) error {
 		}
 		return nil
 	})
+}
+
+// DriverAnswerHandle returns the bridge Handle for a driver-driven WI
+// (nil when the job's agent is not a bridge handle — the WI-Agent path
+// answers through the observe lane instead).
+func (r *Runtime) DriverAnswerHandle(wi string) interface {
+	Answer(questionID, answer, answeredBy string) error
+} {
+	id := r.Resolve(wi)
+	if id == "" {
+		id = wi
+	}
+	j := r.jobOf(id)
+	if j == nil {
+		return nil
+	}
+	j.mu.Lock()
+	h := j.agent
+	j.mu.Unlock()
+	if bh, ok := h.(interface {
+		Answer(questionID, answer, answeredBy string) error
+	}); ok {
+		return bh
+	}
+	return nil
 }

@@ -60,3 +60,13 @@ here corrupts `verification` and `release` downstream.
 Emit the final JSON object per the schema above: every commit actually made, the final
 build status, and a prose summary useful to the next reader (verification, release, or a
 future rewound instance of this very step).
+
+## Handoff duty
+
+This step declares `handoff: true`. Before writing your result envelope:
+1. Write a handoff file at `artifacts/handoff-<step-id>.md` summarizing what
+   the next inherit step needs to know (decisions made, constraints
+   discovered, what was produced, where to find details).
+2. Compute its sha256 and byte count.
+3. Include it in your result envelope's `handoff_ref` field:
+   `"handoff_ref": {"path": "artifacts/handoff-<step-id>.md", "sha256": "<hash>", "bytes": <N>}`

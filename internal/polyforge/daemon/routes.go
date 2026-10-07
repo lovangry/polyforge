@@ -132,7 +132,35 @@ func (d *Daemon) handler() http.Handler {
 	// ruling C2): the flush route passes through the wrap arbitration
 	// gate first (the dual-path close must be one winner, one 409).
 	mux.Handle("GET /jobs/{wi}/observe", obs)
-	mux.Handle("POST /jobs/{wi}/answer", obs)
+	// v2: answer routes through the driver bridge when the WI's job
+	// carries a bridge Handle (UseDriver path); otherwise the observe
+	// lane's agent-facing answer path applies (WI-Agent model).
+	mux.HandleFunc("POST /jobs/{wi}/answer", func(w http.ResponseWriter, r *http.Request) {
+		wi := r.PathValue("wi")
+		if h := d.rt.DriverAnswerHandle(wi); h != nil {
+			// driver path: decode the same wire shape, deliver to bridge
+			var payload struct {
+				QuestionID string `json:"question_id"`
+				Answer     string `json:"answer"`
+				AnsweredBy string `json:"answered_by"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, `{"code":"BAD-400","detail":"decode: `+err.Error()+`"}`, 400)
+				return
+			}
+			if payload.AnsweredBy == "" {
+				payload.AnsweredBy = r.Header.Get("X-PF-User")
+			}
+			if err := h.Answer(payload.QuestionID, payload.Answer, payload.AnsweredBy); err != nil {
+				http.Error(w, `{"code":"ANSWER-409","detail":"`+err.Error()+`"}`, 409)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+			return
+		}
+		obs.ServeHTTP(w, r)
+	})
 	mux.Handle("POST /jobs/{wi}/flush", d.flushGate(obs))
 	// F6-B: the narrow memory channel — mounted verbatim from the
 	// observe lane, whose serveFlush fence semantics the two routes

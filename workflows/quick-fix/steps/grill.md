@@ -83,3 +83,13 @@ requester, so whatever `fix` needs to know must end up in your memo.
 Emit the final JSON object per the schema above: the Q&A log path, the memo path, the
 confirmed scope items (at least one - the schema rejects an empty list, because a fix
 with no confirmed scope is not a fix), and the non-goals.
+
+## Handoff duty
+
+This step declares `handoff: true`. Before writing your result envelope:
+1. Write a handoff file at `artifacts/handoff-<step-id>.md` summarizing what
+   the next inherit step needs to know (decisions made, constraints
+   discovered, what was produced, where to find details).
+2. Compute its sha256 and byte count.
+3. Include it in your result envelope's `handoff_ref` field:
+   `"handoff_ref": {"path": "artifacts/handoff-<step-id>.md", "sha256": "<hash>", "bytes": <N>}`
