@@ -200,16 +200,25 @@ var cmdAnswer = &Command{
 		d := ctx.daemon()
 		question := stringFlag(fs, "question")
 		if question == "" {
-			// Interactive default: the unique pending question. Driver WIs
-			// answer through the daemon's execution.json fallback, so an
-			// observe failure here is not fatal — pass empty and let the
-			// daemon's answer route resolve it.
+			// Interactive default: the unique pending question. Two cases
+			// (owner ruling on 9f4d3a2's over-broad fallback):
+			//   (1) observe SUCCEEDS with no pending question → refuse:
+			//       there is genuinely nothing to answer, and POSTing an
+			//       empty question_id silently delivers nowhere.
+			//   (2) observe FAILS (driver WIs get DAEMON-404) → fall
+			//       through with an empty question: the daemon answer
+			//       route's pendingQuestionID fallback resolves it.
 			raw, err := d.Observe(args[0], 0)
 			if err == nil {
 				var jv protocol.JobView
-				if json.Unmarshal(raw, &jv) == nil && jv.Pending != nil {
+				if uerr := json.Unmarshal(raw, &jv); uerr == nil {
+					if jv.Pending == nil {
+						return fmt.Errorf("answer: %s has no pending question (see `pf observe %s`)", args[0], args[0])
+					}
 					question = jv.Pending.ID
 				}
+				// Undecodable body: Pending == nil cannot be established,
+				// so treat it like an observe failure — fall through.
 			}
 			// question may remain "" (driver WI, observe 404): the daemon
 			// answer route's pendingQuestionID fallback handles it.
