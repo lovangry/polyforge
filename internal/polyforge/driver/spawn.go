@@ -44,8 +44,8 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
-	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/common/spawn"
+	"github.com/silgrid/polyforge/internal/common/workflow"
 )
 
 const (
