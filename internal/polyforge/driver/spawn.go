@@ -718,8 +718,28 @@ func (r *stepRun) collect() (*StepResult, error) {
 	}
 	var res StepResult
 	if err := json.Unmarshal(raw, &res); err != nil {
+		// Tolerant re-parse: step agents persistently write command_evidence
+		// as a string list instead of the object array. Re-parse with a
+		// string-tolerant shadow and salvage the envelope (the evidence
+		// descriptions become log notes, not machine-parsed objects).
+		var shadow struct {
+			CommandEvidence json.RawMessage `json:"command_evidence"`
+		}
+		if json.Unmarshal(raw, &shadow) == nil {
+			// Zero out the malformed field and re-parse the rest.
+			var m map[string]interface{}
+			if json.Unmarshal(raw, &m) == nil {
+				delete(m, "command_evidence")
+				if cleaned, jerr := json.Marshal(m); jerr == nil {
+					if uerr := json.Unmarshal(cleaned, &res); uerr == nil {
+						goto parsed
+					}
+				}
+			}
+		}
 		return nil, fmt.Errorf("envelope at %s is not valid JSON: %w", r.dropPath, err)
 	}
+parsed:
 	// Light completion checks — the lenient fields a well-meaning
 	// process may omit are filled from the dispatch identity; the
 	// fence and the closed sets are enforced (full R14 validation is
