@@ -144,11 +144,17 @@ func (d *Daemon) handler() http.Handler {
 			var payload struct {
 				QuestionID string `json:"question_id"`
 				Answer     string `json:"answer"`
+				AnswerText string `json:"answer_text"` // CLI sends this field name
 				AnsweredBy string `json:"answered_by"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				http.Error(w, `{"code":"BAD-400","detail":"decode: `+err.Error()+`"}`, 400)
 				return
+			}
+			// Wire compatibility: the CLI sends answer_text, the observe
+			// face sends answer — accept both.
+			if payload.Answer == "" {
+				payload.Answer = payload.AnswerText
 			}
 			if payload.AnsweredBy == "" {
 				payload.AnsweredBy = r.Header.Get("X-PF-User")
