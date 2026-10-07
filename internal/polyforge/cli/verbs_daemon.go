@@ -200,19 +200,19 @@ var cmdAnswer = &Command{
 		d := ctx.daemon()
 		question := stringFlag(fs, "question")
 		if question == "" {
-			// Interactive default: the unique pending question.
+			// Interactive default: the unique pending question. Driver WIs
+			// answer through the daemon's execution.json fallback, so an
+			// observe failure here is not fatal — pass empty and let the
+			// daemon's answer route resolve it.
 			raw, err := d.Observe(args[0], 0)
-			if err != nil {
-				return fmt.Errorf("answer: --question is required (observe failed: %w)", err)
+			if err == nil {
+				var jv protocol.JobView
+				if json.Unmarshal(raw, &jv) == nil && jv.Pending != nil {
+					question = jv.Pending.ID
+				}
 			}
-			var jv protocol.JobView
-			if err := json.Unmarshal(raw, &jv); err != nil {
-				return fmt.Errorf("answer: --question is required (observe undecodable)")
-			}
-			if jv.Pending == nil {
-				return fmt.Errorf("answer: %s has no pending question (see `pf observe %s`)", args[0], args[0])
-			}
-			question = jv.Pending.ID
+			// question may remain "" (driver WI, observe 404): the daemon
+			// answer route's pendingQuestionID fallback handles it.
 		}
 		answerID := stringFlag(fs, "answer-id")
 		if answerID == "" {
