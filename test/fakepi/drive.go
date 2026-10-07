@@ -10,14 +10,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -32,6 +36,10 @@ type planAction struct {
 	Name     string `json:"name"`     // repo: the repos/ subdirectory
 	Origin   string `json:"origin"`   // repo: the origin remote URL
 	Kind     string `json:"kind"`     // ui_noise: "ui" (default) | "progress"
+	// Envelope mode (v2 Driver): the outcome and handoff flags for the
+	// result-envelope action.
+	Outcome string `json:"outcome,omitempty"` // envelope: completed|needs_input|gate_failed
+	Handoff bool   `json:"handoff,omitempty"` // envelope: produce handoff_ref
 	// NoEvidence suppresses the step's structured command evidence (the
 	// wrap-evidence-gate scenario scripts a verification step whose
 	// output carries no commands record, then repairs it).
@@ -262,6 +270,25 @@ func runDriveLoop(d *driveEnv) {
 	sleepMS(250)
 	for _, act := range d.plan.Actions {
 		switch act.Do {
+		case "envelope":
+			// v2 Driver mode: each step spawn executes ONLY the envelope
+			// action matching its PF_SPAWN_N (the Driver spawns each step
+			// as a separate process; all share this plan file). The Nth
+			// envelope action in the plan fires for spawn N.
+			envIdx := 0
+			for _, a := range d.plan.Actions {
+				if a.Do == "envelope" {
+					envIdx++
+					if envIdx == int(d.spawnNumber()) {
+						d.writeEnvelope(a.ID, a.Outcome, a.Handoff)
+						parkForever()
+						return
+					}
+				}
+			}
+			// No matching envelope action for this spawn: park.
+			parkForever()
+			return
 		case "step":
 			d.runStep(act.ID, act.NoEvidence)
 		case "ask":
@@ -887,4 +914,84 @@ func (d *driveEnv) makeRepo(name, origin string) {
 	_ = run("-c", "user.name=fake-agent", "-c", "user.email=fake-agent@invalid",
 		"commit", "-q", "-m", "repo work "+d.wi)
 	d.journal("repo", map[string]any{"name": name, "origin": origin})
+}
+
+// writeEnvelope writes a v2 result envelope to the pending-results drop
+// path for the current spawn. The drop path is derived from the
+// PF_SPAWN_N environment variable and the capsule root (PF_WI_ID env
+// carries the WI; the capsule root is the process cwd).
+func (d *driveEnv) writeEnvelope(stepID, outcome string, handoff bool) {
+	if outcome == "" {
+		outcome = "completed"
+	}
+	capsuleRoot := d.capsuleRoot()
+	spawnN := os.Getenv("PF_SPAWN_N")
+	if spawnN == "" {
+		spawnN = "1"
+	}
+	dropPath := filepath.Join(capsuleRoot, "runtime-state", "pending-results", spawnN+".json")
+
+	envelope := map[string]interface{}{
+		"protocol_version": 1,
+		"result_id":        uuid.New().String(),
+		"wi_id":            os.Getenv("PF_WI_ID"),
+		"step_id":          stepID,
+		"spawn_n":          parseIntDefault(spawnN, 1),
+		"outcome":          outcome,
+		"output":           map[string]interface{}{"summary": "envelope action"},
+		"artifacts":        []interface{}{},
+		"command_evidence": []interface{}{},
+		"submitted_at":     time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Handoff duty: write the handoff file and reference it.
+	if handoff {
+		hoPath := filepath.Join(capsuleRoot, "artifacts", "handoff-"+stepID+".md")
+		hoContent := "# Handoff from " + stepID + "\n\nSummary for next step.\n"
+		if err := os.MkdirAll(filepath.Dir(hoPath), 0o755); err == nil {
+			os.WriteFile(hoPath, []byte(hoContent), 0o644)
+			sum := sha256.Sum256([]byte(hoContent))
+			envelope["handoff_ref"] = map[string]interface{}{
+				"path":   "artifacts/handoff-" + stepID + ".md",
+				"sha256": hex.EncodeToString(sum[:]),
+				"bytes":  len(hoContent),
+			}
+		}
+	}
+
+	blob, _ := json.MarshalIndent(envelope, "", "  ")
+	if err := os.MkdirAll(filepath.Dir(dropPath), 0o755); err != nil {
+		d.journal("envelope_error", map[string]any{"err": err.Error()})
+		return
+	}
+	if err := os.WriteFile(dropPath, blob, 0o644); err != nil {
+		d.journal("envelope_error", map[string]any{"err": err.Error()})
+		return
+	}
+	d.journal("envelope", map[string]any{"step": stepID, "outcome": outcome, "path": dropPath})
+}
+
+// capsuleRoot answers the capsule directory: the fakepi runs with the
+// capsule as its cwd.
+func (d *driveEnv) capsuleRoot() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return cwd
+}
+
+func parseIntDefault(s string, def int64) int64 {
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n
+	}
+	return def
+}
+
+// spawnNumber answers this derivation's PF_SPAWN_N (1 when unset).
+func (d *driveEnv) spawnNumber() int64 {
+	if n, err := strconv.ParseInt(os.Getenv("PF_SPAWN_N"), 10, 64); err == nil {
+		return n
+	}
+	return 1
 }

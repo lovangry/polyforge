@@ -63,9 +63,12 @@ type Config struct {
 	MachineID  string
 	SocketPath string
 	// UseDriver selects the v2 Go execution driver (bridge.Start) over
-	// the legacy WI-Agent spawn. Production main.go sets true; the
-	// e2e suite exercising the WI-Agent RPC model leaves it false.
-	UseDriver          bool
+	// the legacy WI-Agent spawn. Phase 3: defaults to TRUE; tests that
+	// need the old path set UseDriver=false AND UseDriverExplicit=true.
+	UseDriver bool
+	// UseDriverExplicit marks that UseDriver was deliberately set
+	// (true or false) — suppressing the fill() default of true.
+	UseDriverExplicit  bool
 	WorkspaceRoot      string
 	DataDir            string
 	Project            string
@@ -135,6 +138,14 @@ type ObserveWindows struct {
 func (c *Config) fill() {
 	if c.SocketPath == "" {
 		c.SocketPath = "/run/polyforge.sock"
+	}
+	// Phase 3: the Go execution driver is the default engine. Tests
+	// exercising the legacy WI-Agent RPC model set UseDriver=false
+	// explicitly; production inherits true.
+	// (Zero-value detection: a Config literal that omits UseDriver
+	// gets true; one that explicitly says false keeps the old path.)
+	if !c.UseDriver && !c.UseDriverExplicit {
+		c.UseDriver = true
 	}
 	if c.MaxConcurrent <= 0 {
 		c.MaxConcurrent = 4

@@ -466,8 +466,13 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 	hub := newFakeHub()
 	sp := &fakeSpawner{}
 	cfg := Config{
-		MachineID:         "m-test",
-		SocketPath:        filepath.Join(dir, "s.sock"),
+		MachineID:  "m-test",
+		SocketPath: filepath.Join(dir, "s.sock"),
+		// Legacy WI-Agent path: these tests exercise the RPC model
+		// (fakeSpawner → fakepi as the WI Agent). Driver tests set
+		// UseDriver=true via the mutate hook.
+		UseDriver:         false,
+		UseDriverExplicit: true,
 		WorkspaceRoot:     ws,
 		DataDir:           data,
 		Project:           "proj",

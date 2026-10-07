@@ -134,6 +134,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		MachineID:           *machineID,
 		SocketPath:          *socket,
 		UseDriver:           *useDriver,
+		UseDriverExplicit:   true,
 		WorkspaceRoot:       *workspaceRoot,
 		DataDir:             *dataDir,
 		Project:             *project,
