@@ -85,6 +85,29 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	// recoveries have FAILED outright does the WI bounded-fail — never
 	// merely because it has recovered before.
 	for {
+		// v2: driver WI — restart the Go Driver via the bridge (it reads
+		// execution.json and continues from the current step; the recovery
+		// steps above — killTree, commitDirty — already ran).
+		if r.cfg.AgentStarter != nil {
+			h, err := r.cfg.AgentStarter(ctx, AgentStartInput{
+				WI:            j.wi,
+				Project:       j.project,
+				CapsuleDir:    j.capsuleDir,
+				BundleName:    j.bundleName,
+				BundleDigest:  j.bundleDigest,
+				SessionHandle: j.sessionFingerprint,
+				SpawnN:        int64(j.spawnN),
+				Spawner:       r.spawner,
+			})
+			if err == nil {
+				j.mu.Lock()
+				j.agent = h
+				j.mu.Unlock()
+				r.recovered(j, h, cause, false)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "runtime: %s: driver recovery failed: %v\n", j.wi, err)
+		}
 		if r.cascade(ctx, j, cause) {
 			return // recovered (or otherwise settled) — budget already reset
 		}

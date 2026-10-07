@@ -14,6 +14,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -150,6 +152,18 @@ func (d *Daemon) handler() http.Handler {
 			}
 			if payload.AnsweredBy == "" {
 				payload.AnsweredBy = r.Header.Get("X-PF-User")
+			}
+			// When the CLI couldn't pre-resolve the question ID (observe
+			// face returns 404 for driver WIs), read it from the capsule's
+			// execution.json pending_question.
+			if payload.QuestionID == "" {
+				if qid := d.pendingQuestionID(wi); qid != "" {
+					payload.QuestionID = qid
+				}
+			}
+			if payload.QuestionID == "" {
+				http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
+				return
 			}
 			if err := h.Answer(payload.QuestionID, payload.Answer, payload.AnsweredBy); err != nil {
 				http.Error(w, `{"code":"ANSWER-409","detail":"`+err.Error()+`"}`, 409)
@@ -575,4 +589,35 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 			_ = err
 		}
 	}()
+}
+
+// pendingQuestionID reads the capsule's execution.json to find the
+// current pending question ID (driver WIs: the observe face doesn't
+// carry it, but execution.json does).
+func (d *Daemon) pendingQuestionID(wi string) string {
+	wid := d.rt.CanonicalID(wi)
+	if wid == "" {
+		wid = wi
+	}
+	execPath := filepath.Join(d.rt.CapsuleDirFor(wid), "runtime-state", "execution.json")
+	data, err := os.ReadFile(execPath)
+	if err != nil {
+		return ""
+	}
+	var exec struct {
+		Steps map[string]struct {
+			PendingQuestion *struct {
+				ID string `json:"id"`
+			} `json:"pending_question"`
+		} `json:"steps"`
+	}
+	if json.Unmarshal(data, &exec) != nil {
+		return ""
+	}
+	for _, st := range exec.Steps {
+		if st.PendingQuestion != nil && st.PendingQuestion.ID != "" {
+			return st.PendingQuestion.ID
+		}
+	}
+	return ""
 }

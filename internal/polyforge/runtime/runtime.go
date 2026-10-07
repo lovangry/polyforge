@@ -1518,3 +1518,16 @@ func (r *Runtime) DriverAnswerHandle(wi string) interface {
 	}
 	return nil
 }
+
+// CanonicalID resolves any WI spelling (id or slug) to the canonical ID.
+func (r *Runtime) CanonicalID(wi string) string {
+	if id := r.Resolve(wi); id != "" {
+		return id
+	}
+	return wi
+}
+
+// CapsuleDirFor returns the capsule directory of a WI.
+func (r *Runtime) CapsuleDirFor(wi string) string {
+	return r.capsuleDir(wi)
+}
