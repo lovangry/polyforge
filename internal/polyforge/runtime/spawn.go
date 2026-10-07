@@ -385,8 +385,34 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 		taps:      taps,
 	}
 	go func() {
-		p.exitErr = cmd.Wait()
-		close(p.exited)
+		// cmd.Wait blocks on inherited pipes: a grandchild (model
+		// provider connection, spawned tool) that inherited stdout keeps
+		// the pipe open past the pi process's own exit, wedging Wait and
+		// the exited channel forever (#92). The bound: a goroutine races
+		// the Wait with a generous process-exit check; when the direct
+		// child is gone but Wait hasn't returned (pipe still held), we
+		// kill the process group (Setpgid makes the child the leader —
+		// killing it releases the pipe) and unblock Wait.
+		done := make(chan struct{})
+		go func() {
+			p.exitErr = cmd.Wait()
+			close(done)
+		}()
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				close(p.exited)
+				return
+			case <-ticker.C:
+				if cmd.Process != nil && cmd.Process.Signal(syscall.Signal(0)) != nil {
+					// direct child gone but Wait still blocked → pipe held by
+					// a grandchild. Kill the process group to release it.
+					syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
+			}
+		}
 	}()
 	go func() {
 		br := bufio.NewReaderSize(stdout, 64*1024)

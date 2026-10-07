@@ -132,6 +132,7 @@ func NewStepSpawnAdapter(a StepSpawnAdapter) (*StepSpawnAdapter, error) {
 // sequencing surface's advisory copy and is deliberately not trusted
 // here — the two loaders carry different default eras.
 func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun, error) {
+	fmt.Fprintf(os.Stderr, "driver: SpawnStep: step=%s spawn=%d policy=%s\n", sp.StepID, sp.SpawnN, sp.ContextMode)
 	spec := a.Workflow.StepByID(sp.StepID)
 	if spec == nil {
 		return nil, fmt.Errorf("driver: step %q is not in the workflow bundle", sp.StepID)
@@ -657,8 +658,21 @@ type stepRun struct {
 }
 
 func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
+	tick := 0
 	for {
+		tick++
+		if tick%30 == 1 { // every ~30 polls (15s at default 500ms), log alive
+			fmt.Fprintf(os.Stderr, "driver: stepRun.Wait alive: step=%s spawn=%d tick=%d drop=%s done=%v\n",
+				r.sp.StepID, r.sp.SpawnN, tick, r.dropPath, r.handle.Done())
+		}
 		res, defect := r.collect()
+		if res != nil {
+			fmt.Fprintf(os.Stderr, "driver: stepRun.Wait COLLECTED: step=%s spawn=%d result_id=%s\n",
+				r.sp.StepID, r.sp.SpawnN, res.ResultID)
+		} else if defect != nil && tick%30 == 1 {
+			fmt.Fprintf(os.Stderr, "driver: stepRun.Wait defect: step=%s spawn=%d err=%v\n",
+				r.sp.StepID, r.sp.SpawnN, defect)
+		}
 		if res != nil {
 			if err := r.archive(res); err != nil {
 				_ = r.handle.Terminate(teardownBound)
