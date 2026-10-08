@@ -1589,6 +1589,19 @@ func requireGh(t *testing.T) {
 	}
 }
 
+// envelopeQuickFix is the canonical driver-era quick-fix plan: four
+// envelope actions, one per workflow step in declaration order, with the
+// handoff chain (grill, fix) the inherit policy needs. The Nth envelope
+// action fires for spawn ordinal N.
+func envelopeQuickFix() []map[string]any {
+	return []map[string]any{
+		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "verification", "outcome": "completed"},
+		{"do": "envelope", "id": "release", "outcome": "completed"},
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Shared small helpers. These used to live in whichever scenario file
 // defined them first; the migration rewrites every scenario file, so the

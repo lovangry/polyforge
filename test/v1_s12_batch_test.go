@@ -11,16 +11,16 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 )
 
-// v1_s12: batch mode. A bare `pf batch-confirm` is a read-only
-// recommendation (NO job is created — the daemon queue stays empty);
-// the confirmed wave (`--all`) submits exactly the recommendation set,
-// and the dispatcher runs the whole wave to wrapped, ordered by
-// priority within the machine's concurrency cap.
+// v1_s12: batch mode, driver/envelope edition. A bare `pf batch-confirm`
+// is a read-only recommendation (NO job is created — the daemon queue
+// stays empty); the confirmed wave (`--all`) submits exactly the
+// recommendation set, and the dispatcher runs the whole wave to wrapped
+// (each member a driver-pinned quick-fix workflow completed and sealed by
+// the terminal wiring), ordered by priority within the machine's
+// concurrency cap.
 func TestV1S12BatchWave(t *testing.T) {
 	inst := newV1Install(t)
-	wiHigh := inst.newWI(t, "s12: batch wave member A", []map[string]any{
-		{"do": "step", "id": "code"}, {"do": "wrap"},
-	}, nil)
+	wiHigh := inst.newWI(t, "s12: batch wave member A", envelopeQuickFix(), nil)
 	// file the second ticket with high priority so the wave is ordered
 	raw, err := inst.client.CreateWorkItem(aihubclient.CreateWorkItemRequest{
 		Project:    v1Project,
@@ -39,12 +39,12 @@ func TestV1S12BatchWave(t *testing.T) {
 		t.Fatal(err)
 	}
 	wiBHigh := wiB.ID
-	inst.setPlan(t, wiBHigh, []map[string]any{{"do": "step", "id": "code"}, {"do": "wrap"}})
+	inst.setPlan(t, wiBHigh, envelopeQuickFix())
 	// filed through the raw client (priority), so register it for the
 	// harness's post-teardown orphan sweep by hand.
 	inst.trackWI(wiBHigh)
 
-	d := newV1Daemon(t, inst)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 
 	// The bare recommendation: read-only, no job created.
@@ -65,8 +65,23 @@ func TestV1S12BatchWave(t *testing.T) {
 	}
 
 	// Both members ran to wrapped.
-	inst.waitWIStatus(t, wiHigh, "wrapped", 60*time.Second)
-	inst.waitWIStatus(t, wiBHigh, "wrapped", 60*time.Second)
+	inst.waitWIStatus(t, wiHigh, "wrapped", 90*time.Second)
+	inst.waitWIStatus(t, wiBHigh, "wrapped", 90*time.Second)
+
+	// The driver faces: each member's workflow completed with every step
+	// done and its own envelopes archived (no cross-contamination).
+	for _, wi := range []string{wiHigh, wiBHigh} {
+		waitWorkflowStatus(t, d, wi, "completed", 30*time.Second)
+		x := readExecution(t, d.capsuleDir(wi))
+		for _, step := range []string{"grill", "fix", "verification", "release"} {
+			if st := x.Steps[step]; st == nil || st.Status != "done" {
+				t.Fatalf("%s: step %s not done: %+v", wi, step, st)
+			}
+		}
+		if env := archivedEnvelope(t, d.capsuleDir(wi), "grill", 1); env["wi_id"] != wi {
+			t.Fatalf("%s: archived envelope names %v", wi, env["wi_id"])
+		}
+	}
 
 	// The wave never widened: nothing else was claimed.
 	items, err := inst.client.ListWorkItems(v1Project, "")

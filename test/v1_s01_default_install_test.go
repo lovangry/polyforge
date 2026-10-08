@@ -9,21 +9,28 @@ import (
 	"time"
 )
 
-// v1_s01: default-install smoke. A real aihub, a real `pf daemon`
-// (interactive), a real `pf submit`, a scripted agent that walks two
-// steps, the capsule git chain visible on the server side BEFORE the
-// close (the observe lane's async push), a real `pf wrap`, the terminal
-// wrapped state, and the sealed chain carrying the transcript — plus the
-// no-orphan invariant.
+// v1_s01: default-install smoke, driver/envelope edition. A real aihub,
+// a real `pf daemon -use-driver`, a real `pf submit`, a scripted
+// envelope-action plan that walks the quick-fix workflow (grill → fix →
+// verification → release), and the completed workflow's faces: every
+// step done in execution.json, every result envelope archived under
+// artifacts/steps/<step>/s<n>/, the task-repo clone, the capsule git
+// chain visible on the server side, the terminal wrapped state (the
+// daemon's v2 terminal wiring translates the driver's completed exit
+// into the wrap close — the recovery cause IS the completion signal),
+// and the sealed chain carrying execution.json plus the session
+// transcripts — plus the no-orphan invariant over the driver's step
+// processes.
 func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	inst, remote := newV1InstallTaskRepo(t)
 	wi := inst.newWI(t, "s01: smoke the default install end to end",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "sleep", "ms": 1500}, // let the async push land the first step
-			{"do": "step", "id": "review"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 
 	// Interactive submit through the real CLI.
@@ -32,9 +39,16 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 		t.Fatalf("submit answer: %q", out)
 	}
 
-	// The job runs: a live agent pid, a materialized capsule.
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
-		return d.agentPIDOf(t, wi) > 0
+	// The job runs: a live driver on a materialized capsule (the driver
+	// lane carries no agent pid on the status face — the live job row is
+	// the running probe).
+	waitUntil(t, 30*time.Second, "the job never started running", func() bool {
+		for _, j := range d.status(t).Jobs {
+			if j.WorkItemID == wi && j.Status == "running" {
+				return true
+			}
+		}
+		return false
 	})
 	capDir := d.capsuleDir(wi)
 	rawID, err := os.ReadFile(filepath.Join(capDir, "capsule.json"))
@@ -66,10 +80,10 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	if sess.Fingerprint == "" || sess.Machine != "m-e2e" {
 		t.Fatalf("running work item carries no session block: %+v", sess)
 	}
-	// The claim's task-repo inventory was cloned before the agent
-	// spawned: repos/demo-src is a real clone of the local fake remote,
-	// its own .git, the remote's content, and the claim-time HEAD
-	// recorded as the capsule baseline.
+	// The claim's task-repo inventory was cloned before the driver's
+	// first step process spawned: repos/demo-src is a real clone of the
+	// local fake remote, its own .git, the remote's content, and the
+	// claim-time HEAD recorded as the capsule baseline.
 	repoDir := filepath.Join(capDir, "repos", "demo-src")
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
 		t.Fatalf("task repo not cloned into the capsule: %v", err)
@@ -90,21 +104,53 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 		t.Fatalf("materialized bundle missing: %v", err)
 	}
 
-	// The observe projection shows both steps done (the CLI face).
-	waitUntil(t, 30*time.Second, "steps never reached done", func() bool {
-		jv := d.observe(t, wi)
-		return jv.Steps["code"] != nil && jv.Steps["code"].Status == "done" &&
-			jv.Steps["review"] != nil && jv.Steps["review"].Status == "done"
-	})
+	// The driver walks the workflow: every step done on the
+	// execution.json face, with the budget_consumed and Version faces
+	// present (the driver is execution.json's single writer).
+	waitWorkflowStatus(t, d, wi, "completed", 60*time.Second)
+	x := readExecution(t, capDir)
+	if x.Version < 4 {
+		t.Fatalf("execution.json version %d — the workflow-version progression face is absent", x.Version)
+	}
+	if x.BudgetConsumed == nil {
+		t.Fatal("execution.json carries no budget_consumed face")
+	}
+	for _, step := range []string{"grill", "fix", "verification", "release"} {
+		st := x.Steps[step]
+		if st == nil || st.Status != "done" {
+			t.Fatalf("step %s: %+v, want done", step, st)
+		}
+	}
+	// The envelope face: every step's collected result envelope is
+	// archived in the R14 staging location, in spawn order.
+	for i, step := range []string{"grill", "fix", "verification", "release"} {
+		env := archivedEnvelope(t, capDir, step, i+1)
+		if env["step_id"] != step || env["outcome"] != "completed" {
+			t.Fatalf("archived envelope of %s wrong: %v", step, env)
+		}
+		if int(env["spawn_n"].(float64)) != i+1 {
+			t.Fatalf("archived envelope of %s carries spawn_n %v", step, env["spawn_n"])
+		}
+	}
+	// The handoff chain: grill and fix declare handoff — their envelopes
+	// carry verified handoff refs, and the handoff files exist.
+	for _, step := range []string{"grill", "fix"} {
+		if _, err := os.Stat(filepath.Join(capDir, "artifacts", "handoff-"+step+".md")); err != nil {
+			t.Fatalf("handoff file of %s missing: %v", step, err)
+		}
+	}
 
-	// The capsule chain is visible on the SERVER side before the close:
-	// the observe lane's async push landed the agent's writes — one
-	// commit per landed wave, so the mid-run chain already has history.
+	// The capsule chain is visible on the SERVER side: the observe
+	// lane's async push landed the driver's execution.json versions —
+	// one commit per landed wave, so the mid-run chain already has
+	// history.
 	inst.waitBareCommits(t, wi, 2, 40*time.Second)
 
-	// Close through the real CLI.
-	d.pf(t, "wrap", wi)
-	inst.waitWIStatus(t, wi, "wrapped", 30*time.Second)
+	// The terminal close: the daemon's v2 terminal wiring wraps the WI
+	// when the driver exits with a completed workflow (the recovery
+	// cause is the completion signal) — the CLI's close on the already
+	// sealed work item is the graceful already-terminal answer.
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 	// T1 session trail, second half: the wrap CLEARED the session row —
 	// a terminal work item names no holder (m4).
 	if sess2 := inst.sessionOf(t, wi); sess2.Fingerprint != "" {
@@ -112,7 +158,7 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	}
 
 	// The sealed chain: seq trailers strictly increasing from 1, the
-	// transcript and the execution state committed, the final push done.
+	// execution state committed, the final push done.
 	seqs := inst.bareSeqTrailers(t, wi)
 	if len(seqs) < 2 {
 		t.Fatalf("sealed chain too short: %d commits", len(seqs))
@@ -122,23 +168,23 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 			t.Fatalf("seq trailer %d is %d, want %d (chain: %v)", i, s, i+1, seqs)
 		}
 	}
-	if !inst.bareHasPath(t, wi, "runtime-state/execution.json") {
-		t.Fatal("sealed chain misses runtime-state/execution.json")
-	}
+	waitUntil(t, 30*time.Second, "sealed chain never carried runtime-state/execution.json", func() bool {
+		return inst.bareHasPath(t, wi, "runtime-state/execution.json")
+	})
 	transcript := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
-	if !strings.Contains(transcript, `"work_item_id":"`+wi+`"`) {
+	if !strings.Contains(transcript, wi) || !strings.Contains(transcript, "work_item_id") {
 		t.Fatalf("execution.json at main is not this work item's: %s", transcript)
 	}
 	// The harness transcript rides the chain (ruling C1).
 	hasTranscript := false
-	out2 := gitRun(t, inst.bareRepo(wi), "ls-tree", "--name-only", "-r", "main", "session")
-	for _, l := range strings.Split(out2, "\n") {
+	out3 := gitRun(t, inst.bareRepo(wi), "ls-tree", "--name-only", "-r", "main", "session")
+	for _, l := range strings.Split(out3, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(l), "session/session-") {
 			hasTranscript = true
 		}
 	}
 	if !hasTranscript {
-		t.Fatalf("sealed chain misses the harness transcript:\n%s", out2)
+		t.Fatalf("sealed chain misses the harness transcript:\n%s", out3)
 	}
 
 	// The daemon holds no job for a sealed work item.
@@ -146,19 +192,24 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 		t.Fatalf("daemon still holds jobs after wrap: %+v", st.Jobs)
 	}
 
-	// No orphaned agent survives the close (PF_WI_ID marker scan).
-	waitUntil(t, 10*time.Second, "agent processes survived the wrap", func() bool {
+	// No orphaned step process survives the close (PF_WI_ID marker scan
+	// — the driver terminates every step process after collecting its
+	// envelope; the sealed close must leave none).
+	waitUntil(t, 10*time.Second, "step processes survived the wrap", func() bool {
 		return len(orphanPIDs(wi)) == 0
 	})
 
-	// The events file tells the whole story in order.
+	// The events file tells the whole story in order: the job lifecycle,
+	// the C3 pushes, and exactly ONE recovery — the driver's completed
+	// exit, which the v2 terminal wiring translates into the wrap (the
+	// completion signal, not a death).
 	kinds := d.eventKinds(t, wi)
-	for _, want := range []string{"job_started", "published"} {
+	for _, want := range []string{"job_started", "published", "job_stopped"} {
 		if !contains(kinds, want) {
 			t.Fatalf("events %v miss %q", kinds, want)
 		}
 	}
-	if contains(kinds, "needs_recovery") {
-		t.Fatalf("healthy run raised a recovery: %v", kinds)
+	if n := countOf(kinds, "needs_recovery"); n != 1 {
+		t.Fatalf("needs_recovery fired %d times, want exactly 1 (the completion signal): %v", n, kinds)
 	}
 }

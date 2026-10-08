@@ -6,47 +6,59 @@ import (
 	"time"
 )
 
-// v1_s14: two work items run concurrently on one daemon. Each keeps its
-// own capsule, its own execution state and its own server-side session
-// and chain; neither agent sees the other's identity, and both close
-// cleanly. The isolation pins: execution.json names its own work item,
-// the sealed chains never cross, the spawn journals carry distinct
-// session handles (T8), and the hub's public session audit blocks name
-// two DIFFERENT fingerprints while both run (T8 — session isolation is
-// per-WI, m4).
+// v1_s14: two work items run concurrently on one driver-pinned daemon.
+// Each keeps its own capsule, its own execution state and its own
+// server-side session and chain; neither driver sees the other's
+// identity, and both complete and close cleanly. The isolation pins:
+// execution.json names its own work item and its own step table, the
+// archived envelopes carry their own wi_id, the sealed chains never
+// cross, the spawn journals carry distinct session handles (T8), and the
+// hub's public session audit blocks name two DIFFERENT fingerprints
+// while both run (T8 — session isolation is per-WI, m4).
 func TestV1S14ConcurrentTwoWI(t *testing.T) {
 	inst := newV1Install(t)
-	wiA := inst.newWI(t, "s14: concurrent member A", []map[string]any{
-		{"do": "step", "id": "code"}, {"do": "step", "id": "review"}, {"do": "wrap"},
-	}, nil)
-	wiB := inst.newWI(t, "s14: concurrent member B", []map[string]any{
-		{"do": "step", "id": "design"}, {"do": "step", "id": "code"}, {"do": "wrap"},
-	}, nil)
+	wiA := inst.newWI(t, "s14: concurrent member A", envelopeQuickFix(), nil)
+	wiB := inst.newWI(t, "s14: concurrent member B", envelopeQuickFix(), nil)
 
-	d := newV1Daemon(t, inst)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	d.pf(t, "submit", wiA)
 	d.pf(t, "submit", wiB)
 
-	// Both agents are live at the same time (the concurrency cap is 4).
-	waitUntil(t, 30*time.Second, "the two agents never ran concurrently", func() bool {
-		return d.agentPIDOf(t, wiA) > 0 && d.agentPIDOf(t, wiB) > 0
+	// Both drivers are live at the same time (the concurrency cap is 4):
+	// two running jobs, each with a spawned step process (the spawn
+	// journal is the step-process ledger — the driver lane carries no
+	// agent pid on the status face).
+	waitUntil(t, 30*time.Second, "the two drivers never ran concurrently", func() bool {
+		jobs := d.status(t).Jobs
+		var a, b bool
+		for _, j := range jobs {
+			if j.WorkItemID == wiA && j.Status == "running" {
+				a = true
+			}
+			if j.WorkItemID == wiB && j.Status == "running" {
+				b = true
+			}
+		}
+		return a && b
 	})
+	waitSpawnCount(t, d, wiA, 1, 30*time.Second)
+	waitSpawnCount(t, d, wiB, 1, 30*time.Second)
 
 	// Each observe projection shows its own step table, never the peer's.
 	waitUntil(t, 30*time.Second, "A's steps never showed", func() bool {
 		jv := d.observe(t, wiA)
-		return jv.Steps["code"] != nil && jv.Steps["review"] != nil
+		return jv.Steps["grill"] != nil && jv.Steps["fix"] != nil
 	})
 	waitUntil(t, 30*time.Second, "B's steps never showed", func() bool {
 		jv := d.observe(t, wiB)
-		return jv.Steps["design"] != nil && jv.Steps["code"] != nil
+		return jv.Steps["grill"] != nil && jv.Steps["fix"] != nil
 	})
 	if jv := d.observe(t, wiA); jv.WorkItem != wiA {
 		t.Fatalf("observe projection of A names %q", jv.WorkItem)
 	}
-	if jv := d.observe(t, wiB); len(jv.Steps) != 2 || jv.Steps["design"] == nil {
-		t.Fatalf("observe projection of B crossed streams: %+v", jv)
+	if jv := d.observe(t, wiB); len(jv.Steps) != 4 {
+		t.Fatalf("observe projection of B crossed streams: %+v", jv.Steps)
 	}
 
 	// T8: while both run, the hub names two DISTINCT session
@@ -60,13 +72,24 @@ func TestV1S14ConcurrentTwoWI(t *testing.T) {
 		t.Fatalf("the two concurrent work items share one session: %q", sessA.Fingerprint)
 	}
 
-	// Both close cleanly.
-	inst.waitWIStatus(t, wiA, "wrapped", 60*time.Second)
-	inst.waitWIStatus(t, wiB, "wrapped", 60*time.Second)
+	// Both complete and close cleanly (the driver's completed exit is the
+	// wrap signal).
+	inst.waitWIStatus(t, wiA, "wrapped", 90*time.Second)
+	inst.waitWIStatus(t, wiB, "wrapped", 90*time.Second)
 
-	// The sealed chains are independent: each carries exactly its own
-	// execution state, and each bare repo holds only its own commits.
+	// The execution faces are independent: each workflow completed with
+	// its own step table and its own archived envelopes, never the
+	// peer's identity anywhere.
 	for _, wi := range []string{wiA, wiB} {
+		waitWorkflowStatus(t, d, wi, "completed", 30*time.Second)
+		x := readExecution(t, d.capsuleDir(wi))
+		if len(x.Steps) != 4 {
+			t.Fatalf("%s: step table crossed streams: %v", wi, x.Steps)
+		}
+		env := archivedEnvelope(t, d.capsuleDir(wi), "grill", 1)
+		if env["wi_id"] != wi {
+			t.Fatalf("%s: archived envelope carries %v", wi, env["wi_id"])
+		}
 		exec := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
 		if !strings.Contains(exec, wi) {
 			t.Fatalf("chain of %s carries foreign state:\n%s", wi, exec)

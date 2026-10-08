@@ -9,23 +9,19 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 )
 
-// v1_s13: drain mode. The daemon (booted straight into drain via its
-// persisted mode) autonomously claims the project's ready queue in
-// waves and runs every ticket to completion with no operator action.
-// Single submits are refused in drain (DAEMON-409) — the internal loop
-// is the only creation entry — and the refused ticket stays queued at
-// aihub, untouched.
+// v1_s13: drain mode, driver/envelope edition. The daemon (booted
+// straight into drain via its persisted mode) autonomously claims the
+// project's ready queue in waves and runs every ticket to completion
+// with no operator action — each member a driver-pinned quick-fix
+// workflow, completed and sealed by the terminal wiring. Single submits
+// are refused in drain (DAEMON-409) — the internal loop is the only
+// creation entry — and the refused ticket stays queued at aihub,
+// untouched.
 func TestV1S13Drain(t *testing.T) {
 	inst := newV1Install(t)
-	wiA := inst.newWI(t, "s13: drain wave member A", []map[string]any{
-		{"do": "step", "id": "code"}, {"do": "wrap"},
-	}, nil)
-	wiB := inst.newWI(t, "s13: drain wave member B", []map[string]any{
-		{"do": "step", "id": "code"}, {"do": "wrap"},
-	}, nil)
-	wiC := inst.newWI(t, "s13: drain wave member C", []map[string]any{
-		{"do": "step", "id": "code"}, {"do": "wrap"},
-	}, nil)
+	wiA := inst.newWI(t, "s13: drain wave member A", envelopeQuickFix(), nil)
+	wiB := inst.newWI(t, "s13: drain wave member B", envelopeQuickFix(), nil)
+	wiC := inst.newWI(t, "s13: drain wave member C", envelopeQuickFix(), nil)
 	// Park the refusal-probe ticket in the needs-human-session segment so
 	// the drain loop itself never claims it (drain only fetches the
 	// autonomous segment); the single-submit refusal under test is the
@@ -49,16 +45,26 @@ func TestV1S13Drain(t *testing.T) {
 	// post-teardown orphan sweep by hand.
 	inst.trackWI(wiD.ID)
 
-	d := newV1Daemon(t, inst, optMode("drain"))
+	d := newV1Daemon(t, inst, optMode("drain"), optUseDriver())
 	d.start()
 
-	// The drain waves claim the ready queue on their own (wave period 5s).
-	inst.waitWIStatus(t, wiA, "wrapped", 60*time.Second)
-	inst.waitWIStatus(t, wiB, "wrapped", 60*time.Second)
-	inst.waitWIStatus(t, wiC, "wrapped", 60*time.Second)
+	// The drain waves claim the ready queue on their own (wave period 5s)
+	// and run every member to wrapped.
+	inst.waitWIStatus(t, wiA, "wrapped", 120*time.Second)
+	inst.waitWIStatus(t, wiB, "wrapped", 120*time.Second)
+	inst.waitWIStatus(t, wiC, "wrapped", 120*time.Second)
 
-	// Both ran on this daemon and sealed their own chains.
+	// Each member ran on this daemon as a driver workflow: the
+	// execution.json face shows the completed quick-fix chain, and the
+	// auto-seal pushed the chain server-side.
 	for _, wi := range []string{wiA, wiB, wiC} {
+		waitWorkflowStatus(t, d, wi, "completed", 30*time.Second)
+		x := readExecution(t, d.capsuleDir(wi))
+		for _, step := range []string{"grill", "fix", "verification", "release"} {
+			if st := x.Steps[step]; st == nil || st.Status != "done" {
+				t.Fatalf("%s: step %s not done: %+v", wi, step, st)
+			}
+		}
 		if inst.bareCommitCount(t, wi) == 0 {
 			t.Fatalf("%s never pushed its chain", wi)
 		}
