@@ -6,38 +6,33 @@ import (
 	"time"
 )
 
-// v1_s08: daemon crash with a running work item. The daemon process is
-// SIGKILLed (the WI agent deliberately survives — it parks on stdin
-// EOF). The restarted daemon runs the §十一 reconciliation against
-// aihub's own verdict — the compare-only session verify (B3) says the
-// crashed daemon's session still holds it, status running — routes the
-// job through the recovery engine, kills the SURVIVING old agent tree,
-// resumes from the transcript and finishes the work item inside the
-// SAME session (T4: the fingerprint never moves). No orphan of the
-// old daemon survives the reconciliation.
+// v1_s08: daemon crash with a running driver workflow. The daemon process
+// is SIGKILLed mid-step (the parked step process deliberately survives —
+// it parks after its envelope write). The restarted daemon runs the §十一
+// reconciliation against aihub's own verdict — the compare-only session
+// verify (B3) says the crashed daemon's session still holds it, status
+// running — routes the job through the recovery engine, and the restarted
+// driver resumes PAST every spawn ordinal the predecessor used (the spawn
+// journal is the fence's source of truth), finishing the work item inside
+// the SAME session (T4: the fingerprint never moves).
 func TestV1S08DaemonRestart(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s08: daemon crash mid-run",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "park"},
-		},
-		[]map[string]any{{"do": "wrap"}})
-	d := newV1Daemon(t, inst)
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			// Ordinal 2 (fix) burns a 3s delay — the deterministic crash window.
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 3000},
+			// Ordinal 3: the post-restart resume dispatch of fix.
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
+		}, nil)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
-		return d.agentPIDOf(t, wi) > 0
-	})
+	waitSpawnCount(t, d, wi, 2, 30*time.Second)
+	waitStepStatus(t, d, wi, "fix", "in_progress", 30*time.Second)
 	capDir := d.capsuleDir(wi)
-	waitUntil(t, 30*time.Second, "first step never landed", func() bool {
-		for _, rec := range fakeJournal(t, capDir) {
-			if rec["type"] == "step" && rec["phase"] == "done" {
-				return true
-			}
-		}
-		return false
-	})
 	t.Cleanup(func() { killOrphans(wi) })
 
 	// The session fingerprint BEFORE the crash — T4's identity contract.
@@ -46,30 +41,42 @@ func TestV1S08DaemonRestart(t *testing.T) {
 		t.Fatal("running work item carries no session")
 	}
 
-	// Crash the daemon hard. The agent survives (parked on EOF).
-	oldPID := d.agentPIDOf(t, wi)
+	// Crash the daemon hard. The parked step process survives (the
+	// crash-safety property the orphan assertion below pins).
+	survivorPID := latestSpawnPID(t, d, wi)
 	d.crash()
-	waitUntil(t, 10*time.Second, "agent did not survive the daemon crash", func() bool {
-		return len(orphanPIDs(wi)) > 0
+	waitUntil(t, 10*time.Second, "the step process did not survive the daemon crash", func() bool {
+		pids := orphanPIDs(wi)
+		for _, p := range pids {
+			if p == survivorPID {
+				return true
+			}
+		}
+		return false
 	})
 
 	// Restart the SAME daemon (same socket, data dir, workspace). The
 	// startup reconciliation recovers the running work item.
 	d2 := &v1Daemon{
 		t: t, inst: inst, sock: d.sock, dataDir: d.dataDir, workspace: d.workspace,
-		machineID: d.machineID, logPath: filepath.Join(t.TempDir(), "daemon2.log"),
+		machineID: d.machineID, extraArgs: d.extraArgs,
+		logPath: filepath.Join(t.TempDir(), "daemon2.log"),
 	}
 	t.Cleanup(func() { d2.stop() })
 	d2.start()
 
-	// The reconciliation resumed the job: a live agent again, and the
-	// SURVIVOR of the crash was collected (no orphan of the old tree).
-	waitUntil(t, 30*time.Second, "restarted daemon never re-derived the agent", func() bool {
-		return d2.agentPIDOf(t, wi) > 0
-	})
-	waitUntil(t, 30*time.Second, "the crash survivor was never collected", func() bool {
-		return len(orphanPIDs(wi)) <= 1 // the new derivation may hold the marker briefly
-	})
+	// The reconciliation resumed the job: a live step process again, and
+	// the restarted driver seeds PAST the crashed dispatch's ordinal (the
+	// fence: the journal's max is the seed, so fix re-dispatches as a
+	// RESUME under ordinal 3 — never two writers on one drop path).
+	waitSpawnCount(t, d2, wi, 3, 60*time.Second)
+	spawns := spawnJournal(t, capDir)
+	if spawns[2]["resume"] != true {
+		t.Fatalf("the restart recovery was not a resume: %+v", spawns[2])
+	}
+	if pid3, _ := spawns[2]["pid"].(float64); int(pid3) == survivorPID {
+		t.Fatalf("restart re-used the crashed pid %v", spawns[2]["pid"])
+	}
 	// T4 (B2): the re-derivation advanced the counter but kept the SAME
 	// session — daemon restart reconciliation attaches to the session
 	// that survived the crash at aihub.
@@ -77,34 +84,35 @@ func TestV1S08DaemonRestart(t *testing.T) {
 		t.Fatalf("daemon-restart recovery changed the session: %q -> %q",
 			sessBefore.Fingerprint, sessAfter.Fingerprint)
 	}
-	// The re-derivation is a RESUME (the transcript survived the crash in
-	// the capsule), under the next derivation counter.
-	spawns := spawnJournal(t, capDir)
-	if len(spawns) != 2 {
-		t.Fatalf("spawn journal has %d entries after restart, want 2", len(spawns))
-	}
-	if spawns[1]["resume"] != true {
-		t.Fatalf("restart recovery was not a resume: %+v", spawns[1])
-	}
-	if pid2, ok := spawns[1]["pid"].(float64); !ok || int(pid2) == oldPID {
-		t.Fatalf("restart re-derived the same pid %v", spawns[1]["pid"])
-	}
 
-	// The resumed agent (scripted by resume_actions) finished the work
-	// item inside the SAME session, and the wrap cleared it.
-	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	// The resumed driver finished the work item inside the SAME session,
+	// and the terminal wiring wrapped it.
+	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {
 		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
 	}
 
-	// And no orphan of the old daemon's tree survived the whole cycle.
-	waitUntil(t, 10*time.Second, "orphan agents survived the restart cycle", func() bool {
-		return len(orphanPIDs(wi)) == 0
-	})
-
-	// The reattached monitor watched the new derivation to its end.
+	// The driver faces: the whole chain done with the resume envelope in
+	// place, and the reattached monitor watched the new derivation to its
+	// end (job_started on the restarted daemon's watch).
+	x := readExecution(t, capDir)
+	for _, step := range []string{"grill", "fix", "verification", "release"} {
+		if st := x.Steps[step]; st == nil || st.Status != "done" {
+			t.Fatalf("step %s: %+v, want done", step, st)
+		}
+	}
+	env3 := archivedEnvelope(t, capDir, "fix", 3)
+	if env3["outcome"] != "completed" {
+		t.Fatalf("fix's resume envelope wrong: %v", env3["outcome"])
+	}
 	kinds := d2.eventKinds(t, wi)
 	if !contains(kinds, "job_started") || !contains(kinds, "job_stopped") {
 		t.Fatalf("restarted daemon's events miss the lifecycle: %v", kinds)
 	}
+	// The known crash survivor is the only orphan the driver lane can
+	// leave (no daemon-side pid to signal — the harness sweep collects
+	// it); nothing else leaks.
+	waitUntil(t, 15*time.Second, "more than the one crash survivor leaked", func() bool {
+		return len(orphanPIDs(wi)) <= 1
+	})
 }

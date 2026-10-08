@@ -1,112 +1,124 @@
 package test
 
 import (
-	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
 
-// v1_s07: provider errors ride the ordinary record stream
-// (stopReason=error on the assistant message records — there is no
-// type:"error" record). Two consecutive error turns arm the storm guard
-// (chain ≥ 2 in stream order), the monitor fires exactly ONE
-// WINeedsRecovery, the recovery engine resumes once, and the resumed
-// agent finishes the work item. The re-derived old handle's exit (the
-// recovery kills it) must NOT raise a second recovery — the
-// "恢复一次而不是连杀" pin.
-//
-// This scenario runs against the REAL `pf daemon` process (the e2e lane's
-// regression for the record-stream assembly fix): the agent's stdout
-// records reach Observe only through the production binding — the
-// spawner's config tap → the daemon's tapRecord → the observe adapter —
-// so the provider-error detection firing at all is the pin that the
-// record stream is wired. The in-process rig it used to run through
-// bypassed exactly that half; it remains in the tree (s06 still needs
-// the injected windows).
+// v1_s07: repeated gate failures are bounded, driver/envelope edition.
+// The legacy storm watched the record stream for consecutive provider
+// errors; the driver-era equivalent storm window is the workflow's OWN
+// gate-fail ladder: the verification gate FAILs with a populated error
+// verdict three times, the on_fail rewind-to-fix policy fires twice (the
+// quick-fix bundle's rewind bounds: max_total 2, max_per_step 2), and the
+// third FAIL hits the bound — failed_rewind_exhausted. The daemon's v2
+// terminal wiring translates the driver's exit into the failed close:
+// the recovery cause is the failure signal, not a death. Every archived
+// attempt, verdict and rewind is on the execution.json / envelope faces.
 func TestV1S07ProviderErrorStorm(t *testing.T) {
 	inst := newV1Install(t)
-	wi := inst.newWI(t, "s07: consecutive provider errors",
+	verdict := map[string]any{
+		"error":   "upstream connection reset after 2 retries (fake harness injected)",
+		"verdict": "FAIL",
+	}
+	wi := inst.newWI(t, "s07: consecutive gate failures, bounded",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "provider_error", "count": 2},
-			{"do": "park"},
-		},
-		[]map[string]any{{"do": "wrap"}})
-	d := newV1Daemon(t, inst)
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			// FAIL #1 → rewind [fix, verification) → fix.
+			{"do": "envelope", "id": "verification", "outcome": "gate_failed", "output": verdict},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			// FAIL #2 → rewind #2 (the last the bounds allow).
+			{"do": "envelope", "id": "verification", "outcome": "gate_failed", "output": verdict},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			// FAIL #3 → the bounds are spent: failed_rewind_exhausted.
+			{"do": "envelope", "id": "verification", "outcome": "gate_failed", "output": verdict},
+		}, nil)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
 
+	// The bounded terminal state on the execution.json face: the workflow
+	// failed_rewind_exhausted after exactly two executed rewinds, and the
+	// gate itself is NEVER done — it holds the third FAIL verdict.
+	waitWorkflowStatus(t, d, wi, "failed_rewind_exhausted", 120*time.Second)
 	capDir := d.capsuleDir(wi)
-	// The first step lands (the stream is live before the errors start).
-	waitUntil(t, 30*time.Second, "first step never landed", func() bool {
-		for _, rec := range fakeJournal(t, capDir) {
-			if rec["type"] == "step" && rec["phase"] == "done" {
-				return true
-			}
+	x := readExecution(t, capDir)
+	if x.ReviewRounds["verification"] != 3 {
+		t.Fatalf("review rounds %v, want 3 verdicts recorded", x.ReviewRounds)
+	}
+	if n := int(x.RewindStats["count"].(float64)); n != 2 {
+		t.Fatalf("rewind count %v, want exactly 2 (the third hit the bound)", x.RewindStats["count"])
+	}
+	ver := x.Steps["verification"]
+	if ver == nil || ver.Status != "in_progress" {
+		t.Fatalf("the gate step must hold the verdict in_progress, got %+v", ver)
+	}
+	if ver.Output["error"] == nil || !strings.Contains(ver.Output["error"].(string), "connection reset") {
+		t.Fatalf("the FAIL verdict output is not on the gate: %+v", ver.Output)
+	}
+	// The two executed rewinds archived fix's superseded outputs as
+	// gate_fail_rewind attempts — the preference order's archive face.
+	fixArchives := 0
+	for _, a := range x.Steps["fix"].Attempts {
+		if a["cause"] == "gate_fail_rewind" {
+			fixArchives++
 		}
-		return false
+	}
+	if fixArchives != 2 {
+		t.Fatalf("fix archived %d gate_fail_rewind attempts, want 2: %+v", fixArchives, x.Steps["fix"].Attempts)
+	}
+	// Every ordinal's envelope is on the archive face, in plan order —
+	// including both error envelopes with their populated verdicts.
+	for i, want := range []struct {
+		step    string
+		outcome string
+	}{
+		{"grill", "completed"}, {"fix", "completed"}, {"verification", "gate_failed"},
+		{"fix", "completed"}, {"verification", "gate_failed"}, {"fix", "completed"},
+		{"verification", "gate_failed"},
+	} {
+		env := archivedEnvelope(t, capDir, want.step, i+1)
+		if env["outcome"] != want.outcome {
+			t.Fatalf("archived envelope s%d (%s): outcome %v, want %s", i+1, want.step, env["outcome"], want.outcome)
+		}
+		if want.outcome == "gate_failed" && env["output"] == nil {
+			t.Fatalf("error envelope s%d carries no verdict output", i+1)
+		}
+	}
+
+	// The daemon's v2 terminal wiring closed the WI as FAILED (the
+	// recovery cause was the failure signal), and the log says so.
+	inst.waitWIStatus(t, wi, "failed", 60*time.Second)
+	waitUntil(t, 30*time.Second, "the daemon log never recorded the failed close", func() bool {
+		return strings.Contains(d.logTail(), "driver workflow failed (failed_rewind_exhausted)")
 	})
 
-	// The incidents are classified and journaled immediately; the
-	// recovery decision fires after the second consecutive one.
-	rec := waitForEvent(t, d, wi, "needs_recovery", 60*time.Second)
-	var body struct {
-		Reason string `json:"reason"`
-		Detail string `json:"detail"`
+	// ONE recovery signal for the whole ladder: the failure translation.
+	// The rewind cycles never left the driver (no re-derivation, no
+	// storm) — the storm bound that matters is the workflow's own.
+	kinds := d.eventKinds(t, wi)
+	if n := countOf(kinds, "needs_recovery"); n != 1 {
+		t.Fatalf("needs_recovery fired %d times, want 1 (the failure signal): %v", n, kinds)
 	}
-	if err := json.Unmarshal(rec.Body, &body); err != nil {
-		t.Fatalf("needs_recovery body: %v (%s)", err, rec.Body)
+	if n := countOf(kinds, "wi_agent_rederived"); n != 0 {
+		t.Fatalf("re-derivation count %d, want 0 (the ladder ran inside one driver): %v", n, kinds)
 	}
-	if body.Reason != "provider_error" {
-		t.Fatalf("recovery reason %q, want provider_error", body.Reason)
+	// The failed close cleared the session (no holder on a terminal WI)
+	// and the sealed chain carries the bounded ladder's archives. (The
+	// terminal workflow_status itself rides the last C3 push wave, which
+	// races the failed close — the local execution.json is the authority
+	// for the verdict; the chain reliably carries the rewind archives.)
+	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {
+		t.Fatalf("failed work item still names session %q", sess.Fingerprint)
 	}
-
-	// Both queued incidents surfaced as infra_incident events before the
-	// recovery decision, classified as provider_error.
-	var incidents []string
-	for _, e := range d.eventsOf(t, wi) {
-		if e.Kind != "infra_incident" {
-			continue
-		}
-		var ib struct {
-			Kind string `json:"kind"`
-		}
-		_ = json.Unmarshal(e.Body, &ib)
-		incidents = append(incidents, ib.Kind)
-	}
-	if len(incidents) < 2 {
-		t.Fatalf("classified incidents %v, want ≥2", incidents)
-	}
-	for _, k := range incidents {
-		if k != "provider_error" {
-			t.Fatalf("incident kind %q, want provider_error", k)
-		}
-	}
-
-	// The resumed agent finished.
-	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
-
-	// ONE recovery for the whole storm: the re-derived old handle's exit
-	// never re-armed the detector (the storm guard), and the new agent
-	// ran clean.
-	var recoveries, rederives int
-	for _, e := range d.eventsOf(t, wi) {
-		switch e.Kind {
-		case "needs_recovery":
-			recoveries++
-		case "wi_agent_rederived":
-			rederives++
-		}
-	}
-	if recoveries != 1 {
-		t.Fatalf("needs_recovery fired %d times, want 1", recoveries)
-	}
-	if rederives != 1 {
-		t.Fatalf("re-derivation count %d, want 1", rederives)
-	}
-	// Two derivations only: the original + the one resume.
-	if n := len(spawnJournal(t, capDir)); n != 2 {
-		t.Fatalf("spawn journal has %d entries, want 2", n)
+	waitUntil(t, 30*time.Second, "the sealed chain never carried the rewind archives", func() bool {
+		return inst.bareHasPath(t, wi, "runtime-state/execution.json") &&
+			strings.Contains(inst.bareFileAtMain(t, wi, "runtime-state/execution.json"), "gate_fail_rewind")
+	})
+	if n := len(spawnJournal(t, capDir)); n != 7 {
+		t.Fatalf("spawn journal has %d entries, want 7 (seven step processes, zero re-derivations)", n)
 	}
 }
