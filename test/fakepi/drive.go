@@ -89,9 +89,11 @@ type planAction struct {
 	// envelope write (the F15 record-stream shapes on driver step
 	// processes).
 	OpenTurn bool `json:"open_turn,omitempty"`
-	// Noise streams ui_noise records (kind ui | progress) for MS
-	// milliseconds before the envelope write (F15 shapes).
-	Noise string `json:"noise,omitempty"` // "" | "ui" | "progress"
+	// Noise streams ui_noise records (kind ui | progress) while the
+	// pre-write delay runs (F15 shapes); NoiseMS is the emitter interval
+	// (MS keeps its meaning as the pre-write delay).
+	Noise   string `json:"noise,omitempty"`    // "" | "ui" | "progress"
+	NoiseMS int    `json:"noise_ms,omitempty"` // the noise emitter interval (default 100ms)
 	// PoisonGitlink / UnpoisonGitlink run the #48 poison shape (lay or
 	// clean an embedded git repository) before the envelope write; the
 	// version bump inside arms the observe push round.
@@ -407,12 +409,12 @@ func runDriveLoop(d *driveEnv) {
 			// mode-160000 gitlink. The version bump in the same action
 			// arms the observe push, whose CommitPush must refuse the
 			// poison locally (GIT-412) instead of committing it.
-			d.poisonGitlink()
+			d.poisonGitlink(true)
 		case "unpoison_gitlink":
 			// The documented cleanup, scripted: delete the nested .git and
 			// bump the Version — the next commit boundary re-arms the
 			// (same-error-capped) push round and the chain must recover.
-			d.unpoisonGitlink()
+			d.unpoisonGitlink(true)
 		default:
 			fmt.Fprintf(os.Stderr, "fakepi: unknown plan action %q; parking\n", act.Do)
 			parkForever()
@@ -439,16 +441,19 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 		d.beginOpenTurn("open_turn")
 	}
 	if act.Noise != "" {
-		d.startNoise(act.Noise, act.MS)
+		d.startNoise(act.Noise, act.NoiseMS)
 	}
 	if act.Name != "" {
 		d.makeRepo(act.Name, act.Origin)
 	}
 	if act.PoisonGitlink {
-		d.poisonGitlink()
+		// No execution.json write here: on the driver lane the DRIVER is
+		// execution.json's single writer, and the envelope this action
+		// precedes IS the version bump (the push lane's commit boundary).
+		d.poisonGitlink(false)
 	}
 	if act.UnpoisonGitlink {
-		d.unpoisonGitlink()
+		d.unpoisonGitlink(false)
 	}
 	sleepMS(act.MS) // the delayed-envelope-write shape (the hang lane)
 	if act.FlushWrap == "before" {
@@ -970,7 +975,7 @@ func withKind(body map[string]any, kind string) map[string]any {
 // the shape `git add -A` stages as a mode-160000 gitlink) OUTSIDE the
 // gitignored repos/ tree, and bumps the Version so the observe lane's
 // async push picks the change up on the next tick.
-func (d *driveEnv) poisonGitlink() {
+func (d *driveEnv) poisonGitlink(bumpVersion bool) {
 	dir := filepath.Join("poison")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
@@ -989,7 +994,12 @@ func (d *driveEnv) poisonGitlink() {
 		os.WriteFile(filepath.Join(dir, "inner.txt"), []byte("embedded history for "+d.wi+"\n"), 0o644) == nil &&
 		run("-c", "user.name=fake-agent", "-c", "user.email=fake-agent@invalid", "add", "-A") == nil &&
 		run("-c", "user.name=fake-agent", "-c", "user.email=fake-agent@invalid", "commit", "-q", "-m", "embedded history") == nil
-	d.commit(func(x *execState) {}) // Version bump: the next commit boundary
+	if bumpVersion {
+		// The legacy agent-as-writer bump (the legacy RPC action flows).
+		// The envelope-mode caller must NOT write execution.json — the
+		// driver is its single writer.
+		d.commit(func(x *execState) {})
+	}
 	d.journal("poison_gitlink", map[string]any{"path": "poison", "laid": ok})
 }
 
@@ -997,10 +1007,12 @@ func (d *driveEnv) poisonGitlink() {
 // delete the embedded repository's .git — and bumps the Version: the
 // formerly embedded files become plain untracked work, and the next
 // commit boundary re-arms the halted push round.
-func (d *driveEnv) unpoisonGitlink() {
+func (d *driveEnv) unpoisonGitlink(bumpVersion bool) {
 	err := os.RemoveAll(filepath.Join("poison", ".git"))
 	// the staged gitlink (if the index still carried one) goes with it
-	d.commit(func(x *execState) {})
+	if bumpVersion {
+		d.commit(func(x *execState) {})
+	}
 	d.journal("unpoison_gitlink", map[string]any{"path": "poison", "err": errString(err)})
 }
 

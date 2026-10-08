@@ -1,21 +1,34 @@
 package test
 
-// v1_s22: the V4/V8 gate repairs, end to end with the REAL daemon.
+// v1_s22: the V4/V8 gate repairs, end to end with the REAL daemon,
+// driver/envelope edition.
 //
-//   - S22a (V4): a verification step whose done-write carries no
-//     structured command evidence must make flush(wrap) REFUSED — the
-//     typed DAEMON-400 VERIFICATION_EVIDENCE_MISSING ack, the work item
-//     still running, no blocked transition — and the repaired re-flush
-//     (evidence appended) seals normally. The sealed chain's HEAD must
-//     carry the readable commands evidence.
+//   - S22a (V4): the wrap evidence gate on the driver path. The gate's
+//     predicate (steps.verification.output.commands readable) judges the
+//     DRIVER's execution.json: a verification envelope written WITHOUT
+//     command evidence (the no_evidence toggle) makes the gated
+//     flush(wrap) seal REFUSED — the typed DAEMON-400
+//     VERIFICATION_EVIDENCE_MISSING ack and the wrap_evidence_refused
+//     event — with the work item still live and nothing sealed. The
+//     repair runs the driver's own bounded-rewind machinery (the
+//     gate_failed envelope rewinds [fix, verification)), the re-run
+//     verification delivers its evidence ON the envelope, and the
+//     second gated flush(wrap) — evidence present — commits, pushes and
+//     seals. The flush(wrap) calls are driven through the daemon's UDS
+//     flush face with the runtime's announced derivation counter (the
+//     B2 fence value of the driver lane), at deterministic parked
+//     moments: after envelope 3 the workflow parks on an open question
+//     WITH verification done-without-evidence (the refusal window), and
+//     after the repair it parks again WITH the evidence (the accept
+//     window) — no timing races anywhere.
 //   - S22b (V8): an embedded git repository laid in the capsule (the
-//     #48 poison shape) is refused by the LOCAL precheck — classified
-//     push_poisoned_local, never push_failed — and the same-error retry
-//     cap bounds the round at exactly 5 attempts before the halt; the
-//     documented cleanup (delete the nested .git) plus a fresh commit
-//     boundary recovers the chain, which seals with NO gitlink anywhere
-//     in the published history.
-
+//     #48 poison shape, the grill envelope action) is refused by the
+//     LOCAL precheck — classified push_poisoned_local, never
+//     push_failed — and the same-error retry cap bounds the round at
+//     exactly 5 attempts before the halt; the documented cleanup (the
+//     unpoison envelope action) plus a fresh commit boundary recovers
+//     the chain, which seals with NO gitlink anywhere in the published
+//     history.
 import (
 	"encoding/json"
 	"strings"
@@ -29,23 +42,68 @@ func TestV1S22WrapEvidenceGate(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s22: wrap refused without verification evidence, sealed after the repair",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "step", "id": "verification", "no_evidence": true},
-			// The broken seal: refused, plan continues to the repair.
-			{"do": "wrap_unless_refused"},
-			// The repair: re-run the verification step WITH the command
-			// evidence, then wrap again.
-			{"do": "step", "id": "verification"},
-			{"do": "wrap"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			// The broken shape: verification done with NO command
+			// evidence (the no_evidence toggle suppresses the envelope's
+			// command_evidence, so execution.json's
+			// steps.verification.output.commands stays empty).
+			{"do": "envelope", "id": "verification", "outcome": "completed", "no_evidence": true},
+			// The deterministic refusal window: release parks the
+			// workflow on an open question while verification holds its
+			// evidence-less done record.
+			{"do": "envelope", "id": "release", "outcome": "needs_input", "question_id": "q_s22_hold",
+				"question": "s22a: parked at the refusal window."},
+			// The repair: the gate_failed envelope engages the driver's
+			// on_fail rewind to fix; the re-run verification delivers
+			// its evidence on the envelope.
+			{"do": "envelope", "id": "release", "outcome": "gate_failed",
+				"output": map[string]any{"verdict": "FAIL", "error": "verification evidence missing; rewinding to fix"}},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			// The accept window: parked again, now with the evidence on
+			// the durable face.
+			{"do": "envelope", "id": "release", "outcome": "needs_input", "question_id": "q_s22_hold2",
+				"question": "s22a: parked at the accept window."},
 		}, nil)
-	d := newV1Daemon(t, inst)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
 
-	// The refusal: the typed event lands, the work item is NOT
-	// terminal, and the agent (which continued the plan) is alive.
-	refusal := waitForEvent(t, d, wi, "wrap_evidence_refused", 60*time.Second)
+	// The refusal window: verification done WITHOUT evidence, the
+	// workflow parked and LIVE.
+	waitQuestion(t, d, wi, "q_s22_hold", 30*time.Second)
+	waitStepStatus(t, d, wi, "verification", "done", 30*time.Second)
+	x := readExecution(t, d.capsuleDir(wi))
+	if x.Steps["verification"].Output["commands"] != nil {
+		t.Fatalf("the broken shape carries evidence after all: %+v", x.Steps["verification"].Output)
+	}
+
+	// The gated seal is REFUSED: the typed DAEMON-400
+	// VERIFICATION_EVIDENCE_MISSING ack, the durable event, the work
+	// item still live, nothing sealed.
+	refusedAck, ferr := d.client.Flush(wi, protocol.FlushRequest{
+		WorkItem: wi, SpawnN: 1, Reason: protocol.FlushWrap, FinalStatus: "wrapped",
+	})
+	if ferr != nil {
+		t.Fatalf("the gated seal failed at the transport: %v", ferr)
+	}
+	// The typed refusal rides the flush ACK (the fence and the gate
+	// answer 200 with ok:false + the error text; transport errors are
+	// for the route itself).
+	var refusedFlush protocol.FlushAck
+	if err := json.Unmarshal(refusedAck, &refusedFlush); err != nil {
+		t.Fatalf("refusal ack undecodable: %v (%s)", err, refusedAck)
+	}
+	if refusedFlush.OK {
+		t.Fatalf("the evidence-less seal was accepted: %s", refusedAck)
+	}
+	refused := refusedFlush.Error
+	if refused == "" {
+		refused = string(refusedAck)
+	}
+	refusal := waitForEvent(t, d, wi, "wrap_evidence_refused", 30*time.Second)
 	var rbody struct {
 		Error string `json:"error"`
 	}
@@ -54,36 +112,58 @@ func TestV1S22WrapEvidenceGate(t *testing.T) {
 	}
 	for _, sub := range []string{"DAEMON-400", "VERIFICATION_EVIDENCE_MISSING", wi, "verification"} {
 		if !strings.Contains(rbody.Error, sub) {
-			t.Fatalf("refusal error must name %q: %q", sub, rbody.Error)
+			t.Fatalf("refusal event must name %q: %q", sub, rbody.Error)
 		}
 	}
 	if st := inst.wiStatus(t, wi); st != "running" {
-		t.Fatalf("a refused wrap must leave the work item running, got %q", st)
+		t.Fatalf("a refused seal must leave the work item running, got %q", st)
 	}
-	if d.agentPIDOf(t, wi) == 0 {
-		t.Fatal("the refused wrap must not kill the agent")
+	// No push bookkeeping fired on the refusal path (no commit was
+	// attempted).
+	for _, e := range d.eventsOf(t, wi) {
+		if e.Kind == "push_failed" || e.Kind == "wrap_blocked" {
+			t.Fatalf("the refused seal must not produce %s: %+v", e.Kind, e.Body)
+		}
 	}
 
-	// The agent's own journal saw both faces: the refused wrap (ok=false)
-	// and, after the repair, the accepted one (ok=true).
+	// The repair: the owner's answer un-parks release, whose gate_failed
+	// envelope engages the bounded rewind to fix; the re-run
+	// verification delivers its evidence on the envelope. Exactly one
+	// rewind, one recorded verdict.
+	answerQuestion(t, d, wi, "q_s22_hold", "Rewind and repair.")
+	waitQuestion(t, d, wi, "q_s22_hold2", 120*time.Second)
+	x = readExecution(t, d.capsuleDir(wi))
+	if n := int(x.RewindStats["count"].(float64)); n != 1 {
+		t.Fatalf("rewind count %v, want exactly 1 (the repair rewind)", x.RewindStats["count"])
+	}
+	if x.ReviewRounds["release"] != 1 {
+		t.Fatalf("review rounds %v, want the one FAIL verdict recorded", x.ReviewRounds)
+	}
+	ver := x.Steps["verification"]
+	if ver.Status != "done" || ver.Output["commands"] == nil {
+		t.Fatalf("the repaired verification must be done WITH commands evidence: %+v", ver)
+	}
+
+	// The gated seal is ACCEPTED: the evidence gate passes, the seal
+	// commit+push lands, and the work item wraps through the gated path.
+	ack, err := d.client.Flush(wi, protocol.FlushRequest{
+		WorkItem: wi, SpawnN: 1, Reason: protocol.FlushWrap, FinalStatus: "wrapped",
+	})
+	if err != nil {
+		t.Fatalf("the repaired seal was refused: %v", err)
+	}
+	var fa protocol.FlushAck
+	if err := json.Unmarshal(ack, &fa); err != nil || !fa.OK || !fa.Pushed {
+		t.Fatalf("accept flush ack wrong: %v (%s)", err, ack)
+	}
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
-	var refused, accepted bool
-	for _, e := range fakeJournal(t, d.capsuleDir(wi)) {
-		if e["type"] != "flush" || e["reason"] != "wrap" {
-			continue
-		}
-		if ok, _ := e["ok"].(bool); ok {
-			accepted = true
-		} else {
-			refused = true
-		}
-	}
-	if !refused || !accepted {
-		t.Fatalf("journal must show the refused wrap then the accepted one (refused=%v accepted=%v)", refused, accepted)
-	}
 
-	// The sealed chain's HEAD carries the readable evidence: the M4
-	// read-through shape lands in the published history.
+	// The faces: the refusal happened exactly once, the repaired
+	// verification's evidence is readable on the sealed chain's HEAD,
+	// and both envelopes (broken and repaired) are archived.
+	if n := countOf(d.eventKinds(t, wi), "wrap_evidence_refused"); n != 1 {
+		t.Fatalf("wrap_evidence_refused fired %d times, want 1", n)
+	}
 	execRaw := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
 	var exec struct {
 		Steps map[string]struct {
@@ -104,12 +184,13 @@ func TestV1S22WrapEvidenceGate(t *testing.T) {
 	if c["exit_code"] == nil || c["duration_ms"] == nil {
 		t.Fatalf("the evidence entry must be a readable {argv, exit_code, duration_ms}: %+v", c)
 	}
-
-	// No push bookkeeping fired on the refusal path.
-	for _, e := range d.eventsOf(t, wi) {
-		if e.Kind == "push_failed" || e.Kind == "wrap_blocked" {
-			t.Fatalf("the refused wrap must not produce %s: %+v", e.Kind, e.Body)
-		}
+	broken := archivedEnvelope(t, d.capsuleDir(wi), "verification", 3)
+	if broken["outcome"] != "completed" {
+		t.Fatalf("the broken verification envelope wrong: %v", broken["outcome"])
+	}
+	repaired := archivedEnvelope(t, d.capsuleDir(wi), "verification", 7)
+	if repaired["outcome"] != "completed" {
+		t.Fatalf("the repaired verification envelope wrong: %v", repaired["outcome"])
 	}
 }
 
@@ -117,24 +198,32 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s22: local gitlink precheck, poisoned-local classification, same-error cap",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
 			// The #48 poison shape: an embedded repository OUTSIDE
-			// repos/ (which is gitignored). The version bump arms the
-			// async push, whose CommitPush must refuse locally.
-			{"do": "poison_gitlink"},
-			// Production timing: PushRetryBackoff is 10s and the cap is
-			// 5 identical failures — the halt lands at ~40s.
-			{"do": "sleep", "ms": 55000},
-			// The documented cleanup, plus a fresh commit boundary that
-			// re-arms the halted round.
-			{"do": "unpoison_gitlink"},
-			{"do": "step", "id": "review"},
-			{"do": "wrap"},
+			// repos/ (which is gitignored), laid by the grill envelope
+			// action; the needs_input transition bumps the Version and
+			// parks the workflow, so the push round runs against the
+			// poisoned worktree while the WI stays live.
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": "q_s22b",
+				"question":       "s22b: parked while the poisoned push round runs.",
+				"poison_gitlink": true},
+			// The documented cleanup, scripted as the continuation: the
+			// unpoison envelope action deletes the nested .git and bumps
+			// the Version — the halted round re-arms at that boundary.
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true,
+				"unpoison_gitlink": true},
+			// The fix step burns 15s before its envelope: the re-armed
+			// push round's second attempt (the 10s backoff) lands on the
+			// CLEAN tree and recovers the chain while the workflow is
+			// still live — the wrap must never outrun the recovery push.
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 15000},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
+	waitQuestion(t, d, wi, "q_s22b", 30*time.Second)
 
 	// The first local refusal lands within one poll+push round.
 	waitForEvent(t, d, wi, "push_poisoned_local", 30*time.Second)
@@ -142,7 +231,8 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 	// The same-error cap: after 5 consecutive identical refusals the
 	// round halts with the reason=same_error degraded event (the steps
 	// ladder's own event may follow on the same failure count — wait for
-	// the cap's specifically).
+	// the cap's specifically). The parked question keeps the WI live and
+	// version-stable while the cap burns.
 	deadline := time.Now().Add(120 * time.Second)
 	var capBody struct {
 		Reason string `json:"reason"`
@@ -168,17 +258,21 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 	}
 
 	// The classification held the whole poisoned episode: local refusals
-	// only, never push_failed; and the cap means EXACTLY 5 attempts
-	// before the cleanup (no 185-push storm).
+	// only, never push_failed; and the cap means the round HALTED at
+	// exactly 5 attempts (no 185-push storm). The re-armed round's first
+	// attempt (the answer's boundary, before the scripted cleanup lands)
+	// meets the still-poisoned index once more and is refused — the 6th
+	// and last local refusal — and its second attempt (the 10s backoff,
+	// the tree now clean) recovers the chain.
 	time.Sleep(2 * time.Second)
-	var poisoned []protocol.EventEntry
+	preCleanup := 0
 	for _, e := range d.eventsOf(t, wi) {
 		if e.Kind == "push_poisoned_local" {
-			poisoned = append(poisoned, e)
+			preCleanup++
 		}
 	}
-	if len(poisoned) != 5 {
-		t.Fatalf("the capped round must attempt exactly 5 poisoned pushes, got %d", len(poisoned))
+	if preCleanup != 5 {
+		t.Fatalf("the capped round must attempt exactly 5 poisoned pushes, got %d", preCleanup)
 	}
 	for _, e := range d.eventsOf(t, wi) {
 		if e.Kind == "push_failed" {
@@ -186,9 +280,23 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 		}
 	}
 
-	// The cleanup recovers the chain: the halted round re-arms at the
-	// next commit boundary, the push succeeds, and the WI seals.
-	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
+	// The cleanup recovers the chain: the owner's answer re-dispatches
+	// grill, whose envelope action unpoisons and bumps the Version — the
+	// halted round re-arms, the push succeeds, and the workflow runs to
+	// its terminal wrap.
+	answerQuestion(t, d, wi, "q_s22b", "Cleaned up; resume.")
+	inst.waitWIStatus(t, wi, "wrapped", 180*time.Second)
+
+	// The recovery push: the re-armed round's first attempt lands on the
+	// CLEAN tree (the scripted cleanup runs inside the 10s backoff
+	// window) — the refusal count stays at the capped 5, the push
+	// succeeds, and the recovered chain lands while fix holds its 15s
+	// window, BEFORE the wrap stops the monitor.
+	waitUntil(t, 60*time.Second, "the re-armed round never recovered the chain", func() bool {
+		kinds := d.eventKinds(t, wi)
+		return countOf(kinds, "push_poisoned_local") == 5 && countOf(kinds, "published") >= 1
+	})
+	inst.waitBareCommits(t, wi, 1, 60*time.Second)
 
 	// THE load-bearing assertion of the precheck: the published history
 	// contains NO gitlink anywhere — the poison never entered it.
@@ -202,5 +310,17 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 	// cleanup's promise: nothing of the work is lost).
 	if !inst.bareHasPath(t, wi, "poison/inner.txt") {
 		t.Fatalf("the cleaned-up embedded file must ride the chain as a plain file")
+	}
+	// The driver faces: the whole chain done, the poisoned ordinal's
+	// envelope archived.
+	x := readExecution(t, d.capsuleDir(wi))
+	for _, step := range []string{"grill", "fix", "verification", "release"} {
+		if st := x.Steps[step]; st == nil || st.Status != "done" {
+			t.Fatalf("step %s: %+v, want done", step, st)
+		}
+	}
+	env2 := archivedEnvelope(t, d.capsuleDir(wi), "grill", 2)
+	if env2["outcome"] != "completed" {
+		t.Fatalf("the cleanup continuation envelope wrong: %v", env2["outcome"])
 	}
 }
