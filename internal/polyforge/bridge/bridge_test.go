@@ -49,3 +49,44 @@ func TestNonProbeControlStillRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestTerminateJoinsDriverExit is the astra-r2 #1 regression: Terminate
+// must BLOCK (bounded) until the driver goroutine actually returned —
+// a cancel that merely returns lets the old driver's journal appends
+// land after the relaunch reads JournalMax, re-colliding ordinals.
+func TestTerminateJoinsDriverExit(t *testing.T) {
+	h := &Handle{done: make(chan error), cancel: func() {}}
+	// the driver goroutine exits 150ms after cancel
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		<-time.After(150 * time.Millisecond)
+		h.mu.Lock()
+		h.doneSet = true
+		h.doneErr = context.Canceled
+		close(h.done)
+		h.mu.Unlock()
+	}()
+	start := time.Now()
+	if err := h.Terminate(5 * time.Second); err != nil {
+		t.Fatalf("terminate must join a clean (context-cancelled) driver exit: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Fatalf("terminate returned before the driver exited (after %v)", elapsed)
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("terminate must return only after the driver goroutine closed done")
+	}
+}
+
+// TestTerminateBoundedWhenDriverNeverExits: a wedged driver answers the
+// bound, loudly — the caller surfaces the incomplete teardown instead of
+// assuming the writer is gone.
+func TestTerminateBoundedWhenDriverNeverExits(t *testing.T) {
+	h := &Handle{done: make(chan error), cancel: func() {}}
+	if err := h.Terminate(40 * time.Millisecond); err == nil {
+		t.Fatal("terminate must fail loudly when the driver does not exit in bound")
+	}
+}

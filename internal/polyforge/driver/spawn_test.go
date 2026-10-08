@@ -22,6 +22,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/common/spawn"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
@@ -540,3 +541,76 @@ func hashOfFile(t *testing.T, capDir, rel string) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
+
+// ---------------------------------------------------------------------------
+// Journal seeding + torn-tail repair (astra r2 #2/#3 regressions).
+
+// TestJournalMaxSeedsFromLedger: the ordinal ledger answers its max;
+// absence answers zero (a fresh capsule), unparsable lines are skipped.
+func TestJournalMaxSeedsFromLedger(t *testing.T) {
+	dir := t.TempDir()
+	if got, err := JournalMax(dir); got != 0 || err != nil {
+		t.Fatalf("absent journal must answer (0, nil), got (%d, %v)", got, err)
+	}
+	writeCapsuleFile(t, dir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+		"{\"spawn_n\":1}\n{\"spawn_n\":3}\n{\"spawn_n\":2}\n")
+	if got, err := JournalMax(dir); got != 3 || err != nil {
+		t.Fatalf("journal max must be 3, got (%d, %v)", got, err)
+	}
+}
+
+// TestJournalMaxTornTailTolerated: a crash-torn tail (half a JSON line)
+// is skipped by the loose reader — but a READABLE existing line before
+// it still seeds the max.
+func TestJournalMaxTornTailTolerated(t *testing.T) {
+	dir := t.TempDir()
+	writeCapsuleFile(t, dir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+		"{\"spawn_n\":7}\n{\"spawn_n\":8, \"trans") // torn tail, no newline
+	if got, err := JournalMax(dir); got != 7 || err != nil {
+		t.Fatalf("torn tail must seed the last parsable ordinal 7, got (%d, %v)", got, err)
+	}
+}
+
+// TestAppendSpawnJournalRepairsTornTail is the astra-r2 #2 regression:
+// a torn tail must never GLUE onto the next record — the repair isolates
+// the half-line as its own line and the appended record stays parsable,
+// so the next JournalMax sees it and the relaunch does not re-derive
+// the same ordinal.
+func TestAppendSpawnJournalRepairsTornTail(t *testing.T) {
+	ad, _, capDir := spawnEnv(t)
+	jpath := capDir + "/" + capsule.DirRuntimeState + "/spawn-journal.jsonl"
+	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+		"{\"spawn_n\":7}\n{\"spawn_n\":8, \"trans") // torn: no trailing newline
+
+	p := spawn.Params{WorkItemID: "wi_sp", SpawnN: 9, TranscriptPath: "t"}
+	if err := ad.appendSpawnJournal(p, "s9", 4242, nowStampX()); err != nil {
+		t.Fatalf("appendSpawnJournal: %v", err)
+	}
+
+	raw, err := os.ReadFile(jpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("torn tail + repair + record must yield 3 lines, got %d: %q", len(lines), string(raw))
+	}
+	// line 1 must survive the repair UNTOUCHED (an offset-0 clobber would
+	// eat its opening brace)
+	if lines[0] != `{"spawn_n":7}` {
+		t.Fatalf("the first record must survive the repair verbatim, got %q", lines[0])
+	}
+	// the appended record must be its OWN line (not glued onto the tail)
+	var rec struct {
+		SpawnN int64 `json:"spawn_n"`
+	}
+	if json.Unmarshal([]byte(lines[2]), &rec) != nil || rec.SpawnN != 9 {
+		t.Fatalf("the appended record must be its own parsable line with spawn 9, got %q", lines[2])
+	}
+	// and the ledger now seeds past the crashed dispatch's ordinal
+	if got, err := JournalMax(capDir); got != 9 || err != nil {
+		t.Fatalf("after repair the ledger must seed 9, got (%d, %v)", got, err)
+	}
+}
+
+func nowStampX() string { return time.Now().UTC().Format(time.RFC3339Nano) }

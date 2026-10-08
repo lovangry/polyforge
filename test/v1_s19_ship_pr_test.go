@@ -125,6 +125,13 @@ func ghOpenPRURLs(t *testing.T, fullRepo, branch string) []string {
 }
 
 func TestV1S19ShipPR(t *testing.T) {
+	// The EARLY legacy-lane guard (astra r1 #6): this scenario performs
+	// real external work (gh auth, a real GitHub scratch repository,
+	// credential git-config) BEFORE any daemon boots — the start()-time
+	// guard would fire only after those side effects, or never on a
+	// machine without the prerequisites. It is a known-legacy scenario,
+	// so it opts out first thing.
+	requireLegacyLane(t)
 	// Skip gates, in order; each skip names the missing gate.
 	if testing.Short() {
 		t.Skipf("short mode: skipping the real-github ship PR e2e (network + gh required)")

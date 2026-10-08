@@ -150,16 +150,16 @@ type jobRecord struct {
 	// of derivations this session has run. Same-machine restarts and
 	// recoveries continue from it; a fresh clone (takeover) re-seeds it
 	// from the capsule's spawn journal.
-	SpawnN       int    `json:"spawn_n"`
-	RecoverFails int    `json:"recover_fails"` // consecutive failed recoveries
-	ResumeFails  int    `json:"resume_fails"`
-	ResumeDead   bool   `json:"resume_dead"`
+	SpawnN       int  `json:"spawn_n"`
+	RecoverFails int  `json:"recover_fails"` // consecutive failed recoveries
+	ResumeFails  int  `json:"resume_fails"`
+	ResumeDead   bool `json:"resume_dead"`
 	// StormFails/LastRecoveryAt persist the entry-rate storm guard (v2):
 	// rapid recoverCore re-entries survive a daemon crash inside the
 	// storm window. RFC3339Nano; zero = never recovered.
 	StormFails     int    `json:"storm_fails"`
 	LastRecoveryAt string `json:"last_recovery_at,omitempty"`
-	Transcript   string `json:"transcript"`
+	Transcript     string `json:"transcript"`
 	// LiveTranscript is the file the current derivation appends to (a
 	// fresh pi derivation's harness-store live path, or the resume
 	// source); "" while not located. Restart keeps it so the resume

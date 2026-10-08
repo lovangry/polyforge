@@ -610,6 +610,26 @@ func (a *StepSpawnAdapter) appendSpawnJournal(p spawn.Params, token string, pid 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	// Torn-tail repair (astra r2 #2): a crash mid-append can leave the
+	// journal without its trailing newline, and appending then would
+	// GLUE the next record onto the half-written line — both becoming
+	// unparsable, quietly erasing the ordinal from the loose readers'
+	// view (JournalMax would under-seed, the next relaunch dispatching
+	// an ordinal the crashed dispatch already used). A missing trailing
+	// newline isolates the torn tail as its own (skipped) line and the
+	// new record lands intact.
+	if f, oerr := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644); oerr == nil {
+		if fi, serr := f.Stat(); serr == nil && fi.Size() > 0 {
+			buf := make([]byte, 1)
+			if _, rerr := f.ReadAt(buf, fi.Size()-1); rerr == nil && buf[0] != '\n' {
+				// WriteAt lands the isolating newline AT THE END — a plain
+				// Write would follow the file offset (0) and clobber the
+				// first record instead.
+				_, _ = f.WriteAt([]byte("\n"), fi.Size())
+			}
+		}
+		f.Close()
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
@@ -632,6 +652,51 @@ func spawnToken(handle string, n int64) string {
 		return fmt.Sprintf("%s#%d", handle, n-1)
 	}
 	return handle
+}
+
+// JournalMax answers the highest spawn ordinal the capsule's spawn
+// journal records (0 when the journal is absent) — the driver-owned
+// derivation ledger: every step dispatch the production adapter
+// spawns appends exactly one line to it. The bridge seeds the driver's
+// STEP-ordinal counter from this ledger, NOT from the job's relaunch
+// ordinal: the step ordinals are the observable contract (the drop
+// path pending-results/<n>.json, the archived envelope dir s<n>, and
+// the e2e fakepi's "Nth envelope action fires for spawn N" all key on
+// them starting at 1 for a fresh capsule), while the job ordinal (≥1
+// since the observe-lane fix) exists for the RTStarted emission.
+// Seeding from the journal keeps both: fresh capsules start steps at
+// 1, and a relaunched driver continues past every ordinal its
+// predecessor used (the fence #97/#99 lessons).
+// Absence answers (0, nil) — a fresh capsule has no ledger yet. Any
+// OTHER read failure answers the error: the ledger is the fence's
+// source of truth and a partially readable one must never be silently
+// treated as fresh (astra r2 #2). Torn/unparsable LINES are tolerated
+// by the loose parser — a crash-torn tail skips those lines only.
+func JournalMax(capsuleDir string) (int64, error) {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.DirRuntimeState, spawnJournalFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	best := int64(0)
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e struct {
+			SpawnN int64 `json:"spawn_n"`
+		}
+		if json.Unmarshal([]byte(line), &e) != nil {
+			continue // loose reader: a torn line is skipped, never fatal
+		}
+		if e.SpawnN > best {
+			best = e.SpawnN
+		}
+	}
+	return best, nil
 }
 
 // pendingResultPath is the absolute drop path of one derivation's

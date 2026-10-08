@@ -62,9 +62,9 @@ type Config struct {
 	// production default is right; tests and relocated installs point
 	// it at a scratch tree. Empty = the default.
 	HarnessSessionsRoot string
-	CgroupRoot          string        // cgroup v2 root; empty ⇒ layer-0 unavailable
-	MaxResumeFails      int           // consecutive resume failures before fresh (default 2)
-	MaxRecoveries       int           // consecutive FAILED recoveries before bounded fail (default 2)
+	CgroupRoot          string // cgroup v2 root; empty ⇒ layer-0 unavailable
+	MaxResumeFails      int    // consecutive resume failures before fresh (default 2)
+	MaxRecoveries       int    // consecutive FAILED recoveries before bounded fail (default 2)
 	// RecoveryStabilityWindow bounds the v2 entry-rate storm guard: a
 	// recoverCore that re-fires inside this window (default 60s) counts
 	// one storm unit; MaxRecoveries rapid re-entries bounded-fail the WI
@@ -72,7 +72,7 @@ type Config struct {
 	// budget — the #97 death loop). A re-entry after a stable gap resets
 	// the storm ledger: an isolated later failure is a fresh episode.
 	RecoveryStabilityWindow time.Duration
-	SendBound           time.Duration // bound on one RT→OB send (default 5s)
+	SendBound               time.Duration // bound on one RT→OB send (default 5s)
 	// ReleaseRetryWindow bounds the release lane (NEW-2): how long a
 	// deferred observe release (RTFinished) whose first bounded send
 	// expired on a full channel keeps retrying before it is dropped for

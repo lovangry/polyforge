@@ -7,6 +7,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -52,8 +53,27 @@ func (h *Handle) Done() bool {
 	return h.doneSet
 }
 func (h *Handle) Terminate(bound time.Duration) error {
+	// The join matters (astra r2 #1): a cancel that merely returns lets
+	// the old driver goroutine keep living into the relaunch — its last
+	// journal appends could land AFTER the replacement read JournalMax,
+	// so both dispatch the same "fresh" ordinal and the stale-envelope
+	// fence is defeated again. Terminate now blocks, bounded, until the
+	// driver's Run actually returned (done closes exactly then); the
+	// caller (killAgentTree → recoverCore → bridge.Start) therefore
+	// reads the journal only once the previous writer is gone.
 	h.cancel()
-	return nil
+	select {
+	case <-h.done:
+		h.mu.Lock()
+		err := h.doneErr
+		h.mu.Unlock()
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+		return nil
+	case <-time.After(bound):
+		return fmt.Errorf("bridge: driver did not exit within %s", bound)
+	}
 }
 func (h *Handle) SendControl(m protocol.ControlMsg) error {
 	// Probe semantics for the driver bridge (the #99 verification
@@ -120,10 +140,25 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 		return nil, fmt.Errorf("bridge: adapter: %w", err)
 	}
 
+	// The driver's STEP-ordinal seed is the capsule journal max (the
+	// driver-owned derivation ledger), NOT the job's relaunch ordinal:
+	// step ordinals are the observable contract (drop paths, archive
+	// dirs, the e2e fakepi's action indexing — all 1-based for a fresh
+	// capsule), while cfg.SpawnN (≥1 since the observe-lane fix) is the
+	// job ordinal the RTStarted emission needs. A fresh capsule seeds 0
+	// → first dispatch is ordinal 1; a relaunch seeds past every ordinal
+	// the predecessor's dispatches used, so stale drops stay fenced.
+	// A journal read failure other than absence refuses the start — the
+	// ledger is the fence's source of truth, never silently fresh.
+	stepSeed, err := driver.JournalMax(cfg.CapsuleDir)
+	if err != nil {
+		return nil, fmt.Errorf("bridge: spawn journal unreadable: %w", err)
+	}
+
 	drv, err := driver.New(driver.Config{
 		WI:      wiInfo,
 		Spawner: adapter,
-		SpawnN:  cfg.SpawnN,
+		SpawnN:  stepSeed,
 		Log:     &stdLogger{},
 	})
 	if err != nil {

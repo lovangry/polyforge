@@ -14,6 +14,11 @@ vet:
 	go vet ./...
 
 test:
+	# Skip-evidence note (polyforge#104): the v1-harness legacy lane skips
+	# through t.Skip, and go test suppresses skip messages unless -v (or
+	# -json) is on. Plain `make test` green therefore does NOT show the
+	# migration reference — verification evidence that needs it must run
+	# `go test -v ./...` (or -json) explicitly.
 	go test ./... -count=1
 
 fmt:

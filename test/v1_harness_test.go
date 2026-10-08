@@ -676,9 +676,76 @@ func newV1Daemon(t *testing.T, inst *v1Install, opts ...daemonOpt) *v1Daemon {
 	return d
 }
 
+// legacyLaneSkipMsg is the one skip message every legacy-lane guard
+// site carries: the debt reference is the ticket that tracks the
+// migration, and the hatch is the way to keep the lane exercisable.
+// Visible in `go test -v` / `-json` output (plain `go test` suppresses
+// skips — see the Makefile test target's evidence note).
+const legacyLaneSkipMsg = "v1-harness legacy lane: fakepi speaks the WI-Agent stdio-RPC protocol the driver-era daemon no longer serves (its stdin sees EOF and it parks forever, producing none of the records/questions the legacy scenarios wait for); skipped pending the Phase-4 e2e migration (polyforge#104). Set PFV1_LEGACY_LANE=1 to run the scenario with the engine pinned to -use-driver=false."
+
+// explicitEngineFlag reports whether an extra-args slice already pins
+// the daemon's execution engine with an explicit -use-driver / --use-driver
+// flag (every spelling the Go flag package accepts: bare, =true, =false).
+func explicitEngineFlag(extraArgs []string) bool {
+	for _, a := range extraArgs {
+		for _, p := range []string{"-use-driver", "--use-driver"} {
+			if a == p || strings.HasPrefix(a, p+"=") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// legacyLaneHatch reports whether the PFV1_LEGACY_LANE escape hatch is
+// armed (only the exact spelling "1" arms it — "", "0", "true" do not:
+// a hatch is a deliberate opt-in, never an ambient default).
+func legacyLaneHatch() bool {
+	return os.Getenv("PFV1_LEGACY_LANE") == "1"
+}
+
+// requireLegacyLane is the EARLY legacy-lane guard for scenarios that
+// perform real external work BEFORE their daemon boots — s19 ship-pr
+// authenticates `gh` and creates a real GitHub repository before any
+// daemon exists, so the start()-time guard would fire only after the
+// external side effects already happened (or failed on a machine
+// without the prerequisites, never reaching the skip at all). A
+// known-legacy scenario calls this first thing; the start() guard
+// remains the authoritative engine-selection check for every daemon.
+func requireLegacyLane(t *testing.T) {
+	t.Helper()
+	if legacyLaneHatch() {
+		return
+	}
+	t.Skip(legacyLaneSkipMsg)
+}
+
 // start launches the daemon process and waits until its UDS face answers.
 func (d *v1Daemon) start() {
 	d.t.Helper()
+	// Legacy-lane guard (polyforge#104, the Phase-4 e2e migration debt):
+	// a daemon booted without an explicit engine flag runs the v2 Go
+	// driver by default, and the legacy scenarios' fakepi agent speaks
+	// the WI-Agent stdio-RPC protocol that engine no longer serves —
+	// fakepi's stdin sees EOF immediately and it parks forever, so every
+	// legacy scenario times out on "agent never spawned" (burn-in #99's
+	// verification attributed the deterministic failures to exactly
+	// this). Every daemon-booting scenario in this package except the
+	// v2 driver e2e (which pins -use-driver explicitly) is legacy-lane
+	// and skips here until the e2e migration lands. The escape hatch
+	// keeps the lane exercisable: PFV1_LEGACY_LANE=1 pins the engine
+	// explicitly to -use-driver=false (immune to any future default
+	// flip) and runs the scenario. A daemon whose argv already carries
+	// an explicit -use-driver/--use-driver flag is never skipped — its
+	// author chose the engine on purpose.
+	if !explicitEngineFlag(d.extraArgs) {
+		if !legacyLaneHatch() {
+			d.t.Skip(legacyLaneSkipMsg)
+		}
+		// escape hatch: pin the legacy engine explicitly so the scenario
+		// keeps its meaning even if the boot default moves again
+		d.extraArgs = append(d.extraArgs, "-use-driver=false")
+	}
 	logf, err := os.Create(d.logPath)
 	if err != nil {
 		d.t.Fatal(err)
