@@ -49,13 +49,13 @@ type Config struct {
 	// starter (the daemon binds bridge.Start here). nil = the legacy
 	// in-package spawnAgent path (kept for tests that exercise the
 	// WI-Agent RPC model directly).
-	AgentStarter  AgentStartFunc
-	MachineID string // registered machine identity
+	AgentStarter AgentStartFunc
+	MachineID    string // registered machine identity
 	// Workspace is the capsule base the daemon was launched with
 	// (-workspace / POLYFORGE_WORKSPACE, required — no default):
 	// <Workspace>/capsules/<wi> are the capsule worktrees.
-	Workspace string
-	DataDir   string // state.json + external git-dirs live here
+	Workspace     string
+	DataDir       string // state.json + external git-dirs live here
 	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
 	Harness       string // harness adapter name ("pi")

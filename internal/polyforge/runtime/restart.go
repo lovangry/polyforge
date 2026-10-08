@@ -45,12 +45,40 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
+
+// MissingCapsuleError is the typed mid-flight failure (#103): a recorded
+// non-terminal work item's capsule directory is absent under the active
+// workspace — the operator has not moved it to the new base (or it was
+// lost). The daemon never rebuilds such a capsule from the remote: the
+// capsule git chain IS the revision chain, and a re-clone would silently
+// discard unpublished local state. Remediation is manual: restore the
+// capsule directory under <workspace>/capsules/<wi_id>, then restart.
+type MissingCapsuleError struct {
+	WI  string
+	Dir string
+}
+
+func (e *MissingCapsuleError) Error() string {
+	return fmt.Sprintf("work item %s: mid-flight capsule missing at %s — it is NOT recoverable from the remote (unpublished local state would be lost); restore the capsule to that path manually, then restart the daemon", e.WI, e.Dir)
+}
+
+// requireMidflightCapsule enforces the no-silent-rebuild contract for a
+// work item this daemon proceeds with: its capsule directory must exist
+// under the active workspace base.
+func (r *Runtime) requireMidflightCapsule(wi string) error {
+	dir := r.capsuleDir(wi)
+	if dirExists(dir) {
+		return nil
+	}
+	return &MissingCapsuleError{WI: wi, Dir: dir}
+}
 
 // Restart loads state.json, reconciles every recorded job with aihub and
 // recovers what is still ours to run. Jobs aihub no longer knows as ours
@@ -108,6 +136,12 @@ func (r *Runtime) Restart(ctx context.Context) error {
 			case api.StatusRunning:
 				// crash-mid-run under this session: recover-resume the
 				// local capsule (a mid-seal record finishes its stop).
+				// The mid-flight capsule must be present at the active
+				// base (#103): a miss is a HARD restart failure — never a
+				// rebuild-from-remote, and the daemon does not start.
+				if err := r.requireMidflightCapsule(rec.WorkItemID); err != nil {
+					return err
+				}
 				if serr := r.restartRunning(ctx, rec); serr != nil {
 					fmt.Fprintf(os.Stderr, "runtime: %s: restart recovery failed: %v\n", rec.WorkItemID, serr)
 				}
@@ -134,6 +168,13 @@ func (r *Runtime) Restart(ctx context.Context) error {
 							})
 						}
 						fmt.Fprintf(os.Stderr, "runtime: %s: pending %s close of the retained paused record — replaying (crash window, NEW-3)\n", rec.WorkItemID, rec.StopReason)
+						// The close replay proceeds against the local capsule
+						// (#103): absent at the active base, the wrap/fail
+						// intent must not be "replayed" out of thin air — a
+						// hard restart failure instead.
+						if err := r.requireMidflightCapsule(rec.WorkItemID); err != nil {
+							return err
+						}
 						j.mu.Lock()
 						sealed := j.sealedPush
 						j.mu.Unlock()
@@ -162,7 +203,14 @@ func (r *Runtime) Restart(ctx context.Context) error {
 				} else if aerr := r.restartAttach(ctx, rec); aerr != nil {
 					// attach refused (taken over in the window, or the hub
 					// disagree): keep the record — the next restart
-					// re-verifies with a fresh verdict.
+					// re-verifies with a fresh verdict. A missing mid-flight
+					// capsule (typed) is different (#103): hard restart
+					// failure — the resume must never proceed without the
+					// local scene, and never rebuild it from the remote.
+					var miss *MissingCapsuleError
+					if errors.As(aerr, &miss) {
+						return aerr
+					}
 					fmt.Fprintf(os.Stderr, "runtime: %s: session attach failed, record kept: %v\n", rec.WorkItemID, aerr)
 				}
 			case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
@@ -243,6 +291,11 @@ func (r *Runtime) restartAttach(ctx context.Context, rec *jobRecord) error {
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no seeded record", rec.WorkItemID)
 	}
+	// Guard BEFORE the hub call (#103): a missing capsule must not first
+	// flip the WI to running server-side and only then fail.
+	if err := r.requireMidflightCapsule(rec.WorkItemID); err != nil {
+		return err
+	}
 	if _, err := r.hub.SessionAttach(rec.WorkItemID, api.SessionAttachRequest{
 		WorkItemID: rec.WorkItemID,
 		SessionID:  rec.SessionID,
@@ -301,6 +354,13 @@ func isTerminalStopReason(reason string) bool {
 
 // restartResume is the shared tail of the attach and crash-resume paths.
 func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job) error {
+	// The resume/recovery entry's own guard (#103): whatever route led
+	// here, a mid-flight capsule absent at the active base is the typed
+	// hard failure — the recovery engine must never see it and
+	// re-materialize or re-derive against a scene that is not there.
+	if err := r.requireMidflightCapsule(rec.WorkItemID); err != nil {
+		return err
+	}
 	state, _ := j.snapshot()
 	if state == StateSealing {
 		// finish the interrupted close — the sealed reason passes through

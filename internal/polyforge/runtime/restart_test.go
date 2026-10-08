@@ -70,6 +70,12 @@ func TestRestartReconciliationMatrix(t *testing.T) {
 					// running: our session is still the holder.
 					if v.status == api.StatusRunning {
 						hub.hold(wi, sess, api.StatusRunning)
+						// the restart-recovery lane proceeds only with the
+						// capsule present at the active base (#103): this
+						// shape models a crash-mid-run, capsule in place.
+						if err := os.MkdirAll(rec.CapsuleDir, 0o755); err != nil {
+							t.Fatal(err)
+						}
 					}
 				}
 

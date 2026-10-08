@@ -139,6 +139,12 @@ func TestRestartRestoresCandidateOrdinal(t *testing.T) {
 	hub2.hold(wi, fakeSession(wi), api.StatusRunning)
 	sp2 := &countingSpawner{}
 	r2, _, _ := newTestRuntimeAt(t, hub2, sp2, dataDir)
+	// The restart contract (#103): the mid-flight capsule must exist at
+	// the restarting daemon's active base — the rig materializes it there
+	// (a restart recovery is exactly the capsule-present shape).
+	if err := os.MkdirAll(r2.capsuleDir(wi), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -405,7 +411,7 @@ func newTestRuntimeAt(t *testing.T, hub Aihub, sp Spawner, dataDir string) (*Run
 	t.Helper()
 	cfg := Config{
 		MachineID:      "m-test",
-		Workspace:  filepath.Join(t.TempDir(), "ws"),
+		Workspace:      filepath.Join(t.TempDir(), "ws"),
 		DataDir:        dataDir,
 		MaxResumeFails: 2,
 		MaxRecoveries:  2,

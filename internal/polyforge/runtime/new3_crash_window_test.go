@@ -45,9 +45,9 @@ func TestRestartForgetsPendingWrapOfRetainedPausedRecord(t *testing.T) {
 	setGitIdentity(t)
 	dir := t.TempDir()
 	cfg := Config{
-		MachineID:     "m-test",
+		MachineID: "m-test",
 		Workspace: filepath.Join(dir, "ws"),
-		DataDir:       filepath.Join(dir, "data"),
+		DataDir:   filepath.Join(dir, "data"),
 	}
 
 	// -- Phase 1: the operator pause, through the real close path.

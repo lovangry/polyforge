@@ -32,9 +32,9 @@ func seedPendingCloseOfRetainedPause(t *testing.T, wi string, reason string) (*R
 	setGitIdentity(t)
 	dir := t.TempDir()
 	cfg := Config{
-		MachineID:     "m-test",
+		MachineID: "m-test",
 		Workspace: filepath.Join(dir, "ws"),
-		DataDir:       filepath.Join(dir, "data"),
+		DataDir:   filepath.Join(dir, "data"),
 	}
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
@@ -201,9 +201,9 @@ func TestRestartPlainRetainedPauseIsNotReplayed(t *testing.T) {
 	setGitIdentity(t)
 	dir := t.TempDir()
 	cfg := Config{
-		MachineID:     "m-test",
+		MachineID: "m-test",
 		Workspace: filepath.Join(dir, "ws"),
-		DataDir:       filepath.Join(dir, "data"),
+		DataDir:   filepath.Join(dir, "data"),
 	}
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}

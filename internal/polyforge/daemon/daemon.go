@@ -73,8 +73,8 @@ type Config struct {
 	// <Workspace>/capsules/<wi_id>. Resolved in main.go from the
 	// -workspace flag (env POLYFORGE_WORKSPACE as the mirror); there is
 	// no default. New validates it exists and capsules/ is creatable.
-	Workspace string
-	DataDir   string
+	Workspace          string
+	DataDir            string
 	Project            string
 	GitRemoteBase      string
 	WorkflowsDir       string // daemon checkout's workflows/

@@ -473,7 +473,7 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 		// UseDriver=true via the mutate hook.
 		UseDriver:         false,
 		UseDriverExplicit: true,
-		Workspace:     ws,
+		Workspace:         ws,
 		DataDir:           data,
 		Project:           "proj",
 		GitRemoteBase:     hubBase,

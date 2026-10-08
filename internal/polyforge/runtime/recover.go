@@ -47,6 +47,25 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	if err := j.transition(StateRecovering); err != nil {
 		return // lost the race to SEALING/DONE: the fence did its job
 	}
+	// Mid-flight vanish-after-start guard (#103): the engine below
+	// re-materializes capsule residue (work-item file, bundle set) and
+	// re-derives agents — against an ABSENT capsule that is a silent
+	// rebuild, exactly what the contract forbids for unpublished local
+	// state. Refuse instead with the loud bounded-fail verdict naming
+	// the WI and the missing path: the operator restores the capsule,
+	// then unblocks (M2 — the human is the only remediation door).
+	if err := r.requireMidflightCapsule(j.wi); err != nil {
+		if r.cfg.EventTap != nil {
+			r.cfg.EventTap(j.wi, "missing_midflight_capsule", map[string]any{
+				"capsule_dir": j.capsuleDir,
+				"cause":       cause,
+				"note":        "mid-flight capsule absent at the active workspace; no rebuild from remote — restore the capsule, then unblock",
+			})
+		}
+		fmt.Fprintf(os.Stderr, "runtime: %s: %v\n", j.wi, err)
+		r.boundedFail(ctx, j, err.Error())
+		return
+	}
 	// v2 terminal wiring (the #99 finale): the driver has no flush(wrap)
 	// call — Run returning nil IS its completion signal, and the
 	// monitor's onExit rightly reports "agent process exited" without

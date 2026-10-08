@@ -333,7 +333,7 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protoco
 	t.Helper()
 	cfg := Config{
 		MachineID:      "m-test",
-		Workspace:  filepath.Join(t.TempDir(), "ws"),
+		Workspace:      filepath.Join(t.TempDir(), "ws"),
 		DataDir:        filepath.Join(t.TempDir(), "data"),
 		MaxResumeFails: 2,
 		MaxRecoveries:  2,
