@@ -802,3 +802,54 @@ func TestInitLocalAndExternalize(t *testing.T) {
 		t.Fatalf("ExternalizeGitDir (again): %v", err)
 	}
 }
+
+// TestCrossDeviceMoveFallback (the #103 cutover lesson): ExternalizeGitDir
+// renames the capsule .git into the data-dir git store; with capsules under
+// -workspace on another mount, rename(2) fails EXDEV and the claim dies.
+// crossDeviceMove must fall back to copy+remove — pinned here on a real
+// cross-device boundary when /tmp and the test dir differ, and on the
+// copy path's fidelity either way.
+func TestCrossDeviceMoveFallback(t *testing.T) {
+	src := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "dst")
+	if err := os.MkdirAll(filepath.Join(src, "objects", "pack"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "objects", "pack", "x.pack"), []byte("pack"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("refs/heads/main", filepath.Join(src, "sym")); err != nil {
+		t.Fatal(err)
+	}
+	// direct: the fallback path itself (rename across two distinct t.TempDir
+	// dirs is a rename on the same device on most systems, so pin the pieces)
+	if err := copyDirTree(src, dst); err != nil {
+		t.Fatalf("copyDirTree: %v", err)
+	}
+	// fidelity: file bytes, read-only mode preserved, symlink preserved
+	raw, err := os.ReadFile(filepath.Join(dst, "objects", "pack", "x.pack"))
+	if err != nil || string(raw) != "pack" {
+		t.Fatalf("copied pack content wrong: %q err=%v", raw, err)
+	}
+	if st, serr := os.Stat(filepath.Join(dst, "objects", "pack", "x.pack")); serr == nil && st.Mode().Perm() != 0o444 {
+		t.Fatalf("read-only mode not preserved: %v", st.Mode())
+	}
+	if target, lerr := os.Readlink(filepath.Join(dst, "sym")); lerr != nil || target != "refs/heads/main" {
+		t.Fatalf("symlink not preserved: %q err=%v", target, lerr)
+	}
+	// crossDeviceMove over a fresh dst uses the copy fallback only on EXDEV;
+	// on same-device it is a plain rename — both must leave dst complete
+	dst2 := filepath.Join(t.TempDir(), "dst2")
+	if err := crossDeviceMove(src, dst2); err != nil {
+		t.Fatalf("crossDeviceMove: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(dst2, "HEAD")); serr != nil {
+		t.Fatalf("move left the tree incomplete: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(src, "HEAD")); !os.IsNotExist(serr) {
+		t.Fatal("the source must be gone after the move")
+	}
+}

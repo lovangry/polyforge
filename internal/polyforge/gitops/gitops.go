@@ -41,12 +41,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -428,6 +430,82 @@ func InitLocal(o Opts) error {
 	return nil
 }
 
+// crossDeviceMove moves src to dst, falling back to copy+remove when
+// rename(2) refuses to cross a filesystem boundary (EXDEV) — the
+// workspace-capsule era puts capsules under -workspace while the git
+// store stays under the data-dir, and the two may live on different
+// mounts (#103 cutover: the first cross-device claim failed exactly
+// here). A fresh clone's git-dir is small; the copy is a one-time
+// per-claim cost.
+func crossDeviceMove(src, dst string) error {
+	err := os.Rename(src, dst)
+	if err == nil {
+		return nil
+	}
+	if le, ok := err.(*os.LinkError); ok && le.Err == syscall.EXDEV {
+		if cerr := copyDirTree(src, dst); cerr != nil {
+			return cerr
+		}
+		return os.RemoveAll(src)
+	}
+	return err
+}
+
+// copyDirTree copies one directory tree verbatim (files, symlinks,
+// modes; the git-dir's objects are regular files — packed or loose —
+// and its few symlinks never leave the store it names).
+func copyDirTree(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		s := filepath.Join(src, e.Name())
+		d := filepath.Join(dst, e.Name())
+		switch {
+		case e.Type()&os.ModeSymlink != 0:
+			target, lerr := os.Readlink(s)
+			if lerr != nil {
+				return lerr
+			}
+			if lerr := os.Symlink(target, d); lerr != nil && !os.IsExist(lerr) {
+				return lerr
+			}
+		case e.IsDir():
+			if cerr := copyDirTree(s, d); cerr != nil {
+				return cerr
+			}
+		default:
+			info, serr := e.Info()
+			if serr != nil {
+				return serr
+			}
+			in, perr := os.Open(s)
+			if perr != nil {
+				return perr
+			}
+			out, perr := os.OpenFile(d, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+			if perr != nil {
+				in.Close()
+				return perr
+			}
+			_, cerr := io.Copy(out, in)
+			in.Close()
+			if cerr != nil {
+				out.Close()
+				return cerr
+			}
+			if cerr := out.Close(); cerr != nil {
+				return cerr
+			}
+		}
+	}
+	return nil
+}
+
 // ExternalizeGitDir moves the worktree's git-dir out to o.GitDir (the
 // agent must never reach hooks/config/index), leaves the one-line .git
 // pointer file, and pins the working branch to main. Idempotent: a
@@ -446,7 +524,7 @@ func ExternalizeGitDir(o Opts) error {
 		}
 		return fmt.Errorf("gitops: capsule %s has a pointer but no git-dir at %s", o.CapsuleDir, o.GitDir)
 	}
-	if err := os.Rename(inner, o.GitDir); err != nil {
+	if err := crossDeviceMove(inner, o.GitDir); err != nil {
 		if !os.IsExist(err) {
 			return err
 		}
