@@ -1,6 +1,6 @@
 ---
 name: e2e-author
-description: Author end-to-end acceptance scenarios against the spec's acceptance criteria, independent of the implementation details in code.
+description: Author end-to-end acceptance scenarios against the spec's acceptance criteria before code runs - executable against the pre-implementation tree, independent of the implementation details in code.
 tools: [read, edit, bash]
 output:
   type: object
@@ -24,10 +24,11 @@ output:
 # e2e-author
 
 Write end-to-end acceptance scenarios against `artifacts/spec.md`'s `## Acceptance
-criteria` and `#### Scenario` blocks — not against `code`'s implementation. This step is
-deliberately positioned to consume the spec, so it can proceed without waiting on a
-finished `code` pass and does not silently encode whatever `code` happened to build; it
-verifies intent, not implementation.
+criteria` and `#### Scenario` blocks — not against `code`'s implementation. This step
+runs BEFORE `code` in the flow (step 5 of the reference graph, before `e2e-baseline`
+at 6 and `code` at 7): authoring happens pre-code, against the spec alone, so the
+scenarios never silently encode whatever `code` later happens to build; they verify
+intent, not implementation.
 
 ## What to do
 
@@ -41,14 +42,27 @@ verifies intent, not implementation.
    one.
 3. Do not read or depend on `code`'s output for this step; if a scenario requires
    information only `code` would know (an internal API shape that was never part of the
-   spec), that is itself a signal the spec under-specified something — note it in
-   `artifacts/e2e-scenarios.md` rather than quietly reverse-engineering it from the
-   as-yet-unwritten (from this step's point of view) implementation.
+   spec), that is itself a signal the spec under-specifies something — flag it in
+   `artifacts/e2e-scenarios.md` as a spec under-specification rather than quietly
+   reverse-engineering it from the as-yet-unwritten implementation.
+
+## Executability against the pre-implementation tree
+
+Generated test files MUST compile against the tree as it stands at authoring time — the
+pre-implementation tree: drive the spec'd behavior through interfaces that already
+exist (CLI, API, config — the project's e2e convention) and never reference symbols
+that do not exist yet. `e2e-baseline` (the next step) executes this suite before `code`
+runs, so its failures must be assertion-level, not build-level. A scenario that
+genuinely cannot be expressed without not-yet-existing surface is either flagged in
+`artifacts/e2e-scenarios.md` as a spec under-specification (do not fake it) or authored
+as a document-only scenario `e2e-baseline` can drive manually through the project's
+actual interfaces. Never reverse-engineer a scenario from an imagined implementation,
+and never write an unrunnable file.
 
 ## Non-goals
 
-- Do not run the scenarios here — `e2e-run` executes them against the implementation
-  produced by `code`.
+- Do not run the scenarios here — `e2e-baseline` (the pre-code bar-laying run) and
+  `e2e-run` (the post-code rerun gate) execute them, not this step.
 - Do not write unit tests for implementation internals — those belong inside `code`'s own
   plan-step commits if the project expects them; this step is end-to-end/acceptance level
   only.
