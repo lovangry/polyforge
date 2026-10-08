@@ -38,12 +38,65 @@ type planAction struct {
 	Kind     string `json:"kind"`     // ui_noise: "ui" (default) | "progress"
 	// Envelope mode (v2 Driver): the outcome and handoff flags for the
 	// result-envelope action.
-	Outcome string `json:"outcome,omitempty"` // envelope: completed|needs_input|gate_failed
+	Outcome string `json:"outcome,omitempty"` // envelope: completed|needs_input|gate_failed|incomplete
 	Handoff bool   `json:"handoff,omitempty"` // envelope: produce handoff_ref
 	// NoEvidence suppresses the step's structured command evidence (the
 	// wrap-evidence-gate scenario scripts a verification step whose
 	// output carries no commands record, then repairs it).
 	NoEvidence bool `json:"no_evidence,omitempty"`
+
+	// --- envelope-mode extensions (polyforge#105, confined to fakepi) ---
+
+	// QuestionID/Question are the needs_input question text, copied
+	// onto the result envelope VERBATIM (the driver refuses a
+	// needs_input result without question_id/question —
+	// internal/polyforge/driver/transition.go). An EMPTY question_id is
+	// scriptable on purpose: the empty-id refusal tests script the
+	// malformed envelope exactly. The question TEXT rides the existing
+	// Question field above (shared with the ask action).
+	QuestionID string `json:"question_id,omitempty"`
+	// Crash shapes on the envelope action: "before" dies BEFORE the
+	// envelope write (the envelope never lands — the kill9 / hang
+	// lanes), "after" dies right AFTER writing it (the seal-crash lane:
+	// the written envelope must still be collected exactly once). Both
+	// work on resume derivations too: the plan file is re-read per
+	// process and resume_actions script crash + continuation in one
+	// file, deterministically (the Nth envelope action fires for spawn
+	// N across fresh and resume dispatches alike).
+	Crash string `json:"crash,omitempty"` // "" | "before" | "after"
+	// Dup writes the IDENTICAL envelope to the same drop path N times
+	// back-to-back (the duplicate drop-path shape: the driver must
+	// consume it exactly once).
+	Dup int `json:"dup,omitempty"`
+	// Output replaces the default output payload verbatim (populated
+	// error outputs for gate_failed envelopes, schema-shaped payloads,
+	// refusal probes).
+	Output map[string]any `json:"output,omitempty"`
+	// Evidence carries extra structured command-evidence entries
+	// (merged with the synthetic one; suppressed entirely by
+	// NoEvidence). The driver copies command_evidence onto
+	// execution.json's steps.<id>.output.commands — the face the wrap
+	// evidence gate judges.
+	Evidence []map[string]any `json:"evidence,omitempty"`
+	// FlushWrap drives the agent-side flush(wrap) seal from the envelope
+	// action: "before" flushes BEFORE writing the envelope (the refused
+	// seal of the evidence-gate scenario — the step is in_progress, the
+	// gate refuses), "after_done" waits (bounded) until execution.json
+	// shows this step done, then flushes (the accepted seal — evidence
+	// present, the gate passes and the flush seals the work item).
+	FlushWrap string `json:"flush_wrap,omitempty"` // "" | "before" | "after_done"
+	// OpenTurn opens a stdout turn and leaves it open before the
+	// envelope write (the F15 record-stream shapes on driver step
+	// processes).
+	OpenTurn bool `json:"open_turn,omitempty"`
+	// Noise streams ui_noise records (kind ui | progress) for MS
+	// milliseconds before the envelope write (F15 shapes).
+	Noise string `json:"noise,omitempty"` // "" | "ui" | "progress"
+	// PoisonGitlink / UnpoisonGitlink run the #48 poison shape (lay or
+	// clean an embedded git repository) before the envelope write; the
+	// version bump inside arms the observe push round.
+	PoisonGitlink   bool `json:"poison_gitlink,omitempty"`
+	UnpoisonGitlink bool `json:"unpoison_gitlink,omitempty"`
 }
 
 // plan is the whole scripted behavior of one derivation.
@@ -274,13 +327,16 @@ func runDriveLoop(d *driveEnv) {
 			// v2 Driver mode: each step spawn executes ONLY the envelope
 			// action matching its PF_SPAWN_N (the Driver spawns each step
 			// as a separate process; all share this plan file). The Nth
-			// envelope action in the plan fires for spawn N.
+			// envelope action in the plan fires for spawn N — across fresh
+			// AND resume dispatches alike (every re-dispatch takes the next
+			// ordinal, so resume_actions script crash + continuation in one
+			// file, deterministically).
 			envIdx := 0
 			for _, a := range d.plan.Actions {
 				if a.Do == "envelope" {
 					envIdx++
 					if envIdx == int(d.spawnNumber()) {
-						d.writeEnvelope(a.ID, a.Outcome, a.Handoff)
+						d.runEnvelopeAction(a)
 						parkForever()
 						return
 					}
@@ -371,6 +427,79 @@ func sleepMS(n int) {
 		n = 50
 	}
 	time.Sleep(time.Duration(n) * time.Millisecond)
+}
+
+// runEnvelopeAction performs one envelope action in full: the optional
+// pre-write side effects (turn/noise records, repo, poison shapes, the
+// ms delay), the optional flush(wrap) before the write, the crash
+// shapes, the envelope write itself (question text, output payload,
+// command evidence, duplicates), and the optional after-done seal.
+func (d *driveEnv) runEnvelopeAction(act planAction) {
+	if act.OpenTurn {
+		d.beginOpenTurn("open_turn")
+	}
+	if act.Noise != "" {
+		d.startNoise(act.Noise, act.MS)
+	}
+	if act.Name != "" {
+		d.makeRepo(act.Name, act.Origin)
+	}
+	if act.PoisonGitlink {
+		d.poisonGitlink()
+	}
+	if act.UnpoisonGitlink {
+		d.unpoisonGitlink()
+	}
+	sleepMS(act.MS) // the delayed-envelope-write shape (the hang lane)
+	if act.FlushWrap == "before" {
+		ok, errText := d.flushWrapVerbose("wrapped")
+		d.journal("flush", map[string]any{"reason": "wrap", "final_status": "wrapped", "ok": ok, "error": errText})
+	}
+	if act.Crash == "before" {
+		d.journal("crash_before", map[string]any{"step": act.ID, "outcome": act.Outcome})
+		os.Exit(101) // die before the envelope write: the envelope never lands
+	}
+	d.writeEnvelope(act)
+	if act.FlushWrap == "after_done" {
+		d.waitOwnStepDoneThenSeal(act.ID)
+	}
+	if act.Crash == "after" {
+		d.journal("crash_after", map[string]any{"step": act.ID, "outcome": act.Outcome})
+		os.Exit(101) // die after the write: the envelope is on the drop path
+	}
+}
+
+// waitOwnStepDoneThenSeal polls execution.json (bounded) until THIS step
+// shows done (the driver collected and accepted this derivation's
+// envelope), then drives flush(wrap): the evidence gate sees the
+// commands this very envelope delivered and the seal goes through the
+// gated agent-side path. Journaled either way (ok + error text).
+func (d *driveEnv) waitOwnStepDoneThenSeal(stepID string) {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		x := d.loadExec()
+		if x != nil {
+			if st := x.Steps[stepID]; st != nil && st.Status == "done" {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			d.journal("flush", map[string]any{"reason": "wrap", "final_status": "wrapped", "ok": false,
+				"error": "step " + stepID + " never reached done within the seal wait"})
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	ok, errText := d.flushWrapVerbose("wrapped")
+	d.journal("flush", map[string]any{"reason": "wrap", "final_status": "wrapped", "ok": ok, "error": errText})
+}
+
+// flushWrapVerbose is flushWrap carrying the ack's error text (the typed
+// refusal — DAEMON-400 VERIFICATION_EVIDENCE_MISSING — must be assertable
+// from the journal).
+func (d *driveEnv) flushWrapVerbose(finalStatus string) (bool, string) {
+	ack, errText := d.flushAck("wrap", map[string]any{"final_status": finalStatus})
+	return ack, errText
 }
 
 // pinnedModelOf reads the --model argv the runtime pinned this derivation
@@ -658,9 +787,17 @@ func (d *driveEnv) flushWrap(finalStatus string) bool {
 // and a real agent retries its lifeline calls the same way (the v0
 // baseline documented this discipline for its own proxy calls).
 func (d *driveEnv) flush(reason string, extra map[string]any) bool {
+	ok, _ := d.flushAck(reason, extra)
+	return ok
+}
+
+// flushAck is flush carrying the ack's error text (the typed refusals —
+// DAEMON-400 VERIFICATION_EVIDENCE_MISSING among them — must be
+// assertable from the journal, not just as a boolean).
+func (d *driveEnv) flushAck(reason string, extra map[string]any) (bool, string) {
 	if d.socket == "" {
 		fmt.Fprintln(os.Stderr, "fakepi: PF_DAEMON_SOCKET not set; flush unavailable")
-		return false
+		return false, "PF_DAEMON_SOCKET not set"
 	}
 	body := map[string]any{
 		"work_item": d.wi,
@@ -672,33 +809,34 @@ func (d *driveEnv) flush(reason string, extra map[string]any) bool {
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return false
+		return false, err.Error()
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		ok, retry := d.flushOnce(reason, raw)
+		ok, errText, retry := d.flushOnce(reason, raw)
 		if ok {
-			return true
+			return true, ""
 		}
 		if !retry || time.Now().After(deadline) {
-			return false
+			return false, errText
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
 }
 
 // flushOnce is one flush round trip. retry reports whether the failure
-// is the transient spawn-window shape worth retrying.
-func (d *driveEnv) flushOnce(reason string, raw []byte) (ok, retry bool) {
+// is the transient spawn-window shape worth retrying; errText carries the
+// refusal verbatim for the journal.
+func (d *driveEnv) flushOnce(reason string, raw []byte) (ok bool, errText string, retry bool) {
 	conn, err := net.Dial("unix", d.socket)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): dial: %v\n", reason, err)
-		return false, true // the listener may not be up yet
+		return false, err.Error(), true // the listener may not be up yet
 	}
 	defer conn.Close()
 	req, err := http.NewRequest("POST", "http://daemon/jobs/"+d.wi+"/flush", bytes.NewReader(raw))
 	if err != nil {
-		return false, false
+		return false, err.Error(), false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Transport: &http.Transport{
@@ -706,7 +844,7 @@ func (d *driveEnv) flushOnce(reason string, raw []byte) (ok, retry bool) {
 	}}).Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): %v\n", reason, err)
-		return false, true
+		return false, err.Error(), true
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -717,7 +855,7 @@ func (d *driveEnv) flushOnce(reason string, raw []byte) (ok, retry bool) {
 		// transient (the recovery window — the wording is the daemon's,
 		// unchanged in v1.5); "already in progress" is a close genuinely
 		// holding the seal guard.
-		return false, bytes.Contains(out, []byte("already in progress")) ||
+		return false, string(out), bytes.Contains(out, []byte("already in progress")) ||
 			bytes.Contains(out, []byte("instance just spawned")) ||
 			resp.StatusCode >= 500
 	}
@@ -726,7 +864,7 @@ func (d *driveEnv) flushOnce(reason string, raw []byte) (ok, retry bool) {
 		Error string `json:"error,omitempty"`
 	}
 	_ = json.Unmarshal(out, &fa)
-	return fa.OK, false
+	return fa.OK, fa.Error, false
 }
 
 // ---------------------------------------------------------------------------
@@ -920,16 +1058,46 @@ func (d *driveEnv) makeRepo(name, origin string) {
 // path for the current spawn. The drop path is derived from the
 // PF_SPAWN_N environment variable and the capsule root (PF_WI_ID env
 // carries the WI; the capsule root is the process cwd).
-func (d *driveEnv) writeEnvelope(stepID, outcome string, handoff bool) {
+//
+// The needs_input question text rides the ENVELOPE level
+// (question_id/question — the driver's delivery contract); an EMPTY
+// question_id is emitted verbatim on purpose (the driver refuses a
+// needs_input result without question text — the scripted refusal
+// shape). The output payload defaults to a summary object and is
+// replaced verbatim by the action's own when present. Structured command
+// evidence rides command_evidence (the driver copies it onto
+// execution.json's output.commands — the face the wrap evidence gate
+// judges) unless the action suppressed it.
+func (d *driveEnv) writeEnvelope(act planAction) {
+	outcome := act.Outcome
 	if outcome == "" {
 		outcome = "completed"
 	}
+	stepID := act.ID
 	capsuleRoot := d.capsuleRoot()
 	spawnN := os.Getenv("PF_SPAWN_N")
 	if spawnN == "" {
 		spawnN = "1"
 	}
 	dropPath := filepath.Join(capsuleRoot, "runtime-state", "pending-results", spawnN+".json")
+
+	output := act.Output
+	if output == nil {
+		output = map[string]interface{}{"summary": "envelope action"}
+	}
+	var evidence []interface{}
+	if !act.NoEvidence {
+		evidence = append(evidence, map[string]any{
+			"argv":        []any{"fakepi", "envelope", stepID},
+			"cwd":         capsuleRoot,
+			"exit_code":   0,
+			"duration_ms": 40,
+			"started_at":  nowStamp(),
+		})
+		for _, e := range act.Evidence {
+			evidence = append(evidence, e)
+		}
+	}
 
 	envelope := map[string]interface{}{
 		"protocol_version": 1,
@@ -938,14 +1106,20 @@ func (d *driveEnv) writeEnvelope(stepID, outcome string, handoff bool) {
 		"step_id":          stepID,
 		"spawn_n":          parseIntDefault(spawnN, 1),
 		"outcome":          outcome,
-		"output":           map[string]interface{}{"summary": "envelope action"},
+		"output":           output,
 		"artifacts":        []interface{}{},
-		"command_evidence": []interface{}{},
+		"command_evidence": evidence,
 		"submitted_at":     time.Now().UTC().Format(time.RFC3339),
+	}
+	if outcome == "needs_input" {
+		// Verbatim, empty included: the empty question_id is the scripted
+		// refusal shape (the driver must refuse it, never mint a pending).
+		envelope["question_id"] = act.QuestionID
+		envelope["question"] = act.Question
 	}
 
 	// Handoff duty: write the handoff file and reference it.
-	if handoff {
+	if act.Handoff {
 		hoPath := filepath.Join(capsuleRoot, "artifacts", "handoff-"+stepID+".md")
 		hoContent := "# Handoff from " + stepID + "\n\nSummary for next step.\n"
 		if err := os.MkdirAll(filepath.Dir(hoPath), 0o755); err == nil {
@@ -964,11 +1138,19 @@ func (d *driveEnv) writeEnvelope(stepID, outcome string, handoff bool) {
 		d.journal("envelope_error", map[string]any{"err": err.Error()})
 		return
 	}
-	if err := os.WriteFile(dropPath, blob, 0o644); err != nil {
-		d.journal("envelope_error", map[string]any{"err": err.Error()})
-		return
+	dupes := act.Dup
+	if dupes < 1 {
+		dupes = 1
 	}
-	d.journal("envelope", map[string]any{"step": stepID, "outcome": outcome, "path": dropPath})
+	for i := 0; i < dupes; i++ {
+		if err := os.WriteFile(dropPath, blob, 0o644); err != nil {
+			d.journal("envelope_error", map[string]any{"err": err.Error()})
+			return
+		}
+	}
+	d.journal("envelope", map[string]any{"step": stepID, "outcome": outcome,
+		"path": dropPath, "question_id": act.QuestionID, "dup": dupes,
+		"evidence": !act.NoEvidence, "crash": act.Crash})
 }
 
 // capsuleRoot answers the capsule directory: the fakepi runs with the
