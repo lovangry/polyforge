@@ -556,8 +556,21 @@ func (m *Monitor) checkHang() {
 		return
 	}
 	m.stateMu.Lock()
+	pending := m.pending != nil
 	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
 	m.stateMu.Unlock()
+	if pending {
+		// Pending-question exemption (the #99 lesson): a driver parked on
+		// an open question has NO live turn — but its stream's last record
+		// may still read turn-open (the step process asked and was torn
+		// down after envelope collection, so InFlight is stale-true forever).
+		// Without this gate the parked question drew a hang probe every
+		// HangWindow — and on driver handles the control probe ALWAYS
+		// fails (no control channel), so every park was a false recovery.
+		// needs_input is designed stillness: the hang criterion, like the
+		// idle one, must not judge it.
+		return
+	}
 	if suppressed {
 		return
 	}

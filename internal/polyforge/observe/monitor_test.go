@@ -342,6 +342,55 @@ func TestIdleExemptWhilePendingQuestion(t *testing.T) {
 	expectNoOB(t, ob, 100*time.Millisecond, "needs_input is exempt from the idle judgment")
 }
 
+// TestHangExemptWhilePendingQuestion is the #99 lesson: a driver parked
+// on an open question has no live turn, but its stream's LAST record can
+// still read turn-open (the step process asked and was torn down after
+// envelope collection — InFlight stays stale-true forever). The stale
+// open turn must not arm the hang judgment: needs_input is designed
+// stillness for the hang criterion exactly as for the idle one, and on
+// driver handles the control probe always fails, so a false park was a
+// false recovery every HangWindow.
+func TestHangExemptWhilePendingQuestion(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.HangWindow = 40 * time.Millisecond
+	})
+	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
+		t.Errorf("no hang probe may be sent while a question is pending, got %s", msg.Method)
+		return protocol.ControlAck{}, errors.New("unexpected probe")
+	})
+
+	// The turn opens and NEVER closes (the stale-open shape), no further
+	// records: the hang criterion would arm the moment the window lapses.
+	feed(h, fxTurnStart)
+
+	// Arm the pending question.
+	resp := make(chan protocol.FlushAck, 1)
+	m.flushCh <- FlushCall{
+		Req: protocol.FlushRequest{
+			WorkItem:   "wi_test",
+			SpawnN:     1,
+			Reason:     protocol.FlushNeedsInput,
+			QuestionID: "q_1",
+			Question:   "which way?",
+			Step:       "code",
+		},
+		Resp: resp,
+	}
+	select {
+	case <-resp:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flush(needs_input) was never answered")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	if h.sentCount() != 0 {
+		t.Fatalf("no hang probe while a question is pending, got %d", h.sentCount())
+	}
+	expectNoOB(t, ob, 100*time.Millisecond, "needs_input is exempt from the hang judgment")
+	_ = m
+}
+
 func TestIdleSuppressedWhileRecovering(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
