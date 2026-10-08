@@ -82,7 +82,7 @@ cmd/pf/             # 入口：`pf` CLI 动词 + `daemon` 子命令（单文件�
 
 ### 4.1 Daemon state（存储位置与内容，权威） <!-- §4.1 -->
 
-存储于 **Daemon 数据目录**（缺省 `$POLYFORGE_HOME/daemon/`，本机路径，**不在任何 Capsule 内**）：
+存储于 **Daemon 数据目录**（缺省 `$POLYFORGE_HOME/daemon/`，本机路径，**不在任何 Capsule 内**）。workspace（Capsule 基底 `<workspace>/capsules/<wi_id>`）由操作者经**必填**的 `pf daemon -workspace <path>` 旗标或 `POLYFORGE_WORKSPACE` 环境变量指定，**没有默认值**：两者皆缺时 Daemon 拒绝启动；启动时校验 workspace 目录存在（Daemon 绝不代建它）且 `<workspace>/capsules/` 可创建、可写，Daemon 在 workspace 内只写 `capsules/` 子树（`08-capsule-base-migration.md` 是 workspace 迁移的人工运行手册）：
 
 ```
 daemon/state.json:
@@ -90,7 +90,7 @@ daemon/state.json:
   "machine_id": "m-01",
   "mode": "interactive|batch|drain",
   "version": "...",
-  "workspace_root": "/home/svc/pf-workspace",
+  "workspace": "/home/svc/pf-workspace",
   "started_at": "2026-09-20T08:00:00Z",
   "jobs": [
     { "work_item_id": "wi_793",
@@ -224,7 +224,7 @@ key、claim 响应、Job 创建意图、Harness session identity 均先于对应
 `03-execution-capsule.md#§4.2` 同一原子写模式）——「落盘」指 fsync 成功返回、rename 完成后才算完成，任一步
 未完成即视为未写入：
 
-1. Daemon 收到 `claim(wi_id)` / `resume(wi_id)` / `takeover(wi_id)` 请求，先做本机预检：workspace 根存在且可写、Daemon 数据目录可写、Capsule 根可写、磁盘余量高于阈值、AIHub 可达。任一项失败立即返回 `DAEMON-507 PREFLIGHT_FAILED`，**不发起**后续任何服务端调用——不产生「claim 成功却无本地现场」的情形。
+1. Daemon 收到 `claim(wi_id)` / `resume(wi_id)` / `takeover(wi_id)` 请求，先做本机预检：workspace（启动时已校验存在，且 Daemon 只写其中的 `capsules/` 子树）可用、Daemon 数据目录可写、Capsule 根可写、磁盘余量高于阈值、AIHub 可达。任一项失败立即返回 `DAEMON-507 PREFLIGHT_FAILED`，**不发起**后续任何服务端调用——不产生「claim 成功却无本地现场」的情形。
 2. 预检通过后，按 `00-architecture.md#§3.4` 的 Interactive/Batch/Drain 判据确认本次请求在当前模式下是否被接受（例如 Drain 模式下对单条 `claim` 一律 `DAEMON-409`，因为 Drain 只接受来自 §6.1c 内部循环的提交，不接受外部单条 claim；这与优雅停机的 `DAEMON-410 SHUTTING_DOWN` 拒绝外部提交是两回事——前者是模式互斥，Drain 本身仍在持续创建 Job，后者才是真正停止创建新 Job）。
 3. **读取 workflow 引用（pin 已随创建事务完成，无独立确认步骤）**：经 `02-aihub-core.md#§5.1` 的 WI
    详情读取（GET，只读、不消耗任何 owner generation）取得该 WI 的 `bundle_name` 与 `bundle_digest`，供

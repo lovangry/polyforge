@@ -48,16 +48,23 @@ pf queue --project polyforge
 ## Step 4 —(执行机)首次起 daemon
 
 ```
+# workspace 先建好(daemon 不代建,只在其下创建 capsules/)
+mkdir -p ~/.polyforge/workspace
 pf daemon -server $(grep ^url ~/.polyforge/config.toml | cut -d'"' -f2) \
   -api-key $(grep ^api_key ~/.polyforge/config.toml | cut -d'"' -f2) \
   -machine-id m-<你的名字> \
   -mode interactive -project polyforge \
+  -workspace ~/.polyforge/workspace \
   -data-dir ~/.polyforge/daemon-data \
   -socket ~/.polyforge/daemon.sock \
   -max-concurrent-jobs 4 \
   > ~/.polyforge/daemon.log 2>&1 &
 ```
 
+- **`-workspace` 必填**(或环境变量 `POLYFORGE_WORKSPACE`;没有默认值,
+  缺了 daemon 拒绝启动)。每个 WI 的 capsule 落在
+  `<workspace>/capsules/<wi_id>/`。若 workspace 在 git 仓库内,把
+  `capsules/` 写进它的 `.gitignore`——daemon 自己从不碰 `.gitignore`。
 - **机器注册是管理员动作**(安全门:心跳首注册只认 admin)
 - 60 秒后验证:`pf machines`(你的 m-xxx 在列,心跳新鲜)
 - 日常运转归 `/polyforge ops`(status/mode/shutdown/升级前自检)

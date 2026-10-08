@@ -170,7 +170,10 @@ WI Agent（§2.3）不在本表——它没有独立的部署位置或版本号�
 ├── backups/<timestamp>/              # 一致性备份点，§6.2 产出
 └── tmp/                              # 原子写中转（tmp+fsync+rename 模式）
 
-工作机侧（Daemon + Capsule）：
+工作机侧（Daemon + Capsule）——workspace 由操作者经**必填**的 `pf daemon -workspace <path>` 旗标或
+`POLYFORGE_WORKSPACE` 环境变量指定（无默认值，缺则拒绝启动；迁移走
+`08-capsule-base-migration.md` 的人工运行手册）：
+
 <pf-workspace>/capsules/<wi_id>/…     # Capsule 布局权威，`03-execution-capsule.md#§3.1`；执行权威文件为
                                        # <capsule>/runtime-state/execution.json（`03-execution-capsule.md#§4.2`）
 $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/state.json + credentials/），
