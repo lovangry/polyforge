@@ -30,6 +30,16 @@
 //     created (the pilot's #48 poison chain made every later push of the
 //     standing HEAD unfetchable; the precheck keeps the poison out of
 //     history entirely).
+//   - task-repo durability lane (polyforge#108): every publish also
+//     mirrors each repos/<name> worktree's HEAD into the WI's own bare
+//     repo as refs/pf-task/<name> (pushTaskRefsLocked) — the capsule
+//     chain itself cannot carry task-repo state (ruling C1: /repos/ is
+//     gitignored), and without this lane the only copy of a session's
+//     code commits is the capsule directory a re-claim renames away.
+//     Best-effort-loud: a carrier failure never fails the
+//     execution-state publish; the claim-time clone lane reads the
+//     carrier back via FetchTaskRef. aihub's pre-receive hook exempts
+//     the namespace from the chain-only seq/gitlink invariants.
 //
 // git-dir is ALWAYS external to the capsule (never inside agent-writable
 // space). All git access goes through the real git binary.
@@ -330,6 +340,9 @@ func Push(o Opts) (bool, error) {
 // pushLocked is push under an already-held per-WI lock. The returned
 // pushMS is the wall-clock duration of the git push invocation,
 // measured honestly on failure too (the observed-only latency sample).
+// Besides the capsule chain (HEAD:refs/heads/main) it drives the
+// task-repo durability lane (pushTaskRefsLocked): best-effort, after
+// the chain push either way, never blocking it.
 //
 // Same-WI push idempotency (the shutdown-window push race): the receive
 // protocol compare-and-swaps every push against the ref value its
@@ -361,9 +374,21 @@ func pushLocked(o Opts) (bool, int64, error) {
 	}
 	defer cleanup()
 	env := append(o.Env(), additions...)
+	pushed, pushMS, perr := pushChainLocked(env, o.CapsuleDir, args)
+	// Task-repo durability lane: after the chain push either way, its
+	// own invocations, its own failures — never the chain's result.
+	pushTaskRefsLocked(o)
+	return pushed, pushMS, perr
+}
+
+// pushChainLocked is the chain push itself (HEAD:refs/heads/main) with
+// the same-WI push idempotency retry, factored out so pushLocked can
+// append the task-repo carrier lane after it without entangling the
+// retry semantics.
+func pushChainLocked(env []string, capsuleDir string, args []string) (bool, int64, error) {
 	for attempt := 1; ; attempt++ {
 		pushStart := time.Now()
-		out, perr := git(env, o.CapsuleDir, args...)
+		out, perr := git(env, capsuleDir, args...)
 		pushMS := time.Since(pushStart).Milliseconds()
 		if perr == nil {
 			return true, pushMS, nil
@@ -378,6 +403,103 @@ func pushLocked(o Opts) (bool, int64, error) {
 		// the retry answers up-to-date.
 		time.Sleep(pushRaceBackoff)
 	}
+}
+
+// TaskCarrierNamespace is the ref namespace, inside the work item's own
+// bare repo, that carries each task repo's local head across session
+// boundaries (polyforge#108): pushTaskRefsLocked mirrors every
+// repos/<name> HEAD to refs/pf-task/<name> on each publish, and the
+// claim-time clone lane (runtime.cloneTaskRepos, via FetchTaskRef)
+// restores it when a bounded-fail re-claim must rebuild repos/<name>
+// from its bare origin. The capsule chain cannot carry this state
+// (ruling C1: /repos/ is gitignored), so without the lane the only copy
+// of a session's code commits is the capsule directory — exactly what a
+// re-claim renames away. The namespace lives OUTSIDE refs/heads/* so a
+// plain clone of the bare repo never materializes task branches, and
+// aihub's pre-receive hook exempts it from the chain-only seq/gitlink
+// invariants while keeping deletion, fast-forward and the blob limit.
+const TaskCarrierNamespace = "refs/pf-task/"
+
+// TaskRefName answers the carrier ref for one task repo.
+func TaskRefName(repo string) string { return TaskCarrierNamespace + repo }
+
+// pushTaskRefsLocked mirrors every task-repo worktree's HEAD under the
+// capsule into the WI's bare repo (HEAD:refs/pf-task/<name>). Runs under
+// the per-WI lock (called from pushLocked), AFTER the chain push, and is
+// BEST-EFFORT-LOUD: each push is its own git invocation — a rejected or
+// failed carrier never fails the execution-state publish this lane
+// rides; it is logged loudly so the operator can see a re-claim would
+// lose that repo's state. An unborn or unreadable task HEAD is nothing
+// to carry (honest skip, not a failure). The invocations run inside each
+// task worktree with its OWN git-dir — never the capsule's external
+// GIT_DIR/GIT_WORK_TREE binding, whose history holds none of these
+// objects.
+func pushTaskRefsLocked(o Opts) {
+	reposDir := filepath.Join(o.CapsuleDir, capsule.DirRepos)
+	ents, err := os.ReadDir(reposDir)
+	if err != nil {
+		return // no repos/ tree: no inventory, nothing to carry
+	}
+	additions, cleanup, cerr := credentialEnv(o)
+	if cerr != nil {
+		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push skipped (credential prep failed): %v\n", o.WorkItemID, cerr)
+		return
+	}
+	defer cleanup()
+	env := append(os.Environ(), additions...)
+	for _, e := range ents {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		dir := filepath.Join(reposDir, e.Name())
+		if out, err := git(nil, dir, "rev-parse", "HEAD"); err != nil || strings.TrimSpace(out) == "" {
+			continue // unborn/absent HEAD: nothing to carry yet
+		}
+		args := []string{"push"}
+		if o.Fingerprint != "" {
+			args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
+		}
+		args = append(args, o.RemoteURL, "HEAD:"+TaskRefName(e.Name()))
+		if out, err := git(env, dir, args...); err != nil {
+			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %v: %s\n", o.WorkItemID, e.Name(), err, strings.TrimSpace(out))
+		}
+	}
+}
+
+// FetchTaskRef reads the carrier lane from the claim side: it fetches
+// refs/pf-task/<name> from the WI's bare repo into the task worktree at
+// dir and answers the SHA the carrier names. "" with a nil error means
+// the carrier holds nothing for this repo yet — the NORMAL first-claim
+// shape (no previous session has published a head), answered quietly;
+// any other failure comes back loud to the caller. The fetch carries the
+// session credential (one-shot askpass) and never touches the capsule
+// worktree: dir is the task repo's own clone with its own git-dir. Takes
+// the per-WI lock, mirroring Clone — the claim lane is single-threaded
+// per WI, but the invariant (one git face per WI at a time) stays
+// mechanical, not remembered.
+func FetchTaskRef(o Opts, dir, name string) (string, error) {
+	if o.RemoteURL == "" {
+		return "", nil // no capsule remote: nowhere a carrier could exist
+	}
+	release := Lock(o.WorkItemID)
+	defer release()
+	additions, cleanup, err := credentialEnv(o)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	env := append(os.Environ(), additions...)
+	if _, err := git(env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, TaskRefName(name)); err != nil {
+		if strings.Contains(err.Error(), "couldn't find remote ref") {
+			return "", nil // no carrier recorded yet: first claim, nothing to restore
+		}
+		return "", err
+	}
+	out, err := git(env, dir, "rev-parse", "FETCH_HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // pushRaceAttempts bounds how many times a ref-transaction CAS rejection
