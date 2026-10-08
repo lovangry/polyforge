@@ -20,10 +20,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
@@ -44,6 +46,37 @@ func (r *Runtime) recoverOp(ctx context.Context, j *job, cause string) {
 func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	if err := j.transition(StateRecovering); err != nil {
 		return // lost the race to SEALING/DONE: the fence did its job
+	}
+	// v2 terminal wiring (the #99 finale): the driver has no flush(wrap)
+	// call — Run returning nil IS its completion signal, and the
+	// monitor's onExit rightly reports "agent process exited" without
+	// knowing the difference. Before any recovery machinery runs, the
+	// capsule's terminal workflow_status is translated into the WI's
+	// close: completed wraps, failed fails, blocked hands the WI to its
+	// owner (the hub's blocked verdict is the unblock door). Without
+	// this the terminal exit bounced through death-recovery into the
+	// storm guard and closed the WI as blocked instead of wrapped —
+	// within one second, exactly as the guard was designed to.
+	switch capsuleWorkflowStatus(j.capsuleDir) {
+	case capsule.WorkflowStatusCompleted:
+		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)
+		// sealedByFlush: the C3 engine already committed and pushed the
+		// terminal execution.json version (every transition bumps Version
+		// and publishes); the final push here would only race it.
+		if err := r.stopOp(ctx, j, protocol.FinishWrapped, false, true); err != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: terminal wrap failed (record kept for the next restart): %v\n", j.wi, err)
+		}
+		return
+	case capsule.WorkflowStatusFailedGate, capsule.WorkflowStatusFailedRewindExhausted:
+		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow failed (%s) — closing failed (recovery cause %q)\n", j.wi, capsuleWorkflowStatus(j.capsuleDir), cause)
+		if err := r.stopOp(ctx, j, protocol.FinishFailed, false, true); err != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: terminal fail close failed (record kept for the next restart): %v\n", j.wi, err)
+		}
+		return
+	case capsule.WorkflowStatusBlocked:
+		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow blocked on an incomplete result — the owner holds the next move (cause %q)\n", j.wi, cause)
+		r.boundedFail(ctx, j, "workflow blocked: the owner holds the next move (resume / rewind / wrap --fail)")
+		return
 	}
 	// The v2 entry-rate storm guard (the #97 lesson): a relaunch that
 	// SUCCEEDS as a spawn but dies within seconds used to reset the
@@ -286,6 +319,22 @@ func (r *Runtime) recovered(j *job, h AgentHandle, cause string, resumed bool) {
 		Detail:    cause,
 		SessionID: j.sessionID,
 	})
+}
+
+// capsuleWorkflowStatus answers the capsule's execution.json
+// workflow_status ("" when absent or unreadable — a legacy WI-Agent
+// capsule or a pre-init scene; the caller treats that as "no terminal
+// verdict" and recovers as before).
+func capsuleWorkflowStatus(capsuleDir string) string {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.ExecutionJSON))
+	if err != nil {
+		return ""
+	}
+	var exec capsule.Execution
+	if json.Unmarshal(raw, &exec) != nil {
+		return ""
+	}
+	return exec.WorkflowStatus
 }
 
 func (r *Runtime) recoveryStabilityWindow() time.Duration {

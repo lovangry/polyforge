@@ -7,12 +7,16 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
@@ -435,6 +439,88 @@ func TestRecoverDriverTerminatesOldHandleAndSeedsFromJournal(t *testing.T) {
 	}
 	if gotSpawn != 8 {
 		t.Fatalf("relaunch must seed past the journal max (want 8, got %d)", gotSpawn)
+	}
+}
+
+// TestRecoverTerminalWorkflowCloses is the #99-finale regression: a
+// driver whose workflow reached a terminal state has Run returning nil
+// as its COMPLETION signal — the monitor reports a plain exit, and the
+// recovery entry must translate the capsule's terminal verdict into the
+// WI's close instead of relaunching: completed wraps (RTFinished wrapped,
+// SessionEnd wrapped, no relaunch), failed_* fails, blocked hands the
+// owner the unblock door. Without the wiring the exit bounced through
+// death-recovery into the storm guard and closed the WI blocked.
+func TestRecoverTerminalWorkflowCloses(t *testing.T) {
+	for _, tc := range []struct {
+		status  string
+		endKind protocol.RTMsgKind
+		wantEnd string
+	}{
+		{capsule.WorkflowStatusCompleted, protocol.RTFinished, api.StatusWrapped},
+		{capsule.WorkflowStatusFailedGate, protocol.RTFinished, api.StatusFailed},
+		{capsule.WorkflowStatusBlocked, protocol.RTFinished, api.StatusBlocked},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			hub := newFakeHub()
+			sp := &scriptedSpawner{}
+			r, toOB, _ := newTestRuntime(t, hub, sp)
+			wi := "wi_term_" + strings.ReplaceAll(tc.status, "_", "")
+			j := seedJob(r, wi)
+			execDir := filepath.Join(j.capsuleDir, "runtime-state")
+			if err := os.MkdirAll(execDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			blob, _ := json.Marshal(map[string]string{"workflow_status": tc.status})
+			if err := os.WriteFile(filepath.Join(execDir, "execution.json"), blob, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			j.mu.Lock()
+			j.agent = &recordingHandle{} // the dead driver handle (pid-less shape)
+			j.agentPID = 0
+			j.mu.Unlock()
+			starterCalls := 0
+			r.cfg.AgentStarter = func(ctx context.Context, in AgentStartInput) (AgentHandle, error) {
+				starterCalls++
+				return &recordingHandle{}, nil
+			}
+
+			r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+			msg := recvRT(t, toOB)
+			if msg.Kind != protocol.RTFinished || msg.Reason != tc.wantEnd {
+				t.Fatalf("terminal workflow must close as %s, got %+v", tc.wantEnd, msg)
+			}
+			if starterCalls != 0 {
+				t.Fatalf("a terminal workflow must NOT relaunch the driver (starter called %d times)", starterCalls)
+			}
+			if r.jobOf(wi) != nil {
+				t.Fatal("the closed job must leave the live set")
+			}
+		})
+	}
+}
+
+// TestRecoverNonTerminalWorkflowRecovers: "running" (and a missing
+// execution.json — the legacy WI-Agent shape) fall through to the
+// ordinary recovery machinery.
+func TestRecoverNonTerminalWorkflowRecovers(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, hub, sp)
+	wi := "wi_term_running"
+	j := seedJob(r, wi)
+	j.mu.Lock()
+	j.agent = &recordingHandle{}
+	j.agentPID = 0
+	j.mu.Unlock()
+	r.cfg.AgentStarter = func(ctx context.Context, in AgentStartInput) (AgentHandle, error) {
+		return &recordingHandle{}, nil
+	}
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+		t.Fatalf("a running workflow must recover normally, got %+v", msg)
+	}
+	if h := j.agent; h != nil {
+		_ = h.Terminate(2e9)
 	}
 }
 

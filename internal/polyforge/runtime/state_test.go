@@ -65,7 +65,12 @@ func TestStateMachineIllegalEdges(t *testing.T) {
 		{StateSealing, StateSealing},
 		{StateSealing, StateRecovering}, // §三: SEALING drops recovery
 		{StateSealing, StatePaused},     // a seal is not a pause (Finding 2)
-		{StateRecovering, StateSealing},
+		// NOTE: RECOVERING → SEALING is a LEGAL edge since the v2
+		// terminal-close wiring (the #99 finale): a recovery that finds
+		// the driver's workflow already terminal translates directly
+		// into the sealing close (stopOp from RECOVERING) instead of
+		// relaunching into the storm guard. It was illegal before that
+		// wiring existed.
 		{StateRecovering, StateRecovering},
 		// Finding 2: the retained paused record cannot re-pause, seal or
 		// recover directly — a resume goes through PAUSED → RUNNING, a

@@ -85,6 +85,21 @@ type Session struct {
 	UpdatedAt      string `json:"updated_at"`
 }
 
+// The workflow_status vocabulary (03 §4.2): the closed status set the
+// execution.json contract speaks. The DRIVER owns the writes and the
+// transitions (its own aliases in internal/polyforge/driver); these
+// constants live at the SCHEMA owner so non-driver lanes (the runtime's
+// recovery wiring) can read a terminal verdict without importing the
+// driver (import cycle: the driver's tests import the runtime).
+const (
+	WorkflowStatusRunning               = "running"
+	WorkflowStatusCompleted             = "completed"
+	WorkflowStatusFailedGate            = "failed_gate"
+	WorkflowStatusFailedRewindExhausted = "failed_rewind_exhausted"
+	// WorkflowStatusBlocked is the NON-terminal waiting-on-owner state.
+	WorkflowStatusBlocked = "blocked"
+)
+
 // Execution is runtime-state/execution.json (03 §4.2): the single source of
 // truth the WI Agent writes and the daemon observes (ruling C3: agent is
 // zero-blocking; observe watches this file).

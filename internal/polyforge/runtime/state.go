@@ -50,7 +50,7 @@ const (
 var legalEdges = map[JobState][]JobState{
 	StateRunning:    {StateSealing, StateRecovering, StatePaused},
 	StateSealing:    {StateDone},
-	StateRecovering: {StateRunning, StateDone},
+	StateRecovering: {StateRunning, StateSealing, StateDone},
 	StatePaused:     {StateRunning, StateDone},
 }
 

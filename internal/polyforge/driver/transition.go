@@ -40,16 +40,18 @@ import (
 // Workflow status vocabulary (03-execution-capsule.md §4.2, closed set).
 // The empty string is tolerated on load as running (a legacy or absent
 // field); New normalizes it in memory and the next transition persists
-// the normalized form.
+// the normalized form. The strings are owned by the SCHEMA package
+// (internal/common/capsule) so non-driver lanes can read them without an
+// import cycle; these are the driver's write-side aliases.
 const (
-	StatusRunning               = "running"
-	StatusCompleted             = "completed"
-	StatusFailedGate            = "failed_gate"
-	StatusFailedRewindExhausted = "failed_rewind_exhausted"
+	StatusRunning               = capsule.WorkflowStatusRunning
+	StatusCompleted             = capsule.WorkflowStatusCompleted
+	StatusFailedGate            = capsule.WorkflowStatusFailedGate
+	StatusFailedRewindExhausted = capsule.WorkflowStatusFailedRewindExhausted
 	// StatusBlocked is the NON-terminal waiting-on-owner state (01
 	// §6.4): current_step frozen, neither forward nor back; the owner
 	// resumes the step, rewinds, or terminates.
-	StatusBlocked = "blocked"
+	StatusBlocked = capsule.WorkflowStatusBlocked
 )
 
 // Attempt causes (01 §6.3b): the closed two-value set of archived
