@@ -14,9 +14,10 @@ package test
 // The scenario SKIPS (never hard-fails) when a gate is missing:
 // testing.Short() (no network in the short lane), the gh binary absent,
 // or gh not authenticated. Each skip message names the missing gate.
-// (The legacy lane's requireLegacyLane early guard is GONE: a
-// driver-pinned scenario has no legacy lane to guard — the environmental
-// gates are the whole story.)
+// There is no lane guard of any kind: a driver-pinned scenario has no
+// legacy lane to guard — the environmental gates are the whole story,
+// and they are carried IN this file (the acceptance suite pins their
+// literals here).
 import (
 	"encoding/json"
 	"fmt"
@@ -131,8 +132,20 @@ func TestV1S19ShipPR(t *testing.T) {
 	// The environmental gates, in order; each skip names the missing
 	// gate. This scenario performs real external work (gh auth, a real
 	// GitHub scratch repository, credential git-config) before any
-	// daemon boots — the gates run first thing, exactly as before.
-	requireGh(t)
+	// daemon boots — the gates run first thing, exactly as before. (The
+	// gates are inlined here — the same shape as the harness's requireGh
+	// helper — so this file carries its own gate literals.)
+	if testing.Short() {
+		t.Skipf("short mode: skipping the real-github ship PR e2e (network + gh required)")
+	}
+	ghPath, err := exec.LookPath("gh")
+	if err != nil {
+		t.Skipf("gh binary absent from PATH: skipping the ship PR e2e")
+	}
+	if out, aerr := exec.Command(ghPath, "auth", "status").CombinedOutput(); aerr != nil {
+		t.Skipf("gh not authenticated (gh auth status exit %v): %s",
+			aerr, strings.TrimSpace(string(out)))
+	}
 
 	// The real github.com origin: a private scratch repo this test owns.
 	owner, repoName, origin := ghScratchRepo(t)
