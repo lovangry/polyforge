@@ -267,6 +267,13 @@ func New(cfg Config) (*Daemon, error) {
 			*root = abs
 		}
 	}
+	// Workspace validation (#103): the daemon never creates the workspace
+	// directory itself — the operator (or installer) selects a
+	// pre-existing one — and the only subtree it ever writes under it is
+	// capsules/. Both facts are enforced here, before any serving.
+	if err := validateWorkspace(cfg.Workspace); err != nil {
+		return nil, err
+	}
 	cfg.fill()
 
 	rtCfg := runtime.Config{
@@ -399,6 +406,37 @@ func New(cfg Config) (*Daemon, error) {
 		d.persistModeQuietly()
 	}
 	return d, nil
+}
+
+// validateWorkspace enforces the startup workspace contract (#103):
+// the selected workspace directory must EXIST (stat only — the daemon
+// never creates it; the operator or installer owns that) and
+// <workspace>/capsules must be creatable and writable — the only place
+// inside the user's workspace the daemon ever writes. Each failure is a
+// hard startup error naming the workspace path, returned before any
+// serving begins.
+func validateWorkspace(ws string) error {
+	st, err := os.Stat(ws)
+	if err != nil {
+		return fmt.Errorf("daemon: workspace %s: %w", ws, err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("daemon: workspace %s is not a directory", ws)
+	}
+	capsules := filepath.Join(ws, "capsules")
+	if err := os.MkdirAll(capsules, 0o755); err != nil {
+		return fmt.Errorf("daemon: workspace %s: capsules/ cannot be created: %w", ws, err)
+	}
+	probe, err := os.CreateTemp(capsules, ".write-probe-*")
+	if err != nil {
+		return fmt.Errorf("daemon: workspace %s: capsules/ is not writable: %w", ws, err)
+	}
+	name := probe.Name()
+	probe.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("daemon: workspace %s: capsules/ write probe residue: %w", ws, err)
+	}
+	return nil
 }
 
 // Run drives the daemon until a graceful shutdown completes (or the
