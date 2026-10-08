@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,13 +103,38 @@ func TestValidateStepResultShape(t *testing.T) {
 	}
 
 	res = *f.res
-	res.ResultID = "not-a-uuid"
+	res.ResultID = "" // empty: the one shape still refused
 	if err := ValidateStepResult(&res, f.spec); err == nil {
-		t.Fatal("malformed result_id must be rejected (it is the idempotency key)")
+		t.Fatal("empty result_id must be rejected")
 	}
-	res.ResultID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0" // 32 hex, no dashes
+	res.ResultID = strings.Repeat("x", 129)
 	if err := ValidateStepResult(&res, f.spec); err == nil {
-		t.Fatal("result_id without UUID shape must be rejected")
+		t.Fatal("oversized result_id must be rejected")
+	}
+	res.ResultID = "has whitespace inside"
+	if err := ValidateStepResult(&res, f.spec); err == nil {
+		t.Fatal("result_id with inner whitespace must be rejected")
+	}
+	// Tolerant id (#97): a readable slug is a legal idempotency key —
+	// the UUID shape is asked for, not enforced.
+	res.ResultID = "grill-review-ask-batch-1"
+	if err := ValidateStepResult(&res, f.spec); err != nil {
+		t.Fatalf("readable result_id must validate: %v", err)
+	}
+	if res.ResultID != "grill-review-ask-batch-1" {
+		t.Fatalf("tolerant id must survive verbatim, got %q", res.ResultID)
+	}
+	// surrounding whitespace is trimmed, not fatal
+	res.ResultID = "  padded-id-9  "
+	if err := ValidateStepResult(&res, f.spec); err != nil {
+		t.Fatalf("padded result_id must validate after trim: %v", err)
+	}
+	if res.ResultID != "padded-id-9" {
+		t.Fatalf("padded result_id must be trimmed in place, got %q", res.ResultID)
+	}
+	res.ResultID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0" // 32 hex, no dashes: single-token, legal now
+	if err := ValidateStepResult(&res, f.spec); err != nil {
+		t.Fatalf("dashless hex result_id must validate: %v", err)
 	}
 
 	res = *f.res

@@ -338,6 +338,11 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protoco
 		MaxResumeFails: 2,
 		MaxRecoveries:  2,
 		SendBound:      2 * time.Second,
+		// Test episodes are separated by handleOB calls, not real time:
+		// the entry-rate storm guard's window is collapsed to nothing so
+		// every recovery models a fresh episode (the storm tests override
+		// this with a real window to drive the guard itself).
+		RecoveryStabilityWindow: time.Nanosecond,
 	}
 	toOB := make(chan protocol.RTMsg, 64)
 	fromOB := make(chan protocol.OBMsg, 64)

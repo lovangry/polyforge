@@ -8,6 +8,7 @@ package runtime
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
@@ -297,6 +298,72 @@ func TestRecoverSingleFreshFailureIsRetriedNotTerminal(t *testing.T) {
 	j.mu.Unlock()
 	if fails != 0 {
 		t.Fatalf("the successful retry must reset the budget, got %d", fails)
+	}
+	if h := j.agent; h != nil {
+		_ = h.Terminate(2e9)
+	}
+}
+
+// TestRecoverStormGuardBlocksRapidRefire: the #97 shape — every relaunch
+// SUCCEEDS as a spawn and dies within seconds, refiring recovery at ~1
+// Hz. The legacy budget never saw these (each relaunch reset it); the
+// entry-rate ledger counts rapid re-entries and bounded-fails the WI on
+// the MaxRecoveries-th rapid refire.
+func TestRecoverStormGuardBlocksRapidRefire(t *testing.T) {
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, newFakeHub(), sp)
+	r.cfg.RecoveryStabilityWindow = 60 * time.Second // the production window
+	wi := "wi_stormrate"
+	j := seedJob(r, wi)
+	installOldAgent(t, sp, j)
+
+	// two back-to-back relaunches succeed (storm ledger 0 then 1 —
+	// below the bound of MaxRecoveries=2)
+	for i := 0; i < 2; i++ {
+		r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+		if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+			t.Fatalf("rapid recovery %d must still relaunch (ledger below the bound), got %+v", i+1, msg)
+		}
+	}
+	// the third rapid refire reaches the bound: bounded fail, never a
+	// fourth relaunch
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	msg := recvRT(t, toOB)
+	if msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
+		t.Fatalf("the third rapid refire must bounded-fail, got %+v", msg)
+	}
+	if n := sp.callCount(); n != 3 { // install + two relaunches, NOT three
+		t.Fatalf("the storm must stop at two relaunches, got %d spawns", n)
+	}
+}
+
+// TestRecoverStormLedgerResetsAfterStabilityWindow: a recovery that
+// arrives after a stable gap starts a fresh episode — an isolated later
+// failure is never poisoned by an earlier storm.
+func TestRecoverStormLedgerResetsAfterStabilityWindow(t *testing.T) {
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, newFakeHub(), sp)
+	r.cfg.RecoveryStabilityWindow = 15 * time.Millisecond
+	wi := "wi_stormgap"
+	j := seedJob(r, wi)
+	installOldAgent(t, sp, j)
+
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+		t.Fatalf("first recovery must relaunch, got %+v", msg)
+	}
+	// inside the window: ledger 1 — still below the bound, relaunches
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+		t.Fatalf("in-window refire must still relaunch below the bound, got %+v", msg)
+	}
+	// past the window: the ledger resets, the episode is fresh
+	j.mu.Lock()
+	j.lastRecoveryAt = time.Now().Add(-time.Hour)
+	j.mu.Unlock()
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+		t.Fatalf("a post-gap recovery must relaunch with a fresh ledger, got %+v", msg)
 	}
 	if h := j.agent; h != nil {
 		_ = h.Terminate(2e9)

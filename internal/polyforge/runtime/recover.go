@@ -45,6 +45,34 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	if err := j.transition(StateRecovering); err != nil {
 		return // lost the race to SEALING/DONE: the fence did its job
 	}
+	// The v2 entry-rate storm guard (the #97 lesson): a relaunch that
+	// SUCCEEDS as a spawn but dies within seconds used to reset the
+	// failure budget on every iteration — a poisoned capsule (a rejected
+	// envelope, a wedged driver) then recovered forever at ~1 Hz, each
+	// iteration spawning a real step process and pushing a commitDirty.
+	// The budget's reset-on-success cannot see a fast death, so the RATE
+	// of re-entry is the missing signal: a recoverCore that fires again
+	// inside the stability window (default 60s) is one storm unit,
+	// counted on its own ledger; a re-entry after a stable gap resets it
+	// (the previous relaunch survived — a fresh episode). The counter is
+	// deliberately separate from recoverFails: ladder-internal retries
+	// and their reset-on-success semantics (§三) are unchanged.
+	now := time.Now()
+	j.mu.Lock()
+	if !j.lastRecoveryAt.IsZero() && now.Sub(j.lastRecoveryAt) < r.recoveryStabilityWindow() {
+		j.stormFails++
+	} else {
+		j.stormFails = 0
+	}
+	j.lastRecoveryAt = now
+	storm := j.stormFails
+	j.mu.Unlock()
+	if storm >= r.cfg.MaxRecoveries {
+		r.boundedFail(ctx, j, fmt.Sprintf(
+			"recovery storm: %d recoveries re-fired inside the %.0fs stability window (latest cause %q) — the relaunch is dying faster than it can stabilize",
+			storm, r.recoveryStabilityWindow().Seconds(), cause))
+		return
+	}
 	// Candidate-chain advancement (I2/INV-1g): ONLY a provider-class
 	// recovery moves the ordinal — business FAIL, rewind, hang, plain
 	// death and daemon restart never do (the mirror rule of
@@ -79,6 +107,14 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	// renames, identical content). Best-effort, never blocks recovery.
 	r.ensureMaterialized(j)
 
+	// v2 bundle freshness (the stale-capsule lesson): the operator may
+	// have evolved the workflow bundle under workflows-dir AFTER this
+	// WI's claim; recovery is the heal point where the capsule is
+	// re-pinned to the checkout's current content and re-materialized,
+	// so the relaunched driver validates against the CURRENT graph
+	// instead of the claim-era one. Best-effort, loud on failure.
+	r.refreshBundle(j)
+
 	// The storm guard (§三): each FAILED recovery ladder spends one unit
 	// of the budget; a successful recovery RESETS it (a healthy relaunch
 	// must never inherit earlier failures). Only when MaxRecoveries
@@ -89,6 +125,16 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 		// execution.json and continues from the current step; the recovery
 		// steps above — killTree, commitDirty — already ran).
 		if r.cfg.AgentStarter != nil {
+			// The relaunch is a fresh derivation (B2): advance the counter,
+		// exactly as the legacy spawnAgent path does. The step ordinals
+		// the relaunched driver derives seed from this counter — without
+		// the advance, every restart re-derives the SAME ordinal and a
+		// stale drop file passes the fence it was supposed to be fenced
+		// out by (#97).
+			j.mu.Lock()
+			j.spawnN++
+			ordinal := int64(j.spawnN)
+			j.mu.Unlock()
 			h, err := r.cfg.AgentStarter(ctx, AgentStartInput{
 				WI:            j.wi,
 				Project:       j.project,
@@ -96,13 +142,18 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 				BundleName:    j.bundleName,
 				BundleDigest:  j.bundleDigest,
 				SessionHandle: j.sessionFingerprint,
-				SpawnN:        int64(j.spawnN),
+				SpawnN:        ordinal,
 				Spawner:       r.spawner,
 			})
 			if err == nil {
 				j.mu.Lock()
 				j.agent = h
 				j.mu.Unlock()
+				// persisted with the advanced counter (crash-safe, same
+				// as the legacy lane's spawnAgent write)
+				if perr := r.persist(); perr != nil {
+					fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+				}
 				r.recovered(j, h, cause, false)
 				return
 			}
@@ -229,6 +280,13 @@ func (r *Runtime) recovered(j *job, h AgentHandle, cause string, resumed bool) {
 		Detail:    cause,
 		SessionID: j.sessionID,
 	})
+}
+
+func (r *Runtime) recoveryStabilityWindow() time.Duration {
+	if r.cfg.RecoveryStabilityWindow > 0 {
+		return r.cfg.RecoveryStabilityWindow
+	}
+	return 60 * time.Second
 }
 
 // advanceCandidate moves the effective model-candidate ordinal one

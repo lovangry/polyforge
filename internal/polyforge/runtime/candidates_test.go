@@ -410,6 +410,8 @@ func newTestRuntimeAt(t *testing.T, hub Aihub, sp Spawner, dataDir string) (*Run
 		MaxResumeFails: 2,
 		MaxRecoveries:  2,
 		SendBound:      2 * time.Second,
+		// episodes, not wall time (see newTestRuntime)
+		RecoveryStabilityWindow: time.Nanosecond,
 	}
 	toOB := make(chan protocol.RTMsg, 64)
 	fromOB := make(chan protocol.OBMsg, 64)

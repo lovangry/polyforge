@@ -154,6 +154,11 @@ type jobRecord struct {
 	RecoverFails int    `json:"recover_fails"` // consecutive failed recoveries
 	ResumeFails  int    `json:"resume_fails"`
 	ResumeDead   bool   `json:"resume_dead"`
+	// StormFails/LastRecoveryAt persist the entry-rate storm guard (v2):
+	// rapid recoverCore re-entries survive a daemon crash inside the
+	// storm window. RFC3339Nano; zero = never recovered.
+	StormFails     int    `json:"storm_fails"`
+	LastRecoveryAt string `json:"last_recovery_at,omitempty"`
 	Transcript   string `json:"transcript"`
 	// LiveTranscript is the file the current derivation appends to (a
 	// fresh pi derivation's harness-store live path, or the resume
@@ -193,6 +198,8 @@ func (j *job) record() *jobRecord {
 		RecoverFails:       j.recoverFails,
 		ResumeFails:        j.resumeFails,
 		ResumeDead:         j.resumeDead,
+		StormFails:         j.stormFails,
+		LastRecoveryAt:     stampIfSet(j.lastRecoveryAt),
 		Transcript:         j.transcript,
 		LiveTranscript:     j.liveTranscript,
 		BundleName:         j.bundleName,
@@ -238,6 +245,8 @@ func jobFromRecord(rec *jobRecord) *job {
 		recoverFails:     rec.RecoverFails,
 		resumeFails:      rec.ResumeFails,
 		resumeDead:       rec.ResumeDead,
+		stormFails:       rec.StormFails,
+		lastRecoveryAt:   parseStamp(rec.LastRecoveryAt),
 		transcript:       rec.Transcript,
 		liveTranscript:   rec.LiveTranscript,
 		bundleName:       rec.BundleName,
@@ -295,3 +304,25 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 }
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+// stampIfSet renders t as RFC3339Nano ("" for the zero time — the
+// storm guard's never-recovered marker).
+func stampIfSet(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// parseStamp is stampIfSet's inverse; an unparsable value reads as
+// never (a torn record must never look like a live storm window).
+func parseStamp(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}

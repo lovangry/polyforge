@@ -27,11 +27,13 @@ package driver
 //     The run collects it, stamps it into the R14 staging location
 //     artifacts/steps/<step>/s<spawn_n>/result.json — durably
 //     discoverable: the NEXT inherit step's handoff is read from
-//     exactly there — and tears the process down. A crash between the
-//     envelope write and collection loses nothing durable: the drop
-//     path is keyed by the spawn ordinal and a re-dispatch takes a
-//     fresh ordinal (B2), so a stale drop file can never be mistaken
-//     for a live derivation's result.
+//     exactly there — consumes the drop (single-shot collection) and
+//     tears the process down. A crash between the envelope write and
+//     collection loses nothing durable: the drop path is keyed by the
+//     spawn ordinal, every re-dispatch takes a fresh ordinal (B2 — the
+//     driver-path relaunches advance the counter too), and a collected
+//     drop is removed, so a stale drop file is never mistaken for a
+//     live derivation's result.
 
 import (
 	"context"
@@ -677,6 +679,18 @@ func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
 			if err := r.archive(res); err != nil {
 				_ = r.handle.Terminate(teardownBound)
 				return nil, fmt.Errorf("driver: step %s spawn %d result staging failed: %w", r.sp.StepID, r.sp.SpawnN, err)
+			}
+			// Consume the drop (the #97 lesson): collection is single-shot.
+			// The archived copy under artifacts/steps/<step>/s<N>/ is the
+			// durable record; the drop left in place would be re-collected
+			// verbatim by the NEXT dispatch that lands on this ordinal —
+			// with a rejected envelope that was a reject/relaunch death
+			// loop, because nothing else ever removed the file. A failed
+			// remove is logged and never fatal: the fence (spawn ordinal)
+			// still guards a stale re-read.
+			if rerr := os.Remove(r.dropPath); rerr != nil && !os.IsNotExist(rerr) {
+				fmt.Fprintf(os.Stderr, "driver: step %s spawn %d drop removal failed (stale re-read still fenced): %v\n",
+					r.sp.StepID, r.sp.SpawnN, rerr)
 			}
 			if terr := r.handle.Terminate(teardownBound); terr != nil {
 				fmt.Fprintf(os.Stderr, "driver: step %s spawn %d teardown after result failed (envelope already collected): %v\n",

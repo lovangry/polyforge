@@ -163,8 +163,22 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 		return fmt.Errorf("%w: envelope speaks %d, driver speaks %d",
 			ErrProtocolMismatch, res.ProtocolVersion, ResultProtocolVersion)
 	}
-	if !validUUID(res.ResultID) {
-		return fmt.Errorf("driver: result_id %q is not a UUID", res.ResultID)
+	if id := strings.TrimSpace(res.ResultID); id == "" {
+		return fmt.Errorf("driver: result_id is empty")
+	} else if len(id) > 128 {
+		return fmt.Errorf("driver: result_id %q exceeds 128 characters", id)
+	} else if strings.ContainsAny(id, " \t\r\n") {
+		return fmt.Errorf("driver: result_id %q contains whitespace", id)
+	} else {
+		// Tolerant id (the #97 lesson): a well-meaning step agent minted
+		// a readable slug ("grill-review-ask-batch-1") where the UUID
+		// contract asked for a random one. The id's whole duty is to be a
+		// non-empty, collision-honest idempotency key — a stable readable
+		// slug serves it as well as a UUID, and rejecting it sent the
+		// driver into a reject/relaunch death loop (nothing consumed the
+		// drop, so every restart re-collected the same envelope). Accept
+		// any single-token id; the prompt still asks for a fresh UUID.
+		res.ResultID = id
 	}
 	if !res.Outcome.Valid() {
 		return fmt.Errorf("driver: unknown outcome %q", res.Outcome)
@@ -353,8 +367,9 @@ func hasArtifact(refs []ArtifactRef, rel string) bool {
 }
 
 // validUUID answers whether s is shaped like a UUID (8-4-4-4-12 hex).
-// The result_id is the idempotency key: a malformed key is rejected at
-// the envelope rather than discovered later as a set-entry collision.
+// No longer the accept gate (see ValidateStepResult's tolerant id), but
+// kept as the documented shape the step prompt asks for and callers may
+// still assert on.
 func validUUID(s string) bool {
 	if len(s) != 36 {
 		return false

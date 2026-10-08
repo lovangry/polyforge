@@ -65,6 +65,13 @@ type Config struct {
 	CgroupRoot          string        // cgroup v2 root; empty ⇒ layer-0 unavailable
 	MaxResumeFails      int           // consecutive resume failures before fresh (default 2)
 	MaxRecoveries       int           // consecutive FAILED recoveries before bounded fail (default 2)
+	// RecoveryStabilityWindow bounds the v2 entry-rate storm guard: a
+	// recoverCore that re-fires inside this window (default 60s) counts
+	// one storm unit; MaxRecoveries rapid re-entries bounded-fail the WI
+	// (a relaunch dying faster than it can stabilize never resets the
+	// budget — the #97 death loop). A re-entry after a stable gap resets
+	// the storm ledger: an isolated later failure is a fresh episode.
+	RecoveryStabilityWindow time.Duration
 	SendBound           time.Duration // bound on one RT→OB send (default 5s)
 	// ReleaseRetryWindow bounds the release lane (NEW-2): how long a
 	// deferred observe release (RTFinished) whose first bounded send
@@ -120,6 +127,9 @@ func (c *Config) fill() {
 	}
 	if c.MaxRecoveries <= 0 {
 		c.MaxRecoveries = 2
+	}
+	if c.RecoveryStabilityWindow <= 0 {
+		c.RecoveryStabilityWindow = 60 * time.Second
 	}
 	if c.SendBound <= 0 {
 		c.SendBound = 5 * time.Second
@@ -244,6 +254,14 @@ type job struct {
 	recoverFails int // consecutive FAILED recoveries; reset on success
 	resumeFails  int
 	resumeDead   bool
+	// stormFails/lastRecoveryAt feed the v2 entry-rate storm guard: a
+	// recoverCore re-entry inside RecoveryStabilityWindow counts one
+	// storm unit (a fast-dying relaunch never proves stability); a
+	// re-entry after the gap resets the ledger. Separate from
+	// recoverFails so the ladder's own reset-on-success semantics stay
+	// untouched.
+	stormFails     int
+	lastRecoveryAt time.Time
 	// cleanPause mirrors the hub's operator-pause flag: latched true by
 	// the pause close (Finding 2) so the retained Paused record carries
 	// the same marker the hub does; false everywhere else (a graceful
@@ -818,6 +836,16 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	var h AgentHandle
 	var err2 error
 	if r.cfg.AgentStarter != nil {
+		// The driver derivation IS a derivation (B2): advance the counter
+		// the legacy spawnAgent path advances, so the RTStarted emission
+		// carries SpawnN ≥ 1. The observe lane refuses to attach a monitor
+		// on SpawnN ≤ 0 ("RTStarted without handle/spawn_n/wi-info"), and
+		// the step ordinals the driver derives seed from this counter —
+		// both the fence and the monitor face need it to move.
+		j.mu.Lock()
+		j.spawnN++
+		spawnN := int64(j.spawnN)
+		j.mu.Unlock()
 		h, err2 = r.cfg.AgentStarter(ctx, AgentStartInput{
 			WI:            j.wi,
 			Project:       j.project,
@@ -825,7 +853,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			BundleName:    j.bundleName,
 			BundleDigest:  j.bundleDigest,
 			SessionHandle: j.sessionFingerprint,
-			SpawnN:        int64(j.spawnN),
+			SpawnN:        spawnN,
 			Spawner:       r.spawner,
 		})
 		if err2 != nil {

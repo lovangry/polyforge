@@ -406,6 +406,11 @@ func TestStepRunWaitCollectsAndArchivesEnvelope(t *testing.T) {
 	if !h.terminated() {
 		t.Fatal("handle must be terminated after envelope collection")
 	}
+	// the drop is CONSUMED (#97): a collected envelope must not sit in
+	// pending-results for the next same-ordinal dispatch to re-collect
+	if _, err := os.Stat(filepath.Join(capDir, capsule.DirRuntimeState, "pending-results", "5.json")); !os.IsNotExist(err) {
+		t.Fatalf("drop file must be removed after collection, stat err=%v", err)
+	}
 }
 
 func TestStepRunWaitFillsOmittedIdentity(t *testing.T) {
