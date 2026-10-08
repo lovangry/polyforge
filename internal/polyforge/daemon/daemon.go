@@ -509,7 +509,26 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// reconciled runtime, never a seeded record's pre-reconciliation
 	// snapshot (stale agent pids, superseded lineages).
 	if err := d.rt.Restart(d.runCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon: restart reconciliation failed: %v\n", err)
+		// Startup abort (#103): the runtime could not be reconciled — for
+		// a recorded mid-flight work item whose capsule is missing at the
+		// active workspace, serving would present clients an unreconciled
+		// runtime and proceed with a WI whose local scene is gone (the
+		// silent-proceed behavior the spec forbids). Unwind as a startup
+		// abort: close the face this process bound but never served, stop
+		// the lanes, collect any agent the reconciliation already
+		// recovered, and persist NOTHING — state.json stays the
+		// pre-reconciliation truth, so the next start (after the manual
+		// remediation the error names) reconciles afresh. Run returns the
+		// error (it identifies the affected work item): the process exits
+		// non-zero.
+		d.closeFace()
+		d.abortStartup()
+		for _, ji := range d.rt.List() {
+			if ji.Agent != nil {
+				_ = ji.Agent.Terminate(10 * time.Second)
+			}
+		}
+		return fmt.Errorf("restart reconciliation failed: %w", err)
 	}
 	d.reattachRecovered()
 
