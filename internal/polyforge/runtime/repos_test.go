@@ -230,3 +230,127 @@ func TestCloneFailureBlocksTicket(t *testing.T) {
 		t.Fatal("unsafe-name start left a live job")
 	}
 }
+
+// The durability half of the claim lane (polyforge#108): a bounded-fail
+// re-claim on a NEW session quarantines the old capsule and re-clones
+// repos/<name> from its bare origin — which knows nothing of the dead
+// session's commits. When the dead session published its head to the
+// WI's carrier ref (refs/pf-task/<name>, written by every capsule
+// publish; the gitops half is pinned in its own package), the fresh
+// clone is moved there: the worktree stands at the carried head, the
+// work files are back, and capsule.json records the carried head as the
+// claim-time baseline. The task origin itself never moves.
+func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
+	setGitIdentity(t)
+	remoteDir, url, head := fakeTaskRemote(t)
+	hub := newFakeHub()
+	hub.repos = []api.ProjectRepo{{Name: "app", URL: url}}
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+
+	// The WI's bare hub — the capsule-chain remote the claim clones from
+	// and the carrier lane publishes to. Pre-created and pinned to main
+	// the way aihub's EnsureBare does, so Start #1 can clone it (empty)
+	// and the carrier ref has a place to land.
+	hubRoot := t.TempDir()
+	hubBare := filepath.Join(hubRoot, "wi_durab.git")
+	if out, err := exec.Command("git", "init", "--bare", "-b", "main", hubBare).CombinedOutput(); err != nil {
+		t.Fatalf("hub bare init: %v: %s", err, out)
+	}
+	// aihub's EnsureBare advertises push options (every pf push carries
+	// one); mirror it so the session's own publishes land cleanly.
+	if out, err := exec.Command("git", "--git-dir", hubBare, "config", "receive.advertisePushOptions", "true").CombinedOutput(); err != nil {
+		t.Fatalf("hub bare config: %v: %s", err, out)
+	}
+	r.cfg.GitRemoteBase = hubRoot
+
+	wi := "wi_durab"
+	if err := r.Start(context.Background(), wi); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	capDir := r.capsuleDir(wi)
+	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
+	if got := capsuleReposOf(t, capDir)["app"]; got != head {
+		t.Fatalf("first-claim baseline = %q, want the origin head %q", got, head)
+	}
+
+	// The agent's work: one local commit on top of the claim-time clone,
+	// pushed NOWHERE near the task origin.
+	if err := os.WriteFile(filepath.Join(repoDir, "work.txt"), []byte("durable work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@invalid", "commit", "-m", "repo work"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repoDir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	out, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	workHead := strings.TrimSpace(string(out))
+	if workHead == head {
+		t.Fatal("the work commit must differ from the origin head")
+	}
+
+	// The publish lane's carrier write (what gitops.pushTaskRefsLocked
+	// does on every capsule publish): mirror the work head into the WI
+	// bare repo under the carrier namespace.
+	if out, err := exec.Command("git", "-C", repoDir, "push", hubBare, "HEAD:refs/pf-task/app").CombinedOutput(); err != nil {
+		t.Fatalf("carrier write: %v: %s", err, out)
+	}
+
+	// Session A dies mid-flight; session B re-claims (takeover: the hub
+	// still holds the dead session, exactly like the post-bounded-fail
+	// unblock path).
+	j := r.jobOf(wi)
+	r.killAgentTree(j)
+	r.dropJob(j)
+	writeStateFile(t, r, nil)
+	if err := r.StartIntent(context.Background(), wi, "takeover"); err != nil {
+		t.Fatalf("re-claim Start: %v", err)
+	}
+
+	// The old scene was quarantined (renamed, never deleted).
+	var quarantined bool
+	ents, err := os.ReadDir(filepath.Dir(capDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), wi+".quarantined.") {
+			quarantined = true
+		}
+	}
+	if !quarantined {
+		t.Fatalf("no %s.quarantined.<ts> sibling: %v", wi, ents)
+	}
+
+	// The oracle: the re-claimed worktree stands at the carried head with
+	// the work files back, and the baseline names it.
+	repoB := filepath.Join(r.capsuleDir(wi), capsule.DirRepos, "app")
+	got, err := exec.Command("git", "-C", repoB, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse (re-claimed): %v", err)
+	}
+	if strings.TrimSpace(string(got)) != workHead {
+		t.Fatalf("re-claimed repos/app HEAD = %q, want the carried head %q", strings.TrimSpace(string(got)), workHead)
+	}
+	if b, err := os.ReadFile(filepath.Join(repoB, "work.txt")); err != nil || string(b) != "durable work\n" {
+		t.Fatalf("re-claimed work.txt wrong: %q, %v", b, err)
+	}
+	if got := capsuleReposOf(t, r.capsuleDir(wi))["app"]; got != workHead {
+		t.Fatalf("re-claim baseline = %q, want the carried head %q", got, workHead)
+	}
+	// The task origin never moved: ship is the only push path, and
+	// nothing here pushed to it.
+	originHead, err := exec.Command("git", "-C", remoteDir, "rev-parse", "HEAD").Output()
+	if err != nil || strings.TrimSpace(string(originHead)) != head {
+		t.Fatalf("task origin moved: %q (%v), want %q", strings.TrimSpace(string(originHead)), err, head)
+	}
+
+	if err := r.Stop(context.Background(), wi, protocol.FinishWrapped); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	unseal(t, r.capsuleDir(wi))
+	unseal(t, repoB)
+}
