@@ -774,3 +774,25 @@ func TestMachinesHelpStatesAdminOnly(t *testing.T) {
 		t.Errorf("help output must state the admin-only requirement:\n%s", stdout)
 	}
 }
+
+// TestDaemonHelpNewOnlyWorkspace pins the #103 help surface: `pf help
+// daemon` documents the REQUIRED -workspace flag and the
+// POLYFORGE_WORKSPACE env mirror — and never presents the deleted
+// -workspace-root flag or POLYFORGE_WORKSPACE_ROOT env as available.
+func TestDaemonHelpNewOnlyWorkspace(t *testing.T) {
+	code, stdout, stderr := runPf(t, map[string]string{}, "help", "daemon")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	for _, want := range []string{"--workspace", "POLYFORGE_WORKSPACE", "capsules"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("daemon help must mention %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "--workspace-root") {
+		t.Errorf("daemon help must not present the deleted --workspace-root flag:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "POLYFORGE_WORKSPACE_ROOT") {
+		t.Errorf("daemon help must not present the deleted POLYFORGE_WORKSPACE_ROOT env:\n%s", stdout)
+	}
+}

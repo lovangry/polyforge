@@ -92,15 +92,22 @@ bin/pf --config /tmp/pf-quickstart/cli.toml file create --project demo \
 ```
 
 **6. Start the local daemon** (Runtime + Observe over its own UDS
-socket; keep it running in a second terminal):
+socket; keep it running in a second terminal). The workspace is REQUIRED
+— the daemon refuses to start without `-workspace` (or
+`POLYFORGE_WORKSPACE`) and creates nothing but `capsules/` inside it:
 
 ```
+mkdir -p /tmp/pf-quickstart/workspace
 bin/pf daemon --config /tmp/pf-quickstart/cli.toml \
   --api-key <MACHINE_KEY> \
   --data-dir /tmp/pf-quickstart/daemon-data \
-  --workspace-root /tmp/pf-quickstart/workspace \
+  --workspace /tmp/pf-quickstart/workspace \
   --machine-id m-smoke
 ```
+
+If the workspace lives inside a git checkout, ignore the capsule
+directory in its `.gitignore` (`capsules/`) — the daemon never touches
+`.gitignore` itself.
 
 **7. Submit the work item and watch the agent work:**
 
@@ -261,7 +268,7 @@ the `PF_*` entries.
 | `--project NAME` | `PF_PROJECT` | — | Ready-queue project scope for batch/drain. |
 | `--machine-id ID` | `POLYFORGE_MACHINE_ID` | `m-<hostname>` | Machine identity claims and leases are recorded under. |
 | `--data-dir DIR` | `POLYFORGE_DATA_DIR` | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
-| `--workspace-root DIR` | `POLYFORGE_WORKSPACE_ROOT` | `<data-dir base>/workspace` | Root the per-WI capsules are materialized under. |
+| `--workspace DIR` | `POLYFORGE_WORKSPACE` | (required — no default) | Capsule base: per-WI capsules live at `<DIR>/capsules/<wi_id>`. The directory must pre-exist; the daemon creates and writes only `capsules/` inside it and refuses to start when it is missing or unusable. |
 | `--workflows-dir DIR` | — | `./workflows` | Workflow-bundle checkout the executor reads. |
 | `--executor-prompt FILE` | — | `./skills/pf-execute/SKILL.md` | Executor skill file injected into every agent. |
 | `--pi-bin PATH` | — | `pi` | Harness binary the agent processes are derived from. |

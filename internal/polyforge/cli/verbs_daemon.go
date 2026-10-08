@@ -622,8 +622,11 @@ Launch flags (with environment variable and default, where one exists):
       machine aihub api key (env PF_API_KEY)
   --machine-id ID
       machine identity (env POLYFORGE_MACHINE_ID; default m-<hostname>)
-  --workspace-root PATH
-      capsule workspace root (env POLYFORGE_WORKSPACE_ROOT)
+  --workspace PATH
+      REQUIRED: capsule workspace — per-WI capsules live at
+      <workspace>/capsules/<wi_id> (env POLYFORGE_WORKSPACE; NO default —
+      the daemon refuses to start without it, validates the directory
+      exists, and creates/writes only capsules/ inside it)
   --data-dir PATH
       daemon data dir (env POLYFORGE_DATA_DIR)
   --project NAME

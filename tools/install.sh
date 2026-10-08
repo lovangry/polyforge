@@ -115,7 +115,13 @@ elif [ -S "$DAEMON_SOCKET" ] && curl -s --unix-socket "$DAEMON_SOCKET" http://lo
   echo "   daemon already running ($(curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('machine_id','?'))" 2>/dev/null))"
 else
   MACHINE_ID=$(hostname -s | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+  # The installer (not the daemon) owns workspace creation: the daemon
+  # requires the dir to pre-exist and creates only capsules/ inside it.
   mkdir -p "$DAEMON_DATA/ws"
+  if [ ! -f "$DAEMON_DATA/ws/.gitignore" ] || ! grep -qx 'capsules/' "$DAEMON_DATA/ws/.gitignore"; then
+    printf 'capsules/\n' >> "$DAEMON_DATA/ws/.gitignore"
+    echo "   added capsules/ to $DAEMON_DATA/ws/.gitignore (daemon never touches .gitignore)"
+  fi
   nohup "$BIN" daemon \
     -server "$API" \
     -api-key "$KEY" \
@@ -123,7 +129,7 @@ else
     -mode interactive -project polyforge \
     -data-dir "$DAEMON_DATA" \
     -socket "$DAEMON_SOCKET" \
-    -workspace-root "$DAEMON_DATA/ws" \
+    -workspace "$DAEMON_DATA/ws" \
     -workflows-dir "$WORKFLOWS" \
     -executor-prompt "$EXECUTOR" \
     -max-concurrent-jobs 4 \
