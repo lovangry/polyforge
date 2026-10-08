@@ -13,7 +13,7 @@
 - 三类 skill 的权威布局与内容边界（§2.1/§3）：路由 skill（`skills/polyforge/`）、执行 skill（`skills/pf-execute/`）、step skill（`workflows/<bundle>/agents/*.md`，即 step agent 定义文件）。
 - `workflow.md` 的两段构成（§4.1/§4.4）：YAML frontmatter 是本 WI 执行图的**唯一结构 schema**（steps 顺序/id/kind/interactive/gate/on_fail/budget/model_candidates，及 workflow 级声明），达到「任一 frontmatter 可据此机械校验」的程度；Markdown 正文是流程级说明，由 WI Agent（wi agent）第 0 步加载。
 - bundle digest 的唯一计算规则（§4.5）与创建 WI 时 AIHub 服务端的 frontmatter 校验 + digest 固化（§4.6；Core 侧落库只有 `bundle_name` + `bundle_digest` + 三个预算基线 scalar，权威见 `02-aihub-core.md#§4.4`/`#§4.5`）。
-- model_candidates 的声明与切换语义（§4.1/§6.3）；grill（interactive，位于 spec 之前 + spec 产物的总结性确认问答）与 e2e-author（§4.2/§4.3）；参考流程 grill → spec → grill-review → plan → code → e2e-author → verification → e2e-run → review（review 可处于流程中的任意位置，§4.2）。
+- model_candidates 的声明与切换语义（§4.1/§6.3）；grill（interactive，位于 spec 之前 + spec 产物的总结性确认问答）与 e2e-author（§4.2/§4.3）；参考流程 grill → spec → grill-review → plan → e2e-author → e2e-baseline → code → e2e-run → review → verification → release（review 可处于流程中的任意位置，§4.2）。
 - 预算（budget）声明的层次与超预算行为（§6.6）。
 - 执行语义（§6）：顺序成功路径、业务 gate FAIL 的有界 on_fail rewind、基础设施失败在当前 step 原地 resume（按候选顺序有界切换模型候选），以及驱动主循环对「全部完成」与「失败终止」两类终态的显式区分。
 
@@ -46,7 +46,7 @@
 - **on_fail rewind**：业务 gate FAIL 时向更早 step 的有界回退；上界见 §6.2。
 - **model_candidates**：一个 step 的有序模型候选列表，声明在 workflow.md frontmatter（defaults 可整体缺省，step 可覆盖，V9/§6.3）；它是模型选择的唯一载体——step skill frontmatter 不写 `model`（§4.4，INV-1g）。
 - **grill**：interactive 追问机制，由参考流程中两个显式 step 实现（§4.2/§4.3）：`grill`（spec 之前，把模糊需求问清）与 `grill-review`（spec 之后，对 spec 产物做一次总结性确认问答）。
-- **e2e-author**：在 code 之后编写端到端验收场景的 step（§4.2）。
+- **e2e-author**：在 code 运行之前对照 spec 编写端到端验收场景的 step（§4.2）；场景由两个执行者消费——`e2e-baseline`（code 之前对照实现前的工作树铺 red bar）与 `e2e-run`（code 之后复跑同一套场景的硬 gate）。
 - **gate FAIL / 基础设施失败**：前者是 review/verification 等业务闸对产出质量的否定判定；后者是进程崩溃、断网、机器重启、上游限流、step agent 输出不符合 `output` schema（§4.4）等**未产出任何业务判定**的失败。二者的区分是本文核心不变量之一（`00-architecture.md#§2.3` INV-9，本文 §6）。
 - **interactive step**：需要人在会话内驱动才能完成的 step（frontmatter 标注 `interactive: true`），grill 与 grill-review 均属此类。
 - **`next_step_by_order`**：驱动主循环用来选出「下一个待执行 step」的判定过程（§6.5）；其唯一职责是在执行图中定位最早处于非终止态的 step，**不判断也不影响** workflow 自身是成功完成还是已失败终止——那是调用方（§6.5 驱动主循环）在其返回空结果后必须另行判定的责任。
@@ -143,12 +143,13 @@ vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontm
 2. `spec`（`kind: spec`；消费 `grill` 的问答记录产物）
 3. `grill-review`（`kind: qa`，`interactive: true` 且 `gate: true`；消费 `spec` 的产物；`on_fail: {action: rewind, target: spec}`）
 4. `plan`（`kind: author`；消费 `spec` 的产物）
-5. `code`（`kind: code`；消费 `plan` 的产物）
-6. `e2e-author`（`kind: author`；消费 `spec` 的产物）
-7. `verification`（`kind: gate`，`gate: true`；`on_fail: {action: rewind, target: code}`）
-8. `e2e-run`（`kind: code`；消费 `e2e-author` 的场景产物）
+5. `e2e-author`（`kind: author`；消费 `spec` 的产物，在 code 之前编写端到端验收场景）
+6. `e2e-baseline`（`kind: code`，非 gate；消费 `e2e-author` 的场景产物，对照实现前的工作树执行场景并把红 bar 交给 `code`）
+7. `code`（`kind: code`；消费 `plan` 的产物与 `e2e-baseline` 铺好的验收 bar）
+8. `e2e-run`（`kind: code`，`gate: true`；复跑 `e2e-author` 编写的同一套场景；`on_fail: {action: rewind, target: code}`）
 9. `review`（`kind: review`，`gate: true`；`on_fail: {action: rewind, target: code}`）
-10. `release`（发版钩子槽位：`kind: code` 缺省或 `gate` 按项目自选，`gate: true` 建议；`on_fail` 按项目自定，缺省 `{action: rewind, target: review}`）
+10. `verification`（`kind: gate`，`gate: true`；最后一道机器闸，在 `review` 之后、`release` 之前复跑完整绿灯 bar；`on_fail: {action: rewind, target: code}`）
+11. `release`（发版钩子槽位：`kind: code` 缺省或 `gate` 按项目自选，`gate: true` 建议；`on_fail` 按项目自定，缺省 `{action: rewind, target: review}`）
 
 **release step（发版钩子，定稿裁定）**：release 是 bundle 内的一个普通 step 槽位——平台零发版专用代码，全部复用既有 step 机器（inputs/output schema/worktree/预算/rewind/边界同步）。不新增 step kind：沿用 `code`（缺省，产生版本号 commit/tag 的 diff）或 `gate`（纯验证型发版），按项目自选；失败语义建议 `gate: true`——发版失败属业务判定，走既有有界 `on_fail` rewind。`agents/release.md` 是随参考 bundle 交付的模板骨架（版本号来源/构建/打 tag/上传目标/渠道晋升，全为 TODO 占位），各项目在各自 bundle 中自填——发版逻辑 per-project，多项目天然隔离。平台自身的发版（`aihub` 服务二进制与工作机二进制二产物）是同一钩子的一个实例，不另立发版模型；`pf upgrade` 只是消费已发布制品的部署管道（`07-deployment-pilot.md#§6`）。
 
