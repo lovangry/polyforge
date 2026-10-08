@@ -3,49 +3,48 @@ package test
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
 
-// v1_s03: operator pause → unpause under the v1.5 session model, in the
-// RETAINED-RECORD shape the v1.5 review's Finding 2 mandated.
+// v1_s03: operator pause → unpause under the v1.5 session model,
+// driver/envelope edition — the parked envelope agent is the live
+// proof (a driver parked on an open needs_input question is designed
+// stillness, and the pause/resume machinery around it is the thing
+// under test).
 //
 //   - pf pause = the daemon close path carrying session-end(paused,
 //     clean_pause=true): the hub keeps the session row (M3 — paused is
 //     not terminal) and marks the operator-pause flag. Locally the close
-//     KILLS the tree and commits+pushes the dirty capsule state, then
-//     RETAINS the job record in the runtime's paused state — the
-//     session secret survives in state.json (Finding 2: the old
-//     drop-the-record contract destroyed it, so the M3 attach could
-//     never fire and `pf resume` printed a promise no restart could
-//     fulfill). There is NO read-only seal and NO fresh claim: the SAME
-//     session keeps owning the paused work item.
+//     terminates the driver (and its live step process with it), commits
+//     and pushes the dirty capsule state, then RETAINS the job record in
+//     the runtime's paused state. There is NO read-only seal and NO fresh
+//     claim: the SAME session keeps owning the paused work item.
 //   - pf resume = the whitelisted WI PATCH clean_pause=false — and
 //     nothing else: the paused work item stays with its holder session.
-//     The holder daemon does NOT pick the resume up while it is live
-//     (this phase); the continuation the code offers is the holder's
-//     next start, whose restart reconciliation attaches (M3) and
-//     resumes from the retained record.
-//   - the scenario drives exactly that: after the resume flag lands,
-//     the holder daemon restarts (graceful stop + fresh start on the
-//     same data dir/workspace), the attach fires, the resumed derivation
-//     (resume_actions) continues the SAME session and wraps.
+//   - the scenario drives exactly that: after the resume flag lands, the
+//     holder daemon restarts (graceful stop + fresh start on the same
+//     data dir/workspace), the attach fires, the resumed driver parks on
+//     the SAME persisted question, and the owner's answer completes the
+//     workflow — the terminal wiring wraps it.
 func TestV1S03PauseResume(t *testing.T) {
 	inst := newV1Install(t)
+	const qid = "q_v1s03"
 	wi := inst.newWI(t, "s03: pause then resume (retained record)",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "park"},
-		},
-		// The attach-resume derivation continues the paused session.
-		[]map[string]any{{"do": "step", "id": "polish"}, {"do": "wrap"}})
-	d := newV1Daemon(t, inst)
+			// The grill envelope parks the driver on an open question: the
+			// paused-envelope-agent shape the pause close interrupts.
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
+				"question": "s03: park here until the operator is ready."},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
+		}, nil)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
-		return d.agentPIDOf(t, wi) > 0
-	})
+	waitQuestion(t, d, wi, qid, 30*time.Second)
 	sessBefore := inst.sessionOf(t, wi)
 	if sessBefore.Fingerprint == "" {
 		t.Fatal("running work item carries no session")
@@ -66,7 +65,9 @@ func TestV1S03PauseResume(t *testing.T) {
 
 	// Finding 2: the record is RETAINED locally. The daemon's status
 	// face shows the paused job, still carrying the SAME public
-	// session fingerprint (the secret never left state.json).
+	// session fingerprint (the secret never left state.json). A driver
+	// job carries no live agent pid by construction (the handle is the
+	// daemon-side driver goroutine) — the retained record is agentless.
 	st := d.status(t)
 	if len(st.Jobs) != 1 || st.Jobs[0].WorkItemID != wi || st.Jobs[0].Status != "paused" {
 		t.Fatalf("the paused job must be retained in the paused state: %+v", st.Jobs)
@@ -74,7 +75,7 @@ func TestV1S03PauseResume(t *testing.T) {
 	if st.Jobs[0].SessionFingerprint != sessBefore.Fingerprint {
 		t.Fatalf("the retained record lost the session fingerprint: %+v", st.Jobs)
 	}
-	if pid := d.agentPIDOf(t, wi); pid != 0 {
+	if pid := st.Jobs[0].AgentPID; pid != 0 {
 		t.Fatalf("the pause close must record no live agent, got pid %d", pid)
 	}
 	// The retained scene is NOT sealed read-only (no read-only seal on a
@@ -89,6 +90,11 @@ func TestV1S03PauseResume(t *testing.T) {
 	pausedCommits := inst.bareCommitCount(t, wi)
 	if pausedCommits == 0 {
 		t.Fatal("paused chain never reached the server")
+	}
+	// The pause committed the parked workflow state: the pending question
+	// is durable in the retained capsule.
+	if x := readExecution(t, d.capsuleDir(wi)); x.Steps["grill"].PendingQuestion == nil {
+		t.Fatal("the parked question did not survive into the retained capsule state")
 	}
 
 	// A plain claim of the paused work item is refused typed ALREADY_HELD
@@ -120,7 +126,8 @@ func TestV1S03PauseResume(t *testing.T) {
 	d.stop()
 	d2 := &v1Daemon{
 		t: t, inst: inst, sock: d.sock, dataDir: d.dataDir, workspace: d.workspace,
-		machineID: d.machineID, logPath: filepath.Join(t.TempDir(), "daemon2.log"),
+		machineID: d.machineID, extraArgs: d.extraArgs,
+		logPath: filepath.Join(t.TempDir(), "daemon2.log"),
 	}
 	t.Cleanup(func() { d2.stop() })
 	d2.start()
@@ -132,13 +139,15 @@ func TestV1S03PauseResume(t *testing.T) {
 	if sess.Fingerprint != sessBefore.Fingerprint {
 		t.Fatalf("the attach changed the session: %q, want %q", sess.Fingerprint, sessBefore.Fingerprint)
 	}
-	waitUntil(t, 30*time.Second, "the attach never re-derived the agent", func() bool {
-		return d2.agentPIDOf(t, wi) > 0
-	})
+	// The resumed driver re-presents the SAME persisted question (the
+	// pending question is durable; the awaiting face is total).
+	waitQuestion(t, d2, wi, qid, 30*time.Second)
 
-	// The resumed derivation (scripted by resume_actions) continues the
-	// SAME session and wraps; the wrap clears the session row.
-	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
+	// The owner's answer completes the parked step (the in-place
+	// re-dispatch continues the SAME session), the workflow runs to its
+	// terminal state and the terminal wiring wraps it.
+	answerQuestion(t, d2, wi, qid, "Ready now: take the lean variant.")
+	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 	sess = inst.sessionOf(t, wi)
 	if sess.Fingerprint != "" {
 		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
@@ -156,14 +165,29 @@ func TestV1S03PauseResume(t *testing.T) {
 		}
 	}
 
-	// The continuation's step is in the sealed chain.
-	exec := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
-	if !strings.Contains(exec, `"polish"`) {
-		t.Fatalf("resumed work missing from the chain:\n%s", exec)
+	// The continuation's faces: grill done with its archived answer, the
+	// whole quick-fix chain done, the spawn journal carrying the pause
+	// interruption (derivation 1 pre-pause, the resume re-dispatch
+	// after the attach — the second entry is a RESUME).
+	x := readExecution(t, d2.capsuleDir(wi))
+	for _, step := range []string{"grill", "fix", "verification", "release"} {
+		if st := x.Steps[step]; st == nil || st.Status != "done" {
+			t.Fatalf("step %s: %+v, want done", step, st)
+		}
+	}
+	if len(x.Steps["grill"].Answers) != 1 {
+		t.Fatalf("grill's archived answers: %+v", x.Steps["grill"].Answers)
+	}
+	spawns := spawnJournal(t, d2.capsuleDir(wi))
+	// The whole post-resume workflow rode the SAME session: the attach
+	// re-dispatch (a resume, ordinal 2) plus the fresh dispatches of fix,
+	// verification and release.
+	if len(spawns) != 5 || spawns[1]["resume"] != true || spawns[2]["resume"] != false {
+		t.Fatalf("spawn journal after the cycle: %d entries (want 5, second a resume then fresh dispatches)", len(spawns))
 	}
 
 	// And no orphan of the paused close survived the whole cycle.
-	waitUntil(t, 10*time.Second, "orphan agents survived the pause/resume cycle", func() bool {
+	waitUntil(t, 10*time.Second, "orphan step processes survived the pause/resume cycle", func() bool {
 		return len(orphanPIDs(wi)) == 0
 	})
 }

@@ -1,359 +1,280 @@
 package test
 
-// v1_s16: F9 — the needs_input question/answer protocol's recovery
-// resilience. Two pilot fractures, both now pinned by e2e:
-//
-//   - A question id is minted ONCE, persisted with pending_question in
-//     the same atomic write and re-presented verbatim across
-//     re-derivations; a re-derived instance that re-minted (or presented
-//     an empty id) stranded every answer already delivered against the
-//     old id.
-//   - An answer that was delivered but never acked/consumed stays
-//     re-deliverable in the daemon's ledger — and since F9 the monitor
-//     re-sends it automatically when the next instance attaches.
+// v1_s16: F9 — the needs_input question/answer protocol's resilience,
+// driver/envelope edition. The legacy suite proved the protocol's
+// fractures on the WI-Agent RPC face (pf/answer control relays, the
+// flush proxy, agent-side acks); every one of those faces is re-expressed
+// here on the driver's answer path, where the CONSUMER of an answer is
+// the DRIVER itself (the D9 archive-and-clear write on execution.json —
+// there is no agent ack anywhere), the pending question's durable home
+// is the capsule's execution.json, and the question round-trip rides the
+// QUESTION column + `pf answer` through the real CLI.
 //
 // Scenarios:
 //
-//   - A: agent asks → owner answers → the answer is delivered but the
-//     agent is killed before consuming it → the resumed instance
-//     re-presents the SAME id → the answer is re-delivered
-//     automatically → consumed and archived → the run wraps.
-//   - B: a needs_input flush with an empty question_id is refused
-//     DAEMON-400 at the entry (fail-closed: no unanswerable pending).
-//   - C: a repeated needs_input flush with the SAME id is idempotent:
-//     one pending, one needs_input event, the loop still finishes.
-//   - D: the ZERO-landing half of the kill -9 window: the agent is
-//     SIGSTOPped before the answer is submitted, so the pf/answer
-//     delivery provably never lands on any agent; the daemon accepts
-//     the answer anyway and persists it to answers.json as retryable +
-//     awaiting (#32's persist-before-delivery invariant) — then the
-//     DAEMON itself is kill -9ed; the restarted daemon reloads the
-//     ledger, the F9 attach-time hook re-delivers the restored entry
-//     to the successor instance, and the run wraps.
-
+//   - A: the answer is consumed durably (driver-side), the daemon is
+//     kill -9ed mid-continuation, and the restarted daemon's resumed
+//     driver continues the workflow FROM the archived answer — the
+//     answer survives the crash because the capsule, not any agent
+//     memory, is its persistent authority.
+//   - B: a needs_input envelope with an EMPTY question_id (scripted
+//     verbatim) is refused by the driver's transition — fail-closed: no
+//     unanswerable pending is ever minted — and the workflow recovers
+//     through the recovery engine onto the well-formed question.
+//   - C: the same drop path written twice (the duplicate envelope
+//     shape) is consumed exactly once: one pending, one needs_input,
+//     one accepted attempt.
+//   - D: the zero-landing half: an answer accepted while the step
+//     process is provably dead to inputs — the DRIVER consumed it, no
+//     pf/answer ever reached any agent — survives a daemon kill -9 and
+//     is replayed from the durable file by the successor.
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"io"
-	"net"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
 
-// udsFlushRaw performs one raw flush round trip on the daemon's UDS face
-// (the same transport the agent's proxy uses), returning the HTTP status
-// and body. questionID == "" sends the field explicitly empty — the F9
-// fail-closed shape under test. spawnN is the v1.5 B2 fence value; 0
-// would be refused STALE_SPAWN before the question-id gate, so callers
-// always pass the current derivation's counter.
-func udsFlushRaw(t *testing.T, d *v1Daemon, wi string, spawnN int, questionID string) (int, string) {
-	t.Helper()
-	conn, err := net.Dial("unix", d.sock)
-	if err != nil {
-		t.Fatalf("dial %s: %v", d.sock, err)
-	}
-	defer conn.Close()
-	body := map[string]any{
-		"work_item": wi,
-		"spawn_n":   spawnN,
-		"reason":    "needs_input",
-		"step":      "code",
-	}
-	// no question text: a bare re-present must not be able to rewrite the
-	// recorded question (the same-id path refreshes asked_at only)
-	if questionID == "" {
-		body["question_id"] = ""
-	} else {
-		body["question_id"] = questionID
-	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := http.NewRequest("POST", "http://daemon/jobs/"+wi+"/flush", bytes.NewReader(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{
-		Timeout:   20 * time.Second,
-		Transport: &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) { return conn, nil }},
-	}).Do(req)
-	if err != nil {
-		t.Fatalf("flush round trip: %v", err)
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return resp.StatusCode, string(out)
-}
-
-// currentSpawnN reads the newest derivation's counter (the flush fence
-// value) off the capsule's spawn journal — the same re-seeding source
-// the runtime itself uses across a fresh clone.
-func currentSpawnN(t *testing.T, d *v1Daemon, wi string) int {
-	t.Helper()
-	entries := spawnJournal(t, d.capsuleDir(wi))
-	max := 0
-	for _, rec := range entries {
-		if n, ok := rec["spawn_n"].(float64); ok && int(n) > max {
-			max = int(n)
-		}
-	}
-	if max == 0 {
-		t.Fatalf("no spawn_n in the spawn journal of %s (%d entries)", wi, len(entries))
-	}
-	return max
-}
-
 // ---------------------------------------------------------------------------
-// Scenario A: delivered-but-unconsumed answer, kill -9, resume, auto
-// redelivery, same-id re-present, consumption, wrap.
+// Scenario A: the durable answer across a daemon kill -9.
 
 func TestV1S16AnswerAutoRedeliveryAfterKill9(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_f9a"
-	actions := []map[string]any{
-		{"do": "step", "id": "code"},
-		{"do": "ask", "id": qid, "question": "Which variant should the recovery take?"},
-		{"do": "step", "id": "polish"},
-		{"do": "wrap"},
-	}
-	// The resume plan's ask carries a DIFFERENT plan id on purpose: the
-	// persisted pending id must win (mint once, re-present verbatim).
-	resume := []map[string]any{
-		{"do": "ask", "id": "q_plan_must_be_ignored", "question": "Which variant should the recovery take?"},
-		{"do": "step", "id": "polish"},
-		{"do": "wrap"},
-	}
-	wi := inst.newWI(t, "s16 A: answer auto-redelivery across a kill -9", actions, resume)
-	// The first derivation lands pf/answer but neither consumes nor acks
-	// it — the died-mid-consumption shape that leaves the answer
-	// delivered-but-unconsumed in the daemon's ledger.
-	writePlanExtra(t, inst, wi, actions, resume, map[string]any{"ack_answer": false})
+	const answerText = "Take the resilient variant."
+	// Ordinals: 1 grill asks; 2 grill completes with the answer; 3 fix
+	// (delayed write — the kill window); 4 fix again (the post-restart
+	// resume dispatch); 5-6 the tail.
+	wi := inst.newWI(t, "s16 A: the durable answer across a daemon kill -9",
+		[]map[string]any{
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
+				"question": "Which variant should the recovery take?"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 3000},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
+		}, nil)
 
-	d := newV1Daemon(t, inst)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
-		return d.agentPIDOf(t, wi) > 0
-	})
-	waitUntil(t, 30*time.Second, "pending question never became visible", func() bool {
-		jv := d.observe(t, wi)
-		return jv.Pending != nil && jv.Pending.ID == qid
-	})
+	waitQuestion(t, d, wi, qid, 30*time.Second)
 
-	// The owner answers. The relay is DELIVERED (the write succeeds) but
-	// the agent never acks: the CLI settles after the ack window with
-	// the delivered-unconsumed outcome, and the ledger keeps the answer
-	// re-deliverable. (Bounded by the daemon's ack wait: ~30s.)
-	out := d.pf(t, "answer", wi, "--text", "Take the resilient variant.", "--question", qid, "--by", "usr_root")
-	if !strings.Contains(out, "delivered") {
-		t.Fatalf("answer outcome: %q", out)
-	}
-
-	// The journal proves the unacked delivery landed on the dead-walking
-	// instance.
+	// The owner answers. The DRIVER consumes it — the D9 write archives
+	// the pair and clears the pending question in one atomic transition,
+	// then re-dispatches the step in place with its Q&A history.
+	answerQuestion(t, d, wi, qid, answerText)
+	waitNoQuestion(t, d, wi, 30*time.Second)
 	capDir := d.capsuleDir(wi)
-	lands := answerControls(t, capDir)
-	if len(lands) != 1 || lands[0]["suppressed"] != true || lands[0]["ref"] != qid {
-		t.Fatalf("expected exactly one suppressed pf/answer landing for %s, got %+v", qid, lands)
+	waitStepStatus(t, d, wi, "grill", "done", 30*time.Second)
+	x := readExecution(t, capDir)
+	if len(x.Steps["grill"].Answers) != 1 || x.Steps["grill"].Answers[0]["answer"] != answerText {
+		t.Fatalf("the answer was never archived: %+v", x.Steps["grill"].Answers)
+	}
+	// The re-dispatch (grill's second derivation) is live and fix is
+	// already in progress when the daemon dies mid-continuation.
+	waitSpawnCount(t, d, wi, 3, 30*time.Second)
+	waitStepStatus(t, d, wi, "fix", "in_progress", 30*time.Second)
+
+	// Zero agent-side answer landings, ever: the driver is the answer's
+	// only consumer (the legacy pf/answer control relay is gone).
+	if lands := answerControls(t, capDir); len(lands) != 0 {
+		t.Fatalf("pf/answer reached an agent %d times — the driver path must never relay to a step process: %+v",
+			len(lands), lands)
 	}
 
-	// Rewrite the plan WITHOUT the suppression: the resume derivation
-	// re-reads the plan file at process start (the first derivation
-	// already holds its copy in memory, so this rewrite is invisible to
-	// it).
-	inst.setPlanFull(t, wi, actions, resume)
-
-	// Kill the agent before it could ever consume the answer.
-	pid := d.agentPIDOf(t, wi)
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-		t.Fatalf("kill -9 %d: %v", pid, err)
+	// Kill -9 the daemon mid-fix. The parked step process survives the
+	// crash (the crash-safety property); execution.json — with the
+	// archived answer — is the only memory either daemon needs.
+	d.crash()
+	if x := readExecution(t, capDir); len(x.Steps["grill"].Answers) != 1 {
+		t.Fatal("the archived answer did not survive the daemon crash")
 	}
-	waitUntil(t, 30*time.Second, "no needs_recovery after the kill", func() bool {
-		return countOf(d.eventKinds(t, wi), "needs_recovery") == 1
+
+	d2 := restartSameDaemon(t, d, "daemon2.log")
+	// The restarted driver seeds past every used ordinal, re-dispatches
+	// fix (resume, with the archived answers in its spawn), and finishes.
+	waitUntil(t, 60*time.Second, "restarted daemon never re-dispatched fix", func() bool {
+		return len(spawnJournal(t, capDir)) >= 4
 	})
+	waitWorkflowStatus(t, d2, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 
-	// The successor re-derived; the daemon automatically re-delivered the
-	// stranded answer to it. Wait for the consumption to settle, then the
-	// run continues (polish, wrap).
-	waitForEvent(t, d, wi, "wi_agent_rederived", 30*time.Second)
-	waitForEvent(t, d, wi, "answer_redelivery", 30*time.Second)
-	waitForEvent(t, d, wi, "answered", 30*time.Second)
-	// Diagnostic dump on a stuck wrap (e2e reds must be diagnosable).
-	deadline := time.Now().Add(60 * time.Second)
-	for inst.wiStatus(t, wi) != "wrapped" {
-		if time.Now().After(deadline) {
-			t.Logf("events: %v", d.eventKinds(t, wi))
-			for _, rec := range fakeJournal(t, capDir) {
-				t.Logf("journal: %+v", rec)
-			}
-			t.Logf("observe: %+v", d.observe(t, wi))
-			t.Logf("daemon log:\n%s", d.logTail())
-			t.Fatalf("work item %s never wrapped (now %q)", wi, inst.wiStatus(t, wi))
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// The fake journal: the re-derived agent asked with the PERSISTED id
-	// (the plan's decoy id was ignored) and consumed the re-delivered
-	// answer without re-asking.
-	var resumedAsk map[string]any
-	for _, rec := range fakeJournal(t, capDir) {
-		if rec["type"] == "ask" && rec["question_id"] == qid {
-			resumedAsk = rec
-		}
-	}
-	if resumedAsk == nil {
-		t.Fatal("the resumed derivation never journaled its ask with the persisted id")
-	}
-	if resumedAsk["already_answered"] != true {
-		t.Fatalf("the resumed ask must find the answer already consumed: %+v", resumedAsk)
-	}
-
-	// Exactly two pf/answer landings across the whole run: the suppressed
-	// one on the dead instance, the consumed one on the successor.
-	lands = answerControls(t, capDir)
-	if len(lands) != 2 {
-		t.Fatalf("pf/answer landings: got %d, want 2 (one suppressed, one auto-redelivered): %+v", len(lands), lands)
-	}
-	if lands[1]["suppressed"] == true || lands[1]["ref"] != qid {
-		t.Fatalf("the auto-redelivered landing must be a normal consumption of %s: %+v", qid, lands[1])
-	}
-
-	// The daemon record: ONE needs_input for the question (the same-id
-	// re-present never duplicated it), one recovery, one re-derivation,
-	// the redelivery attempt, and the answered event.
-	kinds := d.eventKinds(t, wi)
+	// The answer round-trip closed exactly once, pre-crash, and its
+	// record is in the sealed chain; the question never re-opened.
+	kinds := d2.eventKinds(t, wi)
 	if n := countOf(kinds, "needs_input"); n != 1 {
-		t.Fatalf("needs_input fired %d times, want exactly 1 (same-id re-present is idempotent): %v", n, kinds)
+		t.Fatalf("needs_input fired %d times, want 1: %v", n, kinds)
 	}
-	if n := countOf(kinds, "wi_agent_rederived"); n != 1 {
-		t.Fatalf("re-derivations: %d, want 1: %v", n, kinds)
-	}
-	if n := countOf(kinds, "answer_redelivery"); n < 1 {
-		t.Fatalf("no answer_redelivery event: %v", kinds)
-	}
-	if n := countOf(kinds, "answered"); n < 1 {
-		t.Fatalf("no answered event: %v", kinds)
-	}
-
-	// The sealed chain: the answer is archived, the pending question is
-	// gone, and the run continued past it.
 	exec := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
-	if !strings.Contains(exec, "Take the resilient variant.") {
-		t.Fatalf("sealed execution.json misses the re-delivered answer:\n%s", exec)
+	if !strings.Contains(exec, answerText) {
+		t.Fatalf("sealed execution.json misses the answer:\n%s", exec)
 	}
 	if strings.Contains(exec, `"pending_question"`) {
 		t.Fatalf("sealed execution.json still carries a pending question:\n%s", exec)
 	}
-	if !strings.Contains(exec, `"polish"`) {
-		t.Fatalf("the resumed agent never continued past the question:\n%s", exec)
+	x = readExecution(t, capDir)
+	for _, step := range []string{"grill", "fix", "verification", "release"} {
+		if st := x.Steps[step]; st == nil || st.Status != "done" {
+			t.Fatalf("step %s: %+v, want done", step, st)
+		}
 	}
+	if lands := answerControls(t, capDir); len(lands) != 0 {
+		t.Fatalf("pf/answer landings after the whole cycle: %+v", lands)
+	}
+	// The crash survivor is a known orphan (a driver WI's step processes
+	// have no daemon-side pid for the six-layer cleanup to signal — the
+	// harness's own sweep collects them at teardown); nothing else leaks.
+	waitUntil(t, 15*time.Second, "more than the one crash survivor leaked", func() bool {
+		return len(orphanPIDs(wi)) <= 1
+	})
 }
 
 // ---------------------------------------------------------------------------
-// Scenario B: empty question_id flush is refused DAEMON-400 fail-closed.
+// Scenario B: the empty question_id is refused fail-closed by the
+// driver's needs_input transition.
 
 func TestV1S16EmptyQuestionIDFlushRefused(t *testing.T) {
 	inst := newV1Install(t)
+	const goodQID = "q_f9b_live"
+	// Ordinal 1 is the MALFORMED shape: a needs_input envelope whose
+	// question_id is scripted empty verbatim (the driver refuses a
+	// needs_input result without question_id/question — the transition
+	// errors, the driver exits, and the recovery engine re-dispatches
+	// onto ordinal 2, the well-formed question).
 	wi := inst.newWI(t, "s16 B: empty question id fail-closed",
-		[]map[string]any{{"do": "step", "id": "code"}, {"do": "park"}}, nil)
-	d := newV1Daemon(t, inst)
+		[]map[string]any{
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": "",
+				"question": "the malformed ask (must be refused)"},
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": goodQID,
+				"question": "the well-formed ask"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
+		}, nil)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
-		return d.agentPIDOf(t, wi) > 0
+	capDir := d.capsuleDir(wi)
+
+	// The refusal is visible: the driver's transition error names the
+	// missing question text verbatim (the daemon log is the driver's
+	// stderr — the LOG face).
+	waitUntil(t, 60*time.Second, "the driver never refused the malformed envelope", func() bool {
+		return strings.Contains(d.logTail(),
+			"needs_input result without question_id/question (envelope or output)")
 	})
-	spawnN := currentSpawnN(t, d, wi)
 
-	// The flush entry refuses the empty id with DAEMON-400 — never the
-	// monitor, never a pending.
-	status, body := udsFlushRaw(t, d, wi, spawnN, "")
-	if status != 400 || !strings.Contains(body, "DAEMON-400") {
-		t.Fatalf("empty question_id flush: status %d body %s, want 400 DAEMON-400", status, body)
+	// Fail-closed, not fail-deaf: no pending was ever minted off the
+	// malformed envelope — the QUESTION column shows only the
+	// well-formed follow-up (the recovery re-dispatch parked there).
+	waitQuestion(t, d, wi, goodQID, 60*time.Second)
+	if n := countOf(d.eventKinds(t, wi), "needs_input"); n != 1 {
+		t.Fatalf("needs_input fired %d times, want 1 (only the well-formed question): %v",
+			n, d.eventKinds(t, wi))
 	}
-
-	// Fail-closed, not fail-deaf: no pending was minted, no needs_input
-	// event fired, and the agent is still alive and running.
-	if jv := d.observe(t, wi); jv.Pending != nil {
-		t.Fatalf("the refused flush minted a pending: %+v", jv.Pending)
+	// The refused envelope itself is on the archived-envelope face —
+	// the audit trail of what was refused. (The archive drops the empty
+	// question_id field — omitempty on the envelope struct — so absence
+	// and emptiness are the same refused shape; the question text rode
+	// verbatim.)
+	env := archivedEnvelope(t, capDir, "grill", 1)
+	if env["outcome"] != "needs_input" {
+		t.Fatalf("the refused envelope must be archived: %v", env)
 	}
-	if n := countOf(d.eventKinds(t, wi), "needs_input"); n != 0 {
-		t.Fatalf("the refused flush fired needs_input %d times", n)
+	if q, ok := env["question_id"]; ok && q != "" {
+		t.Fatalf("the refused envelope must carry no question id: %v", env)
 	}
-	if pid := d.agentPIDOf(t, wi); pid <= 0 {
-		t.Fatal("the agent must survive the refused flush")
+	if env["question"] != "the malformed ask (must be refused)" {
+		t.Fatalf("the refused envelope's question text must ride verbatim: %v", env["question"])
 	}
-
-	// And the live attempt's own well-formed flush still works.
-	status, body = udsFlushRaw(t, d, wi, spawnN, "q_f9b_live")
-	if status != 200 || !strings.Contains(body, `"ok":true`) {
-		t.Fatalf("live needs_input flush after the refusal: %d %s", status, body)
+	// The live attempt's own well-formed question is answerable, and the
+	// loop finishes normally.
+	answerQuestion(t, d, wi, goodQID, "The well-formed variant.")
+	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	x := readExecution(t, capDir)
+	if pq := x.Steps["grill"].PendingQuestion; pq != nil {
+		t.Fatalf("pending question survived the answer: %+v", pq)
 	}
-	waitUntil(t, 10*time.Second, "the live flush never landed", func() bool {
-		jv := d.observe(t, wi)
-		return jv.Pending != nil && jv.Pending.ID == "q_f9b_live"
-	})
+	if len(x.Steps["grill"].Answers) != 1 || x.Steps["grill"].Answers[0]["question_id"] != goodQID {
+		t.Fatalf("the well-formed answer was not archived: %+v", x.Steps["grill"].Answers)
+	}
+	// The refusal cost exactly one re-dispatch: six derivations, in plan
+	// order, and the sealed chain carries the whole story.
+	if n := len(spawnJournal(t, capDir)); n != 6 {
+		t.Fatalf("spawn journal has %d entries, want 6 (the refused dispatch consumed ordinal 1)", n)
+	}
 }
 
 // ---------------------------------------------------------------------------
-// Scenario C: a repeated needs_input flush with the SAME id is
-// idempotent — one pending, one needs_input event, the loop finishes.
+// Scenario C: the same drop path written twice is consumed exactly once.
 
 func TestV1S16DuplicateFlushSameIDIsIdempotent(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_f9c"
-	wi := inst.newWI(t, "s16 C: duplicate flush same id",
+	wi := inst.newWI(t, "s16 C: duplicate drop-path write is consumed once",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "ask", "id": qid, "question": "Which shape: one pending or two?"},
-			{"do": "step", "id": "polish"},
-			{"do": "wrap"},
+			// The duplicate shape: the IDENTICAL envelope (same result_id)
+			// written twice back-to-back to the same drop path.
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
+				"question": "Which shape: one pending or two?", "dup": 2},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
-		return d.agentPIDOf(t, wi) > 0
-	})
-	waitUntil(t, 30*time.Second, "pending question never became visible", func() bool {
-		jv := d.observe(t, wi)
-		return jv.Pending != nil && jv.Pending.ID == qid
-	})
-	spawnN := currentSpawnN(t, d, wi)
 
-	// A second flush with the SAME id — the recovered re-present shape:
-	// acked OK, still exactly one pending, still exactly one
-	// needs_input event.
-	status, body := udsFlushRaw(t, d, wi, spawnN, qid)
-	if status != 200 || !strings.Contains(body, `"ok":true`) {
-		t.Fatalf("duplicate same-id flush: %d %s", status, body)
-	}
+	// Exactly one pending question, with its text intact.
+	waitQuestion(t, d, wi, qid, 30*time.Second)
 	jv := d.observe(t, wi)
-	if jv.Pending == nil || jv.Pending.ID != qid {
-		t.Fatalf("the duplicate flush must not change the pending: %+v", jv.Pending)
-	}
-	if jv.Pending.Question == "" || !strings.Contains(jv.Pending.Question, "one pending or two") {
-		t.Fatalf("the duplicate flush must not erase the question text: %+v", jv.Pending)
+	if jv.Pending == nil || jv.Pending.ID != qid || !strings.Contains(jv.Pending.Question, "one pending or two") {
+		t.Fatalf("the duplicate write disturbed the pending: %+v", jv.Pending)
 	}
 	if n := countOf(d.eventKinds(t, wi), "needs_input"); n != 1 {
-		t.Fatalf("needs_input fired %d times, want 1 (same id is idempotent)", n)
+		t.Fatalf("needs_input fired %d times, want 1 (the duplicate drop is consumed once)", n)
+	}
+	capDir := d.capsuleDir(wi)
+	// The fake journal saw the duplicate write...
+	var dupRec map[string]any
+	for _, rec := range fakeJournal(t, capDir) {
+		if rec["type"] == "envelope" && rec["step"] == "grill" {
+			if n, _ := rec["dup"].(float64); n == 2 {
+				dupRec = rec
+			}
+		}
+	}
+	if dupRec == nil {
+		t.Fatal("the duplicate envelope write never happened (dup=2 not journaled)")
+	}
+	// ...and the driver archived it exactly once. The accepted-attempt
+	// count is checked after the completion (an acceptance lands with the
+	// completed envelope; a second collection of the same result_id would
+	// be the duplicate-result refusal, never a second question).
+	env := archivedEnvelope(t, capDir, "grill", 1)
+	if env["question_id"] != qid {
+		t.Fatalf("archived envelope question wrong: %v", env["question_id"])
 	}
 
 	// The loop still finishes normally on the single pending.
-	out := d.pf(t, "answer", wi, "--text", "Exactly one pending.", "--question", qid, "--by", "usr_root")
-	if !strings.Contains(out, "delivered") {
-		t.Fatalf("answer: %q", out)
-	}
+	answerQuestion(t, d, wi, qid, "Exactly one pending.")
+	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	x := readExecution(t, capDir)
+	attempts := x.Steps["grill"].Attempts
+	accepted := 0
+	for _, a := range attempts {
+		if a["accepted_result_id"] != nil {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("grill carries %d accepted attempts, want 1: %+v", accepted, attempts)
+	}
 	exec := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
 	if strings.Contains(exec, `"pending_question"`) {
 		t.Fatalf("sealed execution.json still carries a pending question:\n%s", exec)
@@ -361,164 +282,102 @@ func TestV1S16DuplicateFlushSameIDIsIdempotent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario D: the zero-landing half of the kill -9 window — the answer
-// is accepted and persisted (retryable + awaiting) while pf/answer has
-// provably never landed on any agent, the daemon is SIGKILLed, and the
-// restarted daemon's loaded ledger re-delivers it at the successor's
-// attach.
+// Scenario D: the zero-landing answer — accepted while the step process
+// is dead to inputs — survives a daemon kill -9 and is replayed by the
+// successor from the durable file.
 
 func TestV1S16ZeroLandingAnswerSurvivesDaemonCrash(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_f9d"
-	const question = "Can an answer that never landed survive a daemon crash?"
-	actions := []map[string]any{
-		{"do": "step", "id": "code"},
-		{"do": "ask", "id": qid, "question": question},
-		{"do": "step", "id": "polish"},
-		{"do": "wrap"},
-	}
-	// The resume derivation re-presents the persisted question id (the
-	// plan's own id loses to execution.json's minted-once id) and then
-	// finishes the run.
-	resume := []map[string]any{
-		{"do": "ask", "id": qid, "question": question},
-		{"do": "step", "id": "polish"},
-		{"do": "wrap"},
-	}
-	wi := inst.newWI(t, "s16 D: zero-landing answer across a daemon crash", actions, resume)
+	const answerID = "a_f9d"
+	const answerText = "Yes: the capsule is the crash's only memory of it."
+	wi := inst.newWI(t, "s16 D: zero-landing answer across a daemon crash",
+		[]map[string]any{
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
+				"question": "Can an answer that never landed survive a daemon crash?"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 3000},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
+		}, nil)
 
-	d := newV1Daemon(t, inst, optObserveWindows(0, 0, 0, 3*time.Second))
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
-		return d.agentPIDOf(t, wi) > 0
-	})
-	waitUntil(t, 30*time.Second, "pending question never became visible", func() bool {
-		jv := d.observe(t, wi)
-		return jv.Pending != nil && jv.Pending.ID == qid
-	})
+	waitQuestion(t, d, wi, qid, 30*time.Second)
 
-	// Freeze the agent BEFORE any answer exists: a SIGSTOPped process
-	// can never read its stdin, so the pf/answer control write can be
-	// delivered into the pipe but can NEVER be journaled — zero
-	// landings by construction, not by timing. The daemon's liveness
-	// view stays calm: the pending question exempts the agent from the
-	// idle watchdog (needs_input is designed stillness), no turn is in
-	// flight for the hang window, and the process has not exited — so
-	// no recovery fires before the daemon itself is killed.
-	pid := d.agentPIDOf(t, wi)
-	if pid <= 0 {
-		t.Fatalf("no live agent pid for %s", wi)
-	}
-	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
-		t.Fatalf("SIGSTOP %d: %v", pid, err)
-	}
-	waitUntil(t, 10*time.Second, "agent never reached the stopped state", func() bool {
-		raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
-		return err == nil && strings.Contains(string(raw), "State:\tT")
-	})
-
-	// The owner answers. The daemon ACCEPTS the relay (binding checks
-	// pass against the still-open pending), persists it to answers.json
-	// BEFORE the first delivery byte, writes it into the frozen agent's
-	// stdin (phase one succeeds), and the 3s ack window expires with no
-	// consumption: the ledger settles retryable + awaiting.
-	const answerID = "a_f9d"
-	const answerText = "Yes: the ledger is the crash's only memory of it."
-	out := d.pf(t, "answer", wi, "--text", answerText, "--question", qid, "--answer-id", answerID, "--by", "usr_root")
+	// Zero landings by construction: the DRIVER consumes the answer
+	// daemon-side; the parked step process's journal stays silent no
+	// matter what the timing is. The CLI's answer id comes back delivered.
+	out := d.pf(t, "answer", wi, "--text", answerText, "--question", qid,
+		"--answer-id", answerID, "--by", "usr_root")
 	if !strings.Contains(out, answerID) || !strings.Contains(out, "delivered") {
 		t.Fatalf("answer outcome: %q", out)
 	}
-
-	// The book state on disk: the accepted answer reached answers.json
-	// as retryable (the settled applied half) plus its awaiting relay
-	// verbatim (the answer text lives only in the awaiting half).
-	// Format pinning (version/0600) is s19 A's business, not this
-	// scenario's.
-	waitUntil(t, 10*time.Second, "the accepted answer never reached "+answersPath(d), func() bool {
-		return answersFileHas(t, d, answerID, answerText, "retryable")
-	})
-
-	// The consumption never happened: the pending question is still
-	// the daemon's open projection.
-	if jv := d.observe(t, wi); jv.Pending == nil || jv.Pending.ID != qid {
-		t.Fatalf("the frozen agent's pending question vanished pre-crash: %+v", jv.Pending)
-	}
-
-	// THE DISTINGUISHING ASSERTION (vs s19 B's exactly-one suppressed
-	// landing): ZERO pf/answer landings pre-crash — the frozen agent
-	// journaled nothing. A short settle first: the delivery write is
-	// long done (the CLI already returned), this only proves the
-	// journal's silence is stable, not a timing race.
-	time.Sleep(1 * time.Second)
 	capDir := d.capsuleDir(wi)
 	if lands := answerControls(t, capDir); len(lands) != 0 {
-		t.Fatalf("pf/answer landings pre-crash: got %d, want 0 (the SIGSTOPped agent can never read the delivery): %+v", len(lands), lands)
+		t.Fatalf("pf/answer landings: got %d, want 0 (the driver path never relays to a step process): %+v",
+			len(lands), lands)
 	}
 
-	// Kill -9 the DAEMON. The frozen agent is now a headless orphan;
-	// answers.json is the only thing that remembers the owner's answer.
+	// The consumption is DURABLE before anything else moves: the archived
+	// answer and the cleared pending are in execution.json — the capsule
+	// is the driver path's answer authority (the daemon-private ledger
+	// belongs to the legacy agent-relay path).
+	waitNoQuestion(t, d, wi, 30*time.Second)
+	waitStepStatus(t, d, wi, "grill", "done", 30*time.Second)
+	x := readExecution(t, capDir)
+	if len(x.Steps["grill"].Answers) != 1 || x.Steps["grill"].Answers[0]["answer"] != answerText {
+		t.Fatalf("the accepted answer never reached the capsule's durable state: %+v", x.Steps["grill"].Answers)
+	}
+
+	// Let the continuation reach fix (its 3s delayed write is the kill
+	// window), then kill -9 the daemon.
+	waitSpawnCount(t, d, wi, 3, 30*time.Second)
+	waitStepStatus(t, d, wi, "fix", "in_progress", 30*time.Second)
 	d.crash()
-	if !answersFileHas(t, d, answerID, answerText, "retryable") {
-		t.Fatalf("the zero-landing answer did not survive the daemon crash:\n%s", readAnswersFile(t, d))
+
+	// The answer survived the crash — the capsule remembers.
+	if x := readExecution(t, capDir); len(x.Steps["grill"].Answers) != 1 {
+		t.Fatal("the answer did not survive the daemon crash")
 	}
 
-	// Restart the SAME daemon (socket, data dir, workspace): the
-	// startup reconciliation collects the frozen old instance and
-	// re-derives the successor, the ledger loads, and the F9
-	// attach-time hook re-delivers the restored awaiting entry.
+	// Restart the SAME daemon: the startup reconciliation recovers the
+	// running work item, the resumed driver seeds past every used
+	// ordinal and finishes the workflow from the durable state.
 	d2 := restartSameDaemon(t, d, "daemon2.log")
-	waitUntil(t, 60*time.Second, "restarted daemon never re-derived the agent", func() bool {
-		return d2.agentPIDOf(t, wi) > 0
+	waitUntil(t, 60*time.Second, "restarted daemon never re-dispatched fix", func() bool {
+		return len(spawnJournal(t, capDir)) >= 4
 	})
-	waitForEvent(t, d2, wi, "answer_redelivery", 60*time.Second)
-	waitForEvent(t, d2, wi, "answered", 60*time.Second)
+	waitWorkflowStatus(t, d2, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 
-	// The successor consumed the re-delivered answer and the run wraps.
-	// Diagnostic dump on a stuck wrap (e2e reds must be diagnosable).
-	deadline := time.Now().Add(90 * time.Second)
-	for inst.wiStatus(t, wi) != "wrapped" {
-		if time.Now().After(deadline) {
-			t.Logf("events: %v", d2.eventKinds(t, wi))
-			for _, rec := range fakeJournal(t, capDir) {
-				t.Logf("journal: %+v", rec)
-			}
-			t.Logf("observe: %+v", d2.observe(t, wi))
-			t.Logf("daemon log:\n%s", d2.logTail())
-			t.Fatalf("work item %s never wrapped (now %q)", wi, inst.wiStatus(t, wi))
-		}
-		time.Sleep(100 * time.Millisecond)
+	// The replayed state: the answer is in the sealed chain exactly once,
+	// the pending never re-opened, exactly one needs_input across both
+	// daemon lives, and still zero agent-side answer landings.
+	exec := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
+	if !strings.Contains(exec, answerText) {
+		t.Fatalf("sealed execution.json misses the answer:\n%s", exec)
 	}
-
-	// Exactly ONE pf/answer landing across the WHOLE run: the
-	// post-restart auto-redelivery, consumed by the successor — the
-	// pre-crash half of the run stays provably landing-free.
-	lands := answerControls(t, d2.capsuleDir(wi))
-	if len(lands) != 1 {
-		t.Fatalf("pf/answer landings: got %d, want exactly 1 (the post-restart re-delivery; zero pre-crash): %+v", len(lands), lands)
+	if strings.Contains(exec, `"pending_question"`) {
+		t.Fatalf("sealed execution.json still carries a pending question:\n%s", exec)
 	}
-	if lands[0]["suppressed"] == true || lands[0]["ref"] != qid {
-		t.Fatalf("the single landing must be a normal consumption of %s: %+v", qid, lands[0])
-	}
-
-	// The re-delivery rode the loaded ledger, never a second question:
-	// exactly one needs_input across both daemon lives.
 	if n := countOf(d2.eventKinds(t, wi), "needs_input"); n != 1 {
 		t.Fatalf("needs_input fired %d times, want 1: %v", n, d2.eventKinds(t, wi))
 	}
-
-	// The sealed chain: the answer is archived in the capsule (the
-	// persistent authority), the pending question is gone, and the
-	// successor continued past it.
-	exec := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
-	if !strings.Contains(exec, answerText) {
-		t.Fatalf("sealed execution.json misses the re-delivered answer:\n%s", exec)
+	if lands := answerControls(t, capDir); len(lands) != 0 {
+		t.Fatalf("pf/answer landings after the restart: %+v", lands)
 	}
-	if strings.Contains(exec, "\"pending_question\"") {
-		t.Fatalf("sealed execution.json still carries a pending question:\n%s", exec)
+	x = readExecution(t, capDir)
+	for _, step := range []string{"grill", "fix", "verification", "release"} {
+		if st := x.Steps[step]; st == nil || st.Status != "done" {
+			t.Fatalf("step %s: %+v, want done", step, st)
+		}
 	}
-	if !strings.Contains(exec, "\"polish\"") {
-		t.Fatalf("the successor never continued past the question:\n%s", exec)
-	}
+	// The known crash survivor is the only orphan allowed (see scenario A).
+	waitUntil(t, 15*time.Second, "more than the one crash survivor leaked", func() bool {
+		return len(orphanPIDs(wi)) <= 1
+	})
 }
