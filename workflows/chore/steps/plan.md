@@ -50,13 +50,17 @@ whether it exists:
 2. Determine the unit structure: if the change cannot land in one compilable unit, order
    the steps so each leaves the tree buildable — same discipline as feature-full's
    `plan`, minus the spec input (chores carry no product spec).
-3. Every step MUST carry a `Touched files: <repo-relative path> (write|read), ...` line,
+3. Declare each step's green bar as the `verification` gate's bar for the repo,
+   **verbatim** — the same component list, no paraphrase, no subset — so a unit that
+   holds itself green can never diverge from the bar the gate runs. The full bar
+   applies to every unit on this lane: there are no named-file exclusions here.
+4. Every step MUST carry a `Touched files: <repo-relative path> (write|read), ...` line,
    or `Touched files: (no file edits)` for steps that only verify. Declare honestly —
    this list becomes the WI's `declared_resources` and, downstream, its file-scope
    locks; an under-declared write is a real lock gap.
-4. Write `artifacts/plan.md` with an ordered `## Steps` section, then emit the ordered
+5. Write `artifacts/plan.md` with an ordered `## Steps` section, then emit the ordered
    step ids and the deduplicated touched-files list.
-5. BEHAVIOR-FACE ESCALATION (change-coverage rules, discipline ① — hard rule): a
+6. BEHAVIOR-FACE ESCALATION (change-coverage rules, discipline ① — hard rule): a
    chore graph authors no acceptance scenarios. If reading the WI reveals the work
    alters OBSERVABLE BEHAVIOR — new endpoint/verb, protocol/contract/semantics
    change, ownership or fence rule change — you cannot proceed silently. The

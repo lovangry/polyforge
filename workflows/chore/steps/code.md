@@ -39,9 +39,10 @@ and address every point it raises before proceeding with the rest of the plan.
 - **Follow the plan's step order.** Each plan step is designed to leave the tree
   buildable; if the order genuinely does not work, that is a finding to report in
   `summary`, not a license to silently reorder.
-- **Keep the build green between commits.** After each plan step, run the project's
-  build and test commands (via `bash`) before moving to the next. Do not proceed on top
-  of a red build.
+- **Keep the build green between commits.** After each plan step, run the `verification`
+  gate's bar for this repo — verbatim: the same component list, no paraphrase, no
+  subset (via `bash`) — before moving to the next. The full bar applies to every unit;
+  nothing is ever excluded from it on this lane. Do not proceed on top of a red build.
 - **Commit per compilable unit**, with a message identifying which plan step it
   satisfies. For a single-step chore this is one commit; for a sweep it is many.
 - **Stay mechanical.** This lane's contract is no judgment calls: no drive-by
