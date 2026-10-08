@@ -1,46 +1,42 @@
 package test
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// v1_s09: graceful shutdown with a running work item. The shutdown
-// sequence latches shutting_down, delivers pf/stop_notice (the agent
-// acks it — the correlation contract), waits for the agent's
-// flush(shutdown) commit, stops the observe lane, tears down every
-// agent tree, and the daemon PROCESS exits. The work item is NOT
-// closed: aihub still shows running under the SAME session (M3 — the
-// record keeps clean_pause=false, the "paused-with-session, will
-// attach on restart" marker), and a restarted daemon reconciles
-// (session verify matches) and resumes through the recovery engine.
-// No orphan process survives (PF_WI_ID scan).
+// v1_s09: graceful shutdown with a running driver workflow. The shutdown
+// sequence latches shutting_down, notifies every live agent (the driver
+// bridge carries no control channel — the notice is best-effort by
+// contract), waits bounded for the agents' flush(shutdown) (a driver WI
+// has no flush face: the wait degrades on timeout, exactly as designed —
+// uncommitted state rides the recovery engine), stops the observe lane,
+// terminates every agent tree (the driver handle's Terminate unwinds Run
+// and its live step process with it), and the daemon PROCESS exits. The
+// work item is NOT closed: aihub still shows running under the SAME
+// session (M3), and a restarted daemon reconciles and resumes through the
+// recovery engine. The stop_notice/flush(shutdown) journal-ordering faces
+// of the legacy scenario are the WI-Agent RPC control channel — retired
+// pending Phase-4 #106 (the driver-era teardown faces are the process
+// exit, the orphan scan and the session record).
 func TestV1S09GracefulShutdown(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s09: graceful shutdown with a running job",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "park"},
-		},
-		[]map[string]any{{"do": "wrap"}})
-	d := newV1Daemon(t, inst)
+			// Ordinal 1 holds mid-step (delayed envelope write) so the
+			// shutdown interrupts a live driver with a live step process.
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true, "ms": 60000},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
+		}, nil)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
-		return d.agentPIDOf(t, wi) > 0
-	})
+	waitSpawnCount(t, d, wi, 1, 30*time.Second)
 	capDir := d.capsuleDir(wi)
-	waitUntil(t, 30*time.Second, "first step never landed", func() bool {
-		for _, rec := range fakeJournal(t, capDir) {
-			if rec["type"] == "step" && rec["phase"] == "done" {
-				return true
-			}
-		}
-		return false
-	})
 
 	// The session fingerprint BEFORE the shutdown (T4's identity pair
 	// with the one captured below).
@@ -50,59 +46,20 @@ func TestV1S09GracefulShutdown(t *testing.T) {
 	}
 
 	// Graceful shutdown through the real CLI. The daemon answers, then
-	// runs the bounded sequence and the process exits.
+	// runs the bounded sequence and the process exits. (The per-job
+	// flush(shutdown) wait degrades on timeout for a driver WI — the
+	// sequence stays bounded by its budget; the exit bound here covers
+	// that wait plus the teardown.)
 	d.pf(t, "ops", "shutdown")
-	if !d.exitedWithin(30 * time.Second) {
+	if !d.exitedWithin(90 * time.Second) {
 		t.Fatalf("daemon process did not exit after shutdown (log tail: %s)", d.logTail())
 	}
 
-	// The agent saw the stop_notice and began its flush(shutdown) BEFORE
-	// the teardown — the intent line is journaled synchronously in the
-	// control loop, ahead of the ack, so it always survives the race
-	// with the daemon's post-event teardown.
-	var noticeAt, flushAt = -1, -1
-	for i, rec := range fakeJournal(t, capDir) {
-		if rec["type"] == "control" && rec["method"] == "pf/stop_notice" && noticeAt < 0 {
-			noticeAt = i
-		}
-		if rec["type"] == "flush_begin" && rec["reason"] == "shutdown" && flushAt < 0 {
-			flushAt = i
-		}
-		if rec["type"] == "flush" && rec["reason"] == "shutdown" && rec["ok"] != true {
-			t.Fatalf("shutdown flush not acked ok: %+v", rec)
-		}
-	}
-	if noticeAt < 0 || flushAt < 0 || flushAt < noticeAt {
-		for i, rec := range fakeJournal(t, capDir) {
-			t.Logf("journal[%d] = %v", i, rec)
-		}
-		raw, _ := os.ReadFile(filepath.Join(d.dataDir, "events.log"))
-		t.Logf("RAW events:\n%s", raw)
-		t.Logf("daemon log:\n%s", d.logTail())
-		t.Fatalf("stop_notice/flush(shutdown) ordering wrong (notice %d, flush %d)", noticeAt, flushAt)
-	}
-
-	// The shutdown flush commit is recorded in the daemon's durable
-	// events (the published event with the shutdown marker).
-	shutdownPublished := false
-	for _, e := range d.eventsOf(t, wi) {
-		if e.Kind != "published" {
-			continue
-		}
-		var body struct {
-			Shutdown bool `json:"shutdown"`
-		}
-		if json.Unmarshal(e.Body, &body) == nil && body.Shutdown {
-			shutdownPublished = true
-		}
-	}
-	if !shutdownPublished {
-		t.Fatalf("no published{shutdown:true} event: %v", d.eventKinds(t, wi))
-	}
-
-	// No orphan agent survives the sequence (the env-marker scan).
+	// Teardown completed: the driver's live step process was terminated
+	// with the handle (no orphan survives the sequence — the env-marker
+	// scan), and the driver goroutine unwound with the context.
 	if pids := orphanPIDs(wi); len(pids) > 0 {
-		t.Fatalf("orphan agents survived the graceful shutdown: %v", pids)
+		t.Fatalf("orphan step processes survived the graceful shutdown: %v", pids)
 	}
 
 	// The work item is NOT closed server-side: shutdown leaves the
@@ -118,16 +75,21 @@ func TestV1S09GracefulShutdown(t *testing.T) {
 	if sessShutdown.CleanPause {
 		t.Fatalf("shutdown must not set the operator-pause flag: %+v", sessShutdown)
 	}
+	// The interrupted step is durable: grill in_progress on the retained
+	// capsule face (the recovery engine's re-dispatch input).
+	if x := readExecution(t, capDir); x.Steps["grill"].Status != "in_progress" {
+		t.Fatalf("the interrupted step is not in_progress on the retained face: %+v", x.Steps["grill"])
+	}
 
-	// A restarted daemon reconciles + resumes, and the resumed agent
-	// (resume_actions) finishes the work item.
+	// A restarted daemon reconciles + resumes, and the workflow finishes.
 	d2 := &v1Daemon{
 		t: t, inst: inst, sock: d.sock, dataDir: d.dataDir, workspace: d.workspace,
-		machineID: d.machineID, logPath: filepath.Join(t.TempDir(), "daemon2.log"),
+		machineID: d.machineID, extraArgs: d.extraArgs,
+		logPath: filepath.Join(t.TempDir(), "daemon2.log"),
 	}
 	t.Cleanup(func() { d2.stop() })
 	d2.start()
-	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 180*time.Second)
 
 	// T4: the restart attached to the SAME session the shutdown kept
 	// (verify matches → recover-resume), and the wrap cleared it.
@@ -135,8 +97,16 @@ func TestV1S09GracefulShutdown(t *testing.T) {
 		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
 	}
 
-	spawns := spawnJournal(t, capDir)
-	if len(spawns) != 2 || spawns[1]["resume"] != true {
-		t.Fatalf("post-shutdown restart did not resume: %+v", spawns)
+	// The resume re-dispatched grill in place (a RESUME under the next
+	// ordinal), then the tail ran fresh.
+	spawns := waitSpawnCount(t, d2, wi, 5, 60*time.Second)
+	if spawns[1]["resume"] != true {
+		t.Fatalf("post-shutdown restart did not resume: %+v", spawns[1])
+	}
+	x := readExecution(t, capDir)
+	for _, step := range []string{"grill", "fix", "verification", "release"} {
+		if st := x.Steps[step]; st == nil || st.Status != "done" {
+			t.Fatalf("step %s: %+v, want done", step, st)
+		}
 	}
 }

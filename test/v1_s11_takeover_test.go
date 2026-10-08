@@ -2,19 +2,21 @@ package test
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
-// v1_s11: cross-machine force takeover under the v1.5 session model.
+// v1_s11: cross-machine force takeover under the v1.5 session model,
+// driver/envelope edition — the supervised units are the driver's step
+// processes (the spawn journal is their ledger), the parked envelope
+// agent holds the work item between the takeover phases.
+//
 // Daemon B's takeover claim atomically swaps aihub's session row to a
 // NEW secret (ForceTakeover, contract §1.4); daemon A keeps its state
 // and its credentials, and every subsequent use of the OLD secret is
@@ -27,36 +29,36 @@ import (
 //     mismatch + held elsewhere → release (kill the surviving agent
 //     tree, quarantine the capsule, session_released event, NO hub
 //     transition);
-//   - the new session's agent runs on daemon B, the derivation counter
+//   - the new session's driver runs on daemon B, the derivation counter
 //     re-seeds from the cloned capsule spawn journal (contract §4.3),
-//     and the continuation wraps and clears the session.
+//     and the continuation completes and wraps, clearing the session.
 //
 // SHAPE NOTE (v1.5): the release is observed while B holds the WI
 // PAUSED, not running — the six-layer cleanup's L4 env-marker layer
 // kills EVERY process carrying PF_WI_ID=<wi> on the machine, daemon-
-// agnostic (D1: "this machine's writers of this WI are zombies"). On
-// two real machines B's live agent is untouched by A's release; on
-// this e2e host both daemons share one kernel, so B pausing first
-// (no live agent) keeps the release deterministic instead of a race
-// between A's cleanup sweep and B's recovery. The pause is itself a
-// v1.5 surface: session kept at aihub (M3), clean_pause=true.
-//
-// The generation/attempt lineage this scenario pinned in v1 is deleted
-// (contract §5): there is no attempt id to compare anymore, the
-// identity pair is (session_fingerprint, spawn_n).
+// agnostic (D1). On two real machines B's live step process is untouched
+// by A's release; on this e2e host both daemons share one kernel, so B
+// pausing first (no live step process) keeps the release deterministic.
+// The pause is itself a v1.5 surface: session kept at aihub (M3),
+// clean_pause=true.
 func TestV1S11Takeover(t *testing.T) {
 	inst := newV1Install(t)
+	// One plan for the whole run: ordinal 1 parks on the question (the
+	// pre-takeover hold); the post-takeover continuations dispatch
+	// ordinals 2+ — no mid-run plan rewrite anywhere.
 	wi := inst.newWI(t, "s11: force takeover from another daemon",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "park"},
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": "q_s11",
+				"question": "s11: parked across the takeover."},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	daemonA := newV1Daemon(t, inst, optMachineID("m-e2e-a"))
+	daemonA := newV1Daemon(t, inst, optMachineID("m-e2e-a"), optUseDriver())
 	daemonA.start()
 	daemonA.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned on daemon A", func() bool {
-		return daemonA.agentPIDOf(t, wi) > 0
-	})
+	waitQuestion(t, daemonA, wi, "q_s11", 30*time.Second)
 	t.Cleanup(func() { killOrphans(wi) })
 
 	// Daemon A holds the session: the public audit block (m4) names its
@@ -117,21 +119,20 @@ func TestV1S11Takeover(t *testing.T) {
 	// capsule git chain, so B's clone re-seeds its derivation counter
 	// from it — contract §4.3.)
 	inst.waitBareCommits(t, wi, 1, 30*time.Second)
-	daemonB := newV1Daemon(t, inst, optMachineID("m-e2e-b"))
+	daemonB := newV1Daemon(t, inst, optMachineID("m-e2e-b"), optUseDriver())
 	daemonB.start()
 	daemonB.pf(t, "submit", wi, "--takeover")
 
 	// The hub's session row was swapped atomically: a NEW public
-	// fingerprint, daemon B's machine — never the secret. (The CLI submit
-	// only enqueues; the dispatcher's ForceTakeover lands a moment later.)
+	// fingerprint, daemon B's machine — never the secret.
 	var sessB wiSession
 	waitUntil(t, 30*time.Second, "takeover never swapped the session", func() bool {
 		sessB = inst.sessionOf(t, wi)
 		return sessB.Fingerprint != "" && sessB.Fingerprint != sessA.Fingerprint && sessB.Machine == "m-e2e-b"
 	})
-	waitUntil(t, 30*time.Second, "daemon B never re-derived the agent", func() bool {
-		return daemonB.agentPIDOf(t, wi) > 0
-	})
+	// Daemon B re-derived a step process (the parked question's WI now
+	// runs on B's driver).
+	waitSpawnCount(t, daemonB, wi, 1, 30*time.Second)
 
 	// Daemon B's derivation counter continued from the cloned capsule
 	// spawn journal (contract §4.3): the capsule carried 1 derivation, so
@@ -177,19 +178,20 @@ func TestV1S11Takeover(t *testing.T) {
 		t.Fatalf("stale push failed for the wrong reason: %s", out)
 	}
 
-	// The old daemon learns. First crash it — its agent deliberately
-	// survives, parked on stdin EOF (the same-machine L4 note in the
-	// scenario header applies to the pause below too: B's close kills
-	// every PF_WI_ID-marked process on this host, so the survivor is
-	// observed HERE, before B pauses).
+	// The old daemon learns. First crash it. A parked question holds no
+	// live step process (the driver terminates each step process after
+	// collecting its envelope — the durable execution.json is the parked
+	// state), so the crashed daemon leaves no process behind: the release
+	// below is observed against B's paused shape either way (the
+	// same-machine L4 note in the scenario header).
 	daemonA.crash()
-	waitUntil(t, 10*time.Second, "daemon A's agent did not survive its crash", func() bool {
-		return len(orphanPIDs(wi)) > 0
+	waitUntil(t, 10*time.Second, "the crashed daemon left processes behind", func() bool {
+		return len(orphanPIDs(wi)) == 0
 	})
 
 	// B pauses (the v1.5 operator pause: session KEPT, clean_pause=true,
-	// no live agent — see the scenario header for why the release below
-	// is observed against the paused shape).
+	// no live step process — see the scenario header for why the release
+	// below is observed against the paused shape).
 	daemonB.pf(t, "pause", wi)
 	inst.waitWIStatus(t, wi, "paused", 30*time.Second)
 	sessPaused := inst.sessionOf(t, wi)
@@ -205,7 +207,8 @@ func TestV1S11Takeover(t *testing.T) {
 	// it never left "paused" and its session never moved).
 	daemonA2 := &v1Daemon{
 		t: t, inst: inst, sock: daemonA.sock, dataDir: daemonA.dataDir, workspace: daemonA.workspace,
-		machineID: daemonA.machineID, logPath: filepath.Join(t.TempDir(), "daemonA2.log"),
+		machineID: daemonA.machineID, extraArgs: daemonA.extraArgs,
+		logPath: filepath.Join(t.TempDir(), "daemonA2.log"),
 	}
 	t.Cleanup(func() { daemonA2.stop() })
 	daemonA2.start()
@@ -231,44 +234,44 @@ func TestV1S11Takeover(t *testing.T) {
 		}
 		t.Fatalf("daemon A's capsule was not quarantined (capsules/: %v)", names)
 	}
-	// The old daemon holds no job for the released work item, and its
-	// surviving agent tree was collected.
+	// The old daemon holds no job for the released work item, and the
+	// machine carries no process of this WI at all (the parked question
+	// never held a live step process; the release collected the record).
 	for _, j := range daemonA2.status(t).Jobs {
 		if j.WorkItemID == wi {
 			t.Fatalf("daemon A still holds a job for %s after the release", wi)
 		}
 	}
-	waitUntil(t, 30*time.Second, "the old daemon's agent survived the release", func() bool {
+	waitUntil(t, 30*time.Second, "processes survived the release", func() bool {
 		return len(orphanPIDs(wi)) == 0
 	})
 
 	// The continuation: the paused work item moves with a second
 	// takeover, on the same holder machine — session swap #2, fresh
-	// clone above the paused tip, and the scripted wrap.
-	inst.setPlanFull(t, wi,
-		[]map[string]any{{"do": "step", "id": "polish"}, {"do": "wrap"}},
-		[]map[string]any{{"do": "wrap"}})
+	// clone above the paused tip. The cloned execution state carries the
+	// still-open question, so the new driver parks on it; the owner's
+	// answer unlocks the ordinal-2 continuation and the workflow runs to
+	// its terminal wrap.
 	daemonB.pf(t, "submit", wi, "--takeover")
 	inst.waitWIStatus(t, wi, "running", 30*time.Second)
-	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
+	waitQuestion(t, daemonB, wi, "q_s11", 30*time.Second)
+	answerQuestion(t, daemonB, wi, "q_s11", "The takeover continuation is cleared.")
+	inst.waitWIStatus(t, wi, "wrapped", 180*time.Second)
 
 	// The sealed chain grew under the NEW session's credential: the bare
-	// repo carries commits beyond what daemon A ever pushed, and the
-	// wrap cleared the session row entirely.
+	// repo carries commits beyond what daemon A ever pushed, the sealed
+	// execution state is the completed workflow, and the wrap cleared
+	// the session row entirely.
 	if inst.bareCommitCount(t, wi) == 0 {
 		t.Fatal("takeover session never pushed")
+	}
+	waitWorkflowStatus(t, daemonB, wi, "completed", 30*time.Second)
+	env := archivedEnvelope(t, daemonB.capsuleDir(wi), "grill", 2)
+	if env["outcome"] != "completed" {
+		t.Fatalf("the continuation's grill envelope wrong: %v", env["outcome"])
 	}
 	sessFinal := inst.sessionOf(t, wi)
 	if sessFinal.Fingerprint != "" {
 		t.Fatalf("wrapped work item still names session %q", sessFinal.Fingerprint)
 	}
-}
-
-// killAgent SIGKILLs the daemon-side recorded agent pid of wi.
-func killAgent(d *v1Daemon, wi string) error {
-	pid := d.agentPIDOf(d.t, wi)
-	if pid <= 0 {
-		return fmt.Errorf("no live agent pid for %s", wi)
-	}
-	return syscall.Kill(pid, syscall.SIGKILL)
 }

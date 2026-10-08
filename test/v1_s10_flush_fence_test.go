@@ -2,129 +2,129 @@ package test
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
-
-	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
-// v1_s10: the flush spawn_n fence (v1.5 B2). A zombie survivor of a
-// superseded derivation (or a stale flush carrying an older counter)
-// must never seal the live derivation's work: flush(wrap) with an OLD
-// spawn_n answers DAEMON-409 STALE_SPAWN and never reaches the monitor;
-// an ABSENT counter (0) is refused the same way, fail-closed; the
-// CURRENT derivation's flush(wrap) succeeds and the job is undisturbed
-// by the rejected ones. The dual-window half of the fence — a flush
-// carrying the LATEST ANNOUNCED counter while the monitor's adoption
-// still lags must be queued, not refused — is pinned per-derivation at
-// the observe face (internal/polyforge/observe/flush_recovery_window_
-// test.go); every recovery scenario here (s05/s06/s07/s16/s19) also
-// exercises it live, since each re-derived agent's own first flush
-// rides exactly that window.
+// v1_s10: the spawn fence, driver/envelope edition.
+//
+// RETIRED SUB-ASSERTIONS (Phase-4 ticket polyforge#106): the legacy
+// scenario's core was the agent→daemon flush(wrap) STALE_SPAWN fence — a
+// zombie survivor (or a stale flush body) carrying an old/absent
+// derivation counter answered DAEMON-409 STALE_SPAWN and never reached
+// the monitor. That fence lives on the WI-Agent RPC flush proxy
+// (protocol.FlushRequest spawn_n vs the runtime's announced counter), a
+// legacy-only face with no driver counterpart: the driver-era seal is
+// envelope collection + the CLI close, neither of which speaks the flush
+// proxy. The sub-assertions are retired with this comment (deletion is
+// #106's), not silently dropped.
+//
+// LIVE REMAINDER, re-expressed on the driver's spawn/drop contract: the
+// result-envelope drop path is ordinal-keyed AND ordinal-fenced.
+// pending-results/<n>.json is only ever read by the dispatch holding
+// ordinal n, and an envelope whose INNER spawn_n mismatches its drop
+// path's ordinal is a validation defect — never accepted, never applied.
+// The scenario forges a drop file at the live ordinal's path carrying a
+// wrong inner spawn_n and pins: the forged envelope is fenced out (the
+// parked question and the durable state are undisturbed), the REAL
+// derivation's envelope is accepted exactly once, and the stale forged
+// file never enters the accepted record.
 func TestV1S10FlushSpawnFence(t *testing.T) {
 	inst := newV1Install(t)
-	wi := inst.newWI(t, "s10: flush spawn_n fence",
+	const qid = "q_s10_fence"
+	wi := inst.newWI(t, "s10: the spawn/drop-path fence",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "park"},
-		},
-		[]map[string]any{{"do": "park"}})
-	d := newV1Daemon(t, inst)
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
+				"question": "s10: parked while the fence is probed."},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
+		}, nil)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
-		return d.agentPIDOf(t, wi) > 0
-	})
-	t.Cleanup(func() { killOrphans(wi) })
-
-	// The first derivation's counter is 1 (a freshly claimed capsule
-	// seeds the counter from an empty spawn journal).
-	oldSpawn := 0
-	for _, j := range d.status(t).Jobs {
-		if j.WorkItemID == wi {
-			oldSpawn = j.SpawnN
-		}
+	waitQuestion(t, d, wi, qid, 30*time.Second)
+	capDir := d.capsuleDir(wi)
+	// The fence target: the LIVE ordinal's drop path (grill's derivation
+	// is parked after writing its needs_input envelope — already
+	// collected — so the path is free again and the live stepRun's poll
+	// is the fence under test).
+	dropPath := filepath.Join(capDir, "runtime-state", "pending-results", "1.json")
+	forge := map[string]any{
+		"protocol_version": 1,
+		"result_id":        "forged-result-id-s10",
+		"wi_id":            wi,
+		"step_id":          "grill",
+		"spawn_n":          999, // the INNER ordinal mismatches the drop path
+		"outcome":          "completed",
+		"output":           map[string]any{"summary": "forged by the fence probe"},
+		"artifacts":        []any{},
+		"command_evidence": []any{},
+		"submitted_at":     time.Now().UTC().Format(time.RFC3339),
 	}
-	if oldSpawn == 0 {
-		t.Fatalf("no spawn_n on the status job for %s", wi)
-	}
-
-	// Force one recovery so the counter advances: the OLD counter is the
-	// one the zombie would still speak in, the CURRENT one is +1.
-	if err := syscall.Kill(d.agentPIDOf(t, wi), syscall.SIGKILL); err != nil {
+	blob, err := json.Marshal(forge)
+	if err != nil {
 		t.Fatal(err)
 	}
-	// Wait for the ANNOUNCEMENT to be fully processed (monitor adoption),
-	// not merely the spawn journal: the fence's supersession point is the
-	// RTRecovered emission — before it, the old counter is genuinely
-	// current (no successor announced) and a flush under it is
-	// legitimate. Waiting on the journal alone races the announcement.
-	waitForEvent(t, d, wi, "wi_agent_rederived", 30*time.Second)
-	currentSpawn := oldSpawn + 1
-	if got := d.observe(t, wi).SpawnN; got != currentSpawn {
-		t.Fatalf("post-recovery derivation counter %d, want %d", got, currentSpawn)
+	if err := os.WriteFile(dropPath, blob, 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	// The stale flush: wrap in the OLD derivation's counter → DAEMON-409
-	// STALE_SPAWN.
-	_, err := d.client.Flush(wi, protocol.FlushRequest{
-		WorkItem: wi, SpawnN: oldSpawn, Reason: protocol.FlushWrap,
-		FinalStatus: "wrapped",
-	})
-	if err == nil {
-		t.Fatal("stale flush(wrap) was accepted")
+	// The forged envelope is fenced out: the driver collects it, sees the
+	// inner spawn_n mismatch (a validation defect against the dispatch's
+	// fence), and never applies it. The parked question and the durable
+	// state are undisturbed while the live dispatch keeps waiting for ITS
+	// envelope.
+	time.Sleep(1500 * time.Millisecond)
+	if questionIDOf(statusQuiet(d), wi) != qid {
+		t.Fatal("the forged drop disturbed the parked question")
 	}
-	ae, ok := err.(*api.Error)
-	if !ok || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "STALE_SPAWN") {
-		t.Fatalf("stale flush error wrong: %v", err)
+	x := readExecution(t, capDir)
+	if x.WorkflowStatus != "running" || x.Steps["grill"].Status != "in_progress" {
+		t.Fatalf("the forged drop disturbed the durable state: %+v", x)
 	}
-
-	// The absent counter (0) is refused fail-closed, exactly like a
-	// mismatched one: a v1-era flush body (keyed on the deleted
-	// attempt_id, no spawn_n) must never reach the monitor either.
-	_, err = d.client.Flush(wi, protocol.FlushRequest{
-		WorkItem: wi, SpawnN: 0, Reason: protocol.FlushWrap,
-		FinalStatus: "wrapped",
-	})
-	if err == nil {
-		t.Fatal("absent-counter flush(wrap) was accepted")
-	}
-	ae, ok = err.(*api.Error)
-	if !ok || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "STALE_SPAWN") {
-		t.Fatalf("absent-counter flush error wrong: %v", err)
+	for _, a := range x.Steps["grill"].Attempts {
+		if a["accepted_result_id"] == "forged-result-id-s10" {
+			t.Fatal("the forged envelope was accepted — the spawn fence is broken")
+		}
 	}
 
-	// The current derivation is undisturbed: the job still runs.
-	if st := inst.wiStatus(t, wi); st != "running" {
-		t.Fatalf("stale flush disturbed the job: status %q", st)
-	}
-	if d.agentPIDOf(t, wi) == 0 {
-		t.Fatal("stale flush killed the agent")
-	}
+	// The fence held while the live derivation answered for itself: the
+	// owner's answer re-dispatches grill under the NEXT ordinal, whose
+	// envelope is accepted (the forged file at ordinal 1 stays stale and
+	// unread — nobody polls a superseded ordinal).
+	answerQuestion(t, d, wi, qid, "The fence held.")
+	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 
-	// The CURRENT derivation's flush(wrap) seals the session's work.
-	raw, err := d.client.Flush(wi, protocol.FlushRequest{
-		WorkItem: wi, SpawnN: currentSpawn, Reason: protocol.FlushWrap,
-		FinalStatus: "wrapped",
-	})
+	// The accepted record is the real one, exactly once: the archived
+	// envelopes carry the real result ids, the forged id appears nowhere,
+	// and grill's accepted attempts are exactly the real continuations.
+	x = readExecution(t, capDir)
+	for _, step := range []string{"grill", "fix", "verification", "release"} {
+		if st := x.Steps[step]; st == nil || st.Status != "done" {
+			t.Fatalf("step %s: %+v, want done", step, st)
+		}
+	}
+	realEnv := archivedEnvelope(t, capDir, "grill", 2)
+	if realEnv["outcome"] != "completed" {
+		t.Fatalf("grill's continuation envelope wrong: %v", realEnv["outcome"])
+	}
+	rawExec, err := os.ReadFile(filepath.Join(capDir, "runtime-state", "execution.json"))
 	if err != nil {
-		t.Fatalf("current-counter flush(wrap) rejected: %v", err)
+		t.Fatal(err)
 	}
-	var ack protocol.FlushAck
-	if err := json.Unmarshal(raw, &ack); err != nil || !ack.OK || !ack.Pushed {
-		t.Fatalf("wrap flush ack wrong: %v (%s)", err, raw)
+	if strings.Contains(string(rawExec), "forged-result-id-s10") {
+		t.Fatal("the forged result id entered the accepted execution state")
 	}
-	inst.waitWIStatus(t, wi, "wrapped", 30*time.Second)
-
-	// And the fence held the whole time: one session, two derivations.
-	if n := len(spawnJournal(t, d.capsuleDir(wi))); n != 2 {
-		t.Fatalf("spawn journal has %d entries, want 2", n)
+	// One needs_input for the parked question, one clean terminal close.
+	if n := countOf(d.eventKinds(t, wi), "needs_input"); n != 1 {
+		t.Fatalf("needs_input fired %d times, want 1: %v", n, d.eventKinds(t, wi))
 	}
-	// The wrap cleared the session at aihub (m4: no holder on a
-	// terminal work item).
 	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {
 		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
 	}

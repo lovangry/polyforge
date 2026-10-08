@@ -1,29 +1,5 @@
 package test
 
-// v1_t7: pre-claim crash — the B1 journal replay (v1.5 contract §4.2),
-// e2e. The crash window is the v0 known gap "#Start-crash" (D5): the
-// daemon dies between the aihub session claim and the local job
-// registration, orphaning a RUNNING session nobody can name. B1 closes
-// it from both sides with claiming.json, written durably BEFORE the
-// claim call, and the startup replay:
-//
-//   - journal entry exists + hub session matches → adopt and finish the
-//     start (the SAME idempotency key replays the SAME claim answer, D4);
-//   - anything else → drop.
-//
-// The window is deterministic here through a claim-hold proxy (the s17
-// seal-crash mechanism, re-aimed): the proxy fronts the daemon's aihub
-// API face, FORWARDS the claim (so it lands server-side) and then holds
-// the RESPONSE until the test releases it. The daemon is SIGKILLed
-// while the claim is landed-but-unseen — the exact ambiguous-claim
-// shape ZooKeeper's GUID lesson names — and the restarted daemon must
-// adopt the journaled session and finish the start with no second
-// claim and no blocked compensation.
-//
-// The in-process halves (journal write, replay refusal paths) are
-// pinned by runtime/v15_session_test.go; this scenario pins the real
-// daemon's restart wiring end to end.
-
 import (
 	"encoding/json"
 	"net"
@@ -38,6 +14,30 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
+
+// v1_t7: pre-claim crash — the B1 journal replay (v1.5 contract §4.2),
+// e2e, driver/envelope edition. The crash window is the v0 known gap
+// "#Start-crash" (D5): the daemon dies between the aihub session claim
+// and the local job registration, orphaning a RUNNING session nobody can
+// name. B1 closes it from both sides with claiming.json, written durably
+// BEFORE the claim call, and the startup replay:
+//
+//   - journal entry exists + hub session matches → adopt and finish the
+//     start (the SAME idempotency key replays the SAME claim answer, D4);
+//   - anything else → drop.
+//
+// The window is deterministic here through a claim-hold proxy (the s17
+// seal-crash mechanism, re-aimed): the proxy fronts the daemon's aihub
+// API face, FORWARDS the claim (so it lands server-side) and then holds
+// the RESPONSE until the test releases it. The daemon is SIGKILLed
+// while the claim is landed-but-unseen — the exact ambiguous-claim
+// shape ZooKeeper's GUID lesson names — and the restarted daemon must
+// adopt the journaled session and finish the start with no second
+// claim and no blocked compensation: the adopted start dispatches the
+// driver's ordinal-1 step process, the workflow completes and the
+// terminal wiring wraps it. The in-process halves (journal write,
+// replay refusal paths) are pinned by runtime/v15_session_test.go; this
+// scenario pins the real daemon's restart wiring end to end.
 
 // claimHoldProxy fronts aihub: every request is forwarded untouched,
 // but the work item's session CLAIM response is captured and held — the
@@ -166,15 +166,17 @@ func TestV1T7PreClaimCrashJournalReplay(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "t7: pre-claim crash, journal replay adopts",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "wrap"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	t.Cleanup(func() { killOrphans(wi) })
 
 	// The proxy fronts the daemon's aihub API face; git pushes are pinned
 	// direct by optServerURL.
 	proxy := newClaimHoldProxy(t, inst.url)
-	d := newV1Daemon(t, inst, optServerURL(proxy.url()))
+	d := newV1Daemon(t, inst, optServerURL(proxy.url()), optUseDriver())
 	d.start()
 	d.pf(t, "submit", wi)
 
@@ -215,15 +217,17 @@ func TestV1T7PreClaimCrashJournalReplay(t *testing.T) {
 	// aihub: the startup replay must verify the journaled session
 	// (matches), re-claim with the SAME key (D4: the same answer comes
 	// back — no second session, no ALREADY_HELD refusal) and finish the
-	// start: a live agent, then the plan's wrap.
+	// start: the adopted driver dispatches its first step process, then
+	// the workflow runs to its terminal wrap.
 	d2 := &v1Daemon{
 		t: t, inst: inst, sock: d.sock, dataDir: d.dataDir, workspace: d.workspace,
-		machineID: d.machineID, logPath: filepath.Join(t.TempDir(), "daemon2.log"),
+		machineID: d.machineID, extraArgs: d.extraArgs,
+		logPath: filepath.Join(t.TempDir(), "daemon2.log"),
 	}
 	t.Cleanup(func() { d2.stop() })
 	d2.start()
 	waitUntil(t, 60*time.Second, "the restarted daemon never adopted the journaled start", func() bool {
-		return d2.agentPIDOf(t, wi) > 0
+		return len(spawnJournal(t, d2.capsuleDir(wi))) > 0
 	})
 
 	// The adopted session is the JOURNALED one — not a fresh claim: the
@@ -240,13 +244,19 @@ func TestV1T7PreClaimCrashJournalReplay(t *testing.T) {
 
 	// The adopted derivation finished the work item — no blocked
 	// compensation, no second session.
-	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 180*time.Second)
 
-	// One derivation only (the adopted start's first), and the wrap
-	// cleared the session row.
+	// One derivation per workflow step — the adopted start's own
+	// dispatches, no re-derivations — and the wrap cleared the session
+	// row.
 	spawns := spawnJournal(t, d2.capsuleDir(wi))
-	if len(spawns) != 1 {
-		t.Fatalf("spawn journal has %d entries, want 1 (the adopted start's single derivation): %+v", len(spawns), spawns)
+	if len(spawns) != 4 {
+		t.Fatalf("spawn journal has %d entries, want 4 (the adopted start's single pass): %+v", len(spawns), spawns)
+	}
+	for _, s := range spawns {
+		if s["resume"] != false {
+			t.Fatalf("no dispatch of the adopted start may be a resume: %+v", spawns)
+		}
 	}
 	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {
 		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
