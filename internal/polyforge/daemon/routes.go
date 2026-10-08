@@ -62,8 +62,8 @@ type queueStats struct {
 }
 
 type statusResponse struct {
-	MachineID    string      `json:"machine_id"`
-	Mode         string      `json:"mode"`
+	MachineID string `json:"machine_id"`
+	Mode      string `json:"mode"`
 	// Workspace is the active capsule base (#103): the -workspace value
 	// the daemon was launched with — capsules live at <workspace>/capsules.
 	Workspace    string      `json:"workspace"`

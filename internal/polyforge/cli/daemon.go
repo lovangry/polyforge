@@ -145,8 +145,8 @@ type SubmitResponse struct {
 // queue counters. It is NOT workflow execution state (INV-1) — just
 // "what this machine is managing".
 type StatusResponse struct {
-	MachineID    string      `json:"machine_id"`
-	Mode         string      `json:"mode"`
+	MachineID string `json:"machine_id"`
+	Mode      string `json:"mode"`
 	// Workspace is the active capsule base (#103): the daemon's launched
 	// -workspace value — capsules live at <workspace>/capsules/<wi_id>.
 	Workspace    string      `json:"workspace"`
