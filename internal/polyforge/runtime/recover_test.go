@@ -7,6 +7,9 @@ package runtime
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -367,6 +370,71 @@ func TestRecoverStormLedgerResetsAfterStabilityWindow(t *testing.T) {
 	}
 	if h := j.agent; h != nil {
 		_ = h.Terminate(2e9)
+	}
+}
+
+// recordingHandle is a minimal AgentHandle that records Terminate calls —
+// the shape of the driver bridge handle (agentPID 0, teardown through the
+// handle itself).
+type recordingHandle struct {
+	terminated bool
+}
+
+func (h *recordingHandle) PID() int                                { return 0 }
+func (h *recordingHandle) StartedAt() string                       { return "" }
+func (h *recordingHandle) Alive() bool                             { return !h.terminated }
+func (h *recordingHandle) Done() bool                              { return h.terminated }
+func (h *recordingHandle) Terminate(bound time.Duration) error     { h.terminated = true; return nil }
+func (h *recordingHandle) SendControl(m protocol.ControlMsg) error { return nil }
+func (h *recordingHandle) WaitControlAck(ctx context.Context, m protocol.ControlMsg, b time.Duration) error {
+	return nil
+}
+
+// TestRecoverDriverTerminatesOldHandleAndSeedsFromJournal (the #99
+// verification lesson): a driver-path recovery must (1) TERMINATE the old
+// bridge handle — the pid-keyed cleanup is a no-op at agentPID 0 and the
+// old driver goroutine otherwise survives as a second envelope collector
+// on execution.json — and (2) seed the relaunch ordinal past the CAPSULE
+// SPAWN JOURNAL max, not the job counter, so the new driver's step
+// ordinals never collide with the dead driver's.
+func TestRecoverDriverTerminatesOldHandleAndSeedsFromJournal(t *testing.T) {
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, newFakeHub(), sp)
+	wi := "wi_drvreseed"
+	j := seedJob(r, wi)
+	// journal max 7 > job counter 1: the dead driver derived step
+	// ordinals ahead of the relaunch counter
+	journal := filepath.Join(j.capsuleDir, "runtime-state", "spawn-journal.jsonl")
+	if err := os.MkdirAll(filepath.Dir(journal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := ""
+	for n := 1; n <= 7; n++ {
+		lines += fmt.Sprintf(`{"spawn_n":%d,"transcript":"t%d"}%s`, n, n, "\n")
+	}
+	if err := os.WriteFile(journal, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := &recordingHandle{}
+	j.mu.Lock()
+	j.agent = old
+	j.agentPID = 0 // the driver shape
+	j.mu.Unlock()
+	var gotSpawn int64
+	r.cfg.AgentStarter = func(ctx context.Context, in AgentStartInput) (AgentHandle, error) {
+		gotSpawn = in.SpawnN
+		return &recordingHandle{}, nil
+	}
+
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+		t.Fatalf("driver recovery must relaunch, got %+v", msg)
+	}
+	if !old.terminated {
+		t.Fatal("the old bridge handle must be terminated on driver recovery")
+	}
+	if gotSpawn != 8 {
+		t.Fatalf("relaunch must seed past the journal max (want 8, got %d)", gotSpawn)
 	}
 }
 

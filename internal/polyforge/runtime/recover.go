@@ -126,12 +126,18 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 		// steps above — killTree, commitDirty — already ran).
 		if r.cfg.AgentStarter != nil {
 			// The relaunch is a fresh derivation (B2): advance the counter,
-		// exactly as the legacy spawnAgent path does. The step ordinals
-		// the relaunched driver derives seed from this counter — without
-		// the advance, every restart re-derives the SAME ordinal and a
-		// stale drop file passes the fence it was supposed to be fenced
-		// out by (#97).
+			// exactly as the legacy spawnAgent path does. The seed is the
+			// CAPSULE SPAWN JOURNAL max, not the job's counter (the #99
+			// verification lesson): the driver's internal step ordinals run
+			// ahead of the relaunch counter without ever writing back, so a
+			// job-counter seed re-derives an ordinal the dead driver already
+			// used — two step processes on one drop path, the fence
+			// defeated. The journal is the one ledger BOTH lanes append every
+			// derivation to; seeding past its max restores the fence.
 			j.mu.Lock()
+			if m := maxSpawnNFromJournal(j.capsuleDir); m > j.spawnN {
+				j.spawnN = m
+			}
 			j.spawnN++
 			ordinal := int64(j.spawnN)
 			j.mu.Unlock()
@@ -517,7 +523,24 @@ func (r *Runtime) killAgentTree(j *job) {
 	j.mu.Lock()
 	pid := j.agentPID
 	start := j.agentStartedAt
+	h := j.agent
+	j.agent = nil
 	j.mu.Unlock()
+	// v2 driver shape (the #99 verification lesson): a bridge handle
+	// carries no process id (agentPID 0 — the handle's PID is the daemon
+	// itself, which must never be signaled), so the pid-keyed cleanup
+	// below is a no-op and the old driver goroutine SURVIVED the
+	// recovery: it kept collecting envelopes at its own ordinals while
+	// the relaunch dispatched new ones — two writers on one
+	// execution.json. The handle's own Terminate is the kill switch:
+	// canceling the driver context unwinds Run, which terminates its
+	// live step process on the way out.
+	if h != nil && pid <= 0 {
+		if err := h.Terminate(cleanupBound); err != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: driver handle teardown incomplete: %v\n", j.wi, err)
+		}
+		return
+	}
 	if pid <= 0 {
 		return
 	}
@@ -532,7 +555,4 @@ func (r *Runtime) killAgentTree(j *job) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: agent tree cleanup incomplete: %v (warnings: %v)\n", j.wi, err, rep.Warnings)
 	}
-	j.mu.Lock()
-	j.agent = nil
-	j.mu.Unlock()
 }

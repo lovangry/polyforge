@@ -56,9 +56,34 @@ func (h *Handle) Terminate(bound time.Duration) error {
 	return nil
 }
 func (h *Handle) SendControl(m protocol.ControlMsg) error {
+	// Probe semantics for the driver bridge (the #99 verification
+	// lesson): the driver engine has no stdio control channel, so the
+	// old answer — always-fail — turned every watchdog probe into a
+	// false recovery. The supervised liveness of a driver WI IS the
+	// driver goroutine itself: a probe arriving while Run is live is
+	// acknowledged (the engine is working — the step process's long
+	// tool calls legitimately stay record-silent for the whole
+	// HangWindow); a probe on a dead driver fails and recovery owns it
+	// (onExit reaches the same verdict without the probe anyway).
+	if m.Method == protocol.ControlProbe {
+		h.mu.Lock()
+		alive := !h.doneSet
+		h.mu.Unlock()
+		if alive {
+			return nil
+		}
+		return fmt.Errorf("bridge: driver not running")
+	}
 	return fmt.Errorf("bridge: control messages not supported on driver handle")
 }
+
 func (h *Handle) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error {
+	if m.Method == protocol.ControlProbe {
+		// the SendControl probe verdict above IS the ack: an accepted
+		// probe was answered synchronously (the engine is live); there is
+		// no asynchronous ack to wait for.
+		return h.SendControl(m)
+	}
 	return fmt.Errorf("bridge: no control ack channel on driver handle")
 }
 
