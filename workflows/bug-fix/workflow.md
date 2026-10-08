@@ -9,7 +9,12 @@ defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
   - { id: repro, context_policy: fresh, handoff: true, kind: code, budget: { wall_minutes: 30 } }
-  - { id: root-cause, context_policy: inherit, handoff: true, kind: qa, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { action: rewind, target: repro } }
+  # root-cause is a gate: it must run FRESH (the judge never inherits the
+  # judged conversation — driver rule, separation of powers) and takes the repro record (artifacts/repro.md — repro's declared output) through a DECLARED input instead: it reads the artifact,
+  # repro evidence through a DECLARED input instead: it reads the artifact,
+  # not the chat. (The inherit form violated the driver's gate rule and
+  # made the whole lane unclaimable — caught at #108's first claim.)
+  - { id: root-cause, context_policy: fresh, handoff: true, kind: qa, gate: true, budget: { wall_minutes: 20 }, inputs: [artifacts/repro.md], model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { action: rewind, target: repro } }
   - { id: fix, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
   - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
   - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
