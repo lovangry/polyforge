@@ -1,19 +1,22 @@
 package test
 
-// v1_s19_ship_pr_test.go: the ship PR layer e2e against REAL github.com.
-// s04 pins the push layer against a local bare origin, so the PR layer
-// (gh present → gh pr view reuse → gh pr create) is never reached, and
-// v0 usage_s10 pins only its compare-URL fallback. This scenario runs
-// the real thing: a private scratch repo created via gh under the
-// authenticated account, a WI wrapped with that repo as its inventory
-// origin, then the real `pf --json ship` — asserting the PR actually
-// opens on github.com with head branch polyforge/<wi>, and that a
-// second ship reuses the SAME single OPEN PR instead of duplicating it.
+// v1_s19_ship_pr_test.go: the ship PR layer e2e against REAL github.com,
+// driver/envelope edition. s04 pins the push layer against a local bare
+// origin, so the PR layer (gh present → gh pr view reuse → gh pr create)
+// is never reached, and v0 usage_s10 pins only its compare-URL fallback.
+// This scenario runs the real thing: a private scratch repo created via
+// gh under the authenticated account, a WI whose driver-pinned workflow
+// lays the inventory repo (the fix step's envelope action) and completes,
+// then the real `pf --json ship` — asserting the PR actually opens on
+// github.com with head branch polyforge/<wi>, and that a second ship
+// reuses the SAME single OPEN PR instead of duplicating it.
 //
 // The scenario SKIPS (never hard-fails) when a gate is missing:
 // testing.Short() (no network in the short lane), the gh binary absent,
 // or gh not authenticated. Each skip message names the missing gate.
-
+// (The legacy lane's requireLegacyLane early guard is GONE: a
+// driver-pinned scenario has no legacy lane to guard — the environmental
+// gates are the whole story.)
 import (
 	"encoding/json"
 	"fmt"
@@ -125,25 +128,11 @@ func ghOpenPRURLs(t *testing.T, fullRepo, branch string) []string {
 }
 
 func TestV1S19ShipPR(t *testing.T) {
-	// The EARLY legacy-lane guard (astra r1 #6): this scenario performs
-	// real external work (gh auth, a real GitHub scratch repository,
-	// credential git-config) BEFORE any daemon boots — the start()-time
-	// guard would fire only after those side effects, or never on a
-	// machine without the prerequisites. It is a known-legacy scenario,
-	// so it opts out first thing.
-	requireLegacyLane(t)
-	// Skip gates, in order; each skip names the missing gate.
-	if testing.Short() {
-		t.Skipf("short mode: skipping the real-github ship PR e2e (network + gh required)")
-	}
-	ghPath, err := exec.LookPath("gh")
-	if err != nil {
-		t.Skipf("gh binary absent from PATH: skipping the ship PR e2e")
-	}
-	if out, aerr := exec.Command(ghPath, "auth", "status").CombinedOutput(); aerr != nil {
-		t.Skipf("gh not authenticated (gh auth status exit %v): %s",
-			aerr, strings.TrimSpace(string(out)))
-	}
+	// The environmental gates, in order; each skip names the missing
+	// gate. This scenario performs real external work (gh auth, a real
+	// GitHub scratch repository, credential git-config) before any
+	// daemon boots — the gates run first thing, exactly as before.
+	requireGh(t)
 
 	// The real github.com origin: a private scratch repo this test owns.
 	owner, repoName, origin := ghScratchRepo(t)
@@ -152,14 +141,27 @@ func TestV1S19ShipPR(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s19: wrap then ship to real github and open the PR",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "repo", "name": "demo", "origin": origin},
-			{"do": "wrap"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			// The fix step's envelope action lays the inventory repo (a
+			// real worktree with its own github origin) before reporting
+			// done.
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true,
+				"name": "demo", "origin": origin},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	d.pf(t, "submit", wi)
-	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
+
+	// The driver-era completion face: the whole chain done before the
+	// ship.
+	waitWorkflowStatus(t, d, wi, "completed", 30*time.Second)
+	env := archivedEnvelope(t, d.capsuleDir(wi), "fix", 2)
+	if env["outcome"] != "completed" {
+		t.Fatalf("fix envelope wrong: %v", env["outcome"])
+	}
 
 	// The sealed worktree carries the inventory repo and its head.
 	repoDir := filepath.Join(d.capsuleDir(wi), "repos", "demo")
