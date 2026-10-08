@@ -48,8 +48,9 @@ type Command struct {
 // to aihub (file, queue, cancel, recall, remember + the v1.5 takeover,
 // unblock and verify-session) + 8 on the daemon UDS face (submit, observe,
 // answer, batch-confirm, pause, resume, wrap, ops) — then ship (the wrap→git
-// delivery bridge, daemon face), then the management face M1–M5, then
-// the two migrations, then the daemon placeholder (help-only: cmd/pf/
+// delivery bridge, daemon face), then the management face M1–M5, then the
+// two migrations (dispatchable but never surfaced on the help face — #103
+// AC16), then the daemon placeholder (help-only: cmd/pf/
 // main.go intercepts the real launch).
 var commands = []*Command{
 	cmdFile,
@@ -258,8 +259,13 @@ func printUsage(w io.Writer) {
 	// The registry layout: 8 data-plane verbs (direct to aihub) — file,
 	// queue, cancel, recall, remember + the v1.5 takeover, unblock and
 	// verify-session — then the 8 execution-plane verbs, ship, the M1–M5
-	// management face, the two migrations and the daemon placeholder. The
-	// group indices below MUST track that layout.
+	// management face and the daemon placeholder. The two migration verbs
+	// (positions 22–23) stay dispatchable for the one-shot v0→v1 cutover
+	// but are deliberately UNSURFACED here (#103, AC16): no migration
+	// subcommand appears on the pf verb surface — capsule migration is a
+	// manual operator procedure (docs/design/polyforge-vnext/
+	// 08-capsule-base-migration.md). The group indices below MUST track
+	// that layout.
 	fmt.Fprintln(w, "Data-plane verbs (direct to aihub):")
 	for _, c := range commands[0:8] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
@@ -273,15 +279,13 @@ func printUsage(w io.Writer) {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Management face (M1–M5):")
-	for _, c := range commands[17:22] {
+	for _, c := range commands[17:23] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
-	fmt.Fprintln(w, "Migration (admin; one-shot v0→v1 cutover):")
-	for _, c := range commands[22:24] {
-		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
-	}
+	// commands[23:25] are the migration verbs — dispatchable, never
+	// surfaced (see the layout comment above).
 	fmt.Fprintln(w, "Process:")
-	for _, c := range commands[24:] {
+	for _, c := range commands[25:] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w)
