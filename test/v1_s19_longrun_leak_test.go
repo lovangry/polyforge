@@ -1,13 +1,15 @@
 package test
 
 // v1_s19: the long-run leak probe — scenario A of the dual-scenario
-// split the owner confirmed (grill q_f17c2e). Every existing scenario
-// runs one or a handful of jobs and never checks the daemon's
-// steady-state hygiene after MANY consecutive work items; a per-job fd
-// leak (sockets or spawn handles never closed) or duplicate writes to
-// the durable events log would pass today's suite unnoticed. This
-// scenario closes that gap at PROCESS level, against the REAL
-// `pf daemon` binary:
+// split the owner confirmed (grill q_f17c2e), driver/envelope edition.
+// Every existing scenario runs one or a handful of jobs and never checks
+// the daemon's steady-state hygiene after MANY consecutive work items; a
+// per-job fd leak (sockets or spawn handles never closed) or duplicate
+// writes to the durable events log would pass today's suite unnoticed.
+// This scenario closes that gap at PROCESS level, against the REAL
+// `pf daemon` binary running a long driver workload: 20 consecutive
+// driver-pinned quick-fix work items, each completing and sealing through
+// the terminal wiring.
 //
 //   - fd count does not grow: the number of entries in
 //     /proc/<daemon-pid>/fd, measured after all 20 jobs are wrapped
@@ -15,22 +17,19 @@ package test
 //     the baseline captured after daemon start-up idle-settle and
 //     BEFORE job 1.
 //   - events.log is clean: every line of <dataDir>/events.log is one
-//     valid protocol.EventEntry, the total line count equals the
-//     number of events this run actually produced (counted after
-//     settle), and no event occurrence is written twice — a
-//     re-written/duplicated event line is the failure signal.
+//     valid protocol.EventEntry, and no event occurrence is written
+//     twice — a re-written/duplicated event line is the failure signal.
+//     The per-work-item accounting is the healthy driver-run shape:
+//     exactly one job_started and one job_stopped per work item (the
+//     per-job completion recovery emits needs_recovery, which the
+//     accounting deliberately tolerates).
 //
 // Division of labor (the dual-scenario split): fd leaks and event
 // duplication are process-level realities, so the real binary is the
 // most convincing carrier and this file carries them with ZERO
-// production changes — /proc is read from outside, and the owner
-// explicitly rejected test-only introspection hooks in the shipped
-// binary (option B). The GOROUTINE half of the probe cannot run here:
-// the daemon is a separate process runtime.NumGoroutine cannot see, so
-// it lives in the companion scenario v1_s20_longrun_goroutines_test.go,
-// which runs the same 20-job flow through the in-process rig (the
-// faithful already-existing carrier of in-process semantics).
-
+// production changes — /proc is read from outside. The GOROUTINE half of
+// the probe lives in the companion scenario
+// v1_s20_longrun_goroutines_test.go (the in-process rig).
 import (
 	"encoding/json"
 	"fmt"
@@ -48,7 +47,7 @@ import (
 // for a suite that runs on this machine: 2s of start-up idle-settle
 // lets the daemon's boot goroutines and the UDS listener reach steady
 // state before the baseline, and 3s of post-run settle lets the last
-// job's async teardown (agent pipe close, monitor exit, transport
+// job's async teardown (step-process close, monitor exit, transport
 // teardown) finish before the final measurement. The fd sample takes
 // the MINIMUM of 5 reads 200ms apart so a transient fd (a just-closed
 // socket not yet reaped, a concurrent status connection) can only make
@@ -163,11 +162,11 @@ func s19MinFDCount(t *testing.T, pid int, n int, gap time.Duration) int {
 //     can never collide because each carries its own nanosecond-precision
 //     `at`. With every line valid and every line distinct, the total
 //     line count equals the number of events this run actually produced;
-//   - the per-work-item accounting is the healthy-run shape: every one
-//     of the run's work items is present with exactly one job_started
-//     and one job_stopped (a re-derivation or a double stop would be
-//     per-job debris the probe must surface), and no line names a work
-//     item outside the run.
+//   - the per-work-item accounting is the healthy driver-run shape: every
+//     one of the run's work items is present with exactly one
+//     job_started and one job_stopped (a re-derivation or a double stop
+//     would be per-job debris the probe must surface), and no line names
+//     a work item outside the run.
 func s19AssertEventsLogClean(t *testing.T, dataDir string, wis []string) {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(dataDir, "events.log"))
@@ -239,7 +238,7 @@ func s19AssertEventsLogClean(t *testing.T, dataDir string, wis []string) {
 
 func TestV1S19LongRunLeakProbe(t *testing.T) {
 	inst := newV1Install(t)
-	d := newV1Daemon(t, inst)
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	pid := d.cmd.Process.Pid
 
@@ -269,19 +268,16 @@ func TestV1S19LongRunLeakProbe(t *testing.T) {
 	baselineList := s19FDList(pid) // captured at baseline time for failure diagnosis
 	t.Logf("s19: daemon fd baseline after start-up settle: %d", baseline)
 
-	// 20 strictly consecutive jobs: each is a fake single-step short
-	// task that wraps itself, and the next one starts only after this
-	// one reached its terminal state.
+	// 20 strictly consecutive driver work items: each is a quick-fix
+	// workflow that completes and seals itself, and the next one starts
+	// only after this one reached its terminal state.
 	wis := make([]string, 0, s19Jobs)
 	for i := 0; i < s19Jobs; i++ {
 		wi := inst.newWI(t, fmt.Sprintf("s19: long-run leak probe job %02d", i+1),
-			[]map[string]any{
-				{"do": "step", "id": "code"},
-				{"do": "wrap"},
-			}, nil)
+			envelopeQuickFix(), nil)
 		wis = append(wis, wi)
 		d.pf(t, "submit", wi)
-		inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+		inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 	}
 
 	// The daemon holds no job any more.

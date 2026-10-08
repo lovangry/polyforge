@@ -1,32 +1,25 @@
 package test
 
-// v1_s19: cross-restart durability of the observe answer ledger. The
-// daemon-side answer ledger is no longer memory-only: the entries it
-// settles (the `awaiting` relays and the `applied` idempotency
-// outcomes) live in `answers.json` under the daemon data directory, so
-// a daemon restart or crash can neither strand an owner's unconsumed
-// answer nor turn a duplicate submission into a second delivery.
+// v1_s19: answer durability across restarts and crashes, driver/envelope
+// edition. On the driver path the CONSUMER of an answer is the DRIVER
+// (the D9 archive-and-clear write on the capsule's execution.json) — the
+// capsule is the answer's persistent authority, and the daemon-private
+// answers.json ledger belongs to the legacy agent-relay path. The four
+// scenarios re-express the durability contract on those faces:
 //
-// These are acceptance scenarios authored against the spec
-// (artifacts/spec.md of wi_tEnGWCxYEXzw), not against the ledger's
-// internals: everything asserted here is observable through the real
-// surfaces the owner has — the `pf answer` CLI, the capsule's fake-agent
-// journal, the daemon's events.log, the sealed execution.json and the
-// bytes of `answers.json` itself.
-//
-// Scenarios:
-//
-//   - A: an accepted-but-unconsumed answer is on disk as a versioned,
-//     0600, in-flight-free `answers.json` entry.
-//   - B: the daemon is SIGKILLed while the answer is awaiting; the
-//     restarted daemon reloads the ledger, auto-redelivers the relay to
-//     the re-derived instance, the run wraps, and the finished work
-//     item's entries are pruned from the file.
-//   - C: an answer consumed before a daemon crash replays its recorded
-//     outcome after the restart — same answer_id, no second pf/answer.
-//   - D: a corrupt `answers.json` is quarantined at startup; the daemon
-//     boots and serves a normal run.
-
+//   - A: an open question is ON DISK (execution.json pending_question:
+//     id, question, step, asked_at) while the workflow parks; the
+//     QUESTION column mirrors the durable record.
+//   - B: the question is open across a daemon SIGKILL; the restarted
+//     daemon re-presents the SAME persisted id on the QUESTION column
+//     and the answer closes it.
+//   - C: a terminal outcome reached before a daemon crash is replayed
+//     (from the durable file), never re-run: the restarted daemon
+//     re-derives nothing, the spawn journal and the execution state are
+//     byte-identical, and the WI stays wrapped.
+//   - D: a corrupt answers.json is quarantined at startup (the observe
+//     lane's own boot behavior, engine-agnostic), and the daemon serves
+//     a normal driver question/answer run afterwards.
 import (
 	"encoding/json"
 	"fmt"
@@ -37,273 +30,230 @@ import (
 	"time"
 )
 
-// ---------------------------------------------------------------------------
-// Scenario A: an accepted, delivered-but-unconsumed answer is durable on
-// disk — versioned JSON, 0600, no in-flight state, relay verbatim.
+// ---------------------------------------------------------------------
+// Scenario A: the open question is durable on the capsule face.
 
 func TestV1S19AwaitingAnswerIsPersistedToDisk(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_s19a"
-	actions := []map[string]any{
-		{"do": "step", "id": "code"},
-		{"do": "ask", "id": qid, "question": "Should the ledger survive a restart?"},
-		{"do": "park"},
-	}
-	wi := inst.newWI(t, "s19 A: awaiting answer persisted to answers.json", actions, nil)
-	// The instance lands pf/answer but never consumes or acks it: the
-	// answer settles delivered-but-unconsumed, i.e. `retryable` +
-	// `awaiting` — the half the file must carry.
-	writePlanExtra(t, inst, wi, actions, nil, map[string]any{"ack_answer": false})
+	const question = "Should the pending question survive a restart?"
+	wi := inst.newWI(t, "s19 A: the open question persisted to the capsule state",
+		[]map[string]any{
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
+				"question": question},
+		}, nil)
 
-	d := newV1Daemon(t, inst, optObserveWindows(0, 0, 0, 3*time.Second))
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool { return d.agentPIDOf(t, wi) > 0 })
-	waitUntil(t, 30*time.Second, "pending question never became visible", func() bool {
-		jv := d.observe(t, wi)
-		return jv.Pending != nil && jv.Pending.ID == qid
-	})
+	waitQuestion(t, d, wi, qid, 30*time.Second)
 
+	// The pending question is ON DISK in the daemon runtime state that
+	// matters — the capsule's execution.json, written by the driver's
+	// single transition entry: id, question text, step and ask moment.
+	capDir := d.capsuleDir(wi)
+	x := readExecution(t, capDir)
+	pq := x.Steps["grill"].PendingQuestion
+	if pq == nil {
+		t.Fatal("no pending_question on the durable face")
+	}
+	if (*pq)["id"] != qid || (*pq)["step"] != "grill" {
+		t.Fatalf("pending_question identity wrong: %v", pq)
+	}
+	if (*pq)["question"] != question {
+		t.Fatalf("pending_question text wrong: %v", (*pq)["question"])
+	}
+	if asked, _ := (*pq)["asked_at"].(string); asked == "" {
+		t.Fatalf("pending_question carries no asked_at: %v", pq)
+	}
+	// The QUESTION column mirrors the durable record (the D6 owner face),
+	// and the workflow is parked, not blocked.
+	jv := d.observe(t, wi)
+	if jv.Pending == nil || jv.Pending.ID != qid || !strings.Contains(jv.Pending.Question, "restart?") {
+		t.Fatalf("the QUESTION face does not mirror the durable record: %+v", jv.Pending)
+	}
+	if st := inst.wiStatus(t, wi); st != "running" {
+		t.Fatalf("parked workflow status %q, want running", st)
+	}
+
+	// The answer's durable home is the same file: the D9 write archives
+	// the pair and clears the pending question in ONE atomic transition.
 	const answerID = "a_s19a"
-	const answerText = "Yes: persist both halves of the ledger."
-	out := d.pf(t, "answer", wi, "--text", answerText, "--question", qid, "--answer-id", answerID, "--by", "usr_root")
-	if !strings.Contains(out, answerID) {
+	const answerText = "Yes: the capsule is the authority."
+	out := d.pf(t, "answer", wi, "--text", answerText, "--question", qid,
+		"--answer-id", answerID, "--by", "usr_root")
+	if !strings.Contains(out, answerID) || !strings.Contains(out, "delivered") {
 		t.Fatalf("answer outcome: %q", out)
 	}
-
-	// The relay is on disk, verbatim, in the versioned format.
-	waitUntil(t, 10*time.Second, "the accepted answer never reached "+answersPath(d), func() bool {
-		return answersFileHas(t, d, answerID)
-	})
-	doc := assertLedgerFileShape(t, d)
-	raw := readAnswersFile(t, d)
-	for _, field := range []string{qid, answerID, answerText, "usr_root", wi} {
-		if !strings.Contains(raw, field) {
-			t.Fatalf("persisted ledger misses %q (the relay must be stored verbatim, keyed by work item):\n%s", field, raw)
-		}
+	waitNoQuestion(t, d, wi, 30*time.Second)
+	x = readExecution(t, capDir)
+	if x.Steps["grill"].PendingQuestion != nil {
+		t.Fatalf("pending_question survived the answer: %+v", x.Steps["grill"].PendingQuestion)
 	}
-	// answered_at is the fifth relay field: whatever timestamp the CLI
-	// minted, the file must carry it (a today-dated RFC3339 stamp).
-	if !strings.Contains(raw, time.Now().UTC().Format("2006-01-02")) {
-		t.Fatalf("persisted ledger misses the relay's answered_at stamp:\n%s", raw)
-	}
-	if len(doc) < 2 {
-		t.Fatalf("persisted ledger carries only %d top-level fields (version + the two halves expected): %s", len(doc), raw)
-	}
-
-	// The agent journal proves this is the delivered-but-unconsumed
-	// shape: one suppressed landing, nothing archived in the capsule.
-	lands := answerControls(t, d.capsuleDir(wi))
-	if len(lands) != 1 || lands[0]["suppressed"] != true {
-		t.Fatalf("expected exactly one suppressed pf/answer landing, got %+v", lands)
+	if len(x.Steps["grill"].Answers) != 1 ||
+		x.Steps["grill"].Answers[0]["question_id"] != qid ||
+		x.Steps["grill"].Answers[0]["answer"] != answerText {
+		t.Fatalf("the archived answer is wrong: %+v", x.Steps["grill"].Answers)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Scenario B: daemon SIGKILL while the answer is awaiting → the restart
-// reloads the ledger, re-delivers automatically, the run wraps, and the
-// finished work item's entries leave the file.
+// ---------------------------------------------------------------------
+// Scenario B: the open question across a daemon SIGKILL — the restart
+// re-presents the SAME persisted id and the answer closes it.
 
 func TestV1S19AwaitingAnswerRedeliveredAfterDaemonCrash(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_s19b"
-	// The resume plan's ask carries a DIFFERENT id on purpose: it must
-	// never reach the capsule or a pf/answer correlation.
 	const decoyQID = "q_s19b_decoy"
-	actions := []map[string]any{
-		{"do": "step", "id": "code"},
-		{"do": "ask", "id": qid, "question": "Which variant should the recovery take?"},
-		{"do": "step", "id": "polish"},
-		{"do": "wrap"},
-	}
-	// The resume derivation re-presents the PERSISTED question id (the
-	// decoy id must lose) and then finishes the run.
-	resume := []map[string]any{
-		{"do": "ask", "id": decoyQID, "question": "Which variant should the recovery take?"},
-		{"do": "step", "id": "polish"},
-		{"do": "wrap"},
-	}
-	wi := inst.newWI(t, "s19 B: awaiting answer survives a daemon crash", actions, resume)
-	writePlanExtra(t, inst, wi, actions, resume, map[string]any{"ack_answer": false})
+	// The decoy id (the legacy scenario's resume-plan decoy) has no
+	// driver-side hook to exploit: the driver parks on the DURABLE
+	// pending question across the restart — no re-ask happens at all —
+	// so the decoy is pinned negatively instead: it must appear nowhere
+	// in the whole run's records.
+	_ = decoyQID
+	wi := inst.newWI(t, "s19 B: the open question across a daemon crash",
+		[]map[string]any{
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
+				"question": "Which variant should the recovery take?"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
+		}, nil)
 
-	d := newV1Daemon(t, inst, optObserveWindows(0, 0, 0, 3*time.Second))
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool { return d.agentPIDOf(t, wi) > 0 })
-	waitUntil(t, 30*time.Second, "pending question never became visible", func() bool {
-		jv := d.observe(t, wi)
-		return jv.Pending != nil && jv.Pending.ID == qid
-	})
+	waitQuestion(t, d, wi, qid, 30*time.Second)
 
-	const answerID = "a_s19b"
-	const answerText = "Take the durable variant."
-	d.pf(t, "answer", wi, "--text", answerText, "--question", qid, "--answer-id", answerID, "--by", "usr_root")
-	waitUntil(t, 10*time.Second, "the accepted answer never reached "+answersPath(d), func() bool {
-		return answersFileHas(t, d, answerID, answerText)
-	})
-	assertLedgerFileShape(t, d)
-
-	// Let the successor consume normally (the resume derivation re-reads
-	// the plan file at process start).
-	inst.setPlanFull(t, wi, actions, resume)
-
-	// Crash the daemon hard. The agent survives (parked on its question)
-	// and the ledger file is all the restart has.
+	// Crash the daemon hard while the question is open; the durable
+	// pending question is all the restart has.
 	d.crash()
-	if !answersFileHas(t, d, answerID) {
-		t.Fatalf("the awaiting entry did not survive the crash:\n%s", readAnswersFile(t, d))
+	if x := readExecution(t, d.capsuleDir(wi)); x.Steps["grill"].PendingQuestion == nil ||
+		(*x.Steps["grill"].PendingQuestion)["id"] != qid {
+		t.Fatal("the open question did not survive the crash on the durable face")
 	}
 
 	d2 := restartSameDaemon(t, d, "daemon2.log")
-	waitUntil(t, 60*time.Second, "restarted daemon never re-derived the agent", func() bool {
-		return d2.agentPIDOf(t, wi) > 0
-	})
 
-	// The restored `awaiting` entry is re-delivered automatically at the
-	// attach of the post-restart instance, consumed, and the run wraps.
-	waitForEvent(t, d2, wi, "answer_redelivery", 60*time.Second)
-	waitForEvent(t, d2, wi, "answered", 60*time.Second)
-	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
+	// The restarted daemon re-presents the SAME persisted id on the
+	// QUESTION column — the redelivery is the durable file speaking, and
+	// the plan's decoy id never surfaces.
+	waitQuestion(t, d2, wi, qid, 60*time.Second)
+	if q := questionIDOf(statusQuiet(d2), wi); q != qid {
+		t.Fatalf("the restarted QUESTION column shows %q, want the persisted %q", q, qid)
+	}
 
-	// The relay reached the successor verbatim and was archived in the
-	// capsule (the persistent authority), pending question cleared.
+	// The answer closes it and the run finishes. The needs_input EVENT
+	// fires once per monitor lifetime (each daemon's monitor emits it on
+	// first sight of the durable question) — exactly 2 across the two
+	// daemon lives, and the durable face proves it was ONE question:
+	// the same id throughout, asked_at unchanged by the restart.
+	answerQuestion(t, d2, wi, qid, "Take the durable variant.")
+	waitWorkflowStatus(t, d2, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	if n := countOf(d2.eventKinds(t, wi), "needs_input"); n != 2 {
+		t.Fatalf("needs_input fired %d times, want 2 (one per monitor life): %v",
+			n, d2.eventKinds(t, wi))
+	}
+
+	// The sealed chain: the answer archived under the PERSISTED id, the
+	// pending question gone, the decoy nowhere.
 	exec := inst.bareFileAtMain(t, wi, "runtime-state/execution.json")
-	// The answer TEXT and the QUESTION ID are the relay fields the
-	// capsule archive can carry: capsule.ArchivedAnswer is
-	// question_id/answer/answered_by/answered_at and deliberately has no
-	// answer_id — that identifier is daemon-ledger scoped (the pf/answer
-	// control envelope does not carry it either, protocol.ControlMsg is
-	// method/seq/id=question_id/answer), so it is asserted against
-	// answers.json above (answersFileHas) and below (the prune). Same
-	// contract as the S02 reference scenario.
-	if !strings.Contains(exec, answerText) {
-		t.Fatalf("sealed execution.json misses the re-delivered answer:\n%s", exec)
+	if !strings.Contains(exec, "Take the durable variant.") {
+		t.Fatalf("sealed execution.json misses the answer:\n%s", exec)
 	}
-	// The re-delivery was bound to the PERSISTED question id, never to
-	// the resume plan's decoy (mint once, re-present verbatim): the decoy
-	// must appear nowhere, and the persisted id must be archived with the
-	// answer.
 	if strings.Contains(exec, decoyQID) {
-		t.Fatalf("sealed execution.json carries the resume plan's decoy question id %s:\n%s", decoyQID, exec)
-	}
-	if !strings.Contains(exec, qid) {
-		t.Fatalf("sealed execution.json misses the persisted question id %s of the archived answer:\n%s", qid, exec)
+		t.Fatalf("sealed execution.json carries the decoy question id %s:\n%s", decoyQID, exec)
 	}
 	if strings.Contains(exec, `"pending_question"`) {
 		t.Fatalf("sealed execution.json still carries a pending question:\n%s", exec)
 	}
-	// The agent journal: the LAST pf/answer landing is the post-restart
-	// re-delivery, consumed (not suppressed) and correlated to the same
-	// question id — i.e. the restored entry was re-sent verbatim, and no
-	// landing ever carried the decoy.
-	lands := answerControls(t, d2.capsuleDir(wi))
-	if len(lands) < 2 {
-		t.Fatalf("pf/answer landings: got %d, want at least 2 (one suppressed pre-crash, one re-delivered after the restart): %+v", len(lands), lands)
+	if !strings.Contains(exec, qid) {
+		t.Fatalf("sealed execution.json misses the persisted question id %s:\n%s", qid, exec)
 	}
-	last := lands[len(lands)-1]
-	if last["suppressed"] == true || last["ref"] != qid {
-		t.Fatalf("the post-restart landing must be a normal consumption correlated to %s: %+v", qid, last)
-	}
-	for i, rec := range lands {
-		if rec["ref"] == decoyQID {
-			t.Fatalf("pf/answer landing #%d was bound to the decoy question id %s: %+v", i, decoyQID, rec)
+	x := readExecution(t, d2.capsuleDir(wi))
+	for _, step := range []string{"grill", "fix", "verification", "release"} {
+		if st := x.Steps[step]; st == nil || st.Status != "done" {
+			t.Fatalf("step %s: %+v, want done", step, st)
 		}
 	}
-	// Exactly one needs_input across the whole run: the re-delivery is
-	// not a second question.
-	if n := countOf(d2.eventKinds(t, wi), "needs_input"); n != 1 {
-		t.Fatalf("needs_input fired %d times, want 1: %v", n, d2.eventKinds(t, wi))
-	}
-
-	// The finished work item's entries are pruned from the file (the
-	// file may itself be gone only if nothing else is persisted; both
-	// are acceptable, the entry must not be there).
-	waitUntil(t, 30*time.Second, "the finished work item's entries were never pruned from "+answersPath(d2), func() bool {
-		raw := readAnswersFile(t, d2)
-		return raw == "" || (!strings.Contains(raw, answerID) && !strings.Contains(raw, wi))
-	})
 }
 
-// ---------------------------------------------------------------------------
-// Scenario C: cross-restart idempotency — a consumed answer_id replays
-// its recorded outcome and never produces a second delivery.
+// ---------------------------------------------------------------------
+// Scenario C: the final outcome reached before a daemon crash is
+// replayed, never re-run.
 
 func TestV1S19FinalOutcomeReplayedAfterDaemonCrash(t *testing.T) {
 	inst := newV1Install(t)
-	const qid = "q_s19c"
-	actions := []map[string]any{
-		{"do": "step", "id": "code"},
-		{"do": "ask", "id": qid, "question": "Replay or re-deliver after a restart?"},
-		{"do": "park"},
-	}
-	// The resumed derivation just parks: the work item stays live (so
-	// nothing is pruned) while the duplicate submission is tested.
-	resume := []map[string]any{{"do": "park"}}
-	wi := inst.newWI(t, "s19 C: duplicate answer_id after a restart", actions, resume)
+	wi := inst.newWI(t, "s19 C: the terminal outcome replayed after a crash",
+		envelopeQuickFix(), nil)
 
-	d := newV1Daemon(t, inst, optObserveWindows(0, 0, 0, 10*time.Second))
+	d := newV1Daemon(t, inst, optUseDriver())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool { return d.agentPIDOf(t, wi) > 0 })
-	waitUntil(t, 30*time.Second, "pending question never became visible", func() bool {
-		jv := d.observe(t, wi)
-		return jv.Pending != nil && jv.Pending.ID == qid
-	})
 
-	const answerID = "a_s19c"
-	const answerText = "Replay the recorded outcome."
-	// answered_at is re-minted by the CLI on the duplicate; the ledger's
-	// recorded outcome (not the new stamp) is what must come back.
-	first := d.pf(t, "answer", wi, "--text", answerText, "--question", qid, "--answer-id", answerID, "--by", "usr_root")
-	waitForEvent(t, d, wi, "answered", 30*time.Second)
-
+	// The workflow completes and the terminal wiring wraps it — the
+	// final outcome is durable in the capsule and at aihub.
+	waitWorkflowStatus(t, d, wi, "completed", 90*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 	capDir := d.capsuleDir(wi)
-	waitUntil(t, 30*time.Second, "the answer was never consumed by the agent", func() bool {
-		lands := answerControls(t, capDir)
-		return len(lands) == 1 && lands[0]["suppressed"] != true
-	})
-	// The settled outcome is on disk before the crash.
-	waitUntil(t, 10*time.Second, "the settled outcome never reached "+answersPath(d), func() bool {
-		return answersFileHas(t, d, answerID)
-	})
-	assertLedgerFileShape(t, d)
+	execBefore, err := os.ReadFile(filepath.Join(capDir, "runtime-state", "execution.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawnsBefore := len(spawnJournal(t, capDir))
+	if spawnsBefore != 4 {
+		t.Fatalf("spawn journal has %d entries, want 4 (one pass)", spawnsBefore)
+	}
 
-	// Crash and restart on the same state.
+	// Crash the daemon AFTER the terminal outcome; restart on the same
+	// state. The restarted daemon must re-derive NOTHING: the final
+	// outcome is replayed from the durable file, not re-run.
 	d.crash()
 	d2 := restartSameDaemon(t, d, "daemon2.log")
-	waitUntil(t, 60*time.Second, "restarted daemon never re-derived the agent", func() bool {
-		return d2.agentPIDOf(t, wi) > 0
-	})
-
-	// The SAME answer_id, submitted again after the restart: accepted
-	// with the recorded (nil) outcome, no second delivery.
-	second := d2.pf(t, "answer", wi, "--text", answerText, "--question", qid, "--answer-id", answerID, "--by", "usr_root")
-	if !strings.Contains(second, answerID) {
-		t.Fatalf("post-restart duplicate submission outcome: %q (first was %q)", second, first)
+	time.Sleep(5 * time.Second) // any re-derivation would show within this window
+	if st := inst.wiStatus(t, wi); st != "wrapped" {
+		t.Fatalf("the restarted daemon disturbed the terminal WI: %q", st)
 	}
-	// Give any (forbidden) second delivery time to land on the journal.
-	time.Sleep(3 * time.Second)
-	if lands := answerControls(t, capDir); len(lands) != 1 {
-		t.Fatalf("pf/answer landings: got %d, want 1 (a duplicate answer_id must never re-deliver): %+v", len(lands), lands)
+	if n := len(spawnJournal(t, capDir)); n != spawnsBefore {
+		t.Fatalf("the restart re-ran work: spawn journal %d entries, want %d", n, spawnsBefore)
 	}
-	// The work item is still live, so its settled entry is still on disk
-	// (retention drops entries on finish, not on replay).
-	if !answersFileHas(t, d2, answerID) {
-		t.Fatalf("the settled entry vanished from the ledger of a live work item:\n%s", readAnswersFile(t, d2))
+	execAfter, err := os.ReadFile(filepath.Join(d2.capsuleDir(wi), "runtime-state", "execution.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	assertLedgerFileShape(t, d2)
+	var before, after map[string]any
+	if json.Unmarshal(execBefore, &before) != nil || json.Unmarshal(execAfter, &after) != nil {
+		t.Fatal("execution.json unparsable")
+	}
+	if fmt.Sprint(before["version"]) != fmt.Sprint(after["version"]) {
+		t.Fatalf("the restarted daemon wrote new versions (%v -> %v)", before["version"], after["version"])
+	}
+	if before["workflow_status"] != "completed" || after["workflow_status"] != "completed" {
+		t.Fatalf("the terminal outcome moved: %v -> %v", before["workflow_status"], after["workflow_status"])
+	}
+	// The restarted daemon holds no job for the finished WI.
+	if st := d2.status(t); len(st.Jobs) != 0 {
+		t.Fatalf("the restarted daemon holds jobs: %+v", st.Jobs)
+	}
+	// And the session stays cleared (the wrap's terminal close).
+	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {
+		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
+	}
 }
 
-// ---------------------------------------------------------------------------
-// Scenario D: a corrupt ledger file is quarantined at startup, never
-// fatal — the daemon boots with an empty ledger and serves a normal run.
+// ---------------------------------------------------------------------
+// Scenario D: a corrupt answers.json is quarantined at startup, never
+// fatal — the daemon boots with an empty ledger and serves a normal
+// driver run.
 
 func TestV1S19CorruptLedgerFileQuarantinedAtStartup(t *testing.T) {
 	inst := newV1Install(t)
-	d := newV1Daemon(t, inst)
+	d := newV1Daemon(t, inst, optUseDriver())
 
 	// A file that is neither valid JSON nor a known version.
 	const garbage = "{not json at all — s19 corruption probe"
@@ -364,25 +314,22 @@ func TestV1S19CorruptLedgerFileQuarantinedAtStartup(t *testing.T) {
 	})
 
 	// And the daemon is fully functional on the empty ledger: a normal
-	// question/answer run still completes.
+	// driver question/answer run still completes.
 	const qid = "q_s19d"
 	wi := inst.newWI(t, "s19 D: normal run after a quarantined ledger",
 		[]map[string]any{
-			{"do": "step", "id": "code"},
-			{"do": "ask", "id": qid, "question": "Does the daemon still serve answers?"},
-			{"do": "wrap"},
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
+				"question": "Does the daemon still serve answers?"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool { return d.agentPIDOf(t, wi) > 0 })
-	waitUntil(t, 30*time.Second, "pending question never became visible", func() bool {
-		// observeSoft: the submit->monitored window answers DAEMON-404 by
-		// design and must be polled through, not fatal'd on.
-		jv := observeSoft(d, wi)
-		return jv != nil && jv.Pending != nil && jv.Pending.ID == qid
-	})
-	d.pf(t, "answer", wi, "--text", "It does.", "--question", qid, "--answer-id", "a_s19d", "--by", "usr_root")
-	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
+	waitQuestion(t, d, wi, qid, 30*time.Second)
+	answerQuestion(t, d, wi, qid, "It does.")
+	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 	if _, err := os.Stat(answersPath(d)); err != nil && !os.IsNotExist(err) {
 		t.Fatalf("stat %s after the run: %v", answersPath(d), err)
 	}
