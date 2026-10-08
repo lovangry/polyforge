@@ -12,7 +12,7 @@ output:
     verdict:
       type: string
       enum: [pass, fail]
-      description: pass means every authored scenario passed or was honestly skipped (skips never fail the gate - review judges their justification); fail means at least one scenario failed. verdict: fail is recorded iff at least one scenario's status is fail - the oneOf split below makes that mechanical.
+      description: pass means every authored scenario passed or was honestly skipped (skips never fail the gate - review judges their justification); fail means at least one scenario failed. A fail verdict is recorded iff at least one scenario's status is fail - the oneOf split below makes that mechanical.
     fail_reason:
       type: string
       description: Required when verdict is fail - a precise description of what failed, to be carried back to code as its pending_rewind_input. Name the failing scenario's title, the expected-vs-observed contrast, and the implicated plan unit where discernible; vague language like "tests failed" without specifics wastes the rewind. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
