@@ -150,14 +150,15 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		return nil, err
 	}
 	parts := promptParts{
-		WIID:        a.WI.ID,
-		StepID:      sp.StepID,
-		SpawnN:      sp.SpawnN,
-		ContextMode: policy,
-		Definition:  def,
-		Rewind:      sp.RewindInput,
-		Answers:     sp.Answers,
-		HandoffDue:  spec.Handoff,
+		WIID:           a.WI.ID,
+		StepID:         sp.StepID,
+		SpawnN:         sp.SpawnN,
+		ContextMode:    policy,
+		Definition:     def,
+		Rewind:         sp.RewindInput,
+		Answers:        sp.Answers,
+		HandoffDue:     spec.Handoff,
+		PriorRejection: sp.PriorRejection,
 	}
 	if policy == ContextInherit {
 		h, err := a.resolveHandoff(sp.StepID)
@@ -230,6 +231,10 @@ type promptParts struct {
 	// HandoffDue marks a step whose completed result must carry a
 	// handoff_ref (the delivery contract states the duty only then).
 	HandoffDue bool
+	// PriorRejection is the verbatim validation error from the previous
+	// dispatch's rejected envelope (the in-process retry lane): the
+	// author sees exactly what to fix instead of blindly re-authoring.
+	PriorRejection string
 }
 
 // handoffSection is one producing step's handoff artifact, injected
@@ -268,6 +273,12 @@ func assembleStepPrompt(p promptParts) string {
 		b.WriteString("A downstream gate failed and the workflow rewound to this step. The verdict in full:\n\n")
 		b.WriteString(p.Rewind.Reason)
 		b.WriteString("\n")
+	}
+	if p.PriorRejection != "" {
+		b.WriteString("\n# Previous result envelope REJECTED — fix and rewrite\n\n")
+		b.WriteString("Your previous envelope for this step was rejected by the driver's validation:\n\n")
+		b.WriteString(p.PriorRejection)
+		b.WriteString("\n\nFix the defect and write a corrected envelope. Compute artifact digests programmatically (e.g. sha256sum + jq into the JSON) — never hand-transcribe them; re-check every required field the error names.\n")
 	}
 	if len(p.Answers) > 0 {
 		b.WriteString("\n# Answered questions (this step's history — continue from it)\n\n")

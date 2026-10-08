@@ -112,6 +112,13 @@ type Driver struct {
 	// wake carries the "state changed, re-plan" signal to a Run loop
 	// parked on an open question; one buffered slot, coalescing.
 	wake chan struct{}
+
+	// rejects/priorRejection track per-step envelope-rejection state for
+	// the in-process re-dispatch lane (the #97/#107 lessons): the count
+	// bounds the retries, the string rides the next dispatch's prompt as
+	// visible feedback so the author can fix the actual defect.
+	rejects        map[string]int
+	priorRejection map[string]string
 }
 
 // New builds a Driver: it resolves paths, loads the workflow graph from
@@ -174,16 +181,18 @@ func New(cfg Config) (*Driver, error) {
 		return nil, err
 	}
 	return &Driver{
-		wi:          cfg.WI,
-		workflow:    wf,
-		extWF:       ext,
-		exec:        exec,
-		execPath:    execPath,
-		spawnN:      cfg.SpawnN,
-		initialized: existed,
-		cfg:         cfg,
-		log:         cfg.Log,
-		wake:        make(chan struct{}, 1),
+		wi:             cfg.WI,
+		workflow:       wf,
+		extWF:          ext,
+		exec:           exec,
+		execPath:       execPath,
+		spawnN:         cfg.SpawnN,
+		initialized:    existed,
+		cfg:            cfg,
+		log:            cfg.Log,
+		wake:           make(chan struct{}, 1),
+		rejects:        make(map[string]int),
+		priorRejection: make(map[string]string),
 	}, nil
 }
 
@@ -243,10 +252,36 @@ func (d *Driver) Run(ctx context.Context) error {
 			_ = run.Terminate(5 * time.Second)
 			return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, err)
 		}
-		if err := d.validateResultStrict(res, stepID, n); err != nil {
+		if verr := d.validateResultStrict(res, stepID, n); verr != nil {
+			// Envelope-authoring errors are STEP-CONTENT failures, not
+			// infrastructure (the #97/#107 lessons: a hand-transcribed digest
+			// typo, a missing handoff_ref — each used to cost a whole driver
+			// restart through the recovery lane, and two rejections inside
+			// the storm window bounded-failed the WI outright). The driver
+			// re-dispatches the step in-process with the rejection as visible
+			// feedback, bounded by maxEnvelopeRejects; only a persistently
+			// broken author escalates to the recovery lane.
 			_ = run.Terminate(5 * time.Second)
-			return fmt.Errorf("driver: step %s dispatch %d result rejected: %w", stepID, n, err)
+			if d.log != nil {
+				_ = d.log.Append(d.wi.ID, EvEnvelopeRejected, map[string]any{
+					"step": stepID, "spawn_n": n, "detail": verr.Error(),
+				})
+			}
+			d.mu.Lock()
+			d.rejects[stepID]++
+			count := d.rejects[stepID]
+			d.priorRejection[stepID] = fmt.Sprintf("dispatch %d: %v", n, verr)
+			d.mu.Unlock()
+			if count > maxEnvelopeRejects {
+				return fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d): %w",
+					stepID, n, count, maxEnvelopeRejects, verr)
+			}
+			continue // in-process re-dispatch: the step is still in_progress
 		}
+		d.mu.Lock()
+		delete(d.rejects, stepID)
+		delete(d.priorRejection, stepID)
+		d.mu.Unlock()
 		if err := d.transition(TransitionRequest{
 			Kind:   TransStepResult,
 			StepID: stepID,
@@ -358,6 +393,9 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 			sp.Answers = append([]capsule.ArchivedAnswer(nil), st.Answers...)
 		}
 	}
+	// the in-process rejection retry lane: the prior dispatch's
+	// validation error rides the prompt as visible feedback
+	sp.PriorRejection = d.priorRejection[stepID]
 	if spec := d.workflow.step(stepID); spec != nil {
 		sp.ContextMode = spec.ContextPolicy
 		sp.Model = d.modelForLocked(stepID)
@@ -539,6 +577,12 @@ type StepSpawn struct {
 	// on a rewind re-entry; the start transition clears the persisted
 	// field in the same write that starts the step).
 	RewindInput *capsule.RewindInput
+	// PriorRejection is the verbatim validation error the PREVIOUS
+	// dispatch's envelope was rejected for (the in-process retry lane):
+	// the step author sees exactly what to fix — digests computed
+	// programmatically, required fields present — instead of blindly
+	// re-authoring. Empty on a fresh dispatch.
+	PriorRejection string
 }
 
 // StepRun is one spawned step execution awaiting its result envelope.

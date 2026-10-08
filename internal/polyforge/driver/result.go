@@ -33,6 +33,20 @@ import (
 // not know is a contract it cannot validate.
 const ResultProtocolVersion = 1
 
+// EvEnvelopeRejected is the durable event kind for the in-process
+// envelope-rejection retry lane (one event per rejection, carrying the
+// validation error verbatim — the operator sees exactly what the step
+// author got wrong).
+const EvEnvelopeRejected = "envelope_rejected"
+
+// maxEnvelopeRejects bounds the in-process re-dispatch lane: a step
+// whose envelopes keep failing validation this many times CONSECUTIVELY
+// escalates to the recovery lane (the storm guard bounds whatever
+// follows). The #97/#107 history: hand-transcribed digest typos and
+// missing handoff refs — the retries fix the author, the bound keeps a
+// genuinely broken author from looping forever.
+const maxEnvelopeRejects = 3
+
 // Outcome is the closed result-verdict set of the envelope.
 type Outcome string
 

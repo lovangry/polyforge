@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -539,7 +540,14 @@ func TestRunContextCancelDuringDispatch(t *testing.T) {
 
 func TestRunStaleResultFenceRejected(t *testing.T) {
 	d, sp, _ := runEnv(t, spec("a"))
-	sp.script = []fakeEntry{{res: &StepResult{ProtocolVersion: 1, ResultID: "319584c8-10e7-5703-8b0f-4af0a03f8657", Outcome: OutcomeCompleted, SpawnN: 99}}}
+	// the in-process retry lane re-dispatches on rejection; a stale fence
+	// stays stale, so the bound escalates with the fence error wrapped.
+	stale := fakeEntry{res: &StepResult{ProtocolVersion: 1, ResultID: "319584c8-10e7-5703-8b0f-4af0a03f8657", Outcome: OutcomeCompleted, SpawnN: 99}}
+	script := make([]fakeEntry, 0, maxEnvelopeRejects+1)
+	for i := 0; i <= maxEnvelopeRejects; i++ {
+		script = append(script, stale)
+	}
+	sp.script = script
 	err := d.Run(context.Background())
 	if !errors.Is(err, ErrStaleFence) {
 		t.Fatalf("a stale-envelope result must be rejected by the fence, got %v", err)
@@ -571,8 +579,14 @@ func TestRunArtifactValidation(t *testing.T) {
 		return d
 	}
 
-	// A missing handoff on a handoff-declaring step is rejected.
-	sp := &fakeSpawner{script: []fakeEntry{done(`{}`)}}
+	// A missing handoff on a handoff-declaring step is rejected — the
+	// retry lane re-dispatches, so the escalation (not the first
+	// rejection) is what surfaces the error.
+	missing := []fakeEntry{}
+	for i := 0; i <= maxEnvelopeRejects; i++ {
+		missing = append(missing, done(`{}`))
+	}
+	sp := &fakeSpawner{script: missing}
 	if err := mkDriver(sp).Run(context.Background()); err == nil {
 		t.Fatal("a handoff-declaring step must produce a handoff_ref")
 	}
@@ -582,7 +596,11 @@ func TestRunArtifactValidation(t *testing.T) {
 	bad := fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(`{}`),
 		HandoffRef: &ArtifactRef{Path: "artifacts/memo.md", SHA256: "deadbeef", Bytes: int64(len(body))}}}
 	os.Remove(execPath)
-	sp = &fakeSpawner{script: []fakeEntry{bad}}
+	badScript := []fakeEntry{}
+	for i := 0; i <= maxEnvelopeRejects; i++ {
+		badScript = append(badScript, bad)
+	}
+	sp = &fakeSpawner{script: badScript}
 	if err := mkDriver(sp).Run(context.Background()); err == nil {
 		t.Fatal("a hash mismatch must be rejected")
 	}
@@ -607,7 +625,11 @@ func TestRunArtifactValidation(t *testing.T) {
 		ProtocolVersion: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(`{}`),
 		Artifacts: []ArtifactRef{{Path: "../outside.md", SHA256: sum, Bytes: int64(len(body))}},
 	}}
-	sp = &fakeSpawner{script: []fakeEntry{escape}}
+	escapeScript := []fakeEntry{}
+	for i := 0; i <= maxEnvelopeRejects; i++ {
+		escapeScript = append(escapeScript, escape)
+	}
+	sp = &fakeSpawner{script: escapeScript}
 	if err := mkDriver(sp).Run(context.Background()); err == nil {
 		t.Fatal("a parent-escaping artifact path must be rejected")
 	}
@@ -727,4 +749,78 @@ func sha256Hex(t *testing.T, b []byte) string {
 	t.Helper()
 	sum := sha256.Sum256(b)
 	return fmt.Sprintf("%x", sum)
+}
+
+// ---------------------------------------------------------------------------
+// In-process envelope-rejection retry lane (the #97/#107 lessons).
+
+// badHash builds a completed result whose artifact manifest points at a
+// file that does not exist — deterministic substance-gate rejection.
+func badHash() fakeEntry {
+	return fakeEntry{res: &StepResult{
+		ProtocolVersion: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(`{}`),
+		Artifacts: []ArtifactRef{{Path: "artifacts/missing.md", SHA256: "deadbeef", Bytes: 1}},
+	}}
+}
+
+func TestRunRejectedEnvelopeRetriesInProcess(t *testing.T) {
+	d, sp, execPath := runEnv(t, StepSpec{ID: "fix"})
+	sp.script = []fakeEntry{badHash(), done(`{}`)}
+
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("a recoverable envelope rejection must NOT fail the run: %v", err)
+	}
+	if n := len(sp.spawns); n != 2 {
+		t.Fatalf("the rejected envelope must trigger an in-process re-dispatch, got %d spawns", n)
+	}
+	// the re-dispatch carries the rejection as visible prompt feedback
+	second := sp.spawnAt(1)
+	if second.PriorRejection == "" || !strings.Contains(second.PriorRejection, "artifact") {
+		t.Fatalf("the re-dispatch must carry the validation error verbatim, got %q", second.PriorRejection)
+	}
+	// and the step is done with the second envelope
+	exec := loadExecFile(t, execPath)
+	if exec.Steps["fix"].Status != capsule.StepDone {
+		t.Fatalf("the step must be done after the successful retry, got %v", exec.Steps["fix"].Status)
+	}
+	// the rejection ledger cleared on success
+	if _, ok := d.priorRejection["fix"]; ok {
+		t.Fatal("the rejection ledger must clear when the step completes")
+	}
+}
+
+func TestRunRejectedEnvelopeEscalatesAfterBound(t *testing.T) {
+	d, sp, _ := runEnv(t, StepSpec{ID: "fix"})
+	// maxEnvelopeRejects rejections then the bound escalates
+	sp.script = []fakeEntry{badHash(), badHash(), badHash(), badHash()}
+
+	err := d.Run(context.Background())
+	if err == nil {
+		t.Fatal("a persistently broken envelope author must escalate to an error")
+	}
+	if !strings.Contains(err.Error(), "consecutive rejections") {
+		t.Fatalf("the escalation must name the consecutive-rejection bound, got %v", err)
+	}
+	if n := len(sp.spawns); n != maxEnvelopeRejects+1 {
+		t.Fatalf("exactly limit+1 dispatches before escalation, got %d", n)
+	}
+	// every re-dispatch carried the feedback
+	for i := 1; i <= maxEnvelopeRejects; i++ {
+		if sp.spawnAt(i).PriorRejection == "" {
+			t.Fatalf("re-dispatch %d must carry the rejection feedback", i)
+		}
+	}
+}
+
+func loadExecFile(t *testing.T, path string) *capsule.Execution {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exec capsule.Execution
+	if err := json.Unmarshal(raw, &exec); err != nil {
+		t.Fatal(err)
+	}
+	return &exec
 }
