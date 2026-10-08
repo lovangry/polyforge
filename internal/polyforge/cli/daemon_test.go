@@ -46,7 +46,7 @@ func newDaemonFixture(t *testing.T) *daemonFixture {
 			h(w, r)
 			return
 		}
-		io.WriteString(w, `{"machine_id":"m1","mode":"interactive","shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
+		io.WriteString(w, `{"machine_id":"m1","mode":"interactive","workspace":"/srv/pf-ws","shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		d.rec.record(r)
@@ -292,6 +292,10 @@ func TestDaemonClientStatusRoundtrip(t *testing.T) {
 	if s.MachineID != "m1" || s.Mode != "interactive" || s.Queue.MaxConcurrent != 2 {
 		t.Errorf("StatusResponse = %+v", s)
 	}
+	// #103: the workspace line's data source decodes from the body.
+	if s.Workspace != "/srv/pf-ws" {
+		t.Errorf("StatusResponse.Workspace = %q, want /srv/pf-ws", s.Workspace)
+	}
 }
 
 // TestStatusSessionColumnsRawDecodeRender pins the v1.5 additive keys
@@ -304,7 +308,7 @@ func TestDaemonClientStatusRoundtrip(t *testing.T) {
 func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
 	d := newDaemonFixture(t)
 	d.answer("GET", "/status",
-		`{"machine_id":"m1","mode":"interactive","shutting_down":false,`+
+		`{"machine_id":"m1","mode":"interactive","workspace":"/srv/pf-ws","shutting_down":false,`+
 			`"jobs":[`+
 			`{"work_item_id":"wi_run","status":"running","spawn_n":3,`+
 			`"session_fingerprint":"ab12cd34ef56aa00","agent_pid":42},`+
@@ -334,11 +338,13 @@ func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
 			s.Jobs[1].SpawnN, s.Jobs[1].SessionFingerprint)
 	}
 
-	// Render path: exact-output golden for the SPAWN / SESSION cells.
+	// Render path: exact-output golden for the WORKSPACE line and the
+	// SPAWN / SESSION cells.
 	var b bytes.Buffer
 	renderStatus(&b, &s)
 	golden(t, "StatusSessionColumns", b.String(),
 		`machine: m1  mode: interactive  queue: 1 pending / 1 running / max 2
+workspace: /srv/pf-ws
 
 WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  LAST-PROGRESS
 ---------  -----------  ----------------  -----  ---------  --------  -------------

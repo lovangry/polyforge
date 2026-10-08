@@ -41,6 +41,10 @@ func TestSubmitAndStatus(t *testing.T) {
 	if st.MachineID != "m-test" || st.Mode != protocol.ModeInteractive || st.ShuttingDown {
 		t.Fatalf("status head = %+v", st)
 	}
+	// #103: the status carries the active workspace (capsule base).
+	if st.Workspace != td.cfg.Workspace {
+		t.Fatalf("status workspace = %q, want the launched -workspace value %q", st.Workspace, td.cfg.Workspace)
+	}
 	if len(st.Jobs) != 1 {
 		t.Fatalf("jobs = %+v, want 1", st.Jobs)
 	}

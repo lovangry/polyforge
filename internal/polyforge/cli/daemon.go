@@ -147,6 +147,9 @@ type SubmitResponse struct {
 type StatusResponse struct {
 	MachineID    string      `json:"machine_id"`
 	Mode         string      `json:"mode"`
+	// Workspace is the active capsule base (#103): the daemon's launched
+	// -workspace value — capsules live at <workspace>/capsules/<wi_id>.
+	Workspace    string      `json:"workspace"`
 	ShuttingDown bool        `json:"shutting_down"`
 	Jobs         []StatusJob `json:"jobs"`
 	Queue        QueueStats  `json:"queue"`

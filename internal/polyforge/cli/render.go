@@ -455,6 +455,9 @@ func renderReadThrough(w io.Writer, p *api.ProgressResponse) {
 }
 
 // renderStatus renders the daemon status() bookkeeping list. The
+// WORKSPACE line is the #103 owner face: the active capsule base the
+// daemon was launched with (-workspace; capsules live at
+// <workspace>/capsules/<wi_id>) — exactly one line, no annotation. The
 // QUESTION column is the D6 owner face: any job the daemon reports with a
 // pending question shows its question id ("-" otherwise), so an agent
 // blocked on a human is impossible to miss at a glance. The SPAWN column
@@ -470,8 +473,9 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 	if s.ShuttingDown {
 		fmt.Fprint(w, "  (shutting down)")
 	}
-	fmt.Fprintf(w, "  queue: %d pending / %d running / max %d\n\n",
+	fmt.Fprintf(w, "  queue: %d pending / %d running / max %d\n",
 		s.Queue.Pending, s.Queue.Running, s.Queue.MaxConcurrent)
+	fmt.Fprintf(w, "workspace: %s\n\n", s.Workspace)
 	rows := make([][]string, 0, len(s.Jobs))
 	for _, j := range s.Jobs {
 		pid := "-"

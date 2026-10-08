@@ -64,6 +64,9 @@ type queueStats struct {
 type statusResponse struct {
 	MachineID    string      `json:"machine_id"`
 	Mode         string      `json:"mode"`
+	// Workspace is the active capsule base (#103): the -workspace value
+	// the daemon was launched with — capsules live at <workspace>/capsules.
+	Workspace    string      `json:"workspace"`
 	ShuttingDown bool        `json:"shutting_down"`
 	Jobs         []statusJob `json:"jobs"`
 	Queue        queueStats  `json:"queue"`
@@ -472,6 +475,7 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, statusResponse{
 		MachineID:    d.cfg.MachineID,
 		Mode:         d.modes.Current(),
+		Workspace:    d.cfg.Workspace,
 		ShuttingDown: d.modes.ShuttingDown(),
 		Jobs:         jobs,
 		Queue: queueStats{
