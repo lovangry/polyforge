@@ -134,21 +134,6 @@ func TestV1S17DrainKeyRevokedDegradedSignal(t *testing.T) {
 	}
 }
 
-// observeSoft is observe that tolerates the not-yet-monitored window:
-// until the drain wave claims the ticket, the observe route answers
-// DAEMON-404 by design, and a poll must retry rather than fail.
-func observeSoft(d *v1Daemon, wi string) *protocol.JobView {
-	raw, err := d.client.Observe(wi, 0)
-	if err != nil {
-		return nil
-	}
-	var jv protocol.JobView
-	if json.Unmarshal(raw, &jv) != nil {
-		return nil
-	}
-	return &jv
-}
-
 // daemonEventCount scans the daemon's durable events log for entries of
 // one kind at daemon scope (wi=""). eventsOf filters per-WI entries
 // only, so the daemon-scope degraded signal needs its own scan.

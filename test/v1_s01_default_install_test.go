@@ -162,12 +162,3 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 		t.Fatalf("healthy run raised a recovery: %v", kinds)
 	}
 }
-
-func contains(list []string, s string) bool {
-	for _, e := range list {
-		if e == s {
-			return true
-		}
-	}
-	return false
-}

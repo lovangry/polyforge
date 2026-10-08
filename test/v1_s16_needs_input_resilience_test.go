@@ -112,40 +112,6 @@ func currentSpawnN(t *testing.T, d *v1Daemon, wi string) int {
 	return max
 }
 
-// writePlanExtra rewrites the fake agent's plan file with extra top-level
-// fields beyond actions/resume_actions (the first process start reads
-// THIS version; later rewrites steer re-derivations only).
-func writePlanExtra(t *testing.T, inst *v1Install, wi string, actions, resume []map[string]any, extra map[string]any) {
-	t.Helper()
-	body := map[string]any{"actions": actions}
-	if resume != nil {
-		body["resume_actions"] = resume
-	}
-	for k, v := range extra {
-		body[k] = v
-	}
-	blob, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(inst.planDir, wi+".json"), blob, 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// answerControls extracts the fake agent's pf/answer control landings
-// (in journal order) from one capsule.
-func answerControls(t *testing.T, capDir string) []map[string]any {
-	t.Helper()
-	var out []map[string]any
-	for _, rec := range fakeJournal(t, capDir) {
-		if rec["type"] == "control" && rec["method"] == "pf/answer" {
-			out = append(out, rec)
-		}
-	}
-	return out
-}
-
 // ---------------------------------------------------------------------------
 // Scenario A: delivered-but-unconsumed answer, kill -9, resume, auto
 // redelivery, same-id re-present, consumption, wrap.

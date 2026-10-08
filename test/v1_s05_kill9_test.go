@@ -130,13 +130,3 @@ func TestV1S05AgentKill9(t *testing.T) {
 		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
 	}
 }
-
-func countOf(list []string, s string) int {
-	n := 0
-	for _, e := range list {
-		if e == s {
-			n++
-		}
-	}
-	return n
-}

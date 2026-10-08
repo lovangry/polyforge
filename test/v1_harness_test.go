@@ -619,6 +619,14 @@ func optMode(mode string) daemonOpt {
 	return func(d *v1Daemon) { d.extraEnv = append(d.extraEnv, "__PFV1_MODE__="+mode) }
 }
 
+// optUseDriver pins the daemon's execution engine to the v2 Go driver
+// (the -use-driver flag): a migrated scenario's explicit pin, so the
+// start() guard's explicitEngineFlag check sees it and the scenario RUNs
+// regardless of PFV1_LEGACY_LANE.
+func optUseDriver() daemonOpt {
+	return func(d *v1Daemon) { d.extraArgs = append(d.extraArgs, "-use-driver") }
+}
+
 // optServerURL points the daemon's aihub API face (--server) at url
 // instead of the install itself — the s17 hold-proxy front. In that
 // case git pushes are pinned DIRECT to the install via --git-remote-base
@@ -1336,4 +1344,411 @@ func httpStatusOf(method, url, user, secret string) (int, http.Header, string) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return resp.StatusCode, resp.Header, string(body)
+}
+
+// ---------------------------------------------------------------------------
+// Driver/envelope test faces (polyforge#105). The migrated v1_s*/v1_t7
+// scenarios assert on the DRIVER's observable faces: execution.json
+// (steps / budget_consumed / version progression), the archived
+// artifacts/steps/<step>/s<n>/result.json envelopes, the ops status
+// QUESTION column, `pf answer` round-trips, the spawn journal and the
+// fakepi journal. The helpers below are those faces, once.
+
+// execStepView is the loose read shape of one execution.json step record
+// (a subset that keeps every unmarshal honest — the same discipline as
+// fakepi's own execStep).
+type execStepView struct {
+	Status             string           `json:"status"`
+	Model              string           `json:"model"`
+	StepStartedAt      string           `json:"step_started_at"`
+	Output             map[string]any   `json:"output"`
+	Attempts           []map[string]any `json:"attempts"`
+	Answers            []map[string]any `json:"answers"`
+	PendingQuestion    *map[string]any  `json:"pending_question"`
+	PendingRewindInput *map[string]any  `json:"pending_rewind_input"`
+	BudgetConsumed     map[string]any   `json:"budget_consumed"`
+}
+
+// executionView is the loose read shape of runtime-state/execution.json.
+type executionView struct {
+	WorkflowStatus string                   `json:"workflow_status"`
+	CurrentStep    string                   `json:"current_step"`
+	Version        int64                    `json:"version"`
+	BudgetConsumed map[string]any           `json:"budget_consumed"`
+	RewindStats    map[string]any           `json:"rewind_stats"`
+	ReviewRounds   map[string]float64       `json:"review_rounds"`
+	Steps          map[string]*execStepView `json:"steps"`
+}
+
+// readExecutionFile reads and parses one capsule's execution.json; the
+// error is "the file is not there (yet)" or "torn" — callers decide.
+func readExecutionFile(capDir string) (*executionView, error) {
+	raw, err := os.ReadFile(filepath.Join(capDir, "runtime-state", "execution.json"))
+	if err != nil {
+		return nil, err
+	}
+	var x executionView
+	if err := json.Unmarshal(raw, &x); err != nil {
+		return nil, err
+	}
+	return &x, nil
+}
+
+// readExecution reads one capsule's execution.json, failing the test on
+// absence or a torn write past the bound (callers inside waitExecution
+// poll through both).
+func readExecution(t *testing.T, capDir string) *executionView {
+	t.Helper()
+	x, err := readExecutionFile(capDir)
+	if err != nil {
+		t.Fatalf("execution.json of %s: %v", capDir, err)
+	}
+	return x
+}
+
+// waitExecution polls the capsule's execution.json until cond holds (or
+// the bound expires with desc naming what never happened). Absent and
+// torn reads are retried, never fatal — the driver's writes are atomic
+// but the file may not exist yet.
+func waitExecution(t *testing.T, capDir string, bound time.Duration, desc string, cond func(*executionView) bool) {
+	t.Helper()
+	deadline := time.Now().Add(bound)
+	for {
+		if x, err := readExecutionFile(capDir); err == nil && cond(x) {
+			return
+		}
+		if time.Now().After(deadline) {
+			x, _ := readExecutionFile(capDir)
+			t.Fatalf("timeout (%v): %s (execution.json: %s)", bound, desc, execDigest(x))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// execDigest is a one-line summary of an execution view for failure
+// messages.
+func execDigest(x *executionView) string {
+	if x == nil {
+		return "<absent>"
+	}
+	desc := fmt.Sprintf("status=%s version=%d", x.WorkflowStatus, x.Version)
+	for id, st := range x.Steps {
+		desc += fmt.Sprintf(" %s=%s", id, st.Status)
+	}
+	return desc
+}
+
+// waitWorkflowStatus polls the capsule's execution.json until the
+// workflow_status reaches want (the driver-era completion face).
+func waitWorkflowStatus(t *testing.T, d *v1Daemon, wi, want string, bound time.Duration) {
+	t.Helper()
+	waitExecution(t, d.capsuleDir(wi), bound,
+		fmt.Sprintf("workflow_status never reached %q", want),
+		func(x *executionView) bool { return x.WorkflowStatus == want })
+}
+
+// waitStepStatus polls the capsule's execution.json until one step's
+// status reaches want.
+func waitStepStatus(t *testing.T, d *v1Daemon, wi, step, want string, bound time.Duration) {
+	t.Helper()
+	waitExecution(t, d.capsuleDir(wi), bound,
+		fmt.Sprintf("step %s never reached %q", step, want),
+		func(x *executionView) bool {
+			st := x.Steps[step]
+			return st != nil && st.Status == want
+		})
+}
+
+// questionIDOf reads the pending question id of one work item off the
+// daemon status face (the QUESTION column's source; "" when none).
+func questionIDOf(st *cli.StatusResponse, wi string) string {
+	if st == nil {
+		return ""
+	}
+	for _, j := range st.Jobs {
+		if j.WorkItemID == wi {
+			return j.QuestionID
+		}
+	}
+	return ""
+}
+
+// statusQuiet polls the daemon status face without failing (nil on any
+// transport hiccup — the caller's waitUntil retries).
+func statusQuiet(d *v1Daemon) *cli.StatusResponse {
+	if d.client == nil {
+		return nil
+	}
+	raw, err := d.client.Status()
+	if err != nil {
+		return nil
+	}
+	var st cli.StatusResponse
+	if json.Unmarshal(raw, &st) != nil {
+		return nil
+	}
+	return &st
+}
+
+// waitQuestion polls the daemon status face until the work item's
+// QUESTION column shows qid (the D6 owner face of a parked question).
+func waitQuestion(t *testing.T, d *v1Daemon, wi, qid string, bound time.Duration) {
+	t.Helper()
+	waitUntil(t, bound, fmt.Sprintf("QUESTION column never showed %s", qid), func() bool {
+		return questionIDOf(statusQuiet(d), wi) == qid
+	})
+}
+
+// waitNoQuestion polls until the work item's QUESTION column is empty
+// (the question closed).
+func waitNoQuestion(t *testing.T, d *v1Daemon, wi string, bound time.Duration) {
+	t.Helper()
+	waitUntil(t, bound, "the open question never closed", func() bool {
+		return questionIDOf(statusQuiet(d), wi) == ""
+	})
+}
+
+// answerQuestion answers an open question through the real CLI and
+// asserts the delivered outcome (the pf answer round-trip).
+func answerQuestion(t *testing.T, d *v1Daemon, wi, qid, text string) string {
+	t.Helper()
+	out := d.pf(t, "answer", wi, "--text", text, "--question", qid, "--by", "usr_root")
+	if !strings.Contains(out, "delivered") {
+		t.Fatalf("pf answer: %q", out)
+	}
+	return out
+}
+
+// archivedEnvelope reads one archived result envelope
+// (artifacts/steps/<step>/s<spawn>/result.json) — the R14 staging face.
+func archivedEnvelope(t *testing.T, capDir, step string, spawn int) map[string]any {
+	t.Helper()
+	path := filepath.Join(capDir, "artifacts", "steps", step, fmt.Sprintf("s%d", spawn), "result.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("archived envelope %s: %v", path, err)
+	}
+	var env map[string]any
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("archived envelope %s unparsable: %v", path, err)
+	}
+	return env
+}
+
+// waitArchivedEnvelope polls until the archived envelope of one step
+// spawn exists, then returns it.
+func waitArchivedEnvelope(t *testing.T, d *v1Daemon, wi, step string, spawn int, bound time.Duration) map[string]any {
+	t.Helper()
+	path := filepath.Join(d.capsuleDir(wi), "artifacts", "steps", step, fmt.Sprintf("s%d", spawn), "result.json")
+	waitUntil(t, bound, fmt.Sprintf("archived envelope %s never landed", path), func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	})
+	return archivedEnvelope(t, d.capsuleDir(wi), step, spawn)
+}
+
+// waitSpawnCount polls the capsule's spawn journal until it carries n
+// entries (the derivation-count face), returning the entries.
+func waitSpawnCount(t *testing.T, d *v1Daemon, wi string, n int, bound time.Duration) []map[string]any {
+	t.Helper()
+	waitUntil(t, bound, fmt.Sprintf("spawn journal never reached %d entries", n), func() bool {
+		return len(spawnJournal(t, d.capsuleDir(wi))) >= n
+	})
+	return spawnJournal(t, d.capsuleDir(wi))
+}
+
+// latestSpawnPID reads the newest spawn-journal entry's pid — the live
+// step process a scenario SIGKILLs (driver WIs carry no agent pid on the
+// status face; the step process IS the supervised unit).
+func latestSpawnPID(t *testing.T, d *v1Daemon, wi string) int {
+	t.Helper()
+	entries := spawnJournal(t, d.capsuleDir(wi))
+	if len(entries) == 0 {
+		t.Fatalf("no spawn-journal entries for %s", wi)
+	}
+	pid, _ := entries[len(entries)-1]["pid"].(float64)
+	return int(pid)
+}
+
+// requireGh is the environmental gh-availability skip for the real-GitHub
+// scenario: short mode, an absent gh binary and an unauthenticated gh
+// each skip with a message naming its gate (skip-not-fail; the real
+// network is an availability gate, never a regression).
+func requireGh(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skipf("short mode: skipping the real-github ship PR e2e (network + gh required)")
+	}
+	ghPath, err := exec.LookPath("gh")
+	if err != nil {
+		t.Skipf("gh binary absent from PATH: skipping the ship PR e2e")
+	}
+	if out, aerr := exec.Command(ghPath, "auth", "status").CombinedOutput(); aerr != nil {
+		t.Skipf("gh not authenticated (gh auth status exit %v): %s",
+			aerr, strings.TrimSpace(string(out)))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Shared small helpers. These used to live in whichever scenario file
+// defined them first; the migration rewrites every scenario file, so the
+// cross-file ones moved here once (compile-neutral re-homing — the
+// users are unchanged).
+
+// contains reports whether list carries s.
+func contains(list []string, s string) bool {
+	for _, e := range list {
+		if e == s {
+			return true
+		}
+	}
+	return false
+}
+
+// countOf counts occurrences of s in list.
+func countOf(list []string, s string) int {
+	n := 0
+	for _, e := range list {
+		if e == s {
+			n++
+		}
+	}
+	return n
+}
+
+// observeSoft is observe that tolerates the not-yet-monitored window:
+// until the drain wave claims the ticket, the observe route answers
+// DAEMON-404 by design, and a poll must retry rather than fail.
+func observeSoft(d *v1Daemon, wi string) *protocol.JobView {
+	raw, err := d.client.Observe(wi, 0)
+	if err != nil {
+		return nil
+	}
+	var jv protocol.JobView
+	if json.Unmarshal(raw, &jv) != nil {
+		return nil
+	}
+	return &jv
+}
+
+// writePlanExtra rewrites the fake agent's plan file with extra top-level
+// fields beyond actions/resume_actions (the first process start reads
+// THIS version; later rewrites steer re-derivations only).
+func writePlanExtra(t *testing.T, inst *v1Install, wi string, actions, resume []map[string]any, extra map[string]any) {
+	t.Helper()
+	body := map[string]any{"actions": actions}
+	if resume != nil {
+		body["resume_actions"] = resume
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	blob, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inst.planDir, wi+".json"), blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// answerControls extracts the fake agent's pf/answer control landings
+// (in journal order) from one capsule.
+func answerControls(t *testing.T, capDir string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, rec := range fakeJournal(t, capDir) {
+		if rec["type"] == "control" && rec["method"] == "pf/answer" {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// The observe answer-ledger file helpers (black box: the file's PATH and
+// its `version` field are the only structural facts the spec pins;
+// everything else is asserted on the values that must survive verbatim).
+// Shared by the answer-resilience scenarios.
+
+// answersPath is the persisted ledger of one daemon: `answers.json`
+// directly under the observe data dir — the same dir that hosts
+// events.log.
+func answersPath(d *v1Daemon) string { return filepath.Join(d.dataDir, "answers.json") }
+
+// readAnswersFile returns the raw bytes of the persisted ledger ("" when
+// the file does not exist yet).
+func readAnswersFile(t *testing.T, d *v1Daemon) string {
+	t.Helper()
+	raw, err := os.ReadFile(answersPath(d))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatalf("read %s: %v", answersPath(d), err)
+	}
+	return string(raw)
+}
+
+// answersFileHas reports whether the persisted ledger currently mentions
+// every one of the given values (the relay fields are stored verbatim,
+// so their VALUES must be findable whatever the surrounding key names).
+func answersFileHas(t *testing.T, d *v1Daemon, values ...string) bool {
+	t.Helper()
+	raw := readAnswersFile(t, d)
+	if raw == "" {
+		return false
+	}
+	for _, v := range values {
+		if !strings.Contains(raw, v) {
+			return false
+		}
+	}
+	return true
+}
+
+// assertLedgerFileShape pins the format contract: parsable UTF-8 JSON,
+// an explicit integer `version` of 1, mode 0600, and no in-flight
+// marker anywhere in the bytes (the in-flight state is memory-only).
+func assertLedgerFileShape(t *testing.T, d *v1Daemon) map[string]any {
+	t.Helper()
+	path := answersPath(d)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("persisted ledger %s missing: %v", path, err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("persisted ledger mode %04o, want 0600 (answer_text is owner-authored content)", perm)
+	}
+	raw := readAnswersFile(t, d)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("persisted ledger is not JSON: %v\n%s", err, raw)
+	}
+	ver, ok := doc["version"].(float64)
+	if !ok || int(ver) != 1 {
+		t.Fatalf("persisted ledger version = %v, want the integer 1: %s", doc["version"], raw)
+	}
+	for _, marker := range []string{"inflight", "in_flight", "in-flight"} {
+		if strings.Contains(strings.ToLower(raw), marker) {
+			t.Fatalf("persisted ledger carries an in-flight marker %q (settled states only): %s", marker, raw)
+		}
+	}
+	return doc
+}
+
+// restartSameDaemon re-execs a daemon on the SAME socket, data dir and
+// workspace (so the persisted ledger, events.log and capsules are
+// exactly what the new process re-opens) — the s08 restart shape, with
+// the observe-window flags carried over.
+func restartSameDaemon(t *testing.T, d *v1Daemon, logName string) *v1Daemon {
+	t.Helper()
+	d2 := &v1Daemon{
+		t: t, inst: d.inst, sock: d.sock, dataDir: d.dataDir, workspace: d.workspace,
+		machineID: d.machineID, extraArgs: d.extraArgs,
+		logPath: filepath.Join(t.TempDir(), logName),
+	}
+	t.Cleanup(func() { d2.stop() })
+	d2.start()
+	return d2
 }
