@@ -1,6 +1,6 @@
 ---
 name: review
-description: Human-judgment gate over the completed implementation — code diff, verification results, and e2e results together — deciding whether the change is ready to release.
+description: Human-judgment gate over the completed implementation — the code diff, the e2e results, and the plan/spec together — deciding whether the change is ready for the final verification gate and release.
 tools: [read, bash]
 output:
   type: object
@@ -58,10 +58,13 @@ rather than merely passing on a technicality.
 1. Read, in this order: `artifacts/spec.md` (what was supposed to happen),
    `artifacts/plan.md` (how it was supposed to be built), the actual diff produced by
    `code` (what was really built — read the repo worktree's history for the commits
-   `code` reported), `artifacts/verification-report.md`, and `artifacts/e2e-results.md`.
+   `code` reported), and `artifacts/e2e-results.md` (the rerun gate's verdict and
+   per-scenario results; there is no verification report yet — `verification` runs
+   after this step). Judge whether `e2e-run`'s skip justifications, if any, are
+   acceptable — skips do not fail that gate; you do.
 2. Check the implementation against the spec's requirements and acceptance criteria one
-   by one — do not rubber-stamp because verification and e2e both reported pass; those
-   check different things than "is this the right change."
+   by one — do not rubber-stamp because the e2e rerun reported pass; the mechanical
+   gates check different things than "is this the right change."
 3. Record every finding in `findings`, tagged `blocking` or `non-blocking`. Non-blocking
    findings (style nits, minor improvement suggestions) do not fail the gate but should
    still be recorded — they are useful history even when the overall verdict is pass.
@@ -77,10 +80,11 @@ rather than merely passing on a technicality.
 
 This step is declared `kind: review` in the workflow frontmatter, which the schema grants
 positional freedom (it does not have to be last) — in this reference bundle it sits
-between `e2e-run` and `release` because judging release-readiness needs both the
-verification and the e2e evidence in hand. A project adapting this bundle may reposition
-`review` if its process genuinely needs review earlier, but should not do so without also
-reconsidering what evidence would then be available to it.
+between `e2e-run` and `verification`: review is the human judgment on the rerun
+evidence and the diff, and the machine gate follows it, re-running the full green bar
+as the final mechanical word before `release`. A project adapting this bundle may
+reposition `review` if its process genuinely needs review earlier, but should not do so
+without also reconsidering what evidence would then be available to it.
 
 ## Output
 
