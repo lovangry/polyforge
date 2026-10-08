@@ -97,7 +97,7 @@ func TestNewKeepsPersistedModeAcrossRestart(t *testing.T) {
 	boot := func(mode string) (*Daemon, error) {
 		return New(Config{
 			MachineID:     "m-test",
-			WorkspaceRoot: ws,
+			Workspace: ws,
 			DataDir:       data,
 			Project:       "proj",
 			GitRemoteBase: filepath.Join(dir, "hub"),
@@ -162,7 +162,7 @@ func TestNewKeepsPersistedModeAcrossRestart(t *testing.T) {
 	// A fresh data dir with the flag unset: interactive again.
 	d5, err := New(Config{
 		MachineID:     "m-test",
-		WorkspaceRoot: ws,
+		Workspace: ws,
 		DataDir:       filepath.Join(dir, "data2"),
 		Project:       "proj",
 		GitRemoteBase: filepath.Join(dir, "hub"),

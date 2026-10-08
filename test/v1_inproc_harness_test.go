@@ -166,7 +166,7 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 
 	rtCfg := runtime.Config{
 		MachineID:          "m-inproc",
-		WorkspaceRoot:      workspace,
+		Workspace:      workspace,
 		DataDir:            dataDir,
 		GitRemoteBase:      inst.url + "/git",
 		WorkflowsDir:       filepath.Join(inst.root, "workflows"),

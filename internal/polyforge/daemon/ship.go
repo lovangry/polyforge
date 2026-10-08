@@ -111,7 +111,7 @@ func (d *Daemon) Ship(ctx context.Context, wi, initiator string) (*shipResponse,
 	if _, ok := d.rt.Info(wi); ok {
 		return nil, shipErr(api.ErrDaemonConflict, "work item %s is still active on this daemon; ship applies to a sealed capsule only", wi)
 	}
-	capDir := filepath.Join(d.cfg.WorkspaceRoot, "capsules", wi)
+	capDir := filepath.Join(d.cfg.Workspace, "capsules", wi)
 	if st, err := os.Stat(capDir); err != nil || !st.IsDir() {
 		return nil, shipErr(api.ErrDaemonNotFound, "no local sealed capsule for %s on this machine", wi)
 	}

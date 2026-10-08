@@ -201,7 +201,7 @@ func TestRestartDropsPreSessionRecord(t *testing.T) {
 	// a pre-v1.5 record: keyed by a slug, generation-era fields, and NO
 	// session secret — there is nothing to verify against.
 	slug := "proj#3"
-	oldCapsule := filepath.Join(r.cfg.WorkspaceRoot, "capsules", slug)
+	oldCapsule := filepath.Join(r.cfg.Workspace, "capsules", slug)
 	if err := os.MkdirAll(filepath.Join(oldCapsule, capsule.DirRuntimeState), 0o755); err != nil {
 		t.Fatal(err)
 	}

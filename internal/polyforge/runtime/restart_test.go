@@ -336,7 +336,7 @@ func TestRestartReleasesForeignHolder(t *testing.T) {
 			hub.endCount(), len(hub.attaches), hub.claimCount())
 	}
 	// the capsule is quarantined under the contract's sibling naming
-	ents, err := os.ReadDir(filepath.Join(r.cfg.WorkspaceRoot, "capsules"))
+	ents, err := os.ReadDir(filepath.Join(r.cfg.Workspace, "capsules"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestRestartFinishesInterruptedSeal(t *testing.T) {
 	if sp.callCount() != 0 {
 		t.Fatal("finishing a seal must not revive the agent")
 	}
-	unseal(t, r.cfg.WorkspaceRoot)
+	unseal(t, r.cfg.Workspace)
 }
 
 func TestRestartKeepsRecordWhenAihubUnreachable(t *testing.T) {

@@ -176,7 +176,7 @@ func TestOBSupersededKillsAndQuarantines(t *testing.T) {
 		t.Fatalf("the superseded record must be dropped, got %+v", recs)
 	}
 	// the capsule is quarantined under the contract's sibling naming
-	ents, err := os.ReadDir(filepath.Join(r.cfg.WorkspaceRoot, "capsules"))
+	ents, err := os.ReadDir(filepath.Join(r.cfg.Workspace, "capsules"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestPauseCloseRetainsRecord(t *testing.T) {
 		t.Fatal("the paused scene must NOT be sealed read-only")
 	}
 	assertNoRT(t, toOB)
-	unseal(t, r.cfg.WorkspaceRoot)
+	unseal(t, r.cfg.Workspace)
 }
 
 // TestOBSupersededFingerprintFence (NEW-1, delta review): a stale

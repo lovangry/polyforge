@@ -25,7 +25,7 @@ func newFullChanRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan pro
 	t.Helper()
 	cfg := Config{
 		MachineID:      "m-fullchan",
-		WorkspaceRoot:  filepath.Join(t.TempDir(), "ws"),
+		Workspace:  filepath.Join(t.TempDir(), "ws"),
 		DataDir:        filepath.Join(t.TempDir(), "data"),
 		MaxResumeFails: 2,
 		MaxRecoveries:  2,

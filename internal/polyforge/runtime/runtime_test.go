@@ -158,7 +158,7 @@ func TestStartStopEndToEnd(t *testing.T) {
 	waitDead(t, pid)
 
 	unseal(t, capDir)
-	unseal(t, r.cfg.WorkspaceRoot)
+	unseal(t, r.cfg.Workspace)
 }
 
 func TestStopUnknownWorkItem(t *testing.T) {
@@ -191,7 +191,7 @@ func TestStopHubCloseFailureLeavesSealing(t *testing.T) {
 		t.Fatalf("sealing intent not persisted: %+v", recs)
 	}
 	assertNoRT(t, toOB) // no WIFinished — the seal never landed
-	unseal(t, r.cfg.WorkspaceRoot)
+	unseal(t, r.cfg.Workspace)
 }
 
 func run(t *testing.T, name string, args ...string) (string, error) {
@@ -226,5 +226,5 @@ func TestPushStanding(t *testing.T) {
 	if !bareHasMain(t, bare) {
 		t.Fatal("the standing commit must land on the bare repo")
 	}
-	unseal(t, r.cfg.WorkspaceRoot)
+	unseal(t, r.cfg.Workspace)
 }

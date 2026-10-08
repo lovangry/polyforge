@@ -8,6 +8,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -32,7 +33,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	server := fs.String("server", "", "aihub base URL (env PF_SERVER)")
 	apiKey := fs.String("api-key", "", "machine aihub api key (env PF_API_KEY)")
 	machineID := fs.String("machine-id", "", "machine identity (env POLYFORGE_MACHINE_ID; default m-<hostname>)")
-	workspaceRoot := fs.String("workspace-root", "", "capsule workspace root (env POLYFORGE_WORKSPACE_ROOT)")
+	workspace := fs.String("workspace", "", "REQUIRED capsule workspace: capsules live at <workspace>/capsules/<wi_id> (env POLYFORGE_WORKSPACE; no default)")
 	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
 	project := fs.String("project", "", "ready-queue project scope for batch/drain (env PF_PROJECT)")
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
@@ -90,11 +91,10 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *dataDir == "" {
 		*dataDir = base
 	}
-	if *workspaceRoot == "" {
-		*workspaceRoot = os.Getenv("POLYFORGE_WORKSPACE_ROOT")
-	}
-	if *workspaceRoot == "" {
-		*workspaceRoot = filepath.Join(base, "workspace")
+	workspaceVal, err := resolveWorkspace(*workspace, os.Getenv)
+	if err != nil {
+		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
+		return 1
 	}
 	if *machineID == "" {
 		*machineID = os.Getenv("POLYFORGE_MACHINE_ID")
@@ -135,7 +135,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		SocketPath:          *socket,
 		UseDriver:           *useDriver,
 		UseDriverExplicit:   true,
-		WorkspaceRoot:       *workspaceRoot,
+		Workspace:           workspaceVal,
 		DataDir:             *dataDir,
 		Project:             *project,
 		GitRemoteBase:       *gitRemoteBase,
@@ -183,6 +183,24 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveWorkspace applies the required workspace selection chain (flag
+// over env) and refuses to start when neither names a workspace: the
+// capsule base <workspace>/capsules has NO default anymore. The legacy
+// -workspace-root flag is deleted outright — passing it fails flag
+// parsing as an unknown flag — and the deleted POLYFORGE_WORKSPACE_ROOT
+// env is ignored like any unknown environment variable: this helper
+// never reads it, so set alone it simply does not satisfy the
+// requirement.
+func resolveWorkspace(flagVal string, getenv func(string) string) (string, error) {
+	if flagVal != "" {
+		return flagVal, nil
+	}
+	if v := getenv("POLYFORGE_WORKSPACE"); v != "" {
+		return v, nil
+	}
+	return "", errors.New("no workspace selected: -workspace PATH (or POLYFORGE_WORKSPACE) is required — the capsule base <workspace>/capsules has no default; example: pf daemon -workspace /srv/polyforge/workspace ...")
 }
 
 func fileExists(p string) bool {

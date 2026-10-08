@@ -445,7 +445,7 @@ func TestBatchSubmitDispatch(t *testing.T) {
 func TestShip(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_s")
-	capDir := filepath.Join(td.cfg.WorkspaceRoot, "capsules", "wi_s")
+	capDir := filepath.Join(td.cfg.Workspace, "capsules", "wi_s")
 
 	// A task repo inside the capsule, with its own origin remote and a
 	// commit (the "inventory" the agent would have checked out).

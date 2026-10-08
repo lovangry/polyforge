@@ -174,7 +174,7 @@ func TestRestartWiring(t *testing.T) {
 	})
 
 	td := newTestDaemon(t, func(c *Config) {
-		c.WorkspaceRoot = ws
+		c.Workspace = ws
 		c.DataDir = data
 		c.GitRemoteBase = hubBase
 	})

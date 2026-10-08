@@ -166,7 +166,7 @@ func e2eConfig(sock, ws, data, hubBase string, hub *fakeHub, sp runtime.Spawner)
 	return Config{
 		MachineID:         "m-e2e",
 		SocketPath:        sock,
-		WorkspaceRoot:     ws,
+		Workspace:     ws,
 		DataDir:           data,
 		Project:           "proj",
 		GitRemoteBase:     hubBase,

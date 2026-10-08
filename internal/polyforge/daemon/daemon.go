@@ -68,9 +68,13 @@ type Config struct {
 	UseDriver bool
 	// UseDriverExplicit marks that UseDriver was deliberately set
 	// (true or false) — suppressing the fill() default of true.
-	UseDriverExplicit  bool
-	WorkspaceRoot      string
-	DataDir            string
+	UseDriverExplicit bool
+	// Workspace is the REQUIRED capsule base selection: capsules live at
+	// <Workspace>/capsules/<wi_id>. Resolved in main.go from the
+	// -workspace flag (env POLYFORGE_WORKSPACE as the mirror); there is
+	// no default. New validates it exists and capsules/ is creatable.
+	Workspace string
+	DataDir   string
 	Project            string
 	GitRemoteBase      string
 	WorkflowsDir       string // daemon checkout's workflows/
@@ -251,14 +255,14 @@ func New(cfg Config) (*Daemon, error) {
 	if cfg.Hub == nil {
 		return nil, errors.New("daemon: Config.Hub is required")
 	}
-	if cfg.DataDir == "" || cfg.WorkspaceRoot == "" {
-		return nil, errors.New("daemon: DataDir and WorkspaceRoot are required")
+	if cfg.DataDir == "" || cfg.Workspace == "" {
+		return nil, errors.New("daemon: DataDir and Workspace are required")
 	}
 	// Relative paths are a footgun measured live on the window rig: the
 	// spawned git commands run with cmd.Dir = the capsule, so a relative
 	// DataDir resolves GIT_DIR under the capsule ('not a git repository').
 	// Absolutize both roots before anything derives paths from them.
-	for _, root := range []*string{&cfg.DataDir, &cfg.WorkspaceRoot} {
+	for _, root := range []*string{&cfg.DataDir, &cfg.Workspace} {
 		if abs, aerr := filepath.Abs(*root); aerr == nil {
 			*root = abs
 		}
@@ -267,7 +271,7 @@ func New(cfg Config) (*Daemon, error) {
 
 	rtCfg := runtime.Config{
 		MachineID:           cfg.MachineID,
-		WorkspaceRoot:       cfg.WorkspaceRoot,
+		Workspace:           cfg.Workspace,
 		DataDir:             cfg.DataDir,
 		GitRemoteBase:       cfg.GitRemoteBase,
 		WorkflowsDir:        cfg.WorkflowsDir,

@@ -405,7 +405,7 @@ func newTestRuntimeAt(t *testing.T, hub Aihub, sp Spawner, dataDir string) (*Run
 	t.Helper()
 	cfg := Config{
 		MachineID:      "m-test",
-		WorkspaceRoot:  filepath.Join(t.TempDir(), "ws"),
+		Workspace:  filepath.Join(t.TempDir(), "ws"),
 		DataDir:        dataDir,
 		MaxResumeFails: 2,
 		MaxRecoveries:  2,

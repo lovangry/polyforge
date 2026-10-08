@@ -50,9 +50,12 @@ type Config struct {
 	// in-package spawnAgent path (kept for tests that exercise the
 	// WI-Agent RPC model directly).
 	AgentStarter  AgentStartFunc
-	MachineID     string // registered machine identity
-	WorkspaceRoot string // <root>/capsules/<wi> are the capsule worktrees
-	DataDir       string // state.json + external git-dirs live here
+	MachineID string // registered machine identity
+	// Workspace is the capsule base the daemon was launched with
+	// (-workspace / POLYFORGE_WORKSPACE, required — no default):
+	// <Workspace>/capsules/<wi> are the capsule worktrees.
+	Workspace string
+	DataDir   string // state.json + external git-dirs live here
 	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
 	Harness       string // harness adapter name ("pi")
@@ -589,7 +592,7 @@ func (r *Runtime) cgroupPathFor(wi string) string {
 }
 
 func (r *Runtime) capsuleDir(wi string) string {
-	return filepath.Join(r.cfg.WorkspaceRoot, "capsules", wi)
+	return filepath.Join(r.cfg.Workspace, "capsules", wi)
 }
 
 func (r *Runtime) gitDirFor(wi string) string {

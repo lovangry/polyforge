@@ -777,7 +777,7 @@ func (d *v1Daemon) start() {
 		"--api-key", apiKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
-		"--workspace-root", d.workspace,
+		"--workspace", d.workspace,
 		"--project", v1Project,
 		"--workflows-dir", filepath.Join(d.inst.root, "workflows"),
 		"--executor-prompt", execPrompt,

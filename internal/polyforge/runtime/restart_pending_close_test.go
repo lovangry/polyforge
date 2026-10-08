@@ -33,7 +33,7 @@ func seedPendingCloseOfRetainedPause(t *testing.T, wi string, reason string) (*R
 	dir := t.TempDir()
 	cfg := Config{
 		MachineID:     "m-test",
-		WorkspaceRoot: filepath.Join(dir, "ws"),
+		Workspace: filepath.Join(dir, "ws"),
 		DataDir:       filepath.Join(dir, "data"),
 	}
 	hub := newFakeHub()
@@ -202,7 +202,7 @@ func TestRestartPlainRetainedPauseIsNotReplayed(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{
 		MachineID:     "m-test",
-		WorkspaceRoot: filepath.Join(dir, "ws"),
+		Workspace: filepath.Join(dir, "ws"),
 		DataDir:       filepath.Join(dir, "data"),
 	}
 	hub := newFakeHub()
