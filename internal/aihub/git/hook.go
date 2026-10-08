@@ -20,6 +20,15 @@ package git
 //     (the same structure the v1 attempt-id backup layer used; the
 //     values are the session model's).
 //
+// The refs/pf-task/<repo> namespace is the task-repo durability lane
+// (polyforge#108): the daemon's publish boundary mirrors each task
+// repo's LOCAL head there so a bounded-fail re-claim on a fresh session
+// can restore it. The history under these refs is the TASK repo's own —
+// it carries no Polyforge-Seq trailer and may legitimately contain
+// submodules — so the chain-only seq and gitlink invariants do not
+// apply to it. Deletion, fast-forward and the blob limit stay enforced
+// for every ref.
+//
 // The hook is a bash script exec'd by the real git receive-pack; the
 // server process never interprets pack data itself.
 
@@ -90,6 +99,17 @@ while read -r old new ref; do
     prev=""
   fi
 
+  # blob size limit (every ref, carrier namespace included).
+  badblob=$(git rev-list --objects "$range" | awk '{print $1}' \
+    | git cat-file --batch-check='%%(objecttype) %%(objectsize) %%(objectname)' \
+    | awk -v max="$MAXBLOB" '$1=="blob" && $2>max {print $3" ("$2" bytes)"}')
+  [ -z "$badblob" ] || reject "blob exceeds the ${MAXBLOB}-byte limit: $badblob"
+
+  # Task-repo carrier namespace: foreign (task-repo) history — the
+  # chain-only gitlink and seq invariants stop here. Deletion,
+  # fast-forward and the blob limit above stay for every ref.
+  case "$ref" in refs/pf-task/*) continue ;; esac
+
   # gitlink: mode 160000 entries are submodule commits; the capsule chain
   # must stay a single flat history.
   for c in $(git rev-list "$range"); do
@@ -97,12 +117,6 @@ while read -r old new ref; do
       reject "gitlink (mode 160000) in commit $c is not allowed"
     fi
   done
-
-  # blob size limit.
-  badblob=$(git rev-list --objects "$range" | awk '{print $1}' \
-    | git cat-file --batch-check='%%(objecttype) %%(objectsize) %%(objectname)' \
-    | awk -v max="$MAXBLOB" '$1=="blob" && $2>max {print $3" ("$2" bytes)"}')
-  [ -z "$badblob" ] || reject "blob exceeds the ${MAXBLOB}-byte limit: $badblob"
 
   # seq trailer: present, integer, strictly increasing, above the old tip.
   for c in $(git rev-list --reverse "$range"); do

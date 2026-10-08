@@ -633,3 +633,94 @@ func TestSessionPushAuthFencing(t *testing.T) {
 		t.Fatalf("push with the new session secret failed: %v", err)
 	}
 }
+
+// commitPlain writes a file and commits it WITHOUT the Polyforge-Seq
+// trailer — the shape of a task repo's own history.
+func commitPlain(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, dir, "add", "-A")
+	mustGit(t, dir, "commit", "-m", "task work: "+name)
+}
+
+// TestTaskCarrierRefAccepted (polyforge#108): the refs/pf-task/<repo>
+// namespace is the task-repo durability lane — the daemon mirrors a task
+// repo's local head there so a bounded-fail re-claim can restore it. The
+// history is the TASK repo's own: no Polyforge-Seq trailer, submodules
+// allowed. The hook must accept exactly that shape (while the chain
+// invariants stay enforced on refs/heads/* — pinned by the dedicated
+// tests above).
+func TestTaskCarrierRefAccepted(t *testing.T) {
+	e := newGitEnv(t)
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
+	wt := newWorktree(t)
+	commitPlain(t, wt, "code.txt", "task repo work\n")
+	out, err := runGit(t, wt, "push", cred, "HEAD:refs/pf-task/demo-src")
+	if err != nil {
+		t.Fatalf("task-carrier push rejected: %s", out)
+	}
+	// A task repo may legitimately contain a submodule gitlink — the
+	// chain's flat-history rule does not apply to foreign history.
+	mustGit(t, wt, "update-index", "--add", "--cacheinfo", "160000,0123456789012345678901234567890123456789,vendored-thing")
+	mustGit(t, wt, "commit", "-m", "task work with submodule")
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/pf-task/demo-src"); err != nil {
+		t.Fatalf("carrier push with a gitlink rejected: %s", out)
+	}
+	// The ref landed and advertises back.
+	out = mustGit(t, wt, "ls-remote", cred, "refs/pf-task/demo-src")
+	if !strings.Contains(out, "refs/pf-task/demo-src") {
+		t.Fatalf("carrier ref missing after push: %s", out)
+	}
+	// The carried head fetches back out (the restore lane's read).
+	wt2 := newWorktree(t)
+	mustGit(t, wt2, "remote", "add", "hub", cred)
+	mustGit(t, wt2, "fetch", "--quiet", "hub", "refs/pf-task/demo-src")
+	sha := strings.TrimSpace(mustGit(t, wt, "rev-parse", "HEAD"))
+	if got := strings.TrimSpace(mustGit(t, wt2, "rev-parse", "FETCH_HEAD")); got != sha {
+		t.Fatalf("fetched carrier head %q, want %q", got, sha)
+	}
+}
+
+// TestTaskCarrierRefStillFenced: the namespace exemption is ONLY the
+// chain-only seq/gitlink pair — deletion and fast-forward stay enforced
+// for carrier refs, and the chain invariants stay enforced on
+// refs/heads/*.
+func TestTaskCarrierRefStillFenced(t *testing.T) {
+	e := newGitEnv(t)
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
+	wt := newWorktree(t)
+	commitPlain(t, wt, "code.txt", "one\n")
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/pf-task/demo-src"); err != nil {
+		t.Fatalf("base carrier push: %s", out)
+	}
+	// History rewrite: an amended (non-descendant) tip is rejected. The
+	// rewritten tree must actually diverge (an in-second amend would
+	// reproduce the same commit SHA and push as up-to-date).
+	if err := os.WriteFile(filepath.Join(wt, "rewrite.txt"), []byte("divergent\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, wt, "add", "-A")
+	mustGit(t, wt, "commit", "--amend", "--no-edit")
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/pf-task/demo-src"); err == nil {
+		t.Fatalf("non-fast-forward carrier push accepted: %s", out)
+	} else if !strings.Contains(out, "non-fast-forward") {
+		t.Fatalf("wrong rejection: %s", out)
+	}
+	// Deletion stays rejected.
+	if out, err := runGit(t, wt, "push", cred, ":refs/pf-task/demo-src"); err == nil {
+		t.Fatalf("carrier ref deletion accepted: %s", out)
+	} else if !strings.Contains(out, "deletion") {
+		t.Fatalf("wrong rejection: %s", out)
+	}
+	// The chain invariants stay enforced on refs/heads/*: a seq-less
+	// commit to main is still refused.
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main"); err == nil {
+		t.Fatalf("seq-less chain push accepted: %s", out)
+	} else if !strings.Contains(out, "Polyforge-Seq") {
+		t.Fatalf("wrong rejection: %s", out)
+	}
+}
