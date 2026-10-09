@@ -74,7 +74,7 @@ func TestStartClonesTaskRepos(t *testing.T) {
 	if err := r.Start(context.Background(), "wi_repo1"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	capDir := r.capsuleDir("wi_repo1")
+	capDir := testCapsuleDir(r, "wi_repo1")
 	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
 
 	// A real clone: its own .git and the remote's content.
@@ -126,7 +126,7 @@ func TestRematerializePreservesRepoScene(t *testing.T) {
 	if err := r.Start(context.Background(), "wi_repo2"); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
-	capDir := r.capsuleDir("wi_repo2")
+	capDir := testCapsuleDir(r, "wi_repo2")
 	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
 
 	// Simulate a daemon crash between spawn and any further step: the
@@ -211,7 +211,7 @@ func TestCloneFailureBlocksTicket(t *testing.T) {
 	if end.Status != api.StatusBlocked || end.SessionID == "" || end.Note == "" {
 		t.Fatalf("blocked close wrong: %+v", end)
 	}
-	if dirExists(filepath.Join(r.capsuleDir("wi_repo3"), capsule.DirRepos, "app")) {
+	if dirExists(filepath.Join(testCapsuleDir(r, "wi_repo3"), capsule.DirRepos, "app")) {
 		t.Fatal("failed clone left a worktree behind")
 	}
 
@@ -267,7 +267,7 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 	if err := r.Start(context.Background(), wi); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
-	capDir := r.capsuleDir(wi)
+	capDir := testCapsuleDir(r, wi)
 	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
 	if got := capsuleReposOf(t, capDir)["app"]; got != head {
 		t.Fatalf("first-claim baseline = %q, want the origin head %q", got, head)
@@ -327,7 +327,7 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 
 	// The oracle: the re-claimed worktree stands at the carried head with
 	// the work files back, and the baseline names it.
-	repoB := filepath.Join(r.capsuleDir(wi), capsule.DirRepos, "app")
+	repoB := filepath.Join(testCapsuleDir(r, wi), capsule.DirRepos, "app")
 	got, err := exec.Command("git", "-C", repoB, "rev-parse", "HEAD").Output()
 	if err != nil {
 		t.Fatalf("rev-parse (re-claimed): %v", err)
@@ -338,7 +338,7 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(repoB, "work.txt")); err != nil || string(b) != "durable work\n" {
 		t.Fatalf("re-claimed work.txt wrong: %q, %v", b, err)
 	}
-	if got := capsuleReposOf(t, r.capsuleDir(wi))["app"]; got != workHead {
+	if got := capsuleReposOf(t, testCapsuleDir(r, wi))["app"]; got != workHead {
 		t.Fatalf("re-claim baseline = %q, want the carried head %q", got, workHead)
 	}
 	// The task origin never moved: ship is the only push path, and
@@ -351,6 +351,6 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 	if err := r.Stop(context.Background(), wi, protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	unseal(t, r.capsuleDir(wi))
+	unseal(t, testCapsuleDir(r, wi))
 	unseal(t, repoB)
 }

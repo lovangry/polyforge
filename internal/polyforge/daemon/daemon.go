@@ -32,6 +32,7 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/bridge"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -62,13 +63,16 @@ type Hub interface {
 type Config struct {
 	MachineID  string
 	SocketPath string
-	// Workspace is the REQUIRED capsule base selection: capsules live at
-	// <Workspace>/capsules/<wi_id>. Resolved in main.go from the
-	// -workspace flag (env POLYFORGE_WORKSPACE as the mirror); there is
-	// no default. New validates it exists and capsules/ is creatable.
-	Workspace     string
+	// Mapping is the REQUIRED workspace→projects plan of record
+	// (polyforge#113), assembled in main.go from the shared config's
+	// [workspace."<path>"] sections. Capsules route per project through
+	// the inverse mapping: <mapped-workspace>/capsules/<wi_id>. There is
+	// no single workspace and no daemon project scope anymore — batch
+	// and drain iterate ALL mapped projects. New validates the mapping
+	// is non-empty and every mapped workspace exists with capsules/
+	// creatable.
+	Mapping       *mapping.Plan
 	DataDir       string
-	Project       string
 	GitRemoteBase string
 	WorkflowsDir  string // daemon checkout's workflows/
 	PiBin         string
@@ -243,30 +247,35 @@ func New(cfg Config) (*Daemon, error) {
 	if cfg.Hub == nil {
 		return nil, errors.New("daemon: Config.Hub is required")
 	}
-	if cfg.DataDir == "" || cfg.Workspace == "" {
-		return nil, errors.New("daemon: DataDir and Workspace are required")
+	if cfg.DataDir == "" {
+		return nil, errors.New("daemon: DataDir is required")
+	}
+	if cfg.Mapping == nil || cfg.Mapping.Empty() {
+		return nil, errors.New("daemon: a non-empty [workspace] mapping is required — add at least one [workspace.\"<path>\"] section with a projects list to the config (`pf doctor` checks the mapping)")
 	}
 	// Relative paths are a footgun measured live on the window rig: the
 	// spawned git commands run with cmd.Dir = the capsule, so a relative
 	// DataDir resolves GIT_DIR under the capsule ('not a git repository').
-	// Absolutize both roots before anything derives paths from them.
-	for _, root := range []*string{&cfg.DataDir, &cfg.Workspace} {
-		if abs, aerr := filepath.Abs(*root); aerr == nil {
-			*root = abs
-		}
+	// Absolutize the root before anything derives paths from it.
+	if abs, aerr := filepath.Abs(cfg.DataDir); aerr == nil {
+		cfg.DataDir = abs
 	}
-	// Workspace validation (#103): the daemon never creates the workspace
-	// directory itself — the operator (or installer) selects a
-	// pre-existing one — and the only subtree it ever writes under it is
-	// capsules/. Both facts are enforced here, before any serving.
-	if err := validateWorkspace(cfg.Workspace); err != nil {
-		return nil, err
+	// Workspace validation (#103, extended to every mapped workspace by
+	// polyforge#113): the daemon never creates a workspace directory
+	// itself — the operator (or installer) selects pre-existing ones —
+	// and the only subtree it ever writes under any of them is
+	// capsules/. Both facts are enforced here for EVERY mapped
+	// workspace, each failure naming its workspace, before any serving.
+	for _, ws := range cfg.Mapping.Workspaces() {
+		if err := validateWorkspace(ws); err != nil {
+			return nil, err
+		}
 	}
 	cfg.fill()
 
 	rtCfg := runtime.Config{
 		MachineID:           cfg.MachineID,
-		Workspace:           cfg.Workspace,
+		Mapping:             cfg.Mapping,
 		DataDir:             cfg.DataDir,
 		GitRemoteBase:       cfg.GitRemoteBase,
 		WorkflowsDir:        cfg.WorkflowsDir,
@@ -863,22 +872,35 @@ func (d *Daemon) fetchDrainWave() {
 	if !d.modes.AdmitDrainWave() || !d.q.SlotFree() {
 		return
 	}
-	items, err := d.hub.Queue(d.cfg.Project)
-	if err != nil {
-		if authDenied(err) {
-			fmt.Fprintf(os.Stderr, "daemon: drain fetch degraded: ready queue of project %q denied (%v)\n", d.cfg.Project, err)
-			if !d.drainDegraded && d.obs != nil {
-				d.drainDegraded = true
-				_ = d.obs.Events().Append("", observe.EvDrainDegraded, map[string]any{
-					"project": d.cfg.Project,
-					"class":   "authorization",
-					"error":   err.Error(),
-				})
+	// polyforge#113: no daemon-level project scope exists — the drain
+	// wave iterates ALL mapped projects. A per-project authorization-class
+	// denial raises the degraded signal naming THAT project; healthy
+	// projects still enqueue (partial coverage beats none, and the
+	// degraded episode is visible).
+	var items []api.WorkItem
+	degraded := false
+	for _, project := range d.cfg.Mapping.Projects() {
+		pis, err := d.hub.Queue(project)
+		if err != nil {
+			if authDenied(err) {
+				degraded = true
+				fmt.Fprintf(os.Stderr, "daemon: drain fetch degraded: ready queue of project %q denied (%v)\n", project, err)
+				if !d.drainDegraded && d.obs != nil {
+					d.drainDegraded = true
+					_ = d.obs.Events().Append("", observe.EvDrainDegraded, map[string]any{
+						"project": project,
+						"class":   "authorization",
+						"error":   err.Error(),
+					})
+				}
 			}
+			continue
 		}
-		return
+		items = append(items, pis...)
 	}
-	d.drainDegraded = false // episode cleared: this fetch succeeded
+	if !degraded {
+		d.drainDegraded = false // episode cleared: this fetch fully succeeded
+	}
 	for _, it := range items {
 		if it.BundleName == nil {
 			continue // registration tickets never execute
@@ -888,6 +910,16 @@ func (d *Daemon) fetchDrainWave() {
 		}
 		d.q.Enqueue(qEntry{WorkItemID: it.ID, Priority: it.Priority, Intent: "claim"})
 	}
+}
+
+// queueProjects answers the projects the batch/drain wave covers: an
+// explicit scope when one rides the mode wire, else every mapped project
+// in declaration order (polyforge#113).
+func (d *Daemon) queueProjects(scope string) []string {
+	if scope != "" {
+		return []string{scope}
+	}
+	return d.cfg.Mapping.Projects()
 }
 
 // authDenied classifies a ready-queue error as authorization-class: a

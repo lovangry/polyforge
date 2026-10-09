@@ -38,7 +38,7 @@ func startWithRecall(t *testing.T, wi string, seam func(query string, topK int) 
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Stop(context.Background(), wi, protocol.FinishWrapped) })
-	return r, filepath.Join(r.capsuleDir(wi), filepath.FromSlash(relRecalledMemories))
+	return r, filepath.Join(testCapsuleDir(r, wi), filepath.FromSlash(relRecalledMemories))
 }
 
 func readSnapshot(t *testing.T, path string) recalledSnapshot {

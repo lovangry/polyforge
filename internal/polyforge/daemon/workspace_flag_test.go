@@ -1,137 +1,158 @@
 package daemon
 
-// workspace_flag_test.go pins the required-workspace launch surface
-// (#103): -workspace PATH (env mirror POLYFORGE_WORKSPACE) is REQUIRED —
-// no flag and no env refuses to start with an error naming the flag plus
-// one example; the flag wins over the env (A1); the legacy
-// -workspace-root flag is deleted outright (unknown-flag parse failure)
-// and the deleted POLYFORGE_WORKSPACE_ROOT env is ignored silently — it
-// neither satisfies the requirement nor perturbs the new surface.
+// workspace_flag_test.go pins the #113 launch surface at the daemon's
+// real entry (Main): the retired workspace/project selection flags fail
+// flag PARSING (exit 2 — deleted, never demoted), the retired selection
+// environment variables refuse the boot BEFORE anything is loaded or
+// served (exit 1, naming the variable), a config with zero [workspace]
+// sections refuses startup naming the shape and `pf doctor`, and a
+// mapping-bearing config proceeds past the launch guard. All retired
+// names are assembled from fragments so this file's bytes never carry
+// them contiguously (the greppable floor — S36's own convention).
 
 import (
 	"bytes"
-	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestResolveWorkspaceRequiredError(t *testing.T) {
-	_, err := resolveWorkspace("", func(string) string { return "" })
-	if err == nil {
-		t.Fatal("no flag and no env must refuse to start")
+// envTok joins retired env-name fragments at runtime (flagTok lives in
+// removed_knobs_test.go — same file set, one package).
+func envTok(parts ...string) string { return strings.Join(parts, "") }
+
+// TestRetiredSelectionFlagsFailAtParse: the deleted -workspace and
+// --project flags (either dash spelling) are unknown-flag parse failures
+// — the daemon never starts and the error names the flag.
+func TestRetiredSelectionFlagsFailAtParse(t *testing.T) {
+	cases := []struct {
+		name string
+		flag string
+	}{
+		{"retired workspace flag, single dash", flagTok("-", "work", "space")},
+		{"retired workspace flag, double dash", flagTok("--", "work", "space")},
+		{"retired project flag, single dash", flagTok("-", "proj", "ect")},
+		{"retired project flag, double dash", flagTok("--", "proj", "ect")},
 	}
-	for _, want := range []string{"-workspace", "POLYFORGE_WORKSPACE", "pf daemon -workspace"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("refusal error %q must name/mention %q", err, want)
-		}
+	// Go's flag package normalizes the double-dash spelling in its
+	// "not defined" message, so the named-token assertion uses the
+	// single-dash form (a substring of the double-dash one).
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := Main([]string{"--socket", "/nonexistent-probe.sock", c.flag, "/tmp/x"}, nil, &bytes.Buffer{}, &stderr)
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2 (flag parse failure), stderr: %q", code, stderr.String())
+			}
+			named := flagTok("-", strings.TrimLeft(c.flag, "-"))
+			if !strings.Contains(stderr.String(), named) {
+				t.Fatalf("parse error %q does not name the retired flag %q", stderr.String(), named)
+			}
+		})
 	}
 }
 
-func TestResolveWorkspaceEnvOnly(t *testing.T) {
-	ws, err := resolveWorkspace("", func(key string) string {
-		if key == "POLYFORGE_WORKSPACE" {
-			return "/srv/pf/ws"
+// TestRetiredSelectionEnvRefusedBeforeAnythingLoads: either retired
+// environment variable set (even over a fully valid mapping config)
+// refuses the boot with an error naming the variable; the refusal is
+// parse-first (a bad flag still wins with exit 2).
+func TestRetiredSelectionEnvRefusedBeforeAnythingLoads(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgDir)
+	pfDir := filepath.Join(cfgDir, "polyforge")
+	if err := os.MkdirAll(pfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	cfg := "server = \"http://127.0.0.1:1\"\n\n[workspace.\"" + ws + "\"]\nprojects = [\"proj\"]\n"
+	if err := os.WriteFile(filepath.Join(pfDir, "cli.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("retired project variable", func(t *testing.T) {
+		retired := envTok("PF_", "PROJECT")
+		t.Setenv(retired, "ieops")
+		var stderr bytes.Buffer
+		code := Main([]string{"--socket", "/nonexistent-probe.sock"}, nil, &bytes.Buffer{}, &stderr)
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1 (boot refusal), stderr: %q", code, stderr.String())
 		}
-		return ""
+		if !strings.Contains(stderr.String(), retired) {
+			t.Fatalf("boot refusal %q does not name the retired variable %s", stderr.String(), retired)
+		}
 	})
-	if err != nil {
-		t.Fatalf("env-only workspace must resolve: %v", err)
-	}
-	if ws != "/srv/pf/ws" {
-		t.Fatalf("workspace = %q, want the env value", ws)
-	}
-}
-
-func TestResolveWorkspaceFlagBeatsEnv(t *testing.T) {
-	ws, err := resolveWorkspace("/flag/ws", func(key string) string {
-		if key == "POLYFORGE_WORKSPACE" {
-			return "/env/ws"
+	t.Run("retired workspace variable", func(t *testing.T) {
+		retired := envTok("POLYFORGE_", "WORKSPACE")
+		t.Setenv(retired, ws)
+		var stderr bytes.Buffer
+		code := Main([]string{"--socket", "/nonexistent-probe.sock"}, nil, &bytes.Buffer{}, &stderr)
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1 (boot refusal), stderr: %q", code, stderr.String())
 		}
-		return ""
+		if !strings.Contains(stderr.String(), retired) {
+			t.Fatalf("boot refusal %q does not name the retired variable %s", stderr.String(), retired)
+		}
 	})
-	if err != nil {
-		t.Fatalf("flag+env must resolve: %v", err)
-	}
-	if ws != "/flag/ws" {
-		t.Fatalf("workspace = %q, want the flag value (flag beats env)", ws)
-	}
-}
-
-func TestResolveWorkspaceLegacyEnvIgnored(t *testing.T) {
-	var queried []string
-	getenv := func(key string) string {
-		queried = append(queried, key)
-		if key == "POLYFORGE_WORKSPACE_ROOT" {
-			return "/legacy/ws"
+	t.Run("parse failure still wins over the env guard", func(t *testing.T) {
+		retired := envTok("PF_", "PROJECT")
+		t.Setenv(retired, "ieops")
+		var stderr bytes.Buffer
+		code := Main([]string{"--socket", "/nonexistent-probe.sock", "--no-such-flag"}, nil, &bytes.Buffer{}, &stderr)
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2 (flag parse before the env guard), stderr: %q", code, stderr.String())
 		}
-		return ""
-	}
-	// The deleted env alone does NOT satisfy the requirement.
-	if _, err := resolveWorkspace("", getenv); err == nil {
-		t.Fatal("POLYFORGE_WORKSPACE_ROOT alone must not satisfy the requirement")
-	}
-	// ... and the resolver never even consults it (ignored silently —
-	// no error, no warning, no effect on the new surface).
-	ws, err := resolveWorkspace("/new/ws", getenv)
-	if err != nil {
-		t.Fatalf("new surface with legacy env set must resolve: %v", err)
-	}
-	if ws != "/new/ws" {
-		t.Fatalf("workspace = %q, want the new-surface value untouched by the legacy env", ws)
-	}
-	for _, k := range queried {
-		if k == "POLYFORGE_WORKSPACE_ROOT" {
-			t.Fatalf("resolver queried the deleted env %q — it must be ignored outright", k)
-		}
-	}
+	})
 }
 
-// TestMainUnknownWorkspaceRootFlag pins the outright deletion: passing
-// the removed flag is an unknown-flag parse failure (exit 2), the same
-// failure class as any unrecognized flag, and the daemon never starts.
-func TestMainUnknownWorkspaceRootFlag(t *testing.T) {
-	var stderr bytes.Buffer
-	code := Main([]string{"-workspace-root", "/tmp/pf-legacy-ws"}, nil, &bytes.Buffer{}, &stderr)
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2 (unknown flag)", code)
+// TestNoMappingRefusesAtMain: a config with zero [workspace] sections —
+// the fresh-install template shape — refuses startup (exit 1) naming the
+// [workspace] shape and `pf doctor`, before any socket is created.
+func TestNoMappingRefusesAtMain(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgDir)
+	pfDir := filepath.Join(cfgDir, "polyforge")
+	if err := os.MkdirAll(pfDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(stderr.String(), "workspace-root") {
-		t.Errorf("stderr %q must name the unknown flag", stderr.String())
+	if err := os.WriteFile(filepath.Join(pfDir, "cli.toml"),
+		[]byte("server = \"http://127.0.0.1:1\"\napi_key = \"k\"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-}
-
-// TestMainRefusesWithoutWorkspace pins the end-to-end refusal: a launch
-// with neither -workspace nor POLYFORGE_WORKSPACE exits non-zero with an
-// error naming the flag and one example invocation.
-func TestMainRefusesWithoutWorkspace(t *testing.T) {
-	t.Setenv("POLYFORGE_WORKSPACE", "")
-	// Config isolation: the in-process Main reads the default config
-	// location; a scratch XDG dir keeps an operator's config file out of
-	// the refusal's causal chain (this machine is a live polyforge
-	// install whose cli.toml is not this test's subject).
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	var stderr bytes.Buffer
-	code := Main([]string{"-socket", "/tmp/pf-unused.sock"}, nil, &bytes.Buffer{}, &stderr)
+	code := Main([]string{"--socket", filepath.Join(t.TempDir(), "d.sock")}, nil, &bytes.Buffer{}, &stderr)
 	if code != 1 {
-		t.Fatalf("exit = %d, want 1 (refused: no workspace selected)", code)
+		t.Fatalf("exit = %d, want 1 (no-mapping refusal), stderr: %q", code, stderr.String())
 	}
-	out := stderr.String()
-	if !strings.Contains(out, "-workspace") || !strings.Contains(out, "example") {
-		t.Errorf("refusal output %q must name the -workspace flag and an example", out)
-	}
-	if strings.Contains(out, "POLYFORGE_WORKSPACE_ROOT") {
-		t.Errorf("refusal output %q must not resurrect the deleted env name as an option", out)
+	for _, tok := range []string{"[workspace", "doctor"} {
+		if !strings.Contains(stderr.String(), tok) {
+			t.Fatalf("refusal %q misses the %q guidance token", stderr.String(), tok)
+		}
 	}
 }
 
-// resolveWorkspace never wraps its refusal: Main prefixes "pf daemon: "
-// exactly once when printing it.
-func TestResolveWorkspaceErrorUnprefixed(t *testing.T) {
-	_, err := resolveWorkspace("", func(string) string { return "" })
-	if err == nil || errors.Unwrap(err) != nil {
-		t.Fatalf("refusal must be a plain error, got %v", err)
+// TestMappingConfiguredBootReachesWorkspaceValidation: a mapping-bearing
+// config proceeds past the launch guard — with a MISSING workspace dir it
+// fails in New's validation naming the workspace (proving the mapping was
+// actually consumed, and the refusal names the mapped path).
+func TestMappingConfiguredBootReachesWorkspaceValidation(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgDir)
+	pfDir := filepath.Join(cfgDir, "polyforge")
+	if err := os.MkdirAll(pfDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if strings.HasPrefix(err.Error(), "pf daemon:") {
-		t.Fatalf("refusal error carries the main.go prefix itself: %q (double prefix when printed)", err)
+	missing := filepath.Join(t.TempDir(), "no-such-ws")
+	cfg := "server = \"http://127.0.0.1:1\"\n\n[workspace.\"" + missing + "\"]\nprojects = [\"proj\"]\n"
+	if err := os.WriteFile(filepath.Join(pfDir, "cli.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	code := Main([]string{"--socket", filepath.Join(t.TempDir(), "d.sock")}, nil, &bytes.Buffer{}, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (workspace validation failure), stderr: %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no-such-ws") {
+		t.Fatalf("validation failure %q does not name the mapped workspace", stderr.String())
 	}
 }

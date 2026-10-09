@@ -215,7 +215,7 @@ func newTestRuntimeAt(t *testing.T, hub Aihub, sp Spawner, dataDir string) (*Run
 	t.Helper()
 	cfg := Config{
 		MachineID:     "m-test",
-		Workspace:     filepath.Join(t.TempDir(), "ws"),
+		Mapping:       mappingFor(filepath.Join(t.TempDir(), "ws")),
 		DataDir:       dataDir,
 		MaxRecoveries: 2,
 		SendBound:     2 * time.Second,

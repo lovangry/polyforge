@@ -131,11 +131,14 @@ type AnswerPayload struct {
 // ModeRequest is the POST /mode body. Action is one of
 // set|drain|abort-drain|get_recommendation; Mode (interactive|batch|
 // drain) and MaxConcurrentJobs apply to action=set only. There is no
-// "get" action — mode queries go through GET /status.
+// "get" action — mode queries go through GET /status. Project (#113)
+// scopes get_recommendation to one project; absent, the daemon merges
+// ALL mapped projects.
 type ModeRequest struct {
 	Action            string `json:"action"`
 	Mode              string `json:"mode,omitempty"`
 	MaxConcurrentJobs *int   `json:"max_concurrent_jobs,omitempty"`
+	Project           string `json:"project,omitempty"`
 }
 
 // SubmitResponse is the claim-family answer.
@@ -150,9 +153,11 @@ type SubmitResponse struct {
 type StatusResponse struct {
 	MachineID string `json:"machine_id"`
 	Mode      string `json:"mode"`
-	// Workspace is the active capsule base (#103): the daemon's launched
-	// -workspace value — capsules live at <workspace>/capsules/<wi_id>.
-	Workspace    string      `json:"workspace"`
+	// Workspaces is the mapped workspace set (#113): every [workspace]
+	// path the daemon routes capsules into, in mapping declaration
+	// order — a multi-workspace daemon never presents one workspace as
+	// if it were the only one.
+	Workspaces   []string    `json:"workspaces"`
 	ShuttingDown bool        `json:"shutting_down"`
 	Jobs         []StatusJob `json:"jobs"`
 	Queue        QueueStats  `json:"queue"`

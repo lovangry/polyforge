@@ -23,7 +23,7 @@ func newLaneRuntime(t *testing.T, sendBound, retryWindow time.Duration) (*Runtim
 	t.Helper()
 	cfg := Config{
 		MachineID:          "m-lane",
-		Workspace:          filepath.Join(t.TempDir(), "ws"),
+		Mapping:            mappingFor(filepath.Join(t.TempDir(), "ws")),
 		DataDir:            filepath.Join(t.TempDir(), "data"),
 		MaxRecoveries:      2,
 		SendBound:          sendBound,

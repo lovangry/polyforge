@@ -19,6 +19,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
@@ -446,6 +447,20 @@ func fakeEngineStarter() func(ctx context.Context, in runtime.AgentStartInput) (
 	}
 }
 
+// mappingFor builds the daemon tests' one-workspace plan: ws mapping the
+// fakes' project "proj" (polyforge#113 — the Config carries the mapping,
+// never a single workspace or project scope).
+func mappingFor(ws string, projects ...string) *mapping.Plan {
+	if len(projects) == 0 {
+		projects = []string{"proj"}
+	}
+	p, err := mapping.Build([]mapping.Entry{{Workspace: ws, Projects: projects}})
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
 // ---------------------------------------------------------------------------
 // daemon under test
 
@@ -479,9 +494,8 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 		// a FAKE engine starter that delegates to the fake spawner so the
 		// scripted WI-Agent semantics (spawn call params, agent handles)
 		// stay assertable without a real driver.
-		Workspace:         ws,
+		Mapping:           mappingFor(ws),
 		DataDir:           data,
-		Project:           "proj",
 		GitRemoteBase:     hubBase,
 		MaxConcurrent:     4,
 		Hub:               hub,

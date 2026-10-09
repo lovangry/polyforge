@@ -22,8 +22,8 @@ import (
 
 func assertNothingMaterialized(t *testing.T, r *Runtime, wi string, sp *scriptedSpawner) {
 	t.Helper()
-	if _, err := os.Stat(r.capsuleDir(wi)); !os.IsNotExist(err) {
-		t.Errorf("capsule dir %s must NOT be created (no silent rebuild)", r.capsuleDir(wi))
+	if _, err := os.Stat(testCapsuleDir(r, wi)); !os.IsNotExist(err) {
+		t.Errorf("capsule dir %s must NOT be created (no silent rebuild)", testCapsuleDir(r, wi))
 	}
 	if _, err := os.Stat(r.gitDirFor(wi)); !os.IsNotExist(err) {
 		t.Errorf("external git dir %s must NOT be created (no clone from remote)", r.gitDirFor(wi))
@@ -58,7 +58,7 @@ func TestRestartMissingMidflightCapsuleFailsHard(t *testing.T) {
 	if miss.WI != wi || !strings.Contains(err.Error(), wi) {
 		t.Errorf("error must name the affected work item %q, got %q", wi, err)
 	}
-	if !strings.Contains(err.Error(), r.capsuleDir(wi)) {
+	if !strings.Contains(err.Error(), testCapsuleDir(r, wi)) {
 		t.Errorf("error must name the missing capsule path, got %q", err)
 	}
 	// no hub transition fired before the failure
@@ -143,8 +143,8 @@ func TestRestartResumeMissingCapsuleTypedError(t *testing.T) {
 	if !errors.As(err, &miss) {
 		t.Fatalf("want *MissingCapsuleError, got %T: %v", err, err)
 	}
-	if miss.Dir != r.capsuleDir(wi) {
-		t.Errorf("typed error dir = %q, want %q", miss.Dir, r.capsuleDir(wi))
+	if miss.Dir != testCapsuleDir(r, wi) {
+		t.Errorf("typed error dir = %q, want %q", miss.Dir, testCapsuleDir(r, wi))
 	}
 	assertNothingMaterialized(t, r, wi, sp)
 }

@@ -32,6 +32,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/bridge"
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -161,9 +162,13 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 		t.Fatalf("inproc rig: no fake harness binary built; refusing the PiBin default (a real harness would be spawned)")
 	}
 
+	plan, err := mapping.Build([]mapping.Entry{{Workspace: workspace, Projects: []string{v1Project}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	rtCfg := runtime.Config{
 		MachineID:     "m-inproc",
-		Workspace:     workspace,
+		Mapping:       plan,
 		DataDir:       dataDir,
 		GitRemoteBase: inst.url + "/git",
 		WorkflowsDir:  filepath.Join(inst.root, "workflows"),

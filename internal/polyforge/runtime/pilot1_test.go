@@ -123,7 +123,7 @@ func TestWorkItemFileMaterializedAtStart(t *testing.T) {
 	}
 	defer func() { _ = r.Stop(ctx, "wi_goal9", protocol.FinishWrapped) }()
 
-	path := filepath.Join(r.capsuleDir("wi_goal9"), filepath.FromSlash(capsule.WorkItemJSON))
+	path := filepath.Join(testCapsuleDir(r, "wi_goal9"), filepath.FromSlash(capsule.WorkItemJSON))
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("work-item.json missing: %v", err)
@@ -201,7 +201,7 @@ func TestRestartDropsPreSessionRecord(t *testing.T) {
 	// a pre-v1.5 record: keyed by a slug, generation-era fields, and NO
 	// session secret — there is nothing to verify against.
 	slug := "proj#3"
-	oldCapsule := filepath.Join(r.cfg.Workspace, "capsules", slug)
+	oldCapsule := filepath.Join(testWorkspace(r), "capsules", slug)
 	if err := os.MkdirAll(filepath.Join(oldCapsule, capsule.DirRuntimeState), 0o755); err != nil {
 		t.Fatal(err)
 	}

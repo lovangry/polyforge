@@ -81,9 +81,16 @@ const (
 	ErrGitSeqViolation = "GIT-422" // seq trailer not monotonically increasing
 	ErrGitInternal     = "GIT-500"
 	// DAEMON — pf daemon UDS surface (04 §5)
-	ErrDaemonBadInput            = "DAEMON-400"
-	ErrDaemonForbidden           = "DAEMON-403"
-	ErrDaemonNotFound            = "DAEMON-404"
+	ErrDaemonBadInput  = "DAEMON-400"
+	ErrDaemonForbidden = "DAEMON-403"
+	ErrDaemonNotFound  = "DAEMON-404"
+	// ErrDaemonUnmappedProject is the #113 claim-time placement refusal:
+	// the work item's project is not in the machine's [workspace] mapping,
+	// so no capsule home exists for it. Raised BEFORE any capsule is
+	// created or server-side claim state changes (DAEMON-412: a
+	// precondition of placement is missing — remediation is config, not
+	// retry).
+	ErrDaemonUnmappedProject     = "DAEMON-412"
 	ErrDaemonConflict            = "DAEMON-409"
 	ErrDaemonGone                = "DAEMON-410"
 	ErrDaemonShuttingDown        = "DAEMON-503"

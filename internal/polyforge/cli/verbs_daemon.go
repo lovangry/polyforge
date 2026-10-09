@@ -262,11 +262,15 @@ func newAnswerID() string {
 var cmdBatchConfirm = &Command{
 	Name:    "batch-confirm",
 	Summary: "Batch wave: show the recommendation, confirm and submit it",
-	Usage: "pf batch-confirm                # show the recommended wave only (no Job is created)\n" +
+	Usage: "pf batch-confirm [--project P]    # show the recommended wave only (no Job is created)\n" +
 		"pf batch-confirm --all           # confirm and submit the whole recommendation\n" +
-		"pf batch-confirm <id> [<id>...]  # confirm and submit exactly this set",
+		"pf batch-confirm <id> [<id>...]  # confirm and submit exactly this set\n\n" +
+		"Without --project the recommendation covers ALL mapped projects (the\n" +
+		"[workspace] mapping); --project P scopes to P and is validated\n" +
+		"against the mapping.",
 	Setup: func(fs *flag.FlagSet) {
 		fs.Bool("all", false, "submit the entire recommendation as the confirmed wave")
+		fs.String("project", "", "scope the recommendation to one mapped project (validated; absent = all mapped projects)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		all := boolFlag(fs, "all")
@@ -274,8 +278,22 @@ var cmdBatchConfirm = &Command{
 		d := ctx.daemon()
 
 		// Always fetch the scheduler recommendation first (the daemon
-		// forwards the aihub ready-queue answer read-only).
-		raw, err := d.Mode(ModeRequest{Action: "get_recommendation"})
+		// forwards the aihub ready-queue answer read-only). polyforge#113:
+		// an explicit --project scopes the recommendation to that project
+		// — validated against the local mapping (unmapped → guidance
+		// error); absent, the daemon merges all mapped projects' ready
+		// queues.
+		req := ModeRequest{Action: "get_recommendation"}
+		if p := stringFlag(fs, "project"); p != "" {
+			if ctx.Cfg.Mapping.Empty() {
+				return fmt.Errorf("batch-confirm: project %q cannot be validated: no [workspace] mapping is configured in the config — add a [workspace.\"<path>\"] section (`pf doctor` checks the mapping)", p)
+			}
+			if _, err := ctx.Cfg.Mapping.WorkspaceFor(p); err != nil {
+				return fmt.Errorf("batch-confirm: %w", err)
+			}
+			req.Project = p
+		}
+		raw, err := d.Mode(req)
 		if err != nil {
 			return err
 		}

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 )
 
 // validateCfg is the minimal valid Config around a workspace: everything
@@ -32,9 +34,8 @@ func validateCfg(t *testing.T, ws string) Config {
 	return Config{
 		MachineID:         "m-wsval",
 		SocketPath:        filepath.Join(dir, "s.sock"),
-		Workspace:         ws,
+		Mapping:           mappingFor(ws),
 		DataDir:           data,
-		Project:           "proj",
 		GitRemoteBase:     hubBase,
 		MaxConcurrent:     1,
 		Hub:               newFakeHub(),
@@ -139,5 +140,67 @@ func TestValidateWorkspaceUsable(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Fatalf("workspace contents after startup = %v, want only [capsules]", names)
+	}
+}
+
+// TestValidateAllMappedWorkspaces (#113): New validates EVERY mapped
+// workspace — one missing directory among two fails New naming THAT
+// workspace; all present, every workspace gets the #103 contract
+// (capsules/ created, nothing else).
+func TestValidateAllMappedWorkspaces(t *testing.T) {
+	wsOK := filepath.Join(t.TempDir(), "ws-ok")
+	wsMissing := filepath.Join(t.TempDir(), "ws-missing")
+	if err := os.MkdirAll(wsOK, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := validateCfg(t, wsOK)
+	cfg.Mapping = mappingFor(wsOK, "proj")
+	plan, err := mapping.Build([]mapping.Entry{
+		{Workspace: wsOK, Projects: []string{"proj"}},
+		{Workspace: wsMissing, Projects: []string{"ieops"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Mapping = plan
+	if _, err := New(cfg); err == nil {
+		t.Fatal("a missing mapped workspace must be a hard startup error")
+	} else if !strings.Contains(err.Error(), "ws-missing") {
+		t.Errorf("error %q must name the missing workspace", err)
+	}
+	if _, statErr := os.Stat(wsMissing); !os.IsNotExist(statErr) {
+		t.Errorf("the daemon must never create a missing mapped workspace; stat err = %v", statErr)
+	}
+
+	// All present: both workspaces get their capsules/, nothing else.
+	wsB := filepath.Join(t.TempDir(), "ws-b")
+	if err := os.MkdirAll(wsB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plan2, err := mapping.Build([]mapping.Entry{
+		{Workspace: wsOK, Projects: []string{"proj"}},
+		{Workspace: wsB, Projects: []string{"ieops"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Mapping = plan2
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatalf("all-present mapping must assemble: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+	for _, ws := range []string{wsOK, wsB} {
+		ents, err := os.ReadDir(ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 0, len(ents))
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		if len(names) != 1 || names[0] != "capsules" {
+			t.Fatalf("workspace %s contents = %v, want only [capsules]", ws, names)
+		}
 	}
 }

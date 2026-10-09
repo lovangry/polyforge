@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -74,9 +75,11 @@ type queueStats struct {
 type statusResponse struct {
 	MachineID string `json:"machine_id"`
 	Mode      string `json:"mode"`
-	// Workspace is the active capsule base (#103): the -workspace value
-	// the daemon was launched with — capsules live at <workspace>/capsules.
-	Workspace    string      `json:"workspace"`
+	// Workspaces is the mapped workspace set (polyforge#113): every
+	// [workspace] path the daemon routes capsules into, in mapping
+	// declaration order. A multi-workspace daemon must never present one
+	// workspace as if it were the only one.
+	Workspaces   []string    `json:"workspaces"`
 	ShuttingDown bool        `json:"shutting_down"`
 	Jobs         []statusJob `json:"jobs"`
 	Queue        queueStats  `json:"queue"`
@@ -277,6 +280,17 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		if d.q.IsPending(canonical) {
 			writeErr(w, api.ErrDaemonConflict, "work item is already queued on this daemon")
 			return
+		}
+		// polyforge#113 placement pre-check, synchronous on the submit
+		// face: the work item's project must be mapped, or the refusal
+		// reaches the operator's CLI (typed DAEMON-412) BEFORE the job is
+		// enqueued and before any capsule or server-side claim state
+		// exists. The dispatcher's runtime-side guard is the backstop.
+		if probe, err := d.hub.GetWorkItem(canonical); err == nil && probe != nil && probe.ProjectName != "" {
+			if _, merr := d.cfg.Mapping.WorkspaceFor(probe.ProjectName); merr != nil {
+				writeErr(w, api.ErrDaemonUnmappedProject, fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)", probe.ProjectName))
+				return
+			}
 		}
 		// Accepted = enqueued; the dispatcher spawns within one tick,
 		// priority-desc against the machine's concurrency cap.
@@ -539,7 +553,7 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, statusResponse{
 		MachineID:    d.cfg.MachineID,
 		Mode:         d.modes.Current(),
-		Workspace:    d.cfg.Workspace,
+		Workspaces:   d.cfg.Mapping.Workspaces(),
 		ShuttingDown: d.modes.ShuttingDown(),
 		Jobs:         jobs,
 		Queue: queueStats{
@@ -555,6 +569,11 @@ func (d *Daemon) modeRoute(w http.ResponseWriter, r *http.Request) {
 		Action            string `json:"action"`
 		Mode              string `json:"mode"`
 		MaxConcurrentJobs *int   `json:"max_concurrent_jobs"`
+		// Project is the #113 optional ready-queue scope: absent, the
+		// recommendation merges ALL mapped projects; present, it covers
+		// exactly that project (validated by the CLI against the local
+		// mapping before the call).
+		Project string `json:"project,omitempty"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -601,11 +620,17 @@ func (d *Daemon) modeRoute(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, modeResponse{Mode: d.modes.Current()})
 	case "get_recommendation":
 		// Batch's read-only wave projection: the aihub ready queue,
-		// forwarded as-is. NO job is created (04 §6.1b).
-		items, err := d.hub.Queue(d.cfg.Project)
-		if err != nil {
-			writeErrOf(w, err)
-			return
+		// forwarded as-is. NO job is created (04 §6.1b). polyforge#113:
+		// without a scope this merges ALL mapped projects (mapping
+		// declaration order); with one, exactly that project.
+		var items []api.WorkItem
+		for _, project := range d.queueProjects(req.Project) {
+			pis, err := d.hub.Queue(project)
+			if err != nil {
+				writeErrOf(w, err)
+				return
+			}
+			items = append(items, pis...)
 		}
 		writeJSON(w, http.StatusOK, recommendationResponse{Items: items, Total: len(items)})
 	default:
@@ -633,15 +658,26 @@ func (d *Daemon) batchRoute(w http.ResponseWriter, r *http.Request) {
 	// backfill as slots open); duplicates of locally active/pending
 	// ids are skipped, the wave is never widened. Every entry is
 	// canonicalized (F2) so the queue and the runtime agree on keys.
+	// polyforge#113: an entry whose project is unmapped has no capsule
+	// home on this machine — it is skipped loudly (the wave is never
+	// widened with unplaceable work).
 	submitted := make([]string, 0, len(body.WIIDs))
 	for _, wi := range body.WIIDs {
 		canonical := wi
 		priority := "normal"
+		project := ""
 		if item, err := d.hub.GetWorkItem(wi); err == nil && item != nil {
 			if item.ID != "" {
 				canonical = item.ID
 			}
 			priority = item.Priority
+			project = item.ProjectName
+		}
+		if project != "" {
+			if _, merr := d.cfg.Mapping.WorkspaceFor(project); merr != nil {
+				fmt.Fprintf(os.Stderr, "daemon: batch_submit skipped %s: project %q is not in the [workspace] mapping (`pf doctor` checks the mapping)\n", canonical, project)
+				continue
+			}
 		}
 		d.rt.NoteAlias(wi, canonical)
 		if _, live := d.rt.Info(canonical); live || d.q.IsPending(canonical) {

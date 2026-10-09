@@ -237,7 +237,7 @@ func TestOBCompletedDrivesStop(t *testing.T) {
 	if r.jobOf(wi) != nil {
 		t.Fatal("completed job must leave the live set")
 	}
-	unseal(t, r.cfg.Workspace)
+	unseal(t, testWorkspace(r))
 }
 
 // TestOBCompletedFailedReason: the failed final status is carried through.
@@ -259,5 +259,5 @@ func TestOBCompletedFailedReason(t *testing.T) {
 	if hub.lastEnd().Status != protocol.FinishFailed {
 		t.Fatalf("end-generation status must be failed, got %+v", hub.lastEnd())
 	}
-	unseal(t, r.cfg.Workspace)
+	unseal(t, testWorkspace(r))
 }

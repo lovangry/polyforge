@@ -46,7 +46,7 @@ func newDaemonFixture(t *testing.T) *daemonFixture {
 			h(w, r)
 			return
 		}
-		io.WriteString(w, `{"machine_id":"m1","mode":"interactive","workspace":"/srv/pf-ws","shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
+		io.WriteString(w, `{"machine_id":"m1","mode":"interactive","workspaces":["/srv/pf-ws","/srv/pf-ws2"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		d.rec.record(r)
@@ -292,9 +292,10 @@ func TestDaemonClientStatusRoundtrip(t *testing.T) {
 	if s.MachineID != "m1" || s.Mode != "interactive" || s.Queue.MaxConcurrent != 2 {
 		t.Errorf("StatusResponse = %+v", s)
 	}
-	// #103: the workspace line's data source decodes from the body.
-	if s.Workspace != "/srv/pf-ws" {
-		t.Errorf("StatusResponse.Workspace = %q, want /srv/pf-ws", s.Workspace)
+	// #113: the workspace SET's data source decodes from the body.
+	want := []string{"/srv/pf-ws", "/srv/pf-ws2"}
+	if len(s.Workspaces) != 2 || s.Workspaces[0] != want[0] || s.Workspaces[1] != want[1] {
+		t.Errorf("StatusResponse.Workspaces = %v, want %v", s.Workspaces, want)
 	}
 }
 
@@ -308,7 +309,7 @@ func TestDaemonClientStatusRoundtrip(t *testing.T) {
 func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
 	d := newDaemonFixture(t)
 	d.answer("GET", "/status",
-		`{"machine_id":"m1","mode":"interactive","workspace":"/srv/pf-ws","shutting_down":false,`+
+		`{"machine_id":"m1","mode":"interactive","workspaces":["/srv/pf-ws"],"shutting_down":false,`+
 			`"jobs":[`+
 			`{"work_item_id":"wi_run","status":"running","spawn_n":3,`+
 			`"session_fingerprint":"ab12cd34ef56aa00","agent_pid":42},`+
@@ -344,7 +345,7 @@ func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
 	renderStatus(&b, &s)
 	golden(t, "StatusSessionColumns", b.String(),
 		`machine: m1  mode: interactive  queue: 1 pending / 1 running / max 2
-workspace: /srv/pf-ws
+workspaces: /srv/pf-ws
 
 WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  LAST-PROGRESS
 ---------  -----------  ----------------  -----  ---------  --------  -------------

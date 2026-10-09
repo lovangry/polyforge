@@ -477,7 +477,12 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 	}
 	fmt.Fprintf(w, "  queue: %d pending / %d running / max %d\n",
 		s.Queue.Pending, s.Queue.Running, s.Queue.MaxConcurrent)
-	fmt.Fprintf(w, "workspace: %s\n\n", s.Workspace)
+	// polyforge#113: the workspace SET, sorted for stable display — a
+	// multi-workspace daemon must not present one workspace as if it
+	// were the only one.
+	wsSet := append([]string(nil), s.Workspaces...)
+	sort.Strings(wsSet)
+	fmt.Fprintf(w, "workspaces: %s\n\n", strings.Join(wsSet, ", "))
 	rows := make([][]string, 0, len(s.Jobs))
 	for _, j := range s.Jobs {
 		pid := "-"

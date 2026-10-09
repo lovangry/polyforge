@@ -39,7 +39,7 @@ func startedWithBundle(t *testing.T, wi string) (*Runtime, string, *job) {
 	if j == nil {
 		t.Fatalf("no live job for %s", wi)
 	}
-	return r, r.capsuleDir(wi), j
+	return r, testCapsuleDir(r, wi), j
 }
 
 func readMarker(t *testing.T, capDir string) materializeMarkerRecord {
@@ -258,7 +258,7 @@ func TestMaterializeSetClaimReplayReusesTrustedSnapshot(t *testing.T) {
 	if err := r.Start(context.Background(), "wi_f7e"); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
-	capDir := r.capsuleDir("wi_f7e")
+	capDir := testCapsuleDir(r, "wi_f7e")
 	before := readMarker(t, capDir)
 	j := r.jobOf("wi_f7e")
 	j.mu.Lock()

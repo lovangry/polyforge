@@ -332,16 +332,34 @@ func (u *v1Install) restartAihub() {
 }
 
 // hermeticConfigPath writes an EMPTY scratch cli.toml and returns its
-// path: the harness hands it to every pf/daemon invocation via
-// --config so no operator config file (~/.config/polyforge/cli.toml —
-// this machine is a live polyforge install) leaks into a run. The
-// config surface is contract under test, never ambient host state;
-// git/gh credential configuration (HOME-based) is deliberately left
-// untouched — the daemon's push and PR lanes need it.
+// path: the harness hands it to every pf CLI invocation via --config so
+// no operator config file (~/.config/polyforge/cli.toml — this machine
+// is a live polyforge install) leaks into a run. The config surface is
+// contract under test, never ambient host state; git/gh credential
+// configuration (HOME-based) is deliberately left untouched — the
+// daemon's push and PR lanes need it.
 func hermeticConfigPath(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "hermetic-cli.toml")
 	if err := os.WriteFile(path, []byte("# hermetic harness config: deliberately empty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// mappingConfigPath writes the daemon's cli.toml (#113): one
+// [workspace."<path>"] section mapping workspace → projects. This file
+// is the daemon's ONLY workspace source; the connection settings ride
+// their flags. ws/paths are used literally (post-~expansion shape).
+func mappingConfigPath(t *testing.T, ws string, projects []string) string {
+	t.Helper()
+	quoted := make([]string, 0, len(projects))
+	for _, p := range projects {
+		quoted = append(quoted, strconv.Quote(p))
+	}
+	body := "# harness mapping config\n\n[workspace.\"" + ws + "\"]\nprojects = [" + strings.Join(quoted, ", ") + "]\n"
+	path := filepath.Join(t.TempDir(), "mapping-cli.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -712,13 +730,12 @@ func (d *v1Daemon) start() {
 		"--api-key", apiKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
-		"--workspace", d.workspace,
-		"--project", v1Project,
 		"--workflows-dir", filepath.Join(d.inst.root, "workflows"),
 		"--pi-bin", d.inst.fakepiPath,
-		// Config isolation (see hermeticConfigPath): the daemon never
-		// reads an operator config file.
-		"--config", hermeticConfigPath(d.t),
+		// polyforge#113: the [workspace] mapping config is the ONLY
+		// workspace source (and it doubles as the config isolation file —
+		// the daemon never reads an operator config file).
+		"--config", mappingConfigPath(d.t, d.workspace, []string{v1Project}),
 	}
 	if gitRemoteBase != "" {
 		args = append(args, "--git-remote-base", gitRemoteBase)

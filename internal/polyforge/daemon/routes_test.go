@@ -41,9 +41,9 @@ func TestSubmitAndStatus(t *testing.T) {
 	if st.MachineID != "m-test" || st.Mode != protocol.ModeInteractive || st.ShuttingDown {
 		t.Fatalf("status head = %+v", st)
 	}
-	// #103: the status carries the active workspace (capsule base).
-	if st.Workspace != td.cfg.Workspace {
-		t.Fatalf("status workspace = %q, want the launched -workspace value %q", st.Workspace, td.cfg.Workspace)
+	// #113: the status carries the mapped workspace SET.
+	if len(st.Workspaces) != 1 || st.Workspaces[0] != td.cfg.Mapping.Workspaces()[0] {
+		t.Fatalf("status workspaces = %v, want the mapped set %v", st.Workspaces, td.cfg.Mapping.Workspaces())
 	}
 	if len(st.Jobs) != 1 {
 		t.Fatalf("jobs = %+v, want 1", st.Jobs)
@@ -508,7 +508,7 @@ func TestBatchSubmitDispatch(t *testing.T) {
 func TestShip(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_s")
-	capDir := filepath.Join(td.cfg.Workspace, "capsules", "wi_s")
+	capDir := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", "wi_s")
 
 	// A task repo inside the capsule, with its own origin remote and a
 	// commit (the "inventory" the agent would have checked out).

@@ -95,7 +95,7 @@ func TestMaterializeNameDerivedDigestSkipsVerification(t *testing.T) {
 	if err := r.Start(context.Background(), "wi_dig2"); err != nil {
 		t.Fatalf("Start must skip verification for a name-derived digest: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(r.capsuleDir("wi_dig2"), capsule.DirWorkflows, "demo-bundle", "workflow.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(testCapsuleDir(r, "wi_dig2"), capsule.DirWorkflows, "demo-bundle", "workflow.md")); err != nil {
 		t.Fatalf("bundle must be materialized: %v", err)
 	}
 	if err := r.Stop(context.Background(), "wi_dig2", protocol.FinishWrapped); err != nil {
@@ -115,7 +115,7 @@ func TestMaterializePinnedBundleVerified(t *testing.T) {
 	if err := r.Start(context.Background(), "wi_dig3"); err != nil {
 		t.Fatalf("Start must pass a matching pin: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(r.capsuleDir("wi_dig3"), capsule.DirWorkflows, "demo-bundle", "workflow.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(testCapsuleDir(r, "wi_dig3"), capsule.DirWorkflows, "demo-bundle", "workflow.md")); err != nil {
 		t.Fatalf("bundle must be materialized: %v", err)
 	}
 	if err := r.Stop(context.Background(), "wi_dig3", protocol.FinishWrapped); err != nil {

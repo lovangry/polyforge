@@ -59,7 +59,7 @@ func TestStartStopEndToEnd(t *testing.T) {
 		t.Fatalf("RTStarted must carry the 64-hex session secret in-process: %+v", started)
 	}
 
-	capDir := r.capsuleDir(wi)
+	capDir := testCapsuleDir(r, wi)
 	// capsule layout materialized
 	for _, rel := range []string{
 		capsule.CapsuleJSON, capsule.SessionJSON, ".gitignore",
@@ -158,7 +158,7 @@ func TestStartStopEndToEnd(t *testing.T) {
 	waitDead(t, pid)
 
 	unseal(t, capDir)
-	unseal(t, r.cfg.Workspace)
+	unseal(t, testWorkspace(r))
 }
 
 func TestStopUnknownWorkItem(t *testing.T) {
@@ -191,7 +191,7 @@ func TestStopHubCloseFailureLeavesSealing(t *testing.T) {
 		t.Fatalf("sealing intent not persisted: %+v", recs)
 	}
 	assertNoRT(t, toOB) // no WIFinished — the seal never landed
-	unseal(t, r.cfg.Workspace)
+	unseal(t, testWorkspace(r))
 }
 
 func run(t *testing.T, name string, args ...string) (string, error) {
@@ -226,5 +226,5 @@ func TestPushStanding(t *testing.T) {
 	if !bareHasMain(t, bare) {
 		t.Fatal("the standing commit must land on the bare repo")
 	}
-	unseal(t, r.cfg.Workspace)
+	unseal(t, testWorkspace(r))
 }

@@ -38,7 +38,7 @@ func TestTakeoverHappyPath(t *testing.T) {
 	d := newDaemonFixture(t)
 	// The daemon's own machine identity (GET /status) is the mint's
 	// machine (#109) — pinned to m-b to match the canned claim answer.
-	d.answer("GET", "/status", `{"machine_id":"m-b","mode":"interactive","workspace":"/srv/pf-ws","shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
+	d.answer("GET", "/status", `{"machine_id":"m-b","mode":"interactive","workspaces":["/srv/pf-ws"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
 	d.answer("POST", "/jobs/wi_abc/adopt-session", `{"adopted":true,"work_item_id":"wi_abc","session_fingerprint":"ab12cd34ef56aa00"}`)
 
 	code, stdout, stderr := runPf(t, map[string]string{

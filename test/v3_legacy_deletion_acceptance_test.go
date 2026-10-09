@@ -119,13 +119,11 @@ func v3StartDaemon(t *testing.T, inst *v1Install, sock, dataDir, workspace, mach
 		"--api-key", inst.adminKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
-		"--workspace", d.workspace,
-		"--project", v1Project,
 		"--workflows-dir", filepath.Join(root, "workflows"),
 		"--pi-bin", inst.fakepiPath,
-		// Config isolation (v1_harness_test hermeticConfigPath): never
-		// read an operator config file.
-		"--config", hermeticConfigPath(t),
+		// polyforge#113: the mapping config is the only workspace source
+		// (and the config isolation file — never an operator's).
+		"--config", mappingConfigPath(t, d.workspace, []string{v1Project}),
 	}
 	cmd := exec.Command(inst.pfPath, args...)
 	cmd.Dir = root // the documented executor prompt default resolves here pre-change
@@ -569,11 +567,9 @@ func TestV3RetiredLegacyLaneEnvFailsLoudAtBoot(t *testing.T) {
 		"--api-key", inst.adminKey,
 		"--machine-id", "m-v3env",
 		"--data-dir", dataDir,
-		"--workspace", workspace,
-		"--project", v1Project,
 		"--workflows-dir", filepath.Join(root, "workflows"),
 		"--pi-bin", inst.fakepiPath,
-		"--config", hermeticConfigPath(t),
+		"--config", mappingConfigPath(t, workspace, []string{v1Project}),
 	}
 	cmd := exec.Command(inst.pfPath, args...)
 	cmd.Dir = root

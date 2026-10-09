@@ -61,9 +61,8 @@ func TestRunAbortsWhenMidflightCapsuleMissing(t *testing.T) {
 	cfg := Config{
 		MachineID:         "m-test",
 		SocketPath:        filepath.Join(dir, "s.sock"),
-		Workspace:         ws,
+		Mapping:           mappingFor(ws),
 		DataDir:           data,
-		Project:           "proj",
 		GitRemoteBase:     hubBase,
 		MaxConcurrent:     4,
 		Hub:               hub,

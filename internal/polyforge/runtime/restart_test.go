@@ -26,12 +26,12 @@ func matrixRecord(r *Runtime, wi string, pid int, startedAt string) *jobRecord {
 		SessionID:          sess,
 		SessionFingerprint: api.SessionFingerprint(sess),
 		State:              "running",
-		CapsuleDir:         r.capsuleDir(wi),
+		CapsuleDir:         testCapsuleDir(r, wi),
 		GitDir:             r.gitDirFor(wi),
 		BundleName:         "demo-bundle",
 		AgentPID:           pid,
 		AgentStart:         startedAt,
-		Transcript:         sessionPathFor(r.capsuleDir(wi), api.SessionFingerprint(sess)),
+		Transcript:         sessionPathFor(testCapsuleDir(r, wi), api.SessionFingerprint(sess)),
 		SpawnN:             1,
 	}
 }
@@ -251,7 +251,7 @@ func TestRestartCleanPauseNotAutoResumed(t *testing.T) {
 	if recs[0].SessionID != rec.SessionID {
 		t.Fatalf("the retained record must carry the session secret, got %q", recs[0].SessionID)
 	}
-	if _, err := os.Stat(r.capsuleDir(wi)); err != nil {
+	if _, err := os.Stat(testCapsuleDir(r, wi)); err != nil {
 		t.Fatalf("the capsule scene must stay on disk: %v", err)
 	}
 	_ = killFn(-pid, 9) // tidy
@@ -325,7 +325,7 @@ func TestRestartReleasesForeignHolder(t *testing.T) {
 	other := fakeSession(wi + "-other")
 	hub.hold(wi, other, api.StatusRunning)
 	// the local capsule scene exists
-	capDir := r.capsuleDir(wi)
+	capDir := testCapsuleDir(r, wi)
 	if err := os.MkdirAll(capDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestRestartReleasesForeignHolder(t *testing.T) {
 			hub.endCount(), len(hub.attaches), hub.claimCount())
 	}
 	// the capsule is quarantined under the contract's sibling naming
-	ents, err := os.ReadDir(filepath.Join(r.cfg.Workspace, "capsules"))
+	ents, err := os.ReadDir(filepath.Join(testWorkspace(r), "capsules"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +416,7 @@ func TestRestartFinishesInterruptedSeal(t *testing.T) {
 	if sp.callCount() != 0 {
 		t.Fatal("finishing a seal must not revive the agent")
 	}
-	unseal(t, r.cfg.Workspace)
+	unseal(t, testWorkspace(r))
 }
 
 func TestRestartKeepsRecordWhenAihubUnreachable(t *testing.T) {

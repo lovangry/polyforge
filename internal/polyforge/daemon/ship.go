@@ -111,8 +111,32 @@ func (d *Daemon) Ship(ctx context.Context, wi, initiator string) (*shipResponse,
 	if _, ok := d.rt.Info(wi); ok {
 		return nil, shipErr(api.ErrDaemonConflict, "work item %s is still active on this daemon; ship applies to a sealed capsule only", wi)
 	}
-	capDir := filepath.Join(d.cfg.Workspace, "capsules", wi)
-	if st, err := os.Stat(capDir); err != nil || !st.IsDir() {
+	// polyforge#113: the sealed capsule lives under its project's mapped
+	// workspace. Resolve it across the mapped workspace set: the inverse
+	// mapping first (a hub read names the WI's project), then any mapped
+	// workspace whose capsules/<wi> exists — none → the existing
+	// not-found shape. Never a guess outside the mapping.
+	capDir := ""
+	if item, err := d.hub.GetWorkItem(wi); err == nil && item != nil && item.ProjectName != "" {
+		if ws, merr := d.cfg.Mapping.WorkspaceFor(item.ProjectName); merr == nil {
+			capDir = filepath.Join(ws, "capsules", wi)
+		}
+	}
+	if capDir == "" {
+		for _, ws := range d.cfg.Mapping.Workspaces() {
+			candidate := filepath.Join(ws, "capsules", wi)
+			if st, err := os.Stat(candidate); err == nil && st.IsDir() {
+				capDir = candidate
+				break
+			}
+		}
+	}
+	if capDir != "" {
+		if st, err := os.Stat(capDir); err != nil || !st.IsDir() {
+			capDir = "" // the inverse-mapped base lost the scene: fall through to the set-wide probe result below
+		}
+	}
+	if capDir == "" {
 		return nil, shipErr(api.ErrDaemonNotFound, "no local sealed capsule for %s on this machine", wi)
 	}
 	names, err := inventory(capDir)

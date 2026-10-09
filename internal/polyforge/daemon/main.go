@@ -2,13 +2,21 @@ package daemon
 
 // main.go: the `pf daemon` process entry. Assembles the daemon Config
 // from flags, environment (POLYFORGE_*), the shared CLI config chain
-// (PF_SERVER / PF_API_KEY / PF_DAEMON_SOCKET / PF_PROJECT) and the
-// documented defaults, then runs the daemon with SIGTERM/SIGINT wired
-// to the graceful shutdown sequence.
+// (PF_SERVER / PF_API_KEY / PF_DAEMON_SOCKET) and the documented
+// defaults, then runs the daemon with SIGTERM/SIGINT wired to the
+// graceful shutdown sequence.
+//
+// polyforge#113: there is NO launch-time workspace and NO project scope
+// anymore. The [workspace."<path>"] mapping in the shared config (the
+// --config file, defaulting to the standard cli.toml location) is the
+// only workspace source — the daemon refuses to start without a non-empty
+// mapping, validates every mapped workspace, routes capsules per project
+// through the inverse mapping, and iterates all mapped projects in batch
+// and drain. The retired selection surfaces (the -workspace flag, the
+// --project flag and their env mirrors) are refused loudly at boot.
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -24,18 +32,29 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 )
 
+// retiredEnvNames are the retired selection environment variables
+// (polyforge#113), assembled from fragments so the source bytes never
+// carry them contiguously (the greppable floor — the same posture as
+// legacyLaneEnvPrefix below): the ambient default-project variable and
+// the daemon workspace mirror. A daemon whose environment carries either
+// is refused BEFORE anything is loaded or served — silently ignoring
+// them would be exactly the acceptance the spec forbids. The boot
+// refusal names whatever it matched at runtime.
+var retiredEnvNames = []string{
+	"PF_" + "PROJECT",
+	"POLYFORGE_" + "WORKSPACE",
+}
+
 // Main executes `pf daemon <flags>` and returns the process exit code.
 func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("pf daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	cfgPath := fs.String("config", "", "shared config file (default ~/.config/polyforge/cli.toml)")
+	cfgPath := fs.String("config", "", "shared config file: its [workspace] mapping is the capsule-placement source (default ~/.config/polyforge/cli.toml)")
 	socket := fs.String("socket", "", "unix socket path (env PF_DAEMON_SOCKET; default /run/polyforge.sock)")
 	server := fs.String("server", "", "aihub base URL (env PF_SERVER)")
 	apiKey := fs.String("api-key", "", "machine aihub api key (env PF_API_KEY)")
 	machineID := fs.String("machine-id", "", "machine identity (env POLYFORGE_MACHINE_ID; default m-<hostname>)")
-	workspace := fs.String("workspace", "", "REQUIRED capsule workspace: capsules live at <workspace>/capsules/<wi_id> (env POLYFORGE_WORKSPACE; no default)")
 	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
-	project := fs.String("project", "", "ready-queue project scope for batch/drain (env PF_PROJECT)")
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
 	piBin := fs.String("pi-bin", "", "harness binary (default pi)")
 	sessionsRoot := fs.String("harness-sessions-root", "", "harness session store root for the live-transcript sync (env POLYFORGE_HARNESS_SESSIONS_ROOT; default ~/.pi/agent/sessions)")
@@ -70,6 +89,22 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
+	// The ambient selection variables are retired (polyforge#113): no
+	// default project exists anywhere and the workspace comes only from
+	// the config's [workspace] mapping. Refuse before ANYTHING is loaded
+	// or served, naming the variable and the per-invocation replacement.
+	for _, kv := range os.Environ() {
+		name, val, ok := strings.Cut(kv, "=")
+		if !ok || val == "" {
+			continue
+		}
+		for _, retired := range retiredEnvNames {
+			if name == retired {
+				fmt.Fprintf(stderr, "pf daemon: refusing to start: the environment variable %s is retired (polyforge#113) — there is no ambient project or workspace selection anymore; the [workspace.\"<path>\"] mapping in the config decides capsule placement, and project scoping is per-invocation --project on the read verbs\n", name)
+				return 1
+			}
+		}
+	}
 
 	shared, err := cli.LoadConfig(*cfgPath)
 	if err != nil {
@@ -85,8 +120,18 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *apiKey == "" {
 		*apiKey = shared.APIKey
 	}
-	if *project == "" {
-		*project = os.Getenv("PF_PROJECT")
+
+	// The mapping is the ONLY workspace source (polyforge#113): a config
+	// with zero [workspace] sections — the fresh-install template shape —
+	// refuses startup here, before the socket exists, with the shape
+	// guidance and the doctor pointer.
+	if shared.Mapping.Empty() {
+		where := *cfgPath
+		if where == "" {
+			where = cli.DefaultConfigPath()
+		}
+		fmt.Fprintf(stderr, "pf daemon: refusing to start: no workspace mapping is configured — add at least one [workspace.\"<path>\"] section with a projects = [\"...\"] list to %s; the daemon places capsules at <workspace>/capsules/<wi> per the claim's project (`pf doctor` checks the mapping)\n", where)
+		return 1
 	}
 
 	home, _ := os.UserHomeDir()
@@ -96,11 +141,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if *dataDir == "" {
 		*dataDir = base
-	}
-	workspaceVal, err := resolveWorkspace(*workspace, os.Getenv)
-	if err != nil {
-		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
-		return 1
 	}
 	if *machineID == "" {
 		*machineID = os.Getenv("POLYFORGE_MACHINE_ID")
@@ -132,9 +172,8 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfg := Config{
 		MachineID:           *machineID,
 		SocketPath:          *socket,
-		Workspace:           workspaceVal,
+		Mapping:             shared.Mapping,
 		DataDir:             *dataDir,
-		Project:             *project,
 		GitRemoteBase:       *gitRemoteBase,
 		WorkflowsDir:        *workflowsDir,
 		PiBin:               *piBin,
@@ -178,24 +217,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
-}
-
-// resolveWorkspace applies the required workspace selection chain (flag
-// over env) and refuses to start when neither names a workspace: the
-// capsule base <workspace>/capsules has NO default anymore. The legacy
-// -workspace-root flag is deleted outright — passing it fails flag
-// parsing as an unknown flag — and the deleted POLYFORGE_WORKSPACE_ROOT
-// env is ignored like any unknown environment variable: this helper
-// never reads it, so set alone it simply does not satisfy the
-// requirement.
-func resolveWorkspace(flagVal string, getenv func(string) string) (string, error) {
-	if flagVal != "" {
-		return flagVal, nil
-	}
-	if v := getenv("POLYFORGE_WORKSPACE"); v != "" {
-		return v, nil
-	}
-	return "", errors.New("no workspace selected: -workspace PATH (or POLYFORGE_WORKSPACE) is required — the capsule base <workspace>/capsules has no default; example: pf daemon -workspace /srv/polyforge/workspace ...")
 }
 
 // legacyLaneEnvPrefix is the retired WI-Agent lane-selection environment

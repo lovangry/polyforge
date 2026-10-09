@@ -25,7 +25,7 @@ func newFullChanRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan pro
 	t.Helper()
 	cfg := Config{
 		MachineID:     "m-fullchan",
-		Workspace:     filepath.Join(t.TempDir(), "ws"),
+		Mapping:       mappingFor(filepath.Join(t.TempDir(), "ws")),
 		DataDir:       filepath.Join(t.TempDir(), "data"),
 		MaxRecoveries: 2,
 		SendBound:     100 * time.Millisecond,

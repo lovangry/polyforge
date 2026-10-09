@@ -23,6 +23,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 )
 
 // ---------------------------------------------------------------------------
@@ -329,11 +330,45 @@ func setGitIdentity(t *testing.T) {
 	t.Setenv("GIT_COMMITTER_EMAIL", "pf-test@invalid")
 }
 
+// mappingFor builds the tests' one-workspace plan: the given workspace
+// mapping the named projects (default "proj" — the fakes' project).
+func mappingFor(ws string, projects ...string) *mapping.Plan {
+	if len(projects) == 0 {
+		projects = []string{"proj"}
+	}
+	p, err := mapping.Build([]mapping.Entry{{Workspace: ws, Projects: projects}})
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
+// testWorkspace answers the tests' single mapped workspace (project
+// "proj") — the unseal/quarantine probes' base.
+func testWorkspace(r *Runtime) string {
+	ws, err := r.cfg.Mapping.WorkspaceFor("proj")
+	if err != nil {
+		panic(err)
+	}
+	return ws
+}
+
+// testCapsuleDir derives the capsule dir of wi under the test runtime's
+// mapping (the tests' single project "proj") — the unit replacement for
+// the deleted single-workspace capsuleDir.
+func testCapsuleDir(r *Runtime, wi string) string {
+	ws, err := r.cfg.Mapping.WorkspaceFor("proj")
+	if err != nil {
+		panic(err)
+	}
+	return filepath.Join(ws, "capsules", wi)
+}
+
 func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protocol.RTMsg, chan protocol.OBMsg) {
 	t.Helper()
 	cfg := Config{
 		MachineID: "m-test",
-		Workspace: filepath.Join(t.TempDir(), "ws"),
+		Mapping:   mappingFor(filepath.Join(t.TempDir(), "ws")),
 		DataDir:   filepath.Join(t.TempDir(), "data"),
 		// polyforge#106: the driver is the only engine — the rig scripts it
 		// through the single engine seam (a derivation is a Spawn call).
@@ -387,7 +422,7 @@ func scriptedEngineStarter(sp Spawner) AgentStartFunc {
 }
 
 func seedJob(r *Runtime, wi string) *job {
-	capDir := filepath.Join(r.cfg.Workspace, "capsules", wi)
+	capDir := testCapsuleDir(r, wi)
 	_ = os.MkdirAll(capDir, 0o755)
 	sess := fakeSession(wi)
 	fp := api.SessionFingerprint(sess)

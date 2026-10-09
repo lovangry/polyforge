@@ -46,7 +46,7 @@ func TestRestartForgetsPendingWrapOfRetainedPausedRecord(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{
 		MachineID: "m-test",
-		Workspace: filepath.Join(dir, "ws"),
+		Mapping:   mappingFor(filepath.Join(dir, "ws")),
 		DataDir:   filepath.Join(dir, "data"),
 	}
 

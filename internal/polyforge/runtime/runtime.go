@@ -29,6 +29,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 )
 
 // Aihub is the server face Runtime needs (v1.5 session model: the
@@ -53,10 +54,14 @@ type Config struct {
 	// WI-Agent spawn this field used to fall back to is deleted).
 	AgentStarter AgentStartFunc
 	MachineID    string // registered machine identity
-	// Workspace is the capsule base the daemon was launched with
-	// (-workspace / POLYFORGE_WORKSPACE, required — no default):
-	// <Workspace>/capsules/<wi> are the capsule worktrees.
-	Workspace     string
+	// Mapping is the workspace→projects plan of record (polyforge#113):
+	// the daemon assembles it from the shared cli.toml ([workspace.
+	// "<path>"] sections) and the runtime routes every capsule through it
+	// — <mapped-workspace>/capsules/<wi> per the claim answer's project.
+	// There is no single workspace and no default project anymore. The
+	// daemon refuses to start when the mapping is empty or a recorded
+	// mid-flight project falls out of it (restart.go).
+	Mapping       *mapping.Plan
 	DataDir       string // state.json + external git-dirs live here
 	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
@@ -578,8 +583,17 @@ func (r *Runtime) cgroupPathFor(wi string) string {
 	return filepath.Join(r.cfg.CgroupRoot, "polyforge-"+wi)
 }
 
-func (r *Runtime) capsuleDir(wi string) string {
-	return filepath.Join(r.cfg.Workspace, "capsules", wi)
+// capsuleDirForProject resolves the capsule base for one project through
+// the inverse mapping (polyforge#113): <workspace>/capsules/<wi>. An
+// unmapped project answers the typed *mapping.UnmappedError — callers on
+// the claim path re-surface it as the typed DAEMON-412 refusal BEFORE any
+// capsule or claim state exists.
+func (r *Runtime) capsuleDirForProject(project, wi string) (string, error) {
+	ws, err := r.cfg.Mapping.WorkspaceFor(project)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(ws, "capsules", wi), nil
 }
 
 func (r *Runtime) gitDirFor(wi string) string {
@@ -674,6 +688,23 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		// the dead record once the hub accepted the new claim/takeover; a
 		// plain claim of the paused-held WI is refused by the hub's own
 		// ALREADY_HELD gate).
+	}
+	// polyforge#113 placement pre-check: resolve the work item (read-only
+	// GetWorkItem) BEFORE anything is journaled or claimed, and refuse an
+	// unmapped project with the typed DAEMON-412 — before any capsule
+	// exists and before the aihub-side claim state changes. The mapping
+	// governs placement, not knowledge: the hub read is a projection, not
+	// a mutation. A FAILED read refuses nothing here — the claim call is
+	// the authority for WI existence, and startClaimed re-checks the
+	// claim answer's project (the D5 compensation covers the race).
+	if probe, perr := r.hub.GetWorkItem(wi); perr == nil && probe != nil && probe.ProjectName != "" {
+		if _, merr := r.cfg.Mapping.WorkspaceFor(probe.ProjectName); merr != nil {
+			return &api.Error{
+				Code: api.ErrDaemonUnmappedProject,
+				Detail: fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)",
+					probe.ProjectName),
+			}
+		}
 	}
 	sessionID, err := mintSessionID()
 	if err != nil {
@@ -784,12 +815,10 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		sessionID:          sessionID,
 		sessionFingerprint: fp,
 		state:              StateRunning,
-		capsuleDir:         r.capsuleDir(id),
 		git: gitops.Opts{
 			WorkItemID: id,
 			// §1.6 fencing-on-use backup layer: the PUBLIC fingerprint.
 			Fingerprint: fp,
-			CapsuleDir:  r.capsuleDir(id),
 			GitDir:      r.gitDirFor(id),
 			RemoteURL:   r.remoteURLFor(id),
 			Username:    id,
@@ -800,6 +829,22 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		repos:        c.Repos,
 		item:         &resp.WorkItem,
 	}
+	// polyforge#113: the capsule routes by the claim answer's project
+	// through the inverse mapping. An unmapped answer here (a mapping
+	// edit between the pre-check and the claim answer, or a journal
+	// replay over a changed config) compensates with the D5 blocked end —
+	// no capsule directory is ever touched.
+	capDir, rerr := r.capsuleDirForProject(j.project, id)
+	if rerr != nil {
+		err2 := &api.Error{
+			Code: api.ErrDaemonUnmappedProject,
+			Detail: fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)",
+				j.project),
+		}
+		return r.abandonClaim(j, wi, err2, err2.Detail)
+	}
+	j.capsuleDir = capDir
+	j.git.CapsuleDir = capDir
 	j.transcript = sessionPathFor(j.capsuleDir, fp)
 
 	if err := r.prepareCapsule(j); err != nil {
@@ -1564,7 +1609,18 @@ func (r *Runtime) CanonicalID(wi string) string {
 	return wi
 }
 
-// CapsuleDirFor returns the capsule directory of a WI.
+// CapsuleDirFor returns the capsule directory of a WI: the live job's
+// own recorded dir (routed by its project at claim time, polyforge#113);
+// "" when the WI holds no live job — a route caller for a non-live WI
+// has no capsule to address.
 func (r *Runtime) CapsuleDirFor(wi string) string {
-	return r.capsuleDir(wi)
+	id := r.Resolve(wi)
+	if id == "" {
+		id = wi
+	}
+	j := r.jobOf(id)
+	if j == nil {
+		return ""
+	}
+	return j.capsuleDir
 }
