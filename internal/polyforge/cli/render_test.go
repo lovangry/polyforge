@@ -29,10 +29,10 @@ func TestGoldenWITable(t *testing.T) {
 	var b bytes.Buffer
 	renderWITable(&b, items)
 	golden(t, "WITable", b.String(),
-		`SLUG  STATUS   SESSION           PRIORITY  BUNDLE    GOAL
-----  -------  ----------------  --------  --------  --------------------------------------------------------------
-pf-1  running  ab12cd34ef56aa00  high      bundle-x  fix the thing
-pf-2  queued   -                 normal    -         a goal that is definitely longer than sixty characters in t…
+		`SLUG  PROJECT  STATUS   SESSION           PRIORITY  BUNDLE    GOAL
+----  -------  -------  ----------------  --------  --------  --------------------------------------------------------------
+pf-1  -        running  ab12cd34ef56aa00  high      bundle-x  fix the thing
+pf-2  -        queued   -                 normal    -         a goal that is definitely longer than sixty characters in t…
 `)
 }
 
@@ -47,17 +47,17 @@ func TestGoldenReadyWITable(t *testing.T) {
 	var b bytes.Buffer
 	renderReadyWITable(&b, items, unclassified)
 	golden(t, "ReadyWITable", b.String(),
-		`SLUG  STATUS  SESSION  PRIORITY  BUNDLE    GOAL           SEGMENT
-----  ------  -------  --------  --------  -------------  ------------
-pf-1  queued  -        normal    bundle-x  fix the thing  items
-pf-2  queued  -        normal    -         another goal   unclassified
+		`SLUG  PROJECT  STATUS  SESSION  PRIORITY  BUNDLE    GOAL           SEGMENT
+----  -------  ------  -------  --------  --------  -------------  ------------
+pf-1  -        queued  -        normal    bundle-x  fix the thing  items
+pf-2  -        queued  -        normal    -         another goal   unclassified
 `)
 
 	b.Reset()
 	renderReadyWITable(&b, nil, nil)
 	golden(t, "ReadyWITableEmpty", b.String(),
-		`SLUG  STATUS  SESSION  PRIORITY  BUNDLE  GOAL  SEGMENT
-----  ------  -------  --------  ------  ----  -------
+		`SLUG  PROJECT  STATUS  SESSION  PRIORITY  BUNDLE  GOAL  SEGMENT
+----  -------  ------  -------  --------  ------  ----  -------
 `)
 }
 

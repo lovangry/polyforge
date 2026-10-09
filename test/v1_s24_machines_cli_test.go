@@ -274,12 +274,11 @@ func s24RowCells(t *testing.T, out, id string) []string {
 // the combined stdout+stderr is returned for the no-rows pin.
 func s24PfAs(t *testing.T, inst *v1Install, apiKey string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command(inst.pfPath, args...)
+	cmd := exec.Command(inst.pfPath, append([]string{"--config", hermeticConfigPath(t)}, args...)...)
 	cmd.Env = append(os.Environ(),
 		"PF_SERVER="+inst.url,
 		"PF_API_KEY="+apiKey,
 		"PF_USER_ID=usr_root",
-		"PF_PROJECT="+v1Project,
 	)
 	var out strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &out

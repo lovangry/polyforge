@@ -105,6 +105,11 @@ func TestMainUnknownWorkspaceRootFlag(t *testing.T) {
 // error naming the flag and one example invocation.
 func TestMainRefusesWithoutWorkspace(t *testing.T) {
 	t.Setenv("POLYFORGE_WORKSPACE", "")
+	// Config isolation: the in-process Main reads the default config
+	// location; a scratch XDG dir keeps an operator's config file out of
+	// the refusal's causal chain (this machine is a live polyforge
+	// install whose cli.toml is not this test's subject).
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	var stderr bytes.Buffer
 	code := Main([]string{"-socket", "/tmp/pf-unused.sock"}, nil, &bytes.Buffer{}, &stderr)
 	if code != 1 {

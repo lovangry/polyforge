@@ -64,7 +64,10 @@ func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 		{"file", func(t *testing.T) []string { return []string{"file", "show", "wi_x"} },
 			[]string{"file"}, []string{"file", "--no-such-flag"}},
 		{"queue", func(t *testing.T) []string { return []string{"queue", "--project", "polyforge"} },
-			[]string{"queue"}, []string{"queue", "--no-such-flag"}},
+			// A mapped queue can no longer fail locally on arity alone
+			// (no --project is a valid merged run now); the local
+			// validation golden is the --limit range check instead.
+			[]string{"queue", "--limit", "0"}, []string{"queue", "--no-such-flag"}},
 		{"cancel", func(t *testing.T) []string { return []string{"cancel", "wi_x"} },
 			[]string{"cancel"}, []string{"cancel", "--no-such-flag"}},
 		{"recall", func(t *testing.T) []string {
@@ -95,12 +98,22 @@ func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 	}
 	for _, s := range specs {
 		t.Run(s.name, func(t *testing.T) {
+			// Every aihub-face verb runs under a mapping config: the
+			// placement verbs' --project validates against it (polyforge#113);
+			// for every other verb the config is inert.
+			mapEnv := func(base map[string]string) map[string]string {
+				m := withMappingConfig(t)
+				for k, v := range base {
+					m[k] = v
+				}
+				return m
+			}
 			// 2xx → 0.
 			var rec reqRecorder
 			srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 				io.WriteString(w, `{}`)
 			})
-			env0 := map[string]string{"PF_SERVER": srv.URL, "PF_API_KEY": "k_cli"}
+			env0 := mapEnv(map[string]string{"PF_SERVER": srv.URL, "PF_API_KEY": "k_cli"})
 			code, _, stderr := runPf(t, env0, s.args(t)...)
 			if code != 0 {
 				t.Errorf("success: exit = %d, want 0 (stderr %q)", code, stderr)
@@ -113,14 +126,14 @@ func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 						w.WriteHeader(cls.status)
 						io.WriteString(w, cls.body)
 					})
-					code, _, _ := runPf(t, map[string]string{"PF_SERVER": srv.URL, "PF_API_KEY": "k_cli"}, s.args(t)...)
+					code, _, _ := runPf(t, mapEnv(map[string]string{"PF_SERVER": srv.URL, "PF_API_KEY": "k_cli"}), s.args(t)...)
 					if code != cls.want {
 						t.Errorf("exit = %d, want %d", code, cls.want)
 					}
 				})
 			}
 			// Transport failure (aihub unreachable) → 1.
-			code, _, _ = runPf(t, map[string]string{"PF_SERVER": deadAihubURL(t), "PF_API_KEY": "k_cli"}, s.args(t)...)
+			code, _, _ = runPf(t, mapEnv(map[string]string{"PF_SERVER": deadAihubURL(t), "PF_API_KEY": "k_cli"}), s.args(t)...)
 			if code != 1 {
 				t.Errorf("transport: exit = %d, want 1", code)
 			}
@@ -130,7 +143,7 @@ func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 				srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 					io.WriteString(w, `{}`)
 				})
-				code, _, _ = runPf(t, map[string]string{"PF_SERVER": srv.URL}, s.localBad...)
+				code, _, _ = runPf(t, mapEnv(map[string]string{"PF_SERVER": srv.URL}), s.localBad...)
 				if code != 1 {
 					t.Errorf("local validation: exit = %d, want 1", code)
 				}
@@ -144,7 +157,7 @@ func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 				srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 					io.WriteString(w, `{}`)
 				})
-				code, _, _ = runPf(t, map[string]string{"PF_SERVER": srv.URL}, s.parseBad...)
+				code, _, _ = runPf(t, mapEnv(map[string]string{"PF_SERVER": srv.URL}), s.parseBad...)
 				if code != 2 {
 					t.Errorf("flag parse: exit = %d, want 2", code)
 				}

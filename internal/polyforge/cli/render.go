@@ -158,7 +158,9 @@ func wiViewsOf(items []api.WorkItem) []WIView {
 	return out
 }
 
-// wiRow renders the shared per-WI cells (no segment). The SESSION
+// wiRow renders the shared per-WI cells (no segment). The PROJECT
+// column is the #113 merged-presentation requirement: without it a
+// multi-project list could not tell a row's project apart. The SESSION
 // column is the v1.5 public fingerprint of the current holder ("-"
 // when unheld).
 func wiRow(it WIView) []string {
@@ -171,7 +173,7 @@ func wiRow(it WIView) []string {
 		sess = it.SessionFingerprint
 	}
 	return []string{
-		slug, it.Status, sess, it.Priority, nullable(it.BundleName), truncate(it.Goal, 60),
+		slug, orDash(it.ProjectName), it.Status, sess, it.Priority, nullable(it.BundleName), truncate(it.Goal, 60),
 	}
 }
 
@@ -181,7 +183,7 @@ func renderWITable(w io.Writer, items []WIView) {
 	for _, it := range items {
 		rows = append(rows, wiRow(it))
 	}
-	printTable(w, []string{"SLUG", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "GOAL"}, rows)
+	printTable(w, []string{"SLUG", "PROJECT", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "GOAL"}, rows)
 }
 
 // renderReadyWITable renders the ready-queue table: items first, then
@@ -198,7 +200,7 @@ func renderReadyWITable(w io.Writer, items, unclassified []WIView) {
 			rows = append(rows, append(wiRow(it), seg.key))
 		}
 	}
-	printTable(w, []string{"SLUG", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "GOAL", "SEGMENT"}, rows)
+	printTable(w, []string{"SLUG", "PROJECT", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "GOAL", "SEGMENT"}, rows)
 }
 
 // renderWIDetail renders the detail record. The v1.5 session block

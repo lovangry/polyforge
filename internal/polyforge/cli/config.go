@@ -19,7 +19,10 @@
 // 2xx → 0, 4xx → 1, 5xx → 2 (usage errors also 2).
 //
 // Configuration precedence: command-line flags > PF_* environment >
-// ~/.config/polyforge/cli.toml (flat string-keyed TOML subset) > defaults.
+// ~/.config/polyforge/cli.toml (flat string keys + [workspace."<path>"]
+// sections) > defaults. There is NO default project (polyforge#113): the
+// [workspace] mapping decides capsule placement, and project scoping is
+// per-invocation --project.
 package cli
 
 import (
@@ -27,6 +30,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 )
 
 // Default aihub listen address.
@@ -38,16 +43,17 @@ const defaultDaemonSocket = "/run/polyforge.sock"
 
 // Config holds the resolved CLI configuration.
 type Config struct {
-	Server       string // aihub base URL
-	APIKey       string // aihub api key (Bearer)
-	DaemonSocket string // daemon unix socket path
-	UserID       string // caller identity for answer.answered_by
-	Project      string // optional default project
+	Server       string        // aihub base URL
+	APIKey       string        // aihub api key (Bearer)
+	DaemonSocket string        // daemon unix socket path
+	UserID       string        // caller identity for answer.answered_by
+	Mapping      *mapping.Plan // the workspace→projects plan of record (non-nil; possibly empty)
 }
 
 // DefaultConfigPath returns the single documented config location:
 // $XDG_CONFIG_HOME|~/.config / polyforge / cli.toml. One location, no
-// secondary lookup.
+// secondary lookup — the legacy ~/.polyforge/config.toml fallback is
+// dropped (polyforge#113): a file there is simply not read.
 func DefaultConfigPath() string {
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
@@ -57,47 +63,55 @@ func DefaultConfigPath() string {
 		}
 		base = filepath.Join(home, ".config")
 	}
-	primary := filepath.Join(base, "polyforge", "cli.toml")
-	if _, err := os.Stat(primary); err == nil {
-		return primary
-	}
-	// Compat: the bootstrap installer originally wrote here; honor it
-	// if the primary location is absent.
-	hdir, _ := os.UserHomeDir()
-	legacy := filepath.Join(hdir, ".polyforge", "config.toml")
-	if _, err := os.Stat(legacy); err == nil {
-		return legacy
-	}
-	return primary
+	return filepath.Join(base, "polyforge", "cli.toml")
 }
 
 // LoadConfig reads the config file (a missing file is not an error: the
-// defaults apply) and applies environment overrides on top. An empty
-// path means the documented default location, not "no file".
+// defaults apply, with an EMPTY mapping) and applies environment
+// overrides on top. An empty path means the documented default location,
+// not "no file".
 //
 //	PF_SERVER         -> Server
 //	PF_API_KEY        -> APIKey
 //	PF_DAEMON_SOCKET  -> DaemonSocket
 //	PF_USER_ID        -> UserID
-//	PF_PROJECT        -> Project
 //
 // A malformed file IS an error: silent misconfiguration is worse than a
-// loud failure.
+// loud failure. So is the retired old shape (a flat `project` key) and a
+// mapping that fails validation — both refuse with migration guidance,
+// for every pf command and the daemon alike (the shared loader is the
+// single choke point).
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
 		Server:       defaultServer,
 		DaemonSocket: defaultDaemonSocket,
+		Mapping:      &mapping.Plan{},
 	}
 	if path == "" {
 		path = DefaultConfigPath()
 	}
 	data, err := os.ReadFile(path)
 	if err == nil {
-		kv, perr := parseFlatTOML(string(data))
+		flat, sections, perr := parseConfigTOML(string(data))
 		if perr != nil {
 			return cfg, fmt.Errorf("config %s: %w", path, perr)
 		}
-		applyConfigFile(&cfg, kv)
+		if _, retired := flat["project"]; retired {
+			return cfg, fmt.Errorf("config %s: the `project` key is retired (polyforge#113) — there is NO default project anymore; declare your workspaces instead:\n"+
+				"  [workspace.\"/srv/polyforge/workspace\"]\n"+
+				"  projects = [\"p1\", \"p2\"]\n"+
+				"Run `pf doctor` to inspect the mapping; the install docs print the migration steps", path)
+		}
+		applyConfigFile(&cfg, flat)
+		entries := make([]mapping.Entry, 0, len(sections))
+		for _, s := range sections {
+			entries = append(entries, mapping.Entry{Workspace: s.key, Projects: s.projects})
+		}
+		plan, berr := mapping.Build(entries)
+		if berr != nil {
+			return cfg, fmt.Errorf("config %s: %w", path, berr)
+		}
+		cfg.Mapping = plan
 	} else if !os.IsNotExist(err) {
 		return cfg, fmt.Errorf("config %s: %w", path, err)
 	}
@@ -117,13 +131,14 @@ func applyConfigFile(cfg *Config, kv map[string]string) {
 			cfg.DaemonSocket = v
 		case "user_id":
 			cfg.UserID = v
-		case "project":
-			cfg.Project = v
 		}
 	}
 }
 
 // applyEnv overlays environment overrides (env beats the config file).
+// There is no project variable in the set: the ambient default-project
+// selection is retired (polyforge#113) — the mapping in cli.toml is the
+// only placement source and --project is per-invocation.
 func applyEnv(cfg *Config) {
 	if v := os.Getenv("PF_SERVER"); v != "" {
 		cfg.Server = v
@@ -137,52 +152,160 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("PF_USER_ID"); v != "" {
 		cfg.UserID = v
 	}
-	if v := os.Getenv("PF_PROJECT"); v != "" {
-		cfg.Project = v
-	}
 }
 
-// parseFlatTOML parses the flat TOML subset documented for cli.toml:
-// `key = "value"` (or single-quoted literals) with `#` comments and
-// blank lines. Tables, arrays and non-string values are rejected rather
-// than guessed at. Deliberate narrowing: escape sequences are not
-// supported — a double-quoted value containing a backslash is rejected —
-// and values are taken literally between their quotes. A `#` inside a
-// quoted value is data, not a comment.
-func parseFlatTOML(text string) (map[string]string, error) {
-	out := map[string]string{}
+// workspaceSection is one parsed `[workspace."<key>"]` section.
+type workspaceSection struct {
+	key      string
+	projects []string
+	line     int
+}
+
+// parseConfigTOML parses the TOML subset documented for cli.toml:
+//
+//   - top-level `key = "value"` flat string keys (server/url alias,
+//     api_key, daemon_socket, user_id — unknown flat keys are ignored
+//     exactly as before);
+//   - section headers of the EXACT form `[workspace."<path>"]` — the
+//     quoted key is mandatory;
+//   - inside a workspace section, only `projects = ["a", "b"]` — an
+//     array of quoted strings.
+//
+// Tables other than workspace sections, unquoted section keys, non-array
+// or wrongly-typed projects values, and a bare `projects` key at the top
+// level are line-named parse errors, never guesses. Deliberate
+// narrowing: escape sequences are not supported — a double-quoted value
+// containing a backslash is rejected — and values are taken literally
+// between their quotes. A `#` inside a quoted value is data, not a
+// comment.
+func parseConfigTOML(text string) (map[string]string, []workspaceSection, error) {
+	flat := map[string]string{}
+	var sections []workspaceSection
+	cur := -1 // index into sections; -1 = top level
 	for ln, line := range strings.Split(text, "\n") {
 		line = stripTOMLComment(line)
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
+		if strings.HasPrefix(line, "[") {
+			key, err := parseSectionHeader(line, ln+1)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, s := range sections {
+				if s.key == key {
+					return nil, nil, fmt.Errorf("line %d: duplicate [workspace] section for %s", ln+1, key)
+				}
+			}
+			sections = append(sections, workspaceSection{key: key, line: ln + 1})
+			cur = len(sections) - 1
+			continue
+		}
 		eq := strings.IndexByte(line, '=')
 		if eq < 0 {
-			return nil, fmt.Errorf("line %d: expected `key = \"value\"`, got %q", ln+1, line)
+			return nil, nil, fmt.Errorf("line %d: expected `key = \"value\"`, got %q", ln+1, line)
 		}
 		key := strings.TrimSpace(line[:eq])
 		val := strings.TrimSpace(line[eq+1:])
 		if key == "" {
-			return nil, fmt.Errorf("line %d: empty key", ln+1)
+			return nil, nil, fmt.Errorf("line %d: empty key", ln+1)
 		}
-		if len(val) < 2 {
-			return nil, fmt.Errorf("line %d: value must be a quoted string", ln+1)
+		if cur >= 0 {
+			// Inside a workspace section: only the projects array.
+			if key != "projects" {
+				return nil, nil, fmt.Errorf("line %d: a [workspace] section carries only `projects = [\"...\"]`, got %q", ln+1, key)
+			}
+			if len(sections[cur].projects) > 0 {
+				return nil, nil, fmt.Errorf("line %d: duplicate projects array in the [workspace] section of %s", ln+1, sections[cur].key)
+			}
+			list, err := parseStringArray(val, ln+1)
+			if err != nil {
+				return nil, nil, err
+			}
+			sections[cur].projects = append(sections[cur].projects, list...)
+			continue
 		}
-		quote := val[0]
-		if (quote != '"' && quote != '\'') || val[len(val)-1] != quote {
-			return nil, fmt.Errorf("line %d: value must be a quoted string, got %q", ln+1, val)
+		if key == "projects" {
+			return nil, nil, fmt.Errorf("line %d: `projects` belongs inside a [workspace.\"<path>\"] section, not the top level", ln+1)
 		}
-		inner := val[1 : len(val)-1]
-		if quote == '"' && strings.ContainsAny(inner, "\\\n") {
-			return nil, fmt.Errorf("line %d: escapes and multi-line strings are not supported", ln+1)
+		inner, err := parseQuotedValue(val, ln+1)
+		if err != nil {
+			return nil, nil, err
 		}
-		if _, dup := out[key]; dup {
-			return nil, fmt.Errorf("line %d: duplicate key %q", ln+1, key)
+		if _, dup := flat[key]; dup {
+			return nil, nil, fmt.Errorf("line %d: duplicate key %q", ln+1, key)
 		}
-		out[key] = inner
+		flat[key] = inner
+	}
+	return flat, sections, nil
+}
+
+// parseSectionHeader validates one `[...]` line. Only
+// `[workspace."<key>"]` (quoted key mandatory) is legal.
+func parseSectionHeader(line string, ln int) (string, error) {
+	if !strings.HasSuffix(line, "]") {
+		return "", fmt.Errorf("line %d: malformed section header %q", ln, line)
+	}
+	inner := strings.TrimSpace(line[1 : len(line)-1])
+	const prefix = `workspace.`
+	if !strings.HasPrefix(inner, prefix) {
+		return "", fmt.Errorf("line %d: unknown section %q — only [workspace.\"<path>\"] sections are supported", ln, line)
+	}
+	keyExpr := strings.TrimSpace(inner[len(prefix):])
+	if len(keyExpr) < 2 {
+		return "", fmt.Errorf("line %d: section key must be a quoted path: [workspace.\"<path>\"]", ln)
+	}
+	quote := keyExpr[0]
+	if (quote != '"' && quote != '\'') || keyExpr[len(keyExpr)-1] != quote {
+		return "", fmt.Errorf("line %d: section key must be a QUOTED path: [workspace.\"<path>\"]", ln)
+	}
+	key := keyExpr[1 : len(keyExpr)-1]
+	if quote == '"' && strings.ContainsAny(key, "\\\n") {
+		return "", fmt.Errorf("line %d: escapes are not supported in section keys", ln)
+	}
+	if key == "" {
+		return "", fmt.Errorf("line %d: empty workspace key", ln)
+	}
+	return key, nil
+}
+
+// parseStringArray parses `["a", "b"]` — an array of quoted strings
+// only (the one value shape a workspace section may carry).
+func parseStringArray(val string, ln int) ([]string, error) {
+	if len(val) < 2 || val[0] != '[' || val[len(val)-1] != ']' {
+		return nil, fmt.Errorf("line %d: projects must be an array of quoted strings: projects = [\"a\", \"b\"], got %q", ln, val)
+	}
+	body := strings.TrimSpace(val[1 : len(val)-1])
+	if body == "" {
+		return []string{}, nil
+	}
+	var out []string
+	for _, item := range strings.Split(body, ",") {
+		item = strings.TrimSpace(item)
+		s, err := parseQuotedValue(item, ln)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: projects entries must be quoted strings: %w", ln, err)
+		}
+		out = append(out, s)
 	}
 	return out, nil
+}
+
+// parseQuotedValue parses one `"value"` (or single-quoted literal).
+func parseQuotedValue(val string, ln int) (string, error) {
+	if len(val) < 2 {
+		return "", fmt.Errorf("line %d: value must be a quoted string", ln)
+	}
+	quote := val[0]
+	if (quote != '"' && quote != '\'') || val[len(val)-1] != quote {
+		return "", fmt.Errorf("line %d: value must be a quoted string, got %q", ln, val)
+	}
+	inner := val[1 : len(val)-1]
+	if quote == '"' && strings.ContainsAny(inner, "\\\n") {
+		return "", fmt.Errorf("line %d: escapes and multi-line strings are not supported", ln)
+	}
+	return inner, nil
 }
 
 // stripTOMLComment cuts a line at the first `#` OUTSIDE any quoted string.

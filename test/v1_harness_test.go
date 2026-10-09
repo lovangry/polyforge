@@ -331,6 +331,22 @@ func (u *v1Install) restartAihub() {
 	u.waitHTTP(u.t)
 }
 
+// hermeticConfigPath writes an EMPTY scratch cli.toml and returns its
+// path: the harness hands it to every pf/daemon invocation via
+// --config so no operator config file (~/.config/polyforge/cli.toml —
+// this machine is a live polyforge install) leaks into a run. The
+// config surface is contract under test, never ambient host state;
+// git/gh credential configuration (HOME-based) is deliberately left
+// untouched — the daemon's push and PR lanes need it.
+func hermeticConfigPath(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "hermetic-cli.toml")
+	if err := os.WriteFile(path, []byte("# hermetic harness config: deliberately empty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // pf runs the REAL pf CLI against this install (env overrides carry the
 // configuration; no config file is involved). wantExit < 0 means the
 // command must succeed.
@@ -342,12 +358,11 @@ func (u *v1Install) pf(t *testing.T, args ...string) string {
 // pfCombined is pf returning stdout+stderr (for error-path pins).
 func (u *v1Install) pfCombined(t *testing.T, wantExit int, sock string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command(u.pfPath, args...)
+	cmd := exec.Command(u.pfPath, append([]string{"--config", hermeticConfigPath(t)}, args...)...)
 	cmd.Env = append(os.Environ(),
 		"PF_SERVER="+u.url,
 		"PF_API_KEY="+u.adminKey,
 		"PF_USER_ID=usr_root",
-		"PF_PROJECT="+v1Project,
 	)
 	if sock != "" {
 		cmd.Env = append(cmd.Env, "PF_DAEMON_SOCKET="+sock)
@@ -373,12 +388,11 @@ func (u *v1Install) pfCombined(t *testing.T, wantExit int, sock string, args ...
 
 func (u *v1Install) pfExit(t *testing.T, wantExit int, sock string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command(u.pfPath, args...)
+	cmd := exec.Command(u.pfPath, append([]string{"--config", hermeticConfigPath(t)}, args...)...)
 	cmd.Env = append(os.Environ(),
 		"PF_SERVER="+u.url,
 		"PF_API_KEY="+u.adminKey,
 		"PF_USER_ID=usr_root",
-		"PF_PROJECT="+v1Project,
 	)
 	if sock != "" {
 		cmd.Env = append(cmd.Env, "PF_DAEMON_SOCKET="+sock)
@@ -702,6 +716,9 @@ func (d *v1Daemon) start() {
 		"--project", v1Project,
 		"--workflows-dir", filepath.Join(d.inst.root, "workflows"),
 		"--pi-bin", d.inst.fakepiPath,
+		// Config isolation (see hermeticConfigPath): the daemon never
+		// reads an operator config file.
+		"--config", hermeticConfigPath(d.t),
 	}
 	if gitRemoteBase != "" {
 		args = append(args, "--git-remote-base", gitRemoteBase)
@@ -747,6 +764,7 @@ func (d *v1Daemon) start() {
 		}
 		select {
 		case werr := <-d.waitedExit:
+			d.cmd = nil // self-exited: the cleanup stop() must no-op
 			d.t.Fatalf("daemon exited during startup: %v (log tail: %s)", werr, d.logTail())
 		default:
 		}

@@ -123,6 +123,9 @@ func v3StartDaemon(t *testing.T, inst *v1Install, sock, dataDir, workspace, mach
 		"--project", v1Project,
 		"--workflows-dir", filepath.Join(root, "workflows"),
 		"--pi-bin", inst.fakepiPath,
+		// Config isolation (v1_harness_test hermeticConfigPath): never
+		// read an operator config file.
+		"--config", hermeticConfigPath(t),
 	}
 	cmd := exec.Command(inst.pfPath, args...)
 	cmd.Dir = root // the documented executor prompt default resolves here pre-change
@@ -213,12 +216,11 @@ func (d *v3DaemonProc) capsuleDir(wi string) string {
 // returns (combined output, exit code) with NO assertion on the code.
 func v3PfCode(t *testing.T, inst *v1Install, sock string, args ...string) (string, int) {
 	t.Helper()
-	cmd := exec.Command(inst.pfPath, args...)
+	cmd := exec.Command(inst.pfPath, append([]string{"--config", hermeticConfigPath(t)}, args...)...)
 	cmd.Env = append(os.Environ(),
 		"PF_SERVER="+inst.url,
 		"PF_API_KEY="+inst.adminKey,
 		"PF_USER_ID=usr_root",
-		"PF_PROJECT="+v1Project,
 		"PF_DAEMON_SOCKET="+sock,
 	)
 	var out strings.Builder
@@ -571,6 +573,7 @@ func TestV3RetiredLegacyLaneEnvFailsLoudAtBoot(t *testing.T) {
 		"--project", v1Project,
 		"--workflows-dir", filepath.Join(root, "workflows"),
 		"--pi-bin", inst.fakepiPath,
+		"--config", hermeticConfigPath(t),
 	}
 	cmd := exec.Command(inst.pfPath, args...)
 	cmd.Dir = root

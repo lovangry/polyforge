@@ -53,6 +53,13 @@ func TestV1S15MigrationRehearsal(t *testing.T) {
 		"--pf", inst.pfPath,
 		"--v0-export", filepath.Join(bins, "v0-export"),
 	)
+	// Config isolation: the seed runner's pf calls must not read this
+	// machine's real ~/.config/polyforge/cli.toml (a live polyforge
+	// install carries one) — point XDG_CONFIG_HOME at a scratch dir for
+	// the script's env only. PF_* overrides above still apply (the
+	// script passes --server/--api-key explicitly anyway).
+	seedXDG := t.TempDir()
+	cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+seedXDG)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("seed runner: %v\n%s", err, out)
@@ -182,7 +189,11 @@ func TestV1S15DeltaTopUpRehearsal(t *testing.T) {
 			"--v0-export", v0exportBin,
 		}
 		args = append(args, extra...)
-		out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+		cmd := exec.Command(args[0], args[1:]...)
+		// Config isolation (see the runner note in TestV1S15MigrationRehearsal):
+		// the seed's pf calls must not read this machine's real config.
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+t.TempDir())
+		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
 

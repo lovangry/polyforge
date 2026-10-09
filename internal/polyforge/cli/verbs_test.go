@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -20,7 +21,10 @@ func TestVerbFileCreateRequestShape(t *testing.T) {
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, cannedWI)
 	})
-	code, _, stderr := runPf(t, map[string]string{"PF_SERVER": srv.URL, "PF_API_KEY": "k_cli"},
+	env := withMappingConfig(t)
+	env["PF_SERVER"] = srv.URL
+	env["PF_API_KEY"] = "k_cli"
+	code, _, stderr := runPf(t, env,
 		"file", "create", "--project", "polyforge", "--goal", "do the thing",
 		"--label", "infra", "--label", "urgent", "--priority", "high",
 		"--bundle", "b1", "--attr", "team=x")
@@ -42,6 +46,45 @@ func TestVerbFileCreateRequestShape(t *testing.T) {
 		if !strings.Contains(got.Body, want) {
 			t.Errorf("body missing %s: %s", want, got.Body)
 		}
+	}
+}
+
+// TestVerbFileCreateProjectContract pins the #113 placement contract at
+// the unit level: without --project the verb refuses pointing at the
+// mapping; with an unmapped --project it refuses naming the project;
+// with a mapped one it proceeds.
+func TestVerbFileCreateProjectContract(t *testing.T) {
+	srv := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedWI)
+	})
+	// No --project, mapping present: required-flag guidance.
+	env := withMappingConfig(t)
+	env["PF_SERVER"] = srv.URL
+	code, _, stderr := runPf(t, env, "file", "create", "--goal", "g")
+	if code != 1 {
+		t.Fatalf("no --project: code=%d, want 1", code)
+	}
+	for _, tok := range []string{"--project", "required", "[workspace"} {
+		if !strings.Contains(stderr, tok) {
+			t.Errorf("no --project stderr %q misses %q", stderr, tok)
+		}
+	}
+	// Unmapped --project: naming error, no wire call.
+	var rec reqRecorder
+	srv2 := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedWI)
+	})
+	env2 := withMappingConfig(t)
+	env2["PF_SERVER"] = srv2.URL
+	code, _, stderr = runPf(t, env2, "file", "create", "--project", "ghostproj", "--goal", "g")
+	if code != 1 {
+		t.Fatalf("unmapped --project: code=%d, want 1", code)
+	}
+	if !strings.Contains(stderr, "ghostproj") || !strings.Contains(stderr, "doctor") {
+		t.Errorf("unmapped stderr %q misses the naming/guidance tokens", stderr)
+	}
+	if n := len(rec.all()); n != 0 {
+		t.Errorf("unmapped placement must not reach the wire; got %d requests", n)
 	}
 }
 
@@ -77,20 +120,97 @@ func TestVerbQueueRequestShape(t *testing.T) {
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"items":[`+cannedWI+`],"total":1}`)
 	})
-	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
 
-	if code, _, stderr := runPf(t, env, "queue", "--status", "queued"); code != 0 {
+	// An explicit --project passes through to aihub unvalidated: exactly
+	// one query carrying the value.
+	if code, _, stderr := runPf(t, map[string]string{"PF_SERVER": srv.URL},
+		"queue", "--project", "polyforge", "--status", "queued"); code != 0 {
 		t.Fatalf("queue: code=%d stderr=%s", code, stderr)
 	}
 	if got := rec.last(); got.Method != "GET" || got.Path != "/api/v1/work-items?project=polyforge&status=queued" {
 		t.Errorf("queue request = %s %s", got.Method, got.Path)
 	}
 
-	if code, _, stderr := runPf(t, env, "queue", "--ready"); code != 0 {
+	if code, _, stderr := runPf(t, map[string]string{"PF_SERVER": srv.URL},
+		"queue", "--project", "polyforge", "--ready"); code != 0 {
 		t.Fatalf("queue --ready: code=%d stderr=%s", code, stderr)
 	}
 	if got := rec.last(); got.Path != "/api/v1/projects/polyforge/ready-queue" {
 		t.Errorf("ready request path = %s", got.Path)
+	}
+}
+
+// TestVerbQueueMergedAllMapped pins the #113 merged mode: without
+// --project, ONE merged presentation over ALL mapped projects — one
+// query per mapped project (mapping declaration order), merged rows,
+// and --json emitting one merged items array.
+func TestVerbQueueMergedAllMapped(t *testing.T) {
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		proj := r.URL.Query().Get("project")
+		switch proj {
+		case "alpha":
+			io.WriteString(w, `{"items":[{"id":"wi_a","slug":"a-1","project":"alpha","status":"queued","priority":"normal","goal":"alpha goal","created_at":"t"}],"total":1}`)
+		case "beta":
+			io.WriteString(w, `{"items":[{"id":"wi_b","slug":"b-1","project":"beta","status":"queued","priority":"high","goal":"beta goal","created_at":"t"}],"total":1}`)
+		default:
+			io.WriteString(w, `{"items":[],"total":0}`)
+		}
+	})
+	env := withTwoProjectMapping(t)
+	env["PF_SERVER"] = srv.URL
+
+	code, stdout, stderr := runPf(t, env, "queue")
+	if code != 0 {
+		t.Fatalf("merged queue: code=%d stderr=%s", code, stderr)
+	}
+	for _, want := range []string{"2 work item(s)", "a-1", "b-1", "alpha", "beta", "PROJECT"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("merged queue stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	// Deterministic mapping order: alpha first (mapping declaration),
+	// then beta.
+	if strings.Index(stdout, "a-1") > strings.Index(stdout, "b-1") {
+		t.Errorf("merged rows must follow mapping declaration order:\n%s", stdout)
+	}
+	// --json: ONE merged items array; every record carries its project.
+	code, stdout, _ = runPf(t, env, "--json", "queue")
+	if code != 0 {
+		t.Fatalf("merged queue --json: code=%d", code)
+	}
+	var doc struct {
+		Items []struct {
+			Project string `json:"project"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &doc); err != nil {
+		t.Fatalf("merged --json doc: %v (%q)", err, stdout)
+	}
+	if len(doc.Items) != 2 || doc.Total != 2 {
+		t.Fatalf("merged --json items = %d total = %d, want 2/2 (%q)", len(doc.Items), doc.Total, stdout)
+	}
+	seen := map[string]bool{}
+	for _, it := range doc.Items {
+		if it.Project == "" {
+			t.Errorf("merged item without project identity: %q", stdout)
+		}
+		seen[it.Project] = true
+	}
+	if !seen["alpha"] || !seen["beta"] {
+		t.Errorf("merged --json does not cover both projects: %v (%q)", seen, stdout)
+	}
+	// The wire saw one query per mapped project, in mapping order, per
+	// merged run (the human run then the --json run: 4 requests total).
+	reqs := rec.all()
+	if len(reqs) != 4 {
+		t.Fatalf("wire requests = %d, want 2 per merged run", len(reqs))
+	}
+	for i, want := range []string{"project=alpha", "project=beta", "project=alpha", "project=beta"} {
+		if !strings.Contains(reqs[i].Path, want) {
+			t.Errorf("request[%d] = %s, want it to carry %s", i, reqs[i].Path, want)
+		}
 	}
 }
 
@@ -102,11 +222,11 @@ func TestVerbQueueReadyHumanOutput(t *testing.T) {
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, body)
 	})
-	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+	env := map[string]string{"PF_SERVER": srv.URL}
 
 	// Human mode: count is items+unclassified, non-takeable segments are
 	// ignored, items come first, and a SEGMENT column tells them apart.
-	code, stdout, stderr := runPf(t, env, "queue", "--ready")
+	code, stdout, stderr := runPf(t, env, "queue", "--project", "polyforge", "--ready")
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
@@ -127,7 +247,7 @@ func TestVerbQueueReadyHumanOutput(t *testing.T) {
 	}
 
 	// --json stays verbatim passthrough of the full server body.
-	code, stdout, stderr = runPf(t, env, "--json", "queue", "--ready")
+	code, stdout, stderr = runPf(t, env, "--json", "queue", "--project", "polyforge", "--ready")
 	if code != 0 {
 		t.Fatalf("json: code=%d stderr=%s", code, stderr)
 	}
@@ -153,17 +273,17 @@ func TestVerbQueueSessionColumnDecodeRender(t *testing.T) {
 	srv := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"items":[`+held+`,`+unheld+`],"total":2}`)
 	})
-	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
-	code, stdout, stderr := runPf(t, env, "queue")
+	env := map[string]string{"PF_SERVER": srv.URL}
+	code, stdout, stderr := runPf(t, env, "queue", "--project", "polyforge")
 	if code != 0 {
 		t.Fatalf("queue: code=%d stderr=%s", code, stderr)
 	}
 	golden(t, "QueueListSessionColumn", stdout,
 		`2 work item(s)
-SLUG  STATUS   SESSION           PRIORITY  BUNDLE  GOAL
-----  -------  ----------------  --------  ------  -------------
-pf-1  running  ab12cd34ef56aa00  high      -       fix the thing
-pf-2  queued   -                 normal    -       another goal
+SLUG  PROJECT    STATUS   SESSION           PRIORITY  BUNDLE  GOAL
+----  ---------  -------  ----------------  --------  ------  -------------
+pf-1  polyforge  running  ab12cd34ef56aa00  high      -       fix the thing
+pf-2  polyforge  queued   -                 normal    -       another goal
 `)
 
 	// --ready form: same additive decode, same SESSION column, across
@@ -171,17 +291,17 @@ pf-2  queued   -                 normal    -       another goal
 	srv = newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"items":[`+held+`],"unclassified":[`+unheld+`]}`)
 	})
-	env = map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
-	code, stdout, stderr = runPf(t, env, "queue", "--ready")
+	env = map[string]string{"PF_SERVER": srv.URL}
+	code, stdout, stderr = runPf(t, env, "queue", "--project", "polyforge", "--ready")
 	if code != 0 {
 		t.Fatalf("queue --ready: code=%d stderr=%s", code, stderr)
 	}
 	golden(t, "QueueReadySessionColumn", stdout,
 		`2 work item(s)
-SLUG  STATUS   SESSION           PRIORITY  BUNDLE  GOAL           SEGMENT
-----  -------  ----------------  --------  ------  -------------  ------------
-pf-1  running  ab12cd34ef56aa00  high      -       fix the thing  items
-pf-2  queued   -                 normal    -       another goal   unclassified
+SLUG  PROJECT    STATUS   SESSION           PRIORITY  BUNDLE  GOAL           SEGMENT
+----  ---------  -------  ----------------  --------  ------  -------------  ------------
+pf-1  polyforge  running  ab12cd34ef56aa00  high      -       fix the thing  items
+pf-2  polyforge  queued   -                 normal    -       another goal   unclassified
 `)
 }
 
@@ -198,10 +318,10 @@ func TestVerbQueueLimit(t *testing.T) {
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, capped)
 	})
-	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+	env := map[string]string{"PF_SERVER": srv.URL}
 
 	// Omitted --limit: ?limit= is NOT sent; the server default applies.
-	if code, _, stderr := runPf(t, env, "queue"); code != 0 {
+	if code, _, stderr := runPf(t, env, "queue", "--project", "polyforge"); code != 0 {
 		t.Fatalf("omitted --limit: code=%d stderr=%s", code, stderr)
 	}
 	if got := rec.last(); strings.Contains(got.Path, "limit=") {
@@ -210,7 +330,7 @@ func TestVerbQueueLimit(t *testing.T) {
 
 	// Both ends of the in-range contract pass through unchanged.
 	for _, n := range []string{"1", "200"} {
-		if code, _, stderr := runPf(t, env, "queue", "--limit", n); code != 0 {
+		if code, _, stderr := runPf(t, env, "queue", "--project", "polyforge", "--limit", n); code != 0 {
 			t.Fatalf("queue --limit %s: code=%d stderr=%s", n, code, stderr)
 		}
 		if got := rec.last(); !strings.Contains(got.Path, "limit="+n+"&") {
@@ -219,7 +339,7 @@ func TestVerbQueueLimit(t *testing.T) {
 	}
 
 	// Composes with --status on the same wire call.
-	if code, _, stderr := runPf(t, env, "queue", "--status", "queued", "--limit", "5"); code != 0 {
+	if code, _, stderr := runPf(t, env, "queue", "--project", "polyforge", "--status", "queued", "--limit", "5"); code != 0 {
 		t.Fatalf("queue --status queued --limit 5: code=%d stderr=%s", code, stderr)
 	}
 	if got := rec.last(); got.Path != "/api/v1/work-items?limit=5&project=polyforge&status=queued" {
@@ -230,7 +350,7 @@ func TestVerbQueueLimit(t *testing.T) {
 	// style, non-zero exit, and no request on the wire.
 	for _, n := range []string{"0", "-3", "201"} {
 		before := len(rec.all())
-		code, _, stderr := runPf(t, env, "queue", "--limit", n)
+		code, _, stderr := runPf(t, env, "queue", "--project", "polyforge", "--limit", n)
 		if code == 0 {
 			t.Fatalf("--limit %s must exit non-zero", n)
 		}
@@ -246,7 +366,7 @@ func TestVerbQueueLimit(t *testing.T) {
 	// no request on the wire — even for an in-range value.
 	for _, n := range []string{"5", "201"} {
 		before := len(rec.all())
-		code, _, stderr := runPf(t, env, "queue", "--ready", "--limit", n)
+		code, _, stderr := runPf(t, env, "queue", "--project", "polyforge", "--ready", "--limit", n)
 		if code == 0 {
 			t.Fatalf("--ready --limit %s must exit non-zero", n)
 		}
@@ -273,23 +393,23 @@ func TestVerbQueueLimitRenderGoldens(t *testing.T) {
 	srv := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, body)
 	})
-	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+	env := map[string]string{"PF_SERVER": srv.URL}
 
 	// Human render of the capped list.
-	code, stdout, stderr := runPf(t, env, "queue", "--limit", "2")
+	code, stdout, stderr := runPf(t, env, "queue", "--project", "polyforge", "--limit", "2")
 	if code != 0 {
 		t.Fatalf("queue --limit 2: code=%d stderr=%s", code, stderr)
 	}
 	golden(t, "QueueListCapped", stdout,
 		`2 work item(s)
-SLUG  STATUS   SESSION           PRIORITY  BUNDLE  GOAL
-----  -------  ----------------  --------  ------  -------------
-pf-1  running  ab12cd34ef56aa00  high      -       fix the thing
-pf-2  queued   -                 normal    -       another goal
+SLUG  PROJECT    STATUS   SESSION           PRIORITY  BUNDLE  GOAL
+----  ---------  -------  ----------------  --------  ------  -------------
+pf-1  polyforge  running  ab12cd34ef56aa00  high      -       fix the thing
+pf-2  polyforge  queued   -                 normal    -       another goal
 `)
 
 	// --json: raw passthrough of the capped server body, untouched.
-	code, stdout, stderr = runPf(t, env, "--json", "queue", "--limit", "2")
+	code, stdout, stderr = runPf(t, env, "--json", "queue", "--project", "polyforge", "--limit", "2")
 	if code != 0 {
 		t.Fatalf("json: code=%d stderr=%s", code, stderr)
 	}
@@ -318,8 +438,10 @@ func TestVerbRecallRequestShape(t *testing.T) {
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"items":[{"id":"mem_1","type":"experience.debug","content":"first line\nmore","project":"polyforge","visibility":"project","base_strength":3,"created_at":"t","updated_at":"t","tags":["x"]}]}`)
 	})
-	code, _, stderr := runPf(t, map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"},
-		"recall", "flaky build", "--type", "experience.debug", "--tags", "x,y", "--limit", "5")
+	env := withMappingConfig(t)
+	env["PF_SERVER"] = srv.URL
+	code, _, stderr := runPf(t, env,
+		"recall", "--project", "polyforge", "flaky build", "--type", "experience.debug", "--tags", "x,y", "--limit", "5")
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
@@ -348,10 +470,11 @@ func TestVerbRecallLimitContract(t *testing.T) {
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"items":[],"total":0}`)
 	})
-	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+	env := withMappingConfig(t)
+	env["PF_SERVER"] = srv.URL
 
 	// Omitted --limit: the default 20 is sent explicitly.
-	if code, _, stderr := runPf(t, env, "recall", "flaky build"); code != 0 {
+	if code, _, stderr := runPf(t, env, "recall", "--project", "polyforge", "flaky build"); code != 0 {
 		t.Fatalf("recall default limit: code=%d stderr=%s", code, stderr)
 	}
 	if got := rec.last(); !strings.Contains(got.Path, "limit=20") {
@@ -360,7 +483,7 @@ func TestVerbRecallLimitContract(t *testing.T) {
 
 	// Both ends of the in-range contract pass through unchanged.
 	for _, n := range []string{"1", "200"} {
-		if code, _, stderr := runPf(t, env, "recall", "flaky build", "--limit", n); code != 0 {
+		if code, _, stderr := runPf(t, env, "recall", "--project", "polyforge", "flaky build", "--limit", n); code != 0 {
 			t.Fatalf("recall --limit %s: code=%d stderr=%s", n, code, stderr)
 		}
 		if got := rec.last(); !strings.Contains(got.Path, "limit="+n+"&") {
@@ -395,10 +518,11 @@ func TestVerbRecallTypeForms(t *testing.T) {
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"items":[],"total":0}`)
 	})
-	env := map[string]string{"PF_SERVER": srv.URL, "PF_PROJECT": "polyforge"}
+	env := withMappingConfig(t)
+	env["PF_SERVER"] = srv.URL
 
 	// Trailing .*: sent through (the wire percent-encodes the *).
-	if code, _, stderr := runPf(t, env, "recall", "q", "--type", "experience.*"); code != 0 {
+	if code, _, stderr := runPf(t, env, "recall", "--project", "polyforge", "q", "--type", "experience.*"); code != 0 {
 		t.Fatalf("recall --type experience.*: code=%d stderr=%s", code, stderr)
 	}
 	if got := rec.last(); !strings.Contains(got.Path, "type=experience.%2A") {
@@ -406,7 +530,7 @@ func TestVerbRecallTypeForms(t *testing.T) {
 	}
 
 	// Plain value: exact match, sent as-is.
-	if code, _, stderr := runPf(t, env, "recall", "q", "--type", "experience.debug"); code != 0 {
+	if code, _, stderr := runPf(t, env, "recall", "--project", "polyforge", "q", "--type", "experience.debug"); code != 0 {
 		t.Fatalf("recall --type experience.debug: code=%d stderr=%s", code, stderr)
 	}
 	if got := rec.last(); !strings.Contains(got.Path, "type=experience.debug") {
@@ -414,7 +538,7 @@ func TestVerbRecallTypeForms(t *testing.T) {
 	}
 
 	// Lone *: all types — equivalent to omitting --type entirely.
-	if code, _, stderr := runPf(t, env, "recall", "q", "--type", "*"); code != 0 {
+	if code, _, stderr := runPf(t, env, "recall", "--project", "polyforge", "q", "--type", "*"); code != 0 {
 		t.Fatalf("recall --type *: code=%d stderr=%s", code, stderr)
 	}
 	if got := rec.last(); strings.Contains(got.Path, "type=") {
@@ -424,7 +548,7 @@ func TestVerbRecallTypeForms(t *testing.T) {
 	// Every other * placement: loud local refusal, no request.
 	for _, bad := range []string{"*.debug", "exp*rience", "experience*", "experience.**", ".*"} {
 		before := len(rec.all())
-		code, _, stderr := runPf(t, env, "recall", "q", "--type", bad)
+		code, _, stderr := runPf(t, env, "recall", "--project", "polyforge", "q", "--type", bad)
 		if code == 0 {
 			t.Fatalf("--type %q must exit non-zero", bad)
 		}
@@ -643,8 +767,11 @@ func TestVerbRememberRequestShape(t *testing.T) {
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"id":"mem_new","type":"experience.debug","visibility":"project","created_at":"t","updated_at":"t"}`)
 	})
-	code, stdout, stderr := runPf(t, map[string]string{"PF_SERVER": srv.URL, "PF_API_KEY": "k_cli", "PF_PROJECT": "polyforge"},
-		"remember", "--type", "experience.debug", "--title", "ladders",
+	env := withMappingConfig(t)
+	env["PF_SERVER"] = srv.URL
+	env["PF_API_KEY"] = "k_cli"
+	code, stdout, stderr := runPf(t, env,
+		"remember", "--project", "polyforge", "--type", "experience.debug", "--title", "ladders",
 		"--tags", "infra,flaky", "--work-item", "wi_abc",
 		"the lesson about bounded retry ladders")
 	if code != 0 {
@@ -670,7 +797,9 @@ func TestVerbRememberRequestShape(t *testing.T) {
 
 	// Validation: a missing --type is a client-side refusal (no wire call).
 	srv2 := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {})
-	if code, _, _ := runPf(t, map[string]string{"PF_SERVER": srv2.URL, "PF_PROJECT": "polyforge"},
+	env2 := withMappingConfig(t)
+	env2["PF_SERVER"] = srv2.URL
+	if code, _, _ := runPf(t, env2,
 		"remember", "content only"); code != 1 {
 		t.Fatalf("missing --type: code=%d, want 1", code)
 	}

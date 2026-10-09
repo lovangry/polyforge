@@ -43,11 +43,26 @@ var cmdFile = &Command{
 	},
 }
 
+// requireMappedProject validates a placement-adjacent verb's --project
+// against the loaded mapping (polyforge#113): placement needs a home on
+// this machine. An unmapped (or unvalidatable — no mapping configured)
+// project is a loud naming error pointing at the [workspace] shape and
+// `pf doctor`; it never silently proceeds.
+func requireMappedProject(ctx *Context, verb, project string) error {
+	if ctx.Cfg.Mapping.Empty() {
+		return fmt.Errorf("%s: project %q cannot be placed: no [workspace] mapping is configured in cli.toml — add a [workspace.\"<path>\"] section (`pf doctor` checks the mapping)", verb, project)
+	}
+	if _, err := ctx.Cfg.Mapping.WorkspaceFor(project); err != nil {
+		return fmt.Errorf("%s: %w", verb, err)
+	}
+	return nil
+}
+
 // fileCreate builds the create body from flags or from full stdin JSON.
 func fileCreate(ctx *Context, args []string) error {
 	f := subFlags(ctx, "file create")
 	var (
-		project   = f.String("project", "", "project name (required unless stdin JSON carries it)")
+		project   = f.String("project", "", "project name (required; validated against the [workspace] mapping)")
 		goal      = f.String("goal", "", "one-line goal (<=500 chars)")
 		content   optString
 		labels    stringList
@@ -87,10 +102,10 @@ func fileCreate(ctx *Context, args []string) error {
 		req.Goal = *goal
 	}
 	if req.Project == "" {
-		req.Project = ctx.Cfg.Project
+		return fmt.Errorf("file create: --project is required — there is no default project (polyforge#113); workspaces and their projects are declared in [workspace.\"<path>\"] sections of cli.toml (`pf doctor` checks the mapping)")
 	}
-	if req.Project == "" {
-		return fmt.Errorf("file create: --project is required")
+	if err := requireMappedProject(ctx, "file create", req.Project); err != nil {
+		return err
 	}
 	if req.Goal == "" {
 		return fmt.Errorf("file create: --goal is required (or use --stdin with a full JSON body)")
@@ -302,9 +317,12 @@ var cmdQueue = &Command{
 	Name:    "queue",
 	Summary: "List work items / show the ready queue",
 	Usage: "pf queue [--project P] [--status S] [--limit N]\n" +
-		"pf queue --ready [--project P]",
+		"pf queue --ready [--project P]\n\n" +
+		"Without --project: one merged list over ALL mapped projects (the\n" +
+		"[workspace] mapping in cli.toml); --project P is passed to aihub\n" +
+		"unvalidated (read-only: the mapping governs placement, not knowledge).",
 	Setup: func(fs *flag.FlagSet) {
-		fs.String("project", "", "project name")
+		fs.String("project", "", "project name (optional: absent = all mapped projects, merged; present = passed to aihub unvalidated)")
 		fs.Bool("ready", false, "show the ready queue instead of the list")
 		fs.String("status", "", "filter: queued|running|paused|blocked|wrapped|failed|canceled")
 		fs.Int("limit", 0, "cap the list at N items (1..200; default list mode only — "+
@@ -341,11 +359,18 @@ var cmdQueue = &Command{
 		}
 		proj := stringFlag(fs, "project")
 		if proj == "" {
-			proj = ctx.Cfg.Project
+			// polyforge#113: no ambient default project exists. Without
+			// --project the verb covers ALL mapped projects in one merged
+			// presentation; with no mapping at all it fails loudly with
+			// guidance — it never silently lists nothing.
+			if ctx.Cfg.Mapping.Empty() {
+				return fmt.Errorf("queue: --project is required — no [workspace] mapping is configured in cli.toml; add a [workspace.\"<path>\"] section (`pf doctor` checks the mapping) or pass --project P")
+			}
+			return queueMerged(ctx, boolFlag(fs, "ready"), stringFlag(fs, "status"), limit)
 		}
-		if proj == "" {
-			return fmt.Errorf("queue: --project is required (or set project in the config)")
-		}
+		// An explicit --project passes through to aihub UNVALIDATED
+		// (mapped or not — exactly one query; the mapping governs
+		// placement, not knowledge).
 		var (
 			raw json.RawMessage
 			err error
@@ -385,6 +410,61 @@ var cmdQueue = &Command{
 		})
 		return nil
 	},
+}
+
+// queueMerged is queue without --project over a non-empty mapping: one
+// merged presentation of every mapped project's list (or ready queue),
+// each row's project identifiable (PROJECT column; --json emits ONE
+// merged items array — records already carry their project server-side).
+// --limit applies per-project (each query is one server call); a
+// per-project fetch failure fails the verb naming the project — fake
+// coverage is worse than none. Determinism: mapping declaration order,
+// then the server's own order within each project.
+func queueMerged(ctx *Context, ready bool, status string, limit int) error {
+	projects := ctx.Cfg.Mapping.Projects()
+	var items, unclassified []WIView
+	total := 0
+	for _, p := range projects {
+		raw, err := ctx.aihub().ListWorkItemsRawLimit(p, status, limit)
+		if ready {
+			raw, err = ctx.aihub().ReadyQueueRaw(p)
+		}
+		if err != nil {
+			return fmt.Errorf("queue: project %s: %w", p, err)
+		}
+		var l struct {
+			Items        []WIView `json:"items"`
+			Unclassified []WIView `json:"unclassified"`
+		}
+		if err := json.Unmarshal(raw, &l); err != nil {
+			return fmt.Errorf("queue: project %s: %w", p, err)
+		}
+		items = append(items, l.Items...)
+		unclassified = append(unclassified, l.Unclassified...)
+		total += len(l.Items) + len(l.Unclassified)
+	}
+	if ctx.JSON {
+		// ONE merged document: items (plus unclassified in ready mode).
+		doc := struct {
+			Items        []WIView `json:"items"`
+			Unclassified []WIView `json:"unclassified,omitempty"`
+			Total        int      `json:"total"`
+		}{Items: items, Total: total}
+		if ready {
+			doc.Unclassified = unclassified
+		}
+		if b, err := json.Marshal(doc); err == nil {
+			ctx.Out(b)
+		}
+		return nil
+	}
+	fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", total)
+	if ready {
+		renderReadyWITable(ctx.Stdout, items, unclassified)
+		return nil
+	}
+	renderWITable(ctx.Stdout, items)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -452,9 +532,9 @@ var cmdUnblock = &Command{
 var cmdRecall = &Command{
 	Name:    "recall",
 	Summary: "Search project memories",
-	Usage:   "pf recall [--project P] <query> [--type T] [--tags a,b] [--limit N]",
+	Usage:   "pf recall --project P <query> [--type T] [--tags a,b] [--limit N]",
 	Setup: func(fs *flag.FlagSet) {
-		fs.String("project", "", "project name")
+		fs.String("project", "", "project name (required; validated against the [workspace] mapping)")
 		fs.String("q", "", "query text (alternative to the positional argument)")
 		fs.String("type", "", "memory type filter: exact (experience.debug), prefix (experience.*), or * (all types)")
 		fs.String("tags", "", "comma-separated tags")
@@ -482,10 +562,10 @@ var cmdRecall = &Command{
 		}
 		proj := stringFlag(fs, "project")
 		if proj == "" {
-			proj = ctx.Cfg.Project
+			return fmt.Errorf("recall: --project is required — there is no default project (polyforge#113); the routing skill derives it from the WI under discussion, and [workspace.\"<path>\"] sections of cli.toml declare the mapping (`pf doctor` checks it)")
 		}
-		if proj == "" {
-			return fmt.Errorf("recall: --project is required (or set project in the config)")
+		if err := requireMappedProject(ctx, "recall", proj); err != nil {
+			return err
 		}
 		var tagList []string
 		if tags := stringFlag(fs, "tags"); tags != "" {
@@ -543,10 +623,10 @@ func recallTypeFilter(memType string) (string, error) {
 var cmdRemember = &Command{
 	Name:    "remember",
 	Summary: "Store a project memory (the write face of `recall`)",
-	Usage: "pf remember [--project P] --type T [--title S] [--visibility V] [--tags a,b] " +
+	Usage: "pf remember --project P --type T [--title S] [--visibility V] [--tags a,b] " +
 		"[--work-item ID] <content | - (stdin) | @file>",
 	Setup: func(fs *flag.FlagSet) {
-		fs.String("project", "", "project name (default: the configured project)")
+		fs.String("project", "", "project name (required; validated against the [workspace] mapping)")
 		fs.String("type", "", "memory type (required, e.g. experience.debug, fact.note)")
 		fs.String("title", "", "memory title")
 		fs.String("visibility", "project", "admin|private|project|team|public")
@@ -560,10 +640,10 @@ var cmdRemember = &Command{
 		}
 		proj := stringFlag(fs, "project")
 		if proj == "" {
-			proj = ctx.Cfg.Project
+			return fmt.Errorf("remember: --project is required — there is no default project (polyforge#113); [workspace.\"<path>\"] sections of cli.toml declare the mapping (`pf doctor` checks it)")
 		}
-		if proj == "" {
-			return fmt.Errorf("remember: --project is required (or set project in the config)")
+		if err := requireMappedProject(ctx, "remember", proj); err != nil {
+			return err
 		}
 		// The content: positional text, '-' for stdin, '@file' for a file.
 		var content string

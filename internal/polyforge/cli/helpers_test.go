@@ -98,15 +98,58 @@ func deadAihubURL(t *testing.T) string {
 
 // runPf drives the full CLI the way main does; returns the exit code.
 // env pairs are applied with t.Setenv for the duration of the test.
+// XDG_CONFIG_HOME defaults to a fresh scratch dir so no ambient config
+// file leaks into a verb run — pass XDG_CONFIG_HOME explicitly (see
+// withMappingConfig) to point a run at a fixture.
 func runPf(t *testing.T, env map[string]string, args ...string) (int, string, string) {
 	t.Helper()
 	clearEnv(t)
+	if _, ok := env["XDG_CONFIG_HOME"]; !ok {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	}
 	for k, v := range env {
 		t.Setenv(k, v)
 	}
 	var stdout, stderr bytes.Buffer
 	code := Run(args, bytes.NewReader(nil), &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
+}
+
+// withMappingConfig writes a scratch cli.toml whose [workspace] section
+// maps the project "polyforge" to a scratch workspace dir, and answers
+// the XDG_CONFIG_HOME env entry that points a runPf call at it (the
+// default config location is the only thing placement verbs' mapping
+// validation reads).
+func withMappingConfig(t *testing.T) map[string]string {
+	t.Helper()
+	dir := t.TempDir()
+	xdg := filepath.Join(dir, "xdg")
+	if err := os.MkdirAll(filepath.Join(xdg, "polyforge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "server = \"http://mapping-config.invalid:1\"\n\n[workspace.\"" + filepath.Join(dir, "ws") + "\"]\nprojects = [\"polyforge\"]\n"
+	if err := os.WriteFile(filepath.Join(xdg, "polyforge", "cli.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{"XDG_CONFIG_HOME": xdg}
+}
+
+// withTwoProjectMapping is withMappingConfig over TWO projects (alpha,
+// beta — declaration order matters to the merged-presentation pins).
+func withTwoProjectMapping(t *testing.T) map[string]string {
+	t.Helper()
+	dir := t.TempDir()
+	xdg := filepath.Join(dir, "xdg")
+	if err := os.MkdirAll(filepath.Join(xdg, "polyforge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "server = \"http://mapping-config.invalid:1\"\n\n" +
+		"[workspace.\"" + filepath.Join(dir, "wsA") + "\"]\nprojects = [\"alpha\"]\n\n" +
+		"[workspace.\"" + filepath.Join(dir, "wsB") + "\"]\nprojects = [\"beta\"]\n"
+	if err := os.WriteFile(filepath.Join(xdg, "polyforge", "cli.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{"XDG_CONFIG_HOME": xdg}
 }
 
 // jsonBody is a helper for handlers answering canned JSON.

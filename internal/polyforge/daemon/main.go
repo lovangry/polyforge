@@ -86,9 +86,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		*apiKey = shared.APIKey
 	}
 	if *project == "" {
-		*project = shared.Project
-	}
-	if *project == "" {
 		*project = os.Getenv("PF_PROJECT")
 	}
 
