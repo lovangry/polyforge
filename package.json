@@ -1,14 +1,13 @@
 {
   "name": "polyforge",
   "version": "1.0.0",
-  "description": "Polyforge v1.0.0 \u2014 polyforge routing skill (20 verbs) + using-polyforge (resident rules)",
+  "description": "Polyforge v1.0.0 \u2014 polyforge routing skill",
   "keywords": [
     "pi-package"
   ],
   "pi": {
     "skills": [
-      "./operator-skills/polyforge",
-      "./operator-skills/using-polyforge"
+      "./skills/polyforge"
     ]
   }
 }

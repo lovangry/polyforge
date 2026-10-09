@@ -73,7 +73,7 @@ fi
 # ─── 3. skills: install or verify ───────────────────────────────────
 echo "== 3/5 skills"
 SKILLS_OK() { [ -f "$PKG_DIR/package.json" ] && grep -q '"skills"' "$PKG_DIR/package.json" \
-  && [ -f "$PKG_DIR/operator-skills/polyforge/SKILL.md" ]; }
+  && [ -f "$PKG_DIR/skills/polyforge/SKILL.md" ]; }
 
 if command -v pi >/dev/null 2>&1; then
   if SKILLS_OK && [ -f "$PKG_DIR/.git" ]; then
@@ -92,13 +92,14 @@ if command -v pi >/dev/null 2>&1; then
     else
       echo "ERROR: skills install failed. Manual:"
       echo "  git clone -q git@github.com:$REPO.git /tmp/pf-pkg"
-      echo "  cp -r /tmp/pf-pkg/operator-skills/* ~/.pi/agent/skills/"
+      echo "  cp -r /tmp/pf-pkg/skills/polyforge ~/.pi/agent/skills/"
       exit 1
     fi
   fi
 elif [ -d "$HOME/.claude" ]; then
   git clone -q git@github.com:$REPO.git /tmp/pf-pkg 2>/dev/null \
-    && cp -r /tmp/pf-pkg/operator-skills/* "$HOME/.claude/skills/" \
+    && mkdir -p "$HOME/.claude/skills" \
+    && cp -r /tmp/pf-pkg/skills/polyforge "$HOME/.claude/skills/" \
     && rm -rf /tmp/pf-pkg && echo "   skills copied"
 else
   echo "   no pi/claude — CLI only (skills optional)"

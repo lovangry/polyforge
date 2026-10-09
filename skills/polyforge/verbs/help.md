@@ -1,98 +1,52 @@
-# help — from pf-help
+# help — the pf quick-reference
 
-# pf-help - /pf-* Skill Quick Reference
+Read-only contract: this fragment prints reference output and stops — it
+dispatches no verb, performs no wi-lifecycle action and edits no file. It
+is the one-to-one index of the routing skill's verb fragments and the
+`pf` subcommand each fragment drives. Flags are spelled exactly as the
+binary's help faces print them; `pf help` lists the full registry and
+`pf <verb> -help` prints one verb's face.
 
-## Usage
+## Data-plane verbs (pf CLI talks HTTP direct to AIHub)
 
-**Purpose**: Show a quick reference of `/pf-*` skills - either all-at-once (table view) or a single skill's `## Usage` block.
+| Verb | Fragment | Command |
+|---|---|---|
+| file | `verbs/file.md` | `pf file create` / `pf file edit <id>` / `pf file show <id>` — create, edit or show a work item |
+| queue | `verbs/queue.md` | `pf queue` — the list; `pf queue -ready` — the ready queue (`-status`, `-limit`, `-project` filter) |
+| cancel | `verbs/cancel.md` | `pf cancel <id>` — cancel a queued/paused/blocked work item |
+| recall | `verbs/recall.md` | `pf recall <query>` — search project memories (`-type`, `-tags`, `-limit`, `-project`) |
+| remember | `verbs/remember.md` | `pf remember -type <T> <content>` — store a memory (`-title`, `-tags`, `-visibility`, `-work-item`, `-project`) |
 
-**Pattern**: `/pf-help [<skill-name>]`
+## Execution-plane verbs (local daemon unix socket)
 
-**Required**: none (no-arg prints the index; with `<skill-name>` prints one skill's Usage block)
+| Verb | Fragment | Command |
+|---|---|---|
+| submit | `verbs/submit.md` | `pf submit <id>` — submit for execution (`-takeover` force-claim, `-priority`) |
+| observe | `verbs/observe.md` | `pf observe <id>` — progress projection (`-after <cursor>` for incremental events) |
+| answer | `verbs/answer.md` | `pf answer <id> -text "..."` — reply to a pending question (`-question`, `-answer-id`, `-by`) |
+| batch-confirm | `verbs/batch-confirm.md` | `pf batch-confirm` — show the wave recommendation; `pf batch-confirm -all` — confirm and submit it |
+| pause | `verbs/pause.md` | `pf pause <id>` — operator pause at the next safe boundary |
+| resume | `verbs/resume.md` | `pf resume <id>` — clear the operator pause |
+| wrap | `verbs/wrap.md` | `pf wrap <id>` — terminal success; `pf wrap <id> -fail` — terminal failure |
+| ops | `verbs/ops.md` | `pf ops status` — jobs, mode, queue counters; `pf ops shutdown` — graceful stop |
 
-**Flags**: none
+## Delivery bridge (wrap → git, local daemon unix socket)
 
-## When to use
+| Verb | Fragment | Command |
+|---|---|---|
+| ship | `verbs/ship.md` | `pf ship <id>` — push a closed work item's sealed commits to git origin |
 
-Any time the user asks "how do I use /pf-X?", "what flags does /pf-X take?", or wants a
-quick reference of available pf skills - when a quick reference is faster than reading
-the whole SKILL.md. This skill is a **read-only contract** - it prints help and stops.
-It does NOT dispatch other skills or perform any wi-lifecycle action.
+## CLI-meta verbs
 
-## Mechanic
-
-This skill is short on purpose. The calling agent (you, when the user invokes
-`/pf-help`) does the work; the body below is the contract.
-
-### Mode A - no argument (`/pf-help`)
-
-1. List all sibling skill directories under `plugins/polyforge/skills/`:
-
-   ```
-   pf-crystallize  pf-doctor    pf-execute
-   pf-init         pf-plan     pf-project   pf-release
-   pf-retro        pf-revise   pf-spec      pf-status    pf-stop
-   pf-sync         pf-update   pf-user      pf-work      pf-help
-   using-polyforge
-   ```
-
-   (This listing is a convenience, not the source of truth - step 1 says to list the
-   directories. `pf-revise` was missing from it until aihub#683 added `pf-update`
-   beside it, which is exactly the drift a hand-maintained copy accumulates.)
-
-2. For each sibling, read `<sibling>/SKILL.md` and extract the `## Usage` block -
-   specifically the `**Purpose**:` and `**Pattern**:` lines. Skip any skill whose
-   SKILL.md has no `## Usage` block (and surface that as a one-line warning, since
-   every skill is expected to have one after aihub#84).
-
-3. Render a single grouped table:
-
-   ```
-   | Skill           | Purpose                                | Pattern                          |
-   | --------------- | -------------------------------------- | -------------------------------- |
-   | pf-work         | Enter the wi lifecycle …               | /pf-work [<slug>] [--resume|--force] |
-   | pf-spec         | Produce the spec artifact …            | /pf-spec                         |
-   | ...             | ...                                    | ...                              |
-   ```
-
-   Suggested grouping order: lifecycle (work / spec / plan / execute / stop / retro /
-   crystallize / release / sync), management (project / user), platform
-   (init / doctor / status), meta (using-polyforge / pf-help).
-
-4. End with a one-line hint: "Run `/pf-help <skill-name>` for the full Usage block of
-   any single skill, or read `plugins/polyforge/skills/<skill-name>/SKILL.md` for full
-   docs (When-to-use, Mechanic, NL Triggers)."
-
-### Mode B - with argument (`/pf-help pf-work`)
-
-1. Normalize the argument:
-   - Accept `pf-work`, `/pf-work`, or `work` - strip leading `/` and any leading
-     `pf-` if the user typed `/pf-help work`.
-   - Re-prefix to `pf-<arg>` if needed; `using-polyforge` is the one exception (no
-     `pf-` prefix).
-
-2. Resolve `<skill_dir> = plugins/polyforge/skills/<normalized>`.
-   - If it does not exist: print "Unknown skill: <arg>. Available: <list from Mode A
-     step 1>." and stop.
-
-3. Read `<skill_dir>/SKILL.md`. Extract the `## Usage` block (from the line `## Usage`
-   up to the next blank-line-then-`---` separator or the next `## ` heading).
-
-4. Print verbatim, then append:
-
-   ```
-   Full docs: plugins/polyforge/skills/<normalized>/SKILL.md
-              (sections: When to use, Mechanic, NL Triggers)
-   ```
+| Verb | Fragment | Command |
+|---|---|---|
+| help | `verbs/help.md` | `pf help` — the registry face; this fragment is its routing-side index |
+| init | the init fragment (`init.md`) | install / upgrade / machine setup — routes to the repo's `tools/install.sh` |
 
 ## Non-goals
 
-- Do **not** invoke or dispatch the target skill - only print its Usage block.
-- Do **not** edit any SKILL.md from inside `/pf-help`.
-- Do **not** call any `pf_*` MCP tool - this skill is purely local-filesystem read.
-
-## NL Triggers
-
-- "/pf-help" / "/pf-help pf-work" / "pf help"
-- "show pf commands" / "list polyforge skills"
-- "how do I use /pf-X" / "pf-X usage" / "polyforge help"
+- Prints reference output only: it never dispatches the listed verbs
+  itself and never performs an intent's action.
+- Not a substitute for the fragments: each entry's fragment owns the real
+  command shape, success rendering and error branches — read it before
+  running the verb for the first time in a session.

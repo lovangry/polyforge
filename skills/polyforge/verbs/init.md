@@ -1,98 +1,60 @@
-# init — from pf-init
+# init — install / upgrade a machine
 
-# pf-init — v1.0.0 机器安装 / 升级 / 修复
+Installing and upgrading are the same command: the repo's
+`tools/install.sh`. It installs or updates the `pf` binary, writes the
+client config, installs the routing skill into the user harness, and —
+on execution machines — starts the local daemon. Nothing is inlined
+here: the script's own daemon step is the invocation authority, and the
+binary always comes from the script.
 
-## 你需要先有这两样(向管理员要,skill 自己不生成)
+## Prerequisites
 
-1. **服务器地址**:当前生产 `http://10.146.0.34:8080`
-2. **个人 API key**(pf_k1_…):管理员签发。**绝不用 root/admin key
-   装机**,也绝不把 key 写进仓库、消息或工单。
+- a personal API key from the admin (`pf_k1_…`) — never install with an
+  admin key, and never write the key into a repo, message or ticket;
+- `gh` authenticated (the repo is private).
 
-## Step 1 — 装 pf 二进制(从发布服务器,零认证)
-
-```
-REL=<GitHub Releases,见 Step 2;还没配就先按 Step 2 写好再回来>
-VER=$(curl -s "$REL/latest.txt" | awk '{print $1}')
-SHA=$(curl -s "$REL/latest.txt" | awk '{print $2}')
-curl -s -o ~/bin/pf "$REL/pf-$VER" && chmod +x ~/bin/pf
-echo "<下载后文件的 sha256>  -" | sha256sum -c 2>/dev/null || \
-  sha256sum ~/bin/pf   # 必须等于 $SHA
-pf --version           # 应输出 $VER
-```
-
-## Step 2 — 写客户端配置(含发布地址)
+## Command
 
 ```
-mkdir -p ~/.polyforge
-cat > ~/.polyforge/config.toml <<EOF
-url = "http://10.146.0.34:8080"
-api_key = "<你的个人 key>"
-EOF
-chmod 600 ~/.polyforge/config.toml
+tools/install.sh <api-key> [server-host]
 ```
 
-读取规则:本 skill 的一切下载/版本比对只认 **`GitHub Releases`**;
-config 缺该字段时,用 `url` 的主机部分 + `:8090` 推导,但正式装机
-应显式写明。
+Run it again any time to upgrade in place: the script detects the
+already-installed binary and skills and updates them to the latest
+release.
 
-## Step 3 — 连通性验证
+## What it writes
 
-```
-pf queue --project polyforge
-#   通:打印队列(空也算通)
-#   AUTH-401 → key 错或没签发;连不上 → 检查网络/服务器
-```
+The client config lives at `~/.config/polyforge/cli.toml` with exactly
+five flat string keys:
 
-到此为止:纯使用机(开票/答题/看队列)装完了。以下仅执行机需要。
+| Key | Meaning |
+|---|---|
+| `server` | aihub base URL |
+| `api_key` | the personal key this machine authenticates with |
+| `daemon_socket` | the local daemon unix socket |
+| `user_id` | caller identity |
+| `project` | default project |
 
-## Step 4 —(执行机)首次起 daemon
+A missing config file is not an error (built-in defaults apply); a
+malformed file is.
 
-```
-# workspace 先建好(daemon 不代建,只在其下创建 capsules/)
-mkdir -p ~/.polyforge/workspace
-pf daemon -server $(grep ^url ~/.polyforge/config.toml | cut -d'"' -f2) \
-  -api-key $(grep ^api_key ~/.polyforge/config.toml | cut -d'"' -f2) \
-  -machine-id m-<你的名字> \
-  -mode interactive -project polyforge \
-  -workspace ~/.polyforge/workspace \
-  -data-dir ~/.polyforge/daemon-data \
-  -socket ~/.polyforge/daemon.sock \
-  -max-concurrent-jobs 4 \
-  > ~/.polyforge/daemon.log 2>&1 &
-```
-
-- **`-workspace` 必填**(或环境变量 `POLYFORGE_WORKSPACE`;没有默认值,
-  缺了 daemon 拒绝启动)。每个 WI 的 capsule 落在
-  `<workspace>/capsules/<wi_id>/`。若 workspace 在 git 仓库内,把
-  `capsules/` 写进它的 `.gitignore`——daemon 自己从不碰 `.gitignore`。
-- **机器注册是管理员动作**(安全门:心跳首注册只认 admin)
-- 60 秒后验证:`pf machines`(你的 m-xxx 在列,心跳新鲜)
-- 日常运转归 `/polyforge ops`(status/mode/shutdown/升级前自检)
-
-## Step 5 —(AI 操作员机)技能包
-
-操作员技能(pf-* 全套 + using-polyforge)从仓库 `operator-skills/`
-安装到 pi 会话技能目录;用户面只需 `polyforge/` 一个。
-
-## 升级循环(已装机机器)
+## Verify
 
 ```
-REL=<GitHub Releases from config>
-LATEST=$(curl -s "$REL/latest.txt"); VER=$(echo "$LATEST"|awk '{print $1}')
-RUNNING=$(pf --version)          # 旧二进制无此输出 = 需要升级
-if [ "$RUNNING" != "$VER" ]; then
-  # 优雅停(仅执行机;纯 CLI 机跳过)
-  /polyforge ops shutdown        # 或 curl --unix-socket ~/.polyforge/daemon.sock \
-                                 #   -X POST http://localhost/ops/shutdown
-  curl -s -o ~/bin/pf.new "$REL/pf-$VER" && sha256sum ~/bin/pf.new  # 校验
-  mv ~/bin/pf.new ~/bin/pf && chmod +x ~/bin/pf
-  # 重启(执行机):重跑 Step 4 的 daemon 命令;systemd 托管的机器 systemctl restart
-  pf --version && pf machines    # 版本对 + 心跳回来 = 升级完成
-fi
+pf --version        # installed binary and its version
+pf queue            # aihub reachable, key accepted (an empty queue is fine)
+pf ops status       # local daemon: jobs, mode, queue counters
+pf machines         # admin liveness face: this machine heartbeats
 ```
 
-## 修复模式(连接不上/daemon 病了)
+Start the daemon by hand only when the script's daemon step did not run:
+`pf daemon` (its flags are on its help face; the script passes the
+workspace and workflows dirs it already prepared).
 
-按序:config 存在且 600 → key 有效(pf queue)→ daemon 活着
-(`curl --unix-socket ~/.polyforge/daemon.sock http://localhost/status`)
-→ daemon 日志尾三行。逐层修,修不了转 /pf-doctor。
+## Non-goals
+
+- No downloads from this fragment: binary, config and skills all come
+  from `tools/install.sh`.
+- No workflow execution: this fragment is machine setup only — running
+  work items routes to the submit verb's fragment.
