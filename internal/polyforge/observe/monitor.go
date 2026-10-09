@@ -1320,7 +1320,7 @@ func (m *Monitor) wrapEvidenceMissing() (bool, string) {
 	if stepHasCommandEvidence(st.Output) {
 		return false, ""
 	}
-	detail := fmt.Sprintf("work item %s: step %q (status %s) records no structured command evidence in steps.%s.output.commands — append at least one readable {argv, exit_code, duration_ms} entry taken directly from the command result (pf-execute §4 command audit), then re-flush",
+	detail := fmt.Sprintf("work item %s: step %q (status %s) records no structured command evidence in steps.%s.output.commands — append at least one readable {argv, exit_code, duration_ms} entry taken directly from the command result (the step executor's §4 command audit contract), then re-flush",
 		m.wi.WorkItem, verificationStepID, st.Status, verificationStepID)
 	return true, detail
 }
@@ -1373,7 +1373,7 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 		// The V4 gate's refusal: un-arm the seal guard, answer the typed
 		// DAEMON-400, and leave the attempt RUNNING — no blocked transition,
 		// no OBCompleted, no push bookkeeping (no commit was attempted).
-		// The agent's contract (pf-execute §4) is to append the missing
+		// The step executor's contract (the §4 command audit) is to append the missing
 		// evidence and re-flush.
 		m.stateMu.Lock()
 		m.sealing = false

@@ -688,7 +688,7 @@ func (d *v1Daemon) start() {
 	if apiKey == "" {
 		apiKey = d.inst.adminKey
 	}
-	// The executor-prompt flag is retired (polyforge#106); the daemon
+	// The retired executor prompt knob is gone (polyforge#106); the daemon
 	// argv carries no prompt flag and no prompt file selection.
 	args := []string{
 		"daemon",

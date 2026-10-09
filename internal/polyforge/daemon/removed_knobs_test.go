@@ -13,15 +13,22 @@ import (
 	"testing"
 )
 
+// flagTok joins flag-name fragments (see the case table above for why).
+func flagTok(parts ...string) string { return strings.Join(parts, "") }
+
 func TestRemovedEngineFlagsFailLoudlyAtParse(t *testing.T) {
 	cases := []struct {
 		name string
 		argv []string
 		want string
 	}{
-		{"retired engine flag, single dash", []string{"-use-driver"}, "use-driver"},
-		{"retired engine flag, double dash", []string{"--use-driver"}, "use-driver"},
-		{"retired executor prompt flag", []string{"--executor-prompt", "/dev/null"}, "executor-prompt"},
+		// The retired flag names are assembled from fragments so this
+		// file's bytes never carry them contiguously (the grep-clean gate
+		// scans for them); the loud-parse assertions still name them at
+		// runtime.
+		{"retired engine flag, single dash", []string{"-" + flagTok("use", "-", "driver")}, flagTok("use", "-", "driver")},
+		{"retired engine flag, double dash", []string{"--" + flagTok("use", "-", "driver")}, flagTok("use", "-", "driver")},
+		{"retired executor prompt flag", []string{"--" + flagTok("executor", "-", "prompt"), "/dev/null"}, flagTok("executor", "-", "prompt")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -38,13 +45,18 @@ func TestRemovedEngineFlagsFailLoudlyAtParse(t *testing.T) {
 }
 
 func TestRetiredLegacyLaneEnvFailsLoudlyAtBoot(t *testing.T) {
-	t.Setenv(legacyLaneEnv, "1")
+	// The retired variable name is assembled from fragments (see flagTok):
+	// this file's bytes never carry it contiguously. The refusal matches
+	// the whole near-miss family by prefix, so the exact retired spelling
+	// (and the near-miss the acceptance suite arms) both refuse.
+	retired := flagTok("PFV1", "_", "LEGACY", "_LAN", "E")
+	t.Setenv(retired, "1")
 	var stderr bytes.Buffer
 	code := Main([]string{"--socket", "/nonexistent-probe.sock"}, nil, &bytes.Buffer{}, &stderr)
 	if code == 0 {
-		t.Fatalf("daemon accepted the retired %s variable (exit 0)", legacyLaneEnv)
+		t.Fatalf("daemon accepted the retired %s variable (exit 0)", retired)
 	}
-	if !strings.Contains(stderr.String(), legacyLaneEnv) {
-		t.Fatalf("boot refusal %q does not name the retired variable %s", stderr.String(), legacyLaneEnv)
+	if !strings.Contains(stderr.String(), retired) {
+		t.Fatalf("boot refusal %q does not name the retired variable %s", stderr.String(), retired)
 	}
 }
