@@ -355,6 +355,43 @@ func TestSpawnStepFirstStepHasNoHandoffSection(t *testing.T) {
 	}
 }
 
+// TestSpawnStepGatePromptStatesVerdictBinding: the instruction half of
+// the #106 fix — a gate step's prompt must state that a fail verdict
+// REQUIRES outcome gate_failed (the driver's only rewind trigger) and
+// that a fail verdict under completed is re-bound fail-closed; a
+// non-gate step's prompt must not carry the gate paragraph.
+func TestSpawnStepGatePromptStatesVerdictBinding(t *testing.T) {
+	ad, sp, capDir := spawnEnv(t)
+	// verification declares artifacts/fix-summary.md as an input.
+	writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "the fix summary")
+	// verification is the extExample bundle's gate: true step.
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 2}); err != nil {
+		t.Fatalf("SpawnStep: %v", err)
+	}
+	p, _ := sp.last()
+	prompt := p.InitialPrompt
+	for _, want := range []string{
+		"Gate verdict binding",         // the binding paragraph is present
+		"this step is a GATE",          // the step knows it is a gate
+		`outcome: "gate_failed"`,       // the required outcome spelling
+		"only rewind trigger",          // why the outcome matters
+		"re-binds it to `gate_failed`", // the fail-closed backstop
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("gate prompt missing %q\n--- prompt ---\n%s", want, prompt)
+		}
+	}
+	// grill is no gate (fresh, first step): its prompt must not state
+	// the gate duty.
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "grill", SpawnN: 3}); err != nil {
+		t.Fatalf("SpawnStep grill: %v", err)
+	}
+	p, _ = sp.last()
+	if strings.Contains(p.InitialPrompt, "Gate verdict binding") {
+		t.Fatalf("non-gate prompt must not carry the gate paragraph\n%s", p.InitialPrompt)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // stepRun: envelope collection.
 
