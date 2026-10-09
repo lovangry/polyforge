@@ -34,8 +34,8 @@ through file → submit → observe → wrap on a local `pf daemon`.
 
 Prerequisites: a Go toolchain; `git` with a configured
 `user.name`/ `user.email` (capsule commits need it); and the `pi` agent
-harness on `PATH` with a model configured — the daemon spawns real WI
-agents through it. All commands below run from the repo root; everything
+harness on `PATH` with a model configured — the daemon's execution driver
+spawns the real step processes through it. All commands below run from the repo root; everything
 local lands under `/tmp/pf-quickstart` (substitute your own paths).
 
 **1. Build the two binaries:**
@@ -116,18 +116,20 @@ bin/pf --config /tmp/pf-quickstart/cli.toml submit <WI_ID>
 bin/pf --config /tmp/pf-quickstart/cli.toml observe <WI_ID>
 ```
 
-The submit claims the work item and the daemon spawns a WI agent (a
-`pi --mode rpc` process) that starts driving the workflow; a plain
-submit is the ordinary claim — `pf submit <id> --takeover` is the admin
+The submit claims the work item and the daemon's **Go execution driver**
+takes over: an in-daemon engine that reads and writes
+`runtime-state/execution.json` (its single state authority) and spawns one
+**step process** per workflow step — real `pi` harness sessions — collecting
+each step's result envelope, validating it, and advancing the workflow. A
+plain submit is the ordinary claim — `pf submit <id> --takeover` is the admin
 force-takeover path. A WI whose holder is gone or superseded moves with
 `pf takeover <id> --reason <text>`, which swaps the session under it
 (the old holder is fenced at its next push). Observe shows the live
 projection, leading with the `session:` line — the current holder's
 public session fingerprint, never the secret — then current step, step
-table, budget and the event log. Give the agent a few minutes for its
-first turn: once it commits
-the first `runtime-state/execution.json` version, observe shows a
-`current step:` line and a `published` event.
+table, budget and the event log. Give the first step a few minutes: once
+the driver commits the first `runtime-state/execution.json` version, observe
+shows a `current step:` line and a `published` event.
 
 **8. Wrap the run.** Wrap seals the capsule's current state and ends
 the session as terminal success:
@@ -218,7 +220,7 @@ design-doc references (e.g. `04-local-runtime.md §5.1`) are for traceability on
 ### Release flow
 
 The platform ships with zero release-specific code: release logic lives in
-the project bundle's release step (`agents/release.md`), and the platform's
+the project bundle's release step (`steps/release.md`), and the platform's
 own release is one instance of that same hook. `pf upgrade` is a deployment
 pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
 `00-architecture.md §3.3`).
@@ -226,7 +228,7 @@ pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
 ```
  RELEASE: bundle release-step hook (no platform release code)
  +-----------------------------------------------------------+
- | project bundle release step (`agents/release.md`);       |
+ | project bundle release step (`steps/release.md`);       |
  | the platform's own release = one instance of that hook   |
  +----------------------------+----------------------------+
                               |
@@ -367,7 +369,7 @@ next regression of the same bug is left to the naked eye.
 
 **Discipline ③ — workflow-bundle / prompt-logic changes → real-WI observation
 window before the next cutover-grade release.** Any merge touching
-`workflows/*/agents/*.md` or
+`workflows/*/steps/*.md` or
 `workflows/*/workflow.md` requires a real-WI observation window and gate
 readings before the next cutover-grade release: a clean rig, ≥10 real
 tickets of mixed bundle types (including ≥1 exercising the changed

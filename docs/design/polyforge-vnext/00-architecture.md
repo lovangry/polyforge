@@ -627,31 +627,32 @@ origin，人工桥接验证可行后收编为一等动词）按同一判据落�
    （`02-aihub-core.md#§8` 执行面规则——机器不做任何 claim 前的数据面读取即可完成执行路径）——Daemon 不查询、不拉取任何 resolved steps
    （Core 中不存在该数据，INV-8）。Daemon 向 AIHub 申请 owner
    generation（`02-aihub-core.md#§5.1`），创建该 WI 的 Capsule（含 worktree/repo inventory 检出，`03-execution-capsule.md#§4.2`），
-   选定 harness 适配器并派生该 WI 的**持久** Harness RPC WI Agent（`00-architecture.md#§3.6`/§3.6a）。
-3. WI Agent 启动后的**第 0 步**从本机 checkout 物化 `bundle_name` 指向的 bundle（`agents/*.md`
+   物化 bundle 并启动**Daemon 内的 Go driver**（`00-architecture.md#§3.6`/§3.6a，每 WI 一份）。
+3. **Go driver**是执行引擎：从本机 checkout 物化 `bundle_name` 指向的 bundle（`steps/*.md`
    与 `workflow.md` 快照，`03-execution-capsule.md#§4.5`）并按 `bundle_digest` 校验一致性，加载
-   workflow.md 正文后在同一个持久进程/同一次 harness 会话内顺序驱动 workflow 执行
-   （`01-workflow-skills.md#§6`）：每个 step 由 WI Agent 自身或其派生的
-   harness-native subagent 执行，结果写入 `runtime-state/execution.json`（`03-execution-capsule.md#§4.2`）；
+   workflow 图后按 step 图逐个**派生短驻 harness step 进程**（envelope 一次一步，`01-workflow-skills.md#§6`）：
+   每个 step 进程把结果信封写入 capsule，driver 校验后单一 transition 推进
+   `runtime-state/execution.json`（`03-execution-capsule.md#§4.2`）；
    needs_input 的 step 在 Interactive 模式下等待用户通过路由 Skill 的 answer 动作作答
    （`00-architecture.md#§3.4a`）。
-4. 每次 step 完成/中断，WI Agent 向本机 Daemon 发起一次 §4.3 定义的发布请求，Daemon 机械
-   执行一次全扫描发布（`05-sync-revision-recovery.md#§5`/§6）。
+4. 每次 transition 提交即产生一次 §4.3 定义的发布（driver 为唯一写者，Observe 的 C3 引擎机械
+   执行全扫描发布，`05-sync-revision-recovery.md#§5`/§6）。
 5. gate FAIL 触发有界 on_fail rewind（`01-workflow-skills.md#§6.2`）；基础设施失败在当前 step 原地 resume
    （`01-workflow-skills.md#§6.3`）；两者互不越界（INV-9）。
-6. WI 出最终结果（wrap/fail）时，WI Agent 发起最后一次发布请求，Daemon 机械执行发布，并把
-   最终结果写入 Core（`02-aihub-core.md#§6`）。
+6. WI 出最终结果（wrap/fail/blocked）时，driver 的终局接线把工作流终态翻译为 WI 的关闭
+   （`04-local-runtime.md#§7`），终态版本随最后一次 C3 发布上链，并把最终结果写入 Core
+   （`02-aihub-core.md#§6`）。
 7. 任意客户端查询进度：AIHub 从 Core 记录的 HEAD 指针 read-through 读取对应 Revision 的
    `execution.json` 内容并返回（`02-aihub-core.md#§5.2`），不经过任何 Core 落库的进度列。
 
 ## 7. 并发与崩溃恢复（总则） <!-- §7 -->
 
 - **单写者域**：Core 只被单 active Service 写（INV-2）；`runtime-state/execution.json` 只被该
-  WI 的 WI Agent 写（INV-3 + INV-6）；Revision/HEAD 只被 Daemon 机械写入（INV-11）；三者之间
-  的并发面只剩「发布请求 → Daemon 机械发布」这一个接缝，由先数据后状态（INV-4）+ fencing
+  WI 的 Daemon 内 Go driver 单一 transition 入口写（INV-3 + INV-6）；Revision/HEAD 只被 Daemon 机械写入（INV-11）；两者之间
+  的并发面只剩「transition 提交 → C3 机械发布」这一个接缝，由先数据后状态（INV-4）+ fencing
   （INV-5）收敛——这是 vNext 全系统唯一需要分布式一致性的位置。
-- **崩溃恢复分层**：WI Agent 崩溃 → Daemon 检测进程退出后基于 `execution.json` 重新派生
-  持久 WI Agent 续跑（`04-local-runtime.md#§7`、`03-execution-capsule.md#§7`）；同步中断 → 下一次触发时机的全扫描对账收敛
+- **崩溃恢复分层**：driver/step 进程崩溃 → Daemon 的恢复引擎基于 `execution.json` 与 spawn
+  journal 重新派生 driver 续跑（序号栅栏防重放）（`04-local-runtime.md#§7`、`03-execution-capsule.md#§7`）；同步中断 → 下一次触发时机的全扫描对账收敛
   （`05-sync-revision-recovery.md#§7.2`）；takeover 竞态 → fencing（`05-sync-revision-recovery.md#§2.9`）+ 从远端 HEAD 恢复现场（`05-sync-revision-recovery.md#§7.4`）。各文档
   的并发/崩溃细节不得引入上述三类之外的恢复路径。
 
