@@ -57,15 +57,20 @@ grep "one-time api key" /tmp/pf-quickstart/aihub.log
 ```
 
 **3. Point `pf` at the server with a config file** (the flat `cli.toml`
-subset; every entry can also be given per-command via the global
-`--server` / `--api-key` / `--socket` flags):
+subset plus the `[workspace]` mapping; every connection entry can also be
+given per-command via the global `--server` / `--api-key` / `--socket`
+flags). The mapping below is what makes the daemon startable — one
+section per workspace, listing the projects whose capsules live there:
 
 ```
+mkdir -p /tmp/pf-quickstart/workspace
 cat > /tmp/pf-quickstart/cli.toml <<'EOF'
 server = "http://127.0.0.1:18420"
 api_key = "<BOOTSTRAP_KEY>"
 daemon_socket = "/tmp/pf-quickstart/pf.sock"
-project = "demo"
+
+[workspace."/tmp/pf-quickstart/workspace"]
+projects = ["demo"]
 EOF
 ```
 
@@ -92,22 +97,25 @@ bin/pf --config /tmp/pf-quickstart/cli.toml file create --project demo \
 ```
 
 **6. Start the local daemon** (Runtime + Observe over its own UDS
-socket; keep it running in a second terminal). The workspace is REQUIRED
-— the daemon refuses to start without `-workspace` (or
-`POLYFORGE_WORKSPACE`) and creates nothing but `capsules/` inside it:
+socket; keep it running in a second terminal). The `[workspace]` mapping
+in the config is the daemon's only workspace source (polyforge#113): a
+config with zero sections refuses startup, every mapped workspace
+directory must pre-exist, and the daemon creates nothing but
+`capsules/` inside each. Capsules route by the claimed work item's
+project through the mapping — the `demo` section above sends `demo`
+capsules to `/tmp/pf-quickstart/workspace/capsules/`:
 
 ```
-mkdir -p /tmp/pf-quickstart/workspace
 bin/pf daemon --config /tmp/pf-quickstart/cli.toml \
   --api-key <MACHINE_KEY> \
   --data-dir /tmp/pf-quickstart/daemon-data \
-  --workspace /tmp/pf-quickstart/workspace \
   --machine-id m-smoke
 ```
 
-If the workspace lives inside a git checkout, ignore the capsule
+If a workspace lives inside a git checkout, ignore the capsule
 directory in its `.gitignore` (`capsules/`) — the daemon never touches
-`.gitignore` itself.
+`.gitignore` itself. `pf doctor` checks the mapping and the
+connectivity faces.
 
 **7. Submit the work item and watch the agent work:**
 
@@ -267,10 +275,21 @@ the `PF_*` entries.
 | `--socket PATH` | `PF_DAEMON_SOCKET` | `/run/polyforge.sock` | Unix socket the daemon's UDS HTTP face listens on. |
 | `--server URL` | `PF_SERVER` | — | aihub base URL the daemon talks to. |
 | `--api-key KEY` | `PF_API_KEY` | — | Machine aihub credential (never reaches an agent env). |
-| `--project NAME` | `PF_PROJECT` | — | Ready-queue project scope for batch/drain. |
 | `--machine-id ID` | `POLYFORGE_MACHINE_ID` | `m-<hostname>` | Machine identity claims and leases are recorded under. |
 | `--data-dir DIR` | `POLYFORGE_DATA_DIR` | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
-| `--workspace DIR` | `POLYFORGE_WORKSPACE` | (required — no default) | Capsule base: per-WI capsules live at `<DIR>/capsules/<wi_id>`. The directory must pre-exist; the daemon creates and writes only `capsules/` inside it and refuses to start when it is missing or unusable. |
+
+The workspace mapping (polyforge#113) replaces the retired workspace and
+project launch surfaces: the `[workspace."<path>"]` sections of the
+`--config` file are the ONLY workspace source. One section per
+workspace, `projects = ["..."]` under each; `~` at the start of a key
+expands to the home directory, keys must be absolute with no trailing
+separator. Every mapped workspace directory must pre-exist; the daemon
+creates and writes only `capsules/` inside each and refuses to start
+when any is missing or unusable (or when the config carries zero
+sections). Capsules route per claimed project through the inverse
+mapping; batch and drain cover all mapped projects. `pf doctor` checks
+the mapping.
+
 | `--workflows-dir DIR` | — | `./workflows` | Workflow-bundle checkout the executor reads. |
 | `--pi-bin PATH` | — | `pi` | Harness binary the agent processes are derived from. |
 | `--harness-sessions-root DIR` | `POLYFORGE_HARNESS_SESSIONS_ROOT` | `~/.pi/agent/sessions` | Harness session store for the live-transcript sync. |
@@ -309,8 +328,10 @@ full-text search):
 
     pf recall [--project P] <query> [--type T] [--tags a,b] [--limit N]
 
-`<query>` is required (positional or `--q`); `--project` defaults to the
-configured project. Flags:
+`<query>` is required (positional or `--q`); so is `--project` — there
+is no default project anymore (polyforge#113), and the value is
+validated against the `[workspace]` mapping (an unmapped project fails
+loudly). Flags:
 
 - `--limit N` — max results. **Default 20** when the flag is omitted
   (the CLI's product choice, sent explicitly); values must satisfy

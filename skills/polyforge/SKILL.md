@@ -71,7 +71,8 @@ accepts an id.
 | resume it / continue the paused one / 恢复执行 / 接着跑（已暂停的） | `verbs/resume.md` | daemon |
 | wrap it up / we're done / mark it failed / 收尾 / 完事了 / 判完成 / 判失败 | `verbs/wrap.md` | daemon |
 | ship it / push the wrapped commits to origin / deliver the branch / open the PR / 推上去 / 交付 | `verbs/ship.md` | daemon |
-| daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / can't connect / diagnose / 诊断 / 连不上 / switch mode / drain / shutdown / 升级前自检 / 启停 / 切换模式 / 优雅停机 | `verbs/ops.md` | daemon |
+| daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / switch mode / drain / shutdown / 升级前自检 / 启停 / 切换模式 / 优雅停机 | `verbs/ops.md` | daemon |
+| is this machine healthy / diagnose / check the mapping / why won't the daemon start / 连不上 / 诊断 / 体检 / 检查映射 | `verbs/doctor.md` | CLI (config + aihub + daemon reads) |
 | init / install / upgrade / machine setup / 装机 / 升级 | `verbs/init.md` | CLI |
 | help / what skills / usage / 速查 / 怎么用 | `verbs/help.md` | CLI |
 
@@ -143,12 +144,22 @@ pf [global flags] <verb> [verb flags] [positional args]
   `--server URL`, `--api-key KEY`, `--socket PATH`, `--user ID`. Verb flags
   come after the verb word.
 - **Config precedence**, strictest wins: command-line flag > environment
-  (`PF_SERVER`, `PF_API_KEY`, `PF_DAEMON_SOCKET`, `PF_USER_ID`, `PF_PROJECT`)
+  (`PF_SERVER`, `PF_API_KEY`, `PF_DAEMON_SOCKET`, `PF_USER_ID`)
   > config file > built-in defaults (`http://localhost:8420`,
   `/run/polyforge.sock`). The config file default path is
-  `~/.config/polyforge/cli.toml` with exactly five flat string keys:
-  `server`, `api_key`, `daemon_socket`, `user_id`, `project`. A missing file
-  is not an error (defaults apply); a malformed file is.
+  `~/.config/polyforge/cli.toml`: the four flat string keys `server`,
+  `api_key`, `daemon_socket`, `user_id`, plus one `[workspace."<path>"]`
+  section per workspace, each carrying `projects = ["..."]` — the
+  workspace→projects mapping (polyforge#113). There is NO default
+  `project` key: a config carrying one refuses to load with migration
+  guidance (replace it with a `[workspace]` section, then run
+  `pf doctor`). A missing file is not an error (defaults apply, empty
+  mapping); a malformed file is. The mapping governs capsule placement:
+  placement verbs (`file create`, `remember`, `recall`) REQUIRE
+  `--project` and validate it against the mapping; `queue` without
+  `--project` covers all mapped projects; one daemon serves every mapped
+  workspace and routes capsules to `<workspace>/capsules/<wi>` by the
+  claimed work item's project.
 - **Output**: human mode renders per-verb views; `--json` emits the response
   body raw, as-is (machine consumption).
 - **Errors**: every non-2xx answer — from AIHub AND from the daemon — is the

@@ -25,8 +25,11 @@ release.
 
 ## What it writes
 
-The client config lives at `~/.config/polyforge/cli.toml` with exactly
-five flat string keys:
+The client config lives at `~/.config/polyforge/cli.toml`: the flat
+connection keys plus a COMMENTED `[workspace]` template (polyforge#113 —
+the installer never fabricates a real mapping, and never rewrites an
+existing config; an old-shape file with a flat `project` key is left
+byte-identical and the migration steps are printed instead):
 
 | Key | Meaning |
 |---|---|
@@ -34,7 +37,12 @@ five flat string keys:
 | `api_key` | the personal key this machine authenticates with |
 | `daemon_socket` | the local daemon unix socket |
 | `user_id` | caller identity |
-| `project` | default project |
+
+Then the operator uncomments and edits ONE `[workspace."<path>"]`
+example — one section per workspace, `projects = ["..."]` under each.
+The daemon REFUSES to start until a real mapping exists, so the
+installer only launches it when the config carries one. `pf doctor`
+checks the mapping (and the whole machine) after editing.
 
 A missing config file is not an error (built-in defaults apply); a
 malformed file is.
@@ -44,13 +52,15 @@ malformed file is.
 ```
 pf --version        # installed binary and its version
 pf queue            # aihub reachable, key accepted (an empty queue is fine)
-pf ops status       # local daemon: jobs, mode, queue counters
+pf doctor           # config + [workspace] mapping + connectivity, one verdict
+pf ops status       # local daemon: jobs, mode, queue counters, workspace set
 pf machines         # admin liveness face: this machine heartbeats
 ```
 
 Start the daemon by hand only when the script's daemon step did not run:
-`pf daemon` (its flags are on its help face; the script passes the
-workspace and workflows dirs it already prepared).
+`pf daemon` (its flags are on its help face; the mapping-bearing config
+is its only workspace source — the script passes the config, data and
+workflows dirs it already prepared).
 
 ## Non-goals
 

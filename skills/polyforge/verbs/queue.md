@@ -12,15 +12,22 @@ involved.
 ## Command
 
 ```
-pf queue [--project P] [--status S]
+pf queue [--project P] [--status S] [--limit N]
 pf queue --ready [--project P]
 ```
 
-`--project` defaults to the config's `project` (required for the ready
-queue when unset). The plain form is the list filter (`status`:
-queued|running|paused|blocked|wrapped|failed|canceled); `--ready` switches
-to the project's ready queue — the claimable-now projection, flat
-`{items:[...]}`, ordered priority-first.
+`--project` is OPTIONAL (polyforge#113): without it the verb covers ALL
+mapped projects — one merged presentation over the `[workspace]` mapping
+in cli.toml, each row's PROJECT column naming its project; `--json`
+emits one merged items array. With `--project P` the value is passed to
+aihub UNVALIDATED (mapped or not — the mapping governs placement, not
+knowledge; exactly one query). Without `--project` AND without any
+mapping the verb fails loudly with guidance to add a `[workspace]`
+section or pass `--project` — it never silently lists nothing. The
+plain form is the list filter (`status`:
+queued|running|paused|blocked|wrapped|failed|canceled); `--ready`
+switches to the ready queue — the claimable-now projection, ordered
+priority-first.
 
 ## Success
 
@@ -33,8 +40,9 @@ to the project's ready queue — the claimable-now projection, flat
 |---|---|---|
 | `CORE-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
 | `CORE-400` | Bad filter value | A filter flag is malformed — read `detail` and fix the flag. |
-| `CORE-404` | Unknown project | No such project (or no access to it) — check the project name. |
-| (no code) `queue: --project is required` | No project resolvable | Pass `--project` or set `project` in the config. |
+| `CORE-404` | Unknown project | No such project (or no access to it) — that is aihub's own answer for an explicit `--project`; read-only queries are never locally rejected. |
+| (no code) `queue: --project is required — no [workspace] mapping` | No `--project` and no mapping configured | Add a `[workspace."<path>"]` section to cli.toml (`pf doctor` checks the mapping) or pass `--project P`. |
+| (no code) `queue: project P: ...` | A per-project fetch failed in merged mode | The verb fails naming the failing project — fake coverage is worse than none; retry or scope with `--project`. |
 
 A `connection refused` one-liner (no typed code) means the AIHub server is
 not reachable — check `--server` / `PF_SERVER` and whether AIHub is running.

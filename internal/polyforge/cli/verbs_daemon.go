@@ -618,7 +618,9 @@ func opsMode(ctx *Context, d *DaemonClient, args []string) error {
 // daemonUsage is the STATIC help text for `pf help daemon`. It documents
 // the daemon launch surface (flags, env vars, defaults) as defined in
 // internal/polyforge/daemon/main.go. It is NOT generated from the daemon
-// flag set — keep it in sync manually.
+// flag set — keep it in sync manually. The retired selection flags and
+// env mirrors are NOT listed anywhere on this face (polyforge#113): the
+// config's [workspace] mapping is the only workspace source.
 const daemonUsage = `pf daemon [--flag value] ...
 
 Starts the local polyforge daemon (a UDS server hosting the runtime and
@@ -627,10 +629,20 @@ intercepts ` + "`pf daemon`" + ` argv before CLI dispatch and calls
 internal/polyforge/daemon.Main. This CLI registration exists only to
 serve ` + "`pf help daemon`" + ` presentation.
 
+Workspace mapping (polyforge#113): the daemon reads the [workspace]
+sections of the shared config — one [workspace."<path>"] section per
+workspace, each carrying the projects whose capsules live under it.
+Capsules are placed at <workspace>/capsules/<wi_id> per the claimed
+work item's project; an unmapped project is refused at claim time; a
+config with zero sections refuses startup. There is no launch-time
+workspace flag and no default project: the mapping is the only source.
+pf doctor checks the mapping and the connectivity faces.
+
 Launch flags (with environment variable and default, where one exists):
 
   --config PATH
-      shared config file (default ~/.config/polyforge/cli.toml)
+      shared config file: its [workspace] mapping is the capsule
+      placement source (default ~/.config/polyforge/cli.toml)
   --socket PATH
       unix socket path to listen on (env PF_DAEMON_SOCKET;
       default /run/polyforge.sock)
@@ -640,15 +652,8 @@ Launch flags (with environment variable and default, where one exists):
       machine aihub api key (env PF_API_KEY)
   --machine-id ID
       machine identity (env POLYFORGE_MACHINE_ID; default m-<hostname>)
-  --workspace PATH
-      REQUIRED: capsule workspace — per-WI capsules live at
-      <workspace>/capsules/<wi_id> (env POLYFORGE_WORKSPACE; NO default —
-      the daemon refuses to start without it, validates the directory
-      exists, and creates/writes only capsules/ inside it)
   --data-dir PATH
       daemon data dir (env POLYFORGE_DATA_DIR)
-  --project NAME
-      ready-queue project scope for batch/drain (env PF_PROJECT)
   --workflows-dir PATH
       workflows/ checkout dir (default ./workflows)
   --pi-bin PATH

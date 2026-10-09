@@ -19,8 +19,10 @@ pf file edit <id> [flags]                           # or --stdin
 pf file show <id>
 ```
 
-`create` flags: `--project` (required unless the config's `project` or the
-stdin body carries it), `--goal` (required, one line ≤500 chars),
+`create` flags: `--project` (REQUIRED — there is no default project
+anymore, polyforge#113; the value is validated against the `[workspace]`
+mapping in cli.toml, and an unmapped project fails loudly naming it),
+`--goal` (required, one line ≤500 chars),
 `--content` (markdown background; `-` reads stdin, `@file` reads a file),
 `--label` (repeatable), `--priority low|normal|high|urgent`, `--milestone`,
 `--bundle NAME` (non-empty makes an execution ticket; omit it for a

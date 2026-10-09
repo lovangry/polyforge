@@ -904,25 +904,31 @@ func TestMachinesHelpStatesAdminOnly(t *testing.T) {
 	}
 }
 
-// TestDaemonHelpNewOnlyWorkspace pins the #103 help surface: `pf help
-// daemon` documents the REQUIRED -workspace flag and the
-// POLYFORGE_WORKSPACE env mirror — and never presents the deleted
-// -workspace-root flag or POLYFORGE_WORKSPACE_ROOT env as available.
-func TestDaemonHelpNewOnlyWorkspace(t *testing.T) {
+// TestDaemonHelpTeachesMapping pins the #113 help surface: `pf help
+// daemon` documents --config with the [workspace] mapping requirement —
+// and lists NONE of the retired selection surface (either dash spelling
+// of the deleted flags, or either retired env variable, contiguous).
+func TestDaemonHelpTeachesMapping(t *testing.T) {
 	code, stdout, stderr := runPf(t, map[string]string{}, "help", "daemon")
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
-	for _, want := range []string{"--workspace", "POLYFORGE_WORKSPACE", "capsules"} {
+	for _, want := range []string{"--config", "[workspace", "capsules", "doctor"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("daemon help must mention %q:\n%s", want, stdout)
 		}
 	}
-	if strings.Contains(stdout, "--workspace-root") {
-		t.Errorf("daemon help must not present the deleted --workspace-root flag:\n%s", stdout)
-	}
-	if strings.Contains(stdout, "POLYFORGE_WORKSPACE_ROOT") {
-		t.Errorf("daemon help must not present the deleted POLYFORGE_WORKSPACE_ROOT env:\n%s", stdout)
+	// The retired names are assembled from fragments so this file's own
+	// bytes never carry them contiguously (the greppable convention).
+	for _, tok := range []string{
+		"-" + "work" + "space", // either dash spelling: the single-dash form is a substring
+		"-" + "proj" + "ect",
+		"PF_" + "PROJECT",
+		"POLYFORGE_" + "WORKSPACE",
+	} {
+		if strings.Contains(stdout, tok) {
+			t.Errorf("daemon help still lists the retired surface token %q:\n%s", tok, stdout)
+		}
 	}
 }
 

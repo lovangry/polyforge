@@ -19,7 +19,9 @@ pf remember [--project P] --type T [--title S] [--visibility V] [--tags a,b] [--
 
 `--type` is required (e.g. `experience.debug`, `fact.note`). The content
 is the positional text; `-` reads it from stdin, `@file` from a file.
-`--project` defaults to the config's `project`; `--visibility` defaults
+`--project` is REQUIRED (polyforge#113 — no default project exists) and
+validated against the `[workspace]` mapping in cli.toml: an unmapped
+project fails loudly naming it. `--visibility` defaults
 to `project` (`admin|private|project|team|public`); `--work-item`
 optionally attributes the memory to a work item id.
 
@@ -39,5 +41,7 @@ visibility V)`.
 | `MEM-500` | The memory store failed to persist the authority file | Nothing was saved — retry; if it persists, the server's data dir is unhealthy. |
 
 A local `pf: remember: ...` line (exit 1, no typed code) means a local
-refusal before any wire call — missing `--type`, missing content, or no
-project resolvable from `--project` / the config.
+refusal before any wire call — missing `--type`, missing content, a
+missing `--project`, or a `--project` that is not listed under a
+`[workspace."<path>"]` section of cli.toml (`pf doctor` checks the
+mapping).

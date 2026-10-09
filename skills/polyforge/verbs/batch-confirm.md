@@ -13,11 +13,15 @@ confirmation: no job exists until the human says so.
 ## Command
 
 ```
-pf batch-confirm                 # show the recommendation only — creates NO job
+pf batch-confirm [--project P]   # show the recommendation only — creates NO job
 pf batch-confirm --all           # confirm and submit the whole recommendation
 pf batch-confirm <id> [<id>...]  # confirm and submit exactly this set
 ```
 
+Without `--project` the recommendation covers ALL mapped projects'
+ready queues, merged (the `[workspace]` mapping in cli.toml —
+polyforge#113); `--project P` scopes the recommendation to P and is
+validated against the mapping (unmapped → a naming error with guidance).
 The recommendation is always fetched first and shown to the user; the
 confirmed set may be edited (add/remove ids) before submitting. The
 submitted set is passed through exactly as confirmed — never widened or

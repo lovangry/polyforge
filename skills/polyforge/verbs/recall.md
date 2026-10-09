@@ -16,8 +16,11 @@ memories) are not part of this verb — retrieval only.
 pf recall [--project P] <query> [--type T] [--tags a,b] [--limit N]
 ```
 
-The query is the positional argument; `--project` defaults to the config's
-`project`. `--type` filters one memory type (e.g. `experience.debug`);
+The query is the positional argument; `--project` is REQUIRED
+(polyforge#113 — no default project exists) and validated against the
+`[workspace]` mapping in cli.toml: an unmapped project fails loudly
+naming it. The routing flow derives the value from the WI under
+discussion. `--type` filters one memory type (e.g. `experience.debug`);
 `--tags` is comma-separated and an entry must contain all of them;
 `--limit` caps results.
 
@@ -32,7 +35,7 @@ table of ID, TYPE, CONTENT, UPDATED, TAGS.
 |---|---|---|
 | `CORE-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
 | `MEM-400` | Blank query | Give the search words — an empty query is refused. |
-| `MEM-404` | Unknown or missing project | The project does not exist (or you cannot see it) — check `--project` / the config's `project`. |
+| `MEM-404` | Unknown or missing project | The project does not exist (or you cannot see it) — check `--project`; `pf doctor` checks the `[workspace]` mapping. |
 | `MEM-503` | Search backend failure | The search index is unavailable right now — retry shortly; the memories themselves are intact. |
 
 Zero hits are **not** an error: the table simply says `0 hit(s)`. Try

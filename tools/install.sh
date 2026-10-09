@@ -55,21 +55,58 @@ else
   echo "   pf $RUNNING → $VER installed"
 fi
 
-# ─── 2. config: create or verify ────────────────────────────────────
+# ─── 2. config: create or verify (NEVER rewritten) ──────────────────
 echo "== 2/5 config"
 mkdir -p "$(dirname "$CFG")"
 if [ -f "$CFG" ] && grep -q "api_key" "$CFG"; then
   echo "   config exists ($(dirname "$CFG")/$(basename "$CFG"))"
+  if grep -q '^[[:space:]]*\[workspace' "$CFG"; then
+    echo "   workspace mapping present (the daemon routes capsules by it)"
+  else
+    # polyforge#113: an existing config predating the workspace mapping
+    # is the operator's property — install.sh NEVER rewrites it. The
+    # daemon refuses to start without a real mapping, so print the
+    # migration steps instead and let the operator edit.
+    cat <<'MIGEOF'
+   ------------------------------------------------------------------
+   MIGRATION REQUIRED: this config predates the workspace mapping
+   (polyforge#113). There is NO default `project` key anymore, and the
+   daemon refuses to start until the config carries a real mapping.
+   Edit the config and add one section per workspace:
+
+     [workspace."<absolute-path-to-your-workspace>"]
+     projects = ["your-project", "another-project"]
+
+   Notes: `~` at the start of a key expands to your home directory;
+   keys must be absolute and carry no trailing separator; the daemon
+   creates nothing but `capsules/` inside each workspace. Capsules from
+   a previously-bound workspace keep their homes when you re-add that
+   workspace for its projects. Check the result with `pf doctor`, then
+   start the daemon: `pf daemon`.
+   ------------------------------------------------------------------
+MIGEOF
+  fi
 else
-  cat > "$CFG" <<EOF
+  cat > "$CFG" <<CFGEOF
 server = "$API"
 api_key = "$KEY"
 daemon_socket = "$DAEMON_SOCKET"
-EOF
-  chmod 600 "$CFG"
-  echo "   config written"
-fi
 
+# Workspace mapping (polyforge#113): one section per workspace, each
+# listing the projects whose capsules live under it. UNCOMMENT and edit
+# ONE example to create a real mapping — until then the daemon REFUSES
+# to start:
+#
+# [workspace."<absolute-path-to-your-workspace>"]
+# projects = ["your-project", "another-project"]
+#
+# `~` at the start of a key expands to your home directory; keys must
+# be absolute; the daemon creates nothing but capsules/ inside each
+# workspace. Run \`pf doctor\` to check the mapping after editing.
+CFGEOF
+  chmod 600 "$CFG"
+  echo "   config written (add a real [workspace] mapping before starting the daemon — see the commented template inside)"
+fi
 # ─── 3. skills: install or verify ───────────────────────────────────
 echo "== 3/5 skills"
 SKILLS_OK() { [ -f "$PKG_DIR/package.json" ] && grep -q '"skills"' "$PKG_DIR/package.json" \
@@ -105,30 +142,39 @@ else
   echo "   no pi/claude — CLI only (skills optional)"
 fi
 
-# ─── 4. daemon: start if not running ────────────────────────────────
+# ─── 4. daemon: start only when a real mapping exists ────────────────
 echo "== 4/5 daemon"
 WORKFLOWS="$PKG_DIR/workflows"
 if [ ! -d "$WORKFLOWS" ]; then
   echo "   SKIP: repo not cloned (skills step incomplete) — daemon needs workflows"
 elif [ -S "$DAEMON_SOCKET" ] && curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | grep -q machine_id; then
   echo "   daemon already running ($(curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('machine_id','?'))" 2>/dev/null))"
+elif ! grep -q '^[[:space:]]*\[workspace' "$CFG"; then
+  # polyforge#113: no real mapping in the config — the daemon would
+  # refuse to start anyway. Do not launch it; the operator adds the
+  # mapping first (the migration/template guidance from step 2).
+  echo "   SKIP: no [workspace] mapping in $CFG yet — the daemon refuses to start until one exists"
+  echo "   add a mapping (see the migration steps above or the commented template in the config), then: pf daemon"
 else
   MACHINE_ID=$(hostname -s | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
   # The installer (not the daemon) owns workspace creation: the daemon
-  # requires the dir to pre-exist and creates only capsules/ inside it.
+  # requires every mapped workspace dir to pre-exist and creates only
+  # capsules/ inside each.
   mkdir -p "$DAEMON_DATA/ws"
   if [ ! -f "$DAEMON_DATA/ws/.gitignore" ] || ! grep -qx 'capsules/' "$DAEMON_DATA/ws/.gitignore"; then
     printf 'capsules/\n' >> "$DAEMON_DATA/ws/.gitignore"
     echo "   added capsules/ to $DAEMON_DATA/ws/.gitignore (daemon never touches .gitignore)"
   fi
+  # polyforge#113: the mapping-bearing config is the daemon's only
+  # workspace source — the daemon argv carries neither a workspace nor a
+  # project flag, ever.
   nohup "$BIN" daemon \
-    -server "$API" \
+    --config "$CFG" \
     -api-key "$KEY" \
     -machine-id "m-$MACHINE_ID" \
-    -mode interactive -project polyforge \
+    -mode interactive \
     -data-dir "$DAEMON_DATA" \
     -socket "$DAEMON_SOCKET" \
-    -workspace "$DAEMON_DATA/ws" \
     -workflows-dir "$WORKFLOWS" \
     -max-concurrent-jobs 4 \
     > "$DAEMON_DATA/daemon.log" 2>&1 &
@@ -142,7 +188,6 @@ else
     echo "   check: tail $DAEMON_DATA/daemon.log"
   fi
 fi
-
 # ─── 5. verify ──────────────────────────────────────────────────────
 echo "== 5/5 verify"
 "$BIN" queue --project polyforge > /dev/null 2>&1 \

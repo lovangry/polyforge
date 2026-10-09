@@ -30,8 +30,9 @@ pf ops shutdown                                      # graceful shutdown
 
 - `status`: `machine: <id>  mode: <mode>` (plus `(shutting down)` when set),
   the queue counters (`pending / running / max`), one line naming the
-  active workspace (`workspace: <path>` — the launched `-workspace`
-  value; per-WI capsules live at `<workspace>/capsules/<wi_id>`), and a
+  mapped workspace SET (`workspaces: <path>, <path>` — sorted; every
+  `[workspace]` section the daemon routes capsules into, polyforge#113;
+  per-WI capsules live at `<workspace>/capsules/<wi_id>`), and a
   jobs table (WORK
   ITEM, STATUS, ATTEMPT, AGENT PID, QUESTION, LAST-PROGRESS). This is
   bookkeeping about what this machine manages — not workflow execution
