@@ -185,10 +185,15 @@ func TestRestartAttachResumesPausedSession(t *testing.T) {
 	}
 	waitDead(t, pid) // the shutdown's leftover tree is collected
 	if n := sp.callCount(); n != 1 {
-		t.Fatalf("expected exactly one resume derivation, got %d", n)
+		t.Fatalf("expected exactly one engine derivation, got %d", n)
 	}
-	if c := sp.call(0); !c.Resume {
-		t.Fatalf("the attach resume must continue the capsule transcript, got %+v", c)
+	// polyforge#106: the driver IS the engine — the attach resume derives
+	// a fresh driver process (its continuation semantics are the capsule
+	// state it reads, not a --session transcript argv). The transcript
+	// the graceful shutdown synced into the capsule stays the context
+	// record the derivation reads.
+	if c := sp.call(0); c.Resume || c.TranscriptPath != "" {
+		t.Fatalf("the attach derivation is a fresh driver process, got %+v", c)
 	}
 	msg := recvRT(t, toOB)
 	if msg.Kind != protocol.RTRecovered || msg.WorkItem != wi {
@@ -282,8 +287,11 @@ func TestRestartAttachesRetainedPausedRecord(t *testing.T) {
 	if got := hub.attaches[0].SessionID; got != rec.SessionID {
 		t.Fatalf("attach must present the record's session, got %q", got)
 	}
-	if n := sp.callCount(); n != 1 || !sp.call(0).Resume {
-		t.Fatalf("the attach must resume the capsule transcript, got %d calls resume=%v", sp.callCount(), sp.call(0).Resume)
+	// the attach must derive exactly one engine derivation (polyforge#106:
+	// a fresh driver process — its continuation semantics are the capsule
+	// state, not a --session transcript argv)
+	if n := sp.callCount(); n != 1 || sp.call(0).Resume {
+		t.Fatalf("the attach must derive exactly one fresh engine derivation, got %d calls resume=%v", sp.callCount(), sp.call(0).Resume)
 	}
 	msg := recvRT(t, toOB)
 	if msg.Kind != protocol.RTRecovered || msg.WorkItem != wi {

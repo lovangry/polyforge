@@ -45,10 +45,12 @@ type Aihub interface {
 
 // Config is the daemon-supplied runtime configuration.
 type Config struct {
-	// AgentStarter replaces the legacy WI-Agent spawn with an external
-	// starter (the daemon binds bridge.Start here). nil = the legacy
-	// in-package spawnAgent path (kept for tests that exercise the
-	// WI-Agent RPC model directly).
+	// AgentStarter is the execution-engine binding — the ONLY engine seam
+	// and the driver is the only engine (polyforge#106). The daemon binds
+	// bridge.Start here unconditionally at assembly; tests bind
+	// driver-compatible scripted starters. nil is a MISASSEMBLY, not an
+	// engine choice: dispatch refuses it loudly (the legacy in-package
+	// WI-Agent spawn this field used to fall back to is deleted).
 	AgentStarter AgentStartFunc
 	MachineID    string // registered machine identity
 	// Workspace is the capsule base the daemon was launched with
@@ -66,7 +68,6 @@ type Config struct {
 	// it at a scratch tree. Empty = the default.
 	HarnessSessionsRoot string
 	CgroupRoot          string // cgroup v2 root; empty ⇒ layer-0 unavailable
-	MaxResumeFails      int    // consecutive resume failures before fresh (default 2)
 	MaxRecoveries       int    // consecutive FAILED recoveries before bounded fail (default 2)
 	// RecoveryStabilityWindow bounds the v2 entry-rate storm guard: a
 	// recoverCore that re-fires inside this window (default 60s) counts
@@ -121,9 +122,6 @@ func (c *Config) fill() {
 	// (the pi spawner); it decides the F7 discovery-copy directory.
 	if c.Harness == "" {
 		c.Harness = "pi"
-	}
-	if c.MaxResumeFails <= 0 {
-		c.MaxResumeFails = 2
 	}
 	if c.MaxRecoveries <= 0 {
 		c.MaxRecoveries = 2
@@ -202,7 +200,8 @@ type AgentStartInput struct {
 
 // AgentStartFunc starts the execution engine for a claimed work item
 // and returns a supervision handle. The daemon binds the Go driver
-// bridge here; nil falls back to the legacy WI-Agent spawn.
+// bridge here unconditionally; nil is refused loudly at dispatch —
+// there is no fallback engine (polyforge#106).
 type AgentStartFunc func(ctx context.Context, in AgentStartInput) (AgentHandle, error)
 
 type job struct {
@@ -252,8 +251,6 @@ type job struct {
 
 	spawnN       int
 	recoverFails int // consecutive FAILED recoveries; reset on success
-	resumeFails  int
-	resumeDead   bool
 	// stormFails/lastRecoveryAt feed the v2 entry-rate storm guard: a
 	// recoverCore re-entry inside RecoveryStabilityWindow counts one
 	// storm unit (a fast-dying relaunch never proves stability); a
@@ -267,14 +264,7 @@ type job struct {
 	// the same marker the hub does; false everywhere else (a graceful
 	// shutdown keeps it false — the attach-on-restart shape, M3).
 	cleanPause bool
-	// candidates is the bundle's defaults model_candidates chain (F4):
-	// spawnAgent pins the derivation to candidates[candidateOrdinal]. The
-	// ordinal advances ONLY on provider-class recovery (INV-1g; see
-	// recover.go advanceCandidate) and is persisted in the job record.
-	candidates       []string
-	candidateOrdinal int
-
-	mu sync.Mutex
+	mu         sync.Mutex
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries
@@ -832,21 +822,33 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	}
 	// v2: the Go driver replaces the WI-Agent spawn. The daemon binds
 	// bridge.Start as AgentStarter at assembly; the driver owns the step
-	// state machine from here on.
-	var h AgentHandle
-	var err2 error
-	if r.cfg.AgentStarter != nil {
-		// The driver derivation IS a derivation (B2): advance the counter
-		// the legacy spawnAgent path advances, so the RTStarted emission
-		// carries SpawnN ≥ 1. The observe lane refuses to attach a monitor
-		// on SpawnN ≤ 0 ("RTStarted without handle/spawn_n/wi-info"), and
-		// the step ordinals the driver derives seed from this counter —
-		// both the fence and the monitor face need it to move.
+	// state machine from here on. There is no second engine to fall back
+	// to (polyforge#106): a nil starter is a misassembly and refuses the
+	// claim loudly.
+	starter := r.cfg.AgentStarter
+	if starter == nil {
+		err2 := fmt.Errorf("runtime misassembly: no execution engine bound (Config.AgentStarter is nil) — the legacy in-package WI-Agent engine was deleted (polyforge#106); the daemon binds the driver bridge starter unconditionally at assembly")
+		return r.abandonClaim(j, wi, err2, err2.Error())
+	}
+	// polyforge#106: deploy-time fail-closed probe on the claim path — an
+	// in-flight legacy-only capsule (an execution.json the driver never
+	// wrote) is refused, never converted.
+	if err := r.requireDriverStampedState(j); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: %v\n", wi, err)
+		return r.abandonClaim(j, wi, err, err.Error())
+	}
+	{
+		// The derivation IS a derivation (B2): advance the counter so the
+		// RTStarted emission carries SpawnN ≥ 1. The observe lane refuses
+		// to attach a monitor on SpawnN ≤ 0 ("RTStarted without
+		// handle/spawn_n/wi-info"), and the step ordinals the driver
+		// derives seed from this counter — both the fence and the monitor
+		// face need it to move.
 		j.mu.Lock()
 		j.spawnN++
 		spawnN := int64(j.spawnN)
 		j.mu.Unlock()
-		h, err2 = r.cfg.AgentStarter(ctx, AgentStartInput{
+		h, err2 := starter(ctx, AgentStartInput{
 			WI:            j.wi,
 			Project:       j.project,
 			CapsuleDir:    j.capsuleDir,
@@ -859,19 +861,22 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		if err2 != nil {
 			return r.abandonClaim(j, wi, err2, "driver start: "+err2.Error())
 		}
-	} else {
-		// legacy path (tests exercising the WI-Agent RPC model directly)
-		h, err2 = r.spawnAgent(ctx, j, false, "")
-		if err2 != nil {
-			return r.abandonClaim(j, wi, err2, "spawn agent: "+err2.Error())
+		// Bind the handle as the job's agent so the supervision and answer
+		// surfaces can reach the engine. A bridge handle fronts no child
+		// process group (its PID() answers the hosting daemon's own pid —
+		// never signalable), so the recorded pid is zeroed for it; a
+		// scripted test engine's real child pid is recorded verbatim for
+		// the tree killer.
+		pid := h.PID()
+		if pid == os.Getpid() {
+			pid = 0
 		}
+		j.mu.Lock()
+		j.agent = h
+		j.agentPID = pid
+		j.agentStartedAt = h.StartedAt()
+		j.mu.Unlock()
 	}
-	_ = h
-	// v2: bind the AgentStarter's handle as the job's agent so the
-	// supervision and answer surfaces can reach the bridge.
-	j.mu.Lock()
-	j.agent = h
-	j.mu.Unlock()
 	r.mu.Lock()
 	r.jobs[id] = j
 	r.mu.Unlock()

@@ -10,33 +10,36 @@ package test
 // the REAL aihub process's git face, and the outage is that process
 // being genuinely stopped mid-run.
 //
-// Same assertion depth as s17, per trigger: the push_backpressure event
-// carries reason "time"; the agent survives the whole episode under the
-// same non-zero PID with no recovery/respawn signal and no new attempt
-// instance; after the aihub returns the chain catches up (the bare repo
-// reaches the outage-written local commits) and a fresh published event
-// lands.
+// Driver/envelope edition (polyforge#106): the engine is the Go driver
+// bound to the real bridge — the version stream that arms the push
+// rounds is the driver's own transition writes, one per step boundary,
+// with each envelope action holding its step open long enough that the
+// outage window sees both a failing boundary push and the 3s time
+// elapse on the monitor's poll ticks. Same assertion depth as s17, per
+// trigger: the push_backpressure event carries reason "time"; the
+// ENGINE survives the whole episode under the same live handle with no
+// recovery/respawn signal and no new attempt instance; after the aihub
+// returns the chain catches up (the bare repo reaches the outage-written
+// local commits) and a fresh published event lands.
 
 import (
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 )
 
 func TestV1S18BackpressureTime(t *testing.T) {
 	inst := newV1Install(t)
-	// The plan keeps producing versions through the (short) outage
-	// window, then parks — the agent stays alive; degradation never
-	// kills and the scenario closes the WI itself.
-	actions := []map[string]any{{"do": "step", "id": "warm"}}
-	for i := 0; i < 8; i++ {
-		actions = append(actions,
-			map[string]any{"do": "step", "id": fmt.Sprintf("outage-%02d", i)},
-			map[string]any{"do": "sleep", "ms": 1000},
-		)
+	// The driver keeps producing versions through the (short) outage
+	// window, then completes — degradation never kills the engine and
+	// the scenario closes the WI itself. Each envelope action holds its
+	// step open (ms) so the outage window sits INSIDE the run.
+	actions := []map[string]any{
+		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true, "ms": 8000},
+		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 8000},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "handoff": true, "ms": 8000},
+		{"do": "envelope", "id": "release", "outcome": "completed", "ms": 6000},
 	}
-	actions = append(actions, map[string]any{"do": "park"})
 	wi := inst.newWI(t, "s18: push backpressure (time trigger, inproc rig)",
 		actions, nil)
 	// The injected ladder: the time window is 3s, the steps threshold
@@ -45,28 +48,29 @@ func TestV1S18BackpressureTime(t *testing.T) {
 	t.Cleanup(func() { killOrphans(wi) })
 	rig.start(wi)
 
-	agentPID := func() int {
+	engineAlive := func() bool {
 		ji, ok := rig.rt.Info(wi)
-		if !ok || ji.Agent == nil {
-			return 0
+		if !ok {
+			return false
 		}
-		return ji.AgentPID
+		return ji.Agent != nil
 	}
-	waitUntil(t, 30*time.Second, "agent never spawned", func() bool {
-		return agentPID() > 0
+	waitUntil(t, 60*time.Second, "the engine never started", func() bool {
+		return engineAlive()
 	})
-	pid := agentPID()
 
 	// The push path is proven healthy before the outage: at least one
 	// version reached the aihub's bare repo over the real git face.
-	rig.waitEvent(t, wi, "published", 30*time.Second)
+	rig.waitEvent(t, wi, "published", 60*time.Second)
 
-	// The outage: stop the REAL aihub. The next push fails (the
+	// The outage: stop the REAL aihub. The driver's next boundary
+	// transition bumps the version, the monitor's push fails (the
 	// push_failed ledger opens the episode), and 3s after the last
-	// successful push the degradation event fires with reason "time".
+	// successful push the degradation event fires with reason "time"
+	// (checked on every poll tick — no new version needed).
 	inst.stopAihub()
-	rig.waitEvent(t, wi, "push_failed", 30*time.Second)
-	bp := rig.waitEvent(t, wi, "push_backpressure", 30*time.Second)
+	rig.waitEvent(t, wi, "push_failed", 60*time.Second)
+	bp := rig.waitEvent(t, wi, "push_backpressure", 60*time.Second)
 	var body struct {
 		Reason       string `json:"reason"`
 		FailedPushes int    `json:"failed_pushes"`
@@ -81,11 +85,11 @@ func TestV1S18BackpressureTime(t *testing.T) {
 		t.Fatalf("failed_pushes %d, want >= 1 (the episode is open)", body.FailedPushes)
 	}
 
-	// Degradation never kills the agent: same non-zero PID at the
-	// moment the event is observed, and the episode shows none of the
-	// recovery/respawn signals nor a new attempt instance.
-	if now := agentPID(); now == 0 || now != pid {
-		t.Fatalf("agent pid changed across the degradation: was %d, now %d", pid, now)
+	// Degradation never kills the engine: the handle is still live at
+	// the moment the event is observed, and the episode shows none of
+	// the recovery/respawn signals nor a new attempt instance.
+	if !engineAlive() {
+		t.Fatal("the engine handle died across the degradation")
 	}
 	eventKinds := func() []string {
 		var kinds []string
@@ -104,10 +108,11 @@ func TestV1S18BackpressureTime(t *testing.T) {
 		t.Fatalf("job_started fired %d times, want 1 (no new attempt instance): %v", n, kinds)
 	}
 
-	// The catch-up baseline: what the agent produced during the outage
+	// The catch-up baseline: what the driver produced during the outage
 	// lives as local commits in the capsule's chain. Bring the aihub
 	// back and demand the server-side bare repo reach that history plus
-	// a fresh published event.
+	// a fresh published event (the retry round or the next boundary
+	// push lands the backlog).
 	local := capsuleCommitCount(t, rig.dataDir, wi)
 	if local == 0 {
 		t.Fatal("no local commits after the outage episode")
@@ -119,8 +124,8 @@ func TestV1S18BackpressureTime(t *testing.T) {
 		return countOf(eventKinds(), "published") > publishedBefore
 	})
 
-	// The agent is STILL the same live process after the recovery.
-	if now := agentPID(); now == 0 || now != pid {
-		t.Fatalf("agent pid changed across the recovery: was %d, now %d", pid, now)
+	// The engine is STILL the same live handle after the recovery.
+	if !engineAlive() {
+		t.Fatal("the engine handle died across the recovery push")
 	}
 }

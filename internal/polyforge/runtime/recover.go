@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -125,20 +124,31 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 			storm, r.recoveryStabilityWindow().Seconds(), cause))
 		return
 	}
-	// Candidate-chain advancement (I2/INV-1g): ONLY a provider-class
-	// recovery moves the ordinal — business FAIL, rewind, hang, plain
-	// death and daemon restart never do (the mirror rule of
-	// v0/internal/workflow/drive/drive.go:70 CandidateOrdinal: the count
-	// advances on infra failures alone, gate-fail rewind resets it).
-	// Bounded and crash-safe: the advance is persisted in the job record
-	// BEFORE the re-derivation, and exhausting the list is NOT a terminal
-	// condition — the ordinal wraps to 0 (the storm guard owns
-	// terminality, not the candidate list).
-	r.advanceCandidate(j, cause)
-
 	// Kill the old tree first (§一 Recover): six layers, no writer may
-	// survive next to the re-derivation.
+	// survive next to the re-derivation — and none may survive a
+	// fail-closed verdict either, so this runs before the probe below.
 	r.killAgentTree(j)
+
+	// polyforge#106: the deploy-time fail-closed probe. An in-flight WI
+	// whose capsule state is LEGACY-ONLY — an execution.json the driver
+	// never wrote (no bundle_digest stamp; the deleted WI-Agent engine
+	// wrote none, and the preserved legacy fixture proves the shape) —
+	// is refused outright: no re-derivation, no conversion, no migration
+	// path. The refusal names the WI and the missing driver stamp and
+	// hands the WI to its owner blocked (M2: the human is the only
+	// remediation door).
+	if err := r.requireDriverStampedState(j); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: %v\n", j.wi, err)
+		if r.cfg.EventTap != nil {
+			r.cfg.EventTap(j.wi, "legacy_only_state_refused", map[string]any{
+				"capsule_dir": j.capsuleDir,
+				"cause":       cause,
+				"note":        "in-flight legacy-only state at deploy: no migration path — restore a driver-written capsule or close the work item by hand",
+			})
+		}
+		r.boundedFail(ctx, j, err.Error())
+		return
+	}
 
 	// commit-dirty-on-recover (§六): the dead agent's unflushed capsule
 	// state is committed and pushed BEFORE the new instance can touch the
@@ -167,59 +177,73 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	// instead of the claim-era one. Best-effort, loud on failure.
 	r.refreshBundle(j)
 
+	// The engine binding is the driver or NOTHING (polyforge#106): the
+	// legacy in-package WI-Agent spawn is deleted, so a nil starter is a
+	// misassembled runtime, not an engine choice — refused loudly, never
+	// fallen back from.
+	starter := r.cfg.AgentStarter
+	if starter == nil {
+		r.boundedFail(ctx, j, "runtime misassembly: no execution engine bound (Config.AgentStarter is nil) — the legacy in-package WI-Agent engine was deleted (polyforge#106); the daemon binds the driver bridge starter unconditionally at assembly")
+		return
+	}
+
 	// The storm guard (§三): each FAILED recovery ladder spends one unit
 	// of the budget; a successful recovery RESETS it (a healthy relaunch
 	// must never inherit earlier failures). Only when MaxRecoveries
 	// recoveries have FAILED outright does the WI bounded-fail — never
 	// merely because it has recovered before.
 	for {
-		// v2: driver WI — restart the Go Driver via the bridge (it reads
-		// execution.json and continues from the current step; the recovery
-		// steps above — killTree, commitDirty — already ran).
-		if r.cfg.AgentStarter != nil {
-			// The relaunch is a fresh derivation (B2): advance the counter,
-			// exactly as the legacy spawnAgent path does. The seed is the
-			// CAPSULE SPAWN JOURNAL max, not the job's counter (the #99
-			// verification lesson): the driver's internal step ordinals run
-			// ahead of the relaunch counter without ever writing back, so a
-			// job-counter seed re-derives an ordinal the dead driver already
-			// used — two step processes on one drop path, the fence
-			// defeated. The journal is the one ledger BOTH lanes append every
-			// derivation to; seeding past its max restores the fence.
+		// Driver WI: restart the Go Driver via the bound engine starter
+		// (it reads execution.json and continues from the current step;
+		// the recovery steps above — killTree, commitDirty — already ran).
+		// The relaunch is a fresh derivation (B2): advance the counter.
+		// The seed is the CAPSULE SPAWN JOURNAL max, not the job's counter
+		// (the #99 verification lesson): the driver's internal step ordinals
+		// run ahead of the relaunch counter without ever writing back, so a
+		// job-counter seed re-derives an ordinal the dead driver already
+		// used — two step processes on one drop path, the fence defeated.
+		// The journal is the one ledger every derivation appends to;
+		// seeding past its max restores the fence.
+		j.mu.Lock()
+		if m := maxSpawnNFromJournal(j.capsuleDir); m > j.spawnN {
+			j.spawnN = m
+		}
+		j.spawnN++
+		ordinal := int64(j.spawnN)
+		j.mu.Unlock()
+		h, err := starter(ctx, AgentStartInput{
+			WI:            j.wi,
+			Project:       j.project,
+			CapsuleDir:    j.capsuleDir,
+			BundleName:    j.bundleName,
+			BundleDigest:  j.bundleDigest,
+			SessionHandle: j.sessionFingerprint,
+			SpawnN:        ordinal,
+			Spawner:       r.spawner,
+		})
+		if err == nil {
+			// A bridge handle fronts no child process group (its PID()
+			// answers the hosting daemon's own pid — never signalable), so
+			// the recorded pid is zeroed for it; a scripted test engine's
+			// real child pid is recorded verbatim for the tree killer and
+			// the persisted record.
+			pid := h.PID()
+			if pid == os.Getpid() {
+				pid = 0
+			}
 			j.mu.Lock()
-			if m := maxSpawnNFromJournal(j.capsuleDir); m > j.spawnN {
-				j.spawnN = m
-			}
-			j.spawnN++
-			ordinal := int64(j.spawnN)
+			j.agent = h
+			j.agentPID = pid
+			j.agentStartedAt = h.StartedAt()
 			j.mu.Unlock()
-			h, err := r.cfg.AgentStarter(ctx, AgentStartInput{
-				WI:            j.wi,
-				Project:       j.project,
-				CapsuleDir:    j.capsuleDir,
-				BundleName:    j.bundleName,
-				BundleDigest:  j.bundleDigest,
-				SessionHandle: j.sessionFingerprint,
-				SpawnN:        ordinal,
-				Spawner:       r.spawner,
-			})
-			if err == nil {
-				j.mu.Lock()
-				j.agent = h
-				j.mu.Unlock()
-				// persisted with the advanced counter (crash-safe, same
-				// as the legacy lane's spawnAgent write)
-				if perr := r.persist(); perr != nil {
-					fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
-				}
-				r.recovered(j, h, cause, false)
-				return
+			// persisted with the advanced counter (crash-safe)
+			if perr := r.persist(); perr != nil {
+				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
 			}
-			fmt.Fprintf(os.Stderr, "runtime: %s: driver recovery failed: %v\n", j.wi, err)
+			r.recovered(j, h, cause)
+			return
 		}
-		if r.cascade(ctx, j, cause) {
-			return // recovered (or otherwise settled) — budget already reset
-		}
+		fmt.Fprintf(os.Stderr, "runtime: %s: engine relaunch failed: %v\n", j.wi, err)
 		j.mu.Lock()
 		j.recoverFails++
 		fails := j.recoverFails
@@ -235,92 +259,50 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	}
 }
 
-// cascade runs the resume→fresh ladder for one recovery attempt. It
-// answers true when a re-derivation went live (the caller's budget is
-// reset inside); false when the ladder failed outright and the caller
-// must spend budget / retry.
-//
-// The resume discriminator (§七) is transcript readability of the DEAD
-// instance's session record — with F3 there are two physical sources:
-// the capsule's declared copy (session/session-<spawn-token>.jsonl, synced
-// by the daemon at every commit boundary) and, when that is missing, the
-// harness-store live file (the recorded live transcript, or a fresh
-// scan keyed by the dead instance's spawn moment). The resume derivation
-// hands the harness --session pointing at the capsule copy when it is
-// readable — the resumed agent then appends straight into the capsule —
-// and at the live file otherwise (v0's measured finding: the harness
-// resumes from any .jsonl path).
-func (r *Runtime) cascade(ctx context.Context, j *job, cause string) bool {
-	j.mu.Lock()
-	resumeDead := j.resumeDead
-	j.mu.Unlock()
-	if src := r.resumeSource(j); !resumeDead && src != "" {
-		for {
-			h, err := r.spawnAgent(ctx, j, true, src)
-			if err == nil {
-				r.recovered(j, h, cause, true)
-				return true
-			}
-			fmt.Fprintf(os.Stderr, "runtime: %s: resume derivation failed: %v\n", j.wi, err)
-			j.mu.Lock()
-			j.resumeFails++
-			if j.resumeFails >= r.cfg.MaxResumeFails {
-				j.resumeDead = true
-			}
-			dead := j.resumeDead
-			j.mu.Unlock()
-			if dead {
-				break // two consecutive resume failures: switch to fresh
-			}
+// requireDriverStampedState is the deploy-time fail-closed probe
+// (polyforge#106): an in-flight WI whose execution.json is LEGACY-ONLY —
+// it parses but carries no bundle_digest, the stamp every driver write
+// carries (driver/transition.go) and the deleted WI-Agent engine never
+// wrote (the preserved legacy fixture is the reference shape) — is
+// refused. Terminal verdicts are NOT legacy-only state: a completed or
+// failed capsule closes through the terminal wiring without any engine,
+// and a missing or unparsable execution.json is a pre-init scene the
+// driver initializes itself. The error names the WI and the missing
+// stamp and offers no migration path.
+func (r *Runtime) requireDriverStampedState(j *job) error {
+	raw, err := os.ReadFile(filepath.Join(j.capsuleDir, capsule.ExecutionJSON))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // pre-init: the driver initializes the file
 		}
+		return nil // unreadable is the terminal wiring's/capsule repair's problem, not a legacy marker
 	}
-	h, err := r.spawnAgent(ctx, j, false, "")
-	if err == nil {
-		r.recovered(j, h, cause, false)
-		return true
+	var exec capsule.Execution
+	if json.Unmarshal(raw, &exec) != nil {
+		return nil // unparsable: not a legacy marker
 	}
-	fmt.Fprintf(os.Stderr, "runtime: %s: fresh derivation failed: %v\n", j.wi, err)
-	return false
-}
-
-// resumeSource answers the session file a resume derivation should
-// continue from ("" = nothing resumable, go fresh): the capsule's
-// declared copy first, the harness-store live file as the fallback.
-func (r *Runtime) resumeSource(j *job) string {
-	j.mu.Lock()
-	transcript := j.transcript
-	live := j.liveTranscript
-	startedAt := j.agentStartedAt
-	capsuleDir := j.capsuleDir
-	j.mu.Unlock()
-	if transcriptReadable(transcript) {
-		return transcript
+	switch exec.WorkflowStatus {
+	case capsule.WorkflowStatusCompleted,
+		capsule.WorkflowStatusFailedGate, capsule.WorkflowStatusFailedRewindExhausted,
+		capsule.WorkflowStatusBlocked:
+		return nil // terminal verdicts close without any engine
 	}
-	if live != "" && transcriptReadable(live) {
-		return live
+	if exec.BundleDigest != "" {
+		return nil // driver-stamped: the engine may continue it
 	}
-	// Not recorded (the spawn-moment scan raced the harness's file
-	// creation) — scan now: at recovery time the dead instance's live
-	// file has long existed, so a hit here is its transcript.
-	if spawnAt, err := time.Parse(time.RFC3339Nano, startedAt); err == nil {
-		if scanned := r.locateLive(capsuleDir, spawnAt); scanned != "" && transcriptReadable(scanned) {
-			return scanned
-		}
-	}
-	return ""
+	return fmt.Errorf("wi %s: LEGACY-ONLY in-flight state: execution.json carries no driver journal stamp (bundle_digest) — it was written by the WI-Agent engine deleted in polyforge#106; no migration path is offered: restore a driver-written capsule or close the work item by hand", j.wi)
 }
 
 // recovered finishes a successful re-derivation. A successful recovery
 // RESETS the failure budget — the counter is spent by failures only.
 // v1.5: RTRecovered carries SpawnN (the B2 fence key) and the in-process
 // session secret (the observe lane's M4 revalidation reads it); identity
-// otherwise changes NOT AT ALL — no new attempt, no generation bump.
-func (r *Runtime) recovered(j *job, h AgentHandle, cause string, resumed bool) {
+// otherwise changes NOT AT ALL — no new attempt, no generation bump. (The
+// resume-failure bookkeeping died with the legacy resume→fresh cascade —
+// polyforge#106: every relaunch is a fresh driver derivation.)
+func (r *Runtime) recovered(j *job, h AgentHandle, cause string) {
 	j.mu.Lock()
 	j.recoverFails = 0
-	if resumed {
-		j.resumeFails = 0 // a successful resume breaks the failure streak
-	}
 	spawnN := j.spawnN
 	pid := j.agentPID
 	j.mu.Unlock()
@@ -361,40 +343,6 @@ func (r *Runtime) recoveryStabilityWindow() time.Duration {
 		return r.cfg.RecoveryStabilityWindow
 	}
 	return 60 * time.Second
-}
-
-// advanceCandidate moves the effective model-candidate ordinal one
-// step when — and only when — the recovery cause is provider-class.
-// See recoverCore for the full rule statement.
-func (r *Runtime) advanceCandidate(j *job, cause string) {
-	j.mu.Lock()
-	n := len(j.candidates)
-	if n == 0 || cause != protocol.RecoverProviderError {
-		j.mu.Unlock()
-		return
-	}
-	j.candidateOrdinal = (j.candidateOrdinal + 1) % n
-	ord := j.candidateOrdinal
-	j.mu.Unlock()
-	// crash-safe (I2): the advanced ordinal is durable before any
-	// re-derivation is attempted, so a crash mid-recovery resumes the
-	// SAME effective candidate.
-	if err := r.persist(); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
-	}
-	fmt.Fprintf(os.Stderr, "runtime: %s: provider failure advances the candidate chain to ordinal %d\n", j.wi, ord)
-}
-
-// effectiveModel answers the harness model id the next derivation of j
-// must be pinned to ("" = no chain: the harness adapter's default).
-func (j *job) effectiveModel() string {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	n := len(j.candidates)
-	if n == 0 {
-		return ""
-	}
-	return j.candidates[j.candidateOrdinal%n]
 }
 
 // boundedFail terminates the WI without a relaunch: SessionEnd(blocked)
@@ -441,142 +389,6 @@ func commitDirty(r *Runtime, j *job) {
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)
 	}
-}
-
-// transcriptReadable is the recovery engine's ONLY discriminator (§七):
-// the recorded harness transcript exists, is non-empty and its first line
-// parses as a JSON record. Anything else — missing, empty, truncated to
-// zero bytes by the crash — reads as "no transcript" and routes to a
-// fresh derivation.
-func transcriptReadable(path string) bool {
-	if path == "" {
-		return false
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil || len(raw) == 0 {
-		return false
-	}
-	first := raw
-	if i := strings.IndexByte(string(raw), '\n'); i >= 0 {
-		first = raw[:i]
-	}
-	first = []byte(strings.TrimSpace(string(first)))
-	if len(first) == 0 {
-		return false
-	}
-	var probe map[string]any
-	return json.Unmarshal(first, &probe) == nil
-}
-
-// spawnAgent derives one agent instance (resume or fresh), journals the
-// spawn identity and installs the handle under the job lock.
-//
-// v1.5 identity rule (B2): the ONLY identity change across a recovery is
-// spawn_n++ — no new attempt, no generation. The derivation ordinal is
-// state.json's spawn_n + 1 (the fresh-clone seeding happened at
-// startClaimed); the fence token for the transition protocol is the
-// session fingerprint ("#N" appended for re-derivations, mirroring the
-// v1 attempt#N shape), and the journal line records the ordinal so a
-// later fresh clone continues the counter.
-//
-// transcript is the resume source (the file the resumed derivation
-// continues); "" for a fresh derivation, which declares its own
-// token-named capsule copy path instead (sessionPathFor). The live
-// transcript — the file this derivation actually appends to — is
-// recorded on the job: the resume source verbatim, or the located
-// harness-store file for a fresh derivation ("" while the harness has
-// not created it yet; observe re-locates at its sync points).
-func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcript string) (AgentHandle, error) {
-	j.mu.Lock()
-	spawnN := j.spawnN
-	capsuleDir := j.capsuleDir
-	sessionFp := j.sessionFingerprint
-	j.mu.Unlock()
-	// the derivation ordinal this derivation will carry once installed
-	// — the journal must name the process that is live when Spawn
-	// returns. token is the LOCAL display name (the public fingerprint,
-	// "#N"-suffixed after re-derivations) used only for the capsule-side
-	// transcript path and the spawn journal; the protocol fence is the
-	// counter itself.
-	ordinal := spawnN + 1
-	token := sessionFp
-	if ordinal > 1 {
-		token = fmt.Sprintf("%s#%d", sessionFp, ordinal-1)
-	}
-	var live string
-	if resume {
-		live = transcript
-		// A resumed derivation CONTINUES the resume source: the declared
-		// transcript stays that file (for a capsule-copy resume the agent
-		// appends straight into the capsule — the C1 win — and a live-file
-		// resume keeps the harness store as its session file).
-		j.mu.Lock()
-		j.transcript = transcript
-		j.mu.Unlock()
-	} else {
-		j.mu.Lock()
-		j.transcript = sessionPathFor(capsuleDir, token)
-		j.mu.Unlock()
-	}
-	j.mu.Lock()
-	declared := j.transcript
-	j.mu.Unlock()
-	p := SpawnParams{
-		WorkItemID:     j.wi,
-		CapsuleDir:     capsuleDir,
-		SessionHandle:  sessionFp,
-		SpawnN:         ordinal,
-		TranscriptPath: declared,
-		Resume:         resume,
-		InitialPrompt:  r.buildPrompt(j, resume),
-		CgroupPath:     r.cgroupPathFor(j.wi),
-		// F4: the spawn is pinned to the effective candidate of the
-		// persisted chain (spawn.go documents why this rides argv).
-		Model: j.effectiveModel(),
-	}
-	p.Journal = func(pid int, startedAt string) error {
-		return writeSpawnJournal(p, pid, startedAt, token)
-	}
-	h, err := r.spawner.Spawn(ctx, p)
-	if err != nil {
-		return nil, err
-	}
-	// F3: record the live transcript after the derivation is live. For a
-	// fresh derivation this is a best-effort one-shot scan — the harness
-	// may not have created the file yet (the first turn creates it), in
-	// which case the record stays empty and every consumer re-locates on
-	// demand. Never fatal, never blocking.
-	if !resume {
-		if spawnAt, perr := time.Parse(time.RFC3339Nano, h.StartedAt()); perr == nil {
-			live = r.locateLive(capsuleDir, spawnAt)
-		}
-	}
-	j.mu.Lock()
-	j.spawnN = ordinal
-	j.agent = h
-	j.agentPID = h.PID()
-	j.agentStartedAt = h.StartedAt()
-	j.liveTranscript = live
-	j.mu.Unlock()
-	return h, nil
-}
-
-// buildPrompt assembles the WI agent's initial instruction: the executor
-// preamble (from the daemon's configured prompt file when set) plus the
-// WI/capsule identity and the resume-or-fresh framing.
-func (r *Runtime) buildPrompt(j *job, resume bool) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Work item %s (project %s, session %s). Capsule root: %s. ",
-		j.wi, j.project, j.sessionFingerprint, j.capsuleDir)
-	if j.bundleName != "" {
-		fmt.Fprintf(&b, "Workflow bundle %s (digest %s). ", j.bundleName, j.bundleDigest)
-	}
-	if resume {
-		fmt.Fprintf(&b, "This is a crash continuation: resume your session from the transcript at %s and continue the work item.", j.transcript)
-	} else {
-		fmt.Fprintf(&b, "This is a fresh derivation. Earlier attempt transcripts under the capsule session directory describe the previous agent's reasoning; read them for context before starting.")
-	}
-	return b.String()
 }
 
 // killAgentTree tears the current agent's whole tree down through the six

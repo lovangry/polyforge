@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/bridge"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -175,6 +176,20 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 	// here in the historical order for readability.
 	rtCfg.RecordTap = rig.tapRecord
 	sp := runtime.DefaultSpawner(&rtCfg)
+	// polyforge#106: the driver IS the engine — the rig binds the real
+	// bridge starter (the production mapping), so the in-process
+	// scenarios run the same execution engine the daemon runs.
+	rtCfg.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+		return bridge.Start(ctx, bridge.Config{
+			WI:            in.WI,
+			CapsuleDir:    in.CapsuleDir,
+			BundleName:    in.BundleName,
+			BundleDigest:  in.BundleDigest,
+			SessionHandle: in.SessionHandle,
+			SpawnN:        in.SpawnN,
+			Spawner:       in.Spawner,
+		})
+	}
 
 	rtMsgs := make(chan protocol.RTMsg, 64)
 	obMsgs := make(chan protocol.OBMsg, 64)

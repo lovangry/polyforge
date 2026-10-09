@@ -3,9 +3,9 @@ package runtime
 // info.go: the exported per-job READ face the phase-3 daemon assembly
 // needs (the only surface the daemon may use beside Start/Stop/Restart
 // and the protocol channels): the local status projection (GET /status),
-// the RT→Attach bridge's observe-attachment synthesis, the shutdown
-// sequence's live-job enumeration and the stop_notice delivery. Purely
-// additive: the state machine and every writer stay untouched.
+// the RT→Attach bridge's observe-attachment synthesis and the shutdown
+// sequence's live-job enumeration. Purely additive: the state machine
+// and every writer stay untouched.
 
 import (
 	"time"

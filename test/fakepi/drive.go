@@ -122,13 +122,11 @@ type plan struct {
 	// FailSpawnResume true makes every RESUME derivation die AT BIRTH:
 	// the process exits before it reads one byte of stdin, so the
 	// daemon's initial-prompt injection finds no reader, the pipe write
-	// fails and Spawn itself returns an error. That is the ONLY shape the
-	// spawn-failure ladder counts as a failed resume
-	// (runtime.Runtime.cascade increments resumeFails on a spawnAgent
-	// error and nothing else). A derivation that accepts the prompt and
-	// dies AFTERWARDS is a materially different lane — a new agent_death
-	// recovery, which RESETS the budgets — so this mode must never
-	// degrade into that one; see the pipe-capacity contract below.
+	// fails and Spawn itself returns an error. A derivation that accepts
+	// the prompt and dies AFTERWARDS is a materially different lane — a
+	// new agent_death recovery, which RESETS the budgets — so this mode
+	// must never degrade into that one; see the pipe-capacity contract
+	// below.
 	FailSpawnResume bool `json:"fail_spawn_resume"`
 	// FailSpawnFresh true makes every fresh RE-derivation die the same
 	// way. "Re-derivation" is discriminated on the derivation counter the

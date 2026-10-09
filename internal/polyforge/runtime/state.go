@@ -150,10 +150,8 @@ type jobRecord struct {
 	// of derivations this session has run. Same-machine restarts and
 	// recoveries continue from it; a fresh clone (takeover) re-seeds it
 	// from the capsule's spawn journal.
-	SpawnN       int  `json:"spawn_n"`
-	RecoverFails int  `json:"recover_fails"` // consecutive failed recoveries
-	ResumeFails  int  `json:"resume_fails"`
-	ResumeDead   bool `json:"resume_dead"`
+	SpawnN       int `json:"spawn_n"`
+	RecoverFails int `json:"recover_fails"` // consecutive failed recoveries
 	// StormFails/LastRecoveryAt persist the entry-rate storm guard (v2):
 	// rapid recoverCore re-entries survive a daemon crash inside the
 	// storm window. RFC3339Nano; zero = never recovered.
@@ -169,14 +167,6 @@ type jobRecord struct {
 	BundleDigest   string `json:"bundle_digest"`
 	AgentPID       int    `json:"agent_pid"`
 	AgentStart     string `json:"agent_started_at"`
-	// Candidates is the bundle's workflow-level defaults model_candidates
-	// chain (the F4 lane): every derivation spawn pins the candidate at
-	// CandidateOrdinal. Both are persisted so a restart resumes the SAME
-	// effective candidate (I2: the ordinal is crash-safe bookkeeping, not
-	// in-memory state). Empty Candidates = no chain: the harness adapter's
-	// default model stays in effect.
-	Candidates       []string `json:"candidates,omitempty"`
-	CandidateOrdinal int      `json:"candidate_ordinal,omitempty"`
 }
 
 func (j *job) record() *jobRecord {
@@ -196,8 +186,6 @@ func (j *job) record() *jobRecord {
 		CleanPause:         j.cleanPause,
 		SpawnN:             j.spawnN,
 		RecoverFails:       j.recoverFails,
-		ResumeFails:        j.resumeFails,
-		ResumeDead:         j.resumeDead,
 		StormFails:         j.stormFails,
 		LastRecoveryAt:     stampIfSet(j.lastRecoveryAt),
 		Transcript:         j.transcript,
@@ -206,8 +194,6 @@ func (j *job) record() *jobRecord {
 		BundleDigest:       j.bundleDigest,
 		AgentPID:           j.agentPID,
 		AgentStart:         j.agentStartedAt,
-		Candidates:         j.candidates,
-		CandidateOrdinal:   j.candidateOrdinal,
 	}
 }
 
@@ -240,21 +226,17 @@ func jobFromRecord(rec *jobRecord) *job {
 			Username:    rec.WorkItemID,
 			Secret:      rec.SessionID,
 		},
-		cleanPause:       rec.CleanPause,
-		spawnN:           rec.SpawnN,
-		recoverFails:     rec.RecoverFails,
-		resumeFails:      rec.ResumeFails,
-		resumeDead:       rec.ResumeDead,
-		stormFails:       rec.StormFails,
-		lastRecoveryAt:   parseStamp(rec.LastRecoveryAt),
-		transcript:       rec.Transcript,
-		liveTranscript:   rec.LiveTranscript,
-		bundleName:       rec.BundleName,
-		bundleDigest:     rec.BundleDigest,
-		agentPID:         rec.AgentPID,
-		agentStartedAt:   rec.AgentStart,
-		candidates:       rec.Candidates,
-		candidateOrdinal: rec.CandidateOrdinal,
+		cleanPause:     rec.CleanPause,
+		spawnN:         rec.SpawnN,
+		recoverFails:   rec.RecoverFails,
+		stormFails:     rec.StormFails,
+		lastRecoveryAt: parseStamp(rec.LastRecoveryAt),
+		transcript:     rec.Transcript,
+		liveTranscript: rec.LiveTranscript,
+		bundleName:     rec.BundleName,
+		bundleDigest:   rec.BundleDigest,
+		agentPID:       rec.AgentPID,
+		agentStartedAt: rec.AgentStart,
 	}
 }
 
