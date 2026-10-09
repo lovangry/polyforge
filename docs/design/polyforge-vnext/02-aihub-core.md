@@ -6,6 +6,18 @@
 | 上游基线 | `00-architecture.md`（全部术语与不变量的唯一权威基线；本文只交叉引用，不重复定义） |
 | 术语权威 | 本文负责：Core、单 active Service、owner generation、assignee/waiting_on、attrs 拆分、workflow 引用（bundle_name/bundle_digest/budget 基线）、parent_id（epic-lite）与依赖边、project membership 权限硬边界、进度 read-through、AIHub 本地目录布局 |
 
+> **执行模型勘误（polyforge#111 删除 pass，2026-10-09）**：Phase-3 引擎切换（`d9bb866`/`f2163fe`）后，默认执行模型是
+> Daemon 进程内的 **Go 执行驱动**（`internal/polyforge/driver`，`pf daemon -use-driver` 默认开启）；WI-Agent 派生进程
+> 仅在显式选择的旧引擎（`pf daemon -use-driver=false`）下仍存在。本文写于 WI-Agent 模型，正文不整篇重写；
+> 每处「WI Agent」引用按下列行尾标记分类（可机械检索 `#111分类`）：
+>
+> - **〔#111分类：删→驱动〕** —— 该行所述的 WI Agent 进程机制在默认引擎下已删除，职责由驱动承接；按「执行者 = 驱动」读，裁定本身仍有效。
+> - **〔#111分类：替换后仍成立〕** —— 该行陈述在「执行者 = 驱动」替换下逐字仍成立。
+> - **〔#111分类：历史记录〕** —— 引用裁定/历史文档的原文或历史命名，按原样保留，不代表当前执行模型。
+>
+> **未清理声明**：本 pass 只覆盖 02/03/05 三文；`00-architecture.md`（86 行）、`01-workflow-skills.md`（27 行）、
+> `04-local-runtime.md`（100 行）、`07-deployment-pilot.md`（22 行）仍携带未分类的 WI-Agent 引用，不属于 polyforge#111 的验收范围。
+
 ## 1. 范围与非目标 <!-- §1 -->
 
 ### 1.1 范围 <!-- §1.1 -->
@@ -230,7 +242,7 @@ CREATE TABLE claim_idempotency (
 
 **NULL = 纯登记票**：三列可空，且由 §4.2 的 CHECK 强制同 NULL 或同非 NULL。`bundle_name IS NULL` 的 WI 是**纯登记票**（registration-only）：仅承载 goal/content/labels/attrs/parent_id 等登记信息——**不可 claim**（`CORE-409`（`reason=NOT_CLAIMABLE`），§6.1；无 owner_generations 行、无 Capsule 现场），**不可 submit**（块上传与 manifest 提交端点一律 `CORE-409`，无 Revision 可发布）；状态机上只能停在 `queued` 或被 `cancel`（§6.5）。非 NULL 时即为**执行票**，受 §4.5 创建时校验与固化约束。NULL 与非 NULL 之间不存在任何 UPDATE 路径（INV-2e）：登记票不得事后补挂 workflow，执行票不得降级为登记票——不存在 NULL→非 NULL 的任何升级路径；要执行某登记票承载的内容，唯一路径是为它创建子票（epic-lite，§4.2a；子票自身可为执行票），父票保持登记票不变。epic 父票（§4.2a）必为登记票。
 
-**AIHub 完全退出 step skill / subagent 文本管理**：不存储、不解析、不校验内容、不分发任何 step skill 或 subagent 定义正文——这些是 harness 层事务；创建事务对 `agents/*.md` 仅做存在性检查与按字节摘要（仅作为 digest 计算输入，`01-workflow-skills.md#§4.1` V7），摘要结果本身不落库。执行侧（WI Agent/Daemon 所在机器）以 `bundle_name` + `bundle_digest` 为键在本地 bundle 目录取得内容并自行按 digest 规则校验（计算规则权威在 `01-workflow-skills.md#§4.5`；本地 bundle 与 digest 不符即 `WF-203` 的重建场景完全在 harness 侧完成，Core 无任何文件取回端点）。
+**AIHub 完全退出 step skill / subagent 文本管理**：不存储、不解析、不校验内容、不分发任何 step skill 或 subagent 定义正文——这些是 harness 层事务；创建事务对 `agents/*.md` 仅做存在性检查与按字节摘要（仅作为 digest 计算输入，`01-workflow-skills.md#§4.1` V7），摘要结果本身不落库。执行侧（WI Agent/Daemon 所在机器）以 `bundle_name` + `bundle_digest` 为键在本地 bundle 目录取得内容并自行按 digest 规则校验（计算规则权威在 `01-workflow-skills.md#§4.5`；本地 bundle 与 digest 不符即 `WF-203` 的重建场景完全在 harness 侧完成，Core 无任何文件取回端点）。 〔#111分类：删→驱动〕
 
 **不可变（对象是 WI 记录的 bundle 引用；B07 裁定）**：三列随创建事务（§4.5）写入后不存在任何 UPDATE 路径（INV-2e）；`PATCH /api/v1/work-items/{id}` 的可更新字段集不含这三个键名，携带即 `CORE-400`。不可变的是 **WI 记录的 bundle 引用（`bundle_name`/`bundle_digest`）**（`00-architecture.md#§2.3` INV-8 的 Core 侧）——Core 只承诺该引用创建后不再变更，**不存在 Core 侧的「版本锁定」承诺**：执行侧以 pin digest 为校验目标，本机 checkout 与 pin 不一致属配置事故（告警、继续执行，v1 信任内网；`01-workflow-skills.md#§5.2` WF-203 与 `03-execution-capsule.md#§4.5` 的「告警不硬拒」），Core 无任何阻断或版本回取路径。变更 workflow 引用的唯一路径是取消当前 WI 并新建（不存在「claim 前整体替换」窗口，§4.5）。
 
@@ -245,7 +257,7 @@ CREATE TABLE claim_idempotency (
 **适用范围**：仅 `bundle_name` 非 NULL 的执行票。`bundle_name` 为 NULL 或缺省时创建纯登记票（§4.4），跳过本节全部步骤（无 workflow 读取/校验、无 digest 固化，三 workflow 列落 NULL；epic 父票亦然，§4.2a）。
 
 1. **读取对象**：创建 body 携带非空 `bundle_name`；AIHub 服务端读本机 aihub checkout 内该 bundle 的 workflow.md **frontmatter**。checkout 路径与 bundle 定位规则是部署配置项（随部署给定），不落库、不经 API。对 `agents/*.md` 只做存在性检查与按字节摘要（digest 计算输入，`01-workflow-skills.md#§4.1` V7），不解析、不校验其内容、不落库（§4.4）。
-2. **严格校验（仅作用于 frontmatter，结果不落库）**：按 `01-workflow-skills.md#§4.1` 的 V 规则全集校验 workflow.md 的 frontmatter（唯一结构 schema）——含各字段类型与取值、`on_fail` rewind 目标存在且更早（V5）、budget 数值类型与 >0（V6）等。**Markdown 正文不解析、不校验、不落库**——正文是 WI Agent 第 0 步加载的流程级说明（`03-execution-capsule.md#§4.5`），不在 AIHub 校验边界内。任一规则失败 → 创建整体失败 `CORE-400`（`detail` 携带命中的 `rule_id`）。
+2. **严格校验（仅作用于 frontmatter，结果不落库）**：按 `01-workflow-skills.md#§4.1` 的 V 规则全集校验 workflow.md 的 frontmatter（唯一结构 schema）——含各字段类型与取值、`on_fail` rewind 目标存在且更早（V5）、budget 数值类型与 >0（V6）等。**Markdown 正文不解析、不校验、不落库**——正文是 WI Agent 第 0 步加载的流程级说明（`03-execution-capsule.md#§4.5`），不在 AIHub 校验边界内。任一规则失败 → 创建整体失败 `CORE-400`（`detail` 携带命中的 `rule_id`）。 〔#111分类：删→驱动〕
 3. **digest 固化**：校验通过后按唯一规则（`01-workflow-skills.md#§4.5`）计算 `bundle_digest`（输入集 = `workflow.md` 与 `agents/*.md` 全部文件的字节内容），把 `bundle_name`、`bundle_digest` 与 workflow 级 budget 的三个基线 scalar 写入 `work_items`（§4.2/§4.4），与 repo inventory 冻结（§4.6）在同一创建事务内提交。frontmatter 解析结果、逐文件 `content_sha` 等一切校验/摘要中间产物**不落库**——落库的只有 `bundle_name` + `bundle_digest` + 三个基线 scalar（三 scalar 即 WI pin 的全部数据，§4.4）。
 4. **无重新固定路径**：三列不可变（INV-2e）；不存在「claim 前整体替换 pin」的窗口，确需变更 workflow 只能取消当前 WI（§6.5）并新建 WI 重新走创建流程。
 
@@ -269,7 +281,7 @@ CREATE TABLE workflow_budget_increments (
 
 **序列作用域裁定（与 §6.7 CAS 逐字一致）**：`seq` 的唯一作用域是单个 `work_item_id`——同一 WI 的 `requests`/`tokens`/`wall_minutes` 三个维度**共享同一条全局序列**（首行 seq=1，此后每次人工增量跨 dimension 取 max+1），`dimension` 只是行的属性列。任一 increment 恰好被计入一次：生效额度按 dimension 分组求和（见下），序列全局化不影响额度计算的确定性，只让并发 CAS 有单一比较对象。
 
-WI Agent 计算某维度当前有效上界时，取 `work_items.workflow_budget_baseline` 中该维度的基线 scalar（null = 无上界；创建时从 workflow.md frontmatter 抄录，§4.4/§4.5），加上 `workflow_budget_increments` 中该 `work_item_id`、该 `dimension` 全部行的 `amount` 之和；基线本身不被修改（INV-2e）。
+WI Agent 计算某维度当前有效上界时，取 `work_items.workflow_budget_baseline` 中该维度的基线 scalar（null = 无上界；创建时从 workflow.md frontmatter 抄录，§4.4/§4.5），加上 `workflow_budget_increments` 中该 `work_item_id`、该 `dimension` 全部行的 `amount` 之和；基线本身不被修改（INV-2e）。 〔#111分类：删→驱动〕
 
 ### 4.6 `wi_repo_inventory`（repo inventory 的 Core 权威存储） <!-- §4.6 -->
 
@@ -515,7 +527,7 @@ F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-se
 | **D. 机器（1 行：行 21）** | | | | | |
 | 21 | POST | `/api/v1/machines/heartbeat` | Daemon（machine api_key；首次注册由部署操作员以任一合法 human/admin api_key 发起） | 心跳 upsert（§4.10）：无该 `machine_id` 行则以本次调用完成注册（注册即首次心跳：同一事务建 machine user、绑定 `machines.user_id`、签发机器 api_key——明文仅响应一次），已有行仅刷新 `last_heartbeat_at`/`runtime_version`；幂等 | CORE-400 / CORE-401 |
 | **E. Memory（4 组 = 4 行：行 22–25；签名、写序与错误码权威在 `06-memory-search.md#§5.1`）** | | | | | |
-| 22 | POST/GET/PATCH | `/api/v1/memories`、`/api/v1/memories/{id}` | 客户端（WI Agent 经 Daemon 本地认证代理；人经 `pf` CLI） | 【CRUD 组】创建（POST，服务端分配 `mem_id`）/ 详情（GET，`format=html` 返回派生）/ 更新（PATCH，生成新版本 + FTS 先删后插）；三步写序与 `backupBarrier` 权威在 `06-memory-search.md#§5.2` | MEM-400 / MEM-404 / MEM-409 |
+| 22 | POST/GET/PATCH | `/api/v1/memories`、`/api/v1/memories/{id}` | 客户端（WI Agent 经 Daemon 本地认证代理；人经 `pf` CLI） | 【CRUD 组】创建（POST，服务端分配 `mem_id`）/ 详情（GET，`format=html` 返回派生）/ 更新（PATCH，生成新版本 + FTS 先删后插）；三步写序与 `backupBarrier` 权威在 `06-memory-search.md#§5.2` | MEM-400 / MEM-404 / MEM-409 〔#111分类：删→驱动〕 |
 | 23 | GET | `/api/v1/memories/search?q=&type=&tags=&limit=` | 同上 | 【检索组】实时文本检索（FTS trigram，§4.9）；两层过滤顺序（project membership 先行）权威在 `06-memory-search.md#§4.5` | MEM-400 / MEM-404 / MEM-503 |
 | 24 | POST/GET | `/api/v1/memories/{id}/redact`、`/api/v1/memories/{id}/share`、`/api/v1/share/<token>` | 客户端（`share` 仅该条 Memory 的 owner）；`/api/v1/share/<token>` 为**匿名只读消费**——无需 api_key | 【条目动作组】redact 软删除 / share 生成 owner 显式分享链接（A18 裁定：显式例外，不构成第六种 visibility）/ 匿名消费：`GET /share/<token>` 仅返回 token 对应的**单条** Memory 只读视图（无列表、无检索、无任何写操作、token 由 share 生成时随机签发且不可枚举；middleware 对该路径跳过 api_key/membership 校验，除该单条外不暴露任何对象存在性信息）；同组计 1 组 | MEM-403 / MEM-404 / MEM-409 |
 | 25 | POST | `/api/v1/memories/rebuild-index` | 管理 CLI（A12 裁定：管理 CLI 直写权威 Markdown 后调用本端点重建，不走在线 CRUD） | 【重建组】`memory_fts` 全量重建（派生物，可从权威 Markdown 完整重派生，§4.9/`06-memory-search.md#§5.3`） | MEM-502 |
@@ -589,7 +601,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 1. 读 `capsule_heads` 得 `(seq, generation)`；若该 WI 从未 claim 过，返回 `head_seq: null` 及当前 Core 状态即可，不做后续步骤。
 2. **进度不是 Core 侧的独立数据**，而是 HEAD 指向的那份 Revision 里 `runtime-state/execution.json`（权威 schema 见 `03-execution-capsule.md#§4.2`）的完整 JSON 内容本身——该文件当前 schema 未定义独立的 `progress` 字段，`current_step`/`workflow_status`/`steps`/`review_rounds`/`rewind_stats`/`budget_consumed`/`version` 等全部字段合起来就是对外可见的「进度」；若 `03` 未来新增专门的 `progress` 字段，本步骤改为只透传该字段，响应体的 `progress` 键形状不变。
 3. **每次调用都直接 read-through，不维护任何独立落盘的物化缓存**：调用 `05-sync-revision-recovery.md#§7.4` 的远端现场重建过程，按 HEAD 的 `seq` 重建该 Revision 对应的完整同步根文件集（checkpoint+增量或 bootstrap 重放），取其中 `runtime-state/execution.json` 路径对应的内容（通过 sha256 从 CAS 块解压读出并 JSON 解析），将其整体作为响应体的 `progress` 字段值原样返回，不改写、不落任何 Core 列、不做二次聚合存储。AIHub 内部实现可以对 CAS 块做常规的读缓存/页缓存优化，但这是实现细节而非契约：契约上不承诺、也不要求存在任何按 WI/HEAD 维护的进度物化文件，也不定义任何缓存失效协议。
-4. 新鲜度 = HEAD 更新时间，由 `05-sync-revision-recovery.md#§6` 的发布触发时机保证（HEAD 只在该流程的步骤 6 推进）；`freshness_note` 标注「数据截至最近一次发布」。AIHub 不主动向 Daemon/WI Agent 拉取实时状态，read-through 的读取对象永远是已发布的 Revision 现场，不是任何进程的内存状态。
+4. 新鲜度 = HEAD 更新时间，由 `05-sync-revision-recovery.md#§6` 的发布触发时机保证（HEAD 只在该流程的步骤 6 推进）；`freshness_note` 标注「数据截至最近一次发布」。AIHub 不主动向 Daemon/WI Agent 拉取实时状态，read-through 的读取对象永远是已发布的 Revision 现场，不是任何进程的内存状态。 〔#111分类：删→驱动〕
 
 ### 5.1a 事件与执行态键名附录（§2.6 INV-2c 引用的权威表） <!-- §5.1a -->
 
@@ -673,7 +685,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 6. **校验 `frozen_checkpoint`（绑定冻结后的最终本地检查点）**：`frozen_checkpoint` 必须含全部五个事实性子字段——`scanned_at` 早于本次请求到达时刻超过一个可配置窗口（缺省 60s）→ `CORE-425`（`reason=FROZEN_CHECKPOINT_STALE`，防止复用远早之前的一次扫描作为“冻结后最终”证据）；`bytes_digest` 缺失或非 64 位 hex → `CORE-425`（`reason=FROZEN_CHECKPOINT_MISSING`）；`worktree_state` 缺失同因拒绝。若 `matches_head` 为真但 `frozen_checkpoint.manifest_sha ≠ flush_evidence.manifest_sha`（自相矛盾）→ `CORE-425`（`reason=FROZEN_CHECKPOINT_MISMATCH`）；若 `matches_head` 为假 → `CORE-425`（`reason=UNPUBLISHED_CHANGES`，最后一次冻结扫描实际发现了与 HEAD 不一致的本地变化，必须先完成一次真正发布才能结束 generation）。证据因此绑定「冻结后的最终本地检查点」本身（字节聚合摘要 + worktree 状态摘要），不存在仅凭某个旧 HEAD 值直通的形态。
 8. **无 HEAD 的空链分支（与 `05-sync-revision-recovery.md#§6.1` SYNC-INV-9 逐字一致）**：若该 WI 从未发布过任一 Revision（`capsule_heads` 无行，bootstrap 亦未发生），第 4/5 步无校验对象；此时接受且仅接受 `published_seq=0`（哨兵值，与 `05-sync-revision-recovery.md#§2.1` 的 seq=0 首修订明确区分）、`manifest_sha` 为空、且 `frozen_checkpoint.bytes_digest == EMPTY_SYNC_BYTES_DIGEST`（空同步面聚合摘要常量：空列表的 canonical JSON 序列化摘要 `sha256("[]") = 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`，与 `05-sync-revision-recovery.md#§6.1` 逐字一致；该情形下忽略 `matches_head` 子字段）的 `flush_evidence`；`published_seq>0`、缺 `frozen_checkpoint`、或 `bytes_digest` 不等于该常量 → `CORE-425`（`reason=NOT_HEAD`/`MISSING`）。一旦本 generation 产生过任何同步面写入，必须先完成发布形成 HEAD，再回到常规校验，不得以空链分支静默丢弃改动。
 本协议不要求 `capsule_heads.generation` 必须等于调用方自己的 generation：如果本 generation 自始至终未产生任何改动（例如刚 claim 就立即 pause），HEAD 仍可合法属于更早的 generation；该情形的合法性由 `frozen_checkpoint` 的真实冻结扫描承载（`matches_head=true` 且其 `manifest_sha` 与 HEAD 一致、`bytes_digest`/`worktree_state` 齐备），不存在自报布尔的直通路径，校验规则不变（仍需 `published_seq`/`manifest_sha` 与当前 HEAD 一致）。
-**被 fencing 的旧代无需成功发布即可本地封存退出**（B03 第二半）：一旦 WI Agent 的 generation 已被接管（任何 Core 调用返回 `CORE-403` 且 `reason=stale_generation`），它对 `pause`/`block`/`wrap`/`fail` 的调用必然失败（token 已无效），因此**不要求、也不可能要求**它先完成一次成功发布才能停止：合法的退出路径是将本地未发布的中间状态写一份本地封存记录（写入 Capsule `logs/`，不同步）供事后审计，然后直接退出进程，不尝试任何 Core 调用。正确性不依赖这一步：接管它的新 generation 会从它最后一次成功发布的 HEAD 开始重建现场（`05-sync-revision-recovery.md#§7.4`），旧代未发布的本地改动本来就不在新代的恢复范围内。
+**被 fencing 的旧代无需成功发布即可本地封存退出**（B03 第二半）：一旦 WI Agent 的 generation 已被接管（任何 Core 调用返回 `CORE-403` 且 `reason=stale_generation`），它对 `pause`/`block`/`wrap`/`fail` 的调用必然失败（token 已无效），因此**不要求、也不可能要求**它先完成一次成功发布才能停止：合法的退出路径是将本地未发布的中间状态写一份本地封存记录（写入 Capsule `logs/`，不同步）供事后审计，然后直接退出进程，不尝试任何 Core 调用。正确性不依赖这一步：接管它的新 generation 会从它最后一次成功发布的 HEAD 开始重建现场（`05-sync-revision-recovery.md#§7.4`），旧代未发布的本地改动本来就不在新代的恢复范围内。 〔#111分类：删→驱动〕
 
 ### 6.5 非活跃 WI 的终止（cancel）契约（B05 修复） <!-- §6.5 -->
 
@@ -683,7 +695,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 2. **`paused`**：全部历史 generation 均已结束（§2.5）。授权同上。成功后 `status → cancelled`，不要求先 `resume`。
 3. **`blocked`**：同样无活跃 generation（无论进入 `blocked` 的原因是 `waiting_on=owner`、`waiting_on=dependency:*`、还是§6.4 提到的 workflow `failed_gate`/`failed_rewind_exhausted` 映射而来）。授权同上。成功后 `status → cancelled`，**不要求先 `unblock` 或重新执行任何 step**。
 
-**workflow 失败终态的映射与可取消性**：`01-workflow-skills.md#§6.5` 定义的 `failed_gate`/`failed_rewind_exhausted` 是 Capsule 侧（`execution.json.workflow_status`，`03-execution-capsule.md#§4.2`）终态，WI Agent 检测到这两种终态后，按 §6.4 的 flush 证据协议调用 `block` 端点（`waiting_on=owner`）。Core 侧只接收并落盘这一次状态迁移本身（`status=blocked`、`waiting_on=owner`，以及 §5.1a 通用 `blocked` 事件 `{generation, reason?}`）；具体是 `failed_gate` 还是 `failed_rewind_exhausted` 这一区分不随事件或任何字段进入 Core（Core 不新增专属事件类型来承载它，INV-2c），该区分永远只能从 Capsule 的 `execution.json` 或 read-through（§5.2）读到。进入 `blocked` 之后，该 WI 就是本节定义的普通 `blocked` WI，可直接按上述第 3 条取消，**不要求先重新执行任何 step 才能取消**。
+**workflow 失败终态的映射与可取消性**：`01-workflow-skills.md#§6.5` 定义的 `failed_gate`/`failed_rewind_exhausted` 是 Capsule 侧（`execution.json.workflow_status`，`03-execution-capsule.md#§4.2`）终态，WI Agent 检测到这两种终态后，按 §6.4 的 flush 证据协议调用 `block` 端点（`waiting_on=owner`）。Core 侧只接收并落盘这一次状态迁移本身（`status=blocked`、`waiting_on=owner`，以及 §5.1a 通用 `blocked` 事件 `{generation, reason?}`）；具体是 `failed_gate` 还是 `failed_rewind_exhausted` 这一区分不随事件或任何字段进入 Core（Core 不新增专属事件类型来承载它，INV-2c），该区分永远只能从 Capsule 的 `execution.json` 或 read-through（§5.2）读到。进入 `blocked` 之后，该 WI 就是本节定义的普通 `blocked` WI，可直接按上述第 3 条取消，**不要求先重新执行任何 step 才能取消**。 〔#111分类：删→驱动〕
 
 ### 6.6 凭证轮换后的重新授权（B09 修复） <!-- §6.6 -->
 
@@ -699,14 +711,14 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 3. 旧 epoch 不立即失效：进入一个宽限期（缺省时长可配置，建议足够覆盖一次正常心跳周期），期间 `service_secret_epochs.retired_at` 为 NULL，仍可用于校验用这个 epoch 签发的旧 token（§5.1 已定义）。
 4. 宽限期局后，定时任务将 `retired_at` 写上并删除对应 `service.secret.<epoch>` 文件；之后用该 epoch 签发的 token 一律 `CORE-403`（`reason=secret_rotated_expired`）。
 
-**`mode="rollback"` 与现场重建**：回滚不仅需要凭证失效，还需要本机现场隔离与重建，两者分属 Core 与 Daemon 两侧，不共享任何路径：Core 侧只负责上述立即失效；Daemon 侧的现场重建权威在 `04-local-runtime.md#§7`：回滚后的 Daemon 检测到自己持有的 token 的 `secret_epoch` 已被 `mode="rollback"` 标记 `retired_at` 且**无宽限期**后，**MUST NOT** 调用本节的 `reauthorize`（后者仅适用于 `mode="grace"` 轮换的宽限期内重新签发，不适用于回滚），而 MUST 按 `04-local-runtime.md#§7.3` 的回滚专用路径：停止其管理的 WI Agent/subagent 进程组、本地 quarantine 现场。**不存在自动 re-claim 路径**：回滚恢复出的 active generation 行由 admin 通过 `force-takeover`（§6.2）仲裁接管（Gen-3 澄清 5；`04-local-runtime.md#§7.3`/`07-deployment-pilot.md#§6.4` 为该仲裁规则的权威），接管后开启新 generation、新 harness session。
+**`mode="rollback"` 与现场重建**：回滚不仅需要凭证失效，还需要本机现场隔离与重建，两者分属 Core 与 Daemon 两侧，不共享任何路径：Core 侧只负责上述立即失效；Daemon 侧的现场重建权威在 `04-local-runtime.md#§7`：回滚后的 Daemon 检测到自己持有的 token 的 `secret_epoch` 已被 `mode="rollback"` 标记 `retired_at` 且**无宽限期**后，**MUST NOT** 调用本节的 `reauthorize`（后者仅适用于 `mode="grace"` 轮换的宽限期内重新签发，不适用于回滚），而 MUST 按 `04-local-runtime.md#§7.3` 的回滚专用路径：停止其管理的 WI Agent/subagent 进程组、本地 quarantine 现场。**不存在自动 re-claim 路径**：回滚恢复出的 active generation 行由 admin 通过 `force-takeover`（§6.2）仲裁接管（Gen-3 澄清 5；`04-local-runtime.md#§7.3`/`07-deployment-pilot.md#§6.4` 为该仲裁规则的权威），接管后开启新 generation、新 harness session。 〔#111分类：删→驱动〕
 
 **新 key 的 claim 不受影响**：claim 属于 §5.1 类别 2（无活跃 generation），只需 api_key身份有效且 WI 状态合法，与 service_secret 无关；轮换不得以任何形式拒绝一个带有合法 api_key 的新 claim 请求。
 
-**仍持有 active generation 的 WI Agent 如何重新授权（reauthorize 流程 = claim 幂等重放，无独立端点）**：
+**仍持有 active generation 的 WI Agent 如何重新授权（reauthorize 流程 = claim 幂等重放，无独立端点）**： 〔#111分类：删→驱动〕
 
-1. WI Agent 使用旧 token 发起写请求时收到 `CORE-403`，`reason=secret_rotated_expired`（与 `stale_generation` 区分开，后者意味着真正被接管，不应重新授权，只能按 §6.4 本地封存退出）。
-2. **重放由 Daemon 自身执行（B09 裁定）**：WI Agent 不持有任何 Core 凭证（§8），且 reauthorize/secret 类操作在 WI Agent 代理白名单外（`04-local-runtime.md#§5.3` 返回 `DAEMON-403`，该排除保持有效）——正确路径是：WI Agent 收到 `secret_rotated_expired` 后将该失败经内部通道上报 Daemon，**Daemon 以机器凭证直接重放**（携带当初的同一 `idempotency_key`、同一调用方身份、对同一 WI 重放行 7 claim；发起者是 Daemon 进程本身而非代理转发，不占用代理白名单），重签 token 随内部通道交回 WI Agent。不引入任何新端点（§5.1 canonical 清单不因此变动）。
+1. WI Agent 使用旧 token 发起写请求时收到 `CORE-403`，`reason=secret_rotated_expired`（与 `stale_generation` 区分开，后者意味着真正被接管，不应重新授权，只能按 §6.4 本地封存退出）。 〔#111分类：删→驱动〕
+2. **重放由 Daemon 自身执行（B09 裁定）**：WI Agent 不持有任何 Core 凭证（§8），且 reauthorize/secret 类操作在 WI Agent 代理白名单外（`04-local-runtime.md#§5.3` 返回 `DAEMON-403`，该排除保持有效）——正确路径是：WI Agent 收到 `secret_rotated_expired` 后将该失败经内部通道上报 Daemon，**Daemon 以机器凭证直接重放**（携带当初的同一 `idempotency_key`、同一调用方身份、对同一 WI 重放行 7 claim；发起者是 Daemon 进程本身而非代理转发，不占用代理白名单），重签 token 随内部通道交回 WI Agent。不引入任何新端点（§5.1 canonical 清单不因此变动）。 〔#111分类：删→驱动〕
 3. Core 命中 `claim_idempotency`（命中分支先于 WI 状态校验的顺序保持不变，§6.1）后校验：`owner_generations` 中 `(work_item_id, generation)` 行仍为活跃（`ended_at IS NULL`），且与幂等记录绑定的身份匹配。generation 已结束 → `CORE-404`；行不活跃或身份不符 → `CORE-403`（`reason=forbidden`）。本流程依赖 §4.3 的保留约束——关联 generation 仍活跃的幂等行不得被清理，故活跃 WI 的重放在宽限期内必然可命中缓存行。
 4. 均通过后，按下方「幂等响应重签」规则，用当前 `current_secret_epoch` 的 secret 重新签发同一 `(wi_id, generation, machine_id)` 的 token 并返回。**不增加 generation**，不重新创建 Capsule 现场；同 key 重复重放天然幂等，不需额外表。
 
@@ -724,9 +736,9 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 2. Core 在事务内重新查询该 `work_item_id` 的当前最大 `seq`（不分 dimension，序列全局）；若与请求中的 `based_on_seq` 不一致，说明有其他并发增量已写入，拒绝为 `CORE-409`（body 携带当前实际最大 `seq`，调用方重读后重试）。
 3. 一致则插入新行 `(work_item_id, seq=based_on_seq+1, dimension, amount, granted_by, now, note)`，追加 `budget_incremented` 事件。不同 dimension 的并发增量基于同一 `based_on_seq` 竞争时恰一成功，失败方重读重试——序列全局化使并发比较对象唯一，与 §4.5a 主键逐字一致。
 
-**与不可变预算基线的合并方式**：`work_items.workflow_budget_baseline` 本身不被修改（INV-2e）。WI Agent 重新获得执行机会后（经 §6.6 `reauthorize` 或 §6.2 `unblock` 重新 claim），计算某维度当前有效上界时，取 `work_items.workflow_budget_baseline` 中该维度的基线 scalar（null = 无上界），加上 `workflow_budget_increments` 中该 `work_item_id`、该 `dimension` 全部行的 `amount` 之和，作为本次执行的实际上界（与 `01-workflow-skills.md#§6.6` 逐字一致）。`GET .../budget` 的响应也按同样规则先计算好有效上界再返回，避免调用方自己重复汇总。
+**与不可变预算基线的合并方式**：`work_items.workflow_budget_baseline` 本身不被修改（INV-2e）。WI Agent 重新获得执行机会后（经 §6.6 `reauthorize` 或 §6.2 `unblock` 重新 claim），计算某维度当前有效上界时，取 `work_items.workflow_budget_baseline` 中该维度的基线 scalar（null = 无上界），加上 `workflow_budget_increments` 中该 `work_item_id`、该 `dimension` 全部行的 `amount` 之和，作为本次执行的实际上界（与 `01-workflow-skills.md#§6.6` 逐字一致）。`GET .../budget` 的响应也按同样规则先计算好有效上界再返回，避免调用方自己重复汇总。 〔#111分类：删→驱动〕
 
-人工增加预算后，WI 需按 §2.5 的 `unblock` 重新激活（新一次 claim），WI Agent 原地重派之前被停止的 step；若人工判断不值得继续，则直接按 §6.5 取消该 WI。
+人工增加预算后，WI 需按 §2.5 的 `unblock` 重新激活（新一次 claim），WI Agent 原地重派之前被停止的 step；若人工判断不值得继续，则直接按 §6.5 取消该 WI。 〔#111分类：删→驱动〕
 
 ## 7. 并发与崩溃恢复 <!-- §7 -->
 
@@ -746,7 +758,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 ## 9. 监控 <!-- §9 -->
 
 - service 心跳年龄（告警阈值可配）；Core 写事务 p99 延迟；`capsule_heads.updated_at` 滞后分布（= 各 WI 同步新鲜度）；read-through 进度查询延迟 p99。
-- `CORE-403`/`CORE-425`/`CORE-509` 计数分别监控：`CORE-403` 尖峰常对应接管事件或凭证轮换窗口；`CORE-425` 尖峰提示 WI Agent 侧 flush 协议实现可能有缺陷；`CORE-509` 任何非零计数都需人工审查。
+- `CORE-403`/`CORE-425`/`CORE-509` 计数分别监控：`CORE-403` 尖峰常对应接管事件或凭证轮换窗口；`CORE-425` 尖峰提示 WI Agent 侧 flush 协议实现可能有缺陷；`CORE-509` 任何非零计数都需人工审查。 〔#111分类：删→驱动〕
 - stale Daemon/机器数量（心跳过期）；就绪队列长度；`workflow_budget_increments` 的频率（频繁增量提示 workflow 预算声明偏保守，反馈给 `01-workflow-skills.md` 的参考流程作者）。
 
 ## 10. 测试与故障注入 <!-- §10 -->
@@ -767,11 +779,11 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 - DDL 带 `schema_version`；升级 = 停服 → 迁移工具（向后兼容的建表/加列）→ 起新（§2.2 三层锁保证不双写）。回滚 = 恢复 `<data_dir>/backups/` 最近快照（每日一次 SQLite 热备 + WAL 归档）。
 - 一期从无到有：首次启动建库 v1，无任何 schema/存量数据迁移（新系统；唯一例外是 Memory 存量导入——那是一次性管理 CLI 直写动作，权威在 `06-memory-search.md#§10`，不属建库迁移）。
 - 升列（§4.2 attrs 拆分演进）必须升 `schema_version` 并保持旧读兼容一个版本。
-- Daemon/WI Agent 的升级与 AIHub 的升级可以错开，但不得让旧版 Daemon 拿着不同 hash 算法的 token 请求新版 Core（token 结构改变必须随 `schema_version` 升级，不单独演进）。
+- Daemon/WI Agent 的升级与 AIHub 的升级可以错开，但不得让旧版 Daemon 拿着不同 hash 算法的 token 请求新版 Core（token 结构改变必须随 `schema_version` 升级，不单独演进）。 〔#111分类：删→驱动〕
 
 ## 12. 未决问题 <!-- §12 -->
 
 1. WI 事件流的保留策略（全量保留 vs 归档裁剪）：一期全量保留，容量压力出现后再议；不与已决冲突。
-2. read-through 是否增加「WI Agent 在线时直接查询」旁路以获得零延迟进度：一期不做，仅以 HEAD 新鲜度为准；开放，引入时不得违反 INV-1。
+2. read-through 是否增加「WI Agent 在线时直接查询」旁路以获得零延迟进度：一期不做，仅以 HEAD 新鲜度为准；开放，引入时不得违反 INV-1。 〔#111分类：删→驱动〕
 3. 多 project 的配额与可见性矩阵：一期单 project 主用，开放。
 4. service_secret 宽限期时长的默认值与是否允许按 WI 级别差异化配置：开放，不影响 §6.6 机制本身。

@@ -6,6 +6,20 @@
 | 上游基线 | `00-architecture.md#§2.3`（INV-4/INV-5/INV-11）、§4.2/§4.3、§7；`02-aihub-core.md#§4.3`（owner generation）/§4.6（repo inventory）/§4.8（capsule 登记表与 HEAD 指针）/§4.11（本地数据目录布局，含 CAS 存储路径）、§5.1（发布挂载点）、§5.2（read-through）、§6.4（generation 收尾的 flush 证据协议，本文定义其 Daemon 侧证据生成，校验侧归 `02`）；`03-execution-capsule.md#§3.1`（Capsule 目录布局）、§4.2（`runtime-state/execution.json` 原子提交契约）、§4.3（repo inventory 检出基线）、§4.4（harness 会话目录同步范围的最终契约）、§6（落盘与写限制权威）；`04-local-runtime.md#§2.4`（INV-D1/INV-D2/INV-D3）、§6.3/§6.4（触发请求发起与 Daemon 机械执行的分工）、§6.5（优雅停机实现序列） |
 | 术语权威 | 本文负责：Revision、HEAD、watcher（dirty 标记）、全扫描发布触发时机、先数据后状态、takeover fencing（判定条件与错误码）、删除保护、同步传输机制、崩溃恢复（同步域） |
 
+> **执行模型勘误（polyforge#111 删除 pass，2026-10-09）**：Phase-3 引擎切换（`d9bb866`/`f2163fe`）后，默认执行模型是
+> Daemon 进程内的 **Go 执行驱动**（`internal/polyforge/driver`，`pf daemon -use-driver` 默认开启）；WI-Agent 派生进程
+> 仅在显式选择的旧引擎（`pf daemon -use-driver=false`）下仍存在。本文的同步协议实质（单一发布路径、先数据后状态、
+> fencing）不受执行模型影响；受影响的只是「被协调的写入方/被检测的进程」的身份：驱动路径下，同步根的写入方是
+> 驱动派生的 step agent 子进程，驱动的崩溃恢复 = 从 `execution.json` 重新推导驱动，不存在「新派生的 WI Agent 进程」。
+> 本文写于 WI-Agent 模型，正文不整篇重写；每处「WI Agent」引用按下列行尾标记分类（可机械检索 `#111分类`）：
+>
+> - **〔#111分类：删→驱动〕** —— 该行所述的 WI Agent 进程机制在默认引擎下已删除，职责由驱动承接；按「执行者 = 驱动」读，裁定本身仍有效。
+> - **〔#111分类：替换后仍成立〕** —— 该行陈述在「执行者 = 驱动」替换下逐字仍成立。
+> - **〔#111分类：历史记录〕** —— 引用裁定/历史文档/已废弃草稿的原文，按原样保留，不代表当前执行模型。
+>
+> **未清理声明**：本 pass 只覆盖 02/03/05 三文；`00-architecture.md`（86 行）、`01-workflow-skills.md`（27 行）、
+> `04-local-runtime.md`（100 行）、`07-deployment-pilot.md`（22 行）仍携带未分类的 WI-Agent 引用，不属于 polyforge#111 的验收范围。
+
 ## 1. 范围与非目标 <!-- §1 -->
 
 ### 1.1 范围 <!-- §1.1 -->
@@ -16,9 +30,9 @@
   同一条路径在每次触发时刻做的事情的另一个名字（§2.4）。
 - 不可变 Revision 的数据模型与文件格式（§4，权威）。
 - HEAD 推进规则与「先数据后状态」发布顺序不变量（§2.5、§2.6）。
-- **冻结协议与发布互斥（freeze window）**：全扫描发布前，Daemon 必须先协调该 WI 的 WI Agent（wi agent）
+- **冻结协议与发布互斥（freeze window）**：全扫描发布前，Daemon 必须先协调该 WI 的 WI Agent（wi agent） 〔#111分类：删→驱动〕
   让本 Capsule 的写入静止，扫描才能对同一冻结窗口内的字节做一次性打包；冻结的获取、发布互斥的
-  持有与释放均由 Daemon 主导，不由 WI Agent 自行管理（§2.7，修复 B01）。
+  持有与释放均由 Daemon 主导，不由 WI Agent 自行管理（§2.7，修复 B01）。 〔#111分类：删→驱动〕
 - **幂等重放与 HEAD 校验的处理顺序**：先查幂等命中，未命中才校验 HEAD（§2.8，修复 B02）。
 - **发布确认的持久化与消歧**：pending publish 记录的持久化、确认丢失后的 GET HEAD 三分支
   消歧、以及 manifest 幂等身份排除时间性字段（§2.8/§4.2，修复 B10）。
@@ -62,7 +76,7 @@ Revision，没有 seq 号，不能被引用为 parent）。parent/HEAD 的完整
 
 **watcher**：Daemon 内对 Capsule 同步面（§4.1 定义的 `runtime-state/execution.json`、`artifacts/`、
 `logs/`、`repos/<name>/`，以及可选纳入同步的 `harness/<adapter>/session.json`（`03-execution-capsule.md#§4.4`），
-含 untracked 新文件；`harness/<adapter>/session-data/` 不属于同步面，watcher 不观察它；WI Agent 第 0 步物化的
+含 untracked 新文件；`harness/<adapter>/session-data/` 不属于同步面，watcher 不观察它；WI Agent 第 0 步物化的 〔#111分类：删→驱动〕
 `.pi/agents/`、`.claude/agents/` 与 `workflow.md`（或 `workflow/`，`03-execution-capsule.md#§4.5`）同样不属于
 同步面——见 §4.1 排除清单（SYNC-INV-10），watcher 不观察它们）的文件事件监听器。**watcher 的唯一职责是把该 Capsule 标记
 为 dirty**——一个布尔位加一次写入时间戳，写入 Capsule 本地的同步暂存区（`<capsule>/sync/`），
@@ -92,19 +106,19 @@ Revision，没有 seq 号，不能被引用为 parent）。parent/HEAD 的完整
 
 | 触发时机 | 请求发起者 | 说明 |
 |---|---|---|
-| step 完成 | WI Agent | 每个 step 成功/失败结束时，向 Daemon 发起一次发布请求 |
-| step 中断 | WI Agent | 基础设施失败、gate FAIL rewind 等非正常终止路径，向 Daemon 发起一次发布请求 |
-| WI 出最终结果 | WI Agent | wrap / fail 时，向 Daemon 发起一次发布请求 |
-| Daemon 优雅停机 | Daemon | `00-architecture.md#§3.5`，代替所有仍在进行的 WI Agent 各自向自己发起一次请求 |
-| milestone（可选） | WI Agent | workflow 定义的可选检查点，非强制，向 Daemon 发起一次发布请求 |
+| step 完成 | WI Agent | 每个 step 成功/失败结束时，向 Daemon 发起一次发布请求 〔#111分类：删→驱动〕 |
+| step 中断 | WI Agent | 基础设施失败、gate FAIL rewind 等非正常终止路径，向 Daemon 发起一次发布请求 〔#111分类：删→驱动〕 |
+| WI 出最终结果 | WI Agent | wrap / fail 时，向 Daemon 发起一次发布请求 〔#111分类：删→驱动〕 |
+| Daemon 优雅停机 | Daemon | `00-architecture.md#§3.5`，代替所有仍在进行的 WI Agent 各自向自己发起一次请求 〔#111分类：删→驱动〕 |
+| milestone（可选） | WI Agent | workflow 定义的可选检查点，非强制，向 Daemon 发起一次发布请求 〔#111分类：删→驱动〕 |
 
 没有第六种触发时机；watcher 检测到的文件事件不在此表中，也不能加入此表。
 
 **发起者与执行者是两件事（`00` INV-11、`04` INV-D3）**：上表的"请求发起者"只回答"谁认为现在
 该发一次"；无论发起者是谁，**实际的冻结协调、全扫描、manifest 打包与向 AIHub 提交推进 HEAD，
-恒由 Daemon 一方机械执行**（`04-local-runtime.md#§6.4`）。本文档此前的历史草稿中出现过"WI Agent 直接向
-AIHub 发布""只有 WI Agent 能写 Revision""冻结不涉及 Daemon"等表述，均已废弃，不得再出现在
-任何后续修订中：WI Agent 在同步链路中的全部职责仅止于"发起请求"（以及配合 Daemon 的冻结
+恒由 Daemon 一方机械执行**（`04-local-runtime.md#§6.4`）。本文档此前的历史草稿中出现过"WI Agent 直接向 〔#111分类：历史记录〕
+AIHub 发布""只有 WI Agent 能写 Revision""冻结不涉及 Daemon"等表述，均已废弃，不得再出现在 〔#111分类：历史记录〕
+任何后续修订中：WI Agent 在同步链路中的全部职责仅止于"发起请求"（以及配合 Daemon 的冻结 〔#111分类：删→驱动〕
 确认，§2.7），它不持有直接调用 §5.1 发布接口的凭证或路径；持有该凭证、发起块 PUT 与
 manifest POST 的一方始终是 Daemon。
 
@@ -129,20 +143,20 @@ HEAD 不前移；失败后的收敛发生在下一次 §2.4 触发时刻的全�
 
 ### 2.7 冻结协议与发布互斥（freeze window，修复 B01：快照一致性） <!-- §2.7 -->
 
-**问题**：WI Agent 在一次 step 执行期间可能连续修改多个文件（自身写入或经其派生的 step agent（subagent）写入 `repos/`/`artifacts/`/`logs/`），而不逐次记录版本；若扫描发生在这
+**问题**：WI Agent 在一次 step 执行期间可能连续修改多个文件（自身写入或经其派生的 step agent（subagent）写入 `repos/`/`artifacts/`/`logs/`），而不逐次记录版本；若扫描发生在这 〔#111分类：删→驱动〕
 些写入进行中的任意时刻，打包出的 manifest 可能混合了跨越两个不同逻辑时刻的字节（例如新产物文件
 已落盘但对应的 `runtime-state/execution.json` 尚未原子写入新版本，或反之），使得该 Revision 描述的不是任何
 一个真实存在过的一致状态。
 
 **权威定义（两个不同粒度的控制，不得混为一谈）**：
 
-- **write freeze（写冻结）**：使该 Capsule 的写入方（WI Agent 自身与其当前派生的
+- **write freeze（写冻结）**：使该 Capsule 的写入方（WI Agent 自身与其当前派生的 〔#111分类：删→驱动〕
   step agent）在本次扫描 + staging 固化期间不再产生新写入的短暂状态。已经在执行
   中的单个原子写入操作（如 `03-execution-capsule.md#§4.2` 要求的"先写产物、最后原子写 `runtime-state/execution.json`"
   契约里的那次原子写）允许自然完成，不被中途打断——中途打断会破坏该原子提交契约本身，比不冻结
   更糟。write freeze 的持有时长只覆盖"确认停止写入 → 扫描 → 摘要计算 → 构建 manifest → 把本次
   将要上传的全部字节固化进 Daemon 管理的不可变 staging blocks"（见下）这一段本地操作；一旦这些
-  字节已经固化到 staging，Daemon 立即释放 write freeze，WI Agent 恢复写入——此后即使工作树
+  字节已经固化到 staging，Daemon 立即释放 write freeze，WI Agent 恢复写入——此后即使工作树 〔#111分类：删→驱动〕
   内容继续变化，也不影响本次发布，因为本次发布已经不再读取工作树，只读取 staging。
 - **per-WI publish mutex（发布互斥）**：粒度是 per-WI（不跨 WI，不同 WI 的发布流程互不阻塞）的
   一把串行锁，覆盖"获取 write freeze → 扫描 → staging 固化 → 释放 write freeze → 块上传 →
@@ -152,35 +166,35 @@ HEAD 不前移；失败后的收敛发生在下一次 §2.4 触发时刻的全�
   网络往返，publish mutex 的释放必须等待。Daemon 每收到该 WI 的一次发布请求时先尝试获取 publish
   mutex（若该 WI 已有一次发布流程在途，新请求排队等待其释放，不并发发起第二次扫描），避免同一
   WI 的两次扫描相互踩踏或对同一 `seq` 产生竞争的 manifest。两者均由 **Daemon** 持有和管理，
-  不是 WI Agent——这是 `00` INV-11/`04` INV-D3 的直接推论：实际扫描、staging 固化、打包与
-  HEAD 推进只能由 Daemon 执行，WI Agent 不持有直接调用 §5.1 发布接口的凭证或路径。
+  不是 WI Agent——这是 `00` INV-11/`04` INV-D3 的直接推论：实际扫描、staging 固化、打包与 〔#111分类：删→驱动〕
+  HEAD 推进只能由 Daemon 执行，WI Agent 不持有直接调用 §5.1 发布接口的凭证或路径。 〔#111分类：删→驱动〕
 
 **获取/释放协议**：
 
 - **获取（publish mutex 先于 write freeze）**：Daemon 收到一次发布请求后：
   1. 获取该 WI 的 publish mutex（若已被同 WI 的另一次发布流程持有，排队等待其释放）。
-  2. 向该 WI 的持久 WI Agent 发出"到达安全边界并确认停止写入"的请求（本机进程间协调，传输
+  2. 向该 WI 的持久 WI Agent 发出"到达安全边界并确认停止写入"的请求（本机进程间协调，传输 〔#111分类：删→驱动〕
      机制属 `04` 权威，本文只定义协议语义，不重复定义传输层）：
-     - **step 完成/step 中断/WI 出最终结果**（强制触发）：按 `01-workflow-skills.md#§6.1` 的执行契约，WI Agent
+     - **step 完成/step 中断/WI 出最终结果**（强制触发）：按 `01-workflow-skills.md#§6.1` 的执行契约，WI Agent 〔#111分类：删→驱动〕
        在宣告这些状态转换之前就应已经停止自身与其 step agent 的写入，因此该请求在正常路径下应
        立即得到确认；确认内容是"当前没有进行中的写入操作，也不会开始新的"。
-     - **milestone（可选）**：WI Agent 收到请求后主动暂停新写入的发起（不打断已在执行中的
+     - **milestone（可选）**：WI Agent 收到请求后主动暂停新写入的发起（不打断已在执行中的 〔#111分类：删→驱动〕
        单个原子写入操作），确认后回复 Daemon。
      - **Daemon 优雅停机 / 本机崩溃恢复（进程终止判定，修复 B01 追加）**：只有同时满足下列
        **两个条件**，Daemon 才可以不等待任何确认消息、不发起任何 IPC 调用，直接以此作为
        write freeze 已获取：
-       ① **该 Job 的 WI Agent 进程本身、以及它曾经派生的全部命令执行子进程与
+       ① **该 Job 的 WI Agent 进程本身、以及它曾经派生的全部命令执行子进程与 〔#111分类：删→驱动〕
        step agent 进程（含整个 Native runner 进程组，`03-execution-capsule.md#§5.1`/§7）已经全部
-       终止**——Daemon 必须逐一确认进程组内每个已知 pid 都已退出（而不是只看 WI Agent 的
+       终止**——Daemon 必须逐一确认进程组内每个已知 pid 都已退出（而不是只看 WI Agent 的 〔#111分类：删→驱动〕
        顶层 pid），因为一个仍在运行的命令子进程或 step agent 同样可能正在写
-       `repos/`/`artifacts/`/`logs/`；只看 WI Agent 自身退出而不管其子进程组是否已回收，
+       `repos/`/`artifacts/`/`logs/`；只看 WI Agent 自身退出而不管其子进程组是否已回收， 〔#111分类：删→驱动〕
        不足以断言"不会再有新写入"。
-       ② **代替该 Job 的新 WI Agent（若已经在被派生）尚未开始产生任何写入**——即本次
-       判定必须发生在"确认①成立"与"新 WI Agent 首次写入 `runtime-state/execution.json`
-       或同步根内任何其它文件"之间的空窗期内。若新 WI Agent 已经先于本次发布请求写
-       过任何同步根内容（例如 §7.1 崩溃续跑路径中新 WI Agent 已经原地重派当前 step 并
+       ② **代替该 Job 的新 WI Agent（若已经在被派生）尚未开始产生任何写入**——即本次 〔#111分类：删→驱动〕
+       判定必须发生在"确认①成立"与"新 WI Agent 首次写入 `runtime-state/execution.json` 〔#111分类：删→驱动〕
+       或同步根内任何其它文件"之间的空窗期内。若新 WI Agent 已经先于本次发布请求写 〔#111分类：删→驱动〕
+       过任何同步根内容（例如 §7.1 崩溃续跑路径中新 WI Agent 已经原地重派当前 step 并 〔#111分类：删→驱动〕
        产出了新的 `execution.json` 版本），则"进程终止"判定不再成立——此时冻结窗口必须按
-       上面的正常路径向这个新 WI Agent 发起确认请求，不得再假定"旧进程已死即安全"，
+       上面的正常路径向这个新 WI Agent 发起确认请求，不得再假定"旧进程已死即安全"， 〔#111分类：删→驱动〕
        因为真正持有写入能力的现在是这个仍存活的新进程。
        同时满足①②时，没有任何进程持有写入能力，这是比任何确认信号都更强的保证；
        不满足任一条，Daemon 必须走正常确认路径。同一判定同样适用于 §7.1 描述的本机
@@ -198,7 +212,7 @@ HEAD 不前移；失败后的收敛发生在下一次 §2.4 触发时刻的全�
      不可见，`03-execution-capsule.md#§5.2`/§6.2 面表同一原则）。同盘时优先使用 reflink/CoW（`FICLONE`/
      `clonefile`/`cp --reflink`）以避免双倍磁盘占用，文件系统不支持或跨盘时退化为全量复制；
      **禁止硬链接**（修复 B09）——硬链接与活动工作树文件共享同一个 inode，write freeze
-     释放后 WI Agent 对原文件的**原地写（in-place write）或 truncate 会直接改写 staging
+     释放后 WI Agent 对原文件的**原地写（in-place write）或 truncate 会直接改写 staging 〔#111分类：删→驱动〕
      中"已固定"的字节**，冻结窗口等于根本没有固定任何东西。reflink/CoW 与全量复制都保证
      staging 块自固化那一刻起与源文件**不共享 inode、不共享可变字节**（写入方任何后续
      改动——原地写、truncate、unlink 后重建——都只作用于写入方自己的 inode/私有 CoW
@@ -209,7 +223,7 @@ HEAD 不前移；失败后的收敛发生在下一次 §2.4 触发时刻的全�
 - **释放 write freeze**：staging 固化**完成后**（即本次冻结窗口内的字节已经既被固定为一份完整
   的 manifest 对象、又被独立复制进了不可变 staging——与活动工作树文件不共享 inode，§2.7
   窗口内动作第 2 步），Daemon 立即释放 write freeze（通知
-  WI Agent 恢复写入；WI Agent 已终止则无需通知），不等待块上传、manifest 提交或 HEAD
+  WI Agent 恢复写入；WI Agent 已终止则无需通知），不等待块上传、manifest 提交或 HEAD 〔#111分类：删→驱动〕
   推进完成。write freeze 的时长因此只与"枚举 + 摘要计算 + manifest 构建 + 本机文件复制
   （同盘 reflink/CoW 优先，退化全量复制）"这几步本地操作的耗时成正比，与网络往返无关。
 - **释放后的动作（不持有 write freeze，但仍持有 publish mutex）**：write freeze 释放之后、
@@ -230,21 +244,21 @@ HEAD 不前移；失败后的收敛发生在下一次 §2.4 触发时刻的全�
   （成功：数据已进入 AIHub CAS，本机 staging 副本不再需要；
   失败：留给下一次触发时机的扫描重新生成，同一 sha256 内容幂等；被未消歧的 pending 记录
   引用的 staging 目录必须原样保留，供确认丢失后的重发/消歧使用）。
-- **超时处理**：确认阶段设一个有界等待，仅在 WI Agent 进程仍存活但迟迟不确认时才会触发
+- **超时处理**：确认阶段设一个有界等待，仅在 WI Agent 进程仍存活但迟迟不确认时才会触发 〔#111分类：删→驱动〕
   （进程已终止且满足上面①②两个条件的情形按判定直接视为 write freeze 成立，不进入本超时
   逻辑）。分两种情况：
-  - 强制触发（step 完成/中断/WI 最终结果）：等待超时视为 WI Agent 未遵守 `01-workflow-skills.md#§6.1` 执行
+  - 强制触发（step 完成/中断/WI 最终结果）：等待超时视为 WI Agent 未遵守 `01-workflow-skills.md#§6.1` 执行 〔#111分类：删→驱动〕
     契约的基础设施异常，按 `00` INV-9 的基础设施失败语义处理（当前 step 原地 resume 并由
-    WI Agent 重新发起发布请求，不触发 gate FAIL），Daemon 不允许在未确认冻结的情况下强行
+    WI Agent 重新发起发布请求，不触发 gate FAIL），Daemon 不允许在未确认冻结的情况下强行 〔#111分类：删→驱动〕
     扫描；超时同样释放 publish mutex（本次流程未发生，不留下悬挂的互斥）。
   - milestone（可选）：等待超时时 Daemon 直接放弃本次 milestone 扫描（不升级为基础设施失败、
     不重试），释放 write freeze 请求与 publish mutex，把发布推迟到下一次真正的四类触发
     事件；milestone 的存在理由只是"多一次可选检查点"，跳过一次不影响正确性。
 - **与 step 执行推进的关系（不互相饿死）**：publish mutex 的粒度是 per-WI，不同 WI 的发布请
   求互不阻塞；同一 WI 内，write freeze 只在触发时机短暂出现且时长受限于本机扫描+staging
-  固化耗时（通常远小于任何一个 step 的执行时长），WI Agent 与其 step agent 在 write freeze 之
+  固化耗时（通常远小于任何一个 step 的执行时长），WI Agent 与其 step agent 在 write freeze 之 〔#111分类：删→驱动〕
   外（含随后的块上传阶段）可以持续写入而不受任何阻塞；publish mutex 虽然覆盖到上传+提交结
-  束，但它阻塞的只是"该 WI 的下一次发布流程"，不阻塞 WI Agent 继续驱动 step 或产生新的本
+  束，但它阻塞的只是"该 WI 的下一次发布流程"，不阻塞 WI Agent 继续驱动 step 或产生新的本 〔#111分类：删→驱动〕
   地写入（下一次发布请求会排队，不会丢失，§2.4）。milestone 触发在超时时主动放弃扫描并释放
   两把锁，进一步保证不会阻塞 step 从中断状态恢复，也不会阻塞该 WI 后续到来的强制触发请求。
 
@@ -254,7 +268,7 @@ HEAD 不前移；失败后的收敛发生在下一次 §2.4 触发时刻的全�
 场景中产生错误的 `SYNC-409`：请求已在此前成功提交（Core 已 INSERT 且 HEAD 已推进到该 seq 或
 更新的 seq），但响应在网络回程中丢失，客户端重发同一请求时看到的"当前 HEAD"已经不是这次请求
 的 `parent` 值，若先校验 parent 就会被误判为冲突而非重放。在当前模型下，发布请求的发起方
-恒为 Daemon（§2.7），重放也发生在 Daemon↔AIHub 这一段，与 WI Agent↔Daemon 的本机请求
+恒为 Daemon（§2.7），重放也发生在 Daemon↔AIHub 这一段，与 WI Agent↔Daemon 的本机请求 〔#111分类：删→驱动〕
 无关。
 
 **权威处理顺序**（发布请求 `(work_item_id, seq, parent, generation, manifest_sha)` 到达时，
@@ -279,7 +293,7 @@ HEAD 不前移；失败后的收敛发生在下一次 §2.4 触发时刻的全�
   返回途中丢失（网络中断/进程被杀）。Daemon 未收到确认，视为发布失败，在下一次发布请求（或
   同一请求的重试）时用相同的 `(seq, manifest_sha)` 重新提交。此次请求必须在步骤 1 命中同一行，
   直接返回成功。
-- **进程重启后补发**：WI Agent 崩溃重启（`04-local-runtime.md#§7`、§7.1）时会向 Daemon 重新发起发布请求，或
+- **进程重启后补发**：WI Agent 崩溃重启（`04-local-runtime.md#§7`、§7.1）时会向 Daemon 重新发起发布请求，或 〔#111分类：删→驱动〕
   Daemon 自身重启后重新发现待发布内容；此时 Daemon 重新走一次 §2.7 的冻结→扫描→打包，若该次
   扫描恰好重新生成了与此前某次已发布 Revision 完全相同的内容（同一 parent、同一文件集合，
   因而同一 `manifest_sha`——其成立前提正是下述"幂等身份排除时间性字段"的裁定，`built_at`
@@ -344,7 +358,7 @@ token（HMAC 重算比对，非裸整数相等）。不等 → 拒绝 `SYNC-403 
 Core 写 API 的 generation token 校验（`02-aihub-core.md#§5.1` `CORE-403`）是同一 fencing 的应用层延伸。
 此机制同时是 `03-execution-capsule.md#§2.4` 多机副本裁定（任何时刻至多一个活跃发布权持有者）的强制层。fencing 校验
 在**块上传阶段**就已生效（不等到 manifest 提交才校验），理由见 §5.1。旧 owner 被接管后，即使
-其 WI Agent 仍在运行并向旧 Daemon 发起新的发布请求，旧 Daemon 尝试向 AIHub 发布时仍会在本节
+其 WI Agent 仍在运行并向旧 Daemon 发起新的发布请求，旧 Daemon 尝试向 AIHub 发布时仍会在本节 〔#111分类：删→驱动〕
 被拒，旧 owner 一侧不存在绕过 Daemon 直接写 Revision 的路径。
 
 ### 2.10 删除保护（权威定义） <!-- §2.10 -->
@@ -383,7 +397,7 @@ Capsule 落盘/写入的路径规则——同步根内的路径白名单、`../`
 | SYNC-INV-7 | staging 固化必须产生与活动工作树字节独立的副本（§2.7，修复 B09）：禁止硬链接，reflink/CoW 或全量复制均可；write freeze 释放后，工作树内任何原地写/truncate 不得改变 staging 已固定的字节与 sha256。 |
 | SYNC-INV-8 | 块上传开始前必须已原子持久化 pending publish 记录，且仅在服务端确认（任何明确响应，或 GET HEAD 消歧判定为已被接受）后删除（§2.8，修复 B10）；确认丢失时必须先按 GET HEAD 三分支消歧（视为成功/安全重发/全量对账），不得盲目重发；`manifest_sha` 的幂等身份剔除 `built_at` 等时间性字段（§4.2）。 |
 | SYNC-INV-9 | generation 收尾（`02-aihub-core.md#§6.4` 的 pause/block/wrap/fail）前，Daemon 必须在写冻结后实际执行一次 final flush 扫描并据此生成 flush 证据（§6.1，修复 D6）；无 HEAD 的首次 claim 后收尾仅允许 `published_seq=0`+`frozen_checkpoint.bytes_digest == EMPTY_SYNC_BYTES_DIGEST`（空同步面聚合摘要常量，且本 generation 从未产生同步面写入）这一种空链形态。 |
-| SYNC-INV-10 | WI Agent 第 0 步物化的三个目标（`.pi/agents/`、`.claude/agents/`、`workflow.md` 或 `workflow/`）不属于同步根（§4.1）：watcher 不观察，manifest 的 `ops` 永不包含其路径，§7.4 恢复重建不写回；新 generation 一律由 WI Agent 按物化规则从本机 aihub checkout 重新物化（`03-execution-capsule.md#§4.5`）。 |
+| SYNC-INV-10 | WI Agent 第 0 步物化的三个目标（`.pi/agents/`、`.claude/agents/`、`workflow.md` 或 `workflow/`）不属于同步根（§4.1）：watcher 不观察，manifest 的 `ops` 永不包含其路径，§7.4 恢复重建不写回；新 generation 一律由 WI Agent 按物化规则从本机 aihub checkout 重新物化（`03-execution-capsule.md#§4.5`）。 〔#111分类：删→驱动〕 |
 
 ## 3. 模块与代码目录 <!-- §3 -->
 
@@ -411,11 +425,11 @@ dirty 标记作为"是否值得扫一次"的提示，`watcher/` 绝不反向调�
   关于 `harness/` 永远从零重建、不从 Revision 拉回的裁定）。**`harness/<adapter>/session-data/`
   不属于同步根**：它是仅本机运行的会话工作目录（Pi/Claude 各自的转录、工具调用缓存等不
   透明格式），`03-execution-capsule.md#§4.4` 明确裁定其不参与任何一次全扫描发布，watcher 不观察它，manifest 的
-  `ops` 永远不包含该目录下的任何路径。**WI Agent 第 0 步物化的三个目标（`03-execution-capsule.md#§4.5`）同样明确排除在同步根之外（SYNC-INV-10）**：
+  `ops` 永远不包含该目录下的任何路径。**WI Agent 第 0 步物化的三个目标（`03-execution-capsule.md#§4.5`）同样明确排除在同步根之外（SYNC-INV-10）**： 〔#111分类：删→驱动〕
   `.pi/agents/`、`.claude/agents/`、`workflow.md`（或 `workflow/`）——harness 适配器 step agent 定义与本 WI 执行图快照，
-  由 WI Agent 第 0 步从本机 aihub checkout 的 `workflows/<bundle>/` 复制而来——watcher 不观察，manifest 的
+  由 WI Agent 第 0 步从本机 aihub checkout 的 `workflows/<bundle>/` 复制而来——watcher 不观察，manifest 的 〔#111分类：删→驱动〕
   `ops` 永不包含其路径，§7.4 恢复重建不写回。排除理由：① **claim 时可重新物化**：三者是本机 checkout 派生的
-  只读副本，新 generation 的 WI Agent 在第 0 步按同一规则重建，不依赖任何远端数据；② **随 quarantine 销毁**：
+  只读副本，新 generation 的 WI Agent 在第 0 步按同一规则重建，不依赖任何远端数据；② **随 quarantine 销毁**： 〔#111分类：删→驱动〕
   隔离/封存时目录整体废弃，不存在需要跨代保留或跨机迁移的价值；③ **`runtime-state/execution.json` 才是
   执行权威**：workflow 快照只是执行图的可读副本，执行进度的唯一权威恒在 `execution.json`
   （`03-execution-capsule.md#§4.2`），同步快照不增加任何正确性。`runtime-state/` 目录下只有 `execution.json` 一个
@@ -502,7 +516,7 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
 
 ### 5.1 发布协议（Daemon → AIHub，权威签名） <!-- §5.1 -->
 
-**调用方与端点权威**：本节端点的方法/路径/调用方**一律以 `02-aihub-core.md#§5.1` canonical 行 14–20 为权威**（块上传/manifest/HEAD 读取为 Daemon；删除保护与撤销为人（admin）经 `pf` 部署 CLI；恢复读取为恢复方机器），本节不重复定义清单，只展开同步协议细节（分块、manifest、幂等、fencing）。发布动作的机械执行者恒为 Daemon（`00` INV-11/`04` INV-D3），与端点的授权调用方按 canonical 各行定义不冲突。WI Agent 向
+**调用方与端点权威**：本节端点的方法/路径/调用方**一律以 `02-aihub-core.md#§5.1` canonical 行 14–20 为权威**（块上传/manifest/HEAD 读取为 Daemon；删除保护与撤销为人（admin）经 `pf` 部署 CLI；恢复读取为恢复方机器），本节不重复定义清单，只展开同步协议细节（分块、manifest、幂等、fencing）。发布动作的机械执行者恒为 Daemon（`00` INV-11/`04` INV-D3），与端点的授权调用方按 canonical 各行定义不冲突。WI Agent 向 〔#111分类：删→驱动〕
 本机 Daemon 发起发布请求的信道不属于本层 API，权威定义在 `04-local-runtime.md#§5.1`/§6.3/§6.4，
 本文不重复定义。
 
@@ -532,7 +546,7 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
 | SYNC-409 | SEQ_CONFLICT：未命中幂等记录且 parent ≠ HEAD，或同 seq 不同 manifest_sha；亦覆盖 §2.6 bootstrap 规则违反（无 HEAD 行时 seq≠0 或 parent≠null）；或 `DELETE .../capsule-data` 对非终态 WI 的状态门拒绝 |
 | SYNC-410 | 目标 Capsule 数据已 tombstone / 硬删除；或 revert-tombstone 时无 pending tombstone 可撤销 |
 
-冻结窗口的确认超时（§2.7）不产生 AIHub 侧的 SYNC-* 响应码——它是 Daemon 与 WI Agent 之间的本机
+冻结窗口的确认超时（§2.7）不产生 AIHub 侧的 SYNC-* 响应码——它是 Daemon 与 WI Agent 之间的本机 〔#111分类：删→驱动〕
 协调结果，在 Daemon 发起任何向 AIHub 的网络调用之前就已经决出（继续等待 / 放弃本次 milestone /
 升级为基础设施失败 / 按进程终止判定直接成立），不经过本层 API。
 
@@ -545,10 +559,10 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
    milestone），请求发起方按 §2.4 表向 Daemon 发出一次发布请求。watcher 此前写下的 dirty 标记
    （若有）只作为"值得扫一次"的提示被 Daemon 读取，不改变本流程的必经性——即使 dirty 位缺
    失，触发事件本身也足以发起本流程。
-2. **冻结（write freeze，§2.7）**：Daemon 获取该 WI 的 publish mutex 后，协调 WI Agent
+2. **冻结（write freeze，§2.7）**：Daemon 获取该 WI 的 publish mutex 后，协调 WI Agent 〔#111分类：删→驱动〕
    令其自身与当前派生的 step agent 停止产生新的写入，等待"当前无进行中写入、
-   也不会开始新写入"的确认；若该 Job 的 WI Agent 进程及其全部命令子进程与 step agent 进程组
-   均已终止，且代替它的新 WI Agent（若已派生）尚未开始任何写入，则直接以此作为 write freeze
+   也不会开始新写入"的确认；若该 Job 的 WI Agent 进程及其全部命令子进程与 step agent 进程组 〔#111分类：删→驱动〕
+   均已终止，且代替它的新 WI Agent（若已派生）尚未开始任何写入，则直接以此作为 write freeze 〔#111分类：删→驱动〕
    已获取，不等待确认；任一条不满足则改走正常确认路径。确认（或上述判定）到达即视为
    write freeze 已获取。超时按 §2.7 的分类处理。
 3. **扫描**：Daemon 在 write freeze 窗口内一次性枚举同步根（§4.1）全部文件，按 SYNC-INV-6 的
@@ -560,7 +574,7 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
    `manifest_sha`（不含 `built_at`，§4.2）；把 manifest 引用到的全部数据字节**独立复制**
    （禁止硬链接，同盘 reflink/CoW 优先，退化全量复制）进 Daemon 管理的不可变 staging
    （§2.7，SYNC-INV-7）。到此为止本次 write freeze 窗口内的字节已既固定为一份完整的
-   manifest、又固化进了 staging，Daemon 立即释放 write freeze（WI Agent 恢复写入），
+   manifest、又固化进了 staging，Daemon 立即释放 write freeze（WI Agent 恢复写入）， 〔#111分类：删→驱动〕
    但**继续持有**该 WI 的 publish mutex。释放之后，Daemon 先原子持久化 pending publish
    记录（§2.8，SYNC-INV-8），再把 staging 中尚未在 CAS 中存在的数据块通过 §5.1 的块 PUT
    接口上传（携带 `X-PF-Generation-Token`，接受 §2.9 fencing 校验，已存在块跳过；**只读
@@ -583,7 +597,7 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
 
 `02-aihub-core.md#§6.4` 规定 pause/block/wrap/fail 四个结束 generation 的端点必须携带 `flush_evidence`，且
 不允许调用方自报了事——证据的全部事实性字段都必须来自 **Daemon 侧**在写冻结后的一次真实
-扫描（D6 裁定：final flush 证据由 Daemon 生成，WI Agent 只负责发起收尾本身）。本节定义这份
+扫描（D6 裁定：final flush 证据由 Daemon 生成，WI Agent 只负责发起收尾本身）。本节定义这份 〔#111分类：删→驱动〕
 证据的生成协议；字段名与服务端校验规则以 `02-aihub-core.md#§6.4` 为权威，本文不重复校验侧，只定义生产侧。
 证据的核心元组是「**链当前停在哪个版本**（`published_seq`，即收尾时刻的 checkpoint 版本）与
 **最终 manifest 幂等视图摘要**」，加上**绑定冻结后最终本地检查点**的 `frozen_checkpoint`
@@ -591,7 +605,7 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
 
 **生成序列**（Daemon 执行，复用本节六个步骤的全部协议，不另设第二条发布路径）：
 
-1. WI Agent 到达收尾决策（按 `01-workflow-skills.md#§6.1` 契约，收尾前自身与 step agent 已停止写入），向
+1. WI Agent 到达收尾决策（按 `01-workflow-skills.md#§6.1` 契约，收尾前自身与 step agent 已停止写入），向 〔#111分类：删→驱动〕
    Daemon 发起一次发布请求（reason 对应收尾类型）；Daemon 按步骤 2–3 获取 write freeze 并
    完成一次 **final flush 冻结扫描**——无论本 generation 是否产生过改动，这次扫描都必须
    实际执行（`02-aihub-core.md#§6.4` 明确不允许仅凭旧 HEAD 推断）。**每次 end-generation（pause/block/wrap/fail）**，Daemon 在发起
@@ -637,7 +651,7 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
    已产生过任何同步面写入（哪怕尚未触发过任何发布），该捷径不适用：Daemon 必须先完成一次
    bootstrap 发布（§2.6 分支，产生真正的 `seq=0` Revision）再按第 2 步的正常比对生成证据
    ——不允许以空链形态把未发布的本地改动静默丢弃。
-4. 证据生成后由 WI Agent 随收尾调用提交给 Core；`03-execution-capsule.md#§2.3` 的"先发布、后结束 generation"
+4. 证据生成后由 WI Agent 随收尾调用提交给 Core；`03-execution-capsule.md#§2.3` 的"先发布、后结束 generation" 〔#111分类：删→驱动〕
    顺序由本序列天然满足（第 2 步不一致分支内的发布完成先于收尾调用）。
 
 **与 §2.8 pending 记录的关系**：final flush 若走了第 2 步的发布分支，同样按 §2.8 持久化
@@ -647,17 +661,17 @@ pending publish 记录并在确认落定后删除；收尾调用（携带证据�
 
 ## 7. 并发与崩溃恢复（三场景） <!-- §7 -->
 
-### 7.1 本机崩溃（WI Agent / 整机） <!-- §7.1 -->
+### 7.1 本机崩溃（WI Agent / 整机） <!-- §7.1 --> 〔#111分类：删→驱动〕
 
-WI Agent 或其所在机器崩溃重启后，Daemon 按 `04-local-runtime.md#§7` 检测到进程退出并基于
-`runtime-state/execution.json` 当前内容重新派生新的 WI Agent 续跑（不要求从零重放整个
-workflow）。新 WI Agent 恢复驱动后，会在到达下一次 §2.4 的四类触发事件之一时向 Daemon 发出
+WI Agent 或其所在机器崩溃重启后，Daemon 按 `04-local-runtime.md#§7` 检测到进程退出并基于 〔#111分类：删→驱动〕
+`runtime-state/execution.json` 当前内容重新派生新的 WI Agent 续跑（不要求从零重放整个 〔#111分类：删→驱动〕
+workflow）。新 WI Agent 恢复驱动后，会在到达下一次 §2.4 的四类触发事件之一时向 Daemon 发出 〔#111分类：删→驱动〕
 发布请求，Daemon 自然发起一次全扫描发布（§6 步骤 1–6）：崩溃前已发布的 Revision（若有）保持
 不变；崩溃前尚未来得及发布的本地改动仍留在工作树中，会被 Daemon 下一次扫描纳入新的 manifest
-一并发布，不会丢失。若在这个重新发起的冻结中 Daemon 发现旧 WI Agent 进程、及其全部命令子进程
-与 step agent 进程组均已终止，且新 WI Agent 尚未开始任何写入（即在新 WI Agent 首次写入之前
-就已确认死亡），按 §2.7 的判定直接开始扫描，无需等待确认；一旦新 WI Agent 已经写过任何同步
-根内容，该判定不再适用，须改走对新 WI Agent 的正常确认路径。若 Daemon 重新生成的 manifest
+一并发布，不会丢失。若在这个重新发起的冻结中 Daemon 发现旧 WI Agent 进程、及其全部命令子进程 〔#111分类：删→驱动〕
+与 step agent 进程组均已终止，且新 WI Agent 尚未开始任何写入（即在新 WI Agent 首次写入之前 〔#111分类：删→驱动〕
+就已确认死亡），按 §2.7 的判定直接开始扫描，无需等待确认；一旦新 WI Agent 已经写过任何同步 〔#111分类：删→驱动〕
+根内容，该判定不再适用，须改走对新 WI Agent 的正常确认路径。若 Daemon 重新生成的 manifest 〔#111分类：删→驱动〕
 与崩溃前某次已经成功提交但响应未确认的发布内容完全一致，步骤 5 的幂等检查会命中并直接返回
 成功（§2.8 场景二）。
 
@@ -679,15 +693,15 @@ Daemon 重启后先按 §2.8 的 GET HEAD 三分支消歧：HEAD==记录 `seq` �
 
 ### 7.3 takeover 竞态（旧 owner 与新 owner 同时活动） <!-- §7.3 -->
 
-时序：旧 WI Agent 仍在运行 → 人工（admin）经恢复机器发起 force-takeover（该调用本身结束旧代并
+时序：旧 WI Agent 仍在运行 → 人工（admin）经恢复机器发起 force-takeover（该调用本身结束旧代并 〔#111分类：删→驱动〕
 开启 generation+1、在响应中返回新代凭证）→ 恢复机器的 Daemon **消费该响应凭证**创建新现场并派生
-新 WI Agent（无第二次 claim——再 claim 会被 `02-aihub-core.md#§6.1` 以 ALREADY_CLAIMED 拒绝；
-`04-local-runtime.md#§7.3` 恢复序权威）。旧 Daemon 在接管后代旧 WI Agent 发起的任何后续发布（即使旧 WI Agent
+新 WI Agent（无第二次 claim——再 claim 会被 `02-aihub-core.md#§6.1` 以 ALREADY_CLAIMED 拒绝； 〔#111分类：删→驱动〕
+`04-local-runtime.md#§7.3` 恢复序权威）。旧 Daemon 在接管后代旧 WI Agent 发起的任何后续发布（即使旧 WI Agent 〔#111分类：删→驱动〕
 仍在运行并持续向旧 Daemon 发出发布请求），无论处于步骤 4（块上传）还是步骤 6（manifest
 提交），都会在 §2.9 fencing 校验处被拒（`SYNC-403 STALE_OWNER`），旧 Daemon 据此立即停止为
-该 WI 发布并通知旧 WI Agent 停止驱动、封存本地现场（不再尝试发布，`03-execution-capsule.md#§2.4`）。新 Main
+该 WI 发布并通知旧 WI Agent 停止驱动、封存本地现场（不再尝试发布，`03-execution-capsule.md#§2.4`）。新 Main 〔#111分类：删→驱动〕
 Agent 通过 §7.4（若适用）从远端 HEAD 恢复现场后，以新 generation 正常发布。窗口内旧 Daemon
-可能已经代旧 WI Agent 上传过的块因未被任何 manifest 引用而成为无害残留（不被 HEAD 引用），
+可能已经代旧 WI Agent 上传过的块因未被任何 manifest 引用而成为无害残留（不被 HEAD 引用）， 〔#111分类：删→驱动〕
 由删除保护（§2.10）与 checkpoint GC 正常回收，不影响正确性。
 
 ### 7.4 远端现场恢复（takeover / Capsule 重建时调用） <!-- §7.4 -->
@@ -700,10 +714,10 @@ bootstrap 分支）；再按 `02-aihub-core.md#§4.6`/§5.1 的 Core 权威 repo
 （先删后写，避免 checkpoint 之前已删除的文件被错误复活），过程中每个 `symlink`/`put` 操作都
 必须经过 §2.11 引用的 `03-execution-capsule.md#§6` 路径校验；替换后逐文件校验 sha256 与预期一致。**`harness/<adapter>/`
 整体不参与本次替换**：即使某个历史 Revision 里包含过 `harness/<adapter>/session.json` 的
-`put` 操作（§4.1 的可选同步项），本次重建也不据此写回该文件——`harness/<adapter>/` 由 `03-execution-capsule.md#§6.1` 第 5 步为新 generation 创建全新的空目录，随后由新派生的 WI Agent 首次启动 harness 时
+`put` 操作（§4.1 的可选同步项），本次重建也不据此写回该文件——`harness/<adapter>/` 由 `03-execution-capsule.md#§6.1` 第 5 步为新 generation 创建全新的空目录，随后由新派生的 WI Agent 首次启动 harness 时 〔#111分类：删→驱动〕
 重新写入全新的 `session.json`/`session-data/`；Revision 中的历史 `session.json` 只是审计用
 的历史元数据，不构成任何身份恢复依据（`03-execution-capsule.md#§4.4`「新代总是从干净目录开始」的裁定同样约
-束本恢复路径）。WI Agent 第 0 步物化的 `.pi/agents/`、`.claude/agents/` 与 `workflow.md`（或 `workflow/`）与 `harness/` 同一「永远从零重建」模式：不在同步根（§4.1，SYNC-INV-10），不参与本次替换，由新 WI Agent 在第 0 步从本机 aihub checkout 重新物化（`03-execution-capsule.md#§4.5`）。已归档的
+束本恢复路径）。WI Agent 第 0 步物化的 `.pi/agents/`、`.claude/agents/` 与 `workflow.md`（或 `workflow/`）与 `harness/` 同一「永远从零重建」模式：不在同步根（§4.1，SYNC-INV-10），不参与本次替换，由新 WI Agent 在第 0 步从本机 aihub checkout 重新物化（`03-execution-capsule.md#§4.5`）。已归档的 〔#111分类：删→驱动〕
   session transcript（`logs/session/<generation>.jsonl`，`03-execution-capsule.md#§4.4` A14 裁定）若存在于历史
   Revision 中，作为 `logs/` 同步根内的一等文件照常写回，但**跨机重建不依赖已归档 transcript**：它
   只是审计材料，不参与任何执行现场或 harness 身份的重建——重建后的新 generation 产生自己的
@@ -712,7 +726,7 @@ bootstrap 分支）；再按 `02-aihub-core.md#§4.6`/§5.1 的 Core 权威 repo
 前后 HEAD 未变，因此 read-through（`02-aihub-core.md#§5.2`）观测到的进度在恢复前后一致，观测面无感。
 
 **与本机崩溃的区分**：远端现场恢复只在 generation 发生变化（隔离重建或全新 Capsule）时调用，
-总是完整替换，不保留本地内容。§7.1 的本机崩溃（WI Agent 重启但 generation 未变）不走这条
+总是完整替换，不保留本地内容。§7.1 的本机崩溃（WI Agent 重启但 generation 未变）不走这条 〔#111分类：删→驱动〕
 路径，而是等待下一次触发事件走 §6 的正常发布流程；本地未发布的改动被保留，不被完整替换覆盖。
 
 ## 8. 安全边界 <!-- §8 -->
@@ -743,15 +757,15 @@ bootstrap 分支）；再按 `02-aihub-core.md#§4.6`/§5.1 的 Core 权威 repo
 - 单一路径断言：制造 watcher 检测到文件变化但没有任何 §2.4 触发事件发生的情形 → 断言不产生
   任何发布、HEAD 不动，仅 dirty 标记被写入。
 - write freeze 协议：在 step agent 持续写入时人为触发一次全扫描发布 → 断言 Daemon 不开始扫描，
-  直到 WI Agent 确认停止写入；断言扫描窗口内没有任何新文件写入落入本次 manifest。另构造
-  WI Agent 进程、其全部命令子进程与 step agent 进程组均已终止的情形（模拟优雅停机/崩溃）
+  直到 WI Agent 确认停止写入；断言扫描窗口内没有任何新文件写入落入本次 manifest。另构造 〔#111分类：删→驱动〕
+  WI Agent 进程、其全部命令子进程与 step agent 进程组均已终止的情形（模拟优雅停机/崩溃） 〔#111分类：删→驱动〕
   → 断言 Daemon 不等待任何确认信号即开始扫描。
-- 进程组未完全终止：构造 WI Agent 顶层进程已退出但它派生的某个命令子进程/step agent 进程
+- 进程组未完全终止：构造 WI Agent 顶层进程已退出但它派生的某个命令子进程/step agent 进程 〔#111分类：删→驱动〕
   组仍存活的情形 → 断言 Daemon 不视为 write freeze 已获取，继续等待该子进程组终止，不
   提前开始扫描。
-- 代替 WI Agent 已开始写入：构造新 WI Agent 已经先于本次发布请求写过
+- 代替 WI Agent 已开始写入：构造新 WI Agent 已经先于本次发布请求写过 〔#111分类：删→驱动〕
   `runtime-state/execution.json` 的情形 → 断言 Daemon 不再使用进程终止判定，转为对该新
-  WI Agent 发起正常确认请求。
+  WI Agent 发起正常确认请求。 〔#111分类：删→驱动〕
 - staging 隔离与独立副本（修复：防止上传阶段回读活目录；B09：禁止硬链接）：在 write freeze
   释放后、块上传开始前，人为修改 Capsule 工作树内容（包括对本次已固化进 manifest 的某个文件
   执行**原地写**——以 O_RDWR 不截断方式覆写文件中段字节——与 **truncate**（截短与截长两种
@@ -776,7 +790,7 @@ bootstrap 分支）；再按 `02-aihub-core.md#§4.6`/§5.1 的 Core 权威 repo
   Daemon 先走一次 bootstrap 发布（seq=0）再生成证据，不允许以空链形态
   静默丢弃未发布改动。
 - write freeze 与 publish mutex 的释放时机差：断言 write freeze 在 staging 固化完成后立即
-  释放（WI Agent 可恢复写入），而 publish mutex 直到本次块上传+manifest 提交的成功/失败
+  释放（WI Agent 可恢复写入），而 publish mutex 直到本次块上传+manifest 提交的成功/失败 〔#111分类：删→驱动〕
   结果处理完毕才释放，其间该 WI 的下一次发布请求保持排队。
 - manifest 固定顺序（SYNC-INV-6）：在同一次扫描中对 `runtime-state/execution.json` 与另一个
   产物文件同时发起变化（实验环境下人为控制时序）→ 断言生成的 `ops` 中 `execution.json` 对应的
@@ -797,10 +811,10 @@ bootstrap 分支）；再按 `02-aihub-core.md#§4.6`/§5.1 的 Core 权威 repo
   将历史 `session.json` 写回工作树。
 - 物化目录排除（SYNC-INV-10，§4.1）：制造一次仅 `.pi/agents/`（或 `.claude/agents/`、`workflow.md`）内
   发生变化、不碰任何同步根路径的快照 → 断言 manifest 的 `ops` 为空或不发生实质性发布；随后走
-  §7.4 远端现场恢复 → 断言这些路径不被写回工作树，由新 WI Agent 在第 0 步按物化规则重建。
+  §7.4 远端现场恢复 → 断言这些路径不被写回工作树，由新 WI Agent 在第 0 步按物化规则重建。 〔#111分类：删→驱动〕
 - **可注入故障**：网络分区（预期积压后下一次触发事件补齐）；磁盘满（预期 `CORE-507`、HEAD
   不动）；块位翻转（预期抽样校验发现并重发）；进程崩溃于步骤 2/4/5/6 各阶段（预期分别对应
-  §7.1/§7.2 的收敛路径；步骤 2 崩溃尤指 Daemon 本身崩溃与 WI Agent 崩溃两种子情形都需覆
+  §7.1/§7.2 的收敛路径；步骤 2 崩溃尤指 Daemon 本身崩溃与 WI Agent 崩溃两种子情形都需覆 〔#111分类：删→驱动〕
   盖）；takeover 竞态（预期 §7.3 序列）；删除撤销（预期 tombstone 窗口内可撤销）。
 
 ## 11. 迁移与 rollout <!-- §11 -->
