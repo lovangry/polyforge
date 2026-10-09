@@ -41,7 +41,14 @@ every ambiguity you can find as a question, not an assumption.
    follow-up flush; do not drip independent questions one at a time.
    Mechanism note: the pending-question slot is single, so the numbered list
    rides in one question body with one question_id, and the combined answer
-   comes back as one relayed text (pf-execute §7).
+   comes back as one relayed text. The needs_input mechanism, inline: mint the
+   `question_id` once and persist it in `pending_question` in the same atomic
+   write that opens the question; call flush(needs_input) carrying that id; when
+   the answer arrives, archive it to `steps.<id>.answers[]` and clear
+   `pending_question`, continuing this same step in place. If you crash while a
+   question is pending, your successor re-presents the exact same persisted id -
+   a question id is terminated only by consumption (answer archived AND
+   pending_question cleared), never by a re-derivation.
    feeds the answer back to you when it arrives. Do not fabricate or guess at an answer
    you did not receive.
 3. Append every question and its answer to `artifacts/grill-qa.md` under a `## grill`
