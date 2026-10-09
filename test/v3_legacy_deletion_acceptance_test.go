@@ -804,7 +804,7 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 		"SKILL.md", "verbs/help.md",
 		// verbs/crystallize, doctor, retro (and status) were DELETED by
 		// polyforge#97's operator-skills cleanup — their disappearance IS
-		// the compliant outcome for the pf-execute scrub; they are no
+		// the compliant outcome for the deleted-skill scrub; they are no
 		// longer live surfaces to pin.
 	} {
 		surfaces = append(surfaces, filepath.Join(root, "skills", "polyforge", n))
