@@ -18,10 +18,10 @@ curl -s -H "Authorization: token $(gh auth token)" \
 server host with `PF_HOST=<host>` if it ever moves.)
 
 It installs the `pf` binary(SHA-verified from the release server), writes
-`~/.polyforge/config.toml`, installs the operator skills(pi harness → pi
-package;other harnesses with a skills dir → directory copy;otherwise
-CLI-only), and verifies connectivity. Execution machines(ones that run a
-pf daemon)add the daemon per `operator-skills/pf-init/` Step 4 — the
+`~/.config/polyforge/cli.toml`, installs the `skills/polyforge` routing
+skill(pi harness → pi package;other harnesses with a skills dir →
+directory copy;otherwise CLI-only), and verifies connectivity. Execution
+machines(ones that run a pf daemon)add the daemon per `tools/install.sh` — the
 admin registers the machine identity first. Daily use from a session is
 natural language via the `polyforge` routing skill;from a terminal it's
 `pf queue`, `pf submit`, `pf answer`, `pf ops status`, …
