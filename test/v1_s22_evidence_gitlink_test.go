@@ -66,7 +66,7 @@ func TestV1S22WrapEvidenceGate(t *testing.T) {
 			{"do": "envelope", "id": "release", "outcome": "needs_input", "question_id": "q_s22_hold2",
 				"question": "s22a: parked at the accept window."},
 		}, nil)
-	d := newV1Daemon(t, inst, optDriverEngine())
+	d := newV1Daemon(t, inst)
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
@@ -219,7 +219,7 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst, optDriverEngine())
+	d := newV1Daemon(t, inst)
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)

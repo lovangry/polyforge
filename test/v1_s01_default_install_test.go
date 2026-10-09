@@ -31,7 +31,7 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst, optDriverEngine())
+	d := newV1Daemon(t, inst)
 	d.start()
 
 	// Interactive submit through the real CLI.

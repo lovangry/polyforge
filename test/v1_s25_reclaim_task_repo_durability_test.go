@@ -49,7 +49,7 @@ func TestV1S25ReclaimTaskRepoNotDurable(t *testing.T) {
 		}, nil)
 	t.Cleanup(func() { killOrphans(wi) })
 
-	d := newV1Daemon(t, inst, optDriverEngine())
+	d := newV1Daemon(t, inst)
 	d.start()
 	d.pf(t, "submit", wi)
 

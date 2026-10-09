@@ -50,7 +50,7 @@ func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 		"fail_spawn_fresh":  true,
 	})
 
-	d := newV1Daemon(t, inst, optDriverEngine())
+	d := newV1Daemon(t, inst)
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)

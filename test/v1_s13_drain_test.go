@@ -45,7 +45,7 @@ func TestV1S13Drain(t *testing.T) {
 	// post-teardown orphan sweep by hand.
 	inst.trackWI(wiD.ID)
 
-	d := newV1Daemon(t, inst, optMode("drain"), optDriverEngine())
+	d := newV1Daemon(t, inst, optMode("drain"))
 	d.start()
 
 	// The drain waves claim the ready queue on their own (wave period 5s)

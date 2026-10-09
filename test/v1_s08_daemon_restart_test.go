@@ -27,7 +27,7 @@ func TestV1S08DaemonRestart(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst, optDriverEngine())
+	d := newV1Daemon(t, inst)
 	d.start()
 	d.pf(t, "submit", wi)
 	waitSpawnCount(t, d, wi, 2, 30*time.Second)

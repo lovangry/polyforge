@@ -24,7 +24,7 @@ func TestV1S17SealCrashResume(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst, optDriverEngine())
+	d := newV1Daemon(t, inst)
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
