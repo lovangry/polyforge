@@ -111,7 +111,6 @@ type Config struct {
 	Observe           ObserveWindows
 	DrainInterval     time.Duration // drain wave-fetch period (5s)
 	DispatchTick      time.Duration // dispatcher/backfill period (200ms)
-	NoticeAckBound    time.Duration // stop_notice ack wait (30s)
 	ShutdownFlushWait time.Duration // per-job flush(shutdown) wait (60s)
 	ShutdownBudget    time.Duration // whole-shutdown ceiling (5min)
 	ExitPoll          time.Duration // adapter exit-poll period (200ms)
@@ -159,9 +158,6 @@ func (c *Config) fill() {
 	}
 	if c.DispatchTick == 0 {
 		c.DispatchTick = 200 * time.Millisecond
-	}
-	if c.NoticeAckBound == 0 {
-		c.NoticeAckBound = 30 * time.Second
 	}
 	if c.ShutdownFlushWait == 0 {
 		c.ShutdownFlushWait = 60 * time.Second
@@ -713,14 +709,6 @@ func (d *Daemon) bridge() {
 			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
-				// Emission-time counter registration (the flush fence's
-				// recovery window, #8): the hub records the new derivation
-				// counter the moment Runtime announces it — before the
-				// monitor adopts the attachment — so a just-resumed
-				// agent's flush(reason) never eats a STALE_SPAWN refusal
-				// in the window between the RTRecovered emission and the
-				// monitor's adoption.
-				d.obs.NoteSpawn(msg.WorkItem, msg.SpawnN)
 				if ji, live := d.rt.Info(msg.WorkItem); live && ji.Agent != nil {
 					at = d.buildAttach(msg, ji)
 				}

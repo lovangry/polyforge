@@ -171,33 +171,6 @@ func (o *Observe) serveFlush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, api.ErrDaemonBadInput, "unknown flush reason: "+req.Reason)
 		return
 	}
-	// The B2 spawn fence (v1.5 §4.3): the request's SpawnN must name the
-	// monitor's CURRENT derivation — a zombie survivor of a superseded
-	// derivation (the six-layer cleanup admits residue) must never seal
-	// work that belongs to the live one. Mismatch — including an absent
-	// counter (0), refused fail-closed — answers DAEMON-409 STALE_SPAWN
-	// and never reaches the monitor. EXCEPT the recovery window: a counter that matches the
-	// hub's LATEST ANNOUNCED derivation (registered at RTStarted/
-	// RTRecovered emission time, which the monitor's adoption lags)
-	// passes — the just-resumed agent's own flush is never stale. The
-	// monitor queues such a call until its adoption completes (onFlush),
-	// so an older counter can still never reach the flush paths.
-	cur := m.currentSpawn()
-	known := o.spawnKnown(wi)
-	if req.SpawnN == 0 ||
-		(req.SpawnN != cur && req.SpawnN != known) ||
-		// Adoption-window cross-check (the s10 hole): a successor announcement supersedes the
-		// predecessor IMMEDIATELY — a counter that still equals the
-		// monitor's lagging cur is already stale when known names a
-		// DIFFERENT (newer) derivation; only a zombie speaks in the
-		// predecessor's name.
-		(req.SpawnN == cur && known != 0 && req.SpawnN != known) {
-		writeErr(w, api.ErrDaemonConflict,
-			"STALE_SPAWN: flush carries spawn_n "+strconv.Itoa(req.SpawnN)+
-				"; the current derivation is "+strconv.Itoa(cur)+
-				" (latest announced: "+strconv.Itoa(known)+")")
-		return
-	}
 	// F9 fail-closed gate: a needs_input flush without a question id can
 	// never be answered — the answer relay binds on the id — and an empty
 	// id accepted here mints an unanswerable hanging pending (the pilot

@@ -71,7 +71,6 @@ func TestRunAbortsWhenMidflightCapsuleMissing(t *testing.T) {
 		ObservePoll:       10 * time.Millisecond,
 		DrainInterval:     10 * time.Millisecond,
 		DispatchTick:      10 * time.Millisecond,
-		NoticeAckBound:    100 * time.Millisecond,
 		ShutdownFlushWait: 100 * time.Millisecond,
 		ExitPoll:          10 * time.Millisecond,
 	}

@@ -217,12 +217,6 @@ type Monitor struct {
 	stop     sync.Once
 	answerCh chan AnswerCall
 	flushCh  chan FlushCall
-	// deferredFlush holds one flush call whose (serveFlush-validated)
-	// spawn_n names the hub's LATEST ANNOUNCED derivation while the
-	// monitor still holds its predecessor — the recovery-adoption window.
-	// The call is released by onRecovered once the announced counter is
-	// adopted; the fence never lets an OLDER counter reach this field.
-	deferredFlush *FlushCall
 
 	// execution.json polling state (monitor goroutine only).
 	execPath      string
@@ -387,7 +381,6 @@ func (m *Monitor) requestStop() { m.stop.Do(func() { close(m.stopCh) }) }
 // criterion, poll execution.json, maybe schedule a push, check
 // backpressure.
 func (m *Monitor) onTick() {
-	m.releaseDeferredFlush()
 	m.drainIncidents()
 	m.checkHang()
 	m.checkIdle()
@@ -396,24 +389,6 @@ func (m *Monitor) onTick() {
 	m.schedulePush()
 	m.checkBackpressure()
 	m.checkRevalidate()
-}
-
-// releaseDeferredFlush re-examines a flush parked in the adoption window:
-// the adoption it waits for may have completed between the serveFlush
-// fence and this monitor pass (the fence read the OLD current counter,
-// onRecovered ran, and only then did the call reach onFlush) — a
-// deferred call stranded that way is released here within one poll
-// tick instead of waiting out the flush bound. A call whose counter is
-// still ahead stays parked; onRecovered owns the immediate release path.
-func (m *Monitor) releaseDeferredFlush() {
-	if m.deferredFlush == nil {
-		return
-	}
-	call := *m.deferredFlush
-	if call.Req.SpawnN == m.spawnN {
-		m.deferredFlush = nil
-		m.onFlush(call)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -792,22 +767,6 @@ func (m *Monitor) onRecovered(at Attach) {
 	_ = m.log.Append(m.wi.WorkItem, EvAgentRecovered, map[string]any{
 		"spawn_n": at.Msg.SpawnN,
 	})
-	// Release the flush that arrived during the adoption window: the
-	// counter it carries is now current, so it takes the ordinary path; a
-	// counter that STILL does not match (a superseded announcement) is
-	// answered with the stale-refusal shape — the fence's promise holds.
-	if m.deferredFlush != nil {
-		call := *m.deferredFlush
-		m.deferredFlush = nil
-		if call.Req.SpawnN == at.Msg.SpawnN {
-			m.onFlush(call)
-		} else {
-			call.Resp <- protocol.FlushAck{
-				OK: false, Error: "STALE_SPAWN: flush carries spawn_n " + strconv.Itoa(call.Req.SpawnN) +
-					"; the current derivation is " + strconv.Itoa(at.Msg.SpawnN),
-			}
-		}
-	}
 	// F9: the successor may inherit answers that were delivered to its
 	// dead predecessor but never consumed — re-send them now.
 	m.redeliverAwaiting()
@@ -1378,50 +1337,6 @@ func (m *Monitor) spawnRedelivery(relay AnswerRelay, qid, step string) {
 // flush(reason) handling (the UDS face entry)
 
 func (m *Monitor) onFlush(call FlushCall) {
-	// M4: a superseded session's flushes are refused with the stale
-	// shape — the work item belongs to another daemon now, and no local
-	// seal may speak for it.
-	m.stateMu.Lock()
-	superseded := m.superseded
-	m.stateMu.Unlock()
-	if superseded {
-		call.Resp <- protocol.FlushAck{
-			OK: false, Error: "STALE_SPAWN: this session was superseded (another daemon holds the work item); the flush is refused",
-		}
-		return
-	}
-	// The B2 spawn fence, monitor half: a request that carries NO counter
-	// while the monitor runs a session-model derivation (spawnN > 0)
-	// names nothing and is refused fail-closed — the belt-and-braces
-	// twin of the serveFlush fence for direct-channel callers. A monitor
-	// that never adopted a counter (legacy attach, spawnN == 0) keeps
-	// serving legacy callers unchanged until the cleanup commit.
-	if n := call.Req.SpawnN; m.spawnN > 0 && n == 0 {
-		call.Resp <- protocol.FlushAck{
-			OK: false, Error: "STALE_SPAWN: flush carries no spawn_n; the current derivation is " +
-				strconv.Itoa(m.spawnN),
-		}
-		return
-	}
-	// The recovery-adoption window: the request names a derivation the
-	// monitor has not adopted yet (the serveFlush fence has already
-	// proven it is the hub's latest announced counter, never an older
-	// one). Queue it — the RTRecovered attachment this counter belongs to
-	// is already in flight on rtCh; onRecovered releases the call the
-	// moment the counter becomes current. Only one such call can exist
-	// (the window is one spawn deep); a second answers an explicit
-	// refusal.
-	if n := call.Req.SpawnN; n != 0 && n != m.spawnN {
-		if m.deferredFlush == nil {
-			m.deferredFlush = &call
-			return
-		}
-		call.Resp <- protocol.FlushAck{
-			OK: false, Error: "flush adoption window busy; retry: spawn_n " + strconv.Itoa(n) +
-				" is still ahead of the monitor (holding " + strconv.Itoa(m.spawnN) + ")",
-		}
-		return
-	}
 	switch call.Req.Reason {
 	case protocol.FlushNeedsInput:
 		m.flushNeedsInput(call)

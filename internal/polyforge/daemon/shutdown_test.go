@@ -38,22 +38,9 @@ func TestShutdownSequence(t *testing.T) {
 		t.Fatal("Run did not return after the shutdown sequence")
 	}
 
-	// Both live agents received the stop-advancing notice.
-	for _, n := range []int{0, 1} {
-		a := td.spawner.agentOf(n)
-		if a == nil {
-			t.Fatalf("agent %d missing", n)
-		}
-		got := false
-		for _, m := range a.sentMethods() {
-			if m == protocol.ControlStopNotice {
-				got = true
-			}
-		}
-		if !got {
-			t.Fatalf("agent %d never received pf/stop_notice (got %v)", n, a.sentMethods())
-		}
-	}
+	// polyforge#106: the pf/stop_notice delivery face is deleted with
+	// the WI-Agent lane — the driver owns the step state machine, so
+	// the sequence's per-job grace is the flush(shutdown) window only.
 
 	// Runtime's state.json landed with both jobs recorded (the
 	// bookkeeping the next start reconciles against aihub).
@@ -103,17 +90,10 @@ func TestShutdownFlushPositive(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- td.Shutdown(context.Background()) }()
 
-	// Play the agent: once the notice is observable, flush(shutdown).
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if td.spawner.agentOf(0).sentMethods() != nil && len(td.spawner.agentOf(0).sentMethods()) > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("stop_notice never delivered")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Play the agent: flush(shutdown) right after the shutdown call
+	// latches. (The stop_notice delivery that used to gate this is
+	// retired with the WI-Agent lane, polyforge#106.)
+	time.Sleep(50 * time.Millisecond)
 	if _, err := td.client.Flush("wi_s3", protocol.FlushRequest{
 		WorkItem: "wi_s3", SpawnN: sjv.SpawnN, Reason: protocol.FlushShutdown,
 	}); err != nil {
