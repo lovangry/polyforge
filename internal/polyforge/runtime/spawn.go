@@ -479,10 +479,12 @@ func (p *proc) writeCommand(c piCommand) error {
 }
 
 // SendControl delivers one daemon→agent control method (§五 stdio channel:
-// answer / stop_notice / probe only): the protocol.ControlMsg JSON line is
-// the message text of a prompt command VERBATIM — the agent parses the user
-// message text exactly as the raw line. steer keeps the command legal while
-// a turn is in flight and delivers at the next boundary.
+// the probe only since polyforge#106 — the answer relay and the
+// stop-notice delivery died with the WI-Agent engine): the
+// protocol.ControlMsg JSON line is the message text of a prompt command
+// VERBATIM — the agent parses the user message text exactly as the raw
+// line. steer keeps the command legal while a turn is in flight and
+// delivers at the next boundary.
 func (p *proc) SendControl(m protocol.ControlMsg) error {
 	line, err := json.Marshal(m)
 	if err != nil {
@@ -529,18 +531,10 @@ func ackOutcome(m protocol.ControlMsg, ack protocol.ControlAck) error {
 }
 
 // ackTokenOf is the correlation token a control message carries:
-// pf/answer → the question id, pf/probe → the nonce, everything else →
-// the numeric seq.
+// pf/probe → the nonce, everything else → the numeric seq.
 func ackTokenOf(m protocol.ControlMsg) string {
-	switch m.Method {
-	case protocol.ControlAnswer:
-		if m.ID != "" {
-			return m.ID
-		}
-	case protocol.ControlProbe:
-		if m.Nonce != "" {
-			return m.Nonce
-		}
+	if m.Method == protocol.ControlProbe && m.Nonce != "" {
+		return m.Nonce
 	}
 	return strconv.FormatInt(m.Seq, 10)
 }
@@ -615,8 +609,9 @@ func (p *proc) controlCandidate(line string) {
 		return
 	}
 	switch ack.Method {
-	case protocol.ControlAnswer, protocol.ControlStopNotice, protocol.ControlProbe:
-		// closed vocabulary
+	case protocol.ControlProbe:
+		// closed vocabulary (polyforge#106: the probe is the only control
+		// method the stdio channel still carries)
 	default:
 		return
 	}

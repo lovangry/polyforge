@@ -75,17 +75,6 @@ func (a *fakeAgent) sentMethods() []string {
 	return out
 }
 
-func (a *fakeAgent) sentAnswer(id, text string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for _, m := range a.sent {
-		if m.Method == protocol.ControlAnswer && m.ID == id && m.Answer == text {
-			return true
-		}
-	}
-	return false
-}
-
 // ---------------------------------------------------------------------------
 // fake spawner
 

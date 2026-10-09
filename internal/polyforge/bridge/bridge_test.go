@@ -43,7 +43,11 @@ func TestProbeFailsAfterDriverExit(t *testing.T) {
 
 func TestNonProbeControlStillRefused(t *testing.T) {
 	h := &Handle{done: make(chan error)}
-	for _, method := range []string{protocol.ControlStopNotice, protocol.ControlAnswer} {
+	// polyforge#106: the answer relay and the stop-notice delivery died
+	// with the WI-Agent engine — the driver handle still refuses them BY
+	// NAME (literals: the protocol constants are deleted) alongside
+	// anything else that is not the probe.
+	for _, method := range []string{"pf/stop_notice", "pf/answer"} {
 		if err := h.SendControl(protocol.ControlMsg{Method: method}); err == nil {
 			t.Fatalf("non-probe control %q must stay refused (no stdio channel)", method)
 		}
