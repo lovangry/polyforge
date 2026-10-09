@@ -72,6 +72,12 @@ type planAction struct {
 	// error outputs for gate_failed envelopes, schema-shaped payloads,
 	// refusal probes).
 	Output map[string]any `json:"output,omitempty"`
+	// Files writes extra capsule-relative files (path → content) BEFORE
+	// the envelope write — the declared-input shape: a later step's
+	// declared `inputs:` entry must exist on disk at ITS dispatch, and
+	// this is how a scripted step produces it (e.g. the bug-fix lane's
+	// root-cause consuming artifacts/repro.md).
+	Files map[string]string `json:"files,omitempty"`
 	// Evidence carries extra structured command-evidence entries
 	// (merged with the synthetic one; suppressed entirely by
 	// NoEvidence). The driver copies command_evidence onto
@@ -459,6 +465,20 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 	if act.FlushWrap == "before" {
 		ok, errText := d.flushWrapVerbose("wrapped")
 		d.journal("flush", map[string]any{"reason": "wrap", "final_status": "wrapped", "ok": ok, "error": errText})
+	}
+	// Extra capsule-relative files, verbatim content (the declared-input
+	// producer: a downstream step's declared inputs must exist at its
+	// dispatch).
+	for p, content := range act.Files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(d.capsuleRoot(), p)), 0o755); err == nil {
+			if err := os.WriteFile(filepath.Join(d.capsuleRoot(), p), []byte(content), 0o644); err != nil {
+				d.journal("file_error", map[string]any{"path": p, "err": err.Error()})
+			} else {
+				d.journal("file", map[string]any{"path": p, "bytes": len(content)})
+			}
+		} else {
+			d.journal("file_error", map[string]any{"path": p, "err": err.Error()})
+		}
 	}
 	if act.Crash == "before" {
 		d.journal("crash_before", map[string]any{"step": act.ID, "outcome": act.Outcome})
