@@ -252,6 +252,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			_ = run.Terminate(5 * time.Second)
 			return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, err)
 		}
+		delivered := res.Outcome
 		if verr := d.validateResultStrict(res, stepID, n); verr != nil {
 			// Envelope-authoring errors are STEP-CONTENT failures, not
 			// infrastructure (the #97/#107 lessons: a hand-transcribed digest
@@ -277,6 +278,18 @@ func (d *Driver) Run(ctx context.Context) error {
 					stepID, n, count, maxEnvelopeRejects, verr)
 			}
 			continue // in-process re-dispatch: the step is still in_progress
+		}
+		if res.Outcome != delivered && d.log != nil {
+			// The verdict binding re-classified the envelope (the #106
+			// lesson): a gate's completed envelope carrying a fail verdict
+			// routes as the gate-fail report it claims to be. News, not
+			// state — the delivered envelope stays archived verbatim, the
+			// rewind itself is written by the transitions that follow.
+			verdict, _ := failVerdictInOutput(res.Output)
+			_ = d.log.Append(d.wi.ID, EvGateVerdictBound, map[string]any{
+				"step": stepID, "spawn_n": n, "verdict": verdict,
+				"delivered_outcome": delivered, "bound_outcome": res.Outcome,
+			})
 		}
 		d.mu.Lock()
 		delete(d.rejects, stepID)
@@ -639,12 +652,14 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 		}
 	}
 	d.mu.Unlock()
-	// Declared outputs and handoff duty from the extended workflow.
+	// Declared outputs, handoff duty and gate-ness from the extended
+	// workflow (gate-ness feeds the verdict binding — the #106 lesson).
 	if d.extWF != nil {
 		for _, ds := range d.extWF.Steps {
 			if ds.ID == stepID {
 				spec.Outputs = ds.Outputs
 				spec.HandoffRequired = ds.Handoff
+				spec.Gate = ds.Gate
 				break
 			}
 		}
@@ -653,6 +668,7 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 		// declaration (tests inject Workflow directly without a bundle dir).
 		if ss := d.workflow.step(stepID); ss != nil {
 			spec.HandoffRequired = ss.Handoff
+			spec.Gate = ss.Gate
 		}
 	}
 	return spec

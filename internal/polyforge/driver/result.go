@@ -13,6 +13,17 @@
 //  4. substance — artifact files exist with matching hashes (R14
 //     step 3) and output matches the step's declared
 //     schema (R14 step 2)
+//
+// For a step the workflow declares gate: true there is a fifth rule,
+// the VERDICT BINDING (the #106 lesson): a gate's business verdict —
+// the top-level "verdict" string in the output JSON — and the
+// envelope's routing outcome must agree in the fail direction. A
+// completed envelope carrying a fail verdict is a mislabeled gate-fail
+// report: it is never accepted as a completed step. ValidateStepResult
+// re-binds it to gate_failed — the only outcome whose routing (the
+// gate's on_fail policy) the driver honors — so a gate's fail verdict
+// can never advance a workflow, whatever the envelope's outcome field
+// says. Fail-closed by construction.
 package driver
 
 import (
@@ -38,6 +49,15 @@ const ResultProtocolVersion = 1
 // validation error verbatim — the operator sees exactly what the step
 // author got wrong).
 const EvEnvelopeRejected = "envelope_rejected"
+
+// EvGateVerdictBound is the durable event kind for the verdict binding
+// (the #106 lesson): one event per envelope the driver re-classified
+// from completed to gate_failed because a workflow-declared gate step
+// delivered a fail verdict under a completed outcome. The delivered
+// envelope is archived verbatim where it always is (the R14 staging
+// result.json); this event is the news that its ROUTING was bound to
+// the verdict.
+const EvGateVerdictBound = "gate_verdict_bound"
 
 // maxEnvelopeRejects bounds the in-process re-dispatch lane: a step
 // whose envelopes keep failing validation this many times CONSECUTIVELY
@@ -145,6 +165,10 @@ type ResultSpec struct {
 	// HandoffRequired mirrors the step's handoff: true declaration —
 	// a completed handoff step must carry a verifiable handoff_ref.
 	HandoffRequired bool
+	// Gate mirrors the step's gate: true declaration — the verdict
+	// binding applies (a completed envelope carrying a fail verdict is
+	// re-bound to gate_failed, never accepted as a completed step).
+	Gate bool
 	// CapsuleRoot is the directory capsule-relative artifact paths
 	// resolve against (verification is jailed inside it).
 	CapsuleRoot string
@@ -157,6 +181,13 @@ type ResultSpec struct {
 //     spawn (a result from a superseded spawn is fenced out);
 //  3. once-only: a result_id already in AcceptedIDs answers
 //     ErrDuplicateResult (wrap with errors.Is to detect);
+//     3b. verdict binding (gate steps only): a completed envelope whose
+//     output carries a top-level fail verdict is re-bound to
+//     gate_failed BEFORE substance is judged — a gate-fail report owes
+//     no completed duties (declared outputs, handoff_ref). The
+//     re-bind is visible to the caller: res.Outcome differs from the
+//     delivered outcome after this call, and the Run loop logs it as
+//     an EvGateVerdictBound event;
 //  4. substance: every artifact the envelope declares must exist under
 //     the capsule with matching size and SHA-256, and — for completed
 //     results — every declared output must be delivered and the output
@@ -210,6 +241,17 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	if spec.AcceptedIDs[res.ResultID] {
 		return fmt.Errorf("%w: %s", ErrDuplicateResult, res.ResultID)
 	}
+	// 3b. the verdict binding (the #106 lesson): for a gate step the
+	// output's top-level fail verdict IS the routing. A completed
+	// envelope carrying one is a mislabeled gate-fail report — re-bind
+	// it to gate_failed so the gate's on_fail policy fires and the
+	// verdict can never advance a workflow. The caller logs the bind;
+	// the delivered envelope stays archived verbatim.
+	if spec.Gate && res.Outcome == OutcomeCompleted {
+		if _, fail := failVerdictInOutput(res.Output); fail {
+			res.Outcome = OutcomeGateFailed
+		}
+	}
 	// 4. substance: verify everything the envelope names, whether or
 	// not the outcome demands it.
 	for i, a := range res.Artifacts {
@@ -241,6 +283,34 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 			spec.StepID)
 	}
 	return nil
+}
+
+// failVerdictInOutput reports whether one result output carries a
+// top-level "verdict" field whose STRING value asserts failure. The
+// match is a case- and space-insensitive prefix on "fail" — the
+// verdict vocabulary the gate steps declare (enum [pass, fail]) plus
+// the prose-decorated shape the in-repo gate fixtures use ("FAIL:
+// tests red"). Only the top-level scalar is read: a nested verdict or
+// a non-string one is not a fail verdict this binding can interpret,
+// and the declared-schema lane stays its authority.
+func failVerdictInOutput(output json.RawMessage) (string, bool) {
+	if len(output) == 0 {
+		return "", false
+	}
+	var probe struct {
+		Verdict any `json:"verdict"`
+	}
+	if err := json.Unmarshal(output, &probe); err != nil {
+		return "", false
+	}
+	s, ok := probe.Verdict.(string)
+	if !ok {
+		return "", false
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(s)), "fail") {
+		return s, true
+	}
+	return "", false
 }
 
 // ValidateOutputSchema checks one result output against a declared
