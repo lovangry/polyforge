@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -30,6 +31,15 @@ import (
 type submitResponse struct {
 	Accepted   bool   `json:"accepted"`
 	WorkItemID string `json:"work_item_id"`
+}
+
+// adoptResponse is the POST /jobs/{id}/adopt-session answer: custody
+// taken, with the PUBLIC fingerprint of the adopted session (never the
+// secret — it arrived IN the request and is never echoed).
+type adoptResponse struct {
+	Adopted            bool   `json:"adopted"`
+	WorkItemID         string `json:"work_item_id"`
+	SessionFingerprint string `json:"session_fingerprint"`
 }
 
 type statusJob struct {
@@ -195,6 +205,7 @@ func (d *Daemon) handler() http.Handler {
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute("claim"))
 	mux.HandleFunc("POST /jobs/{wi}/resume", d.submitRoute("resume"))
 	mux.HandleFunc("POST /jobs/{wi}/takeover", d.submitRoute("takeover"))
+	mux.HandleFunc("POST /jobs/{wi}/adopt-session", d.adoptSessionRoute)
 	mux.HandleFunc("POST /jobs/{wi}/pause", d.pauseRoute)
 	mux.HandleFunc("POST /jobs/{wi}/wrap", d.wrapRoute)
 	mux.HandleFunc("POST /jobs/{wi}/ship", d.shipRoute)
@@ -272,6 +283,59 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent})
 		writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// adopt-session: custody of an externally minted session (#109).
+
+// adoptSessionRoute takes a session secret minted OUTSIDE any runtime
+// start — the CLI-side takeover's mint — into this daemon's durable
+// custody (#109). Without it the secret would die with the CLI process
+// and the hub row would keep naming a session no process can ever use
+// (the #97/#109 orphaned holder). The adoption is verify-backed: the
+// daemon confirms with the hub that the presented secret really is the
+// live holder BEFORE journaling it, so custody is never recorded for a
+// swap that did not land.
+func (d *Daemon) adoptSessionRoute(w http.ResponseWriter, r *http.Request) {
+	wi := r.PathValue("wi")
+	var body struct {
+		SessionID string `json:"session_id"`
+		Owner     string `json:"owner"`
+		Reason    string `json:"reason"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.SessionID) == "" {
+		writeErr(w, api.ErrDaemonBadInput, "session_id required (the minted session secret)")
+		return
+	}
+	canonical := d.canonWI(wi)
+	// Custody makes no sense for work already live here (a retained
+	// PAUSED record coexists: the operator may take over a WI paused on
+	// this very daemon — the eventual takeover start replaces the record).
+	if ji, live := d.rt.Info(canonical); live && ji.State != runtime.StatePaused {
+		writeErr(w, api.ErrDaemonConflict, "work item is already active on this daemon")
+		return
+	}
+	v, err := d.hub.SessionVerify(canonical, body.SessionID)
+	if err != nil {
+		writeErrOf(w, err)
+		return
+	}
+	if !v.Matches {
+		writeErr(w, api.ErrDaemonConflict, "session is not the live holder of "+canonical)
+		return
+	}
+	if err := d.rt.AdoptSession(canonical, body.SessionID); err != nil {
+		writeErrOf(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, adoptResponse{
+		Adopted:            true,
+		WorkItemID:         canonical,
+		SessionFingerprint: api.SessionFingerprint(body.SessionID),
+	})
 }
 
 // ---------------------------------------------------------------------------

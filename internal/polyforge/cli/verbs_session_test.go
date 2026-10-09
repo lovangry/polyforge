@@ -21,9 +21,10 @@ const cannedSessionClaim = `{"claim":{"work_item_id":"wi_abc",` +
 	`"work_item":` + cannedWI + `}`
 
 // TestTakeoverHappyPath: `pf takeover <id> --reason ...` mints a fresh
-// 32-byte session secret, POSTs force-takeover with it (plus machine,
-// owner, reason, idempotency key), and renders the response's PUBLIC
-// fingerprint — never the secret.
+// 32-byte session secret, POSTs force-takeover with it (plus the LOCAL
+// DAEMON's machine id (#109), owner, reason, idempotency key), hands
+// the secret to the local daemon for durable custody (#109), and
+// renders the response's PUBLIC fingerprint — never the secret.
 func TestTakeoverHappyPath(t *testing.T) {
 	var rec reqRecorder
 	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
@@ -34,10 +35,15 @@ func TestTakeoverHappyPath(t *testing.T) {
 		}
 		io.WriteString(w, cannedSessionClaim)
 	})
+	d := newDaemonFixture(t)
+	// The daemon's own machine identity (GET /status) is the mint's
+	// machine (#109) — pinned to m-b to match the canned claim answer.
+	d.answer("GET", "/status", `{"machine_id":"m-b","mode":"interactive","workspace":"/srv/pf-ws","shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
+	d.answer("POST", "/jobs/wi_abc/adopt-session", `{"adopted":true,"work_item_id":"wi_abc","session_fingerprint":"ab12cd34ef56aa00"}`)
 
 	code, stdout, stderr := runPf(t, map[string]string{
 		"PF_SERVER": aihub.URL, "PF_API_KEY": "key-admin",
-		"PF_USER_ID": "usr_1",
+		"PF_USER_ID": "usr_1", "PF_DAEMON_SOCKET": d.sock,
 	}, "takeover", "wi_abc", "--reason", "holder machine died mid-drill")
 	if code != 0 {
 		t.Fatalf("takeover: code=%d stderr=%s", code, stderr)
@@ -84,8 +90,30 @@ func TestTakeoverHappyPath(t *testing.T) {
 	if ik, _ := gotBody["idempotency_key"].(string); ik == "" || !strings.HasPrefix(ik, "tk_") {
 		t.Errorf("idempotency_key = %v, want a fresh tk_ key", gotBody["idempotency_key"])
 	}
-	if m, _ := gotBody["machine_id"].(string); m == "" {
-		t.Errorf("machine_id must be reported, got %q", m)
+	if m, _ := gotBody["machine_id"].(string); m != "m-b" {
+		t.Errorf("machine_id = %v, want the local daemon's own id (GET /status, #109)", m)
+	}
+	// The custody handoff (#109): the minted secret went to the daemon's
+	// adopt-session route — the SAME secret the hub swap presented — and
+	// the operator-facing output names the custody, not an orphan.
+	var adoptBody map[string]any
+	var adoptSeen bool
+	for _, r := range d.rec.all() {
+		if r.Method == "POST" && r.Path == "/jobs/wi_abc/adopt-session" {
+			adoptSeen = true
+			if err := json.Unmarshal([]byte(r.Body), &adoptBody); err != nil {
+				t.Fatalf("adopt body must decode: %v (%s)", err, r.Body)
+			}
+		}
+	}
+	if !adoptSeen {
+		t.Fatalf("takeover must hand the minted secret to the daemon (POST /jobs/wi_abc/adopt-session); daemon saw: %v", d.rec.all())
+	}
+	if adoptBody["session_id"] != sid {
+		t.Errorf("adopt session_id = %v, want the minted secret", adoptBody["session_id"])
+	}
+	if !strings.Contains(stdout, "custody") || strings.Contains(stdout, "orphan session after this") {
+		t.Errorf("stdout must name the daemon custody (#109), not the old orphan note: %s", stdout)
 	}
 	// The call rode the caller's api key.
 	if last := rec.last(); last.Header.Get("Authorization") != "Bearer key-admin" {
@@ -99,8 +127,10 @@ func TestTakeoverJSONMode(t *testing.T) {
 	aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, cannedSessionClaim)
 	})
+	d := newDaemonFixture(t)
+	d.answer("POST", "/jobs/wi_abc/adopt-session", `{"adopted":true,"work_item_id":"wi_abc","session_fingerprint":"ab12cd34ef56aa00"}`)
 	code, stdout, _ := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL,
+		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
 	}, "--json", "takeover", "wi_abc", "--reason", "drill")
 	if code != 0 {
 		t.Fatalf("takeover --json: code=%d", code)
@@ -140,7 +170,8 @@ func TestTakeoverMissingReason(t *testing.T) {
 }
 
 // TestTakeoverWireErrorClasses: the typed envelope keeps the standard
-// exit-code mapping (4xx → 1, 5xx → 2).
+// exit-code mapping (4xx → 1, 5xx → 2). The local daemon is reachable
+// (fixture) — the refusal rides the hub face.
 func TestTakeoverWireErrorClasses(t *testing.T) {
 	for _, cls := range []struct {
 		name   string
@@ -155,14 +186,77 @@ func TestTakeoverWireErrorClasses(t *testing.T) {
 			w.WriteHeader(cls.status)
 			io.WriteString(w, cls.body)
 		})
-		code, _, stderr := runPf(t, map[string]string{"PF_SERVER": aihub.URL},
-			"takeover", "wi_abc", "--reason", "drill")
+		d := newDaemonFixture(t)
+		code, _, stderr := runPf(t, map[string]string{
+			"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
+		}, "takeover", "wi_abc", "--reason", "drill")
 		if code != cls.want {
 			t.Errorf("%s: exit = %d, want %d", cls.name, code, cls.want)
 		}
 		if !strings.Contains(stderr, "CORE-") {
 			t.Errorf("%s: stderr must carry the typed code: %s", cls.name, stderr)
 		}
+	}
+}
+
+// TestTakeoverRequiresLocalDaemon (#109): with no local daemon
+// reachable the verb refuses BEFORE minting or touching the hub — a
+// takeover whose session no daemon holds is exactly the #97 orphan
+// wedge. Same for a --machine that does not match the daemon's own id:
+// a session labeled for a machine that will never hold the secret is
+// the same unusable mint.
+func TestTakeoverRequiresLocalDaemon(t *testing.T) {
+	var rec reqRecorder
+	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedSessionClaim)
+	})
+	// No daemon at the socket (the fixture-free dead path).
+	code, _, stderr := runPf(t, map[string]string{
+		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": "/nonexistent/polyforge.sock",
+	}, "takeover", "wi_abc", "--reason", "drill")
+	if code != 1 {
+		t.Errorf("no-daemon takeover: exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "no local daemon reachable") {
+		t.Errorf("stderr must name the refusal: %s", stderr)
+	}
+	if n := len(rec.all()); n != 0 {
+		t.Errorf("the refusal must contact no hub (no mint, no swap); got %d calls", n)
+	}
+
+	// --machine mismatch: refused the same way, before the hub.
+	d := newDaemonFixture(t) // default /status: machine m1
+	code, _, stderr = runPf(t, map[string]string{
+		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
+	}, "takeover", "wi_abc", "--reason", "drill", "--machine", "m-elsewhere")
+	if code != 1 {
+		t.Errorf("machine-mismatch takeover: exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "does not match this box's daemon") {
+		t.Errorf("stderr must name the mismatch refusal: %s", stderr)
+	}
+	if n := len(rec.all()); n != 0 {
+		t.Errorf("the mismatch refusal must contact no hub; got %d calls", n)
+	}
+}
+
+// TestTakeoverAdoptFailureIsLoud (#109): if the hub swap landed but the
+// custody handoff to the daemon failed, the verb exits non-zero and
+// says the session is an orphan until a daemon-side takeover fences it
+// — never a silent exit-0 "success" over a lost secret.
+func TestTakeoverAdoptFailureIsLoud(t *testing.T) {
+	aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedSessionClaim)
+	})
+	d := newDaemonFixture(t) // no adopt-session answer → 404
+	code, _, stderr := runPf(t, map[string]string{
+		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
+	}, "takeover", "wi_abc", "--reason", "drill")
+	if code != 1 {
+		t.Fatalf("failed custody: exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "orphan until a daemon-side takeover fences it") {
+		t.Errorf("stderr must carry the orphan warning and the recovery path: %s", stderr)
 	}
 }
 

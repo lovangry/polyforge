@@ -648,23 +648,6 @@ func mintSessionSecret() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// takeoverMachineID resolves the machine identity a CLI-side takeover
-// reports: --machine, then POLYFORGE_MACHINE_ID (the daemon's own env
-// spelling), then the cli-<hostname> default.
-func takeoverMachineID(flagVal string) string {
-	if flagVal != "" {
-		return flagVal
-	}
-	if v := os.Getenv("POLYFORGE_MACHINE_ID"); v != "" {
-		return v
-	}
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		host = "unknown"
-	}
-	return "cli-" + host
-}
-
 // takeoverIdempotencyKey mints a fresh takeover idempotency key so a
 // network retry of the same invocation cannot double-swap (the server
 // keys the cached answer on it, D4).
@@ -674,18 +657,38 @@ func takeoverIdempotencyKey() string {
 	return "tk_" + hex.EncodeToString(b)
 }
 
+// daemonStatusOf reads the local daemon's GET /status — "the daemon on
+// this box". The takeover verb uses it as the machine-identity source
+// of truth (#109): the executor half's own view of itself, never a
+// CLI-side guess like the old cli-<hostname> spelling.
+func daemonStatusOf(ctx *Context) (*StatusResponse, error) {
+	raw, err := ctx.daemon().Status()
+	if err != nil {
+		return nil, err
+	}
+	var st StatusResponse
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
 // cmdTakeover is the v1.5 §1.4 force-takeover verb: atomically swap the
-// work item's session to a freshly minted secret presented by THIS
-// invocation. The old holder learns at its next fenced use (push or the
-// M4 revalidation). The response carries the PUBLIC fingerprint only —
-// never the secret.
+// work item's session to a freshly minted secret — minted by THIS
+// invocation and handed to the LOCAL daemon for durable custody (#109),
+// because a session whose secret dies with the CLI process is an orphan
+// no process can ever attach, verify, or fence (the #97 wedge). The
+// machine identity is the local daemon's own (GET /status): the session
+// this verb produces is one this box's daemon holds. The old holder
+// learns at its next fenced use (push or the M4 revalidation). The
+// response carries the PUBLIC fingerprint only — never the secret.
 var cmdTakeover = &Command{
 	Name:    "takeover",
 	Summary: "Force-takeover a running/paused WI to a fresh session (v1.5 §1.4; fences the old holder)",
 	Usage:   "pf takeover <id> --reason <text> [--machine ID] [--owner ID] [--json]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("reason", "", "why the takeover is justified (required; recorded in the session_superseded event)")
-		fs.String("machine", "", "machine identity reported to the hub (env POLYFORGE_MACHINE_ID; default cli-<hostname>)")
+		fs.String("machine", "", "machine identity override (must equal the local daemon's own id; default: the daemon's id from GET /status)")
 		fs.String("owner", "", "owner identity reported to the hub (default the configured user_id)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -695,6 +698,17 @@ var cmdTakeover = &Command{
 		reason := strings.TrimSpace(stringFlag(fs, "reason"))
 		if reason == "" {
 			return fmt.Errorf("takeover: --reason is required (recorded in the takeover audit event)")
+		}
+		// #109: the executor half must already be on this box. The local
+		// daemon is the only process that can hold the minted session
+		// secret and later run the work item, so a takeover without one
+		// would mint an unusable orphan — refuse instead of minting.
+		st, err := daemonStatusOf(ctx)
+		if err != nil {
+			return fmt.Errorf("takeover: no local daemon reachable (%v); a takeover minted without a daemon to hold the session orphans the work item (#109) — start the daemon and retry, or run the takeover on the box whose daemon should own the work item", err)
+		}
+		if m := stringFlag(fs, "machine"); m != "" && m != st.MachineID {
+			return fmt.Errorf("takeover: --machine %q does not match this box's daemon (%q); the minted session would be unusable by any daemon that holds it (#109) — run the takeover on the box that should own the work item", m, st.MachineID)
 		}
 		secret, err := mintSessionSecret()
 		if err != nil {
@@ -710,7 +724,7 @@ var cmdTakeover = &Command{
 		req := api.SessionClaimRequest{
 			WorkItemID:     args[0],
 			SessionID:      secret,
-			MachineID:      takeoverMachineID(stringFlag(fs, "machine")),
+			MachineID:      st.MachineID,
 			Owner:          owner,
 			Reason:         reason,
 			IdempotencyKey: takeoverIdempotencyKey(),
@@ -718,6 +732,17 @@ var cmdTakeover = &Command{
 		resp, err := ctx.aihub().ForceTakeover(args[0], req)
 		if err != nil {
 			return err
+		}
+		// Custody (#109): hand the minted secret to the local daemon over
+		// the UDS. The daemon verify-backs the handoff against the hub
+		// (only the live holder's secret is adopted) and journals it
+		// durably — the session stays usable after this process exits.
+		if _, aerr := ctx.daemon().AdoptSession(args[0], AdoptSessionRequest{
+			SessionID: secret,
+			Owner:     owner,
+			Reason:    reason,
+		}); aerr != nil {
+			return fmt.Errorf("takeover: the hub session swapped, but handing the secret to the local daemon failed (%v) — the session is an orphan until a daemon-side takeover fences it: pf submit %s --takeover", aerr, args[0])
 		}
 		if ctx.JSON {
 			// --json: the response envelope as-is.
@@ -733,10 +758,8 @@ var cmdTakeover = &Command{
 			resp.Claim.SessionFingerprint, resp.Claim.MachineID, resp.Claim.Owner)
 		fmt.Fprintf(ctx.Stdout, "  bundle:  %s\n", resp.Claim.BundleName)
 		fmt.Fprintln(ctx.Stdout, "  the previous holder is fenced at its next push or session revalidation")
-		// NOTE 8 (v1.5 review): a CLI-side takeover swaps the hub session
-		// but starts nothing — the WI is held by an orphan session until a
-		// daemon-side takeover picks it up.
-		fmt.Fprintln(ctx.Stdout, "  note: the WI is held by an orphan session after this; a daemon-side takeover (`pf submit <id> --takeover`) must follow for it to run")
+		// #109: the mint is in the local daemon's custody — no orphan.
+		fmt.Fprintf(ctx.Stdout, "  the session secret is in the local daemon's custody (%s); `pf submit %s --takeover` runs the work item on it\n", st.MachineID, resp.Claim.WorkItemID)
 		return nil
 	},
 }
