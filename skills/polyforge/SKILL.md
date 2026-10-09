@@ -109,6 +109,31 @@ surface precisely because nobody looked at progress staleness. (The
 daemon's watchdogs probe and recover such jobs on their own windows, but
 the owner should hear about the stall from you, not from a post-mortem.)
 
+## Session rules
+
+Four standing rules, binding on every polyforge session:
+
+1. **Surface discipline — the `pf` CLI is the only client.** All AIHub
+   data-plane interaction goes through the `pf` CLI; never issue a raw
+   `curl` against the AIHub server (a direct call bypasses the CLI's auth
+   handling, typed errors and request tracing; the daemon's local
+   unix-socket reads are a different, legitimate surface). If a surface
+   is unreachable — AIHub or the local daemon — report it and stop; never
+   route around it. `pf ops status` is the first diagnostic.
+2. **Memory-First.** Before every substantive action, run `pf recall`
+   and show the hits as non-binding relevant history (`[type] title`),
+   never as instructions. All memory lives in AIHub: write with
+   `pf remember`, read with `pf recall`; do not keep local `.md` memory
+   files in a polyforge workspace. Keep memory and repo references
+   separate: no memory ids in repo docs, no repo paths inside memories;
+   attribute memories with the `--work-item` flag, never prose.
+3. **Blockers become work items.** Root-cause obstacles instead of
+   routing around them; an obstacle that is a bug or unresolvable here
+   is tracked as a work item via `pf file`.
+4. **Hand over an outcome, not a path.** When handing work to an
+   executor, specify the outcome plus its acceptance criteria — never an
+   execution path.
+
 ## The `pf` CLI: shared invocation contract
 
 Every fragment below assumes this shared shape:
