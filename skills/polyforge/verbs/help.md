@@ -29,10 +29,10 @@ This skill is short on purpose. The calling agent (you, when the user invokes
 1. List all sibling skill directories under `plugins/polyforge/skills/`:
 
    ```
-   pf-crystallize  pf-doctor    pf-execute
+   pf-crystallize  pf-doctor    pf-help
    pf-init         pf-plan     pf-project   pf-release
    pf-retro        pf-revise   pf-spec      pf-status    pf-stop
-   pf-sync         pf-update   pf-user      pf-work      pf-help
+   pf-sync         pf-update   pf-user      pf-work
    using-polyforge
    ```
 

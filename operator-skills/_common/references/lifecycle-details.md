@@ -1,7 +1,7 @@
 # _common/references/lifecycle-details.md - deferred lifecycle detail (ON DEMAND)
 
 > **Not injected.** `_common/lifecycle.md` is injected by `hooks/pf-skill-router` into every
-> pf-execute step and shares a hard **10,000-character** budget with the memory, engine and
+> workflow step and shares a hard **10,000-character** budget with the memory, engine and
 > storage fragments (aihub#304 - past that limit the harness replaces the whole payload with a
 > ~2,000-character preview, so growing the resident tier does not add context, it *destroys* it).
 >

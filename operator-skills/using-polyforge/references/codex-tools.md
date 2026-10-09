@@ -39,10 +39,10 @@ codex mcp add polyforge -- /absolute/path/to/<plugin-cache>/bin/polyforge-mcp.sh
 
 ## Skill-router note
 
-Under Claude Code a PreToolUse(`Skill`) hook injects the step body for `/pf-execute` only
-(its stub's fallback pointer routes to `engine.native.md` + `_common/*`). `/pf-spec` and
-`/pf-plan` are self-sufficient `SKILL.md` files with no router involvement. Codex has no
-`Skill` tool, so the router hook does not run at all under Codex - `/pf-execute` loads its
-step body from `SKILL.md`'s fallback pointer directly, same as `/pf-spec` and `/pf-plan`.
+Under Claude Code a PreToolUse(`Skill`) hook injected the step body for the retired
+agent-side executor skill only (that skill and its router pointer are retired with the
+WI-Agent engine, polyforge#106 - workflow execution is the daemon's Go driver now).
+`/pf-spec` and
+`/pf-plan` are self-sufficient `SKILL.md` files with no router involvement in any harness.
 The wi lifecycle (claim / step / artifact / commit / PR / wrap) is unchanged - it runs
 through the `mcp__polyforge__pf_*` tools.

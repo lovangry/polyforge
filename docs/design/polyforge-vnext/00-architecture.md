@@ -32,12 +32,11 @@
   用户动词按目标面二分为「经 `pf` CLI 直连 AIHub」与「打 Daemon 本机面」（分流表 §5.1；
   第 13 个动词 `ship` 为基线修订 polyforge#37 所加，见 §5.1）；
   AIHub 服务端是权限硬边界的唯一执行点（A17，§8）。
-- 定义每 WI 一个的**持久化 Harness RPC WI Agent**：宿主机原生、长驻进程，从 claim 到
-  wrap/fail/停机中断全程存活，执行与交互式路径完全相同的 `pf-execute` 主循环，并使用
-  harness-native subagent 派生 step agent（执行 step 级子任务）；Daemon **不**为每个 step 另起一个新的 headless
-  agent 进程（§3.6、INV-14）。
-- 定义两条 v1 harness 适配器（Pi、Claude）在 WI Agent 层面必须满足的最小契约：稳定 session
-  身份、Capsule 本地会话目录、可选的 subagent introspection（§3.6a）。
+- 【polyforge#106 修订】原 v1 的「每 WI 一个持久化 Harness RPC WI Agent（agent 侧执行
+  skill 主循环 + harness-native subagent 派生）」执行面已被删除。现在的执行引擎是 Daemon 内的
+  **Go driver**：按 workflow 的 step 图逐 step 派生短驻 harness 进程（envelope 一次一步），
+  驱动器独占推进 `execution.json` 状态机，Daemon 无条件绑定 driver，无引擎选择、无回退。
+  历史 WI-Agent 面的删除裁定见 PR 描述（re-audit 分类）与本目录 §3.6 的删除注记。
 - 定义同步的**触发时机边界**：仅在 step 完成/中断、WI 出最终结果、Daemon 优雅停机、以及可选
   milestone 上做一次全扫描发布；触发请求由该事件的责任方（通常是 WI Agent）**发起**，实际的
   全扫描与发布是 Daemon 的机械执行动作；后台 watcher 的唯一职责是把 Capsule 标记为 dirty，不得
@@ -91,7 +90,7 @@
 |---|---|
 | 路由 Skill（Routing Skill）、Daemon 命名裁定、Interactive/Batch/Drain 模式定义、优雅停机（quiesce/shutdown）与其和 Drain 的区分、持久化 Harness RPC WI Agent、harness-native subagent、harness 适配器最小契约、模块归属判据、Core/Capsule 状态分离、全局不变量 | 本文（00）§3 / §4 / §2.3 |
 | Core（数据集）、单 active Service、owner generation（存储与生命周期）、assignee / waiting_on、attrs 拆分、进度 read-through、AIHub 本地目录布局 | `02-aihub-core.md` |
-| workflow.md frontmatter schema、workflow bundle、bundle digest、step skill（step agent 定义文件）内容 schema、model_candidates、grill、interactive step / needs_input 判定、e2e-author、budget、on_fail rewind（有界）、执行语义（rewind vs resume）、pf-execute 主循环 | `01-workflow-skills.md` |
+| workflow.md frontmatter schema、workflow bundle、bundle digest、step skill（step agent 定义文件）内容 schema、model_candidates、grill、interactive step / needs_input 判定、e2e-author、budget、on_fail rewind（有界）、执行语义（rewind vs resume）| `01-workflow-skills.md` |
 | Capsule（身份/绑定/生成时机）、`runtime-state/execution.json`（执行权威文件格式）、repo inventory、Native runner profile、harness 会话目录布局与会话数据落位（per-adapter）、Subagent 写限制不变量、多机副本裁定 | `03-execution-capsule.md` |
 | Daemon 内部职责实现（Job 队列、持久 WI Agent 生命周期管理、harness 适配器启动参数）、命令执行入口（调用面）、Daemon state 存储位置、模式切换实现、全扫描发布的机械执行 | `04-local-runtime.md` |
 | Revision（数据模型与文件格式）、HEAD（推进规则）、watcher（dirty 标记）、全扫描发布协议、同步传输机制、先数据后状态、takeover fencing（判定条件与错误码）、删除保护、崩溃恢复（同步域） | `05-sync-revision-recovery.md` |
@@ -142,17 +141,15 @@
 │ pf CLI       │ ─────────────────────────────────────────────────────────────▶ │  · 调度器/就绪队列     │
 └─────────────┘                                                                   │    （扁平）            │
                                                                                   └────────────────────┘
-                                            │ 每 WI 派生一个持久 Harness RPC WI Agent
+                                            │ Daemon 内的 Go driver 驱动（每 WI 一份）
                                   ┌─────────▼──────────┐
-                                  │ WI Agent  （每 WI 一个）│
-                                  │  · 宿主机原生、长驻进程  │
-                                  │  · 运行 pf-execute 主循环│
-                                  │    （全部 step 同一循环）│
-                                  │  · 派生 harness-native  │
-                                  │    subagent             │
-                                  │  · 独占写 Capsule       │
-                                  │    execution.json       │
-                                  │  · 向 Daemon 发起发布请求│
+                                  │ Go Driver （polyforge#106 起）│
+                                  │  · Daemon 无条件绑定的唯一引擎 │
+                                  │  · 按 step 图逐 step 派生短驻 │
+                                  │    harness 进程（envelope）│
+                                  │  · 独占推进 Capsule      │
+                                  │    execution.json 状态机 │
+                                  │  · 每个 transition 发布  │
                                   └─────────┬───────────┘
                                             │ 读写
                                   ┌─────────▼──────────┐
@@ -173,9 +170,9 @@
   是 settings 中 skills 配置的一行路径，直接指向本机 aihub checkout 内的 `skills/polyforge/`
   （零复制，不搬文件）；Claude Code 侧经 plugin marketplace 安装。用户 harness **永不执行
   workflow**：Interactive 会话（§3.4a）中用户只提交意图、观察进度、回答 needs_input，workflow 的
-  解析与执行全部发生在 Daemon 派生的 WI Agent 一侧。`pf-execute`（WI Agent 的初始指令与驱动
-  主循环载体）**不由任何 harness 安装**：由 Daemon 从自身 checkout/分发物注入给它派生的每个
-  WI Agent，版本与 Daemon 锁定（三类 skill 的权威定义见 `01-workflow-skills.md#§2.1`，
+  解析与执行全部发生在 Daemon 一侧：workflow 的执行引擎是 Daemon 内的 Go driver
+  （polyforge#106 起唯一引擎，无选择、无回退；原 agent 侧执行 skill 已随 WI-Agent 引擎删除）。
+  （skill 的权威定义见 `01-workflow-skills.md#§2.1`，
   部署边界见 `07-deployment-pilot.md#§2.3`）。
 - **Daemon**（进程名 `pf-daemon`，全文档统一用「Daemon」这一名称，不得再用「Runtime」单独指代该
   部署单元）：本机执行管理层，是 Interactive / Batch / Drain 三种 WI Job 执行模式的**唯一执行者**
@@ -250,19 +247,18 @@ aihub/
 │   ├── core/             # Core 领域模型 + SQLite 存取（02）
 │   ├── workflow/         # workflow.md frontmatter 校验、bundle digest、驱动语义（01）
 │   ├── daemon/           # Daemon：Job 排入、Interactive/Batch/Drain 判据、优雅停机、全扫描发布执行（04）
-│   ├── mainagent/         # 持久 Harness RPC WI Agent：pf-execute 主循环、subagent 派生、harness 适配器（`00-architecture.md#§3.6`, 04）
+│   ├── driver/           # Go driver：Daemon 唯一执行引擎（polyforge#106），按 step 图驱动 envelope 派生（`00-architecture.md#§3.6` 修订, 04）
 │   ├── capsule/           # Capsule 布局、inventory、execution.json、会话目录、Native runner（03）
 │   ├── sync/              # Revision、watcher（dirty 标记）、全扫描发布协议、fencing（05）
 │   ├── memory/            # Markdown 权威、HTML 派生、索引（06）
 │   └── server/            # HTTP API 面（02/05/06 的 API）
 ├── docs/design/polyforge-vnext/   # 本设计目录
 ├── skills/
-│   ├── polyforge/       # 路由 skill（用户 harness 唯一安装面，§3.1）
-│   └── pf-execute/      # WI Agent 初始指令与驱动主循环载体（由 Daemon 从自身 checkout 注入，任何 harness 不安装）
+│   └── polyforge/       # 路由 skill（用户 harness 唯一安装面，§3.1）
 └── workflows/           # 参考 workflow bundle 源：<bundle>/workflow.md + agents/*.md（skill 层布局权威见 `01-workflow-skills.md#§3`）
 ```
 
-各模块实现细节由对应文档定义；本文只锁定归属与依赖方向：`daemon → mainagent → workflow → core`，
+各模块实现细节由对应文档定义；本文只锁定归属与依赖方向：`daemon → driver → workflow → core`，
 `sync → core`，`capsule → sync`（发布 Revision），单向无环。
 
 ### 3.4 Daemon 的三种 WI Job 执行模式（唯一执行者判据） <!-- §3.4 -->
@@ -356,8 +352,8 @@ Daemon 原样转发给正在等待的 WI Agent，不解析、不改写：
 - `answer_id`：必填，本次回答的唯一 id（格式 `a_` + 6 位随机字符，由提交方生成）。Daemon 的
   answer API 以 `answer_id` **幂等**：同一 `answer_id` 的重复提交不产生第二次效果（不重复应用、
   不重复消费），返回与首次提交一致的结果。
-- `answer_text`：必填，非空字符串，不做结构化解析（WI Agent 内部的 `pf-execute` 主循环自行
-  理解自然语言，本报文不强制结构）。
+- `answer_text`：必填，非空字符串，不做结构化解析（引擎侧把回答原文投递给进行中的 step
+  上下文，本报文不强制结构）。
 - `answered_at`：必填，RFC3339，由提交方（UI/CLI）填写，不由 Daemon 重新覆盖的。
 - `answered_by`：必填，回答者的 `user_id`，与 `04-local-runtime.md#§5.1` 请求的认证身份必须
   一致，不一致拒绝为 `DAEMON-403`。
@@ -420,12 +416,12 @@ Daemon 不自行扩大或缩小该集合，也不在未经确认前把调度器�
 - **可恢复**：WI Agent 崩溃或被杀后，Daemon 检测到进程退出，可基于 Capsule 的
   `runtime-state/execution.json` 当前内容重新派生一个新的 WI Agent 进程续跑，不要求从零
   重放整个 workflow（细节见 `03-execution-capsule.md#§7`、`04-local-runtime.md#§7`）。
-- **运行同一 pf-execute 主循环**：WI Agent 内部运行的驱动逻辑与交互式（Interactive）路径下
-  人工逐 step 推进时使用的是**同一份** `pf-execute` 主循环实现，不存在「自动执行用一套引擎、
-  交互执行用另一套引擎」的分叉；区别只在于该 step 是否为 needs_input（人工输入门），这一判据
-  本身属于 `01-workflow-skills.md` 的 workflow 语义，不属于 WI Agent 是否用同一循环的问题。该
-  `pf-execute` 由 Daemon 从自身 checkout/分发物注入给 WI Agent，版本与 Daemon 锁定，任何
-  harness 都不安装它（§3.1 安装面裁定、`01-workflow-skills.md#§2.1`）。
+- 【polyforge#106 修订】**引擎唯一**：workflow 的自动执行与交互式（Interactive）路径下人工
+  逐 step 推进使用**同一个** Daemon 内的 Go driver 实现，不存在「自动执行用一套引擎、交互
+  执行用另一套引擎」的分叉；区别只在于该 step 是否为 needs_input（人工输入门），这一判据
+  本身属于 `01-workflow-skills.md` 的 workflow 语义。Daemon 无条件绑定 driver（无引擎选择
+  旗标、无回退），原 agent 侧执行 skill 已删除，任何 harness 都不安装任何执行 skill
+  （§3.1 安装面裁定、`01-workflow-skills.md#§2.1`）。
 - **使用 harness-native subagent**：WI Agent 需要派生 step agent（step 级子代理，例如 code-change 的
   实现子任务）时，使用该 WI Agent 所在 harness 自身提供的原生 subagent 机制（同进程/同会话内
   派生的子会话/子上下文），而不是启动独立的 headless agent 进程；subagent
@@ -438,9 +434,10 @@ Daemon 不自行扩大或缩小该集合，也不在未经确认前把调度器�
 
 ### 3.6a Harness 适配器的最小契约（v1：Pi、Claude） <!-- §3.6a -->
 
-WI Agent 是「宿主机原生进程 + pf-execute 主循环」这一抽象在具体 harness 上的落地，v1 通过
-**harness 适配器**接入不同的宿主 harness；两个适配器共享同一份 §3.6 的行为契约，各自的启动细节
-与运行参数由 `04-local-runtime.md` 给出实现，本节只固定跨 harness 必须满足的最小契约：
+【polyforge#106 修订注记】本节原文描述的「宿主机原生进程 + agent 侧执行主循环」抽象随
+WI-Agent 引擎删除：引擎是 Daemon 内的 Go driver，step 派生是短驻 harness 进程。下表的
+会话身份/派生裁定在 driver 时代的对应面（短驻 step 进程的 envelope 语义与 journal 栅栏）
+由 `04-local-runtime.md` 与 `03-execution-capsule.md` 给出；原文保留为历史裁定记录。
 
 | 契约项 | 要求 |
 |---|---|
@@ -741,7 +738,8 @@ vNext 不继承现行 polyforge 的任何 `/pf-*` skill 入口或散装 agent �
 | using-polyforge | 删除独立 skill：会话启动与路由背景并入路由 skill（用户 harness 唯一安装面，§3.1） |
 | worker764 / wi708-* / composer-* 等散装 agent 定义 | 全部废弃：step agent 一律来自 bundle 的 `agents/*.md`，经 Capsule `.pi/agents` / `.claude/agents` 物化机制派生（`03-execution-capsule.md#§4.5`）；不维护任何 capsule 之外的散装 agent 定义 |
 
-`skills/` 目录只保留两个 skill：`skills/polyforge/`（路由 skill）与 `skills/pf-execute/`（§3.1）；参考
+`skills/` 目录只保留一个 skill：`skills/polyforge/`（路由 skill，§3.1）——原执行 skill 已随
+WI-Agent 引擎删除（polyforge#106）；参考
 workflow bundle 的源目录为 `workflows/`（§3.3、`01-workflow-skills.md#§3`）。
 
 ## 12. 未决问题（第 1、3 项已在本次修订中裁定，不再是开放项） <!-- §12 -->

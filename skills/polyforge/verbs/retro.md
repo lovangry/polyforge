@@ -20,7 +20,7 @@ After completing a wi. **Placement matters** (credentials, not preference):
 
 - **Preferred - BEFORE the terminal call** (`/pf-stop --wrap` / `--fail`): the attempt's
   state file is still live, so `pf_save_artifact` works and the retro + wrap_summary
-  artifacts land on the wi. `/pf-execute`'s built-in retro dispatch and `/pf-stop`'s
+  artifacts land on the wi. The engine's built-in retro dispatch and `/pf-stop`'s
   suggestion both point here.
 - **Standalone after wrap**: the state file is gone and the wi is TERMINAL - it cannot be
   re-claimed. Analysis and `pf_remember` still work (they need no attempt credentials),

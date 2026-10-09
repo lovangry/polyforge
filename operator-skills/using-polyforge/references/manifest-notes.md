@@ -415,8 +415,9 @@ from a channel that silently dropped it to one that does not.
 
 ## RESIDENT TIER - WHAT aihub#338 ADDED, AND WHAT PAID FOR IT
 fragments/post-claim-dispatch.md is resident because the rule it carries had NO resident
-presence at all. "Claim a `requires_human_session=false` wi -> dispatch `/pf-execute` as a
-subagent" lived in exactly two places, both of them off this channel: skills/pf-work/SKILL.md
+presence at all. "Claim a `requires_human_session=false` wi -> dispatch the executor as a
+subagent" (the pre-#106 agent-side execution path, retired with the WI-Agent engine)
+lived in exactly two places, both of them off this channel: skills/pf-work/SKILL.md
 (a skill BODY, charged only when the skill is invoked) and the on-demand
 fragments/post-claim-routing.md. The 8,452-character payload mentioned that path exactly
 once, inside a parenthesis, in order to say that another fragment did not apply to it - so

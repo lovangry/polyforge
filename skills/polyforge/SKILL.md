@@ -37,11 +37,13 @@ intent is ambiguous, **ask rather than guess**.
 This skill is the **only** thing a user harness installs. Pi: one `skills`
 path line in settings, pointing directly at `skills/polyforge/` inside the
 local checkout — zero copying, no bundling. Claude Code: installed via the
-plugin marketplace. `skills/pf-execute` (the WI Agent's execution skill) is
-**never installed by any harness**: the daemon injects it into the WI Agent
-processes it spawns, version-locked to the daemon release. A user harness
-never executes a workflow: in an interactive session the user only submits
-intents, observes progress, and answers needs_input questions.
+plugin marketplace. No executor skill exists any more (polyforge#106
+deleted the agent-side executor skill with the WI-Agent engine it
+served): the **Go driver** owns workflow execution — the daemon binds it
+unconditionally, version-locked to the daemon release, and no harness
+installs or runs a workflow. A user harness never executes a workflow:
+in an interactive session the user only submits intents, observes
+progress, and answers needs_input questions.
 
 ## Intent mapping table
 
@@ -153,8 +155,9 @@ pf [global flags] <verb> [verb flags] [positional args]
 
 ## Routing boundaries this skill never crosses
 
-- Never execute, parse or re-drive a workflow — that belongs to the WI Agent
-  (`skills/pf-execute`, injected by the daemon, never installed here).
+- Never execute, parse or re-drive a workflow — that belongs to the daemon's
+  Go driver (the only execution engine; there is no agent-side executor any
+  more).
 - Never touch a Capsule, a worktree, or any execution state file.
 - Never invent error codes or CLI shapes: use exactly the codes and flags the
   surfaces emit today (cross-checked against `internal/common/api/errors.go`

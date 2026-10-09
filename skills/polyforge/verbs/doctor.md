@@ -190,7 +190,7 @@ Verify the wi-progress chain takeover is healthy:
 
 **Missing refreshInterval (pre-aihub#122 takeover).** Workspaces initialized before
 aihub#122 have a `statusLine` block without `refreshInterval`, so the wi chain freezes
-during bg-subagent `/pf-execute` runs (the watching session idles -> no message updates ->
+during driver-driven work-item runs (the watching session idles -> no message updates ->
 no re-render). If `statusLine.command` contains `pf-statusline.cjs` **but**
 `statusLine.refreshInterval` is absent -> report `warn` and re-run `/pf-init` to re-assert
 the takeover. Its Step 4 is idempotent and writes `"refreshInterval": 3` into the block.
@@ -228,8 +228,10 @@ disable the polyforge plugin. `--uninstall` only undoes the statusLine takeover.
 
 ### Skill-side: seam-check (superpowers)
 
-`pf-seam-check` pins the 6.1.1 baseline of the cached `superpowers` plugin that pf-execute's
-engine pointer hardcodes against: `subagent-driven-development` (the engine pointer itself),
+`pf-seam-check` pins the 6.1.1 baseline of the cached `superpowers` plugin that the
+router's engine pointer used to hardcode against (the agent-side executor pointer is
+retired with the WI-Agent engine, polyforge#106): `subagent-driven-development` (the
+former engine pointer itself),
 `finishing-a-development-branch` (the D6 execute boundary, in
 `_common/references/lifecycle-details.md` §6 since aihub#338), and
 `executing-plans` (the one the router test's negative assertion checks stays absent from the

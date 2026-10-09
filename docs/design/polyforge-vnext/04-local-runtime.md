@@ -184,10 +184,11 @@ session 数据。
 
 ### 5.3 WI Agent → Daemon authenticated local proxy（凭证最小暴露，呼应 `00-architecture.md#§5`/`#§8`、`01-workflow-skills.md#§5.1`） <!-- §5.3 -->
 
-**存在理由**：WI Agent 自始至终不持有 AIHub API key 或 Revision 发布凭证（与 §8 一致），但 `pf-execute`
-主循环需要调用一组有限的 WI 生命周期/只读操作（读取该 WI 的 workflow 引用与预算（`bundle_name`/
-`bundle_digest`/budget 基线与有效上界）、写 step 结果到 Capsule、读写 Memory）。这些调用均经本地代理中转，WI Agent 本身从不持有任何可直接呼叫 AIHub
-的凭证。
+**存在理由**：执行侧自始至终不持有 AIHub API key 或 Revision 发布凭证（与 §8 一致），但执行引擎
+需要调用一组有限的 WI 生命周期/只读操作（读取该 WI 的 workflow 引用与预算（`bundle_name`/
+`bundle_digest`/budget 基线与有效上界）、读写 Memory）。这些调用均经本地代理中转，执行引擎本身从不持有任何可直接呼叫 AIHub
+的凭证。【polyforge#106 修订注记】原 v1 的代理对端是 WI Agent 进程；driver 时代引擎运行在
+Daemon 进程内，本节保留为历史裁定记录，其 SO_PEERCRED 对端校验随对端形态更新。
 
 **接口**：`POST /run/polyforge.sock` 上的 `proxy_call(work_item_id, operation, payload)`，仅接受本机 Unix domain
 套接字连接，连接方身份由内核 `SO_PEERCRED`（Linux）/`LOCAL_PEERCRED`（macOS）验证为本机上由
@@ -216,7 +217,7 @@ owner generation token（`02-aihub-core.md#§5.1`）向 AIHub 发起实际调用
 
 ## 6. 核心流程（编号步骤，非伪代码） <!-- §6 -->
 
-### 6.1 claim / resume / takeover：预检 → workflow 引用读取 → 意图持久化 → Job 创建 → 持久 WI Agent 派生与 pf-execute 注入 <!-- §6.1 -->
+### 6.1 claim / resume / takeover：预检 → workflow 引用读取 → 意图持久化 → Job 创建 → 引擎绑定（polyforge#106：Go driver） <!-- §6.1 -->
 
 下列每一步与其紧跟的持久化动作都写入 §4.1 的 `daemon/state.json`，实现 spec 「不可逆动作前持久化」要求（claim idempotency
 key、claim 响应、Job 创建意图、Harness session identity 均先于对应的不可逆外部动作落盘）；本文对
@@ -251,21 +252,17 @@ key、claim 响应、Job 创建意图、Harness session identity 均先于对应
    **fsync 落盘完成后才派生进程**：
    这保证若派生成功但落盘 `jobs[]` 正式记录前 Daemon 崩溃，重启后能从 `pending_jobs[]` 识别出这个孤儿
    意图（带着已知的 session id）并按 §7.1 的存活检测重新连接或回收，不产生无人认领的进程。
-8. **读取并注入 `pf-execute` 初始指令（注入协议的来源侧）**：Daemon 从**自身 checkout/发行物**读取
-   `skills/pf-execute/SKILL.md`（`00-architecture.md#§3.1`/§3.6、`01-workflow-skills.md#§2.1`），作为即将
-   派生的 WI Agent RPC 会话的初始指令；注入时机即第 9 步的派生时刻。其版本标识与 Daemon 发行版
-   绑定——`pf-execute` 与 Daemon 同一份发行物交付，升级 Daemon 即升级 executor，不存在独立于
-   Daemon 的 pf-execute 版本协商面。任何 harness（Pi/Claude）都**不安装** `pf-execute`：二者在 vNext
-   中仅作为宿主适配器承载该初始指令（注入方式见 §6.1a）。本步**不经 §5.3 本地代理**——该代理的对端
-   是已派生的 WI Agent（`SO_PEERCRED` 校验 `main_agent_pid`，§5.3），而此刻 WI Agent 尚未派生。
-9. 按第 7 步确定的 harness 适配器和 session id 派生**持久** Harness RPC WI Agent 进程（`00-architecture.md#§3.6`），把
-   Capsule 路径、**claim 响应携带的** `bundle_name`+`bundle_digest`+预算基线（Core 在 claim 事务内随 generation/token 一并返回——因此 Daemon 与 WI Agent 都**不需要任何数据面详情读取**即可完成执行路径：机器的执行面授权由 key scope 与 claim 端点承载，数据面 membership 不可见性不构成障碍，`02-aihub-core.md#§8` 执行面规则；运行期 WI Agent 经 §5.3 白名单的 `read_workflow_ref` 按需读取仍可用）、harness session id 作为启动参数传入，并按
-   §6.1a 的注入方式把第 8 步读取的 `pf-execute` 初始指令注入该 RPC 会话；WI Agent 启动后运行同一份
-   `pf-execute` 主循环（不因 claim/resume 还是 takeover 而分叉），其**第 0 步**从本机 checkout 物化
+8. 【polyforge#106 修订】原「读取并注入 agent 侧执行 skill 初始指令」步骤已删除：执行引擎是
+   Daemon 内的 Go driver，无注入协议、无执行 skill 分发面（原 `skills/` 下的执行 skill 已随
+   WI-Agent 引擎删除）。引擎与 Daemon 同一份发行物交付，升级 Daemon 即升级引擎，不存在独立的
+   引擎版本协商面。harness（Pi/Claude）仅作为 step 派生的宿主适配器（envelope 一次一步）。
+9. 【polyforge#106 修订】绑定执行引擎（Daemon 内的 Go driver，`00-architecture.md#§3.6` 修订注记），把
+   Capsule 路径、**claim 响应携带的** `bundle_name`+`bundle_digest`+预算基线（Core 在 claim 事务内随 generation/token 一并返回——因此执行路径**不需要任何数据面详情读取**：机器的执行面授权由 key scope 与 claim 端点承载，数据面 membership 不可见性不构成障碍，`02-aihub-core.md#§8` 执行面规则）作为输入传入。driver 从本机 checkout 物化
    `workflows/<bundle_name>/` 并按 `bundle_digest` 校验（`03-execution-capsule.md#§4.5`）后加载
-   `workflow.md` 正文驱动执行，并在其整个生命周期内持续存活、驱动全部 step（不因单个 step 结束而
-   退出，INV-D4）。Daemon 不向 WI Agent 注入任何步骤集——Core 不存储 resolved steps
-   （`00-architecture.md#§2.3` INV-8），步骤图的唯一来源是 WI Agent 第 0 步按 digest 校验过的本机
+   `workflow.md` 正文驱动执行，按 step 图逐 step 派生短驻 harness 进程（envelope 一次一步；
+   claim/resume/takeover 不分叉），并在整个 WI 生命周期内持续驱动（不因单个 step 结束而
+   停止，INV-D4）。Daemon 不注入任何步骤集——Core 不存储 resolved steps
+   （`00-architecture.md#§2.3` INV-8），步骤图的唯一来源是按 digest 校验过的本机
    物化产物。
 10. 在 §4.1 的 Daemon state 中追加一条正式 `jobs[]` 记录：`{work_item_id, capsule_id, generation,
     harness_adapter, harness_session_id, main_agent_pid, main_agent_started_at, status: "running"}`，
@@ -298,19 +295,15 @@ Daemon 在第 6 步派生持久 WI Agent 时，按该 WI 配置选定的 harness
   位置**只读**采集本代会话 JSONL 进该 Capsule 的 `harness/<adapter>/session-data/`，随后归档为
   `logs/session/<generation>.jsonl`（权威在 `03-execution-capsule.md#§4.4`）；本代已派生 harness 会话而默认位置缺失该
   JSONL 时以 `DAEMON-513 SESSION_JSONL_MISSING`（§5.2）失败收尾，不静默。
-- **WI Agent 出生隔离档（birth isolation profile）**：WI Agent 继承 HOME（§8 只清理凭据，不清理 HOME——harness 自身登录需要它），因此默认会加载**操作者的全局 harness 配置**：全局 skill、`AGENTS.md`/`CLAUDE.md` 上下文文件、prompt 模板与扩展。这些是 v1 时代的路由指令与 harness 级后台任务机制，会污染执行器（其唯一权威指令是本节注入的 `pf-execute`），其派生的后台任务 Daemon 看不见、也在 Capsule 单写者域（`03-execution-capsule.md#§7`）之外。故两条适配器在派生时各带一组**具名的隔离启动参数**：Pi 为 `--no-skills --no-context-files --no-prompt-templates`，Claude 为 `--disable-slash-commands`。**本机物化的 agent 定义不受影响**：`.pi/agents/<step>.md` 与 `.claude/agents/<step>.md`（`03-execution-capsule.md#§4.5`）与 skill 属于不同的资源族，上述参数全开时步骤 agent 仍可被发现并派发（两条 harness 均实测确认）。两处**刻意不加**的参数同样是裁定的一部分：Pi 的 `--no-extensions`（会连带移除提供 subagent 能力的扩展，等于取消步骤 agent 派发）、Claude 的 `--safe-mode`（按其帮助文本会禁用「custom commands and agents」）与 `--bare`（强制仅 `ANTHROPIC_API_KEY` 鉴权，与下一条「Daemon 不管理 harness 登录」冲突）。由此残留的暴露面（扩展注册的后台任务工具、Claude 侧的 `CLAUDE.md` 与内建后台会话）不再由参数关闭，而由指令关闭：`pf-execute` 基本规则禁止 WI Agent 使用任何 harness 后台任务机制——参数与指令互为冗余，缺一不视为违规入口。
+- **WI Agent 出生隔离档（birth isolation profile）**：WI Agent 继承 HOME（§8 只清理凭据，不清理 HOME——harness 自身登录需要它），因此默认会加载**操作者的全局 harness 配置**：全局 skill、`AGENTS.md`/`CLAUDE.md` 上下文文件、prompt 模板与扩展。这些是 v1 时代的路由指令与 harness 级后台任务机制，会污染 step 执行上下文（其唯一权威指令是 driver 组装的 envelope），其派生的后台任务 Daemon 看不见、也在 Capsule 单写者域（`03-execution-capsule.md#§7`）之外。故两条适配器在派生时各带一组**具名的隔离启动参数**：Pi 为 `--no-skills --no-context-files --no-prompt-templates`，Claude 为 `--disable-slash-commands`。**本机物化的 agent 定义不受影响**：`.pi/agents/<step>.md` 与 `.claude/agents/<step>.md`（`03-execution-capsule.md#§4.5`）与 skill 属于不同的资源族，上述参数全开时步骤 agent 仍可被发现并派发（两条 harness 均实测确认）。两处**刻意不加**的参数同样是裁定的一部分：Pi 的 `--no-extensions`（会连带移除提供 subagent 能力的扩展，等于取消步骤 agent 派发）、Claude 的 `--safe-mode`（按其帮助文本会禁用「custom commands and agents」）与 `--bare`（强制仅 `ANTHROPIC_API_KEY` 鉴权，与下一条「Daemon 不管理 harness 登录」冲突）。由此残留的暴露面（扩展注册的后台任务工具、Claude 侧的 `CLAUDE.md` 与内建后台会话）不再由参数关闭，而由指令关闭：envelope 基本规则禁止 step 进程使用任何 harness 后台任务机制——参数与指令互为冗余，缺一不视为违规入口。
 - **Daemon 不管理 harness 登录（裁定）**：派生 WI Agent 时 Daemon 直接调用机器上已安装的 harness 二进制（Pi CLI /
   Claude Code CLI），不代理、不托管其登录/凭据——登录与凭据配置是各 harness 自身的事前项（`07-deployment-pilot.md#§2.1`
   运行时依赖清单，在部署 CLI 面之外）；harness 自身的报错（含登录/凭据类）**原样透传**给用户，不包装、不拦截、不代答。
 - 两条适配器共用同一套 Daemon state 记录结构（§4.1）与同一套崩溃续跑规则（§7.1）；新增第三条适配器时只需在此新增一个分支，不改变 §6.1/§6.2/§7 的流程结构。
-- **`pf-execute` 初始指令的注入方式（注入时机 = §6.1 第 9 步派生时）**：第 8 步读取的
-  `skills/pf-execute/SKILL.md` 内容在两条适配器上分别经以下通道成为 WI Agent RPC 会话的初始
-  指令——**Pi 适配器**：`pi --mode rpc` 起持久会话（稳定 session id、Capsule 内 session dir，见上）后，以**首条 prompt** 注入，先于该会话内任何其它消息；注入内容 = `pf-execute` 全文 + bundle 引用（`bundle_name`、`bundle_digest`、预算基线）+ 本 capsule 路径；崩溃重派时以同一 session id 重新起会话并按同一协议重注入（§7.1）；
-  **Claude 适配器**：以**追加进 system prompt** 的方式注入 `pf-execute`（不是一条会被后续消息冲刷的 user
-  message），bundle 引用与本 capsule 路径随 §6.1 第 9 步的启动参数传入。两条通道都只在派生时注入一次；注入内容的版本标识与 Daemon 发行版绑定（升级 Daemon
-  即升级 executor），任何 harness 不安装 `pf-execute`——Pi/Claude 仅作为宿主适配器，其自身的 skill
-  安装面与本注入无关（`00-architecture.md#§3.1` 安装面裁定）。§7.1 崩溃续跑重新派生时按同一协议从
-  Daemon 当时发行物重读并再次注入。
+- 【polyforge#106 修订】**原「执行 skill 初始指令的注入方式」小节随注入面删除**：引擎是
+  Daemon 内的 Go driver，无注入协议；step 派生是短驻 envelope 进程，其初始指令由 driver 逐
+  step 组装（bundle 引用与预算基线是 driver 的输入，不经任何 skill 注入通道）。崩溃重派按
+  §7.1 的同一 session 语义由 driver 重新驱动（execution.json 是恢复权威）。
 
 ### 6.1b Batch：调度器推荐 + 人确认 + 成批提交 <!-- §6.1b -->
 
@@ -416,7 +409,7 @@ Job 回收的触发原因分两类，机械动作**不同**，不共用同一套
 | 普通执行 | 无 | — | 是 | 按普通在飞回合判 |
 | 空闲/步间 | 无 | — | 否 | 记录流判据不触发（无回合在飞） |
 
-切换点是 `pending_answer` 持久化——`skills/pf-execute` §12 本就规定「先持久化 `pending_answer`，再做消化处理」（`03-execution-capsule.md#§4.2`），正好是「停止等人、开始干活」的那一刻。注意在记录流判据下**这不再是特例**：等人时无回合在飞，判据天然不触发；消化时有回合在飞，与任何回合一视同仁。显式标志只为无流可观测的降级路径保留——那条路径看不见回合。
+切换点是 `pending_answer` 持久化——引擎的 answer 契约本就是「先持久化 `pending_answer`，再做消化处理」（`03-execution-capsule.md#§4.2`），正好是「停止等人、开始干活」的那一刻。注意在记录流判据下**这不再是特例**：等人时无回合在飞，判据天然不触发；消化时有回合在飞，与任何回合一视同仁。显式标志只为无流可观测的降级路径保留——那条路径看不见回合。
 
 **基础设施事件即时化（polyforge#48 第 3 项）。** 上游 provider 失败此前被归为 bulk（至多一行 stderr），运维第一次得知是几分钟后的挂起。现在同一次记录流分类即产出 incident，一个 dispatcher tick（≤200ms）内进入该 Job 的 observe 事件环（`infra_incident`，见 §5.1a 事件类型的第十项）与日志。它是**消息不是判决**：不杀、不重派、不计入风暴护栏计数。
 
@@ -474,7 +467,7 @@ WI Agent 与 Daemon 之间唯一的同步接缝，其余时间两者各自独立
    `mode(abort-drain)` 撤销入口都不变；优雅停机只是在自己的收尾序列里，把「阻止新 Job」这件事
    同时套用到外部提交和 Drain 内部循环两个来源上，不把两者合并成同一个状态机（§2.3、§6.1c）。
 3. 对每个当前活跃的 Job（此时已不会再有新 Job 加入，集合从这一刻起只减不增）：向其 WI Agent 发送停止推进通知（Daemon 本身不是 step 派发者——step
-   之间的推进由该 WI Agent 自己的 `pf-execute` 主循环驱动，`00-architecture.md#§3.6`；Daemon 能做的只是通知
+   之间的推进由 Daemon 内的 Go driver 驱动（`00-architecture.md#§3.6` 修订注记）；Daemon 能做的只是通知
    它在下一个安全边界停止继续推进，不能代它选择或跳过某个 step）；等待该 WI Agent 到达一个可安全
    中断的边界。
 
@@ -544,7 +537,7 @@ Daemon 在整个 Job 生命周期中**不直接执行任何 step 命令**。命�
    a. 检查 `main_agent_pid` 对应的操作系统进程是否仍存在（`kill -0` 等价检查）。
    b. **pid 复用防护**：若进程存在，进一步比对该 pid 当前的进程创建时间戳与记录的 `main_agent_started_at` 是否一致（Linux 可读 `/proc/<pid>/stat` 的启动时间，macOS 可用 `ps -o lstart= -p <pid>`）。时间戳不一致 ⇒ 该 pid 已被无关的新进程复用，视为 WI Agent 已死，不得当作存活处理。
 3. **存活**（pid 存在且创建时间戳匹配）：不重新派生，**重接**该 WI Agent——Daemon 崩溃重启丢失的只是自己进程内的监督连接与 RPC 通道，不是该 WI Agent 本身（它是长驻进程，`00-architecture.md#§3.6`，从未随 Daemon 一起退出）；按记录的 `harness_session_id` 与 `harness_adapter` 重建对它的 RPC 连接与标准进程句柄观察（pid、退出码、stdout/stderr、进程组），重接不打扰其运行、不重置其 session、不重复派发任何 step；把该 Job 保留在内存中的活跃集合，`harness_session_id` 不变。
-4. **已死**（pid 不存在，或存在但创建时间戳不匹配）：**先回收残留进程组再重派**——WI Agent 进程已死，但其进程组内可能仍有孤儿存活（它派生的 step agent、经 `03-execution-capsule.md#§5.1` 启动的命令子进程），继续写入会违反 `03-execution-capsule.md#§7` 的单写者域并与新进程的写入短暂并存；Daemon 先向该 Job 记录的进程组（以 `main_agent_pid` 为组长派生，§6.1a）发 `SIGTERM`、超时仍存活则 `SIGKILL`（与 `03-execution-capsule.md#§6`/§7 的进程组回收口径一致），确认无残留写入者后，才按 `03-execution-capsule.md#§7` 定义的 WI Agent 崩溃续跑规则、按 §6.1a 记录的同一 `harness_adapter`，用**同一个** `harness_session_id`（不重新分配）重新派生一个新的持久 WI Agent 进程——重新派生走 §6.1 第 8/9 步的同一注入与参数序列（从 Daemon 自身 checkout/发行物重读并注入 `pf-execute` 初始指令，传入该 WI 的 `bundle_name`+`bundle_digest` 与同一 session id）；新 WI Agent 的第 0 步**不重新读取本机 checkout**（同代快照只读，`01-workflow-skills.md#§2.2` INV-1a/`03-execution-capsule.md#§4.5`）：同 generation 崩溃续跑**复用本机已物化的快照**（Capsule 内 `.pi/agents/` 与 `workflow.md` 副本仍在上次派生时物化的原样），仅当快照**缺失**（上次物化从未成功落盘）才按 `03-execution-capsule.md#§4.5` 从 checkout 物化——快照存在而与 pin digest 不一致时**告警、继续用既有快照**（该快照是本代已被接受的执行基准，不因 checkout 后续漂移而更换；跨代/跨机重建才按 pin digest 重新物化），随后读取该 Capsule 的 `runtime-state/execution.json`，从 `current_step`/`steps.<current_step>.status` 决定原地重派当前 step 还是推进到下一个 step（`03-execution-capsule.md#§7` 权威流程，本文不重复其判定细节），并更新 `daemon/state.json` 中该条目的 `main_agent_pid`/`main_agent_started_at`。
+4. **已死**（pid 不存在，或存在但创建时间戳不匹配）：**先回收残留进程组再重派**——WI Agent 进程已死，但其进程组内可能仍有孤儿存活（它派生的 step agent、经 `03-execution-capsule.md#§5.1` 启动的命令子进程），继续写入会违反 `03-execution-capsule.md#§7` 的单写者域并与新进程的写入短暂并存；Daemon 先向该 Job 记录的进程组（以 `main_agent_pid` 为组长派生，§6.1a）发 `SIGTERM`、超时仍存活则 `SIGKILL`（与 `03-execution-capsule.md#§6`/§7 的进程组回收口径一致），确认无残留写入者后，才按崩溃续跑规则重新驱动（polyforge#106：driver 时代的续跑是重新绑定 Daemon 内的 Go driver，deploy 时的 fail-closed 检查先行——in-flight 且无 driver journal 戳记的 legacy 胶囊拒绝恢复；传入该 WI 的 `bundle_name`+`bundle_digest` 与同一 session 语义）；续跑**不重新读取本机 checkout**（同代快照只读，`01-workflow-skills.md#§2.2` INV-1a/`03-execution-capsule.md#§4.5`）：同 generation 崩溃续跑**复用本机已物化的快照**（Capsule 内 `.pi/agents/` 与 `workflow.md` 副本仍在上次派生时物化的原样），仅当快照**缺失**（上次物化从未成功落盘）才按 `03-execution-capsule.md#§4.5` 从 checkout 物化——快照存在而与 pin digest 不一致时**告警、继续用既有快照**（该快照是本代已被接受的执行基准，不因 checkout 后续漂移而更换；跨代/跨机重建才按 pin digest 重新物化），随后读取该 Capsule 的 `runtime-state/execution.json`，从 `current_step`/`steps.<current_step>.status` 决定原地重派当前 step 还是推进到下一个 step（`03-execution-capsule.md#§7` 权威流程，本文不重复其判定细节），并更新 `daemon/state.json` 中该条目的 `main_agent_pid`/`main_agent_started_at`。
 5. 若某条 `jobs[]` 记录对应的 `capsule_id` 目录已不存在（被外部误删）：记为异常，不自动重建，转人工介入（不同于「WI Agent 已死但 Capsule 现场完好」的正常续跑路径）。
 6. 恢复完成后，Daemon 按正常职责继续驱动 watcher 与后续触发时机的机械发布。
 

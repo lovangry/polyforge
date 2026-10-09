@@ -71,8 +71,8 @@ hook schema with `polyforge-pf_*` / `apply_patch` matchers:
   and `PLUGIN_ROOT` with the same value, so manifests and hook commands need no env-var rewrite.
 - Hooks and MCP servers DO fire under `-p` (non-interactive) - verified on 1.0.68.
 - The `PreToolUse(Skill)` skill-router does not run under Copilot (no `Skill` tool). Under
-  Claude Code that router only ever injects for `/pf-execute` (fallback pointer to
-  `SKILL.md`'s `engine.native.md`); `/pf-spec` and `/pf-plan` are self-sufficient `SKILL.md`
-  files with no router involvement in any harness. Under Copilot `/pf-execute` loads its
-  step body from `SKILL.md`'s fallback pointer directly, same as Codex. The wi lifecycle
+  Claude Code that router only ever injected for the retired agent-side executor skill
+  (polyforge#106 deleted it with the WI-Agent engine - workflow execution is the daemon's
+  Go driver now); `/pf-spec` and `/pf-plan` are self-sufficient `SKILL.md`
+  files with no router involvement in any harness. The wi lifecycle
   (claim / step / artifact / commit / PR / wrap) is unchanged, via `polyforge(pf_*)`.

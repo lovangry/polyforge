@@ -270,7 +270,6 @@ the `PF_*` entries.
 | `--data-dir DIR` | `POLYFORGE_DATA_DIR` | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
 | `--workspace DIR` | `POLYFORGE_WORKSPACE` | (required — no default) | Capsule base: per-WI capsules live at `<DIR>/capsules/<wi_id>`. The directory must pre-exist; the daemon creates and writes only `capsules/` inside it and refuses to start when it is missing or unusable. |
 | `--workflows-dir DIR` | — | `./workflows` | Workflow-bundle checkout the executor reads. |
-| `--executor-prompt FILE` | — | `./skills/pf-execute/SKILL.md` | Executor skill file injected into every agent. |
 | `--pi-bin PATH` | — | `pi` | Harness binary the agent processes are derived from. |
 | `--harness-sessions-root DIR` | `POLYFORGE_HARNESS_SESSIONS_ROOT` | `~/.pi/agent/sessions` | Harness session store for the live-transcript sync. |
 | `--cgroup-root DIR` | `POLYFORGE_CGROUP_ROOT` | — | cgroup v2 root used for layer-0 agent cleanup. |
@@ -367,9 +366,9 @@ Waivers must be explicit (`waived: <reason>`) and are review-visible and
 challengeable. A bug fix without a test pinning it is an unfixed bug — the
 next regression of the same bug is left to the naked eye.
 
-**Discipline ③ — skill / prompt-logic changes → real-WI observation window
-before the next cutover-grade release.** Any merge touching
-`skills/pf-execute/SKILL.md`, `workflows/*/agents/*.md`, or
+**Discipline ③ — workflow-bundle / prompt-logic changes → real-WI observation
+window before the next cutover-grade release.** Any merge touching
+`workflows/*/agents/*.md` or
 `workflows/*/workflow.md` requires a real-WI observation window and gate
 readings before the next cutover-grade release: a clean rig, ≥10 real
 tickets of mixed bundle types (including ≥1 exercising the changed

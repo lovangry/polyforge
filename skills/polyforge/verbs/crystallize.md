@@ -161,7 +161,7 @@ optional `paths`/`pr_base`):
 paths=[the new .md files only], pr_title="Add <wi_type> step graph",
 pr_body="<what the flow captures>", pr_base="main")`. Present the DRAFT for
 confirmation before writing (Enter=confirm / notes=revise / cancel=skip), and keep the
-pf-execute-compatible format: frontmatter only `requires_human_session`; `## Step: <word>`
+scenario-graph format: frontmatter only `requires_human_session`; `## Step: <word>`
 at strict line start; `@include:` level params on the immediately following line; a
 `## Step:` inside a code fence is not a step. **This branch remains exactly as before** for machines and wi_types still driven by scenario step graphs - see
 docs/workflow-v2/01-authority-and-compatibility.md for which path a wi takes. When in

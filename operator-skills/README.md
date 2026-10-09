@@ -19,6 +19,6 @@ Two FACES — install the right one, not both.
 
 砍掉的 10 个是 v0 工作树工作流的遗产,胶囊模型(v1.0.0)已取代其工作面:
 pf-work(领取=路由动词+hub;观察器纪律移入 using-polyforge)、
-pf-spec/pf-plan/pf-execute(执行在胶囊内)、pf-revise、pf-sync(v1 无此
+pf-spec/pf-plan(执行由 daemon 的 Go driver 驱动)、pf-revise、pf-sync(v1 无此
 机制)、pf-update(v0 role 机制)、pf-project/pf-user(CLI 薄壳)、
 pf-stop(动词 fragments 已带)。git 历史可追溯。
