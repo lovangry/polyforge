@@ -1,45 +1,37 @@
 // Command fakepi is the v1 e2e stand-in for the real `pi --mode rpc`
-// harness binary. The daemon derives it as the WI-agent process
-// (--pi-bin); it speaks the REAL v1 RPC envelope pinned by
-// internal/polyforge/runtime/spawn.go and the record shapes frozen in
-// internal/polyforge/observe/stream.go:
+// harness binary — envelope edition (polyforge#106: the WI-Agent RPC
+// lane is deleted; the Go driver spawns one process per step). The
+// daemon derives it as the step process (--pi-bin); it speaks the REAL
+// v1 envelope pinned by internal/polyforge/runtime/spawn.go and the
+// record shapes frozen in internal/polyforge/observe/stream.go:
 //
 //   - stdin: one JSON command object per line; prompt commands
 //     {"id":..,"type":"prompt","message":..} are the only commands
-//     honored; the daemon's control methods (pf/answer, pf/probe,
-//     pf/stop_notice) ride prompt commands whose message text is the
-//     protocol.ControlMsg JSON line VERBATIM;
+//     honored; the daemon's one control method (pf/probe) rides a
+//     prompt command whose message text is the protocol.ControlMsg
+//     JSON line VERBATIM (on the driver lane the bridge answers probes
+//     from the driver goroutine's liveness — this stdin face stays for
+//     the transport contract only);
 //   - stdout: response records {"id","type":"response","command":"prompt",
 //     "success":true} echo the command id; assistant text rides the
 //     message_start/message_update/message_end event burst; the control
 //     ACK is a JSON line embedded in a MULTI-LINE assistant message
 //     (the v1 ack contract: the ack carries method + correlation —
-//     pf/answer echoes the question id in "ref", pf/probe echoes the
-//     nonce in "ref", pf/stop_notice carries no string token and acks
-//     with the method alone);
+//     pf/probe echoes the nonce in "ref");
 //   - capsule-side execution state: runtime-state/execution.json is
 //     written atomically (tmp+rename) with a MONOTONIC Version per
 //     write — the v1 zero-blocking agent contract (ruling C3) the
 //     observe lane polls;
-//   - the agent-side UDS proxy: flush(reason) rides
-//     POST /jobs/<wi>/flush on PF_DAEMON_SOCKET with the v1.5
-//     protocol.FlushRequest shape; the flush fence value is the
-//     derivation counter read from PF_SPAWN_N (the v1.5 B2 spawn env
-//     injection — there is no PF_INSTANCE_ID and no attempt id
-//     anywhere; PF_SESSION_HANDLE carries the PUBLIC session
-//     fingerprint, display only, never a credential);
-//   - a harness transcript is appended at the session path the recovery
-//     engine discriminates on (the --session argv on resume, the
-//     token-named capsule copy session/session-<handle>[#N].jsonl
-//     otherwise), so crash-recovery scenarios exercise the real resume
-//     path.
+//   - a harness transcript is appended at the session path the driver's
+//     derivation declares (--session on a resume, the token-named
+//     capsule copy session/session-<handle>[#N].jsonl otherwise), so
+//     crash-recovery scenarios exercise the real resume path.
 //
 // Scripted behavior: the process reads a JSON plan file at startup
 // (FAKEPI_PLANS/<PF_WI_ID>.json, falling back to
 // FAKEPI_PLANS/default.json). The plan is re-read on every process
 // start, so a scenario rewrites the file to change what a RE-DERIVED
-// agent does. Actions: step / ask / wrap / fail / hang / open_turn /
-// ui_noise / provider_error / park / exit / sleep / repo (see drive.go).
+// agent does. The Nth envelope action fires for spawn N (see drive.go).
 //
 // Besides the action list the plan carries per-derivation-kind modes.
 // fail_spawn_resume / fail_spawn_fresh are the must-fail-AT-SPAWN mode:
@@ -155,17 +147,6 @@ func main() {
 			continue
 		}
 		switch ctl.Method {
-		case "pf/answer":
-			if !drv.ackAnswer {
-				// The died-mid-consumption shape: the relay reached stdin but
-				// this instance never consumes or acks it — the daemon's ledger
-				// keeps the answer re-deliverable (F9).
-				drv.journal("control", map[string]any{"method": "pf/answer", "ref": ctl.ID, "suppressed": true})
-				continue
-			}
-			drv.consumeAnswer(ctl.ID, ctl.Answer)
-			ackViaAssistantMessage(map[string]any{"method": "pf/answer", "ref": ctl.ID, "ok": true})
-			drv.journal("control", map[string]any{"method": "pf/answer", "ref": ctl.ID})
 		case "pf/probe":
 			if drv.suppressProbeAck() {
 				// the hang scenario: no ack, the liveness probe must time out
@@ -180,11 +161,10 @@ func main() {
 			}
 			ackViaAssistantMessage(ack)
 			drv.journal("control", map[string]any{"method": "pf/probe", "ref": ctl.Nonce})
-		case "pf/stop_notice":
-			ackViaAssistantMessage(map[string]any{"method": "pf/stop_notice", "ok": true})
-			drv.journal("control", map[string]any{"method": "pf/stop_notice"})
-			drv.beginShutdownFlush()
 		default:
+			// polyforge#106: the answer relay and the stop-notice delivery
+			// died with the WI-Agent engine — the channel's only method is
+			// the probe; anything else is journaled as the unknown it is.
 			drv.journal("control", map[string]any{"method": ctl.Method, "unknown": true})
 		}
 	}
