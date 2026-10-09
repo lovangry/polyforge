@@ -780,6 +780,10 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", id, err)
 		}
 	}
+	// #109: a fresh daemon-minted session for this WI supersedes any
+	// adopted (externally minted) session's custody — the hub holds one
+	// session at a time and the new one is THIS daemon's.
+	r.clearAdopted(id)
 	fp := api.SessionFingerprint(sessionID)
 	if c.SessionFingerprint != "" && c.SessionFingerprint != fp {
 		// the server computed a different fingerprint for our secret: the
