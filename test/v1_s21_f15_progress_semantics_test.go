@@ -33,7 +33,7 @@ import (
 // #106's), not silently.
 func TestV1S21F15ProgressSemantics(t *testing.T) {
 	inst := newV1Install(t)
-	d := newV1Daemon(t, inst, optObserveWindows(2*time.Second, 2*time.Second, 2*time.Second, 0))
+	d := newV1Daemon(t, inst, optObserveWindows(2*time.Second, 2*time.Second, 2*time.Second))
 	d.start()
 
 	// ------------------------------------------------------------------
