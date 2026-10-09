@@ -288,7 +288,6 @@ behaves exactly as before:
 | `--hang-window D` | — | `10m` | Stream silence while a turn is in flight before the liveness probe arms. |
 | `--idle-window D` | — | `10m` | No progress record and no turn in flight before the idle watchdog probes. |
 | `--probe-timeout D` | — | `2m` | Ack bound of one liveness probe. |
-| `--answer-ack-window D` | — | `2m` | Bound on the agent's `pf/answer` consumption ack. |
 | `--revalidate-every D` | — | `5m` | M4 periodic session-revalidation cadence for RUNNING jobs; `0`/omitted keeps the 5m default, a negative value disables revalidation. |
 
 Before starting ANY implementation or review lane: recall the v0 lessons

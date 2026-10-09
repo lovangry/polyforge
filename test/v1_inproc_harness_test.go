@@ -3,8 +3,8 @@ package test
 // v1_inproc_harness_test.go: the in-process runtime+observe rig for
 // fault-injection scenarios whose detection windows must be shrunk
 // (hang watchdog, probe bound). Since #12 the `pf daemon` CLI takes the
-// window flags itself (--hang-window / --idle-window / --probe-timeout /
-// --answer-ack-window), so s06 — the last scenario on this rig — now
+// window flags itself (--hang-window / --idle-window / --probe-timeout),
+// so s06 — the last scenario on this rig — now
 // runs against the real daemon process and no scenario needs the rig
 // today; it stays as the in-process injection seam, assembling the SAME
 // production components — runtime.New (lifecycle + recovery engine), observe.New
@@ -197,13 +197,12 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 
 	rig.rt = runtime.New(rtCfg, inst.client, sp, rtMsgs, obMsgs)
 	obCfg := observe.Config{
-		RT:              attachCh,
-		OB:              obMsgs,
-		DataDir:         dataDir,
-		PollInterval:    50 * time.Millisecond,
-		HangWindow:      hangWindow,
-		ProbeTimeout:    probeTimeout,
-		AnswerAckWindow: 3 * time.Second,
+		RT:           attachCh,
+		OB:           obMsgs,
+		DataDir:      dataDir,
+		PollInterval: 50 * time.Millisecond,
+		HangWindow:   hangWindow,
+		ProbeTimeout: probeTimeout,
 	}
 	for _, tune := range obsTune {
 		tune(&obCfg)

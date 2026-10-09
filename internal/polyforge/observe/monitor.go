@@ -158,7 +158,6 @@ type monitorCfg struct {
 	// zero window would fire on every tick; production default 10min).
 	IdleWindow        time.Duration
 	ProbeTimeout      time.Duration
-	AnswerAckWindow   time.Duration
 	PushRetryBackoff  time.Duration
 	BackpressureSteps int
 	BackpressureAfter time.Duration

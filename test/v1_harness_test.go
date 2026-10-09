@@ -581,8 +581,10 @@ func optAPIKey(key string) daemonOpt {
 
 // optObserveWindows injects the observe supervision windows through the
 // real `pf daemon` flags (#12). A zero duration omits its flag, leaving
-// that window at the production default.
-func optObserveWindows(hang, idle, probe, answerAck time.Duration) daemonOpt {
+// that window at the production default. (The fourth #12 window is
+// deleted — its consumer went with the driver cutover; a stale usage
+// now fails loudly at flag parse.)
+func optObserveWindows(hang, idle, probe time.Duration) daemonOpt {
 	return func(d *v1Daemon) {
 		for _, f := range []struct {
 			name string
@@ -591,7 +593,6 @@ func optObserveWindows(hang, idle, probe, answerAck time.Duration) daemonOpt {
 			{"--hang-window", hang},
 			{"--idle-window", idle},
 			{"--probe-timeout", probe},
-			{"--answer-ack-window", answerAck},
 		} {
 			if f.val > 0 {
 				d.extraArgs = append(d.extraArgs, f.name, f.val.String())

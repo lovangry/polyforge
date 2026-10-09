@@ -661,8 +661,6 @@ observe's own default):
       probes (10m)
   --probe-timeout D
       one liveness probe's ack bound (2m)
-  --answer-ack-window D
-      the agent's pf/answer consumption-ack bound (2m)
   --revalidate-every D
       periodic session revalidation cadence for RUNNING jobs
       (5m; negative disables)

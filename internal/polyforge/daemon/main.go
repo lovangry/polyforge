@@ -49,7 +49,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	hangWindow := fs.Duration("hang-window", 0, "stream-silence window while a turn is in flight before the liveness probe arms (default 10m)")
 	idleWindow := fs.Duration("idle-window", 0, "no-record-no-turn quiet window before the idle watchdog probes (default 10m)")
 	probeTimeout := fs.Duration("probe-timeout", 0, "liveness-probe ack bound (default 2m)")
-	answerAckWindow := fs.Duration("answer-ack-window", 0, "pf/answer consumption-ack window (default 2m)")
 	revalidateEvery := fs.Duration("revalidate-every", 0, "M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
 	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "machines heartbeat cadence (0 = disabled)")
 	if err := fs.Parse(argv); err != nil {
@@ -156,7 +155,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			HangWindow:             *hangWindow,
 			IdleWindow:             *idleWindow,
 			ProbeTimeout:           *probeTimeout,
-			AnswerAckWindow:        *answerAckWindow,
 			SessionRevalidateEvery: *revalidateEvery,
 		},
 	}

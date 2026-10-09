@@ -35,11 +35,10 @@ func newHubAt(t *testing.T, dataDir string) (*Observe, chan Attach, func()) {
 	ob := make(chan protocol.OBMsg, 64)
 	o, err := New(Config{
 		RT: rt, OB: ob, DataDir: dataDir,
-		PollInterval:    5 * time.Millisecond,
-		HangWindow:      time.Hour,
-		IdleWindow:      time.Hour,
-		AnswerAckWindow: 80 * time.Millisecond,
-		CallTimeout:     time.Second,
+		PollInterval: 5 * time.Millisecond,
+		HangWindow:   time.Hour,
+		IdleWindow:   time.Hour,
+		CallTimeout:  time.Second,
 		PushFunc: func(ctx context.Context, g gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			return "sha_persist", true, gitops.PushTimings{}, nil
 		},

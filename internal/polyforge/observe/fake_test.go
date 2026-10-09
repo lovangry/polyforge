@@ -109,7 +109,6 @@ func testCfg() monitorCfg {
 		// the idle watchdog tests below shrink it explicitly.
 		IdleWindow:        time.Hour,
 		ProbeTimeout:      80 * time.Millisecond,
-		AnswerAckWindow:   50 * time.Millisecond,
 		PushRetryBackoff:  2 * time.Millisecond,
 		BackpressureSteps: 5,
 		BackpressureAfter: 30 * time.Minute,

@@ -80,7 +80,6 @@ type Config struct {
 	// fatal provider error) with the session left driving nothing.
 	IdleWindow        time.Duration // no-record-no-turn quiet window (10min)
 	ProbeTimeout      time.Duration // liveness-probe ack bound (2min)
-	AnswerAckWindow   time.Duration // pf/answer consumption-ack window (2min)
 	PushRetryBackoff  time.Duration // async push retry spacing after a failure (10s)
 	BackpressureSteps int           // N consecutive failed pushes before the degradation event (5)
 	BackpressureAfter time.Duration // T without a successful push before the degradation event (30min)
@@ -105,9 +104,6 @@ func (c *Config) fill() {
 	}
 	if c.ProbeTimeout == 0 {
 		c.ProbeTimeout = 2 * time.Minute
-	}
-	if c.AnswerAckWindow == 0 {
-		c.AnswerAckWindow = 2 * time.Minute
 	}
 	if c.PushRetryBackoff == 0 {
 		c.PushRetryBackoff = 10 * time.Second
@@ -363,7 +359,6 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 			HangWindow:           o.cfg.HangWindow,
 			IdleWindow:           o.cfg.IdleWindow,
 			ProbeTimeout:         o.cfg.ProbeTimeout,
-			AnswerAckWindow:      o.cfg.AnswerAckWindow,
 			PushRetryBackoff:     o.cfg.PushRetryBackoff,
 			BackpressureSteps:    o.cfg.BackpressureSteps,
 			BackpressureAfter:    o.cfg.BackpressureAfter,

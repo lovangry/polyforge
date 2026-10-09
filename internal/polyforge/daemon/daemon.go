@@ -130,8 +130,6 @@ type ObserveWindows struct {
 	IdleWindow time.Duration
 	// ProbeTimeout bounds one liveness probe's ack wait.
 	ProbeTimeout time.Duration
-	// AnswerAckWindow bounds the agent's pf/answer consumption ack.
-	AnswerAckWindow time.Duration
 	// SessionRevalidateEvery is the M4 periodic session-revalidation
 	// cadence (0 = observe's default 5m; negative = disabled).
 	SessionRevalidateEvery time.Duration
@@ -357,10 +355,9 @@ func New(cfg Config) (*Daemon, error) {
 		MemoryFace: memFace{hub: cfg.Hub},
 		// Bug-4 seam: the supervision windows pass through; zero fields
 		// keep the observe defaults.
-		HangWindow:      cfg.Observe.HangWindow,
-		IdleWindow:      cfg.Observe.IdleWindow,
-		ProbeTimeout:    cfg.Observe.ProbeTimeout,
-		AnswerAckWindow: cfg.Observe.AnswerAckWindow,
+		HangWindow:   cfg.Observe.HangWindow,
+		IdleWindow:   cfg.Observe.IdleWindow,
+		ProbeTimeout: cfg.Observe.ProbeTimeout,
 		// M4 cadence rides the same pass-through (0 = the 5m default,
 		// negative = disabled).
 		SessionRevalidateEvery: cfg.Observe.SessionRevalidateEvery,
