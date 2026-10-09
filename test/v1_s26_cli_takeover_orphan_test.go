@@ -189,7 +189,7 @@ func TestV1S26CLITakeoverNoOrphan(t *testing.T) {
 
 	wi := inst.newWI(t, "s26: CLI takeover must not mint an orphan session (#109)",
 		s26Plan(), nil)
-	daemonA := newV1Daemon(t, inst, optMachineID("m-e2e-a"), optAPIKey(keyA), optUseDriver())
+	daemonA := newV1Daemon(t, inst, optMachineID("m-e2e-a"), optAPIKey(keyA))
 	daemonA.start()
 	daemonA.pf(t, "submit", wi)
 	waitQuestion(t, daemonA, wi, "q_s26", 60*time.Second)
@@ -268,7 +268,7 @@ func TestV1S26SubmitTakeoverFencesForeignHolder(t *testing.T) {
 
 	wi := inst.newWI(t, "s26: submit --takeover must fence a foreign holder (#109)",
 		s26Plan(), nil)
-	daemonB := newV1Daemon(t, inst, optMachineID("m-e2e-b"), optAPIKey(keyB), optUseDriver())
+	daemonB := newV1Daemon(t, inst, optMachineID("m-e2e-b"), optAPIKey(keyB))
 	daemonB.start()
 	daemonB.pf(t, "submit", wi)
 	waitQuestion(t, daemonB, wi, "q_s26", 60*time.Second)
@@ -289,7 +289,7 @@ func TestV1S26SubmitTakeoverFencesForeignHolder(t *testing.T) {
 	}
 
 	// This box's daemon, holding only its machine credential.
-	daemonA := newV1Daemon(t, inst, optMachineID("m-e2e-a"), optAPIKey(keyA), optUseDriver())
+	daemonA := newV1Daemon(t, inst, optMachineID("m-e2e-a"), optAPIKey(keyA))
 	daemonA.start()
 	daemonA.pf(t, "submit", wi, "--takeover")
 

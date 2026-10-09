@@ -801,7 +801,11 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 		surfaces = append(surfaces, filepath.Join(root, "docs", "design", "polyforge-vnext", n))
 	}
 	for _, n := range []string{
-		"SKILL.md", "verbs/crystallize.md", "verbs/doctor.md", "verbs/help.md", "verbs/retro.md",
+		"SKILL.md", "verbs/help.md",
+		// verbs/crystallize, doctor, retro (and status) were DELETED by
+		// polyforge#97's operator-skills cleanup — their disappearance IS
+		// the compliant outcome for the pf-execute scrub; they are no
+		// longer live surfaces to pin.
 	} {
 		surfaces = append(surfaces, filepath.Join(root, "skills", "polyforge", n))
 	}
@@ -821,26 +825,29 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 			hits = append(hits, p)
 		}
 	}
-	// operator-skills: the passing citations scrubbed in passing. Symlinks
-	// (the shared-checkout link) are skipped — only real repo bytes count.
-	err := filepath.WalkDir(filepath.Join(root, "operator-skills"), func(path string, de os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !de.Type().IsRegular() {
+	// operator-skills: the passing citations scrubbed in passing. The
+	// directory itself was DELETED by polyforge#97 — a missing directory
+	// is the compliant outcome, not a walk error.
+	if _, serr := os.Stat(filepath.Join(root, "operator-skills")); serr == nil {
+		werr := filepath.WalkDir(filepath.Join(root, "operator-skills"), func(path string, de os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !de.Type().IsRegular() {
+				return nil
+			}
+			raw, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			if strings.Contains(string(raw), skill) {
+				hits = append(hits, path)
+			}
 			return nil
+		})
+		if werr != nil {
+			t.Fatalf("operator-skills walk: %v", werr)
 		}
-		raw, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return rerr
-		}
-		if strings.Contains(string(raw), skill) {
-			hits = append(hits, path)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("operator-skills walk: %v", err)
 	}
 	if len(hits) > 0 {
 		t.Fatalf("live doc surfaces still reference the deleted skill (%d):\n%s", len(hits), strings.Join(hits, "\n"))

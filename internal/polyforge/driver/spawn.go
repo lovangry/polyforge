@@ -158,6 +158,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		Rewind:         sp.RewindInput,
 		Answers:        sp.Answers,
 		HandoffDue:     spec.Handoff,
+		Gate:           spec.Gate,
 		PriorRejection: sp.PriorRejection,
 	}
 	if policy == ContextInherit {
@@ -231,6 +232,12 @@ type promptParts struct {
 	// HandoffDue marks a step whose completed result must carry a
 	// handoff_ref (the delivery contract states the duty only then).
 	HandoffDue bool
+	// Gate marks a workflow-declared gate step (gate: true): the
+	// delivery contract states the verdict binding for it — a fail
+	// verdict in the output REQUIRES outcome gate_failed (the driver's
+	// only rewind trigger), and a fail verdict delivered under
+	// completed is re-bound to gate_failed fail-closed.
+	Gate bool
 	// PriorRejection is the verbatim validation error from the previous
 	// dispatch's rejected envelope (the in-process retry lane): the
 	// author sees exactly what to fix instead of blindly re-authoring.
@@ -304,7 +311,11 @@ func assembleStepPrompt(p promptParts) string {
 }
 
 // deliveryContract states the envelope delivery path and shape: the
-// single channel the driver reads a result from.
+// single channel the driver reads a result from. For a gate step it
+// also states the verdict binding (the #106 lesson): the output's
+// top-level fail verdict and the envelope outcome must agree — a fail
+// verdict requires gate_failed, and the driver re-binds a completed
+// envelope carrying one fail-closed.
 func deliveryContract(p promptParts) string {
 	rel := capsule.DirRuntimeState + "/" + dirPendingResults + "/" + strconv.FormatInt(p.SpawnN, 10) + ".json"
 	var b strings.Builder
@@ -329,6 +340,15 @@ func deliveryContract(p promptParts) string {
 		b.WriteString("; this step DECLARES handoff, so a completed result must also carry `handoff_ref` — the same {path, sha256, bytes} shape — naming the artifact the next inherit step continues from")
 	}
 	b.WriteString("; a `needs_input` result carries `question_id` and `question` instead. End your turn once the file is written.\n")
+	if p.Gate {
+		b.WriteString("\nGate verdict binding: this step is a GATE (the workflow declares it `gate: true`), " +
+			"and the top-level `verdict` field of your `output` is the business verdict. " +
+			"A fail verdict REQUIRES `outcome: \"gate_failed\"` — that outcome is the driver's only rewind trigger, " +
+			"and the fail verdict rides `output` verbatim as the rewind input. " +
+			"A fail verdict delivered under `outcome: \"completed\"` is a mislabeled gate report: " +
+			"the driver re-binds it to `gate_failed` fail-closed (the gate is never archived done on it). " +
+			"Deliver `outcome: \"completed\"` only for a pass verdict (or when the step owes no verdict).\n")
+	}
 	return b.String()
 }
 

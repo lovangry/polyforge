@@ -10,10 +10,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,6 +75,16 @@ type planAction struct {
 	// error outputs for gate_failed envelopes, schema-shaped payloads,
 	// refusal probes).
 	Output map[string]any `json:"output,omitempty"`
+	// Files writes extra capsule-relative files (path → content) BEFORE
+	// the envelope write — the declared-input shape: a later step's
+	// declared `inputs:` entry must exist on disk at ITS dispatch, and
+	// this is how a scripted step produces it (e.g. the bug-fix lane's
+	// root-cause consuming artifacts/repro.md).
+	Files map[string]string `json:"files,omitempty"`
+
+	// FlushWrap runs a flush(wrap) round trip BEFORE ("before") or AFTER
+	// ("after") the envelope write — the seal-gate cycle shapes.
+	FlushWrap string `json:"flush_wrap,omitempty"`
 	// Evidence carries extra structured command-evidence entries
 	// (merged with the synthetic one; suppressed entirely by
 	// NoEvidence). The driver copies command_evidence onto
@@ -352,6 +367,24 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 		d.unpoisonGitlink(false)
 	}
 	sleepMS(act.MS) // the delayed-envelope-write shape (the hang lane)
+	if act.FlushWrap == "before" {
+		ok, errText := d.flushWrapVerbose("wrapped")
+		d.journal("flush", map[string]any{"reason": "wrap", "final_status": "wrapped", "ok": ok, "error": errText})
+	}
+	// Extra capsule-relative files, verbatim content (the declared-input
+	// producer: a downstream step's declared inputs must exist at its
+	// dispatch).
+	for p, content := range act.Files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(d.capsuleRoot(), p)), 0o755); err == nil {
+			if err := os.WriteFile(filepath.Join(d.capsuleRoot(), p), []byte(content), 0o644); err != nil {
+				d.journal("file_error", map[string]any{"path": p, "err": err.Error()})
+			} else {
+				d.journal("file", map[string]any{"path": p, "bytes": len(content)})
+			}
+		} else {
+			d.journal("file_error", map[string]any{"path": p, "err": err.Error()})
+		}
+	}
 	if act.Crash == "before" {
 		d.journal("crash_before", map[string]any{"step": act.ID, "outcome": act.Outcome})
 		os.Exit(101) // die before the envelope write: the envelope never lands
@@ -774,4 +807,88 @@ func (d *driveEnv) spawnNumber() int64 {
 		return n
 	}
 	return 1
+}
+
+// flushOnce is one flush round trip. retry reports whether the failure
+// is the transient spawn-window shape worth retrying; errText carries the
+// refusal verbatim for the journal.
+func (d *driveEnv) flushOnce(reason string, raw []byte) (ok bool, errText string, retry bool) {
+	conn, err := net.Dial("unix", d.socket)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): dial: %v\n", reason, err)
+		return false, err.Error(), true // the listener may not be up yet
+	}
+	defer conn.Close()
+	req, err := http.NewRequest("POST", "http://daemon/jobs/"+d.wi+"/flush", bytes.NewReader(raw))
+	if err != nil {
+		return false, err.Error(), false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Transport: &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) { return conn, nil },
+	}}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): %v\n", reason, err)
+		return false, err.Error(), true
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != 200 {
+		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): HTTP %d: %s\n", reason, resp.StatusCode, out)
+		// a close/recovery race is transient; a stale counter is forever.
+		// "instance just spawned" is the flushGate's typed RECOVERING
+		// transient (the recovery window — the wording is the daemon's,
+		// unchanged in v1.5); "already in progress" is a close genuinely
+		// holding the seal guard.
+		return false, string(out), bytes.Contains(out, []byte("already in progress")) ||
+			bytes.Contains(out, []byte("instance just spawned")) ||
+			resp.StatusCode >= 500
+	}
+	var fa struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	_ = json.Unmarshal(out, &fa)
+	return fa.OK, fa.Error, false
+}
+
+// flushAck is flush carrying the ack's error text (the typed refusals —
+// DAEMON-400 VERIFICATION_EVIDENCE_MISSING among them — must be
+// assertable from the journal, not just as a boolean).
+func (d *driveEnv) flushAck(reason string, extra map[string]any) (bool, string) {
+	if d.socket == "" {
+		fmt.Fprintln(os.Stderr, "fakepi: PF_DAEMON_SOCKET not set; flush unavailable")
+		return false, "PF_DAEMON_SOCKET not set"
+	}
+	body := map[string]any{
+		"work_item": d.wi,
+		"spawn_n":   d.spawnN,
+		"reason":    reason,
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return false, err.Error()
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		ok, errText, retry := d.flushOnce(reason, raw)
+		if ok {
+			return true, ""
+		}
+		if !retry || time.Now().After(deadline) {
+			return false, errText
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// flushWrapVerbose is flushWrap carrying the ack's error text (the typed
+// refusal — DAEMON-400 VERIFICATION_EVIDENCE_MISSING — must be assertable
+// from the journal).
+func (d *driveEnv) flushWrapVerbose(finalStatus string) (bool, string) {
+	ack, errText := d.flushAck("wrap", map[string]any{"final_status": finalStatus})
+	return ack, errText
 }
