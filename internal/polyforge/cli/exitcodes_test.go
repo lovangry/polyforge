@@ -328,16 +328,17 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 	if code, _, _ := runPf(t, nil, "daemon", "--no-such-flag"); code != 2 {
 		t.Errorf("flag parse: exit = %d, want 2", code)
 	}
-	// Sanity: the registry really is the full 26-verb set the audit
-	// covered (16 routing + ship + 6 admin + 2 migrations + daemon; the
-	// 26th is the M3 machines liveness face, lane hb-m3).
+	// Sanity: the registry really is the full 27-verb set the audit
+	// covered (16 routing + ship + 6 admin + 2 migrations + doctor +
+	// daemon; the 26th was the M3 machines liveness face, lane hb-m3;
+	// doctor is the #113 machine health face).
 	want := []string{
 		"file", "queue", "cancel", "recall", "remember", "takeover", "unblock",
 		"verify-session",
 		"submit", "observe", "answer", "batch-confirm", "pause", "resume",
 		"wrap", "ops", "ship", "users", "api-keys", "machines", "projects",
 		"backup", "rotate-secret", "migrate-memories", "migrate-work-items",
-		"daemon",
+		"doctor", "daemon",
 	}
 	if len(commands) != len(want) {
 		t.Fatalf("registry has %d commands, want %d", len(commands), len(want))

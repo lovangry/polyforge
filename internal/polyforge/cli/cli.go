@@ -12,6 +12,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/version"
 )
 
@@ -23,6 +24,10 @@ type Context struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Stdin  io.Reader
+	// ConfigPath is the raw --config global flag ("" = the documented
+	// default location). Only the NoConfigLoad verbs (doctor) need it;
+	// everything else reads the resolved Cfg.
+	ConfigPath string
 }
 
 // aihub returns the direct-aihub client for the resolved config.
@@ -40,8 +45,13 @@ type Command struct {
 	Name    string
 	Summary string
 	Usage   string
-	Setup   func(fs *flag.FlagSet)
-	Run     func(ctx *Context, fs *flag.FlagSet, args []string) error
+	// NoConfigLoad marks verbs that load the config THEMSELVES because
+	// an unloadable config is the verb's subject, not an early exit
+	// (`pf doctor`): Run skips the shared pre-load and hands the verb a
+	// defaults Context plus the raw --config path (Context.ConfigPath).
+	NoConfigLoad bool
+	Setup        func(fs *flag.FlagSet)
+	Run          func(ctx *Context, fs *flag.FlagSet, args []string) error
 }
 
 // commands is the full registry: the 16 routing verbs first — 8 direct
@@ -50,8 +60,8 @@ type Command struct {
 // answer, batch-confirm, pause, resume, wrap, ops) — then ship (the wrap→git
 // delivery bridge, daemon face), then the management face M1–M5, then the
 // two migrations (dispatchable but never surfaced on the help face — #103
-// AC16), then the daemon placeholder (help-only: cmd/pf/
-// main.go intercepts the real launch).
+// AC16), then the machine health face (doctor, #113), then the daemon
+// placeholder (help-only: cmd/pf/main.go intercepts the real launch).
 var commands = []*Command{
 	cmdFile,
 	cmdQueue,
@@ -78,6 +88,7 @@ var commands = []*Command{
 	cmdRotateSecret,
 	cmdMigrateMemories,
 	cmdMigrateWorkItems,
+	cmdDoctor,
 	cmdDaemon,
 }
 
@@ -134,10 +145,18 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	cfg, err := LoadConfig(*cfgFlag)
-	if err != nil {
-		fmt.Fprintf(stderr, "pf: %v\n", err)
-		return 1
+	cfg := Config{
+		Server:       defaultServer,
+		DaemonSocket: defaultDaemonSocket,
+		Mapping:      &mapping.Plan{},
+	}
+	if !cmd.NoConfigLoad {
+		loaded, err := LoadConfig(*cfgFlag)
+		if err != nil {
+			fmt.Fprintf(stderr, "pf: %v\n", err)
+			return 1
+		}
+		cfg = loaded
 	}
 	// Flags override environment, environment overrides the file.
 	if *serverFlag != "" {
@@ -154,11 +173,12 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	ctx := &Context{
-		Cfg:    cfg,
-		JSON:   *jsonFlag,
-		Stdout: stdout,
-		Stderr: stderr,
-		Stdin:  stdin,
+		Cfg:        cfg,
+		JSON:       *jsonFlag,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		Stdin:      stdin,
+		ConfigPath: *cfgFlag,
 	}
 
 	fs := flag.NewFlagSet("pf "+cmd.Name, flag.ContinueOnError)
@@ -284,8 +304,12 @@ func printUsage(w io.Writer) {
 	}
 	// commands[23:25] are the migration verbs — dispatchable, never
 	// surfaced (see the layout comment above).
+	fmt.Fprintln(w, "Diagnostics:")
+	for _, c := range commands[25:26] {
+		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
+	}
 	fmt.Fprintln(w, "Process:")
-	for _, c := range commands[25:] {
+	for _, c := range commands[26:] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w)
