@@ -622,7 +622,16 @@ func (d *Daemon) modeRoute(w http.ResponseWriter, r *http.Request) {
 		// Batch's read-only wave projection: the aihub ready queue,
 		// forwarded as-is. NO job is created (04 §6.1b). polyforge#113:
 		// without a scope this merges ALL mapped projects (mapping
-		// declaration order); with one, exactly that project.
+		// declaration order); with one, exactly that project — validated
+		// against THIS daemon's mapping (the placement authority): an
+		// unmapped scope is a typed refusal naming the project, before
+		// any wire call.
+		if req.Project != "" {
+			if _, merr := d.cfg.Mapping.WorkspaceFor(req.Project); merr != nil {
+				writeErr(w, api.ErrDaemonUnmappedProject, fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the recommendation cannot be scoped to it; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)", req.Project))
+				return
+			}
+		}
 		var items []api.WorkItem
 		for _, project := range d.queueProjects(req.Project) {
 			pis, err := d.hub.Queue(project)

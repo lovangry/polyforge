@@ -188,6 +188,13 @@
 - **`pf` CLI**（`cmd/pf/`，§3.3）：AIHub 的第二个对外面。数据面动词（file/queue/cancel/recall，
   §5.1）、CI/脚本与管理调用经它直达 AIHub 的 HTTP API；不经过 Daemon、不触碰任何 Capsule，
   不携带任何执行现场语义，也不持有任何超出调用者身份的权限（A17，§8）。
+  配置契约（polyforge#113）：`~/.config/polyforge/cli.toml` 的
+  `[workspace."<path>"]` sections（每节 `projects = [...]`）是**唯一的
+  workspace 来源**——CLI 与 Daemon 读同一份映射，placement 类动词的
+  `--project` 按它校验，Capsule 按被认领 WI 的 project 经逆映射落到
+  `<workspace>/capsules/<wi>`；不存在任何默认 project 或启动期 workspace
+  选择面（历史旗标/环境变量已删除，仅在迁移文档中作为历史出现）；
+  `pf doctor` 是本机的唯一健康面（配置 + 映射 + 连通性）。
 - **AIHub**：全局仲裁与持久层。work item 生命周期状态机（排队/认领/暂停/终止）、owner generation
   仲裁、Memory 管理与检索、远端 Capsule Revision 存储与 HEAD 指针、最终结果归档，以及调度器/
   就绪队列（扁平两数组 `{executable, blocked}` 响应，schema 权威见

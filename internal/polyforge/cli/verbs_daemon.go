@@ -279,18 +279,14 @@ var cmdBatchConfirm = &Command{
 
 		// Always fetch the scheduler recommendation first (the daemon
 		// forwards the aihub ready-queue answer read-only). polyforge#113:
-		// an explicit --project scopes the recommendation to that project
-		// — validated against the local mapping (unmapped → guidance
-		// error); absent, the daemon merges all mapped projects' ready
-		// queues.
+		// an explicit --project scopes the recommendation to that project;
+		// absent, the daemon merges all mapped projects' ready queues.
+		// The scope is validated by the DAEMON against ITS mapping — the
+		// daemon is the placement authority (its [workspace] config is
+		// what batch/drain actually iterate), so the CLI passes the value
+		// through and a typed refusal names the project.
 		req := ModeRequest{Action: "get_recommendation"}
 		if p := stringFlag(fs, "project"); p != "" {
-			if ctx.Cfg.Mapping.Empty() {
-				return fmt.Errorf("batch-confirm: project %q cannot be validated: no [workspace] mapping is configured in the config — add a [workspace.\"<path>\"] section (`pf doctor` checks the mapping)", p)
-			}
-			if _, err := ctx.Cfg.Mapping.WorkspaceFor(p); err != nil {
-				return fmt.Errorf("batch-confirm: %w", err)
-			}
 			req.Project = p
 		}
 		raw, err := d.Mode(req)
