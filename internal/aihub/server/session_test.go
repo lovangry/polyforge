@@ -230,6 +230,74 @@ func TestForceTakeoverOverHTTP(t *testing.T) {
 	}
 }
 
+// TestForceTakeoverMachineSelfTakeover (#109): a MACHINE-credential
+// caller — the heartbeat-registration shape every production daemon
+// holds — with project membership (role writer) may force-takeover
+// ONLY onto its own machine identity (the executor's self-service
+// recovery). Onto another machine it is refused, and a human writer
+// member is refused exactly as before the widening.
+func TestForceTakeoverMachineSelfTakeover(t *testing.T) {
+	e := newSrvEnv(t)
+	id := createExecWIOverHTTP(t, e, "machine self-takeover over http")
+	oldSecret := "57151515151515151515151515151515"
+	if code, raw, _ := sessClaim(t, e, id, oldSecret, "mft-1"); code != 200 {
+		t.Fatalf("claim: %d %s", code, raw)
+	}
+	// Register a machine through the real heartbeat face (creates the
+	// kind='machine' user + key) and make it a project writer.
+	var hb struct {
+		UserID string `json:"user_id"`
+		APIKey struct {
+			Plain string `json:"plain"`
+		} `json:"api_key"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/machines/heartbeat", e.key,
+		map[string]any{"machine_id": "m-self", "live_wi_ids": []string{}}, &hb); code != 200 || hb.UserID == "" || hb.APIKey.Plain == "" {
+		t.Fatalf("heartbeat registration: %d %s", code, raw)
+	}
+	if code, raw := e.do(t, "PATCH", "/api/v1/projects/alpha", e.key,
+		map[string]any{"members": []map[string]string{{"user_id": hb.UserID, "role": "writer"}}}, nil); code != 200 {
+		t.Fatalf("membership: %d %s", code, raw)
+	}
+	// Machine self-takeover onto its own machine: admitted (the #109 gate).
+	selfSecret := "58151515151515151515151515151515"
+	var resp api.SessionClaimResponse
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/force-takeover", hb.APIKey.Plain,
+		map[string]string{"session_id": selfSecret, "machine_id": "m-self",
+			"owner": "m-self", "reason": "holder machine lost", "idempotency_key": "mft-2"}, &resp); code != 200 {
+		t.Fatalf("machine self-takeover: %d %s", code, raw)
+	}
+	if resp.Claim.SessionFingerprint != api.SessionFingerprint(selfSecret) || resp.Claim.MachineID != "m-self" {
+		t.Fatalf("self-takeover response wrong: %+v", resp.Claim)
+	}
+	// A machine claiming onto ANOTHER machine: refused.
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/force-takeover", hb.APIKey.Plain,
+		map[string]string{"session_id": "59151515151515151515151515151515",
+			"machine_id": "m-other", "reason": "x"}, nil); code != 403 {
+		t.Fatalf("machine foreign-machine takeover: %d %s", code, raw)
+	} else if c, _ := errEnvelope(t, raw); c != "AUTH-403" {
+		t.Fatalf("wrong refusal class: %s", raw)
+	}
+	// A HUMAN writer member stays refused (the v1 human gate is intact).
+	human, _ := e.admin.CreateUser("humanw", "hw@example.com", "writer", "human")
+	hkey, _ := e.admin.CreateAPIKey(human.ID, "hw", "")
+	if code, raw := e.do(t, "PATCH", "/api/v1/projects/alpha", e.key,
+		map[string]any{"members": []map[string]string{{"user_id": human.ID, "role": "writer"}}}, nil); code != 200 {
+		t.Fatalf("human membership: %d %s", code, raw)
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/force-takeover", hkey.Plain,
+		map[string]string{"session_id": "5a151515151515151515151515151515",
+			"machine_id": "m-self", "reason": "x"}, nil); code != 403 {
+		t.Fatalf("human writer takeover: %d %s", code, raw)
+	}
+	// The self-takeover actually holds: the new secret verifies.
+	var v api.SessionVerifyResponse
+	e.do(t, "POST", "/api/v1/work-items/"+id+"/session-verify", e.key, map[string]string{"session_id": selfSecret}, &v)
+	if !v.Matches {
+		t.Fatalf("self-takeover secret does not verify")
+	}
+}
+
 func TestSessionEndOverHTTP(t *testing.T) {
 	e := newSrvEnv(t)
 	id := createExecWIOverHTTP(t, e, "end over http")

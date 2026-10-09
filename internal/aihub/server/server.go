@@ -659,7 +659,8 @@ func (s *Server) hSessionAttach(w http.ResponseWriter, r *http.Request, idn *ide
 
 // hForceTakeover serves the atomic session swap. Takeover is a
 // privileged operation: admin or project maintainer (the v1 human
-// decision gate, kept for v1.5).
+// decision gate, kept for v1.5) — plus the #109 machine self-takeover
+// admission (see takeoverAdmitted).
 func (s *Server) hForceTakeover(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -670,21 +671,70 @@ func (s *Server) hForceTakeover(w http.ResponseWriter, r *http.Request, idn *ide
 		writeErr(w, err)
 		return
 	}
-	if idn.Role != "admin" {
-		role, merr := s.memberRole(projectID, idn.UserID)
-		if merr != nil || role != "maintainer" {
-			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "force-takeover requires admin or project maintainer"))
-			return
-		}
-	}
+	// The request is decoded BEFORE the gate: the machine admission reads
+	// the requested machine identity from it.
 	var req api.SessionClaimRequest
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
 	}
+	if !s.takeoverAdmitted(idn, projectID, req) {
+		writeErr(w, core.Fail(api.ErrAuthForbidden, "",
+			"force-takeover requires admin or project maintainer (a machine-credential caller may take over only onto its own machine)"))
+		return
+	}
 	req.WorkItemID = id
 	claim, err := s.Sessions.Takeover(id, req, idn.UserID)
 	s.sessionClaimResponse(w, id, claim, err)
+}
+
+// takeoverAdmitted is the force-takeover authorization gate (#109).
+// Three admissions:
+//
+//   - global admin — the v1 human decision gate, unchanged;
+//   - project maintainer — the human decision gate's project face, unchanged;
+//   - a MACHINE-credential caller (kind='machine', the daemon's own
+//     registration shape) with project membership taking over ONTO
+//     ITSELF: machine_id in the request must be the machine identity the
+//     caller's credential represents. This is the executor's self-service
+//     recovery (`pf submit <id> --takeover` fencing a dead or foreign
+//     holder) — the same power a plain claim on a queued WI already
+//     grants a project writer, scoped so a machine can never hand a
+//     foreign work item to a third identity. Humans keep the v1 gate:
+//     a non-admin, non-maintainer human is refused exactly as before.
+func (s *Server) takeoverAdmitted(idn *identity, projectID string, req api.SessionClaimRequest) bool {
+	if idn.Role == "admin" {
+		return true
+	}
+	role, err := s.memberRole(projectID, idn.UserID)
+	if err != nil {
+		return false
+	}
+	if role == "maintainer" {
+		return true
+	}
+	if idn.Kind != "machine" || role != "writer" {
+		return false
+	}
+	if strings.TrimSpace(req.MachineID) == "" {
+		return false
+	}
+	machine, err := s.machineIDOfUser(idn.UserID)
+	if err != nil || machine == "" || machine != req.MachineID {
+		return false
+	}
+	return true
+}
+
+// machineIDOfUser resolves the machine identity a machine user
+// represents ("" when the user has no machines row).
+func (s *Server) machineIDOfUser(userID string) (string, error) {
+	var id string
+	err := s.DB.QueryRow(`SELECT id FROM machines WHERE user_id=?1`, userID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
 }
 
 // hSessionEnd serves the session-fenced terminal verdict (wrapped|
