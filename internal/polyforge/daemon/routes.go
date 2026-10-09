@@ -147,9 +147,9 @@ func (d *Daemon) handler() http.Handler {
 	// ruling C2): the flush route passes through the wrap arbitration
 	// gate first (the dual-path close must be one winner, one 409).
 	mux.Handle("GET /jobs/{wi}/observe", obs)
-	// v2: answer routes through the driver bridge when the WI's job
-	// carries a bridge Handle (UseDriver path); otherwise the observe
-	// lane's agent-facing answer path applies (WI-Agent model).
+	// v2 (polyforge#106): answer routes through the driver bridge when
+	// the WI's job carries a bridge Handle; otherwise the observe
+	// lane's agent-facing answer path applies.
 	mux.HandleFunc("POST /jobs/{wi}/answer", func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
 		if h := d.rt.DriverAnswerHandle(wi); h != nil {

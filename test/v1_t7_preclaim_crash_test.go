@@ -176,7 +176,7 @@ func TestV1T7PreClaimCrashJournalReplay(t *testing.T) {
 	// The proxy fronts the daemon's aihub API face; git pushes are pinned
 	// direct by optServerURL.
 	proxy := newClaimHoldProxy(t, inst.url)
-	d := newV1Daemon(t, inst, optServerURL(proxy.url()), optUseDriver())
+	d := newV1Daemon(t, inst, optServerURL(proxy.url()))
 	d.start()
 	d.pf(t, "submit", wi)
 

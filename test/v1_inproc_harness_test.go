@@ -21,7 +21,6 @@ package test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -32,6 +31,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/bridge"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -67,9 +67,9 @@ func (a *inprocAdapter) pollDone(interval time.Duration) {
 	}
 }
 
-// SendControl composes the handle's write+ack pair into the observe
-// face's single bounded call (the daemon adapter's contract: a
-// written-but-unacked method maps to ErrAnswerAckPending).
+// SendControl composes the handle's probe write+ack pair into the
+// observe face's single bounded call (the daemon adapter's contract: a
+// written-but-unacked probe surfaces its deadline error verbatim).
 func (a *inprocAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
 	ack := protocol.ControlAck{Method: msg.Method, Seq: msg.Seq}
 	if err := a.h.SendControl(msg); err != nil {
@@ -82,9 +82,6 @@ func (a *inprocAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg
 		}
 	}
 	if err := a.h.WaitControlAck(ctx, msg, bound); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return ack, observe.ErrAnswerAckPending
-		}
 		return ack, err
 	}
 	ack.OK = true
@@ -165,21 +162,34 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 	}
 
 	rtCfg := runtime.Config{
-		MachineID:          "m-inproc",
-		Workspace:          workspace,
-		DataDir:            dataDir,
-		GitRemoteBase:      inst.url + "/git",
-		WorkflowsDir:       filepath.Join(inst.root, "workflows"),
-		Harness:            "pi",
-		PiBin:              inst.fakepiPath,
-		SocketPath:         sock,
-		ExecutorPromptFile: filepath.Join(inst.root, "skills", "pf-execute", "SKILL.md"),
+		MachineID:     "m-inproc",
+		Workspace:     workspace,
+		DataDir:       dataDir,
+		GitRemoteBase: inst.url + "/git",
+		WorkflowsDir:  filepath.Join(inst.root, "workflows"),
+		Harness:       "pi",
+		PiBin:         inst.fakepiPath,
+		SocketPath:    sock,
 	}
 	// The tap rides the spawner's SHARED config (DefaultSpawner takes it
 	// by pointer), so the binding order is no longer load-bearing — kept
 	// here in the historical order for readability.
 	rtCfg.RecordTap = rig.tapRecord
 	sp := runtime.DefaultSpawner(&rtCfg)
+	// polyforge#106: the driver IS the engine — the rig binds the real
+	// bridge starter (the production mapping), so the in-process
+	// scenarios run the same execution engine the daemon runs.
+	rtCfg.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+		return bridge.Start(ctx, bridge.Config{
+			WI:            in.WI,
+			CapsuleDir:    in.CapsuleDir,
+			BundleName:    in.BundleName,
+			BundleDigest:  in.BundleDigest,
+			SessionHandle: in.SessionHandle,
+			SpawnN:        in.SpawnN,
+			Spawner:       in.Spawner,
+		})
+	}
 
 	rtMsgs := make(chan protocol.RTMsg, 64)
 	obMsgs := make(chan protocol.OBMsg, 64)

@@ -427,51 +427,6 @@ func TestIdleSuppressedWhileRecovering(t *testing.T) {
 // select non-blocking proofs (mutation-honest: a blocking implementation
 // turns these red through the soon() timeout)
 
-func TestMonitorNotBlockedByAnswerAckWait(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.HangWindow = time.Hour // keep the probe out of this test
-	})
-
-	// Arm a pending question.
-	fc := FlushCall{Req: protocol.FlushRequest{SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: "q1", Question: "A or B?"}, Resp: make(chan protocol.FlushAck, 1)}
-	m.flushCh <- fc
-	if ack := <-fc.Resp; !ack.OK {
-		t.Fatalf("needs_input ack: %+v", ack)
-	}
-
-	// The answer's pf/answer delivery blocks until the test releases it.
-	release := make(chan struct{})
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		<-release
-		return protocol.ControlAck{Method: msg.Method, OK: true}, nil
-	})
-	ac := AnswerCall{
-		Relay:  AnswerRelay{QuestionID: "q1", AnswerID: "a1", AnswerText: "A", AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "alice"},
-		Caller: "alice",
-		Resp:   make(chan error, 1),
-	}
-	m.answerCh <- ac
-
-	// WHILE the ack wait is parked in its sub-goroutine, the monitor
-	// must keep classifying records. (A blocking implementation parks
-	// the whole select loop and this goes red.)
-	feed(h, fxTextDelta)
-	soon(t, 300*time.Millisecond, "record classified while answer ack is parked", func() bool {
-		return m.stream.heartbeat().Records >= 1
-	})
-
-	close(release)
-	select {
-	case err := <-ac.Resp:
-		if err != nil {
-			t.Fatalf("answer outcome: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("answer never settled after release")
-	}
-}
-
 func TestMonitorNotBlockedByPushInFlight(t *testing.T) {
 	h := newFakeHandle("att_1")
 	release := make(chan struct{})

@@ -172,37 +172,24 @@ func TestObserveAnswerFlush(t *testing.T) {
 		t.Fatalf("needs_input projection = %s / %+v", jv.Status, jv.Pending)
 	}
 
-	araw, err := td.client.Answer("wi_b", cli.AnswerPayload{
+	// polyforge#106: the answer relay lane is deleted — the WI's engine
+	// here is the scripted fake (no bridge Handle), so the answer
+	// refuses fast with the typed no-bridge-handle 409 and NO relay
+	// reaches the agent.
+	araw, aerr := td.client.Answer("wi_b", cli.AnswerPayload{
 		QuestionID: "q_abc123", AnswerID: "a_xy1234",
 		AnswerText: "mint", AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "u_1",
 	})
-	if err != nil {
-		t.Fatalf("answer: %v", err)
+	if aerr == nil {
+		t.Fatalf("answer with no live bridge handle was accepted: %s", araw)
 	}
-	var out struct {
-		Outcome  string `json:"outcome"`
-		AnswerID string `json:"answer_id"`
+	var ae *api.Error
+	if !errors.As(aerr, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "bridge") {
+		t.Fatalf("answer error = %v, want the typed no-bridge-handle 409", aerr)
 	}
-	if err := json.Unmarshal(araw, &out); err != nil || out.Outcome != "consumed" {
-		t.Fatalf("answer outcome = %s (%v)", araw, err)
-	}
-	// The relay reached the agent over the stdio control channel.
-	if !td.spawner.agentOf(0).sentAnswer("q_abc123", "mint") {
-		t.Fatalf("agent never consumed the answer: %+v", td.spawner.agentOf(0).sent)
-	}
-
-	// Idempotent replay of the same answer_id: consumed again, never
-	// re-delivered.
-	araw, err = td.client.Answer("wi_b", cli.AnswerPayload{
-		QuestionID: "q_abc123", AnswerID: "a_xy1234",
-		AnswerText: "mint", AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "u_1",
-	})
-	if err != nil {
-		t.Fatalf("answer replay: %v", err)
-	}
-	json.Unmarshal(araw, &out)
-	if out.Outcome != "consumed" {
-		t.Fatalf("replay outcome = %s", araw)
+	// Nothing reached the agent: no relay executed.
+	if n := len(td.spawner.agentOf(0).sentMethods()); n != 0 {
+		t.Fatalf("a relay reached the agent (%v) — none may execute", td.spawner.agentOf(0).sentMethods())
 	}
 }
 
@@ -660,49 +647,6 @@ func dialWorks(sock string) bool {
 	return true
 }
 
-// TestFlushStaleAttemptRefused (#8): through the daemon's own socket — a
-// flush not naming the monitor's current instance answers DAEMON-409
-// STALE_ATTEMPT without sealing anything; the live attempt stays closable.
-func TestFlushStaleAttemptRefused(t *testing.T) {
-	td := newTestDaemon(t, nil)
-	td.submitClaim(t, "wi_f")
-	td.waitMonitored(t, "wi_f")
-	fraw, err := td.client.Observe("wi_f", 0)
-	if err != nil {
-		t.Fatalf("observe wi_f: %v", err)
-	}
-	var fjv protocol.JobView
-	if err := json.Unmarshal(fraw, &fjv); err != nil || fjv.SpawnN == 0 {
-		t.Fatalf("wi_f view undecodable: %v (%s)", err, fraw)
-	}
-
-	// A zombie's wrap flush (a stale derivation counter): refused at the fence.
-	_, err = td.client.Flush("wi_f", protocol.FlushRequest{
-		WorkItem: "wi_f", SpawnN: fjv.SpawnN + 1,
-		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
-	})
-	if err == nil {
-		t.Fatal("stale flush(wrap) succeeded; want DAEMON-409 STALE_SPAWN")
-	}
-	var ae *api.Error
-	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "STALE_SPAWN") {
-		t.Fatalf("stale flush error = %v, want DAEMON-409 STALE_SPAWN", err)
-	}
-
-	// The live attempt was untouched: the CLI close still wins.
-	if _, err := td.client.Wrap("wi_f", "wrap"); err != nil {
-		t.Fatalf("wrap after a stale flush: %v", err)
-	}
-	waitGone(t, td, "wi_f")
-	if td.hub.endCount() != 1 {
-		t.Fatalf("end-generation calls = %d, want 1", td.hub.endCount())
-	}
-}
-
-// TestStatusShowsNeedsInput pins the D6 owner face: a job the runtime
-// state machine calls running while its monitor holds a pending question
-// is presented as needs_input on GET /status, carrying the question id —
-// the operator's one-glance surface for "the agent is blocked on you".
 func TestStatusShowsNeedsInput(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_askst")

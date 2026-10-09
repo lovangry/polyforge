@@ -10,7 +10,8 @@ import (
 )
 
 // v1_s01: default-install smoke, driver/envelope edition. A real aihub,
-// a real `pf daemon -use-driver`, a real `pf submit`, a scripted
+// a real `pf daemon` (the driver is the engine; polyforge#106 removed
+// the selection flag), a real `pf submit`, a scripted
 // envelope-action plan that walks the quick-fix workflow (grill → fix →
 // verification → release), and the completed workflow's faces: every
 // step done in execution.json, every result envelope archived under
@@ -30,7 +31,7 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst)
 	d.start()
 
 	// Interactive submit through the real CLI.

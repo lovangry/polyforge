@@ -1,16 +1,18 @@
 package observe
 
 // answerfile_test.go: the on-disk answer-ledger format in isolation —
-// atomic write, mode, round-trip of BOTH halves, the A3 missing/corrupt
-// tolerance and the A4 load-time retention rule. Nothing here touches a
-// monitor or a hub; the wiring tests live in answers_persist_test.go.
+// atomic write, mode, round-trip of the settled-record half, the A3
+// missing/corrupt tolerance and the A4 load-time retention rule.
+// Nothing here touches a monitor or a hub. (The relay halves and the
+// two-phase states these tests used to pin are deleted with the
+// WI-Agent lane, polyforge#106 — version 2 of the document carries
+// settled records only, and a version-1 file quarantines.)
 
 import (
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -26,168 +28,137 @@ func collectRecorder() (ledgerRecorder, *[]map[string]any) {
 
 func seedDoc() answerFileDoc {
 	doc := newAnswerFileDoc()
-	doc.Awaiting["wi_a"] = map[string]AnswerRelay{
-		"a1": {
-			QuestionID: "q1", AnswerID: "a1", AnswerText: "ship it",
-			AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "alice",
-		},
-	}
 	doc.Applied["a1"] = answerFileEntry{
-		State: stateNameRetryable, ErrorCode: errCodeAckPending,
+		State: stateNameFinal, ErrorCode: errCodeConsumed,
 		WorkItem: "wi_a", SettledAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	doc.Applied["a0"] = answerFileEntry{
-		State: stateNameFinal, ErrorCode: errCodeConsumed,
-		WorkItem: "wi_a", SettledAt: time.Now().UTC().Format(time.RFC3339Nano),
+		State: stateNameFinal, ErrorCode: errCodeOther,
+		ErrorMessage: "control path closed: agent exited",
+		WorkItem:     "wi_a", SettledAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	return doc
 }
 
-func TestAnswerFileRoundTripsBothHalves(t *testing.T) {
+func readDoc(t *testing.T, dir string) answerFileDoc {
+	t.Helper()
+	raw, err := os.ReadFile(answerFilePath(dir))
+	if err != nil {
+		t.Fatalf("read %s: %v", answerFilePath(dir), err)
+	}
+	var doc answerFileDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse %s: %v", answerFilePath(dir), err)
+	}
+	doc.normalize()
+	return doc
+}
+
+func TestAnswerFileRoundTrips(t *testing.T) {
 	dir := t.TempDir()
-	want := seedDoc()
-	if err := writeAnswerFile(dir, want); err != nil {
-		t.Fatalf("write: %v", err)
+	if err := writeAnswerFile(dir, seedDoc()); err != nil {
+		t.Fatal(err)
 	}
-	rec, events := collectRecorder()
-	got, pruned := loadAnswerFile(dir, rec, time.Now())
-	if pruned {
-		t.Fatalf("a fresh document must not prune")
+	doc := readDoc(t, dir)
+	if doc.Version != answerFileVersion {
+		t.Fatalf("version = %d, want %d", doc.Version, answerFileVersion)
 	}
-	if len(*events) != 0 {
-		t.Fatalf("a clean load records no event: %+v", *events)
+	if len(doc.Applied) != 2 {
+		t.Fatalf("applied = %+v", doc.Applied)
 	}
-	if got.Version != answerFileVersion {
-		t.Fatalf("version: got %d want %d", got.Version, answerFileVersion)
+	if e := doc.Applied["a1"]; e.State != stateNameFinal || e.ErrorCode != errCodeConsumed {
+		t.Fatalf("a1 record = %+v", e)
 	}
-	// The awaiting half keeps all five relay fields verbatim.
-	gotRelay, ok := got.Awaiting["wi_a"]["a1"]
-	if !ok {
-		t.Fatalf("awaiting half lost the relay: %+v", got.Awaiting)
-	}
-	if gotRelay != want.Awaiting["wi_a"]["a1"] {
-		t.Fatalf("relay not verbatim:\n got %+v\nwant %+v", gotRelay, want.Awaiting["wi_a"]["a1"])
-	}
-	// The applied half keeps state + error identity + owner + settle time.
-	if e := got.Applied["a1"]; e.State != stateNameRetryable || e.ErrorCode != errCodeAckPending || e.WorkItem != "wi_a" {
-		t.Fatalf("applied a1 round-trip: %+v", e)
-	}
-	if e := got.Applied["a0"]; e.State != stateNameFinal || e.ErrorCode != errCodeConsumed {
-		t.Fatalf("applied a0 round-trip: %+v", e)
-	}
-	// The recorded error identity replays as the SENTINEL, not a copy.
-	if err := decodeAnswerErr(got.Applied["a0"].ErrorCode, got.Applied["a0"].ErrorMessage); !errors.Is(err, ErrAnswerConsumed) {
-		t.Fatalf("final outcome must replay ErrAnswerConsumed, got %v", err)
-	}
-	if err := decodeAnswerErr(got.Applied["a1"].ErrorCode, ""); !errors.Is(err, ErrAnswerAckPending) {
-		t.Fatalf("retryable outcome must replay ErrAnswerAckPending, got %v", err)
+	if e := doc.Applied["a0"]; e.ErrorCode != errCodeOther || e.ErrorMessage == "" {
+		t.Fatalf("a0 record = %+v", e)
 	}
 }
 
 func TestAnswerFileErrorCodecIsAClosedSet(t *testing.T) {
-	cases := []struct {
+	for _, c := range []struct {
 		err  error
 		code string
 	}{
 		{nil, errCodeNone},
 		{ErrAnswerConsumed, errCodeConsumed},
-		{ErrAnswerAckPending, errCodeAckPending},
 		{ErrAnswerIdentity, errCodeIdentity},
-	}
-	for _, c := range cases {
+		{errors.New("boom"), errCodeOther},
+	} {
 		code, msg := encodeAnswerErr(c.err)
-		if code != c.code || msg != "" {
-			t.Fatalf("encode %v: got (%q,%q) want (%q,\"\")", c.err, code, msg, c.code)
+		if code != c.code {
+			t.Errorf("encodeAnswerErr(%v) = %q, want %q", c.err, code, c.code)
 		}
-		back := decodeAnswerErr(code, msg)
-		if c.err == nil {
-			if back != nil {
-				t.Fatalf("nil outcome must decode to nil, got %v", back)
-			}
-			continue
+		if c.err == nil && msg != "" {
+			t.Errorf("nil error must encode without a message, got %q", msg)
 		}
-		if !errors.Is(back, c.err) {
-			t.Fatalf("decode %q: got %v want %v", code, back, c.err)
+		if c.err != nil && code == errCodeOther && msg == "" {
+			t.Errorf("an untyped error must carry its message")
 		}
 	}
-	// A non-sentinel delivery failure keeps its message under `other`.
-	code, msg := encodeAnswerErr(errors.New("control path closed"))
-	if code != errCodeOther || msg != "control path closed" {
-		t.Fatalf("other encoding: (%q,%q)", code, msg)
+	// The round trip: every coded record decodes to the same class.
+	if got := decodeAnswerErr(errCodeConsumed, ""); !errEq(got, ErrAnswerConsumed) {
+		t.Errorf("decodeAnswerErr(consumed) = %v", got)
 	}
-	if got := decodeAnswerErr(code, msg); got == nil || got.Error() != "control path closed" {
-		t.Fatalf("other decoding: %v", got)
+	if got := decodeAnswerErr(errCodeIdentity, ""); !errEq(got, ErrAnswerIdentity) {
+		t.Errorf("decodeAnswerErr(identity) = %v", got)
+	}
+	if got := decodeAnswerErr(errCodeNone, ""); got != nil {
+		t.Errorf("decodeAnswerErr(none) = %v", got)
+	}
+	if got := decodeAnswerErr(errCodeOther, "boom"); got == nil || got.Error() != "boom" {
+		t.Errorf("decodeAnswerErr(other) = %v", got)
 	}
 }
 
-func TestAnswerFileStateCodecNeverEncodesInflight(t *testing.T) {
-	if got := encodeAnswerState(answerInflight); got != stateNameRetryable {
-		t.Fatalf("in-flight must project to retryable on disk, got %q", got)
+func errEq(a, b error) bool { return a != nil && b != nil && a.Error() == b.Error() }
+
+func TestAnswerFileStateCodecIsSettledOnly(t *testing.T) {
+	// Every record encodes as the settled state; any on-disk spelling
+	// (including the pre-trim retryable/in-flight encodings) decodes as
+	// history — nothing re-delivers anything.
+	if got := encodeAnswerState(); got != stateNameFinal {
+		t.Fatalf("encodeAnswerState() = %q", got)
 	}
-	if got := encodeAnswerState(answerFinal); got != stateNameFinal {
-		t.Fatalf("final encoding: %q", got)
-	}
-	if got := encodeAnswerState(answerRetryable); got != stateNameRetryable {
-		t.Fatalf("retryable encoding: %q", got)
-	}
-	// No on-disk name decodes to the in-flight state — not even garbage.
-	for _, name := range []string{stateNameFinal, stateNameRetryable, "", "inflight", "bogus"} {
-		if got := decodeAnswerState(name); got == answerInflight {
-			t.Fatalf("state %q decoded to answerInflight", name)
-		}
+	if !decodeAnswerState(stateNameFinal) || !decodeAnswerState("retryable") {
+		t.Fatal("every decoded state is settled history")
 	}
 }
 
 func TestAnswerFileIsWrittenAtMode0600(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeAnswerFile(dir, seedDoc()); err != nil {
-		t.Fatalf("write: %v", err)
+		t.Fatal(err)
 	}
 	st, err := os.Stat(answerFilePath(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := st.Mode().Perm(); got != answerFileMode {
-		t.Fatalf("mode: got %v want %v", got, answerFileMode)
+	if st.Mode().Perm() != answerFileMode.Perm() {
+		t.Fatalf("mode = %v, want %v", st.Mode().Perm(), answerFileMode.Perm())
 	}
 }
 
 func TestAnswerFileInterruptedWriteLeavesPreviousFileIntact(t *testing.T) {
 	dir := t.TempDir()
-	first := seedDoc()
-	if err := writeAnswerFile(dir, first); err != nil {
-		t.Fatalf("write: %v", err)
+	if err := writeAnswerFile(dir, seedDoc()); err != nil {
+		t.Fatal(err)
 	}
 	before, err := os.ReadFile(answerFilePath(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a crash AFTER the tmp file was created but BEFORE the
-	// rename: a leftover, half-written answers.json.tmp.
-	if err := os.WriteFile(answerFilePath(dir)+".tmp", []byte(`{"version":1,"awai`), 0o600); err != nil {
+	// A torn tmp file must never become the live document: write the tmp
+	// side only (simulating a crash mid-atomicWriteFile).
+	tmp := answerFilePath(dir) + ".tmp"
+	if err := os.WriteFile(tmp, []byte("{torn"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(answerFilePath(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(after) != string(before) {
-		t.Fatalf("the visible file must be untouched by an interrupted write")
-	}
-	rec, events := collectRecorder()
-	doc, _ := loadAnswerFile(dir, rec, time.Now())
-	if len(*events) != 0 {
-		t.Fatalf("a leftover tmp must not quarantine the valid file: %+v", *events)
-	}
-	if _, ok := doc.Awaiting["wi_a"]["a1"]; !ok {
-		t.Fatalf("the previous valid content must still load: %+v", doc)
-	}
-	// And the next successful write still lands cleanly over the leftover.
-	if err := writeAnswerFile(dir, doc); err != nil {
-		t.Fatalf("rewrite over a leftover tmp: %v", err)
-	}
-	if _, err := os.Stat(answerFilePath(dir) + ".tmp"); !os.IsNotExist(err) {
-		t.Fatalf("the tmp file must be consumed by the rename, stat err=%v", err)
+	if string(before) != string(after) {
+		t.Fatal("the live document changed during an interrupted write")
 	}
 }
 
@@ -195,160 +166,118 @@ func TestAnswerFileMissingLoadsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	rec, events := collectRecorder()
 	doc, pruned := loadAnswerFile(dir, rec, time.Now())
-	if pruned {
-		t.Fatalf("nothing to prune on first boot")
-	}
-	if len(doc.Awaiting) != 0 || len(doc.Applied) != 0 {
-		t.Fatalf("first boot must load empty: %+v", doc)
+	if len(doc.Applied) != 0 || pruned {
+		t.Fatalf("first boot = %+v pruned=%v", doc, pruned)
 	}
 	if len(*events) != 0 {
-		t.Fatalf("a missing file is not an incident: %+v", *events)
-	}
-	if _, err := os.Stat(answerFilePath(dir)); !os.IsNotExist(err) {
-		t.Fatalf("the loader must not create the file: %v", err)
-	}
-}
-
-func assertQuarantined(t *testing.T, dir string, events []map[string]any) {
-	t.Helper()
-	if len(events) != 1 {
-		t.Fatalf("exactly one event must describe the quarantine: %+v", events)
-	}
-	if events[0]["__kind"] != EvAnswerLedger || events[0]["detail"] != "quarantine" {
-		t.Fatalf("quarantine event shape: %+v", events[0])
-	}
-	if _, err := os.Stat(answerFilePath(dir)); !os.IsNotExist(err) {
-		t.Fatalf("the bad file must be moved aside, stat err=%v", err)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := ""
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), answerFileName+".corrupt-") {
-			found = e.Name()
-		}
-	}
-	if found == "" {
-		t.Fatalf("no answers.json.corrupt-<ts> file in %v", entries)
-	}
-	stamp := strings.TrimPrefix(found, answerFileName+".corrupt-")
-	if _, err := time.Parse(time.RFC3339, stamp); err != nil {
-		t.Fatalf("quarantine suffix %q is not RFC3339: %v", stamp, err)
+		t.Fatalf("first boot must be silent: %+v", *events)
 	}
 }
 
 func TestAnswerFileUnparsableIsQuarantinedNotFatal(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(answerFilePath(dir), []byte("{not json at all"), 0o600); err != nil {
+	garbage := "{not json at all"
+	if err := os.WriteFile(answerFilePath(dir), []byte(garbage), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rec, events := collectRecorder()
 	doc, _ := loadAnswerFile(dir, rec, time.Now())
-	if len(doc.Awaiting) != 0 || len(doc.Applied) != 0 {
-		t.Fatalf("a corrupt file must yield an EMPTY ledger: %+v", doc)
+	if len(doc.Applied) != 0 {
+		t.Fatalf("a corrupt file must yield an empty document: %+v", doc.Applied)
 	}
-	assertQuarantined(t, dir, *events)
+	if len(*events) != 1 || (*events)[0]["detail"] != "quarantine" {
+		t.Fatalf("exactly one quarantine event is required: %+v", *events)
+	}
+	// The original bytes moved aside verbatim.
+	hits, _ := filepath.Glob(answerFilePath(dir) + ".corrupt-*")
+	if len(hits) != 1 {
+		t.Fatalf("quarantine files: %v", hits)
+	}
+	raw, err := os.ReadFile(hits[0])
+	if err != nil || string(raw) != garbage {
+		t.Fatalf("quarantined bytes = %q (%v)", raw, err)
+	}
 }
 
 func TestAnswerFileUnknownVersionIsQuarantined(t *testing.T) {
 	dir := t.TempDir()
-	raw, _ := json.Marshal(map[string]any{"version": 99, "applied": map[string]any{}})
+	raw, _ := json.Marshal(map[string]any{"version": answerFileVersion + 1, "applied": map[string]any{}})
 	if err := os.WriteFile(answerFilePath(dir), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rec, events := collectRecorder()
 	doc, _ := loadAnswerFile(dir, rec, time.Now())
-	if len(doc.Applied) != 0 {
-		t.Fatalf("unknown version must yield an EMPTY ledger: %+v", doc)
+	if len(doc.Applied) != 0 || len(*events) != 1 {
+		t.Fatalf("unknown version must quarantine: %+v %+v", doc, *events)
 	}
-	assertQuarantined(t, dir, *events)
 }
 
 func TestAnswerFileUnreadableIsQuarantined(t *testing.T) {
 	dir := t.TempDir()
-	sub := filepath.Join(dir, "d")
-	if err := os.MkdirAll(answerFilePath(sub), 0o755); err != nil {
+	if err := os.MkdirAll(answerFilePath(dir), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// answers.json is a DIRECTORY here: reading it fails with a
-	// non-NotExist error, the unreadable branch.
 	rec, events := collectRecorder()
-	doc, _ := loadAnswerFile(sub, rec, time.Now())
-	if len(doc.Applied) != 0 {
-		t.Fatalf("unreadable must yield an EMPTY ledger: %+v", doc)
-	}
-	if len(*events) != 1 || (*events)[0]["detail"] != "quarantine" {
-		t.Fatalf("unreadable must record one quarantine event: %+v", *events)
+	doc, _ := loadAnswerFile(dir, rec, time.Now())
+	if len(doc.Applied) != 0 || len(*events) != 1 {
+		t.Fatalf("an unreadable path must quarantine: %+v %+v", doc, *events)
 	}
 }
 
 func TestAnswerFileAgesOutStaleAppliedEntriesAtLoad(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Now().UTC()
-	doc := newAnswerFileDoc()
-	doc.Applied["fresh"] = answerFileEntry{
-		State: stateNameFinal, WorkItem: "wi_a",
-		SettledAt: now.Add(-13 * 24 * time.Hour).Format(time.RFC3339Nano),
-	}
-	doc.Applied["stale"] = answerFileEntry{
-		State: stateNameFinal, WorkItem: "wi_a",
-		SettledAt: now.Add(-15 * 24 * time.Hour).Format(time.RFC3339Nano),
-	}
-	doc.Applied["undated"] = answerFileEntry{State: stateNameFinal, WorkItem: "wi_a"}
+	doc := seedDoc()
+	old := time.Now().Add(-appliedMaxAge - time.Hour).UTC().Format(time.RFC3339Nano)
+	e := doc.Applied["a0"]
+	e.SettledAt = old
+	doc.Applied["a0"] = e
 	if err := writeAnswerFile(dir, doc); err != nil {
 		t.Fatal(err)
 	}
-	got, pruned := loadAnswerFile(dir, nil, now)
+	loaded, pruned := loadAnswerFile(dir, nil, time.Now())
 	if !pruned {
-		t.Fatalf("the age-out must report a change so the caller rewrites the file")
+		t.Fatal("the stale entry must be pruned at load")
 	}
-	if _, ok := got.Applied["stale"]; ok {
-		t.Fatalf("an applied entry older than 14 days must age out: %+v", got.Applied)
+	if _, ok := loaded.Applied["a0"]; ok {
+		t.Fatal("the aged-out entry must be gone")
 	}
-	if _, ok := got.Applied["fresh"]; !ok {
-		t.Fatalf("a 13-day-old entry must survive: %+v", got.Applied)
-	}
-	if _, ok := got.Applied["undated"]; !ok {
-		t.Fatalf("an unknown age is not an old age: %+v", got.Applied)
-	}
-	// And the rewritten file no longer carries it.
-	if err := writeAnswerFile(dir, got); err != nil {
-		t.Fatal(err)
-	}
-	again, _ := loadAnswerFile(dir, nil, now)
-	if _, ok := again.Applied["stale"]; ok {
-		t.Fatalf("the rewritten file must not carry the aged-out entry")
+	if _, ok := loaded.Applied["a1"]; !ok {
+		t.Fatal("a fresh entry must survive the age-out")
 	}
 }
 
-func TestAnswerFilePruningNeverDropsALiveAwaitingEntry(t *testing.T) {
+func TestLedgerForgetWorkItemEmptiesTheFileForThatWorkItem(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Now().UTC()
-	ancient := now.Add(-365 * 24 * time.Hour).Format(time.RFC3339Nano)
-	doc := newAnswerFileDoc()
-	doc.Awaiting["wi_a"] = map[string]AnswerRelay{
-		"old_await": {
-			QuestionID: "q1", AnswerID: "old_await", AnswerText: "still unconsumed",
-			AnsweredAt: ancient, AnsweredBy: "alice",
-		},
-	}
-	doc.Applied["old_await"] = answerFileEntry{
-		State: stateNameRetryable, ErrorCode: errCodeAckPending,
-		WorkItem: "wi_a", SettledAt: ancient,
-	}
-	if err := writeAnswerFile(dir, doc); err != nil {
+	// Seed the file the way a previous daemon process would have left it.
+	if err := writeAnswerFile(dir, seedDoc()); err != nil {
 		t.Fatal(err)
 	}
-	got, pruned := loadAnswerFile(dir, nil, now)
-	if pruned {
-		t.Fatalf("nothing may be pruned when the only old entry is awaiting")
+	l2 := NewAnswerLedgerAt(dir, nil)
+
+	l2.ForgetWorkItem("wi_a")
+
+	doc := readDoc(t, dir)
+	if _, ok := doc.Applied["a1"]; ok {
+		t.Fatalf("the finished work item's records must be gone: %+v", doc.Applied)
 	}
-	if _, ok := got.Awaiting["wi_a"]["old_await"]; !ok {
-		t.Fatalf("a live awaiting entry must be retained at ANY age: %+v", got.Awaiting)
+	if _, ok := doc.Applied["a0"]; ok {
+		t.Fatalf("the finished work item's records must be gone: %+v", doc.Applied)
 	}
-	if _, ok := got.Applied["old_await"]; !ok {
-		t.Fatalf("the applied half of a live awaiting entry must be retained: %+v", got.Applied)
+	// And the reload agrees.
+	l3 := NewAnswerLedgerAt(dir, nil)
+	l3.mu.Lock()
+	n := len(l3.applied)
+	l3.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("reload after ForgetWorkItem carries %d records", n)
+	}
+}
+
+func TestMemoryOnlyLedgerWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	l := NewAnswerLedger() // no backend: every persist is a no-op
+	l.ForgetWorkItem("wi_a")
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("a memory-only ledger must write nothing: %v %v", entries, err)
 	}
 }

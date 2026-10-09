@@ -1,0 +1,937 @@
+package test
+
+// v3_legacy_deletion_acceptance_test.go: the polyforge#106 acceptance
+// suite — authored against the SPEC (the capsule's artifacts/e2e-scenarios.md,
+// which mirrors spec.md's Acceptance criteria and Scenario blocks), BEFORE
+// the deletion lands. It pins the post-deletion contract through the
+// project's real e2e surfaces only: the pf/aihub/fakepi binaries, the
+// `pf` CLI, the daemon's UDS face, the capsule's runtime-state files and
+// real git — never engine internals.
+//
+// Suite posture (see artifacts/e2e-scenarios.md for the full mapping):
+//   - Kept-face guards (driver lifecycle on a production-shaped argv,
+//     answer fail-fast with no live bridge, pilot/v0 invariants) are
+//     green BOTH before and after the deletion.
+//   - New-behavior bars (retired flags fail loudly at parse, the retired
+//     env hatch fails loudly at boot, grep-clean, skill/dir/citation
+//     removal, the 5+ commit delivery shape) are RED before the deletion
+//     — assertion-level reds, never build reds — and must go green after.
+//
+// Self-policing: the retired legacy-face terms this suite greps for are
+// assembled at RUNTIME from fragments (v3Tok) so that THIS file never
+// carries any of the tokens it polices — the grep-clean scenario stays
+// honest about its own bytes.
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// ---------------------------------------------------------------------------
+// Retired-face tokens, assembled from fragments at runtime.
+// ---------------------------------------------------------------------------
+
+// v3Tok joins parts into one legacy-face token. The fragmentation is
+// deliberate: the grep-clean scenario below scans every non-markdown
+// code/build file in the repo INCLUDING this one, so the tokens it
+// polices must never appear as contiguous bytes here.
+func v3Tok(parts ...string) string {
+	return strings.Join(parts, "")
+}
+
+// v3SpecFloorTerms is the spec-floor grep list (spec.md Assumptions §2):
+// only the face-qualified tokens whose absence is unambiguous post-change.
+// Deliberately NOT included: face tokens that also name kept sub-faces
+// (the graceful-shutdown notice, the flush refusal markers woven through
+// the observe lane, the generic fakepi action names) — those faces are
+// covered by the document scenarios, not by a blind token scan.
+func v3SpecFloorTerms() []string {
+	return []string{
+		v3Tok("use", "-", "driver"),              // both dash spellings of the retired engine flag, and every pin of them
+		v3Tok("Use", "Driver"),                   // the engine Config plumbing (and its Explicit sibling)
+		v3Tok("spawn", "Agent"),                  // the legacy recover cascade's spawn entry
+		v3Tok("resume", "Source"),                // the resume→fresh cascade discriminator
+		v3Tok("transcript", "Readable"),          // the cascade's transcript probe
+		v3Tok("build", "Prompt"),                 // the WI-Agent prompt assembly face
+		v3Tok("Executor", "Prompt", "File"),      // the executor prompt Config plumbing
+		v3Tok("executor", "-", "prompt"),         // the daemon flag (and every help-text mention)
+		v3Tok("PFV1", "_", "LEGACY", "_LAN"),     // the retired test hatch, everywhere
+		v3Tok("pf", "-", "execute"),              // the deleted skill, on code/build surfaces
+		v3Tok("wrap", "_", "unless", "_refused"), // a fakepi RPC action with no kept homonym
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The daemon as a real process, booted the way PRODUCTION boots it.
+// ---------------------------------------------------------------------------
+
+// v3DaemonProc is one `pf daemon` OS process started from a
+// production-shaped argv: every flag in it exists both before and after
+// the deletion (socket/server/api-key/machine-id/data-dir/workspace/
+// project/workflows-dir/pi-bin). No engine-selection flag (retired by
+// the change) and no executor prompt flag (retired by the change) are
+// passed; pre-change the executor prompt resolves from its documented
+// default relative to the repo root (the daemon's cwd here), post-change
+// the concept is gone entirely. The engine is the driver in both trees:
+// pre-change via the flag's default, post-change unconditionally.
+type v3DaemonProc struct {
+	t         *testing.T
+	cmd       *exec.Cmd
+	sock      string
+	dataDir   string
+	workspace string
+	machineID string
+	logPath   string
+	logFile   *os.File
+	waitExit  chan error
+}
+
+// v3StartDaemon launches the daemon process and waits until its UDS face
+// answers. dirs may be shared with a previous (crashed) v3DaemonProc on
+// the same socket/data/workspace/machine — the crash-restart shape.
+func v3StartDaemon(t *testing.T, inst *v1Install, sock, dataDir, workspace, machineID string) *v3DaemonProc {
+	t.Helper()
+	root := v1Root(t)
+	d := &v3DaemonProc{
+		t: t, sock: sock, dataDir: dataDir, workspace: workspace,
+		machineID: machineID,
+		logPath:   filepath.Join(t.TempDir(), "v3daemon.log"),
+	}
+	logf, err := os.Create(d.logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.logFile = logf
+	args := []string{
+		"daemon",
+		"--socket", d.sock,
+		"--server", inst.url,
+		"--api-key", inst.adminKey,
+		"--machine-id", d.machineID,
+		"--data-dir", d.dataDir,
+		"--workspace", d.workspace,
+		"--project", v1Project,
+		"--workflows-dir", filepath.Join(root, "workflows"),
+		"--pi-bin", inst.fakepiPath,
+	}
+	cmd := exec.Command(inst.pfPath, args...)
+	cmd.Dir = root // the documented executor prompt default resolves here pre-change
+	cmd.Env = append(os.Environ(),
+		"FAKEPI_PLANS="+inst.planDir,
+		"GIT_AUTHOR_NAME=pf-e2e",
+		"GIT_AUTHOR_EMAIL=pf-e2e@invalid",
+		"GIT_COMMITTER_NAME=pf-e2e",
+		"GIT_COMMITTER_EMAIL=pf-e2e@invalid",
+	)
+	cmd.Stdout, cmd.Stderr = logf, logf
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d.cmd = cmd
+	d.waitExit = make(chan error, 1)
+	go func() { d.waitExit <- cmd.Wait() }()
+	t.Cleanup(func() { d.stop() })
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		conn, err := net.Dial("unix", d.sock)
+		if err == nil {
+			conn.Close()
+			return d
+		}
+		select {
+		case werr := <-d.waitExit:
+			d.cmd = nil
+			t.Fatalf("v3 daemon exited during startup: %v (log tail: %s)", werr, d.logTail())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("v3 daemon UDS never came up on %s (log tail: %s)", d.sock, d.logTail())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// logTail returns the last ~4KB of the daemon log.
+func (d *v3DaemonProc) logTail() string {
+	raw, err := os.ReadFile(d.logPath)
+	if err != nil {
+		return fmt.Sprintf("(unreadable log: %v)", err)
+	}
+	if len(raw) > 4096 {
+		raw = raw[len(raw)-4096:]
+	}
+	return string(raw)
+}
+
+// stop terminates the daemon gracefully (SIGTERM, SIGKILL fallback).
+// Idempotent.
+func (d *v3DaemonProc) stop() {
+	if d.logFile != nil {
+		_ = d.logFile.Close()
+	}
+	if d.cmd == nil || d.cmd.Process == nil {
+		return
+	}
+	_ = d.cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-d.waitExit:
+	case <-time.After(10 * time.Second):
+		_ = d.cmd.Process.Kill()
+		<-d.waitExit
+	}
+	d.cmd = nil
+}
+
+// crash kills the daemon hard (the crash-recovery lever).
+func (d *v3DaemonProc) crash() {
+	d.t.Helper()
+	if d.cmd == nil || d.cmd.Process == nil {
+		d.t.Fatal("v3 crash: daemon not running")
+	}
+	_ = d.cmd.Process.Kill()
+	<-d.waitExit
+	d.cmd = nil
+}
+
+// capsuleDir is the WI's capsule directory under this daemon's workspace.
+func (d *v3DaemonProc) capsuleDir(wi string) string {
+	return filepath.Join(d.workspace, "capsules", wi)
+}
+
+// v3Pf runs the real pf CLI against an explicit daemon socket and
+// returns (combined output, exit code) with NO assertion on the code.
+func v3PfCode(t *testing.T, inst *v1Install, sock string, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(inst.pfPath, args...)
+	cmd.Env = append(os.Environ(),
+		"PF_SERVER="+inst.url,
+		"PF_API_KEY="+inst.adminKey,
+		"PF_USER_ID=usr_root",
+		"PF_PROJECT="+v1Project,
+		"PF_DAEMON_SOCKET="+sock,
+	)
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	code := 0
+	if err := cmd.Run(); err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("pf %v: %v", args, err)
+		}
+		code = ee.ExitCode()
+	}
+	return out.String(), code
+}
+
+// v3ReadExec reads the capsule's execution.json as a loose map.
+func v3ReadExec(t *testing.T, capDir string) map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(capDir, "runtime-state", "execution.json"))
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("execution.json unparsable: %v (%s)", err, raw)
+	}
+	return m
+}
+
+// v3StepField digs steps.<step>.<field> out of a loose execution.json.
+func v3StepField(exec map[string]any, step, field string) any {
+	steps, _ := exec["steps"].(map[string]any)
+	if steps == nil {
+		return nil
+	}
+	st, _ := steps[step].(map[string]any)
+	if st == nil {
+		return nil
+	}
+	return st[field]
+}
+
+// v3StepStatus answers a step's status ("" when absent).
+func v3StepStatus(exec map[string]any, step string) string {
+	s, _ := v3StepField(exec, step, "status").(string)
+	return s
+}
+
+// v3PendingQID answers a step's pending question id ("" when none).
+func v3PendingQID(exec map[string]any, step string) string {
+	pq, _ := v3StepField(exec, step, "pending_question").(map[string]any)
+	if pq == nil {
+		return ""
+	}
+	id, _ := pq["id"].(string)
+	return id
+}
+
+// v3AnswerControlLandings counts the fake agent's pf/answer control
+// landings in the capsule journal (the legacy relay observable: any
+// landing means a relay path executed).
+func v3AnswerControlLandings(t *testing.T, capDir string) int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(capDir, "logs", "fakepi.jsonl"))
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil {
+			if rec["type"] == "control" && rec["method"] == "pf/answer" {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// ---------------------------------------------------------------------------
+// Scenario S3 — the driver-only lifecycle on a production-shaped argv.
+// ---------------------------------------------------------------------------
+
+// TestV3DriverLifecycleProductionArgv pins the kept face end-to-end: a
+// daemon booted exactly the way production boots it (no engine-selection
+// flag, no executor prompt flag) claims a WI, clones the task repo,
+// drives the whole quick-fix workflow through the Go driver and the
+// fakepi envelope mode, survives a kill -9 mid-step and completes after
+// restart. Pre-change this passes via the engine flag's default; the
+// deletion makes the driver unconditional and must keep it green — the
+// spawner core, the claim lane and the recovery window are all exercised.
+func TestV3DriverLifecycleProductionArgv(t *testing.T) {
+	inst, _ := newV1InstallTaskRepo(t)
+	const qid = "q_v3life"
+	// Ordinals: 1 grill asks; 2 grill completes with the answer; 3 fix
+	// (delayed envelope — the kill window); 4 fix again (the post-restart
+	// re-dispatch); 5-6 the tail.
+	wi := inst.newWI(t, "v3: driver-only lifecycle on a production argv",
+		[]map[string]any{
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
+				"question": "Which variant should the lifecycle take?"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 4000},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
+		}, nil)
+
+	sockBase := filepath.Join(t.TempDir(), "sock")
+	sock := filepath.Join(sockBase, "d.sock")
+	dataDir := t.TempDir()
+	workspace := t.TempDir()
+	d := v3StartDaemon(t, inst, sock, dataDir, workspace, "m-v3life")
+	defer d.stop()
+
+	// Submit through the real CLI.
+	out, code := v3PfCode(t, inst, d.sock, "submit", wi)
+	if code != 0 || !strings.Contains(out, "accepted") {
+		t.Fatalf("submit: exit %d, output %q", code, out)
+	}
+
+	capDir := d.capsuleDir(wi)
+
+	// Claim→clone: the task repo lands in the capsule before the agent
+	// spawns (the #108 claim lane is a kept face).
+	waitUntil(t, 30*time.Second, "task repo never cloned into the capsule", func() bool {
+		_, err := os.Stat(filepath.Join(capDir, "repos", "demo-src", "hello.txt"))
+		return err == nil
+	})
+
+	// The driver drives: grill parks in needs_input with the question
+	// persisted (the F9 face), the owner answers through the real CLI,
+	// and the step consumes it.
+	waitUntil(t, 60*time.Second, "grill never parked in needs_input", func() bool {
+		return v3PendingQID(v3ReadExec(t, capDir), "grill") == qid
+	})
+	aout, acode := v3PfCode(t, inst, d.sock, "answer", wi, "--question", qid,
+		"--text", "Take the driver-only variant.", "--by", "usr_root")
+	if acode != 0 || !strings.Contains(aout, "delivered") {
+		t.Fatalf("pf answer through the live bridge: exit %d, output %q", acode, aout)
+	}
+
+	// The kill window: crash the daemon hard while fix is mid-step.
+	waitUntil(t, 60*time.Second, "fix never started", func() bool {
+		return v3StepStatus(v3ReadExec(t, capDir), "fix") == "in_progress"
+	})
+	d.crash()
+
+	// Restart on the same socket/data/workspace/machine: recovery must
+	// re-drive the workflow with the driver only and close it.
+	d2 := v3StartDaemon(t, inst, sock, dataDir, workspace, "m-v3life")
+	defer d2.stop()
+	waitUntil(t, 120*time.Second, "restarted daemon never completed the workflow", func() bool {
+		exec := v3ReadExec(t, capDir)
+		if exec == nil {
+			return false
+		}
+		ws, _ := exec["workflow_status"].(string)
+		return ws == "completed"
+	})
+	exec := v3ReadExec(t, capDir)
+	for _, step := range []string{"grill", "fix", "verification", "release"} {
+		if got := v3StepStatus(exec, step); got != "done" {
+			t.Fatalf("step %s: expected done, got %q", step, got)
+		}
+	}
+	// The crash-restart re-dispatched through the spawner core: the
+	// spawn journal grew past the crashed derivation.
+	journal, err := os.ReadFile(filepath.Join(capDir, "runtime-state", "spawn-journal.jsonl"))
+	if err != nil {
+		t.Fatalf("spawn journal: %v", err)
+	}
+	if n := len(nonEmptyLines(string(journal))); n < 3 {
+		t.Fatalf("spawn journal carries only %d derivations; the post-crash re-dispatch never happened: %s", n, journal)
+	}
+}
+
+func nonEmptyLines(s string) []string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// Scenario S4 — pf answer without a live bridge handle.
+// ---------------------------------------------------------------------------
+
+// TestV3AnswerWithoutLiveBridgeFailsFast pins the answer criterion's
+// posture: `pf answer` against a daemon that holds NO live bridge handle
+// for the WI fails fast — non-zero exit, a surfaced error, no success
+// marker — and no relay path executes anywhere (zero pf/answer control
+// landings; the pending question is untouched on the daemon that holds
+// the job). The construction is deterministic instead of racing the
+// recovery window: daemon-1 owns the parked WI (live bridge), and the
+// answer is pointed at a second, idle daemon that has no job for it.
+func TestV3AnswerWithoutLiveBridgeFailsFast(t *testing.T) {
+	inst := newV1Install(t)
+	const qid = "q_v3ans"
+	wi := inst.newWI(t, "v3: answer fail-fast with no live bridge handle",
+		[]map[string]any{
+			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
+				"question": "Which lane takes the fail-fast check?"},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+			{"do": "envelope", "id": "release", "outcome": "completed"},
+		}, nil)
+
+	sock1 := filepath.Join(t.TempDir(), "s1", "d.sock")
+	d1 := v3StartDaemon(t, inst, sock1, t.TempDir(), t.TempDir(), "m-v3a1")
+	defer d1.stop()
+	out, code := v3PfCode(t, inst, d1.sock, "submit", wi)
+	if code != 0 || !strings.Contains(out, "accepted") {
+		t.Fatalf("submit: exit %d, output %q", code, out)
+	}
+	capDir := d1.capsuleDir(wi)
+	waitUntil(t, 60*time.Second, "grill never parked in needs_input", func() bool {
+		return v3PendingQID(v3ReadExec(t, capDir), "grill") == qid
+	})
+
+	// A second daemon on its own socket/data/workspace: it holds no job
+	// and no bridge handle for the WI (daemon-1's live claim keeps the
+	// WI out of the ready queue, so this daemon stays idle).
+	sock2 := filepath.Join(t.TempDir(), "s2", "d.sock")
+	d2 := v3StartDaemon(t, inst, sock2, t.TempDir(), t.TempDir(), "m-v3a2")
+	defer d2.stop()
+
+	aout, acode := v3PfCode(t, inst, d2.sock, "answer", wi, "--question", qid,
+		"--text", "This must not be relayed.", "--by", "usr_root")
+	if acode == 0 {
+		t.Fatalf("pf answer with no live bridge handle was accepted: exit 0, output %q", aout)
+	}
+	if strings.TrimSpace(aout) == "" {
+		t.Fatalf("pf answer failed silently: exit %d with no output", acode)
+	}
+	if strings.Contains(aout, "delivered") {
+		t.Fatalf("pf answer reported delivery with no live bridge handle: %q", aout)
+	}
+	// No relay path executed: the capsule journal shows zero pf/answer
+	// control landings, and the parked question is untouched.
+	if n := v3AnswerControlLandings(t, capDir); n != 0 {
+		t.Fatalf("pf answer reached an agent-side relay %d times — no relay path may execute: %d landings", n, n)
+	}
+	if got := v3PendingQID(v3ReadExec(t, capDir), "grill"); got != qid {
+		t.Fatalf("the pending question changed under the failed answer: got %q, want %q", got, qid)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario S1 — retired engine flags fail loudly at parse.
+// ---------------------------------------------------------------------------
+
+// TestV3RemovedEngineFlagsFailLoudly invokes the real `pf daemon` binary
+// with each retired flag and requires a loud parse failure naming that
+// flag. The invocation deliberately omits --workspace so the pre-change
+// binary terminates promptly too (workspace validation fails fast) —
+// which keeps the failure assertion-level before the change: the exit is
+// non-zero but the output names the workspace, never the retired flag.
+// After the change the flag parse fails first and names the flag.
+func TestV3RemovedEngineFlagsFailLoudly(t *testing.T) {
+	// Only the real pf binary is needed — no aihub, no daemon: the flag
+	// parse fails (or, pre-change, the missing-workspace validation
+	// fails) long before anything boots.
+	inst := &v1Install{pfPath: filepath.Join(v1Bins(t), "pf")}
+	cases := []struct {
+		name string
+		argv []string
+		want string // the token the loud error must name (assembled)
+	}{
+		{"retired engine flag, single dash", []string{"-" + v3Tok("use", "-", "driver")}, v3Tok("use", "-", "driver")},
+		{"retired engine flag, double dash", []string{"--" + v3Tok("use", "-", "driver")}, v3Tok("use", "-", "driver")},
+		{"retired executor prompt flag", []string{"--" + v3Tok("executor", "-", "prompt"), "/dev/null"}, v3Tok("executor", "-", "prompt")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			home := t.TempDir()
+			args := append([]string{
+				"daemon",
+				"--socket", filepath.Join(t.TempDir(), "d.sock"),
+				"--machine-id", "m-v3flags",
+				"--data-dir", t.TempDir(),
+			}, c.argv...)
+			cmd := exec.Command(inst.pfPath, args...)
+			// A minimal, hermetic environment: no shared CLI config, no
+			// POLYFORGE_* fallbacks — the only failure cause can be the
+			// retired flag itself (post-change) or the missing workspace
+			// (pre-change).
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}
+			var out strings.Builder
+			cmd.Stdout, cmd.Stderr = &out, &out
+			code := 0
+			if err := cmd.Run(); err != nil {
+				ee, ok := err.(*exec.ExitError)
+				if !ok {
+					t.Fatalf("pf %v: %v", args, err)
+				}
+				code = ee.ExitCode()
+			}
+			if code == 0 {
+				t.Fatalf("pf %v was silently accepted (exit 0, output %q)", c.argv, out.String())
+			}
+			if !strings.Contains(out.String(), c.want) {
+				t.Fatalf("pf %v failed (exit %d) without naming the retired flag %q — output %q",
+					c.argv, code, c.want, out.String())
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario S2 — the retired legacy-lane env hatch fails loudly at boot.
+// ---------------------------------------------------------------------------
+
+// TestV3RetiredLegacyLaneEnvFailsLoudAtBoot boots a fully-valid daemon
+// with the retired environment variable set and requires the process to
+// exit at boot with an error naming the variable. Pre-change the daemon
+// boots and serves (the variable is simply not its knob), so this bar is
+// red — the daemon is killed after a bounded wait and the failure names
+// the silent acceptance. Post-change the boot check fires and exits.
+func TestV3RetiredLegacyLaneEnvFailsLoudAtBoot(t *testing.T) {
+	inst := newV1Install(t)
+	hatch := v3Tok("PFV1", "_", "LEGACY", "_LAN")
+	sock := filepath.Join(t.TempDir(), "s", "d.sock")
+	dataDir := t.TempDir()
+	workspace := t.TempDir()
+
+	root := v1Root(t)
+	logPath := filepath.Join(t.TempDir(), "v3boot.log")
+	logf, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logf.Close()
+	args := []string{
+		"daemon",
+		"--socket", sock,
+		"--server", inst.url,
+		"--api-key", inst.adminKey,
+		"--machine-id", "m-v3env",
+		"--data-dir", dataDir,
+		"--workspace", workspace,
+		"--project", v1Project,
+		"--workflows-dir", filepath.Join(root, "workflows"),
+		"--pi-bin", inst.fakepiPath,
+	}
+	cmd := exec.Command(inst.pfPath, args...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "FAKEPI_PLANS="+inst.planDir)
+	cmd.Env = append(cmd.Env, hatch+"=1")
+	cmd.Stdout, cmd.Stderr = logf, logf
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitExit := make(chan error, 1)
+	go func() { waitExit <- cmd.Wait() }()
+	// exited tracks whether waitExit has been consumed (self-exit or
+	// cleanup) so the deferred cleanup never blocks on an empty channel.
+	exited := false
+	cleanup := func() {
+		if exited || cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-waitExit:
+			exited = true
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waitExit
+			exited = true
+		}
+	}
+	defer cleanup()
+
+	// Either the process exits at boot (the expected post-change shape)
+	// or its UDS face comes up (the pre-change shape: silently accepted).
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		conn, derr := net.Dial("unix", sock)
+		if derr == nil {
+			conn.Close()
+			break
+		}
+		select {
+		case werr := <-waitExit:
+			exited = true
+			// Exited before serving: require a loud, named error.
+			if lograw := v3ReadLog(logPath); !strings.Contains(lograw, hatch) {
+				t.Fatalf("daemon exited under %s=1 without naming the variable (exit %v) — output %q", hatch, werr, lograw)
+			}
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			cleanup()
+			t.Fatalf("daemon neither booted nor exited under %s=1 (log: %s)", hatch, v3ReadLog(logPath))
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	// It booted and serves: the retired variable was silently accepted.
+	// Give a short grace for a late boot-time exit, then fail the bar.
+	select {
+	case <-waitExit:
+		exited = true
+		t.Fatalf("daemon exited late under %s=1 (log: %s)", hatch, v3ReadLog(logPath))
+	case <-time.After(5 * time.Second):
+		cleanup()
+		t.Fatalf("daemon silently accepted the retired %s variable: it booted and served with it set", hatch)
+	}
+}
+
+func v3ReadLog(logPath string) string {
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		return "(unreadable)"
+	}
+	return string(raw)
+}
+
+// ---------------------------------------------------------------------------
+// Scenario S5 — grep-clean for the deleted faces.
+// ---------------------------------------------------------------------------
+
+// TestV3GrepCleanDeletedFaces scans every non-markdown code/build file
+// in the repo (Go source and tests, scripts, configs, Makefile; .git/
+// and the frozen v0/ archive excluded; binary files sniffed out) for the
+// spec-floor term list and requires zero hits. RED before the deletion
+// (the faces are still present by design), GREEN after.
+func TestV3GrepCleanDeletedFaces(t *testing.T) {
+	root := v1Root(t)
+	terms := v3SpecFloorTerms()
+	var hits []string
+	err := v3WalkTextFiles(root, func(path string, raw []byte) {
+		for _, term := range terms {
+			if bytes.Contains(raw, []byte(term)) {
+				rel, _ := filepath.Rel(root, path)
+				hits = append(hits, rel+": "+term)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(hits) > 0 {
+		t.Fatalf("deleted-face terms still present on code/build surfaces (%d hits):\n%s",
+			len(hits), strings.Join(hits, "\n"))
+	}
+}
+
+// v3WalkTextFiles walks root's regular files, skipping .git/, the frozen
+// v0/ archive, markdown (excluded from the gate by the spec), and
+// non-regular entries (symlinks — e.g. the shared-checkout links the
+// capsule materialization creates — and binary-looking files, sniffed
+// by a NUL byte in the first 512 bytes).
+func v3WalkTextFiles(root string, fn func(path string, raw []byte)) error {
+	return filepath.WalkDir(root, func(path string, de os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if de.IsDir() {
+			name := de.Name()
+			if name == ".git" || (name == "v0" && path == filepath.Join(root, "v0")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !de.Type().IsRegular() {
+			return nil // symlinks and special files are not repo bytes
+		}
+		if strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if len(raw) == 0 {
+			return nil
+		}
+		sniff := raw
+		if len(sniff) > 512 {
+			sniff = sniff[:512]
+		}
+		if bytes.IndexByte(sniff, 0) >= 0 {
+			return nil // binary
+		}
+		fn(path, raw)
+		return nil
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Scenarios S6/S7 — the executor skill deletion, re-homing and doc
+// rewrites (runnable parts).
+// ---------------------------------------------------------------------------
+
+// v3StepFilesCitingTheSkill are the five workflow step files the spec
+// names as carrying the deleted skill's §4/§7 citations that must be
+// re-homed inline.
+func v3StepFilesCitingTheSkill(root string) []string {
+	return []string{
+		filepath.Join(root, "workflows", "feature-full", "steps", "e2e-baseline.md"),
+		filepath.Join(root, "workflows", "feature-full", "steps", "e2e-run.md"),
+		filepath.Join(root, "workflows", "feature-full", "steps", "grill-review.md"),
+		filepath.Join(root, "workflows", "feature-full", "steps", "grill.md"),
+		filepath.Join(root, "workflows", "quick-fix", "steps", "grill.md"),
+	}
+}
+
+// TestV3SkillDeletedAndMechanismTextRehomed pins the skill-deletion
+// criterion's mechanical parts: the skill directory is gone, the five
+// citing step files carry no citation any more, and each still teaches
+// the mechanism it cited (the §4 echoed-field cross-check marker for the
+// two e2e files; the §7 needs_input mechanism marker for the three
+// grill-side files) — the mechanism must survive the re-homing, not just
+// lose its pointer.
+func TestV3SkillDeletedAndMechanismTextRehomed(t *testing.T) {
+	root := v1Root(t)
+	skill := v3Tok("pf", "-", "execute")
+
+	skillDir := filepath.Join(root, "skills", skill)
+	if _, err := os.Stat(skillDir); !os.IsNotExist(err) {
+		t.Fatalf("skills/%s still exists (stat err: %v) — the skill directory must be deleted", skill, err)
+	}
+
+	type mark struct {
+		file, marker string
+	}
+	markers := []mark{
+		{v3StepFilesCitingTheSkill(root)[0], "cross-check"}, // §4: echoed-field cross-check
+		{v3StepFilesCitingTheSkill(root)[1], "cross-check"},
+		{v3StepFilesCitingTheSkill(root)[2], "needs_input"}, // §7: the interactive needs_input loop
+		{v3StepFilesCitingTheSkill(root)[3], "needs_input"},
+		{v3StepFilesCitingTheSkill(root)[4], "needs_input"},
+	}
+	for _, m := range markers {
+		raw, err := os.ReadFile(m.file)
+		if err != nil {
+			t.Fatalf("step file %s: %v", m.file, err)
+		}
+		body := string(raw)
+		if strings.Contains(body, skill) {
+			t.Fatalf("step file %s still cites the deleted skill", m.file)
+		}
+		if !strings.Contains(body, m.marker) {
+			t.Fatalf("step file %s lost the re-homed mechanism text (marker %q absent after citation removal)", m.file, m.marker)
+		}
+	}
+}
+
+// TestV3LiveDocSurfacesRewritten pins the doc-rewrite criterion's
+// greppable floor: the spec-named live teaching surfaces (README, the 8
+// non-pilot design docs, the 5 skills/polyforge files, every workflow
+// step file) and operator-skills carry ZERO references to the deleted
+// skill after the change. The "teaches the driver-only architecture"
+// quality judgment is a document scenario (artifacts/e2e-scenarios.md);
+// this test pins the mechanical floor.
+func TestV3LiveDocSurfacesRewritten(t *testing.T) {
+	root := v1Root(t)
+	skill := v3Tok("pf", "-", "execute")
+
+	var surfaces []string
+	surfaces = append(surfaces, filepath.Join(root, "README.md"))
+	// The 8 non-pilot design docs: 00–06 and 08 (07-deployment-pilot.md
+	// is the pilot register; docs/pilot/* is a separate historical tree).
+	for _, n := range []string{
+		"00-architecture.md", "01-workflow-skills.md", "02-aihub-core.md",
+		"03-execution-capsule.md", "04-local-runtime.md",
+		"05-sync-revision-recovery.md", "06-memory-search.md",
+		"08-capsule-base-migration.md",
+	} {
+		surfaces = append(surfaces, filepath.Join(root, "docs", "design", "polyforge-vnext", n))
+	}
+	for _, n := range []string{
+		"SKILL.md", "verbs/crystallize.md", "verbs/doctor.md", "verbs/help.md", "verbs/retro.md",
+	} {
+		surfaces = append(surfaces, filepath.Join(root, "skills", "polyforge", n))
+	}
+	// Every workflow step file across the bundles.
+	for _, bundle := range []string{"bug-fix", "chore", "feature-full", "quick-fix"} {
+		matches, _ := filepath.Glob(filepath.Join(root, "workflows", bundle, "steps", "*.md"))
+		surfaces = append(surfaces, matches...)
+	}
+
+	var hits []string
+	for _, p := range surfaces {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("live doc surface %s: %v", p, err)
+		}
+		if strings.Contains(string(raw), skill) {
+			hits = append(hits, p)
+		}
+	}
+	// operator-skills: the passing citations scrubbed in passing. Symlinks
+	// (the shared-checkout link) are skipped — only real repo bytes count.
+	err := filepath.WalkDir(filepath.Join(root, "operator-skills"), func(path string, de os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !de.Type().IsRegular() {
+			return nil
+		}
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		if strings.Contains(string(raw), skill) {
+			hits = append(hits, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("operator-skills walk: %v", err)
+	}
+	if len(hits) > 0 {
+		t.Fatalf("live doc surfaces still reference the deleted skill (%d):\n%s", len(hits), strings.Join(hits, "\n"))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario S8 — historical registers and the v0 archive stay untouched.
+// ---------------------------------------------------------------------------
+
+// TestV3HistoricalRegistersAndV0Untouched pins the byte-identity
+// invariants against the pre-change tree authority (HEAD bb7ab95, per
+// the spec): docs/pilot/* and v0/ carry no diff and no new untracked
+// files, and the root module's package list never reaches into v0/.
+// Green before AND after the change — these are invariants, not bars.
+func TestV3HistoricalRegistersAndV0Untouched(t *testing.T) {
+	root := v1Root(t)
+	const base = "bb7ab95"
+
+	for _, dir := range []string{"docs/pilot", "v0"} {
+		// No modifications or deletions against the pre-change tree.
+		if out, code := v3Git(t, root, "diff", "--stat", base, "--", dir); code != 0 {
+			t.Fatalf("git diff %s %s: exit %d, output %q", base, dir, code, out)
+		} else if strings.TrimSpace(out) != "" {
+			t.Fatalf("%s changed against %s (must be byte-identical):\n%s", dir, base, out)
+		}
+		// No new untracked files either.
+		if out, code := v3Git(t, root, "ls-files", "--others", "--exclude-standard", dir); code != 0 {
+			t.Fatalf("git ls-files %s: exit %d, output %q", dir, code, out)
+		} else if strings.TrimSpace(out) != "" {
+			t.Fatalf("new untracked files under %s (must stay byte-identical):\n%s", dir, out)
+		}
+	}
+
+	// The frozen archive is not part of the root build: the module's own
+	// package list never descends into the v0/ archive's module path (the
+	// tools/v0-export helper is a kept root-module package and stays).
+	gi := exec.Command("go", "list", "./...")
+	gi.Dir = root
+	gi.Env = append(os.Environ(), "GOWORK=off")
+	gout, err := gi.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list ./...: %v (%s)", err, gout)
+	}
+	const frozenModule = "github.com/silgrid/polyforge/v0"
+	for _, line := range nonEmptyLines(string(gout)) {
+		if line == frozenModule || strings.HasPrefix(line, frozenModule+"/") {
+			t.Fatalf("root module package list reaches into the frozen archive: %s", line)
+		}
+	}
+}
+
+func v3Git(t *testing.T, dir string, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	code := 0
+	if err := cmd.Run(); err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		code = ee.ExitCode()
+	}
+	return out.String(), code
+}
+
+// ---------------------------------------------------------------------------
+// Scenario S9 — the delivery shape.
+// ---------------------------------------------------------------------------
+
+// TestV3DeliveryShapeSequentialCommits pins the delivery floor: the
+// change lands as at least 5 sequential commits on top of the pre-change
+// tree authority (bb7ab95), the ticket's batch order floor. RED before
+// any commit exists, GREEN on the delivered branch. The per-batch
+// greenness of each commit is the flow's own gate (document scenario),
+// not a single-tree assertion.
+func TestV3DeliveryShapeSequentialCommits(t *testing.T) {
+	root := v1Root(t)
+	const base = "bb7ab95"
+	out, code := v3Git(t, root, "rev-list", "--count", base+"..HEAD")
+	if code != 0 {
+		t.Fatalf("git rev-list --count %s..HEAD: exit %d, output %q", base, code, out)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		t.Fatalf("rev-list count unparsable: %q", out)
+	}
+	if n < 5 {
+		t.Fatalf("delivery carries %d commit(s) on top of %s; the ticket's batch floor is 5+ sequential commits", n, base)
+	}
+}

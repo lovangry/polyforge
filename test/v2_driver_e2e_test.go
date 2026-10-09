@@ -10,7 +10,8 @@ import (
 )
 
 // v2_driver_e2e: the Go execution driver's end-to-end smoke. A real
-// aihub, a real `pf daemon -use-driver`, a scripted fakepi step agent
+// aihub, a real `pf daemon` (driver engine, no selection flag since
+// polyforge#106), a scripted fakepi step agent
 // that writes result envelopes (not execution.json), the capsule chain,
 // and the completed workflow — driven entirely by the Go Driver.
 func TestV2DriverEndToEnd(t *testing.T) {
@@ -28,7 +29,6 @@ func TestV2DriverEndToEnd(t *testing.T) {
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
-	d.extraArgs = append(d.extraArgs, "-use-driver")
 	d.start()
 
 	// Submit through the real CLI.

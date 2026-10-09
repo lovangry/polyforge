@@ -55,7 +55,7 @@ func TestV1S11Takeover(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	daemonA := newV1Daemon(t, inst, optMachineID("m-e2e-a"), optUseDriver())
+	daemonA := newV1Daemon(t, inst, optMachineID("m-e2e-a"))
 	daemonA.start()
 	daemonA.pf(t, "submit", wi)
 	waitQuestion(t, daemonA, wi, "q_s11", 30*time.Second)
@@ -119,7 +119,7 @@ func TestV1S11Takeover(t *testing.T) {
 	// capsule git chain, so B's clone re-seeds its derivation counter
 	// from it — contract §4.3.)
 	inst.waitBareCommits(t, wi, 1, 30*time.Second)
-	daemonB := newV1Daemon(t, inst, optMachineID("m-e2e-b"), optUseDriver())
+	daemonB := newV1Daemon(t, inst, optMachineID("m-e2e-b"))
 	daemonB.start()
 	daemonB.pf(t, "submit", wi, "--takeover")
 

@@ -108,8 +108,6 @@ fi
 # ─── 4. daemon: start if not running ────────────────────────────────
 echo "== 4/5 daemon"
 WORKFLOWS="$PKG_DIR/workflows"
-EXECUTOR="$PKG_DIR/skills/pf-execute/SKILL.md"
-
 if [ ! -d "$WORKFLOWS" ]; then
   echo "   SKIP: repo not cloned (skills step incomplete) — daemon needs workflows"
 elif [ -S "$DAEMON_SOCKET" ] && curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | grep -q machine_id; then
@@ -132,7 +130,6 @@ else
     -socket "$DAEMON_SOCKET" \
     -workspace "$DAEMON_DATA/ws" \
     -workflows-dir "$WORKFLOWS" \
-    -executor-prompt "$EXECUTOR" \
     -max-concurrent-jobs 4 \
     > "$DAEMON_DATA/daemon.log" 2>&1 &
   DAEMON_PID=$!

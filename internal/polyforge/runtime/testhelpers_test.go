@@ -332,12 +332,14 @@ func setGitIdentity(t *testing.T) {
 func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protocol.RTMsg, chan protocol.OBMsg) {
 	t.Helper()
 	cfg := Config{
-		MachineID:      "m-test",
-		Workspace:      filepath.Join(t.TempDir(), "ws"),
-		DataDir:        filepath.Join(t.TempDir(), "data"),
-		MaxResumeFails: 2,
-		MaxRecoveries:  2,
-		SendBound:      2 * time.Second,
+		MachineID: "m-test",
+		Workspace: filepath.Join(t.TempDir(), "ws"),
+		DataDir:   filepath.Join(t.TempDir(), "data"),
+		// polyforge#106: the driver is the only engine — the rig scripts it
+		// through the single engine seam (a derivation is a Spawn call).
+		AgentStarter:  scriptedEngineStarter(sp),
+		MaxRecoveries: 2,
+		SendBound:     2 * time.Second,
 		// Test episodes are separated by handleOB calls, not real time:
 		// the entry-rate storm guard's window is collapsed to nothing so
 		// every recovery models a fresh episode (the storm tests override
@@ -355,6 +357,33 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protoco
 func fakeSession(wi string) string {
 	sum := sha256.Sum256([]byte("test-session:" + wi))
 	return hex.EncodeToString(sum[:])
+}
+
+// scriptedEngineStarter binds the runtime's single engine seam to the
+// test's spawner (polyforge#106: the driver is the only engine, so the
+// in-process rig scripts it — a derivation is one Spawn call, the same
+// shape the daemon tests' fake engine uses).
+func scriptedEngineStarter(sp Spawner) AgentStartFunc {
+	return func(ctx context.Context, in AgentStartInput) (AgentHandle, error) {
+		p := SpawnParams{
+			WorkItemID:    in.WI,
+			CapsuleDir:    in.CapsuleDir,
+			SessionHandle: in.SessionHandle,
+			SpawnN:        int(in.SpawnN),
+			InitialPrompt: "engine",
+		}
+		h, err := sp.Spawn(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		// Like the real engine, journal the derivation: the capsule spawn
+		// journal is the B2 fence ledger every derivation appends to.
+		token := fmt.Sprintf("%s#%d", in.SessionHandle, in.SpawnN-1)
+		if jerr := writeSpawnJournal(p, h.PID(), h.StartedAt(), token); jerr != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: scripted engine journal: %v\n", in.WI, jerr)
+		}
+		return h, nil
+	}
 }
 
 func seedJob(r *Runtime, wi string) *job {

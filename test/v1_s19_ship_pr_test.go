@@ -163,7 +163,7 @@ func TestV1S19ShipPR(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst)
 	d.start()
 	d.pf(t, "submit", wi)
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)

@@ -125,15 +125,10 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 		t.Fatalf("verify calls after supersession: %d, want >= 2 (the re-emission engine)", verifier.calls)
 	}
 
-	// Superseded, not terminal: a flush is answered with the
-	// STALE_SPAWN refusal instead of sealing.
-	ack := doFlush(m, FlushCall{
-		Req:  protocol.FlushRequest{WorkItem: "wi_test", SpawnN: 1, Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped},
-		Resp: make(chan protocol.FlushAck, 1),
-	})
-	if ack.OK || !contains(ack.Error, "STALE_SPAWN") {
-		t.Fatalf("a superseded session's flush must be refused with the stale shape: %+v", ack)
-	}
+	// polyforge#106: the superseded session's flush refusal (the
+	// STALE_SPAWN shape) is retired with the legacy flush fence — the
+	// superseded monitor's protective surface is the server-side push
+	// fencing, not a local refusal.
 }
 
 // TestRevalidateMatchIsQuiet: matches=true → no OB message, no event,

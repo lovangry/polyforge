@@ -24,12 +24,11 @@ import (
 func newFullChanRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protocol.RTMsg) {
 	t.Helper()
 	cfg := Config{
-		MachineID:      "m-fullchan",
-		Workspace:      filepath.Join(t.TempDir(), "ws"),
-		DataDir:        filepath.Join(t.TempDir(), "data"),
-		MaxResumeFails: 2,
-		MaxRecoveries:  2,
-		SendBound:      100 * time.Millisecond,
+		MachineID:     "m-fullchan",
+		Workspace:     filepath.Join(t.TempDir(), "ws"),
+		DataDir:       filepath.Join(t.TempDir(), "data"),
+		MaxRecoveries: 2,
+		SendBound:     100 * time.Millisecond,
 	}
 	toOB := make(chan protocol.RTMsg, 1)
 	fromOB := make(chan protocol.OBMsg, 1)

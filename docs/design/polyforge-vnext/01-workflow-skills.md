@@ -4,13 +4,13 @@
 |---|---|
 | 文档定位 | 三类 skill（路由/执行/step skill）权威布局、workflow.md frontmatter schema、bundle digest、model_candidates、grill、e2e-author、budget、on_fail rewind、执行语义 |
 | 上游基线 | `00-architecture.md`（全部术语与不变量的唯一权威基线；本文只交叉引用，不重复定义） |
-| 术语权威 | 本文负责：workflow bundle、workflow.md frontmatter、step skill（step agent 定义文件）、路由 skill、执行 skill（pf-execute）、bundle digest、budget、on_fail rewind、grill、e2e-author、执行语义（rewind vs resume） |
+| 术语权威 | 本文负责：workflow bundle、workflow.md frontmatter、step skill（step agent 定义文件）、路由 skill、bundle digest、budget、on_fail rewind、grill、e2e-author、执行语义（rewind vs resume） |
 
 ## 1. 范围与非目标 <!-- §1 -->
 
 ### 1.1 范围 <!-- §1.1 -->
 
-- 三类 skill 的权威布局与内容边界（§2.1/§3）：路由 skill（`skills/polyforge/`）、执行 skill（`skills/pf-execute/`）、step skill（`workflows/<bundle>/agents/*.md`，即 step agent 定义文件）。
+- 【polyforge#106 修订】skill 的权威布局与内容边界（§2.1/§3）：路由 skill（`skills/polyforge/`）与 step skill（`workflows/<bundle>/agents/*.md`，即 step agent 定义文件）；原 agent 侧执行 skill 已随 WI-Agent 引擎删除，workflow 的执行引擎是 Daemon 内的 Go driver。
 - `workflow.md` 的两段构成（§4.1/§4.4）：YAML frontmatter 是本 WI 执行图的**唯一结构 schema**（steps 顺序/id/kind/interactive/gate/on_fail/budget/model_candidates，及 workflow 级声明），达到「任一 frontmatter 可据此机械校验」的程度；Markdown 正文是流程级说明，由 WI Agent（wi agent）第 0 步加载。
 - bundle digest 的唯一计算规则（§4.5）与创建 WI 时 AIHub 服务端的 frontmatter 校验 + digest 固化（§4.6；Core 侧落库只有 `bundle_name` + `bundle_digest` + 三个预算基线 scalar，权威见 `02-aihub-core.md#§4.4`/`#§4.5`）。
 - model_candidates 的声明与切换语义（§4.1/§6.3）；grill（interactive，位于 spec 之前 + spec 产物的总结性确认问答）与 e2e-author（§4.2/§4.3）；参考流程 grill → spec → grill-review → plan → e2e-author → e2e-baseline → code → e2e-run → review → verification → release（review 可处于流程中的任意位置，§4.2）。
@@ -34,7 +34,7 @@
 **三类 skill（skill 层定稿，本节为唯一权威布局）**：
 
 - **路由 skill**：`skills/polyforge/`，构成 = `SKILL.md`（路由清单与装配入口）+ `verbs/` 下按用户动词拆分的 13 个 fragment（`ship` 为基线修订 polyforge#37 所加，分流表 `00-architecture.md#§5.1`）。它是用户 harness 的**唯一安装面**：只读用户请求、判定意图、把请求转发给本机 Daemon（`00-architecture.md#§3.1`），不解析 workflow、不触碰执行现场、不保存状态、**永不执行 workflow**——用户在 Interactive 模式下只提交意图、观察、回答（`00-architecture.md#§3.4a`）。
-- **执行 skill（pf-execute）**：`skills/pf-execute/`，WI Agent 的初始指令与驱动主循环（§6.5）的载体。它**不由任何用户 harness 安装**：由 Daemon 从自身分发物注入 WI Agent，版本与 Daemon 锁定（部署边界权威见 `07-deployment-pilot.md#§2.3`；WI Agent 与 Daemon 同一分发物的裁定见 `00-architecture.md#§3.6`）。
+- 【polyforge#106 修订】**执行 skill 已删除**：workflow 的驱动主循环（§6.5）不在任何 agent 进程内运行——它是 Daemon 内的 Go driver，Daemon 无条件绑定，版本与 Daemon 天然锁定（部署边界见 `07-deployment-pilot.md#§2.3`；引擎唯一裁定见 `00-architecture.md#§3.6` 修订注记）。
 - **step skill（step agent 定义文件）**：`workflows/<bundle>/agents/*.md`，一个 step 的执行指令包，元数据写在其 frontmatter（`name`/`description`/`tools`/`output`，§4.4），由 WI Agent 第 0 步物化进 Capsule 供 harness 派生为执行该 step 的 step agent（step agent 即 WI Agent 派出执行 step 的 subagent；`03-execution-capsule.md#§4.5`）。
 
 **workflow 与执行图**：
@@ -70,7 +70,6 @@
 aihub/
 ├── skills/
 │   ├── polyforge/          # 路由 skill：SKILL.md + verbs/（13 个用户动词 fragment）
-│   └── pf-execute/         # 执行 skill：WI Agent 初始指令与驱动主循环载体
 └── workflows/
     └── <bundle-name>/
         ├── workflow.md     # frontmatter（唯一结构 schema）+ 正文（流程级说明）
@@ -171,7 +170,7 @@ grill 的两段职责分别由两个独立 step 承载，不是单 step 内的�
 
 `grill-review` 的判定语义是「人是否确认」而非质量评分，但驱动引擎不区分判定来源，一律按 gate FAIL 语义处理，因此不需要为其新增状态机分支，恢复路径与其余 gate 完全一致。
 
-**交互渠道**：grill / grill-review 的问答由 WI Agent 内运行的同一份 `pf-execute` 主循环（`00-architecture.md#§3.6`）驱动，走一条 needs_input/answer 的中继路径而非另立通道——WI Agent 遇到 interactive step 时，把待问问题**持久化写入 `runtime-state/execution.json`**（`03-execution-capsule.md#§4.2` 的 `steps.<id>.pending_question`；execution.json 的权威 schema 在 `03-execution-capsule.md#§4.2`，本文只引用），该写入**作为 step interrupted 边界同步触发**一次发布请求（`00-architecture.md#§4.3` 的「step 中断」类触发时机），使待问问题经发布链路呈现给 owner 正在使用的 observer UI；owner 的回答经 Daemon 的 answer API（`answer(wi_id, payload)`，`04-local-runtime.md#§5.1`，以 `answer_id` 幂等，中继报文格式见 `00-architecture.md#§3.4a`）中继回这同一个正在等待的 WI Agent，WI Agent 收到后原地续跑同一 step，不派生新 step、不新增状态机分支。每问每答即时追加写入 Capsule 内 `artifacts/grill-qa.md`。无人驱动（批处理）模式下两者均按本文 §5.2 `WF-105` 的规则处理（不派发，WI 转 blocked，`waiting_on=owner`，`02-aihub-core.md#§2.4`：`waiting_on` 非空即 blocked，非 pause），不依赖 schema 层位置假设；Daemon 侧只按 `00-architecture.md#§3.4` 的 Interactive/Batch/Drain 判据决定当前是否处于无人驱动上下文，具体拦截与状态转换语义仍在本层。
+**交互渠道**：grill / grill-review 的问答由引擎的同一份驱动逻辑（`00-architecture.md#§3.6` 修订注记）驱动，走一条 needs_input/answer 的中继路径而非另立通道——引擎遇到 interactive step 时，把待问问题**持久化写入 `runtime-state/execution.json`**（`03-execution-capsule.md#§4.2` 的 `steps.<id>.pending_question`；execution.json 的权威 schema 在 `03-execution-capsule.md#§4.2`，本文只引用），该写入**作为 step interrupted 边界同步触发**一次发布请求（`00-architecture.md#§4.3` 的「step 中断」类触发时机），使待问问题经发布链路呈现给 owner 正在使用的 observer UI；owner 的回答经 Daemon 的 answer API（`answer(wi_id, payload)`，`04-local-runtime.md#§5.1`，以 `answer_id` 幂等，中继报文格式见 `00-architecture.md#§3.4a`）中继回进行中的同一个 step 的执行上下文，引擎收到后原地续跑同一 step，不新增状态机分支。每问每答即时追加写入 Capsule 内 `artifacts/grill-qa.md`。无人驱动（批处理）模式下两者均按本文 §5.2 `WF-105` 的规则处理（不派发，WI 转 blocked，`waiting_on=owner`，`02-aihub-core.md#§2.4`：`waiting_on` 非空即 blocked，非 pause），不依赖 schema 层位置假设；Daemon 侧只按 `00-architecture.md#§3.4` 的 Interactive/Batch/Drain 判据决定当前是否处于无人驱动上下文，具体拦截与状态转换语义仍在本层。
 
 ### 4.4 step skill：step agent 定义文件 <!-- §4.4 -->
 
@@ -387,11 +386,11 @@ bundleDigest := sha256.Sum256(canonical)
 3. 当前执行位置保持不变：既不前进也不回退，`execution.json` 中记录的当前 step 不变。
 4. 处置权交给人：可以原地重派当前 step 续跑，也可以终止该 WI。这是一个有明确出路的合法状态，不与任何自动恢复机制耦合。
 
-### 6.5 驱动主循环（WI Agent 内的 `pf-execute` 主循环，`00-architecture.md#§3.6`） <!-- §6.5 -->
+### 6.5 驱动主循环（polyforge#106 起：Daemon 内的 Go driver，`00-architecture.md#§3.6` 修订注记） <!-- §6.5 -->
 
-本节描述的驱动主循环就是 WI Agent 进程内运行的 `pf-execute` 主循环本体（执行 skill，§2.1；其注入与版本绑定见 `07-deployment-pilot.md#§2.3`）：workflow 唯一的驱动者是这份运行在 WI Agent 内、interactive 与 batch 两条路径共用同一实现的逻辑，Daemon 不重复实现、也不越过它逐 step 派生独立进程去驱动。其职责是反复调用 `next_step_by_order` 选出下一个待执行 step 并派发，直到没有下一个 step 为止；「没有下一个 step」之后必须做的第一件事，是判定这是「全部完成」还是「已进入失败终态」（INV-1e），这两者外观相同（都是 `next_step_by_order` 返回空），但后续动作完全不同：
+【polyforge#106 修订】本节原文把驱动主循环放在 WI Agent 进程内的执行 skill 里；该引擎删除后，主循环本体是 Daemon 内的 Go driver（§2.1 修订；引擎唯一裁定见 `00-architecture.md#§3.6`）：workflow 唯一的驱动者是这份运行在 Daemon 内、interactive 与 batch 两条路径共用同一实现的逻辑，它按 step 图逐 step 派生短驻 harness 进程（envelope 一次一步），不派生长驻 agent。其职责是反复调用 `next_step_by_order` 选出下一个待执行 step 并派发，直到没有下一个 step 为止；「没有下一个 step」之后必须做的第一件事，是判定这是「全部完成」还是「已进入失败终态」（INV-1e），这两者外观相同（都是 `next_step_by_order` 返回空），但后续动作完全不同：
 
-1. 只要 `next_step_by_order` 返回一个 step，就派发该 step 的执行（WI Agent 自身或其派生的 step agent，`03-execution-capsule.md#§5`），并等待其结果。
+1. 只要 `next_step_by_order` 返回一个 step，就派发该 step 的执行（一个短驻 harness 进程的 envelope，step skill 见 `03-execution-capsule.md#§5`），并等待其结果。
 2. 结果为 `completed`：把该 step 标记为 `done`，回到第 1 步继续选下一个 step。
 3. 结果为 `gate FAIL`：按 §6.2 处理（处理中不切换任何候选，INV-1g）。若处理后 workflow 已进入 `failed_gate` 或 `failed_rewind_exhausted` 终态，驱动主循环必须立即退出，不得继续调用 `next_step_by_order`；若处理后是走了 rewind 分支且流程仍在推进，则回到第 1 步继续。
 4. 结果为基础设施失败：按 §6.3 处理，等待恢复条件后原地重派同一 step（含按序候选切换；不调用 `next_step_by_order` 前进）。
@@ -414,7 +413,7 @@ bundleDigest := sha256.Sum256(canonical)
 
 - 竞态面：owner generation 唯一活跃 + fencing（`00-architecture.md#§2.3` INV-3/INV-5，落地细节见 `03-execution-capsule.md#§2.4`）保证同一时刻至多一个 generation 的执行结果能写入 Core、推进 Revision HEAD——本层的 rewind/resume 状态机正是依赖这一「至多一份结果生效」的仲裁结果，不建立自己的并发控制。但 fencing 只在**发布权**层面排他，不保证**本地执行**立即停止：接管（尤其跨机）之后，旧 generation 的 WI Agent 进程可能仍短暂存活并继续驱动同一份只读物化快照（`03-execution-capsule.md#§4.5`），本文不得声称「双 WI Agent 本地执行」已被 fencing 排除——被排除的只是旧结果生效的可能性：旧侧的任何输出既无法通过 fencing 写入 Core/Revision，也不会被新 generation 从干净目录+远端 HEAD 重建的 Capsule（`03-execution-capsule.md#§6.1`）读取或采信，因此对本层已记录的 workflow 状态没有可观测影响。
 - rewind 与 resume 互斥：同一 step 在任意时刻只可能处于二者触发的处理路径之一，判定以 `execution.json` 中该 step 最后一条结果为准（单写者序列，`00-architecture.md#§2.3` INV-6；该单写者约束在 host-native 同 UID 形态下是防误写措施而非安全边界，不构成机制级隔离，见 `00-architecture.md#§8`）。
-- 崩溃恢复：WI Agent 在某 step 执行中崩溃 → Daemon 检测到进程退出后基于 `execution.json` 当前内容重新派生 WI Agent → 新 WI Agent 调用 `next_step_by_order` 找到状态为 `in_progress` 的 step → 按 §6.3 原地 resume（候选指针按 §6.3 第 4 步从 `attempts[]` 复算，与崩溃前一致）；已经是 `done` 的 step 不会被重新选中，也不会重跑。
+- 崩溃恢复：引擎在某 step 执行中崩溃（进程退出或 driver 中断）→ Daemon 基于当前 `execution.json` 重新驱动（重启 driver，及 deploy 时的 fail-closed 检查——in-flight 且无 driver journal 戳记的 legacy 胶囊拒绝恢复，polyforge#106）→ driver 调用 `next_step_by_order` 找到状态为 `in_progress` 的 step → 按 §6.3 原地 resume（候选指针按 §6.3 第 4 步从 `attempts[]` 复算，与崩溃前一致）；已经是 `done` 的 step 不会被重新选中，也不会重跑。
 
 ## 8. 安全边界 <!-- §8 -->
 

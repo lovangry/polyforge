@@ -18,7 +18,6 @@ package observe
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"sort"
@@ -89,62 +88,21 @@ func (o *Observe) serveObserve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
-// serveAnswer relays a human answer. Caller identity rides X-PF-User
-// (04 §5.1: the local UDS face has no authenticated user layer; a
-// missing header degrades to trusting the relay's self-reported
-// answered_by).
+// serveAnswer is the answer route's post-trim shape (polyforge#106):
+// the WI-Agent answer relay is deleted — the driver consumes answers —
+// so this face only answers honestly. An unmonitored work item gets the
+// ordinary not-monitored 404 (the fail-fast posture the idle-daemon
+// shape has always answered); a monitored one names the missing live
+// bridge handle: the workflow is between derivations and no relay path
+// exists any more.
 func (o *Observe) serveAnswer(w http.ResponseWriter, r *http.Request) {
 	wi := r.PathValue("wi")
-	m := o.lookup(wi)
-	if m == nil {
+	if o.lookup(wi) == nil {
 		writeErr(w, api.ErrDaemonNotFound, "work item is not monitored on this daemon")
 		return
 	}
-	var relay AnswerRelay
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&relay); err != nil {
-		writeErr(w, api.ErrDaemonBadInput, "answer relay body: "+err.Error())
-		return
-	}
-	caller := r.Header.Get("X-PF-User")
-	if caller == "" {
-		caller = relay.AnsweredBy // degraded local trust (documented shape)
-	}
-	call := AnswerCall{Relay: relay, Caller: caller, Resp: make(chan error, 1)}
-	select {
-	case m.answerCh <- call:
-	case <-time.After(o.cfg.CallTimeout):
-		writeErr(w, api.ErrDaemonInternal, "monitor did not accept the answer in time")
-		return
-	}
-	var err error
-	select {
-	case err = <-call.Resp:
-	case <-time.After(o.cfg.CallTimeout + o.cfg.AnswerAckWindow):
-		writeErr(w, api.ErrDaemonInternal, "answer delivery did not settle in time")
-		return
-	}
-	switch {
-	case err == nil:
-		writeJSON(w, http.StatusOK, map[string]any{
-			"outcome": "consumed", "answer_id": relay.AnswerID,
-		})
-	case errors.Is(err, ErrAnswerAckPending):
-		// Delivered, consumption pending: NOT an error-grade outcome —
-		// the CLI tells the human so instead of printing a failure.
-		writeJSON(w, http.StatusOK, map[string]any{
-			"outcome": "ack_pending", "answer_id": relay.AnswerID,
-		})
-	case errors.Is(err, ErrAnswerConsumed):
-		writeErr(w, api.ErrDaemonConflict, err.Error())
-	case errors.Is(err, ErrAnswerIdentity):
-		writeErr(w, api.ErrDaemonForbidden, err.Error())
-	case errors.Is(err, ErrAnswerInFlight):
-		writeErr(w, api.ErrDaemonConflict, err.Error())
-	default:
-		// Delivery failure (agent dead pre-ack, control path lost). The
-		// answer_id remains REDELIVERABLE: report the failure but say so.
-		writeErr(w, api.ErrDaemonInternal, err.Error()+" (answer_id remains re-deliverable)")
-	}
+	writeErr(w, api.ErrDaemonConflict,
+		"no live bridge handle for work item "+wi+": the answer relay lane is deleted (polyforge#106) and the workflow is between derivations — retry after the daemon re-derives it")
 }
 
 // serveFlush is the agent UDS face's flush(reason) entry (ruling C2:
@@ -169,33 +127,6 @@ func (o *Observe) serveFlush(w http.ResponseWriter, r *http.Request) {
 	case protocol.FlushNeedsInput, protocol.FlushWrap, protocol.FlushShutdown:
 	default:
 		writeErr(w, api.ErrDaemonBadInput, "unknown flush reason: "+req.Reason)
-		return
-	}
-	// The B2 spawn fence (v1.5 §4.3): the request's SpawnN must name the
-	// monitor's CURRENT derivation — a zombie survivor of a superseded
-	// derivation (the six-layer cleanup admits residue) must never seal
-	// work that belongs to the live one. Mismatch — including an absent
-	// counter (0), refused fail-closed — answers DAEMON-409 STALE_SPAWN
-	// and never reaches the monitor. EXCEPT the recovery window: a counter that matches the
-	// hub's LATEST ANNOUNCED derivation (registered at RTStarted/
-	// RTRecovered emission time, which the monitor's adoption lags)
-	// passes — the just-resumed agent's own flush is never stale. The
-	// monitor queues such a call until its adoption completes (onFlush),
-	// so an older counter can still never reach the flush paths.
-	cur := m.currentSpawn()
-	known := o.spawnKnown(wi)
-	if req.SpawnN == 0 ||
-		(req.SpawnN != cur && req.SpawnN != known) ||
-		// Adoption-window cross-check (the s10 hole): a successor announcement supersedes the
-		// predecessor IMMEDIATELY — a counter that still equals the
-		// monitor's lagging cur is already stale when known names a
-		// DIFFERENT (newer) derivation; only a zombie speaks in the
-		// predecessor's name.
-		(req.SpawnN == cur && known != 0 && req.SpawnN != known) {
-		writeErr(w, api.ErrDaemonConflict,
-			"STALE_SPAWN: flush carries spawn_n "+strconv.Itoa(req.SpawnN)+
-				"; the current derivation is "+strconv.Itoa(cur)+
-				" (latest announced: "+strconv.Itoa(known)+")")
 		return
 	}
 	// F9 fail-closed gate: a needs_input flush without a question id can

@@ -61,8 +61,6 @@ func TestRunAbortsWhenMidflightCapsuleMissing(t *testing.T) {
 	cfg := Config{
 		MachineID:         "m-test",
 		SocketPath:        filepath.Join(dir, "s.sock"),
-		UseDriver:         false,
-		UseDriverExplicit: true,
 		Workspace:         ws,
 		DataDir:           data,
 		Project:           "proj",
@@ -73,7 +71,6 @@ func TestRunAbortsWhenMidflightCapsuleMissing(t *testing.T) {
 		ObservePoll:       10 * time.Millisecond,
 		DrainInterval:     10 * time.Millisecond,
 		DispatchTick:      10 * time.Millisecond,
-		NoticeAckBound:    100 * time.Millisecond,
 		ShutdownFlushWait: 100 * time.Millisecond,
 		ExitPoll:          10 * time.Millisecond,
 	}

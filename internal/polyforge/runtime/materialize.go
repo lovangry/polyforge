@@ -179,14 +179,9 @@ func (r *Runtime) materializeBundle(j *job) error {
 	// touch" rule — this is also what makes a same-generation husk
 	// reuse and the pilot's compensated scene churn-free).
 	if r.materializationComplete(j) {
-		r.extractCandidates(j, filepath.Join(j.capsuleDir, capsule.DirWorkflows, j.bundleName))
 		return nil
 	}
-	if err := r.materializeBundleSet(j, src); err != nil {
-		return err
-	}
-	r.extractCandidates(j, filepath.Join(j.capsuleDir, capsule.DirWorkflows, j.bundleName))
-	return nil
+	return r.materializeBundleSet(j, src)
 }
 
 // materializeBundleSet is the staged swap itself (see the file header).
@@ -361,11 +356,7 @@ func (r *Runtime) ensureMaterialized(j *job) {
 	if r.materializationComplete(j) {
 		return // trusted: the scene is left untouched
 	}
-	if err := r.materializeBundleSet(j, src); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: materialization backfill failed: %v\n", j.wi, err)
-		return
-	}
-	r.extractCandidates(j, filepath.Join(j.capsuleDir, capsule.DirWorkflows, j.bundleName))
+	_ = r.materializeBundleSet(j, src)
 }
 
 // refreshBundle is the v2 recovery-time bundle freshness heal (the
@@ -428,23 +419,6 @@ func (r *Runtime) refreshBundle(j *job) {
 		})
 	}
 	fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s re-pinned %s → %s (source moved past the claim pin)\n", j.wi, name, pinned, got)
-}
-
-// extractCandidates is the F4 candidate-chain read, re-factored out of
-// the old copy path so a gate-passing reuse (no copy, no churn) still
-// pins the chain onto the job. Best-effort: a missing or torn
-// frontmatter leaves the chain absent and the spawn unpinned.
-func (r *Runtime) extractCandidates(j *job, bundleDir string) {
-	fm, err := workflow.ReadFrontmatter(filepath.Join(bundleDir, "workflow.md"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: workflow frontmatter unreadable; spawn stays unpinned: %v\n", j.wi, err)
-		return
-	}
-	if fm != nil && fm.Defaults != nil {
-		j.mu.Lock()
-		j.candidates = fm.Defaults.ModelCandidates
-		j.mu.Unlock()
-	}
 }
 
 // nameDerivedDigest is the name-derived stand-in aihub stores when a work

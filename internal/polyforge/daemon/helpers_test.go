@@ -75,17 +75,6 @@ func (a *fakeAgent) sentMethods() []string {
 	return out
 }
 
-func (a *fakeAgent) sentAnswer(id, text string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for _, m := range a.sent {
-		if m.Method == protocol.ControlAnswer && m.ID == id && m.Answer == text {
-			return true
-		}
-	}
-	return false
-}
-
 // ---------------------------------------------------------------------------
 // fake spawner
 
@@ -439,6 +428,24 @@ func seedStateFile(t *testing.T, dataDir, machineID string, rec map[string]any) 
 	}
 }
 
+// fakeEngineStarter binds a scripted execution engine: the driver is
+// the only engine (polyforge#106) and the config knob only swaps the
+// starter, so the in-process tests script the engine through it. The
+// starter delegates to the job's own spawner (the config knob), so the
+// fake-agent handles and spawn-call assertions keep working — including
+// for tests that swap cfg.Spawner for a wrapping variant.
+func fakeEngineStarter() func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+	return func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+		return in.Spawner.Spawn(ctx, runtime.SpawnParams{
+			WorkItemID:    in.WI,
+			CapsuleDir:    in.CapsuleDir,
+			SessionHandle: in.SessionHandle,
+			SpawnN:        int(in.SpawnN),
+			InitialPrompt: "engine",
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // daemon under test
 
@@ -468,11 +475,10 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 	cfg := Config{
 		MachineID:  "m-test",
 		SocketPath: filepath.Join(dir, "s.sock"),
-		// Legacy WI-Agent path: these tests exercise the RPC model
-		// (fakeSpawner → fakepi as the WI Agent). Driver tests set
-		// UseDriver=true via the mutate hook.
-		UseDriver:         false,
-		UseDriverExplicit: true,
+		// The driver is the only engine (polyforge#106); these tests bind
+		// a FAKE engine starter that delegates to the fake spawner so the
+		// scripted WI-Agent semantics (spawn call params, agent handles)
+		// stay assertable without a real driver.
 		Workspace:         ws,
 		DataDir:           data,
 		Project:           "proj",
@@ -480,10 +486,10 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 		MaxConcurrent:     4,
 		Hub:               hub,
 		Spawner:           sp,
+		AgentStarter:      fakeEngineStarter(),
 		ObservePoll:       10 * time.Millisecond,
 		DrainInterval:     10 * time.Millisecond,
 		DispatchTick:      10 * time.Millisecond,
-		NoticeAckBound:    100 * time.Millisecond,
 		ShutdownFlushWait: 100 * time.Millisecond,
 		ExitPoll:          10 * time.Millisecond,
 	}

@@ -62,24 +62,16 @@ type Hub interface {
 type Config struct {
 	MachineID  string
 	SocketPath string
-	// UseDriver selects the v2 Go execution driver (bridge.Start) over
-	// the legacy WI-Agent spawn. Phase 3: defaults to TRUE; tests that
-	// need the old path set UseDriver=false AND UseDriverExplicit=true.
-	UseDriver bool
-	// UseDriverExplicit marks that UseDriver was deliberately set
-	// (true or false) — suppressing the fill() default of true.
-	UseDriverExplicit bool
 	// Workspace is the REQUIRED capsule base selection: capsules live at
 	// <Workspace>/capsules/<wi_id>. Resolved in main.go from the
 	// -workspace flag (env POLYFORGE_WORKSPACE as the mirror); there is
 	// no default. New validates it exists and capsules/ is creatable.
-	Workspace          string
-	DataDir            string
-	Project            string
-	GitRemoteBase      string
-	WorkflowsDir       string // daemon checkout's workflows/
-	ExecutorPromptFile string
-	PiBin              string
+	Workspace     string
+	DataDir       string
+	Project       string
+	GitRemoteBase string
+	WorkflowsDir  string // daemon checkout's workflows/
+	PiBin         string
 	// HarnessSessionsRoot overrides the harness's default session store
 	// for the live-transcript locator (F3); "" = ~/.pi/agent/sessions.
 	HarnessSessionsRoot string
@@ -100,10 +92,17 @@ type Config struct {
 	HeartbeatEvery time.Duration
 
 	// Test/ops knobs.
-	Spawner     runtime.Spawner  // nil = the production pi spawner
-	Hub         Hub              // required; aihubclient.Client satisfies
-	PushFunc    observe.PushFunc // nil = the shared gitops choke point
-	ObservePoll time.Duration    // observe execution.json poll tick
+	Spawner runtime.Spawner // nil = the production pi spawner
+	// AgentStarter replaces the execution-engine starter the runtime
+	// uses (nil = the production Go driver, bridge.Start). Test seam:
+	// the in-process daemon tests bind a fake engine so they can script
+	// agent behavior without a real driver. There is no selection and
+	// no fallback — the driver IS the engine; this only swaps which
+	// starter binds it.
+	AgentStarter runtime.AgentStartFunc
+	Hub          Hub              // required; aihubclient.Client satisfies
+	PushFunc     observe.PushFunc // nil = the shared gitops choke point
+	ObservePoll  time.Duration    // observe execution.json poll tick
 	// Observe carries the observe lane's supervision windows into the
 	// assembly — the injection seam the fault-injection scenarios shrink
 	// (hang watchdog, idle watchdog, liveness-probe bound, answer-ack
@@ -112,7 +111,6 @@ type Config struct {
 	Observe           ObserveWindows
 	DrainInterval     time.Duration // drain wave-fetch period (5s)
 	DispatchTick      time.Duration // dispatcher/backfill period (200ms)
-	NoticeAckBound    time.Duration // stop_notice ack wait (30s)
 	ShutdownFlushWait time.Duration // per-job flush(shutdown) wait (60s)
 	ShutdownBudget    time.Duration // whole-shutdown ceiling (5min)
 	ExitPoll          time.Duration // adapter exit-poll period (200ms)
@@ -143,14 +141,9 @@ func (c *Config) fill() {
 	if c.SocketPath == "" {
 		c.SocketPath = "/run/polyforge.sock"
 	}
-	// Phase 3: the Go execution driver is the default engine. Tests
-	// exercising the legacy WI-Agent RPC model set UseDriver=false
-	// explicitly; production inherits true.
-	// (Zero-value detection: a Config literal that omits UseDriver
-	// gets true; one that explicitly says false keeps the old path.)
-	if !c.UseDriver && !c.UseDriverExplicit {
-		c.UseDriver = true
-	}
+	// The Go execution driver is THE engine (polyforge#106): the legacy
+	// WI-Agent selection surface is deleted — there is nothing to
+	// default and nothing to flip.
 	if c.MaxConcurrent <= 0 {
 		c.MaxConcurrent = 4
 	}
@@ -165,9 +158,6 @@ func (c *Config) fill() {
 	}
 	if c.DispatchTick == 0 {
 		c.DispatchTick = 200 * time.Millisecond
-	}
-	if c.NoticeAckBound == 0 {
-		c.NoticeAckBound = 30 * time.Second
 	}
 	if c.ShutdownFlushWait == 0 {
 		c.ShutdownFlushWait = 60 * time.Second
@@ -288,7 +278,6 @@ func New(cfg Config) (*Daemon, error) {
 		CgroupRoot:          cfg.CgroupRoot,
 		SocketPath:          cfg.SocketPath, // the spawned agent's PF_DAEMON_SOCKET (flush proxy, §五)
 		EnvSecrets:          []string{cfg.APIKey},
-		ExecutorPromptFile:  cfg.ExecutorPromptFile,
 	}
 	// Runtime-sourced diagnostic events (a seal push that failed after
 	// its retries, pilot item 3) land in the observe lane's durable
@@ -303,12 +292,14 @@ func New(cfg Config) (*Daemon, error) {
 	if sp == nil {
 		sp = runtime.DefaultSpawner(&rtCfg)
 	}
-	// v2: bind the Go driver bridge as the execution engine. Only when
-	// UseDriver is set (production main.go); tests exercising the
-	// WI-Agent RPC model keep the legacy spawn path (AgentStarter nil).
-	if cfg.UseDriver {
+	// v2 (polyforge#106): the Go driver bridge IS the execution engine —
+	// bound unconditionally, no selection flag, no fallback. The
+	// AgentStarter config knob only swaps WHICH starter binds (tests).
+	if cfg.AgentStarter != nil {
+		rtCfg.AgentStarter = cfg.AgentStarter
+	} else {
 		rtCfg.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
-			h, err := bridge.Start(ctx, bridge.Config{
+			return bridge.Start(ctx, bridge.Config{
 				WI:            in.WI,
 				CapsuleDir:    in.CapsuleDir,
 				BundleName:    in.BundleName,
@@ -317,12 +308,8 @@ func New(cfg Config) (*Daemon, error) {
 				SpawnN:        in.SpawnN,
 				Spawner:       in.Spawner,
 			})
-			if err != nil {
-				return nil, err
-			}
-			return h, nil
 		}
-	} // end UseDriver
+	}
 
 	d := &Daemon{
 		cfg:      cfg,
@@ -722,14 +709,6 @@ func (d *Daemon) bridge() {
 			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
-				// Emission-time counter registration (the flush fence's
-				// recovery window, #8): the hub records the new derivation
-				// counter the moment Runtime announces it — before the
-				// monitor adopts the attachment — so a just-resumed
-				// agent's flush(reason) never eats a STALE_SPAWN refusal
-				// in the window between the RTRecovered emission and the
-				// monitor's adoption.
-				d.obs.NoteSpawn(msg.WorkItem, msg.SpawnN)
 				if ji, live := d.rt.Info(msg.WorkItem); live && ji.Agent != nil {
 					at = d.buildAttach(msg, ji)
 				}
@@ -802,10 +781,11 @@ func (a *agentAdapter) pollDone(interval time.Duration) {
 func (a *agentAdapter) Exit() <-chan struct{}  { return a.exit }
 func (a *agentAdapter) Records() <-chan []byte { return a.records }
 
-// SendControl composes the runtime handle's write+ack pair into the
-// observe face's single bounded call. A written-but-unacked method maps
-// to observe.ErrAnswerAckPending (delivered, consumption pending) per
-// the ledger's two-phase contract.
+// SendControl composes the runtime handle's probe write+ack pair into
+// the observe face's single bounded call. The probe is the control
+// channel's only occupant since the answer relay died (polyforge#106);
+// a written-but-unacked probe surfaces its deadline error verbatim —
+// the monitor's watchdog owns the verdict.
 func (a *agentAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
 	ack := protocol.ControlAck{Method: msg.Method, Seq: msg.Seq}
 	if err := a.h.SendControl(msg); err != nil {
@@ -818,9 +798,6 @@ func (a *agentAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg)
 		}
 	}
 	if err := a.h.WaitControlAck(ctx, msg, bound); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return ack, observe.ErrAnswerAckPending
-		}
 		return ack, err
 	}
 	ack.OK = true

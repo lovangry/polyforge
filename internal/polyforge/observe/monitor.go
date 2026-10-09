@@ -29,7 +29,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,19 +109,13 @@ type Handle interface {
 	// Records yields the raw stdout record blobs (one JSON record per
 	// delivery); the channel closes when the stream ends.
 	Records() <-chan []byte
-	// SendControl writes one stdio control-channel message (pf/answer,
-	// pf/probe, pf/stop_notice) and waits for the agent's ack, bounded
-	// by ctx. Contract: it returns ErrAnswerAckPending when the message
-	// was WRITTEN but the ack did not arrive within ctx (delivered,
-	// consumption pending); any other error is a delivery failure.
+	// SendControl writes one liveness-probe message (pf/probe) to the
+	// agent and waits for its ack, bounded by ctx. The probe is the
+	// control channel's only surviving occupant: pf/answer and
+	// pf/stop_notice died with the WI-Agent lane (polyforge#106). Any
+	// error (including a deadline) is a failed probe — the caller owns
+	// the verdict.
 	SendControl(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error)
-}
-
-// AnswerCall is one CLI answer submission routed to the monitor.
-type AnswerCall struct {
-	Relay  AnswerRelay
-	Caller string
-	Resp   chan error // buffered 1; receives the settled relay outcome
 }
 
 // FlushCall is one agent flush(reason) routed to the monitor.
@@ -212,17 +205,10 @@ type Monitor struct {
 	exitCh    <-chan struct{}
 	stream    *streamState
 
-	rtCh     chan Attach
-	stopCh   chan struct{}
-	stop     sync.Once
-	answerCh chan AnswerCall
-	flushCh  chan FlushCall
-	// deferredFlush holds one flush call whose (serveFlush-validated)
-	// spawn_n names the hub's LATEST ANNOUNCED derivation while the
-	// monitor still holds its predecessor — the recovery-adoption window.
-	// The call is released by onRecovered once the announced counter is
-	// adopted; the fence never lets an OLDER counter reach this field.
-	deferredFlush *FlushCall
+	rtCh    chan Attach
+	stopCh  chan struct{}
+	stop    sync.Once
+	flushCh chan FlushCall
 
 	// execution.json polling state (monitor goroutine only).
 	execPath      string
@@ -372,8 +358,6 @@ func (m *Monitor) run() {
 			m.onProbeResult(pr)
 		case res := <-m.verifyDone:
 			m.onVerifyResult(res)
-		case call := <-m.answerCh:
-			m.onAnswer(call)
 		case call := <-m.flushCh:
 			m.onFlush(call)
 		}
@@ -387,7 +371,6 @@ func (m *Monitor) requestStop() { m.stop.Do(func() { close(m.stopCh) }) }
 // criterion, poll execution.json, maybe schedule a push, check
 // backpressure.
 func (m *Monitor) onTick() {
-	m.releaseDeferredFlush()
 	m.drainIncidents()
 	m.checkHang()
 	m.checkIdle()
@@ -396,24 +379,6 @@ func (m *Monitor) onTick() {
 	m.schedulePush()
 	m.checkBackpressure()
 	m.checkRevalidate()
-}
-
-// releaseDeferredFlush re-examines a flush parked in the adoption window:
-// the adoption it waits for may have completed between the serveFlush
-// fence and this monitor pass (the fence read the OLD current counter,
-// onRecovered ran, and only then did the call reach onFlush) — a
-// deferred call stranded that way is released here within one poll
-// tick instead of waiting out the flush bound. A call whose counter is
-// still ahead stays parked; onRecovered owns the immediate release path.
-func (m *Monitor) releaseDeferredFlush() {
-	if m.deferredFlush == nil {
-		return
-	}
-	call := *m.deferredFlush
-	if call.Req.SpawnN == m.spawnN {
-		m.deferredFlush = nil
-		m.onFlush(call)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -792,25 +757,6 @@ func (m *Monitor) onRecovered(at Attach) {
 	_ = m.log.Append(m.wi.WorkItem, EvAgentRecovered, map[string]any{
 		"spawn_n": at.Msg.SpawnN,
 	})
-	// Release the flush that arrived during the adoption window: the
-	// counter it carries is now current, so it takes the ordinary path; a
-	// counter that STILL does not match (a superseded announcement) is
-	// answered with the stale-refusal shape — the fence's promise holds.
-	if m.deferredFlush != nil {
-		call := *m.deferredFlush
-		m.deferredFlush = nil
-		if call.Req.SpawnN == at.Msg.SpawnN {
-			m.onFlush(call)
-		} else {
-			call.Resp <- protocol.FlushAck{
-				OK: false, Error: "STALE_SPAWN: flush carries spawn_n " + strconv.Itoa(call.Req.SpawnN) +
-					"; the current derivation is " + strconv.Itoa(at.Msg.SpawnN),
-			}
-		}
-	}
-	// F9: the successor may inherit answers that were delivered to its
-	// dead predecessor but never consumed — re-send them now.
-	m.redeliverAwaiting()
 }
 
 // ---------------------------------------------------------------------------
@@ -920,8 +866,7 @@ func (m *Monitor) applyPending(pv *protocol.PendingView) {
 	case pv == nil:
 		if m.pending != nil {
 			// The agent consumed the question itself: clear the projection
-			// quietly (the answered event belongs to the answer path).
-			m.ledger.clearAwaitingQuestion(m.wi.WorkItem, m.pending.ID)
+			// quietly (the archived answer lives in execution.json).
 			m.pending = nil
 		}
 		m.stateMu.Unlock()
@@ -1222,206 +1167,9 @@ func (m *Monitor) checkBackpressure() {
 }
 
 // ---------------------------------------------------------------------------
-// answer relay
-
-func (m *Monitor) onAnswer(call AnswerCall) {
-	m.stateMu.Lock()
-	var fp PendingSource = frozenPending{}
-	if m.pending != nil {
-		fp = frozenPending{id: m.pending.ID, step: m.pending.Step}
-	}
-	m.stateMu.Unlock()
-	handle := m.handle
-	wi := m.wi.WorkItem
-	ledger := m.ledger
-	go func() {
-		delivered, err := ledger.SubmitFor(wi, call.Relay, call.Caller, fp, m.deliverVia(handle))
-		if err == nil {
-			if delivered {
-				// A fresh consumption (never an idempotent replay): announce
-				// it and clear the pending projection.
-				_ = m.log.Append(wi, EvAnswered, map[string]any{
-					"question_id": call.Relay.QuestionID, "answer_id": call.Relay.AnswerID,
-				})
-				m.clearPendingByID(call.Relay.QuestionID)
-			}
-		}
-		call.Resp <- err
-	}()
-}
-
-// clearPendingByID drops the pending projection once the answer's
-// consumption is observed (only if it is still the same question).
-func (m *Monitor) clearPendingByID(questionID string) {
-	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
-	if m.pending != nil && m.pending.ID == questionID {
-		m.pending = nil
-	}
-}
-
-// ---------------------------------------------------------------------------
-// attach-time answer redelivery (F9)
-
-// deliverVia builds the stdio pf/answer delivery closure for one handle
-// (the shared body of the manual answer path and the attach-time
-// redelivery — the only two legal senders of an answer relay).
-func (m *Monitor) deliverVia(handle Handle) Deliver {
-	return func(relay AnswerRelay) error {
-		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.AnswerAckWindow)
-		defer cancel()
-		seq := atomic.AddInt64(&m.ctrl, 1) // control sequence, monotonic per monitor
-		ack, serr := handle.SendControl(ctx, protocol.ControlMsg{
-			Method: protocol.ControlAnswer,
-			Seq:    seq,
-			ID:     relay.QuestionID,
-			Answer: relay.AnswerText,
-		})
-		if serr != nil {
-			return serr // ErrAnswerAckPending passes through by contract
-		}
-		if !ack.OK {
-			return fmt.Errorf("agent refused pf/answer: %s", ack.Error)
-		}
-		return nil
-	}
-}
-
-// redeliverAwaiting closes the answer relay's recovery gap: an answer
-// that was DELIVERED but never acked/consumed stays in the ledger as
-// re-deliverable, and the agent instance that held it may have died.
-// When a new instance attaches (RTStarted/RTRecovered landing), every
-// such answer whose question is STILL the open pending question (the
-// execution.json projection — the id is minted once and lives there) is
-// re-sent to the new handle from a sub-goroutine — the select loop never
-// blocks, the attempt is recorded, and a failed re-delivery stays in the
-// ledger untouched (the manual answer path and the NEXT attachment both
-// re-try it). Answers bound to older, consumed questions are not resent.
-func (m *Monitor) redeliverAwaiting() {
-	if m.handle == nil {
-		return
-	}
-	qid, step := m.openQuestionID()
-	if qid == "" {
-		return
-	}
-	for _, relay := range m.ledger.Awaiting(m.wi.WorkItem) {
-		if relay.QuestionID != qid {
-			continue // bound to a different (older) question: not this attach's business
-		}
-		m.spawnRedelivery(relay, qid, step)
-	}
-}
-
-// openQuestionID answers the currently open pending question's id and
-// step: the capsule's execution.json is the authority (the id is minted
-// once and persists there; a recovered derivation re-presents from it),
-// the monitor's projection the fallback when the file cannot be read.
-// "" when no question is open.
-func (m *Monitor) openQuestionID() (string, string) {
-	if data, err := os.ReadFile(m.execPath); err == nil {
-		var exec capsule.Execution
-		if json.Unmarshal(data, &exec) == nil {
-			if s := exec.Steps[exec.CurrentStep]; s != nil && s.PendingQuestion != nil && s.PendingQuestion.ID != "" {
-				return s.PendingQuestion.ID, s.PendingQuestion.Step
-			}
-		}
-	}
-	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
-	if m.pending != nil {
-		return m.pending.ID, m.pending.Step
-	}
-	return "", ""
-}
-
-// spawnRedelivery re-delivers one awaiting answer to the currently
-// attached handle. The attempt is recorded before the send; the ledger's
-// own SubmitFor owns the idempotency semantics (a retryable entry
-// re-delivers, an in-flight one is refused for now, a finalized one no
-// longer sits in the awaiting set).
-func (m *Monitor) spawnRedelivery(relay AnswerRelay, qid, step string) {
-	handle := m.handle
-	wi := m.wi.WorkItem
-	ledger := m.ledger
-	log := m.log
-	_ = log.Append(wi, EvAnswerRedelivery, map[string]any{
-		"question_id": relay.QuestionID, "answer_id": relay.AnswerID,
-		"spawn_n": m.currentSpawn(),
-		"detail":  "re-delivering the delivered-but-unconsumed answer to the newly attached instance",
-	})
-	go func() {
-		delivered, err := ledger.SubmitFor(wi, relay, relay.AnsweredBy,
-			frozenPending{id: qid, step: step}, m.deliverVia(handle))
-		if err == nil {
-			if delivered {
-				_ = log.Append(wi, EvAnswered, map[string]any{
-					"question_id": relay.QuestionID, "answer_id": relay.AnswerID,
-					"redelivered": true,
-				})
-				m.clearPendingByID(relay.QuestionID)
-			}
-			return
-		}
-		if !errors.Is(err, ErrAnswerAckPending) && !errors.Is(err, ErrAnswerInFlight) {
-			// Delivery failed (agent dead pre-ack, control path lost): the
-			// entry stays re-deliverable in the ledger — record why.
-			_ = log.Append(wi, EvAnswerRedelivery, map[string]any{
-				"question_id": relay.QuestionID, "answer_id": relay.AnswerID,
-				"error": err.Error(),
-			})
-		}
-	}()
-}
-
-// ---------------------------------------------------------------------------
 // flush(reason) handling (the UDS face entry)
 
 func (m *Monitor) onFlush(call FlushCall) {
-	// M4: a superseded session's flushes are refused with the stale
-	// shape — the work item belongs to another daemon now, and no local
-	// seal may speak for it.
-	m.stateMu.Lock()
-	superseded := m.superseded
-	m.stateMu.Unlock()
-	if superseded {
-		call.Resp <- protocol.FlushAck{
-			OK: false, Error: "STALE_SPAWN: this session was superseded (another daemon holds the work item); the flush is refused",
-		}
-		return
-	}
-	// The B2 spawn fence, monitor half: a request that carries NO counter
-	// while the monitor runs a session-model derivation (spawnN > 0)
-	// names nothing and is refused fail-closed — the belt-and-braces
-	// twin of the serveFlush fence for direct-channel callers. A monitor
-	// that never adopted a counter (legacy attach, spawnN == 0) keeps
-	// serving legacy callers unchanged until the cleanup commit.
-	if n := call.Req.SpawnN; m.spawnN > 0 && n == 0 {
-		call.Resp <- protocol.FlushAck{
-			OK: false, Error: "STALE_SPAWN: flush carries no spawn_n; the current derivation is " +
-				strconv.Itoa(m.spawnN),
-		}
-		return
-	}
-	// The recovery-adoption window: the request names a derivation the
-	// monitor has not adopted yet (the serveFlush fence has already
-	// proven it is the hub's latest announced counter, never an older
-	// one). Queue it — the RTRecovered attachment this counter belongs to
-	// is already in flight on rtCh; onRecovered releases the call the
-	// moment the counter becomes current. Only one such call can exist
-	// (the window is one spawn deep); a second answers an explicit
-	// refusal.
-	if n := call.Req.SpawnN; n != 0 && n != m.spawnN {
-		if m.deferredFlush == nil {
-			m.deferredFlush = &call
-			return
-		}
-		call.Resp <- protocol.FlushAck{
-			OK: false, Error: "flush adoption window busy; retry: spawn_n " + strconv.Itoa(n) +
-				" is still ahead of the monitor (holding " + strconv.Itoa(m.spawnN) + ")",
-		}
-		return
-	}
 	switch call.Req.Reason {
 	case protocol.FlushNeedsInput:
 		m.flushNeedsInput(call)
@@ -1572,7 +1320,7 @@ func (m *Monitor) wrapEvidenceMissing() (bool, string) {
 	if stepHasCommandEvidence(st.Output) {
 		return false, ""
 	}
-	detail := fmt.Sprintf("work item %s: step %q (status %s) records no structured command evidence in steps.%s.output.commands — append at least one readable {argv, exit_code, duration_ms} entry taken directly from the command result (pf-execute §4 command audit), then re-flush",
+	detail := fmt.Sprintf("work item %s: step %q (status %s) records no structured command evidence in steps.%s.output.commands — append at least one readable {argv, exit_code, duration_ms} entry taken directly from the command result (the step executor's §4 command audit contract), then re-flush",
 		m.wi.WorkItem, verificationStepID, st.Status, verificationStepID)
 	return true, detail
 }
@@ -1625,7 +1373,7 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 		// The V4 gate's refusal: un-arm the seal guard, answer the typed
 		// DAEMON-400, and leave the attempt RUNNING — no blocked transition,
 		// no OBCompleted, no push bookkeeping (no commit was attempted).
-		// The agent's contract (pf-execute §4) is to append the missing
+		// The step executor's contract (the §4 command audit) is to append the missing
 		// evidence and re-flush.
 		m.stateMu.Lock()
 		m.sealing = false

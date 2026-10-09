@@ -39,7 +39,7 @@ func TestV1S06HangRecovery(t *testing.T) {
 	// Injected windows: 1s hang / 1s probe — far shorter than the delayed
 	// write, so the whole silence window is covered by the watchdogs'
 	// cadence and they still must not fire.
-	d := newV1Daemon(t, inst, optUseDriver(), optObserveWindows(time.Second, 0, time.Second, 0))
+	d := newV1Daemon(t, inst, optObserveWindows(time.Second, 0, time.Second, 0))
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)

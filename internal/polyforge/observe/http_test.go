@@ -145,36 +145,16 @@ func TestHTTPRoutesEndToEnd(t *testing.T) {
 		t.Fatalf("view after needs_input: %+v", view)
 	}
 
-	// answer: correct caller → consumed.
-	relay := AnswerRelay{
-		QuestionID: "q_http", AnswerID: "a_http", AnswerText: "yes",
-		AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "alice",
-	}
-	code, body = hs.post(t, "/jobs/wi_http/answer", relay, map[string]string{"X-PF-User": "alice"})
-	if code != http.StatusOK {
-		t.Fatalf("answer: %d %s", code, body)
-	}
-	var out map[string]any
-	_ = json.Unmarshal(body, &out)
-	if out["outcome"] != "consumed" {
-		t.Fatalf("outcome: %s", body)
-	}
-
-	// answer: wrong question binding → DAEMON-409.
-	bad := relay
-	bad.QuestionID = "q_other"
-	bad.AnswerID = "a_bad"
-	code, body = hs.post(t, "/jobs/wi_http/answer", bad, map[string]string{"X-PF-User": "alice"})
+	// answer: the relay lane is deleted (polyforge#106) — the monitored
+	// work item's answer is refused with the typed no-bridge-handle 409
+	// (the fail-fast posture; the driver branch answers on the daemon
+	// mux before this face is ever reached).
+	code, body = hs.post(t, "/jobs/wi_http/answer", map[string]string{"question_id": "q_http"}, nil)
 	if code != http.StatusConflict {
-		t.Fatalf("binding refusal: %d %s", code, body)
+		t.Fatalf("answer on the relayless face: %d %s", code, body)
 	}
-
-	// answer: identity mismatch → DAEMON-403.
-	id := relay
-	id.AnswerID = "a_id"
-	code, _ = hs.post(t, "/jobs/wi_http/answer", id, map[string]string{"X-PF-User": "mallory"})
-	if code != http.StatusForbidden {
-		t.Fatalf("identity refusal: %d", code)
+	if !jsonContains(body, "bridge") {
+		t.Fatalf("the answer refusal must name the missing bridge handle: %s", body)
 	}
 
 	// flush(wrap): the ack distinguishes local commit and push.
@@ -201,7 +181,7 @@ func TestHTTPUnknownWorkItemIs404(t *testing.T) {
 	if code != http.StatusNotFound {
 		t.Fatalf("observe unknown: %d", code)
 	}
-	code, _ = hs.post(t, "/jobs/wi_nope/answer", AnswerRelay{}, nil)
+	code, _ = hs.post(t, "/jobs/wi_nope/answer", map[string]string{}, nil)
 	if code != http.StatusNotFound {
 		t.Fatalf("answer unknown: %d", code)
 	}
@@ -242,157 +222,7 @@ func TestHTTPFlushRejectsBadReason(t *testing.T) {
 // A zombie survivor of a superseded derivation — or any request not
 // naming the monitor's CURRENT derivation counter — answers DAEMON-409
 // STALE_SPAWN and never reaches the monitor: no seal, no OBCompleted,
-// and the live derivation's own flush still works afterwards.
-func TestHTTPFlushStaleSpawnRefused(t *testing.T) {
-	h := newFakeHandle("att_cur")
-	hs := newHarness(t)
-	hs.start(t, h)
-	soon(t, time.Second, "job registered", func() bool {
-		code, _ := hs.get(t, "/jobs/wi_http/observe")
-		return code == http.StatusOK
-	})
 
-	// (1) flush(wrap) from a superseded derivation's counter: 409
-	// STALE_SPAWN, naming the carried and current counters.
-	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http",
-		SpawnN:   7, // an older derivation's counter
-		Reason:   protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
-	}, nil)
-	if code != http.StatusConflict {
-		t.Fatalf("stale wrap flush: %d %s", code, body)
-	}
-	for _, want := range []string{"STALE_SPAWN", "spawn_n 7"} {
-		if !bytes.Contains(body, []byte(want)) {
-			t.Fatalf("stale wrap flush detail must carry %q: %s", want, body)
-		}
-	}
-
-	// (2) a flush with NO spawn counter is stale too (the fence requires
-	// it — fail-closed).
-	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem:   "wi_http",
-		Reason:     protocol.FlushNeedsInput,
-		QuestionID: "q_stale", Question: "which?",
-	}, nil)
-	if code != http.StatusConflict {
-		t.Fatalf("anonymous needs_input flush: %d %s", code, body)
-	}
-
-	// (3) the current derivation was untouched: no OB message, no seal,
-	// no pending question from the refused flush, job still running.
-	expectNoOB(t, hs.ob, 150*time.Millisecond, "OBCompleted from a stale flush")
-	_, body = hs.get(t, "/jobs/wi_http/observe")
-	var view protocol.JobView
-	if err := json.Unmarshal(body, &view); err != nil {
-		t.Fatalf("view decode: %v (%s)", err, body)
-	}
-	if view.Status != protocol.JobRunning || view.Pending != nil {
-		t.Fatalf("stale flush leaked into the live attempt: %+v", view)
-	}
-	for _, e := range hs.o.Events().Since("wi_http") {
-		if e.Kind == EvNeedsInput && bytes.Contains(e.Body, []byte("q_stale")) {
-			t.Fatalf("refused flush still recorded its question: %+v", e)
-		}
-	}
-
-	// (4) the LIVE derivation's flushes still work: needs_input lands,
-	// and the wrap seals exactly once for the current counter.
-	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", SpawnN: 1,
-		Reason: protocol.FlushNeedsInput, QuestionID: "q_live", Question: "which?",
-	}, nil)
-	if code != http.StatusOK {
-		t.Fatalf("live needs_input flush: %d %s", code, body)
-	}
-	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", SpawnN: 1,
-		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
-	}, nil)
-	if code != http.StatusOK {
-		t.Fatalf("live wrap flush: %d %s", code, body)
-	}
-	var ack protocol.FlushAck
-	if err := json.Unmarshal(body, &ack); err != nil || !ack.OK {
-		t.Fatalf("live wrap ack: %v (%s)", err, body)
-	}
-	msg := waitOB(t, hs.ob, "WICompleted from the live attempt")
-	if msg.Kind != protocol.OBCompleted || msg.SpawnN != 1 {
-		t.Fatalf("WICompleted: %+v", msg)
-	}
-}
-
-// TestHTTPFlushRecoveryWindowNotStale (the B2 fence's recovery window):
-// a flush whose spawn_n names the hub's LATEST ANNOUNCED derivation —
-// the counter RTRecovered announced, which the monitor's adoption lags —
-// must NOT be refused as STALE_SPAWN: it is the just-resumed agent's
-// own lifeline. The call is queued by the monitor until the adoption
-// completes (or answered once the counter is current), while every
-// OLDER counter stays fenced exactly as before.
-func TestHTTPFlushRecoveryWindowNotStale(t *testing.T) {
-	h := newFakeHandle("att_cur")
-	hs := newHarness(t)
-	hs.start(t, h)
-	soon(t, time.Second, "job registered", func() bool {
-		code, _ := hs.get(t, "/jobs/wi_http/observe")
-		return code == http.StatusOK
-	})
-
-	// (1) the recovery window, adoption NOT yet delivered: the hub knows
-	// the announced counter (emission-time registration), the monitor
-	// does not. The flush is queued, not refused — it must not answer
-	// the instant STALE_SPAWN 409; it settles only after adoption, so
-	// the bounded caller sees the settle-timeout instead (CallTimeout
-	// here).
-	hs.o.NoteSpawn("wi_http", 2)
-	start := time.Now()
-	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", SpawnN: 2,
-		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
-	}, nil)
-	if code == http.StatusConflict && bytes.Contains(body, []byte("STALE_SPAWN")) {
-		t.Fatalf("recovery-window flush was refused as stale: %d %s", code, body)
-	}
-	if code != http.StatusInternalServerError || !bytes.Contains(body, []byte("settle")) {
-		t.Fatalf("queued flush before adoption: %d %s, want the settle-timeout shape", code, body)
-	}
-	if time.Since(start) < 400*time.Millisecond {
-		t.Fatalf("queued flush answered too fast (%v): it must wait out the adoption window", time.Since(start))
-	}
-
-	// (2) the adoption lands: from here the announced counter is
-	// current, and its flushes take the ordinary path.
-	h2 := newFakeHandle("att_next")
-	hs.rt <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_http", SpawnN: 2},
-		Handle: h2,
-	}
-	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", SpawnN: 2,
-		Reason: protocol.FlushNeedsInput, QuestionID: "q_next", Question: "which?",
-	}, nil)
-	if code != http.StatusOK {
-		t.Fatalf("post-adoption needs_input flush: %d %s", code, body)
-	}
-
-	// (3) the fence did not widen: every OLDER counter — the
-	// pre-recovery current counter included — is still refused.
-	for _, stale := range []int{0, 1} {
-		code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-			WorkItem: "wi_http", SpawnN: stale,
-			Reason: protocol.FlushNeedsInput, QuestionID: "q_z", Question: "which?",
-		}, nil)
-		if code != http.StatusConflict || !bytes.Contains(body, []byte("STALE_SPAWN")) {
-			t.Fatalf("older counter %d after recovery: %d %s, want 409 STALE_SPAWN", stale, code, body)
-		}
-	}
-}
-
-// TestHTTPFlushNeedsInputEmptyQuestionIDFailClosed (F9): a needs_input
-// flush without a question id can never be answered — the relay binds on
-// the id — and an empty id accepted here mints an unanswerable hanging
-// pending. The entry refuses it DAEMON-400 before the monitor ever sees
-// the call; the live attempt keeps working afterwards.
 func TestHTTPFlushNeedsInputEmptyQuestionIDFailClosed(t *testing.T) {
 	h := newFakeHandle("att_cur")
 	hs := newHarness(t)

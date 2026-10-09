@@ -6,10 +6,7 @@ package daemon
 //  1. latch shutting_down FIRST (external submissions now answer
 //     DAEMON-410 and the drain loop stops fetching — the same latch,
 //     two block paths);
-//  2. pf/stop_notice to every live agent: stop advancing at the next
-//     safe boundary (the daemon never picks or skips steps for the
-//     agent);
-//  3. wait, bounded per job, for the agent's flush(shutdown) — its own
+//  2. wait, bounded per job, for the agent's flush(shutdown) — its own
 //     commit-and-ack of what exists — or degrade on timeout (the data
 //     is in the working tree; the recovery engine's
 //     commit-dirty-on-recover picks it up at the next start);
@@ -38,7 +35,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -82,13 +78,13 @@ func (d *Daemon) runShutdown(ctx context.Context) error {
 	// set only shrinks from this moment (no source may add a job).
 	live := d.liveJobs()
 
-	// Step 2: the stop-advancing notice (best-effort: a dead control
-	// path never blocks the sequence).
-	for _, ji := range live {
-		d.notifyStop(ji)
-	}
-
-	// Step 3: the bounded flush(shutdown) wait, one window per job in
+	// Step 2 (polyforge#106): the pf/stop_notice delivery face is
+	// deleted with the WI-Agent lane — the driver owns the step state
+	// machine, so there is no agent to notify "stop advancing". The
+	// bounded flush(shutdown) wait below is the sequence's only
+	// per-job grace.
+	//
+	// The bounded flush(shutdown) wait, one window per job in
 	// parallel (bounded by the overall ctx regardless).
 	if err := d.awaitShutdownFlushes(ctx, live); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: shutdown flush wait: %v\n", err)
@@ -179,23 +175,6 @@ func (d *Daemon) liveJobs() []runtime.JobInfo {
 		out = append(out, ji)
 	}
 	return out
-}
-
-// notifyStop delivers pf/stop_notice to one live agent and waits for
-// the ack, bounded by the notice window. Best-effort by design.
-func (d *Daemon) notifyStop(ji runtime.JobInfo) {
-	// one message value carries the correlation the ack wait matches on
-	// ((method, correlation), not method alone)
-	notice := protocol.ControlMsg{Method: protocol.ControlStopNotice}
-	if err := ji.Agent.SendControl(notice); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon: %s: stop_notice delivery failed: %v\n", ji.WorkItem, err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.NoticeAckBound)
-	defer cancel()
-	if err := ji.Agent.WaitControlAck(ctx, notice, d.cfg.NoticeAckBound); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon: %s: stop_notice not acked in the window (proceeding): %v\n", ji.WorkItem, err)
-	}
 }
 
 // awaitShutdownFlushes waits, per job, for the monitor's shutdown-flush

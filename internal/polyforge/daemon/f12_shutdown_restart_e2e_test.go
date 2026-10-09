@@ -164,19 +164,22 @@ func waitFor(t *testing.T, what string, bound time.Duration, probe func() bool) 
 
 func e2eConfig(sock, ws, data, hubBase string, hub *fakeHub, sp runtime.Spawner) Config {
 	return Config{
-		MachineID:         "m-e2e",
-		SocketPath:        sock,
-		Workspace:         ws,
-		DataDir:           data,
-		Project:           "proj",
-		GitRemoteBase:     hubBase,
-		MaxConcurrent:     4,
-		Hub:               hub,
-		Spawner:           sp,
+		MachineID:     "m-e2e",
+		SocketPath:    sock,
+		Workspace:     ws,
+		DataDir:       data,
+		Project:       "proj",
+		GitRemoteBase: hubBase,
+		MaxConcurrent: 4,
+		Hub:           hub,
+		Spawner:       sp,
+		// polyforge#106: the engine seam is bound like every other
+		// in-process test (the driver is the only engine; the fake starter
+		// scripts it through the test's spawner).
+		AgentStarter:      fakeEngineStarter(),
 		ObservePoll:       10 * time.Millisecond,
 		DrainInterval:     10 * time.Millisecond,
 		DispatchTick:      10 * time.Millisecond,
-		NoticeAckBound:    10 * time.Second,
 		ShutdownFlushWait: 200 * time.Millisecond,
 		ShutdownBudget:    30 * time.Second,
 		ExitPoll:          10 * time.Millisecond,

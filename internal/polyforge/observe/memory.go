@@ -27,7 +27,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -77,17 +76,15 @@ type MemoryStored struct {
 	Status string `json:"status"`
 }
 
-// The UDS memory request bodies (the fence field is route business,
-// the rest is the agent's payload). SpawnN is the v1.5 B2 proof — it
-// must name the current derivation.
+// The UDS memory request bodies (the agent's payload; the route id is
+// the work item). The legacy spawn-proof fence field is retired with
+// the WI-Agent lane (polyforge#106).
 type memoryRecallRequest struct {
-	SpawnN int    `json:"spawn_n"`
-	Query  string `json:"query"`
-	TopK   int    `json:"top_k"`
+	Query string `json:"query"`
+	TopK  int    `json:"top_k"`
 }
 
 type memoryRememberRequest struct {
-	SpawnN     int      `json:"spawn_n"`
 	Type       string   `json:"type"`
 	Title      string   `json:"title,omitempty"`
 	Content    string   `json:"content"`
@@ -121,9 +118,6 @@ func (o *Observe) serveRecall(w http.ResponseWriter, r *http.Request) {
 	var req memoryRecallRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, api.ErrDaemonBadInput, "recall request body: "+err.Error())
-		return
-	}
-	if !o.memoryFence(w, m, wi, req.SpawnN, "recall") {
 		return
 	}
 	if strings.TrimSpace(req.Query) == "" {
@@ -176,9 +170,6 @@ func (o *Observe) serveRemember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, api.ErrDaemonBadInput, "remember request body: "+err.Error())
 		return
 	}
-	if !o.memoryFence(w, m, wi, req.SpawnN, "remember") {
-		return
-	}
 	if strings.TrimSpace(req.Content) == "" {
 		writeErr(w, api.ErrDaemonBadInput, "remember requires content")
 		return
@@ -225,28 +216,6 @@ func (o *Observe) serveRemember(w http.ResponseWriter, r *http.Request) {
 		"write_ms": writeMS,
 	})
 	writeJSON(w, http.StatusOK, stored)
-}
-
-// memoryFence is the memory routes' share of the flush-mode fence (§二):
-// the request must prove it speaks for the monitor's CURRENT derivation
-// with the v1.5 spawn_n counter (B2, the same dual-match as serveFlush:
-// current, or the hub's latest ANNOUNCED counter during the
-// recovery-adoption window, with the same lagging-current cross-check).
-// An absent counter (0) answers DAEMON-409 and never reaches the face —
-// fail-closed, exactly like the flush fence: a zombie survivor of a
-// superseded derivation must never read or write the live one's memory.
-// Answers false when the caller already wrote the refusal.
-func (o *Observe) memoryFence(w http.ResponseWriter, m *Monitor, wi string, spawnN int, verb string) bool {
-	cur := m.currentSpawn()
-	known := o.spawnKnown(wi)
-	if (spawnN == cur && (known == 0 || spawnN == known)) || spawnN == known {
-		return true
-	}
-	writeErr(w, api.ErrDaemonConflict,
-		"STALE_SPAWN: "+verb+" carries spawn_n "+strconv.Itoa(spawnN)+
-			"; the current derivation is "+strconv.Itoa(cur)+
-			" (latest announced: "+strconv.Itoa(known)+")")
-	return false
 }
 
 // writeMemoryFaceErr surfaces a typed api error verbatim (MEM-*/CORE-*

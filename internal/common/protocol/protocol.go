@@ -105,15 +105,11 @@ const (
 // ---------------------------------------------------------------------------
 
 // --- stdio control channel: daemon writes one JSON line to agent stdin,
-// agent acknowledges on stdout. Three methods only. ---
+// agent acknowledges on stdout. One method only (polyforge#106: the
+// answer relay and the stop-notice delivery died with the WI-Agent
+// engine; the probe is the channel's kept occupant). ---
 
 const (
-	// ControlAnswer relays a human answer to a pending question. Payload:
-	// {"method":"pf/answer","id":<qid>,"answer":<text>,"seq":<monotonic>}
-	ControlAnswer = "pf/answer"
-	// ControlStopNotice warns the agent of an imminent daemon shutdown so it
-	// can finish the current sentence cleanly. Payload: {"method":"pf/stop_notice"}
-	ControlStopNotice = "pf/stop_notice"
 	// ControlProbe asks the agent to prove liveness within the 2-minute
 	// budget. Payload: {"method":"pf/probe","nonce":<hex>}
 	ControlProbe = "pf/probe"

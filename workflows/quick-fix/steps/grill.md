@@ -44,8 +44,13 @@ requester, so whatever `fix` needs to know must end up in your memo.
 2. BATCH your questions (owner ruling 2026-10-02): collect all material ambiguities
    first, then ask them in ONE needs_input flush as a NUMBERED list (one focused
    question per item, answerable in one line each) via the interactive needs_input
-   mechanism your WI Agent drives (pf-execute §7). Only a follow-up whose content
-   genuinely depends on an earlier answer waits. Do not
+   mechanism your WI Agent drives. That mechanism, inline: mint the `question_id`
+   once and persist it in `pending_question` in the same atomic write that opens the
+   question; call flush(needs_input) carrying that id; when the answer arrives,
+   archive it to `steps.<id>.answers[]` and clear `pending_question`, continuing
+   this same step in place. If you crash while a question is pending, your successor
+   re-presents the exact same persisted id - never a fresh mint. Only a follow-up
+   whose content genuinely depends on an earlier answer waits. Do not
    fabricate or guess an answer you did not receive. Append every question and answer to
    `artifacts/grill-qa.md` under a `## grill` heading as they come in.
 3. Do not over-interrogate. This lane exists for small, well-understood changes: if after

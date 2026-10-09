@@ -415,9 +415,10 @@ func TestAckRoutingByMethodAndCorrelation(t *testing.T) {
 	}
 	defer func() { _ = h.Terminate(3 * time.Second) }()
 
-	// two pf/answer methods in flight with different question ids
-	a := protocol.ControlMsg{Method: protocol.ControlAnswer, Seq: 1, ID: "q-first", Answer: "A"}
-	b := protocol.ControlMsg{Method: protocol.ControlAnswer, Seq: 2, ID: "q-second", Answer: "B"}
+	// two pf/probe methods in flight with different nonces (polyforge#106:
+	// the probe is the stdio channel's only method)
+	a := protocol.ControlMsg{Method: protocol.ControlProbe, Seq: 1, Nonce: "n-first"}
+	b := protocol.ControlMsg{Method: protocol.ControlProbe, Seq: 2, Nonce: "n-second"}
 	if err := h.SendControl(a); err != nil {
 		t.Fatal(err)
 	}
@@ -466,8 +467,8 @@ func TestAckRefusalReachedTheWaiter(t *testing.T) {
 // backlog and is claimed at registration — never dropped.
 func TestAckHubOrphanClaim(t *testing.T) {
 	h := newAckHub()
-	msg := protocol.ControlMsg{Method: protocol.ControlAnswer, Seq: 5, ID: "q1", Answer: "A"}
-	ack := protocol.ControlAck{Method: protocol.ControlAnswer, Seq: 5, Ref: "q1", OK: true}
+	msg := protocol.ControlMsg{Method: protocol.ControlProbe, Seq: 5, Nonce: "n1"}
+	ack := protocol.ControlAck{Method: protocol.ControlProbe, Seq: 5, Ref: "n1", OK: true}
 
 	h.deliver(ack) // no waiter registered yet
 	w := h.register(msg)
@@ -484,14 +485,14 @@ func TestAckHubOrphanClaim(t *testing.T) {
 // answers a DIFFERENT correlation of the same method.
 func TestAckHubRoutedByKey(t *testing.T) {
 	h := newAckHub()
-	a := protocol.ControlMsg{Method: protocol.ControlAnswer, Seq: 1, ID: "qa"}
-	b := protocol.ControlMsg{Method: protocol.ControlAnswer, Seq: 2, ID: "qb"}
+	a := protocol.ControlMsg{Method: protocol.ControlProbe, Seq: 1, Nonce: "na"}
+	b := protocol.ControlMsg{Method: protocol.ControlProbe, Seq: 2, Nonce: "nb"}
 	wa := h.register(a)
 	wb := h.register(b)
 	defer h.unregister(wb)
 
 	// the ack for B arrives while BOTH waiters are parked
-	h.deliver(protocol.ControlAck{Method: protocol.ControlAnswer, Seq: 2, Ref: "qb", OK: true})
+	h.deliver(protocol.ControlAck{Method: protocol.ControlProbe, Seq: 2, Ref: "nb", OK: true})
 	if got := h.claim(wa); got != nil {
 		t.Fatalf("waiter A must not claim B's ack, got %+v", got)
 	}
