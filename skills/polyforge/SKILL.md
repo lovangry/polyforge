@@ -69,14 +69,9 @@ accepts an id.
 | resume it / continue the paused one / 恢复执行 / 接着跑（已暂停的） | `verbs/resume.md` | daemon |
 | wrap it up / we're done / mark it failed / 收尾 / 完事了 / 判完成 / 判失败 | `verbs/wrap.md` | daemon |
 | ship it / push the wrapped commits to origin / deliver the branch / open the PR / 推上去 / 交付 | `verbs/ship.md` | daemon |
-| daemon status / what's this machine running / switch mode / drain / shutdown / 升级前自检 / 启停 / 切换模式 / 优雅停机 | `verbs/ops.md` | daemon |
-| doctor / can't connect / diagnose / 诊断 / 连不上 | `verbs/doctor.md` | CLI |
+| daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / can't connect / diagnose / 诊断 / 连不上 / switch mode / drain / shutdown / 升级前自检 / 启停 / 切换模式 / 优雅停机 | `verbs/ops.md` | daemon |
 | init / install / upgrade / machine setup / 装机 / 升级 | `verbs/init.md` | CLI |
 | help / what skills / usage / 速查 / 怎么用 | `verbs/help.md` | CLI |
-| status / what's happening / 看看什么情况 / 全局状态 | `verbs/status.md` | daemon |
-| retro / lessons learned / what did we learn / 复盘 | `verbs/retro.md` | CLI |
-| crystallize / save flow / make bundle / 固化流程 | `verbs/crystallize.md` | CLI |
-| release / cut version / 发版 | `verbs/release.md` | CLI |
 
 Disambiguation: "continue / go on" **mid-run** routes to `observe`, not
 `resume` — `resume` only reactivates a **paused** WI and is always a fresh
