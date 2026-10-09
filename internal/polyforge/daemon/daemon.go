@@ -781,10 +781,11 @@ func (a *agentAdapter) pollDone(interval time.Duration) {
 func (a *agentAdapter) Exit() <-chan struct{}  { return a.exit }
 func (a *agentAdapter) Records() <-chan []byte { return a.records }
 
-// SendControl composes the runtime handle's write+ack pair into the
-// observe face's single bounded call. A written-but-unacked method maps
-// to observe.ErrAnswerAckPending (delivered, consumption pending) per
-// the ledger's two-phase contract.
+// SendControl composes the runtime handle's probe write+ack pair into
+// the observe face's single bounded call. The probe is the control
+// channel's only occupant since the answer relay died (polyforge#106);
+// a written-but-unacked probe surfaces its deadline error verbatim —
+// the monitor's watchdog owns the verdict.
 func (a *agentAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
 	ack := protocol.ControlAck{Method: msg.Method, Seq: msg.Seq}
 	if err := a.h.SendControl(msg); err != nil {
@@ -797,9 +798,6 @@ func (a *agentAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg)
 		}
 	}
 	if err := a.h.WaitControlAck(ctx, msg, bound); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return ack, observe.ErrAnswerAckPending
-		}
 		return ack, err
 	}
 	ack.OK = true

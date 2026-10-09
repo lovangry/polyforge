@@ -21,7 +21,6 @@ package test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -67,9 +66,9 @@ func (a *inprocAdapter) pollDone(interval time.Duration) {
 	}
 }
 
-// SendControl composes the handle's write+ack pair into the observe
-// face's single bounded call (the daemon adapter's contract: a
-// written-but-unacked method maps to ErrAnswerAckPending).
+// SendControl composes the handle's probe write+ack pair into the
+// observe face's single bounded call (the daemon adapter's contract: a
+// written-but-unacked probe surfaces its deadline error verbatim).
 func (a *inprocAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
 	ack := protocol.ControlAck{Method: msg.Method, Seq: msg.Seq}
 	if err := a.h.SendControl(msg); err != nil {
@@ -82,9 +81,6 @@ func (a *inprocAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg
 		}
 	}
 	if err := a.h.WaitControlAck(ctx, msg, bound); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return ack, observe.ErrAnswerAckPending
-		}
 		return ack, err
 	}
 	ack.OK = true

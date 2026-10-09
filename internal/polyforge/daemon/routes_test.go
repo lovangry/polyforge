@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,37 +100,24 @@ func TestObserveAnswerFlush(t *testing.T) {
 		t.Fatalf("needs_input projection = %s / %+v", jv.Status, jv.Pending)
 	}
 
-	araw, err := td.client.Answer("wi_b", cli.AnswerPayload{
+	// polyforge#106: the answer relay lane is deleted — the WI's engine
+	// here is the scripted fake (no bridge Handle), so the answer
+	// refuses fast with the typed no-bridge-handle 409 and NO relay
+	// reaches the agent.
+	araw, aerr := td.client.Answer("wi_b", cli.AnswerPayload{
 		QuestionID: "q_abc123", AnswerID: "a_xy1234",
 		AnswerText: "mint", AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "u_1",
 	})
-	if err != nil {
-		t.Fatalf("answer: %v", err)
+	if aerr == nil {
+		t.Fatalf("answer with no live bridge handle was accepted: %s", araw)
 	}
-	var out struct {
-		Outcome  string `json:"outcome"`
-		AnswerID string `json:"answer_id"`
+	var ae *api.Error
+	if !errors.As(aerr, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "bridge") {
+		t.Fatalf("answer error = %v, want the typed no-bridge-handle 409", aerr)
 	}
-	if err := json.Unmarshal(araw, &out); err != nil || out.Outcome != "consumed" {
-		t.Fatalf("answer outcome = %s (%v)", araw, err)
-	}
-	// The relay reached the agent over the stdio control channel.
-	if !td.spawner.agentOf(0).sentAnswer("q_abc123", "mint") {
-		t.Fatalf("agent never consumed the answer: %+v", td.spawner.agentOf(0).sent)
-	}
-
-	// Idempotent replay of the same answer_id: consumed again, never
-	// re-delivered.
-	araw, err = td.client.Answer("wi_b", cli.AnswerPayload{
-		QuestionID: "q_abc123", AnswerID: "a_xy1234",
-		AnswerText: "mint", AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "u_1",
-	})
-	if err != nil {
-		t.Fatalf("answer replay: %v", err)
-	}
-	json.Unmarshal(araw, &out)
-	if out.Outcome != "consumed" {
-		t.Fatalf("replay outcome = %s", araw)
+	// Nothing reached the agent: no relay executed.
+	if n := len(td.spawner.agentOf(0).sentMethods()); n != 0 {
+		t.Fatalf("a relay reached the agent (%v) — none may execute", td.spawner.agentOf(0).sentMethods())
 	}
 }
 

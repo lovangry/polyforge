@@ -380,10 +380,9 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 		// persisted file is single and keyed by work item.
 		ledger: o.ledger,
 
-		rtCh:     make(chan Attach, 4),
-		stopCh:   make(chan struct{}),
-		answerCh: make(chan AnswerCall, 8),
-		flushCh:  make(chan FlushCall, 8),
+		rtCh:    make(chan Attach, 4),
+		stopCh:  make(chan struct{}),
+		flushCh: make(chan FlushCall, 8),
 
 		gate:       make(chan struct{}, 1),
 		pushDone:   make(chan pushResult, 1),
@@ -411,10 +410,6 @@ func (m *Monitor) attach(at Attach) {
 	m.sessionID = at.Msg.SessionID
 	m.stateMu.Unlock()
 	m.setTranscriptInfo(at.WI)
-	// F9: the attach-time answer redelivery (a no-op for a fresh
-	// monitor — the ledger is empty — but the same landing point for
-	// every successor).
-	m.redeliverAwaiting()
 }
 
 // Events exposes the log (diagnostic/tests).

@@ -1,23 +1,23 @@
 package observe
 
 // answerfile.go: the ON-DISK shape of the answer ledger — the delivery
-// status cache that lets an unconsumed owner answer survive a daemon
+// status cache that let an unconsumed owner answer survive a daemon
 // restart (spec A1/A2/A3/A4).
 //
-// AUTHORITY SPLIT (unchanged): the capsule's runtime-state/execution.json
-// stays the persistent authority for the open pending question; this file
-// only remembers WHAT THE DAEMON DID with the answers it accepted —
-// which relays were delivered but never consumed (the F9 re-delivery
-// input) and which answer_ids already settled (the idempotency replay
-// input). Losing it costs at worst one owner re-submission, so no load
-// failure may ever block daemon startup.
+// polyforge#106 trim: the legacy WI-Agent answer relay is deleted (the
+// driver consumes answers, and the capsule is the authority), so the
+// cache no longer carries an awaiting half and no longer admits an
+// in-flight or retryable state — every record is history from a previous
+// daemon process. The file machinery itself stays exactly as pinned:
+// atomic writes at mode 0600, a versioned document, load-time quarantine
+// of unreadable/unparsable/unknown-version files (one event, never
+// fatal), and the A4 age-out for settled entries.
 //
-// SETTLED STATES ONLY. answerInflight is a memory-only reservation and
-// has NO on-disk encoding: the serializer projects an in-flight entry to
-// `retryable` + its `awaiting` relay, which is exactly the state a crash
-// mid-delivery should reload as (the answer is not lost, and the next
-// attachment re-delivers it). No load path can therefore produce an
-// entry that makes a later submission return ErrAnswerInFlight.
+// AUTHORITY SPLIT (unchanged): the capsule's runtime-state/execution.json
+// stays the persistent authority for the open pending question and the
+// archived answers; this file only remembers what a previous daemon
+// process recorded. Losing it costs nothing the capsule does not
+// already hold, so no load failure may ever block daemon startup.
 
 import (
 	"encoding/json"
@@ -33,28 +33,29 @@ import (
 const answerFileName = "answers.json"
 
 // answerFileVersion is the integer document version (spec A2). A file
-// carrying any other value is quarantined, never migrated: no prior
-// on-disk format exists, and the field is here so a future one can.
-const answerFileVersion = 1
+// carrying any other value is quarantined, never migrated: the version
+// bump accompanies the polyforge#106 trim (the awaiting half and the
+// two-phase states are gone), and an older document is history, not a
+// format to resurrect.
+const answerFileVersion = 2
 
-// answerFileMode: answer_text is owner-authored content (spec A2).
+// answerFileMode: answer metadata only now (no answer_text has been
+// stored since the relay trim), but the file stays owner-data adjacent —
+// keep the restrictive mode (spec A2).
 const answerFileMode os.FileMode = 0o600
 
 // appliedMaxAge is the load-time age-out bound for settled `applied`
-// entries that are no longer awaiting (spec A4).
+// entries (spec A4).
 const appliedMaxAge = 14 * 24 * time.Hour
 
-// On-disk state names. The enum deliberately admits only the SETTLED
-// states — there is no encoding for answerInflight.
-const (
-	stateNameFinal     = "final"
-	stateNameRetryable = "retryable"
-)
+// On-disk state names. The enum admits only the settled state — the
+// in-flight and retryable encodings died with the relay.
+const stateNameFinal = "final"
 
 // On-disk error identity: a closed code set rather than a message, so a
-// replayed outcome compares Is-equal to the sentinel it was settled
-// with. `other` carries its message because only `final` entries replay
-// their outcome and a non-sentinel delivery error never settles final.
+// decoded record compares equal to the class it was recorded with.
+// `ack_pending` and the other pre-trim codes still DECODE (an older
+// file's history stays readable) but nothing re-delivers anything.
 const (
 	errCodeNone       = ""
 	errCodeConsumed   = "consumed"
@@ -63,7 +64,7 @@ const (
 	errCodeOther      = "other"
 )
 
-// answerFileEntry is one persisted `applied` idempotency outcome.
+// answerFileEntry is one persisted `applied` record.
 type answerFileEntry struct {
 	State        string `json:"state"`
 	ErrorCode    string `json:"error_code,omitempty"`
@@ -76,73 +77,44 @@ type answerFileEntry struct {
 	SettledAt string `json:"settled_at,omitempty"`
 }
 
-// answerFileDoc is the whole version-1 document: BOTH halves of the
-// ledger (spec: persisting only one half turns every restart into an
-// idempotency hole).
+// answerFileDoc is the whole version-2 document: the settled records
+// the previous daemon processes wrote (the awaiting half and the
+// in-flight projection are retired with the relay).
 type answerFileDoc struct {
 	Version int `json:"version"`
-	// Awaiting holds the delivered-but-unconsumed relays per WORK ITEM,
-	// verbatim (all five AnswerRelay fields).
-	Awaiting map[string]map[string]AnswerRelay `json:"awaiting"`
-	// Applied holds the settled outcome per answer_id.
+	// Applied holds the settled record per answer_id.
 	Applied map[string]answerFileEntry `json:"applied"`
 }
 
 func newAnswerFileDoc() answerFileDoc {
 	return answerFileDoc{
-		Version:  answerFileVersion,
-		Awaiting: map[string]map[string]AnswerRelay{},
-		Applied:  map[string]answerFileEntry{},
+		Version: answerFileVersion,
+		Applied: map[string]answerFileEntry{},
 	}
 }
 
-// normalize fills the nil maps a hand-written or minimal document may
-// decode into, so every caller can write to them unconditionally.
+// normalize fills the nil map a hand-written or minimal document may
+// decode into, so every caller can write to it unconditionally.
 func (d *answerFileDoc) normalize() {
-	if d.Awaiting == nil {
-		d.Awaiting = map[string]map[string]AnswerRelay{}
-	}
 	if d.Applied == nil {
 		d.Applied = map[string]answerFileEntry{}
 	}
-	for wi, m := range d.Awaiting {
-		if m == nil {
-			d.Awaiting[wi] = map[string]AnswerRelay{}
-		}
-	}
-}
-
-// isAwaiting reports whether answerID sits in any work item's awaiting
-// half (the "never prune a live awaiting entry" guard).
-func (d answerFileDoc) isAwaiting(answerID string) bool {
-	for _, m := range d.Awaiting {
-		if _, ok := m[answerID]; ok {
-			return true
-		}
-	}
-	return false
 }
 
 // ---------------------------------------------------------------------------
 // state / error codecs
 
-// encodeAnswerState projects an in-memory state onto the on-disk enum.
-// answerInflight has no encoding of its own: it is projected to
-// retryable, which is precisely how a crash mid-delivery must reload.
-func encodeAnswerState(s answerState) string {
-	if s == answerFinal {
-		return stateNameFinal
-	}
-	return stateNameRetryable
+// encodeAnswerState projects the in-memory record onto the on-disk
+// enum: every record is settled history now.
+func encodeAnswerState() string {
+	return stateNameFinal
 }
 
 // decodeAnswerState maps the on-disk enum back. Anything that is not
-// the literal "final" loads as retryable — never as in-flight.
-func decodeAnswerState(name string) answerState {
-	if name == stateNameFinal {
-		return answerFinal
-	}
-	return answerRetryable
+// the literal "final" still loads as a settled record (pre-trim files
+// carry retryable/in-flight-encoded entries; they are history).
+func decodeAnswerState(name string) bool {
+	return true
 }
 
 // encodeAnswerErr records the error IDENTITY as a closed code set.
@@ -152,8 +124,6 @@ func encodeAnswerErr(err error) (code, message string) {
 		return errCodeNone, ""
 	case errors.Is(err, ErrAnswerConsumed):
 		return errCodeConsumed, ""
-	case errors.Is(err, ErrAnswerAckPending):
-		return errCodeAckPending, ""
 	case errors.Is(err, ErrAnswerIdentity):
 		return errCodeIdentity, ""
 	default:
@@ -161,7 +131,9 @@ func encodeAnswerErr(err error) (code, message string) {
 	}
 }
 
-// decodeAnswerErr rebuilds the sentinel a replay must return verbatim.
+// decodeAnswerErr rebuilds the recorded error class. The pre-trim
+// ack_pending code decodes to a plain delivered-but-unconsumed note —
+// nothing acts on it, but the history stays honest.
 func decodeAnswerErr(code, message string) error {
 	switch code {
 	case errCodeNone:
@@ -169,7 +141,7 @@ func decodeAnswerErr(code, message string) error {
 	case errCodeConsumed:
 		return ErrAnswerConsumed
 	case errCodeAckPending:
-		return ErrAnswerAckPending
+		return errors.New("observe: recorded pre-trim as delivered, consumption unconfirmed (relay since deleted)")
 	case errCodeIdentity:
 		return ErrAnswerIdentity
 	case errCodeOther:
@@ -309,19 +281,13 @@ func quarantineAnswerFile(path string, rec ledgerRecorder, reason string) {
 	rec.record(body)
 }
 
-// pruneAnswerDoc applies the A4 retention rule at load: an `applied`
-// entry settled more than appliedMaxAge ago AND not present in the
-// awaiting half is dropped. A live awaiting entry is NEVER pruned, at
-// any age — those are exactly the unconsumed owner answers this whole
-// file exists to protect. Entries without a parsable settle time are
-// kept (an unknown age is not an old age).
+// pruneAnswerDoc applies the A4 retention rule at load: a settled entry
+// older than appliedMaxAge is dropped. Entries without a parsable
+// settle time are kept (an unknown age is not an old age).
 func pruneAnswerDoc(doc *answerFileDoc, now time.Time) bool {
 	cutoff := now.Add(-appliedMaxAge)
 	changed := false
 	for id, e := range doc.Applied {
-		if doc.isAwaiting(id) {
-			continue
-		}
 		ts, err := time.Parse(time.RFC3339Nano, e.SettledAt)
 		if err != nil {
 			continue

@@ -145,36 +145,16 @@ func TestHTTPRoutesEndToEnd(t *testing.T) {
 		t.Fatalf("view after needs_input: %+v", view)
 	}
 
-	// answer: correct caller → consumed.
-	relay := AnswerRelay{
-		QuestionID: "q_http", AnswerID: "a_http", AnswerText: "yes",
-		AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "alice",
-	}
-	code, body = hs.post(t, "/jobs/wi_http/answer", relay, map[string]string{"X-PF-User": "alice"})
-	if code != http.StatusOK {
-		t.Fatalf("answer: %d %s", code, body)
-	}
-	var out map[string]any
-	_ = json.Unmarshal(body, &out)
-	if out["outcome"] != "consumed" {
-		t.Fatalf("outcome: %s", body)
-	}
-
-	// answer: wrong question binding → DAEMON-409.
-	bad := relay
-	bad.QuestionID = "q_other"
-	bad.AnswerID = "a_bad"
-	code, body = hs.post(t, "/jobs/wi_http/answer", bad, map[string]string{"X-PF-User": "alice"})
+	// answer: the relay lane is deleted (polyforge#106) — the monitored
+	// work item's answer is refused with the typed no-bridge-handle 409
+	// (the fail-fast posture; the driver branch answers on the daemon
+	// mux before this face is ever reached).
+	code, body = hs.post(t, "/jobs/wi_http/answer", map[string]string{"question_id": "q_http"}, nil)
 	if code != http.StatusConflict {
-		t.Fatalf("binding refusal: %d %s", code, body)
+		t.Fatalf("answer on the relayless face: %d %s", code, body)
 	}
-
-	// answer: identity mismatch → DAEMON-403.
-	id := relay
-	id.AnswerID = "a_id"
-	code, _ = hs.post(t, "/jobs/wi_http/answer", id, map[string]string{"X-PF-User": "mallory"})
-	if code != http.StatusForbidden {
-		t.Fatalf("identity refusal: %d", code)
+	if !jsonContains(body, "bridge") {
+		t.Fatalf("the answer refusal must name the missing bridge handle: %s", body)
 	}
 
 	// flush(wrap): the ack distinguishes local commit and push.
@@ -201,7 +181,7 @@ func TestHTTPUnknownWorkItemIs404(t *testing.T) {
 	if code != http.StatusNotFound {
 		t.Fatalf("observe unknown: %d", code)
 	}
-	code, _ = hs.post(t, "/jobs/wi_nope/answer", AnswerRelay{}, nil)
+	code, _ = hs.post(t, "/jobs/wi_nope/answer", map[string]string{}, nil)
 	if code != http.StatusNotFound {
 		t.Fatalf("answer unknown: %d", code)
 	}

@@ -151,7 +151,6 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, ch
 		ledger:     NewAnswerLedger(),
 		rtCh:       make(chan Attach, 4),
 		stopCh:     make(chan struct{}),
-		answerCh:   make(chan AnswerCall, 8),
 		flushCh:    make(chan FlushCall, 8),
 		gate:       make(chan struct{}, 1),
 		pushDone:   make(chan pushResult, 1),
