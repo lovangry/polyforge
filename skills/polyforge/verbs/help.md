@@ -26,7 +26,7 @@ binary's help faces print them; `pf help` lists the full registry and
 | answer | `verbs/answer.md` | `pf answer <id> -text "..."` — reply to a pending question (`-question`, `-answer-id`, `-by`) |
 | batch-confirm | `verbs/batch-confirm.md` | `pf batch-confirm` — show the wave recommendation; `pf batch-confirm -all` — confirm and submit it |
 | pause | `verbs/pause.md` | `pf pause <id>` — operator pause at the next safe boundary |
-| resume | `verbs/resume.md` | `pf resume <id>` — clear the operator pause (`-priority`) |
+| resume | `verbs/resume.md` | `pf resume <id>` — clear the operator pause |
 | wrap | `verbs/wrap.md` | `pf wrap <id>` — terminal success; `pf wrap <id> -fail` — terminal failure |
 | ops | `verbs/ops.md` | `pf ops status` — jobs, mode, queue counters; `pf ops shutdown` — graceful stop |
 
@@ -41,7 +41,7 @@ binary's help faces print them; `pf help` lists the full registry and
 | Verb | Fragment | Command |
 |---|---|---|
 | help | `verbs/help.md` | `pf help` — the registry face; this fragment is its routing-side index |
-| init | this fragment (`init.md`) | install / upgrade / machine setup — routes to the repo's `tools/install.sh` |
+| init | the init fragment (`init.md`) | install / upgrade / machine setup — routes to the repo's `tools/install.sh` |
 
 ## Non-goals
 
