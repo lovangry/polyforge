@@ -28,7 +28,7 @@ func TestV1S02NeedsInputLoop(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	d.pf(t, "submit", wi)
 

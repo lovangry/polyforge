@@ -55,7 +55,7 @@ func TestV1S16AnswerAutoRedeliveryAfterKill9(t *testing.T) {
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	d.pf(t, "submit", wi)
 	waitQuestion(t, d, wi, qid, 30*time.Second)
@@ -153,7 +153,7 @@ func TestV1S16EmptyQuestionIDFlushRefused(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	d.pf(t, "submit", wi)
 	capDir := d.capsuleDir(wi)
@@ -225,7 +225,7 @@ func TestV1S16DuplicateFlushSameIDIsIdempotent(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	d.pf(t, "submit", wi)
 
@@ -302,7 +302,7 @@ func TestV1S16ZeroLandingAnswerSurvivesDaemonCrash(t *testing.T) {
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)

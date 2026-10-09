@@ -43,7 +43,7 @@ func TestV1S19AwaitingAnswerIsPersistedToDisk(t *testing.T) {
 				"question": question},
 		}, nil)
 
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
@@ -122,7 +122,7 @@ func TestV1S19AwaitingAnswerRedeliveredAfterDaemonCrash(t *testing.T) {
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
@@ -191,7 +191,7 @@ func TestV1S19FinalOutcomeReplayedAfterDaemonCrash(t *testing.T) {
 	wi := inst.newWI(t, "s19 C: the terminal outcome replayed after a crash",
 		envelopeQuickFix(), nil)
 
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
@@ -253,7 +253,7 @@ func TestV1S19FinalOutcomeReplayedAfterDaemonCrash(t *testing.T) {
 
 func TestV1S19CorruptLedgerFileQuarantinedAtStartup(t *testing.T) {
 	inst := newV1Install(t)
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 
 	// A file that is neither valid JSON nor a known version.
 	const garbage = "{not json at all — s19 corruption probe"

@@ -61,8 +61,6 @@ func TestRunAbortsWhenMidflightCapsuleMissing(t *testing.T) {
 	cfg := Config{
 		MachineID:         "m-test",
 		SocketPath:        filepath.Join(dir, "s.sock"),
-		UseDriver:         false,
-		UseDriverExplicit: true,
 		Workspace:         ws,
 		DataDir:           data,
 		Project:           "proj",

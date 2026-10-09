@@ -32,8 +32,6 @@ func validateCfg(t *testing.T, ws string) Config {
 	return Config{
 		MachineID:         "m-wsval",
 		SocketPath:        filepath.Join(dir, "s.sock"),
-		UseDriver:         false,
-		UseDriverExplicit: true,
 		Workspace:         ws,
 		DataDir:           data,
 		Project:           "proj",

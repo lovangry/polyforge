@@ -550,21 +550,22 @@ func strPtr(s string) *string { return &s }
 
 // v1Daemon is one `pf daemon` OS process.
 type v1Daemon struct {
-	t          *testing.T
-	inst       *v1Install
-	cmd        *exec.Cmd
-	logPath    string
-	sock       string
-	dataDir    string
-	workspace  string
-	machineID  string
-	apiKey     string // optional dedicated aihub key (optAPIKey); "" = bootstrap admin key
-	execPrompt string
-	extraEnv   []string
-	extraArgs  []string // extra `pf daemon` flags appended to the argv
-	client     *cli.DaemonClient
-	waitedExit chan error
-	serverURL  string // --server override (optServerURL)
+	t            *testing.T
+	inst         *v1Install
+	cmd          *exec.Cmd
+	logPath      string
+	sock         string
+	dataDir      string
+	workspace    string
+	machineID    string
+	apiKey       string // optional dedicated aihub key (optAPIKey); "" = bootstrap admin key
+	execPrompt   string
+	driverPinned bool // optDriverEngine marker: the scenario chose the (only) engine
+	extraEnv     []string
+	extraArgs    []string // extra `pf daemon` flags appended to the argv
+	client       *cli.DaemonClient
+	waitedExit   chan error
+	serverURL    string // --server override (optServerURL)
 }
 
 type daemonOpt func(*v1Daemon)
@@ -573,17 +574,8 @@ func optMachineID(id string) daemonOpt {
 	return func(d *v1Daemon) { d.machineID = id }
 }
 
-// optExecutorPrompt points --executor-prompt at another file. The
-// initial prompt the daemon injects into every derivation is built from
-// it (runtime.buildPrompt), so a scenario that needs a prompt of a
-// particular SIZE — s17's must-fail-at-spawn ladder needs one larger
-// than a pipe buffer — sets it here instead of touching the real
-// executor skill. Empty means the default (the real
-// skills/pf-execute/SKILL.md), resolved in start() rather than at
-// construction so struct-literal builders keep the default for free.
-func optExecutorPrompt(path string) daemonOpt {
-	return func(d *v1Daemon) { d.execPrompt = path }
-}
+// optExecutorPrompt was the executor-prompt opt; the flag is retired
+// (polyforge#106) and the opt is gone with it.
 
 // optAPIKey boots the daemon on a dedicated aihub api key (e.g. a
 // machine user's key the scenario revokes mid-run) instead of the
@@ -619,12 +611,12 @@ func optMode(mode string) daemonOpt {
 	return func(d *v1Daemon) { d.extraEnv = append(d.extraEnv, "__PFV1_MODE__="+mode) }
 }
 
-// optUseDriver pins the daemon's execution engine to the v2 Go driver
-// (the -use-driver flag): a migrated scenario's explicit pin, so the
-// start() guard's explicitEngineFlag check sees it and the scenario RUNs
-// regardless of PFV1_LEGACY_LANE.
-func optUseDriver() daemonOpt {
-	return func(d *v1Daemon) { d.extraArgs = append(d.extraArgs, "-use-driver") }
+// optDriverEngine marks the scenario as driver-pinned: a migrated
+// scenario's explicit marker (polyforge#106 retired the engine flag it
+// used to pass), so the start() guard sees it and the scenario RUNS
+// regardless of the (soon-retired) legacy-lane hatch.
+func optDriverEngine() daemonOpt {
+	return func(d *v1Daemon) { d.driverPinned = true }
 }
 
 // optServerURL points the daemon's aihub API face (--server) at url
@@ -689,25 +681,16 @@ func newV1Daemon(t *testing.T, inst *v1Install, opts ...daemonOpt) *v1Daemon {
 // migration, and the hatch is the way to keep the lane exercisable.
 // Visible in `go test -v` / `-json` output (plain `go test` suppresses
 // skips — see the Makefile test target's evidence note).
-const legacyLaneSkipMsg = "v1-harness legacy lane: fakepi speaks the WI-Agent stdio-RPC protocol the driver-era daemon no longer serves (its stdin sees EOF and it parks forever, producing none of the records/questions the legacy scenarios wait for); skipped pending the Phase-4 e2e migration (polyforge#104). Set PFV1_LEGACY_LANE=1 to run the scenario with the engine pinned to -use-driver=false."
-
-// explicitEngineFlag reports whether an extra-args slice already pins
-// the daemon's execution engine with an explicit -use-driver / --use-driver
-// flag (every spelling the Go flag package accepts: bare, =true, =false).
-func explicitEngineFlag(extraArgs []string) bool {
-	for _, a := range extraArgs {
-		for _, p := range []string{"-use-driver", "--use-driver"} {
-			if a == p || strings.HasPrefix(a, p+"=") {
-				return true
-			}
-		}
-	}
-	return false
-}
+// (polyforge#106: the message's flag spellings are gone; the hatch
+// itself is retired later in this same change.)
+const legacyLaneSkipMsg = "v1-harness legacy lane: fakepi speaks the WI-Agent stdio-RPC protocol the driver-era daemon no longer serves (its stdin sees EOF and it parks forever, producing none of the records/questions the legacy scenarios wait for); skipped pending the Phase-4 e2e migration (polyforge#104). Set PFV1_LEGACY_LANE=1 to run the scenario with the engine pinned to the legacy lane."
 
 // legacyLaneHatch reports whether the PFV1_LEGACY_LANE escape hatch is
 // armed (only the exact spelling "1" arms it — "", "0", "true" do not:
 // a hatch is a deliberate opt-in, never an ambient default).
+// (polyforge#106: retired later in this change; until then an armed
+// hatch simply runs the scenario — the daemon now refuses the variable
+// at boot, loudly, by design.)
 func legacyLaneHatch() bool {
 	return os.Getenv("PFV1_LEGACY_LANE") == "1"
 }
@@ -731,28 +714,15 @@ func requireLegacyLane(t *testing.T) {
 // start launches the daemon process and waits until its UDS face answers.
 func (d *v1Daemon) start() {
 	d.t.Helper()
-	// Legacy-lane guard (polyforge#104, the Phase-4 e2e migration debt):
-	// a daemon booted without an explicit engine flag runs the v2 Go
-	// driver by default, and the legacy scenarios' fakepi agent speaks
-	// the WI-Agent stdio-RPC protocol that engine no longer serves —
-	// fakepi's stdin sees EOF immediately and it parks forever, so every
-	// legacy scenario times out on "agent never spawned" (burn-in #99's
-	// verification attributed the deterministic failures to exactly
-	// this). Every daemon-booting scenario in this package except the
-	// v2 driver e2e (which pins -use-driver explicitly) is legacy-lane
-	// and skips here until the e2e migration lands. The escape hatch
-	// keeps the lane exercisable: PFV1_LEGACY_LANE=1 pins the engine
-	// explicitly to -use-driver=false (immune to any future default
-	// flip) and runs the scenario. A daemon whose argv already carries
-	// an explicit -use-driver/--use-driver flag is never skipped — its
-	// author chose the engine on purpose.
-	if !explicitEngineFlag(d.extraArgs) {
+	// Legacy-lane guard (polyforge#104): a scenario without the driver
+	// marker is legacy-lane and skips here unless the hatch is armed.
+	// polyforge#106 retires both (the marker, then the guard): today the
+	// marker only marks; the daemon argv carries no engine flag because
+	// the driver IS the engine and no selection flag exists anymore.
+	if !d.driverPinned {
 		if !legacyLaneHatch() {
 			d.t.Skip(legacyLaneSkipMsg)
 		}
-		// escape hatch: pin the legacy engine explicitly so the scenario
-		// keeps its meaning even if the boot default moves again
-		d.extraArgs = append(d.extraArgs, "-use-driver=false")
 	}
 	logf, err := os.Create(d.logPath)
 	if err != nil {
@@ -773,11 +743,8 @@ func (d *v1Daemon) start() {
 	if apiKey == "" {
 		apiKey = d.inst.adminKey
 	}
-	// optExecutorPrompt: the opt-set file, or the real executor skill.
-	execPrompt := d.execPrompt
-	if execPrompt == "" {
-		execPrompt = filepath.Join(d.inst.root, "skills", "pf-execute", "SKILL.md")
-	}
+	// The executor-prompt flag is retired (polyforge#106); the daemon
+	// argv carries no prompt flag and no prompt file selection.
 	args := []string{
 		"daemon",
 		"--socket", d.sock,
@@ -788,7 +755,6 @@ func (d *v1Daemon) start() {
 		"--workspace", d.workspace,
 		"--project", v1Project,
 		"--workflows-dir", filepath.Join(d.inst.root, "workflows"),
-		"--executor-prompt", execPrompt,
 		"--pi-bin", d.inst.fakepiPath,
 	}
 	if gitRemoteBase != "" {

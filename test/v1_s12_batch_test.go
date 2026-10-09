@@ -44,7 +44,7 @@ func TestV1S12BatchWave(t *testing.T) {
 	// harness's post-teardown orphan sweep by hand.
 	inst.trackWI(wiBHigh)
 
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 
 	// The bare recommendation: read-only, no job created.

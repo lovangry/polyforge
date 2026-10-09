@@ -44,7 +44,7 @@ func TestV1S10FlushSpawnFence(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	d.pf(t, "submit", wi)
 	waitQuestion(t, d, wi, qid, 30*time.Second)

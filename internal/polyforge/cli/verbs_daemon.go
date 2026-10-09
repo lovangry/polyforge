@@ -633,9 +633,6 @@ Launch flags (with environment variable and default, where one exists):
       ready-queue project scope for batch/drain (env PF_PROJECT)
   --workflows-dir PATH
       workflows/ checkout dir (default ./workflows)
-  --executor-prompt PATH
-      executor skill file injected into every agent
-      (default ./skills/pf-execute/SKILL.md)
   --pi-bin PATH
       harness binary (default pi)
   --harness-sessions-root PATH

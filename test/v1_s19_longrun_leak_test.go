@@ -238,7 +238,7 @@ func s19AssertEventsLogClean(t *testing.T, dataDir string, wis []string) {
 
 func TestV1S19LongRunLeakProbe(t *testing.T) {
 	inst := newV1Install(t)
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	pid := d.cmd.Process.Pid
 

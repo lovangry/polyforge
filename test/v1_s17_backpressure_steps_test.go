@@ -53,7 +53,7 @@ func TestV1S17BackpressureSteps(t *testing.T) {
 		map[string]any{"do": "envelope", "id": "release", "outcome": "completed"},
 	)
 	wi := inst.newWI(t, "s17: push backpressure (steps trigger, aihub outage)", actions, nil)
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)

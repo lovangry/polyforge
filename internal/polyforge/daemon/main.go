@@ -37,7 +37,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
 	project := fs.String("project", "", "ready-queue project scope for batch/drain (env PF_PROJECT)")
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
-	executorPrompt := fs.String("executor-prompt", "", "executor skill file injected into every agent (default ./skills/pf-execute/SKILL.md)")
 	piBin := fs.String("pi-bin", "", "harness binary (default pi)")
 	sessionsRoot := fs.String("harness-sessions-root", "", "harness session store root for the live-transcript sync (env POLYFORGE_HARNESS_SESSIONS_ROOT; default ~/.pi/agent/sessions)")
 	cgroupRoot := fs.String("cgroup-root", "", "cgroup v2 root for layer-0 cleanup (env POLYFORGE_CGROUP_ROOT)")
@@ -45,7 +44,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
 	recallTopK := fs.Int("recall-topk", 0, "claim-time memory snapshot hit count (env POLYFORGE_RECALL_TOPK; default 10, max 50)")
 	mode := fs.String("mode", "", "initial mode: interactive|batch|drain (default interactive)")
-	useDriver := fs.Bool("use-driver", true, "use the v2 Go execution driver (replaces the WI-Agent spawn)")
 	// Observe supervision windows (#12): Go duration strings, flags only
 	// (no env fallbacks). Omitted or zero keeps observe's own default.
 	hangWindow := fs.Duration("hang-window", 0, "stream-silence window while a turn is in flight before the liveness probe arms (default 10m)")
@@ -60,6 +58,15 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "pf daemon: unexpected arguments %v\n", fs.Args())
 		return 2
+	}
+	// The WI-Agent legacy lane hatch is retired (polyforge#106): a daemon
+	// whose environment carries the retired variable is refused BEFORE
+	// anything is loaded or served — the engine selection the variable
+	// used to force no longer exists, and silently ignoring it would be
+	// exactly the acceptance the spec forbids.
+	if os.Getenv(legacyLaneEnv) != "" {
+		fmt.Fprintf(stderr, "pf daemon: refusing to start: the environment variable %s is set, but the legacy WI-Agent lane it selected was deleted (polyforge#106); unset it — the driver engine is the only engine\n", legacyLaneEnv)
+		return 1
 	}
 
 	shared, err := cli.LoadConfig(*cfgPath)
@@ -106,13 +113,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *workflowsDir == "" {
 		*workflowsDir = "workflows"
 	}
-	if *executorPrompt == "" {
-		*executorPrompt = filepath.Join("skills", "pf-execute", "SKILL.md")
-	}
-	if !fileExists(*executorPrompt) {
-		fmt.Fprintf(stderr, "pf daemon: executor prompt %s not found (run from the daemon checkout or pass --executor-prompt)\n", *executorPrompt)
-		return 1
-	}
 	if *cgroupRoot == "" {
 		*cgroupRoot = os.Getenv("POLYFORGE_CGROUP_ROOT")
 	}
@@ -133,14 +133,11 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfg := Config{
 		MachineID:           *machineID,
 		SocketPath:          *socket,
-		UseDriver:           *useDriver,
-		UseDriverExplicit:   true,
 		Workspace:           workspaceVal,
 		DataDir:             *dataDir,
 		Project:             *project,
 		GitRemoteBase:       *gitRemoteBase,
 		WorkflowsDir:        *workflowsDir,
-		ExecutorPromptFile:  *executorPrompt,
 		PiBin:               *piBin,
 		HarnessSessionsRoot: *sessionsRoot,
 		CgroupRoot:          *cgroupRoot,
@@ -203,7 +200,7 @@ func resolveWorkspace(flagVal string, getenv func(string) string) (string, error
 	return "", errors.New("no workspace selected: -workspace PATH (or POLYFORGE_WORKSPACE) is required — the capsule base <workspace>/capsules has no default; example: pf daemon -workspace /srv/polyforge/workspace ...")
 }
 
-func fileExists(p string) bool {
-	st, err := os.Stat(p)
-	return err == nil && !st.IsDir()
-}
+// legacyLaneEnv is the retired WI-Agent lane-selection environment
+// variable (polyforge#106). The name is kept only so the boot refusal
+// can name it; nothing reads it as a knob anymore.
+const legacyLaneEnv = "PFV1_LEGACY_LANE"

@@ -179,18 +179,17 @@ func TestRestartWiring(t *testing.T) {
 		c.GitRemoteBase = hubBase
 	})
 
-	// The recovery engine resumed the recorded agent (transcript exists
-	// → resume, not fresh).
+	// The recovery engine re-derived the recorded agent at restart
+	// (polyforge#106: the WI-Agent transcript-resume discriminator is
+	// retired with the legacy cascade; the driver derivation's own
+	// resume shape is pinned by the e2e journal assertions, s08/s17 —
+	// here the pin is that restart reconciliation re-derives AT ALL).
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		td.spawner.mu.Lock()
 		calls := len(td.spawner.calls)
-		resume := calls > 0 && td.spawner.calls[0].Resume
 		td.spawner.mu.Unlock()
 		if calls > 0 {
-			if !resume {
-				t.Fatal("restart recovery spawned a FRESH agent; want transcript resume")
-			}
 			break
 		}
 		if time.Now().After(deadline) {

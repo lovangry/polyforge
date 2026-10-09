@@ -35,7 +35,7 @@ func TestV1S07ProviderErrorStorm(t *testing.T) {
 			// FAIL #3 → the bounds are spent: failed_rewind_exhausted.
 			{"do": "envelope", "id": "verification", "outcome": "gate_failed", "output": verdict},
 		}, nil)
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)

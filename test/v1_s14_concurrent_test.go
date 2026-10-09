@@ -20,7 +20,7 @@ func TestV1S14ConcurrentTwoWI(t *testing.T) {
 	wiA := inst.newWI(t, "s14: concurrent member A", envelopeQuickFix(), nil)
 	wiB := inst.newWI(t, "s14: concurrent member B", envelopeQuickFix(), nil)
 
-	d := newV1Daemon(t, inst, optUseDriver())
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	d.pf(t, "submit", wiA)
 	d.pf(t, "submit", wiB)

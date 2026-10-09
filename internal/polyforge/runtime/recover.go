@@ -566,12 +566,6 @@ func (r *Runtime) spawnAgent(ctx context.Context, j *job, resume bool, transcrip
 // WI/capsule identity and the resume-or-fresh framing.
 func (r *Runtime) buildPrompt(j *job, resume bool) string {
 	var b strings.Builder
-	if r.cfg.ExecutorPromptFile != "" {
-		if raw, err := os.ReadFile(r.cfg.ExecutorPromptFile); err == nil {
-			b.Write(raw)
-			b.WriteString("\n\n")
-		}
-	}
 	fmt.Fprintf(&b, "Work item %s (project %s, session %s). Capsule root: %s. ",
 		j.wi, j.project, j.sessionFingerprint, j.capsuleDir)
 	if j.bundleName != "" {

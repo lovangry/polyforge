@@ -1,9 +1,6 @@
 package test
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -23,18 +20,16 @@ import (
 // in-process; here the ladder runs through the REAL daemon, the real
 // spawner and real step processes.
 //
-// PIPE-CAPACITY CONTRACT RE-VERIFIED AGAINST DRIVER SPAWNS. The oversized
-// executor prompt (optExecutorPrompt, kept for the legacy lane until
-// #106) is inert on this lane: the driver assembles each dispatch's
-// prompt from the bundle's step definition (a few KB), so the daemon's
-// prompt write always completes into the stdin pipe buffer. The must-fail
+// PIPE-CAPACITY CONTRACT RE-VERIFIED AGAINST DRIVER SPAWNS. The driver
+// assembles each dispatch's prompt from the bundle's step definition (a
+// few KB), so the prompt write always completes into the stdin pipe
+// buffer. The must-fail
 // ladder is deterministic anyway, and for a stronger reason: a derivation
 // that dies at birth can NEVER write its result envelope, so EVERY
 // ordering of the birth-exit race fails the dispatch (envelope absence),
 // which is the same failed-recovery input the pipe-capacity shape used to
-// buy. The fail_spawn_* flags and the oversized prompt stay in the plan
-// and the daemon argv so the scenario's shape is unchanged when #106
-// removes the legacy lane.
+// buy. The fail_spawn_* flags stay in the plan so the scenario's shape is
+// unchanged now that #106 has removed the legacy lane.
 func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 	inst := newV1Install(t)
 	actions := []map[string]any{
@@ -55,7 +50,7 @@ func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 		"fail_spawn_fresh":  true,
 	})
 
-	d := newV1Daemon(t, inst, optUseDriver(), optExecutorPrompt(oversizedExecutorPrompt(t)))
+	d := newV1Daemon(t, inst, optDriverEngine())
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
@@ -162,29 +157,3 @@ func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 			x.WorkflowStatus, x.Steps["grill"].Status)
 	}
 }
-
-// oversizedExecutorPrompt writes an executor preamble several times the
-// pipe capacity and returns its path. The daemon builds every LEGACY-lane
-// initial prompt from this file; on the driver lane it is inert (see the
-// scenario header's contract re-verification) and kept only so the
-// daemon argv matches the legacy shape until #106.
-func oversizedExecutorPrompt(t *testing.T) string {
-	t.Helper()
-	var b strings.Builder
-	b.WriteString("# executor preamble (s17 must-fail ladder)\n\n")
-	for b.Len() < 4*piPipeCapacity {
-		b.WriteString("Padding: the initial prompt must not fit in the agent's stdin pipe buffer.\n")
-	}
-	if b.Len() <= piPipeCapacity {
-		t.Fatalf("executor prompt %d bytes, must exceed the pipe capacity %d", b.Len(), piPipeCapacity)
-	}
-	path := filepath.Join(t.TempDir(), "executor-prompt.md")
-	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-// piPipeCapacity is Linux's default pipe buffer (16 pages). See the
-// scenario header for the driver-era re-verification of the contract.
-const piPipeCapacity = 64 << 10

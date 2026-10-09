@@ -93,9 +93,6 @@ type Config struct {
 	// observe lane's own entries. The daemon binds it to the observe
 	// EventLog; nil (tests) disables it.
 	EventTap func(wi, kind string, body map[string]any)
-	// ExecutorPromptFile, when set, is prepended verbatim to every agent's
-	// initial prompt (the executor skill shipped with the daemon release).
-	ExecutorPromptFile string
 	// EnvSecrets are configured secret values (machine api key, push
 	// credential) the spawned agents' environment must never carry, even
 	// under a renamed variable.

@@ -87,7 +87,7 @@ func TestV1S17DrainKeyRevokedDegradedSignal(t *testing.T) {
 				"question": "s17: park here (the test never answers)."},
 		}, nil)
 
-	d := newV1Daemon(t, inst, optMode("drain"), optAPIKey(issued.Plain), optUseDriver())
+	d := newV1Daemon(t, inst, optMode("drain"), optAPIKey(issued.Plain), optDriverEngine())
 	d.start()
 
 	// The wave claims A on its own (5s wave period) and A parks. The
