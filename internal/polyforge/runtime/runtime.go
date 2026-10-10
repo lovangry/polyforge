@@ -28,6 +28,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
@@ -260,6 +261,11 @@ type job struct {
 	// there).
 	workspaceRoot string
 	workspaceYaml *workspace.Config
+	// stepCandidates is the polyforge#79 claim-time compose: the
+	// per-step post-precedence candidate lists (step id → list; a
+	// present-empty entry governs and means no switchable chain). In-
+	// memory only; the durable snapshot is the capsule.json audit.
+	stepCandidates map[string][]string
 	// repoSources is the polyforge#79 local-source record: repo name →
 	// the source actually cloned from (the resolved local checkout for
 	// yaml-sourced clones). In-memory only; the durable copy is the
@@ -1013,6 +1019,7 @@ func (r *Runtime) readWorkspaceYaml(j *job) error {
 		}
 	}
 	j.workspaceYaml = wcfg
+	r.composeStepCandidates(j)
 	if wcfg == nil || wcfg.Projects == nil {
 		return nil // no projects section: the registry inventory stands
 	}
@@ -1034,6 +1041,33 @@ func (r *Runtime) readWorkspaceYaml(j *job) error {
 	j.repos = repos         // the yaml inventory WHOLLY replaces the claim answer's
 	j.repoSources = sources // repo name → resolved local checkout (the audit's repo_sources)
 	return nil
+}
+
+// composeStepCandidates is the polyforge#79 claim-time compose: the
+// four-level precedence over the pinned bundle's frontmatter (read from
+// the daemon checkout at WorkflowsDir/<bundle>; no bundle ⇒ nil — the
+// yaml still stashes for the audit) and the claim's workspace yaml. The
+// composed map rides the job into the driver (AgentStartInput → bridge →
+// driver.Config) and into the capsule audit.
+func (r *Runtime) composeStepCandidates(j *job) {
+	j.stepCandidates = workspace.ComposeCandidates(r.readBundleFrontmatter(j.bundleName), j.workspaceYaml)
+}
+
+// readBundleFrontmatter reads the pinned bundle's workflow.md
+// frontmatter from the daemon checkout. A torn frontmatter is aihub's
+// bundle-validation business at WI creation; the claim treats it as
+// absent and lets the driver's own parse surface the defect at
+// dispatch.
+func (r *Runtime) readBundleFrontmatter(bundleName string) *workflow.Frontmatter {
+	if bundleName == "" || r.cfg.WorkflowsDir == "" {
+		return nil
+	}
+	fm, err := workflow.ReadFrontmatter(filepath.Join(r.cfg.WorkflowsDir, bundleName, "workflow.md"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: bundle frontmatter unreadable (treating as absent): %v\n", bundleName, err)
+		return nil
+	}
+	return fm
 }
 
 // abandonClaim is the D5 compensation carried into the session model:
