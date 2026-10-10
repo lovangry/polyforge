@@ -48,6 +48,34 @@ func doctorFind(t *testing.T, doc doctorDoc, name string) (string, string) {
 	return "", ""
 }
 
+// withSummarizeCovered extends a doctor env for the all-pass contract:
+// both harness binaries reachable (stub PATH) and both
+// [watch.summarize_model] entries non-empty in the scratch config.
+func withSummarizeCovered(t *testing.T, env map[string]string) map[string]string {
+	t.Helper()
+	stub := t.TempDir()
+	for _, name := range []string{"pi", "claude"} {
+		if err := os.WriteFile(filepath.Join(stub, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfgPath := filepath.Join(env["XDG_CONFIG_HOME"], "polyforge", "cli.toml")
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	covered := string(raw) + "\n[watch.summarize_model.pi]\nmodel = \"prov/pi\"\n\n[watch.summarize_model.claude]\nmodel = \"prov/claude\"\n"
+	if err := os.WriteFile(cfgPath, []byte(covered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for k, v := range env {
+		out[k] = v
+	}
+	out["PATH"] = stub
+	return out
+}
+
 // doctorServerConfig points a scratch config at srv with a live mapped
 // workspace and the given daemon socket, and answers the runPf env.
 func doctorServerConfig(t *testing.T, server, apiKey, socket string, projects ...string) map[string]string {
@@ -112,6 +140,10 @@ func TestDoctorHealthyMachineAllPassExit0(t *testing.T) {
 	srv := aiSever(t, &reqRecorder{}, map[string]bool{"polyforge": true}, 0, "")
 	sock := liveDaemonSocket(t, "m-h")
 	env := doctorServerConfig(t, srv.URL, "k_ok", sock, "polyforge")
+	// The watch summarize-model check is part of the all-pass report:
+	// pin the harness reachability (stub PATH with pi + claude) and
+	// cover both entries in the scratch config (wi_LMSxPTQTtz5x).
+	env = withSummarizeCovered(t, env)
 	code, stdout, doc := doctorStatus(t, env, "--json", "doctor")
 	if code != 0 {
 		t.Fatalf("healthy machine: exit %d, want 0 (output %s)", code, stdout)
