@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // ---------------------------------------------------------------------------
@@ -41,6 +43,62 @@ var cmdFile = &Command{
 			return fmt.Errorf("file: unknown action %q", sub)
 		}
 	},
+}
+
+// osGetwd is the file-create inference's cwd seam: the production value
+// is the process working directory; tests pin it to a fixture path.
+var osGetwd = os.Getwd
+
+// requiredProjectFlagError is the polyforge#113 required-flag error,
+// byte-identical wherever inference cannot answer (no containing
+// workspace, no yaml). It never mutates.
+const requiredProjectFlagError = "file create: --project is required — there is no default project (polyforge#113); workspaces and their projects are declared in [workspace.\"<path>\"] sections of cli.toml (`pf doctor` checks the mapping)"
+
+// inferProjectFromCwd is the polyforge#79 file-create default: the
+// process cwd resolved against the expanded [workspace] mapping by
+// containment (cwd equal to or inside the workspace root). Exactly one
+// containing workspace whose yaml lists exactly ONE project answers it —
+// the create proceeds as if --project had been passed. Every other shape
+// asks for --project or surfaces the typed yaml error; inference never
+// silently degrades and never ambient-picks (the #113 principle).
+func inferProjectFromCwd(ctx *Context) (string, error) {
+	cwd, err := osGetwd()
+	if err != nil || ctx.Cfg.Mapping == nil || ctx.Cfg.Mapping.Empty() {
+		return "", fmt.Errorf(requiredProjectFlagError)
+	}
+	var containing []string
+	for _, ws := range ctx.Cfg.Mapping.Workspaces() {
+		if cwd == ws || strings.HasPrefix(cwd, ws+string(os.PathSeparator)) {
+			containing = append(containing, ws)
+		}
+	}
+	switch {
+	case len(containing) == 0:
+		return "", fmt.Errorf(requiredProjectFlagError)
+	case len(containing) > 1:
+		return "", fmt.Errorf("file create: --project is required — the working directory is inside more than one mapped workspace (%s); pass --project explicitly (placement stays unambiguous, polyforge#113)", strings.Join(containing, ", "))
+	}
+	wcfg, err := workspace.Load(containing[0])
+	if err != nil {
+		return "", fmt.Errorf("file create: %v", err)
+	}
+	if wcfg == nil || len(wcfg.Projects) == 0 {
+		// No yaml (absent-equivalent) or a workflow-only yaml: no project
+		// inventory to infer from — today's required-flag error stands.
+		return "", fmt.Errorf(requiredProjectFlagError)
+	}
+	if len(wcfg.Projects) > 1 {
+		names := make([]string, 0, len(wcfg.Projects))
+		for name := range wcfg.Projects {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return "", fmt.Errorf("file create: --project is required — %s lists %d projects (%s); pass --project explicitly (no default is invented)", workspace.PathFor(containing[0]), len(names), strings.Join(names, ", "))
+	}
+	for name := range wcfg.Projects {
+		return name, nil
+	}
+	return "", fmt.Errorf(requiredProjectFlagError) // unreachable
 }
 
 // requireMappedProject validates a placement-adjacent verb's --project
@@ -102,7 +160,14 @@ func fileCreate(ctx *Context, args []string) error {
 		req.Goal = *goal
 	}
 	if req.Project == "" {
-		return fmt.Errorf("file create: --project is required — there is no default project (polyforge#113); workspaces and their projects are declared in [workspace.\"<path>\"] sections of cli.toml (`pf doctor` checks the mapping)")
+		// polyforge#79 inference: the cwd → workspace → yaml default. It
+		// answers a project, the #113 required-flag error (verbatim), or
+		// the typed yaml/ambiguity error — never a silent skip.
+		proj, err := inferProjectFromCwd(ctx)
+		if err != nil {
+			return err
+		}
+		req.Project = proj
 	}
 	if err := requireMappedProject(ctx, "file create", req.Project); err != nil {
 		return err
