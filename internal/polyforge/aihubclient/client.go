@@ -578,3 +578,20 @@ func (c *Client) SessionEnd(wi string, req api.SessionEndRequest) error {
 func (c *Client) UnblockWorkItem(idOrSlug string) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/unblock", map[string]any{})
 }
+
+// ResumeBlockedWorkItem is the §6.4 owner resume verdict's hub door
+// (polyforge#116): `pf resume` on a workflow parked blocked — status
+// blocked → queued for the owner's immediate re-claim; the daemon then
+// re-establishes execution over the parked capsule. Authorization is
+// server-side (the claim gate: any project member).
+func (c *Client) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
+	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/resume-blocked", map[string]any{})
+}
+
+// TerminateBlockedWorkItem is the §6.4 owner terminate verdict's hub
+// door (polyforge#116): `pf wrap --fail` on a parked workflow — status
+// blocked → failed. Authorization is server-side (admin or project
+// maintainer, the unblock gate).
+func (c *Client) TerminateBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
+	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/terminate-blocked", map[string]any{})
+}

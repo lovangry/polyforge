@@ -695,6 +695,140 @@ func (m *WIManager) Unblock(idOrSlug string, actor string) (*api.WorkItem, error
 	return m.load(id)
 }
 
+// ResumeBlocked is the §6.4 owner resume verdict's hub door (polyforge#116):
+// the door the owner's `pf resume` exercises on a workflow parked blocked on
+// an honest incomplete result. Unlike Unblock it is NOT a pool return for a
+// generic re-claim: it marks the WI re-claimable for the owner's own
+// immediate re-establishment of execution (the daemon claims it back and the
+// claim/start path resumes the parked capsule in place). Gate:
+// status==blocked AND the session row is EMPTY — the same M2 invariant
+// Unblock asserts (a blocked WI still carrying a session would orphan a
+// holder). Effect: status→queued, waiting_on=NULL, event wi_resumed; the
+// claim gate (unchanged: queued only) then admits the WI like any queued
+// ticket. Authorization is the CLAIM gate's (any project member), not the
+// unblock gate's admin/maintainer: this door exercises the right the
+// blocked verdict itself grants ("the owner holds the next move") rather
+// than overriding it — the pool-return override stays admin-gated on
+// Unblock.
+func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem, error) {
+	id, err := m.Resolve(idOrSlug)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var status string
+	var session sql.NullString
+	if err := tx.QueryRow(`SELECT status, session_hash FROM work_items WHERE id=?1`, id).
+		Scan(&status, &session); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
+		}
+		return nil, err
+	}
+	if isTerminal(status) {
+		return nil, Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", status)
+	}
+	if status != api.StatusBlocked {
+		return nil, Fail(api.ErrCoreConflict, "NOT_BLOCKED",
+			"resume requires a blocked work item (got %s)", status)
+	}
+	if session.Valid && session.String != "" {
+		// M2's invariant, asserted in the gate: blocked = blocked status
+		// PLUS a cleared session. A session that survived the verdict is
+		// a half-settled close — refuse rather than orphan a live holder.
+		return nil, Fail(api.ErrCoreConflict, "SESSION_HELD",
+			"a blocked work item must carry no session (M2 cleared it); refuse rather than orphan the holder")
+	}
+	now := Now()
+	// Guarded: only a blocked row flips; 0 rows = concurrent transition.
+	res, err := tx.Exec(`UPDATE work_items SET status=?, waiting_on=NULL, updated_at=?
+		WHERE id=? AND status=?`, api.StatusQueued, now, id, api.StatusBlocked)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, Fail(api.ErrCoreConflict, "", "state changed concurrently")
+	}
+	if err := appendEventTx(tx, id, now, actor, "wi_resumed",
+		map[string]any{"from": api.StatusBlocked, "to": api.StatusQueued}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return m.load(id)
+}
+
+// TerminateBlocked is the §6.4 owner terminate verdict's hub door
+// (polyforge#116): `pf wrap --fail` on a workflow parked blocked. The bounded
+// close dropped the job and cleared the session, so a session-fenced
+// session-end is unavailable there — this is the door that lands the owner's
+// kill verdict. Gate: status==blocked AND the session row is EMPTY (the same
+// M2 invariant Unblock asserts). Effect: status→failed, closed_at set,
+// waiting_on cleared, event wi_failed_blocked; a wrapped (success) verdict is
+// not a door here — a parked workflow has no completed output to wrap, and
+// the owner's continuing move is ResumeBlocked. Authorization mirrors
+// Unblock — admin or project maintainer: landing a terminal verdict overrides
+// what the runtime judged a wait-on-owner state.
+func (m *WIManager) TerminateBlocked(idOrSlug string, actor string) (*api.WorkItem, error) {
+	id, err := m.Resolve(idOrSlug)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var status string
+	var session sql.NullString
+	if err := tx.QueryRow(`SELECT status, session_hash FROM work_items WHERE id=?1`, id).
+		Scan(&status, &session); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
+		}
+		return nil, err
+	}
+	if isTerminal(status) {
+		return nil, Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", status)
+	}
+	if status != api.StatusBlocked {
+		return nil, Fail(api.ErrCoreConflict, "NOT_BLOCKED",
+			"terminate requires a blocked work item (got %s)", status)
+	}
+	if session.Valid && session.String != "" {
+		return nil, Fail(api.ErrCoreConflict, "SESSION_HELD",
+			"a blocked work item must carry no session (M2 cleared it); refuse rather than orphan the holder")
+	}
+	now := Now()
+	// Guarded: only a blocked row flips; 0 rows = concurrent transition.
+	// The session row stays cleared (it already is): a terminal WI must
+	// never stay "held" (M2's clearing rule applies to every terminal
+	// transition).
+	res, err := tx.Exec(`UPDATE work_items SET status=?, closed_at=?, updated_at=?,
+		waiting_on=NULL, session_hash=NULL, session_fingerprint=NULL, session_machine=NULL,
+		session_owner=NULL, session_started_at=NULL, clean_pause=0
+		WHERE id=? AND status=?`, api.StatusFailed, now, now, id, api.StatusBlocked)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, Fail(api.ErrCoreConflict, "", "state changed concurrently")
+	}
+	if err := appendEventTx(tx, id, now, actor, "wi_failed_blocked",
+		map[string]any{"from": api.StatusBlocked, "to": api.StatusFailed}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return m.load(id)
+}
+
 // ListFilters is the list query.
 type ListFilters struct {
 	Project   string // project name or id; "" = all visible
