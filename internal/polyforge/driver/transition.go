@@ -86,7 +86,6 @@ const (
 	// needs a kind to ride. Every other kind follows the driver spec.
 	TransInit   TransitionKind = "init"
 	TransAnswer TransitionKind = "answer"
-	TransAnswer TransitionKind = "answer"
 	// TransInterrupted is the recovery integration's write: ONE
 	// infra_failure attempt for the derivation that died without a
 	// result, archived by the single execution.json writer when the
