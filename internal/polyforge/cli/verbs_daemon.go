@@ -380,23 +380,34 @@ func setCleanPause(ctx *Context, wiID string, value bool) string {
 }
 
 // ---------------------------------------------------------------------------
-// resume — clear the operator pause: flips clean_pause back to false on
-// the hub and leaves the paused work item to its HOLDER daemon (the
-// session's machine attaches on its next start via session-attach;
-// a work item whose holder is gone moves with `pf takeover`). This
-// deliberately replaces v1's “fresh local claim via the daemon”
-// behavior — the v1.5 pause keeps the session on the hub, and only the
-// holder may resume it. Since the v1.5 review Finding 2 the pause also
-// RETAINS the holder daemon's local record, so the attach promised
-// below really can fire. If the holder daemon is LIVE when the resume
-// lands there is deliberately NO auto-pickup this phase: the retained
-// paused record sits until that daemon's next start (whose restart
-// reconciliation attaches); to continue immediately use `pf takeover`.
+// resume — one verb, two doors (polyforge#116). The hub status picks the
+// door:
+//
+//   - a workflow parked BLOCKED on an honest incomplete result (§6.5
+//     step 5: workflow_status=blocked, position frozen, the owner holds
+//     the next move) gets the §6.4 owner move: the daemon's resume-blocked
+//     route returns the WI to claimable at the hub and re-establishes
+//     execution over the parked capsule — the frozen current step
+//     re-dispatches in place as a fresh derivation. It must never answer
+//     the pause copy again (nothing here was ever paused).
+//   - every other status keeps the operator-pause door exactly as it was:
+//     a clean_pause=false PATCH on the hub, the WI left to its HOLDER
+//     daemon (the session's machine attaches on its next start via
+//     session-attach; a work item whose holder is gone moves with `pf
+//     takeover`). This deliberately replaces v1's “fresh local claim via
+//     the daemon” behavior — the v1.5 pause keeps the session on the hub,
+//     and only the holder may resume it. Since the v1.5 review Finding 2
+//     the pause also RETAINS the holder daemon's local record, so the
+//     attach promised below really can fire. If the holder daemon is LIVE
+//     when the resume lands there is deliberately NO auto-pickup this
+//     phase: the retained paused record sits until that daemon's next
+//     start (whose restart reconciliation attaches); to continue
+//     immediately use `pf takeover`.
 // ---------------------------------------------------------------------------
 
 var cmdResume = &Command{
 	Name:    "resume",
-	Summary: "Clear the operator pause of a WI (clean_pause=false; the holder daemon attaches on its next start)",
+	Summary: "Resume a paused WI (clean_pause=false), or a workflow parked blocked (the §6.4 owner move)",
 	Usage:   "pf resume <id>",
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -406,12 +417,27 @@ var cmdResume = &Command{
 		if err := submitPrecheck(ctx, args[0]); err != nil {
 			return err
 		}
-		if err := patchCleanPause(ctx, args[0], false); err != nil {
+		wi, err := ctx.aihub().GetWorkItem(args[0])
+		if err != nil {
 			return err
 		}
-		fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the paused work item stays with its holder daemon\n", args[0])
-		fmt.Fprintln(ctx.Stdout, "(its machine re-attaches on the next daemon start; a work item whose holder is gone moves with `pf takeover <id> --reason ...`)")
-		fmt.Fprintln(ctx.Stdout, "(a live holder daemon does NOT pick this up until its next start; to continue immediately use `pf takeover`)")
+		if wi.Status != api.StatusBlocked {
+			if err := patchCleanPause(ctx, args[0], false); err != nil {
+				return err
+			}
+			fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the paused work item stays with its holder daemon\n", args[0])
+			fmt.Fprintln(ctx.Stdout, "(its machine re-attaches on the next daemon start; a work item whose holder is gone moves with `pf takeover <id> --reason ...`)")
+			fmt.Fprintln(ctx.Stdout, "(a live holder daemon does NOT pick this up until its next start; to continue immediately use `pf takeover`)")
+			return nil
+		}
+		raw, err := ctx.daemon().ResumeBlocked(args[0])
+		if err != nil {
+			return err
+		}
+		ctx.finish(raw, func() {
+			fmt.Fprintf(ctx.Stdout, "resumed %s: the workflow was parked blocked (incomplete result) — the §6.4 owner move re-established execution over the parked capsule\n", args[0])
+			fmt.Fprintln(ctx.Stdout, "(the frozen current step re-dispatches in place as a fresh derivation; watch it with `pf observe <id>`)")
+		})
 		return nil
 	},
 }
@@ -680,6 +706,9 @@ observe's own default):
       probes (10m)
   --probe-timeout D
       one liveness probe's ack bound (2m)
+  --wall-window D
+      absolute wall-clock backstop on a derivation's progress silence;
+      no probe ack restarts it (15m; negative disables)
   --revalidate-every D
       periodic session revalidation cadence for RUNNING jobs
       (5m; negative disables)

@@ -15,6 +15,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -53,6 +54,15 @@ type Hub interface {
 	SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error)
 	// Heartbeat posts one machines/heartbeat upsert (M3 liveness face).
 	Heartbeat(req aihubclient.MachineHeartbeat) (*aihubclient.MachineHeartbeatResult, error)
+	// ResumeBlockedWorkItem is the §6.4 owner resume verdict's hub door
+	// (polyforge#116): `pf resume` on a workflow parked blocked — blocked
+	// → queued for the owner's immediate re-claim. *aihubclient.Client
+	// satisfies it.
+	ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error)
+	// TerminateBlockedWorkItem is the §6.4 owner terminate verdict's hub
+	// door (polyforge#116): `pf wrap --fail` on a parked workflow —
+	// blocked → failed. *aihubclient.Client satisfies it.
+	TerminateBlockedWorkItem(idOrSlug string) (json.RawMessage, error)
 	// Do performs one typed request against aihub (the client's own
 	// generic entry): the F6 memory adapters use it for the calls the
 	// shared client carries no typed method for.
@@ -134,6 +144,10 @@ type ObserveWindows struct {
 	IdleWindow time.Duration
 	// ProbeTimeout bounds one liveness probe's ack wait.
 	ProbeTimeout time.Duration
+	// WallBackstop is the §6.2 absolute bound on a derivation's PROGRESS
+	// silence that no probe ack can restart (polyforge#114). Zero keeps
+	// observe's default (15m); negative disables the backstop.
+	WallBackstop time.Duration
 	// SessionRevalidateEvery is the M4 periodic session-revalidation
 	// cadence (0 = observe's default 5m; negative = disabled).
 	SessionRevalidateEvery time.Duration
@@ -369,6 +383,9 @@ func New(cfg Config) (*Daemon, error) {
 		HangWindow:   cfg.Observe.HangWindow,
 		IdleWindow:   cfg.Observe.IdleWindow,
 		ProbeTimeout: cfg.Observe.ProbeTimeout,
+		// polyforge#114: the §6.2 wall backstop rides the same
+		// pass-through (0 = the 15m default, negative = disabled).
+		WallBackstop: cfg.Observe.WallBackstop,
 		// M4 cadence rides the same pass-through (0 = the 5m default,
 		// negative = disabled).
 		SessionRevalidateEvery: cfg.Observe.SessionRevalidateEvery,
@@ -547,12 +564,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			// The caller gave up: run the same bounded graceful sequence.
-			return d.Shutdown(context.Background())
+			return d.Shutdown(context.Background(), CallerContextShutdownCause())
 		case <-d.shutDone:
 			return nil
 		case err := <-serveErr:
 			if err != nil && err != http.ErrServerClosed {
-				_ = d.Shutdown(context.Background())
+				_ = d.Shutdown(context.Background(), ServeErrorShutdownCause(err))
 				return err
 			}
 			return nil
@@ -576,7 +593,7 @@ func (d *Daemon) startFace(lst net.Listener) (chan error, bool) {
 	if d.faceClosed {
 		return nil, false
 	}
-	d.srv = &http.Server{Handler: d.handler()}
+	d.srv = &http.Server{Handler: d.handler(), ConnContext: credConnContext}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- d.srv.Serve(lst) }()
 	return serveErr, true
@@ -962,7 +979,11 @@ func (d *Daemon) listenUDS() (net.Listener, error) {
 		return nil, err
 	}
 	_ = os.Chmod(path, 0o660)
-	return lst, nil
+	// credListener (polyforge#110): capture each accepted conn's UDS
+	// peer credential at accept time so the POST /shutdown route can
+	// attribute the shutdown to the dialing process. The wrapper is
+	// transparent otherwise; closeFace closes it like any listener.
+	return &credListener{Listener: lst}, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -522,6 +522,48 @@ func TestRunIncompleteParksBlocked(t *testing.T) {
 	}
 }
 
+// polyforge#116: the §6.4 owner resume must keep the spawn ledger
+// honest — the verdict consumes no derivation ordinal, so the loop's
+// re-dispatch of the frozen step takes exactly the next ordinal. (The
+// old shape wrote the resume's step_start at n+1 and the loop then
+// dispatched at n+2: a phantom derivation between the verdict and the
+// re-dispatch it names — the e2e fakepi's ordinal indexing skips a
+// plan action.)
+func TestResumeCurrentLedgerHonest(t *testing.T) {
+	d, sp, execPath := runEnv(t, spec("a"), spec("b"))
+	sp.script = []fakeEntry{done(`{}`), incomplete()}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	pre := len(sp.dispatched())
+	if err := d.ResumeCurrent(); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if s := readExec(t, execPath).WorkflowStatus; s != StatusRunning {
+		t.Fatalf("the verdict writes running back: %q", s)
+	}
+	if s := readExec(t, execPath).Steps["b"]; s == nil || s.Status != capsule.StepInProgress {
+		t.Fatalf("the verdict keeps the position frozen: %+v", s)
+	}
+	sp.script = []fakeEntry{done(`{"b":2}`)}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run after resume: %v", err)
+	}
+	got := sp.dispatched()
+	if len(got) != pre+1 {
+		t.Fatalf("the owner resume re-dispatches the frozen step exactly once: %v (pre %d)", got, pre)
+	}
+	if !sp.spawnAt(pre).Resume {
+		t.Fatalf("the re-dispatch is a resume in place: %v", got)
+	}
+	if n := sp.spawnAt(pre).SpawnN; n != 3 {
+		t.Fatalf("the re-dispatch carries ordinal %d, want 3 — no phantom derivation between the verdict and the dispatch (ledger honesty)", n)
+	}
+	if s := readExec(t, execPath).Steps["b"]; s == nil || s.Status != capsule.StepDone {
+		t.Fatalf("the re-dispatched step completes: %+v", s)
+	}
+}
+
 func TestRunContextCancelDuringDispatch(t *testing.T) {
 	d, sp, _ := runEnv(t, spec("a"))
 	sp.script = []fakeEntry{{hold: true}}

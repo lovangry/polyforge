@@ -86,6 +86,7 @@ const (
 	// needs a kind to ride. Every other kind follows the driver spec.
 	TransInit   TransitionKind = "init"
 	TransAnswer TransitionKind = "answer"
+	TransAnswer TransitionKind = "answer"
 	// TransInterrupted is the recovery integration's write: ONE
 	// infra_failure attempt for the derivation that died without a
 	// result, archived by the single execution.json writer when the
@@ -93,6 +94,14 @@ const (
 	// recomputation over the attempts archive (candidates.go), so this
 	// archive is the only state an interruption leaves behind.
 	TransInterrupted TransitionKind = "interrupted"
+	// TransUnblock is the §6.4 owner resume verdict for a workflow parked
+	// blocked on an honest incomplete result (polyforge#116): flip
+	// workflow_status back to running and leave the re-dispatch to the
+	// loop. It consumes NO derivation ordinal — the fresh ordinal is the
+	// loop's own step_start write on the next dispatch, so the spawn
+	// ledger never records a phantom derivation between the owner's
+	// verdict and the re-dispatch it names.
+	TransUnblock TransitionKind = "unblock"
 )
 
 // TransitionRequest is one submitted execution.json mutation. SpawnN is
@@ -206,6 +215,8 @@ func (d *Driver) applyLocked(req TransitionRequest, info *appliedInfo) error {
 		return d.applyInitLocked()
 	case TransStepStart:
 		return d.applyStepStartLocked(req, info)
+	case TransUnblock:
+		return d.applyUnblockLocked()
 	case TransStepResult:
 		return d.applyStepResultLocked(req)
 	case TransGateFail:
@@ -280,6 +291,24 @@ func (d *Driver) applyStepStartLocked(req TransitionRequest, info *appliedInfo) 
 	st.StepStartedAt = d.stamp() // refreshes on every re-entry (03 §4.2 D8)
 	d.exec.WorkflowStatus = StatusRunning
 	d.exec.CurrentStep = req.StepID
+	return nil
+}
+
+// applyUnblockLocked lands the §6.4 owner resume verdict (polyforge#116):
+// only a blocked workflow accepts it (03 §4.2: the owner's follow-up
+// writes running back), the position stays frozen exactly as the park
+// left it (the current step remains in_progress — the loop's own
+// step_start write on the next dispatch re-dispatches it as the fresh
+// derivation), and no derivation ordinal is consumed here: a spawn
+// ledger entry must name a derivation that actually ran.
+func (d *Driver) applyUnblockLocked() error {
+	if d.exec.WorkflowStatus != StatusBlocked {
+		return fmt.Errorf("driver: resume is the owner's blocked-step verdict; workflow is %q", d.exec.WorkflowStatus)
+	}
+	if d.exec.CurrentStep == "" {
+		return fmt.Errorf("driver: blocked workflow without a current step")
+	}
+	d.exec.WorkflowStatus = StatusRunning
 	return nil
 }
 
@@ -728,6 +757,10 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 	case TransInit:
 		kind = "exec_init"
 		body["steps"] = len(d.workflow.Steps)
+	case TransUnblock:
+		kind = "resumed"
+		body["step"] = d.exec.CurrentStep
+		body["resume"] = true
 	case TransStepStart:
 		kind = "step_started"
 		body["step"] = req.StepID

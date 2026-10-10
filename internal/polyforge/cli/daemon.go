@@ -233,6 +233,15 @@ func (d *DaemonClient) Takeover(wiID, priority string) (json.RawMessage, error) 
 	return d.submit(wiID, "takeover", priority)
 }
 
+// ResumeBlocked submits the §6.4 owner move for a workflow parked blocked
+// (polyforge#116): the daemon returns the WI to claimable at the hub (the
+// owner's resume door) and re-establishes execution over the parked capsule
+// synchronously — the claim/start path's owner move unblocks the workflow
+// and the loop re-dispatches the frozen step in place as a fresh derivation.
+func (d *DaemonClient) ResumeBlocked(wiID string) (json.RawMessage, error) {
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-blocked", "", map[string]any{}, nil)
+}
+
 // AdoptSessionRequest is the POST /jobs/{id}/adopt-session body. The
 // session SECRET travels only over this local UDS route (never the hub
 // wire): it is the custody handoff that keeps a CLI-side takeover's

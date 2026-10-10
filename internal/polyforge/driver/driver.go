@@ -525,26 +525,30 @@ func (d *Driver) Terminate(status, reason string) error {
 }
 
 // ResumeCurrent is the owner's third §6.4 verdict after an incomplete
-// result: unblock the workflow and re-dispatch the current step in
-// place (03 §4.2: the owner's follow-up writes running back). Only a
-// blocked workflow accepts it — while running, the loop owns starts,
-// and a stray resume would race the loop's own dispatch ordinal.
+// result: write running back over the parked workflow (03 §4.2: the
+// owner's follow-up writes running back) and wake the loop, whose own
+// dispatch re-dispatches the frozen in_progress current step in place
+// as a fresh derivation. Only a blocked workflow accepts it — while
+// running, the loop owns starts, and a stray resume would race the
+// loop's own dispatch ordinal.
+//
+// The verdict consumes NO derivation ordinal (polyforge#116): the fresh
+// ordinal is the loop's own step_start write on that dispatch, so the
+// spawn ledger records exactly one derivation per dispatch that ran —
+// the re-dispatch the owner asked for lands at the next ordinal with no
+// phantom gap. The verdict alone re-dispatches nothing: it is a state
+// write plus a wake; the caller re-invokes Run (the claim/start path
+// does: bridge.Start → ResumeCurrent → Run).
 func (d *Driver) ResumeCurrent() error {
 	d.mu.Lock()
 	blocked := d.exec.WorkflowStatus == StatusBlocked
-	cur := d.exec.CurrentStep
-	n := d.spawnN
 	d.mu.Unlock()
 	if !blocked {
 		return fmt.Errorf("driver: resume is the owner's blocked-step verdict; workflow is %q", d.Snapshot().WorkflowStatus)
 	}
-	if cur == "" {
-		return fmt.Errorf("driver: blocked workflow without a current step")
-	}
 	return d.transition(TransitionRequest{
-		Kind:   TransStepStart,
-		StepID: cur,
-		SpawnN: n + 1, // the resume re-dispatch is a fresh derivation
+		Kind:   TransUnblock,
+		SpawnN: d.currentSpawnN(),
 	})
 }
 

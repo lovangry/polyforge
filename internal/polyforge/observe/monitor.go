@@ -58,6 +58,13 @@ const wrapRetries = 3
 // (wrapRetries) and are not affected.
 const sameErrorCap = 5
 
+// toolDispatchWindow is the #83 tool-execution exemption's bound: how
+// long a dispatched-but-unreturned tool call counts as live work (both
+// the hang lane and the wall backstop honor it). A tool silent longer
+// than this genuinely deserves the probe — and, past the wall backstop,
+// the kill.
+const toolDispatchWindow = 30 * time.Minute
+
 // defaultVersionStagnantTicks is the belt-and-braces bound for C3': the
 // number of consecutive execution.json REWRITES (mtime advanced) that
 // carry an unchanged top-level Version before the monitor also treats
@@ -65,6 +72,12 @@ const sameErrorCap = 5
 // version_stagnant event per episode. The Version-driven rule stays the
 // primary archival semantic; this only catches an agent that violates it.
 const defaultVersionStagnantTicks = 3
+
+// defaultWallBackstop is the §6.2 wall clock's production floor
+// (polyforge#114): max(3× step wall budget, 15min) with the per-step
+// refinement unimplemented, so the 15-minute floor is the absolute
+// bound on a dispatch's PROGRESS silence no probe ack can reset.
+const defaultWallBackstop = 15 * time.Minute
 
 // PushFunc is the injectable capsule commit+push operation (the seam the
 // tests use; production binds gitops.CommitPush). ctx bounds the call;
@@ -156,8 +169,18 @@ type monitorCfg struct {
 	HangWindow   time.Duration
 	// IdleWindow bounds the F5 idle watchdog (zero = disabled — a
 	// zero window would fire on every tick; production default 10min).
-	IdleWindow        time.Duration
-	ProbeTimeout      time.Duration
+	IdleWindow   time.Duration
+	ProbeTimeout time.Duration
+	// WallBackstop is the §6.2 absolute bound (polyforge#114): the cap
+	// on the derivation's PROGRESS silence that no probe ack can
+	// restart. The hang/idle watchdogs' probe-cleared windows protect
+	// short legitimate silences; this bound is what turns a dispatch
+	// that nothing can progress — the #114 wedge shape: the criterion
+	// arms, the probe acks from the HARNESS side (driver-alive) while
+	// the step process sits parked — into a confirmed recovery. The
+	// design's per-step refinement (max(3× step wall budget, 15m)) is
+	// future work; the daemon-level floor is the default. <= 0 disables.
+	WallBackstop      time.Duration
 	PushRetryBackoff  time.Duration
 	BackpressureSteps int
 	BackpressureAfter time.Duration
@@ -256,6 +279,14 @@ type Monitor struct {
 	// is only needed to restart the window after a probe the agent
 	// survived.
 	hangAnchor time.Time
+	// attachAt is the wall backstop's non-resettable floor for derivations
+	// that have not produced a single progress record yet (polyforge#114):
+	// set once per derivation at attach/onRecovered, NEVER moved by a
+	// probe ack (unlike hangAnchor/idleAnchor). The measured progress
+	// silence is anchored on max(LastProgressAt, attachAt), so every
+	// dispatch is bounded from its birth no matter how the ack lanes
+	// behave.
+	attachAt time.Time
 	// idle detection (F5). idleAnchor is the idle window's baseline
 	// when the stream has produced no progress record yet (set at
 	// attach/recovery adoption) and its restart point after a probe the
@@ -373,6 +404,7 @@ func (m *Monitor) onTick() {
 	m.drainIncidents()
 	m.checkHang()
 	m.checkIdle()
+	m.checkWallBackstop()
 	m.checkNoProgress()
 	m.pollExecution()
 	m.schedulePush()
@@ -516,7 +548,7 @@ func (m *Monitor) checkHang() {
 	// mid-tool-call). Window: 30 minutes from the dispatch — a tool that
 	// takes longer than that is genuinely stuck and DESERVES the probe.
 	hb := m.stream.heartbeat()
-	if !hb.ToolDispatchAt.IsZero() && time.Since(hb.ToolDispatchAt) < 30*time.Minute {
+	if !hb.ToolDispatchAt.IsZero() && time.Since(hb.ToolDispatchAt) < toolDispatchWindow {
 		return
 	}
 	m.stateMu.Lock()
@@ -626,6 +658,74 @@ func (m *Monitor) checkIdle() {
 	}()
 }
 
+// checkWallBackstop is the §6.2 absolute bound (polyforge#114): the
+// non-resettable cap on a dispatch's PROGRESS silence — the backstop for
+// exactly the shape where every criterion-driven lane is silenced by the
+// ack itself. The hang/idle watchdogs arm on silence, probe, and let an
+// acked probe restart their windows; on the driver lane that ack is
+// answered from the daemon-side harness liveness (bridge.SendControl,
+// the #99 comment) and never carries step-process progress, so a wedged
+// step is acked every window forever (experiments C/D of wi_u0xTEIz0gxi4:
+// goroutine liveness, process liveness and a stdio echo all fail to
+// discriminate the wedge). This check ignores the ack lanes entirely: it
+// measures the progress witness — StreamHeartbeat.LastProgressAt, which
+// no probe result ever moves, floored by the derivation's attach moment
+// — and past the absolute bound it confirms the recovery regardless of
+// what the probes answered (design: 墙钟仅作绝对兜底，防的正是确认探针自身
+// 失效或被回声洗白). Same exemptions as the watchdogs: a live #83 tool
+// dispatch, a pending question (needs_input is designed stillness — the
+// §6.2a wall clock does not judge waiting-for-human either) and every
+// suppressed state. The reason follows the stream's turn state: InFlight
+// ⇒ hang, otherwise the idle shape the F5 lane owns.
+func (m *Monitor) checkWallBackstop() {
+	if m.cfg.WallBackstop <= 0 {
+		return // disabled (zero = the unit-test default; negative = explicit off)
+	}
+	hb := m.stream.heartbeat()
+	silent := m.wallSilence(hb)
+	if silent < m.cfg.WallBackstop {
+		return
+	}
+	if !hb.ToolDispatchAt.IsZero() && time.Since(hb.ToolDispatchAt) < toolDispatchWindow {
+		return // #83: a dispatched tool within its window is live work
+	}
+	m.stateMu.Lock()
+	pending := m.pending != nil
+	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
+	m.stateMu.Unlock()
+	if pending || suppressed {
+		return
+	}
+	if hb.InFlight {
+		m.needRecovery(protocol.RecoverHang, fmt.Sprintf(
+			"stream silent with turn in flight for %s, past the absolute %s wall bound; "+
+				"liveness-probe acks carry harness-side liveness, not step progress — the wall backstop confirms the hang",
+			silent.Round(time.Second), m.cfg.WallBackstop))
+		return
+	}
+	m.needRecovery(protocol.RecoverIdle, fmt.Sprintf(
+		"no progress record and no turn in flight for %s, past the absolute %s wall bound; "+
+			"the wall backstop confirms what the acked probes kept clearing",
+		silent.Round(time.Second), m.cfg.WallBackstop))
+}
+
+// wallSilence measures the derivation's PROGRESS silence on the
+// non-resettable witness: StreamHeartbeat.LastProgressAt (the F15
+// progress whitelist; no probe result ever resets it) floored by the
+// derivation's attach moment, so a derivation that has not emitted a
+// single progress record yet is bounded from its birth rather than from
+// the epoch.
+func (m *Monitor) wallSilence(hb StreamHeartbeat) time.Duration {
+	eff := hb.LastProgressAt
+	if m.attachAt.After(eff) {
+		eff = m.attachAt
+	}
+	if eff.IsZero() {
+		return 0 // defensive: attachAt is always set at attach/onRecovered
+	}
+	return time.Since(eff)
+}
+
 // checkNoProgress is the F15c owner face: the same progress-silence
 // signal the hang/idle watchdogs judge (no PROGRESS record for longer
 // than the idle window, REGARDLESS of whether a turn is open — an open
@@ -681,6 +781,29 @@ func (m *Monitor) onProbeResult(pr probeResult) {
 	// and a fresh episode deserves a fresh event.
 	m.noProgressAt = time.Time{}
 	if pr.err == nil && pr.ack.OK {
+		// polyforge#114 — the ack never restarts a window past the
+		// absolute bound. An acked probe proves at most that the HARNESS
+		// side answered: on driver handles the verdict is the daemon-side
+		// driver goroutine's liveness (bridge.SendControl, the #99
+		// comment), on step handles it is the stdio reader's transport
+		// echo — neither says the agent's turn is moving. Before granting
+		// the window restart, the non-resettable progress witness gets a
+		// veto: measured progress silence past the wall backstop confirms
+		// the recovery even though the probe was answered.
+		if m.cfg.WallBackstop > 0 {
+			if s := m.wallSilence(m.stream.heartbeat()); s >= m.cfg.WallBackstop {
+				if idleProbe {
+					m.needRecovery(protocol.RecoverIdle, fmt.Sprintf(
+						"no turn in flight; liveness probe acknowledged but progress silence is %s, past the absolute %s wall bound — the ack is a harness-side echo, not life",
+						s.Round(time.Second), m.cfg.WallBackstop))
+					return
+				}
+				m.needRecovery(protocol.RecoverHang, fmt.Sprintf(
+					"stream silent with turn in flight; liveness probe acknowledged but progress silence is %s, past the absolute %s wall bound — the ack is a harness-side echo, not life",
+					s.Round(time.Second), m.cfg.WallBackstop))
+				return
+			}
+		}
 		if idleProbe {
 			// The agent answered with no turn open: legal slow work or
 			// a live-but-quiet session. The idle window restarts;
@@ -736,6 +859,7 @@ func (m *Monitor) onRecovered(at Attach) {
 	m.probeInFlight = false
 	m.probeIdle = false
 	m.hangAnchor = time.Now()
+	m.attachAt = time.Now()      // the successor's wall-bound floor restarts with it
 	m.idleAnchor = time.Now()    // the successor derivation gets a fresh idle baseline
 	m.noProgressAt = time.Time{} // ...and a fresh no_progress episode
 	// The successor derivation carries its own transcript facts (its

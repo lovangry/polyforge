@@ -138,8 +138,13 @@ type fakeHub struct {
 	// verifies records the wi of every SessionVerify call (the M4
 	// revalidation seam the -revalidate-every flag test pins).
 	verifies []string
-	queues   []api.WorkItem
-	blockEnd chan struct{} // non-nil: SessionEnd parks until closed
+	// resumeBlockeds/terminateBlockeds record the wi of every §6.4 owner
+	// door call (polyforge#116): the resume door (resume-blocked route)
+	// and the terminate door (wrap --fail on a parked workflow).
+	resumeBlockeds    []string
+	terminateBlockeds []string
+	queues            []api.WorkItem
+	blockEnd          chan struct{} // non-nil: SessionEnd parks until closed
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string
@@ -267,6 +272,31 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 		st = api.StatusRunning
 	}
 	return &api.WorkItem{ID: id, Status: st, ProjectName: "proj"}, nil
+}
+
+// ResumeBlockedWorkItem / TerminateBlockedWorkItem are the §6.4 owner
+// doors (polyforge#116): the resume door returns the WI to claimable
+// (queued, session cleared), the terminate door lands failed. Both
+// record the transition in the status map; the returned view is unused
+// by the routes (only the error matters).
+func (h *fakeHub) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id := h.canonicalID(idOrSlug)
+	h.status[id] = api.StatusQueued
+	delete(h.held, id)
+	h.resumeBlockeds = append(h.resumeBlockeds, id)
+	return json.RawMessage(`{"id":"` + id + `","status":"` + api.StatusQueued + `"}`), nil
+}
+
+func (h *fakeHub) TerminateBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id := h.canonicalID(idOrSlug)
+	h.status[id] = api.StatusFailed
+	delete(h.held, id)
+	h.terminateBlockeds = append(h.terminateBlockeds, id)
+	return json.RawMessage(`{"id":"` + id + `","status":"` + api.StatusFailed + `"}`), nil
 }
 
 func (h *fakeHub) Queue(project string) ([]api.WorkItem, error) {
@@ -535,7 +565,7 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 	}
 	td.client = cli.NewDaemonClient(td.sock)
 	t.Cleanup(func() {
-		_ = d.Shutdown(context.Background())
+		_ = d.Shutdown(context.Background(), DirectShutdownCause())
 		select {
 		case <-td.runDone:
 		case <-time.After(5 * time.Second):

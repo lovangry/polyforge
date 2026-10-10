@@ -77,6 +77,11 @@ func (s *Server) routes() {
 	// Finding 3 (v1.5 review): the blocked state's exit door — the human
 	// unblock that returns a bounded-fail verdict to the queued pool.
 	m.HandleFunc("POST /api/v1/work-items/{id}/unblock", s.auth(s.hUnblockWI))
+	// polyforge#116: the §6.4 owner doors on a workflow parked blocked —
+	// resume (the owner's re-dispatch-in-place verdict, claimed back
+	// immediately) and the terminate verdict (pf wrap --fail on a parked WI).
+	m.HandleFunc("POST /api/v1/work-items/{id}/resume-blocked", s.auth(s.hResumeBlockedWI))
+	m.HandleFunc("POST /api/v1/work-items/{id}/terminate-blocked", s.auth(s.hTerminateBlockedWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
 	m.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.auth(s.hDeps))
 	m.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking}/{kind}", s.auth(s.hDelDep))
@@ -796,6 +801,70 @@ func (s *Server) hUnblockWI(w http.ResponseWriter, r *http.Request, idn *identit
 		}
 	}
 	wi, err := s.WIs.Unblock(id, idn.UserID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, err := s.WIs.View(wi)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// hResumeBlockedWI serves the §6.4 owner resume verdict's hub door
+// (polyforge#116): the door `pf resume` exercises on a workflow parked
+// blocked on an honest incomplete result. Authorization is the CLAIM
+// gate's (any project member), NOT the unblock gate's admin/maintainer:
+// this door exercises the right the blocked verdict itself grants ("the
+// owner holds the next move") rather than overriding it — the
+// pool-return override stays admin-gated on Unblock.
+func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	wi, err := s.WIs.ResumeBlocked(id, idn.UserID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, err := s.WIs.View(wi)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// hTerminateBlockedWI serves the §6.4 owner terminate verdict's hub door
+// (polyforge#116): `pf wrap --fail` on a parked workflow. Authorization
+// mirrors Unblock — admin or project maintainer: landing a terminal
+// verdict overrides what the runtime judged a wait-on-owner state.
+func (s *Server) hTerminateBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if idn.Role != "admin" {
+		role, merr := s.memberRole(projectID, idn.UserID)
+		if merr != nil || role != "maintainer" {
+			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "terminate-blocked requires admin or project maintainer"))
+			return
+		}
+	}
+	wi, err := s.WIs.TerminateBlocked(id, idn.UserID)
 	if err != nil {
 		writeErr(w, err)
 		return

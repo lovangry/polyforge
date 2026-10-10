@@ -85,6 +85,26 @@ func (h *Handle) SendControl(m protocol.ControlMsg) error {
 	// tool calls legitimately stay record-silent for the whole
 	// HangWindow); a probe on a dead driver fails and recovery owns it
 	// (onExit reaches the same verdict without the probe anyway).
+	//
+	// polyforge#114 — the ack's SUBJECT, stated as a warning: this
+	// verdict is DRIVER-alive (the daemon-side driver goroutine), not
+	// step-process liveness and never step progress. A wedged step
+	// process (open turn, no envelope, no exit) blocks stepRun.Wait
+	// forever, so doneSet stays false and this branch acks the wedge
+	// indefinitely; routing the probe down the step process's own stdio
+	// channel does not help either — the wedged process's stdin reader
+	// answers while its work goroutine sits parked (the transport echo
+	// 04-local-runtime.md §6.2a warns about; reproduced in
+	// wi_u0xTEIz0gxi4 experiment E). An ack from here therefore carries
+	// NO information about the subject whose silence armed the hang
+	// criterion, and the observer must not treat it as unconditional
+	// proof of life: the monitor judges progress on its own record-stream
+	// witness (StreamHeartbeat.LastProgressAt, which no ack moves) and
+	// bounds it with the wall backstop (observe's checkWallBackstop,
+	// --wall-window). This branch stays as-is: within the wall bound an
+	// ack is the only thing keeping a legitimately slow, record-silent
+	// step alive (the pre-#99 false-positive it exists to prevent);
+	// past the bound the monitor stops believing it.
 	if m.Method == protocol.ControlProbe {
 		h.mu.Lock()
 		alive := !h.doneSet
@@ -101,7 +121,10 @@ func (h *Handle) WaitControlAck(ctx context.Context, m protocol.ControlMsg, boun
 	if m.Method == protocol.ControlProbe {
 		// the SendControl probe verdict above IS the ack: an accepted
 		// probe was answered synchronously (the engine is live); there is
-		// no asynchronous ack to wait for.
+		// no asynchronous ack to wait for. See the #114 subject warning on
+		// SendControl: this ack is driver-alive, never step progress —
+		// the observer's wall backstop owns the verdict past the absolute
+		// bound.
 		return h.SendControl(m)
 	}
 	return fmt.Errorf("bridge: no control ack channel on driver handle")
@@ -192,6 +215,26 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bridge: driver.New: %w", err)
+	}
+
+	// The §6.4 owner move on the claim/start path (polyforge#116): a
+	// capsule that arrives BLOCKED (the parked §6.5-step-5 verdict —
+	// chain-durable since the bounded close seals it) must not re-wedge
+	// the fresh driver: Run would read blocked and exit at once (the
+	// bounded close again, forever). The owner's resume verdict unblocks
+	// the workflow; the loop's own dispatch then re-dispatches the frozen
+	// in_progress step in place as a fresh derivation (the parked journal
+	// and prior step output survive — the resumed lane continues the
+	// parked capsule, never a pre-blocked re-derivation). The call is the
+	// owner's verdict exactly because no live loop can leave the blocked
+	// state (Run exits on it): every claim of a parked capsule arrives
+	// here. ResumeCurrent's blocked-only guard makes the call refuse on
+	// any other capsule state; a parked capsule without a current step is
+	// the error surfaced below (the D5 compensation closes the claim).
+	if drv.Snapshot().WorkflowStatus == driver.StatusBlocked {
+		if err := drv.ResumeCurrent(); err != nil {
+			return nil, fmt.Errorf("bridge: owner resume of the parked workflow: %w", err)
+		}
 	}
 
 	dctx, cancel := context.WithCancel(ctx)

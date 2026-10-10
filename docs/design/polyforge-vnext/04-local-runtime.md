@@ -414,6 +414,8 @@ Job 回收的触发原因分两类，机械动作**不同**，不共用同一套
 
 **墙钟兜底不变**：`max(3× step wall 预算, 15 分钟)`，一切判据失效时的绝对界。
 
+**polyforge#114 裁定：确认探针 ack 的语义与墙钟兜底的实现位。** driver 车道（v2 Go driver）上，监督面分类的记录流是 **step 进程**的 stdout，而 `pf/probe` 由 daemon 内 bridge 从 `driver.Run` 的存活性应答——ack 是「driver-alive」，对 step 进程的进展零信息：step 卡死（回合开着、无信封、不退出）时 `stepRun.Wait` 永不返回、应答恒为 ack，确认探针被 harness 侧回声每个窗口永久洗白（正是本节开头警示的传输层回声假阴性在 driver 车道的复刻；把探针改投 step 进程 stdio 同样无效——卡死进程的 stdin 读层照常应答，wi_u0xTEIz0gxi4 实验 E 实测复现）。因此 acked 探针的判决必须依赖进展见证：observe 监视器以 `StreamHeartbeat.LastProgressAt`（任何 ack 都不重置它，attach 时刻为地板）为不可重置的进展静默钟，越过墙钟绝对界即确认恢复（回合在飞 ⇒ `hang`，否则 `idle`），无论探针是否 ack。实现位：`internal/polyforge/observe/monitor.go` 的 `checkWallBackstop`（onTick 直判）与 `onProbeResult` 的界内判决（ack 在界内才重置窗口）；daemon 旗标 `--wall-window` 透传，默认 15 分钟（本节要求的每 step `max(3× wall 预算)` 精化留待后续）；#83 工具执行豁免与 pending_question 豁免对墙钟兜底同款适用。ack 语义注记在 `internal/polyforge/bridge/bridge.go` 的探针应答处（driver-alive ≠ step-alive，界内合法、界外不可信）。
+
 **needs_input 豁免收窄（折入 polyforge#50 实测）。** 旧判据是「`pending_question != nil` 即豁免」，实测过宽（2026-09-29 01:20）：答案**已送达**、agent 消化中挂起（零 TCP/零 io/零写 8min+），而问题仍开着，于是豁免成立、墙钟兜底同被豁免、relay 也不重投——三条自愈路径同时失效，只剩人工可救。收窄后的映射：
 
 | 状态 | `pending_question` | `pending_answer` | 回合在飞 | 判据结论 |

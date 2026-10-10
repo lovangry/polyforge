@@ -1,31 +1,56 @@
-# resume — resume a paused work item
+# resume — resume a paused work item, or a workflow parked blocked
 
-Execution-plane verb: routed to the local daemon (the resume route: a fresh
-claim, generation+1). Resume is **always a new generation** with a newly
-derived WI Agent — it is not "unpause the old run"; the previous generation
-ended when the pause landed. The new generation continues from the
-execution record the sealed capsule holds.
+Execution-plane verb with two doors; the hub status of the work item picks
+the door.
+
+## Door 1 — a paused work item (hub status `paused`)
+
+The operator-pause move: a `clean_pause=false` PATCH on the hub. Nothing is
+claimed locally and no daemon route is contacted — the paused work item
+stays with its HOLDER daemon (the session's machine attaches on its next
+daemon start; a work item whose holder is gone moves with
+`pf takeover <id> --reason ...`; a live holder daemon does not pick this up
+until its next start — to continue immediately use `pf takeover`).
+
+Success: `resumed <id>: clean_pause cleared; the paused work item stays
+with its holder daemon`. `--json`: the raw answer.
+
+## Door 2 — a workflow parked blocked (hub status `blocked`)
+
+The §6.4 owner move (polyforge#116): the workflow parked on an honest
+`incomplete` step result — `workflow_status=blocked` in the capsule, the
+current step frozen `in_progress`, the owner holding the next move. The
+daemon re-establishes execution over the parked capsule: the hub's
+resume-blocked door returns the WI to claimable, the daemon claims it back,
+and the claim/start path's owner move unblocks the workflow — the frozen
+current step re-dispatches IN PLACE as a fresh derivation (the spawn
+journal and the step's prior output survive; the resumed lane continues
+the parked capsule, never a pre-blocked re-derivation).
+
+Success: `resumed <id>: the workflow was parked blocked (incomplete
+result) — the §6.4 owner move re-established execution over the parked
+capsule`, then `(the frozen current step re-dispatches in place as a fresh
+derivation; watch it with pf observe <id>)`. `--json`: the raw answer.
+
+A blocked workflow must never answer the pause copy, and a plain claim
+(`pf submit`) of a parked work item still refuses (`CORE-409
+NOT_CLAIMABLE`) — the owner's moves go through this door, not through the
+claim gate.
 
 ## Triggers
 
-- EN: resume it / continue the paused one / bring it back / pick it up again
-- 中文: 恢复执行 / 把暂停的那个恢复 / 重新跑起来（已暂停的）
+- EN: resume it / continue the paused one / unblock it / it parked blocked,
+  continue it / bring it back / pick it up again
+- 中文: 恢复执行 / 把暂停的那个恢复 / 解除阻塞继续跑 / 重新跑起来
 
 ## Command
 
 ```
-pf resume <id> [--priority low|normal|high|urgent]
+pf resume <id>
 ```
 
 Same CLI precheck as `submit`: an unknown id or a terminal work item is
-refused before the daemon is involved.
-
-## Success
-
-`resumed <id> (fresh claim accepted by the local daemon)`. `--json`: the
-raw answer. The daemon queues the job; its dispatcher derives the new
-agent, which recovers its position from the capsule's
-`runtime-state/execution.json` and continues from where the pause landed.
+refused before anything else happens.
 
 ## Failure branches
 
@@ -33,10 +58,14 @@ agent, which recovers its position from the capsule's
 |---|---|---|
 | `CORE-404` | Unknown or invisible id (CLI precheck) | No such work item — check the `wi_` id. |
 | (no code) `submit: <id> is terminal (<status>)` | The work item is wrapped/failed/cancelled | A finished work item cannot be resumed — file a new one. |
-| `DAEMON-409` | The work item is already active or queued on this daemon, or drain mode rejects the external resume | Observe to see the running attempt; in drain mode leave drain first. |
+| `DAEMON-409` | The work item is already active or queued on this daemon, or drain mode rejects the resume | Observe to see the running attempt; in drain mode leave drain first. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | Graceful shutdown in progress | Wait for restart, then resume. |
-| `CORE-409` (async, in the daemon log) | The server-side claim was refused — an active generation still exists elsewhere | Someone (or another machine) is already running it — observe, or take over as admin if it is stale. |
-| `dial unix …` | Daemon not running | Start the daemon or check `--socket`. |
+| `CORE-409 NOT_BLOCKED` | The resume door on a work item that is no longer blocked | The state moved — check `pf queue`/`pf observe`; a paused WI unpauses with this same verb. |
+| `CORE-409 NOT_CLAIMABLE` (from the resume door) | The blocked WI still carries a session (a half-settled close) | Nobody may resume it until the holder settles — check the holder daemon or take over as admin. |
+| `CORE-404` (from the resume door, on claim) | Another machine claimed the work item between the door and the claim | It resumed elsewhere — observe there. |
+| `dial unix …` | Daemon not running | The blocked-door resume re-establishes execution, so a daemon must be involved — start the daemon or check `--socket`. |
 
 Do not route "continue / go on" of a **running** work item here — that is
-`observe`. `resume` applies to a paused work item only.
+`observe`. The §6.4 sibling moves of Door 2 (rewind to a step, terminate
+the WI) are not exposed on this verb: `pf wrap --fail <id>` is the
+terminate verdict for a parked workflow.
