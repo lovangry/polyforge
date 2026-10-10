@@ -60,7 +60,8 @@ type Command struct {
 // answer, batch-confirm, pause, resume, wrap, ops) — then ship (the wrap→git
 // delivery bridge, daemon face), then the management face M1–M5, then the
 // two migrations (dispatchable but never surfaced on the help face — #103
-// AC16), then the machine health face (doctor, #113), then the daemon
+// AC16), then the machine health face (doctor, #113) and the watch lane's
+// one-shot data face (watch-probe, wi_LMSxPTQTtz5x), then the daemon
 // placeholder (help-only: cmd/pf/main.go intercepts the real launch).
 var commands = []*Command{
 	cmdFile,
@@ -89,6 +90,7 @@ var commands = []*Command{
 	cmdMigrateMemories,
 	cmdMigrateWorkItems,
 	cmdDoctor,
+	cmdWatchProbe,
 	cmdDaemon,
 }
 
@@ -305,11 +307,11 @@ func printUsage(w io.Writer) {
 	// commands[23:25] are the migration verbs — dispatchable, never
 	// surfaced (see the layout comment above).
 	fmt.Fprintln(w, "Diagnostics:")
-	for _, c := range commands[25:26] {
+	for _, c := range commands[25:27] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Process:")
-	for _, c := range commands[26:] {
+	for _, c := range commands[27:] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w)
