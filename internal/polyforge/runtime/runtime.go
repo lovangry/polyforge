@@ -1238,6 +1238,11 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 		Repos:        repoSHAs,
 		CreatedAt:    nowStamp(),
 	}
+	// polyforge#79: the claim-time snapshot doubles as the audit record —
+	// the parsed yaml verbatim, the per-step post-precedence candidate
+	// lists, the resolved repo sources. A no-yaml claim records NOTHING
+	// (omitempty, never fabricated) and its legacy fields are unchanged.
+	stampWorkspaceAudit(j, &idn)
 	blob, _ := json.MarshalIndent(idn, "", "  ")
 	if err := atomicWrite(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
 		return err
@@ -1277,6 +1282,55 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// and agents/, the harness DISCOVERY copies under .pi/agents/, and
 	// sync/materialized.json gates every later consumer.
 	return r.materializeBundle(j)
+}
+
+// stampWorkspaceAudit fills the polyforge#79 audit fields of the
+// capsule identity from the job's claim-time snapshot: the parsed yaml
+// verbatim (the same structures the shared loader answered), the
+// per-step post-precedence candidate lists, and the resolved repo
+// sources — the workspace-root-joined local checkout for yaml-sourced
+// clones, the registry URLs for registry clones under a yaml that
+// governs nothing on the repo side. A no-yaml claim records nothing.
+func stampWorkspaceAudit(j *job, idn *capsule.Identity) {
+	if j.workspaceYaml == nil {
+		return
+	}
+	projects := map[string]capsule.WorkspaceProjectAudit{}
+	for name, proj := range j.workspaceYaml.Projects {
+		if proj == nil {
+			continue
+		}
+		repos := make([]capsule.WorkspaceRepoAudit, 0, len(proj.Repos))
+		for _, re := range proj.Repos {
+			repos = append(repos, capsule.WorkspaceRepoAudit{Name: re.Name, Path: re.Path})
+		}
+		projects[name] = capsule.WorkspaceProjectAudit{Repos: repos}
+	}
+	doc := &capsule.WorkspaceYamlAuditDoc{Projects: projects}
+	if wd := j.workspaceYaml.WorkflowDefaults; wd != nil {
+		doc.WorkflowDefaults = &capsule.WorkspaceDefaultsAuditDoc{
+			ModelCandidates: wd.ModelCandidates,
+			StepKinds:       wd.StepKinds,
+		}
+	}
+	idn.WorkspaceYaml = doc
+	if len(j.stepCandidates) > 0 {
+		idn.EffectiveCandidates = j.stepCandidates
+	}
+	if len(j.repoSources) > 0 {
+		idn.RepoSources = j.repoSources
+	} else {
+		// A yaml that governs nothing on the repo side (workflow-only):
+		// the audit still records the sources actually cloned from — the
+		// claim answer's registry URLs.
+		reg := map[string]string{}
+		for _, pr := range j.repos {
+			reg[pr.Name] = pr.URL
+		}
+		if len(reg) > 0 {
+			idn.RepoSources = reg
+		}
+	}
 }
 
 // writeWorkItemFile materializes runtime-state/work-item.json (F1): the
