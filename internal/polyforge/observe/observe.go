@@ -78,8 +78,14 @@ type Config struct {
 	// WINeedsRecovery(idle). It covers the shape the hang window is
 	// blind to by definition — a turn that already ENDED (e.g. on a
 	// fatal provider error) with the session left driving nothing.
-	IdleWindow        time.Duration // no-record-no-turn quiet window (10min)
-	ProbeTimeout      time.Duration // liveness-probe ack bound (2min)
+	IdleWindow   time.Duration // no-record-no-turn quiet window (10min)
+	ProbeTimeout time.Duration // liveness-probe ack bound (2min)
+	// WallBackstop is the §6.2 absolute bound (polyforge#114): the cap
+	// on a derivation's PROGRESS silence that no probe ack can restart —
+	// the monitor's checkWallBackstop. 0 = the 15m default (the §6.2
+	// floor; the per-step max(3× wall budget) refinement is future
+	// work), a negative value disables the backstop entirely.
+	WallBackstop      time.Duration
 	PushRetryBackoff  time.Duration // async push retry spacing after a failure (10s)
 	BackpressureSteps int           // N consecutive failed pushes before the degradation event (5)
 	BackpressureAfter time.Duration // T without a successful push before the degradation event (30min)
@@ -104,6 +110,12 @@ func (c *Config) fill() {
 	}
 	if c.ProbeTimeout == 0 {
 		c.ProbeTimeout = 2 * time.Minute
+	}
+	if c.WallBackstop == 0 {
+		// §6.2: 墙钟仅作绝对兜底，一切判据失效时的绝对界 — the 15-minute
+		// floor of max(3× step wall budget, 15min) (polyforge#114; the
+		// per-step refinement is future work).
+		c.WallBackstop = defaultWallBackstop
 	}
 	if c.PushRetryBackoff == 0 {
 		c.PushRetryBackoff = 10 * time.Second
@@ -359,6 +371,7 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 			HangWindow:           o.cfg.HangWindow,
 			IdleWindow:           o.cfg.IdleWindow,
 			ProbeTimeout:         o.cfg.ProbeTimeout,
+			WallBackstop:         o.cfg.WallBackstop,
 			PushRetryBackoff:     o.cfg.PushRetryBackoff,
 			BackpressureSteps:    o.cfg.BackpressureSteps,
 			BackpressureAfter:    o.cfg.BackpressureAfter,
@@ -400,6 +413,7 @@ func (m *Monitor) attach(at Attach) {
 	m.records = at.Handle.Records()
 	m.exitCh = at.Handle.Exit()
 	m.idleAnchor = time.Now() // the idle window's pre-first-record baseline
+	m.attachAt = time.Now()   // the wall backstop's non-resettable silence floor
 	m.stateMu.Lock()
 	m.spawnN = at.Msg.SpawnN
 	m.sessionID = at.Msg.SessionID

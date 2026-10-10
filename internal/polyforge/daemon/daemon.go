@@ -134,6 +134,10 @@ type ObserveWindows struct {
 	IdleWindow time.Duration
 	// ProbeTimeout bounds one liveness probe's ack wait.
 	ProbeTimeout time.Duration
+	// WallBackstop is the §6.2 absolute bound on a derivation's PROGRESS
+	// silence that no probe ack can restart (polyforge#114). Zero keeps
+	// observe's default (15m); negative disables the backstop.
+	WallBackstop time.Duration
 	// SessionRevalidateEvery is the M4 periodic session-revalidation
 	// cadence (0 = observe's default 5m; negative = disabled).
 	SessionRevalidateEvery time.Duration
@@ -367,6 +371,9 @@ func New(cfg Config) (*Daemon, error) {
 		HangWindow:   cfg.Observe.HangWindow,
 		IdleWindow:   cfg.Observe.IdleWindow,
 		ProbeTimeout: cfg.Observe.ProbeTimeout,
+		// polyforge#114: the §6.2 wall backstop rides the same
+		// pass-through (0 = the 15m default, negative = disabled).
+		WallBackstop: cfg.Observe.WallBackstop,
 		// M4 cadence rides the same pass-through (0 = the 5m default,
 		// negative = disabled).
 		SessionRevalidateEvery: cfg.Observe.SessionRevalidateEvery,
