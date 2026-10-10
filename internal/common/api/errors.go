@@ -119,7 +119,7 @@ const (
 	// ledger is accounting, not best-effort, so the ship op fails with the
 	// typed error instead of silently skipping the record.
 	ErrDaemonShipLedger = "DAEMON-514"
-	ErrDaemonInternal            = "DAEMON-500"
+	ErrDaemonInternal   = "DAEMON-500"
 
 	// CAP — capsule lifecycle errors (03 §5.3)
 	ErrCapBadInput      = "CAP-400"
