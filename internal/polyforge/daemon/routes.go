@@ -97,9 +97,21 @@ type recommendationResponse struct {
 
 type closeResponse struct {
 	WorkItemID string `json:"work_item_id"`
-	Outcome    string `json:"outcome"` // sealed | already_terminal
-	Status     string `json:"status,omitempty"`
-	Reason     string `json:"reason,omitempty"`
+	// Outcome: sealed | already_terminal | already_paused — plus
+	// "terminated" (polyforge#116): a parked workflow's §6.4 terminate
+	// verdict, landed at the hub by the terminate-blocked door (no local
+	// seal exists — the bounded close already sealed the parked capsule).
+	Outcome string `json:"outcome"`
+	Status  string `json:"status,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// resumeBlockedResponse is the POST /jobs/{id}/resume-blocked answer
+// (polyforge#116): the §6.4 owner move re-established execution — the
+// parked workflow is unblocked and the frozen step re-dispatches in place.
+type resumeBlockedResponse struct {
+	Resumed    bool   `json:"resumed"`
+	WorkItemID string `json:"work_item_id"`
 }
 
 type batchResponse struct {
@@ -207,6 +219,11 @@ func (d *Daemon) handler() http.Handler {
 	mux.Handle("POST /jobs/{wi}/remember", obs)
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute("claim"))
 	mux.HandleFunc("POST /jobs/{wi}/resume", d.submitRoute("resume"))
+	// polyforge#116: the §6.4 owner move on a workflow parked blocked on an
+	// honest incomplete result — the state the bounded close leaves has no
+	// live driver, no bridge handle and no job record; the owner's moves
+	// are their own route, not a runtime call.
+	mux.HandleFunc("POST /jobs/{wi}/resume-blocked", d.resumeBlockedRoute)
 	mux.HandleFunc("POST /jobs/{wi}/takeover", d.submitRoute("takeover"))
 	mux.HandleFunc("POST /jobs/{wi}/adopt-session", d.adoptSessionRoute)
 	mux.HandleFunc("POST /jobs/{wi}/pause", d.pauseRoute)
@@ -300,6 +317,58 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 }
 
 // ---------------------------------------------------------------------------
+// resume-blocked: the §6.4 owner move on a parked workflow (polyforge#116).
+
+// resumeBlockedRoute serves POST /jobs/{id}/resume-blocked — the owner's
+// resume verdict on a workflow parked blocked on an honest incomplete
+// result. The bounded close dropped the job and ended the session, so this
+// route re-establishes execution: the hub's resume-blocked door first
+// (blocked → queued, the claim gate stays queued-only), then a plain claim
+// that runs synchronously — the claim/start path's owner move
+// (bridge.Start → driver.ResumeCurrent) unblocks the parked workflow and
+// the loop re-dispatches the frozen in_progress step in place as a fresh
+// derivation (the parked journal and prior step output survive). The claim
+// is the authority for everything else; a refused door (the WI is not
+// blocked, or it is terminal) surfaces verbatim.
+func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
+	wi := r.PathValue("wi")
+	var body struct {
+		Priority string `json:"priority"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if err := d.modes.AdmitSingle(); err != nil {
+		writeAdmissionErr(w, err)
+		return
+	}
+	canonical := d.canonWI(wi)
+	d.rt.NoteAlias(wi, canonical)
+	// The live check mirrors the submit family: a live run owns starts —
+	// the owner's verdict is for the parked state only (a retained paused
+	// record flows to the hub's own gate, as in the submit family).
+	if ji, live := d.rt.Info(canonical); live {
+		if ji.State != runtime.StatePaused {
+			writeErr(w, api.ErrDaemonConflict, "work item is already active on this daemon")
+			return
+		}
+	}
+	if d.q.IsPending(canonical) {
+		writeErr(w, api.ErrDaemonConflict, "work item is already queued on this daemon")
+		return
+	}
+	if _, err := d.hub.ResumeBlockedWorkItem(canonical); err != nil {
+		writeErrOf(w, err)
+		return
+	}
+	if err := d.rt.StartIntent(r.Context(), canonical, "claim"); err != nil {
+		writeErrOf(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical})
+}
+
+// ---------------------------------------------------------------------------
 // adopt-session: custody of an externally minted session (#109).
 
 // adoptSessionRoute takes a session secret minted OUTSIDE any runtime
@@ -358,11 +427,43 @@ func (d *Daemon) adoptSessionRoute(w http.ResponseWriter, r *http.Request) {
 // that finds the work item already terminal answers gracefully (the
 // arbitration's idempotency contract).
 
+// parkedWIClose handles a close that finds no local job because the
+// workflow is parked blocked on an honest incomplete result (polyforge#116):
+// the bounded close dropped the job, so the owner's moves on this state are
+// the §6.4 face, not a runtime close — `--fail` is the owner's terminate
+// verdict, landed at the hub by the terminate-blocked door (the
+// session-fenced session-end is unavailable: the bounded close cleared the
+// session); a wrap (success) or a pause of a parked workflow has nothing to
+// seal — refused with the owner-move copy. Returns true when it answered;
+// a non-blocked work item falls through to the caller's terminalOf/404.
+func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
+	item, err := d.hub.GetWorkItem(wi)
+	if err != nil || item == nil || item.Status != api.StatusBlocked {
+		return false
+	}
+	if reason == protocol.FinishFailed {
+		if _, err := d.hub.TerminateBlockedWorkItem(wi); err != nil {
+			writeErrOf(w, err)
+			return true
+		}
+		writeJSON(w, http.StatusOK, closeResponse{
+			WorkItemID: wi, Outcome: "terminated", Status: api.StatusFailed, Reason: reason,
+		})
+		return true
+	}
+	writeErr(w, api.ErrDaemonConflict,
+		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue in place or `pf wrap --fail <id>` to terminate; there is no completed run to wrap or pause")
+	return true
+}
+
 // closeJob runs one CLI-side close through Runtime.Stop.
 func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason string) {
 	wi = d.canonWI(wi) // a slug spelling closes the canonical job (F2)
 	ji, ok := d.rt.Info(wi)
 	if !ok {
+		if d.parkedWIClose(w, wi, reason) {
+			return
+		}
 		if st, terr := d.terminalOf(wi); terr == nil {
 			writeJSON(w, http.StatusOK, closeResponse{
 				WorkItemID: wi, Outcome: "already_terminal", Status: st,
