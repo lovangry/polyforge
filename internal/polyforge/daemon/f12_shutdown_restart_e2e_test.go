@@ -289,7 +289,7 @@ func TestShutdownRestartFullChainPushIdempotency(t *testing.T) {
 	// UDS listener open while the commit-dirty push is still in flight.
 	// ---
 	shutErr := make(chan error, 1)
-	go func() { shutErr <- d1.Shutdown(context.Background()) }()
+	go func() { shutErr <- d1.Shutdown(context.Background(), DirectShutdownCause()) }()
 
 	// --- the NEW process of the operator restart: same data-dir, same
 	// socket, started while the old process is mid-shutdown. ---
@@ -374,7 +374,7 @@ func TestShutdownRestartFullChainPushIdempotency(t *testing.T) {
 		return sp3.callCount() >= 2
 	})
 	close(sp3rel) // let the third daemon's stop notices ack
-	if err := d3.Shutdown(context.Background()); err != nil {
+	if err := d3.Shutdown(context.Background(), DirectShutdownCause()); err != nil {
 		t.Fatalf("third daemon shutdown: %v", err)
 	}
 	select {
@@ -489,7 +489,7 @@ func TestShutdownDuringStartupReconciliationNeverServesFace(t *testing.T) {
 
 	// The shutdown sequence completes (no live agent yet: nothing to
 	// notice, flush or terminate) while the push is still in flight.
-	if err := d.Shutdown(context.Background()); err != nil {
+	if err := d.Shutdown(context.Background(), DirectShutdownCause()); err != nil {
 		t.Fatalf("shutdown during reconciliation: %v", err)
 	}
 

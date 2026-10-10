@@ -71,6 +71,14 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	wallWindow := fs.Duration("wall-window", 0, "absolute wall-clock backstop on a derivation's progress silence that no probe ack can reset (polyforge#114; default 15m; negative disables)")
 	revalidateEvery := fs.Duration("revalidate-every", 0, "M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
 	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "machines heartbeat cadence (0 = disabled)")
+	// The graceful sequence's per-job flush(shutdown) wait (polyforge#110
+	// rewind): flags-only like the observe windows above — a harness
+	// shutting a daemon down over a live driver job (no flush face, so
+	// the bounded wait always degrades on timeout) shortens the window
+	// instead of spending the production 60s per live job. Omitted or
+	// zero keeps the production default; the sequence's semantics are
+	// unchanged either way.
+	shutdownFlushWait := fs.Duration("shutdown-flush-wait", 0, "per-job flush(shutdown) wait before the graceful sequence degrades (default 60s)")
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}
@@ -185,6 +193,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		RecallTopK:          *recallTopK,
 		Mode:                *mode,
 		HeartbeatEvery:      *heartbeatEvery,
+		ShutdownFlushWait:   *shutdownFlushWait,
 		Hub:                 aihubclient.New(*server, *apiKey),
 		// Zero fields fall through to observe's own fill() defaults, so a
 		// daemon started without these flags keeps the production windows.
@@ -203,13 +212,19 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// SIGTERM/SIGINT run the same bounded graceful sequence the
-	// POST /shutdown route triggers.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+	// POST /shutdown route triggers. The signal VALUE is observed via a
+	// Notify channel (polyforge#110): a NotifyContext cancellation
+	// reports only "context canceled", so the cause record could never
+	// name which signal fired. One shot: after the first delivery
+	// signal.Stop restores the default disposition, so a second signal
+	// aborts waits hard — the same semantics NotifyContext's stop gave.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
 	go func() {
-		<-ctx.Done()
-		stop() // one shot: a second signal aborts waits hard
-		if err := d.Shutdown(context.Background()); err != nil {
+		sig := <-sigCh
+		signal.Stop(sigCh) // one shot: a second signal aborts waits hard
+		if err := d.Shutdown(context.Background(), SignalShutdownCause(sig)); err != nil {
 			fmt.Fprintf(stderr, "pf daemon: shutdown: %v\n", err)
 		}
 	}()

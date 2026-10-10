@@ -535,7 +535,7 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 	}
 	td.client = cli.NewDaemonClient(td.sock)
 	t.Cleanup(func() {
-		_ = d.Shutdown(context.Background())
+		_ = d.Shutdown(context.Background(), DirectShutdownCause())
 		select {
 		case <-td.runDone:
 		case <-time.After(5 * time.Second):

@@ -127,7 +127,7 @@ func TestValidateWorkspaceUsable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("usable workspace must assemble: %v", err)
 	}
-	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = d.Shutdown(context.Background(), DirectShutdownCause()) })
 	// The daemon created exactly the capsules/ subtree — nothing else
 	// outside it (notably never a .gitignore or any sibling file).
 	ents, err := os.ReadDir(ws)
@@ -189,7 +189,7 @@ func TestValidateAllMappedWorkspaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("all-present mapping must assemble: %v", err)
 	}
-	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = d.Shutdown(context.Background(), DirectShutdownCause()) })
 	for _, ws := range []string{wsOK, wsB} {
 		ents, err := os.ReadDir(ws)
 		if err != nil {

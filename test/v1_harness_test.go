@@ -633,6 +633,22 @@ func optObserveWindows(hang, idle, probe time.Duration) daemonOpt {
 	}
 }
 
+// optShutdownFlushWait injects the graceful sequence's per-job
+// flush(shutdown) wait through the real `pf daemon` flag
+// (--shutdown-flush-wait, polyforge#110 rewind). A non-positive duration
+// omits the flag, leaving the production 60s default. A scenario that
+// shuts a daemon down over a live driver job (no flush face — the
+// bounded wait always degrades on timeout) shortens the window instead
+// of spending 60s per live job; the sequence and its semantics are
+// unchanged.
+func optShutdownFlushWait(wait time.Duration) daemonOpt {
+	return func(d *v1Daemon) {
+		if wait > 0 {
+			d.extraArgs = append(d.extraArgs, "--shutdown-flush-wait", wait.String())
+		}
+	}
+}
+
 // optMode pre-seeds the daemon state file with an initial mode (read at
 // boot; used to start straight in drain).
 func optMode(mode string) daemonOpt {
