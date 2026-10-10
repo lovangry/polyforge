@@ -158,6 +158,7 @@ type fakeHub struct {
 	queueErr error
 	// heartbeats/heartbeatErr are the M3 liveness seam: heartbeats
 	// records every Heartbeat payload the daemon POSTed; heartbeatErr,
+	// when non-nil, is what Heartbeat answers instead.
 	// when non-nil, fails every call (the backoff test's fault
 	// injector); heartbeatAttempts counts every call including failures
 	// (the disabled-mode test asserts on attempts, not successes). All
@@ -165,6 +166,13 @@ type fakeHub struct {
 	heartbeats        []aihubclient.MachineHeartbeat
 	heartbeatErr      error
 	heartbeatAttempts int
+	// shipLedgerCalls/shipLedgers are the ship-ledger seam
+	// (polyforge#123, P1b): every RecordShipLedger call lands here in
+	// call order; ledgerErr, when non-nil, fails every call (the typed
+	// ship-failure test's fault injector).
+	shipLedgerCalls []string
+	shipLedgers     map[string][]api.ShipLedgerEntry
+	ledgerErr       error
 }
 
 type endCall struct {
@@ -347,6 +355,24 @@ func (h *fakeHub) Do(method, path string, body, out any) error {
 		return &api.Error{Code: api.ErrDaemonInternal, Detail: "fakeHub: Do call not scripted"}
 	}
 	return fn(method, path, body, out)
+}
+
+// RecordShipLedger records the ship bridge's ledger calls (polyforge#123,
+// P1b seam): every (wi, entries) lands in shipLedgers in call order;
+// ledgerErr, when non-nil, is what the call answers instead (the typed
+// ship-failure test scripts it).
+func (h *fakeHub) RecordShipLedger(wi string, req api.ShipLedgerRequest) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.ledgerErr != nil {
+		return h.ledgerErr
+	}
+	if h.shipLedgers == nil {
+		h.shipLedgers = map[string][]api.ShipLedgerEntry{}
+	}
+	h.shipLedgerCalls = append(h.shipLedgerCalls, wi)
+	h.shipLedgers[wi] = append(h.shipLedgers[wi], req.Repos...)
+	return nil
 }
 
 func (h *fakeHub) verifyCount() int {

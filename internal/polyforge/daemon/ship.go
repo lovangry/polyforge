@@ -149,6 +149,18 @@ func (d *Daemon) Ship(ctx context.Context, wi, initiator string) (*shipResponse,
 		if err != nil {
 			return nil, err // first typed failure fails the op: no partial answer, no force-push
 		}
+		// The ship ledger (polyforge#123, P1b): record this repo's
+		// branch-top SHA in aihub — accounting, not best-effort. A
+		// recording failure fails the ship op with the typed DAEMON-514;
+		// the pushes already made stay (git is the source of truth), but
+		// the op never answers success while a row is missing.
+		if err := d.hub.RecordShipLedger(wi, api.ShipLedgerRequest{
+			Branch: branch,
+			Repos:  []api.ShipLedgerEntry{{Repo: name, BranchTopSHA: oc.Head}},
+		}); err != nil {
+			return nil, shipErr(api.ErrDaemonShipLedger,
+				"repo %s: the aihub ship-ledger recording failed — the ledger is accounting, not best-effort: %v", name, err)
+		}
 		out.Repos = append(out.Repos, *oc)
 	}
 	return out, nil

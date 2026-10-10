@@ -63,6 +63,11 @@ type Hub interface {
 	// door (polyforge#116): `pf wrap --fail` on a parked workflow —
 	// blocked → failed. *aihubclient.Client satisfies it.
 	TerminateBlockedWorkItem(idOrSlug string) (json.RawMessage, error)
+	// RecordShipLedger is the ship bridge's accounting call (polyforge#123,
+	// P1b): report one ship run's per-repo branch tops to the WI's ledger
+	// in aihub. *aihubclient.Client satisfies it. A recording failure is
+	// a typed ship failure — the ledger is accounting, not best-effort.
+	RecordShipLedger(wi string, req api.ShipLedgerRequest) error
 	// Do performs one typed request against aihub (the client's own
 	// generic entry): the F6 memory adapters use it for the calls the
 	// shared client carries no typed method for.
@@ -321,13 +326,15 @@ func New(cfg Config) (*Daemon, error) {
 	} else {
 		rtCfg.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
 			return bridge.Start(ctx, bridge.Config{
-				WI:            in.WI,
-				CapsuleDir:    in.CapsuleDir,
-				BundleName:    in.BundleName,
-				BundleDigest:  in.BundleDigest,
-				SessionHandle: in.SessionHandle,
-				SpawnN:        in.SpawnN,
-				Spawner:       in.Spawner,
+				WI:               in.WI,
+				CapsuleDir:       in.CapsuleDir,
+				BundleName:       in.BundleName,
+				BundleDigest:     in.BundleDigest,
+				SessionHandle:    in.SessionHandle,
+				SpawnN:           in.SpawnN,
+				Spawner:          in.Spawner,
+				StepCandidates:   in.StepCandidates,
+				InterruptedCause: in.InterruptedCause,
 			})
 		}
 	}

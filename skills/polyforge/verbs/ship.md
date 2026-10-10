@@ -24,6 +24,13 @@ One argument, no flags. The daemon reads the sealed capsule on this machine
 credential is involved — the push uses the machine's existing git push
 identity.
 
+The inventory itself is never resolved by hand: when the WI's workspace
+carries a `.polyforge.yaml`, its `projects` section names the repos and
+their workspace-root-relative local-checkout paths — the sources the
+capsule's worktrees were cloned from at claim; a workspace without the
+yaml uses the aihub registry inventory. The capsule-side `repos/<name>`
+worktree layout is unchanged either way.
+
 ## Success
 
 Human mode: `shipped <id> → branch polyforge/<id>` plus one line per

@@ -301,3 +301,131 @@ func TestDoctorUsageErrorExit2(t *testing.T) {
 		t.Fatalf("doctor --bogus: exit %d, want 2", code)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The release/deploy faces check (polyforge#123).
+// ---------------------------------------------------------------------------
+
+// facesWorkspaceConfig points a scratch config at srv with ONE mapped
+// workspace the test controls (ws, already on disk), mapping project, and
+// answers the runPf env.
+func facesWorkspaceConfig(t *testing.T, ws, server, apiKey, socket, project string) map[string]string {
+	t.Helper()
+	dir := t.TempDir()
+	xdg := filepath.Join(dir, "xdg")
+	if err := os.MkdirAll(filepath.Join(xdg, "polyforge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString("server = \"" + server + "\"\napi_key = \"" + apiKey + "\"\n")
+	b.WriteString("daemon_socket = \"" + socket + "\"\n")
+	b.WriteString("\n[workspace.\"" + ws + "\"]\nprojects = [\"" + project + "\"]\n")
+	if err := os.WriteFile(filepath.Join(xdg, "polyforge", "cli.toml"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{"XDG_CONFIG_HOME": xdg}
+}
+
+// facesCheckout lays one governed repo checkout under ws with the given
+// face files present (paths relative to the checkout).
+func facesCheckout(t *testing.T, ws, name string, faces ...string) {
+	t.Helper()
+	dir := filepath.Join(ws, "checkouts", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("checkout\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range faces {
+		p := filepath.Join(dir, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// facesYaml writes the workspace yaml governing project with the named repos.
+func facesYaml(t *testing.T, ws, project string, repos ...string) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("projects:\n  " + project + ":\n    repos:\n")
+	for _, r := range repos {
+		b.WriteString("      - name: " + r + "\n        path: checkouts/" + r + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(ws, "polyforge.yaml.tmp"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(ws, "polyforge.yaml.tmp"), filepath.Join(ws, ".polyforge.yaml")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDoctorFacesWarnNamesMissingRepos(t *testing.T) {
+	srv := aiSever(t, &reqRecorder{}, map[string]bool{"pi": true}, 0, "")
+	sock := liveDaemonSocket(t, "m-f")
+	ws := t.TempDir()
+	facesYaml(t, ws, "pi", "pi-web", "tsshd", "trzsz-ssh", "full")
+	facesCheckout(t, ws, "pi-web")    // no faces
+	facesCheckout(t, ws, "tsshd")     // no faces
+	facesCheckout(t, ws, "trzsz-ssh") // no faces
+	facesCheckout(t, ws, "full",
+		".polyforge/release.sh", ".polyforge/deploy.md") // both faces (mixed spellings)
+	env := facesWorkspaceConfig(t, ws, srv.URL, "k_f", sock, "pi")
+	code, stdout, doc := doctorStatus(t, env, "--json", "doctor")
+	st, detail := doctorFind(t, doc, docChFaces)
+	if st != "warn" {
+		t.Fatalf("faces check = %q (%s), want warn", st, detail)
+	}
+	for _, name := range []string{"pi-web", "tsshd", "trzsz-ssh"} {
+		if !strings.Contains(detail, name) {
+			t.Fatalf("faces detail does not name missing repo %q: %q", name, detail)
+		}
+	}
+	if strings.Contains(detail, "full (") {
+		t.Fatalf("faces detail reports the fully-faced repo as missing: %q", detail)
+	}
+	// Warn never flips ok nor the exit code.
+	if code != 0 || !doc.OK {
+		t.Fatalf("warn changed the doctor verdict: exit %d ok=%v (output %s)", code, doc.OK, stdout)
+	}
+}
+
+func TestDoctorFacesPassWhenEveryRepoCarriesFaces(t *testing.T) {
+	srv := aiSever(t, &reqRecorder{}, map[string]bool{"pi": true}, 0, "")
+	sock := liveDaemonSocket(t, "m-f2")
+	ws := t.TempDir()
+	facesYaml(t, ws, "pi", "a", "b")
+	facesCheckout(t, ws, "a", ".polyforge/release.md", ".polyforge/deploy.sh")
+	facesCheckout(t, ws, "b", ".polyforge/release.sh", ".polyforge/deploy.sh")
+	env := facesWorkspaceConfig(t, ws, srv.URL, "k_f2", sock, "pi")
+	code, _, doc := doctorStatus(t, env, "--json", "doctor")
+	st, detail := doctorFind(t, doc, docChFaces)
+	if st != "pass" {
+		t.Fatalf("faces check = %q (%s), want pass", st, detail)
+	}
+	if code != 0 || !doc.OK {
+		t.Fatalf("all-faced machine: exit %d ok=%v", code, doc.OK)
+	}
+}
+
+func TestDoctorFacesSkipOnUnreadableYaml(t *testing.T) {
+	srv := aiSever(t, &reqRecorder{}, map[string]bool{"pi": true}, 0, "")
+	sock := liveDaemonSocket(t, "m-f3")
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, ".polyforge.yaml"), []byte("projects: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := facesWorkspaceConfig(t, ws, srv.URL, "k_f3", sock, "pi")
+	code, _, doc := doctorStatus(t, env, "--json", "doctor")
+	st, detail := doctorFind(t, doc, docChFaces)
+	if st != "skip" {
+		t.Fatalf("faces check = %q (%s), want skip on an unreadable yaml", st, detail)
+	}
+	if code != 0 || !doc.OK {
+		t.Fatalf("a faces skip must not change the verdict: exit %d ok=%v", code, doc.OK)
+	}
+}

@@ -595,3 +595,25 @@ func (c *Client) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error)
 func (c *Client) TerminateBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/terminate-blocked", map[string]any{})
 }
+
+// RecordShipLedger is the ship bridge's ledger recording call
+// (polyforge#123, P1b): report one ship run's per-repo branch tops to the
+// WI's ledger. The server upserts per (WI, repo); the branch query param
+// names the delivery branch. Accounting, not best-effort — the caller
+// (the daemon's ship bridge) treats an error as a typed ship failure.
+func (c *Client) RecordShipLedger(wi string, req api.ShipLedgerRequest) error {
+	_, err := c.raw("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/ship-ledger", req)
+	return err
+}
+
+// ShipLedger reads the WI's ship ledger (the queryable face): one row per
+// shipped repo — repo, branch, branch-top SHA, pushed_at — ordered by
+// repo name.
+func (c *Client) ShipLedger(wi string) (*api.ShipLedgerResponse, error) {
+	var out api.ShipLedgerResponse
+	err := c.Do("GET", "/api/v1/work-items/"+url.PathEscape(wi)+"/ship-ledger", nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

@@ -22,13 +22,13 @@ test:
 	# go test suppresses skip messages unless -v (or -json) is on, so
 	# plain `make test` green does NOT show them — verification evidence
 	# that needs it must run `go test -v ./...` (or -json) explicitly.
-	# Watchdog (wi_LMSxPTQTtz5x rewind fix): the rig-heavy e2e suite in ./test
-	# needs ~10-13m wall on this machine — 596.924s at base 59c30f6 (already
-	# borderline under the 10m default) and +~78s from the watch lane's e2e
-	# files → 675.314s — so go's default 600s per-package timeout fired
-	# mid-suite (`panic: test timed out after 10m0s`) while NO test fails on
-	# content (the whole package is `ok` given time). -timeout 20m relaxes
-	# only the per-package watchdog; nothing else about the recipe changes.
+# Explicit -timeout (rewind fixes: wi_LMSxPTQTtz5x and wi_QVLW3ceFGfSF both hit
+	# it): the ./test acceptance package honestly runs 10-13m on this machine
+	# (596.924s at base 59c30f6, +~78s watch-lane e2e, +~50s w079 suite) —
+	# LONGER than go's default 600s per-package timeout, so `go test ./...`
+	# panics on wall clock while every test passes on content. -timeout 20m
+	# relaxes only the per-package watchdog; the slowest single test is ~62s,
+	# so per-test hangs still trip it long before 20m.
 	go test ./... -count=1 -timeout 20m
 
 fmt:

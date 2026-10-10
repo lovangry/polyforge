@@ -59,6 +59,13 @@ const EvEnvelopeRejected = "envelope_rejected"
 // the verdict.
 const EvGateVerdictBound = "gate_verdict_bound"
 
+// releaseStepID is the step id whose output schema carries the extended
+// verdict vocabulary [pass, defer, fail] (polyforge#123): the only step a
+// defer verdict validates on, and the only step the release verdict
+// binding (rule 3c below) judges. It mirrors the workflow bundles' step
+// declaration the same way verificationStepID does in observe.
+const releaseStepID = "release"
+
 // maxEnvelopeRejects bounds the in-process re-dispatch lane: a step
 // whose envelopes keep failing validation this many times CONSECUTIVELY
 // escalates to the recovery lane (the storm guard bounds whatever
@@ -188,6 +195,18 @@ type ResultSpec struct {
 //     re-bind is visible to the caller: res.Outcome differs from the
 //     delivered outcome after this call, and the Run loop logs it as
 //     an EvGateVerdictBound event;
+//     3c. release verdict binding (the release step only, polyforge#123):
+//     a completed envelope for the release step whose output carries a
+//     top-level verdict is judged against the extended release verdict
+//     vocabulary — pass owes a non-empty version plus at least one
+//     artifacts_published entry, fail owes a non-empty fail_reason,
+//     defer owes neither version nor artifacts_published, and anything
+//     else is outside the closed [pass, defer, fail] set. A defer
+//     verdict on any OTHER step is a validation error: defer validates
+//     nowhere but the release step. The gate binding above stays
+//     prefix-fail only, so a defer verdict clears the release gate and
+//     the workflow proceeds to wrap, while a fail verdict (with its
+//     fail_reason) still re-binds to gate_failed and rewinds.
 //  4. substance: every artifact the envelope declares must exist under
 //     the capsule with matching size and SHA-256, and — for completed
 //     results — every declared output must be delivered and the output
@@ -247,9 +266,19 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	// it to gate_failed so the gate's on_fail policy fires and the
 	// verdict can never advance a workflow. The caller logs the bind;
 	// the delivered envelope stays archived verbatim.
-	if spec.Gate && res.Outcome == OutcomeCompleted {
+	delivered := res.Outcome
+	if spec.Gate && delivered == OutcomeCompleted {
 		if _, fail := failVerdictInOutput(res.Output); fail {
 			res.Outcome = OutcomeGateFailed
+		}
+	}
+	// 3c. the release verdict binding (polyforge#123): judged on the
+	// DELIVERED outcome (a completed envelope), before substance. A
+	// binding error is an envelope rejection (the retry lane re-dispatches
+	// the step with the typed reason) — never a silent reclassification.
+	if delivered == OutcomeCompleted {
+		if err := releaseVerdictBinding(res); err != nil {
+			return err
 		}
 	}
 	// 4. substance: verify everything the envelope names, whether or
@@ -311,6 +340,77 @@ func failVerdictInOutput(output json.RawMessage) (string, bool) {
 		return s, true
 	}
 	return "", false
+}
+
+// releaseVerdictBinding judges one completed envelope against the release
+// step's extended verdict contract (polyforge#123). It reads only the
+// top-level scalar fields the release output schema names and mirrors the
+// failVerdictInOutput tolerance: an output that is not a JSON object, or
+// whose verdict is absent/non-string, is not this binding's business (the
+// declared-schema lane stays its authority). On the release step the
+// vocabulary is closed — pass owes a non-empty version plus at least one
+// artifacts_published entry, fail owes a non-empty fail_reason, defer owes
+// neither version nor artifacts_published — and defer is illegal on every
+// other step.
+func releaseVerdictBinding(res *StepResult) error {
+	if len(res.Output) == 0 {
+		return nil
+	}
+	var probe struct {
+		Verdict            any   `json:"verdict"`
+		Version            any   `json:"version"`
+		ArtifactsPublished []any `json:"artifacts_published"`
+		FailReason         any   `json:"fail_reason"`
+	}
+	if err := json.Unmarshal(res.Output, &probe); err != nil {
+		return nil // not a decodable output object: not this binding's business
+	}
+	v, ok := probe.Verdict.(string)
+	if !ok {
+		return nil
+	}
+	verdict := strings.ToLower(strings.TrimSpace(v))
+	isRelease := res.StepID == releaseStepID
+	switch {
+	case verdict == "defer":
+		if !isRelease {
+			return fmt.Errorf("driver: step %q output carries verdict %q — defer validates nowhere but the %s step's schema",
+				res.StepID, v, releaseStepID)
+		}
+		if nonEmptyJSONString(probe.Version) || len(probe.ArtifactsPublished) > 0 {
+			return fmt.Errorf("driver: release output verdict %q owes neither version nor artifacts_published — a defer releases nothing; report pass with the produced version/artifacts or defer with none", v)
+		}
+		return nil
+	case strings.HasPrefix(verdict, "fail"):
+		if !isRelease {
+			return nil // the gate binding's business, not this one
+		}
+		if !nonEmptyJSONString(probe.FailReason) {
+			return fmt.Errorf("driver: release output verdict %q requires a non-empty fail_reason — the on_fail rewind input must say what went wrong", v)
+		}
+		return nil
+	case verdict == "pass":
+		if !isRelease {
+			return nil
+		}
+		if !nonEmptyJSONString(probe.Version) || len(probe.ArtifactsPublished) == 0 {
+			return fmt.Errorf("driver: release output verdict %q requires a non-empty version and at least one artifacts_published entry — pass means something was actually published", v)
+		}
+		return nil
+	default:
+		if isRelease {
+			return fmt.Errorf("driver: release output verdict %q is outside the closed release vocabulary [pass, defer, fail]", v)
+		}
+		return nil
+	}
+}
+
+// nonEmptyJSONString answers whether one decoded JSON field carries a
+// non-blank string value (absent, non-string and blank all count as
+// empty — the release schema's minLength: 1 discipline).
+func nonEmptyJSONString(v any) bool {
+	s, ok := v.(string)
+	return ok && strings.TrimSpace(s) != ""
 }
 
 // ValidateOutputSchema checks one result output against a declared

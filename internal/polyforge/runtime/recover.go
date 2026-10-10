@@ -26,7 +26,10 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/observe"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // cleanupBound bounds one teardown's waits inside the six-layer cleanup.
@@ -35,14 +38,17 @@ const cleanupBound = 10 * time.Second
 // recoverOp runs one recovery event from the message loop. Callers have
 // already verified the attempt-id fence and the RUNNING state; opMu
 // serializes it against Start/Stop/Restart.
-func (r *Runtime) recoverOp(ctx context.Context, j *job, cause string) {
+func (r *Runtime) recoverOp(ctx context.Context, j *job, cause, detail string) {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
-	r.recoverCore(ctx, j, cause)
+	r.recoverCore(ctx, j, cause, detail)
 }
 
-// recoverCore is the recovery sequence; the caller holds opMu.
-func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
+// recoverCore is the recovery sequence; the caller holds opMu. cause
+// names the recovery trigger (the storm guard's ledger key and the
+// interrupted-dispatch archive's class input); detail is the observe
+// lane's free-text elaboration ("" when none).
+func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string) {
 	if err := j.transition(StateRecovering); err != nil {
 		return // lost the race to SEALING/DONE: the fence did its job
 	}
@@ -78,6 +84,30 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	switch capsuleWorkflowStatus(j.capsuleDir) {
 	case capsule.WorkflowStatusCompleted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)
+		// Release-intent wrap gate (polyforge#123, P1a — the driver-lane
+		// face): the driver era has no flush(wrap) call, so THIS close is
+		// where the seal-time gate must refuse. A workflow that completed
+		// while releaseable code changed with no covering entry in
+		// artifacts/release-intent.json is NOT wrapped: the typed
+		// DAEMON-400 RELEASE_INTENT_MISSING goes to the daemon log and the
+		// events tap, the scene is sealed exactly like the blocked branch
+		// below (the fragment and the changed worktree stay on disk for
+		// the fix), and the WI parks blocked for its owner — never
+		// wrapped. The flush lane's twin gate lives in observe's
+		// flushWrap; both run the same predicate.
+		if missing := observe.ReleaseIntentMissingFor(j.capsuleDir, j.wi); len(missing) > 0 {
+			refusal := "DAEMON-400 RELEASE_INTENT_MISSING: " + observe.ReleaseIntentRefusal(j.wi, missing)
+			fmt.Fprintf(os.Stderr, "runtime: %s: %s\n", j.wi, refusal)
+			if r.cfg.EventTap != nil {
+				r.cfg.EventTap(j.wi, "wrap_intent_refused", map[string]any{
+					"error": refusal, "missing": missing,
+				})
+			}
+			r.killAgentTree(j)
+			commitDirty(r, j)
+			r.boundedFail(ctx, j, refusal)
+			return
+		}
 		// sealedByFlush: the C3 engine already committed and pushed the
 		// terminal execution.json version (every transition bumps Version
 		// and publishes); the final push here would only race it.
@@ -206,6 +236,18 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 	// must never inherit earlier failures). Only when MaxRecoveries
 	// recoveries have FAILED outright does the WI bounded-fail — never
 	// merely because it has recovered before.
+	//
+	// polyforge#79: the effective lists this re-derivation dispatches
+	// under (rehydrated or re-derived — see
+	// effectiveCandidatesForRecovery) ride every relaunch attempt, and
+	// the interrupted dispatch (the death that forced this recovery)
+	// is archived by the driver before the re-dispatch: the
+	// recomputation then advances on provider-class causes alone. The
+	// archive signal is the raw cause — the bridge classifies it and
+	// filters operator-shaped stops (a deliberate stop is not a model
+	// verdict).
+	stepCandidates := r.effectiveCandidatesForRecovery(j)
+	interruptedCause := cause
 	for {
 		// Driver WI: restart the Go Driver via the bound engine starter
 		// (it reads execution.json and continues from the current step;
@@ -234,6 +276,11 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 			SessionHandle: j.sessionFingerprint,
 			SpawnN:        ordinal,
 			Spawner:       r.spawner,
+			// polyforge#79: the effective lists this re-derivation
+			// dispatches under, and the archive signal for the dispatch
+			// the recovery cause interrupted.
+			StepCandidates:   stepCandidates,
+			InterruptedCause: interruptedCause,
 		})
 		if err == nil {
 			// A bridge handle fronts no child process group (its PID()
@@ -271,6 +318,70 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 		}
 		fmt.Fprintf(os.Stderr, "runtime: %s: recovery failed (%d/%d), retrying the ladder\n", j.wi, fails, r.cfg.MaxRecoveries)
 	}
+}
+
+// effectiveCandidatesForRecovery answers the per-step effective
+// candidate lists a recovery re-derivation dispatches under
+// (polyforge#79):
+//
+//   - a LIVE job carries its claim-time snapshot — an in-process
+//     recovery keeps the claim-time list (an edit governs the NEXT
+//     claim, never an in-flight job's recomputation);
+//   - a restart-reconstructed job carries no snapshot: the effective
+//     lists re-derive from the workspace yaml FRESH through the same
+//     compose, so the archived-attempt recomputation indexes the
+//     re-derived list (the mid-flight-edit restart shape);
+//   - a yaml that fails to re-read falls back to the capsule.json
+//     audit — the claim-time snapshot materialize wrote;
+//   - an audit-less capsule rehydrates to nil (bundle-only, today's
+//     behavior).
+func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
+	j.mu.Lock()
+	snap := j.stepCandidates
+	j.mu.Unlock()
+	if snap != nil {
+		return snap
+	}
+	if ws, werr := r.cfg.Mapping.WorkspaceFor(j.project); werr == nil {
+		wcfg, cerr := workspace.Load(ws)
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: workspace yaml unreadable at recovery (%v); the claim-time audit stands\n", j.wi, cerr)
+		} else {
+			return workspace.ComposeCandidates(r.readCapsuleBundleFrontmatter(j), wcfg)
+		}
+	}
+	return readCapsuleEffectiveCandidates(j.capsuleDir)
+}
+
+// readCapsuleBundleFrontmatter reads the job's MATERIALIZED bundle
+// frontmatter from the capsule — the claim-era graph the driver
+// validates against (never the daemon checkout, which the operator may
+// have evolved).
+func (r *Runtime) readCapsuleBundleFrontmatter(j *job) *workflow.Frontmatter {
+	if j.bundleName == "" || j.capsuleDir == "" {
+		return nil
+	}
+	fm, err := workflow.ReadFrontmatter(filepath.Join(j.capsuleDir, capsule.DirWorkflows, j.bundleName, "workflow.md"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: materialized bundle frontmatter unreadable (treating as absent): %v\n", j.wi, err)
+		return nil
+	}
+	return fm
+}
+
+// readCapsuleEffectiveCandidates reads the effective_candidates audit
+// of the capsule.json on disk (nil when absent — an audit-less capsule
+// rehydrates to nil, bundle-only behavior).
+func readCapsuleEffectiveCandidates(capsuleDir string) map[string][]string {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.CapsuleJSON))
+	if err != nil {
+		return nil
+	}
+	var idn capsule.Identity
+	if json.Unmarshal(raw, &idn) != nil {
+		return nil
+	}
+	return idn.EffectiveCandidates
 }
 
 // requireDriverStampedState is the deploy-time fail-closed probe

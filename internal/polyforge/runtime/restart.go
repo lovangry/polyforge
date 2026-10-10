@@ -336,7 +336,7 @@ func (r *Runtime) restartAttach(ctx context.Context, rec *jobRecord) error {
 	}); err != nil {
 		return err
 	}
-	return r.restartResume(ctx, rec, j)
+	return r.restartResume(ctx, rec, j, "operator daemon shutdown", "session attach after a graceful shutdown")
 }
 
 // restartDrop handles aihub's terminal verdicts: no revival. A local
@@ -370,7 +370,7 @@ func (r *Runtime) restartRunning(ctx context.Context, rec *jobRecord) error {
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no seeded record", rec.WorkItemID)
 	}
-	return r.restartResume(ctx, rec, j)
+	return r.restartResume(ctx, rec, j, "daemon_restart", "daemon restart (crash mid-run)")
 }
 
 // isTerminalStopReason reports whether a persisted stop_reason is a
@@ -384,8 +384,13 @@ func isTerminalStopReason(reason string) bool {
 		reason == protocol.FinishBlocked
 }
 
-// restartResume is the shared tail of the attach and crash-resume paths.
-func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job) error {
+// restartResume is the shared tail of the attach and crash-resume
+// paths. recoveryCause names the trigger the recovery engine logs (and,
+// polyforge#79, the interrupted-dispatch archive's classification input:
+// an operator-shaped attach cause archives nothing — a deliberate stop
+// is not a model verdict — while a daemon_restart re-derivation archives
+// the dispatch the crash interrupted).
+func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job, recoveryCause, detail string) error {
 	// The resume/recovery entry's own guard (#103/#113): whatever route
 	// led here, a mid-flight record whose project is unmapped or whose
 	// capsule is absent at its mapped base is the typed hard failure —
@@ -431,6 +436,6 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job) err
 	j.mu.Lock()
 	j.state = StateRunning
 	j.mu.Unlock()
-	r.recoverCore(ctx, j, "daemon_restart")
+	r.recoverCore(ctx, j, recoveryCause, detail)
 	return nil
 }

@@ -35,6 +35,16 @@ string clears it), `--waiting-on`, `--attr`.
 
 `show` takes exactly one id (or slug) and renders the detail record.
 
+`--project` inference (polyforge#79): when the flag is omitted, the CLI
+resolves the working directory against the `[workspace]` mapping — a cwd
+inside exactly one mapped workspace whose `.polyforge.yaml` lists exactly
+ONE project gets that project as the default and the create proceeds as if
+the flag had been passed. A yaml listing two or more projects errors asking
+for `--project` (never a silent pick); a workspace without the yaml (or a
+cwd matching no mapped workspace) keeps the #113 required-flag error; an
+INVALID yaml surfaces its typed error naming the file and the reason. An
+explicit `--project` always bypasses inference byte-for-byte.
+
 ## Success
 
 `--json`: the server's record raw. Human mode renders the work item detail

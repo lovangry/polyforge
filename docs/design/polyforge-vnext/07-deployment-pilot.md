@@ -51,6 +51,17 @@
   **`pf upgrade` 是部署管道而非发版系统**：只负责下载已发布制品、校验 sha256、quiesce、替换二进制、拉起
   （§6.3），不承担任何发版决策；制品 = v1 内网 `releases/` 目录按 tag 存二产物 + 校验清单（mono-repo 单一 semver，
   `00-architecture.md#§3.3`）。一期部署面（§3/§6）不含发版 step，发版由各项目 bundle 自带。
+- **发布凭据两分（polyforge#123 合同声明，publish/distribution 面）**：release 生命周期涉及两个**彼此独立**的凭据——
+  (1) **git tag-push credential**（把发版 tag 推到项目 git remote）；(2) **shelf/publish write credential**（向发布架
+  `releases/` 目录写入制品）。二者不得混用、不得假设同源；各自的存储与授予机制（哪台机器、哪个身份、哪个最小
+  权限面）是刻意留白的后续设计——P2 子票裁定，本层只定"两凭据分离"这一合同。本项目自身的两个 procedure
+  （repo 内 `.polyforge/release.sh` 发版、`.polyforge/deploy.sh` 部署）即这两类凭据的消费方，模板与 dispatcher
+  对其内容不做任何假设（`01-workflow-skills.md#§4.2` 的 dispatcher 裁定）。
+- **deploy face 永远人门控（polyforge#123）**：`.polyforge/deploy.sh|.md` 是项目 repo 内的部署 procedure
+  （aihub 升级 + 每台工作机 `pf upgrade` 序列，含回滚），**只由人触发**——任何自动化路径（workflow step、
+  daemon lane、release procedure）不得引用或触发它；本部署面不为其开设任何 CLI verb，§6 的升级序列由人在
+  各机器上手动执行。deploy 不是发版（release 产出制品，deploy 只把已发布版本装上机器），二者凭据亦分离
+  （见上一条）。
 
 ## 2. 术语与不变量（含一期部署形态） <!-- §2 -->
 

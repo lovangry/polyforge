@@ -249,3 +249,39 @@ func SessionHashHex(sessionID string) string {
 	sum := sha256.Sum256([]byte(sessionID))
 	return hex.EncodeToString(sum[:])
 }
+
+// ---------------------------------------------------------------------------
+// Ship ledger (polyforge#123, P1b): the WI → repo → branch-top SHA
+// accounting aihub keeps of what ship actually pushed, queryable per WI.
+// ---------------------------------------------------------------------------
+
+// ShipLedgerEntry is one repo's branch-top report: the POST body's entry.
+// The SHA is what the daemon's ship bridge saw at the branch top it pushed
+// (or re-used) — self-recorded accounting, not re-verified server-side.
+type ShipLedgerEntry struct {
+	Repo         string `json:"repo"`
+	BranchTopSHA string `json:"branch_top_sha"`
+}
+
+// ShipLedgerRequest is the POST /api/v1/work-items/{id}/ship-ledger body:
+// the delivery branch plus the repos pushed by one ship run.
+type ShipLedgerRequest struct {
+	Branch string            `json:"branch,omitempty"`
+	Repos  []ShipLedgerEntry `json:"repos"`
+}
+
+// ShipLedgerRow is one recorded ledger row (the GET answer's entry):
+// where this WI's copy of the repo lives in git, and when it was recorded.
+type ShipLedgerRow struct {
+	Repo         string `json:"repo"`
+	Branch       string `json:"branch"`
+	BranchTopSHA string `json:"branch_top_sha"`
+	PushedAt     string `json:"pushed_at"`
+}
+
+// ShipLedgerResponse is GET /api/v1/work-items/{id}/ship-ledger: the WI's
+// ledger, one row per shipped repo, ordered by repo name.
+type ShipLedgerResponse struct {
+	WorkItemID string          `json:"work_item_id"`
+	Repos      []ShipLedgerRow `json:"repos"`
+}
