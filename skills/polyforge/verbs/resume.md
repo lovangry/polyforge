@@ -69,3 +69,20 @@ Do not route "continue / go on" of a **running** work item here — that is
 `observe`. The §6.4 sibling moves of Door 2 (rewind to a step, terminate
 the WI) are not exposed on this verb: `pf wrap --fail <id>` is the
 terminate verdict for a parked workflow.
+
+## Watch lane: re-arm the watcher
+
+When this session interactively resumes a work item it had been watching
+— `pf resume` after a pause, the owner-resume of a parked workflow, or
+any resume of a WI this session previously armed whose watcher is no
+longer running — RE-ARM the session-side watcher: copy
+`skills/polyforge/scripts/watch.sh` verbatim to
+`<workspace>/.polyforge/watchers/<wi>.sh` with the three header lines
+(`# pf-watcher wi: <wi id>` / `# pf-watcher session_id: <YOUR session's
+harness session id>` / `# pf-watcher armed_at: <RFC3339 UTC>`) above the
+copied body, and start the copy as a harness background task. At session
+start, scan `<workspace>/.polyforge/watchers/` for YOUR OWN non-running
+watchers (header session_id = yours) and re-arm each after one catch-up
+check (read the `<wi>.log` tail for what was missed). Never adopt or
+steal another session's watcher. Full procedure: the watch-lane section
+of `SKILL.md`.

@@ -44,3 +44,18 @@ server-side refusal (e.g. `CORE-409`, someone else holds the active
 generation) surfaces in the daemon log and the job never appears in
 `pf ops status` — observe/status is the follow-up, not the submit answer.
 For a takeover refused as non-admin, the same path reports `CORE-403`.
+
+## Watch lane: arm the watcher
+
+Arm the session-side watcher after a successful submit — for a plain
+claim AND for `--takeover` alike: copy `skills/polyforge/scripts/watch.sh`
+verbatim to `<workspace>/.polyforge/watchers/<wi>.sh`, prepend the three
+header lines (`# pf-watcher wi: <wi id>` / `# pf-watcher session_id:
+<YOUR session's harness session id>` / `# pf-watcher armed_at: <RFC3339
+UTC>`) above the copied body, and start the copy as a harness background
+task. Refuse to arm a terminal work item (wrapped / failed / canceled) —
+check `pf observe <wi> --json` once before copying; the script's startup
+guard refuses too, naming the status. The watcher wakes the session with
+one full report on the WI's first state change and self-deletes (script,
+log, state) when the WI turns terminal. Full procedure: the watch-lane
+section of `SKILL.md`.

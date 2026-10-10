@@ -107,6 +107,65 @@ surface precisely because nobody looked at progress staleness. (The
 daemon's watchdogs probe and recover such jobs on their own windows, but
 the owner should hear about the stall from you, not from a post-mortem.)
 
+## The watch lane: session-side watchers (wake on state change)
+
+The execution plane never notifies a session by itself — the session-side
+WATCH LANE is the proactive face: a small watcher a session arms for a
+work item it owns, which wakes the session when the work item's state
+changes (needs_input above all) and appends a log summary line while
+nothing wakes. The mechanism is versioned with the repo as a real file:
+`skills/polyforge/scripts/watch.sh`. It is never inlined, never
+rewritten, never paraphrased — the session copies it verbatim.
+
+### Arm step (plain claim, `--takeover`, interactive resume)
+
+After a successful submit — a plain claim or `--takeover` alike — or an
+interactive `pf resume` of a work item this session watches, arm (or
+re-arm) the watcher for that work item:
+
+1. **Refuse to arm a terminal work item** (wrapped / failed / canceled):
+   check `pf observe <wi> --json` once first; the script's own startup
+   guard refuses too, naming the status — never arm-then-immediately-clean.
+2. **Copy the script verbatim** (byte-for-byte, never embedded as
+   fragment text): `skills/polyforge/scripts/watch.sh` →
+   `<workspace>/.polyforge/watchers/<wi>.sh` — the mapped workspace whose
+   `capsules/` holds this WI — and prepend three header comment lines
+   ABOVE the copied body:
+   `# pf-watcher wi: <wi id>`,
+   `# pf-watcher session_id: <YOUR session's harness session id>`,
+   `# pf-watcher armed_at: <RFC3339 UTC>`.
+3. **Start the copy as a harness background task**
+   (`sh <workspace>/.polyforge/watchers/<wi>.sh`). It sources the
+   resolved cadence itself (`watch_poll` / `watch_log` /
+   `watch_heartbeat` from cli.toml, or the `pf watch-probe
+   --poll/--log/--heartbeat` flags) — never pass transcript sizes or
+   any `--since`-style state: the probe owns the delta state in
+   `<workspace>/.polyforge/watchers/<wi>.state`.
+4. Tell the user the watcher is armed: it exits with ONE full report
+   when the WI's state changes (that exit IS the wake), and it
+   self-deletes — script, log and state — when the WI turns terminal
+   (`--keep-log` keeps the log).
+
+### Turn-start scan/re-arm (session-restart recovery)
+
+At session start — and cheaply at every turn start — scan
+`<workspace>/.polyforge/watchers/` for `*.sh` files whose
+`pf-watcher session_id:` header is THIS session's and which have no
+running process. For each, check that work item ONCE — read the tail of
+its `<wi>.log` for what was missed while you were away — and re-arm it
+with the arm step above. NEVER adopt or steal another session's watcher:
+a header naming a different session_id is not yours to take. Orphans are
+bounded by the terminal self-delete.
+
+### Retire note: hand-rolled sentinels
+
+Machines that carried the older hand-rolled sentinels — the #79
+session's hand-written watcher script, an operator-local
+`/usr/local/bin/pf-sentinel` — should retire them at adoption: delete
+YOUR OWN sentinel scripts when you adopt this watch lane. This repo's
+code removes neither; they are operator-local files, and retiring them
+is an operator action, not a migration.
+
 ## Session rules
 
 Four standing rules, binding on every polyforge session:
