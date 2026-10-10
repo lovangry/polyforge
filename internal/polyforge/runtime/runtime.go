@@ -201,6 +201,14 @@ type AgentStartInput struct {
 	BundleDigest  string
 	SessionHandle string // public fingerprint
 	SpawnN        int64
+	// StepCandidates is the polyforge#79 effective per-step candidate
+	// map this derivation dispatches under (nil = no yaml layer — the
+	// bundle's own resolution). The bridge forwards it to the driver.
+	StepCandidates map[string][]string
+	// InterruptedCause is the recovery lane's cause string when THIS
+	// derivation is a recovery re-derivation ("" on a fresh claim): the
+	// driver archives the interrupted dispatch's infra attempt from it.
+	InterruptedCause string
 	// Spawner is the runtime's process spawner (production: pi).
 	Spawner Spawner
 }
@@ -384,7 +392,7 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 			// death signal; DONE: terminal.
 			return
 		}
-		r.recoverOp(ctx, j, msg.Reason)
+		r.recoverOp(ctx, j, msg.Reason, msg.Detail)
 	case protocol.OBCompleted:
 		if state != StateRunning {
 			return
@@ -942,6 +950,10 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			SessionHandle: j.sessionFingerprint,
 			SpawnN:        spawnN,
 			Spawner:       r.spawner,
+			// polyforge#79: the claim-time compose rides to the driver —
+			// every dispatch of this derivation resolves its model from
+			// the post-precedence effective list.
+			StepCandidates: j.stepCandidates,
 		})
 		if err2 != nil {
 			return r.abandonClaim(j, wi, err2, "driver start: "+err2.Error())

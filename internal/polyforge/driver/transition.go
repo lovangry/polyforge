@@ -86,6 +86,13 @@ const (
 	// needs a kind to ride. Every other kind follows the driver spec.
 	TransInit   TransitionKind = "init"
 	TransAnswer TransitionKind = "answer"
+	// TransInterrupted is the recovery integration's write: ONE
+	// infra_failure attempt for the derivation that died without a
+	// result, archived by the single execution.json writer when the
+	// recovery lane re-derives. The candidate pointer is a pure
+	// recomputation over the attempts archive (candidates.go), so this
+	// archive is the only state an interruption leaves behind.
+	TransInterrupted TransitionKind = "interrupted"
 )
 
 // TransitionRequest is one submitted execution.json mutation. SpawnN is
@@ -103,6 +110,7 @@ type TransitionRequest struct {
 	Model      string          // step_start: the pinned candidate this dispatch runs under
 	Status     string          // terminal: the target workflow_status
 	Reason     string          // terminal/rewind reason; answer: the answer text
+	FaultClass string          // interrupted: the classified fault of the dead derivation
 	QuestionID string          // answer: the question id being answered
 	AnsweredBy string          // answer: who answered ("" → "owner")
 	SpawnN     int64
@@ -210,6 +218,8 @@ func (d *Driver) applyLocked(req TransitionRequest, info *appliedInfo) error {
 		return d.applyBudgetLocked(req)
 	case TransAnswer:
 		return d.applyAnswerLocked(req)
+	case TransInterrupted:
+		return d.applyInterruptedLocked(req)
 	default:
 		return fmt.Errorf("driver: unknown transition kind %q", req.Kind)
 	}
@@ -641,6 +651,43 @@ func (d *Driver) applyAnswerLocked(req TransitionRequest) error {
 	return nil
 }
 
+// applyInterruptedLocked archives the interrupted derivation as one
+// infra_failure attempt on the current in_progress step (the recovery
+// lane's re-derivation input; the recomputation advances on
+// provider-class entries alone). A dispatch that ended legitimately
+// archives nothing: a parked question means the dispatch DELIVERED, and
+// a step that is not in flight means the recovery cause predates the
+// step's own resolution. The no-archive shapes are silent, not errors —
+// the transition still lands (one version bump, no state change).
+func (d *Driver) applyInterruptedLocked(req TransitionRequest) error {
+	if d.exec.WorkflowStatus != StatusRunning {
+		return nil
+	}
+	cur := d.exec.CurrentStep
+	if cur == "" {
+		return nil
+	}
+	st := d.exec.Steps[cur]
+	if st == nil || st.Status != capsule.StepInProgress || st.PendingQuestion != nil {
+		return nil
+	}
+	seq := 0
+	for _, a := range st.Attempts {
+		if a.AttemptSeq > seq {
+			seq = a.AttemptSeq
+		}
+	}
+	st.Attempts = append(st.Attempts, capsule.Attempt{
+		Cause:         CauseInfraFailure,
+		FaultClass:    req.FaultClass,
+		AttemptSeq:    seq + 1,
+		StartedAt:     st.StepStartedAt,
+		InterruptedAt: d.stamp(),
+		Detail:        req.Reason,
+	})
+	return nil
+}
+
 // requireRunningStep is the shared gate_fail precondition: a known,
 // current, in_progress step under a running (not terminal, not blocked)
 // workflow.
@@ -734,6 +781,11 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 		body["step"] = d.exec.CurrentStep
 		body["question_id"] = req.QuestionID
 		body["answered_by"] = req.AnsweredBy
+	case TransInterrupted:
+		kind = "interrupted"
+		body["step"] = d.exec.CurrentStep
+		body["fault_class"] = req.FaultClass
+		body["detail"] = req.Reason
 	}
 	if kind == "" {
 		return

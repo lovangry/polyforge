@@ -307,13 +307,15 @@ func New(cfg Config) (*Daemon, error) {
 	} else {
 		rtCfg.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
 			return bridge.Start(ctx, bridge.Config{
-				WI:            in.WI,
-				CapsuleDir:    in.CapsuleDir,
-				BundleName:    in.BundleName,
-				BundleDigest:  in.BundleDigest,
-				SessionHandle: in.SessionHandle,
-				SpawnN:        in.SpawnN,
-				Spawner:       in.Spawner,
+				WI:               in.WI,
+				CapsuleDir:       in.CapsuleDir,
+				BundleName:       in.BundleName,
+				BundleDigest:     in.BundleDigest,
+				SessionHandle:    in.SessionHandle,
+				SpawnN:           in.SpawnN,
+				Spawner:          in.Spawner,
+				StepCandidates:   in.StepCandidates,
+				InterruptedCause: in.InterruptedCause,
 			})
 		}
 	}
