@@ -40,7 +40,8 @@ wrap answers the graceful `already_terminal` shape, not an error.
 
 | Code | When | What to tell the user |
 |---|---|---|
-| `DAEMON-404` | No local job and the work item is not terminal on the server | It is not running here — check observe; if it runs elsewhere, wrap it there. |
+| `DAEMON-404` | No local job and the work item is not blocked or terminal on the server | It is not running here — check observe; if it runs elsewhere, wrap it there. |
+| (no code) `the workflow is parked blocked …` | A close of a workflow parked blocked on an incomplete result (polyforge#116): a `--fail` close is the §6.4 owner's terminate verdict and lands `failed` at the hub (the terminate-blocked door); a plain `wrap` (success) or a `pause` of a parked workflow is refused — a parked workflow never completed, so there is nothing to seal | Use `pf wrap <id> --fail` to terminate the parked workflow, or `pf resume <id>` to continue it in place. |
 | `DAEMON-409` | A close is already in progress for this job — the agent's own wrap flush, another pause/wrap, or a mid-recovery state | Wait for the in-flight close to settle, then observe; the work item is being closed exactly once either way. |
 | `CORE-*` passthrough (e.g. `CORE-403`, `CORE-409`) | The server-side end-generation was refused | The typed Core verdict arrives verbatim — typically the generation is no longer yours to end; act per its detail. |
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |
