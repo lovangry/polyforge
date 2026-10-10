@@ -17,12 +17,21 @@
 //	  model_candidates: ["id", ...]  # non-empty model-id strings only
 //	  step_kinds:                    # keys ONLY from the V8 kind vocabulary
 //	    code: ["id", ...]            # {qa, spec, author, code, gate, review}
+//	release:                         # optional section (polyforge#123)
+//	  cadence: weekly               # string: the train's release cadence
+//	  channel: stable               # string: the train's channel label
+//	  urgent: false                 # bool: the train's urgent-release switch
+//	  versioning: fixed             # fixed|independent (default fixed)
 //
 // Any key not shown here — at any level — is a load error, as are
 // duplicate keys, type mismatches, a project entry without `repos:`,
 // a repo entry without `name:`/`path:` or with an unsafe name or an
 // absolute/parent-escaping `path`, empty model-id strings, and
-// `step_kinds` keys outside the V8 set.
+// `step_kinds` keys outside the V8 set. The `release:` section is
+// structurally procedure-free: it admits train parameters only (the four
+// keys above and no others), so no release procedure content can be
+// expressed through it — procedure text lives in a repo's
+// .polyforge/release.sh|.md, never in the workspace yaml (polyforge#123).
 //
 // Presence semantics: an ABSENT file and an EMPTY or comments-only
 // file both answer (nil, nil) — absent-equivalent, never an error
@@ -85,6 +94,45 @@ type WorkflowDefaults struct {
 	StepKinds map[string][]string `yaml:"step_kinds" json:"step_kinds,omitempty"`
 }
 
+// ReleaseSection is the `release:` train-parameters section
+// (polyforge#123): a closed four-key grammar of train scheduling facts.
+// It deliberately admits NO procedure content — the yaml structurally
+// cannot carry a release procedure (that is a repo's
+// .polyforge/release.sh|.md); any other key at any level of the section
+// is a load error, and the wrong `versioning` value is one too.
+type ReleaseSection struct {
+	// Cadence is the train's release cadence (e.g. "weekly"). Free-form
+	// string; the train consumes it, the loader only checks the type.
+	Cadence string `yaml:"cadence" json:"cadence,omitempty"`
+	// Channel is the train's channel label (e.g. "stable"). Free-form
+	// string; v1 has no channel machinery — this is the reservation.
+	Channel string `yaml:"channel" json:"channel,omitempty"`
+	// Urgent is the train's urgent-release switch.
+	Urgent bool `yaml:"urgent" json:"urgent,omitempty"`
+	// Versioning is the per-repo versioning reservation:
+	// "fixed" (default — one repo-level version, today's only semantics)
+	// or "independent" (reserved for the P2+ child, a load error until
+	// then).
+	Versioning string `yaml:"versioning" json:"versioning,omitempty"`
+}
+
+// releaseVersioningVocabulary is the closed `versioning:` value set.
+var releaseVersioningVocabulary = []string{"fixed", "independent"}
+
+// DefaultVersioning is the versioning reservation's default: one
+// repo-level version per release (today's only implemented semantics).
+const DefaultVersioning = "fixed"
+
+// EffectiveVersioning answers the release section's versioning mode with
+// the default applied: an absent section and an absent key both mean
+// "fixed" (one repo-level version).
+func (r *ReleaseSection) EffectiveVersioning() string {
+	if r == nil || r.Versioning == "" {
+		return DefaultVersioning
+	}
+	return r.Versioning
+}
+
 // Config is the parsed `.polyforge.yaml`.
 type Config struct {
 	// Projects is the repo-source section (present when non-nil): the
@@ -94,6 +142,9 @@ type Config struct {
 	// WorkflowDefaults is the model-candidates section (present when
 	// non-nil).
 	WorkflowDefaults *WorkflowDefaults `yaml:"workflow_defaults" json:"workflow_defaults,omitempty"`
+	// Release is the train-parameters section (present when non-nil;
+	// polyforge#123). Absent section keeps today's behavior.
+	Release *ReleaseSection `yaml:"release" json:"release,omitempty"`
 }
 
 // Error is the typed load failure: the file that refused and the
@@ -140,7 +191,7 @@ func parse(path string, raw []byte) (*Config, error) {
 		}
 		return nil, &Error{Path: path, Reason: sumReason(err)}
 	}
-	if cfg.Projects == nil && cfg.WorkflowDefaults == nil {
+	if cfg.Projects == nil && cfg.WorkflowDefaults == nil && cfg.Release == nil {
 		return nil, nil // a file declaring nothing governs nothing
 	}
 	if err := validate(path, &cfg); err != nil {
@@ -160,6 +211,15 @@ func sumReason(err error) string {
 // required fields, safe names, workspace-root-relative paths, non-empty
 // model ids, and the closed step_kinds key set.
 func validate(path string, cfg *Config) error {
+	if r := cfg.Release; r != nil {
+		switch r.Versioning {
+		case "", "fixed", "independent":
+			// "" keeps the default; the two vocabulary values are legal.
+		default:
+			return &Error{Path: path, Reason: fmt.Sprintf("release.versioning %q is outside the vocabulary (%s)",
+				r.Versioning, strings.Join(releaseVersioningVocabulary, ", "))}
+		}
+	}
 	for name, proj := range cfg.Projects {
 		if proj == nil {
 			return &Error{Path: path, Reason: fmt.Sprintf("project %q: entry is empty — repos is required (declare it, possibly as [])", name)}
