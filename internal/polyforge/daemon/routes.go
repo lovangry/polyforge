@@ -361,7 +361,14 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 		writeErrOf(w, err)
 		return
 	}
-	if err := d.rt.StartIntent(r.Context(), canonical, "claim"); err != nil {
+	// The daemon's run context, NOT the HTTP request's: the claim's ctx
+	// is the driver's parent (bridge.Start derives from it) — a request-
+	// scoped ctx would cancel the driver mid-dispatch the moment the CLI
+	// hangs up on this answer (the dispatch then dies with "context
+	// canceled" and the recovery lane re-derives at the job counter —
+	// measured exactly that way on the s28 shape). The dispatcher starts
+	// every claim on d.runCtx for the same reason.
+	if err := d.rt.StartIntent(d.runCtx, canonical, "claim"); err != nil {
 		writeErrOf(w, err)
 		return
 	}
