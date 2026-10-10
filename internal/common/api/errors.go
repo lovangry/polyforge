@@ -114,6 +114,11 @@ const (
 	ErrDaemonWatchdog            = "DAEMON-511"
 	ErrDaemonShipPreflight       = "DAEMON-512"
 	ErrDaemonSessionJSONLMissing = "DAEMON-513"
+	// ErrDaemonShipLedger is the polyforge#123 ship-ledger refusal: the
+	// aihub ledger recording failed after (or between) the pushes — the
+	// ledger is accounting, not best-effort, so the ship op fails with the
+	// typed error instead of silently skipping the record.
+	ErrDaemonShipLedger = "DAEMON-514"
 	ErrDaemonInternal            = "DAEMON-500"
 
 	// CAP — capsule lifecycle errors (03 §5.3)
