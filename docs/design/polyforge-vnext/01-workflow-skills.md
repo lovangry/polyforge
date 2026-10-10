@@ -152,6 +152,12 @@ vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontm
 
 **release step（发版钩子，定稿裁定）**：release 是 bundle 内的一个普通 step 槽位——平台零发版专用代码，全部复用既有 step 机器（inputs/output schema/worktree/预算/rewind/边界同步）。不新增 step kind：沿用 `code`（缺省，产生版本号 commit/tag 的 diff）或 `gate`（纯验证型发版），按项目自选；失败语义建议 `gate: true`——发版失败属业务判定，走既有有界 `on_fail` rewind。`agents/release.md` 是随参考 bundle 交付的模板骨架（版本号来源/构建/打 tag/上传目标/渠道晋升，全为 TODO 占位），各项目在各自 bundle 中自填——发版逻辑 per-project，多项目天然隔离。平台自身的发版（`aihub` 服务二进制与工作机二进制二产物）是同一钩子的一个实例，不另立发版模型；`pf upgrade` 只是消费已发布制品的部署管道（`07-deployment-pilot.md#§6`）。
 
+**release dispatcher（polyforge#123 定稿裁定）**：随参考 bundle 交付的三个 `steps/release.md`（feature-full / bug-fix / quick-fix）是**项目无关的 dispatcher，不是 procedure**——模板正文不含任何项目私有发版步骤。归属判定只有一个机械规则：扫描 capsule 的 `repos/`，某 repo 携带 `.polyforge/release.sh` 或 `.polyforge/release.md` 即为 release-procedure owner。**零 owner → `verdict: defer`**（本 capsule 显式不发版，不发明 procedure，流程继续 wrap）；**恰一 owner → 在本 step 内执行其 procedure**（过渡语义，单一可拆除接缝；train 子票拆除）；**两个及以上 owner → step FAIL**，`fail_reason` 以 `PF-RELEASE-AMBIGUOUS_OWNER` 开头并点名每一个候选 repo——绝不静默择一。verdict 词汇表为闭集 `[pass, defer, fail]`：defer 只在 release step 的 schema 里合法，任何其它 step 的输出不得出现 defer；pass 必须携带非空 `version` 与至少一条 `artifacts_published`，fail 必须携带非空 `fail_reason`，defer 既不欠 version 也不欠 artifacts_published。
+
+**发布凭据两分（polyforge#123 合同声明）**：release 生命周期涉及两个**彼此独立**的凭据——(1) **git tag-push credential**：把发版 tag 推到项目 git remote 的凭据；(2) **shelf/publish write credential**：向发布架（发布制品目录/通道）写入制品的凭据。两者不得混用、不得假设同源；各自如何存储、如何授予（哪台机器、哪个身份、哪个最小权限面）是刻意的后续设计——留待 P2 子票的机制设计，本层只裁定"两凭据分离"这一合同本身。`.polyforge/release.sh|.md` 是各项目 repo 内的 procedure，其自身使用的凭据形态即这两类，模板与 dispatcher 对其内容不做任何假设。
+
+**deploy face 合同（polyforge#123）**：`.polyforge/deploy.sh|.md` 是各项目 repo 内的**部署 procedure**——aihub 服务二进制升级 + 每台工作机 `pf upgrade` 的既定序列（含回滚）。它**永远只由人触发**：任何自动化路径（workflow step、daemon lane、release procedure、CLI verb）都不得引用或触发 deploy procedure——共享 release dispatcher 刻意不提及该文件，CLI 不设 deploy verb（P3+ 排除项：deploy 永远人门控）。
+
 流程级 `rewind` 声明：`max_total: 4`，`max_per_step: 2`。
 
 要点：

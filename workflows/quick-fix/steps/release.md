@@ -8,8 +8,8 @@ output:
   properties:
     verdict:
       type: string
-      enum: [pass, fail]
-      description: pass means the release completed (version cut, built, tagged, published per this project's convention); fail means the release attempt did not complete.
+      enum: [pass, defer, fail]
+      description: pass means the release completed (version cut, built, tagged, published per this project's convention); defer means this capsule found no release procedure to execute and the release is explicitly left to the project's owner; fail means the release attempt did not complete.
     version:
       type: string
       minLength: 1
@@ -33,117 +33,62 @@ output:
         verdict: { type: string, enum: [fail] }
         fail_reason: { type: string, minLength: 1 }
       required: [verdict, fail_reason]
+    - description: A deferred release - no release procedure found in this capsule, so nothing was executed; owes neither a version nor published artifacts.
+      properties:
+        verdict: { type: string, enum: [defer] }
+      required: [verdict]
 ---
 
 # release
 
-This is a normal step slot - it reuses every existing step primitive (inputs, this
-`output` schema, worktree access, budget, rewind;
-`01-workflow-skills.md` §4.2). It is **not** a special "deploy mechanism". For this repo
-the template is already filled in: the body below is polyforge's own concrete release
-procedure - the platform bootstraps its releases through the same hook it ships to
-projects - while this file's frontmatter contract (`name`, `description`, `tools`,
-`output`) stays exactly as shipped.
+> Pin: this bundle always defers - a quick-fix smoke lane never cuts a version, so finish here with verdict: defer and no other output.
+This is a normal step slot — it reuses every existing step primitive (inputs, this
+`output` schema, worktree access, budget, rewind; `01-workflow-skills.md` §4.2). It is
+**not** a special mechanism in the workflow engine.
 
-In this lane there is no separate `review` step, so `release` is the last judgment point.
-Read `artifacts/verification-report.md` before starting: a release attempted on top of a
-verification attempt that was anything less than a clean pass is a self-inflicted
-failure.
+This template is a **dispatcher, not a procedure**: it ships project-generic, and the
+release procedure itself belongs to each project's repository — the platform never
+ships a procedure here and never fills one in. The dispatcher's only job is to find
+the one repo that owns the release procedure and either execute it, defer, or fail
+loudly when ownership is ambiguous.
 
-## The polyforge release procedure
+## Ownership resolution
 
-Polyforge is a mono-repo with a single repo-level semver: one git tag is one version, and
-the two deployment artifacts are built together under that same tag
-(`00-architecture.md` §3.3). Distribution is the intranet `releases/<tag>/` directory
-holding the two binaries plus a sha256 checksum manifest - that is what `pf upgrade`
-downloads and verifies before running the `07-deployment-pilot.md` §6.3 upgrade
-sequence, and what a §6.4 rollback restores from. `skills/` and `workflows/` are not
-released separately; they travel with the repo itself. Concretely:
+Scan the capsule's `repos/` directory (one level: `repos/<name>/`). A repo is a
+release-procedure owner when it carries `.polyforge/release.sh` or
+`.polyforge/release.md` — exactly these two spellings, inside the repo's `.polyforge/`
+directory. A repo carrying neither file is not an owner. Classify the scan:
 
-1. **Determine the version.** The version is the git tag and nothing else - no
-   per-artifact versioning, no build or step numbers. Take the current floor from the
-   union of this worktree's tags and the versions already published to the intranet
-   releases root: every capsule is its own clone, so a release tag created in a
-   sibling capsule never appears in this clone's `git tag -l`, while the publish
-   root carries every version any capsule has shipped. Set `RELEASES_ROOT` to the
-   intranet `releases/` directory (the same publish root step 5 publishes into)
-   and compute the floor with:
-
-   ```
-   RELEASES_ROOT=<the intranet releases directory>
-   { git tag -l 'v*'; ls "$RELEASES_ROOT"; } | grep -E '^v[0-9]' | sort -Vu | tail -1
-   ```
-
-   Bump one segment of that floor: patch for a fix, minor for new capability. Record
-   the decided version and its notes in `artifacts/release-notes.md`; do not invent a
-   version ad hoc each run.
-2. **Build the two artifacts.** Build from the exact commit `fix`'s last commit produced
-   (read it from `execution.json`'s `steps.fix.output.commits` rather than assuming
-   HEAD):
-
-   ```
-   GOWORK=off make release VERSION=<tag>
-   ```
-
-   The `release` Makefile target stamps the git tag into both binaries at
-   link time - `-ldflags "-X github.com/silgrid/polyforge/internal/version.Version=<tag>"`
-   - so `pf --version` and `aihub --version` print `<tag>` (never the
-   un-injected `dev` default). It echoes the injected value after the build;
-   that echo is the release record of the injection.
-
-   Two binaries come out and nothing else is shipped: `aihub`, the AIHub service
-   binary, and `pf`, the work-machine binary - one file carrying the `pf` CLI verbs plus
-   the `daemon` subcommand (`00-architecture.md` §3.3).
-3. **Checksum manifest.** In the same staging directory, produce `SHA256SUMS` covering
-   the two binaries in the plain `sha256sum -c` format that `pf upgrade` verifies
-   against:
-
-   ```
-   cd artifacts/release-<tag> && sha256sum aihub pf > SHA256SUMS
-   ```
-
-   The manifest is itself one of the published artifacts: it sits beside the binaries
-   and is listed in `artifacts_published` with them.
-4. **Tag.** Create a single annotated tag named exactly the version (`v<semver>`) on the
-   commit from step 2. The tag is the version - there is no second numbering scheme
-   anywhere in the release.
-5. **Publish.** Claim the version before placing anything: create the per-tag
-   directory in the intranet releases root with a plain `mkdir` (never `mkdir -p`)
-   - the mkdir is the atomic version claim, and it fails loudly if a parallel
-   capsule already published this version:
-
-   ```
-   mkdir "$RELEASES_ROOT/<tag>"
-   ```
-
-   If the mkdir fails because `releases/<tag>/` already exists, fail the release
-   with a `fail_reason` naming the taken version - never publish into or over an
-   existing version directory. On success, place `aihub`, `pf` and `SHA256SUMS`
-   into the claimed directory - one directory per tag holding the two binaries and
-   their checksum manifest (`00-architecture.md` §3.3 placement). That directory is
-   v1's only distribution channel: there are no alpha/stable channel promotions, so
-   publishing into the per-tag directory is the whole promotion. `artifacts_published`
-   is the published path list: `releases/<tag>/aihub`, `releases/<tag>/pf`,
-   `releases/<tag>/SHA256SUMS`.
-
-## Rewind contract
-
-This bundle points `release`'s `on_fail` at `fix`, not at the immediately preceding
-`verification` - see `workflow.md`'s rewind-boundaries section for the reasoning. In
-practice that means your `fail_reason` must be written for a **code-fixing** reader:
-name the concrete thing that failed (missing changelog entry, wrong version constant,
-tag rejected because of uncommitted files), not just "release failed", so `fix`'s next
-attempt can act on it. If the failure is purely procedural and no code change could
-help, say that explicitly - the bounded rewind will exhaust itself rather than loop
-forever, and the honest record is what the human closing out the WI needs.
+- **Zero owners.** No repo in this capsule carries either file. There is no procedure
+  to execute and none may be invented here: finish with `verdict: defer` and nothing
+  else in the output — no `version`, no `artifacts_published`. Defer is an explicit,
+  honest outcome (the release is left to the project's owner), not a failure and not a
+  license to improvise a release.
+- **One owner.** Exactly one repo carries a procedure file: that repo is the release
+  owner, and its procedure is executed in this step. Read the owner's procedure file
+  first, then follow it exactly with your `bash` tool from the capsule root, treating
+  its exit contract as the release's: any nonzero command exit is a release failure —
+  `verdict: fail` with a precise `fail_reason` — never something to work around. On
+  success, report `verdict: pass` with the `version` and the `artifacts_published`
+  list the procedure actually produced (never invented ones).
+- **Two or more owners.** More than one repo carries a procedure file: stop — this is
+  a loud failure, not a choice. Finish with `verdict: fail` and a `fail_reason` that
+  begins with `PF-RELEASE-AMBIGUOUS_OWNER` and names EVERY candidate repo. The
+  one-release-owner rule is the contract; the dispatcher must never silently pick one
+  owner (or merge procedures) when ownership is ambiguous.
 
 ## Honesty
 
-A nonzero exit from any of the steps above should still `fail` the gate; do not report
-`pass` on a release that did not actually publish something. The schema enforces the
-same line mechanically: a `pass` verdict requires a non-empty `version` and at least
-one `artifacts_published` entry, so a template left unfilled cannot validate as a
-completed release.
+A release failure is a business judgment about readiness to ship, not merely "a
+command exited nonzero" — but a nonzero exit from the owner's procedure should still
+`fail` the gate; do not report `pass` on a release that did not actually produce and
+publish something. The schema enforces the same line mechanically: a `pass` verdict
+requires a non-empty `version` and at least one `artifacts_published` entry, a `fail`
+verdict requires a non-empty `fail_reason` (this bundle's default `on_fail` target
+carries it back as its pending_rewind_input), and a `defer` verdict requires none of
+them. One boundary on "execute exactly": a procedure file that exists but is
+unreadable or empty is a release failure (`fail_reason` says so), not a defer —
+defer means the procedure file is absent, not that it is broken.
 
 ## Output
 

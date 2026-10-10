@@ -1159,7 +1159,12 @@ func TestW079RecoveryContractForLocallySourcedClones(t *testing.T) {
 		t.Fatalf("claim-time baseline %q, want the local HEAD %s", id.Repos["w079src"], origHead)
 	}
 	// The agent's uncommitted edits in the worktree are the live scene.
-	if err := os.WriteFile(filepath.Join(reposDir, "w079-keep.txt"), []byte("in flight\n"), 0o644); err != nil {
+	// The witness is a docs-path file on purpose (polyforge#123): the
+	// seal-time release-intent gate counts untracked non-docs repo files
+	// as releaseable changes, and this scenario's WI wraps — its marker
+	// exists to detect a re-clone/reset (any surviving file proves that,
+	// extension aside), not to be a releaseable delta.
+	if err := os.WriteFile(filepath.Join(reposDir, "w079-keep.md"), []byte("in flight\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// The local checkout MOVES ON (the operator commits there).
@@ -1180,7 +1185,7 @@ func TestW079RecoveryContractForLocallySourcedClones(t *testing.T) {
 
 	// Never re-cloned / re-fetched / reset: the marker survives, the
 	// worktree HEAD and the recorded baseline are the claim-time facts.
-	if b, err := os.ReadFile(filepath.Join(reposDir, "w079-keep.txt")); err != nil || string(b) != "in flight\n" {
+	if b, err := os.ReadFile(filepath.Join(reposDir, "w079-keep.md")); err != nil || string(b) != "in flight\n" {
 		t.Fatalf("the in-flight marker was lost — repos/w079src was re-cloned or reset: %q, %v", b, err)
 	}
 	if head := strings.TrimSpace(gitRun(t, reposDir, "rev-parse", "HEAD")); head != origHead {

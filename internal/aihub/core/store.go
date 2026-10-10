@@ -160,6 +160,22 @@ CREATE TABLE IF NOT EXISTS wi_repo_inventory (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_name ON wi_repo_inventory(work_item_id, name);
 
+CREATE TABLE IF NOT EXISTS wi_ship_ledger (
+  -- polyforge#123 (P1b): the ship-time WI → repo → branch-top SHA
+  -- ledger. One row per (WI, repo); ship upserts the branch top it
+  -- pushed (or re-used), so the ledger always answers "where this WI's
+  -- copy of the repo lives in git". The queryable face is
+  -- GET /api/v1/work-items/{id}/ship-ledger; the recording face is the
+  -- ship bridge's POST. Not execution state (INV-1): it is delivery
+  -- accounting about git remotes, written by the daemon's ship bridge.
+  work_item_id   TEXT NOT NULL REFERENCES work_items(id),
+  repo           TEXT NOT NULL,               -- repo short name (inventory spelling)
+  branch         TEXT NOT NULL DEFAULT '',    -- the delivery branch (polyforge/<wi>)
+  branch_top_sha TEXT NOT NULL,               -- the pushed/re-used branch top
+  pushed_at      TEXT NOT NULL,               -- RFC3339, server-stamped at record time
+  PRIMARY KEY (work_item_id, repo)
+);
+
 CREATE TABLE IF NOT EXISTS wi_dependencies (
   blocking_wi_id TEXT NOT NULL REFERENCES work_items(id),
   blocked_wi_id  TEXT NOT NULL REFERENCES work_items(id),
