@@ -93,6 +93,20 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause string) {
 		return
 	case capsule.WorkflowStatusBlocked:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow blocked on an incomplete result — the owner holds the next move (cause %q)\n", j.wi, cause)
+		// The parked verdict's chain durability (polyforge#116): the bounded
+		// close below drops the job with NO seal — unlike the completed and
+		// failed branches, nothing publishes the blocked execution.json — so
+		// the verdict would reach the chain only through the monitor's next
+		// tick, a race the owner's resume face must not inherit (a later
+		// re-materialization would clone pre-blocked state and silently
+		// discard the verdict — the workspace where the same re-claim both
+		// wedges and escapes depending on a timing race). Seal the parked
+		// capsule explicitly: kill the (already returned) driver's tree, then
+		// commit+push the parked state — journal, step output and the blocked
+		// verdict together. The §6.4 owner moves (resume / wrap --fail) and
+		// every re-materialization read exactly this state.
+		r.killAgentTree(j)
+		commitDirty(r, j)
 		r.boundedFail(ctx, j, "workflow blocked: the owner holds the next move (resume / rewind / wrap --fail)")
 		return
 	}
@@ -351,7 +365,10 @@ func (r *Runtime) recoveryStabilityWindow() time.Duration {
 // "never a third relaunch" contract is preserved: restart sees blocked
 // and leaves the record untouched. RTFinished(blocked) follows — on
 // sendRelease, so a full observe channel defers rather than drops it
-// (NEW-2: every RTFinished is a terminal release).
+// (NEW-2: every RTFinished is a terminal release). The parked capsule's
+// chain durability is the CALLER's seal (the blocked branch commits and
+// pushes before calling here — polyforge#116): this close itself
+// publishes nothing, exactly like before.
 func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
 		SessionID: j.sessionID,
