@@ -58,6 +58,12 @@ type planAction struct {
 	// malformed envelope exactly. The question TEXT rides the existing
 	// Question field above (shared with the ask action).
 	QuestionID string `json:"question_id,omitempty"`
+	// Park is the #113 wedge shape: open a turn, emit nothing further,
+	// never write the envelope, never exit — the process sits alive at
+	// zero activity while the driver's stepRun.Wait watches a drop path
+	// that never changes (repro scaffolding for the step-wedge detection
+	// lane; test-only, like all of fakepi).
+	Park bool `json:"park,omitempty"` // park: silent live wedge, no envelope, no exit
 	// Crash shapes on the envelope action: "before" dies BEFORE the
 	// envelope write (the envelope never lands — the kill9 / hang
 	// lanes), "after" dies right AFTER writing it (the seal-crash lane:
@@ -348,6 +354,19 @@ func sleepMS(n int) {
 // ms delay), the crash shapes, and the envelope write itself (question
 // text, output payload, command evidence, duplicates).
 func (d *driveEnv) runEnvelopeAction(act planAction) {
+	if act.Park {
+		// The silent-live wedge (polyforge#113's e2e-author shape): a
+		// real harness whose provider call for the next turn never
+		// returns. Open the turn (the in-flight silence the hang
+		// watchdog discriminates on), then sit: no envelope write, no
+		// exit, no further stdout record, zero activity — indefinitely.
+		d.journal("park", map[string]any{
+			"step": act.ID, "pid": os.Getpid(), "spawn_n": d.spawnN,
+		})
+		emitOpenTurn()
+		parkForever()
+		return
+	}
 	if act.OpenTurn {
 		d.beginOpenTurn("open_turn")
 	}
