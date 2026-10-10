@@ -320,6 +320,11 @@ func facesWorkspaceConfig(t *testing.T, ws, server, apiKey, socket, project stri
 	b.WriteString("server = \"" + server + "\"\napi_key = \"" + apiKey + "\"\n")
 	b.WriteString("daemon_socket = \"" + socket + "\"\n")
 	b.WriteString("\n[workspace.\"" + ws + "\"]\nprojects = [\"" + project + "\"]\n")
+	// polyforge#117: the watch.summarize_model check is a hard-fail on a
+	// missing entry — faces tests predate it; carry a valid section so
+	// the faces check's own semantics are tested in isolation.
+	b.WriteString("\n[watch.summarize_model.pi]\nmodel = \"test/flash\"\n")
+	b.WriteString("\n[watch.summarize_model.claude]\nmodel = \"test/haiku\"\n")
 	if err := os.WriteFile(filepath.Join(xdg, "polyforge", "cli.toml"), []byte(b.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
