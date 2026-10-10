@@ -699,11 +699,17 @@ func (d *Daemon) batchRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
+	// Attribute the shutdown to the dialing process (polyforge#110):
+	// the UDS peer credential — the kernel's SO_PEERCRED record of who
+	// is on the other end, never anything from the request body
+	// (caller-supplied; the CLI sends an empty object).
+	cred, ok := requestPeerCred(r.Context())
+	cause := RouteShutdownCause(cred, ok)
 	// Answer immediately; the bounded sequence runs to completion in the
 	// background and Run returns when it finishes (04 §6.5).
 	writeJSON(w, http.StatusOK, map[string]any{"shutting_down": true})
 	go func() {
-		if err := d.Shutdown(context.Background()); err != nil {
+		if err := d.Shutdown(context.Background(), cause); err != nil {
 			// already surfaced on stderr by the sequence; nothing else to do
 			_ = err
 		}

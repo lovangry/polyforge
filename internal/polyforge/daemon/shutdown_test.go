@@ -26,7 +26,7 @@ func TestShutdownSequence(t *testing.T) {
 	td.submitClaim(t, "wi_s2")
 
 	start := time.Now()
-	if err := td.Shutdown(context.Background()); err != nil {
+	if err := td.Shutdown(context.Background(), DirectShutdownCause()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 	if el := time.Since(start); el > 5*time.Second {
@@ -88,7 +88,7 @@ func TestShutdownFlushPositive(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- td.Shutdown(context.Background()) }()
+	go func() { done <- td.Shutdown(context.Background(), DirectShutdownCause()) }()
 
 	// Play the agent: flush(shutdown) right after the shutdown call
 	// latches. (The stop_notice delivery that used to gate this is

@@ -89,7 +89,7 @@ func TestHeartbeatLoopTicksPayloadAndStops(t *testing.T) {
 		t.Fatalf("idle daemon must carry an empty live list, not nil: %+v", p)
 	}
 
-	if err := td.Daemon.Shutdown(t.Context()); err != nil {
+	if err := td.Daemon.Shutdown(t.Context(), DirectShutdownCause()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 	// Grace for an in-flight tick, then the count must be frozen.
@@ -113,7 +113,7 @@ func TestHeartbeatDisabled(t *testing.T) {
 	if got := heartbeatAttempts(td.hub); got != 0 {
 		t.Fatalf("disabled heartbeat still attempted %d POSTs", got)
 	}
-	if err := td.Daemon.Shutdown(t.Context()); err != nil {
+	if err := td.Daemon.Shutdown(t.Context(), DirectShutdownCause()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 }
@@ -134,7 +134,7 @@ func TestHeartbeatFailureBackoffAndRecovery(t *testing.T) {
 	// Recover: the next tick succeeds and the ledger moves.
 	td.hub.setHeartbeatErr(nil)
 	waitFor(t, "heartbeat recovers after the hub heals", 3*time.Second, func() bool { return heartbeatCount(td.hub) >= 1 })
-	if err := td.Daemon.Shutdown(t.Context()); err != nil {
+	if err := td.Daemon.Shutdown(t.Context(), DirectShutdownCause()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 }

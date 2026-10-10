@@ -545,12 +545,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			// The caller gave up: run the same bounded graceful sequence.
-			return d.Shutdown(context.Background())
+			return d.Shutdown(context.Background(), CallerContextShutdownCause())
 		case <-d.shutDone:
 			return nil
 		case err := <-serveErr:
 			if err != nil && err != http.ErrServerClosed {
-				_ = d.Shutdown(context.Background())
+				_ = d.Shutdown(context.Background(), ServeErrorShutdownCause(err))
 				return err
 			}
 			return nil
@@ -574,7 +574,7 @@ func (d *Daemon) startFace(lst net.Listener) (chan error, bool) {
 	if d.faceClosed {
 		return nil, false
 	}
-	d.srv = &http.Server{Handler: d.handler()}
+	d.srv = &http.Server{Handler: d.handler(), ConnContext: credConnContext}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- d.srv.Serve(lst) }()
 	return serveErr, true
@@ -960,7 +960,11 @@ func (d *Daemon) listenUDS() (net.Listener, error) {
 		return nil, err
 	}
 	_ = os.Chmod(path, 0o660)
-	return lst, nil
+	// credListener (polyforge#110): capture each accepted conn's UDS
+	// peer credential at accept time so the POST /shutdown route can
+	// attribute the shutdown to the dialing process. The wrapper is
+	// transparent otherwise; closeFace closes it like any listener.
+	return &credListener{Listener: lst}, nil
 }
 
 // ---------------------------------------------------------------------------

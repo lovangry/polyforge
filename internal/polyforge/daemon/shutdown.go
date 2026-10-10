@@ -33,17 +33,104 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
+// ShutdownCause names what triggered the graceful shutdown sequence
+// (polyforge#110). It is the attribution record a post-mortem reads:
+// every Shutdown caller names its trigger explicitly — signal exits
+// name the signal (name + number), route exits name the UDS peer
+// credential (SO_PEERCRED), the Run arms name their own — so an
+// unattributed graceful exit can only ever be one the code explicitly
+// passes as such. The zero value is emitted as UNSPECIFIED (never a
+// silent "unknown") so a call site that forgets its cause is visible
+// in the log instead of re-creating the anonymous exit this WI
+// closed.
+type ShutdownCause struct {
+	Kind   string // signal | route | caller-context | serve-error | direct
+	Detail string // trigger specifics (signal number, UDS peer credential, ...)
+}
+
+// Cause kinds, one per production Shutdown call site (main.go's signal
+// goroutine: CauseSignal; routes.go's POST /shutdown: CauseRoute;
+// daemon.go Run's caller-ctx and serve-error arms: CauseCallerContext
+// and CauseServeError; test harnesses and embedders calling Shutdown
+// directly: CauseDirect).
+const (
+	CauseSignal        = "signal"
+	CauseRoute         = "route"
+	CauseCallerContext = "caller-context"
+	CauseServeError    = "serve-error"
+	CauseDirect        = "direct"
+)
+
+func (c ShutdownCause) String() string {
+	switch {
+	case c.Kind == "":
+		return "UNSPECIFIED (a Shutdown caller passed the zero cause)"
+	case c.Detail == "":
+		return c.Kind
+	default:
+		return c.Kind + ": " + c.Detail
+	}
+}
+
+// SignalShutdownCause attributes the shutdown to an OS signal. The
+// detail carries the signal's name AND number (e.g. "terminated
+// (signal 15)") — the number per the polyforge#110 fix ask, so a
+// post-mortem attributes a signal exit in one read.
+func SignalShutdownCause(sig os.Signal) ShutdownCause {
+	if s, ok := sig.(syscall.Signal); ok {
+		return ShutdownCause{Kind: CauseSignal, Detail: fmt.Sprintf("%s (signal %d)", s, int(s))}
+	}
+	return ShutdownCause{Kind: CauseSignal, Detail: fmt.Sprintf("%v", sig)}
+}
+
+// RouteShutdownCause attributes the shutdown to the POST /shutdown
+// route over the daemon's UDS face. The detail carries the UDS peer
+// credential — the kernel's SO_PEERCRED record of the dialing process
+// (pid per the fix ask, uid as corroboration), never anything from the
+// request body (caller-supplied; the CLI sends an empty object). An
+// unavailable credential is recorded as such, explicitly — it never
+// degrades into an anonymous exit.
+func RouteShutdownCause(cred peerCred, ok bool) ShutdownCause {
+	if !ok {
+		return ShutdownCause{Kind: CauseRoute, Detail: "POST /shutdown uds peer credential unavailable"}
+	}
+	return ShutdownCause{Kind: CauseRoute, Detail: fmt.Sprintf("POST /shutdown uds peer pid=%d uid=%d", cred.pid, cred.uid)}
+}
+
+// CallerContextShutdownCause attributes the shutdown to the Run
+// caller's context reaching Done (the embedder gave up on the daemon).
+func CallerContextShutdownCause() ShutdownCause {
+	return ShutdownCause{Kind: CauseCallerContext, Detail: "the Run caller's context is done"}
+}
+
+// ServeErrorShutdownCause attributes the shutdown to the UDS face's
+// Serve returning an error.
+func ServeErrorShutdownCause(err error) ShutdownCause {
+	return ShutdownCause{Kind: CauseServeError, Detail: fmt.Sprintf("%v", err)}
+}
+
+// DirectShutdownCause attributes the shutdown to a direct in-process
+// Shutdown call — test harnesses and embedders only; no production
+// call site uses it (production triggers name their real cause).
+func DirectShutdownCause() ShutdownCause {
+	return ShutdownCause{Kind: CauseDirect, Detail: "in-process Shutdown call"}
+}
+
 // Shutdown runs the graceful shutdown sequence. Concurrent callers JOIN
 // the first sequence (never race it: a second sequence that skipped
 // every job would let the process exit mid-close) and receive its
 // verdict — write-before-close is the happens-before edge for the error.
-func (d *Daemon) Shutdown(ctx context.Context) error {
+// cause is the FIRST caller's trigger record (polyforge#110): only the
+// trigger of the first sequence is attributable, so joiners' causes are
+// ignored.
+func (d *Daemon) Shutdown(ctx context.Context, cause ShutdownCause) error {
 	first := false
 	d.shutOnce.Do(func() { first = true })
 	if !first {
@@ -62,7 +149,7 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 		ctx, cancel = context.WithTimeout(context.Background(), d.cfg.ShutdownBudget)
 		defer cancel()
 	}
-	err := d.runShutdown(ctx)
+	err := d.runShutdown(ctx, cause)
 	d.shutMu.Lock()
 	d.shutdownErr = err
 	d.shutMu.Unlock()
@@ -70,7 +157,14 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 	return err
 }
 
-func (d *Daemon) runShutdown(ctx context.Context) error {
+func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
+	// Step 0 (polyforge#110): the cause record, FIRST — before the
+	// latch's side effects — so the attribution survives a
+	// budget-exhausted or mid-sequence exit. One line per sequence on
+	// the daemon's stderr: the sink a post-mortem of the process
+	// window reads.
+	fmt.Fprintf(os.Stderr, "daemon: shutdown: cause=%s\n", cause)
+
 	// Step 1: the latch, before any other action.
 	d.modes.SetShuttingDown()
 

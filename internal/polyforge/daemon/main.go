@@ -201,13 +201,19 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// SIGTERM/SIGINT run the same bounded graceful sequence the
-	// POST /shutdown route triggers.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+	// POST /shutdown route triggers. The signal VALUE is observed via a
+	// Notify channel (polyforge#110): a NotifyContext cancellation
+	// reports only "context canceled", so the cause record could never
+	// name which signal fired. One shot: after the first delivery
+	// signal.Stop restores the default disposition, so a second signal
+	// aborts waits hard — the same semantics NotifyContext's stop gave.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
 	go func() {
-		<-ctx.Done()
-		stop() // one shot: a second signal aborts waits hard
-		if err := d.Shutdown(context.Background()); err != nil {
+		sig := <-sigCh
+		signal.Stop(sigCh) // one shot: a second signal aborts waits hard
+		if err := d.Shutdown(context.Background(), SignalShutdownCause(sig)); err != nil {
 			fmt.Fprintf(stderr, "pf daemon: shutdown: %v\n", err)
 		}
 	}()
