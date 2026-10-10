@@ -22,7 +22,18 @@ test:
 	# go test suppresses skip messages unless -v (or -json) is on, so
 	# plain `make test` green does NOT show them — verification evidence
 	# that needs it must run `go test -v ./...` (or -json) explicitly.
-	go test ./... -count=1
+	#
+	# Explicit -timeout (rewind fix for the wi_QVLW3ceFGfSF verification
+	# FAIL): the ./test acceptance package honestly runs ~11m on this
+	# class of machine (646s measured: the w079 workspace-yaml suite alone
+	# is ~73s across 28 daemon-driven scenarios, and the pre-existing v1/
+	# v2/v3 acceptance suites carry the rest) — LONGER than go's default
+	# 600s per-package timeout, so `go test ./...` with no -timeout panics
+	# on wall clock while every test passes. The target passes an explicit
+	# timeout with headroom instead of failing a green package; per-test
+	# hangs still trip it long before 20m (the package's slowest single
+	# test is ~62s).
+	go test ./... -count=1 -timeout 20m
 
 fmt:
 	@out=$$(gofmt -l .); \

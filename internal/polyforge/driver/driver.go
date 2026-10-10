@@ -67,6 +67,19 @@ type Config struct {
 	// Workflow supplies the execution graph directly (tests, or a
 	// daemon that already parsed it); nil → loaded from BundleDir.
 	Workflow *Workflow
+	// StepCandidates is the polyforge#79 effective per-step candidate
+	// map (post-precedence, computed at claim time; rehydrated or
+	// re-derived at recovery). When non-nil it SUBSTITUTES the parsed
+	// step-level lists for every step it keys — a present-empty entry
+	// governs and means no switchable chain. A step absent from the map
+	// (or a nil map) keeps the bundle's own resolution.
+	StepCandidates map[string][]string
+	// Interrupted, when set, archives ONE infra_failure attempt on the
+	// current in_progress step before the loop re-dispatches (the
+	// recovery integration's write, performed by the single
+	// execution.json writer). Nil on a fresh start — a claim never
+	// archives.
+	Interrupted *InterruptedDispatch
 	// Spawner derives the step processes. Required.
 	Spawner StepSpawner
 	// SpawnN seeds the per-WI monotonic derivation counter (B2): the
@@ -79,6 +92,15 @@ type Config struct {
 	Log EventLogger
 	// Now overrides the clock (tests).
 	Now func() time.Time
+}
+
+// InterruptedDispatch records one derivation that ended without a
+// result: its classified fault and the recovery cause. The driver
+// archives it as the step's infra_failure attempt (the candidate
+// pointer's input) when the recovery lane re-derives.
+type InterruptedDispatch struct {
+	FaultClass FaultClass
+	Detail     string
 }
 
 // Driver is the per-WI execution driver. One Driver per work item; Run
@@ -215,6 +237,24 @@ func (d *Driver) Run(ctx context.Context) error {
 	if !d.isInitialized() {
 		if err := d.transition(TransitionRequest{Kind: TransInit, SpawnN: d.currentSpawnN()}); err != nil {
 			return fmt.Errorf("driver: execution init failed: %w", err)
+		}
+	}
+	// polyforge#79 era: the recovery integration's interrupted-dispatch
+	// archive (the recovery lane triggers it; the single execution.json
+	// writer performs it). ONE infra_failure attempt for the derivation
+	// that died without a result, BEFORE the re-derivation dispatches —
+	// the archived-attempt recomputation then indexes it (a
+	// provider-class archive is what advances the candidate pointer;
+	// operator-class causes never reach this hook — the bridge filters
+	// them).
+	if d.cfg.Interrupted != nil {
+		if err := d.transition(TransitionRequest{
+			Kind:       TransInterrupted,
+			FaultClass: string(d.cfg.Interrupted.FaultClass),
+			Reason:     d.cfg.Interrupted.Detail,
+			SpawnN:     d.currentSpawnN(),
+		}); err != nil {
+			return fmt.Errorf("driver: interrupted-dispatch archive failed: %w", err)
 		}
 	}
 	for {
@@ -1063,21 +1103,41 @@ func attemptsToPointer(st *capsule.Step) []StepAttempt {
 	return out
 }
 
+// effectiveCandidates answers the step's effective candidate list: the
+// polyforge#79 post-precedence map when the claim/recovery supplied
+// one, the bundle's own resolution otherwise.
+func (d *Driver) effectiveCandidates(stepID string) []string {
+	if d.cfg.StepCandidates != nil {
+		if list, ok := d.cfg.StepCandidates[stepID]; ok {
+			return list
+		}
+	}
+	if spec := d.workflow.step(stepID); spec != nil {
+		return spec.ModelCandidates
+	}
+	return nil
+}
+
 // modelForLocked resolves the step's effective model for the NEXT
 // dispatch (the candidate at the recomputed ordinal; "" when no
-// candidate list is in effect).
+// candidate list is in effect). The recomputation runs over the
+// EFFECTIVE list (polyforge#79): the post-precedence list the claim
+// carried — or the recovery re-derived — never the raw bundle parse
+// alone. Rotation semantics are untouched: provider-class infra
+// failures alone advance (bounded, capped at list end), a gate-FAIL
+// rewind resets to the head.
 func (d *Driver) modelForLocked(stepID string) string {
-	spec := d.workflow.step(stepID)
-	if spec == nil || len(spec.ModelCandidates) == 0 {
+	list := d.effectiveCandidates(stepID)
+	if len(list) == 0 {
 		return ""
 	}
 	st := d.exec.Steps[stepID]
 	if st == nil {
-		return spec.ModelCandidates[0]
+		return list[0]
 	}
-	ord := candidateOrdinal(st, len(spec.ModelCandidates))
+	ord := candidateOrdinal(st, len(list))
 	if ord <= 0 {
 		return ""
 	}
-	return spec.ModelCandidates[ord-1]
+	return list[ord-1]
 }

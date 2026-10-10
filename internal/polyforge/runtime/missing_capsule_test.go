@@ -167,7 +167,7 @@ func TestRecoverCoreMissingCapsuleBoundedFail(t *testing.T) {
 		}
 	}
 
-	r.recoverOp(context.Background(), j, "daemon_restart")
+	r.recoverOp(context.Background(), j, "daemon_restart", "daemon restart (crash mid-run)")
 
 	msg := recvRT(t, toOB)
 	if msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {

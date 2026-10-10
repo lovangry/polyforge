@@ -113,3 +113,63 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return blob
 }
+
+// TestCapsuleAuditFieldsRoundTrip pins the polyforge#79 audit contract:
+// a governed capsule's audit fields decode typed; a legacy capsule
+// without them decodes with them empty (the loose-parse tolerance
+// stays untouched); and an audit-less Identity marshals WITHOUT the
+// keys (a no-yaml claim records nothing — never fabricated content).
+func TestCapsuleAuditFieldsRoundTrip(t *testing.T) {
+	const governed = `{
+	  "work_item_id": "wi_gov",
+	  "project": "e2e",
+	  "workspace_yaml": {
+	    "projects": {"e2e": {"repos": [{"name": "src", "path": ".repo/src"}]}},
+	    "workflow_defaults": {"model_candidates": ["a", "b"], "step_kinds": {"code": ["c"]}}
+	  },
+	  "effective_candidates": {"fix": ["a", "b"], "grill": []},
+	  "repo_sources": {"src": "/ws/.repo/src"}
+	}`
+	var idn Identity
+	if err := json.Unmarshal([]byte(governed), &idn); err != nil {
+		t.Fatalf("governed capsule.json must parse: %v", err)
+	}
+	if idn.WorkspaceYaml == nil ||
+		idn.WorkspaceYaml.Projects["e2e"].Repos[0].Name != "src" ||
+		idn.WorkspaceYaml.Projects["e2e"].Repos[0].Path != ".repo/src" {
+		t.Fatalf("workspace_yaml must decode verbatim: %+v", idn.WorkspaceYaml)
+	}
+	if wd := idn.WorkspaceYaml.WorkflowDefaults; wd == nil || len(wd.ModelCandidates) != 2 || wd.StepKinds["code"][0] != "c" {
+		t.Fatalf("workflow_defaults must decode verbatim: %+v", idn.WorkspaceYaml.WorkflowDefaults)
+	}
+	if got := idn.EffectiveCandidates["fix"]; len(got) != 2 || got[0] != "a" {
+		t.Fatalf("effective_candidates must decode: %v", idn.EffectiveCandidates)
+	}
+	if got, ok := idn.EffectiveCandidates["grill"]; !ok || len(got) != 0 {
+		t.Fatalf("a present-empty effective list must decode as present-empty: %v", idn.EffectiveCandidates)
+	}
+	if got := idn.RepoSources["src"]; got != "/ws/.repo/src" {
+		t.Fatalf("repo_sources must decode: %v", idn.RepoSources)
+	}
+
+	// A legacy capsule without the audit keys decodes loose, fields empty.
+	const legacy = `{"work_item_id": "wi_old", "generation": 4, "attempt_id": "att_1"}`
+	var old Identity
+	if err := json.Unmarshal([]byte(legacy), &old); err != nil {
+		t.Fatalf("legacy capsule must parse: %v", err)
+	}
+	if old.WorkspaceYaml != nil || old.EffectiveCandidates != nil || old.RepoSources != nil {
+		t.Fatalf("legacy reads must leave the audit fields empty: %+v", old)
+	}
+
+	// An audit-less Identity marshals without the keys at all.
+	blob, err := json.Marshal(Identity{WorkItemID: "wi_plain", Repos: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tok := range []string{"workspace_yaml", "effective_candidates", "repo_sources"} {
+		if strings.Contains(string(blob), tok) {
+			t.Fatalf("audit-less identity marshals a %q key: %s", tok, blob)
+		}
+	}
+}

@@ -38,9 +38,14 @@ type Defaults struct {
 }
 
 // FrontmatterStep is one frontmatter step entry, reduced to the fields
-// the read surface needs (the id + the per-step candidate override).
+// the read surface needs (the id, the step's V8 KIND, and the per-step
+// candidate override). Kind is the polyforge#79 read-surface addition:
+// the workspace yaml's step_kinds is kind-KEYED, so the compose needs
+// the same closed vocabulary the bundle declares. A read-surface
+// addition only — aihub's bundle validation is untouched.
 type FrontmatterStep struct {
 	ID              string   `yaml:"id"`
+	Kind            string   `yaml:"kind"`
 	ModelCandidates []string `yaml:"model_candidates"`
 }
 

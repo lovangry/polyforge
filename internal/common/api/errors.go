@@ -90,7 +90,23 @@ const (
 	// created or server-side claim state changes (DAEMON-412: a
 	// precondition of placement is missing — remediation is config, not
 	// retry).
-	ErrDaemonUnmappedProject     = "DAEMON-412"
+	ErrDaemonUnmappedProject = "DAEMON-412"
+	// ErrDaemonWorkspaceYaml is the polyforge#79 claim-time refusal: the
+	// workspace's .polyforge.yaml failed to parse or violated the strict
+	// schema. Raised BEFORE any capsule is created — a precondition of
+	// the claim's materialization is a valid workspace layer (remediation
+	// is fixing the file, not retrying). Same abandonClaim lane as
+	// DAEMON-412: the session ends blocked, the WI stays queued/blocked,
+	// nothing half-materializes.
+	ErrDaemonWorkspaceYaml = "DAEMON-414"
+	// ErrDaemonProjectNotListed is the polyforge#79 claim-time drift
+	// refusal: the workspace yaml carries a present `projects` section
+	// but the claimed project is not listed in it. The section is the
+	// authoritative repo inventory — no silent registry fallback is
+	// offered (the DAEMON-412 precedent: silent-ambient behavior is
+	// rejected); remediation is listing the project or removing the
+	// section.
+	ErrDaemonProjectNotListed    = "DAEMON-415"
 	ErrDaemonConflict            = "DAEMON-409"
 	ErrDaemonGone                = "DAEMON-410"
 	ErrDaemonShuttingDown        = "DAEMON-503"

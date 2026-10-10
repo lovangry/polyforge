@@ -139,6 +139,33 @@ type Config struct {
 	SessionHandle string
 	SpawnN        int64
 	Spawner       rt.Spawner
+	// StepCandidates is the polyforge#79 effective per-step candidate
+	// map the runtime computed at claim time (or rehydrated/re-derived
+	// at recovery); nil = no yaml layer, the bundle's own resolution.
+	// Forwarded to the driver verbatim.
+	StepCandidates map[string][]string
+	// InterruptedCause is the recovery lane's cause string when THIS
+	// start is a re-derivation ("" on a fresh claim). Operator-shaped
+	// causes archive nothing — a deliberate stop is not a model verdict.
+	InterruptedCause string
+}
+
+// interruptedFromCause maps the recovery lane's cause onto the driver's
+// interrupted-dispatch archive: the cause runs through the driver's
+// fault table, and an OPERATOR-classified cause archives NOTHING (an
+// interruption is a stop, not a model verdict — the
+// attach-after-graceful-shutdown resume keeps today's no-advance
+// behavior). Everything else defaults provider-class, exactly the
+// bounded side of the policy.
+func interruptedFromCause(cause string) *driver.InterruptedDispatch {
+	if cause == "" {
+		return nil
+	}
+	fc := driver.ClassifyFault(errors.New(cause))
+	if fc == driver.FaultOperator {
+		return nil
+	}
+	return &driver.InterruptedDispatch{FaultClass: fc, Detail: cause}
 }
 
 // Start instantiates the driver over the capsule and runs it.
@@ -179,10 +206,12 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 	}
 
 	drv, err := driver.New(driver.Config{
-		WI:      wiInfo,
-		Spawner: adapter,
-		SpawnN:  stepSeed,
-		Log:     &stdLogger{},
+		WI:             wiInfo,
+		Spawner:        adapter,
+		SpawnN:         stepSeed,
+		Log:            &stdLogger{},
+		StepCandidates: cfg.StepCandidates,
+		Interrupted:    interruptedFromCause(cfg.InterruptedCause),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bridge: driver.New: %w", err)
