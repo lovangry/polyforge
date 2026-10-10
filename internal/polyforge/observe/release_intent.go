@@ -144,6 +144,21 @@ func (r *ReleaseIntent) covers(repo string) bool {
 	return false
 }
 
+// ReleaseIntentMissingFor is the wrap gate's predicate, exported for the
+// runtime's driver-lane terminal wrap close (recover.go): the driver era
+// has no flush(wrap) call — Run returning nil IS the completion signal —
+// so the driver lane's close is the face that must refuse. The monitor's
+// flush lane (flushWrap) runs the same predicate for agent-driven seals.
+func ReleaseIntentMissingFor(capsuleDir, wi string) []string {
+	return releaseIntentMissingFor(capsuleDir, wi)
+}
+
+// ReleaseIntentRefusal is the typed refusal text for repos the fragment
+// does not cover, exported alongside the predicate for the same caller.
+func ReleaseIntentRefusal(wi string, missing []string) string {
+	return releaseIntentRefusal(wi, missing)
+}
+
 // releaseIntentRefusal builds the typed refusal text for repos the
 // fragment does not cover (or mis-declared): the DAEMON-400 code, the
 // release-intent name, every uncovered repo, and the re-flush recovery —
