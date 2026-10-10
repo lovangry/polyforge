@@ -260,6 +260,11 @@ type job struct {
 	// there).
 	workspaceRoot string
 	workspaceYaml *workspace.Config
+	// repoSources is the polyforge#79 local-source record: repo name →
+	// the source actually cloned from (the resolved local checkout for
+	// yaml-sourced clones). In-memory only; the durable copy is the
+	// capsule.json audit.
+	repoSources map[string]string
 
 	agent          AgentHandle
 	agentPID       int
@@ -983,6 +988,14 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 // workspace carries no yaml — absent-equivalent, behavior unchanged).
 // An invalid yaml returns the typed DAEMON-414 refusal; the caller
 // compensates through abandonClaim and nothing materializes.
+//
+// When the yaml carries a present `projects` section, the claimed
+// project MUST be listed (DAEMON-415 otherwise — no silent registry
+// fallback), and the job's repo inventory is built WHOLLY from the yaml
+// entries: name + source = the workspace root joined with the entry's
+// workspace-root-relative `path`, which flows through the existing
+// cloneTaskRepos/gitClone seam verbatim (the recovery contract and the
+// DAEMON-507 lane hold unchanged for locally-sourced clones).
 func (r *Runtime) readWorkspaceYaml(j *job) error {
 	ws, err := r.cfg.Mapping.WorkspaceFor(j.project)
 	if err != nil {
@@ -1000,6 +1013,26 @@ func (r *Runtime) readWorkspaceYaml(j *job) error {
 		}
 	}
 	j.workspaceYaml = wcfg
+	if wcfg == nil || wcfg.Projects == nil {
+		return nil // no projects section: the registry inventory stands
+	}
+	entry, listed := wcfg.Projects[j.project]
+	if !listed || entry == nil {
+		return &api.Error{
+			Code: api.ErrDaemonProjectNotListed,
+			Detail: fmt.Sprintf("the workspace yaml refused the claim of %s: project %q is not listed in the projects section of %s — the section is the authoritative repo inventory and no registry fallback is offered; list %q there or remove the section",
+				j.wi, j.project, workspace.PathFor(ws), j.project),
+		}
+	}
+	repos := make([]api.ProjectRepo, 0, len(entry.Repos))
+	sources := make(map[string]string, len(entry.Repos))
+	for _, re := range entry.Repos {
+		src := workspace.ResolveRepoSource(ws, re)
+		repos = append(repos, api.ProjectRepo{Name: re.Name, URL: src})
+		sources[re.Name] = src
+	}
+	j.repos = repos         // the yaml inventory WHOLLY replaces the claim answer's
+	j.repoSources = sources // repo name → resolved local checkout (the audit's repo_sources)
 	return nil
 }
 
