@@ -188,6 +188,26 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 		return nil, fmt.Errorf("bridge: driver.New: %w", err)
 	}
 
+	// The §6.4 owner move on the claim/start path (polyforge#116): a
+	// capsule that arrives BLOCKED (the parked §6.5-step-5 verdict —
+	// chain-durable since the bounded close seals it) must not re-wedge
+	// the fresh driver: Run would read blocked and exit at once (the
+	// bounded close again, forever). The owner's resume verdict unblocks
+	// the workflow; the loop's own dispatch then re-dispatches the frozen
+	// in_progress step in place as a fresh derivation (the parked journal
+	// and prior step output survive — the resumed lane continues the
+	// parked capsule, never a pre-blocked re-derivation). The call is the
+	// owner's verdict exactly because no live loop can leave the blocked
+	// state (Run exits on it): every claim of a parked capsule arrives
+	// here. ResumeCurrent's blocked-only guard makes the call refuse on
+	// any other capsule state; a parked capsule without a current step is
+	// the error surfaced below (the D5 compensation closes the claim).
+	if drv.Snapshot().WorkflowStatus == driver.StatusBlocked {
+		if err := drv.ResumeCurrent(); err != nil {
+			return nil, fmt.Errorf("bridge: owner resume of the parked workflow: %w", err)
+		}
+	}
+
 	dctx, cancel := context.WithCancel(ctx)
 	h := &Handle{
 		done:    make(chan error),

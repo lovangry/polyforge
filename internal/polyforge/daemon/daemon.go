@@ -15,6 +15,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -53,6 +54,15 @@ type Hub interface {
 	SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error)
 	// Heartbeat posts one machines/heartbeat upsert (M3 liveness face).
 	Heartbeat(req aihubclient.MachineHeartbeat) (*aihubclient.MachineHeartbeatResult, error)
+	// ResumeBlockedWorkItem is the §6.4 owner resume verdict's hub door
+	// (polyforge#116): `pf resume` on a workflow parked blocked — blocked
+	// → queued for the owner's immediate re-claim. *aihubclient.Client
+	// satisfies it.
+	ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error)
+	// TerminateBlockedWorkItem is the §6.4 owner terminate verdict's hub
+	// door (polyforge#116): `pf wrap --fail` on a parked workflow —
+	// blocked → failed. *aihubclient.Client satisfies it.
+	TerminateBlockedWorkItem(idOrSlug string) (json.RawMessage, error)
 	// Do performs one typed request against aihub (the client's own
 	// generic entry): the F6 memory adapters use it for the calls the
 	// shared client carries no typed method for.

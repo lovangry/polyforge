@@ -293,6 +293,46 @@ func TestResumeFlagClearSemantics(t *testing.T) {
 	}
 }
 
+// TestResumeBlockedDoorWiring (polyforge#116): a workflow parked blocked
+// answers the §6.4 owner move, not the pause copy — the hub status picks
+// the door, and the blocked door contacts the daemon's resume-blocked
+// route (the paused door contacts no daemon route at all; the test above
+// pins that).
+func TestResumeBlockedDoorWiring(t *testing.T) {
+	blockedWI := `{"id":"wi_blocked","slug":"pf-43","seq":43,"project":"polyforge","goal":"the goal",` +
+		`"status":"blocked","priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z",` +
+		`"updated_at":"2026-10-01T00:00:00Z"}`
+	var aihubRec reqRecorder
+	aihub := newFakeAihub(t, &aihubRec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, blockedWI)
+	})
+	d := newDaemonFixture(t)
+	d.answer("POST", "/jobs/wi_blocked/resume-blocked", `{"resumed":true,"work_item_id":"wi_blocked"}`)
+	code, stdout, stderr := runPf(t, map[string]string{
+		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
+	}, "resume", "wi_blocked")
+	if code != 0 {
+		t.Fatalf("resume: code=%d stderr=%s", code, stderr)
+	}
+	if strings.Contains(stdout, "clean_pause cleared") {
+		t.Errorf("a parked workflow must never answer the pause copy: %s", stdout)
+	}
+	if !strings.Contains(stdout, "resumed wi_blocked") || !strings.Contains(stdout, "parked blocked") {
+		t.Errorf("stdout must carry the §6.4 owner-move copy: %s", stdout)
+	}
+	// The daemon's owner-move route is contacted exactly once.
+	calls := d.rec.all()
+	if len(calls) != 1 || calls[0].Path != "/jobs/wi_blocked/resume-blocked" {
+		t.Errorf("resume must contact the daemon's resume-blocked route once: %+v", calls)
+	}
+	// No clean_pause PATCH lands for a blocked WI (the pause copy's door).
+	for _, r := range aihubRec.all() {
+		if r.Method == "PATCH" {
+			t.Errorf("a parked WI must not PATCH clean_pause: %s %s", r.Method, r.Path)
+		}
+	}
+}
+
 // TestResumeWireErrorClasses: with the daemon socket deliberately dead
 // (resume never dials it), the exit code rides the aihub face alone.
 func TestResumeWireErrorClasses(t *testing.T) {

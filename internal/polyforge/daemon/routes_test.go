@@ -294,6 +294,98 @@ func TestWrapDualPathArbitration(t *testing.T) {
 
 // TestWrapAlreadyTerminalGraceful: a wrap of an already-sealed work item
 // answers gracefully (the idempotent already-terminal shape), not 404.
+// TestResumeBlockedOwnerMove (polyforge#116): the §6.4 owner face on a
+// workflow parked blocked — the route drives the hub's resume-blocked
+// door (blocked → queued) once and then starts the WI live (the
+// claim/start path's owner move resumes the parked capsule). A live or
+// queued duplicate is refused, the submit-family way.
+func TestResumeBlockedOwnerMove(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	const wi = "wi_parked"
+	// The hub names the WI blocked with no session (the bounded close's
+	// shape — M2).
+	td.hub.mu.Lock()
+	td.hub.status[wi] = api.StatusBlocked
+	td.hub.mu.Unlock()
+	mkBare(t, td.cfg.GitRemoteBase, wi)
+
+	raw, err := td.client.ResumeBlocked(wi)
+	if err != nil {
+		t.Fatalf("resume-blocked: %v", err)
+	}
+	var rr struct {
+		Resumed    bool   `json:"resumed"`
+		WorkItemID string `json:"work_item_id"`
+	}
+	if err := json.Unmarshal(raw, &rr); err != nil {
+		t.Fatalf("resume-blocked answer undecodable: %v", err)
+	}
+	if !rr.Resumed || rr.WorkItemID != wi {
+		t.Fatalf("resume-blocked answer = %+v, want resumed for %s", rr, wi)
+	}
+	td.waitLive(t, wi)
+	// The hub door landed exactly once (blocked → queued; the claim went
+	// live after it).
+	td.hub.mu.Lock()
+	if len(td.hub.resumeBlockeds) != 1 || td.hub.resumeBlockeds[0] != wi {
+		t.Fatalf("the hub resume door fired %v, want once for %s", td.hub.resumeBlockeds, wi)
+	}
+	td.hub.mu.Unlock()
+
+	// A live work item refuses the owner's verdict (it owns its starts).
+	if _, err := td.client.ResumeBlocked(wi); err == nil {
+		t.Fatal("resume-blocked on a live work item must be refused")
+	}
+}
+
+// TestTerminateBlockedOwnerVerdict (polyforge#116): the §6.4 terminate
+// verdict's face — a close that finds no local job because the workflow
+// is parked blocked lands the owner's kill verdict at the hub
+// (the terminate-blocked door) instead of DAEMON-404; a wrap (success)
+// and a pause of a parked workflow answer the owner-move refusal — there
+// is nothing to seal.
+func TestTerminateBlockedOwnerVerdict(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	const wi = "wi_parked"
+	td.hub.mu.Lock()
+	td.hub.status[wi] = api.StatusBlocked
+	td.hub.mu.Unlock()
+
+	raw, err := td.client.Wrap(wi, "fail")
+	if err != nil {
+		t.Fatalf("wrap --fail on a parked workflow: %v", err)
+	}
+	var cr closeResponse
+	if err := json.Unmarshal(raw, &cr); err != nil {
+		t.Fatalf("wrap answer undecodable: %v", err)
+	}
+	if cr.Outcome != "terminated" || cr.Status != "failed" || cr.Reason != "failed" {
+		t.Fatalf("the terminate verdict answer = %+v, want terminated/failed", cr)
+	}
+	td.hub.mu.Lock()
+	if len(td.hub.terminateBlockeds) != 1 || td.hub.terminateBlockeds[0] != wi {
+		t.Fatalf("the hub terminate door fired %v, want once for %s", td.hub.terminateBlockeds, wi)
+	}
+	td.hub.mu.Unlock()
+
+	// A wrap (success) or a pause of a STILL-parked workflow has nothing
+	// to seal — the owner's moves are the §6.4 face, not a runtime close.
+	// (After the terminate verdict the WI is terminal, and a close answers
+	// the graceful already_terminal shape — the arbitration's idempotency.)
+	const wi2 = "wi_parked2"
+	td.hub.mu.Lock()
+	td.hub.status[wi2] = api.StatusBlocked
+	td.hub.mu.Unlock()
+	if _, err := td.client.Wrap(wi2, "wrap"); err == nil {
+		t.Fatal("wrap (success) on a parked workflow must be refused")
+	}
+	// A pause of a parked workflow: same refusal — the owner's moves are
+	// the §6.4 face, not a runtime close.
+	if _, err := td.client.Pause(wi2); err == nil {
+		t.Fatal("pause on a parked workflow must be refused")
+	}
+}
+
 func TestWrapAlreadyTerminalGraceful(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_e")

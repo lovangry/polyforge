@@ -354,6 +354,89 @@ func TestSessionEndFenceAndClear(t *testing.T) {
 	}
 }
 
+// TestOwnerDoorsOnBlockedWI (polyforge#116): the §6.4 owner doors on a
+// workflow parked blocked on an honest incomplete result. The resume
+// door (blocked → queued for the owner's re-claim — the claim gate
+// itself stays queued-only, so a plain claim still refuses) and the
+// terminate door (blocked → failed, closed_at set). Both refuse a
+// non-blocked work item; both record their event.
+func TestOwnerDoorsOnBlockedWI(t *testing.T) {
+	env, m := sessionEnv(t)
+	id := mustCreateExecWI(t, env, "owner doors on blocked", nil, "")
+
+	// The doors refuse a non-blocked work item (the parked shape only).
+	if _, err := env.WIs.ResumeBlocked(id, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_BLOCKED" {
+		t.Fatalf("the resume door accepted a queued WI: %v", err)
+	}
+	if _, err := env.WIs.TerminateBlocked(id, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_BLOCKED" {
+		t.Fatalf("the terminate door accepted a queued WI: %v", err)
+	}
+
+	// Park blocked the way the runtime's bounded close does: session
+	// cleared, waiting_on=owner.
+	secret := "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+	mustSessionClaim(t, m, env, id, secret, "e-1")
+	if err := m.End(id, api.SessionEndRequest{SessionID: secret, Status: api.StatusBlocked, Note: "incomplete"}, env.UserID); err != nil {
+		t.Fatalf("session-end blocked: %v", err)
+	}
+
+	// The claim gate stays queued-only (M2): a plain claim of the parked
+	// WI still refuses — the owner moves go through their own doors.
+	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b"}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_CLAIMABLE" {
+		t.Fatalf("a plain claim of a parked WI must still refuse: %v", err)
+	}
+
+	// The resume door: blocked → queued (wi_resumed), waiting_on cleared.
+	if _, err := env.WIs.ResumeBlocked(id, env.UserID); err != nil {
+		t.Fatalf("resume-blocked: %v", err)
+	}
+	wi, err := env.WIs.Get(id, GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if wi.Status != api.StatusQueued {
+		t.Fatalf("the resume door must land queued: %s", wi.Status)
+	}
+	if wi.WaitingOn != nil {
+		t.Fatalf("the resume door must clear waiting_on: %v", *wi.WaitingOn)
+	}
+	// The owner's re-claim now goes through the unchanged claim gate.
+	reclaim := "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+	mustSessionClaim(t, m, env, id, reclaim, "e-2")
+
+	// Park blocked again; the terminate door lands failed with closed_at
+	// and the session row cleared (M2 holds on every terminal transition).
+	if err := m.End(id, api.SessionEndRequest{SessionID: reclaim, Status: api.StatusBlocked, Note: "incomplete again"}, env.UserID); err != nil {
+		t.Fatalf("second session-end blocked: %v", err)
+	}
+	if _, err := env.WIs.TerminateBlocked(id, env.UserID); err != nil {
+		t.Fatalf("terminate-blocked: %v", err)
+	}
+	wi, err = env.WIs.Get(id, GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if wi.Status != api.StatusFailed {
+		t.Fatalf("the terminate door must land failed: %s", wi.Status)
+	}
+	if wi.ClosedAt == nil {
+		t.Fatalf("the terminate door must set closed_at")
+	}
+	status, hash, _, _, _, _, _ := rowSession(t, env, id)
+	if status != api.StatusFailed || hash != nil {
+		t.Fatalf("the terminate door must leave the session cleared: status=%s hash=%v", status, hash)
+	}
+	// The doors record their events.
+	found := map[string]bool{}
+	events, _ := env.WIs.Events(id)
+	for _, e := range events {
+		found[e.Type] = true
+	}
+	if !found["wi_resumed"] || !found["wi_failed_blocked"] {
+		t.Fatalf("the doors' events missing: %v", found)
+	}
+}
+
 // TestSessionClaimGates: the M1 joint gate's typed refusals — terminal
 // (CORE-410), no bundle / not queued (CORE-409 NOT_CLAIMABLE),
 // dependency-blocked (CORE-409 DEPENDENCY_BLOCKED).
