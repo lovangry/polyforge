@@ -30,6 +30,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // Aihub is the server face Runtime needs (v1.5 session model: the
@@ -249,6 +250,16 @@ type job struct {
 	// starts. In-memory only — recovery never re-materializes, so it is
 	// not part of the persisted job record.
 	repos []api.ProjectRepo
+
+	// workspaceRoot/workspaceYaml are the polyforge#79 claim-time read:
+	// the mapped workspace's root and its strictly-validated
+	// .polyforge.yaml (nil when the workspace carries none). Read FRESH
+	// on every claim — an edit governs the next claim with no daemon
+	// restart. In-memory only: the durable snapshot is the capsule.json
+	// audit materialize writes (the recovery path rehydrates from
+	// there).
+	workspaceRoot string
+	workspaceYaml *workspace.Config
 
 	agent          AgentHandle
 	agentPID       int
@@ -847,6 +858,20 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	j.git.CapsuleDir = capDir
 	j.transcript = sessionPathFor(j.capsuleDir, fp)
 
+	// polyforge#79: the workspace yaml is read FRESH on every claim (the
+	// read lives in the claim path, so an edit governs the next claim
+	// with no daemon restart) and an invalid one refuses the claim BEFORE
+	// any capsule state exists — the same abandonClaim lane as the
+	// unmapped-project refusal above (DAEMON-414).
+	if err := r.readWorkspaceYaml(j); err != nil {
+		note := err.Error()
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.Detail != "" {
+			note = ae.Detail
+		}
+		return r.abandonClaim(j, wi, err, note)
+	}
+
 	if err := r.prepareCapsule(j); err != nil {
 		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
 	}
@@ -947,6 +972,34 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		// session revalidation needs it); never a log, never the capsule.
 		SessionID: j.sessionID,
 	})
+	return nil
+}
+
+// readWorkspaceYaml is the polyforge#79 claim-time read (fresh, no
+// cache): resolve the workspace root through the same inverse mapping
+// placement used (the WorkspaceFor source capsuleDirForProject keys
+// off), strictly validate <root>/.polyforge.yaml through the shared
+// loader, and stash the parsed snapshot on the job (nil when the
+// workspace carries no yaml — absent-equivalent, behavior unchanged).
+// An invalid yaml returns the typed DAEMON-414 refusal; the caller
+// compensates through abandonClaim and nothing materializes.
+func (r *Runtime) readWorkspaceYaml(j *job) error {
+	ws, err := r.cfg.Mapping.WorkspaceFor(j.project)
+	if err != nil {
+		// Unreachable on this path (the capsule-routing site just resolved
+		// the same inverse), but never guess: a workspace that cannot be
+		// resolved carries no yaml layer.
+		return nil
+	}
+	j.workspaceRoot = ws
+	wcfg, err := workspace.Load(ws)
+	if err != nil {
+		return &api.Error{
+			Code:   api.ErrDaemonWorkspaceYaml,
+			Detail: fmt.Sprintf("the workspace yaml refused the claim of %s before any capsule was created: %v", j.wi, err),
+		}
+	}
+	j.workspaceYaml = wcfg
 	return nil
 }
 
