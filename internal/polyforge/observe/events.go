@@ -71,6 +71,14 @@ const (
 	// evidence and re-flushes — so this is neither wrap_blocked nor any
 	// push bookkeeping; the refusal happened before any commit attempt.
 	EvWrapEvidenceRefused = "wrap_evidence_refused"
+	// EvWrapIntentRefused is the release-intent wrap gate's record
+	// (polyforge#123, P1a): a flush(wrap) was refused with DAEMON-400
+	// RELEASE_INTENT_MISSING because releaseable code changed with no
+	// covering entry in artifacts/release-intent.json (or the fragment was
+	// schema-invalid). Same non-terminal shape as the evidence refusal —
+	// the agent writes the fragment and re-flushes — so this is neither
+	// wrap_blocked nor any push bookkeeping.
+	EvWrapIntentRefused = "wrap_intent_refused"
 	// EvTranscriptMissing is the F3 typed warning: a commit-boundary
 	// transcript sync could not locate the derivation's live harness
 	// transcript (the harness wrote nothing under its session store).
