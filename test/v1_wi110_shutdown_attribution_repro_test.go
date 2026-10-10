@@ -34,8 +34,16 @@ package test
 //
 // Both cases run with a live mid-step driver WI (delayed envelope
 // write), mirroring the production incident shape: two driver WIs were
-// mid-flight when the daemon exited. On failure the test prints every
-// shutdown-related log line from both runs as the observed evidence.
+// mid-flight when the daemon exited. The daemon is booted with a
+// shortened flush(shutdown) window (--shutdown-flush-wait, the
+// polyforge#110 rewind): a driver WI has no flush face, so the bounded
+// wait degrades on timeout exactly as in production — only sooner —
+// and the attribution lines (written at sequence ENTRY, before the
+// latch) are independent of the window's length. The production 60s
+// default stays untouched; the shortened window keeps this scenario's
+// runtime (two shutdowns) inside the ./test/ package's default `go
+// test` budget. On failure the test prints every shutdown-related log
+// line from both runs as the observed evidence.
 
 import (
 	"context"
@@ -67,7 +75,13 @@ func TestV1WI110ShutdownAttributionRepro(t *testing.T) {
 
 	// bootWithLiveWI mirrors the production incident shape: a daemon
 	// with one driver WI mid-step (delayed envelope write) when the
-	// shutdown lands.
+	// shutdown lands. The flush(shutdown) window is shortened (1s) via
+	// the real daemon flag: the driver WI has no flush face, so the
+	// wait still degrades on timeout (the production degrade path,
+	// reached in 1s instead of 60s) and the incident shape — a live
+	// step process interrupted mid-flight — is unchanged. The
+	// attribution under assertion happens at sequence entry, before
+	// any flush waiting.
 	bootWithLiveWI := func(label string) (*v1Daemon, string) {
 		t.Helper()
 		wi := inst.newWI(t, label, []map[string]any{
@@ -76,7 +90,7 @@ func TestV1WI110ShutdownAttributionRepro(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-		d := newV1Daemon(t, inst)
+		d := newV1Daemon(t, inst, optShutdownFlushWait(1*time.Second))
 		d.start()
 		d.pf(t, "submit", wi)
 		waitSpawnCount(t, d, wi, 1, 30*time.Second)
