@@ -20,6 +20,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
 )
 
 // liveFixture builds one real live transcript (a harness-store-shaped
@@ -257,5 +258,68 @@ func TestResumedDerivationWritingInCapsuleIsNotReCopied(t *testing.T) {
 	}
 	if !st.ModTime().Equal(before) {
 		t.Fatal("a resumed derivation writing into the capsule must not be re-copied over itself")
+	}
+}
+
+// The sync face's source read goes through the ONE session-jsonl parser
+// (wi_LMSxPTQTtz5x step sync_face_tail): copyFileReadonly reads the live
+// harness transcript via the sessionjsonl package's whole-file tail
+// extraction, so the session-jsonl storage format has exactly one
+// parsing source in the repo (the stdout-wire parser stream.go is a
+// different vocabulary and stays untouched). These regressions pin the
+// two faces of that route: byte-identical copies (torn trailing line,
+// blank and malformed lines preserved verbatim) and the typed failure
+// posture (a source that cannot be read never leaves a destination
+// behind).
+
+// TestSyncTranscriptCopyByteIdentical pins the byte-identity regression.
+func TestSyncTranscriptCopyByteIdentical(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "live.jsonl")
+	dst := filepath.Join(dir, "capsule", "session", "session-ra_wi_x.jsonl")
+	body := "{\"type\":\"session\",\"id\":\"s1\"}\n" +
+		"\n" + // blank line: preserved verbatim
+		"not json at all\n" + // malformed line: preserved verbatim
+		"{\"type\":\"message_end\"}\n" +
+		"{\"type\":\"spe" // torn trailing line: preserved verbatim
+	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFileReadonly(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != body {
+		t.Fatalf("the synced transcript must be byte-identical to the source:\n got %q\nwant %q", got, body)
+	}
+	// The copy really rides the shared parser: the source is
+	// session-jsonl parseable end to end.
+	if _, err := sessionjsonl.Tail(src, 0); err != nil {
+		t.Fatalf("the source must be session-jsonl parseable: %v", err)
+	}
+	// tmp+rename semantics: no temp residue next to the destination.
+	ents, err := os.ReadDir(filepath.Dir(dst))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if e.Name() != "session-ra_wi_x.jsonl" {
+			t.Fatalf("unexpected residue next to the synced transcript: %s", e.Name())
+		}
+	}
+}
+
+// TestSyncTranscriptCopyMissingSource keeps the typed failure posture.
+func TestSyncTranscriptCopyMissingSource(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "session", "out.jsonl")
+	if err := copyFileReadonly(filepath.Join(dir, "absent.jsonl"), dst); err == nil {
+		t.Fatal("copying a missing source must fail")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatalf("a failed copy must not leave a destination behind: %v", err)
 	}
 }

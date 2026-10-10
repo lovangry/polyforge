@@ -41,6 +41,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
 )
 
 // wrapRetries is the §五 bound: a wrap flush retries three times before
@@ -1097,12 +1098,19 @@ func (m *Monitor) syncTranscript(s transcriptSnapshot) {
 }
 
 // copyFileReadonly copies src onto dst without ever opening the source
-// for writing (the source is the harness's own session store).
+// for writing (the source is the harness's own session store). The source
+// read goes through the ONE session-jsonl parser (wi_LMSxPTQTtz5x step
+// sync_face_tail): the whole-file tail extraction preserves the raw bytes,
+// so the session-jsonl storage format has a single parsing source in the
+// repo (the stdout-wire parser stream.go is a different vocabulary and
+// stays untouched). The destination semantics are unchanged: tmp+rename,
+// 0644.
 func copyFileReadonly(src, dst string) error {
-	data, err := os.ReadFile(src)
+	recs, err := sessionjsonl.Tail(src, 0)
 	if err != nil {
 		return err
 	}
+	data := sessionjsonl.MarshalRaw(recs)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
