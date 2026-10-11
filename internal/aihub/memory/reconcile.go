@@ -592,7 +592,7 @@ func (s *Store) rebuildFTSBatched(entries []rebuildEntry, progress func(written 
 			return 0, err
 		}
 		batchStart := time.Now() // the open transaction's hold clock
-		rotWrote := 0
+		rotWrote, batchWrote := 0, 0
 		// fail rolls back the CURRENT batch transaction (the closure captures
 		// the variable, so it stays correct across batch rotations).
 		fail := func(e error) (int, error) {
@@ -602,13 +602,14 @@ func (s *Store) rebuildFTSBatched(entries []rebuildEntry, progress func(written 
 		// closeBatch commits the open batch transaction and reports the
 		// rotation: the commit hands Core's only connection back to the
 		// pool (queued requests — reads and writes — run here), progress
-		// fires, and the yield gives waiting writers their turn before the
-		// caller re-opens the next batch.
+		// fires for a batch that actually wrote something, and the yield
+		// gives waiting writers their turn before the caller re-opens the
+		// next batch.
 		closeBatch := func() error {
 			if err := tx.Commit(); err != nil {
 				return err
 			}
-			if progress != nil {
+			if progress != nil && batchWrote > 0 {
 				progress(n)
 			}
 			time.Sleep(ftsRebuildYield)
@@ -636,6 +637,7 @@ func (s *Store) rebuildFTSBatched(entries []rebuildEntry, progress func(written 
 			}
 			n++
 			rotWrote++
+			batchWrote++
 			// Batch boundary: row count OR hold budget, whichever fires
 			// first (polyforge#129 ruling b① — the open transaction is
 			// Core's only connection; every concurrent request queues
@@ -649,6 +651,7 @@ func (s *Store) rebuildFTSBatched(entries []rebuildEntry, progress func(written 
 					return 0, err
 				}
 				batchStart = time.Now()
+				batchWrote = 0
 			}
 		}
 		if err := closeBatch(); err != nil {
