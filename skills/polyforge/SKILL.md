@@ -32,6 +32,28 @@ through the same AIHub authentication as any other HTTP client, and daemon
 mediation does not loosen Core-side validation. If no intent fits or the
 intent is ambiguous, **ask rather than guess**.
 
+## Agent role detection (read your own env first)
+
+Before acting on any duty below, check your own spawn environment for
+`PF_AGENT_ROLE`. This skill serves two different kinds of session, and every
+supervision duty is routed by which one you are:
+
+- **`PF_AGENT_ROLE=wi-agent` present → EXECUTION role.** You are a WI agent
+  the daemon spawned to drive one work item's workflow. Skip ALL supervision
+  duties: no watcher setup, no session-start reconciliation, no
+  needs_input presentation, no stall reporting — the watcher, needs_input
+  and stall machinery of the sections below belongs to interactive
+  sessions, not to you. Run the workflow you were derived for: execute the
+  step, write artifacts, commit and push.
+- **Marker absent → SUPERVISION role.** You are an interactive session (the
+  owner's harness). You carry the routing and the supervision duties as
+  documented here — but the turn-start and watch-lane duties apply
+  BOUND-ONLY: you present and answer for work items bound to THIS session
+  only (the bound-set rule of the turn-start obligation section below).
+
+The daemon injects exactly the value `wi-agent` into WI-agent processes; an
+interactive session carries no marker and is SUPERVISION.
+
 ## Install surface
 
 This skill is the **only** thing a user harness installs. Pi: one `skills`
@@ -85,28 +107,47 @@ no active execution). "Ship / deliver / push it" routes to `ship` — the git
 delivery of an already-closed WI's sealed commits — never to `submit`
 (which starts execution).
 
-## Turn-start obligation: surface pending questions (needs_input) and stalled jobs (LAST-PROGRESS)
+## Turn-start obligation: surface pending questions (needs_input) and stalled jobs (LAST-PROGRESS) — BOUND-ONLY
+
+Your presentation duty here reaches exactly your BOUND set — never the
+machine-global sweep. A work item is **bound to this session** when
+`<workspace>/.polyforge/watchers/` holds a watcher script whose
+`pf-watcher session_id:` header carries YOUR session's id, or when you
+explicitly adopted the script through the watch lane's ask-to-adopt channel
+(below). `pf ops status` alone binds nothing: it is a machine-global
+listing, and another session's bound work item appearing in it gives you no
+duty over it — you did not arm it and you did not adopt it.
 
 At the start of **every execution-plane verb turn** — and once at session
-start — run `pf ops status` first. Any job shown with status `needs_input`
-(the QUESTION column carries its question id) is an agent **blocked on a
-human**: present the question to the user (question id, step and text — the
-full text comes from `pf observe <wi>`) **before** carrying out whatever
-else they asked. A pending question must never wait for the user to happen
-to ask for status: v0's known gap was exactly that needs_input had no
-proactive owner notification, and jobs sat blocked for hours. Answering
-routes to `verbs/answer.md` as usual.
+start — derive your bound set from the watchers directory first, then run
+`pf ops status` and read it THROUGH the bound set:
 
-The same status read carries the LAST-PROGRESS column (mm:ss since the
-job's stream last proved **agent progress**; `-` when no progress record
-exists). UI noise does not refresh it — only real turn machinery does. A
-large LAST-PROGRESS (> 10m) on a job whose status is not `needs_input`
-means the job is stalled or wedged: report it to the owner FIRST, with the
-work item id and the staleness figure, before doing anything else — the
-on-machine pilot wedge ran 2.7 hours with zero events and no visible
-surface precisely because nobody looked at progress staleness. (The
-daemon's watchdogs probe and recover such jobs on their own windows, but
-the owner should hear about the stall from you, not from a post-mortem.)
+- **Bound job with status `needs_input`** (the QUESTION column carries its
+  question id): the agent is **blocked on a human** — present the question
+  to the user (question id, step and text — the full text comes from
+  `pf observe <wi>`) **before** carrying out whatever else they asked. A
+  bound pending question must never wait for the user to happen to ask for
+  status: v0's known gap was exactly that needs_input had no proactive
+  owner notification, and jobs sat blocked for hours. Answering routes to
+  `verbs/answer.md` as usual.
+- **Bound job with a large LAST-PROGRESS** (mm:ss since the job's stream
+  last proved **agent progress**; UI noise does not refresh it — only real
+  turn machinery does) — a LAST-PROGRESS over 10m on a job whose status is
+  not `needs_input` means the job is stalled or wedged: report it to the
+  owner FIRST, with the work item id and the staleness figure, before
+  doing anything else — the on-machine pilot wedge ran 2.7 hours with zero
+  events and no visible surface precisely because nobody looked at
+  progress staleness. The daemon's watchdogs probe and recover such jobs
+  on their own windows: machine-level stall recovery is and stays the
+  daemon's, unchanged — your bound-only duty is presentation, so the owner
+  hears about the stall from you, not from a post-mortem.
+- **Unbound jobs are never proactively surfaced** — regardless of status
+  or staleness. The #117 incident (an unbound session presented and
+  answered another session's needs_input question) is exactly what this
+  gating forbids. At most, when the owner EXPLICITLY asks for
+  machine-global status, list unbound work items BY NAME ONLY (id and
+  status from `pf ops status`) — never the question text, never an answer,
+  never a stall report.
 
 ## The watch lane: session-side watchers (wake on state change)
 
@@ -147,16 +188,42 @@ re-arm) the watcher for that work item:
    self-deletes — script, log and state — when the WI turns terminal
    (`--keep-log` keeps the log).
 
-### Turn-start scan/re-arm (session-restart recovery)
+### Turn-start scan/re-arm (session-restart recovery) and ask-to-adopt
 
 At session start — and cheaply at every turn start — scan
-`<workspace>/.polyforge/watchers/` for `*.sh` files whose
-`pf-watcher session_id:` header is THIS session's and which have no
-running process. For each, check that work item ONCE — read the tail of
-its `<wi>.log` for what was missed while you were away — and re-arm it
-with the arm step above. NEVER adopt or steal another session's watcher:
-a header naming a different session_id is not yours to take. Orphans are
-bounded by the terminal self-delete.
+`<workspace>/.polyforge/watchers/` for `*.sh` files and sort them by their
+`pf-watcher session_id:` header against this session:
+
+- **Own-header scripts** (the header session_id is THIS session's) with no
+  running process: check that work item ONCE — read the tail of its
+  `<wi>.log` for what was missed while you were away — and re-arm it with
+  the arm step above.
+- **Predecessor scripts** (a header naming a session that is no longer
+  live — left by a restart or another session's departure) for
+  non-terminal work items: ASK the owner once, as a single batched prompt
+  ("found N watcher scripts from session X — adopt?"), and bind only on
+  the owner's explicit consent. Adoption is a header rewrite on consent:
+  rewrite the script's `pf-watcher session_id:` line to YOUR session's id
+  and refresh its `pf-watcher armed_at:` line, then re-arm it with the arm
+  step above. An adopted binding is yours in every respect — including the
+  bound-only answer-presentation duty of the turn-start obligation (an
+  adopted work item's pending needs_input or stall is yours to present).
+  On refusal or no answer, touch nothing: the scripts stay exactly as they
+  are, unbound, with no presentation duty. There is no adoption without
+  the ask and the owner's yes.
+- **Concurrent sessions** (the header names another session that IS live):
+  the header is authoritative — the script is not yours, carries no
+  presentation duty for you, and your only path to ownership is the same
+  ask-to-adopt channel as for predecessor scripts. NEVER steal a live
+  session's watcher: a header naming a different session_id is not yours
+  to take.
+- **Legacy scripts** carrying the old #76 header from a non-live session:
+  the identical rule — session_id ownership decides, and the way in is
+  ask-to-adopt, never a default.
+
+Orphans you did not adopt are bounded by the terminal self-delete; until
+the owner decides, they stay exactly as left — unbound, unpresented,
+untouched.
 
 ### Retire note: hand-rolled sentinels
 
