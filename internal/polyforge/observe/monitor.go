@@ -68,6 +68,25 @@ const sameErrorCap = 5
 // the kill.
 const toolDispatchWindow = 30 * time.Minute
 
+// wallSuspendMultiplier is the polyforge#124 ceiling on how far the
+// wall-adjacent suspensions may outrank the operator's absolute bound:
+// both the #83 tool-dispatch exemption and the turn-duration lane are
+// capped at 4× the wall window. 4 is the smallest multiple the pinned
+// #83 design can carry (TestWallBackstopExemptDuringToolDispatch holds
+// a dispatch live through 3⅓ wall windows with no probe and no
+// recovery), so "cap the exemption at the wall window itself" is not
+// available without breaking that pin. What 4× buys instead: neither
+// the exemption NOR an open turn can suspend every detection lane past
+// 4× the bound the operator declared absolute — the #117 trickle-wedge
+// (an open turn re-arming the exemption forever) is bounded by turn
+// age, and a tight wall tightens the exemption with it. With the
+// default 15m wall the cap is 60m — above toolDispatchWindow — so the
+// production default keeps the 30m exemption unchanged (the #124 WI's
+// stated non-goal; the conflict between that non-goal and the
+// incident's 8m wall is resolved here, stated, in favor of the
+// operator's bound mattering).
+const wallSuspendMultiplier = 4
+
 // defaultVersionStagnantTicks is the belt-and-braces bound for C3': the
 // number of consecutive execution.json REWRITES (mtime advanced) that
 // carry an unchanged top-level Version before the monitor also treats
@@ -184,6 +203,13 @@ type monitorCfg struct {
 	// the step process sits parked — into a confirmed recovery. The
 	// design's per-step refinement (max(3× step wall budget, 15m)) is
 	// future work; the daemon-level floor is the default. <= 0 disables.
+	// polyforge#124: the wall also owns two derived bounds — the #83
+	// tool-dispatch exemption is capped at 4× this window (never able
+	// to outrank the operator's bound by more than that multiple), and
+	// the turn-duration lane bounds a never-closing turn at 4× this
+	// window (the trickle-wedge hole: no silence-based lane can see a
+	// turn that keeps one progress record per sub-window interval
+	// alive). A negative value disables all three.
 	WallBackstop      time.Duration
 	PushRetryBackoff  time.Duration
 	BackpressureSteps int
@@ -287,9 +313,9 @@ type Monitor struct {
 	// that have not produced a single progress record yet (polyforge#114):
 	// set once per derivation at attach/onRecovered, NEVER moved by a
 	// probe ack (unlike hangAnchor/idleAnchor). The measured progress
-	// silence is anchored on max(LastProgressAt, attachAt), so every
-	// dispatch is bounded from its birth no matter how the ack lanes
-	// behave.
+	// silence is anchored on max(WallProgressAt, attachAt) — the wall's
+	// turn-machinery witness, #124 — so every dispatch is bounded from
+	// its birth no matter how the ack lanes behave.
 	attachAt time.Time
 	// idle detection (F5). idleAnchor is the idle window's baseline
 	// when the stream has produced no progress record yet (set at
@@ -409,6 +435,7 @@ func (m *Monitor) onTick() {
 	m.checkHang()
 	m.checkIdle()
 	m.checkWallBackstop()
+	m.checkTurnDuration()
 	m.checkNoProgress()
 	m.pollExecution()
 	m.schedulePush()
@@ -549,10 +576,11 @@ func (m *Monitor) checkHang() {
 	// returned yet is live work, not a hang. Large file edits and long
 	// builds routinely exceed the 10-minute HangWindow; the pre-#83
 	// watchdog killed those deterministically (probe undeliverable
-	// mid-tool-call). Window: 30 minutes from the dispatch — a tool that
+	// mid-tool-call). Window: 30 minutes from the dispatch (capped at
+	// 4× the wall window when the wall is enabled, #124) — a tool that
 	// takes longer than that is genuinely stuck and DESERVES the probe.
 	hb := m.stream.heartbeat()
-	if !hb.ToolDispatchAt.IsZero() && time.Since(hb.ToolDispatchAt) < toolDispatchWindow {
+	if !hb.ToolDispatchAt.IsZero() && time.Since(hb.ToolDispatchAt) < m.dispatchExemptWindow() {
 		return
 	}
 	m.stateMu.Lock()
@@ -672,12 +700,16 @@ func (m *Monitor) checkIdle() {
 // step is acked every window forever (experiments C/D of wi_u0xTEIz0gxi4:
 // goroutine liveness, process liveness and a stdio echo all fail to
 // discriminate the wedge). This check ignores the ack lanes entirely: it
-// measures the progress witness — StreamHeartbeat.LastProgressAt, which
-// no probe result ever moves, floored by the derivation's attach moment
-// — and past the absolute bound it confirms the recovery regardless of
-// what the probes answered (design: 墙钟仅作绝对兜底，防的正是确认探针自身
-// 失效或被回声洗白). Same exemptions as the watchdogs: a live #83 tool
-// dispatch, a pending question (needs_input is designed stillness — the
+// measures the progress witness - the turn-machinery witness pinned by
+// polyforge#124 (StreamHeartbeat.WallProgressAt: the F15 whitelist
+// minus the `response` command echo, which no probe result ever moves
+// and no echo ever refreshes), floored by the derivation's attach
+// moment - and past the absolute bound it confirms the recovery
+// regardless of what the probes answered (design: the wall clock is the
+// absolute floor against exactly probe-ack failure and echo
+// laundering, 6.2a). Same exemptions as the watchdogs: a live #83
+// tool dispatch (capped at 4x the wall window, #124), a pending
+// question (needs_input is designed stillness - the
 // §6.2a wall clock does not judge waiting-for-human either) and every
 // suppressed state. The reason follows the stream's turn state: InFlight
 // ⇒ hang, otherwise the idle shape the F5 lane owns.
@@ -690,7 +722,7 @@ func (m *Monitor) checkWallBackstop() {
 	if silent < m.cfg.WallBackstop {
 		return
 	}
-	if !hb.ToolDispatchAt.IsZero() && time.Since(hb.ToolDispatchAt) < toolDispatchWindow {
+	if !hb.ToolDispatchAt.IsZero() && time.Since(hb.ToolDispatchAt) < m.dispatchExemptWindow() {
 		return // #83: a dispatched tool within its window is live work
 	}
 	m.stateMu.Lock()
@@ -713,14 +745,17 @@ func (m *Monitor) checkWallBackstop() {
 		silent.Round(time.Second), m.cfg.WallBackstop))
 }
 
-// wallSilence measures the derivation's PROGRESS silence on the
-// non-resettable witness: StreamHeartbeat.LastProgressAt (the F15
-// progress whitelist; no probe result ever resets it) floored by the
-// derivation's attach moment, so a derivation that has not emitted a
-// single progress record yet is bounded from its birth rather than from
-// the epoch.
+// wallSilence measures the derivation's PROGRESS silence on the wall's
+// own witness: StreamHeartbeat.WallProgressAt - the turn-machinery
+// subset of the F15 whitelist (the `response` command echo excluded,
+// polyforge#124: an echo is daemon-side life, not turn work - in the
+// #117 incident one echo bought the derivation a full extra wall
+// window, root-cause Cause B). No probe result ever resets it; floored
+// by the derivation's attach moment, so a derivation that has not
+// emitted a single progress record yet is bounded from its birth
+// rather than from the epoch.
 func (m *Monitor) wallSilence(hb StreamHeartbeat) time.Duration {
-	eff := hb.LastProgressAt
+	eff := hb.WallProgressAt
 	if m.attachAt.After(eff) {
 		eff = m.attachAt
 	}
@@ -728,6 +763,77 @@ func (m *Monitor) wallSilence(hb StreamHeartbeat) time.Duration {
 		return 0 // defensive: attachAt is always set at attach/onRecovered
 	}
 	return time.Since(eff)
+}
+
+// dispatchExemptWindow answers the effective #83 tool-dispatch
+// exemption bound: the 30m window, capped at 4x the wall window when
+// the wall is enabled (polyforge#124 Cause A - the constant must not
+// silently outrank a configured absolute bound; with the default 15m
+// wall the cap is 60m, above the constant, so production defaults are
+// unchanged). A disabled wall (<= 0) keeps the absolute 30m: the
+// negative flag is the explicit escape hatch from every bound.
+func (m *Monitor) dispatchExemptWindow() time.Duration {
+	if m.cfg.WallBackstop <= 0 {
+		return toolDispatchWindow
+	}
+	if w := wallSuspendMultiplier * m.cfg.WallBackstop; w < toolDispatchWindow {
+		return w
+	}
+	return toolDispatchWindow
+}
+
+// turnDurationBound answers the turn-duration lane's bound: how long a
+// single turn may stay open - 4x the wall window (0 = disabled: the
+// lane rides the wall's own escape hatch, since a negative wall is the
+// explicit opt-out from every absolute bound).
+func (m *Monitor) turnDurationBound() time.Duration {
+	if m.cfg.WallBackstop <= 0 {
+		return 0
+	}
+	return wallSuspendMultiplier * m.cfg.WallBackstop
+}
+
+// checkTurnDuration is the polyforge#124 lane for the #117
+// trickle-wedge's structural hole (root-cause Cause C): every other
+// detection lane keys on progress SILENCE, so a turn that never closes
+// while emitting one progress-class record per sub-window interval
+// keeps every witness young forever - measured zero probes, zero
+// incidents, zero recoveries across 40 wall windows (root-cause
+// experiment E5). This lane bounds the one dimension none of them
+// measures: the TURN's own age, from StreamHeartbeat.TurnOpenedAt,
+// against 4x the wall window. It fires directly, not
+// probe-and-confirm: on driver handles the probe verdict is
+// daemon-side driver liveness (bridge.SendControl) and carries nothing
+// about the subject whose age armed the criterion - the same reason
+// checkWallBackstop judges on its own witness. Exemptions, same as
+// every absolute bound: a pending question (needs_input is designed
+// stillness) and every suppressed state. A closed turn has no age -
+// the idle/hang lanes own closed-turn silence.
+func (m *Monitor) checkTurnDuration() {
+	bound := m.turnDurationBound()
+	if bound <= 0 {
+		return // the wall is disabled: every absolute bound opted out
+	}
+	hb := m.stream.heartbeat()
+	if hb.TurnOpenedAt.IsZero() || !hb.InFlight {
+		return // no turn in flight: no age to judge
+	}
+	if age := time.Since(hb.TurnOpenedAt); age < bound {
+		return
+	}
+	m.stateMu.Lock()
+	pending := m.pending != nil
+	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
+	m.stateMu.Unlock()
+	if pending || suppressed {
+		return
+	}
+	age := time.Since(hb.TurnOpenedAt).Round(time.Second)
+	m.needRecovery(protocol.RecoverTurnDuration, fmt.Sprintf(
+		"turn in flight for %s, past the %s turn-duration bound (%dx the wall window); "+
+			"progress-class records kept every silence witness fresh - no silence lane "+
+			"can see this shape, so the turn's own age is the bound",
+		age, bound, wallSuspendMultiplier))
 }
 
 // checkNoProgress is the F15c owner face: the same progress-silence

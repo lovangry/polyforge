@@ -708,7 +708,9 @@ observe's own default):
       one liveness probe's ack bound (2m)
   --wall-window D
       absolute wall-clock backstop on a derivation's progress silence;
-      no probe ack restarts it (15m; negative disables)
+      no probe ack restarts it; also bounds a never-closing turn and
+      caps the tool-dispatch exemption at 4x this window
+      (15m; negative disables)
   --revalidate-every D
       periodic session revalidation cadence for RUNNING jobs
       (5m; negative disables)

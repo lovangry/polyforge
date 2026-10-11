@@ -68,7 +68,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	hangWindow := fs.Duration("hang-window", 0, "stream-silence window while a turn is in flight before the liveness probe arms (default 10m)")
 	idleWindow := fs.Duration("idle-window", 0, "no-record-no-turn quiet window before the idle watchdog probes (default 10m)")
 	probeTimeout := fs.Duration("probe-timeout", 0, "liveness-probe ack bound (default 2m)")
-	wallWindow := fs.Duration("wall-window", 0, "absolute wall-clock backstop on a derivation's progress silence that no probe ack can reset (polyforge#114; default 15m; negative disables)")
+	wallWindow := fs.Duration("wall-window", 0, "absolute wall-clock backstop on a derivation's progress silence that no probe ack can reset; also bounds a never-closing turn and caps the tool-dispatch exemption at 4x this window (polyforge#114/#124; default 15m; negative disables)")
 	revalidateEvery := fs.Duration("revalidate-every", 0, "M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
 	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "machines heartbeat cadence (0 = disabled)")
 	// The graceful sequence's per-job flush(shutdown) wait (polyforge#110

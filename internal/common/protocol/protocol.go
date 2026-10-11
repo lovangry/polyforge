@@ -79,6 +79,12 @@ const (
 	// nobody drives it — no progress record, no turn in flight past the
 	// idle window, and the liveness probe went unacknowledged.
 	RecoverIdle = "idle"
+	// RecoverTurnDuration is the polyforge#124 cause: the turn stayed
+	// open past the turn-duration bound (a fixed multiple of the wall
+	// window) while progress-class records kept every silence witness
+	// fresh — no silence-based lane can see that shape, so the turn's
+	// own age is the bound (the #117 trickle-wedge).
+	RecoverTurnDuration = "turn_duration"
 )
 
 // Terminal reasons carried by WIFinished.

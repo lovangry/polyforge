@@ -137,6 +137,24 @@ type StreamHeartbeat struct {
 	// way the old exclusion feared, and a probe ack's own assistant
 	// message burst refreshes progress anyway.
 	LastProgressAt time.Time
+	// WallProgressAt is when the reader last classified a TURN-MACHINERY
+	// progress record — the F15 whitelist minus the `response` echo.
+	// This is the WALL backstop's own witness (polyforge#124): the wall
+	// is the non-resettable absolute bound whose design purpose is
+	// immunity to echo-laundering (§6.2a — 防的正是确认探针自身失效或被回声
+	// 洗白), and the `response` echo is a command-acceptance echo, not
+	// agent turn work — a daemon-side echo must not buy the derivation
+	// another full wall window. The hang/idle/no-progress watchdogs keep
+	// the LastProgressAt semantics (the F15 ruling) unchanged.
+	WallProgressAt time.Time
+	// TurnOpenedAt is when the current turn OPENED (turnDepth's 0→1
+	// transition; zero while no turn is in flight). Turn age is the one
+	// dimension no silence-based lane measures (polyforge#124, the #117
+	// trickle-wedge): a turn that never closes while emitting one
+	// progress record per sub-window interval keeps every silence
+	// witness young forever, so the monitor's turn-duration lane bounds
+	// the turn itself.
+	TurnOpenedAt time.Time
 	// LastNoiseAt is when the reader last classified a NON-progress
 	// record: extension UI chatter or any unclassified line. Never a
 	// detection anchor — carried for the owner face and diagnostics.
@@ -196,6 +214,15 @@ type streamState struct {
 	// because agent_start and turn_start both open; it saturates at 0 so
 	// a stray close can never wedge the flag negative.
 	turnDepth int
+	// turnOpenedAt is the current turn's birth moment — set on
+	// turnDepth's 0→1 transition (the FIRST opener wins: a nested
+	// turn_start must not re-arm the clock), cleared when the depth
+	// returns to zero. The turn-duration lane's input (#124).
+	turnOpenedAt time.Time
+	// wallProgressAt is the wall backstop's witness: the newest
+	// TURN-MACHINERY progress record (the F15 whitelist minus the
+	// `response` echo — see StreamHeartbeat.WallProgressAt, #124).
+	wallProgressAt time.Time
 	// toolDispatchAt is when the stream last saw message_end with the
 	// turn still open — the signature of a tool call dispatched and
 	// executing. Cleared when a toolResult arrives (the tool returned)
@@ -257,13 +284,26 @@ func (s *streamState) note(raw []byte) {
 	}
 	s.lastProgressAt = now
 	s.records++
+	// The wall's witness is the turn-machinery subset of progress: every
+	// F15 whitelist type except the `response` echo (polyforge#124 — a
+	// command-acceptance echo is daemon-side life, not agent turn work,
+	// and the absolute bound exists precisely to be immune to echoes).
+	if typ != recResponse {
+		s.wallProgressAt = now
+	}
 	switch typ {
 	case recAgentStart, recTurnStart:
 		s.turnDepth++
+		if s.turnDepth == 1 {
+			s.turnOpenedAt = now // first opener: the turn's birth moment
+		}
 		s.lastIncidentKey = ""
 	case recTurnEnd, recAgentEnd, recAgentSettled:
 		if s.turnDepth > 0 {
 			s.turnDepth--
+		}
+		if s.turnDepth == 0 {
+			s.turnOpenedAt = time.Time{} // no turn in flight: no turn age
 		}
 		s.toolDispatchAt = time.Time{} // turn closed: no tool in flight
 	case recMessageEnd:
@@ -392,6 +432,8 @@ func (s *streamState) heartbeat() StreamHeartbeat {
 		Observable:     s.records > 0 || s.noise > 0,
 		LastRecordAt:   latestOf(s.lastProgressAt, s.lastNoiseAt),
 		LastProgressAt: s.lastProgressAt,
+		WallProgressAt: s.wallProgressAt,
+		TurnOpenedAt:   s.turnOpenedAt,
 		LastNoiseAt:    s.lastNoiseAt,
 		InFlight:       s.turnDepth > 0,
 		ToolDispatchAt: s.toolDispatchAt,
