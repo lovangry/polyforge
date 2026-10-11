@@ -33,9 +33,12 @@ type ExecDispatcher struct {
 }
 
 // DispatchArgs builds the one-shot argv (exposed for tests): print mode
-// first, then exactly the configured model, then the prompt.
-func DispatchArgs(model, prompt string) []string {
-	return []string{"-p", "--model", model, prompt}
+// first, then exactly the configured model. The PROMPT rides stdin, never
+// argv — a transcript tail routinely exceeds the kernel's per-argument
+// limit (~128KB) and fork/exec fails with "argument list too long"
+// (caught live: polyforge#117 field use, 2026-10-11).
+func DispatchArgs(model string) []string {
+	return []string{"-p", "--model", model}
 }
 
 // dispatchBinary maps the normalized harness onto the binary name.
@@ -65,7 +68,8 @@ func (d ExecDispatcher) Dispatch(harness, model, prompt string) (string, error) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, DispatchArgs(model, prompt)...)
+	cmd := exec.CommandContext(ctx, bin, DispatchArgs(model)...)
+	cmd.Stdin = strings.NewReader(prompt)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
