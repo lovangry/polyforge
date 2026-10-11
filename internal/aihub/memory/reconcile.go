@@ -349,10 +349,12 @@ func (s *Store) RebuildIndex() (int, error) { return s.rebuildIndex("") }
 // RebuildIndexProject scopes the reconcile to ONE project: only that
 // project's authority tree is walked and only its rows are
 // orphan-scanned. The migrate-memories path uses this so the rebuild's
-// work — and the reindexed count it answers — covers exactly the placed
-// tree the count reconciliation compares against (seq-fix lane 3a/3c).
-// The transient sweep and the dangling-FTS cleanup stay global: both are
-// cheap and benefit every project.
+// work covers exactly the placed tree (seq-fix lane 3a/3c). Since
+// polyforge#129 the reindexed count answers "entries brought current",
+// so a delta run that re-places only some records answers less than the
+// whole tree — the migrate verify step compares it against the run's own
+// placement, not the tree. The transient sweep and the dangling-FTS
+// cleanup stay global: both are cheap and benefit every project.
 func (s *Store) RebuildIndexProject(projectID string) (int, error) {
 	if strings.TrimSpace(projectID) == "" {
 		return 0, errf("MEM-400", "", "project required")
@@ -765,7 +767,11 @@ func (s *Store) bindingsExist(fm *frontmatter) bool {
 }
 
 // backfillRow inserts a memories row for a file whose mem_id has none:
-// full frontmatter→DDL mapping, content_sha computed live.
+// full frontmatter→DDL mapping, content_sha computed live. The row is
+// deliberately written UNSTAMPED (polyforge#129): its index write and
+// stamp land together in the batched pass, so a crash in between leaves
+// the row unstamped — the next pass re-verifies and re-queues it — never
+// stamped with no index row.
 func (s *Store) backfillRow(fm *frontmatter, raw []byte, dirProject, memID, status string) error {
 	rel := "memory/" + dirProject + "/" + memID
 	if status == "redacted" {
