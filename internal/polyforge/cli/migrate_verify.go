@@ -73,13 +73,13 @@ func migVerifyMemories(opts MigMemoriesOptions, rep *MigMemoriesReport, placed [
 // migVerifyCounts is step ①: every migrated id has a row with the
 // expected status, the TARGET PROJECT's row counts equal the placed
 // authority tree's counts and the (project-scoped) reconcile statistic
-// equals the tree's active count. Scoped, not global (seq-fix lane 3c):
-// the target carries OTHER projects' stock in a real cutover rig, and
-// comparing the whole memories table against ONE project's tree reported
-// 1165 != 139 on the real export. The placed tree (not this run's import
-// count) is the project's stock: a delta run feeds a subset, and earlier
-// runs' placements persist — so the tree is what the project's rows must
-// add up to.
+// covers every record this run placed. Scoped, not global (seq-fix lane
+// 3c): the target carries OTHER projects' stock in a real cutover rig,
+// and comparing the whole memories table against ONE project's tree
+// reported 1165 != 139 on the real export. The placed tree (not this
+// run's import count) is the project's stock: a delta run feeds a
+// subset, and earlier runs' placements persist — so the tree is what the
+// project's rows must add up to.
 func migVerifyCounts(db *sql.DB, opts MigMemoriesOptions, rep *MigMemoriesReport, placed []placedMem) StepResult {
 	step := StepResult{Step: "count-reconciliation", OK: true}
 	var problems []string
@@ -121,8 +121,23 @@ func migVerifyCounts(db *sql.DB, opts MigMemoriesOptions, rep *MigMemoriesReport
 	if counts["redacted"] != treeRedacted {
 		problems = append(problems, fmt.Sprintf("project redacted rows %d != placed tree %d", counts["redacted"], treeRedacted))
 	}
-	if rep.Rebuilt != treeActive {
-		problems = append(problems, fmt.Sprintf("rebuild-index rebuilt %d != placed tree active %d", rep.Rebuilt, treeActive))
+	// polyforge#129: the reconcile is incremental behind the freshness
+	// stamp — its reindexed statistic answers "entries this pass brought
+	// current" (index writes + stamp refreshes after observed drift), not
+	// "rows rewritten". Every authority file THIS RUN placed carries a
+	// fresh mtime, so the pass must have acted on each one (backfill,
+	// drift correction, or stamp refresh): the run's placed active count
+	// is the floor. Tree-wide stock is asserted above (rows == tree per
+	// status) and sampled by the retrieval smoke; a delta run's untouched
+	// placements are stamp-verified and correctly NOT counted.
+	placedActive := 0
+	for _, p := range placed {
+		if p.rec.Status == "active" {
+			placedActive++
+		}
+	}
+	if rep.Rebuilt < placedActive {
+		problems = append(problems, fmt.Sprintf("rebuild-index brought %d current, below the %d active record(s) this run placed — the reconcile did not cover its own placement", rep.Rebuilt, placedActive))
 	}
 	if len(problems) > 0 {
 		step.OK = false
