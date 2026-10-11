@@ -67,6 +67,10 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	t.Setenv("POLYFORGE_API_KEY", "machine-key")
 	t.Setenv("PF_LEAK", "leak")
 	t.Setenv("PLAIN_VAR", "keep-me")
+	// polyforge#81: a parent shell's spoofed role marker must be
+	// stripped with the rest of the inherited PF_* family before the
+	// daemon re-injects the real value below.
+	t.Setenv("PF_AGENT_ROLE", "spoofed-role")
 	t.Setenv("SOME_OTHER_NAME", "machine-key") // renamed secret: value match
 	sp := newPiSpawner(&Config{EnvSecrets: []string{"machine-key"}, SocketPath: "/run/polyforge.sock"})
 	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionHandle: "ab12cd34", SpawnN: 2})
@@ -90,6 +94,9 @@ func TestSpawnEnvSanitized(t *testing.T) {
 		// derivation counter are the agent's flush fence identity
 		"PF_SESSION_HANDLE=ab12cd34",
 		"PF_SPAWN_N=2",
+		// polyforge#81: the execution-role marker is re-injected after
+		// the strip, so the spoofed parent value above cannot survive.
+		"PF_AGENT_ROLE=wi-agent",
 	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env must carry %q, got:\n%s", want, env)
@@ -115,7 +122,9 @@ func TestSpawnEnvNoSocketPathOmitted(t *testing.T) {
 // TestSpawnSessionIdentityEnvReachesChild drives the REAL spawn path
 // (scripted harness) and proves the child's environment carries the v1.5
 // identity pair — PF_SESSION_HANDLE (the public fingerprint) and
-// PF_SPAWN_N (the derivation counter) — and NOT the session secret: the
+// PF_SPAWN_N (the derivation counter) — plus the polyforge#81 execution-
+// role marker PF_AGENT_ROLE=wi-agent (step subagents inherit it through
+// plain env propagation) — and NOT the session secret: the
 // agent reads its flush fence identity from env, never the credential.
 func TestSpawnSessionIdentityEnvReachesChild(t *testing.T) {
 	capDir, sp := scriptedHarness(t)
@@ -149,6 +158,9 @@ func TestSpawnSessionIdentityEnvReachesChild(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"PF_SPAWN_N=2"`) {
 		t.Fatalf("child env must carry the derivation counter, got:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), `"PF_AGENT_ROLE=wi-agent"`) {
+		t.Fatalf("child env must carry the execution-role marker, got:\n%s", raw)
 	}
 	if strings.Contains(string(raw), secret) {
 		t.Fatalf("the session SECRET must never reach the child env, got:\n%s", raw)

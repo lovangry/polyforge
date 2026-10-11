@@ -222,6 +222,14 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		// env; it lives only in state.json and the one-shot askpass).
 		"PF_SESSION_HANDLE=" + p.SessionHandle,
 		"PF_SPAWN_N=" + strconv.Itoa(p.SpawnN),
+		// polyforge#81 context identity: the execution-role marker. The
+		// skill routes on it at load time (EXECUTION = a WI agent: no
+		// supervision duties); step subagents inherit it through plain
+		// env propagation, needing no extra daemon code. Deliberate
+		// addition, same family as PF_WI_ID: the sanitize point above
+		// strips every inherited PF_* first, so a parent shell's
+		// spoofed PF_AGENT_ROLE cannot survive into the child.
+		"PF_AGENT_ROLE=wi-agent",
 	}
 	if s.cfg.SocketPath != "" {
 		// deliberate addition, same mechanism as PF_WI_ID: the env sanitize
