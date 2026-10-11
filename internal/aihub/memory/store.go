@@ -77,6 +77,13 @@ type Store struct {
 	db      *core.DB
 	dataDir string
 
+	// ReconcileProgress, when set, receives periodic progress during
+	// O(library) reconcile passes (polyforge#129: a long pass — first
+	// boot after the upgrade, index repair, migrate-memories — must be
+	// distinguishable from a hang). Set it before the first RebuildIndex
+	// call; it is invoked only from the goroutine running the pass.
+	ReconcileProgress func(ProgressReport)
+
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex // per-mem_id write mutex
 }
@@ -99,6 +106,26 @@ func (s *Store) memLock(memID string) func() {
 	s.mu.Unlock()
 	l.Lock()
 	return l.Unlock
+}
+
+// tryMemLock is memLock without waiting: it answers false instead of
+// blocking when the entry's mutex is already held. The reconcile's
+// batched pass uses it to never wait on a per-mem lock while holding an
+// open write transaction — the lock holder needs Core's only connection
+// for its own write, so blocking there is a deadlock shape (polyforge#129:
+// the startup reconcile runs concurrently with serving traffic).
+func (s *Store) tryMemLock(memID string) (func(), bool) {
+	s.mu.Lock()
+	l, ok := s.locks[memID]
+	if !ok {
+		l = &sync.Mutex{}
+		s.locks[memID] = l
+	}
+	s.mu.Unlock()
+	if !l.TryLock() {
+		return nil, false
+	}
+	return l.Unlock, true
 }
 
 // CreateRequest is the POST /api/v1/memories body.
