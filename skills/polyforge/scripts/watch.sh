@@ -99,7 +99,7 @@ now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # observe_status greps the observe projection's JSON for the top-level
 # status (the Go marshal order pins it as the first "status" occurrence).
 observe_status() {
-  $pf observe "$WI" --json 2>/dev/null | grep -o '"status":"[a-z_]*"' | head -n 1 | sed 's/.*:"//;s/"$//'
+  $pf --json observe "$WI" 2>/dev/null | grep -o '"status":"[a-z_]*"' | head -n 1 | sed 's/.*:"//;s/"$//'
 }
 
 # terminal_status: the spec's terminal set (wrapped, failed, canceled)
@@ -182,7 +182,7 @@ trap cleanup EXIT
 # --- WAKE channel (foreground) ------------------------------------------
 prev_sig=""
 while :; do
-  view=$($pf observe "$WI" --json 2>/dev/null) || {
+  view=$($pf --json observe "$WI" 2>/dev/null) || {
     sleep "$poll_s"
     continue
   }
