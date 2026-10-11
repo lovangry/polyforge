@@ -91,7 +91,7 @@ At session start, scan `<workspace>/.polyforge/watchers/` and sort by the
 `pf-watcher session_id:` header: YOUR OWN non-running watchers (header
 session_id = yours) re-arm after one catch-up check (read the `<wi>.log`
 tail for what was missed). A script headed with a DIFFERENT session's id is
-not yours — never steal it. For a predecessor (non-live-session) script,
+not yours — never steal it. For a Predecessor (non-live-session) script,
 the only path to ownership is the watch lane's ask-to-adopt channel: ask
 the owner (one batched prompt covers several scripts), and only on the
 owner's explicit consent rewrite the script's `session_id` header line to
