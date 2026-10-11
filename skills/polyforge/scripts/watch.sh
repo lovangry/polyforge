@@ -24,7 +24,16 @@
 #          the only wake primitive: it wakes only the owning session,
 #          which tells the human, handles it, and re-runs the script.
 #   LOG  — every watch_log (default 1m) appends
-#          `<RFC3339 UTC> <pf watch-probe human line>` to <wi>.log.
+#          `<RFC3339 UTC> <pf watch-probe human line>` to <wi>.log, and
+#          PROACTIVELY PUSHES the line when its meaningful content changed
+#          since the last push (owner ruling 2026-10-11: narration is for
+#          the human, not the archive): the log subshell drops the line
+#          into <wi>.push; the foreground WAKE loop picks it up within one
+#          poll, prints it, and exits 0 — the session relays it to the
+#          human and re-runs the script. Age tokens are excluded from the
+#          change comparison, so a silent step (no new output) never
+#          pushes; active work (size/summary/step_status/event changes)
+#          pushes roughly once per watch_log.
 #   HEARTBEAT — optional (watch_heartbeat, default off): prints a line to
 #          stdout every cycle so the harness task log shows liveness.
 #
@@ -84,6 +93,8 @@ done
 log_dir=$workspace/.polyforge/watchers
 log_file=$log_dir/$WI.log
 state_file=$log_dir/$WI.state
+push_file=$log_dir/$WI.push
+push_mark=$log_dir/$WI.pushed
 
 pf=${PF_BIN:-pf}
 
@@ -134,7 +145,7 @@ hb_s=${watch_heartbeat_seconds:-0}
 tail_lines=${watch_log_tail_lines:-50}
 
 self_delete() {
-  rm -f "$self" "$state_file"
+  rm -f "$self" "$state_file" "$push_file" "$push_mark"
   if [ "$keep_log" -ne 1 ]; then
     rm -f "$log_file"
   fi
@@ -153,6 +164,17 @@ mkdir -p "$log_dir"
       printf '%s %s\n' "$ts" "$line" >> "$log_file"
     else
       printf '%s probe failed (exit %d)\n' "$ts" "$rc" >> "$log_file"
+      line=""
+    fi
+    # Proactive push (owner ruling): meaningful change vs the last pushed
+    # line -> drop it into the push file; the WAKE loop relays and exits.
+    if [ -n "$line" ]; then
+      norm=$(printf '%s\n' "$line" | sed 's/ age=[0-9hdms]*//g')
+      prev=$(cat "$push_mark" 2>/dev/null || true)
+      if [ "$norm" != "$prev" ]; then
+        printf '%s\n' "$norm" > "$push_mark"
+        printf '%s %s\n' "$ts" "$line" > "$push_file"
+      fi
     fi
   done
 ) &
@@ -182,6 +204,14 @@ trap cleanup EXIT
 # --- WAKE channel (foreground) ------------------------------------------
 prev_sig=""
 while :; do
+  # Proactive narration push: the LOG subshell saw a meaningful change.
+  if [ -s "$push_file" ]; then
+    echo "================================================================"
+    echo "pf watcher narration: $WI (session $SESSION_ID)"
+    cat "$push_file"
+    rm -f "$push_file"
+    exit 0
+  fi
   view=$($pf --json observe "$WI" 2>/dev/null) || {
     sleep "$poll_s"
     continue

@@ -197,11 +197,12 @@ func TestSummarizeModelAndNormalize(t *testing.T) {
 	}
 }
 
-// TestDispatchArgsShape pins the one-shot argv: print mode, exactly the
-// configured model, then the prompt — no model selection in the adapter.
+// TestDispatchArgsShape pins the one-shot argv: print mode and exactly the
+// configured model — the prompt travels via stdin, never argv (large
+// transcript tails exceed the kernel per-argument limit).
 func TestDispatchArgsShape(t *testing.T) {
-	got := DispatchArgs("prov/m-1", "summarize this")
-	want := []string{"-p", "--model", "prov/m-1", "summarize this"}
+	got := DispatchArgs("prov/m-1")
+	want := []string{"-p", "--model", "prov/m-1"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("DispatchArgs = %v, want %v", got, want)
 	}
