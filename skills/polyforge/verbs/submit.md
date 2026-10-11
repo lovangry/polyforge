@@ -47,15 +47,26 @@ For a takeover refused as non-admin, the same path reports `CORE-403`.
 
 ## Watch lane: arm the watcher
 
-Arm the session-side watcher after a successful submit — for a plain
-claim AND for `--takeover` alike: copy `skills/polyforge/scripts/watch.sh`
-verbatim to `<workspace>/.polyforge/watchers/<wi>.sh`, prepend the three
-header lines (`# pf-watcher wi: <wi id>` / `# pf-watcher session_id:
-<YOUR session's harness session id>` / `# pf-watcher armed_at: <RFC3339
-UTC>`) above the copied body, and start the copy as a harness background
-task. Refuse to arm a terminal work item (wrapped / failed / canceled) —
-check `pf observe <wi> --json` once before copying; the script's startup
-guard refuses too, naming the status. The watcher wakes the session with
-one full report on the WI's first state change and self-deletes (script,
-log, state) when the WI turns terminal. Full procedure: the watch-lane
+Role gate first: if your env carries `PF_AGENT_ROLE=wi-agent` you are an
+EXECUTION agent — arm nothing here. Watcher setup is a SUPERVISION duty of
+the interactive session; skip this whole section and continue with the
+workflow you were derived for (the role-detection section at the top of
+`SKILL.md` routes it).
+
+If you are an interactive session (no marker), arm the session-side watcher
+after a successful submit — for a plain claim AND for `--takeover` alike:
+copy `skills/polyforge/scripts/watch.sh` verbatim to
+`<workspace>/.polyforge/watchers/<wi>.sh`, prepend the three header lines
+(`# pf-watcher wi: <wi id>` / `# pf-watcher session_id: <YOUR session's
+harness session id>` / `# pf-watcher armed_at: <RFC3339 UTC>`) above the
+copied body, and start the copy as a harness background task. Refuse to arm
+a terminal work item (wrapped / failed / canceled) — check
+`pf observe <wi> --json` once before copying; the script's startup guard
+refuses too, naming the status. The watcher wakes the session with one full
+report on the WI's first state change and self-deletes (script, log, state)
+when the WI turns terminal. The header you prepend is the ownership record:
+its `session_id` decides who is bound to the work item (the bound-only
+presentation duties and turn-start scan/re-arm), and a script headed with
+another session's id is never yours to take — the only path to ownership is
+the watch lane's ask-to-adopt channel. Full procedure: the watch-lane
 section of `SKILL.md`.

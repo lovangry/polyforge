@@ -72,17 +72,30 @@ terminate verdict for a parked workflow.
 
 ## Watch lane: re-arm the watcher
 
-When this session interactively resumes a work item it had been watching
-— `pf resume` after a pause, the owner-resume of a parked workflow, or
-any resume of a WI this session previously armed whose watcher is no
-longer running — RE-ARM the session-side watcher: copy
-`skills/polyforge/scripts/watch.sh` verbatim to
+Role gate first: if your env carries `PF_AGENT_ROLE=wi-agent` you are an
+EXECUTION agent — re-arm nothing and skip this whole section; watcher setup,
+reconciliation and presentation are SUPERVISION duties of the interactive
+session (the role-detection section at the top of `SKILL.md` routes it).
+
+If you are an interactive session (no marker): when this session
+interactively resumes a work item it had been watching — `pf resume` after
+a pause, the owner-resume of a parked workflow, or any resume of a WI this
+session previously armed whose watcher is no longer running — RE-ARM the
+session-side watcher: copy `skills/polyforge/scripts/watch.sh` verbatim to
 `<workspace>/.polyforge/watchers/<wi>.sh` with the three header lines
 (`# pf-watcher wi: <wi id>` / `# pf-watcher session_id: <YOUR session's
 harness session id>` / `# pf-watcher armed_at: <RFC3339 UTC>`) above the
-copied body, and start the copy as a harness background task. At session
-start, scan `<workspace>/.polyforge/watchers/` for YOUR OWN non-running
-watchers (header session_id = yours) and re-arm each after one catch-up
-check (read the `<wi>.log` tail for what was missed). Never adopt or
-steal another session's watcher. Full procedure: the watch-lane section
-of `SKILL.md`.
+copied body, and start the copy as a harness background task.
+
+At session start, scan `<workspace>/.polyforge/watchers/` and sort by the
+`pf-watcher session_id:` header: YOUR OWN non-running watchers (header
+session_id = yours) re-arm after one catch-up check (read the `<wi>.log`
+tail for what was missed). A script headed with a DIFFERENT session's id is
+not yours — never steal it. For a predecessor (non-live-session) script,
+the only path to ownership is the watch lane's ask-to-adopt channel: ask
+the owner (one batched prompt covers several scripts), and only on the
+owner's explicit consent rewrite the script's `session_id` header line to
+your own and refresh its `armed_at` line, then re-arm it — an adopted
+binding carries the full bound-only presentation duty. A refusal leaves the
+script untouched and you unbound. Full procedure: the watch-lane section of
+`SKILL.md`.
