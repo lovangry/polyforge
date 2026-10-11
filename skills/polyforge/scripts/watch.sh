@@ -169,7 +169,7 @@ mkdir -p "$log_dir"
     # Proactive push (owner ruling): meaningful change vs the last pushed
     # line -> drop it into the push file; the WAKE loop relays and exits.
     if [ -n "$line" ]; then
-      norm=$(printf '%s\n' "$line" | sed 's/ age=[0-9hdms]*//g')
+      norm=$(printf '%s\n' "$line" | sed 's/ age=[0-9hdms]*//g; s/, age [0-9hdms]*//g')
       prev=$(cat "$push_mark" 2>/dev/null || true)
       if [ "$norm" != "$prev" ]; then
         printf '%s\n' "$norm" > "$push_mark"
