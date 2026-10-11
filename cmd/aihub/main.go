@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -87,11 +88,19 @@ func main() {
 	}
 
 	// Memory startup reconcile (authority files are the truth source).
+	// polyforge#129, serve-first: the reconcile's steady state is a
+	// freshness-stamp check (stat + row compare per entry, no reads, no
+	// index writes), but a first boot after an upgrade, an index repair
+	// or a migrate-memories pass is still O(library) — it runs in the
+	// background so the listener binds immediately, with progress logs
+	// for any long pass and a batch yield that lets API writers
+	// interleave. The completion line (always logged, previously gated
+	// on n>0, which made a no-op reconcile silent) is the readiness
+	// signal.
 	mems := memory.NewStore(db, *dataDir)
-	if n, err := mems.RebuildIndex(); err != nil {
-		log.Printf("aihub: startup memory reconcile: %v", err)
-	} else if n > 0 {
-		log.Printf("aihub: startup memory reconcile: %d entries reindexed", n)
+	mems.ReconcileProgress = func(p memory.ProgressReport) {
+		log.Printf("aihub: memory reconcile: scanned %d, reindexed %d, elapsed %s",
+			p.Scanned, p.Reindexed, p.Elapsed.Round(time.Millisecond))
 	}
 
 	gitMgr, err := git.NewManager(*dataDir, core.NewOwnerManager(db))
@@ -107,6 +116,26 @@ func main() {
 	srv.StaleAfter = *staleAfter
 	httpSrv := &http.Server{Addr: *listen, Handler: srv}
 
+	// Bind BEFORE the reconcile starts: the port must exist while any
+	// long background pass runs (polyforge#129: the old order reconciled
+	// synchronously first, so the port refused every connection for the
+	// whole pass).
+	ln, err := net.Listen("tcp", *listen)
+	if err != nil {
+		log.Fatalf("aihub: listen: %v", err)
+	}
+
+	go func() {
+		start := time.Now()
+		n, err := mems.RebuildIndex()
+		if err != nil {
+			log.Printf("aihub: startup memory reconcile: %v", err)
+			return
+		}
+		log.Printf("aihub: startup memory reconcile complete: %d entries brought current in %s",
+			n, time.Since(start).Round(time.Millisecond))
+	}()
+
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -118,7 +147,7 @@ func main() {
 	}()
 
 	log.Printf("aihub: listening on %s (data-dir %s)", *listen, *dataDir)
-	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("aihub: %v", err)
 	}
 }
