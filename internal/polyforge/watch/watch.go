@@ -25,6 +25,14 @@ const (
 	// TranscriptTailRecords is the bounded tail of session-jsonl records
 	// the snapshot carries.
 	TranscriptTailRecords = 200
+	// TranscriptTailBytes caps the tail BY BYTES: raw jsonl records carry
+	// whole assistant messages, so a records-only bound routinely feeds a
+	// multi-hundred-KB prompt and the summarize dispatch dies at its
+	// timeout (caught live on polyforge#124/#81, 2026-10-11: a 447KB
+	// transcript saturated the full 5-minute dispatch timeout every
+	// probe, stalling the LOG channel to one line per ~6 minutes). Keep
+	// the NEWEST bytes under the cap; oldest records drop first.
+	TranscriptTailBytes = 32 * 1024
 	// WatchLogTailLines is the watcher-log tail the wake report carries.
 	WatchLogTailLines = 50
 )
@@ -163,8 +171,14 @@ func fillTranscript(snap *Snapshot, path string, now time.Time) {
 	snap.TranscriptPath = path
 	snap.TranscriptSize = info.Size()
 	if recs, err := sessionjsonl.Tail(path, TranscriptTailRecords); err == nil {
+		total := 0
 		for _, r := range recs {
 			snap.TranscriptTail = append(snap.TranscriptTail, r.Raw)
+			total += len(r.Raw) + 1
+			for total > TranscriptTailBytes && len(snap.TranscriptTail) > 1 {
+				total -= len(snap.TranscriptTail[0]) + 1
+				snap.TranscriptTail = snap.TranscriptTail[1:]
+			}
 		}
 	}
 	age := now.Sub(info.ModTime())
