@@ -283,15 +283,29 @@ func (s *Store) sweepTransients() error {
 	})
 }
 
-// ftsRebuildBatch is how many FTS rows one rebuild transaction carries.
-// Every row is a DELETE+INSERT inside a shared transaction: at real-library
-// scale (thousands of entries) the old per-entry transaction made the
-// rebuild one fsync PER ENTRY and blew past any sane client timeout
-// (seq-fix lane 3a: the 3760-entry rebuild exceeded the CLI's 60s). The
-// batch holds Core's single write connection, so other writers queue
-// until it commits — acceptable for an admin maintenance path (server
-// boot reconcile, migrate-memories).
-const ftsRebuildBatch = 256
+// ftsRebuildBatch caps how many FTS rows one rebuild transaction
+// carries. Every row is a DELETE+INSERT inside a shared transaction: at
+// real-library scale (thousands of entries) the old per-entry transaction
+// made the rebuild one fsync PER ENTRY and blew past any sane client
+// timeout (seq-fix lane 3a: the 3760-entry rebuild exceeded the CLI's
+// 60s). The batch holds Core's ONLY connection for its full duration, so
+// a request arriving mid-batch — read or write — queues until it
+// commits: the cap is deliberately small (polyforge#129 ruling b① — a
+// concurrent request may wait a few hundred milliseconds, never the
+// batch count × per-entry cost) and ftsRebuildHold bounds the hold in
+// wall time besides.
+const ftsRebuildBatch = 32
+
+// ftsRebuildHold is the wall-time budget of one batch transaction of the
+// FTS rebuild (polyforge#129 ruling b①): as soon as the open batch has
+// held Core's only connection this long it commits and yields. A row
+// count cap alone cannot bound the hold — per-entry index cost grows
+// with the corpus (~15ms/entry locally, ~0.1s/entry at production
+// scale), so a large batch would still mean seconds-to-minutes of
+// queueing. With the budget, a concurrent request's worst wait is
+// roughly ftsRebuildHold plus one entry's write, independent of corpus
+// size.
+const ftsRebuildHold = 250 * time.Millisecond
 
 // ftsRebuildYield is the pause between two batch transactions of the FTS
 // rebuild — the writer yield (polyforge#129): each batch holds Core's
@@ -303,7 +317,8 @@ const ftsRebuildYield = 2 * time.Millisecond
 // progressEvery is how many scanned entries lie between two progress
 // reports of an O(library) reconcile pass (polyforge#129: a long pass —
 // first boot after the upgrade, index repair, migrate-memories — must be
-// distinguishable from a hang).
+// distinguishable from a hang). The batched index-write phase reports on
+// top of this, per batch rotation; see rebuildFTSBatched.
 const progressEvery = 256
 
 // ProgressReport is one reconcile progress observation.
@@ -499,8 +514,21 @@ func (s *Store) rebuildIndex(scopedProject string) (int, error) {
 	}
 	// The batched index writes — only for the entries this pass queued
 	// (backfills, unstamped rows); every other entry was either skipped
-	// on its stamp or already written inline by its correction.
-	n, err := s.rebuildFTSBatched(queue)
+	// on its stamp or already written inline by its correction. The phase
+	// reports progress per batch rotation (folded into Reindexed): on a
+	// full-rebuild pass — first boot after the upgrade, index repair,
+	// migrate-memories — this phase is the bulk of the wall time, and the
+	// walk's reports stop once the walk is done, so it must not go
+	// silent (polyforge#129 ruling c).
+	n, err := s.rebuildFTSBatched(queue, func(written int) {
+		if s.ReconcileProgress != nil {
+			s.ReconcileProgress(ProgressReport{
+				Scanned:   scanned,
+				Reindexed: counted + written,
+				Elapsed:   time.Since(start),
+			})
+		}
+	})
 	if err != nil {
 		return 0, errf("MEM-502", "", "fts: %v", err)
 	}
@@ -543,7 +571,18 @@ type rebuildEntry struct{ id, dirProject string }
 // Core's pool is one connection, and a nested write there would deadlock
 // it. Between batches the pass sleeps ftsRebuildYield so queued writers
 // can commit.
-func (s *Store) rebuildFTSBatched(entries []rebuildEntry) (int, error) {
+//
+// polyforge#129 rewind (owner rulings b① + c): a batch transaction holds
+// Core's ONLY connection for its full duration, so it commits as soon as
+// EITHER ftsRebuildBatch rows or ftsRebuildHold of wall time are in —
+// whichever fires first — bounding a concurrent request's worst wait to
+// roughly the hold plus one entry instead of the whole batch. After
+// every commit progress fires (called with the entries written so far)
+// so this phase — the bulk of a full-rebuild pass — keeps emitting
+// scanned/reindexed/elapsed instead of going silent for minutes. A
+// rotation in which every entry was lock-deferred sleeps before the next
+// round instead of spinning on empty transactions.
+func (s *Store) rebuildFTSBatched(entries []rebuildEntry, progress func(written int)) (int, error) {
 	n := 0
 	pending := entries
 	for len(pending) > 0 {
@@ -552,11 +591,28 @@ func (s *Store) rebuildFTSBatched(entries []rebuildEntry) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		batchStart := time.Now() // the open transaction's hold clock
+		rotWrote := 0
 		// fail rolls back the CURRENT batch transaction (the closure captures
 		// the variable, so it stays correct across batch rotations).
 		fail := func(e error) (int, error) {
 			_ = tx.Rollback()
 			return 0, e
+		}
+		// closeBatch commits the open batch transaction and reports the
+		// rotation: the commit hands Core's only connection back to the
+		// pool (queued requests — reads and writes — run here), progress
+		// fires, and the yield gives waiting writers their turn before the
+		// caller re-opens the next batch.
+		closeBatch := func() error {
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			if progress != nil {
+				progress(n)
+			}
+			time.Sleep(ftsRebuildYield)
+			return nil
 		}
 		for _, e := range pending {
 			unlock, ok := s.tryMemLock(e.id)
@@ -579,19 +635,30 @@ func (s *Store) rebuildFTSBatched(entries []rebuildEntry) (int, error) {
 				return fail(err)
 			}
 			n++
-			if n%ftsRebuildBatch == 0 {
-				if err := tx.Commit(); err != nil {
-					return fail(err)
+			rotWrote++
+			// Batch boundary: row count OR hold budget, whichever fires
+			// first (polyforge#129 ruling b① — the open transaction is
+			// Core's only connection; every concurrent request queues
+			// behind it until this commit).
+			if n%ftsRebuildBatch == 0 || time.Since(batchStart) >= ftsRebuildHold {
+				if cerr := closeBatch(); cerr != nil {
+					return fail(cerr)
 				}
-				time.Sleep(ftsRebuildYield)
 				tx, err = s.db.Begin()
 				if err != nil {
 					return 0, err
 				}
+				batchStart = time.Now()
 			}
 		}
-		if err := tx.Commit(); err != nil {
+		if err := closeBatch(); err != nil {
 			return fail(err)
+		}
+		if rotWrote == 0 && len(deferred) > 0 {
+			// Every entry of this rotation was lock-deferred: without a
+			// pause the pass would spin on empty transactions between two
+			// reports while a writer holds the per-mem lock.
+			time.Sleep(ftsRebuildYield)
 		}
 		pending = deferred
 	}
