@@ -18,6 +18,35 @@ import (
 	"github.com/silgrid/polyforge/internal/aihub/core"
 )
 
+// fileStamp is the freshness stamp a memories row carries (polyforge#129):
+// the authority file's observed mtime (nanoseconds) and byte size at the
+// moment the row was written. Equality with a fresh Stat of the file is
+// the reconcile's skip condition — the row (and its FTS row, written in
+// the same transaction) then provably describe this exact file state.
+type fileStamp struct {
+	mtimeNS int64
+	size    int64
+}
+
+// statStamp observes one file's freshness stamp. nil when the file cannot
+// be stat'ed: the row is written unstamped and the next reconcile pass
+// verifies it by content — a write never fails for a stamp.
+func statStamp(path string) *fileStamp {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	return &fileStamp{mtimeNS: st.ModTime().UnixNano(), size: st.Size()}
+}
+
+// stampArgs renders a stamp as two SQL values (NULL when unstamped).
+func stampArgs(st *fileStamp) (any, any) {
+	if st == nil {
+		return nil, nil
+	}
+	return st.mtimeNS, st.size
+}
+
 // Entry is the memories row as served.
 type Entry struct {
 	ID          string   `json:"id"`
@@ -36,12 +65,24 @@ type Entry struct {
 	UpdatedAt   string   `json:"updated_at"`
 
 	apath string `json:"-"` // authority_path, internal
+
+	// fsStamp is the row's freshness stamp (polyforge#129); nil when the
+	// row is unstamped (a pre-#129 row, or a write that could not stat
+	// the file) and the reconcile must verify it by content.
+	fsStamp *fileStamp `json:"-"`
 }
 
 // Store is the memory subsystem.
 type Store struct {
 	db      *core.DB
 	dataDir string
+
+	// ReconcileProgress, when set, receives periodic progress during
+	// O(library) reconcile passes (polyforge#129: a long pass — first
+	// boot after the upgrade, index repair, migrate-memories — must be
+	// distinguishable from a hang). Set it before the first RebuildIndex
+	// call; it is invoked only from the goroutine running the pass.
+	ReconcileProgress func(ProgressReport)
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex // per-mem_id write mutex
@@ -65,6 +106,26 @@ func (s *Store) memLock(memID string) func() {
 	s.mu.Unlock()
 	l.Lock()
 	return l.Unlock
+}
+
+// tryMemLock is memLock without waiting: it answers false instead of
+// blocking when the entry's mutex is already held. The reconcile's
+// batched pass uses it to never wait on a per-mem lock while holding an
+// open write transaction — the lock holder needs Core's only connection
+// for its own write, so blocking there is a deadlock shape (polyforge#129:
+// the startup reconcile runs concurrently with serving traffic).
+func (s *Store) tryMemLock(memID string) (func(), bool) {
+	s.mu.Lock()
+	l, ok := s.locks[memID]
+	if !ok {
+		l = &sync.Mutex{}
+		s.locks[memID] = l
+	}
+	s.mu.Unlock()
+	if !l.TryLock() {
+		return nil, false
+	}
+	return l.Unlock, true
 }
 
 // CreateRequest is the POST /api/v1/memories body.
@@ -170,6 +231,11 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 		return nil, errf("MEM-500", "", "write authority: %v", err)
 	}
 	contentSHA := shaHex(authorityBytes)
+	// Freshness stamp (polyforge#129): the tmp file's mtime+size ARE the
+	// authority file's state after step ③ (rename preserves mtime), so
+	// the stamp is taken now and commits together with the row — before
+	// the rename, never after.
+	fsStamp := statStamp(tmp)
 	// ②
 	rel := "memory/" + projectID + "/" + memID
 	var idem any
@@ -181,11 +247,14 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
+	fsM, fsS := stampArgs(fsStamp)
 	if _, err := tx.Exec(`INSERT INTO memories(id, project_id, owner_user_id, work_item_id, type, title,
-		visibility, authority_path, content_sha, content_len, tags, related, idempotency_key, status, created_at, updated_at)
-		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'active',?14,?14)`,
+		visibility, authority_path, content_sha, content_len, tags, related, idempotency_key, status, created_at, updated_at,
+		fs_mtime_ns, fs_size)
+		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'active',?14,?14,?15,?16)`,
 		memID, projectID, owner, anyPtr(req.WorkItemID), req.Type, anyPtr(req.Title), req.Visibility, rel,
-		contentSHA, len(authorityBytes), jsonOrEmpty(req.Tags), jsonOrEmpty(req.Related), idem, now); err != nil {
+		contentSHA, len(authorityBytes), jsonOrEmpty(req.Tags), jsonOrEmpty(req.Related), idem, now,
+		fsM, fsS); err != nil {
 		return nil, err
 	}
 	if err := ftsReplace(tx, memID, extractBody(string(authorityBytes))); err != nil {
@@ -227,11 +296,14 @@ func (s *Store) load(memID string) (*Entry, error) {
 	var e Entry
 	var wi, title sql.NullString
 	var tags, related string
+	var fsM, fsS sql.NullInt64
 	err := s.db.QueryRow(`SELECT id, project_id, owner_user_id, work_item_id, type, title, visibility,
-		authority_path, content_sha, content_len, tags, related, status, created_at, updated_at
+		authority_path, content_sha, content_len, tags, related, status, created_at, updated_at,
+		fs_mtime_ns, fs_size
 		FROM memories WHERE id=?1`, memID).
 		Scan(&e.ID, &e.ProjectID, &e.OwnerUserID, &wi, &e.Type, &title, &e.Visibility,
-			&e.apath, &e.ContentSHA, &e.ContentLen, &tags, &related, &e.Status, &e.CreatedAt, &e.UpdatedAt)
+			&e.apath, &e.ContentSHA, &e.ContentLen, &tags, &related, &e.Status, &e.CreatedAt, &e.UpdatedAt,
+			&fsM, &fsS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errf("MEM-404", "", "memory %s", memID)
 	}
@@ -251,6 +323,9 @@ func (s *Store) load(memID string) (*Entry, error) {
 	_ = json.Unmarshal([]byte(related), &e.Related)
 	if e.Related == nil {
 		e.Related = []string{}
+	}
+	if fsM.Valid && fsS.Valid {
+		e.fsStamp = &fileStamp{mtimeNS: fsM.Int64, size: fsS.Int64}
 	}
 	return &e, nil
 }
@@ -334,16 +409,20 @@ func (s *Store) Update(memID string, req UpdateRequest) (*Entry, error) {
 		return nil, errf("MEM-500", "", "write authority: %v", err)
 	}
 	contentSHA := shaHex(authorityBytes)
+	// Freshness stamp (polyforge#129): see Create — taken from the tmp
+	// file (rename preserves mtime) and committed with the row.
+	fsStamp := statStamp(tmp)
 	// ②
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	fsM, fsS := stampArgs(fsStamp)
 	if _, err := tx.Exec(`UPDATE memories SET content_sha=?1, content_len=?2, title=?3, tags=?4,
-		related=?5, visibility=?6, updated_at=?7 WHERE id=?8`,
+		related=?5, visibility=?6, updated_at=?7, fs_mtime_ns=?8, fs_size=?9 WHERE id=?10`,
 		contentSHA, len(authorityBytes), anyPtr(fm.Title), jsonOrEmpty(fm.Tags), jsonOrEmpty(fm.Related),
-		fm.Visibility, fm.UpdatedAt, memID); err != nil {
+		fm.Visibility, fm.UpdatedAt, fsM, fsS, memID); err != nil {
 		return nil, err
 	}
 	if err := ftsReplace(tx, memID, extractBody(string(authorityBytes))); err != nil {

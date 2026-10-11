@@ -69,8 +69,11 @@ func TestRebuildIndexScopedToProject(t *testing.T) {
 		t.Fatalf("scoped rebuild FTS miss: %v %+v", err, hits)
 	}
 
-	// The full rebuild now picks up beta too.
-	if n, err := e.store.RebuildIndex(); err != nil || n != 2 {
+	// The full rebuild now picks up beta too. polyforge#129: the reindexed
+	// count covers the entries the pass brings CURRENT — alpha was already
+	// indexed and stamped by the scoped pass moments ago and its file is
+	// untouched, so the stamp fast path skips it and only beta counts.
+	if n, err := e.store.RebuildIndex(); err != nil || n != 1 {
 		t.Fatalf("full rebuild: %v %d", err, n)
 	}
 	if err := e.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE project_id=?1`, betaID).Scan(&rows); err != nil || rows != 1 {

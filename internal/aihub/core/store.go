@@ -231,7 +231,17 @@ CREATE TABLE IF NOT EXISTS memories (
   idempotency_key TEXT UNIQUE,
   status       TEXT NOT NULL DEFAULT 'active',
   created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
+  updated_at   TEXT NOT NULL,
+  -- polyforge#129 freshness stamp: the authority file's observed state
+  -- (Stat mtime in nanoseconds + byte size) at the moment the row was
+  -- written, recorded by the write path in the same transaction as the
+  -- row. The reconcile consults it before any per-entry work — stamp
+  -- match ⇒ skip (no read, no hash, no FTS write); mismatch ⇒ verify by
+  -- content sha. NULL means "unverified" (pre-#129 rows, backfills
+  -- awaiting their batched index write): the next reconcile pass
+  -- verifies the row against the file and stamps it.
+  fs_mtime_ns  INTEGER,
+  fs_size      INTEGER
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -272,6 +282,16 @@ func Open(dataDir string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("core: migrate machines: %w", err)
 	}
+	// polyforge#129: memories gains the freshness-stamp columns in place
+	// (guarded ALTER TABLE, same discipline as migrateMachines). Rows in
+	// a pre-#129 database carry NULL stamps; the first reconcile after
+	// the upgrade verifies each row against its authority file and
+	// stamps it — one full pass, after which the steady state is
+	// incremental.
+	if err := migrateMemoryStamps(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("core: migrate memory stamps: %w", err)
+	}
 	// seq-fix lane: global seq numbering becomes per-project. The UNIQUE
 	// column constraint cannot be altered in place, so databases created
 	// by an older build are rebuilt (renumbering per project, relative
@@ -304,6 +324,33 @@ func migrateMachines(db *sql.DB) error {
 			continue
 		}
 		if _, err := db.Exec(`ALTER TABLE machines ADD COLUMN ` + c.name + ` ` + c.decl); err != nil {
+			return fmt.Errorf("add column %s: %w", c.name, err)
+		}
+	}
+	return nil
+}
+
+// memoryColumns are the polyforge#129 freshness-stamp additions to
+// memories (DDL above). Fresh installs get them from the DDL; existing
+// databases get them from migrateMemoryStamps' guarded ALTER TABLE,
+// same discipline as migrateMachines/migrateSessions.
+var memoryColumns = []struct{ name, decl string }{
+	{"fs_mtime_ns", "INTEGER"},
+	{"fs_size", "INTEGER"},
+}
+
+// migrateMemoryStamps adds the memories freshness-stamp columns when
+// missing. Every guard makes re-runs (and fresh DDL installs) no-ops.
+func migrateMemoryStamps(db *sql.DB) error {
+	for _, c := range memoryColumns {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name=?1`, c.name).Scan(&n); err != nil {
+			return fmt.Errorf("probe column %s: %w", c.name, err)
+		}
+		if n != 0 {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE memories ADD COLUMN ` + c.name + ` ` + c.decl); err != nil {
 			return fmt.Errorf("add column %s: %w", c.name, err)
 		}
 	}
