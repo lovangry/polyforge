@@ -392,37 +392,6 @@ func (u *v1Install) pf(t *testing.T, args ...string) string {
 	return u.pfExit(t, -1, "", args...)
 }
 
-// pfCombined is pf returning stdout+stderr (for error-path pins).
-func (u *v1Install) pfCombined(t *testing.T, wantExit int, sock string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command(u.pfPath, append([]string{"--config", hermeticConfigPath(t)}, args...)...)
-	cmd.Env = append(os.Environ(),
-		"PF_SERVER="+u.url,
-		"PF_API_KEY="+u.adminKey,
-		"PF_USER_ID=usr_root",
-	)
-	if sock != "" {
-		cmd.Env = append(cmd.Env, "PF_DAEMON_SOCKET="+sock)
-	}
-	var out strings.Builder
-	cmd.Stdout, cmd.Stderr = &out, &out
-	code := 0
-	if err := cmd.Run(); err != nil {
-		ee, ok := err.(*exec.ExitError)
-		if !ok {
-			t.Fatalf("pf %v: %v", args, err)
-		}
-		code = ee.ExitCode()
-	}
-	if wantExit < 0 && code != 0 {
-		t.Fatalf("pf %v: exit %d (output %q)", args, code, out.String())
-	}
-	if wantExit >= 0 && code != wantExit {
-		t.Fatalf("pf %v: exit %d, want %d (output %q)", args, code, wantExit, out.String())
-	}
-	return out.String()
-}
-
 func (u *v1Install) pfExit(t *testing.T, wantExit int, sock string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(u.pfPath, append([]string{"--config", hermeticConfigPath(t)}, args...)...)
@@ -951,13 +920,6 @@ func (d *v1Daemon) pf(t *testing.T, args ...string) string {
 	return d.inst.pfExit(t, -1, d.sock, args...)
 }
 
-// pfCode runs the real pf CLI against THIS daemon's socket with an
-// expected exit code; returns combined stdout+stderr.
-func (d *v1Daemon) pfCode(t *testing.T, wantExit int, args ...string) string {
-	t.Helper()
-	return d.inst.pfCombined(t, wantExit, d.sock, args...)
-}
-
 // status reads GET /status.
 func (d *v1Daemon) status(t *testing.T) cli.StatusResponse {
 	t.Helper()
@@ -987,17 +949,6 @@ func (d *v1Daemon) observe(t *testing.T, wi string) *protocol.JobView {
 		t.Fatalf("observe %s undecodable: %v (%s)", wi, err, raw)
 	}
 	return &jv
-}
-
-// agentPIDOf returns the recorded agent pid of wi (0 when not running).
-func (d *v1Daemon) agentPIDOf(t *testing.T, wi string) int {
-	t.Helper()
-	for _, j := range d.status(t).Jobs {
-		if j.WorkItemID == wi {
-			return j.AgentPID
-		}
-	}
-	return 0
 }
 
 // capsuleDir is this daemon's capsule root for wi.
@@ -1652,18 +1603,6 @@ func archivedEnvelope(t *testing.T, capDir, step string, spawn int) map[string]a
 	return env
 }
 
-// waitArchivedEnvelope polls until the archived envelope of one step
-// spawn exists, then returns it.
-func waitArchivedEnvelope(t *testing.T, d *v1Daemon, wi, step string, spawn int, bound time.Duration) map[string]any {
-	t.Helper()
-	path := filepath.Join(d.capsuleDir(wi), "artifacts", "steps", step, fmt.Sprintf("s%d", spawn), "result.json")
-	waitUntil(t, bound, fmt.Sprintf("archived envelope %s never landed", path), func() bool {
-		_, err := os.Stat(path)
-		return err == nil
-	})
-	return archivedEnvelope(t, d.capsuleDir(wi), step, spawn)
-}
-
 // waitSpawnCount polls the capsule's spawn journal until it carries n
 // entries (the derivation-count face), returning the entries.
 func waitSpawnCount(t *testing.T, d *v1Daemon, wi string, n int, bound time.Duration) []map[string]any {
@@ -1685,25 +1624,6 @@ func latestSpawnPID(t *testing.T, d *v1Daemon, wi string) int {
 	}
 	pid, _ := entries[len(entries)-1]["pid"].(float64)
 	return int(pid)
-}
-
-// requireGh is the environmental gh-availability skip for the real-GitHub
-// scenario: short mode, an absent gh binary and an unauthenticated gh
-// each skip with a message naming its gate (skip-not-fail; the real
-// network is an availability gate, never a regression).
-func requireGh(t *testing.T) {
-	t.Helper()
-	if testing.Short() {
-		t.Skipf("short mode: skipping the real-github ship PR e2e (network + gh required)")
-	}
-	ghPath, err := exec.LookPath("gh")
-	if err != nil {
-		t.Skipf("gh binary absent from PATH: skipping the ship PR e2e")
-	}
-	if out, aerr := exec.Command(ghPath, "auth", "status").CombinedOutput(); aerr != nil {
-		t.Skipf("gh not authenticated (gh auth status exit %v): %s",
-			aerr, strings.TrimSpace(string(out)))
-	}
 }
 
 // envelopeQuickFix is the canonical driver-era quick-fix plan: four

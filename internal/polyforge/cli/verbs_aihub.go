@@ -743,19 +743,3 @@ var cmdRemember = &Command{
 // ---------------------------------------------------------------------------
 // v1.5 session-model faces.
 // ---------------------------------------------------------------------------
-
-// wiSessionView reads the work item's v1.5 PUBLIC session audit fields
-// from aihub (additive decode: api.WorkItem carries them only once Lane
-// A's server lands; the raw body already can). nil when the read fails —
-// the renderers skip the session line rather than fabricate one.
-func wiSessionView(ctx *Context, wiID string) *WIView {
-	raw, err := ctx.aihub().GetWorkItemRaw(wiID)
-	if err != nil {
-		return nil
-	}
-	var v WIView
-	if json.Unmarshal(raw, &v) != nil {
-		return nil
-	}
-	return &v
-}

@@ -250,33 +250,6 @@ func TestPauseRefusalWritesNothing(t *testing.T) {
 	}
 }
 
-// TestUnblockVerbRemoved (v2-converge §7): the separate `pf unblock` verb is
-// gone — blocked has two actions, continue (`pf resume`) and abandon
-// (`pf cancel`). Invoking the old spelling prints a one-line hint and makes
-// no network call; the help face no longer lists it.
-func TestUnblockVerbRemoved(t *testing.T) {
-	var rec reqRecorder
-	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, cannedWI)
-	})
-	code, _, stderr := runPf(t, map[string]string{
-		"PF_SERVER": srv.URL, "PF_API_KEY": "key-admin",
-	}, "unblock", "wi_abc")
-	if code != 2 || !strings.Contains(stderr, "pf resume (continue) or pf cancel (abandon)") {
-		t.Fatalf("unblock hint: code=%d stderr=%q", code, stderr)
-	}
-	if n := len(rec.all()); n != 0 {
-		t.Errorf("the removed verb must not call aihub; saw %d calls", n)
-	}
-	_, stdout, _ := runPf(t, nil, "help")
-	if strings.Contains(stdout, "unblock") {
-		t.Errorf("help must not list unblock: %s", stdout)
-	}
-	if !strings.Contains(stdout, "abandon") {
-		t.Errorf("help must point cancel at abandon: %s", stdout)
-	}
-}
-
 // TestResumeDispatchByWIState pins the three-way `pf resume` order (D1+D2
 // merge): blocked -> human-key door then daemon resume-blocked; not blocked
 // and parked repair_pending on THIS daemon -> the daemon's in-place resume

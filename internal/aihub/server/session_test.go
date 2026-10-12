@@ -530,90 +530,8 @@ func TestSessionHolderOverHTTP(t *testing.T) {
 	}
 }
 
-// TestUnblockOverHTTP (Finding 3, v1.5 review): the blocked state's exit
-// door. session-end(blocked) is the STANDARD compensation (abandonClaim's
-// D5 rule, the bounded fail), so a human must be able to return the
-// verdict to the queued pool: POST /unblock flips blocked→queued, clears
-// waiting_on and leaves a wi_unblocked event. Authorization mirrors
-// force-end-session (admin or project maintainer); a non-blocked work item
-// answers the typed NOT_BLOCKED refusal.
-func TestUnblockOverHTTP(t *testing.T) {
-	e := newSrvEnv(t)
-	id := createExecWIOverHTTP(t, e, "unblock over http")
-	secret := "91919191919191919191919191919191"
-	if code, raw, _ := sessClaim(t, e, id, secret, "ub-1"); code != 200 {
-		t.Fatalf("claim: %d %s", code, raw)
-	}
-	// The bounded-fail shape: session-end(blocked) clears the session row
-	// (M2) and sets waiting_on=owner.
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
-		map[string]string{"session_id": secret, "status": "blocked", "note": "recovery budget exhausted"}, nil); code != 200 {
-		t.Fatalf("session-end(blocked): %d %s", code, raw)
-	}
-
-	// Authorization: a plain writer (non-member) is refused.
-	outsider, _ := e.admin.CreateUser("plainub", "pub@example.com", "writer", "human")
-	okey, _ := e.admin.CreateAPIKey(outsider.ID, "pub", "")
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/unblock", okey.Plain,
-		map[string]any{}, nil); code != 403 {
-		t.Fatalf("non-maintainer unblock: %d %s", code, raw)
-	}
-
-	// The gate: unblocking a QUEUED work item answers NOT_BLOCKED.
-	other := createExecWIOverHTTP(t, e, "unblock not blocked")
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+other+"/unblock", e.key,
-		map[string]any{}, nil); code != 409 {
-		t.Fatalf("queued unblock: %d %s", code, raw)
-	} else if c, r := errEnvelope(t, raw); c != "CORE-409" || r != "NOT_BLOCKED" {
-		t.Fatalf("wrong refusal: %s %s", c, r)
-	}
-
-	// A project maintainer may unblock (the force-end gate's twin).
-	member, _ := e.admin.CreateUser("maintub", "mub@example.com", "writer", "human")
-	mkey, _ := e.admin.CreateAPIKey(member.ID, "mub", "")
-	e.do(t, "PATCH", "/api/v1/projects/"+e.adminProjectID(t, "alpha"), e.key,
-		map[string]any{"members": []map[string]string{{"user_id": member.ID, "role": "maintainer"}}}, nil)
-
-	var unblocked struct {
-		ID        string  `json:"id"`
-		Status    string  `json:"status"`
-		WaitingOn *string `json:"waiting_on"`
-	}
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/unblock", mkey.Plain,
-		map[string]any{}, &unblocked); code != 200 || unblocked.Status != "queued" || unblocked.WaitingOn != nil {
-		t.Fatalf("maintainer unblock: %d %s %+v", code, raw, unblocked)
-	}
-
-	// The wi_unblocked event landed on the timeline.
-	found := false
-	for _, ev := range eventsOf(t, e, id) {
-		if ev["type"] == "wi_unblocked" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("wi_unblocked event missing: %v", eventsOf(t, e, id))
-	}
-
-	// The unblocked work item is claimable again through the ordinary CAS
-	// gate (the runtime needs no change — queued is queued).
-	if code, raw, _ := sessClaim(t, e, id, "92929292929292929292929292929292", "ub-2"); code != 200 {
-		t.Fatalf("claim after unblock: %d %s", code, raw)
-	}
-
-	// Terminal states stay read-only: a wrapped work item answers 410.
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
-		map[string]string{"session_id": "92929292929292929292929292929292", "status": "wrapped"}, nil); code != 200 {
-		t.Fatalf("session-end(wrapped): %d %s", code, raw)
-	}
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/unblock", e.key,
-		map[string]any{}, nil); code != 410 {
-		t.Fatalf("terminal unblock: %d %s", code, raw)
-	}
-}
-
 // TestBlockedExitsUnifiedAuthorization (v2-converge §7, §11 item 7): the
-// blocked exits — resume-blocked (continue), terminate-blocked and unblock —
+// blocked exits — resume-blocked (continue) and terminate-blocked —
 // and cancel (abandon) are open to exactly the work item's reporter, a
 // project maintainer, or an admin. A plain project member (writer) who is
 // none of those is refused on EVERY door — resume-blocked used to check the
@@ -665,7 +583,7 @@ func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
 	s := func(n byte) string { return strings.Repeat(string(rune('a'+n)), 32) }
 	id := block("blocked auth", s(1))
 
-	for _, door := range []string{"resume-blocked", "terminate-blocked", "unblock"} {
+	for _, door := range []string{"resume-blocked", "terminate-blocked"} {
 		for who, key := range map[string]string{"plain member": otherKey, "outsider": outKey} {
 			if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/"+door, key, map[string]any{}, nil); code != 403 && code != 404 {
 				t.Fatalf("%s on %s must be refused, got %d %s", who, door, code, raw)

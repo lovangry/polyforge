@@ -85,11 +85,11 @@ func TestErrorJSONModeReemitsEnvelope(t *testing.T) {
 // 502/504 pages as auth failures — #14).
 func TestErrorNoEnvelopeDegradesToHTTPCode(t *testing.T) {
 	d := newDaemonFixture(t)
-	d.answers["GET /jobs/wi_x/observe"] = func(w http.ResponseWriter, r *http.Request) {
+	d.answers["GET /jobs/wi_x/watch"] = func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(502)
 		io.WriteString(w, "proxy garbage")
 	}
-	code, _, stderr := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock}, "observe", "wi_x")
+	code, _, stderr := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock}, "watch", "wi_x", "--once")
 	if code != 2 {
 		t.Errorf("exit = %d, want 2 (5xx class)", code)
 	}

@@ -76,7 +76,6 @@ var commands = []*Command{
 	cmdRecall,
 	cmdRemember,
 	cmdSubmit,
-	cmdObserve,
 	cmdAnswer,
 	cmdPause,
 	cmdResume,
@@ -142,11 +141,6 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	if args[0] == "unblock" {
-		// v2-converge §7: the three blocked doors became two actions.
-		fmt.Fprintln(stderr, "pf: `unblock` was removed — use pf resume (continue) or pf cancel (abandon)")
-		return 2
-	}
 	cmd := lookupCommand(args[0])
 	if cmd == nil {
 		fmt.Fprintf(stderr, "pf: unknown command %q (see `pf help`)\n", args[0])
@@ -243,8 +237,8 @@ func lookupCommand(name string) *Command {
 
 // parseCommandArgs parses the command tail. For commands that registered
 // flags in Setup, flags may appear anywhere (before, between or after
-// positionals) — humans write `pf observe wi_a --after 5` as naturally
-// as `pf observe --after 5 wi_a`. For flag-less commands parsing stops
+// positionals) — humans write `pf watch wi_a --after 5` as naturally
+// as `pf watch --after 5 wi_a`. For flag-less commands parsing stops
 // at the first positional and the rest is handed over verbatim for the
 // sub-action to parse.
 func parseCommandArgs(fs *flag.FlagSet, args []string) ([]string, error) {

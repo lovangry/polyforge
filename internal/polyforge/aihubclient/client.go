@@ -497,13 +497,6 @@ func (c *Client) SessionEnd(wi string, req api.SessionEndRequest) error {
 	return c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/session-end", req, nil)
 }
 
-// UnblockWorkItem is the blocked state's exit door (v1.5 review
-// Finding 3): status blocked → queued. Authorization is server-side
-// (admin or project maintainer — the force-end gate).
-func (c *Client) UnblockWorkItem(idOrSlug string) (json.RawMessage, error) {
-	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/unblock", map[string]any{})
-}
-
 // ResumeBlockedWorkItem is the §6.4 owner resume verdict's hub door
 // (polyforge#116): `pf resume` on a workflow parked blocked — status
 // blocked → queued for the owner's immediate re-claim; the daemon then

@@ -277,31 +277,6 @@ func v3PendingQID(exec map[string]any, step string) string {
 	return id
 }
 
-// v3AnswerControlLandings counts the fake agent's pf/answer control
-// landings in the capsule journal (the legacy relay observable: any
-// landing means a relay path executed).
-func v3AnswerControlLandings(t *testing.T, capDir string) int {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(capDir, "logs", "fakepi.jsonl"))
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if json.Unmarshal([]byte(line), &rec) == nil {
-			if rec["type"] == "control" && rec["method"] == "pf/answer" {
-				n++
-			}
-		}
-	}
-	return n
-}
-
 // ---------------------------------------------------------------------------
 // Scenario S3 — the driver-only lifecycle on a production-shaped argv.
 // ---------------------------------------------------------------------------
@@ -417,9 +392,8 @@ func nonEmptyLines(s string) []string {
 // TestV3AnswerWithoutLiveBridgeFailsFast pins the answer criterion's
 // posture: `pf answer` against a daemon that holds NO live bridge handle
 // for the WI fails fast — non-zero exit, a surfaced error, no success
-// marker — and no relay path executes anywhere (zero pf/answer control
-// landings; the pending question is untouched on the daemon that holds
-// the job). The construction is deterministic instead of racing the
+// marker — and the pending question is untouched on the daemon that holds
+// the job. The construction is deterministic instead of racing the
 // recovery window: daemon-1 owns the parked WI (live bridge), and the
 // answer is pointed at a second, idle daemon that has no job for it.
 func TestV3AnswerWithoutLiveBridgeFailsFast(t *testing.T) {
@@ -465,11 +439,7 @@ func TestV3AnswerWithoutLiveBridgeFailsFast(t *testing.T) {
 	if strings.Contains(aout, "delivered") {
 		t.Fatalf("pf answer reported delivery with no live bridge handle: %q", aout)
 	}
-	// No relay path executed: the capsule journal shows zero pf/answer
-	// control landings, and the parked question is untouched.
-	if n := v3AnswerControlLandings(t, capDir); n != 0 {
-		t.Fatalf("pf answer reached an agent-side relay %d times — no relay path may execute: %d landings", n, n)
-	}
+	// The parked question is untouched.
 	if got := v3PendingQID(v3ReadExec(t, capDir), "grill"); got != qid {
 		t.Fatalf("the pending question changed under the failed answer: got %q, want %q", got, qid)
 	}

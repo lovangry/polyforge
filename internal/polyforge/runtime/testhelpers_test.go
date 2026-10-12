@@ -623,13 +623,6 @@ func timeAfter() <-chan struct{} {
 	return ch
 }
 
-func writeBytes(p string, b []byte) error {
-	if b == nil {
-		b = []byte{}
-	}
-	return os.WriteFile(p, b, 0o644)
-}
-
 // orphaningAgent is an "agent" whose leader dies immediately after forking
 // a long-lived child: the child survives in the leader's process group as
 // the orphan the six-layer cleanup must still collect.

@@ -7,8 +7,7 @@
 //
 //   - stdin: one JSON command object per line; prompt commands
 //     {"id":..,"type":"prompt","message":..} are the only commands
-//     honored (the liveness probe died with the guessing supervision
-//     lanes — v2-converge 2.3);
+//     honored;
 //   - stdout: response records {"id","type":"response","command":"prompt",
 //     "success":true} echo the command id; assistant text rides the
 //     message_start/message_update/message_end event burst; tool
@@ -68,7 +67,7 @@ const execPath = "runtime-state/execution.json"
 // capsule git chain and is assertable from the sealed scene too).
 const journalPath = "logs/fakepi.jsonl"
 
-// outMu serializes stdout record emission between the control loop and
+// outMu serializes stdout record emission between the stdin command loop and
 // the drive goroutine.
 var outMu sync.Mutex
 

@@ -6,10 +6,8 @@ package core
 // session CAS claim), running → paused/blocked (session-end), paused →
 // running (session-attach, M3), running/paused → queued (force-end
 // by an admin/maintainer: the recovery door), running → wrapped/failed (session-end), queued/paused/
-// blocked → canceled (cancel), blocked → queued (unblock — the human
-// exit door of the bounded-fail verdict, v1.5 review Finding 3: since
-// session-end(blocked) became the STANDARD compensation (abandonClaim,
-// bounded fail) blocked needed an unblock path, not just cancel).
+// blocked → canceled (cancel); the blocked exits are resume-blocked
+// (continue) and terminate-blocked / cancel (abandon).
 // Terminal states are read-only (CORE-410).
 
 import (
@@ -633,80 +631,18 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error)
 	return m.load(id)
 }
 
-// Unblock is the blocked state's exit door (v1.5 review Finding 3,
-// M2's "until a human unblocks"): session-end(blocked) is the standard
-// compensation — abandonClaim's D5 rule and the bounded fail both land
-// there — so a human must be able to return the verdict to the queued
-// pool. Gate: status==blocked AND the session row is EMPTY (M2 cleared
-// it with the verdict — a blocked WI still carrying a session would
-// mean the clearing half never settled, and unblocking it would orphan
-// a holder). Effect: status→queued, waiting_on=NULL, event wi_unblock-
-// ed; the work item re-enters the CAS claim gate like any queued ticket.
-func (m *WIManager) Unblock(idOrSlug string, actor string) (*api.WorkItem, error) {
-	id, err := m.Resolve(idOrSlug)
-	if err != nil {
-		return nil, err
-	}
-	tx, err := m.db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	var status string
-	var session sql.NullString
-	if err := tx.QueryRow(`SELECT status, session_hash FROM work_items WHERE id=?1`, id).
-		Scan(&status, &session); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
-		}
-		return nil, err
-	}
-	if isTerminal(status) {
-		return nil, Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", status)
-	}
-	if status != api.StatusBlocked {
-		return nil, Fail(api.ErrCoreConflict, "NOT_BLOCKED",
-			"unblock requires a blocked work item (got %s)", status)
-	}
-	if session.Valid && session.String != "" {
-		// M2's invariant, asserted in the gate: blocked = blocked status
-		// PLUS a cleared session. A session that survived the verdict is
-		// a half-settled close — refuse rather than orphan a live holder.
-		return nil, Fail(api.ErrCoreConflict, "SESSION_HELD",
-			"a blocked work item must carry no session (M2 cleared it); refuse rather than orphan the holder")
-	}
-	now := Now()
-	// Guarded: only a blocked row flips; 0 rows = concurrent transition.
-	res, err := tx.Exec(`UPDATE work_items SET status=?, waiting_on=NULL, updated_at=?
-		WHERE id=? AND status=?`, api.StatusQueued, now, id, api.StatusBlocked)
-	if err != nil {
-		return nil, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, Fail(api.ErrCoreConflict, "", "state changed concurrently")
-	}
-	if err := appendEventTx(tx, id, now, actor, "wi_unblocked",
-		map[string]any{"from": api.StatusBlocked, "to": api.StatusQueued}); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return m.load(id)
-}
-
 // ResumeBlocked is the §6.4 owner resume verdict's hub door (polyforge#116):
 // the door the owner's `pf resume` exercises on a workflow parked blocked on
-// an honest incomplete result. Unlike Unblock it is NOT a pool return for a
+// an honest incomplete result. It is NOT a pool return for a
 // generic re-claim: it marks the WI re-claimable for the owner's own
 // immediate re-establishment of execution (the daemon claims it back and the
 // claim/start path resumes the parked capsule in place). Gate:
-// status==blocked AND the session row is EMPTY — the same M2 invariant
-// Unblock asserts (a blocked WI still carrying a session would orphan a
+// status==blocked AND the session row is EMPTY — the M2 invariant
+// (a blocked WI still carrying a session would orphan a
 // holder). Effect: status→queued, waiting_on=NULL, event wi_resumed; the
 // claim gate (unchanged: queued only) then admits the WI like any queued
 // ticket. Authorization (server layer, v2-converge §7): the WI's reporter,
-// a project maintainer, or an admin — the same gate as Unblock,
+// a project maintainer, or an admin — the same gate as
 // TerminateBlocked and cancel.
 func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem, error) {
 	id, err := m.Resolve(idOrSlug)
@@ -765,8 +701,8 @@ func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem,
 // (polyforge#116): `pf wrap --fail` on a workflow parked blocked. The bounded
 // close dropped the job and cleared the session, so a session-fenced
 // session-end is unavailable there — this is the door that lands the owner's
-// kill verdict. Gate: status==blocked AND the session row is EMPTY (the same
-// M2 invariant Unblock asserts). Effect: status→failed, closed_at set,
+// kill verdict. Gate: status==blocked AND the session row is EMPTY (the M2
+// invariant). Effect: status→failed, closed_at set,
 // waiting_on cleared, event wi_failed_blocked; a wrapped (success) verdict is
 // not a door here — a parked workflow has no completed output to wrap, and
 // the owner's continuing move is ResumeBlocked. Authorization is the unified

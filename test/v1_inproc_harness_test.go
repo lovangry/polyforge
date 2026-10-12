@@ -283,11 +283,6 @@ func (r *inprocRig) start(wi string) {
 	}
 }
 
-// capsuleDir is the rig's capsule root for wi.
-func (r *inprocRig) capsuleDir(wi string) string {
-	return filepath.Join(r.workspace, "capsules", wi)
-}
-
 // eventsOf reads the rig's durable events file for one work item.
 func (r *inprocRig) eventsOf(t *testing.T, wi string) []protocol.EventEntry {
 	t.Helper()

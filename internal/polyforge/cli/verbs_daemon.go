@@ -72,95 +72,6 @@ func submitPrecheck(ctx *Context, wiID string) error {
 }
 
 // ---------------------------------------------------------------------------
-// observe — the daemon observe projection (protocol.JobView): current
-// step, step table, budget, pending question, recent events.
-// ---------------------------------------------------------------------------
-
-var cmdObserve = &Command{
-	Name:    "observe",
-	Group:   GroupExec,
-	Summary: "DEPRECATED, use `pf watch <wi> --once`: observe WI progress (daemon projection)",
-	Usage:   "pf observe <id> [--after N] [--read-through=false]   (deprecated alias of the watch lane: use `pf watch <id> --once`)",
-	Setup: func(fs *flag.FlagSet) {
-		fs.Int64("after", 0, "last received event cursor (first call: 0)")
-		fs.Bool("read-through", true, "on the daemon's not-monitored answer, fall back to the aihub progress read-through (layer=read-through)")
-	},
-	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		if len(args) != 1 {
-			return fmt.Errorf("observe: expected exactly one work item id")
-		}
-		raw, err := ctx.daemon().Observe(args[0], int64Flag(fs, "after"))
-		if err != nil {
-			// The daemon's not-monitored answer (DAEMON-404 on the observe
-			// face) is the read-through trigger: fall back to the aihub
-			// progress endpoint (02 §5.2) unless the caller opted out with
-			// --read-through=false (the old fail-fast behavior).
-			if boolFlag(fs, "read-through") && daemonNotMonitored(err) {
-				return observeReadThrough(ctx, args[0], err)
-			}
-			return err
-		}
-		ctx.finish(raw, func() {
-			var jv protocol.JobView
-			if err := json.Unmarshal(raw, &jv); err != nil {
-				printJSON(ctx.Stdout, raw)
-			} else {
-				// v1.5: render the session fingerprint (the PUBLIC holder
-				// handle) instead of the deleted lineage's attempt/
-				// generation fields. Best-effort aihub WI read: the daemon
-				// layer's projection carries no session fields (protocol.
-				// JobView is frozen), so the additive WI read supplies them;
-				// on failure the session line is skipped, never fabricated.
-				renderObserve(ctx.Stdout, &jv, wiSessionView(ctx, args[0]))
-			}
-		})
-		return nil
-	},
-}
-
-// daemonNotMonitored reports whether err is the daemon's not-monitored
-// answer (DAEMON-404 from the observe face: no local capsule for the WI).
-func daemonNotMonitored(err error) bool {
-	var ae *api.Error
-	return errors.As(err, &ae) && ae.Code == api.ErrDaemonNotFound
-}
-
-// observeReadThrough is the second observe layer: the aihub §5.2 progress
-// read-through, called with the CALLER's ordinary api key. The rendered
-// view is visibly a different layer (labeled layer=read-through, with the
-// as-of-last-publish freshness note); daemon-layer-only content (the
-// live events ring, --after cursor semantics, pending-question
-// interactivity) has no read-through equivalent and is never fabricated.
-// daemonErr is the daemon's not-monitored answer, surfaced when the
-// read-through itself fails so neither layer's failure is swallowed.
-func observeReadThrough(ctx *Context, wiID string, daemonErr error) error {
-	raw, err := ctx.aihub().GetProgressRaw(wiID)
-	if err != nil {
-		// Neither layer's failure is swallowed: the combined error names
-		// the daemon's not-monitored answer AND the read-through miss.
-		// Typed read-through errors keep their code (the CLI's exit-code
-		// and error rendering key on it); renderError prints the detail.
-		var ae *api.Error
-		if errors.As(err, &ae) {
-			return &api.Error{Code: ae.Code, Extra: ae.Extra,
-				Detail: fmt.Sprintf("daemon does not monitor %s (%s); read-through failed: %s",
-					wiID, daemonErr, ae.Detail)}
-		}
-		return fmt.Errorf("observe: daemon does not monitor %s (%s); read-through failed: %w",
-			wiID, daemonErr, err)
-	}
-	ctx.finish(raw, func() {
-		var p api.ProgressResponse
-		if err := json.Unmarshal(raw, &p); err != nil {
-			printJSON(ctx.Stdout, raw)
-			return
-		}
-		renderReadThrough(ctx.Stdout, &p)
-	})
-	return nil
-}
-
-// ---------------------------------------------------------------------------
 // answer — answer the pending needs_input question: --question names
 // it explicitly, or the unique pending question is used (the JobView
 // carries at most one).
@@ -208,7 +119,7 @@ var cmdAnswer = &Command{
 				var jv protocol.JobView
 				if uerr := json.Unmarshal(raw, &jv); uerr == nil {
 					if jv.Pending == nil {
-						return fmt.Errorf("answer: %s has no pending question (see `pf observe %s`)", args[0], args[0])
+						return fmt.Errorf("answer: %s has no pending question (see `pf watch %s --once`)", args[0], args[0])
 					}
 					question = jv.Pending.ID
 				}
@@ -288,15 +199,6 @@ var cmdPause = &Command{
 func patchCleanPause(ctx *Context, wiID string, value bool) error {
 	_, err := ctx.aihub().PatchWorkItem(wiID, map[string]any{"clean_pause": value})
 	return err
-}
-
-// setCleanPause wraps patchCleanPause with the warning-only error
-// policy of the pause verb; "" means the flag landed.
-func setCleanPause(ctx *Context, wiID string, value bool) string {
-	if err := patchCleanPause(ctx, wiID, value); err != nil {
-		return fmt.Sprintf("could not set clean_pause=%v on the hub (%v); the daemon pause request still carries the flag", value, err)
-	}
-	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +294,7 @@ var cmdResume = &Command{
 		}
 		ctx.finish(raw, func() {
 			fmt.Fprintf(ctx.Stdout, "resumed %s: the workflow was parked blocked (incomplete result) — the §6.4 owner move re-established execution over the parked capsule\n", args[0])
-			fmt.Fprintln(ctx.Stdout, "(the frozen current step re-dispatches in place as a fresh derivation; watch it with `pf observe <id>`)")
+			fmt.Fprintln(ctx.Stdout, "(the frozen current step re-dispatches in place as a fresh derivation; watch it with `pf watch <id> --once`)")
 		})
 		return nil
 	},
@@ -728,9 +630,6 @@ Launch flags (with environment variable and default, where one exists):
   --auto
       auto-pull: the daemon claims ready-queue work itself (default
       off; unset keeps the persisted switch; --auto=false forces off)
-  --mode interactive|drain
-      DEPRECATED alias for one release: interactive = --auto=false,
-      drain = --auto=true (prints a warning)
 
 Supervision flags (v2-converge 2.4; Go duration strings; omitted or 0 keeps
 the default; a step overrides them in workflow.md: budget.wall_minutes = T,

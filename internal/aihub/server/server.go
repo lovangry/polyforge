@@ -78,9 +78,6 @@ func (s *Server) routes() {
 	// Recovery door: an admin/maintainer force-ends a stuck holder's session
 	// (WI -> queued); any daemon then claims it normally.
 	m.HandleFunc("POST /api/v1/work-items/{id}/force-end-session", s.auth(s.hForceEndSession))
-	// Finding 3 (v1.5 review): the blocked state's exit door — the human
-	// unblock that returns a bounded-fail verdict to the queued pool.
-	m.HandleFunc("POST /api/v1/work-items/{id}/unblock", s.auth(s.hUnblockWI))
 	// polyforge#116: the §6.4 owner doors on a workflow parked blocked —
 	// resume (the owner's re-dispatch-in-place verdict, claimed back
 	// immediately) and the terminate verdict (pf wrap --fail on a parked WI).
@@ -811,45 +808,11 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 	writeJSON(w, http.StatusOK, view)
 }
 
-// hUnblockWI serves the blocked exit door (v1.5 review Finding 3):
-// status blocked → queued, waiting_on cleared, event wi_unblocked. Kept
-// for wire compatibility; the CLI's "continue" is `pf resume` (the
-// resume-blocked door). Authorization is the unified blocked-exit gate:
-// the work item's reporter, a project maintainer, or an admin.
-func (s *Server) hUnblockWI(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "unblock requires the work item's reporter, a project maintainer or admin"))
-		return
-	}
-	wi, err := s.WIs.Unblock(id, idn.UserID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
-}
-
 // hResumeBlockedWI serves the §6.4 owner resume verdict's hub door
 // (polyforge#116): the door `pf resume` exercises on a workflow parked
-// blocked on an honest incomplete result. Authorization is the CLAIM
-// gate's (any project member), NOT the unblock gate's admin/maintainer:
-// this door exercises the right the blocked verdict itself grants ("the
-// owner holds the next move") rather than overriding it — the
-// pool-return override stays admin-gated on Unblock.
+// blocked on an honest incomplete result. Authorization (v2-converge §7):
+// the WI's reporter, a project maintainer, or an admin — the same gate as
+// terminate-blocked and cancel.
 func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -1494,32 +1457,18 @@ func (s *Server) hListUsers(w http.ResponseWriter, r *http.Request, idn *identit
 }
 
 func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request, idn *identity) {
-	// The scope field is accepted under BOTH wire names (#11): the CLI
-	// sends project_id, older callers sent project_scope. Both present and
-	// disagreeing is a 400; either one alone works.
 	var req struct {
-		UserID       string  `json:"user_id"`
-		Name         string  `json:"name"`
-		ProjectID    *string `json:"project_id,omitempty"`
-		ProjectScope *string `json:"project_scope,omitempty"`
+		UserID    string  `json:"user_id"`
+		Name      string  `json:"name"`
+		ProjectID *string `json:"project_id,omitempty"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
 	}
 	scope := ""
-	switch {
-	case req.ProjectID != nil && req.ProjectScope != nil:
-		if *req.ProjectID != *req.ProjectScope {
-			writeErr(w, core.Fail(api.ErrCoreBadInput, "",
-				"project_id and project_scope both present but disagree"))
-			return
-		}
+	if req.ProjectID != nil {
 		scope = *req.ProjectID
-	case req.ProjectID != nil:
-		scope = *req.ProjectID
-	case req.ProjectScope != nil:
-		scope = *req.ProjectScope
 	}
 	key, err := s.Admin.CreateAPIKey(req.UserID, req.Name, scope)
 	if err != nil {

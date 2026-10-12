@@ -84,15 +84,6 @@ func (s *fakeSpawner) agentOf(n int) *fakeAgent {
 	return s.spawned[n]
 }
 
-func (s *fakeSpawner) lastParams() runtime.SpawnParams {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.calls) == 0 {
-		return runtime.SpawnParams{}
-	}
-	return s.calls[len(s.calls)-1]
-}
-
 // ---------------------------------------------------------------------------
 // fake aihub (v1.5 session model): the daemon-facing subset of the hub —
 // session claim/verify/attach/end plus the queue and the generic Do the
@@ -362,15 +353,6 @@ func (h *fakeHub) lastEnd() api.SessionEndRequest {
 		return api.SessionEndRequest{}
 	}
 	return h.ends[len(h.ends)-1].Req
-}
-
-func (h *fakeHub) lastEndWI() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(h.ends) == 0 {
-		return ""
-	}
-	return h.ends[len(h.ends)-1].WI
 }
 
 // ---------------------------------------------------------------------------

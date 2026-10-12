@@ -298,27 +298,6 @@ func eventsOf(m *Monitor, kind string) []protocol.EventEntry {
 	return out
 }
 
-// eventBodyInt64 reads one integer field out of an event body, failing
-// the test when the key is ABSENT: presence — not mere decodability — is
-// what the timing fields (published's commit_ms/push_ms, remember's
-// write_ms) must guarantee.
-func eventBodyInt64(t *testing.T, e protocol.EventEntry, key string) int64 {
-	t.Helper()
-	var body map[string]any
-	if err := json.Unmarshal(e.Body, &body); err != nil {
-		t.Fatalf("%s body must decode: %v", e.Kind, err)
-	}
-	raw, ok := body[key]
-	if !ok {
-		t.Fatalf("%s body must carry %q, got %s", e.Kind, key, e.Body)
-	}
-	n, ok := raw.(float64)
-	if !ok {
-		t.Fatalf("%s body's %q must be a number, got %T", e.Kind, key, raw)
-	}
-	return int64(n)
-}
-
 // rawWrite rewrites execution.json WITHOUT the commit-boundary fact.
 func rawWrite(t *testing.T, m *Monitor, version int64, step string) {
 	t.Helper()

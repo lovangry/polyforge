@@ -561,10 +561,9 @@ func TestAdminFaceEndpointsOverHTTP(t *testing.T) {
 	}
 }
 
-// TestApiKeyScopeFieldCompat pins #11: the CLI sends the scope as
-// project_id, the server used to read project_scope — the key was minted
-// GLOBAL. Both field names now work (and must actually scope the key).
-func TestApiKeyScopeFieldCompat(t *testing.T) {
+// TestApiKeyScopeField pins #11: the CLI sends the scope as project_id and
+// the key must actually be scoped (not minted GLOBAL).
+func TestApiKeyScopeField(t *testing.T) {
 	e := newSrvEnv(t)
 	if _, err := e.admin.CreateProject(core.CreateProjectRequest{Name: "beta"}); err != nil {
 		t.Fatal(err)
@@ -613,33 +612,6 @@ func TestApiKeyScopeFieldCompat(t *testing.T) {
 	}
 	if code, raw := e.do(t, "GET", "/api/v1/work-items/"+betaID, issued.Plain, nil, nil); code != 403 {
 		t.Fatalf("scoped key reached another project: %d %s", code, raw)
-	}
-	// The legacy field name (project_scope) still works, by name or id.
-	var legacy struct {
-		Plain string `json:"plain"`
-	}
-	if code, raw := e.do(t, "POST", "/api/v1/api-keys", e.key,
-		map[string]any{"user_id": target.ID, "project_scope": "beta"}, &legacy); code != 201 || legacy.Plain == "" {
-		t.Fatalf("legacy scope field: %d %s", code, raw)
-	}
-	if code, _ := e.do(t, "GET", "/api/v1/work-items/"+betaID, legacy.Plain, nil, nil); code != 200 {
-		t.Fatalf("legacy-scoped key denied on beta: %d", code)
-	}
-	if code, _ := e.do(t, "GET", "/api/v1/work-items/"+alphaID, legacy.Plain, nil, nil); code != 403 {
-		t.Fatalf("legacy-scoped key reached alpha: %d", code)
-	}
-	// Both names present and agreeing is accepted...
-	var both struct {
-		Plain string `json:"plain"`
-	}
-	if code, raw := e.do(t, "POST", "/api/v1/api-keys", e.key,
-		map[string]any{"user_id": target.ID, "project_id": "alpha", "project_scope": "alpha"}, &both); code != 201 || both.Plain == "" {
-		t.Fatalf("both fields agreeing: %d %s", code, raw)
-	}
-	// ...disagreeing is a 400.
-	if code, _ := e.do(t, "POST", "/api/v1/api-keys", e.key,
-		map[string]any{"user_id": target.ID, "project_id": "alpha", "project_scope": "beta"}, nil); code != 400 {
-		t.Fatalf("both fields disagreeing: %d", code)
 	}
 }
 

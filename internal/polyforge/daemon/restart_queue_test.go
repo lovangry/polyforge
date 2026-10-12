@@ -132,14 +132,14 @@ func TestSubmitQueueSurvivesRestartAndReplays(t *testing.T) {
 }
 
 // Replay drops what must not run: a WI aihub shows claimed elsewhere, and
-// resume and legacy (retired takeover) intents — each with a submit_dropped event.
+// resume and unknown intents — each with a submit_dropped event.
 func TestSubmitReplayDropsClaimedAndNonClaimIntents(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
 	const (
 		wiOK    = "wi_r_ok"
 		wiTaken = "wi_r_claimed_elsewhere"
-		wiTake  = "wi_r_legacy_takeover"
+		wiTake  = "wi_r_unknown_intent"
 		wiRes   = "wi_r_resume"
 	)
 	hub.status[wiOK] = api.StatusQueued
@@ -150,7 +150,7 @@ func TestSubmitReplayDropsClaimedAndNonClaimIntents(t *testing.T) {
 		c.Hub = hub
 		now := time.Now().UTC()
 		var es []qEntry
-		for _, e := range []struct{ wi, intent string }{{wiOK, "claim"}, {wiTaken, "claim"}, {wiTake, "takeover"}, {wiRes, "resume"}} {
+		for _, e := range []struct{ wi, intent string }{{wiOK, "claim"}, {wiTaken, "claim"}, {wiTake, "bogus"}, {wiRes, "resume"}} {
 			es = append(es, qEntry{WorkItemID: e.wi, Intent: e.intent, SubmittedAt: now, EnqueuedAt: now})
 		}
 		blob, _ := json.Marshal(submitQueueState{Version: 1, Entries: es})

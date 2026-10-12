@@ -173,20 +173,14 @@ type workspaceSection struct {
 // The known flat keys: root-level wherever they appear in the file.
 var coreFlatKeys = map[string]bool{"server": true, "url": true, "api_key": true, "daemon_socket": true, "user_id": true}
 
-// Keys and sections of the retired watch summarizer (the Go `pf watch`
-// replaced it): still ACCEPTED and ignored, so an installed cli.toml that
-// carries them keeps loading.
-var legacyWatchKeys = map[string]bool{"harness_sessions_root": true, "watch_poll": true, "watch_log": true, "watch_heartbeat": true}
-
 // parseConfigTOML parses the TOML subset documented for cli.toml:
 //
 //   - `key = "value"` flat string keys: the known set (server/url alias,
 //     api_key, daemon_socket, user_id) is stored; the known keys are
 //     root-level wherever they appear; unknown flat keys at the top
-//     level are ignored exactly as before;
+//     level are stored and ignored;
 //   - one section family: `[workspace."<path>"]` (quoted key mandatory)
-//     — inside, only `projects = ["a", "b"]`; the retired `[watch.*]`
-//     sections and watch_* keys are tolerated and ignored.
+//     — inside, only `projects = ["a", "b"]`.
 //
 // Other tables, unquoted section keys, non-array or wrongly-typed
 // projects values, a bare `projects` key at the top level, and duplicate
@@ -199,9 +193,8 @@ func parseConfigTOML(text string) (map[string]string, []workspaceSection, error)
 	flat := map[string]string{}
 	var sections []workspaceSection
 	var (
-		inWS     bool
-		inLegacy bool // inside a retired [watch.*] section
-		curWS    = -1 // index into sections while inside a [workspace] section
+		inWS  bool
+		curWS = -1 // index into sections while inside a [workspace] section
 	)
 	for ln, line := range strings.Split(text, "\n") {
 		line = stripTOMLComment(line)
@@ -210,11 +203,6 @@ func parseConfigTOML(text string) (map[string]string, []workspaceSection, error)
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
-			if strings.HasPrefix(strings.TrimSpace(strings.Trim(line, "[]")), "watch.") {
-				inWS, inLegacy = false, true // retired [watch.*] section: skipped
-				continue
-			}
-			inLegacy = false
 			key, err := parseSectionHeader(line, ln+1)
 			if err != nil {
 				return nil, nil, err
@@ -237,9 +225,6 @@ func parseConfigTOML(text string) (map[string]string, []workspaceSection, error)
 		val := strings.TrimSpace(line[eq+1:])
 		if key == "" {
 			return nil, nil, fmt.Errorf("line %d: empty key", ln+1)
-		}
-		if inLegacy || legacyWatchKeys[key] {
-			continue
 		}
 		if coreFlatKeys[key] {
 			// Known flat key: root-level wherever it appears.
@@ -271,9 +256,8 @@ func parseConfigTOML(text string) (map[string]string, []workspaceSection, error)
 		if key == "projects" {
 			return nil, nil, fmt.Errorf("line %d: `projects` belongs inside a [workspace.\"<path>\"] section, not the top level", ln+1)
 		}
-		// Unknown top-level flat keys are stored exactly as before
-		// (the retired-key check in LoadConfig reads them;
-		// applyConfigFile ignores the ones it does not know).
+		// Unknown top-level flat keys are stored (the retired-key check in
+		// LoadConfig reads them; applyConfigFile ignores the rest).
 		inner, ierr := parseQuotedValue(val, ln+1)
 		if ierr != nil {
 			return nil, nil, ierr

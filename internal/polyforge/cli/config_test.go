@@ -277,23 +277,18 @@ func TestConfigMalformedTomlIsAnError(t *testing.T) {
 
 func errorsAs(err error, target any) bool { return errors.As(err, target) }
 
-// The watch summarizer is gone: its [watch.*] sections and watch_* keys
-// are tolerated and ignored (an installed cli.toml keeps loading); any
-// other unknown section still refuses.
-func TestConfigRetiredWatchConfigIsIgnored(t *testing.T) {
+// The watch summarizer is gone and nothing tolerates its config: a [watch.*]
+// section is an unknown section and refuses like any other.
+func TestConfigWatchSectionIsRefused(t *testing.T) {
 	clearEnv(t)
 	ws := t.TempDir()
 	base := "[workspace.\"" + ws + "\"]\nprojects = [\"e2e\"]\n"
-	body := base + "\n[watch.summarize_model.pi]\nmodel = \"prov/pi-m\"\n\nwatch_poll = \"7s\"\nharness_sessions_root = \"/x\"\n" +
-		"\n[watch.summarize_model.claude]\nmodel = \"prov/cl\"\n"
-	cfg, err := LoadConfig(writeTempConfig(t, body))
-	if err != nil {
-		t.Fatalf("retired watch config must stay loadable: %v", err)
-	}
-	if len(cfg.Mapping.Workspaces()) != 1 {
-		t.Fatalf("the mapping must survive: %v", cfg.Mapping.Workspaces())
-	}
-	if _, err := LoadConfig(writeTempConfig(t, base+"\n[other.thing]\nx = \"1\"\n")); err == nil || !strings.Contains(err.Error(), "unknown section") {
-		t.Fatalf("an unknown section must still refuse: %v", err)
+	for _, body := range []string{
+		base + "\n[watch.summarize_model.pi]\nmodel = \"prov/pi-m\"\n",
+		base + "\n[other.thing]\nx = \"1\"\n",
+	} {
+		if _, err := LoadConfig(writeTempConfig(t, body)); err == nil || !strings.Contains(err.Error(), "unknown section") {
+			t.Fatalf("an unknown section must refuse: %v\n%s", err, body)
+		}
 	}
 }

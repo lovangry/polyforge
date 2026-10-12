@@ -1,15 +1,12 @@
 package daemon
 
-// modes_test.go: the auto switch + admission (v2-converge §5), the
-// daemon-state migration, the legacy -mode alias and the auto pull.
+// modes_test.go: the auto switch + admission (v2-converge §5) and the
+// auto pull.
 
 import (
 	"errors"
-	"flag"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -107,97 +104,6 @@ func TestNewKeepsPersistedAutoAcrossRestart(t *testing.T) {
 	d4b, _ := bootCfg(t, data, nil)
 	if d4b.modes.Auto() {
 		t.Fatal("the flag override must land in daemon-state.json (fx3 gap)")
-	}
-}
-
-// TestDaemonStateMigratesLegacyMode: a pre-v2 daemon-state.json carries
-// only "mode"; drain -> auto on, interactive/batch -> off; a rewrite drops
-// the legacy field.
-func TestDaemonStateMigratesLegacyMode(t *testing.T) {
-	cases := []struct {
-		legacy string
-		want   bool
-	}{{"drain", true}, {"interactive", false}, {"batch", false}, {"", false}}
-	for _, c := range cases {
-		t.Run(c.legacy, func(t *testing.T) {
-			data := filepath.Join(t.TempDir(), "data")
-			if err := os.MkdirAll(data, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			body := `{"version":1,"machine_id":"m-test","mode":"` + c.legacy + `","max_concurrent_jobs":3}`
-			if err := os.WriteFile(filepath.Join(data, daemonStateFile), []byte(body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			d, err := bootCfg(t, data, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if d.modes.Auto() != c.want {
-				t.Fatalf("legacy %q -> auto=%v, want %v", c.legacy, d.modes.Auto(), c.want)
-			}
-			if d.q.MaxConcurrent() != 3 {
-				t.Fatalf("max = %d, want 3 (carried over)", d.q.MaxConcurrent())
-			}
-			d.persistModeQuietly()
-			raw, _ := os.ReadFile(filepath.Join(data, daemonStateFile))
-			if strings.Contains(string(raw), `"mode"`) || !strings.Contains(string(raw), `"auto"`) {
-				t.Fatalf("rewritten state not in the new shape: %s", raw)
-			}
-			// A second load reads the new shape (no re-migration).
-			d2, _ := bootCfg(t, data, nil)
-			if d2.modes.Auto() != c.want {
-				t.Fatalf("reload after rewrite: auto=%v, want %v", d2.modes.Auto(), c.want)
-			}
-		})
-	}
-}
-
-// TestResolveAutoLegacyModeAlias: the deprecated -mode flag maps to -auto
-// and warns; an explicit -auto wins; unknown values are refused.
-func TestResolveAutoLegacyModeAlias(t *testing.T) {
-	parse := func(args ...string) (*bool, string, error) {
-		fs := flag.NewFlagSet("t", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		auto := fs.Bool("auto", false, "")
-		mode := fs.String("mode", "", "")
-		if err := fs.Parse(args); err != nil {
-			t.Fatal(err)
-		}
-		var sb strings.Builder
-		got, err := resolveAuto(fs, *auto, *mode, &sb)
-		return got, sb.String(), err
-	}
-	cases := []struct {
-		args []string
-		want string // "", "on", "off"
-		warn bool
-	}{
-		{nil, "", false},
-		{[]string{"-auto"}, "on", false},
-		{[]string{"-auto=false"}, "off", false},
-		{[]string{"-mode", "drain"}, "on", true},
-		{[]string{"-mode", "interactive"}, "off", true},
-		{[]string{"-mode", "batch"}, "off", true},
-		{[]string{"-mode", "drain", "-auto=false"}, "off", true},
-	}
-	for _, c := range cases {
-		got, warn, err := parse(c.args...)
-		if err != nil {
-			t.Fatalf("%v: %v", c.args, err)
-		}
-		have := ""
-		if got != nil {
-			have = map[bool]string{true: "on", false: "off"}[*got]
-		}
-		if have != c.want || (warn != "") != c.warn {
-			t.Fatalf("%v -> %q warn=%q, want %q warn=%v", c.args, have, warn, c.want, c.warn)
-		}
-		if c.warn && !strings.Contains(warn, "deprecated") {
-			t.Fatalf("%v: warning %q lacks 'deprecated'", c.args, warn)
-		}
-	}
-	if _, _, err := parse("-mode", "turbo"); err == nil {
-		t.Fatal("unknown legacy mode must be refused")
 	}
 }
 

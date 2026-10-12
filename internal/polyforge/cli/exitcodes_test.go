@@ -175,13 +175,13 @@ func TestDaemonFaceVerbExitCodeGoldens(t *testing.T) {
 		localBad  []string
 		parseBad  []string
 	}
-	const observeBody = `{"work_item":"wi_x","project":"p","status":"running","generation":1}`
+	const watchBody = `{"work_item":"wi_x","project":"p","status":"running"}`
 	specs := []spec{
 		{"submit", []string{"submit", "wi_x"}, "POST /jobs/wi_x/claim",
 			`{"accepted":true,"work_item_id":"wi_x"}`, true,
 			[]string{"submit"}, []string{"submit", "--no-such-flag"}},
-		{"observe", []string{"observe", "wi_x"}, "GET /jobs/wi_x/observe",
-			observeBody, false, []string{"observe"}, []string{"observe", "--no-such-flag"}},
+		{"watch", []string{"watch", "wi_x", "--once"}, "GET /jobs/wi_x/watch",
+			watchBody, false, []string{"watch", "--once"}, []string{"watch", "--no-such-flag"}},
 		{"answer", []string{"answer", "wi_x", "--question", "q_1", "--text", "yes", "--by", "usr_1"},
 			"POST /jobs/wi_x/answer", `{"applied":true,"delivered":true}`, false,
 			[]string{"answer", "wi_x"}, []string{"answer", "--no-such-flag"}},
@@ -318,12 +318,12 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 	if code, _, _ := runPf(t, nil, "daemon", "--no-such-flag"); code != 2 {
 		t.Errorf("flag parse: exit = %d, want 2", code)
 	}
-	// Sanity: the registry really is the full 24-verb set (12 routing +
+	// Sanity: the registry really is the full 22-verb set (11 routing +
 	// ship + 6 admin + doctor + daemon + chat + watch; watch replaced the
 	// retired watch-probe; doctor is the #113 machine health face).
 	want := []string{
 		"file", "queue", "cancel", "recall", "remember",
-		"submit", "observe", "answer", "pause", "resume",
+		"submit", "answer", "pause", "resume",
 		"wrap", "ops", "chat", "watch", "ship", "users", "api-keys", "machines", "projects",
 		"backup", "rotate-secret",
 		"doctor", "daemon",

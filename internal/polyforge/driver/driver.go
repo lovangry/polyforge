@@ -22,11 +22,8 @@ package driver
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -852,98 +849,6 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 		spec.RequireCommandEvidence = true
 	}
 	return spec
-}
-
-// validateResultLegacy is retained for test compatibility during migration.
-func (d *Driver) validateResult(res *StepResult, stepID string, n int64) error {
-	if res == nil {
-		return fmt.Errorf("nil result envelope")
-	}
-	if res.StepID != "" && res.StepID != stepID {
-		return fmt.Errorf("envelope names step %q, dispatch was %q", res.StepID, stepID)
-	}
-	if res.SpawnN != n {
-		return fmt.Errorf("%w: envelope spawn %d, dispatch %d", ErrStaleFence, res.SpawnN, n)
-	}
-	if res.WIID != "" && res.WIID != d.wi.ID {
-		return fmt.Errorf("envelope names work item %q, this driver drives %q", res.WIID, d.wi.ID)
-	}
-	if res.ResultID == "" {
-		return fmt.Errorf("missing result_id (idempotency key)")
-	}
-	if res.ProtocolVersion != protocolVersion {
-		return fmt.Errorf("protocol_version %d, this driver speaks %d", res.ProtocolVersion, protocolVersion)
-	}
-	switch res.Outcome {
-	case OutcomeCompleted, OutcomeGateFailed, OutcomeNeedsInput, OutcomeIncomplete:
-	default:
-		return fmt.Errorf("unknown outcome %q", res.Outcome)
-	}
-	if _, err := parseOutput(res.Output); err != nil {
-		return err
-	}
-	if res.Outcome != OutcomeCompleted {
-		return nil // only the accept path carries artifacts to verify
-	}
-	if spec := d.workflow.step(stepID); spec != nil && spec.Handoff && res.HandoffRef == nil {
-		return fmt.Errorf("step %q declares handoff but the result carries no handoff_ref", stepID)
-	}
-	for i := range res.Artifacts {
-		if err := d.verifyArtifact(&res.Artifacts[i]); err != nil {
-			return fmt.Errorf("artifact %q: %w", res.Artifacts[i].Path, err)
-		}
-	}
-	if res.HandoffRef != nil {
-		if err := d.verifyArtifact(res.HandoffRef); err != nil {
-			return fmt.Errorf("handoff_ref: %w", err)
-		}
-	}
-	return nil
-}
-
-// verifyArtifact checks one manifest entry against the capsule's bytes:
-// the path must be capsule-relative (no absolute paths, no parent
-// escapes), the file must exist with the declared size and SHA-256.
-func (d *Driver) verifyArtifact(a *ArtifactRef) error {
-	if a.Path == "" {
-		return fmt.Errorf("empty path")
-	}
-	if filepath.IsAbs(a.Path) || strings.HasPrefix(a.Path, "/") {
-		return fmt.Errorf("path must be capsule-relative")
-	}
-	for _, seg := range strings.Split(a.Path, "/") {
-		if seg == ".." {
-			return fmt.Errorf("parent escape in path")
-		}
-	}
-	full := filepath.Join(d.wi.CapsuleDir, filepath.FromSlash(a.Path))
-	st, err := os.Stat(full)
-	if err != nil {
-		return err
-	}
-	if !st.Mode().IsRegular() {
-		return fmt.Errorf("not a regular file")
-	}
-	if a.Bytes > 0 && st.Size() != a.Bytes {
-		return fmt.Errorf("size %d, manifest says %d", st.Size(), a.Bytes)
-	}
-	f, err := os.Open(full)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	h := sha256.New()
-	size, err := io.Copy(h, f)
-	if err != nil {
-		return err
-	}
-	if a.Bytes > 0 && size != a.Bytes {
-		return fmt.Errorf("size %d, manifest says %d", size, a.Bytes)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != a.SHA256 {
-		return fmt.Errorf("sha256 %s, manifest says %s", got, a.SHA256)
-	}
-	return nil
 }
 
 // parseOutput coerces a result's output payload to a JSON object map

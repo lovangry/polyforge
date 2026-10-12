@@ -311,9 +311,6 @@ type daemonState struct {
 	MachineID         string `json:"machine_id"`
 	Auto              bool   `json:"auto"`
 	MaxConcurrentJobs int    `json:"max_concurrent_jobs"`
-	// Mode is the LEGACY (pre-v2 §5) persisted field: read for migration
-	// only (drain -> auto on, anything else -> off) and never written.
-	Mode string `json:"mode,omitempty"`
 }
 
 func (d *Daemon) statePath() string {
@@ -335,15 +332,8 @@ func (d *Daemon) loadDaemonState() error {
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return fmt.Errorf("daemon: %s unparsable: %w", daemonStateFile, err)
 	}
-	// Migration: a pre-v2 file carries only "mode" (no "auto" key).
-	// drain -> auto on; interactive/batch/anything else -> off. The next
-	// persist rewrites the file in the new shape.
-	auto := st.Auto
-	if !hasKey(raw, "auto") && st.Mode != "" {
-		auto = st.Mode == "drain"
-	}
 	d.modes.mu.Lock()
-	d.modes.auto = auto
+	d.modes.auto = st.Auto
 	d.modes.mu.Unlock()
 	if st.MaxConcurrentJobs > 0 {
 		if err := d.q.SetMaxConcurrent(st.MaxConcurrentJobs); err != nil {
@@ -351,16 +341,6 @@ func (d *Daemon) loadDaemonState() error {
 		}
 	}
 	return nil
-}
-
-// hasKey reports whether the JSON object carries the top-level key.
-func hasKey(raw []byte, key string) bool {
-	var m map[string]json.RawMessage
-	if json.Unmarshal(raw, &m) != nil {
-		return false
-	}
-	_, ok := m[key]
-	return ok
 }
 
 func (d *Daemon) persistDaemonState() error {

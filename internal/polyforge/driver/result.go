@@ -664,31 +664,3 @@ func hasArtifact(refs []ArtifactRef, rel string) bool {
 	}
 	return false
 }
-
-// validUUID answers whether s is shaped like a UUID (8-4-4-4-12 hex).
-// No longer the accept gate (see ValidateStepResult's tolerant id), but
-// kept as the documented shape the step prompt asks for and callers may
-// still assert on.
-func validUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !isHexDigit(c) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func isHexDigit(c byte) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-}

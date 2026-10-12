@@ -4,7 +4,7 @@
 // envelope action). The plan file is a JSON document describing what
 // each derivation does on the capsule side — write execution.json
 // (Version monotonically increasing, atomic tmp+rename), emit record
-// bursts, park or die. Every action and control-method landing is
+// bursts, park or die. Every action is
 // journaled to logs/fakepi.jsonl inside the capsule, which the
 // scenarios assert on.
 package main
@@ -465,21 +465,6 @@ func pinnedModelOf() string {
 		}
 	}
 	return ""
-}
-
-// runStep writes one step through execution.json: in_progress, then done
-// — two atomic writes, Version increasing each time (the async push
-// surface the observe lane polls). The done write carries the step's
-// structured command evidence (output.commands) — the #29 command-audit
-// contract every real driver honors — unless the plan action suppressed
-// it (the evidence-gate scenario's broken shape).
-func (x *execState) step(id string) *execStep {
-	st := x.Steps[id]
-	if st == nil {
-		st = &execStep{Status: "pending", Attempts: []any{}, Answers: []archivedAnswer{}}
-		x.Steps[id] = st
-	}
-	return st
 }
 
 func (d *driveEnv) beginOpenTurn(journalKind string) {

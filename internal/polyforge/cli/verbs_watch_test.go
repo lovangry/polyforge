@@ -279,8 +279,16 @@ func TestHelpGroupsAreExplicitMetadata(t *testing.T) {
 			t.Errorf("%s is deleted and must not dispatch", gone)
 		}
 	}
-	if !strings.Contains(help, "DEPRECATED") {
-		t.Error("observe must be marked deprecated in help")
+	if strings.Contains(help, "DEPRECATED") {
+		t.Error("no verb is a deprecated alias in v2")
+	}
+	for _, gone := range []string{"observe", "takeover", "verify-session", "unblock", "batch-confirm"} {
+		if lookupCommand(gone) != nil {
+			t.Errorf("%s is removed and must not dispatch", gone)
+		}
+		if code, _, stderr := runPf(t, nil, gone, "wi_1"); code != 2 || !strings.Contains(stderr, "unknown command") {
+			t.Errorf("%s must be unknown: %d %q", gone, code, stderr)
+		}
 	}
 	// the watch verb sits in the execution-plane group, between its header and the next
 	exec := help[strings.Index(help, "Execution-plane"):strings.Index(help, "Delivery bridge")]
