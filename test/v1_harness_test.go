@@ -119,11 +119,13 @@ type v1Install struct {
 	pfPath     string
 	fakepiPath string
 
-	// keepHumanGates makes daemons run the SHIPPED bundles verbatim
-	// (requires_human_answer intact); by default workflowsPath hands out
-	// a copy with the human gate flag stripped so unattended plans run.
-	keepHumanGates bool
-	strippedWF     string
+	// gateQuickFixGrill makes daemons run a copy of the shipped bundles
+	// whose quick-fix grill additionally declares requires_human_answer
+	// (no shipped quick-fix step carries the flag: its grill allows zero
+	// questions); by default workflowsPath hands out a copy with every
+	// human gate flag stripped so unattended plans run.
+	gateQuickFixGrill bool
+	strippedWF        string
 
 	// wis holds every work item this scenario created (through newWI or
 	// trackWI): the post-teardown orphan sweep (sweepOrphans) kills and

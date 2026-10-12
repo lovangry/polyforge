@@ -10,7 +10,7 @@ package test
 // production components — runtime.New (lifecycle + recovery engine), observe.New
 // (per-WI monitor + detection faces), runtime.DefaultSpawner (the real
 // pi-spawner that derives the real fakepi process) and observe.Handler
-// (the real UDS flush/answer/observe routes) — with the observe config
+// (the real UDS answer/observe routes) — with the observe config
 // injected.
 //
 // The RecordTap binding order bug the lane report pinned here is fixed
@@ -222,9 +222,9 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 	go func() { rig.obs.Run(rig.ctx); close(rig.done) }()
 	go rig.bridge(rtMsgs, attachCh)
 
-	// The observe lane's own UDS face: the real routes (flush/answer/
-	// observe) on a real listener, so the agent's flush(reason) proxy
-	// calls are production-shaped.
+	// The observe lane's own UDS face: the real routes (answer/
+	// observe) on a real listener, so the answer/observe calls are
+	// production-shaped.
 	lst, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("inproc UDS listen: %v", err)

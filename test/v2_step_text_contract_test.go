@@ -66,5 +66,13 @@ func TestV2VerificationStepsRequireCommandEvidence(t *testing.T) {
 		if !strings.Contains(string(b), "command_evidence: [{argv, exit_code, duration_ms}]") {
 			t.Errorf("%s must instruct command_evidence: [{argv, exit_code, duration_ms}]", f)
 		}
+		for _, want := range []string{"AT LEAST ONE entry", "actually run at least one check command", "measured, > 0"} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s evidence obligation must state %q (driver gate: >=1 entry, argv, duration_ms>0)", f, want)
+			}
+		}
+		if strings.Contains(string(b), "leave `command_evidence` empty") {
+			t.Errorf("%s still permits an empty command_evidence, which the driver rejects", f)
+		}
 	}
 }

@@ -436,8 +436,9 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 // with output cleared, moves the position back to target and (with
 // include_verdict, the default) persists the FAIL verdict as the
 // target's pending_rewind_input. The gate itself is neither archived
-// nor reset: it stays in_progress holding its verdict output, and its
-// candidate pointer is untouched (INV-1g — rewind never switches
+// nor reset: it stays in_progress holding its verdict output (only its
+// AnswerBase advances, so a human gate needs a fresh answer on re-entry),
+// and its candidate pointer is untouched (INV-1g — rewind never switches
 // candidates).
 func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) error {
 	v := req.Gate
@@ -474,6 +475,12 @@ func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) e
 		return nil
 	}
 	d.applyRewindRangeLocked(tIdx, gIdx, target, gate, "", info)
+	// The gate itself stays in_progress, but its verdict closes the human
+	// round it judged: answers recorded so far must not satisfy a
+	// requires_human_answer gate on re-entry (human-gate bypass).
+	if gst := d.exec.Steps[gate]; gst != nil {
+		gst.AnswerBase = len(gst.Answers)
+	}
 	if v.IncludeVerdict {
 		d.exec.Steps[target].PendingRewindInput = &capsule.RewindInput{
 			ToStep: target,

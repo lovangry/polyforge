@@ -86,20 +86,21 @@ what it is. A false `pass` here ships straight into `release`.
 
 ## Evidence obligation (hard gate)
 
-This step cannot complete without structured command evidence: the result envelope you
-write must carry `command_evidence: [{argv, exit_code, duration_ms}]`, one entry per command
-you actually ran, and the driver refuses a completed verification result that has no readable
-entry (non-empty `argv`, readable `exit_code`). Your obligations that make that possible:
+This step cannot complete without structured command evidence, and the driver enforces it
+mechanically: the result envelope you write must carry
+`command_evidence: [{argv, exit_code, duration_ms}]` with AT LEAST ONE entry, every entry
+with a non-empty `argv` and a measured `duration_ms` greater than 0. An empty list, an entry
+without `argv`, or an entry with no positive `duration_ms` is rejected and this step is
+re-dispatched. Your obligations:
 
-- Run every check (never summarize a command
-  you did not actually run) and copy each one's exact argv,
-  exit code and wall time into `command_evidence` in the envelope, so the audit record
-  matches what ran.
-- Never claim a check ran without its command having run — an evidence-less `done` is
-  a contract violation, and the driver rejects a completed verification envelope whose
-  `command_evidence` is empty or unreadable.
-- If you genuinely ran nothing recordable (no build/lint/test command applies at all),
-  say so explicitly in `checks` and leave `command_evidence` empty — never fabricate an argv to satisfy the gate.
+- You MUST actually run at least one check command (the project's verification bar: build,
+  lint, tests, and the original repro where this step names one) before you complete. This
+  step never completes on reading code alone.
+- Report EVERY command you ran as one entry: its exact `argv`, its real `exit_code`, and its
+  wall time in `duration_ms` (measured, > 0). The audit record must match what ran.
+- Never fabricate an entry, an argv, or a duration to satisfy the gate, and never claim a
+  check ran without its command having run. If no check command can be run at all, do not
+  complete: return the problem to the owner instead.
 
 ## Output
 

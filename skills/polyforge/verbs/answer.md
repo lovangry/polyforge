@@ -19,8 +19,8 @@ pf answer <id> --text "..." [--question q_xxx] [--answer-id a_xxxx] [--by user]
 `--question` is the `question_id` the observe output showed; it may be
 omitted when exactly one question is pending (the default). `--text` is the
 natural-language answer — required. `--answer-id` defaults to a generated
-`a_` + 6 chars; supply it explicitly to make a repeat of the same answer
-idempotent. `--by` is the answerer's user id, defaulting to the config's
+`a_` + 6 chars; it is an identifier for the answer only — there is no
+idempotent replay (see Success). `--by` is the answerer's user id, defaulting to the config's
 `user_id` / `PF_USER_ID`; the CLI refuses locally if no identity is
 resolvable.
 
@@ -28,8 +28,10 @@ resolvable.
 
 `answer <a_…> delivered for question <q_…>`: the driver accepted the answer
 for its pending question and the parked step resumes — re-observe to watch
-it land. Re-submitting the **same `answer_id`** is idempotent — it is never applied
-twice and returns the same outcome as the first submission.
+it land. An answer is applied once: a second answer to a question that was
+already answered (even with the same `answer_id`) is refused with
+`ANSWER-409` (surfaced as `DAEMON-409`) — it is never re-applied and does not
+return the first submission's outcome. Observe to confirm the first answer landed.
 
 ## Failure branches
 

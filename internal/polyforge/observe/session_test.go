@@ -5,8 +5,8 @@ package observe
 //
 //   - matches == false → OBSuperseded reaches the runtime channel, an
 //     event records the new holder's fingerprint, and the monitor
-//     stops supervising (detection suppressed, flushes refused with
-//     the STALE_SPAWN shape) while making NO hub transition. Since
+//     stops supervising (detection suppressed) while making NO hub
+//     transition. Since
 //     Finding 1(b) (v1.5 review) the emission is RETRYABLE: while the
 //     supersession latch is set the revalidation keeps running and
 //     every unmatched verdict re-emits OBSuperseded (the event face
@@ -69,7 +69,7 @@ func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, c
 // TestRevalidateMismatchSupersedes: matches=false → OBSuperseded is
 // emitted (carrying the new holder's fingerprint as the m4 audit), the
 // session_superseded VERDICT event lands exactly once, and the monitor
-// refuses further flushes with the stale shape — superseded, not
+// stops supervising (detection suppressed) — superseded, not
 // terminal: no OBCompleted and no hub transition (the fake verifier's
 // call log is the only server contact).
 func TestRevalidateMismatchSupersedes(t *testing.T) {
