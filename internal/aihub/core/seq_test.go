@@ -6,8 +6,7 @@ package core
 //
 //   - create numbers each project from 1 (was: one global counter);
 //   - slugs always resolved by (project, seq) — now actually unique;
-//   - databases created by the global-seq build are rebuilt on Open
-//     with per-project renumbering, relative order preserved.
+//   - databases still on the global-seq shape are refused on Open.
 
 import (
 	"database/sql"
@@ -170,139 +169,18 @@ func openLegacySeqDB(t *testing.T, withRows bool) string {
 	return dir
 }
 
-// TestSeqMigrationRebuildsPerProject: a global-seq database renumbers to
-// per-project seqs preserving relative order, carries child rows over,
-// and re-opens idempotently.
-func TestSeqMigrationRebuildsPerProject(t *testing.T) {
-	dir := openLegacySeqDB(t, true)
-	db, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open (migration): %v", err)
-	}
-	defer db.Close()
-
-	// The old shape is gone: no UNIQUE index on (seq) alone; a UNIQUE
-	// (project_id, seq) index exists.
-	needed, err := seqMigrationNeeded(db.DB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if needed {
-		t.Fatal("unique-on-seq index still present after migration")
-	}
-	haveProjectSeq := false
-	idxRows, err := db.Query(`SELECT name FROM pragma_index_list('work_items') WHERE "unique"=1 AND origin='u'`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var idxNames []string
-	for idxRows.Next() {
-		var name string
-		if err := idxRows.Scan(&name); err != nil {
-			t.Fatal(err)
+// TestOpenRefusesGlobalSeqDB: a database still carrying the old global
+// UNIQUE(seq) is refused with a clear error (no in-place migration).
+func TestOpenRefusesGlobalSeqDB(t *testing.T) {
+	for _, withRows := range []bool{true, false} {
+		dir := openLegacySeqDB(t, withRows)
+		db, err := Open(dir)
+		if err == nil {
+			db.Close()
+			t.Fatal("Open must refuse a global-seq database")
 		}
-		idxNames = append(idxNames, name)
-	}
-	idxRows.Close()
-	// One-connection pool: inspect each index only after the pragma rows
-	// are closed (a nested Query would deadlock the pool).
-	for _, name := range idxNames {
-		cols, err := indexColumns(db.DB, name)
-		if err != nil {
-			t.Fatal(err)
+		if !strings.Contains(err.Error(), "globally UNIQUE") {
+			t.Fatalf("error does not name the shape problem: %v", err)
 		}
-		if len(cols) == 2 && cols[0] == "project_id" && cols[1] == "seq" {
-			haveProjectSeq = true
-		}
-	}
-	if !haveProjectSeq {
-		t.Fatal("UNIQUE(project_id, seq) index missing after migration")
-	}
-
-	// Renumbering: per project 1..n, old relative order preserved.
-	type row struct {
-		id   string
-		seq  int64
-		goal string
-	}
-	want := map[string]row{
-		"wi_alphaold001": {"wi_alphaold001", 1, "legacy goal wi_alphaold001"},
-		"wi_alphaold003": {"wi_alphaold003", 2, "legacy goal wi_alphaold003"},
-		"wi_betaold0001": {"wi_betaold0001", 1, "legacy goal wi_betaold0001"},
-		"wi_betaold0005": {"wi_betaold0005", 2, "legacy goal wi_betaold0005"},
-	}
-	got, err := db.Query(`SELECT id, seq, goal FROM work_items ORDER BY project_id, seq`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer got.Close()
-	n := 0
-	for got.Next() {
-		var r row
-		if err := got.Scan(&r.id, &r.seq, &r.goal); err != nil {
-			t.Fatal(err)
-		}
-		w, ok := want[r.id]
-		if !ok {
-			t.Fatalf("unexpected row %s after migration", r.id)
-		}
-		if r.seq != w.seq || r.goal != w.goal {
-			t.Errorf("%s: seq=%d goal=%q, want seq=%d goal=%q", r.id, r.seq, r.goal, w.seq, w.goal)
-		}
-		n++
-	}
-	if n != len(want) {
-		t.Fatalf("rows after migration = %d, want %d", n, len(want))
-	}
-	// Child rows carried over verbatim.
-	var events int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM wi_events WHERE work_item_id='wi_alphaold001'`).Scan(&events); err != nil || events != 1 {
-		t.Fatalf("child events lost: n=%d err=%v", events, err)
-	}
-	// The state machine works on the rebuilt table (a fresh create takes
-	// the project's next seq).
-	env := &testEnv{DB: db, Admin: NewAdminManager(db), WIs: NewWIManager(db)}
-	if _, err := env.WIs.Create(CreateRequest{Project: "alpha", Goal: "post-migration", Reporter: "u1"}); err != nil {
-		t.Fatalf("create on rebuilt table: %v", err)
-	}
-	var maxSeq int64
-	if err := db.QueryRow(`SELECT MAX(seq) FROM work_items WHERE project_id='p1'`).Scan(&maxSeq); err != nil || maxSeq != 3 {
-		t.Fatalf("post-migration create seq = %d (%v), want 3", maxSeq, err)
-	}
-
-	// Re-open: the migration is a no-op and the seqs are untouched.
-	db2, err := Open(dir)
-	if err != nil {
-		t.Fatalf("re-open: %v", err)
-	}
-	defer db2.Close()
-	var seqAgain int64
-	if err := db2.QueryRow(`SELECT seq FROM work_items WHERE id='wi_alphaold003'`).Scan(&seqAgain); err != nil || seqAgain != 2 {
-		t.Fatalf("re-open renumbered: seq=%d err=%v, want 2", seqAgain, err)
-	}
-}
-
-// TestSeqMigrationEmptyDB: the rebuild is safe on an empty legacy
-// database (nothing to copy, indexes rebuilt, creates then number from
-// 1 per project).
-func TestSeqMigrationEmptyDB(t *testing.T) {
-	dir := openLegacySeqDB(t, false)
-	db, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open empty legacy db: %v", err)
-	}
-	defer db.Close()
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("rows = %d (%v), want 0", n, err)
-	}
-	// A create on the rebuilt (empty) table takes seq 1.
-	m := NewWIManager(db)
-	if _, err := m.Create(CreateRequest{Project: "beta", Goal: "first", Reporter: "u1"}); err != nil {
-		t.Fatal(err)
-	}
-	var seq int64
-	if err := db.QueryRow(`SELECT seq FROM work_items LIMIT 1`).Scan(&seq); err != nil || seq != 1 {
-		t.Fatalf("first seq on empty migrated db = %d (%v), want 1", seq, err)
 	}
 }

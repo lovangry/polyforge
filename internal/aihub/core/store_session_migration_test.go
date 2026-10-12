@@ -24,7 +24,7 @@ func TestSessionColumnMigrationFromV1Database(t *testing.T) {
 	// The v1-era work_items shape: no session columns, one live row.
 	if _, err := raw.Exec(`CREATE TABLE work_items (
   id           TEXT PRIMARY KEY,
-  seq          INTEGER NOT NULL UNIQUE,
+  seq          INTEGER NOT NULL,
   project_id   TEXT NOT NULL REFERENCES projects(id),
   goal         TEXT NOT NULL,
   content      TEXT,
@@ -45,7 +45,8 @@ func TestSessionColumnMigrationFromV1Database(t *testing.T) {
   workflow_budget_baseline TEXT,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
-  closed_at    TEXT
+  closed_at    TEXT,
+  UNIQUE (project_id, seq)
 );`); err != nil {
 		t.Fatalf("v1 table: %v", err)
 	}
