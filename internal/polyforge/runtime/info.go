@@ -43,6 +43,7 @@ type JobInfo struct {
 	Agent          AgentHandle
 	AgentPID       int
 	AgentStartedAt string
+	Origin         *Origin
 }
 
 // Info returns the snapshot of one job; ok=false when the work item has
@@ -97,6 +98,7 @@ func (j *job) info() JobInfo {
 		Agent:              j.agent,
 		AgentPID:           j.agentPID,
 		AgentStartedAt:     j.agentStartedAt,
+		Origin:             j.origin,
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 // Admission error shapes (04 §5.2); the HTTP layer maps them to codes.
@@ -160,6 +161,7 @@ type qEntry struct {
 	Priority   string
 	EnqueuedAt time.Time
 	Intent     string // claim | resume | takeover
+	Origin     runtime.Origin
 }
 
 type jobQueue struct {

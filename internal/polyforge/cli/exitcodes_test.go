@@ -337,7 +337,7 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 		"file", "queue", "cancel", "recall", "remember", "takeover", "unblock",
 		"verify-session",
 		"submit", "observe", "answer", "batch-confirm", "pause", "resume",
-		"wrap", "ops", "ship", "users", "api-keys", "machines", "projects",
+		"wrap", "ops", "chat", "ship", "users", "api-keys", "machines", "projects",
 		"backup", "rotate-secret", "migrate-memories", "migrate-work-items",
 		"doctor", "watch-probe", "daemon",
 	}

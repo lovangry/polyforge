@@ -76,8 +76,10 @@ type Hub interface {
 
 // Config wires the daemon. Zero fields take the defaults in fill().
 type Config struct {
-	MachineID  string
-	SocketPath string
+	MachineID string
+	// DisplayName is the display-only daemon name (default: hostname).
+	DisplayName string
+	SocketPath  string
 	// Mapping is the REQUIRED workspace→projects plan of record
 	// (polyforge#113), assembled in main.go from the shared config's
 	// [workspace."<path>"] sections. Capsules route per project through
@@ -189,6 +191,7 @@ func (c *Config) fill() {
 
 // Daemon is the assembled local runtime.
 type Daemon struct {
+	chats *chatStore
 	cfg   Config
 	hub   Hub
 	modes *ModeCtl
@@ -334,6 +337,7 @@ func New(cfg Config) (*Daemon, error) {
 	}
 
 	d := &Daemon{
+		chats:    &chatStore{path: filepath.Join(cfg.DataDir, chatsFile)},
 		cfg:      cfg,
 		hub:      cfg.Hub,
 		modes:    NewModeCtl(),
@@ -868,6 +872,7 @@ func (d *Daemon) dispatch() {
 		if e == nil {
 			return
 		}
+		d.rt.NoteOrigin(e.WorkItemID, e.Origin)
 		if err := d.rt.StartIntent(d.runCtx, e.WorkItemID, e.Intent); err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)
 			continue // slot stays free; the next pending entry backfills
@@ -923,7 +928,7 @@ func (d *Daemon) fetchDrainWave() {
 		if d.q.IsRunning(it.ID) || d.q.IsPending(it.ID) {
 			continue
 		}
-		d.q.Enqueue(qEntry{WorkItemID: it.ID, Priority: it.Priority, Intent: "claim"})
+		d.q.Enqueue(qEntry{WorkItemID: it.ID, Priority: it.Priority, Intent: "claim", Origin: runtime.Origin{Kind: runtime.OriginAuto}})
 	}
 }
 

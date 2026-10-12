@@ -71,6 +71,7 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	// stripped with the rest of the inherited PF_* family and never
 	// re-injected.
 	t.Setenv("PF_AGENT_ROLE", "spoofed-role")
+	t.Setenv("PF_CHAT_ID", "chat_leak") // a chat id is a notification label: never reaches a step agent
 	t.Setenv("PF_DAEMON_SOCKET", "/spoofed.sock")
 	t.Setenv("SOME_OTHER_NAME", "machine-key") // renamed secret: value match
 	sp := newPiSpawner(&Config{EnvSecrets: []string{"machine-key"}})
@@ -78,6 +79,9 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	env := strings.Join(cmd.Env, "\n")
 	if strings.Contains(env, "POLYFORGE_API_KEY") || strings.Contains(env, "PF_LEAK=") {
 		t.Fatalf("POLYFORGE_*/PF_* must be stripped, got:\n%s", env)
+	}
+	if strings.Contains(env, "PF_CHAT_ID") {
+		t.Fatalf("PF_CHAT_ID must be stripped, got:\n%s", env)
 	}
 	if strings.Contains(env, "SOME_OTHER_NAME=machine-key") {
 		t.Fatal("a renamed variable carrying the configured secret must be stripped")

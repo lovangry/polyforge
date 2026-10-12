@@ -159,6 +159,8 @@ type Runtime struct {
 	// Resolve's unknown-input answer is "", and the daemon's resolver
 	// falls back to aihub for those (a restart re-learns on demand).
 	aliases map[string]string
+	// origins: submit origins noted by the daemon, consumed at job creation.
+	origins map[string]Origin
 
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
@@ -245,6 +247,8 @@ type job struct {
 	liveTranscript string
 	bundleName     string
 	bundleDigest   string
+	// origin is how the job was submitted (nil = unknown / legacy record).
+	origin *Origin
 	// item is the claim answer's work-item snapshot (the F1 materializer
 	// input). In-memory only: the durable copy is the capsule's
 	// runtime-state/work-item.json, which recovery re-derives from aihub
@@ -562,6 +566,32 @@ func (r *Runtime) NoteAlias(alias, canonical string) {
 	r.mu.Unlock()
 }
 
+// NoteOrigin records the origin the NEXT job started for wi will carry.
+// The daemon calls it right before StartIntent; startClaimed consumes it.
+func (r *Runtime) NoteOrigin(wi string, o Origin) {
+	r.mu.Lock()
+	if r.origins == nil {
+		r.origins = map[string]Origin{}
+	}
+	r.origins[wi] = o
+	r.mu.Unlock()
+}
+
+// takeOrigin pops the noted origin for any of the given id spellings.
+func (r *Runtime) takeOrigin(ids ...string) *Origin {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var found *Origin
+	for _, id := range ids {
+		if o, ok := r.origins[id]; ok {
+			o := o
+			found = &o
+			delete(r.origins, id)
+		}
+	}
+	return found
+}
+
 // Resolve maps any id form this runtime knows — a live job key (already
 // canonical) or a registered alias — to the canonical work-item id;
 // "" when the form is unknown to this daemon (the daemon's resolver
@@ -832,6 +862,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		bundleDigest: c.BundleDigest,
 		repos:        c.Repos,
 		item:         &resp.WorkItem,
+		origin:       r.takeOrigin(wi, id),
 	}
 	// polyforge#113: the capsule routes by the claim answer's project
 	// through the inverse mapping. An unmapped answer here (a mapping

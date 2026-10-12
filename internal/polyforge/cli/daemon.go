@@ -40,6 +40,37 @@ import (
 type DaemonClient struct {
 	Sock string
 	HTTP *http.Client
+	// Origin, when set, rides on the submit-family bodies so the daemon
+	// can record where the job came from (chat id + owner).
+	Origin *SubmitOrigin
+}
+
+// SubmitOrigin is the optional "origin" of a submit-family request body.
+type SubmitOrigin struct {
+	ChatID string `json:"chat_id,omitempty"`
+	Owner  string `json:"owner,omitempty"`
+}
+
+// ChatRecord is the POST /chat/init answer.
+type ChatRecord struct {
+	ChatID         string `json:"chat_id"`
+	Harness        string `json:"harness"`
+	HarnessSession string `json:"harness_session"`
+	Created        bool   `json:"created"`
+}
+
+// ChatInit asks the daemon for the chat id of a harness session
+// (created on first use).
+func (d *DaemonClient) ChatInit(harness, session string) (json.RawMessage, error) {
+	return d.do("POST", "/chat/init", "", map[string]any{"harness": harness, "harness_session": session}, nil)
+}
+
+// withOrigin adds the origin to a request body when one is configured.
+func (d *DaemonClient) withOrigin(body map[string]any) map[string]any {
+	if d.Origin != nil {
+		body["origin"] = d.Origin
+	}
+	return body
 }
 
 // NewDaemonClient builds a client dialing the given unix socket.
@@ -149,8 +180,9 @@ type SubmitResponse struct {
 // queue counters. It is NOT workflow execution state (INV-1) — just
 // "what this machine is managing".
 type StatusResponse struct {
-	MachineID string `json:"machine_id"`
-	Mode      string `json:"mode"`
+	MachineID   string `json:"machine_id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Mode        string `json:"mode"`
 	// Workspaces is the mapped workspace set (#113): every [workspace]
 	// path the daemon routes capsules into, in mapping declaration
 	// order — a multi-workspace daemon never presents one workspace as
@@ -179,6 +211,15 @@ type StatusJob struct {
 	// job's stream last proved agent progress (nil = none yet — rendered
 	// "-" in the LAST-PROGRESS column).
 	LastProgressAgoSec *int64 `json:"last_progress_ago_sec,omitempty"`
+	// Origin is how the job was submitted (absent on legacy records).
+	Origin *JobOrigin `json:"origin,omitempty"`
+}
+
+// JobOrigin mirrors the daemon-side origin record.
+type JobOrigin struct {
+	Kind   string `json:"kind"`
+	ChatID string `json:"chat_id,omitempty"`
+	Owner  string `json:"owner,omitempty"`
 }
 
 // QueueStats is the local job queue counters.
@@ -237,7 +278,7 @@ func (d *DaemonClient) Takeover(wiID, priority string) (json.RawMessage, error) 
 // synchronously — the claim/start path's owner move unblocks the workflow
 // and the loop re-dispatches the frozen step in place as a fresh derivation.
 func (d *DaemonClient) ResumeBlocked(wiID string) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-blocked", "", map[string]any{}, nil)
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-blocked", "", d.withOrigin(map[string]any{}), nil)
 }
 
 // AdoptSessionRequest is the POST /jobs/{id}/adopt-session body. The
@@ -264,7 +305,7 @@ func (d *DaemonClient) submit(wiID, intent, priority string) (json.RawMessage, e
 		priority = "normal"
 	}
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/"+intent, "",
-		map[string]any{"priority": priority}, nil)
+		d.withOrigin(map[string]any{"priority": priority}), nil)
 }
 
 // Observe pulls the observe projection (protocol.JobView). after is the
@@ -319,7 +360,7 @@ func (d *DaemonClient) Mode(req ModeRequest) (json.RawMessage, error) {
 // BatchSubmit submits the human-confirmed wave; the daemon never widens
 // or narrows the set.
 func (d *DaemonClient) BatchSubmit(wiIDs []string) (json.RawMessage, error) {
-	return d.do("POST", "/batch_submit", "", map[string]any{"wi_ids": wiIDs}, nil)
+	return d.do("POST", "/batch_submit", "", d.withOrigin(map[string]any{"wi_ids": wiIDs}), nil)
 }
 
 // Shutdown triggers graceful shutdown (quiesce).

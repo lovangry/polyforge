@@ -48,6 +48,7 @@ type Config struct {
 	APIKey       string        // aihub api key (Bearer)
 	DaemonSocket string        // daemon unix socket path
 	UserID       string        // caller identity for answer.answered_by
+	ChatID       string        // PF_CHAT_ID: the harness chat this process runs in (label, not a credential)
 	Mapping      *mapping.Plan // the workspace→projects plan of record (non-nil; possibly empty)
 
 	// The watch lane's config (wi_LMSxPTQTtz5x). The summarize model is
@@ -91,6 +92,7 @@ func DefaultConfigPath() string {
 //	PF_API_KEY        -> APIKey
 //	PF_DAEMON_SOCKET  -> DaemonSocket
 //	PF_USER_ID        -> UserID
+//	PF_CHAT_ID        -> ChatID
 //	PF_WATCH_POLL / PF_WATCH_LOG / PF_WATCH_HEARTBEAT -> the watch
 //	  cadence keys, FILL-IN ONLY: a present cli.toml key wins
 //	  (precedence flag > env > config)
@@ -184,6 +186,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PF_USER_ID"); v != "" {
 		cfg.UserID = v
+	}
+	if v := os.Getenv("PF_CHAT_ID"); v != "" {
+		cfg.ChatID = v
 	}
 }
 

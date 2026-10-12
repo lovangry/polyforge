@@ -37,7 +37,11 @@ func (ctx *Context) aihub() *aihubclient.Client {
 
 // daemon returns the daemon-socket client for the resolved config.
 func (ctx *Context) daemon() *DaemonClient {
-	return NewDaemonClient(ctx.Cfg.DaemonSocket)
+	d := NewDaemonClient(ctx.Cfg.DaemonSocket)
+	if ctx.Cfg.ChatID != "" || ctx.Cfg.UserID != "" {
+		d.Origin = &SubmitOrigin{ChatID: ctx.Cfg.ChatID, Owner: ctx.Cfg.UserID}
+	}
+	return d
 }
 
 // Command is one `pf <name>` subcommand.
@@ -80,6 +84,7 @@ var commands = []*Command{
 	cmdResume,
 	cmdWrap,
 	cmdOps,
+	cmdChat,
 	cmdShip,
 	cmdUsers,
 	cmdApiKeys,
@@ -293,25 +298,25 @@ func printUsage(w io.Writer) {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Execution-plane verbs (local daemon UDS face):")
-	for _, c := range commands[8:16] {
+	for _, c := range commands[8:17] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Delivery bridge (wrap→git, local daemon UDS face):")
-	for _, c := range commands[16:17] {
+	for _, c := range commands[17:18] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Management face (M1–M5):")
-	for _, c := range commands[17:23] {
+	for _, c := range commands[18:24] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
-	// commands[23:25] are the migration verbs — dispatchable, never
+	// commands[24:26] are the migration verbs — dispatchable, never
 	// surfaced (see the layout comment above).
 	fmt.Fprintln(w, "Diagnostics:")
-	for _, c := range commands[25:27] {
+	for _, c := range commands[26:28] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Process:")
-	for _, c := range commands[27:] {
+	for _, c := range commands[28:] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w)
