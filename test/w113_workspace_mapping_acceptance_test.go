@@ -1334,7 +1334,7 @@ func TestW113DaemonValidatesAllMappedWorkspaces(t *testing.T) {
 // `e2e` and workspace B mapping `ieops`, claims land the capsules at
 // A/capsules/<wi> and B/capsules/<wi>, each workspace's top level
 // holds only capsules/, `pf ops status` names BOTH workspaces, and the
-// WI-anchored `pf observe` works with no project anywhere (unchanged
+// WI-anchored `pf watch --once` works with no project anywhere (unchanged
 // face).
 func TestW113CrossProjectClaimsRoutePerWorkspace(t *testing.T) {
 	inst := newV1Install(t)
@@ -1388,9 +1388,9 @@ func TestW113CrossProjectClaimsRoutePerWorkspace(t *testing.T) {
 		}
 	}
 
-	// WI-anchored verbs need no project: observe works exactly as
+	// WI-anchored verbs need no project: watch --once works exactly as
 	// before, deriving the project from the WI via the hub.
-	d.pfWant(inst, -1, "observe", wiA)
+	d.pfWant(inst, -1, "watch", wiA, "--once")
 }
 
 // ---------------------------------------------------------------------------

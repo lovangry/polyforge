@@ -20,11 +20,11 @@ func TestV1S13AutoPull(t *testing.T) {
 	wiB := inst.newWI(t, "s13: auto-pull member B", envelopeQuickFix(), nil)
 	wiC := inst.newWI(t, "s13: auto-pull member C", envelopeQuickFix(), nil)
 
-	d := newV1Daemon(t, inst, optLegacyMode("drain"))
+	d := newV1Daemon(t, inst, optAuto())
 	d.start()
 
 	if st := d.status(t); !st.Auto {
-		t.Fatalf("legacy mode drain did not migrate to auto on: %+v", st)
+		t.Fatalf("--auto did not turn auto-pull on: %+v", st)
 	}
 
 	// The auto waves claim the ready queue on their own (wave period 5s)

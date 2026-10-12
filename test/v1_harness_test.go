@@ -629,11 +629,9 @@ func optSupervision(b supBounds) daemonOpt {
 	}
 }
 
-// optLegacyMode pre-seeds the daemon state file in the PRE-v2 shape
-// ("mode": interactive|batch|drain), which the boot loader migrates
-// (drain -> auto on). Used to start straight in auto-pull.
-func optLegacyMode(mode string) daemonOpt {
-	return func(d *v1Daemon) { d.extraEnv = append(d.extraEnv, "__PFV1_MODE__="+mode) }
+// optAuto starts the daemon straight in auto-pull (`pf daemon --auto`).
+func optAuto() daemonOpt {
+	return func(d *v1Daemon) { d.extraArgs = append(d.extraArgs, "--auto") }
 }
 
 // optServerURL points the daemon's aihub API face (--server) at url
@@ -674,20 +672,6 @@ func newV1Daemon(t *testing.T, inst *v1Install, opts ...daemonOpt) *v1Daemon {
 	}
 	for _, o := range opts {
 		o(d)
-	}
-	// legacy-mode pre-seed: the daemon-state.json the boot loader migrates
-	mode := ""
-	for _, kv := range d.extraEnv {
-		if strings.HasPrefix(kv, "__PFV1_MODE__=") {
-			mode = strings.TrimPrefix(kv, "__PFV1_MODE__=")
-		}
-	}
-	if mode != "" {
-		st := map[string]any{"version": 1, "machine_id": d.machineID, "mode": mode, "max_concurrent_jobs": 4}
-		blob, _ := json.Marshal(st)
-		if err := os.WriteFile(filepath.Join(dataDir, "daemon-state.json"), blob, 0o600); err != nil {
-			t.Fatal(err)
-		}
 	}
 	t.Cleanup(func() { d.stop() })
 	return d
