@@ -176,15 +176,19 @@ type Step struct {
 	// run under (the F4 lane: the executor records the candidate it
 	// dispatched with into every step-starting execution.json write, so
 	// the observe face can render it — the daemon never derives it).
-	Model              string             `json:"model,omitempty"`
-	Output             map[string]any     `json:"output,omitempty"`
-	StepStartedAt      string             `json:"step_started_at,omitempty"`
-	StepStartRefs      map[string]RepoRef `json:"step_start_refs,omitempty"`
-	BudgetConsumed     Budget             `json:"budget_consumed"`
-	Attempts           []Attempt          `json:"attempts"`
-	Answers            []ArchivedAnswer   `json:"answers"`
-	PendingQuestion    *PendingQuestion   `json:"pending_question,omitempty"`
-	PendingRewindInput *RewindInput       `json:"pending_rewind_input,omitempty"`
+	Model          string             `json:"model,omitempty"`
+	Output         map[string]any     `json:"output,omitempty"`
+	StepStartedAt  string             `json:"step_started_at,omitempty"`
+	StepStartRefs  map[string]RepoRef `json:"step_start_refs,omitempty"`
+	BudgetConsumed Budget             `json:"budget_consumed"`
+	Attempts       []Attempt          `json:"attempts"`
+	Answers        []ArchivedAnswer   `json:"answers"`
+	// AnswerBase is len(Answers) at the step's last gate-fail rewind: the
+	// answers at index >= AnswerBase form the step's CURRENT attempt chain
+	// (the human-gate guarantee counts only those). Zero until a rewind.
+	AnswerBase         int              `json:"answer_base,omitempty"`
+	PendingQuestion    *PendingQuestion `json:"pending_question,omitempty"`
+	PendingRewindInput *RewindInput     `json:"pending_rewind_input,omitempty"`
 }
 
 type Attempt struct {

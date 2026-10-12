@@ -69,6 +69,13 @@ type DriverStep struct {
 	Kind    string
 	Gate    bool
 	Handoff bool
+	// RequiresHumanAnswer mirrors `requires_human_answer: true`: the step
+	// may not complete until a human answered at least one of its
+	// questions in the current attempt chain (ResultSpec.HumanAnswers).
+	RequiresHumanAnswer bool
+	// RequiresCommandEvidence mirrors `requires_command_evidence: true`
+	// (the V4 gate; implied for a step whose id is "verification").
+	RequiresCommandEvidence bool
 	// ContextPolicy is ContextInherit (the default) or ContextFresh.
 	ContextPolicy string
 	// Inputs are the declared input artifacts (R11), in declaration
@@ -149,13 +156,15 @@ func ParseDriverWorkflow(front []byte) (*DriverWorkflow, error) {
 	}
 	for _, s := range doc.Steps {
 		step := DriverStep{
-			ID:              s.ID,
-			Kind:            s.Kind,
-			Gate:            s.Gate,
-			Handoff:         s.Handoff,
-			ContextPolicy:   s.ContextPolicy,
-			Inputs:          append([]InputRef(nil), s.Inputs...),
-			ModelCandidates: s.ModelCandidates,
+			ID:                      s.ID,
+			Kind:                    s.Kind,
+			Gate:                    s.Gate,
+			Handoff:                 s.Handoff,
+			ContextPolicy:           s.ContextPolicy,
+			RequiresHumanAnswer:     s.RequiresHumanAnswer,
+			RequiresCommandEvidence: s.RequiresCommandEvidence,
+			Inputs:                  append([]InputRef(nil), s.Inputs...),
+			ModelCandidates:         s.ModelCandidates,
 		}
 		if step.ContextPolicy == "" {
 			step.ContextPolicy = ContextInherit // the declared default
@@ -274,15 +283,17 @@ type extRewind struct {
 }
 
 type extStep struct {
-	ID              string      `yaml:"id"`
-	Kind            string      `yaml:"kind"`
-	Gate            bool        `yaml:"gate"`
-	Handoff         bool        `yaml:"handoff"`
-	ContextPolicy   string      `yaml:"context_policy"`
-	Inputs          []InputRef  `yaml:"inputs"`
-	Outputs         []extOutput `yaml:"outputs"`
-	ModelCandidates []string    `yaml:"model_candidates"`
-	OnFail          *extOnFail  `yaml:"on_fail"`
+	ID                      string      `yaml:"id"`
+	Kind                    string      `yaml:"kind"`
+	Gate                    bool        `yaml:"gate"`
+	Handoff                 bool        `yaml:"handoff"`
+	RequiresHumanAnswer     bool        `yaml:"requires_human_answer"`
+	RequiresCommandEvidence bool        `yaml:"requires_command_evidence"`
+	ContextPolicy           string      `yaml:"context_policy"`
+	Inputs                  []InputRef  `yaml:"inputs"`
+	Outputs                 []extOutput `yaml:"outputs"`
+	ModelCandidates         []string    `yaml:"model_candidates"`
+	OnFail                  *extOnFail  `yaml:"on_fail"`
 }
 
 type extOutput struct {

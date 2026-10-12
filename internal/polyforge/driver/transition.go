@@ -404,26 +404,11 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 		}
 		d.exec.ReviewRounds[req.StepID]++
 	case OutcomeNeedsInput:
-		// The question may live at envelope level (QuestionID/Question)
-		// or embedded in the output JSON (question_id/question) — step
-		// agents naturally put it in the output object. Try both.
-		qid, qtext := res.QuestionID, res.Question
-		if qid == "" || qtext == "" {
-			var embedded struct {
-				QuestionID string `json:"question_id"`
-				Question   string `json:"question"`
-			}
-			if len(res.Output) > 0 && json.Unmarshal(res.Output, &embedded) == nil {
-				if qid == "" {
-					qid = embedded.QuestionID
-				}
-				if qtext == "" {
-					qtext = embedded.Question
-				}
-			}
-		}
-		if qid == "" || qtext == "" {
-			return fmt.Errorf("driver: needs_input result without question_id/question (envelope or output)")
+		// Shape was validated at staging (ValidateStepResult); the same
+		// helper re-derives the pair here and stays a backstop.
+		qid, qtext, qerr := needsInputQuestion(res)
+		if qerr != nil {
+			return qerr
 		}
 		st.PendingQuestion = &capsule.PendingQuestion{
 			ID:       qid,
@@ -574,6 +559,7 @@ func (d *Driver) applyRewindRangeLocked(from, to int, target, rewindGate, detail
 		st.Output = nil
 		st.PendingQuestion = nil
 		st.PendingRewindInput = nil
+		st.AnswerBase = len(st.Answers) // a rewound step starts a new attempt chain: earlier answers no longer count toward the human gate
 		info.archived = append(info.archived, sid)
 	}
 	d.exec.RewindStats.Count++

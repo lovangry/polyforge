@@ -1,9 +1,9 @@
 ---
 name: feature-full
 steps:
-  - { id: grill, context_policy: fresh, handoff: true, kind: qa, interactive: true, budget: { wall_minutes: 30 } }
+  - { id: grill, context_policy: fresh, handoff: true, kind: qa, interactive: true, requires_human_answer: true, budget: { wall_minutes: 30 } }
   - { id: spec, context_policy: inherit, handoff: true, kind: spec, budget: { wall_minutes: 15 } }
-  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, interactive: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { action: rewind, target: spec } }
+  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, interactive: true, requires_human_answer: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { action: rewind, target: spec } }
   - { id: plan, context_policy: inherit, handoff: true, kind: author, budget: { wall_minutes: 15 } }
   - { id: e2e-author, context_policy: fresh, handoff: true, kind: author, budget: { wall_minutes: 15 } }
   - { id: e2e-baseline, context_policy: fresh, handoff: true, kind: code, gate: false, budget: { wall_minutes: 20 } }

@@ -839,8 +839,25 @@ func (r *stepRun) collect() (*StepResult, error) {
 			// Zero out the malformed field and re-parse the rest.
 			var m map[string]interface{}
 			if json.Unmarshal(raw, &m) == nil {
+				// Keep the well-formed object entries (a mixed or partly
+				// string-typed list must not drop real evidence before the
+				// V4 gate looks at it); string entries are discarded.
 				delete(m, "command_evidence")
+				var elems []json.RawMessage
+				if json.Unmarshal(shadow.CommandEvidence, &elems) == nil {
+					kept := []json.RawMessage{}
+					for _, el := range elems {
+						var ce CommandEvidence
+						if t := strings.TrimSpace(string(el)); strings.HasPrefix(t, "{") && json.Unmarshal(el, &ce) == nil {
+							kept = append(kept, el)
+						}
+					}
+					if len(kept) > 0 {
+						m["command_evidence"] = kept
+					}
+				}
 				if cleaned, jerr := json.Marshal(m); jerr == nil {
+					res = StepResult{} // the failed first decode leaves partial fields (e.g. a zeroed evidence entry)
 					if uerr := json.Unmarshal(cleaned, &res); uerr == nil {
 						goto parsed
 					}
