@@ -115,6 +115,10 @@ type planAction struct {
 	// agent_end all carry stopReason=error), then parks alive without ever
 	// writing the envelope.
 	ErrorTurn string `json:"error_turn,omitempty"`
+	// EndTurn is the ok-ended twin of ErrorTurn (rule 1b): the dispatch
+	// emits an assistant turn that ends NORMALLY, then parks alive without
+	// ever writing the envelope.
+	EndTurn bool `json:"end_turn,omitempty"`
 	// ToolMS runs one tool execution of this length (tool_execution_start,
 	// then tool_execution_end after the delay) before the envelope write:
 	// the #83 long-tool shape. ToolHang never ends it (rule 3's shape).
@@ -379,6 +383,12 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 		// F5: a turn that ends on a fatal provider error, then nothing.
 		d.journal("error_turn", map[string]any{"step": act.ID, "error": act.ErrorTurn, "spawn_n": d.spawnN})
 		emitAssistantTurn(d, "the provider connection dropped mid-reply", act.ErrorTurn)
+		parkForever()
+		return
+	}
+	if act.EndTurn {
+		d.journal("end_turn", map[string]any{"step": act.ID, "spawn_n": d.spawnN})
+		emitAssistantTurn(d, "I have finished my reply.", "")
 		parkForever()
 		return
 	}

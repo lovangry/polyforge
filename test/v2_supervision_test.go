@@ -506,3 +506,49 @@ func TestV2TwoRulesAtOnceOneVerdictOneFailure(t *testing.T) {
 		t.Fatalf("grill archived %d infra_failure attempts, want 1: %+v", infra, x.Steps["grill"].Attempts)
 	}
 }
+
+// TestV2OkEndedTurnWithoutResultRetriesSameModel: rule 1b. A turn that
+// ENDS NORMALLY and then idles with no result file is dead one grace
+// later (ended_without_result), judged as a same-model retry — NOT a
+// candidate switch — and the retry prompt tells the agent its previous
+// turn ended without writing the result envelope.
+func TestV2OkEndedTurnWithoutResultRetriesSameModel(t *testing.T) {
+	inst := newV1Install(t)
+	wi := inst.newWI(t, "rule 1b: ok-ended turn without result",
+		plan([]map[string]any{
+			{"do": "envelope", "id": "grill", "end_turn": true},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+		}), nil)
+	grace := 2 * time.Second
+	d := newV1Daemon(t, inst, optSupervision(supBounds{modelErrorGrace: grace}))
+	d.start()
+	t.Cleanup(func() { killOrphans(wi) })
+	d.pf(t, "submit", wi)
+
+	rec := waitForEvent(t, d, wi, "supervisor_verdict", 60*time.Second)
+	var v verdictEvent
+	eventBody(t, rec, &v)
+	if v.Verdict != "step_dead" || v.Cause != "ended_without_result" {
+		t.Fatalf("verdict %+v, want step_dead ended_without_result", v)
+	}
+	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
+	fails := stepFailures(t, d, wi)
+	if len(fails) != 1 || fails[0].Cause != "ended_without_result" || fails[0].Disposition != "retry_same_model" ||
+		fails[0].FaultClass != "" || fails[0].Count != 1 {
+		t.Fatalf("failure records %+v, want one ended_without_result/retry_same_model, no fault class", fails)
+	}
+	models := spawnModels(t, d.capsuleDir(wi))
+	if len(models) < 2 || models[0] != models[1] {
+		t.Fatalf("ended_without_result retries the SAME model: %v", models)
+	}
+	var hints []bool
+	for _, j := range fakeJournal(t, d.capsuleDir(wi)) {
+		if j["type"] == "prompt" {
+			h, _ := j["ended_without_result_hint"].(bool)
+			hints = append(hints, h)
+		}
+	}
+	if len(hints) < 2 || hints[0] || !hints[1] {
+		t.Fatalf("prompt hints %v: only the retry may carry the ended-without-result feedback", hints)
+	}
+}

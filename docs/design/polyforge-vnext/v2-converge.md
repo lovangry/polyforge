@@ -87,7 +87,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | # | 规则 | 条件 | 死因 cause |
 |---|---|---|---|
 | ⓪ | 启动后无信号 | 派发后 X 内没有任何工作类信号（harness 卡在启动、stdout 被孙进程持有等） | `harness_silent` |
-| ① | 报错后停住 | harness 发出"本轮结束、原因出错"，宽限 1 分钟仍无结果文件 | `model_error` |
+| ① | 本轮结束后停住 | harness 发出"本轮结束"，宽限 1 分钟仍无结果文件：原因出错 → `model_error`（换候选）；正常结束 → `ended_without_result`（同模型重试） | `model_error` / `ended_without_result` |
 | ② | 等模型太久 | 在等模型回复，超过 X 无任何输出 | `model_hung` |
 | ③ | 工具太久 | 某工具超过 Y 未结束 | `tool_hung` |
 | ④ | 总时长超 | 本步**累计**运行超过 T | `step_timeout_long_task`（主要耗在工具上）或 `step_timeout_slow_model`（主要耗在等模型 / 单次回复异常慢） |
@@ -109,6 +109,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 |---|---|
 | 退出未交结果（其余） | 同模型重试 |
 | `harness_silent` | 同模型重试 |
+| `ended_without_result` | 同模型重试；重试的 prompt 明确告知"上一轮已结束但没有写结果信封"。进程在正常结束一轮后退出且无结果，也归此类 |
 | `model_error`、`model_hung`、`step_timeout_slow_model`、退出（模型类） | 换下一个候选模型 |
 | `tool_hung` | 同模型重试，并**放宽 Y**（同 T 的放宽规则） |
 | `step_timeout_long_task` | 同模型重试并放宽 T；再超时 → blocked |
@@ -132,7 +133,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 ### 2.4 阈值（已定）
 
 - X（⓪②）、Y（③）、T（④）、N（driver_stalled）**全局默认，step 可覆盖**。
-- **T 的 step 级覆盖复用现有 `budget.wall_minutes`**（当前写在各 workflow.md 但没有任何代码执行它），不新增键；X、Y 的 step 级覆盖在 frontmatter 新增。覆盖值随 bundle 在领取时钉住，对之后领取的 WI 生效。
+- **T 的 step 级覆盖复用现有 `budget.wall_minutes`**，但它是**估计值而非硬上限**（bundle 里现有的 15–30 分钟都是估计）：声明了 `wall_minutes` 的 step，总时长界 **T = max(3 × wall_minutes, 全局 `--step-timeout` 默认)**；未声明则就是全局默认。不新增键；X、Y 的 step 级覆盖在 frontmatter 新增。覆盖值随 bundle 在领取时钉住，对之后领取的 WI 生效。
 - X 默认按 harness 翻译器声明的**输出粒度**取：逐字粒度（思考时也有输出）可短（例 10 分钟）；整条粒度或模型不返回思考内容时放长（例 30 分钟）。"模型不返回思考内容"在模型配置中声明。
 - Y 默认 30 分钟（#83 教训）；T 默认 60–90 分钟（#117 教训）；N 默认 10 分钟。
 - **放宽**：每次放宽翻倍，写入 `execution.json`，重启后沿用。
@@ -379,6 +380,8 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - driver 一侧：`internal/polyforge/driver/supervision.go`（判定围栏、死因表、失败计数、放宽、事实发送）；`TransStepFailed` 在 `transition.go`，一次原子写入记录 attempt（带死因子类）、计数、放宽值、下一次派发形态，必要时写 blocked。
 - supervisor 一侧：`internal/polyforge/observe/monitor.go`（消费事实、每派发一份状态、判定、`driver_stalled`、事件触发推送、M4 保留）；事件底座 `observe/events.go`（逐行带 id、按大小轮转、重启后续号、历史从文件读）。
 - 失败计数等持久字段：`capsule.Step.Supervision`、`Attempt.FailureCause`、`Execution.BlockedReason`。
+
+**规则 ① 与 T 的后续修订（集成分支）**：规则 ① 扩展到正常结束的轮次（`ended_without_result`，见 2.3 表）；T 取 `max(3 × wall_minutes, 全局默认)`（见 2.4）。
 
 **阈值配置名**：旗标 `--silence-window`（X）、`--tool-window`（Y）、`--step-timeout`（T）、`--stall-window`（N）、`--model-error-grace`（规则 ① 宽限）；step 级覆盖在 workflow.md：`budget.wall_minutes`（T）、`silence_minutes`（X）、`tool_minutes`（Y）。旧旗标 `--hang-window/--idle-window/--probe-timeout/--wall-window` 已删，传入即解析失败。
 

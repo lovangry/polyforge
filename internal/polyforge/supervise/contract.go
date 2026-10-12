@@ -32,7 +32,8 @@ type Cause string
 
 const (
 	CauseHarnessSilent        Cause = "harness_silent"          // rule 0
-	CauseModelError           Cause = "model_error"             // rule 1
+	CauseModelError           Cause = "model_error"             // rule 1 (error-ended turn)
+	CauseEndedWithoutResult   Cause = "ended_without_result"    // rule 1 (ok-ended turn)
 	CauseModelHung            Cause = "model_hung"              // rule 2
 	CauseToolHung             Cause = "tool_hung"               // rule 3
 	CauseStepTimeoutLongTask  Cause = "step_timeout_long_task"  // rule 4a

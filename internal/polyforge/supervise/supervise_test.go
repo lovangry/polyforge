@@ -158,6 +158,29 @@ func TestJudgeRuleTable(t *testing.T) {
 		}
 	})
 
+	t.Run("rule 1 ended_without_result: ok-ended turn, no result after the grace", func(t *testing.T) {
+		c := &fixClock{now: time.Unix(1000, 0)}
+		tr := newTrackerAt(c, th)
+		tr.WaitingModel()
+		tr.TurnEnded(true, "")
+		c.advance(59 * time.Second)
+		if judge(c, tr) != nil {
+			t.Fatal("inside the 1 minute grace")
+		}
+		c.advance(2 * time.Second)
+		if v := judge(c, tr); v == nil || v.Cause != CauseEndedWithoutResult {
+			t.Fatalf("verdict %+v, want ended_without_result", v)
+		}
+		tr2 := newTrackerAt(c, th)
+		tr2.TurnEnded(true, "")
+		c.advance(30 * time.Second)
+		tr2.WaitingModel() // the harness went on (a new turn)
+		c.advance(2 * time.Minute)
+		if v := judge(c, tr2); v != nil && v.Cause == CauseEndedWithoutResult {
+			t.Fatal("a new turn clears the ended state")
+		}
+	})
+
 	t.Run("rule 2 model_hung: waiting, no output for X", func(t *testing.T) {
 		c := &fixClock{now: time.Unix(1000, 0)}
 		tr := newTrackerAt(c, th)

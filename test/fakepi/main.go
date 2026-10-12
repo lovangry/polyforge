@@ -55,6 +55,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -137,6 +138,10 @@ func main() {
 		}
 		emitRecord(map[string]any{
 			"id": cmd.ID, "type": "response", "command": "prompt", "success": true,
+		})
+		drv.journal("prompt", map[string]any{
+			"spawn_n":                   drv.spawnN,
+			"ended_without_result_hint": strings.Contains(cmd.Message, "ended without you writing the result envelope"),
 		})
 		// the initial instruction: a plain assistant turn — unless this
 		// dispatch's action is the zero-signal harness (Silent: not even

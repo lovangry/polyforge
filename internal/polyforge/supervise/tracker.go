@@ -59,6 +59,7 @@ type Tracker struct {
 	recentFiles []string
 
 	turnEnded   bool
+	turnEndedAt time.Time
 	turnErr     bool
 	turnErrText string
 	turnErrAt   time.Time
@@ -211,6 +212,7 @@ func (t *Tracker) TurnEnded(ok bool, errText string) {
 	t.workLocked()
 	t.closeModelLocked(now)
 	t.turnEnded = true
+	t.turnEndedAt = now
 	if !ok {
 		t.turnErr = true
 		t.turnErrText = errText
@@ -263,6 +265,7 @@ type Snapshot struct {
 	ToolTime     time.Duration // closed + running tool time
 
 	TurnEnded   bool
+	TurnEndedAt time.Time
 	TurnError   bool
 	TurnErrText string
 	TurnErrAt   time.Time
@@ -303,6 +306,7 @@ func (t *Tracker) Snapshot(now time.Time) Snapshot {
 		ToolTime:     t.toolDur,
 
 		TurnEnded:   t.turnEnded,
+		TurnEndedAt: t.turnEndedAt,
 		TurnError:   t.turnErr,
 		TurnErrText: t.turnErrText,
 		TurnErrAt:   t.turnErrAt,

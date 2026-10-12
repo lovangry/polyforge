@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-// DefaultModelErrorGrace is rule 1's grace after an error-ended turn.
+// DefaultModelErrorGrace is rule 1's grace after an ended turn (error or
+// ok) with no result file.
 const DefaultModelErrorGrace = time.Minute
 
 // Judge applies the rules in priority order and answers the verdict of
@@ -39,6 +40,14 @@ func Judge(s Snapshot, now time.Time, grace time.Duration) *StepDead {
 		return dead(CauseModelError, fmt.Sprintf(
 			"turn ended with an error %s ago and no result file followed within the %s grace: %s",
 			now.Sub(s.TurnErrAt).Round(time.Second), grace.Round(time.Second), s.TurnErrText))
+	}
+	// 1b: ended_without_result — the turn ended normally and no result
+	// file followed within the grace: the agent stopped without
+	// delivering. Same-model retry (the retry prompt says so).
+	if s.TurnEnded && !s.TurnError && !s.TurnEndedAt.IsZero() && now.Sub(s.TurnEndedAt) >= grace {
+		return dead(CauseEndedWithoutResult, fmt.Sprintf(
+			"turn ended normally %s ago and no result file followed within the %s grace",
+			now.Sub(s.TurnEndedAt).Round(time.Second), grace.Round(time.Second)))
 	}
 	// 2: model_hung — waiting for the model, no output for X.
 	if th.Silence > 0 && s.Waiting {

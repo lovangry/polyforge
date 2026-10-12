@@ -551,6 +551,9 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 	// the in-process rejection retry lane: the prior dispatch's
 	// validation error rides the prompt as visible feedback
 	sp.PriorRejection = d.priorRejection[stepID]
+	if st != nil && len(st.Attempts) > 0 && st.Attempts[len(st.Attempts)-1].FailureCause == FailEndedWithoutResult {
+		sp.PriorEndedWithoutResult = true
+	}
 	if spec := d.workflow.step(stepID); spec != nil {
 		sp.ContextMode = spec.ContextPolicy
 		sp.Model = d.modelForLocked(stepID)
@@ -761,6 +764,10 @@ type StepSpawn struct {
 	// programmatically, required fields present — instead of blindly
 	// re-authoring. Empty on a fresh dispatch.
 	PriorRejection string
+	// PriorEndedWithoutResult tells the retry that the previous dispatch's
+	// turn ENDED without the agent writing the result envelope (cause
+	// ended_without_result).
+	PriorEndedWithoutResult bool
 }
 
 // StepRun is one spawned step execution awaiting its result envelope.

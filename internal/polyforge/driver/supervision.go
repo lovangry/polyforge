@@ -40,6 +40,7 @@ import (
 const (
 	FailHarnessSilent        = string(supervise.CauseHarnessSilent)
 	FailModelError           = string(supervise.CauseModelError)
+	FailEndedWithoutResult   = string(supervise.CauseEndedWithoutResult)
 	FailModelHung            = string(supervise.CauseModelHung)
 	FailToolHung             = string(supervise.CauseToolHung)
 	FailStepTimeoutLongTask  = string(supervise.CauseStepTimeoutLongTask)
@@ -55,6 +56,10 @@ const (
 	// kill, envelope never written).
 	FailExitOther = "exit_other"
 )
+
+// WallEstimateFactor scales a step's declared budget.wall_minutes into its
+// total-time bound T = max(3 x wall_minutes, global --step-timeout).
+const WallEstimateFactor = 3
 
 // DefaultMaxStepFailures is the per-step failure counter bound (v2-converge
 // 2.3): the third counted failure blocks the step.
@@ -91,6 +96,7 @@ type ExitedError struct {
 	Signal    string
 	LastError string // stderr tail / last reported error
 	TurnError bool   // the last signal was "turn ended with an error"
+	TurnOK    bool   // the last signal was a normally ended turn (no error)
 	Detail    string // envelope defect, when one was left behind
 }
 
@@ -142,6 +148,10 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 			return FailExitHost, ee.ExitCode, ee.Error()
 		case ee.TurnError || modelPatterns.MatchString(text):
 			return FailExitModel, ee.ExitCode, ee.Error()
+		case ee.TurnOK:
+			// the turn ended normally and the process is gone with no
+			// result: the agent stopped without delivering
+			return FailEndedWithoutResult, ee.ExitCode, ee.Error()
 		default:
 			return FailExitOther, ee.ExitCode, ee.Error()
 		}
@@ -197,7 +207,12 @@ func (d *Driver) stepBases(stepID string) (silence, tool, wall time.Duration) {
 			tool = time.Duration(spec.ToolMinutes) * time.Minute
 		}
 		if spec.WallMinutes > 0 {
-			wall = time.Duration(spec.WallMinutes) * time.Minute
+			// budget.wall_minutes is an ESTIMATE, not a hard limit: the
+			// step's total-time bound is generous around it, never below
+			// the global default.
+			if est := time.Duration(spec.WallMinutes) * time.Minute * WallEstimateFactor; est > wall {
+				wall = est
+			}
 		}
 		if spec.SilenceMinutes > 0 {
 			silence = time.Duration(spec.SilenceMinutes) * time.Minute

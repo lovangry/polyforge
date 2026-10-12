@@ -504,6 +504,7 @@ func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 	}
 	md := "---\nname: b\nsteps:\n" +
 		"  - { id: slow, budget: { wall_minutes: 45 }, silence_minutes: 20, tool_minutes: 60 }\n" +
+		"  - { id: small, budget: { wall_minutes: 15 } }\n" +
 		"  - { id: plain }\n---\n# b\n"
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(md), 0o644); err != nil {
 		t.Fatal(err)
@@ -526,10 +527,15 @@ func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 	}
 	d.mu.Lock()
 	th := d.effectiveThresholdsLocked("slow", supervise.GranularityToken)
+	small := d.effectiveThresholdsLocked("small", supervise.GranularityToken)
 	plain := d.effectiveThresholdsLocked("plain", supervise.GranularityToken)
 	msg := d.effectiveThresholdsLocked("plain", supervise.GranularityMessage)
 	d.mu.Unlock()
-	if th.StepTimeout != 45*time.Minute || th.Silence != 20*time.Minute || th.Tool != 60*time.Minute {
+	// T = max(3 x wall_minutes, global default): wall_minutes is an estimate
+	if small.StepTimeout != 90*time.Minute {
+		t.Fatalf("a 15m estimate must not shrink T below the 90m global default: %+v", small)
+	}
+	if th.StepTimeout != 135*time.Minute || th.Silence != 20*time.Minute || th.Tool != 60*time.Minute {
 		t.Fatalf("slow step thresholds %+v", th)
 	}
 	if plain.StepTimeout != 90*time.Minute || plain.Tool != 30*time.Minute || plain.Silence != 10*time.Minute {
@@ -760,5 +766,49 @@ func TestHumanContinueStartsAFreshTWindow(t *testing.T) {
 	st := env.exec(t).Steps["s"]
 	if st.Supervision.RuntimeBaseMs != st.BudgetConsumed.WallMs {
 		t.Fatalf("a human continue restarts the T window: %+v / %+v", st.BudgetConsumed, st.Supervision)
+	}
+}
+
+// --- ended_without_result (rule 1, ok-ended turn) ---------------------------
+
+func TestEndedWithoutResultVerdictRetriesSameModelWithFeedback(t *testing.T) {
+	env := newSupEnv(t, nil, chain("s", "a", "b"))
+	env.sp.script = []fakeEntry{{hold: true}, done(`{"ok":true}`)}
+	go func() {
+		waitForSpawns(env, 1)
+		env.link.Verdict(supervise.StepDead{Step: "s", SpawnN: 1, Cause: supervise.CauseEndedWithoutResult, Evidence: "turn ended ok"})
+	}()
+	if err := env.d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if m := env.models(); len(m) != 2 || m[0] != "a" || m[1] != "a" {
+		t.Fatalf("ended_without_result is a same-model retry, got %v", m)
+	}
+	st := env.exec(t).Steps["s"]
+	if st.Supervision == nil || st.Supervision.FailureCount != 1 {
+		t.Fatalf("counted failure: %+v", st.Supervision)
+	}
+	if a := st.Attempts[0]; a.FailureCause != FailEndedWithoutResult || a.FaultClass != "" {
+		t.Fatalf("attempt %+v must carry the cause with no fault class", a)
+	}
+	if env.sp.spawnAt(0).PriorEndedWithoutResult || !env.sp.spawnAt(1).PriorEndedWithoutResult {
+		t.Fatalf("only the retry tells the agent its previous turn ended without a result: %+v / %+v",
+			env.sp.spawnAt(0), env.sp.spawnAt(1))
+	}
+}
+
+func TestClassifyEndedOKExitIsEndedWithoutResult(t *testing.T) {
+	if got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 0, TurnOK: true}); got != FailEndedWithoutResult {
+		t.Fatalf("clean exit after an ok-ended turn: %q", got)
+	}
+	if got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 1, TurnError: true}); got != FailExitModel {
+		t.Fatalf("an error-ended turn stays model-class: %q", got)
+	}
+}
+
+func TestRetryPromptNamesEndedWithoutResult(t *testing.T) {
+	p := promptParts{PriorEndedWithoutResult: true}
+	if out := assembleStepPrompt(p); !strings.Contains(out, "ended without you writing the result envelope") {
+		t.Fatalf("retry prompt must tell the agent: %q", out)
 	}
 }

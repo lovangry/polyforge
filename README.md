@@ -356,7 +356,8 @@ the mapping.
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
 `5m`), flags only (no environment fallbacks). Omitting a flag, or passing
 `0`, keeps the default listed here. A workflow step overrides them in
-`workflow.md`: `budget.wall_minutes` (T), `silence_minutes` (X),
+`workflow.md`: `budget.wall_minutes` (an estimate: T becomes
+`max(3 x wall_minutes, --step-timeout)`), `silence_minutes` (X),
 `tool_minutes` (Y).
 
 | Flag | Env | Default | Controls |
@@ -365,7 +366,7 @@ Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
 | `--tool-window D` | — | `30m` | Y: one tool running longer than this is `tool_hung`. |
 | `--step-timeout D` | — | `90m` | T: cumulative step runtime across all its dispatches (`step_timeout_long_task` / `step_timeout_slow_model`). |
 | `--stall-window D` | — | `10m` | N: the driver between steps (not waiting on a human) for longer than this is `driver_stalled`; a negative value disables it. |
-| `--model-error-grace D` | — | `1m` | Grace after a turn ends on a model error with no result file before the step is `model_error`. |
+| `--model-error-grace D` | — | `1m` | Grace after a turn ENDS with no result file: ended on a model error is `model_error` (switch candidate); ended normally is `ended_without_result` (same-model retry). |
 | `--revalidate-every D` | — | `5m` | M4 periodic session-revalidation cadence for RUNNING jobs; `0`/omitted keeps the 5m default, a negative value disables revalidation. |
 
 Before starting ANY implementation or review lane: recall the v0 lessons

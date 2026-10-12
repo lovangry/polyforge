@@ -157,16 +157,17 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		return nil, err
 	}
 	parts := promptParts{
-		WIID:           a.WI.ID,
-		StepID:         sp.StepID,
-		SpawnN:         sp.SpawnN,
-		ContextMode:    policy,
-		Definition:     def,
-		Rewind:         sp.RewindInput,
-		Answers:        sp.Answers,
-		HandoffDue:     spec.Handoff,
-		Gate:           spec.Gate,
-		PriorRejection: sp.PriorRejection,
+		WIID:                    a.WI.ID,
+		StepID:                  sp.StepID,
+		SpawnN:                  sp.SpawnN,
+		ContextMode:             policy,
+		Definition:              def,
+		Rewind:                  sp.RewindInput,
+		Answers:                 sp.Answers,
+		HandoffDue:              spec.Handoff,
+		Gate:                    spec.Gate,
+		PriorRejection:          sp.PriorRejection,
+		PriorEndedWithoutResult: sp.PriorEndedWithoutResult,
 
 		RequireCommandEvidence: spec.RequiresCommandEvidence || sp.StepID == verificationStepID,
 		RequiresHumanAnswer:    spec.RequiresHumanAnswer,
@@ -328,6 +329,9 @@ type promptParts struct {
 	// dispatch's rejected envelope (the in-process retry lane): the
 	// author sees exactly what to fix instead of blindly re-authoring.
 	PriorRejection string
+	// PriorEndedWithoutResult: the previous dispatch's turn ended without
+	// the result envelope being written (retry feedback).
+	PriorEndedWithoutResult bool
 	// RequireCommandEvidence marks a step whose completed result must
 	// carry command_evidence (verification / requires_command_evidence):
 	// the contract states the entry shape and the rule.
@@ -382,6 +386,10 @@ func assembleStepPrompt(p promptParts) string {
 		b.WriteString("Your previous envelope for this step was rejected by the driver's validation:\n\n")
 		b.WriteString(p.PriorRejection)
 		b.WriteString("\n\nFix the defect and write a corrected envelope. Compute artifact digests programmatically (e.g. sha256sum + jq into the JSON) — never hand-transcribe them; re-check every required field the error names.\n")
+	}
+	if p.PriorEndedWithoutResult {
+		b.WriteString("\n# Previous turn ended WITHOUT a result envelope\n\n")
+		b.WriteString("Your previous turn on this step ended without you writing the result envelope. Finishing your reply is not delivering: the step only completes when the result envelope file is written (see the delivery contract below). Do the remaining work, then WRITE the envelope before you stop.\n")
 	}
 	if p.Reference != "" {
 		b.WriteString("\n# Previous attempt (read-only reference)\n\n")
@@ -897,6 +905,7 @@ func (r *stepRun) exited(defect error) error {
 	if r.sink != nil {
 		snap := r.sink.Snapshot(time.Now())
 		ee.TurnError = snap.TurnError
+		ee.TurnOK = snap.TurnEnded && !snap.TurnError
 		if snap.Exit != nil {
 			if ee.ExitCode < 0 {
 				ee.ExitCode, ee.Signal = snap.Exit.Code, snap.Exit.Signal
