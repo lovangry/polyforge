@@ -304,47 +304,6 @@ func TestLocateLiveTranscript(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// F3: the resume discriminator's live-file fallback.
-
-func TestStopSealSyncsLiveTranscriptIntoTheChain(t *testing.T) {
-	sp := &scriptedSpawner{}
-	r, _, _ := newTestRuntime(t, newFakeHub(), sp)
-	wi := "wi_sealsync"
-	j := seedJob(r, wi)
-	bare := initGitCapsule(t, j)
-	// the recorded live transcript exists; the capsule copy does not.
-	live := filepath.Join(t.TempDir(), "live-session.jsonl")
-	liveBody := []byte("{\"type\":\"session\"}\n{\"t\":\"final turn\"}\n")
-	if err := os.WriteFile(live, liveBody, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	j.mu.Lock()
-	j.liveTranscript = live
-	j.mu.Unlock()
-	installOldAgent(t, sp, j)
-
-	if err := r.Stop(context.Background(), wi, protocol.FinishWrapped); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	// the seal commit carried the transcript: the capsule copy exists
-	// with the live bytes, and the pushed chain's tip holds it.
-	raw, err := os.ReadFile(j.transcript)
-	if err != nil || string(raw) != string(liveBody) {
-		t.Fatalf("the seal must land the transcript in the capsule: %v (%q)", err, raw)
-	}
-	if !bareHasMain(t, bare) {
-		t.Fatal("seal push never landed")
-	}
-	out, err := run(t, "git", "--git-dir", bare, "ls-tree", "--name-only", "-r", "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, "session/session-"+j.sessionFingerprint+".jsonl") {
-		t.Fatalf("the pushed chain misses the transcript:\n%s", out)
-	}
-}
-
 func TestStopSealPushFailureEmitsPushFailedEvent(t *testing.T) {
 	sp := &scriptedSpawner{}
 	r, _, _ := newTestRuntime(t, newFakeHub(), sp)
@@ -389,4 +348,48 @@ func hub_endStatus(t *testing.T, r *Runtime, wi string) string {
 		return ""
 	}
 	return fh.ends[len(fh.ends)-1].Status
+}
+
+// Step 1's capsule transcript is the job-level declared path
+// (session-<fingerprint>.jsonl: the driver names a fresh first dispatch's
+// transcript that way). The seal must never overwrite it with a LATER
+// step's live transcript.
+func TestSealNeverOverwritesStepOneTranscript(t *testing.T) {
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, newFakeHub(), sp)
+	wi := "wi_stepone"
+	j := seedJob(r, wi)
+	initGitCapsule(t, j)
+	installOldAgent(t, sp, j)
+
+	t.Setenv("HOME", t.TempDir()) // the default harness session store
+	storeDir := filepath.Join(HarnessSessionsRootDefault(), piSessionDirName(j.capsuleDir))
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	step1Live := filepath.Join(storeDir, "step1.jsonl")
+	step2Live := filepath.Join(storeDir, "step2.jsonl")
+	_ = os.WriteFile(step1Live, []byte("step one\n"), 0o644)
+	_ = os.WriteFile(step2Live, []byte("step two\n"), 0o644)
+	_ = os.Chtimes(step1Live, now, now)
+	_ = os.Chtimes(step2Live, now.Add(time.Second), now.Add(time.Second))
+	// step 1's transcript was synced to its own capsule file at its boundary
+	if err := os.MkdirAll(filepath.Dir(j.transcript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(j.transcript, []byte("step one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j.mu.Lock()
+	j.agentStartedAt = now.Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	j.mu.Unlock()
+
+	if err := r.Stop(context.Background(), wi, protocol.FinishWrapped); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	raw, err := os.ReadFile(j.transcript)
+	if err != nil || string(raw) != "step one\n" {
+		t.Fatalf("step 1's transcript was overwritten at seal: %q (%v)", raw, err)
+	}
 }

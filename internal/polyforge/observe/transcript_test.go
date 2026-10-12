@@ -21,6 +21,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // liveFixture builds one real live transcript (a harness-store-shaped
@@ -46,18 +47,17 @@ func newLiveFixture(t *testing.T, capsuleDir, liveDir string) liveFixture {
 	return f
 }
 
-// adopt delivers the per-derivation transcript facts through the
-// production path: an RTRecovered attachment on rtQ.
-func adopt(t *testing.T, m *Monitor, h Handle, wi WIInfo) {
+// stepStarted announces one dispatch through the production path — the
+// driver's step_started fact naming the dispatch's own transcript — and
+// waits until the monitor adopted it.
+func stepStarted(t *testing.T, m *Monitor, spawn int64, step, dst string, resumed bool) {
 	t.Helper()
-	m.rtQ.Push(Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: wi.WorkItem, SpawnN: 2},
-		Handle: h,
-		WI:     wi,
+	m.link.Fact(supervise.StepStarted{
+		Step: step, SpawnN: spawn, Model: "m", Harness: "pi",
+		TranscriptPath: dst, Resumed: resumed,
+		StartedAt: time.Now().Add(-time.Minute),
 	})
-	// the adoption and the driver's facts race on the select: wait until
-	// the attachment landed before any commit boundary is announced
-	soon(t, 2*time.Second, "transcript facts adopted", func() bool { return m.currentSpawn() == 2 })
+	soon(t, 2*time.Second, "dispatch adopted", func() bool { return m.activity().Step == step })
 }
 
 // pushOnceRecorded is a PushFunc that records whether the capsule's
@@ -85,16 +85,9 @@ func TestStepBoundarySyncsTranscriptBeforePush(t *testing.T) {
 	h := newFakeHandle("ra_wi_test")
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.push = pushOnceRecorded(f, &sawCopy)
+		c.locateLive = func(string, time.Time) string { return f.src }
 	})
-	adopt(t, m, h, WIInfo{
-		WorkItem:       "wi_test",
-		Project:        "proj",
-		CapsuleDir:     f.capsuleDir,
-		BundleName:     "bundle-a",
-		Transcript:     f.dst,
-		LiveTranscript: f.src,
-		SpawnAt:        time.Now().Add(-time.Minute),
-	})
+	stepStarted(t, m, 1, "code", f.dst, false)
 
 	// one execution.json step-boundary write: the version bump schedules
 	// the async commit pipeline (sync → push).
@@ -119,6 +112,84 @@ func TestStepBoundarySyncsTranscriptBeforePush(t *testing.T) {
 	expectNoOB(t, ob, 100*time.Millisecond, "no recovery may fire for a healthy transcript sync")
 }
 
+// Each step's transcript is synced to its OWN capsule file: a later step's
+// live transcript never lands on an earlier step's path, and after a
+// recovery nothing is synced until the successor's step_started names the
+// dispatch's transcript.
+func TestEachStepSyncsToItsOwnTranscript(t *testing.T) {
+	dir := t.TempDir()
+	capsuleDir := filepath.Join(dir, "capsule")
+	if err := os.MkdirAll(filepath.Join(capsuleDir, "runtime-state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(dir, "pi-sessions")
+	if err := os.MkdirAll(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src1, src2 := filepath.Join(live, "one.jsonl"), filepath.Join(live, "two.jsonl")
+	dst1 := filepath.Join(capsuleDir, "session", "session-ra_wi_test.jsonl")
+	dst2 := filepath.Join(capsuleDir, "session", "session-ra_wi_test#1.jsonl")
+	write := func(p, body string) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(p string) string {
+		raw, _ := os.ReadFile(p)
+		return string(raw)
+	}
+	write(src1, "step one\n")
+	write(src2, "step two\n")
+
+	h := newFakeHandle("ra_wi_test")
+	var pushes atomic.Int32
+	var current atomic.Value // the live file the "harness" currently writes
+	current.Store(src1)
+	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.locateLive = func(string, time.Time) string { return current.Load().(string) }
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
+			pushes.Add(1)
+			return "sha_steps", true, gitops.PushTimings{}, nil
+		}
+	})
+	pushedAfter := func(what string, n int32) {
+		soon(t, 5*time.Second, what, func() bool { return pushes.Load() >= n })
+	}
+
+	stepStarted(t, m, 1, "one", dst1, false)
+	m.writeExec(t, 1, "one")
+	pushedAfter("step one push", 1)
+	if got := read(dst1); got != "step one\n" {
+		t.Fatalf("step one transcript = %q", got)
+	}
+
+	current.Store(src2)
+	stepStarted(t, m, 2, "two", dst2, false)
+	m.writeExec(t, 2, "two")
+	pushedAfter("step two push", 2)
+	if got := read(dst2); got != "step two\n" {
+		t.Fatalf("step two transcript = %q", got)
+	}
+	if got := read(dst1); got != "step one\n" {
+		t.Fatalf("step one's transcript was overwritten by step two: %q", got)
+	}
+
+	// a recovery drops the dead dispatch: later commits sync nothing
+	// until the successor's own step_started.
+	write(src2, "step two, later\n")
+	m.rtQ.Push(Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 2}, Handle: h})
+	soon(t, 2*time.Second, "recovery adopted", func() bool { return m.currentSpawn() == 2 })
+	m.writeExec(t, 3, "two")
+	pushedAfter("post-recovery push", 3)
+	if got := read(dst2); got != "step two\n" {
+		t.Fatalf("a commit between a recovery and the next step_started synced %q onto the dead dispatch's file", got)
+	}
+	if got := read(dst1); got != "step one\n" {
+		t.Fatalf("step one's transcript changed across the recovery: %q", got)
+	}
+}
+
 func TestTranscriptMissingWarnsOnceAndPushProceeds(t *testing.T) {
 	dir := t.TempDir()
 	capsuleDir := filepath.Join(dir, "capsule")
@@ -141,14 +212,7 @@ func TestTranscriptMissingWarnsOnceAndPushProceeds(t *testing.T) {
 			return "sha_nomiss", true, gitops.PushTimings{}, nil
 		}
 	})
-	adopt(t, m, h, WIInfo{
-		WorkItem:   "wi_test",
-		Project:    "proj",
-		CapsuleDir: capsuleDir,
-		BundleName: "b",
-		Transcript: filepath.Join(capsuleDir, "session", "session-ra_wi_test.jsonl"),
-		SpawnAt:    time.Now().Add(-time.Minute),
-	})
+	stepStarted(t, m, 1, "code", filepath.Join(capsuleDir, "session", "session-ra_wi_test.jsonl"), false)
 
 	// two step boundaries: the warning fires ONCE, both pushes proceed.
 	m.writeExec(t, 1, "code")
@@ -194,15 +258,7 @@ func TestResumedDerivationWritingInCapsuleIsNotReCopied(t *testing.T) {
 			return "sha_resume", true, gitops.PushTimings{}, nil
 		}
 	})
-	adopt(t, m, h, WIInfo{
-		WorkItem:       "wi_test",
-		Project:        "proj",
-		CapsuleDir:     f.capsuleDir,
-		BundleName:     "bundle-a",
-		Transcript:     f.dst,
-		LiveTranscript: f.dst, // the resume source IS the capsule copy
-		SpawnAt:        time.Now().Add(-time.Minute),
-	})
+	stepStarted(t, m, 1, "code", f.dst, true) // the resume source IS the capsule copy
 
 	// stamp a distinct mtime; a needless self-copy would rewrite it.
 	before := time.Now().Add(-time.Hour)

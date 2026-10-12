@@ -165,11 +165,6 @@ type jobRecord struct {
 	StormFails     int    `json:"storm_fails"`
 	LastRecoveryAt string `json:"last_recovery_at,omitempty"`
 	Transcript     string `json:"transcript"`
-	// LiveTranscript is the file the current derivation appends to (a
-	// fresh pi derivation's harness-store live path, or the resume
-	// source); "" while not located. Restart keeps it so the resume
-	// discriminator's live fallback survives a daemon restart.
-	LiveTranscript string `json:"live_transcript,omitempty"`
 	BundleName     string `json:"bundle_name"`
 	BundleDigest   string `json:"bundle_digest"`
 	AgentPID       int    `json:"agent_pid"`
@@ -226,7 +221,6 @@ func (j *job) record() *jobRecord {
 		StormFails:         j.stormFails,
 		LastRecoveryAt:     stampIfSet(j.lastRecoveryAt),
 		Transcript:         j.transcript,
-		LiveTranscript:     j.liveTranscript,
 		BundleName:         j.bundleName,
 		BundleDigest:       j.bundleDigest,
 		AgentPID:           j.agentPID,
@@ -274,7 +268,6 @@ func jobFromRecord(rec *jobRecord) *job {
 		stormFails:     rec.StormFails,
 		lastRecoveryAt: parseStamp(rec.LastRecoveryAt),
 		transcript:     rec.Transcript,
-		liveTranscript: rec.LiveTranscript,
 		bundleName:     rec.BundleName,
 		bundleDigest:   rec.BundleDigest,
 		agentPID:       rec.AgentPID,

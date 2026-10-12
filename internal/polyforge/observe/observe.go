@@ -24,9 +24,7 @@ import (
 type Attach struct {
 	Msg    protocol.RTMsg
 	Handle Handle // nil for RTFinished
-	// WI is required on RTStarted and re-read on RTRecovered: the
-	// successor derivation carries its own per-derivation facts (F3
-	// transcript info), which the monitor adopts alongside the handle.
+	// WI is required on RTStarted.
 	WI WIInfo
 }
 
@@ -44,9 +42,9 @@ type Config struct {
 	PushFunc PushFunc
 	// LocateLive, when non-nil, resolves the live harness transcript of a
 	// derivation (capsuleDir + spawn moment → absolute .jsonl path; "" =
-	// not found). The monitor calls it at its commit-boundary sync points
-	// when the runtime-attached WIInfo carries no recorded live path —
-	// the F3 daemon-side transcript sync. nil disables the sync entirely
+	// not found). The monitor calls it at each dispatch's commit-boundary
+	// sync points (the F3 daemon-side transcript sync, onto the path the
+	// dispatch's step_started names). nil disables the sync entirely
 	// (unit tests that never exercise it).
 	LocateLive func(capsuleDir string, spawnAt time.Time) string
 	// Resolve maps a non-canonical work-item id form (a "<project>#<seq>"
@@ -340,7 +338,6 @@ func (m *Monitor) attach(at Attach) {
 	m.spawnN = at.Msg.SpawnN
 	m.sessionID = at.Msg.SessionID
 	m.stateMu.Unlock()
-	m.setTranscriptInfo(at.WI)
 }
 
 // Events exposes the log (diagnostic/tests).

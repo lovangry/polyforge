@@ -8,8 +8,6 @@ package runtime
 // and every writer stay untouched.
 
 import (
-	"time"
-
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -33,17 +31,11 @@ type JobInfo struct {
 	SessionID          string // the SECRET — in-process consumers only, never a log surface
 	SpawnN             int
 	Transcript         string
-	// LiveTranscript is the file the current derivation appends to (the
-	// F3 live-transcript face; "" while not located). SpawnAt is its
-	// agentStartedAt parsed once, for the observe lane's on-demand
-	// live-transcript location.
-	LiveTranscript string
-	SpawnAt        time.Time
-	BundleName     string
-	Agent          AgentHandle
-	AgentPID       int
-	AgentStartedAt string
-	Origin         *Origin
+	BundleName         string
+	Agent              AgentHandle
+	AgentPID           int
+	AgentStartedAt     string
+	Origin             *Origin
 	// RepairPending is the v2 §6 parked-for-repair reason kind
 	// ("capsule_missing" | "project_unmapped"); "" = not parked.
 	RepairPending string
@@ -81,12 +73,6 @@ func (r *Runtime) List() []JobInfo {
 func (j *job) info() JobInfo {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	spawnAt := time.Time{}
-	if j.agentStartedAt != "" {
-		if at, err := time.Parse(time.RFC3339Nano, j.agentStartedAt); err == nil {
-			spawnAt = at
-		}
-	}
 	return JobInfo{
 		WorkItem:           j.wi,
 		Project:            j.project,
@@ -98,8 +84,6 @@ func (j *job) info() JobInfo {
 		SessionID:          j.sessionID,
 		SpawnN:             j.spawnN,
 		Transcript:         j.transcript,
-		LiveTranscript:     j.liveTranscript,
-		SpawnAt:            spawnAt,
 		BundleName:         j.bundleName,
 		Agent:              j.agent,
 		AgentPID:           j.agentPID,

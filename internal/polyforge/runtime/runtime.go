@@ -70,13 +70,8 @@ type Config struct {
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
 	Harness       string // harness adapter name ("pi")
 	PiBin         string // harness binary (default "pi")
-	// HarnessSessionsRoot overrides the harness's default session store
-	// (~/.pi/agent/sessions) for the live-transcript locator (F3): the
-	// production default is right; tests and relocated installs point
-	// it at a scratch tree. Empty = the default.
-	HarnessSessionsRoot string
-	CgroupRoot          string // cgroup v2 root; empty ⇒ layer-0 unavailable
-	MaxRecoveries       int    // consecutive FAILED recoveries before bounded fail (default 2)
+	CgroupRoot    string // cgroup v2 root; empty ⇒ layer-0 unavailable
+	MaxRecoveries int    // consecutive FAILED recoveries before bounded fail (default 2)
 	// RecoveryStabilityWindow bounds the v2 entry-rate storm guard: a
 	// recoverCore that re-fires inside this window (default 60s) counts
 	// one storm unit; MaxRecoveries rapid re-entries bounded-fail the WI
@@ -217,19 +212,12 @@ type job struct {
 	// set when the SEALING transition records the reason and persisted
 	// with it, so a crash between that push and SessionEnd keeps the
 	// restart's stop finisher from re-pushing either.
-	sealedPush bool
-	capsuleDir string
-	git        gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
-	transcript string
-	// liveTranscript is the file the CURRENT derivation appends to: the
-	// harness-store path a fresh pi derivation really writes (the harness
-	// ignores PI_SESSION_DIR), or — for a resumed derivation — the very
-	// file --session points at. Empty while not yet located (the observe
-	// lane re-locates at its sync points; the recovery engine at its
-	// resume decision).
-	liveTranscript string
-	bundleName     string
-	bundleDigest   string
+	sealedPush   bool
+	capsuleDir   string
+	git          gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
+	transcript   string
+	bundleName   string
+	bundleDigest string
 	// origin is how the job was submitted (nil = unknown).
 	origin *Origin
 	// item is the claim answer's work-item snapshot (the F1 materializer
@@ -549,21 +537,6 @@ func (r *Runtime) remoteURLFor(wi string) string {
 // fingerprint (+#N after re-derivations) — public, never the secret.
 func sessionPathFor(capsuleDir, token string) string {
 	return filepath.Join(capsuleDir, capsule.DirSession, "session-"+token+".jsonl")
-}
-
-// harnessSessionsRoot answers the configured harness session store.
-func (r *Runtime) harnessSessionsRoot() string {
-	if r.cfg.HarnessSessionsRoot != "" {
-		return r.cfg.HarnessSessionsRoot
-	}
-	return HarnessSessionsRootDefault()
-}
-
-// locateLive locates the live transcript of a derivation born at
-// spawnAt (the F3 face over the shared helper; "" = not there yet or
-// never — a typed warning condition, never an error).
-func (r *Runtime) locateLive(capsuleDir string, spawnAt time.Time) string {
-	return LocateLiveTranscript(r.harnessSessionsRoot(), capsuleDir, spawnAt)
 }
 
 // randomKey mints an idempotency key (NOT a secret: it only needs
@@ -1531,10 +1504,6 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// Only the read-only seal and the terminal close remain.
 	finalReason := reason
 	if !alreadyPushed {
-		// F3: the dead derivation's live transcript rides the seal commit
-		// (C1) — sync before the push, best-effort.
-		r.syncTranscriptBeforeSeal(j)
-
 		// The seq trailer is gitops' business (derived in-lock).
 		// CommitPush is honest on every path — including a clean tree,
 		// where it pushes the standing HEAD — so a failed first push is
@@ -1645,9 +1614,6 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job, alreadyPushed bool) error
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
 	if !alreadyPushed {
-		// F3: the dead derivation's live transcript rides the pause commit
-		// (C1) — sync before the push, best-effort.
-		r.syncTranscriptBeforeSeal(j)
 		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+protocol.FinishPaused)
 		for i := 0; i < 2 && perr != nil; i++ {
 			_, perr = gitops.Push(j.git)

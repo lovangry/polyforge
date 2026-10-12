@@ -74,16 +74,6 @@ type WIInfo struct {
 	CapsuleDir string
 	BundleName string
 	Git        gitops.Opts
-	// Transcript is the capsule-side declared session path of the
-	// current derivation (the live-transcript sync's destination until
-	// the first step_started names the dispatch's own).
-	Transcript string
-	// LiveTranscript is the file the current derivation appends to (the
-	// runtime's recorded live path; "" = locate on demand below).
-	LiveTranscript string
-	// SpawnAt is the current derivation's birth moment (the on-demand
-	// locator's floor).
-	SpawnAt time.Time
 }
 
 // Handle is the driver face a monitor watches. Implemented by the
@@ -613,17 +603,12 @@ func (m *Monitor) onRecovered(at Attach) {
 	m.act = nil
 	m.stateMu.Unlock()
 	m.setPhase(phaseBetween)
-	// The successor derivation carries its own transcript facts: adopt
-	// them for the sync points that follow (F3) until its first
-	// step_started names the dispatch's own.
-	if at.WI.WorkItem != "" {
-		m.setTranscriptInfo(at.WI)
-	} else {
-		m.stateMu.Lock()
-		m.transcriptWarned = false
-		m.stateMu.Unlock()
-	}
+	// No dispatch is in flight until the successor's first step_started
+	// names its transcript: nothing to sync in between, and the dead
+	// dispatch's destination must never receive the successor's file.
+	m.trDst, m.trSrc, m.trSpawnAt = "", "", time.Time{}
 	m.stateMu.Lock()
+	m.transcriptWarned = false
 	m.recovering = false
 	m.spawnN = at.Msg.SpawnN
 	m.sessionID = at.Msg.SessionID
@@ -712,19 +697,6 @@ type transcriptSnapshot struct {
 
 func (m *Monitor) transcriptSnapshot() transcriptSnapshot {
 	return transcriptSnapshot{dst: m.trDst, src: m.trSrc, spawnAt: m.trSpawnAt}
-}
-
-// setTranscriptInfo adopts the per-derivation transcript facts of an
-// attachment (monitor goroutine only; observe.attach and onRecovered).
-// transcriptWarned is stateMu-guarded: a push sub-goroutine claims the
-// once-per-attempt warning concurrently with this reset.
-func (m *Monitor) setTranscriptInfo(wi WIInfo) {
-	m.trDst = wi.Transcript
-	m.trSrc = wi.LiveTranscript
-	m.trSpawnAt = wi.SpawnAt
-	m.stateMu.Lock()
-	m.transcriptWarned = false
-	m.stateMu.Unlock()
 }
 
 // claimTranscriptWarning claims the once-per-attempt transcript_missing

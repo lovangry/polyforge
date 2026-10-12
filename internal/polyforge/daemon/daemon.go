@@ -297,16 +297,15 @@ func New(cfg Config) (*Daemon, error) {
 	cfg.fill()
 
 	rtCfg := runtime.Config{
-		MachineID:           cfg.MachineID,
-		Mapping:             cfg.Mapping,
-		DataDir:             cfg.DataDir,
-		GitRemoteBase:       cfg.GitRemoteBase,
-		WorkflowsDir:        cfg.WorkflowsDir,
-		Harness:             cfg.Harness,
-		PiBin:               cfg.PiBin,
-		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
-		CgroupRoot:          cfg.CgroupRoot,
-		EnvSecrets:          []string{cfg.APIKey},
+		MachineID:     cfg.MachineID,
+		Mapping:       cfg.Mapping,
+		DataDir:       cfg.DataDir,
+		GitRemoteBase: cfg.GitRemoteBase,
+		WorkflowsDir:  cfg.WorkflowsDir,
+		Harness:       cfg.Harness,
+		PiBin:         cfg.PiBin,
+		CgroupRoot:    cfg.CgroupRoot,
+		EnvSecrets:    []string{cfg.APIKey},
 	}
 	// Runtime-sourced diagnostic events (a seal push that failed after
 	// its retries, pilot item 3) land in the observe lane's durable
@@ -384,8 +383,8 @@ func New(cfg Config) (*Daemon, error) {
 		DataDir:      cfg.DataDir,
 		PollInterval: cfg.ObservePoll,
 		PushFunc:     cfg.PushFunc,
-		// F3: the live-transcript locator the monitor's commit-boundary
-		// sync calls when the runtime recorded no live path; the F2 slug
+		// F3: the live-transcript locator the monitor's per-dispatch
+		// commit-boundary sync calls; the F2 slug
 		// resolver lets CLI-side route calls by the operator's spelling
 		// (a "<project>#<seq>") find the canonically-keyed monitor.
 		LocateLive: func(capsuleDir string, spawnAt time.Time) string {
@@ -681,22 +680,16 @@ func (d *Daemon) reattachRecovered() {
 
 // buildAttach turns one runtime snapshot into an observe attachment:
 // the protocol message plus the agent handle adapted to observe's face.
-// The per-derivation transcript facts (F3: the capsule copy path, the
-// live file, the spawn moment) ride the WIInfo the monitor's
-// commit-boundary transcript sync reads.
 func (d *Daemon) buildAttach(msg protocol.RTMsg, ji runtime.JobInfo) observe.Attach {
 	return observe.Attach{
 		Msg:    msg,
 		Handle: d.installAdapter(ji),
 		WI: observe.WIInfo{
-			WorkItem:       ji.WorkItem,
-			Project:        ji.Project,
-			CapsuleDir:     ji.CapsuleDir,
-			BundleName:     ji.BundleName,
-			Git:            ji.Git,
-			Transcript:     ji.Transcript,
-			LiveTranscript: ji.LiveTranscript,
-			SpawnAt:        ji.SpawnAt,
+			WorkItem:   ji.WorkItem,
+			Project:    ji.Project,
+			CapsuleDir: ji.CapsuleDir,
+			BundleName: ji.BundleName,
+			Git:        ji.Git,
 		},
 	}
 }

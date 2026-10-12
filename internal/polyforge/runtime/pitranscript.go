@@ -10,13 +10,11 @@ package runtime
 //	~/.pi/agent/sessions/<dashified-capsule-dir>--/<ts>-<uuid>.jsonl
 //
 // — and nothing ever reaches the capsule's declared session/ path. The
-// fix follows the v0 late conclusion: the DAEMON owns the sync (locate
-// after spawn, copy into the capsule at every commit boundary, before
-// the commit so the transcript rides git history — ruling C1), and the
-// recovery engine resumes from the capsule copy with the live file as
-// the fallback. The spawn-side env additions are deliberately untouched
-// (the isolation flags and the sanitize point are pinned by v0's
-// measured baseline); this file is the daemon-side compensation.
+// fix: the observe monitor owns the sync (locate after spawn, copy into
+// the capsule at every commit boundary of the dispatch, before the
+// commit so the transcript rides git history — ruling C1), per dispatch
+// onto the path its step_started fact names. This file only holds the
+// locator the monitor calls.
 //
 // The session-directory naming rule is the harness's own, mirrored here
 // verbatim from its source: the resolved cwd is stripped of its one
@@ -27,7 +25,6 @@ package runtime
 // capsule directory itself must carry the canonical work-item id (F2).
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,55 +122,4 @@ func LocateLiveTranscript(sessionsRoot, capsuleDir string, notBefore time.Time) 
 		}
 	}
 	return best
-}
-
-// copyTranscriptReadonly copies the live transcript onto the capsule's
-// declared session path. "Read-only" is about the SOURCE: it is opened
-// for reading only, never truncated, never renamed. The destination is
-// written atomically (tmp+rename) with 0644 — deliberately writable,
-// because the resume path hands the very same file back to the harness
-// as its --session continuation target, and the harness must be able to
-// append to it.
-func copyTranscriptReadonly(src, dst string) error {
-	if src == "" || dst == "" {
-		return nil
-	}
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	return atomicWrite(dst, data, 0o644)
-}
-
-// syncTranscriptBeforeSeal is the RUNTIME half of the F3 transcript
-// sync: the two commit points the observe lane cannot see — the seal
-// push of a CLI-driven Stop (pause/wrap) and the commit-dirty-on-recover
-// — copy the dead derivation's live transcript into the capsule before
-// their commit, so the transcript rides the chain (ruling C1) even when
-// the last step boundary is long past. Best-effort and quiet: the commit
-// proceeds without the transcript when the source cannot be read.
-func (r *Runtime) syncTranscriptBeforeSeal(j *job) {
-	j.mu.Lock()
-	src := j.liveTranscript
-	startedAt := j.agentStartedAt
-	dst := j.transcript
-	capsuleDir := j.capsuleDir
-	j.mu.Unlock()
-	if dst == "" {
-		return
-	}
-	if src == "" {
-		if spawnAt, err := time.Parse(time.RFC3339Nano, startedAt); err == nil {
-			src = r.locateLive(capsuleDir, spawnAt)
-		}
-	}
-	if src == "" || src == dst {
-		return
-	}
-	if err := copyTranscriptReadonly(src, dst); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: seal transcript sync skipped: %v\n", j.wi, err)
-	}
 }
