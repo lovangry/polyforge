@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
 // DaemonClient speaks the daemon's UDS HTTP face: HTTP over the local
@@ -32,6 +33,11 @@ import (
 //	POST /jobs/{id}/ship  {}                 GET  /status
 //	POST /mode {"action":...}               POST /batch_submit {"wi_ids":[]}
 //	POST /shutdown
+//
+// pf watch lane (v2-converge §3): GET /jobs/{id}/watch?after=<seq> (one WI's
+// authoritative snapshot + events after a cursor) and the daemon-held chat
+// subscriptions under /chats/{chat}/ (subscribe, unsubscribe, subscriptions,
+// ack, heartbeat, attention) — see protocol/watch.go.
 //
 // Error envelope: the daemon answers non-2xx with the SAME typed
 // envelope the aihub face uses (common/api.Error: {code, detail} at the
@@ -369,4 +375,78 @@ func (d *DaemonClient) BatchSubmit(wiIDs []string) (json.RawMessage, error) {
 // Shutdown triggers graceful shutdown (quiesce).
 func (d *DaemonClient) Shutdown() (json.RawMessage, error) {
 	return d.do("POST", "/shutdown", "", map[string]any{}, nil)
+}
+
+// ---------------------------------------------------------------------------
+// pf watch lane routes.
+// ---------------------------------------------------------------------------
+
+// WatchSnapshot reads one WI's authoritative state plus the events after
+// the cursor (first call: 0).
+func (d *DaemonClient) WatchSnapshot(wiID string, after int64) (*protocol.WatchSnapshot, error) {
+	raw, err := d.do("GET", "/jobs/"+url.PathEscape(wiID)+"/watch", "after="+strconv.FormatInt(after, 10), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var s protocol.WatchSnapshot
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("decode the watch snapshot: %w", err)
+	}
+	return &s, nil
+}
+
+func chatPath(chat, tail string) string { return "/chats/" + url.PathEscape(chat) + "/" + tail }
+
+// ChatSubscriptions lists a chat's daemon-held subscriptions.
+func (d *DaemonClient) ChatSubscriptions(chat string) (protocol.ChatSubscriptions, error) {
+	var out protocol.ChatSubscriptions
+	raw, err := d.do("GET", chatPath(chat, "subscriptions"), "", nil, nil)
+	if err != nil {
+		return out, err
+	}
+	return out, json.Unmarshal(raw, &out)
+}
+
+// ChatSubscribe subscribes (or unsubscribes) a chat to a WI.
+func (d *DaemonClient) ChatSubscribe(chat, wi string, subscribe bool) (protocol.ChatSubscribeAnswer, error) {
+	var out protocol.ChatSubscribeAnswer
+	tail := "subscribe"
+	if !subscribe {
+		tail = "unsubscribe"
+	}
+	raw, err := d.do("POST", chatPath(chat, tail), "", map[string]any{"wi": wi}, nil)
+	if err != nil {
+		return out, err
+	}
+	return out, json.Unmarshal(raw, &out)
+}
+
+// ChatAck records a watcher's cursor/notified state for one subscription.
+func (d *DaemonClient) ChatAck(chat string, a protocol.ChatAck) error {
+	_, err := d.do("POST", chatPath(chat, "ack"), "", a, nil)
+	return err
+}
+
+// ChatHeartbeat marks the chat's watcher live.
+func (d *DaemonClient) ChatHeartbeat(chat string, pid int) error {
+	_, err := d.do("POST", chatPath(chat, "heartbeat"), "", map[string]any{"pid": pid}, nil)
+	return err
+}
+
+// ChatAttention lists WIs that need a human and have no live watcher
+// (marking them shown to the chat).
+func (d *DaemonClient) ChatAttention(chat, owner string) ([]protocol.ChatAttentionItem, error) {
+	q := url.Values{"mark": {"1"}}
+	if owner != "" {
+		q.Set("owner", owner)
+	}
+	raw, err := d.do("GET", chatPath(chat, "attention"), q.Encode(), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out protocol.ChatAttention
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
 }

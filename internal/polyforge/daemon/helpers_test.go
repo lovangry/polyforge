@@ -145,7 +145,9 @@ type fakeHub struct {
 	resumeBlockeds    []string
 	terminateBlockeds []string
 	queues            []api.WorkItem
-	blockEnd          chan struct{} // non-nil: SessionEnd parks until closed
+	// reporters maps a canonical id to the WI reporter (owner fallback).
+	reporters map[string]string
+	blockEnd  chan struct{} // non-nil: SessionEnd parks until closed
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string
@@ -280,7 +282,7 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	if st == "" {
 		st = api.StatusRunning
 	}
-	return &api.WorkItem{ID: id, Status: st, ProjectName: "proj"}, nil
+	return &api.WorkItem{ID: id, Status: st, ProjectName: "proj", Reporter: h.reporters[id]}, nil
 }
 
 // ResumeBlockedWorkItem / TerminateBlockedWorkItem are the §6.4 owner

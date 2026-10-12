@@ -182,6 +182,7 @@ func (c *Config) fill() {
 // Daemon is the assembled local runtime.
 type Daemon struct {
 	chats *chatStore
+	subs  *subStore // pf watch: chat subscriptions, cursors, watcher liveness
 	cfg   Config
 	hub   Hub
 	modes *ModeCtl
@@ -326,8 +327,13 @@ func New(cfg Config) (*Daemon, error) {
 		}
 	}
 
+	subs, err := newSubStore(filepath.Join(cfg.DataDir, chatSubsFile))
+	if err != nil {
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
 	d := &Daemon{
 		chats:    &chatStore{path: filepath.Join(cfg.DataDir, chatsFile)},
+		subs:     subs,
 		cfg:      cfg,
 		hub:      cfg.Hub,
 		modes:    NewModeCtl(),
