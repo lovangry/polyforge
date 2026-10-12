@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/polyforge/driver"
 	rt "github.com/silgrid/polyforge/internal/polyforge/runtime"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
@@ -55,7 +56,7 @@ func (h *Handle) Done() bool {
 func (h *Handle) Terminate(bound time.Duration) error {
 	// The join matters (astra r2 #1): a cancel that merely returns lets
 	// the old driver goroutine keep living into the relaunch — its last
-	// journal appends could land AFTER the replacement read JournalMax,
+	// journal appends could land AFTER the replacement read the journal,
 	// so both dispatch the same "fresh" ordinal and the stale-envelope
 	// fence is defeated again. Terminate now blocks, bounded, until the
 	// driver's Run actually returned (done closes exactly then); the
@@ -157,7 +158,7 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 	// the predecessor's dispatches used, so stale drops stay fenced.
 	// A journal read failure other than absence refuses the start — the
 	// ledger is the fence's source of truth, never silently fresh.
-	stepSeed, err := driver.JournalMax(cfg.CapsuleDir)
+	stepSeed, err := capsule.SpawnJournalMaxN(cfg.CapsuleDir)
 	if err != nil {
 		return nil, fmt.Errorf("bridge: spawn journal unreadable: %w", err)
 	}
@@ -174,7 +175,7 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 		BundleDir:      adapter.BundleDir,
 		Workflow:       adapter.Workflow, // parsed once, shared with the adapter
 		Spawner:        adapter,
-		SpawnN:         stepSeed,
+		SpawnN:         int64(stepSeed),
 		Log:            logger,
 		Link:           cfg.Link,
 		Limits:         cfg.Limits,

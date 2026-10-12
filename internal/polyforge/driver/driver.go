@@ -128,7 +128,7 @@ type Driver struct {
 
 	cfg Config
 	log EventLogger
-	// degraded latches when atomicPersist succeeds at rename but fails
+	// degraded latches when atomicfile.Write succeeds at rename but fails
 	// at the post-rename directory fsync: disk may hold the new state
 	// while memory rolled back. All further transitions are refused
 	// until reconciliation (review issue 6).

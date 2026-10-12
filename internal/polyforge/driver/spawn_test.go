@@ -614,36 +614,10 @@ func hashOfFile(t *testing.T, capDir, rel string) string {
 // ---------------------------------------------------------------------------
 // Journal seeding + torn-tail repair (astra r2 #2/#3 regressions).
 
-// TestJournalMaxSeedsFromLedger: the ordinal ledger answers its max;
-// absence answers zero (a fresh capsule), unparsable lines are skipped.
-func TestJournalMaxSeedsFromLedger(t *testing.T) {
-	dir := t.TempDir()
-	if got, err := JournalMax(dir); got != 0 || err != nil {
-		t.Fatalf("absent journal must answer (0, nil), got (%d, %v)", got, err)
-	}
-	writeCapsuleFile(t, dir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
-		"{\"spawn_n\":1}\n{\"spawn_n\":3}\n{\"spawn_n\":2}\n")
-	if got, err := JournalMax(dir); got != 3 || err != nil {
-		t.Fatalf("journal max must be 3, got (%d, %v)", got, err)
-	}
-}
-
-// TestJournalMaxTornTailTolerated: a crash-torn tail (half a JSON line)
-// is skipped by the loose reader — but a READABLE existing line before
-// it still seeds the max.
-func TestJournalMaxTornTailTolerated(t *testing.T) {
-	dir := t.TempDir()
-	writeCapsuleFile(t, dir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
-		"{\"spawn_n\":7}\n{\"spawn_n\":8, \"trans") // torn tail, no newline
-	if got, err := JournalMax(dir); got != 7 || err != nil {
-		t.Fatalf("torn tail must seed the last parsable ordinal 7, got (%d, %v)", got, err)
-	}
-}
-
 // TestAppendSpawnJournalRepairsTornTail is the astra-r2 #2 regression:
 // a torn tail must never GLUE onto the next record — the repair isolates
 // the half-line as its own line and the appended record stays parsable,
-// so the next JournalMax sees it and the relaunch does not re-derive
+// so the next journal read sees it and the relaunch does not re-derive
 // the same ordinal.
 func TestAppendSpawnJournalRepairsTornTail(t *testing.T) {
 	ad, _, capDir := spawnEnv(t)
@@ -677,7 +651,7 @@ func TestAppendSpawnJournalRepairsTornTail(t *testing.T) {
 		t.Fatalf("the appended record must be its own parsable line with spawn 9, got %q", lines[2])
 	}
 	// and the ledger now seeds past the crashed dispatch's ordinal
-	if got, err := JournalMax(capDir); got != 9 || err != nil {
+	if got, err := capsule.SpawnJournalMaxN(capDir); got != 9 || err != nil {
 		t.Fatalf("after repair the ledger must seed 9, got (%d, %v)", got, err)
 	}
 }

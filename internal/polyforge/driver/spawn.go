@@ -38,13 +38,14 @@ package driver
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/spawn"
@@ -62,11 +63,6 @@ const (
 	// ordinal — the ordinal IS the fence, so a superseded derivation's
 	// leftover file is never collected).
 	dirPendingResults = "pending-results"
-	// spawnJournalFile is the capsule spawn journal the runtime
-	// maintains (runtime-state/spawn-journal.jsonl): same name, same
-	// line shape — the adapter appends through SpawnParams.Journal so
-	// B2 counter continuity keeps working across both lanes.
-	spawnJournalFile = "spawn-journal.jsonl"
 	// defaultEnvelopePoll is the default envelope-collection cadence.
 	defaultEnvelopePoll = 200 * time.Millisecond
 	// teardownBound bounds the post-envelope process teardown.
@@ -687,28 +683,13 @@ func (a *StepSpawnAdapter) sessionHandle() string {
 // with no journal line (or no journal) answers ("", nil): the caller
 // degrades to a fresh dispatch; only an unreadable journal is an error.
 func (a *StepSpawnAdapter) latestJournalTranscript(stepID string) (string, error) {
-	raw, err := os.ReadFile(filepath.Join(a.WI.CapsuleDir, capsule.DirRuntimeState, spawnJournalFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil // no journal yet: no transcript to resume
-	}
+	entries, err := capsule.ReadSpawnJournal(a.WI.CapsuleDir)
 	if err != nil {
 		return "", fmt.Errorf("driver: resume ordered but the capsule spawn journal is unreadable: %w", err)
 	}
 	bestN := -1
 	best := ""
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var e struct {
-			StepID     string `json:"step_id"`
-			SpawnN     int    `json:"spawn_n"`
-			Transcript string `json:"transcript"`
-		}
-		if json.Unmarshal([]byte(line), &e) != nil {
-			continue // loose reader: skip anything unparsable
-		}
+	for _, e := range entries {
 		if e.StepID == stepID && e.Transcript != "" && e.SpawnN > bestN {
 			bestN, best = e.SpawnN, e.Transcript
 		}
@@ -727,23 +708,23 @@ func (a *StepSpawnAdapter) appendSpawnJournal(p spawn.Params, stepID, token stri
 	if a.Now != nil {
 		now = a.Now()
 	}
-	entry := map[string]any{
-		"at":             now.UTC().Format(time.RFC3339Nano),
-		"work_item":      p.WorkItemID,
-		"step_id":        stepID,
-		"spawn_token":    token,
-		"pid":            pid,
-		"started_at":     startedAt,
-		"session_handle": p.SessionHandle,
-		"spawn_n":        p.SpawnN,
-		"resume":         p.Resume,
-		"transcript":     p.TranscriptPath,
+	entry := capsule.SpawnJournalEntry{
+		At:            now.UTC().Format(time.RFC3339Nano),
+		WorkItem:      p.WorkItemID,
+		StepID:        stepID,
+		SpawnToken:    token,
+		PID:           pid,
+		StartedAt:     startedAt,
+		SessionHandle: p.SessionHandle,
+		SpawnN:        int(p.SpawnN),
+		Resume:        p.Resume,
+		Transcript:    p.TranscriptPath,
 	}
 	blob, err := json.Marshal(entry)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(a.WI.CapsuleDir, capsule.DirRuntimeState, spawnJournalFile)
+	path := filepath.Join(a.WI.CapsuleDir, capsule.DirRuntimeState, capsule.SpawnJournalFile)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -751,7 +732,7 @@ func (a *StepSpawnAdapter) appendSpawnJournal(p spawn.Params, stepID, token stri
 	// journal without its trailing newline, and appending then would
 	// GLUE the next record onto the half-written line — both becoming
 	// unparsable, quietly erasing the ordinal from the loose readers'
-	// view (JournalMax would under-seed, the next relaunch dispatching
+	// view (the ordinal seed would under-seed, the next relaunch dispatching
 	// an ordinal the crashed dispatch already used). A missing trailing
 	// newline isolates the torn tail as its own (skipped) line and the
 	// new record lands intact.
@@ -789,51 +770,6 @@ func spawnToken(handle string, n int64) string {
 		return fmt.Sprintf("%s#%d", handle, n-1)
 	}
 	return handle
-}
-
-// JournalMax answers the highest spawn ordinal the capsule's spawn
-// journal records (0 when the journal is absent) — the driver-owned
-// derivation ledger: every step dispatch the production adapter
-// spawns appends exactly one line to it. The bridge seeds the driver's
-// STEP-ordinal counter from this ledger, NOT from the job's relaunch
-// ordinal: the step ordinals are the observable contract (the drop
-// path pending-results/<n>.json, the archived envelope dir s<n>, and
-// the e2e fakepi's "Nth envelope action fires for spawn N" all key on
-// them starting at 1 for a fresh capsule), while the job ordinal (≥1
-// since the observe-lane fix) exists for the RTStarted emission.
-// Seeding from the journal keeps both: fresh capsules start steps at
-// 1, and a relaunched driver continues past every ordinal its
-// predecessor used (the fence #97/#99 lessons).
-// Absence answers (0, nil) — a fresh capsule has no ledger yet. Any
-// OTHER read failure answers the error: the ledger is the fence's
-// source of truth and a partially readable one must never be silently
-// treated as fresh (astra r2 #2). Torn/unparsable LINES are tolerated
-// by the loose parser — a crash-torn tail skips those lines only.
-func JournalMax(capsuleDir string) (int64, error) {
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.DirRuntimeState, spawnJournalFile))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	best := int64(0)
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var e struct {
-			SpawnN int64 `json:"spawn_n"`
-		}
-		if json.Unmarshal([]byte(line), &e) != nil {
-			continue // loose reader: a torn line is skipped, never fatal
-		}
-		if e.SpawnN > best {
-			best = e.SpawnN
-		}
-	}
-	return best, nil
 }
 
 // pendingResultPath is the absolute drop path of one derivation's
@@ -1077,5 +1013,5 @@ func (r *stepRun) archive(res *StepResult) error {
 		return err
 	}
 	path := filepath.Join(r.capsuleRoot, capsule.DirArtifacts, "steps", r.sp.StepID, spawnTokenDir(r.sp.SpawnN), "result.json")
-	return atomicPersist(path, blob, 0o644)
+	return atomicfile.Write(path, blob, 0o644)
 }

@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -218,7 +220,7 @@ func TestRestartDropsPreSessionRecord(t *testing.T) {
 		SpawnN:     1,
 	}
 	blob, _ := json.MarshalIndent(&stateFile{Version: 1, MachineID: r.cfg.MachineID, Jobs: []*jobRecord{rec}}, "", "  ")
-	if err := atomicWrite(r.statePath, blob, stateFilePerm); err != nil {
+	if err := atomicfile.Write(r.statePath, blob, stateFilePerm); err != nil {
 		t.Fatal(err)
 	}
 

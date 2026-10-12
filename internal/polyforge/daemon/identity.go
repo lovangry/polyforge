@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -52,34 +54,10 @@ func ResolveDaemonID(dataDir, requested string, explicit bool) (string, error) {
 	if requested == "" {
 		return "", fmt.Errorf("daemon id is empty")
 	}
-	if err := atomicWriteFile(path, []byte(requested+"\n"), 0o644); err != nil {
+	if err := atomicfile.Write(path, []byte(requested+"\n"), 0o644); err != nil {
 		return "", fmt.Errorf("record daemon id: %w", err)
 	}
 	return requested, nil
-}
-
-// atomicWriteFile lands data via tmp + fsync + rename.
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 // chatStore persists the (harness, harness-session) -> chat id mapping.
@@ -141,7 +119,7 @@ func (s *chatStore) Init(harness, session string) (chatRecord, error) {
 	if err != nil {
 		return chatRecord{}, err
 	}
-	if err := atomicWriteFile(s.path, blob, 0o600); err != nil {
+	if err := atomicfile.Write(s.path, blob, 0o600); err != nil {
 		return chatRecord{}, err
 	}
 	rec.ChatID, rec.Created = id, true

@@ -31,6 +31,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
@@ -100,7 +102,7 @@ func (r *Runtime) writeClaiming(items map[string]*claimingRec) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(r.claimingPath(), blob, stateFilePerm)
+	return atomicfile.Write(r.claimingPath(), blob, stateFilePerm)
 }
 
 // noteClaiming journals one claim intention — the minted session secret

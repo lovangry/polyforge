@@ -40,6 +40,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
@@ -762,14 +764,7 @@ func copyFileReadonly(src, dst string) error {
 		return err
 	}
 	data := sessionjsonl.MarshalRaw(recs)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	tmp := dst + ".tsync.tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, dst)
+	return atomicfile.Write(dst, data, 0o644)
 }
 
 // schedulePush starts one async commit+push sub-goroutine when a newer

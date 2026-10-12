@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 )
@@ -33,13 +35,7 @@ func (d *Daemon) recordLastShutdown(cause ShutdownCause) {
 		return
 	}
 	path := filepath.Join(d.cfg.DataDir, lastShutdownFile)
-	if os.MkdirAll(d.cfg.DataDir, 0o755) != nil {
-		return
-	}
-	tmp := path + ".tmp"
-	if os.WriteFile(tmp, blob, 0o600) == nil {
-		_ = os.Rename(tmp, path)
-	}
+	_ = atomicfile.Write(path, blob, 0o600)
 }
 
 // takeLastShutdown reads and consumes the previous run's shutdown record.
