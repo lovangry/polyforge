@@ -377,8 +377,9 @@ models:
 ```
 
 For a step of the claimed project the list is, highest first: the work
-item's manual `pf submit <id> --models a,b,c` list (every step; local to
-this machine, kept across daemon restart and `pf resume`), else the
+item's manual `pf submit <id> --models a,b,c` list (every step; kept by this
+daemon only — across its restarts and `pf resume` — and a re-claim on
+another machine uses that machine's settings), else the
 step's kind list, else the project's `default`, else the workflow
 bundle's step-level candidates, else the bundle's `defaults` (a
 declared-but-empty yaml list governs: no switchable chain). A project not

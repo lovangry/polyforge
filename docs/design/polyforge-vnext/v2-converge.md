@@ -128,7 +128,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - 计入：上表除"daemon 重启"外的所有死因。**信封被拒（#107 进程内重试，独立上限）不计入。**
 - 清零：gate rewind 回到该步、换到新候选模型、人工"继续"。
 - daemon 重启触发的中断**不归档为失败、不推进候选指针**；一般地，被中断的 attempt 永不推进候选指针。（现状：`FaultClass` 分类层已删除，改为**死因规则**——只有模型类死因 `model_error`、`model_hung`、`step_timeout_slow_model`、`exit_model_class` 推进候选指针；指针在 gate_fail rewind 时重置；见 `driver/candidates.go`、`driver/supervision.go`。事件体与 attempts 记录带 `failure_cause`，不再有 `fault_class`。）
-- （现状：候选列表五级优先，高到低：`pf submit --models a,b,c` 的手工列表（仅本机、按 WI、作用于该 WI 的每一步；随 submit 队列落盘，认领时写入 capsule.json 的 `manual_candidates`，daemon 重启、恢复、`pf resume` 重新认领均沿用）> 工作区 yaml 文件的 `models.<project>.<kind>` > `models.<project>.default` > bundle 步骤自带 `model_candidates` > bundle `defaults.model_candidates`；推进/重置语义不变。见 `workspace/compose.go`。）
+- （现状：候选列表五级优先，高到低：`pf submit --models a,b,c` 的手工列表（仅由本 daemon 保存、按 WI、作用于该 WI 的每一步；随 submit 队列落盘，认领时写入 daemon 数据目录的 `manual-models.json`（不进 capsule），本机 daemon 重启、恢复、`pf resume` 重新认领均沿用，WI 终态（wrapped/failed/canceled）时删除；在另一台机器上重新认领则没有该列表，使用那台机器自己的设置）> 工作区 yaml 文件的 `models.<project>.<kind>` > `models.<project>.default` > bundle 步骤自带 `model_candidates` > bundle `defaults.model_candidates`；推进/重置语义不变。见 `workspace/compose.go`。）
 - 失败处理按死因表（上节）执行；`PolicyFor` / provider·host·operator·schema 分类已随 FaultClass 层删除（`driver/supervision.go`）。
 
 ### 2.4 阈值（已定）

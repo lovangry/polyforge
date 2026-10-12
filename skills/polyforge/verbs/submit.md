@@ -22,8 +22,9 @@ pf submit <id> [--priority low|normal|high|urgent] [--models a,b,c]
 
 `--priority` defaults to `normal`. `--models` is a manual model-candidate
 list for this work item: it is the candidate chain of every step (advancing
-on model-class failures like any list), kept across daemon restarts and
-`pf resume`, local to this machine. Non-empty, comma-separated, no empty
+on model-class failures like any list), kept by this daemon only (across its
+restarts and `pf resume`); a re-claim on another machine uses that machine's
+settings. Non-empty, comma-separated, no empty
 or duplicate ids, else a local bad-input refusal. Candidate precedence,
 highest first: `--models` > yaml `models.<project>.<kind>` > yaml
 `models.<project>.default` > bundle step `model_candidates` > bundle
