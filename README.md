@@ -4,10 +4,10 @@ Work-item orchestration platform: an aihub server (WI store, memory, git
 revision chain) and a pf work-machine binary (CLI + daemon with the Go
 execution driver).
 
-## Install(team machines — read this first)
+## Install (team machines — read this first)
 
-One line, any machine, any harness(or none). Ask the admin for a personal
-API key(`pf_k1_…`), then:
+One line, any machine, any harness (or none). Ask the admin for a personal
+API key (`pf_k1_…`), then:
 
 ```
 curl -s -H "Authorization: token $(gh auth token)" \
@@ -18,16 +18,16 @@ curl -s -H "Authorization: token $(gh auth token)" \
 (requires `gh` authenticated — the repo is private. Override the
 server host with `PF_HOST=<host>` if it ever moves.)
 
-It installs the `pf` binary(SHA-verified from the release server), writes
+It installs the `pf` binary (SHA-verified from the release server), writes
 `~/.config/polyforge/cli.toml`, installs the `skills/polyforge` routing
-skill(pi harness → pi package;other harnesses with a skills dir →
-directory copy;otherwise CLI-only), and verifies connectivity. Execution
-machines(ones that run a pf daemon)add the daemon per `tools/install.sh` — the
+skill (pi harness → pi package; other harnesses with a skills dir →
+directory copy; otherwise CLI-only), and verifies connectivity. Execution
+machines (ones that run a pf daemon) add the daemon per `tools/install.sh` — the
 admin registers the machine identity first. Daily use from a session is
-natural language via the `polyforge` routing skill;from a terminal it's
+natural language via the `polyforge` routing skill; from a terminal it's
 `pf queue`, `pf submit`, `pf answer`, `pf ops status`, …
 
-## Quickstart(developers — from-zero smoke run)
+## Quickstart (developers — from-zero smoke run)
 
 A from-zero smoke run on one machine: start a local aihub, set up a
 project and a machine identity, file a minimal work item, and drive it
@@ -209,7 +209,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/polyforge/sessionjsonl` | The single parser of the harness session-jsonl format (live transcript tail extraction). |
 | `internal/polyforge/supervise` | The driver↔supervisor contract: facts, verdicts and the per-WI link (v2-converge §2.2–2.5). |
 | `internal/polyforge/workspace` | The `.polyforge.yaml` per-project model-candidates loader, read and validated by the daemon before every claim (an invalid file refuses the claim without claiming). |
-| `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, and the answer HTTP face over the monitors. |
+| `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, session verification, and the live activity / pending-question / progress views the daemon reads. |
 | `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules, human gate, command-evidence gate). |
 | `internal/polyforge/watcher` | The `pf watch` engine: decision classification (fixed-template wake-up lines) and the resident per-chat watcher with its progress file. |
 | `internal/polyforge/runtime` | Runtime lane: the WI lifecycle manager (Start/Stop/Recover/Restart), the pi-harness agent spawner, the six-layer process cleanup and the recovery engine. |

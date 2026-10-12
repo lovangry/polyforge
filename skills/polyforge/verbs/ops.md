@@ -54,14 +54,15 @@ end), `CORE-410` (terminal).
   `[workspace]` section the daemon routes capsules into, polyforge#113;
   per-WI capsules live at `<workspace>/capsules/<wi_id>`), and a
   jobs table (WORK
-  ITEM, STATUS, ATTEMPT, AGENT PID, QUESTION, LAST-PROGRESS). This is
+  ITEM, STATUS, SESSION, SPAWN, AGENT PID, QUESTION, STEP-AGE, LAST-WORK;
+  plus ORIGIN when some job has one). This is
   bookkeeping about what this machine manages — not workflow execution
-  progress (`pf watch` is the progress verb) — with one deliberately
-  progress-shaped exception: LAST-PROGRESS is mm:ss since the job's
-  stream last proved **agent progress** (`-` when no progress record
-  exists). UI noise never refreshes it, so a job that is chattering but
-  wedged reads as STALE, not fresh. A LAST-PROGRESS over ~10 minutes on
-  a non-`needs_input` job is a stalled job — report it to the owner.
+  progress (`pf watch` is the progress verb) — with two deliberately
+  progress-shaped exceptions: STEP-AGE is mm:ss since the current dispatch
+  began, and LAST-WORK is mm:ss since its harness last did real work (`-`
+  when there is none). UI noise never refreshes LAST-WORK, so a job that is
+  chattering but wedged reads as stale, not fresh. A LAST-WORK over ~10
+  minutes on a non-`needs_input` job is a stalled job — report it to the owner.
   A work item whose capsule directory is missing at restart
   (`capsule_missing`) or whose project is no longer mapped
   (`project_unmapped`) is not listed here: the daemon sets it `blocked` at

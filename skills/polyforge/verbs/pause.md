@@ -2,9 +2,11 @@
 
 Execution-plane verb: routed to the local daemon (the pause route: a close
 of the current generation with reason `paused`). The daemon seals the
-capsule read-only and ends the generation server-side; the work item
-becomes `paused` and the only way back is the `resume` verb (always a
-fresh claim, generation+1).
+capsule read-only and closes the session as `paused`; the work item
+becomes `paused` and the only way back is the `resume` verb. The session
+is KEPT (it is not cleared like a wrap/fail/block): `pf resume` on a paused
+work item is a hub PATCH that clears `clean_pause`, and the holder daemon
+attaches to the kept session on its next start.
 
 ## Triggers
 
@@ -24,7 +26,7 @@ the end-generation call.
 ## Success
 
 `pause requested for <id>` plus the daemon's raw answer (`--json`: the raw
-answer alone). The generation closes for good; the sealed capsule stays on
+answer alone). The local run stops but the session is kept; the sealed capsule stays on
 disk as the read-only scene a later resume continues from.
 
 ## Failure branches

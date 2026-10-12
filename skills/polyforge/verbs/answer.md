@@ -26,18 +26,21 @@ resolvable.
 
 ## Success
 
-`answer <a_…> delivered for question <q_…>`: the driver accepted the answer
+`answer delivered for question <q_…>` (`--json`: the daemon's raw answer,
+`{"status":"accepted","question_id":"q_…"}`): the driver accepted the answer
 for its pending question and the parked step resumes — `pf watch` to follow
 it land. An answer is applied once: a second answer to a question that was
-already answered is refused with
-`ANSWER-409` (surfaced as `DAEMON-409`) — it is never re-applied and does not
-return the first submission's outcome. Observe to confirm the first answer landed.
+already answered is refused with `ANSWER-409` — it is never re-applied and
+does not return the first submission's outcome. Run `pf watch <id> --once` to
+confirm the first answer landed.
 
 ## Failure branches
 
 | Code | When | What to tell the user |
 |---|---|---|
-| `DAEMON-409` | The `question_id` does not match the waiting step's persisted question, was already consumed, or another delivery of the same answer is in flight; or the work item has no live driver handle (the workflow is between derivations) | The question is stale or mistyped — run `pf watch <id> --once` again, take the currently printed `question_id`, and answer that one; for an in-flight duplicate or a workflow between derivations, simply retry shortly. |
+| `ANSWER-409` | The `question_id` does not match the waiting step's persisted question, was already consumed, or another delivery of the same answer is in flight | The question is stale or mistyped — run `pf watch <id> --once` again, take the currently printed `question_id`, and answer that one; for an in-flight duplicate, simply retry shortly. |
+| `ANSWER-400` | No `--question` was given and the work item has no pending question | Nothing is waiting for an answer — check `pf watch <id> --once`; do not retry blindly. |
+| `DAEMON-409` | The work item has no live driver handle (the workflow is between derivations) | Retry shortly, after the daemon re-derives the workflow. |
 | `DAEMON-403` | The `--by` identity does not match the request's caller identity | The answerer identity and the caller identity must be the same — fix `--by` / `PF_USER_ID`, or answer as yourself. |
 | `DAEMON-404` | No local job for this work item | The work item is not running on this machine — answer from the machine that runs it. |
 | (no code) `answer: --text is required` / `… identity required` | Local usage refusal | Fill in the required flags; no request left the machine. |
@@ -45,5 +48,5 @@ return the first submission's outcome. Observe to confirm the first answer lande
 | `dial unix …` | Daemon not running | Start the daemon or check `--socket`. |
 
 Answers bind per `question_id`: if the step re-asks, it mints a **new**
-question id — never reuse an old answer command; read the new one with `pf watch --once` and answer it
-question.
+question id — never reuse an old answer command; read the new one with
+`pf watch --once` and answer that question.

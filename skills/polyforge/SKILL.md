@@ -76,8 +76,9 @@ accepts an id.
 | help / what skills / usage / 速查 / 怎么用 | `verbs/help.md` | CLI |
 
 Disambiguation: "continue / go on" **mid-run** routes to `watch` (`pf watch <wi> --once`), not
-`resume` — `resume` is "continue": it reactivates a **paused** WI or a
-**blocked** one (always a fresh claim). A blocked WI has exactly two human
+`resume` — `resume` is "continue": it reactivates a **paused** WI (a hub
+PATCH only — the kept session is re-attached by its holder daemon) or a
+**blocked** one (the daemon re-claims it and resumes from the checkpoint). A blocked WI has exactly two human
 moves: continue = `resume`, abandon = `cancel` (both are allowed to the task's reporter, a project maintainer or an admin).
 A WI whose capsule directory went missing, or whose project lost its
 `[workspace]` mapping, across a daemon restart is simply set `blocked` (the
@@ -100,7 +101,8 @@ proactive face, and it carries exactly two kinds of signal:
   context.
 - **Decisions** — a question to answer or gate to pass, a failed / blocked /
   completed workflow, a step judged dead, candidates exhausted, a rejected or
-  dropped submit, a capsule or project needing repair, a daemon restart.
+  dropped submit, a blocked work item (including a missing capsule or an
+  unmapped project), a daemon restart.
   These wake you with ONE fixed-template line:
   `[polyforge] <wi> <kind> — <short fixed phrase>; this is a human decision,
   the agent must not answer it`.
