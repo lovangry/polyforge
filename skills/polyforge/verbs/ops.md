@@ -62,10 +62,11 @@ end), `CORE-410` (terminal).
   exists). UI noise never refreshes it, so a job that is chattering but
   wedged reads as STALE, not fresh. A LAST-PROGRESS over ~10 minutes on
   a non-`needs_input` job is a stalled job — report it to the owner.
-  A job with STATUS `repair_pending` is a work item the daemon parked at
-  restart because its capsule directory is missing (`capsule_missing`) or
-  its project is no longer mapped (`project_unmapped`); its session is
-  kept. The owner's moves: fix the cause and `pf resume <id>`, or give up
+  A work item whose capsule directory is missing at restart
+  (`capsule_missing`) or whose project is no longer mapped
+  (`project_unmapped`) is not listed here: the daemon sets it `blocked` at
+  the hub (reason note names the cause; the event shows in `pf watch`).
+  The owner's moves: fix the cause if any and `pf resume <id>`, or give up
   with `pf cancel <id>` / `pf wrap <id> --fail`.
 - `auto` / `max` bare: `auto: on|off` / `max: N`; a change answers with
   the effective `{"auto":..,"max":..}`.

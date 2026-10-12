@@ -538,7 +538,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.rt.Restart(d.runCtx); err != nil {
 		// Startup abort: the runtime could not be reconciled as a whole
 		// (a missing capsule or an unmapped project is NOT such a case —
-		// v2-converge §6 parks only that work item repair_pending and
+		// v2-converge §6 blocks only that work item at aihub and
 		// Restart returns nil), so serving would present clients an
 		// unreconciled runtime. Unwind as a startup
 		// abort: close the face this process bound but never served, stop
@@ -829,14 +829,13 @@ func (l driverEventLog) Append(wi, kind string, body any) error {
 
 // occupiedSlots is the set of WIs holding a concurrency slot: the
 // runtime's live jobs, whoever started them (dispatch, restart recovery,
-// resume-blocked, repair). Finding 2 (v1.5 review): a RETAINED paused job
+// resume-blocked). Finding 2 (v1.5 review): a RETAINED paused job
 // holds no agent and no writer — it must not pin a slot (four
-// operator-paused jobs would otherwise starve the whole daemon); a
-// repair_pending park holds no agent and no slot either.
+// operator-paused jobs would otherwise starve the whole daemon).
 func (d *Daemon) occupiedSlots() map[string]bool {
 	live := map[string]bool{}
 	for _, ji := range d.rt.List() {
-		if ji.State == runtime.StatePaused || ji.RepairPending != "" {
+		if ji.State == runtime.StatePaused {
 			continue
 		}
 		live[ji.WorkItem] = true

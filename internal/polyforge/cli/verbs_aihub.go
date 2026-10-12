@@ -513,7 +513,7 @@ func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 var cmdCancel = &Command{
 	Name:    "cancel",
 	Group:   GroupData,
-	Summary: "Cancel (abandon) a queued/paused/blocked work item, or one parked repair_pending on this daemon",
+	Summary: "Cancel (abandon) a queued/paused/blocked work item",
 	Usage:   "pf cancel <id>",
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -522,12 +522,6 @@ var cmdCancel = &Command{
 		}
 		raw, err := ctx.aihub().CancelWorkItem(args[0])
 		if err != nil {
-			// A repair_pending WI is still `running` at aihub under THIS
-			// daemon's kept session, so the hub's cancel refuses it; the
-			// daemon holds the secret and ends the session itself.
-			if abandoned, aerr := abandonRepairPending(ctx, args[0], "canceled"); abandoned || aerr != nil {
-				return aerr
-			}
 			return err
 		}
 		ctx.finish(raw, func() {

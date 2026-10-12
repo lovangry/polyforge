@@ -211,29 +211,9 @@ var cmdResume = &Command{
 		// Dispatch order, decided by WI state (v2 merge of D1 + D2):
 		//  1. hub status blocked  -> the human-key resume-blocked door, then
 		//     the daemon's claim/start (below).
-		//  2. not blocked, and THIS daemon holds the WI parked repair_pending
-		//     (capsule missing / project unmapped at restart; the session is
-		//     kept) -> the daemon re-checks and resumes it in place
-		//     (RepairResume); a paused WI has its clean_pause
-		//     cleared first so the in-place attach is not held back.
-		//  3. otherwise (paused) -> clear clean_pause on the hub; no daemon.
+		//  2. otherwise (paused) -> clear clean_pause on the hub; no daemon.
 		// end_pending (D2) is a distinct local state with no door of its own:
 		// the daemon retries its SessionEnd itself.
-		if wi.Status != api.StatusBlocked && localRepairPending(ctx, wi.ID) {
-			if wi.Status == api.StatusPaused {
-				if err := patchCleanPause(ctx, args[0], false); err != nil {
-					return err
-				}
-			}
-			raw, err := ctx.daemon().Resume(args[0], "")
-			if err != nil {
-				return err
-			}
-			ctx.finish(raw, func() {
-				fmt.Fprintf(ctx.Stdout, "resumed %s: the repair_pending work item was re-checked and continues in place with its kept session\n", args[0])
-			})
-			return nil
-		}
 		if wi.Status != api.StatusBlocked {
 			if err := patchCleanPause(ctx, args[0], false); err != nil {
 				return err
@@ -263,54 +243,6 @@ var cmdResume = &Command{
 	},
 }
 
-// localRepairPending reports whether the local daemon holds wiID parked as
-// repair_pending. Any daemon failure (not running, wrong socket) is "no":
-// the plain paused path never needs the daemon.
-func localRepairPending(ctx *Context, wiID string) bool {
-	raw, err := ctx.daemon().Status()
-	if err != nil {
-		return false
-	}
-	var st StatusResponse
-	if json.Unmarshal(raw, &st) != nil {
-		return false
-	}
-	for _, j := range st.Jobs {
-		if j.WorkItemID == wiID && j.Status == "repair_pending" {
-			return true
-		}
-	}
-	return false
-}
-
-// abandonRepairPending is the give-up door of a WI the LOCAL daemon holds
-// parked repair_pending (capsule missing / project unmapped at restart): the
-// WI is still `running` at aihub under the daemon's kept session, so the
-// hub's cancel refuses it and only the daemon holds the secret to end that
-// session. Authorization follows the continue/abandon doors: the HUMAN's own
-// key is checked at aihub first (reporter / maintainer / admin, a read-only
-// probe), and only then is the daemon asked — its machine key is not that
-// caller. verdict is "canceled" (pf cancel) or "failed" (pf wrap --fail).
-// handled=false with a nil error means the WI is not parked here and the
-// caller proceeds with its normal path.
-func abandonRepairPending(ctx *Context, id, verdict string) (handled bool, err error) {
-	wi, gerr := ctx.aihub().GetWorkItem(id)
-	if gerr != nil || wi.Status != api.StatusRunning || !localRepairPending(ctx, wi.ID) {
-		return false, nil
-	}
-	if err := ctx.aihub().CloseAuth(id); err != nil {
-		return true, err
-	}
-	raw, err := ctx.daemon().AbandonRepair(id, verdict)
-	if err != nil {
-		return true, err
-	}
-	ctx.finish(raw, func() {
-		fmt.Fprintf(ctx.Stdout, "%s %s: the repair_pending work item was abandoned — the daemon ended its session and dropped the parked record\n", verdict, id)
-	})
-	return true, nil
-}
-
 // ---------------------------------------------------------------------------
 // wrap — wrap (or fail) a running WI via the daemon.
 // ---------------------------------------------------------------------------
@@ -337,9 +269,6 @@ var cmdWrap = &Command{
 		// against the person typing, not the daemon's machine key). No
 		// daemon step follows: the bounded close already dropped the job.
 		if reason == "fail" {
-			if abandoned, aerr := abandonRepairPending(ctx, args[0], "failed"); abandoned || aerr != nil {
-				return aerr
-			}
 			if wi, gerr := ctx.aihub().GetWorkItem(args[0]); gerr == nil && wi.Status == api.StatusBlocked {
 				raw, err := ctx.aihub().TerminateBlockedWorkItem(args[0])
 				if err != nil {

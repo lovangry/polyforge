@@ -145,7 +145,7 @@ type jobQueue struct {
 	inflight map[string]qEntry
 	// occupied returns the WIs holding a concurrency slot, derived from
 	// the runtime's live job list — the single source of truth, so jobs
-	// recovered by a restart or resumed by a repair count like dispatched
+	// recovered by a restart count like dispatched
 	// ones (there is no separate running set to drift).
 	occupied func() map[string]bool
 	maxConc  int

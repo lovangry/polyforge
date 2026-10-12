@@ -88,7 +88,7 @@ func ev(seq int64, kind string) protocol.EventEntry {
 
 func TestDecisionTableClassifiesTheDocumentedKinds(t *testing.T) {
 	for _, kind := range []string{"needs_input", "step_dead", "candidates_exhausted", "submit_rejected",
-		"submit_dropped", "capsule_missing", "project_unmapped", "daemon_restarted", "terminal"} {
+		"submit_dropped", "daemon_restarted", "terminal"} {
 		if _, ok := ClassifyEvent(kind); !ok {
 			t.Errorf("%s must be decision-worthy", kind)
 		}

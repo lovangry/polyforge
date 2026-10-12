@@ -659,12 +659,12 @@ func blockedSealTx(tx txExecer, wiID string) (head, machine string) {
 }
 
 // End is the session-fenced terminal verdict: hash matches → set the
-// status (wrapped|failed|canceled|blocked), CLEAR the session row entirely (M2:
+// status (wrapped|failed|blocked), CLEAR the session row entirely (M2:
 // blocked = status blocked + cleared session, excluded from the claim
 // gate until a human unblocks), event session_ended.
 func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdentity string) error {
 	switch req.Status {
-	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked, api.StatusCanceled:
+	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked:
 	case api.StatusPaused:
 		// Merge amend (Lane B/C complaint): "paused" routes to the M3
 		// pause transition — the session is KEPT (restart attaches), the
@@ -672,7 +672,7 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 		// three terminal verdicts clear the session row.
 		return m.Pause(wiID, req.SessionID, req.CleanPause, req.Note, callerIdentity)
 	default:
-		return Fail(api.ErrCoreBadInput, "", "status must be one of wrapped|failed|canceled|blocked|paused")
+		return Fail(api.ErrCoreBadInput, "", "status must be one of wrapped|failed|blocked|paused")
 	}
 	tx, err := m.db.Begin()
 	if err != nil {
@@ -693,7 +693,7 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 		"session_hash=NULL", "session_fingerprint=NULL", "session_machine=NULL",
 		"session_owner=NULL", "session_started_at=NULL", "clean_pause=0"}
 	args := []any{req.Status, now}
-	if req.Status == api.StatusWrapped || req.Status == api.StatusFailed || req.Status == api.StatusCanceled {
+	if req.Status == api.StatusWrapped || req.Status == api.StatusFailed {
 		sets = append(sets, "closed_at=?")
 		args = append(args, now)
 	}

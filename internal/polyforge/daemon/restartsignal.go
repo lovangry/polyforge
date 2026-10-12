@@ -56,17 +56,13 @@ func (d *Daemon) takeLastShutdown() map[string]any {
 }
 
 // announceRestart writes the durable daemon_restarted event into every WI
-// the daemon recovered or parked (v2 §6 bug 8).
+// the daemon recovered (v2 §6 bug 8).
 func (d *Daemon) announceRestart(prev map[string]any) {
 	if d.obs == nil {
 		return
 	}
 	for _, ji := range d.rt.List() {
 		body := map[string]any{"previous_shutdown": prev, "state": string(ji.State)}
-		if ji.RepairPending != "" {
-			body["state"] = "repair_pending"
-			body["repair_reason"] = ji.RepairPending
-		}
 		_ = d.obs.Events().Append(ji.WorkItem, observe.EvDaemonRestarted, body)
 	}
 }

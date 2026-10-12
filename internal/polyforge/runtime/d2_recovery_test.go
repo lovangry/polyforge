@@ -304,11 +304,10 @@ func TestVerifySealedHead(t *testing.T) {
 	}
 }
 
-// D1 x D2: end_pending and repair_pending are distinct states. An
-// end_pending record whose capsule is gone is NOT parked repair_pending at
-// restart (its SessionEnd retry needs no capsule), RepairResume does not
-// hold it, and the retry still settles the close.
-func TestEndPendingIsNotRepairPending(t *testing.T) {
+// An end_pending record whose capsule is gone still retries its SessionEnd at
+// restart (the close needs no capsule — it is never re-blocked with a
+// missing-capsule reason of its own), and the retry settles the close.
+func TestEndPendingWithGoneCapsuleStillRetries(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
@@ -329,13 +328,7 @@ func TestEndPendingIsNotRepairPending(t *testing.T) {
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if ji, ok := r2.Info(j.wi); ok && ji.RepairPending != "" {
-		t.Fatalf("an end_pending record must never be parked repair_pending, got %q", ji.RepairPending)
-	}
-	if held, _ := r2.RepairResume(context.Background(), j.wi); held {
-		t.Fatal("RepairResume must not hold an end_pending WI")
-	}
-	if hub.endCount() < 1 || hub.lastEnd().Status != api.StatusBlocked {
+	if hub.endCount() < 1 || hub.lastEnd().Status != api.StatusBlocked || hub.lastEnd().Note != "boom" {
 		t.Fatalf("the blocked close must still be retried, got %+v", hub.lastEnd())
 	}
 }

@@ -1398,12 +1398,14 @@ func TestW113InflightCapsulesKeepHomesAcrossRestart(t *testing.T) {
 // relocated.
 // ---------------------------------------------------------------------------
 
-// TestW113UnmappedMidflightWIFailsLoudly pins criterion #11's failure
+// TestW113UnmappedMidflightWIBlocksThenResumes pins criterion #11's failure
 // posture: a mid-flight capsule for a workspace the operator failed to
-// re-add to the mapping makes the restart loud (startup refusal or
-// recovered-job failure — the spec leaves the surface open) naming the
-// project, and the capsule is NOT relocated to another workspace.
-func TestW113UnmappedMidflightWIFailsLoudly(t *testing.T) {
+// re-add to the mapping does not stop the daemon — that work item alone is
+// set to the ordinary aihub `blocked` status with a reason naming the
+// project, nothing stays parked locally, and the capsule is NOT relocated to
+// another workspace. Once the mapping is restored, `pf resume` re-claims it
+// and the workflow finishes.
+func TestW113UnmappedMidflightWIBlocksThenResumes(t *testing.T) {
 	inst := newV1Install(t)
 	w113EnsureProject(t, inst, "ieops")
 	wsA := filepath.Join(t.TempDir(), "w113wsA")
@@ -1440,21 +1442,23 @@ func TestW113UnmappedMidflightWIFailsLoudly(t *testing.T) {
 	d.crash()
 
 	// The operator rewrote the config WITHOUT wsX's mapping (the failed
-	// re-add): restart must be loud about `ieops`.
+	// re-add): the daemon still starts and blocks that work item alone.
 	w113ConfigFile(t, fullCfgPath, inst.url, inst.adminKey, "",
 		[]w113WS{{key: wsA, projects: []string{"e2e"}}})
 	d2 := w113NewDaemon(t, inst,
 		w113DOptConfig(fullCfgPath), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	served, output, _ := d2.boot(30 * time.Second)
-	if served {
-		// The recovered-job shape: the failure surfaces in the running
-		// daemon's diagnostics.
-		waitUntil(t, 30*time.Second, "the restarted daemon never diagnosed the unmapped mid-flight work item", func() bool {
-			return strings.Contains(d2.logTail(), "ieops")
-		})
-	} else if !strings.Contains(output, "ieops") {
-		t.Fatalf("daemon restart without the ieops workspace: exit diagnostics do not name the project (output %q)", output)
+	if !served {
+		t.Fatalf("an unmapped mid-flight project must not stop the daemon: %s", output)
 	}
+	inst.waitWIStatus(t, wi, "blocked", 60*time.Second)
+	if raw := wiRawWithEvents(t, inst, wi); !strings.Contains(raw, "ieops") || !strings.Contains(raw, "[workspace] mapping") {
+		t.Fatalf("the blocked reason does not name the project: %s", raw)
+	}
+	waitUntil(t, 20*time.Second, "the unmapped WI is still held by the daemon", func() bool {
+		snap, _ := d2.pf(inst, "ops", "status")
+		return !strings.Contains(snap, wi)
+	})
 
 	// No relocation: the capsule stays under wsX, nothing appears under
 	// any other workspace.
@@ -1463,6 +1467,24 @@ func TestW113UnmappedMidflightWIFailsLoudly(t *testing.T) {
 	}
 	if _, err := os.Stat(w113Capsule(wsA, wi)); err == nil {
 		t.Fatalf("the mid-flight capsule was relocated to %s", w113Capsule(wsA, wi))
+	}
+
+	// The operator restores the mapping and the human resumes: the work
+	// item is re-claimed under its project's workspace and finishes.
+	d2.stop()
+	w113ConfigFile(t, fullCfgPath, inst.url, inst.adminKey, "",
+		[]w113WS{
+			{key: wsA, projects: []string{"e2e"}},
+			{key: wsX, projects: []string{"ieops"}},
+		})
+	d3 := w113NewDaemon(t, inst,
+		w113DOptConfig(fullCfgPath), w113DOptSock(sock), w113DOptDataDir(dataDir))
+	d3.start()
+	defer d3.stop()
+	d3.pfWant(inst, 0, "resume", wi)
+	inst.waitWIStatus(t, wi, "wrapped", 180*time.Second)
+	if _, err := os.Stat(w113Capsule(wsA, wi)); err == nil {
+		t.Fatalf("the resumed work item was placed under %s", w113Capsule(wsA, wi))
 	}
 }
 

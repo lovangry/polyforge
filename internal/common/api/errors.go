@@ -108,10 +108,6 @@ const (
 	// published state cannot be determined), so a local init — which
 	// would restart the workflow from step 1 — is refused.
 	ErrDaemonCapsuleClone = "DAEMON-516"
-	// ErrDaemonRepairPending is the v2 §6 "continue" refusal: the work
-	// item is parked repair_pending and its capsule directory is still
-	// missing; the detail names the path to restore. The session is kept.
-	ErrDaemonRepairPending = "DAEMON-517"
 	// ErrDaemonSealedHeadMismatch is the cross-daemon continue refusal
 	// (v2-converge §7): a blocked WI continued on a different daemon than
 	// the one that sealed it, whose aihub capsule head is not the head the

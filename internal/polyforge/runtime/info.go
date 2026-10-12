@@ -36,9 +36,6 @@ type JobInfo struct {
 	AgentPID           int
 	AgentStartedAt     string
 	Origin             *Origin
-	// RepairPending is the v2 §6 parked-for-repair reason kind
-	// ("capsule_missing" | "project_unmapped"); "" = not parked.
-	RepairPending string
 	// VerifyPending: the restart session verify could not reach aihub and
 	// is being retried with backoff; the job has no agent yet.
 	VerifyPending bool
@@ -89,7 +86,6 @@ func (j *job) info() JobInfo {
 		AgentPID:           j.agentPID,
 		AgentStartedAt:     j.agentStartedAt,
 		Origin:             j.origin,
-		RepairPending:      j.repairPending,
 		VerifyPending:      j.verifyPending,
 	}
 }
