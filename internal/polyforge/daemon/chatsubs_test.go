@@ -8,6 +8,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
+	"github.com/silgrid/polyforge/internal/polyforge/observe"
 )
 
 func TestSubStorePersistsAcrossRestart(t *testing.T) {
@@ -249,5 +250,21 @@ func waitNeedsInput(t *testing.T, td *testDaemon, wis ...string) {
 			t.Fatalf("jobs never presented needs_input: %+v", jobs)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWatchProgressProjection(t *testing.T) {
+	if p := watchProgress(observe.LiveProgress{InDispatch: true, Step: "s"}); p != nil {
+		t.Fatalf("an empty dispatch has nothing to show: %+v", p)
+	}
+	p := watchProgress(observe.LiveProgress{InDispatch: true, Command: "go test ./...", CommandAgeSec: 42,
+		RecentFiles: []string{"a.go", "b.go"}, ToolCalls: 7})
+	if p == nil || p.Command != "go test ./..." || p.CommandAgeSec == nil || *p.CommandAgeSec != 42 ||
+		len(p.RecentFiles) != 2 || p.ToolCalls == nil || *p.ToolCalls != 7 {
+		t.Fatalf("projection: %+v", p)
+	}
+	p = watchProgress(observe.LiveProgress{InDispatch: true, RecentFiles: []string{"a.go"}})
+	if p == nil || p.Command != "" || p.CommandAgeSec != nil || p.ToolCalls != nil {
+		t.Fatalf("files-only projection: %+v", p)
 	}
 }

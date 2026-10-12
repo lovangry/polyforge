@@ -34,6 +34,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/observe"
 )
 
 const (
@@ -424,10 +425,33 @@ func (d *Daemon) watchSnapshot(wi string, after int64) protocol.WatchSnapshot {
 		snap.Execution = exec
 	}
 	if d.obs != nil {
+		// live progress of the in-flight dispatch (current command, recent
+		// files, tool calls); absent between steps / when nothing is monitored
+		if lp, ok := d.obs.Progress(wi); ok && lp.InDispatch {
+			snap.Progress = watchProgress(lp)
+		}
 		snap.LastSeq = d.lastSeq(wi)
 		snap.Events = append(snap.Events, d.obs.Events().SinceAfter(wi, after)...)
 	}
 	return snap
+}
+
+// watchProgress projects the observe lane's LiveProgress onto the wire
+// block; nil when the dispatch has nothing to show yet.
+func watchProgress(lp observe.LiveProgress) *protocol.WatchProgress {
+	p := &protocol.WatchProgress{Command: lp.Command, RecentFiles: lp.RecentFiles}
+	if lp.Command != "" {
+		age := lp.CommandAgeSec
+		p.CommandAgeSec = &age
+	}
+	if lp.ToolCalls > 0 {
+		n := int64(lp.ToolCalls)
+		p.ToolCalls = &n
+	}
+	if p.Command == "" && len(p.RecentFiles) == 0 && p.ToolCalls == nil {
+		return nil
+	}
+	return p
 }
 
 // readExecution reads the WI's execution.json (the authority), from the
