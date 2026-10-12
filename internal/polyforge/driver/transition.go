@@ -128,7 +128,6 @@ type TransitionRequest struct {
 	Model      string          // step_start: the pinned candidate this dispatch runs under
 	Status     string          // terminal: the target workflow_status
 	Reason     string          // terminal/rewind reason; answer: the answer text
-	FaultClass string          // interrupted: the classified fault of the dead derivation
 	QuestionID string          // answer: the question id being answered
 	AnsweredBy string          // answer: who answered ("" → "owner")
 	// Failure carries a step_failed write's failed-dispatch record.
@@ -763,15 +762,14 @@ func (d *Driver) applyInterruptedLocked(req TransitionRequest) error {
 	}
 	// The interruption is audit only: it is NOT a counted failure (the
 	// per-step failure counter is untouched — a daemon restart or driver
-	// relaunch must not push a step towards blocked) and, with no fault
-	// class, never advances the candidate pointer.
+	// relaunch must not push a step towards blocked) and its cause is not
+	// model-class, so it never advances the candidate pointer.
 	cause := "driver_relaunch"
 	if req.Reason == "daemon_restart" {
 		cause = "daemon_restart"
 	}
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,
-		FaultClass:    req.FaultClass,
 		FailureCause:  cause,
 		AttemptSeq:    seq + 1,
 		StartedAt:     st.StepStartedAt,
@@ -885,7 +883,6 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 	case TransInterrupted:
 		kind = "interrupted"
 		body["step"] = d.exec.CurrentStep
-		body["fault_class"] = req.FaultClass
 		body["detail"] = req.Reason
 	case TransStepFailed:
 		kind = "step_failed"
@@ -923,7 +920,6 @@ func (d *Driver) failureEventsLocked(req TransitionRequest, info *appliedInfo, b
 	body["step"] = req.StepID
 	body["cause"] = dec.Cause
 	body["detail"] = req.Failure.Detail
-	body["fault_class"] = string(dec.FaultClass)
 	body["disposition"] = dec.disposition()
 	body["failure_count"] = dec.Count
 	body["next_dispatch"] = "resume"

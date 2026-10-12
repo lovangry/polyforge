@@ -228,11 +228,11 @@ func w079AttemptStats(t *testing.T, capDir, step string) (providerInfra, gateRew
 	}
 	for _, a := range st.Attempts {
 		cause, _ := a["cause"].(string)
-		fc, _ := a["fault_class"].(string)
+		fc, _ := a["failure_cause"].(string)
 		switch {
 		case cause == "gate_fail_rewind":
 			gateRewind++
-		case cause == "infra_failure" && fc == "provider":
+		case cause == "infra_failure" && isModelClassCause(fc):
 			providerInfra++
 		}
 	}

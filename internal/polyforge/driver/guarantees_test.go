@@ -122,14 +122,14 @@ func TestVerificationEvidenceGate(t *testing.T) {
 }
 
 func TestVerificationEvidenceFromStepIDAndField(t *testing.T) {
-	d := &Driver{wi: WIInfo{ID: "wi_1"}, exec: &capsule.Execution{Steps: map[string]*capsule.Step{}}}
+	d := &Driver{wi: WIInfo{ID: "wi_1"}, workflow: &Workflow{}, exec: &capsule.Execution{Steps: map[string]*capsule.Step{}}}
 	if !d.buildResultSpec("verification", 1).RequireCommandEvidence {
 		t.Fatal("step id verification must require evidence")
 	}
 	if d.buildResultSpec("fix", 1).RequireCommandEvidence {
 		t.Fatal("other steps must not")
 	}
-	wf, err := ParseDriverWorkflow([]byte("steps:\n  - {id: a, requires_human_answer: true}\n  - {id: b, requires_command_evidence: true}\n"))
+	wf, err := parseWorkflow([]byte("steps:\n  - {id: a, requires_human_answer: true}\n  - {id: b, requires_command_evidence: true}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,23 +145,23 @@ func TestShippedBundlesDeclareHumanGates(t *testing.T) {
 		"feature-full": {"grill-review"},
 	}
 	for bundle, ids := range map[string][]string{"feature-full": {"grill"}, "quick-fix": {"grill"}} {
-		wf, err := LoadDriverWorkflow(filepath.Join("..", "..", "..", "workflows", bundle))
+		wf, err := LoadWorkflow(filepath.Join("..", "..", "..", "workflows", bundle))
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, id := range ids {
-			if s := wf.StepByID(id); s == nil || s.RequiresHumanAnswer {
+			if s := wf.step(id); s == nil || s.RequiresHumanAnswer {
 				t.Fatalf("%s/%s allows zero questions and must not declare requires_human_answer", bundle, id)
 			}
 		}
 	}
 	for bundle, ids := range want {
-		wf, err := LoadDriverWorkflow(filepath.Join("..", "..", "..", "workflows", bundle))
+		wf, err := LoadWorkflow(filepath.Join("..", "..", "..", "workflows", bundle))
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, id := range ids {
-			if s := wf.StepByID(id); s == nil || !s.RequiresHumanAnswer {
+			if s := wf.step(id); s == nil || !s.RequiresHumanAnswer {
 				t.Fatalf("%s/%s must declare requires_human_answer", bundle, id)
 			}
 		}

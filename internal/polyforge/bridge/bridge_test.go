@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/spawn"
-	"github.com/silgrid/polyforge/internal/polyforge/driver"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
@@ -89,18 +88,10 @@ func TestInterruptedFromCausePolicy(t *testing.T) {
 	if got := interruptedFromCause("operator daemon shutdown"); got != nil {
 		t.Fatalf("an operator-shaped cause archives nothing, got %+v", got)
 	}
-	for cause, want := range map[string]driver.FaultClass{
-		"agent_death":    "", // unknown: never advances
-		"daemon_restart": "",
-		"driver_stalled": "",
-		"rate limit hit": driver.FaultProvider, // a recognised model-class text
-	} {
+	for _, cause := range []string{"agent_death", "daemon_restart", "driver_stalled", "rate limit hit"} {
 		got := interruptedFromCause(cause)
 		if got == nil {
 			t.Fatalf("cause %q must archive, got nil", cause)
-		}
-		if got.FaultClass != want {
-			t.Fatalf("cause %q classified %q, want %q", cause, got.FaultClass, want)
 		}
 		if got.Detail != cause {
 			t.Fatalf("archive detail %q, want the cause verbatim %q", got.Detail, cause)

@@ -189,19 +189,6 @@ func isHostError(err error) bool {
 	return hostPatterns.MatchString(err.Error())
 }
 
-// faultClassOf maps a failure cause onto the candidate-chain fault class
-// (PolicyFor's input): model-class causes advance the candidate, host
-// blocks, everything else is unclassified (never advances).
-func faultClassOf(cause string) FaultClass {
-	switch cause {
-	case FailModelError, FailModelHung, FailStepTimeoutSlowModel, FailExitModel:
-		return FaultProvider
-	case FailExitHost:
-		return FaultHost
-	}
-	return ""
-}
-
 // ---------------------------------------------------------------------------
 // Thresholds.
 
@@ -396,7 +383,6 @@ func (d *Driver) takeStalled() *supervise.DriverStalled {
 // dispatch.
 type failureDecision struct {
 	Cause       string
-	FaultClass  FaultClass
 	Switch      bool
 	Exhausted   bool // switch wanted, candidate chain spent
 	NoChain     bool // switch wanted, no candidate chain at all
@@ -423,20 +409,19 @@ func (dec failureDecision) disposition() string {
 
 // decideFailureLocked applies the 2.3 table to the step's current state.
 func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFailure) failureDecision {
-	dec := failureDecision{Cause: f.Cause, FaultClass: faultClassOf(f.Cause)}
+	dec := failureDecision{Cause: f.Cause}
 	var sup capsule.StepSupervision
 	if st.Supervision != nil {
 		sup = *st.Supervision
 	}
-	pol := PolicyFor(dec.FaultClass)
 	cands := d.effectiveCandidates(stepID)
 	switch {
-	case pol.Block:
+	case f.Cause == FailExitHost:
 		dec.Block = true
-		dec.Report = pol.Report
+		dec.Report = true
 		dec.BlockReason = fmt.Sprintf("host-class fault (%s): the machine, not the model, is broken: %s", f.Cause, f.Detail)
-	case pol.Advance:
-		ptr := CandidatePointer(attemptsToPointer(st), cands)
+	case IsModelClass(f.Cause):
+		ptr := CandidatePointer(st.Attempts, cands)
 		switch {
 		case len(cands) == 0:
 			dec.NoChain = true
@@ -445,7 +430,7 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 			dec.From, dec.To = cands[ptr], cands[ptr+1]
 		default:
 			// the pointer is already at the end (CandidatePointer caps
-			// there): the failure is still provider-class on the record,
+			// there): the failure is still model-class on the record,
 			// but it counts as a same-model retry
 			dec.Exhausted = true
 		}
@@ -527,7 +512,6 @@ func (d *Driver) applyStepFailedLocked(req TransitionRequest, info *appliedInfo)
 	}
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,
-		FaultClass:    string(dec.FaultClass),
 		FailureCause:  f.Cause,
 		AttemptSeq:    seq + 1,
 		StartedAt:     st.StepStartedAt,

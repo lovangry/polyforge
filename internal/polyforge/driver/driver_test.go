@@ -705,6 +705,7 @@ steps:
     model_candidates: [prov/c]
   - id: check
     gate: true
+    context_policy: fresh
     on_fail:
       action: rewind
       target: code
@@ -715,7 +716,7 @@ steps:
 	if err := os.WriteFile(filepath.Join(dir, "workflow.md"), []byte(fm), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	wf, err := loadWorkflow(dir)
+	wf, err := LoadWorkflow(dir)
 	if err != nil {
 		t.Fatalf("loadWorkflow: %v", err)
 	}
@@ -725,7 +726,7 @@ steps:
 	if len(wf.Steps) != 3 || wf.Steps[0].ID != "spec" || wf.Steps[2].ID != "check" {
 		t.Fatalf("order is the declaration order: %+v", wf.Steps)
 	}
-	if wf.Steps[0].ContextPolicy != "fresh" {
+	if wf.Steps[0].ContextPolicy != ContextInherit {
 		t.Fatalf("spec step: %+v", wf.Steps[0])
 	}
 	if wf.Steps[1].ContextPolicy != "inherit" || len(wf.Steps[1].ModelCandidates) != 1 || wf.Steps[1].ModelCandidates[0] != "prov/c" {
@@ -765,46 +766,6 @@ steps:
 	}
 	if m := sp.spawnAt(2).Model; m != "prov/a" {
 		t.Fatalf("defaults chain for the gate, got %q", m)
-	}
-}
-
-// candidateOrdinal: the §6.3 recomputation (1-based, capped, restarted
-// after the last rewind archive).
-func TestCandidateOrdinal(t *testing.T) {
-	st := &capsule.Step{}
-	if got := candidateOrdinal(st, 0); got != 0 {
-		t.Fatalf("no-candidate fallback is 0, got %d", got)
-	}
-	// No archives: first candidate.
-	if got := candidateOrdinal(st, 3); got != 1 {
-		t.Fatalf("fresh step ordinal 1, got %d", got)
-	}
-	// Unclassified infra failures (a daemon restart, a driver relaunch)
-	// NEVER advance the pointer.
-	st.Attempts = append(st.Attempts,
-		capsule.Attempt{Cause: CauseInfraFailure},
-		capsule.Attempt{Cause: CauseInfraFailure},
-	)
-	if got := candidateOrdinal(st, 3); got != 1 {
-		t.Fatalf("unclassified failures must not advance: %d", got)
-	}
-	// Two provider-class infra failures advance twice; the cap holds the
-	// last entry.
-	st.Attempts = []capsule.Attempt{
-		{Cause: CauseInfraFailure, FaultClass: string(FaultProvider)},
-		{Cause: CauseInfraFailure, FaultClass: string(FaultProvider)},
-	}
-	if got := candidateOrdinal(st, 3); got != 3 {
-		t.Fatalf("ordinal after 2 infra failures: %d", got)
-	}
-	if got := candidateOrdinal(st, 2); got != 2 {
-		t.Fatalf("cap at list length: %d", got)
-	}
-	// A rewind archive restarts the count (the pointer resets with the
-	// pending reset, INV-1g).
-	st.Attempts = append(st.Attempts, capsule.Attempt{Cause: CauseGateFailRewind})
-	if got := candidateOrdinal(st, 3); got != 1 {
-		t.Fatalf("count restarts after the rewind archive: %d", got)
 	}
 }
 

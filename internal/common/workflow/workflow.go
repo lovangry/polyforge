@@ -57,34 +57,36 @@ type Frontmatter struct {
 	Steps    []FrontmatterStep `yaml:"steps"`
 }
 
-// SplitFrontmatter extracts the YAML frontmatter block from workflow.md
-// bytes. The file must begin with a `---` line; ok=false when it does not
-// (a frontmatter-less workflow.md is legal input to this reader — the
-// candidate chain is then simply absent).
-func SplitFrontmatter(content []byte) (front []byte, ok bool) {
+// SplitFrontmatter splits a Markdown document into its YAML frontmatter
+// block and the body that follows the closing fence. The file must begin
+// with a `---` line; ok=false when it does not (a frontmatter-less
+// workflow.md is legal input to this reader — the candidate chain is then
+// simply absent).
+func SplitFrontmatter(content []byte) (front, body []byte, ok bool) {
 	s := string(content)
 	nl := strings.IndexByte(s, '\n')
 	if nl < 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	if strings.TrimRight(s[:nl], " \r") != "---" {
-		return nil, false
+		return nil, nil, false
 	}
 	rest := s[nl+1:]
 	end := strings.Index(rest, "\n---")
 	if end < 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	block := rest[:end+1]
 	// a closing fence may carry trailing spaces / CRLF noise
 	tail := rest[end+4:]
+	after := ""
 	if nl2 := strings.IndexByte(tail, '\n'); nl2 >= 0 {
-		tail = tail[:nl2]
+		tail, after = tail[:nl2], tail[nl2+1:]
 	}
 	if strings.TrimRight(tail, " \r") != "" {
-		return nil, false // not a fence close (e.g. ---- separator in the body)
+		return nil, nil, false // not a fence close (e.g. ---- separator in the body)
 	}
-	return []byte(block), true
+	return []byte(block), []byte(after), true
 }
 
 // ReadFrontmatter reads one workflow.md and parses its frontmatter with
@@ -100,7 +102,7 @@ func ReadFrontmatter(path string) (*Frontmatter, error) {
 		}
 		return nil, err
 	}
-	front, ok := SplitFrontmatter(raw)
+	front, _, ok := SplitFrontmatter(raw)
 	if !ok || len(strings.TrimSpace(string(front))) == 0 {
 		return nil, nil
 	}
@@ -109,25 +111,6 @@ func ReadFrontmatter(path string) (*Frontmatter, error) {
 		return nil, err
 	}
 	return &fm, nil
-}
-
-// CandidatesFor answers the effective candidate list of one step: the
-// per-step override when the step declares a non-empty list, the
-// workflow-level defaults otherwise. Nil means no switchable list exists
-// (the harness adapter's default model stays in effect).
-func (fm *Frontmatter) CandidatesFor(stepID string) []string {
-	if fm == nil {
-		return nil
-	}
-	for _, s := range fm.Steps {
-		if s.ID == stepID && len(s.ModelCandidates) > 0 {
-			return s.ModelCandidates
-		}
-	}
-	if fm.Defaults != nil {
-		return fm.Defaults.ModelCandidates
-	}
-	return nil
 }
 
 // Digest computes the canonical bundle digest: files sorted by path

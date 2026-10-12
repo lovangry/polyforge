@@ -37,7 +37,6 @@ type failEvent struct {
 	SpawnN      int64  `json:"spawn_n"`
 	Cause       string `json:"cause"`
 	Disposition string `json:"disposition"`
-	FaultClass  string `json:"fault_class"`
 	Count       int    `json:"failure_count"`
 	Next        string `json:"next_dispatch"`
 	From        string `json:"from_model"`
@@ -148,8 +147,8 @@ func TestV2F5FatalProviderErrorThenIdleModelError(t *testing.T) {
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 	fails := stepFailures(t, d, wi)
 	if len(fails) != 1 || fails[0].Cause != "model_error" || fails[0].Disposition != "switch_model" ||
-		fails[0].From == fails[0].To || fails[0].FaultClass != "provider" {
-		t.Fatalf("failure records %+v, want one model_error/switch_model/provider", fails)
+		fails[0].From == fails[0].To {
+		t.Fatalf("failure records %+v, want one model_error/switch_model", fails)
 	}
 }
 
@@ -369,7 +368,7 @@ func TestV2ModelPinFailureAdvancesCandidate(t *testing.T) {
 	x := readExecution(t, d.capsuleDir(wi))
 	var sawClass bool
 	for _, a := range x.Steps["fix"].Attempts {
-		if a["failure_cause"] == "exit_model_class" && a["fault_class"] == "provider" {
+		if a["failure_cause"] == "exit_model_class" {
 			sawClass = true
 		}
 	}
@@ -383,8 +382,7 @@ func TestV2ModelPinFailureAdvancesCandidate(t *testing.T) {
 
 // TestV2DaemonRestartNotCountedSameModel: a daemon restart mid-dispatch
 // re-dispatches the step on the SAME model, counts NO failure and never
-// advances the candidate pointer (the old ClassifyFault default read the
-// restart's cause text as a provider fault and switched models).
+// advances the candidate pointer (a restart is not a model-class cause).
 func TestV2DaemonRestartNotCountedSameModel(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "restart: not counted, same model",
@@ -418,7 +416,7 @@ func TestV2DaemonRestartNotCountedSameModel(t *testing.T) {
 		}
 	}
 	for _, a := range x.Steps["grill"].Attempts {
-		if a["fault_class"] == "provider" {
+		if fc, _ := a["failure_cause"].(string); isModelClassCause(fc) {
 			t.Fatalf("a daemon restart advanced the candidate pointer: %+v", a)
 		}
 	}
@@ -534,8 +532,8 @@ func TestV2OkEndedTurnWithoutResultRetriesSameModel(t *testing.T) {
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 	fails := stepFailures(t, d, wi)
 	if len(fails) != 1 || fails[0].Cause != "ended_without_result" || fails[0].Disposition != "retry_same_model" ||
-		fails[0].FaultClass != "" || fails[0].Count != 1 {
-		t.Fatalf("failure records %+v, want one ended_without_result/retry_same_model, no fault class", fails)
+		fails[0].Count != 1 {
+		t.Fatalf("failure records %+v, want one ended_without_result/retry_same_model", fails)
 	}
 	models := spawnModels(t, d.capsuleDir(wi))
 	if len(models) < 2 || models[0] != models[1] {
@@ -551,4 +549,14 @@ func TestV2OkEndedTurnWithoutResultRetriesSameModel(t *testing.T) {
 	if len(hints) < 2 || hints[0] || !hints[1] {
 		t.Fatalf("prompt hints %v: only the retry may carry the ended-without-result feedback", hints)
 	}
+}
+
+// isModelClassCause mirrors driver.IsModelClass: the causes that advance
+// the candidate pointer.
+func isModelClassCause(c string) bool {
+	switch c {
+	case "model_error", "model_hung", "step_timeout_slow_model", "exit_model_class":
+		return true
+	}
+	return false
 }
