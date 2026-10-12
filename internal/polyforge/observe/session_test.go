@@ -21,6 +21,7 @@ package observe
 import (
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,12 +31,12 @@ import (
 
 // fakeVerifier is the SessionVerifier test double.
 type fakeVerifier struct {
-	calls int
+	calls atomic.Int64
 	ans   func(wi, sid string) (*api.SessionVerifyResponse, error)
 }
 
 func (f *fakeVerifier) SessionVerify(wi, sid string) (*api.SessionVerifyResponse, error) {
-	f.calls++
+	f.calls.Add(1)
 	return f.ans(wi, sid)
 }
 
@@ -121,8 +122,8 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 	// The revalidation really is still running: the verify calls grew
 	// past one (the old contract asserted exactly 1 here — the fire-once
 	// shape the review's Finding 1 deleted).
-	if verifier.calls < 2 {
-		t.Fatalf("verify calls after supersession: %d, want >= 2 (the re-emission engine)", verifier.calls)
+	if verifier.calls.Load() < 2 {
+		t.Fatalf("verify calls after supersession: %d, want >= 2 (the re-emission engine)", verifier.calls.Load())
 	}
 
 	// The superseded monitor's protective surface is the server-side
@@ -141,7 +142,7 @@ func TestRevalidateMatchIsQuiet(t *testing.T) {
 	if n := len(eventsOf(m, EvSessionSuperseded)); n != 0 {
 		t.Fatalf("no session_superseded event may land on a match: %d", n)
 	}
-	if verifier.calls == 0 {
+	if verifier.calls.Load() == 0 {
 		t.Fatal("the revalidation never ran")
 	}
 	// The live derivation keeps being observed: a pending question
@@ -170,7 +171,7 @@ func TestRevalidateTransportErrorNeverActs(t *testing.T) {
 	// The retry fires (calls grow past 1 within the backoff bound —
 	// the shrunk cadence caps the error backoff at the cadence).
 	soon(t, 2*time.Second, "the verify was never retried", func() bool {
-		return verifier.calls >= 2
+		return verifier.calls.Load() >= 2
 	})
 	// The monitor still behaves normally: the execution.json poll keeps
 	// projecting a pending question.
@@ -201,8 +202,8 @@ func TestRevalidateSkipsWithoutSessionID(t *testing.T) {
 	})
 	_ = m
 	expectNoOB(t, ob, 150*time.Millisecond, "OBSuperseded for a session-less attachment")
-	if verifier.calls != 0 {
-		t.Fatalf("a session-less attachment must not be verified: %d calls", verifier.calls)
+	if verifier.calls.Load() != 0 {
+		t.Fatalf("a session-less attachment must not be verified: %d calls", verifier.calls.Load())
 	}
 }
 
