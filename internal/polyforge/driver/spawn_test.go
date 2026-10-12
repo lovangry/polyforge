@@ -255,8 +255,8 @@ func TestLatestJournalTranscriptFiltersByStep(t *testing.T) {
 			t.Fatalf("step %s: got (%q, %v) want %q", step, got, err, want)
 		}
 	}
-	if got, err := ad.latestJournalTranscript("polish"); err == nil {
-		t.Fatalf("a step with no journal line must error, got %q", got)
+	if got, err := ad.latestJournalTranscript("polish"); err != nil || got != "" {
+		t.Fatalf("a step with no journal line answers (\"\", nil), got (%q, %v)", got, err)
 	}
 }
 
@@ -765,6 +765,31 @@ func TestSpawnStepResumeWithoutReadableTranscriptDegradesToFresh(t *testing.T) {
 	p, _ := sp.last()
 	if p.Resume {
 		t.Fatalf("an unreadable transcript cannot be resumed: %+v", p)
+	}
+}
+
+// TestSpawnStepResumeWithoutJournalLineDegradesToFresh: a resume for a
+// step with no spawn-journal line of its own (other steps' lines, or no
+// journal at all) is a plain fresh dispatch, not an error.
+func TestSpawnStepResumeWithoutJournalLineDegradesToFresh(t *testing.T) {
+	for name, journal := range map[string]string{
+		"other-step-only": `{"spawn_n":3,"step_id":"other","transcript":"/t/o.jsonl"}` + "\n" + `{"spawn_n":4,"transcript":"/t/untagged.jsonl"}` + "\n",
+		"no-journal":      "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ad, sp, capDir := spawnEnv(t)
+			writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "s")
+			if journal != "" {
+				writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl", journal)
+			}
+			if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 4, Resume: true}); err != nil {
+				t.Fatalf("resume without a journal line must degrade, not fail: %v", err)
+			}
+			p, _ := sp.last()
+			if p.Resume || strings.Contains(p.TranscriptPath, "/t/") {
+				t.Fatalf("expected a fresh dispatch: %+v", p)
+			}
+		})
 	}
 }
 

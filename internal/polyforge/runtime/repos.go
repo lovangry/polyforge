@@ -94,11 +94,15 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		if exists {
 			// Resume/recovery shape: presence is the check; a recorded
 			// baseline is carried forward untouched.
-			if sha, ok := prior[pr.Name]; ok && sha != "" {
+			// "Recorded" means the key is present, even with an empty value:
+			// a repo that was empty at claim time baselines "" and its
+			// directory may hold agent edits that must never be restored over
+			// or removed.
+			if sha, ok := prior[pr.Name]; ok {
 				out[pr.Name] = sha
 				continue
 			}
-			// No recorded baseline: the previous Start died between the
+			// No recorded key: the previous Start died between the
 			// clone and the capsule.json write, so the directory is an
 			// untouched fresh clone (the agent never ran). It takes the
 			// same carrier restore as a new clone, instead of adopting

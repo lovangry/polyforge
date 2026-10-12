@@ -60,7 +60,8 @@ else
   fi
   mkdir -p /usr/local/bin
   # stop the daemon gracefully, then wait until it is really gone: the
-  # binary is never swapped under a live daemon.
+  # binary is never swapped under a live daemon. The wait must exceed the
+  # daemon's graceful ShutdownBudget (5 minutes), hence 330s.
   if daemon_running; then
     echo "   stopping daemon (graceful)"
     if [ -x "$BIN" ] && "$BIN" ops shutdown >/dev/null 2>&1; then
@@ -70,8 +71,8 @@ else
     fi
     WAITED=0
     while daemon_running; do
-      if [ "$WAITED" -ge 60 ]; then
-        echo "ERROR: daemon did not stop within 60s; binary NOT replaced. Check: tail $DAEMON_DATA/daemon.log"
+      if [ "$WAITED" -ge 330 ]; then
+        echo "ERROR: daemon did not stop within 330s (graceful shutdown budget is 300s); binary NOT replaced. Check: tail $DAEMON_DATA/daemon.log"
         rm -rf "$TMP"
         exit 1
       fi
