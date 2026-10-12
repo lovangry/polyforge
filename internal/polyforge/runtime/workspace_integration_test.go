@@ -137,6 +137,8 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 	hub.items = map[string]*api.WorkItem{
 		"wi_w079s1": {ID: "wi_w079s1", ProjectName: "p1"},
 		"wi_w079s2": {ID: "wi_w079s2", ProjectName: "p2"},
+		"wi_w079s3": {ID: "wi_w079s3", ProjectName: "p1"},
+		"wi_w079s4": {ID: "wi_w079s4", ProjectName: "p2"},
 	}
 	ws := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
@@ -176,5 +178,20 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 		if err := r.Stop(context.Background(), wi, protocol.FinishWrapped); err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	// The shared yaml is torn: BOTH projects refuse with DAEMON-414 and
+	// neither reaches the aihub claim.
+	claims := hub.claimCount()
+	writeWorkspaceYaml(t, ws, "models:\n  p1:\n    code: [\n")
+	for _, wi := range []string{"wi_w079s3", "wi_w079s4"} {
+		err := r.Start(context.Background(), wi)
+		ae, ok := err.(*api.Error)
+		if !ok || ae.Code != api.ErrDaemonWorkspaceYaml {
+			t.Fatalf("Start %s over a broken shared yaml = %v, want DAEMON-414", wi, err)
+		}
+	}
+	if n := hub.claimCount(); n != claims {
+		t.Fatalf("a refused Start must not claim: %d -> %d claim calls", claims, n)
 	}
 }
