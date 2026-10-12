@@ -79,9 +79,9 @@ func DefaultConfigPath() string {
 //	PF_CHAT_ID        -> ChatID
 //
 // A malformed file IS an error: silent misconfiguration is worse than a
-// loud failure. So is the retired old shape (a flat `project` key), a
-// mapping that fails validation — all refuse with guidance, for every pf command and the daemon alike
-// (the shared loader is the single choke point).
+// loud failure. So is a mapping that fails validation — it refuses with
+// guidance for every pf command and the daemon alike (the shared loader is
+// the single choke point).
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
 		Server:       defaultServer,
@@ -101,12 +101,6 @@ func LoadConfig(path string) (Config, error) {
 		flat, sections, perr = parseConfigTOML(string(data))
 		if perr != nil {
 			return cfg, fmt.Errorf("config %s: %w", path, perr)
-		}
-		if _, retired := flat["project"]; retired {
-			return cfg, fmt.Errorf("config %s: the `project` key is retired (polyforge#113) — there is NO default project anymore; declare your workspaces instead:\n"+
-				"  [workspace.\"/srv/polyforge/workspace\"]\n"+
-				"  projects = [\"p1\", \"p2\"]\n"+
-				"Run `pf doctor` to inspect the mapping; the install docs print the migration steps", path)
 		}
 		applyConfigFile(&cfg, flat)
 		entries := make([]mapping.Entry, 0, len(sections))

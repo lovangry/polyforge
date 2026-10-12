@@ -141,30 +141,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		return
 	}
 	// Kill the old tree first (§一 Recover): six layers, no writer may
-	// survive next to the re-derivation — and none may survive a
-	// fail-closed verdict either, so this runs before the probe below.
+	// survive next to the re-derivation.
 	r.killAgentTree(j)
-
-	// polyforge#106: the deploy-time fail-closed probe. An in-flight WI
-	// whose capsule state is LEGACY-ONLY — an execution.json the driver
-	// never wrote (no bundle_digest stamp; the deleted WI-Agent engine
-	// wrote none, and the preserved legacy fixture proves the shape) —
-	// is refused outright: no re-derivation, no conversion, no migration
-	// path. The refusal names the WI and the missing driver stamp and
-	// hands the WI to its owner blocked (M2: the human is the only
-	// remediation door).
-	if err := r.requireDriverStampedState(j); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: %v\n", j.wi, err)
-		if r.cfg.EventTap != nil {
-			r.cfg.EventTap(j.wi, "legacy_only_state_refused", map[string]any{
-				"capsule_dir": j.capsuleDir,
-				"cause":       cause,
-				"note":        "in-flight legacy-only state at deploy: no migration path — restore a driver-written capsule or close the work item by hand",
-			})
-		}
-		r.boundedFail(ctx, j, err.Error())
-		return
-	}
 
 	// commit-dirty-on-recover (§六): the dead agent's unflushed capsule
 	// state is committed and pushed BEFORE the new instance can touch the
@@ -354,40 +332,6 @@ func readCapsuleEffectiveCandidates(capsuleDir string) map[string][]string {
 		return nil
 	}
 	return idn.EffectiveCandidates
-}
-
-// requireDriverStampedState is the deploy-time fail-closed probe
-// (polyforge#106): an in-flight WI whose execution.json is LEGACY-ONLY —
-// it parses but carries no bundle_digest, the stamp every driver write
-// carries (driver/transition.go) and the deleted WI-Agent engine never
-// wrote (the preserved legacy fixture is the reference shape) — is
-// refused. Terminal verdicts are NOT legacy-only state: a completed or
-// failed capsule closes through the terminal wiring without any engine,
-// and a missing or unparsable execution.json is a pre-init scene the
-// driver initializes itself. The error names the WI and the missing
-// stamp and offers no migration path.
-func (r *Runtime) requireDriverStampedState(j *job) error {
-	raw, err := os.ReadFile(filepath.Join(j.capsuleDir, capsule.ExecutionJSON))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // pre-init: the driver initializes the file
-		}
-		return nil // unreadable is the terminal wiring's/capsule repair's problem, not a legacy marker
-	}
-	var exec capsule.Execution
-	if json.Unmarshal(raw, &exec) != nil {
-		return nil // unparsable: not a legacy marker
-	}
-	switch exec.WorkflowStatus {
-	case capsule.WorkflowStatusCompleted,
-		capsule.WorkflowStatusFailedGate, capsule.WorkflowStatusFailedRewindExhausted,
-		capsule.WorkflowStatusBlocked:
-		return nil // terminal verdicts close without any engine
-	}
-	if exec.BundleDigest != "" {
-		return nil // driver-stamped: the engine may continue it
-	}
-	return fmt.Errorf("wi %s: LEGACY-ONLY in-flight state: execution.json carries no driver journal stamp (bundle_digest) — it was written by the WI-Agent engine deleted in polyforge#106; no migration path is offered: restore a driver-written capsule or close the work item by hand", j.wi)
 }
 
 // recovered finishes a successful re-derivation. A successful recovery

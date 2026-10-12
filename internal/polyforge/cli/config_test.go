@@ -128,23 +128,6 @@ projects = ["ieops"]
 	}
 }
 
-// TestConfigOldShapeRefusedWithMigrationGuidance: the retired flat
-// `project` key refuses EVERY reader (the loader is the shared choke
-// point) with the three guidance tokens the contract pins.
-func TestConfigOldShapeRefusedWithMigrationGuidance(t *testing.T) {
-	clearEnv(t)
-	path := writeTempConfig(t, "server = \"http://x:1\"\napi_key = \"k\"\nproject = \"e2e\"\n")
-	_, err := LoadConfig(path)
-	if err == nil {
-		t.Fatal("the retired flat project key must refuse loading")
-	}
-	for _, tok := range []string{"project", "[workspace", "doctor"} {
-		if !strings.Contains(err.Error(), tok) {
-			t.Errorf("refusal %q misses the %q guidance token", err, tok)
-		}
-	}
-}
-
 // TestConfigMalformedMappingRejected: the loud-parse posture over the
 // extended grammar — each malformed shape is a line-named error.
 func TestConfigMalformedMappingRejected(t *testing.T) {

@@ -37,7 +37,7 @@ func TestBoundedFailKillsAgentAndPushesDirtyWork(t *testing.T) {
 	r, toOB, _ := newTestRuntime(t, hub, sp)
 	j := seedJob(r, "wi_d2_commit")
 	bare := initGitCapsule(t, j)
-	writeLegacyExecution(t, j.capsuleDir, "running")
+	writeExecutionState(t, j.capsuleDir, "running")
 	h := installOldAgent(t, sp, j)
 	pid := h.PID()
 	if err := os.WriteFile(filepath.Join(j.capsuleDir, "last-work.txt"), []byte("dirty\n"), 0o644); err != nil {
@@ -330,5 +330,19 @@ func TestEndPendingIsNotRepairPending(t *testing.T) {
 	}
 	if hub.endCount() < 1 || hub.lastEnd().Status != api.StatusBlocked {
 		t.Fatalf("the blocked close must still be retried, got %+v", hub.lastEnd())
+	}
+}
+
+// writeExecutionState seeds a minimal in-flight execution.json in capDir.
+func writeExecutionState(t *testing.T, capDir, workflowStatus string) {
+	t.Helper()
+	dir := filepath.Join(capDir, "runtime-state")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blob := `{"work_item_id":"wi","current_step":"grill","workflow_status":"` +
+		workflowStatus + `","bundle_digest":"d0","steps":{"grill":{"status":"in_progress"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "execution.json"), []byte(blob), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

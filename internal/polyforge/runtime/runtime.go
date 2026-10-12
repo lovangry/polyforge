@@ -955,13 +955,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		err2 := fmt.Errorf("runtime misassembly: no execution engine bound (Config.AgentStarter is nil) — the legacy in-package WI-Agent engine was deleted (polyforge#106); the daemon binds the driver bridge starter unconditionally at assembly")
 		return r.abandonClaim(j, wi, err2, err2.Error())
 	}
-	// polyforge#106: deploy-time fail-closed probe on the claim path — an
-	// in-flight legacy-only capsule (an execution.json the driver never
-	// wrote) is refused, never converted.
-	if err := r.requireDriverStampedState(j); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: %v\n", wi, err)
-		return r.abandonClaim(j, wi, err, err.Error())
-	}
 	{
 		// The derivation IS a derivation (B2): advance the counter so the
 		// RTStarted emission carries SpawnN ≥ 1. The observe lane refuses

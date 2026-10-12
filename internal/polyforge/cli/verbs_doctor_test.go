@@ -233,7 +233,7 @@ func TestDoctorUnloadableConfigDoesNotFakeGreen(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(xdg, "polyforge"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	oldShape := "server = \"http://x:1\"\napi_key = \"k\"\nproject = \"e2e\"\n"
+	oldShape := "server = \"http://x:1\"\napi_key = \"k\"\n[other]\nx = \"1\"\n"
 	if err := os.WriteFile(filepath.Join(xdg, "polyforge", "cli.toml"), []byte(oldShape), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -243,10 +243,10 @@ func TestDoctorUnloadableConfigDoesNotFakeGreen(t *testing.T) {
 		t.Fatalf("exit %d, want 1 (output %s)", code, stdout)
 	}
 	if doc.OK {
-		t.Fatalf("ok = true on an old-shape config")
+		t.Fatalf("ok = true on an unloadable config")
 	}
 	st, detail := doctorFind(t, doc, "config")
-	if st != "fail" || !strings.Contains(detail, "project") {
+	if st != "fail" || !strings.Contains(detail, "other") {
 		t.Fatalf("config check = %s %q", st, detail)
 	}
 	skips := 0

@@ -32,19 +32,6 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 )
 
-// retiredEnvNames are the retired selection environment variables
-// (polyforge#113), assembled from fragments so the source bytes never
-// carry them contiguously (the greppable floor — the same posture as
-// legacyLaneEnvPrefix below): the ambient default-project variable and
-// the daemon workspace mirror. A daemon whose environment carries either
-// is refused BEFORE anything is loaded or served — silently ignoring
-// them would be exactly the acceptance the spec forbids. The boot
-// refusal names whatever it matched at runtime.
-var retiredEnvNames = []string{
-	"PF_" + "PROJECT",
-	"POLYFORGE_" + "WORKSPACE",
-}
-
 // Main executes `pf daemon <flags>` and returns the process exit code.
 func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("pf daemon", flag.ContinueOnError)
@@ -82,35 +69,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	autoCfg := resolveAuto(fs, *auto)
-	// The WI-Agent legacy lane hatch is retired (polyforge#106): a daemon
-	// whose environment carries the retired variable is refused BEFORE
-	// anything is loaded or served — the engine selection the variable
-	// used to force no longer exists, and silently ignoring it would be
-	// exactly the acceptance the spec forbids.
-	for _, kv := range os.Environ() {
-		name, _, ok := strings.Cut(kv, "=")
-		if ok && strings.HasPrefix(name, legacyLaneEnvPrefix) {
-			fmt.Fprintf(stderr, "pf daemon: refusing to start: the environment variable %s is set, but the legacy WI-Agent lane it selected was deleted (polyforge#106); unset it — the driver engine is the only engine\n", name)
-			return 1
-		}
-	}
-	// The ambient selection variables are retired (polyforge#113): no
-	// default project exists anywhere and the workspace comes only from
-	// the config's [workspace] mapping. Refuse before ANYTHING is loaded
-	// or served, naming the variable and the per-invocation replacement.
-	for _, kv := range os.Environ() {
-		name, val, ok := strings.Cut(kv, "=")
-		if !ok || val == "" {
-			continue
-		}
-		for _, retired := range retiredEnvNames {
-			if name == retired {
-				fmt.Fprintf(stderr, "pf daemon: refusing to start: the environment variable %s is retired (polyforge#113) — there is no ambient project or workspace selection anymore; the [workspace.\"<path>\"] mapping in the config decides capsule placement, and project scoping is per-invocation --project on the read verbs\n", name)
-				return 1
-			}
-		}
-	}
-
 	shared, err := cli.LoadConfig(*cfgPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
@@ -246,15 +204,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	return 0
 }
-
-// legacyLaneEnvPrefix is the retired WI-Agent lane-selection environment
-// variable family prefix (polyforge#106), assembled from fragments so the
-// source bytes never carry the retired name contiguously (the grep-clean
-// gate scans for it; the boot refusal still names whatever it matches at
-// runtime). The family prefix deliberately matches near-miss spellings of
-// the retired name too: a hatch is a deliberate opt-in, and anything that
-// looks like one is refused loudly, never silently ignored.
-var legacyLaneEnvPrefix = "PFV1" + "_" + "LEGACY" + "_" + "LAN"
 
 // resolveAuto maps -auto to the initial auto switch (nil = unspecified:
 // the persisted switch wins).

@@ -18,10 +18,6 @@ import (
 	"testing"
 )
 
-// envTok joins retired env-name fragments at runtime (flagTok lives in
-// removed_knobs_test.go — same file set, one package).
-func envTok(parts ...string) string { return strings.Join(parts, "") }
-
 // TestRetiredSelectionFlagsFailAtParse: the deleted -workspace and
 // --project flags (either dash spelling) are unknown-flag parse failures
 // — the daemon never starts and the error names the flag.
@@ -51,58 +47,6 @@ func TestRetiredSelectionFlagsFailAtParse(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestRetiredSelectionEnvRefusedBeforeAnythingLoads: either retired
-// environment variable set (even over a fully valid mapping config)
-// refuses the boot with an error naming the variable; the refusal is
-// parse-first (a bad flag still wins with exit 2).
-func TestRetiredSelectionEnvRefusedBeforeAnythingLoads(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfgDir)
-	pfDir := filepath.Join(cfgDir, "polyforge")
-	if err := os.MkdirAll(pfDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	ws := t.TempDir()
-	cfg := "server = \"http://127.0.0.1:1\"\n\n[workspace.\"" + ws + "\"]\nprojects = [\"proj\"]\n"
-	if err := os.WriteFile(filepath.Join(pfDir, "cli.toml"), []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Run("retired project variable", func(t *testing.T) {
-		retired := envTok("PF_", "PROJECT")
-		t.Setenv(retired, "ieops")
-		var stderr bytes.Buffer
-		code := Main([]string{"--socket", "/nonexistent-probe.sock"}, nil, &bytes.Buffer{}, &stderr)
-		if code != 1 {
-			t.Fatalf("exit = %d, want 1 (boot refusal), stderr: %q", code, stderr.String())
-		}
-		if !strings.Contains(stderr.String(), retired) {
-			t.Fatalf("boot refusal %q does not name the retired variable %s", stderr.String(), retired)
-		}
-	})
-	t.Run("retired workspace variable", func(t *testing.T) {
-		retired := envTok("POLYFORGE_", "WORKSPACE")
-		t.Setenv(retired, ws)
-		var stderr bytes.Buffer
-		code := Main([]string{"--socket", "/nonexistent-probe.sock"}, nil, &bytes.Buffer{}, &stderr)
-		if code != 1 {
-			t.Fatalf("exit = %d, want 1 (boot refusal), stderr: %q", code, stderr.String())
-		}
-		if !strings.Contains(stderr.String(), retired) {
-			t.Fatalf("boot refusal %q does not name the retired variable %s", stderr.String(), retired)
-		}
-	})
-	t.Run("parse failure still wins over the env guard", func(t *testing.T) {
-		retired := envTok("PF_", "PROJECT")
-		t.Setenv(retired, "ieops")
-		var stderr bytes.Buffer
-		code := Main([]string{"--socket", "/nonexistent-probe.sock", "--no-such-flag"}, nil, &bytes.Buffer{}, &stderr)
-		if code != 2 {
-			t.Fatalf("exit = %d, want 2 (flag parse before the env guard), stderr: %q", code, stderr.String())
-		}
-	})
 }
 
 // TestNoMappingRefusesAtMain: a config with zero [workspace] sections —
@@ -156,3 +100,6 @@ func TestMappingConfiguredBootReachesWorkspaceValidation(t *testing.T) {
 		t.Fatalf("validation failure %q does not name the mapped workspace", stderr.String())
 	}
 }
+
+// flagTok joins flag-name fragments.
+func flagTok(parts ...string) string { return strings.Join(parts, "") }
