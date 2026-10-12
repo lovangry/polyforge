@@ -1,7 +1,7 @@
 package test
 
 // v1_s17: the drain degraded signal, driver/envelope edition. A
-// drain-mode daemon runs on a DEDICATED machine key (a machine user's api
+// auto-on daemon runs on a DEDICATED machine key (a machine user's api
 // key, not the bootstrap admin key), claims a wave member whose driver
 // parks on an open needs_input question (the parked envelope agent), and
 // then mid-run the admin revokes that key (`pf api-keys revoke`). The
@@ -10,7 +10,7 @@ package test
 // lands in the durable events log (daemon scope, exactly once per
 // silent→degraded episode) and is readable from the parked member's
 // observe view; the process stays alive, the UDS face keeps answering,
-// the mode stays drain, and the parked member is undisturbed.
+// auto stays on, and the parked member is undisturbed.
 import (
 	"encoding/json"
 	"os"
@@ -87,7 +87,7 @@ func TestV1S17DrainKeyRevokedDegradedSignal(t *testing.T) {
 				"question": "s17: park here (the test never answers)."},
 		}, nil)
 
-	d := newV1Daemon(t, inst, optMode("drain"), optAPIKey(issued.Plain))
+	d := newV1Daemon(t, inst, optLegacyMode("drain"), optAPIKey(issued.Plain))
 	d.start()
 
 	// The wave claims A on its own (5s wave period) and A parks. The
@@ -143,11 +143,11 @@ func TestV1S17DrainKeyRevokedDegradedSignal(t *testing.T) {
 		t.Fatalf("drain_degraded payload wrong: %v", gotBody)
 	}
 
-	// 不崩: the process is alive, the UDS face still answers, the mode
-	// is still drain.
+	// 不崩: the process is alive, the UDS face still answers, auto
+	// is still on.
 	st := d.status(t)
-	if st.Mode != "drain" {
-		t.Fatalf("daemon left drain mode after key revocation: %q", st.Mode)
+	if !st.Auto {
+		t.Fatalf("daemon left auto mode after key revocation: %+v", st)
 	}
 	if d.exitedWithin(0) {
 		t.Fatalf("daemon exited after key revocation (log tail: %s)", d.logTail())

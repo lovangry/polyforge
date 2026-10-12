@@ -475,12 +475,12 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 	if s.DisplayName != "" {
 		fmt.Fprintf(w, " (%s)", s.DisplayName)
 	}
-	fmt.Fprintf(w, "  mode: %s", s.Mode)
+	fmt.Fprintf(w, "  auto: %s  max: %d", onOff(s.Auto), s.Queue.MaxConcurrent)
 	if s.ShuttingDown {
 		fmt.Fprint(w, "  (shutting down)")
 	}
-	fmt.Fprintf(w, "  queue: %d pending / %d running / max %d\n",
-		s.Queue.Pending, s.Queue.Running, s.Queue.MaxConcurrent)
+	fmt.Fprintf(w, "  queue: %d pending / %d running\n",
+		s.Queue.Pending, s.Queue.Running)
 	// polyforge#113: the workspace SET, sorted for stable display — a
 	// multi-workspace daemon must not present one workspace as if it
 	// were the only one.

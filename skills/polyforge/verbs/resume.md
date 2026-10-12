@@ -91,7 +91,7 @@ refused before anything else happens.
 |---|---|---|
 | `CORE-404` | Unknown or invisible id (CLI precheck) | No such work item — check the `wi_` id. |
 | (no code) `submit: <id> is terminal (<status>)` | The work item is wrapped/failed/cancelled | A finished work item cannot be resumed — file a new one. |
-| `DAEMON-409` | The work item is already active or queued on this daemon, or drain mode rejects the resume | Observe to see the running attempt; in drain mode leave drain first. |
+| `DAEMON-409` | The work item is already active or queued on this daemon | Observe to see the running attempt. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | Graceful shutdown in progress | Wait for restart, then resume. |
 | `AUTH-403` (from the resume door) | The caller is not the work item's reporter, a project maintainer or an admin | Ask the task owner or a maintainer to continue it. |
 | `DAEMON-517` | The work item is parked `repair_pending` on this daemon (restart found its capsule missing) and the capsule is still missing | Restore the capsule directory named in the detail (the session is kept), then `pf resume` again; or give up with `pf cancel <id>`. |

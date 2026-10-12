@@ -1,8 +1,9 @@
 # submit — submit a work item for execution on this machine
 
 Execution-plane verb: the `pf` CLI talks to the local daemon over its unix
-socket (claim / resume / takeover route family). Interactive submit of
-exactly one work item; batch waves are the `batch-confirm` verb.
+socket (claim / resume / takeover route family). Explicit submit of
+exactly one work item; always legal, also while the daemon's auto-pull
+(`pf ops auto on`) is on. To see what is ready, use `pf queue --ready`.
 
 ## Triggers
 
@@ -34,7 +35,7 @@ raw answer `{accepted, work_item_id}`.
 |---|---|---|
 | `CORE-404` | Unknown or invisible id (CLI precheck) | No such work item — check the `wi_` id. |
 | (no code) `submit: <id> is terminal (<status>)` | The work item is already wrapped/failed/cancelled (CLI precheck) | It is finished and can never be claimed again — file a new work item instead. |
-| `DAEMON-409` | The work item is already active or queued on this daemon, or drain mode rejects an external submit (the drain loop is the only job-creation entrance there) | Wait for the running attempt, or leave drain first (`pf ops mode abort-drain`). |
+| `DAEMON-409` | The work item is already active or queued on this daemon | Wait for the running attempt. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | The daemon is in graceful shutdown | Wait for the shutdown to finish and the daemon to restart, then submit again. |
 | `DAEMON-400` | Malformed request body | Fix the invocation. |
 | `DAEMON-412` | The work item's project is not in the `[workspace]` mapping of this machine (refused before any capsule or claim state exists) | Add the project to a `[workspace."<path>"]` section; `pf doctor` checks the mapping. |

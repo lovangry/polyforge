@@ -660,9 +660,10 @@ func optSupervision(b supBounds) daemonOpt {
 	}
 }
 
-// optMode pre-seeds the daemon state file with an initial mode (read at
-// boot; used to start straight in drain).
-func optMode(mode string) daemonOpt {
+// optLegacyMode pre-seeds the daemon state file in the PRE-v2 shape
+// ("mode": interactive|batch|drain), which the boot loader migrates
+// (drain -> auto on). Used to start straight in auto-pull.
+func optLegacyMode(mode string) daemonOpt {
 	return func(d *v1Daemon) { d.extraEnv = append(d.extraEnv, "__PFV1_MODE__="+mode) }
 }
 
@@ -705,7 +706,7 @@ func newV1Daemon(t *testing.T, inst *v1Install, opts ...daemonOpt) *v1Daemon {
 	for _, o := range opts {
 		o(d)
 	}
-	// drain mode pre-seed: the daemon-state.json the boot loader reads
+	// legacy-mode pre-seed: the daemon-state.json the boot loader migrates
 	mode := ""
 	for _, kv := range d.extraEnv {
 		if strings.HasPrefix(kv, "__PFV1_MODE__=") {
@@ -1746,7 +1747,7 @@ func countOf(list []string, s string) int {
 }
 
 // observeSoft is observe that tolerates the not-yet-monitored window:
-// until the drain wave claims the ticket, the observe route answers
+// until the auto wave claims the ticket, the observe route answers
 // DAEMON-404 by design, and a poll must retry rather than fail.
 func observeSoft(d *v1Daemon, wi string) *protocol.JobView {
 	raw, err := d.client.Observe(wi, 0)

@@ -225,7 +225,7 @@ budget:
 func TestGoldenStatus(t *testing.T) {
 	s := StatusResponse{
 		MachineID:  "m1",
-		Mode:       protocol.ModeDrain,
+		Auto:       true,
 		Workspaces: []string{"/srv/pf-ws"},
 		Jobs: []StatusJob{
 			{WorkItemID: "wi_abc", Status: "running", SpawnN: 3, SessionFingerprint: "ab12cd34ef56aa00", AgentPID: 42,
@@ -242,7 +242,7 @@ func TestGoldenStatus(t *testing.T) {
 	var b bytes.Buffer
 	renderStatus(&b, &s)
 	golden(t, "Status", b.String(),
-		`daemon: m1  mode: drain  queue: 1 pending / 2 running / max 2
+		`daemon: m1  auto: on  max: 2  queue: 1 pending / 2 running
 workspaces: /srv/pf-ws
 
 WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  STEP-AGE  LAST-WORK

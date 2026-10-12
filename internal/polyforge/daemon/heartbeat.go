@@ -83,7 +83,7 @@ func (d *Daemon) sendHeartbeat() error {
 	res, err := d.hub.Heartbeat(aihubclient.MachineHeartbeat{
 		MachineID:      d.cfg.MachineID,
 		RuntimeVersion: heartbeatRuntimeVersion,
-		Mode:           d.modes.Current(),
+		Mode:           d.modes.HeartbeatMode(),
 		LiveWIIDs:      liveWIIDs(d.rt.List()),
 	})
 	if err != nil {

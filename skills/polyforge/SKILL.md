@@ -1,6 +1,6 @@
 ---
 name: polyforge
-description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, submit, observe, answer, batch-confirm, pause, resume, wrap, ops) or the ship delivery bridge, each carried by a fragment under verbs/; data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
+description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 12 routing verbs (file, queue, cancel, recall, remember, submit, observe, answer, pause, resume, wrap, ops) or the ship delivery bridge, each carried by a fragment under verbs/; data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
 license: proprietary
 compatibility:
   harnesses: [pi, claude]
@@ -9,7 +9,7 @@ compatibility:
 # polyforge routing skill
 
 You are the routing layer of a user's harness session. Your whole job: read the
-user's request, decide which of the 13 routing verbs it is (or whether it is
+user's request, decide which of the 12 routing verbs it is (or whether it is
 the `ship` delivery bridge), and run the `pf` CLI verb that carries it.
 Nothing else. The split between the target faces is fixed (the v1
 architecture's routing table):
@@ -18,14 +18,14 @@ architecture's routing table):
   Core data reads/writes that do not touch any execution scene. The `pf` CLI
   talks HTTP **direct to AIHub** (single port, `Authorization: Bearer
   <api_key>`); the daemon is not involved.
-- **Execution-plane verbs** (`submit`, `observe` = `pf watch`, `answer`, `batch-confirm`,
+- **Execution-plane verbs** (`submit`, `observe` = `pf watch`, `answer`,
   `pause`, `resume`, `wrap`, `ops`): semantically bound to this machine's local
   execution scene. The `pf` CLI talks to the **local daemon over its unix
   domain socket** (default `/run/polyforge.sock`); the daemon translates each
   route into its Runtime (lifecycle) and Observe (supervision) modules.
 - **The delivery bridge** (`ship`): pushes an already-closed WI's sealed
   capsule commits to git origin — also the local daemon's unix-socket face,
-  but not one of the 13 routing verbs; it is the step after `wrap`.
+  but not one of the 12 routing verbs; it is the step after `wrap`.
 
 Direct connection does not bypass any permission boundary: the `pf` CLI passes
 through the same AIHub authentication as any other HTTP client, and daemon
@@ -66,12 +66,11 @@ accepts an id.
 | take it over / force takeover / 接管 / 强制接管 | `verbs/submit.md` (--takeover) | daemon |
 | how's it going / show progress / what step is it on / watch this one / follow it / 看看进度 / 跑到哪了 / 观察一下 / 盯着 | `verbs/observe.md` (`pf watch`) | daemon |
 | answer the question / reply to needs_input / 回答问题 / 它在问我 / 答一下 | `verbs/answer.md` | daemon |
-| run a batch / show the wave recommendation / confirm this batch / 跑一批 / 看看推荐哪批 / 确认这一波 | `verbs/batch-confirm.md` | daemon |
 | pause it / stop for now / hold on / 暂停 / 先停一下 / 挂起 | `verbs/pause.md` | daemon |
 | resume it / continue the paused or blocked one / 恢复执行 / 接着跑（已暂停或已阻塞的）/ 继续 | `verbs/resume.md` | daemon |
 | wrap it up / we're done / mark it failed / 收尾 / 完事了 / 判完成 / 判失败 | `verbs/wrap.md` | daemon |
 | ship it / push the wrapped commits to origin / deliver the branch / open the PR / 推上去 / 交付 | `verbs/ship.md` | daemon |
-| daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / switch mode / drain / shutdown / 升级前自检 / 启停 / 切换模式 / 优雅停机 | `verbs/ops.md` | daemon |
+| daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / auto-pull on/off / max concurrent jobs / shutdown / 升级前自检 / 启停 / 自动领取开关 / 调并发 / 优雅停机 | `verbs/ops.md` | daemon |
 | is this machine healthy / diagnose / check the mapping / why won't the daemon start / 连不上 / 诊断 / 体检 / 检查映射 | `verbs/doctor.md` | CLI (config + aihub + daemon reads) |
 | init / install / upgrade / machine setup / 装机 / 升级 | `verbs/init.md` (machine pointer) | CLI |
 | init this workspace / initialize the workspace / write the workspace yaml / 初始化工作区 / 生成工作区配置 | `verbs/init.md` (workspace init) | CLI |

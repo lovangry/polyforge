@@ -38,7 +38,7 @@ func TestTakeoverHappyPath(t *testing.T) {
 	d := newDaemonFixture(t)
 	// The daemon's own machine identity (GET /status) is the mint's
 	// machine (#109) — pinned to m-b to match the canned claim answer.
-	d.answer("GET", "/status", `{"machine_id":"m-b","mode":"interactive","workspaces":["/srv/pf-ws"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
+	d.answer("GET", "/status", `{"machine_id":"m-b","auto":false,"workspaces":["/srv/pf-ws"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
 	d.answer("POST", "/jobs/wi_abc/adopt-session", `{"adopted":true,"work_item_id":"wi_abc","session_fingerprint":"ab12cd34ef56aa00"}`)
 
 	code, stdout, stderr := runPf(t, map[string]string{
@@ -649,7 +649,7 @@ func TestResumeDispatchByWIState(t *testing.T) {
 			`","clean_pause":` + map[bool]string{true: "true", false: "false"}[clean] +
 			`,"priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`
 	}
-	const repairStatus = `{"machine_id":"m1","mode":"interactive","workspaces":["/w"],"shutting_down":false,` +
+	const repairStatus = `{"machine_id":"m1","auto":false,"workspaces":["/w"],"shutting_down":false,` +
 		`"jobs":[{"work_item_id":"wi_abc","status":"repair_pending","repair_reason":"capsule_missing"}],"queue":{"pending":0,"running":0,"max_concurrent":2}}`
 	cases := []struct {
 		name         string
@@ -718,7 +718,7 @@ func TestResumeDispatchByWIState(t *testing.T) {
 // daemon (canceled / failed). A refused probe never reaches the daemon.
 func TestAbandonRepairPendingDispatch(t *testing.T) {
 	const wiJSON = `{"id":"wi_abc","slug":"pf-42","seq":42,"project":"polyforge","goal":"g","status":"running","priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`
-	const repairStatus = `{"machine_id":"m1","mode":"interactive","workspaces":["/w"],"shutting_down":false,` +
+	const repairStatus = `{"machine_id":"m1","auto":false,"workspaces":["/w"],"shutting_down":false,` +
 		`"jobs":[{"work_item_id":"wi_abc","status":"repair_pending","repair_reason":"capsule_missing"}],"queue":{"pending":0,"running":0,"max_concurrent":2}}`
 	cases := []struct {
 		name        string
@@ -802,7 +802,7 @@ func TestCancelRunningNotParkedKeepsHubError(t *testing.T) {
 		io.WriteString(w, `{"id":"wi_abc","slug":"pf-42","seq":42,"project":"polyforge","goal":"g","status":"running","priority":"normal","reporter":"usr_1","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`)
 	})
 	d := newDaemonFixture(t)
-	d.answer("GET", "/status", `{"machine_id":"m1","mode":"interactive","workspaces":["/w"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
+	d.answer("GET", "/status", `{"machine_id":"m1","auto":false,"workspaces":["/w"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
 	code, _, stderr := runPf(t, map[string]string{"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "k"}, "cancel", "wi_abc")
 	if code == 0 || !strings.Contains(stderr, "CORE-409") {
 		t.Fatalf("want the hub's CORE-409, code=%d stderr=%s", code, stderr)

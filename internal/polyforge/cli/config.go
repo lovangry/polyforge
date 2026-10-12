@@ -9,7 +9,7 @@
 //	Local daemon UDS HTTP face (04 §5.1 minus publish_request — the
 //	client surface is pinned in internal/common/protocol and daemon.go
 //	below):
-//	  submit, observe, answer, batch-confirm, pause, resume, wrap,
+//	  submit, observe, answer, pause, resume, wrap,
 //	  ops, ship.
 //
 // Output: human-readable tables by default; --json emits the server's

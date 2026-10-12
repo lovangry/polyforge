@@ -11,8 +11,8 @@ package daemon
 // --config file, defaulting to the standard cli.toml location) is the
 // only workspace source — the daemon refuses to start without a non-empty
 // mapping, validates every mapped workspace, routes capsules per project
-// through the inverse mapping, and iterates all mapped projects in batch
-// and drain. The retired selection surfaces (the -workspace flag, the
+// through the inverse mapping, and iterates all mapped projects when
+// auto-pulling. The retired selection surfaces (the -workspace flag, the
 // --project flag and their env mirrors) are refused loudly at boot.
 
 import (
@@ -63,7 +63,8 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	gitRemoteBase := fs.String("git-remote-base", "", "aihub bare-repo base URL (default <server>/git)")
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
 	recallTopK := fs.Int("recall-topk", 0, "claim-time memory snapshot hit count (env POLYFORGE_RECALL_TOPK; default 10, max 50)")
-	mode := fs.String("mode", "", "initial mode: interactive|batch|drain (default interactive)")
+	auto := fs.Bool("auto", false, "auto-pull: the daemon claims ready-queue work itself (default off; unset keeps the persisted switch)")
+	legacyMode := fs.String("mode", "", "DEPRECATED alias of -auto: interactive -> -auto=false, drain -> -auto=true")
 	// Supervision bounds (v2-converge 2.4): Go duration strings, flags
 	// only (no env fallbacks). Omitted or zero keeps the documented
 	// default; a step may override them in workflow.md.
@@ -79,6 +80,11 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "pf daemon: unexpected arguments %v\n", fs.Args())
+		return 2
+	}
+	autoCfg, autoErr := resolveAuto(fs, *auto, *legacyMode, stderr)
+	if autoErr != nil {
+		fmt.Fprintf(stderr, "pf daemon: %v\n", autoErr)
 		return 2
 	}
 	// The WI-Agent legacy lane hatch is retired (polyforge#106): a daemon
@@ -202,7 +208,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		APIKey:              *apiKey,
 		MaxConcurrent:       *maxConcurrent,
 		RecallTopK:          *recallTopK,
-		Mode:                *mode,
+		Auto:                autoCfg,
 		HeartbeatEvery:      *heartbeatEvery,
 		Hub:                 aihubclient.New(*server, *apiKey),
 		// Zero fields fall through to the documented defaults.
@@ -254,3 +260,33 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // the retired name too: a hatch is a deliberate opt-in, and anything that
 // looks like one is refused loudly, never silently ignored.
 var legacyLaneEnvPrefix = "PFV1" + "_" + "LEGACY" + "_" + "LAN"
+
+// resolveAuto maps -auto / the deprecated -mode alias to the initial
+// auto switch (nil = unspecified: the persisted switch wins). An explicit
+// -auto beats -mode. The alias is accepted for one release so existing
+// launch scripts keep starting: interactive|batch -> off, drain -> on.
+func resolveAuto(fs *flag.FlagSet, auto bool, legacyMode string, stderr io.Writer) (*bool, error) {
+	autoSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "auto" {
+			autoSet = true
+		}
+	})
+	if legacyMode != "" {
+		fmt.Fprintf(stderr, "pf daemon: WARNING: -mode is deprecated and will be removed; use -auto (interactive|batch -> -auto=false, drain -> -auto=true)\n")
+		if !autoSet {
+			switch legacyMode {
+			case "interactive", "batch":
+				auto, autoSet = false, true
+			case "drain":
+				auto, autoSet = true, true
+			default:
+				return nil, fmt.Errorf("-mode must be interactive|drain (deprecated; use -auto)")
+			}
+		}
+	}
+	if !autoSet {
+		return nil, nil
+	}
+	return &auto, nil
+}

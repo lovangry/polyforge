@@ -18,7 +18,7 @@ import (
 //	transport failure (daemon socket down, aihub unreachable) → 1
 //
 // Classes a verb cannot produce (backup has no local validation;
-// batch-confirm has no pre-wire validation; the daemon verb is
+// the daemon verb is
 // help-only) are absent from that verb's table and reported in the fix
 // summary as semantic blanks, never silently skipped.
 
@@ -185,8 +185,6 @@ func TestDaemonFaceVerbExitCodeGoldens(t *testing.T) {
 		{"answer", []string{"answer", "wi_x", "--question", "q_1", "--text", "yes", "--by", "usr_1"},
 			"POST /jobs/wi_x/answer", `{"applied":true,"delivered":true}`, false,
 			[]string{"answer", "wi_x"}, []string{"answer", "--no-such-flag"}},
-		{"batch-confirm", []string{"batch-confirm"}, "POST /mode",
-			`{"items":[]}`, false, nil, []string{"batch-confirm", "--no-such-flag"}},
 		{"pause", []string{"pause", "wi_x"}, "POST /jobs/wi_x/pause", `{}`, false,
 			[]string{"pause"}, []string{"pause", "--no-such-flag"}},
 		{"wrap", []string{"wrap", "wi_x"}, "POST /jobs/wi_x/wrap", `{}`, false,
@@ -195,7 +193,7 @@ func TestDaemonFaceVerbExitCodeGoldens(t *testing.T) {
 			`{"work_item_id":"wi_x","branch":"polyforge/wi_x","repos":[]}`, false,
 			[]string{"ship"}, []string{"ship", "--no-such-flag"}},
 		{"ops", []string{"ops", "status"}, "GET /status",
-			`{"machine_id":"m1","mode":"interactive","shutting_down":false,"jobs":[],` +
+			`{"machine_id":"m1","auto":false,"shutting_down":false,"jobs":[],` +
 				`"queue":{"pending":0,"running":0,"max_concurrent":2}}`, false,
 			[]string{"ops", "bogus-action"}, []string{"ops", "--no-such-flag"}},
 	}
@@ -326,7 +324,7 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 	want := []string{
 		"file", "queue", "cancel", "recall", "remember", "takeover",
 		"verify-session",
-		"submit", "observe", "answer", "batch-confirm", "pause", "resume",
+		"submit", "observe", "answer", "pause", "resume",
 		"wrap", "ops", "chat", "watch", "ship", "users", "api-keys", "machines", "projects",
 		"backup", "rotate-secret",
 		"doctor", "daemon",

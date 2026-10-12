@@ -25,7 +25,7 @@ package test
 // --api-key, --machine-id, --data-dir, --workflows-dir, --pi-bin,
 // --config) — never through the mapping-retired workspace/project
 // flags. The only `--project` bytes in this file are LIVE CLI surface
-// (queue / file create / remember / recall / batch-confirm), which the
+// (queue / file create / remember / recall), which the
 // change keeps.
 //
 // Self-policing: the retired env/flag tokens this suite polices are
@@ -1787,81 +1787,11 @@ func TestW113QueueNoMappingFailsLoudly(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// S22 — batch-confirm: all-mapped default, --project scoping validated.
-// ---------------------------------------------------------------------------
-
-// TestW113BatchConfirmAllMappedAndScoped pins criterion #17: without a
-// domain the scheduler recommendation covers both mapped projects'
-// ready queues, merged; `--project P` scopes to P (validated against
-// the mapping — unmapped fails with guidance).
-func TestW113BatchConfirmAllMappedAndScoped(t *testing.T) {
-	inst := newV1Install(t)
-	w113EnsureProject(t, inst, "ieops")
-	wsA := filepath.Join(t.TempDir(), "w113wsA")
-	wsB := filepath.Join(t.TempDir(), "w113wsB")
-	for _, ws := range []string{wsA, wsB} {
-		if err := os.MkdirAll(ws, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{
-			{key: wsA, projects: []string{"e2e"}},
-			{key: wsB, projects: []string{"ieops"}},
-		})
-	goalA := "w113 batch-confirm ready alpha"
-	goalB := "w113 batch-confirm ready beta"
-	w113NewWI(t, inst, "e2e", goalA, envelopeQuickFix())
-	w113NewWI(t, inst, "ieops", goalB, envelopeQuickFix())
-
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
-
-	// No domain: the recommendation covers BOTH projects' ready queues,
-	// merged.
-	out := d.pfWant(inst, -1, "batch-confirm")
-	if !strings.Contains(out, "2 recommended") {
-		t.Fatalf("pf batch-confirm (all mapped): expected the merged recommendation of 2, output %q", out)
-	}
-	for _, tok := range []string{goalA, goalB} {
-		if !strings.Contains(out, tok) {
-			t.Fatalf("pf batch-confirm (all mapped): the merged recommendation misses %q (output %q)", tok, out)
-		}
-	}
-
-	// Scoped to one mapped project: only that project's ready queue.
-	scoped := d.pfWant(inst, -1, "batch-confirm", "--project", "e2e")
-	if !strings.Contains(scoped, "1 recommended") {
-		t.Fatalf("pf batch-confirm --project e2e: expected exactly 1 recommended, output %q", scoped)
-	}
-	if !strings.Contains(scoped, goalA) {
-		t.Fatalf("pf batch-confirm --project e2e: the scoped recommendation misses e2e's item (output %q)", scoped)
-	}
-	if strings.Contains(scoped, goalB) {
-		t.Fatalf("pf batch-confirm --project e2e: the scoped recommendation leaks ieops's item (output %q)", scoped)
-	}
-
-	// Unmapped scope: fails with a naming error and guidance.
-	out3, code3 := d.pf(inst, "batch-confirm", "--project", "ghostproj")
-	if code3 != 1 {
-		t.Fatalf("pf batch-confirm --project ghostproj: exit %d, want 1 (output %q)", code3, out3)
-	}
-	if !strings.Contains(out3, "ghostproj") {
-		t.Fatalf("pf batch-confirm --project ghostproj: error does not name the project (output %q)", out3)
-	}
-	if !strings.Contains(out3, "[workspace") && !strings.Contains(out3, "doctor") && !strings.Contains(out3, "mapping") {
-		t.Fatalf("pf batch-confirm --project ghostproj: error does not point at the mapping (output %q)", out3)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// S23 — daemon drain iterates all mapped projects.
+// S23 — the auto-pull iterates all mapped projects.
 // ---------------------------------------------------------------------------
 
 // TestW113DrainIteratesAllMappedProjects pins criterion #17's daemon
-// half: a daemon in drain mode fetches the ready queue and iterates ALL
+// half: a daemon with auto on fetches the ready queue and iterates ALL
 // mapped projects — no daemon-level project scope exists anymore.
 func TestW113DrainIteratesAllMappedProjects(t *testing.T) {
 	inst := newV1Install(t)
@@ -1882,7 +1812,7 @@ func TestW113DrainIteratesAllMappedProjects(t *testing.T) {
 	wiA := w113NewWI(t, inst, "e2e", "w113 drain across workspaces alpha", envelopeQuickFix())
 	wiB := w113NewWI(t, inst, "ieops", "w113 drain across workspaces beta", envelopeQuickFix())
 
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptArgs("--mode", "drain"))
+	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptArgs("--auto"))
 	d.start()
 	defer d.stop()
 
@@ -2346,7 +2276,7 @@ func TestW113DesignDocsTeachMappingContract(t *testing.T) {
 
 // TestW113SkillsTeachMappingContract pins criterion #26's automated
 // floor: SKILL.md's config-contract section and the file, queue,
-// remember, recall and batch-confirm fragments all teach the
+// remember and recall fragments all teach the
 // `[workspace` mapping shape. (The teaching-quality judgment is the
 // manual document-only review in artifacts/e2e-scenarios.md.)
 func TestW113SkillsTeachMappingContract(t *testing.T) {
@@ -2357,7 +2287,6 @@ func TestW113SkillsTeachMappingContract(t *testing.T) {
 		filepath.Join(root, "skills", "polyforge", "verbs", "queue.md"),
 		filepath.Join(root, "skills", "polyforge", "verbs", "remember.md"),
 		filepath.Join(root, "skills", "polyforge", "verbs", "recall.md"),
-		filepath.Join(root, "skills", "polyforge", "verbs", "batch-confirm.md"),
 	}
 	for _, f := range files {
 		raw, err := os.ReadFile(f)

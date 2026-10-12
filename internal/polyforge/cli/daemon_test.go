@@ -46,7 +46,7 @@ func newDaemonFixture(t *testing.T) *daemonFixture {
 			h(w, r)
 			return
 		}
-		io.WriteString(w, `{"machine_id":"m1","mode":"interactive","workspaces":["/srv/pf-ws","/srv/pf-ws2"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
+		io.WriteString(w, `{"machine_id":"m1","auto":false,"workspaces":["/srv/pf-ws","/srv/pf-ws2"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		d.rec.record(r)
@@ -266,7 +266,7 @@ func TestDaemonClientStatusRoundtrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if s.MachineID != "m1" || s.Mode != "interactive" || s.Queue.MaxConcurrent != 2 {
+	if s.MachineID != "m1" || s.Auto || s.Queue.MaxConcurrent != 2 {
 		t.Errorf("StatusResponse = %+v", s)
 	}
 	// #113: the workspace SET's data source decodes from the body.
@@ -286,7 +286,7 @@ func TestDaemonClientStatusRoundtrip(t *testing.T) {
 func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
 	d := newDaemonFixture(t)
 	d.answer("GET", "/status",
-		`{"machine_id":"m1","mode":"interactive","workspaces":["/srv/pf-ws"],"shutting_down":false,`+
+		`{"machine_id":"m1","auto":false,"workspaces":["/srv/pf-ws"],"shutting_down":false,`+
 			`"jobs":[`+
 			`{"work_item_id":"wi_run","status":"running","spawn_n":3,`+
 			`"session_fingerprint":"ab12cd34ef56aa00","agent_pid":42},`+
@@ -321,7 +321,7 @@ func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
 	var b bytes.Buffer
 	renderStatus(&b, &s)
 	golden(t, "StatusSessionColumns", b.String(),
-		`daemon: m1  mode: interactive  queue: 1 pending / 1 running / max 2
+		`daemon: m1  auto: off  max: 2  queue: 1 pending / 1 running
 workspaces: /srv/pf-ws
 
 WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  STEP-AGE  LAST-WORK
@@ -487,5 +487,46 @@ func TestObserveReadThroughFailure(t *testing.T) {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr missing %q: %s", want, stderr)
 		}
+	}
+}
+
+// TestOpsAutoAndMaxVerbs: `pf ops auto on|off` / `pf ops max N` post the
+// one switch and the one number to /ops/config; bare forms read /status;
+// bad arguments are refused locally.
+func TestOpsAutoAndMaxVerbs(t *testing.T) {
+	d := newDaemonFixture(t)
+	d.answer("POST", "/ops/config", `{"auto":true,"max":3}`)
+	env := map[string]string{"PF_DAEMON_SOCKET": d.sock}
+
+	for _, c := range []struct {
+		args []string
+		body string
+	}{
+		{[]string{"ops", "auto", "on"}, `{"auto":true}`},
+		{[]string{"ops", "auto", "off"}, `{"auto":false}`},
+		{[]string{"ops", "max", "3"}, `{"max":3}`},
+	} {
+		if code, _, stderr := runPf(t, env, c.args...); code != 0 {
+			t.Fatalf("%v: code=%d stderr=%s", c.args, code, stderr)
+		}
+		if got := strings.TrimSpace(d.rec.last().Body); d.rec.last().Path != "/ops/config" || got != c.body {
+			t.Fatalf("%v posted %s %s, want /ops/config %s", c.args, d.rec.last().Path, got, c.body)
+		}
+	}
+	// Bare forms read /status (fixture: auto off, max 2).
+	if _, out, _ := runPf(t, env, "ops", "auto"); strings.TrimSpace(out) != "auto: off" {
+		t.Fatalf("ops auto = %q", out)
+	}
+	if _, out, _ := runPf(t, env, "ops", "max"); strings.TrimSpace(out) != "max: 2" {
+		t.Fatalf("ops max = %q", out)
+	}
+	n := len(d.rec.all())
+	for _, bad := range [][]string{{"ops", "auto", "maybe"}, {"ops", "max", "0"}, {"ops", "max", "x"}, {"ops", "mode", "drain"}} {
+		if code, _, _ := runPf(t, env, bad...); code == 0 {
+			t.Fatalf("%v accepted", bad)
+		}
+	}
+	if len(d.rec.all()) != n {
+		t.Fatal("a refused argument reached the daemon")
 	}
 }

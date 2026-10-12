@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 )
 
@@ -22,8 +21,8 @@ import (
 // losses stay silent.
 func TestDrainDegradedEdgeSemantics(t *testing.T) {
 	td := newTestDaemon(t, nil)
-	if err := td.modes.Set(protocol.ModeDrain); err != nil {
-		t.Fatalf("enter drain: %v", err)
+	if err := td.modes.SetAuto(true); err != nil {
+		t.Fatalf("enable auto: %v", err)
 	}
 	eventsPath := filepath.Join(td.DataDirPath(), observe.EventsFile)
 
