@@ -253,3 +253,79 @@ func TestTransientProbeFailureKeepsSubmitQueued(t *testing.T) {
 		}
 	}
 }
+
+// DAEMON-503 backoff: 1s, 2s, 4s ... capped at 30s.
+func TestDeferralBackoffGrowsAndCaps(t *testing.T) {
+	want := []time.Duration{1, 2, 4, 8, 16, 30, 30, 30}
+	for i, w := range want {
+		if got := deferralBackoff(i + 1); got != w*time.Second {
+			t.Fatalf("backoff(%d) = %v, want %v", i+1, got, w*time.Second)
+		}
+	}
+	if got := deferralBackoff(1000); got != deferralMax {
+		t.Fatalf("backoff(1000) = %v, want the cap", got)
+	}
+}
+
+// A deferred entry is skipped by Take until its NotBefore, so another
+// pending entry (even a lower-priority one) proceeds; the deferred entry is
+// never dropped, keeps its rank, and its backoff persists with it.
+func TestRequeueBackoffDoesNotBlockOthers(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	q := NewJobQueue(4, func() map[string]bool { return map[string]bool{} })
+	q.now = func() time.Time { return now }
+	var persisted []qEntry
+	q.persist = func(es []qEntry) error { persisted = append([]qEntry(nil), es...); return nil }
+
+	if err := q.Enqueue(qEntry{WorkItemID: "wi_bad", Priority: "urgent", Intent: "claim"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Enqueue(qEntry{WorkItemID: "wi_ok", Priority: "low", Intent: "claim"}); err != nil {
+		t.Fatal(err)
+	}
+	e := q.Take()
+	if e == nil || e.WorkItemID != "wi_bad" || e.Deferrals != 0 {
+		t.Fatalf("first take = %+v, want wi_bad (urgent)", e)
+	}
+	if err := q.Requeue("wi_bad"); err != nil {
+		t.Fatal(err)
+	}
+	// the persisted entry carries the backoff (survives a restart)
+	var saved *qEntry
+	for i := range persisted {
+		if persisted[i].WorkItemID == "wi_bad" {
+			saved = &persisted[i]
+		}
+	}
+	if saved == nil || saved.Deferrals != 1 || !saved.NotBefore.Equal(now.Add(time.Second)) {
+		t.Fatalf("persisted wi_bad = %+v, want deferrals 1 and not_before now+1s", saved)
+	}
+	// not due: the lower-priority entry proceeds, then nothing is takeable
+	if e := q.Take(); e == nil || e.WorkItemID != "wi_ok" {
+		t.Fatalf("second take = %+v, want wi_ok", e)
+	}
+	if e := q.Take(); e != nil {
+		t.Fatalf("a not-due entry was taken: %+v", e)
+	}
+	if !q.IsPending("wi_bad") {
+		t.Fatal("the deferred entry must stay pending")
+	}
+	// due again: back first by rank; a second deferral doubles the wait
+	now = now.Add(time.Second)
+	e = q.Take()
+	if e == nil || e.WorkItemID != "wi_bad" || e.Deferrals != 1 {
+		t.Fatalf("take after the backoff = %+v", e)
+	}
+	_ = q.Requeue("wi_bad")
+	if e := q.Take(); e != nil {
+		t.Fatalf("second backoff not honored: %+v", e)
+	}
+	now = now.Add(2*time.Second - time.Millisecond)
+	if e := q.Take(); e != nil {
+		t.Fatalf("taken 1ms early: %+v", e)
+	}
+	now = now.Add(time.Millisecond)
+	if e := q.Take(); e == nil {
+		t.Fatal("not taken once due")
+	}
+}

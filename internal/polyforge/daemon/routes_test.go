@@ -584,3 +584,34 @@ func statusJobOf(s *cli.StatusResponse, wi string) *cli.StatusJob {
 	}
 	return nil
 }
+
+// TestResumeBlockedHubUnavailableQueuesClaim: a DAEMON-503 at the claim
+// (the CLI already flipped the WI blocked -> queued) does not strand the
+// WI: the route queues the claim in the persisted submit queue and answers
+// success-deferred; the dispatcher claims it once the hub answers.
+func TestResumeBlockedHubUnavailableQueuesClaim(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	const wi = "wi_resume503"
+	td.hub.mu.Lock()
+	td.hub.status[wi] = api.StatusQueued
+	td.hub.probeFails = 2 // the route's own Start probe fails (and possibly the first dispatch), then the hub answers
+	td.hub.mu.Unlock()
+	mkBare(t, td.cfg.GitRemoteBase, wi)
+
+	raw, err := td.client.ResumeBlocked(wi)
+	if err != nil {
+		t.Fatalf("resume-blocked must answer success-deferred on DAEMON-503: %v", err)
+	}
+	var rr struct {
+		Resumed    bool   `json:"resumed"`
+		WorkItemID string `json:"work_item_id"`
+		Deferred   bool   `json:"deferred"`
+	}
+	if err := json.Unmarshal(raw, &rr); err != nil {
+		t.Fatal(err)
+	}
+	if !rr.Resumed || !rr.Deferred || rr.WorkItemID != wi {
+		t.Fatalf("answer = %+v, want resumed+deferred", rr)
+	}
+	td.waitLive(t, wi)
+}

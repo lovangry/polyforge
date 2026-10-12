@@ -135,6 +135,31 @@ type qEntry struct {
 	// Origin.ChatID). Persisted so a replayed claim hands it to the job
 	// record exactly like a live submit.
 	Origin runtime.Origin `json:"origin"`
+	// NotBefore/Deferrals are the DAEMON-503 backoff: a claim the hub
+	// could not be reached for is held back until NotBefore (Take skips
+	// it, so other entries proceed) and each deferral doubles the wait.
+	// Both persist with the entry, so a restart keeps the remaining wait
+	// (at most deferralMax) instead of hammering a down hub.
+	NotBefore time.Time `json:"not_before,omitempty"`
+	Deferrals int       `json:"deferrals,omitempty"`
+}
+
+// Hub-unavailable backoff bounds: 1s, 2s, 4s ... capped at deferralMax.
+const (
+	deferralBase = time.Second
+	deferralMax  = 30 * time.Second
+)
+
+// deferralBackoff is the wait after the n-th (1-based) consecutive deferral.
+func deferralBackoff(n int) time.Duration {
+	d := deferralBase
+	for i := 1; i < n && d < deferralMax; i++ {
+		d *= 2
+	}
+	if d > deferralMax {
+		d = deferralMax
+	}
+	return d
 }
 
 type jobQueue struct {
@@ -152,6 +177,8 @@ type jobQueue struct {
 	// ones (there is no separate running set to drift).
 	occupied func() map[string]bool
 	maxConc  int
+	// now is the clock (tests inject one); nil means time.Now.
+	now func() time.Time
 	// persist, when non-nil, atomically rewrites the queue file from the
 	// given snapshot (pending + inflight). Called under mu.
 	persist func([]qEntry) error
@@ -159,6 +186,13 @@ type jobQueue struct {
 
 func NewJobQueue(maxConc int, occupied func() map[string]bool) *jobQueue {
 	return &jobQueue{occupied: occupied, inflight: map[string]qEntry{}, maxConc: maxConc}
+}
+
+func (q *jobQueue) clock() time.Time {
+	if q.now != nil {
+		return q.now()
+	}
+	return time.Now()
 }
 
 func (q *jobQueue) SetMaxConcurrent(n int) error {
@@ -230,8 +264,9 @@ func (q *jobQueue) Settle(wi string) error {
 
 // Requeue returns a Take()n entry to pending (the claim attempt did not
 // run to a verdict — a transient hub failure) and persists; the next
-// dispatch pass retries it. The entry keeps its original enqueue time, so
-// its rank is unchanged.
+// dispatch pass after the entry's backoff retries it (Take skips it until
+// then, so other entries are not starved by one WI's failure). The entry
+// keeps its original enqueue time, so its rank is unchanged.
 func (q *jobQueue) Requeue(wi string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -240,6 +275,8 @@ func (q *jobQueue) Requeue(wi string) error {
 		return nil
 	}
 	delete(q.inflight, wi)
+	e.Deferrals++
+	e.NotBefore = q.clock().Add(deferralBackoff(e.Deferrals))
 	q.pending = append(q.pending, e)
 	return q.persistLocked()
 }
@@ -282,8 +319,9 @@ func (q *jobQueue) SlotFree() bool {
 	return len(q.occupied()) < q.maxConc
 }
 
-// Take pops the next pending entry IF a slot is free (04 §6.1d backfill:
-// strictly priority desc, then FIFO). A started job occupies its slot by
+// Take pops the next DUE pending entry IF a slot is free (04 §6.1d
+// backfill: strictly priority desc, then FIFO; an entry still inside its
+// DAEMON-503 backoff is skipped). A started job occupies its slot by
 // appearing in the runtime's live list.
 func (q *jobQueue) Take() *qEntry {
 	q.mu.Lock()
@@ -291,13 +329,24 @@ func (q *jobQueue) Take() *qEntry {
 	if len(q.pending) == 0 || len(q.occupied()) >= q.maxConc {
 		return nil
 	}
-	best := 0
-	for i := 1; i < len(q.pending); i++ {
+	now := q.clock()
+	best := -1
+	for i := range q.pending {
+		if q.pending[i].NotBefore.After(now) {
+			continue
+		}
+		if best < 0 {
+			best = i
+			continue
+		}
 		a, b := q.pending[i], q.pending[best]
 		if rankOf(a.Priority) < rankOf(b.Priority) ||
 			(rankOf(a.Priority) == rankOf(b.Priority) && a.EnqueuedAt.Before(b.EnqueuedAt)) {
 			best = i
 		}
+	}
+	if best < 0 {
+		return nil
 	}
 	e := q.pending[best]
 	q.pending = append(q.pending[:best], q.pending[best+1:]...)

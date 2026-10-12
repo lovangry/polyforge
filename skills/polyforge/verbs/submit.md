@@ -47,6 +47,7 @@ raw answer `{accepted, work_item_id}`.
 | (no code) `submit: <id> is terminal (<status>)` | The work item is already wrapped/failed/cancelled (CLI precheck) | It is finished and can never be claimed again — file a new work item instead. |
 | `DAEMON-409` | The work item is already active or queued on this daemon | Wait for the running attempt. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | The daemon is in graceful shutdown | Wait for the shutdown to finish and the daemon to restart, then submit again. |
+| `DAEMON-503` | The hub could not be reached before the claim (transient) | Nothing was claimed; the submit stays queued in the daemon and is retried with backoff (1s doubling to 30s). Check aihub reachability; `pf watch <id> --once` shows it once claimed. |
 | `DAEMON-400` | Malformed request body | Fix the invocation. |
 | `DAEMON-412` | The work item's project is not in the `[workspace]` mapping of this machine (refused before any capsule or claim state exists) | Add the project to a `[workspace."<path>"]` section; `pf doctor` checks the mapping. |
 | `DAEMON-516` | (surfaces as a `submit_rejected` event) re-claim clone refusal: the capsule clone failed for a work item with published progress, so a local init that would restart at step 1 is refused | Fix aihub reachability / credentials, then `pf resume <id>`. |

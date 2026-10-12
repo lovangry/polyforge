@@ -866,13 +866,16 @@ func (d *Daemon) dispatch() {
 		var ae *api.Error
 		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
 			// The hub could not be reached before the claim: nothing was
-			// claimed, so the accepted submit stays queued and the next
-			// dispatch tick retries it (never dropped on a transient blip).
-			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) deferred: %v\n", e.WorkItemID, e.Intent, err)
+			// claimed, so the accepted submit stays queued and is retried
+			// with backoff (never dropped on a transient blip, never
+			// blocking the other entries). One log line per episode.
+			if e.Deferrals == 0 {
+				fmt.Fprintf(os.Stderr, "daemon: start %s (%s) deferred, will retry with backoff: %v\n", e.WorkItemID, e.Intent, err)
+			}
 			if rerr := d.q.Requeue(e.WorkItemID); rerr != nil {
 				fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, rerr)
 			}
-			return
+			continue
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)

@@ -88,6 +88,7 @@ refused before anything else happens.
 | `DAEMON-409` | The work item is already active or queued on this daemon | `pf watch <id> --once` shows the running attempt. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | Graceful shutdown in progress | Wait for restart, then resume. |
 | `AUTH-403` (from the resume door) | The caller is not the work item's reporter, a project maintainer or an admin | Ask the task owner or a maintainer to continue it. |
+| `DAEMON-503` | The hub was unreachable when the daemon went to claim after the resume door | Not an error: the claim is queued in the daemon (persisted, retried with backoff) and `pf resume` answers `resumed ...: the hub is unreachable right now; the claim is queued`. Do not run `pf resume` again — it would only find the work item already queued (`DAEMON-409`). |
 | `DAEMON-412` | The project is not in the `[workspace]` mapping (a claim/submit for an unmapped project) | Re-add the project to a `[workspace."<path>"]` section (`pf doctor` checks it), then `pf resume`. |
 | `DAEMON-516` | The claim behind the resume could not clone the capsule for a work item with published progress; a local init would restart the workflow at step 1, so it is refused and the claim returns to blocked | Fix aihub reachability / credentials, then `pf resume` again. |
 | `DAEMON-518` | A different daemon than the sealing one claimed the continue and the aihub capsule head is not the sealed head | Continue it on the machine that sealed it, or abandon with `pf cancel <id>`. |

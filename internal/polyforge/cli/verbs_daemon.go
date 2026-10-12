@@ -247,7 +247,15 @@ var cmdResume = &Command{
 		if err != nil {
 			return err
 		}
+		var ans struct {
+			Deferred bool `json:"deferred"`
+		}
+		_ = json.Unmarshal(raw, &ans)
 		ctx.finish(raw, func() {
+			if ans.Deferred {
+				fmt.Fprintf(ctx.Stdout, "resumed %s: the hub is unreachable right now; the claim is queued in the daemon and will run when the hub is reachable (retried with backoff; watch it with `pf watch <id> --once`)\n", args[0])
+				return
+			}
 			fmt.Fprintf(ctx.Stdout, "resumed %s: the workflow was parked blocked (incomplete result) — the §6.4 owner move re-established execution over the parked capsule\n", args[0])
 			fmt.Fprintln(ctx.Stdout, "(the frozen current step re-dispatches in place as a fresh derivation; watch it with `pf watch <id> --once`)")
 		})

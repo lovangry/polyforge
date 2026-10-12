@@ -163,13 +163,16 @@ func TestSubmitModelsPersistedAndValidated(t *testing.T) {
 		c.SocketPath = filepath.Join(filepath.Dir(data), "s2.sock")
 	})
 	td2.waitLive(t, wi)
-	ji, _ := td2.rt.Info(wi)
-	raw, err := os.ReadFile(filepath.Join(ji.CapsuleDir, "capsule.json"))
+	raw, err := os.ReadFile(filepath.Join(data, "manual-models.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"manual_candidates": [`) || !strings.Contains(string(raw), `"p/a"`) || !strings.Contains(string(raw), `"p/b"`) {
-		t.Fatalf("replayed claim lost the manual list: %s", raw)
+	if !strings.Contains(string(raw), `"p/a"`) || !strings.Contains(string(raw), `"p/b"`) {
+		t.Fatalf("replayed claim lost the manual list (daemon-side record): %s", raw)
+	}
+	ji, _ := td2.rt.Info(wi)
+	if cj, err := os.ReadFile(filepath.Join(ji.CapsuleDir, "capsule.json")); err != nil || strings.Contains(string(cj), "manual_candidates") {
+		t.Fatalf("capsule.json must not carry the manual list: %v %s", err, cj)
 	}
 }
 

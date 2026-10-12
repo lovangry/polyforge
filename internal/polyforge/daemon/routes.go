@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -105,6 +106,10 @@ type closeResponse struct {
 type resumeBlockedResponse struct {
 	Resumed    bool   `json:"resumed"`
 	WorkItemID string `json:"work_item_id"`
+	// Deferred: the hub was unreachable (DAEMON-503) when the claim ran;
+	// the claim is queued in the persisted submit queue and retried with
+	// backoff, exactly like a submit.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -367,6 +372,20 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	d.rt.NoteOrigin(canonical, body.Origin.origin())
 	cursor := d.lastSeq(canonical)
 	if err := d.rt.Start(d.runCtx, canonical); err != nil {
+		// The CLI already flipped the WI blocked -> queued at the hub; a
+		// transient hub loss before the claim must not strand it there:
+		// queue the claim like a submit (persisted, retried with backoff).
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
+			if qerr := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: "claim", Origin: body.Origin.origin()}); qerr != nil {
+				writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+qerr.Error())
+				return
+			}
+			fmt.Fprintf(os.Stderr, "daemon: resume %s deferred, queued for the claim: %v\n", canonical, err)
+			d.autoSubscribe(body.Origin, canonical, cursor)
+			writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical, Deferred: true})
+			return
+		}
 		writeErrOf(w, err)
 		return
 	}
