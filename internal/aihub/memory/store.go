@@ -470,13 +470,9 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 			WHERE memory_fts MATCH ?1 AND m.status='active'
 			ORDER BY rank LIMIT ?2`, ftsQuery(long), limit*4)
 		if err != nil {
-			// FTS could not serve the expression: degrade to the substring
-			// scan so retrieval still answers.
-			candRows, serr := s.scanBodies()
-			if serr != nil {
-				return nil, errf("MEM-503", "", "fts: %v", err)
-			}
-			cands = candRows
+			// A typed refusal, never a degrade to a full scan: answering
+			// every memory for a query FTS could not parse is a leak.
+			return nil, errf("MEM-503", "", "fts: %v", err)
 		} else {
 			for rows.Next() {
 				var c candRow
@@ -572,17 +568,15 @@ func (s *Store) scanBodies() ([]candRow, error) {
 	return out, nil
 }
 
-// ftsQuery ANDs the tokens as quoted phrases for the trigram MATCH.
+// ftsQuery ANDs the tokens as quoted phrases for the trigram MATCH. Every
+// token is an FTS5 string literal (embedded `"` doubled), so operator
+// characters such as - : * ( ) never reach the FTS5 expression parser.
 func ftsQuery(tokens []string) string {
 	parts := make([]string, len(tokens))
 	for i, p := range tokens {
-		if !strings.ContainsAny(p, `:-*()"`) {
-			parts[i] = `"` + p + `"`
-		} else {
-			parts[i] = p
-		}
+		parts[i] = `body:"` + strings.ReplaceAll(p, `"`, `""`) + `"`
 	}
-	return "body:" + strings.Join(parts, " AND body:")
+	return strings.Join(parts, " AND ")
 }
 
 func containsAll(have, want []string) bool {
