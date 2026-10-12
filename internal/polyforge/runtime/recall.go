@@ -25,6 +25,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 )
 
 const (
@@ -134,7 +136,7 @@ func (r *Runtime) writeRecalledMemories(j *job) {
 		fmt.Fprintf(os.Stderr, "runtime: %s: recalled-memories snapshot marshal failed: %v\n", j.wi, err)
 		return
 	}
-	if err := atomicWrite(filepath.Join(j.capsuleDir, filepath.FromSlash(relRecalledMemories)), blob, 0o644); err != nil {
+	if err := atomicfile.Write(filepath.Join(j.capsuleDir, filepath.FromSlash(relRecalledMemories)), blob, 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: recalled-memories snapshot write failed: %v\n", j.wi, err)
 	}
 }

@@ -17,13 +17,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -424,7 +425,7 @@ func (r *Runtime) persist() error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(r.statePath, blob, stateFilePerm)
+	return atomicfile.Write(r.statePath, blob, stateFilePerm)
 }
 
 func (r *Runtime) dropJob(j *job) {
@@ -1156,7 +1157,7 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// (omitempty, never fabricated) and its legacy fields are unchanged.
 	stampWorkspaceAudit(j, &idn)
 	blob, _ := json.MarshalIndent(idn, "", "  ")
-	if err := atomicWrite(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
+	if err := atomicfile.Write(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
 		return err
 	}
 	// v1.5: the session ownership marker — this session's fingerprint,
@@ -1173,7 +1174,7 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 		UpdatedAt:      nowStamp(),
 	}
 	sblob, _ := json.MarshalIndent(sess, "", "  ")
-	if err := atomicWrite(filepath.Join(j.capsuleDir, capsule.SessionJSON), sblob, 0o644); err != nil {
+	if err := atomicfile.Write(filepath.Join(j.capsuleDir, capsule.SessionJSON), sblob, 0o644); err != nil {
 		return err
 	}
 	// Task-repo inventory and the F1 task-definition file land before
@@ -1308,7 +1309,7 @@ func (r *Runtime) writeWorkItemDoc(j *job, item *api.WorkItem) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(filepath.Join(j.capsuleDir, filepath.FromSlash(capsule.WorkItemJSON)), blob, 0o644)
+	return atomicfile.Write(filepath.Join(j.capsuleDir, filepath.FromSlash(capsule.WorkItemJSON)), blob, 0o644)
 }
 
 func copyTree(src, dst string) error {
@@ -1327,37 +1328,12 @@ func copyTree(src, dst string) error {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		in, ierr := os.Open(p)
+		data, ierr := os.ReadFile(p)
 		if ierr != nil {
 			return ierr
 		}
-		defer in.Close()
-		if werr := atomicWriteFileMode(target, in, 0o444); werr != nil {
-			return werr
-		}
-		return nil
+		return atomicfile.Write(target, data, 0o444)
 	})
-}
-
-func atomicWriteFileMode(dst string, in io.Reader, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	tmp := dst + ".mtmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(f, in); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, dst)
 }
 
 // ---------------------------------------------------------------------------

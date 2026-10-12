@@ -31,6 +31,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -90,7 +92,7 @@ func (s *subStore) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(s.path, blob, 0o600)
+	return atomicfile.Write(s.path, blob, 0o600)
 }
 
 func (s *subStore) chatLocked(id string, create bool) *chatDoc {

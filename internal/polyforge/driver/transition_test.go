@@ -132,8 +132,10 @@ func tryReadExec(path string) *capsule.Execution {
 	return &exec
 }
 
-func tmpName(path string) string {
-	return filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp")
+// tmpLeftovers lists the atomic-write temp files next to path.
+func tmpLeftovers(path string) []string {
+	m, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp"))
+	return m
 }
 
 // ---------------------------------------------------------------------------
@@ -157,8 +159,8 @@ func TestTransitionInitWritesSkeleton(t *testing.T) {
 			t.Fatalf("step %s must be pending in the skeleton, got %+v", id, s)
 		}
 	}
-	if _, err := os.Stat(tmpName(execPath)); !os.IsNotExist(err) {
-		t.Fatalf("tmp file must not survive the rename: %v", err)
+	if m := tmpLeftovers(execPath); len(m) > 0 {
+		t.Fatalf("tmp file must not survive the rename: %v", m)
 	}
 	// Double init is refused — there is exactly one first write.
 	if err := d.transition(TransitionRequest{Kind: TransInit, SpawnN: 0}); err == nil {
@@ -832,7 +834,7 @@ func TestTransitionPersistFailureRevertsInMemory(t *testing.T) {
 	if d.SpawnN() != 0 {
 		t.Fatalf("the spawn counter must not advance over a failed start: %d", d.SpawnN())
 	}
-	if _, err := os.Stat(tmpName(execPath)); !os.IsNotExist(err) {
-		t.Fatalf("the tmp file must be cleaned on failure: %v", err)
+	if m := tmpLeftovers(execPath); len(m) > 0 {
+		t.Fatalf("the tmp file must be cleaned on failure: %v", m)
 	}
 }

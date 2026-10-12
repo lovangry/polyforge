@@ -34,7 +34,7 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 // TestTerminateJoinsDriverExit is the astra-r2 #1 regression: Terminate
 // must BLOCK (bounded) until the driver goroutine actually returned —
 // a cancel that merely returns lets the old driver's journal appends
-// land after the relaunch reads JournalMax, re-colliding ordinals.
+// land after the relaunch reads the journal, re-colliding ordinals.
 func TestTerminateJoinsDriverExit(t *testing.T) {
 	h := &Handle{done: make(chan error), cancel: func() {}}
 	// the driver goroutine exits 150ms after cancel

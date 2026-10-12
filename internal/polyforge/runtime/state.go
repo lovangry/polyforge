@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
@@ -287,50 +286,6 @@ func loadState(path string) (*stateFile, error) {
 		return nil, fmt.Errorf("runtime: state file unparsable: %w", err)
 	}
 	return &st, nil
-}
-
-// atomicWrite lands data at path via tmp+fsync+rename (the same contract
-// every daemon-side state file uses).
-func atomicWrite(path string, data []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	// A unique temp name per write: two concurrent persists of the same
-	// file must not share (and rename away) one fixed ".tmp".
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	// fsync the directory so the rename itself survives a power loss.
-	if d, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = d.Sync()
-		d.Close()
-	}
-	return nil
 }
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }

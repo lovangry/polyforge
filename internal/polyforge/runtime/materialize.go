@@ -36,6 +36,8 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/workflow"
@@ -267,7 +269,7 @@ func (r *Runtime) materializeBundleSet(j *job, src string) error {
 	if merr != nil {
 		return merr
 	}
-	if err := atomicWrite(markerPath, blob, 0o444); err != nil {
+	if err := atomicfile.Write(markerPath, blob, 0o444); err != nil {
 		return err
 	}
 	// The staging tree is empty now (every piece was renamed out);

@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -341,14 +343,7 @@ func (d *Daemon) persistDaemonState() error {
 		return err
 	}
 	path := d.statePath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, blob, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, blob, 0o600)
 }
 
 // persistModeQuietly lands the auto/max bookkeeping after an ops change;
@@ -380,27 +375,7 @@ func (d *Daemon) persistQueue(entries []qEntry) error {
 	if err != nil {
 		return err
 	}
-	path := d.queuePath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(blob); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(d.queuePath(), blob, 0o600)
 }
 
 // loadPersistedQueue reads the previous run's queue file (missing = none).

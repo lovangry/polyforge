@@ -44,9 +44,6 @@ func TestSubStorePersistsAcrossRestart(t *testing.T) {
 	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("file mode: %v %v", st, err)
 	}
-	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
-		t.Fatal("atomic write must not leave its temp file")
-	}
 	// a finished WI is re-armed by a new submit
 	_ = s2.Ack("chat_a", protocol.ChatAck{WI: "wi_1", Cursor: 12, Done: true})
 	if ch, _ := s2.Subscribe("chat_a", "wi_1", 0); !ch {

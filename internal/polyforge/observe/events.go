@@ -27,6 +27,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
@@ -224,10 +226,7 @@ func (l *EventLog) writeSnapshotLocked() {
 	if err != nil {
 		return
 	}
-	tmp := filepath.Join(l.dir, eventsSeqFile+".tmp")
-	if os.WriteFile(tmp, raw, 0o644) == nil {
-		_ = os.Rename(tmp, filepath.Join(l.dir, eventsSeqFile))
-	}
+	_ = atomicfile.Write(filepath.Join(l.dir, eventsSeqFile), raw, 0o644)
 }
 
 // scanFiles parses every durable generation, oldest first.
