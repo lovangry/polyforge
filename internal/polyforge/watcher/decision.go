@@ -41,8 +41,6 @@ var eventRules = map[string]Rule{
 	// daemon-side submit and restart signals
 	"submit_rejected":  {Class: "submit_rejected", Phrase: "a submit was accepted but did not start"},
 	"submit_dropped":   {Class: "submit_dropped", Phrase: "a queued submit was dropped"},
-	"capsule_missing":  {Class: "capsule_missing", Phrase: "the local capsule is missing and the work item needs repair", StateBacked: true},
-	"project_unmapped": {Class: "project_unmapped", Phrase: "the project is not mapped on this daemon and the work item needs repair", StateBacked: true},
 	"daemon_restarted": {Class: "daemon_restarted", Phrase: "the daemon restarted"},
 }
 
@@ -183,11 +181,6 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 	if j := snap.Job; j != nil {
 		if pendingID == "" && j.QuestionID != "" && (j.Status == protocol.JobNeedsInput) {
 			pendingID = j.QuestionID
-		}
-		if j.RepairReason != "" {
-			if r, ok := eventRules[j.RepairReason]; ok {
-				fire(r.Class, r)
-			}
 		}
 	}
 	if pendingID != "" {

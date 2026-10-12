@@ -20,7 +20,7 @@ pf watch --statusline --harness-session <id|->             # same, chat resolved
 ```
 
 `--once` is the pull: status (`running`, `needs input`, `completed`, `failed`,
-`blocked`, `repair pending`, or `queued/preparing` for a work item the daemon
+`blocked`, or `queued/preparing` for a work item the daemon
 has not registered yet), the current step and how long it has run, the age of
 the last work signal when known, the pending question's id and text, and the
 latest events. `--json` is the daemon's raw watch snapshot. The state comes

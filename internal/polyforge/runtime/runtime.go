@@ -62,8 +62,8 @@ type Config struct {
 	// — <mapped-workspace>/capsules/<wi> per the claim answer's project.
 	// There is no single workspace and no default project anymore. The
 	// daemon refuses to start when the mapping is empty; a recorded
-	// mid-flight project that falls out of it parks only that work item
-	// repair_pending (restart.go, v2-converge §6).
+	// mid-flight project that falls out of it blocks only that work item
+	// at aihub (restart.go, blockUnrecoverable).
 	Mapping       *mapping.Plan
 	DataDir       string // state.json + external git-dirs live here
 	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
@@ -270,13 +270,6 @@ type job struct {
 	// the same marker the hub does; false everywhere else (a graceful
 	// shutdown keeps it false — the attach-on-restart shape, M3).
 	cleanPause bool
-	// repairPending is the v2 §6 local "pending repair" mark: the record's
-	// capsule is missing / its project is unmapped at restart. Non-empty =
-	// the reason kind (RepairCapsuleMissing | RepairProjectUnmapped). The
-	// job is parked — record and SESSION kept, no agent, no hub call —
-	// until the next start or `pf resume` re-checks it. Orthogonal to
-	// state (the pre-park state is what the in-place resume continues).
-	repairPending string
 	// verifyPending marks a record whose restart SessionVerify could not
 	// reach aihub: it keeps its place (no agent yet) while the daemon
 	// retries the verify with backoff, then proceeds through restartOne.
@@ -286,11 +279,7 @@ type job struct {
 	// end_pending job (see StateEndPending).
 	endNote string
 	endHead string
-	// endStatus is the verdict of the pending SessionEnd; "" = blocked
-	// (the bounded-fail close). "canceled" / "failed" ride an abandoned
-	// repair_pending WI (AbandonRepair).
-	endStatus string
-	mu        sync.Mutex
+	mu      sync.Mutex
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries

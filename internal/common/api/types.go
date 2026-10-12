@@ -197,7 +197,7 @@ type SessionVerifyResponse struct {
 // terminal verdict sets the status and clears the session row entirely.
 type SessionEndRequest struct {
 	SessionID string `json:"session_id"`
-	Status    string `json:"status"` // wrapped|failed|canceled|blocked|paused (canceled: the abandon of a repair_pending WI, ended by its holder daemon)
+	Status    string `json:"status"` // wrapped|failed|blocked|paused
 	Note      string `json:"note,omitempty"`
 	// CleanPause rides the paused verdict only (merge amend: the atomic
 	// pause transition — session KEPT, clean_pause set — is the M3 pause;

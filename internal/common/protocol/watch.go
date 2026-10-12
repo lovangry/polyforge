@@ -44,7 +44,6 @@ type WatchSnapshot struct {
 // WatchJob is the daemon-side job bookkeeping of a WI.
 type WatchJob struct {
 	Status             string       `json:"status"`
-	RepairReason       string       `json:"repair_reason,omitempty"`
 	QuestionID         string       `json:"question_id,omitempty"`
 	LastProgressAgoSec *int64       `json:"last_progress_ago_sec,omitempty"`
 	Origin             *WatchOrigin `json:"origin,omitempty"`
@@ -133,7 +132,7 @@ type ChatAck struct {
 // ChatAttentionItem is one WI that needs a human and has no live watcher.
 type ChatAttentionItem struct {
 	WI     string `json:"wi"`
-	Reason string `json:"reason"` // needs_input | repair_pending
+	Reason string `json:"reason"` // needs_input
 }
 
 // ChatAttention is the GET /chats/{id}/attention answer.

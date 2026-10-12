@@ -13,7 +13,6 @@ const (
 	StateQueued   = "queued/preparing"
 	StateRunning  = "running"
 	StateNeeds    = "needs input"
-	StateRepair   = "repair pending"
 	maxFieldWidth = 60
 )
 
@@ -21,9 +20,6 @@ const (
 // yet (submitted, not registered with a monitor) is queued/preparing — a
 // normal transient, never an error (#98/#101).
 func StateLabel(s *protocol.WatchSnapshot) string {
-	if j := s.Job; j != nil && j.RepairReason != "" {
-		return StateRepair + " (" + clean(j.RepairReason) + ")"
-	}
 	if sr, ok := statusRules[s.HubStatus]; ok && s.HubStatus != "" {
 		return sr.Class // closed by hand: the hub status outranks a stale execution.json
 	}
@@ -120,9 +116,6 @@ func FormatOnce(s *protocol.WatchSnapshot, now time.Time, maxEvents int) string 
 	if j := s.Job; j != nil {
 		if j.LastProgressAgoSec != nil {
 			fmt.Fprintf(&b, "last signal: %s ago\n", FormatAge(time.Duration(*j.LastProgressAgoSec)*time.Second))
-		}
-		if j.RepairReason != "" {
-			fmt.Fprintf(&b, "repair:     %s\n", clean(j.RepairReason))
 		}
 	}
 	if p := s.Progress; p != nil {

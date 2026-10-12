@@ -172,17 +172,11 @@ type jobRecord struct {
 	// records written before it existed: such a job loads fine and is
 	// treated as owned by the WI reporter by later consumers.
 	Origin *Origin `json:"origin,omitempty"`
-	// RepairPending is the v2 §6 local pending-repair mark (see
-	// job.repairPending): "capsule_missing" | "project_unmapped" | "".
-	RepairPending string `json:"repair_pending,omitempty"`
 	// EndNote/EndHead persist the pending SessionEnd(blocked) of an
 	// end_pending record: the verdict's note and the capsule head the
 	// sealing daemon pushed (the cross-daemon continue check, §7).
 	EndNote string `json:"end_note,omitempty"`
 	EndHead string `json:"end_head,omitempty"`
-	// EndStatus is the pending SessionEnd verdict when it is not blocked
-	// (an abandoned repair_pending WI: canceled | failed).
-	EndStatus string `json:"end_status,omitempty"`
 }
 
 // Origin kinds.
@@ -225,10 +219,8 @@ func (j *job) record() *jobRecord {
 		AgentPID:           j.agentPID,
 		AgentStart:         j.agentStartedAt,
 		Origin:             j.origin,
-		RepairPending:      j.repairPending,
 		EndNote:            j.endNote,
 		EndHead:            j.endHead,
-		EndStatus:          j.endStatus,
 	}
 }
 
@@ -265,10 +257,8 @@ func jobFromRecord(rec *jobRecord) *job {
 		agentPID:       rec.AgentPID,
 		agentStartedAt: rec.AgentStart,
 		origin:         rec.Origin,
-		repairPending:  rec.RepairPending,
 		endNote:        rec.EndNote,
 		endHead:        rec.EndHead,
-		endStatus:      rec.EndStatus,
 	}
 }
 

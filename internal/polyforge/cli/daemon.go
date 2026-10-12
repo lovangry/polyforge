@@ -199,11 +199,8 @@ type StatusJob struct {
 	AgentPID           int    `json:"agent_pid,omitempty"`
 	// NeedsInput/QuestionID are the D6 owner face: a job presented as
 	// needs_input carries its pending question's id.
-	NeedsInput bool `json:"needs_input,omitempty"`
-	// RepairReason accompanies Status "repair_pending" (v2 §6):
-	// capsule_missing | project_unmapped.
-	RepairReason string `json:"repair_reason,omitempty"`
-	QuestionID   string `json:"question_id,omitempty"`
+	NeedsInput bool   `json:"needs_input,omitempty"`
+	QuestionID string `json:"question_id,omitempty"`
 	// StepAgeSec / LastWorkAgoSec are the owner liveness face: whole
 	// seconds since the current dispatch began and since its harness last
 	// did real work (nil = none — rendered "-" in the STEP-AGE and
@@ -273,14 +270,6 @@ func (d *DaemonClient) Resume(wiID, priority string) (json.RawMessage, error) {
 // and the loop re-dispatches the frozen step in place as a fresh derivation.
 func (d *DaemonClient) ResumeBlocked(wiID string) (json.RawMessage, error) {
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-blocked", "", d.withOrigin(map[string]any{}), nil)
-}
-
-// AbandonRepair asks the daemon to give up a repair_pending WI it holds:
-// it ends the kept session with verdict ("canceled" | "failed") and drops
-// the parked record. The caller has already passed the aihub human-key
-// authorization probe (CloseAuth).
-func (d *DaemonClient) AbandonRepair(wiID, verdict string) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/abandon-repair", "", map[string]any{"verdict": verdict}, nil)
 }
 
 func (d *DaemonClient) submit(wiID, intent, priority string) (json.RawMessage, error) {

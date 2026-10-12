@@ -79,14 +79,13 @@ Disambiguation: "continue / go on" **mid-run** routes to `watch` (`pf watch <wi>
 `resume` — `resume` is "continue": it reactivates a **paused** WI or a
 **blocked** one (always a fresh claim). A blocked WI has exactly two human
 moves: continue = `resume`, abandon = `cancel` (both are allowed to the task's reporter, a project maintainer or an admin).
-The same two moves apply to a WI the local daemon parked `repair_pending`
-after a restart (capsule missing / project unmapped; `pf ops status` lists
-it): continue = fix the cause then `resume`, abandon = `cancel` (or
-`wrap --fail` for the failed verdict).
+A WI whose capsule directory went missing, or whose project lost its
+`[workspace]` mapping, across a daemon restart is simply set `blocked` (the
+reason note names the cause): fix the cause if any, then `resume`, or `cancel`
+(or `wrap --fail` for the failed verdict).
 "Stop" of a running work item routes to `pause` (reversible) or
 `wrap --fail` (the owner's failed verdict), never to `cancel` (which only
-applies to WIs with no active execution — queued, paused, blocked, or parked
-`repair_pending` on this daemon). "Ship / deliver / push it" routes to `ship` — the git
+applies to WIs with no active execution — queued, paused or blocked). "Ship / deliver / push it" routes to `ship` — the git
 delivery of an already-closed WI's sealed commits — never to `submit`
 (which starts execution).
 

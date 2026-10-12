@@ -5,16 +5,14 @@ package daemon
 //     plain claim intents, only while aihub still shows the WI queued);
 //   - a dispatch-time Start failure lands as a durable
 //     submit_rejected event instead of a stderr line;
-//   - a mid-flight WI whose capsule is missing parks repair_pending while
-//     every other WI recovers, the daemon starts, `pf resume` after the
-//     capsule is restored continues the SAME session in place, and every
-//     recovered/parked WI carries a daemon_restarted event.
+//   - a mid-flight WI whose capsule is missing is blocked at aihub (nothing
+//     left parked locally) while every other WI recovers and the daemon
+//     starts, and every recovered WI carries a daemon_restarted event.
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -199,11 +197,10 @@ func TestSubmitRejectedRecordedAsEvent(t *testing.T) {
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 
-// A mid-flight WI with a missing capsule parks repair_pending (session
-// kept) while the daemon starts and another WI recovers; `pf resume`
-// refuses with a typed error until the capsule is restored, then resumes
-// the same session in place. Every recovered/parked WI gets daemon_restarted.
-func TestRestartMissingCapsuleParksOnlyThatWI(t *testing.T) {
+// A mid-flight WI with a missing capsule is blocked at aihub (SessionEnd
+// blocked naming the path, no local record) while the daemon starts and
+// another WI recovers. Every recovered WI gets daemon_restarted.
+func TestRestartMissingCapsuleBlocksOnlyThatWI(t *testing.T) {
 	setGitIdentity(t)
 	dir := t.TempDir()
 	ws := filepath.Join(dir, "ws")
@@ -251,26 +248,27 @@ func TestRestartMissingCapsuleParksOnlyThatWI(t *testing.T) {
 	})
 	client := cli.NewDaemonClient(sock)
 	var st cli.StatusResponse
-	waitFor(t, "daemon serving with the bad WI parked", 20*time.Second, func() bool {
+	waitFor(t, "daemon serving with the bad WI blocked", 20*time.Second, func() bool {
 		raw, serr := client.Status()
 		if serr != nil || json.Unmarshal(raw, &st) != nil {
 			return false
 		}
-		return len(st.Jobs) == 2
+		return len(st.Jobs) == 1 && hub.endCount() == 1
 	})
-	byWI := map[string]cli.StatusJob{}
-	for _, j := range st.Jobs {
-		byWI[j.WorkItemID] = j
+	if st.Jobs[0].WorkItemID != good {
+		t.Fatalf("only the good WI may stay local (the bad one is blocked at aihub), got %+v", st.Jobs)
 	}
-	if byWI[bad].Status != "repair_pending" || byWI[bad].RepairReason != "capsule_missing" {
-		t.Fatalf("pf ops status must show %s repair_pending/capsule_missing, got %+v", bad, byWI[bad])
-	}
-	if byWI[good].Status == "repair_pending" {
-		t.Fatalf("the good WI must recover normally, got %+v", byWI[good])
+	hub.mu.Lock()
+	end := hub.ends[0]
+	badStatus := hub.status[bad]
+	hub.mu.Unlock()
+	if end.WI != bad || end.Req.Status != api.StatusBlocked || end.Req.SessionID != e2eSession(bad) ||
+		!strings.Contains(end.Req.Note, "capsule missing at "+capBad) || badStatus != api.StatusBlocked {
+		t.Fatalf("the bad WI must be blocked at the hub naming the path, got %+v (status %q)", end, badStatus)
 	}
 	waitFor(t, "good WI recovered (one derivation)", 10*time.Second, func() bool { return sp.callCount() == 1 })
-	if hub.endCount() != 0 {
-		t.Fatalf("parking must not end the session (ends=%d)", hub.endCount())
+	if hub.endCount() != 1 {
+		t.Fatalf("only the bad WI is ended (ends=%d)", hub.endCount())
 	}
 	if _, serr := os.Stat(capBad); !os.IsNotExist(serr) {
 		t.Fatal("the capsule must not be rebuilt")
@@ -279,36 +277,13 @@ func TestRestartMissingCapsuleParksOnlyThatWI(t *testing.T) {
 	if !hasKind(eventKinds(d, bad), "capsule_missing") {
 		t.Errorf("want capsule_missing on %s, got %v", bad, eventKinds(d, bad))
 	}
-	for _, w := range []string{bad, good} {
-		if !hasKind(eventKinds(d, w), observe.EvDaemonRestarted) {
-			t.Errorf("want daemon_restarted on %s, got %v", w, eventKinds(d, w))
-		}
+	if !hasKind(eventKinds(d, good), observe.EvDaemonRestarted) {
+		t.Errorf("want daemon_restarted on %s, got %v", good, eventKinds(d, good))
 	}
 	for _, e := range d.obs.Events().Since(good) {
 		if e.Kind == observe.EvDaemonRestarted && !strings.Contains(string(mustJSON(e)), "signal") {
 			t.Errorf("daemon_restarted must carry the previous shutdown cause: %s", mustJSON(e))
 		}
-	}
-
-	// still broken: typed error, still parked
-	_, rerr := client.Resume(bad, "normal")
-	var ae *api.Error
-	if rerr == nil || !errors.As(rerr, &ae) || ae.Code != api.ErrDaemonRepairPending || !strings.Contains(ae.Detail, capBad) {
-		t.Fatalf("resume with the capsule still missing must answer %s naming the path, got %v", api.ErrDaemonRepairPending, rerr)
-	}
-	// the owner restores the capsule; resume continues the same session
-	seedCapsuleGit(t, capBad, gitBad, bareBad)
-	seedTranscript(t, capBad, apiSessionFingerprint(e2eSession(bad)))
-	if _, rerr := client.Resume(bad, "normal"); rerr != nil {
-		t.Fatalf("resume after restoring the capsule: %v", rerr)
-	}
-	waitFor(t, "bad WI resumed in place", 10*time.Second, func() bool { return sp.callCount() == 2 })
-	ji, ok := d.rt.Info(bad)
-	if !ok || ji.RepairPending != "" || ji.SessionID != e2eSession(bad) {
-		t.Fatalf("same session must continue, got ok=%v %+v", ok, ji)
-	}
-	if hub.endCount() != 0 || hub.claimCount() != 0 {
-		t.Fatalf("in-place resume must not end/re-claim (ends=%d claims=%d)", hub.endCount(), hub.claimCount())
 	}
 }
 
@@ -324,91 +299,4 @@ func (h *fakeHub) hold(wi, sess, status string) {
 	defer h.mu.Unlock()
 	h.held[wi] = sess
 	h.status[wi] = status
-}
-
-// Abandon (v2 §6): a repair_pending WI is given up through the daemon
-// route — the daemon ends the kept session with the verdict, drops the
-// parked record and writes repair_abandoned. The plain wrap route refuses a
-// parked WI with a pointer to the owner moves; an unparked WI is DAEMON-404.
-func TestAbandonRepairPendingRoute(t *testing.T) {
-	setGitIdentity(t)
-	for _, verdict := range []string{"canceled", "failed"} {
-		t.Run(verdict, func(t *testing.T) {
-			dir := t.TempDir()
-			ws := filepath.Join(dir, "ws")
-			data := filepath.Join(dir, "data")
-			hubBase := filepath.Join(dir, "hub")
-			for _, p := range []string{ws, data, hubBase} {
-				if err := os.MkdirAll(p, 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
-			const bad = "wi_abandon_capsule"
-			bareBad := mkBare(t, hubBase, bad)
-			capBad := filepath.Join(ws, "capsules", bad)
-			gitBad := filepath.Join(data, "git", bad+".git")
-			seedStateJobs(t, data, "m-e2e", e2eRecord(bad, capBad, gitBad, bareBad))
-			hub := newFakeHub()
-			hub.hold(bad, e2eSession(bad), api.StatusRunning)
-			sock := filepath.Join(dir, "d.sock")
-			d, err := New(e2eConfig(sock, ws, data, hubBase, hub, &fakeSpawner{}))
-			if err != nil {
-				t.Fatal(err)
-			}
-			runErr := make(chan error, 1)
-			go func() { runErr <- d.Run(context.Background()) }()
-			t.Cleanup(func() {
-				_ = d.Shutdown(context.Background(), DirectShutdownCause())
-				select {
-				case <-runErr:
-				case <-time.After(15 * time.Second):
-				}
-			})
-			client := cli.NewDaemonClient(sock)
-			waitFor(t, "the WI parked repair_pending", 20*time.Second, func() bool {
-				var st cli.StatusResponse
-				raw, serr := client.Status()
-				return serr == nil && json.Unmarshal(raw, &st) == nil && len(st.Jobs) == 1 && st.Jobs[0].Status == "repair_pending"
-			})
-
-			// the plain close route must not touch a parked WI
-			_, werr := client.Wrap(bad, "fail")
-			var ae *api.Error
-			if werr == nil || !errors.As(werr, &ae) || ae.Code != api.ErrDaemonConflict {
-				t.Fatalf("wrap on a parked WI must answer %s, got %v", api.ErrDaemonConflict, werr)
-			}
-			if hub.endCount() != 0 {
-				t.Fatalf("no SessionEnd before the abandon (ends=%d)", hub.endCount())
-			}
-			if _, aerr := client.AbandonRepair("wi_not_parked", verdict); aerr == nil || !errors.As(aerr, &ae) || ae.Code != api.ErrDaemonNotFound {
-				t.Fatalf("an unparked WI must answer %s, got %v", api.ErrDaemonNotFound, aerr)
-			}
-			if _, aerr := client.AbandonRepair(bad, "wrapped"); aerr == nil || !errors.As(aerr, &ae) || ae.Code != api.ErrDaemonBadInput {
-				t.Fatalf("a non-abandon verdict must answer %s, got %v", api.ErrDaemonBadInput, aerr)
-			}
-
-			if _, aerr := client.AbandonRepair(bad, verdict); aerr != nil {
-				t.Fatalf("abandon: %v", aerr)
-			}
-			if hub.endCount() != 1 {
-				t.Fatalf("want exactly one SessionEnd, got %d", hub.endCount())
-			}
-			end := hub.ends[0]
-			if end.WI != bad || end.Req.Status != verdict || end.Req.SessionID != e2eSession(bad) {
-				t.Fatalf("SessionEnd = %+v", end)
-			}
-			if _, ok := d.rt.Info(bad); ok {
-				t.Fatal("the parked record must be dropped")
-			}
-			if !hasKind(eventKinds(d, bad), "repair_abandoned") {
-				t.Errorf("want repair_abandoned, got %v", eventKinds(d, bad))
-			}
-			var st cli.StatusResponse
-			raw, _ := client.Status()
-			_ = json.Unmarshal(raw, &st)
-			if len(st.Jobs) != 0 {
-				t.Errorf("status must no longer list the WI: %+v", st.Jobs)
-			}
-		})
-	}
 }

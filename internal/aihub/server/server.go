@@ -80,9 +80,6 @@ func (s *Server) routes() {
 	// immediately) and the terminate verdict (pf wrap --fail on a parked WI).
 	m.HandleFunc("POST /api/v1/work-items/{id}/resume-blocked", s.auth(s.hResumeBlockedWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/terminate-blocked", s.auth(s.hTerminateBlockedWI))
-	// The read-only authorization probe of the abandon-a-repair-pending-WI
-	// door (the daemon ends the session; the human is checked here first).
-	m.HandleFunc("GET /api/v1/work-items/{id}/close-auth", s.auth(s.hCloseAuthWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
 	m.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.auth(s.hDeps))
 	// Ship ledger (polyforge#123, P1b): the ship bridge records each
@@ -770,29 +767,6 @@ func (s *Server) hTerminateBlockedWI(w http.ResponseWriter, r *http.Request, idn
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
-}
-
-// hCloseAuthWI serves GET /api/v1/work-items/{id}/close-auth: a read-only
-// probe of the human close authorization (reporter, project maintainer or
-// admin — the same gate as cancel and the blocked exits). It mutates
-// nothing. The CLI runs it with the human's own key before asking the local
-// daemon to abandon a repair_pending WI, whose session only the daemon can
-// end (the hub's cancel refuses a running WI).
-func (s *Server) hCloseAuthWI(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "closing a work item requires its reporter, a project maintainer or admin"))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"authorized": true, "work_item_id": id})
 }
 
 // ---------------------------------------------------------------------------

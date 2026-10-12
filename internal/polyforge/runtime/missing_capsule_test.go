@@ -3,7 +3,7 @@ package runtime
 // missing_capsule_test.go pins the mid-flight no-silent-rebuild guard
 // (#103): a recorded non-terminal work item whose capsule directory is
 // absent under the active workspace is a typed hard failure — Restart
-// parks that WI alone as repair_pending (v2 §6; the daemon still starts), the resume
+// blocks that WI alone at aihub (v2 §6; the daemon still starts), the resume
 // entry refuses with *MissingCapsuleError, the recovery engine refuses
 // with a loud blocked verdict — and NO code path rebuilds, re-clones or
 // re-materializes the scene: the clone stays confined to the
@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -35,36 +36,37 @@ func assertNothingMaterialized(t *testing.T, r *Runtime, wi string, sp *scripted
 	}
 }
 
-// parked asserts the v2 §6 posture: Restart returned nil, the WI is
-// parked repair_pending with the session kept, the durable event named the
-// path/project, no hub transition fired and nothing was rebuilt.
-func assertParked(t *testing.T, r *Runtime, hub *fakeHub, sp *scriptedSpawner, wi, kind string, events *[]string) {
+// assertBlocked asserts the v2 §6 posture: Restart returned nil, the WI was
+// closed through the ordinary bounded-fail path (SessionEnd(blocked) under
+// the kept session secret, a note naming the cause), the durable event was
+// emitted, nothing is left parked locally and nothing was rebuilt.
+func assertBlocked(t *testing.T, r *Runtime, hub *fakeHub, sp *scriptedSpawner, rec *jobRecord, kind, wantInNote string, events *[]string) {
 	t.Helper()
-	ji, ok := r.Info(wi)
-	if !ok || ji.RepairPending != kind {
-		t.Fatalf("%s must be parked repair_pending(%s), got ok=%v info=%+v", wi, kind, ok, ji)
+	wi := rec.WorkItemID
+	if hub.endCount() != 1 {
+		t.Fatalf("exactly one SessionEnd(blocked) must fire, got %d", hub.endCount())
 	}
-	if ji.SessionID == "" {
-		t.Error("the parked record must keep its session")
+	end := hub.lastEnd()
+	if end.Status != api.StatusBlocked || end.SessionID != rec.SessionID || !strings.Contains(end.Note, wantInNote) {
+		t.Fatalf("SessionEnd must be blocked under the stored secret with a note naming %q, got %+v", wantInNote, end)
+	}
+	if hub.status[wi] != api.StatusBlocked {
+		t.Errorf("hub status = %q, want blocked", hub.status[wi])
 	}
 	found := false
 	for _, k := range *events {
-		if k == kind {
-			found = true
-		}
+		found = found || k == kind
 	}
 	if !found {
 		t.Errorf("durable event %q not emitted (got %v)", kind, *events)
 	}
-	if len(hub.attaches) != 0 || hub.endCount() != 0 || hub.claimCount() != 0 {
-		t.Fatalf("no hub transition may fire for a parked WI (attaches=%d ends=%d claims=%d)",
-			len(hub.attaches), hub.endCount(), hub.claimCount())
+	if r.jobOf(wi) != nil || len(loadRecords(t, r)) != 0 {
+		t.Fatalf("nothing may stay parked locally (job %v, records %+v)", r.jobOf(wi), loadRecords(t, r))
+	}
+	if len(hub.attaches) != 0 || hub.claimCount() != 0 {
+		t.Fatalf("no attach / claim may fire (attaches=%d claims=%d)", len(hub.attaches), hub.claimCount())
 	}
 	assertNothingMaterialized(t, r, wi, sp)
-	recs := loadRecords(t, r)
-	if len(recs) != 1 || recs[0].WorkItemID != wi || recs[0].RepairPending != kind || recs[0].SessionID == "" {
-		t.Fatalf("record (with its session) must be kept and marked, got %+v", recs)
-	}
 }
 
 func tapEvents(r *Runtime) *[]string {
@@ -74,9 +76,9 @@ func tapEvents(r *Runtime) *[]string {
 }
 
 // Restart with a mid-flight (verify-matches running) record whose capsule
-// is absent at the active base: that WI alone parks as repair_pending
-// (session kept, event written, no hub transition, nothing rebuilt).
-func TestRestartMissingMidflightCapsuleParks(t *testing.T) {
+// is absent at the active base: that WI alone is blocked (SessionEnd(blocked)
+// naming the path, event written, record dropped, nothing rebuilt).
+func TestRestartMissingMidflightCapsuleBlocks(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, hub, sp)
@@ -88,15 +90,18 @@ func TestRestartMissingMidflightCapsuleParks(t *testing.T) {
 	// the capsule dir is deliberately NOT created.
 
 	if err := r.Restart(context.Background()); err != nil {
-		t.Fatalf("a missing capsule must park the WI, not fail Restart: %v", err)
+		t.Fatalf("a missing capsule must block the WI, not fail Restart: %v", err)
 	}
-	assertParked(t, r, hub, sp, wi, RepairCapsuleMissing, events)
-	assertNoRT(t, toOB)
+	assertBlocked(t, r, hub, sp, rec, EventCapsuleMissing, "capsule missing at "+testCapsuleDir(r, wi), events)
+	msg := recvRT(t, toOB)
+	if msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked || msg.WorkItem != wi {
+		t.Fatalf("expected RTFinished(blocked) so the slot is released, got %+v", msg)
+	}
 }
 
-// Same guard on the paused/unclean attach branch: the park fires BEFORE
+// Same guard on the paused/unclean attach branch: the block fires BEFORE
 // the SessionAttach flips the hub.
-func TestRestartMissingPausedCapsuleParksBeforeAttach(t *testing.T) {
+func TestRestartMissingPausedCapsuleBlocksBeforeAttach(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, _, _ := newTestRuntime(t, hub, sp)
@@ -111,12 +116,12 @@ func TestRestartMissingPausedCapsuleParksBeforeAttach(t *testing.T) {
 	if err := r.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	assertParked(t, r, hub, sp, wi, RepairCapsuleMissing, events)
+	assertBlocked(t, r, hub, sp, rec, EventCapsuleMissing, "capsule missing at", events)
 }
 
 // Same guard on the NEW-3 pending-close replay branch: the close must not
 // be "replayed" against a capsule that is not there.
-func TestRestartMissingPendingCloseCapsuleParks(t *testing.T) {
+func TestRestartMissingPendingCloseCapsuleBlocks(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, _, _ := newTestRuntime(t, hub, sp)
@@ -132,32 +137,61 @@ func TestRestartMissingPendingCloseCapsuleParks(t *testing.T) {
 	if err := r.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	assertParked(t, r, hub, sp, wi, RepairCapsuleMissing, events)
+	assertBlocked(t, r, hub, sp, rec, EventCapsuleMissing, "capsule missing at", events)
 }
 
-// RepairResume answers the typed error while the capsule is still absent
-// (WI stays parked, session kept), and held=false for a WI not parked.
-func TestRepairResumeStillMissingTypedError(t *testing.T) {
+// An unmapped mid-flight project blocks that WI alone with a note naming
+// the project; the (existing) capsule is left where it is.
+func TestRestartUnmappedProjectBlocks(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, _, _ := newTestRuntime(t, hub, sp)
 	events := tapEvents(r)
-	wi := "wi_repair_still"
+	wi := "wi_unmapped"
 	rec := matrixRecord(r, wi, 0, "")
+	rec.Project = "ghost" // not in the mapping
 	hub.hold(wi, rec.SessionID, api.StatusRunning)
 	writeStateFile(t, r, []*jobRecord{rec})
+
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("an unmapped project must block the WI, not fail Restart: %v", err)
+	}
+	assertBlocked(t, r, hub, sp, rec, EventProjectUnmapped, `project "ghost"`, events)
+}
+
+// A SessionEnd the hub does not acknowledge keeps the record in the durable
+// end_pending lane (the ordinary blocked-close retry) until it lands.
+func TestRestartMissingCapsuleBlockedCloseRetries(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, hub, sp)
+	r.cfg.EndRetryBase = 10 * time.Millisecond
+	r.cfg.EndRetryMax = 20 * time.Millisecond
+	t.Cleanup(r.Close)
+	wi := "wi_missing_retry"
+	rec := matrixRecord(r, wi, 0, "")
+	hub.hold(wi, rec.SessionID, api.StatusRunning)
+	hub.mu.Lock()
+	hub.end[wi] = fmt.Errorf("aihub unreachable (scripted)")
+	hub.mu.Unlock()
+	writeStateFile(t, r, []*jobRecord{rec})
+
 	if err := r.Restart(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	held, err := r.RepairResume(context.Background(), wi)
-	var miss *MissingCapsuleError
-	if !held || !errors.As(err, &miss) || miss.Dir != testCapsuleDir(r, wi) {
-		t.Fatalf("want held + *MissingCapsuleError(%s), got held=%v err=%v", testCapsuleDir(r, wi), held, err)
+	recs := loadRecords(t, r)
+	if len(recs) != 1 || recs[0].State != string(StateEndPending) || recs[0].SessionID != rec.SessionID ||
+		!strings.Contains(recs[0].EndNote, "capsule missing at") {
+		t.Fatalf("durable record must be end_pending with the secret and the reason, got %+v", recs)
 	}
-	assertParked(t, r, hub, sp, wi, RepairCapsuleMissing, events)
-	if held, _ := r.RepairResume(context.Background(), "wi_not_here"); held {
-		t.Error("an unknown WI is not held")
+	hub.mu.Lock()
+	delete(hub.end, wi)
+	hub.mu.Unlock()
+	waitFor(t, "the retry to land the blocked close", func() bool { return r.jobOf(wi) == nil })
+	if hub.lastEnd().Status != api.StatusBlocked {
+		t.Fatalf("retry must send blocked, got %+v", hub.lastEnd())
 	}
+	waitFor(t, "state.json to drop the record", func() bool { return len(loadRecords(t, r)) == 0 })
 }
 
 // The resume entry itself (restartRunning → restartResume) refuses with
@@ -219,10 +253,9 @@ func TestRecoverCoreMissingCapsuleBoundedFail(t *testing.T) {
 	assertNothingMaterialized(t, r, j.wi, sp)
 }
 
-// One bad WI never takes the others down (v2 §6), and after the operator
-// restores the capsule, RepairResume resumes the SAME session in place
-// through the restart-recovery path (no re-claim, no SessionEnd).
-func TestRestartParksOnlyBadWIAndRepairResumeSameSession(t *testing.T) {
+// One bad WI never takes the others down (v2 §6): the daemon starts, the
+// good WI recovers, only the bad one is blocked.
+func TestRestartBlocksOnlyBadWI(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, hub, sp)
@@ -243,138 +276,22 @@ func TestRestartParksOnlyBadWIAndRepairResumeSameSession(t *testing.T) {
 	if n := sp.callCount(); n != 1 {
 		t.Fatalf("exactly the good WI recovers (1 derivation), got %d", n)
 	}
-	msg := recvRT(t, toOB)
-	if msg.Kind != protocol.RTRecovered || msg.WorkItem != good.WorkItemID {
-		t.Fatalf("expected RTRecovered for the good WI, got %+v", msg)
+	var kinds []string
+	for i := 0; i < 2; i++ {
+		msg := recvRT(t, toOB)
+		kinds = append(kinds, fmt.Sprintf("%v:%s", msg.Kind, msg.WorkItem))
 	}
-	if ji, _ := r.Info(bad.WorkItemID); ji.RepairPending != RepairCapsuleMissing || ji.SessionID != bad.SessionID {
-		t.Fatalf("bad WI must be parked with its session kept, got %+v", ji)
+	want := []string{fmt.Sprintf("%v:%s", protocol.RTRecovered, good.WorkItemID), fmt.Sprintf("%v:%s", protocol.RTFinished, bad.WorkItemID)}
+	for _, w := range want {
+		if !slices.Contains(kinds, w) {
+			t.Fatalf("expected RT messages %v, got %v", want, kinds)
+		}
 	}
-	if ji, _ := r.Info(good.WorkItemID); ji.RepairPending != "" {
-		t.Fatalf("good WI must not be parked: %+v", ji)
+	if hub.status[bad.WorkItemID] != api.StatusBlocked || hub.status[good.WorkItemID] != api.StatusRunning {
+		t.Fatalf("only the bad WI is blocked: bad=%q good=%q", hub.status[bad.WorkItemID], hub.status[good.WorkItemID])
+	}
+	if r.jobOf(bad.WorkItemID) != nil || r.jobOf(good.WorkItemID) == nil {
+		t.Fatal("the bad job must be released and the good one live")
 	}
 	_ = events
-
-	// the operator restores the capsule; `pf resume` continues in place
-	if err := os.MkdirAll(bad.CapsuleDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	held, err := r.RepairResume(context.Background(), bad.WorkItemID)
-	if !held || err != nil {
-		t.Fatalf("RepairResume: held=%v err=%v", held, err)
-	}
-	if n := sp.callCount(); n != 2 {
-		t.Fatalf("the repaired WI must resume (2 derivations total), got %d", n)
-	}
-	ji, _ := r.Info(bad.WorkItemID)
-	if ji.RepairPending != "" || ji.SessionID != bad.SessionID {
-		t.Fatalf("repaired WI: mark must clear and the SAME session continue, got %+v", ji)
-	}
-	if hub.endCount() != 0 || hub.claimCount() != 0 {
-		t.Fatalf("in-place resume must not end or re-claim (ends=%d claims=%d)", hub.endCount(), hub.claimCount())
-	}
-	// a second call is not parked any more: falls through to the normal path
-	if held, _ := r.RepairResume(context.Background(), bad.WorkItemID); held {
-		t.Error("a repaired WI is no longer held")
-	}
-}
-
-func parkOne(t *testing.T, hub *fakeHub, wi string) (*Runtime, *jobRecord, *[]string) {
-	t.Helper()
-	sp := &scriptedSpawner{}
-	r, _, _ := newTestRuntime(t, hub, sp)
-	r.cfg.EndRetryBase = 10 * time.Millisecond
-	r.cfg.EndRetryMax = 20 * time.Millisecond
-	t.Cleanup(r.Close)
-	events := tapEvents(r)
-	rec := matrixRecord(r, wi, 0, "")
-	hub.hold(wi, rec.SessionID, api.StatusRunning)
-	writeStateFile(t, r, []*jobRecord{rec})
-	if err := r.Restart(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	assertParked(t, r, hub, sp, wi, RepairCapsuleMissing, events)
-	return r, rec, events
-}
-
-// Abandon: the daemon ends the kept session with the verdict (the stored
-// secret), drops the parked record and writes an event.
-func TestAbandonRepairEndsSessionAndDropsRecord(t *testing.T) {
-	for _, verdict := range []string{api.StatusCanceled, api.StatusFailed} {
-		t.Run(verdict, func(t *testing.T) {
-			hub := newFakeHub()
-			wi := "wi_abandon_" + verdict
-			r, rec, events := parkOne(t, hub, wi)
-			held, err := r.AbandonRepair(wi, verdict, "owner gave up")
-			if !held || err != nil {
-				t.Fatalf("AbandonRepair: held=%v err=%v", held, err)
-			}
-			end := hub.lastEnd()
-			if end.Status != verdict || end.SessionID != rec.SessionID || end.Note != "owner gave up" {
-				t.Fatalf("SessionEnd must carry the verdict and the stored secret, got %+v", end)
-			}
-			if hub.status[wi] != verdict {
-				t.Errorf("hub status = %q, want %s", hub.status[wi], verdict)
-			}
-			if r.jobOf(wi) != nil || len(loadRecords(t, r)) != 0 {
-				t.Fatal("the parked record must be dropped")
-			}
-			found := false
-			for _, k := range *events {
-				found = found || k == EventRepairAbandoned
-			}
-			if !found {
-				t.Errorf("want a %s event, got %v", EventRepairAbandoned, *events)
-			}
-			if held, _ := r.AbandonRepair(wi, verdict, ""); held {
-				t.Error("a dropped WI is no longer held")
-			}
-		})
-	}
-}
-
-// An unacknowledged abandon keeps the record in the durable end_pending
-// lane WITH the abandon verdict (not blocked) and retries until it lands.
-func TestAbandonRepairSessionEndFailureRetriesWithVerdict(t *testing.T) {
-	hub := newFakeHub()
-	wi := "wi_abandon_retry"
-	r, rec, _ := parkOne(t, hub, wi)
-	hub.mu.Lock()
-	hub.end[wi] = fmt.Errorf("aihub unreachable (scripted)")
-	hub.mu.Unlock()
-
-	held, err := r.AbandonRepair(wi, api.StatusCanceled, "n")
-	if !held || err != nil {
-		t.Fatalf("held=%v err=%v", held, err)
-	}
-	recs := loadRecords(t, r)
-	if len(recs) != 1 || recs[0].State != string(StateEndPending) || recs[0].EndStatus != api.StatusCanceled ||
-		recs[0].RepairPending != "" || recs[0].SessionID != rec.SessionID {
-		t.Fatalf("durable record must be end_pending(canceled) with the secret, got %+v", recs)
-	}
-	if ji, _ := r.Info(wi); ji.RepairPending != "" {
-		t.Errorf("an abandoned WI must not read repair_pending: %+v", ji)
-	}
-	hub.mu.Lock()
-	delete(hub.end, wi)
-	hub.mu.Unlock()
-	waitFor(t, "the retry to land the canceled close", func() bool { return r.jobOf(wi) == nil })
-	if hub.lastEnd().Status != api.StatusCanceled {
-		t.Fatalf("retry must send the abandon verdict, got %+v", hub.lastEnd())
-	}
-	waitFor(t, "state.json to drop the record", func() bool { return len(loadRecords(t, r)) == 0 })
-}
-
-func TestAbandonRepairRejectsOtherVerdictsAndNonParked(t *testing.T) {
-	hub := newFakeHub()
-	r, _, _ := parkOne(t, hub, "wi_abandon_bad")
-	if _, err := r.AbandonRepair("wi_abandon_bad", api.StatusWrapped, ""); err == nil {
-		t.Error("wrapped is not an abandon verdict")
-	}
-	if held, _ := r.AbandonRepair("wi_unknown", api.StatusCanceled, ""); held {
-		t.Error("an unknown WI is not held")
-	}
-	if hub.endCount() != 0 {
-		t.Errorf("no SessionEnd may fire, got %d", hub.endCount())
-	}
 }

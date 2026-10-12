@@ -325,8 +325,6 @@ func (d *Daemon) attention(chat, owner string, mark bool) ([]protocol.ChatAttent
 	for _, j := range jobs {
 		reason := ""
 		switch {
-		case j.Status == "repair_pending":
-			reason = "repair_pending"
 		case j.NeedsInput:
 			reason = "needs_input"
 		default:
@@ -416,7 +414,7 @@ func (d *Daemon) watchSnapshot(wi string, after int64) protocol.WatchSnapshot {
 		}
 		snap.Known = true
 		localLive = j.Status != string(runtime.StatePaused)
-		wj := &protocol.WatchJob{Status: j.Status, RepairReason: j.RepairReason,
+		wj := &protocol.WatchJob{Status: j.Status,
 			QuestionID: j.QuestionID, LastProgressAgoSec: j.LastWorkAgoSec}
 		if j.Origin != nil {
 			wj.Origin = &protocol.WatchOrigin{Kind: j.Origin.Kind, ChatID: j.Origin.ChatID, Owner: j.Origin.Owner}

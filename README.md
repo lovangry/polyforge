@@ -162,8 +162,8 @@ capsule's first commit lands leaves no revision to seal — the close
 degrades to `blocked`, and the WI is not claimable again until
 `pf resume <WI_ID>` continues it, or `pf cancel <WI_ID>` abandons it (the task's
 reporter, a project maintainer or an admin; the same two moves apply to a WI the
-daemon parked `repair_pending` after a restart — see the failure codes below;
-`pf wrap <WI_ID> --fail` records the owner's failed verdict instead).
+daemon set `blocked` at restart for a missing capsule / unmapped project — see
+below; `pf wrap <WI_ID> --fail` records the owner's failed verdict instead).
 `pf pause <WI_ID>` sets a clean_pause (a daemon restart will not
 auto-resume it); `pf resume <WI_ID>` clears the flag and the holder
 daemon re-attaches on its next start — to move it elsewhere (or immediately),
@@ -228,9 +228,8 @@ daemon socket by design.)
 | --- | --- | --- | --- |
 | POST | `/jobs/{wi}/answer` | Answer a pending agent question. | user |
 | POST | `/jobs/{wi}/claim` | Submit family: enqueue a claim of a queued work item. | user |
-| POST | `/jobs/{wi}/resume` | Submit family: enqueue a resume of a paused item; for a WI parked `repair_pending` it re-checks the capsule/mapping and resumes in place with the kept session (still broken → `DAEMON-517` / `DAEMON-412`). | user |
+| POST | `/jobs/{wi}/resume` | Submit family: enqueue a resume of a paused item. | user |
 | POST | `/jobs/{wi}/resume-blocked` | The claim/start half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
-| POST | `/jobs/{wi}/abandon-repair` | Give up a `repair_pending` WI (`pf cancel` → verdict `canceled`, `pf wrap --fail` → `failed`): ends the kept session with the stored secret, drops the parked record, writes `repair_abandoned`. The CLI passes aihub's `close-auth` probe with the human's key first. | user |
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
 | POST | `/jobs/{wi}/wrap` | CLI close path: seal the job with reason `wrap` or `fail`. | user |
 | POST | `/jobs/{wi}/ship` | Delivery bridge: push the sealed capsule's task repos to their origins as branch `polyforge/<wi>` (+ PR when a credential exists). | user |
@@ -254,12 +253,18 @@ design-doc references (e.g. `04-local-runtime.md §5.1`) are for traceability on
 | Code | Meaning | Operator move |
 | --- | --- | --- |
 | `DAEMON-516` | Re-claim clone refusal: the capsule clone failed for a WI with published progress (or its progress cannot be determined), so a local init — which would restart the workflow at step 1 — is refused. The claim is abandoned back to blocked. | Fix aihub reachability / credentials, then `pf resume <id>`. |
-| `DAEMON-517` | The WI is parked `repair_pending` on this daemon (restart found its capsule missing or its project unmapped); the detail names the path. The session is kept; nothing is rebuilt from the remote. | Restore the capsule directory (or re-add the project to `[workspace]`) and `pf resume <id>`; or give up with `pf cancel <id>` / `pf wrap --fail <id>`. |
 | `DAEMON-518` | A blocked WI continued on a different daemon than the one that sealed it, and the aihub capsule head is not the sealed head. | Continue it on the sealing machine, or abandon with `pf cancel <id>`. |
 
-A missing capsule is no longer a startup failure: only the affected WI parks
-`repair_pending` (listed by `pf ops status`, announced by a `capsule_missing` /
-`project_unmapped` event); the daemon starts and every other WI recovers.
+A missing capsule is no longer a startup failure: only the affected WI is set to
+the ordinary `blocked` status at restart (the reason note names the cause —
+"capsule missing at <path>" or "project <p> is not in the daemon's [workspace]
+mapping"; a `capsule_missing` / `project_unmapped` event shows in `pf watch`);
+nothing is parked locally, the daemon starts and every other WI recovers. Restore
+the mapping if that was the cause, then `pf resume <id>`: a fresh re-claim from
+the aihub capsule chain plus the task-repo carrier refs (`refs/pf-task/<name>`);
+the dead scene is quarantined, completed steps are not re-run, and work published
+after the last push is lost. `pf cancel <id>` / `pf wrap <id> --fail` are the
+ordinary blocked exits.
 
 ### Release flow
 
@@ -313,9 +318,8 @@ registry; `pf <verb> -help` one verb's face. The routing skill's fragments
 | management | `users`, `api-keys`, `projects`, `machines`, `backup` |
 | local | `daemon` (run the work machine), `doctor` |
 
-Human moves: continue = `pf resume <id>` (a paused, blocked or repair_pending
-WI), abandon = `pf cancel <id>` (queued, paused, blocked, or repair_pending on
-this daemon), owner's failed verdict = `pf wrap <id> --fail`. These run with the
+Human moves: continue = `pf resume <id>` (a paused or blocked
+WI), abandon = `pf cancel <id>` (queued, paused or blocked), owner's failed verdict = `pf wrap <id> --fail`. These run with the
 human's own api key: aihub's door checks the WI's reporter, a project
 maintainer or an admin.
 
