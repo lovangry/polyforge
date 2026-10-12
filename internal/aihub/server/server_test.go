@@ -6,7 +6,6 @@ package server
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -541,37 +540,6 @@ func TestAdminFaceEndpointsOverHTTP(t *testing.T) {
 		t.Fatalf("snapshot file missing: %v", err)
 	}
 
-	// rotate-secret: grace then rollback, with the mode validation.
-	var rot struct {
-		Epoch int    `json:"epoch"`
-		Mode  string `json:"mode"`
-	}
-	if code, raw := e.do(t, "POST", "/api/v1/service/rotate-secret", e.key,
-		map[string]any{"mode": "grace", "grace_seconds": 300}, &rot); code != 200 || rot.Epoch != 1 || rot.Mode != "grace" {
-		t.Fatalf("rotate grace: %d %s", code, raw)
-	}
-	if code, _ := e.do(t, "POST", "/api/v1/service/rotate-secret", e.key,
-		map[string]any{"mode": "grace", "grace_seconds": 0}, nil); code != 400 {
-		t.Fatalf("grace without window: %d", code)
-	}
-	if code, _ := e.do(t, "POST", "/api/v1/service/rotate-secret", e.key,
-		map[string]any{"mode": "rollback", "grace_seconds": 5}, nil); code != 400 {
-		t.Fatalf("rollback with window: %d", code)
-	}
-	if code, _ := e.do(t, "POST", "/api/v1/service/rotate-secret", e.key,
-		map[string]any{"mode": "bogus"}, nil); code != 400 {
-		t.Fatalf("bogus mode: %d", code)
-	}
-	if code, raw := e.do(t, "POST", "/api/v1/service/rotate-secret", e.key,
-		map[string]any{"mode": "rollback"}, &rot); code != 200 || rot.Epoch != 2 {
-		t.Fatalf("rotate rollback: %d %s", code, raw)
-	}
-	// Rollback retired epoch 1 immediately.
-	var retired sql.NullString
-	if err := e.db.QueryRow(`SELECT retired_at FROM service_secret_epochs WHERE epoch=1`).Scan(&retired); err != nil || !retired.Valid {
-		t.Fatalf("epoch 1 not retired by rollback: %v %v", retired, err)
-	}
-
 	// Non-admin callers are refused on every new admin endpoint.
 	for _, tc := range []struct {
 		method, path string
@@ -581,7 +549,6 @@ func TestAdminFaceEndpointsOverHTTP(t *testing.T) {
 		{"PATCH", "/api/v1/users/" + outsider.ID, map[string]string{"display_name": "x"}},
 		{"GET", "/api/v1/api-keys", nil},
 		{"POST", "/api/v1/admin/backup", map[string]any{}},
-		{"POST", "/api/v1/service/rotate-secret", map[string]any{"mode": "grace", "grace_seconds": 60}},
 	} {
 		if code, raw := e.do(t, tc.method, tc.path, okey.Plain, tc.body, nil); code != 403 {
 			t.Fatalf("non-admin %s %s: %d %s", tc.method, tc.path, code, raw)

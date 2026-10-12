@@ -1,8 +1,7 @@
 package core
 
-// Admin face: users, api keys, machines, projects and the project
-// identifier rotation. v0 semantics: secrets are stored hash-only and
-// returned in plaintext exactly once at issuance.
+// Admin face: users, api keys, machines and projects. Secrets are stored
+// hash-only and returned in plaintext exactly once at issuance.
 
 import (
 	"database/sql"
@@ -11,9 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -420,14 +417,9 @@ type CreateProjectRequest struct {
 	Visible     *bool             `json:"visible"`
 }
 
-// CreateProject inserts a project and mints its identifier token
-// (plaintext returned once; hash stored — the same discipline as api keys).
-type ProjectWithSecret struct {
-	Project    api.Project `json:"project"`
-	Identifier string      `json:"identifier"` // plaintext, shown once
-}
-
-func (m *AdminManager) CreateProject(req CreateProjectRequest) (*ProjectWithSecret, error) {
+// CreateProject inserts a project. identifier_hash is a legacy NOT NULL
+// column without a default; it is written as ”.
+func (m *AdminManager) CreateProject(req CreateProjectRequest) (*api.Project, error) {
 	if !projectNameRe.MatchString(req.Name) {
 		return nil, Fail(api.ErrCoreBadInput, "", "project name must be 1-40 chars of [a-z0-9-_]")
 	}
@@ -446,34 +438,25 @@ func (m *AdminManager) CreateProject(req CreateProjectRequest) (*ProjectWithSecr
 	if err != nil {
 		return nil, err
 	}
-	identifier, err := NewSecret(24)
-	if err != nil {
-		return nil, err
-	}
 	now := Now()
 	if _, err := m.db.Exec(`INSERT INTO projects(id, name, description, repos, visible, identifier_hash, created_at, updated_at)
-		VALUES (?1,?2,?3,?4,?5,?6,?7,?7)`,
-		id, req.Name, req.Description, string(repos), visible, Sha256Hex(identifier), now); err != nil {
+		VALUES (?1,?2,?3,?4,?5,'',?6,?6)`,
+		id, req.Name, req.Description, string(repos), visible, now); err != nil {
 		if isUniqueViolation(err) {
 			return nil, Fail(api.ErrCoreConflict, "", "project %q already exists", req.Name)
 		}
 		return nil, err
 	}
-	p, err := m.GetProject(id)
-	if err != nil {
-		return nil, err
-	}
-	return &ProjectWithSecret{Project: *p, Identifier: identifier}, nil
+	return m.GetProject(id)
 }
 
 func (m *AdminManager) GetProject(idOrName string) (*api.Project, error) {
 	var p api.Project
 	var visible int
 	var repos string
-	var scenario sql.NullString
-	err := m.db.QueryRow(`SELECT id, name, description, repos, visible, scenario, created_at, updated_at
+	err := m.db.QueryRow(`SELECT id, name, description, repos, visible, created_at, updated_at
 		FROM projects WHERE id=?1 OR name=?1`, idOrName).
-		Scan(&p.ID, &p.Name, &p.Description, &repos, &visible, &scenario, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.Name, &p.Description, &repos, &visible, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "project %q", idOrName)
 	}
@@ -484,10 +467,6 @@ func (m *AdminManager) GetProject(idOrName string) (*api.Project, error) {
 	_ = json.Unmarshal([]byte(repos), &p.Repos)
 	if p.Repos == nil {
 		p.Repos = []api.ProjectRepo{}
-	}
-	if scenario.Valid {
-		s := scenario.String
-		_ = s // scenario kept for forward compatibility; not exposed on the v1 wire
 	}
 	p.Members, err = m.projectMembers(p.ID)
 	if err != nil {
@@ -556,24 +535,6 @@ func (m *AdminManager) AddMember(projectID, userID, role string) error {
 		return err
 	}
 	return nil
-}
-
-// RotateIdentifier mints a fresh project identifier; the plaintext is
-// returned once, only the hash is kept (the old identifier dies at once).
-func (m *AdminManager) RotateIdentifier(idOrName string) (string, error) {
-	plain, err := NewSecret(24)
-	if err != nil {
-		return "", err
-	}
-	res, err := m.db.Exec(`UPDATE projects SET identifier_hash=?, updated_at=? WHERE id=? OR name=?`,
-		Sha256Hex(plain), Now(), idOrName, idOrName)
-	if err != nil {
-		return "", err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return "", Fail(api.ErrCoreNotFound, "", "project %q", idOrName)
-	}
-	return plain, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -698,71 +659,4 @@ func (m *AdminManager) Backup(dataDir string) (string, error) {
 		return "", Fail("CORE-507", "", "vacuum into %s: %v", target, err)
 	}
 	return name, nil
-}
-
-// RotateSecret records a service-secret epoch rotation (M5, 02 §6.6).
-// Session-model pushes are fenced by the per-WI session hash on
-// work_items — no validation path consumes a shared service secret — so
-// rotation maintains the epoch LEDGER only: the M5 wire contract and
-// its audit trail. mode=grace requires grace_seconds > 0
-// and retires the superseded epoch at now+grace; mode=rollback forces
-// grace to zero and retires every older live epoch immediately.
-func (m *AdminManager) RotateSecret(mode string, graceSeconds int64, rotatedBy string) (int, error) {
-	if mode == "" {
-		mode = "grace"
-	}
-	now := Now()
-	var retireExpr string
-	var retireArgs []any
-	switch mode {
-	case "grace":
-		if graceSeconds <= 0 {
-			return 0, Fail(api.ErrCoreBadInput, "", "grace_seconds must be > 0 for mode=grace")
-		}
-		retireExpr = `?`
-		expire := time.Now().UTC().Add(time.Duration(graceSeconds) * time.Second).Format(time.RFC3339Nano)
-		retireArgs = append(retireArgs, expire)
-	case "rollback":
-		if graceSeconds != 0 {
-			return 0, Fail(api.ErrCoreBadInput, "", "grace_seconds must be 0 for mode=rollback")
-		}
-		retireExpr = `?`
-		retireArgs = append(retireArgs, now)
-	default:
-		return 0, Fail(api.ErrCoreBadInput, "", "mode must be grace or rollback")
-	}
-	tx, err := m.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	var maxEpoch sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(epoch) FROM service_secret_epochs`).Scan(&maxEpoch); err != nil {
-		return 0, err
-	}
-	epoch := maxEpoch.Int64 + 1
-	var actor any
-	if rotatedBy != "" {
-		actor = rotatedBy
-	}
-	if _, err := tx.Exec(`INSERT INTO service_secret_epochs(epoch, mode, created_at, rotated_by)
-		VALUES (?1,?2,?3,?4)`, epoch, mode, now, actor); err != nil {
-		return 0, err
-	}
-	// Retire the superseded epochs: for grace, at the end of the window;
-	// for rollback, immediately and permanently.
-	args := append([]any{}, retireArgs...)
-	args = append(args, epoch)
-	if _, err := tx.Exec(`UPDATE service_secret_epochs SET retired_at=`+retireExpr+`
-		WHERE epoch < ?2 AND retired_at IS NULL`, args...); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(`INSERT INTO core_meta(key, value) VALUES ('current_secret_epoch', ?1)
-		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, strconv.FormatInt(epoch, 10)); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return int(epoch), nil
 }

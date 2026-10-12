@@ -337,12 +337,6 @@ type RepoRef struct {
 	URL  string `json:"url"`
 }
 
-// RotateSecretRequest is the M5 body (grace | rollback).
-type RotateSecretRequest struct {
-	Mode         string `json:"mode"`
-	GraceSeconds int64  `json:"grace_seconds,omitempty"`
-}
-
 // CreateUser issues a user (M1).
 func (c *Client) CreateUser(req UserCreateRequest) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/users", req)
@@ -401,11 +395,6 @@ func (c *Client) PatchProject(idOrName string, req ProjectPatchRequest) (json.Ra
 // Backup triggers the on-demand snapshot (M4).
 func (c *Client) Backup() (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/admin/backup", map[string]any{})
-}
-
-// RotateSecret rotates the service secret (M5).
-func (c *Client) RotateSecret(req RotateSecretRequest) (json.RawMessage, error) {
-	return c.raw("POST", "/api/v1/service/rotate-secret", req)
 }
 
 // RebuildMemoryIndex triggers the explicit reconcile/backfill (admin).

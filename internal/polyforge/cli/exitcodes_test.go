@@ -84,9 +84,6 @@ func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 			[]string{"projects"}, []string{"projects", "--no-such-flag"}},
 		{"backup", func(t *testing.T) []string { return []string{"backup"} },
 			nil, []string{"backup", "--no-such-flag"}},
-		{"rotate-secret", func(t *testing.T) []string {
-			return []string{"rotate-secret", "--mode", "rollback"}
-		}, []string{"rotate-secret"}, []string{"rotate-secret", "--no-such-flag"}},
 	}
 	for _, s := range specs {
 		t.Run(s.name, func(t *testing.T) {
@@ -325,7 +322,7 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 		"file", "queue", "cancel", "recall", "remember", "memory",
 		"submit", "answer", "pause", "resume",
 		"wrap", "ops", "chat", "watch", "ship", "users", "api-keys", "machines", "projects",
-		"backup", "rotate-secret",
+		"backup",
 		"doctor", "daemon",
 	}
 	if len(commands) != len(want) {

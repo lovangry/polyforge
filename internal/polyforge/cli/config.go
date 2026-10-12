@@ -4,7 +4,7 @@
 //
 //	Direct to aihub HTTP (internal/common/api types, aihubclient client):
 //	  file, queue, cancel, recall — plus the management face M1–M5
-//	  (users, api-keys, projects, backup, rotate-secret).
+//	  (users, api-keys, projects, backup).
 //
 //	Local daemon UDS HTTP face (04 §5.1 minus publish_request — the
 //	client surface is pinned in internal/common/protocol and daemon.go

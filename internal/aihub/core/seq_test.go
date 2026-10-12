@@ -24,7 +24,7 @@ func mustProject(t *testing.T, env *testEnv, name string) string {
 	if err != nil {
 		t.Fatalf("create project %s: %v", name, err)
 	}
-	return p.Project.ID
+	return p.ID
 }
 
 // TestCreateSeqPerProject: two projects each number from 1; slugs

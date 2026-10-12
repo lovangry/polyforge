@@ -599,8 +599,6 @@ func TestAdminVerbsRequestShapes(t *testing.T) {
 			io.WriteString(w, `{"id":"prj_1","name":"polyforge","visible":true,"members":[],"created_at":"t","updated_at":"t"}`)
 		case strings.HasSuffix(r.URL.Path, "/backup"):
 			io.WriteString(w, `{"backup":"/var/backups/snap.db"}`)
-		case strings.HasSuffix(r.URL.Path, "/rotate-secret"):
-			io.WriteString(w, `{"rotated":true}`)
 		}
 	})
 	env := map[string]string{"PF_SERVER": srv.URL}
@@ -695,14 +693,6 @@ func TestAdminVerbsRequestShapes(t *testing.T) {
 	}
 	if got := rec.last(); got.Method != "POST" || got.Path != "/api/v1/admin/backup" {
 		t.Errorf("backup = %s %s", got.Method, got.Path)
-	}
-
-	if code, _, stderr := runPf(t, env, "rotate-secret", "--mode", "grace", "--grace-seconds", "300"); code != 0 {
-		t.Fatalf("rotate-secret: %d %s", code, stderr)
-	}
-	if got := rec.last(); got.Path != "/api/v1/service/rotate-secret" ||
-		!strings.Contains(got.Body, `"mode":"grace"`) || !strings.Contains(got.Body, `"grace_seconds":300`) {
-		t.Errorf("rotate-secret = %s %s %s", got.Method, got.Path, got.Body)
 	}
 }
 

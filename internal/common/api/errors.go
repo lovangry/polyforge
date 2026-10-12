@@ -51,7 +51,6 @@ const (
 	// (no readable object at the WI's published HEAD).
 	ErrCoreProgressUnavailable = "CORE-504"
 	ErrCoreLockHeld            = "CORE-508"
-	ErrCoreStaleService        = "CORE-509"
 
 	// MEM — memory errors (06 §5)
 	ErrMemBadInput       = "MEM-400"

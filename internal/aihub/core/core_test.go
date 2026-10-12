@@ -52,7 +52,7 @@ func newEnv(t *testing.T) *testEnv {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	env.Project = p.Project.ID
+	env.Project = p.ID
 	return env
 }
 
@@ -388,18 +388,6 @@ func TestAdminFaces(t *testing.T) {
 	users, err := env.Admin.ListUsers()
 	if err != nil || len(users) != 3 { // admin + writer + machine
 		t.Fatalf("users: %v %d", err, len(users))
-	}
-	// Rotate identifier: the plaintext changes and is returned once.
-	plain1, err := env.Admin.RotateIdentifier("alpha")
-	if err != nil || plain1 == "" {
-		t.Fatalf("rotate: %v", err)
-	}
-	plain2, err := env.Admin.RotateIdentifier("alpha")
-	if err != nil || plain2 == "" || plain2 == plain1 {
-		t.Fatalf("rotate 2: %v", err)
-	}
-	if _, err := env.Admin.RotateIdentifier("nope"); !IsCode(err, api.ErrCoreNotFound) {
-		t.Fatalf("rotate unknown: %v", err)
 	}
 }
 

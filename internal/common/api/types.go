@@ -70,7 +70,6 @@ type Project struct {
 	Repos       []ProjectRepo   `json:"repos"`
 	Visible     bool            `json:"visible"`
 	Members     []ProjectMember `json:"members"`
-	Identifier  string          `json:"identifier"`
 	CreatedAt   string          `json:"created_at"`
 	UpdatedAt   string          `json:"updated_at"`
 }

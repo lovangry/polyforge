@@ -119,9 +119,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/v1/projects", s.authAdmin(s.hListProjects))
 	m.HandleFunc("GET /api/v1/projects/{id}", s.authAdmin(s.hGetProject))
 	m.HandleFunc("PATCH /api/v1/projects/{id}", s.auth(s.hPatchProject))
-	m.HandleFunc("POST /api/v1/projects/{id}/rotate-identifier", s.authAdmin(s.hRotateIdentifier))
 	m.HandleFunc("POST /api/v1/admin/backup", s.authAdmin(s.hBackup))
-	m.HandleFunc("POST /api/v1/service/rotate-secret", s.authAdmin(s.hRotateSecret))
 
 	// Git proxy (own auth: session-scoped Basic credential).
 	m.Handle("/git/", http.HandlerFunc(s.Git.HandleGit))
@@ -1494,7 +1492,7 @@ func (s *Server) hCreateProject(w http.ResponseWriter, r *http.Request, idn *ide
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, p) // identifier plaintext rides once
+	writeJSON(w, http.StatusCreated, p)
 }
 
 func (s *Server) hListProjects(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -1513,15 +1511,6 @@ func (s *Server) hGetProject(w http.ResponseWriter, r *http.Request, idn *identi
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
-}
-
-func (s *Server) hRotateIdentifier(w http.ResponseWriter, r *http.Request, idn *identity) {
-	plain, err := s.Admin.RotateIdentifier(r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"identifier": plain}) // once
 }
 
 func (s *Server) hGetUser(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -1599,25 +1588,4 @@ func (s *Server) hBackup(w http.ResponseWriter, r *http.Request, idn *identity) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"backup": name})
-}
-
-func (s *Server) hRotateSecret(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req struct {
-		Mode         string `json:"mode"`
-		GraceSeconds int64  `json:"grace_seconds"`
-	}
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	mode := req.Mode
-	if mode == "" {
-		mode = "grace" // v0 default
-	}
-	epoch, err := s.Admin.RotateSecret(mode, req.GraceSeconds, idn.UserID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"epoch": epoch, "mode": mode})
 }
