@@ -3,8 +3,7 @@
 Data-plane verb: the `pf` CLI talks HTTP direct to AIHub. Cancel only ends a
 work item that has **no active generation**; it never interrupts a running
 one (that is `pause` or `wrap --fail`). This is also the "abandon" of a
-**blocked** work item (the counterpart of `resume` = continue; there is no
-separate `unblock` verb). Allowed to the task's reporter, a project
+**blocked** work item (the counterpart of `resume` = continue). Allowed to the task's reporter, a project
 maintainer or an admin.
 
 One exception touches the local daemon: a work item the daemon parked
@@ -44,7 +43,7 @@ abandoned — the daemon ended its session and dropped the parked record`.
 | `CORE-404` | Unknown or invisible id | No such work item — check the id. |
 | `CORE-409` | The work item has an active generation (running) and is not parked repair_pending on this daemon | It is being executed — use `pause`/`wrap` on the machine that runs it, not cancel. |
 | `AUTH-403` | The caller is not the reporter, a project maintainer or an admin (also from the repair_pending abandon probe) | Ask the task owner or a maintainer. |
-| `CORE-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
+| `AUTH-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
 
 A canceled work item is terminal; only a brand-new work item can carry the
 work forward.

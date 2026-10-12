@@ -4,7 +4,6 @@ description: Maintenance lane - plan, code, verify. No review step, no release s
 rewind:
   max_total: 2
   max_per_step: 2
-budget: { requests: 40, tokens: 100000, wall_minutes: 120 }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
@@ -17,8 +16,7 @@ steps:
 
 This is the flow-level narrative for the workflow. It explains how the three
 steps compose; it is not itself a structural schema — the frontmatter `steps` array above
-is the *only* execution order (`01-workflow-skills.md` §4.1 rule V3). Nothing here
-overrides it.
+is the *only* execution order. Nothing here overrides it.
 
 ## Shape of the flow
 
@@ -38,14 +36,12 @@ deliberate omissions define it:
   and re-file on `feature-full` or `bug-fix`.
 - **No release slot.** Chores do not ship. They merge as ordinary commits and ride the
   project's next release train; the release hook belongs to whichever WI carries that
-  release (`01-workflow-skills.md` §4.2 — release is a step slot, and this bundle
-  simply does not include one).
+  release (release is an ordinary step slot, and this bundle simply does not include one).
 
 ## Artifact flow between steps
 
-Nothing here is wired through frontmatter. Every step's output is a path recorded in
-`execution.json`'s `steps.<id>.output`, pointing at a file under `artifacts/`
-(`03-execution-capsule.md` §4.2):
+Every step's output is a path recorded in `execution.json`'s `steps.<id>.output`, pointing at a
+file under `artifacts/`; no step declares frontmatter `inputs:`, so downstream steps read upstream artifacts by that convention:
 
 | step | primary artifact it writes | who reads it |
 |---|---|---|
@@ -66,8 +62,7 @@ small is not an option; writing the small thought down is cheap.
 
 - **`verification` FAILs -> rewind to `code`.** The only gate's only sensible target:
   build/lint/tests failed on the changed tree, and `code` is the only step that can
-  change it. Rule V5 requires the target to sit strictly earlier than the failing step,
-  which `code` does.
+  change it.
 
 Workflow-level rewind bounds are the tightest of the reference bundles:
 `max_total: 2`, `max_per_step: 2`. A chore that needs more than two bounded attempts to
@@ -76,21 +71,13 @@ honestly instead of burning the budget.
 
 ## Budget guidance
 
-The frontmatter workflow-level budget (`requests: 40, tokens: 100000,
-wall_minutes: 120`) is the smallest reference budget, matching the lane's contract:
-mechanical work, known shape, no judgment passes. Slow-CI repos should raise the
-workflow-level ceiling rather than thin the verification set. Hitting the budget is a
-resource ceiling (`WF-103 OVER_BUDGET`), unrelated to gate verdicts, and never triggers
-rewind.
+There is no workflow-level budget; the bounds are the rewind limits above and each step's wall estimate. Slow-CI
+repos should raise the `code` and `verification` walls rather than thin the verification set.
 
-Every step also declares its own `budget.wall_minutes` — `plan: 15`, `code: 30`,
-`verification: 20`, summing to 65 minutes, under the 120-minute workflow ceiling so one
-in-budget pass never busts it. The per-step wall is what the daemon watchdog's absolute
-backstop over a single agent instance is computed from: `max(3× the step's declared
-wall, 15 min)`. A step declaring nothing falls back to a 5-minute assumed wall, which
-collapses the backstop to its 15-minute floor and bounded-terminates agents that are
-still legitimately working (measured attempts run 2–5 minutes healthy, 15–52 minutes in
-the slow tail). Declared walls stay within `[5, 60]` by convention (enforced by
-`internal/workflow/schema/bundles_test.go`): at least 5 so the backstop is genuinely
-`3× wall` rather than clamped to the floor, at most 60 so one attempt never books more
-than an hour.
+Every step declares its own `budget.wall_minutes` — `plan: 15`, `code: 30`, `verification: 20`, 65 minutes
+in total, matching the lane's contract: mechanical work, known shape, no judgment passes.
+
+The declared wall is an estimate, not a limit: the daemon bounds a step's total runtime across its
+dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
+A step that declares nothing gets the default, so declare a wall only for a step that legitimately
+needs more than 90 minutes in total.

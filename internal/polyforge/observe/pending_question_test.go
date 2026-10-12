@@ -1,6 +1,6 @@
 package observe
 
-// redeliver_test.go: the pins that survive the polyforge#106 answer-
+// pending_question_test.go: the pins that survive the polyforge#106 answer-
 // relay trim. The legacy WI-Agent redelivery lane this file used to pin
 // (delivered-but-unconsumed answers re-sent on the next instance
 // attachment) is deleted — the driver consumes answers, and the durable

@@ -31,10 +31,10 @@ func TestMachinesFaceOverHTTP(t *testing.T) {
 
 	// Two machines: one stale (backdated stamp), one fresh.
 	e.do(t, "POST", "/api/v1/machines/heartbeat", e.key,
-		map[string]any{"machine_id": "m-stale", "mode": "interactive",
+		map[string]any{"machine_id": "m-stale", "mode": "manual",
 			"live_wi_ids": []string{"p#7"}, "runtime_version": "v1.5"}, nil)
 	e.do(t, "POST", "/api/v1/machines/heartbeat", e.key,
-		map[string]any{"machine_id": "m-fresh", "mode": "drain"}, nil)
+		map[string]any{"machine_id": "m-fresh", "mode": "auto"}, nil)
 	backdated := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
 	if _, err := e.db.Exec(`UPDATE machines SET last_heartbeat_at=? WHERE id='m-stale'`, backdated); err != nil {
 		t.Fatalf("backdate: %v", err)
@@ -55,7 +55,7 @@ func TestMachinesFaceOverHTTP(t *testing.T) {
 			if !m.Stale {
 				t.Fatalf("m-stale must be stale: %+v", m)
 			}
-			if m.Mode != "interactive" || m.RuntimeVersion != "v1.5" || len(m.LiveWIIDs) != 1 || m.LiveWIIDs[0] != "p#7" {
+			if m.Mode != "manual" || m.RuntimeVersion != "v1.5" || len(m.LiveWIIDs) != 1 || m.LiveWIIDs[0] != "p#7" {
 				t.Fatalf("m-stale projection: %+v", m)
 			}
 			if m.HeartbeatAgeSeconds == nil || *m.HeartbeatAgeSeconds < 3500 {
@@ -68,7 +68,7 @@ func TestMachinesFaceOverHTTP(t *testing.T) {
 			if m.Stale {
 				t.Fatalf("m-fresh must not be stale: %+v", m)
 			}
-			if m.Mode != "drain" {
+			if m.Mode != "auto" {
 				t.Fatalf("m-fresh mode: %+v", m)
 			}
 			if m.HeartbeatAgeSeconds == nil || *m.HeartbeatAgeSeconds > 60 {

@@ -1,9 +1,9 @@
 ---
 name: feature-full
 steps:
-  - { id: grill, context_policy: fresh, handoff: true, kind: qa, interactive: true, budget: { wall_minutes: 30 } }
+  - { id: grill, context_policy: fresh, handoff: true, kind: qa, budget: { wall_minutes: 30 } }
   - { id: spec, context_policy: inherit, handoff: true, kind: spec, budget: { wall_minutes: 15 } }
-  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, interactive: true, requires_human_answer: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { action: rewind, target: spec } }
+  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, requires_human_answer: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { action: rewind, target: spec } }
   - { id: plan, context_policy: inherit, handoff: true, kind: author, budget: { wall_minutes: 15 } }
   - { id: e2e-author, context_policy: fresh, handoff: true, kind: author, budget: { wall_minutes: 15 } }
   - { id: e2e-baseline, context_policy: fresh, handoff: true, kind: code, gate: false, budget: { wall_minutes: 20 } }
@@ -12,7 +12,6 @@ steps:
   - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
   - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
   - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, budget: { wall_minutes: 15 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: review } }
-budget: { requests: 200, tokens: 500000, wall_minutes: 240 }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 ---
@@ -21,8 +20,7 @@ defaults:
 
 This is the flow-level narrative for the workflow. It explains how the
 eleven steps compose and what flows between them; it is not itself a structural
-schema — the frontmatter `steps` array above is the *only* execution order
-(`01-workflow-skills.md` §4.1 rule V3). Nothing here overrides it.
+schema — the frontmatter `steps` array above is the *only* execution order. Nothing here overrides it.
 
 ## Shape of the flow
 
@@ -46,10 +44,8 @@ gate), and a release slot at the end that is a normal step, not a special mechan
 
 ## Artifact flow between steps
 
-Nothing here is wired through frontmatter. Every step's output is a path recorded in
-`execution.json`'s `steps.<id>.output`, pointing at a file under `artifacts/`
-(`03-execution-capsule.md` §4.2). Downstream steps read their inputs by following that
-convention, not by any declared edge:
+Every step's output is a path recorded in `execution.json`'s `steps.<id>.output`, pointing at a
+file under `artifacts/`; no step declares frontmatter `inputs:`, so downstream steps read upstream artifacts by that convention:
 
 | step | primary artifact it writes | who reads it |
 |---|---|---|
@@ -73,7 +69,7 @@ for context, and `grill-review` appends its own confirmation pass underneath.
 
 Every gate in this flow declares its rewind target in the frontmatter `on_fail` — five
 gates, three distinct targets (`spec`, `code`, `review`). This section only explains
-*why* each target was picked, the mechanism is `01-workflow-skills.md` §6.2:
+*why* each target was picked:
 
 - **`grill-review` FAILs -> rewind to `spec`.** The user's confirmation pass found the
   spec itself wrong (not just the confirmation script). Rewinding to `spec` re-runs
@@ -91,7 +87,7 @@ gates, three distinct targets (`spec`, `code`, `review`). This section only expl
   attached. `plan` is not re-run unless the reviewer's verdict says the plan itself was
   wrong, in which case the plan step's own re-authoring happens as part of the `code`
   step consuming the verdict text (the flow does not need a third rewind target for
-  this — see `01-workflow-skills.md` §12 item 2 on composite rewind ergonomics).
+  this).
 - **`verification` FAILs -> rewind to `code`.** Verification is the last machine gate:
   it re-runs the full green bar as the final mechanical check, after `review` and
   before `release`; a failure here means the implementation itself needs another pass,
@@ -104,47 +100,33 @@ gates, three distinct targets (`spec`, `code`, `review`). This section only expl
   wrong.
 
 Workflow-level rewind bounds: this bundle's frontmatter deliberately omits the
-`rewind` block, so the schema defaults apply — `max_total: 4`, `max_per_step: 2`
-(`01-workflow-skills.md` §4.1 rule V6). A gate that keeps failing past those bounds ends
+`rewind` block, so the driver defaults apply — `max_total: 4`, `max_per_step: 2`. A gate that keeps failing past those bounds ends
 the workflow in `failed_rewind_exhausted`, not an infinite loop.
 
 ## Budget guidance
 
-The frontmatter workflow-level budget (`requests: 200, tokens: 500000, wall_minutes: 240`)
-is sized for one full pass through all eleven steps plus one rewind of the most
-expensive lane (`code` + `e2e-run` + `review` + `verification`). Projects with larger
-codebases or slower CI should raise the workflow-level ceiling and/or raise the
-per-step `budget.wall_minutes` on `code`/`e2e-run` rather than trying to fit a bigger
-repo into the reference default. Do not treat hitting the budget as a quality signal —
-it is purely a resource ceiling (`WF-103 OVER_BUDGET`), unrelated to gate verdicts, and
-never triggers rewind.
+There is no workflow-level budget; the bounds are the rewind limits above and each step's wall estimate. Projects
+with larger codebases or slower CI should raise the per-step `budget.wall_minutes` on `code`/`e2e-run`.
 
-Every step declares its own `budget.wall_minutes`: the interactive checkpoints `grill`
-and `grill-review` get 30 (the user's own thinking time is inside the step), the
-authoring steps `spec`/`plan`/`e2e-author` 15, the e2e executions
-`e2e-baseline`/`e2e-run` 20, `code` 30, `release` 15, and the judgment gates
-`verification`/`review` 20 — summing to 230 minutes, under the 240-minute workflow
-ceiling so one in-budget pass never busts it. The per-step wall is what the daemon
-watchdog's absolute backstop over a single agent instance is computed from:
-`max(3× the step's declared wall, 15 min)`. A step declaring nothing falls back to a
-5-minute assumed wall, collapsing the backstop to its 15-minute floor and bounded-
-terminating agents that are still legitimately working (measured attempts run 2–5
-minutes healthy, 15–52 minutes in the slow tail, and interactive steps routinely
-exceed 15). Declared walls stay within `[5, 60]` by convention (enforced by
-`internal/workflow/schema/bundles_test.go`): at least 5 so the backstop is genuinely
-`3× wall` rather than clamped to the floor, at most 60 so one attempt never books more
-than an hour.
+Every step declares its own `budget.wall_minutes`: the checkpoints `grill` and `grill-review` get 30 (the
+user's own thinking time is inside the step), the authoring steps `spec`/`plan`/`e2e-author` 15, the e2e
+executions `e2e-baseline`/`e2e-run` 20, `code` 30, `release` 15, and the judgment gates `verification`/`review`
+20 — 230 minutes in total.
+
+The declared wall is an estimate, not a limit: the daemon bounds a step's total runtime across its
+dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
+A step that declares nothing gets the default, so declare a wall only for a step that legitimately
+needs more than 90 minutes in total.
 
 ## The release step (per-project convention)
 
 `release` is an ordinary step slot, not a distinct mechanism — it reuses every existing
-step primitive (inputs, `output` schema, worktree, budget, rewind;
-`01-workflow-skills.md` §4.2). The version shipped in this reference bundle
-(`agents/release.md`) is deliberately generic: it defines the shape of a release step
+step primitive (inputs, `output` schema, worktree, wall estimate, rewind). The version shipped in this reference bundle
+(`steps/release.md`) is deliberately generic: it defines the shape of a release step
 (what a release verdict/output looks like) without hard-wiring a specific version scheme,
 build system, tagging convention, or publish target, because those are legitimately
 per-project. Each project consuming this bundle as a template is expected to replace the
-body of `agents/release.md` with its own concrete release procedure while keeping the
+body of `steps/release.md` with its own concrete release procedure while keeping the
 frontmatter contract (`name`, `description`, `tools`, `output`) intact. The platform's
 own release of aihub and the work-machine binary (two build outputs) is just one
 instance of this same hook, not a special case.

@@ -3,7 +3,7 @@
 > 状态：**r3，owner 裁决已全部纳入，待审阅**（2026-10-12）。
 > 来源：2026-10-12 owner 与 review 会话的完整讨论；r2 吸收了一次独立深度审查（25 个漏洞 + 历史回归对照，附录 A/B），owner 已同意其 18 条修补默认值。
 > 本文取代的范围：04 §6.2 监督车道、v1.5-session-model 中 watch/adoption 相关描述、`skills/polyforge/scripts/watch.sh`。
-> 落地进度（集成分支 `v2/converge`）：见第 8 节状态列、第 10 节映射与文末「已知缺口」；监督重写（第 2 节、`pf watch` 进展字段）在另一分支进行。
+> 落地进度：本文第 2–8 节的设计均已落地（含监督重写与 `pf watch` 进展字段）；见第 8 节状态列、第 10 节映射与文末「已知缺口」。
 > 落地方式：**快速落地**——直接切换到新设计，不走"新旧并行观察 → 再删旧"的分阶段迁移（owner 2026-10-12）。
 
 ---
@@ -127,8 +127,8 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - 存放：`execution.json` 该 step 的字段（attempts 记录带 cause 子类）。
 - 计入：上表除"daemon 重启"外的所有死因。**信封被拒（#107 进程内重试，独立上限）不计入。**
 - 清零：gate rewind 回到该步、换到新候选模型、人工"继续"。
-- daemon 重启触发的中断**不归档为失败、不推进候选指针**（修正现状：`ClassifyFault` 默认 provider 导致重启切模型，`driver/candidates.go:201`）。
-- `PolicyFor` 中 host→block、schema→report 当前未接入生产，按上表落实。
+- daemon 重启触发的中断**不归档为失败、不推进候选指针**：`ClassifyFault` 对无法归类的原因返回空类（不再默认 provider），空类永不推进候选（`driver/candidates.go`）。
+- `PolicyFor` 已接入失败处理（`driver/supervision.go`）：provider→推进候选，host→block 并上报，operator→不计，schema→上报。
 
 ### 2.4 阈值（已定）
 
@@ -214,7 +214,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - 形态（**已落地**，分支 `v2/m2-modes`）：`pf ops auto on|off` + `pf ops max N`，自动领取与手动提交并存。`auto off` = 只有显式 `pf submit`；`auto on` = daemon 另外自己拉 aihub 就绪队列（即原 drain 循环，origin 仍为 `auto`）。已删除 interactive/batch/drain 三模式、`abort-drain`、`batch-confirm`、`batch_submit`、`get_recommendation`（只是原样转发就绪队列，改用 `pf queue --ready`）、DAEMON-409「drain 是唯一建 job 入口」拒绝。`status` 头为 `auto: on|off  max: N`；heartbeat 体仍带 mode 字符串（`auto` / `manual`）以兼容 aihub。daemon 旗标 `-auto`（`-mode` 别名与 `daemon-state.json` 旧 `mode` 字段的迁移均已删除，见第 262 行「兼容垫片」：v2 不留向后兼容代码）。drain 作为产品能力仍属「暂不做」范围（跨 daemon 通信 #84 未到），但架构上已可用。
 - **名额已满时的提交**：daemon 排队队列**持久化到 daemon 数据目录**（方案 B），重启不丢。重放规则（r2 补）：
   - 条目带 origin 与提交时间；
-  - **只重放普通提交，不重放 takeover**；
+  - 只重放普通提交；
   - 重放前先查 aihub 状态（已被领取 / 已结束则丢弃）；
   - 与 B1 claiming journal 重放去重，避免同一 WI 双重领取；
   - 被拒一律发决策事件给订阅者 / 负责人。
@@ -229,7 +229,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - **不加租约**（保留 v1.5 裁决：领取永不驱逐活着的持有者，接管是单独的特权操作）。改为 WI 级"失联"提示：**WI 失联 = 其持有 daemon 的心跳超时（统一一个阈值，替代 aihub 展示层的 5 分钟与本文早先的 15 分钟两套），或该 WI 从该 daemon 心跳上报的在跑列表中消失**；在 `pf queue`/`pf watch` 提示"可接管"并发事件。
 - 同一步失败计数上限（2.3）；driver 异常退出界（2.3）。
 
-**待修 bug（已核实或读码得出）**
+**曾经的缺陷（均已修复，保留作回归清单）**
 1. 重新领取时克隆失败会退化为本地 init，`execution.json` 丢失，工作流从第 1 步重来（`runtime/runtime.go:1143-1153`）→ 改为本地"待 blocked"，保留现场，**持续重试 SessionEnd**（克隆失败多半因 aihub 不可达，此时 SessionEnd 也会失败，不能假设立刻 blocked 成功）；修复须保留 #108 的 task-ref 拉取（`FetchTaskRef`）。
 2. 同机重新领取接上旧 git-dir（`gitops.go:649-656`，ENOTEMPTY 被 `os.IsExist` 视为已存在）。
 3. daemon 崩溃后 step 进程及其子进程不回收（`recover.go:534-545`）→ 重启时按 spawn journal 中的 pid 与 `PF_WI_ID` + `PF_DAEMON_ID` 双环境标记（同机另一 daemon 的同 WI 进程不受影响）回收（四层清理对 pid=0 也执行）。
@@ -239,7 +239,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 7. 重启后 `pf observe` 只读内存事件环，历史从头开始（由 2.2 的持久事件 + 单调 id 解决）。
 8. 重启后无任何"daemon 重启过"的信号给会话（→ 决策事件）。
 
-**文档对齐**：正常关停后 WI 在 aihub 上是 `running`（不是文档所说 paused）；resume-blocked 是从 aihub 重新克隆（不是"原地继续"）。
+**事实澄清**：正常关停后 WI 在 aihub 上保持 `running`（session 保留），下次 daemon 启动时恢复。
 
 ## 7. 生命周期简化（已定方向）
 

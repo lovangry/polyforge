@@ -1,7 +1,6 @@
-# observe — watch a work item's progress (`pf watch`)
+# watch — watch a work item's progress (`pf watch`)
 
-Execution-plane verb: routed to the local daemon. The `pf watch` lane replaces
-the old observe verb and the old watcher script: one command for a snapshot,
+Execution-plane verb: routed to the local daemon. One command for a snapshot,
 one resident watcher per chat for progress and human-decision wake-ups.
 
 ## Triggers
@@ -17,6 +16,7 @@ pf watch <id> --once [--json] [--after N] [--events N]    # one snapshot
 pf watch subscribe <id> | unsubscribe <id> | list          # this chat's subscriptions
 pf watch --chat <chat> [--wait-decision]                   # resident watcher (default chat: $PF_CHAT_ID)
 pf watch --chat <chat> --statusline                        # print the progress file
+pf watch --statusline --harness-session <id|->             # same, chat resolved from the harness session
 ```
 
 `--once` is the pull: status (`running`, `needs input`, `completed`, `failed`,

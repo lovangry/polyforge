@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// v1_s10: the spawn fence, driver/envelope edition.
+// v1_s10_spawn_fence_test.go: the spawn fence, driver/envelope edition.
 //
 // RETIRED SUB-ASSERTIONS (Phase-4 ticket polyforge#106): the legacy
 // scenario's core was the agent→daemon flush(wrap) STALE_SPAWN fence — a

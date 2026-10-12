@@ -14,21 +14,13 @@ vet:
 	go vet ./...
 
 test:
-	# Skip-evidence note (polyforge#104, retired with polyforge#106): the
-	# v1-harness legacy lane this note originally described is GONE — the
-	# hatch, its guard and every legacy-lane skip died with the engine.
-	# The note's mechanics still matter for the remaining gated lane (the
-	# real-github ship-pr e2e skips outside short mode without gh):
-	# go test suppresses skip messages unless -v (or -json) is on, so
-	# plain `make test` green does NOT show them — verification evidence
-	# that needs it must run `go test -v ./...` (or -json) explicitly.
-# Explicit -timeout (rewind fixes: wi_LMSxPTQTtz5x and wi_QVLW3ceFGfSF both hit
-	# it): the ./test acceptance package honestly runs 10-13m on this machine
-	# (596.924s at base 59c30f6, +~78s watch-lane e2e, +~50s w079 suite) —
-	# LONGER than go's default 600s per-package timeout, so `go test ./...`
-	# panics on wall clock while every test passes on content. -timeout 20m
-	# relaxes only the per-package watchdog; the slowest single test is ~62s,
-	# so per-test hangs still trip it long before 20m.
+	# go test suppresses skip messages unless -v (or -json) is on, so a plain
+	# `make test` does NOT show which tests skipped (e.g. the real-github ship-pr
+	# e2e outside short mode without gh); run `go test -v ./...` when that
+	# evidence matters.
+	# Explicit -timeout: the ./test acceptance package runs longer than go's
+	# default 10m per-package timeout, which would panic on wall clock while
+	# every test passes on content. 20m relaxes only that per-package watchdog.
 	go test ./... -count=1 -timeout 20m
 
 fmt:
