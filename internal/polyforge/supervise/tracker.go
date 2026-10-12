@@ -145,7 +145,7 @@ func (t *Tracker) ModelOutput(OutputKind) {
 	t.lastOutput = now
 	t.turnErr = false // the harness produced more output: it went on
 	t.lastError = ""
-	if !t.waiting {   // output without a seen turn_start: still a model phase
+	if !t.waiting { // output without a seen turn_start: still a model phase
 		t.waiting = true
 		t.waitingSince = now
 	}
