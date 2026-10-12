@@ -457,37 +457,6 @@ func (m *SessionManager) Verify(wiID, sessionID string) (*api.SessionVerifyRespo
 }
 
 // ---------------------------------------------------------------------------
-// Holder (contract §1.7, the public holder read)
-
-// Holder answers "who holds this work item now" in PUBLIC fields only:
-// the same audit set as the m4 SessionPublic block (machine_id spelled
-// per the endpoint contract). The unheld state is an ordinary answer —
-// the holder fields stay empty (flat omitted on the wire, the §1.2
-// fingerprint-omission precedent) — so the operator tri-state
-// (unheld / held-paused / held-running) is three 200 answers, never an
-// error. No state change, no event. By construction the hash and the
-// secret never reach the response: only the public columns are mapped,
-// and the hash column is read solely to tell held from unheld.
-func (m *SessionManager) Holder(wiID string) (*api.SessionHolderResponse, error) {
-	row, err := loadSessionRow(m.db, wiID)
-	if err != nil {
-		return nil, err
-	}
-	resp := &api.SessionHolderResponse{
-		WorkItemID: wiID,
-		Status:     row.Status,
-		CleanPause: row.CleanPause,
-	}
-	if sessionHeld(row) {
-		resp.SessionFingerprint = row.Fingerprint.String
-		resp.MachineID = row.Machine.String
-		resp.SessionOwner = row.Owner.String
-		resp.SessionStartedAt = row.StartedAt.String
-	}
-	return resp, nil
-}
-
-// ---------------------------------------------------------------------------
 // Attach (contract §1.3, M3 same-session resume)
 
 // Attach resumes a paused WI under the SAME session: hash matches AND

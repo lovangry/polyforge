@@ -1269,7 +1269,7 @@ func TestW079SingleProjectYamlInfersDefault(t *testing.T) {
 	if !strings.Contains(out, goal) {
 		t.Fatalf("pf file create (inferred): output does not carry the created item (output %q)", out)
 	}
-	items, err := inst.client.ListWorkItems("e2e", "")
+	items, err := listWorkItems(inst, "e2e", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1310,7 +1310,7 @@ func TestW079MultiProjectYamlAsksForProject(t *testing.T) {
 		t.Fatalf("the error does not ask for --project (output %q)", out)
 	}
 	for _, project := range []string{"e2e", "w079second"} {
-		items, err := inst.client.ListWorkItems(project, "")
+		items, err := listWorkItems(inst, project, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1371,7 +1371,7 @@ func TestW079ExplicitProjectBypassesInference(t *testing.T) {
 	goal := "w079 explicit project wins over inference"
 	w079PfWant(t, inst, -1, w079Env{config: cfg, cwd: ws},
 		"file", "create", "--project", "e2e", "--goal", goal)
-	items, err := inst.client.ListWorkItems("e2e", "")
+	items, err := listWorkItems(inst, "e2e", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1390,7 +1390,7 @@ func TestW079ExplicitProjectBypassesInference(t *testing.T) {
 	goal2 := "w079 explicit project over invalid yaml"
 	w079PfWant(t, inst, -1, w079Env{config: cfg, cwd: ws},
 		"file", "create", "--project", "e2e", "--goal", goal2)
-	items2, err := inst.client.ListWorkItems("e2e", "")
+	items2, err := listWorkItems(inst, "e2e", "")
 	if err != nil {
 		t.Fatal(err)
 	}

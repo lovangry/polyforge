@@ -69,10 +69,8 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/v1/work-items/{id}", s.auth(s.hGetWI))
 	m.HandleFunc("PATCH /api/v1/work-items/{id}", s.auth(s.hPatchWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/cancel", s.auth(s.hCancelWI))
-	m.HandleFunc("GET /api/v1/work-items/{id}/progress", s.auth(s.hProgress))
 	m.HandleFunc("POST /api/v1/work-items/{id}/claim", s.auth(s.hSessionClaim))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-verify", s.auth(s.hSessionVerify))
-	m.HandleFunc("GET /api/v1/work-items/{id}/session", s.auth(s.hSessionHolder))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-attach", s.auth(s.hSessionAttach))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-end", s.auth(s.hSessionEnd))
 	// Recovery door: an admin/maintainer force-ends a stuck holder's session
@@ -91,7 +89,6 @@ func (s *Server) routes() {
 	// Ship ledger (polyforge#123, P1b): the ship bridge records each
 	// pushed repo's branch top; anyone who can read the WI queries it.
 	m.HandleFunc("POST /api/v1/work-items/{id}/ship-ledger", s.auth(s.hRecordShipLedger))
-	m.HandleFunc("GET /api/v1/work-items/{id}/ship-ledger", s.auth(s.hShipLedger))
 	m.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking}/{kind}", s.auth(s.hDelDep))
 	m.HandleFunc("GET /api/v1/projects/{project}/ready-queue", s.auth(s.hReadyQueue))
 	m.HandleFunc("POST /api/v1/machines/heartbeat", s.auth(s.hHeartbeat))
@@ -99,12 +96,9 @@ func (s *Server) routes() {
 
 	// Memory face.
 	m.HandleFunc("POST /api/v1/memories", s.auth(s.hCreateMemory))
-	m.HandleFunc("GET /api/v1/memories", s.auth(s.hListMemories))
-	m.HandleFunc("POST /api/v1/memories/search", s.auth(s.hSearchMemoryPOST))
 	m.HandleFunc("GET /api/v1/memories/search", s.auth(s.hSearchMemory))
 	m.HandleFunc("POST /api/v1/memories/rebuild-index", s.authAdmin(s.hRebuildIndex))
 	m.HandleFunc("GET /api/v1/memories/{id}", s.auth(s.hGetMemory))
-	m.HandleFunc("PATCH /api/v1/memories/{id}", s.auth(s.hPatchMemory))
 	m.HandleFunc("POST /api/v1/memories/{id}/redact", s.auth(s.hRedactMemory))
 
 	// Admin face.
@@ -498,53 +492,6 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 	s.writeWI(w, http.StatusOK, wi)
 }
 
-// hProgress serves GET /api/v1/work-items/{id}/progress (02 §5.2): the
-// read-only progress projection. The server reads its own local bare
-// repo HEAD's runtime-state/execution.json and passes it through
-// VERBATIM in `progress` — no field pruning, no re-representation in
-// Core's data model, no materialized cache (INV-1). Authorization is
-// the ordinary object-data rule: project-member canRead (membership OR
-// global admin) with the caller's ordinary API key; a non-readable WI
-// stays hidden behind CORE-404 like every other GET route.
-func (s *Server) hProgress(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.requireRead(w, idn, projectID, "work item %s", r.PathValue("id")) {
-		return
-	}
-	hp, err := s.Git.ReadHeadProgress(id)
-	if err != nil {
-		if errors.Is(err, git.ErrNoPublishedProgress) {
-			// §5.2: never-published WIs answer CORE-504 — no invented HEAD
-			// data is fabricated for a WI whose chain is still empty.
-			writeErr(w, core.Fail(api.ErrCoreProgressUnavailable, "",
-				"no published revision for %s yet (read-through has no readable object)", id))
-			return
-		}
-		writeErr(w, core.Fail(api.ErrCoreInternal, "", "read HEAD progress: %v", err))
-		return
-	}
-	if !json.Valid(hp.Content) {
-		writeErr(w, core.Fail(api.ErrCoreProgressUnavailable, "",
-			"the published execution state of %s is not valid JSON", id))
-		return
-	}
-	// The published file body passes through VERBATIM and is not
-	// re-represented: the v1 head_generation read-out (the published
-	// execution.json's top-level `generation` field) is deleted with the
-	// capsule lineage it surfaced (v1.5 session model).
-	writeJSON(w, http.StatusOK, &api.ProgressResponse{
-		WorkItemID:    id,
-		HeadSeq:       hp.Seq,
-		Progress:      json.RawMessage(hp.Content),
-		HeadUpdatedAt: hp.UpdatedAt.UTC().Format(time.RFC3339),
-		FreshnessNote: api.ProgressFreshnessNote,
-	})
-}
-
 // ---------------------------------------------------------------------------
 // Ship ledger (polyforge#123, P1b): record on ship, queryable per WI.
 
@@ -572,27 +519,6 @@ func (s *Server) hRecordShipLedger(w http.ResponseWriter, r *http.Request, idn *
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded", "work_item_id": id})
-}
-
-// hShipLedger serves GET /api/v1/work-items/{id}/ship-ledger: the
-// queryable face — one row per shipped repo (repo, branch, branch-top
-// SHA, pushed_at), ordered by repo name; a WI with no recorded ship
-// serves an empty array.
-func (s *Server) hShipLedger(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.requireRead(w, idn, projectID, "work item %s", id) {
-		return
-	}
-	out, err := s.Ships.Ledger(id)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
 }
 
 // ---------------------------------------------------------------------------
@@ -673,30 +599,6 @@ func (s *Server) hSessionVerify(w http.ResponseWriter, r *http.Request, idn *ide
 		return
 	}
 	resp, err := s.Sessions.Verify(id, req.SessionID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// hSessionHolder serves the §1.7 public holder read: who holds this
-// WI right now, in PUBLIC fields only. It deliberately uses the WI
-// read gate (wiProject + requireRead), not scopeCheck — any project
-// viewer may ask (the operator's recovery-decision input); non-members
-// get the standard hidden-not-found answer. All three holder states
-// (unheld / held-paused / held-running) are ordinary 200 answers;
-// the hash and secret never appear in any response.
-func (s *Server) hSessionHolder(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.requireRead(w, idn, projectID, "work item %s", r.PathValue("id")) {
-		return
-	}
-	resp, err := s.Sessions.Holder(id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1230,30 +1132,6 @@ func (s *Server) memRead(idOrSlug string, idn *identity) (*memory.Entry, []byte,
 	return e, content, nil
 }
 
-func (s *Server) hPatchMemory(w http.ResponseWriter, r *http.Request, idn *identity) {
-	memID := r.PathValue("id")
-	e, _, err := s.memRead(memID, idn)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := s.memWriteAllowed(idn, e.ProjectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	var req memory.UpdateRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	updated, err := s.Mems.Update(memID, req)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, updated)
-}
-
 func (s *Server) hRedactMemory(w http.ResponseWriter, r *http.Request, idn *identity) {
 	memID := r.PathValue("id")
 	e, _, err := s.memRead(memID, idn)
@@ -1272,32 +1150,6 @@ func (s *Server) hRedactMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	writeJSON(w, http.StatusOK, map[string]string{"id": memID, "status": "redacted"})
 }
 
-func (s *Server) hListMemories(w http.ResponseWriter, r *http.Request, idn *identity) {
-	project := r.URL.Query().Get("project")
-	if project == "" {
-		writeErr(w, core.Fail(api.ErrMemBadInput, "", "project query parameter required"))
-		return
-	}
-	projectID, err := s.projectIDOf(project)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := s.memReadAllowed(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	items, err := s.Mems.List(projectID, s.memAllowed(idn))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if items == nil {
-		items = []memory.Entry{}
-	}
-	writeJSON(w, http.StatusOK, api.ListResponse[memory.Entry]{Items: items, Total: len(items)})
-}
-
 func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *identity) {
 	q := r.URL.Query()
 	var tags []string
@@ -1307,21 +1159,6 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	excerpt, _ := strconv.Atoi(q.Get("excerpt"))
 	s.hSearchRun(w, q.Get("q"), q.Get("type"), tags, limit, excerpt, idn)
-}
-
-func (s *Server) hSearchMemoryPOST(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req struct {
-		Q       string   `json:"q"`
-		Type    string   `json:"type,omitempty"`
-		Tags    []string `json:"tags,omitempty"`
-		Limit   int      `json:"limit,omitempty"`
-		Excerpt int      `json:"excerpt,omitempty"`
-	}
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	s.hSearchRun(w, req.Q, req.Type, req.Tags, req.Limit, req.Excerpt, idn)
 }
 
 // maxMemoryExcerptRunes bounds the content excerpt a search answer may

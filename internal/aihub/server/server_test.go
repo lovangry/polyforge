@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -682,17 +681,10 @@ func TestMemorySearchExcerpt(t *testing.T) {
 		t.Fatalf("content_excerpt = %q, want the first 9 runes", with.Items[0].ContentExcerpt)
 	}
 
-	// POST with an excerpt: the same extension on the POST face.
-	if code, raw := e.do(t, "POST", "/api/v1/memories/search", e.key, map[string]any{
-		"q": "ladders", "excerpt": 40,
-	}, &with); code != 200 || len(with.Items) != 1 || with.Items[0].ContentExcerpt != "the lesson about bounded retry ladders" {
-		t.Fatalf("POST excerpt search: %d %s (%+v)", code, raw, with.Items)
-	}
 }
 
 // TestMemorySearchTypeWildcard: the type filter's trailing-".*" prefix
-// interpretation (X.* → prefix "X.") is shared by the GET and POST faces
-// of the search endpoint; non-wildcard values keep exact matching.
+// interpretation (X.* → prefix "X.") applies to the GET search face; non-wildcard values keep exact matching.
 func TestMemorySearchTypeWildcard(t *testing.T) {
 	e := newSrvEnv(t)
 	mk := func(memType string) {
@@ -723,196 +715,12 @@ func TestMemorySearchTypeWildcard(t *testing.T) {
 			t.Fatalf("GET experience.* matched type %q", it.Type)
 		}
 	}
-	// POST face: the same interpretation.
-	if code, raw := e.do(t, "POST", "/api/v1/memories/search", e.key, map[string]any{
-		"q": "xylophone", "type": "experience.*",
-	}, &res); code != 200 || len(res.Items) != 2 {
-		t.Fatalf("POST experience.*: %d %s (%d items)", code, raw, len(res.Items))
-	}
-	for _, it := range res.Items {
-		if !strings.HasPrefix(it.Type, "experience.") {
-			t.Fatalf("POST experience.* matched type %q", it.Type)
-		}
-	}
 	// GET face, non-wildcard: exact type only.
 	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=xylophone&type=experience.debug", e.key, nil, &res); code != 200 || len(res.Items) != 1 || res.Items[0].Type != "experience.debug" {
 		t.Fatalf("GET exact: %d %s (%+v)", code, raw, res.Items)
 	}
-	// POST face, non-wildcard: exact type only.
-	if code, raw := e.do(t, "POST", "/api/v1/memories/search", e.key, map[string]any{
-		"q": "xylophone", "type": "experience.debug",
-	}, &res); code != 200 || len(res.Items) != 1 || res.Items[0].Type != "experience.debug" {
-		t.Fatalf("POST exact: %d %s (%+v)", code, raw, res.Items)
-	}
-	// fact.* never matches experience.* rows, on either face.
+	// fact.* never matches experience.* rows.
 	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=xylophone&type=fact.*", e.key, nil, &res); code != 200 || len(res.Items) != 1 || res.Items[0].Type != "fact.note" {
 		t.Fatalf("GET fact.*: %d %s (%+v)", code, raw, res.Items)
-	}
-	if code, raw := e.do(t, "POST", "/api/v1/memories/search", e.key, map[string]any{
-		"q": "xylophone", "type": "fact.*",
-	}, &res); code != 200 || len(res.Items) != 1 || res.Items[0].Type != "fact.note" {
-		t.Fatalf("POST fact.*: %d %s (%+v)", code, raw, res.Items)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// GET /api/v1/work-items/{id}/progress — the §5.2 read-through face.
-
-// runGitIn runs one git command inside dir (test helper for seeding bare
-// repos); failure is fatal.
-func runGitIn(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
-		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v: %s", args, err, out)
-	}
-}
-
-// tryGitIn runs one git command and reports success (non-fatal variant
-// of runGitIn, for optional setup steps).
-func tryGitIn(t *testing.T, dir string, args ...string) bool {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
-		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("git %s (tolerated): %v: %s", args, err, out)
-		return false
-	}
-	return true
-}
-
-// pushProgressRev builds a throwaway worktree whose runtime-state/execution.json
-// is content, commits it with the seq trailer and pushes to the WI's bare repo.
-// The committer date is pinned so head_updated_at is assertable. When the
-// bare repo already holds revisions, the worktree builds on its main tip so
-// the push stays fast-forward.
-func pushProgressRev(t *testing.T, gitRoot, wiID, content string, seq int64, at string) {
-	t.Helper()
-	wt := t.TempDir()
-	bare := filepath.Join(gitRoot, wiID+".git")
-	runGitIn(t, wt, "init", "--initial-branch=main", ".")
-	if tryGitIn(t, wt, "fetch", bare, "main") {
-		tryGitIn(t, wt, "reset", "--hard", "FETCH_HEAD")
-	}
-	if err := os.MkdirAll(filepath.Join(wt, "runtime-state"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(wt, "runtime-state", "execution.json"), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitIn(t, wt, "add", "-A")
-	cmd := exec.Command("git", "commit", "-m", fmt.Sprintf("rev\n\nPolyforge-Seq: %d", seq))
-	cmd.Dir = wt
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
-		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
-		"GIT_COMMITTER_DATE="+at, "GIT_AUTHOR_DATE="+at,
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("commit: %v: %s", err, out)
-	}
-	runGitIn(t, wt, "push", filepath.Join(gitRoot, wiID+".git"), "HEAD:refs/heads/main")
-}
-
-func TestProgressReadThrough(t *testing.T) {
-	e := newSrvEnv(t)
-	var wi struct {
-		ID string `json:"id"`
-	}
-	if code, raw := e.do(t, "POST", "/api/v1/work-items", e.key,
-		map[string]any{"project": "alpha", "goal": "progress read-through", "bundle_name": "b"}, &wi); code != 201 || wi.ID == "" {
-		t.Fatalf("create: %d %s", code, raw)
-	}
-
-	// Unknown WI → typed CORE-404.
-	code, raw := e.do(t, "GET", "/api/v1/work-items/wi_nosuchthing/progress", e.key, nil, nil)
-	if code != http.StatusNotFound {
-		t.Fatalf("unknown WI: %d %s", code, raw)
-	}
-	var envl api.Error
-	if err := json.Unmarshal(raw, &envl); err != nil || envl.Code != api.ErrCoreNotFound {
-		t.Fatalf("unknown WI envelope: %s (%v)", raw, err)
-	}
-
-	// Known WI, never published → CORE-504 (no invented HEAD data).
-	code, raw = e.do(t, "GET", "/api/v1/work-items/"+wi.ID+"/progress", e.key, nil, nil)
-	if code != 504 { // status derives from the numeric suffix: CORE-504 → HTTP 504
-		t.Fatalf("never published: %d %s", code, raw)
-	}
-	if err := json.Unmarshal(raw, &envl); err != nil || envl.Code != api.ErrCoreProgressUnavailable {
-		t.Fatalf("never published envelope: %s (%v)", raw, err)
-	}
-
-	// Publish one revision directly into the bare repo (a local push: no
-	// attempt-id option, so the pre-receive attempt gate stays open — the
-	// same path the git-package tests use).
-	if err := e.srv.Git.EnsureBare(wi.ID); err != nil {
-		t.Fatalf("EnsureBare: %v", err)
-	}
-	execJSON := `{"capsule_id":"cap_1","work_item_id":"` + wi.ID + `","generation":3,` +
-		`"current_step":"fix","workflow_status":"running","steps":{},"version":7}`
-	pushProgressRev(t, filepath.Join(e.dataDir, "git"), wi.ID, execJSON, 1, "2026-10-01T00:00:00Z")
-
-	var p api.ProgressResponse
-	if code, raw = e.do(t, "GET", "/api/v1/work-items/"+wi.ID+"/progress", e.key, nil, &p); code != http.StatusOK {
-		t.Fatalf("after publish: %d %s", code, raw)
-	}
-	if p.WorkItemID != wi.ID || p.HeadSeq != 1 {
-		t.Errorf("head fields: %+v", p)
-	}
-	if p.HeadUpdatedAt != "2026-10-01T00:00:00Z" {
-		t.Errorf("head_updated_at = %q", p.HeadUpdatedAt)
-	}
-	if p.FreshnessNote != api.ProgressFreshnessNote {
-		t.Errorf("freshness_note = %q", p.FreshnessNote)
-	}
-	// The progress blob passes through VERBATIM.
-	if string(p.Progress) != execJSON {
-		t.Errorf("progress not verbatim:\n got: %s\nwant: %s", p.Progress, execJSON)
-	}
-
-	// A second publish moves the head: every call reads through live.
-	execJSON2 := `{"capsule_id":"cap_1","work_item_id":"` + wi.ID + `","generation":3,` +
-		`"current_step":"verify","workflow_status":"running","steps":{},"version":8}`
-	pushProgressRev(t, filepath.Join(e.dataDir, "git"), wi.ID, execJSON2, 2, "2026-10-01T00:09:00Z")
-	if code, raw = e.do(t, "GET", "/api/v1/work-items/"+wi.ID+"/progress", e.key, nil, &p); code != http.StatusOK {
-		t.Fatalf("second publish: %d %s", code, raw)
-	}
-	if p.HeadSeq != 2 || string(p.Progress) != execJSON2 {
-		t.Errorf("second head: seq=%d progress=%s", p.HeadSeq, p.Progress)
-	}
-
-	// A non-member (non-admin) key cannot read another project's WI: the
-	// object stays hidden behind the same CORE-404 non-visibility the
-	// other object-data GET routes enforce.
-	outsider, _ := e.admin.CreateUser("stranger", "s@example.com", "writer", "human")
-	okey, _ := e.admin.CreateAPIKey(outsider.ID, "s", "")
-	code, raw = e.do(t, "GET", "/api/v1/work-items/"+wi.ID+"/progress", okey.Plain, nil, nil)
-	if code != http.StatusNotFound {
-		t.Fatalf("non-member: %d %s", code, raw)
-	}
-	if err := json.Unmarshal(raw, &envl); err != nil || envl.Code != api.ErrCoreNotFound {
-		t.Fatalf("non-member envelope: %s (%v)", raw, err)
-	}
-	// A project member (viewer) CAN read: membership is the canRead rule.
-	member, _ := e.admin.CreateUser("mate", "m@example.com", "writer", "human")
-	mkey, _ := e.admin.CreateAPIKey(member.ID, "m", "")
-	if _, err := e.admin.PatchProject("alpha", core.ProjectPatchRequest{
-		Members: &[]api.ProjectMember{{UserID: member.ID, Role: "viewer"}},
-	}); err != nil {
-		t.Fatalf("add member: %v", err)
-	}
-	if code, _ = e.do(t, "GET", "/api/v1/work-items/"+wi.ID+"/progress", mkey.Plain, nil, nil); code != http.StatusOK {
-		t.Fatalf("member viewer: %d", code)
 	}
 }

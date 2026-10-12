@@ -62,9 +62,13 @@ func TestListMachinesPinsRouteAndDecoding(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, "k")
 
-	out, err := c.ListMachines()
+	raw, err := c.ListMachinesRaw()
 	if err != nil {
-		t.Fatalf("ListMachines: %v", err)
+		t.Fatalf("ListMachinesRaw: %v", err)
+	}
+	var out MachinesList
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
 	if gotMethod != "GET" || gotPath != "/api/v1/machines" || gotAuth != "Bearer k" {
 		t.Fatalf("request shape: %s %s auth=%q", gotMethod, gotPath, gotAuth)
@@ -85,10 +89,6 @@ func TestListMachinesPinsRouteAndDecoding(t *testing.T) {
 		t.Fatalf("m_2 decode: %+v", m1)
 	}
 
-	raw, err := c.ListMachinesRaw()
-	if err != nil {
-		t.Fatalf("ListMachinesRaw: %v", err)
-	}
 	if string(raw) != body {
 		t.Fatalf("raw passthrough altered the body:\n got: %s\nwant: %s", raw, body)
 	}

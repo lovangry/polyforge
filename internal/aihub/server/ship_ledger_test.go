@@ -35,12 +35,6 @@ func TestShipLedgerRouteRecordAndQuery(t *testing.T) {
 	if code != http.StatusUnauthorized {
 		t.Fatalf("record with no key: %d", code)
 	}
-	// No key on the query face → the typed 401.
-	code, _ = e.do(t, "GET", "/api/v1/work-items/"+wi+"/ship-ledger", "", nil, nil)
-	if code != http.StatusUnauthorized {
-		t.Fatalf("query with no key: %d", code)
-	}
-
 	// Record one ship run (branch + two repos), then query it back.
 	code, body := e.do(t, "POST", "/api/v1/work-items/"+wi+"/ship-ledger", e.key,
 		api.ShipLedgerRequest{
@@ -53,21 +47,30 @@ func TestShipLedgerRouteRecordAndQuery(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("record: %d %s", code, body)
 	}
-	var out api.ShipLedgerResponse
-	code, body = e.do(t, "GET", "/api/v1/work-items/"+wi+"/ship-ledger", e.key, nil, &out)
-	if code != http.StatusOK {
-		t.Fatalf("query: %d %s", code, body)
+	rows, err := e.db.Query(`SELECT repo, branch, branch_top_sha, pushed_at FROM wi_ship_ledger
+		WHERE work_item_id=?1 ORDER BY repo`, wi)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if out.WorkItemID != wi || len(out.Repos) != 2 {
-		t.Fatalf("ledger = %+v", out)
+	defer rows.Close()
+	type row struct{ repo, branch, sha, at string }
+	var got []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.repo, &r.branch, &r.sha, &r.at); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, r)
 	}
-	if out.Repos[0].Repo != "demo-src" || out.Repos[0].Branch != "polyforge/"+wi ||
-		out.Repos[0].BranchTopSHA != "2222222222222222222222222222222222222222" ||
-		out.Repos[0].PushedAt == "" {
-		t.Fatalf("row 0: %+v", out.Repos[0])
+	if len(got) != 2 {
+		t.Fatalf("ledger = %+v", got)
 	}
-	if out.Repos[1].Repo != "polyforge" {
-		t.Fatalf("rows not repo-ordered: %+v", out.Repos)
+	if got[0].repo != "demo-src" || got[0].branch != "polyforge/"+wi ||
+		got[0].sha != "2222222222222222222222222222222222222222" || got[0].at == "" {
+		t.Fatalf("row 0: %+v", got[0])
+	}
+	if got[1].repo != "polyforge" {
+		t.Fatalf("rows not repo-ordered: %+v", got)
 	}
 }
 
@@ -91,16 +94,5 @@ func TestShipLedgerRouteRefusals(t *testing.T) {
 		api.ShipLedgerRequest{Repos: []api.ShipLedgerEntry{{Repo: "r", BranchTopSHA: "a"}}}, nil)
 	if code != http.StatusNotFound {
 		t.Fatalf("unknown wi: %d %s", code, body)
-	}
-	// Unknown WI on the query face → CORE-404.
-	code, body = e.do(t, "GET", "/api/v1/work-items/wi_nope/ship-ledger", e.key, nil, nil)
-	if code != http.StatusNotFound {
-		t.Fatalf("unknown wi query: %d %s", code, body)
-	}
-	// Empty ledger for a real WI: 200 with an empty repos array.
-	var out api.ShipLedgerResponse
-	code, body = e.do(t, "GET", "/api/v1/work-items/"+wi+"/ship-ledger", e.key, nil, &out)
-	if code != http.StatusOK || out.Repos == nil || len(out.Repos) != 0 {
-		t.Fatalf("empty ledger: %d %s %+v", code, body, out)
 	}
 }
