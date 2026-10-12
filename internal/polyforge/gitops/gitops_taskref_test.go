@@ -7,6 +7,7 @@ package gitops
 // carrier back for the claim-time restore.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,13 +234,10 @@ func TestTaskRefDivergenceIsRejectedAndRaisedAsEvent(t *testing.T) {
 
 	var kinds []string
 	var body map[string]any
-	SetEventSink(func(wi, kind string, b map[string]any) {
-		if wi == o.WorkItemID {
-			kinds = append(kinds, kind)
-			body = b
-		}
-	})
-	t.Cleanup(func() { SetEventSink(nil) })
+	o.EventSink = func(kind string, b map[string]any) {
+		kinds = append(kinds, kind)
+		body = b
+	}
 	if _, _, _, err := CommitPush(o, "boundary 2"); err != nil {
 		t.Fatalf("a rejected carrier must not fail the chain publish: %v", err)
 	}
@@ -251,5 +249,43 @@ func TestTaskRefDivergenceIsRejectedAndRaisedAsEvent(t *testing.T) {
 	}
 	if body["repo"] != "demo-src" || body["ref"] != TaskRefName("demo-src") {
 		t.Fatalf("event body = %v", body)
+	}
+}
+
+// IsNonFastForward must match REAL git push output, and git must run
+// under the C locale however the daemon's environment is set.
+func TestIsNonFastForwardOnRealGitOutput(t *testing.T) {
+	setIdentity(t)
+	t.Setenv("LC_ALL", "zh_CN.UTF-8")
+	t.Setenv("LANGUAGE", "zh_CN")
+	base := t.TempDir()
+	bare := filepath.Join(base, "b.git")
+	mustRun(t, "git", "init", "-q", "--bare", "-b", "main", bare)
+	a, b := filepath.Join(base, "a"), filepath.Join(base, "b")
+	mustRun(t, "git", "clone", "-q", bare, a)
+	mustRun(t, "git", "-C", a, "commit", "-q", "--allow-empty", "-m", "one")
+	mustRun(t, "git", "-C", a, "push", "-q", "origin", "HEAD:main")
+	mustRun(t, "git", "clone", "-q", bare, b)
+	mustRun(t, "git", "-C", b, "commit", "-q", "--allow-empty", "-m", "b-side")
+	mustRun(t, "git", "-C", a, "commit", "-q", "--allow-empty", "-m", "a-side")
+	mustRun(t, "git", "-C", a, "push", "-q", "origin", "HEAD:main")
+
+	out, err := git(nil, b, "push", "origin", "HEAD:main")
+	if err == nil {
+		t.Fatal("the diverged push must be rejected")
+	}
+	if !IsNonFastForward(err, out) {
+		t.Fatalf("real git rejection not recognised: err=%v out=%q", err, out)
+	}
+	if !strings.Contains(err.Error(), "[rejected]") {
+		t.Fatalf("git did not run under the C locale: %v", err)
+	}
+	if IsNonFastForward(errors.New("git push: Could not resolve host"), "") {
+		t.Fatal("an unreachable remote is not a non-fast-forward")
+	}
+	// The carrier-absent answer is the ls-remote exit code, locale-free.
+	o := Opts{WorkItemID: "wi_loc", RemoteURL: bare, Username: "u", Secret: "s"}
+	if sha, err := FetchTaskRef(o, b, "nothing"); err != nil || sha != "" {
+		t.Fatalf("absent carrier under a foreign locale: %q, %v", sha, err)
 	}
 }

@@ -340,11 +340,6 @@ type job struct {
 // Observe→Runtime messages; both sides speak only common/protocol types.
 func New(cfg Config, hub Aihub, spawner Spawner, toOB chan<- protocol.RTMsg, fromOB <-chan protocol.OBMsg) *Runtime {
 	cfg.fill()
-	if cfg.EventTap != nil {
-		// gitops raises its error events (task_ref_diverged) through the
-		// same durable tap as the runtime's own.
-		gitops.SetEventSink(cfg.EventTap)
-	}
 	return &Runtime{
 		cfg:       cfg,
 		hub:       hub,
@@ -891,6 +886,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			RemoteURL:   r.remoteURLFor(id),
 			Username:    id,
 			Secret:      sessionID, // v1.5: the session secret IS the push password
+			EventSink:   r.gitEventSink(id),
 		},
 		bundleName:   c.BundleName,
 		bundleDigest: c.BundleDigest,

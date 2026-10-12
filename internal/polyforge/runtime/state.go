@@ -371,3 +371,11 @@ func parseStamp(s string) time.Time {
 	}
 	return t
 }
+
+// restoredJob is jobFromRecord plus the runtime-owned wiring (the gitops
+// event sink) a bare record cannot carry.
+func (r *Runtime) restoredJob(rec *jobRecord) *job {
+	j := jobFromRecord(rec)
+	j.git.EventSink = r.gitEventSink(rec.WorkItemID)
+	return j
+}

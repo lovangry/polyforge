@@ -8,6 +8,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
 func carrierGit(t *testing.T, dir string, args ...string) string {
@@ -181,4 +183,78 @@ func TestFreshClaimWithoutCarrierClonesNormally(t *testing.T) {
 	if got := capsuleReposOf(t, testCapsuleDir(g.r, g.wi))["app"]; got != g.srcHead {
 		t.Fatalf("baseline = %q, want %q", got, g.srcHead)
 	}
+}
+
+// (d) M8a: the crash window between the task-repo clone and the
+// capsule.json baseline write leaves an untouched fresh clone with NO
+// recorded baseline. The replay must run the carrier restore on it, not
+// adopt the origin's HEAD as the baseline.
+func TestHuskWithoutRecordedBaselineIsRestoredFromCarrier(t *testing.T) {
+	g := newCarrierRig(t, "wi_husk", true)
+	r := g.r
+	capDir := testCapsuleDir(r, g.wi)
+	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
+	// The husk: the repo stands on the origin HEAD (no work commit) and no
+	// baseline was ever recorded.
+	carrierGit(t, repoDir, "reset", "--hard", "--quiet", g.srcHead)
+	if err := os.Remove(filepath.Join(capDir, capsule.CapsuleJSON)); err != nil {
+		t.Fatal(err)
+	}
+	j := &job{wi: g.wi, capsuleDir: capDir, repos: []api.ProjectRepo{{Name: "app", URL: g.source}}}
+	j.git = r.gitOptsForTest(t, g)
+	shas, err := r.cloneTaskRepos(context.Background(), j)
+	if err != nil {
+		t.Fatalf("cloneTaskRepos on the husk: %v", err)
+	}
+	if shas["app"] != g.workHead {
+		t.Fatalf("baseline = %q, want the carrier tip %q (origin HEAD %q must not win)", shas["app"], g.workHead, g.srcHead)
+	}
+	if got := carrierGit(t, repoDir, "rev-parse", "HEAD"); got != g.workHead {
+		t.Fatalf("husk HEAD = %q, want the carrier tip %q", got, g.workHead)
+	}
+}
+
+// (e) M8b: the required task-repo set is the claim inventory UNION the
+// prior capsule.json Repos. An empty inventory must not drop a recorded
+// repo: an existing worktree is carried forward with its baseline, and a
+// recorded repo that is missing on disk with no URL to re-clone is a
+// typed refusal, not a silent continue.
+func TestRecordedReposSurviveAnEmptyInventory(t *testing.T) {
+	g := newCarrierRig(t, "wi_union", true)
+	r := g.r
+	capDir := testCapsuleDir(r, g.wi)
+	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
+	raw, err := json.Marshal(capsule.Identity{WorkItemID: g.wi, Repos: map[string]string{"app": g.workHead}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(capDir, capsule.CapsuleJSON), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j := &job{wi: g.wi, capsuleDir: capDir} // empty inventory
+	j.git = r.gitOptsForTest(t, g)
+
+	shas, err := r.cloneTaskRepos(context.Background(), j)
+	if err != nil {
+		t.Fatalf("cloneTaskRepos: %v", err)
+	}
+	if shas["app"] != g.workHead {
+		t.Fatalf("recorded repo dropped or rebaselined: %v", shas)
+	}
+
+	if err := os.RemoveAll(repoDir); err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.cloneTaskRepos(context.Background(), j)
+	ae, ok := err.(*api.Error)
+	if !ok || ae.Code != api.ErrDaemonSpawnFail || !strings.Contains(ae.Detail, "app") {
+		t.Fatalf("a recorded repo missing with no inventory URL must be a typed DAEMON-507, got %v", err)
+	}
+}
+
+// gitOptsForTest builds the capsule gitops.Opts the rig's claim would
+// (RemoteURL = the WI's hub bare repo).
+func (r *Runtime) gitOptsForTest(t *testing.T, g *carrierRig) gitops.Opts {
+	t.Helper()
+	return gitops.Opts{WorkItemID: g.wi, Username: g.wi, Secret: "s", CapsuleDir: testCapsuleDir(r, g.wi), RemoteURL: g.hubBare}
 }

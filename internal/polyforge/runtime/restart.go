@@ -157,7 +157,7 @@ func (r *Runtime) Restart(ctx context.Context) error {
 			continue
 		}
 		r.mu.Lock()
-		r.jobs[rec.WorkItemID] = jobFromRecord(rec)
+		r.jobs[rec.WorkItemID] = r.restoredJob(rec)
 		r.mu.Unlock()
 	}
 	for _, rec := range st.Jobs {
@@ -207,7 +207,7 @@ func (r *Runtime) retryVerify(j *job) {
 func (r *Runtime) restartRelease(rec *jobRecord, currentFingerprint string) {
 	j := r.jobOf(rec.WorkItemID)
 	if j == nil {
-		j = jobFromRecord(rec)
+		j = r.restoredJob(rec)
 	}
 	r.killAgentTree(j) // pid 0 (driver lane) reaps via journal + env marker
 	if err := quarantineCapsule(j.capsuleDir, j.git.GitDir); err != nil {
@@ -257,7 +257,7 @@ func (r *Runtime) restartAttach(ctx context.Context, rec *jobRecord) error {
 func (r *Runtime) restartDrop(rec *jobRecord) {
 	j := r.jobOf(rec.WorkItemID)
 	if j == nil {
-		j = jobFromRecord(rec)
+		j = r.restoredJob(rec)
 	}
 	// dead or alive: either way the tree's orphans must not survive
 	// (killAgentTree's identity guard refuses to signal a reused pid)
@@ -547,7 +547,7 @@ const (
 func (r *Runtime) parkRepair(rec *jobRecord, cause error) {
 	j := r.jobOf(rec.WorkItemID)
 	if j == nil {
-		j = jobFromRecord(rec)
+		j = r.restoredJob(rec)
 		r.mu.Lock()
 		r.jobs[rec.WorkItemID] = j
 		r.mu.Unlock()

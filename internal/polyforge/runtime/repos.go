@@ -18,11 +18,13 @@ package runtime
 // push credential does, via the gitops choke point).
 //
 // Recovery contract: a repos/<name> that already exists at materialize
-// time (a same-generation husk from a crashed Start, or an in-place
-// materialize rerun) is NEVER fetched, reset or re-cloned — the agent's
-// uncommitted edits in that worktree are the live scene a later
-// commit-dirty/ship path needs. Existence is verified, the recorded
-// baseline is carried forward, nothing else is touched.
+// time AND has a baseline recorded in the prior capsule.json (a
+// same-generation husk from a crashed Start, or an in-place materialize
+// rerun) is NEVER fetched, reset or re-cloned — the agent's uncommitted
+// edits in that worktree are the live scene a later commit-dirty/ship
+// path needs. A directory with NO recorded baseline is the crash window
+// between the clone and the capsule.json write: an untouched fresh
+// clone, which takes the carrier restore like any new clone.
 //
 // Durability contract (polyforge#108): a repos/<name> that does NOT
 // exist at materialize time — the bounded-fail re-claim shape, where
@@ -44,6 +46,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -59,36 +62,54 @@ import (
 // error — the caller closes the attempt as blocked, never a daemon crash.
 func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string, error) {
 	out := map[string]string{}
-	if len(j.repos) == 0 {
-		return out, nil
-	}
 	// The prior capsule.json (same-generation husk) is read BEFORE this
 	// materialize overwrites it: recorded baselines are claim-time facts
 	// and must survive a re-materialize even if the agent has since
 	// committed (moved HEAD).
 	prior := readCapsuleRepos(j.capsuleDir)
-	for _, pr := range j.repos {
+	// The required set is the claim inventory UNION the repos the prior
+	// capsule.json recorded: an inventory that went empty (or lost a
+	// repo) must not silently drop a task repo the WI already works in.
+	repos := append([]api.ProjectRepo(nil), j.repos...)
+	inInventory := map[string]bool{}
+	for _, pr := range repos {
+		inInventory[pr.Name] = true
+	}
+	var recorded []string
+	for name := range prior {
+		if !inInventory[name] {
+			recorded = append(recorded, name)
+		}
+	}
+	sort.Strings(recorded)
+	for _, name := range recorded {
+		repos = append(repos, api.ProjectRepo{Name: name})
+	}
+	for _, pr := range repos {
 		if !safeRepoName(pr.Name) {
 			return nil, repoCloneErr(j.wi, pr, "repo name %q is not a single safe path element", pr.Name)
 		}
 		dir := filepath.Join(j.capsuleDir, capsule.DirRepos, pr.Name)
-		if dirExists(dir) {
-			// Resume/recovery shape: presence is the check; the baseline
-			// is the recorded one, falling back to the worktree's HEAD
-			// only when no prior record exists (a torn first Start).
+		exists := dirExists(dir)
+		if exists {
+			// Resume/recovery shape: presence is the check; a recorded
+			// baseline is carried forward untouched.
 			if sha, ok := prior[pr.Name]; ok && sha != "" {
 				out[pr.Name] = sha
 				continue
 			}
-			sha, err := gitHeadSHA(ctx, dir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: HEAD unreadable in existing worktree: %v\n", j.wi, pr.Name, err)
+			// No recorded baseline: the previous Start died between the
+			// clone and the capsule.json write, so the directory is an
+			// untouched fresh clone (the agent never ran). It takes the
+			// same carrier restore as a new clone, instead of adopting
+			// the origin's HEAD as the baseline.
+		} else {
+			if pr.URL == "" {
+				return nil, repoCloneErr(j.wi, pr, "recorded in the prior capsule.json but absent from the project inventory and missing on disk: no URL to clone from")
 			}
-			out[pr.Name] = sha
-			continue
-		}
-		if err := gitClone(ctx, pr.URL, dir); err != nil {
-			return nil, repoCloneErr(j.wi, pr, "clone failed: %v", err)
+			if err := gitClone(ctx, pr.URL, dir); err != nil {
+				return nil, repoCloneErr(j.wi, pr, "clone failed: %v", err)
+			}
 		}
 		// A clone of a history-less remote succeeds with no HEAD: the
 		// baseline is then empty, which is honest — there is no commit
@@ -99,13 +120,11 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		}
 		// Durability lane (polyforge#108): when a previous session
 		// published its head to the WI's carrier ref, the fresh origin
-		// clone is moved there — the recorded baseline then names the
-		// scene the workflow actually left behind, not the origin's
-		// default branch. ("", nil) = no carrier (first claim). A carrier
-		// that exists but cannot be restored FAILS the claim (typed
-		// DAEMON-507, the WI closes blocked, the carrier stays safe on
-		// aihub) and the half-restored clone is removed so a retry
-		// cannot mistake it for a recovery husk.
+		// clone is moved there. ("", nil) = no carrier (first claim). A
+		// carrier that exists but cannot be restored FAILS the claim
+		// (typed DAEMON-507, the WI closes blocked, the carrier stays
+		// safe on aihub) and the half-restored clone is removed so a
+		// retry re-clones it cleanly.
 		restored, rerr := r.restoreTaskRepoState(ctx, j, pr.Name, dir)
 		if rerr != nil {
 			_ = os.RemoveAll(dir)
@@ -246,4 +265,14 @@ func readCapsuleRepos(capsuleDir string) map[string]string {
 		return nil
 	}
 	return idn.Repos
+}
+
+// gitEventSink binds the durable EventTap to one WI for the gitops lanes
+// (task_ref_diverged); nil when no tap is configured.
+func (r *Runtime) gitEventSink(wi string) func(kind string, body map[string]any) {
+	tap := r.cfg.EventTap
+	if tap == nil {
+		return nil
+	}
+	return func(kind string, body map[string]any) { tap(wi, kind, body) }
 }
