@@ -395,6 +395,7 @@ func New(cfg Config) (*Daemon, error) {
 	}
 	d.rt = rt
 	d.obs = obs
+	d.q.persist = d.persistQueue
 
 	// The persisted mode/concurrency bookkeeping (the daemon's OWN state
 	// file; jobs/attempts bookkeeping is Runtime's state.json and is
@@ -520,6 +521,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// a single request: a client that reaches the daemon must see a
 	// reconciled runtime, never a seeded record's pre-reconciliation
 	// snapshot (stale agent pids, superseded lineages).
+	prevShutdown := d.takeLastShutdown()
 	if err := d.rt.Restart(d.runCtx); err != nil {
 		// Startup abort (#103): the runtime could not be reconciled — for
 		// a recorded mid-flight work item whose capsule is missing at the
@@ -543,6 +545,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("restart reconciliation failed: %w", err)
 	}
 	d.reattachRecovered()
+	// v2 §5/§6: replay the persisted submit queue (after the B1 claiming
+	// journal replay inside Restart, so a WI is never claimed twice) and
+	// tell every recovered/parked WI the daemon restarted.
+	d.replaySubmitQueue()
+	d.announceRestart(prevShutdown)
 
 	serveErr, serving := d.startFace(lst)
 	if !serving {
@@ -861,8 +868,8 @@ func (d *Daemon) dispatch() {
 		// Finding 2 (v1.5 review): a RETAINED paused job holds no agent
 		// and no writer — it must not pin a concurrency slot (four
 		// operator-paused jobs would otherwise starve the whole daemon).
-		if ji.State == runtime.StatePaused {
-			continue
+		if ji.State == runtime.StatePaused || ji.RepairPending != "" {
+			continue // a repair_pending park holds no agent and no slot either
 		}
 		live[ji.WorkItem] = true
 	}
@@ -873,11 +880,21 @@ func (d *Daemon) dispatch() {
 			return
 		}
 		d.rt.NoteOrigin(e.WorkItemID, e.Origin)
-		if err := d.rt.StartIntent(d.runCtx, e.WorkItemID, e.Intent); err != nil {
+		err := d.rt.StartIntent(d.runCtx, e.WorkItemID, e.Intent)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)
+			// The submit was answered `accepted`: record the refusal as a
+			// durable event on the WI so watchers can surface it (v2 §5).
+			d.recordSubmitRejected(*e, err)
+		} else {
+			d.q.MarkRunning(e.WorkItemID)
+		}
+		if serr := d.q.Settle(e.WorkItemID); serr != nil {
+			fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, serr)
+		}
+		if err != nil {
 			continue // slot stays free; the next pending entry backfills
 		}
-		d.q.MarkRunning(e.WorkItemID)
 	}
 }
 
@@ -928,7 +945,9 @@ func (d *Daemon) fetchDrainWave() {
 		if d.q.IsRunning(it.ID) || d.q.IsPending(it.ID) {
 			continue
 		}
-		d.q.Enqueue(qEntry{WorkItemID: it.ID, Priority: it.Priority, Intent: "claim", Origin: runtime.Origin{Kind: runtime.OriginAuto}})
+		if err := d.q.Enqueue(qEntry{WorkItemID: it.ID, Priority: it.Priority, Intent: "claim", Origin: runtime.Origin{Kind: runtime.OriginAuto}}); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: drain enqueue %s: queue persist failed: %v\n", it.ID, err)
+		}
 	}
 }
 

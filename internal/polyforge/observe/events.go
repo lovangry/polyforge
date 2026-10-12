@@ -93,6 +93,26 @@ const (
 	// session-verify could not reach aihub. Log-only by contract — no
 	// action is ever taken on a transport error; the retry is bounded.
 	EvSessionVerifyFailed = "session_verify_failed"
+	// EvSubmitRejected (v2 §5): an accepted submit's StartIntent failed at
+	// dispatch (live or replayed after a restart); body carries the error,
+	// intent and the entry's submitted_at/origin. The submit was answered
+	// `accepted` earlier, so this durable event is how watchers learn it
+	// did not start.
+	EvSubmitRejected = "submit_rejected"
+	// EvSubmitDropped (v2 §5): a persisted submit was NOT replayed after a
+	// restart (takeover/resume intent, or aihub no longer shows the WI
+	// queued, or the claiming journal already owns it); body names why.
+	EvSubmitDropped = "submit_dropped"
+	// EvCapsuleMissing / EvProjectUnmapped (v2 §6): the WI was parked
+	// repair_pending at restart; body names the path/project and the fix.
+	// Emitted by the runtime (runtime.RepairCapsuleMissing/Unmapped carry
+	// the same strings).
+	EvCapsuleMissing  = "capsule_missing"
+	EvProjectUnmapped = "project_unmapped"
+	// EvDaemonRestarted (v2 §6): written into every WI the daemon
+	// recovered or parked after restart reconciliation; body carries the
+	// previous shutdown cause when known (#110) else "unknown".
+	EvDaemonRestarted = "daemon_restarted"
 )
 
 // Infra-incident payload kinds (04 §5.1a tenth-event family).

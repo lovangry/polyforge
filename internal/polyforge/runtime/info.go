@@ -44,6 +44,9 @@ type JobInfo struct {
 	AgentPID       int
 	AgentStartedAt string
 	Origin         *Origin
+	// RepairPending is the v2 §6 parked-for-repair reason kind
+	// ("capsule_missing" | "project_unmapped"); "" = not parked.
+	RepairPending string
 }
 
 // Info returns the snapshot of one job; ok=false when the work item has
@@ -99,6 +102,7 @@ func (j *job) info() JobInfo {
 		AgentPID:           j.agentPID,
 		AgentStartedAt:     j.agentStartedAt,
 		Origin:             j.origin,
+		RepairPending:      j.repairPending,
 	}
 }
 

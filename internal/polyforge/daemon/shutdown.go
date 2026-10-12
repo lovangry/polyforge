@@ -162,6 +162,7 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	// the daemon's stderr: the sink a post-mortem of the process
 	// window reads.
 	fmt.Fprintf(os.Stderr, "daemon: shutdown: cause=%s\n", cause)
+	d.recordLastShutdown(cause)
 
 	// Step 1: the latch, before any other action.
 	d.modes.SetShuttingDown()

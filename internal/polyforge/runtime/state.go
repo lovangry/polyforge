@@ -171,6 +171,9 @@ type jobRecord struct {
 	// records written before it existed: such a job loads fine and is
 	// treated as owned by the WI reporter by later consumers.
 	Origin *Origin `json:"origin,omitempty"`
+	// RepairPending is the v2 §6 local pending-repair mark (see
+	// job.repairPending): "capsule_missing" | "project_unmapped" | "".
+	RepairPending string `json:"repair_pending,omitempty"`
 }
 
 // Origin kinds.
@@ -214,6 +217,7 @@ func (j *job) record() *jobRecord {
 		AgentPID:           j.agentPID,
 		AgentStart:         j.agentStartedAt,
 		Origin:             j.origin,
+		RepairPending:      j.repairPending,
 	}
 }
 
@@ -258,6 +262,7 @@ func jobFromRecord(rec *jobRecord) *job {
 		agentPID:       rec.AgentPID,
 		agentStartedAt: rec.AgentStart,
 		origin:         rec.Origin,
+		repairPending:  rec.RepairPending,
 	}
 }
 

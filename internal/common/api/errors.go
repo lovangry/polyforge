@@ -125,6 +125,10 @@ const (
 	// published state cannot be determined), so a local init — which
 	// would restart the workflow from step 1 — is refused.
 	ErrDaemonCapsuleClone = "DAEMON-516"
+	// ErrDaemonRepairPending is the v2 §6 "continue" refusal: the work
+	// item is parked repair_pending and its capsule directory is still
+	// missing; the detail names the path to restore. The session is kept.
+	ErrDaemonRepairPending = "DAEMON-517"
 
 	// CAP — capsule lifecycle errors (03 §5.3)
 	ErrCapBadInput      = "CAP-400"
