@@ -218,7 +218,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		// The journal is the one ledger every derivation appends to;
 		// seeding past its max restores the fence.
 		j.mu.Lock()
-		if m := maxSpawnNFromJournal(j.capsuleDir); m > j.spawnN {
+		if m := spawnJournalMaxN(j.capsuleDir); m > j.spawnN {
 			j.spawnN = m
 		}
 		j.spawnN++
