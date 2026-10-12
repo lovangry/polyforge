@@ -50,7 +50,7 @@ type Command struct {
 	Summary string
 	Usage   string
 	// Group is the help group the verb is listed under; "" = dispatchable
-	// but not surfaced (the one-shot migration verbs, #103 AC16).
+	// but not surfaced.
 	Group string
 	// NoConfigLoad marks verbs that load the config THEMSELVES because
 	// an unloadable config is the verb's subject, not an early exit
@@ -68,8 +68,7 @@ type Command struct {
 // `cancel` = abandon, v2-converge §7) + 8 on the daemon UDS face (submit, observe,
 // answer, batch-confirm, pause, resume, wrap, ops) — then ship (the wrap→git
 // delivery bridge, daemon face), then the management face M1–M5, then the
-// two migrations (dispatchable but never surfaced on the help face — #103
-// AC16), then the machine health face (doctor, #113), then the daemon
+// machine health face (doctor, #113), then the daemon
 // placeholder (help-only: cmd/pf/main.go intercepts the real launch).
 var commands = []*Command{
 	cmdFile,
@@ -96,8 +95,6 @@ var commands = []*Command{
 	cmdProjects,
 	cmdBackup,
 	cmdRotateSecret,
-	cmdMigrateMemories,
-	cmdMigrateWorkItems,
 	cmdDoctor,
 	cmdDaemon,
 }
@@ -288,7 +285,7 @@ func fsHasFlags(fs *flag.FlagSet) bool {
 }
 
 // Help groups (Command.Group), in print order. A verb with an empty Group
-// stays dispatchable but is not listed (the migration verbs, #103 AC16).
+// stays dispatchable but is not listed.
 const (
 	GroupData     = "data"
 	GroupExec     = "exec"

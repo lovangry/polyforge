@@ -122,7 +122,6 @@ func (s *Server) routes() {
 	m.HandleFunc("PATCH /api/v1/projects/{id}", s.auth(s.hPatchProject))
 	m.HandleFunc("POST /api/v1/projects/{id}/rotate-identifier", s.authAdmin(s.hRotateIdentifier))
 	m.HandleFunc("POST /api/v1/admin/backup", s.authAdmin(s.hBackup))
-	m.HandleFunc("POST /api/v1/admin/import-work-item", s.authAdmin(s.hImportWorkItem))
 	m.HandleFunc("POST /api/v1/service/rotate-secret", s.authAdmin(s.hRotateSecret))
 
 	// Git proxy (own auth: session-scoped Basic credential).
@@ -1485,25 +1484,6 @@ func firstRunes(s string, n int) string {
 }
 
 func (s *Server) hRebuildIndex(w http.ResponseWriter, r *http.Request, idn *identity) {
-	// ?project=<id-or-name> scopes the reconcile to one project (seq-fix
-	// lane 3a/3c): the rebuild touches only that project's authority tree
-	// and answers its reindexed count — the migrate-memories path pairs
-	// the scope with the placed tree its count step compares against.
-	// Absent: the full rebuild (server boot reconcile semantics).
-	if project := r.URL.Query().Get("project"); project != "" {
-		projectID, err := s.projectIDOf(project)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		n, err := s.Mems.RebuildIndexProject(projectID)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"reindexed": n, "project": projectID})
-		return
-	}
 	n, err := s.Mems.RebuildIndex()
 	if err != nil {
 		writeErr(w, err)
@@ -1703,33 +1683,6 @@ func (s *Server) hBackup(w http.ResponseWriter, r *http.Request, idn *identity) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"backup": name})
-}
-
-// hImportWorkItem is the migration-only record import (admin face; see
-// core/import.go for the face constraints). A same-id re-import answers
-// 200 with outcome=skipped-existing — idempotent re-runs count skips, they
-// do not error. With overwrite:true a same-id record is rewritten in
-// place and the answer carries outcome=overwritten.
-func (s *Server) hImportWorkItem(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req core.ImportRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	res, err := s.WIs.Import(req)
-	if err != nil {
-		if core.IsImportAlreadyExists(err) {
-			writeJSON(w, http.StatusOK, &core.ImportResult{Outcome: core.ImportSkipped})
-			return
-		}
-		writeErr(w, err)
-		return
-	}
-	if res.Outcome == core.ImportOverwritten {
-		writeJSON(w, http.StatusOK, res) // a rewrite, not a creation
-		return
-	}
-	writeJSON(w, http.StatusCreated, res)
 }
 
 func (s *Server) hRotateSecret(w http.ResponseWriter, r *http.Request, idn *identity) {

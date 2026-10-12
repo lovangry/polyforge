@@ -883,7 +883,6 @@ func TestV3HistoricalRegistersAndV0Untouched(t *testing.T) {
 
 	// The v0/ reference tree was dropped from the working tree (it lives
 	// in git history only): no directory and no tracked file remains.
-	// (tools/v0-export is a kept root-module package and stays.)
 	if _, err := os.Stat(filepath.Join(root, "v0")); !os.IsNotExist(err) {
 		t.Fatalf("v0/ must be absent from the working tree (stat err: %v)", err)
 	}

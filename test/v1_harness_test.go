@@ -73,10 +73,10 @@ func v1Bins(t *testing.T) string {
 			return
 		}
 		build := exec.Command("go", "build", "-o", dir+"/",
-			"./cmd/aihub", "./cmd/pf", "./test/fakepi", "./tools/v0-export")
+			"./cmd/aihub", "./cmd/pf", "./test/fakepi")
 		if os.Getenv("PFV1_COVER_BINS") != "" {
 			build = exec.Command("go", "build", "-cover", "-coverpkg=./...",
-				"-o", dir+"/", "./cmd/aihub", "./cmd/pf", "./test/fakepi", "./tools/v0-export")
+				"-o", dir+"/", "./cmd/aihub", "./cmd/pf", "./test/fakepi")
 			covDir := filepath.Join(dir, "covdata")
 			if err := os.MkdirAll(covDir, 0o755); err != nil {
 				v1BinErr = err

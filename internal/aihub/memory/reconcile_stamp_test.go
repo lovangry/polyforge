@@ -9,8 +9,7 @@ package memory
 //     content, every FTS row rewritten, every row stamped — and be
 //     incremental from the next pass on.
 //   - A touched-but-unmodified authority file (fresh mtime, identical
-//     bytes — what migrate-memories' re-placement does on every run, and
-//     what its verify step's rebuilt==tree count depends on) is
+//     bytes — a re-placement of an unchanged file) is
 //     re-verified by content, its stamp refreshed, and it IS counted as
 //     brought current; no index write is needed and retrieval is
 //     unchanged.

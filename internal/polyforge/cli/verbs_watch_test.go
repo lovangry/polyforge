@@ -271,12 +271,12 @@ func TestHelpGroupsAreExplicitMetadata(t *testing.T) {
 	if strings.Contains(help, "watch-probe") {
 		t.Error("watch-probe is gone")
 	}
-	for _, hidden := range []string{"migrate-memories", "migrate-work-items"} {
-		if strings.Contains(help, hidden) {
-			t.Errorf("%s must stay unsurfaced", hidden)
+	for _, gone := range []string{"migrate-memories", "migrate-work-items"} {
+		if strings.Contains(help, gone) {
+			t.Errorf("%s is deleted and must not be listed", gone)
 		}
-		if lookupCommand(hidden) == nil {
-			t.Errorf("%s must stay dispatchable", hidden)
+		if lookupCommand(gone) != nil {
+			t.Errorf("%s is deleted and must not dispatch", gone)
 		}
 	}
 	if !strings.Contains(help, "DEPRECATED") {
@@ -288,7 +288,7 @@ func TestHelpGroupsAreExplicitMetadata(t *testing.T) {
 		t.Errorf("watch/chat must be listed under the execution plane:\n%s", exec)
 	}
 	for _, c := range commands {
-		if c.Group == "" && !strings.HasPrefix(c.Name, "migrate-") {
+		if c.Group == "" {
 			t.Errorf("%s has no help group", c.Name)
 		}
 	}
