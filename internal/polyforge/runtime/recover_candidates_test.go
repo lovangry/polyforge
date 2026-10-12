@@ -118,10 +118,11 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	}
 }
 
-// A restart-RECONSTRUCTED job (nil snapshot — the jobFromRecord shape)
-// rehydrates the capsule.json audit and never re-reads the yaml: even a
-// yaml now on disk that pins another list, or is invalid, changes nothing.
-func TestRecoveryReconstructedJobRehydratesAuditNotYaml(t *testing.T) {
+// A restart-RECONSTRUCTED job rehydrates the claim snapshot from the
+// daemon-private state.json record and never re-reads the yaml or the
+// agent-writable capsule.json: an edited yaml, or a forged
+// effective_candidates in the capsule, changes nothing.
+func TestRecoveryReconstructedJobRehydratesRecordNotYamlOrCapsule(t *testing.T) {
 	setGitIdentity(t)
 	wfDir, _ := frontmatterBundle(t, w079Frontmatter)
 	sp := &scriptedSpawner{}
@@ -141,12 +142,13 @@ func TestRecoveryReconstructedJobRehydratesAuditNotYaml(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	j := seedJob(r, "wi_w079rec2")
-	audit := map[string][]string{
+	live := seedJob(r, "wi_w079rec2")
+	live.stepCandidates = map[string][]string{
 		"fix":   {"w79/aud-a", "w79/aud-b"},
 		"grill": {"prov/weak-a"},
 	}
-	blob, err := json.Marshal(map[string]any{"effective_candidates": audit})
+	j := jobFromRecord(live.record()) // the restart shape
+	blob, err := json.Marshal(map[string]any{"effective_candidates": map[string][]string{"fix": {"evil/x"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,12 +162,12 @@ func TestRecoveryReconstructedJobRehydratesAuditNotYaml(t *testing.T) {
 		writeWorkspaceYaml(t, ws, y)
 		got := r.effectiveCandidatesForRecovery(j)
 		if len(got["fix"]) != 2 || got["fix"][0] != "w79/aud-a" || got["fix"][1] != "w79/aud-b" {
-			t.Fatalf("rehydrated fix list %v, want the audit's [w79/aud-a w79/aud-b] regardless of the disk yaml %q", got["fix"], y)
+			t.Fatalf("rehydrated fix list %v, want the record's [w79/aud-a w79/aud-b] regardless of the disk yaml %q and the capsule.json forgery", got["fix"], y)
 		}
 	}
 }
 
-// An audit-less capsule (no yaml, no audit — the no-yaml claim shape)
+// A record without a snapshot (no yaml, no audit — the no-yaml claim shape)
 // rehydrates to nil: bundle-only behavior, exactly today's.
 func TestRecoveryAuditlessCapsuleRehydratesNil(t *testing.T) {
 	setGitIdentity(t)

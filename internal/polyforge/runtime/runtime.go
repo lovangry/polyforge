@@ -156,6 +156,8 @@ type Runtime struct {
 	// manualModels: `pf submit --models` lists noted by the daemon,
 	// consumed by the next Start of that work item (like origins).
 	manualModels map[string][]string
+	// manualMu guards the daemon-local manual-models.json (manualmodels.go).
+	manualMu sync.Mutex
 
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
@@ -247,7 +249,7 @@ type job struct {
 	// memory only; the durable snapshot is the capsule.json audit.
 	stepCandidates map[string][]string
 	// manualModels is the work item's `pf submit --models` list (top
-	// precedence level; audited in capsule.json manual_candidates).
+	// precedence level; kept daemon-side in manual-models.json).
 	manualModels []string
 
 	agent          AgentHandle
@@ -719,6 +721,16 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		// the server side). Refuse rather than adopt someone else's claim.
 		return fmt.Errorf("runtime: %s: claim answer fingerprint %s does not match this session (%s)", id, c.SessionFingerprint, fp)
 	}
+	// The manual `pf submit --models` list is daemon-local: a submit that
+	// carries one records it under the daemon's data dir; a re-claim
+	// (pf resume of a blocked WI) carries none and reads it back from
+	// there. Never from the capsule — the agent writes there and the
+	// capsule travels to other machines with the WI.
+	if len(manual) > 0 {
+		r.saveManualModels(id, manual)
+	} else {
+		manual = r.loadManualModels(id)
+	}
 	j := &job{
 		wi:                 id,
 		project:            resp.WorkItem.ProjectName,
@@ -765,14 +777,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 
 	if err := r.prepareCapsule(j); err != nil {
 		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
-	}
-	// A re-claim (pf resume of a blocked WI) carries no new --models: the
-	// capsule just restored from its remote still names the earlier list.
-	if len(j.manualModels) == 0 {
-		if m := readCapsuleManualModels(j.capsuleDir); len(m) > 0 {
-			j.manualModels = m
-			j.stepCandidates = workspace.ComposeCandidates(fm, wcfg, j.project, m)
-		}
 	}
 	if err := r.verifySealedHead(j, c); err != nil {
 		return r.abandonClaim(j, wi, err, err.Error())
@@ -1184,9 +1188,7 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 // rehydrates — when the workspace yaml governs this project's models. A
 // claim the yaml does not touch records nothing.
 func stampWorkspaceAudit(j *job, idn *capsule.Identity) {
-	if len(j.manualModels) > 0 {
-		idn.ManualCandidates = j.manualModels
-	} else if j.workspaceYaml == nil || j.workspaceYaml.Models[j.project] == nil {
+	if len(j.manualModels) == 0 && (j.workspaceYaml == nil || j.workspaceYaml.Models[j.project] == nil) {
 		return
 	}
 	if len(j.stepCandidates) > 0 {
@@ -1455,6 +1457,11 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		return err
 	}
 	r.dropJob(j)
+	if finalReason != protocol.FinishBlocked {
+		// terminal on this daemon: the manual --models list dies with it
+		// (a blocked end keeps it for the re-claim).
+		r.clearManualModels(j.wi)
+	}
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}

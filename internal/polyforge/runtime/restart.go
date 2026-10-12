@@ -482,6 +482,7 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 			}
 		case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
 			r.restartDrop(rec)
+			r.clearManualModels(rec.WorkItemID)
 		default:
 			// queued/blocked while our session still matches (a torn
 			// server state): treat as not-ours, drop the record.
@@ -498,6 +499,7 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 		// local residue and drop the record — no quarantine, the
 		// terminal scene is the preserved artifact.
 		r.restartDrop(rec)
+		r.clearManualModels(rec.WorkItemID)
 	case api.StatusBlocked:
 		// M2 storm guard: the bounded-fail verdict stands — no
 		// revival, no kill, no quarantine; the record is kept so the

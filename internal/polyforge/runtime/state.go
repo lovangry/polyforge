@@ -176,6 +176,10 @@ type jobRecord struct {
 	// sealing daemon pushed (the cross-daemon continue check, §7).
 	EndNote string `json:"end_note,omitempty"`
 	EndHead string `json:"end_head,omitempty"`
+	// StepCandidates is the claim-time per-step candidate snapshot a
+	// recovery re-derivation dispatches under; kept here (daemon-private)
+	// rather than read back from the agent-writable capsule.json.
+	StepCandidates map[string][]string `json:"step_candidates,omitempty"`
 }
 
 // Origin kinds.
@@ -220,6 +224,7 @@ func (j *job) record() *jobRecord {
 		Origin:             j.origin,
 		EndNote:            j.endNote,
 		EndHead:            j.endHead,
+		StepCandidates:     j.stepCandidates,
 	}
 }
 
@@ -258,6 +263,7 @@ func jobFromRecord(rec *jobRecord) *job {
 		origin:         rec.Origin,
 		endNote:        rec.EndNote,
 		endHead:        rec.EndHead,
+		stepCandidates: rec.StepCandidates,
 	}
 }
 

@@ -43,8 +43,8 @@ func TestS12ManualModelsBeatYamlAndAdvanceOnModelFailure(t *testing.T) {
 			t.Fatalf("step %s model %q, want %q (manual list; fix advanced once on the provider failure)", step, got, want)
 		}
 	}
-	if raw := w079CapsuleRaw(t, capDir); !strings.Contains(raw, "manual_candidates") || strings.Contains(raw, "s12-yaml") {
-		t.Fatalf("capsule audit must record the manual list and not the yaml's: %s", raw)
+	if raw := w079CapsuleRaw(t, capDir); strings.Contains(raw, "manual_candidates") || strings.Contains(raw, "s12-yaml") || !strings.Contains(raw, "s12-m1") {
+		t.Fatalf("capsule audit must carry the effective (manual) candidates only, never the manual field or the yaml's: %s", raw)
 	}
 
 	// an ordinary submit of another WI is unaffected: the yaml chain governs.
@@ -117,7 +117,8 @@ func TestS12ManualModelsSurviveDaemonRestart(t *testing.T) {
 
 // TestS12ManualModelsSurviveReclaim: a blocked WI (capsule lost while the
 // daemon was down) is re-claimed by `pf resume` without any --models; the
-// list comes back from the capsule chain restored from the hub.
+// list comes back from the daemon's own record (manual-models.json in its
+// data dir), never from the capsule chain.
 func TestS12ManualModelsSurviveReclaim(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s12 reclaim keeps manual models",
@@ -136,8 +137,7 @@ func TestS12ManualModelsSurviveReclaim(t *testing.T) {
 	waitStepStatus(t, d, wi, "verification", "in_progress", 90*time.Second)
 	capA := d.capsuleDir(wi)
 	waitUntil(t, 60*time.Second, "the hub chain never carried capsule.json and the fix step done", func() bool {
-		if !inst.bareHasPath(t, wi, "capsule.json") || !inst.bareHasPath(t, wi, "runtime-state/execution.json") ||
-			!strings.Contains(inst.bareFileAtMain(t, wi, "capsule.json"), "manual_candidates") {
+		if !inst.bareHasPath(t, wi, "capsule.json") || !inst.bareHasPath(t, wi, "runtime-state/execution.json") {
 			return false
 		}
 		var x executionView
@@ -147,6 +147,13 @@ func TestS12ManualModelsSurviveReclaim(t *testing.T) {
 		fix := x.Steps["fix"]
 		return fix != nil && fix.Status == "done"
 	})
+
+	if strings.Contains(inst.bareFileAtMain(t, wi, "capsule.json"), "manual_candidates") {
+		t.Fatal("the published capsule must not carry the manual list")
+	}
+	if raw, err := os.ReadFile(filepath.Join(d.dataDir, "manual-models.json")); err != nil || !strings.Contains(string(raw), "s12-r1") {
+		t.Fatalf("the daemon-side manual record is missing: %v %s", err, raw)
+	}
 
 	d.crash()
 	if err := os.RemoveAll(capA); err != nil {

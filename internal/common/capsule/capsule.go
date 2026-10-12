@@ -54,10 +54,6 @@ type Identity struct {
 	// list governs and means no switchable chain). Doubles as the
 	// claim-time SNAPSHOT the recovery path rehydrates from.
 	EffectiveCandidates map[string][]string `json:"effective_candidates,omitempty"`
-	// ManualCandidates is the work item's `pf submit --models` list (the
-	// top precedence level, applied to every step); a re-claim of the
-	// capsule keeps using it.
-	ManualCandidates []string `json:"manual_candidates,omitempty"`
 }
 
 // WorkItemDoc is runtime-state/work-item.json: the daemon-materialized

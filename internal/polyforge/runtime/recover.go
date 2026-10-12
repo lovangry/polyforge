@@ -272,48 +272,15 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 
 // effectiveCandidatesForRecovery answers the per-step effective
 // candidate lists a recovery re-derivation dispatches under
-// (polyforge#79): a LIVE job carries its claim-time snapshot; a
-// restart-reconstructed job rehydrates the capsule.json audit the claim
-// wrote (an audit-less capsule answers nil — bundle-only behavior). The
-// yaml is never re-read here: an edit governs the NEXT claim, never an
+// (polyforge#79): the job's claim-time snapshot — live, or rehydrated
+// from the daemon-private state.json record (never from capsule.json,
+// which the agent can write). nil means bundle-only behavior. The yaml
+// is never re-read here: an edit governs the NEXT claim, never an
 // in-flight job.
 func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
 	j.mu.Lock()
-	snap := j.stepCandidates
-	j.mu.Unlock()
-	if snap != nil {
-		return snap
-	}
-	return readCapsuleEffectiveCandidates(j.capsuleDir)
-}
-
-// readCapsuleEffectiveCandidates reads the effective_candidates audit
-// of the capsule.json on disk (nil when absent — an audit-less capsule
-// rehydrates to nil, bundle-only behavior).
-func readCapsuleEffectiveCandidates(capsuleDir string) map[string][]string {
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.CapsuleJSON))
-	if err != nil {
-		return nil
-	}
-	var idn capsule.Identity
-	if json.Unmarshal(raw, &idn) != nil {
-		return nil
-	}
-	return idn.EffectiveCandidates
-}
-
-// readCapsuleManualModels reads the manual_candidates audit of the
-// capsule.json on disk (nil when absent).
-func readCapsuleManualModels(capsuleDir string) []string {
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.CapsuleJSON))
-	if err != nil {
-		return nil
-	}
-	var idn capsule.Identity
-	if json.Unmarshal(raw, &idn) != nil {
-		return nil
-	}
-	return idn.ManualCandidates
+	defer j.mu.Unlock()
+	return j.stepCandidates
 }
 
 // recovered finishes a successful re-derivation. A successful recovery
