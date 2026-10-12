@@ -413,3 +413,43 @@ func TestRecoverDeadOldAgentWithOrphans(t *testing.T) {
 		_ = h.Terminate(2e9)
 	}
 }
+
+// TestRecoverStormLedgerExemptsDaemonRestart: restarts and attaches are
+// lifecycle events, not failures (v2-converge §2.3) — three of them inside
+// the stability window leave the WI running and the ledger untouched, while
+// a real storm still bounded-fails afterwards.
+func TestRecoverStormLedgerExemptsDaemonRestart(t *testing.T) {
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, newFakeHub(), sp)
+	r.cfg.RecoveryStabilityWindow = 60 * time.Second
+	j := seedJob(r, "wi_restartloop")
+	installOldAgent(t, sp, j)
+
+	for i, cause := range []string{causeDaemonRestart, causeOperatorAttach, causeDaemonRestart, causeDaemonRestart} {
+		r.recoverOp(context.Background(), j, cause, "")
+		if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+			t.Fatalf("restart-class recovery %d must relaunch, got %+v", i+1, msg)
+		}
+	}
+	j.mu.Lock()
+	storm, last := j.stormFails, j.lastRecoveryAt
+	j.mu.Unlock()
+	if storm != 0 || !last.IsZero() {
+		t.Fatalf("restart causes must not touch the storm ledger, got storm=%d last=%v", storm, last)
+	}
+	// real refires are still bounded
+	for i := 0; i < 2; i++ {
+		r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+		if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+			t.Fatalf("rapid recovery %d must relaunch, got %+v", i+1, msg)
+		}
+	}
+	r.recoverOp(context.Background(), j, causeDaemonRestart, "") // must not reset the storm
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+		t.Fatalf("got %+v", msg)
+	}
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
+		t.Fatalf("a real storm must still bounded-fail after restarts, got %+v", msg)
+	}
+}

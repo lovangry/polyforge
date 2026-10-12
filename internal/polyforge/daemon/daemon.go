@@ -360,7 +360,7 @@ func New(cfg Config) (*Daemon, error) {
 		cfg:      cfg,
 		hub:      cfg.Hub,
 		modes:    NewModeCtl(),
-		q:        NewJobQueue(cfg.MaxConcurrent),
+		q:        NewJobQueue(cfg.MaxConcurrent, func() map[string]bool { return d.occupiedSlots() }),
 		rtMsgs:   make(chan protocol.RTMsg, 64),
 		obMsgs:   make(chan protocol.OBMsg, 64),
 		attachCh: make(chan observe.Attach, 64),
@@ -839,25 +839,28 @@ func (l driverEventLog) Append(wi, kind string, body any) error {
 // ---------------------------------------------------------------------------
 // Dispatcher (04 §6.1d backfill) and auto-pull loop (04 §6.1c).
 
-// dispatch starts pending jobs into free slots, priority-desc then FIFO,
-// and reconciles the queue's running marks against the runtime's live
-// job set first (a job sealed by wrap/pause frees its
-// slot without telling the queue).
+// occupiedSlots is the set of WIs holding a concurrency slot: the
+// runtime's live jobs, whoever started them (dispatch, restart recovery,
+// resume-blocked, repair). Finding 2 (v1.5 review): a RETAINED paused job
+// holds no agent and no writer — it must not pin a slot (four
+// operator-paused jobs would otherwise starve the whole daemon); a
+// repair_pending park holds no agent and no slot either.
+func (d *Daemon) occupiedSlots() map[string]bool {
+	live := map[string]bool{}
+	for _, ji := range d.rt.List() {
+		if ji.State == runtime.StatePaused || ji.RepairPending != "" {
+			continue
+		}
+		live[ji.WorkItem] = true
+	}
+	return live
+}
+
+// dispatch starts pending jobs into free slots, priority-desc then FIFO.
 func (d *Daemon) dispatch() {
 	if d.modes.ShuttingDown() {
 		return
 	}
-	live := map[string]bool{}
-	for _, ji := range d.rt.List() {
-		// Finding 2 (v1.5 review): a RETAINED paused job holds no agent
-		// and no writer — it must not pin a concurrency slot (four
-		// operator-paused jobs would otherwise starve the whole daemon).
-		if ji.State == runtime.StatePaused || ji.RepairPending != "" {
-			continue // a repair_pending park holds no agent and no slot either
-		}
-		live[ji.WorkItem] = true
-	}
-	d.q.Reconcile(live)
 	for {
 		e := d.q.Take()
 		if e == nil {
@@ -870,8 +873,6 @@ func (d *Daemon) dispatch() {
 			// The submit was answered `accepted`: record the refusal as a
 			// durable event on the WI so watchers can surface it (v2 §5).
 			d.recordSubmitRejected(*e, err)
-		} else {
-			d.q.MarkRunning(e.WorkItemID)
 		}
 		if serr := d.q.Settle(e.WorkItemID); serr != nil {
 			fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, serr)

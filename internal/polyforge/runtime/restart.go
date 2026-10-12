@@ -248,7 +248,7 @@ func (r *Runtime) restartAttach(ctx context.Context, rec *jobRecord) error {
 	}); err != nil {
 		return err
 	}
-	return r.restartResume(ctx, rec, j, "operator daemon shutdown", "session attach after a graceful shutdown")
+	return r.restartResume(ctx, rec, j, causeOperatorAttach, "session attach after a graceful shutdown")
 }
 
 // restartDrop handles aihub's terminal verdicts: no revival. A local
@@ -280,7 +280,7 @@ func (r *Runtime) restartRunning(ctx context.Context, rec *jobRecord) error {
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no seeded record", rec.WorkItemID)
 	}
-	return r.restartResume(ctx, rec, j, "daemon_restart", "daemon restart (crash mid-run)")
+	return r.restartResume(ctx, rec, j, causeDaemonRestart, "daemon restart (crash mid-run)")
 }
 
 // isTerminalStopReason reports whether a persisted stop_reason is a
@@ -684,3 +684,9 @@ func (r *Runtime) AbandonRepair(wi, status, note string) (held bool, err error) 
 	}
 	return true, nil
 }
+
+// Recovery causes that are lifecycle events, exempt from the storm ledger.
+const (
+	causeDaemonRestart  = "daemon_restart"
+	causeOperatorAttach = "operator daemon shutdown"
+)

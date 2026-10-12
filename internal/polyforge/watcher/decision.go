@@ -60,6 +60,10 @@ var statusRules = map[string]struct {
 	"failed_gate":             {Rule{Class: "failed", Phrase: "the workflow failed"}, true},
 	"failed_rewind_exhausted": {Rule{Class: "failed", Phrase: "the workflow failed"}, true},
 	"blocked":                 {Rule{Class: "blocked", Phrase: "the workflow is blocked and needs a human"}, false},
+	// closed by hand (aihub status; execution.json is not rewritten by a
+	// manual close): canceled is final, paused can be resumed.
+	"canceled": {Rule{Class: "canceled", Phrase: "the work item was canceled"}, true},
+	"paused":   {Rule{Class: "paused", Phrase: "the work item was paused"}, false},
 }
 
 // ClassifyEvent looks an event kind up in the decision table.
@@ -164,6 +168,13 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 			fire(sr.Class, sr.Rule)
 			res.Done = sr.Final
 		}
+	}
+	// A manual close leaves execution.json at `running`: when the daemon
+	// holds no live job, the hub status (wrapped / failed / canceled /
+	// paused / blocked) decides, and overrides a stale execution.json.
+	if sr, ok := statusRules[snap.HubStatus]; ok && snap.HubStatus != "" {
+		fire(sr.Class, sr.Rule)
+		res.Done = sr.Final
 	}
 	if j := snap.Job; j != nil {
 		if pendingID == "" && j.QuestionID != "" && (j.Status == protocol.JobNeedsInput) {

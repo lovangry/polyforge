@@ -124,21 +124,28 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// (the previous relaunch survived — a fresh episode). The counter is
 	// deliberately separate from recoverFails: ladder-internal retries
 	// and their reset-on-success semantics (§三) are unchanged.
-	now := time.Now()
-	j.mu.Lock()
-	if !j.lastRecoveryAt.IsZero() && now.Sub(j.lastRecoveryAt) < r.recoveryStabilityWindow() {
-		j.stormFails++
-	} else {
-		j.stormFails = 0
-	}
-	j.lastRecoveryAt = now
-	storm := j.stormFails
-	j.mu.Unlock()
-	if storm >= r.cfg.MaxRecoveries {
-		r.boundedFail(ctx, j, fmt.Sprintf(
-			"recovery storm: %d recoveries re-fired inside the %.0fs stability window (latest cause %q) — the relaunch is dying faster than it can stabilize",
-			storm, r.recoveryStabilityWindow().Seconds(), cause))
-		return
+	//
+	// A daemon restart / operator attach is NOT a failure (v2-converge
+	// §2.3): those causes are exempt from the ledger entirely — neither
+	// counted nor resetting a real storm — so a deploy retry or a
+	// systemd restart loop cannot bounded-fail every running WI.
+	if !restartExemptCause(cause) {
+		now := time.Now()
+		j.mu.Lock()
+		if !j.lastRecoveryAt.IsZero() && now.Sub(j.lastRecoveryAt) < r.recoveryStabilityWindow() {
+			j.stormFails++
+		} else {
+			j.stormFails = 0
+		}
+		j.lastRecoveryAt = now
+		storm := j.stormFails
+		j.mu.Unlock()
+		if storm >= r.cfg.MaxRecoveries {
+			r.boundedFail(ctx, j, fmt.Sprintf(
+				"recovery storm: %d recoveries re-fired inside the %.0fs stability window (latest cause %q) — the relaunch is dying faster than it can stabilize",
+				storm, r.recoveryStabilityWindow().Seconds(), cause))
+			return
+		}
 	}
 	// Kill the old tree first (§一 Recover): six layers, no writer may
 	// survive next to the re-derivation.
@@ -475,4 +482,11 @@ func (r *Runtime) killAgentTree(j *job) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: agent tree cleanup incomplete: %v (warnings: %v)\n", j.wi, err, rep.Warnings)
 	}
+}
+
+// restartExemptCause reports whether a recovery cause is a daemon
+// restart or an operator attach — a process-lifecycle event, not a
+// failure, so the storm ledger ignores it.
+func restartExemptCause(cause string) bool {
+	return cause == causeDaemonRestart || cause == causeOperatorAttach
 }
