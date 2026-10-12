@@ -28,7 +28,6 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
-	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
@@ -84,30 +83,6 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	switch capsuleWorkflowStatus(j.capsuleDir) {
 	case capsule.WorkflowStatusCompleted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)
-		// Release-intent wrap gate (polyforge#123, P1a — the driver-lane
-		// face): the driver era has no flush(wrap) call, so THIS close is
-		// where the seal-time gate must refuse. A workflow that completed
-		// while releaseable code changed with no covering entry in
-		// artifacts/release-intent.json is NOT wrapped: the typed
-		// DAEMON-400 RELEASE_INTENT_MISSING goes to the daemon log and the
-		// events tap, the scene is sealed exactly like the blocked branch
-		// below (the fragment and the changed worktree stay on disk for
-		// the fix), and the WI parks blocked for its owner — never
-		// wrapped. The flush lane's twin gate lives in observe's
-		// flushWrap; both run the same predicate.
-		if missing := observe.ReleaseIntentMissingFor(j.capsuleDir, j.wi); len(missing) > 0 {
-			refusal := "DAEMON-400 RELEASE_INTENT_MISSING: " + observe.ReleaseIntentRefusal(j.wi, missing)
-			fmt.Fprintf(os.Stderr, "runtime: %s: %s\n", j.wi, refusal)
-			if r.cfg.EventTap != nil {
-				r.cfg.EventTap(j.wi, "wrap_intent_refused", map[string]any{
-					"error": refusal, "missing": missing,
-				})
-			}
-			r.killAgentTree(j)
-			commitDirty(r, j)
-			r.boundedFail(ctx, j, refusal)
-			return
-		}
 		// sealedByFlush: the C3 engine already committed and pushed the
 		// terminal execution.json version (every transition bumps Version
 		// and publishes); the final push here would only race it.

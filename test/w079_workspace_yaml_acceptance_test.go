@@ -1159,11 +1159,8 @@ func TestW079RecoveryContractForLocallySourcedClones(t *testing.T) {
 		t.Fatalf("claim-time baseline %q, want the local HEAD %s", id.Repos["w079src"], origHead)
 	}
 	// The agent's uncommitted edits in the worktree are the live scene.
-	// The witness is a docs-path file on purpose (polyforge#123): the
-	// seal-time release-intent gate counts untracked non-docs repo files
-	// as releaseable changes, and this scenario's WI wraps — its marker
-	// exists to detect a re-clone/reset (any surviving file proves that,
-	// extension aside), not to be a releaseable delta.
+	// The marker exists to detect a re-clone/reset: any surviving file
+	// proves that, whatever its extension.
 	if err := os.WriteFile(filepath.Join(reposDir, "w079-keep.md"), []byte("in flight\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -31,9 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,7 +174,7 @@ type probeResult struct {
 type wrapResult struct {
 	ok          bool
 	refused     bool   // a fail-closed wrap gate refused the seal before any push attempt
-	code        string // the refusal's typed code (VERIFICATION_EVIDENCE_MISSING / RELEASE_INTENT_MISSING); "" = the evidence gate
+	code        string // the refusal's typed code (VERIFICATION_EVIDENCE_MISSING); "" = the evidence gate
 	sha         string
 	pushed      bool
 	timings     gitops.PushTimings // the settled (successful, or last) attempt's latency samples
@@ -1483,21 +1481,6 @@ func (m *Monitor) flushWrap(call FlushCall) {
 			}
 			return
 		}
-		// Release-intent gate (polyforge#123, P1a; same fail-closed,
-		// non-terminal shape, beside the evidence gate): a seal whose
-		// per-repo base→worktree diff touches releaseable code with no
-		// covering entry in artifacts/release-intent.json is refused with
-		// the typed DAEMON-400 RELEASE_INTENT_MISSING ack before any
-		// commit/push. The agent writes the self-reported fragment and
-		// re-flushes; a pure docs/tests WI seals with no fragment at all.
-		if missing := m.wrapReleaseIntentMissing(); len(missing) > 0 {
-			m.wrapDone <- wrapResult{
-				ok: false, refused: true, code: codeIntentMissing,
-				err:     releaseIntentRefusal(m.wi.WorkItem, missing),
-				version: version, finalStatus: finalStatus, call: call,
-			}
-			return
-		}
 		// seal flush: the transcript copy must ride the seal commit (C1)
 		// — sync before the first push attempt, inside the gate.
 		m.syncTranscript(tr)
@@ -1548,21 +1531,10 @@ func pickSHA(ok bool, a, b string) string {
 // seal exactly what the metric then counts as evidence-less.
 const verificationStepID = "verification"
 
-// The wrap gates' typed refusal codes (the DAEMON-400 family): the ack
+// The wrap gate's typed refusal code (the DAEMON-400 family): the ack
 // text prefixes the code, the event log records the kind, and the agent's
-// recovery is the same on both — fix what is missing, re-flush.
-const (
-	codeEvidenceMissing = "VERIFICATION_EVIDENCE_MISSING"
-	codeIntentMissing   = "RELEASE_INTENT_MISSING"
-)
-
-// intentRefusalCode maps a refusal code onto its durable event kind.
-func intentRefusalCode(code string) string {
-	if code == codeIntentMissing {
-		return EvWrapIntentRefused
-	}
-	return EvWrapEvidenceRefused
-}
+// recovery is to fix what is missing and re-flush.
+const codeEvidenceMissing = "VERIFICATION_EVIDENCE_MISSING"
 
 // wrapEvidenceMissing answers whether the seal must be refused: some
 // EXECUTED verification step in the capsule's execution.json carries no
@@ -1639,129 +1611,13 @@ func commandEvidenceReadable(v any) bool {
 	return e["exit_code"] != nil && e["duration_ms"] != nil
 }
 
-// ---------------------------------------------------------------------------
-// Release-intent wrap gate (polyforge#123, P1a): fail-closed, non-terminal
-
-// wrapReleaseIntentMissing answers which repos changed releaseable code
-// with no covering release-intent entry — empty means the seal may
-// proceed. Per capsule.json's repos map (repo name → checked-out SHA at
-// claim, the per-repo base), the gate takes the mechanical base→worktree
-// change set of repos/<name> (tracked changes since the base, committed
-// or not, UNION the untracked files — an untracked source file is as
-// releaseable as a committed one) and classifies every path: only *.md
-// and test/** are exempt (pure docs/tests). A repo with any non-exempt
-// path requires an entry for it in the capsule's
-// artifacts/release-intent.json. The same tolerance as the evidence gate:
-// an unreadable capsule.json, a missing checkout, or a git failure fails
-// OPEN here (nothing to gate on) — the gate refuses only what it can
-// actually see. Reads happen in the flushWrap sub-goroutine; the select
-// loop never blocks on this check.
-func (m *Monitor) wrapReleaseIntentMissing() []string {
-	return releaseIntentMissingFor(m.wi.CapsuleDir, m.wi.WorkItem)
-}
-
-// releaseIntentMissingFor is the gate's predicate, split from the Monitor
-// so tests (and future callers) can run it against a capsule directory.
-func releaseIntentMissingFor(capsuleDir, wi string) []string {
-	idnRaw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.CapsuleJSON))
-	if err != nil {
-		return nil // no capsule identity: nothing to gate on
-	}
-	var idn capsule.Identity
-	if json.Unmarshal(idnRaw, &idn) != nil {
-		return nil
-	}
-	if len(idn.Repos) == 0 {
-		return nil // a capsule without task repos owes no fragment
-	}
-	frag, err := loadReleaseIntent(capsuleDir)
-	if err != nil {
-		// A PRESENT but malformed fragment is the typed refusal (P1c:
-		// schema-validated), naming the file via the detail path below.
-		return []string{err.Error()}
-	}
-	var missing []string
-	for repo, base := range idn.Repos {
-		paths, err := repoChangedFiles(filepath.Join(capsuleDir, capsule.DirRepos, repo), base)
-		if err != nil || len(paths) == 0 {
-			continue // unreadable diff or no changes: not gated
-			// (fail-open on git failure, the evidence gate's tolerance)
-		}
-		releaseable := false
-		for _, p := range paths {
-			if !intentExemptPath(p) {
-				releaseable = true
-				break
-			}
-		}
-		if releaseable && !frag.covers(repo) {
-			missing = append(missing, repo)
-		}
-	}
-	sort.Strings(missing)
-	return missing
-}
-
-// intentExemptPath classifies one changed path against the pure
-// docs/tests exemption: only *.md files and paths under test/ are
-// exempt — everything else (code, configs, scripts, fixtures outside
-// test/) is releaseable.
-func intentExemptPath(p string) bool {
-	p = filepath.ToSlash(p)
-	if strings.HasSuffix(p, ".md") {
-		return true
-	}
-	return p == "test" || strings.HasPrefix(p, "test/")
-}
-
-// repoChangedFiles answers the repo worktree's full base→worktree change
-// set: tracked changes since base (committed or not) UNION the untracked
-// files, as repo-relative slash paths. An unknown/unreadable base or any
-// git failure is an error (the caller fails open).
-func repoChangedFiles(repoDir, base string) ([]string, error) {
-	if st, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil || st == nil {
-		return nil, fmt.Errorf("no git worktree at %s", repoDir)
-	}
-	if strings.TrimSpace(base) == "" {
-		return nil, fmt.Errorf("no recorded base sha")
-	}
-	seen := map[string]bool{}
-	var paths []string
-	collect := func(args ...string) error {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repoDir
-		raw, err := cmd.Output()
-		if err != nil {
-			return err
-		}
-		for _, ln := range strings.Split(string(raw), "\n") {
-			ln = strings.TrimSpace(ln)
-			if ln == "" || seen[ln] {
-				continue
-			}
-			seen[ln] = true
-			paths = append(paths, ln)
-		}
-		return nil
-	}
-	if err := collect("diff", "--name-only", base); err != nil {
-		return nil, err
-	}
-	if err := collect("ls-files", "--others", "--exclude-standard"); err != nil {
-		return nil, err
-	}
-	return paths, nil
-}
-
 func (m *Monitor) onWrapResult(wr wrapResult) {
 	if wr.refused {
-		// A fail-closed wrap gate's refusal (the evidence gate or the
-		// release-intent gate): un-arm the seal guard, answer the typed
-		// DAEMON-400, and leave the attempt RUNNING — no blocked
-		// transition, no OBCompleted, no push bookkeeping (no commit was
-		// attempted). The step executor's contract is to supply what is
-		// missing (the command evidence, or the release-intent fragment)
-		// and re-flush.
+		// The fail-closed evidence gate's refusal: un-arm the seal guard,
+		// answer the typed DAEMON-400, and leave the attempt RUNNING — no
+		// blocked transition, no OBCompleted, no push bookkeeping (no
+		// commit was attempted). The step executor's contract is to supply
+		// the missing command evidence and re-flush.
 		m.stateMu.Lock()
 		m.sealing = false
 		m.stateMu.Unlock()
@@ -1773,7 +1629,7 @@ func (m *Monitor) onWrapResult(wr wrapResult) {
 			OK:    false,
 			Error: "DAEMON-400 " + code + ": " + wr.err,
 		}
-		_ = m.log.Append(m.wi.WorkItem, intentRefusalCode(code), map[string]any{
+		_ = m.log.Append(m.wi.WorkItem, EvWrapEvidenceRefused, map[string]any{
 			"error": ack.Error, "final_status": wr.finalStatus,
 			"spawn_n": m.currentSpawn(),
 		})
