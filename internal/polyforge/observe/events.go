@@ -39,7 +39,6 @@ const (
 	EvJobStarted       = "job_started"
 	EvAgentRecovered   = "wi_agent_rederived"
 	EvNeedsRecovery    = "needs_recovery"
-	EvNeedsInput       = "needs_input"
 	EvPublished        = "published"
 	EvPushFailed       = "push_failed"
 	EvPushBackpressure = "push_backpressure"
@@ -71,8 +70,7 @@ const (
 	// the ready queue was denied for authorization reasons (typed aihub
 	// error with HTTP 401/403/404 — e.g. the machine key revoked mid-run).
 	// Daemon-scope: appended with wi="" (the fetch owns no job) and
-	// merged into every live monitor's JobView events layer, so any
-	// observe view can read it. Edge-triggered once per silent→degraded
+	// kept in the durable events log only. Edge-triggered once per silent→degraded
 	// episode; the episode clears on the next successful fetch. Denial
 	// MUST surface as this event, never as silent idling; transport-class
 	// losses (network/5xx) stay silent idle, unchanged.
@@ -98,12 +96,6 @@ const (
 	// restart (resume intent, or aihub no longer shows the WI
 	// queued, or the claiming journal already owns it); body names why.
 	EvSubmitDropped = "submit_dropped"
-	// EvCapsuleMissing / EvProjectUnmapped (v2 §6): the WI was parked
-	// repair_pending at restart; body names the path/project and the fix.
-	// Emitted by the runtime (runtime.RepairCapsuleMissing/Unmapped carry
-	// the same strings).
-	EvCapsuleMissing  = "capsule_missing"
-	EvProjectUnmapped = "project_unmapped"
 	// EvDaemonRestarted (v2 §6): written into every WI the daemon
 	// recovered or parked after restart reconciliation; body carries the
 	// previous shutdown cause when known (#110) else "unknown".

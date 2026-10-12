@@ -13,7 +13,7 @@ func TestEventsFileShapeIsJSONLEventEntry(t *testing.T) {
 	m, _ := newTestMonitor(t, h, nil)
 	// a driver event lands in the same durable log through the daemon's
 	// binding (the driver's EventLogger IS EventLog.Append)
-	if err := m.log.Append("wi_test", EvNeedsInput, map[string]any{"question_id": "q_file", "step": "code"}); err != nil {
+	if err := m.log.Append("wi_test", "needs_input", map[string]any{"question_id": "q_file", "step": "code"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -25,7 +25,7 @@ func TestEventsFileShapeIsJSONLEventEntry(t *testing.T) {
 			return false
 		}
 		for _, e := range entries {
-			if e.Kind == EvNeedsInput && e.WI == "wi_test" && e.At != "" {
+			if e.Kind == "needs_input" && e.WI == "wi_test" && e.At != "" {
 				return true
 			}
 		}
@@ -40,7 +40,7 @@ func TestEventsFileShapeIsJSONLEventEntry(t *testing.T) {
 		switch e.Kind {
 		case EvJobStarted:
 			started = true
-		case EvNeedsInput:
+		case "needs_input":
 			var b struct {
 				QuestionID string `json:"question_id"`
 			}
