@@ -17,7 +17,6 @@ pf watch <id> --once [--json] [--after N] [--events N]    # one snapshot
 pf watch subscribe <id> | unsubscribe <id> | list          # this chat's subscriptions
 pf watch --chat <chat> [--wait-decision]                   # resident watcher (default chat: $PF_CHAT_ID)
 pf watch --chat <chat> --statusline                        # print the progress file
-pf observe <id> [--after N]                                # DEPRECATED alias of the old projection view
 ```
 
 `--once` is the pull: status (`running`, `needs input`, `completed`, `failed`,

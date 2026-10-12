@@ -40,7 +40,7 @@ the parked capsule, never a pre-blocked re-derivation).
 Success: `resumed <id>: the workflow was parked blocked (incomplete
 result) — the §6.4 owner move re-established execution over the parked
 capsule`, then `(the frozen current step re-dispatches in place as a fresh
-derivation; watch it with pf observe <id>)`. `--json`: the raw answer.
+derivation; watch it with pf watch <id> --once)`. `--json`: the raw answer.
 
 Cross-daemon safety: the default is that the daemon which sealed the block
 continues it. When a DIFFERENT daemon picks it up, the start is refused
@@ -99,7 +99,7 @@ refused before anything else happens.
 | `DAEMON-412` | Parked `repair_pending` because its project is not in the `[workspace]` mapping, or a submit/claim for an unmapped project | Re-add the project to a `[workspace."<path>"]` section (`pf doctor` checks it), then `pf resume`. |
 | `DAEMON-516` | The claim behind the resume could not clone the capsule for a work item with published progress; a local init would restart the workflow at step 1, so it is refused and the claim returns to blocked | Fix aihub reachability / credentials, then `pf resume` again. |
 | `DAEMON-518` | A different daemon than the sealing one claimed the continue and the aihub capsule head is not the sealed head | Continue it on the machine that sealed it, or abandon with `pf cancel <id>`. |
-| `CORE-409 NOT_BLOCKED` | The resume door on a work item that is no longer blocked | The state moved — check `pf queue`/`pf observe`; a paused WI unpauses with this same verb. |
+| `CORE-409 NOT_BLOCKED` | The resume door on a work item that is no longer blocked | The state moved — check `pf queue`/`pf watch <id> --once`; a paused WI unpauses with this same verb. |
 | `CORE-409 NOT_CLAIMABLE` (from the resume door) | The blocked WI still carries a session (a half-settled close) | Nobody may resume it until the holder settles — check the holder daemon or take over as admin. |
 | `CORE-404` (from the resume door, on claim) | Another machine claimed the work item between the door and the claim | It resumed elsewhere — observe there. |
 | `dial unix …` | Daemon not running | The blocked-door resume re-establishes execution, so a daemon must be involved — start the daemon or check `--socket`. |

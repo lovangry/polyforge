@@ -142,9 +142,8 @@ snapshot read from the capsule's `execution.json`: status, current step and
 how long it has run, the pending question and the latest events;
 `pf watch --chat "$PF_CHAT_ID" --wait-decision` is the resident per-chat
 watcher that wakes a harness session only for human decisions (see
-`skills/polyforge/SKILL.md`). `pf observe <id>` is the deprecated alias of the
-older projection view (it still leads with the `session:` line — the current
-holder's public session fingerprint, never the secret). Give the first step a
+`skills/polyforge/SKILL.md`). `pf watch <id> --once` is the one-shot snapshot (status, step, ages,
+pending question, latest events). Give the first step a
 few minutes: once the driver commits the first `runtime-state/execution.json`
 version, the snapshot shows a current step and a `published` event.
 
@@ -194,7 +193,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | --- | --- |
 | `internal/common/api` | Shared business contract between aihub and pf: work items, projects, users, generations, memories, and the typed error-code registry (`CORE-*`, `DAEMON-*`, `GIT-*`). |
 | `internal/common/capsule` | Execution-capsule contract shared by pf (runtime creates capsules, observe commits them) and aihub (serves the matching bare repos; git-dir lives outside the capsule). |
-| `internal/common/protocol` | The three in-machine contracts: Runtime↔Observe messages, the liveness-probe control message, and the pf CLI↔daemon UDS HTTP API surface. |
+| `internal/common/protocol` | The in-machine contracts: Runtime↔Observe messages and the pf CLI↔daemon UDS HTTP API surface. |
 | `internal/common/workflow` | Workflow-bundle digest contract shared by pf (bundle materialization with digest verification) and aihub (serves bundle bytes, validates digests at claim time). |
 | `internal/aihub/core` | aihub persistent layer: SQLite store (single writer, WAL), the work-item state machine, claim/generation arbitration with attempt-scoped push credentials, the ready queue and the admin face. |
 | `internal/aihub/git` | aihub git surface: per-WI bare-repo lifecycle, the git-http-backend smart-protocol proxy, attempt-scoped credential auth (generation fencing) and the pre-receive hook enforcing the capsule-chain invariants. |
@@ -341,7 +340,6 @@ the `PF_*` entries.
 | `--max-concurrent-jobs N` | — | `4` | Cap on concurrently running jobs (also `pf ops max N`). |
 | `--recall-topk N` | `POLYFORGE_RECALL_TOPK` | `10` (max 50) | Claim-time memory snapshot hit count. |
 | `--auto` | — | off | Auto-pull: the daemon also claims ready-queue work itself; an explicit `--auto` / `--auto=false` overrides the persisted switch (also `pf ops auto on\|off`). |
-| `--mode M` | — | — | **Deprecated** alias for one release: `interactive` = `--auto=false`, `drain` = `--auto=true` (prints a warning). |
 | `--heartbeat-every D` | — | `60s` | Machines heartbeat cadence (`0` disables). |
 
 The workspace mapping (polyforge#113) replaces the retired workspace and

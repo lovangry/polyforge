@@ -91,9 +91,3 @@ ready-queue work by itself (an internal loop; idle-polls when the queue is
 empty, never exits); shutdown stops accepting anything new, closes what
 remains and exits. They are independent concepts and never substitute for
 each other.
-
-Upgrade note: the pre-v2 `pf ops mode ...`, `abort-drain`, batch mode and
-`pf batch-confirm` are gone. An old daemon-state.json `mode` migrates on
-load (drain becomes auto on, anything else auto off), and the daemon flag
-`-mode interactive|drain` is accepted for one release as a deprecated
-alias of `-auto`.
