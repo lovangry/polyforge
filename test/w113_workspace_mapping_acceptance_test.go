@@ -1394,8 +1394,7 @@ func TestW113CrossProjectClaimsRoutePerWorkspace(t *testing.T) {
 // S13 — unmapped project claim refused loudly, before any side effect.
 // ---------------------------------------------------------------------------
 
-// TestW113UnmappedProjectClaimRefused pins criterion #10: a claim (or
-// takeover) for a work item whose project exists on aihub but is NOT in
+// TestW113UnmappedProjectClaimRefused pins criterion #10: a claim for a work item whose project exists on aihub but is NOT in
 // the machine's mapping is rejected with an error naming the project
 // and pointing at the mapping / `pf doctor`, BEFORE any capsule is
 // created and before the aihub-side claim state changes.
@@ -1417,7 +1416,6 @@ func TestW113UnmappedProjectClaimRefused(t *testing.T) {
 	before := inst.wiStatus(t, wi)
 	for _, argv := range [][]string{
 		{"submit", wi},
-		{"submit", wi, "--takeover"},
 	} {
 		out, code := d.pf(inst, argv...)
 		if code != 1 {

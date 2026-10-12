@@ -270,11 +270,13 @@ func persistedSecret(t *testing.T, d *v1Daemon, wi string) string {
 	return secret
 }
 
-// endSession force-ends the held session through the admin door.
+// endSession force-ends the held session through the operator CLI
+// (`pf ops end-session`, the human's admin key, aihub-direct: no daemon).
 func endSession(t *testing.T, inst *v1Install, wi, reason string) {
 	t.Helper()
-	if err := inst.client.ForceEndSession(wi, reason); err != nil {
-		t.Fatalf("force-end session: %v", err)
+	out := inst.pf(t, "ops", "end-session", wi, "--reason", reason)
+	if !strings.Contains(out, "queued") || !strings.Contains(out, "pf submit") {
+		t.Fatalf("end-session answer: %q", out)
 	}
 }
 

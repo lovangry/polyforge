@@ -63,7 +63,7 @@ accepts an id.
 | how did we handle X before / any past experience on X / 之前怎么处理过 X / 查一下记忆 | `verbs/recall.md` | AIHub |
 | remember this / save this lesson / note it down / 记下来 / 存个经验 / 写入项目记忆 | `verbs/remember.md` | AIHub |
 | run it / submit it / start this work item / execute / 跑起来 / 执行这个 WI / 提交执行 | `verbs/submit.md` | daemon |
-| take it over / force takeover / 接管 / 强制接管 | `verbs/submit.md` (--takeover) | daemon |
+| take over a stuck work item / its machine is dead / force takeover / 接管 / 强制接管 | `verbs/ops.md` (`pf ops end-session`, then `verbs/submit.md`) | AIHub + daemon |
 | how's it going / show progress / what step is it on / watch this one / follow it / 看看进度 / 跑到哪了 / 观察一下 / 盯着 | `verbs/observe.md` (`pf watch`) | daemon |
 | answer the question / reply to needs_input / 回答问题 / 它在问我 / 答一下 | `verbs/answer.md` | daemon |
 | run a batch / show the wave recommendation / confirm this batch / 跑一批 / 看看推荐哪批 / 确认这一波 | `verbs/batch-confirm.md` | daemon |

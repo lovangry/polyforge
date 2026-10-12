@@ -12,8 +12,9 @@ The operator-pause move: a `clean_pause=false` PATCH on the hub. Nothing is
 claimed locally and no daemon route is contacted — the paused work item
 stays with its HOLDER daemon (the session's machine attaches on its next
 daemon start; a work item whose holder is gone moves with
-`pf takeover <id> --reason ...`; a live holder daemon does not pick this up
-until its next start — to continue immediately use `pf takeover`).
+`pf ops end-session <id> --reason ...` then `pf submit <id>`; a live holder
+daemon does not pick this up until its next start — to continue immediately
+use `pf ops end-session` + `pf submit`).
 
 Success: `resumed <id>: clean_pause cleared; the paused work item stays
 with its holder daemon`. `--json`: the raw answer.
