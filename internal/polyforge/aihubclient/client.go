@@ -545,6 +545,15 @@ func (c *Client) ForceTakeover(wi string, req api.SessionClaimRequest) (*api.Ses
 	return &out, nil
 }
 
+// ForceEndSession is the admin/maintainer recovery door: it ends the held
+// session (WI running|paused -> queued, old secret fenced); any daemon then
+// claims the WI normally. Authorization is server-side (admin or project
+// maintainer).
+func (c *Client) ForceEndSession(wi, reason string) error {
+	return c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/force-end-session",
+		api.ForceEndSessionRequest{Reason: reason}, nil)
+}
+
 // SessionVerify is the compare-only holder check (B3: no secret echo).
 func (c *Client) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error) {
 	var out api.SessionVerifyResponse

@@ -76,6 +76,9 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-attach", s.auth(s.hSessionAttach))
 	m.HandleFunc("POST /api/v1/work-items/{id}/force-takeover", s.auth(s.hForceTakeover))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-end", s.auth(s.hSessionEnd))
+	// Recovery door: an admin/maintainer force-ends a stuck holder's session
+	// (WI -> queued); any daemon then claims it normally.
+	m.HandleFunc("POST /api/v1/work-items/{id}/force-end-session", s.auth(s.hForceEndSession))
 	// Finding 3 (v1.5 review): the blocked state's exit door — the human
 	// unblock that returns a bounded-fail verdict to the queued pool.
 	m.HandleFunc("POST /api/v1/work-items/{id}/unblock", s.auth(s.hUnblockWI))
@@ -804,6 +807,54 @@ func (s *Server) machineIDOfUser(userID string) (string, error) {
 		return "", nil
 	}
 	return id, err
+}
+
+// hForceEndSession serves the admin/maintainer force-end of a held session
+// (WI -> queued, session cleared, the old secret fenced). Authorization is
+// admin or project maintainer: the human recovery decision.
+func (s *Server) hForceEndSession(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !s.adminOrMaintainer(idn, projectID) {
+		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "end-session requires admin or project maintainer"))
+		return
+	}
+	var req api.ForceEndSessionRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := s.Sessions.ForceEnd(id, req.Reason, idn.UserID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	wi, err := s.WIs.Get(id, core.GetOptions{})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, err := s.WIs.View(wi)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// adminOrMaintainer is the human recovery gate (no reporter admission).
+func (s *Server) adminOrMaintainer(idn *identity, projectID string) bool {
+	if idn.Role == "admin" {
+		return true
+	}
+	role, err := s.memberRole(projectID, idn.UserID)
+	return err == nil && role == "maintainer"
 }
 
 // hSessionEnd serves the session-fenced terminal verdict (wrapped|

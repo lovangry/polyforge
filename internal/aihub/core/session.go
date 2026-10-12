@@ -653,6 +653,68 @@ func (m *SessionManager) Takeover(wiID string, req api.SessionClaimRequest, call
 }
 
 // ---------------------------------------------------------------------------
+// Force end (v2-converge §6, §8 tier four)
+
+// ForceEnd is the admin/maintainer recovery door for a work item held by a
+// dead or stuck daemon: it ends the live session WITHOUT the holder's
+// secret, returning the WI to queued with the session row cleared. The old
+// holder is fenced by construction (its secret no longer matches any
+// stored hash: git push -> GIT-401, session-end/pause/verify -> stale), and
+// any daemon then claims the queued WI through the ordinary claim path,
+// restoring progress from the capsule revision chain. Gate: running or
+// paused (a session is held) and a non-empty reason. The session_superseded
+// event carries the OLD fingerprint (m4 audit).
+func (m *SessionManager) ForceEnd(wiID, reason, callerIdentity string) error {
+	if strings.TrimSpace(reason) == "" {
+		return Fail(api.ErrCoreBadInput, "", "reason required")
+	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	row, err := loadSessionRow(tx, wiID)
+	if err != nil {
+		return err
+	}
+	if isTerminal(row.Status) {
+		return Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", row.Status)
+	}
+	if !sessionHeld(row) || (row.Status != api.StatusRunning && row.Status != api.StatusPaused) {
+		return Fail(api.ErrCoreConflict, "NOT_HELD",
+			"end-session requires a running or paused work item holding a session (got %s)", row.Status)
+	}
+	now := Now()
+	// Fenced on the hash read in this snapshot: a concurrent end/swap
+	// refuses instead of ending someone else's fresh session.
+	res, err := tx.Exec(`UPDATE work_items SET status='queued', session_hash=NULL, session_fingerprint=NULL,
+		session_machine=NULL, session_owner=NULL, session_started_at=NULL, clean_pause=0,
+		waiting_on=NULL, updated_at=?1
+		WHERE id=?2 AND session_hash=?3 AND status IN ('running','paused')`, now, wiID, row.Hash.String)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Fail(api.ErrCoreConflict, "RACE_LOST", "state changed concurrently")
+	}
+	if err := setBlockedSealTx(tx, wiID, "", "", true); err != nil {
+		return err
+	}
+	if err := appendEventTx(tx, wiID, now, callerIdentity, "session_superseded",
+		map[string]any{
+			"old_session_fingerprint": row.Fingerprint.String,
+			"old_machine_id":          row.Machine.String,
+			"from":                    row.Status,
+			"to":                      api.StatusQueued,
+			"reason":                  reason,
+		}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ---------------------------------------------------------------------------
 // Session end (contract §1.5) and pause (M3)
 
 // blockedSealKey is the WI attrs key carrying the blocked verdict's sealed

@@ -187,6 +187,12 @@ type SessionClaimRequest struct {
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
+// ForceEndSessionRequest is the admin/maintainer force-end body (reason
+// required; it lands in the session_superseded audit event).
+type ForceEndSessionRequest struct {
+	Reason string `json:"reason"`
+}
+
 // SessionAttachRequest resumes a paused WI under the SAME session (M3:
 // same-machine restart resume; clean_pause WIs refuse attach).
 type SessionAttachRequest struct {
