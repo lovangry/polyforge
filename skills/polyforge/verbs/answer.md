@@ -18,8 +18,9 @@ pf answer <id> --text "..." [--question q_xxx] [--by user]
 
 `--question` is the `question_id` the `pf watch --once` output showed; it may be
 omitted when exactly one question is pending (the default). `--text` is the
-natural-language answer — required. The CLI generates the answer's `a_` id
-itself; there is no idempotent replay (see Success). `--by` is the answerer's user id, defaulting to the config's
+natural-language answer — required. Without `--question` the daemon answers
+the step's currently pending question; there is no idempotent replay (see
+Success). `--by` is the answerer's user id, defaulting to the config's
 `user_id` / `PF_USER_ID`; the CLI refuses locally if no identity is
 resolvable.
 

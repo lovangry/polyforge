@@ -333,7 +333,7 @@ func (l *EventLog) Since(wi string) []protocol.EventEntry {
 }
 
 // SinceAfter returns the entries for wi whose seq is strictly greater
-// than after — the GET /jobs/{id}/observe ?after cursor (#21). The ring
+// than after — the watch snapshot's ?after cursor (#21). The ring
 // answers when it still holds the cursor's successor; a cursor older than
 // the ring (or from before a restart that outlived the ring) is served
 // from the DURABLE files, so history is never limited to the in-memory
