@@ -267,7 +267,7 @@ func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 	id := h.canonicalID(wi)
 	h.ends = append(h.ends, endCall{WI: id, Req: req})
 	switch req.Status {
-	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked:
+	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked, api.StatusCanceled:
 		h.held[id] = ""
 	}
 	h.status[id] = req.Status

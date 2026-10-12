@@ -290,6 +290,14 @@ func (d *DaemonClient) ResumeBlocked(wiID string) (json.RawMessage, error) {
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-blocked", "", d.withOrigin(map[string]any{}), nil)
 }
 
+// AbandonRepair asks the daemon to give up a repair_pending WI it holds:
+// it ends the kept session with verdict ("canceled" | "failed") and drops
+// the parked record. The caller has already passed the aihub human-key
+// authorization probe (CloseAuth).
+func (d *DaemonClient) AbandonRepair(wiID, verdict string) (json.RawMessage, error) {
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/abandon-repair", "", map[string]any{"verdict": verdict}, nil)
+}
+
 // AdoptSessionRequest is the POST /jobs/{id}/adopt-session body. The
 // session SECRET travels only over this local UDS route (never the hub
 // wire): it is the custody handoff that keeps a CLI-side takeover's

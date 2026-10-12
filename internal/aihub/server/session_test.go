@@ -692,6 +692,53 @@ func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
 	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id4+"/cancel", repKey, map[string]any{}, &got); code != 200 || got.Status != "canceled" {
 		t.Fatalf("reporter cancel of a blocked WI: %d %s", code, raw)
 	}
+
+	// close-auth: the read-only probe the CLI runs before abandoning a
+	// repair_pending WI answers the same set, and mutates nothing.
+	id5 := block("close auth", s(5))
+	for who, key := range map[string]string{"plain member": otherKey, "outsider": outKey} {
+		if code, raw := e.do(t, "GET", "/api/v1/work-items/"+id5+"/close-auth", key, nil, nil); code != 403 && code != 404 {
+			t.Fatalf("%s close-auth must be refused, got %d %s", who, code, raw)
+		}
+	}
+	for who, key := range map[string]string{"reporter": repKey, "maintainer": maintKey, "admin": e.key} {
+		if code, raw := e.do(t, "GET", "/api/v1/work-items/"+id5+"/close-auth", key, nil, nil); code != 200 {
+			t.Fatalf("%s close-auth: %d %s", who, code, raw)
+		}
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/work-items/"+id5, e.key, nil, &got); code != 200 || got.Status != "blocked" {
+		t.Fatalf("close-auth must not mutate: %d %s", code, raw)
+	}
+}
+
+// TestSessionEndCanceledVerdict: the abandon of a repair_pending WI ends the
+// kept session with the canceled verdict — fenced on the secret, session
+// cleared, closed_at set, terminal.
+func TestSessionEndCanceledVerdict(t *testing.T) {
+	e := newSrvEnv(t)
+	id := createExecWIOverHTTP(t, e, "abandon me")
+	secret := strings.Repeat("c", 32)
+	if code, raw, _ := sessClaim(t, e, id, secret, "k-cc"); code != 200 {
+		t.Fatalf("claim: %d %s", code, raw)
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
+		map[string]string{"session_id": strings.Repeat("d", 32), "status": "canceled"}, nil); code != 403 {
+		t.Fatalf("a foreign secret must be fenced, got %d %s", code, raw)
+	}
+	var got struct {
+		Status   string  `json:"status"`
+		ClosedAt *string `json:"closed_at"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
+		map[string]string{"session_id": secret, "status": "canceled", "note": "abandoned"}, &got); code != 200 || got.Status != "canceled" {
+		t.Fatalf("canceled session-end: %d %s", code, raw)
+	}
+	if got.ClosedAt == nil || *got.ClosedAt == "" {
+		t.Errorf("a canceled close must set closed_at: %+v", got)
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/cancel", e.key, map[string]any{}, nil); code == 200 {
+		t.Fatalf("a terminal WI cannot be cancelled again: %d %s", code, raw)
+	}
 }
 
 // TestBlockedSealHeadRoundTrip (v2-converge §7): the blocked verdict's

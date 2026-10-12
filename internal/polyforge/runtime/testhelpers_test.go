@@ -207,7 +207,7 @@ func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 	}
 	h.ends = append(h.ends, req)
 	switch req.Status {
-	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked:
+	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked, api.StatusCanceled:
 		h.held[id] = "" // terminal + blocked clear the session (M2)
 	default:
 		// paused keeps the session (the design's paused-with-session)

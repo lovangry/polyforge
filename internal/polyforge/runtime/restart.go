@@ -574,3 +574,61 @@ func (r *Runtime) RepairResume(ctx context.Context, wi string) (held bool, err e
 	}
 	return true, nil
 }
+
+// EventRepairAbandoned is the durable event of AbandonRepair.
+const EventRepairAbandoned = "repair_abandoned"
+
+// AbandonRepair is the owner's "give up" for a repair_pending WI (v2 §6):
+// the WI is still running at aihub under this daemon's kept session, so
+// the data-plane cancel is refused; the daemon holds the only copy of the
+// session secret and ends the session itself — status is api.StatusCanceled
+// (`pf cancel`) or api.StatusFailed (`pf wrap --fail`). The caller (the
+// CLI) has already verified the human is reporter / maintainer / admin at
+// aihub. A SessionEnd the hub does not acknowledge keeps the record in the
+// durable end_pending lane with this verdict and retries (endpending.go);
+// the parked record is dropped either way. held=false when wi is not
+// parked here.
+func (r *Runtime) AbandonRepair(wi, status, note string) (held bool, err error) {
+	if status != api.StatusCanceled && status != api.StatusFailed {
+		return false, fmt.Errorf("runtime: abandon verdict must be canceled or failed, got %q", status)
+	}
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	j := r.resolveJob(wi)
+	if j == nil {
+		return false, nil
+	}
+	j.mu.Lock()
+	kind := j.repairPending
+	secret := j.sessionID
+	j.mu.Unlock()
+	if kind == "" {
+		return false, nil
+	}
+	settled := r.endAtHub(j.wi, secret, status, note, "")
+	j.mu.Lock()
+	j.repairPending = ""
+	j.endNote, j.endHead, j.endStatus = note, "", status
+	if settled {
+		j.state = StateDone
+	} else {
+		j.state = StateEndPending
+	}
+	j.mu.Unlock()
+	if settled {
+		r.dropJob(j)
+	}
+	if perr := r.persist(); perr != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+	}
+	if r.cfg.EventTap != nil {
+		r.cfg.EventTap(j.wi, EventRepairAbandoned, map[string]any{
+			"work_item": j.wi, "verdict": status, "was": kind, "session_ended": settled,
+		})
+	}
+	if !settled {
+		fmt.Fprintf(os.Stderr, "runtime: %s: abandon (%s) not acknowledged by the hub — record kept end_pending, retrying\n", j.wi, status)
+		r.retryEndPending(j)
+	}
+	return true, nil
+}

@@ -325,3 +325,90 @@ func (h *fakeHub) hold(wi, sess, status string) {
 	h.held[wi] = sess
 	h.status[wi] = status
 }
+
+// Abandon (v2 §6): a repair_pending WI is given up through the daemon
+// route — the daemon ends the kept session with the verdict, drops the
+// parked record and writes repair_abandoned. The plain wrap route refuses a
+// parked WI with a pointer to the owner moves; an unparked WI is DAEMON-404.
+func TestAbandonRepairPendingRoute(t *testing.T) {
+	setGitIdentity(t)
+	for _, verdict := range []string{"canceled", "failed"} {
+		t.Run(verdict, func(t *testing.T) {
+			dir := t.TempDir()
+			ws := filepath.Join(dir, "ws")
+			data := filepath.Join(dir, "data")
+			hubBase := filepath.Join(dir, "hub")
+			for _, p := range []string{ws, data, hubBase} {
+				if err := os.MkdirAll(p, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const bad = "wi_abandon_capsule"
+			bareBad := mkBare(t, hubBase, bad)
+			capBad := filepath.Join(ws, "capsules", bad)
+			gitBad := filepath.Join(data, "git", bad+".git")
+			seedStateJobs(t, data, "m-e2e", e2eRecord(bad, capBad, gitBad, bareBad))
+			hub := newFakeHub()
+			hub.hold(bad, e2eSession(bad), api.StatusRunning)
+			sock := filepath.Join(dir, "d.sock")
+			d, err := New(e2eConfig(sock, ws, data, hubBase, hub, &fakeSpawner{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runErr := make(chan error, 1)
+			go func() { runErr <- d.Run(context.Background()) }()
+			t.Cleanup(func() {
+				_ = d.Shutdown(context.Background(), DirectShutdownCause())
+				select {
+				case <-runErr:
+				case <-time.After(15 * time.Second):
+				}
+			})
+			client := cli.NewDaemonClient(sock)
+			waitFor(t, "the WI parked repair_pending", 20*time.Second, func() bool {
+				var st cli.StatusResponse
+				raw, serr := client.Status()
+				return serr == nil && json.Unmarshal(raw, &st) == nil && len(st.Jobs) == 1 && st.Jobs[0].Status == "repair_pending"
+			})
+
+			// the plain close route must not touch a parked WI
+			_, werr := client.Wrap(bad, "fail")
+			var ae *api.Error
+			if werr == nil || !errors.As(werr, &ae) || ae.Code != api.ErrDaemonConflict {
+				t.Fatalf("wrap on a parked WI must answer %s, got %v", api.ErrDaemonConflict, werr)
+			}
+			if hub.endCount() != 0 {
+				t.Fatalf("no SessionEnd before the abandon (ends=%d)", hub.endCount())
+			}
+			if _, aerr := client.AbandonRepair("wi_not_parked", verdict); aerr == nil || !errors.As(aerr, &ae) || ae.Code != api.ErrDaemonNotFound {
+				t.Fatalf("an unparked WI must answer %s, got %v", api.ErrDaemonNotFound, aerr)
+			}
+			if _, aerr := client.AbandonRepair(bad, "wrapped"); aerr == nil || !errors.As(aerr, &ae) || ae.Code != api.ErrDaemonBadInput {
+				t.Fatalf("a non-abandon verdict must answer %s, got %v", api.ErrDaemonBadInput, aerr)
+			}
+
+			if _, aerr := client.AbandonRepair(bad, verdict); aerr != nil {
+				t.Fatalf("abandon: %v", aerr)
+			}
+			if hub.endCount() != 1 {
+				t.Fatalf("want exactly one SessionEnd, got %d", hub.endCount())
+			}
+			end := hub.ends[0]
+			if end.WI != bad || end.Req.Status != verdict || end.Req.SessionID != e2eSession(bad) {
+				t.Fatalf("SessionEnd = %+v", end)
+			}
+			if _, ok := d.rt.Info(bad); ok {
+				t.Fatal("the parked record must be dropped")
+			}
+			if !hasKind(eventKinds(d, bad), "repair_abandoned") {
+				t.Errorf("want repair_abandoned, got %v", eventKinds(d, bad))
+			}
+			var st cli.StatusResponse
+			raw, _ := client.Status()
+			_ = json.Unmarshal(raw, &st)
+			if len(st.Jobs) != 0 {
+				t.Errorf("status must no longer list the WI: %+v", st.Jobs)
+			}
+		})
+	}
+}

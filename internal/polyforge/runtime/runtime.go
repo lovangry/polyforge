@@ -330,7 +330,11 @@ type job struct {
 	// end_pending job (see StateEndPending).
 	endNote string
 	endHead string
-	mu      sync.Mutex
+	// endStatus is the verdict of the pending SessionEnd; "" = blocked
+	// (the bounded-fail close). "canceled" / "failed" ride an abandoned
+	// repair_pending WI (AbandonRepair).
+	endStatus string
+	mu        sync.Mutex
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries

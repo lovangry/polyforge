@@ -596,6 +596,13 @@ func (c *Client) TerminateBlockedWorkItem(idOrSlug string) (json.RawMessage, err
 	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/terminate-blocked", map[string]any{})
 }
 
+// CloseAuth is the read-only close-authorization probe: nil when the
+// caller's key belongs to the WI's reporter, a project maintainer or an
+// admin (the cancel / blocked-exit gate); an AUTH-403 error otherwise.
+func (c *Client) CloseAuth(idOrSlug string) error {
+	return c.Do("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/close-auth", nil, nil)
+}
+
 // RecordShipLedger is the ship bridge's ledger recording call
 // (polyforge#123, P1b): report one ship run's per-repo branch tops to the
 // WI's ledger. The server upserts per (WI, repo); the branch query param

@@ -104,7 +104,7 @@ type recommendationResponse struct {
 
 type closeResponse struct {
 	WorkItemID string `json:"work_item_id"`
-	// Outcome: sealed | already_terminal | already_paused — plus
+	// Outcome: sealed | already_terminal | already_paused | abandoned (a repair_pending give-up) — plus
 	// "terminated" (polyforge#116): a parked workflow's §6.4 terminate
 	// verdict, landed at the hub by the terminate-blocked door (no local
 	// seal exists — the bounded close already sealed the parked capsule).
@@ -233,6 +233,9 @@ func (d *Daemon) handler() http.Handler {
 	// live driver, no bridge handle and no job record; the owner's moves
 	// are their own route, not a runtime call.
 	mux.HandleFunc("POST /jobs/{wi}/resume-blocked", d.resumeBlockedRoute)
+	// v2 §6 abandon: the give-up of a repair_pending WI (session ended by
+	// the daemon after the CLI's human-key authorization step).
+	mux.HandleFunc("POST /jobs/{wi}/abandon-repair", d.abandonRepairRoute)
 	mux.HandleFunc("POST /jobs/{wi}/takeover", d.submitRoute("takeover"))
 	mux.HandleFunc("POST /jobs/{wi}/adopt-session", d.adoptSessionRoute)
 	mux.HandleFunc("POST /jobs/{wi}/pause", d.pauseRoute)
@@ -424,6 +427,45 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical})
 }
 
+// abandonRepairRoute serves POST /jobs/{id}/abandon-repair — the give-up of
+// a WI parked repair_pending (v2 §6). The WI is still running at aihub under
+// this daemon's kept session, so the hub's cancel refuses it and only the
+// daemon holds the secret to end that session (canceled for `pf cancel`,
+// failed for `pf wrap --fail`; a refused SessionEnd is retried through the
+// end_pending lane). Like the resume-blocked door, the human authorization
+// (reporter / maintainer / admin) is the CLI's job and runs with the human's
+// own key BEFORE this route; this is the daemon half. A WI that is not
+// parked here answers DAEMON-404.
+func (d *Daemon) abandonRepairRoute(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Verdict string `json:"verdict"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	var status string
+	switch body.Verdict {
+	case "canceled":
+		status = api.StatusCanceled
+	case "failed":
+		status = api.StatusFailed
+	default:
+		writeErr(w, api.ErrDaemonBadInput, "verdict must be canceled or failed")
+		return
+	}
+	wi := d.canonWI(r.PathValue("wi"))
+	held, err := d.rt.AbandonRepair(wi, status, "abandoned while parked repair_pending by the owner ("+body.Verdict+")")
+	if err != nil {
+		writeErrOf(w, err)
+		return
+	}
+	if !held {
+		writeErr(w, api.ErrDaemonNotFound, wi+" is not parked repair_pending on this daemon")
+		return
+	}
+	writeJSON(w, http.StatusOK, closeResponse{WorkItemID: wi, Outcome: "abandoned", Status: status})
+}
+
 // ---------------------------------------------------------------------------
 // adopt-session: custody of an externally minted session (#109).
 
@@ -526,6 +568,10 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 			return
 		}
 		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
+		return
+	}
+	if ji.RepairPending != "" {
+		writeErr(w, api.ErrDaemonConflict, wi+" is parked repair_pending — fix the cause and `pf resume "+wi+"`, or give it up with `pf cancel "+wi+"` / `pf wrap --fail "+wi+"`")
 		return
 	}
 	if ji.State == runtime.StateSealing || ji.State == runtime.StateRecovering {
