@@ -1,7 +1,8 @@
-# Polyforge v1
+# Polyforge
 
 Work-item orchestration platform: an aihub server (WI store, memory, git
-revision chain) and a pf work-machine binary (Runtime + Observe + CLI).
+revision chain) and a pf work-machine binary (CLI + daemon with the Go
+execution driver).
 
 ## Install(team machines — read this first)
 
@@ -30,7 +31,7 @@ natural language via the `polyforge` routing skill;from a terminal it's
 
 A from-zero smoke run on one machine: start a local aihub, set up a
 project and a machine identity, file a minimal work item, and drive it
-through file → submit → observe → wrap on a local `pf daemon`.
+through file → submit → watch → wrap on a local `pf daemon`.
 
 Prerequisites: a Go toolchain; `git` with a configured
 `user.name`/ `user.email` (capsule commits need it); and the `pi` agent
@@ -91,12 +92,12 @@ the workflow bundles shipped in `workflows/`:
 ```
 bin/pf --config /tmp/pf-quickstart/cli.toml file create --project demo \
   --bundle quick-fix \
-  --goal "Quickstart smoke: exercise the file -> submit -> observe -> wrap chain." \
+  --goal "Quickstart smoke: exercise the file -> submit -> watch -> wrap chain." \
   --content "Minimal smoke work item; no product change is expected." \
   --label smoke
 ```
 
-**6. Start the local daemon** (Runtime + Observe over its own UDS
+**6. Start the local daemon** (runtime, driver and watcher behind its own UDS
 socket; keep it running in a second terminal). The `[workspace]` mapping
 in the config is the daemon's only workspace source (polyforge#113): a
 config with zero sections refuses startup, every mapped workspace
@@ -117,7 +118,7 @@ directory in its `.gitignore` (`capsules/`) — the daemon never touches
 `.gitignore` itself. `pf doctor` checks the mapping and the
 connectivity faces.
 
-**7. Submit the work item and watch the agent work:**
+**7. Submit the work item and watch it run:**
 
 ```
 bin/pf --config /tmp/pf-quickstart/cli.toml submit <WI_ID>
@@ -142,8 +143,7 @@ snapshot read from the capsule's `execution.json`: status, current step and
 how long it has run, the pending question and the latest events;
 `pf watch --chat "$PF_CHAT_ID" --wait-decision` is the resident per-chat
 watcher that wakes a harness session only for human decisions (see
-`skills/polyforge/SKILL.md`). `pf watch <id> --once` is the one-shot snapshot (status, step, ages,
-pending question, latest events). Give the first step a
+`skills/polyforge/SKILL.md`). Give the first step a
 few minutes: once the driver commits the first `runtime-state/execution.json`
 version, the snapshot shows a current step and a `published` event.
 
@@ -180,8 +180,8 @@ kill <AIHUB_PID>
 
 Design record: `docs/design/polyforge-vnext/v1-architecture-spec.md`, as
 superseded in part by `docs/design/polyforge-vnext/v2-converge.md` (the
-design authority; conflicts resolve in its favor)
-(full design record: `v1-spec-full.md`; the frozen v0 pilot tree was removed from the working tree and lives in git history / the `v0-archive` tag; restore with `git checkout v0-archive -- v0`).
+design authority; conflicts resolve in its favor; full design record:
+`v1-spec-full.md`).
 The subsections below describe the code as it actually exists in this tree —
 the live code is the authority; design-doc references are for traceability.
 
@@ -191,20 +191,26 @@ One row per sub-package, exactly as `internal/` exists today:
 
 | Package | Role |
 | --- | --- |
-| `internal/common/api` | Shared business contract between aihub and pf: work items, projects, users, generations, memories, and the typed error-code registry (`CORE-*`, `DAEMON-*`, `GIT-*`). |
-| `internal/common/capsule` | Execution-capsule contract shared by pf (runtime creates capsules, observe commits them) and aihub (serves the matching bare repos; git-dir lives outside the capsule). |
+| `internal/common/api` | Shared business contract between aihub and pf: work items, projects, users, generations, memories, and the typed error-code registry (`CORE-*`, `MEM-*`, `AUTH-*`, `DAEMON-*`, `GIT-*`, `CAP-*`). |
+| `internal/common/capsule` | Execution-capsule contract shared by pf (runtime creates capsules, the driver writes `execution.json`, the observe lane commits them) and aihub (serves the matching bare repos; git-dir lives outside the capsule). |
 | `internal/common/protocol` | The in-machine contracts: Runtime↔Observe messages and the pf CLI↔daemon UDS HTTP API surface. |
+| `internal/common/spawn` | Process-derivation contract shared by the runtime (daemon assembly) and the driver (step-process spawning). |
 | `internal/common/workflow` | Workflow-bundle digest contract shared by pf (bundle materialization with digest verification) and aihub (serves bundle bytes, validates digests at claim time). |
 | `internal/aihub/core` | aihub persistent layer: SQLite store (single writer, WAL), the work-item state machine, claim/generation arbitration with attempt-scoped push credentials, the ready queue and the admin face. |
 | `internal/aihub/git` | aihub git surface: per-WI bare-repo lifecycle, the git-http-backend smart-protocol proxy, attempt-scoped credential auth (generation fencing) and the pre-receive hook enforcing the capsule-chain invariants. |
 | `internal/aihub/memory` | Core-side memory store: FTS5-trigram full-text search, authoritative `memory.md` files and the reconcile procedure. |
-| `internal/aihub/server` | The v1 AIHub HTTP face: business endpoints (v0 openapi surface minus every SYNC-*/revision-chain route), the admin face, and the `/git/{wi}.git/...` proxy mount; Bearer API key auth, typed `api.Error` envelope. |
+| `internal/aihub/server` | The AIHub HTTP face: business endpoints, the admin face, and the `/git/{wi}.git/...` proxy mount; Bearer API key auth, typed `api.Error` envelope. |
 | `internal/polyforge/aihubclient` | Shared HTTP client for the aihub server, used by runtime, observe and the CLI verbs; decodes the typed error envelope back into `*api.Error`. |
-| `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, submit, `watch`, answer, pause, resume, wrap, ops), `chat`, `ship`, the M1–M5 management face, the daemon client over the UDS socket, and config resolution. |
-| `internal/polyforge/daemon` | Phase-3 assembly of the local work machine: the UDS HTTP face, Runtime + Observe wired over the five protocol messages, the auto switch, the pending-job dispatcher, the auto-pull loop, the ship delivery bridge and the graceful shutdown sequence. |
+| `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, memory, submit, `watch`, answer, pause, resume, wrap, ops), `chat`, `ship`, the management face (users, api-keys, projects, machines, backup), the daemon client over the UDS socket, and config resolution. |
+| `internal/polyforge/daemon` | Assembly of the local work machine: the UDS HTTP face, runtime, observe lane and driver wired together, the auto switch, the pending-job dispatcher, the auto-pull loop, the ship delivery bridge and the graceful shutdown sequence. |
 | `internal/polyforge/gitops` | Shared capsule-git operations layer used by Runtime (clone at start, dirty-commit at recover) and Observe (async commit+push); owns the per-WI git mutex and the `Polyforge-Seq` trailer derivation. |
+| `internal/polyforge/bridge` | Connects the runtime's job machinery to the Go driver: a running `Driver.Run` is the job's agent handle for supervision. |
+| `internal/polyforge/mapping` | The workspace→projects plan read from cli.toml's `[workspace]` sections, and its validated inverse (project → workspace). |
+| `internal/polyforge/sessionjsonl` | The single parser of the harness session-jsonl format (live transcript tail extraction). |
+| `internal/polyforge/supervise` | The driver↔supervisor contract: facts, verdicts and the per-WI link (v2-converge §2.2–2.5). |
+| `internal/polyforge/workspace` | The `.polyforge.yaml` workspace-defaults loader shared by claim-time reads, candidate compose and `pf file create` project inference. |
 | `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, and the observe/answer HTTP face over the monitors. |
-| `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules, human gate, V4 command-evidence gate). |
+| `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules, human gate, command-evidence gate). |
 | `internal/polyforge/watcher` | The `pf watch` engine: decision classification (fixed-template wake-up lines) and the resident per-chat watcher with its progress file. |
 | `internal/polyforge/runtime` | Runtime lane: the WI lifecycle manager (Start/Stop/Recover/Restart), the pi-harness agent spawner, the six-layer process cleanup and the recovery engine. |
 
@@ -215,9 +221,8 @@ CLI verbs + `pf daemon`).
 
 The routes mounted by the daemon's local Unix-socket HTTP face
 (`internal/polyforge/daemon/routes.go`). **Face** marks who calls the route:
-`user` = the operator's CLI / observe tooling. (The in-capsule agent's
-lifeline proxies and the flush lane were retired with the WI-Agent lane,
-polyforge#106; no step process reaches the daemon socket by design.)
+`user` = the operator's CLI / watch tooling. (No step process reaches the
+daemon socket by design.)
 
 | Method | Path | Role | Face |
 | --- | --- | --- | --- |
@@ -304,8 +309,8 @@ registry; `pf <verb> -help` one verb's face. The routing skill's fragments
 
 | Face | Verbs |
 | --- | --- |
-| aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember` |
-| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`; the old `pf observe` verb is removed), `answer`, `pause`, `resume`, `wrap`, `ship`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
+| aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember`, `memory` |
+| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ship`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
 | management | `users`, `api-keys`, `projects`, `machines`, `backup`, `rotate-secret` |
 | local | `daemon` (run the work machine), `doctor` |
 
@@ -313,12 +318,12 @@ Human moves: continue = `pf resume <id>` (a paused, blocked or repair_pending
 WI), abandon = `pf cancel <id>` (queued, paused, blocked, or repair_pending on
 this daemon), owner's failed verdict = `pf wrap <id> --fail`. These run with the
 human's own api key: aihub's door checks the WI's reporter, a project
-maintainer or an admin. There is no `unblock` verb.
+maintainer or an admin.
 
 ## `pf daemon` flags
 
-`pf daemon` runs the local work machine (Runtime + Observe over the UDS
-face). Every setting is a flag; where an environment variable is listed
+`pf daemon` runs the local work machine (runtime, driver and watcher over
+the UDS face). Every setting is a flag; where an environment variable is listed
 the flag wins over it, and the shared CLI config file
 (`~/.config/polyforge/cli.toml`, or `--config`) is the last fallback for
 the `PF_*` entries.
@@ -378,7 +383,7 @@ actually read first. After a fix lands, write its status back: append the
 「已修」/Fixed annotation (with commit reference) to the ledger entry the
 change fixes, so the ledger the next lane recalls is never stale.
 
-Minimal external dependencies: pure-Go SQLite (modernc.org/sqlite), yaml.v3, goldmark, jsonschema, x/sys.
+Minimal external dependencies: pure-Go SQLite (modernc.org/sqlite), yaml.v3, goldmark, jsonschema, klauspost/compress, x/sys.
 
 ## `pf recall` — memory search
 
@@ -419,7 +424,7 @@ Examples:
 
 Change coverage is tiered by the change's **behavior face**, not by a
 "e2e on every ticket" blanket rule (owner ruling 2026-10-02). The existing
-40-scenario e2e suite (`go test ./test/`) is the regression net for every
+e2e suite (`go test ./test/`) is the regression net for every
 change — each ticket's verification step runs it — and the three disciplines
 below govern when **new** coverage must be added. The authoritative source is
 `docs/design/polyforge-vnext/v1.5-change-coverage-rules.md` (Chinese); this
@@ -433,7 +438,7 @@ a graph that carries e2e-author / e2e-run steps (currently `feature-full`;
 giving another graph those steps is zero code). Pure refactors, pure docs,
 and obviously non-behavior chores keep the existing graphs (the existing
 suite + verification is enough). Quick test: ask "after this merges, what
-difference would users/callers perceive that the existing 40 scenarios can't
+difference would users/callers perceive that the existing scenarios can't
 detect?" — if you can answer, new scenarios are required. Edge case: a small
 ticket discovered mid-flight to touch the behavior face (at the grill/spec
 stage) declares it in needs_input, and the owner decides between re-filing
@@ -453,8 +458,8 @@ window before the next cutover-grade release.** Any merge touching
 `workflows/*/workflow.md` requires a real-WI observation window and gate
 readings before the next cutover-grade release: a clean rig, ≥10 real
 tickets of mixed bundle types (including ≥1 exercising the changed
-surface), owner-answered needs_input, and the readings (V4 evidence gate, V8
-sync chain, recovery/blocked counts, orphan counts) compared against the
+surface), owner-answered needs_input, and the readings (command-evidence gate,
+revision chain, recovery/blocked counts, orphan counts) compared against the
 previous window — no regression passes, regression freezes merges until
 fixed. The window ticket is registered at merge; it blocks cutover, not
 merge. The report lands in `docs/pilot/` and readings never rewrite
