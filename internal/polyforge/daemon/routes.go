@@ -431,9 +431,8 @@ func (d *Daemon) adoptSessionRoute(w http.ResponseWriter, r *http.Request) {
 // workflow is parked blocked on an honest incomplete result (polyforge#116):
 // the bounded close dropped the job, so the owner's moves on this state are
 // the §6.4 face, not a runtime close — `--fail` is the owner's terminate
-// verdict, landed at the hub by the terminate-blocked door (the
-// session-fenced session-end is unavailable: the bounded close cleared the
-// session); a wrap (success) or a pause of a parked workflow has nothing to
+// verdict, landed by the CLI at the hub's terminate-blocked door with the
+// human's key (refused here with a hint); a wrap (success) or a pause of a parked workflow has nothing to
 // seal — refused with the owner-move copy. Returns true when it answered;
 // a non-blocked work item falls through to the caller's terminalOf/404.
 func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
@@ -441,14 +440,14 @@ func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
 	if err != nil || item == nil || item.Status != api.StatusBlocked {
 		return false
 	}
+	// The terminate verdict (`--fail`) is NOT landed here: the hub's
+	// terminate-blocked door authorizes the HUMAN (reporter / maintainer /
+	// admin), so the CLI calls it with the user's own key; the daemon's
+	// machine key is not that caller. There is no local state to clean —
+	// the bounded close already dropped the job.
 	if reason == protocol.FinishFailed {
-		if _, err := d.hub.TerminateBlockedWorkItem(wi); err != nil {
-			writeErrOf(w, err)
-			return true
-		}
-		writeJSON(w, http.StatusOK, closeResponse{
-			WorkItemID: wi, Outcome: "terminated", Status: api.StatusFailed, Reason: reason,
-		})
+		writeErr(w, api.ErrDaemonConflict,
+			"the workflow is parked blocked — its failed verdict is landed by the CLI with your own credential (`pf wrap --fail <id>` from an up-to-date pf), or abandon it with `pf cancel <id>`")
 		return true
 	}
 	writeErr(w, api.ErrDaemonConflict,

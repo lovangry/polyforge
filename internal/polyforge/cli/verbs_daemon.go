@@ -470,6 +470,23 @@ var cmdWrap = &Command{
 		if boolFlag(fs, "fail") {
 			reason = "fail"
 		}
+		// A WI parked blocked has no local job: `--fail` is the owner's
+		// terminate verdict, landed at the hub's terminate-blocked door with
+		// the HUMAN's own api key (reporter / maintainer / admin is checked
+		// against the person typing, not the daemon's machine key). No
+		// daemon step follows: the bounded close already dropped the job.
+		if reason == "fail" {
+			if wi, gerr := ctx.aihub().GetWorkItem(args[0]); gerr == nil && wi.Status == api.StatusBlocked {
+				raw, err := ctx.aihub().TerminateBlockedWorkItem(args[0])
+				if err != nil {
+					return err
+				}
+				ctx.finish(raw, func() {
+					fmt.Fprintf(ctx.Stdout, "%s requested for %s (the parked workflow was terminated at the hub)\n", reason, args[0])
+				})
+				return nil
+			}
+		}
 		raw, err := ctx.daemon().Wrap(args[0], reason)
 		if err != nil {
 			return err

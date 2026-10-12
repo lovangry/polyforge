@@ -293,6 +293,54 @@ func TestResumeFlagClearSemantics(t *testing.T) {
 	}
 }
 
+// TestWrapFailBlockedLandsDoorWithHumanKey: `pf wrap --fail` on a WI parked
+// blocked posts aihub's terminate-blocked door directly with the human's api
+// key and never contacts the daemon; a refused door (non-owner) is typed.
+func TestWrapFailBlockedLandsDoorWithHumanKey(t *testing.T) {
+	blockedWI := `{"id":"wi_blocked","slug":"pf-43","seq":43,"project":"polyforge","goal":"g",` +
+		`"status":"blocked","priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z",` +
+		`"updated_at":"2026-10-01T00:00:00Z"}`
+	var rec reqRecorder
+	hub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, blockedWI)
+	})
+	d := newDaemonFixture(t)
+	code, stdout, stderr := runPf(t, map[string]string{
+		"PF_SERVER": hub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
+	}, "wrap", "wi_blocked", "--fail")
+	if code != 0 || !strings.Contains(stdout, "fail requested for wi_blocked") {
+		t.Fatalf("wrap --fail: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	var door *capturedRequest
+	for _, r := range rec.all() {
+		r := r
+		if r.Method == "POST" && r.Path == "/api/v1/work-items/wi_blocked/terminate-blocked" {
+			door = &r
+		}
+	}
+	if door == nil || !strings.Contains(door.Header.Get("Authorization"), "human-key") {
+		t.Fatalf("the terminate door must be posted with the human's key: %+v", rec.all())
+	}
+	if n := len(d.rec.all()); n != 0 {
+		t.Errorf("the daemon must not be contacted: %v", d.rec.all())
+	}
+
+	deny := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `{"code":"AUTH-403","detail":"terminate-blocked requires the work item's reporter, a project maintainer or admin"}`)
+			return
+		}
+		io.WriteString(w, blockedWI)
+	})
+	code, _, stderr = runPf(t, map[string]string{
+		"PF_SERVER": deny.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "plain",
+	}, "wrap", "wi_blocked", "--fail")
+	if code != 1 || !strings.Contains(stderr, "AUTH-403") {
+		t.Errorf("non-owner must be refused: code=%d stderr=%s", code, stderr)
+	}
+}
+
 // TestResumeBlockedDoorWiring (polyforge#116): a workflow parked blocked
 // answers the §6.4 owner move, not the pause copy — the hub status picks
 // the door, and the blocked door contacts the daemon's resume-blocked
