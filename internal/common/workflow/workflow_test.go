@@ -14,7 +14,6 @@ import (
 
 const fmFixture = `---
 name: demo
-budget: { requests: 10, tokens: 1000, wall_minutes: 5 }
 defaults:
   model_candidates: [prov-a/model-a1, prov-a/model-a2, prov-b/model-b1]
 steps:
