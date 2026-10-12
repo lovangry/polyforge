@@ -34,6 +34,7 @@ func TestV1S09GracefulShutdown(t *testing.T) {
 	d.start()
 	d.pf(t, "submit", wi)
 	waitSpawnCount(t, d, wi, 1, 30*time.Second)
+	waitSpawnTranscript(t, d, wi, 1, 30*time.Second)
 	capDir := d.capsuleDir(wi)
 
 	// The session fingerprint BEFORE the shutdown (T4's identity pair

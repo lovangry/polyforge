@@ -395,7 +395,14 @@ func TestV2DaemonRestartNotCountedSameModel(t *testing.T) {
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
 	waitSpawnCount(t, d, wi, 1, 30*time.Second)
+	waitSpawnTranscript(t, d, wi, 1, 30*time.Second)
+	waitUntil(t, 30*time.Second, "fakepi never journaled its first spawn", func() bool {
+		return len(spawnModels(t, d.capsuleDir(wi))) >= 1
+	})
 	firstModels := spawnModels(t, d.capsuleDir(wi))
+	if len(firstModels) == 0 {
+		t.Fatalf("no fakepi spawn record before the crash")
+	}
 
 	d.crash()
 	for _, pid := range orphanPIDs(wi) { // the dispatch dies with its daemon's tree

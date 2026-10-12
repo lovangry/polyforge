@@ -50,6 +50,7 @@ func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 	// The original derivation is healthy (live, mid-delay), then killed.
 	capDir := d.capsuleDir(wi)
 	waitSpawnCount(t, d, wi, 1, 30*time.Second)
+	waitSpawnTranscript(t, d, wi, 1, 30*time.Second)
 	pid := latestSpawnPID(t, d, wi)
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill -9 %d: %v", pid, err)
