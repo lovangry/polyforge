@@ -13,6 +13,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -59,11 +60,26 @@ func TestRecoveryWindowThenWrapClosesOnce(t *testing.T) {
 	close(park)
 	waitState(t, td, "wi_rw", "running")
 	// The monitor's adoption of the new derivation lags the RUNNING flip
-	// by the attachment pipeline; wait for it to drain.
+	// by the attachment pipeline: poll until it logs agent_recovered for
+	// spawn 2 (the recovered derivation's counter).
+	adopted := func() bool {
+		for _, e := range td.obs.Events().Since("wi_rw") {
+			if e.Kind != observe.EvAgentRecovered {
+				continue
+			}
+			var b struct {
+				SpawnN int `json:"spawn_n"`
+			}
+			if json.Unmarshal(e.Body, &b) == nil && b.SpawnN == 2 {
+				return true
+			}
+		}
+		return false
+	}
 	deadline := time.Now().Add(5 * time.Second)
-	for td.rtMsgs.Len() != 0 || td.attachCh.Len() != 0 {
+	for !adopted() {
 		if time.Now().After(deadline) {
-			t.Fatal("the attachment pipeline never drained")
+			t.Fatal("the monitor never adopted the recovered derivation (no agent_recovered spawn_n 2)")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

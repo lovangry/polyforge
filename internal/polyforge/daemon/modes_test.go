@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"errors"
+	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"os"
 	"path/filepath"
 	"testing"
@@ -228,4 +229,27 @@ func TestInvalidWorkspaceYamlRefusedBeforeClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	td.waitLive(t, "wi_a1")
+}
+
+// TestTransientProbeFailureKeepsSubmitQueued: an explicit submit whose
+// pre-claim hub probe hits a transient blip at dispatch time is not
+// dropped — it stays queued, no submit_rejected is recorded, and the next
+// dispatch tick claims it once the hub answers again.
+func TestTransientProbeFailureKeepsSubmitQueued(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	mkBare(t, td.cfg.GitRemoteBase, "wi_blip")
+	// call 1 is the submit route's own (advisory) probe, call 2 the
+	// dispatcher's Start probe: both fail; the third succeeds.
+	td.hub.mu.Lock()
+	td.hub.probeFails = 2
+	td.hub.mu.Unlock()
+	if _, err := td.client.Claim("wi_blip", "normal"); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	td.waitLive(t, "wi_blip")
+	for _, e := range td.obs.Events().Since("wi_blip") {
+		if e.Kind == observe.EvSubmitRejected {
+			t.Fatalf("a transient probe failure must not reject the submit: %+v", e)
+		}
+	}
 }

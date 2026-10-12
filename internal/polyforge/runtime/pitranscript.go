@@ -25,10 +25,14 @@ package runtime
 // capsule directory itself must carry the canonical work-item id (F2).
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
 )
 
 // locateSlack is how far before the spawn moment a live transcript's
@@ -122,4 +126,36 @@ func LocateLiveTranscript(sessionsRoot, capsuleDir string, notBefore time.Time) 
 		}
 	}
 	return best
+}
+
+// syncLiveTranscript copies the CURRENT dispatch's live harness
+// transcript onto that dispatch's own capsule session path (the latest
+// spawn-journal entry's transcript) so a seal / pause / bounded-fail
+// commit carries the tail written since the last commit boundary. It is
+// synchronous and best-effort (a missing source or journal is a no-op:
+// the commit proceeds without the tail) and touches only the latest
+// dispatch's file — an earlier step's transcript is never overwritten.
+// A resumed dispatch already appends to the capsule file itself. Callers
+// run it after the agent tree is killed and BEFORE the commit and the
+// read-only seal.
+func (r *Runtime) syncLiveTranscript(capsuleDir string) {
+	entries, _ := capsule.ReadSpawnJournal(capsuleDir)
+	if len(entries) == 0 {
+		return
+	}
+	last := entries[len(entries)-1]
+	if last.Transcript == "" || last.Resume {
+		return
+	}
+	spawnAt, err := time.Parse(time.RFC3339Nano, last.StartedAt)
+	if err != nil {
+		return
+	}
+	src := LocateLiveTranscript(r.cfg.HarnessSessionsRoot, capsuleDir, spawnAt)
+	if src == "" || src == last.Transcript {
+		return
+	}
+	if err := sessionjsonl.CopyReadonly(src, last.Transcript); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: transcript sync before commit failed: %v\n", err)
+	}
 }

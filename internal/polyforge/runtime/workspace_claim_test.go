@@ -277,3 +277,25 @@ func TestReplayWithInvalidYamlCompensatesBlocked(t *testing.T) {
 		t.Fatalf("the journal must settle, got %+v", items)
 	}
 }
+
+// A transport-class failure of the pre-claim probe is the typed transient
+// DAEMON-503 (nothing claimed, the caller retries); a hub refusal stays a
+// plain final error.
+func TestStartProbeFailureIsTypedTransient(t *testing.T) {
+	hub := newFakeHub()
+	r, _, _ := newWorkspaceTestRuntime(t, hub, "proj")
+	hub.lookupErr = map[string]error{"wi_probe": errors.New("connection refused")}
+	err := r.Start(context.Background(), "wi_probe")
+	var ae *api.Error
+	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonHubUnavailable {
+		t.Fatalf("transport-class probe failure = %v, want DAEMON-503", err)
+	}
+	hub.lookupErr["wi_probe"] = &api.Error{Code: api.ErrCoreNotFound, Detail: "no such work item"}
+	err = r.Start(context.Background(), "wi_probe")
+	if err == nil || (errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable) {
+		t.Fatalf("a hub refusal must stay final, got %v", err)
+	}
+	if n := hub.claimCount(); n != 0 {
+		t.Fatalf("a failed probe must not claim, got %d", n)
+	}
+}

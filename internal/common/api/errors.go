@@ -93,6 +93,10 @@ const (
 	// typed error instead of silently skipping the record.
 	ErrDaemonShipLedger = "DAEMON-514"
 	ErrDaemonInternal   = "DAEMON-500"
+	// ErrDaemonHubUnavailable is the transient pre-claim refusal: the
+	// work-item probe could not reach the hub (transport loss or a 5xx).
+	// Nothing was claimed; the caller retries.
+	ErrDaemonHubUnavailable = "DAEMON-503"
 	// ErrDaemonCapsuleClone is the re-claim clone refusal: the capsule
 	// clone failed for a work item that has published progress (or whose
 	// published state cannot be determined), so a local init — which

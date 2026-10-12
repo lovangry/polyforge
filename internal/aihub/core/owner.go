@@ -53,6 +53,14 @@ func (m *OwnerManager) CheckSessionCredential(wiID, username, secret string) (st
 		return "", Fail(api.ErrGitUnauthorized, "BAD_CREDENTIAL",
 			"credential rejected: the work item is held by session %s", fp.String)
 	}
+	// Fail closed: the handle the proxy hands the pre-receive fence must be
+	// the secret's own fingerprint. An empty or divergent stored value would
+	// reach the hook as an empty PF_EXPECTED_FINGERPRINT, which skips the
+	// fence (the hook's no-proxy branch) — refuse the push instead.
+	if fp.String != api.SessionFingerprint(secret) {
+		return "", Fail(api.ErrGitUnauthorized, "BAD_FINGERPRINT",
+			"credential rejected: the session's fingerprint is missing or invalid")
+	}
 	if status != api.StatusRunning {
 		return "", Fail(api.ErrGitForbidden, "PAUSED",
 			"pushes are refused while the work item is %s (session holder %s)", status, fp.String)

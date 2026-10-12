@@ -410,8 +410,7 @@ type MachinesList struct {
 }
 
 // ListMachinesRaw reads the machines liveness face undecoded (--json
-// passthrough: the server body byte-for-byte). The typed ListMachines
-// above stays for programmatic users.
+// passthrough: the server body byte-for-byte).
 func (c *Client) ListMachinesRaw() (json.RawMessage, error) {
 	return c.raw("GET", "/api/v1/machines", nil)
 }

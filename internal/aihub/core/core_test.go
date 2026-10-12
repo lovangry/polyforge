@@ -236,6 +236,10 @@ func TestTerminalTransitions(t *testing.T) {
 	if err != nil || canceled.Status != api.StatusCanceled {
 		t.Fatalf("cancel: %v", err)
 	}
+	// A terminal WI cannot be cancelled again: CORE-410 TERMINAL_STATE.
+	if _, err := env.WIs.Cancel(id2, env.UserID); !IsCode(err, api.ErrCoreGone) || ErrorReason(err) != "TERMINAL_STATE" {
+		t.Fatalf("cancel of terminal not refused CORE-410: %v", err)
+	}
 	// Running WI cannot be cancelled directly.
 	id3 := mustCreateExecWI(t, env, "goal six", nil, "")
 	secret3 := "10101010101010101010101010101010"

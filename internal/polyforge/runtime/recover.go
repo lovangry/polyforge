@@ -192,10 +192,10 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// effectiveCandidatesForRecovery) ride every relaunch attempt, and
 	// the interrupted dispatch (the death that forced this recovery)
 	// is archived by the driver before the re-dispatch: the
-	// recomputation then advances on provider-class causes alone. The
-	// archive signal is the raw cause — the bridge classifies it and
-	// filters operator-shaped stops (a deliberate stop is not a model
-	// verdict).
+	// recomputation then advances on model-class causes alone
+	// (driver.IsModelClass). The archive signal is the raw cause — the
+	// bridge classifies it and filters operator-shaped stops (a
+	// deliberate stop is not a model verdict).
 	stepCandidates := r.effectiveCandidatesForRecovery(j)
 	interruptedCause := cause
 	for {
@@ -388,6 +388,7 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 // are the caller's to log; the LOCAL commit is the durable half and it
 // stands on its own.
 func commitDirty(r *Runtime, j *job) string {
+	r.syncLiveTranscript(j.capsuleDir)
 	sha, _, _, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)

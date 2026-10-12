@@ -100,7 +100,7 @@ type LiveProgress struct {
 }
 
 // Progress answers the live progress of one work item's current dispatch
-// (any id form the observe routes accept); ok=false when the work item is
+// (the canonical id or the operator's slug spelling); ok=false when the work item is
 // not monitored here.
 func (o *Observe) Progress(wi string) (LiveProgress, bool) {
 	m := o.lookup(wi)

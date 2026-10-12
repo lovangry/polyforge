@@ -505,6 +505,30 @@ func TestSessionClaimGates(t *testing.T) {
 	}
 }
 
+// A held session whose stored fingerprint is empty/NULL/divergent must be
+// refused: the proxy would otherwise hand the hook an empty expected
+// fingerprint, which skips the push-option fence.
+func TestCheckSessionCredentialRejectsBadFingerprint(t *testing.T) {
+	env, m := sessionEnv(t)
+	secret := "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+	id := mustCreateExecWI(t, env, "fp guard", nil, "")
+	mustSessionClaim(t, m, env, id, secret, "p-1")
+	for _, bad := range []string{"", "deadbeefdeadbeef"} {
+		if _, err := env.DB.Exec(`UPDATE work_items SET session_fingerprint=?1 WHERE id=?2`, bad, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.Owners.CheckSessionCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) || ErrorReason(err) != "BAD_FINGERPRINT" {
+			t.Fatalf("fingerprint %q not refused: %v", bad, err)
+		}
+	}
+	if _, err := env.DB.Exec(`UPDATE work_items SET session_fingerprint=NULL WHERE id=?1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Owners.CheckSessionCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) {
+		t.Fatalf("NULL fingerprint not refused: %v", err)
+	}
+}
+
 // TestCheckSessionCredentialSessionPath: the git credential check validates
 // hex(sha256(password)) == session_hash AND status==running (M3); the
 // mismatch names the current holder fingerprint.

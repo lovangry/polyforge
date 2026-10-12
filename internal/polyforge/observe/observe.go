@@ -3,8 +3,8 @@ package observe
 // observe.go: the Observe hub — the supervisor's root object. It owns
 // the events log (driver events land in it too, durably), spawns one
 // per-WI supervisor goroutine per RTStarted, routes RTRecovered/WIFinished
-// to the right monitor, and exposes the HTTP face (observe/answer) over
-// the monitors. Runtime talks to Observe through exactly two channels
+// to the right monitor, and exposes the monitors' read faces (Activities,
+// PendingInputs, Progress, the events log) to the daemon. Runtime talks to Observe through exactly two channels
 // carrying the five protocol messages (the driver Handle rides WITH the
 // lifecycle message as the attachment — it is not a third message kind).
 

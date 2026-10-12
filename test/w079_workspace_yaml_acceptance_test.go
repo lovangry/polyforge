@@ -246,7 +246,7 @@ func w079Refused(t *testing.T, d *w113Daemon, inst *v1Install, ws, wi, submitOut
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if status := inst.wiStatus(t, wi); status != "queued" {
-			t.Fatalf("refused work item %s left queued: status %q — a pre-claim refusal must never claim it (log tail %s)", wi, status, d.logTail())
+			t.Fatalf("refused work item %s left the queued state: status %q — a pre-claim refusal must never claim it (log tail %s)", wi, status, d.logTail())
 		}
 		if _, err := os.Stat(w079Capsule(ws, wi)); err == nil {
 			t.Fatalf("refused claim of %s materialized a capsule at %s", wi, w079Capsule(ws, wi))

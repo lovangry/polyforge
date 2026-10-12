@@ -159,9 +159,9 @@ CREATE TABLE IF NOT EXISTS wi_ship_ledger (
   -- polyforge#123 (P1b): the ship-time WI → repo → branch-top SHA
   -- ledger. One row per (WI, repo); ship upserts the branch top it
   -- pushed (or re-used), so the ledger always answers "where this WI's
-  -- copy of the repo lives in git". The queryable face is
-  -- GET /api/v1/work-items/{id}/ship-ledger; the recording face is the
-  -- ship bridge's POST. Not execution state (INV-1): it is delivery
+  -- copy of the repo lives in git". It is
+  -- recorded through POST /api/v1/work-items/{id}/ship-ledger by the ship
+  -- bridge (no HTTP read face). Not execution state (INV-1): it is delivery
   -- accounting about git remotes, written by the daemon's ship bridge.
   work_item_id   TEXT NOT NULL REFERENCES work_items(id),
   repo           TEXT NOT NULL,               -- repo short name (inventory spelling)

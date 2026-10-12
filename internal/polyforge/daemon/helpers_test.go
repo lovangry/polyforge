@@ -8,6 +8,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,6 +112,9 @@ type fakeHub struct {
 	// reporters maps a canonical id to the WI reporter (owner fallback).
 	reporters map[string]string
 	blockEnd  chan struct{} // non-nil: SessionEnd parks until closed
+	// probeFails, when > 0, makes the next N GetWorkItem calls fail with a
+	// transport-class error (a transient hub blip).
+	probeFails int
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string
@@ -233,6 +237,10 @@ func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.probeFails > 0 {
+		h.probeFails--
+		return nil, errors.New("connection refused")
+	}
 	id := h.canonicalID(idOrSlug)
 	st := h.status[id]
 	if st == "" {

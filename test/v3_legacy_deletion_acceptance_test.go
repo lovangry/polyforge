@@ -56,20 +56,32 @@ func v3Tok(parts ...string) string {
 // covered by the document scenarios, not by a blind token scan.
 func v3SpecFloorTerms() []string {
 	return []string{
-		v3Tok("use", "-", "driver"),                // both dash spellings of the retired engine flag, and every pin of them
-		v3Tok("Use", "Driver"),                     // the engine Config plumbing (and its Explicit sibling)
-		v3Tok("spawn", "Agent"),                    // the legacy recover cascade's spawn entry
-		v3Tok("resume", "Source"),                  // the resume→fresh cascade discriminator
-		v3Tok("transcript", "Readable"),            // the cascade's transcript probe
-		v3Tok("build", "Prompt"),                   // the WI-Agent prompt assembly face
-		v3Tok("Executor", "Prompt", "File"),        // the executor prompt Config plumbing
-		v3Tok("executor", "-", "prompt"),           // the daemon flag (and every help-text mention)
-		v3Tok("PFV1", "_", "LEGACY", "_LAN"),       // the retired test hatch, everywhere
-		v3Tok("pf", "-", "execute"),                // the deleted skill, on code/build surfaces
-		v3Tok("wrap", "_", "unless", "_refused"),   // a fakepi RPC action with no kept homonym
-		v3Tok("answer", "-", "ack", "-", "window"), // the retired answer-ack knob: flag spelling
-		v3Tok("Answer", "Ack", "Window"),           // ... and its Go identifier
-		v3Tok("answer", "Ack", "Window"),           // ... and the harness var spelling
+		v3Tok("use", "-", "driver"),                   // both dash spellings of the retired engine flag, and every pin of them
+		v3Tok("Use", "Driver"),                        // the engine Config plumbing (and its Explicit sibling)
+		v3Tok("spawn", "Agent"),                       // the legacy recover cascade's spawn entry
+		v3Tok("resume", "Source"),                     // the resume→fresh cascade discriminator
+		v3Tok("transcript", "Readable"),               // the cascade's transcript probe
+		v3Tok("build", "Prompt"),                      // the WI-Agent prompt assembly face
+		v3Tok("Executor", "Prompt", "File"),           // the executor prompt Config plumbing
+		v3Tok("executor", "-", "prompt"),              // the daemon flag (and every help-text mention)
+		v3Tok("PFV1", "_", "LEGACY", "_LAN"),          // the retired test hatch, everywhere
+		v3Tok("pf", "-", "execute"),                   // the deleted skill, on code/build surfaces
+		v3Tok("wrap", "_", "unless", "_refused"),      // a fakepi RPC action with no kept homonym
+		v3Tok("answer", "-", "ack", "-", "window"),    // the retired answer-ack knob: flag spelling
+		v3Tok("Answer", "Ack", "Window"),              // ... and its Go identifier
+		v3Tok("answer", "Ack", "Window"),              // ... and the harness var spelling
+		v3Tok("Fault", "Class"),                       // the retired fault-classification type
+		v3Tok("Classify", "Fault"),                    // ... and its classifier
+		v3Tok("repair", "_", "pending"),               // the retired repair-pending state
+		v3Tok("refresh", "Bundle"),                    // the retired bundle re-materialization hook
+		v3Tok("ensure", "Materialized"),               // the retired materialization guard
+		v3Tok("Remote", "Published"),                  // the retired published-remote probe
+		v3Tok("Job", "View"),                          // the retired observe job view
+		v3Tok("rotate", "-", "secret"),                // the retired secret-rotation verb
+		v3Tok("Candidates", "For", "("),               // the retired candidates accessor (the live recovery helper has a longer name)
+		v3Tok("jobs/{wi}/", "observe"),                // the retired observe route
+		v3Tok("Start", "Intent"),                      // the retired start-intent plumbing
+		v3Tok("sync", "Transcript", "Before", "Seal"), // the job-level seal-time transcript overwrite
 	}
 }
 

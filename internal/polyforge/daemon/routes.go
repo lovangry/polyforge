@@ -1,9 +1,8 @@
 package daemon
 
-// routes.go: the daemon's UDS HTTP face. The observe lane's routes
-// (observe/answer) are mounted from observe.Handler();
-// everything else translates the CLI contract (internal/polyforge/cli/
-// daemon.go — the pinned route family) into Runtime calls. Every error
+// routes.go: the daemon's UDS HTTP face. Every route translates the CLI
+// contract (internal/polyforge/cli/verbs_daemon.go — the pinned route
+// family) into Runtime/observe calls. Every error
 // answer is the TOP-LEVEL api.Error envelope {code, detail} (the same
 // typed shape the aihub face uses; DAEMON-* codes per 04 §5.2).
 

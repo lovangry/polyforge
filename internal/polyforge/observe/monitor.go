@@ -40,8 +40,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/atomicfile"
-
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
@@ -740,7 +738,7 @@ func (m *Monitor) syncTranscript(s transcriptSnapshot) {
 	if src == s.dst {
 		return // a resumed derivation already writes into the capsule
 	}
-	if err := copyFileReadonly(src, s.dst); err != nil {
+	if err := sessionjsonl.CopyReadonly(src, s.dst); err != nil {
 		if m.claimTranscriptWarning() {
 			_ = m.log.Append(m.wi.WorkItem, EvTranscriptMissing, map[string]any{
 				"detail":  fmt.Sprintf("transcript sync failed: %v", err),
@@ -748,23 +746,6 @@ func (m *Monitor) syncTranscript(s transcriptSnapshot) {
 			})
 		}
 	}
-}
-
-// copyFileReadonly copies src onto dst without ever opening the source
-// for writing (the source is the harness's own session store). The source
-// read goes through the ONE session-jsonl parser (wi_LMSxPTQTtz5x step
-// sync_face_tail): the whole-file tail extraction preserves the raw bytes,
-// so the session-jsonl storage format has a single parsing source in the
-// repo (the stdout-wire parser stream.go is a different vocabulary and
-// stays untouched). The destination semantics are unchanged: tmp+rename,
-// 0644.
-func copyFileReadonly(src, dst string) error {
-	recs, err := sessionjsonl.Tail(src, 0)
-	if err != nil {
-		return err
-	}
-	data := sessionjsonl.MarshalRaw(recs)
-	return atomicfile.Write(dst, data, 0o644)
 }
 
 // schedulePush starts one async commit+push sub-goroutine when a newer

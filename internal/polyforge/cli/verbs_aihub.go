@@ -142,9 +142,9 @@ func fileCreate(ctx *Context, args []string) error {
 		req.Goal = *goal
 	}
 	if req.Project == "" {
-		// polyforge#79 inference: the cwd → workspace → yaml default. It
+		// polyforge#79 inference: the cwd → mapped workspace. It
 		// answers a project, the #113 required-flag error (verbatim), or
-		// the typed yaml/ambiguity error — never a silent skip.
+		// the ambiguity error — never a silent skip.
 		proj, err := inferProjectFromCwd(ctx)
 		if err != nil {
 			return err

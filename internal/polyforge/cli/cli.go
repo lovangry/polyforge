@@ -296,7 +296,7 @@ var helpGroups = []struct{ id, title string }{
 
 // printUsage lists all commands grouped by Command.Group, in registry order.
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "pf — polyforge v1 client CLI")
+	fmt.Fprintln(w, "pf — polyforge client CLI")
 	fmt.Fprintln(w)
 	for _, g := range helpGroups {
 		fmt.Fprintln(w, g.title)

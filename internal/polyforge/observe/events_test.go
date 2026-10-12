@@ -2,7 +2,7 @@ package observe
 
 // events_test.go: #21 — the seq is a per-WI MONOTONIC append counter
 // (truncation only bounds retention, never the numbering), and the
-// GET /observe ?after cursor filters on it. v2: the id is persisted on
+// SinceAfter cursor filters on it. v2: the id is persisted on
 // every line and survives daemon restarts, the file rotates by size, and
 // history is served from the durable files, not only the in-memory ring.
 

@@ -1,16 +1,14 @@
-// Package cli implements the `pf` client CLI of Polyforge v1.
+// Package cli implements the `pf` client CLI of Polyforge.
 //
-// Routing split (13 user verbs + the M1–M5 management face):
+// Routing split:
 //
 //	Direct to aihub HTTP (internal/common/api types, aihubclient client):
-//	  file, queue, cancel, recall — plus the management face M1–M5
-//	  (users, api-keys, projects, backup).
+//	  file, queue, cancel, recall, remember, memory — plus the management
+//	  face (users, api-keys, projects, backup, machines).
 //
-//	Local daemon UDS HTTP face (04 §5.1 minus publish_request — the
-//	client surface is pinned in internal/common/protocol and daemon.go
-//	below):
-//	  submit, observe, answer, pause, resume, wrap,
-//	  ops, ship.
+//	Local daemon UDS HTTP face (the client surface is pinned in
+//	internal/common/protocol and verbs_daemon.go):
+//	  submit, answer, pause, resume, wrap, ship, ops, watch, chat, daemon.
 //
 // Output: human-readable tables by default; --json emits the server's
 // JSON response as-is. Errors are decoded from the typed errStatus

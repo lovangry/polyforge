@@ -1,7 +1,7 @@
 package driver
 
-// candidates_test.go: the B-chain recomputation and the fault
-// classification. The pinned tables are the policy: provider failures
+// candidates_test.go: the B-chain recomputation and the model-class
+// predicate. The pinned tables are the policy: model-class failures
 // alone advance the pointer, a rewind resets it, the list end caps it —
 // and host/operator/schema failures never move it.
 
@@ -89,7 +89,7 @@ func TestIsModelClass(t *testing.T) {
 			t.Errorf("%q must be model-class", c)
 		}
 	}
-	for _, c := range []string{"", FailExitHost, FailExitOther, FailToolHung, FailEndedWithoutResult, "daemon_restart", "rate limit hit"} {
+	for _, c := range []string{"", FailExitHost, FailExitOther, FailToolHung, FailEndedWithoutResult, FailHarnessSilent, FailStepTimeoutLongTask, "daemon_restart", "rate limit hit"} {
 		if IsModelClass(c) {
 			t.Errorf("%q must not be model-class", c)
 		}
