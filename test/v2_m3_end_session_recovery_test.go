@@ -74,7 +74,6 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 	if codeHead == remote.head {
 		t.Fatalf("the fix step left no task-repo commit (HEAD %s == origin %s)", codeHead, remote.head)
 	}
-	aJournalLen := len(fakeJournal(t, daemonA.capsuleDir(wi)))
 	preSpawns := len(spawnJournal(t, daemonA.capsuleDir(wi)))
 	if preSpawns != 3 {
 		t.Fatalf("daemon A dispatched %d step processes, want 3", preSpawns)
@@ -161,11 +160,14 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 	waitStepStatus(t, daemonB, wi, "verification", "done", 90*time.Second)
 	waitStepStatus(t, daemonB, wi, "release", "in_progress", 60*time.Second)
 	capB := daemonB.capsuleDir(wi)
-	// fakepi's journal rides the chain, so B's capsule carries A's
-	// records as a prefix: B's OWN envelope writes are what follows it.
+	// fakepi's journal rides the chain, so B's capsule carries whatever
+	// prefix of A's records had been pushed when A was killed (the
+	// journal under logs/ is not part of the synced premise above, so
+	// its length is NOT A's local length). B's OWN envelope writes are
+	// told apart by the capsule path they record: A's name A's capsule.
 	var stepsRun []string
-	for i, rec := range fakeJournal(t, capB) {
-		if rec["type"] == "envelope" && i >= aJournalLen {
+	for _, rec := range fakeJournal(t, capB) {
+		if p, _ := rec["path"].(string); rec["type"] == "envelope" && strings.HasPrefix(p, capB+string(filepath.Separator)) {
 			stepsRun = append(stepsRun, rec["step"].(string))
 		}
 	}
