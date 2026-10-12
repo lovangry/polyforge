@@ -157,13 +157,3 @@ func jsonBody(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
-
-// writeFileT writes a temp file and returns its path.
-func writeFileT(t *testing.T, content string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "f.txt")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}

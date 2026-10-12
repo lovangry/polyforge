@@ -935,10 +935,8 @@ func TestDaemonHelpTeachesMapping(t *testing.T) {
 // TestHelpSurfaceNoMigration pins the #103 AC16 surface: no migration
 // subcommand appears on the pf verb surface — `pf help` (and the daemon
 // flag face) never mention migration; capsule migration is a manual
-// operator procedure documented in the migration runbook. The two
-// migration verbs stay dispatchable for the one-shot v0→v1 cutover
-// (errors_test.go/exitcodes_test.go exercise them), they are just
-// deliberately unsurfaced.
+// operator procedure documented in the migration runbook. The one-shot
+// v0→v1 migration verbs are deleted (v2 M1).
 func TestHelpSurfaceNoMigration(t *testing.T) {
 	code, stdout, stderr := runPf(t, map[string]string{}, "help")
 	if code != 0 {

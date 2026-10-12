@@ -52,7 +52,7 @@ var wireClasses = []struct {
 }
 
 // TestAihubFaceVerbExitCodeGoldens: every direct-to-aihub verb (data
-// plane, admin face, migrations), one golden table per verb.
+// plane, admin face), one golden table per verb.
 func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 	type spec struct {
 		name     string
@@ -87,14 +87,6 @@ func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 		{"rotate-secret", func(t *testing.T) []string {
 			return []string{"rotate-secret", "--mode", "rollback"}
 		}, []string{"rotate-secret"}, []string{"rotate-secret", "--no-such-flag"}},
-		{"migrate-memories", func(t *testing.T) []string {
-			return []string{"migrate-memories", "--from-jsonl", writeFileT(t, ""),
-				"--data-dir", t.TempDir(), "--project", "polyforge", "--dry-run"}
-		}, []string{"migrate-memories"}, []string{"migrate-memories", "--no-such-flag"}},
-		{"migrate-work-items", func(t *testing.T) []string {
-			return []string{"migrate-work-items", "--from", writeFileT(t, ""),
-				"--project", "polyforge", "--dry-run"}
-		}, []string{"migrate-work-items"}, []string{"migrate-work-items", "--no-such-flag"}},
 	}
 	for _, s := range specs {
 		t.Run(s.name, func(t *testing.T) {
@@ -328,15 +320,15 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 	if code, _, _ := runPf(t, nil, "daemon", "--no-such-flag"); code != 2 {
 		t.Errorf("flag parse: exit = %d, want 2", code)
 	}
-	// Sanity: the registry really is the full 28-verb set (16 routing +
-	// ship + 6 admin + 2 migrations + doctor + daemon; watch replaced the
+	// Sanity: the registry really is the full 26-verb set (16 routing +
+	// ship + 6 admin + doctor + daemon; watch replaced the
 	// retired watch-probe; doctor is the #113 machine health face).
 	want := []string{
 		"file", "queue", "cancel", "recall", "remember", "takeover",
 		"verify-session",
 		"submit", "observe", "answer", "batch-confirm", "pause", "resume",
 		"wrap", "ops", "chat", "watch", "ship", "users", "api-keys", "machines", "projects",
-		"backup", "rotate-secret", "migrate-memories", "migrate-work-items",
+		"backup", "rotate-secret",
 		"doctor", "daemon",
 	}
 	if len(commands) != len(want) {

@@ -316,7 +316,7 @@ const ftsRebuildYield = 2 * time.Millisecond
 
 // progressEvery is how many scanned entries lie between two progress
 // reports of an O(library) reconcile pass (polyforge#129: a long pass —
-// first boot after the upgrade, index repair, migrate-memories — must be
+// first boot after the upgrade, index repair — must be
 // distinguishable from a hang). The batched index-write phase reports on
 // top of this, per batch rotation; see rebuildFTSBatched.
 const progressEvery = 256
@@ -359,27 +359,10 @@ const (
 // drift. A steady-state (zero-change) pass answers 0 — the old full-
 // rebuild count was structurally the whole library and carried no
 // information.
-func (s *Store) RebuildIndex() (int, error) { return s.rebuildIndex("") }
+func (s *Store) RebuildIndex() (int, error) { return s.rebuildIndex() }
 
-// RebuildIndexProject scopes the reconcile to ONE project: only that
-// project's authority tree is walked and only its rows are
-// orphan-scanned. The migrate-memories path uses this so the rebuild's
-// work covers exactly the placed tree (seq-fix lane 3a/3c). Since
-// polyforge#129 the reindexed count answers "entries brought current",
-// so a delta run that re-places only some records answers less than the
-// whole tree — the migrate verify step compares it against the run's own
-// placement, not the tree. The transient sweep and the dangling-FTS
-// cleanup stay global: both are cheap and benefit every project.
-func (s *Store) RebuildIndexProject(projectID string) (int, error) {
-	if strings.TrimSpace(projectID) == "" {
-		return 0, errf("MEM-400", "", "project required")
-	}
-	return s.rebuildIndex(projectID)
-}
-
-// rebuildIndex is the shared reconcile body; scopedProject "" means
-// every project.
-func (s *Store) rebuildIndex(scopedProject string) (int, error) {
+// rebuildIndex is the reconcile body (every project).
+func (s *Store) rebuildIndex() (int, error) {
 	start := time.Now()
 	scanned := 0
 	counted := 0
@@ -392,23 +375,13 @@ func (s *Store) rebuildIndex(scopedProject string) (int, error) {
 		return 0, errf("MEM-502", "", "sweep: %v", err)
 	}
 	var projDirs []string
-	if scopedProject != "" {
-		if _, err := os.Stat(filepath.Join(s.dataDir, "memory", scopedProject)); err != nil {
-			if os.IsNotExist(err) {
-				return 0, errf("MEM-404", "", "project %s has no placed authority tree", scopedProject)
-			}
-			return 0, errf("MEM-502", "", "walk: %v", err)
-		}
-		projDirs = []string{scopedProject}
-	} else {
-		all, err := os.ReadDir(filepath.Join(s.dataDir, "memory"))
-		if err != nil && !os.IsNotExist(err) {
-			return 0, errf("MEM-502", "", "walk: %v", err)
-		}
-		for _, d := range all {
-			if d.IsDir() {
-				projDirs = append(projDirs, d.Name())
-			}
+	all, err := os.ReadDir(filepath.Join(s.dataDir, "memory"))
+	if err != nil && !os.IsNotExist(err) {
+		return 0, errf("MEM-502", "", "walk: %v", err)
+	}
+	for _, d := range all {
+		if d.IsDir() {
+			projDirs = append(projDirs, d.Name())
 		}
 	}
 	// Active tree: each entry is decided from its freshness stamp
@@ -470,14 +443,8 @@ func (s *Store) rebuildIndex(scopedProject string) (int, error) {
 	// remainder — active rows whose authority dir/file is missing,
 	// unreadable or unparseable — is checked here, so the healthy
 	// majority no longer pays a per-row load + full file read + sha on
-	// every pass (scoped to the project under RebuildIndexProject).
-	scanQ := `SELECT id FROM memories WHERE status='active'`
-	var scanArgs []any
-	if scopedProject != "" {
-		scanQ += ` AND project_id=?1`
-		scanArgs = append(scanArgs, scopedProject)
-	}
-	rows, err := s.db.Query(scanQ, scanArgs...)
+	// every pass.
+	rows, err := s.db.Query(`SELECT id FROM memories WHERE status='active'`)
 	if err != nil {
 		return 0, errf("MEM-502", "", "scan rows: %v", err)
 	}
@@ -516,8 +483,8 @@ func (s *Store) rebuildIndex(scopedProject string) (int, error) {
 	// (backfills, unstamped rows); every other entry was either skipped
 	// on its stamp or already written inline by its correction. The phase
 	// reports progress per batch rotation (folded into Reindexed): on a
-	// full-rebuild pass — first boot after the upgrade, index repair,
-	// migrate-memories — this phase is the bulk of the wall time, and the
+	// full-rebuild pass — first boot after the upgrade, index repair —
+	// this phase is the bulk of the wall time, and the
 	// walk's reports stop once the walk is done, so it must not go
 	// silent (polyforge#129 ruling c).
 	n, err := s.rebuildFTSBatched(queue, func(written int) {

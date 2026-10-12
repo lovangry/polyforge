@@ -196,7 +196,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/aihub/memory` | Core-side memory store: FTS5-trigram full-text search, authoritative `memory.md` files and the reconcile procedure. |
 | `internal/aihub/server` | The v1 AIHub HTTP face: business endpoints (v0 openapi surface minus every SYNC-*/revision-chain route), the admin face, and the `/git/{wi}.git/...` proxy mount; Bearer API key auth, typed `api.Error` envelope. |
 | `internal/polyforge/aihubclient` | Shared HTTP client for the aihub server, used by runtime, observe and the CLI verbs; decodes the typed error envelope back into `*api.Error`. |
-| `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, submit, `watch`, answer, batch-confirm, pause, resume, wrap, ops), `chat`, `ship`, the M1–M5 management face, the daemon client over the UDS socket, config resolution, and the v0 migration paths. |
+| `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, submit, `watch`, answer, batch-confirm, pause, resume, wrap, ops), `chat`, `ship`, the M1–M5 management face, the daemon client over the UDS socket, and config resolution. |
 | `internal/polyforge/daemon` | Phase-3 assembly of the local work machine: the UDS HTTP face, Runtime + Observe wired over the five protocol messages, admission modes, the pending-job dispatcher, the drain loop, the ship delivery bridge and the graceful shutdown sequence. |
 | `internal/polyforge/gitops` | Shared capsule-git operations layer used by Runtime (clone at start, dirty-commit at recover) and Observe (async commit+push); owns the per-WI git mutex and the `Polyforge-Seq` trailer derivation. |
 | `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, and the observe/answer HTTP face over the monitors. |
@@ -306,7 +306,7 @@ registry; `pf <verb> -help` one verb's face. The routing skill's fragments
 | aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember`, `takeover`, `verify-session` |
 | daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`; `observe` is its deprecated alias), `answer`, `batch-confirm`, `pause`, `resume`, `wrap`, `ship`, `ops`, `chat init` |
 | management | `users`, `api-keys`, `projects`, `machines`, `backup`, `rotate-secret` |
-| local | `daemon` (run the work machine), `doctor`, `migrate-memories`, `migrate-work-items` |
+| local | `daemon` (run the work machine), `doctor` |
 
 Human moves: continue = `pf resume <id>` (a paused, blocked or repair_pending
 WI), abandon = `pf cancel <id>` (queued, paused, blocked, or repair_pending on

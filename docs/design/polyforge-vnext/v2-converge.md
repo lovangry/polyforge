@@ -257,7 +257,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | 三（改逻辑，随本设计） | supervisor 猜测型车道（hang/idle/probe/wall/turn_duration/工具豁免/问题豁免/ack veto）→ 2.3 规则（**M4 重验保留**）；watch.sh → `pf watch`；三模式 → 第 5 节 | `pf watch`（Go）、watch.sh / watch-probe 删除：**已完成**（`f642e06`、`c01bd94`）；supervisor 车道重写：**进行中（另一分支）**；三模式简化：**未做** |
 | 四（待定） | takeover/adopt-session 简化（先验证"结束会话后重新领取能从断点继续"）；心跳保留并修权限漏洞 | 待验证（未动） |
 | 已完成 | release-intent 门禁（#139，commit a159c8c）；driver 机械保证（needs_input 校验、仅 feature-full grill-review 的 `requires_human_answer`、V4 command_evidence 门禁，`f00b398`）；重新领取两个 bug（git-dir 隔离、克隆失败拒绝 InitLocal / DAEMON-516）；身份模型（daemon-id 文件、`pf chat init`、`PF_CHAT_ID`、origin）；持久化提交队列 + 待修复停放 + `pf resume` 续跑（DAEMON-517）+ `daemon_restarted`/`submit_*` 事件；bounded-fail 杀树 + 推送、end_pending 重试、隔离原子性、继续/放弃走人的 key（`pf resume`/`pf cancel`/`pf wrap --fail`）、`unblock` 动词移除、blocked 封存跨 daemon 校验（DAEMON-518）；待修复 WI 的放弃路径；孤儿 step 进程回收；`atomicWrite` 修复 | 集成分支已完成，待合并部署 |
-| 迁移代码 | v0→v1 迁移（约 4.8k 行）：观察期至 2026-10-17 后打 tag 删除 | 定时 |
+| 迁移代码 | v0→v1 迁移（`migrate-memories`/`migrate-work-items`、`core/import.go`、`tools/v0export`、`seed-v1.sh` 等）：owner 裁定提前删除，不再设观察期 | **已完成**（`v2/m1-migrate`） |
 
 ## 9. 快速落地顺序
 
