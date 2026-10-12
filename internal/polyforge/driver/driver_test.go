@@ -29,6 +29,8 @@ type fakeEntry struct {
 	res  *StepResult
 	err  error
 	hold bool // block Wait until ctx or Terminate
+	// spawnErr makes SpawnStep itself fail (a harness that died at startup).
+	spawnErr error
 }
 
 type fakeRun struct {
@@ -104,6 +106,10 @@ func (s *fakeSpawner) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun, err
 	}
 	e := s.script[0]
 	s.script = s.script[1:]
+	if e.spawnErr != nil {
+		s.spawns = append(s.spawns, sp)
+		return nil, e.spawnErr
+	}
 	run := &fakeRun{sp: sp, e: e}
 	if e.hold {
 		run.rel = make(chan struct{})
