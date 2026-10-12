@@ -132,14 +132,14 @@ func TestSubmitQueueSurvivesRestartAndReplays(t *testing.T) {
 }
 
 // Replay drops what must not run: a WI aihub shows claimed elsewhere, and
-// takeover/resume intents — each with a submit_dropped event.
+// resume and legacy (retired takeover) intents — each with a submit_dropped event.
 func TestSubmitReplayDropsClaimedAndNonClaimIntents(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
 	const (
 		wiOK    = "wi_r_ok"
 		wiTaken = "wi_r_claimed_elsewhere"
-		wiTake  = "wi_r_takeover"
+		wiTake  = "wi_r_legacy_takeover"
 		wiRes   = "wi_r_resume"
 	)
 	hub.status[wiOK] = api.StatusQueued
@@ -168,8 +168,8 @@ func TestSubmitReplayDropsClaimedAndNonClaimIntents(t *testing.T) {
 			t.Errorf("%s must not be started", w)
 		}
 	}
-	if hub.claimCount() != 1 || len(hub.takeovers) != 0 {
-		t.Fatalf("only the plain queued claim may run (claims=%d takeovers=%d)", hub.claimCount(), len(hub.takeovers))
+	if hub.claimCount() != 1 {
+		t.Fatalf("only the plain queued claim may run (claims=%d)", hub.claimCount())
 	}
 }
 

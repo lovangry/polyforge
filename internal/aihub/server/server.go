@@ -1,7 +1,7 @@
 // Package server is the v1 AIHub HTTP face: the business endpoints
 // (v0 openapi surface minus every SYNC-*/revision-chain route), the
 // admin face, the v1.5 session endpoints (claim/session-verify/
-// session-attach/force-takeover/session-end), and the /git/{wi}.git/...
+// session-attach/force-end-session/session-end), and the /git/{wi}.git/...
 // proxy mount. Every error is the typed common/api errStatus envelope;
 // auth is the Bearer API key.
 package server
@@ -74,7 +74,6 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-verify", s.auth(s.hSessionVerify))
 	m.HandleFunc("GET /api/v1/work-items/{id}/session", s.auth(s.hSessionHolder))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-attach", s.auth(s.hSessionAttach))
-	m.HandleFunc("POST /api/v1/work-items/{id}/force-takeover", s.auth(s.hForceTakeover))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-end", s.auth(s.hSessionEnd))
 	// Recovery door: an admin/maintainer force-ends a stuck holder's session
 	// (WI -> queued); any daemon then claims it normally.
@@ -600,10 +599,10 @@ func (s *Server) hShipLedger(w http.ResponseWriter, r *http.Request, idn *identi
 
 // ---------------------------------------------------------------------------
 // v1.5 session endpoints (contract §1). The claim path is the machine
-// execution surface (any valid key, scope-checked); force-takeover keeps
-// the v1 human decision gate (admin or project maintainer).
+// execution surface (any valid key, scope-checked); force-end-session keeps
+// the human decision gate (admin or project maintainer).
 
-// sessionClaimEnvelope is the claim/attach/takeover response: the SAME
+// sessionClaimEnvelope is the claim/attach response: the SAME
 // shape as api.SessionClaimResponse (which cannot gain fields — Phase 0
 // owns it), with the work item served as the m4 audit view so its JSON
 // carries the public session block.
@@ -687,7 +686,7 @@ func (s *Server) hSessionVerify(w http.ResponseWriter, r *http.Request, idn *ide
 // hSessionHolder serves the §1.7 public holder read: who holds this
 // WI right now, in PUBLIC fields only. It deliberately uses the WI
 // read gate (wiProject + requireRead), not scopeCheck — any project
-// viewer may ask (the operator's takeover-decision input); non-members
+// viewer may ask (the operator's recovery-decision input); non-members
 // get the standard hidden-not-found answer. All three holder states
 // (unheld / held-paused / held-running) are ordinary 200 answers;
 // the hash and secret never appear in any response.
@@ -727,86 +726,6 @@ func (s *Server) hSessionAttach(w http.ResponseWriter, r *http.Request, idn *ide
 	req.WorkItemID = id
 	claim, err := s.Sessions.Attach(id, req, idn.UserID)
 	s.sessionClaimResponse(w, id, claim, err)
-}
-
-// hForceTakeover serves the atomic session swap. Takeover is a
-// privileged operation: admin or project maintainer (the v1 human
-// decision gate, kept for v1.5) — plus the #109 machine self-takeover
-// admission (see takeoverAdmitted).
-func (s *Server) hForceTakeover(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	// The request is decoded BEFORE the gate: the machine admission reads
-	// the requested machine identity from it.
-	var req api.SessionClaimRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.takeoverAdmitted(idn, projectID, req) {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "",
-			"force-takeover requires admin or project maintainer (a machine-credential caller may take over only onto its own machine)"))
-		return
-	}
-	req.WorkItemID = id
-	claim, err := s.Sessions.Takeover(id, req, idn.UserID)
-	s.sessionClaimResponse(w, id, claim, err)
-}
-
-// takeoverAdmitted is the force-takeover authorization gate (#109).
-// Three admissions:
-//
-//   - global admin — the v1 human decision gate, unchanged;
-//   - project maintainer — the human decision gate's project face, unchanged;
-//   - a MACHINE-credential caller (kind='machine', the daemon's own
-//     registration shape) with project membership taking over ONTO
-//     ITSELF: machine_id in the request must be the machine identity the
-//     caller's credential represents. This is the executor's self-service
-//     recovery (`pf submit <id> --takeover` fencing a dead or foreign
-//     holder) — the same power a plain claim on a queued WI already
-//     grants a project writer, scoped so a machine can never hand a
-//     foreign work item to a third identity. Humans keep the v1 gate:
-//     a non-admin, non-maintainer human is refused exactly as before.
-func (s *Server) takeoverAdmitted(idn *identity, projectID string, req api.SessionClaimRequest) bool {
-	if idn.Role == "admin" {
-		return true
-	}
-	role, err := s.memberRole(projectID, idn.UserID)
-	if err != nil {
-		return false
-	}
-	if role == "maintainer" {
-		return true
-	}
-	if idn.Kind != "machine" || role != "writer" {
-		return false
-	}
-	if strings.TrimSpace(req.MachineID) == "" {
-		return false
-	}
-	machine, err := s.machineIDOfUser(idn.UserID)
-	if err != nil || machine == "" || machine != req.MachineID {
-		return false
-	}
-	return true
-}
-
-// machineIDOfUser resolves the machine identity a machine user
-// represents ("" when the user has no machines row).
-func (s *Server) machineIDOfUser(userID string) (string, error) {
-	var id string
-	err := s.DB.QueryRow(`SELECT id FROM machines WHERE user_id=?1`, userID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return id, err
 }
 
 // hForceEndSession serves the admin/maintainer force-end of a held session

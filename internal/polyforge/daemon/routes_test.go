@@ -55,78 +55,6 @@ func TestSubmitAndStatus(t *testing.T) {
 	}
 }
 
-// TestAdoptSessionCustody (#109): the adopt-session route verify-backs
-// the handoff against the hub (only the LIVE holder's secret is
-// adopted), journals the custody durably, and answers the PUBLIC
-// fingerprint — never the secret.
-func TestAdoptSessionCustody(t *testing.T) {
-	td := newTestDaemon(t, nil)
-	const wi = "wi_adopt"
-	const secret = "abababababababababababababababababababababababababababababababab"
-	// The hub names the presented secret as the live holder (the CLI
-	// takeover's swap landed first — the production order of events).
-	td.hub.mu.Lock()
-	td.hub.held[wi] = secret
-	td.hub.status[wi] = api.StatusRunning
-	td.hub.mu.Unlock()
-
-	raw, err := td.client.AdoptSession(wi, cli.AdoptSessionRequest{SessionID: secret, Owner: "op", Reason: "custody test"})
-	if err != nil {
-		t.Fatalf("adopt: %v", err)
-	}
-	var ar struct {
-		Adopted            bool   `json:"adopted"`
-		WorkItemID         string `json:"work_item_id"`
-		SessionFingerprint string `json:"session_fingerprint"`
-	}
-	if err := json.Unmarshal(raw, &ar); err != nil {
-		t.Fatalf("adopt answer undecodable: %v (%s)", err, raw)
-	}
-	if !ar.Adopted || ar.WorkItemID != wi || ar.SessionFingerprint != api.SessionFingerprint(secret) {
-		t.Fatalf("adopt answer = %+v", ar)
-	}
-	// Custody is durable: the journal carries the secret (the anchor a
-	// restart's reconciliation verifies against the hub).
-	rec := readAdoptedJournal(t, td.cfg.DataDir, wi)
-	if rec == nil || rec.SessionID != secret || rec.MachineID != "m-test" {
-		t.Fatalf("custody journal = %+v, want the adopted secret under m-test", rec)
-	}
-
-	// A foreign secret is refused (verify-backed) and never replaces the
-	// journalled custody.
-	if _, err := td.client.AdoptSession(wi, cli.AdoptSessionRequest{SessionID: strings.Repeat("ff", 32)}); err == nil {
-		t.Fatal("adopt of a non-holder secret must fail")
-	}
-	if rec := readAdoptedJournal(t, td.cfg.DataDir, wi); rec == nil || rec.SessionID != secret {
-		t.Fatalf("refused adoption must not touch the journal: %+v", rec)
-	}
-}
-
-// readAdoptedJournal reads one work item's custody entry from the
-// daemon's adopted.json journal under dataDir (nil when absent). The
-// journal shape is pinned here field by field (the runtime owns the
-// type; this decode is the wire contract's guard).
-func readAdoptedJournal(t *testing.T, dataDir, wi string) *adoptedJournalRec {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(dataDir, "adopted.json"))
-	if err != nil {
-		t.Fatalf("adopted journal: %v", err)
-	}
-	var af struct {
-		Items map[string]*adoptedJournalRec `json:"items"`
-	}
-	if err := json.Unmarshal(raw, &af); err != nil {
-		t.Fatalf("adopted journal unparsable: %v", err)
-	}
-	return af.Items[wi]
-}
-
-type adoptedJournalRec struct {
-	WorkItemID string `json:"work_item_id"`
-	SessionID  string `json:"session_id"`
-	MachineID  string `json:"machine_id"`
-}
-
 // TestObserveAnswerFlush walks the observe lane's own routes end to end
 // through the daemon socket: JobView, a driver-persisted pending question
 // projected from execution.json, and the answer route's refusal.
@@ -372,30 +300,10 @@ func TestPauseResume(t *testing.T) {
 	}
 }
 
-// TestTakeoverAndErrorEnvelope: the takeover intent reaches the claim
-// call; unknown targets answer the top-level api.Error envelope
-// (DAEMON-404), which the CLI client decodes as a typed error.
-func TestTakeoverAndErrorEnvelope(t *testing.T) {
+// TestErrorEnvelope: unknown targets answer the top-level api.Error
+// envelope (DAEMON-404), which the CLI client decodes as a typed error.
+func TestErrorEnvelope(t *testing.T) {
 	td := newTestDaemon(t, nil)
-	mkBare(t, td.cfg.GitRemoteBase, "wi_g")
-	// The takeover intent reaches the aihub claim call.
-	if _, err := td.client.Takeover("wi_g", "normal"); err != nil {
-		t.Fatalf("takeover: %v", err)
-	}
-	td.waitLive(t, "wi_g")
-	// v1.5: the takeover intent reaches the ForceTakeover endpoint with a
-	// freshly minted session secret and a reason.
-	td.hub.mu.Lock()
-	var last api.SessionClaimRequest
-	if len(td.hub.takeovers) > 0 {
-		last = td.hub.takeovers[len(td.hub.takeovers)-1]
-	}
-	nTakeovers := len(td.hub.takeovers)
-	td.hub.mu.Unlock()
-	if nTakeovers != 1 || last.Reason == "" || len(last.SessionID) != 64 {
-		t.Fatalf("takeover must reach ForceTakeover with a reason and a fresh 64-hex secret, got %d calls %+v", nTakeovers, last)
-	}
-
 	// Typed 404 for an unknown work item (the envelope shape the CLI
 	// decodes): no local job + aihub lookup fails.
 	td.hub.mu.Lock()

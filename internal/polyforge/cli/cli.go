@@ -62,10 +62,9 @@ type Command struct {
 }
 
 // commands is the full registry (help grouping is per-command metadata,
-// Command.Group, not position): the 15 routing verbs first — 7 direct
-// to aihub (file, queue, cancel, recall, remember + the v1.5 takeover
-// and verify-session; the blocked exits are `resume` = continue and
-// `cancel` = abandon, v2-converge §7) + 8 on the daemon UDS face (submit, observe,
+// Command.Group, not position): the 13 routing verbs first — 5 direct
+// to aihub (file, queue, cancel, recall, remember; the blocked exits are
+// `resume` = continue and `cancel` = abandon, v2-converge §7) + 8 on the daemon UDS face (submit, observe,
 // answer, batch-confirm, pause, resume, wrap, ops) — then ship (the wrap→git
 // delivery bridge, daemon face), then the management face M1–M5, then the
 // two migrations (dispatchable but never surfaced on the help face — #103
@@ -77,8 +76,6 @@ var commands = []*Command{
 	cmdCancel,
 	cmdRecall,
 	cmdRemember,
-	cmdTakeover,
-	cmdVerifySession,
 	cmdSubmit,
 	cmdObserve,
 	cmdAnswer,

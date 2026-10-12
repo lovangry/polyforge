@@ -99,7 +99,7 @@ func (m *ModeCtl) AbortDrain() error {
 	return nil
 }
 
-// AdmitSingle decides a single claim/resume/takeover: legal in
+// AdmitSingle decides a single claim/resume: legal in
 // Interactive and Batch; refused in Drain (its internal loop is the only
 // creation entry there). Every submission source is refused once
 // shutting_down is latched (DAEMON-410).
@@ -163,7 +163,7 @@ type qEntry struct {
 	WorkItemID string    `json:"work_item_id"`
 	Priority   string    `json:"priority,omitempty"`
 	EnqueuedAt time.Time `json:"enqueued_at"`
-	Intent     string    `json:"intent"` // claim | resume | takeover
+	Intent     string    `json:"intent"` // claim | resume
 	// SubmittedAt is the wall time the submit was accepted (replay
 	// evidence; EnqueuedAt is the FIFO key and equals it for live submits).
 	SubmittedAt time.Time `json:"submitted_at"`

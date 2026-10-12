@@ -299,14 +299,15 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 		t.Fatalf("carrier write: %v: %s", err, out)
 	}
 
-	// Session A dies mid-flight; session B re-claims (takeover: the hub
-	// still holds the dead session, exactly like the post-bounded-fail
-	// unblock path).
+	// Session A dies mid-flight; session B re-claims (the hub still
+	// holds the dead session until the operator's force-end-session
+	// returns the WI to queued).
 	j := r.jobOf(wi)
 	r.killAgentTree(j)
 	r.dropJob(j)
 	writeStateFile(t, r, nil)
-	if err := r.StartIntent(context.Background(), wi, "takeover"); err != nil {
+	hub.forceEnd(wi)
+	if err := r.Start(context.Background(), wi); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 

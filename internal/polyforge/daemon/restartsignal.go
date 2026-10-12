@@ -113,8 +113,8 @@ func (d *Daemon) dropReplay(e qEntry, reason string) {
 // replaySubmitQueue re-enqueues the submits the previous process accepted
 // but never started (v2 §5). It runs strictly after rt.Restart (which
 // replayed the B1 claiming journal), before the face serves:
-//   - only plain `claim` intents replay; takeover/resume are dropped with
-//     a submit_dropped event (a stale takeover must never fire later);
+//   - only plain `claim` intents replay; resume is dropped with
+//     a submit_dropped event (a stale intent must never fire later);
 //   - the WI is read from aihub first: anything but queued (claimed
 //     elsewhere, terminal, paused, blocked) is dropped;
 //   - a WI the runtime already holds (the journal replay adopted it, or a

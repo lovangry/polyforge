@@ -6,7 +6,7 @@ package core
 // only survivor is CheckSessionCredential, which validates a push's
 // Basic pair against the WI's LIVE session (fencing-on-use, contract
 // §1.6): hex(sha256(password)) == work_items.session_hash AND
-// status==running. Claim/attach/takeover/end live in session.go.
+// status==running. Claim/attach/force-end/end live in session.go.
 
 import (
 	"database/sql"

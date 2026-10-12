@@ -39,7 +39,6 @@ import (
 // endpoints). *aihubclient.Client satisfies it.
 type Aihub interface {
 	SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimResponse, error)
-	ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error)
 	SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error)
 	SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error)
 	SessionEnd(wi string, req api.SessionEndRequest) error
@@ -737,18 +736,17 @@ func mintSessionID() (string, error) {
 // Start claims wi and runs it to a live agent (a plain claim). Idempotency
 // rides on the claim idempotency key: a retry after a lost response
 // re-claims the same session server-side (D4). See StartIntent for the
-// resume/takeover intents.
+// resume intents.
 func (r *Runtime) Start(ctx context.Context, wi string) error {
 	return r.StartIntent(ctx, wi, "claim")
 }
 
-// StartIntent claims wi with an explicit claim intent (claim|resume|
-// takeover) and runs it to a live agent. v1.5 maps the intents onto the
-// session endpoints: "takeover" → ForceTakeover (an atomic session
-// swap, a NEW secret), everything else → the CAS SessionClaim (a paused
-// WI answers NOT_CLAIMABLE until the hub side grows an operator-unpause
-// transition — the honest refusal, never a guess; contract complaint
-// filed). The secret is minted HERE and journaled durably BEFORE the
+// StartIntent claims wi with an explicit claim intent (claim|resume) and
+// runs it to a live agent. Both map onto the CAS SessionClaim (a paused
+// or held WI answers NOT_CLAIMABLE/ALREADY_HELD — the honest refusal,
+// never a guess; a WI whose holder is dead is first force-ended by an
+// admin, `pf ops end-session`, which returns it to queued for an
+// ordinary claim). The secret is minted HERE and journaled durably BEFORE the
 // call (B1): a crash between journal and call is recoverable by replay,
 // a crash after the call by verify — the ambiguous-claim window is
 // closed from both sides.
@@ -761,7 +759,7 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		}
 		// Finding 2 (v1.5 review): a RETAINED paused record is not an
 		// active run — the start may proceed over it (startClaimed drops
-		// the dead record once the hub accepted the new claim/takeover; a
+		// the dead record once the hub accepted the new claim; a
 		// plain claim of the paused-held WI is refused by the hub's own
 		// ALREADY_HELD gate).
 	}
@@ -804,13 +802,7 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		Owner:          r.cfg.MachineID,
 		IdempotencyKey: key,
 	}
-	var resp *api.SessionClaimResponse
-	if intent == "takeover" {
-		req.Reason = "operator takeover"
-		resp, err = r.hub.ForceTakeover(wi, req)
-	} else {
-		resp, err = r.hub.SessionClaim(req)
-	}
+	resp, err := r.hub.SessionClaim(req)
 	if err != nil {
 		// the claim never opened: nothing can dangle, drop the journal
 		// entry so a restart does not replay a dead intention.
@@ -852,9 +844,9 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	r.NoteAlias(wi, id)
 	if existing := r.jobOf(id); existing != nil {
 		// Finding 2 (v1.5 review): a RETAINED paused record is not an
-		// active run — a successful takeover over it (the s11 continuation
-		// shape: the holder daemon keeps the paused record and re-takes
-		// over locally) replaces the dead record: the new session owns
+		// active run — a successful claim over it (the holder daemon kept
+		// the paused record; an admin force-ended the session and the
+		// WI was claimed again) replaces the dead record: the new session owns
 		// the WI, and prepareCapsule quarantines the old scene on the
 		// session-marker mismatch exactly as it would have after a
 		// restart release. Every other live state keeps the duplicate
@@ -874,10 +866,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", id, err)
 		}
 	}
-	// #109: a fresh daemon-minted session for this WI supersedes any
-	// adopted (externally minted) session's custody — the hub holds one
-	// session at a time and the new one is THIS daemon's.
-	r.clearAdopted(id)
 	fp := api.SessionFingerprint(sessionID)
 	if c.SessionFingerprint != "" && c.SessionFingerprint != fp {
 		// the server computed a different fingerprint for our secret: the
@@ -945,7 +933,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		return r.abandonClaim(j, wi, err, err.Error())
 	}
 	// B2 spawn_n source: a FRESHLY CLAIMED capsule may carry another
-	// session's spawn journal (the takeover/attach clone path — the
+	// session's spawn journal (the re-claim/attach clone path — the
 	// journal rides capsule git), so the derivation counter continues
 	// where the capsule's history left off; a brand-new capsule answers
 	// 0 and the first derivation is #1.
@@ -1188,7 +1176,7 @@ func (r *Runtime) verifySealedHead(j *job, c api.SessionClaim) error {
 // v1.5 capsule ownership: generations no longer discriminate a reusable
 // husk from a foreign scene — the session does. materialize stamps the
 // owning session's FINGERPRINT into sync/session-handle (daemon-private,
-// gitignored: it deliberately does NOT travel with a takeover clone), so:
+// gitignored: it deliberately does NOT travel with a re-claim clone), so:
 //
 //	amarker == this session's fingerprint → this session's own
 //	  crashed-Start husk (or attach-resume scene): reuse in place;
@@ -1371,7 +1359,7 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 		return err
 	}
 	// v1.5: the session ownership marker — this session's fingerprint,
-	// under gitignored sync/ so a takeover clone re-stamps its own.
+	// under gitignored sync/ so a re-claim clone re-stamps its own.
 	if err := writeSessionMarker(j.capsuleDir, j.sessionFingerprint); err != nil {
 		return err
 	}

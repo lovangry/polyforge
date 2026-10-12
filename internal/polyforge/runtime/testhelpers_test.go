@@ -29,7 +29,7 @@ import (
 // ---------------------------------------------------------------------------
 // fake aihub (v1.5 session model): a tiny in-memory hub. `held` maps a
 // canonical wi → the session SECRET currently holding it ("" = unheld);
-// SessionVerify compares against it, SessionClaim/ForceTakeover install,
+// SessionVerify compares against it, SessionClaim installs,
 // SessionEnd clears (terminal) or keeps (paused) it, SessionAttach
 // re-opens a paused+not-clean-pause row. `status` scripts the WI status
 // verify answers; `lookupErr` scripts outages per wi.
@@ -41,7 +41,6 @@ type fakeHub struct {
 	cleanPause map[string]bool
 	lookupErr  map[string]error
 	claims     []api.SessionClaimRequest
-	takeovers  []api.SessionClaimRequest
 	attaches   []api.SessionAttachRequest
 	ends       []api.SessionEndRequest
 	end        map[string]error  // wi → end-error scripting (per wi)
@@ -141,16 +140,16 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 	return resp, nil
 }
 
-func (h *fakeHub) ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
+// forceEnd scripts the aihub-side force-end-session recovery door: the
+// held session is dropped and the WI returns to queued, so the next plain
+// claim succeeds.
+func (h *fakeHub) forceEnd(wi string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.takeovers = append(h.takeovers, req)
 	id := h.canonicalID(wi)
-	resp := h.claimResponse(id, req.SessionID)
-	h.held[id] = req.SessionID
-	h.status[id] = api.StatusRunning
+	h.held[id] = ""
+	h.status[id] = api.StatusQueued
 	h.cleanPause[id] = false
-	return resp, nil
 }
 
 func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error) {

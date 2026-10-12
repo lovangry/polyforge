@@ -2,15 +2,15 @@ package observe
 
 // session.go: the v1.5 M4 session revalidation — the periodic holder
 // check that bounds zombie discovery latency (the design record's
-// ruling: push-cadence-dependent discovery is unbounded; a takeover
-// must be learned within ~5 minutes even when the zombie never pushes).
+// ruling: push-cadence-dependent discovery is unbounded; a supersession
+// (force-end + re-claim elsewhere) must be learned within ~5 minutes even when the zombie never pushes).
 //
 // Every monitor tick piggybacks a session-verify for each RUNNING job
 // whose attachment carried a session id (RTMsg.SessionID travels
 // runtime→observe IN-PROCESS; the secret never leaves the daemon). The
 // verdict splits on the answer class:
 //
-//   - matches == false → the session was superseded (force-takeover
+//   - matches == false → the session was superseded (force-end
 //     landed on another daemon). The monitor emits OBSuperseded to the
 //     runtime channel — the runtime kills the tree, quarantines the
 //     capsule and releases the record — and stops supervising the work
@@ -181,7 +181,7 @@ func (m *Monitor) onVerifyResult(res verifyResult) {
 	if !already {
 		_ = m.log.Append(m.wi.WorkItem, EvSessionSuperseded, map[string]any{
 			"current_fingerprint": res.currentFingerprint,
-			"detail": "session revalidation learned another daemon holds this work item; " +
+			"detail": "session revalidation learned this session no longer holds the work item (force-ended or claimed elsewhere); " +
 				"local supervision stopped, runtime notified (no hub transition — superseded is not terminal)",
 			"spawn_n": m.currentSpawn(),
 		})

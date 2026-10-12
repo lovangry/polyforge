@@ -303,7 +303,7 @@ func writeSpawnJournal(p SpawnParams, pid int, startedAt string, spawnToken stri
 
 // maxSpawnNFromJournal answers the highest spawn_n the capsule's spawn
 // journal records (0 when absent/unreadable): the B2 fresh-clone source —
-// a takeover or attach that cloned this capsule from the bare repo
+// a re-claim or attach that cloned this capsule from the bare repo
 // continues the derivation counter where the capsule's history left off.
 func maxSpawnNFromJournal(capsuleDir string) int {
 	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.DirRuntimeState, "spawn-journal.jsonl"))

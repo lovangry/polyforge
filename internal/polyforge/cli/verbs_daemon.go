@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -14,16 +15,15 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// submit — interactive submit of one WI (claim, or takeover).
+// submit — interactive submit of one WI (a plain claim).
 // ---------------------------------------------------------------------------
 
 var cmdSubmit = &Command{
 	Name:    "submit",
 	Group:   GroupExec,
-	Summary: "Submit a WI for execution on this machine (claim, or takeover)",
-	Usage:   "pf submit <id> [--takeover] [--priority low|normal|high|urgent]",
+	Summary: "Submit a WI for execution on this machine (claim)",
+	Usage:   "pf submit <id> [--priority low|normal|high|urgent]",
 	Setup: func(fs *flag.FlagSet) {
-		fs.Bool("takeover", false, "admin force-takeover instead of a plain claim")
 		fs.String("priority", "normal", "queue priority (low|normal|high|urgent)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -33,16 +33,7 @@ var cmdSubmit = &Command{
 		if err := submitPrecheck(ctx, args[0]); err != nil {
 			return err
 		}
-		var (
-			raw json.RawMessage
-			err error
-		)
-		d := ctx.daemon()
-		if boolFlag(fs, "takeover") {
-			raw, err = d.Takeover(args[0], stringFlag(fs, "priority"))
-		} else {
-			raw, err = d.Claim(args[0], stringFlag(fs, "priority"))
-		}
+		raw, err := ctx.daemon().Claim(args[0], stringFlag(fs, "priority"))
 		if err != nil {
 			return err
 		}
@@ -74,7 +65,7 @@ func submitPrecheck(ctx *Context, wiID string) error {
 	}
 	switch wi.Status {
 	case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
-		return fmt.Errorf("submit: %s is terminal (%s); no claim, resume or takeover can start", wiID, wi.Status)
+		return fmt.Errorf("submit: %s is terminal (%s); no claim or resume can start", wiID, wi.Status)
 	}
 	return nil
 }
@@ -400,7 +391,7 @@ func setCleanPause(ctx *Context, wiID string, value bool) string {
 //     a clean_pause=false PATCH on the hub, the WI left to its HOLDER
 //     daemon (the session's machine attaches on its next start via
 //     session-attach; a work item whose holder is gone moves with `pf
-//     takeover`). This deliberately replaces v1's “fresh local claim via
+//     ops end-session` + `pf submit`). This deliberately replaces v1's “fresh local claim via
 //     the daemon” behavior — the v1.5 pause keeps the session on the hub,
 //     and only the holder may resume it. Since the v1.5 review Finding 2
 //     the pause also RETAINS the holder daemon's local record, so the
@@ -408,7 +399,7 @@ func setCleanPause(ctx *Context, wiID string, value bool) string {
 //     when the resume lands there is deliberately NO auto-pickup this
 //     phase: the retained paused record sits until that daemon's next
 //     start (whose restart reconciliation attaches); to continue
-//     immediately use `pf takeover`.
+//     immediately use `pf ops end-session` + `pf submit`.
 // ---------------------------------------------------------------------------
 
 var cmdResume = &Command{
@@ -459,8 +450,8 @@ var cmdResume = &Command{
 				return err
 			}
 			fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the paused work item stays with its holder daemon\n", args[0])
-			fmt.Fprintln(ctx.Stdout, "(its machine re-attaches on the next daemon start; a work item whose holder is gone moves with `pf takeover <id> --reason ...`)")
-			fmt.Fprintln(ctx.Stdout, "(a live holder daemon does NOT pick this up until its next start; to continue immediately use `pf takeover`)")
+			fmt.Fprintln(ctx.Stdout, "(its machine re-attaches on the next daemon start; a work item whose holder is gone moves with `pf ops end-session <id> --reason ...` then `pf submit <id>`)")
+			fmt.Fprintln(ctx.Stdout, "(a live holder daemon does NOT pick this up until its next start; to continue immediately use `pf ops end-session <id> --reason ...` then `pf submit <id>`)")
 			return nil
 		}
 		// The authorization-bearing step runs with the HUMAN's own api key
@@ -630,17 +621,21 @@ var cmdShip = &Command{
 var cmdOps = &Command{
 	Name:    "ops",
 	Group:   GroupExec,
-	Summary: "Daemon ops: local job status, mode switching, graceful shutdown",
+	Summary: "Daemon ops: local job status, mode switching, graceful shutdown; end-session recovery",
 	Usage: "pf ops status\n" +
 		"pf ops mode                                   # query the current mode (via status)\n" +
 		"pf ops mode set --max-concurrent-jobs N [--mode interactive|batch|drain]\n" +
 		"pf ops mode drain                             # enter autonomous drain mode\n" +
 		"pf ops mode abort-drain                       # leave drain mode\n" +
-		"pf ops shutdown                               # graceful shutdown (quiesce)",
+		"pf ops shutdown                               # graceful shutdown (quiesce)\n" +
+		"pf ops end-session <wi> --reason <text>       # admin/maintainer: force-end a stuck holder's session (WI -> queued; then `pf submit <wi>` anywhere)",
 	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) == 0 {
-			return fmt.Errorf("ops: expected status|mode|shutdown")
+			return fmt.Errorf("ops: expected status|mode|shutdown|end-session")
+		}
+		if args[0] == "end-session" {
+			return opsEndSession(ctx, args[1:])
 		}
 		d := ctx.daemon()
 		switch args[0] {
@@ -673,6 +668,37 @@ var cmdOps = &Command{
 			return fmt.Errorf("ops: unknown action %q", args[0])
 		}
 	},
+}
+
+// opsEndSession handles `pf ops end-session <wi> --reason <text>`: the
+// recovery door for a work item whose holder daemon is dead or stuck. It
+// talks to aihub directly with the caller's key (admin or project
+// maintainer, checked server-side): the live session is ended WITHOUT the
+// holder's secret, the WI returns to queued and the old secret is fenced.
+// Any daemon then claims it with a plain `pf submit <wi>`, restoring
+// progress from the capsule revision chain.
+func opsEndSession(ctx *Context, args []string) error {
+	f := subFlags(ctx, "ops end-session")
+	reason := f.String("reason", "", "why the holder's session is being ended (required; recorded in the session_superseded event)")
+	rest, err := parseCommandArgs(f, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 {
+		return fmt.Errorf("ops end-session: expected exactly one work item id")
+	}
+	if strings.TrimSpace(*reason) == "" {
+		return fmt.Errorf("ops end-session: --reason is required (recorded in the audit event)")
+	}
+	if err := ctx.aihub().ForceEndSession(rest[0], strings.TrimSpace(*reason)); err != nil {
+		return err
+	}
+	raw, _ := json.Marshal(map[string]any{"work_item_id": rest[0], "status": "queued"})
+	ctx.finish(raw, func() {
+		fmt.Fprintf(ctx.Stdout, "ended the session of %s; it is queued again — claim it on any daemon with `pf submit %s`\n", rest[0], rest[0])
+		fmt.Fprintln(ctx.Stdout, "  the previous holder is fenced (its secret no longer matches)")
+	})
+	return nil
 }
 
 // opsMode handles `pf ops mode [set|drain|abort-drain]`. A bare query has

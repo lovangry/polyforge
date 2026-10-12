@@ -22,10 +22,7 @@ import (
 // v0 daemon surface minus publish_request
 // (docs/design/polyforge-vnext/04-local-runtime.md §5.1):
 //
-//	POST /jobs/{id}/claim|resume|takeover   body {"priority":"normal"}
-//	POST /jobs/{id}/adopt-session           body = AdoptSessionRequest (#109:
-//	                                        custody of an externally minted
-//	                                        session secret — local UDS only)
+//	POST /jobs/{id}/claim|resume            body {"priority":"normal"}
 //	GET  /jobs/{id}/observe?after=<cursor>  answer = protocol.JobView
 //	POST /jobs/{id}/answer                  body = the five-field relay
 //	                                        message itself (00 §3.4a)
@@ -276,11 +273,6 @@ func (d *DaemonClient) Resume(wiID, priority string) (json.RawMessage, error) {
 	return d.submit(wiID, "resume", priority)
 }
 
-// Takeover submits an admin force-takeover request.
-func (d *DaemonClient) Takeover(wiID, priority string) (json.RawMessage, error) {
-	return d.submit(wiID, "takeover", priority)
-}
-
 // ResumeBlocked submits the §6.4 owner move for a workflow parked blocked
 // (polyforge#116): the daemon returns the WI to claimable at the hub (the
 // owner's resume door) and re-establishes execution over the parked capsule
@@ -296,25 +288,6 @@ func (d *DaemonClient) ResumeBlocked(wiID string) (json.RawMessage, error) {
 // authorization probe (CloseAuth).
 func (d *DaemonClient) AbandonRepair(wiID, verdict string) (json.RawMessage, error) {
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/abandon-repair", "", map[string]any{"verdict": verdict}, nil)
-}
-
-// AdoptSessionRequest is the POST /jobs/{id}/adopt-session body. The
-// session SECRET travels only over this local UDS route (never the hub
-// wire): it is the custody handoff that keeps a CLI-side takeover's
-// session usable after the CLI process exits (#109). Owner/Reason ride
-// for the daemon's journal trace only.
-type AdoptSessionRequest struct {
-	SessionID string `json:"session_id"`
-	Owner     string `json:"owner,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-}
-
-// AdoptSession hands one externally minted session secret to the
-// daemon's durable custody (#109). The daemon verify-backs the handoff
-// against the hub (only the live holder's secret is adopted) and
-// journals it; the answer carries the PUBLIC fingerprint only.
-func (d *DaemonClient) AdoptSession(wiID string, req AdoptSessionRequest) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/adopt-session", "", req, nil)
 }
 
 func (d *DaemonClient) submit(wiID, intent, priority string) (json.RawMessage, error) {

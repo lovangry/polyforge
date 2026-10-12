@@ -155,7 +155,7 @@ type jobRecord struct {
 	CleanPause bool `json:"clean_pause"`
 	// SpawnN is the per-WI monotonic derivation counter (B2): the number
 	// of derivations this session has run. Same-machine restarts and
-	// recoveries continue from it; a fresh clone (takeover) re-seeds it
+	// recoveries continue from it; a fresh clone (re-claim on another machine) re-seeds it
 	// from the capsule's spawn journal.
 	SpawnN       int `json:"spawn_n"`
 	RecoverFails int `json:"recover_fails"` // consecutive failed recoveries

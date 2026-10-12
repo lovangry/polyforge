@@ -202,12 +202,12 @@ func TestCommentsOnlyWorkspaceYamlIsAbsentEquivalent(t *testing.T) {
 	}
 }
 
-// The single-lane convergence: a FRESH claim and a TAKEOVER both read
-// the yaml on their own claim path — a yaml valid for claim one that is
-// broken for the takeover refuses the takeover, and vice versa (the
-// takeover lane re-enters startClaimed over a paused record, the s11
-// continuation shape).
-func TestWorkspaceYamlReadOnFreshClaimAndTakeover(t *testing.T) {
+// The single-lane convergence: a FRESH claim and a RE-CLAIM over a
+// retained paused record both read the yaml on their own claim path — a
+// yaml valid for claim one that is broken for the re-claim refuses it, and
+// vice versa (the re-claim re-enters startClaimed over a paused record
+// once force-end-session returned the WI to queued).
+func TestWorkspaceYamlReadOnFreshClaimAndReclaim(t *testing.T) {
 	hub := newFakeHub()
 	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
 
@@ -215,25 +215,26 @@ func TestWorkspaceYamlReadOnFreshClaimAndTakeover(t *testing.T) {
 	if err := r.Start(context.Background(), "wi_w079lane"); err != nil {
 		t.Fatalf("fresh claim: %v", err)
 	}
-	// Park the live job (the only shape a takeover re-enters startClaimed
+	// Park the live job (the only shape a re-claim re-enters startClaimed
 	// from): the operator-pause close retains the record in StatePaused.
 	if err := r.Stop(context.Background(), "wi_w079lane", protocol.FinishPaused); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	// The takeover path re-enters startClaimed: it re-reads the yaml —
-	// now broken — and refuses with DAEMON-414.
+	hub.forceEnd("wi_w079lane")
+	// The re-claim re-enters startClaimed: it re-reads the yaml — now
+	// broken — and refuses with DAEMON-414.
 	writeWorkspaceYaml(t, ws, "workflow_defaults:\n  step_kinds:\n    bogus: [a]\n")
-	terr := r.StartIntent(context.Background(), "wi_w079lane", "takeover")
+	terr := r.Start(context.Background(), "wi_w079lane")
 	if terr == nil {
-		t.Fatal("the takeover must re-read the yaml and refuse on an invalid one")
+		t.Fatal("the re-claim must re-read the yaml and refuse on an invalid one")
 	}
 	if ae, ok := terr.(*api.Error); !ok || ae.Code != api.ErrDaemonWorkspaceYaml {
-		t.Fatalf("expected DAEMON-414 on the takeover, got %v", terr)
+		t.Fatalf("expected DAEMON-414 on the re-claim, got %v", terr)
 	}
-	// Fixed again: the takeover proceeds.
+	// Fixed again: the re-claim proceeds.
 	writeWorkspaceYaml(t, ws, "projects:\n  proj:\n    repos: []\n")
-	if err := r.StartIntent(context.Background(), "wi_w079lane", "takeover"); err != nil {
-		t.Fatalf("takeover after the fix: %v", err)
+	if err := r.Start(context.Background(), "wi_w079lane"); err != nil {
+		t.Fatalf("re-claim after the fix: %v", err)
 	}
 	if err := r.Stop(context.Background(), "wi_w079lane", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)

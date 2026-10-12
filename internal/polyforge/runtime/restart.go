@@ -140,10 +140,6 @@ func (r *Runtime) Restart(ctx context.Context) error {
 	// record may predate. startClaimed's sessionIsRecorded guard keeps the
 	// crash-past-registration window honest (see claiming.go).
 	r.resumeClaiming(ctx)
-	// #109 custody reconciliation: adopted (externally minted) sessions
-	// never replay into a claim — custody is kept only while the hub
-	// still names the session as the live holder.
-	r.resumeAdopted()
 	// Seed every recorded job into the live map first: persist() rewrites
 	// state.json from the map, so records that must SURVIVE the
 	// reconciliation (blocked, aihub-unreachable) are preserved by simply
@@ -486,8 +482,8 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 		fmt.Fprintf(os.Stderr, "runtime: %s: session ended server-side (queued); record dropped\n", rec.WorkItemID)
 		r.restartDrop(rec)
 	default:
-		// running or paused under ANOTHER session (the takeover
-		// happened while we were down): release — kill any local
+		// running or paused under ANOTHER session (a force-end
+		// + re-claim happened while we were down): release — kill any local
 		// tree, quarantine the capsule, drop the record. NO hub
 		// transition: the new owner owns the work.
 		r.restartRelease(rec, v.CurrentFingerprint)

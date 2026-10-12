@@ -113,7 +113,7 @@ func TestDaemonClientObserveRoundtrip(t *testing.T) {
 
 func TestDaemonClientSubmitFamilyRoundtrip(t *testing.T) {
 	d := newDaemonFixture(t)
-	for _, intent := range []string{"claim", "resume", "takeover"} {
+	for _, intent := range []string{"claim", "resume"} {
 		d.answer("POST", "/jobs/wi_abc/"+intent, `{"accepted":true,"work_item_id":"wi_abc"}`)
 	}
 	c := NewDaemonClient(d.sock)
@@ -124,7 +124,6 @@ func TestDaemonClientSubmitFamilyRoundtrip(t *testing.T) {
 	}{
 		{func() (json.RawMessage, error) { return c.Claim("wi_abc", "high") }, "/jobs/wi_abc/claim"},
 		{func() (json.RawMessage, error) { return c.Resume("wi_abc", "") }, "/jobs/wi_abc/resume"},
-		{func() (json.RawMessage, error) { return c.Takeover("wi_abc", "") }, "/jobs/wi_abc/takeover"},
 	}
 	for i, tc := range cases {
 		raw, err := tc.call()
