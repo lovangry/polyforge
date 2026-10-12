@@ -860,9 +860,72 @@ func (d *v1Daemon) crash() {
 	if d.cmd == nil || d.cmd.Process == nil {
 		d.t.Fatal("crash: daemon not running")
 	}
+	// a push the daemon's monitor had in flight is a git child that
+	// outlives the SIGKILL and keeps writing the WI's bare repo: collect
+	// those children first and let them drain after the kill
+	gits := gitDescendants(d.cmd.Process.Pid)
 	_ = d.cmd.Process.Kill()
 	<-d.waitedExit
 	d.cmd = nil
+	waitPIDsGone(gits, 10*time.Second)
+}
+
+// gitDescendants lists the live git processes below pid (any depth).
+func gitDescendants(pid int) []int {
+	ents, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	parent, comm := map[int]int{}, map[int]string{}
+	for _, e := range ents {
+		n, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue
+		}
+		// pid (comm) state ppid ...: comm may contain spaces/parens
+		str := string(raw)
+		lp, rp := strings.IndexByte(str, '('), strings.LastIndexByte(str, ')')
+		if lp < 0 || rp < lp {
+			continue
+		}
+		f := strings.Fields(str[rp+1:])
+		if len(f) < 2 {
+			continue
+		}
+		pp, _ := strconv.Atoi(f[1])
+		parent[n], comm[n] = pp, str[lp+1:rp]
+	}
+	var out []int
+	var walk func(p int)
+	walk = func(p int) {
+		for n, pp := range parent {
+			if pp == p {
+				if strings.HasPrefix(comm[n], "git") {
+					out = append(out, n)
+				}
+				walk(n)
+			}
+		}
+	}
+	walk(pid)
+	return out
+}
+
+// waitPIDsGone waits (softly) until every pid has exited.
+func waitPIDsGone(pids []int, bound time.Duration) {
+	deadline := time.Now().Add(bound)
+	for _, p := range pids {
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat("/proc/" + strconv.Itoa(p)); err != nil {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
 }
 
 // exitedWithin reports whether the daemon process exited within bound

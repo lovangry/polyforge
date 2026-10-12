@@ -416,9 +416,12 @@ func (d *w113Daemon) crash() {
 	if d.cmd == nil || d.cmd.Process == nil {
 		d.t.Fatal("w113 crash: daemon not running")
 	}
+	// drain a push the daemon had in flight (see v1Daemon.crash)
+	gits := gitDescendants(d.cmd.Process.Pid)
 	_ = d.cmd.Process.Kill()
 	<-d.waitExit
 	d.cmd = nil
+	waitPIDsGone(gits, 10*time.Second)
 }
 
 // socketExists reports whether the UDS socket file is on disk.
