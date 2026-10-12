@@ -353,17 +353,19 @@ sections). Capsules route per claimed project through the inverse
 mapping; batch and drain cover all mapped projects. `pf doctor` checks
 the mapping.
 
-Observe supervision windows — Go duration strings (e.g. `700ms`, `5m`),
-flags only (no environment fallbacks). Omitting a flag, or passing `0`,
-keeps the observe default listed here, so a daemon started without them
-behaves exactly as before:
+Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
+`5m`), flags only (no environment fallbacks). Omitting a flag, or passing
+`0`, keeps the default listed here. A workflow step overrides them in
+`workflow.md`: `budget.wall_minutes` (T), `silence_minutes` (X),
+`tool_minutes` (Y).
 
 | Flag | Env | Default | Controls |
 | --- | --- | --- | --- |
-| `--hang-window D` | — | `10m` | Stream silence while a turn is in flight before the liveness probe arms. |
-| `--idle-window D` | — | `10m` | No progress record and no turn in flight before the idle watchdog probes. |
-| `--probe-timeout D` | — | `2m` | Ack bound of one liveness probe. |
-| `--wall-window D` | — | `15m` | Absolute wall-clock backstop on a derivation's progress silence that no probe ack can reset (polyforge#114): past it the monitor confirms the hang/idle recovery even when probes were acknowledged from the harness side. `0`/omitted keeps the 15m default, a negative value disables the backstop. |
+| `--silence-window D` | — | `10m` (token-level harness) / `30m` (message-level) | X: no real work signal after dispatch (`harness_silent`), or no model output while waiting for the model (`model_hung`). UI chatter never counts as work. |
+| `--tool-window D` | — | `30m` | Y: one tool running longer than this is `tool_hung`. |
+| `--step-timeout D` | — | `90m` | T: cumulative step runtime across all its dispatches (`step_timeout_long_task` / `step_timeout_slow_model`). |
+| `--stall-window D` | — | `10m` | N: the driver between steps (not waiting on a human) for longer than this is `driver_stalled`; a negative value disables it. |
+| `--model-error-grace D` | — | `1m` | Grace after a turn ends on a model error with no result file before the step is `model_error`. |
 | `--revalidate-every D` | — | `5m` | M4 periodic session-revalidation cadence for RUNNING jobs; `0`/omitted keeps the 5m default, a negative value disables revalidation. |
 
 Before starting ANY implementation or review lane: recall the v0 lessons

@@ -1,45 +1,50 @@
 package observe
 
-// monitor.go: the per-WI monitor goroutine — the observe lane's eyes and
-// brain (v1-spec-full §四). ONE goroutine watches ONE work item; its ONLY
-// execution shape is a select loop whose CASES NEVER BLOCK. Every long
-// operation — a push, an ack wait, a liveness probe — runs in a
-// sub-goroutine and reports back through a buffered channel that the
-// select drains on a later pass. The gate (a size-1 channel used as a
-// semaphore) is the per-WI "only one push in flight" invariant.
+// monitor.go: the per-WI SUPERVISOR goroutine (v2-converge 2.1-2.3; the
+// guessing lanes — hang, idle, probe/ack, wall, turn-duration, the tool
+// and question exemptions, no_progress — are gone). ONE goroutine
+// supervises ONE work item; its only execution shape is a select loop
+// whose cases never block. Every long operation (a push, a session
+// verify) runs in a sub-goroutine and reports back through a buffered
+// channel.
 //
 // Input sources drained by the select:
-//   - the agent stdout record stream (Handle.Records) → classification;
-//   - the confirmed process-exit signal (Handle.Exit) → death detection;
-//   - the execution.json poll (~500ms tick; mtime+Version change);
-//   - RT messages (WIRecovered rides rtCh; WIFinished rides stopCh);
-//   - results of the sub-goroutines (push/probe/verify);
-//   - the stop signal.
+//   - the driver's FACTS (supervise.Link.Facts: step_started,
+//     step_waiting_human/answered, step_ended, exec_committed) — an
+//     unbounded in-process queue, never dropped;
+//   - the confirmed driver-exit signal (Handle.Exit) → recovery;
+//   - RT messages (RTRecovered rides rtCh; RTFinished rides stopCh);
+//   - results of the sub-goroutines (push / verify);
+//   - the tick (judging, push retry backoff, backpressure, M4).
 //
-// RECOVERING: after WINeedsRecovery is sent the monitor enters the
-// RECOVERING state and suppresses every further recovery signal of the
-// same derivation (storm guard) until RTRecovered arrives with a new
-// handle. The select keeps running — the old handle's channels must
-// keep being drained or Runtime's stdout reader would block forever —
-// but no detection consequence fires.
+// JUDGING: per dispatch the supervisor holds the harness Tracker the
+// translator folds the step process's records into (only real work
+// counts; UI noise does not) and applies the rules of package
+// supervise each tick; the first rule that fires becomes ONE step_dead
+// verdict on the link, after which the supervisor stays silent for that
+// spawn until step_ended. State is per dispatch: created on
+// step_started, dropped on step_ended. Between steps (and not waiting on
+// a human) the supervisor also times the DRIVER: driver_stalled.
+//
+// RECOVERING: after WINeedsRecovery is sent (driver exit / stall) the
+// monitor suppresses every further recovery signal of the same
+// derivation (storm guard) until RTRecovered arrives.
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // sameErrorCap is the V8-repair retry bound: after this many consecutive
@@ -51,46 +56,6 @@ import (
 // the cap turns every such deterministic-failure shape into at most
 // sameErrorCap attempts per round.
 const sameErrorCap = 5
-
-// toolDispatchWindow is the #83 tool-execution exemption's bound: how
-// long a dispatched-but-unreturned tool call counts as live work (both
-// the hang lane and the wall backstop honor it). A tool silent longer
-// than this genuinely deserves the probe — and, past the wall backstop,
-// the kill.
-const toolDispatchWindow = 30 * time.Minute
-
-// wallSuspendMultiplier is the polyforge#124 ceiling on how far the
-// wall-adjacent suspensions may outrank the operator's absolute bound:
-// both the #83 tool-dispatch exemption and the turn-duration lane are
-// capped at 4× the wall window. 4 is the smallest multiple the pinned
-// #83 design can carry (TestWallBackstopExemptDuringToolDispatch holds
-// a dispatch live through 3⅓ wall windows with no probe and no
-// recovery), so "cap the exemption at the wall window itself" is not
-// available without breaking that pin. What 4× buys instead: neither
-// the exemption NOR an open turn can suspend every detection lane past
-// 4× the bound the operator declared absolute — the #117 trickle-wedge
-// (an open turn re-arming the exemption forever) is bounded by turn
-// age, and a tight wall tightens the exemption with it. With the
-// default 15m wall the cap is 60m — above toolDispatchWindow — so the
-// production default keeps the 30m exemption unchanged (the #124 WI's
-// stated non-goal; the conflict between that non-goal and the
-// incident's 8m wall is resolved here, stated, in favor of the
-// operator's bound mattering).
-const wallSuspendMultiplier = 4
-
-// defaultVersionStagnantTicks is the belt-and-braces bound for C3': the
-// number of consecutive execution.json REWRITES (mtime advanced) that
-// carry an unchanged top-level Version before the monitor also treats
-// the capsule as dirty and schedules a commit anyway — plus one
-// version_stagnant event per episode. The Version-driven rule stays the
-// primary archival semantic; this only catches an agent that violates it.
-const defaultVersionStagnantTicks = 3
-
-// defaultWallBackstop is the §6.2 wall clock's production floor
-// (polyforge#114): max(3× step wall budget, 15min) with the per-step
-// refinement unimplemented, so the 15-minute floor is the absolute
-// bound on a dispatch's PROGRESS silence no probe ack can reset.
-const defaultWallBackstop = 15 * time.Minute
 
 // PushFunc is the injectable capsule commit+push operation (the seam the
 // tests use; production binds gitops.CommitPush). ctx bounds the call;
@@ -110,9 +75,8 @@ type WIInfo struct {
 	BundleName string
 	Git        gitops.Opts
 	// Transcript is the capsule-side declared session path of the
-	// current derivation (session/session-<instance>.jsonl): the
-	// live-transcript sync's destination and the recovery engine's
-	// resume source.
+	// current derivation (the live-transcript sync's destination until
+	// the first step_started names the dispatch's own).
 	Transcript string
 	// LiveTranscript is the file the current derivation appends to (the
 	// runtime's recorded live path; "" = locate on demand below).
@@ -122,75 +86,36 @@ type WIInfo struct {
 	SpawnAt time.Time
 }
 
-// Handle is the agent face a monitor watches. Implemented by the Runtime
-// lane's process adapter; Observe owns no process code. The handle rides
-// the RT channel WITH the protocol lifecycle message it belongs to — the
-// five messages stay the only control vocabulary, and the handle is the
-// attachment Observe needs to observe and control.
+// Handle is the driver face a monitor watches. Implemented by the
+// daemon's adapter over the runtime's agent handle; Observe owns no
+// process code.
 type Handle interface {
-	// Exit fires ONCE when the underlying agent process has exited. The
-	// adapter waits on the process first, so the signal is ALREADY the
-	// confirmed death ("确认后" — no second confirmation needed).
+	// Exit fires ONCE when the supervised driver has returned. The
+	// adapter waits on the driver first, so the signal is ALREADY the
+	// confirmed exit.
 	Exit() <-chan struct{}
-	// Records yields the raw stdout record blobs (one JSON record per
-	// delivery); the channel closes when the stream ends.
-	Records() <-chan []byte
-	// SendControl writes one liveness-probe message (pf/probe) to the
-	// agent and waits for its ack, bounded by ctx. The probe is the
-	// control channel's only surviving occupant: pf/answer and
-	// pf/stop_notice died with the WI-Agent lane (polyforge#106). Any
-	// error (including a deadline) is a failed probe — the caller owns
-	// the verdict.
-	SendControl(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error)
 }
 
 type pushResult struct {
-	version  int64
-	sha      string
-	pushed   bool
-	stagnant bool // the push was scheduled by the stagnation fallback
-	timings  gitops.PushTimings
-	err      error
-}
-
-type probeResult struct {
-	ack protocol.ControlAck
-	err error
+	version int64
+	sha     string
+	pushed  bool
+	timings gitops.PushTimings
+	err     error
 }
 
 // monitorCfg carries the tunables (defaults in observe.go Config).
 type monitorCfg struct {
 	PollInterval time.Duration
-	HangWindow   time.Duration
-	// IdleWindow bounds the F5 idle watchdog (zero = disabled — a
-	// zero window would fire on every tick; production default 10min).
-	IdleWindow   time.Duration
-	ProbeTimeout time.Duration
-	// WallBackstop is the §6.2 absolute bound (polyforge#114): the cap
-	// on the derivation's PROGRESS silence that no probe ack can
-	// restart. The hang/idle watchdogs' probe-cleared windows protect
-	// short legitimate silences; this bound is what turns a dispatch
-	// that nothing can progress — the #114 wedge shape: the criterion
-	// arms, the probe acks from the HARNESS side (driver-alive) while
-	// the step process sits parked — into a confirmed recovery. The
-	// design's per-step refinement (max(3× step wall budget, 15m)) is
-	// future work; the daemon-level floor is the default. <= 0 disables.
-	// polyforge#124: the wall also owns two derived bounds — the #83
-	// tool-dispatch exemption is capped at 4× this window (never able
-	// to outrank the operator's bound by more than that multiple), and
-	// the turn-duration lane bounds a never-closing turn at 4× this
-	// window (the trickle-wedge hole: no silence-based lane can see a
-	// turn that keeps one progress record per sub-window interval
-	// alive). A negative value disables all three.
-	WallBackstop      time.Duration
+	// ModelErrorGrace is rule 1's grace after an error-ended turn.
+	ModelErrorGrace time.Duration
+	// DriverStall is N: the driver between steps (not waiting on a
+	// human) for longer than this is stalled. <= 0 disables the clock.
+	DriverStall       time.Duration
 	PushRetryBackoff  time.Duration
 	BackpressureSteps int
 	BackpressureAfter time.Duration
 	PushBound         time.Duration
-	// VersionStagnantTicks is the C3' belt-and-braces bound (0 = the
-	// default 3): consecutive same-Version rewrites before a fallback
-	// commit. Injectable so tests shrink the window.
-	VersionStagnantTicks int
 	// revalidate is the v1.5 M4 session-verify cadence (0 = disabled:
 	// no verifier, no checks — the unit-test default).
 	revalidate time.Duration
@@ -202,16 +127,32 @@ type monitorCfg struct {
 	locateLive func(capsuleDir string, spawnAt time.Time) string
 }
 
+// driver phases the supervisor tracks.
+const (
+	phaseBetween = "between_steps"
+	phaseInStep  = "in_step"
+	phaseWaiting = "waiting_human"
+)
+
+// dispatchState is the supervisor's per-dispatch state (created on
+// step_started, dropped on step_ended).
+type dispatchState struct {
+	spawnN    int64
+	step      string
+	startedAt time.Time
+	tracker   *supervise.Tracker
+	verdicted bool
+}
+
 // Monitor supervises one work item.
 type Monitor struct {
 	wi   WIInfo
 	cfg  monitorCfg
 	log  *EventLog
 	ob   chan<- protocol.OBMsg
-	ctrl int64 // control-message correlation counter (atomic): the ack wait's (method, correlation) dual key
+	link *supervise.Link
 
-	// handle attachment (monitor-goroutine only; captured into spawned
-	// sub-goroutines at spawn time).
+	// handle attachment (monitor-goroutine only).
 	handle Handle
 	// spawnN is the v1.5 B2 derivation counter of the CURRENTLY ADOPTED
 	// derivation (guarded by stateMu for the HTTP fence's read). It is
@@ -220,35 +161,38 @@ type Monitor struct {
 	// sessionID is the v1.5 session secret carried in-process on the
 	// RTStarted/RTRecovered message (M4 revalidation input). It lives
 	// ONLY here — never in events, never in the capsule, never in a log
-	// line — and is read solely by checkRevalidate on this goroutine
-	// (set at attach/onRecovered, both monitor-goroutine contexts).
+	// line.
 	sessionID string
-	records   <-chan []byte
 	exitCh    <-chan struct{}
-	stream    *streamState
 
 	rtCh   chan Attach
 	stopCh chan struct{}
 	stop   sync.Once
 
-	// execution.json polling state (monitor goroutine only).
-	execPath      string
-	execMtime     time.Time
+	// supervision state (monitor goroutine; the activity face reads the
+	// published copy under stateMu).
+	cur        *dispatchState
+	phase      string
+	phaseSince time.Time
+	stalled    bool // driver_stalled sent for the current gap
+
+	// execution.json state, refreshed on driver facts (monitor goroutine).
 	currentStep   string
 	dirtyVersion  int64 // latest Version seen that has no confirmed push
 	pushedVersion int64
-	// C3' belt-and-braces stagnation tracking: lastVersion/lastSeen are the
-	// latest Version observed in the file and whether one was seen at
-	// all; stagnantTicks counts consecutive rewrites that did not bump
-	// it; stagnantDirty arms the fallback commit once the bound is hit.
-	lastSeen      bool
-	lastVersion   int64
-	stagnantTicks int
-	stagnantDirty bool
 
 	// the single-in-flight push gate.
 	gate     chan struct{}
 	pushDone chan pushResult
+	// exitFlush: the driver returned while capsule state was not yet
+	// published. The recovery/terminal path assumes the commit boundary's
+	// push already landed (a completed workflow wraps without a push of its
+	// own), so the supervisor publishes the last Version FIRST and only then
+	// reports the exit — exitFlushDeadline bounds the wait.
+	exitFlush         bool
+	exitFlushDeadline time.Time
+	exitFlushReason   string
+	exitFlushDetail   string
 
 	// backpressure bookkeeping (monitor goroutine only).
 	failedPushes int
@@ -258,55 +202,18 @@ type Monitor struct {
 	timeDegraded bool
 	retryAt      time.Time
 	// same-error retry-cap bookkeeping (V8 repair; monitor goroutine
-	// only): lastPushErr/sameErrStreak count consecutive failures with
-	// the identical error text; retryHalted/retryHaltedAt mark the
-	// halted round and the Version it halted at (a later dirtyVersion is
-	// the next commit boundary that re-arms the round).
+	// only).
 	lastPushErr   string
 	sameErrStreak int
 	retryHalted   bool
 	retryHaltedAt int64
 
-	// hang detection.
-	probeInFlight bool
-	probeDone     chan probeResult
-	// hangAnchor is the hang window's probe-cleared restart point: the
-	// moment the last ACKED liveness probe answered while a turn was in
-	// flight. The criterion itself is anchored on lastProgressAt (the
-	// F15 semantics: UI-noise records never count as life), so an anchor
-	// is only needed to restart the window after a probe the agent
-	// survived.
-	hangAnchor time.Time
-	// attachAt is the wall backstop's non-resettable floor for derivations
-	// that have not produced a single progress record yet (polyforge#114):
-	// set once per derivation at attach/onRecovered, NEVER moved by a
-	// probe ack (unlike hangAnchor/idleAnchor). The measured progress
-	// silence is anchored on max(WallProgressAt, attachAt) — the wall's
-	// turn-machinery witness, #124 — so every dispatch is bounded from
-	// its birth no matter how the ack lanes behave.
-	attachAt time.Time
-	// idle detection (F5). idleAnchor is the idle window's baseline
-	// when the stream has produced no progress record yet (set at
-	// attach/recovery adoption) and its restart point after a probe the
-	// agent answered; like the hang criterion, the measured clock is
-	// lastProgressAt, never the noise clock. probeIdle remembers WHICH
-	// criterion armed the in-flight probe so the result lands as the
-	// right recovery reason.
-	idleAnchor time.Time
-	probeIdle  bool
-	// noProgressAt is the F15c no_progress event's throttle stamp: the
-	// last emission of the owner-facing progress-silence event (zero =
-	// none this attempt). At most one event per idle window; cleared by
-	// a probe round and by recovery adoption (resumed progress clears it
-	// implicitly — the gate reads lastProgressAt first).
-	noProgressAt time.Time
-
 	// live-transcript sync state (F3; monitor goroutine only — the push
 	// sub-goroutines receive the values as arguments, never over m).
-	trDst            string    // the capsule's declared session path
-	trSrc            string    // the runtime-recorded live path (may be "")
-	trSpawnAt        time.Time // the derivation's birth moment
-	transcriptWarned bool      // one transcript_missing event per attempt
+	trDst            string    // the capsule's declared session path (latest step_started)
+	trSrc            string    // the live path when known (a resumed dispatch writes into the capsule)
+	trSpawnAt        time.Time // the dispatch's birth moment
+	transcriptWarned bool      // one transcript_missing event per dispatch
 
 	// stateMu guards the fields every goroutine (HTTP view, push
 	// sub-goroutines) reads.
@@ -314,6 +221,9 @@ type Monitor struct {
 	pending    *protocol.PendingView
 	sealing    bool
 	recovering bool
+	// act is the published activity copy of the current dispatch (the
+	// ops status face reads it): nil outside a dispatch.
+	act *dispatchState
 	// superseded is the v1.5 M4 state: the periodic session-verify
 	// answered matches=false — another daemon holds the work item. The
 	// monitor stops supervising (detection and pushes are suppressed) but keeps
@@ -321,8 +231,7 @@ type Monitor struct {
 	// release (RTFinished, sent by supersedeOp — v1.5 review Finding 4)
 	// stops the loop: the OBSuperseded emission is retryable (Finding
 	// 1(b)), so the periodic verify is the re-emission engine. Observe
-	// makes NO hub transition (the new owner owns it). stateMu-guarded
-	// like the rest of the suppression set.
+	// makes NO hub transition (the new owner owns it).
 	superseded bool
 
 	// revalidation bookkeeping (M4; monitor goroutine only except where
@@ -349,6 +258,9 @@ func (m *Monitor) run() {
 	_ = m.log.Append(m.wi.WorkItem, EvJobStarted, map[string]any{
 		"spawn_n": m.spawnN,
 	})
+	// the seed read: a restarted supervisor learns the capsule's state
+	// (pending question, version to publish) before any fact arrives
+	m.refreshExec(0)
 	ticker := time.NewTicker(m.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -359,18 +271,12 @@ func (m *Monitor) run() {
 			m.onRecovered(at)
 		case <-m.exitCh:
 			m.onExit()
-		case rec, ok := <-m.records:
-			if !ok {
-				m.records = nil // stream end; Exit carries the death signal
-				continue
-			}
-			m.stream.note(rec)
+		case <-m.link.Facts.Notify():
+			m.drainFacts()
 		case <-ticker.C:
 			m.onTick()
 		case res := <-m.pushDone:
 			m.onPushResult(res)
-		case pr := <-m.probeDone:
-			m.onProbeResult(pr)
 		case res := <-m.verifyDone:
 			m.onVerifyResult(res)
 		}
@@ -380,102 +286,253 @@ func (m *Monitor) run() {
 // stop requests the monitor loop to exit (idempotent).
 func (m *Monitor) requestStop() { m.stop.Do(func() { close(m.stopCh) }) }
 
-// onTick is the ~500ms heartbeat: drain stream incidents, check the hang
-// criterion, poll execution.json, maybe schedule a push, check
-// backpressure.
+// onTick is the heartbeat: judge the dispatch (or the driver), retry a
+// push whose backoff elapsed, check backpressure, M4 revalidation.
 func (m *Monitor) onTick() {
-	m.drainIncidents()
-	m.checkHang()
-	m.checkIdle()
-	m.checkWallBackstop()
-	m.checkTurnDuration()
-	m.checkNoProgress()
-	m.pollExecution()
+	m.drainFacts() // belt and braces: a wake-up can coalesce
+	m.judge()
 	m.schedulePush()
+	m.maybeFinishExitFlush()
 	m.checkBackpressure()
 	m.checkRevalidate()
 }
 
 // ---------------------------------------------------------------------------
-// detection: provider errors (fatal → instant recovery; the chain
-// stays the storm-guarded backstop for non-fatal reports)
+// facts in
 
-// drainIncidents is the provider-error detection surface. Every
-// classified incident becomes an IMMEDIATE infra_incident event (the
-// operator learns about a dead provider in the same tick the harness
-// reported it — v0 #48's "provider-error instant incidents"), while
-// the RECOVERY decision splits on fatality:
-//
-//   - FATAL (the turn ENDED on the error: turn_end stopReason=error) →
-//     WINeedsRecovery fires on THIS single event, outside the
-//     storm-count chain. The v1 pilot (F5) proved the decision must
-//     be as instant as the news: a real harness's RPC session does
-//     NOT self-retry after a fatal turn error — the turn is wrongly
-//     terminated, nobody sends the next prompt, and the session sits
-//     permanently idle (35+ minutes observed on the real machine).
-//     The storm guard's "2 consecutive incidents in the same step"
-//     then waits for a second event that never comes, and the hang
-//     window is blind too (its criterion is silence WITH a turn in
-//     flight; the turn already ended). One fatal event is the whole
-//     judgment.
-//   - non-fatal (a mid-turn report the harness may still recover
-//     from) → the existing event face only, plus the storm-guarded
-//     chain: the same step needs two consecutive incidents — counted
-//     in stream order — before one WINeedsRecovery goes out.
-func (m *Monitor) drainIncidents() {
-	fatalDetail := ""
-	for _, in := range m.stream.drain() {
-		_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
-			"kind": in.Kind, "detail": in.Detail, "fatal": in.Fatal,
-			"at": in.At.UTC().Format(time.RFC3339Nano),
-		})
-		if in.Fatal && fatalDetail == "" {
-			fatalDetail = in.Detail
-		}
-	}
-	if fatalDetail != "" {
-		// Single-event recovery: the fatal incident never joins the
-		// chain arithmetic (already judged here); reset it so the
-		// drained reports cannot re-fire the storm path. The storm guard
-		// in needRecovery keeps this attempt silent until recovery lands.
-		m.stream.resetChain()
-		step := m.currentStep
-		if step == "" {
-			step = "-"
-		}
-		m.needRecovery(protocol.RecoverProviderError,
-			fmt.Sprintf("step %s: fatal provider error ended the turn: %s",
-				step, fatalDetail))
+func (m *Monitor) now() time.Time { return m.link.Clock() }
+
+// drainFacts consumes every queued driver fact, in order.
+func (m *Monitor) drainFacts() {
+	facts := m.link.Facts.Drain()
+	if len(facts) == 0 {
 		return
 	}
-	if m.stream.chainValue() >= 2 {
-		m.stream.resetChain()
-		step := m.currentStep
-		if step == "" {
-			step = "-"
+	for _, f := range facts {
+		switch v := f.(type) {
+		case supervise.StepStarted:
+			m.onStepStarted(v)
+		case supervise.StepEnded:
+			m.onStepEnded(v)
+		case supervise.StepWaitingHuman:
+			m.setPhase(phaseWaiting)
+			m.refreshExec(0)
+		case supervise.StepAnswered:
+			m.setPhase(phaseBetween)
+			m.refreshExec(0)
+		case supervise.ExecCommitted:
+			m.refreshExec(v.Version)
 		}
-		m.needRecovery(protocol.RecoverProviderError,
-			fmt.Sprintf("step %s: 2 consecutive stream incidents; latest: %s",
-				step, m.stream.latestIncidentDetail()))
 	}
+	m.schedulePush() // event-triggered: do not wait for the next tick
 }
 
-// ---------------------------------------------------------------------------
-// detection: death
+func (m *Monitor) setPhase(p string) {
+	m.phase = p
+	m.phaseSince = m.now()
+	m.stalled = false
+}
 
-// onExit handles the CONFIRMED process-exit signal (the handle adapter
-// already waited on the process — this is the confirmation). An expected
-// exit (a daemon-initiated close, or a signal already sent for this
-// attempt) is silent.
-func (m *Monitor) onExit() {
-	m.exitCh = nil // fires once per handle
+// onStepStarted creates the per-dispatch state (a still-open older one is
+// dropped: the driver runs one dispatch at a time).
+func (m *Monitor) onStepStarted(f supervise.StepStarted) {
+	if m.cur != nil && m.cur.spawnN < f.SpawnN {
+		m.link.Release(m.cur.spawnN)
+	}
+	m.link.Release(f.SpawnN - 1) // fence every older ordinal
+	tr := m.link.Tracker(f.SpawnN)
+	tr.Begin(f)
+	d := &dispatchState{spawnN: f.SpawnN, step: f.Step, startedAt: f.StartedAt, tracker: tr}
+	if d.startedAt.IsZero() {
+		d.startedAt = m.now()
+	}
+	m.cur = d
+	m.setPhase(phaseInStep)
+	// F3: the transcript sync sources from the latest step_started
+	m.trDst = f.TranscriptPath
+	m.trSpawnAt = f.StartedAt
+	if f.Resumed {
+		m.trSrc = f.TranscriptPath // a resumed dispatch appends to the capsule file itself
+	} else {
+		m.trSrc = ""
+	}
+	m.stateMu.Lock()
+	m.transcriptWarned = false
+	m.act = d // published last: readers that see the dispatch see its transcript facts
+	m.stateMu.Unlock()
+}
+
+// onStepEnded drops the dispatch's state; the supervisor is silent for
+// that spawn from here on.
+func (m *Monitor) onStepEnded(f supervise.StepEnded) {
+	m.link.Release(f.SpawnN)
+	if m.cur != nil && m.cur.spawnN <= f.SpawnN {
+		m.cur = nil
+		m.stateMu.Lock()
+		m.act = nil
+		m.stateMu.Unlock()
+	}
+	m.setPhase(phaseBetween)
+}
+
+// refreshExec is the event-triggered read of the authoritative file: the
+// pending-question projection and the Version to publish. version > 0 is
+// the committed Version the fact named.
+func (m *Monitor) refreshExec(version int64) {
+	if version > m.dirtyVersion {
+		m.dirtyVersion = version
+	}
+	data, err := os.ReadFile(m.execPath())
+	if err != nil {
+		return
+	}
+	var exec capsule.Execution
+	if json.Unmarshal(data, &exec) != nil {
+		return // torn/partial write: the next fact retries
+	}
+	m.currentStep = exec.CurrentStep
+	if exec.Version > m.dirtyVersion {
+		m.dirtyVersion = exec.Version
+	}
+	m.applyPendingFromExec(&exec)
+}
+
+func (m *Monitor) execPath() string { return m.execJSONPath() }
+
+// ---------------------------------------------------------------------------
+// judging
+
+// judge applies the rules to the current dispatch (one verdict, then
+// silence until step_ended) or times the driver between steps.
+func (m *Monitor) judge() {
 	m.stateMu.Lock()
 	suppressed := m.recovering || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if suppressed {
 		return
 	}
+	now := m.now()
+	if m.cur != nil {
+		if m.cur.verdicted {
+			return
+		}
+		snap := m.cur.tracker.Snapshot(now)
+		v := supervise.Judge(snap, now, m.cfg.ModelErrorGrace)
+		if v == nil {
+			return
+		}
+		m.cur.verdicted = true
+		_ = m.log.Append(m.wi.WorkItem, EvSupervisorVerdict, map[string]any{
+			"verdict": v.VerdictKind(), "step": v.Step, "spawn_n": v.SpawnN,
+			"cause": v.Cause, "evidence": v.Evidence,
+		})
+		m.link.Verdict(*v)
+		return
+	}
+	if m.phase == phaseBetween && !m.stalled && m.cfg.DriverStall > 0 {
+		if gap := now.Sub(m.phaseSince); gap >= m.cfg.DriverStall {
+			m.stalled = true
+			_ = m.log.Append(m.wi.WorkItem, EvSupervisorVerdict, map[string]any{
+				"verdict": "driver_stalled", "duration_ms": gap.Milliseconds(),
+				"evidence": "the driver is between steps (not waiting on a human) past the stall bound",
+			})
+			m.link.Verdict(supervise.DriverStalled{Duration: gap, Phase: phaseBetween})
+			// A driver that cannot consume its verdict is the point: the
+			// recovery engine kills its tree (any stuck git/push child with
+			// it) and relaunches it, counted against the driver-crash bound.
+			m.needRecovery(protocol.RecoverDriverStalled,
+				fmt.Sprintf("driver stalled between steps for %s", gap.Round(time.Second)))
+		}
+	}
+}
+
+// activity answers the ops-status face: when the current dispatch began
+// and when its harness last did real work.
+func (m *Monitor) activity() Activity {
+	m.stateMu.Lock()
+	d := m.act
+	m.stateMu.Unlock()
+	if d == nil {
+		return Activity{}
+	}
+	now := m.now()
+	snap := d.tracker.Snapshot(now)
+	return Activity{Step: d.step, SpawnN: d.spawnN, StepStartedAt: d.startedAt, LastWorkAt: snap.LastWork, InDispatch: true}
+}
+
+// liveProgress answers the watch face's per-dispatch reading (any
+// goroutine: it reads the published dispatch pointer under stateMu and the
+// tracker's own lock).
+func (m *Monitor) liveProgress() LiveProgress {
+	m.stateMu.Lock()
+	d := m.act
+	m.stateMu.Unlock()
+	if d == nil {
+		return LiveProgress{}
+	}
+	now := m.now()
+	snap := d.tracker.Snapshot(now)
+	p := LiveProgress{InDispatch: true, Step: d.step, RecentFiles: snap.RecentFiles, ToolCalls: snap.ToolCalls}
+	if n := len(snap.Tools); n > 0 {
+		cur := snap.Tools[n-1] // oldest first: the last is the newest
+		p.Command = cur.Summary
+		p.CommandAgeSec = int64(now.Sub(cur.Since) / time.Second)
+	}
+	return p
+}
+
+// ---------------------------------------------------------------------------
+// detection: driver death
+
+// onExit handles the CONFIRMED driver-exit signal (the handle adapter
+// already waited on the driver — this is the confirmation). An expected
+// exit (a daemon-initiated close, or a signal already sent for this
+// attempt) is silent.
+func (m *Monitor) onExit() {
+	m.exitCh = nil // fires once per handle
+	m.drainFacts() // the driver's final commit-boundary facts may still be queued
+	m.stateMu.Lock()
+	suppressed := m.recovering || m.sealing || m.superseded
+	m.stateMu.Unlock()
+	if suppressed {
+		return
+	}
+	// Publish the driver's last commit boundary before telling the runtime:
+	// the terminal wrap trusts that push (see exitFlush).
+	if m.dirtyVersion > m.pushedVersion || m.pushInFlight() {
+		m.exitFlush = true
+		m.exitFlushDeadline = time.Now().Add(m.cfg.PushBound + time.Second)
+		m.exitFlushReason, m.exitFlushDetail = protocol.RecoverDeath, "agent process exited"
+		m.retryAt = time.Time{} // the flush push is not held back by a failed round's backoff
+		m.retryHalted = false
+		m.schedulePush()
+		m.maybeFinishExitFlush()
+		return
+	}
 	m.needRecovery(protocol.RecoverDeath, "agent process exited")
+}
+
+// pushInFlight reports whether a capsule push is running right now.
+func (m *Monitor) pushInFlight() bool { return len(m.gate) > 0 }
+
+// maybeFinishExitFlush reports the pending driver exit once the last
+// Version is published (or the push failed, or the bound passed).
+func (m *Monitor) maybeFinishExitFlush() {
+	if !m.exitFlush {
+		return
+	}
+	if m.pushInFlight() && time.Now().Before(m.exitFlushDeadline) {
+		return // wait for the in-flight push's result
+	}
+	if m.dirtyVersion > m.pushedVersion && !m.pushInFlight() && m.failedPushes == 0 &&
+		time.Now().Before(m.exitFlushDeadline) {
+		m.schedulePush() // a newer Version arrived behind the push that just ended
+		if m.pushInFlight() {
+			return
+		}
+	}
+	m.exitFlush = false
+	m.needRecovery(m.exitFlushReason, m.exitFlushDetail)
 }
 
 // needRecovery is the single choke point for the storm guard: after one
@@ -514,420 +571,28 @@ func (m *Monitor) sendOB(msg protocol.OBMsg) {
 }
 
 // ---------------------------------------------------------------------------
-// detection: hang (stream silence with a turn in flight → probe → kill)
-
-func (m *Monitor) checkHang() {
-	if m.probeInFlight {
-		return
-	}
-	// The ruled criterion: silence WHILE A TURN IS IN FLIGHT. An idle
-	// agent (waiting for work or for a human answer) is never a hang.
-	if !m.stream.heartbeat().Silent(time.Now(), m.cfg.HangWindow, m.hangAnchor) {
-		return
-	}
-	// #83 tool-execution exemption: a dispatched tool call that has not
-	// returned yet is live work, not a hang. Large file edits and long
-	// builds routinely exceed the 10-minute HangWindow; the pre-#83
-	// watchdog killed those deterministically (probe undeliverable
-	// mid-tool-call). Window: 30 minutes from the dispatch (capped at
-	// 4× the wall window when the wall is enabled, #124) — a tool that
-	// takes longer than that is genuinely stuck and DESERVES the probe.
-	hb := m.stream.heartbeat()
-	if !hb.ToolDispatchAt.IsZero() && time.Since(hb.ToolDispatchAt) < m.dispatchExemptWindow() {
-		return
-	}
-	m.stateMu.Lock()
-	pending := m.pending != nil
-	suppressed := m.recovering || m.sealing || m.superseded
-	m.stateMu.Unlock()
-	if pending {
-		// Pending-question exemption (the #99 lesson): a driver parked on
-		// an open question has NO live turn — but its stream's last record
-		// may still read turn-open (the step process asked and was torn
-		// down after envelope collection, so InFlight is stale-true forever).
-		// Without this gate the parked question drew a hang probe every
-		// HangWindow — and on driver handles the control probe ALWAYS
-		// fails (no control channel), so every park was a false recovery.
-		// needs_input is designed stillness: the hang criterion, like the
-		// idle one, must not judge it.
-		return
-	}
-	if suppressed {
-		return
-	}
-	m.probeInFlight = true
-	m.probeIdle = false
-	_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
-		"kind": HangSuspected,
-		"detail": fmt.Sprintf("progress-silent past the %.0fs window with a turn in flight; sending liveness probe",
-			m.cfg.HangWindow.Seconds()),
-	})
-	handle := m.handle // captured: no race with a concurrent recovery
-	nonce, _ := randomNonce()
-	// the correlation tokens the ack wait matches on: the nonce (echoed
-	// as Ref) and the numeric seq
-	ctrlSeq := atomic.AddInt64(&m.ctrl, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.ProbeTimeout)
-		defer cancel()
-		ack, err := handle.SendControl(ctx, protocol.ControlMsg{
-			Method: protocol.ControlProbe, Nonce: nonce, Seq: ctrlSeq,
-		})
-		m.probeDone <- probeResult{ack: ack, err: err}
-	}()
-}
-
-// checkIdle is the F5 idle watchdog — the general backstop the hang
-// criterion is structurally blind to. v0 #44's runtime watchdog judged
-// ACTIVITY (procfs I/O/CPU motion), so it caught an agent that was
-// merely idle; the v1 port kept only the in-flight criterion (stream
-// silence WITH a turn open) and lost that layer. The pilot's F5 shape
-// is exactly the hole: a fatal provider error ENDS the turn (fatal
-// recovery now catches that on the spot), but any other path that
-// leaves the session running with no open turn and no arriving prompt
-// — a wrongly-terminated turn, a lost driver — leaves the stream
-// quiet with turnDepth 0, which no in-flight window ever covers.
-// Criterion: no PROGRESS record (the F15 semantics: UI noise never
-// counts) AND no in-flight turn for longer than IdleWindow ⇒ liveness
-// probe (the same probe mechanism, the same ProbeTimeout bound) ⇒ no
-// ack ⇒ WINeedsRecovery(idle); ack ⇒ the window restarts and nothing
-// recovers (the agent is on legal slow work). Exemptions: a pending
-// question (needs_input is a designed standstill — waiting for a human
-// answer is not idleness) and every suppressed state (RECOVERING
-// already shipped its one signal; the storm semantics are unchanged).
-func (m *Monitor) checkIdle() {
-	if m.cfg.IdleWindow <= 0 {
-		return // disabled: a zero window would fire on every tick
-	}
-	if m.probeInFlight {
-		return // one probe at a time, whichever criterion armed it
-	}
-	hb := m.stream.heartbeat()
-	if hb.InFlight {
-		return // a turn is open: the hang criterion owns that silence
-	}
-	eff := hb.LastProgressAt
-	if m.idleAnchor.After(eff) {
-		eff = m.idleAnchor // pre-first-record baseline / probe-cleared restart
-	}
-	if eff.IsZero() || time.Since(eff) < m.cfg.IdleWindow {
-		return
-	}
-	m.stateMu.Lock()
-	pending := m.pending != nil
-	suppressed := m.recovering || m.sealing || m.superseded
-	m.stateMu.Unlock()
-	if pending {
-		return // needs_input: waiting for a human answer is designed stillness
-	}
-	if suppressed {
-		return
-	}
-	m.probeInFlight = true
-	m.probeIdle = true
-	_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
-		"kind": IdleSuspected,
-		"detail": fmt.Sprintf("no progress record and no turn in flight past the %.0fs idle window; sending liveness probe",
-			m.cfg.IdleWindow.Seconds()),
-	})
-	handle := m.handle // captured: no race with a concurrent recovery
-	nonce, _ := randomNonce()
-	ctrlSeq := atomic.AddInt64(&m.ctrl, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.ProbeTimeout)
-		defer cancel()
-		ack, err := handle.SendControl(ctx, protocol.ControlMsg{
-			Method: protocol.ControlProbe, Nonce: nonce, Seq: ctrlSeq,
-		})
-		m.probeDone <- probeResult{ack: ack, err: err}
-	}()
-}
-
-// checkWallBackstop is the §6.2 absolute bound (polyforge#114): the
-// non-resettable cap on a dispatch's PROGRESS silence — the backstop for
-// exactly the shape where every criterion-driven lane is silenced by the
-// ack itself. The hang/idle watchdogs arm on silence, probe, and let an
-// acked probe restart their windows; on the driver lane that ack is
-// answered from the daemon-side harness liveness (bridge.SendControl,
-// the #99 comment) and never carries step-process progress, so a wedged
-// step is acked every window forever (experiments C/D of wi_u0xTEIz0gxi4:
-// goroutine liveness, process liveness and a stdio echo all fail to
-// discriminate the wedge). This check ignores the ack lanes entirely: it
-// measures the progress witness - the turn-machinery witness pinned by
-// polyforge#124 (StreamHeartbeat.WallProgressAt: the F15 whitelist
-// minus the `response` command echo, which no probe result ever moves
-// and no echo ever refreshes), floored by the derivation's attach
-// moment - and past the absolute bound it confirms the recovery
-// regardless of what the probes answered (design: the wall clock is the
-// absolute floor against exactly probe-ack failure and echo
-// laundering, 6.2a). Same exemptions as the watchdogs: a live #83
-// tool dispatch (capped at 4x the wall window, #124), a pending
-// question (needs_input is designed stillness - the
-// §6.2a wall clock does not judge waiting-for-human either) and every
-// suppressed state. The reason follows the stream's turn state: InFlight
-// ⇒ hang, otherwise the idle shape the F5 lane owns.
-func (m *Monitor) checkWallBackstop() {
-	if m.cfg.WallBackstop <= 0 {
-		return // disabled (zero = the unit-test default; negative = explicit off)
-	}
-	hb := m.stream.heartbeat()
-	silent := m.wallSilence(hb)
-	if silent < m.cfg.WallBackstop {
-		return
-	}
-	if !hb.ToolDispatchAt.IsZero() && time.Since(hb.ToolDispatchAt) < m.dispatchExemptWindow() {
-		return // #83: a dispatched tool within its window is live work
-	}
-	m.stateMu.Lock()
-	pending := m.pending != nil
-	suppressed := m.recovering || m.sealing || m.superseded
-	m.stateMu.Unlock()
-	if pending || suppressed {
-		return
-	}
-	if hb.InFlight {
-		m.needRecovery(protocol.RecoverHang, fmt.Sprintf(
-			"stream silent with turn in flight for %s, past the absolute %s wall bound; "+
-				"liveness-probe acks carry harness-side liveness, not step progress — the wall backstop confirms the hang",
-			silent.Round(time.Second), m.cfg.WallBackstop))
-		return
-	}
-	m.needRecovery(protocol.RecoverIdle, fmt.Sprintf(
-		"no progress record and no turn in flight for %s, past the absolute %s wall bound; "+
-			"the wall backstop confirms what the acked probes kept clearing",
-		silent.Round(time.Second), m.cfg.WallBackstop))
-}
-
-// wallSilence measures the derivation's PROGRESS silence on the wall's
-// own witness: StreamHeartbeat.WallProgressAt - the turn-machinery
-// subset of the F15 whitelist (the `response` command echo excluded,
-// polyforge#124: an echo is daemon-side life, not turn work - in the
-// #117 incident one echo bought the derivation a full extra wall
-// window, root-cause Cause B). No probe result ever resets it; floored
-// by the derivation's attach moment, so a derivation that has not
-// emitted a single progress record yet is bounded from its birth
-// rather than from the epoch.
-func (m *Monitor) wallSilence(hb StreamHeartbeat) time.Duration {
-	eff := hb.WallProgressAt
-	if m.attachAt.After(eff) {
-		eff = m.attachAt
-	}
-	if eff.IsZero() {
-		return 0 // defensive: attachAt is always set at attach/onRecovered
-	}
-	return time.Since(eff)
-}
-
-// dispatchExemptWindow answers the effective #83 tool-dispatch
-// exemption bound: the 30m window, capped at 4x the wall window when
-// the wall is enabled (polyforge#124 Cause A - the constant must not
-// silently outrank a configured absolute bound; with the default 15m
-// wall the cap is 60m, above the constant, so production defaults are
-// unchanged). A disabled wall (<= 0) keeps the absolute 30m: the
-// negative flag is the explicit escape hatch from every bound.
-func (m *Monitor) dispatchExemptWindow() time.Duration {
-	if m.cfg.WallBackstop <= 0 {
-		return toolDispatchWindow
-	}
-	if w := wallSuspendMultiplier * m.cfg.WallBackstop; w < toolDispatchWindow {
-		return w
-	}
-	return toolDispatchWindow
-}
-
-// turnDurationBound answers the turn-duration lane's bound: how long a
-// single turn may stay open - 4x the wall window (0 = disabled: the
-// lane rides the wall's own escape hatch, since a negative wall is the
-// explicit opt-out from every absolute bound).
-func (m *Monitor) turnDurationBound() time.Duration {
-	if m.cfg.WallBackstop <= 0 {
-		return 0
-	}
-	return wallSuspendMultiplier * m.cfg.WallBackstop
-}
-
-// checkTurnDuration is the polyforge#124 lane for the #117
-// trickle-wedge's structural hole (root-cause Cause C): every other
-// detection lane keys on progress SILENCE, so a turn that never closes
-// while emitting one progress-class record per sub-window interval
-// keeps every witness young forever - measured zero probes, zero
-// incidents, zero recoveries across 40 wall windows (root-cause
-// experiment E5). This lane bounds the one dimension none of them
-// measures: the TURN's own age, from StreamHeartbeat.TurnOpenedAt,
-// against 4x the wall window. It fires directly, not
-// probe-and-confirm: on driver handles the probe verdict is
-// daemon-side driver liveness (bridge.SendControl) and carries nothing
-// about the subject whose age armed the criterion - the same reason
-// checkWallBackstop judges on its own witness. Exemptions, same as
-// every absolute bound: a pending question (needs_input is designed
-// stillness) and every suppressed state. A closed turn has no age -
-// the idle/hang lanes own closed-turn silence.
-func (m *Monitor) checkTurnDuration() {
-	bound := m.turnDurationBound()
-	if bound <= 0 {
-		return // the wall is disabled: every absolute bound opted out
-	}
-	hb := m.stream.heartbeat()
-	if hb.TurnOpenedAt.IsZero() || !hb.InFlight {
-		return // no turn in flight: no age to judge
-	}
-	if age := time.Since(hb.TurnOpenedAt); age < bound {
-		return
-	}
-	m.stateMu.Lock()
-	pending := m.pending != nil
-	suppressed := m.recovering || m.sealing || m.superseded
-	m.stateMu.Unlock()
-	if pending || suppressed {
-		return
-	}
-	age := time.Since(hb.TurnOpenedAt).Round(time.Second)
-	m.needRecovery(protocol.RecoverTurnDuration, fmt.Sprintf(
-		"turn in flight for %s, past the %s turn-duration bound (%dx the wall window); "+
-			"progress-class records kept every silence witness fresh - no silence lane "+
-			"can see this shape, so the turn's own age is the bound",
-		age, bound, wallSuspendMultiplier))
-}
-
-// checkNoProgress is the F15c owner face: the same progress-silence
-// signal the hang/idle watchdogs judge (no PROGRESS record for longer
-// than the idle window, REGARDLESS of whether a turn is open — an open
-// turn hands the silence to the hang watchdog, a closed one to the
-// idle watchdog, and the event covers both) also lands in the events
-// log, so the owner's observe face shows a stalled job even while the
-// watchdogs are still inside their probe/confirmation cycle — the
-// pilot's wedge produced ZERO events and no owner-visible surface for
-// 2.7 hours. Throttled to at most one event per idle window; cleared
-// by a probe round and by recovery adoption, and resumed progress
-// clears it implicitly (the gate reads lastProgressAt first). Exempt
-// while a question is pending (needs_input already owns the QUESTION
-// face) and in every suppressed state.
-func (m *Monitor) checkNoProgress() {
-	if m.cfg.IdleWindow <= 0 {
-		return // disabled with the idle watchdog it shares the window with
-	}
-	hb := m.stream.heartbeat()
-	eff := hb.LastProgressAt
-	if m.idleAnchor.After(eff) {
-		eff = m.idleAnchor // pre-first-record baseline / probe-cleared restart
-	}
-	if eff.IsZero() || time.Since(eff) < m.cfg.IdleWindow {
-		return
-	}
-	m.stateMu.Lock()
-	pending := m.pending != nil
-	suppressed := m.recovering || m.sealing || m.superseded
-	m.stateMu.Unlock()
-	if pending || suppressed {
-		return
-	}
-	if !m.noProgressAt.IsZero() && time.Since(m.noProgressAt) < m.cfg.IdleWindow {
-		return // throttle: at most one no_progress event per window
-	}
-	m.noProgressAt = time.Now()
-	_ = m.log.Append(m.wi.WorkItem, EvNoProgress, map[string]any{
-		"silent_for_ms": time.Since(eff).Milliseconds(),
-		"window_ms":     m.cfg.IdleWindow.Milliseconds(),
-		"in_flight":     hb.InFlight,
-		"detail": fmt.Sprintf("no agent progress record for %.0fs (turn in flight: %v); UI noise is not progress",
-			time.Since(eff).Seconds(), hb.InFlight),
-		"spawn_n": m.currentSpawn(),
-	})
-}
-
-func (m *Monitor) onProbeResult(pr probeResult) {
-	m.probeInFlight = false
-	idleProbe := m.probeIdle
-	m.probeIdle = false
-	// A probe round clears the no_progress throttle (F15c): the probe
-	// itself was an intervention on the same silence the event reports,
-	// and a fresh episode deserves a fresh event.
-	m.noProgressAt = time.Time{}
-	if pr.err == nil && pr.ack.OK {
-		// polyforge#114 — the ack never restarts a window past the
-		// absolute bound. An acked probe proves at most that the HARNESS
-		// side answered: on driver handles the verdict is the daemon-side
-		// driver goroutine's liveness (bridge.SendControl, the #99
-		// comment), on step handles it is the stdio reader's transport
-		// echo — neither says the agent's turn is moving. Before granting
-		// the window restart, the non-resettable progress witness gets a
-		// veto: measured progress silence past the wall backstop confirms
-		// the recovery even though the probe was answered.
-		if m.cfg.WallBackstop > 0 {
-			if s := m.wallSilence(m.stream.heartbeat()); s >= m.cfg.WallBackstop {
-				if idleProbe {
-					m.needRecovery(protocol.RecoverIdle, fmt.Sprintf(
-						"no turn in flight; liveness probe acknowledged but progress silence is %s, past the absolute %s wall bound — the ack is a harness-side echo, not life",
-						s.Round(time.Second), m.cfg.WallBackstop))
-					return
-				}
-				m.needRecovery(protocol.RecoverHang, fmt.Sprintf(
-					"stream silent with turn in flight; liveness probe acknowledged but progress silence is %s, past the absolute %s wall bound — the ack is a harness-side echo, not life",
-					s.Round(time.Second), m.cfg.WallBackstop))
-				return
-			}
-		}
-		if idleProbe {
-			// The agent answered with no turn open: legal slow work or
-			// a live-but-quiet session. The idle window restarts;
-			// nothing recovers.
-			m.idleAnchor = time.Now()
-			_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
-				"kind": IdleCleared, "detail": "liveness probe acknowledged with no turn in flight; idle window restarted",
-			})
-			return
-		}
-		// The agent answered: kill cancelled, window restarts.
-		m.hangAnchor = time.Now()
-		_ = m.log.Append(m.wi.WorkItem, EvInfraIncident, map[string]any{
-			"kind": HangCleared, "detail": "liveness probe acknowledged; hang window restarted",
-		})
-		return
-	}
-	if idleProbe {
-		m.needRecovery(protocol.RecoverIdle,
-			"no stream record and no turn in flight past the idle window; liveness probe failed")
-		return
-	}
-	m.needRecovery(protocol.RecoverHang, "stream silent with turn in flight; liveness probe failed")
-}
-
-func randomNonce() (string, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// ---------------------------------------------------------------------------
 // recovery lifecycle
 
 // onRecovered adopts the new handle Runtime derived (RTRecovered). The
-// monitor leaves RECOVERING, resets the detection surfaces and re-arms
-// them against the new derivation.
+// monitor leaves RECOVERING and drops every per-dispatch state: the
+// relaunched driver announces its own dispatches.
 func (m *Monitor) onRecovered(at Attach) {
 	if at.Handle == nil || at.Msg.SpawnN <= 0 {
 		return // malformed attachment (no announced derivation): never adopted
 	}
 	m.handle = at.Handle
-	m.records = at.Handle.Records()
 	m.exitCh = at.Handle.Exit()
-	// The stream pointer is swapped under stateMu: the HTTP/status read
-	// face reads it cross-goroutine (see lastProgressAt), and every other
-	// use stays on this goroutine.
+	if m.cur != nil {
+		m.link.Release(m.cur.spawnN)
+	}
+	m.cur = nil
 	m.stateMu.Lock()
-	m.stream = newStreamState()
+	m.act = nil
 	m.stateMu.Unlock()
-	m.probeInFlight = false
-	m.probeIdle = false
-	m.hangAnchor = time.Now()
-	m.attachAt = time.Now()      // the successor's wall-bound floor restarts with it
-	m.idleAnchor = time.Now()    // the successor derivation gets a fresh idle baseline
-	m.noProgressAt = time.Time{} // ...and a fresh no_progress episode
-	// The successor derivation carries its own transcript facts (its
-	// declared capsule path, its live file, its spawn moment): adopt
-	// them for the sync points that follow (F3).
+	m.setPhase(phaseBetween)
+	// The successor derivation carries its own transcript facts: adopt
+	// them for the sync points that follow (F3) until its first
+	// step_started names the dispatch's own.
 	if at.WI.WorkItem != "" {
 		m.setTranscriptInfo(at.WI)
 	} else {
@@ -946,74 +611,7 @@ func (m *Monitor) onRecovered(at Attach) {
 }
 
 // ---------------------------------------------------------------------------
-// execution.json polling + async commit/push
-
-// pollExecution is the C3 engine: the agent writes execution.json and
-// moves on (zero-blocking); the monitor notices mtime/Version changes on
-// its ~500ms tick and triggers the async commit+push itself.
-func (m *Monitor) pollExecution() {
-	st, err := os.Stat(m.execPath)
-	if err != nil {
-		return
-	}
-	if !st.ModTime().After(m.execMtime) {
-		return // mtime unchanged → not rewritten
-	}
-	data, err := os.ReadFile(m.execPath)
-	if err != nil {
-		return
-	}
-	var exec capsule.Execution
-	if json.Unmarshal(data, &exec) != nil {
-		return // torn/partial write: the next tick retries
-	}
-	m.execMtime = st.ModTime()
-	if m.currentStep != "" && exec.CurrentStep != m.currentStep {
-		// The incident chain is per-step: a step change starts a new one.
-		// (A first observation from "" is not a change — incidents that
-		// arrived before the first execution.json read belong to the
-		// step the agent was already on.)
-		m.stream.resetChain()
-	}
-	m.currentStep = exec.CurrentStep
-	if exec.Version > m.dirtyVersion {
-		m.dirtyVersion = exec.Version
-	}
-	// C3' belt-and-braces: the Version bump is the archival contract, but
-	// an agent that rewrites the file WITHOUT bumping it must not starve
-	// the capsule chain either. N consecutive same-Version rewrites (mtime
-	// advanced, Version stagnant) arm one fallback commit and leave one
-	// version_stagnant event; a real Version bump clears the episode. The
-	// Version-driven rule above stays the primary semantic.
-	if m.lastSeen && exec.Version == m.lastVersion {
-		m.stagnantTicks++
-		if m.stagnantTicks >= m.stagnantBound() {
-			m.stagnantTicks = 0
-			m.stagnantDirty = true
-			_ = m.log.Append(m.wi.WorkItem, EvVersionStagnant, map[string]any{
-				"version": exec.Version,
-				"detail":  fmt.Sprintf("execution.json rewritten %d times without a Version bump; scheduling a fallback commit", m.stagnantBound()),
-				"spawn_n": m.currentSpawn(),
-			})
-		}
-	} else {
-		m.stagnantTicks = 0
-		if m.lastSeen && exec.Version > m.lastVersion {
-			m.stagnantDirty = false // the primary semantic resumed
-		}
-	}
-	m.lastSeen = true
-	m.lastVersion = exec.Version
-	m.applyPendingFromExec(&exec)
-}
-
-// stagnantBound answers the injectable stagnation bound (default 3).
-func (m *Monitor) stagnantBound() int {
-	if m.cfg.VersionStagnantTicks > 0 {
-		return m.cfg.VersionStagnantTicks
-	}
-	return defaultVersionStagnantTicks
-}
+// execution.json projection + async commit/push
 
 // applyPendingFromExec reconciles the pending-question projection with
 // the authoritative file (the agent persists pending_question in
@@ -1039,8 +637,7 @@ func (m *Monitor) applyPendingFromExec(exec *capsule.Execution) {
 	m.applyPending(pv)
 }
 
-// applyPending records/clears the pending question, idempotent by id, and
-// emits the needs_input event on first sight of a new question. A nil
+// applyPending records/clears the pending question, idempotent by id. A nil
 // view after a successful execution read means the agent consumed the
 // question itself: clear the projection quietly (the answered event
 // belongs to the answer path).
@@ -1077,9 +674,8 @@ func (m *Monitor) applyPending(pv *protocol.PendingView) {
 		m.pending = pv
 	}
 	m.stateMu.Unlock()
-	_ = m.log.Append(m.wi.WorkItem, EvNeedsInput, map[string]any{
-		"question_id": pv.ID, "step": pv.Step, "question": pv.Question,
-	})
+	// the needs_input event is the DRIVER's (it lands in this same log at
+	// the park transition); this projection only feeds the status faces
 }
 
 // transcriptSnapshot captures the current derivation's transcript-sync
@@ -1183,9 +779,9 @@ func copyFileReadonly(src, dst string) error {
 
 // schedulePush starts one async commit+push sub-goroutine when a newer
 // execution Version exists, the retry backoff has elapsed, and the
-// single-in-flight gate is free. The C3' stagnation fallback rides the
-// same gate: a stagnant episode (mtime advanced, Version frozen) also
-// arms a commit, so a contract-violating agent cannot starve the chain.
+// single-in-flight gate is free. It is event-triggered: the driver's
+// exec_committed facts raise dirtyVersion and the loop calls it right
+// after draining them (the tick only serves the retry backoff).
 func (m *Monitor) schedulePush() {
 	m.stateMu.Lock()
 	superseded := m.superseded
@@ -1194,8 +790,7 @@ func (m *Monitor) schedulePush() {
 		return // M4: a superseded daemon's pushes are fenced server-side;
 		// observe does not keep offering them either
 	}
-	stagnant := m.stagnantDirty
-	if m.dirtyVersion <= m.pushedVersion && !stagnant {
+	if m.dirtyVersion <= m.pushedVersion {
 		return
 	}
 	if !m.retryAt.IsZero() && !time.Now().After(m.retryAt) {
@@ -1204,8 +799,8 @@ func (m *Monitor) schedulePush() {
 	// Same-error retry cap (V8 repair): a halted round stays halted
 	// until the next commit boundary — an execution.json Version the
 	// round did NOT already see — re-arms it. dirtyVersion only moves
-	// forward on fresh agent work (pollExecution), so a frozen poisoned
-	// tree cannot spin the retry loop.
+	// forward on a fresh driver commit, so a frozen poisoned tree cannot
+	// spin the retry loop.
 	if m.retryHalted {
 		if m.dirtyVersion <= m.retryHaltedAt {
 			return
@@ -1221,7 +816,6 @@ func (m *Monitor) schedulePush() {
 		return // one already in flight; the next tick retries
 	}
 	m.retryAt = time.Time{}
-	m.stagnantDirty = false      // consumed by this scheduling pass
 	version := m.dirtyVersion    // the seq trailer is gitops' single authority (derived in-lock)
 	tr := m.transcriptSnapshot() // captured BEFORE the spawn: no shared-field reads
 	go func() {
@@ -1232,17 +826,13 @@ func (m *Monitor) schedulePush() {
 		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.PushBound)
 		defer cancel()
 		message := fmt.Sprintf("observe: execution v%d", version)
-		if stagnant {
-			// never a lie about the version: the message names the
-			// contract violation this commit compensates for
-			message = fmt.Sprintf("observe: execution v%d (mtime advanced without a Version bump)", version)
-		}
 		sha, pushed, timings, err := m.cfg.push(ctx, m.wi.Git, message)
-		m.pushDone <- pushResult{version: version, sha: sha, pushed: pushed, stagnant: stagnant, timings: timings, err: err}
+		m.pushDone <- pushResult{version: version, sha: sha, pushed: pushed, timings: timings, err: err}
 	}()
 }
 
 func (m *Monitor) onPushResult(res pushResult) {
+	defer m.maybeFinishExitFlush()
 	<-m.gate // release the single-in-flight slot
 	// 兜底: an honest gitops result is either (pushed, nil) or a non-nil
 	// error — a clean-tree CommitPush pushes the standing HEAD, so a
@@ -1270,12 +860,6 @@ func (m *Monitor) onPushResult(res pushResult) {
 			"commit_ms": res.timings.CommitMS, "push_ms": res.timings.PushMS,
 		})
 		return
-	}
-	// A failed stagnation fallback re-arms itself: the Version-driven
-	// condition alone would never retry it (dirtyVersion never moved
-	// past pushedVersion on that path).
-	if res.stagnant {
-		m.stagnantDirty = true
 	}
 	m.failedPushes++
 	if m.firstFailAt.IsZero() {

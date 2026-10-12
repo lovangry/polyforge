@@ -1,26 +1,26 @@
 package observe
 
-// monitor_test.go: the detection surface — death, hang (probe-confirmed),
-// provider errors (fatal → instant recovery; non-fatal → storm-guarded
-// chain), the idle watchdog (F5), recovery lifecycle — plus the
-// select-never-blocks proofs.
+// monitor_test.go: the supervisor surface — driver death and the storm
+// guard, the rules of v2-converge 2.3 applied through the driver's facts
+// and the harness Tracker (each historical incident replayed), the
+// verdict fence (one verdict per dispatch, silence until step_ended,
+// state per dispatch), driver_stalled with its human-wait exemption, and
+// the select-never-blocks proofs.
 //
-// The non-blocking tests are the MUTATION-HONEST kind: the fake handle's
-// SendControl and the fake push both block on a channel the TEST
-// controls. If an implementation regressed to calling either inline in a
-// select case, the "monitor still processes records meanwhile" assertion
-// below would time out and the suite would go red.
+// The non-blocking test is the MUTATION-HONEST kind: the fake push
+// blocks on a channel the TEST controls. If an implementation regressed
+// to calling it inline in a select case, the "monitor still processes
+// facts meanwhile" assertion would time out and the suite would go red.
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"sync/atomic"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 func TestDeathDetectionSendsNeedsRecovery(t *testing.T) {
@@ -51,27 +51,23 @@ func TestStormGuardSingleNeedsRecoveryPerAttempt(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, ob := newTestMonitor(t, h, nil)
 
-	// Signal 1: the process died.
+	// Signal 1: the driver died.
 	h.die()
 	msg := waitOB(t, ob, "first WINeedsRecovery")
 	if msg.Reason != protocol.RecoverDeath {
 		t.Fatalf("reason: got %s", msg.Reason)
 	}
 
-	// Signal 2..n: the stream also went silent mid-turn and the probe
-	// would fail, the provider also errored — everything a dying agent
-	// can still emit. Exactly ONE WINeedsRecovery may leave the monitor
-	// for this attempt ("已发后静默到恢复完成").
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndErr("upstream API error (401)"))
-	feed(h, fxTurnEndErr("upstream API error (401)"))
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		return protocol.ControlAck{}, errors.New("control path closed")
-	})
+	// Signal 2..n: everything a dying driver can still emit — a dispatch
+	// whose harness errored. Exactly ONE WINeedsRecovery may leave the
+	// monitor for this attempt ("已发后静默到恢复完成").
+	tr := startDispatch(m, 1, "code", supervise.Thresholds{Silence: time.Hour})
+	tr.WaitingModel()
+	tr.TurnEnded(false, "upstream API error (401)")
 	expectNoOB(t, ob, 250*time.Millisecond, "storm-suppressed duplicate signals")
 
 	// Recovery: a NEW attempt re-arms the guard. Its death is reported
-	// again — with the new attempt-id.
+	// again — with the new derivation counter.
 	h2 := newFakeHandle("att_2")
 	m.rtCh <- Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 2}, Handle: h2}
 	soon(t, 500*time.Millisecond, "recovery adopted", func() bool {
@@ -86,308 +82,281 @@ func TestStormGuardSingleNeedsRecoveryPerAttempt(t *testing.T) {
 	expectNoOB(t, ob, 250*time.Millisecond, "no third message")
 }
 
-func TestHangDetectionProbeConfirmed(t *testing.T) {
+// A daemon-initiated close arms the sealing suppression (markClosing):
+// the driver's exit that follows is EXPECTED, not a death.
+func TestExpectedExitAfterMarkClosingIsSilent(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, ob := newTestMonitor(t, h, nil)
 
-	// A turn opens, then the stream goes silent past the window.
-	feed(h, fxTurnStart)
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		if msg.Method != protocol.ControlProbe {
-			t.Errorf("probe goroutine must send pf/probe, got %s", msg.Method)
-		}
-		return protocol.ControlAck{}, errors.New("no ack: agent wedged")
-	})
-
-	msg := waitOB(t, ob, "WINeedsRecovery(hang)")
-	if msg.Reason != protocol.RecoverHang {
-		t.Fatalf("reason: got %s, want %s", msg.Reason, protocol.RecoverHang)
-	}
-	if h.sentCount() != 1 {
-		t.Fatalf("exactly one confirmation probe, got %d", h.sentCount())
-	}
-	if len(eventsOf(m, EvInfraIncident)) == 0 {
-		t.Fatal("hang_suspected infra incident must be written")
-	}
-}
-
-func TestHangProbeClearedRestartsWindow(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, nil)
-
-	feed(h, fxTurnStart)
-	var probes atomic.Int64
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		probes.Add(1)
-		return protocol.ControlAck{Method: msg.Method, OK: true}, nil
-	})
-
-	// The window expires, the probe is answered: kill CANCELLED, window
-	// restarts, no recovery message — and no probe storm while the
-	// restarted window is young.
-	time.Sleep(120 * time.Millisecond)
-	if probes.Load() == 0 {
-		t.Fatal("the probe must have been sent after the silent window")
-	}
-	expectNoOB(t, ob, 100*time.Millisecond, "a cleared probe never recovers")
-	if len(eventsOf(m, EvInfraIncident)) == 0 {
-		t.Fatal("hang_suspected must be written")
-	}
-}
-
-func TestProviderErrorNonFatalChainStillStormGuarded(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, nil)
-	m.writeExec(t, 1, "code")
-
-	// NON-FATAL mid-turn reports (the turn has not ended on them):
-	// each becomes an immediate infra_incident event, and the recovery
-	// decision stays storm-guarded — the same step needs two consecutive
-	// incidents before one WINeedsRecovery goes out.
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndErr("upstream API error (503)"))
-	soon(t, 500*time.Millisecond, "first incident event", func() bool {
-		return len(eventsOf(m, EvInfraIncident)) >= 1
-	})
-	expectNoOB(t, ob, 150*time.Millisecond, "one non-fatal report must not recover")
-
-	// Second consecutive report in the same turn, a different error
-	// text (the dedup keeps one report per failure): the chain reaches
-	// two and the storm guard releases ONE recovery.
-	feed(h, fxMsgEndErr("upstream API error (429)"))
-	msg := waitOB(t, ob, "WINeedsRecovery(provider_error)")
-	if msg.Reason != protocol.RecoverProviderError {
-		t.Fatalf("reason: got %s", msg.Reason)
-	}
-}
-
-func TestProviderErrorCleanTurnResetsChain(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, nil)
-	m.writeExec(t, 1, "code")
-
-	// A single NON-FATAL report per turn, each turn ending clean: the
-	// clean turn_end resets the chain, so the strikes never accumulate.
-	strike := func(detail string) {
-		feed(h, fxTurnStart)
-		feed(h, fxMsgEndErr(detail))
-		feed(h, fxMsgEndStop)
-		feed(h, fxTurnEndStop)
-	}
-	strike("upstream API error (503)")
-	soon(t, 500*time.Millisecond, "first incident event", func() bool {
-		return len(eventsOf(m, EvInfraIncident)) >= 1
-	})
-	strike("upstream API error (503)")
-	expectNoOB(t, ob, 250*time.Millisecond, "a clean turn between failures starts a new chain; two isolated strikes never accumulate")
-}
-
-func TestFatalProviderErrorRecoversInstantly(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, nil)
-	m.writeExec(t, 1, "code")
-
-	const detail = "upstream API error (503)"
-	// ONE full failed turn — the turn ENDS on the provider error
-	// (turn_end stopReason=error) — is the whole judgment: the F5
-	// pilot shape. The harness's RPC session does not self-retry
-	// after a fatal turn error, so waiting for a second consecutive
-	// incident is waiting for an event that never comes.
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndErr(detail))
-	feed(h, fxTurnEndErr(detail))
-	msg := waitOB(t, ob, "WINeedsRecovery(provider_error)")
-	if msg.Reason != protocol.RecoverProviderError {
-		t.Fatalf("reason: got %s", msg.Reason)
-	}
-	soon(t, 500*time.Millisecond, "needs_recovery event written", func() bool {
-		return len(eventsOf(m, EvNeedsRecovery)) == 1
-	})
-
-	// Storm guard: the same attempt stays silent — a further fatal
-	// turn is logged as an incident but never produces a second
-	// recovery (“已发后静默到恢复完成”).
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndErr(detail))
-	feed(h, fxTurnEndErr(detail))
-	expectNoOB(t, ob, 250*time.Millisecond, "fatal recovery fires exactly once per attempt")
+	m.markClosing()
+	h.die()
+	expectNoOB(t, ob, 250*time.Millisecond, "post-close exit")
 }
 
 // ---------------------------------------------------------------------------
-// idle watchdog (F5): quiet stream with NO turn in flight → probe →
-// recover-or-restart, with the needs_input and RECOVERING exemptions.
+// the rules, one dispatch at a time (the pure rule table lives in
+// package supervise; these prove the supervisor applies it per dispatch
+// and speaks once).
 
-func TestIdleWatchdogRecoversOnce(t *testing.T) {
+func TestRuleHarnessSilentZeroSignalsAfterSpawn(t *testing.T) {
+	// incident class: #114 zero events — the harness is stuck at startup
+	// (or its stdout is held by a grandchild) and only ever times out.
 	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.IdleWindow = 40 * time.Millisecond
-	})
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		if msg.Method != protocol.ControlProbe {
-			t.Errorf("idle watchdog must send pf/probe, got %s", msg.Method)
+	m, _ := newTestMonitor(t, h, nil)
+	startDispatch(m, 1, "grill", supervise.Thresholds{Silence: 60 * time.Millisecond})
+
+	v := nextVerdict(t, m, "harness_silent")
+	dead, ok := v.(supervise.StepDead)
+	if !ok || dead.Cause != supervise.CauseHarnessSilent || dead.SpawnN != 1 || dead.Step != "grill" {
+		t.Fatalf("verdict = %+v, want step_dead harness_silent for grill@1", v)
+	}
+	// the supervisor stays silent for that spawn until step_ended
+	expectNoVerdict(t, m, 150*time.Millisecond, "after the verdict")
+	if n := len(eventsOf(m, EvSupervisorVerdict)); n != 1 {
+		t.Fatalf("supervisor_verdict events: %d, want 1", n)
+	}
+}
+
+func TestRuleHarnessSilentUINoiseDoesNotCountAsWork(t *testing.T) {
+	// F15: a background extension streams UI refreshes that kept the old
+	// "any record is life" rule fresh forever. Noise is not work.
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, nil)
+	tr := startDispatch(m, 1, "grill", supervise.Thresholds{Silence: 80 * time.Millisecond})
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+				tr.Noise()
+			}
 		}
-		return protocol.ControlAck{}, errors.New("no ack: session wedged")
-	})
-
-	// A turn completes cleanly, then the stream goes quiet with NO turn
-	// in flight — outside the hang window by definition. Past the idle
-	// window the watchdog probes; the probe goes unacknowledged.
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndStop)
-	feed(h, fxTurnEndStop)
-
-	msg := waitOB(t, ob, "WINeedsRecovery(idle)")
-	if msg.Reason != protocol.RecoverIdle {
-		t.Fatalf("reason: got %s, want %s", msg.Reason, protocol.RecoverIdle)
+	}()
+	dead, ok := nextVerdict(t, m, "harness_silent through noise").(supervise.StepDead)
+	if !ok || dead.Cause != supervise.CauseHarnessSilent {
+		t.Fatalf("verdict = %+v, want harness_silent (UI noise is silence)", dead)
 	}
-	if !hasIncidentKind(m, IdleSuspected) {
-		t.Fatal("idle_suspect infra incident must be written")
-	}
-
-	// Storm guard: the recovery fired once and only once — RECOVERING
-	// suppresses every further idle probe and signal for this attempt.
-	expectNoOB(t, ob, 150*time.Millisecond, "idle recovery fires exactly once")
-	if h.sentCount() != 1 {
-		t.Fatalf("exactly one confirmation probe, got %d", h.sentCount())
+	if !strings.Contains(dead.Evidence, "non-work records") {
+		t.Fatalf("evidence should say noise was seen: %q", dead.Evidence)
 	}
 }
 
-func TestIdleProbeAckedNoRecovery(t *testing.T) {
+func TestRuleModelErrorAfterGraceNotBefore(t *testing.T) {
+	// F5: the turn ENDED on a fatal provider error and the session sits
+	// idle forever. Rule 1 judges it one grace after the error — not
+	// instantly, not never.
 	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.IdleWindow = 40 * time.Millisecond
-	})
-	var probes atomic.Int64
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		probes.Add(1)
-		return protocol.ControlAck{Method: msg.Method, OK: true}, nil
-	})
-
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndStop)
-	feed(h, fxTurnEndStop)
-
-	// The window expires, the probe is answered: the agent is alive but
-	// on legal slow work — the window restarts and nothing recovers.
-	// No probe storm either: a restarted window spaces the probes.
-	time.Sleep(150 * time.Millisecond)
-	if probes.Load() == 0 {
-		t.Fatal("the probe must have been sent after the idle window")
+	m, _ := newTestMonitor(t, h, func(c *monitorCfg) { c.ModelErrorGrace = 150 * time.Millisecond })
+	tr := startDispatch(m, 1, "fix", supervise.Thresholds{Silence: time.Hour, Tool: time.Hour, StepTimeout: time.Hour})
+	tr.WaitingModel()
+	tr.ModelOutput(supervise.OutputText)
+	tr.TurnEnded(false, "upstream API error 529")
+	t0 := time.Now()
+	expectNoVerdict(t, m, 60*time.Millisecond, "inside the grace")
+	dead, ok := nextVerdict(t, m, "model_error").(supervise.StepDead)
+	if !ok || dead.Cause != supervise.CauseModelError {
+		t.Fatalf("verdict = %+v, want model_error", dead)
 	}
-	if probes.Load() > 4 {
-		t.Fatalf("probe storm: %d probes in one restarted window set", probes.Load())
+	if since := time.Since(t0); since < 120*time.Millisecond {
+		t.Fatalf("model_error came after only %v: the grace was not honoured", since)
 	}
-	expectNoOB(t, ob, 100*time.Millisecond, "a live-but-quiet session never recovers")
-	if !hasIncidentKind(m, IdleCleared) {
-		t.Fatal("idle_cleared must be written when the probe is acknowledged")
+	if !strings.Contains(dead.Evidence, "529") {
+		t.Fatalf("evidence must carry the error text: %q", dead.Evidence)
 	}
 }
 
-func TestIdleWatchdogRecoversWithNoStream(t *testing.T) {
+func TestRuleModelErrorClearedByRecovery(t *testing.T) {
+	// the harness went on (auto-retry): no verdict
 	h := newFakeHandle("att_1")
-	_, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.IdleWindow = 40 * time.Millisecond
-	})
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		return protocol.ControlAck{}, errors.New("no ack: session wedged")
-	})
+	m, _ := newTestMonitor(t, h, func(c *monitorCfg) { c.ModelErrorGrace = 100 * time.Millisecond })
+	tr := startDispatch(m, 1, "fix", supervise.Thresholds{Silence: time.Hour})
+	tr.TurnEnded(false, "429")
+	time.Sleep(30 * time.Millisecond)
+	tr.WaitingModel() // a new turn: the harness retried
+	expectNoVerdict(t, m, 200*time.Millisecond, "after the harness went on")
+}
 
-	// The starved-stream shape: not ONE record ever arrived (the idle
-	// anchor — set at attach — is the window baseline), no turn is in
-	// flight. Past the window: probe, no ack, one recovery.
-	msg := waitOB(t, ob, "WINeedsRecovery(idle)")
-	if msg.Reason != protocol.RecoverIdle {
-		t.Fatalf("reason: got %s, want %s", msg.Reason, protocol.RecoverIdle)
-	}
-	expectNoOB(t, ob, 150*time.Millisecond, "idle recovery fires exactly once")
-	if h.sentCount() != 1 {
-		t.Fatalf("exactly one confirmation probe, got %d", h.sentCount())
+func TestRuleModelHungWaitingForModelNoOutput(t *testing.T) {
+	// #114: the provider call never returns mid-step.
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, nil)
+	tr := startDispatch(m, 1, "fix", supervise.Thresholds{Silence: 90 * time.Millisecond, Tool: time.Hour, StepTimeout: time.Hour})
+	tr.WaitingModel()
+	dead, ok := nextVerdict(t, m, "model_hung").(supervise.StepDead)
+	if !ok || dead.Cause != supervise.CauseModelHung {
+		t.Fatalf("verdict = %+v, want model_hung", dead)
 	}
 }
 
-func TestIdleExemptWhilePendingQuestion(t *testing.T) {
+func TestRuleModelHungNotWhileTokensFlow(t *testing.T) {
+	// token-level granularity: a long reply that keeps streaming is alive
 	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.IdleWindow = 40 * time.Millisecond
-	})
-
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndStop)
-	feed(h, fxTurnEndStop)
-
-	// Arm a pending question (pending question): waiting for a human
-	// answer is a designed standstill — never idle.
-	writePendingQuestion(t, m, "q_1", "which way?", "code")
-
-	time.Sleep(150 * time.Millisecond)
-	if h.sentCount() != 0 {
-		t.Fatalf("no idle probe while a question is pending, got %d", h.sentCount())
+	m, _ := newTestMonitor(t, h, nil)
+	tr := startDispatch(m, 1, "fix", supervise.Thresholds{Silence: 90 * time.Millisecond})
+	tr.WaitingModel()
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		tr.ModelOutput(supervise.OutputThinking)
+		time.Sleep(10 * time.Millisecond)
 	}
-	expectNoOB(t, ob, 100*time.Millisecond, "needs_input is exempt from the idle judgment")
+	expectNoVerdict(t, m, 10*time.Millisecond, "a streaming model is not hung")
 }
 
-// TestHangExemptWhilePendingQuestion is the #99 lesson: a driver parked
-// on an open question has no live turn, but its stream's LAST record can
-// still read turn-open (the step process asked and was torn down after
-// envelope collection — InFlight stays stale-true forever). The stale
-// open turn must not arm the hang judgment: needs_input is designed
-// stillness for the hang criterion exactly as for the idle one, and on
-// driver handles the control probe always fails, so a false park was a
-// false recovery every HangWindow.
-func TestHangExemptWhilePendingQuestion(t *testing.T) {
+func TestRuleLongToolWithinYSurvives(t *testing.T) {
+	// #83: a long build/edit is live work, not a hang — the old lane
+	// killed it deterministically; now it only matters past Y.
 	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.HangWindow = 40 * time.Millisecond
-	})
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		t.Errorf("no hang probe may be sent while a question is pending, got %s", msg.Method)
-		return protocol.ControlAck{}, errors.New("unexpected probe")
-	})
-
-	// The turn opens and NEVER closes (the stale-open shape), no further
-	// records: the hang criterion would arm the moment the window lapses.
-	feed(h, fxTurnStart)
-
-	// Arm the pending question.
-	writePendingQuestion(t, m, "q_1", "which way?", "code")
-
-	time.Sleep(150 * time.Millisecond)
-	if h.sentCount() != 0 {
-		t.Fatalf("no hang probe while a question is pending, got %d", h.sentCount())
-	}
-	expectNoOB(t, ob, 100*time.Millisecond, "needs_input is exempt from the hang judgment")
-	_ = m
+	m, _ := newTestMonitor(t, h, nil)
+	tr := startDispatch(m, 1, "fix", supervise.Thresholds{Silence: 50 * time.Millisecond, Tool: time.Hour, StepTimeout: time.Hour})
+	tr.WaitingModel()
+	tr.ToolStart("c1", "bash", `{"command":"go test ./..."}`)
+	expectNoVerdict(t, m, 300*time.Millisecond, "a tool running within Y with the model quiet")
 }
 
-func TestIdleSuppressedWhileRecovering(t *testing.T) {
+func TestRuleToolHungBeyondY(t *testing.T) {
 	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.IdleWindow = 40 * time.Millisecond
+	m, _ := newTestMonitor(t, h, nil)
+	tr := startDispatch(m, 1, "fix", supervise.Thresholds{Silence: time.Hour, Tool: 80 * time.Millisecond, StepTimeout: time.Hour})
+	tr.ToolStart("c1", "bash", `{"command":"sleep infinity"}`)
+	dead, ok := nextVerdict(t, m, "tool_hung").(supervise.StepDead)
+	if !ok || dead.Cause != supervise.CauseToolHung {
+		t.Fatalf("verdict = %+v, want tool_hung", dead)
+	}
+	if !strings.Contains(dead.Evidence, "bash") || !strings.Contains(dead.Evidence, "sleep infinity") {
+		t.Fatalf("evidence must name the tool and its args: %q", dead.Evidence)
+	}
+}
+
+func TestRuleStepTimeoutTrickleWedgePastT(t *testing.T) {
+	// #117/#124: the step trickles one progress record per window forever;
+	// no silence rule ever fires. Only the CUMULATIVE bound can — and it
+	// counts the runtime earlier dispatches of the step already spent.
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, nil)
+	tr := startDispatch(m, 1, "fix", supervise.Thresholds{
+		Silence: time.Hour, Tool: time.Hour,
+		StepTimeout: 300 * time.Millisecond, PriorRuntime: 200 * time.Millisecond,
 	})
-
-	// Enter RECOVERING deterministically: one fatal provider error is an
-	// instant recovery, no wall-clock involved.
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndErr("upstream API error (503)"))
-	feed(h, fxTurnEndErr("upstream API error (503)"))
-	msg := waitOB(t, ob, "WINeedsRecovery(provider_error)")
-	if msg.Reason != protocol.RecoverProviderError {
-		t.Fatalf("reason: got %s", msg.Reason)
+	tr.WaitingModel()
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(10 * time.Millisecond):
+				tr.ModelOutput(supervise.OutputText) // the trickle
+			}
+		}
+	}()
+	t0 := time.Now()
+	dead, ok := nextVerdict(t, m, "step_timeout").(supervise.StepDead)
+	if !ok || dead.Cause != supervise.CauseStepTimeoutSlowModel {
+		t.Fatalf("verdict = %+v, want step_timeout_slow_model (the time went to the model)", dead)
 	}
-
-	// A clean turn closes the stream state (no turn in flight, fresh
-	// last record), then the idle window elapses: RECOVERING suppresses
-	// the idle judgment — no probe, no second signal.
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndStop)
-	feed(h, fxTurnEndStop)
-	time.Sleep(150 * time.Millisecond)
-	if h.sentCount() != 0 {
-		t.Fatalf("no idle probe while RECOVERING, got %d probes", h.sentCount())
+	if since := time.Since(t0); since > 250*time.Millisecond {
+		t.Fatalf("T accumulates across dispatches: fired after %v, want ~100ms (200ms already spent)", since)
 	}
-	expectNoOB(t, ob, 100*time.Millisecond, "RECOVERING suppresses the idle watchdog")
-	if hasIncidentKind(m, IdleSuspected) {
-		t.Fatal("no idle_suspect may be written while RECOVERING")
+}
+
+func TestRuleTwoRulesAtOnceOneVerdictLowestNumberWins(t *testing.T) {
+	// harness never worked (rule 0) AND the step is already over T
+	// (rule 4): exactly ONE verdict, the lower-numbered rule's.
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, nil)
+	startDispatch(m, 1, "fix", supervise.Thresholds{
+		Silence: 40 * time.Millisecond, StepTimeout: 40 * time.Millisecond,
+	})
+	dead, ok := nextVerdict(t, m, "priority").(supervise.StepDead)
+	if !ok || dead.Cause != supervise.CauseHarnessSilent {
+		t.Fatalf("verdict = %+v, want harness_silent (rule 0 outranks rule 4)", dead)
+	}
+	expectNoVerdict(t, m, 150*time.Millisecond, "no second verdict for the same dispatch")
+}
+
+func TestStateIsPerDispatchDroppedOnStepEnded(t *testing.T) {
+	// #124: turn/tool state of one step must never survive into the next.
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, nil)
+	th := supervise.Thresholds{Silence: time.Hour, Tool: 100 * time.Millisecond, StepTimeout: time.Hour}
+	tr1 := startDispatch(m, 1, "a", th)
+	tr1.ToolStart("c1", "bash", "{}")
+	soon(t, time.Second, "dispatch 1 adopted", func() bool { return m.activity().InDispatch })
+	// the step ended before Y; the next dispatch starts clean
+	m.link.Fact(supervise.StepEnded{Step: "a", SpawnN: 1, Outcome: supervise.OutcomeResult})
+	tr2 := startDispatch(m, 2, "b", th)
+	tr2.Alive()
+	expectNoVerdict(t, m, 300*time.Millisecond, "a tool of the ended dispatch must not poison the next")
+	// late records of the dead spawn are ignored, never resurrected
+	if got := m.link.Tracker(1); got.Snapshot(time.Now()).Begun {
+		t.Fatal("a released dispatch must not come back with state")
+	}
+}
+
+func TestVerdictForNewDispatchAfterStepEnded(t *testing.T) {
+	// one verdict per DISPATCH: a new dispatch is judged afresh
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, nil)
+	startDispatch(m, 1, "a", supervise.Thresholds{Silence: 40 * time.Millisecond})
+	if _, ok := nextVerdict(t, m, "first").(supervise.StepDead); !ok {
+		t.Fatal("no first verdict")
+	}
+	m.link.Fact(supervise.StepEnded{Step: "a", SpawnN: 1, Outcome: supervise.OutcomeExitedWithoutResult})
+	startDispatch(m, 2, "a", supervise.Thresholds{Silence: 40 * time.Millisecond})
+	dead, ok := nextVerdict(t, m, "second").(supervise.StepDead)
+	if !ok || dead.SpawnN != 2 {
+		t.Fatalf("second dispatch verdict = %+v", dead)
+	}
+}
+
+func TestNoVerdictsWhileRecovering(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, nil)
+	startDispatch(m, 1, "a", supervise.Thresholds{Silence: 40 * time.Millisecond})
+	h.die()
+	waitOB(t, ob, "death")
+	expectNoVerdict(t, m, 200*time.Millisecond, "the driver is being relaunched")
+}
+
+// ---------------------------------------------------------------------------
+// the driver between steps
+
+func TestDriverStalledBetweenStepsEscalatesToRecovery(t *testing.T) {
+	// the driver is neither in a step nor waiting on a human past N
+	// (e.g. a push child stuck holding the lock)
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, func(c *monitorCfg) { c.DriverStall = 80 * time.Millisecond })
+	st, ok := nextVerdict(t, m, "driver_stalled").(supervise.DriverStalled)
+	if !ok || st.Duration < 80*time.Millisecond {
+		t.Fatalf("verdict = %+v, want driver_stalled", st)
+	}
+	msg := waitOB(t, ob, "driver_stalled recovery")
+	if msg.Reason != protocol.RecoverDriverStalled || msg.Kind != protocol.OBNeedsRecovery {
+		t.Fatalf("OB message = %+v", msg)
+	}
+	expectNoOB(t, ob, 150*time.Millisecond, "one escalation per gap")
+}
+
+func TestNoTimersWhileWaitingForHuman(t *testing.T) {
+	// #99: a parked question has no step process — no dispatch timer and
+	// no stall clock may run, however long the human takes.
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, func(c *monitorCfg) { c.DriverStall = 60 * time.Millisecond })
+	tr := startDispatch(m, 1, "grill", supervise.Thresholds{Silence: 60 * time.Millisecond, Tool: 60 * time.Millisecond, StepTimeout: 60 * time.Millisecond})
+	tr.Alive()
+	m.link.Fact(supervise.StepEnded{Step: "grill", SpawnN: 1, Outcome: supervise.OutcomeResult})
+	m.link.Fact(supervise.StepWaitingHuman{Step: "grill", SpawnN: 1, QuestionID: "q1"})
+	expectNoVerdict(t, m, 400*time.Millisecond, "waiting on a human")
+	expectNoOB(t, ob, 10*time.Millisecond, "no stall while a human is asked")
+	// the human answers: the driver is between steps again and the clock
+	// starts from the answer
+	m.link.Fact(supervise.StepAnswered{Step: "grill", SpawnN: 1, QuestionID: "q1"})
+	if _, ok := nextVerdict(t, m, "stall after the answer").(supervise.DriverStalled); !ok {
+		t.Fatal("expected driver_stalled once the driver idles after the answer")
 	}
 }
 
@@ -407,14 +376,14 @@ func TestMonitorNotBlockedByPushInFlight(t *testing.T) {
 		}
 	})
 
-	// execution.json v1 appears → an async push starts and parks.
+	// execution.json v1 commits → an async push starts and parks.
 	m.writeExec(t, 1, "code")
 	soon(t, 500*time.Millisecond, "push started", func() bool { return len(pushes) > 0 })
 
-	// The monitor must keep observing while the push is in flight.
-	feed(h, fxTextDelta)
-	soon(t, 300*time.Millisecond, "record classified while push is in flight", func() bool {
-		return m.stream.heartbeat().Records >= 1
+	// The monitor must keep consuming facts while the push is in flight.
+	m.link.Fact(supervise.StepStarted{Step: "code", SpawnN: 1, StartedAt: time.Now()})
+	soon(t, 300*time.Millisecond, "fact consumed while the push is in flight", func() bool {
+		return m.activity().InDispatch
 	})
 
 	// Only ONE push may be in flight per WI: the parked push holds the
@@ -435,346 +404,104 @@ func TestMonitorNotBlockedByPushInFlight(t *testing.T) {
 	})
 }
 
-// A daemon-initiated close arms the sealing suppression (markClosing):
-// the agent's process exit that follows is EXPECTED, not a death.
-func TestExpectedExitAfterMarkClosingIsSilent(t *testing.T) {
+func TestPushIsEventTriggeredNotPolled(t *testing.T) {
+	// the supervisor no longer polls execution.json: a file rewrite with
+	// no exec_committed fact publishes nothing, the fact does
 	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, nil)
-
-	m.markClosing()
-	h.die()
-	expectNoOB(t, ob, 250*time.Millisecond, "post-close exit")
+	pushes := make(chan struct{}, 4)
+	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
+			pushes <- struct{}{}
+			return "sha", true, gitops.PushTimings{}, nil
+		}
+	})
+	soon(t, time.Second, "supervisor running", func() bool { return len(eventsOf(m, EvJobStarted)) == 1 })
+	time.Sleep(50 * time.Millisecond) // past the seed read
+	rawWrite(t, m, 5, "code")         // file only, no fact
+	time.Sleep(150 * time.Millisecond)
+	if len(pushes) != 0 {
+		t.Fatal("a silent file rewrite must not trigger a push: the supervisor does not poll")
+	}
+	m.link.Fact(supervise.ExecCommitted{Version: 5, Step: "code"})
+	soon(t, time.Second, "push on the commit-boundary fact", func() bool { return len(pushes) == 1 })
 }
 
-func TestMonitorNotBlockedByProbeWait(t *testing.T) {
+func TestTranscriptSourceFollowsLatestStepStarted(t *testing.T) {
+	// F3: the sync sources from the latest step_started.transcript_path
 	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, nil)
+	m, _ := newTestMonitor(t, h, nil)
+	when := time.Now()
+	m.link.Fact(supervise.StepStarted{Step: "a", SpawnN: 1, TranscriptPath: "/cap/session/one.jsonl", StartedAt: when})
+	m.link.Fact(supervise.StepStarted{Step: "a", SpawnN: 2, TranscriptPath: "/cap/session/two.jsonl", StartedAt: when, Resumed: true})
+	soon(t, time.Second, "both facts consumed", func() bool {
+		return m.activity().SpawnN == 2
+	})
+	snap := m.transcriptSnapshot()
+	if snap.dst != "/cap/session/two.jsonl" || snap.src != "/cap/session/two.jsonl" {
+		t.Fatalf("transcript snapshot = %+v, want the latest dispatch's (resumed: src == dst)", snap)
+	}
+}
 
-	// A turn opens, then the stream goes silent past the hang window.
-	feed(h, fxTurnStart)
-	probeEntered := make(chan struct{}, 1)
+func TestDriverExitFlushesLastCommitBoundaryBeforeReporting(t *testing.T) {
+	// the terminal wrap trusts that the driver's last Version was published
+	// (it does not push on its own): the supervisor publishes FIRST, then
+	// reports the exit
+	h := newFakeHandle("att_1")
 	release := make(chan struct{})
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		if msg.Method == protocol.ControlProbe {
-			probeEntered <- struct{}{}
-			<-release // the "long" probe wait
-			return protocol.ControlAck{Method: msg.Method, OK: true}, nil
+	pushes := make(chan struct{}, 4)
+	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
+			pushes <- struct{}{}
+			<-release
+			return "sha", true, gitops.PushTimings{}, nil
 		}
-		return protocol.ControlAck{Method: msg.Method, OK: true}, nil
 	})
+	m.writeExec(t, 7, "release") // the terminal commit boundary
+	soon(t, time.Second, "the push started", func() bool { return len(pushes) == 1 })
 
-	// The probe is now CONFIRMED parked. While it waits, the monitor
-	// must keep classifying records (an inline probe wait parks the
-	// whole select loop and this goes red).
-	select {
-	case <-probeEntered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the liveness probe never started")
-	}
-	feed(h, fxTextDelta)
-	soon(t, 400*time.Millisecond, "record classified while probe is parked", func() bool {
-		return m.stream.heartbeat().Records >= 2
-	})
-
-	// The probe answers: kill cancelled, window restarts, no recovery.
+	h.die() // the driver returned while its last Version is still being published
+	expectNoOB(t, ob, 150*time.Millisecond, "the exit must wait for the in-flight publish")
 	close(release)
-	expectNoOB(t, ob, 200*time.Millisecond, "a cleared probe never recovers")
-}
-
-// TestPollVersionStagnantSchedulesFallbackCommit pins the C3'
-// belt-and-braces: an agent that rewrites execution.json (mtime advances)
-// while leaving the top-level Version frozen must not starve the capsule
-// chain — after the stagnation bound (3 rewrites here) the monitor
-// schedules a commit anyway and records one version_stagnant event.
-// The Version-driven rule stays primary: a proper Version bump publishes
-// without any stagnation episode.
-func TestPollVersionStagnantSchedulesFallbackCommit(t *testing.T) {
-	var pushes atomic.Int64
-	h := newFakeHandle("att_1")
-	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.VersionStagnantTicks = 3
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
-			pushes.Add(1)
-			return "sha_stag", true, gitops.PushTimings{}, nil
-		}
-	})
-
-	// v1 published normally: the primary Version-driven semantic.
-	m.writeExec(t, 1, "s1")
-	soon(t, 2*time.Second, "version-driven publish", func() bool {
-		return pushes.Load() == 1
-	})
-
-	// The agent now violates the contract: four rewrites, Version stays 1.
-	for i := 0; i < 4; i++ {
-		m.writeExec(t, 1, "s1")
-		time.Sleep(5 * time.Millisecond) // let a poll tick observe each mtime
+	msg := waitOB(t, ob, "the exit report after the publish")
+	if msg.Reason != protocol.RecoverDeath {
+		t.Fatalf("reason %q", msg.Reason)
 	}
-	soon(t, 2*time.Second, "stagnation fallback commit", func() bool {
-		return pushes.Load() == 2
-	})
-	if evs := eventsOf(m, EvVersionStagnant); len(evs) != 1 {
-		t.Fatalf("exactly one version_stagnant event per episode, got %d", len(evs))
-	}
-	// The fallback stops after one commit until a NEW episode: no push
-	// storm while the file is left alone.
-	time.Sleep(60 * time.Millisecond)
-	if n := pushes.Load(); n != 2 {
-		t.Fatalf("stale stagnant episode must not keep pushing, pushes=%d", n)
+	if len(eventsOf(m, EvPublished)) == 0 {
+		t.Fatal("the last Version must be published before the exit is reported")
 	}
 }
 
-// TestPollVersionBumpClearsStagnation: a real Version bump in the middle
-// of a stagnation episode re-arms the primary semantic — the episode's
-// partial count is discarded, no fallback commit fires, no event lands.
-func TestPollVersionBumpClearsStagnation(t *testing.T) {
-	var pushes atomic.Int64
-	h := newFakeHandle("att_1")
-	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.VersionStagnantTicks = 3
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
-			pushes.Add(1)
-			return "sha_bump", true, gitops.PushTimings{}, nil
-		}
-	})
-
-	m.writeExec(t, 1, "s1")
-	soon(t, 2*time.Second, "initial publish", func() bool {
-		return pushes.Load() == 1
-	})
-	// two stagnant rewrites (below the bound), then a proper bump
-	m.writeExec(t, 1, "s1")
-	time.Sleep(5 * time.Millisecond)
-	m.writeExec(t, 1, "s1")
-	time.Sleep(5 * time.Millisecond)
-	m.writeExec(t, 2, "s2") // the agent fixes its write path
-	soon(t, 2*time.Second, "version-driven publish of v2", func() bool {
-		return pushes.Load() == 2
-	})
-	// The async observe-flush published variant carries the timing fields
-	// (here the fake's zero timings — presence is the assertion).
-	for _, e := range eventsOf(m, EvPublished) {
-		eventBodyInt64(t, e, "commit_ms")
-		eventBodyInt64(t, e, "push_ms")
-	}
-	if evs := eventsOf(m, EvVersionStagnant); len(evs) != 0 {
-		t.Fatalf("a resolved episode must leave no event, got %d", len(evs))
-	}
-	time.Sleep(40 * time.Millisecond)
-	if n := pushes.Load(); n != 2 {
-		t.Fatalf("no fallback commit may fire after a bump, pushes=%d", n)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// F15 progress semantics: UI noise is not life. The three pinned shapes
-// of the pilot's double-blind wedge.
-
-// fxExtUI is the extension-UI chatter record the pilot probe measured
-// streaming continuously out of a background-task extension while the
-// agent's turn was stuck.
-const fxExtUI = `{"type":"extension_ui_request","request":{"method":"setStatus","payload":"…"},"seq":0}`
-
-// TestHangDetectionSurvivesUINoise is shape A — the on-machine incident:
-// a turn is open, NO progress record arrives, but the extension UI keeps
-// streaming records continuously. Under the old "any record is life"
-// rule the hang window never armed (and the turn being open held off the
-// idle watchdog too — the double blind). Under the F15 rule the noise is
-// invisible to the watchdogs: hang suspects, probes, the probe fails,
-// one WINeedsRecovery(hang).
-func TestHangDetectionSurvivesUINoise(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, nil)
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		return protocol.ControlAck{}, errors.New("no ack: agent wedged")
-	})
-
-	// The turn opens (progress stops here), then the UI chatter floods.
-	feed(h, fxTurnStart)
-	feed(h, fxMsgStart)
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				feed(h, fxExtUI)
-				time.Sleep(2 * time.Millisecond)
-			}
-		}
-	}()
-
-	msg := waitOB(t, ob, "WINeedsRecovery(hang) through UI noise")
-	if msg.Reason != protocol.RecoverHang {
-		t.Fatalf("reason: got %s, want %s", msg.Reason, protocol.RecoverHang)
-	}
-	if !hasIncidentKind(m, HangSuspected) {
-		t.Fatal("hang_suspected must be written")
-	}
-}
-
-// TestSlowProgressTurnNotHang is shape B — legal slow work: a turn is
-// open and ordinary progress records keep arriving. No watchdog fires,
-// no probe is sent, nothing recovers.
-func TestSlowProgressTurnNotHang(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, nil)
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		t.Errorf("no probe may be sent while progress flows, got %s", msg.Method)
-		return protocol.ControlAck{Method: msg.Method, OK: true}, nil
-	})
-
-	feed(h, fxTurnStart)
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				feed(h, fxTextDelta) // message_update: real turn progress
-				time.Sleep(5 * time.Millisecond)
-			}
-		}
-	}()
-
-	expectNoOB(t, ob, 250*time.Millisecond, "a progressing turn never recovers")
-	if h.sentCount() != 0 {
-		t.Fatalf("no probe while progress flows, got %d", h.sentCount())
-	}
-	for _, kind := range incidentKinds(m) {
-		if kind == HangSuspected || kind == IdleSuspected {
-			t.Fatalf("no watchdog may suspect a progressing turn, saw %s", kind)
-		}
-	}
-}
-
-// TestIdleFiresThroughUINoise is shape C — the idle backstop with the
-// noise ingredient: no turn in flight, no progress record, but the
-// extension UI keeps chattering. The idle watchdog (anchored on
-// lastProgressAt since F15) still arms, probes and recovers; the noise
-// cannot hold the window open the way it held the old lastRecordAt.
-func TestIdleFiresThroughUINoise(t *testing.T) {
+func TestDriverExitFlushIsBoundedWhenThePushFails(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.IdleWindow = 40 * time.Millisecond
-	})
-	h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-		return protocol.ControlAck{}, errors.New("no ack: session wedged")
-	})
-
-	// A turn completes cleanly, then only UI chatter arrives.
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndStop)
-	feed(h, fxTurnEndStop)
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				feed(h, fxExtUI)
-				time.Sleep(2 * time.Millisecond)
-			}
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
+			return "", false, gitops.PushTimings{}, context.DeadlineExceeded
 		}
-	}()
-
-	msg := waitOB(t, ob, "WINeedsRecovery(idle) through UI noise")
-	if msg.Reason != protocol.RecoverIdle {
-		t.Fatalf("reason: got %s, want %s", msg.Reason, protocol.RecoverIdle)
-	}
-	if !hasIncidentKind(m, IdleSuspected) {
-		t.Fatal("idle_suspect must be written")
+	})
+	m.writeExec(t, 3, "code")
+	soon(t, time.Second, "a failed push", func() bool { return len(eventsOf(m, EvPushFailed)) >= 1 })
+	h.die()
+	if msg := waitOB(t, ob, "the exit report despite a failing push"); msg.Reason != protocol.RecoverDeath {
+		t.Fatalf("reason %q", msg.Reason)
 	}
 }
 
-// TestNoProgressEventAndThrottle pins the F15c owner face: progress
-// silence past the idle window lands ONE no_progress event per window in
-// the events log (whatever the turn state), keeps reporting at window
-// cadence while the stall continues, goes quiet while progress flows,
-// and reports again when a fresh silent episode begins.
-func TestNoProgressEventAndThrottle(t *testing.T) {
+func TestLiveProgressFaceReadsTheCurrentDispatch(t *testing.T) {
 	h := newFakeHandle("att_1")
-	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.IdleWindow = 40 * time.Millisecond
-		c.HangWindow = time.Hour // keep the hang lane out of this test
-		h.setSend(func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-			return protocol.ControlAck{Method: msg.Method, OK: true}, nil
-		})
-	})
-
-	// A clean turn, then silence. The first no_progress lands once...
-	feed(h, fxTurnStart)
-	feed(h, fxMsgEndStop)
-	feed(h, fxTurnEndStop)
-	soon(t, 500*time.Millisecond, "first no_progress event", func() bool {
-		return len(eventsOf(m, EvNoProgress)) == 1
-	})
-	// ...and a continuing stall keeps reporting at window cadence (the
-	// idle probe acks restart the window; the throttle spaces the
-	// events), never more than one per window.
-	time.Sleep(150 * time.Millisecond)
-	if n := len(eventsOf(m, EvNoProgress)); n < 2 || n > 5 {
-		t.Fatalf("no_progress cadence: %d events over ~4 windows, want 2..5", n)
+	m, _ := newTestMonitor(t, h, nil)
+	if p := m.liveProgress(); p.InDispatch {
+		t.Fatalf("no dispatch yet: %+v", p)
 	}
-
-	// Progress resumes and keeps flowing: the gate reads lastProgressAt,
-	// so no further event lands while the stream proves life.
-	base := len(eventsOf(m, EvNoProgress))
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				feed(h, fxTextDelta)
-				time.Sleep(5 * time.Millisecond)
-			}
-		}
-	}()
-	time.Sleep(150 * time.Millisecond)
-	if n := len(eventsOf(m, EvNoProgress)); n != base {
-		t.Fatalf("no no_progress while progress flows: %d -> %d", base, n)
+	tr := startDispatch(m, 1, "fix", supervise.Thresholds{Silence: time.Hour})
+	soon(t, time.Second, "dispatch adopted", func() bool { return m.liveProgress().InDispatch })
+	tr.ToolStart("c1", "edit", `{"path":"internal/a.go"}`)
+	tr.ToolEnd("c1", "edit")
+	tr.ToolStart("c2", "bash", `{"command":"go test ./..."}`)
+	p := m.liveProgress()
+	if p.Step != "fix" || p.Command != "go test ./..." || p.ToolCalls != 2 ||
+		len(p.RecentFiles) != 1 || p.RecentFiles[0] != "internal/a.go" {
+		t.Fatalf("live progress %+v", p)
 	}
-	close(stop)
-
-	// Silence again: a fresh episode reports again.
-	soon(t, 500*time.Millisecond, "no_progress after the fresh episode", func() bool {
-		return len(eventsOf(m, EvNoProgress)) > base
-	})
-	// The event body carries the facts the owner face renders.
-	e := eventsOf(m, EvNoProgress)[0]
-	var body map[string]any
-	if err := json.Unmarshal(e.Body, &body); err != nil {
-		t.Fatalf("no_progress body: %v", err)
-	}
-	for _, key := range []string{"silent_for_ms", "window_ms", "in_flight", "spawn_n"} {
-		if _, ok := body[key]; !ok {
-			t.Fatalf("no_progress body must carry %q: %s", key, e.Body)
-		}
-	}
-}
-
-// TestNoProgressExemptWhilePendingQuestion: needs_input is designed
-// stillness — the no_progress owner face stays quiet while a human
-// answer is pending (the QUESTION column already owns that signal).
-func TestNoProgressExemptWhilePendingQuestion(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.IdleWindow = 40 * time.Millisecond
-		c.HangWindow = time.Hour
-	})
-
-	writePendingQuestion(t, m, "q_np", "which way?", "code")
-
-	time.Sleep(150 * time.Millisecond)
-	if n := len(eventsOf(m, EvNoProgress)); n != 0 {
-		t.Fatalf("no no_progress while a question is pending, got %d", n)
-	}
+	m.link.Fact(supervise.StepEnded{Step: "fix", SpawnN: 1, Outcome: supervise.OutcomeResult})
+	soon(t, time.Second, "dispatch dropped", func() bool { return !m.liveProgress().InDispatch })
 }

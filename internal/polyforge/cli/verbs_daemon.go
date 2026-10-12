@@ -812,22 +812,24 @@ Launch flags (with environment variable and default, where one exists):
   --mode interactive|batch|drain
       initial mode (default interactive)
 
-Supervision-window flags (#12; Go duration strings; omitted or 0 keeps
-observe's own default):
+Supervision flags (v2-converge 2.4; Go duration strings; omitted or 0 keeps
+the default; a step overrides them in workflow.md: budget.wall_minutes = T,
+silence_minutes = X, tool_minutes = Y):
 
-  --hang-window D
-      stream silence while a turn is in flight before the liveness probe
-      arms (10m)
-  --idle-window D
-      no progress record and no turn in flight before the idle watchdog
-      probes (10m)
-  --probe-timeout D
-      one liveness probe's ack bound (2m)
-  --wall-window D
-      absolute wall-clock backstop on a derivation's progress silence;
-      no probe ack restarts it; also bounds a never-closing turn and
-      caps the tool-dispatch exemption at 4x this window
-      (15m; negative disables)
+  --silence-window D
+      X: no real work signal after dispatch, or no model output while
+      waiting for the model, before the step is judged dead
+      (10m token-level harnesses, 30m message-level)
+  --tool-window D
+      Y: one tool running longer than this is judged hung (30m)
+  --step-timeout D
+      T: cumulative step runtime across its dispatches (90m)
+  --stall-window D
+      N: the driver between steps, not waiting on a human, for longer
+      than this is judged stalled (10m; negative disables)
+  --model-error-grace D
+      grace after a turn ends on a model error before the step is
+      judged dead (1m)
   --revalidate-every D
       periodic session revalidation cadence for RUNNING jobs
       (5m; negative disables)

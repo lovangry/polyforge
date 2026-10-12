@@ -50,10 +50,4 @@ func TestAnswerWithoutLiveBridgeHandleFailsFast(t *testing.T) {
 	if !strings.Contains(ae.Detail, "bridge") {
 		t.Fatalf("the refusal must name the missing bridge handle: %q", ae.Detail)
 	}
-	// No relay executed: the fake engine received zero control methods.
-	for i := 0; i < td.spawner.callCount(); i++ {
-		if got := td.spawner.agentOf(i).sentMethods(); len(got) != 0 {
-			t.Fatalf("a relay reached agent %d (%v) — no relay path may execute", i, got)
-		}
-	}
 }

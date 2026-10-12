@@ -3,8 +3,8 @@ package daemon
 // revalidate_flag_test.go: pins the -revalidate-every seam. Main()'s
 // flag parse is not unit-testable (it runs the daemon), so the flag
 // test follows the established seam-test shape — the same
-// TestObserveWindowsInjectionDrivesHangDetection pattern: inject
-// Config.Observe through newTestDaemon and assert the assembled
+// supervision-config injection pattern: inject
+// Config.Supervision through newTestDaemon and assert the assembled
 // observe lane honors it. Two pins:
 //
 //   - a small injected cadence drives REPEATED periodic session-verify
@@ -22,7 +22,7 @@ import (
 func TestRevalidateEveryInjectionDrivesPeriodicSessionVerify(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) {
 		// The seam: the M4 cadence the assembly passes through.
-		c.Observe.SessionRevalidateEvery = 40 * time.Millisecond
+		c.Supervision.SessionRevalidateEvery = 40 * time.Millisecond
 	})
 	td.submitClaim(t, "wi_rv")
 	td.waitMonitored(t, "wi_rv")
@@ -49,7 +49,7 @@ func TestRevalidateEveryInjectionDrivesPeriodicSessionVerify(t *testing.T) {
 
 func TestRevalidateEveryNegativeDisablesSessionVerify(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) {
-		c.Observe.SessionRevalidateEvery = -1
+		c.Supervision.SessionRevalidateEvery = -1
 	})
 	td.submitClaim(t, "wi_rvn")
 	td.waitMonitored(t, "wi_rvn")

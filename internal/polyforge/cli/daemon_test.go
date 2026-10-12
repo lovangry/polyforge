@@ -324,10 +324,10 @@ func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
 		`daemon: m1  mode: interactive  queue: 1 pending / 1 running / max 2
 workspaces: /srv/pf-ws
 
-WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  LAST-PROGRESS
----------  -----------  ----------------  -----  ---------  --------  -------------
-wi_run     running      ab12cd34ef56aa00  #3     42         -         -
-wi_old     needs_input  -                 -      43         -         -
+WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  STEP-AGE  LAST-WORK
+---------  -----------  ----------------  -----  ---------  --------  --------  ---------
+wi_run     running      ab12cd34ef56aa00  #3     42         -         -         -
+wi_old     needs_input  -                 -      43         -         -         -
 `)
 
 	// Full verb drive: `pf ops status` runs the same raw-JSON → decode

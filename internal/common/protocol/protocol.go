@@ -1,11 +1,15 @@
-// Package protocol defines the three in-process/in-machine contracts of v1
+// Package protocol defines the in-process/in-machine contracts of v1
 // (design authority: docs/design/polyforge-vnext/v1-architecture-spec.md +
-// v1-spec-full.md §二 §五, rulings C2/C3):
+// v1-spec-full.md §二 §五, rulings C2/C3; v2-converge.md §2 for the
+// supervision changes):
 //
 //  1. Runtime ↔ Observe messages (5 kinds, every message carries the
 //     per-WI derivation counter spawn_n).
-//  2. The liveness-probe control message (daemon→agent handle).
-//  3. The pf CLI ↔ daemon UDS HTTP API surface (04 §5).
+//  2. The pf CLI ↔ daemon UDS HTTP API surface (04 §5).
+//
+// (The liveness-probe control message was deleted with the guessing
+// supervision lanes; the driver ↔ supervisor contract lives in
+// internal/polyforge/supervise.)
 package protocol
 
 import "encoding/json"
@@ -67,21 +71,18 @@ const (
 	OBSuperseded OBMsgKind = "wi_superseded"
 )
 
-// Recovery causes carried by WINeedsRecovery.
+// Recovery causes carried by WINeedsRecovery. The supervisor's step-level
+// judgements (harness_silent, model_hung, tool_hung, step timeouts, ...)
+// are NOT recoveries: they ride the in-process driver link and the
+// driver handles them itself. Recovery is only about the driver.
 const (
-	RecoverDeath         = "agent_death"
-	RecoverHang          = "hang"
-	RecoverProviderError = "provider_error"
-	// RecoverIdle is the F5 watchdog cause: the session is alive but
-	// nobody drives it — no progress record, no turn in flight past the
-	// idle window, and the liveness probe went unacknowledged.
-	RecoverIdle = "idle"
-	// RecoverTurnDuration is the polyforge#124 cause: the turn stayed
-	// open past the turn-duration bound (a fixed multiple of the wall
-	// window) while progress-class records kept every silence witness
-	// fresh — no silence-based lane can see that shape, so the turn's
-	// own age is the bound (the #117 trickle-wedge).
-	RecoverTurnDuration = "turn_duration"
+	// RecoverDeath: the driver returned (crash, error, or terminal exit;
+	// the runtime tells them apart from the capsule).
+	RecoverDeath = "agent_death"
+	// RecoverDriverStalled: the driver sat between steps (not waiting on
+	// a human) past the stall bound — the recovery engine kills its tree
+	// and relaunches it, counted against the driver-crash bound.
+	RecoverDriverStalled = "driver_stalled"
 )
 
 // Terminal reasons carried by WIFinished.
@@ -102,49 +103,12 @@ const (
 	FinishSuperseded = "superseded"
 )
 
-// ---------------------------------------------------------------------------
-// 2. Liveness-probe control surface
-// ---------------------------------------------------------------------------
-
-// The probe is the control channel's only method (polyforge#106 retired
-// the answer relay and the stop-notice delivery with the WI-Agent
-// engine; the remaining flush/stdio remnants were deleted after it).
-
-const (
-	// ControlProbe asks the agent to prove liveness within the 2-minute
-	// budget. Payload: {"method":"pf/probe","nonce":<hex>}
-	ControlProbe = "pf/probe"
-)
-
-// ControlMsg is the control envelope. Seq is the numeric correlation
-// token (monotonic per sender); pf/probe carries its nonce in Nonce —
-// the ack MUST echo one of them so concurrent waits cannot steal each
-// other's acks.
-type ControlMsg struct {
-	Method string `json:"method"`
-	Seq    int64  `json:"seq,omitempty"`
-	Nonce  string `json:"nonce,omitempty"` // probe: echo this back
-}
-
-// ControlAck is the reply to a control method. It MUST echo the
-// correlation token of the message it answers: the numeric Seq and/or
-// Ref (pf/probe → the nonce). The
-// daemon-side wait matches on (method, correlation) — an ack that
-// echoes neither token matches nothing.
-type ControlAck struct {
-	Method string `json:"method"` // echoes the method
-	Seq    int64  `json:"seq,omitempty"`
-	Ref    string `json:"ref,omitempty"` // echoes the probe nonce
-	OK     bool   `json:"ok"`
-	Error  string `json:"error,omitempty"`
-}
-
 // PushTimeout is the hard bound on one capsule commit+push (the
 // monitor's periodic push; v1-spec-full §五).
 const PushTimeout = 60 * 1e9 // 60 seconds (ns, for time.Duration)
 
 // ---------------------------------------------------------------------------
-// 3. pf CLI ↔ daemon UDS HTTP API (04 §5.1; v0 surface minus publish_request)
+// 2. pf CLI ↔ daemon UDS HTTP API (04 §5.1; v0 surface minus publish_request)
 // ---------------------------------------------------------------------------
 
 // Daemon job states.

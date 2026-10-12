@@ -31,10 +31,12 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/bridge"
+	"github.com/silgrid/polyforge/internal/polyforge/driver"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // Hub is the aihub face the daemon itself needs beyond Runtime's
@@ -114,39 +116,47 @@ type Config struct {
 	Hub          Hub              // required; aihubclient.Client satisfies
 	PushFunc     observe.PushFunc // nil = the shared gitops choke point
 	ObservePoll  time.Duration    // observe execution.json poll tick
-	// Observe carries the observe lane's supervision windows into the
-	// assembly — the injection seam the fault-injection scenarios shrink
-	// (hang watchdog, idle watchdog, liveness-probe bound, answer-ack
-	// window). Zero fields keep the observe defaults
-	// (10min / 10min / 2min / 2min).
-	Observe        ObserveWindows
+	// Supervision carries the supervisor's global bounds into the
+	// assembly (X silence, Y tool, T step timeout, N driver stall, the
+	// model-error grace; zero fields keep the documented defaults) and
+	// the M4 revalidation cadence. Step overrides live in workflow.md.
+	Supervision    SupervisionConfig
 	DrainInterval  time.Duration // drain wave-fetch period (5s)
 	DispatchTick   time.Duration // dispatcher/backfill period (200ms)
 	ShutdownBudget time.Duration // whole-shutdown ceiling (5min)
 	ExitPoll       time.Duration // adapter exit-poll period (200ms)
 }
 
-// ObserveWindows is the observe-lane supervision-window subset of the
-// observe config that daemon.Config passes through. All five default
-// to zero — observe's own fill() then applies the production defaults —
-// so a production Config with an untouched Observe field assembles the
-// production windows.
-type ObserveWindows struct {
-	// HangWindow is the stream-silence window while a turn is in flight
-	// that arms the liveness probe.
-	HangWindow time.Duration
-	// IdleWindow is the no-record-no-turn quiet window that arms the
-	// idle watchdog's liveness probe.
-	IdleWindow time.Duration
-	// ProbeTimeout bounds one liveness probe's ack wait.
-	ProbeTimeout time.Duration
-	// WallBackstop is the §6.2 absolute bound on a derivation's PROGRESS
-	// silence that no probe ack can restart (polyforge#114). Zero keeps
-	// observe's default (15m); negative disables the backstop.
-	WallBackstop time.Duration
+// SupervisionConfig is the supervisor's global-default surface
+// (v2-converge 2.4): daemon flags map onto it one to one.
+type SupervisionConfig struct {
+	// SilenceWindow is X: no work-class signal after dispatch (rule 0)
+	// and no model output while waiting for the model (rule 2). Zero =
+	// by the harness's output granularity (10m token-level, 30m
+	// message-level).
+	SilenceWindow time.Duration
+	// ToolWindow is Y: one tool running longer than this is hung
+	// (default 30m).
+	ToolWindow time.Duration
+	// StepTimeout is T: cumulative step runtime (default 90m; a step's
+	// own budget.wall_minutes overrides it).
+	StepTimeout time.Duration
+	// StallWindow is N: the driver between steps (not waiting on a human)
+	// for longer than this is stalled (default 10m; negative disables).
+	StallWindow time.Duration
+	// ModelErrorGrace is the rule-1 grace after an error-ended turn
+	// (default 1m).
+	ModelErrorGrace time.Duration
 	// SessionRevalidateEvery is the M4 periodic session-revalidation
 	// cadence (0 = observe's default 5m; negative = disabled).
 	SessionRevalidateEvery time.Duration
+}
+
+func (c SupervisionConfig) limits() supervise.Defaults {
+	return supervise.Defaults{
+		Silence: c.SilenceWindow, Tool: c.ToolWindow,
+		StepTimeout: c.StepTimeout, ModelErrorGrace: c.ModelErrorGrace,
+	}
 }
 
 func (c *Config) fill() {
@@ -218,6 +228,11 @@ type Daemon struct {
 	// drain ticker goroutine touches it (fetchDrainWave), so it carries
 	// no lock.
 	drainDegraded bool
+
+	// sup hands out the per-WI supervision links shared by the driver
+	// bridge (facts out, verdicts in, harness trackers) and the observe
+	// monitors.
+	sup *supervise.Registry
 
 	adapMu   sync.Mutex
 	adapters map[string]*agentAdapter
@@ -309,6 +324,7 @@ func New(cfg Config) (*Daemon, error) {
 	// v2 (polyforge#106): the Go driver bridge IS the execution engine —
 	// bound unconditionally, no selection flag, no fallback. The
 	// AgentStarter config knob only swaps WHICH starter binds (tests).
+	var d *Daemon // bound below; the starter closure reads it at call time
 	if cfg.AgentStarter != nil {
 		rtCfg.AgentStarter = cfg.AgentStarter
 	} else {
@@ -323,6 +339,13 @@ func New(cfg Config) (*Daemon, error) {
 				Spawner:          in.Spawner,
 				StepCandidates:   in.StepCandidates,
 				InterruptedCause: in.InterruptedCause,
+				// driver events land in the durable per-WI event log
+				// (monotonic ids); the supervision link is the WI's
+				// shared driver <-> supervisor channel
+				Log:     d.driverLog(),
+				Link:    d.sup.Link(in.WI),
+				Limits:  cfg.Supervision.limits(),
+				Harness: cfg.Harness,
 			})
 		}
 	}
@@ -331,7 +354,7 @@ func New(cfg Config) (*Daemon, error) {
 	if err != nil {
 		return nil, fmt.Errorf("daemon: %w", err)
 	}
-	d := &Daemon{
+	d = &Daemon{
 		chats:    &chatStore{path: filepath.Join(cfg.DataDir, chatsFile)},
 		subs:     subs,
 		cfg:      cfg,
@@ -344,10 +367,10 @@ func New(cfg Config) (*Daemon, error) {
 		sealedWI: map[string]bool{},
 		adapters: map[string]*agentAdapter{},
 		shutDone: make(chan struct{}),
+		sup:      supervise.NewRegistry(),
 	}
 	rtCfg.EventTap = d.tapRuntimeEvent
 
-	rtCfg.RecordTap = d.tapRecord
 	// F6-A: the claim-time memory snapshot seam — the daemon binds it to
 	// aihub's memory search (bounded excerpts; the machine credential
 	// stays here, never in an agent env). See memface.go. The hit count
@@ -374,17 +397,14 @@ func New(cfg Config) (*Daemon, error) {
 		// a superseded daemon learns within ~5min even with zero push
 		// traffic; unit-tested in observe, daemon-wired here).
 		SessionVerify: cfg.Hub,
-		// Bug-4 seam: the supervision windows pass through; zero fields
-		// keep the observe defaults.
-		HangWindow:   cfg.Observe.HangWindow,
-		IdleWindow:   cfg.Observe.IdleWindow,
-		ProbeTimeout: cfg.Observe.ProbeTimeout,
-		// polyforge#114: the §6.2 wall backstop rides the same
-		// pass-through (0 = the 15m default, negative = disabled).
-		WallBackstop: cfg.Observe.WallBackstop,
+		// the supervisor's bounds pass through; zero fields keep the
+		// documented defaults
+		Registry:        d.sup,
+		ModelErrorGrace: cfg.Supervision.ModelErrorGrace,
+		DriverStall:     cfg.Supervision.StallWindow,
 		// M4 cadence rides the same pass-through (0 = the 5m default,
 		// negative = disabled).
-		SessionRevalidateEvery: cfg.Observe.SessionRevalidateEvery,
+		SessionRevalidateEvery: cfg.Supervision.SessionRevalidateEvery,
 	})
 	if err != nil {
 		return nil, err
@@ -757,19 +777,16 @@ func (d *Daemon) bridge() {
 
 type agentAdapter struct {
 	h        runtime.AgentHandle
-	records  chan []byte
 	exit     chan struct{}
 	pollStop chan struct{}
 	retire   sync.Once
 }
 
-// installAdapter registers the CURRENT handle of a work item as the
-// tap target and returns its observe face. A previous adapter is retired
-// (its exit poll stops; its records channel stops receiving).
+// installAdapter registers the CURRENT handle of a work item and returns
+// its observe face. A previous adapter is retired (its exit poll stops).
 func (d *Daemon) installAdapter(ji runtime.JobInfo) *agentAdapter {
 	a := &agentAdapter{
 		h:        ji.Agent,
-		records:  make(chan []byte, 1024),
 		exit:     make(chan struct{}),
 		pollStop: make(chan struct{}),
 	}
@@ -806,46 +823,19 @@ func (a *agentAdapter) pollDone(interval time.Duration) {
 	}
 }
 
-func (a *agentAdapter) Exit() <-chan struct{}  { return a.exit }
-func (a *agentAdapter) Records() <-chan []byte { return a.records }
+func (a *agentAdapter) Exit() <-chan struct{} { return a.exit }
 
-// SendControl composes the runtime handle's probe write+ack pair into
-// the observe face's single bounded call. The probe is the control
-// channel's only occupant since the answer relay died (polyforge#106);
-// a written-but-unacked probe surfaces its deadline error verbatim —
-// the monitor's watchdog owns the verdict.
-func (a *agentAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-	ack := protocol.ControlAck{Method: msg.Method, Seq: msg.Seq}
-	if err := a.h.SendControl(msg); err != nil {
-		return ack, err
-	}
-	bound := 30 * time.Second
-	if dl, ok := ctx.Deadline(); ok {
-		if b := time.Until(dl); b > 0 && b < bound {
-			bound = b
-		}
-	}
-	if err := a.h.WaitControlAck(ctx, msg, bound); err != nil {
-		return ack, err
-	}
-	ack.OK = true
-	return ack, nil
-}
+// driverLog is the driver's EventLogger: it resolves the observe event
+// log at call time (the log exists only after observe.New).
+func (d *Daemon) driverLog() driver.EventLogger { return driverEventLog{d} }
 
-// tapRecord feeds one raw stdout record line to the work item's current
-// adapter (the runtime RecordTap binding). Bounded: a full buffer drops
-// rather than ever blocking the runtime's stdout reader.
-func (d *Daemon) tapRecord(wi string, line []byte) {
-	d.adapMu.Lock()
-	a := d.adapters[wi]
-	d.adapMu.Unlock()
-	if a == nil {
-		return
+type driverEventLog struct{ d *Daemon }
+
+func (l driverEventLog) Append(wi, kind string, body any) error {
+	if l.d.obs == nil {
+		return nil
 	}
-	select {
-	case a.records <- line:
-	default:
-	}
+	return l.d.obs.Events().Append(wi, kind, body)
 }
 
 // ---------------------------------------------------------------------------

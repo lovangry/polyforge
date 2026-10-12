@@ -370,4 +370,20 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 - **(a) bundle digest 描述与代码不一致**：01 §4.5 描述的是 RFC 8785 canonical-JSON bundle digest，但在线的 `Digest` 实现是"路径 + sha + 长度"拼接。**以代码为准**（`internal/common/workflow`，golden 向量在活测试中），01 §4.5 待更正。
 - **(b) 人工确认保证只约束诚实的 agent，直到 #135 落地**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证，但不可信的 step agent 仍可写 capsule、可触达 daemon 的 UDS socket，从而绕过。真正的隔离是 #135（第 9 节 8）。
-- **(c) `pf watch` 进展字段待监督重写**：命令、最近文件、工具调用数等进展字段依赖 driver ↔ supervisor 契约（第 2.2 节）；目前 `pf watch` 只提供状态、当前步骤及其时长与事件，上述字段随监督重写分支落地。
+- **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
+
+## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`）
+
+**代码位置**
+- 契约、翻译器、判死规则：`internal/polyforge/supervise`（`contract.go` 事实/判定/无界队列/每 WI 的 `Link`；`translator.go` + `pi.go` 翻译器接口与 pi 实现；`tracker.go` 每次派发一份的合并状态；`rules.go` 规则 ⓪–④ 的纯函数 `Judge`；`defaults.go` 全局阈值）。
+- driver 一侧：`internal/polyforge/driver/supervision.go`（判定围栏、死因表、失败计数、放宽、事实发送）；`TransStepFailed` 在 `transition.go`，一次原子写入记录 attempt（带死因子类）、计数、放宽值、下一次派发形态，必要时写 blocked。
+- supervisor 一侧：`internal/polyforge/observe/monitor.go`（消费事实、每派发一份状态、判定、`driver_stalled`、事件触发推送、M4 保留）；事件底座 `observe/events.go`（逐行带 id、按大小轮转、重启后续号、历史从文件读）。
+- 失败计数等持久字段：`capsule.Step.Supervision`、`Attempt.FailureCause`、`Execution.BlockedReason`。
+
+**阈值配置名**：旗标 `--silence-window`（X）、`--tool-window`（Y）、`--step-timeout`（T）、`--stall-window`（N）、`--model-error-grace`（规则 ① 宽限）；step 级覆盖在 workflow.md：`budget.wall_minutes`（T）、`silence_minutes`（X）、`tool_minutes`（Y）。旧旗标 `--hang-window/--idle-window/--probe-timeout/--wall-window` 已删，传入即解析失败。
+
+**与正文的实现差异（均为补充，不改契约语义）**
+- 事实集合多一条 `exec_committed{version}`：事件触发推送需要"driver 提交了新 Version"的提示，否则只能回到轮询 `execution.json`。
+- 事实/判定走 `supervise.Link`（进程内）；driver 与 supervisor 之外的"harness 海量输出"由翻译器直接折叠进每派发一份的 `Tracker`（只保留最新状态，不排队）。
+- `driver_stalled`：supervisor 同时向 driver 发判定，并经 `OBNeedsRecovery(reason=driver_stalled)` 交给恢复引擎——卡死的 driver 无法自己消费判定；恢复引擎杀树并重拉，计入 storm guard。当前 driver 自身不做 git/推送（推送在 supervisor 的推送环里，受 60s 单次上界约束），所以该规则管的是"driver 在步骤之间的任何卡死"。
+- 前一次 transcript 作为"只读参考"仅在 capsule 里读得到时才附上（capsule 内的转录靠提交边界同步，进程刚死时可能还没有）；声明的 resume 路径不可读时，resume 退化为 fresh。

@@ -61,8 +61,7 @@ type parkedSpawner struct {
 
 func (s *parkedSpawner) Spawn(ctx context.Context, p runtime.SpawnParams) (runtime.AgentHandle, error) {
 	s.calls.Add(1)
-	a := &fakeAgent{ackFn: func(string) error { <-s.release; return nil }}
-	return a, nil
+	return &fakeAgent{}, nil
 }
 
 func (s *parkedSpawner) callCount() int { return int(s.calls.Load()) }

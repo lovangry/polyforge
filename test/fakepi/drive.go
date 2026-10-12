@@ -68,6 +68,11 @@ type planAction struct {
 	// file, deterministically (the Nth envelope action fires for spawn
 	// N across fresh and resume dispatches alike).
 	Crash string `json:"crash,omitempty"` // "" | "before" | "after"
+	// CrashStderr is written to stderr just before a crash:"before" exit
+	// (a harness dying WITH a reason: a model-class text such as a
+	// provider error makes the driver advance the candidate chain; the
+	// bare crash stays an unclassified exit).
+	CrashStderr string `json:"crash_stderr,omitempty"`
 	// Dup writes the IDENTICAL envelope to the same drop path N times
 	// back-to-back (the duplicate drop-path shape: the driver must
 	// consume it exactly once).
@@ -97,6 +102,25 @@ type planAction struct {
 	// (MS keeps its meaning as the pre-write delay).
 	Noise   string `json:"noise,omitempty"`    // "" | "ui" | "progress"
 	NoiseMS int    `json:"noise_ms,omitempty"` // the noise emitter interval (default 100ms)
+
+	// --- supervision shapes (v2-converge 2.3 incident replays) ---
+
+	// Silent is the zero-signal harness (rule 0, #114): the dispatch
+	// emits NO work record at all — not even the boot greeting turn — and
+	// parks alive. Combined with Noise "ui" it is the F15 shape (UI
+	// chatter only).
+	Silent bool `json:"silent,omitempty"`
+	// ErrorTurn is the F5 shape: the dispatch emits an assistant turn that
+	// ENDS on this provider error (message_start/message_end/turn_end and
+	// agent_end all carry stopReason=error), then parks alive without ever
+	// writing the envelope.
+	ErrorTurn string `json:"error_turn,omitempty"`
+	// ToolMS runs one tool execution of this length (tool_execution_start,
+	// then tool_execution_end after the delay) before the envelope write:
+	// the #83 long-tool shape. ToolHang never ends it (rule 3's shape).
+	ToolMS   int    `json:"tool_ms,omitempty"`
+	ToolName string `json:"tool_name,omitempty"`
+	ToolHang bool   `json:"tool_hang,omitempty"`
 	// PoisonGitlink / UnpoisonGitlink run the #48 poison shape (lay or
 	// clean an embedded git repository) before the envelope write; the
 	// version bump inside arms the observe push round.
@@ -112,9 +136,10 @@ type plan struct {
 	// the crash and the continuation in one file, deterministically —
 	// no rewrite race against the recovery spawn.
 	ResumeActions []planAction `json:"resume_actions"`
-	// AckProbe false makes the agent ignore liveness probes (the hang
-	// scenario: silence must extend to the probe channel).
-	AckProbe *bool `json:"ack_probe"`
+	// BadModels lists pinned model ids this harness cannot resolve (F4):
+	// a dispatch spawned with `--model <one of them>` prints the error to
+	// stderr and exits non-zero at startup.
+	BadModels []string `json:"bad_models,omitempty"`
 	// FailSpawnResume true makes every RESUME derivation die AT BIRTH:
 	// the process exits before it reads one byte of stdin, so the
 	// daemon's initial-prompt injection finds no reader, the pipe write
@@ -202,8 +227,6 @@ type driveEnv struct {
 	exec       *execState
 	plan       *plan
 	transcript string
-	hanging    bool
-	ackProbe   bool
 	// mustFail: this derivation is scripted to die at birth, before it
 	// reads the daemon's initial prompt (see plan.FailSpawnResume).
 	mustFail bool
@@ -230,7 +253,6 @@ func newDriveEnv() *driveEnv {
 		spawnN:     spawnN,
 		sessionArg: transcriptPathOf(),
 		resumed:    hasSessionArg(),
-		ackProbe:   pl.AckProbe == nil || *pl.AckProbe,
 		transcript: transcriptPathOf(),
 	}
 	d.exec = d.loadExec()
@@ -343,6 +365,26 @@ func sleepMS(n int) {
 // ms delay), the crash shapes, and the envelope write itself (question
 // text, output payload, command evidence, duplicates).
 func (d *driveEnv) runEnvelopeAction(act planAction) {
+	if act.Silent {
+		// The zero-signal harness: no record at all (UI noise optionally),
+		// no envelope, no exit.
+		d.journal("silent", map[string]any{"step": act.ID, "pid": os.Getpid(), "spawn_n": d.spawnN})
+		if act.Noise != "" {
+			d.startNoise(act.Noise, act.NoiseMS)
+		}
+		parkForever()
+		return
+	}
+	if act.ErrorTurn != "" {
+		// F5: a turn that ends on a fatal provider error, then nothing.
+		d.journal("error_turn", map[string]any{"step": act.ID, "error": act.ErrorTurn, "spawn_n": d.spawnN})
+		emitAssistantTurn(d, "the provider connection dropped mid-reply", act.ErrorTurn)
+		parkForever()
+		return
+	}
+	if act.ToolMS > 0 || act.ToolHang {
+		d.emitToolRun(act.ToolName, act.ToolMS, act.ToolHang)
+	}
 	if act.Park {
 		// The silent-live wedge (polyforge#113's e2e-author shape): a
 		// real harness whose provider call for the next turn never
@@ -391,6 +433,9 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 	}
 	if act.Crash == "before" {
 		d.journal("crash_before", map[string]any{"step": act.ID, "outcome": act.Outcome})
+		if act.CrashStderr != "" {
+			fmt.Fprintln(os.Stderr, act.CrashStderr)
+		}
 		os.Exit(101) // die before the envelope write: the envelope never lands
 	}
 	d.writeEnvelope(act)
@@ -428,9 +473,6 @@ func (x *execState) step(id string) *execStep {
 }
 
 func (d *driveEnv) beginOpenTurn(journalKind string) {
-	d.mu.Lock()
-	d.hanging = true
-	d.mu.Unlock()
 	d.journal(journalKind, map[string]any{"at": nowStamp()})
 	emitOpenTurn()
 }
@@ -470,11 +512,67 @@ func (d *driveEnv) startNoise(kind string, intervalMS int) {
 	}()
 }
 
-// suppressProbeAck reports whether the plan wants probes ignored.
-func (d *driveEnv) suppressProbeAck() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.hanging || !d.ackProbe
+// badModel answers the pinned model this derivation was spawned with when
+// the plan declares it unresolvable ("" otherwise).
+func (d *driveEnv) badModel() string {
+	m := pinnedModelOf()
+	if m == "" {
+		return ""
+	}
+	for _, b := range d.plan.BadModels {
+		if b == m {
+			return m
+		}
+	}
+	return ""
+}
+
+// currentAction answers the envelope action this derivation executes
+// (the Nth envelope action fires for spawn N); nil when none.
+func (d *driveEnv) currentAction() *planAction {
+	idx := 0
+	for i := range d.plan.Actions {
+		if d.plan.Actions[i].Do == "envelope" {
+			idx++
+			if idx == int(d.spawnNumber()) {
+				return &d.plan.Actions[i]
+			}
+		}
+	}
+	return nil
+}
+
+// silentThisSpawn reports whether this derivation is the zero-signal
+// harness: it must not even answer the initial instruction.
+func (d *driveEnv) silentThisSpawn() bool {
+	a := d.currentAction()
+	return a != nil && a.Silent
+}
+
+// emitToolRun plays one tool execution as the real stream does: a model
+// reply that ends in a tool call, tool_execution_start, the run, and
+// tool_execution_end (unless hanging).
+func (d *driveEnv) emitToolRun(name string, ms int, hang bool) {
+	if name == "" {
+		name = "bash"
+	}
+	msg := map[string]any{"role": "assistant", "stopReason": "toolUse", "content": []any{}}
+	emitRecord(map[string]any{"type": "agent_start"})
+	emitRecord(map[string]any{"type": "turn_start"})
+	emitRecord(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant", "stopReason": "pending", "content": []any{}}})
+	emitRecord(map[string]any{"type": "message_update", "assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "running the tool"}})
+	emitRecord(map[string]any{"type": "message_end", "message": msg})
+	emitRecord(map[string]any{"type": "tool_execution_start", "toolCallId": "call_1", "toolName": name,
+		"args": map[string]any{"command": "fakepi " + name}})
+	d.journal("tool_start", map[string]any{"name": name, "ms": ms, "hang": hang})
+	if hang {
+		parkForever()
+		return
+	}
+	sleepMS(ms)
+	emitRecord(map[string]any{"type": "tool_execution_end", "toolCallId": "call_1", "toolName": name, "result": map[string]any{}})
+	emitRecord(map[string]any{"type": "turn_end", "message": msg, "toolResults": []any{}})
+	d.journal("tool_end", map[string]any{"name": name})
 }
 
 func (d *driveEnv) loadExec() *execState {

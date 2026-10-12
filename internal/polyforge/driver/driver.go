@@ -35,6 +35,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/workflow"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,8 +89,20 @@ type Config struct {
 	// the driver derives is one derivation; the counter advances with
 	// every durable step_start and is the transition fence key.
 	SpawnN int64
-	// Log receives progress events; nil disables emission.
+	// Log receives progress events; nil disables emission. Production
+	// binds the daemon's per-WI event log (durable, monotonic ids).
 	Log EventLogger
+	// Link is the per-WI driver <-> supervisor channel (supervise
+	// package); nil = unsupervised (no facts out, no verdicts in).
+	Link *supervise.Link
+	// Limits are the global supervision defaults (X, Y, T); step
+	// overrides in workflow.md apply on top. Zero fields take the
+	// documented defaults.
+	Limits supervise.Defaults
+	// Harness names the step harness for step_started ("" = pi).
+	Harness string
+	// MaxStepFailures is the per-step failure counter bound (default 3).
+	MaxStepFailures int
 	// Now overrides the clock (tests).
 	Now func() time.Time
 }
@@ -141,6 +154,17 @@ type Driver struct {
 	// visible feedback so the author can fix the actual defect.
 	rejects        map[string]int
 	priorRejection map[string]string
+	// unbooked is the wall time of finished dispatches not yet written
+	// into the step's cumulative runtime (the T accumulator): folded into
+	// the next result/failure write.
+	unbooked map[string]int64
+	// waitingAnnounced is the question id step_waiting_human was last
+	// sent for (one fact per question, however often the loop re-plans).
+	waitingAnnounced string
+	// inputEventFor is the question id a needs_input event was last
+	// emitted for in this driver life (the park transition emits it; a
+	// restarted driver re-announces a question it finds parked).
+	inputEventFor string
 }
 
 // New builds a Driver: it resolves paths, loads the workflow graph from
@@ -215,6 +239,7 @@ func New(cfg Config) (*Driver, error) {
 		wake:           make(chan struct{}, 1),
 		rejects:        make(map[string]int),
 		priorRejection: make(map[string]string),
+		unbooked:       make(map[string]int64),
 	}, nil
 }
 
@@ -258,6 +283,10 @@ func (d *Driver) Run(ctx context.Context) error {
 		}
 	}
 	for {
+		if v := d.takeStalled(); v != nil {
+			d.emit("driver_stalled", map[string]any{"duration_ms": v.Duration.Milliseconds(), "phase": v.Phase})
+			return ErrDriverStalled
+		}
 		stop, stepID, err := d.plan(ctx)
 		if err != nil {
 			return err
@@ -283,15 +312,59 @@ func (d *Driver) Run(ctx context.Context) error {
 			return fmt.Errorf("driver: step %s start failed: %w", stepID, err)
 		}
 
+		dispatchedAt := d.now()
 		run, err := d.cfg.Spawner.SpawnStep(ctx, *spawn)
 		if err != nil {
-			return fmt.Errorf("driver: step %s spawn %d failed: %w", stepID, n, err)
+			if ctx.Err() != nil {
+				return fmt.Errorf("driver: step %s spawn %d failed: %w", stepID, n, err)
+			}
+			// The spawn itself failed (harness binary missing, journal or
+			// prompt I/O, ...): a dispatch that never produced a process is
+			// a failed dispatch like any other — classified, counted,
+			// retried or blocked.
+			cause, code, detail := classifyWaitFailure(fmt.Errorf("driver: step %s spawn %d failed: %w", stepID, n, err))
+			if blocked, ferr := d.failDispatch(stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
+				return ferr
+			} else if blocked {
+				return nil
+			}
+			continue
 		}
-		res, err := run.Wait(ctx)
-		if err != nil {
+		d.announceStart(spawn, run, dispatchedAt)
+		res, werr, verdict := d.awaitDispatch(ctx, run, stepID, n)
+		if verdict != nil {
+			// The supervisor judged the dispatch dead. The process is
+			// already torn down; this is the dispatch's one failure record.
+			d.emit("step_dead", map[string]any{
+				"step": stepID, "spawn_n": n, "cause": verdict.Cause, "evidence": verdict.Evidence,
+			})
+			if blocked, ferr := d.failDispatch(stepID, n, dispatchedAt, string(verdict.Cause), -1, verdict.Evidence); ferr != nil {
+				return ferr
+			} else if blocked {
+				return nil
+			}
+			continue
+		}
+		if werr != nil {
 			_ = run.Terminate(5 * time.Second)
-			return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, err)
+			if ctx.Err() != nil {
+				// Cancellation (shutdown, recovery relaunch): not a failure of
+				// the step — nothing is counted and the candidate pointer
+				// stays; the cumulative runtime is still booked.
+				d.announceEnd(stepID, n, supervise.OutcomeExitedWithoutResult, -1, "cancelled")
+				d.bookWall(stepID, dispatchedAt)
+				return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, werr)
+			}
+			cause, code, detail := classifyWaitFailure(werr)
+			if blocked, ferr := d.failDispatch(stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
+				return ferr
+			} else if blocked {
+				return nil
+			}
+			continue
 		}
+		d.announceEnd(stepID, n, supervise.OutcomeResult, 0, "")
+		d.addUnbooked(stepID, dispatchedAt)
 		delivered := res.Outcome
 		if verr := d.validateResultStrict(res, stepID, n); verr != nil {
 			// Envelope-authoring errors are STEP-CONTENT failures, not
@@ -329,6 +402,12 @@ func (d *Driver) Run(ctx context.Context) error {
 			d.priorRejection[stepID] = feedback
 			d.mu.Unlock()
 			if count > maxEnvelopeRejects {
+				if PolicyFor(FaultSchema).Report {
+					d.emit("schema_fault", map[string]any{
+						"step": stepID, "spawn_n": n, "rejections": count,
+						"detail": "persistent envelope rejection: the result contract is broken, not the model; reported to the owner",
+					})
+				}
 				return fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d): %w",
 					stepID, n, count, maxEnvelopeRejects, verr)
 			}
@@ -355,6 +434,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			StepID: stepID,
 			Result: res,
 			SpawnN: n,
+			WallMs: d.takeUnbooked(stepID),
 		}); err != nil {
 			return fmt.Errorf("driver: step %s result transition failed: %w", stepID, err)
 		}
@@ -416,6 +496,9 @@ func (d *Driver) plan(ctx context.Context) (stop bool, stepID string, err error)
 			return true, "", nil
 		}
 		if pending {
+			// no step process exists while a human is asked: the
+			// supervisor runs no dispatch timer and no stall clock
+			d.announceWaiting()
 			if err := d.awaitAnswer(ctx); err != nil {
 				return false, "", err
 			}
@@ -459,6 +542,10 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 		sp.RewindInput = st.PendingRewindInput
 		if len(st.Answers) > 0 {
 			sp.Answers = append([]capsule.ArchivedAnswer(nil), st.Answers...)
+		}
+		if sp.Resume && st.Supervision != nil && st.Supervision.NextDispatch == capsule.NextDispatchFresh {
+			sp.Fresh = true
+			sp.Resume = false
 		}
 	}
 	// the in-process rejection retry lane: the prior dispatch's
@@ -505,13 +592,26 @@ func (d *Driver) awaitAnswer(ctx context.Context) error {
 // mismatch, or no open question at all, is refused — the same binding
 // the daemon's answer relay enforces on its side.
 func (d *Driver) Answer(questionID, answer, answeredBy string) error {
-	return d.transition(TransitionRequest{
+	step := ""
+	d.mu.Lock()
+	step = d.exec.CurrentStep
+	d.mu.Unlock()
+	if err := d.transition(TransitionRequest{
 		Kind:       TransAnswer,
 		QuestionID: questionID,
 		Reason:     answer,
 		AnsweredBy: answeredBy,
 		SpawnN:     d.currentSpawnN(),
-	})
+	}); err != nil {
+		return err
+	}
+	// the human answered: the driver is between steps again (the
+	// supervisor's stall clock restarts from here)
+	d.mu.Lock()
+	d.waitingAnnounced = ""
+	d.mu.Unlock()
+	d.fact(supervise.StepAnswered{Step: step, SpawnN: d.currentSpawnN(), QuestionID: questionID})
+	return nil
 }
 
 // Rewind is the operator rewind verdict: archive and reset
@@ -649,6 +749,12 @@ type StepSpawn struct {
 	// on a rewind re-entry; the start transition clears the persisted
 	// field in the same write that starts the step).
 	RewindInput *capsule.RewindInput
+	// Fresh orders a new conversation for a retry (2nd+ failure, or a
+	// candidate switch): no resume of the old transcript; the previous
+	// transcript, when one is readable, rides the prompt as a read-only
+	// reference (v2-converge 2.3 retry shape — a context-overflow style
+	// failure must not repeat on every model).
+	Fresh bool
 	// PriorRejection is the verbatim validation error the PREVIOUS
 	// dispatch's envelope was rejected for (the in-process retry lane):
 	// the step author sees exactly what to fix — digests computed
@@ -902,6 +1008,12 @@ type StepSpec struct {
 	// DriverStep fields of the same name (workflow_ext.go).
 	RequiresHumanAnswer     bool
 	RequiresCommandEvidence bool
+	// Step-level supervision overrides (workflow.md frontmatter): T is
+	// the existing budget.wall_minutes, X is silence_minutes, Y is
+	// tool_minutes. Zero = the global default.
+	SilenceMinutes int
+	ToolMinutes    int
+	WallMinutes    int
 }
 
 // OnFail is the gate FAIL policy (01 §4.1): rewind with a target, or
@@ -981,6 +1093,11 @@ func loadWorkflow(bundleDir string) (*Workflow, error) {
 		}
 		spec.RequiresHumanAnswer = s.RequiresHumanAnswer
 		spec.RequiresCommandEvidence = s.RequiresCommandEvidence
+		spec.SilenceMinutes = s.SilenceMinutes
+		spec.ToolMinutes = s.ToolMinutes
+		if s.Budget != nil {
+			spec.WallMinutes = s.Budget.WallMinutes
+		}
 		if s.OnFail != nil {
 			of := &OnFail{Action: s.OnFail.Action, Target: s.OnFail.Target}
 			if s.OnFail.IncludeVerdict == nil || *s.OnFail.IncludeVerdict {
@@ -1023,6 +1140,15 @@ type fmStep struct {
 
 	RequiresHumanAnswer     bool `yaml:"requires_human_answer"`
 	RequiresCommandEvidence bool `yaml:"requires_command_evidence"`
+
+	// supervision overrides (v2-converge 2.4)
+	SilenceMinutes int       `yaml:"silence_minutes"`
+	ToolMinutes    int       `yaml:"tool_minutes"`
+	Budget         *fmBudget `yaml:"budget"`
+}
+
+type fmBudget struct {
+	WallMinutes int `yaml:"wall_minutes"`
 }
 
 type fmOnFail struct {
@@ -1123,14 +1249,10 @@ func attemptsToPointer(st *capsule.Step) []StepAttempt {
 	}
 	out := make([]StepAttempt, len(st.Attempts))
 	for i, a := range st.Attempts {
-		fc := FaultClass(a.FaultClass)
-		// Legacy attempts (predating the FaultClass field) carry an empty
-		// class on infra failures: default them to provider so the B-chain
-		// formula keeps advancing on the historical data.
-		if fc == "" && a.Cause == CauseInfraFailure {
-			fc = FaultProvider
-		}
-		out[i] = StepAttempt{Cause: a.Cause, FaultClass: fc}
+		// An empty class is an unknown fault: it never advances the
+		// candidate pointer (v2-converge 2.3 — daemon restarts and other
+		// unclassified interruptions must not switch models).
+		out[i] = StepAttempt{Cause: a.Cause, FaultClass: FaultClass(a.FaultClass)}
 	}
 	return out
 }

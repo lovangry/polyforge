@@ -18,6 +18,11 @@ import (
 
 var humanGateFlag = regexp.MustCompile(`,\s*requires_human_answer:\s*true`)
 
+// stepWallBudget matches one step-level `budget: { wall_minutes: N }`
+// override (the flow-map holds ONLY wall_minutes; the workflow-level
+// budget carries other keys and is left alone).
+var stepWallBudget = regexp.MustCompile(`,\s*budget:\s*\{\s*wall_minutes:\s*\d+\s*\}`)
+
 // workflowsPath answers the --workflows-dir the daemon should use.
 func (u *v1Install) workflowsPath() string {
 	shipped := filepath.Join(u.root, "workflows")
@@ -25,6 +30,9 @@ func (u *v1Install) workflowsPath() string {
 		u.strippedWF = strippedWorkflowsDir(u.t, shipped)
 		if u.gateQuickFixGrill {
 			addGrillHumanGate(u.t, u.strippedWF)
+		}
+		if u.stripWallBudgets {
+			stripStepWallBudgets(u.t, u.strippedWF)
 		}
 	}
 	return u.strippedWF
@@ -77,4 +85,23 @@ func strippedWorkflowsDir(t testing.TB, shipped string) string {
 		t.Fatalf("stripped workflows copy: %v", err)
 	}
 	return dst
+}
+
+// stripStepWallBudgets removes the step-level wall_minutes overrides from
+// every workflow.md of an already-copied workflows tree.
+func stripStepWallBudgets(t testing.TB, dir string) {
+	t.Helper()
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(p, "workflow.md") {
+			return err
+		}
+		raw, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		return os.WriteFile(p, stepWallBudget.ReplaceAll(raw, nil), info.Mode().Perm())
+	})
+	if err != nil {
+		t.Fatalf("strip step wall budgets: %v", err)
+	}
 }

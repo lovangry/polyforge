@@ -44,7 +44,7 @@ func TestV1S18BackpressureTime(t *testing.T) {
 		actions, nil)
 	// The injected ladder: the time window is 3s, the steps threshold
 	// is far out of reach (1000), so the time bound fires first.
-	rig := newInprocRig(t, inst, 0, 0, optBackpressure(3*time.Second, 1000))
+	rig := newInprocRig(t, inst, optBackpressure(3*time.Second, 1000))
 	t.Cleanup(func() { killOrphans(wi) })
 	rig.start(wi)
 

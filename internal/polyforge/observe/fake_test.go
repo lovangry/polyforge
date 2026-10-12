@@ -1,14 +1,12 @@
 package observe
 
-// fake_test.go: the test doubles. The agent record fixtures are the
-// PINNED REAL RECORD SHAPES (frozen v0 capture; the v0 frozen v0 capture test
-// double emits these exact twins) — see stream.go's header for the
-// full burst sequence.
+// fake_test.go: the test doubles. The supervisor consumes the driver's
+// facts and the harness Tracker (fed here directly through the standard
+// signals); the record-level translation is pinned in package supervise.
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,98 +15,36 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
-
-// --- pinned record fixtures (the frozen real-stream shapes) ---
-
-const (
-	fxResponse    = `{"id":"pf-1","type":"response","command":"prompt","success":true}`
-	fxAgentStart  = `{"type":"agent_start"}`
-	fxTurnStart   = `{"type":"turn_start"}`
-	fxMsgStart    = `{"type":"message_start","message":{"role":"assistant","stopReason":"pending","content":[]}}`
-	fxTextDelta   = `{"type":"message_update","usage":{"input":0,"output":2,"totalTokens":2},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"ok"}}`
-	fxMsgEndStop  = `{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"ok"}]}}`
-	fxTurnEndStop = `{"type":"turn_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"ok"}]},"toolResults":[]}`
-	fxAgentEnd    = `{"type":"agent_end","messages":[],"willRetry":false}`
-	fxSettled     = `{"type":"agent_settled"}`
-)
-
-// A provider failure rides the ORDINARY records: stopReason=="error" +
-// errorMessage, byte-shaped like the real capture minus vendor detail.
-func fxMsgEndErr(detail string) string {
-	return fmt.Sprintf(`{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":%q,"content":[]}}`, detail)
-}
-
-func fxTurnEndErr(detail string) string {
-	return fmt.Sprintf(`{"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorMessage":%q,"content":[]},"toolResults":[]}`, detail)
-}
-
-// feed emits one record on the handle's stream.
-func feed(h *fakeHandle, rec string) {
-	h.records <- []byte(rec)
-}
 
 // --- fakeHandle ---
 
 type fakeHandle struct {
-	records chan []byte
-	exit    chan struct{}
-
-	mu     sync.Mutex
-	sends  []protocol.ControlMsg
-	sendFn func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error)
+	exit chan struct{}
+	once sync.Once
 }
 
-// newFakeHandle builds one fake agent handle. The label argument is
+// newFakeHandle builds one fake driver handle. The label argument is
 // documentation only (which derivation the handle plays in the test) —
 // the v1.5 fence key is the spawn counter carried on the RT messages,
 // not anything the handle owns.
 func newFakeHandle(label string) *fakeHandle {
-	return &fakeHandle{
-		records: make(chan []byte, 256),
-		exit:    make(chan struct{}),
-	}
+	return &fakeHandle{exit: make(chan struct{})}
 }
 
-func (h *fakeHandle) Exit() <-chan struct{}  { return h.exit }
-func (h *fakeHandle) Records() <-chan []byte { return h.records }
-
-func (h *fakeHandle) SendControl(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-	h.mu.Lock()
-	fn := h.sendFn
-	h.sends = append(h.sends, msg)
-	h.mu.Unlock()
-	if fn == nil {
-		return protocol.ControlAck{Method: msg.Method, Seq: msg.Seq, OK: true}, nil
-	}
-	return fn(ctx, msg)
-}
-
-func (h *fakeHandle) sentCount() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.sends)
-}
-
-func (h *fakeHandle) setSend(fn func(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error)) {
-	h.mu.Lock()
-	h.sendFn = fn
-	h.mu.Unlock()
-}
+func (h *fakeHandle) Exit() <-chan struct{} { return h.exit }
 
 // dying marks the process as exited (confirmed death signal).
-func (h *fakeHandle) die() { close(h.exit) }
+func (h *fakeHandle) die() { h.once.Do(func() { close(h.exit) }) }
 
 // --- monitor construction ---
 
 func testCfg() monitorCfg {
 	return monitorCfg{
-		PollInterval: 5 * time.Millisecond,
-		HangWindow:   40 * time.Millisecond,
-		// IdleWindow: inert for every test that does not override it —
-		// the idle watchdog tests below shrink it explicitly.
-		IdleWindow:        time.Hour,
-		ProbeTimeout:      80 * time.Millisecond,
+		PollInterval:      5 * time.Millisecond,
+		ModelErrorGrace:   40 * time.Millisecond,
+		DriverStall:       time.Hour, // inert unless a test shrinks it
 		PushRetryBackoff:  2 * time.Millisecond,
 		BackpressureSteps: 5,
 		BackpressureAfter: 30 * time.Minute,
@@ -147,27 +83,62 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, ch
 		cfg:        cfg,
 		log:        log,
 		ob:         ob,
+		link:       supervise.NewLink("wi_test"),
 		rtCh:       make(chan Attach, 4),
 		stopCh:     make(chan struct{}),
 		gate:       make(chan struct{}, 1),
 		pushDone:   make(chan pushResult, 1),
-		probeDone:  make(chan probeResult, 1),
 		verifyDone: make(chan verifyResult, 1),
-		hangAnchor: time.Now(),
-		stream:     newStreamState(),
 	}
-	m.execPath = m.execJSONPath()
 	m.attach(Attach{
 		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_test", SpawnN: 1},
 		Handle: h,
 		WI:     m.wi,
 	})
+	m.phase = phaseBetween
+	m.phaseSince = m.now()
 	go m.run()
 	t.Cleanup(func() {
 		m.requestStop()
 		_ = log.Close()
 	})
 	return m, ob
+}
+
+// startDispatch announces one dispatch with the given thresholds through
+// the link (the driver's step_started fact) and returns its tracker.
+func startDispatch(m *Monitor, spawn int64, step string, th supervise.Thresholds) *supervise.Tracker {
+	m.link.Fact(supervise.StepStarted{
+		Step: step, SpawnN: spawn, Model: "m", Harness: "pi",
+		StartedAt: m.link.Clock(), Thresholds: th,
+	})
+	return m.link.Tracker(spawn)
+}
+
+// nextVerdict waits for one verdict on the link.
+func nextVerdict(t *testing.T, m *Monitor, what string) supervise.Verdict {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if vs := m.link.Verdicts.Drain(); len(vs) > 0 {
+			if len(vs) > 1 {
+				t.Fatalf("%s: more than one verdict at once: %+v", what, vs)
+			}
+			return vs[0]
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for verdict %s", what)
+	return nil
+}
+
+// expectNoVerdict asserts the supervisor stays silent for d.
+func expectNoVerdict(t *testing.T, m *Monitor, d time.Duration, what string) {
+	t.Helper()
+	time.Sleep(d)
+	if vs := m.link.Verdicts.Drain(); len(vs) > 0 {
+		t.Fatalf("unexpected verdict (%s): %+v", what, vs)
+	}
 }
 
 // writeExec writes capsule runtime-state/execution.json with the given
@@ -206,6 +177,8 @@ func (m *Monitor) writeExec(t *testing.T, version int64, currentStep string) {
 	if err := os.Rename(tmp, path); err != nil {
 		t.Fatal(err)
 	}
+	// the driver's commit-boundary notice (the supervisor no longer polls)
+	m.link.Fact(supervise.ExecCommitted{Version: version, Step: currentStep})
 }
 
 // writePendingQuestion seeds an open pending question the way the driver
@@ -271,6 +244,7 @@ func writePendingQuestionAt(t *testing.T, m *Monitor, qid, question, step, asked
 	if err := os.Rename(tmp, path); err != nil {
 		t.Fatal(err)
 	}
+	m.link.Fact(supervise.ExecCommitted{Version: version, Step: step})
 	soon(t, 2*time.Second, "pending question "+qid+" projected", func() bool {
 		m.stateMu.Lock()
 		defer m.stateMu.Unlock()
@@ -345,27 +319,20 @@ func eventBodyInt64(t *testing.T, e protocol.EventEntry, key string) int64 {
 	return int64(n)
 }
 
-// incidentKinds reads the infra_incident payload kinds off the ring.
-func incidentKinds(m *Monitor) []string {
-	var out []string
-	for _, e := range eventsOf(m, EvInfraIncident) {
-		var body map[string]any
-		if json.Unmarshal(e.Body, &body) == nil {
-			if k, _ := body["kind"].(string); k != "" {
-				out = append(out, k)
-			}
-		}
+// rawWrite rewrites execution.json WITHOUT the commit-boundary fact.
+func rawWrite(t *testing.T, m *Monitor, version int64, step string) {
+	t.Helper()
+	exec := map[string]any{
+		"capsule_id": "cap_wi_test", "work_item_id": "wi_test", "current_step": step,
+		"workflow_status": "running", "version": version,
+		"steps": map[string]any{step: map[string]any{"status": "in_progress", "attempts": []any{}, "answers": []any{}}},
 	}
-	return out
-}
-
-// hasIncidentKind reports whether an infra_incident of that payload kind
-// was written.
-func hasIncidentKind(m *Monitor, kind string) bool {
-	for _, k := range incidentKinds(m) {
-		if k == kind {
-			return true
-		}
+	raw, err := json.Marshal(exec)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return false
+	path := filepath.Join(m.wi.CapsuleDir, "runtime-state", "execution.json")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

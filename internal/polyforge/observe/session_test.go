@@ -48,7 +48,6 @@ func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, c
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.revalidate = cadence
 		c.verify = verifier
-		c.HangWindow = time.Hour // keep the hang probe out of the way
 	})
 	// The session id rides the RTStarted/RTRecovered message in
 	// production; re-attach through rtCh so the monitor goroutine
@@ -173,7 +172,7 @@ func TestRevalidateTransportErrorNeverActs(t *testing.T) {
 	soon(t, 2*time.Second, "the verify was never retried", func() bool {
 		return verifier.calls.Load() >= 2
 	})
-	// The monitor still behaves normally: the execution.json poll keeps
+	// The monitor still behaves normally: the exec_committed-triggered read keeps
 	// projecting a pending question.
 	writePendingQuestion(t, m, "q_t", "ok?", "code")
 }
@@ -198,7 +197,6 @@ func TestRevalidateSkipsWithoutSessionID(t *testing.T) {
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.revalidate = 20 * time.Millisecond
 		c.verify = verifier
-		c.HangWindow = time.Hour
 	})
 	_ = m
 	expectNoOB(t, ob, 150*time.Millisecond, "OBSuperseded for a session-less attachment")

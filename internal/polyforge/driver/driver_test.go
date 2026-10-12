@@ -768,11 +768,21 @@ func TestCandidateOrdinal(t *testing.T) {
 	if got := candidateOrdinal(st, 3); got != 1 {
 		t.Fatalf("fresh step ordinal 1, got %d", got)
 	}
-	// Two infra failures advance twice; the cap holds the last entry.
+	// Unclassified infra failures (a daemon restart, a driver relaunch)
+	// NEVER advance the pointer.
 	st.Attempts = append(st.Attempts,
 		capsule.Attempt{Cause: CauseInfraFailure},
 		capsule.Attempt{Cause: CauseInfraFailure},
 	)
+	if got := candidateOrdinal(st, 3); got != 1 {
+		t.Fatalf("unclassified failures must not advance: %d", got)
+	}
+	// Two provider-class infra failures advance twice; the cap holds the
+	// last entry.
+	st.Attempts = []capsule.Attempt{
+		{Cause: CauseInfraFailure, FaultClass: string(FaultProvider)},
+		{Cause: CauseInfraFailure, FaultClass: string(FaultProvider)},
+	}
 	if got := candidateOrdinal(st, 3); got != 3 {
 		t.Fatalf("ordinal after 2 infra failures: %d", got)
 	}

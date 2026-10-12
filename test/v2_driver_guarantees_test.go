@@ -33,11 +33,14 @@ func TestV2HumanGateGuaranteeEndToEnd(t *testing.T) {
 	d.pf(t, "submit", wi)
 
 	waitQuestion(t, d, wi, qid, 60*time.Second)
-	if !strings.Contains(d.logTail(), "requires a human answer: return needs_input first") {
-		t.Fatalf("the completed-without-answer envelope was not rejected in-process:\n%s", d.logTail())
+	// the driver's rejection is an event in the durable per-WI log
+	rej := waitForEvent(t, d, wi, "envelope_rejected", 30*time.Second)
+	if !strings.Contains(string(rej.Body), "requires a human answer: return needs_input first") {
+		t.Fatalf("the completed-without-answer envelope was not rejected in-process: %s", rej.Body)
 	}
 	answerQuestion(t, d, wi, qid, "Yes, that scope.")
 	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 }
 
 func TestV2VerificationEvidenceRejectedInProcess(t *testing.T) {
@@ -55,11 +58,15 @@ func TestV2VerificationEvidenceRejectedInProcess(t *testing.T) {
 	d.pf(t, "submit", wi)
 
 	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
-	if !strings.Contains(d.logTail(), "completed without verification evidence") {
-		t.Fatalf("the evidence-less verification was not rejected in-process:\n%s", d.logTail())
+	rej := waitForEvent(t, d, wi, "envelope_rejected", 30*time.Second)
+	if !strings.Contains(string(rej.Body), "completed without verification evidence") {
+		t.Fatalf("the evidence-less verification was not rejected in-process: %s", rej.Body)
 	}
 	x := readExecution(t, d.capsuleDir(wi))
 	if x.Steps["verification"].Output["commands"] == nil {
 		t.Fatalf("accepted verification must keep its evidence: %+v", x.Steps["verification"].Output)
 	}
+	// let the terminal wrap (and the final publish before it) finish before
+	// the scenario's teardown removes the install
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 }
