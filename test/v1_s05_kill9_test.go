@@ -33,6 +33,7 @@ func TestV1S05AgentKill9(t *testing.T) {
 	d.start()
 	d.pf(t, "submit", wi)
 	waitSpawnCount(t, d, wi, 1, 30*time.Second)
+	waitSpawnTranscript(t, d, wi, 1, 30*time.Second)
 
 	// The session fingerprint BEFORE the kill — T4's identity contract.
 	sessBefore := inst.sessionOf(t, wi)

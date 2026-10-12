@@ -1597,6 +1597,40 @@ func waitSpawnCount(t *testing.T, d *v1Daemon, wi string, n int, bound time.Dura
 	return spawnJournal(t, d.capsuleDir(wi))
 }
 
+// waitSpawnTranscript waits until the n-th spawn's agent child has
+// written its harness transcript (the file the spawn journal names, or
+// the fakepi journal's n-th "spawn" record when no path is recorded).
+// The spawn-journal line is written by the PARENT before the child
+// starts, but the driver only resumes from a transcript that exists and
+// is non-empty — a kill landing in that gap silently downgrades the
+// retry to a fresh dispatch. Tests that kill/crash right after
+// waitSpawnCount and assert on resume must wait here first.
+func waitSpawnTranscript(t *testing.T, d *v1Daemon, wi string, n int, bound time.Duration) {
+	t.Helper()
+	capDir := d.capsuleDir(wi)
+	waitUntil(t, bound, fmt.Sprintf("spawn %d never wrote its transcript", n), func() bool {
+		entries := spawnJournal(t, capDir)
+		if len(entries) < n {
+			return false
+		}
+		path, _ := entries[n-1]["transcript"].(string)
+		if path == "" {
+			spawns := 0
+			for _, r := range fakeJournal(t, capDir) {
+				if r["type"] == "spawn" {
+					spawns++
+				}
+			}
+			return spawns >= n
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(capDir, path)
+		}
+		st, err := os.Stat(path)
+		return err == nil && st.Mode().IsRegular() && st.Size() > 0
+	})
+}
+
 // latestSpawnPID reads the newest spawn-journal entry's pid — the live
 // step process a scenario SIGKILLs (driver WIs carry no agent pid on the
 // status face; the step process IS the supervised unit).
