@@ -39,9 +39,7 @@ import (
 )
 
 // Workflow status vocabulary (03-execution-capsule.md §4.2, closed set).
-// The empty string is tolerated on load as running (a legacy or absent
-// field); New normalizes it in memory and the next transition persists
-// the normalized form. The strings are owned by the SCHEMA package
+// The strings are owned by the SCHEMA package
 // (internal/common/capsule) so non-driver lanes can read them without an
 // import cycle; these are the driver's write-side aliases.
 const (

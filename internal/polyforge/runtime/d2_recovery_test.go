@@ -28,7 +28,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-// Bug 4: the legacy-only refusal branch (and every other boundedFail
+// Bug 4: the storm-guard branch (and every other boundedFail
 // caller) kills the live agent tree and commits+pushes the last local work
 // BEFORE the verdict, and the blocked verdict carries the pushed head.
 func TestBoundedFailKillsAgentAndPushesDirtyWork(t *testing.T) {
@@ -40,11 +40,17 @@ func TestBoundedFailKillsAgentAndPushesDirtyWork(t *testing.T) {
 	writeExecutionState(t, j.capsuleDir, "running")
 	h := installOldAgent(t, sp, j)
 	pid := h.PID()
+	// Arm the storm guard so this recovery re-entry bounded-fails.
+	r.cfg.RecoveryStabilityWindow = time.Hour
+	j.mu.Lock()
+	j.lastRecoveryAt = time.Now()
+	j.stormFails = r.cfg.MaxRecoveries
+	j.mu.Unlock()
 	if err := os.WriteFile(filepath.Join(j.capsuleDir, "last-work.txt"), []byte("dirty\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	r.recoverOp(context.Background(), j, "agent_death", "x")
 	if msg := recvRT(t, toOB); msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
 		t.Fatalf("expected RTFinished(blocked), got %+v", msg)
 	}

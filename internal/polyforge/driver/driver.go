@@ -1102,9 +1102,6 @@ func loadExecution(path string, wi WIInfo, wf *Workflow) (*capsule.Execution, bo
 			exec.Steps[spec.ID] = &capsule.Step{Status: capsule.StepPending}
 		}
 	}
-	if exec.WorkflowStatus == "" {
-		exec.WorkflowStatus = StatusRunning // normalize the legacy/absent field in memory
-	}
 	return &exec, true, nil
 }
 

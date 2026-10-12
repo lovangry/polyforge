@@ -150,7 +150,7 @@ func (r *Runtime) Restart(ctx context.Context) error {
 			continue
 		}
 		if rec.SessionID == "" {
-			// a pre-v1.5 record (or a torn write): no session to verify,
+			// a torn write: no session to verify,
 			// nothing to reconcile — drop it rather than guess.
 			fmt.Fprintf(os.Stderr, "runtime: %s: record without a session dropped\n", rec.WorkItemID)
 			continue

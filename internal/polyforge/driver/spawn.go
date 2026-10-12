@@ -615,7 +615,7 @@ func (a *StepSpawnAdapter) newestAcceptedResult(stepID string) (*StepResult, err
 		}
 	}
 	if acceptedID == "" {
-		return nil, nil // done but no accepted id (legacy state)
+		return nil, nil // done but no accepted id (no accepted attempt recorded)
 	}
 	// Load the archived envelope with that exact result_id.
 	res, err := newestArchivedResult(a.WI.CapsuleDir, stepID)

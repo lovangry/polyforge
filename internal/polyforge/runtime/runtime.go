@@ -261,12 +261,12 @@ type job struct {
 	liveTranscript string
 	bundleName     string
 	bundleDigest   string
-	// origin is how the job was submitted (nil = unknown / legacy record).
+	// origin is how the job was submitted (nil = unknown).
 	origin *Origin
 	// item is the claim answer's work-item snapshot (the F1 materializer
 	// input). In-memory only: the durable copy is the capsule's
 	// runtime-state/work-item.json, which recovery re-derives from aihub
-	// (GetWorkItem) when a legacy capsule predates it.
+	// (GetWorkItem) when a capsule predates it.
 	item *api.WorkItem
 	// repos is the claim-served task-repo inventory (api.Claim.Repos):
 	// materialize clones each entry into repos/<name> before the agent
@@ -396,8 +396,8 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	// NEW-1 (delta review): OBSuperseded bypasses the spawn fence but is
 	// fenced on the SESSION fingerprint instead — a stale message buffered
 	// in the OB channel must never kill a successor job of the same WI
-	// (takeover-back inside the message-residence window). An empty
-	// SessionFP (legacy/test emission) keeps the old behavior: processed.
+	// (a re-claim inside the message-residence window). An empty
+	// SessionFP is processed.
 	if msg.Kind == protocol.OBSuperseded && msg.SessionFP != "" {
 		if fp := j.fingerprint(); fp != "" && fp != msg.SessionFP {
 			return // a DIFFERENT session's supersession verdict: not ours
@@ -1228,7 +1228,7 @@ func dirExists(p string) bool {
 
 // relSessionMarker is the capsule-local session ownership tag: the
 // fingerprint of the session that owns this worktree, under sync/ —
-// daemon-private, gitignored, so it never travels with a takeover clone
+// daemon-private, gitignored, so it never travels with a clone
 // and never reaches the revision chain.
 const relSessionMarker = "sync/session-handle"
 
@@ -1442,7 +1442,7 @@ func (r *Runtime) writeWorkItemFile(j *job) error {
 }
 
 // ensureWorkItemFile repairs a capsule whose work-item.json is missing
-// (a legacy pre-F1 capsule, or a torn scene): the in-memory claim
+// (a pre-F1 capsule, or a torn scene): the in-memory claim
 // snapshot answers when present, aihub does otherwise. Best-effort — a
 // repair failure is loud but never blocks recovery.
 func (r *Runtime) ensureWorkItemFile(j *job) {
@@ -1604,7 +1604,7 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	}
 	// Finding 4 (v1.5 review, MINOR): the observe release. Without it the
 	// superseded monitor loop never stops (a 500ms goroutine leaked per
-	// takeover), the latestSpawn entry is never pruned and the answer
+	// supersession), the latestSpawn entry is never pruned and the answer
 	// ledger never forgets the work item. RTFinished(superseded) is the
 	// same release message stopOp sends — observe stops the monitor,
 	// prunes the fence map and drops the ledger entries. It also closes

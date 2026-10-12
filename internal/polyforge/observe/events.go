@@ -183,9 +183,7 @@ func NewEventLogOpts(dataDir string, o EventLogOpts) (*EventLog, error) {
 	// rebuild counters + rings from the durable files (oldest first)
 	for _, e := range l.scanFiles() {
 		if e.Seq <= 0 {
-			// a legacy line from before ids were persisted: number it in
-			// file order after whatever the WI already counted
-			e.Seq = l.totals[e.WI] + 1
+			continue // not a valid persisted event (ids are always persisted)
 		}
 		if e.Seq > l.totals[e.WI] {
 			l.totals[e.WI] = e.Seq

@@ -150,7 +150,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// boundary; the local commit already keeps the bytes.
 	commitDirty(r, j)
 
-	// F1 repair: a capsule without runtime-state/work-item.json (a legacy
+	// F1 repair: a capsule without runtime-state/work-item.json (a pre-F1
 	// pre-F1 scene) gets it re-materialized before the next derivation
 	// wakes up blind to its own goal. Best-effort, idempotent.
 	r.ensureWorkItemFile(j)
@@ -402,7 +402,7 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	// No writer may outlive the verdict, and the last local work must
 	// reach aihub before the WI is handed to its owner (v2-converge §6
 	// bug 4): every bounded-fail branch — missing capsule, storm guard,
-	// legacy-only refusal, budget exhaustion — kills the driver/agent tree
+	// budget exhaustion — kills the driver/agent tree
 	// and commits+pushes best-effort here, not in the callers. The head
 	// the capsule ends at rides the blocked verdict (cross-daemon continue
 	// check, §7).

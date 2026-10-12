@@ -213,7 +213,7 @@ type StatusJob struct {
 	// LAST-WORK columns).
 	StepAgeSec     *int64 `json:"step_age_sec,omitempty"`
 	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
-	// Origin is how the job was submitted (absent on legacy records).
+	// Origin is how the job was submitted (may be absent).
 	Origin *JobOrigin `json:"origin,omitempty"`
 }
 

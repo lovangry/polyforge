@@ -106,7 +106,7 @@ func (m *Monitor) checkRevalidate() {
 		return
 	}
 	if m.sessionID == "" {
-		return // legacy attachment (no session carried): nothing to verify
+		return // attachment carries no session: nothing to verify
 	}
 	m.stateMu.Lock()
 	// superseded is deliberately ABSENT: see the doc comment above.
@@ -205,7 +205,7 @@ func (m *Monitor) onVerifyResult(res verifyResult) {
 			res.currentFingerprint,
 		// NEW-1 (delta review): carry the SUPERSEDED session's public
 		// fingerprint so the runtime can fence a stale buffered message
-		// against a successor job of the same WI (takeover-back race).
+		// against a successor job of the same WI (re-claim race).
 		SessionFP: m.sessionFingerprint(),
 	})
 	// Bound the retry cadence like the transport-error path: the next

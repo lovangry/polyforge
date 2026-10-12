@@ -86,8 +86,8 @@ func (m *Manager) EnsureBare(wiID string) error {
 	}
 	dir := m.RepoDir(wiID)
 	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err == nil {
-		// Pre-existing repo: re-install the hook anyway (it is ours, and a
-		// stale hook from an older server build must not survive).
+		// Pre-existing repo (e.g. after a server restart): re-install the
+		// hook so it always matches this build's configuration.
 		if err := os.MkdirAll(filepath.Join(dir, "hooks"), 0o750); err != nil {
 			return err
 		}
@@ -125,8 +125,7 @@ func (m *Manager) EnsureBare(wiID string) error {
 // point sends --push-option=session-fingerprint=<fp> on EVERY push
 // (v1.5 §1.6 backup layer), so without this config every push to an aihub
 // bare repo fails. Both the fresh-creation and the pre-existing-repo
-// paths run it, so repos created by older server builds are repaired at
-// their next EnsureBare.
+// paths run it.
 func (m *Manager) ensurePushOptions(dir string) error {
 	_, err := git(dir, nil, "config", "receive.advertisePushOptions", "true")
 	return err

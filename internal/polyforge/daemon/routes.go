@@ -60,7 +60,7 @@ type statusJob struct {
 	// job reads as stale, not fresh.
 	StepAgeSec     *int64 `json:"step_age_sec,omitempty"`
 	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
-	// Origin is how the job was submitted; absent for legacy records.
+	// Origin is how the job was submitted; may be absent.
 	Origin *runtime.Origin `json:"origin,omitempty"`
 }
 
@@ -169,18 +169,12 @@ func (d *Daemon) handler() http.Handler {
 			// driver path: decode the same wire shape, deliver to bridge
 			var payload struct {
 				QuestionID string `json:"question_id"`
-				Answer     string `json:"answer"`
-				AnswerText string `json:"answer_text"` // CLI sends this field name
+				AnswerText string `json:"answer_text"`
 				AnsweredBy string `json:"answered_by"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				http.Error(w, `{"code":"BAD-400","detail":"decode: `+err.Error()+`"}`, 400)
 				return
-			}
-			// Wire compatibility: the CLI sends answer_text, the observe
-			// face sends answer — accept both.
-			if payload.Answer == "" {
-				payload.Answer = payload.AnswerText
 			}
 			if payload.AnsweredBy == "" {
 				payload.AnsweredBy = r.Header.Get("X-PF-User")
@@ -197,7 +191,7 @@ func (d *Daemon) handler() http.Handler {
 				http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
 				return
 			}
-			if err := h.Answer(payload.QuestionID, payload.Answer, payload.AnsweredBy); err != nil {
+			if err := h.Answer(payload.QuestionID, payload.AnswerText, payload.AnsweredBy); err != nil {
 				http.Error(w, `{"code":"ANSWER-409","detail":"`+err.Error()+`"}`, 409)
 				return
 			}

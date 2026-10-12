@@ -48,7 +48,7 @@ type OBMsg struct {
 	// SessionFP (v1.5 NEW-1 fence): OBSuperseded carries the SUPERSEDED
 	// session's public fingerprint. The runtime fences the message on it
 	// (session-level verdict): a stale buffered message must never kill a
-	// successor job of the same WI claimed after a takeover-back.
+	// successor job of the same WI claimed after a re-claim.
 	SessionFP string `json:"session_fp,omitempty"`
 }
 

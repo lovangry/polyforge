@@ -337,7 +337,7 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 		rows = append(rows, row)
 	}
 	head := []string{"WORK ITEM", "STATUS", "SESSION", "SPAWN", "AGENT PID", "QUESTION", "STEP-AGE", "LAST-WORK"}
-	if showOrigin { // legacy records carry none: the column appears only when some job has one
+	if showOrigin { // the column appears only when some job has one
 		head = append(head, "ORIGIN")
 	}
 	printTable(w, head, rows)
