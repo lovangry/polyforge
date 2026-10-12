@@ -854,19 +854,19 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario S8 — historical registers and the v0 archive stay untouched.
+// Scenario S8 — historical registers stay untouched; the v0 archive is gone.
 // ---------------------------------------------------------------------------
 
 // TestV3HistoricalRegistersAndV0Untouched pins the byte-identity
 // invariants against the pre-change tree authority (HEAD bb7ab95, per
-// the spec): docs/pilot/* and v0/ carry no diff and no new untracked
-// files, and the root module's package list never reaches into v0/.
-// Green before AND after the change — these are invariants, not bars.
+// the spec): docs/pilot/* carries no diff and no new untracked files; and
+// the frozen v0/ reference tree has been dropped from the working tree
+// (it lives in git history only).
 func TestV3HistoricalRegistersAndV0Untouched(t *testing.T) {
 	root := v1Root(t)
 	const base = "bb7ab95"
 
-	for _, dir := range []string{"docs/pilot", "v0"} {
+	for _, dir := range []string{"docs/pilot"} {
 		// No modifications or deletions against the pre-change tree.
 		if out, code := v3Git(t, root, "diff", "--stat", base, "--", dir); code != 0 {
 			t.Fatalf("git diff %s %s: exit %d, output %q", base, dir, code, out)
@@ -881,21 +881,16 @@ func TestV3HistoricalRegistersAndV0Untouched(t *testing.T) {
 		}
 	}
 
-	// The frozen archive is not part of the root build: the module's own
-	// package list never descends into the v0/ archive's module path (the
-	// tools/v0-export helper is a kept root-module package and stays).
-	gi := exec.Command("go", "list", "./...")
-	gi.Dir = root
-	gi.Env = append(os.Environ(), "GOWORK=off")
-	gout, err := gi.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go list ./...: %v (%s)", err, gout)
+	// The v0/ reference tree was dropped from the working tree (it lives
+	// in git history only): no directory and no tracked file remains.
+	// (tools/v0-export is a kept root-module package and stays.)
+	if _, err := os.Stat(filepath.Join(root, "v0")); !os.IsNotExist(err) {
+		t.Fatalf("v0/ must be absent from the working tree (stat err: %v)", err)
 	}
-	const frozenModule = "github.com/silgrid/polyforge/v0"
-	for _, line := range nonEmptyLines(string(gout)) {
-		if line == frozenModule || strings.HasPrefix(line, frozenModule+"/") {
-			t.Fatalf("root module package list reaches into the frozen archive: %s", line)
-		}
+	if out, code := v3Git(t, root, "ls-files", "--", "v0"); code != 0 {
+		t.Fatalf("git ls-files v0: exit %d, output %q", code, out)
+	} else if strings.TrimSpace(out) != "" {
+		t.Fatalf("v0/ must have no tracked files:\n%s", out)
 	}
 }
 

@@ -36,7 +36,7 @@ import (
 // are a different resource family and stay reachable.
 //
 // --no-extensions is DELIBERATELY ABSENT and must stay absent (the v0
-// supervisor's live-tested baseline, v0/internal/mainagent/supervisor.go:
+// supervisor's live-tested baseline, v0/internal/mainagent/supervisor.go (git history):
 // it silences the operator's extension UI noise but also removes the
 // harness-native subagent tool — which is extension-provided — and with
 // it the whole step-agent dispatch path; the harness has no built-in

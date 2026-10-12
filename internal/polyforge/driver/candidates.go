@@ -2,7 +2,7 @@
 // set. The candidate pointer is not a persisted field: it is recomputed
 // from the step's archived attempts alone, so a crash-recovered driver
 // derives the same ordinal as its predecessor without any process
-// memory (the mirror rule of v0/internal/workflow/drive/drive.go
+// memory (the mirror rule of v0/internal/workflow/drive/drive.go (git history)
 // CandidateOrdinal, extended with the v2 fault classes: only a
 // PROVIDER-class infra failure moves the pointer).
 //

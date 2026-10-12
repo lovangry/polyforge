@@ -2,7 +2,7 @@ package cli
 
 // migrate.go: shared foundation of the two migration verbs
 // (migrate-memories, migrate-work-items). The engine is the v1 port of
-// the pilot-validated v0 tool (/v0/internal/migrate): JSONL-only old-world
+// the pilot-validated v0 tool (v0/internal/migrate, in git history): JSONL-only old-world
 // input, identity resolution with deterministic placeholders, direct
 // authority-file placement (CLI直写 — the memory API is never used for
 // stock; the server's file-wins reconcile is the only backfill path), the

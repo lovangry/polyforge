@@ -2,7 +2,7 @@ package runtime
 
 // materialize.go: the F7 lane — the bundle materialization as ONE atomic
 // SET with a completion marker, ported from v0's 03 §4.5 semantics
-// (v0/internal/capsule/materialize.go):
+// (v0/internal/capsule/materialize.go, git history):
 //
 //   - the authority copies stay where they were: the full bundle tree
 //     under workflows/<bundle>/ and the step-agent definitions under
