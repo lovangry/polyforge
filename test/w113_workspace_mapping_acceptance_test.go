@@ -762,7 +762,13 @@ func w113InstallPrep(t *testing.T) *w113InstallCtx {
 	}
 
 	// The /usr/local/bin write gate (the installer hard-codes it), with
-	// snapshot/restore of any pre-existing pf binary.
+	// snapshot/restore of any pre-existing pf binary. Opt-in only: the
+	// restore runs in t.Cleanup, so a test process killed mid-run (a
+	// -timeout panic, a stopped CI job) leaves the test build installed
+	// as the host's real pf. Never touch a host binary by default.
+	if os.Getenv("POLYFORGE_TEST_SYSTEM_INSTALL") != "1" {
+		t.Skip("installer scenarios write the host's /usr/local/bin/pf; set POLYFORGE_TEST_SYSTEM_INSTALL=1 to run them on a disposable host")
+	}
 	probe := "/usr/local/bin/.w113probe"
 	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
 		t.Skipf("installer scenarios need write access to /usr/local/bin: %v", err)
