@@ -22,6 +22,10 @@ const POLL_MS = 2000;
 const RESTART_MS = 5000;
 
 export default function (pi: ExtensionAPI) {
+  // Step agents (spawned by the daemon with PF_WI_ID in their env) are
+  // workers, not the owner's chat: no chat id, no resident watcher, no
+  // PF_CHAT_ID injection into their bash commands.
+  if (process.env.PF_WI_ID) return;
   let chatId = "";
   let watcher: ChildProcess | undefined;
   let poller: ReturnType<typeof setInterval> | undefined;
