@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -738,6 +739,144 @@ var cmdRemember = &Command{
 		})
 		return nil
 	},
+}
+
+// ---------------------------------------------------------------------------
+// memory — per-id memory read (the body face `recall` cannot serve:
+// recall returns metadata per hit; a memory's body only comes back by
+// id, from the server's per-id face).
+// ---------------------------------------------------------------------------
+
+var cmdMemory = &Command{
+	Name:    "memory",
+	Group:   GroupData,
+	Summary: "Show one stored memory (metadata + body, by id)",
+	Usage:   "pf memory show <id> [--max-bytes N]",
+	Setup:   func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("memory: expected show (see `pf help memory`)")
+		}
+		sub, rest := args[0], args[1:]
+		switch sub {
+		case "show":
+			return memoryShow(ctx, rest)
+		default:
+			return fmt.Errorf("memory: unknown action %q", sub)
+		}
+	},
+}
+
+// defaultMemoryShowCap is the human-mode body cap: 256 KiB. A larger
+// body is truncated with the exact notice below; --max-bytes 0 lifts the
+// cap entirely. The --json body is never capped at any value.
+const defaultMemoryShowCap = 262144
+
+// memoryMetaView is the human header's decode of the memory.Entry
+// metadata JSON (additive: unknown fields are ignored — the raw bytes
+// stay the --json face's authority).
+type memoryMetaView struct {
+	ID         string `json:"id"`
+	Type       string `json:"type"`
+	Title      string `json:"title"`
+	Visibility string `json:"visibility"`
+	UpdatedAt  string `json:"updated_at"`
+	ContentLen int64  `json:"content_len"`
+}
+
+// memoryShow reads one memory by id: metadata from the default JSON face
+// (GET /api/v1/memories/{id}) and the body from ?format=content — two
+// requests, both through the aihub client's shared auth/typed-error
+// path, never a bypass. Human mode prints the metadata header, a blank
+// line, then the body capped at --max-bytes (default 256 KiB, 0 =
+// unlimited), ending with the exact truncation notice when capped.
+// --json emits the server metadata verbatim plus one CLI-added top-level
+// "content" string carrying the full, never-truncated body. There is no
+// --project flag: ids are globally unique and visibility is enforced
+// server-side, so an unknown or invisible id answers the server's 404 as
+// the typed CLI error (no probing, no special-casing).
+func memoryShow(ctx *Context, args []string) error {
+	f := subFlags(ctx, "memory show")
+	maxBytes := f.Int("max-bytes", defaultMemoryShowCap,
+		"human-mode body cap in bytes (default 262144; 0 = unlimited)")
+	rest, err := parseCommandArgs(f, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 {
+		return fmt.Errorf("memory show: expected exactly one memory id")
+	}
+	capBytes := *maxBytes
+	if capBytes < 0 {
+		return fmt.Errorf("memory show: --max-bytes must be >= 0 (0 = unlimited)")
+	}
+	id := rest[0]
+	metaRaw, err := ctx.aihub().GetMemory(id)
+	if err != nil {
+		return err
+	}
+	var meta memoryMetaView
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		return fmt.Errorf("memory show: metadata decode: %w", err)
+	}
+	body, err := ctx.aihub().GetMemoryContent(id)
+	if err != nil {
+		return err
+	}
+	if ctx.JSON {
+		doc, err := memoryJSONWithContent(metaRaw, string(body))
+		if err != nil {
+			return err
+		}
+		ctx.Out(doc)
+		return nil
+	}
+	// Human mode: metadata header, blank line, the (capped) body.
+	fmt.Fprintf(ctx.Stdout, "id: %s\n", meta.ID)
+	fmt.Fprintf(ctx.Stdout, "type: %s\n", meta.Type)
+	fmt.Fprintf(ctx.Stdout, "title: %s\n", orDash(meta.Title))
+	fmt.Fprintf(ctx.Stdout, "visibility: %s\n", meta.Visibility)
+	fmt.Fprintf(ctx.Stdout, "updated: %s\n", meta.UpdatedAt)
+	fmt.Fprintf(ctx.Stdout, "content_len: %d\n", meta.ContentLen)
+	fmt.Fprintln(ctx.Stdout)
+	shown := body
+	truncated := false
+	if capBytes > 0 && len(body) > capBytes {
+		shown = body[:capBytes] // byte cap: the notice counts bytes, not runes
+		truncated = true
+	}
+	fmt.Fprint(ctx.Stdout, string(shown))
+	if !strings.HasSuffix(string(shown), "\n") {
+		fmt.Fprintln(ctx.Stdout)
+	}
+	if truncated {
+		fmt.Fprintf(ctx.Stdout, "[truncated: showed %d of %d bytes — use --max-bytes 0 for the full body]\n", capBytes, len(body))
+	}
+	return nil
+}
+
+// memoryJSONWithContent merges the fetched body into the server's
+// metadata JSON as one CLI-added top-level "content" string member (the
+// #132 --json shape: server metadata verbatim plus the full body). The
+// server's bytes are kept verbatim — a map round-trip would reorder keys
+// and reformat whitespace — by inserting the member before the object's
+// closing brace. A non-object metadata body is a loud server-contract
+// failure, never silently rewrapped.
+func memoryJSONWithContent(metaRaw json.RawMessage, content string) (json.RawMessage, error) {
+	esc, err := json.Marshal(content)
+	if err != nil {
+		return nil, err
+	}
+	s := bytes.TrimRight(metaRaw, " \t\r\n")
+	if len(s) > 0 && s[len(s)-1] == '}' {
+		out := make([]byte, 0, len(s)+len(`,"content":`)+len(esc))
+		out = append(out, s[:len(s)-1]...)
+		out = append(out, `,"content":`...)
+		out = append(out, esc...)
+		out = append(out, '}')
+		return out, nil
+	}
+	return nil, fmt.Errorf("memory show: metadata is not a JSON object (unexpected server response)")
 }
 
 // ---------------------------------------------------------------------------
