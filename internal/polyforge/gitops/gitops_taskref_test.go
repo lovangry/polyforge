@@ -203,3 +203,53 @@ func TestPushTaskRefsWithoutReposIsANoop(t *testing.T) {
 		t.Fatal("no carrier ref may exist without a repos/ tree")
 	}
 }
+
+// Never force: a re-claim that started from a clone LACKING the carried
+// commits publishes a diverged head. The carrier push is rejected
+// non-fast-forward, the carrier on the hub stays on the WI's commits, and
+// the divergence is raised as a task_ref_diverged error event (not only
+// stderr).
+func TestTaskRefDivergenceIsRejectedAndRaisedAsEvent(t *testing.T) {
+	setIdentity(t)
+	o, base := taskOpts(t, "wi_task3")
+	mkBare(t, o.RemoteURL, false)
+	mkTaskCapsule(t, o)
+	workHead := mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
+	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+		t.Fatalf("first CommitPush: %v", err)
+	}
+	if got, ok := bareRefSHA(t, o.RemoteURL, TaskRefName("demo-src")); !ok || got != workHead {
+		t.Fatalf("carrier = %q (%v), want %q", got, ok, workHead)
+	}
+
+	// Diverge: drop the work commit, commit something else.
+	repoDir := filepath.Join(o.CapsuleDir, capsule.DirRepos, "demo-src")
+	mustRun(t, "git", "-C", repoDir, "reset", "-q", "--hard", "HEAD~1")
+	if err := os.WriteFile(filepath.Join(repoDir, "other.txt"), []byte("diverged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, "git", "-C", repoDir, "add", "-A")
+	mustRun(t, "git", "-C", repoDir, "commit", "-q", "-m", "diverged work")
+
+	var kinds []string
+	var body map[string]any
+	SetEventSink(func(wi, kind string, b map[string]any) {
+		if wi == o.WorkItemID {
+			kinds = append(kinds, kind)
+			body = b
+		}
+	})
+	t.Cleanup(func() { SetEventSink(nil) })
+	if _, _, _, err := CommitPush(o, "boundary 2"); err != nil {
+		t.Fatalf("a rejected carrier must not fail the chain publish: %v", err)
+	}
+	if got, _ := bareRefSHA(t, o.RemoteURL, TaskRefName("demo-src")); got != workHead {
+		t.Fatalf("carrier moved to %q: a diverged push must never overwrite it (want %q)", got, workHead)
+	}
+	if len(kinds) != 1 || kinds[0] != EventTaskRefDiverged {
+		t.Fatalf("events = %v, want one %s", kinds, EventTaskRefDiverged)
+	}
+	if body["repo"] != "demo-src" || body["ref"] != TaskRefName("demo-src") {
+		t.Fatalf("event body = %v", body)
+	}
+}

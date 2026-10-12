@@ -340,6 +340,11 @@ type job struct {
 // Observe→Runtime messages; both sides speak only common/protocol types.
 func New(cfg Config, hub Aihub, spawner Spawner, toOB chan<- protocol.RTMsg, fromOB <-chan protocol.OBMsg) *Runtime {
 	cfg.fill()
+	if cfg.EventTap != nil {
+		// gitops raises its error events (task_ref_diverged) through the
+		// same durable tap as the runtime's own.
+		gitops.SetEventSink(cfg.EventTap)
+	}
 	return &Runtime{
 		cfg:       cfg,
 		hub:       hub,

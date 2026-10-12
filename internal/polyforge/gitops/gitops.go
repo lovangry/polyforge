@@ -474,6 +474,18 @@ func pushTaskRefsLocked(o Opts) {
 		args = append(args, o.RemoteURL, "HEAD:"+TaskRefName(e.Name()))
 		if out, err := git(env, dir, args...); err != nil {
 			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %v: %s\n", o.WorkItemID, e.Name(), err, strings.TrimSpace(out))
+			// Never force: a non-fast-forward rejection means the carrier
+			// and this worktree DIVERGED (e.g. a re-claim that started
+			// from a clone lacking the carried commits). The carrier is
+			// left untouched and the divergence is raised as an error
+			// event, not left to stderr.
+			if isNonFastForward(err, out) {
+				emitEvent(o.WorkItemID, EventTaskRefDiverged, map[string]any{
+					"repo":  e.Name(),
+					"ref":   TaskRefName(e.Name()),
+					"error": err.Error(),
+				})
+			}
 		}
 	}
 }
@@ -857,4 +869,40 @@ func cleanStaleLocks(gitDir string) error {
 		return nil
 	}
 	return os.Remove(lockPath)
+}
+
+// EventTaskRefDiverged is the error event kind raised when the carrier
+// push of one task repo is rejected non-fast-forward.
+const EventTaskRefDiverged = "task_ref_diverged"
+
+var (
+	eventMu   sync.RWMutex
+	eventSink func(wi, kind string, body map[string]any)
+)
+
+// SetEventSink installs the durable-event sink the gitops lanes raise
+// error events through (the daemon's runtime EventTap). nil disables.
+func SetEventSink(fn func(wi, kind string, body map[string]any)) {
+	eventMu.Lock()
+	eventSink = fn
+	eventMu.Unlock()
+}
+
+func emitEvent(wi, kind string, body map[string]any) {
+	eventMu.RLock()
+	fn := eventSink
+	eventMu.RUnlock()
+	if fn != nil {
+		fn(wi, kind, body)
+	}
+}
+
+// isNonFastForward reports a push refused because the remote ref is not an
+// ancestor of the pushed commit.
+func isNonFastForward(err error, out string) bool {
+	msg := out
+	if err != nil {
+		msg += " " + err.Error()
+	}
+	return strings.Contains(msg, "non-fast-forward") || strings.Contains(msg, "[rejected]") || strings.Contains(msg, "fetch first")
 }
