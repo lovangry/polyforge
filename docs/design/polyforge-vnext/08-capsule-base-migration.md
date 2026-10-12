@@ -1,5 +1,7 @@
 # 08 — Capsule 基底迁移运行手册（人工流程）<!-- 权威 -->
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 | 权威项 | 值 |
 |---|---|
 | 文档定位 | Capsule 基底（workspace）的人工迁移流程：换机/换盘/迁移到新基底时的映射改写 → shutdown → `mv`（如需）→ 重启序列、`capsules/` 的 `.gitignore` 指引 |

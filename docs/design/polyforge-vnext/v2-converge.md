@@ -1,6 +1,6 @@
 # v2 收敛设计：减法、监督重构、watch 与身份模型
 
-> 状态：**草案 r2，待 owner 审阅**（2026-10-12）。
+> 状态：**r3，owner 裁决已全部纳入，待审阅**（2026-10-12）。
 > 来源：2026-10-12 owner 与 review 会话的完整讨论；r2 吸收了一次独立深度审查（25 个漏洞 + 历史回归对照，附录 A/B），owner 已同意其 18 条修补默认值。
 > 本文取代的范围：04 §6.2 监督车道、v1.5-session-model 中 watch/adoption 相关描述、`skills/polyforge/scripts/watch.sh`。
 > 落地方式：**快速落地**——直接切换到新设计，不走"新旧并行观察 → 再删旧"的分阶段迁移（owner 2026-10-12）。
@@ -244,7 +244,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - "resume"现有 5 种含义 → 对人只保留 **暂停 / 继续**；系统内部自动处理统一称 **恢复（recover）**，不再叫 resume。
 - blocked 三扇门（unblock / resume-blocked / terminate-blocked）→ **继续 / 放弃**两个动作。
 - **"继续"的范围（r2 补）**：默认由**原持有 daemon 原地继续**；跨 daemon 继续前，必须确认 aihub 上的 capsule 版本等于原 daemon 封存时的版本，否则拒绝（#116 教训：防止拿到 blocked 之前的旧状态）。
-- 继续 / 放弃的最低角色：**待 owner 确认**（建议：任务负责人、项目 maintainer、admin；顺带修 resume-blocked 只查 key scope 不查成员）。
+- 继续 / 放弃的权限（已定）：**任务负责人、项目 maintainer、admin** 均可；顺带修 resume-blocked 只查 key scope 不查成员。
 - WI 依赖关系保留（#120 已解冻）。
 
 ## 8. 减法清单
@@ -252,7 +252,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | 档 | 内容 | 状态 |
 |---|---|---|
 | 一（直接删） | `v0/`（先打 tag，迁移 workflow digest 测试向量、改 S8 测试）；根目录 `fakepi` 二进制；deadcode 函数（不含 `EffectiveModel`/`PolicyFor`）；旧答案缓存 `observe/answers.go`+`answerfile.go`；`tools/gate-metrics`、`tools/capsule-audit.go` | 待执行 |
-| 二（#106 残骸） | flush 车道全套、recall/remember 代理路由、step 进程 stdio 控制通道、`PF_DAEMON_SOCKET`、`agents/` 布局兼容（#136）；步骤文本旧协议（#137） | 待执行 |
+| 二（#106 残骸） | flush 车道全套、recall/remember 代理路由、step 进程 stdio 控制通道、`PF_DAEMON_SOCKET`、`agents/` 布局兼容（#136）；步骤文本旧协议（#137）；`PF_AGENT_ROLE`（#81，step 不加载 skill，无读者；skill 中对应的角色路由段落一并删除） | 待执行 |
 | 三（改逻辑，随本设计） | supervisor 猜测型车道（hang/idle/probe/wall/turn_duration/工具豁免/问题豁免/ack veto）→ 2.3 规则（**M4 重验保留**）；watch.sh → `pf watch`；三模式 → 第 5 节 | 随落地 |
 | 四（待定） | takeover/adopt-session 简化（先验证"结束会话后重新领取能从断点继续"）；心跳保留并修权限漏洞 | 待验证 |
 | 已完成 | release-intent 门禁（#139，分支 `fix/139-drop-release-intent-gate`，commit a159c8c） | 待合并部署 |
@@ -264,6 +264,8 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 1. **止血**：去掉 release-intent 门禁（已完成待部署）；修步骤文本旧协议（#137）；driver 人工确认保证（#138）；**重新领取路径的两个 bug（第 6 节 1、2）**——已暂停的 #130、#134 恢复依赖它们，修复前不要 resume。
    - git-dir 修法：隔离 capsule 时把外置 git-dir 一并移入隔离区；目标已存在时报错而非复用（含跨文件系统 EXDEV 合并情形）；加"同机隔离后重新领取 → HEAD 等于 aihub 最新提交"的测试。
+   - **V4 验证证据门禁移入 driver**（已定）：driver 接受 verification 步骤的 completed 结果时，要求结构化命令证据（argv、exit_code、duration_ms），缺失则走信封拒绝的进程内重试；旧 flush 路径上的同名检查随 #136 删除。
+   - 步骤 1 完成后：**验证"结束会话 + 重新领取能从断点继续"**，通过则按第 8 节四档简化 takeover / adopt-session / verify-session。
 2. **事件底座**：driver 事件写入事件日志；单调 id、轮转；`execution.json` 权威。
 3. **监督替换（同一批上线）**：driver ↔ supervisor 契约 + 判死规则 + 死因处理 + 失败计数 + 阈值 + 恢复引擎的 driver 异常退出界 + **孤儿 step 进程回收（第 6 节 bug 3，必须同批——否则"重启后同模型重派"会与孤儿进程双写同一 capsule，#99 教训）**。
 4. **`pf watch`**：Go 实现、双通道、固定模板唤醒、订阅/游标存 daemon、Claude Code statusLine 与唤醒适配、pi 扩展；删除 watch.sh / watch-probe。
@@ -278,26 +280,26 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 |---|---|
 | #119 | 已取消（本文即其产出） |
 | #102 | 已取消（残留） |
-| #87、#88 | 待处理：被已失联的 `cli-opencode` 持有自 10-06，需接管后关闭 |
+| #87、#88 | 被已失联的 `cli-opencode` 持有自 10-06；**保留至"失联提示 + 接管"落地后再清理**（已定） |
 | #122 | 由 #137/#138/#135 与 3.2 的唤醒约束修复后复现验证关闭 |
 | #139 | 由门禁删除分支解决 |
 | #136、#137、#138 | 归入第 9 节 1、7 |
 | #135 | 第 9 节 8；在其之前由 3.2 的安全约束兜底 |
 | #84 | 重要性上升：drain 与跨机器回答的前提；仍冻结，范围待改写 |
 | #120 | 已解冻 |
-| #130（执行 #126）、#134（执行 #133） | owner 已于 2026-10-12 暂停（paused，进度已推到 aihub）；待第 9 节步骤 1 的重新领取 bug 修复后再 resume；#134 的 epic/task 概念待 owner 裁定 |
+| #130（执行 #126）、#134（执行 #133） | owner 已于 2026-10-12 暂停（paused，进度已推到 aihub）；待第 9 节步骤 1 的重新领取 bug 修复后再 resume；#134 的 **epic/task 概念保留**（已定） |
 | #71、#73、#74、#118、#132、#133 | 不受影响 |
 | #78、#121、#125、#126、#128 | 继续冻结 |
 
-## 11. 仍需 owner 决定
+## 11. owner 裁决（2026-10-12，原待定项全部已定）
 
-1. 旧 flush 路径上的"验证证据门禁"（V4）：driver 时代实际已失效——移入 driver 还是放弃？
-2. `PF_AGENT_ROLE`（#81）：step 进程不加载 skill，目前无读者——保留给将来还是删除？
-3. 历史设计文档（00–07、v1-*）：标注"已被取代"还是保持原样？
-4. takeover 简化：是否先做"结束会话后重新领取能否从断点继续"的验证？
-5. #87、#88 的处理方式。
-6. #133/#134 引入的 epic/task 概念：是否符合"心智模型简单"？
-7. "继续 / 放弃"的最低角色（第 7 节）。
+1. **V4 验证证据门禁**：移入 driver（第 9 节步骤 1）。
+2. **`PF_AGENT_ROLE`**：删除（第 8 节二档）。
+3. **历史设计文档**：00–08、v1-*、v1.5-* 开头加注"部分内容已被本文取代，冲突时以本文为准"，不逐篇改写。
+4. **takeover 简化**：步骤 1 完成后先验证"结束会话 + 重新领取能从断点继续"，通过再简化。
+5. **#87、#88**：保留至"失联提示 + 接管"落地后再清理。
+6. **epic/task 概念（#133/#134）**：保留。
+7. **继续 / 放弃权限**：任务负责人、项目 maintainer、admin。
 
 ---
 

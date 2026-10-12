@@ -1,5 +1,7 @@
 # 00 — 总体架构：三模块边界与 Core/Capsule 状态分离
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 > Polyforge vNext 设计基线文档。本文档是其余七份文档（`01`–`07`）的**术语与不变量基线**：
 > 全部跨文档术语的权威分配表（§2.2）、全部全局不变量（§2.3）在此定义，其余文档只做交叉引用
 > （`文件名#锚点`），不得重复定义同一术语。

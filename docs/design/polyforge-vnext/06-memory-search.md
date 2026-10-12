@@ -1,5 +1,7 @@
 # 06 — Memory / Search：Markdown 权威、HTML 派生、索引可重建与实时检索
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 | 权威项 | 值 |
 |---|---|
 | 文档定位 | Memory 文件化格式权威（Markdown 权威 / HTML 派生）、文件布局与 frontmatter、Markdown→HTML 派生规则、搜索索引可重建、实时检索、Memory 管理 API 与错误码、社交面保留声明与分享链接、wrap 摘要条目、存量迁移 |

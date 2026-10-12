@@ -1,5 +1,7 @@
 # 04 — Daemon：Job 排入、Interactive/Batch/Drain、持久 WI Agent 生命周期与全扫描发布的机械执行
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 | 权威项 | 值 |
 |---|---|
 | 文档定位 | Daemon 职责、Job 排入、Interactive/Batch/Drain 三模式的**实现**、持久化 Harness RPC WI Agent 的派生与监督、harness 适配器（Pi/Claude）的启动参数、watcher 驱动（dirty 标记）、全扫描发布的四类触发时机的**机械执行**、优雅停机（quiesce/shutdown，**实现**）、Daemon state 存储、命令执行入口的调用面、崩溃恢复 |
