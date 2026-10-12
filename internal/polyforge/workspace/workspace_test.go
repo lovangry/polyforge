@@ -52,11 +52,6 @@ func TestLoadValidGrammars(t *testing.T) {
 		{"step kinds", "workflow_defaults:\n  step_kinds:\n    code: [a, b]\n    spec: [c]\n"},
 		{"empty step-kind list governs", "workflow_defaults:\n  step_kinds:\n    code: []\n"},
 		{"exhaustive", "projects:\n  e2e:\n    repos:\n      - name: src\n        path: .repo/src\n      - name: docs\n        path: sub/dir/docs\nworkflow_defaults:\n  model_candidates: [a]\n  step_kinds:\n    review: [b]\n"},
-		{"release train params", "release:\n  cadence: weekly\n  channel: stable\n  urgent: false\n  versioning: fixed\n"},
-		{"release partial (cadence only)", "release:\n  cadence: weekly\n"},
-		{"release urgent switch", "release:\n  urgent: true\n"},
-		{"release independent reservation", "release:\n  versioning: independent\n"},
-		{"release exhaustive with projects", "projects:\n  e2e:\n    repos: []\nrelease:\n  cadence: weekly\n  channel: stable\n  urgent: true\n  versioning: fixed\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -103,14 +98,7 @@ func TestLoadRefusals(t *testing.T) {
 		{"type mismatch on repos", "projects:\n  e2e:\n    repos: 7\n", []string{FileName}},
 		{"duplicate project key", "projects:\n  e2e:\n    repos: []\n  dup:\n    repos: []\n  dup:\n    repos: []\n", []string{FileName, "dup"}},
 		{"duplicate nested key", "projects:\n  e2e:\n    repos: []\n    repos: []\n", []string{FileName, "repos"}},
-		// polyforge#123: the release section admits train parameters only —
-		// procedure content under it is refused, naming the yaml AND the key.
-		{"unknown key under release (procedure content)", "release:\n  script: .polyforge/release.sh\n", []string{FileName, "script"}},
-		{"unknown nested key under release", "release:\n  cadence: weekly\n  channel_tag: stable\n", []string{FileName, "channel_tag"}},
-		{"type mismatch on release cadence", "release:\n  cadence: [weekly]\n", []string{FileName, "cadence"}},
-		{"type mismatch on release urgent", "release:\n  urgent: sometimes\n", []string{FileName, "urgent"}},
-		{"release versioning outside the vocabulary", "release:\n  versioning: per-repo\n", []string{FileName, "versioning"}},
-		{"release itself mistyped", "release: weekly\n", []string{FileName, "release"}},
+		{"retired release section", "release:\n  cadence: weekly\n", []string{FileName, "release"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -167,51 +155,5 @@ func TestKindVocabulary(t *testing.T) {
 	want := "qa spec author code gate review"
 	if got := strings.Join(KindVocabulary, " "); got != want {
 		t.Fatalf("kind vocabulary %q, want %q", got, want)
-	}
-}
-
-// TestReleaseSectionDefaultsAndAbsence pins the release-section defaults
-// (polyforge#123): an absent section and a section without `versioning`
-// both answer the fixed default (one repo-level version), and an absent
-// section is behaviorally equivalent to today's no-release-section yaml.
-func TestReleaseSectionDefaultsAndAbsence(t *testing.T) {
-	// Absent section: nil pointer, default versioning.
-	ws := t.TempDir()
-	if err := os.WriteFile(filepath.Join(ws, FileName), []byte("projects:\n  e2e:\n    repos: []\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(ws)
-	if err != nil || cfg == nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.Release != nil {
-		t.Fatalf("no release section: %+v, want nil", cfg.Release)
-	}
-	if got := cfg.Release.EffectiveVersioning(); got != DefaultVersioning {
-		t.Fatalf("absent section versioning = %q, want %q", got, DefaultVersioning)
-	}
-
-	// Present section, absent versioning key: default applies.
-	if err := os.WriteFile(filepath.Join(ws, FileName), []byte("release:\n  cadence: weekly\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err = Load(ws)
-	if err != nil || cfg == nil || cfg.Release == nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.Release.Cadence != "weekly" || cfg.Release.Channel != "" || cfg.Release.Urgent {
-		t.Fatalf("release section misparsed: %+v", cfg.Release)
-	}
-	if got := cfg.Release.EffectiveVersioning(); got != DefaultVersioning {
-		t.Fatalf("absent versioning key = %q, want %q", got, DefaultVersioning)
-	}
-
-	// Explicit fixed survives the round-trip.
-	if err := os.WriteFile(filepath.Join(ws, FileName), []byte("release:\n  versioning: fixed\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err = Load(ws)
-	if err != nil || cfg == nil || cfg.Release == nil || cfg.Release.EffectiveVersioning() != "fixed" {
-		t.Fatalf("explicit fixed: %v %+v", err, cfg)
 	}
 }
