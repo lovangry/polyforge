@@ -82,3 +82,40 @@ func TestWatcherAgainstRealDaemonNeedsInputOnce(t *testing.T) {
 		t.Fatalf("progress file = %q err=%v", raw, err)
 	}
 }
+
+// A manual close (wrap --fail here) leaves execution.json at `running`; the
+// subscriber must still get the terminal decision and Done from the hub
+// status the daemon consults once the job is no longer local.
+func TestWatcherGetsDecisionAfterManualClose(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason, class string
+	}{
+		{"wrap", "wrap", "completed"},
+		{"fail", "fail", "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			td := newTestDaemon(t, nil)
+			td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_close", Owner: "alice"}
+			wi := "wi_close_" + tc.name
+			td.submitClaim(t, wi)
+			td.waitMonitored(t, wi)
+			if _, err := td.client.Wrap(wi, tc.reason); err != nil {
+				t.Fatalf("wrap: %v", err)
+			}
+			api := clientAPI{d: td.client, chat: "chat_close"}
+			var out bytes.Buffer
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := watcher.Run(ctx, api, watcher.Options{WaitDecision: true, Out: &out, Poll: 20 * time.Millisecond}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.String(), wi+" "+tc.class) {
+				t.Fatalf("out = %q, want a %s decision", out.String(), tc.class)
+			}
+			subs, _ := td.client.ChatSubscriptions("chat_close")
+			if len(subs.Subscriptions) != 1 || !subs.Subscriptions[0].Done {
+				t.Fatalf("subscription must be Done after the terminal decision: %+v", subs)
+			}
+		})
+	}
+}

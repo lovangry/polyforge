@@ -25,6 +25,13 @@ type WatchSnapshot struct {
 	Queued    bool            `json:"queued,omitempty"`
 	Job       *WatchJob       `json:"job,omitempty"`
 	Execution *WatchExecution `json:"execution,omitempty"`
+	// HubStatus is the work item's aihub status, filled only when the
+	// daemon no longer holds a live local job for it (closed by wrap /
+	// wrap --fail / cancel / pause): execution.json is not rewritten by a
+	// manual close and keeps saying `running`, so this is the only
+	// authority for how the WI ended. Empty when not consulted or the hub
+	// was unreachable.
+	HubStatus string `json:"hub_status,omitempty"`
 	// Progress is the optional live-progress block (current command, recent
 	// files, tool-call count); every field is shown only when present.
 	Progress *WatchProgress `json:"progress,omitempty"`

@@ -35,6 +35,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 const (
@@ -408,11 +409,13 @@ func (d *Daemon) watchSnapshot(wi string, after int64) protocol.WatchSnapshot {
 	snap := protocol.WatchSnapshot{WorkItem: wi, Events: []protocol.EventEntry{}}
 	snap.Queued = d.q != nil && d.q.IsPending(wi)
 	jobs, _ := d.statusJobs()
+	localLive := false
 	for _, j := range jobs {
 		if j.WorkItemID != wi {
 			continue
 		}
 		snap.Known = true
+		localLive = j.Status != string(runtime.StatePaused)
 		wj := &protocol.WatchJob{Status: j.Status, RepairReason: j.RepairReason,
 			QuestionID: j.QuestionID, LastProgressAgoSec: j.LastWorkAgoSec}
 		if j.Origin != nil {
@@ -423,6 +426,14 @@ func (d *Daemon) watchSnapshot(wi string, after int64) protocol.WatchSnapshot {
 	if exec := d.readExecution(wi); exec != nil {
 		snap.Known = true
 		snap.Execution = exec
+	}
+	if !localLive && !snap.Queued && d.hub != nil {
+		// No live local job: a manual close (wrap / wrap --fail / cancel /
+		// pause) leaves execution.json at `running`, so the hub's status
+		// is the authority for how the WI ended.
+		if item, err := d.hub.GetWorkItem(wi); err == nil && item != nil {
+			snap.HubStatus = item.Status
+		}
 	}
 	if d.obs != nil {
 		// live progress of the in-flight dispatch (current command, recent
