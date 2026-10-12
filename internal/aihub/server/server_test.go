@@ -382,6 +382,34 @@ func TestMemoryOverHTTP(t *testing.T) {
 	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=brown+fox", e.key, nil, &search); code != 200 || search.Total != 1 {
 		t.Fatalf("search: %d %s", code, raw)
 	}
+	// Per-id read (polyforge#132, the faces `pf memory show` consumes):
+	// the default face is metadata only (no body); ?format=content is the
+	// bare body as text/markdown (no front-matter; metadata lives on the
+	// JSON face).
+	var meta map[string]any
+	if code, raw := e.do(t, "GET", "/api/v1/memories/"+created.ID, e.key, nil, &meta); code != 200 || meta["id"] != created.ID {
+		t.Fatalf("get metadata: %d %s", code, raw)
+	}
+	if _, has := meta["content"]; has {
+		t.Fatalf("metadata face must not carry the body: %v", meta)
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/memories/"+created.ID+"?format=content", e.key, nil, nil); code != 200 || string(raw) != "the quick brown fox over http" {
+		t.Fatalf("get content: %d %q", code, raw)
+	}
+	// A body that itself contains a "---" line is returned whole.
+	const dashed = "intro\n---\nnot a delimiter\n---\ntail\n"
+	var dcreated struct {
+		ID string `json:"id"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/memories", e.key, map[string]any{
+		"project": "alpha", "type": "experience.debug", "visibility": "project",
+		"content": dashed,
+	}, &dcreated); code != 201 || dcreated.ID == "" {
+		t.Fatalf("create dashed memory: %d %s", code, raw)
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/memories/"+dcreated.ID+"?format=content", e.key, nil, nil); code != 200 || string(raw) != dashed {
+		t.Fatalf("dashed body: %d %q, want %q", code, raw, dashed)
+	}
 	// Redact → GET is a 404.
 	if code, _ := e.do(t, "POST", "/api/v1/memories/"+created.ID+"/redact", e.key, nil, nil); code != 200 {
 		t.Fatalf("redact: %d", code)

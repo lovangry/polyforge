@@ -62,16 +62,7 @@ func (c *Client) Do(method, path string, body, out any) error {
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var ae api.Error
-		if json.Unmarshal(data, &ae) == nil && ae.Code != "" {
-			return &ae
-		}
-		// No typed envelope in the body (a proxy's HTML 502/504 page, a
-		// bare 404): synthesize the code from the HTTP status itself.
-		return &api.Error{
-			Code:   fmt.Sprintf("HTTP-%d", resp.StatusCode),
-			Detail: fmt.Sprintf("HTTP %d: %.200s", resp.StatusCode, data),
-		}
+		return typedError(resp.StatusCode, data)
 	}
 	if out == nil || len(data) == 0 {
 		return nil
@@ -87,6 +78,21 @@ func (c *Client) raw(method, path string, body any) (json.RawMessage, error) {
 		return nil, err
 	}
 	return raw, nil
+}
+
+// typedError maps a non-2xx response body back into *api.Error: the
+// typed envelope when one is present, a status-synthesized code
+// otherwise (a proxy's HTML 502/504 page, a bare 404). Shared by Do and
+// the text/markdown read so every error carries the same envelope.
+func typedError(status int, data []byte) error {
+	var ae api.Error
+	if json.Unmarshal(data, &ae) == nil && ae.Code != "" {
+		return &ae
+	}
+	return &api.Error{
+		Code:   fmt.Sprintf("HTTP-%d", status),
+		Detail: fmt.Sprintf("HTTP %d: %.200s", status, data),
+	}
 }
 
 func (c *Client) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
@@ -241,6 +247,42 @@ func (c *Client) SearchMemories(project, q, memType string, tags []string, limit
 		v.Set("limit", strconv.Itoa(limit))
 	}
 	return c.raw("GET", "/api/v1/memories/search?"+v.Encode(), nil)
+}
+
+// GetMemory reads one memory's metadata (GET /api/v1/memories/{id}, the
+// v1 per-id memory face): the default JSON response is the memory.Entry
+// metadata and carries NO content — the body only comes back from
+// GetMemoryContent (?format=content). Raw so the CLI's --json mode can
+// hand the server metadata through verbatim.
+func (c *Client) GetMemory(id string) (json.RawMessage, error) {
+	return c.raw("GET", "/api/v1/memories/"+url.PathEscape(id), nil)
+}
+
+// GetMemoryContent reads one memory's body (GET
+// /api/v1/memories/{id}?format=content): the server answers the bare
+// body (no front-matter) as text/markdown, NOT JSON, so the body bytes are returned undecoded — a
+// JSON decode would refuse plain markdown. Auth and the typed-error
+// envelope are exactly Do's (the shared non-2xx path), and the response
+// is bounded to the same 32 MiB cap.
+func (c *Client) GetMemoryContent(id string) ([]byte, error) {
+	req, err := http.NewRequest("GET", c.BaseURL+"/api/v1/memories/"+url.PathEscape(id)+"?format=content", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, typedError(resp.StatusCode, data)
+	}
+	return data, nil
 }
 
 // UserCreateRequest is the M1 create body. v1 field: user_type
