@@ -312,7 +312,9 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 // resumeBlockedRoute serves POST /jobs/{id}/resume-blocked — the owner's
 // resume verdict on a workflow parked blocked on an honest incomplete
 // result. The bounded close dropped the job and ended the session, so this
-// route re-establishes execution: the hub's resume-blocked door first
+// route re-establishes execution AFTER the CLI has landed the hub's
+// resume-blocked door with the human's own credential (never the daemon's
+// machine key — the door's owner/maintainer/admin check is about the human):
 // (blocked → queued, the claim gate stays queued-only), then a plain claim
 // that runs synchronously — the claim/start path's owner move
 // (bridge.Start → driver.ResumeCurrent) unblocks the parked workflow and
@@ -347,10 +349,11 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, api.ErrDaemonConflict, "work item is already queued on this daemon")
 		return
 	}
-	if _, err := d.hub.ResumeBlockedWorkItem(canonical); err != nil {
-		writeErrOf(w, err)
-		return
-	}
+	// The hub's resume-blocked door is NOT called here (v2-converge §7):
+	// its owner/maintainer/admin check must evaluate the HUMAN who typed
+	// `pf resume`, so the CLI lands the door with the user's own api key
+	// first; this route is only the claim/start half. A WI still blocked
+	// at the hub is refused by the claim gate itself.
 	// The daemon's run context, NOT the HTTP request's: the claim's ctx
 	// is the driver's parent (bridge.Start derives from it) — a request-
 	// scoped ctx would cancel the driver mid-dispatch the moment the CLI

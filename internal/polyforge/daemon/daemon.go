@@ -54,11 +54,6 @@ type Hub interface {
 	SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error)
 	// Heartbeat posts one machines/heartbeat upsert (M3 liveness face).
 	Heartbeat(req aihubclient.MachineHeartbeat) (*aihubclient.MachineHeartbeatResult, error)
-	// ResumeBlockedWorkItem is the §6.4 owner resume verdict's hub door
-	// (polyforge#116): `pf resume` on a workflow parked blocked — blocked
-	// → queued for the owner's immediate re-claim. *aihubclient.Client
-	// satisfies it.
-	ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error)
 	// TerminateBlockedWorkItem is the §6.4 owner terminate verdict's hub
 	// door (polyforge#116): `pf wrap --fail` on a parked workflow —
 	// blocked → failed. *aihubclient.Client satisfies it.

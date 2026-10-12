@@ -309,7 +309,7 @@ func TestResumeBlockedDoorWiring(t *testing.T) {
 	d := newDaemonFixture(t)
 	d.answer("POST", "/jobs/wi_blocked/resume-blocked", `{"resumed":true,"work_item_id":"wi_blocked"}`)
 	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
+		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
 	}, "resume", "wi_blocked")
 	if code != 0 {
 		t.Fatalf("resume: code=%d stderr=%s", code, stderr)
@@ -320,10 +320,45 @@ func TestResumeBlockedDoorWiring(t *testing.T) {
 	if !strings.Contains(stdout, "resumed wi_blocked") || !strings.Contains(stdout, "parked blocked") {
 		t.Errorf("stdout must carry the §6.4 owner-move copy: %s", stdout)
 	}
+	// The hub door is landed by the CLI with the HUMAN's key, before the
+	// daemon is contacted.
+	var door *capturedRequest
+	for _, r := range aihubRec.all() {
+		r := r
+		if r.Method == "POST" && r.Path == "/api/v1/work-items/wi_blocked/resume-blocked" {
+			door = &r
+		}
+	}
+	if door == nil {
+		t.Fatalf("the CLI must call the hub resume-blocked door itself: %+v", aihubRec.all())
+	}
+	if got := door.Header.Get("Authorization"); !strings.Contains(got, "human-key") {
+		t.Errorf("the door must carry the human's api key, got %q", got)
+	}
 	// The daemon's owner-move route is contacted exactly once.
 	calls := d.rec.all()
 	if len(calls) != 1 || calls[0].Path != "/jobs/wi_blocked/resume-blocked" {
 		t.Errorf("resume must contact the daemon's resume-blocked route once: %+v", calls)
+	}
+	// A refused door (non-owner member) stops before the daemon is asked.
+	d2 := newDaemonFixture(t)
+	d2.answer("POST", "/jobs/wi_blocked/resume-blocked", `{"resumed":true,"work_item_id":"wi_blocked"}`)
+	deny := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `{"code":"AUTH-403","detail":"resume-blocked requires the work item's reporter, a project maintainer or admin"}`)
+			return
+		}
+		io.WriteString(w, blockedWI)
+	})
+	code, _, stderr = runPf(t, map[string]string{
+		"PF_SERVER": deny.URL, "PF_DAEMON_SOCKET": d2.sock, "PF_API_KEY": "plain-member-key",
+	}, "resume", "wi_blocked")
+	if code != 1 || !strings.Contains(stderr, "AUTH-403") {
+		t.Errorf("a non-owner member must be refused: code=%d stderr=%s", code, stderr)
+	}
+	if n := len(d2.rec.all()); n != 0 {
+		t.Errorf("a refused door must not contact the daemon: %v", d2.rec.all())
 	}
 	// No clean_pause PATCH lands for a blocked WI (the pause copy's door).
 	for _, r := range aihubRec.all() {

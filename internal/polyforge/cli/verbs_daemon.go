@@ -385,9 +385,10 @@ func setCleanPause(ctx *Context, wiID string, value bool) string {
 //
 //   - a workflow parked BLOCKED on an honest incomplete result (§6.5
 //     step 5: workflow_status=blocked, position frozen, the owner holds
-//     the next move) gets the §6.4 owner move: the daemon's resume-blocked
-//     route returns the WI to claimable at the hub and re-establishes
-//     execution over the parked capsule — the frozen current step
+//     the next move) gets the §6.4 owner move: the CLI lands the hub's
+//     resume-blocked door with the human's own credential (authorization
+//     is reporter / maintainer / admin), then the daemon's route claims
+//     it and re-establishes execution over the parked capsule — the frozen current step
 //     re-dispatches in place as a fresh derivation. It must never answer
 //     the pause copy again (nothing here was ever paused).
 //   - every other status keeps the operator-pause door exactly as it was:
@@ -429,6 +430,14 @@ var cmdResume = &Command{
 			fmt.Fprintln(ctx.Stdout, "(its machine re-attaches on the next daemon start; a work item whose holder is gone moves with `pf takeover <id> --reason ...`)")
 			fmt.Fprintln(ctx.Stdout, "(a live holder daemon does NOT pick this up until its next start; to continue immediately use `pf takeover`)")
 			return nil
+		}
+		// The authorization-bearing step runs with the HUMAN's own api key
+		// (data plane, like `pf cancel`): the hub's resume-blocked door
+		// checks reporter / project maintainer / admin against the caller,
+		// and the daemon's machine key is not that caller. Only then does
+		// the local daemon claim and start the WI.
+		if _, err := ctx.aihub().ResumeBlockedWorkItem(args[0]); err != nil {
+			return err
 		}
 		raw, err := ctx.daemon().ResumeBlocked(args[0])
 		if err != nil {

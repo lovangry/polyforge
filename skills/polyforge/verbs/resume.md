@@ -20,6 +20,12 @@ with its holder daemon`. `--json`: the raw answer.
 
 ## Door 2 — a blocked work item (hub status `blocked`)
 
+Two steps: the CLI first lands aihub's resume-blocked door with the HUMAN's
+own api key (data plane, like `cancel`; the check is reporter / project
+maintainer / admin against the person typing, never the daemon's machine
+key), then asks the local daemon to claim and start the WI. A refused door
+(`AUTH-403`) stops there and the daemon is never contacted.
+
 The §6.4 owner move (polyforge#116): the workflow parked on an honest
 `incomplete` step result — `workflow_status=blocked` in the capsule, the
 current step frozen `in_progress`, the owner holding the next move. The
