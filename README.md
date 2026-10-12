@@ -168,7 +168,7 @@ kill <AIHUB_PID>
 ## Architecture
 
 Design record: `docs/design/polyforge-vnext/v1-architecture-spec.md`
-(full design record: `v1-spec-full.md`; v0 pilot code: `/v0`, frozen).
+(full design record: `v1-spec-full.md`; the frozen v0 pilot tree was removed from the working tree and lives in git history / the v0 tag).
 The subsections below describe the code as it actually exists in this tree —
 the live code is the authority; design-doc references are for traceability.
 
