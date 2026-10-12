@@ -171,7 +171,7 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 		Mapping:       plan,
 		DataDir:       dataDir,
 		GitRemoteBase: inst.url + "/git",
-		WorkflowsDir:  filepath.Join(inst.root, "workflows"),
+		WorkflowsDir:  inst.workflowsPath(),
 		Harness:       "pi",
 		PiBin:         inst.fakepiPath,
 		SocketPath:    sock,

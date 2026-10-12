@@ -163,7 +163,8 @@ func TestV1S16EmptyQuestionIDFlushRefused(t *testing.T) {
 	// stderr — the LOG face).
 	waitUntil(t, 60*time.Second, "the driver never refused the malformed envelope", func() bool {
 		return strings.Contains(d.logTail(),
-			"needs_input result without question_id/question (envelope or output)")
+			"envelope_rejected") && strings.Contains(d.logTail(),
+			"needs_input result is missing question_id")
 	})
 
 	// Fail-closed, not fail-deaf: no pending was ever minted off the

@@ -39,6 +39,9 @@ import (
 )
 
 func TestV1S22WrapEvidenceGate(t *testing.T) {
+	t.Skip("superseded by the driver's V4 verification-evidence gate (v2 §9 step 1): an evidence-less " +
+		"verification envelope is now rejected in-process and can never reach the wrap gate through " +
+		"the driver; see TestV2VerificationEvidenceRejectedInProcess")
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s22: wrap refused without verification evidence, sealed after the repair",
 		[]map[string]any{

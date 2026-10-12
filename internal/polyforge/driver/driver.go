@@ -311,7 +311,22 @@ func (d *Driver) Run(ctx context.Context) error {
 			d.mu.Lock()
 			d.rejects[stepID]++
 			count := d.rejects[stepID]
-			d.priorRejection[stepID] = fmt.Sprintf("dispatch %d: %v", n, verr)
+			feedback := fmt.Sprintf("dispatch %d: %v", n, verr)
+			if delivered == OutcomeNeedsInput {
+				// Keep the pending-question context across the retry: the
+				// rejected envelope was a question, and the rewrite must
+				// still be one.
+				q := strings.TrimSpace(res.Question)
+				if q == "" {
+					_, q, _ = needsInputQuestion(res)
+				}
+				feedback += "\nThe rejected envelope was a needs_input (question) report"
+				if q != "" {
+					feedback += fmt.Sprintf(" asking: %q", q)
+				}
+				feedback += ". Rewrite it as a needs_input envelope carrying both question_id and question (envelope level or in the output object); do not turn it into a completed result."
+			}
+			d.priorRejection[stepID] = feedback
 			d.mu.Unlock()
 			if count > maxEnvelopeRejects {
 				return fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d): %w",
@@ -694,6 +709,7 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 				spec.AcceptedIDs[at.AcceptedResultID] = true
 			}
 		}
+		spec.HumanAnswers = currentChainAnswers(st)
 	}
 	d.mu.Unlock()
 	// Declared outputs, handoff duty and gate-ness from the extended
@@ -704,6 +720,8 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 				spec.Outputs = ds.Outputs
 				spec.HandoffRequired = ds.Handoff
 				spec.Gate = ds.Gate
+				spec.RequiresHumanAnswer = ds.RequiresHumanAnswer
+				spec.RequireCommandEvidence = ds.RequiresCommandEvidence
 				break
 			}
 		}
@@ -713,7 +731,12 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 		if ss := d.workflow.step(stepID); ss != nil {
 			spec.HandoffRequired = ss.Handoff
 			spec.Gate = ss.Gate
+			spec.RequiresHumanAnswer = ss.RequiresHumanAnswer
+			spec.RequireCommandEvidence = ss.RequiresCommandEvidence
 		}
+	}
+	if stepID == verificationStepID {
+		spec.RequireCommandEvidence = true
 	}
 	return spec
 }
@@ -875,6 +898,10 @@ type StepSpec struct {
 	// Handoff marks a step that must produce a handoff artifact for the
 	// next inherit step (validated on its completed results).
 	Handoff bool
+	// RequiresHumanAnswer / RequiresCommandEvidence mirror the
+	// DriverStep fields of the same name (workflow_ext.go).
+	RequiresHumanAnswer     bool
+	RequiresCommandEvidence bool
 }
 
 // OnFail is the gate FAIL policy (01 §4.1): rewind with a target, or
@@ -952,6 +979,8 @@ func loadWorkflow(bundleDir string) (*Workflow, error) {
 		if s.Handoff {
 			spec.Handoff = true
 		}
+		spec.RequiresHumanAnswer = s.RequiresHumanAnswer
+		spec.RequiresCommandEvidence = s.RequiresCommandEvidence
 		if s.OnFail != nil {
 			of := &OnFail{Action: s.OnFail.Action, Target: s.OnFail.Target}
 			if s.OnFail.IncludeVerdict == nil || *s.OnFail.IncludeVerdict {
@@ -991,6 +1020,9 @@ type fmStep struct {
 	ContextPolicy   string    `yaml:"context_policy"`
 	ModelCandidates []string  `yaml:"model_candidates"`
 	OnFail          *fmOnFail `yaml:"on_fail"`
+
+	RequiresHumanAnswer     bool `yaml:"requires_human_answer"`
+	RequiresCommandEvidence bool `yaml:"requires_command_evidence"`
 }
 
 type fmOnFail struct {

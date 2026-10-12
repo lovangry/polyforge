@@ -197,6 +197,9 @@ func TestValidateStepResultNonCompletedOutcomes(t *testing.T) {
 		// non-completed outcomes — and the envelope carries neither.
 		f.res.Artifacts = nil
 		f.res.Output = nil
+		if outcome == OutcomeNeedsInput {
+			f.res.QuestionID, f.res.Question = "q1", "which one?" // a needs_input envelope owes its question
+		}
 		if err := ValidateStepResult(f.res, f.spec); err != nil {
 			t.Fatalf("%s result without outputs must validate: %v", outcome, err)
 		}
