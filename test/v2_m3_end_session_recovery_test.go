@@ -5,7 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -193,13 +195,15 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 	// Late writes from A's old secret are rejected, now naming B.
 	assertStaleWritesRejected(t, inst, wi, oldSecret, sessB.Fingerprint)
 
-	// B pauses (session kept) so it holds no live step process: the
-	// release's layer-4 env-marker sweep kills EVERY process carrying
-	// PF_WI_ID on the machine, and this e2e host runs both daemons on one
-	// kernel (as v1_s11 notes) — on two real machines B's step would be
-	// untouched.
-	daemonB.pf(t, "pause", wi)
-	inst.waitWIStatus(t, wi, "paused", 30*time.Second)
+	// B keeps running with its release step parked: a LIVE step process
+	// for the same WI id on the same kernel. A's restart release sweeps
+	// by PF_WI_ID AND PF_DAEMON_ID, so it must leave B's process alone
+	// (on one host both daemons share the kernel).
+	stBefore := inst.wiStatus(t, wi)
+	stepPIDsBefore := daemonStepPIDs(wi, "m-e2e-b")
+	if len(stepPIDsBefore) == 0 {
+		t.Fatal("B's parked release step has no live process to protect")
+	}
 	spawnsAtRelease := len(spawnJournal(t, capB))
 
 	// A restarts later: its restart session verify sees the WI is held by
@@ -218,8 +222,13 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 			t.Fatalf("restarted daemon A still holds a job for %s", wi)
 		}
 	}
-	if st := inst.wiStatus(t, wi); st != "paused" {
-		t.Fatalf("A's restart moved the hub state: %q", st)
+	if st := inst.wiStatus(t, wi); st != stBefore {
+		t.Fatalf("A's restart moved the hub state: %q, was %q", st, stBefore)
+	}
+	for _, pid := range stepPIDsBefore {
+		if syscall.Kill(pid, 0) != nil {
+			t.Fatalf("A's restart release killed B's live step process %d", pid)
+		}
 	}
 	if s := inst.sessionOf(t, wi); s.Fingerprint != sessB.Fingerprint {
 		t.Fatalf("A's restart touched B's session: %+v", s)
@@ -322,4 +331,23 @@ func assertStaleWritesRejected(t *testing.T, inst *v1Install, wi, secret, holder
 	if after := inst.wiStatus(t, wi); after != before {
 		t.Fatalf("a refused stale end moved the WI: %s -> %s", before, after)
 	}
+}
+
+// daemonStepPIDs lists live pids carrying BOTH the WI's and the daemon's
+// env markers (the pair the daemon's orphan sweep keys on).
+func daemonStepPIDs(wi, daemonID string) []int {
+	var out []int
+	for _, pid := range orphanPIDs(wi) {
+		raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ")
+		if err != nil {
+			continue
+		}
+		for _, kv := range strings.Split(string(raw), "\x00") {
+			if kv == "PF_DAEMON_ID="+daemonID {
+				out = append(out, pid)
+				break
+			}
+		}
+	}
+	return out
 }

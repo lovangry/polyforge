@@ -11,7 +11,7 @@
 //     every step pid the daemon ever spawned for the WI; each pid whose
 //     identity still verifies is torn down through the six-layer Cleanup
 //     (its process group, TERM -> bounded wait -> KILL);
-//  2. one pid-less Cleanup sweep: layer 4's PF_WI_ID env-marker scan
+//  2. one pid-less Cleanup sweep: layer 4's PF_WI_ID + PF_DAEMON_ID env-marker scan
 //     catches whatever the journal could not name (torn journal, escapees
 //     that left the group).
 package runtime
@@ -65,19 +65,14 @@ func journalPIDs(capsuleDir string) []journalPID {
 	return out
 }
 
-// pidHasWIMarker reports whether pid's environment carries PF_WI_ID=wi.
-func pidHasWIMarker(pid int, wi string) bool {
+// pidHasWIMarker reports whether pid's environment carries both
+// PF_WI_ID=wi and PF_DAEMON_ID=daemonID.
+func pidHasWIMarker(pid int, wi, daemonID string) bool {
 	raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "environ"))
 	if err != nil {
 		return false
 	}
-	marker := "PF_WI_ID=" + wi
-	for _, kv := range strings.Split(string(raw), "\x00") {
-		if kv == marker {
-			return true
-		}
-	}
-	return false
+	return envHasMarkers(string(raw), wi, daemonID)
 }
 
 // journalPIDIsOurs is the pid-reuse guard. A journal pid is signaled only
@@ -85,8 +80,8 @@ func pidHasWIMarker(pid int, wi string) bool {
 // then requires every member to postdate the recorded start) or when the
 // live occupant provably is the recorded process: its starttime matches
 // the journaled started_at, or - for a line with no usable stamp - it
-// carries this WI's PF_WI_ID marker. Never the daemon itself.
-func journalPIDIsOurs(jp journalPID, wi string) bool {
+// carries this WI's PF_WI_ID and this daemon's PF_DAEMON_ID markers. Never the daemon itself.
+func journalPIDIsOurs(jp journalPID, wi, daemonID string) bool {
 	if jp.pid == os.Getpid() {
 		return false
 	}
@@ -96,7 +91,7 @@ func journalPIDIsOurs(jp journalPID, wi string) bool {
 	if jp.startedAt != "" {
 		return rootIdentityHolds(CleanupTarget{PID: jp.pid, StartedAt: jp.startedAt})
 	}
-	return pidHasWIMarker(jp.pid, wi)
+	return pidHasWIMarker(jp.pid, wi, daemonID)
 }
 
 // reapOrphans kills every leftover step process tree of one WI: the
@@ -107,7 +102,7 @@ func journalPIDIsOurs(jp journalPID, wi string) bool {
 func (r *Runtime) reapOrphans(wi, capsuleDir string) {
 	cg := r.cgroupPathFor(wi)
 	for _, jp := range journalPIDs(capsuleDir) {
-		if !journalPIDIsOurs(jp, wi) {
+		if !journalPIDIsOurs(jp, wi, r.cfg.MachineID) {
 			fmt.Fprintf(os.Stderr, "runtime: %s: journal pid %d no longer matches its recorded identity (pid reuse); not signaled\n", wi, jp.pid)
 			continue
 		}
@@ -119,7 +114,7 @@ func (r *Runtime) reapOrphans(wi, capsuleDir string) {
 			fmt.Fprintf(os.Stderr, "runtime: %s: orphan step tree %d cleanup incomplete: %v (warnings: %v)\n", wi, jp.pid, err, rep.Warnings)
 		}
 	}
-	if rep, err := Cleanup(CleanupTarget{WIID: wi, CapsuleDir: capsuleDir, CgroupPath: cg}, cleanupBound); err != nil {
+	if rep, err := Cleanup(CleanupTarget{WIID: wi, DaemonID: r.cfg.MachineID, CapsuleDir: capsuleDir, CgroupPath: cg}, cleanupBound); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: orphan env-marker sweep incomplete: %v (warnings: %v)\n", wi, err, rep.Warnings)
 	}
 }

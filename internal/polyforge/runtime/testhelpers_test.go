@@ -282,7 +282,7 @@ func (s *scriptedSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle
 
 	cmd := exec.Command("sleep", "300")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "PF_WI_ID="+p.WorkItemID)
+	cmd.Env = append(os.Environ(), "PF_WI_ID="+p.WorkItemID, "PF_DAEMON_ID=m-test")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -584,7 +584,7 @@ func spawnSleeper(t *testing.T, wi string) (pid int, startedAt string) {
 	t.Helper()
 	cmd := exec.Command("sleep", "300")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi)
+	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=m-test")
 	startedAt = nowStamp()
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -646,7 +646,7 @@ func spawnOrphaningSleeper(wi string) (*orphaningAgent, error) {
 	pidFile := filepath.Join(dir, "child.pid")
 	cmd := exec.Command("sh", "-c", "sleep 300 & echo $! > "+pidFile)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi)
+	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=m-test")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

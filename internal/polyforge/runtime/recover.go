@@ -524,6 +524,7 @@ func (r *Runtime) killAgentTree(j *job) {
 		Pgid:       pid, // the agent spawns as its own group leader
 		StartedAt:  start,
 		WIID:       j.wi,
+		DaemonID:   r.cfg.MachineID,
 		CapsuleDir: j.capsuleDir,
 		CgroupPath: r.cgroupPathFor(j.wi),
 	}, cleanupBound)

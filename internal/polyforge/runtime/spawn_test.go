@@ -74,7 +74,7 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	t.Setenv("PF_CHAT_ID", "chat_leak") // a chat id is a notification label: never reaches a step agent
 	t.Setenv("PF_DAEMON_SOCKET", "/spoofed.sock")
 	t.Setenv("SOME_OTHER_NAME", "machine-key") // renamed secret: value match
-	sp := newPiSpawner(&Config{EnvSecrets: []string{"machine-key"}})
+	sp := newPiSpawner(&Config{MachineID: "m-env", EnvSecrets: []string{"machine-key"}})
 	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionHandle: "ab12cd34", SpawnN: 2})
 	env := strings.Join(cmd.Env, "\n")
 	if strings.Contains(env, "POLYFORGE_API_KEY") || strings.Contains(env, "PF_LEAK=") {
@@ -90,7 +90,7 @@ func TestSpawnEnvSanitized(t *testing.T) {
 		t.Fatal("the blacklist must not strip unrelated variables")
 	}
 	for _, want := range []string{
-		"PF_WI_ID=wi_env", "PI_SESSION_DIR=/caps/session",
+		"PF_WI_ID=wi_env", "PF_DAEMON_ID=m-env", "PI_SESSION_DIR=/caps/session",
 		// v1.5 B2/B3: the PUBLIC session handle and the monotonic
 		// derivation counter
 		"PF_SESSION_HANDLE=ab12cd34",

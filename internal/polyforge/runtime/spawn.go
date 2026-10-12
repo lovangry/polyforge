@@ -196,6 +196,9 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		// compensation lives in pitranscript.go (F3).
 		"PI_SESSION_DIR=" + filepath.Join(p.CapsuleDir, capsule.DirSession),
 		"PF_WI_ID=" + p.WorkItemID, // layer-4 cleanup marker (deliberate addition)
+		// second marker half: the sweep needs BOTH, so a daemon never
+		// reaps another daemon's step process for the same WI id.
+		"PF_DAEMON_ID=" + s.cfg.MachineID,
 		// v1.5 B2/B3 identity: the PUBLIC session handle and the monotonic
 		// derivation counter. The SECRET
 		// session id is deliberately ABSENT (it must never reach agent
