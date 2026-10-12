@@ -80,13 +80,14 @@ func TestObserveAnswerPending(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		snap, _ = td.client.WatchSnapshot("wi_b", 0)
-		if (snap != nil && snap.Execution != nil && snap.Execution.PendingQuestion != nil) || time.Now().After(deadline) {
+		if (snap != nil && snap.Job != nil && snap.Job.Status == protocol.JobNeedsInput &&
+			snap.Execution != nil && snap.Execution.PendingQuestion != nil) || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if snap == nil || snap.Execution == nil || snap.Execution.PendingQuestion == nil ||
-		snap.Execution.PendingQuestion.ID != "q_abc123" {
+		snap.Execution.PendingQuestion.ID != "q_abc123" || snap.Job == nil || snap.Job.Status != protocol.JobNeedsInput {
 		t.Fatalf("needs_input projection = %+v", snap)
 	}
 

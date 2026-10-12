@@ -38,7 +38,7 @@ const GitignoreContent = "/repos/\n/artifacts/release-*/\n"
 // Identity is capsule.json (03 §2.2). Repos pins each task repo's claim-time
 // SHA. The v1 generation/attempt_id lineage fields and base_commit are
 // deleted: capsules still carrying those keys parse fine — encoding/json
-// ignores unknown keys (pinned by TestLooseParseLegacyCapsuleKeys).
+// ignores unknown keys.
 type Identity struct {
 	WorkItemID   string            `json:"work_item_id"`
 	CapsuleID    string            `json:"capsule_id"`
@@ -82,7 +82,7 @@ type WorkItemDoc struct {
 // used by the recovery engine (v1-spec-full §七; discriminator =
 // transcript exists). The v1 attempt_id/generation lineage fields are
 // deleted (v1.5 session model); legacy files carrying those keys parse
-// fine (TestLooseParseLegacyCapsuleKeys).
+// fine (encoding/json ignores unknown keys).
 type Session struct {
 	Harness        string `json:"harness"`         // pi|cc
 	SessionID      string `json:"session_id"`      // harness-native session identifier

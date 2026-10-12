@@ -68,6 +68,3 @@ func TestMappingConfiguredBootReachesWorkspaceValidation(t *testing.T) {
 		t.Fatalf("validation failure %q does not name the mapped workspace", stderr.String())
 	}
 }
-
-// flagTok joins flag-name fragments.
-func flagTok(parts ...string) string { return strings.Join(parts, "") }
