@@ -627,7 +627,7 @@ func (m *AdminManager) PatchProject(idOrName string, req ProjectPatchRequest) (*
 }
 
 // ---------------------------------------------------------------------------
-// Backup (M4) and service-secret rotation (M5)
+// Backup (M4)
 
 // sanitizeFilename keeps a backup name filesystem-safe.
 func sanitizeFilename(s string) string {
