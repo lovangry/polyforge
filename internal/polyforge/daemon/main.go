@@ -53,7 +53,8 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	socket := fs.String("socket", "", "unix socket path (env PF_DAEMON_SOCKET; default /run/polyforge.sock)")
 	server := fs.String("server", "", "aihub base URL (env PF_SERVER)")
 	apiKey := fs.String("api-key", "", "machine aihub api key (env PF_API_KEY)")
-	machineID := fs.String("machine-id", "", "machine identity (env POLYFORGE_MACHINE_ID; default m-<hostname>)")
+	machineID := fs.String("machine-id", "", "daemon id (env POLYFORGE_MACHINE_ID; default m-<hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start")
+	displayName := fs.String("display-name", "", "daemon display name shown by `pf ops status` (env POLYFORGE_DISPLAY_NAME; default hostname)")
 	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
 	piBin := fs.String("pi-bin", "", "harness binary (default pi)")
@@ -146,9 +147,24 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *machineID == "" {
 		*machineID = os.Getenv("POLYFORGE_MACHINE_ID")
 	}
+	// v2 identity: <data-dir>/daemon-id is THE id once written; a flag/env
+	// value that disagrees refuses to start (never silently switch).
+	explicitID := *machineID != ""
 	if *machineID == "" {
 		host, _ := os.Hostname()
 		*machineID = "m-" + strings.ToLower(host)
+	}
+	id, err := ResolveDaemonID(*dataDir, *machineID, explicitID)
+	if err != nil {
+		fmt.Fprintf(stderr, "pf daemon: refusing to start: %v\n", err)
+		return 1
+	}
+	*machineID = id
+	if *displayName == "" {
+		*displayName = os.Getenv("POLYFORGE_DISPLAY_NAME")
+	}
+	if *displayName == "" {
+		*displayName, _ = os.Hostname()
 	}
 	if *workflowsDir == "" {
 		*workflowsDir = "workflows"
@@ -172,6 +188,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	cfg := Config{
 		MachineID:           *machineID,
+		DisplayName:         *displayName,
 		SocketPath:          *socket,
 		Mapping:             shared.Mapping,
 		DataDir:             *dataDir,

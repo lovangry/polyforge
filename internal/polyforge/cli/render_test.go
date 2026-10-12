@@ -242,7 +242,7 @@ func TestGoldenStatus(t *testing.T) {
 	var b bytes.Buffer
 	renderStatus(&b, &s)
 	golden(t, "Status", b.String(),
-		`machine: m1  mode: drain  queue: 1 pending / 2 running / max 2
+		`daemon: m1  mode: drain  queue: 1 pending / 2 running / max 2
 workspaces: /srv/pf-ws
 
 WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  LAST-PROGRESS

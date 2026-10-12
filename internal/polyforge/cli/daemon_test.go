@@ -321,7 +321,7 @@ func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
 	var b bytes.Buffer
 	renderStatus(&b, &s)
 	golden(t, "StatusSessionColumns", b.String(),
-		`machine: m1  mode: interactive  queue: 1 pending / 1 running / max 2
+		`daemon: m1  mode: interactive  queue: 1 pending / 1 running / max 2
 workspaces: /srv/pf-ws
 
 WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  LAST-PROGRESS

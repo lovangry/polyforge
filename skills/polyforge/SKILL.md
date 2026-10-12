@@ -308,6 +308,31 @@ pf [global flags] <verb> [verb flags] [positional args]
   running on this machine — start it (`pf daemon`) or check `--socket`; it is
   not a typed verdict about any work item.
 
+## Chat identity (PF_CHAT_ID)
+
+A chat is one interactive harness conversation. `pf chat init --harness
+claude|pi --harness-session <id>` asks the local daemon for that
+conversation's chat id (`chat_` + random; created on first use, the same id
+on resume) and prints it. `PF_CHAT_ID` is a notification label, not a
+credential; `pf submit` sends it (plus the `PF_USER_ID` owner) so the daemon
+records the job's origin. Step agents never see it. The model does not handle
+it: a harness adapter sets it.
+
+- **Claude Code**: register `hooks/claude-session-start.sh` as a SessionStart
+  hook in `~/.claude/settings.json` (path = this checkout's absolute path):
+
+  ```json
+  {"hooks": {"SessionStart": [{"hooks": [
+    {"type": "command", "command": "/path/to/skills/polyforge/hooks/claude-session-start.sh"}
+  ]}]}}
+  ```
+
+  It appends `export PF_CHAT_ID=<id>` to `$CLAUDE_ENV_FILE` and prints one
+  context line; it is silent when pf or the daemon is unavailable.
+- **pi**: the `extensions/pf-chat.ts` extension is listed in this package's
+  `pi.extensions` manifest; it runs `pf chat init` on session start and
+  prefixes every bash tool call with `PF_CHAT_ID=<id>`.
+
 ## Routing boundaries this skill never crosses
 
 - Never execute, parse or re-drive a workflow — that belongs to the daemon's

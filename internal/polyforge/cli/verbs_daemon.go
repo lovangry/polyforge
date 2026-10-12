@@ -673,7 +673,12 @@ Launch flags (with environment variable and default, where one exists):
   --api-key KEY
       machine aihub api key (env PF_API_KEY)
   --machine-id ID
-      machine identity (env POLYFORGE_MACHINE_ID; default m-<hostname>)
+      daemon id (env POLYFORGE_MACHINE_ID; default m-<hostname>). The id
+      is recorded in <data-dir>/daemon-id on first start and that file
+      wins afterwards; a differing flag/env value refuses to start.
+  --display-name NAME
+      daemon display name shown by pf ops status (env
+      POLYFORGE_DISPLAY_NAME; default hostname)
   --data-dir PATH
       daemon data dir (env POLYFORGE_DATA_DIR)
   --workflows-dir PATH

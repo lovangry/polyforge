@@ -471,7 +471,11 @@ func renderReadThrough(w io.Writer, p *api.ProgressResponse) {
 // job reads as stale — the pilot's 2.7-hour double-blind wedge had no
 // such surface.
 func renderStatus(w io.Writer, s *StatusResponse) {
-	fmt.Fprintf(w, "machine: %s  mode: %s", s.MachineID, s.Mode)
+	fmt.Fprintf(w, "daemon: %s", s.MachineID)
+	if s.DisplayName != "" {
+		fmt.Fprintf(w, " (%s)", s.DisplayName)
+	}
+	fmt.Fprintf(w, "  mode: %s", s.Mode)
 	if s.ShuttingDown {
 		fmt.Fprint(w, "  (shutting down)")
 	}
@@ -483,6 +487,10 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 	wsSet := append([]string(nil), s.Workspaces...)
 	sort.Strings(wsSet)
 	fmt.Fprintf(w, "workspaces: %s\n\n", strings.Join(wsSet, ", "))
+	showOrigin := false
+	for _, j := range s.Jobs {
+		showOrigin = showOrigin || j.Origin != nil
+	}
 	rows := make([][]string, 0, len(s.Jobs))
 	for _, j := range s.Jobs {
 		pid := "-"
@@ -505,9 +513,24 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 		if j.LastProgressAgoSec != nil {
 			progress = mmssAgo(*j.LastProgressAgoSec)
 		}
-		rows = append(rows, []string{j.WorkItemID, j.Status, sess, spawn, pid, question, progress})
+		origin := "-"
+		if j.Origin != nil {
+			origin = j.Origin.Kind
+			if j.Origin.ChatID != "" {
+				origin += ":" + j.Origin.ChatID
+			}
+		}
+		row := []string{j.WorkItemID, j.Status, sess, spawn, pid, question, progress}
+		if showOrigin {
+			row = append(row, origin)
+		}
+		rows = append(rows, row)
 	}
-	printTable(w, []string{"WORK ITEM", "STATUS", "SESSION", "SPAWN", "AGENT PID", "QUESTION", "LAST-PROGRESS"}, rows)
+	head := []string{"WORK ITEM", "STATUS", "SESSION", "SPAWN", "AGENT PID", "QUESTION", "LAST-PROGRESS"}
+	if showOrigin { // legacy records carry none: the column appears only when some job has one
+		head = append(head, "ORIGIN")
+	}
+	printTable(w, head, rows)
 }
 
 // mmssAgo renders whole seconds as the mm:ss staleness figure the

@@ -64,6 +64,8 @@ type statusJob struct {
 	// yet — the CLI renders "-"). UI-noise records never refresh it, so
 	// a wedged-but-chattering job reads as stale, not fresh.
 	LastProgressAgoSec *int64 `json:"last_progress_ago_sec,omitempty"`
+	// Origin is how the job was submitted; absent for legacy records.
+	Origin *runtime.Origin `json:"origin,omitempty"`
 }
 
 type queueStats struct {
@@ -74,7 +76,9 @@ type queueStats struct {
 
 type statusResponse struct {
 	MachineID string `json:"machine_id"`
-	Mode      string `json:"mode"`
+	// DisplayName is the display-only daemon name (default: hostname).
+	DisplayName string `json:"display_name,omitempty"`
+	Mode        string `json:"mode"`
 	// Workspaces is the mapped workspace set (polyforge#113): every
 	// [workspace] path the daemon routes capsules into, in mapping
 	// declaration order. A multi-workspace daemon must never present one
@@ -223,6 +227,7 @@ func (d *Daemon) handler() http.Handler {
 	mux.HandleFunc("POST /mode", d.modeRoute)
 	mux.HandleFunc("POST /batch_submit", d.batchRoute)
 	mux.HandleFunc("POST /shutdown", d.shutdownRoute)
+	mux.HandleFunc("POST /chat/init", d.chatInitRoute)
 	return mux
 }
 
@@ -251,7 +256,8 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
 		var body struct {
-			Priority string `json:"priority"`
+			Priority string     `json:"priority"`
+			Origin   *reqOrigin `json:"origin,omitempty"`
 		}
 		if !decodeBody(w, r, &body) {
 			return
@@ -301,7 +307,7 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		}
 		// Accepted = enqueued; the dispatcher spawns within one tick,
 		// priority-desc against the machine's concurrency cap.
-		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent})
+		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent, Origin: body.Origin.origin()})
 		writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
 	}
 }
@@ -323,7 +329,8 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	wi := r.PathValue("wi")
 	var body struct {
-		Priority string `json:"priority"`
+		Priority string     `json:"priority"`
+		Origin   *reqOrigin `json:"origin,omitempty"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
@@ -358,6 +365,7 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	// canceled" and the recovery lane re-derives at the job counter —
 	// measured exactly that way on the s28 shape). The dispatcher starts
 	// every claim on d.runCtx for the same reason.
+	d.rt.NoteOrigin(canonical, body.Origin.origin())
 	if err := d.rt.StartIntent(d.runCtx, canonical, "claim"); err != nil {
 		writeErrOf(w, err)
 		return
@@ -583,6 +591,7 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 			SpawnN:             ji.SpawnN,
 			SessionFingerprint: ji.SessionFingerprint,
 			AgentPID:           ji.AgentPID,
+			Origin:             ji.Origin,
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID
@@ -603,6 +612,7 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, statusResponse{
 		MachineID:    d.cfg.MachineID,
+		DisplayName:  d.cfg.DisplayName,
 		Mode:         d.modes.Current(),
 		Workspaces:   d.cfg.Mapping.Workspaces(),
 		ShuttingDown: d.modes.ShuttingDown(),
@@ -700,7 +710,8 @@ func (d *Daemon) modeRoute(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) batchRoute(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		WIIDs []string `json:"wi_ids"`
+		WIIDs  []string   `json:"wi_ids"`
+		Origin *reqOrigin `json:"origin,omitempty"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
@@ -743,7 +754,7 @@ func (d *Daemon) batchRoute(w http.ResponseWriter, r *http.Request) {
 		if _, live := d.rt.Info(canonical); live || d.q.IsPending(canonical) {
 			continue
 		}
-		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: priority, Intent: "claim"})
+		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: priority, Intent: "claim", Origin: body.Origin.origin()})
 		submitted = append(submitted, canonical)
 	}
 	writeJSON(w, http.StatusOK, batchResponse{Submitted: len(submitted), WorkItemIDs: submitted})
