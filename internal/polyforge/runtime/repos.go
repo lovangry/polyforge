@@ -152,8 +152,8 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 // a carrier that cannot be read is not evidence there is none.
 //
 // The branch is the clone's checked-out branch when HEAD is symbolic; a
-// clone sourced from a detached-HEAD checkout (locally sourced clones,
-// w079) has none, so the carrier tip lands on the deterministic branch
+// clone sourced from a detached-HEAD checkout (a remote whose HEAD is detached)
+// has none, so the carrier tip lands on the deterministic branch
 // carrierFallbackBranch. Non-destructive by construction: the worktree
 // is a just-created clone with no local state.
 func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, name, dir string) (string, error) {

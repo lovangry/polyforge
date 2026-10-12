@@ -78,7 +78,7 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	rec := &recordingStarter{base: scriptedEngineStarter(sp)}
 	r.cfg.AgentStarter = rec.start
 
-	writeWorkspaceYaml(t, ws, "workflow_defaults:\n  step_kinds:\n    code: [w79/code-a, w79/code-b]\n")
+	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    code: [w79/code-a, w79/code-b]\n")
 	if err := r.Start(context.Background(), "wi_w079rec"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	}
 
 	// The mid-flight edit: the yaml on disk now pins a DIFFERENT list.
-	writeWorkspaceYaml(t, ws, "workflow_defaults:\n  step_kinds:\n    code: [w79/edited-a]\n")
+	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    code: [w79/edited-a]\n")
 
 	// The death → recovery: the relaunch must carry the claim snapshot,
 	// NOT a re-derivation of the edited yaml.
@@ -119,10 +119,9 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 }
 
 // A restart-RECONSTRUCTED job (nil snapshot — the jobFromRecord shape)
-// re-derives the effective lists from the workspace yaml FRESH through
-// the same compose, indexing the CURRENT yaml: the mid-flight-edit
-// restart shape the red S11 scenario pins.
-func TestRecoveryReconstructedJobReDerivesFreshYaml(t *testing.T) {
+// rehydrates the capsule.json audit and never re-reads the yaml: even a
+// yaml now on disk that pins another list, or is invalid, changes nothing.
+func TestRecoveryReconstructedJobRehydratesAuditNotYaml(t *testing.T) {
 	setGitIdentity(t)
 	wfDir, _ := frontmatterBundle(t, w079Frontmatter)
 	sp := &scriptedSpawner{}
@@ -143,59 +142,6 @@ func TestRecoveryReconstructedJobReDerivesFreshYaml(t *testing.T) {
 		t.Fatal(err)
 	}
 	j := seedJob(r, "wi_w079rec2")
-
-	// The materialized claim-era bundle inside the capsule (the compose
-	// keys on the MATERIALIZED frontmatter, never the daemon checkout).
-	bundleDir := filepath.Join(j.capsuleDir, capsule.DirWorkflows, j.bundleName)
-	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bundleDir, "workflow.md"), []byte(w079Frontmatter), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	writeWorkspaceYaml(t, ws, "workflow_defaults:\n  step_kinds:\n    code: [w79/n1, w79/n2]\n")
-	got := r.effectiveCandidatesForRecovery(j)
-	if len(got["fix"]) != 2 || got["fix"][0] != "w79/n1" || got["fix"][1] != "w79/n2" {
-		t.Fatalf("re-derived fix list %v, want the CURRENT yaml's [w79/n1 w79/n2]", got["fix"])
-	}
-	if got["grill"] == nil || got["grill"][0] != "prov/weak-a" {
-		t.Fatalf("re-derived grill list %v, want the bundle weak default (kind spec unlisted)", got["grill"])
-	}
-
-	// The re-derivation is FRESH per recovery: edit the yaml and the
-	// NEXT recovery recomputation indexes the new list.
-	writeWorkspaceYaml(t, ws, "workflow_defaults:\n  step_kinds:\n    code: [w79/edited]\n")
-	got = r.effectiveCandidatesForRecovery(j)
-	if len(got["fix"]) != 1 || got["fix"][0] != "w79/edited" {
-		t.Fatalf("re-derived fix list %v, want the re-read yaml's [w79/edited]", got["fix"])
-	}
-}
-
-// A yaml that fails to re-read at recovery falls back to the
-// capsule.json audit — the claim-time snapshot materialize wrote.
-func TestRecoveryYamlUnreadableFallsBackToAudit(t *testing.T) {
-	setGitIdentity(t)
-	wfDir, _ := frontmatterBundle(t, w079Frontmatter)
-	sp := &scriptedSpawner{}
-	cfg := Config{
-		MachineID:               "m-test",
-		Mapping:                 mappingFor(filepath.Join(t.TempDir(), "ws")),
-		DataDir:                 filepath.Join(t.TempDir(), "data"),
-		AgentStarter:            scriptedEngineStarter(sp),
-		MaxRecoveries:           2,
-		RecoveryStabilityWindow: time.Nanosecond,
-	}
-	toOB := supervise.NewQueue[protocol.RTMsg]()
-	fromOB := supervise.NewQueue[protocol.OBMsg]()
-	r := New(cfg, newFakeHub(), sp, toOB, fromOB)
-	r.cfg.WorkflowsDir = wfDir
-	ws, err := r.cfg.Mapping.WorkspaceFor("proj")
-	if err != nil {
-		t.Fatal(err)
-	}
-	j := seedJob(r, "wi_w079rec3")
-	writeWorkspaceYaml(t, ws, "workflow_defaults: [this, is, not, a, mapping]\n")
 	audit := map[string][]string{
 		"fix":   {"w79/aud-a", "w79/aud-b"},
 		"grill": {"prov/weak-a"},
@@ -207,9 +153,15 @@ func TestRecoveryYamlUnreadableFallsBackToAudit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := r.effectiveCandidatesForRecovery(j)
-	if len(got["fix"]) != 2 || got["fix"][0] != "w79/aud-a" {
-		t.Fatalf("rehydrated fix list %v, want the audit's [w79/aud-a w79/aud-b]", got["fix"])
+	for _, y := range []string{
+		"models:\n  proj:\n    code: [w79/edited]\n",
+		"models:\n  proj:\n    code: [\n", // invalid: recovery must not care
+	} {
+		writeWorkspaceYaml(t, ws, y)
+		got := r.effectiveCandidatesForRecovery(j)
+		if len(got["fix"]) != 2 || got["fix"][0] != "w79/aud-a" || got["fix"][1] != "w79/aud-b" {
+			t.Fatalf("rehydrated fix list %v, want the audit's [w79/aud-a w79/aud-b] regardless of the disk yaml %q", got["fix"], y)
+		}
 	}
 }
 

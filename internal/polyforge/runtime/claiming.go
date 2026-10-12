@@ -25,6 +25,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -193,7 +194,25 @@ func (r *Runtime) resumeClaiming(ctx context.Context) {
 			r.clearClaiming(wi)
 			continue
 		}
-		if err := r.startClaimed(ctx, rec.WorkItemID, rec.SessionID, resp); err != nil {
+		// The claim is already open server-side, so this is the one place
+		// the yaml is read after a claim: an invalid file here
+		// compensates with the D5 blocked end like any post-claim refusal.
+		wcfg, werr := r.LoadWorkspace(resp.WorkItem.ProjectName)
+		if werr != nil {
+			var ae *api.Error
+			note := werr.Error()
+			if errors.As(werr, &ae) && ae.Detail != "" {
+				note = ae.Detail
+			}
+			id := resp.WorkItem.ID
+			if id == "" {
+				id = resp.Claim.WorkItemID
+			}
+			r.abandonClaim(&job{wi: id, sessionID: rec.SessionID}, rec.WorkItemID, werr, note)
+			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused (session ended blocked): %v\n", wi, werr)
+			continue
+		}
+		if err := r.startClaimed(ctx, rec.WorkItemID, rec.SessionID, resp, wcfg); err != nil {
 			// startClaimed already compensated (blocked) and cleared
 			// the entry; the log line is for the operator.
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay start failed (session ended blocked): %v\n", wi, err)

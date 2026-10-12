@@ -17,34 +17,6 @@ package capsule
 
 import "encoding/json"
 
-// WorkspaceYamlAuditDoc is the polyforge#79 audit shape of the parsed
-// `.polyforge.yaml` (projects + workflow_defaults, verbatim — declared
-// repo list order intact, no normalization or redaction). It is the
-// JSON encoding of the same structures the shared strict-schema loader
-// answered, so no second mapping layer exists between the loader and
-// the record.
-type WorkspaceYamlAuditDoc struct {
-	Projects         map[string]WorkspaceProjectAudit `json:"projects,omitempty"`
-	WorkflowDefaults *WorkspaceDefaultsAuditDoc       `json:"workflow_defaults,omitempty"`
-}
-
-// WorkspaceProjectAudit is one project entry of the audited yaml.
-type WorkspaceProjectAudit struct {
-	Repos []WorkspaceRepoAudit `json:"repos"`
-}
-
-// WorkspaceRepoAudit is one repo entry of the audited yaml.
-type WorkspaceRepoAudit struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-}
-
-// WorkspaceDefaultsAuditDoc is the audited yaml's workflow_defaults.
-type WorkspaceDefaultsAuditDoc struct {
-	ModelCandidates []string            `json:"model_candidates,omitempty"`
-	StepKinds       map[string][]string `json:"step_kinds,omitempty"`
-}
-
 // Capsule directory layout (relative to capsule root).
 const (
 	DirAgents       = "agents"        // materialized step-agent definitions
@@ -76,23 +48,12 @@ type Identity struct {
 	Repos        map[string]string `json:"repos"` // repo name -> checked-out SHA at claim
 	CreatedAt    string            `json:"created_at"`
 
-	// WorkspaceYaml is the polyforge#79 audit: the parsed .polyforge.yaml
-	// verbatim (projects + workflow_defaults, declared repo list order
-	// intact). nil (omitted) when the claim carried no yaml — a no-yaml
-	// claim records no yaml audit content, never a fabricated one. Legacy
-	// capsules decode loose: the key is simply absent on old reads.
-	WorkspaceYaml *WorkspaceYamlAuditDoc `json:"workspace_yaml,omitempty"`
 	// EffectiveCandidates is the polyforge#79 audit: the per-step
-	// post-precedence candidate list the claim actually applied (step id
-	// → list; a present-empty list governs and means no switchable
-	// chain). Doubles as the claim-time SNAPSHOT the recovery path
-	// rehydrates from.
+	// post-precedence candidate list the claim actually applied when the
+	// workspace yaml governs the project (step id → list; a present-empty
+	// list governs and means no switchable chain). Doubles as the
+	// claim-time SNAPSHOT the recovery path rehydrates from.
 	EffectiveCandidates map[string][]string `json:"effective_candidates,omitempty"`
-	// RepoSources is the polyforge#79 audit: repo name → the source
-	// actually cloned from (the resolved local checkout path for
-	// yaml-sourced clones, the registry URL for registry clones under a
-	// yaml that governs nothing on the repo side).
-	RepoSources map[string]string `json:"repo_sources,omitempty"`
 }
 
 // WorkItemDoc is runtime-state/work-item.json: the daemon-materialized

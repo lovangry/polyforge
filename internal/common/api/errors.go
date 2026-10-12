@@ -77,26 +77,16 @@ const (
 	// precondition of placement is missing — remediation is config, not
 	// retry).
 	ErrDaemonUnmappedProject = "DAEMON-412"
-	// ErrDaemonWorkspaceYaml is the polyforge#79 claim-time refusal: the
+	// ErrDaemonWorkspaceYaml is the polyforge#79 pre-claim refusal: the
 	// workspace's .polyforge.yaml failed to parse or violated the strict
-	// schema. Raised BEFORE any capsule is created — a precondition of
-	// the claim's materialization is a valid workspace layer (remediation
-	// is fixing the file, not retrying). Same abandonClaim lane as
-	// DAEMON-412: the session ends blocked, the WI stays queued/blocked,
-	// nothing half-materializes.
+	// schema. Raised BEFORE the aihub claim (like DAEMON-412): the work
+	// item stays queued so another machine may take it, no capsule
+	// exists; remediation is fixing the local file, not retrying.
 	ErrDaemonWorkspaceYaml = "DAEMON-414"
-	// ErrDaemonProjectNotListed is the polyforge#79 claim-time drift
-	// refusal: the workspace yaml carries a present `projects` section
-	// but the claimed project is not listed in it. The section is the
-	// authoritative repo inventory — no silent registry fallback is
-	// offered (the DAEMON-412 precedent: silent-ambient behavior is
-	// rejected); remediation is listing the project or removing the
-	// section.
-	ErrDaemonProjectNotListed = "DAEMON-415"
-	ErrDaemonConflict         = "DAEMON-409"
-	ErrDaemonGone             = "DAEMON-410"
-	ErrDaemonSpawnFail        = "DAEMON-507"
-	ErrDaemonShipPreflight    = "DAEMON-512"
+	ErrDaemonConflict      = "DAEMON-409"
+	ErrDaemonGone          = "DAEMON-410"
+	ErrDaemonSpawnFail     = "DAEMON-507"
+	ErrDaemonShipPreflight = "DAEMON-512"
 	// ErrDaemonShipLedger is the polyforge#123 ship-ledger refusal: the
 	// aihub ledger recording failed after (or between) the pushes — the
 	// ledger is accounting, not best-effort, so the ship op fails with the

@@ -7,14 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
-	"github.com/silgrid/polyforge/internal/polyforge/mapping"
-	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // verbs_doctor.go: `pf doctor` — the machine's single health face
@@ -64,7 +61,6 @@ const (
 	docChMapping  = "workspace mapping"
 	docChDirs     = "workspace dirs"
 	docChProjects = "aihub projects"
-	docChFaces    = "release/deploy faces"
 	docChServer   = "server reach"
 	docChSocket   = "daemon socket"
 	docChAuth     = "auth"
@@ -129,7 +125,7 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	cfg, err := LoadConfig(ctx.ConfigPath)
 	if err != nil {
 		add(docChConfig, "fail", err.Error()+" — see the install docs for the migration steps")
-		for _, name := range []string{docChMapping, docChDirs, docChFaces, docChProjects, docChServer, docChSocket, docChAuth} {
+		for _, name := range []string{docChMapping, docChDirs, docChProjects, docChServer, docChSocket, docChAuth} {
 			add(name, "skip", "config-dependent check not run: the config could not be loaded")
 		}
 		return doctorReport{OK: false, Checks: checks}
@@ -166,17 +162,6 @@ func runDoctorChecks(ctx *Context) doctorReport {
 			add(docChDirs, "pass", fmt.Sprintf("all %d mapped workspace(s) exist as directories", len(cfg.Mapping.Workspaces())))
 		}
 	}
-
-	// Release/deploy faces (polyforge#123): per mapped workspace, per yaml
-	// project, per repo — does the local checkout carry the project-owned
-	// release and deploy face files? Absence is the WARN posture (a repo
-	// without .polyforge/release.sh|.md and .polyforge/deploy.sh|.md is
-	// not broken; its releases defer and its deploys are simply not
-	// machine-triggerable), so this check NEVER fails and never flips ok
-	// or the exit code — it names the repos so the operator sees which
-	// checkouts are faceless.
-	status, detail := runDoctorFaces(cfg.Mapping)
-	add(docChFaces, status, detail)
 
 	// Server reach: ANY http answer (even an error status) proves the
 	// server is reachable; only a transport failure is a fail.
@@ -249,103 +234,6 @@ func passOrFail(ok bool) string {
 		return "pass"
 	}
 	return "fail"
-}
-
-// faceReleaseSh, faceReleaseMd, faceDeploySh, faceDeployMd are the four
-// face files a project-owned release/deploy lifecycle lives in (one repo,
-// .polyforge/ inside its checkout): the release face is procedure (the
-// dispatcher executes it), the deploy face is human-triggered procedure
-// (never any automated step). Presence rule: either spelling of a pair
-// counts — the same rule the release dispatcher uses for ownership.
-const (
-	faceReleaseSh = ".polyforge/release.sh"
-	faceReleaseMd = ".polyforge/release.md"
-	faceDeploySh  = ".polyforge/deploy.sh"
-	faceDeployMd  = ".polyforge/deploy.md"
-)
-
-// hasEitherFile answers whether <dir>/<a> or <dir>/<b> exists.
-func hasEitherFile(dir, a, b string) bool {
-	for _, f := range []string{a, b} {
-		if st, err := os.Stat(filepath.Join(dir, f)); err == nil && !st.IsDir() {
-			return true
-		}
-	}
-	return false
-}
-
-// runDoctorFaces resolves every mapped workspace's repos through the
-// workspace yaml (the shared strict-schema loader) and reports, BY NAME,
-// every repo whose local checkout carries neither face file pair. The
-// status vocabulary: pass (every checked repo carries both faces —
-// including the vacuous zero-governed-repos posture: a workspace with no
-// yaml governs no local repos, so there is nothing to miss), warn (some
-// repos miss at least one pair — always warn, never fail), skip (every
-// mapped workspace's yaml is UNREADABLE — the existing skip discipline:
-// not-run, never faked green). A project the yaml does not govern falls
-// back to the aihub registry inventory, which this local check cannot
-// resolve without a hub read — reported in the detail, never invented.
-func runDoctorFaces(mp *mapping.Plan) (string, string) {
-	if mp == nil || mp.Empty() {
-		return "skip", "not run: the mapping is absent"
-	}
-	var faceless []string
-	var ungoverned []string
-	var checked int
-	var broken []string
-	workspaces := mp.Workspaces()
-	for _, ws := range workspaces {
-		cfg, err := workspace.Load(ws)
-		if err != nil {
-			broken = append(broken, fmt.Sprintf("%s unreadable (%v)", ws, err))
-			continue
-		}
-		if cfg == nil {
-			continue // no yaml layer: zero governed repos, nothing to check
-		}
-		for _, project := range mp.Projects() {
-			pws, err := mp.WorkspaceFor(project)
-			if err != nil || pws != ws {
-				continue // not this workspace's project
-			}
-			proj, ok := cfg.Projects[project]
-			if !ok || proj == nil {
-				// The yaml does not govern this project's repos; the local
-				// checkout set would have to come from the aihub registry.
-				ungoverned = append(ungoverned, project)
-				continue
-			}
-			for _, re := range proj.Repos {
-				checked++
-				repoDir := workspace.ResolveRepoSource(ws, re)
-				if st, serr := os.Stat(repoDir); serr != nil || !st.IsDir() {
-					faceless = append(faceless, fmt.Sprintf("%s (checkout %s missing)", re.Name, repoDir))
-					continue
-				}
-				if !hasEitherFile(repoDir, faceReleaseSh, faceReleaseMd) &&
-					!hasEitherFile(repoDir, faceDeploySh, faceDeployMd) {
-					faceless = append(faceless, re.Name)
-				}
-			}
-		}
-	}
-	if len(broken) == len(workspaces) && checked == 0 {
-		return "skip", "not run: no mapped workspace carries a readable " + workspace.FileName + " (" + strings.Join(broken, "; ") + ")"
-	}
-	detail := fmt.Sprintf("%d repo(s) checked for %s|%s and %s|%s", checked, faceReleaseSh, faceReleaseMd, faceDeploySh, faceDeployMd)
-	if len(faceless) > 0 {
-		detail += "; missing both face file pairs (release defers, deploy is not machine-triggerable there): " + strings.Join(faceless, ", ")
-	}
-	if len(ungoverned) > 0 {
-		detail += "; not checked (repos governed by the aihub registry, not the yaml): " + strings.Join(ungoverned, ", ")
-	}
-	if len(broken) > 0 {
-		detail += "; skipped: " + strings.Join(broken, ", ")
-	}
-	if len(faceless) > 0 {
-		return "warn", detail
-	}
-	return "pass", detail
 }
 
 // probeServerReach classifies server reachability.

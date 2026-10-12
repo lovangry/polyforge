@@ -191,3 +191,41 @@ func TestMaxConcurrentCountsJobsStartedOutsideTheQueue(t *testing.T) {
 		t.Fatalf("pending = %d, want 2 queued submits", td.q.LenPending())
 	}
 }
+
+// TestInvalidWorkspaceYamlRefusedBeforeClaim: an invalid .polyforge.yaml
+// makes the manual submit answer DAEMON-414 synchronously and makes
+// auto-pull skip the project — nothing is claimed at the hub either way
+// (the WI stays queued for other machines); fixing the file lets the
+// next wave pull it.
+func TestInvalidWorkspaceYamlRefusedBeforeClaim(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	ws, err := td.cfg.Mapping.WorkspaceFor("proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlPath := filepath.Join(ws, ".polyforge.yaml")
+	if err := os.WriteFile(yamlPath, []byte("workflow_defaults:\n  model_candidates: [\"x\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mkBare(t, td.cfg.GitRemoteBase, "wi_manual")
+	_, cerr := td.client.Claim("wi_manual", "normal")
+	var ae *api.Error
+	if !errors.As(cerr, &ae) || ae.Code != api.ErrDaemonWorkspaceYaml {
+		t.Fatalf("submit over an invalid yaml = %v, want DAEMON-414", cerr)
+	}
+	seedReady(td, t, "wi_a1")
+	if err := td.modes.SetAuto(true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // ~30 drain ticks
+	td.hub.mu.Lock()
+	claims := len(td.hub.claims)
+	td.hub.mu.Unlock()
+	if claims != 0 || liveCount(td) != 0 || td.q.LenPending() != 0 {
+		t.Fatalf("invalid yaml must claim and enqueue nothing: claims=%d live=%d pending=%d", claims, liveCount(td), td.q.LenPending())
+	}
+	if err := os.WriteFile(yamlPath, []byte("models:\n  proj:\n    code: [\"x\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	td.waitLive(t, "wi_a1")
+}

@@ -12,7 +12,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -272,14 +271,16 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 			writeErr(w, api.ErrDaemonConflict, "work item is already queued on this daemon")
 			return
 		}
-		// polyforge#113 placement pre-check, synchronous on the submit
-		// face: the work item's project must be mapped, or the refusal
-		// reaches the operator's CLI (typed DAEMON-412) BEFORE the job is
-		// enqueued and before any capsule or server-side claim state
-		// exists. The dispatcher's runtime-side guard is the backstop.
+		// Pre-claim placement + workspace-yaml check, synchronous on the
+		// submit face: an unmapped project (DAEMON-412) or an invalid
+		// workspace yaml (DAEMON-414) reaches the operator's CLI BEFORE
+		// the job is enqueued and before any capsule or server-side claim
+		// state exists. The runtime's own pre-claim check is the
+		// backstop. A failed probe refuses nothing here (the submit is
+		// durable-queued; the dispatcher retries the probe at Start).
 		if probe, err := d.hub.GetWorkItem(canonical); err == nil && probe != nil && probe.ProjectName != "" {
-			if _, merr := d.cfg.Mapping.WorkspaceFor(probe.ProjectName); merr != nil {
-				writeErr(w, api.ErrDaemonUnmappedProject, fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)", probe.ProjectName))
+			if _, lerr := d.rt.LoadWorkspace(probe.ProjectName); lerr != nil {
+				writeErrOf(w, lerr)
 				return
 			}
 		}

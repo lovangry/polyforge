@@ -1,12 +1,14 @@
 package runtime
 
-// workspace_claim_test.go: the polyforge#79 claim-time yaml lane — the
-// fresh per-claim read, the typed DAEMON-414 refusal BEFORE any capsule
-// state exists, and the no-restart freshness observable (an edit governs
-// the next claim on the SAME runtime instance).
+// workspace_claim_test.go: the polyforge#79 pre-claim yaml lane — the
+// fresh per-claim read, the typed DAEMON-414 refusal BEFORE the aihub
+// claim (no claim call, no capsule, the WI stays queued), and the
+// no-restart freshness observable (an edit governs the next claim on the
+// SAME runtime instance).
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,16 +61,17 @@ func writeWorkspaceYaml(t *testing.T, ws, content string) string {
 	return p
 }
 
-// An invalid .polyforge.yaml refuses the claim with the typed DAEMON-414
-// BEFORE any capsule directory exists: the session ends blocked, the
-// claiming journal settles, no live job remains — and after the operator
-// fixes the file, the NEXT claim on the SAME runtime runs clean (the
-// no-restart freshness observable).
-func TestWorkspaceYamlRefusesClaimBeforeMaterialization(t *testing.T) {
+const w079ValidYaml = "models:\n  proj:\n    default: [a/one]\n"
+
+// An invalid .polyforge.yaml refuses with the typed DAEMON-414 BEFORE the
+// aihub claim: no SessionClaim call, no session end, no capsule, no
+// journal entry, no live job — and after the operator fixes the file, the
+// NEXT claim on the SAME runtime runs clean.
+func TestWorkspaceYamlRefusesBeforeClaim(t *testing.T) {
 	hub := newFakeHub()
 	r, ws, sp := newWorkspaceTestRuntime(t, hub, "proj")
 
-	writeWorkspaceYaml(t, ws, "projects:\n  proj:\n    repos: [\n") // torn
+	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    code: [\n") // torn
 	err := r.Start(context.Background(), "wi_w079ref")
 	if err == nil {
 		t.Fatal("an invalid workspace yaml must refuse the claim")
@@ -80,11 +83,11 @@ func TestWorkspaceYamlRefusesClaimBeforeMaterialization(t *testing.T) {
 	if !strings.Contains(ae.Detail, ".polyforge.yaml") {
 		t.Fatalf("the refusal must name the file, got %q", ae.Detail)
 	}
-	if n := hub.endCount(); n != 1 {
-		t.Fatalf("the refused claim must close the session exactly once, got %d", n)
+	if n := hub.claimCount(); n != 0 {
+		t.Fatalf("the refusal must happen BEFORE the aihub claim, got %d claim calls", n)
 	}
-	if end := hub.lastEnd(); end.Status != api.StatusBlocked || end.Note == "" {
-		t.Fatalf("DAEMON-414 must close blocked with a note, got %+v", end)
+	if n := hub.endCount(); n != 0 {
+		t.Fatalf("nothing was claimed, so nothing may be ended, got %d ends", n)
 	}
 	if _, serr := os.Stat(testCapsuleDir(r, "wi_w079ref")); !os.IsNotExist(serr) {
 		t.Fatalf("the refused claim must materialize nothing (stat: %v)", serr)
@@ -93,23 +96,19 @@ func TestWorkspaceYamlRefusesClaimBeforeMaterialization(t *testing.T) {
 		t.Fatal("a refused claim must leave no live job")
 	}
 	if items := r.loadClaiming(); len(items) != 0 {
-		t.Fatalf("the claiming journal must settle with the refusal, got %+v", items)
+		t.Fatalf("a refusal before the claim must journal nothing, got %+v", items)
 	}
 	if n := sp.callCount(); n != 0 {
 		t.Fatalf("the refusal must derive no agent, got %d spawns", n)
 	}
 
-	// The operator fixes the yaml; the SAME runtime instance serves the
-	// next claim — no restart (the read lives in the claim path).
-	writeWorkspaceYaml(t, ws, "projects:\n  proj:\n    repos: []\n")
+	// The operator fixes the yaml; the SAME runtime serves the next claim.
+	writeWorkspaceYaml(t, ws, w079ValidYaml)
 	if err := r.Start(context.Background(), "wi_w079fix"); err != nil {
 		t.Fatalf("the fixed yaml must let the next claim run: %v", err)
 	}
 	if r.jobOf("wi_w079fix") == nil {
 		t.Fatal("the fixed-yaml claim must run to a live agent")
-	}
-	if n := hub.endCount(); n != 1 {
-		t.Fatalf("the clean claim must not close any session, got %d ends", n)
 	}
 	if err := r.Stop(context.Background(), "wi_w079fix", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -122,15 +121,15 @@ func TestWorkspaceYamlRefusalFamilies(t *testing.T) {
 		name string
 		yaml string
 	}{
-		{"torn", "projects:\n  proj:\n    repos: [\n"},
-		{"unknown top-level key", "project: proj\nprojects:\n  proj:\n    repos: []\n"},
-		{"step_kinds key outside the V8 set", "workflow_defaults:\n  step_kinds:\n    build: [a]\n"},
-		{"project entry without repos", "projects:\n  proj: {}\n"},
-		{"unsafe repo name", "projects:\n  proj:\n    repos:\n      - name: ../esc\n        path: .repo/a\n"},
-		{"absolute repo path", "projects:\n  proj:\n    repos:\n      - name: a\n        path: /tmp/a\n"},
-		{"parent-escaping repo path", "projects:\n  proj:\n    repos:\n      - name: a\n        path: ../a\n"},
-		{"empty model id", "workflow_defaults:\n  model_candidates: [\"\"]\n"},
-		{"duplicate key", "projects:\n  proj:\n    repos: []\n  dup:\n    repos: []\n  dup:\n    repos: []\n"},
+		{"torn", "models:\n  proj:\n    code: [\n"},
+		{"unknown top-level key", "model: x\nmodels:\n  proj:\n    default: [a]\n"},
+		{"retired projects section", "projects:\n  proj:\n    repos: []\n"},
+		{"retired workflow_defaults section", "workflow_defaults:\n  model_candidates: [a]\n"},
+		{"kind outside the V8 set", "models:\n  proj:\n    build: [a]\n"},
+		{"empty project entry", "models:\n  proj:\n"},
+		{"empty model id", "models:\n  proj:\n    default: [\"\"]\n"},
+		{"scalar instead of list", "models:\n  proj:\n    default: a\n"},
+		{"duplicate key", "models:\n  proj:\n    default: [a]\n    default: [b]\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -142,6 +141,9 @@ func TestWorkspaceYamlRefusalFamilies(t *testing.T) {
 			if !ok || ae.Code != api.ErrDaemonWorkspaceYaml {
 				t.Fatalf("expected DAEMON-414 for %s, got %v", c.name, err)
 			}
+			if n := hub.claimCount(); n != 0 {
+				t.Fatalf("%s: refused AFTER a claim (%d claim calls)", c.name, n)
+			}
 			if _, serr := os.Stat(testCapsuleDir(r, "wi_w079fam")); !os.IsNotExist(serr) {
 				t.Fatalf("%s: the refused claim materialized a capsule", c.name)
 			}
@@ -149,7 +151,26 @@ func TestWorkspaceYamlRefusalFamilies(t *testing.T) {
 	}
 }
 
-// A workspace WITHOUT a yaml runs exactly as at HEAD: the claim
+// A failed work-item probe claims nothing: the project (hence the
+// workspace) is unknown, so Start returns the error for the caller to
+// retry.
+func TestProbeFailureClaimsNothing(t *testing.T) {
+	hub := newFakeHub()
+	r, _, _ := newWorkspaceTestRuntime(t, hub, "proj")
+	hub.lookupErr["wi_w079probe"] = errors.New("hub unreachable")
+	err := r.Start(context.Background(), "wi_w079probe")
+	if err == nil || !strings.Contains(err.Error(), "hub unreachable") {
+		t.Fatalf("expected the probe error, got %v", err)
+	}
+	if n := hub.claimCount(); n != 0 {
+		t.Fatalf("a failed probe must not claim, got %d claim calls", n)
+	}
+	if items := r.loadClaiming(); len(items) != 0 {
+		t.Fatalf("a failed probe must journal nothing, got %+v", items)
+	}
+}
+
+// A workspace WITHOUT a yaml runs exactly as before: the claim
 // proceeds, the job carries no yaml snapshot.
 func TestAbsentWorkspaceYamlEqualsToday(t *testing.T) {
 	hub := newFakeHub()
@@ -166,13 +187,9 @@ func TestAbsentWorkspaceYamlEqualsToday(t *testing.T) {
 	}
 	j.mu.Lock()
 	snap := j.workspaceYaml
-	root := j.workspaceRoot
 	j.mu.Unlock()
 	if snap != nil {
 		t.Fatalf("no yaml must answer a nil snapshot, got %+v", snap)
-	}
-	if root != testWorkspace(r) {
-		t.Fatalf("workspace root %q, want the mapped root", root)
 	}
 	if err := r.Stop(context.Background(), "wi_w079abs", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -202,41 +219,61 @@ func TestCommentsOnlyWorkspaceYamlIsAbsentEquivalent(t *testing.T) {
 	}
 }
 
-// The single-lane convergence: a FRESH claim and a RE-CLAIM over a
-// retained paused record both read the yaml on their own claim path — a
-// yaml valid for claim one that is broken for the re-claim refuses it, and
-// vice versa (the re-claim re-enters startClaimed over a paused record
-// once force-end-session returned the WI to queued).
+// A RE-CLAIM over a retained paused record reads the yaml on its own
+// pre-claim path: a yaml broken for the re-claim refuses it before any
+// claim call (the paused record stays), a fixed one proceeds.
 func TestWorkspaceYamlReadOnFreshClaimAndReclaim(t *testing.T) {
 	hub := newFakeHub()
 	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
 
-	writeWorkspaceYaml(t, ws, "projects:\n  proj:\n    repos: []\n")
+	writeWorkspaceYaml(t, ws, w079ValidYaml)
 	if err := r.Start(context.Background(), "wi_w079lane"); err != nil {
 		t.Fatalf("fresh claim: %v", err)
 	}
-	// Park the live job (the only shape a re-claim re-enters startClaimed
-	// from): the operator-pause close retains the record in StatePaused.
 	if err := r.Stop(context.Background(), "wi_w079lane", protocol.FinishPaused); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	hub.forceEnd("wi_w079lane")
-	// The re-claim re-enters startClaimed: it re-reads the yaml — now
-	// broken — and refuses with DAEMON-414.
-	writeWorkspaceYaml(t, ws, "workflow_defaults:\n  step_kinds:\n    bogus: [a]\n")
+	claims := hub.claimCount()
+	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    bogus: [a]\n")
 	terr := r.Start(context.Background(), "wi_w079lane")
-	if terr == nil {
-		t.Fatal("the re-claim must re-read the yaml and refuse on an invalid one")
-	}
 	if ae, ok := terr.(*api.Error); !ok || ae.Code != api.ErrDaemonWorkspaceYaml {
 		t.Fatalf("expected DAEMON-414 on the re-claim, got %v", terr)
 	}
-	// Fixed again: the re-claim proceeds.
-	writeWorkspaceYaml(t, ws, "projects:\n  proj:\n    repos: []\n")
+	if n := hub.claimCount(); n != claims {
+		t.Fatalf("the refused re-claim must not call the hub (claims %d -> %d)", claims, n)
+	}
+	writeWorkspaceYaml(t, ws, w079ValidYaml)
 	if err := r.Start(context.Background(), "wi_w079lane"); err != nil {
 		t.Fatalf("re-claim after the fix: %v", err)
 	}
 	if err := r.Stop(context.Background(), "wi_w079lane", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+// The journal replay is the one place the yaml is read after a claim (the
+// claim is already open server-side): an invalid yaml compensates with the
+// blocked session end and settles the journal.
+func TestReplayWithInvalidYamlCompensatesBlocked(t *testing.T) {
+	hub := newFakeHub()
+	r, ws, sp := newWorkspaceTestRuntime(t, hub, "proj")
+	session := fakeSession("wi_w079rep")
+	if err := r.noteClaiming("wi_w079rep", session, randomKey()); err != nil {
+		t.Fatal(err)
+	}
+	hub.hold("wi_w079rep", session, api.StatusRunning)
+	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    code: [\n")
+
+	r.resumeClaiming(context.Background())
+
+	if end := hub.lastEnd(); end.Status != api.StatusBlocked || end.Note == "" {
+		t.Fatalf("an invalid yaml at replay must end the session blocked with a note, got %+v", end)
+	}
+	if r.jobOf("wi_w079rep") != nil || sp.callCount() != 0 {
+		t.Fatal("the refused replay must start nothing")
+	}
+	if items := r.loadClaiming(); len(items) != 0 {
+		t.Fatalf("the journal must settle, got %+v", items)
 	}
 }

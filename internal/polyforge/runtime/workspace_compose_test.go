@@ -1,7 +1,7 @@
 package runtime
 
-// workspace_compose_test.go: the claim-time compose wiring — the four
-// level precedence runs ONCE per claim over the pinned bundle's
+// workspace_compose_test.go: the claim-time compose wiring — the
+// precedence runs ONCE per claim over the pinned bundle's
 // frontmatter (read from the daemon checkout) and the claim's workspace
 // yaml, and the composed map rides the job.
 
@@ -82,7 +82,7 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 	r := New(cfg, hub, sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 
-	writeWorkspaceYaml(t, ws, "workflow_defaults:\n  step_kinds:\n    code: [w79/code-a, w79/code-b]\n")
+	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    code: [w79/code-a, w79/code-b]\n")
 	if err := r.Start(context.Background(), "wi_w079comp"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

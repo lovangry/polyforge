@@ -1,10 +1,9 @@
 package cli
 
-// file_create_infer_test.go: the polyforge#79 file-create default — the
-// cwd → workspace containment through the expanded [workspace] mapping,
-// the shared strict-schema yaml loader, the single-project default, the
-// ambiguity guards, and the byte-for-byte bypass of an explicit
-// --project.
+// file_create_infer_test.go: the file-create default — the cwd →
+// workspace containment through the expanded cli.toml [workspace]
+// mapping, the single-project default, the ambiguity guards, and the
+// bypass of an explicit --project.
 
 import (
 	"io"
@@ -43,115 +42,68 @@ func runPfInCwd(t *testing.T, cwd string, env map[string]string, args ...string)
 	return runPf(t, env, args...)
 }
 
-// inferFixture builds the shared shape: a fake aihub, a scratch
-// workspace mapped to project "e2e", and (optionally) a workspace yaml.
-func inferFixture(t *testing.T, yaml string) (srvHost string, env map[string]string, ws string) {
+// inferFixture builds the shared shape: a fake aihub and a scratch
+// workspace mapped (cli.toml) to the given projects.
+func inferFixture(t *testing.T, projects ...string) (env map[string]string, ws string) {
 	t.Helper()
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, cannedWI)
 	})
 	ws = t.TempDir()
-	env = withWorkspaceMappingAt(t, ws, "e2e")
+	env = withWorkspaceMappingAt(t, ws, projects...)
 	env["PF_SERVER"] = srv.URL
 	env["PF_API_KEY"] = "k_cli"
-	if yaml != "" {
-		if err := os.WriteFile(filepath.Join(ws, ".polyforge.yaml"), []byte(yaml), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return srv.URL, env, ws
+	return env, ws
 }
 
-// A cwd inside a mapped workspace whose yaml lists exactly one project
-// infers it: the create proceeds as if --project had been passed.
+// A cwd inside a mapped workspace that lists exactly one project infers
+// it: the create proceeds as if --project had been passed.
 func TestFileCreateInferenceSingleProject(t *testing.T) {
-	_, env, ws := inferFixture(t, "projects:\n  e2e:\n    repos: []\n")
-	code, _, stderr := runPfInCwd(t, ws, env, "file", "create", "--goal", "inferred goal")
+	env, ws := inferFixture(t, "e2e")
+	code, _, stderr := runPfInCwd(t, filepath.Join(ws, "sub"), env, "file", "create", "--goal", "inferred goal")
 	if code != 0 {
 		t.Fatalf("inferred create: code=%d stderr=%s", code, stderr)
 	}
+	code, _, stderr = runPfInCwd(t, ws, env, "file", "create", "--goal", "inferred at root")
+	if code != 0 {
+		t.Fatalf("inferred create at the workspace root: code=%d stderr=%s", code, stderr)
+	}
 }
 
-// A multi-project yaml errors asking for --project — no silent pick.
+// A workspace mapping several projects errors asking for --project.
 func TestFileCreateInferenceMultiProjectAsksForFlag(t *testing.T) {
-	_, env, ws := inferFixture(t, "projects:\n  e2e:\n    repos: []\n  second:\n    repos: []\n")
+	env, ws := inferFixture(t, "e2e", "second")
 	code, _, stderr := runPfInCwd(t, ws, env, "file", "create", "--goal", "no pick")
 	if code != 1 {
 		t.Fatalf("multi-project inference: code=%d, want 1", code)
 	}
-	if !strings.Contains(stderr, "--project") {
-		t.Fatalf("multi-project stderr %q does not ask for --project", stderr)
+	if !strings.Contains(stderr, "--project") || !strings.Contains(stderr, "e2e") || !strings.Contains(stderr, "second") {
+		t.Fatalf("multi-project stderr %q must ask for --project and name the projects", stderr)
 	}
 }
 
-// No yaml (and a cwd matching no workspace) keeps the #113 required-flag
-// error byte-for-byte.
-func TestFileCreateInferenceNoYamlKeepsRequiredFlagError(t *testing.T) {
-	_, env, ws := inferFixture(t, "")
-	code, _, stderr := runPfInCwd(t, ws, env, "file", "create", "--goal", "no yaml")
-	if code != 1 {
-		t.Fatalf("no-yaml inference: code=%d, want 1", code)
-	}
-	for _, tok := range []string{"--project is required", "polyforge#113", "[workspace", "doctor"} {
-		if !strings.Contains(stderr, tok) {
-			t.Fatalf("no-yaml stderr %q misses %q (the #113 error must stand verbatim)", stderr, tok)
-		}
-	}
-	// A cwd matching NO mapped workspace: same error.
-	code, _, _ = runPfInCwd(t, t.TempDir(), env, "file", "create", "--goal", "elsewhere")
+// A cwd matching no mapped workspace keeps the #113 required-flag error.
+func TestFileCreateInferenceOutsideKeepsRequiredFlagError(t *testing.T) {
+	env, _ := inferFixture(t, "e2e")
+	code, _, stderr := runPfInCwd(t, t.TempDir(), env, "file", "create", "--goal", "elsewhere")
 	if code != 1 {
 		t.Fatalf("cwd-outside inference: code=%d, want 1", code)
 	}
-}
-
-// A valid workflow-only yaml (no projects section) also defers to the
-// required-flag error — the yaml carries no project inventory to infer
-// from.
-func TestFileCreateInferenceWorkflowOnlyYamlDefers(t *testing.T) {
-	_, env, ws := inferFixture(t, "workflow_defaults:\n  model_candidates: [prov/a]\n")
-	code, _, stderr := runPfInCwd(t, ws, env, "file", "create", "--goal", "workflow only")
-	if code != 1 {
-		t.Fatalf("workflow-only inference: code=%d, want 1", code)
-	}
-	if !strings.Contains(stderr, "--project is required") {
-		t.Fatalf("workflow-only stderr %q misses the required-flag guidance", stderr)
+	for _, tok := range []string{"--project is required", "polyforge#113", "[workspace", "doctor"} {
+		if !strings.Contains(stderr, tok) {
+			t.Fatalf("stderr %q misses %q (the #113 error must stand verbatim)", stderr, tok)
+		}
 	}
 }
 
-// An invalid yaml under inference surfaces the typed error naming the
-// file and the reason — never a silent skip to the required-flag error.
-func TestFileCreateInferenceInvalidYamlSurfacesTypedError(t *testing.T) {
-	_, env, ws := inferFixture(t, "projects:\n  e2e:\n    repos: [\n")
-	code, _, stderr := runPfInCwd(t, ws, env, "file", "create", "--goal", "torn yaml")
-	if code != 1 {
-		t.Fatalf("invalid-yaml inference: code=%d, want 1", code)
-	}
-	if !strings.Contains(stderr, ".polyforge.yaml") {
-		t.Fatalf("invalid-yaml stderr %q does not name the file", stderr)
-	}
-	if strings.Contains(stderr, "--project is required") {
-		t.Fatalf("invalid-yaml stderr %q silently degraded to the required-flag error", stderr)
-	}
-}
-
-// An explicit --project bypasses inference byte-for-byte: it wins over a
-// yaml whose single listed project differs, and an invalid yaml never
-// breaks an explicit create.
+// An explicit --project bypasses inference: it creates even where
+// inference alone would be ambiguous (two projects mapped).
 func TestFileCreateInferenceExplicitProjectBypasses(t *testing.T) {
-	// A valid single-project yaml naming a DIFFERENT project.
-	_, env, ws := inferFixture(t, "projects:\n  second:\n    repos: []\n")
+	env, ws := inferFixture(t, "e2e", "second")
 	code, _, stderr := runPfInCwd(t, ws, env, "file", "create", "--project", "e2e", "--goal", "explicit wins")
 	if code != 0 {
 		t.Fatalf("explicit create over inference: code=%d stderr=%s", code, stderr)
-	}
-	// An invalid yaml never breaks an explicit create (no inference read).
-	if err := os.WriteFile(filepath.Join(ws, ".polyforge.yaml"), []byte("projects:\n  e2e:\n    repos: [\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	code, _, stderr = runPfInCwd(t, ws, env, "file", "create", "--project", "e2e", "--goal", "explicit over torn yaml")
-	if code != 0 {
-		t.Fatalf("explicit create over invalid yaml: code=%d stderr=%s", code, stderr)
 	}
 }
 
