@@ -83,6 +83,20 @@ func splitFrontmatter(content string) (fmBlock, body string, ok bool) {
 	return content[4:end], rest, true
 }
 
+// Body answers the memory body of a stored authority document: the
+// leading frontmatter block and its closing delimiter line are dropped,
+// everything after is returned verbatim (a "---" line inside the body is
+// content, never a second delimiter). A document without a closed
+// frontmatter block is all body.
+func Body(raw []byte) string {
+	_, body, ok := splitFrontmatter(string(raw))
+	if !ok {
+		return body
+	}
+	body = strings.TrimPrefix(body, "\r")
+	return strings.TrimPrefix(body, "\n")
+}
+
 // parseFrontmatterBlock parses a frontmatter block into a generic map.
 func parseFrontmatterBlock(block string) (map[string]any, error) {
 	var raw map[string]any

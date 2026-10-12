@@ -259,8 +259,8 @@ func (c *Client) GetMemory(id string) (json.RawMessage, error) {
 }
 
 // GetMemoryContent reads one memory's body (GET
-// /api/v1/memories/{id}?format=content): the server answers
-// text/markdown, NOT JSON, so the body bytes are returned undecoded — a
+// /api/v1/memories/{id}?format=content): the server answers the bare
+// body (no front-matter) as text/markdown, NOT JSON, so the body bytes are returned undecoded — a
 // JSON decode would refuse plain markdown. Auth and the typed-error
 // envelope are exactly Do's (the shared non-2xx path), and the response
 // is bounded to the same 32 MiB cap.

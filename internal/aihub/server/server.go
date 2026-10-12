@@ -1198,7 +1198,7 @@ func (s *Server) hGetMemory(w http.ResponseWriter, r *http.Request, idn *identit
 	if r.URL.Query().Get("format") == "content" {
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(content)
+		_, _ = w.Write([]byte(memory.Body(content)))
 		return
 	}
 	writeJSON(w, http.StatusOK, e)
@@ -1391,13 +1391,7 @@ func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags [
 // the hit already carries as fields) is skipped, so the excerpt is
 // content, not metadata echo.
 func excerptBody(authority string, n int) string {
-	body := authority
-	if strings.HasPrefix(body, "---\n") {
-		if i := strings.Index(body[4:], "\n---"); i >= 0 {
-			body = strings.TrimLeft(body[4+i+4:], "\n")
-		}
-	}
-	return firstRunes(body, n)
+	return firstRunes(strings.TrimLeft(memory.Body([]byte(authority)), "\n"), n)
 }
 
 // firstRunes answers the first n runes of s (shorter strings pass

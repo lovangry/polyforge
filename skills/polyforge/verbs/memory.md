@@ -23,7 +23,7 @@ id that does not exist or is invisible to the caller answers 404 as the
 typed CLI error. `--max-bytes N` caps the human-mode body at N bytes
 (default 262144 = 256 KiB; `0` = unlimited). The verb makes two requests:
 metadata from the default JSON face (`GET /api/v1/memories/{id}`) and the
-body from `?format=content` — the default JSON response carries NO
+body from `?format=content` (the bare body, no front-matter) — the default JSON response carries NO
 content, only `?format=content` returns the body.
 
 ## Success
