@@ -147,8 +147,8 @@ const (
 )
 
 // Execution is runtime-state/execution.json (03 §4.2): the single source of
-// truth the WI Agent writes and the daemon observes (ruling C3: agent is
-// zero-blocking; observe watches this file).
+// truth the daemon's Go driver writes (the single writer) and observe
+// watches (ruling C3: the agent is zero-blocking).
 type Execution struct {
 	CapsuleID      string           `json:"capsule_id"`
 	WorkItemID     string           `json:"work_item_id"`

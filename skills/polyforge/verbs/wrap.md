@@ -28,6 +28,14 @@ pf wrap <id> --fail   # close with reason=fail  → terminal failure
 No other outcomes exist on this verb. `--fail` is the owner's failed
 verdict; to abandon a blocked work item use `pf cancel <id>`.
 
+A work item the local daemon parked `repair_pending` (capsule missing /
+project unmapped at restart) cannot be wrapped or sealed — there is no
+capsule. `pf wrap <id> --fail` is its failed-verdict give-up: the CLI checks
+with YOUR api key that you are the reporter, a maintainer or an admin, then
+the daemon ends the kept session (verdict `failed`), drops the parked record
+and writes `repair_abandoned`. A plain `pf wrap <id>` (success) is refused
+with `DAEMON-409` — fix the cause and `pf resume <id>`, or give up.
+
 ## Success
 
 Human mode: `wrap requested for <id>` (or `fail requested for <id>`) plus
@@ -43,8 +51,9 @@ wrap answers the graceful `already_terminal` shape, not an error.
 |---|---|---|
 | `DAEMON-404` | No local job and the work item is not blocked or terminal on the server | It is not running here — check observe; if it runs elsewhere, wrap it there. |
 | (no code) `the workflow is parked blocked …` | A close of a workflow parked blocked on an incomplete result (polyforge#116): a `--fail` close is the §6.4 owner's terminate verdict: the CLI lands it at the hub's terminate-blocked door with YOUR api key (reporter / maintainer / admin; the daemon is not involved) and it ends `failed`; a plain `wrap` (success) or a `pause` of a parked workflow is refused — a parked workflow never completed, so there is nothing to seal | Use `pf resume <id>` to continue it, or `pf cancel <id>` to abandon it; `pf wrap <id> --fail` records the owner's failed verdict on the parked workflow (it is not the abandon verb). |
-| `DAEMON-409` | A close is already in progress for this job — another pause/wrap, or a mid-recovery state | Wait for the in-flight close to settle, then observe; the work item is being closed exactly once either way. |
+| `DAEMON-409` | A close is already in progress for this job — another pause/wrap, or a mid-recovery state; or the work item is parked `repair_pending` and a plain wrap/pause was asked | Wait for the in-flight close to settle, then observe; the work item is being closed exactly once either way. |
 | `CORE-*` passthrough (e.g. `CORE-403`, `CORE-409`) | The server-side end-generation was refused | The typed Core verdict arrives verbatim — typically the generation is no longer yours to end; act per its detail. |
+| `DAEMON-517` | Not from wrap itself: the work item is parked `repair_pending` (see `pf resume`) | Restore the capsule or mapping and `pf resume <id>`, or give up with `pf wrap <id> --fail` / `pf cancel <id>`. |
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |
 | `dial unix …` | Daemon not running | Nothing is executing here — start the daemon or check `--socket`. |
 

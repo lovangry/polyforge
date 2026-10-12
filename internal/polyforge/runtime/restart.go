@@ -42,6 +42,18 @@ package runtime
 //	  drop the record: restart must NOT auto-resume it.
 //	aihub unreachable → keep the record, try again on the next restart —
 //	  never guess a verdict.
+//
+// A mid-flight record whose capsule directory is missing, or whose project
+// fell out of the [workspace] mapping, is NOT a startup failure (v2-converge
+// §6): that ONE work item parks repair_pending (parkRepair — the record and
+// the session are kept, no hub transition, a capsule_missing /
+// project_unmapped event names the path or project and the fix), the daemon
+// starts and every other work item reconciles as above. The owner's moves on
+// a parked WI: fix the cause and `pf resume` (RepairResume continues the SAME
+// session in place, retried on every daemon start too), or give up with
+// `pf cancel` / `pf wrap --fail` (AbandonRepair ends the session canceled /
+// failed). An end_pending record (a bounded-fail verdict the hub has not yet
+// heard) is retried first, needing no capsule.
 
 import (
 	"context"
@@ -59,29 +71,32 @@ import (
 // workspace — the operator has not moved it to the new base (or it was
 // lost). The daemon never rebuilds such a capsule from the remote: the
 // capsule git chain IS the revision chain, and a re-clone would silently
-// discard unpublished local state. Remediation is manual: restore the
-// capsule directory under <workspace>/capsules/<wi_id>, then restart.
+// discard unpublished local state. At restart it parks ONLY that work item
+// repair_pending (v2-converge §6; it is not a startup failure). Remediation
+// is manual: restore the capsule directory under <workspace>/capsules/<wi_id>,
+// then `pf resume <wi>` (or restart the daemon).
 type MissingCapsuleError struct {
 	WI  string
 	Dir string
 }
 
 func (e *MissingCapsuleError) Error() string {
-	return fmt.Sprintf("work item %s: mid-flight capsule missing at %s — it is NOT recoverable from the remote (unpublished local state would be lost); restore the capsule to that path manually, then restart the daemon", e.WI, e.Dir)
+	return fmt.Sprintf("work item %s: mid-flight capsule missing at %s — it is NOT recoverable from the remote (unpublished local state would be lost); restore the capsule to that path manually, then `pf resume %s` (or restart the daemon); or give up with `pf cancel %s`", e.WI, e.Dir, e.WI, e.WI)
 }
 
 // UnmappedMidflightError is the #113 mid-flight failure posture: a
 // recorded work item's project has no workspace in the CURRENT mapping
 // (the operator's config edit dropped its section). The capsule is NOT
-// relocated — the operator re-adds the workspace section, then restarts;
-// the existing no-rebuild rule stands.
+// relocated; at restart ONLY that work item parks repair_pending (v2-converge
+// §6) — the operator re-adds the workspace section, then `pf resume <wi>` (or
+// restarts); the existing no-rebuild rule stands.
 type UnmappedMidflightError struct {
 	WI      string
 	Project string
 }
 
 func (e *UnmappedMidflightError) Error() string {
-	return fmt.Sprintf("work item %s: mid-flight project %q is not in the [workspace] mapping — the capsule is NOT relocated and the work item is not recoverable until its workspace is re-added to the mapping in the config, then the daemon is restarted (`pf doctor` checks the mapping)", e.WI, e.Project)
+	return fmt.Sprintf("work item %s: mid-flight project %q is not in the [workspace] mapping — the capsule is NOT relocated and the work item is not recoverable until its workspace is re-added to the mapping in the config, then `pf resume %s` (or restart the daemon) (`pf doctor` checks the mapping)", e.WI, e.Project, e.WI)
 }
 
 // requireMidflightCapsule enforces the no-silent-rebuild contract for a

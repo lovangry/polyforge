@@ -1131,7 +1131,7 @@ func (s *Server) machinesStaleAfter() time.Duration {
 // machineStatus is one machines read-face row: the stored liveness
 // projection plus the server-computed stale boolean and age. An
 // unparseable last_heartbeat_at reports stale=false with no age —
-// "cannot judge" is not "dead" (gate-metrics reports it the same way).
+// "cannot judge" is not "dead".
 type machineStatus struct {
 	ID                  string   `json:"id"`
 	UserID              string   `json:"user_id"`

@@ -53,6 +53,20 @@ A blocked workflow must never answer the pause copy, and a plain claim
 NOT_CLAIMABLE`) — the owner's moves go through this door, not through the
 claim gate.
 
+## Door 3 — a work item parked `repair_pending` on THIS daemon
+
+After a daemon restart a work item whose capsule directory is missing, or
+whose project is no longer in the `[workspace]` mapping, parks
+`repair_pending`: the session is kept, the daemon starts normally, the other
+work items recover, and a `capsule_missing` / `project_unmapped` event names
+the path or project and the fix. Restore the directory (or re-add the
+project), then `pf resume <id>`: the daemon re-checks and continues the SAME
+session in place — never a re-claim, nothing is rebuilt from the remote. A
+`paused` work item has its `clean_pause` cleared first. Still broken answers
+`DAEMON-517` (path in the detail) or `DAEMON-412` (project unmapped) and the
+work item stays parked. To give up instead: `pf cancel <id>` or
+`pf wrap <id> --fail` (see their fragments).
+
 ## Triggers
 
 - EN: resume it / continue it / continue the paused one / it parked blocked,
@@ -80,7 +94,9 @@ refused before anything else happens.
 | `DAEMON-409` | The work item is already active or queued on this daemon, or drain mode rejects the resume | Observe to see the running attempt; in drain mode leave drain first. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | Graceful shutdown in progress | Wait for restart, then resume. |
 | `AUTH-403` (from the resume door) | The caller is not the work item's reporter, a project maintainer or an admin | Ask the task owner or a maintainer to continue it. |
-| `DAEMON-517` | The work item is parked `repair_pending` on this daemon (restart found its capsule missing) and the capsule is still missing | Restore the capsule directory named in the detail (the session is kept), then `pf resume` again. |
+| `DAEMON-517` | The work item is parked `repair_pending` on this daemon (restart found its capsule missing) and the capsule is still missing | Restore the capsule directory named in the detail (the session is kept), then `pf resume` again; or give up with `pf cancel <id>`. |
+| `DAEMON-412` | Parked `repair_pending` because its project is not in the `[workspace]` mapping, or a submit/claim for an unmapped project | Re-add the project to a `[workspace."<path>"]` section (`pf doctor` checks it), then `pf resume`. |
+| `DAEMON-516` | The claim behind the resume could not clone the capsule for a work item with published progress; a local init would restart the workflow at step 1, so it is refused and the claim returns to blocked | Fix aihub reachability / credentials, then `pf resume` again. |
 | `DAEMON-518` | A different daemon than the sealing one claimed the continue and the aihub capsule head is not the sealed head | Continue it on the machine that sealed it, or abandon with `pf cancel <id>`. |
 | `CORE-409 NOT_BLOCKED` | The resume door on a work item that is no longer blocked | The state moved — check `pf queue`/`pf observe`; a paused WI unpauses with this same verb. |
 | `CORE-409 NOT_CLAIMABLE` (from the resume door) | The blocked WI still carries a session (a half-settled close) | Nobody may resume it until the holder settles — check the holder daemon or take over as admin. |

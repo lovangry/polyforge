@@ -3,6 +3,7 @@
 > 状态：**r3，owner 裁决已全部纳入，待审阅**（2026-10-12）。
 > 来源：2026-10-12 owner 与 review 会话的完整讨论；r2 吸收了一次独立深度审查（25 个漏洞 + 历史回归对照，附录 A/B），owner 已同意其 18 条修补默认值。
 > 本文取代的范围：04 §6.2 监督车道、v1.5-session-model 中 watch/adoption 相关描述、`skills/polyforge/scripts/watch.sh`。
+> 落地进度（集成分支 `v2/converge`）：见第 8 节状态列、第 10 节映射与文末「已知缺口」；监督重写（第 2 节、`pf watch` 进展字段）在另一分支进行。
 > 落地方式：**快速落地**——直接切换到新设计，不走"新旧并行观察 → 再删旧"的分阶段迁移（owner 2026-10-12）。
 
 ---
@@ -223,7 +224,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 **原则**：session 是唯一的锁；`execution.json` 是唯一的进度账本；推到 aihub git 才算保存；**绝不悄悄从远端重建本地现场**（#103）。
 
 **已定**
-- 某 WI 的 capsule 在重启时缺失 / 项目未映射：**只该 WI 进入"待修复"**——本地标记、**session 保留**、写明原因并发决策事件；daemon 照常启动、其余 WI 照常恢复。人恢复目录 / 补映射后，由**同一 session 原地续跑**（不走重新领取，避免隔离 + 克隆把人刚恢复的本地现场丢掉）。人也可选择"放弃"。
+- 某 WI 的 capsule 在重启时缺失 / 项目未映射：**只该 WI 进入"待修复"**——本地标记、**session 保留**、写明原因并发决策事件；daemon 照常启动、其余 WI 照常恢复。人恢复目录 / 补映射后，由**同一 session 原地续跑**（不走重新领取，避免隔离 + 克隆把人刚恢复的本地现场丢掉）。人也可选择"放弃"：`pf cancel <wi>` / `pf wrap --fail <wi>` 先用**人自己的 key** 调 aihub 只读授权探针（`GET /work-items/{id}/close-auth`：负责人 / maintainer / admin），再由 daemon 用保存的 session secret 结束 session（`canceled` / `failed`；失败走 end_pending 持续重试），丢弃待修复记录并写 `repair_abandoned` 事件。
 - **不加租约**（保留 v1.5 裁决：领取永不驱逐活着的持有者，接管是单独的特权操作）。改为 WI 级"失联"提示：**WI 失联 = 其持有 daemon 的心跳超时（统一一个阈值，替代 aihub 展示层的 5 分钟与本文早先的 15 分钟两套），或该 WI 从该 daemon 心跳上报的在跑列表中消失**；在 `pf queue`/`pf watch` 提示"可接管"并发事件。
 - 同一步失败计数上限（2.3）；driver 异常退出界（2.3）。
 
@@ -251,11 +252,11 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 | 档 | 内容 | 状态 |
 |---|---|---|
-| 一（直接删） | `v0/`（先打 tag，迁移 workflow digest 测试向量、改 S8 测试）；根目录 `fakepi` 二进制；deadcode 函数（不含 `EffectiveModel`/`PolicyFor`）；旧答案缓存 `observe/answers.go`+`answerfile.go`；`tools/gate-metrics`、`tools/capsule-audit.go` | 待执行 |
-| 二（#106 残骸） | flush 车道全套、recall/remember 代理路由、step 进程 stdio 控制通道、`PF_DAEMON_SOCKET`、`agents/` 布局兼容（#136）；步骤文本旧协议（#137）；`PF_AGENT_ROLE`（#81，step 不加载 skill，无读者；skill 中对应的角色路由段落一并删除） | 待执行 |
-| 三（改逻辑，随本设计） | supervisor 猜测型车道（hang/idle/probe/wall/turn_duration/工具豁免/问题豁免/ack veto）→ 2.3 规则（**M4 重验保留**）；watch.sh → `pf watch`；三模式 → 第 5 节 | 随落地 |
-| 四（待定） | takeover/adopt-session 简化（先验证"结束会话后重新领取能从断点继续"）；心跳保留并修权限漏洞 | 待验证 |
-| 已完成 | release-intent 门禁（#139，分支 `fix/139-drop-release-intent-gate`，commit a159c8c） | 待合并部署 |
+| 一（直接删） | `v0/`（已打 tag `v0-archive`，workflow digest 测试向量已迁入活测试）；根目录 `fakepi` 二进制；旧答案缓存 `observe/answers.go`+`answerfile.go`；`tools/gate-metrics`、`tools/capsule-audit.go` | **集成分支已完成**（`3a036b9`、`90d95bf`、`34fdf86`）；deadcode 函数清扫**未做**（不含 `EffectiveModel`/`PolicyFor`） |
+| 二（#106 残骸） | flush 车道全套、answer 缓存/ledger、recall/remember 代理路由、step 进程 stdio 控制通道、`PF_DAEMON_SOCKET`（**仅作为 step 环境变量**删除；CLI/daemon 的 `--socket`/`PF_DAEMON_SOCKET` 是用户面配置，保留）、`PF_AGENT_ROLE`（#81）；步骤文本旧协议（#137） | **集成分支已完成**（`34fdf86`、`5f4fc3c`、`4c4564f`）；`agents/` 布局兼容（#136）**未单独核对** |
+| 三（改逻辑，随本设计） | supervisor 猜测型车道（hang/idle/probe/wall/turn_duration/工具豁免/问题豁免/ack veto）→ 2.3 规则（**M4 重验保留**）；watch.sh → `pf watch`；三模式 → 第 5 节 | `pf watch`（Go）、watch.sh / watch-probe 删除：**已完成**（`f642e06`、`c01bd94`）；supervisor 车道重写：**进行中（另一分支）**；三模式简化：**未做** |
+| 四（待定） | takeover/adopt-session 简化（先验证"结束会话后重新领取能从断点继续"）；心跳保留并修权限漏洞 | 待验证（未动） |
+| 已完成 | release-intent 门禁（#139，commit a159c8c）；driver 机械保证（needs_input 校验、仅 feature-full grill-review 的 `requires_human_answer`、V4 command_evidence 门禁，`f00b398`）；重新领取两个 bug（git-dir 隔离、克隆失败拒绝 InitLocal / DAEMON-516）；身份模型（daemon-id 文件、`pf chat init`、`PF_CHAT_ID`、origin）；持久化提交队列 + 待修复停放 + `pf resume` 续跑（DAEMON-517）+ `daemon_restarted`/`submit_*` 事件；bounded-fail 杀树 + 推送、end_pending 重试、隔离原子性、继续/放弃走人的 key（`pf resume`/`pf cancel`/`pf wrap --fail`）、`unblock` 动词移除、blocked 封存跨 daemon 校验（DAEMON-518）；待修复 WI 的放弃路径；孤儿 step 进程回收；`atomicWrite` 修复 | 集成分支已完成，待合并部署 |
 | 迁移代码 | v0→v1 迁移（约 4.8k 行）：观察期至 2026-10-17 后打 tag 删除 | 定时 |
 
 ## 9. 快速落地顺序
@@ -282,12 +283,12 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | #102 | 已取消（残留） |
 | #87、#88 | 被已失联的 `cli-opencode` 持有自 10-06；**保留至"失联提示 + 接管"落地后再清理**（已定） |
 | #122 | 由 #137/#138/#135 与 3.2 的唤醒约束修复后复现验证关闭 |
-| #139 | 由门禁删除分支解决 |
-| #136、#137、#138 | 归入第 9 节 1、7 |
-| #135 | 第 9 节 8；在其之前由 3.2 的安全约束兜底 |
+| #139 | 由门禁删除分支解决（已落在集成分支） |
+| #136、#137、#138 | 归入第 9 节 1、7；集成分支已落：#137（步骤文本，`5f4fc3c`）、#138（driver 人工确认保证，`f00b398`）、#136 的 flush/stdio/`PF_AGENT_ROLE` 部分（`34fdf86`）；`agents/` 布局兼容未单独核对 |
+| #135 | 第 9 节 8；在其之前由 3.2 的安全约束兜底（见文末「已知缺口」(b)） |
 | #84 | 重要性上升：drain 与跨机器回答的前提；仍冻结，范围待改写 |
 | #120 | 已解冻 |
-| #130（执行 #126）、#134（执行 #133） | owner 已于 2026-10-12 暂停（paused，进度已推到 aihub）；待第 9 节步骤 1 的重新领取 bug 修复后再 resume；#134 的 **epic/task 概念保留**（已定） |
+| #130（执行 #126）、#134（执行 #133） | owner 已于 2026-10-12 暂停（paused，进度已推到 aihub）；重新领取 bug 已在集成分支修复（git-dir 隔离、克隆失败 DAEMON-516），**部署后**再 resume；#134 的 **epic/task 概念保留**（已定） |
 | #71、#73、#74、#118、#132、#133 | 不受影响 |
 | #78、#121、#125、#126、#128 | 继续冻结 |
 
@@ -362,3 +363,11 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | #92 孙进程持管道 | 组杀不变 |
 | #107 信封拒绝 | 进程内重试不变，不计入失败计数 |
 | watch 四次修补 | Go 实现、不调模型、进展不进上下文 |
+
+---
+
+## 附录 C：已知缺口（集成分支，2026-10-12）
+
+- **(a) bundle digest 描述与代码不一致**：01 §4.5 描述的是 RFC 8785 canonical-JSON bundle digest，但在线的 `Digest` 实现是"路径 + sha + 长度"拼接。**以代码为准**（`internal/common/workflow`，golden 向量在活测试中），01 §4.5 待更正。
+- **(b) 人工确认保证只约束诚实的 agent，直到 #135 落地**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证，但不可信的 step agent 仍可写 capsule、可触达 daemon 的 UDS socket，从而绕过。真正的隔离是 #135（第 9 节 8）。
+- **(c) `pf watch` 进展字段待监督重写**：命令、最近文件、工具调用数等进展字段依赖 driver ↔ supervisor 契约（第 2.2 节）；目前 `pf watch` 只提供状态、当前步骤及其时长与事件，上述字段随监督重写分支落地。
