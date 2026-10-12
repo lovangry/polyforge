@@ -1,6 +1,6 @@
 ---
 name: polyforge
-description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 12 routing verbs (file, queue, cancel, recall, remember, submit, observe, answer, pause, resume, wrap, ops) or the ship delivery bridge, each carried by a fragment under verbs/; data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
+description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, observe, answer, pause, resume, wrap, ops) or the ship delivery bridge, each carried by a fragment under verbs/; data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
 license: proprietary
 compatibility:
   harnesses: [pi, claude]
@@ -9,12 +9,12 @@ compatibility:
 # polyforge routing skill
 
 You are the routing layer of a user's harness session. Your whole job: read the
-user's request, decide which of the 12 routing verbs it is (or whether it is
+user's request, decide which of the 13 routing verbs it is (or whether it is
 the `ship` delivery bridge), and run the `pf` CLI verb that carries it.
 Nothing else. The split between the target faces is fixed (the v1
 architecture's routing table):
 
-- **Data-plane verbs** (`file`, `queue`, `cancel`, `recall`, `remember`): pure
+- **Data-plane verbs** (`file`, `queue`, `cancel`, `recall`, `remember`, `memory`): pure
   Core data reads/writes that do not touch any execution scene. The `pf` CLI
   talks HTTP **direct to AIHub** (single port, `Authorization: Bearer
   <api_key>`); the daemon is not involved.
@@ -25,7 +25,7 @@ architecture's routing table):
   route into its Runtime (lifecycle) and Observe (supervision) modules.
 - **The delivery bridge** (`ship`): pushes an already-closed WI's sealed
   capsule commits to git origin — also the local daemon's unix-socket face,
-  but not one of the 12 routing verbs; it is the step after `wrap`.
+  but not one of the 13 routing verbs; it is the step after `wrap`.
 
 Direct connection does not bypass any permission boundary: the `pf` CLI passes
 through the same AIHub authentication as any other HTTP client, and daemon
@@ -62,6 +62,7 @@ accepts an id.
 | cancel it / drop it / abandon it / don't want it anymore / 不要了 / 取消这个票 / 作废 / 放弃 | `verbs/cancel.md` | AIHub |
 | how did we handle X before / any past experience on X / 之前怎么处理过 X / 查一下记忆 | `verbs/recall.md` | AIHub |
 | remember this / save this lesson / note it down / 记下来 / 存个经验 / 写入项目记忆 | `verbs/remember.md` | AIHub |
+| show that memory's full body / open the stored note / 看看记忆正文 / 打开那条记忆 | `verbs/memory.md` | AIHub |
 | run it / submit it / start this work item / execute / 跑起来 / 执行这个 WI / 提交执行 | `verbs/submit.md` | daemon |
 | take over a stuck work item / its machine is dead / force takeover / 接管 / 强制接管 | `verbs/ops.md` (`pf ops end-session`, then `verbs/submit.md`) | AIHub + daemon |
 | how's it going / show progress / what step is it on / watch this one / follow it / 看看进度 / 跑到哪了 / 观察一下 / 盯着 | `verbs/observe.md` (`pf watch`) | daemon |

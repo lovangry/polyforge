@@ -16,6 +16,7 @@ binary's help faces print them; `pf help` lists the full registry and
 | cancel | `verbs/cancel.md` | `pf cancel <id>` — cancel (abandon) a queued/paused/blocked work item, or one parked repair_pending on this daemon |
 | recall | `verbs/recall.md` | `pf recall -project P <query>` — search project memories (`-type`, `-tags`, `-limit`) |
 | remember | `verbs/remember.md` | `pf remember -project P -type <T> <content>` — store a memory (`-title`, `-tags`, `-visibility`, `-work-item`) |
+| memory | `verbs/memory.md` | `pf memory show <id>` — one memory's metadata header + full body (`-max-bytes N`, `0` = unlimited; `--json` = metadata verbatim + CLI-added `content`) |
 
 ## Execution-plane verbs (local daemon unix socket)
 
