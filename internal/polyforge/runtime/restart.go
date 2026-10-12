@@ -170,9 +170,7 @@ func (r *Runtime) restartRelease(rec *jobRecord, currentFingerprint string) {
 	if j == nil {
 		j = jobFromRecord(rec)
 	}
-	if j.agentPID > 0 {
-		r.killAgentTree(j)
-	}
+	r.killAgentTree(j) // pid 0 (driver lane) reaps via journal + env marker
 	if err := quarantineCapsule(j.capsuleDir, j.git.GitDir); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: release quarantine failed (scene left in place): %v\n", rec.WorkItemID, err)
 	}
@@ -222,11 +220,9 @@ func (r *Runtime) restartDrop(rec *jobRecord) {
 	if j == nil {
 		j = jobFromRecord(rec)
 	}
-	if j.agentPID > 0 {
-		// dead or alive: either way the tree's orphans must not survive
-		// (killAgentTree's identity guard refuses to signal a reused pid)
-		r.killAgentTree(j)
-	}
+	// dead or alive: either way the tree's orphans must not survive
+	// (killAgentTree's identity guard refuses to signal a reused pid)
+	r.killAgentTree(j)
 	r.forgetRecord(rec)
 }
 
@@ -274,6 +270,8 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job, rec
 	if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 		return err
 	}
+	// crash orphans die BEFORE anything is re-dispatched (single writer)
+	r.reapOrphans(rec.WorkItemID, j.capsuleDir)
 	state, _ := j.snapshot()
 	if state == StateSealing {
 		// finish the interrupted close — the sealed reason passes through
@@ -461,6 +459,10 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 		// revival, no kill, no quarantine; the record is kept so the
 		// next boot re-checks (the unblock path re-claims through the
 		// normal start, which quarantines the old scene itself).
+		// Crash orphans are the one exception: no live step process
+		// is legitimate for a blocked WI, and they would keep writing
+		// the scene — reap only (no session action).
+		r.reapOrphans(rec.WorkItemID, rec.CapsuleDir)
 	case api.StatusQueued:
 		// back in the pool: our claim is gone. A local tree (if any)
 		// is a writer of a session nobody holds — collect it and drop

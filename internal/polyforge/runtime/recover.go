@@ -509,9 +509,14 @@ func (r *Runtime) killAgentTree(j *job) {
 		if err := h.Terminate(cleanupBound); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: driver handle teardown incomplete: %v\n", j.wi, err)
 		}
+		r.reapOrphans(j.wi, j.capsuleDir)
 		return
 	}
 	if pid <= 0 {
+		// driver job with no live handle (the daemon crashed and the
+		// record carries pid 0): the journal + env-marker reap is the
+		// only way to find the step processes.
+		r.reapOrphans(j.wi, j.capsuleDir)
 		return
 	}
 	rep, err := Cleanup(CleanupTarget{
