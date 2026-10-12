@@ -266,6 +266,7 @@ func (m *Monitor) run() {
 	for {
 		select {
 		case <-m.stopCh:
+			m.awaitPushInFlight()
 			return
 		case at := <-m.rtCh:
 			m.onRecovered(at)
@@ -280,6 +281,25 @@ func (m *Monitor) run() {
 		case res := <-m.verifyDone:
 			m.onVerifyResult(res)
 		}
+	}
+}
+
+// awaitPushInFlight blocks the monitor's exit until a still-running
+// commit+push sub-goroutine has finished (it is bounded by its own
+// PushBound context): "the monitor is gone" must mean no writer of the
+// WI's git repositories is left behind it. The result is dropped — the
+// monitor is stopping.
+func (m *Monitor) awaitPushInFlight() {
+	if len(m.gate) == 0 {
+		return
+	}
+	bound := m.cfg.PushBound
+	if bound <= 0 {
+		bound = time.Minute
+	}
+	select {
+	case <-m.pushDone:
+	case <-time.After(bound + 5*time.Second):
 	}
 }
 
