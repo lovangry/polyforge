@@ -92,26 +92,8 @@ Do not route "continue / go on" of a **running** work item here — that is
 the WI) are not exposed on this verb: `pf cancel <id>` abandons a blocked
 work item, and `pf wrap --fail <id>` records the owner's failed verdict.
 
-## Watch lane: re-arm the watcher
+## Watching after a resume
 
-When this session interactively resumes a work item it had been watching — `pf resume` after
-a pause, the owner-resume of a parked workflow, or any resume of a WI this
-session previously armed whose watcher is no longer running — RE-ARM the
-session-side watcher: copy `skills/polyforge/scripts/watch.sh` verbatim to
-`<workspace>/.polyforge/watchers/<wi>.sh` with the three header lines
-(`# pf-watcher wi: <wi id>` / `# pf-watcher session_id: <YOUR session's
-harness session id>` / `# pf-watcher armed_at: <RFC3339 UTC>`) above the
-copied body, and start the copy as a harness background task.
-
-At session start, scan `<workspace>/.polyforge/watchers/` and sort by the
-`pf-watcher session_id:` header: YOUR OWN non-running watchers (header
-session_id = yours) re-arm after one catch-up check (read the `<wi>.log`
-tail for what was missed). A script headed with a DIFFERENT session's id is
-not yours — never steal it. For a Predecessor (non-live-session) script,
-the only path to ownership is the watch lane's ask-to-adopt channel: ask
-the owner (one batched prompt covers several scripts), and only on the
-owner's explicit consent rewrite the script's `session_id` header line to
-your own and refresh its `armed_at` line, then re-arm it — an adopted
-binding carries the full bound-only presentation duty. A refusal leaves the
-script untouched and you unbound. Full procedure: the watch-lane section of
-`SKILL.md`.
+`pf resume` subscribes the resuming chat to the work item like `pf submit`
+does; nothing to re-arm. If the chat's watcher is not running, start it (see
+the `pf watch` section of `SKILL.md`).
