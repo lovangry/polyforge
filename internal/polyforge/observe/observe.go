@@ -1,12 +1,12 @@
 package observe
 
-// observe.go: the Observe hub — the lane's root object. It owns the
-// events log, spawns one per-WI monitor goroutine per RTStarted, routes
-// RTRecovered/WIFinished to the right monitor, and exposes the HTTP face
-// (observe/answer) over the monitors. Runtime talks to Observe
-// through exactly two channels carrying the five protocol messages (the
-// agent Handle rides WITH the lifecycle message as the attachment this
-// lane needs to observe and control — it is not a third message kind).
+// observe.go: the Observe hub — the supervisor's root object. It owns
+// the events log (driver events land in it too, durably), spawns one
+// per-WI supervisor goroutine per RTStarted, routes RTRecovered/WIFinished
+// to the right monitor, and exposes the HTTP face (observe/answer) over
+// the monitors. Runtime talks to Observe through exactly two channels
+// carrying the five protocol messages (the driver Handle rides WITH the
+// lifecycle message as the attachment — it is not a third message kind).
 
 import (
 	"context"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // Attach is one Runtime→Observe lifecycle event plus its attachment:
@@ -64,50 +65,33 @@ type Config struct {
 	// negative = disabled).
 	SessionRevalidateEvery time.Duration
 
-	PollInterval time.Duration // execution.json poll tick (500ms)
-	HangWindow   time.Duration // stream-silence window while a turn is in flight (10min)
-	// IdleWindow is the F5 idle-watchdog window: no progress record
-	// AND no turn in flight for this long ⇒ liveness probe ⇒ (no ack)
-	// WINeedsRecovery(idle). It covers the shape the hang window is
-	// blind to by definition — a turn that already ENDED (e.g. on a
-	// fatal provider error) with the session left driving nothing.
-	IdleWindow   time.Duration // no-record-no-turn quiet window (10min)
-	ProbeTimeout time.Duration // liveness-probe ack bound (2min)
-	// WallBackstop is the §6.2 absolute bound (polyforge#114): the cap
-	// on a derivation's PROGRESS silence that no probe ack can restart —
-	// the monitor's checkWallBackstop. 0 = the 15m default (the §6.2
-	// floor; the per-step max(3× wall budget) refinement is future
-	// work), a negative value disables the backstop entirely.
-	WallBackstop      time.Duration
+	// Registry hands out the per-WI supervision links shared with the
+	// driver (facts in, verdicts out, harness trackers). nil = every
+	// monitor builds a private link (unit tests).
+	Registry *supervise.Registry
+	// PollInterval is the supervisor tick (judging cadence; 500ms).
+	PollInterval time.Duration
+	// ModelErrorGrace is rule 1's grace after an error-ended turn (1m).
+	ModelErrorGrace time.Duration
+	// DriverStall is N: the driver between steps for longer than this,
+	// not waiting on a human, is stalled (10m; negative disables).
+	DriverStall       time.Duration
 	PushRetryBackoff  time.Duration // async push retry spacing after a failure (10s)
 	BackpressureSteps int           // N consecutive failed pushes before the degradation event (5)
 	BackpressureAfter time.Duration // T without a successful push before the degradation event (30min)
 	PushBound         time.Duration // per-push bound (protocol.PushTimeout, 60s)
 	OBCapacity        int           // OB channel buffer check (64)
-	// VersionStagnantTicks is the C3' belt-and-braces bound: consecutive
-	// same-Version execution.json rewrites before a fallback commit + one
-	// version_stagnant event. 0 = the default (3). Injectable for tests.
-	VersionStagnantTicks int
 }
 
 func (c *Config) fill() {
 	if c.PollInterval == 0 {
 		c.PollInterval = 500 * time.Millisecond
 	}
-	if c.HangWindow == 0 {
-		c.HangWindow = 10 * time.Minute
+	if c.ModelErrorGrace == 0 {
+		c.ModelErrorGrace = supervise.DefaultModelErrorGrace
 	}
-	if c.IdleWindow == 0 {
-		c.IdleWindow = 10 * time.Minute
-	}
-	if c.ProbeTimeout == 0 {
-		c.ProbeTimeout = 2 * time.Minute
-	}
-	if c.WallBackstop == 0 {
-		// §6.2: 墙钟仅作绝对兜底，一切判据失效时的绝对界 — the 15-minute
-		// floor of max(3× step wall budget, 15min) (polyforge#114; the
-		// per-step refinement is future work).
-		c.WallBackstop = defaultWallBackstop
+	if c.DriverStall == 0 {
+		c.DriverStall = 10 * time.Minute
 	}
 	if c.PushRetryBackoff == 0 {
 		c.PushRetryBackoff = 10 * time.Second
@@ -123,9 +107,6 @@ func (c *Config) fill() {
 	}
 	if c.OBCapacity == 0 {
 		c.OBCapacity = 64
-	}
-	if c.VersionStagnantTicks == 0 {
-		c.VersionStagnantTicks = defaultVersionStagnantTicks
 	}
 	if c.SessionRevalidateEvery == 0 {
 		c.SessionRevalidateEvery = defaultRevalidateEvery
@@ -324,39 +305,40 @@ func (o *Observe) takeMonitor(wi string) *Monitor {
 
 // newMonitor builds the per-WI supervisor for one RTStarted attachment.
 func (o *Observe) newMonitor(at Attach) *Monitor {
+	var link *supervise.Link
+	if o.cfg.Registry != nil {
+		link = o.cfg.Registry.Link(at.WI.WorkItem)
+	} else {
+		link = supervise.NewLink(at.WI.WorkItem)
+	}
 	m := &Monitor{
 		wi: at.WI,
 		cfg: monitorCfg{
-			PollInterval:         o.cfg.PollInterval,
-			HangWindow:           o.cfg.HangWindow,
-			IdleWindow:           o.cfg.IdleWindow,
-			ProbeTimeout:         o.cfg.ProbeTimeout,
-			WallBackstop:         o.cfg.WallBackstop,
-			PushRetryBackoff:     o.cfg.PushRetryBackoff,
-			BackpressureSteps:    o.cfg.BackpressureSteps,
-			BackpressureAfter:    o.cfg.BackpressureAfter,
-			PushBound:            o.cfg.PushBound,
-			VersionStagnantTicks: o.cfg.VersionStagnantTicks,
-			revalidate:           o.cfg.SessionRevalidateEvery,
-			verify:               o.cfg.SessionVerify,
-			push:                 o.cfg.PushFunc,
-			locateLive:           o.cfg.LocateLive,
+			PollInterval:      o.cfg.PollInterval,
+			ModelErrorGrace:   o.cfg.ModelErrorGrace,
+			DriverStall:       o.cfg.DriverStall,
+			PushRetryBackoff:  o.cfg.PushRetryBackoff,
+			BackpressureSteps: o.cfg.BackpressureSteps,
+			BackpressureAfter: o.cfg.BackpressureAfter,
+			PushBound:         o.cfg.PushBound,
+			revalidate:        o.cfg.SessionRevalidateEvery,
+			verify:            o.cfg.SessionVerify,
+			push:              o.cfg.PushFunc,
+			locateLive:        o.cfg.LocateLive,
 		},
 		log:    o.log,
 		ob:     o.cfg.OB,
+		link:   link,
 		rtCh:   make(chan Attach, 4),
 		stopCh: make(chan struct{}),
 
 		gate:       make(chan struct{}, 1),
 		pushDone:   make(chan pushResult, 1),
-		probeDone:  make(chan probeResult, 1),
 		verifyDone: make(chan verifyResult, 1),
-
-		hangAnchor: time.Now(),
-		stream:     newStreamState(),
 	}
-	m.execPath = m.execJSONPath()
 	m.attach(at)
+	m.phase = phaseBetween
+	m.phaseSince = m.now()
 	return m
 }
 
@@ -364,10 +346,7 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 // the same for successors).
 func (m *Monitor) attach(at Attach) {
 	m.handle = at.Handle
-	m.records = at.Handle.Records()
 	m.exitCh = at.Handle.Exit()
-	m.idleAnchor = time.Now() // the idle window's pre-first-record baseline
-	m.attachAt = time.Now()   // the wall backstop's non-resettable silence floor
 	m.stateMu.Lock()
 	m.spawnN = at.Msg.SpawnN
 	m.sessionID = at.Msg.SessionID

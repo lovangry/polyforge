@@ -17,11 +17,11 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
-	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // ---------------------------------------------------------------------------
@@ -31,8 +31,6 @@ type fakeAgent struct {
 	mu         sync.Mutex
 	done       bool
 	terminated bool
-	sent       []protocol.ControlMsg
-	ackFn      func(method string) error
 }
 
 func (a *fakeAgent) PID() int          { return 0 } // runtime's kill guard no-ops on pid<=0
@@ -50,31 +48,6 @@ func (a *fakeAgent) Terminate(time.Duration) error {
 	a.terminated = true
 	a.mu.Unlock()
 	return nil
-}
-func (a *fakeAgent) SendControl(m protocol.ControlMsg) error {
-	a.mu.Lock()
-	a.sent = append(a.sent, m)
-	a.mu.Unlock()
-	return nil
-}
-func (a *fakeAgent) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error {
-	a.mu.Lock()
-	fn := a.ackFn
-	a.mu.Unlock()
-	if fn != nil {
-		return fn(m.Method)
-	}
-	return nil
-}
-
-func (a *fakeAgent) sentMethods() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make([]string, 0, len(a.sent))
-	for _, m := range a.sent {
-		out = append(out, m.Method)
-	}
-	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -620,8 +593,8 @@ func (td *testDaemon) submitClaim(t *testing.T, wi string) {
 
 // seedPendingQuestion plays the driver's needs_input park: it writes an
 // open pending_question for the step into the capsule's execution.json
-// (Version bumped, atomic tmp+rename) so the observe monitor's
-// pollExecution/applyPendingFromExec projects it.
+// (Version bumped, atomic tmp+rename) and sends the exec_committed fact
+// so the supervisor projects it.
 func (td *testDaemon) seedPendingQuestion(t *testing.T, wi, qid, step, question string) {
 	t.Helper()
 	path := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", wi, filepath.FromSlash(capsule.ExecutionJSON))
@@ -657,6 +630,9 @@ func (td *testDaemon) seedPendingQuestion(t *testing.T, wi, qid, step, question 
 	if err := os.Rename(tmp, path); err != nil {
 		t.Fatal(err)
 	}
+	// the driver's commit-boundary notice: the supervisor projects the
+	// pending question when the fact arrives (it no longer polls)
+	td.sup.Link(wi).Fact(supervise.ExecCommitted{Version: exec.Version, Step: step})
 }
 
 // waitLive blocks until the work item holds a runtime job.

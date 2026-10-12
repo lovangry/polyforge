@@ -115,7 +115,8 @@ type CandidatePolicy struct {
 	Report  bool
 }
 
-// PolicyFor answers the advancement policy of one fault class:
+// PolicyFor answers the advancement policy of one fault class (wired
+// into the failure handler of supervision.go, v2-converge 2.3):
 //
 //	provider → advance (bounded)
 //	host     → block + report: the machine, not the model, is broken
@@ -175,11 +176,11 @@ var faultNeedles = []struct {
 // ClassifyFault classifies one step-attempt error into the four fault
 // classes. Sentinel context errors are recognized first (wrapped or
 // not): a cancellation is an operator interruption, a deadline is a
-// timeout on the model call (provider). An unmatched message defaults
-// to provider — the bounded side of the policy: advancing the candidate
-// is capped by the list length and never terminal, whereas defaulting
-// to host would report blocked on an unknown free-text string. A nil
-// error answers "" (nothing to classify).
+// timeout on the model call (provider). An unmatched message answers ""
+// (unknown): an unknown fault never advances the candidate pointer — the
+// old provider default made every daemon restart (cause text "agent
+// process exited") switch models (v2-converge 2.3). A nil error answers
+// "" too (nothing to classify).
 func ClassifyFault(err error) FaultClass {
 	if err == nil {
 		return ""
@@ -198,5 +199,5 @@ func ClassifyFault(err error) FaultClass {
 			}
 		}
 	}
-	return FaultProvider
+	return ""
 }

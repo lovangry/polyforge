@@ -229,7 +229,7 @@ func TestGoldenStatus(t *testing.T) {
 		Workspaces: []string{"/srv/pf-ws"},
 		Jobs: []StatusJob{
 			{WorkItemID: "wi_abc", Status: "running", SpawnN: 3, SessionFingerprint: "ab12cd34ef56aa00", AgentPID: 42,
-				LastProgressAgoSec: int64Ptr(754)},
+				StepAgeSec: int64Ptr(3725), LastWorkAgoSec: int64Ptr(7)},
 			// D6: a job presented as needs_input shows its pending
 			// question's id in the QUESTION column. A job with no session
 			// fingerprint renders "-" in SESSION (and "-" in SPAWN while
@@ -245,10 +245,10 @@ func TestGoldenStatus(t *testing.T) {
 		`machine: m1  mode: drain  queue: 1 pending / 2 running / max 2
 workspaces: /srv/pf-ws
 
-WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  LAST-PROGRESS
----------  -----------  ----------------  -----  ---------  --------  -------------
-wi_abc     running      ab12cd34ef56aa00  #3     42         -         12:34
-wi_ask     needs_input  -                 -      43         q_zz9     -
+WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  STEP-AGE  LAST-WORK
+---------  -----------  ----------------  -----  ---------  --------  --------  ---------
+wi_abc     running      ab12cd34ef56aa00  #3     42         -         62:05     00:07
+wi_ask     needs_input  -                 -      43         q_zz9     -         -
 `)
 }
 
@@ -366,5 +366,5 @@ mem_1  experience.debug  first line  t1       go
 `)
 }
 
-// int64Ptr is the LAST-PROGRESS golden helper (a *int64 field).
+// int64Ptr is the STEP-AGE / LAST-WORK golden helper (a *int64 field).
 func int64Ptr(v int64) *int64 { return &v }

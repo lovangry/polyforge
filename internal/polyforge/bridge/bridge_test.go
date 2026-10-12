@@ -1,10 +1,10 @@
 package bridge
 
-// bridge_test.go: the driver-bridge handle's probe semantics (the #99
-// verification lesson) — a liveness probe on a live driver is acknowledged
-// (the engine IS the supervised entity; step processes stay record-silent
-// for a whole HangWindow during long tool calls), and every other control
-// method stays refused (no stdio control channel exists).
+// bridge_test.go: the driver-bridge handle — Terminate joins the driver's
+// exit, the interrupted-cause archive policy (an unclassified cause never
+// advances the candidate pointer), the candidate pass-through, and the
+// driver-event / supervision-link wiring. (The liveness probe the bridge
+// used to answer died with the guessing supervision lanes.)
 
 import (
 	"context"
@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/spawn"
 	"github.com/silgrid/polyforge/internal/polyforge/driver"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // waitUntil is the bridge tests' small poll helper.
@@ -30,46 +30,6 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
-}
-
-func TestProbeAckedWhileDriverAlive(t *testing.T) {
-	h := &Handle{done: make(chan error)}
-	msg := protocol.ControlMsg{Method: protocol.ControlProbe, Nonce: "deadbeef", Seq: 7}
-	if err := h.SendControl(msg); err != nil {
-		t.Fatalf("probe on a live driver must be accepted, got %v", err)
-	}
-	if err := h.WaitControlAck(context.Background(), msg, time.Second); err != nil {
-		t.Fatalf("probe ack on a live driver must succeed, got %v", err)
-	}
-}
-
-func TestProbeFailsAfterDriverExit(t *testing.T) {
-	h := &Handle{done: make(chan error)}
-	h.mu.Lock()
-	h.doneSet = true
-	h.doneErr = nil
-	close(h.done)
-	h.mu.Unlock()
-	msg := protocol.ControlMsg{Method: protocol.ControlProbe}
-	if err := h.SendControl(msg); err == nil {
-		t.Fatal("probe on a dead driver must fail — recovery owns it")
-	}
-	if err := h.WaitControlAck(context.Background(), msg, time.Second); err == nil {
-		t.Fatal("probe ack on a dead driver must fail")
-	}
-}
-
-func TestNonProbeControlStillRefused(t *testing.T) {
-	h := &Handle{done: make(chan error)}
-	// polyforge#106: the answer relay and the stop-notice delivery died
-	// with the WI-Agent engine — the driver handle still refuses them BY
-	// NAME (literals: the protocol constants are deleted) alongside
-	// anything else that is not the probe.
-	for _, method := range []string{"pf/stop_notice", "pf/answer"} {
-		if err := h.SendControl(protocol.ControlMsg{Method: method}); err == nil {
-			t.Fatalf("non-probe control %q must stay refused (no stdio channel)", method)
-		}
-	}
 }
 
 // TestTerminateJoinsDriverExit is the astra-r2 #1 regression: Terminate
@@ -119,8 +79,9 @@ func TestTerminateBoundedWhenDriverNeverExits(t *testing.T) {
 // TestInterruptedFromCausePolicy pins the operator filter: an
 // operator-shaped recovery cause archives nothing (a deliberate stop is
 // not a model verdict); everything else classifies through the driver's
-// fault table and archives with that class (unknown free text defaults
-// provider — the bounded side).
+// fault table and archives with that class. Unknown free text (a daemon
+// restart, a driver relaunch) archives with NO class: unclassified never
+// advances the candidate pointer (v2-converge 2.3).
 func TestInterruptedFromCausePolicy(t *testing.T) {
 	if got := interruptedFromCause(""); got != nil {
 		t.Fatalf("an empty cause archives nothing, got %+v", got)
@@ -129,10 +90,10 @@ func TestInterruptedFromCausePolicy(t *testing.T) {
 		t.Fatalf("an operator-shaped cause archives nothing, got %+v", got)
 	}
 	for cause, want := range map[string]driver.FaultClass{
-		"agent_death":    driver.FaultProvider, // free text defaults provider
-		"daemon_restart": driver.FaultProvider,
-		"provider_error": driver.FaultProvider,
-		"hang":           driver.FaultProvider,
+		"agent_death":    "", // unknown: never advances
+		"daemon_restart": "",
+		"driver_stalled": "",
+		"rate limit hit": driver.FaultProvider, // a recognised model-class text
 	} {
 		got := interruptedFromCause(cause)
 		if got == nil {
@@ -176,14 +137,10 @@ type fakeRTHandle struct {
 	once  sync.Once
 }
 
-func (h *fakeRTHandle) PID() int                              { return 0 }
-func (h *fakeRTHandle) StartedAt() string                     { return "fake" }
-func (h *fakeRTHandle) Alive() bool                           { return true }
-func (h *fakeRTHandle) Done() bool                            { return false }
-func (h *fakeRTHandle) SendControl(protocol.ControlMsg) error { return nil }
-func (h *fakeRTHandle) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error {
-	return nil
-}
+func (h *fakeRTHandle) PID() int          { return 0 }
+func (h *fakeRTHandle) StartedAt() string { return "fake" }
+func (h *fakeRTHandle) Alive() bool       { return true }
+func (h *fakeRTHandle) Done() bool        { return false }
 func (h *fakeRTHandle) Terminate(bound time.Duration) error {
 	h.once.Do(func() { close(h.block) })
 	return nil
@@ -233,5 +190,81 @@ func TestBridgeForwardsStepCandidates(t *testing.T) {
 	})
 	if got := sp.last().Model; got != "eff-a" {
 		t.Fatalf("first dispatch model %q, want the effective head eff-a", got)
+	}
+}
+
+// recLog records driver events.
+type recLog struct {
+	mu    sync.Mutex
+	kinds []string
+}
+
+func (l *recLog) Append(wi, kind string, body any) error {
+	l.mu.Lock()
+	l.kinds = append(l.kinds, kind)
+	l.mu.Unlock()
+	return nil
+}
+
+func (l *recLog) has(kind string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, k := range l.kinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBridgeWiresDriverEventsAndSupervisionLink pins the v2 event base
+// and the contract wiring: the driver's events reach the Log the daemon
+// supplied (not a stderr logger) and the step_started fact reaches the
+// WI's link, carrying the dispatch's model, harness and transcript.
+func TestBridgeWiresDriverEventsAndSupervisionLink(t *testing.T) {
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "workflows", "wf")
+	if err := os.MkdirAll(filepath.Join(bundle, "steps"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	front := "---\nname: wf\ndefaults:\n  model_candidates: [m-a]\nsteps:\n  - { id: fix, kind: code }\n---\n# body\n"
+	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(front), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "steps", "fix.md"), []byte("do the fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte(`{"harness":"pi","session_id":"fp123"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sp := &fakeRTSpawner{}
+	log := &recLog{}
+	link := supervise.NewLink("wi_wire")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h, err := Start(ctx, Config{
+		WI: "wi_wire", CapsuleDir: dir, BundleName: "wf", SpawnN: 1, Spawner: sp,
+		Log: log, Link: link,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer h.Terminate(2 * time.Second)
+	waitUntil(t, "the step_started event in the supplied log", func() bool { return log.has("step_started") })
+	var started *supervise.StepStarted
+	waitUntil(t, "the step_started fact on the link", func() bool {
+		for _, f := range link.Facts.Drain() {
+			if st, ok := f.(supervise.StepStarted); ok {
+				c := st
+				started = &c
+			}
+		}
+		return started != nil
+	})
+	if started.Step != "fix" || started.Model != "m-a" || started.Harness != "pi" || started.SpawnN != 1 {
+		t.Fatalf("step_started fact = %+v", *started)
+	}
+	if started.Thresholds.StepTimeout <= 0 || started.Thresholds.Tool <= 0 || started.Thresholds.Silence <= 0 {
+		t.Fatalf("the fact must carry the thresholds, got %+v", started.Thresholds)
 	}
 }

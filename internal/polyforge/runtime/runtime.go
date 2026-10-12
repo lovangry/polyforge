@@ -101,12 +101,6 @@ type Config struct {
 	// credential) the spawned agents' environment must never carry, even
 	// under a renamed variable.
 	EnvSecrets []string
-	// RecordTap, when non-nil, receives every raw stdout record line the
-	// production spawner reads (one harness record per delivery, verbatim
-	// including the trailing newline stripped). The phase-3 daemon binds it
-	// to its observe adapter so the Observe lane's stream monitoring sees
-	// the record stream; nil (tests, non-pi spawners) disables it.
-	RecordTap func(wi string, line []byte)
 	// RecallTopK bounds the F6-A claim-time memory snapshot: how many
 	// semantic hits over the goal+content query land in the capsule's
 	// runtime-state/recalled-memories.json (default 10, capped at 50).
@@ -316,8 +310,8 @@ func New(cfg Config, hub Aihub, spawner Spawner, toOB chan<- protocol.RTMsg, fro
 
 // DefaultSpawner returns the production pi-harness spawner. It takes the
 // runtime config BY POINTER: the spawner reads its fields at spawn time
-// from the shared config, so any field bound after assembly (RecordTap
-// included) is seen by the spawner.
+// from the shared config, so any field bound after assembly is seen by
+// the spawner.
 func DefaultSpawner(cfg *Config) Spawner {
 	return newPiSpawner(cfg)
 }

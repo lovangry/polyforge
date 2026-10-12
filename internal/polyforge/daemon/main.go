@@ -63,12 +63,14 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
 	recallTopK := fs.Int("recall-topk", 0, "claim-time memory snapshot hit count (env POLYFORGE_RECALL_TOPK; default 10, max 50)")
 	mode := fs.String("mode", "", "initial mode: interactive|batch|drain (default interactive)")
-	// Observe supervision windows (#12): Go duration strings, flags only
-	// (no env fallbacks). Omitted or zero keeps observe's own default.
-	hangWindow := fs.Duration("hang-window", 0, "stream-silence window while a turn is in flight before the liveness probe arms (default 10m)")
-	idleWindow := fs.Duration("idle-window", 0, "no-record-no-turn quiet window before the idle watchdog probes (default 10m)")
-	probeTimeout := fs.Duration("probe-timeout", 0, "liveness-probe ack bound (default 2m)")
-	wallWindow := fs.Duration("wall-window", 0, "absolute wall-clock backstop on a derivation's progress silence that no probe ack can reset; also bounds a never-closing turn and caps the tool-dispatch exemption at 4x this window (polyforge#114/#124; default 15m; negative disables)")
+	// Supervision bounds (v2-converge 2.4): Go duration strings, flags
+	// only (no env fallbacks). Omitted or zero keeps the documented
+	// default; a step may override them in workflow.md.
+	silenceWindow := fs.Duration("silence-window", 0, "X: no real work signal after dispatch, or no model output while waiting for the model, before the step is judged dead (default 10m for token-level harnesses, 30m for message-level)")
+	toolWindow := fs.Duration("tool-window", 0, "Y: one tool running longer than this is judged hung (default 30m)")
+	stepTimeout := fs.Duration("step-timeout", 0, "T: cumulative step runtime bound across its dispatches (default 90m; a step's budget.wall_minutes overrides it)")
+	stallWindow := fs.Duration("stall-window", 0, "N: the driver between steps (not waiting on a human) for longer than this is judged stalled (default 10m; negative disables)")
+	modelErrorGrace := fs.Duration("model-error-grace", 0, "grace after a turn ends on a model error before the step is judged dead (default 1m)")
 	revalidateEvery := fs.Duration("revalidate-every", 0, "M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
 	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "machines heartbeat cadence (0 = disabled)")
 	if err := fs.Parse(argv); err != nil {
@@ -186,13 +188,13 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		Mode:                *mode,
 		HeartbeatEvery:      *heartbeatEvery,
 		Hub:                 aihubclient.New(*server, *apiKey),
-		// Zero fields fall through to observe's own fill() defaults, so a
-		// daemon started without these flags keeps the production windows.
-		Observe: ObserveWindows{
-			HangWindow:             *hangWindow,
-			IdleWindow:             *idleWindow,
-			ProbeTimeout:           *probeTimeout,
-			WallBackstop:           *wallWindow,
+		// Zero fields fall through to the documented defaults.
+		Supervision: SupervisionConfig{
+			SilenceWindow:          *silenceWindow,
+			ToolWindow:             *toolWindow,
+			StepTimeout:            *stepTimeout,
+			StallWindow:            *stallWindow,
+			ModelErrorGrace:        *modelErrorGrace,
 			SessionRevalidateEvery: *revalidateEvery,
 		},
 	}

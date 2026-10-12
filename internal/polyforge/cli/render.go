@@ -464,12 +464,12 @@ func renderReadThrough(w io.Writer, p *api.ProgressResponse) {
 // pending question shows its question id ("-" otherwise), so an agent
 // blocked on a human is impossible to miss at a glance. The SPAWN column
 // is the v1.5 B2 derivation counter and SESSION the public fingerprint of
-// the job's session ("-" when unheld). The
-// LAST-PROGRESS column is the F15c owner face: mm:ss since the job's
-// stream last proved agent progress ("-" when no progress record
-// exists). UI-noise records never refresh it, so a wedged-but-chattering
-// job reads as stale — the pilot's 2.7-hour double-blind wedge had no
-// such surface.
+// the job's session ("-" when unheld). STEP-AGE and LAST-WORK are the
+// owner liveness face: mm:ss since the current dispatch began, and since
+// its harness last did REAL work ("-" when no dispatch is in flight or
+// no work signal exists yet). UI-noise records never refresh LAST-WORK,
+// so a wedged-but-chattering job reads as stale — the pilot's 2.7-hour
+// double-blind wedge had no such surface.
 func renderStatus(w io.Writer, s *StatusResponse) {
 	fmt.Fprintf(w, "machine: %s  mode: %s", s.MachineID, s.Mode)
 	if s.ShuttingDown {
@@ -501,17 +501,20 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 		if j.SpawnN > 0 {
 			spawn = "#" + strconv.Itoa(j.SpawnN)
 		}
-		progress := "-"
-		if j.LastProgressAgoSec != nil {
-			progress = mmssAgo(*j.LastProgressAgoSec)
+		stepAge, lastWork := "-", "-"
+		if j.StepAgeSec != nil {
+			stepAge = mmssAgo(*j.StepAgeSec)
 		}
-		rows = append(rows, []string{j.WorkItemID, j.Status, sess, spawn, pid, question, progress})
+		if j.LastWorkAgoSec != nil {
+			lastWork = mmssAgo(*j.LastWorkAgoSec)
+		}
+		rows = append(rows, []string{j.WorkItemID, j.Status, sess, spawn, pid, question, stepAge, lastWork})
 	}
-	printTable(w, []string{"WORK ITEM", "STATUS", "SESSION", "SPAWN", "AGENT PID", "QUESTION", "LAST-PROGRESS"}, rows)
+	printTable(w, []string{"WORK ITEM", "STATUS", "SESSION", "SPAWN", "AGENT PID", "QUESTION", "STEP-AGE", "LAST-WORK"}, rows)
 }
 
-// mmssAgo renders whole seconds as the mm:ss staleness figure the
-// LAST-PROGRESS column carries (minutes grow unbounded past an hour —
+// mmssAgo renders whole seconds as the mm:ss figure the STEP-AGE and
+// LAST-WORK columns carry (minutes grow unbounded past an hour —
 // 97:30 reads faster than 1h37m on a scan).
 func mmssAgo(sec int64) string {
 	if sec < 0 {

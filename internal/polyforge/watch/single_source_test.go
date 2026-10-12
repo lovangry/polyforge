@@ -12,12 +12,11 @@ import (
 // The single-source property (spec: "exactly ONE package parses the
 // session-jsonl storage format"), asserted from inside the tree: the
 // watch module's internal imports and the observe sync face's internal
-// imports (every observe file except the stdout-wire parser stream.go)
-// intersect in exactly ONE package — this package's sessionjsonl parser —
-// with the legitimately shared infra excluded (runtime for the
-// LocateLiveTranscript reuse, common/*). stream.go itself must import
-// neither the parser nor the watch module: the stdout-wire vocabulary
-// stays separate and unchanged.
+// imports intersect in exactly ONE package — this package's sessionjsonl
+// parser — with the legitimately shared infra excluded (runtime for the
+// LocateLiveTranscript reuse, common/*). The stdout-wire vocabulary (the
+// harness translator in package supervise) stays a separate parser: it
+// must import neither the session-jsonl parser nor the watch module.
 func TestSingleSourceSessionJSONLParser(t *testing.T) {
 	// The test binary's cwd is this package's source directory.
 	pkgDir, err := os.Getwd()
@@ -30,11 +29,11 @@ func TestSingleSourceSessionJSONLParser(t *testing.T) {
 	if len(watchImports) == 0 || dirGoFileCount(pkgDir) == 0 {
 		t.Fatalf("the watch module must exist as a Go package: %s", pkgDir)
 	}
-	streamPath := filepath.Join(obsDir, "stream.go")
-	if _, err := os.Stat(streamPath); err != nil {
-		t.Fatalf("internal/polyforge/observe/stream.go must stay where it is: %v", err)
+	translatorPath := filepath.Join(pkgDir, "..", "supervise", "pi.go")
+	if _, err := os.Stat(translatorPath); err != nil {
+		t.Fatalf("internal/polyforge/supervise/pi.go (the stdout-wire translator) must exist: %v", err)
 	}
-	syncImports := dirInternalImportsExcept(t, obsDir, "stream.go")
+	syncImports := dirInternalImportsExcept(t, obsDir, "")
 
 	shared := map[string]bool{}
 	for imp := range watchImports {
@@ -59,9 +58,9 @@ func TestSingleSourceSessionJSONLParser(t *testing.T) {
 	if parserPkg != "github.com/silgrid/polyforge/internal/polyforge/sessionjsonl" {
 		t.Fatalf("the shared parser package must be sessionjsonl, got %q", parserPkg)
 	}
-	streamImports := fileInternalImports(t, streamPath)
+	streamImports := fileInternalImports(t, translatorPath)
 	if streamImports[parserPkg] || streamImports["github.com/silgrid/polyforge/internal/polyforge/watch"] {
-		t.Fatalf("observe/stream.go must stay a separate, unchanged vocabulary: %v", streamImports)
+		t.Fatalf("supervise/pi.go must stay a separate vocabulary: %v", streamImports)
 	}
 	// And the consumers really consume it: watch's non-test sources
 	// import the parser, and so does the observe sync face.

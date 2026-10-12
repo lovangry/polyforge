@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/common/spawn"
 )
 
 func TestSpawnIsolationFlags(t *testing.T) {
@@ -264,29 +264,17 @@ func TestPiRPCInitialPrompt(t *testing.T) {
 	if cmd.Type != "prompt" || cmd.ID != "pf-init" || cmd.Message != "begin the work item" {
 		t.Fatalf("initial prompt envelope wrong: %+v", cmd)
 	}
-	// a bare harness process carries no control channel
-	if err := h.SendControl(protocol.ControlMsg{Method: protocol.ControlProbe}); err == nil {
-		t.Fatal("SendControl on a harness process must be unsupported")
-	}
 }
 
-// TestSpawnRecordTapFeedsEveryStdoutRecord pins the RecordTap binding: every
+// TestSpawnOnRecordFeedsEveryStdoutRecord pins the OnRecord binding: every
 // raw stdout record the production spawner reads also reaches the
-// configured tap — the daemon binds the tap to its observe adapter, so the
-// Observe lane's Records() stream receives exactly this line.
-func TestSpawnRecordTapFeedsEveryStdoutRecord(t *testing.T) {
+// dispatch's callback — the driver binds it to the harness translator, so
+// the supervisor's per-dispatch state receives exactly this line.
+func TestSpawnOnRecordFeedsEveryStdoutRecord(t *testing.T) {
 	capDir, sp := scriptedHarness(t)
 
 	var mu sync.Mutex
 	var seen []string
-	sp.cfg.RecordTap = func(wi string, line []byte) {
-		mu.Lock()
-		if wi == "wi_tap" {
-			seen = append(seen, string(line))
-		}
-		mu.Unlock()
-	}
-
 	h, err := sp.Spawn(context.Background(), SpawnParams{
 		WorkItemID:    "wi_tap",
 		CapsuleDir:    capDir,
@@ -294,6 +282,11 @@ func TestSpawnRecordTapFeedsEveryStdoutRecord(t *testing.T) {
 		SpawnN:        1,
 		InitialPrompt: "begin",
 		Journal:       func(pid int, startedAt string) error { return nil },
+		OnRecord: func(line string) {
+			mu.Lock()
+			seen = append(seen, line)
+			mu.Unlock()
+		},
 	})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -311,7 +304,7 @@ func TestSpawnRecordTapFeedsEveryStdoutRecord(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("RecordTap never saw the startup record, saw %q", seen)
+			t.Fatalf("OnRecord never saw the startup record, saw %q", seen)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -322,52 +315,62 @@ func TestSpawnRecordTapFeedsEveryStdoutRecord(t *testing.T) {
 	}
 }
 
-// TestSpawnRecordTapBoundAfterSpawnerBuild is the assembly-order
-// regression for the e2e lane's high-severity bug: the daemon binds
-// RecordTap AFTER DefaultSpawner is built (the tap is a method value on
-// the daemon, which does not exist yet at spawner-construction time).
-// The spawner holds the config by pointer, so a tap bound after the
-// build — the exact production order — must still receive every record;
-// with a value copy this test is the bug, not the pin.
-func TestSpawnRecordTapBoundAfterSpawnerBuild(t *testing.T) {
+// TestSpawnExitInfoCarriesCodeStderrAndTailRecords pins the process-exit
+// signal: a harness that writes its last record and an error line to
+// stderr and exits non-zero is announced through OnExit AFTER its stdout
+// drained (the tail record reached the tap first) and ExitInfo reports the
+// code and the stderr tail — the raw material of the driver's
+// exited_without_result classification.
+func TestSpawnExitInfoCarriesCodeStderrAndTailRecords(t *testing.T) {
 	capDir, sp := scriptedHarness(t)
+	t.Setenv("GO_BE_DIE", "model sub2api/nope not found")
 
 	var mu sync.Mutex
-	var seen []string
-	// THE PRODUCTION ORDER: spawner first, tap afterwards.
-	sp.cfg.RecordTap = func(wi string, line []byte) {
-		mu.Lock()
-		if wi == "wi_tap_order" {
-			seen = append(seen, string(line))
-		}
-		mu.Unlock()
-	}
-
+	var order []string
+	var exitInfo spawn.ExitInfo
 	h, err := sp.Spawn(context.Background(), SpawnParams{
-		WorkItemID:    "wi_tap_order",
+		WorkItemID:    "wi_exit",
 		CapsuleDir:    capDir,
 		SessionHandle: "ab12cd34",
 		SpawnN:        1,
 		InitialPrompt: "begin",
 		Journal:       func(pid int, startedAt string) error { return nil },
+		OnRecord: func(line string) {
+			mu.Lock()
+			order = append(order, "record")
+			mu.Unlock()
+		},
+		OnExit: func(info spawn.ExitInfo) {
+			mu.Lock()
+			order = append(order, "exit")
+			exitInfo = info
+			mu.Unlock()
+		},
 	})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
-	defer func() { _ = h.Terminate(3 * time.Second) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		mu.Lock()
-		n := len(seen)
-		mu.Unlock()
-		if n >= 1 {
-			break
-		}
+	deadline := time.Now().Add(10 * time.Second)
+	for !h.Done() {
 		if time.Now().After(deadline) {
-			t.Fatalf("RecordTap bound after the spawner build never saw the record, saw %q", seen)
+			t.Fatal("the dying harness never reported Done")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) < 3 || order[len(order)-1] != "exit" {
+		t.Fatalf("OnExit must come after every record: %v", order)
+	}
+	if exitInfo.Code != 7 || !strings.Contains(exitInfo.StderrTail, "model sub2api/nope not found") {
+		t.Fatalf("exit info = %+v, want code 7 and the stderr tail", exitInfo)
+	}
+	er, ok := h.(spawn.ExitReporter)
+	if !ok {
+		t.Fatal("a harness process must implement spawn.ExitReporter")
+	}
+	if got := er.ExitInfo(); got.Code != 7 {
+		t.Fatalf("ExitInfo() after Done = %+v", got)
 	}
 }
 
@@ -417,8 +420,14 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(3)
 	}
 	defer f.Close()
-	// one fixture record at derivation: the RecordTap must see it verbatim
+	// one fixture record at derivation: the tap must see it verbatim
 	os.Stdout.WriteString(`{"type":"agent_start"}` + "\n")
+	if die := os.Getenv("GO_BE_DIE"); die != "" {
+		// the dying harness: a last error-turn record, a stderr line, exit 7
+		os.Stdout.WriteString(`{"type":"agent_end","messages":[{"role":"assistant","stopReason":"error","errorMessage":"` + die + `"}]}` + "\n")
+		fmt.Fprintln(os.Stderr, "fatal: "+die)
+		os.Exit(7)
+	}
 	br := bufio.NewReader(os.Stdin)
 	for {
 		line, rerr := br.ReadString('\n')

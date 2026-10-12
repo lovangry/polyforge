@@ -175,10 +175,12 @@ type StatusJob struct {
 	// needs_input carries its pending question's id.
 	NeedsInput bool   `json:"needs_input,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
-	// LastProgressAgoSec is the F15c owner face: whole seconds since the
-	// job's stream last proved agent progress (nil = none yet — rendered
-	// "-" in the LAST-PROGRESS column).
-	LastProgressAgoSec *int64 `json:"last_progress_ago_sec,omitempty"`
+	// StepAgeSec / LastWorkAgoSec are the owner liveness face: whole
+	// seconds since the current dispatch began and since its harness last
+	// did real work (nil = none — rendered "-" in the STEP-AGE and
+	// LAST-WORK columns).
+	StepAgeSec     *int64 `json:"step_age_sec,omitempty"`
+	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
 }
 
 // QueueStats is the local job queue counters.

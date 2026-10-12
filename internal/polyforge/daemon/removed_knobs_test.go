@@ -44,6 +44,30 @@ func TestRemovedEngineFlagsFailLoudlyAtParse(t *testing.T) {
 	}
 }
 
+// TestRetiredSupervisionFlagsFailLoudlyAtParse pins the v2 converge
+// deletion of the guessing lanes: their windows (hang, idle, probe, wall)
+// are not accepted any more — a stale service unit must fail at parse,
+// naming the flag, instead of silently running with defaults.
+func TestRetiredSupervisionFlagsFailLoudlyAtParse(t *testing.T) {
+	for _, name := range []string{"hang-window", "idle-window", "probe-timeout", "wall-window"} {
+		var stderr bytes.Buffer
+		code := Main([]string{"--socket", "/nonexistent-probe.sock", "--" + name, "1m"}, nil, &bytes.Buffer{}, &stderr)
+		if code != 2 {
+			t.Fatalf("--%s: exit = %d, want 2 (flag parse failure), stderr: %q", name, code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), name) {
+			t.Fatalf("--%s: parse error %q does not name the flag", name, stderr.String())
+		}
+	}
+	for _, name := range []string{"silence-window", "tool-window", "step-timeout", "stall-window", "model-error-grace"} {
+		var stderr bytes.Buffer
+		code := Main([]string{"--socket", "/nonexistent-probe.sock", "--" + name, "notaduration"}, nil, &bytes.Buffer{}, &stderr)
+		if code != 2 || strings.Contains(stderr.String(), "flag provided but not defined") {
+			t.Fatalf("--%s must be a defined duration flag: exit %d, %q", name, code, stderr.String())
+		}
+	}
+}
+
 func TestRetiredLegacyLaneEnvFailsLoudlyAtBoot(t *testing.T) {
 	// The retired variable name is assembled from fragments (see flagTok):
 	// this file's bytes never carry it contiguously. The refusal matches

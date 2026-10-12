@@ -8,8 +8,8 @@ package observe
 // unedited by the migrated s19 e2e suite). Two KEPT faces stay pinned
 // here, byte-for-byte as before:
 //
-//   - the F9 needs_input same-id re-present: one pending, one event,
-//     asked_at refreshed (via the execution.json poll);
+//   - the F9 needs_input same-id re-present: one pending, asked_at
+//     refreshed (via the exec_committed-triggered execution.json read);
 //   - the pending projection's execution.json reconcile: an invalid id
 //     never clobbers the valid pending, and a consumed (nil) pending
 //     clears the projection (the QUESTION face's D6/M4 half).
@@ -37,10 +37,12 @@ func TestSameIDRepresentRefreshesAskedAtWithoutNewEvent(t *testing.T) {
 	}
 	m.stateMu.Unlock()
 
-	// One question id = one needs_input event, one pending — but the
-	// re-present refreshes the projection's asked_at.
-	if got := len(eventsOf(m, EvNeedsInput)); got != 1 {
-		t.Fatalf("needs_input events: got %d, want 1", got)
+	// One question id = one pending — the re-present refreshes the
+	// projection's asked_at. The needs_input EVENT is the driver's (it
+	// lands in the same log at the park transition): the supervisor's
+	// projection must never add a second copy.
+	if got := len(eventsOf(m, EvNeedsInput)); got != 0 {
+		t.Fatalf("the supervisor must not duplicate the driver's needs_input event: got %d", got)
 	}
 	if pending == nil || pending.ID != "qF9" || pending.AskedAt != "2026-10-01T00:00:02Z" {
 		t.Fatalf("pending must stay the same single question with a refreshed asked_at: %+v", pending)

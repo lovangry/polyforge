@@ -48,12 +48,16 @@ func newLiveFixture(t *testing.T, capsuleDir, liveDir string) liveFixture {
 
 // adopt delivers the per-derivation transcript facts through the
 // production path: an RTRecovered attachment on rtCh.
-func adopt(m *Monitor, h Handle, wi WIInfo) {
+func adopt(t *testing.T, m *Monitor, h Handle, wi WIInfo) {
+	t.Helper()
 	m.rtCh <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: wi.WorkItem, SpawnN: 1},
+		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: wi.WorkItem, SpawnN: 2},
 		Handle: h,
 		WI:     wi,
 	}
+	// the adoption and the driver's facts race on the select: wait until
+	// the attachment landed before any commit boundary is announced
+	soon(t, 2*time.Second, "transcript facts adopted", func() bool { return m.currentSpawn() == 2 })
 }
 
 // pushOnceRecorded is a PushFunc that records whether the capsule's
@@ -82,7 +86,7 @@ func TestStepBoundarySyncsTranscriptBeforePush(t *testing.T) {
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.push = pushOnceRecorded(f, &sawCopy)
 	})
-	adopt(m, h, WIInfo{
+	adopt(t, m, h, WIInfo{
 		WorkItem:       "wi_test",
 		Project:        "proj",
 		CapsuleDir:     f.capsuleDir,
@@ -137,7 +141,7 @@ func TestTranscriptMissingWarnsOnceAndPushProceeds(t *testing.T) {
 			return "sha_nomiss", true, gitops.PushTimings{}, nil
 		}
 	})
-	adopt(m, h, WIInfo{
+	adopt(t, m, h, WIInfo{
 		WorkItem:   "wi_test",
 		Project:    "proj",
 		CapsuleDir: capsuleDir,
@@ -190,7 +194,7 @@ func TestResumedDerivationWritingInCapsuleIsNotReCopied(t *testing.T) {
 			return "sha_resume", true, gitops.PushTimings{}, nil
 		}
 	})
-	adopt(m, h, WIInfo{
+	adopt(t, m, h, WIInfo{
 		WorkItem:       "wi_test",
 		Project:        "proj",
 		CapsuleDir:     f.capsuleDir,

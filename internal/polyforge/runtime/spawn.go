@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
-	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/common/spawn"
 )
 
 // piIsolationFlags is the WI-agent birth isolation profile: the named flag
@@ -126,18 +126,15 @@ func newPiSpawner(cfg *Config) *piSpawner {
 	return &piSpawner{cfg: cfg}
 }
 
-// recordTaps wires the runtime Config's RecordTap into the process's
-// stdout tap chain: the production daemon binds RecordTap to its observe
-// adapter, so EVERY raw stdout record the spawner reads also reaches
-// the Observe lane's stream monitoring. Without the binding the record
-// stream (and with it the whole detection face) would be blind in
-// production.
+// recordTaps wires the dispatch's OnRecord callback into the process's
+// stdout tap chain: the driver's harness translator hangs on it, so every
+// raw stdout record the spawner reads also reaches the supervisor's
+// per-dispatch state.
 func (s *piSpawner) recordTaps(p SpawnParams) []func(string) {
-	if s.cfg.RecordTap == nil {
+	if p.OnRecord == nil {
 		return nil
 	}
-	wi, tap := p.WorkItemID, s.cfg.RecordTap
-	return []func(string){func(line string) { tap(wi, []byte(line)) }}
+	return []func(string){p.OnRecord}
 }
 
 func (s *piSpawner) bin() string {
@@ -225,15 +222,37 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	// Own pipes (not cmd.StdoutPipe): cmd.Wait would close the read end
+	// the instant the process exits and could drop the tail of the
+	// stream — exactly the records (the error turn's agent_end) the exit
+	// classification needs. With plain *os.File sinks Wait copies
+	// nothing, and the reader sees EOF once every writer is gone.
+	outR, outW, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	cmd.Stderr = os.Stderr
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		outR.Close()
+		outW.Close()
+		return nil, err
+	}
+	cmd.Stdout = outW
+	cmd.Stderr = errW
 	if err := cmd.Start(); err != nil {
+		outR.Close()
+		outW.Close()
+		errR.Close()
+		errW.Close()
 		return nil, fmt.Errorf("runtime: harness start failed: %w", err)
 	}
-	proc := newProc(cmd, stdin, stdout, s.recordTaps(p)...)
+	outW.Close()
+	errW.Close()
+	proc := newProcOpts(cmd, stdin, outR, procOpts{
+		taps:   s.recordTaps(p),
+		stderr: errR,
+		onExit: p.OnExit,
+	})
 	// Layer-0 enrollment: move the agent (and with it every descendant) into
 	// the per-WI cgroup. Unavailable cgroups degrade silently — layers 1-4
 	// remain the kill path.
@@ -254,6 +273,18 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 	}
 	if err := proc.writeCommand(piCommand{ID: "pf-init", Type: "prompt", Message: p.InitialPrompt}); err != nil {
 		_ = proc.Terminate(5 * time.Second)
+		// A harness that died at startup (an unresolvable pinned model, a
+		// bad credential) never read the prompt: its stderr is the only
+		// explanation, and the driver classifies the failure from it (a
+		// model-class text advances the candidate chain, F4).
+		select {
+		case <-proc.exited:
+		case <-time.After(2 * time.Second):
+		}
+		detail := strings.TrimSpace(proc.tail.String())
+		if detail != "" {
+			return nil, fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w; harness stderr: %s", err, detail)
+		}
 		return nil, fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w", err)
 	}
 	return proc, nil
@@ -335,12 +366,19 @@ const (
 
 var errControlTooLong = fmt.Errorf("runtime: control line exceeded the bounded reader limit")
 
+// procOpts carries the optional wiring of newProcOpts.
+type procOpts struct {
+	taps   []func(string)
+	stderr io.ReadCloser // when set, drained into a bounded tail (mirrored to os.Stderr)
+	onExit func(spawn.ExitInfo)
+}
+
 // proc wraps one derived harness process.
 type proc struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	startedAt string
-	taps      []func(string) // stdout record taps (the observe adapter binding)
+	taps      []func(string) // stdout record taps (the translator binding)
 
 	mu   sync.Mutex // guards stdin writes
 	pend sync.Mutex // guards pending ids (own lock: stdin writes may block)
@@ -348,26 +386,60 @@ type proc struct {
 	pending map[string]bool
 	exited  chan struct{}
 	exitErr error
+	exit    spawn.ExitInfo // valid once exited is closed
+	tail    *tailBuffer
+}
+
+// tailBuffer keeps the last stderrTailBytes bytes written to it.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+const stderrTailBytes = 4096
+
+func (t *tailBuffer) Write(b []byte) (int, error) {
+	t.mu.Lock()
+	t.buf = append(t.buf, b...)
+	if len(t.buf) > stderrTailBytes {
+		t.buf = append([]byte(nil), t.buf[len(t.buf)-stderrTailBytes:]...)
+	}
+	t.mu.Unlock()
+	return len(b), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
 }
 
 func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...func(string)) *proc {
+	return newProcOpts(cmd, stdin, stdout, procOpts{taps: taps})
+}
+
+func newProcOpts(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, o procOpts) *proc {
 	p := &proc{
 		cmd:       cmd,
 		stdin:     stdin,
 		startedAt: nowStamp(),
 		pending:   map[string]bool{},
 		exited:    make(chan struct{}),
-		taps:      taps,
+		taps:      o.taps,
+		tail:      &tailBuffer{},
+	}
+	readerDone := make(chan struct{})
+	if o.stderr != nil {
+		go func() {
+			_, _ = io.Copy(io.MultiWriter(os.Stderr, p.tail), o.stderr)
+			o.stderr.Close()
+		}()
 	}
 	go func() {
-		// cmd.Wait blocks on inherited pipes: a grandchild (model
-		// provider connection, spawned tool) that inherited stdout keeps
-		// the pipe open past the pi process's own exit, wedging Wait and
-		// the exited channel forever (#92). The bound: a goroutine races
-		// the Wait with a generous process-exit check; when the direct
-		// child is gone but Wait hasn't returned (pipe still held), we
-		// kill the process group (Setpgid makes the child the leader —
-		// killing it releases the pipe) and unblock Wait.
+		// A grandchild (model provider connection, spawned tool) that
+		// inherited stdout keeps the pipe open past the pi process's own
+		// exit (#92): the exit sequence below waits for the reader only a
+		// bounded moment, and the group kill releases the pipe.
 		done := make(chan struct{})
 		go func() {
 			p.exitErr = cmd.Wait()
@@ -378,6 +450,18 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 		for {
 			select {
 			case <-done:
+				// Let the stdout reader drain what the dead process left
+				// in the pipe before the exit is announced: the last
+				// records (the error turn's agent_end) decide the exit's
+				// class.
+				select {
+				case <-readerDone:
+				case <-time.After(500 * time.Millisecond):
+				}
+				p.exit = p.exitInfo()
+				if o.onExit != nil {
+					o.onExit(p.exit)
+				}
 				close(p.exited)
 				return
 			case <-ticker.C:
@@ -390,6 +474,7 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 		}
 	}()
 	go func() {
+		defer close(readerDone)
 		br := bufio.NewReaderSize(stdout, 64*1024)
 		for {
 			line, tooLong, rerr := readBoundedLine(br, maxControlLineBytes)
@@ -410,6 +495,28 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 		}
 	}()
 	return p
+}
+
+// exitInfo reads the finished process's status.
+func (p *proc) exitInfo() spawn.ExitInfo {
+	info := spawn.ExitInfo{Code: -1, StderrTail: strings.TrimSpace(p.tail.String())}
+	if ps := p.cmd.ProcessState; ps != nil {
+		info.Code = ps.ExitCode()
+		if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			info.Signal = ws.Signal().String()
+		}
+	}
+	return info
+}
+
+// ExitInfo implements spawn.ExitReporter; meaningful once Done().
+func (p *proc) ExitInfo() spawn.ExitInfo {
+	select {
+	case <-p.exited:
+		return p.exit
+	default:
+		return spawn.ExitInfo{Code: -1}
+	}
 }
 
 func (p *proc) PID() int          { return p.cmd.Process.Pid }
@@ -451,18 +558,6 @@ func (p *proc) writeCommand(c piCommand) error {
 		p.pend.Unlock()
 	}
 	return nil
-}
-
-// SendControl / WaitControlAck complete the supervised handle face
-// (spawn.Handle). The stdio control channel died with the WI-Agent
-// engine (polyforge#106) and the liveness probe is answered by the driver
-// bridge, so a bare harness process carries no control channel.
-func (p *proc) SendControl(protocol.ControlMsg) error {
-	return fmt.Errorf("runtime: control messages not supported on a harness process")
-}
-
-func (p *proc) WaitControlAck(context.Context, protocol.ControlMsg, time.Duration) error {
-	return fmt.Errorf("runtime: no control ack channel on a harness process")
 }
 
 // classify sorts one stdout line: response records repeating OUR command

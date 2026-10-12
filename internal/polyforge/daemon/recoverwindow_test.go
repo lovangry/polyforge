@@ -7,17 +7,13 @@ package daemon
 //     adopts the recovered derivation, and a CLI wrap then closes the
 //     work item exactly once.
 //
-//   - Bug 4 + the record-stream assembly: the daemon.Config Observe seam
-//     carries the supervision windows into the assembled observe lane,
-//     and the record path the production binding feeds (RecordTap →
-//     tapRecord → adapter → monitor) actually drives detection — with the
-//     real-daemon spawner half pinned by the runtime lane's
-//     DefaultSpawner pointer test and s07's real-`pf daemon` e2e run.
+//   - the supervision config seam: daemon.Config.Supervision carries the
+//     bounds into the assembled supervisor, and a driver that keeps
+//     stalling is bounded by the recovery engine's storm guard.
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -96,86 +92,49 @@ func TestRecoveryWindowThenWrapClosesOnce(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Bug 4 + the record-stream assembly: injected windows + the tap path.
+// The supervision config seam + the driver-crash bound.
 
-func TestObserveWindowsInjectionDrivesHangDetection(t *testing.T) {
+// TestSupervisionStallWindowDrivesRecoveryThenBlocks pins two things at
+// the daemon assembly: Config.Supervision reaches the supervisor (a
+// driver that sits between steps past the injected stall window — here a
+// fake engine that never announces a dispatch — draws a driver_stalled
+// recovery through the production path), and the recovery engine's
+// storm guard still bounds a driver that keeps stalling: after the
+// bound the WI is parked blocked, never relaunched forever (the #97
+// crash-loop lesson, now fed by the stall verdict too).
+func TestSupervisionStallWindowDrivesRecoveryThenBlocks(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) {
-		// The Bug-4 seam: the supervision windows the assembly passes
-		// through (zero would keep the 10min/2min production defaults,
-		// and this test would hang instead of detect).
-		c.Observe = ObserveWindows{
-			HangWindow:   80 * time.Millisecond,
-			ProbeTimeout: 300 * time.Millisecond,
-		}
+		c.Supervision = SupervisionConfig{StallWindow: 80 * time.Millisecond}
 	})
-	td.submitClaim(t, "wi_win")
-	td.waitMonitored(t, "wi_win")
+	td.submitClaim(t, "wi_stall")
+	td.waitMonitored(t, "wi_stall")
 
-	// The agent's liveness probe will never be acknowledged.
-	agent := td.spawner.agentOf(0)
-	agent.mu.Lock()
-	agent.ackFn = func(method string) error { return errors.New("probe lost") }
-	agent.mu.Unlock()
-
-	// One record through the PRODUCTION record path — the spawner tap →
-	// daemon tapRecord → adapter → monitor — opens a turn: observable
-	// stream, turn in flight. Silence past the injected 80ms window arms
-	// the watchdog.
-	td.tapRecord("wi_win", []byte(`{"type":"agent_start"}`))
-
-	// The watchdog probes (the probe really reached the agent), the probe
-	// fails, and exactly one hang recovery re-derives the agent.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for td.spawner.callCount() < 2 {
 		if time.Now().After(deadline) {
-			t.Fatalf("hang recovery never re-derived the agent (spawns=%d)", td.spawner.callCount())
+			t.Fatalf("the stalled driver was never relaunched (spawns=%d)", td.spawner.callCount())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := agent.sentMethods(); !containsStr(got, protocol.ControlProbe) {
-		t.Fatalf("the liveness probe never reached the agent: %v", got)
-	}
-
-	// The detection surfaces journaled the episode: hang_suspected incident
-	// and the hang recovery, through the injected windows.
-	var sawSuspect, sawHang bool
-	for _, e := range td.obs.Events().Since("wi_win") {
-		switch e.Kind {
-		case observe.EvInfraIncident:
-			if strings.Contains(string(e.Body), observe.HangSuspected) {
-				sawSuspect = true
-			}
-		case observe.EvNeedsRecovery:
-			if strings.Contains(string(e.Body), protocol.RecoverHang) {
-				sawHang = true
-			}
+	var sawStall bool
+	for _, e := range td.obs.Events().Since("wi_stall") {
+		if e.Kind == observe.EvNeedsRecovery && strings.Contains(string(e.Body), protocol.RecoverDriverStalled) {
+			sawStall = true
 		}
 	}
-	if !sawSuspect {
-		t.Fatal("no hang_suspected incident: the injected HangWindow did not drive the watchdog")
-	}
-	if !sawHang {
-		t.Fatal("no hang recovery: the injected windows did not drive detection")
+	if !sawStall {
+		t.Fatalf("no driver_stalled recovery event: %v", td.obs.Events().Since("wi_stall"))
 	}
 
-	// The storm guard: the recovered agent's fresh stream (no records,
-	// no turn) never re-arms, so the whole episode is ONE recovery.
-	time.Sleep(250 * time.Millisecond)
-	if n := td.spawner.callCount(); n != 2 {
-		t.Fatalf("spawns = %d after the recovery settled, want 2 (storm guard)", n)
-	}
-	for _, e := range td.obs.Events().Since("wi_win") {
-		if e.Kind == observe.EvNeedsRecovery && !strings.Contains(string(e.Body), protocol.RecoverHang) {
-			t.Fatalf("second recovery outside the hang episode: %+v", e)
+	// It keeps stalling: the storm guard parks the WI blocked.
+	deadline = time.Now().Add(15 * time.Second)
+	for td.hub.endCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("a driver that keeps stalling was never parked blocked (spawns=%d)", td.spawner.callCount())
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
-}
-
-func containsStr(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
+	if st := td.hub.lastEnd().Status; st != "blocked" {
+		t.Fatalf("end status = %q, want blocked (the driver-crash bound)", st)
 	}
-	return false
 }

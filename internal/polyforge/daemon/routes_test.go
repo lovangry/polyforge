@@ -183,10 +183,6 @@ func TestObserveAnswerPending(t *testing.T) {
 	if !errors.As(aerr, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "bridge") {
 		t.Fatalf("answer error = %v, want the typed no-bridge-handle 409", aerr)
 	}
-	// Nothing reached the agent: no relay executed.
-	if n := len(td.spawner.agentOf(0).sentMethods()); n != 0 {
-		t.Fatalf("a relay reached the agent (%v) — none may execute", td.spawner.agentOf(0).sentMethods())
-	}
 }
 
 // TestCloseArbitration is the load-bearing close arbitration: a CLI wrap

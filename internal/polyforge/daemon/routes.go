@@ -59,11 +59,14 @@ type statusJob struct {
 	// human must never read as merely busy).
 	NeedsInput bool   `json:"needs_input,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
-	// LastProgressAgoSec is the F15c owner face: whole seconds since the
-	// job's stream last proved AGENT progress (nil = no progress record
-	// yet — the CLI renders "-"). UI-noise records never refresh it, so
-	// a wedged-but-chattering job reads as stale, not fresh.
-	LastProgressAgoSec *int64 `json:"last_progress_ago_sec,omitempty"`
+	// StepAgeSec / LastWorkAgoSec are the owner liveness face (the ops
+	// status columns): whole seconds since the current dispatch began and
+	// since its harness last did REAL work (nil = no dispatch in flight,
+	// or no work-class signal yet — the CLI renders "-"). UI-noise
+	// records never refresh the work clock, so a wedged-but-chattering
+	// job reads as stale, not fresh.
+	StepAgeSec     *int64 `json:"step_age_sec,omitempty"`
+	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
 }
 
 type queueStats struct {
@@ -563,10 +566,10 @@ func (d *Daemon) wrapRoute(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	// D6: the per-job needs_input projection, derived from the observe
 	// lane's monitors (keyed by the canonical id — the same key
-	// rt.List() reports). F15c rides the same loop: the per-job progress
-	// staleness for the LAST-PROGRESS column.
+	// rt.List() reports). The same loop carries the per-job liveness
+	// reading (step age + last real-work-signal age).
 	pending := d.obs.PendingInputs()
-	progress := d.obs.ProgressAges()
+	activity := d.obs.Activities()
 	jobs := make([]statusJob, 0, 8)
 	// running slots: a retained PAUSED job (Finding 2) holds no agent and
 	// no queue slot — the ops face must not count it as running work.
@@ -595,9 +598,15 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 				sj.NeedsInput = true
 			}
 		}
-		if pa, ok := progress[ji.WorkItem]; ok && !pa.LastProgressAt.IsZero() {
-			ago := int64(time.Since(pa.LastProgressAt) / time.Second)
-			sj.LastProgressAgoSec = &ago
+		if act, ok := activity[ji.WorkItem]; ok && act.InDispatch {
+			if !act.StepStartedAt.IsZero() {
+				age := int64(time.Since(act.StepStartedAt) / time.Second)
+				sj.StepAgeSec = &age
+			}
+			if !act.LastWorkAt.IsZero() {
+				ago := int64(time.Since(act.LastWorkAt) / time.Second)
+				sj.LastWorkAgoSec = &ago
+			}
 		}
 		jobs = append(jobs, sj)
 	}
