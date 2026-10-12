@@ -65,6 +65,19 @@ func TestV1S08DaemonRestart(t *testing.T) {
 	t.Cleanup(func() { d2.stop() })
 	d2.start()
 
+	// Crash-orphan reaping (v2-converge §6 bug 3): the restart
+	// reconciliation reaps the crashed daemon's surviving step process
+	// (journal pid + PF_WI_ID sweep) BEFORE re-dispatching, so the old
+	// writer is gone while the new derivation runs.
+	waitUntil(t, 30*time.Second, "the crashed daemon's step process survived the restart", func() bool {
+		for _, p := range orphanPIDs(wi) {
+			if p == survivorPID {
+				return false
+			}
+		}
+		return true
+	})
+
 	// The reconciliation resumed the job: a live step process again, and
 	// the restarted driver seeds PAST the crashed dispatch's ordinal (the
 	// fence: the journal's max is the seed, so fix re-dispatches as a
@@ -109,10 +122,8 @@ func TestV1S08DaemonRestart(t *testing.T) {
 	if !contains(kinds, "job_started") || !contains(kinds, "job_stopped") {
 		t.Fatalf("restarted daemon's events miss the lifecycle: %v", kinds)
 	}
-	// The known crash survivor is the only orphan the driver lane can
-	// leave (no daemon-side pid to signal — the harness sweep collects
-	// it); nothing else leaks.
-	waitUntil(t, 15*time.Second, "more than the one crash survivor leaked", func() bool {
-		return len(orphanPIDs(wi)) <= 1
+	// The crash survivor was reaped at restart; nothing leaks.
+	waitUntil(t, 15*time.Second, "step processes leaked after the work item wrapped", func() bool {
+		return len(orphanPIDs(wi)) == 0
 	})
 }
