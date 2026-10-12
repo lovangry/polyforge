@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 )
@@ -14,7 +13,7 @@ import (
 // clearEnv removes the PF_* overrides for a hermetic config test.
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"PF_SERVER", "PF_API_KEY", "PF_DAEMON_SOCKET", "PF_USER_ID", "PF_CHAT_ID", "PF_WATCH_POLL", "PF_WATCH_LOG", "PF_WATCH_HEARTBEAT"} {
+	for _, k := range []string{"PF_SERVER", "PF_API_KEY", "PF_DAEMON_SOCKET", "PF_USER_ID", "PF_CHAT_ID"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("XDG_CONFIG_HOME", "")
@@ -278,139 +277,23 @@ func TestConfigMalformedTomlIsAnError(t *testing.T) {
 
 func errorsAs(err error, target any) bool { return errors.As(err, target) }
 
-// --- The watch-lane config keys (wi_LMSxPTQTtz5x step
-// cli_config_watch_keys): the [watch.summarize_model.<harness>] sections,
-// the harness_sessions_root override, and the cadence keys with their
-// flag > env > config precedence, env as fill-in only, defaults
-// 3s / 1m / off, the heartbeat `off` literal. ---
-
-// watchConfigEnv writes a scratch config with the [workspace] mapping and
-// the given extra body, and answers the XDG env for LoadConfig.
-func watchConfigEnv(t *testing.T, extra string) string {
-	t.Helper()
+// The watch summarizer is gone: its [watch.*] sections and watch_* keys
+// are tolerated and ignored (an installed cli.toml keeps loading); any
+// other unknown section still refuses.
+func TestConfigRetiredWatchConfigIsIgnored(t *testing.T) {
+	clearEnv(t)
 	ws := t.TempDir()
-	dir := t.TempDir()
-	xdg := filepath.Join(dir, "xdg")
-	if err := os.MkdirAll(filepath.Join(xdg, "polyforge"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cfg := "[workspace.\"" + ws + "\"]\nprojects = [\"e2e\"]\n" + extra
-	if err := os.WriteFile(filepath.Join(xdg, "polyforge", "cli.toml"), []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return xdg
-}
-
-func loadWatchConfig(t *testing.T, extra string, env map[string]string) (Config, error) {
-	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", watchConfigEnv(t, extra))
-	for k, v := range env {
-		t.Setenv(k, v)
-	}
-	return LoadConfig("")
-}
-
-func TestConfigWatchSummarizeSectionsAndSessionsRoot(t *testing.T) {
-	cfg, err := loadWatchConfig(t, "\nharness_sessions_root = \"/srv/sessions\"\n\n[watch.summarize_model.pi]\nmodel = \"prov/pi-m\"\n\n[watch.summarize_model.claude]\nmodel = \"prov/cl-m\"\n", nil)
+	base := "[workspace.\"" + ws + "\"]\nprojects = [\"e2e\"]\n"
+	body := base + "\n[watch.summarize_model.pi]\nmodel = \"prov/pi-m\"\n\nwatch_poll = \"7s\"\nharness_sessions_root = \"/x\"\n" +
+		"\n[watch.summarize_model.claude]\nmodel = \"prov/cl\"\n"
+	cfg, err := LoadConfig(writeTempConfig(t, body))
 	if err != nil {
-		t.Fatalf("the watch sections must load: %v", err)
+		t.Fatalf("retired watch config must stay loadable: %v", err)
 	}
-	if cfg.HarnessSessionsRoot != "/srv/sessions" {
-		t.Fatalf("harness_sessions_root = %q", cfg.HarnessSessionsRoot)
+	if len(cfg.Mapping.Workspaces()) != 1 {
+		t.Fatalf("the mapping must survive: %v", cfg.Mapping.Workspaces())
 	}
-	if cfg.WatchSummarize["pi"] != "prov/pi-m" || cfg.WatchSummarize["claude"] != "prov/cl-m" {
-		t.Fatalf("watch.summarize_model sections = %v", cfg.WatchSummarize)
-	}
-}
-
-func TestConfigWatchKeysAfterSectionsHoistToRoot(t *testing.T) {
-	// The watch lane's own configs write the flat cadence keys after the
-	// summarize-model sections: known flat keys are root-level wherever
-	// they appear.
-	cfg, err := loadWatchConfig(t, "\n[watch.summarize_model.pi]\nmodel = \"prov/pi-m\"\n\nwatch_poll = \"7s\"\nwatch_log = \"11m\"\nwatch_heartbeat = \"13m\"\n", nil)
-	if err != nil {
-		t.Fatalf("flat cadence keys after section headers must hoist to the root: %v", err)
-	}
-	if cfg.WatchPoll != 7*time.Second || cfg.WatchLog != 11*time.Minute || cfg.WatchHeartbeat != 13*time.Minute {
-		t.Fatalf("cadence keys = %v / %v / %v", cfg.WatchPoll, cfg.WatchLog, cfg.WatchHeartbeat)
-	}
-}
-
-func TestConfigWatchCadencePrecedenceEnvFillInAndDefaults(t *testing.T) {
-	// Defaults when absent everywhere: 3s / 1m / off.
-	cfg, err := loadWatchConfig(t, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cad := cfg.ResolveWatchCadence(WatchFlagOverrides{})
-	if cad.Poll != 3*time.Second || cad.Log != time.Minute || cad.Heartbeat != 0 {
-		t.Fatalf("defaults = %+v, want 3s / 1m / off", cad)
-	}
-	// Env fills ABSENT keys only.
-	cfg, err = loadWatchConfig(t, "", map[string]string{"PF_WATCH_POLL": "6s", "PF_WATCH_LOG": "9m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cad = cfg.ResolveWatchCadence(WatchFlagOverrides{})
-	if cad.Poll != 6*time.Second || cad.Log != 9*time.Minute || cad.Heartbeat != 0 {
-		t.Fatalf("env fill-in = %+v", cad)
-	}
-	// A present cli.toml key beats PF_WATCH_* (env is fill-in only).
-	cfg, err = loadWatchConfig(t, "\nwatch_log = \"11m\"\n", map[string]string{"PF_WATCH_LOG": "9m", "PF_WATCH_HEARTBEAT": "17m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cad = cfg.ResolveWatchCadence(WatchFlagOverrides{})
-	if cad.Log != 11*time.Minute {
-		t.Fatalf("cli.toml must beat PF_WATCH_*: %+v", cad)
-	}
-	if cad.Heartbeat != 17*time.Minute {
-		t.Fatalf("PF_WATCH_HEARTBEAT must fill the absent key: %+v", cad)
-	}
-	// The flag layer beats everything.
-	four := 4 * time.Second
-	cad = cfg.ResolveWatchCadence(WatchFlagOverrides{Log: &four})
-	if cad.Log != 4*time.Second {
-		t.Fatalf("the flag layer must win: %+v", cad)
-	}
-	// The heartbeat `off` literal (cli.toml) wins over the env and
-	// resolves to off.
-	cfg, err = loadWatchConfig(t, "\nwatch_heartbeat = \"off\"\n", map[string]string{"PF_WATCH_HEARTBEAT": "13m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cad = cfg.ResolveWatchCadence(WatchFlagOverrides{}); cad.Heartbeat != 0 {
-		t.Fatalf("the off literal must win over the env: %+v", cad)
-	}
-}
-
-func TestConfigWatchMalformedValuesRefuseLoudly(t *testing.T) {
-	for _, tc := range []struct {
-		extra string
-		env   map[string]string
-		key   string
-	}{
-		{extra: "\nwatch_poll = \"banana\"\n", key: "watch_poll"},
-		{extra: "\nwatch_log = \"12\"\n", key: "watch_log"},
-		{extra: "\nwatch_heartbeat = \"banana\"\n", key: "watch_heartbeat"},
-		{extra: "\nwatch_poll = \"-3s\"\n", key: "watch_poll"},
-		{extra: "", env: map[string]string{"PF_WATCH_POLL": "nope"}, key: "PF_WATCH_POLL"},
-	} {
-		_, err := loadWatchConfig(t, tc.extra, tc.env)
-		if err == nil || !strings.Contains(err.Error(), tc.key) {
-			t.Fatalf("malformed %s must refuse loudly naming the key, got %v", tc.key, err)
-		}
-	}
-}
-
-func TestConfigWatchUnknownSectionStillRefused(t *testing.T) {
-	_, err := loadWatchConfig(t, "\n[watch.other]\nmodel = \"x\"\n", nil)
-	if err == nil || !strings.Contains(err.Error(), "unknown section") {
+	if _, err := LoadConfig(writeTempConfig(t, base+"\n[other.thing]\nx = \"1\"\n")); err == nil || !strings.Contains(err.Error(), "unknown section") {
 		t.Fatalf("an unknown section must still refuse: %v", err)
-	}
-	// A watch section's only key is `model`.
-	_, err = loadWatchConfig(t, "\n[watch.summarize_model.pi]\ntemperature = \"0.2\"\n", nil)
-	if err == nil || !strings.Contains(err.Error(), "model") {
-		t.Fatalf("a [watch.summarize_model] section carries only model: %v", err)
 	}
 }

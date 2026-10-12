@@ -1903,18 +1903,6 @@ func TestW113DoctorHealthyMachine(t *testing.T) {
 	d := w113NewDaemon(t, inst, w113DOptConfig(cfgPath))
 	w113ConfigFile(t, cfgPath, inst.url, inst.adminKey, d.sock,
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	// The healthy machine of the watch lane (wi_LMSxPTQTtz5x) also
-	// covers the per-harness summarize-model entries: a reachable
-	// harness without a non-empty watch.summarize_model entry now fails
-	// the doctor's health report, so the healthy fixture covers both.
-	cfgRaw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	covered := string(cfgRaw) + "\n[watch.summarize_model.pi]\nmodel = \"prov/pi\"\n\n[watch.summarize_model.claude]\nmodel = \"prov/claude\"\n"
-	if err := os.WriteFile(cfgPath, []byte(covered), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	d.start()
 	defer d.stop()
 

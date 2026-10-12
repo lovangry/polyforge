@@ -243,6 +243,14 @@ func (d *Daemon) handler() http.Handler {
 	mux.HandleFunc("POST /batch_submit", d.batchRoute)
 	mux.HandleFunc("POST /shutdown", d.shutdownRoute)
 	mux.HandleFunc("POST /chat/init", d.chatInitRoute)
+	// pf watch: the per-WI snapshot and the daemon-held chat subscriptions.
+	mux.HandleFunc("GET /jobs/{wi}/watch", d.watchSnapshotRoute)
+	mux.HandleFunc("GET /chats/{id}/subscriptions", d.subscriptionsRoute)
+	mux.HandleFunc("POST /chats/{id}/subscribe", d.subscribeRoute(true))
+	mux.HandleFunc("POST /chats/{id}/unsubscribe", d.subscribeRoute(false))
+	mux.HandleFunc("POST /chats/{id}/ack", d.ackRoute)
+	mux.HandleFunc("POST /chats/{id}/heartbeat", d.heartbeatRoute)
+	mux.HandleFunc("GET /chats/{id}/attention", d.attentionRoute)
 	return mux
 }
 
@@ -295,11 +303,13 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// unmapped at restart) is resumed IN PLACE with its kept session —
 		// re-check first; still broken answers the typed error.
 		if intent == "resume" {
+			cursor := d.lastSeq(canonical)
 			if held, rerr := d.rt.RepairResume(d.runCtx, canonical); held {
 				if rerr != nil {
 					writeRepairErr(w, rerr)
 					return
 				}
+				d.autoSubscribe(body.Origin, canonical, cursor)
 				writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
 				return
 			}
@@ -336,10 +346,14 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// Accepted = enqueued; the dispatcher spawns within one tick,
 		// priority-desc against the machine's concurrency cap.
 		// `accepted` is answered only once the entry is on disk (v2 §5).
+		cursor := d.lastSeq(canonical)
 		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent, Origin: body.Origin.origin()}); err != nil {
 			writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+err.Error())
 			return
 		}
+		// pf watch: the submitting chat is subscribed (subscription =
+		// adoption); events from here on are its to consume.
+		d.autoSubscribe(body.Origin, canonical, cursor)
 		writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
 	}
 }
@@ -401,10 +415,12 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	// measured exactly that way on the s28 shape). The dispatcher starts
 	// every claim on d.runCtx for the same reason.
 	d.rt.NoteOrigin(canonical, body.Origin.origin())
+	cursor := d.lastSeq(canonical)
 	if err := d.rt.StartIntent(d.runCtx, canonical, "claim"); err != nil {
 		writeErrOf(w, err)
 		return
 	}
+	d.autoSubscribe(body.Origin, canonical, cursor)
 	writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical})
 }
 
@@ -602,11 +618,9 @@ func (d *Daemon) wrapRoute(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 // ops face: status / mode / batch_submit / shutdown.
 
-func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
-	// D6: the per-job needs_input projection, derived from the observe
-	// lane's monitors (keyed by the canonical id — the same key
-	// rt.List() reports). F15c rides the same loop: the per-job progress
-	// staleness for the LAST-PROGRESS column.
+// statusJobs builds the jobs[] bookkeeping (with the running-slot count);
+// the status route and the watch lane share it.
+func (d *Daemon) statusJobs() ([]statusJob, int) {
 	pending := d.obs.PendingInputs()
 	progress := d.obs.ProgressAges()
 	jobs := make([]statusJob, 0, 8)
@@ -651,6 +665,15 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		jobs = append(jobs, sj)
 	}
+	return jobs, running
+}
+
+func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
+	// D6: the per-job needs_input projection, derived from the observe
+	// lane's monitors (keyed by the canonical id — the same key
+	// rt.List() reports). F15c rides the same loop: the per-job progress
+	// staleness for the LAST-PROGRESS column.
+	jobs, running := d.statusJobs()
 	writeJSON(w, http.StatusOK, statusResponse{
 		MachineID:    d.cfg.MachineID,
 		DisplayName:  d.cfg.DisplayName,
@@ -795,10 +818,12 @@ func (d *Daemon) batchRoute(w http.ResponseWriter, r *http.Request) {
 		if _, live := d.rt.Info(canonical); live || d.q.IsPending(canonical) {
 			continue
 		}
+		cursor := d.lastSeq(canonical)
 		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: priority, Intent: "claim", Origin: body.Origin.origin()}); err != nil {
 			writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+err.Error())
 			return
 		}
+		d.autoSubscribe(body.Origin, canonical, cursor)
 		submitted = append(submitted, canonical)
 	}
 	writeJSON(w, http.StatusOK, batchResponse{Submitted: len(submitted), WorkItemIDs: submitted})

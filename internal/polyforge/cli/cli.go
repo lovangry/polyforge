@@ -49,6 +49,9 @@ type Command struct {
 	Name    string
 	Summary string
 	Usage   string
+	// Group is the help group the verb is listed under; "" = dispatchable
+	// but not surfaced (the one-shot migration verbs, #103 AC16).
+	Group string
 	// NoConfigLoad marks verbs that load the config THEMSELVES because
 	// an unloadable config is the verb's subject, not an early exit
 	// (`pf doctor`): Run skips the shared pre-load and hands the verb a
@@ -58,15 +61,15 @@ type Command struct {
 	Run          func(ctx *Context, fs *flag.FlagSet, args []string) error
 }
 
-// commands is the full registry: the 15 routing verbs first — 7 direct
+// commands is the full registry (help grouping is per-command metadata,
+// Command.Group, not position): the 15 routing verbs first — 7 direct
 // to aihub (file, queue, cancel, recall, remember + the v1.5 takeover
 // and verify-session; the blocked exits are `resume` = continue and
 // `cancel` = abandon, v2-converge §7) + 8 on the daemon UDS face (submit, observe,
 // answer, batch-confirm, pause, resume, wrap, ops) — then ship (the wrap→git
 // delivery bridge, daemon face), then the management face M1–M5, then the
 // two migrations (dispatchable but never surfaced on the help face — #103
-// AC16), then the machine health face (doctor, #113) and the watch lane's
-// one-shot data face (watch-probe, wi_LMSxPTQTtz5x), then the daemon
+// AC16), then the machine health face (doctor, #113), then the daemon
 // placeholder (help-only: cmd/pf/main.go intercepts the real launch).
 var commands = []*Command{
 	cmdFile,
@@ -85,6 +88,7 @@ var commands = []*Command{
 	cmdWrap,
 	cmdOps,
 	cmdChat,
+	cmdWatch,
 	cmdShip,
 	cmdUsers,
 	cmdApiKeys,
@@ -95,7 +99,6 @@ var commands = []*Command{
 	cmdMigrateMemories,
 	cmdMigrateWorkItems,
 	cmdDoctor,
-	cmdWatchProbe,
 	cmdDaemon,
 }
 
@@ -284,45 +287,37 @@ func fsHasFlags(fs *flag.FlagSet) bool {
 	return has
 }
 
-// printUsage lists all commands grouped by target face.
+// Help groups (Command.Group), in print order. A verb with an empty Group
+// stays dispatchable but is not listed (the migration verbs, #103 AC16).
+const (
+	GroupData     = "data"
+	GroupExec     = "exec"
+	GroupDelivery = "delivery"
+	GroupMgmt     = "mgmt"
+	GroupDiag     = "diag"
+	GroupProcess  = "process"
+)
+
+var helpGroups = []struct{ id, title string }{
+	{GroupData, "Data-plane verbs (direct to aihub):"},
+	{GroupExec, "Execution-plane verbs (local daemon UDS face):"},
+	{GroupDelivery, "Delivery bridge (wrap→git, local daemon UDS face):"},
+	{GroupMgmt, "Management face (M1–M5):"},
+	{GroupDiag, "Diagnostics:"},
+	{GroupProcess, "Process:"},
+}
+
+// printUsage lists all commands grouped by Command.Group, in registry order.
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "pf — polyforge v1 client CLI")
 	fmt.Fprintln(w)
-	// The registry layout: 7 data-plane verbs (direct to aihub) — file,
-	// queue, cancel, recall, remember + the v1.5 takeover and
-	// verify-session — then the 8 execution-plane verbs, chat, ship, the M1–M5
-	// management face and the daemon placeholder. The two migration verbs
-	// (positions 23–24) stay dispatchable for the one-shot v0→v1 cutover
-	// but are deliberately UNSURFACED here (#103, AC16): no migration
-	// subcommand appears on the pf verb surface — capsule migration is a
-	// manual operator procedure (docs/design/polyforge-vnext/
-	// 08-capsule-base-migration.md). The group indices below MUST track
-	// that layout.
-	fmt.Fprintln(w, "Data-plane verbs (direct to aihub):")
-	for _, c := range commands[0:7] {
-		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
-	}
-	fmt.Fprintln(w, "Execution-plane verbs (local daemon UDS face):")
-	for _, c := range commands[7:16] {
-		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
-	}
-	fmt.Fprintln(w, "Delivery bridge (wrap→git, local daemon UDS face):")
-	for _, c := range commands[16:17] {
-		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
-	}
-	fmt.Fprintln(w, "Management face (M1–M5):")
-	for _, c := range commands[17:23] {
-		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
-	}
-	// commands[23:25] are the migration verbs — dispatchable, never
-	// surfaced (see the layout comment above).
-	fmt.Fprintln(w, "Diagnostics:")
-	for _, c := range commands[25:27] {
-		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
-	}
-	fmt.Fprintln(w, "Process:")
-	for _, c := range commands[27:] {
-		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
+	for _, g := range helpGroups {
+		fmt.Fprintln(w, g.title)
+		for _, c := range commands {
+			if c.Group == g.id {
+				fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
+			}
+		}
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global flags (before the command):")

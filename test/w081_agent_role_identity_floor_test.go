@@ -8,19 +8,14 @@ package test
 // content-floor pattern (test/w079_*, test/w113_* read the skill surfaces
 // via v1Root(t) and assert what the docs must teach):
 //
-//   - SKILL.md teaches BOUND-ONLY needs_input and LAST-PROGRESS
-//     presentation, the watchers-directory bound set, name-only
-//     machine-global listing on an explicit ask, and the unchanged daemon
-//     watchdog recovery;
-//   - SKILL.md teaches the ask-to-adopt channel (batched ask, explicit
-//     consent, header-rewrite adoption with the armed_at refresh, the
-//     adopted binding's answer-presentation duty, concurrent-session
-//     header authority, legacy #76-header scripts) and does NOT teach
-//     automatic same-workspace adoption;
-//   - verbs/submit.md and verbs/resume.md carry the explicit-adoption
-//     wording in the fragments' own words;
+//   - SKILL.md teaches the `pf watch` lane (v2-converge §3): subscription
+//     = adoption, the fixed-template decision line the agent must not
+//     answer, the Claude Code statusLine + wake loop and the pi adapter,
+//     and no longer teaches the retired watch.sh arming / ask-to-adopt;
+//   - verbs/submit.md and verbs/resume.md say the chat is subscribed
+//     automatically (nothing to arm);
 //   - no bootstrap resurrection: skills/polyforge's top level stays
-//     SKILL.md + scripts/ + verbs/, and no using-polyforge-shaped file
+//     SKILL.md + hooks/ + extensions/ + verbs/, and no using-polyforge-shaped file
 //     appears anywhere the docs live.
 //
 // The PF_AGENT_ROLE execution-role marker and the SKILL.md role-detection
@@ -30,7 +25,6 @@ package test
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -55,203 +49,64 @@ func w081FloorSection(t *testing.T, full, start, end string) string {
 	return full[i:j]
 }
 
-// w081FloorWatchLane returns the watch-lane text (from its heading to the
-// end of the file).
-func w081FloorWatchLane(t *testing.T, full string) string {
-	t.Helper()
-	i := strings.Index(full, "## The watch lane")
-	if i < 0 {
-		t.Fatal("SKILL.md lost the watch-lane anchor — the adoption floor lost its subject")
-	}
-	return full[i:]
-}
-
-// w081FloorHasWord answers whether text contains tok as a whole word
-// (CJK tokens fall back to plain containment).
-func w081FloorHasWord(text, tok string) bool {
-	if !regexp.MustCompile(`^[A-Za-z]+$`).MatchString(tok) {
-		return strings.Contains(text, tok)
-	}
-	re, err := regexp.Compile(`\b` + regexp.QuoteMeta(tok) + `\b`)
-	if err != nil {
-		return strings.Contains(text, tok)
-	}
-	return re.MatchString(text)
-}
-
-// TestW081FloorTurnStartDutyIsBoundOnly pins the #117 correction's taught
-// contract: the turn-start obligation section derives a BOUND set from the
-// watchers directory (own session_id headers + explicit adoption), gates
-// needs_input AND LAST-PROGRESS presentation on it, never surfaces
-// unbound jobs proactively (name-only on an explicit machine-global ask),
-// and leaves machine-level stall recovery with the daemon's watchdogs.
-func TestW081FloorTurnStartDutyIsBoundOnly(t *testing.T) {
+// TestW081FloorWatchLaneTeaching pins the taught contract of the pf watch
+// lane: subscription is the ownership model, a decision line is a fixed
+// template the agent never answers, the question text is read only on
+// request, and both harness adapters are documented.
+func TestW081FloorWatchLaneTeaching(t *testing.T) {
 	full := w081FloorSkill(t)
-	section := w081FloorSection(t, full, "## Turn-start obligation", "## The watch lane")
-	// The bound set: derived from the watchers directory (session_id
-	// headers), plus explicit adoption — and `pf ops status` alone
-	// binds nothing.
-	for _, tok := range []string{"bound", "watchers/", "session_id", "adopt"} {
+	section := w081FloorSection(t, full, "## Human coordination: `pf watch`", "## Session rules")
+	for _, tok := range []string{
+		"Subscription is the whole ownership model", "pf watch subscribe", "PF_CHAT_ID",
+		"the agent must not answer it", "Never answer a decision line yourself",
+		"pf watch <wi> --once", "queued/preparing", "daemon unreachable; progress paused",
+		"statusLine", "pf watch --statusline --harness-session -", "--wait-decision",
+		"COMMAND AGAIN", "extensions/pf-chat.ts", "triggerTurn",
+	} {
 		if !strings.Contains(section, tok) {
-			t.Fatalf("the turn-start obligation section does not derive the bound set via %q", tok)
+			t.Fatalf("the pf watch section no longer teaches %q", tok)
 		}
-	}
-	if !strings.Contains(section, "machine-global") || !strings.Contains(section, "pf ops status") {
-		t.Fatal("the turn-start obligation section does not contrast the bound set with the machine-global pf ops status sweep")
-	}
-	// Both presentation duties ride the bound gate.
-	for _, tok := range []string{"needs_input", "LAST-PROGRESS"} {
-		if !strings.Contains(section, tok) {
-			t.Fatalf("the bound-only gate does not cover %q presentation", tok)
-		}
-	}
-	// Unbound jobs: never proactive; name-only on an explicit
-	// machine-global ask.
-	if !strings.Contains(section, "BY NAME ONLY") {
-		t.Fatal("the turn-start obligation section does not teach name-only listing for unbound WIs on an explicit machine-global status ask")
-	}
-	// Machine-level stall recovery stays with the daemon's watchdogs.
-	if !strings.Contains(section, "watchdogs") || !strings.Contains(section, "unchanged") {
-		t.Fatal("the turn-start obligation section does not teach that the daemon's watchdogs keep machine-level stall recovery unchanged")
-	}
-	// The incident this gating forbids stays named.
-	if !strings.Contains(section, "117") {
-		t.Fatal("the turn-start obligation section no longer names the #117 cross-session hijack this gating forbids")
 	}
 }
 
-// TestW081FloorAdoptionIsAskToAdoptWithHeaderRewrite pins the adoption
-// channel's taught contract on the watch lane: predecessor (non-live-
-// session) scripts go through a batched ask-the-owner prompt; consent
-// adopts by REWRITING the session_id header and refreshing armed_at; the
-// adopted binding carries the answer-presentation duty; concurrent
-// sessions keep the header authoritative; legacy #76-header scripts
-// follow the identical rule.
-func TestW081FloorAdoptionIsAskToAdoptWithHeaderRewrite(t *testing.T) {
-	full := w081FloorSkill(t)
-	lane := w081FloorWatchLane(t, full)
-	if !strings.Contains(lane, "adopt") {
-		t.Fatal("the watch-lane teaching never mentions adoption — the ask-to-adopt channel for predecessor scripts is unspecified")
-	}
-	asked := false
-	for _, tok := range []string{"ask", "consent", "explicit", "确认", "征求"} {
-		if w081FloorHasWord(lane, tok) {
-			asked = true
-			break
-		}
-	}
-	if !asked {
-		t.Fatal("the watch-lane adoption teaching carries no ask-the-owner consent step")
-	}
-	// The batched ask for predecessor scripts.
-	for _, tok := range []string{"Predecessor", "batched"} {
-		if !strings.Contains(lane, tok) {
-			t.Fatalf("the watch lane does not teach the batched ask for %q (non-live-session) scripts", tok)
-		}
-	}
-	// Adoption is a header rewrite: session_id line rewritten to the
-	// adopting session, armed_at refreshed.
-	for _, tok := range []string{"rewrite", "armed_at"} {
-		if !strings.Contains(lane, tok) {
-			t.Fatalf("the watch lane does not teach header-rewrite adoption via %q", tok)
-		}
-	}
-	// An adopted binding carries the answer-presentation duty.
-	if !strings.Contains(lane, "presentation duty") {
-		t.Fatal("the watch lane does not teach that an adopted binding carries the answer-presentation duty")
-	}
-	// Concurrent sessions: the header is authoritative; the only path
-	// to ownership is ask-to-adopt.
-	if !strings.Contains(lane, "authoritative") {
-		t.Fatal("the watch lane does not teach that the pf-watcher session_id: header stays authoritative among concurrent sessions")
-	}
-	// Legacy #76-header scripts follow the identical ask-to-adopt rule.
-	if !strings.Contains(lane, "#76") {
-		t.Fatal("the watch lane does not teach the legacy #76-header script rule")
-	}
-}
-
-// TestW081FloorNoAutomaticAdoptionTeaching re-pins the absent-behavior
-// guard on the floor suite's own terms: no skill/verb/workflow document
-// may pair adoption with an automatic / silent mechanism (a line carrying
-// both). Green before AND after — this floor exists so the adoption
-// teaching can never grow the WI §3 behavior back.
-func TestW081FloorNoAutomaticAdoptionTeaching(t *testing.T) {
+// TestW081FloorRetiredWatchLaneIsGone pins the removal of the old watcher
+// script lane from every document surface.
+func TestW081FloorRetiredWatchLaneIsGone(t *testing.T) {
 	root := v1Root(t)
-	autos := []string{"automatic", "automatically", "silently", "silent"}
-	var hits []string
-	for _, r := range []string{filepath.Join(root, "skills"), filepath.Join(root, "workflows")} {
-		err := filepath.WalkDir(r, func(path string, de os.DirEntry, werr error) error {
-			if werr != nil {
-				return werr
-			}
-			if de.IsDir() || !strings.HasSuffix(path, ".md") {
-				return nil
-			}
-			raw, rerr := os.ReadFile(path)
-			if rerr != nil {
-				return rerr
-			}
-			for _, line := range strings.Split(string(raw), "\n") {
-				low := strings.ToLower(line)
-				if !strings.Contains(low, "adopt") {
-					continue
-				}
-				for _, a := range autos {
-					if strings.Contains(low, a) {
-						hits = append(hits, path+": "+strings.TrimSpace(line))
-						break
-					}
-				}
-			}
-			return nil
-		})
+	if _, err := os.Stat(filepath.Join(root, "skills", "polyforge", "scripts", "watch.sh")); err == nil {
+		t.Fatal("skills/polyforge/scripts/watch.sh must be deleted")
+	}
+	for _, rel := range []string{"SKILL.md", "verbs/submit.md", "verbs/resume.md", "verbs/observe.md", "verbs/doctor.md", "verbs/help.md", "verbs/init.md"} {
+		raw, err := os.ReadFile(filepath.Join(root, "skills", "polyforge", filepath.FromSlash(rel)))
 		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	if len(hits) > 0 {
-		t.Fatalf("docs teach automatic adoption — adoption is ask-only, the WI §3 behavior must stay absent (%d hits):\n%s",
-			len(hits), strings.Join(hits, "\n"))
+		text := string(raw)
+		for _, stale := range []string{"watch.sh", "watch-probe", "ask-to-adopt", ".polyforge/watchers", "summarize_model"} {
+			if strings.Contains(text, stale) {
+				t.Fatalf("%s still mentions the retired %q", rel, stale)
+			}
+		}
 	}
 }
 
-// TestW081FloorVerbFragmentsCarryAdoptionRule pins the touched verb
-// fragments' contract in the fragments' own words: submit's arm step and
-// resume's re-arm lane state the ownership rule — another session's
-// script is reachable only through ask-to-adopt, with resume carrying the
-// explicit consent + header-rewrite wording.
-func TestW081FloorVerbFragmentsCarryAdoptionRule(t *testing.T) {
+// TestW081FloorVerbFragmentsSayChatIsSubscribed pins submit's and resume's
+// wording: the submitting chat is subscribed by the daemon, nothing to arm.
+func TestW081FloorVerbFragmentsSayChatIsSubscribed(t *testing.T) {
 	for _, frag := range []string{"submit.md", "resume.md"} {
 		raw, err := os.ReadFile(filepath.Join(v1Root(t), "skills", "polyforge", "verbs", frag))
 		if err != nil {
 			t.Fatal(err)
 		}
-		text := string(raw)
-		// The ownership/adoption wording in the fragment's own words.
-		for _, tok := range []string{"session_id", "ask-to-adopt"} {
-			if !strings.Contains(text, tok) {
-				t.Fatalf("verbs/%s does not carry the ownership rule token %q", frag, tok)
-			}
-		}
-	}
-	// resume.md additionally carries the explicit-consent +
-	// header-rewrite adoption mechanics (the re-arm lane is where a
-	// session meets predecessor scripts).
-	raw, err := os.ReadFile(filepath.Join(v1Root(t), "skills", "polyforge", "verbs", "resume.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tok := range []string{"explicit consent", "armed_at", "Predecessor"} {
-		if !strings.Contains(string(raw), tok) {
-			t.Fatalf("verbs/resume.md does not carry the explicit-adoption mechanic %q", tok)
+		if !strings.Contains(string(raw), "subscribes") || !strings.Contains(string(raw), "pf watch") {
+			t.Fatalf("verbs/%s does not say the chat is subscribed automatically", frag)
 		}
 	}
 }
 
 // TestW081FloorNoBootstrapResurrection pins the documentation confinement
 // on the final tree: skills/polyforge's top level stays exactly
-// SKILL.md + scripts/ + verbs/ (the role routing lives in SKILL.md and
+// SKILL.md + hooks/ + extensions/ + verbs/ (the role routing lives in SKILL.md and
 // the touched verb fragments, never a new document), and no
 // using-polyforge-shaped file appears anywhere the docs live. Green
 // before AND after.

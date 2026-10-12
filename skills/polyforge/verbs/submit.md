@@ -45,21 +45,11 @@ generation) surfaces in the daemon log and the job never appears in
 `pf ops status` — observe/status is the follow-up, not the submit answer.
 For a takeover refused as non-admin, the same path reports `CORE-403`.
 
-## Watch lane: arm the watcher
+## Watching what you submitted
 
-Arm the session-side watcher after a successful submit — for a plain claim AND for `--takeover` alike:
-copy `skills/polyforge/scripts/watch.sh` verbatim to
-`<workspace>/.polyforge/watchers/<wi>.sh`, prepend the three header lines
-(`# pf-watcher wi: <wi id>` / `# pf-watcher session_id: <YOUR session's
-harness session id>` / `# pf-watcher armed_at: <RFC3339 UTC>`) above the
-copied body, and start the copy as a harness background task. Refuse to arm
-a terminal work item (wrapped / failed / canceled) — check
-`pf observe <wi> --json` once before copying; the script's startup guard
-refuses too, naming the status. The watcher wakes the session with one full
-report on the WI's first state change and self-deletes (script, log, state)
-when the WI turns terminal. The header you prepend is the ownership record:
-its `session_id` decides who is bound to the work item (the bound-only
-presentation duties and turn-start scan/re-arm), and a script headed with
-another session's id is never yours to take — the only path to ownership is
-the watch lane's ask-to-adopt channel. Full procedure: the watch-lane
-section of `SKILL.md`.
+`pf submit` subscribes the submitting chat (`PF_CHAT_ID`) to the work item in
+the daemon — there is nothing to arm. Make sure the chat's resident watcher is
+running (Claude Code: the `pf watch --chat "$PF_CHAT_ID" --wait-decision`
+background task; pi: the extension does it) so a decision wakes you. Until the
+daemon registers the work item with a monitor it shows as `queued/preparing`
+— not an error. Full procedure: the `pf watch` section of `SKILL.md`.

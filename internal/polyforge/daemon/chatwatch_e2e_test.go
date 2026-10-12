@@ -1,0 +1,84 @@
+package daemon
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/cli"
+	"github.com/silgrid/polyforge/internal/polyforge/watcher"
+)
+
+// clientAPI adapts the real DaemonClient to watcher.API for one chat.
+type clientAPI struct {
+	d    *cli.DaemonClient
+	chat string
+}
+
+func (c clientAPI) Subscriptions() (protocol.ChatSubscriptions, error) {
+	return c.d.ChatSubscriptions(c.chat)
+}
+func (c clientAPI) Snapshot(wi string, after int64) (*protocol.WatchSnapshot, error) {
+	return c.d.WatchSnapshot(wi, after)
+}
+func (c clientAPI) Ack(a protocol.ChatAck) error { return c.d.ChatAck(c.chat, a) }
+func (c clientAPI) Heartbeat(pid int) error      { return c.d.ChatHeartbeat(c.chat, pid) }
+func (c clientAPI) Attention(owner string) ([]protocol.ChatAttentionItem, error) {
+	return c.d.ChatAttention(c.chat, owner)
+}
+
+// The real watcher against the real daemon: a chat submits, the step asks a
+// question, the watcher prints ONE fixed-template line (no question text),
+// acks it, and does not repeat it.
+func TestWatcherAgainstRealDaemonNeedsInputOnce(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_e2e", Owner: "alice"}
+	td.submitClaim(t, "wi_e2e")
+	td.waitMonitored(t, "wi_e2e")
+	const secret = "drop the production database now"
+	td.seedPendingQuestion(t, "wi_e2e", "q-7", "plan", secret)
+	waitNeedsInput(t, td, "wi_e2e")
+
+	api := clientAPI{d: td.client, chat: "chat_e2e"}
+	run := func() string {
+		var out bytes.Buffer
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := watcher.Run(ctx, api, watcher.Options{WaitDecision: true, Out: &out, Poll: 20 * time.Millisecond}); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	out := run()
+	if !strings.Contains(out, "[polyforge] wi_e2e needs_input — a step is waiting for a human answer; this is a human decision, the agent must not answer it") {
+		t.Fatalf("out = %q", out)
+	}
+	if strings.Contains(out, secret) || strings.Count(out, "\n") != 1 {
+		t.Fatalf("exactly one fixed line, no free text: %q", out)
+	}
+	// acked in the daemon: a fresh watcher (restart) does not repeat it
+	subs, _ := td.client.ChatSubscriptions("chat_e2e")
+	if len(subs.Subscriptions) != 1 || len(subs.Subscriptions[0].Notified) != 1 {
+		t.Fatalf("subscriptions after ack = %+v", subs)
+	}
+	var out2 bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_ = watcher.Run(ctx, api, watcher.Options{Out: &out2, Poll: 20 * time.Millisecond})
+	if out2.Len() != 0 {
+		t.Fatalf("the delivered decision must not repeat: %q", out2.String())
+	}
+	// the progress file (daemon-provided path) is written by the resident watcher
+	sink := &watcher.StatusSink{Primary: subs.StatusPath, Fallback: t.TempDir() + "/fb"}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel2()
+	_ = watcher.Run(ctx2, api, watcher.Options{Status: sink, Poll: 20 * time.Millisecond})
+	raw, err := os.ReadFile(subs.StatusPath)
+	if err != nil || !strings.Contains(string(raw), "wi_e2e needs input step=plan") {
+		t.Fatalf("progress file = %q err=%v", raw, err)
+	}
+}
