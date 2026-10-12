@@ -324,7 +324,7 @@ func (d *w113Daemon) boot(bound time.Duration) (served bool, output string, code
 		"--api-key", d.apiKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
-		"--workflows-dir", filepath.Join(d.root, "workflows"),
+		"--workflows-dir", strippedWorkflowsDir(d.t, filepath.Join(d.root, "workflows")),
 		"--pi-bin", d.fakepi,
 	}
 	if d.config != "" {

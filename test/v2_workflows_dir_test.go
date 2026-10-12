@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"testing"
 )
 
 var humanGateFlag = regexp.MustCompile(`,\s*requires_human_answer:\s*true`)
@@ -23,10 +24,18 @@ func (u *v1Install) workflowsPath() string {
 	if u.keepHumanGates {
 		return shipped
 	}
-	if u.strippedWF != "" {
-		return u.strippedWF
+	if u.strippedWF == "" {
+		u.strippedWF = strippedWorkflowsDir(u.t, shipped)
 	}
-	dst := filepath.Join(u.t.TempDir(), "workflows")
+	return u.strippedWF
+}
+
+// strippedWorkflowsDir copies the shipped workflows tree into a test temp
+// dir with the requires_human_answer flag removed from every workflow.md,
+// for daemons started by harnesses other than v1Install (w113/w079, v3).
+func strippedWorkflowsDir(t testing.TB, shipped string) string {
+	t.Helper()
+	dst := filepath.Join(t.TempDir(), "workflows")
 	err := filepath.Walk(shipped, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -46,8 +55,7 @@ func (u *v1Install) workflowsPath() string {
 		return os.WriteFile(out, raw, info.Mode().Perm())
 	})
 	if err != nil {
-		u.t.Fatalf("stripped workflows copy: %v", err)
+		t.Fatalf("stripped workflows copy: %v", err)
 	}
-	u.strippedWF = dst
 	return dst
 }

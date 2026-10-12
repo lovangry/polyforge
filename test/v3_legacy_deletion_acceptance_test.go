@@ -119,7 +119,7 @@ func v3StartDaemon(t *testing.T, inst *v1Install, sock, dataDir, workspace, mach
 		"--api-key", inst.adminKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
-		"--workflows-dir", filepath.Join(root, "workflows"),
+		"--workflows-dir", inst.workflowsPath(),
 		"--pi-bin", inst.fakepiPath,
 		// polyforge#113: the mapping config is the only workspace source
 		// (and the config isolation file — never an operator's).
@@ -567,7 +567,7 @@ func TestV3RetiredLegacyLaneEnvFailsLoudAtBoot(t *testing.T) {
 		"--api-key", inst.adminKey,
 		"--machine-id", "m-v3env",
 		"--data-dir", dataDir,
-		"--workflows-dir", filepath.Join(root, "workflows"),
+		"--workflows-dir", inst.workflowsPath(),
 		"--pi-bin", inst.fakepiPath,
 		"--config", mappingConfigPath(t, workspace, []string{v1Project}),
 	}
