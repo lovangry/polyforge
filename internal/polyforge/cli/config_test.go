@@ -145,6 +145,7 @@ func TestConfigMalformedMappingRejected(t *testing.T) {
 		{"non-string array element", "[workspace.\"/tmp/x\"]\nprojects = [1]\n", "quoted strings"},
 		{"top-level projects key", "projects = [\"a\"]\n", "[workspace"},
 		{"other key in section", "[workspace.\"/tmp/x\"]\ngoal = \"nope\"\n", "projects"},
+		{"flat key after a workspace section", "[workspace.\"/tmp/x\"]\nprojects = [\"a\"]\nfoo = \"bar\"\n", `unknown key "foo" in section [workspace."/tmp/x"]`},
 		{"duplicate section", "[workspace.\"/tmp/x\"]\nprojects = [\"a\"]\n[workspace.\"/tmp/x\"]\nprojects = [\"b\"]\n", "duplicate"},
 	}
 	for _, c := range cases {

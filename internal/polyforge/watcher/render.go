@@ -136,7 +136,7 @@ func FormatOnce(s *protocol.WatchSnapshot, now time.Time, maxEvents int) string 
 	if ex := s.Execution; ex != nil && ex.PendingQuestion != nil && ex.PendingQuestion.ID != "" {
 		q := ex.PendingQuestion
 		fmt.Fprintf(&b, "question:   %s (step %s)\n", clean(q.ID), clean(q.Step))
-		fmt.Fprintf(&b, "  %s\n", strings.ReplaceAll(strings.TrimSpace(q.Question), "\n", "\n  "))
+		fmt.Fprintf(&b, "  %s\n", strings.ReplaceAll(cleanMultiline(q.Question), "\n", "\n  "))
 	}
 	evs := s.Events
 	if maxEvents > 0 && len(evs) > maxEvents {
@@ -180,6 +180,26 @@ func FormatAge(d time.Duration) string {
 
 // clean drops control characters (no terminal escapes from agent text) and
 // truncates.
+// cleanMultiline drops terminal control characters from free text (the
+// agent-authored question) but keeps its line structure: newlines survive,
+// tabs become spaces, every other C0/C1 control (ESC included) is removed.
+func cleanMultiline(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		switch {
+		case r == '\n':
+			b.WriteRune(r)
+		case r == '\t':
+			b.WriteRune(' ')
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0):
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func clean(s string) string {
 	var b strings.Builder
 	for _, r := range s {

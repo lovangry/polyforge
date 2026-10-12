@@ -23,7 +23,39 @@ func RuntimeDir() string {
 	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
 		return filepath.Join(x, "polyforge")
 	}
+	return tmpFallbackDir()
+}
+
+func tmpFallbackDir() string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("polyforge-%d", os.Getuid()))
+}
+
+// EnsureDir creates dir (0700). The shared-/tmp fallback is a name any
+// local user can pre-create, so it is also verified: it must be a real
+// directory (not a symlink) owned by the current uid and not group/world
+// writable — otherwise it is refused, never used.
+func EnsureDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if dir != tmpFallbackDir() {
+		return nil
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("runtime dir %s is not a directory (refusing to use it)", dir)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("runtime dir %s is not owned by uid %d (refusing to use it)", dir, os.Getuid())
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("runtime dir %s is group/world-writable (mode %o; refusing to use it)", dir, fi.Mode().Perm())
+	}
+	return nil
 }
 
 // PIDInfo is the pidfile content.
@@ -55,7 +87,7 @@ func (f Files) FallbackStatusPath() string {
 	return filepath.Join(f.Dir, "chat-"+f.Chat+".status")
 }
 
-func (f Files) ensureDir() error { return os.MkdirAll(f.Dir, 0o700) }
+func (f Files) ensureDir() error { return EnsureDir(f.Dir) }
 
 // ErrLocked means another watcher holds the chat's lock.
 var ErrLocked = errors.New("another watcher is already running for this chat")

@@ -235,7 +235,7 @@ func parseConfigTOML(text string) (map[string]string, []workspaceSection, error)
 		if inWS {
 			// Inside a workspace section: only the projects array.
 			if key != "projects" {
-				return nil, nil, fmt.Errorf("line %d: a [workspace] section carries only `projects = [\"...\"]`, got %q", ln+1, key)
+				return nil, nil, fmt.Errorf("line %d: unknown key %q in section [workspace.%q] (a workspace section carries only `projects`)", ln+1, key, sections[curWS].key)
 			}
 			if len(sections[curWS].projects) > 0 {
 				return nil, nil, fmt.Errorf("line %d: duplicate projects array in the [workspace] section of %s", ln+1, sections[curWS].key)

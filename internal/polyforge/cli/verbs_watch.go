@@ -207,7 +207,11 @@ func chatFromHarnessSession(ctx *Context, harness, session string) (string, erro
 		session = in.SessionID
 	}
 	sum := sha256.Sum256([]byte(harness + ":" + session))
-	cache := watcher.NewFiles("", "").Dir + "/session-" + hex.EncodeToString(sum[:8]) + ".chat"
+	rdir := watcher.RuntimeDir()
+	if err := watcher.EnsureDir(rdir); err != nil {
+		return "", fmt.Errorf("watch: %w", err)
+	}
+	cache := rdir + "/session-" + hex.EncodeToString(sum[:8]) + ".chat"
 	if raw, err := os.ReadFile(cache); err == nil {
 		if c := strings.TrimSpace(string(raw)); watcher.ChatIDRe.MatchString(c) {
 			return c, nil
@@ -221,7 +225,6 @@ func chatFromHarnessSession(ctx *Context, harness, session string) (string, erro
 	if err := json.Unmarshal(raw, &rec); err != nil || rec.ChatID == "" {
 		return "", fmt.Errorf("watch: unexpected chat init answer")
 	}
-	_ = os.MkdirAll(watcher.RuntimeDir(), 0o700)
 	_ = os.WriteFile(cache, []byte(rec.ChatID+"\n"), 0o600)
 	return rec.ChatID, nil
 }

@@ -518,3 +518,49 @@ func TestOneWatcherPerChatLock(t *testing.T) {
 	}
 	again()
 }
+
+func TestOnceStripsControlCharsFromQuestionText(t *testing.T) {
+	snap := running("wi_1", "s1")
+	snap.Execution.PendingQuestion = &protocol.WatchPendingQuestion{ID: "q-1", Step: "s1",
+		Question: "Which\x1b[2J database?\r\nsecond\tline\x07\u009b31m"}
+	out := FormatOnce(snap, time.Now(), 8)
+	if strings.ContainsAny(out, "\x1b\x07\r\u009b") {
+		t.Fatalf("control characters leaked into the --once output: %q", out)
+	}
+	if !strings.Contains(out, "Which[2J database?\n  second line31m") {
+		t.Fatalf("question text must keep its line structure, got %q", out)
+	}
+}
+
+func TestEnsureDirRefusesUnsafeTmpFallback(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("TMPDIR", t.TempDir())
+	dir := RuntimeDir()
+	if err := EnsureDir(dir); err != nil {
+		t.Fatalf("a fresh fallback dir must be created: %v", err)
+	}
+	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("fallback dir must be 0700: %v %v", fi, err)
+	}
+	if err := os.Chmod(dir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureDir(dir); err == nil || !strings.Contains(err.Error(), "writable") {
+		t.Fatalf("a group-writable fallback dir must be refused, got %v", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureDir(dir); err != nil {
+		t.Fatalf("a private dir must pass again: %v", err)
+	}
+	// a symlink planted at the name is not a directory we own
+	os.RemoveAll(dir)
+	target := t.TempDir()
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureDir(dir); err == nil {
+		t.Fatal("a symlink planted at the fallback name must be refused")
+	}
+}
