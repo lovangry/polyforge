@@ -249,15 +249,25 @@ func (m *Monitor) execJSONPath() string {
 // ---------------------------------------------------------------------------
 // main loop
 
+// announceStart appends the job_started event. The attaching side calls
+// it synchronously before launching run(): launching first would leave a
+// scheduling gap in which an event from another writer of the shared log
+// (the driver's EventLogger) could land ahead of job_started.
+func (m *Monitor) announceStart() {
+	_ = m.log.Append(m.wi.WorkItem, EvJobStarted, map[string]any{
+		"spawn_n": m.spawnN,
+	})
+}
+
 func (m *Monitor) run() {
 	defer func() {
 		_ = m.log.Append(m.wi.WorkItem, EvJobStopped, map[string]any{
 			"spawn_n": m.currentSpawn(),
 		})
 	}()
-	_ = m.log.Append(m.wi.WorkItem, EvJobStarted, map[string]any{
-		"spawn_n": m.spawnN,
-	})
+	// job_started is announced by the attaching side (announceStart)
+	// BEFORE this goroutine is scheduled, so no event appended after the
+	// attach can precede it in the log.
 	// the seed read: a restarted supervisor learns the capsule's state
 	// (pending question, version to publish) before any fact arrives
 	m.refreshExec(0)

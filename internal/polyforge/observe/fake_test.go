@@ -97,6 +97,7 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, ch
 	})
 	m.phase = phaseBetween
 	m.phaseSince = m.now()
+	m.announceStart()
 	go m.run()
 	t.Cleanup(func() {
 		m.requestStop()

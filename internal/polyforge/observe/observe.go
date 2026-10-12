@@ -214,6 +214,7 @@ func (o *Observe) onAttach(at Attach) {
 		}
 		m := o.newMonitor(at)
 		o.setMonitor(wi, m)
+		m.announceStart()
 		o.wg.Add(1)
 		go func() {
 			defer o.wg.Done()
