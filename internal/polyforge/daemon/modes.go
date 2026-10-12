@@ -225,6 +225,22 @@ func (q *jobQueue) Settle(wi string) error {
 	return q.persistLocked()
 }
 
+// Requeue returns a Take()n entry to pending (the claim attempt did not
+// run to a verdict — a transient hub failure) and persists; the next
+// dispatch pass retries it. The entry keeps its original enqueue time, so
+// its rank is unchanged.
+func (q *jobQueue) Requeue(wi string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	e, ok := q.inflight[wi]
+	if !ok {
+		return nil
+	}
+	delete(q.inflight, wi)
+	q.pending = append(q.pending, e)
+	return q.persistLocked()
+}
+
 // Flush persists the current state (used after a replay pass that only
 // dropped entries).
 func (q *jobQueue) Flush() error {

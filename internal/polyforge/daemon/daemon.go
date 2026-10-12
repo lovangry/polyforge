@@ -862,6 +862,17 @@ func (d *Daemon) dispatch() {
 		}
 		d.rt.NoteOrigin(e.WorkItemID, e.Origin)
 		err := d.rt.Start(d.runCtx, e.WorkItemID)
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
+			// The hub could not be reached before the claim: nothing was
+			// claimed, so the accepted submit stays queued and the next
+			// dispatch tick retries it (never dropped on a transient blip).
+			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) deferred: %v\n", e.WorkItemID, e.Intent, err)
+			if rerr := d.q.Requeue(e.WorkItemID); rerr != nil {
+				fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, rerr)
+			}
+			return
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)
 			// The submit was answered `accepted`: record the refusal as a
@@ -870,9 +881,6 @@ func (d *Daemon) dispatch() {
 		}
 		if serr := d.q.Settle(e.WorkItemID); serr != nil {
 			fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, serr)
-		}
-		if err != nil {
-			continue // slot stays free; the next pending entry backfills
 		}
 	}
 }

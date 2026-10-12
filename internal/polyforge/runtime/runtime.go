@@ -580,7 +580,14 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	// either (no project, no workspace to read): the caller retries.
 	probe, perr := r.hub.GetWorkItem(wi)
 	if perr != nil {
-		return fmt.Errorf("runtime: %s: work-item probe failed (not claiming; retry later): %w", wi, perr)
+		var ae *api.Error
+		if errors.As(perr, &ae) && ae.HTTPStatus() < 500 {
+			// the hub answered and refused (unknown WI, forbidden): final
+			return fmt.Errorf("runtime: %s: work-item probe refused (not claiming): %w", wi, perr)
+		}
+		// transport loss or a hub 5xx: typed transient, the caller retries
+		return &api.Error{Code: api.ErrDaemonHubUnavailable,
+			Detail: fmt.Sprintf("%s: work-item probe failed (not claiming; retry later): %v", wi, perr)}
 	}
 	if probe == nil || probe.ProjectName == "" {
 		return fmt.Errorf("runtime: %s: work-item probe answered no project (not claiming)", wi)
