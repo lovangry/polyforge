@@ -25,7 +25,10 @@
 // List presence: a declared-but-empty list is a PRESENT level that
 // wholly governs (yielding no switchable chain rather than a
 // fall-through). Absent keys fall through per the precedence chain
-// (compose.go).
+// (compose.go), five levels, highest first: manual `pf submit --models`
+// (per work item, every step) > models.<project>.<kind> >
+// models.<project>.default > bundle step model_candidates > bundle
+// defaults.model_candidates.
 package workspace
 
 import (

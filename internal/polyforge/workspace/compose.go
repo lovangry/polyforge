@@ -6,10 +6,14 @@ package workspace
 // it once per claim and snapshots the result into capsule.json; recovery
 // rehydrates that snapshot, never a second composition.
 //
-// The chain, outermost first:
+// The chain, outermost first (five levels):
 //
-//	yaml models.<project>.<kind> > yaml models.<project>.default >
-//	bundle step-level model_candidates > bundle defaults.model_candidates
+//	manual `pf submit --models` > yaml models.<project>.<kind> >
+//	yaml models.<project>.default > bundle step-level model_candidates >
+//	bundle defaults.model_candidates
+//
+// The manual list is the per-work-item level: when present it is the
+// candidate chain of EVERY step of that work item.
 //
 // The kind is the step's V8 KIND, not its id — a `code` list governs
 // EVERY kind:code step of the bundle. Resolution is non-merge: the first
@@ -20,6 +24,9 @@ package workspace
 // list leaves the bundle alone.
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/silgrid/polyforge/internal/common/workflow"
 )
 
@@ -29,7 +36,8 @@ import (
 // absent from the map (or a nil map) means no list applies anywhere. fm
 // may be nil (no bundle frontmatter — no steps to key on); cfg may be
 // nil (no yaml — the bundle alone).
-func ComposeCandidates(fm *workflow.Frontmatter, cfg *Config, project string) map[string][]string {
+// manual is the work item's `pf submit --models` list (nil/empty = none).
+func ComposeCandidates(fm *workflow.Frontmatter, cfg *Config, project string, manual []string) map[string][]string {
 	if fm == nil || len(fm.Steps) == 0 {
 		return nil
 	}
@@ -39,7 +47,9 @@ func ComposeCandidates(fm *workflow.Frontmatter, cfg *Config, project string) ma
 	}
 	out := make(map[string][]string, len(fm.Steps))
 	for _, s := range fm.Steps {
-		if list := composeStep(fm, pm, s); list != nil {
+		if len(manual) > 0 {
+			out[s.ID] = append([]string(nil), manual...)
+		} else if list := composeStep(fm, pm, s); list != nil {
 			out[s.ID] = list
 		}
 	}
@@ -65,4 +75,27 @@ func composeStep(fm *workflow.Frontmatter, pm map[string][]string, s workflow.Fr
 		return fm.Defaults.ModelCandidates
 	}
 	return nil
+}
+
+// NormalizeModels validates a manual `--models` list: non-empty, every
+// id trimmed and non-empty, no duplicates. It returns the trimmed list.
+// There is no model registry to check ids against.
+func NormalizeModels(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, fmt.Errorf("models list is empty")
+	}
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, m := range in {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			return nil, fmt.Errorf("models list has an empty model id")
+		}
+		if seen[m] {
+			return nil, fmt.Errorf("models list repeats %q", m)
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	return out, nil
 }

@@ -30,7 +30,7 @@ func TestJournalReplayUnstartableCompensatesBlocked(t *testing.T) {
 
 	session := fakeSession("wi_adoptfail")
 	key := randomKey()
-	if err := r.noteClaiming("wi_adoptfail", session, key); err != nil {
+	if err := r.noteClaiming("wi_adoptfail", session, key, nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.hold("wi_adoptfail", session, api.StatusRunning)

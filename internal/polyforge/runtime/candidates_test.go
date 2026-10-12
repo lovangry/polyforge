@@ -139,7 +139,7 @@ func TestClaimCrashRestartReplaysSameKey(t *testing.T) {
 	// hub, so the hub reports the journaled session as the holder.
 	key := randomKey()
 	session := fakeSession("wi_crashd")
-	if err := r.noteClaiming("wi_crashd", session, key); err != nil {
+	if err := r.noteClaiming("wi_crashd", session, key, nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.hold("wi_crashd", session, api.StatusRunning)
@@ -189,7 +189,7 @@ func TestStaleClaimingEntryDropped(t *testing.T) {
 	sp := &countingSpawner{}
 	r, _, _ := newTestRuntime(t, hub, sp)
 
-	if err := r.noteClaiming("wi_stalec", fakeSession("wi_stalec"), randomKey()); err != nil {
+	if err := r.noteClaiming("wi_stalec", fakeSession("wi_stalec"), randomKey(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Restart(context.Background()); err != nil {

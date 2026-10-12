@@ -17,10 +17,17 @@ submit as usual.
 ## Command
 
 ```
-pf submit <id> [--priority low|normal|high|urgent]
+pf submit <id> [--priority low|normal|high|urgent] [--models a,b,c]
 ```
 
-`--priority` defaults to `normal`. Before the daemon is
+`--priority` defaults to `normal`. `--models` is a manual model-candidate
+list for this work item: it is the candidate chain of every step (advancing
+on model-class failures like any list), kept across daemon restarts and
+`pf resume`, local to this machine. Non-empty, comma-separated, no empty
+or duplicate ids, else a local bad-input refusal. Candidate precedence,
+highest first: `--models` > yaml `models.<project>.<kind>` > yaml
+`models.<project>.default` > bundle step `model_candidates` > bundle
+`defaults.model_candidates`. Before the daemon is
 involved, the CLI prechecks the work item against Core with the caller's own
 api key, so obviously doomed submissions fail fast with a visible verdict.
 

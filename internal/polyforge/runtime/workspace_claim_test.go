@@ -259,7 +259,7 @@ func TestReplayWithInvalidYamlCompensatesBlocked(t *testing.T) {
 	hub := newFakeHub()
 	r, ws, sp := newWorkspaceTestRuntime(t, hub, "proj")
 	session := fakeSession("wi_w079rep")
-	if err := r.noteClaiming("wi_w079rep", session, randomKey()); err != nil {
+	if err := r.noteClaiming("wi_w079rep", session, randomKey(), nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.hold("wi_w079rep", session, api.StatusRunning)

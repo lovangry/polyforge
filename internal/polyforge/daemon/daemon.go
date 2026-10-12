@@ -861,6 +861,7 @@ func (d *Daemon) dispatch() {
 			return
 		}
 		d.rt.NoteOrigin(e.WorkItemID, e.Origin)
+		d.rt.NoteModels(e.WorkItemID, e.Models)
 		err := d.rt.Start(d.runCtx, e.WorkItemID)
 		var ae *api.Error
 		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {

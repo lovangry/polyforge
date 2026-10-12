@@ -53,6 +53,9 @@ type claimingRec struct {
 	IdempotencyKey string `json:"idempotency_key"` // the D4 replay token
 	MachineID      string `json:"machine_id"`
 	At             string `json:"at"`
+	// Models is the manual `pf submit --models` list of this start, so a
+	// crash-replayed claim keeps it.
+	Models []string `json:"models,omitempty"`
 }
 
 func (r *Runtime) claimingPath() string {
@@ -110,7 +113,7 @@ func (r *Runtime) writeClaiming(items map[string]*claimingRec) error {
 // plus the idempotency key — BEFORE the claim call. A write failure is
 // fatal to the start (the caller refuses to claim): a claim we cannot
 // journal is exactly the dangling-session risk this file exists to close.
-func (r *Runtime) noteClaiming(wi, sessionID, key string) error {
+func (r *Runtime) noteClaiming(wi, sessionID, key string, models []string) error {
 	items := r.loadClaiming()
 	items[wi] = &claimingRec{
 		WorkItemID:     wi,
@@ -118,6 +121,7 @@ func (r *Runtime) noteClaiming(wi, sessionID, key string) error {
 		IdempotencyKey: key,
 		MachineID:      r.cfg.MachineID,
 		At:             nowStamp(),
+		Models:         models,
 	}
 	return r.writeClaiming(items)
 }
@@ -212,7 +216,7 @@ func (r *Runtime) resumeClaiming(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused (session ended blocked): %v\n", wi, werr)
 			continue
 		}
-		if err := r.startClaimed(ctx, rec.WorkItemID, rec.SessionID, resp, wcfg); err != nil {
+		if err := r.startClaimed(ctx, rec.WorkItemID, rec.SessionID, resp, wcfg, rec.Models); err != nil {
 			// startClaimed already compensated (blocked) and cleared
 			// the entry; the log line is for the operator.
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay start failed (session ended blocked): %v\n", wi, err)
