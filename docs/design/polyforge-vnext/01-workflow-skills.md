@@ -1,5 +1,7 @@
 # 01 — Workflow 与 Skills：frontmatter schema、bundle digest、执行语义与预算
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 | 权威项 | 值 |
 |---|---|
 | 文档定位 | 三类 skill（路由/执行/step skill）权威布局、workflow.md frontmatter schema、bundle digest、model_candidates、grill、e2e-author、budget、on_fail rewind、执行语义 |

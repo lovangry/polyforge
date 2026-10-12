@@ -1,5 +1,7 @@
 # 02 — AIHub Core：SQLite Core schema、单 active Service、owner generation 与进度 read-through
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 | 权威项 | 值 |
 |---|---|
 | 文档定位 | Core 数据集、完整 SQLite DDL、assignee/waiting_on、attrs 拆分、workflow 引用与预算基线（bundle_name/bundle_digest/budget 基线）、parent_id（epic-lite）与依赖边、project membership 权限硬边界、单 active Service、owner generation、进度 read-through、AIHub 本地目录布局、Core API 与错误码 |

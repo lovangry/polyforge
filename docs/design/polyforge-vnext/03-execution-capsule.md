@@ -1,5 +1,7 @@
 # 03 — Execution Capsule：身份、repo inventory 与 Native Runner Profile
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 | 权威项 | 值 |
 |---|---|
 | 文档定位 | Capsule 身份与目录、repo inventory、`runtime-state/execution.json`、v1 Native runner profile、Subagent 写限制不变量、subagent 定义文件与 workflow 快照物化（§4.5）、多机副本裁定、session transcript 归档（§4.4） |
