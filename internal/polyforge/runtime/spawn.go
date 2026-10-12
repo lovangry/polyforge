@@ -429,11 +429,15 @@ func newProcOpts(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, o pr
 		tail:      &tailBuffer{},
 	}
 	readerDone := make(chan struct{})
+	stderrDone := make(chan struct{})
 	if o.stderr != nil {
 		go func() {
+			defer close(stderrDone)
 			_, _ = io.Copy(io.MultiWriter(os.Stderr, p.tail), o.stderr)
 			o.stderr.Close()
 		}()
+	} else {
+		close(stderrDone)
 	}
 	go func() {
 		// A grandchild (model provider connection, spawned tool) that
@@ -450,13 +454,21 @@ func newProcOpts(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, o pr
 		for {
 			select {
 			case <-done:
-				// Let the stdout reader drain what the dead process left
-				// in the pipe before the exit is announced: the last
-				// records (the error turn's agent_end) decide the exit's
-				// class.
-				select {
-				case <-readerDone:
-				case <-time.After(500 * time.Millisecond):
+				// Let the stdout reader AND the stderr copier drain what the
+				// dead process left in its pipes before the exit is
+				// announced: the last records (the error turn's agent_end)
+				// and the stderr tail decide the exit's class. Bounded: a
+				// grandchild holding a pipe must not hold the exit back.
+				drainDeadline := time.Now().Add(500 * time.Millisecond)
+				for _, ch := range []chan struct{}{readerDone, stderrDone} {
+					wait := time.Until(drainDeadline)
+					if wait < 0 {
+						wait = 0
+					}
+					select {
+					case <-ch:
+					case <-time.After(wait):
+					}
 				}
 				p.exit = p.exitInfo()
 				if o.onExit != nil {

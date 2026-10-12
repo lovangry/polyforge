@@ -224,7 +224,14 @@ func (d *Driver) effectiveThresholdsLocked(stepID string, gran supervise.Granula
 				th.StepTimeout = r
 			}
 		}
-		th.PriorRuntime = time.Duration(st.BudgetConsumed.WallMs) * time.Millisecond
+		spent := st.BudgetConsumed.WallMs
+		if st.Supervision != nil {
+			spent -= st.Supervision.RuntimeBaseMs
+		}
+		if spent < 0 {
+			spent = 0
+		}
+		th.PriorRuntime = time.Duration(spent) * time.Millisecond
 	}
 	return th
 }
@@ -506,6 +513,11 @@ func (d *Driver) applyStepFailedLocked(req TransitionRequest, info *appliedInfo)
 	if f.WallMs > 0 {
 		st.BudgetConsumed.WallMs += f.WallMs
 		d.exec.BudgetConsumed.WallMs += f.WallMs
+	}
+	if dec.Switch {
+		// the new candidate gets a fresh T window (the old one's slow or
+		// hung time is not its to repay)
+		sup.RuntimeBaseMs = st.BudgetConsumed.WallMs
 	}
 	if dec.Block {
 		d.exec.WorkflowStatus = StatusBlocked

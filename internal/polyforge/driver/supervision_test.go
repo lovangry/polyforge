@@ -708,3 +708,57 @@ func TestEventAppendFailureNeverBreaksTheRun(t *testing.T) {
 		t.Fatal("execution.json stays the authority")
 	}
 }
+
+func TestCandidateSwitchStartsAFreshTWindow(t *testing.T) {
+	// the slow model already spent T: its replacement must not be killed
+	// the moment it starts (T is cumulative per step, but a new candidate
+	// is a new chance)
+	var mu sync.Mutex
+	tick := 0
+	env := newSupEnv(t, func(c *Config) {
+		c.Now = func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			tick++
+			return time.Unix(1_000_000, 0).Add(time.Duration(tick) * 40 * time.Minute)
+		}
+		c.Limits = supervise.Defaults{StepTimeout: time.Hour}
+	}, chain("s", "a", "b"))
+	env.sp.script = []fakeEntry{exitErr(1, "model not found", false), done(`{}`)}
+	if err := env.d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var started []supervise.StepStarted
+	for _, f := range env.link.Facts.Drain() {
+		if s, ok := f.(supervise.StepStarted); ok {
+			started = append(started, s)
+		}
+	}
+	if len(started) != 2 {
+		t.Fatalf("step_started facts: %d", len(started))
+	}
+	if prior := started[1].Thresholds.PriorRuntime; prior != 0 {
+		t.Fatalf("after a candidate switch the T window restarts, prior runtime %v", prior)
+	}
+	// accounting keeps every booked millisecond; the T base is only the
+	// first (switched-away) dispatch's share
+	if st := env.exec(t).Steps["s"]; st.Supervision.RuntimeBaseMs != (40*time.Minute).Milliseconds() ||
+		st.BudgetConsumed.WallMs <= st.Supervision.RuntimeBaseMs {
+		t.Fatalf("booked wall time vs T base: %+v / %+v", st.BudgetConsumed, st.Supervision)
+	}
+}
+
+func TestHumanContinueStartsAFreshTWindow(t *testing.T) {
+	env := newSupEnv(t, nil, spec("s"))
+	env.sp.script = []fakeEntry{failEntryFor(FailExitOther), failEntryFor(FailExitOther), failEntryFor(FailExitOther)}
+	if err := env.d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := env.d.ResumeCurrent(); err != nil {
+		t.Fatalf("continue: %v", err)
+	}
+	st := env.exec(t).Steps["s"]
+	if st.Supervision.RuntimeBaseMs != st.BudgetConsumed.WallMs {
+		t.Fatalf("a human continue restarts the T window: %+v / %+v", st.BudgetConsumed, st.Supervision)
+	}
+}
