@@ -196,8 +196,8 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/aihub/memory` | Core-side memory store: FTS5-trigram full-text search, authoritative `memory.md` files and the reconcile procedure. |
 | `internal/aihub/server` | The v1 AIHub HTTP face: business endpoints (v0 openapi surface minus every SYNC-*/revision-chain route), the admin face, and the `/git/{wi}.git/...` proxy mount; Bearer API key auth, typed `api.Error` envelope. |
 | `internal/polyforge/aihubclient` | Shared HTTP client for the aihub server, used by runtime, observe and the CLI verbs; decodes the typed error envelope back into `*api.Error`. |
-| `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, submit, `watch`, answer, batch-confirm, pause, resume, wrap, ops), `chat`, `ship`, the M1–M5 management face, the daemon client over the UDS socket, config resolution, and the v0 migration paths. |
-| `internal/polyforge/daemon` | Phase-3 assembly of the local work machine: the UDS HTTP face, Runtime + Observe wired over the five protocol messages, admission modes, the pending-job dispatcher, the drain loop, the ship delivery bridge and the graceful shutdown sequence. |
+| `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, submit, `watch`, answer, pause, resume, wrap, ops), `chat`, `ship`, the M1–M5 management face, the daemon client over the UDS socket, config resolution, and the v0 migration paths. |
+| `internal/polyforge/daemon` | Phase-3 assembly of the local work machine: the UDS HTTP face, Runtime + Observe wired over the five protocol messages, the auto switch, the pending-job dispatcher, the auto-pull loop, the ship delivery bridge and the graceful shutdown sequence. |
 | `internal/polyforge/gitops` | Shared capsule-git operations layer used by Runtime (clone at start, dirty-commit at recover) and Observe (async commit+push); owns the per-WI git mutex and the `Polyforge-Seq` trailer derivation. |
 | `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, and the observe/answer HTTP face over the monitors. |
 | `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules, human gate, V4 command-evidence gate). |
@@ -228,9 +228,8 @@ polyforge#106; no step process reaches the daemon socket by design.)
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
 | POST | `/jobs/{wi}/wrap` | CLI close path: seal the job with reason `wrap` or `fail`. | user |
 | POST | `/jobs/{wi}/ship` | Delivery bridge: push the sealed capsule's task repos to their origins as branch `polyforge/<wi>` (+ PR when a credential exists). | user |
-| GET | `/status` | Machine status: jobs (with the needs-input projection), queue stats, mode. | user |
-| POST | `/mode` | Mode actions: `set` / `drain` / `abort-drain` / `get_recommendation`. | user |
-| POST | `/batch_submit` | Submit a whole confirmed wave of work items at once. | user |
+| GET | `/status` | Machine status: jobs (with the needs-input projection), queue stats, auto switch. | user |
+| POST | `/ops/config` | `pf ops auto on\|off` / `pf ops max N`: body `{"auto":bool,"max":N}` (either or both). | user |
 | POST | `/shutdown` | Trigger the bounded graceful shutdown sequence. | user |
 | POST | `/chat/init` | `pf chat init`: the chat id of a harness session (created on first use). | user |
 | GET | `/jobs/{wi}/watch` | `pf watch <wi> --once`: per-WI snapshot (status, step, pending question, events). | user |
@@ -304,7 +303,7 @@ registry; `pf <verb> -help` one verb's face. The routing skill's fragments
 | Face | Verbs |
 | --- | --- |
 | aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember`, `takeover`, `verify-session` |
-| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`; `observe` is its deprecated alias), `answer`, `batch-confirm`, `pause`, `resume`, `wrap`, `ship`, `ops`, `chat init` |
+| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`; `observe` is its deprecated alias), `answer`, `pause`, `resume`, `wrap`, `ship`, `ops`, `chat init` |
 | management | `users`, `api-keys`, `projects`, `machines`, `backup`, `rotate-secret` |
 | local | `daemon` (run the work machine), `doctor`, `migrate-memories`, `migrate-work-items` |
 
@@ -336,9 +335,10 @@ the `PF_*` entries.
 | `--harness-sessions-root DIR` | `POLYFORGE_HARNESS_SESSIONS_ROOT` | `~/.pi/agent/sessions` | Harness session store for the live-transcript sync. |
 | `--cgroup-root DIR` | `POLYFORGE_CGROUP_ROOT` | — | cgroup v2 root used for layer-0 agent cleanup. |
 | `--git-remote-base URL` | — | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
-| `--max-concurrent-jobs N` | — | `4` | Cross-mode cap on concurrently running jobs. |
+| `--max-concurrent-jobs N` | — | `4` | Cap on concurrently running jobs (also `pf ops max N`). |
 | `--recall-topk N` | `POLYFORGE_RECALL_TOPK` | `10` (max 50) | Claim-time memory snapshot hit count. |
-| `--mode M` | — | `interactive` | Initial mode (`interactive\|batch\|drain`); an explicit flag overrides the persisted mode. |
+| `--auto` | — | off | Auto-pull: the daemon also claims ready-queue work itself; an explicit `--auto` / `--auto=false` overrides the persisted switch (also `pf ops auto on\|off`). |
+| `--mode M` | — | — | **Deprecated** alias for one release: `interactive` = `--auto=false`, `drain` = `--auto=true` (prints a warning). |
 | `--heartbeat-every D` | — | `60s` | Machines heartbeat cadence (`0` disables). |
 
 The workspace mapping (polyforge#113) replaces the retired workspace and
@@ -350,7 +350,7 @@ separator. Every mapped workspace directory must pre-exist; the daemon
 creates and writes only `capsules/` inside each and refuses to start
 when any is missing or unusable (or when the config carries zero
 sections). Capsules route per claimed project through the inverse
-mapping; batch and drain cover all mapped projects. `pf doctor` checks
+mapping; the auto-pull covers all mapped projects. `pf doctor` checks
 the mapping.
 
 Observe supervision windows — Go duration strings (e.g. `700ms`, `5m`),

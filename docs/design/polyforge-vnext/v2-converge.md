@@ -210,14 +210,14 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 ## 5. 执行模式与提交（已定）
 
 - **drain 暂不做**，但架构保留支持：领取与执行分离（已是）；人与任务的交互不绑死在执行机上（依赖 #84 跨 daemon 通信）。
-- 目标形态（drain 恢复时）：`pf ops auto on|off` + `pf ops max N`，自动领取与手动提交并存；去掉 interactive/batch/drain 三模式、`abort-drain`、`batch-confirm`、波次推荐（已核实只是原样转发就绪队列，`daemon/routes.go:729-752`）。
+- 形态（**已落地**，分支 `v2/m2-modes`）：`pf ops auto on|off` + `pf ops max N`，自动领取与手动提交并存。`auto off` = 只有显式 `pf submit`；`auto on` = daemon 另外自己拉 aihub 就绪队列（即原 drain 循环，origin 仍为 `auto`）。已删除 interactive/batch/drain 三模式、`abort-drain`、`batch-confirm`、`batch_submit`、`get_recommendation`（只是原样转发就绪队列，改用 `pf queue --ready`）、DAEMON-409「drain 是唯一建 job 入口」拒绝。`status` 头为 `auto: on|off  max: N`；heartbeat 体仍带 mode 字符串（`auto` / `manual`）以兼容 aihub。daemon 旗标 `-auto`（`-mode interactive|drain` 作一版弃用别名，打印告警）；`daemon-state.json` 的旧 `mode` 字段加载时迁移（drain → auto on，其余 off），下次持久化改写为 `auto`。drain 作为产品能力仍属「暂不做」范围（跨 daemon 通信 #84 未到），但架构上已可用。
 - **名额已满时的提交**：daemon 排队队列**持久化到 daemon 数据目录**（方案 B），重启不丢。重放规则（r2 补）：
   - 条目带 origin 与提交时间；
   - **只重放普通提交，不重放 takeover**；
   - 重放前先查 aihub 状态（已被领取 / 已结束则丢弃）；
   - 与 B1 claiming journal 重放去重，避免同一 WI 双重领取；
   - 被拒一律发决策事件给订阅者 / 负责人。
-- `pf submit` 只在本机执行；跨机器使用方式 = 建票进就绪队列由执行方领取（drain 恢复后）。
+- `pf submit` 只在本机执行；跨机器使用方式 = 建票进就绪队列由执行方领取（auto 打开后）。
 
 ## 6. 恢复与重启
 
@@ -254,7 +254,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 |---|---|---|
 | 一（直接删） | `v0/`（已打 tag `v0-archive`，workflow digest 测试向量已迁入活测试）；根目录 `fakepi` 二进制；旧答案缓存 `observe/answers.go`+`answerfile.go`；`tools/gate-metrics`、`tools/capsule-audit.go` | **集成分支已完成**（`3a036b9`、`90d95bf`、`34fdf86`）；deadcode 函数清扫**未做**（不含 `EffectiveModel`/`PolicyFor`） |
 | 二（#106 残骸） | flush 车道全套、answer 缓存/ledger、recall/remember 代理路由、step 进程 stdio 控制通道、`PF_DAEMON_SOCKET`（**仅作为 step 环境变量**删除；CLI/daemon 的 `--socket`/`PF_DAEMON_SOCKET` 是用户面配置，保留）、`PF_AGENT_ROLE`（#81）；步骤文本旧协议（#137） | **集成分支已完成**（`34fdf86`、`5f4fc3c`、`4c4564f`）；`agents/` 布局兼容（#136）**未单独核对** |
-| 三（改逻辑，随本设计） | supervisor 猜测型车道（hang/idle/probe/wall/turn_duration/工具豁免/问题豁免/ack veto）→ 2.3 规则（**M4 重验保留**）；watch.sh → `pf watch`；三模式 → 第 5 节 | `pf watch`（Go）、watch.sh / watch-probe 删除：**已完成**（`f642e06`、`c01bd94`）；supervisor 车道重写：**进行中（另一分支）**；三模式简化：**未做** |
+| 三（改逻辑，随本设计） | supervisor 猜测型车道（hang/idle/probe/wall/turn_duration/工具豁免/问题豁免/ack veto）→ 2.3 规则（**M4 重验保留**）；watch.sh → `pf watch`；三模式 → 第 5 节 | `pf watch`（Go）、watch.sh / watch-probe 删除：**已完成**（`f642e06`、`c01bd94`）；supervisor 车道重写：**进行中（另一分支）**；三模式简化：**已完成**（`v2/m2-modes`） |
 | 四（待定） | takeover/adopt-session 简化（先验证"结束会话后重新领取能从断点继续"）；心跳保留并修权限漏洞 | 待验证（未动） |
 | 已完成 | release-intent 门禁（#139，commit a159c8c）；driver 机械保证（needs_input 校验、仅 feature-full grill-review 的 `requires_human_answer`、V4 command_evidence 门禁，`f00b398`）；重新领取两个 bug（git-dir 隔离、克隆失败拒绝 InitLocal / DAEMON-516）；身份模型（daemon-id 文件、`pf chat init`、`PF_CHAT_ID`、origin）；持久化提交队列 + 待修复停放 + `pf resume` 续跑（DAEMON-517）+ `daemon_restarted`/`submit_*` 事件；bounded-fail 杀树 + 推送、end_pending 重试、隔离原子性、继续/放弃走人的 key（`pf resume`/`pf cancel`/`pf wrap --fail`）、`unblock` 动词移除、blocked 封存跨 daemon 校验（DAEMON-518）；待修复 WI 的放弃路径；孤儿 step 进程回收；`atomicWrite` 修复 | 集成分支已完成，待合并部署 |
 | 迁移代码 | v0→v1 迁移（约 4.8k 行）：观察期至 2026-10-17 后打 tag 删除 | 定时 |
