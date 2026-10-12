@@ -164,3 +164,30 @@ func TestAutoOnPullsUpToMax(t *testing.T) {
 		t.Fatalf("manual submit while auto on: %v", err)
 	}
 }
+
+// TestMaxConcurrentCountsJobsStartedOutsideTheQueue: jobs the runtime holds
+// without the dispatcher having started them (restart recovery,
+// resume-blocked, repair) occupy slots too — `max N` must hold after a
+// restart, so further submits stay queued.
+func TestMaxConcurrentCountsJobsStartedOutsideTheQueue(t *testing.T) {
+	td := newTestDaemon(t, func(c *Config) { c.MaxConcurrent = 2 })
+	for _, wi := range []string{"wi_rec1", "wi_rec2"} {
+		mkBare(t, td.cfg.GitRemoteBase, wi)
+		if err := td.rt.StartIntent(td.runCtx, wi, "claim"); err != nil {
+			t.Fatalf("start %s directly: %v", wi, err)
+		}
+	}
+	for _, wi := range []string{"wi_q1", "wi_q2"} {
+		mkBare(t, td.cfg.GitRemoteBase, wi)
+		if _, err := td.client.Claim(wi, "normal"); err != nil {
+			t.Fatalf("claim %s: %v", wi, err)
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := liveCount(td); n != 2 {
+		t.Fatalf("live = %d, want max=2 (recovered jobs must hold their slots)", n)
+	}
+	if td.q.LenPending() != 2 {
+		t.Fatalf("pending = %d, want 2 queued submits", td.q.LenPending())
+	}
+}
