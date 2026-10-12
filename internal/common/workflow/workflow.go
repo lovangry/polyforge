@@ -113,25 +113,6 @@ func ReadFrontmatter(path string) (*Frontmatter, error) {
 	return &fm, nil
 }
 
-// CandidatesFor answers the effective candidate list of one step: the
-// per-step override when the step declares a non-empty list, the
-// workflow-level defaults otherwise. Nil means no switchable list exists
-// (the harness adapter's default model stays in effect).
-func (fm *Frontmatter) CandidatesFor(stepID string) []string {
-	if fm == nil {
-		return nil
-	}
-	for _, s := range fm.Steps {
-		if s.ID == stepID && len(s.ModelCandidates) > 0 {
-			return s.ModelCandidates
-		}
-	}
-	if fm.Defaults != nil {
-		return fm.Defaults.ModelCandidates
-	}
-	return nil
-}
-
 // Digest computes the canonical bundle digest: files sorted by path
 // (codepoint order), each contributing path+sha+8-byte LE byte length, then
 // the whole buffer is SHA-256'd. Keep byte-for-byte stable so pinned digests
