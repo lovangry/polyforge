@@ -462,8 +462,8 @@ surface), owner-answered needs_input, and the readings (command-evidence gate,
 revision chain, recovery/blocked counts, orphan counts) compared against the
 previous window — no regression passes, regression freezes merges until
 fixed. The window ticket is registered at merge; it blocks cutover, not
-merge. The report lands in `docs/pilot/` and readings never rewrite
-history.
+merge. The report is filed on the window ticket and readings never
+rewrite history.
 
 **Merge-review checklist** (compact form of the authority doc's 检查单):
 

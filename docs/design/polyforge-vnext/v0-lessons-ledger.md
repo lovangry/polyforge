@@ -2,6 +2,8 @@
 # (source: pilot history, HANDOFF, ticket records; the authoritative
 # registry the v1 implementation should have been audited against)
 
+> **注意（2026-10-12）**：`docs/pilot/` 已删除；本文引用的 pilot 路径请到 git 历史查看（tag `v2.1.0`）。
+
 ## Protocol/harness class
 P1  Real pi rejects invented RPC envelopes (v0 first pilot ticket:
     "Unknown command: undefined"). v1 spawn envelope must be the v0

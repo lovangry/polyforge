@@ -596,7 +596,7 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 	var surfaces []string
 	surfaces = append(surfaces, filepath.Join(root, "README.md"))
 	// The 8 non-pilot design docs: 00–06 and 08 (07-deployment-pilot.md
-	// is the pilot register; docs/pilot/* is a separate historical tree).
+	// is the pilot register).
 	for _, n := range []string{
 		"00-architecture.md", "01-workflow-skills.md", "02-aihub-core.md",
 		"03-execution-capsule.md", "04-local-runtime.md",
@@ -660,32 +660,14 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario S8 — historical registers stay untouched; the v0 archive is gone.
+// Scenario S8 — the v0 archive is gone.
 // ---------------------------------------------------------------------------
 
-// TestV3HistoricalRegistersAndV0Untouched pins the byte-identity
-// invariants against the pre-change tree authority (HEAD bb7ab95, per
-// the spec): docs/pilot/* carries no diff and no new untracked files; and
-// the frozen v0/ reference tree has been dropped from the working tree
-// (it lives in git history only).
-func TestV3HistoricalRegistersAndV0Untouched(t *testing.T) {
+// TestV3V0ArchiveAbsent pins that the frozen v0/ reference tree has
+// been dropped from the working tree (it lives in git history only, tag
+// v0-archive).
+func TestV3V0ArchiveAbsent(t *testing.T) {
 	root := v1Root(t)
-	const base = "bb7ab95"
-
-	for _, dir := range []string{"docs/pilot"} {
-		// No modifications or deletions against the pre-change tree.
-		if out, code := v3Git(t, root, "diff", "--stat", base, "--", dir); code != 0 {
-			t.Fatalf("git diff %s %s: exit %d, output %q", base, dir, code, out)
-		} else if strings.TrimSpace(out) != "" {
-			t.Fatalf("%s changed against %s (must be byte-identical):\n%s", dir, base, out)
-		}
-		// No new untracked files either.
-		if out, code := v3Git(t, root, "ls-files", "--others", "--exclude-standard", dir); code != 0 {
-			t.Fatalf("git ls-files %s: exit %d, output %q", dir, code, out)
-		} else if strings.TrimSpace(out) != "" {
-			t.Fatalf("new untracked files under %s (must stay byte-identical):\n%s", dir, out)
-		}
-	}
 
 	// The v0/ reference tree was dropped from the working tree (it lives
 	// in git history only): no directory and no tracked file remains.
