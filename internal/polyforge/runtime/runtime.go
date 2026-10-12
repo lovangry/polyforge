@@ -91,6 +91,12 @@ type Config struct {
 	// once) delays the release; only a channel wedged past the window
 	// loses it, loudly.
 	ReleaseRetryWindow time.Duration // total retry bound for a deferred release (default 2min)
+	// EndRetryBase/EndRetryMax shape the backoff of the durable
+	// SessionEnd(blocked) retry (end_pending records and the re-claim
+	// abandon lane): first retry after Base, doubling up to Max
+	// (defaults 2s / 60s). Retries run until the hub accepts the close.
+	EndRetryBase time.Duration
+	EndRetryMax  time.Duration
 	// EventTap, when non-nil, receives runtime-sourced diagnostic events
 	// (kind "push_failed" on a seal push that failed after its retries)
 	// so they land in the daemon's durable events log next to the
@@ -141,6 +147,12 @@ func (c *Config) fill() {
 	if c.RecallTopK <= 0 {
 		c.RecallTopK = defaultRecallTopK
 	}
+	if c.EndRetryBase <= 0 {
+		c.EndRetryBase = 2 * time.Second
+	}
+	if c.EndRetryMax <= 0 {
+		c.EndRetryMax = 60 * time.Second
+	}
 }
 
 // Runtime is the per-daemon WI lifecycle manager.
@@ -176,6 +188,14 @@ type Runtime struct {
 	relMu    sync.Mutex
 	relQueue chan protocol.RTMsg
 	relDone  chan struct{}
+
+	// The durable-close retry lane (endpending.go): WIs whose
+	// SessionEnd(blocked) retry goroutine is running (one per WI), and
+	// the stop signal Close fires.
+	endMu       sync.Mutex
+	endRetrying map[string]bool
+	endStop     chan struct{}
+	endStopOnce sync.Once
 }
 
 // releaseQueueCap bounds the lane's pending set: a wedged Observe must
@@ -295,7 +315,11 @@ type job struct {
 	// the same marker the hub does; false everywhere else (a graceful
 	// shutdown keeps it false — the attach-on-restart shape, M3).
 	cleanPause bool
-	mu         sync.Mutex
+	// endNote/endHead: the pending SessionEnd(blocked) verdict of an
+	// end_pending job (see StateEndPending).
+	endNote string
+	endHead string
+	mu      sync.Mutex
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries
@@ -310,6 +334,7 @@ func New(cfg Config, hub Aihub, spawner Spawner, toOB chan<- protocol.RTMsg, fro
 		fromOB:    fromOB,
 		jobs:      map[string]*job{},
 		aliases:   map[string]string{},
+		endStop:   make(chan struct{}),
 		statePath: filepath.Join(cfg.DataDir, "runtime-state.json"),
 	}
 }
@@ -502,6 +527,11 @@ func (r *Runtime) runReleaseLane(queue <-chan protocol.RTMsg, done <-chan struct
 // every parked release is deadline-bounded and the lane goroutine only
 // ever blocks on the queue or the done signal.
 func (r *Runtime) Close() {
+	r.endStopOnce.Do(func() {
+		if r.endStop != nil {
+			close(r.endStop)
+		}
+	})
 	r.relMu.Lock()
 	defer r.relMu.Unlock()
 	if r.relDone == nil {
@@ -868,6 +898,9 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	if err := r.prepareCapsule(j); err != nil {
 		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
 	}
+	if err := r.verifySealedHead(j, c); err != nil {
+		return r.abandonClaim(j, wi, err, err.Error())
+	}
 	// B2 spawn_n source: a FRESHLY CLAIMED capsule may carry another
 	// session's spawn journal (the takeover/attach clone path — the
 	// journal rides capsule git), so the derivation counter continues
@@ -1071,11 +1104,36 @@ func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note str
 		Status:    api.StatusBlocked,
 		Note:      note,
 	}); cerr != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: session-end(blocked) after failed start failed (claiming entry kept for the next restart): %v\n", j.wi, cerr)
+		// v2-converge §6 bug 1: a clone failure is most often an
+		// unreachable aihub, so the compensation fails too — it must not
+		// be a one-shot. The journal entry (the only copy of the secret)
+		// stays, the close is retried in-process with backoff, and a
+		// restart replays the journal.
+		fmt.Fprintf(os.Stderr, "runtime: %s: session-end(blocked) after failed start failed (claiming entry kept; retrying with backoff): %v\n", j.wi, cerr)
+		r.retryClaimEnd(submitted, j.wi, j.sessionID, note)
 		return origErr
 	}
 	r.clearClaiming(submitted)
 	return origErr
+}
+
+// verifySealedHead is the cross-daemon continue guard (v2-converge §7): a
+// blocked WI claimed by a DIFFERENT machine than the one that sealed it must
+// find the sealing daemon's recorded capsule head in its fresh clone,
+// otherwise the clone is pre-blocked state (the #116 lesson) and the start
+// is refused. A same-machine continue, or a WI with no recorded seal, is
+// not gated here.
+func (r *Runtime) verifySealedHead(j *job, c api.SessionClaim) error {
+	if c.SealedHead == "" || c.SealedMachine == "" || c.SealedMachine == r.cfg.MachineID {
+		return nil
+	}
+	head, err := gitops.Head(j.git)
+	if err == nil && head == c.SealedHead {
+		return nil
+	}
+	return &api.Error{Code: api.ErrDaemonSealedHeadMismatch,
+		Detail: fmt.Sprintf("continue refused: the work item was sealed blocked by machine %q at capsule head %s, but the aihub capsule this daemon cloned is at %q (%v) — the sealing daemon's last push did not land; continue it on %q, or abandon (pf cancel)",
+			c.SealedMachine, c.SealedHead, head, err, c.SealedMachine)}
 }
 
 // prepareCapsule makes CapsuleDir a git worktree whose git-dir is EXTERNAL
@@ -1183,17 +1241,34 @@ func readSessionMarker(capsuleDir string) string {
 func quarantineCapsule(capsuleDir, gitDir string) error {
 	ts := strconv.FormatInt(time.Now().UnixNano(), 36)
 	// The external git-dir is part of the same unit: it moves under the
-	// same timestamp, as a sibling of the original, never deleted.
+	// same timestamp, as a sibling of the original, never deleted. The
+	// two moves are ALL-OR-NOTHING (v2-converge §6): a failed second move
+	// puts the first back, so the scene is never split between a
+	// quarantined git-dir and a live worktree pointing at it.
+	movedGit := ""
 	if gitDir != "" && dirExists(gitDir) {
-		if err := os.Rename(gitDir, gitDir+".quarantined."+ts); err != nil {
+		movedGit = gitDir + ".quarantined." + ts
+		if err := renameFn(gitDir, movedGit); err != nil {
 			return err
 		}
 	}
 	if !dirExists(capsuleDir) {
 		return nil // nothing to move (a capsule never materialized)
 	}
-	return os.Rename(capsuleDir, capsuleDir+".quarantined."+ts)
+	if err := renameFn(capsuleDir, capsuleDir+".quarantined."+ts); err != nil {
+		if movedGit != "" {
+			if rerr := renameFn(movedGit, gitDir); rerr != nil {
+				return fmt.Errorf("quarantine split the scene: moving the worktree failed (%w) and restoring the git-dir from %s failed (%v)", err, movedGit, rerr)
+			}
+		}
+		return fmt.Errorf("quarantine of the capsule failed, git-dir restored: %w", err)
+	}
+	return nil
 }
+
+// renameFn is the filesystem move quarantineCapsule uses (a seam for the
+// injected-failure test).
+var renameFn = os.Rename
 
 // materialize lays out the capsule: workflows/, agents/,
 // capsule.json, session.json, .gitignore and the runtime-state/ tree.

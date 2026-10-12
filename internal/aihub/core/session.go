@@ -338,6 +338,7 @@ func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, calle
 	if err != nil {
 		return nil, err
 	}
+	claim.SealedHead, claim.SealedMachine = blockedSealTx(tx, wiID)
 
 	if req.IdempotencyKey != "" {
 		if err := cacheIdempotentClaimTx(tx, req.IdempotencyKey, wiID, callerIdentity, claim); err != nil {
@@ -654,6 +655,71 @@ func (m *SessionManager) Takeover(wiID string, req api.SessionClaimRequest, call
 // ---------------------------------------------------------------------------
 // Session end (contract §1.5) and pause (M3)
 
+// blockedSealKey is the WI attrs key carrying the blocked verdict's sealed
+// capsule head (v2-converge §7): {"head": sha, "machine": id}. It rides the
+// existing business attrs JSON — no schema change. Set by End(blocked) with
+// a head, cleared by every other End/Pause, read by the claim answer so a
+// continue on a different machine can check its clone. A user PATCH of
+// attrs may drop it; that only disables the check (fail open).
+const blockedSealKey = "blocked_seal"
+
+type txExecer interface {
+	QueryRow(query string, args ...any) *sql.Row
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func loadAttrsTx(tx txExecer, wiID string) (map[string]any, error) {
+	var raw sql.NullString
+	if err := tx.QueryRow(`SELECT attrs FROM work_items WHERE id=?1`, wiID).Scan(&raw); err != nil {
+		return nil, err
+	}
+	attrs := map[string]any{}
+	if raw.Valid && raw.String != "" {
+		_ = json.Unmarshal([]byte(raw.String), &attrs)
+	}
+	if attrs == nil {
+		attrs = map[string]any{}
+	}
+	return attrs, nil
+}
+
+// setBlockedSealTx records (head != "") or clears (clear) the seal.
+func setBlockedSealTx(tx txExecer, wiID, head, machine string, clear bool) error {
+	if head == "" && !clear {
+		return nil
+	}
+	attrs, err := loadAttrsTx(tx, wiID)
+	if err != nil {
+		return err
+	}
+	if _, had := attrs[blockedSealKey]; !had && head == "" {
+		return nil
+	}
+	if head != "" {
+		attrs[blockedSealKey] = map[string]any{"head": head, "machine": machine}
+	} else {
+		delete(attrs, blockedSealKey)
+	}
+	blob, err := json.Marshal(attrs)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE work_items SET attrs=?1 WHERE id=?2`, string(blob), wiID)
+	return err
+}
+
+// blockedSealTx reads the recorded seal ("" when none).
+func blockedSealTx(tx txExecer, wiID string) (head, machine string) {
+	attrs, err := loadAttrsTx(tx, wiID)
+	if err != nil {
+		return "", ""
+	}
+	m, _ := attrs[blockedSealKey].(map[string]any)
+	head, _ = m["head"].(string)
+	machine, _ = m["machine"].(string)
+	return head, machine
+}
+
 // End is the session-fenced terminal verdict: hash matches → set the
 // status (wrapped|failed|blocked), CLEAR the session row entirely (M2:
 // blocked = status blocked + cleared session, excluded from the claim
@@ -714,6 +780,16 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 	if req.Note != "" {
 		payload["note"] = req.Note
 	}
+	// The blocked verdict records the sealed head (+ the sealing machine,
+	// from the session row); any other verdict clears a stale seal. A
+	// blocked verdict without a head (an abandoned claim) keeps the
+	// standing seal.
+	if err := setBlockedSealTx(tx, wiID, req.HeadSHA, row.Machine.String, req.Status != api.StatusBlocked); err != nil {
+		return err
+	}
+	if req.HeadSHA != "" && req.Status == api.StatusBlocked {
+		payload["head_sha"] = req.HeadSHA
+	}
 	if err := appendEventTx(tx, wiID, now, callerIdentity, "session_ended", payload); err != nil {
 		return err
 	}
@@ -759,6 +835,9 @@ func (m *SessionManager) Pause(wiID, sessionID string, cleanPause bool, note, ca
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return Fail(api.ErrCoreForbidden, "STALE_SESSION", "the session changed concurrently")
+	}
+	if err := setBlockedSealTx(tx, wiID, "", "", true); err != nil {
+		return err
 	}
 	payload := map[string]any{
 		"session_fingerprint": row.Fingerprint.String,

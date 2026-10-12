@@ -449,7 +449,7 @@ func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
 		return true
 	}
 	writeErr(w, api.ErrDaemonConflict,
-		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue in place or `pf wrap --fail <id>` to terminate; there is no completed run to wrap or pause")
+		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon (`pf wrap --fail <id>` records a failed verdict); there is no completed run to wrap or pause")
 	return true
 }
 

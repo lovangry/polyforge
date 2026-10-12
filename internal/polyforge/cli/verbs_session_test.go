@@ -415,43 +415,30 @@ func TestPauseRefusalWritesNothing(t *testing.T) {
 	}
 }
 
-// TestUnblockHappyPath (Finding 3, v1.5 review): `pf unblock <id>` POSTs
-// the exit-door route directly to aihub and renders the returned work
-// item's new queued status.
-func TestUnblockHappyPath(t *testing.T) {
+// TestUnblockVerbRemoved (v2-converge §7): the separate `pf unblock` verb is
+// gone — blocked has two actions, continue (`pf resume`) and abandon
+// (`pf cancel`). Invoking the old spelling prints a one-line hint and makes
+// no network call; the help face no longer lists it.
+func TestUnblockVerbRemoved(t *testing.T) {
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, strings.Replace(cannedWI, `"queued"`, `"queued"`, 1))
-	})
-	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": srv.URL, "PF_API_KEY": "key-admin",
-	}, "unblock", "wi_abc")
-	if code != 0 {
-		t.Fatalf("unblock: code=%d stderr=%s", code, stderr)
-	}
-	if got := rec.last(); got.Method != "POST" || got.Path != "/api/v1/work-items/wi_abc/unblock" {
-		t.Errorf("request = %s %s, want POST /api/v1/work-items/wi_abc/unblock", got.Method, got.Path)
-	}
-	if !strings.Contains(stdout, "unblocked pf-42 (status queued; claimable again)") {
-		t.Errorf("stdout = %q", stdout)
-	}
-}
-
-// TestUnblockRefusalClasses: a typed wire refusal (NOT_BLOCKED /
-// AUTH-403) surfaces as exit 1 with the typed envelope on stderr.
-func TestUnblockRefusalClasses(t *testing.T) {
-	srv := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		io.WriteString(w, `{"code":"CORE-409","detail":"unblock requires a blocked work item (got queued)","extra":{"reason":"NOT_BLOCKED"}}`)
+		io.WriteString(w, cannedWI)
 	})
 	code, _, stderr := runPf(t, map[string]string{
 		"PF_SERVER": srv.URL, "PF_API_KEY": "key-admin",
 	}, "unblock", "wi_abc")
-	if code != 1 {
-		t.Fatalf("refused unblock: exit=%d, want 1 (stderr=%s)", code, stderr)
+	if code != 2 || !strings.Contains(stderr, "pf resume (continue) or pf cancel (abandon)") {
+		t.Fatalf("unblock hint: code=%d stderr=%q", code, stderr)
 	}
-	if !strings.Contains(stderr, "CORE-409") || !strings.Contains(stderr, "blocked work item") {
-		t.Errorf("stderr must carry the typed refusal: %s", stderr)
+	if n := len(rec.all()); n != 0 {
+		t.Errorf("the removed verb must not call aihub; saw %d calls", n)
+	}
+	_, stdout, _ := runPf(t, nil, "help")
+	if strings.Contains(stdout, "unblock") {
+		t.Errorf("help must not list unblock: %s", stdout)
+	}
+	if !strings.Contains(stdout, "abandon") {
+		t.Errorf("help must point cancel at abandon: %s", stdout)
 	}
 }
 

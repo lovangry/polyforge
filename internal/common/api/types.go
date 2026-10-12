@@ -161,6 +161,12 @@ type SessionClaim struct {
 	BundleDigest       string        `json:"bundle_digest"`
 	ClaimedAt          string        `json:"claimed_at"`
 	Repos              []ProjectRepo `json:"repos,omitempty"`
+	// SealedHead/SealedMachine are the blocked verdict's recorded capsule
+	// head and the machine that sealed it (v2-converge §7); empty unless
+	// the WI was last closed blocked with a head. A claim by another
+	// machine must find exactly this head in its clone or refuse.
+	SealedHead    string `json:"sealed_head,omitempty"`
+	SealedMachine string `json:"sealed_machine,omitempty"`
 }
 
 // SessionClaimResponse wraps SessionClaim plus the full WorkItem.
@@ -216,6 +222,12 @@ type SessionEndRequest struct {
 	// pause transition — session KEPT, clean_pause set — is the M3 pause;
 	// true = operator pause, restart must not auto-resume).
 	CleanPause bool `json:"clean_pause,omitempty"`
+	// HeadSHA rides the blocked verdict only (v2-converge §7): the capsule
+	// revision-chain head the sealing daemon holds locally after its
+	// best-effort commit+push. aihub records it (with the session's
+	// machine) so a continue claimed by a DIFFERENT daemon can refuse a
+	// clone whose head is not this one (the #116 stale-state hazard).
+	HeadSHA string `json:"head_sha,omitempty"`
 }
 
 // SessionHolderResponse is the §1.7 public holder read

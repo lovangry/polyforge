@@ -1,14 +1,17 @@
-# cancel — terminate a non-active work item
+# cancel — abandon a non-active work item
 
 Data-plane verb: the `pf` CLI talks HTTP direct to AIHub. The daemon is not
 involved. Cancel only ends a work item that has **no active generation**;
 it never interrupts a running one (that is `pause` or `wrap --fail`).
+This is also the "abandon" of a **blocked** work item (the counterpart of
+`resume` = continue; there is no separate `unblock` verb). Allowed to the
+task's reporter, a project maintainer or an admin.
 
 ## Triggers
 
 - EN: cancel it / drop it / don't want it anymore / scrap this ticket /
-  abandon it
-- 中文: 不要了 / 取消这个票 / 作废 / 删掉这个任务
+  abandon it / give up on the blocked one
+- 中文: 不要了 / 取消这个票 / 作废 / 删掉这个任务 / 放弃
 
 ## Command
 
@@ -28,6 +31,7 @@ The argument is the work item id (`wi_` + random chars) or its slug.
 |---|---|---|
 | `CORE-404` | Unknown or invisible id | No such work item — check the id. |
 | `CORE-409` | The work item has an active generation (running) | It is being executed — use `pause`/`wrap` on the machine that runs it, not cancel. |
+| `AUTH-403` | The caller is not the reporter, a project maintainer or an admin | Ask the task owner or a maintainer. |
 | `CORE-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
 
 A canceled work item is terminal; only a brand-new work item can carry the

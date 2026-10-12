@@ -460,6 +460,22 @@ func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request, idn *identity)
 	s.writeWI(w, http.StatusOK, wi)
 }
 
+// ownerMaintainerOrAdmin is the one authorization of the human decisions on
+// a work item — cancel (abandon) and the blocked exits (continue /
+// terminate; v2-converge §7, §11 item 7): the WI's reporter (the task
+// owner), a project maintainer, or a global admin.
+func (s *Server) ownerMaintainerOrAdmin(idn *identity, projectID, wiID string) bool {
+	if idn.Role == "admin" {
+		return true
+	}
+	var reporter string
+	if err := s.DB.QueryRow(`SELECT reporter FROM work_items WHERE id=?1`, wiID).Scan(&reporter); err == nil && reporter == idn.UserID {
+		return true
+	}
+	role, err := s.memberRole(projectID, idn.UserID)
+	return err == nil && role == "maintainer"
+}
+
 func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -467,18 +483,7 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 		return
 	}
 	// Cancel authorization: reporter, project maintainer, or admin (02 §6.5).
-	allowed := idn.Role == "admin"
-	if !allowed {
-		var reporter string
-		if rerr := s.DB.QueryRow(`SELECT reporter FROM work_items WHERE id=?1`, id).Scan(&reporter); rerr == nil {
-			allowed = reporter == idn.UserID
-		}
-		role, merr := s.memberRole(projectID, idn.UserID)
-		if merr == nil && role == "maintainer" {
-			allowed = true
-		}
-	}
-	if !allowed {
+	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
 		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "cancel requires reporter, maintainer or admin"))
 		return
 	}
@@ -835,10 +840,10 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 }
 
 // hUnblockWI serves the blocked exit door (v1.5 review Finding 3):
-// status blocked → queued, waiting_on cleared, event wi_unblocked. The
-// authorization mirrors force-takeover — a human decision gate, admin
-// or project maintainer — because unblock overrides what the runtime
-// judged a terminal-enough verdict to stop work for.
+// status blocked → queued, waiting_on cleared, event wi_unblocked. Kept
+// for wire compatibility; the CLI's "continue" is `pf resume` (the
+// resume-blocked door). Authorization is the unified blocked-exit gate:
+// the work item's reporter, a project maintainer, or an admin.
 func (s *Server) hUnblockWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -849,12 +854,9 @@ func (s *Server) hUnblockWI(w http.ResponseWriter, r *http.Request, idn *identit
 		writeErr(w, err)
 		return
 	}
-	if idn.Role != "admin" {
-		role, merr := s.memberRole(projectID, idn.UserID)
-		if merr != nil || role != "maintainer" {
-			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "unblock requires admin or project maintainer"))
-			return
-		}
+	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
+		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "unblock requires the work item's reporter, a project maintainer or admin"))
+		return
 	}
 	wi, err := s.WIs.Unblock(id, idn.UserID)
 	if err != nil {
@@ -886,6 +888,10 @@ func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *i
 		writeErr(w, err)
 		return
 	}
+	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
+		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "resume-blocked requires the work item's reporter, a project maintainer or admin"))
+		return
+	}
 	wi, err := s.WIs.ResumeBlocked(id, idn.UserID)
 	if err != nil {
 		writeErr(w, err)
@@ -900,9 +906,8 @@ func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *i
 }
 
 // hTerminateBlockedWI serves the §6.4 owner terminate verdict's hub door
-// (polyforge#116): `pf wrap --fail` on a parked workflow. Authorization
-// mirrors Unblock — admin or project maintainer: landing a terminal
-// verdict overrides what the runtime judged a wait-on-owner state.
+// (polyforge#116): `pf wrap --fail` on a parked workflow. Authorization is
+// the unified blocked-exit gate: reporter, project maintainer, or admin.
 func (s *Server) hTerminateBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -913,12 +918,9 @@ func (s *Server) hTerminateBlockedWI(w http.ResponseWriter, r *http.Request, idn
 		writeErr(w, err)
 		return
 	}
-	if idn.Role != "admin" {
-		role, merr := s.memberRole(projectID, idn.UserID)
-		if merr != nil || role != "maintainer" {
-			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "terminate-blocked requires admin or project maintainer"))
-			return
-		}
+	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
+		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "terminate-blocked requires the work item's reporter, a project maintainer or admin"))
+		return
 	}
 	wi, err := s.WIs.TerminateBlocked(id, idn.UserID)
 	if err != nil {

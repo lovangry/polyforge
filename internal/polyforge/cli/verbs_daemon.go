@@ -407,7 +407,7 @@ func setCleanPause(ctx *Context, wiID string, value bool) string {
 
 var cmdResume = &Command{
 	Name:    "resume",
-	Summary: "Resume a paused WI (clean_pause=false), or a workflow parked blocked (the §6.4 owner move)",
+	Summary: "Continue a paused WI (clean_pause=false) or a blocked one (reporter, maintainer or admin); abandon with pf cancel",
 	Usage:   "pf resume <id>",
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -448,10 +448,10 @@ var cmdResume = &Command{
 
 var cmdWrap = &Command{
 	Name:    "wrap",
-	Summary: "Wrap a running WI as terminal success (--fail for terminal failure)",
+	Summary: "Wrap a running WI as terminal success (--fail = the owner's failed verdict; to abandon a blocked WI use pf cancel)",
 	Usage:   "pf wrap <id> [--fail]",
 	Setup: func(fs *flag.FlagSet) {
-		fs.Bool("fail", false, "end the session with reason=fail instead of wrap")
+		fs.Bool("fail", false, "end the session with reason=fail instead of wrap (the owner's failed verdict; to abandon a blocked WI use pf cancel)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {

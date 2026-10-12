@@ -334,7 +334,7 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 	// #113 machine health face; watch-probe is the watch lane's one-shot
 	// data face, wi_LMSxPTQTtz5x).
 	want := []string{
-		"file", "queue", "cancel", "recall", "remember", "takeover", "unblock",
+		"file", "queue", "cancel", "recall", "remember", "takeover",
 		"verify-session",
 		"submit", "observe", "answer", "batch-confirm", "pause", "resume",
 		"wrap", "ops", "ship", "users", "api-keys", "machines", "projects",

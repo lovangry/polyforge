@@ -705,11 +705,9 @@ func (m *WIManager) Unblock(idOrSlug string, actor string) (*api.WorkItem, error
 // Unblock asserts (a blocked WI still carrying a session would orphan a
 // holder). Effect: status→queued, waiting_on=NULL, event wi_resumed; the
 // claim gate (unchanged: queued only) then admits the WI like any queued
-// ticket. Authorization is the CLAIM gate's (any project member), not the
-// unblock gate's admin/maintainer: this door exercises the right the
-// blocked verdict itself grants ("the owner holds the next move") rather
-// than overriding it — the pool-return override stays admin-gated on
-// Unblock.
+// ticket. Authorization (server layer, v2-converge §7): the WI's reporter,
+// a project maintainer, or an admin — the same gate as Unblock,
+// TerminateBlocked and cancel.
 func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem, error) {
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
@@ -771,9 +769,8 @@ func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem,
 // M2 invariant Unblock asserts). Effect: status→failed, closed_at set,
 // waiting_on cleared, event wi_failed_blocked; a wrapped (success) verdict is
 // not a door here — a parked workflow has no completed output to wrap, and
-// the owner's continuing move is ResumeBlocked. Authorization mirrors
-// Unblock — admin or project maintainer: landing a terminal verdict overrides
-// what the runtime judged a wait-on-owner state.
+// the owner's continuing move is ResumeBlocked. Authorization is the unified
+// blocked-exit gate (reporter, project maintainer, admin).
 func (m *WIManager) TerminateBlocked(idOrSlug string, actor string) (*api.WorkItem, error) {
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {

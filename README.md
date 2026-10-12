@@ -152,7 +152,8 @@ The queue now lists the work item as `wrapped`; its SESSION column is
 fingerprint). Note: wrapping before the
 capsule's first commit lands leaves no revision to seal — the close
 degrades to `blocked`, and the WI is not claimable again until
-`pf unblock <WI_ID>` returns it to `queued` (admin or maintainer).
+`pf resume <WI_ID>` continues it, or `pf cancel <WI_ID>` abandons it (the task's
+reporter, a project maintainer or an admin).
 `pf pause <WI_ID>` sets a clean_pause (a daemon restart will not
 auto-resume it); `pf resume <WI_ID>` clears the flag and the holder
 daemon re-attaches on its next start — to continue immediately, use

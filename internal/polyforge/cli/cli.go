@@ -54,9 +54,10 @@ type Command struct {
 	Run          func(ctx *Context, fs *flag.FlagSet, args []string) error
 }
 
-// commands is the full registry: the 16 routing verbs first — 8 direct
-// to aihub (file, queue, cancel, recall, remember + the v1.5 takeover,
-// unblock and verify-session) + 8 on the daemon UDS face (submit, observe,
+// commands is the full registry: the 15 routing verbs first — 7 direct
+// to aihub (file, queue, cancel, recall, remember + the v1.5 takeover
+// and verify-session; the blocked exits are `resume` = continue and
+// `cancel` = abandon, v2-converge §7) + 8 on the daemon UDS face (submit, observe,
 // answer, batch-confirm, pause, resume, wrap, ops) — then ship (the wrap→git
 // delivery bridge, daemon face), then the management face M1–M5, then the
 // two migrations (dispatchable but never surfaced on the help face — #103
@@ -70,7 +71,6 @@ var commands = []*Command{
 	cmdRecall,
 	cmdRemember,
 	cmdTakeover,
-	cmdUnblock,
 	cmdVerifySession,
 	cmdSubmit,
 	cmdObserve,
@@ -141,6 +141,11 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	if args[0] == "unblock" {
+		// v2-converge §7: the three blocked doors became two actions.
+		fmt.Fprintln(stderr, "pf: `unblock` was removed — use pf resume (continue) or pf cancel (abandon)")
+		return 2
+	}
 	cmd := lookupCommand(args[0])
 	if cmd == nil {
 		fmt.Fprintf(stderr, "pf: unknown command %q (see `pf help`)\n", args[0])
@@ -278,40 +283,40 @@ func fsHasFlags(fs *flag.FlagSet) bool {
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "pf — polyforge v1 client CLI")
 	fmt.Fprintln(w)
-	// The registry layout: 8 data-plane verbs (direct to aihub) — file,
-	// queue, cancel, recall, remember + the v1.5 takeover, unblock and
+	// The registry layout: 7 data-plane verbs (direct to aihub) — file,
+	// queue, cancel, recall, remember + the v1.5 takeover and
 	// verify-session — then the 8 execution-plane verbs, ship, the M1–M5
 	// management face and the daemon placeholder. The two migration verbs
-	// (positions 22–23) stay dispatchable for the one-shot v0→v1 cutover
+	// (positions 21–22) stay dispatchable for the one-shot v0→v1 cutover
 	// but are deliberately UNSURFACED here (#103, AC16): no migration
 	// subcommand appears on the pf verb surface — capsule migration is a
 	// manual operator procedure (docs/design/polyforge-vnext/
 	// 08-capsule-base-migration.md). The group indices below MUST track
 	// that layout.
 	fmt.Fprintln(w, "Data-plane verbs (direct to aihub):")
-	for _, c := range commands[0:8] {
+	for _, c := range commands[0:7] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Execution-plane verbs (local daemon UDS face):")
-	for _, c := range commands[8:16] {
+	for _, c := range commands[7:15] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Delivery bridge (wrap→git, local daemon UDS face):")
-	for _, c := range commands[16:17] {
+	for _, c := range commands[15:16] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Management face (M1–M5):")
-	for _, c := range commands[17:23] {
+	for _, c := range commands[16:22] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
-	// commands[23:25] are the migration verbs — dispatchable, never
+	// commands[22:24] are the migration verbs — dispatchable, never
 	// surfaced (see the layout comment above).
 	fmt.Fprintln(w, "Diagnostics:")
-	for _, c := range commands[25:27] {
+	for _, c := range commands[24:26] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "Process:")
-	for _, c := range commands[27:] {
+	for _, c := range commands[26:] {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w)
