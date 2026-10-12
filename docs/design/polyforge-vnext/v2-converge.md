@@ -211,7 +211,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 ## 5. 执行模式与提交（已定）
 
 - **drain 暂不做**，但架构保留支持：领取与执行分离（已是）；人与任务的交互不绑死在执行机上（依赖 #84 跨 daemon 通信）。
-- 形态（**已落地**，分支 `v2/m2-modes`）：`pf ops auto on|off` + `pf ops max N`，自动领取与手动提交并存。`auto off` = 只有显式 `pf submit`；`auto on` = daemon 另外自己拉 aihub 就绪队列（即原 drain 循环，origin 仍为 `auto`）。已删除 interactive/batch/drain 三模式、`abort-drain`、`batch-confirm`、`batch_submit`、`get_recommendation`（只是原样转发就绪队列，改用 `pf queue --ready`）、DAEMON-409「drain 是唯一建 job 入口」拒绝。`status` 头为 `auto: on|off  max: N`；heartbeat 体仍带 mode 字符串（`auto` / `manual`）以兼容 aihub。daemon 旗标 `-auto`（`-mode interactive|drain` 作一版弃用别名，打印告警）；`daemon-state.json` 的旧 `mode` 字段加载时迁移（drain → auto on，其余 off），下次持久化改写为 `auto`。drain 作为产品能力仍属「暂不做」范围（跨 daemon 通信 #84 未到），但架构上已可用。
+- 形态（**已落地**，分支 `v2/m2-modes`）：`pf ops auto on|off` + `pf ops max N`，自动领取与手动提交并存。`auto off` = 只有显式 `pf submit`；`auto on` = daemon 另外自己拉 aihub 就绪队列（即原 drain 循环，origin 仍为 `auto`）。已删除 interactive/batch/drain 三模式、`abort-drain`、`batch-confirm`、`batch_submit`、`get_recommendation`（只是原样转发就绪队列，改用 `pf queue --ready`）、DAEMON-409「drain 是唯一建 job 入口」拒绝。`status` 头为 `auto: on|off  max: N`；heartbeat 体仍带 mode 字符串（`auto` / `manual`）以兼容 aihub。daemon 旗标 `-auto`（`-mode` 别名与 `daemon-state.json` 旧 `mode` 字段的迁移均已删除，见第 262 行「兼容垫片」：v2 不留向后兼容代码）。drain 作为产品能力仍属「暂不做」范围（跨 daemon 通信 #84 未到），但架构上已可用。
 - **名额已满时的提交**：daemon 排队队列**持久化到 daemon 数据目录**（方案 B），重启不丢。重放规则（r2 补）：
   - 条目带 origin 与提交时间；
   - **只重放普通提交，不重放 takeover**；
@@ -371,7 +371,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 ## 附录 C：已知缺口（集成分支，2026-10-12）
 
 - **(a) bundle digest 描述与代码不一致**：01 §4.5 描述的是 RFC 8785 canonical-JSON bundle digest，但在线的 `Digest` 实现是"路径 + sha + 长度"拼接。**以代码为准**（`internal/common/workflow`，golden 向量在活测试中），01 §4.5 待更正。
-- **(b) 人工确认保证只约束诚实的 agent，直到 #135 落地**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证，但不可信的 step agent 仍可写 capsule、可触达 daemon 的 UDS socket，从而绕过。真正的隔离是 #135（第 9 节 8）。
+- **(b) 人工确认保证只约束诚实的 agent，直到 #135 落地**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证，但不可信的 step agent 仍可写 capsule、可触达 daemon 的 UDS socket，从而绕过。真正的隔离是 #135（第 9 节 8）。同一缺口的一个具体实例：daemon 的 abandon-repair 路由（放弃 repair_pending WI）信任 CLI 侧的人类密钥检查，因此任何能连上 UDS socket 的客户端都可以放弃一个 repair_pending 的 WI，直到 #135 落地。
 - **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
 
 ## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`）

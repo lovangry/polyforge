@@ -195,7 +195,7 @@ type jobRecord struct {
 const (
 	OriginChat = "chat" // interactive submit from a harness chat
 	OriginCLI  = "cli"  // interactive/batch submit without a chat
-	OriginAuto = "auto" // drain-mode auto claim
+	OriginAuto = "auto" // auto-claim (pf ops auto on)
 )
 
 // Origin is the daemon-side record of where a job came from. ChatID is a

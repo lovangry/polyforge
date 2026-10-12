@@ -305,7 +305,7 @@ registry; `pf <verb> -help` one verb's face. The routing skill's fragments
 | Face | Verbs |
 | --- | --- |
 | aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember` |
-| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`; `observe` is its deprecated alias), `answer`, `pause`, `resume`, `wrap`, `ship`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
+| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`; the old `pf observe` verb is removed), `answer`, `pause`, `resume`, `wrap`, `ship`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
 | management | `users`, `api-keys`, `projects`, `machines`, `backup`, `rotate-secret` |
 | local | `daemon` (run the work machine), `doctor` |
 
