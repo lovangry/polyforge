@@ -250,16 +250,18 @@ func TestV1S19LongRunLeakProbe(t *testing.T) {
 	//   - the daemon's hub client shares one http.Transport whose
 	//     keep-alive connection to the aihub is a persistent fd; if the
 	//     first claim opened it after the baseline, that legitimate
-	//     steady-state fd would read as post-run growth. `pf
-	//     batch-confirm` (read-only recommendation fetch — no job is
-	//     created) exercises the same hub client.
+	//     steady-state fd would read as post-run growth. One uncounted
+	//     warm-up job (file, submit, wait for wrapped) exercises the
+	//     same hub client before the baseline is taken.
 	//   - the test's own in-process DaemonClient keeps its idle
 	//     keep-alive connection open on the CLIENT side, which pins the
 	//     daemon-side ACCEPTED socket open too (the server has no idle
 	//     timeout); a first post-run status call would open it after the
 	//     baseline. One status call now pins that accepted fd in the
 	//     baseline instead.
-	d.pf(t, "batch-confirm")
+	warm := inst.newWI(t, "s19: hub-client warm-up job", envelopeQuickFix(), nil)
+	d.pf(t, "submit", warm)
+	inst.waitWIStatus(t, warm, "wrapped", 120*time.Second)
 	d.status(t)
 
 	// Baseline: after start-up idle-settle, before job 1.
@@ -281,9 +283,11 @@ func TestV1S19LongRunLeakProbe(t *testing.T) {
 	}
 
 	// The daemon holds no job any more.
-	if st := d.status(t); len(st.Jobs) != 0 {
-		t.Fatalf("daemon still holds jobs after the run: %+v", st.Jobs)
-	}
+	// (the WI status flips to wrapped before the last job's sealing
+	// bookkeeping drains, so allow it a moment)
+	waitUntil(t, 30*time.Second, "daemon still holds jobs after the run", func() bool {
+		return len(d.status(t).Jobs) == 0
+	})
 
 	// Every job's monitor reached its job_stopped event: the wrap
 	// status is set by session-end, which precedes RTFinished, so
@@ -310,5 +314,5 @@ func TestV1S19LongRunLeakProbe(t *testing.T) {
 	t.Logf("s19: daemon fd final after settle: %d (baseline %d)", final, baseline)
 
 	// The durable events log tells the whole run with no duplicates.
-	s19AssertEventsLogClean(t, d.dataDir, wis)
+	s19AssertEventsLogClean(t, d.dataDir, append([]string{warm}, wis...))
 }

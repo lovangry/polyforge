@@ -31,7 +31,7 @@ import (
 //	                                        message itself (00 §3.4a)
 //	POST /jobs/{id}/pause  {}               POST /jobs/{id}/wrap {"reason"}
 //	POST /jobs/{id}/ship  {}                 GET  /status
-//	POST /mode {"action":...}               POST /batch_submit {"wi_ids":[]}
+//	POST /ops/config {"auto":bool,"max":N}
 //	POST /shutdown
 //
 // pf watch lane (v2-converge §3): GET /jobs/{id}/watch?after=<seq> (one WI's
@@ -163,17 +163,11 @@ type AnswerPayload struct {
 	AnsweredBy string `json:"answered_by"`
 }
 
-// ModeRequest is the POST /mode body. Action is one of
-// set|drain|abort-drain|get_recommendation; Mode (interactive|batch|
-// drain) and MaxConcurrentJobs apply to action=set only. There is no
-// "get" action — mode queries go through GET /status. Project (#113)
-// scopes get_recommendation to one project; absent, the daemon merges
-// ALL mapped projects.
-type ModeRequest struct {
-	Action            string `json:"action"`
-	Mode              string `json:"mode,omitempty"`
-	MaxConcurrentJobs *int   `json:"max_concurrent_jobs,omitempty"`
-	Project           string `json:"project,omitempty"`
+// OpsConfigRequest is the POST /ops/config body: the auto switch and/or
+// the max-concurrent-jobs number (at least one).
+type OpsConfigRequest struct {
+	Auto *bool `json:"auto,omitempty"`
+	Max  *int  `json:"max,omitempty"`
 }
 
 // SubmitResponse is the claim-family answer.
@@ -182,13 +176,13 @@ type SubmitResponse struct {
 	WorkItemID string `json:"work_item_id"`
 }
 
-// StatusResponse is the GET /status answer: local bookkeeping + mode +
+// StatusResponse is the GET /status answer: local bookkeeping + auto switch +
 // queue counters. It is NOT workflow execution state (INV-1) — just
 // "what this machine is managing".
 type StatusResponse struct {
 	MachineID   string `json:"machine_id"`
 	DisplayName string `json:"display_name,omitempty"`
-	Mode        string `json:"mode"`
+	Auto        bool   `json:"auto"`
 	// Workspaces is the mapped workspace set (#113): every [workspace]
 	// path the daemon routes capsules into, in mapping declaration
 	// order — a multi-workspace daemon never presents one workspace as
@@ -369,15 +363,9 @@ func (d *DaemonClient) Status() (json.RawMessage, error) {
 	return d.do("GET", "/status", "", nil, nil)
 }
 
-// Mode issues one POST /mode operation.
-func (d *DaemonClient) Mode(req ModeRequest) (json.RawMessage, error) {
-	return d.do("POST", "/mode", "", req, nil)
-}
-
-// BatchSubmit submits the human-confirmed wave; the daemon never widens
-// or narrows the set.
-func (d *DaemonClient) BatchSubmit(wiIDs []string) (json.RawMessage, error) {
-	return d.do("POST", "/batch_submit", "", d.withOrigin(map[string]any{"wi_ids": wiIDs}), nil)
+// OpsConfig issues one POST /ops/config operation.
+func (d *DaemonClient) OpsConfig(req OpsConfigRequest) (json.RawMessage, error) {
+	return d.do("POST", "/ops/config", "", req, nil)
 }
 
 // Shutdown triggers graceful shutdown (quiesce).

@@ -172,7 +172,7 @@ else
     --config "$CFG" \
     -api-key "$KEY" \
     -machine-id "m-$MACHINE_ID" \
-    -mode interactive \
+    -auto=false \
     -data-dir "$DAEMON_DATA" \
     -socket "$DAEMON_SOCKET" \
     -workflows-dir "$WORKFLOWS" \

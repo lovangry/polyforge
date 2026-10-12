@@ -131,7 +131,7 @@ func (c *Client) ListWorkItems(project string, status string) ([]api.WorkItem, e
 	return resp.Items, nil
 }
 
-// Queue returns ready work items for autonomous claiming (drain mode).
+// Queue returns ready work items for autonomous claiming (the daemon auto-pull).
 // Both executable segments count as takeable: items (classified
 // requires_human_session=false) and unclassified (classification missing —
 // per the ready-queue contract the segment that means "takeable now by an

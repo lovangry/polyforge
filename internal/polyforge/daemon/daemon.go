@@ -92,7 +92,7 @@ type Config struct {
 	// RecallTopK is the F6-A claim-time memory snapshot's hit count
 	// (0 = the runtime default, 10; bounded at 50 there).
 	RecallTopK int
-	Mode       string // initial mode; "" = not specified (persisted mode wins; default interactive)
+	Auto       *bool  // initial auto switch; nil = not specified (persisted state wins; default off)
 	Harness    string // harness adapter name (default "pi")
 
 	// HeartbeatEvery is the machines liveness cadence (M3): how often the
@@ -215,7 +215,7 @@ type Daemon struct {
 	// drainDegraded is the drain degraded-signal episode flag: set when
 	// the first drain_degraded event of a silent→degraded transition has
 	// been emitted, cleared on the next successful wave fetch. Only the
-	// drain ticker goroutine touches it (fetchDrainWave), so it carries
+	// drain ticker goroutine touches it (fetchAutoWave), so it carries
 	// no lock.
 	drainDegraded bool
 
@@ -399,19 +399,17 @@ func New(cfg Config) (*Daemon, error) {
 	if err := d.loadDaemonState(); err != nil {
 		return nil, err
 	}
-	// cfg.Mode is an EXPLICIT flag override only (#18): unset ("") keeps
-	// the persisted mode — a drain daemon restarting stays drain — and
-	// loadDaemonState has already defaulted to interactive when no state
-	// file exists. An explicit flag equal to the loaded mode is a no-op
-	// (Set would refuse drain→drain as a non-exit transition).
-	if cfg.Mode != "" && cfg.Mode != d.modes.Current() {
-		if err := d.modes.Set(cfg.Mode); err != nil {
-			return nil, fmt.Errorf("daemon: initial mode %q: %w", cfg.Mode, err)
+	// cfg.Auto is an EXPLICIT flag override only (#18): nil keeps the
+	// persisted switch — an auto daemon restarting stays auto — and
+	// loadDaemonState has already defaulted to off when no state file
+	// exists.
+	if cfg.Auto != nil && *cfg.Auto != d.modes.Auto() {
+		if err := d.modes.SetAuto(*cfg.Auto); err != nil {
+			return nil, fmt.Errorf("daemon: initial auto: %w", err)
 		}
 		// The flag override must survive the restart it rode in on:
-		// without this persist, a `--mode interactive` that overrides a
-		// persisted drain stays interactive in memory only — the NEXT boot
-		// would load the stale drain again (the fx3 gap).
+		// without this persist, `-auto=false` over a persisted auto-on
+		// would be undone by the NEXT boot (the fx3 gap).
 		d.persistModeQuietly()
 	}
 	return d, nil
@@ -579,7 +577,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-dispatch.C:
 			d.dispatch()
 		case <-drain.C:
-			d.fetchDrainWave()
+			d.fetchAutoWave()
 		}
 	}
 }
@@ -849,7 +847,7 @@ func (d *Daemon) tapRecord(wi string, line []byte) {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatcher (04 §6.1d backfill) and drain loop (04 §6.1c).
+// Dispatcher (04 §6.1d backfill) and auto-pull loop (04 §6.1c).
 
 // dispatch starts pending jobs into free slots, priority-desc then FIFO,
 // and reconciles the queue's running marks against the runtime's live
@@ -894,15 +892,15 @@ func (d *Daemon) dispatch() {
 	}
 }
 
-// fetchDrainWave pulls the ready queue and enqueues what is claimable
-// (04 §6.1c): only in drain mode, never once shutting_down latched, and
+// fetchAutoWave pulls the ready queue and enqueues what is claimable
+// (04 §6.1c): only with auto on, never once shutting_down latched, and
 // only while a concurrency slot is free. Authorization-class denials
 // raise the degraded signal — a typed drain_degraded event in the
 // observe lane's durable log, once per silent→degraded episode (the
 // flag clears on the next successful fetch); transport-class losses
 // stay silent idle.
-func (d *Daemon) fetchDrainWave() {
-	if !d.modes.AdmitDrainWave() || !d.q.SlotFree() {
+func (d *Daemon) fetchAutoWave() {
+	if !d.modes.AdmitAutoPull() || !d.q.SlotFree() {
 		return
 	}
 	// polyforge#113: no daemon-level project scope exists — the drain
@@ -945,16 +943,6 @@ func (d *Daemon) fetchDrainWave() {
 			fmt.Fprintf(os.Stderr, "daemon: drain enqueue %s: queue persist failed: %v\n", it.ID, err)
 		}
 	}
-}
-
-// queueProjects answers the projects the batch/drain wave covers: an
-// explicit scope when one rides the mode wire, else every mapped project
-// in declaration order (polyforge#113).
-func (d *Daemon) queueProjects(scope string) []string {
-	if scope != "" {
-		return []string{scope}
-	}
-	return d.cfg.Mapping.Projects()
 }
 
 // authDenied classifies a ready-queue error as authorization-class: a

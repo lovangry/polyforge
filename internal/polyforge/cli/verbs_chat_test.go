@@ -62,7 +62,7 @@ func TestConfigReadsChatIDFromEnv(t *testing.T) {
 func TestStatusRendersDaemonNameAndOrigin(t *testing.T) {
 	var b strings.Builder
 	renderStatus(&b, &StatusResponse{
-		MachineID: "m-h", DisplayName: "laptop", Mode: "interactive",
+		MachineID: "m-h", DisplayName: "laptop",
 		Jobs: []StatusJob{{WorkItemID: "wi_1", Status: "running", Origin: &JobOrigin{Kind: "chat", ChatID: "chat_z"}}},
 	})
 	for _, want := range []string{"daemon: m-h (laptop)", "ORIGIN", "chat:chat_z"} {

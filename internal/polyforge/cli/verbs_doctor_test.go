@@ -80,7 +80,7 @@ func liveDaemonSocket(t *testing.T, machineID string) string {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"machine_id":"`+machineID+`","mode":"interactive","shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":1}}`)
+		io.WriteString(w, `{"machine_id":"`+machineID+`","auto":false,"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":1}}`)
 	})
 	return newFakeDaemon(t, mux)
 }

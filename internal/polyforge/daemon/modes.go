@@ -1,12 +1,14 @@
 package daemon
 
-// modes.go: mode storage/admission (04 §2.2/§6.7; criteria authority
-// 00 §3.4), the pending-job queue (04 §6.1d) and the daemon's own small
-// state file. The mode field changes ONLY how future requests are
-// admitted; it never touches running jobs and is fully independent from
-// the shutting_down latch (INV-13: drain-idle is not shutdown, shutdown
-// is not drain). Jobs/attempts bookkeeping is NOT here — it lives in
-// Runtime's state.json and is never duplicated (04 §4.1 INV-D1).
+// modes.go: the auto switch + admission (v2-converge §5), the pending-job
+// queue (04 §6.1d) and the daemon's own small state file. The daemon has
+// ONE switch (auto on|off) and ONE number (max concurrent jobs): auto
+// off = only explicit pf submit; auto on = the daemon also pulls the
+// aihub ready queue by itself (the former drain loop). Manual submits
+// stay legal either way. The switch changes ONLY how future work is
+// sourced; it never touches running jobs and is fully independent from
+// the shutting_down latch. Jobs/attempts bookkeeping is NOT here — it
+// lives in Runtime's state.json and is never duplicated (04 §4.1 INV-D1).
 
 import (
 	"encoding/json"
@@ -22,29 +24,35 @@ import (
 )
 
 // Admission error shapes (04 §5.2); the HTTP layer maps them to codes.
-var (
-	errModeConflict = errors.New("request refused by the current mode (DAEMON-409)")
-	errShuttingDown = errors.New("daemon is shutting down (DAEMON-410)")
-	errBadMode      = errors.New("unknown mode (DAEMON-400)")
-)
+var errShuttingDown = errors.New("daemon is shutting down (DAEMON-410)")
 
-// ModeCtl stores and admits against the current mode. The shutting_down
-// latch gates BOTH external submissions and the drain loop's next wave
-// fetch (04 §6.5 step 2) — two different block paths for the same "no
-// new jobs from any source" outcome.
+// ModeCtl stores the auto switch and admits against the shutting_down
+// latch. The latch gates BOTH external submissions and the auto-pull's
+// next fetch (04 §6.5 step 2) — two different block paths for the same
+// "no new jobs from any source" outcome.
 type ModeCtl struct {
 	mu           sync.Mutex
-	mode         string
+	auto         bool
 	shuttingDown bool
 }
 
-// NewModeCtl starts in Interactive.
-func NewModeCtl() *ModeCtl { return &ModeCtl{mode: protocol.ModeInteractive} }
+// NewModeCtl starts with auto off.
+func NewModeCtl() *ModeCtl { return &ModeCtl{} }
 
-func (m *ModeCtl) Current() string {
+// Auto reports the auto-pull switch.
+func (m *ModeCtl) Auto() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.mode
+	return m.auto
+}
+
+// HeartbeatMode is the mode string the machines heartbeat still carries
+// for aihub compatibility: "auto" | "manual".
+func (m *ModeCtl) HeartbeatMode() string {
+	if m.Auto() {
+		return protocol.HeartbeatModeAuto
+	}
+	return protocol.HeartbeatModeManual
 }
 
 func (m *ModeCtl) ShuttingDown() bool {
@@ -61,89 +69,40 @@ func (m *ModeCtl) SetShuttingDown() {
 	m.shuttingDown = true
 }
 
-// Set applies a mode transition with 00 §3.4's criteria:
-//   - interactive → batch | drain: allowed;
-//   - batch → interactive | drain: allowed;
-//   - drain → anything except abort-drain's interactive: refused —
-//     Drain's only exit is its explicit abort.
-func (m *ModeCtl) Set(next string) error {
-	switch next {
-	case protocol.ModeInteractive, protocol.ModeBatch, protocol.ModeDrain:
-	default:
-		return errBadMode
-	}
+// SetAuto flips the switch; refused once shutting_down is latched.
+func (m *ModeCtl) SetAuto(on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.shuttingDown {
 		return errShuttingDown
 	}
-	if m.mode == protocol.ModeDrain && next != protocol.ModeInteractive {
-		return errModeConflict
-	}
-	m.mode = next
+	m.auto = on
 	return nil
 }
 
-// AbortDrain ends Drain mode without touching anything else (04 §6.1c);
-// running jobs are unaffected.
-func (m *ModeCtl) AbortDrain() error {
+// AdmitSubmit decides a single claim/resume/takeover: always legal (also
+// while auto is on) except once shutting_down is latched (DAEMON-410).
+func (m *ModeCtl) AdmitSubmit() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.shuttingDown {
 		return errShuttingDown
 	}
-	if m.mode != protocol.ModeDrain {
-		return errModeConflict
-	}
-	m.mode = protocol.ModeInteractive
 	return nil
 }
 
-// AdmitSingle decides a single claim/resume/takeover: legal in
-// Interactive and Batch; refused in Drain (its internal loop is the only
-// creation entry there). Every submission source is refused once
-// shutting_down is latched (DAEMON-410).
-func (m *ModeCtl) AdmitSingle() error {
+// AdmitAutoPull decides whether the auto loop may fetch the ready queue:
+// only with auto on, never once shutting_down is latched.
+func (m *ModeCtl) AdmitAutoPull() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.shuttingDown {
-		return errShuttingDown
-	}
-	if m.mode == protocol.ModeDrain {
-		return errModeConflict
-	}
-	return nil
-}
-
-// AdmitBatch decides a batch_submit wave: admitted in Batch (its home)
-// and Interactive (a wave is just an explicit set of submissions);
-// refused in Drain.
-func (m *ModeCtl) AdmitBatch() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.shuttingDown {
-		return errShuttingDown
-	}
-	if m.mode == protocol.ModeDrain {
-		return errModeConflict
-	}
-	return nil
-}
-
-// AdmitDrainWave decides whether the drain loop may fetch its next wave:
-// only in drain mode, never once shutting_down is latched (04 §6.1c:
-// the loop checks the latch before every fetch — the same latch that
-// refuses external callers, reached by a different path).
-func (m *ModeCtl) AdmitDrainWave() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.mode == protocol.ModeDrain && !m.shuttingDown
+	return m.auto && !m.shuttingDown
 }
 
 // ---------------------------------------------------------------------------
 // Pending-job queue (04 §6.1d): priority DESC (urgent > high > normal >
 // low), FIFO within a priority, no preemption, ordered backfill. One
-// queue and one cap shared across Interactive, Batch and Drain.
+// queue and one cap shared by manual submits and auto pulls.
 
 var priorityRank = map[string]int{
 	"urgent": 0, "high": 1, "normal": 2, "low": 3,
@@ -341,7 +300,7 @@ func (q *jobQueue) Reconcile(live map[string]bool) {
 }
 
 // ---------------------------------------------------------------------------
-// The daemon's own state file: mode + concurrency only (the 04 §4.1
+// The daemon's own state file: auto switch + concurrency only (the 04 §4.1
 // shape minus jobs[], which is Runtime's state.json). Same atomic-write
 // discipline as every daemon-side state file.
 
@@ -350,8 +309,11 @@ const daemonStateFile = "daemon-state.json"
 type daemonState struct {
 	Version           int    `json:"version"`
 	MachineID         string `json:"machine_id"`
-	Mode              string `json:"mode"`
+	Auto              bool   `json:"auto"`
 	MaxConcurrentJobs int    `json:"max_concurrent_jobs"`
+	// Mode is the LEGACY (pre-v2 §5) persisted field: read for migration
+	// only (drain -> auto on, anything else -> off) and never written.
+	Mode string `json:"mode,omitempty"`
 }
 
 func (d *Daemon) statePath() string {
@@ -360,7 +322,7 @@ func (d *Daemon) statePath() string {
 
 func (d *Daemon) loadDaemonState() error {
 	d.modes.mu.Lock()
-	d.modes.mode = protocol.ModeInteractive
+	d.modes.auto = false
 	d.modes.mu.Unlock()
 	raw, err := os.ReadFile(d.statePath())
 	if err != nil {
@@ -373,11 +335,16 @@ func (d *Daemon) loadDaemonState() error {
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return fmt.Errorf("daemon: %s unparsable: %w", daemonStateFile, err)
 	}
-	if st.Mode != "" {
-		d.modes.mu.Lock()
-		d.modes.mode = st.Mode
-		d.modes.mu.Unlock()
+	// Migration: a pre-v2 file carries only "mode" (no "auto" key).
+	// drain -> auto on; interactive/batch/anything else -> off. The next
+	// persist rewrites the file in the new shape.
+	auto := st.Auto
+	if !hasKey(raw, "auto") && st.Mode != "" {
+		auto = st.Mode == "drain"
 	}
+	d.modes.mu.Lock()
+	d.modes.auto = auto
+	d.modes.mu.Unlock()
 	if st.MaxConcurrentJobs > 0 {
 		if err := d.q.SetMaxConcurrent(st.MaxConcurrentJobs); err != nil {
 			return err
@@ -386,11 +353,21 @@ func (d *Daemon) loadDaemonState() error {
 	return nil
 }
 
+// hasKey reports whether the JSON object carries the top-level key.
+func hasKey(raw []byte, key string) bool {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	_, ok := m[key]
+	return ok
+}
+
 func (d *Daemon) persistDaemonState() error {
 	st := daemonState{
 		Version:           1,
 		MachineID:         d.cfg.MachineID,
-		Mode:              d.modes.Current(),
+		Auto:              d.modes.Auto(),
 		MaxConcurrentJobs: d.q.MaxConcurrent(),
 	}
 	blob, err := json.MarshalIndent(&st, "", "  ")
@@ -408,9 +385,9 @@ func (d *Daemon) persistDaemonState() error {
 	return os.Rename(tmp, path)
 }
 
-// persistModeQuietly lands the mode/concurrency bookkeeping after a
-// mode operation; a persist failure is loud but never fails the
-// transition that already happened in memory.
+// persistModeQuietly lands the auto/max bookkeeping after an ops change;
+// a persist failure is loud but never fails the change that already
+// happened in memory.
 func (d *Daemon) persistModeQuietly() {
 	if err := d.persistDaemonState(); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: state persist failed: %v\n", err)

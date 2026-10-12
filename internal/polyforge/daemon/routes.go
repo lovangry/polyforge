@@ -81,7 +81,9 @@ type statusResponse struct {
 	MachineID string `json:"machine_id"`
 	// DisplayName is the display-only daemon name (default: hostname).
 	DisplayName string `json:"display_name,omitempty"`
-	Mode        string `json:"mode"`
+	// Auto is the auto-pull switch (v2-converge §5); the max-jobs number
+	// rides queue.max_concurrent.
+	Auto bool `json:"auto"`
 	// Workspaces is the mapped workspace set (polyforge#113): every
 	// [workspace] path the daemon routes capsules into, in mapping
 	// declaration order. A multi-workspace daemon must never present one
@@ -92,14 +94,9 @@ type statusResponse struct {
 	Queue        queueStats  `json:"queue"`
 }
 
-type modeResponse struct {
-	Mode              string `json:"mode"`
-	MaxConcurrentJobs int    `json:"max_concurrent_jobs,omitempty"`
-}
-
-type recommendationResponse struct {
-	Items []api.WorkItem `json:"items"`
-	Total int            `json:"total"`
+type opsConfigResponse struct {
+	Auto bool `json:"auto"`
+	Max  int  `json:"max"`
 }
 
 type closeResponse struct {
@@ -119,11 +116,6 @@ type closeResponse struct {
 type resumeBlockedResponse struct {
 	Resumed    bool   `json:"resumed"`
 	WorkItemID string `json:"work_item_id"`
-}
-
-type batchResponse struct {
-	Submitted   int      `json:"submitted"`
-	WorkItemIDs []string `json:"work_item_ids"`
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -164,10 +156,6 @@ func writeAdmissionErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errShuttingDown):
 		writeErr(w, api.ErrDaemonGone, err.Error())
-	case errors.Is(err, errModeConflict):
-		writeErr(w, api.ErrDaemonConflict, err.Error())
-	case errors.Is(err, errBadMode):
-		writeErr(w, api.ErrDaemonBadInput, err.Error())
 	default:
 		writeErrOf(w, err)
 	}
@@ -242,8 +230,7 @@ func (d *Daemon) handler() http.Handler {
 	mux.HandleFunc("POST /jobs/{wi}/wrap", d.wrapRoute)
 	mux.HandleFunc("POST /jobs/{wi}/ship", d.shipRoute)
 	mux.HandleFunc("GET /status", d.statusRoute)
-	mux.HandleFunc("POST /mode", d.modeRoute)
-	mux.HandleFunc("POST /batch_submit", d.batchRoute)
+	mux.HandleFunc("POST /ops/config", d.opsConfigRoute)
 	mux.HandleFunc("POST /shutdown", d.shutdownRoute)
 	mux.HandleFunc("POST /chat/init", d.chatInitRoute)
 	// pf watch: the per-WI snapshot and the daemon-held chat subscriptions.
@@ -288,7 +275,7 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		if !decodeBody(w, r, &body) {
 			return
 		}
-		if err := d.modes.AdmitSingle(); err != nil {
+		if err := d.modes.AdmitSubmit(); err != nil {
 			writeAdmissionErr(w, err)
 			return
 		}
@@ -386,7 +373,7 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	if err := d.modes.AdmitSingle(); err != nil {
+	if err := d.modes.AdmitSubmit(); err != nil {
 		writeAdmissionErr(w, err)
 		return
 	}
@@ -662,7 +649,7 @@ func (d *Daemon) wrapRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// ops face: status / mode / batch_submit / shutdown.
+// ops face: status / ops config (auto + max) / shutdown.
 
 // statusJobs builds the jobs[] bookkeeping (with the running-slot count);
 // the status route and the watch lane share it.
@@ -723,7 +710,7 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, statusResponse{
 		MachineID:    d.cfg.MachineID,
 		DisplayName:  d.cfg.DisplayName,
-		Mode:         d.modes.Current(),
+		Auto:         d.modes.Auto(),
 		Workspaces:   d.cfg.Mapping.Workspaces(),
 		ShuttingDown: d.modes.ShuttingDown(),
 		Jobs:         jobs,
@@ -735,144 +722,38 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (d *Daemon) modeRoute(w http.ResponseWriter, r *http.Request) {
+// opsConfigRoute is POST /ops/config {"auto":bool?,"max":int?}: the one
+// switch and the one number. At least one must be present.
+func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Action            string `json:"action"`
-		Mode              string `json:"mode"`
-		MaxConcurrentJobs *int   `json:"max_concurrent_jobs"`
-		// Project is the #113 optional ready-queue scope: absent, the
-		// recommendation merges ALL mapped projects; present, it covers
-		// exactly that project (validated by the CLI against the local
-		// mapping before the call).
-		Project string `json:"project,omitempty"`
+		Auto *bool `json:"auto"`
+		Max  *int  `json:"max"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	switch req.Action {
-	case "set":
-		if req.Mode == "" && req.MaxConcurrentJobs == nil {
-			writeErr(w, api.ErrDaemonBadInput, "mode set requires mode and/or max_concurrent_jobs")
-			return
-		}
-		if req.Mode != "" {
-			switch req.Mode {
-			case protocol.ModeInteractive, protocol.ModeBatch, protocol.ModeDrain:
-			default:
-				writeErr(w, api.ErrDaemonBadInput, "mode must be interactive|batch|drain")
-				return
-			}
-			if err := d.modes.Set(req.Mode); err != nil {
-				writeAdmissionErr(w, err)
-				return
-			}
-		}
-		if req.MaxConcurrentJobs != nil {
-			if err := d.q.SetMaxConcurrent(*req.MaxConcurrentJobs); err != nil {
-				writeErr(w, api.ErrDaemonBadInput, err.Error())
-				return
-			}
-		}
-		d.persistModeQuietly()
-		writeJSON(w, http.StatusOK, modeResponse{Mode: d.modes.Current(), MaxConcurrentJobs: d.q.MaxConcurrent()})
-	case "drain":
-		if err := d.modes.Set(protocol.ModeDrain); err != nil {
+	if req.Auto == nil && req.Max == nil {
+		writeErr(w, api.ErrDaemonBadInput, "ops config requires auto and/or max")
+		return
+	}
+	if req.Max != nil && *req.Max < 1 {
+		writeErr(w, api.ErrDaemonBadInput, "max must be >= 1 (DAEMON-400)")
+		return
+	}
+	if req.Auto != nil {
+		if err := d.modes.SetAuto(*req.Auto); err != nil {
 			writeAdmissionErr(w, err)
 			return
 		}
-		d.persistModeQuietly()
-		writeJSON(w, http.StatusOK, modeResponse{Mode: d.modes.Current()})
-	case "abort-drain":
-		if err := d.modes.AbortDrain(); err != nil {
-			writeAdmissionErr(w, err)
+	}
+	if req.Max != nil {
+		if err := d.q.SetMaxConcurrent(*req.Max); err != nil {
+			writeErr(w, api.ErrDaemonBadInput, err.Error())
 			return
 		}
-		d.persistModeQuietly()
-		writeJSON(w, http.StatusOK, modeResponse{Mode: d.modes.Current()})
-	case "get_recommendation":
-		// Batch's read-only wave projection: the aihub ready queue,
-		// forwarded as-is. NO job is created (04 §6.1b). polyforge#113:
-		// without a scope this merges ALL mapped projects (mapping
-		// declaration order); with one, exactly that project — validated
-		// against THIS daemon's mapping (the placement authority): an
-		// unmapped scope is a typed refusal naming the project, before
-		// any wire call.
-		if req.Project != "" {
-			if _, merr := d.cfg.Mapping.WorkspaceFor(req.Project); merr != nil {
-				writeErr(w, api.ErrDaemonUnmappedProject, fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the recommendation cannot be scoped to it; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)", req.Project))
-				return
-			}
-		}
-		var items []api.WorkItem
-		for _, project := range d.queueProjects(req.Project) {
-			pis, err := d.hub.Queue(project)
-			if err != nil {
-				writeErrOf(w, err)
-				return
-			}
-			items = append(items, pis...)
-		}
-		writeJSON(w, http.StatusOK, recommendationResponse{Items: items, Total: len(items)})
-	default:
-		writeErr(w, api.ErrDaemonBadInput, "unknown mode action: "+req.Action)
 	}
-}
-
-func (d *Daemon) batchRoute(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		WIIDs  []string   `json:"wi_ids"`
-		Origin *reqOrigin `json:"origin,omitempty"`
-	}
-	if !decodeBody(w, r, &body) {
-		return
-	}
-	if len(body.WIIDs) == 0 {
-		writeErr(w, api.ErrDaemonBadInput, "batch_submit requires a non-empty wi_ids set")
-		return
-	}
-	if err := d.modes.AdmitBatch(); err != nil {
-		writeAdmissionErr(w, err)
-		return
-	}
-	// The whole confirmed wave is enqueued (04 §12 ruling 0: never
-	// refuse the batch for exceeding the cap — pending entries
-	// backfill as slots open); duplicates of locally active/pending
-	// ids are skipped, the wave is never widened. Every entry is
-	// canonicalized (F2) so the queue and the runtime agree on keys.
-	// polyforge#113: an entry whose project is unmapped has no capsule
-	// home on this machine — it is skipped loudly (the wave is never
-	// widened with unplaceable work).
-	submitted := make([]string, 0, len(body.WIIDs))
-	for _, wi := range body.WIIDs {
-		canonical := wi
-		priority := "normal"
-		project := ""
-		if item, err := d.hub.GetWorkItem(wi); err == nil && item != nil {
-			if item.ID != "" {
-				canonical = item.ID
-			}
-			priority = item.Priority
-			project = item.ProjectName
-		}
-		if project != "" {
-			if _, merr := d.cfg.Mapping.WorkspaceFor(project); merr != nil {
-				fmt.Fprintf(os.Stderr, "daemon: batch_submit skipped %s: project %q is not in the [workspace] mapping (`pf doctor` checks the mapping)\n", canonical, project)
-				continue
-			}
-		}
-		d.rt.NoteAlias(wi, canonical)
-		if _, live := d.rt.Info(canonical); live || d.q.IsPending(canonical) {
-			continue
-		}
-		cursor := d.lastSeq(canonical)
-		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: priority, Intent: "claim", Origin: body.Origin.origin()}); err != nil {
-			writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+err.Error())
-			return
-		}
-		d.autoSubscribe(body.Origin, canonical, cursor)
-		submitted = append(submitted, canonical)
-	}
-	writeJSON(w, http.StatusOK, batchResponse{Submitted: len(submitted), WorkItemIDs: submitted})
+	d.persistModeQuietly()
+	writeJSON(w, http.StatusOK, opsConfigResponse{Auto: d.modes.Auto(), Max: d.q.MaxConcurrent()})
 }
 
 func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {

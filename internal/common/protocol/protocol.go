@@ -203,9 +203,10 @@ type EventEntry struct {
 	Seq  int64           `json:"seq,omitempty"`
 }
 
-// Daemon modes (04 §3).
+// Heartbeat mode strings: the daemon has one auto switch (v2-converge §5);
+// the machines heartbeat body still carries a mode string for aihub
+// compatibility.
 const (
-	ModeInteractive = "interactive" // claim nothing on its own
-	ModeBatch       = "batch"       // recommendation → confirm → execute
-	ModeDrain       = "drain"       // autonomously claims queued work
+	HeartbeatModeAuto   = "auto"   // the daemon pulls from the ready queue itself
+	HeartbeatModeManual = "manual" // only explicit pf submit
 )

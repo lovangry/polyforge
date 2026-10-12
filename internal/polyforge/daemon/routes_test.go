@@ -36,7 +36,7 @@ func TestSubmitAndStatus(t *testing.T) {
 	if err := json.Unmarshal(raw, &st); err != nil {
 		t.Fatalf("status undecodable: %v", err)
 	}
-	if st.MachineID != "m-test" || st.Mode != protocol.ModeInteractive || st.ShuttingDown {
+	if st.MachineID != "m-test" || st.Auto || st.ShuttingDown {
 		t.Fatalf("status head = %+v", st)
 	}
 	// #113: the status carries the mapped workspace SET.
@@ -411,80 +411,42 @@ func TestTakeoverAndErrorEnvelope(t *testing.T) {
 	}
 }
 
-// TestOpsModesAndGetRecommendation: mode switching over UDS, the batch
-// recommendation shape, mode-exclusion refusals.
-func TestOpsModesAndGetRecommendation(t *testing.T) {
+// TestOpsAutoAndMax: the auto switch and the max number over UDS; manual
+// submits stay legal while auto is on; bad input and shutdown refusals.
+func TestOpsAutoAndMax(t *testing.T) {
 	td := newTestDaemon(t, nil)
-	// get_recommendation: {items:[...]} — every field of api.WorkItem.
-	want := []api.WorkItem{{
-		ID: "wi_1", Slug: "wi-1", ProjectName: "proj", Goal: "do a thing",
-		Status: api.StatusQueued, Priority: api.PriorityHigh,
-		Labels: []string{"x"}, BundleName: strp("demo-bundle"),
-	}}
-	td.hub.mu.Lock()
-	td.hub.queues = want
-	td.hub.mu.Unlock()
-	raw, err := td.client.Mode(cli.ModeRequest{Action: "get_recommendation"})
+	on, off, two := true, false, 2
+	raw, err := td.client.OpsConfig(cli.OpsConfigRequest{Auto: &on, Max: &two})
 	if err != nil {
-		t.Fatalf("get_recommendation: %v", err)
+		t.Fatalf("ops config: %v", err)
 	}
-	var rec struct {
-		Items []api.WorkItem `json:"items"`
-		Total int            `json:"total"`
+	var r opsConfigResponse
+	if err := json.Unmarshal(raw, &r); err != nil || !r.Auto || r.Max != 2 {
+		t.Fatalf("ops config answer = %s (%v)", raw, err)
 	}
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		t.Fatalf("recommendation undecodable: %v", err)
+	if !td.modes.Auto() || td.q.MaxConcurrent() != 2 {
+		t.Fatalf("state not applied: auto=%v max=%d", td.modes.Auto(), td.q.MaxConcurrent())
 	}
-	if rec.Total != 1 || len(rec.Items) != 1 {
-		t.Fatalf("recommendation = %+v", rec)
+	// A manual submit is ALLOWED while auto is on (no DAEMON-409).
+	if _, err := td.client.Claim("wi_z", "normal"); err != nil {
+		t.Fatalf("claim while auto on: %v", err)
 	}
-	got := rec.Items[0]
-	if got.ID != want[0].ID || got.Slug != want[0].Slug || got.Goal != want[0].Goal ||
-		got.Status != want[0].Status || got.Priority != want[0].Priority ||
-		got.ProjectName != want[0].ProjectName || len(got.Labels) != 1 ||
-		got.BundleName == nil || *got.BundleName != "demo-bundle" {
-		t.Fatalf("recommendation item = %+v, want %+v", got, want[0])
+	if _, err := td.client.OpsConfig(cli.OpsConfigRequest{Auto: &off}); err != nil {
+		t.Fatalf("auto off: %v", err)
 	}
-
-	// mode set / drain / abort-drain round trips.
-	raw, err = td.client.Mode(cli.ModeRequest{Action: "set", Mode: protocol.ModeBatch})
-	if err != nil {
-		t.Fatalf("mode set batch: %v", err)
+	if td.modes.Auto() {
+		t.Fatal("auto still on")
 	}
-	var mr modeResponse
-	json.Unmarshal(raw, &mr)
-	if mr.Mode != protocol.ModeBatch {
-		t.Fatalf("mode set answer = %s", raw)
-	}
-	if _, err := td.client.Mode(cli.ModeRequest{Action: "drain"}); err != nil {
-		t.Fatalf("mode drain: %v", err)
-	}
-	// Single submits are refused in drain (the loop is the only entry).
-	if _, err := td.client.Claim("wi_z", "normal"); err == nil {
-		t.Fatal("claim in drain succeeded")
-	} else {
-		var ae *api.Error
-		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict {
-			t.Fatalf("drain claim error = %v, want DAEMON-409", err)
-		}
-	}
-	// batch_submit is refused in drain as well.
-	if _, err := td.client.BatchSubmit([]string{"wi_z"}); err == nil {
-		t.Fatal("batch_submit in drain succeeded")
-	}
-	if _, err := td.client.Mode(cli.ModeRequest{Action: "abort-drain"}); err != nil {
-		t.Fatalf("abort-drain: %v", err)
-	}
-	// Bad mode values refuse with DAEMON-400.
-	if _, err := td.client.Mode(cli.ModeRequest{Action: "set", Mode: "turbo"}); err == nil {
-		t.Fatal("bad mode accepted")
-	} else {
+	// Bad input refuses with DAEMON-400.
+	zero := 0
+	for _, bad := range []cli.OpsConfigRequest{{}, {Max: &zero}} {
+		_, err := td.client.OpsConfig(bad)
 		var ae *api.Error
 		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonBadInput {
-			t.Fatalf("bad mode error = %v, want DAEMON-400", err)
+			t.Fatalf("bad ops config %+v error = %v, want DAEMON-400", bad, err)
 		}
 	}
-	// A submit during shutdown answers DAEMON-410.
+	// A submit and an auto switch during shutdown answer DAEMON-410.
 	td.modes.SetShuttingDown()
 	if _, err := td.client.Claim("wi_y", "normal"); err == nil {
 		t.Fatal("claim during shutdown succeeded")
@@ -494,34 +456,32 @@ func TestOpsModesAndGetRecommendation(t *testing.T) {
 			t.Fatalf("shutdown claim error = %v, want DAEMON-410", err)
 		}
 	}
+	if _, err := td.client.OpsConfig(cli.OpsConfigRequest{Auto: &on}); err == nil {
+		t.Fatal("auto switch during shutdown succeeded")
+	}
 }
 
-// TestBatchSubmitDispatch: a confirmed wave enqueues beyond the
-// concurrency cap and backfills as slots open (04 §12 ruling 0).
-func TestBatchSubmitDispatch(t *testing.T) {
+// TestSubmitDispatchBackfill: submits beyond the concurrency cap queue
+// and backfill as slots open (04 §12 ruling 0).
+func TestSubmitDispatchBackfill(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) { c.MaxConcurrent = 1 })
 	for _, wi := range []string{"wi_p", "wi_q", "wi_r"} {
 		mkBare(t, td.cfg.GitRemoteBase, wi)
-	}
-	raw, err := td.client.BatchSubmit([]string{"wi_p", "wi_q", "wi_r"})
-	if err != nil {
-		t.Fatalf("batch_submit: %v", err)
-	}
-	var br batchResponse
-	if err := json.Unmarshal(raw, &br); err != nil || br.Submitted != 3 {
-		t.Fatalf("batch answer = %s (%v)", raw, err)
+		if _, err := td.client.Claim(wi, "normal"); err != nil {
+			t.Fatalf("claim %s: %v", wi, err)
+		}
 	}
 	// With max=1 exactly one job runs; the rest stay pending.
 	td.waitLive(t, "wi_p")
 	time.Sleep(100 * time.Millisecond)
-	raw, _ = td.client.Status()
+	raw, _ := td.client.Status()
 	var st cli.StatusResponse
 	json.Unmarshal(raw, &st)
 	if st.Queue.Running != 1 || st.Queue.Pending != 2 {
 		t.Fatalf("queue after one slot = %+v, want 1 running / 2 pending", st.Queue)
 	}
 	// Wrapping the running job frees its slot; the next pending entry
-	// backfills without any new confirmation.
+	// backfills without any new submission.
 	if _, err := td.client.Wrap("wi_p", "wrap"); err != nil {
 		t.Fatalf("wrap wi_p: %v", err)
 	}

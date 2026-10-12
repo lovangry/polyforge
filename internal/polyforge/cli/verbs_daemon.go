@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -255,83 +256,6 @@ func newAnswerID() string {
 		return fmt.Sprintf("a_%06x", time.Now().UnixNano()&0xffffff)
 	}
 	return "a_" + hex.EncodeToString(b)
-}
-
-// ---------------------------------------------------------------------------
-// batch-confirm — Batch wave: read the scheduler recommendation, let the
-// human confirm (possibly edited), submit the wave in one call.
-// ---------------------------------------------------------------------------
-
-var cmdBatchConfirm = &Command{
-	Name:    "batch-confirm",
-	Group:   GroupExec,
-	Summary: "Batch wave: show the recommendation, confirm and submit it",
-	Usage: "pf batch-confirm [--project P]    # show the recommended wave only (no Job is created)\n" +
-		"pf batch-confirm --all           # confirm and submit the whole recommendation\n" +
-		"pf batch-confirm <id> [<id>...]  # confirm and submit exactly this set\n\n" +
-		"Without --project the recommendation covers ALL mapped projects (the\n" +
-		"[workspace] mapping); --project P scopes to P and is validated\n" +
-		"against the mapping.",
-	Setup: func(fs *flag.FlagSet) {
-		fs.Bool("all", false, "submit the entire recommendation as the confirmed wave")
-		fs.String("project", "", "scope the recommendation to one mapped project (validated; absent = all mapped projects)")
-	},
-	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		all := boolFlag(fs, "all")
-		ids := args
-		d := ctx.daemon()
-
-		// Always fetch the scheduler recommendation first (the daemon
-		// forwards the aihub ready-queue answer read-only). polyforge#113:
-		// an explicit --project scopes the recommendation to that project;
-		// absent, the daemon merges all mapped projects' ready queues.
-		// The scope is validated by the DAEMON against ITS mapping — the
-		// daemon is the placement authority (its [workspace] config is
-		// what batch/drain actually iterate), so the CLI passes the value
-		// through and a typed refusal names the project.
-		req := ModeRequest{Action: "get_recommendation"}
-		if p := stringFlag(fs, "project"); p != "" {
-			req.Project = p
-		}
-		raw, err := d.Mode(req)
-		if err != nil {
-			return err
-		}
-		var rec struct {
-			Items []api.WorkItem `json:"items"`
-		}
-		if err := json.Unmarshal(raw, &rec); err != nil {
-			return fmt.Errorf("batch-confirm: cannot parse recommendation: %w", err)
-		}
-
-		if !all && len(ids) == 0 {
-			// Read-only recommendation display; NO Job is created.
-			ctx.finish(raw, func() {
-				fmt.Fprintf(ctx.Stdout, "%d recommended work item(s)\n", len(rec.Items))
-				renderWITable(ctx.Stdout, wiViewsOf(rec.Items))
-				fmt.Fprintln(ctx.Stdout, "\nconfirm with: pf batch-confirm --all  or  pf batch-confirm <id> ...")
-			})
-			return nil
-		}
-		if all {
-			ids = make([]string, 0, len(rec.Items))
-			for _, e := range rec.Items {
-				ids = append(ids, e.ID)
-			}
-		}
-		if len(ids) == 0 {
-			return fmt.Errorf("batch-confirm: the recommendation is empty; nothing to submit")
-		}
-		sraw, err := d.BatchSubmit(ids)
-		if err != nil {
-			return err
-		}
-		ctx.finish(sraw, func() {
-			fmt.Fprintf(ctx.Stdout, "wave submitted: %d work item(s)\n", len(ids))
-			printJSON(ctx.Stdout, sraw)
-		})
-		return nil
-	},
 }
 
 // ---------------------------------------------------------------------------
@@ -624,23 +548,21 @@ var cmdShip = &Command{
 }
 
 // ---------------------------------------------------------------------------
-// ops — the daemon ops face: status / mode / shutdown.
+// ops — the daemon ops face: status / auto / max / shutdown.
 // ---------------------------------------------------------------------------
 
 var cmdOps = &Command{
 	Name:    "ops",
 	Group:   GroupExec,
-	Summary: "Daemon ops: local job status, mode switching, graceful shutdown",
+	Summary: "Daemon ops: local job status, auto-pull switch, max concurrent jobs, graceful shutdown",
 	Usage: "pf ops status\n" +
-		"pf ops mode                                   # query the current mode (via status)\n" +
-		"pf ops mode set --max-concurrent-jobs N [--mode interactive|batch|drain]\n" +
-		"pf ops mode drain                             # enter autonomous drain mode\n" +
-		"pf ops mode abort-drain                       # leave drain mode\n" +
-		"pf ops shutdown                               # graceful shutdown (quiesce)",
+		"pf ops auto [on|off]    # off = only explicit pf submit; on = the daemon also pulls the ready queue itself (bare = show)\n" +
+		"pf ops max [N]          # max concurrent jobs on this machine, N >= 1 (bare = show)\n" +
+		"pf ops shutdown         # graceful shutdown (quiesce)",
 	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) == 0 {
-			return fmt.Errorf("ops: expected status|mode|shutdown")
+			return fmt.Errorf("ops: expected status|auto|max|shutdown")
 		}
 		d := ctx.daemon()
 		switch args[0] {
@@ -658,8 +580,10 @@ var cmdOps = &Command{
 				}
 			})
 			return nil
-		case "mode":
-			return opsMode(ctx, d, args[1:])
+		case "auto":
+			return opsAuto(ctx, d, args[1:])
+		case "max":
+			return opsMax(ctx, d, args[1:])
 		case "shutdown":
 			raw, err := d.Shutdown()
 			if err != nil {
@@ -675,70 +599,67 @@ var cmdOps = &Command{
 	},
 }
 
-// opsMode handles `pf ops mode [set|drain|abort-drain]`. A bare query has
-// no POST /mode "get" action — it reads GET /status.
-func opsMode(ctx *Context, d *DaemonClient, args []string) error {
-	if len(args) == 0 {
-		raw, err := d.Status()
-		if err != nil {
-			return err
-		}
-		ctx.finish(raw, func() {
-			var s StatusResponse
-			if err := json.Unmarshal(raw, &s); err == nil {
-				fmt.Fprintf(ctx.Stdout, "mode: %s\n", s.Mode)
-			} else {
-				printJSON(ctx.Stdout, raw)
-			}
-		})
-		return nil
+// opsShow answers a bare `pf ops auto|max` from GET /status.
+func opsShow(ctx *Context, d *DaemonClient, render func(s *StatusResponse) string) error {
+	raw, err := d.Status()
+	if err != nil {
+		return err
 	}
-	switch args[0] {
-	case "set":
-		f := subFlags(ctx, "ops mode set")
-		maxJobs := f.Int("max-concurrent-jobs", 0, "max concurrent jobs on this machine (n >= 1)")
-		mode := f.String("mode", "", "also switch the mode: interactive|batch|drain")
-		rest, err := parseCommandArgs(f, args[1:])
-		if err != nil {
-			return err
-		}
-		if len(rest) != 0 {
-			return fmt.Errorf("ops mode set: unexpected arguments %v", rest)
-		}
-		switch *mode {
-		case "", protocol.ModeInteractive, protocol.ModeBatch, protocol.ModeDrain:
-		default:
-			return fmt.Errorf("ops mode set: --mode must be interactive|batch|drain")
-		}
-		req := ModeRequest{Action: "set", Mode: *mode}
-		if *maxJobs >= 1 {
-			req.MaxConcurrentJobs = maxJobs
-		} else if *maxJobs < 0 {
-			return fmt.Errorf("ops mode set: --max-concurrent-jobs must be >= 1")
-		}
-		if req.Mode == "" && req.MaxConcurrentJobs == nil {
-			return fmt.Errorf("ops mode set: expected --max-concurrent-jobs N and/or --mode M")
-		}
-		raw, err := d.Mode(req)
-		if err != nil {
-			return err
-		}
-		ctx.finish(raw, func() {
+	ctx.finish(raw, func() {
+		var s StatusResponse
+		if err := json.Unmarshal(raw, &s); err == nil {
+			fmt.Fprintln(ctx.Stdout, render(&s))
+		} else {
 			printJSON(ctx.Stdout, raw)
-		})
-		return nil
-	case "drain", "abort-drain":
-		raw, err := d.Mode(ModeRequest{Action: args[0]})
-		if err != nil {
-			return err
 		}
-		ctx.finish(raw, func() {
-			printJSON(ctx.Stdout, raw)
-		})
-		return nil
-	default:
-		return fmt.Errorf("ops mode: unknown sub-action %q (set|drain|abort-drain)", args[0])
+	})
+	return nil
+}
+
+func opsApply(ctx *Context, d *DaemonClient, req OpsConfigRequest) error {
+	raw, err := d.OpsConfig(req)
+	if err != nil {
+		return err
 	}
+	ctx.finish(raw, func() { printJSON(ctx.Stdout, raw) })
+	return nil
+}
+
+// opsAuto handles `pf ops auto [on|off]`.
+func opsAuto(ctx *Context, d *DaemonClient, args []string) error {
+	switch len(args) {
+	case 0:
+		return opsShow(ctx, d, func(s *StatusResponse) string { return "auto: " + onOff(s.Auto) })
+	case 1:
+		switch args[0] {
+		case "on", "off":
+			on := args[0] == "on"
+			return opsApply(ctx, d, OpsConfigRequest{Auto: &on})
+		}
+	}
+	return fmt.Errorf("ops auto: expected on|off")
+}
+
+// opsMax handles `pf ops max [N]`.
+func opsMax(ctx *Context, d *DaemonClient, args []string) error {
+	switch len(args) {
+	case 0:
+		return opsShow(ctx, d, func(s *StatusResponse) string { return fmt.Sprintf("max: %d", s.Queue.MaxConcurrent) })
+	case 1:
+		n, err := strconv.Atoi(args[0])
+		if err != nil || n < 1 {
+			return fmt.Errorf("ops max: N must be an integer >= 1")
+		}
+		return opsApply(ctx, d, OpsConfigRequest{Max: &n})
+	}
+	return fmt.Errorf("ops max: expected a single N")
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 // ---------------------------------------------------------------------------
@@ -809,8 +730,12 @@ Launch flags (with environment variable and default, where one exists):
   --recall-topk N
       claim-time memory snapshot hit count
       (env POLYFORGE_RECALL_TOPK; default 10, max 50)
-  --mode interactive|batch|drain
-      initial mode (default interactive)
+  --auto
+      auto-pull: the daemon claims ready-queue work itself (default
+      off; unset keeps the persisted switch; --auto=false forces off)
+  --mode interactive|drain
+      DEPRECATED alias for one release: interactive = --auto=false,
+      drain = --auto=true (prints a warning)
 
 Supervision-window flags (#12; Go duration strings; omitted or 0 keeps
 observe's own default):
