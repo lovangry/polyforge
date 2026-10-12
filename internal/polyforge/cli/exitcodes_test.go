@@ -318,11 +318,11 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 	if code, _, _ := runPf(t, nil, "daemon", "--no-such-flag"); code != 2 {
 		t.Errorf("flag parse: exit = %d, want 2", code)
 	}
-	// Sanity: the registry really is the full 22-verb set (11 routing +
+	// Sanity: the registry really is the full 23-verb set (12 routing +
 	// ship + 6 admin + doctor + daemon + chat + watch; watch replaced the
 	// retired watch-probe; doctor is the #113 machine health face).
 	want := []string{
-		"file", "queue", "cancel", "recall", "remember",
+		"file", "queue", "cancel", "recall", "remember", "memory",
 		"submit", "answer", "pause", "resume",
 		"wrap", "ops", "chat", "watch", "ship", "users", "api-keys", "machines", "projects",
 		"backup", "rotate-secret",

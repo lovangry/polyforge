@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/silgrid/polyforge/internal/common/api"
 )
 
 // TestQueueMergesUnclassified pins the F8 semantics: both executable
@@ -89,6 +91,74 @@ func TestListMachinesPinsRouteAndDecoding(t *testing.T) {
 	}
 	if string(raw) != body {
 		t.Fatalf("raw passthrough altered the body:\n got: %s\nwant: %s", raw, body)
+	}
+}
+
+// TestGetMemoryPinsRouteAndRawBody (polyforge#132): the per-id memory
+// read hits GET /api/v1/memories/{id} with the bearer key and hands the
+// metadata JSON through raw; the ?format=content body call answers
+// text/markdown and must come back UNDECODED (plain markdown is not
+// JSON); a 404 surfaces the server's typed envelope.
+func TestGetMemoryPinsRouteAndRawBody(t *testing.T) {
+	const meta = `{"id":"mem_1","project":"p","type":"experience.debug","title":"the title",` +
+		`"visibility":"project","content_sha":"abc","content_len":9,` +
+		`"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z","future_field":true}`
+	const body = "# heading\n\nbody text — not JSON at all\n"
+	var gotMethod, gotURI, gotAuth, gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotURI, gotAuth = r.Method, r.URL.RequestURI(), r.Header.Get("Authorization")
+		gotAccept = r.Header.Get("Accept")
+		if r.URL.Query().Get("format") == "content" {
+			w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		_, _ = w.Write([]byte(meta))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "k")
+
+	raw, err := c.GetMemory("mem_1")
+	if err != nil {
+		t.Fatalf("GetMemory: %v", err)
+	}
+	if gotMethod != "GET" || gotURI != "/api/v1/memories/mem_1" || gotAuth != "Bearer k" {
+		t.Fatalf("metadata request shape: %s %s auth=%q", gotMethod, gotURI, gotAuth)
+	}
+	if string(raw) != meta {
+		t.Fatalf("metadata passthrough altered the body:\n got: %s\nwant: %s", raw, meta)
+	}
+
+	got, err := c.GetMemoryContent("mem_1")
+	if err != nil {
+		t.Fatalf("GetMemoryContent: %v", err)
+	}
+	if gotURI != "/api/v1/memories/mem_1?format=content" {
+		t.Fatalf("body request uri = %q, want /api/v1/memories/mem_1?format=content", gotURI)
+	}
+	if string(got) != body {
+		t.Fatalf("content body altered:\n got: %q\nwant: %q", got, body)
+	}
+	if gotAccept != "" {
+		t.Logf("note: body request carried Accept %q", gotAccept)
+	}
+
+	// 404: the typed envelope surfaces as *api.Error, not a generic error.
+	errSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":"MEM-404","detail":"no such memory"}`))
+	}))
+	defer errSrv.Close()
+	c2 := New(errSrv.URL, "k")
+	if _, err := c2.GetMemory("ghost"); err == nil {
+		t.Fatalf("GetMemory(ghost): want typed 404, got nil")
+	} else if e, ok := err.(*api.Error); !ok || e.Code != "MEM-404" {
+		t.Fatalf("GetMemory(ghost) error = %v (%T), want *api.Error MEM-404", err, err)
+	}
+	if _, err := c2.GetMemoryContent("ghost"); err == nil {
+		t.Fatalf("GetMemoryContent(ghost): want typed 404, got nil")
+	} else if e, ok := err.(*api.Error); !ok || e.Code != "MEM-404" {
+		t.Fatalf("GetMemoryContent(ghost) error = %v (%T), want *api.Error MEM-404", err, err)
 	}
 }
 
