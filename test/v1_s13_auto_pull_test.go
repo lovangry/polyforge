@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// v1_s13: auto-pull, driver/envelope edition. The daemon (booted with
-// auto on — here via a pre-v2 daemon-state.json carrying mode "drain",
-// which also exercises the boot migration) autonomously claims the
+// v1_s13_auto_pull_test.go: auto-pull, driver/envelope edition. The daemon
+// (booted with --auto) autonomously claims the
 // project's ready queue in waves and runs every ticket to completion with
 // no operator action — each member a driver-pinned quick-fix workflow,
 // completed and sealed by the terminal wiring. An explicit `pf submit`

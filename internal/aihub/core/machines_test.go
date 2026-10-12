@@ -80,7 +80,7 @@ func TestHeartbeatLivenessProjectionKeepVsReplace(t *testing.T) {
 	env := newEnv(t)
 	// Register with a full projection.
 	if _, err := env.Admin.Heartbeat(MachineHeartbeat{
-		MachineID: "m-live", Mode: "interactive",
+		MachineID: "m-live", Mode: "manual",
 		LiveWIIDs: []string{"wi_b", "wi_a"}, RuntimeVersion: "v1.5",
 	}); err != nil {
 		t.Fatalf("register: %v", err)
@@ -89,7 +89,7 @@ func TestHeartbeatLivenessProjectionKeepVsReplace(t *testing.T) {
 	if err != nil || len(ms) != 1 {
 		t.Fatalf("machines: %v %+v", err, ms)
 	}
-	if ms[0].Mode != "interactive" || ms[0].RuntimeVersion != "v1.5" {
+	if ms[0].Mode != "manual" || ms[0].RuntimeVersion != "v1.5" {
 		t.Fatalf("projection lost: %+v", ms[0])
 	}
 	// live_wi_ids is stored (order preserved) and read back.
@@ -102,7 +102,7 @@ func TestHeartbeatLivenessProjectionKeepVsReplace(t *testing.T) {
 		t.Fatalf("keep heartbeat: %v", err)
 	}
 	ms, _ = env.Admin.Machines()
-	if ms[0].Mode != "interactive" || len(ms[0].LiveWIIDs) != 2 {
+	if ms[0].Mode != "manual" || len(ms[0].LiveWIIDs) != 2 {
 		t.Fatalf("empty payload must keep the stored projection: %+v", ms[0])
 	}
 
@@ -114,22 +114,22 @@ func TestHeartbeatLivenessProjectionKeepVsReplace(t *testing.T) {
 	if len(ms[0].LiveWIIDs) != 0 {
 		t.Fatalf("empty slice must clear live_wi_ids: %+v", ms[0].LiveWIIDs)
 	}
-	if ms[0].Mode != "interactive" {
+	if ms[0].Mode != "manual" {
 		t.Fatalf("empty mode must keep stored mode: %+v", ms[0])
 	}
 
 	// A new mode replaces; a second machine appears in the same listing.
-	if _, err := env.Admin.Heartbeat(MachineHeartbeat{MachineID: "m-live", Mode: "drain"}); err != nil {
+	if _, err := env.Admin.Heartbeat(MachineHeartbeat{MachineID: "m-live", Mode: "auto"}); err != nil {
 		t.Fatalf("mode replace: %v", err)
 	}
-	if _, err := env.Admin.Heartbeat(MachineHeartbeat{MachineID: "m-two", Mode: "batch"}); err != nil {
+	if _, err := env.Admin.Heartbeat(MachineHeartbeat{MachineID: "m-two", Mode: "auto"}); err != nil {
 		t.Fatalf("second machine: %v", err)
 	}
 	ms, _ = env.Admin.Machines()
 	if len(ms) != 2 {
 		t.Fatalf("machines rows: %d", len(ms))
 	}
-	if ms[0].Mode != "drain" {
+	if ms[0].Mode != "auto" {
 		t.Fatalf("mode not replaced: %+v", ms[0])
 	}
 	// Oldest heartbeat first: m-live's last refresh predates m-two's row.
@@ -198,12 +198,12 @@ func TestMachinesColumnsMigrationFromLegacyDatabase(t *testing.T) {
 		t.Fatalf("legacy row reads as unlived: %+v", ms[0])
 	}
 	// And the face works on the migrated table.
-	h, err := admin.Heartbeat(MachineHeartbeat{MachineID: "m-legacy", Mode: "interactive", LiveWIIDs: []string{"wi_x"}})
+	h, err := admin.Heartbeat(MachineHeartbeat{MachineID: "m-legacy", Mode: "manual", LiveWIIDs: []string{"wi_x"}})
 	if err != nil || h.Registered {
 		t.Fatalf("heartbeat on migrated row: %+v %v", h, err)
 	}
 	ms, _ = admin.Machines()
-	if ms[0].Mode != "interactive" || len(ms[0].LiveWIIDs) != 1 || ms[0].LiveWIIDs[0] != "wi_x" {
+	if ms[0].Mode != "manual" || len(ms[0].LiveWIIDs) != 1 || ms[0].LiveWIIDs[0] != "wi_x" {
 		t.Fatalf("projection on migrated row: %+v", ms[0])
 	}
 }

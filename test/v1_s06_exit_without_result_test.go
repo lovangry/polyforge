@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// v1_s06: the step process that dies silently without delivering,
+// v1_s06_exit_without_result_test.go: the step process that dies silently without delivering,
 // driver/envelope edition (v2-converge 2.3: an exit WITHOUT a result is
 // the driver's own to classify — it is the one failure the driver sees
 // directly, without any supervisor verdict). The grill dispatch burns an

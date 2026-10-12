@@ -1,6 +1,6 @@
 package test
 
-// v1_s19: answer durability across restarts and crashes, driver/envelope
+// v1_s19_answer_persistence_test.go: answer durability across restarts and crashes, driver/envelope
 // edition. On the driver path the CONSUMER of an answer is the DRIVER
 // (the D9 archive-and-clear write on the capsule's execution.json) — the
 // capsule is the answer's persistent authority (the daemon-private

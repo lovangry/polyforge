@@ -1,6 +1,6 @@
 package test
 
-// v1_s23_verify_session_test.go: the v1.5 §1.7 public holder read face —
+// v1_s23_session_holder_read_test.go: the v1.5 §1.7 public holder read face —
 // GET /api/v1/work-items/{id}/session — end to end over the REAL aihub binary and the REAL pf
 // CLI. The spec's contract under test:
 //
