@@ -103,21 +103,16 @@ func (c *Client) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	return &wi, nil
 }
 
-// Queue returns ready work items for autonomous claiming (the daemon auto-pull).
-// Both executable segments count as takeable: items (classified
-// requires_human_session=false) and unclassified (classification missing —
-// per the ready-queue contract the segment that means "takeable now by an
-// agent"; a claim resolves the classification). needs_human_session is
-// NEVER included — a human session is a claim precondition there.
+// Queue returns the ready queue's executable items for autonomous
+// claiming (the daemon auto-pull).
 func (c *Client) Queue(project string) ([]api.WorkItem, error) {
 	var resp struct {
-		Items   []api.WorkItem `json:"items"`
-		Unknown []api.WorkItem `json:"unclassified"`
+		Items []api.WorkItem `json:"items"`
 	}
 	if err := c.Do("GET", "/api/v1/projects/"+url.PathEscape(project)+"/ready-queue", nil, &resp); err != nil {
 		return nil, err
 	}
-	return append(resp.Items, resp.Unknown...), nil
+	return resp.Items, nil
 }
 
 // ---------------------------------------------------------------------------

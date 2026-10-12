@@ -9,16 +9,14 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
-// TestQueueMergesUnclassified pins the F8 semantics: both executable
-// segments (items + unclassified) are takeable by drain; the
-// needs_human_session segment is never included.
-func TestQueueMergesUnclassified(t *testing.T) {
+// TestQueueReturnsItems pins that the daemon's auto-pull reads only the
+// ready queue's items segment (running/paused are visibility-only).
+func TestQueueReturnsItems(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"project":             "p",
-			"items":               []map[string]any{{"id": "wi_a", "status": "queued", "goal": "a"}},
-			"needs_human_session": []map[string]any{{"id": "wi_h", "status": "queued", "goal": "h"}},
-			"unclassified":        []map[string]any{{"id": "wi_u", "status": "queued", "goal": "u"}},
+			"project": "p",
+			"items":   []map[string]any{{"id": "wi_a", "status": "queued", "goal": "a"}},
+			"running": []map[string]any{{"id": "wi_r", "status": "running", "goal": "r"}},
 		})
 	}))
 	defer srv.Close()
@@ -27,15 +25,8 @@ func TestQueueMergesUnclassified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Queue: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("want 2 takeable (items+unclassified), got %d: %+v", len(got), got)
-	}
-	ids := map[string]bool{}
-	for _, wi := range got {
-		ids[wi.ID] = true
-	}
-	if !ids["wi_a"] || !ids["wi_u"] || ids["wi_h"] {
-		t.Fatalf("wrong segment membership: %+v", ids)
+	if len(got) != 1 || got[0].ID != "wi_a" {
+		t.Fatalf("want only items segment, got %+v", got)
 	}
 }
 

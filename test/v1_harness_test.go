@@ -432,7 +432,7 @@ func (u *v1Install) newWI(t *testing.T, goal string, actions, resumeActions []ma
 		Project:    v1Project,
 		Goal:       goal,
 		BundleName: strPtr("quick-fix"),
-		Attrs:      map[string]any{"requires_human_session": false},
+		Attrs:      nil,
 	})
 	if err != nil {
 		t.Fatalf("create work item: %v", err)
