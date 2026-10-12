@@ -209,7 +209,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/polyforge/sessionjsonl` | The single parser of the harness session-jsonl format (live transcript tail extraction). |
 | `internal/polyforge/supervise` | The driver↔supervisor contract: facts, verdicts and the per-WI link (v2-converge §2.2–2.5). |
 | `internal/polyforge/workspace` | The `.polyforge.yaml` workspace-defaults loader shared by claim-time reads, candidate compose and `pf file create` project inference. |
-| `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, and the observe/answer HTTP face over the monitors. |
+| `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, and the answer HTTP face over the monitors. |
 | `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules, human gate, command-evidence gate). |
 | `internal/polyforge/watcher` | The `pf watch` engine: decision classification (fixed-template wake-up lines) and the resident per-chat watcher with its progress file. |
 | `internal/polyforge/runtime` | Runtime lane: the WI lifecycle manager (Start/Stop/Recover/Restart), the pi-harness agent spawner, the six-layer process cleanup and the recovery engine. |
@@ -226,7 +226,6 @@ daemon socket by design.)
 
 | Method | Path | Role | Face |
 | --- | --- | --- | --- |
-| GET | `/jobs/{wi}/observe` | Live observe view of one job's transcript stream (mounted verbatim from the Observe handler). | user |
 | POST | `/jobs/{wi}/answer` | Answer a pending agent question. | user |
 | POST | `/jobs/{wi}/claim` | Submit family: enqueue a claim of a queued work item. | user |
 | POST | `/jobs/{wi}/resume` | Submit family: enqueue a resume of a paused item; for a WI parked `repair_pending` it re-checks the capsule/mapping and resumes in place with the kept session (still broken → `DAEMON-517` / `DAEMON-412`). | user |
@@ -410,8 +409,8 @@ loudly). Flags:
   - all — `--type *` is equivalent to omitting the flag.
 
   Any other `*` placement (`*.debug`, `exp*rience`, `experience*`) is
-  rejected locally with no request sent. Both the GET and POST faces of
-  `/api/v1/memories/search` interpret a trailing `.*` the same way.
+  rejected locally with no request sent. The
+  `GET /api/v1/memories/search` face interprets a trailing `.*` the same way.
 - `--tags a,b` — comma-separated tag filter (a hit carries all of them).
 
 Examples:

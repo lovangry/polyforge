@@ -24,7 +24,7 @@ binary's help faces print them; `pf help` lists the full registry and
 |---|---|---|
 | submit | `verbs/submit.md` | `pf submit <id>` — submit for execution (`-priority`) |
 | watch | `verbs/watch.md` | `pf watch <id> --once` — one snapshot (status, step, pending question, events); `pf watch --chat "$PF_CHAT_ID" --wait-decision` — the resident watcher; `pf watch subscribe\|unsubscribe\|list` |
-| answer | `verbs/answer.md` | `pf answer <id> -text "..."` — reply to a pending question (`-question`, `-answer-id`, `-by`) |
+| answer | `verbs/answer.md` | `pf answer <id> -text "..."` — reply to a pending question (`-question`, `-by`) |
 | pause | `verbs/pause.md` | `pf pause <id>` — operator pause at the next safe boundary |
 | resume | `verbs/resume.md` | `pf resume <id>` — continue a paused, blocked or repair_pending work item |
 | wrap | `verbs/wrap.md` | `pf wrap <id>` — terminal success; `pf wrap <id> --fail` — the owner's failed verdict (also gives up a repair_pending work item) |

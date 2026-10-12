@@ -54,7 +54,7 @@
 - harness 的海量输出**只保留最新状态**（合并，不排队）。
 - 持久化：`execution.json` 是**唯一权威**（进度、待答问题、失败计数、放宽后的阈值、终态）；事件日志是**补充记录**——driver 事件也写入（替代只打 stderr 的 `stdLogger`），每条事件带**跨重启单调递增 id**（不再每次重启从 1 重编），文件按大小轮转；磁盘满时事件追加失败只降级为日志告警，权威仍在 `execution.json`。
 - supervisor 不再轮询 `execution.json` 作为主路径；推送进度到 aihub 改由事件触发，**保留退避与同错熔断**（F18/F22 教训：曾 185 次推送风暴）。
-- 转录同步（F3）以最近一次 `step_started.transcript_path` 为源，commit 前同步。
+- 转录同步（F3）以最近一次 `step_started.transcript_path` 为源，commit 前同步。（现状：job 级的 seal 前转录同步 `syncTranscriptBeforeSeal` 已删除；capsule 内转录靠提交边界同步。）
 
 **driver → supervisor（事实）**
 
@@ -127,8 +127,8 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - 存放：`execution.json` 该 step 的字段（attempts 记录带 cause 子类）。
 - 计入：上表除"daemon 重启"外的所有死因。**信封被拒（#107 进程内重试，独立上限）不计入。**
 - 清零：gate rewind 回到该步、换到新候选模型、人工"继续"。
-- daemon 重启触发的中断**不归档为失败、不推进候选指针**：`ClassifyFault` 对无法归类的原因返回空类（不再默认 provider），空类永不推进候选（`driver/candidates.go`）。
-- `PolicyFor` 已接入失败处理（`driver/supervision.go`）：provider→推进候选，host→block 并上报，operator→不计，schema→上报。
+- daemon 重启触发的中断**不归档为失败、不推进候选指针**；一般地，被中断的 attempt 永不推进候选指针。（现状：`FaultClass` 分类层已删除，改为**死因规则**——只有模型类死因 `model_error`、`model_hung`、`step_timeout_slow_model`、`exit_model_class` 推进候选指针；指针在 gate_fail rewind 时重置；见 `driver/candidates.go`、`driver/supervision.go`。事件体与 attempts 记录带 `failure_cause`，不再有 `fault_class`。）
+- 失败处理按死因表（上节）执行；`PolicyFor` / provider·host·operator·schema 分类已随 FaultClass 层删除（`driver/supervision.go`）。
 
 ### 2.4 阈值（已定）
 
