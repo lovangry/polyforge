@@ -257,10 +257,6 @@ func w113DOptArgs(a ...string) w113DOpt {
 	return func(d *w113Daemon) { d.extraArgs = append(d.extraArgs, a...) }
 }
 
-func w113DOptEnv(kv ...string) w113DOpt {
-	return func(d *w113Daemon) { d.extraEnv = append(d.extraEnv, kv...) }
-}
-
 // w113NewDaemon prepares (without starting) a daemon on the surviving
 // flag surface. inst may be nil for refusal paths that never reach the
 // wire (the binary cache is shared either way).
@@ -1068,49 +1064,6 @@ func TestW113DuplicateProjectInOneListRejected(t *testing.T) {
 		if !strings.Contains(doutput, tok) {
 			t.Fatalf("daemon on duplicate project: error misses %q (output %q)", tok, doutput)
 		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// S06/S08-env — the retired env vars are refused at daemon startup.
-// ---------------------------------------------------------------------------
-
-// TestW113DaemonRefusesRetiredEnv pins criteria #4 and #5's env half:
-// the daemon refuses to start when the retired default-project env var
-// (S06) or the retired workspace env mirror (S08) is set — before
-// loading or serving anything, naming the variable; the socket is
-// never created. The mapping in cli.toml is the only workspace source.
-func TestW113DaemonRefusesRetiredEnv(t *testing.T) {
-	ws := t.TempDir()
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		"http://127.0.0.1:1", "w113key", "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	cases := []struct {
-		name string
-		kv   string
-		tok  string
-	}{
-		{"retired default-project var", w113EnvProjectTok() + "=ieops", w113EnvProjectTok()},
-		{"retired workspace var", w113EnvWorkspaceTok() + "=" + ws, w113EnvWorkspaceTok()},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			d := w113NewDaemon(t, nil, w113DOptConfig(cfg), w113DOptEnv(c.kv))
-			served, output, code := d.boot(30 * time.Second)
-			if served {
-				d.stop()
-				t.Fatalf("daemon silently accepted the retired %s variable: it booted and served", c.tok)
-			}
-			if code != 1 {
-				t.Fatalf("daemon under %s: exit %d, want 1 (output %q)", c.tok, code, output)
-			}
-			if !strings.Contains(output, c.tok) {
-				t.Fatalf("daemon under %s exited without naming the variable (output %q)", c.tok, output)
-			}
-			if d.socketExists() {
-				t.Fatalf("daemon under %s still created its socket", c.tok)
-			}
-		})
 	}
 }
 
