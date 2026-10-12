@@ -132,8 +132,8 @@ func TestPrepareCapsuleCloneFailurePublishedRefusesInit(t *testing.T) {
 	}
 }
 
-// An undeterminable remote (transport error) is not "nothing published".
-func TestPrepareCapsuleCloneFailureUnknownRefusesInit(t *testing.T) {
+// Any clone failure (transport error, absent repo) is a typed refusal.
+func TestPrepareCapsuleCloneFailureRefusesInit(t *testing.T) {
 	r := &Runtime{}
 	j := reclaimJob(t, "wi_clone_unknown", "fp")
 	j.git.RemoteURL = "http://127.0.0.1:1/wi.git"
@@ -147,14 +147,14 @@ func TestPrepareCapsuleCloneFailureUnknownRefusesInit(t *testing.T) {
 	}
 }
 
-// A first claim of a fresh WI (no remote content) still inits locally.
-func TestPrepareCapsuleCloneFailureNothingPublishedInits(t *testing.T) {
+// No RemoteURL configured (tests only) inits locally.
+func TestPrepareCapsuleNoRemoteInitsLocally(t *testing.T) {
 	setGitIdentity(t)
 	r := &Runtime{}
 	j := reclaimJob(t, "wi_fresh", "fp")
-	j.git.RemoteURL = filepath.Join(t.TempDir(), "absent.git") // repo does not exist
+	j.git.RemoteURL = ""
 	if err := r.prepareCapsule(j); err != nil {
-		t.Fatalf("first claim must still init locally: %v", err)
+		t.Fatalf("no-remote claim must init locally: %v", err)
 	}
 	if !isRegularFile(filepath.Join(j.capsuleDir, ".git")) || !dirExists(j.git.GitDir) {
 		t.Fatal("capsule must be initialised with an external git-dir")

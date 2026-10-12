@@ -1194,30 +1194,19 @@ func (r *Runtime) prepareCapsule(j *job) error {
 	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {
 		return err
 	}
-	if err := gitops.Clone(o); err != nil {
-		// A clone failure may fall back to a purely local init ONLY for
-		// a WI that has never published a revision (first claim of a
-		// fresh WI, or no remote configured). For a WI with published
-		// progress an init would drop execution.json and silently
-		// restart the workflow from step 1: refuse loudly instead (the
-		// caller abandons the claim through the claiming-journal lane).
-		published, perr := gitops.RemotePublished(o)
-		switch {
-		case perr != nil:
-			return &api.Error{Code: api.ErrDaemonCapsuleClone,
-				Detail: fmt.Sprintf("capsule clone failed (%v) and the remote's published state cannot be determined (%v); refusing a local init that could restart the workflow", err, perr)}
-		case published:
-			return &api.Error{Code: api.ErrDaemonCapsuleClone,
-				Detail: fmt.Sprintf("capsule clone failed (%v) for a work item with published progress; refusing a local init that would restart the workflow from step 1", err)}
+	if o.RemoteURL == "" {
+		// No capsule remote (tests only; aihub always supplies one at
+		// claim): a purely local init.
+		if err := gitops.InitLocal(o); err != nil {
+			return fmt.Errorf("runtime: %s: local init: %w", j.wi, err)
 		}
-		// Nothing published: remove any torn partial clone, then init.
-		if rerr := os.RemoveAll(o.CapsuleDir); rerr != nil {
-			return fmt.Errorf("runtime: %s: capsule clone failed (%v); cleanup: %w", j.wi, err, rerr)
-		}
-		if lerr := gitops.InitLocal(o); lerr != nil {
-			return fmt.Errorf("runtime: %s: capsule clone failed: %w", j.wi, err)
-		}
-		fmt.Fprintf(os.Stderr, "runtime: %s: capsule clone failed (%v); nothing published, fell back to local init\n", j.wi, err)
+	} else if err := gitops.Clone(o); err != nil {
+		// aihub creates the bare repo at claim, so a clone failure is
+		// never "nothing published yet": refuse loudly (the caller
+		// abandons the claim) rather than init locally and restart the
+		// workflow from step 1.
+		return &api.Error{Code: api.ErrDaemonCapsuleClone,
+			Detail: fmt.Sprintf("capsule clone failed: %v", err)}
 	}
 	return gitops.ExternalizeGitDir(o)
 }
