@@ -23,7 +23,7 @@ steps:
 
 # bug-fix — root-cause lane
 
-This is the flow-level narrative the WI Agent loads at step 0. It explains how the six
+This is the flow-level narrative for the workflow. It explains how the six
 steps compose and what flows between them; it is not itself a structural schema — the
 frontmatter `steps` array above is the *only* execution order (`01-workflow-skills.md`
 §4.1 rule V3). Nothing here overrides it.

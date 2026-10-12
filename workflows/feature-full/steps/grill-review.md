@@ -39,14 +39,12 @@ not grading the spec's writing quality, you are checking for a match against int
 
 1. Read `artifacts/spec.md` in full.
 2. Present a concise summary of the spec's scope, non-goals, and requirements back to the
-   user via the interactive needs_input mechanism — ask
+   user via a needs_input envelope - ask
    one clear confirmation question: does this match what you meant, or is something off?
-   The mechanism, inline: mint the `question_id` once and persist it in
-   `pending_question` in the same atomic write that opens the question; call
-   flush(needs_input) carrying that id; when the answer arrives, archive it to
-   `steps.<id>.answers[]` and clear `pending_question`, continuing this same step in
-   place with the answer in context. If you crash while the question is pending, your
-   successor re-presents the exact same persisted id - never a fresh mint.
+   To ask: mint a `question_id`, return a result envelope with `outcome: "needs_input"`, that
+   `question_id` and the `question` text, and end your turn. The answer arrives in the NEXT
+   dispatch of this step under "# Answered questions" - continue from it; never fabricate
+   or guess an answer you did not receive.
 3. Append the question and the user's answer to `artifacts/grill-qa.md` under a
    `## grill-review` heading, below the existing `## grill` section — do not overwrite or
    remove the earlier section.

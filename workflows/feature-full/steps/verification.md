@@ -83,21 +83,20 @@ release would ship on an unchecked tree.
 
 ## Evidence obligation (hard gate)
 
-This step cannot be marked `done` without structured command evidence: the driver
-records every command this step runs into `steps.verification.output.commands` as
-`{argv, exit_code, duration_ms, started_at}` entries, and the done-write is forbidden
-unless at least one readable entry (non-empty `argv`, readable `exit_code`) exists.
-Your obligations that make that possible:
+This step cannot complete without structured command evidence: the result envelope you
+write must carry `command_evidence: [{argv, exit_code, duration_ms}]`, one entry per command
+you actually ran, and the driver refuses a completed verification result that has no readable
+entry (non-empty `argv`, readable `exit_code`). Your obligations that make that possible:
 
-- Run every check through the driver's command execution (never summarize a command
-  you did not actually run through it) and report the exact argv of each check in your
-  output, so the audit record matches what ran.
+- Run every check (never summarize a command
+  you did not actually run) and copy each one's exact argv,
+  exit code and wall time into `command_evidence` in the envelope, so the audit record
+  matches what ran.
 - Never claim a check ran without its command having run — an evidence-less `done` is
-  a contract violation, and the daemon enforces the same rule fail-closed at the seal:
-  a `flush(wrap)` with no readable command evidence for an executed verification step is
-  refused with `DAEMON-400 VERIFICATION_EVIDENCE_MISSING` until the evidence is appended.
+  a contract violation, and the driver rejects a completed verification envelope whose
+  `command_evidence` is empty or unreadable.
 - If you genuinely ran nothing recordable (no build/lint/test command applies at all),
-  say so explicitly in `checks` — never fabricate an argv to satisfy the gate.
+  say so explicitly in `checks` and leave `command_evidence` empty — never fabricate an argv to satisfy the gate.
 
 ## Output
 
