@@ -483,6 +483,10 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 		writeErr(w, err)
 		return
 	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
 	// Cancel authorization: reporter, project maintainer, or admin (02 §6.5).
 	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
 		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "cancel requires reporter, maintainer or admin"))
@@ -640,8 +644,7 @@ func (s *Server) hSessionClaim(w http.ResponseWriter, r *http.Request, idn *iden
 		writeErr(w, err)
 		return
 	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
+	if !s.requireWrite(w, idn, projectID) {
 		return
 	}
 	var req api.SessionClaimRequest
