@@ -1,6 +1,5 @@
-// Package server is the v1 AIHub HTTP face: the business endpoints
-// (v0 openapi surface minus every SYNC-*/revision-chain route), the
-// admin face, the v1.5 session endpoints (claim/session-verify/
+// Package server is the AIHub HTTP face: the business endpoints, the
+// admin face, the session endpoints (claim/session-verify/
 // session-attach/force-end-session/session-end), and the /git/{wi}.git/...
 // proxy mount. Every error is the typed common/api errStatus envelope;
 // auth is the Bearer API key.
@@ -1169,7 +1168,7 @@ const maxMemoryExcerptRunes = 8192
 // memoryHit is one search answer row with a content excerpt attached:
 // every memory.Entry field (embedded, marshaled flat) plus the first
 // excerpt runes of the authority content. Only served when the caller
-// asked for an excerpt — the plain search answer stays the v0 shape.
+// asked for an excerpt — the plain search answer carries no excerpt.
 type memoryHit struct {
 	memory.Entry
 	ContentExcerpt string `json:"content_excerpt,omitempty"`
@@ -1205,7 +1204,7 @@ func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags [
 	}
 	// The excerpt extension (F6): a caller that names an excerpt length
 	// gets each hit with a bounded content prefix attached. Purely
-	// additive — an absent/zero excerpt keeps the exact v0 answer shape.
+	// additive — an absent/zero excerpt keeps the plain answer shape.
 	if excerpt > 0 {
 		if excerpt > maxMemoryExcerptRunes {
 			excerpt = maxMemoryExcerptRunes

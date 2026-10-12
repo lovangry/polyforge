@@ -63,10 +63,9 @@ const (
 // GitignoreContent is the .gitignore written at capsule init (ruling C1).
 const GitignoreContent = "/repos/\n/artifacts/release-*/\n"
 
-// Identity is capsule.json (03 §2.2). The declared BaseCommit pins the task
-// repos; CapsuleRepo is the bare repo this worktree pushes to. The v1
-// generation/attempt_id lineage fields are deleted (v1.5 session model):
-// legacy capsules still carrying those keys parse fine — encoding/json
+// Identity is capsule.json (03 §2.2). Repos pins each task repo's claim-time
+// SHA. The v1 generation/attempt_id lineage fields and base_commit are
+// deleted: capsules still carrying those keys parse fine — encoding/json
 // ignores unknown keys (pinned by TestLooseParseLegacyCapsuleKeys).
 type Identity struct {
 	WorkItemID   string            `json:"work_item_id"`
@@ -74,8 +73,7 @@ type Identity struct {
 	Project      string            `json:"project"`
 	BundleName   string            `json:"bundle_name"`
 	BundleDigest string            `json:"bundle_digest"`
-	BaseCommit   string            `json:"base_commit"` // task repo baseline each step starts from
-	Repos        map[string]string `json:"repos"`       // repo name -> checked-out SHA at claim
+	Repos        map[string]string `json:"repos"` // repo name -> checked-out SHA at claim
 	CreatedAt    string            `json:"created_at"`
 
 	// WorkspaceYaml is the polyforge#79 audit: the parsed .polyforge.yaml
@@ -180,13 +178,12 @@ type Step struct {
 	// run under (the F4 lane: the executor records the candidate it
 	// dispatched with into every step-starting execution.json write, so
 	// the observe face can render it — the daemon never derives it).
-	Model          string             `json:"model,omitempty"`
-	Output         map[string]any     `json:"output,omitempty"`
-	StepStartedAt  string             `json:"step_started_at,omitempty"`
-	StepStartRefs  map[string]RepoRef `json:"step_start_refs,omitempty"`
-	BudgetConsumed Budget             `json:"budget_consumed"`
-	Attempts       []Attempt          `json:"attempts"`
-	Answers        []ArchivedAnswer   `json:"answers"`
+	Model          string           `json:"model,omitempty"`
+	Output         map[string]any   `json:"output,omitempty"`
+	StepStartedAt  string           `json:"step_started_at,omitempty"`
+	BudgetConsumed Budget           `json:"budget_consumed"`
+	Attempts       []Attempt        `json:"attempts"`
+	Answers        []ArchivedAnswer `json:"answers"`
 	// AnswerBase is len(Answers) at the step's last gate-fail rewind: the
 	// answers at index >= AnswerBase form the step's CURRENT attempt chain
 	// (the human-gate guarantee counts only those). Zero until a rewind.

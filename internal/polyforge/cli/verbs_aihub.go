@@ -444,7 +444,7 @@ var cmdQueue = &Command{
 		if boolFlag(fs, "ready") {
 			raw, err = ctx.aihub().ReadyQueueRaw(proj)
 		} else {
-			raw, err = ctx.aihub().ListWorkItemsRawLimit(proj, stringFlag(fs, "status"), limit)
+			raw, err = ctx.aihub().ListWorkItemsRaw(proj, stringFlag(fs, "status"), limit)
 		}
 		if err != nil {
 			return err
@@ -475,7 +475,7 @@ func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 	projects := ctx.Cfg.Mapping.Projects()
 	var items []WIView
 	for _, p := range projects {
-		raw, err := ctx.aihub().ListWorkItemsRawLimit(p, status, limit)
+		raw, err := ctx.aihub().ListWorkItemsRaw(p, status, limit)
 		if ready {
 			raw, err = ctx.aihub().ReadyQueueRaw(p)
 		}

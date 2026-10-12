@@ -419,7 +419,7 @@ func (s *Store) rebuildIndex() (int, error) {
 			}
 		}
 	}
-	// _redacted tree: backfill migrated stock; forward-complete crashed
+	// _redacted tree: backfill missing rows; forward-complete crashed
 	// redacts.
 	for _, dirProject := range projDirs {
 		redDirs, rerr := os.ReadDir(filepath.Join(s.dataDir, "memory", dirProject, "_redacted"))
@@ -760,8 +760,8 @@ func (s *Store) rebuildActiveEntry(dirProject, memID string) (rebuildOutcome, er
 	return rebuildRefresh, nil // touched, not modified: counted, no index write
 }
 
-// rebuildRedactedEntry runs the _redacted pass for one entry: migrated
-// stock is backfilled; a row still active while the directory already
+// rebuildRedactedEntry runs the _redacted pass for one entry: a missing
+// row is backfilled; a row still active while the directory already
 // sits in _redacted/ is forward-completed.
 func (s *Store) rebuildRedactedEntry(dirProject, memID string) error {
 	unlock := s.memLock(memID)

@@ -165,9 +165,9 @@ func (c *Client) CancelWorkItem(id string) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(id)+"/cancel", map[string]any{})
 }
 
-// ListWorkItemsRawLimit is the limit-aware variant (the migration
-// count-reconciliation needs whole projects; 0 = the server default).
-func (c *Client) ListWorkItemsRawLimit(project, status string, limit int) (json.RawMessage, error) {
+// ListWorkItemsRaw lists work items undecoded (0 limit = the server
+// default cap).
+func (c *Client) ListWorkItemsRaw(project, status string, limit int) (json.RawMessage, error) {
 	q := url.Values{}
 	if project != "" {
 		q.Set("project", project)

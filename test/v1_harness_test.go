@@ -1705,7 +1705,7 @@ func restartSameDaemon(t *testing.T, d *v1Daemon, logName string) *v1Daemon {
 // listWorkItems reads GET /api/v1/work-items through the raw client and
 // decodes the items (test-only; the CLI itself consumes the raw body).
 func listWorkItems(inst *v1Install, project, status string) ([]api.WorkItem, error) {
-	raw, err := inst.client.ListWorkItemsRawLimit(project, status, 0)
+	raw, err := inst.client.ListWorkItemsRaw(project, status, 0)
 	if err != nil {
 		return nil, err
 	}
