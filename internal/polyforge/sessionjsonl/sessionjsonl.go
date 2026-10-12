@@ -3,7 +3,7 @@
 // appended to concurrently by the harness process). It is the one package
 // in the repo that parses this format — consumed by the watch module (tail
 // extraction + record typing) and by the daemon live-transcript sync face
-// (tail extraction, whole file) — and it stays a stdlib-only leaf so both
+// (tail extraction, whole file) — and it stays a leaf (stdlib plus the atomicfile leaf) so both
 // consumers can import it without cycles.
 //
 // The observe stdout-wire parser (internal/polyforge/observe/stream.go) is
@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 )
 
 // Record is one line of a session-jsonl file, raw bytes preserved.
@@ -144,4 +146,19 @@ func timestampOf(raw string) string {
 		}
 	}
 	return ""
+}
+
+// CopyReadonly copies the session-jsonl file src onto dst without ever
+// opening the source for writing (the source is the harness's own
+// session store). The read goes through Tail, whose raw-byte
+// preservation keeps the copy byte-identical; the destination is written
+// tmp+rename, 0644. It is the one live-transcript copier: the observe
+// monitor's commit-boundary sync and the runtime's seal/pause/bounded-fail
+// sync both call it.
+func CopyReadonly(src, dst string) error {
+	recs, err := Tail(src, 0)
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(dst, MarshalRaw(recs), 0o644)
 }

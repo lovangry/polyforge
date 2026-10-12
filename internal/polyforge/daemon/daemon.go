@@ -303,15 +303,16 @@ func New(cfg Config) (*Daemon, error) {
 	cfg.fill()
 
 	rtCfg := runtime.Config{
-		MachineID:     cfg.MachineID,
-		Mapping:       cfg.Mapping,
-		DataDir:       cfg.DataDir,
-		GitRemoteBase: cfg.GitRemoteBase,
-		WorkflowsDir:  cfg.WorkflowsDir,
-		Harness:       cfg.Harness,
-		PiBin:         cfg.PiBin,
-		CgroupRoot:    cfg.CgroupRoot,
-		EnvSecrets:    []string{cfg.APIKey},
+		MachineID:           cfg.MachineID,
+		Mapping:             cfg.Mapping,
+		DataDir:             cfg.DataDir,
+		GitRemoteBase:       cfg.GitRemoteBase,
+		WorkflowsDir:        cfg.WorkflowsDir,
+		Harness:             cfg.Harness,
+		PiBin:               cfg.PiBin,
+		CgroupRoot:          cfg.CgroupRoot,
+		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
+		EnvSecrets:          []string{cfg.APIKey},
 	}
 	// Runtime-sourced diagnostic events (a seal push that failed after
 	// its retries, pilot item 3) land in the observe lane's durable

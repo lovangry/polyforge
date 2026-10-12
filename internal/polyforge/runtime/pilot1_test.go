@@ -398,3 +398,84 @@ func TestSealNeverOverwritesStepOneTranscript(t *testing.T) {
 		t.Fatalf("step 1's transcript was overwritten at seal: %q (%v)", raw, err)
 	}
 }
+
+// A LATER step's live transcript tail written after the last commit
+// boundary must land in THAT step's own capsule file at seal, pause and
+// bounded fail (the observe monitor's async copy races the runtime's own
+// commit), while step 1's file stays untouched.
+func TestLiveTranscriptTailSyncedBeforeCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(r *Runtime, j *job) error
+	}{
+		{"seal", func(r *Runtime, j *job) error {
+			return r.Stop(context.Background(), j.wi, protocol.FinishWrapped)
+		}},
+		{"pause", func(r *Runtime, j *job) error {
+			return r.Stop(context.Background(), j.wi, protocol.FinishPaused)
+		}},
+		{"bounded-fail", func(r *Runtime, j *job) error {
+			r.boundedFail(context.Background(), j, "test bounded fail")
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := &scriptedSpawner{}
+			r, _, _ := newTestRuntime(t, newFakeHub(), sp)
+			wi := "wi_tail_" + strings.ReplaceAll(tc.name, "-", "")
+			j := seedJob(r, wi)
+			initGitCapsule(t, j)
+			installOldAgent(t, sp, j)
+			r.cfg.HarnessSessionsRoot = t.TempDir()
+			storeDir := filepath.Join(r.cfg.HarnessSessionsRoot, piSessionDirName(j.capsuleDir))
+			if err := os.MkdirAll(storeDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			spawn2At := now.Add(-time.Minute)
+			step1Live := filepath.Join(storeDir, "step1.jsonl")
+			step2Live := filepath.Join(storeDir, "step2.jsonl")
+			step2Dst := filepath.Join(j.capsuleDir, "session", "step2.jsonl")
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			must(os.WriteFile(step1Live, []byte("step one live\n"), 0o644))
+			must(os.Chtimes(step1Live, spawn2At.Add(-time.Hour), spawn2At.Add(-time.Hour)))
+			must(os.WriteFile(step2Live, []byte("step two\nstep two tail\n"), 0o644))
+			must(os.Chtimes(step2Live, now, now))
+			must(os.MkdirAll(filepath.Dir(j.transcript), 0o755))
+			must(os.WriteFile(j.transcript, []byte("step one\n"), 0o644))
+			must(os.WriteFile(step2Dst, []byte("step two\n"), 0o644)) // last commit boundary
+			journal := filepath.Join(j.capsuleDir, capsule.DirRuntimeState, capsule.SpawnJournalFile)
+			must(os.MkdirAll(filepath.Dir(journal), 0o755))
+			var lines string
+			for _, e := range []capsule.SpawnJournalEntry{
+				{StepID: "s1", SpawnN: 1, StartedAt: spawn2At.Add(-time.Hour).UTC().Format(time.RFC3339Nano), Transcript: j.transcript},
+				{StepID: "s2", SpawnN: 2, StartedAt: spawn2At.UTC().Format(time.RFC3339Nano), Transcript: step2Dst},
+			} {
+				b, err := json.Marshal(e)
+				must(err)
+				lines += string(b) + "\n"
+			}
+			must(os.WriteFile(journal, []byte(lines), 0o644))
+
+			must(tc.end(r, j))
+
+			if raw, err := os.ReadFile(step2Dst); err != nil || string(raw) != "step two\nstep two tail\n" {
+				t.Fatalf("step 2's file must carry the live tail: %q (%v)", raw, err)
+			}
+			if raw, err := os.ReadFile(j.transcript); err != nil || string(raw) != "step one\n" {
+				t.Fatalf("step 1's file must be untouched: %q (%v)", raw, err)
+			}
+			cmd := exec.Command("git", "show", "HEAD:session/step2.jsonl")
+			cmd.Env = j.git.Env()
+			cmd.Dir = j.capsuleDir
+			if out, err := cmd.CombinedOutput(); err != nil || string(out) != "step two\nstep two tail\n" {
+				t.Fatalf("the tail must ride the commit: %q (%v)", out, err)
+			}
+		})
+	}
+}

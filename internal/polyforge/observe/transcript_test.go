@@ -277,7 +277,7 @@ func TestResumedDerivationWritingInCapsuleIsNotReCopied(t *testing.T) {
 }
 
 // The sync face's source read goes through the ONE session-jsonl parser
-// (wi_LMSxPTQTtz5x step sync_face_tail): copyFileReadonly reads the live
+// (wi_LMSxPTQTtz5x step sync_face_tail): sessionjsonl.CopyReadonly reads the live
 // harness transcript via the sessionjsonl package's whole-file tail
 // extraction, so the session-jsonl storage format has exactly one
 // parsing source in the repo (the stdout-wire parser stream.go is a
@@ -300,7 +300,7 @@ func TestSyncTranscriptCopyByteIdentical(t *testing.T) {
 	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := copyFileReadonly(src, dst); err != nil {
+	if err := sessionjsonl.CopyReadonly(src, dst); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(dst)
@@ -331,7 +331,7 @@ func TestSyncTranscriptCopyByteIdentical(t *testing.T) {
 func TestSyncTranscriptCopyMissingSource(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "session", "out.jsonl")
-	if err := copyFileReadonly(filepath.Join(dir, "absent.jsonl"), dst); err == nil {
+	if err := sessionjsonl.CopyReadonly(filepath.Join(dir, "absent.jsonl"), dst); err == nil {
 		t.Fatal("copying a missing source must fail")
 	}
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {

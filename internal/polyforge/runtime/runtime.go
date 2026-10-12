@@ -72,7 +72,10 @@ type Config struct {
 	Harness       string // harness adapter name ("pi")
 	PiBin         string // harness binary (default "pi")
 	CgroupRoot    string // cgroup v2 root; empty ⇒ layer-0 unavailable
-	MaxRecoveries int    // consecutive FAILED recoveries before bounded fail (default 2)
+	// HarnessSessionsRoot overrides the harness's default session store
+	// (the live-transcript locator of the seal/pause/bounded-fail sync).
+	HarnessSessionsRoot string
+	MaxRecoveries       int // consecutive FAILED recoveries before bounded fail (default 2)
 	// RecoveryStabilityWindow bounds the v2 entry-rate storm guard: a
 	// recoverCore that re-fires inside this window (default 60s) counts
 	// one storm unit; MaxRecoveries rapid re-entries bounded-fail the WI
@@ -1358,6 +1361,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		// retried directly via gitops.Push below. A persistently failed
 		// push degrades the terminal reason to blocked — the local commit
 		// keeps the bytes, but the server never heard the final state.
+		r.syncLiveTranscript(j.capsuleDir)
 		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
 		for i := 0; i < 2 && perr != nil; i++ {
 			_, perr = gitops.Push(j.git)
@@ -1462,6 +1466,7 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job, alreadyPushed bool) error
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
 	if !alreadyPushed {
+		r.syncLiveTranscript(j.capsuleDir)
 		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+protocol.FinishPaused)
 		for i := 0; i < 2 && perr != nil; i++ {
 			_, perr = gitops.Push(j.git)
