@@ -48,34 +48,6 @@ func doctorFind(t *testing.T, doc doctorDoc, name string) (string, string) {
 	return "", ""
 }
 
-// withSummarizeCovered extends a doctor env for the all-pass contract:
-// both harness binaries reachable (stub PATH) and both
-// [watch.summarize_model] entries non-empty in the scratch config.
-func withSummarizeCovered(t *testing.T, env map[string]string) map[string]string {
-	t.Helper()
-	stub := t.TempDir()
-	for _, name := range []string{"pi", "claude"} {
-		if err := os.WriteFile(filepath.Join(stub, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cfgPath := filepath.Join(env["XDG_CONFIG_HOME"], "polyforge", "cli.toml")
-	raw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	covered := string(raw) + "\n[watch.summarize_model.pi]\nmodel = \"prov/pi\"\n\n[watch.summarize_model.claude]\nmodel = \"prov/claude\"\n"
-	if err := os.WriteFile(cfgPath, []byte(covered), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	out := map[string]string{}
-	for k, v := range env {
-		out[k] = v
-	}
-	out["PATH"] = stub
-	return out
-}
-
 // doctorServerConfig points a scratch config at srv with a live mapped
 // workspace and the given daemon socket, and answers the runPf env.
 func doctorServerConfig(t *testing.T, server, apiKey, socket string, projects ...string) map[string]string {
@@ -108,7 +80,7 @@ func liveDaemonSocket(t *testing.T, machineID string) string {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"machine_id":"`+machineID+`","mode":"interactive","shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":1}}`)
+		io.WriteString(w, `{"machine_id":"`+machineID+`","auto":false,"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":1}}`)
 	})
 	return newFakeDaemon(t, mux)
 }
@@ -140,10 +112,6 @@ func TestDoctorHealthyMachineAllPassExit0(t *testing.T) {
 	srv := aiSever(t, &reqRecorder{}, map[string]bool{"polyforge": true}, 0, "")
 	sock := liveDaemonSocket(t, "m-h")
 	env := doctorServerConfig(t, srv.URL, "k_ok", sock, "polyforge")
-	// The watch summarize-model check is part of the all-pass report:
-	// pin the harness reachability (stub PATH with pi + claude) and
-	// cover both entries in the scratch config (wi_LMSxPTQTtz5x).
-	env = withSummarizeCovered(t, env)
 	code, stdout, doc := doctorStatus(t, env, "--json", "doctor")
 	if code != 0 {
 		t.Fatalf("healthy machine: exit %d, want 0 (output %s)", code, stdout)
@@ -265,7 +233,7 @@ func TestDoctorUnloadableConfigDoesNotFakeGreen(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(xdg, "polyforge"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	oldShape := "server = \"http://x:1\"\napi_key = \"k\"\nproject = \"e2e\"\n"
+	oldShape := "server = \"http://x:1\"\napi_key = \"k\"\n[other]\nx = \"1\"\n"
 	if err := os.WriteFile(filepath.Join(xdg, "polyforge", "cli.toml"), []byte(oldShape), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -275,10 +243,10 @@ func TestDoctorUnloadableConfigDoesNotFakeGreen(t *testing.T) {
 		t.Fatalf("exit %d, want 1 (output %s)", code, stdout)
 	}
 	if doc.OK {
-		t.Fatalf("ok = true on an old-shape config")
+		t.Fatalf("ok = true on an unloadable config")
 	}
 	st, detail := doctorFind(t, doc, "config")
-	if st != "fail" || !strings.Contains(detail, "project") {
+	if st != "fail" || !strings.Contains(detail, "other") {
 		t.Fatalf("config check = %s %q", st, detail)
 	}
 	skips := 0
@@ -320,11 +288,6 @@ func facesWorkspaceConfig(t *testing.T, ws, server, apiKey, socket, project stri
 	b.WriteString("server = \"" + server + "\"\napi_key = \"" + apiKey + "\"\n")
 	b.WriteString("daemon_socket = \"" + socket + "\"\n")
 	b.WriteString("\n[workspace.\"" + ws + "\"]\nprojects = [\"" + project + "\"]\n")
-	// polyforge#117: the watch.summarize_model check is a hard-fail on a
-	// missing entry — faces tests predate it; carry a valid section so
-	// the faces check's own semantics are tested in isolation.
-	b.WriteString("\n[watch.summarize_model.pi]\nmodel = \"test/flash\"\n")
-	b.WriteString("\n[watch.summarize_model.claude]\nmodel = \"test/haiku\"\n")
 	if err := os.WriteFile(filepath.Join(xdg, "polyforge", "cli.toml"), []byte(b.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}

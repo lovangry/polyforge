@@ -3,7 +3,7 @@ package test
 // v1_s16: F9 — the needs_input question/answer protocol's resilience,
 // driver/envelope edition. The legacy suite proved the protocol's
 // fractures on the WI-Agent RPC face (pf/answer control relays, the
-// flush proxy, agent-side acks); every one of those faces is re-expressed
+// flush proxy, agent-side acks — all since deleted); every one of those faces is re-expressed
 // here on the driver's answer path, where the CONSUMER of an answer is
 // the DRIVER itself (the D9 archive-and-clear write on execution.json —
 // there is no agent ack anywhere), the pending question's durable home
@@ -76,13 +76,6 @@ func TestV1S16AnswerAutoRedeliveryAfterKill9(t *testing.T) {
 	waitSpawnCount(t, d, wi, 3, 30*time.Second)
 	waitStepStatus(t, d, wi, "fix", "in_progress", 30*time.Second)
 
-	// Zero agent-side answer landings, ever: the driver is the answer's
-	// only consumer (the legacy pf/answer control relay is gone).
-	if lands := answerControls(t, capDir); len(lands) != 0 {
-		t.Fatalf("pf/answer reached an agent %d times — the driver path must never relay to a step process: %+v",
-			len(lands), lands)
-	}
-
 	// Kill -9 the daemon mid-fix. The parked step process survives the
 	// crash (the crash-safety property); execution.json — with the
 	// archived answer — is the only memory either daemon needs.
@@ -119,9 +112,6 @@ func TestV1S16AnswerAutoRedeliveryAfterKill9(t *testing.T) {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}
 	}
-	if lands := answerControls(t, capDir); len(lands) != 0 {
-		t.Fatalf("pf/answer landings after the whole cycle: %+v", lands)
-	}
 	// The crash survivor is a known orphan (a driver WI's step processes
 	// have no daemon-side pid for the six-layer cleanup to signal — the
 	// harness's own sweep collects them at teardown); nothing else leaks.
@@ -134,7 +124,7 @@ func TestV1S16AnswerAutoRedeliveryAfterKill9(t *testing.T) {
 // Scenario B: the empty question_id is refused fail-closed by the
 // driver's needs_input transition.
 
-func TestV1S16EmptyQuestionIDFlushRefused(t *testing.T) {
+func TestV1S16EmptyQuestionIDRefused(t *testing.T) {
 	inst := newV1Install(t)
 	const goodQID = "q_f9b_live"
 	// Ordinal 1 is the MALFORMED shape: a needs_input envelope whose
@@ -158,13 +148,13 @@ func TestV1S16EmptyQuestionIDFlushRefused(t *testing.T) {
 	d.pf(t, "submit", wi)
 	capDir := d.capsuleDir(wi)
 
-	// The refusal is visible: the driver's transition error names the
-	// missing question text verbatim (the daemon log is the driver's
-	// stderr — the LOG face).
-	waitUntil(t, 60*time.Second, "the driver never refused the malformed envelope", func() bool {
-		return strings.Contains(d.logTail(),
-			"needs_input result without question_id/question (envelope or output)")
-	})
+	// The refusal is visible: the driver's envelope_rejected event (it
+	// lands in the durable per-WI event log) names the missing question
+	// text verbatim.
+	rej := waitForEvent(t, d, wi, "envelope_rejected", 60*time.Second)
+	if !strings.Contains(string(rej.Body), "needs_input result is missing question_id") {
+		t.Fatalf("the rejection must name the missing question id: %s", rej.Body)
+	}
 
 	// Fail-closed, not fail-deaf: no pending was ever minted off the
 	// malformed envelope — the QUESTION column shows only the
@@ -211,7 +201,7 @@ func TestV1S16EmptyQuestionIDFlushRefused(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Scenario C: the same drop path written twice is consumed exactly once.
 
-func TestV1S16DuplicateFlushSameIDIsIdempotent(t *testing.T) {
+func TestV1S16DuplicateDropSameIDIsIdempotent(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_f9c"
 	wi := inst.newWI(t, "s16 C: duplicate drop-path write is consumed once",
@@ -317,10 +307,6 @@ func TestV1S16ZeroLandingAnswerSurvivesDaemonCrash(t *testing.T) {
 		t.Fatalf("answer outcome: %q", out)
 	}
 	capDir := d.capsuleDir(wi)
-	if lands := answerControls(t, capDir); len(lands) != 0 {
-		t.Fatalf("pf/answer landings: got %d, want 0 (the driver path never relays to a step process): %+v",
-			len(lands), lands)
-	}
 
 	// The consumption is DURABLE before anything else moves: the archived
 	// answer and the cleared pending are in execution.json — the capsule
@@ -366,9 +352,6 @@ func TestV1S16ZeroLandingAnswerSurvivesDaemonCrash(t *testing.T) {
 	}
 	if n := countOf(d2.eventKinds(t, wi), "needs_input"); n != 1 {
 		t.Fatalf("needs_input fired %d times, want 1: %v", n, d2.eventKinds(t, wi))
-	}
-	if lands := answerControls(t, capDir); len(lands) != 0 {
-		t.Fatalf("pf/answer landings after the restart: %+v", lands)
 	}
 	x = readExecution(t, capDir)
 	for _, step := range []string{"grill", "fix", "verification", "release"} {

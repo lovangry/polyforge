@@ -71,7 +71,7 @@ const (
 
 	// GIT — v1 git proxy surface (pre-receive rejects, auth, protocol)
 	ErrGitBadRequest   = "GIT-400" // smart-HTTP method/target mismatch at the proxy
-	ErrGitUnauthorized = "GIT-401" // attempt-scoped credential rejected (takeover fencing)
+	ErrGitUnauthorized = "GIT-401" // attempt-scoped credential rejected (stale-session fencing)
 	ErrGitForbidden    = "GIT-403"
 	ErrGitNotFound     = "GIT-404"
 	ErrGitNonFF        = "GIT-409" // non-fast-forward push
@@ -120,6 +120,20 @@ const (
 	// typed error instead of silently skipping the record.
 	ErrDaemonShipLedger = "DAEMON-514"
 	ErrDaemonInternal   = "DAEMON-500"
+	// ErrDaemonCapsuleClone is the re-claim clone refusal: the capsule
+	// clone failed for a work item that has published progress (or whose
+	// published state cannot be determined), so a local init — which
+	// would restart the workflow from step 1 — is refused.
+	ErrDaemonCapsuleClone = "DAEMON-516"
+	// ErrDaemonRepairPending is the v2 §6 "continue" refusal: the work
+	// item is parked repair_pending and its capsule directory is still
+	// missing; the detail names the path to restore. The session is kept.
+	ErrDaemonRepairPending = "DAEMON-517"
+	// ErrDaemonSealedHeadMismatch is the cross-daemon continue refusal
+	// (v2-converge §7): a blocked WI continued on a different daemon than
+	// the one that sealed it, whose aihub capsule head is not the head the
+	// sealing daemon recorded — the clone would be pre-blocked state.
+	ErrDaemonSealedHeadMismatch = "DAEMON-518"
 
 	// CAP — capsule lifecycle errors (03 §5.3)
 	ErrCapBadInput      = "CAP-400"

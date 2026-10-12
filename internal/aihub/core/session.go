@@ -16,9 +16,10 @@ package core
 //   - Attach (POST .../session-attach): same-session resume of a paused
 //     WI (M3); clean_pause WIs refuse (operator pause is not
 //     auto-resumable).
-//   - Takeover (POST .../force-takeover): atomically swaps the session to
-//     the requester's new secret; the supersession event carries the OLD
-//     fingerprint (m4 audit).
+//   - ForceEnd (POST .../force-end-session): the admin/maintainer recovery
+//     door — ends a stuck holder's session without its secret (WI ->
+//     queued, old secret fenced); the supersession event carries the OLD
+//     fingerprint (m4 audit). Any daemon then claims normally.
 //   - End (POST .../session-end): session-fenced terminal verdict; the
 //     session row is cleared entirely (M2: blocked = status blocked +
 //     cleared session, excluded from the claim gate).
@@ -338,6 +339,7 @@ func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, calle
 	if err != nil {
 		return nil, err
 	}
+	claim.SealedHead, claim.SealedMachine = blockedSealTx(tx, wiID)
 
 	if req.IdempotencyKey != "" {
 		if err := cacheIdempotentClaimTx(tx, req.IdempotencyKey, wiID, callerIdentity, claim); err != nil {
@@ -558,109 +560,142 @@ func (m *SessionManager) Attach(wiID string, req api.SessionAttachRequest, calle
 }
 
 // ---------------------------------------------------------------------------
-// Force takeover (contract §1.4)
+// Force end (v2-converge §6, §8 tier four)
 
-// Takeover atomically swaps the session to the requester's new secret.
-// Gate: status non-terminal (running or paused) and a non-empty reason.
-// The session_superseded event carries the OLD fingerprint (m4 audit) so
-// the superseded daemon can be identified from the timeline alone.
-func (m *SessionManager) Takeover(wiID string, req api.SessionClaimRequest, callerIdentity string) (*api.SessionClaim, error) {
-	if strings.TrimSpace(req.SessionID) == "" {
-		return nil, Fail(api.ErrCoreBadInput, "", "session_id required (the client-minted secret)")
-	}
-	if strings.TrimSpace(req.Reason) == "" {
-		return nil, Fail(api.ErrCoreBadInput, "", "reason required")
-	}
-	if req.IdempotencyKey != "" {
-		if cached, err := m.replay(wiID, req.IdempotencyKey, callerIdentity); err != nil || cached != nil {
-			return cached, err
-		}
+// ForceEnd is the admin/maintainer recovery door for a work item held by a
+// dead or stuck daemon: it ends the live session WITHOUT the holder's
+// secret, returning the WI to queued with the session row cleared. The old
+// holder is fenced by construction (its secret no longer matches any
+// stored hash: git push -> GIT-401, session-end/pause/verify -> stale), and
+// any daemon then claims the queued WI through the ordinary claim path,
+// restoring progress from the capsule revision chain. Gate: running or
+// paused (a session is held) and a non-empty reason. The session_superseded
+// event carries the OLD fingerprint (m4 audit).
+func (m *SessionManager) ForceEnd(wiID, reason, callerIdentity string) error {
+	if strings.TrimSpace(reason) == "" {
+		return Fail(api.ErrCoreBadInput, "", "reason required")
 	}
 	tx, err := m.db.Begin()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer tx.Rollback()
 
 	row, err := loadSessionRow(tx, wiID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if isTerminal(row.Status) {
-		return nil, Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", row.Status)
+		return Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", row.Status)
 	}
-	if row.Status != api.StatusRunning && row.Status != api.StatusPaused {
-		return nil, Fail(api.ErrCoreConflict, "NOT_TAKEOVERABLE",
-			"force-takeover requires a running or paused work item (got %s)", row.Status)
+	if !sessionHeld(row) || (row.Status != api.StatusRunning && row.Status != api.StatusPaused) {
+		return Fail(api.ErrCoreConflict, "NOT_HELD",
+			"end-session requires a running or paused work item holding a session (got %s)", row.Status)
 	}
-
-	oldFP := row.Fingerprint.String
-	hash := api.SessionHashHex(req.SessionID)
-	fp := api.SessionFingerprint(req.SessionID)
 	now := Now()
-	owner := req.Owner
-	if owner == "" {
-		owner = callerIdentity
-	}
-	var machineAny any
-	if req.MachineID != "" {
-		machineAny = req.MachineID
-	}
-	res, err := tx.Exec(`UPDATE work_items SET status='running', session_hash=?1, session_fingerprint=?2,
-		session_machine=?3, session_owner=?4, session_started_at=?5, clean_pause=0, assignee=?6,
-		waiting_on=NULL, updated_at=?5
-		WHERE id=?7 AND status IN ('running','paused')`,
-		hash, fp, machineAny, owner, now, callerIdentity, wiID)
+	// Fenced on the hash read in this snapshot: a concurrent end/swap
+	// refuses instead of ending someone else's fresh session.
+	res, err := tx.Exec(`UPDATE work_items SET status='queued', session_hash=NULL, session_fingerprint=NULL,
+		session_machine=NULL, session_owner=NULL, session_started_at=NULL, clean_pause=0,
+		waiting_on=NULL, updated_at=?1
+		WHERE id=?2 AND session_hash=?3 AND status IN ('running','paused')`, now, wiID, row.Hash.String)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, Fail(api.ErrCoreConflict, "RACE_LOST", "state changed concurrently")
+		return Fail(api.ErrCoreConflict, "RACE_LOST", "state changed concurrently")
 	}
-	claim := &api.SessionClaim{
-		WorkItemID:         wiID,
-		SessionFingerprint: fp,
-		MachineID:          req.MachineID,
-		Owner:              owner,
-		BundleName:         row.BundleName.String,
-		BundleDigest:       row.BundleDigest.String,
-		ClaimedAt:          now,
-	}
-	claim.Repos, err = projectReposTx(tx, row.ProjectID)
-	if err != nil {
-		return nil, err
-	}
-	if req.IdempotencyKey != "" {
-		if err := cacheIdempotentClaimTx(tx, req.IdempotencyKey, wiID, callerIdentity, claim); err != nil {
-			return nil, err
-		}
+	if err := setBlockedSealTx(tx, wiID, "", "", true); err != nil {
+		return err
 	}
 	if err := appendEventTx(tx, wiID, now, callerIdentity, "session_superseded",
 		map[string]any{
-			"old_session_fingerprint": oldFP,
-			"new_session_fingerprint": fp,
-			"machine_id":              req.MachineID,
-			"owner":                   owner,
-			"reason":                  req.Reason,
+			"old_session_fingerprint": row.Fingerprint.String,
+			"old_machine_id":          row.Machine.String,
+			"from":                    row.Status,
+			"to":                      api.StatusQueued,
+			"reason":                  reason,
 		}); err != nil {
-		return nil, err
+		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return claim, nil
+	return tx.Commit()
 }
 
 // ---------------------------------------------------------------------------
 // Session end (contract §1.5) and pause (M3)
 
+// blockedSealKey is the WI attrs key carrying the blocked verdict's sealed
+// capsule head (v2-converge §7): {"head": sha, "machine": id}. It rides the
+// existing business attrs JSON — no schema change. Set by End(blocked) with
+// a head, cleared by every other End/Pause, read by the claim answer so a
+// continue on a different machine can check its clone. A user PATCH of
+// attrs may drop it; that only disables the check (fail open).
+const blockedSealKey = "blocked_seal"
+
+type txExecer interface {
+	QueryRow(query string, args ...any) *sql.Row
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func loadAttrsTx(tx txExecer, wiID string) (map[string]any, error) {
+	var raw sql.NullString
+	if err := tx.QueryRow(`SELECT attrs FROM work_items WHERE id=?1`, wiID).Scan(&raw); err != nil {
+		return nil, err
+	}
+	attrs := map[string]any{}
+	if raw.Valid && raw.String != "" {
+		_ = json.Unmarshal([]byte(raw.String), &attrs)
+	}
+	if attrs == nil {
+		attrs = map[string]any{}
+	}
+	return attrs, nil
+}
+
+// setBlockedSealTx records (head != "") or clears (clear) the seal.
+func setBlockedSealTx(tx txExecer, wiID, head, machine string, clear bool) error {
+	if head == "" && !clear {
+		return nil
+	}
+	attrs, err := loadAttrsTx(tx, wiID)
+	if err != nil {
+		return err
+	}
+	if _, had := attrs[blockedSealKey]; !had && head == "" {
+		return nil
+	}
+	if head != "" {
+		attrs[blockedSealKey] = map[string]any{"head": head, "machine": machine}
+	} else {
+		delete(attrs, blockedSealKey)
+	}
+	blob, err := json.Marshal(attrs)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE work_items SET attrs=?1 WHERE id=?2`, string(blob), wiID)
+	return err
+}
+
+// blockedSealTx reads the recorded seal ("" when none).
+func blockedSealTx(tx txExecer, wiID string) (head, machine string) {
+	attrs, err := loadAttrsTx(tx, wiID)
+	if err != nil {
+		return "", ""
+	}
+	m, _ := attrs[blockedSealKey].(map[string]any)
+	head, _ = m["head"].(string)
+	machine, _ = m["machine"].(string)
+	return head, machine
+}
+
 // End is the session-fenced terminal verdict: hash matches → set the
-// status (wrapped|failed|blocked), CLEAR the session row entirely (M2:
+// status (wrapped|failed|canceled|blocked), CLEAR the session row entirely (M2:
 // blocked = status blocked + cleared session, excluded from the claim
 // gate until a human unblocks), event session_ended.
 func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdentity string) error {
 	switch req.Status {
-	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked:
+	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked, api.StatusCanceled:
 	case api.StatusPaused:
 		// Merge amend (Lane B/C complaint): "paused" routes to the M3
 		// pause transition — the session is KEPT (restart attaches), the
@@ -668,7 +703,7 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 		// three terminal verdicts clear the session row.
 		return m.Pause(wiID, req.SessionID, req.CleanPause, req.Note, callerIdentity)
 	default:
-		return Fail(api.ErrCoreBadInput, "", "status must be one of wrapped|failed|blocked|paused")
+		return Fail(api.ErrCoreBadInput, "", "status must be one of wrapped|failed|canceled|blocked|paused")
 	}
 	tx, err := m.db.Begin()
 	if err != nil {
@@ -689,7 +724,7 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 		"session_hash=NULL", "session_fingerprint=NULL", "session_machine=NULL",
 		"session_owner=NULL", "session_started_at=NULL", "clean_pause=0"}
 	args := []any{req.Status, now}
-	if req.Status == api.StatusWrapped || req.Status == api.StatusFailed {
+	if req.Status == api.StatusWrapped || req.Status == api.StatusFailed || req.Status == api.StatusCanceled {
 		sets = append(sets, "closed_at=?")
 		args = append(args, now)
 	}
@@ -714,6 +749,16 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 	if req.Note != "" {
 		payload["note"] = req.Note
 	}
+	// The blocked verdict records the sealed head (+ the sealing machine,
+	// from the session row); any other verdict clears a stale seal. A
+	// blocked verdict without a head (an abandoned claim) keeps the
+	// standing seal.
+	if err := setBlockedSealTx(tx, wiID, req.HeadSHA, row.Machine.String, req.Status != api.StatusBlocked); err != nil {
+		return err
+	}
+	if req.HeadSHA != "" && req.Status == api.StatusBlocked {
+		payload["head_sha"] = req.HeadSHA
+	}
 	if err := appendEventTx(tx, wiID, now, callerIdentity, "session_ended", payload); err != nil {
 		return err
 	}
@@ -724,7 +769,7 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 // session-end's "paused" verdict (the merge amend): the session is KEPT
 // (a same-machine restart attaches back through it), status becomes
 // paused, and clean_pause records WHO paused — 1 = operator pause (never auto-resumed;
-// only force-takeover or a CLI unpause may resume), 0 = daemon shutdown.
+// only a CLI unpause (or a force-end + re-claim) may resume), 0 = daemon shutdown.
 func (m *SessionManager) Pause(wiID, sessionID string, cleanPause bool, note, callerIdentity string) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return Fail(api.ErrCoreBadInput, "", "session_id required")
@@ -759,6 +804,9 @@ func (m *SessionManager) Pause(wiID, sessionID string, cleanPause bool, note, ca
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return Fail(api.ErrCoreForbidden, "STALE_SESSION", "the session changed concurrently")
+	}
+	if err := setBlockedSealTx(tx, wiID, "", "", true); err != nil {
+		return err
 	}
 	payload := map[string]any{
 		"session_fingerprint": row.Fingerprint.String,

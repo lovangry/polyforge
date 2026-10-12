@@ -3,7 +3,7 @@ package observe
 // transcript_test.go: the F3 commit-boundary transcript-sync regressions
 // (real files on disk): the live harness transcript is copied onto the
 // capsule's declared session path BEFORE the commit/push at every
-// execution.json step boundary and on flush(wrap), a source that cannot
+// execution.json step boundary, a source that cannot
 // be located is the once-per-attempt typed advisory (transcript_missing)
 // and never blocks the push, and a resumed derivation that already
 // writes into the capsule is not re-copied. The per-derivation transcript
@@ -48,12 +48,16 @@ func newLiveFixture(t *testing.T, capsuleDir, liveDir string) liveFixture {
 
 // adopt delivers the per-derivation transcript facts through the
 // production path: an RTRecovered attachment on rtCh.
-func adopt(m *Monitor, h Handle, wi WIInfo) {
+func adopt(t *testing.T, m *Monitor, h Handle, wi WIInfo) {
+	t.Helper()
 	m.rtCh <- Attach{
-		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: wi.WorkItem, SpawnN: 1},
+		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: wi.WorkItem, SpawnN: 2},
 		Handle: h,
 		WI:     wi,
 	}
+	// the adoption and the driver's facts race on the select: wait until
+	// the attachment landed before any commit boundary is announced
+	soon(t, 2*time.Second, "transcript facts adopted", func() bool { return m.currentSpawn() == 2 })
 }
 
 // pushOnceRecorded is a PushFunc that records whether the capsule's
@@ -82,7 +86,7 @@ func TestStepBoundarySyncsTranscriptBeforePush(t *testing.T) {
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.push = pushOnceRecorded(f, &sawCopy)
 	})
-	adopt(m, h, WIInfo{
+	adopt(t, m, h, WIInfo{
 		WorkItem:       "wi_test",
 		Project:        "proj",
 		CapsuleDir:     f.capsuleDir,
@@ -115,51 +119,6 @@ func TestStepBoundarySyncsTranscriptBeforePush(t *testing.T) {
 	expectNoOB(t, ob, 100*time.Millisecond, "no recovery may fire for a healthy transcript sync")
 }
 
-func TestFlushWrapSyncsTranscriptBeforePush(t *testing.T) {
-	dir := t.TempDir()
-	capsuleDir := filepath.Join(dir, "capsule")
-	if err := os.MkdirAll(filepath.Join(capsuleDir, "runtime-state"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	f := newLiveFixture(t, capsuleDir, filepath.Join(dir, "pi-sessions"))
-
-	var sawCopy atomic.Bool
-	h := newFakeHandle("ra_wi_test")
-	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = pushOnceRecorded(f, &sawCopy)
-	})
-	adopt(m, h, WIInfo{
-		WorkItem:       "wi_test",
-		Project:        "proj",
-		CapsuleDir:     f.capsuleDir,
-		BundleName:     "bundle-a",
-		Transcript:     f.dst,
-		LiveTranscript: f.src,
-		SpawnAt:        time.Now().Add(-time.Minute),
-	})
-	// the adoption must be processed before the flush rides the channel
-	// (otherwise the select order races the transcript facts).
-	soon(t, 5*time.Second, "the transcript attachment was never adopted", func() bool {
-		return len(eventsOf(m, EvAgentRecovered)) > 0
-	})
-
-	call := FlushCall{Req: protocol.FlushRequest{
-		WorkItem: "wi_test", SpawnN: 1,
-		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
-	}, Resp: make(chan protocol.FlushAck, 1)}
-	m.flushCh <- call
-	ack := <-call.Resp
-	if !ack.OK {
-		t.Fatalf("wrap flush failed: %+v", ack)
-	}
-	if !sawCopy.Load() {
-		t.Fatal("the wrap seal push must see the transcript copy in the capsule")
-	}
-	if raw, err := os.ReadFile(f.dst); err != nil || string(raw) != string(f.body) {
-		t.Fatalf("capsule session copy missing after wrap: %v", err)
-	}
-}
-
 func TestTranscriptMissingWarnsOnceAndPushProceeds(t *testing.T) {
 	dir := t.TempDir()
 	capsuleDir := filepath.Join(dir, "capsule")
@@ -182,7 +141,7 @@ func TestTranscriptMissingWarnsOnceAndPushProceeds(t *testing.T) {
 			return "sha_nomiss", true, gitops.PushTimings{}, nil
 		}
 	})
-	adopt(m, h, WIInfo{
+	adopt(t, m, h, WIInfo{
 		WorkItem:   "wi_test",
 		Project:    "proj",
 		CapsuleDir: capsuleDir,
@@ -235,7 +194,7 @@ func TestResumedDerivationWritingInCapsuleIsNotReCopied(t *testing.T) {
 			return "sha_resume", true, gitops.PushTimings{}, nil
 		}
 	})
-	adopt(m, h, WIInfo{
+	adopt(t, m, h, WIInfo{
 		WorkItem:       "wi_test",
 		Project:        "proj",
 		CapsuleDir:     f.capsuleDir,

@@ -31,7 +31,7 @@ import (
 func (m *Monitor) JobView() *protocol.JobView {
 	m.stateMu.Lock()
 	pending := m.pending
-	sealing, wrapped, blocked := m.sealing, m.wrapped, m.blocked
+	sealing := m.sealing
 	spawn := m.spawnN
 	fp := ""
 	if m.sessionID != "" {
@@ -50,7 +50,7 @@ func (m *Monitor) JobView() *protocol.JobView {
 
 	// layer 1: execution.json direct read (authoritative).
 	var exec capsule.Execution
-	if data, err := os.ReadFile(m.execPath); err == nil &&
+	if data, err := os.ReadFile(m.execPath()); err == nil &&
 		json.Unmarshal(data, &exec) == nil {
 		view.CurrentStep = exec.CurrentStep
 		view.Steps = map[string]*protocol.StepView{}
@@ -88,11 +88,10 @@ func (m *Monitor) JobView() *protocol.JobView {
 	}
 
 	// status derivation, most specific first. A terminal derivation
-	// (wrap acked or wrap-blocked) or a terminal workflow_status in the
-	// authoritative file wins; then the seal-in-progress window; then the
+	// workflow_status in the authoritative file wins; then the seal-in-progress window; then the
 	// needs_input exemption; otherwise the job is running.
 	switch {
-	case wrapped || blocked || isTerminalStatus(exec.WorkflowStatus):
+	case isTerminalStatus(exec.WorkflowStatus):
 		view.Status = protocol.JobDone
 	case sealing:
 		view.Status = protocol.JobSealing
@@ -123,45 +122,33 @@ func (m *Monitor) pendingQuestion() *protocol.PendingView {
 	return m.pending
 }
 
-// lastProgressAt answers when this job's stream last proved AGENT
-// progress (the F15c owner face's source; zero = no progress record
-// yet — the caller renders "-"). The stream pointer is read under
-// stateMu because recovery swaps it on the monitor goroutine while
-// this runs on the HTTP/status face's goroutine; the heartbeat itself
-// locks the stream's own mutex. UI-noise records never move this clock
-// (stream.go's F15 whitelist).
-func (m *Monitor) lastProgressAt() time.Time {
-	m.stateMu.Lock()
-	s := m.stream
-	m.stateMu.Unlock()
-	if s == nil {
-		return time.Time{}
-	}
-	return s.heartbeat().LastProgressAt
+// Activity is one work item's owner-facing liveness reading (the ops
+// status face): when its current dispatch began and when its harness last
+// did REAL work (UI chatter never counts — the F15 ruling carried into
+// the translator). Zero values = no dispatch in flight (between steps,
+// waiting on a human, or not yet started).
+type Activity struct {
+	Step          string
+	SpawnN        int64
+	StepStartedAt time.Time
+	LastWorkAt    time.Time // zero = no work-class signal yet this dispatch
+	InDispatch    bool
 }
 
-// ProgressAge is one work item's owner-facing progress staleness (F15c):
-// when the job's stream last proved agent progress. Zero = never.
-type ProgressAge struct {
-	LastProgressAt time.Time
-}
-
-// ProgressAges answers the progress staleness of every monitored work
-// item (F15c): canonical work-item id → last agent-progress moment.
-// Monitors are keyed by the canonical id the runtime announced; the
-// caller merges by the same key (the ops status face renders it as the
-// LAST-PROGRESS column — the pilot's 2.7-hour wedge had NO owner-
-// visible surface while it ran).
-func (o *Observe) ProgressAges() map[string]ProgressAge {
+// Activities answers the activity of every monitored work item:
+// canonical work-item id -> Activity (the ops status face renders the
+// step age and the last-work-signal age; the pilot's 2.7-hour wedge had
+// NO owner-visible surface while it ran).
+func (o *Observe) Activities() map[string]Activity {
 	o.mu.Lock()
 	monitors := make([]*Monitor, 0, len(o.monitors))
 	for _, m := range o.monitors {
 		monitors = append(monitors, m)
 	}
 	o.mu.Unlock()
-	out := map[string]ProgressAge{}
+	out := map[string]Activity{}
 	for _, m := range monitors {
-		out[m.wi.WorkItem] = ProgressAge{LastProgressAt: m.lastProgressAt()}
+		out[m.wi.WorkItem] = m.activity()
 	}
 	return out
 }
@@ -197,4 +184,49 @@ func isTerminalStatus(s string) bool {
 		return true
 	}
 	return false
+}
+
+// LiveProgress is one work item's live progress inside its current
+// dispatch (the watch face): the command the harness is running right now
+// and how long it has run, the files it changed lately, and how many tools
+// the dispatch has used. The zero value (InDispatch false) means no
+// dispatch is in flight (between steps, waiting on a human).
+type LiveProgress struct {
+	InDispatch bool
+	Step       string
+	// Command is the newest running tool's command line (the bash command,
+	// or the tool name plus its key argument); "" when no tool is running.
+	Command       string
+	CommandAgeSec int64
+	// RecentFiles are the last few paths edit/write tools touched, oldest
+	// first (at most five).
+	RecentFiles []string
+	ToolCalls   int
+}
+
+// Progress answers the live progress of one work item's current dispatch
+// (any id form the observe routes accept); ok=false when the work item is
+// not monitored here.
+func (o *Observe) Progress(wi string) (LiveProgress, bool) {
+	m := o.lookup(wi)
+	if m == nil {
+		return LiveProgress{}, false
+	}
+	return m.liveProgress(), true
+}
+
+// Progresses answers the live progress of every monitored work item
+// (canonical id -> LiveProgress).
+func (o *Observe) Progresses() map[string]LiveProgress {
+	o.mu.Lock()
+	monitors := make([]*Monitor, 0, len(o.monitors))
+	for _, m := range o.monitors {
+		monitors = append(monitors, m)
+	}
+	o.mu.Unlock()
+	out := map[string]LiveProgress{}
+	for _, m := range monitors {
+		out[m.wi.WorkItem] = m.liveProgress()
+	}
+	return out
 }

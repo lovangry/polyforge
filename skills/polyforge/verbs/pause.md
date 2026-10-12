@@ -32,7 +32,7 @@ disk as the read-only scene a later resume continues from.
 | Code | When | What to tell the user |
 |---|---|---|
 | `DAEMON-404` | No local job for this work item on this machine | It is not running here — pause it on the machine that runs it. |
-| `DAEMON-409` | A close is already in progress for this job (a wrap, another pause, or the agent's own wrap flush), or the job is mid-recovery | Wait for the in-flight close to settle, then re-check with observe. |
+| `DAEMON-409` | A close is already in progress for this job (a wrap or another pause), or the job is mid-recovery | Wait for the in-flight close to settle, then re-check with observe. |
 | `CORE-*` passthrough | The server-side end-generation was refused | Read the typed Core verdict — typically the generation is no longer yours to end; act per its detail. |
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |
 | `dial unix …` | Daemon not running | Nothing is executing here — start the daemon or check `--socket`. |

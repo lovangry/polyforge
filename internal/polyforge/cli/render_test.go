@@ -2,11 +2,9 @@ package cli
 
 import (
 	"bytes"
-	"encoding/json"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 )
 
@@ -61,175 +59,14 @@ pf-2  -        queued  -        normal    -         another goal   unclassified
 `)
 }
 
-func TestGoldenObserve(t *testing.T) {
-	jv := protocol.JobView{
-		WorkItem:    "wi_abc",
-		Project:     "polyforge",
-		Status:      protocol.JobNeedsInput,
-		SpawnN:      3,
-		BundleName:  "bundle-x",
-		CurrentStep: "implement",
-		Steps: map[string]*protocol.StepView{
-			"spec":      {Status: "completed", Attempts: 1, Model: "m-a", StartedAt: "t0"},
-			"implement": {Status: "in_progress", Attempts: 2, Model: "m-b", StartedAt: "t1"},
-		},
-		Budget:  json.RawMessage(`{"requests":{"used":3,"ceiling":50}}`),
-		Pending: &protocol.PendingView{ID: "q_1", Step: "implement", Question: "Ship now?", AskedAt: "t2"},
-		Events: []protocol.EventEntry{
-			{At: "t3", Kind: "step_started", Body: json.RawMessage(`{"step":"implement"}`), Seq: 7},
-			{At: "t4", Kind: "needs_input", Seq: 8},
-		},
-	}
-	var b bytes.Buffer
-	renderObserve(&b, &jv, nil)
-	golden(t, "Observe", b.String(),
-		`wi_abc (polyforge) — needs_input
-bundle: bundle-x
-current step: implement
-
-steps:
-STEP       STATUS       ATTEMPTS  MODEL  STARTED
----------  -----------  --------  -----  -------
-implement  in_progress  2         m-b    t1
-spec       completed    1         m-a    t0
-
-budget:
-{
-  "requests": {
-    "used": 3,
-    "ceiling": 50
-  }
-}
-
-pending question:
-  q_1 [implement] asked at t2
-  Ship now?
-
-events:
-AT  KIND          BODY
---  ------------  --------------------
-t3  step_started  {"step":"implement"}
-t4  needs_input
-next cursor: pf observe wi_abc --after 8
-`)
-}
-
-func TestGoldenObserveEventLatency(t *testing.T) {
-	jv := protocol.JobView{
-		WorkItem: "wi_lat",
-		Project:  "polyforge",
-		Status:   protocol.JobRunning,
-		Events: []protocol.EventEntry{
-			// Both keys: full latency segment.
-			{At: "t1", Kind: "commit_push", Body: json.RawMessage(`{"commit_ms":1234,"push_ms":567,"repo":"polyforge"}`), Seq: 1},
-			// Only commit_ms: push segment stays blank.
-			{At: "t2", Kind: "commit_push", Body: json.RawMessage(`{"commit_ms":42}`), Seq: 2},
-			// Only push_ms: commit segment stays blank.
-			{At: "t3", Kind: "commit_push", Body: json.RawMessage(`{"push_ms":7}`), Seq: 3},
-			// Neither key: renders exactly as before (truncated raw JSON).
-			{At: "t4", Kind: "step_started", Body: json.RawMessage(`{"step":"implement"}`), Seq: 4},
-			// Invalid JSON: falls back to raw, no error.
-			{At: "t5", Kind: "noise", Body: json.RawMessage(`{not json`), Seq: 5},
-			// Null body: blank cell, exactly as before.
-			{At: "t6", Kind: "needs_input", Body: json.RawMessage(`null`), Seq: 6},
-		},
-	}
-	var b bytes.Buffer
-	renderObserve(&b, &jv, nil)
-	golden(t, "ObserveEventLatency", b.String(),
-		`wi_lat (polyforge) — running
-
-events:
-AT  KIND          BODY
---  ------------  ---------------------------
-t1  commit_push   commit 1234ms · push 567ms
-t2  commit_push   commit 42ms
-t3  commit_push   push 7ms
-t4  step_started  {"step":"implement"}
-t5  noise         {not json
-t6  needs_input
-next cursor: pf observe wi_lat --after 6
-`)
-}
-
-func TestGoldenObserveHeaderWall(t *testing.T) {
-	base := func() protocol.JobView {
-		return protocol.JobView{WorkItem: "wi_w", Project: "polyforge", Status: protocol.JobRunning}
-	}
-
-	// Budget carrying wall_ms: header gains the cumulative wall figure.
-	jv := base()
-	jv.Budget = json.RawMessage(`{"usd":1.5,"wall_ms":11520000,"tokens":9000}`)
-	var b bytes.Buffer
-	renderObserve(&b, &jv, nil)
-	golden(t, "ObserveHeaderWall", b.String(),
-		`wi_w (polyforge) — running · wall 3.2h
-
-budget:
-{
-  "usd": 1.5,
-  "wall_ms": 11520000,
-  "tokens": 9000
-}
-`)
-
-	// Sub-minute wall renders in seconds.
-	jv = base()
-	jv.Budget = json.RawMessage(`{"wall_ms":12345}`)
-	b.Reset()
-	renderObserve(&b, &jv, nil)
-	golden(t, "ObserveHeaderWallSeconds", b.String(),
-		`wi_w (polyforge) — running · wall 12.3s
-
-budget:
-{
-  "wall_ms": 12345
-}
-`)
-
-	// Budget without wall_ms: header exactly as today (no wall segment).
-	jv = base()
-	jv.Budget = json.RawMessage(`{"requests":{"used":3,"ceiling":50}}`)
-	b.Reset()
-	renderObserve(&b, &jv, nil)
-	golden(t, "ObserveHeaderNoWall", b.String(),
-		`wi_w (polyforge) — running
-
-budget:
-{
-  "requests": {
-    "used": 3,
-    "ceiling": 50
-  }
-}
-`)
-
-	// Null / empty / zero wall_ms budgets: no wall segment, no "0ms" artifact.
-	for name, budget := range map[string]json.RawMessage{
-		"null":  json.RawMessage(`null`),
-		"empty": json.RawMessage(``),
-		"zero":  json.RawMessage(`{"wall_ms":0}`),
-	} {
-		jv = base()
-		jv.Budget = budget
-		b.Reset()
-		renderObserve(&b, &jv, nil)
-		want := "wi_w (polyforge) — running\n"
-		if name == "zero" {
-			want += "\nbudget:\n{\n  \"wall_ms\": 0\n}\n"
-		}
-		golden(t, "ObserveHeader"+name, b.String(), want)
-	}
-}
-
 func TestGoldenStatus(t *testing.T) {
 	s := StatusResponse{
 		MachineID:  "m1",
-		Mode:       protocol.ModeDrain,
+		Auto:       true,
 		Workspaces: []string{"/srv/pf-ws"},
 		Jobs: []StatusJob{
 			{WorkItemID: "wi_abc", Status: "running", SpawnN: 3, SessionFingerprint: "ab12cd34ef56aa00", AgentPID: 42,
-				LastProgressAgoSec: int64Ptr(754)},
+				StepAgeSec: int64Ptr(3725), LastWorkAgoSec: int64Ptr(7)},
 			// D6: a job presented as needs_input shows its pending
 			// question's id in the QUESTION column. A job with no session
 			// fingerprint renders "-" in SESSION (and "-" in SPAWN while
@@ -242,13 +79,13 @@ func TestGoldenStatus(t *testing.T) {
 	var b bytes.Buffer
 	renderStatus(&b, &s)
 	golden(t, "Status", b.String(),
-		`machine: m1  mode: drain  queue: 1 pending / 2 running / max 2
+		`daemon: m1  auto: on  max: 2  queue: 1 pending / 2 running
 workspaces: /srv/pf-ws
 
-WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  LAST-PROGRESS
----------  -----------  ----------------  -----  ---------  --------  -------------
-wi_abc     running      ab12cd34ef56aa00  #3     42         -         12:34
-wi_ask     needs_input  -                 -      43         q_zz9     -
+WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  STEP-AGE  LAST-WORK
+---------  -----------  ----------------  -----  ---------  --------  --------  ---------
+wi_abc     running      ab12cd34ef56aa00  #3     42         -         62:05     00:07
+wi_ask     needs_input  -                 -      43         q_zz9     -         -
 `)
 }
 
@@ -366,5 +203,5 @@ mem_1  experience.debug  first line  t1       go
 `)
 }
 
-// int64Ptr is the LAST-PROGRESS golden helper (a *int64 field).
+// int64Ptr is the STEP-AGE / LAST-WORK golden helper (a *int64 field).
 func int64Ptr(v int64) *int64 { return &v }

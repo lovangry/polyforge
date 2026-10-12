@@ -50,7 +50,7 @@ func TestSpawnModelPinRidesArgv(t *testing.T) {
 func TestMaterializeFailureBlocksGeneration(t *testing.T) {
 	setGitIdentity(t)
 	wfDir, pinned := pristineBundle(t)
-	if err := os.WriteFile(filepath.Join(wfDir, "demo-bundle", "agents", "step.md"),
+	if err := os.WriteFile(filepath.Join(wfDir, "demo-bundle", "steps", "step.md"),
 		[]byte("tampered after the pin\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func idxOf(args []string, want string) int {
 func TestAbandonedClaimKeepsJournalWhenCloseFails(t *testing.T) {
 	setGitIdentity(t)
 	wfDir, pinned := pristineBundle(t)
-	if err := os.WriteFile(filepath.Join(wfDir, "demo-bundle", "agents", "step.md"),
+	if err := os.WriteFile(filepath.Join(wfDir, "demo-bundle", "steps", "step.md"),
 		[]byte("tampered after the pin\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

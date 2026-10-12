@@ -5,48 +5,40 @@ import (
 	"time"
 )
 
-// v1_s06: the unresponsive step process, driver/envelope edition. The
-// driver-era hang face is the envelope absence: the grill dispatch burns
-// its injected delay (4s — four hang windows' worth of silence) and then
-// dies WITHOUT writing its result envelope. The driver surfaces the
-// envelope-less exit, the recovery engine re-dispatches the step in place
-// under the next ordinal, and the workflow completes and wraps. The
-// record-stream watchdogs stay quiet through the silence (no turn is in
-// flight — the driver lane's step processes answer the boot prompt and
-// close their turn; the injected windows prove the suspicion-free
-// stillness), so exactly ONE recovery fires for the whole episode.
+// v1_s06: the step process that dies silently without delivering,
+// driver/envelope edition (v2-converge 2.3: an exit WITHOUT a result is
+// the driver's own to classify — it is the one failure the driver sees
+// directly, without any supervisor verdict). The grill dispatch burns an
+// injected delay and then dies WITHOUT writing its result envelope. The
+// driver classifies the exit (no model-class sign: same-model retry),
+// records ONE failure (cause exit_other, counter 1) in execution.json,
+// and re-dispatches the step in place — resuming the transcript, the
+// first retry's shape — under the next ordinal; the workflow completes
+// and wraps. No recovery fires for the exit (the recovery engine is the
+// DRIVER's crash bound now): exactly ONE needs_recovery signal for the
+// whole episode, the completion wrap. And the supervisor stays quiet
+// through the silent-but-live delay: no verdict, no driver stall.
 //
-// This scenario runs against the REAL `pf daemon` process: the detection
-// windows are injected purely through the CLI's observe-window flags
-// (#12), so the whole production path — the spawner, the daemon's observe
-// binding, the recovery engine's resume re-dispatch — is the thing under
-// test. The legacy open-turn/record-stream shapes are the WI-Agent RPC
-// face (retired pending Phase-4 #106): the driver lane supervises the
-// step PROCESS (envelope absence), not the record stream.
+// This scenario runs against the REAL `pf daemon` process.
 func TestV1S06HangRecovery(t *testing.T) {
 	inst := newV1Install(t)
-	wi := inst.newWI(t, "s06: unresponsive step process (the delayed envelope never lands)",
+	wi := inst.newWI(t, "s06: step process dies without delivering (the delayed envelope never lands)",
 		[]map[string]any{
 			// Ordinal 1: 4s of silence, then die before the envelope write.
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true,
 				"ms": 4000, "crash": "before"},
-			// Ordinal 2: the recovery continuation, in place.
+			// Ordinal 2: the driver's in-place retry (resume).
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-	// Injected windows: 1s hang / 1s probe — far shorter than the delayed
-	// write, so the whole silence window is covered by the watchdogs'
-	// cadence and they still must not fire.
-	d := newV1Daemon(t, inst, optObserveWindows(time.Second, 0, time.Second))
+	d := newV1Daemon(t, inst)
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
 
 	capDir := d.capsuleDir(wi)
-	// The crash is journaled by the step process itself (the scripted
-	// before-write death) and the recovery re-dispatches in place.
 	waitUntil(t, 30*time.Second, "the before-write crash was never journaled", func() bool {
 		for _, rec := range fakeJournal(t, capDir) {
 			if rec["type"] == "crash_before" && rec["step"] == "grill" {
@@ -56,45 +48,53 @@ func TestV1S06HangRecovery(t *testing.T) {
 		return false
 	})
 
-	// Exactly one hang-lane recovery fires and its reason is the confirmed
-	// death (the envelope-less exit IS an agent death to the monitor).
-	rec := waitForEvent(t, d, wi, "needs_recovery", 60*time.Second)
+	// The driver's own handling: ONE failure record with its cause
+	// sub-class, same-model retry, resume shape.
+	rec := waitForEvent(t, d, wi, "step_failed", 60*time.Second)
 	var body struct {
-		Reason string `json:"reason"`
+		Step        string `json:"step"`
+		Cause       string `json:"cause"`
+		Disposition string `json:"disposition"`
+		Count       int    `json:"failure_count"`
+		Next        string `json:"next_dispatch"`
 	}
 	eventBody(t, rec, &body)
-	if body.Reason != "agent_death" {
-		t.Fatalf("recovery reason %q, want agent_death", body.Reason)
+	if body.Step != "grill" || body.Cause != "exit_other" || body.Disposition != "retry_same_model" ||
+		body.Count != 1 || body.Next != "resume" {
+		t.Fatalf("step_failed = %+v, want grill/exit_other/retry_same_model/1/resume", body)
 	}
 
-	// The recovery engine resumed and the resumed workflow finished; the
-	// terminal wiring wrapped it.
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 	spawns := waitSpawnCount(t, d, wi, 5, 60*time.Second)
 	if len(spawns) != 5 || spawns[1]["resume"] != true {
-		t.Fatalf("the recovery was not an in-place resume: %+v", spawns)
+		t.Fatalf("the retry was not an in-place resume: %+v", spawns)
 	}
-
-	// The whole episode fired exactly TWO recovery signals: the crash and
-	// the completion signal — never a watchdog false positive against the
-	// silent-but-live step process.
-	kinds := d.eventKinds(t, wi)
-	if n := countOf(kinds, "needs_recovery"); n != 2 {
-		t.Fatalf("needs_recovery fired %d times, want 2 (crash + completion): %v", n, kinds)
-	}
-	for _, e := range d.eventsOf(t, wi) {
-		if e.Kind == "infra_incident" {
-			var b struct {
-				Kind string `json:"kind"`
+	x := readExecution(t, capDir)
+	grill := x.Steps["grill"]
+	var failures int
+	for _, a := range grill.Attempts {
+		if a["cause"] == "infra_failure" {
+			failures++
+			if a["failure_cause"] != "exit_other" {
+				t.Fatalf("attempt cause sub-class %v, want exit_other", a["failure_cause"])
 			}
-			eventBody(t, e, &b)
-			t.Fatalf("a watchdog incident fired against the silent step process: %s", b.Kind)
 		}
 	}
+	if failures != 1 {
+		t.Fatalf("grill carries %d infra_failure attempts, want exactly 1: %+v", failures, grill.Attempts)
+	}
 
-	// Teardown: the killed process is gone, the survivor count is zero
-	// (every later step process was terminated by its own driver after
-	// envelope collection).
+	// The whole episode fired exactly ONE recovery signal: the completion
+	// wrap. The exit never reached the recovery engine, and the
+	// supervisor never judged the silent-but-live delay.
+	kinds := d.eventKinds(t, wi)
+	if n := countOf(kinds, "needs_recovery"); n != 1 {
+		t.Fatalf("needs_recovery fired %d times, want 1 (completion only): %v", n, kinds)
+	}
+	if n := countOf(kinds, "supervisor_verdict"); n != 0 {
+		t.Fatalf("the supervisor judged a live step process dead: %v", kinds)
+	}
+
 	waitUntil(t, 15*time.Second, "step processes survived the episode", func() bool {
 		return len(orphanPIDs(wi)) == 0
 	})

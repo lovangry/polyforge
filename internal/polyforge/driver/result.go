@@ -36,6 +36,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
 // ResultProtocolVersion is the result-envelope protocol this driver
@@ -66,6 +68,10 @@ const EvGateVerdictBound = "gate_verdict_bound"
 // declaration the same way verificationStepID does in observe.
 const releaseStepID = "release"
 
+// verificationStepID is the conventional id of the V4 verification step:
+// a completed result for it owes command evidence (ResultSpec.RequireCommandEvidence).
+const verificationStepID = "verification"
+
 // maxEnvelopeRejects bounds the in-process re-dispatch lane: a step
 // whose envelopes keep failing validation this many times CONSECUTIVELY
 // escalates to the recovery lane (the storm guard bounds whatever
@@ -73,6 +79,12 @@ const releaseStepID = "release"
 // missing handoff refs — the retries fix the author, the bound keeps a
 // genuinely broken author from looping forever.
 const maxEnvelopeRejects = 3
+
+// maxRejectRelaunches bounds the driver relaunches a persistently
+// rejected envelope may cost (persisted per step in execution.json,
+// because the in-process counter resets on every relaunch): the third
+// escalation blocks the step instead of relaunching again.
+const maxRejectRelaunches = 3
 
 // Outcome is the closed result-verdict set of the envelope.
 type Outcome string
@@ -111,6 +123,11 @@ type StepResult struct {
 	Question        string            `json:"question,omitempty"`    // the question text for needs_input
 	CommandEvidence []CommandEvidence `json:"command_evidence"`
 	SubmittedAt     time.Time         `json:"submitted_at"`
+
+	// evidenceDropped records why the tolerant re-parse discarded
+	// command_evidence entries (set by the collector, never serialized);
+	// the evidence gate quotes it so a rejection names the real reason.
+	evidenceDropped []string
 }
 
 // ArtifactRef pins one artifact file: capsule-relative path plus the
@@ -124,8 +141,9 @@ type ArtifactRef struct {
 }
 
 // CommandEvidence is one recorded command the step process ran, kept in
-// the envelope for audit (the operator face renders it; validation
-// never branches on it).
+// the envelope for audit (the operator face renders it). Validation of
+// a verification step checks argv non-emptiness and duration_ms > 0
+// (checkCommandEvidence); exit_code and started_at are not enforced.
 type CommandEvidence struct {
 	Argv       []string  `json:"argv"`
 	Cwd        string    `json:"cwd"`
@@ -179,6 +197,21 @@ type ResultSpec struct {
 	// CapsuleRoot is the directory capsule-relative artifact paths
 	// resolve against (verification is jailed inside it).
 	CapsuleRoot string
+	// RequiresHumanAnswer mirrors the step's requires_human_answer: true
+	// declaration: a delivered completed result is rejected unless
+	// HumanAnswers > 0 (the human-gate guarantee, polyforge#138).
+	RequiresHumanAnswer bool
+	// HumanAnswers is the number of human answers recorded in the step's
+	// CURRENT attempt chain: st.Answers[st.AnswerBase:], where AnswerBase
+	// is advanced to len(Answers) by every gate-fail rewind that archives
+	// the step (see currentChainAnswers). Answers only enter the record
+	// through the answer transition, so every entry is a human's.
+	HumanAnswers int
+	// RequireCommandEvidence mirrors requires_command_evidence: true (or
+	// the step id "verification"): an accepted completed result must carry
+	// at least one command_evidence entry, each with a non-empty argv and
+	// duration_ms > 0 (the V4 gate; exit_code presence is not checkable).
+	RequireCommandEvidence bool
 }
 
 // ValidateStepResult runs the R14 staging gates over one envelope:
@@ -260,6 +293,15 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	if spec.AcceptedIDs[res.ResultID] {
 		return fmt.Errorf("%w: %s", ErrDuplicateResult, res.ResultID)
 	}
+	// 3a. needs_input envelope shape: the question must be nameable
+	// BEFORE the process is gone, so a missing question_id/question is an
+	// envelope rejection (in-process rewrite), never a recovery-lane error
+	// at the commit point.
+	if res.Outcome == OutcomeNeedsInput {
+		if _, _, err := needsInputQuestion(res); err != nil {
+			return err
+		}
+	}
 	// 3b. the verdict binding (the #106 lesson): for a gate step the
 	// output's top-level fail verdict IS the routing. A completed
 	// envelope carrying one is a mislabeled gate-fail report — re-bind
@@ -271,6 +313,12 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 		if _, fail := failVerdictInOutput(res.Output); fail {
 			res.Outcome = OutcomeGateFailed
 		}
+	}
+	// 3b'. the human-gate guarantee (#138): judged on the DELIVERED
+	// outcome so a gate-fail verdict cannot dodge the human either.
+	if delivered == OutcomeCompleted && spec.RequiresHumanAnswer && spec.HumanAnswers <= 0 {
+		return fmt.Errorf("driver: step %q requires a human answer: return needs_input first (a completed result is refused until a human has answered a question in this attempt)",
+			spec.StepID)
 	}
 	// 3c. the release verdict binding (polyforge#123): judged on the
 	// DELIVERED outcome (a completed envelope), before substance. A
@@ -311,7 +359,80 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 		return fmt.Errorf("driver: step %q declares handoff but the completed result carries no handoff_ref",
 			spec.StepID)
 	}
+	if spec.RequireCommandEvidence {
+		if err := checkCommandEvidence(res.CommandEvidence); err != nil {
+			if len(res.evidenceDropped) > 0 {
+				err = fmt.Errorf("%w (entries dropped while parsing the envelope: %s)", err, strings.Join(res.evidenceDropped, "; "))
+			}
+			return fmt.Errorf("driver: step %q completed without verification evidence: %w", spec.StepID, err)
+		}
+	}
 	return nil
+}
+
+// needsInputQuestion extracts the question of a needs_input envelope: it
+// may live at envelope level (question_id/question) or embedded in the
+// output object (step agents naturally put it there). Each half is taken
+// from the envelope first, then the output. An error names what is missing.
+func needsInputQuestion(res *StepResult) (id, text string, err error) {
+	id, text = strings.TrimSpace(res.QuestionID), strings.TrimSpace(res.Question)
+	if (id == "" || text == "") && len(res.Output) > 0 {
+		var embedded struct {
+			QuestionID string `json:"question_id"`
+			Question   string `json:"question"`
+		}
+		if json.Unmarshal(res.Output, &embedded) == nil {
+			if id == "" {
+				id = strings.TrimSpace(embedded.QuestionID)
+			}
+			if text == "" {
+				text = strings.TrimSpace(embedded.Question)
+			}
+		}
+	}
+	var missing []string
+	if id == "" {
+		missing = append(missing, "question_id")
+	}
+	if text == "" {
+		missing = append(missing, "question")
+	}
+	if len(missing) > 0 {
+		return id, text, fmt.Errorf("driver: needs_input result is missing %s (set them on the envelope or in the output object)",
+			strings.Join(missing, " and "))
+	}
+	return id, text, nil
+}
+
+// checkCommandEvidence enforces the V4 evidence shape: at least one entry,
+// every entry with a non-empty argv and duration_ms > 0. exit_code's
+// zero value is legitimate and its presence cannot be checked on the
+// decoded struct, so it is not enforced. An entry the tolerant re-parse
+// could not decode never reaches here as a struct (see evidenceDropped).
+func checkCommandEvidence(ev []CommandEvidence) error {
+	if len(ev) == 0 {
+		return errors.New("command_evidence is empty — a verification step must carry at least one entry, each an OBJECT {\"argv\": [...], \"exit_code\": N, \"duration_ms\": N} (duration_ms > 0)")
+	}
+	for i, e := range ev {
+		if len(e.Argv) == 0 || strings.TrimSpace(strings.Join(e.Argv, "")) == "" {
+			return fmt.Errorf("command_evidence[%d] has an empty argv", i)
+		}
+		if e.DurationMs <= 0 {
+			return fmt.Errorf("command_evidence[%d] (%s) has no duration_ms (must be > 0)", i, e.Argv[0])
+		}
+	}
+	return nil
+}
+
+// currentChainAnswers counts the human answers of a step's current attempt
+// chain: answers recorded since the step's last gate-fail rewind
+// (st.Answers[st.AnswerBase:]). A step never rewound counts all of them.
+func currentChainAnswers(st *capsule.Step) int {
+	base := st.AnswerBase
+	if base < 0 || base > len(st.Answers) {
+		base = len(st.Answers)
+	}
+	return len(st.Answers) - base
 }
 
 // failVerdictInOutput reports whether one result output carries a
@@ -548,32 +669,4 @@ func hasArtifact(refs []ArtifactRef, rel string) bool {
 		}
 	}
 	return false
-}
-
-// validUUID answers whether s is shaped like a UUID (8-4-4-4-12 hex).
-// No longer the accept gate (see ValidateStepResult's tolerant id), but
-// kept as the documented shape the step prompt asks for and callers may
-// still assert on.
-func validUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !isHexDigit(c) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func isHexDigit(c byte) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }

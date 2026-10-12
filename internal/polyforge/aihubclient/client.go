@@ -1,5 +1,5 @@
 // Package aihubclient is the shared HTTP client for the aihub server, used
-// by runtime (session claim/attach/takeover/end), observe (read-through)
+// by runtime (session claim/attach/force-end/end), observe (read-through)
 // and the CLI verbs. Wire types come from internal/common/api; error
 // decoding maps the typed errStatus envelope back into *api.Error.
 package aihubclient
@@ -131,7 +131,7 @@ func (c *Client) ListWorkItems(project string, status string) ([]api.WorkItem, e
 	return resp.Items, nil
 }
 
-// Queue returns ready work items for autonomous claiming (drain mode).
+// Queue returns ready work items for autonomous claiming (the daemon auto-pull).
 // Both executable segments count as takeable: items (classified
 // requires_human_session=false) and unclassified (classification missing —
 // per the ready-queue contract the segment that means "takeable now by an
@@ -366,76 +366,12 @@ func (c *Client) RotateSecret(req RotateSecretRequest) (json.RawMessage, error) 
 	return c.raw("POST", "/api/v1/service/rotate-secret", req)
 }
 
-// ---------------------------------------------------------------------------
-// Migration face (admin): the one-shot record import paths.
-// ---------------------------------------------------------------------------
-
-// ImportWorkItemRequest is the POST /api/v1/admin/import-work-item body;
-// it mirrors core.ImportRequest (the target server owns the domain).
-type ImportWorkItemRequest struct {
-	Project        string          `json:"project"`
-	ID             string          `json:"id"`
-	Seq            *int64          `json:"seq"`
-	Goal           string          `json:"goal"`
-	Content        *string         `json:"content"`
-	Status         string          `json:"status"`
-	Priority       string          `json:"priority"`
-	Milestone      *string         `json:"milestone"`
-	Labels         []string        `json:"labels"`
-	Attrs          map[string]any  `json:"attrs"`
-	Reporter       string          `json:"reporter"`
-	Assignee       *string         `json:"assignee"`
-	WaitingOn      *string         `json:"waiting_on"`
-	BundleName     *string         `json:"bundle_name"`
-	BundleDigest   *string         `json:"bundle_digest"`
-	BudgetBaseline json.RawMessage `json:"workflow_budget_baseline"`
-	CreatedAt      string          `json:"created_at"`
-	UpdatedAt      string          `json:"updated_at"`
-	ClosedAt       *string         `json:"closed_at"`
-	// Overwrite: a same-id record is rewritten in place (new version
-	// wins) and the answer carries outcome=overwritten.
-	Overwrite bool `json:"overwrite"`
-}
-
-// ImportResult is the import answer.
-type ImportResult struct {
-	Outcome  string        `json:"outcome"` // imported | skipped-existing | overwritten
-	WorkItem *api.WorkItem `json:"work_item"`
-}
-
-// ImportWorkItem imports one migration record (admin face).
-func (c *Client) ImportWorkItem(req ImportWorkItemRequest) (*ImportResult, error) {
-	var out ImportResult
-	if err := c.Do("POST", "/api/v1/admin/import-work-item", req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 // RebuildMemoryIndex triggers the explicit reconcile/backfill (admin).
 func (c *Client) RebuildMemoryIndex() (int, error) {
 	var out struct {
 		Reindexed int `json:"reindexed"`
 	}
 	if err := c.Do("POST", "/api/v1/memories/rebuild-index", map[string]any{}, &out); err != nil {
-		return 0, err
-	}
-	return out.Reindexed, nil
-}
-
-// RebuildMemoryIndexScoped triggers the reconcile/backfill scoped to ONE
-// project (admin; seq-fix lane 3a): the server walks only that project's
-// authority tree and answers the per-project reindexed count. At
-// real-library scale the work can outlast the default 60s exchange
-// timeout — the caller raises client.HTTP.Timeout for this one call
-// (migrate-memories' --rebuild-timeout) and never silently skips: a
-// timeout fails the run, because the rebuild is the only backfill path.
-func (c *Client) RebuildMemoryIndexScoped(project string) (int, error) {
-	var out struct {
-		Reindexed int `json:"reindexed"`
-	}
-	if err := c.Do("POST", "/api/v1/memories/rebuild-index?project="+url.QueryEscape(project),
-		map[string]any{}, &out); err != nil {
 		return 0, err
 	}
 	return out.Reindexed, nil
@@ -536,13 +472,13 @@ func (c *Client) SessionAttach(wi string, req api.SessionAttachRequest) (*api.Se
 	return &out, nil
 }
 
-// ForceTakeover atomically swaps the session to this daemon's new secret.
-func (c *Client) ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
-	var out api.SessionClaimResponse
-	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/force-takeover", req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+// ForceEndSession is the admin/maintainer recovery door: it ends the held
+// session (WI running|paused -> queued, old secret fenced); any daemon then
+// claims the WI normally. Authorization is server-side (admin or project
+// maintainer).
+func (c *Client) ForceEndSession(wi, reason string) error {
+	return c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/force-end-session",
+		api.ForceEndSessionRequest{Reason: reason}, nil)
 }
 
 // SessionVerify is the compare-only holder check (B3: no secret echo).
@@ -555,28 +491,10 @@ func (c *Client) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse
 	return &out, nil
 }
 
-// SessionHolder is the §1.7 public holder read: who holds this WI
-// right now, in PUBLIC fields only (any project viewer may ask; the
-// unheld state is an ordinary answer with the holder fields omitted).
-func (c *Client) SessionHolder(wi string) (*api.SessionHolderResponse, error) {
-	var out api.SessionHolderResponse
-	if err := c.Do("GET", "/api/v1/work-items/"+url.PathEscape(wi)+"/session", nil, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 // SessionEnd is the session-fenced terminal verdict (and the paused
 // transition — the merge amend).
 func (c *Client) SessionEnd(wi string, req api.SessionEndRequest) error {
 	return c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/session-end", req, nil)
-}
-
-// UnblockWorkItem is the blocked state's exit door (v1.5 review
-// Finding 3): status blocked → queued. Authorization is server-side
-// (admin or project maintainer — the force-takeover gate).
-func (c *Client) UnblockWorkItem(idOrSlug string) (json.RawMessage, error) {
-	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/unblock", map[string]any{})
 }
 
 // ResumeBlockedWorkItem is the §6.4 owner resume verdict's hub door
@@ -594,6 +512,13 @@ func (c *Client) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error)
 // maintainer, the unblock gate).
 func (c *Client) TerminateBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/terminate-blocked", map[string]any{})
+}
+
+// CloseAuth is the read-only close-authorization probe: nil when the
+// caller's key belongs to the WI's reporter, a project maintainer or an
+// admin (the cancel / blocked-exit gate); an AUTH-403 error otherwise.
+func (c *Client) CloseAuth(idOrSlug string) error {
+	return c.Do("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/close-auth", nil, nil)
 }
 
 // RecordShipLedger is the ship bridge's ledger recording call

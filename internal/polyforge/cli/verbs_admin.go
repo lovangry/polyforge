@@ -20,6 +20,7 @@ import (
 
 var cmdUsers = &Command{
 	Name:    "users",
+	Group:   GroupMgmt,
 	Summary: "User management (M1, admin only)",
 	Usage: "pf users create --display-name N [--user-type human|machine] [--role writer|admin]\n" +
 		"pf users list\n" +
@@ -120,6 +121,7 @@ var cmdUsers = &Command{
 
 var cmdApiKeys = &Command{
 	Name:    "api-keys",
+	Group:   GroupMgmt,
 	Summary: "API key management (M2, admin only; plaintext shown exactly once)",
 	Usage: "pf api-keys create --user U [--project-scope P]\n" +
 		"pf api-keys list\n" +
@@ -189,6 +191,7 @@ var cmdApiKeys = &Command{
 
 var cmdProjects = &Command{
 	Name:    "projects",
+	Group:   GroupMgmt,
 	Summary: "Project and membership management (M3)",
 	Usage: "pf projects create --name N [--visible]\n" +
 		"pf projects list\n" +
@@ -362,6 +365,7 @@ func projectsMembers(ctx *Context, client *aihubclient.Client, args []string) er
 
 var cmdBackup = &Command{
 	Name:    "backup",
+	Group:   GroupMgmt,
 	Summary: "Trigger an on-demand backup snapshot (M4, admin only)",
 	Usage:   "pf backup",
 	Setup:   func(fs *flag.FlagSet) {},
@@ -386,6 +390,7 @@ var cmdBackup = &Command{
 
 var cmdRotateSecret = &Command{
 	Name:    "rotate-secret",
+	Group:   GroupMgmt,
 	Summary: "Rotate the service secret (M5, admin only)",
 	Usage: "pf rotate-secret --mode grace --grace-seconds N\n" +
 		"pf rotate-secret --mode rollback",
@@ -429,6 +434,7 @@ var cmdRotateSecret = &Command{
 
 var cmdMachines = &Command{
 	Name:    "machines",
+	Group:   GroupMgmt,
 	Summary: "Machines liveness face (M3, admin only)",
 	Usage: "pf machines list\n\n" +
 		"Requires an admin credential: the machines liveness face is admin-only.",

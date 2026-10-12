@@ -19,21 +19,22 @@ import (
 
 // DaemonClient speaks the daemon's UDS HTTP face: HTTP over the local
 // unix socket (/run/polyforge.sock by default). The route family is the
-// v0 daemon surface minus publish_request — flush replaces it (ruling
-// C2, docs/design/polyforge-vnext/04-local-runtime.md §5.1):
+// v0 daemon surface minus publish_request
+// (docs/design/polyforge-vnext/04-local-runtime.md §5.1):
 //
-//	POST /jobs/{id}/claim|resume|takeover   body {"priority":"normal"}
-//	POST /jobs/{id}/adopt-session           body = AdoptSessionRequest (#109:
-//	                                        custody of an externally minted
-//	                                        session secret — local UDS only)
+//	POST /jobs/{id}/claim|resume            body {"priority":"normal"}
 //	GET  /jobs/{id}/observe?after=<cursor>  answer = protocol.JobView
 //	POST /jobs/{id}/answer                  body = the five-field relay
 //	                                        message itself (00 §3.4a)
-//	POST /jobs/{id}/flush                   body = protocol.FlushRequest
 //	POST /jobs/{id}/pause  {}               POST /jobs/{id}/wrap {"reason"}
 //	POST /jobs/{id}/ship  {}                 GET  /status
-//	POST /mode {"action":...}               POST /batch_submit {"wi_ids":[]}
+//	POST /ops/config {"auto":bool,"max":N}
 //	POST /shutdown
+//
+// pf watch lane (v2-converge §3): GET /jobs/{id}/watch?after=<seq> (one WI's
+// authoritative snapshot + events after a cursor) and the daemon-held chat
+// subscriptions under /chats/{chat}/ (subscribe, unsubscribe, subscriptions,
+// ack, heartbeat, attention) — see protocol/watch.go.
 //
 // Error envelope: the daemon answers non-2xx with the SAME typed
 // envelope the aihub face uses (common/api.Error: {code, detail} at the
@@ -42,6 +43,37 @@ import (
 type DaemonClient struct {
 	Sock string
 	HTTP *http.Client
+	// Origin, when set, rides on the submit-family bodies so the daemon
+	// can record where the job came from (chat id + owner).
+	Origin *SubmitOrigin
+}
+
+// SubmitOrigin is the optional "origin" of a submit-family request body.
+type SubmitOrigin struct {
+	ChatID string `json:"chat_id,omitempty"`
+	Owner  string `json:"owner,omitempty"`
+}
+
+// ChatRecord is the POST /chat/init answer.
+type ChatRecord struct {
+	ChatID         string `json:"chat_id"`
+	Harness        string `json:"harness"`
+	HarnessSession string `json:"harness_session"`
+	Created        bool   `json:"created"`
+}
+
+// ChatInit asks the daemon for the chat id of a harness session
+// (created on first use).
+func (d *DaemonClient) ChatInit(harness, session string) (json.RawMessage, error) {
+	return d.do("POST", "/chat/init", "", map[string]any{"harness": harness, "harness_session": session}, nil)
+}
+
+// withOrigin adds the origin to a request body when one is configured.
+func (d *DaemonClient) withOrigin(body map[string]any) map[string]any {
+	if d.Origin != nil {
+		body["origin"] = d.Origin
+	}
+	return body
 }
 
 // NewDaemonClient builds a client dialing the given unix socket.
@@ -128,17 +160,11 @@ type AnswerPayload struct {
 	AnsweredBy string `json:"answered_by"`
 }
 
-// ModeRequest is the POST /mode body. Action is one of
-// set|drain|abort-drain|get_recommendation; Mode (interactive|batch|
-// drain) and MaxConcurrentJobs apply to action=set only. There is no
-// "get" action — mode queries go through GET /status. Project (#113)
-// scopes get_recommendation to one project; absent, the daemon merges
-// ALL mapped projects.
-type ModeRequest struct {
-	Action            string `json:"action"`
-	Mode              string `json:"mode,omitempty"`
-	MaxConcurrentJobs *int   `json:"max_concurrent_jobs,omitempty"`
-	Project           string `json:"project,omitempty"`
+// OpsConfigRequest is the POST /ops/config body: the auto switch and/or
+// the max-concurrent-jobs number (at least one).
+type OpsConfigRequest struct {
+	Auto *bool `json:"auto,omitempty"`
+	Max  *int  `json:"max,omitempty"`
 }
 
 // SubmitResponse is the claim-family answer.
@@ -147,12 +173,13 @@ type SubmitResponse struct {
 	WorkItemID string `json:"work_item_id"`
 }
 
-// StatusResponse is the GET /status answer: local bookkeeping + mode +
+// StatusResponse is the GET /status answer: local bookkeeping + auto switch +
 // queue counters. It is NOT workflow execution state (INV-1) — just
 // "what this machine is managing".
 type StatusResponse struct {
-	MachineID string `json:"machine_id"`
-	Mode      string `json:"mode"`
+	MachineID   string `json:"machine_id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Auto        bool   `json:"auto"`
 	// Workspaces is the mapped workspace set (#113): every [workspace]
 	// path the daemon routes capsules into, in mapping declaration
 	// order — a multi-workspace daemon never presents one workspace as
@@ -175,12 +202,26 @@ type StatusJob struct {
 	AgentPID           int    `json:"agent_pid,omitempty"`
 	// NeedsInput/QuestionID are the D6 owner face: a job presented as
 	// needs_input carries its pending question's id.
-	NeedsInput bool   `json:"needs_input,omitempty"`
-	QuestionID string `json:"question_id,omitempty"`
-	// LastProgressAgoSec is the F15c owner face: whole seconds since the
-	// job's stream last proved agent progress (nil = none yet — rendered
-	// "-" in the LAST-PROGRESS column).
-	LastProgressAgoSec *int64 `json:"last_progress_ago_sec,omitempty"`
+	NeedsInput bool `json:"needs_input,omitempty"`
+	// RepairReason accompanies Status "repair_pending" (v2 §6):
+	// capsule_missing | project_unmapped.
+	RepairReason string `json:"repair_reason,omitempty"`
+	QuestionID   string `json:"question_id,omitempty"`
+	// StepAgeSec / LastWorkAgoSec are the owner liveness face: whole
+	// seconds since the current dispatch began and since its harness last
+	// did real work (nil = none — rendered "-" in the STEP-AGE and
+	// LAST-WORK columns).
+	StepAgeSec     *int64 `json:"step_age_sec,omitempty"`
+	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
+	// Origin is how the job was submitted (may be absent).
+	Origin *JobOrigin `json:"origin,omitempty"`
+}
+
+// JobOrigin mirrors the daemon-side origin record.
+type JobOrigin struct {
+	Kind   string `json:"kind"`
+	ChatID string `json:"chat_id,omitempty"`
+	Owner  string `json:"owner,omitempty"`
 }
 
 // QueueStats is the local job queue counters.
@@ -228,37 +269,21 @@ func (d *DaemonClient) Resume(wiID, priority string) (json.RawMessage, error) {
 	return d.submit(wiID, "resume", priority)
 }
 
-// Takeover submits an admin force-takeover request.
-func (d *DaemonClient) Takeover(wiID, priority string) (json.RawMessage, error) {
-	return d.submit(wiID, "takeover", priority)
-}
-
 // ResumeBlocked submits the §6.4 owner move for a workflow parked blocked
 // (polyforge#116): the daemon returns the WI to claimable at the hub (the
 // owner's resume door) and re-establishes execution over the parked capsule
 // synchronously — the claim/start path's owner move unblocks the workflow
 // and the loop re-dispatches the frozen step in place as a fresh derivation.
 func (d *DaemonClient) ResumeBlocked(wiID string) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-blocked", "", map[string]any{}, nil)
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-blocked", "", d.withOrigin(map[string]any{}), nil)
 }
 
-// AdoptSessionRequest is the POST /jobs/{id}/adopt-session body. The
-// session SECRET travels only over this local UDS route (never the hub
-// wire): it is the custody handoff that keeps a CLI-side takeover's
-// session usable after the CLI process exits (#109). Owner/Reason ride
-// for the daemon's journal trace only.
-type AdoptSessionRequest struct {
-	SessionID string `json:"session_id"`
-	Owner     string `json:"owner,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-}
-
-// AdoptSession hands one externally minted session secret to the
-// daemon's durable custody (#109). The daemon verify-backs the handoff
-// against the hub (only the live holder's secret is adopted) and
-// journals it; the answer carries the PUBLIC fingerprint only.
-func (d *DaemonClient) AdoptSession(wiID string, req AdoptSessionRequest) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/adopt-session", "", req, nil)
+// AbandonRepair asks the daemon to give up a repair_pending WI it holds:
+// it ends the kept session with verdict ("canceled" | "failed") and drops
+// the parked record. The caller has already passed the aihub human-key
+// authorization probe (CloseAuth).
+func (d *DaemonClient) AbandonRepair(wiID, verdict string) (json.RawMessage, error) {
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/abandon-repair", "", map[string]any{"verdict": verdict}, nil)
 }
 
 func (d *DaemonClient) submit(wiID, intent, priority string) (json.RawMessage, error) {
@@ -266,7 +291,7 @@ func (d *DaemonClient) submit(wiID, intent, priority string) (json.RawMessage, e
 		priority = "normal"
 	}
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/"+intent, "",
-		map[string]any{"priority": priority}, nil)
+		d.withOrigin(map[string]any{"priority": priority}), nil)
 }
 
 // Observe pulls the observe projection (protocol.JobView). after is the
@@ -282,13 +307,6 @@ func (d *DaemonClient) Observe(wiID string, after int64) (json.RawMessage, error
 func (d *DaemonClient) Answer(wiID string, payload AnswerPayload) (json.RawMessage, error) {
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/answer", "", payload,
 		map[string]string{"X-PF-User": payload.AnsweredBy})
-}
-
-// Flush is the agent-side UDS proxy call (ruling C2/C3: flush replaces
-// publish_request). The CLI itself never drives it; the method exists so
-// the client surface covers the full daemon route family.
-func (d *DaemonClient) Flush(wiID string, req protocol.FlushRequest) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/flush", "", req, nil)
 }
 
 // Pause asks the daemon to pause a running WI. The v1.5 operator pause
@@ -320,18 +338,86 @@ func (d *DaemonClient) Status() (json.RawMessage, error) {
 	return d.do("GET", "/status", "", nil, nil)
 }
 
-// Mode issues one POST /mode operation.
-func (d *DaemonClient) Mode(req ModeRequest) (json.RawMessage, error) {
-	return d.do("POST", "/mode", "", req, nil)
-}
-
-// BatchSubmit submits the human-confirmed wave; the daemon never widens
-// or narrows the set.
-func (d *DaemonClient) BatchSubmit(wiIDs []string) (json.RawMessage, error) {
-	return d.do("POST", "/batch_submit", "", map[string]any{"wi_ids": wiIDs}, nil)
+// OpsConfig issues one POST /ops/config operation.
+func (d *DaemonClient) OpsConfig(req OpsConfigRequest) (json.RawMessage, error) {
+	return d.do("POST", "/ops/config", "", req, nil)
 }
 
 // Shutdown triggers graceful shutdown (quiesce).
 func (d *DaemonClient) Shutdown() (json.RawMessage, error) {
 	return d.do("POST", "/shutdown", "", map[string]any{}, nil)
+}
+
+// ---------------------------------------------------------------------------
+// pf watch lane routes.
+// ---------------------------------------------------------------------------
+
+// WatchSnapshot reads one WI's authoritative state plus the events after
+// the cursor (first call: 0).
+func (d *DaemonClient) WatchSnapshot(wiID string, after int64) (*protocol.WatchSnapshot, error) {
+	raw, err := d.do("GET", "/jobs/"+url.PathEscape(wiID)+"/watch", "after="+strconv.FormatInt(after, 10), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var s protocol.WatchSnapshot
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("decode the watch snapshot: %w", err)
+	}
+	return &s, nil
+}
+
+func chatPath(chat, tail string) string { return "/chats/" + url.PathEscape(chat) + "/" + tail }
+
+// ChatSubscriptions lists a chat's daemon-held subscriptions.
+func (d *DaemonClient) ChatSubscriptions(chat string) (protocol.ChatSubscriptions, error) {
+	var out protocol.ChatSubscriptions
+	raw, err := d.do("GET", chatPath(chat, "subscriptions"), "", nil, nil)
+	if err != nil {
+		return out, err
+	}
+	return out, json.Unmarshal(raw, &out)
+}
+
+// ChatSubscribe subscribes (or unsubscribes) a chat to a WI.
+func (d *DaemonClient) ChatSubscribe(chat, wi string, subscribe bool) (protocol.ChatSubscribeAnswer, error) {
+	var out protocol.ChatSubscribeAnswer
+	tail := "subscribe"
+	if !subscribe {
+		tail = "unsubscribe"
+	}
+	raw, err := d.do("POST", chatPath(chat, tail), "", map[string]any{"wi": wi}, nil)
+	if err != nil {
+		return out, err
+	}
+	return out, json.Unmarshal(raw, &out)
+}
+
+// ChatAck records a watcher's cursor/notified state for one subscription.
+func (d *DaemonClient) ChatAck(chat string, a protocol.ChatAck) error {
+	_, err := d.do("POST", chatPath(chat, "ack"), "", a, nil)
+	return err
+}
+
+// ChatHeartbeat marks the chat's watcher live.
+func (d *DaemonClient) ChatHeartbeat(chat string, pid int) error {
+	_, err := d.do("POST", chatPath(chat, "heartbeat"), "", map[string]any{"pid": pid}, nil)
+	return err
+}
+
+// ChatAttention lists WIs that need a human and have no live watcher
+// (marking them shown to the chat).
+func (d *DaemonClient) ChatAttention(chat, owner string) ([]protocol.ChatAttentionItem, error) {
+	q := url.Values{"mark": {"1"}}
+	if owner != "" {
+		q.Set("owner", owner)
+	}
+	raw, err := d.do("GET", chatPath(chat, "attention"), q.Encode(), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out protocol.ChatAttention
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
 }

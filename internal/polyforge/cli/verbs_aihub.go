@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,6 +20,7 @@ import (
 
 var cmdFile = &Command{
 	Name:    "file",
+	Group:   GroupData,
 	Summary: "Create, edit or show a work item",
 	Usage: "pf file create --project P --goal G [flags] | --stdin\n" +
 		"pf file edit <id> [flags] | --stdin\n" +
@@ -380,6 +379,7 @@ func parseAttrValue(v string) (any, error) {
 
 var cmdQueue = &Command{
 	Name:    "queue",
+	Group:   GroupData,
 	Summary: "List work items / show the ready queue",
 	Usage: "pf queue [--project P] [--status S] [--limit N]\n" +
 		"pf queue --ready [--project P]\n\n" +
@@ -538,7 +538,8 @@ func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 
 var cmdCancel = &Command{
 	Name:    "cancel",
-	Summary: "Cancel a queued/paused/blocked work item (no live session)",
+	Group:   GroupData,
+	Summary: "Cancel (abandon) a queued/paused/blocked work item, or one parked repair_pending on this daemon",
 	Usage:   "pf cancel <id>",
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -547,6 +548,12 @@ var cmdCancel = &Command{
 		}
 		raw, err := ctx.aihub().CancelWorkItem(args[0])
 		if err != nil {
+			// A repair_pending WI is still `running` at aihub under THIS
+			// daemon's kept session, so the hub's cancel refuses it; the
+			// daemon holds the secret and ends the session itself.
+			if abandoned, aerr := abandonRepairPending(ctx, args[0], "canceled"); abandoned || aerr != nil {
+				return aerr
+			}
 			return err
 		}
 		ctx.finish(raw, func() {
@@ -560,42 +567,12 @@ var cmdCancel = &Command{
 }
 
 // ---------------------------------------------------------------------------
-// unblock — the blocked state's exit door (v1.5 review Finding 3, direct
-// to aihub): returns a bounded-fail verdict to the queued pool. The
-// daemon needs no runtime change — a queued WI is claimable again
-// through the ordinary drain/submit flow. Authorization mirrors
-// force-takeover (admin or project maintainer).
-// ---------------------------------------------------------------------------
-
-var cmdUnblock = &Command{
-	Name:    "unblock",
-	Summary: "Return a blocked WI to the queued pool (the bounded-fail exit door; admin or maintainer)",
-	Usage:   "pf unblock <id>",
-	Setup:   func(fs *flag.FlagSet) {},
-	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		if len(args) != 1 {
-			return fmt.Errorf("unblock: expected exactly one work item id")
-		}
-		raw, err := ctx.aihub().UnblockWorkItem(args[0])
-		if err != nil {
-			return err
-		}
-		ctx.finish(raw, func() {
-			var wi api.WorkItem
-			if err := json.Unmarshal(raw, &wi); err == nil {
-				fmt.Fprintf(ctx.Stdout, "unblocked %s (status %s; claimable again)\n", wi.Slug, wi.Status)
-			}
-		})
-		return nil
-	},
-}
-
-// ---------------------------------------------------------------------------
 // recall — memory retrieval (direct to the aihub memory face).
 // ---------------------------------------------------------------------------
 
 var cmdRecall = &Command{
 	Name:    "recall",
+	Group:   GroupData,
 	Summary: "Search project memories",
 	Usage:   "pf recall --project P <query> [--type T] [--tags a,b] [--limit N]",
 	Setup: func(fs *flag.FlagSet) {
@@ -687,6 +664,7 @@ func recallTypeFilter(memType string) (string, error) {
 
 var cmdRemember = &Command{
 	Name:    "remember",
+	Group:   GroupData,
 	Summary: "Store a project memory (the write face of `recall`)",
 	Usage: "pf remember --project P --type T [--title S] [--visibility V] [--tags a,b] " +
 		"[--work-item ID] <content | - (stdin) | @file>",
@@ -765,187 +743,3 @@ var cmdRemember = &Command{
 // ---------------------------------------------------------------------------
 // v1.5 session-model faces.
 // ---------------------------------------------------------------------------
-
-// wiSessionView reads the work item's v1.5 PUBLIC session audit fields
-// from aihub (additive decode: api.WorkItem carries them only once Lane
-// A's server lands; the raw body already can). nil when the read fails —
-// the renderers skip the session line rather than fabricate one.
-func wiSessionView(ctx *Context, wiID string) *WIView {
-	raw, err := ctx.aihub().GetWorkItemRaw(wiID)
-	if err != nil {
-		return nil
-	}
-	var v WIView
-	if json.Unmarshal(raw, &v) != nil {
-		return nil
-	}
-	return &v
-}
-
-// mintSessionSecret mints the v1.5 session secret: 32 crypto/rand
-// bytes, hex (contract §0). It is presented once, never logged, never
-// echoed by the server.
-func mintSessionSecret() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// takeoverIdempotencyKey mints a fresh takeover idempotency key so a
-// network retry of the same invocation cannot double-swap (the server
-// keys the cached answer on it, D4).
-func takeoverIdempotencyKey() string {
-	b := make([]byte, 12)
-	_, _ = rand.Read(b)
-	return "tk_" + hex.EncodeToString(b)
-}
-
-// daemonStatusOf reads the local daemon's GET /status — "the daemon on
-// this box". The takeover verb uses it as the machine-identity source
-// of truth (#109): the executor half's own view of itself, never a
-// CLI-side guess like the old cli-<hostname> spelling.
-func daemonStatusOf(ctx *Context) (*StatusResponse, error) {
-	raw, err := ctx.daemon().Status()
-	if err != nil {
-		return nil, err
-	}
-	var st StatusResponse
-	if err := json.Unmarshal(raw, &st); err != nil {
-		return nil, err
-	}
-	return &st, nil
-}
-
-// cmdTakeover is the v1.5 §1.4 force-takeover verb: atomically swap the
-// work item's session to a freshly minted secret — minted by THIS
-// invocation and handed to the LOCAL daemon for durable custody (#109),
-// because a session whose secret dies with the CLI process is an orphan
-// no process can ever attach, verify, or fence (the #97 wedge). The
-// machine identity is the local daemon's own (GET /status): the session
-// this verb produces is one this box's daemon holds. The old holder
-// learns at its next fenced use (push or the M4 revalidation). The
-// response carries the PUBLIC fingerprint only — never the secret.
-var cmdTakeover = &Command{
-	Name:    "takeover",
-	Summary: "Force-takeover a running/paused WI to a fresh session (v1.5 §1.4; fences the old holder)",
-	Usage:   "pf takeover <id> --reason <text> [--machine ID] [--owner ID] [--json]",
-	Setup: func(fs *flag.FlagSet) {
-		fs.String("reason", "", "why the takeover is justified (required; recorded in the session_superseded event)")
-		fs.String("machine", "", "machine identity override (must equal the local daemon's own id; default: the daemon's id from GET /status)")
-		fs.String("owner", "", "owner identity reported to the hub (default the configured user_id)")
-	},
-	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		if len(args) != 1 {
-			return fmt.Errorf("takeover: expected exactly one work item id")
-		}
-		reason := strings.TrimSpace(stringFlag(fs, "reason"))
-		if reason == "" {
-			return fmt.Errorf("takeover: --reason is required (recorded in the takeover audit event)")
-		}
-		// #109: the executor half must already be on this box. The local
-		// daemon is the only process that can hold the minted session
-		// secret and later run the work item, so a takeover without one
-		// would mint an unusable orphan — refuse instead of minting.
-		st, err := daemonStatusOf(ctx)
-		if err != nil {
-			return fmt.Errorf("takeover: no local daemon reachable (%v); a takeover minted without a daemon to hold the session orphans the work item (#109) — start the daemon and retry, or run the takeover on the box whose daemon should own the work item", err)
-		}
-		if m := stringFlag(fs, "machine"); m != "" && m != st.MachineID {
-			return fmt.Errorf("takeover: --machine %q does not match this box's daemon (%q); the minted session would be unusable by any daemon that holds it (#109) — run the takeover on the box that should own the work item", m, st.MachineID)
-		}
-		secret, err := mintSessionSecret()
-		if err != nil {
-			return fmt.Errorf("takeover: minting the session secret: %w", err)
-		}
-		owner := stringFlag(fs, "owner")
-		if owner == "" {
-			owner = ctx.Cfg.UserID
-		}
-		if owner == "" {
-			owner = "cli"
-		}
-		req := api.SessionClaimRequest{
-			WorkItemID:     args[0],
-			SessionID:      secret,
-			MachineID:      st.MachineID,
-			Owner:          owner,
-			Reason:         reason,
-			IdempotencyKey: takeoverIdempotencyKey(),
-		}
-		resp, err := ctx.aihub().ForceTakeover(args[0], req)
-		if err != nil {
-			return err
-		}
-		// Custody (#109): hand the minted secret to the local daemon over
-		// the UDS. The daemon verify-backs the handoff against the hub
-		// (only the live holder's secret is adopted) and journals it
-		// durably — the session stays usable after this process exits.
-		if _, aerr := ctx.daemon().AdoptSession(args[0], AdoptSessionRequest{
-			SessionID: secret,
-			Owner:     owner,
-			Reason:    reason,
-		}); aerr != nil {
-			return fmt.Errorf("takeover: the hub session swapped, but handing the secret to the local daemon failed (%v) — the session is an orphan until a daemon-side takeover fences it: pf submit %s --takeover", aerr, args[0])
-		}
-		if ctx.JSON {
-			// --json: the response envelope as-is.
-			raw, merr := json.Marshal(resp)
-			if merr != nil {
-				return merr
-			}
-			ctx.Out(raw)
-			return nil
-		}
-		fmt.Fprintf(ctx.Stdout, "took over %s\n", resp.Claim.WorkItemID)
-		fmt.Fprintf(ctx.Stdout, "  session: %s (machine %s, owner %s)\n",
-			resp.Claim.SessionFingerprint, resp.Claim.MachineID, resp.Claim.Owner)
-		fmt.Fprintf(ctx.Stdout, "  bundle:  %s\n", resp.Claim.BundleName)
-		fmt.Fprintln(ctx.Stdout, "  the previous holder is fenced at its next push or session revalidation")
-		// #109: the mint is in the local daemon's custody — no orphan.
-		fmt.Fprintf(ctx.Stdout, "  the session secret is in the local daemon's custody (%s); `pf submit %s --takeover` runs the work item on it\n", st.MachineID, resp.Claim.WorkItemID)
-		return nil
-	},
-}
-
-// cmdVerifySession is the v1.5 §1.7 public holder read: who holds
-// this WI right now — the operator's takeover-decision input (held-
-// running / held-paused / unheld are three ordinary answers; exit 0 in
-// all three). It carries the PUBLIC audit fields only — no session
-// secret ever travels through this face, and never the hash.
-var cmdVerifySession = &Command{
-	Name:    "verify-session",
-	Summary: "Show who holds a WI right now (v1.5 §1.7 public holder read; takeover-decision input)",
-	Usage:   "pf verify-session <id> [--json]",
-	Setup:   func(fs *flag.FlagSet) {},
-	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		if len(args) != 1 {
-			return fmt.Errorf("verify-session: expected exactly one work item id")
-		}
-		resp, err := ctx.aihub().SessionHolder(args[0])
-		if err != nil {
-			return err
-		}
-		if ctx.JSON {
-			// --json: the endpoint body (same wire type the server wrote,
-			// so the marshal is byte-identical to the §1.7 response).
-			raw, merr := json.Marshal(resp)
-			if merr != nil {
-				return merr
-			}
-			ctx.Out(raw)
-			return nil
-		}
-		if resp.SessionFingerprint == "" {
-			fmt.Fprintf(ctx.Stdout, "verify-session %s: nobody holds it (status %s)\n", resp.WorkItemID, resp.Status)
-			return nil
-		}
-		fmt.Fprintf(ctx.Stdout, "verify-session %s: held (status %s)\n", resp.WorkItemID, resp.Status)
-		fmt.Fprintf(ctx.Stdout, "  session: %s (machine %s, owner %s)\n",
-			resp.SessionFingerprint, resp.MachineID, resp.SessionOwner)
-		fmt.Fprintf(ctx.Stdout, "  started: %s\n", resp.SessionStartedAt)
-		fmt.Fprintf(ctx.Stdout, "  clean_pause: %t\n", resp.CleanPause)
-		return nil
-	},
-}

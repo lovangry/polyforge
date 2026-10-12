@@ -3,7 +3,8 @@
 // and aihub (serves bundle bytes, validates digests at claim time).
 //
 // Design authority: docs/design/polyforge-vnext/01-workflow-skills.md,
-// frozen digest rules from the v0 implementation (/v0/internal/workflow).
+// digest rules pinned by the golden vectors in digest_test.go (the retired v0
+// implementation lives in git history).
 package workflow
 
 import (
@@ -130,10 +131,10 @@ func (fm *Frontmatter) CandidatesFor(stepID string) []string {
 }
 
 // Digest computes the canonical bundle digest: files sorted by path
-// (codepoint order), each contributing len(path)+path+len(sha)+sha+8-byte
-// LE byte length, then the whole buffer is SHA-256'd (frozen v0 algorithm —
-// golden vectors live in /v0/internal/workflow/digest tests; keep byte-for-
-// byte compatible so migrated chains stay verifiable).
+// (codepoint order), each contributing path+sha+8-byte LE byte length, then
+// the whole buffer is SHA-256'd. Keep byte-for-byte stable so pinned digests
+// stay verifiable; golden vectors live in digest_test.go. (This is NOT the
+// RFC 8785 canonical-JSON digest of the retired v0 tree.)
 func Digest(files []FileEntry) string {
 	sorted := make([]FileEntry, len(files))
 	copy(sorted, files)

@@ -1,35 +1,55 @@
-# ops — daemon operations: status, mode, graceful shutdown
+# ops — daemon operations: status, auto-pull, max jobs, graceful shutdown; end-session recovery
 
-Execution-plane verb: routed to the local daemon (status / mode / shutdown
-routes). Machine-local operations only: what this daemon is managing, how
-it accepts work, and how it stops. Graceful shutdown is a
-process-lifecycle action and is **not** drain — the shutdown sequence
-notifies every live agent, waits bounded for their closing flushes, seals
-and exits; drain is a resident mode that keeps claiming queued work.
+Execution-plane verb: routed to the local daemon (status / ops-config /
+shutdown routes). Machine-local operations only: what this daemon is
+managing, whether it also pulls work by itself, and how it stops. The
+daemon has ONE switch and ONE number: `auto` (off = only explicit
+`pf submit`; on = the daemon additionally pulls the aihub ready queue by
+itself) and `max` (concurrent jobs). Manual `pf submit` stays legal while
+auto is on. Graceful shutdown is a process-lifecycle action and is **not**
+the auto switch — the shutdown sequence terminates every live agent tree,
+persists its bookkeeping and exits; auto keeps claiming queued work while
+the daemon lives.
 
 ## Triggers
 
-- EN: daemon status / what's this machine running / how many jobs / switch
-  to batch mode / enter drain / leave drain / raise the concurrency / shut
-  the daemon down gracefully / pre-upgrade check
-- 中文: 升级前自检 / 启停 / 守护进程状态 / 本机在跑什么 / 切换模式 / 进入排水 /
-  退出排水 / 优雅停机 / 调大并发
+- EN: daemon status / what's this machine running / how many jobs / turn
+  auto-pull on / turn auto-pull off / let the machine pick up ready work
+  itself / raise the concurrency / shut the daemon down gracefully /
+  pre-upgrade check
+- 中文: 升级前自检 / 启停 / 守护进程状态 / 本机在跑什么 / 开启自动领取 /
+  关闭自动领取 / 优雅停机 / 调大并发
+- EN (recovery): take over a stuck work item / its daemon is dead / the
+  machine holding it is gone / force-end the session
+- 中文 (恢复): 接管卡住的 WI / 持有它的机器挂了 / 强制结束会话
 
 ## Command
 
 ```
-pf ops status                                        # local jobs + mode + queue counters
-pf ops mode                                          # query the current mode (reads status)
-pf ops mode set --max-concurrent-jobs N [--mode interactive|batch|drain]
-pf ops mode drain                                    # enter autonomous drain mode
-pf ops mode abort-drain                              # leave drain mode
+pf ops status                                        # local jobs + auto/max + queue counters
+pf ops auto [on|off]                                 # bare: show; on: pull the ready queue itself; off: explicit pf submit only
+pf ops max [N]                                       # bare: show; N >= 1: max concurrent jobs
 pf ops shutdown                                      # graceful shutdown
+pf ops end-session <wi> --reason <text>              # force-end a stuck holder's session (aihub-direct)
 ```
+
+To see what is ready before turning auto on (or to submit by hand), use
+`pf queue --ready`.
+
+`end-session` is the one `ops` action that does not touch the local daemon:
+it calls aihub with the CALLER's own key (admin or project maintainer,
+checked server-side), ends the running/paused session without the holder's
+secret, and returns the work item to `queued`; the old holder is fenced (its
+secret no longer matches). Then any daemon claims it with a plain
+`pf submit <wi>` — progress is restored from the aihub capsule revision chain
+and the driver continues from the recorded current step. Failures: `AUTH-403`
+(not admin/maintainer), `CORE-409` (`NOT_HELD`: not running/paused, nothing to
+end), `CORE-410` (terminal).
 
 ## Success
 
-- `status`: `machine: <id>  mode: <mode>` (plus `(shutting down)` when set),
-  the queue counters (`pending / running / max`), one line naming the
+- `status`: `daemon: <id>  auto: on|off  max: N` (plus `(shutting down)` when set),
+  the queue counters (`pending / running`), one line naming the
   mapped workspace SET (`workspaces: <path>, <path>` — sorted; every
   `[workspace]` section the daemon routes capsules into, polyforge#113;
   per-WI capsules live at `<workspace>/capsules/<wi_id>`), and a
@@ -43,12 +63,18 @@ pf ops shutdown                                      # graceful shutdown
   wedged reads as STALE, not fresh. A LAST-PROGRESS over ~10 minutes on
   a non-`needs_input` job is a stalled job — report it to the owner
   before anything else (see SKILL.md's turn-start obligation).
-- `mode` bare: `mode: <current>`; every mode transition answers with the
-  new mode (and the effective concurrency on `set`).
+  A job with STATUS `repair_pending` is a work item the daemon parked at
+  restart because its capsule directory is missing (`capsule_missing`) or
+  its project is no longer mapped (`project_unmapped`); its session is
+  kept. The owner's moves: fix the cause and `pf resume <id>`, or give up
+  with `pf cancel <id>` / `pf wrap <id> --fail`.
+- `auto` / `max` bare: `auto: on|off` / `max: N`; a change answers with
+  the effective `{"auto":..,"max":..}`.
 - `shutdown`: `graceful shutdown requested; the daemon quiesces and exits`
-  — the sequence notifies every live agent (`pf/stop_notice`), waits
-  bounded for each agent's closing `flush(shutdown)`, terminates the agent
-  trees, persists the bookkeeping and exits within its five-minute budget.
+  — the sequence terminates the live agent trees, persists the
+  bookkeeping and exits within its five-minute budget (there is no
+  per-agent flush wait: uncommitted state is picked up by the recovery
+  engine at the next start).
   Interrupted work items stay running server-side; the next daemon start
   recovers them through the transcript-resume engine.
 
@@ -56,13 +82,12 @@ pf ops shutdown                                      # graceful shutdown
 
 | Code | When | What to tell the user |
 |---|---|---|
-| `DAEMON-409` | Mode conflict — e.g. a `set` that is not a plain mode switch while drain is active; in drain mode single submits and external `batch_submit` are rejected because the drain loop is the only job-creation entrance | Expected mode semantics, not a breakage — leave drain (`abort-drain`) to submit externally, or wait for the drain loop. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | Any external submit while a graceful shutdown is in flight | Wait for the shutdown to complete and the daemon to restart. |
-| `DAEMON-400` | Malformed mode request (unknown action, bad mode value, `max-concurrent-jobs < 1`) — the CLI's own flag validation usually catches this first with a usage error | Fix the invocation; read the detail. |
+| `DAEMON-400` | Malformed ops-config request (`max < 1`, empty body) — the CLI's own argument validation usually catches this first with a usage error | Fix the invocation; read the detail. |
 | `dial unix …` | The daemon is not running on this machine | Nothing to operate on — start it first (`pf daemon`); check `--socket` / `PF_DAEMON_SOCKET` if you expect it elsewhere. |
 
-Drain vs shutdown: drain keeps the machine autonomously claiming and
-running ready-queue work (internal loop; idle-polls when the queue is
+Auto vs shutdown: with auto on the machine also claims and runs
+ready-queue work by itself (an internal loop; idle-polls when the queue is
 empty, never exits); shutdown stops accepting anything new, closes what
 remains and exits. They are independent concepts and never substitute for
 each other.

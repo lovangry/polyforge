@@ -1,22 +1,13 @@
 package test
 
 // v1_inproc_harness_test.go: the in-process runtime+observe rig for
-// fault-injection scenarios whose detection windows must be shrunk
-// (hang watchdog, probe bound). Since #12 the `pf daemon` CLI takes the
-// window flags itself (--hang-window / --idle-window / --probe-timeout),
-// so s06 — the last scenario on this rig — now
-// runs against the real daemon process and no scenario needs the rig
-// today; it stays as the in-process injection seam, assembling the SAME
-// production components — runtime.New (lifecycle + recovery engine), observe.New
-// (per-WI monitor + detection faces), runtime.DefaultSpawner (the real
-// pi-spawner that derives the real fakepi process) and observe.Handler
-// (the real UDS flush/answer/observe routes) — with the observe config
-// injected.
-//
-// The RecordTap binding order bug the lane report pinned here is fixed
-// at the source: DefaultSpawner now takes the runtime config by pointer,
-// so the tap set after the spawner is built (the rig's own order below)
-// is the same binding the production daemon's assembly produces.
+// scenarios that need an injectable observe config (the backpressure
+// ladder, the long-run leak probes). It assembles the SAME production
+// components — runtime.New (lifecycle + recovery engine), observe.New
+// (the per-WI supervisor), runtime.DefaultSpawner (the real pi-spawner
+// that derives the real fakepi process), the driver bridge with its
+// supervision link, and observe.Handler (the real UDS answer/observe
+// routes) — with the observe config injected.
 
 import (
 	"context"
@@ -35,20 +26,19 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // inprocAdapter bridges runtime.AgentHandle to observe.Handle (the same
 // shape as the daemon's agentAdapter, which is unexported).
 type inprocAdapter struct {
 	h        runtime.AgentHandle
-	recs     chan []byte
 	exit     chan struct{}
 	pollStop chan struct{}
 	retire   sync.Once
 }
 
-func (a *inprocAdapter) Exit() <-chan struct{}  { return a.exit }
-func (a *inprocAdapter) Records() <-chan []byte { return a.recs }
+func (a *inprocAdapter) Exit() <-chan struct{} { return a.exit }
 
 func (a *inprocAdapter) retireAdapter() { a.retire.Do(func() { close(a.pollStop) }) }
 
@@ -66,27 +56,6 @@ func (a *inprocAdapter) pollDone(interval time.Duration) {
 			}
 		}
 	}
-}
-
-// SendControl composes the handle's probe write+ack pair into the
-// observe face's single bounded call (the daemon adapter's contract: a
-// written-but-unacked probe surfaces its deadline error verbatim).
-func (a *inprocAdapter) SendControl(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error) {
-	ack := protocol.ControlAck{Method: msg.Method, Seq: msg.Seq}
-	if err := a.h.SendControl(msg); err != nil {
-		return ack, err
-	}
-	bound := 30 * time.Second
-	if dl, ok := ctx.Deadline(); ok {
-		if b := time.Until(dl); b > 0 && b < bound {
-			bound = b
-		}
-	}
-	if err := a.h.WaitControlAck(ctx, msg, bound); err != nil {
-		return ack, err
-	}
-	ack.OK = true
-	return ack, nil
 }
 
 // inprocRig is the assembled runtime+observe pair with injectable
@@ -109,6 +78,7 @@ type inprocRig struct {
 
 	adaptMu  sync.Mutex
 	adapters map[string]*inprocAdapter
+	sup      *supervise.Registry
 }
 
 // inprocObsTune is one injected tweak of the rig's observe.Config
@@ -129,12 +99,10 @@ func optBackpressure(after time.Duration, steps int) inprocObsTune {
 	}
 }
 
-// newInprocRig assembles and runs the rig. hangWindow/probeTimeout are
-// the injected detection bounds; zero keeps the production defaults.
-// obsTune carries additional observe.Config tweaks (e.g. the
-// backpressure windows), so a scenario extends the assembly instead of
-// forking the helper.
-func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.Duration, obsTune ...inprocObsTune) *inprocRig {
+// newInprocRig assembles and runs the rig. obsTune carries observe.Config
+// tweaks (e.g. the backpressure windows), so a scenario extends the
+// assembly instead of forking the helper.
+func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inprocRig {
 	t.Helper()
 	sockBase := shortTmp("/tmp", "pfv1inproc")
 	sock := filepath.Join(sockBase, "o.sock")
@@ -145,6 +113,7 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 		t: t, inst: inst, sock: sock, dataDir: dataDir, workspace: workspace,
 		adapters: map[string]*inprocAdapter{},
 		done:     make(chan struct{}),
+		sup:      supervise.NewRegistry(),
 	}
 
 	// The spawner inherits THIS process's environment: the plan dir must
@@ -171,15 +140,10 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 		Mapping:       plan,
 		DataDir:       dataDir,
 		GitRemoteBase: inst.url + "/git",
-		WorkflowsDir:  filepath.Join(inst.root, "workflows"),
+		WorkflowsDir:  inst.workflowsPath(),
 		Harness:       "pi",
 		PiBin:         inst.fakepiPath,
-		SocketPath:    sock,
 	}
-	// The tap rides the spawner's SHARED config (DefaultSpawner takes it
-	// by pointer), so the binding order is no longer load-bearing — kept
-	// here in the historical order for readability.
-	rtCfg.RecordTap = rig.tapRecord
 	sp := runtime.DefaultSpawner(&rtCfg)
 	// polyforge#106: the driver IS the engine — the rig binds the real
 	// bridge starter (the production mapping), so the in-process
@@ -193,6 +157,8 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 			SessionHandle: in.SessionHandle,
 			SpawnN:        in.SpawnN,
 			Spawner:       in.Spawner,
+			Log:           rig.obs.Events(),
+			Link:          rig.sup.Link(in.WI),
 		})
 	}
 
@@ -206,8 +172,7 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 		OB:           obMsgs,
 		DataDir:      dataDir,
 		PollInterval: 50 * time.Millisecond,
-		HangWindow:   hangWindow,
-		ProbeTimeout: probeTimeout,
+		Registry:     rig.sup,
 	}
 	for _, tune := range obsTune {
 		tune(&obCfg)
@@ -223,9 +188,9 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 	go func() { rig.obs.Run(rig.ctx); close(rig.done) }()
 	go rig.bridge(rtMsgs, attachCh)
 
-	// The observe lane's own UDS face: the real routes (flush/answer/
-	// observe) on a real listener, so the agent's flush(reason) proxy
-	// calls are production-shaped.
+	// The observe lane's own UDS face: the real routes (answer/
+	// observe) on a real listener, so the answer/observe calls are
+	// production-shaped.
 	lst, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("inproc UDS listen: %v", err)
@@ -257,26 +222,10 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 	return rig
 }
 
-// tapRecord feeds one raw stdout record line to the work item's current
-// adapter (bounded drop, the daemon's contract).
-func (r *inprocRig) tapRecord(wi string, line []byte) {
-	r.adaptMu.Lock()
-	a := r.adapters[wi]
-	r.adaptMu.Unlock()
-	if a == nil {
-		return
-	}
-	select {
-	case a.recs <- line:
-	default:
-	}
-}
-
-// installAdapter registers the CURRENT handle as the tap target.
+// installAdapter registers the CURRENT handle and returns its observe face.
 func (r *inprocRig) installAdapter(ji runtime.JobInfo) *inprocAdapter {
 	a := &inprocAdapter{
 		h:        ji.Agent,
-		recs:     make(chan []byte, 1024),
 		exit:     make(chan struct{}),
 		pollStop: make(chan struct{}),
 	}
@@ -332,11 +281,6 @@ func (r *inprocRig) start(wi string) {
 	if err := r.rt.Start(r.ctx, wi); err != nil {
 		r.t.Fatalf("runtime start %s: %v", wi, err)
 	}
-}
-
-// capsuleDir is the rig's capsule root for wi.
-func (r *inprocRig) capsuleDir(wi string) string {
-	return filepath.Join(r.workspace, "capsules", wi)
 }
 
 // eventsOf reads the rig's durable events file for one work item.

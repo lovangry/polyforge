@@ -1,12 +1,14 @@
 package daemon
 
-// modes.go: mode storage/admission (04 §2.2/§6.7; criteria authority
-// 00 §3.4), the pending-job queue (04 §6.1d) and the daemon's own small
-// state file. The mode field changes ONLY how future requests are
-// admitted; it never touches running jobs and is fully independent from
-// the shutting_down latch (INV-13: drain-idle is not shutdown, shutdown
-// is not drain). Jobs/attempts bookkeeping is NOT here — it lives in
-// Runtime's state.json and is never duplicated (04 §4.1 INV-D1).
+// modes.go: the auto switch + admission (v2-converge §5), the pending-job
+// queue (04 §6.1d) and the daemon's own small state file. The daemon has
+// ONE switch (auto on|off) and ONE number (max concurrent jobs): auto
+// off = only explicit pf submit; auto on = the daemon also pulls the
+// aihub ready queue by itself (the former drain loop). Manual submits
+// stay legal either way. The switch changes ONLY how future work is
+// sourced; it never touches running jobs and is fully independent from
+// the shutting_down latch. Jobs/attempts bookkeeping is NOT here — it
+// lives in Runtime's state.json and is never duplicated (04 §4.1 INV-D1).
 
 import (
 	"encoding/json"
@@ -18,32 +20,39 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 // Admission error shapes (04 §5.2); the HTTP layer maps them to codes.
-var (
-	errModeConflict = errors.New("request refused by the current mode (DAEMON-409)")
-	errShuttingDown = errors.New("daemon is shutting down (DAEMON-410)")
-	errBadMode      = errors.New("unknown mode (DAEMON-400)")
-)
+var errShuttingDown = errors.New("daemon is shutting down (DAEMON-410)")
 
-// ModeCtl stores and admits against the current mode. The shutting_down
-// latch gates BOTH external submissions and the drain loop's next wave
-// fetch (04 §6.5 step 2) — two different block paths for the same "no
-// new jobs from any source" outcome.
+// ModeCtl stores the auto switch and admits against the shutting_down
+// latch. The latch gates BOTH external submissions and the auto-pull's
+// next fetch (04 §6.5 step 2) — two different block paths for the same
+// "no new jobs from any source" outcome.
 type ModeCtl struct {
 	mu           sync.Mutex
-	mode         string
+	auto         bool
 	shuttingDown bool
 }
 
-// NewModeCtl starts in Interactive.
-func NewModeCtl() *ModeCtl { return &ModeCtl{mode: protocol.ModeInteractive} }
+// NewModeCtl starts with auto off.
+func NewModeCtl() *ModeCtl { return &ModeCtl{} }
 
-func (m *ModeCtl) Current() string {
+// Auto reports the auto-pull switch.
+func (m *ModeCtl) Auto() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.mode
+	return m.auto
+}
+
+// HeartbeatMode is the mode string the machines heartbeat still carries
+// for aihub compatibility: "auto" | "manual".
+func (m *ModeCtl) HeartbeatMode() string {
+	if m.Auto() {
+		return protocol.HeartbeatModeAuto
+	}
+	return protocol.HeartbeatModeManual
 }
 
 func (m *ModeCtl) ShuttingDown() bool {
@@ -60,89 +69,40 @@ func (m *ModeCtl) SetShuttingDown() {
 	m.shuttingDown = true
 }
 
-// Set applies a mode transition with 00 §3.4's criteria:
-//   - interactive → batch | drain: allowed;
-//   - batch → interactive | drain: allowed;
-//   - drain → anything except abort-drain's interactive: refused —
-//     Drain's only exit is its explicit abort.
-func (m *ModeCtl) Set(next string) error {
-	switch next {
-	case protocol.ModeInteractive, protocol.ModeBatch, protocol.ModeDrain:
-	default:
-		return errBadMode
-	}
+// SetAuto flips the switch; refused once shutting_down is latched.
+func (m *ModeCtl) SetAuto(on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.shuttingDown {
 		return errShuttingDown
 	}
-	if m.mode == protocol.ModeDrain && next != protocol.ModeInteractive {
-		return errModeConflict
-	}
-	m.mode = next
+	m.auto = on
 	return nil
 }
 
-// AbortDrain ends Drain mode without touching anything else (04 §6.1c);
-// running jobs are unaffected.
-func (m *ModeCtl) AbortDrain() error {
+// AdmitSubmit decides a single claim/resume: always legal (also
+// while auto is on) except once shutting_down is latched (DAEMON-410).
+func (m *ModeCtl) AdmitSubmit() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.shuttingDown {
 		return errShuttingDown
 	}
-	if m.mode != protocol.ModeDrain {
-		return errModeConflict
-	}
-	m.mode = protocol.ModeInteractive
 	return nil
 }
 
-// AdmitSingle decides a single claim/resume/takeover: legal in
-// Interactive and Batch; refused in Drain (its internal loop is the only
-// creation entry there). Every submission source is refused once
-// shutting_down is latched (DAEMON-410).
-func (m *ModeCtl) AdmitSingle() error {
+// AdmitAutoPull decides whether the auto loop may fetch the ready queue:
+// only with auto on, never once shutting_down is latched.
+func (m *ModeCtl) AdmitAutoPull() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.shuttingDown {
-		return errShuttingDown
-	}
-	if m.mode == protocol.ModeDrain {
-		return errModeConflict
-	}
-	return nil
-}
-
-// AdmitBatch decides a batch_submit wave: admitted in Batch (its home)
-// and Interactive (a wave is just an explicit set of submissions);
-// refused in Drain.
-func (m *ModeCtl) AdmitBatch() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.shuttingDown {
-		return errShuttingDown
-	}
-	if m.mode == protocol.ModeDrain {
-		return errModeConflict
-	}
-	return nil
-}
-
-// AdmitDrainWave decides whether the drain loop may fetch its next wave:
-// only in drain mode, never once shutting_down is latched (04 §6.1c:
-// the loop checks the latch before every fetch — the same latch that
-// refuses external callers, reached by a different path).
-func (m *ModeCtl) AdmitDrainWave() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.mode == protocol.ModeDrain && !m.shuttingDown
+	return m.auto && !m.shuttingDown
 }
 
 // ---------------------------------------------------------------------------
 // Pending-job queue (04 §6.1d): priority DESC (urgent > high > normal >
 // low), FIFO within a priority, no preemption, ordered backfill. One
-// queue and one cap shared across Interactive, Batch and Drain.
+// queue and one cap shared by manual submits and auto pulls.
 
 var priorityRank = map[string]int{
 	"urgent": 0, "high": 1, "normal": 2, "low": 3,
@@ -155,22 +115,41 @@ func rankOf(priority string) int {
 	return priorityRank["normal"]
 }
 
+// qEntry is one pending submit. The JSON tags are the persisted shape
+// (submit-queue.json, v2-converge §5): the answered `accepted` must
+// survive a daemon restart.
 type qEntry struct {
-	WorkItemID string
-	Priority   string
-	EnqueuedAt time.Time
-	Intent     string // claim | resume | takeover
+	WorkItemID string    `json:"work_item_id"`
+	Priority   string    `json:"priority,omitempty"`
+	EnqueuedAt time.Time `json:"enqueued_at"`
+	Intent     string    `json:"intent"` // claim | resume
+	// SubmittedAt is the wall time the submit was accepted (replay
+	// evidence; EnqueuedAt is the FIFO key and equals it for live submits).
+	SubmittedAt time.Time `json:"submitted_at"`
+	// Origin is the typed submit origin (identity model; chat_id lives in
+	// Origin.ChatID). Persisted so a replayed claim hands it to the job
+	// record exactly like a live submit.
+	Origin runtime.Origin `json:"origin"`
 }
 
 type jobQueue struct {
 	mu      sync.Mutex
 	pending []qEntry
-	running map[string]bool
-	maxConc int
+	// inflight holds entries Take()n but not yet Settled: the dispatcher
+	// popped them and the claim has not finished. They stay in the
+	// persisted file so a crash between the pop and the claim journal
+	// cannot lose an accepted submit; replay's aihub check + claiming
+	// dedupe make a re-attempt harmless.
+	inflight map[string]qEntry
+	running  map[string]bool
+	maxConc  int
+	// persist, when non-nil, atomically rewrites the queue file from the
+	// given snapshot (pending + inflight). Called under mu.
+	persist func([]qEntry) error
 }
 
 func NewJobQueue(maxConc int) *jobQueue {
-	return &jobQueue{running: map[string]bool{}, maxConc: maxConc}
+	return &jobQueue{running: map[string]bool{}, inflight: map[string]qEntry{}, maxConc: maxConc}
 }
 
 func (q *jobQueue) SetMaxConcurrent(n int) error {
@@ -189,13 +168,63 @@ func (q *jobQueue) MaxConcurrent() int {
 	return q.maxConc
 }
 
-func (q *jobQueue) Enqueue(e qEntry) {
+// snapshotLocked is the persisted view: inflight first (older), then
+// pending. Caller holds mu.
+func (q *jobQueue) snapshotLocked() []qEntry {
+	out := make([]qEntry, 0, len(q.inflight)+len(q.pending))
+	for _, e := range q.inflight {
+		out = append(out, e)
+	}
+	out = append(out, q.pending...)
+	return out
+}
+
+func (q *jobQueue) persistLocked() error {
+	if q.persist == nil {
+		return nil
+	}
+	return q.persist(q.snapshotLocked())
+}
+
+// Enqueue appends one entry and persists the queue BEFORE returning: the
+// caller answers `accepted` only on a nil error, so an accepted submit is
+// always on disk. A persist failure rolls the entry back.
+func (q *jobQueue) Enqueue(e qEntry) error {
+	now := time.Now()
 	if e.EnqueuedAt.IsZero() {
-		e.EnqueuedAt = time.Now()
+		e.EnqueuedAt = now
+	}
+	if e.SubmittedAt.IsZero() {
+		e.SubmittedAt = e.EnqueuedAt
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.pending = append(q.pending, e)
+	if err := q.persistLocked(); err != nil {
+		q.pending = q.pending[:len(q.pending)-1]
+		return err
+	}
+	return nil
+}
+
+// Settle ends the inflight state of a Take()n entry (the claim attempt
+// finished — success or failure) and persists the dequeue.
+func (q *jobQueue) Settle(wi string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, ok := q.inflight[wi]; !ok {
+		return nil
+	}
+	delete(q.inflight, wi)
+	return q.persistLocked()
+}
+
+// Flush persists the current state (used after a replay pass that only
+// dropped entries).
+func (q *jobQueue) Flush() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.persistLocked()
 }
 
 func (q *jobQueue) IsPending(wi string) bool {
@@ -247,6 +276,8 @@ func (q *jobQueue) Take() *qEntry {
 	}
 	e := q.pending[best]
 	q.pending = append(q.pending[:best], q.pending[best+1:]...)
+	q.inflight[e.WorkItemID] = e // persisted until Settle; a persist error here is non-fatal (the entry is merely re-listed on disk)
+	_ = q.persistLocked()
 	return &e
 }
 
@@ -257,7 +288,7 @@ func (q *jobQueue) MarkRunning(wi string) {
 }
 
 // Reconcile frees the slots of jobs the runtime no longer holds (a
-// wrap/pause/flush-path close ends a job without telling the queue).
+// wrap/pause close ends a job without telling the queue).
 func (q *jobQueue) Reconcile(live map[string]bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -269,7 +300,7 @@ func (q *jobQueue) Reconcile(live map[string]bool) {
 }
 
 // ---------------------------------------------------------------------------
-// The daemon's own state file: mode + concurrency only (the 04 §4.1
+// The daemon's own state file: auto switch + concurrency only (the 04 §4.1
 // shape minus jobs[], which is Runtime's state.json). Same atomic-write
 // discipline as every daemon-side state file.
 
@@ -278,7 +309,7 @@ const daemonStateFile = "daemon-state.json"
 type daemonState struct {
 	Version           int    `json:"version"`
 	MachineID         string `json:"machine_id"`
-	Mode              string `json:"mode"`
+	Auto              bool   `json:"auto"`
 	MaxConcurrentJobs int    `json:"max_concurrent_jobs"`
 }
 
@@ -288,7 +319,7 @@ func (d *Daemon) statePath() string {
 
 func (d *Daemon) loadDaemonState() error {
 	d.modes.mu.Lock()
-	d.modes.mode = protocol.ModeInteractive
+	d.modes.auto = false
 	d.modes.mu.Unlock()
 	raw, err := os.ReadFile(d.statePath())
 	if err != nil {
@@ -301,11 +332,9 @@ func (d *Daemon) loadDaemonState() error {
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return fmt.Errorf("daemon: %s unparsable: %w", daemonStateFile, err)
 	}
-	if st.Mode != "" {
-		d.modes.mu.Lock()
-		d.modes.mode = st.Mode
-		d.modes.mu.Unlock()
-	}
+	d.modes.mu.Lock()
+	d.modes.auto = st.Auto
+	d.modes.mu.Unlock()
 	if st.MaxConcurrentJobs > 0 {
 		if err := d.q.SetMaxConcurrent(st.MaxConcurrentJobs); err != nil {
 			return err
@@ -318,7 +347,7 @@ func (d *Daemon) persistDaemonState() error {
 	st := daemonState{
 		Version:           1,
 		MachineID:         d.cfg.MachineID,
-		Mode:              d.modes.Current(),
+		Auto:              d.modes.Auto(),
 		MaxConcurrentJobs: d.q.MaxConcurrent(),
 	}
 	blob, err := json.MarshalIndent(&st, "", "  ")
@@ -336,11 +365,74 @@ func (d *Daemon) persistDaemonState() error {
 	return os.Rename(tmp, path)
 }
 
-// persistModeQuietly lands the mode/concurrency bookkeeping after a
-// mode operation; a persist failure is loud but never fails the
-// transition that already happened in memory.
+// persistModeQuietly lands the auto/max bookkeeping after an ops change;
+// a persist failure is loud but never fails the change that already
+// happened in memory.
 func (d *Daemon) persistModeQuietly() {
 	if err := d.persistDaemonState(); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: state persist failed: %v\n", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Persisted submit queue (v2-converge §5): <DataDir>/submit-queue.json,
+// atomic tmp+fsync+rename on every enqueue / dequeue.
+
+const submitQueueFile = "submit-queue.json"
+
+type submitQueueState struct {
+	Version int      `json:"version"`
+	Entries []qEntry `json:"entries"`
+}
+
+func (d *Daemon) queuePath() string {
+	return filepath.Join(d.cfg.DataDir, submitQueueFile)
+}
+
+func (d *Daemon) persistQueue(entries []qEntry) error {
+	blob, err := json.MarshalIndent(&submitQueueState{Version: 1, Entries: entries}, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := d.queuePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(blob); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// loadPersistedQueue reads the previous run's queue file (missing = none).
+// An unparsable file is set aside as submit-queue.json.corrupt and
+// reported — never silently dropped, never fatal to the start.
+func (d *Daemon) loadPersistedQueue() []qEntry {
+	raw, err := os.ReadFile(d.queuePath())
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "daemon: %s unreadable: %v\n", submitQueueFile, err)
+		}
+		return nil
+	}
+	var st submitQueueState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		_ = os.Rename(d.queuePath(), d.queuePath()+".corrupt")
+		fmt.Fprintf(os.Stderr, "daemon: %s unparsable (set aside as .corrupt): %v\n", submitQueueFile, err)
+		return nil
+	}
+	return st.Entries
 }

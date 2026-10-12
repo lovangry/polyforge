@@ -119,7 +119,7 @@ func v3StartDaemon(t *testing.T, inst *v1Install, sock, dataDir, workspace, mach
 		"--api-key", inst.adminKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
-		"--workflows-dir", filepath.Join(root, "workflows"),
+		"--workflows-dir", inst.workflowsPath(),
 		"--pi-bin", inst.fakepiPath,
 		// polyforge#113: the mapping config is the only workspace source
 		// (and the config isolation file — never an operator's).
@@ -277,31 +277,6 @@ func v3PendingQID(exec map[string]any, step string) string {
 	return id
 }
 
-// v3AnswerControlLandings counts the fake agent's pf/answer control
-// landings in the capsule journal (the legacy relay observable: any
-// landing means a relay path executed).
-func v3AnswerControlLandings(t *testing.T, capDir string) int {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(capDir, "logs", "fakepi.jsonl"))
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if json.Unmarshal([]byte(line), &rec) == nil {
-			if rec["type"] == "control" && rec["method"] == "pf/answer" {
-				n++
-			}
-		}
-	}
-	return n
-}
-
 // ---------------------------------------------------------------------------
 // Scenario S3 — the driver-only lifecycle on a production-shaped argv.
 // ---------------------------------------------------------------------------
@@ -417,9 +392,8 @@ func nonEmptyLines(s string) []string {
 // TestV3AnswerWithoutLiveBridgeFailsFast pins the answer criterion's
 // posture: `pf answer` against a daemon that holds NO live bridge handle
 // for the WI fails fast — non-zero exit, a surfaced error, no success
-// marker — and no relay path executes anywhere (zero pf/answer control
-// landings; the pending question is untouched on the daemon that holds
-// the job). The construction is deterministic instead of racing the
+// marker — and the pending question is untouched on the daemon that holds
+// the job. The construction is deterministic instead of racing the
 // recovery window: daemon-1 owns the parked WI (live bridge), and the
 // answer is pointed at a second, idle daemon that has no job for it.
 func TestV3AnswerWithoutLiveBridgeFailsFast(t *testing.T) {
@@ -465,11 +439,7 @@ func TestV3AnswerWithoutLiveBridgeFailsFast(t *testing.T) {
 	if strings.Contains(aout, "delivered") {
 		t.Fatalf("pf answer reported delivery with no live bridge handle: %q", aout)
 	}
-	// No relay path executed: the capsule journal shows zero pf/answer
-	// control landings, and the parked question is untouched.
-	if n := v3AnswerControlLandings(t, capDir); n != 0 {
-		t.Fatalf("pf answer reached an agent-side relay %d times — no relay path may execute: %d landings", n, n)
-	}
+	// The parked question is untouched.
 	if got := v3PendingQID(v3ReadExec(t, capDir), "grill"); got != qid {
 		t.Fatalf("the pending question changed under the failed answer: got %q, want %q", got, qid)
 	}
@@ -534,115 +504,6 @@ func TestV3RemovedEngineFlagsFailLoudly(t *testing.T) {
 			}
 		})
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Scenario S2 — the retired legacy-lane env hatch fails loudly at boot.
-// ---------------------------------------------------------------------------
-
-// TestV3RetiredLegacyLaneEnvFailsLoudAtBoot boots a fully-valid daemon
-// with the retired environment variable set and requires the process to
-// exit at boot with an error naming the variable. Pre-change the daemon
-// boots and serves (the variable is simply not its knob), so this bar is
-// red — the daemon is killed after a bounded wait and the failure names
-// the silent acceptance. Post-change the boot check fires and exits.
-func TestV3RetiredLegacyLaneEnvFailsLoudAtBoot(t *testing.T) {
-	inst := newV1Install(t)
-	hatch := v3Tok("PFV1", "_", "LEGACY", "_LAN")
-	sock := filepath.Join(t.TempDir(), "s", "d.sock")
-	dataDir := t.TempDir()
-	workspace := t.TempDir()
-
-	root := v1Root(t)
-	logPath := filepath.Join(t.TempDir(), "v3boot.log")
-	logf, err := os.Create(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer logf.Close()
-	args := []string{
-		"daemon",
-		"--socket", sock,
-		"--server", inst.url,
-		"--api-key", inst.adminKey,
-		"--machine-id", "m-v3env",
-		"--data-dir", dataDir,
-		"--workflows-dir", filepath.Join(root, "workflows"),
-		"--pi-bin", inst.fakepiPath,
-		"--config", mappingConfigPath(t, workspace, []string{v1Project}),
-	}
-	cmd := exec.Command(inst.pfPath, args...)
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "FAKEPI_PLANS="+inst.planDir)
-	cmd.Env = append(cmd.Env, hatch+"=1")
-	cmd.Stdout, cmd.Stderr = logf, logf
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waitExit := make(chan error, 1)
-	go func() { waitExit <- cmd.Wait() }()
-	// exited tracks whether waitExit has been consumed (self-exit or
-	// cleanup) so the deferred cleanup never blocks on an empty channel.
-	exited := false
-	cleanup := func() {
-		if exited || cmd.Process == nil {
-			return
-		}
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case <-waitExit:
-			exited = true
-		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Kill()
-			<-waitExit
-			exited = true
-		}
-	}
-	defer cleanup()
-
-	// Either the process exits at boot (the expected post-change shape)
-	// or its UDS face comes up (the pre-change shape: silently accepted).
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		conn, derr := net.Dial("unix", sock)
-		if derr == nil {
-			conn.Close()
-			break
-		}
-		select {
-		case werr := <-waitExit:
-			exited = true
-			// Exited before serving: require a loud, named error.
-			if lograw := v3ReadLog(logPath); !strings.Contains(lograw, hatch) {
-				t.Fatalf("daemon exited under %s=1 without naming the variable (exit %v) — output %q", hatch, werr, lograw)
-			}
-			return
-		default:
-		}
-		if time.Now().After(deadline) {
-			cleanup()
-			t.Fatalf("daemon neither booted nor exited under %s=1 (log: %s)", hatch, v3ReadLog(logPath))
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	// It booted and serves: the retired variable was silently accepted.
-	// Give a short grace for a late boot-time exit, then fail the bar.
-	select {
-	case <-waitExit:
-		exited = true
-		t.Fatalf("daemon exited late under %s=1 (log: %s)", hatch, v3ReadLog(logPath))
-	case <-time.After(5 * time.Second):
-		cleanup()
-		t.Fatalf("daemon silently accepted the retired %s variable: it booted and served with it set", hatch)
-	}
-}
-
-func v3ReadLog(logPath string) string {
-	raw, err := os.ReadFile(logPath)
-	if err != nil {
-		return "(unreadable)"
-	}
-	return string(raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -854,19 +715,19 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario S8 — historical registers and the v0 archive stay untouched.
+// Scenario S8 — historical registers stay untouched; the v0 archive is gone.
 // ---------------------------------------------------------------------------
 
 // TestV3HistoricalRegistersAndV0Untouched pins the byte-identity
 // invariants against the pre-change tree authority (HEAD bb7ab95, per
-// the spec): docs/pilot/* and v0/ carry no diff and no new untracked
-// files, and the root module's package list never reaches into v0/.
-// Green before AND after the change — these are invariants, not bars.
+// the spec): docs/pilot/* carries no diff and no new untracked files; and
+// the frozen v0/ reference tree has been dropped from the working tree
+// (it lives in git history only).
 func TestV3HistoricalRegistersAndV0Untouched(t *testing.T) {
 	root := v1Root(t)
 	const base = "bb7ab95"
 
-	for _, dir := range []string{"docs/pilot", "v0"} {
+	for _, dir := range []string{"docs/pilot"} {
 		// No modifications or deletions against the pre-change tree.
 		if out, code := v3Git(t, root, "diff", "--stat", base, "--", dir); code != 0 {
 			t.Fatalf("git diff %s %s: exit %d, output %q", base, dir, code, out)
@@ -881,21 +742,15 @@ func TestV3HistoricalRegistersAndV0Untouched(t *testing.T) {
 		}
 	}
 
-	// The frozen archive is not part of the root build: the module's own
-	// package list never descends into the v0/ archive's module path (the
-	// tools/v0-export helper is a kept root-module package and stays).
-	gi := exec.Command("go", "list", "./...")
-	gi.Dir = root
-	gi.Env = append(os.Environ(), "GOWORK=off")
-	gout, err := gi.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go list ./...: %v (%s)", err, gout)
+	// The v0/ reference tree was dropped from the working tree (it lives
+	// in git history only): no directory and no tracked file remains.
+	if _, err := os.Stat(filepath.Join(root, "v0")); !os.IsNotExist(err) {
+		t.Fatalf("v0/ must be absent from the working tree (stat err: %v)", err)
 	}
-	const frozenModule = "github.com/silgrid/polyforge/v0"
-	for _, line := range nonEmptyLines(string(gout)) {
-		if line == frozenModule || strings.HasPrefix(line, frozenModule+"/") {
-			t.Fatalf("root module package list reaches into the frozen archive: %s", line)
-		}
+	if out, code := v3Git(t, root, "ls-files", "--", "v0"); code != 0 {
+		t.Fatalf("git ls-files v0: exit %d, output %q", code, out)
+	} else if strings.TrimSpace(out) != "" {
+		t.Fatalf("v0/ must have no tracked files:\n%s", out)
 	}
 }
 

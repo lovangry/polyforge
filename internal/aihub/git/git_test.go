@@ -4,7 +4,7 @@ package git
 // git-http-backend proxy + clone/push. Each pre-receive violation gets a
 // dedicated test: non-FF, ref deletion, gitlink, seq regression, blob
 // over-limit; plus legal push/clone and session fencing (the superseded
-// session's secret rejected after force takeover).
+// session's secret rejected after force-end).
 
 import (
 	"bytes"
@@ -444,7 +444,7 @@ func TestBlobOverLimitRejected(t *testing.T) {
 	}
 }
 
-func TestOldSecretRejectedAfterTakeover(t *testing.T) {
+func TestOldSecretRejectedAfterForceEnd(t *testing.T) {
 	e := newGitEnv(t)
 	wiID, secret1 := e.claimWI(t)
 	cred1 := e.credURL(wiID, secret1)
@@ -453,13 +453,16 @@ func TestOldSecretRejectedAfterTakeover(t *testing.T) {
 	if err := push(t, wt, cred1); err != nil {
 		t.Fatalf("push with the live session secret failed: %v", err)
 	}
-	// Force takeover: the session swaps atomically to a NEW secret; the
-	// old one must be dead at the git face (fencing-on-use, §1.6).
+	// Force-end, then a fresh claim installs a NEW secret; the old one
+	// must be dead at the git face (fencing-on-use, §1.6).
 	secret2 := "git-session-secret-2-" + wiID
-	if _, err := e.sessions.Takeover(wiID, api.SessionClaimRequest{
-		SessionID: secret2, MachineID: "machine-2", Reason: "machine lost",
+	if err := e.sessions.ForceEnd(wiID, "machine lost", e.userID); err != nil {
+		t.Fatalf("force-end: %v", err)
+	}
+	if _, err := e.sessions.Claim(wiID, api.SessionClaimRequest{
+		SessionID: secret2, MachineID: "machine-2", IdempotencyKey: "idem2-" + wiID,
 	}, e.userID); err != nil {
-		t.Fatalf("force takeover: %v", err)
+		t.Fatalf("re-claim after force-end: %v", err)
 	}
 	commitSeq(t, wt, "b.txt", "two\n", 2)
 	out, perr := runGit(t, wt, "push", cred1, "HEAD:refs/heads/main")
@@ -570,7 +573,7 @@ func firstFieldOf(s string) string {
 // the live session secret succeeds through the proxy; a wrong secret is
 // refused at auth (401, rejection names the current holder fingerprint);
 // a PAUSED work item refuses pushes entirely (M3: no pushes while
-// paused, GIT-403); and after a force takeover the OLD secret is dead
+// paused, GIT-403); and after a force-end the OLD secret is dead
 // while the new one works.
 func TestSessionPushAuthFencing(t *testing.T) {
 	e := newGitEnv(t)
@@ -608,13 +611,16 @@ func TestSessionPushAuthFencing(t *testing.T) {
 		t.Fatalf("paused push must be a 403, got: %s", out)
 	}
 
-	// Force takeover swaps the session; the old secret is dead, the new
-	// one pushes and continues the seq chain.
+	// Force-end then a fresh claim swaps the session; the old secret is
+	// dead, the new one pushes and continues the seq chain.
 	newSecret := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	if _, err := e.sessions.Takeover(wiID, api.SessionClaimRequest{
-		SessionID: newSecret, MachineID: "m2", Owner: "op", Reason: "machine lost",
+	if err := e.sessions.ForceEnd(wiID, "machine lost", e.userID); err != nil {
+		t.Fatalf("force-end: %v", err)
+	}
+	if _, err := e.sessions.Claim(wiID, api.SessionClaimRequest{
+		SessionID: newSecret, MachineID: "m2", Owner: "op", IdempotencyKey: "idem2-" + wiID,
 	}, e.userID); err != nil {
-		t.Fatalf("force takeover: %v", err)
+		t.Fatalf("re-claim after force-end: %v", err)
 	}
 	out, err = runGit(t, wt, "push", cred, "HEAD:refs/heads/main")
 	if err == nil {

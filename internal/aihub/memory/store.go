@@ -79,7 +79,7 @@ type Store struct {
 
 	// ReconcileProgress, when set, receives periodic progress during
 	// O(library) reconcile passes (polyforge#129: a long pass — first
-	// boot after the upgrade, index repair, migrate-memories — must be
+	// boot after the upgrade, index repair — must be
 	// distinguishable from a hang). Set it before the first RebuildIndex
 	// call; it is invoked only from the goroutine running the pass.
 	ReconcileProgress func(ProgressReport)

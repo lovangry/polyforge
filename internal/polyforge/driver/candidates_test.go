@@ -160,9 +160,11 @@ func TestClassifyFault(t *testing.T) {
 		{"canceled under noise", fmt.Errorf("rate limit noise around: %w", context.Canceled), FaultOperator},
 		{"deadline exceeded", fmt.Errorf("model call: %w", context.DeadlineExceeded), FaultProvider},
 
-		// unmatched defaults to provider (bounded advance, never a
-		// spurious blocked report).
-		{"unknown", errors.New("something completely different"), FaultProvider},
+		// unmatched is UNKNOWN: it never advances the candidate pointer
+		// (the old provider default made every daemon restart switch
+		// models — v2-converge 2.3).
+		{"unknown", errors.New("something completely different"), ""},
+		{"daemon restart cause text", errors.New("agent process exited"), ""},
 	}
 	for _, tc := range cases {
 		if got := ClassifyFault(tc.err); got != tc.want {

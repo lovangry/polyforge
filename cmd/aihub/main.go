@@ -91,7 +91,7 @@ func main() {
 	// polyforge#129, serve-first: the reconcile's steady state is a
 	// freshness-stamp check (stat + row compare per entry, no reads, no
 	// index writes), but a first boot after an upgrade, an index repair
-	// or a migrate-memories pass is still O(library) — it runs in the
+	// is still O(library) — it runs in the
 	// background so the listener binds immediately, with progress logs
 	// for any long pass and a batch yield that lets API writers
 	// interleave. The completion line (always logged, previously gated

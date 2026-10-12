@@ -1,9 +1,8 @@
 package daemon
 
 // shutdown_test.go + restart wiring: the graceful shutdown sequence
-// (stop_notice to every live agent, the bounded flush(shutdown) wait,
-// timeout degradation, state.json on disk, the socket closing) and the
-// daemon-start Restart reconciliation wiring.
+// (state.json on disk, the socket closing) and the daemon-start Restart
+// reconciliation wiring.
 
 import (
 	"context"
@@ -16,10 +15,9 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
-// TestShutdownSequence: two live jobs, no agent flushes → the per-job
-// window times out and DEGRADES (never blocks), every live agent got
-// pf/stop_notice, Runtime's state.json lands with both jobs recorded,
-// the socket closes and Run returns.
+// TestShutdownSequence: two live jobs → the sequence is fast (no per-job
+// grace window), Runtime's state.json lands with both jobs recorded, the
+// socket closes and Run returns.
 func TestShutdownSequence(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_s1")
@@ -37,10 +35,6 @@ func TestShutdownSequence(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after the shutdown sequence")
 	}
-
-	// polyforge#106: the pf/stop_notice delivery face is deleted with
-	// the WI-Agent lane — the driver owns the step state machine, so
-	// the sequence's per-job grace is the flush(shutdown) window only.
 
 	// Runtime's state.json landed with both jobs recorded (the
 	// bookkeeping the next start reconciles against aihub).
@@ -66,46 +60,6 @@ func TestShutdownSequence(t *testing.T) {
 	// The UDS face is gone.
 	if dialWorks(td.sock) {
 		t.Fatal("socket still accepts connections after shutdown")
-	}
-}
-
-// TestShutdownFlushPositive: an agent that answers the notice with
-// flush(shutdown) lets the sequence proceed without the degradation
-// wait — the commit lands (published event) and the wait observes it.
-func TestShutdownFlushPositive(t *testing.T) {
-	td := newTestDaemon(t, func(c *Config) {
-		c.ShutdownFlushWait = 5 * time.Second // long window: only a flush may end it fast
-	})
-	td.submitClaim(t, "wi_s3")
-	td.waitMonitored(t, "wi_s3")
-	sraw, err := td.client.Observe("wi_s3", 0)
-	if err != nil {
-		t.Fatalf("observe wi_s3: %v", err)
-	}
-	var sjv protocol.JobView
-	if err := json.Unmarshal(sraw, &sjv); err != nil || sjv.SpawnN == 0 {
-		t.Fatalf("wi_s3 view undecodable: %v (%s)", err, sraw)
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- td.Shutdown(context.Background(), DirectShutdownCause()) }()
-
-	// Play the agent: flush(shutdown) right after the shutdown call
-	// latches. (The stop_notice delivery that used to gate this is
-	// retired with the WI-Agent lane, polyforge#106.)
-	time.Sleep(50 * time.Millisecond)
-	if _, err := td.client.Flush("wi_s3", protocol.FlushRequest{
-		WorkItem: "wi_s3", SpawnN: sjv.SpawnN, Reason: protocol.FlushShutdown,
-	}); err != nil {
-		t.Fatalf("flush(shutdown): %v", err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("shutdown: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("shutdown did not observe the flush within the window")
 	}
 }
 

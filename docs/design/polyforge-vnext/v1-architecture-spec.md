@@ -1,5 +1,7 @@
 # v2 Architecture Spec — Design Record
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 > Status: RULED (human-approved). This is the authoritative summary of the v2 architecture
 > redesign. The full specification lives in the work item (polyforge#61 content field).
 > Implementation is decomposed into 9 follow-up tickets (§13 of the spec).

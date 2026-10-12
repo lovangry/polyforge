@@ -46,7 +46,7 @@ func newDaemonFixture(t *testing.T) *daemonFixture {
 			h(w, r)
 			return
 		}
-		io.WriteString(w, `{"machine_id":"m1","mode":"interactive","workspaces":["/srv/pf-ws","/srv/pf-ws2"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
+		io.WriteString(w, `{"machine_id":"m1","auto":false,"workspaces":["/srv/pf-ws","/srv/pf-ws2"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		d.rec.record(r)
@@ -113,7 +113,7 @@ func TestDaemonClientObserveRoundtrip(t *testing.T) {
 
 func TestDaemonClientSubmitFamilyRoundtrip(t *testing.T) {
 	d := newDaemonFixture(t)
-	for _, intent := range []string{"claim", "resume", "takeover"} {
+	for _, intent := range []string{"claim", "resume"} {
 		d.answer("POST", "/jobs/wi_abc/"+intent, `{"accepted":true,"work_item_id":"wi_abc"}`)
 	}
 	c := NewDaemonClient(d.sock)
@@ -124,7 +124,6 @@ func TestDaemonClientSubmitFamilyRoundtrip(t *testing.T) {
 	}{
 		{func() (json.RawMessage, error) { return c.Claim("wi_abc", "high") }, "/jobs/wi_abc/claim"},
 		{func() (json.RawMessage, error) { return c.Resume("wi_abc", "") }, "/jobs/wi_abc/resume"},
-		{func() (json.RawMessage, error) { return c.Takeover("wi_abc", "") }, "/jobs/wi_abc/takeover"},
 	}
 	for i, tc := range cases {
 		raw, err := tc.call()
@@ -233,9 +232,9 @@ func TestDaemonClientPauseWrapResumeEndToEnd(t *testing.T) {
 
 func TestDaemonClientTypedErrorDecoding(t *testing.T) {
 	d := newDaemonFixture(t)
-	// No answer registered for observe → the fixture answers DAEMON-404.
+	// No answer registered for watch → the fixture answers DAEMON-404.
 	c := NewDaemonClient(d.sock)
-	_, err := c.Observe("wi_missing", 0)
+	_, err := c.WatchSnapshot("wi_missing", 0)
 	if err == nil {
 		t.Fatal("expected typed error")
 	}
@@ -246,34 +245,9 @@ func TestDaemonClientTypedErrorDecoding(t *testing.T) {
 	if ae.HTTPStatus() != 404 {
 		t.Errorf("HTTPStatus = %d, want 404", ae.HTTPStatus())
 	}
-	// --read-through=false keeps the observe verb hermetic here: the
-	// daemon error surfaces directly and no aihub call is attempted.
 	if code, _, _ := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock},
-		"observe", "wi_missing", "--read-through=false"); code != 1 {
+		"watch", "wi_missing", "--once"); code != 1 {
 		t.Errorf("DAEMON-404 must exit 1, got %d", code)
-	}
-}
-
-// TestDaemonClientFlushRoute pins the flush route (ruling C2:
-// publish_request is replaced by flush on the UDS proxy face).
-func TestDaemonClientFlushRoute(t *testing.T) {
-	d := newDaemonFixture(t)
-	d.answer("POST", "/jobs/wi_abc/flush", `{"ok":true,"local_commit":"sha1","pushed":true}`)
-	c := NewDaemonClient(d.sock)
-	req := protocol.FlushRequest{
-		WorkItem: "wi_abc",
-		SpawnN:   1,
-		Reason:   protocol.FlushWrap,
-	}
-	if _, err := c.Flush("wi_abc", req); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-	got := d.rec.last()
-	if got.Method != "POST" || got.Path != "/jobs/wi_abc/flush" {
-		t.Errorf("request = %s %s", got.Method, got.Path)
-	}
-	if !strings.Contains(got.Body, `"reason":"wrap"`) {
-		t.Errorf("body = %s", got.Body)
 	}
 }
 
@@ -289,7 +263,7 @@ func TestDaemonClientStatusRoundtrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if s.MachineID != "m1" || s.Mode != "interactive" || s.Queue.MaxConcurrent != 2 {
+	if s.MachineID != "m1" || s.Auto || s.Queue.MaxConcurrent != 2 {
 		t.Errorf("StatusResponse = %+v", s)
 	}
 	// #113: the workspace SET's data source decodes from the body.
@@ -309,7 +283,7 @@ func TestDaemonClientStatusRoundtrip(t *testing.T) {
 func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
 	d := newDaemonFixture(t)
 	d.answer("GET", "/status",
-		`{"machine_id":"m1","mode":"interactive","workspaces":["/srv/pf-ws"],"shutting_down":false,`+
+		`{"machine_id":"m1","auto":false,"workspaces":["/srv/pf-ws"],"shutting_down":false,`+
 			`"jobs":[`+
 			`{"work_item_id":"wi_run","status":"running","spawn_n":3,`+
 			`"session_fingerprint":"ab12cd34ef56aa00","agent_pid":42},`+
@@ -344,13 +318,13 @@ func TestStatusSessionColumnsRawDecodeRender(t *testing.T) {
 	var b bytes.Buffer
 	renderStatus(&b, &s)
 	golden(t, "StatusSessionColumns", b.String(),
-		`machine: m1  mode: interactive  queue: 1 pending / 1 running / max 2
+		`daemon: m1  auto: off  max: 2  queue: 1 pending / 1 running
 workspaces: /srv/pf-ws
 
-WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  LAST-PROGRESS
----------  -----------  ----------------  -----  ---------  --------  -------------
-wi_run     running      ab12cd34ef56aa00  #3     42         -         -
-wi_old     needs_input  -                 -      43         -         -
+WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  STEP-AGE  LAST-WORK
+---------  -----------  ----------------  -----  ---------  --------  --------  ---------
+wi_run     running      ab12cd34ef56aa00  #3     42         -         -         -
+wi_old     needs_input  -                 -      43         -         -         -
 `)
 
 	// Full verb drive: `pf ops status` runs the same raw-JSON → decode
@@ -399,116 +373,43 @@ func TestAnswerUniquePendingResolution(t *testing.T) {
 	}
 }
 
-// TestObserveRenderedOutput drives the full observe verb and checks the
-// human table reached stdout.
-func TestObserveRenderedOutput(t *testing.T) {
-	jv := protocol.JobView{
-		WorkItem: "wi_abc", Project: "polyforge", Status: protocol.JobRunning,
-		SpawnN: 1, CurrentStep: "implement",
-		Steps: map[string]*protocol.StepView{"implement": {Status: "in_progress", Attempts: 1}},
-	}
+// TestOpsAutoAndMaxVerbs: `pf ops auto on|off` / `pf ops max N` post the
+// one switch and the one number to /ops/config; bare forms read /status;
+// bad arguments are refused locally.
+func TestOpsAutoAndMaxVerbs(t *testing.T) {
 	d := newDaemonFixture(t)
-	d.answer("GET", "/jobs/wi_abc/observe", jsonBody(jv))
-	code, stdout, stderr := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock}, "observe", "wi_abc")
-	if code != 0 {
-		t.Fatalf("code=%d stderr=%s", code, stderr)
-	}
-	for _, want := range []string{"wi_abc (polyforge) — running", "current step: implement", "implement  in_progress"} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("stdout missing %q:\n%s", want, stdout)
-		}
-	}
-}
+	d.answer("POST", "/ops/config", `{"auto":true,"max":3}`)
+	env := map[string]string{"PF_DAEMON_SOCKET": d.sock}
 
-// progressAnswer is a canned §5.2 read-through body for the fake aihub.
-const progressAnswer = `{"work_item_id":"wi_abc","head_seq":7,` +
-	`"progress":{"work_item_id":"wi_abc","current_step":"fix","workflow_status":"running","version":12},` +
-	`"head_updated_at":"2026-10-01T00:00:00Z","freshness_note":"data is as of the most recent publish"}`
-
-// TestObserveReadThroughFallback: a daemon DAEMON-404 (not monitored) plus
-// a reachable aihub observe succeeds by default, visibly labeled as the
-// read-through layer, with the caller's ordinary api key on the call.
-func TestObserveReadThroughFallback(t *testing.T) {
-	var rec reqRecorder
-	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, progressAnswer)
-	})
-	d := newDaemonFixture(t) // no observe answer → DAEMON-404 not monitored
-
-	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_API_KEY": "key-ordinary", "PF_DAEMON_SOCKET": d.sock,
-	}, "observe", "wi_abc")
-	if code != 0 {
-		t.Fatalf("code=%d stderr=%s", code, stderr)
-	}
-	for _, want := range []string{
-		"layer=read-through",
-		"seq 7  updated 2026-10-01T00:00:00Z",
-		"data is as of the most recent publish",
-		"current_step",
+	for _, c := range []struct {
+		args []string
+		body string
+	}{
+		{[]string{"ops", "auto", "on"}, `{"auto":true}`},
+		{[]string{"ops", "auto", "off"}, `{"auto":false}`},
+		{[]string{"ops", "max", "3"}, `{"max":3}`},
 	} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		if code, _, stderr := runPf(t, env, c.args...); code != 0 {
+			t.Fatalf("%v: code=%d stderr=%s", c.args, code, stderr)
+		}
+		if got := strings.TrimSpace(d.rec.last().Body); d.rec.last().Path != "/ops/config" || got != c.body {
+			t.Fatalf("%v posted %s %s, want /ops/config %s", c.args, d.rec.last().Path, got, c.body)
 		}
 	}
-	// The fallback rode the ordinary api key, and the daemon was tried
-	// first.
-	last := rec.last()
-	if last.Path != "/api/v1/work-items/wi_abc/progress" {
-		t.Errorf("progress path = %s", last.Path)
+	// Bare forms read /status (fixture: auto off, max 2).
+	if _, out, _ := runPf(t, env, "ops", "auto"); strings.TrimSpace(out) != "auto: off" {
+		t.Fatalf("ops auto = %q", out)
 	}
-	if got := last.Header.Get("Authorization"); got != "Bearer key-ordinary" {
-		t.Errorf("Authorization = %q, want the caller's ordinary api key", got)
+	if _, out, _ := runPf(t, env, "ops", "max"); strings.TrimSpace(out) != "max: 2" {
+		t.Fatalf("ops max = %q", out)
 	}
-	if daemonReq := d.rec.last(); !strings.HasPrefix(daemonReq.Path, "/jobs/wi_abc/observe") {
-		t.Errorf("daemon was not tried first: %s", daemonReq.Path)
-	}
-}
-
-// TestObserveReadThroughOptOut: --read-through=false restores the old
-// fail-fast behavior — the daemon's not-monitored error surfaces and NO
-// server call is made.
-func TestObserveReadThroughOptOut(t *testing.T) {
-	var rec reqRecorder
-	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, progressAnswer)
-	})
-	d := newDaemonFixture(t) // DAEMON-404 not monitored
-
-	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_API_KEY": "key-ordinary", "PF_DAEMON_SOCKET": d.sock,
-	}, "observe", "wi_abc", "--read-through=false")
-	if code != 1 {
-		t.Fatalf("code=%d stdout=%s", code, stdout)
-	}
-	if !strings.Contains(stderr, "DAEMON-404") {
-		t.Errorf("stderr must surface the daemon error, got: %s", stderr)
-	}
-	if n := len(rec.all()); n != 0 {
-		t.Errorf("--read-through=false must make no server call, made %d", n)
-	}
-}
-
-// TestObserveReadThroughFailure: when the daemon is not monitored AND the
-// read-through fails, the combined error names both layers (neither
-// failure is swallowed).
-func TestObserveReadThroughFailure(t *testing.T) {
-	var rec reqRecorder
-	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		io.WriteString(w, `{"code":"CORE-404","detail":"work item wi_abc"}`)
-	})
-	d := newDaemonFixture(t) // DAEMON-404 not monitored
-
-	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_API_KEY": "key-ordinary", "PF_DAEMON_SOCKET": d.sock,
-	}, "observe", "wi_abc")
-	if code != 1 {
-		t.Fatalf("code=%d stdout=%s", code, stdout)
-	}
-	for _, want := range []string{"DAEMON-404", "read-through failed", "CORE-404"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("stderr missing %q: %s", want, stderr)
+	n := len(d.rec.all())
+	for _, bad := range [][]string{{"ops", "auto", "maybe"}, {"ops", "max", "0"}, {"ops", "max", "x"}, {"ops", "mode", "drain"}} {
+		if code, _, _ := runPf(t, env, bad...); code == 0 {
+			t.Fatalf("%v accepted", bad)
 		}
+	}
+	if len(d.rec.all()) != n {
+		t.Fatal("a refused argument reached the daemon")
 	}
 }

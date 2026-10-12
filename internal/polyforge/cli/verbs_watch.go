@@ -1,277 +1,301 @@
 package cli
 
-// verbs_watch.go: `pf watch-probe` — the watch lane's one-shot data face
-// (wi_LMSxPTQTtz5x). The session-side watcher MECHANISM is the skill's
-// watch.sh (copied verbatim into <workspace>/.polyforge/watchers/ at arm
-// time); this verb is the data it consumes:
+// verbs_watch.go: `pf watch` — the human-coordination lane (v2-converge §3).
 //
-//   - the default face assembles the watch.Snapshot (execution state via
-//     the daemon observe face, harness from the capsule's session.json,
-//     transcript via the watch module's shared location resolution, delta
-//     state next to the log), runs the delta-gated summarize and renders:
-//     --json emits the exact documented field set (spec decision 4); the
-//     human face is ONE line carrying the metadata fields inline in a
-//     fixed order (the script only prefixes the RFC3339 UTC timestamp).
-//   - --print-cadence prints the resolved cadence (flag > env > config,
-//     defaults 3s / 1m / off) as one shell-sourceable line — the single
-//     source the script evals once at startup, so cli.toml beats
-//     PF_WATCH_* even inside the script's loops.
+//	pf watch <wi> --once [--json]          one snapshot of a WI
+//	pf watch --chat <id> [--wait-decision] the resident per-chat watcher
+//	pf watch --chat <id> --statusline      print the progress file (fast)
+//	pf watch subscribe|unsubscribe <wi>    daemon-held subscriptions
+//	pf watch list                          the chat's subscriptions
 //
-// The probe owns the delta state (<workspace>/.polyforge/watchers/<wi>.state);
-// no --since-size-style flag exists, by construction.
+// The chat defaults to PF_CHAT_ID; --harness-session maps a harness
+// session id to its chat through the daemon (the Claude Code statusLine
+// gets the session JSON on stdin, not PF_CHAT_ID). All mechanics live in
+// internal/polyforge/watcher; this file only wires flags and the daemon.
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/polyforge/watch"
+	"github.com/silgrid/polyforge/internal/polyforge/watcher"
 )
 
-// Seams for unit tests: production wiring is the daemon observe face and
-// the exec dispatcher; tests swap these to fakes.
-var (
-	watchStateSource = func(ctx *Context) watch.StateSource {
-		return daemonStateSource{d: ctx.daemon()}
-	}
-	watchNewDispatcher = func() watch.Dispatcher {
-		return watch.ExecDispatcher{}
-	}
-)
+// watchNow is the clock seam for the snapshot render.
+var watchNow = time.Now
 
-// daemonStateSource adapts the daemon observe projection (protocol.
-// JobView over the UDS face) onto watch.StateSource — the CLI wires the
-// daemon face; the watch module never imports the protocol vocabulary.
-type daemonStateSource struct {
-	d *DaemonClient
+// chatAPI adapts the daemon client to watcher.API for one chat. Every
+// answer of the subscriptions route also teaches the status sink the
+// daemon-provided progress path.
+type chatAPI struct {
+	d    *DaemonClient
+	chat string
+	sink *watcher.StatusSink
 }
 
-func (s daemonStateSource) ObserveExecState(wi string) (watch.ExecState, error) {
-	raw, err := s.d.Observe(wi, 0)
-	if err != nil {
-		return watch.ExecState{}, err
+func (c chatAPI) Subscriptions() (protocol.ChatSubscriptions, error) {
+	s, err := c.d.ChatSubscriptions(c.chat)
+	if err == nil && c.sink != nil && s.StatusPath != "" {
+		c.sink.Primary = s.StatusPath
 	}
-	var jv protocol.JobView
-	if err := json.Unmarshal(raw, &jv); err != nil {
-		return watch.ExecState{}, fmt.Errorf("decode the observe projection: %w", err)
-	}
-	es := watch.ExecState{
-		Status: jv.Status,
-		Step:   jv.CurrentStep,
-	}
-	if jv.Steps != nil {
-		if sv, ok := jv.Steps[jv.CurrentStep]; ok && sv != nil {
-			es.StepStatus = sv.Status
-		}
-	}
-	if n := len(jv.Events); n > 0 {
-		es.LatestEvent = jv.Events[n-1].Kind
-		es.LatestSeq = jv.Events[n-1].Seq
-	}
-	if jv.Pending != nil {
-		es.Pending = &watch.PendingQuestion{
-			ID:       jv.Pending.ID,
-			Step:     jv.Pending.Step,
-			Question: jv.Pending.Question,
-			AskedAt:  jv.Pending.AskedAt,
-		}
-	}
-	return es, nil
+	return s, err
+}
+func (c chatAPI) Snapshot(wi string, after int64) (*protocol.WatchSnapshot, error) {
+	return c.d.WatchSnapshot(wi, after)
+}
+func (c chatAPI) Ack(a protocol.ChatAck) error { return c.d.ChatAck(c.chat, a) }
+func (c chatAPI) Heartbeat(pid int) error      { return c.d.ChatHeartbeat(c.chat, pid) }
+func (c chatAPI) Attention(owner string) ([]protocol.ChatAttentionItem, error) {
+	return c.d.ChatAttention(c.chat, owner)
 }
 
-var cmdWatchProbe = &Command{
-	Name:    "watch-probe",
-	Summary: "One-shot watch snapshot for a work item (the session-side watcher's data face)",
-	Usage:   "pf watch-probe <id> [--json] [--poll D] [--log D] [--heartbeat D|off] [--print-cadence]",
+var cmdWatch = &Command{
+	Name:    "watch",
+	Group:   GroupExec,
+	Summary: "Watch work items: one snapshot, or the resident per-chat watcher (progress + human-decision wake-ups)",
+	Usage: "pf watch <wi> --once [--json] [--after N] [--events N]\n" +
+		"       pf watch --chat ID [--wait-decision] [--poll D]      (chat default: $PF_CHAT_ID)\n" +
+		"       pf watch --chat ID --statusline                       (print the progress file)\n" +
+		"       pf watch --harness-session ID|- [--harness claude|pi] ...   (resolve the chat via the daemon; - reads {\"session_id\"} from stdin)\n" +
+		"       pf watch subscribe|unsubscribe <wi> [--chat ID]\n" +
+		"       pf watch list [--chat ID]",
 	Setup: func(fs *flag.FlagSet) {
-		fs.Var(&cadenceFlag{}, "poll", "watch_poll override — the flag layer of flag > env > config")
-		fs.Var(&cadenceFlag{}, "log", "watch_log override (duration)")
-		fs.Var(&cadenceFlag{allowOff: true}, "heartbeat", "watch_heartbeat override (duration or the literal off)")
-		fs.Bool("print-cadence", false, "print the resolved cadence (one shell-sourceable line) and exit")
+		fs.Bool("once", false, "print one snapshot of <wi> and exit (status, step, ages, pending question, latest events)")
+		fs.Bool("json", false, "machine-readable output for --once / list")
+		fs.Int64("after", 0, "--once: only events with seq above this cursor")
+		fs.Int("events", 8, "--once: how many latest events to show")
+		fs.String("chat", "", "chat id (default: env PF_CHAT_ID)")
+		fs.Bool("wait-decision", false, "resident: exit 0 printing one fixed-template line per human decision")
+		fs.Bool("statusline", false, "print the resident watcher's progress lines (for a harness status line) and exit")
+		fs.String("harness-session", "", "resolve the chat from a harness session id via the daemon ('-' = read session_id from stdin JSON)")
+		fs.String("harness", "claude", "harness of --harness-session: claude|pi")
+		fs.Duration("poll", 2*time.Second, "resident poll interval")
+		fs.Bool("no-parent-check", false, "resident: do not exit when the parent process goes away")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		if len(args) != 1 {
-			return fmt.Errorf("watch-probe: expected exactly one work item id")
-		}
-		wi := args[0]
-		cad := ctx.Cfg.ResolveWatchCadence(WatchFlagOverrides{
-			Poll:      cadenceFlagPtr(fs, "poll"),
-			Log:       cadenceFlagPtr(fs, "log"),
-			Heartbeat: cadenceFlagPtr(fs, "heartbeat"),
-		})
-		if boolFlag(fs, "print-cadence") {
-			// The cadence face needs nothing but the config: no daemon,
-			// no capsule, no transcript, no model — the script sources it
-			// once at startup, before the guard even runs.
-			fmt.Fprintln(ctx.Stdout, renderCadence(cad))
-			return nil
-		}
-		workspace, err := resolveWorkspace(ctx)
-		if err != nil {
-			return err
-		}
-		capsuleDir := filepath.Join(workspace, "capsules", wi)
-		sess, err := readCapsuleSession(capsuleDir)
-		if err != nil {
-			return err
-		}
-		harness, err := watch.NormalizeHarness(sess.Harness)
-		if err != nil {
-			return err
-		}
-		snap, err := (watch.Probe{
-			Deps: watch.Deps{
-				WI:           wi,
-				Workspace:    workspace,
-				CapsuleDir:   capsuleDir,
-				SessionsRoot: ctx.Cfg.HarnessSessionsRoot,
-				Source:       watchStateSource(ctx),
-			},
-			Models:     watch.ModelConfig(ctx.Cfg.WatchSummarize),
-			Harness:    harness,
-			Dispatcher: watchNewDispatcher(),
-		}).Run()
-		if err != nil {
-			return err
-		}
-		if ctx.JSON {
-			b, err := json.Marshal(snap)
-			if err != nil {
-				return err
+		asJSON := ctx.JSON || boolFlag(fs, "json")
+		if len(args) > 0 {
+			switch args[0] {
+			case "subscribe", "unsubscribe":
+				if len(args) != 2 {
+					return fmt.Errorf("watch %s: expected exactly one work item id", args[0])
+				}
+				chat, err := watchChat(ctx, fs)
+				if err != nil {
+					return err
+				}
+				ans, err := ctx.daemon().ChatSubscribe(chat, args[1], args[0] == "subscribe")
+				if err != nil {
+					return err
+				}
+				verb := map[bool]string{true: "subscribed", false: "unsubscribed"}[args[0] == "subscribe"]
+				if asJSON {
+					b, _ := json.Marshal(ans)
+					ctx.Out(b)
+				} else if ans.Changed {
+					fmt.Fprintf(ctx.Stdout, "%s %s: %s\n", verb, chat, ans.WI)
+				} else {
+					fmt.Fprintf(ctx.Stdout, "no change: %s %s was already %s\n", chat, ans.WI, map[bool]string{true: "subscribed", false: "not subscribed"}[args[0] == "subscribe"])
+				}
+				return nil
+			case "list":
+				chat, err := watchChat(ctx, fs)
+				if err != nil {
+					return err
+				}
+				subs, err := ctx.daemon().ChatSubscriptions(chat)
+				if err != nil {
+					return err
+				}
+				if asJSON {
+					b, _ := json.Marshal(subs)
+					ctx.Out(b)
+					return nil
+				}
+				fmt.Fprintf(ctx.Stdout, "chat %s: %d subscription(s)\n", chat, len(subs.Subscriptions))
+				for _, s := range subs.Subscriptions {
+					state := "active"
+					if s.Done {
+						state = "finished"
+					}
+					fmt.Fprintf(ctx.Stdout, "  %-22s %-8s cursor=%d\n", s.WI, state, s.Cursor)
+				}
+				return nil
 			}
-			ctx.Out(b)
-			return nil
 		}
-		fmt.Fprintln(ctx.Stdout, renderSnapshotLine(snap))
-		return nil
+		if boolFlag(fs, "statusline") {
+			return watchStatusline(ctx, fs)
+		}
+		if len(args) == 1 && args[0] != "" {
+			return watchOnce(ctx, fs, args[0], asJSON)
+		}
+		if len(args) > 1 {
+			return fmt.Errorf("watch: expected one work item id (with --once) or none (with --chat)")
+		}
+		if boolFlag(fs, "once") {
+			return fmt.Errorf("watch --once: a work item id is required")
+		}
+		return watchResident(ctx, fs)
 	},
 }
 
-// resolveWorkspace answers the mapped workspace the process runs in. The
-// watch lane is session-side, so the probe reads the machine layout from
-// its own working directory: the mapped workspace that contains the cwd
-// (the workspace itself or any directory inside it; the longest match
-// wins). The mapping (cli.toml's [workspace] sections) is the only
-// placement source (polyforge#113).
-func resolveWorkspace(ctx *Context) (string, error) {
-	wd, err := os.Getwd()
+// watchOnce prints one snapshot (`pf watch <wi> --once`).
+func watchOnce(ctx *Context, fs *flag.FlagSet, wi string, asJSON bool) error {
+	snap, err := ctx.daemon().WatchSnapshot(wi, int64Flag(fs, "after"))
 	if err != nil {
-		return "", fmt.Errorf("watch-probe: resolve the working directory: %w", err)
+		return err
 	}
-	if ctx.Cfg.Mapping == nil || ctx.Cfg.Mapping.Empty() {
-		return "", fmt.Errorf("watch-probe: no workspace mapping is configured — add a [workspace.\"<path>\"] section to cli.toml; pf doctor checks the mapping")
-	}
-	best := ""
-	for _, ws := range ctx.Cfg.Mapping.Workspaces() {
-		if wd == ws || strings.HasPrefix(wd, ws+string(filepath.Separator)) {
-			if len(ws) > len(best) {
-				best = ws
-			}
-		}
-	}
-	if best == "" {
-		return "", fmt.Errorf("watch-probe: the working directory %s is not inside a mapped workspace — run the probe from the workspace whose watchers/ holds this WI (pf doctor shows the mapping)", wd)
-	}
-	return best, nil
-}
-
-// readCapsuleSession reads the capsule's session.json: the recorded
-// harness decides which summarize-model key and which dispatch binary
-// apply.
-func readCapsuleSession(capsuleDir string) (capsule.Session, error) {
-	var sess capsule.Session
-	path := filepath.Join(capsuleDir, capsule.SessionJSON)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return sess, fmt.Errorf("watch-probe: read %s: %w — the probe narrates a derived capsule; is %s a capsule of a mapped workspace?", path, err, capsuleDir)
-	}
-	if err := json.Unmarshal(raw, &sess); err != nil {
-		return sess, fmt.Errorf("watch-probe: decode %s: %w", path, err)
-	}
-	return sess, nil
-}
-
-// renderCadence is the --print-cadence face: ONE shell-sourceable line of
-// KEY=VALUE pairs (the script evals it), the direct seconds spellings
-// sleep can consume, and the watch module's log-tail constant (spec
-// decision 2: the tail constants live in the watch module, not the
-// script).
-func renderCadence(c WatchCadence) string {
-	hb := "off"
-	if c.Heartbeat > 0 {
-		hb = watch.FormatDuration(c.Heartbeat)
-	}
-	return fmt.Sprintf("watch_poll=%s watch_log=%s watch_heartbeat=%s watch_poll_seconds=%d watch_log_seconds=%d watch_heartbeat_seconds=%d watch_log_tail_lines=%d",
-		watch.FormatDuration(c.Poll), watch.FormatDuration(c.Log), hb,
-		int64(c.Poll/time.Second), int64(c.Log/time.Second), int64(c.Heartbeat/time.Second),
-		watch.WatchLogTailLines)
-}
-
-// renderSnapshotLine is the probe's own human output: the metadata fields
-// inline in a fixed order, ONE line — the script prefixes the RFC3339 UTC
-// timestamp and appends the line to the watcher log verbatim. The closing
-// clause is the delta verdict: the summary line, the raw summarize error,
-// or the silent-transcript note with its climbing age.
-func renderSnapshotLine(snap *watch.Snapshot) string {
-	pending := "-"
-	if snap.Pending != nil {
-		pending = snap.Pending.ID
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "wi=%s status=%s step=%s step_status=%s latest_event=%s pending_question=%s transcript=%s size=%d age=%s",
-		snap.WI, snap.Status, snap.Step, snap.StepStatus, snap.LatestEvent, pending,
-		snap.TranscriptPath, snap.TranscriptSize, snap.TranscriptAge)
-	switch {
-	case snap.SummaryError != nil:
-		fmt.Fprintf(&b, " summary_error: %s", *snap.SummaryError)
-	case snap.Summary != nil:
-		fmt.Fprintf(&b, " summary: %s", *snap.Summary)
-	default:
-		fmt.Fprintf(&b, " no new output, age %s", snap.TranscriptAge)
-	}
-	return b.String()
-}
-
-// cadenceFlag is the --poll/--log/--heartbeat flag layer: a duration, or
-// (heartbeat only) the literal off. Absent stays distinguishable from a
-// zero value.
-type cadenceFlag struct {
-	val      time.Duration
-	set      bool
-	allowOff bool
-}
-
-func (f *cadenceFlag) String() string { return f.val.String() }
-
-func (f *cadenceFlag) Set(s string) error {
-	if f.allowOff && s == "off" {
-		f.val, f.set = 0, true
+	if asJSON {
+		b, _ := json.Marshal(snap)
+		ctx.Out(b)
 		return nil
 	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return fmt.Errorf("%q is not a duration%s", s, offHint(f.allowOff))
-	}
-	if d < 0 {
-		return fmt.Errorf("%q must not be negative", s)
-	}
-	f.val, f.set = d, true
+	fmt.Fprint(ctx.Stdout, watcher.FormatOnce(snap, watchNow(), intFlag(fs, "events")))
 	return nil
 }
 
-// cadenceFlagPtr answers the flag's parsed value, nil when the flag was
-// absent (the precedence's flag layer is "set beats everything").
-func cadenceFlagPtr(fs *flag.FlagSet, name string) *time.Duration {
-	v, ok := fs.Lookup(name).Value.(*cadenceFlag)
-	if !ok || !v.set {
+// watchChat resolves the chat id: --chat, else PF_CHAT_ID, else a
+// --harness-session lookup through the daemon.
+func watchChat(ctx *Context, fs *flag.FlagSet) (string, error) {
+	chat := stringFlag(fs, "chat")
+	if chat == "" {
+		chat = ctx.Cfg.ChatID
+	}
+	if chat == "" {
+		if hs := stringFlag(fs, "harness-session"); hs != "" {
+			c, err := chatFromHarnessSession(ctx, stringFlag(fs, "harness"), hs)
+			if err != nil {
+				return "", err
+			}
+			chat = c
+		}
+	}
+	if chat == "" {
+		return "", fmt.Errorf("watch: no chat id — pass --chat <id>, set PF_CHAT_ID, or use --harness-session <id>")
+	}
+	if !watcher.ChatIDRe.MatchString(chat) {
+		return "", fmt.Errorf("watch: chat id %q must be 1-64 characters of [A-Za-z0-9_-]", chat)
+	}
+	return chat, nil
+}
+
+// chatFromHarnessSession maps a harness session id to its chat (`pf chat
+// init` semantics: created on first use, stable on resume). The answer is
+// cached in the runtime dir so a statusLine refresh stays off the daemon.
+func chatFromHarnessSession(ctx *Context, harness, session string) (string, error) {
+	if session == "-" {
+		raw, err := io.ReadAll(io.LimitReader(ctx.Stdin, 1<<20))
+		if err != nil {
+			return "", err
+		}
+		var in struct {
+			SessionID string `json:"session_id"`
+		}
+		if json.Unmarshal(raw, &in) != nil || in.SessionID == "" {
+			return "", fmt.Errorf("watch: no session_id in the JSON on stdin")
+		}
+		session = in.SessionID
+	}
+	sum := sha256.Sum256([]byte(harness + ":" + session))
+	rdir := watcher.RuntimeDir()
+	if err := watcher.EnsureDir(rdir); err != nil {
+		return "", fmt.Errorf("watch: %w", err)
+	}
+	cache := rdir + "/session-" + hex.EncodeToString(sum[:8]) + ".chat"
+	if raw, err := os.ReadFile(cache); err == nil {
+		if c := strings.TrimSpace(string(raw)); watcher.ChatIDRe.MatchString(c) {
+			return c, nil
+		}
+	}
+	raw, err := ctx.daemon().ChatInit(harness, session)
+	if err != nil {
+		return "", err
+	}
+	var rec ChatRecord
+	if err := json.Unmarshal(raw, &rec); err != nil || rec.ChatID == "" {
+		return "", fmt.Errorf("watch: unexpected chat init answer")
+	}
+	_ = os.WriteFile(cache, []byte(rec.ChatID+"\n"), 0o600)
+	return rec.ChatID, nil
+}
+
+// watchStatusline prints the progress file. It must never fail a
+// status line: any problem prints nothing.
+func watchStatusline(ctx *Context, fs *flag.FlagSet) error {
+	chat, err := watchChat(ctx, fs)
+	if err != nil {
 		return nil
 	}
-	d := v.val
-	return &d
+	fmt.Fprint(ctx.Stdout, watcher.NewFiles("", chat).ReadStatusline(30*time.Second))
+	return nil
+}
+
+// watchResident runs the per-chat watcher until its parent goes away, the
+// user interrupts it, or (--wait-decision) a decision was printed.
+func watchResident(ctx *Context, fs *flag.FlagSet) error {
+	chat, err := watchChat(ctx, fs)
+	if err != nil {
+		return err
+	}
+	files := watcher.NewFiles("", chat)
+	release, err := files.Lock(5 * time.Second)
+	if err != nil {
+		return fmt.Errorf("watch: %w", err)
+	}
+	defer release()
+	sink := &watcher.StatusSink{Fallback: files.FallbackStatusPath()}
+	_ = files.WritePID(files.FallbackStatusPath())
+
+	d := ctx.daemon()
+	d.HTTP.Timeout = 10 * time.Second
+	api := chatAPI{d: d, chat: chat, sink: sink}
+
+	opts := watcher.Options{
+		Owner:        ctx.Cfg.UserID,
+		WaitDecision: boolFlag(fs, "wait-decision"),
+		Poll:         durationFlag(fs, "poll"),
+		Out:          ctx.Stdout,
+		Err:          ctx.Stderr,
+		Status:       sink,
+	}
+	if !boolFlag(fs, "no-parent-check") {
+		opts.ParentAlive = parentAlive()
+	}
+	sctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// Keep the pidfile naming the file the watcher really writes.
+	lastPath := files.FallbackStatusPath()
+	opts.OnStatusPath = func(p string) {
+		if p != lastPath {
+			lastPath = p
+			_ = files.WritePID(p)
+		}
+	}
+	err = watcher.Run(sctx, api, opts)
+	if err == watcher.ErrParentGone {
+		return nil
+	}
+	return err
+}
+
+// parentAlive answers false once the process that started the watcher is
+// gone (reparented). A watcher launched already orphaned (ppid 1, e.g. by
+// nohup or a service manager) has no parent to follow and never exits on
+// this account.
+func parentAlive() func() bool {
+	ppid := os.Getppid()
+	if ppid == 1 {
+		return func() bool { return true }
+	}
+	return func() bool { return os.Getppid() == ppid }
 }

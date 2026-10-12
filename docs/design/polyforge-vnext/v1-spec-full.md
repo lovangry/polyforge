@@ -1,5 +1,7 @@
 # v2 架构设计修订（三轮 review 收敛版）
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 ## 〇、Review 轨迹
 - 第一轮（初级方案 go-git 内嵌）：判定不可行（嵌套仓库、服务端不成熟、大文件、凭证隔离）
 - 第二轮（修订方案 capsule git + .gitignore + 真 git 服务）：判定条件可行，3 个 blocker

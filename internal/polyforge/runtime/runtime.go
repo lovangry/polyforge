@@ -39,7 +39,6 @@ import (
 // endpoints). *aihubclient.Client satisfies it.
 type Aihub interface {
 	SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimResponse, error)
-	ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error)
 	SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error)
 	SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error)
 	SessionEnd(wi string, req api.SessionEndRequest) error
@@ -61,8 +60,9 @@ type Config struct {
 	// "<path>"] sections) and the runtime routes every capsule through it
 	// — <mapped-workspace>/capsules/<wi> per the claim answer's project.
 	// There is no single workspace and no default project anymore. The
-	// daemon refuses to start when the mapping is empty or a recorded
-	// mid-flight project falls out of it (restart.go).
+	// daemon refuses to start when the mapping is empty; a recorded
+	// mid-flight project that falls out of it parks only that work item
+	// repair_pending (restart.go, v2-converge §6).
 	Mapping       *mapping.Plan
 	DataDir       string // state.json + external git-dirs live here
 	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
@@ -91,10 +91,12 @@ type Config struct {
 	// once) delays the release; only a channel wedged past the window
 	// loses it, loudly.
 	ReleaseRetryWindow time.Duration // total retry bound for a deferred release (default 2min)
-	// SocketPath is the daemon's UDS listen path, injected into every
-	// spawned agent as PF_DAEMON_SOCKET so the agent can call
-	// flush(reason) on the proxy (§五).
-	SocketPath string
+	// EndRetryBase/EndRetryMax shape the backoff of the durable
+	// SessionEnd(blocked) retry (end_pending records and the re-claim
+	// abandon lane): first retry after Base, doubling up to Max
+	// (defaults 2s / 60s). Retries run until the hub accepts the close.
+	EndRetryBase time.Duration
+	EndRetryMax  time.Duration
 	// EventTap, when non-nil, receives runtime-sourced diagnostic events
 	// (kind "push_failed" on a seal push that failed after its retries)
 	// so they land in the daemon's durable events log next to the
@@ -105,12 +107,6 @@ type Config struct {
 	// credential) the spawned agents' environment must never carry, even
 	// under a renamed variable.
 	EnvSecrets []string
-	// RecordTap, when non-nil, receives every raw stdout record line the
-	// production spawner reads (one harness record per delivery, verbatim
-	// including the trailing newline stripped). The phase-3 daemon binds it
-	// to its observe adapter so the Observe lane's stream monitoring sees
-	// the record stream; nil (tests, non-pi spawners) disables it.
-	RecordTap func(wi string, line []byte)
 	// RecallTopK bounds the F6-A claim-time memory snapshot: how many
 	// semantic hits over the goal+content query land in the capsule's
 	// runtime-state/recalled-memories.json (default 10, capped at 50).
@@ -126,7 +122,7 @@ type Config struct {
 
 func (c *Config) fill() {
 	// The harness adapter defaults to the only one that exists today
-	// (the pi spawner); it decides the F7 discovery-copy directory.
+	// (the pi spawner).
 	if c.Harness == "" {
 		c.Harness = "pi"
 	}
@@ -144,6 +140,12 @@ func (c *Config) fill() {
 	}
 	if c.RecallTopK <= 0 {
 		c.RecallTopK = defaultRecallTopK
+	}
+	if c.EndRetryBase <= 0 {
+		c.EndRetryBase = 2 * time.Second
+	}
+	if c.EndRetryMax <= 0 {
+		c.EndRetryMax = 60 * time.Second
 	}
 }
 
@@ -163,6 +165,8 @@ type Runtime struct {
 	// Resolve's unknown-input answer is "", and the daemon's resolver
 	// falls back to aihub for those (a restart re-learns on demand).
 	aliases map[string]string
+	// origins: submit origins noted by the daemon, consumed at job creation.
+	origins map[string]Origin
 
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
@@ -180,6 +184,14 @@ type Runtime struct {
 	relMu    sync.Mutex
 	relQueue chan protocol.RTMsg
 	relDone  chan struct{}
+
+	// The durable-close retry lane (endpending.go): WIs whose
+	// SessionEnd(blocked) retry goroutine is running (one per WI), and
+	// the stop signal Close fires.
+	endMu       sync.Mutex
+	endRetrying map[string]bool
+	endStop     chan struct{}
+	endStopOnce sync.Once
 }
 
 // releaseQueueCap bounds the lane's pending set: a wedged Observe must
@@ -231,11 +243,11 @@ type job struct {
 	state              JobState
 	stopReason         string // sealed-in reason while SEALING (restart can finish the stop)
 	// sealedPush records that the final capsule state was ALREADY
-	// committed and pushed by the flush(wrap) half of the dual close
-	// (the flaw fix): the stopOp half then skips its own seal push. It is
+	// committed and pushed by the driver's own publish (the terminal
+	// close of recover.go): stopOp then skips its own seal push. It is
 	// set when the SEALING transition records the reason and persisted
-	// with it, so a crash between the flush's push and SessionEnd keeps
-	// the restart's stop finisher from re-pushing either.
+	// with it, so a crash between that push and SessionEnd keeps the
+	// restart's stop finisher from re-pushing either.
 	sealedPush bool
 	capsuleDir string
 	git        gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
@@ -249,10 +261,12 @@ type job struct {
 	liveTranscript string
 	bundleName     string
 	bundleDigest   string
+	// origin is how the job was submitted (nil = unknown).
+	origin *Origin
 	// item is the claim answer's work-item snapshot (the F1 materializer
 	// input). In-memory only: the durable copy is the capsule's
 	// runtime-state/work-item.json, which recovery re-derives from aihub
-	// (GetWorkItem) when a legacy capsule predates it.
+	// (GetWorkItem) when a capsule predates it.
 	item *api.WorkItem
 	// repos is the claim-served task-repo inventory (api.Claim.Repos):
 	// materialize clones each entry into repos/<name> before the agent
@@ -299,7 +313,27 @@ type job struct {
 	// the same marker the hub does; false everywhere else (a graceful
 	// shutdown keeps it false — the attach-on-restart shape, M3).
 	cleanPause bool
-	mu         sync.Mutex
+	// repairPending is the v2 §6 local "pending repair" mark: the record's
+	// capsule is missing / its project is unmapped at restart. Non-empty =
+	// the reason kind (RepairCapsuleMissing | RepairProjectUnmapped). The
+	// job is parked — record and SESSION kept, no agent, no hub call —
+	// until the next start or `pf resume` re-checks it. Orthogonal to
+	// state (the pre-park state is what the in-place resume continues).
+	repairPending string
+	// verifyPending marks a record whose restart SessionVerify could not
+	// reach aihub: it keeps its place (no agent yet) while the daemon
+	// retries the verify with backoff, then proceeds through restartOne.
+	// In-memory only — a daemon restart re-verifies everything anyway.
+	verifyPending bool
+	// endNote/endHead: the pending SessionEnd(blocked) verdict of an
+	// end_pending job (see StateEndPending).
+	endNote string
+	endHead string
+	// endStatus is the verdict of the pending SessionEnd; "" = blocked
+	// (the bounded-fail close). "canceled" / "failed" ride an abandoned
+	// repair_pending WI (AbandonRepair).
+	endStatus string
+	mu        sync.Mutex
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries
@@ -314,14 +348,15 @@ func New(cfg Config, hub Aihub, spawner Spawner, toOB chan<- protocol.RTMsg, fro
 		fromOB:    fromOB,
 		jobs:      map[string]*job{},
 		aliases:   map[string]string{},
+		endStop:   make(chan struct{}),
 		statePath: filepath.Join(cfg.DataDir, "runtime-state.json"),
 	}
 }
 
 // DefaultSpawner returns the production pi-harness spawner. It takes the
 // runtime config BY POINTER: the spawner reads its fields at spawn time
-// from the shared config, so any field bound after assembly (RecordTap
-// included) is seen by the spawner.
+// from the shared config, so any field bound after assembly is seen by
+// the spawner.
 func DefaultSpawner(cfg *Config) Spawner {
 	return newPiSpawner(cfg)
 }
@@ -358,7 +393,7 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	// verify in flight while a recovery bumps spawn N→N+1 emitted
 	// OBSuperseded(N), the fence dropped it at the counter mismatch, and
 	// the freshly-derived agent of a WI held elsewhere ran unsupervised
-	// forever (detection/push/flush/revalidation all suppressed, the
+	// forever (detection/push/revalidation all suppressed, the
 	// monitor latched). Every other OB kind stays fenced (B2).
 	if msg.Kind != protocol.OBSuperseded && msg.SpawnN != spawn {
 		return // stale handle: dropped (recovery-loop guard, §二)
@@ -366,8 +401,8 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	// NEW-1 (delta review): OBSuperseded bypasses the spawn fence but is
 	// fenced on the SESSION fingerprint instead — a stale message buffered
 	// in the OB channel must never kill a successor job of the same WI
-	// (takeover-back inside the message-residence window). An empty
-	// SessionFP (legacy/test emission) keeps the old behavior: processed.
+	// (a re-claim inside the message-residence window). An empty
+	// SessionFP is processed.
 	if msg.Kind == protocol.OBSuperseded && msg.SessionFP != "" {
 		if fp := j.fingerprint(); fp != "" && fp != msg.SessionFP {
 			return // a DIFFERENT session's supersession verdict: not ours
@@ -393,28 +428,6 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 			return
 		}
 		r.recoverOp(ctx, j, msg.Reason, msg.Detail)
-	case protocol.OBCompleted:
-		if state != StateRunning {
-			return
-		}
-		// The terminal vocabulary (wrapped|failed|blocked) passes through
-		// VERBATIM: flush(wrap)'s blocked outcome (3 failed seals) must
-		// reach aihub as blocked, not be silently upgraded to wrapped.
-		//
-		// wrapped|failed additionally mean the monitor's flushWrap has
-		// ALREADY committed and pushed the final state ("wrap: <status>",
-		// its EvPublished) — the dual-path close's other half, this very
-		// Stop, must not push a second time: the session row is cleared
-		// once the sealed state settles, and a redundant seal push
-		// fails against it (the real-machine push_failed: a successful
-		// wrap push followed one second later by a seal push refused with
-		// GIT-500). The blocked vocabulary is the exception: the flush
-		// itself failed to push, so the stop retries the push before
-		// degrading — exactly the pre-existing semantics.
-		sealedByFlush := msg.Reason != protocol.FinishBlocked
-		if err := r.stopWith(ctx, msg.WorkItem, msg.Reason, sealedByFlush); err != nil {
-			fmt.Fprintf(os.Stderr, "runtime: %s: stop after completion failed: %v\n", msg.WorkItem, err)
-		}
 	}
 }
 
@@ -528,6 +541,11 @@ func (r *Runtime) runReleaseLane(queue <-chan protocol.RTMsg, done <-chan struct
 // every parked release is deadline-bounded and the lane goroutine only
 // ever blocks on the queue or the done signal.
 func (r *Runtime) Close() {
+	r.endStopOnce.Do(func() {
+		if r.endStop != nil {
+			close(r.endStop)
+		}
+	})
 	r.relMu.Lock()
 	defer r.relMu.Unlock()
 	if r.relDone == nil {
@@ -586,6 +604,32 @@ func (r *Runtime) NoteAlias(alias, canonical string) {
 	r.mu.Lock()
 	r.aliases[alias] = canonical
 	r.mu.Unlock()
+}
+
+// NoteOrigin records the origin the NEXT job started for wi will carry.
+// The daemon calls it right before StartIntent; startClaimed consumes it.
+func (r *Runtime) NoteOrigin(wi string, o Origin) {
+	r.mu.Lock()
+	if r.origins == nil {
+		r.origins = map[string]Origin{}
+	}
+	r.origins[wi] = o
+	r.mu.Unlock()
+}
+
+// takeOrigin pops the noted origin for any of the given id spellings.
+func (r *Runtime) takeOrigin(ids ...string) *Origin {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var found *Origin
+	for _, id := range ids {
+		if o, ok := r.origins[id]; ok {
+			o := o
+			found = &o
+			delete(r.origins, id)
+		}
+	}
+	return found
 }
 
 // Resolve maps any id form this runtime knows — a live job key (already
@@ -691,18 +735,17 @@ func mintSessionID() (string, error) {
 // Start claims wi and runs it to a live agent (a plain claim). Idempotency
 // rides on the claim idempotency key: a retry after a lost response
 // re-claims the same session server-side (D4). See StartIntent for the
-// resume/takeover intents.
+// resume intents.
 func (r *Runtime) Start(ctx context.Context, wi string) error {
 	return r.StartIntent(ctx, wi, "claim")
 }
 
-// StartIntent claims wi with an explicit claim intent (claim|resume|
-// takeover) and runs it to a live agent. v1.5 maps the intents onto the
-// session endpoints: "takeover" → ForceTakeover (an atomic session
-// swap, a NEW secret), everything else → the CAS SessionClaim (a paused
-// WI answers NOT_CLAIMABLE until the hub side grows an operator-unpause
-// transition — the honest refusal, never a guess; contract complaint
-// filed). The secret is minted HERE and journaled durably BEFORE the
+// StartIntent claims wi with an explicit claim intent (claim|resume) and
+// runs it to a live agent. Both map onto the CAS SessionClaim (a paused
+// or held WI answers NOT_CLAIMABLE/ALREADY_HELD — the honest refusal,
+// never a guess; a WI whose holder is dead is first force-ended by an
+// admin, `pf ops end-session`, which returns it to queued for an
+// ordinary claim). The secret is minted HERE and journaled durably BEFORE the
 // call (B1): a crash between journal and call is recoverable by replay,
 // a crash after the call by verify — the ambiguous-claim window is
 // closed from both sides.
@@ -715,7 +758,7 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		}
 		// Finding 2 (v1.5 review): a RETAINED paused record is not an
 		// active run — the start may proceed over it (startClaimed drops
-		// the dead record once the hub accepted the new claim/takeover; a
+		// the dead record once the hub accepted the new claim; a
 		// plain claim of the paused-held WI is refused by the hub's own
 		// ALREADY_HELD gate).
 	}
@@ -758,13 +801,7 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		Owner:          r.cfg.MachineID,
 		IdempotencyKey: key,
 	}
-	var resp *api.SessionClaimResponse
-	if intent == "takeover" {
-		req.Reason = "operator takeover"
-		resp, err = r.hub.ForceTakeover(wi, req)
-	} else {
-		resp, err = r.hub.SessionClaim(req)
-	}
+	resp, err := r.hub.SessionClaim(req)
 	if err != nil {
 		// the claim never opened: nothing can dangle, drop the journal
 		// entry so a restart does not replay a dead intention.
@@ -806,9 +843,9 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	r.NoteAlias(wi, id)
 	if existing := r.jobOf(id); existing != nil {
 		// Finding 2 (v1.5 review): a RETAINED paused record is not an
-		// active run — a successful takeover over it (the s11 continuation
-		// shape: the holder daemon keeps the paused record and re-takes
-		// over locally) replaces the dead record: the new session owns
+		// active run — a successful claim over it (the holder daemon kept
+		// the paused record; an admin force-ended the session and the
+		// WI was claimed again) replaces the dead record: the new session owns
 		// the WI, and prepareCapsule quarantines the old scene on the
 		// session-marker mismatch exactly as it would have after a
 		// restart release. Every other live state keeps the duplicate
@@ -828,10 +865,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", id, err)
 		}
 	}
-	// #109: a fresh daemon-minted session for this WI supersedes any
-	// adopted (externally minted) session's custody — the hub holds one
-	// session at a time and the new one is THIS daemon's.
-	r.clearAdopted(id)
 	fp := api.SessionFingerprint(sessionID)
 	if c.SessionFingerprint != "" && c.SessionFingerprint != fp {
 		// the server computed a different fingerprint for our secret: the
@@ -858,6 +891,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		bundleDigest: c.BundleDigest,
 		repos:        c.Repos,
 		item:         &resp.WorkItem,
+		origin:       r.takeOrigin(wi, id),
 	}
 	// polyforge#113: the capsule routes by the claim answer's project
 	// through the inverse mapping. An unmapped answer here (a mapping
@@ -894,8 +928,11 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	if err := r.prepareCapsule(j); err != nil {
 		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
 	}
+	if err := r.verifySealedHead(j, c); err != nil {
+		return r.abandonClaim(j, wi, err, err.Error())
+	}
 	// B2 spawn_n source: a FRESHLY CLAIMED capsule may carry another
-	// session's spawn journal (the takeover/attach clone path — the
+	// session's spawn journal (the re-claim/attach clone path — the
 	// journal rides capsule git), so the derivation counter continues
 	// where the capsule's history left off; a brand-new capsule answers
 	// 0 and the first derivation is #1.
@@ -922,13 +959,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	if starter == nil {
 		err2 := fmt.Errorf("runtime misassembly: no execution engine bound (Config.AgentStarter is nil) — the legacy in-package WI-Agent engine was deleted (polyforge#106); the daemon binds the driver bridge starter unconditionally at assembly")
 		return r.abandonClaim(j, wi, err2, err2.Error())
-	}
-	// polyforge#106: deploy-time fail-closed probe on the claim path — an
-	// in-flight legacy-only capsule (an execution.json the driver never
-	// wrote) is refused, never converted.
-	if err := r.requireDriverStampedState(j); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: %v\n", wi, err)
-		return r.abandonClaim(j, wi, err, err.Error())
 	}
 	{
 		// The derivation IS a derivation (B2): advance the counter so the
@@ -1097,11 +1127,36 @@ func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note str
 		Status:    api.StatusBlocked,
 		Note:      note,
 	}); cerr != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: session-end(blocked) after failed start failed (claiming entry kept for the next restart): %v\n", j.wi, cerr)
+		// v2-converge §6 bug 1: a clone failure is most often an
+		// unreachable aihub, so the compensation fails too — it must not
+		// be a one-shot. The journal entry (the only copy of the secret)
+		// stays, the close is retried in-process with backoff, and a
+		// restart replays the journal.
+		fmt.Fprintf(os.Stderr, "runtime: %s: session-end(blocked) after failed start failed (claiming entry kept; retrying with backoff): %v\n", j.wi, cerr)
+		r.retryClaimEnd(submitted, j.wi, j.sessionID, note)
 		return origErr
 	}
 	r.clearClaiming(submitted)
 	return origErr
+}
+
+// verifySealedHead is the cross-daemon continue guard (v2-converge §7): a
+// blocked WI claimed by a DIFFERENT machine than the one that sealed it must
+// find the sealing daemon's recorded capsule head in its fresh clone,
+// otherwise the clone is pre-blocked state (the #116 lesson) and the start
+// is refused. A same-machine continue, or a WI with no recorded seal, is
+// not gated here.
+func (r *Runtime) verifySealedHead(j *job, c api.SessionClaim) error {
+	if c.SealedHead == "" || c.SealedMachine == "" || c.SealedMachine == r.cfg.MachineID {
+		return nil
+	}
+	head, err := gitops.Head(j.git)
+	if err == nil && head == c.SealedHead {
+		return nil
+	}
+	return &api.Error{Code: api.ErrDaemonSealedHeadMismatch,
+		Detail: fmt.Sprintf("continue refused: the work item was sealed blocked by machine %q at capsule head %s, but the aihub capsule this daemon cloned is at %q (%v) — the sealing daemon's last push did not land; continue it on %q, or abandon (pf cancel)",
+			c.SealedMachine, c.SealedHead, head, err, c.SealedMachine)}
 }
 
 // prepareCapsule makes CapsuleDir a git worktree whose git-dir is EXTERNAL
@@ -1113,7 +1168,7 @@ func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note str
 // v1.5 capsule ownership: generations no longer discriminate a reusable
 // husk from a foreign scene — the session does. materialize stamps the
 // owning session's FINGERPRINT into sync/session-handle (daemon-private,
-// gitignored: it deliberately does NOT travel with a takeover clone), so:
+// gitignored: it deliberately does NOT travel with a re-claim clone), so:
 //
 //	amarker == this session's fingerprint → this session's own
 //	  crashed-Start husk (or attach-resume scene): reuse in place;
@@ -1122,34 +1177,46 @@ func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note str
 func (r *Runtime) prepareCapsule(j *job) error {
 	o := j.git
 	pointer := filepath.Join(o.CapsuleDir, ".git")
-	if isRegularFile(pointer) && dirExists(o.GitDir) {
-		if readSessionMarker(o.CapsuleDir) == j.sessionFingerprint {
-			return nil // this session's own crashed-Start husk: reuse
-		}
-		if err := quarantineCapsule(o.CapsuleDir); err != nil {
-			return err
-		}
+	if isRegularFile(pointer) && dirExists(o.GitDir) &&
+		readSessionMarker(o.CapsuleDir) == j.sessionFingerprint {
+		return nil // this session's own crashed-Start husk: reuse
 	}
-	if dirExists(o.CapsuleDir) && !isRegularFile(pointer) {
-		// unprepared husk or another session's sealed scene
-		if err := quarantineCapsule(o.CapsuleDir); err != nil {
-			return err
-		}
+	// Anything else (another session's scene, an unprepared husk, a
+	// pointer without a git-dir, an orphan git-dir with no worktree) is
+	// quarantined as ONE unit: worktree AND external git-dir move aside
+	// together, so the fresh clone can never meet a previous session's
+	// HEAD/index (a stale git-dir reused under a fresh worktree made
+	// every later push non-fast-forward).
+	if err := quarantineCapsule(o.CapsuleDir, o.GitDir); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {
 		return err
 	}
 	if err := gitops.Clone(o); err != nil {
-		// No usable remote (or a torn local state): fall back to a purely
-		// local init — gitops owns the single implementation of the
-		// init/externalize pair (the old gitops.Init was removed: it
-		// wrote the .git pointer over a live directory). The clone's own
-		// failure must not vanish with the fallback (the window rig
-		// measured exactly this: every real diagnosis lost).
+		// A clone failure may fall back to a purely local init ONLY for
+		// a WI that has never published a revision (first claim of a
+		// fresh WI, or no remote configured). For a WI with published
+		// progress an init would drop execution.json and silently
+		// restart the workflow from step 1: refuse loudly instead (the
+		// caller abandons the claim through the claiming-journal lane).
+		published, perr := gitops.RemotePublished(o)
+		switch {
+		case perr != nil:
+			return &api.Error{Code: api.ErrDaemonCapsuleClone,
+				Detail: fmt.Sprintf("capsule clone failed (%v) and the remote's published state cannot be determined (%v); refusing a local init that could restart the workflow", err, perr)}
+		case published:
+			return &api.Error{Code: api.ErrDaemonCapsuleClone,
+				Detail: fmt.Sprintf("capsule clone failed (%v) for a work item with published progress; refusing a local init that would restart the workflow from step 1", err)}
+		}
+		// Nothing published: remove any torn partial clone, then init.
+		if rerr := os.RemoveAll(o.CapsuleDir); rerr != nil {
+			return fmt.Errorf("runtime: %s: capsule clone failed (%v); cleanup: %w", j.wi, err, rerr)
+		}
 		if lerr := gitops.InitLocal(o); lerr != nil {
 			return fmt.Errorf("runtime: %s: capsule clone failed: %w", j.wi, err)
 		}
-		fmt.Fprintf(os.Stderr, "runtime: %s: capsule clone failed (%v); fell back to local init\n", j.wi, err)
+		fmt.Fprintf(os.Stderr, "runtime: %s: capsule clone failed (%v); nothing published, fell back to local init\n", j.wi, err)
 	}
 	return gitops.ExternalizeGitDir(o)
 }
@@ -1166,7 +1233,7 @@ func dirExists(p string) bool {
 
 // relSessionMarker is the capsule-local session ownership tag: the
 // fingerprint of the session that owns this worktree, under sync/ —
-// daemon-private, gitignored, so it never travels with a takeover clone
+// daemon-private, gitignored, so it never travels with a clone
 // and never reaches the revision chain.
 const relSessionMarker = "sync/session-handle"
 
@@ -1194,15 +1261,39 @@ func readSessionMarker(capsuleDir string) string {
 // deleting it (v1.5 naming, contract §4.4: capsules/<id> →
 // capsules/<id>.quarantined.<ts> — a sibling, so the scene sits next to
 // whatever replaces it and the bytes always survive).
-func quarantineCapsule(capsuleDir string) error {
+func quarantineCapsule(capsuleDir, gitDir string) error {
+	ts := strconv.FormatInt(time.Now().UnixNano(), 36)
+	// The external git-dir is part of the same unit: it moves under the
+	// same timestamp, as a sibling of the original, never deleted. The
+	// two moves are ALL-OR-NOTHING (v2-converge §6): a failed second move
+	// puts the first back, so the scene is never split between a
+	// quarantined git-dir and a live worktree pointing at it.
+	movedGit := ""
+	if gitDir != "" && dirExists(gitDir) {
+		movedGit = gitDir + ".quarantined." + ts
+		if err := renameFn(gitDir, movedGit); err != nil {
+			return err
+		}
+	}
 	if !dirExists(capsuleDir) {
 		return nil // nothing to move (a capsule never materialized)
 	}
-	ts := strconv.FormatInt(time.Now().UnixNano(), 36)
-	return os.Rename(capsuleDir, capsuleDir+".quarantined."+ts)
+	if err := renameFn(capsuleDir, capsuleDir+".quarantined."+ts); err != nil {
+		if movedGit != "" {
+			if rerr := renameFn(movedGit, gitDir); rerr != nil {
+				return fmt.Errorf("quarantine split the scene: moving the worktree failed (%w) and restoring the git-dir from %s failed (%v)", err, movedGit, rerr)
+			}
+		}
+		return fmt.Errorf("quarantine of the capsule failed, git-dir restored: %w", err)
+	}
+	return nil
 }
 
-// materialize lays out the capsule: workflows/, agents/, .pi/agents/,
+// renameFn is the filesystem move quarantineCapsule uses (a seam for the
+// injected-failure test).
+var renameFn = os.Rename
+
+// materialize lays out the capsule: workflows/, agents/,
 // capsule.json, session.json, .gitignore and the runtime-state/ tree.
 // The bundle is materialized as ONE atomic set with a completion marker
 // (F7, materialize.go): a pinned bundle digest is verified against the
@@ -1260,7 +1351,7 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 		return err
 	}
 	// v1.5: the session ownership marker — this session's fingerprint,
-	// under gitignored sync/ so a takeover clone re-stamps its own.
+	// under gitignored sync/ so a re-claim clone re-stamps its own.
 	if err := writeSessionMarker(j.capsuleDir, j.sessionFingerprint); err != nil {
 		return err
 	}
@@ -1290,9 +1381,8 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// plus a notice, never a failed spawn (see recall.go).
 	r.writeRecalledMemories(j)
 	// F7: the bundle copy is ONE atomic set with a completion marker
-	// (materialize.go): the authority copy lands under workflows/<bundle>
-	// and agents/, the harness DISCOVERY copies under .pi/agents/, and
-	// sync/materialized.json gates every later consumer.
+	// (materialize.go): the bundle lands under workflows/<bundle> and
+	// agents/, and sync/materialized.json gates every later consumer.
 	return r.materializeBundle(j)
 }
 
@@ -1357,7 +1447,7 @@ func (r *Runtime) writeWorkItemFile(j *job) error {
 }
 
 // ensureWorkItemFile repairs a capsule whose work-item.json is missing
-// (a legacy pre-F1 capsule, or a torn scene): the in-memory claim
+// (a pre-F1 capsule, or a torn scene): the in-memory claim
 // snapshot answers when present, aihub does otherwise. Best-effort — a
 // repair failure is loud but never blocks recovery.
 func (r *Runtime) ensureWorkItemFile(j *job) {
@@ -1475,22 +1565,13 @@ func atomicWriteFileMode(dst string, in io.Reader, perm os.FileMode) error {
 // with its reason) so a restart finishes the close — never a silent
 // half-seal.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
-	return r.stopWith(ctx, wi, reason, false)
-}
-
-// stopWith is Stop plus the dual-close seal knowledge: sealedByFlush
-// names a close whose final capsule state the agent's flush(wrap) path
-// has ALREADY committed and pushed, so stopOp skips its own seal push
-// (see handleOB's OBCompleted branch). The CLI close paths pass false
-// there: their seal push is the only one that ever ran.
-func (r *Runtime) stopWith(ctx context.Context, wi, reason string, sealedByFlush bool) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	j := r.resolveJob(wi)
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
-	return r.stopOp(ctx, j, reason, false, sealedByFlush)
+	return r.stopOp(ctx, j, reason, false, false)
 }
 
 // supersedeOp is the OBSuperseded response (v1.5 M4 + m3): the periodic
@@ -1500,8 +1581,9 @@ func (r *Runtime) stopWith(ctx context.Context, wi, reason string, sealedByFlush
 // STALE and a blocked verdict would sabotage the new owner), runs NO
 // recovery, and instead: kills the local tree, quarantines the capsule
 // in place (capsules/<id>.quarantined.<ts>), drops the state.json record
-// and emits the owner-visible event — the answer ledger did not travel,
-// so "answers may be lost; question re-opened" (m3).
+// and emits the owner-visible event — the local capsule (and any answers
+// recorded in it) did not travel, so "answers may be lost; question
+// re-opened" (m3).
 func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
@@ -1511,7 +1593,7 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 		return
 	}
 	r.killAgentTree(j)
-	if err := quarantineCapsule(j.capsuleDir); err != nil {
+	if err := quarantineCapsule(j.capsuleDir, j.git.GitDir); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: superseded capsule quarantine failed (scene left in place): %v\n", j.wi, err)
 	}
 	r.dropJob(j)
@@ -1527,7 +1609,7 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	}
 	// Finding 4 (v1.5 review, MINOR): the observe release. Without it the
 	// superseded monitor loop never stops (a 500ms goroutine leaked per
-	// takeover), the latestSpawn entry is never pruned and the answer
+	// supersession), the latestSpawn entry is never pruned and the answer
 	// ledger never forgets the work item. RTFinished(superseded) is the
 	// same release message stopOp sends — observe stops the monitor,
 	// prunes the fence map and drops the ledger entries. It also closes
@@ -1540,7 +1622,7 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	_ = ctx
 }
 
-func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, sealedByFlush bool) error {
+func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, alreadyPushed bool) error {
 	// Finding 2 (v1.5 review, MAJOR): the operator pause is its own close.
 	// It does NOT pass through SEALING (no terminal verdict follows), it
 	// retains the record (the secret must survive locally for the M3
@@ -1549,7 +1631,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// job — a repeat pause is answered by the daemon's already-paused
 	// graceful path before it ever gets here.
 	if reason == protocol.FinishPaused && !alreadySealing {
-		return r.pauseOp(ctx, j, sealedByFlush)
+		return r.pauseOp(ctx, j, alreadyPushed)
 	}
 	if !alreadySealing {
 		// Closing a RETAINED paused record (wrap/fail after an operator
@@ -1563,7 +1645,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		if fromPaused {
 			j.mu.Lock()
 			j.stopReason = reason
-			j.sealedPush = sealedByFlush
+			j.sealedPush = alreadyPushed
 			j.mu.Unlock()
 			r.persist()
 		} else {
@@ -1572,10 +1654,10 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 			}
 			j.mu.Lock()
 			j.stopReason = reason
-			// Persisted with the reason: a daemon crash between the flush's
+			// Persisted with the reason: a daemon crash between the earlier
 			// push and SessionEnd must not make the restart's stop finisher
 			// re-push either.
-			j.sealedPush = sealedByFlush
+			j.sealedPush = alreadyPushed
 			j.mu.Unlock()
 			r.persist()
 		}
@@ -1583,15 +1665,13 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// Six-layer teardown: no writer survives into the sealed scene.
 	r.killAgentTree(j)
 
-	// Final push (flush(wrap) semantics, §五) — UNLESS the flush path
-	// already sealed: then the final state is committed, pushed and
-	// published, the transcript rode that push, and a second push can
-	// only fail against the revoked attempt credential (the real-machine
-	// push_failed one second after a successful wrap push). Only the
-	// read-only seal and the terminal close remain for this half of the
-	// dual path.
+	// Final push (§五) — UNLESS the final state was already committed
+	// and pushed (alreadyPushed: the terminal close of recover.go, the
+	// C3 engine published the terminal execution.json): a second push
+	// can only race it or fail against the revoked attempt credential.
+	// Only the read-only seal and the terminal close remain.
 	finalReason := reason
-	if !sealedByFlush {
+	if !alreadyPushed {
 		// F3: the dead derivation's live transcript rides the seal commit
 		// (C1) — sync before the push, best-effort.
 		r.syncTranscriptBeforeSeal(j)
@@ -1682,13 +1762,13 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 // that shape (verify matches + running + a local Paused record →
 // resume through the recovery engine), so the error is loud but never
 // a dangling half-close.
-func (r *Runtime) pauseOp(ctx context.Context, j *job, sealedByFlush bool) error {
+func (r *Runtime) pauseOp(ctx context.Context, j *job, alreadyPushed bool) error {
 	if err := j.transition(StatePaused); err != nil {
 		return err
 	}
 	j.mu.Lock()
 	j.stopReason = protocol.FinishPaused
-	j.sealedPush = sealedByFlush
+	j.sealedPush = alreadyPushed
 	j.cleanPause = true
 	j.mu.Unlock()
 	r.persist()
@@ -1705,7 +1785,7 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job, sealedByFlush bool) error
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	if !sealedByFlush {
+	if !alreadyPushed {
 		// F3: the dead derivation's live transcript rides the pause commit
 		// (C1) — sync before the push, best-effort.
 		r.syncTranscriptBeforeSeal(j)

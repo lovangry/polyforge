@@ -23,7 +23,7 @@ output:
           kind: { type: string, enum: [repro-log, code, test, experiment, doc] }
           ref: { type: string, description: "file path, symbol, log excerpt location, or experiment command" }
           detail: { type: string, description: what this item shows and how it supports or bounds the causal claim }
-      description: "The concrete evidence backing the causal claim - at least one item is required (minItems 1) and every item must carry a non-empty detail; an empty or hand-wavy list is grounds for the WI Agent to treat the verdict as dishonest."
+      description: "The concrete evidence backing the causal claim - at least one item is required (minItems 1) and every item must carry a non-empty detail; an empty or hand-wavy list is grounds to treat the verdict as dishonest."
     fail_reason:
       type: string
       description: Required when verdict is fail - what evidence was missing, carried back to repro as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.

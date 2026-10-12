@@ -3,7 +3,7 @@ package memory
 // reconcile_batched_phase_test.go (polyforge#129 rewind): regression
 // guards for the NON-steady-state (batched) phase of the reconcile — the
 // full-rebuild pass a pre-#129 database degrades to on first boot after
-// the upgrade, plus index repair and migrate-memories. The phase is the
+// the upgrade, plus index repair. The phase is the
 // bulk of every such pass (root-cause E1: ~99% of the old pass was the
 // two FTS rewrite loops), and the first fix attempt left two blocking
 // gaps in exactly this phase:

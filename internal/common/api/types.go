@@ -4,10 +4,10 @@
 // docs/design/polyforge-vnext/v1.5-api-contract.md, over the v1
 // architecture baseline).
 //
-// v1 deltas vs v0 (frozen under /v0):
+// v1 deltas vs v0 (removed from the tree; in git history):
 //   - SYNC-* and revision-chain endpoints are deleted (git IS the chain).
 //   - New GIT-* error codes for the git-http-backend proxy surface.
-//   - DAEMON-* codes retained; publish_request becomes flush(reason).
+//   - DAEMON-* codes retained; publish_request is deleted.
 package api
 
 import (
@@ -149,7 +149,7 @@ type ListResponse[T any] struct {
 // ---------------------------------------------------------------------------
 // v1.5 session model wire types (docs/design/polyforge-vnext/v1.5-api-contract.md).
 
-// SessionClaim is the v1.5 claim/attach/takeover response envelope. The
+// SessionClaim is the v1.5 claim/attach response envelope. The
 // session_id is a SECRET minted by the daemon; it is never echoed here —
 // only its public fingerprint travels (B3 identity/credential split).
 type SessionClaim struct {
@@ -161,6 +161,12 @@ type SessionClaim struct {
 	BundleDigest       string        `json:"bundle_digest"`
 	ClaimedAt          string        `json:"claimed_at"`
 	Repos              []ProjectRepo `json:"repos,omitempty"`
+	// SealedHead/SealedMachine are the blocked verdict's recorded capsule
+	// head and the machine that sealed it (v2-converge §7); empty unless
+	// the WI was last closed blocked with a head. A claim by another
+	// machine must find exactly this head in its clone or refuse.
+	SealedHead    string `json:"sealed_head,omitempty"`
+	SealedMachine string `json:"sealed_machine,omitempty"`
 }
 
 // SessionClaimResponse wraps SessionClaim plus the full WorkItem.
@@ -169,16 +175,20 @@ type SessionClaimResponse struct {
 	WorkItem WorkItem     `json:"work_item"`
 }
 
-// SessionClaimRequest is the CAS claim body (also force-takeover, where
-// Reason is required). session_id is the client-minted secret, journaled
-// durably BEFORE this call (B1).
+// SessionClaimRequest is the CAS claim body. session_id is the
+// client-minted secret, journaled durably BEFORE this call (B1).
 type SessionClaimRequest struct {
 	WorkItemID     string `json:"work_item_id"`
 	SessionID      string `json:"session_id"`
 	MachineID      string `json:"machine_id"`
 	Owner          string `json:"owner"`
-	Reason         string `json:"reason,omitempty"` // takeover only; required there
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+// ForceEndSessionRequest is the admin/maintainer force-end body (reason
+// required; it lands in the session_superseded audit event).
+type ForceEndSessionRequest struct {
+	Reason string `json:"reason"`
 }
 
 // SessionAttachRequest resumes a paused WI under the SAME session (M3:
@@ -210,12 +220,18 @@ type SessionVerifyResponse struct {
 // terminal verdict sets the status and clears the session row entirely.
 type SessionEndRequest struct {
 	SessionID string `json:"session_id"`
-	Status    string `json:"status"` // wrapped|failed|blocked|paused
+	Status    string `json:"status"` // wrapped|failed|canceled|blocked|paused (canceled: the abandon of a repair_pending WI, ended by its holder daemon)
 	Note      string `json:"note,omitempty"`
 	// CleanPause rides the paused verdict only (merge amend: the atomic
 	// pause transition — session KEPT, clean_pause set — is the M3 pause;
 	// true = operator pause, restart must not auto-resume).
 	CleanPause bool `json:"clean_pause,omitempty"`
+	// HeadSHA rides the blocked verdict only (v2-converge §7): the capsule
+	// revision-chain head the sealing daemon holds locally after its
+	// best-effort commit+push. aihub records it (with the session's
+	// machine) so a continue claimed by a DIFFERENT daemon can refuse a
+	// clone whose head is not this one (the #116 stale-state hazard).
+	HeadSHA string `json:"head_sha,omitempty"`
 }
 
 // SessionHolderResponse is the §1.7 public holder read

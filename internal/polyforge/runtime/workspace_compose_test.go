@@ -25,20 +25,20 @@ func frontmatterBundle(t *testing.T, frontmatter string) (workflowsDir, pinned s
 	t.Helper()
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "demo-bundle")
-	if err := os.MkdirAll(filepath.Join(bundle, "agents"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(bundle, "steps"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(frontmatter), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bundle, "agents", "step.md"), []byte("do the thing\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(bundle, "steps", "step.md"), []byte("do the thing\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	fmSum := sha256.Sum256([]byte(frontmatter))
 	stepSum := sha256.Sum256([]byte("do the thing\n"))
 	pinned = workflow.Digest([]workflow.FileEntry{
 		{Path: "workflow.md", Sha256: hex.EncodeToString(fmSum[:]), Bytes: uint64(len(frontmatter))},
-		{Path: "agents/step.md", Sha256: hex.EncodeToString(stepSum[:]), Bytes: 13},
+		{Path: "steps/step.md", Sha256: hex.EncodeToString(stepSum[:]), Bytes: 13},
 	})
 	return dir, pinned
 }

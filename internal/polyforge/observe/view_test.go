@@ -11,16 +11,12 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
-// armQuestion records an open pending question through the kept
-// flush(needs_input) face (the answer-relay helpers died with the
-// relay, polyforge#106).
+// armQuestion records an open pending question through execution.json
+// (the driver's own write; the exec_committed fact makes the monitor
+// project it).
 func armQuestion(t *testing.T, m *Monitor, qid string) {
 	t.Helper()
-	fc := FlushCall{Req: protocol.FlushRequest{SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: qid, Question: "pick one"}, Resp: make(chan protocol.FlushAck, 1)}
-	m.flushCh <- fc
-	if ack := <-fc.Resp; !ack.OK {
-		t.Fatalf("needs_input ack: %+v", ack)
-	}
+	writePendingQuestion(t, m, qid, "pick one", "code")
 }
 
 func TestJobViewProjectionFromExecutionFile(t *testing.T) {
@@ -94,7 +90,11 @@ func TestJobViewDegradesWithoutExecutionFile(t *testing.T) {
 func TestEventsFileShapeIsJSONLEventEntry(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, nil)
-	armQuestion(t, m, "q_file")
+	// a driver event lands in the same durable log through the daemon's
+	// binding (the driver's EventLogger IS EventLog.Append)
+	if err := m.log.Append("wi_test", EvNeedsInput, map[string]any{"question_id": "q_file", "step": "code"}); err != nil {
+		t.Fatal(err)
+	}
 
 	// The durable record: every ring entry exists as ONE JSONL line in
 	// the daemon data dir, parseable as protocol.EventEntry.
@@ -141,7 +141,7 @@ func TestEventRingBounded(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, nil)
 	for i := 0; i < RingCap+50; i++ {
-		if err := m.log.Append("wi_ring", EvInfraIncident, nil); err != nil {
+		if err := m.log.Append("wi_ring", "t_event", nil); err != nil {
 			t.Fatal(err)
 		}
 	}

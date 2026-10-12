@@ -5,8 +5,8 @@ package observe
 //
 //   - matches == false → OBSuperseded reaches the runtime channel, an
 //     event records the new holder's fingerprint, and the monitor
-//     stops supervising (detection suppressed, flushes refused with
-//     the STALE_SPAWN shape) while making NO hub transition. Since
+//     stops supervising (detection suppressed) while making NO hub
+//     transition. Since
 //     Finding 1(b) (v1.5 review) the emission is RETRYABLE: while the
 //     supersession latch is set the revalidation keeps running and
 //     every unmatched verdict re-emits OBSuperseded (the event face
@@ -21,6 +21,7 @@ package observe
 import (
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,12 +31,12 @@ import (
 
 // fakeVerifier is the SessionVerifier test double.
 type fakeVerifier struct {
-	calls int
+	calls atomic.Int64
 	ans   func(wi, sid string) (*api.SessionVerifyResponse, error)
 }
 
 func (f *fakeVerifier) SessionVerify(wi, sid string) (*api.SessionVerifyResponse, error) {
-	f.calls++
+	f.calls.Add(1)
 	return f.ans(wi, sid)
 }
 
@@ -47,7 +48,6 @@ func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, c
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.revalidate = cadence
 		c.verify = verifier
-		c.HangWindow = time.Hour // keep the hang probe out of the way
 	})
 	// The session id rides the RTStarted/RTRecovered message in
 	// production; re-attach through rtCh so the monitor goroutine
@@ -68,7 +68,7 @@ func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, c
 // TestRevalidateMismatchSupersedes: matches=false → OBSuperseded is
 // emitted (carrying the new holder's fingerprint as the m4 audit), the
 // session_superseded VERDICT event lands exactly once, and the monitor
-// refuses further flushes with the stale shape — superseded, not
+// stops supervising (detection suppressed) — superseded, not
 // terminal: no OBCompleted and no hub transition (the fake verifier's
 // call log is the only server contact).
 func TestRevalidateMismatchSupersedes(t *testing.T) {
@@ -121,14 +121,12 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 	// The revalidation really is still running: the verify calls grew
 	// past one (the old contract asserted exactly 1 here — the fire-once
 	// shape the review's Finding 1 deleted).
-	if verifier.calls < 2 {
-		t.Fatalf("verify calls after supersession: %d, want >= 2 (the re-emission engine)", verifier.calls)
+	if verifier.calls.Load() < 2 {
+		t.Fatalf("verify calls after supersession: %d, want >= 2 (the re-emission engine)", verifier.calls.Load())
 	}
 
-	// polyforge#106: the superseded session's flush refusal (the
-	// STALE_SPAWN shape) is retired with the legacy flush fence — the
-	// superseded monitor's protective surface is the server-side push
-	// fencing, not a local refusal.
+	// The superseded monitor's protective surface is the server-side
+	// push fencing, not a local refusal.
 }
 
 // TestRevalidateMatchIsQuiet: matches=true → no OB message, no event,
@@ -143,17 +141,12 @@ func TestRevalidateMatchIsQuiet(t *testing.T) {
 	if n := len(eventsOf(m, EvSessionSuperseded)); n != 0 {
 		t.Fatalf("no session_superseded event may land on a match: %d", n)
 	}
-	if verifier.calls == 0 {
+	if verifier.calls.Load() == 0 {
 		t.Fatal("the revalidation never ran")
 	}
-	// The live derivation's flushes keep working.
-	ack := doFlush(m, FlushCall{
-		Req:  protocol.FlushRequest{WorkItem: "wi_test", SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: "q_m", Question: "ok?"},
-		Resp: make(chan protocol.FlushAck, 1),
-	})
-	if !ack.OK {
-		t.Fatalf("live flush after a matching verify: %+v", ack)
-	}
+	// The live derivation keeps being observed: a pending question
+	// persisted in execution.json is still projected.
+	writePendingQuestion(t, m, "q_m", "ok?", "code")
 }
 
 // TestRevalidateTransportErrorNeverActs: a verify that fails on the
@@ -177,17 +170,11 @@ func TestRevalidateTransportErrorNeverActs(t *testing.T) {
 	// The retry fires (calls grow past 1 within the backoff bound —
 	// the shrunk cadence caps the error backoff at the cadence).
 	soon(t, 2*time.Second, "the verify was never retried", func() bool {
-		return verifier.calls >= 2
+		return verifier.calls.Load() >= 2
 	})
-	// The monitor still behaves normally: the live derivation's flush
-	// keeps its ordinary path.
-	ack := doFlush(m, FlushCall{
-		Req:  protocol.FlushRequest{WorkItem: "wi_test", SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: "q_t", Question: "ok?"},
-		Resp: make(chan protocol.FlushAck, 1),
-	})
-	if !ack.OK {
-		t.Fatalf("live flush after transport errors: %+v", ack)
-	}
+	// The monitor still behaves normally: the exec_committed-triggered read keeps
+	// projecting a pending question.
+	writePendingQuestion(t, m, "q_t", "ok?", "code")
 }
 
 // TestRevalidateDisabledWithoutVerifier: no verifier bound (the
@@ -210,12 +197,11 @@ func TestRevalidateSkipsWithoutSessionID(t *testing.T) {
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.revalidate = 20 * time.Millisecond
 		c.verify = verifier
-		c.HangWindow = time.Hour
 	})
 	_ = m
 	expectNoOB(t, ob, 150*time.Millisecond, "OBSuperseded for a session-less attachment")
-	if verifier.calls != 0 {
-		t.Fatalf("a session-less attachment must not be verified: %d calls", verifier.calls)
+	if verifier.calls.Load() != 0 {
+		t.Fatalf("a session-less attachment must not be verified: %d calls", verifier.calls.Load())
 	}
 }
 

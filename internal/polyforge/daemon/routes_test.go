@@ -7,7 +7,6 @@ package daemon
 // envelope).
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -21,7 +20,6 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
-	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
 // TestSubmitAndStatus pins the claim round trip: SubmitResponse shape,
@@ -38,7 +36,7 @@ func TestSubmitAndStatus(t *testing.T) {
 	if err := json.Unmarshal(raw, &st); err != nil {
 		t.Fatalf("status undecodable: %v", err)
 	}
-	if st.MachineID != "m-test" || st.Mode != protocol.ModeInteractive || st.ShuttingDown {
+	if st.MachineID != "m-test" || st.Auto || st.ShuttingDown {
 		t.Fatalf("status head = %+v", st)
 	}
 	// #113: the status carries the mapped workspace SET.
@@ -57,82 +55,10 @@ func TestSubmitAndStatus(t *testing.T) {
 	}
 }
 
-// TestAdoptSessionCustody (#109): the adopt-session route verify-backs
-// the handoff against the hub (only the LIVE holder's secret is
-// adopted), journals the custody durably, and answers the PUBLIC
-// fingerprint — never the secret.
-func TestAdoptSessionCustody(t *testing.T) {
-	td := newTestDaemon(t, nil)
-	const wi = "wi_adopt"
-	const secret = "abababababababababababababababababababababababababababababababab"
-	// The hub names the presented secret as the live holder (the CLI
-	// takeover's swap landed first — the production order of events).
-	td.hub.mu.Lock()
-	td.hub.held[wi] = secret
-	td.hub.status[wi] = api.StatusRunning
-	td.hub.mu.Unlock()
-
-	raw, err := td.client.AdoptSession(wi, cli.AdoptSessionRequest{SessionID: secret, Owner: "op", Reason: "custody test"})
-	if err != nil {
-		t.Fatalf("adopt: %v", err)
-	}
-	var ar struct {
-		Adopted            bool   `json:"adopted"`
-		WorkItemID         string `json:"work_item_id"`
-		SessionFingerprint string `json:"session_fingerprint"`
-	}
-	if err := json.Unmarshal(raw, &ar); err != nil {
-		t.Fatalf("adopt answer undecodable: %v (%s)", err, raw)
-	}
-	if !ar.Adopted || ar.WorkItemID != wi || ar.SessionFingerprint != api.SessionFingerprint(secret) {
-		t.Fatalf("adopt answer = %+v", ar)
-	}
-	// Custody is durable: the journal carries the secret (the anchor a
-	// restart's reconciliation verifies against the hub).
-	rec := readAdoptedJournal(t, td.cfg.DataDir, wi)
-	if rec == nil || rec.SessionID != secret || rec.MachineID != "m-test" {
-		t.Fatalf("custody journal = %+v, want the adopted secret under m-test", rec)
-	}
-
-	// A foreign secret is refused (verify-backed) and never replaces the
-	// journalled custody.
-	if _, err := td.client.AdoptSession(wi, cli.AdoptSessionRequest{SessionID: strings.Repeat("ff", 32)}); err == nil {
-		t.Fatal("adopt of a non-holder secret must fail")
-	}
-	if rec := readAdoptedJournal(t, td.cfg.DataDir, wi); rec == nil || rec.SessionID != secret {
-		t.Fatalf("refused adoption must not touch the journal: %+v", rec)
-	}
-}
-
-// readAdoptedJournal reads one work item's custody entry from the
-// daemon's adopted.json journal under dataDir (nil when absent). The
-// journal shape is pinned here field by field (the runtime owns the
-// type; this decode is the wire contract's guard).
-func readAdoptedJournal(t *testing.T, dataDir, wi string) *adoptedJournalRec {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(dataDir, "adopted.json"))
-	if err != nil {
-		t.Fatalf("adopted journal: %v", err)
-	}
-	var af struct {
-		Items map[string]*adoptedJournalRec `json:"items"`
-	}
-	if err := json.Unmarshal(raw, &af); err != nil {
-		t.Fatalf("adopted journal unparsable: %v", err)
-	}
-	return af.Items[wi]
-}
-
-type adoptedJournalRec struct {
-	WorkItemID string `json:"work_item_id"`
-	SessionID  string `json:"session_id"`
-	MachineID  string `json:"machine_id"`
-}
-
 // TestObserveAnswerFlush walks the observe lane's own routes end to end
-// through the daemon socket: JobView, flush(needs_input), the pending
-// projection, the answer relay consumed by the (fake) agent.
-func TestObserveAnswerFlush(t *testing.T) {
+// through the daemon socket: JobView, a driver-persisted pending question
+// projected from execution.json, and the answer route's refusal.
+func TestObserveAnswerPending(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_b")
 	td.waitMonitored(t, "wi_b")
@@ -152,22 +78,20 @@ func TestObserveAnswerFlush(t *testing.T) {
 		t.Fatalf("job view missing spawn/events: %+v", jv)
 	}
 
-	// The agent's needs_input lifeline (ruling C2: UDS proxy).
-	fraw, err := td.client.Flush("wi_b", protocol.FlushRequest{
-		WorkItem: "wi_b", SpawnN: jv.SpawnN,
-		Reason: protocol.FlushNeedsInput, QuestionID: "q_abc123",
-		Question: "which flavor?", Step: "spec",
-	})
-	if err != nil {
-		t.Fatalf("flush(needs_input): %v", err)
-	}
-	var ack protocol.FlushAck
-	if err := json.Unmarshal(fraw, &ack); err != nil || !ack.OK {
-		t.Fatalf("flush(needs_input) ack = %s (%v)", fraw, err)
+	// The driver parks on a question: pending_question lands in
+	// execution.json and the monitor's poll projects it.
+	td.seedPendingQuestion(t, "wi_b", "q_abc123", "spec", "which flavor?")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		raw, _ = td.client.Observe("wi_b", 0)
+		jv = protocol.JobView{}
+		json.Unmarshal(raw, &jv)
+		if jv.Pending != nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	raw, _ = td.client.Observe("wi_b", 0)
-	json.Unmarshal(raw, &jv)
 	if jv.Status != protocol.JobNeedsInput || jv.Pending == nil || jv.Pending.ID != "q_abc123" {
 		t.Fatalf("needs_input projection = %s / %+v", jv.Status, jv.Pending)
 	}
@@ -187,72 +111,13 @@ func TestObserveAnswerFlush(t *testing.T) {
 	if !errors.As(aerr, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "bridge") {
 		t.Fatalf("answer error = %v, want the typed no-bridge-handle 409", aerr)
 	}
-	// Nothing reached the agent: no relay executed.
-	if n := len(td.spawner.agentOf(0).sentMethods()); n != 0 {
-		t.Fatalf("a relay reached the agent (%v) — none may execute", td.spawner.agentOf(0).sentMethods())
-	}
 }
 
-// TestWrapDualPathArbitration is the load-bearing close arbitration:
-// the CLI wrap (Runtime.Stop) and the agent's flush(wrap) (Observe →
-// OBCompleted → Runtime) racing on one work item must produce exactly
-// one winner; the late arrival answers the typed DAEMON-409.
-func TestWrapDualPathArbitration(t *testing.T) {
-	// (a) flush(wrap) first, its commit+push deliberately slow so the
-	// seal guard is observably held; the CLI wrap must get DAEMON-409.
-	td := newTestDaemon(t, func(c *Config) {
-		c.PushFunc = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
-			time.Sleep(400 * time.Millisecond)
-			return gitops.CommitPush(o, msg)
-		}
-	})
-	td.submitClaim(t, "wi_c")
-	td.waitMonitored(t, "wi_c")
-	// The flush face is attempt-fenced (#8): play the agent with its
-	// CURRENT attempt id, as the live one would.
-	craw, err := td.client.Observe("wi_c", 0)
-	if err != nil {
-		t.Fatalf("observe wi_c: %v", err)
-	}
-	var cjv protocol.JobView
-	if err := json.Unmarshal(craw, &cjv); err != nil || cjv.SpawnN == 0 {
-		t.Fatalf("wi_c view undecodable: %v (%s)", err, craw)
-	}
-
-	flushDone := make(chan error, 1)
-	go func() {
-		_, err := td.client.Flush("wi_c", protocol.FlushRequest{
-			WorkItem: "wi_c", SpawnN: cjv.SpawnN,
-			Reason: protocol.FlushWrap, FinalStatus: "wrapped",
-		})
-		flushDone <- err
-	}()
-	// Let the flush claim the guard (its first action on the route).
-	time.Sleep(120 * time.Millisecond)
-	if _, err := td.client.Wrap("wi_c", "wrap"); err == nil {
-		t.Fatal("concurrent CLI wrap succeeded; want DAEMON-409")
-	} else {
-		var ae *api.Error
-		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict {
-			t.Fatalf("CLI wrap error = %v, want DAEMON-409", err)
-		}
-	}
-	if err := <-flushDone; err != nil {
-		t.Fatalf("flush(wrap) winner failed: %v", err)
-	}
-	// The winner sealed exactly once: one end-generation, terminal.
-	waitGone(t, td, "wi_c")
-	if td.hub.endCount() != 1 {
-		t.Fatalf("end-generation calls = %d, want 1", td.hub.endCount())
-	}
-	if st := td.hub.lastEnd().Status; st != protocol.FinishWrapped {
-		t.Fatalf("end status = %q, want wrapped", st)
-	}
-
-	// (b) the reverse: CLI wrap first with the server-side end call
-	// parked, so the wrap route holds the guard in sealing; the agent's
-	// flush(wrap) must get DAEMON-409; releasing the park completes the
-	// wrap as the winner.
+// TestCloseArbitration is the load-bearing close arbitration: a CLI wrap
+// holding the seal guard (its server-side end call parked) makes a
+// concurrent wrap and a concurrent pause answer the typed DAEMON-409;
+// releasing the park completes the first wrap as the one winner.
+func TestCloseArbitration(t *testing.T) {
 	td2 := newTestDaemon(t, nil)
 	td2.hub.mu.Lock()
 	td2.hub.blockEnd = make(chan struct{})
@@ -266,23 +131,17 @@ func TestWrapDualPathArbitration(t *testing.T) {
 		wrapDone <- err
 	}()
 	waitState(t, td2, "wi_d", "sealing")
-	draw, err := td2.client.Observe("wi_d", 0)
-	if err != nil {
-		t.Fatalf("observe wi_d: %v", err)
-	}
-	var djv protocol.JobView
-	if err := json.Unmarshal(draw, &djv); err != nil || djv.SpawnN == 0 {
-		t.Fatalf("wi_d view undecodable: %v (%s)", err, draw)
-	}
-	if _, err := td2.client.Flush("wi_d", protocol.FlushRequest{
-		WorkItem: "wi_d", SpawnN: djv.SpawnN,
-		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
-	}); err == nil {
-		t.Fatal("flush(wrap) during the CLI close succeeded; want DAEMON-409")
-	} else {
+	for name, call := range map[string]func() error{
+		"wrap":  func() error { _, err := td2.client.Wrap("wi_d", "wrap"); return err },
+		"pause": func() error { _, err := td2.client.Pause("wi_d"); return err },
+	} {
+		err := call()
+		if err == nil {
+			t.Fatalf("concurrent %s during the CLI close succeeded; want DAEMON-409", name)
+		}
 		var ae *api.Error
 		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict {
-			t.Fatalf("flush(wrap) error = %v, want DAEMON-409", err)
+			t.Fatalf("concurrent %s error = %v, want DAEMON-409", name, err)
 		}
 	}
 	close(td2.hub.blockEnd)
@@ -290,6 +149,9 @@ func TestWrapDualPathArbitration(t *testing.T) {
 		t.Fatalf("CLI wrap winner failed: %v", err)
 	}
 	waitGone(t, td2, "wi_d")
+	if td2.hub.endCount() != 1 {
+		t.Fatalf("end-generation calls = %d, want 1", td2.hub.endCount())
+	}
 }
 
 // TestWrapAlreadyTerminalGraceful: a wrap of an already-sealed work item
@@ -304,8 +166,10 @@ func TestResumeBlockedOwnerMove(t *testing.T) {
 	const wi = "wi_parked"
 	// The hub names the WI blocked with no session (the bounded close's
 	// shape — M2).
+	// The CLI has already landed the hub's resume-blocked door with the
+	// human's credential: the WI is queued when the daemon route runs.
 	td.hub.mu.Lock()
-	td.hub.status[wi] = api.StatusBlocked
+	td.hub.status[wi] = api.StatusQueued
 	td.hub.mu.Unlock()
 	mkBare(t, td.cfg.GitRemoteBase, wi)
 
@@ -324,11 +188,10 @@ func TestResumeBlockedOwnerMove(t *testing.T) {
 		t.Fatalf("resume-blocked answer = %+v, want resumed for %s", rr, wi)
 	}
 	td.waitLive(t, wi)
-	// The hub door landed exactly once (blocked → queued; the claim went
-	// live after it).
+	// The daemon must NOT call the hub's resume door with its machine key.
 	td.hub.mu.Lock()
-	if len(td.hub.resumeBlockeds) != 1 || td.hub.resumeBlockeds[0] != wi {
-		t.Fatalf("the hub resume door fired %v, want once for %s", td.hub.resumeBlockeds, wi)
+	if len(td.hub.resumeBlockeds) != 0 {
+		t.Fatalf("the daemon route fired the hub resume door %v; the human's CLI owns that call", td.hub.resumeBlockeds)
 	}
 	td.hub.mu.Unlock()
 
@@ -351,20 +214,14 @@ func TestTerminateBlockedOwnerVerdict(t *testing.T) {
 	td.hub.status[wi] = api.StatusBlocked
 	td.hub.mu.Unlock()
 
-	raw, err := td.client.Wrap(wi, "fail")
-	if err != nil {
-		t.Fatalf("wrap --fail on a parked workflow: %v", err)
-	}
-	var cr closeResponse
-	if err := json.Unmarshal(raw, &cr); err != nil {
-		t.Fatalf("wrap answer undecodable: %v", err)
-	}
-	if cr.Outcome != "terminated" || cr.Status != "failed" || cr.Reason != "failed" {
-		t.Fatalf("the terminate verdict answer = %+v, want terminated/failed", cr)
+	// `--fail` on a parked workflow is landed by the CLI with the human's
+	// key; the daemon route refuses with a hint and never calls the door.
+	if _, err := td.client.Wrap(wi, "fail"); err == nil || !strings.Contains(err.Error(), "your own credential") {
+		t.Fatalf("daemon wrap --fail on a parked workflow must refuse with the CLI hint, got %v", err)
 	}
 	td.hub.mu.Lock()
-	if len(td.hub.terminateBlockeds) != 1 || td.hub.terminateBlockeds[0] != wi {
-		t.Fatalf("the hub terminate door fired %v, want once for %s", td.hub.terminateBlockeds, wi)
+	if len(td.hub.terminateBlockeds) != 0 {
+		t.Fatalf("the daemon fired the hub terminate door %v with its machine key", td.hub.terminateBlockeds)
 	}
 	td.hub.mu.Unlock()
 
@@ -439,30 +296,10 @@ func TestPauseResume(t *testing.T) {
 	}
 }
 
-// TestTakeoverAndErrorEnvelope: the takeover intent reaches the claim
-// call; unknown targets answer the top-level api.Error envelope
-// (DAEMON-404), which the CLI client decodes as a typed error.
-func TestTakeoverAndErrorEnvelope(t *testing.T) {
+// TestErrorEnvelope: unknown targets answer the top-level api.Error
+// envelope (DAEMON-404), which the CLI client decodes as a typed error.
+func TestErrorEnvelope(t *testing.T) {
 	td := newTestDaemon(t, nil)
-	mkBare(t, td.cfg.GitRemoteBase, "wi_g")
-	// The takeover intent reaches the aihub claim call.
-	if _, err := td.client.Takeover("wi_g", "normal"); err != nil {
-		t.Fatalf("takeover: %v", err)
-	}
-	td.waitLive(t, "wi_g")
-	// v1.5: the takeover intent reaches the ForceTakeover endpoint with a
-	// freshly minted session secret and a reason.
-	td.hub.mu.Lock()
-	var last api.SessionClaimRequest
-	if len(td.hub.takeovers) > 0 {
-		last = td.hub.takeovers[len(td.hub.takeovers)-1]
-	}
-	nTakeovers := len(td.hub.takeovers)
-	td.hub.mu.Unlock()
-	if nTakeovers != 1 || last.Reason == "" || len(last.SessionID) != 64 {
-		t.Fatalf("takeover must reach ForceTakeover with a reason and a fresh 64-hex secret, got %d calls %+v", nTakeovers, last)
-	}
-
 	// Typed 404 for an unknown work item (the envelope shape the CLI
 	// decodes): no local job + aihub lookup fails.
 	td.hub.mu.Lock()
@@ -478,80 +315,42 @@ func TestTakeoverAndErrorEnvelope(t *testing.T) {
 	}
 }
 
-// TestOpsModesAndGetRecommendation: mode switching over UDS, the batch
-// recommendation shape, mode-exclusion refusals.
-func TestOpsModesAndGetRecommendation(t *testing.T) {
+// TestOpsAutoAndMax: the auto switch and the max number over UDS; manual
+// submits stay legal while auto is on; bad input and shutdown refusals.
+func TestOpsAutoAndMax(t *testing.T) {
 	td := newTestDaemon(t, nil)
-	// get_recommendation: {items:[...]} — every field of api.WorkItem.
-	want := []api.WorkItem{{
-		ID: "wi_1", Slug: "wi-1", ProjectName: "proj", Goal: "do a thing",
-		Status: api.StatusQueued, Priority: api.PriorityHigh,
-		Labels: []string{"x"}, BundleName: strp("demo-bundle"),
-	}}
-	td.hub.mu.Lock()
-	td.hub.queues = want
-	td.hub.mu.Unlock()
-	raw, err := td.client.Mode(cli.ModeRequest{Action: "get_recommendation"})
+	on, off, two := true, false, 2
+	raw, err := td.client.OpsConfig(cli.OpsConfigRequest{Auto: &on, Max: &two})
 	if err != nil {
-		t.Fatalf("get_recommendation: %v", err)
+		t.Fatalf("ops config: %v", err)
 	}
-	var rec struct {
-		Items []api.WorkItem `json:"items"`
-		Total int            `json:"total"`
+	var r opsConfigResponse
+	if err := json.Unmarshal(raw, &r); err != nil || !r.Auto || r.Max != 2 {
+		t.Fatalf("ops config answer = %s (%v)", raw, err)
 	}
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		t.Fatalf("recommendation undecodable: %v", err)
+	if !td.modes.Auto() || td.q.MaxConcurrent() != 2 {
+		t.Fatalf("state not applied: auto=%v max=%d", td.modes.Auto(), td.q.MaxConcurrent())
 	}
-	if rec.Total != 1 || len(rec.Items) != 1 {
-		t.Fatalf("recommendation = %+v", rec)
+	// A manual submit is ALLOWED while auto is on (no DAEMON-409).
+	if _, err := td.client.Claim("wi_z", "normal"); err != nil {
+		t.Fatalf("claim while auto on: %v", err)
 	}
-	got := rec.Items[0]
-	if got.ID != want[0].ID || got.Slug != want[0].Slug || got.Goal != want[0].Goal ||
-		got.Status != want[0].Status || got.Priority != want[0].Priority ||
-		got.ProjectName != want[0].ProjectName || len(got.Labels) != 1 ||
-		got.BundleName == nil || *got.BundleName != "demo-bundle" {
-		t.Fatalf("recommendation item = %+v, want %+v", got, want[0])
+	if _, err := td.client.OpsConfig(cli.OpsConfigRequest{Auto: &off}); err != nil {
+		t.Fatalf("auto off: %v", err)
 	}
-
-	// mode set / drain / abort-drain round trips.
-	raw, err = td.client.Mode(cli.ModeRequest{Action: "set", Mode: protocol.ModeBatch})
-	if err != nil {
-		t.Fatalf("mode set batch: %v", err)
+	if td.modes.Auto() {
+		t.Fatal("auto still on")
 	}
-	var mr modeResponse
-	json.Unmarshal(raw, &mr)
-	if mr.Mode != protocol.ModeBatch {
-		t.Fatalf("mode set answer = %s", raw)
-	}
-	if _, err := td.client.Mode(cli.ModeRequest{Action: "drain"}); err != nil {
-		t.Fatalf("mode drain: %v", err)
-	}
-	// Single submits are refused in drain (the loop is the only entry).
-	if _, err := td.client.Claim("wi_z", "normal"); err == nil {
-		t.Fatal("claim in drain succeeded")
-	} else {
-		var ae *api.Error
-		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict {
-			t.Fatalf("drain claim error = %v, want DAEMON-409", err)
-		}
-	}
-	// batch_submit is refused in drain as well.
-	if _, err := td.client.BatchSubmit([]string{"wi_z"}); err == nil {
-		t.Fatal("batch_submit in drain succeeded")
-	}
-	if _, err := td.client.Mode(cli.ModeRequest{Action: "abort-drain"}); err != nil {
-		t.Fatalf("abort-drain: %v", err)
-	}
-	// Bad mode values refuse with DAEMON-400.
-	if _, err := td.client.Mode(cli.ModeRequest{Action: "set", Mode: "turbo"}); err == nil {
-		t.Fatal("bad mode accepted")
-	} else {
+	// Bad input refuses with DAEMON-400.
+	zero := 0
+	for _, bad := range []cli.OpsConfigRequest{{}, {Max: &zero}} {
+		_, err := td.client.OpsConfig(bad)
 		var ae *api.Error
 		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonBadInput {
-			t.Fatalf("bad mode error = %v, want DAEMON-400", err)
+			t.Fatalf("bad ops config %+v error = %v, want DAEMON-400", bad, err)
 		}
 	}
-	// A submit during shutdown answers DAEMON-410.
+	// A submit and an auto switch during shutdown answer DAEMON-410.
 	td.modes.SetShuttingDown()
 	if _, err := td.client.Claim("wi_y", "normal"); err == nil {
 		t.Fatal("claim during shutdown succeeded")
@@ -561,34 +360,32 @@ func TestOpsModesAndGetRecommendation(t *testing.T) {
 			t.Fatalf("shutdown claim error = %v, want DAEMON-410", err)
 		}
 	}
+	if _, err := td.client.OpsConfig(cli.OpsConfigRequest{Auto: &on}); err == nil {
+		t.Fatal("auto switch during shutdown succeeded")
+	}
 }
 
-// TestBatchSubmitDispatch: a confirmed wave enqueues beyond the
-// concurrency cap and backfills as slots open (04 §12 ruling 0).
-func TestBatchSubmitDispatch(t *testing.T) {
+// TestSubmitDispatchBackfill: submits beyond the concurrency cap queue
+// and backfill as slots open (04 §12 ruling 0).
+func TestSubmitDispatchBackfill(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) { c.MaxConcurrent = 1 })
 	for _, wi := range []string{"wi_p", "wi_q", "wi_r"} {
 		mkBare(t, td.cfg.GitRemoteBase, wi)
-	}
-	raw, err := td.client.BatchSubmit([]string{"wi_p", "wi_q", "wi_r"})
-	if err != nil {
-		t.Fatalf("batch_submit: %v", err)
-	}
-	var br batchResponse
-	if err := json.Unmarshal(raw, &br); err != nil || br.Submitted != 3 {
-		t.Fatalf("batch answer = %s (%v)", raw, err)
+		if _, err := td.client.Claim(wi, "normal"); err != nil {
+			t.Fatalf("claim %s: %v", wi, err)
+		}
 	}
 	// With max=1 exactly one job runs; the rest stay pending.
 	td.waitLive(t, "wi_p")
 	time.Sleep(100 * time.Millisecond)
-	raw, _ = td.client.Status()
+	raw, _ := td.client.Status()
 	var st cli.StatusResponse
 	json.Unmarshal(raw, &st)
 	if st.Queue.Running != 1 || st.Queue.Pending != 2 {
 		t.Fatalf("queue after one slot = %+v, want 1 running / 2 pending", st.Queue)
 	}
 	// Wrapping the running job frees its slot; the next pending entry
-	// backfills without any new confirmation.
+	// backfills without any new submission.
 	if _, err := td.client.Wrap("wi_p", "wrap"); err != nil {
 		t.Fatalf("wrap wi_p: %v", err)
 	}
@@ -750,22 +547,8 @@ func TestStatusShowsNeedsInput(t *testing.T) {
 		t.Fatalf("pre-question status = %+v", j)
 	}
 
-	// the agent blocks on a human (ruling C2 lifeline)
-	raw, err := td.client.Observe("wi_askst", 0)
-	if err != nil {
-		t.Fatalf("observe: %v", err)
-	}
-	var jv protocol.JobView
-	if err := json.Unmarshal(raw, &jv); err != nil {
-		t.Fatalf("observe undecodable: %v", err)
-	}
-	if _, err := td.client.Flush("wi_askst", protocol.FlushRequest{
-		WorkItem: "wi_askst", SpawnN: jv.SpawnN,
-		Reason: protocol.FlushNeedsInput, QuestionID: "q_d6001",
-		Question: "pick one", Step: "spec",
-	}); err != nil {
-		t.Fatalf("flush(needs_input): %v", err)
-	}
+	// the driver parks on a human question (pending_question persisted)
+	td.seedPendingQuestion(t, "wi_askst", "q_d6001", "spec", "pick one")
 
 	// /status presents needs_input + the question id (the monitor's
 	// projection is applied on the read, so a small poll window is legal)

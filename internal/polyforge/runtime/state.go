@@ -45,12 +45,19 @@ const (
 	// so the holder daemon's restart can attach (M3) once the operator
 	// clears clean_pause. No read-only seal, no dropJob, no DONE.
 	StatePaused JobState = "paused"
+	// StateEndPending is the durable "blocked, but the hub has not heard"
+	// state (v2-converge §6 bug 5): a bounded-fail whose SessionEnd(blocked)
+	// failed keeps the record — the session secret only that record holds —
+	// and retries the close (in-process with backoff, and at every daemon
+	// start) until the hub accepts it. Only then is the record dropped.
+	StateEndPending JobState = "end_pending"
 )
 
 var legalEdges = map[JobState][]JobState{
 	StateRunning:    {StateSealing, StateRecovering, StatePaused},
 	StateSealing:    {StateDone},
-	StateRecovering: {StateRunning, StateSealing, StateDone},
+	StateRecovering: {StateRunning, StateSealing, StateDone, StateEndPending},
+	StateEndPending: {StateDone},
 	StatePaused:     {StateRunning, StateDone},
 }
 
@@ -148,7 +155,7 @@ type jobRecord struct {
 	CleanPause bool `json:"clean_pause"`
 	// SpawnN is the per-WI monotonic derivation counter (B2): the number
 	// of derivations this session has run. Same-machine restarts and
-	// recoveries continue from it; a fresh clone (takeover) re-seeds it
+	// recoveries continue from it; a fresh clone (re-claim on another machine) re-seeds it
 	// from the capsule's spawn journal.
 	SpawnN       int `json:"spawn_n"`
 	RecoverFails int `json:"recover_fails"` // consecutive failed recoveries
@@ -167,6 +174,36 @@ type jobRecord struct {
 	BundleDigest   string `json:"bundle_digest"`
 	AgentPID       int    `json:"agent_pid"`
 	AgentStart     string `json:"agent_started_at"`
+	// Origin is how the job was submitted (v2 identity model). Absent on
+	// records written before it existed: such a job loads fine and is
+	// treated as owned by the WI reporter by later consumers.
+	Origin *Origin `json:"origin,omitempty"`
+	// RepairPending is the v2 §6 local pending-repair mark (see
+	// job.repairPending): "capsule_missing" | "project_unmapped" | "".
+	RepairPending string `json:"repair_pending,omitempty"`
+	// EndNote/EndHead persist the pending SessionEnd(blocked) of an
+	// end_pending record: the verdict's note and the capsule head the
+	// sealing daemon pushed (the cross-daemon continue check, §7).
+	EndNote string `json:"end_note,omitempty"`
+	EndHead string `json:"end_head,omitempty"`
+	// EndStatus is the pending SessionEnd verdict when it is not blocked
+	// (an abandoned repair_pending WI: canceled | failed).
+	EndStatus string `json:"end_status,omitempty"`
+}
+
+// Origin kinds.
+const (
+	OriginChat = "chat" // interactive submit from a harness chat
+	OriginCLI  = "cli"  // interactive/batch submit without a chat
+	OriginAuto = "auto" // auto-claim (pf ops auto on)
+)
+
+// Origin is the daemon-side record of where a job came from. ChatID is a
+// notification label, not a credential. Owner may be empty (unknown).
+type Origin struct {
+	Kind   string `json:"kind"`
+	ChatID string `json:"chat_id,omitempty"`
+	Owner  string `json:"owner,omitempty"`
 }
 
 func (j *job) record() *jobRecord {
@@ -194,6 +231,11 @@ func (j *job) record() *jobRecord {
 		BundleDigest:       j.bundleDigest,
 		AgentPID:           j.agentPID,
 		AgentStart:         j.agentStartedAt,
+		Origin:             j.origin,
+		RepairPending:      j.repairPending,
+		EndNote:            j.endNote,
+		EndHead:            j.endHead,
+		EndStatus:          j.endStatus,
 	}
 }
 
@@ -237,6 +279,11 @@ func jobFromRecord(rec *jobRecord) *job {
 		bundleDigest:   rec.BundleDigest,
 		agentPID:       rec.AgentPID,
 		agentStartedAt: rec.AgentStart,
+		origin:         rec.Origin,
+		repairPending:  rec.RepairPending,
+		endNote:        rec.EndNote,
+		endHead:        rec.EndHead,
+		endStatus:      rec.EndStatus,
 	}
 }
 
@@ -263,9 +310,16 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	// A unique temp name per write: two concurrent persists of the same
+	// file must not share (and rename away) one fixed ".tmp".
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
@@ -282,7 +336,16 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	// fsync the directory so the rename itself survives a power loss.
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }

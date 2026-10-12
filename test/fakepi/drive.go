@@ -4,21 +4,16 @@
 // envelope action). The plan file is a JSON document describing what
 // each derivation does on the capsule side — write execution.json
 // (Version monotonically increasing, atomic tmp+rename), emit record
-// bursts, park or die. Every action and control-method landing is
+// bursts, park or die. Every action is
 // journaled to logs/fakepi.jsonl inside the capsule, which the
 // scenarios assert on.
 package main
 
 import (
-	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,6 +68,11 @@ type planAction struct {
 	// file, deterministically (the Nth envelope action fires for spawn
 	// N across fresh and resume dispatches alike).
 	Crash string `json:"crash,omitempty"` // "" | "before" | "after"
+	// CrashStderr is written to stderr just before a crash:"before" exit
+	// (a harness dying WITH a reason: a model-class text such as a
+	// provider error makes the driver advance the candidate chain; the
+	// bare crash stays an unclassified exit).
+	CrashStderr string `json:"crash_stderr,omitempty"`
 	// Dup writes the IDENTICAL envelope to the same drop path N times
 	// back-to-back (the duplicate drop-path shape: the driver must
 	// consume it exactly once).
@@ -88,14 +88,10 @@ type planAction struct {
 	// root-cause consuming artifacts/repro.md).
 	Files map[string]string `json:"files,omitempty"`
 
-	// FlushWrap runs a flush(wrap) round trip BEFORE ("before") or AFTER
-	// ("after") the envelope write — the seal-gate cycle shapes.
-	FlushWrap string `json:"flush_wrap,omitempty"`
 	// Evidence carries extra structured command-evidence entries
 	// (merged with the synthetic one; suppressed entirely by
 	// NoEvidence). The driver copies command_evidence onto
-	// execution.json's steps.<id>.output.commands — the face the wrap
-	// evidence gate judges.
+	// execution.json's steps.<id>.output.commands.
 	Evidence []map[string]any `json:"evidence,omitempty"`
 	// OpenTurn opens a stdout turn and leaves it open before the
 	// envelope write (the F15 record-stream shapes on driver step
@@ -106,6 +102,29 @@ type planAction struct {
 	// (MS keeps its meaning as the pre-write delay).
 	Noise   string `json:"noise,omitempty"`    // "" | "ui" | "progress"
 	NoiseMS int    `json:"noise_ms,omitempty"` // the noise emitter interval (default 100ms)
+
+	// --- supervision shapes (v2-converge 2.3 incident replays) ---
+
+	// Silent is the zero-signal harness (rule 0, #114): the dispatch
+	// emits NO work record at all — not even the boot greeting turn — and
+	// parks alive. Combined with Noise "ui" it is the F15 shape (UI
+	// chatter only).
+	Silent bool `json:"silent,omitempty"`
+	// ErrorTurn is the F5 shape: the dispatch emits an assistant turn that
+	// ENDS on this provider error (message_start/message_end/turn_end and
+	// agent_end all carry stopReason=error), then parks alive without ever
+	// writing the envelope.
+	ErrorTurn string `json:"error_turn,omitempty"`
+	// EndTurn is the ok-ended twin of ErrorTurn (rule 1b): the dispatch
+	// emits an assistant turn that ends NORMALLY, then parks alive without
+	// ever writing the envelope.
+	EndTurn bool `json:"end_turn,omitempty"`
+	// ToolMS runs one tool execution of this length (tool_execution_start,
+	// then tool_execution_end after the delay) before the envelope write:
+	// the #83 long-tool shape. ToolHang never ends it (rule 3's shape).
+	ToolMS   int    `json:"tool_ms,omitempty"`
+	ToolName string `json:"tool_name,omitempty"`
+	ToolHang bool   `json:"tool_hang,omitempty"`
 	// PoisonGitlink / UnpoisonGitlink run the #48 poison shape (lay or
 	// clean an embedded git repository) before the envelope write; the
 	// version bump inside arms the observe push round.
@@ -121,9 +140,10 @@ type plan struct {
 	// the crash and the continuation in one file, deterministically —
 	// no rewrite race against the recovery spawn.
 	ResumeActions []planAction `json:"resume_actions"`
-	// AckProbe false makes the agent ignore liveness probes (the hang
-	// scenario: silence must extend to the probe channel).
-	AckProbe *bool `json:"ack_probe"`
+	// BadModels lists pinned model ids this harness cannot resolve (F4):
+	// a dispatch spawned with `--model <one of them>` prints the error to
+	// stderr and exits non-zero at startup.
+	BadModels []string `json:"bad_models,omitempty"`
 	// FailSpawnResume true makes every RESUME derivation die AT BIRTH:
 	// the process exits before it reads one byte of stdin, so the
 	// daemon's initial-prompt injection finds no reader, the pipe write
@@ -201,10 +221,9 @@ type driveEnv struct {
 	wi string
 	// handle is the PUBLIC session fingerprint (PF_SESSION_HANDLE,
 	// display only); spawnN is the v1.5 B2 derivation counter
-	// (PF_SPAWN_N) — the flush fence identity.
+	// (PF_SPAWN_N).
 	handle     string
 	spawnN     int
-	socket     string // PF_DAEMON_SOCKET
 	sessionArg string
 	resumed    bool
 
@@ -212,8 +231,6 @@ type driveEnv struct {
 	exec       *execState
 	plan       *plan
 	transcript string
-	hanging    bool
-	ackProbe   bool
 	// mustFail: this derivation is scripted to die at birth, before it
 	// reads the daemon's initial prompt (see plan.FailSpawnResume).
 	mustFail bool
@@ -238,10 +255,8 @@ func newDriveEnv() *driveEnv {
 		wi:         wi,
 		handle:     capsuleSessionHandle(),
 		spawnN:     spawnN,
-		socket:     os.Getenv("PF_DAEMON_SOCKET"),
 		sessionArg: transcriptPathOf(),
 		resumed:    hasSessionArg(),
-		ackProbe:   pl.AckProbe == nil || *pl.AckProbe,
 		transcript: transcriptPathOf(),
 	}
 	d.exec = d.loadExec()
@@ -354,6 +369,32 @@ func sleepMS(n int) {
 // ms delay), the crash shapes, and the envelope write itself (question
 // text, output payload, command evidence, duplicates).
 func (d *driveEnv) runEnvelopeAction(act planAction) {
+	if act.Silent {
+		// The zero-signal harness: no record at all (UI noise optionally),
+		// no envelope, no exit.
+		d.journal("silent", map[string]any{"step": act.ID, "pid": os.Getpid(), "spawn_n": d.spawnN})
+		if act.Noise != "" {
+			d.startNoise(act.Noise, act.NoiseMS)
+		}
+		parkForever()
+		return
+	}
+	if act.ErrorTurn != "" {
+		// F5: a turn that ends on a fatal provider error, then nothing.
+		d.journal("error_turn", map[string]any{"step": act.ID, "error": act.ErrorTurn, "spawn_n": d.spawnN})
+		emitAssistantTurn(d, "the provider connection dropped mid-reply", act.ErrorTurn)
+		parkForever()
+		return
+	}
+	if act.EndTurn {
+		d.journal("end_turn", map[string]any{"step": act.ID, "spawn_n": d.spawnN})
+		emitAssistantTurn(d, "I have finished my reply.", "")
+		parkForever()
+		return
+	}
+	if act.ToolMS > 0 || act.ToolHang {
+		d.emitToolRun(act.ToolName, act.ToolMS, act.ToolHang)
+	}
 	if act.Park {
 		// The silent-live wedge (polyforge#113's e2e-author shape): a
 		// real harness whose provider call for the next turn never
@@ -386,10 +427,6 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 		d.unpoisonGitlink(false)
 	}
 	sleepMS(act.MS) // the delayed-envelope-write shape (the hang lane)
-	if act.FlushWrap == "before" {
-		ok, errText := d.flushWrapVerbose("wrapped")
-		d.journal("flush", map[string]any{"reason": "wrap", "final_status": "wrapped", "ok": ok, "error": errText})
-	}
 	// Extra capsule-relative files, verbatim content (the declared-input
 	// producer: a downstream step's declared inputs must exist at its
 	// dispatch).
@@ -406,6 +443,9 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 	}
 	if act.Crash == "before" {
 		d.journal("crash_before", map[string]any{"step": act.ID, "outcome": act.Outcome})
+		if act.CrashStderr != "" {
+			fmt.Fprintln(os.Stderr, act.CrashStderr)
+		}
 		os.Exit(101) // die before the envelope write: the envelope never lands
 	}
 	d.writeEnvelope(act)
@@ -427,41 +467,7 @@ func pinnedModelOf() string {
 	return ""
 }
 
-// runStep writes one step through execution.json: in_progress, then done
-// — two atomic writes, Version increasing each time (the async push
-// surface the observe lane polls). The done write carries the step's
-// structured command evidence (output.commands) — the #29 command-audit
-// contract every real driver honors and the wrap gate enforces — unless
-// the plan action suppressed it (the evidence-gate scenario's broken
-// shape).
-func (x *execState) step(id string) *execStep {
-	st := x.Steps[id]
-	if st == nil {
-		st = &execStep{Status: "pending", Attempts: []any{}, Answers: []archivedAnswer{}}
-		x.Steps[id] = st
-	}
-	return st
-}
-
-// askAndWait persists the open pending_question (BEFORE the flush, the
-// idempotent double-source contract), fires the real flush(needs_input)
-// over the UDS proxy, then parks until the control loop's answer
-// consumption signals this question id. The SAME step continues in
-// place once the answer lands (the interactive contract: the step is
-// started, parks on its open question, never re-dispatches).
-//
-// F9 contract behavior (mirroring the executor skill): the question id
-// is MINTED ONCE and lives in execution.json — whatever the plan says,
-// a pending question already persisted for this step IS the question's
-// identity, and a re-derived instance re-presents that id verbatim,
-// never a fresh one. An answer that already landed for that id (the
-// daemon re-delivers delivered-but-unconsumed answers at attachment,
-// and the re-delivery can outrun the plan) is consumed silently, with
-// no re-ask.
 func (d *driveEnv) beginOpenTurn(journalKind string) {
-	d.mu.Lock()
-	d.hanging = true
-	d.mu.Unlock()
 	d.journal(journalKind, map[string]any{"at": nowStamp()})
 	emitOpenTurn()
 }
@@ -501,18 +507,69 @@ func (d *driveEnv) startNoise(kind string, intervalMS int) {
 	}()
 }
 
-// suppressProbeAck reports whether the plan wants probes ignored.
-func (d *driveEnv) suppressProbeAck() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.hanging || !d.ackProbe
+// badModel answers the pinned model this derivation was spawned with when
+// the plan declares it unresolvable ("" otherwise).
+func (d *driveEnv) badModel() string {
+	m := pinnedModelOf()
+	if m == "" {
+		return ""
+	}
+	for _, b := range d.plan.BadModels {
+		if b == m {
+			return m
+		}
+	}
+	return ""
 }
 
-// beginShutdownFlush performs the agent's flush(shutdown) once: commit
-// what exists, ack the result, never wait — the graceful-shutdown
-// contract (§五). The intent is journaled BEFORE the call: the daemon
-// may tear the process down the instant its own push event lands, so
-// a post-call journal line would race the teardown.
+// currentAction answers the envelope action this derivation executes
+// (the Nth envelope action fires for spawn N); nil when none.
+func (d *driveEnv) currentAction() *planAction {
+	idx := 0
+	for i := range d.plan.Actions {
+		if d.plan.Actions[i].Do == "envelope" {
+			idx++
+			if idx == int(d.spawnNumber()) {
+				return &d.plan.Actions[i]
+			}
+		}
+	}
+	return nil
+}
+
+// silentThisSpawn reports whether this derivation is the zero-signal
+// harness: it must not even answer the initial instruction.
+func (d *driveEnv) silentThisSpawn() bool {
+	a := d.currentAction()
+	return a != nil && a.Silent
+}
+
+// emitToolRun plays one tool execution as the real stream does: a model
+// reply that ends in a tool call, tool_execution_start, the run, and
+// tool_execution_end (unless hanging).
+func (d *driveEnv) emitToolRun(name string, ms int, hang bool) {
+	if name == "" {
+		name = "bash"
+	}
+	msg := map[string]any{"role": "assistant", "stopReason": "toolUse", "content": []any{}}
+	emitRecord(map[string]any{"type": "agent_start"})
+	emitRecord(map[string]any{"type": "turn_start"})
+	emitRecord(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant", "stopReason": "pending", "content": []any{}}})
+	emitRecord(map[string]any{"type": "message_update", "assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "running the tool"}})
+	emitRecord(map[string]any{"type": "message_end", "message": msg})
+	emitRecord(map[string]any{"type": "tool_execution_start", "toolCallId": "call_1", "toolName": name,
+		"args": map[string]any{"command": "fakepi " + name}})
+	d.journal("tool_start", map[string]any{"name": name, "ms": ms, "hang": hang})
+	if hang {
+		parkForever()
+		return
+	}
+	sleepMS(ms)
+	emitRecord(map[string]any{"type": "tool_execution_end", "toolCallId": "call_1", "toolName": name, "result": map[string]any{}})
+	emitRecord(map[string]any{"type": "turn_end", "message": msg, "toolResults": []any{}})
+	d.journal("tool_end", map[string]any{"name": name})
+}
+
 func (d *driveEnv) loadExec() *execState {
 	raw, err := os.ReadFile(execPath)
 	if err != nil {
@@ -826,88 +883,4 @@ func (d *driveEnv) spawnNumber() int64 {
 		return n
 	}
 	return 1
-}
-
-// flushOnce is one flush round trip. retry reports whether the failure
-// is the transient spawn-window shape worth retrying; errText carries the
-// refusal verbatim for the journal.
-func (d *driveEnv) flushOnce(reason string, raw []byte) (ok bool, errText string, retry bool) {
-	conn, err := net.Dial("unix", d.socket)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): dial: %v\n", reason, err)
-		return false, err.Error(), true // the listener may not be up yet
-	}
-	defer conn.Close()
-	req, err := http.NewRequest("POST", "http://daemon/jobs/"+d.wi+"/flush", bytes.NewReader(raw))
-	if err != nil {
-		return false, err.Error(), false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Transport: &http.Transport{
-		DialContext: func(context.Context, string, string) (net.Conn, error) { return conn, nil },
-	}}).Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): %v\n", reason, err)
-		return false, err.Error(), true
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != 200 {
-		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): HTTP %d: %s\n", reason, resp.StatusCode, out)
-		// a close/recovery race is transient; a stale counter is forever.
-		// "instance just spawned" is the flushGate's typed RECOVERING
-		// transient (the recovery window — the wording is the daemon's,
-		// unchanged in v1.5); "already in progress" is a close genuinely
-		// holding the seal guard.
-		return false, string(out), bytes.Contains(out, []byte("already in progress")) ||
-			bytes.Contains(out, []byte("instance just spawned")) ||
-			resp.StatusCode >= 500
-	}
-	var fa struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error,omitempty"`
-	}
-	_ = json.Unmarshal(out, &fa)
-	return fa.OK, fa.Error, false
-}
-
-// flushAck is flush carrying the ack's error text (the typed refusals —
-// DAEMON-400 VERIFICATION_EVIDENCE_MISSING among them — must be
-// assertable from the journal, not just as a boolean).
-func (d *driveEnv) flushAck(reason string, extra map[string]any) (bool, string) {
-	if d.socket == "" {
-		fmt.Fprintln(os.Stderr, "fakepi: PF_DAEMON_SOCKET not set; flush unavailable")
-		return false, "PF_DAEMON_SOCKET not set"
-	}
-	body := map[string]any{
-		"work_item": d.wi,
-		"spawn_n":   d.spawnN,
-		"reason":    reason,
-	}
-	for k, v := range extra {
-		body[k] = v
-	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return false, err.Error()
-	}
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		ok, errText, retry := d.flushOnce(reason, raw)
-		if ok {
-			return true, ""
-		}
-		if !retry || time.Now().After(deadline) {
-			return false, errText
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-}
-
-// flushWrapVerbose is flushWrap carrying the ack's error text (the typed
-// refusal — DAEMON-400 VERIFICATION_EVIDENCE_MISSING — must be assertable
-// from the journal).
-func (d *driveEnv) flushWrapVerbose(finalStatus string) (bool, string) {
-	ack, errText := d.flushAck("wrap", map[string]any{"final_status": finalStatus})
-	return ack, errText
 }

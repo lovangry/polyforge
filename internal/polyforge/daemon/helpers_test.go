@@ -16,11 +16,12 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // ---------------------------------------------------------------------------
@@ -30,8 +31,6 @@ type fakeAgent struct {
 	mu         sync.Mutex
 	done       bool
 	terminated bool
-	sent       []protocol.ControlMsg
-	ackFn      func(method string) error
 }
 
 func (a *fakeAgent) PID() int          { return 0 } // runtime's kill guard no-ops on pid<=0
@@ -49,31 +48,6 @@ func (a *fakeAgent) Terminate(time.Duration) error {
 	a.terminated = true
 	a.mu.Unlock()
 	return nil
-}
-func (a *fakeAgent) SendControl(m protocol.ControlMsg) error {
-	a.mu.Lock()
-	a.sent = append(a.sent, m)
-	a.mu.Unlock()
-	return nil
-}
-func (a *fakeAgent) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error {
-	a.mu.Lock()
-	fn := a.ackFn
-	a.mu.Unlock()
-	if fn != nil {
-		return fn(m.Method)
-	}
-	return nil
-}
-
-func (a *fakeAgent) sentMethods() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make([]string, 0, len(a.sent))
-	for _, m := range a.sent {
-		out = append(out, m.Method)
-	}
-	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -110,15 +84,6 @@ func (s *fakeSpawner) agentOf(n int) *fakeAgent {
 	return s.spawned[n]
 }
 
-func (s *fakeSpawner) lastParams() runtime.SpawnParams {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.calls) == 0 {
-		return runtime.SpawnParams{}
-	}
-	return s.calls[len(s.calls)-1]
-}
-
 // ---------------------------------------------------------------------------
 // fake aihub (v1.5 session model): the daemon-facing subset of the hub —
 // session claim/verify/attach/end plus the queue and the generic Do the
@@ -128,13 +93,12 @@ func (s *fakeSpawner) lastParams() runtime.SpawnParams {
 // tests need; a HELD wi answers matches only for its own secret.
 
 type fakeHub struct {
-	mu        sync.Mutex
-	status    map[string]string
-	held      map[string]string
-	claims    []api.SessionClaimRequest
-	takeovers []api.SessionClaimRequest
-	ends      []endCall
-	attaches  []api.SessionAttachRequest
+	mu       sync.Mutex
+	status   map[string]string
+	held     map[string]string
+	claims   []api.SessionClaimRequest
+	ends     []endCall
+	attaches []api.SessionAttachRequest
 	// verifies records the wi of every SessionVerify call (the M4
 	// revalidation seam the -revalidate-every flag test pins).
 	verifies []string
@@ -144,7 +108,9 @@ type fakeHub struct {
 	resumeBlockeds    []string
 	terminateBlockeds []string
 	queues            []api.WorkItem
-	blockEnd          chan struct{} // non-nil: SessionEnd parks until closed
+	// reporters maps a canonical id to the WI reporter (owner fallback).
+	reporters map[string]string
+	blockEnd  chan struct{} // non-nil: SessionEnd parks until closed
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string
@@ -209,13 +175,6 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 	}, nil
 }
 
-func (h *fakeHub) ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
-	h.mu.Lock()
-	h.takeovers = append(h.takeovers, req)
-	h.mu.Unlock()
-	return h.SessionClaim(req)
-}
-
 func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -264,7 +223,7 @@ func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 	id := h.canonicalID(wi)
 	h.ends = append(h.ends, endCall{WI: id, Req: req})
 	switch req.Status {
-	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked:
+	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked, api.StatusCanceled:
 		h.held[id] = ""
 	}
 	h.status[id] = req.Status
@@ -279,7 +238,7 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	if st == "" {
 		st = api.StatusRunning
 	}
-	return &api.WorkItem{ID: id, Status: st, ProjectName: "proj"}, nil
+	return &api.WorkItem{ID: id, Status: st, ProjectName: "proj", Reporter: h.reporters[id]}, nil
 }
 
 // ResumeBlockedWorkItem / TerminateBlockedWorkItem are the §6.4 owner
@@ -394,15 +353,6 @@ func (h *fakeHub) lastEnd() api.SessionEndRequest {
 		return api.SessionEndRequest{}
 	}
 	return h.ends[len(h.ends)-1].Req
-}
-
-func (h *fakeHub) lastEndWI() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(h.ends) == 0 {
-		return ""
-	}
-	return h.ends[len(h.ends)-1].WI
 }
 
 // ---------------------------------------------------------------------------
@@ -550,18 +500,17 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 		// a FAKE engine starter that delegates to the fake spawner so the
 		// scripted WI-Agent semantics (spawn call params, agent handles)
 		// stay assertable without a real driver.
-		Mapping:           mappingFor(ws),
-		DataDir:           data,
-		GitRemoteBase:     hubBase,
-		MaxConcurrent:     4,
-		Hub:               hub,
-		Spawner:           sp,
-		AgentStarter:      fakeEngineStarter(),
-		ObservePoll:       10 * time.Millisecond,
-		DrainInterval:     10 * time.Millisecond,
-		DispatchTick:      10 * time.Millisecond,
-		ShutdownFlushWait: 100 * time.Millisecond,
-		ExitPoll:          10 * time.Millisecond,
+		Mapping:       mappingFor(ws),
+		DataDir:       data,
+		GitRemoteBase: hubBase,
+		MaxConcurrent: 4,
+		Hub:           hub,
+		Spawner:       sp,
+		AgentStarter:  fakeEngineStarter(),
+		ObservePoll:   10 * time.Millisecond,
+		DrainInterval: 10 * time.Millisecond,
+		DispatchTick:  10 * time.Millisecond,
+		ExitPoll:      10 * time.Millisecond,
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -616,6 +565,50 @@ func (td *testDaemon) submitClaim(t *testing.T, wi string) {
 		t.Fatalf("submit answer = %+v, want accepted for %s", sr, wi)
 	}
 	td.waitLive(t, wi)
+}
+
+// seedPendingQuestion plays the driver's needs_input park: it writes an
+// open pending_question for the step into the capsule's execution.json
+// (Version bumped, atomic tmp+rename) and sends the exec_committed fact
+// so the supervisor projects it.
+func (td *testDaemon) seedPendingQuestion(t *testing.T, wi, qid, step, question string) {
+	t.Helper()
+	path := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", wi, filepath.FromSlash(capsule.ExecutionJSON))
+	exec := capsule.Execution{WorkItemID: wi, Steps: map[string]*capsule.Step{}}
+	if raw, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(raw, &exec)
+		if exec.Steps == nil {
+			exec.Steps = map[string]*capsule.Step{}
+		}
+	}
+	st := exec.Steps[step]
+	if st == nil {
+		st = &capsule.Step{Status: capsule.StepInProgress}
+		exec.Steps[step] = st
+	}
+	st.PendingQuestion = &capsule.PendingQuestion{
+		ID: qid, Step: step, Question: question,
+		AskedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	exec.CurrentStep = step
+	exec.Version++
+	blob, err := json.Marshal(exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	// the driver's commit-boundary notice: the supervisor projects the
+	// pending question when the fact arrives (it no longer polls)
+	td.sup.Link(wi).Fact(supervise.ExecCommitted{Version: exec.Version, Step: step})
 }
 
 // waitLive blocks until the work item holds a runtime job.

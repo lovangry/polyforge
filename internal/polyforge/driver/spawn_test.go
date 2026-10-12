@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,9 +22,9 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
-	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/spawn"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // ---------------------------------------------------------------------------
@@ -45,10 +46,6 @@ func (h *fakeAgent) Terminate(bound time.Duration) error {
 	defer h.mu.Unlock()
 	h.done = true
 	h.term = true
-	return nil
-}
-func (h *fakeAgent) SendControl(m protocol.ControlMsg) error { return nil }
-func (h *fakeAgent) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error {
 	return nil
 }
 
@@ -245,13 +242,16 @@ func TestSpawnStepResumeUsesJournal(t *testing.T) {
 	journal := `{"spawn_n":1,"transcript":"/old/t1.jsonl","work_item":"wi_sp"}
 {"spawn_n":3,"transcript":"/live/t3.jsonl","work_item":"wi_sp"}
 `
+	liveT3 := filepath.Join(capDir, "session", "live-t3.jsonl")
+	writeCapsuleFile(t, capDir, "session/live-t3.jsonl", `{"t":"turn"}`+"\n")
+	journal = strings.ReplaceAll(journal, "/live/t3.jsonl", liveT3)
 	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl", journal)
 
 	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 4, Resume: true}); err != nil {
 		t.Fatalf("SpawnStep: %v", err)
 	}
 	p, _ := sp.last()
-	if !p.Resume || p.TranscriptPath != "/live/t3.jsonl" {
+	if !p.Resume || p.TranscriptPath != liveT3 {
 		t.Fatalf("resume mapping: resume=%v transcript=%q", p.Resume, p.TranscriptPath)
 	}
 
@@ -480,8 +480,12 @@ func TestStepRunWaitExitWithoutEnvelope(t *testing.T) {
 	_, h := sp.last()
 	h.setDone() // the process died before delivering anything
 	_, err = run.Wait(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "without writing a result envelope") {
-		t.Fatalf("exit without envelope must fail, got %v", err)
+	var ee *ExitedError
+	if err == nil || !errors.As(err, &ee) {
+		t.Fatalf("exit without envelope must fail with an ExitedError, got %v", err)
+	}
+	if ee.Step != "verification" || ee.SpawnN != 6 {
+		t.Fatalf("exit error identity: %+v", ee)
 	}
 }
 
@@ -651,3 +655,114 @@ func TestAppendSpawnJournalRepairsTornTail(t *testing.T) {
 }
 
 func nowStampX() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+// TestSpawnStepFreshRetryCarriesPreviousTranscriptAsReference pins the
+// 2nd+ retry shape (v2-converge 2.3): a fresh conversation — no resume —
+// with the previous transcript, when readable, handed over as read-only
+// reference in the prompt; a missing/empty transcript is simply omitted.
+func TestSpawnStepFreshRetryCarriesPreviousTranscriptAsReference(t *testing.T) {
+	ad, sp, capDir := spawnEnv(t)
+	writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "the fix summary")
+	prev := filepath.Join(capDir, "session", "prev.jsonl")
+	writeCapsuleFile(t, capDir, "session/prev.jsonl", `{"t":"turn"}`+"\n")
+	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+		`{"spawn_n":3,"transcript":"`+prev+`","work_item":"wi_sp"}`+"\n")
+
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 4, Fresh: true}); err != nil {
+		t.Fatalf("SpawnStep: %v", err)
+	}
+	p, _ := sp.last()
+	if p.Resume {
+		t.Fatal("a fresh retry must not resume the old conversation")
+	}
+	if p.TranscriptPath == prev {
+		t.Fatal("a fresh retry declares its own new transcript")
+	}
+	if !strings.Contains(p.InitialPrompt, "Previous attempt (read-only reference)") || !strings.Contains(p.InitialPrompt, prev) {
+		t.Fatalf("the prompt must carry the previous transcript as reference:\n%s", p.InitialPrompt)
+	}
+
+	// an unreadable previous transcript is omitted, never an error
+	if err := os.Remove(prev); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 5, Fresh: true}); err != nil {
+		t.Fatalf("SpawnStep (no transcript): %v", err)
+	}
+	p2, _ := sp.last()
+	if strings.Contains(p2.InitialPrompt, "read-only reference") {
+		t.Fatalf("no reference may be named when the transcript is gone:\n%s", p2.InitialPrompt)
+	}
+}
+
+// TestSpawnStepResumeWithoutReadableTranscriptDegradesToFresh: a resume
+// whose declared transcript was never written (the dispatch died before
+// the harness created its session) starts the conversation fresh instead
+// of handing the harness a path it cannot resume.
+func TestSpawnStepResumeWithoutReadableTranscriptDegradesToFresh(t *testing.T) {
+	ad, sp, capDir := spawnEnv(t)
+	writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "s")
+	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+		`{"spawn_n":3,"transcript":"/does/not/exist.jsonl","work_item":"wi_sp"}`+"\n")
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 4, Resume: true}); err != nil {
+		t.Fatalf("SpawnStep: %v", err)
+	}
+	p, _ := sp.last()
+	if p.Resume {
+		t.Fatalf("an unreadable transcript cannot be resumed: %+v", p)
+	}
+}
+
+// TestSpawnStepWiresHarnessTranslatorOntoTheLink: the step process's
+// stdout records reach the dispatch's tracker through the harness
+// translator, and the process exit (code + stderr tail) is announced.
+func TestSpawnStepWiresHarnessTranslatorOntoTheLink(t *testing.T) {
+	capDir := t.TempDir()
+	writeCapsuleFile(t, capDir, "workflows/quick-fix-x/workflow.md", "---\n"+strings.TrimPrefix(extExample, "\n")+"---\n")
+	writeCapsuleFile(t, capDir, "workflows/quick-fix-x/steps/grill.md", "grill")
+	writeCapsuleFile(t, capDir, capsule.SessionJSON, `{"harness":"pi","session_id":"ab12cd34"}`)
+	sp := &captureSpawner{}
+	link := supervise.NewLink("wi_sp")
+	ad, err := NewStepSpawnAdapter(StepSpawnAdapter{
+		WI:      WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "quick-fix-x"},
+		Spawner: sp, Link: link, PollInterval: 2 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "grill", SpawnN: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := sp.last()
+	if p.OnRecord == nil || p.OnExit == nil {
+		t.Fatal("the dispatch must hand the spawner its record tap and exit callback")
+	}
+	meta := run.(MetaRun).Meta()
+	if meta.Harness != "pi" || meta.Granularity != supervise.GranularityToken || meta.PID != 4242 {
+		t.Fatalf("run meta %+v", meta)
+	}
+	tr := link.Tracker(1)
+	p.OnRecord(`{"type":"extension_ui_request"}`)
+	if s := tr.Snapshot(time.Now()); s.WorkSignals != 0 || s.NoiseCount != 1 {
+		t.Fatalf("UI noise must not count as work: %+v", s)
+	}
+	p.OnRecord(`{"type":"turn_start"}`)
+	p.OnRecord(`{"type":"agent_end","messages":[{"role":"assistant","stopReason":"error","errorMessage":"401 unauthorized"}]}`)
+	p.OnExit(spawn.ExitInfo{Code: 1, StderrTail: "fatal: auth failed"})
+	s := tr.Snapshot(time.Now())
+	if !s.TurnError || s.Exit == nil || s.Exit.Code != 1 {
+		t.Fatalf("the tracker must hold the error turn and the exit: %+v", s)
+	}
+	// the driver's classification reads both: the last signal was an error turn
+	_, h := sp.last()
+	h.setDone()
+	_, werr := run.Wait(context.Background())
+	var ee *ExitedError
+	if !errors.As(werr, &ee) || !ee.TurnError || !strings.Contains(ee.LastError, "401") {
+		t.Fatalf("exit error %+v, want the error turn + its text", werr)
+	}
+	if cause, _, _ := classifyWaitFailure(werr); cause != FailExitModel {
+		t.Fatalf("an error-turn exit is model-class, got %q", cause)
+	}
+}

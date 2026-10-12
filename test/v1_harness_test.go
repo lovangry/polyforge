@@ -73,10 +73,10 @@ func v1Bins(t *testing.T) string {
 			return
 		}
 		build := exec.Command("go", "build", "-o", dir+"/",
-			"./cmd/aihub", "./cmd/pf", "./test/fakepi", "./tools/v0-export")
+			"./cmd/aihub", "./cmd/pf", "./test/fakepi")
 		if os.Getenv("PFV1_COVER_BINS") != "" {
 			build = exec.Command("go", "build", "-cover", "-coverpkg=./...",
-				"-o", dir+"/", "./cmd/aihub", "./cmd/pf", "./test/fakepi", "./tools/v0-export")
+				"-o", dir+"/", "./cmd/aihub", "./cmd/pf", "./test/fakepi")
 			covDir := filepath.Join(dir, "covdata")
 			if err := os.MkdirAll(covDir, 0o755); err != nil {
 				v1BinErr = err
@@ -119,11 +119,30 @@ type v1Install struct {
 	pfPath     string
 	fakepiPath string
 
+	// gateQuickFixGrill makes daemons run a copy of the shipped bundles
+	// whose quick-fix grill additionally declares requires_human_answer
+	// (no shipped quick-fix step carries the flag: its grill allows zero
+	// questions); by default workflowsPath hands out a copy with every
+	// human gate flag stripped so unattended plans run.
+	gateQuickFixGrill bool
+	strippedWF        string
+	// stripWallBudgets removes every step-level `budget: { wall_minutes }`
+	// override from the daemon's workflow copy, so the daemon-wide
+	// --step-timeout flag (T) governs the scenario (a step's own
+	// wall_minutes is minutes-granular and would otherwise win).
+	stripWallBudgets bool
+
 	// wis holds every work item this scenario created (through newWI or
 	// trackWI): the post-teardown orphan sweep (sweepOrphans) kills and
 	// then asserts gone every live process carrying one of these WIs'
 	// PF_WI_ID env marker at the scenario's final cleanup.
 	wis []string
+
+	// daemons are the scenario's started daemon processes (every
+	// v1Daemon.start registers): the terminal-settle wait asks each one
+	// whether a finished work item's close has fully drained.
+	dmu     sync.Mutex
+	daemons []*v1Daemon
 }
 
 // newV1Install boots a real aihub on a free loopback port, harvests the
@@ -373,37 +392,6 @@ func (u *v1Install) pf(t *testing.T, args ...string) string {
 	return u.pfExit(t, -1, "", args...)
 }
 
-// pfCombined is pf returning stdout+stderr (for error-path pins).
-func (u *v1Install) pfCombined(t *testing.T, wantExit int, sock string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command(u.pfPath, append([]string{"--config", hermeticConfigPath(t)}, args...)...)
-	cmd.Env = append(os.Environ(),
-		"PF_SERVER="+u.url,
-		"PF_API_KEY="+u.adminKey,
-		"PF_USER_ID=usr_root",
-	)
-	if sock != "" {
-		cmd.Env = append(cmd.Env, "PF_DAEMON_SOCKET="+sock)
-	}
-	var out strings.Builder
-	cmd.Stdout, cmd.Stderr = &out, &out
-	code := 0
-	if err := cmd.Run(); err != nil {
-		ee, ok := err.(*exec.ExitError)
-		if !ok {
-			t.Fatalf("pf %v: %v", args, err)
-		}
-		code = ee.ExitCode()
-	}
-	if wantExit < 0 && code != 0 {
-		t.Fatalf("pf %v: exit %d (output %q)", args, code, out.String())
-	}
-	if wantExit >= 0 && code != wantExit {
-		t.Fatalf("pf %v: exit %d, want %d (output %q)", args, code, wantExit, out.String())
-	}
-	return out.String()
-}
-
 func (u *v1Install) pfExit(t *testing.T, wantExit int, sock string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(u.pfPath, append([]string{"--config", hermeticConfigPath(t)}, args...)...)
@@ -611,20 +599,28 @@ func optAPIKey(key string) daemonOpt {
 	return func(d *v1Daemon) { d.apiKey = key }
 }
 
-// optObserveWindows injects the observe supervision windows through the
-// real `pf daemon` flags (#12). A zero duration omits its flag, leaving
-// that window at the production default. (The fourth #12 window is
-// deleted — its consumer went with the driver cutover; a stale usage
-// now fails loudly at flag parse.)
-func optObserveWindows(hang, idle, probe time.Duration) daemonOpt {
+// supBounds are the supervision bounds a scenario injects through the
+// real `pf daemon` flags (v2-converge 2.4). A zero duration omits its
+// flag, leaving that bound at the production default.
+type supBounds struct {
+	silence, tool, stepTimeout, stall, modelErrorGrace time.Duration
+}
+
+// optSupervision injects the supervision bounds through the daemon's own
+// flags — the same real path an operator uses, so the whole production
+// chain (flag → config → driver thresholds → supervisor rules → driver
+// verdict handling) is the thing under test.
+func optSupervision(b supBounds) daemonOpt {
 	return func(d *v1Daemon) {
 		for _, f := range []struct {
 			name string
 			val  time.Duration
 		}{
-			{"--hang-window", hang},
-			{"--idle-window", idle},
-			{"--probe-timeout", probe},
+			{"--silence-window", b.silence},
+			{"--tool-window", b.tool},
+			{"--step-timeout", b.stepTimeout},
+			{"--stall-window", b.stall},
+			{"--model-error-grace", b.modelErrorGrace},
 		} {
 			if f.val > 0 {
 				d.extraArgs = append(d.extraArgs, f.name, f.val.String())
@@ -633,26 +629,9 @@ func optObserveWindows(hang, idle, probe time.Duration) daemonOpt {
 	}
 }
 
-// optShutdownFlushWait injects the graceful sequence's per-job
-// flush(shutdown) wait through the real `pf daemon` flag
-// (--shutdown-flush-wait, polyforge#110 rewind). A non-positive duration
-// omits the flag, leaving the production 60s default. A scenario that
-// shuts a daemon down over a live driver job (no flush face — the
-// bounded wait always degrades on timeout) shortens the window instead
-// of spending 60s per live job; the sequence and its semantics are
-// unchanged.
-func optShutdownFlushWait(wait time.Duration) daemonOpt {
-	return func(d *v1Daemon) {
-		if wait > 0 {
-			d.extraArgs = append(d.extraArgs, "--shutdown-flush-wait", wait.String())
-		}
-	}
-}
-
-// optMode pre-seeds the daemon state file with an initial mode (read at
-// boot; used to start straight in drain).
-func optMode(mode string) daemonOpt {
-	return func(d *v1Daemon) { d.extraEnv = append(d.extraEnv, "__PFV1_MODE__="+mode) }
+// optAuto starts the daemon straight in auto-pull (`pf daemon --auto`).
+func optAuto() daemonOpt {
+	return func(d *v1Daemon) { d.extraArgs = append(d.extraArgs, "--auto") }
 }
 
 // optServerURL points the daemon's aihub API face (--server) at url
@@ -694,20 +673,6 @@ func newV1Daemon(t *testing.T, inst *v1Install, opts ...daemonOpt) *v1Daemon {
 	for _, o := range opts {
 		o(d)
 	}
-	// drain mode pre-seed: the daemon-state.json the boot loader reads
-	mode := ""
-	for _, kv := range d.extraEnv {
-		if strings.HasPrefix(kv, "__PFV1_MODE__=") {
-			mode = strings.TrimPrefix(kv, "__PFV1_MODE__=")
-		}
-	}
-	if mode != "" {
-		st := map[string]any{"version": 1, "machine_id": d.machineID, "mode": mode, "max_concurrent_jobs": 4}
-		blob, _ := json.Marshal(st)
-		if err := os.WriteFile(filepath.Join(dataDir, "daemon-state.json"), blob, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
 	t.Cleanup(func() { d.stop() })
 	return d
 }
@@ -746,7 +711,7 @@ func (d *v1Daemon) start() {
 		"--api-key", apiKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
-		"--workflows-dir", filepath.Join(d.inst.root, "workflows"),
+		"--workflows-dir", d.inst.workflowsPath(),
 		"--pi-bin", d.inst.fakepiPath,
 		// polyforge#113: the [workspace] mapping config is the ONLY
 		// workspace source (and it doubles as the config isolation file —
@@ -777,6 +742,11 @@ func (d *v1Daemon) start() {
 		d.t.Fatal(err)
 	}
 	d.cmd = cmd
+	if d.inst != nil {
+		d.inst.dmu.Lock()
+		d.inst.daemons = append(d.inst.daemons, d)
+		d.inst.dmu.Unlock()
+	}
 	d.waitedExit = make(chan error, 1)
 	go func() { d.waitedExit <- cmd.Wait() }()
 	t := d.t
@@ -844,9 +814,72 @@ func (d *v1Daemon) crash() {
 	if d.cmd == nil || d.cmd.Process == nil {
 		d.t.Fatal("crash: daemon not running")
 	}
+	// a push the daemon's monitor had in flight is a git child that
+	// outlives the SIGKILL and keeps writing the WI's bare repo: collect
+	// those children first and let them drain after the kill
+	gits := gitDescendants(d.cmd.Process.Pid)
 	_ = d.cmd.Process.Kill()
 	<-d.waitedExit
 	d.cmd = nil
+	waitPIDsGone(gits, 10*time.Second)
+}
+
+// gitDescendants lists the live git processes below pid (any depth).
+func gitDescendants(pid int) []int {
+	ents, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	parent, comm := map[int]int{}, map[int]string{}
+	for _, e := range ents {
+		n, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue
+		}
+		// pid (comm) state ppid ...: comm may contain spaces/parens
+		str := string(raw)
+		lp, rp := strings.IndexByte(str, '('), strings.LastIndexByte(str, ')')
+		if lp < 0 || rp < lp {
+			continue
+		}
+		f := strings.Fields(str[rp+1:])
+		if len(f) < 2 {
+			continue
+		}
+		pp, _ := strconv.Atoi(f[1])
+		parent[n], comm[n] = pp, str[lp+1:rp]
+	}
+	var out []int
+	var walk func(p int)
+	walk = func(p int) {
+		for n, pp := range parent {
+			if pp == p {
+				if strings.HasPrefix(comm[n], "git") {
+					out = append(out, n)
+				}
+				walk(n)
+			}
+		}
+	}
+	walk(pid)
+	return out
+}
+
+// waitPIDsGone waits (softly) until every pid has exited.
+func waitPIDsGone(pids []int, bound time.Duration) {
+	deadline := time.Now().Add(bound)
+	for _, p := range pids {
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat("/proc/" + strconv.Itoa(p)); err != nil {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
 }
 
 // exitedWithin reports whether the daemon process exited within bound
@@ -869,13 +902,6 @@ func (d *v1Daemon) exitedWithin(bound time.Duration) bool {
 func (d *v1Daemon) pf(t *testing.T, args ...string) string {
 	t.Helper()
 	return d.inst.pfExit(t, -1, d.sock, args...)
-}
-
-// pfCode runs the real pf CLI against THIS daemon's socket with an
-// expected exit code; returns combined stdout+stderr.
-func (d *v1Daemon) pfCode(t *testing.T, wantExit int, args ...string) string {
-	t.Helper()
-	return d.inst.pfCombined(t, wantExit, d.sock, args...)
 }
 
 // status reads GET /status.
@@ -907,17 +933,6 @@ func (d *v1Daemon) observe(t *testing.T, wi string) *protocol.JobView {
 		t.Fatalf("observe %s undecodable: %v (%s)", wi, err, raw)
 	}
 	return &jv
-}
-
-// agentPIDOf returns the recorded agent pid of wi (0 when not running).
-func (d *v1Daemon) agentPIDOf(t *testing.T, wi string) int {
-	t.Helper()
-	for _, j := range d.status(t).Jobs {
-		if j.WorkItemID == wi {
-			return j.AgentPID
-		}
-	}
-	return 0
 }
 
 // capsuleDir is this daemon's capsule root for wi.
@@ -986,6 +1001,70 @@ func (u *v1Install) waitWIStatus(t *testing.T, wi, status string, bound time.Dur
 	t.Helper()
 	waitUntil(t, bound, fmt.Sprintf("work item %s never reached status %q (now %q)", wi, status, u.wiStatus(t, wi)),
 		func() bool { return u.wiStatus(t, wi) == status })
+	if status == "wrapped" {
+		// the server-side wrap lands before the daemon's own terminal close
+		// (job release, monitor stop, final push) has drained: a scenario
+		// that returns right here races the teardown of the aihub data dir
+		u.settleClose(wi)
+	}
+}
+
+// settleClose waits (softly: never fails the scenario) until every
+// started daemon has drained the terminal close of wi — the job gone from
+// its status face and its monitor stopped — so a test that ends at the
+// terminal state does not race the final push against temp-dir cleanup.
+func (u *v1Install) settleClose(wi string) {
+	u.dmu.Lock()
+	ds := append([]*v1Daemon(nil), u.daemons...)
+	u.dmu.Unlock()
+	for _, d := range ds {
+		d.settleClose(wi)
+	}
+}
+
+// settleClose is the per-daemon half of v1Install.settleClose.
+func (d *v1Daemon) settleClose(wi string) {
+	if d.cmd == nil || d.client == nil {
+		return
+	}
+	held := func() bool {
+		raw, err := d.client.Status()
+		if err != nil {
+			return false // daemon gone: nothing left to drain
+		}
+		var st cli.StatusResponse
+		if json.Unmarshal(raw, &st) != nil {
+			return false
+		}
+		for _, j := range st.Jobs {
+			if j.WorkItemID == wi {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(12 * time.Second)
+	for held() && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	// a monitor that started must also have stopped (job_stopped is its
+	// last act; the final published push precedes it)
+	stopped := func() bool {
+		started, stopped := false, false
+		for _, e := range d.eventsOf(d.t, wi) {
+			switch e.Kind {
+			case "job_started":
+				started, stopped = true, false
+			case "job_stopped":
+				stopped = true
+			}
+		}
+		return !started || stopped
+	}
+	deadline = time.Now().Add(6 * time.Second)
+	for !stopped() && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // waitForEvent polls the daemon's durable events.log until one event of
@@ -1330,11 +1409,15 @@ type execStepView struct {
 	PendingQuestion    *map[string]any  `json:"pending_question"`
 	PendingRewindInput *map[string]any  `json:"pending_rewind_input"`
 	BudgetConsumed     map[string]any   `json:"budget_consumed"`
+	// Supervision is the driver-owned failure ledger and relaxed bounds
+	// (v2-converge 2.3/2.4).
+	Supervision map[string]any `json:"supervision"`
 }
 
 // executionView is the loose read shape of runtime-state/execution.json.
 type executionView struct {
 	WorkflowStatus string                   `json:"workflow_status"`
+	BlockedReason  string                   `json:"blocked_reason"`
 	CurrentStep    string                   `json:"current_step"`
 	Version        int64                    `json:"version"`
 	BudgetConsumed map[string]any           `json:"budget_consumed"`
@@ -1408,6 +1491,12 @@ func waitWorkflowStatus(t *testing.T, d *v1Daemon, wi, want string, bound time.D
 	waitExecution(t, d.capsuleDir(wi), bound,
 		fmt.Sprintf("workflow_status never reached %q", want),
 		func(x *executionView) bool { return x.WorkflowStatus == want })
+	if want == "completed" {
+		// completed is the driver's last write; the daemon's terminal
+		// close (final push, wrap, job release) still follows — drain it
+		// before the scenario can end and tear the data dir down
+		d.settleClose(wi)
+	}
 }
 
 // waitStepStatus polls the capsule's execution.json until one step's
@@ -1498,18 +1587,6 @@ func archivedEnvelope(t *testing.T, capDir, step string, spawn int) map[string]a
 	return env
 }
 
-// waitArchivedEnvelope polls until the archived envelope of one step
-// spawn exists, then returns it.
-func waitArchivedEnvelope(t *testing.T, d *v1Daemon, wi, step string, spawn int, bound time.Duration) map[string]any {
-	t.Helper()
-	path := filepath.Join(d.capsuleDir(wi), "artifacts", "steps", step, fmt.Sprintf("s%d", spawn), "result.json")
-	waitUntil(t, bound, fmt.Sprintf("archived envelope %s never landed", path), func() bool {
-		_, err := os.Stat(path)
-		return err == nil
-	})
-	return archivedEnvelope(t, d.capsuleDir(wi), step, spawn)
-}
-
 // waitSpawnCount polls the capsule's spawn journal until it carries n
 // entries (the derivation-count face), returning the entries.
 func waitSpawnCount(t *testing.T, d *v1Daemon, wi string, n int, bound time.Duration) []map[string]any {
@@ -1531,25 +1608,6 @@ func latestSpawnPID(t *testing.T, d *v1Daemon, wi string) int {
 	}
 	pid, _ := entries[len(entries)-1]["pid"].(float64)
 	return int(pid)
-}
-
-// requireGh is the environmental gh-availability skip for the real-GitHub
-// scenario: short mode, an absent gh binary and an unauthenticated gh
-// each skip with a message naming its gate (skip-not-fail; the real
-// network is an availability gate, never a regression).
-func requireGh(t *testing.T) {
-	t.Helper()
-	if testing.Short() {
-		t.Skipf("short mode: skipping the real-github ship PR e2e (network + gh required)")
-	}
-	ghPath, err := exec.LookPath("gh")
-	if err != nil {
-		t.Skipf("gh binary absent from PATH: skipping the ship PR e2e")
-	}
-	if out, aerr := exec.Command(ghPath, "auth", "status").CombinedOutput(); aerr != nil {
-		t.Skipf("gh not authenticated (gh auth status exit %v): %s",
-			aerr, strings.TrimSpace(string(out)))
-	}
 }
 
 // envelopeQuickFix is the canonical driver-era quick-fix plan: four
@@ -1593,7 +1651,7 @@ func countOf(list []string, s string) int {
 }
 
 // observeSoft is observe that tolerates the not-yet-monitored window:
-// until the drain wave claims the ticket, the observe route answers
+// until the auto wave claims the ticket, the observe route answers
 // DAEMON-404 by design, and a poll must retry rather than fail.
 func observeSoft(d *v1Daemon, wi string) *protocol.JobView {
 	raw, err := d.client.Observe(wi, 0)
@@ -1628,93 +1686,8 @@ func writePlanExtra(t *testing.T, inst *v1Install, wi string, actions, resume []
 	}
 }
 
-// answerControls extracts the fake agent's pf/answer control landings
-// (in journal order) from one capsule.
-func answerControls(t *testing.T, capDir string) []map[string]any {
-	t.Helper()
-	var out []map[string]any
-	for _, rec := range fakeJournal(t, capDir) {
-		if rec["type"] == "control" && rec["method"] == "pf/answer" {
-			out = append(out, rec)
-		}
-	}
-	return out
-}
-
-// ---------------------------------------------------------------------------
-// The observe answer-ledger file helpers (black box: the file's PATH and
-// its `version` field are the only structural facts the spec pins;
-// everything else is asserted on the values that must survive verbatim).
-// Shared by the answer-resilience scenarios.
-
-// answersPath is the persisted ledger of one daemon: `answers.json`
-// directly under the observe data dir — the same dir that hosts
-// events.log.
-func answersPath(d *v1Daemon) string { return filepath.Join(d.dataDir, "answers.json") }
-
-// readAnswersFile returns the raw bytes of the persisted ledger ("" when
-// the file does not exist yet).
-func readAnswersFile(t *testing.T, d *v1Daemon) string {
-	t.Helper()
-	raw, err := os.ReadFile(answersPath(d))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return ""
-		}
-		t.Fatalf("read %s: %v", answersPath(d), err)
-	}
-	return string(raw)
-}
-
-// answersFileHas reports whether the persisted ledger currently mentions
-// every one of the given values (the relay fields are stored verbatim,
-// so their VALUES must be findable whatever the surrounding key names).
-func answersFileHas(t *testing.T, d *v1Daemon, values ...string) bool {
-	t.Helper()
-	raw := readAnswersFile(t, d)
-	if raw == "" {
-		return false
-	}
-	for _, v := range values {
-		if !strings.Contains(raw, v) {
-			return false
-		}
-	}
-	return true
-}
-
-// assertLedgerFileShape pins the format contract: parsable UTF-8 JSON,
-// an explicit integer `version` of 1, mode 0600, and no in-flight
-// marker anywhere in the bytes (the in-flight state is memory-only).
-func assertLedgerFileShape(t *testing.T, d *v1Daemon) map[string]any {
-	t.Helper()
-	path := answersPath(d)
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("persisted ledger %s missing: %v", path, err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("persisted ledger mode %04o, want 0600 (answer_text is owner-authored content)", perm)
-	}
-	raw := readAnswersFile(t, d)
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
-		t.Fatalf("persisted ledger is not JSON: %v\n%s", err, raw)
-	}
-	ver, ok := doc["version"].(float64)
-	if !ok || int(ver) != 1 {
-		t.Fatalf("persisted ledger version = %v, want the integer 1: %s", doc["version"], raw)
-	}
-	for _, marker := range []string{"inflight", "in_flight", "in-flight"} {
-		if strings.Contains(strings.ToLower(raw), marker) {
-			t.Fatalf("persisted ledger carries an in-flight marker %q (settled states only): %s", marker, raw)
-		}
-	}
-	return doc
-}
-
 // restartSameDaemon re-execs a daemon on the SAME socket, data dir and
-// workspace (so the persisted ledger, events.log and capsules are
+// workspace (so events.log and capsules are
 // exactly what the new process re-opens) — the s08 restart shape, with
 // the observe-window flags carried over.
 func restartSameDaemon(t *testing.T, d *v1Daemon, logName string) *v1Daemon {

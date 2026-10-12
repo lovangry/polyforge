@@ -55,10 +55,15 @@ type procIdent struct {
 
 // CleanupTarget names one WI's agent tree.
 type CleanupTarget struct {
-	PID        int
-	Pgid       int // 0 ⇒ use PID (the agent spawns as its own group leader)
-	StartedAt  string
-	WIID       string
+	PID       int
+	Pgid      int // 0 ⇒ use PID (the agent spawns as its own group leader)
+	StartedAt string
+	WIID      string
+	// DaemonID is the second env-marker half (PF_DAEMON_ID): the L4 sweep
+	// kills only processes carrying BOTH this WI's and this daemon's
+	// markers, so a daemon whose WI moved to another daemon on the same
+	// host never reaps that daemon's live step process.
+	DaemonID   string
 	CapsuleDir string
 	CgroupPath string // per-WI cgroup v2 dir; "" ⇒ layer 0 unavailable
 }
@@ -156,7 +161,7 @@ func Cleanup(t CleanupTarget, bound time.Duration) (*CleanupReport, error) {
 	// L4 — env marker scan.
 	if t.WIID != "" {
 		rep.Layers = append(rep.Layers, "l4-env-marker")
-		marked := scanEnvMarker(t.WIID)
+		marked := scanEnvMarker(t.WIID, t.DaemonID)
 		for _, pid := range marked {
 			signalPID(pid, syscall.SIGTERM, rep)
 		}
@@ -184,7 +189,7 @@ func Cleanup(t CleanupTarget, bound time.Duration) (*CleanupReport, error) {
 		}
 	}
 	if t.WIID != "" {
-		for _, pid := range scanEnvMarker(t.WIID) {
+		for _, pid := range scanEnvMarker(t.WIID, t.DaemonID) {
 			rep.Survivors = append(rep.Survivors, pid)
 		}
 	}
@@ -515,10 +520,10 @@ func treeGone(t CleanupTarget, bound time.Duration) bool {
 // ---------------------------------------------------------------------------
 // env marker scan (L4) and cwd scan (L5)
 
-// scanEnvMarker returns the live pids whose environ carries this WI's
-// PF_WI_ID marker. Excludes self and pid 1.
-func scanEnvMarker(wi string) []int {
-	marker := "PF_WI_ID=" + wi
+// scanEnvMarker returns the live pids whose environ carries BOTH this
+// WI's PF_WI_ID marker and this daemon's PF_DAEMON_ID marker. Excludes
+// self and pid 1.
+func scanEnvMarker(wi, daemonID string) []int {
 	self := os.Getpid()
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
@@ -541,11 +546,8 @@ func scanEnvMarker(wi string) []int {
 		if err != nil {
 			continue // unreadable (permission/exit race): not provably ours
 		}
-		for _, kv := range strings.Split(string(raw), "\x00") {
-			if kv == marker {
-				out = append(out, pid)
-				break
-			}
+		if envHasMarkers(string(raw), wi, daemonID) {
+			out = append(out, pid)
 		}
 	}
 	return out
@@ -583,4 +585,20 @@ func cwdScan(t CleanupTarget, rep *CleanupReport) {
 				fmt.Sprintf("layer 5: pid %d has cwd inside the capsule (%s); reported, not killed", pid, cwd))
 		}
 	}
+}
+
+// envHasMarkers reports whether a /proc/<pid>/environ blob carries both
+// PF_WI_ID=<wi> and PF_DAEMON_ID=<daemonID>.
+func envHasMarkers(environ, wi, daemonID string) bool {
+	wiMark, dMark := "PF_WI_ID="+wi, "PF_DAEMON_ID="+daemonID
+	var hasWI, hasD bool
+	for _, kv := range strings.Split(environ, "\x00") {
+		switch kv {
+		case wiMark:
+			hasWI = true
+		case dMark:
+			hasD = true
+		}
+	}
+	return hasWI && hasD
 }

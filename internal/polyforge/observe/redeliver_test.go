@@ -8,62 +8,50 @@ package observe
 // unedited by the migrated s19 e2e suite). Two KEPT faces stay pinned
 // here, byte-for-byte as before:
 //
-//   - the F9 needs_input same-id re-present: one pending, one event,
-//     asked_at refreshed (the flush face — batch 2a kept it);
+//   - the F9 needs_input same-id re-present: one pending, asked_at
+//     refreshed (via the exec_committed-triggered execution.json read);
 //   - the pending projection's execution.json reconcile: an invalid id
 //     never clobbers the valid pending, and a consumed (nil) pending
 //     clears the projection (the QUESTION face's D6/M4 half).
 
 import (
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
-func TestFlushSameIDRefreshesAskedAtWithoutNewEvent(t *testing.T) {
+func TestSameIDRepresentRefreshesAskedAtWithoutNewEvent(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, nil)
 
-	call := func() FlushCall {
-		return FlushCall{
-			Req:  protocol.FlushRequest{SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: "qF9", Question: "again?", Step: "code"},
-			Resp: make(chan protocol.FlushAck, 1),
-		}
-	}
-	if ack := doFlush(m, call()); !ack.OK {
-		t.Fatalf("first needs_input ack: %+v", ack)
-	}
+	writePendingQuestionAt(t, m, "qF9", "again?", "code", "2026-10-01T00:00:01Z")
+	// the same question id re-presented (a recovered derivation re-writing
+	// its persisted pending): only asked_at moves.
+	writePendingQuestionAt(t, m, "qF9", "again?", "code", "2026-10-01T00:00:02Z")
 	m.stateMu.Lock()
-	first := m.pending.AskedAt
+	var pending *protocol.PendingView
+	if m.pending != nil {
+		cp := *m.pending
+		pending = &cp
+	}
 	m.stateMu.Unlock()
 
-	time.Sleep(5 * time.Millisecond) // asked_at is wall-clock derived
-	if ack := doFlush(m, call()); !ack.OK {
-		t.Fatalf("same-id re-present ack: %+v", ack)
+	// One question id = one pending — the re-present refreshes the
+	// projection's asked_at. The needs_input EVENT is the driver's (it
+	// lands in the same log at the park transition): the supervisor's
+	// projection must never add a second copy.
+	if got := len(eventsOf(m, EvNeedsInput)); got != 0 {
+		t.Fatalf("the supervisor must not duplicate the driver's needs_input event: got %d", got)
 	}
-	m.stateMu.Lock()
-	second := m.pending.AskedAt
-	pending := m.pending
-	m.stateMu.Unlock()
-
-	// One question id = one needs_input event, one pending — but the
-	// re-present refreshes the projection's asked_at.
-	if got := len(eventsOf(m, EvNeedsInput)); got != 1 {
-		t.Fatalf("needs_input events: got %d, want 1", got)
-	}
-	if pending == nil || pending.ID != "qF9" {
-		t.Fatalf("pending must stay the same single question: %+v", pending)
-	}
-	if first == "" || second == "" || first == second {
-		t.Fatalf("asked_at must refresh on the same-id re-present: %q vs %q", first, second)
+	if pending == nil || pending.ID != "qF9" || pending.AskedAt != "2026-10-01T00:00:02Z" {
+		t.Fatalf("pending must stay the same single question with a refreshed asked_at: %+v", pending)
 	}
 }
 
 func TestApplyPendingFromExecIgnoresInvalidID(t *testing.T) {
 	m, _ := newTestMonitor(t, &fakeHandle{}, nil)
-	// flush face recorded a valid pending
+	// a valid pending already recorded
 	m.applyPending(&protocol.PendingView{ID: "q_good", Step: "grill", Question: "valid", AskedAt: "t1"})
 	// execution.json carries an invalid pending (id missing)
 	exec := &capsule.Execution{CurrentStep: "grill", Steps: map[string]*capsule.Step{

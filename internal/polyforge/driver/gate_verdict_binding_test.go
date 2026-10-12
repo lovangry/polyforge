@@ -13,9 +13,11 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
@@ -172,18 +174,29 @@ func TestRunGateVerdictBindingRewindsAndLogs(t *testing.T) {
 		}},
 		// The rewind re-dispatches fix (spawn 3) — this entry lets the
 		// ledger record it with the rewind input aboard. The loop then
-		// re-dispatches the gate itself (resume, INV-1g) and the script
-		// runs out: that infrastructure error is the loop's honest stop,
-		// not a business verdict. The durable state is the assertion.
+		// re-dispatches the gate itself (resume, INV-1g), which parks
+		// (held) until the test cancels: the durable state is the
+		// assertion.
 		done(`{"summary":"fix round 2"}`),
+		{hold: true},
 	}
-	runErr := d.Run(context.Background())
-	if runErr == nil || !strings.Contains(runErr.Error(), "script exhausted") {
-		t.Fatalf("Run: want the script-exhausted stop after the rewind re-dispatch, got %v", runErr)
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- d.Run(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(sp.dispatched()) < 4 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the gate re-dispatch never happened: %v", sp.dispatched())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if runErr := <-runDone; runErr == nil || !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("Run: want the cancellation stop after the rewind re-dispatch, got %v", runErr)
 	}
 
 	if got := sp.dispatched(); fmt.Sprint(got) != fmt.Sprint([]string{
-		"fix@1(resume=false)", "review@2(resume=false)", "fix@3(resume=false)",
+		"fix@1(resume=false)", "review@2(resume=false)", "fix@3(resume=false)", "review@4(resume=true)",
 	}) {
 		t.Fatalf("dispatch ledger: %v", got)
 	}

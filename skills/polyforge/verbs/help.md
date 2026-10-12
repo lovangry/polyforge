@@ -13,7 +13,7 @@ binary's help faces print them; `pf help` lists the full registry and
 |---|---|---|
 | file | `verbs/file.md` | `pf file create` / `pf file edit <id>` / `pf file show <id>` — create, edit or show a work item |
 | queue | `verbs/queue.md` | `pf queue` — the merged list over all mapped projects; `pf queue -project P` — one project; `pf queue -ready` — the ready queue (`-status`, `-limit` filters) |
-| cancel | `verbs/cancel.md` | `pf cancel <id>` — cancel a queued/paused/blocked work item |
+| cancel | `verbs/cancel.md` | `pf cancel <id>` — cancel (abandon) a queued/paused/blocked work item, or one parked repair_pending on this daemon |
 | recall | `verbs/recall.md` | `pf recall -project P <query>` — search project memories (`-type`, `-tags`, `-limit`) |
 | remember | `verbs/remember.md` | `pf remember -project P -type <T> <content>` — store a memory (`-title`, `-tags`, `-visibility`, `-work-item`) |
 
@@ -21,14 +21,13 @@ binary's help faces print them; `pf help` lists the full registry and
 
 | Verb | Fragment | Command |
 |---|---|---|
-| submit | `verbs/submit.md` | `pf submit <id>` — submit for execution (`-takeover` force-claim, `-priority`) |
-| observe | `verbs/observe.md` | `pf observe <id>` — progress projection (`-after <cursor>` for incremental events) |
+| submit | `verbs/submit.md` | `pf submit <id>` — submit for execution (`-priority`) |
+| observe | `verbs/observe.md` | `pf watch <id> --once` — one snapshot (status, step, pending question, events); `pf watch --chat "$PF_CHAT_ID" --wait-decision` — the resident watcher; `pf watch subscribe\|unsubscribe\|list`; the old `pf observe` verb is removed |
 | answer | `verbs/answer.md` | `pf answer <id> -text "..."` — reply to a pending question (`-question`, `-answer-id`, `-by`) |
-| batch-confirm | `verbs/batch-confirm.md` | `pf batch-confirm` — the merged recommendation over all mapped projects (`-project P` scopes); `pf batch-confirm -all` — confirm and submit it |
 | pause | `verbs/pause.md` | `pf pause <id>` — operator pause at the next safe boundary |
-| resume | `verbs/resume.md` | `pf resume <id>` — clear the operator pause |
-| wrap | `verbs/wrap.md` | `pf wrap <id>` — terminal success; `pf wrap <id> -fail` — terminal failure |
-| ops | `verbs/ops.md` | `pf ops status` — jobs, mode, queue counters, the workspace set; `pf ops shutdown` — graceful stop |
+| resume | `verbs/resume.md` | `pf resume <id>` — continue a paused, blocked or repair_pending work item |
+| wrap | `verbs/wrap.md` | `pf wrap <id>` — terminal success; `pf wrap <id> --fail` — the owner's failed verdict (also gives up a repair_pending work item) |
+| ops | `verbs/ops.md` | `pf ops status` — jobs, auto/max, queue counters, the workspace set; `pf ops auto on|off`; `pf ops max N`; `pf ops shutdown` — graceful stop; `pf ops end-session <wi> --reason ...` — force-end a stuck holder's session (admin/maintainer), then `pf submit` |
 
 ## Delivery bridge (wrap → git, local daemon unix socket)
 
@@ -41,6 +40,7 @@ binary's help faces print them; `pf help` lists the full registry and
 | Verb | Fragment | Command |
 |---|---|---|
 | doctor | `verbs/doctor.md` | `pf doctor` — the machine's one health face: config, `[workspace]` mapping, connectivity (`--json` for machines) |
+| chat | (`SKILL.md`, Chat identity) | `pf chat init --harness claude\|pi --harness-session ID` — the chat id a harness adapter exports as `PF_CHAT_ID` |
 | help | `verbs/help.md` | `pf help` — the registry face; this fragment is its routing-side index |
 | init | the init fragment (`init.md`) | install / upgrade / machine setup — routes to the repo's `tools/install.sh` |
 

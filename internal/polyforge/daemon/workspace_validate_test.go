@@ -32,19 +32,18 @@ func validateCfg(t *testing.T, ws string) Config {
 		}
 	}
 	return Config{
-		MachineID:         "m-wsval",
-		SocketPath:        filepath.Join(dir, "s.sock"),
-		Mapping:           mappingFor(ws),
-		DataDir:           data,
-		GitRemoteBase:     hubBase,
-		MaxConcurrent:     1,
-		Hub:               newFakeHub(),
-		Spawner:           &fakeSpawner{},
-		ObservePoll:       10 * time.Millisecond,
-		DrainInterval:     10 * time.Millisecond,
-		DispatchTick:      10 * time.Millisecond,
-		ShutdownFlushWait: 100 * time.Millisecond,
-		ExitPoll:          10 * time.Millisecond,
+		MachineID:     "m-wsval",
+		SocketPath:    filepath.Join(dir, "s.sock"),
+		Mapping:       mappingFor(ws),
+		DataDir:       data,
+		GitRemoteBase: hubBase,
+		MaxConcurrent: 1,
+		Hub:           newFakeHub(),
+		Spawner:       &fakeSpawner{},
+		ObservePoll:   10 * time.Millisecond,
+		DrainInterval: 10 * time.Millisecond,
+		DispatchTick:  10 * time.Millisecond,
+		ExitPoll:      10 * time.Millisecond,
 	}
 }
 

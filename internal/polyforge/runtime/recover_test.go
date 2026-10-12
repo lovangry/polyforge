@@ -245,15 +245,11 @@ type recordingHandle struct {
 	terminated bool
 }
 
-func (h *recordingHandle) PID() int                                { return 0 }
-func (h *recordingHandle) StartedAt() string                       { return "" }
-func (h *recordingHandle) Alive() bool                             { return !h.terminated }
-func (h *recordingHandle) Done() bool                              { return h.terminated }
-func (h *recordingHandle) Terminate(bound time.Duration) error     { h.terminated = true; return nil }
-func (h *recordingHandle) SendControl(m protocol.ControlMsg) error { return nil }
-func (h *recordingHandle) WaitControlAck(ctx context.Context, m protocol.ControlMsg, b time.Duration) error {
-	return nil
-}
+func (h *recordingHandle) PID() int                            { return 0 }
+func (h *recordingHandle) StartedAt() string                   { return "" }
+func (h *recordingHandle) Alive() bool                         { return !h.terminated }
+func (h *recordingHandle) Done() bool                          { return h.terminated }
+func (h *recordingHandle) Terminate(bound time.Duration) error { h.terminated = true; return nil }
 
 // TestRecoverDriverTerminatesOldHandleAndSeedsFromJournal (the #99
 // verification lesson): a driver-path recovery must (1) TERMINATE the old
@@ -416,17 +412,4 @@ func TestRecoverDeadOldAgentWithOrphans(t *testing.T) {
 	if h := j.agent; h != nil {
 		_ = h.Terminate(2e9)
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 || indexOf(s, sub) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }

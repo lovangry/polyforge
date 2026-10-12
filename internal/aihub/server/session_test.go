@@ -165,47 +165,51 @@ func TestSessionAttachOverHTTP(t *testing.T) {
 	}
 }
 
-func TestForceTakeoverOverHTTP(t *testing.T) {
+func TestForceEndSessionOverHTTP(t *testing.T) {
 	e := newSrvEnv(t)
-	id := createExecWIOverHTTP(t, e, "takeover over http")
+	id := createExecWIOverHTTP(t, e, "force-end over http")
 	oldSecret := "51515151515151515151515151515151"
 	if code, raw, _ := sessClaim(t, e, id, oldSecret, "ft-1"); code != 200 {
 		t.Fatalf("claim: %d %s", code, raw)
 	}
-	// A plain writer (non-member) cannot force-takeover.
+	path := "/api/v1/work-items/" + id + "/force-end-session"
+	// A non-member writer is refused AUTH-403.
 	outsider, _ := e.admin.CreateUser("plainw", "pw@example.com", "writer", "human")
 	okey, _ := e.admin.CreateAPIKey(outsider.ID, "pw", "")
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/force-takeover", okey.Plain,
-		map[string]string{"session_id": "52525252525252525252525252525252", "reason": "x"}, nil); code != 403 {
-		t.Fatalf("non-maintainer takeover: %d %s", code, raw)
+	if code, raw := e.do(t, "POST", path, okey.Plain, map[string]string{"reason": "x"}, nil); code != 403 {
+		t.Fatalf("non-member force-end: %d %s", code, raw)
+	} else if c, _ := errEnvelope(t, raw); c != "AUTH-403" {
+		t.Fatalf("wrong refusal class: %s", raw)
 	}
 	// Empty reason: 400.
-	if code, _ := e.do(t, "POST", "/api/v1/work-items/"+id+"/force-takeover", e.key,
-		map[string]string{"session_id": "52525252525252525252525252525252"}, nil); code != 400 {
+	if code, _ := e.do(t, "POST", path, e.key, map[string]string{}, nil); code != 400 {
 		t.Fatalf("empty reason accepted: %d", code)
 	}
-	// Admin takeover: the session swaps atomically.
-	newSecret := "53535353535353535353535353535353"
-	var resp api.SessionClaimResponse
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/force-takeover", e.key,
-		map[string]string{"session_id": newSecret, "machine_id": "m2", "owner": "op2",
-			"reason": "machine lost", "idempotency_key": "ft-2"}, &resp); code != 200 {
-		t.Fatalf("takeover: %d %s", code, raw)
+	// Admin force-end: WI back to queued, session cleared.
+	var view struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
 	}
-	if resp.Claim.SessionFingerprint != api.SessionFingerprint(newSecret) || resp.WorkItem.Status != "running" {
-		t.Fatalf("takeover response wrong: %+v", resp)
+	if code, raw := e.do(t, "POST", path, e.key, map[string]string{"reason": "machine lost"}, &view); code != 200 {
+		t.Fatalf("force-end: %d %s", code, raw)
 	}
-	// The old secret no longer verifies; the new one does.
+	if view.ID != id || view.Status != "queued" {
+		t.Fatalf("force-end response wrong: %+v", view)
+	}
+	// The old secret no longer verifies.
 	var v api.SessionVerifyResponse
 	e.do(t, "POST", "/api/v1/work-items/"+id+"/session-verify", e.key, map[string]string{"session_id": oldSecret}, &v)
 	if v.Matches {
-		t.Fatalf("old secret still matches after takeover")
+		t.Fatalf("old secret still matches after force-end")
 	}
-	e.do(t, "POST", "/api/v1/work-items/"+id+"/session-verify", e.key, map[string]string{"session_id": newSecret}, &v)
-	if !v.Matches {
-		t.Fatalf("new secret does not match after takeover")
+	// The old secret can no longer end the WI (fenced).
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
+		map[string]string{"session_id": oldSecret, "status": "wrapped"}, nil); code != 403 {
+		t.Fatalf("old secret ended the WI after force-end: %d %s", code, raw)
+	} else if c, r := errEnvelope(t, raw); c != "CORE-403" || r != "STALE_SESSION" {
+		t.Fatalf("wrong refusal: %s %s", c, r)
 	}
-	// The session_superseded event carries the OLD fingerprint (m4).
+	// The session_superseded event carries the OLD fingerprint and reason.
 	found := false
 	for _, ev := range eventsOf(t, e, id) {
 		if ev["type"] != "session_superseded" {
@@ -213,38 +217,50 @@ func TestForceTakeoverOverHTTP(t *testing.T) {
 		}
 		found = true
 		payload, _ := ev["payload"].(map[string]any)
-		if payload["old_session_fingerprint"] != api.SessionFingerprint(oldSecret) {
-			t.Fatalf("superseded event lost the old fingerprint: %v", ev)
+		if payload["old_session_fingerprint"] != api.SessionFingerprint(oldSecret) || payload["reason"] != "machine lost" {
+			t.Fatalf("superseded event payload wrong: %v", ev)
 		}
 	}
 	if !found {
 		t.Fatalf("session_superseded event missing")
 	}
-	// Idempotent takeover replay: same key, same session.
-	var replay api.SessionClaimResponse
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/force-takeover", e.key,
-		map[string]string{"session_id": "54545454545454545454545454545454",
-			"reason": "retry", "idempotency_key": "ft-2"}, &replay); code != 200 ||
-		replay.Claim.SessionFingerprint != resp.Claim.SessionFingerprint {
-		t.Fatalf("takeover replay minted a new session: %d %s %+v", code, raw, replay.Claim)
+	// A second force-end: the WI no longer holds a session -> 409 NOT_HELD.
+	if code, raw := e.do(t, "POST", path, e.key, map[string]string{"reason": "again"}, nil); code != 409 {
+		t.Fatalf("force-end of queued WI: %d %s", code, raw)
+	} else if c, r := errEnvelope(t, raw); c != "CORE-409" || r != "NOT_HELD" {
+		t.Fatalf("wrong refusal: %s %s", c, r)
+	}
+	// The WI is claimable by a fresh claim, and the new secret verifies.
+	newSecret := "53535353535353535353535353535353"
+	if code, raw, _ := sessClaim(t, e, id, newSecret, "ft-2"); code != 200 {
+		t.Fatalf("claim after force-end: %d %s", code, raw)
+	}
+	e.do(t, "POST", "/api/v1/work-items/"+id+"/session-verify", e.key, map[string]string{"session_id": newSecret}, &v)
+	if !v.Matches {
+		t.Fatalf("new secret does not match after re-claim")
 	}
 }
 
-// TestForceTakeoverMachineSelfTakeover (#109): a MACHINE-credential
-// caller — the heartbeat-registration shape every production daemon
-// holds — with project membership (role writer) may force-takeover
-// ONLY onto its own machine identity (the executor's self-service
-// recovery). Onto another machine it is refused, and a human writer
-// member is refused exactly as before the widening.
-func TestForceTakeoverMachineSelfTakeover(t *testing.T) {
+// TestForceEndSessionAuthorization: the recovery door is a human decision —
+// admin or project maintainer only. A project writer and a MACHINE
+// credential (even with project membership) are refused AUTH-403; a
+// maintainer is admitted.
+func TestForceEndSessionAuthorization(t *testing.T) {
 	e := newSrvEnv(t)
-	id := createExecWIOverHTTP(t, e, "machine self-takeover over http")
-	oldSecret := "57151515151515151515151515151515"
-	if code, raw, _ := sessClaim(t, e, id, oldSecret, "mft-1"); code != 200 {
+	id := createExecWIOverHTTP(t, e, "force-end authz")
+	if code, raw, _ := sessClaim(t, e, id, "57151515151515151515151515151515", "fa-1"); code != 200 {
 		t.Fatalf("claim: %d %s", code, raw)
 	}
-	// Register a machine through the real heartbeat face (creates the
-	// kind='machine' user + key) and make it a project writer.
+	path := "/api/v1/work-items/" + id + "/force-end-session"
+	alpha := e.adminProjectID(t, "alpha")
+	addMember := func(userID, role string) {
+		t.Helper()
+		if code, raw := e.do(t, "PATCH", "/api/v1/projects/"+alpha, e.key,
+			map[string]any{"members": []map[string]string{{"user_id": userID, "role": role}}}, nil); code != 200 {
+			t.Fatalf("membership: %d %s", code, raw)
+		}
+	}
+	// A registered machine (heartbeat shape) with writer membership.
 	var hb struct {
 		UserID string `json:"user_id"`
 		APIKey struct {
@@ -255,46 +271,37 @@ func TestForceTakeoverMachineSelfTakeover(t *testing.T) {
 		map[string]any{"machine_id": "m-self", "live_wi_ids": []string{}}, &hb); code != 200 || hb.UserID == "" || hb.APIKey.Plain == "" {
 		t.Fatalf("heartbeat registration: %d %s", code, raw)
 	}
-	if code, raw := e.do(t, "PATCH", "/api/v1/projects/alpha", e.key,
-		map[string]any{"members": []map[string]string{{"user_id": hb.UserID, "role": "writer"}}}, nil); code != 200 {
-		t.Fatalf("membership: %d %s", code, raw)
-	}
-	// Machine self-takeover onto its own machine: admitted (the #109 gate).
-	selfSecret := "58151515151515151515151515151515"
-	var resp api.SessionClaimResponse
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/force-takeover", hb.APIKey.Plain,
-		map[string]string{"session_id": selfSecret, "machine_id": "m-self",
-			"owner": "m-self", "reason": "holder machine lost", "idempotency_key": "mft-2"}, &resp); code != 200 {
-		t.Fatalf("machine self-takeover: %d %s", code, raw)
-	}
-	if resp.Claim.SessionFingerprint != api.SessionFingerprint(selfSecret) || resp.Claim.MachineID != "m-self" {
-		t.Fatalf("self-takeover response wrong: %+v", resp.Claim)
-	}
-	// A machine claiming onto ANOTHER machine: refused.
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/force-takeover", hb.APIKey.Plain,
-		map[string]string{"session_id": "59151515151515151515151515151515",
-			"machine_id": "m-other", "reason": "x"}, nil); code != 403 {
-		t.Fatalf("machine foreign-machine takeover: %d %s", code, raw)
+	addMember(hb.UserID, "writer")
+	if code, raw := e.do(t, "POST", path, hb.APIKey.Plain, map[string]string{"reason": "x"}, nil); code != 403 {
+		t.Fatalf("machine credential force-end: %d %s", code, raw)
 	} else if c, _ := errEnvelope(t, raw); c != "AUTH-403" {
 		t.Fatalf("wrong refusal class: %s", raw)
 	}
-	// A HUMAN writer member stays refused (the v1 human gate is intact).
+	// A human writer member is refused too.
 	human, _ := e.admin.CreateUser("humanw", "hw@example.com", "writer", "human")
 	hkey, _ := e.admin.CreateAPIKey(human.ID, "hw", "")
-	if code, raw := e.do(t, "PATCH", "/api/v1/projects/alpha", e.key,
-		map[string]any{"members": []map[string]string{{"user_id": human.ID, "role": "writer"}}}, nil); code != 200 {
-		t.Fatalf("human membership: %d %s", code, raw)
+	addMember(human.ID, "writer")
+	if code, raw := e.do(t, "POST", path, hkey.Plain, map[string]string{"reason": "x"}, nil); code != 403 {
+		t.Fatalf("human writer force-end: %d %s", code, raw)
+	} else if c, _ := errEnvelope(t, raw); c != "AUTH-403" {
+		t.Fatalf("wrong refusal class: %s", raw)
 	}
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/force-takeover", hkey.Plain,
-		map[string]string{"session_id": "5a151515151515151515151515151515",
-			"machine_id": "m-self", "reason": "x"}, nil); code != 403 {
-		t.Fatalf("human writer takeover: %d %s", code, raw)
+	// Still held: nothing above changed the WI.
+	var wi struct {
+		Status string `json:"status"`
 	}
-	// The self-takeover actually holds: the new secret verifies.
-	var v api.SessionVerifyResponse
-	e.do(t, "POST", "/api/v1/work-items/"+id+"/session-verify", e.key, map[string]string{"session_id": selfSecret}, &v)
-	if !v.Matches {
-		t.Fatalf("self-takeover secret does not verify")
+	if code, raw := e.do(t, "GET", "/api/v1/work-items/"+id, e.key, nil, &wi); code != 200 || wi.Status != "running" {
+		t.Fatalf("refused force-end mutated the WI: %d %s", code, raw)
+	}
+	// A project maintainer is admitted.
+	maint, _ := e.admin.CreateUser("maintfe", "mfe@example.com", "writer", "human")
+	mkey, _ := e.admin.CreateAPIKey(maint.ID, "mfe", "")
+	addMember(maint.ID, "maintainer")
+	var view struct {
+		Status string `json:"status"`
+	}
+	if code, raw := e.do(t, "POST", path, mkey.Plain, map[string]string{"reason": "holder machine lost"}, &view); code != 200 || view.Status != "queued" {
+		t.Fatalf("maintainer force-end: %d %s %+v", code, raw, view)
 	}
 }
 
@@ -523,84 +530,194 @@ func TestSessionHolderOverHTTP(t *testing.T) {
 	}
 }
 
-// TestUnblockOverHTTP (Finding 3, v1.5 review): the blocked state's exit
-// door. session-end(blocked) is the STANDARD compensation (abandonClaim's
-// D5 rule, the bounded fail), so a human must be able to return the
-// verdict to the queued pool: POST /unblock flips blocked→queued, clears
-// waiting_on and leaves a wi_unblocked event. Authorization mirrors
-// force-takeover (admin or project maintainer); a non-blocked work item
-// answers the typed NOT_BLOCKED refusal.
-func TestUnblockOverHTTP(t *testing.T) {
+// TestBlockedExitsUnifiedAuthorization (v2-converge §7, §11 item 7): the
+// blocked exits — resume-blocked (continue) and terminate-blocked —
+// and cancel (abandon) are open to exactly the work item's reporter, a
+// project maintainer, or an admin. A plain project member (writer) who is
+// none of those is refused on EVERY door — resume-blocked used to check the
+// key scope only.
+func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
 	e := newSrvEnv(t)
-	id := createExecWIOverHTTP(t, e, "unblock over http")
-	secret := "91919191919191919191919191919191"
-	if code, raw, _ := sessClaim(t, e, id, secret, "ub-1"); code != 200 {
-		t.Fatalf("claim: %d %s", code, raw)
+	mk := func(name, role string) (string, string) {
+		u, err := e.admin.CreateUser(name, name+"@example.com", "writer", "human")
+		if err != nil {
+			t.Fatal(err)
+		}
+		k, err := e.admin.CreateAPIKey(u.ID, name, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u.ID, k.Plain
 	}
-	// The bounded-fail shape: session-end(blocked) clears the session row
-	// (M2) and sets waiting_on=owner.
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
-		map[string]string{"session_id": secret, "status": "blocked", "note": "recovery budget exhausted"}, nil); code != 200 {
-		t.Fatalf("session-end(blocked): %d %s", code, raw)
-	}
-
-	// Authorization: a plain writer (non-member) is refused.
-	outsider, _ := e.admin.CreateUser("plainub", "pub@example.com", "writer", "human")
-	okey, _ := e.admin.CreateAPIKey(outsider.ID, "pub", "")
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/unblock", okey.Plain,
-		map[string]any{}, nil); code != 403 {
-		t.Fatalf("non-maintainer unblock: %d %s", code, raw)
-	}
-
-	// The gate: unblocking a QUEUED work item answers NOT_BLOCKED.
-	other := createExecWIOverHTTP(t, e, "unblock not blocked")
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+other+"/unblock", e.key,
-		map[string]any{}, nil); code != 409 {
-		t.Fatalf("queued unblock: %d %s", code, raw)
-	} else if c, r := errEnvelope(t, raw); c != "CORE-409" || r != "NOT_BLOCKED" {
-		t.Fatalf("wrong refusal: %s %s", c, r)
+	repID, repKey := mk("reporterx", "writer")
+	otherID, otherKey := mk("memberx", "writer")
+	maintID, maintKey := mk("maintx", "maintainer")
+	_, outKey := mk("outsiderx", "writer")
+	if _, err := e.admin.PatchProject("alpha", core.ProjectPatchRequest{
+		Members: &[]api.ProjectMember{
+			{UserID: repID, Role: "writer"},
+			{UserID: otherID, Role: "writer"},
+			{UserID: maintID, Role: "maintainer"},
+		},
+	}); err != nil {
+		t.Fatal(err)
 	}
 
-	// A project maintainer may unblock (the takeover gate's twin).
-	member, _ := e.admin.CreateUser("maintub", "mub@example.com", "writer", "human")
-	mkey, _ := e.admin.CreateAPIKey(member.ID, "mub", "")
-	e.do(t, "PATCH", "/api/v1/projects/"+e.adminProjectID(t, "alpha"), e.key,
-		map[string]any{"members": []map[string]string{{"user_id": member.ID, "role": "maintainer"}}}, nil)
-
-	var unblocked struct {
-		ID        string  `json:"id"`
-		Status    string  `json:"status"`
-		WaitingOn *string `json:"waiting_on"`
+	block := func(goal, secret string) string {
+		var wi struct {
+			ID string `json:"id"`
+		}
+		if code, raw := e.do(t, "POST", "/api/v1/work-items", repKey,
+			map[string]any{"project": "alpha", "goal": goal, "bundle_name": "demo-bundle"}, &wi); code != 201 {
+			t.Fatalf("reporter create: %d %s", code, raw)
+		}
+		if code, raw, _ := sessClaim(t, e, wi.ID, secret, "k-"+secret[:4]); code != 200 {
+			t.Fatalf("claim: %d %s", code, raw)
+		}
+		if code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/session-end", e.key,
+			map[string]string{"session_id": secret, "status": "blocked"}, nil); code != 200 {
+			t.Fatalf("block: %d %s", code, raw)
+		}
+		return wi.ID
 	}
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/unblock", mkey.Plain,
-		map[string]any{}, &unblocked); code != 200 || unblocked.Status != "queued" || unblocked.WaitingOn != nil {
-		t.Fatalf("maintainer unblock: %d %s %+v", code, raw, unblocked)
-	}
+	s := func(n byte) string { return strings.Repeat(string(rune('a'+n)), 32) }
+	id := block("blocked auth", s(1))
 
-	// The wi_unblocked event landed on the timeline.
-	found := false
-	for _, ev := range eventsOf(t, e, id) {
-		if ev["type"] == "wi_unblocked" {
-			found = true
+	for _, door := range []string{"resume-blocked", "terminate-blocked"} {
+		for who, key := range map[string]string{"plain member": otherKey, "outsider": outKey} {
+			if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/"+door, key, map[string]any{}, nil); code != 403 && code != 404 {
+				t.Fatalf("%s on %s must be refused, got %d %s", who, door, code, raw)
+			}
 		}
 	}
-	if !found {
-		t.Fatalf("wi_unblocked event missing: %v", eventsOf(t, e, id))
+	// cancel (abandon) answers the same set
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/cancel", otherKey, map[string]any{}, nil); code != 403 {
+		t.Fatalf("plain member cancel: %d %s", code, raw)
 	}
 
-	// The unblocked work item is claimable again through the ordinary CAS
-	// gate (the runtime needs no change — queued is queued).
-	if code, raw, _ := sessClaim(t, e, id, "92929292929292929292929292929292", "ub-2"); code != 200 {
-		t.Fatalf("claim after unblock: %d %s", code, raw)
+	// the reporter continues
+	var got struct {
+		Status string `json:"status"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/resume-blocked", repKey, map[string]any{}, &got); code != 200 || got.Status != "queued" {
+		t.Fatalf("reporter resume-blocked: %d %s", code, raw)
+	}
+	// a maintainer continues another blocked WI
+	id2 := block("blocked auth 2", s(2))
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id2+"/resume-blocked", maintKey, map[string]any{}, &got); code != 200 || got.Status != "queued" {
+		t.Fatalf("maintainer resume-blocked: %d %s", code, raw)
+	}
+	// an admin terminates a third
+	id3 := block("blocked auth 3", s(3))
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id3+"/terminate-blocked", e.key, map[string]any{}, &got); code != 200 || got.Status != "failed" {
+		t.Fatalf("admin terminate-blocked: %d %s", code, raw)
+	}
+	// the reporter abandons a fourth
+	id4 := block("blocked auth 4", s(4))
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id4+"/cancel", repKey, map[string]any{}, &got); code != 200 || got.Status != "canceled" {
+		t.Fatalf("reporter cancel of a blocked WI: %d %s", code, raw)
 	}
 
-	// Terminal states stay read-only: a wrapped work item answers 410.
+	// close-auth: the read-only probe the CLI runs before abandoning a
+	// repair_pending WI answers the same set, and mutates nothing.
+	id5 := block("close auth", s(5))
+	for who, key := range map[string]string{"plain member": otherKey, "outsider": outKey} {
+		if code, raw := e.do(t, "GET", "/api/v1/work-items/"+id5+"/close-auth", key, nil, nil); code != 403 && code != 404 {
+			t.Fatalf("%s close-auth must be refused, got %d %s", who, code, raw)
+		}
+	}
+	for who, key := range map[string]string{"reporter": repKey, "maintainer": maintKey, "admin": e.key} {
+		if code, raw := e.do(t, "GET", "/api/v1/work-items/"+id5+"/close-auth", key, nil, nil); code != 200 {
+			t.Fatalf("%s close-auth: %d %s", who, code, raw)
+		}
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/work-items/"+id5, e.key, nil, &got); code != 200 || got.Status != "blocked" {
+		t.Fatalf("close-auth must not mutate: %d %s", code, raw)
+	}
+}
+
+// TestSessionEndCanceledVerdict: the abandon of a repair_pending WI ends the
+// kept session with the canceled verdict — fenced on the secret, session
+// cleared, closed_at set, terminal.
+func TestSessionEndCanceledVerdict(t *testing.T) {
+	e := newSrvEnv(t)
+	id := createExecWIOverHTTP(t, e, "abandon me")
+	secret := strings.Repeat("c", 32)
+	if code, raw, _ := sessClaim(t, e, id, secret, "k-cc"); code != 200 {
+		t.Fatalf("claim: %d %s", code, raw)
+	}
 	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
-		map[string]string{"session_id": "92929292929292929292929292929292", "status": "wrapped"}, nil); code != 200 {
-		t.Fatalf("session-end(wrapped): %d %s", code, raw)
+		map[string]string{"session_id": strings.Repeat("d", 32), "status": "canceled"}, nil); code != 403 {
+		t.Fatalf("a foreign secret must be fenced, got %d %s", code, raw)
 	}
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/unblock", e.key,
-		map[string]any{}, nil); code != 410 {
-		t.Fatalf("terminal unblock: %d %s", code, raw)
+	var got struct {
+		Status   string  `json:"status"`
+		ClosedAt *string `json:"closed_at"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
+		map[string]string{"session_id": secret, "status": "canceled", "note": "abandoned"}, &got); code != 200 || got.Status != "canceled" {
+		t.Fatalf("canceled session-end: %d %s", code, raw)
+	}
+	if got.ClosedAt == nil || *got.ClosedAt == "" {
+		t.Errorf("a canceled close must set closed_at: %+v", got)
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/cancel", e.key, map[string]any{}, nil); code == 200 {
+		t.Fatalf("a terminal WI cannot be cancelled again: %d %s", code, raw)
+	}
+}
+
+// TestBlockedSealHeadRoundTrip (v2-converge §7): the blocked verdict's
+// head_sha is recorded with the sealing machine and answered on the next
+// claim; a non-blocked close clears it (no stale seal on later claims); a
+// blocked verdict without a head (an abandoned claim) keeps the standing
+// seal.
+func TestBlockedSealHeadRoundTrip(t *testing.T) {
+	e := newSrvEnv(t)
+	id := createExecWIOverHTTP(t, e, "sealed head")
+	end := func(secret string, body map[string]string) {
+		t.Helper()
+		body["session_id"] = secret
+		if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key, body, nil); code != 200 {
+			t.Fatalf("session-end %v: %d %s", body, code, raw)
+		}
+	}
+	unblock := func() {
+		t.Helper()
+		if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/resume-blocked", e.key, map[string]any{}, nil); code != 200 {
+			t.Fatalf("resume-blocked: %d %s", code, raw)
+		}
+	}
+	s1, s2, s3 := strings.Repeat("a1", 16), strings.Repeat("b2", 16), strings.Repeat("c3", 16)
+
+	_, _, first := sessClaim(t, e, id, s1, "seal-1")
+	if first.Claim.SealedHead != "" {
+		t.Fatalf("a fresh WI has no seal: %+v", first.Claim)
+	}
+	end(s1, map[string]string{"status": "blocked", "head_sha": "abc123"})
+	unblock()
+	code, raw, second := sessClaim(t, e, id, s2, "seal-2")
+	if code != 200 || second.Claim.SealedHead != "abc123" || second.Claim.SealedMachine != "m1" {
+		t.Fatalf("the claim must answer the sealed head + machine: %d %s", code, raw)
+	}
+	// an abandoned claim (blocked, no head) keeps the standing seal
+	end(s2, map[string]string{"status": "blocked", "note": "refused"})
+	unblock()
+	_, _, third := sessClaim(t, e, id, s3, "seal-3")
+	if third.Claim.SealedHead != "abc123" {
+		t.Fatalf("a head-less blocked verdict must keep the seal: %+v", third.Claim)
+	}
+	// a pause clears it
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
+		map[string]any{"session_id": s3, "status": "paused", "clean_pause": true}, nil); code != 200 {
+		t.Fatalf("pause: %d %s", code, raw)
+	}
+	var wi struct {
+		Attrs map[string]any `json:"attrs"`
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/work-items/"+id, e.key, nil, &wi); code != 200 {
+		t.Fatalf("get: %d %s", code, raw)
+	}
+	if _, has := wi.Attrs["blocked_seal"]; has {
+		t.Fatalf("a pause must clear the seal: %v", wi.Attrs)
 	}
 }

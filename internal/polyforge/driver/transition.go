@@ -35,12 +35,11 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // Workflow status vocabulary (03-execution-capsule.md §4.2, closed set).
-// The empty string is tolerated on load as running (a legacy or absent
-// field); New normalizes it in memory and the next transition persists
-// the normalized form. The strings are owned by the SCHEMA package
+// The strings are owned by the SCHEMA package
 // (internal/common/capsule) so non-driver lanes can read them without an
 // import cycle; these are the driver's write-side aliases.
 const (
@@ -101,6 +100,17 @@ const (
 	// ledger never records a phantom derivation between the owner's
 	// verdict and the re-dispatch it names.
 	TransUnblock TransitionKind = "unblock"
+	// TransStepFailed is the supervision write (v2-converge 2.3): ONE
+	// failed dispatch — the attempt with its cause sub-class, the per-step
+	// failure counter, relaxed thresholds, the next dispatch's shape and,
+	// when the death-cause table says so, the blocked status — in one
+	// atomic execution.json write.
+	TransStepFailed TransitionKind = "step_failed"
+	// TransRejectEscalated persists one spent in-process envelope-rejection
+	// bound (the driver is about to be relaunched): it counts the
+	// relaunch in the step's supervision ledger and, at the bound, blocks
+	// the step instead.
+	TransRejectEscalated TransitionKind = "reject_escalated"
 )
 
 // TransitionRequest is one submitted execution.json mutation. SpawnN is
@@ -121,7 +131,12 @@ type TransitionRequest struct {
 	FaultClass string          // interrupted: the classified fault of the dead derivation
 	QuestionID string          // answer: the question id being answered
 	AnsweredBy string          // answer: who answered ("" → "owner")
-	SpawnN     int64
+	// Failure carries a step_failed write's failed-dispatch record.
+	Failure *StepFailure
+	// WallMs is the finished dispatch's wall time folded into the step's
+	// cumulative runtime by a step_result write.
+	WallMs int64
+	SpawnN int64
 }
 
 // GateVerdict is one business gate FAIL judgment (01 §6.2): the policy
@@ -146,6 +161,14 @@ type appliedInfo struct {
 	archived []string
 	target   string
 	resume   bool
+	failure  *failureDecision
+	extra    []appliedEvent
+}
+
+// appliedEvent is a follow-up event of one transition.
+type appliedEvent struct {
+	kind string
+	body map[string]any
 }
 
 // transition is the SINGLE entry point for all execution.json mutations.
@@ -205,6 +228,11 @@ func (d *Driver) transition(req TransitionRequest) error {
 	}
 	d.emitLocked(req, info)
 	d.wakeLoopLocked()
+	if d.cfg.Link != nil {
+		// the commit boundary: the supervisor pushes the capsule on this
+		// notice (it no longer polls execution.json)
+		d.cfg.Link.Fact(supervise.ExecCommitted{Version: d.exec.Version, Step: d.exec.CurrentStep})
+	}
 	return nil
 }
 
@@ -230,6 +258,10 @@ func (d *Driver) applyLocked(req TransitionRequest, info *appliedInfo) error {
 		return d.applyAnswerLocked(req)
 	case TransInterrupted:
 		return d.applyInterruptedLocked(req)
+	case TransStepFailed:
+		return d.applyStepFailedLocked(req, info)
+	case TransRejectEscalated:
+		return d.applyRejectEscalatedLocked(req, info)
 	default:
 		return fmt.Errorf("driver: unknown transition kind %q", req.Kind)
 	}
@@ -286,6 +318,9 @@ func (d *Driver) applyStepStartLocked(req TransitionRequest, info *appliedInfo) 
 	default:
 		return fmt.Errorf("driver: step %q is %s; only pending or in_progress steps start", req.StepID, st.Status)
 	}
+	if st.Supervision != nil {
+		st.Supervision.NextDispatch = "" // this dispatch consumed the shape the last failure ordered
+	}
 	st.Model = req.Model
 	st.StepStartedAt = d.stamp() // refreshes on every re-entry (03 §4.2 D8)
 	d.exec.WorkflowStatus = StatusRunning
@@ -308,6 +343,16 @@ func (d *Driver) applyUnblockLocked() error {
 		return fmt.Errorf("driver: blocked workflow without a current step")
 	}
 	d.exec.WorkflowStatus = StatusRunning
+	d.exec.BlockedReason = ""
+	// the human's "continue" resets the step's failure ledger (the
+	// relaxed thresholds stay: they are the step's learned bounds)
+	if st := d.exec.Steps[d.exec.CurrentStep]; st != nil && st.Supervision != nil {
+		st.Supervision.FailureCount = 0
+		st.Supervision.LongTaskTimeouts = 0
+		st.Supervision.NextDispatch = ""
+		st.Supervision.RejectRelaunches = 0
+		st.Supervision.RuntimeBaseMs = st.BudgetConsumed.WallMs // a fresh T window
+	}
 	return nil
 }
 
@@ -373,6 +418,16 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 	if st.Status != capsule.StepInProgress {
 		return fmt.Errorf("driver: step %q is %s; only an in_progress step accepts results", req.StepID, st.Status)
 	}
+	if st.Supervision != nil {
+		st.Supervision.RejectRelaunches = 0 // an accepted result ends the rejection streak
+	}
+	if req.WallMs > 0 {
+		// the finished dispatch's wall time joins the step's cumulative
+		// runtime (the T accumulator, human-wait time excluded by
+		// construction: no process runs while a question is open)
+		st.BudgetConsumed.WallMs += req.WallMs
+		d.exec.BudgetConsumed.WallMs += req.WallMs
+	}
 
 	switch res.Outcome {
 	case OutcomeCompleted:
@@ -404,26 +459,11 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 		}
 		d.exec.ReviewRounds[req.StepID]++
 	case OutcomeNeedsInput:
-		// The question may live at envelope level (QuestionID/Question)
-		// or embedded in the output JSON (question_id/question) — step
-		// agents naturally put it in the output object. Try both.
-		qid, qtext := res.QuestionID, res.Question
-		if qid == "" || qtext == "" {
-			var embedded struct {
-				QuestionID string `json:"question_id"`
-				Question   string `json:"question"`
-			}
-			if len(res.Output) > 0 && json.Unmarshal(res.Output, &embedded) == nil {
-				if qid == "" {
-					qid = embedded.QuestionID
-				}
-				if qtext == "" {
-					qtext = embedded.Question
-				}
-			}
-		}
-		if qid == "" || qtext == "" {
-			return fmt.Errorf("driver: needs_input result without question_id/question (envelope or output)")
+		// Shape was validated at staging (ValidateStepResult); the same
+		// helper re-derives the pair here and stays a backstop.
+		qid, qtext, qerr := needsInputQuestion(res)
+		if qerr != nil {
+			return qerr
 		}
 		st.PendingQuestion = &capsule.PendingQuestion{
 			ID:       qid,
@@ -451,8 +491,9 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 // with output cleared, moves the position back to target and (with
 // include_verdict, the default) persists the FAIL verdict as the
 // target's pending_rewind_input. The gate itself is neither archived
-// nor reset: it stays in_progress holding its verdict output, and its
-// candidate pointer is untouched (INV-1g — rewind never switches
+// nor reset: it stays in_progress holding its verdict output (only its
+// AnswerBase advances, so a human gate needs a fresh answer on re-entry),
+// and its candidate pointer is untouched (INV-1g — rewind never switches
 // candidates).
 func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) error {
 	v := req.Gate
@@ -489,6 +530,12 @@ func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) e
 		return nil
 	}
 	d.applyRewindRangeLocked(tIdx, gIdx, target, gate, "", info)
+	// The gate itself stays in_progress, but its verdict closes the human
+	// round it judged: answers recorded so far must not satisfy a
+	// requires_human_answer gate on re-entry (human-gate bypass).
+	if gst := d.exec.Steps[gate]; gst != nil {
+		gst.AnswerBase = len(gst.Answers)
+	}
 	if v.IncludeVerdict {
 		d.exec.Steps[target].PendingRewindInput = &capsule.RewindInput{
 			ToStep: target,
@@ -574,6 +621,8 @@ func (d *Driver) applyRewindRangeLocked(from, to int, target, rewindGate, detail
 		st.Output = nil
 		st.PendingQuestion = nil
 		st.PendingRewindInput = nil
+		st.Supervision = nil            // a gate rewind into the step resets its failure ledger and relaxed bounds
+		st.AnswerBase = len(st.Answers) // a rewound step starts a new attempt chain: earlier answers no longer count toward the human gate
 		info.archived = append(info.archived, sid)
 	}
 	d.exec.RewindStats.Count++
@@ -705,9 +754,18 @@ func (d *Driver) applyInterruptedLocked(req TransitionRequest) error {
 			seq = a.AttemptSeq
 		}
 	}
+	// The interruption is audit only: it is NOT a counted failure (the
+	// per-step failure counter is untouched — a daemon restart or driver
+	// relaunch must not push a step towards blocked) and, with no fault
+	// class, never advances the candidate pointer.
+	cause := "driver_relaunch"
+	if req.Reason == "daemon_restart" {
+		cause = "daemon_restart"
+	}
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,
 		FaultClass:    req.FaultClass,
+		FailureCause:  cause,
 		AttemptSeq:    seq + 1,
 		StartedAt:     st.StepStartedAt,
 		InterruptedAt: d.stamp(),
@@ -778,7 +836,11 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 			kind = "gate_verdict"
 		case OutcomeNeedsInput:
 			kind = "needs_input"
+			d.inputEventFor = req.Result.QuestionID
 			body["question_id"] = req.Result.QuestionID
+			if _, q, qerr := needsInputQuestion(req.Result); qerr == nil {
+				body["question"] = q
+			}
 		case OutcomeIncomplete:
 			kind = "incomplete"
 		}
@@ -818,12 +880,75 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 		body["step"] = d.exec.CurrentStep
 		body["fault_class"] = req.FaultClass
 		body["detail"] = req.Reason
+	case TransStepFailed:
+		kind = "step_failed"
+		d.failureEventsLocked(req, info, body)
+	case TransRejectEscalated:
+		kind = "reject_escalated"
+		body["step"] = req.StepID
+		body["detail"] = req.Reason
+		if st := d.exec.Steps[req.StepID]; st != nil && st.Supervision != nil {
+			body["reject_relaunches"] = st.Supervision.RejectRelaunches
+		}
+		if d.exec.WorkflowStatus == StatusBlocked {
+			info.extra = append(info.extra, appliedEvent{"blocked", map[string]any{
+				"step": req.StepID, "cause": "envelope_rejected", "reason": d.exec.BlockedReason, "report": true,
+			}})
+		}
 	}
 	if kind == "" {
 		return
 	}
-	if err := d.log.Append(d.wi.ID, kind, body); err != nil {
-		fmt.Fprintf(os.Stderr, "driver: %s: event %s emission failed (transition committed): %v\n", d.wi.ID, kind, err)
+	d.emit(kind, body)
+	for _, x := range info.extra {
+		d.emit(x.kind, x.body)
+	}
+}
+
+// failureEventsLocked fills the step_failed body and queues the
+// follow-up events (blocked, candidate_switched, candidates_exhausted)
+// the owner-facing log carries.
+func (d *Driver) failureEventsLocked(req TransitionRequest, info *appliedInfo, body map[string]any) {
+	dec := info.failure
+	if dec == nil || req.Failure == nil {
+		return
+	}
+	body["step"] = req.StepID
+	body["cause"] = dec.Cause
+	body["detail"] = req.Failure.Detail
+	body["fault_class"] = string(dec.FaultClass)
+	body["disposition"] = dec.disposition()
+	body["failure_count"] = dec.Count
+	body["next_dispatch"] = "resume"
+	if dec.Fresh {
+		body["next_dispatch"] = "fresh"
+	}
+	if dec.RelaxToolMs > 0 {
+		body["relaxed_tool_ms"] = dec.RelaxToolMs
+	}
+	if dec.RelaxWallMs > 0 {
+		body["relaxed_wall_ms"] = dec.RelaxWallMs
+	}
+	if dec.Switch {
+		body["from_model"], body["to_model"] = dec.From, dec.To
+		info.extra = append(info.extra, appliedEvent{"candidate_switched", map[string]any{
+			"step": req.StepID, "from": dec.From, "to": dec.To, "cause": dec.Cause,
+		}})
+	}
+	if dec.Exhausted {
+		body["candidates_exhausted"] = true
+		info.extra = append(info.extra, appliedEvent{"candidates_exhausted", map[string]any{
+			"step": req.StepID, "cause": dec.Cause,
+			"note": "the candidate chain is spent: the pointer stays at the end and this counts as a same-model retry",
+		}})
+	}
+	if dec.NoChain {
+		body["no_candidate_chain"] = true
+	}
+	if dec.Block {
+		info.extra = append(info.extra, appliedEvent{"blocked", map[string]any{
+			"step": req.StepID, "cause": dec.Cause, "reason": dec.BlockReason, "report": dec.Report,
+		}})
 	}
 }
 

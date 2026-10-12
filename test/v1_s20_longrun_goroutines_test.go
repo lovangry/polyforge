@@ -118,7 +118,7 @@ func s20RigAdapterRetired(rig *inprocRig, wi string) bool {
 
 func TestV1S20LongRunGoroutines(t *testing.T) {
 	inst := newV1Install(t)
-	rig := newInprocRig(t, inst, 0, 0)
+	rig := newInprocRig(t, inst)
 
 	// Baseline: after start-up idle-settle, before job 1. The aihub
 	// HTTP pool's idle connections park two goroutines per connection in

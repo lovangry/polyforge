@@ -85,11 +85,11 @@ func TestErrorJSONModeReemitsEnvelope(t *testing.T) {
 // 502/504 pages as auth failures — #14).
 func TestErrorNoEnvelopeDegradesToHTTPCode(t *testing.T) {
 	d := newDaemonFixture(t)
-	d.answers["GET /jobs/wi_x/observe"] = func(w http.ResponseWriter, r *http.Request) {
+	d.answers["GET /jobs/wi_x/watch"] = func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(502)
 		io.WriteString(w, "proxy garbage")
 	}
-	code, _, stderr := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock}, "observe", "wi_x")
+	code, _, stderr := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock}, "watch", "wi_x", "--once")
 	if code != 2 {
 		t.Errorf("exit = %d, want 2 (5xx class)", code)
 	}
@@ -178,60 +178,5 @@ func TestDaemonUnreachableExits1(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "pf:") {
 		t.Errorf("stderr = %q", stderr)
-	}
-}
-
-// TestMigrateResolveExitCodeClasses (#40): the migration resolve path
-// wraps wire errors in ResolveError — the typed class must SURVIVE the
-// wrap. Before the fix a typed 5xx during project/user resolution was
-// flattened to the generic client-class 1; the contract (4xx → 1,
-// 5xx → 2, transport → 1) wins. Pinned through Run() on both verbs.
-func TestMigrateResolveExitCodeClasses(t *testing.T) {
-	classes := []struct {
-		name    string
-		status  int
-		body    string
-		want    int
-		wantMsg string
-	}{
-		{"typed-4xx", 404, `{"code":"CORE-404","detail":"no such project"}`, 1, "CORE-404"},
-		{"typed-5xx", 500, `{"code":"CORE-500","detail":"boom"}`, 2, "CORE-500"},
-	}
-	for _, cls := range classes {
-		t.Run(cls.name, func(t *testing.T) {
-			for _, verb := range []string{"migrate-memories", "migrate-work-items"} {
-				t.Run(verb, func(t *testing.T) {
-					var rec reqRecorder
-					srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-						w.WriteHeader(cls.status)
-						io.WriteString(w, cls.body)
-					})
-					env := map[string]string{"PF_SERVER": srv.URL, "PF_API_KEY": "k_admin"}
-					var code int
-					var stderr string
-					if verb == "migrate-memories" {
-						code, _, stderr = runPf(t, env, verb,
-							"--from-jsonl", writeFileT(t, ""), "--data-dir", t.TempDir(),
-							"--project", "polyforge", "--dry-run")
-					} else {
-						code, _, stderr = runPf(t, env, verb,
-							"--from", writeFileT(t, ""), "--project", "polyforge", "--dry-run")
-					}
-					if code != cls.want {
-						t.Errorf("exit = %d, want %d", code, cls.want)
-					}
-					if !strings.Contains(stderr, cls.wantMsg) {
-						t.Errorf("stderr = %q, want the typed code %q", stderr, cls.wantMsg)
-					}
-				})
-			}
-		})
-	}
-	// Transport failure on the resolve path stays client-class 1.
-	dead := deadAihubURL(t)
-	code, _, _ := runPf(t, map[string]string{"PF_SERVER": dead, "PF_API_KEY": "k_admin"},
-		"migrate-work-items", "--from", writeFileT(t, ""), "--project", "polyforge", "--dry-run")
-	if code != 1 {
-		t.Errorf("transport: exit = %d, want 1", code)
 	}
 }

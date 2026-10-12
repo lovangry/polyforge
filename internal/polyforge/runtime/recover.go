@@ -23,12 +23,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
-	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
@@ -71,8 +69,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		r.boundedFail(ctx, j, err.Error())
 		return
 	}
-	// v2 terminal wiring (the #99 finale): the driver has no flush(wrap)
-	// call — Run returning nil IS its completion signal, and the
+	// v2 terminal wiring (the #99 finale): Run returning nil IS the
+	// driver's completion signal, and the
 	// monitor's onExit rightly reports "agent process exited" without
 	// knowing the difference. Before any recovery machinery runs, the
 	// capsule's terminal workflow_status is translated into the WI's
@@ -84,31 +82,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	switch capsuleWorkflowStatus(j.capsuleDir) {
 	case capsule.WorkflowStatusCompleted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)
-		// Release-intent wrap gate (polyforge#123, P1a — the driver-lane
-		// face): the driver era has no flush(wrap) call, so THIS close is
-		// where the seal-time gate must refuse. A workflow that completed
-		// while releaseable code changed with no covering entry in
-		// artifacts/release-intent.json is NOT wrapped: the typed
-		// DAEMON-400 RELEASE_INTENT_MISSING goes to the daemon log and the
-		// events tap, the scene is sealed exactly like the blocked branch
-		// below (the fragment and the changed worktree stay on disk for
-		// the fix), and the WI parks blocked for its owner — never
-		// wrapped. The flush lane's twin gate lives in observe's
-		// flushWrap; both run the same predicate.
-		if missing := observe.ReleaseIntentMissingFor(j.capsuleDir, j.wi); len(missing) > 0 {
-			refusal := "DAEMON-400 RELEASE_INTENT_MISSING: " + observe.ReleaseIntentRefusal(j.wi, missing)
-			fmt.Fprintf(os.Stderr, "runtime: %s: %s\n", j.wi, refusal)
-			if r.cfg.EventTap != nil {
-				r.cfg.EventTap(j.wi, "wrap_intent_refused", map[string]any{
-					"error": refusal, "missing": missing,
-				})
-			}
-			r.killAgentTree(j)
-			commitDirty(r, j)
-			r.boundedFail(ctx, j, refusal)
-			return
-		}
-		// sealedByFlush: the C3 engine already committed and pushed the
+		// alreadyPushed: the C3 engine already committed and pushed the
 		// terminal execution.json version (every transition bumps Version
 		// and publishes); the final push here would only race it.
 		if err := r.stopOp(ctx, j, protocol.FinishWrapped, false, true); err != nil {
@@ -135,8 +109,6 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		// commit+push the parked state — journal, step output and the blocked
 		// verdict together. The §6.4 owner moves (resume / wrap --fail) and
 		// every re-materialization read exactly this state.
-		r.killAgentTree(j)
-		commitDirty(r, j)
 		r.boundedFail(ctx, j, "workflow blocked: the owner holds the next move (resume / rewind / wrap --fail)")
 		return
 	}
@@ -169,30 +141,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		return
 	}
 	// Kill the old tree first (§一 Recover): six layers, no writer may
-	// survive next to the re-derivation — and none may survive a
-	// fail-closed verdict either, so this runs before the probe below.
+	// survive next to the re-derivation.
 	r.killAgentTree(j)
-
-	// polyforge#106: the deploy-time fail-closed probe. An in-flight WI
-	// whose capsule state is LEGACY-ONLY — an execution.json the driver
-	// never wrote (no bundle_digest stamp; the deleted WI-Agent engine
-	// wrote none, and the preserved legacy fixture proves the shape) —
-	// is refused outright: no re-derivation, no conversion, no migration
-	// path. The refusal names the WI and the missing driver stamp and
-	// hands the WI to its owner blocked (M2: the human is the only
-	// remediation door).
-	if err := r.requireDriverStampedState(j); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: %v\n", j.wi, err)
-		if r.cfg.EventTap != nil {
-			r.cfg.EventTap(j.wi, "legacy_only_state_refused", map[string]any{
-				"capsule_dir": j.capsuleDir,
-				"cause":       cause,
-				"note":        "in-flight legacy-only state at deploy: no migration path — restore a driver-written capsule or close the work item by hand",
-			})
-		}
-		r.boundedFail(ctx, j, err.Error())
-		return
-	}
 
 	// commit-dirty-on-recover (§六): the dead agent's unflushed capsule
 	// state is committed and pushed BEFORE the new instance can touch the
@@ -200,15 +150,15 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// boundary; the local commit already keeps the bytes.
 	commitDirty(r, j)
 
-	// F1 repair: a capsule without runtime-state/work-item.json (a legacy
+	// F1 repair: a capsule without runtime-state/work-item.json (a pre-F1
 	// pre-F1 scene) gets it re-materialized before the next derivation
 	// wakes up blind to its own goal. Best-effort, idempotent.
 	r.ensureWorkItemFile(j)
 
 	// F7 repair: a capsule whose materialized bundle set is missing its
 	// completion marker (a crash-torn snapshot) — or predates the product
-	// fix entirely — gets the set idempotently rebuilt, discovery copies
-	// and marker included, before the next derivation wakes up. The
+	// fix entirely — gets the set idempotently rebuilt, marker
+	// included, before the next derivation wakes up. The
 	// rebuild never breaks a scene the dead agents already read (staged
 	// renames, identical content). Best-effort, never blocks recovery.
 	r.ensureMaterialized(j)
@@ -384,40 +334,6 @@ func readCapsuleEffectiveCandidates(capsuleDir string) map[string][]string {
 	return idn.EffectiveCandidates
 }
 
-// requireDriverStampedState is the deploy-time fail-closed probe
-// (polyforge#106): an in-flight WI whose execution.json is LEGACY-ONLY —
-// it parses but carries no bundle_digest, the stamp every driver write
-// carries (driver/transition.go) and the deleted WI-Agent engine never
-// wrote (the preserved legacy fixture is the reference shape) — is
-// refused. Terminal verdicts are NOT legacy-only state: a completed or
-// failed capsule closes through the terminal wiring without any engine,
-// and a missing or unparsable execution.json is a pre-init scene the
-// driver initializes itself. The error names the WI and the missing
-// stamp and offers no migration path.
-func (r *Runtime) requireDriverStampedState(j *job) error {
-	raw, err := os.ReadFile(filepath.Join(j.capsuleDir, capsule.ExecutionJSON))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // pre-init: the driver initializes the file
-		}
-		return nil // unreadable is the terminal wiring's/capsule repair's problem, not a legacy marker
-	}
-	var exec capsule.Execution
-	if json.Unmarshal(raw, &exec) != nil {
-		return nil // unparsable: not a legacy marker
-	}
-	switch exec.WorkflowStatus {
-	case capsule.WorkflowStatusCompleted,
-		capsule.WorkflowStatusFailedGate, capsule.WorkflowStatusFailedRewindExhausted,
-		capsule.WorkflowStatusBlocked:
-		return nil // terminal verdicts close without any engine
-	}
-	if exec.BundleDigest != "" {
-		return nil // driver-stamped: the engine may continue it
-	}
-	return fmt.Errorf("wi %s: LEGACY-ONLY in-flight state: execution.json carries no driver journal stamp (bundle_digest) — it was written by the WI-Agent engine deleted in polyforge#106; no migration path is offered: restore a driver-written capsule or close the work item by hand", j.wi)
-}
-
 // recovered finishes a successful re-derivation. A successful recovery
 // RESETS the failure budget — the counter is spent by failures only.
 // v1.5: RTRecovered carries SpawnN (the B2 fence key) and the in-process
@@ -476,31 +392,26 @@ func (r *Runtime) recoveryStabilityWindow() time.Duration {
 // "never a third relaunch" contract is preserved: restart sees blocked
 // and leaves the record untouched. RTFinished(blocked) follows — on
 // sendRelease, so a full observe channel defers rather than drops it
-// (NEW-2: every RTFinished is a terminal release). The parked capsule's
-// chain durability is the CALLER's seal (the blocked branch commits and
-// pushes before calling here — polyforge#116): this close itself
-// publishes nothing, exactly like before.
+// (NEW-2: every RTFinished is a terminal release). Before the verdict the
+// agent tree is killed and the dirty capsule committed+pushed best-effort
+// (polyforge#116: the parked verdict must reach the chain; v2-converge §6
+// bug 4: every branch, not just the blocked one). A SessionEnd the hub does
+// not acknowledge keeps the record end_pending and retries (§6 bug 5,
+// endpending.go) — the WI is never orphaned running at aihub.
 func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
-	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
-		SessionID: j.sessionID,
-		Status:    api.StatusBlocked,
-		Note:      detail,
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bounded-fail session-end failed (restart will reconcile): %v\n", j.wi, err)
+	// No writer may outlive the verdict, and the last local work must
+	// reach aihub before the WI is handed to its owner (v2-converge §6
+	// bug 4): every bounded-fail branch — missing capsule, storm guard,
+	// budget exhaustion — kills the driver/agent tree
+	// and commits+pushes best-effort here, not in the callers. The head
+	// the capsule ends at rides the blocked verdict (cross-daemon continue
+	// check, §7).
+	r.killAgentTree(j)
+	head := ""
+	if dirExists(j.capsuleDir) {
+		head = commitDirty(r, j)
 	}
-	if err := j.transition(StateDone); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bounded fail could not reach DONE: %v\n", j.wi, err)
-	}
-	r.dropJob(j)
-	if err := r.persist(); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
-	}
-	r.sendRelease(protocol.RTMsg{
-		Kind:     protocol.RTFinished,
-		WorkItem: j.wi,
-		Reason:   protocol.FinishBlocked,
-		Detail:   detail,
-	})
+	r.finishBlocked(j, detail, head)
 	_ = ctx
 }
 
@@ -510,13 +421,14 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 // HEAD push), so the next boundary sees an honest remote state. Errors
 // are the caller's to log; the LOCAL commit is the durable half and it
 // stands on its own.
-func commitDirty(r *Runtime, j *job) {
+func commitDirty(r *Runtime, j *job) string {
 	// F3: the dead agent's live transcript rides this dirty commit too.
 	r.syncTranscriptBeforeSeal(j)
 	sha, _, _, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)
 	}
+	return sha
 }
 
 // killAgentTree tears the current agent's whole tree down through the six
@@ -541,9 +453,14 @@ func (r *Runtime) killAgentTree(j *job) {
 		if err := h.Terminate(cleanupBound); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: driver handle teardown incomplete: %v\n", j.wi, err)
 		}
+		r.reapOrphans(j.wi, j.capsuleDir)
 		return
 	}
 	if pid <= 0 {
+		// driver job with no live handle (the daemon crashed and the
+		// record carries pid 0): the journal + env-marker reap is the
+		// only way to find the step processes.
+		r.reapOrphans(j.wi, j.capsuleDir)
 		return
 	}
 	rep, err := Cleanup(CleanupTarget{
@@ -551,6 +468,7 @@ func (r *Runtime) killAgentTree(j *job) {
 		Pgid:       pid, // the agent spawns as its own group leader
 		StartedAt:  start,
 		WIID:       j.wi,
+		DaemonID:   r.cfg.MachineID,
 		CapsuleDir: j.capsuleDir,
 		CgroupPath: r.cgroupPathFor(j.wi),
 	}, cleanupBound)

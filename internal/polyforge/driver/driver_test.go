@@ -29,6 +29,8 @@ type fakeEntry struct {
 	res  *StepResult
 	err  error
 	hold bool // block Wait until ctx or Terminate
+	// spawnErr makes SpawnStep itself fail (a harness that died at startup).
+	spawnErr error
 }
 
 type fakeRun struct {
@@ -104,6 +106,10 @@ func (s *fakeSpawner) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun, err
 	}
 	e := s.script[0]
 	s.script = s.script[1:]
+	if e.spawnErr != nil {
+		s.spawns = append(s.spawns, sp)
+		return nil, e.spawnErr
+	}
 	run := &fakeRun{sp: sp, e: e}
 	if e.hold {
 		run.rel = make(chan struct{})
@@ -768,11 +774,21 @@ func TestCandidateOrdinal(t *testing.T) {
 	if got := candidateOrdinal(st, 3); got != 1 {
 		t.Fatalf("fresh step ordinal 1, got %d", got)
 	}
-	// Two infra failures advance twice; the cap holds the last entry.
+	// Unclassified infra failures (a daemon restart, a driver relaunch)
+	// NEVER advance the pointer.
 	st.Attempts = append(st.Attempts,
 		capsule.Attempt{Cause: CauseInfraFailure},
 		capsule.Attempt{Cause: CauseInfraFailure},
 	)
+	if got := candidateOrdinal(st, 3); got != 1 {
+		t.Fatalf("unclassified failures must not advance: %d", got)
+	}
+	// Two provider-class infra failures advance twice; the cap holds the
+	// last entry.
+	st.Attempts = []capsule.Attempt{
+		{Cause: CauseInfraFailure, FaultClass: string(FaultProvider)},
+		{Cause: CauseInfraFailure, FaultClass: string(FaultProvider)},
+	}
 	if got := candidateOrdinal(st, 3); got != 3 {
 		t.Fatalf("ordinal after 2 infra failures: %d", got)
 	}
@@ -865,4 +881,56 @@ func loadExecFile(t *testing.T, path string) *capsule.Execution {
 		t.Fatal(err)
 	}
 	return &exec
+}
+
+func TestRejectionRelaunchesArePersistedAndBounded(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, capsule.ExecutionJSON)
+	log := &eventLog{}
+	round := func() (*Driver, error) {
+		sp := &fakeSpawner{script: []fakeEntry{badHash(), badHash(), badHash(), badHash()}}
+		d, err := New(Config{
+			WI:       WIInfo{ID: "wi_rej", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+			ExecPath: execPath,
+			Workflow: &Workflow{Steps: []StepSpec{{ID: "fix"}}, MaxTotal: 4, MaxPerStep: 2},
+			Spawner:  sp,
+			Log:      log,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return d, d.Run(context.Background())
+	}
+	// each relaunch is a fresh driver: its in-memory counter starts at zero
+	for i := 1; i < maxRejectRelaunches; i++ {
+		if _, err := round(); err == nil {
+			t.Fatalf("relaunch round %d must still escalate to an error", i)
+		}
+		if got := readExec(t, execPath).Steps["fix"].Supervision.RejectRelaunches; got != i {
+			t.Fatalf("round %d: persisted reject_relaunches %d", i, got)
+		}
+	}
+	if _, err := round(); err != nil {
+		t.Fatalf("the bound must block cleanly, not error: %v", err)
+	}
+	x := readExec(t, execPath)
+	if x.WorkflowStatus != StatusBlocked || !strings.Contains(x.BlockedReason, "rejected through") {
+		t.Fatalf("status %q reason %q, want blocked on the rejection bound", x.WorkflowStatus, x.BlockedReason)
+	}
+	if n := log.count("blocked"); n != 1 {
+		t.Fatalf("one blocked event expected, got %d", n)
+	}
+	if n := log.count("reject_escalated"); n != maxRejectRelaunches {
+		t.Fatalf("reject_escalated events %d, want %d", n, maxRejectRelaunches)
+	}
+}
+
+func (l *eventLog) count(kind string) int {
+	n := 0
+	for _, e := range l.entries {
+		if e.kind == kind {
+			n++
+		}
+	}
+	return n
 }

@@ -1,7 +1,7 @@
 package daemon
 
-// routes.go: the daemon's UDS HTTP face. The observe lane's three routes
-// (observe/answer/flush) are mounted VERBATIM from observe.Handler();
+// routes.go: the daemon's UDS HTTP face. The observe lane's routes
+// (observe/answer) are mounted from observe.Handler();
 // everything else translates the CLI contract (internal/polyforge/cli/
 // daemon.go — the pinned route family) into Runtime calls. Every error
 // answer is the TOP-LEVEL api.Error envelope {code, detail} (the same
@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -34,15 +33,6 @@ type submitResponse struct {
 	WorkItemID string `json:"work_item_id"`
 }
 
-// adoptResponse is the POST /jobs/{id}/adopt-session answer: custody
-// taken, with the PUBLIC fingerprint of the adopted session (never the
-// secret — it arrived IN the request and is never echoed).
-type adoptResponse struct {
-	Adopted            bool   `json:"adopted"`
-	WorkItemID         string `json:"work_item_id"`
-	SessionFingerprint string `json:"session_fingerprint"`
-}
-
 type statusJob struct {
 	WorkItemID string `json:"work_item_id"`
 	Status     string `json:"status"`
@@ -57,13 +47,21 @@ type statusJob struct {
 	// (a job the runtime calls running but the monitor holds a pending
 	// question for is presented as needs_input — an agent blocked on a
 	// human must never read as merely busy).
-	NeedsInput bool   `json:"needs_input,omitempty"`
-	QuestionID string `json:"question_id,omitempty"`
-	// LastProgressAgoSec is the F15c owner face: whole seconds since the
-	// job's stream last proved AGENT progress (nil = no progress record
-	// yet — the CLI renders "-"). UI-noise records never refresh it, so
-	// a wedged-but-chattering job reads as stale, not fresh.
-	LastProgressAgoSec *int64 `json:"last_progress_ago_sec,omitempty"`
+	NeedsInput bool `json:"needs_input,omitempty"`
+	// RepairReason is set with Status "repair_pending": capsule_missing |
+	// project_unmapped (v2 §6).
+	RepairReason string `json:"repair_reason,omitempty"`
+	QuestionID   string `json:"question_id,omitempty"`
+	// StepAgeSec / LastWorkAgoSec are the owner liveness face (the ops
+	// status columns): whole seconds since the current dispatch began and
+	// since its harness last did REAL work (nil = no dispatch in flight,
+	// or no work-class signal yet — the CLI renders "-"). UI-noise
+	// records never refresh the work clock, so a wedged-but-chattering
+	// job reads as stale, not fresh.
+	StepAgeSec     *int64 `json:"step_age_sec,omitempty"`
+	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
+	// Origin is how the job was submitted; may be absent.
+	Origin *runtime.Origin `json:"origin,omitempty"`
 }
 
 type queueStats struct {
@@ -74,7 +72,11 @@ type queueStats struct {
 
 type statusResponse struct {
 	MachineID string `json:"machine_id"`
-	Mode      string `json:"mode"`
+	// DisplayName is the display-only daemon name (default: hostname).
+	DisplayName string `json:"display_name,omitempty"`
+	// Auto is the auto-pull switch (v2-converge §5); the max-jobs number
+	// rides queue.max_concurrent.
+	Auto bool `json:"auto"`
 	// Workspaces is the mapped workspace set (polyforge#113): every
 	// [workspace] path the daemon routes capsules into, in mapping
 	// declaration order. A multi-workspace daemon must never present one
@@ -85,19 +87,14 @@ type statusResponse struct {
 	Queue        queueStats  `json:"queue"`
 }
 
-type modeResponse struct {
-	Mode              string `json:"mode"`
-	MaxConcurrentJobs int    `json:"max_concurrent_jobs,omitempty"`
-}
-
-type recommendationResponse struct {
-	Items []api.WorkItem `json:"items"`
-	Total int            `json:"total"`
+type opsConfigResponse struct {
+	Auto bool `json:"auto"`
+	Max  int  `json:"max"`
 }
 
 type closeResponse struct {
 	WorkItemID string `json:"work_item_id"`
-	// Outcome: sealed | already_terminal | already_paused — plus
+	// Outcome: sealed | already_terminal | already_paused | abandoned (a repair_pending give-up) — plus
 	// "terminated" (polyforge#116): a parked workflow's §6.4 terminate
 	// verdict, landed at the hub by the terminate-blocked door (no local
 	// seal exists — the bounded close already sealed the parked capsule).
@@ -112,11 +109,6 @@ type closeResponse struct {
 type resumeBlockedResponse struct {
 	Resumed    bool   `json:"resumed"`
 	WorkItemID string `json:"work_item_id"`
-}
-
-type batchResponse struct {
-	Submitted   int      `json:"submitted"`
-	WorkItemIDs []string `json:"work_item_ids"`
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -141,14 +133,22 @@ func writeErrOf(w http.ResponseWriter, err error) {
 	writeErr(w, api.ErrDaemonInternal, err.Error())
 }
 
+// writeRepairErr answers a RepairResume refusal: the unmapped project keeps
+// the DAEMON-412 placement code, a missing capsule the new DAEMON-517;
+// both explain exactly what to restore.
+func writeRepairErr(w http.ResponseWriter, err error) {
+	var unm *runtime.UnmappedMidflightError
+	if errors.As(err, &unm) {
+		writeErr(w, api.ErrDaemonUnmappedProject, err.Error())
+		return
+	}
+	writeErr(w, api.ErrDaemonRepairPending, err.Error())
+}
+
 func writeAdmissionErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errShuttingDown):
 		writeErr(w, api.ErrDaemonGone, err.Error())
-	case errors.Is(err, errModeConflict):
-		writeErr(w, api.ErrDaemonConflict, err.Error())
-	case errors.Is(err, errBadMode):
-		writeErr(w, api.ErrDaemonBadInput, err.Error())
 	default:
 		writeErrOf(w, err)
 	}
@@ -158,31 +158,23 @@ func writeAdmissionErr(w http.ResponseWriter, err error) {
 func (d *Daemon) handler() http.Handler {
 	mux := http.NewServeMux()
 	obs := d.obs.Handler()
-	// The observe lane's own three routes, mounted verbatim (04 §5.1a /
-	// ruling C2): the flush route passes through the wrap arbitration
-	// gate first (the dual-path close must be one winner, one 409).
+	// The observe lane's own routes, mounted verbatim (04 §5.1a).
 	mux.Handle("GET /jobs/{wi}/observe", obs)
 	// v2 (polyforge#106): answer routes through the driver bridge when
 	// the WI's job carries a bridge Handle; otherwise the observe
-	// lane's agent-facing answer path applies.
+	// lane's honest no-live-handle refusal applies.
 	mux.HandleFunc("POST /jobs/{wi}/answer", func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
 		if h := d.rt.DriverAnswerHandle(wi); h != nil {
 			// driver path: decode the same wire shape, deliver to bridge
 			var payload struct {
 				QuestionID string `json:"question_id"`
-				Answer     string `json:"answer"`
-				AnswerText string `json:"answer_text"` // CLI sends this field name
+				AnswerText string `json:"answer_text"`
 				AnsweredBy string `json:"answered_by"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				http.Error(w, `{"code":"BAD-400","detail":"decode: `+err.Error()+`"}`, 400)
 				return
-			}
-			// Wire compatibility: the CLI sends answer_text, the observe
-			// face sends answer — accept both.
-			if payload.Answer == "" {
-				payload.Answer = payload.AnswerText
 			}
 			if payload.AnsweredBy == "" {
 				payload.AnsweredBy = r.Header.Get("X-PF-User")
@@ -199,7 +191,7 @@ func (d *Daemon) handler() http.Handler {
 				http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
 				return
 			}
-			if err := h.Answer(payload.QuestionID, payload.Answer, payload.AnsweredBy); err != nil {
+			if err := h.Answer(payload.QuestionID, payload.AnswerText, payload.AnsweredBy); err != nil {
 				http.Error(w, `{"code":"ANSWER-409","detail":"`+err.Error()+`"}`, 409)
 				return
 			}
@@ -209,14 +201,6 @@ func (d *Daemon) handler() http.Handler {
 		}
 		obs.ServeHTTP(w, r)
 	})
-	mux.Handle("POST /jobs/{wi}/flush", d.flushGate(obs))
-	// F6-B: the narrow memory channel — mounted verbatim from the
-	// observe lane, whose serveFlush fence semantics the two routes
-	// share (the flush route alone passes through the wrap arbitration
-	// gate first; recall/remember are stateless proxies and carry no
-	// close semantics at all).
-	mux.Handle("POST /jobs/{wi}/recall", obs)
-	mux.Handle("POST /jobs/{wi}/remember", obs)
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute("claim"))
 	mux.HandleFunc("POST /jobs/{wi}/resume", d.submitRoute("resume"))
 	// polyforge#116: the §6.4 owner move on a workflow parked blocked on an
@@ -224,15 +208,24 @@ func (d *Daemon) handler() http.Handler {
 	// live driver, no bridge handle and no job record; the owner's moves
 	// are their own route, not a runtime call.
 	mux.HandleFunc("POST /jobs/{wi}/resume-blocked", d.resumeBlockedRoute)
-	mux.HandleFunc("POST /jobs/{wi}/takeover", d.submitRoute("takeover"))
-	mux.HandleFunc("POST /jobs/{wi}/adopt-session", d.adoptSessionRoute)
+	// v2 §6 abandon: the give-up of a repair_pending WI (session ended by
+	// the daemon after the CLI's human-key authorization step).
+	mux.HandleFunc("POST /jobs/{wi}/abandon-repair", d.abandonRepairRoute)
 	mux.HandleFunc("POST /jobs/{wi}/pause", d.pauseRoute)
 	mux.HandleFunc("POST /jobs/{wi}/wrap", d.wrapRoute)
 	mux.HandleFunc("POST /jobs/{wi}/ship", d.shipRoute)
 	mux.HandleFunc("GET /status", d.statusRoute)
-	mux.HandleFunc("POST /mode", d.modeRoute)
-	mux.HandleFunc("POST /batch_submit", d.batchRoute)
+	mux.HandleFunc("POST /ops/config", d.opsConfigRoute)
 	mux.HandleFunc("POST /shutdown", d.shutdownRoute)
+	mux.HandleFunc("POST /chat/init", d.chatInitRoute)
+	// pf watch: the per-WI snapshot and the daemon-held chat subscriptions.
+	mux.HandleFunc("GET /jobs/{wi}/watch", d.watchSnapshotRoute)
+	mux.HandleFunc("GET /chats/{id}/subscriptions", d.subscriptionsRoute)
+	mux.HandleFunc("POST /chats/{id}/subscribe", d.subscribeRoute(true))
+	mux.HandleFunc("POST /chats/{id}/unsubscribe", d.subscribeRoute(false))
+	mux.HandleFunc("POST /chats/{id}/ack", d.ackRoute)
+	mux.HandleFunc("POST /chats/{id}/heartbeat", d.heartbeatRoute)
+	mux.HandleFunc("GET /chats/{id}/attention", d.attentionRoute)
 	return mux
 }
 
@@ -255,18 +248,19 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 // ---------------------------------------------------------------------------
-// submit family: claim | resume | takeover.
+// submit family: claim | resume.
 
 func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
 		var body struct {
-			Priority string `json:"priority"`
+			Priority string     `json:"priority"`
+			Origin   *reqOrigin `json:"origin,omitempty"`
 		}
 		if !decodeBody(w, r, &body) {
 			return
 		}
-		if err := d.modes.AdmitSingle(); err != nil {
+		if err := d.modes.AdmitSubmit(); err != nil {
 			writeAdmissionErr(w, err)
 			return
 		}
@@ -280,15 +274,30 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// path resolves (or refuses) server-side, exactly as before.
 		canonical := d.canonWI(wi)
 		d.rt.NoteAlias(wi, canonical)
+		// v2 §6 "continue": a repair_pending WI (capsule missing / project
+		// unmapped at restart) is resumed IN PLACE with its kept session —
+		// re-check first; still broken answers the typed error.
+		if intent == "resume" {
+			cursor := d.lastSeq(canonical)
+			if held, rerr := d.rt.RepairResume(d.runCtx, canonical); held {
+				if rerr != nil {
+					writeRepairErr(w, rerr)
+					return
+				}
+				d.autoSubscribe(body.Origin, canonical, cursor)
+				writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
+				return
+			}
+		}
 		// The live check is the runtime's own job set (the queue's slot
 		// marks are accounting, reconciled a tick later); a pending
 		// duplicate is refused on the queue.
 		if ji, live := d.rt.Info(canonical); live {
 			// Finding 2 (v1.5 review): a RETAINED paused job is not an active
 			// run — a submit over it flows to the hub's own gate. A plain
-			// claim answers ALREADY_HELD there (the paused session still
-			// holds the work item); a takeover replaces the paused record
-			// (the s11 continuation shape) and proceeds.
+			// claim answers ALREADY_HELD there while the paused session still
+			// holds the work item; once an admin force-ended it (WI queued)
+			// the claim replaces the paused record and proceeds.
 			if ji.State != runtime.StatePaused {
 				writeErr(w, api.ErrDaemonConflict, "work item is already active on this daemon")
 				return
@@ -311,7 +320,15 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		}
 		// Accepted = enqueued; the dispatcher spawns within one tick,
 		// priority-desc against the machine's concurrency cap.
-		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent})
+		// `accepted` is answered only once the entry is on disk (v2 §5).
+		cursor := d.lastSeq(canonical)
+		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent, Origin: body.Origin.origin()}); err != nil {
+			writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+err.Error())
+			return
+		}
+		// pf watch: the submitting chat is subscribed (subscription =
+		// adoption); events from here on are its to consume.
+		d.autoSubscribe(body.Origin, canonical, cursor)
 		writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
 	}
 }
@@ -322,7 +339,9 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 // resumeBlockedRoute serves POST /jobs/{id}/resume-blocked — the owner's
 // resume verdict on a workflow parked blocked on an honest incomplete
 // result. The bounded close dropped the job and ended the session, so this
-// route re-establishes execution: the hub's resume-blocked door first
+// route re-establishes execution AFTER the CLI has landed the hub's
+// resume-blocked door with the human's own credential (never the daemon's
+// machine key — the door's owner/maintainer/admin check is about the human):
 // (blocked → queued, the claim gate stays queued-only), then a plain claim
 // that runs synchronously — the claim/start path's owner move
 // (bridge.Start → driver.ResumeCurrent) unblocks the parked workflow and
@@ -333,12 +352,13 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	wi := r.PathValue("wi")
 	var body struct {
-		Priority string `json:"priority"`
+		Priority string     `json:"priority"`
+		Origin   *reqOrigin `json:"origin,omitempty"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	if err := d.modes.AdmitSingle(); err != nil {
+	if err := d.modes.AdmitSubmit(); err != nil {
 		writeAdmissionErr(w, err)
 		return
 	}
@@ -357,10 +377,11 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, api.ErrDaemonConflict, "work item is already queued on this daemon")
 		return
 	}
-	if _, err := d.hub.ResumeBlockedWorkItem(canonical); err != nil {
-		writeErrOf(w, err)
-		return
-	}
+	// The hub's resume-blocked door is NOT called here (v2-converge §7):
+	// its owner/maintainer/admin check must evaluate the HUMAN who typed
+	// `pf resume`, so the CLI lands the door with the user's own api key
+	// first; this route is only the claim/start half. A WI still blocked
+	// at the hub is refused by the claim gate itself.
 	// The daemon's run context, NOT the HTTP request's: the claim's ctx
 	// is the driver's parent (bridge.Start derives from it) — a request-
 	// scoped ctx would cancel the driver mid-dispatch the moment the CLI
@@ -368,69 +389,58 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	// canceled" and the recovery lane re-derives at the job counter —
 	// measured exactly that way on the s28 shape). The dispatcher starts
 	// every claim on d.runCtx for the same reason.
+	d.rt.NoteOrigin(canonical, body.Origin.origin())
+	cursor := d.lastSeq(canonical)
 	if err := d.rt.StartIntent(d.runCtx, canonical, "claim"); err != nil {
 		writeErrOf(w, err)
 		return
 	}
+	d.autoSubscribe(body.Origin, canonical, cursor)
 	writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical})
 }
 
-// ---------------------------------------------------------------------------
-// adopt-session: custody of an externally minted session (#109).
-
-// adoptSessionRoute takes a session secret minted OUTSIDE any runtime
-// start — the CLI-side takeover's mint — into this daemon's durable
-// custody (#109). Without it the secret would die with the CLI process
-// and the hub row would keep naming a session no process can ever use
-// (the #97/#109 orphaned holder). The adoption is verify-backed: the
-// daemon confirms with the hub that the presented secret really is the
-// live holder BEFORE journaling it, so custody is never recorded for a
-// swap that did not land.
-func (d *Daemon) adoptSessionRoute(w http.ResponseWriter, r *http.Request) {
-	wi := r.PathValue("wi")
+// abandonRepairRoute serves POST /jobs/{id}/abandon-repair — the give-up of
+// a WI parked repair_pending (v2 §6). The WI is still running at aihub under
+// this daemon's kept session, so the hub's cancel refuses it and only the
+// daemon holds the secret to end that session (canceled for `pf cancel`,
+// failed for `pf wrap --fail`; a refused SessionEnd is retried through the
+// end_pending lane). Like the resume-blocked door, the human authorization
+// (reporter / maintainer / admin) is the CLI's job and runs with the human's
+// own key BEFORE this route; this is the daemon half. A WI that is not
+// parked here answers DAEMON-404.
+func (d *Daemon) abandonRepairRoute(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		SessionID string `json:"session_id"`
-		Owner     string `json:"owner"`
-		Reason    string `json:"reason"`
+		Verdict string `json:"verdict"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	if strings.TrimSpace(body.SessionID) == "" {
-		writeErr(w, api.ErrDaemonBadInput, "session_id required (the minted session secret)")
+	var status string
+	switch body.Verdict {
+	case "canceled":
+		status = api.StatusCanceled
+	case "failed":
+		status = api.StatusFailed
+	default:
+		writeErr(w, api.ErrDaemonBadInput, "verdict must be canceled or failed")
 		return
 	}
-	canonical := d.canonWI(wi)
-	// Custody makes no sense for work already live here (a retained
-	// PAUSED record coexists: the operator may take over a WI paused on
-	// this very daemon — the eventual takeover start replaces the record).
-	if ji, live := d.rt.Info(canonical); live && ji.State != runtime.StatePaused {
-		writeErr(w, api.ErrDaemonConflict, "work item is already active on this daemon")
-		return
-	}
-	v, err := d.hub.SessionVerify(canonical, body.SessionID)
+	wi := d.canonWI(r.PathValue("wi"))
+	held, err := d.rt.AbandonRepair(wi, status, "abandoned while parked repair_pending by the owner ("+body.Verdict+")")
 	if err != nil {
 		writeErrOf(w, err)
 		return
 	}
-	if !v.Matches {
-		writeErr(w, api.ErrDaemonConflict, "session is not the live holder of "+canonical)
+	if !held {
+		writeErr(w, api.ErrDaemonNotFound, wi+" is not parked repair_pending on this daemon")
 		return
 	}
-	if err := d.rt.AdoptSession(canonical, body.SessionID); err != nil {
-		writeErrOf(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, adoptResponse{
-		Adopted:            true,
-		WorkItemID:         canonical,
-		SessionFingerprint: api.SessionFingerprint(body.SessionID),
-	})
+	writeJSON(w, http.StatusOK, closeResponse{WorkItemID: wi, Outcome: "abandoned", Status: status})
 }
 
 // ---------------------------------------------------------------------------
 // pause / wrap: the CLI close paths. Both pass the seal guard; the loser
-// of a race with the agent's flush(wrap) answers DAEMON-409, and a close
+// of a race between two closes answers DAEMON-409, and a close
 // that finds the work item already terminal answers gracefully (the
 // arbitration's idempotency contract).
 
@@ -438,9 +448,8 @@ func (d *Daemon) adoptSessionRoute(w http.ResponseWriter, r *http.Request) {
 // workflow is parked blocked on an honest incomplete result (polyforge#116):
 // the bounded close dropped the job, so the owner's moves on this state are
 // the §6.4 face, not a runtime close — `--fail` is the owner's terminate
-// verdict, landed at the hub by the terminate-blocked door (the
-// session-fenced session-end is unavailable: the bounded close cleared the
-// session); a wrap (success) or a pause of a parked workflow has nothing to
+// verdict, landed by the CLI at the hub's terminate-blocked door with the
+// human's key (refused here with a hint); a wrap (success) or a pause of a parked workflow has nothing to
 // seal — refused with the owner-move copy. Returns true when it answered;
 // a non-blocked work item falls through to the caller's terminalOf/404.
 func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
@@ -448,18 +457,18 @@ func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
 	if err != nil || item == nil || item.Status != api.StatusBlocked {
 		return false
 	}
+	// The terminate verdict (`--fail`) is NOT landed here: the hub's
+	// terminate-blocked door authorizes the HUMAN (reporter / maintainer /
+	// admin), so the CLI calls it with the user's own key; the daemon's
+	// machine key is not that caller. There is no local state to clean —
+	// the bounded close already dropped the job.
 	if reason == protocol.FinishFailed {
-		if _, err := d.hub.TerminateBlockedWorkItem(wi); err != nil {
-			writeErrOf(w, err)
-			return true
-		}
-		writeJSON(w, http.StatusOK, closeResponse{
-			WorkItemID: wi, Outcome: "terminated", Status: api.StatusFailed, Reason: reason,
-		})
+		writeErr(w, api.ErrDaemonConflict,
+			"the workflow is parked blocked — its failed verdict is landed by the CLI with your own credential (`pf wrap --fail <id>` from an up-to-date pf), or abandon it with `pf cancel <id>`")
 		return true
 	}
 	writeErr(w, api.ErrDaemonConflict,
-		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue in place or `pf wrap --fail <id>` to terminate; there is no completed run to wrap or pause")
+		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon (`pf wrap --fail <id>` records a failed verdict); there is no completed run to wrap or pause")
 	return true
 }
 
@@ -478,6 +487,14 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 			return
 		}
 		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
+		return
+	}
+	if ji.VerifyPending {
+		writeErr(w, api.ErrDaemonConflict, wi+" is verify_pending — the daemon is still retrying its session verify with aihub; retry shortly")
+		return
+	}
+	if ji.RepairPending != "" {
+		writeErr(w, api.ErrDaemonConflict, wi+" is parked repair_pending — fix the cause and `pf resume "+wi+"`, or give it up with `pf cancel "+wi+"` / `pf wrap --fail "+wi+"`")
 		return
 	}
 	if ji.State == runtime.StateSealing || ji.State == runtime.StateRecovering {
@@ -568,68 +585,23 @@ func (d *Daemon) wrapRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// flush gate: the wrap arbitration on the agent's own flush path. Only
-// reason=wrap claims the seal guard (needs_input and shutdown are the
-// agent's ordinary lifeline, never a close). The recovery window — new
-// instance alive, recovered() not yet back to RUNNING — is answered
-// with the typed retryable RECOVERING transient, never a "close in
-// progress" refusal: no close is in progress there.
-func (d *Daemon) flushGate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wi := d.canonWI(r.PathValue("wi")) // F2: gate on the canonical job
-		raw, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-		if err != nil {
-			writeErr(w, api.ErrDaemonBadInput, "body read: "+err.Error())
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(raw))
-		var req protocol.FlushRequest
-		if json.Unmarshal(raw, &req) == nil && req.Reason == protocol.FlushWrap {
-			if ji, ok := d.rt.Info(wi); ok {
-				if ji.State == runtime.StateSealing {
-					writeErr(w, api.ErrDaemonConflict, "work item is sealing; a close is already in progress")
-					return
-				}
-				if ji.State == runtime.StateRecovering {
-					if d.sealHeld(wi) {
-						// close holds the guard with its Stop queued behind
-						// the recovery: genuinely "close in progress".
-						writeErr(w, api.ErrDaemonConflict, "a close is already in progress for this work item")
-						return
-					}
-					// no close anywhere: the recovery window answers the
-					// typed retryable RECOVERING transient.
-					writeErr(w, api.ErrDaemonConflict,
-						"work item is recovering; instance just spawned; retry shortly")
-					return
-				}
-			}
-			if !d.claimSeal(wi) {
-				writeErr(w, api.ErrDaemonConflict, "a close is already in progress for this work item")
-				return
-			}
-			defer d.releaseSeal(wi)
-		}
-		next.ServeHTTP(w, r)
-	})
-}
+// ops face: status / ops config (auto + max) / shutdown.
 
-// ---------------------------------------------------------------------------
-// ops face: status / mode / batch_submit / shutdown.
-
-func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
-	// D6: the per-job needs_input projection, derived from the observe
-	// lane's monitors (keyed by the canonical id — the same key
-	// rt.List() reports). F15c rides the same loop: the per-job progress
-	// staleness for the LAST-PROGRESS column.
+// statusJobs builds the jobs[] bookkeeping (with the running-slot count);
+// the status route and the watch lane share it. The per-job needs_input
+// projection (D6) is derived from the observe lane's monitors (keyed by
+// the canonical id — the same key rt.List() reports); the same loop
+// carries the per-job liveness reading (step age + last real-work-signal
+// age).
+func (d *Daemon) statusJobs() ([]statusJob, int) {
 	pending := d.obs.PendingInputs()
-	progress := d.obs.ProgressAges()
+	activity := d.obs.Activities()
 	jobs := make([]statusJob, 0, 8)
 	// running slots: a retained PAUSED job (Finding 2) holds no agent and
 	// no queue slot — the ops face must not count it as running work.
 	running := 0
 	for _, ji := range d.rt.List() {
-		if ji.State != runtime.StatePaused {
+		if ji.State != runtime.StatePaused && ji.RepairPending == "" {
 			running++
 		}
 		sj := statusJob{
@@ -640,6 +612,18 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 			SpawnN:             ji.SpawnN,
 			SessionFingerprint: ji.SessionFingerprint,
 			AgentPID:           ji.AgentPID,
+			Origin:             ji.Origin,
+		}
+		if ji.RepairPending != "" {
+			// v2 §6: parked at restart (capsule missing / project
+			// unmapped), session kept — shown as repair_pending, the
+			// reason kind alongside.
+			sj.Status = "repair_pending"
+			sj.RepairReason = ji.RepairPending
+		}
+		if ji.VerifyPending {
+			// restart verify could not reach aihub: retried with backoff
+			sj.Status = "verify_pending"
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID
@@ -652,15 +636,31 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 				sj.NeedsInput = true
 			}
 		}
-		if pa, ok := progress[ji.WorkItem]; ok && !pa.LastProgressAt.IsZero() {
-			ago := int64(time.Since(pa.LastProgressAt) / time.Second)
-			sj.LastProgressAgoSec = &ago
+		if act, ok := activity[ji.WorkItem]; ok && act.InDispatch {
+			if !act.StepStartedAt.IsZero() {
+				age := int64(time.Since(act.StepStartedAt) / time.Second)
+				sj.StepAgeSec = &age
+			}
+			if !act.LastWorkAt.IsZero() {
+				ago := int64(time.Since(act.LastWorkAt) / time.Second)
+				sj.LastWorkAgoSec = &ago
+			}
 		}
 		jobs = append(jobs, sj)
 	}
+	return jobs, running
+}
+
+func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
+	// D6: the per-job needs_input projection, derived from the observe
+	// lane's monitors (keyed by the canonical id — the same key
+	// rt.List() reports). F15c rides the same loop: the per-job progress
+	// staleness for the LAST-PROGRESS column.
+	jobs, running := d.statusJobs()
 	writeJSON(w, http.StatusOK, statusResponse{
 		MachineID:    d.cfg.MachineID,
-		Mode:         d.modes.Current(),
+		DisplayName:  d.cfg.DisplayName,
+		Auto:         d.modes.Auto(),
 		Workspaces:   d.cfg.Mapping.Workspaces(),
 		ShuttingDown: d.modes.ShuttingDown(),
 		Jobs:         jobs,
@@ -672,138 +672,38 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (d *Daemon) modeRoute(w http.ResponseWriter, r *http.Request) {
+// opsConfigRoute is POST /ops/config {"auto":bool?,"max":int?}: the one
+// switch and the one number. At least one must be present.
+func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Action            string `json:"action"`
-		Mode              string `json:"mode"`
-		MaxConcurrentJobs *int   `json:"max_concurrent_jobs"`
-		// Project is the #113 optional ready-queue scope: absent, the
-		// recommendation merges ALL mapped projects; present, it covers
-		// exactly that project (validated by the CLI against the local
-		// mapping before the call).
-		Project string `json:"project,omitempty"`
+		Auto *bool `json:"auto"`
+		Max  *int  `json:"max"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	switch req.Action {
-	case "set":
-		if req.Mode == "" && req.MaxConcurrentJobs == nil {
-			writeErr(w, api.ErrDaemonBadInput, "mode set requires mode and/or max_concurrent_jobs")
-			return
-		}
-		if req.Mode != "" {
-			switch req.Mode {
-			case protocol.ModeInteractive, protocol.ModeBatch, protocol.ModeDrain:
-			default:
-				writeErr(w, api.ErrDaemonBadInput, "mode must be interactive|batch|drain")
-				return
-			}
-			if err := d.modes.Set(req.Mode); err != nil {
-				writeAdmissionErr(w, err)
-				return
-			}
-		}
-		if req.MaxConcurrentJobs != nil {
-			if err := d.q.SetMaxConcurrent(*req.MaxConcurrentJobs); err != nil {
-				writeErr(w, api.ErrDaemonBadInput, err.Error())
-				return
-			}
-		}
-		d.persistModeQuietly()
-		writeJSON(w, http.StatusOK, modeResponse{Mode: d.modes.Current(), MaxConcurrentJobs: d.q.MaxConcurrent()})
-	case "drain":
-		if err := d.modes.Set(protocol.ModeDrain); err != nil {
+	if req.Auto == nil && req.Max == nil {
+		writeErr(w, api.ErrDaemonBadInput, "ops config requires auto and/or max")
+		return
+	}
+	if req.Max != nil && *req.Max < 1 {
+		writeErr(w, api.ErrDaemonBadInput, "max must be >= 1 (DAEMON-400)")
+		return
+	}
+	if req.Auto != nil {
+		if err := d.modes.SetAuto(*req.Auto); err != nil {
 			writeAdmissionErr(w, err)
 			return
 		}
-		d.persistModeQuietly()
-		writeJSON(w, http.StatusOK, modeResponse{Mode: d.modes.Current()})
-	case "abort-drain":
-		if err := d.modes.AbortDrain(); err != nil {
-			writeAdmissionErr(w, err)
+	}
+	if req.Max != nil {
+		if err := d.q.SetMaxConcurrent(*req.Max); err != nil {
+			writeErr(w, api.ErrDaemonBadInput, err.Error())
 			return
 		}
-		d.persistModeQuietly()
-		writeJSON(w, http.StatusOK, modeResponse{Mode: d.modes.Current()})
-	case "get_recommendation":
-		// Batch's read-only wave projection: the aihub ready queue,
-		// forwarded as-is. NO job is created (04 §6.1b). polyforge#113:
-		// without a scope this merges ALL mapped projects (mapping
-		// declaration order); with one, exactly that project — validated
-		// against THIS daemon's mapping (the placement authority): an
-		// unmapped scope is a typed refusal naming the project, before
-		// any wire call.
-		if req.Project != "" {
-			if _, merr := d.cfg.Mapping.WorkspaceFor(req.Project); merr != nil {
-				writeErr(w, api.ErrDaemonUnmappedProject, fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the recommendation cannot be scoped to it; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)", req.Project))
-				return
-			}
-		}
-		var items []api.WorkItem
-		for _, project := range d.queueProjects(req.Project) {
-			pis, err := d.hub.Queue(project)
-			if err != nil {
-				writeErrOf(w, err)
-				return
-			}
-			items = append(items, pis...)
-		}
-		writeJSON(w, http.StatusOK, recommendationResponse{Items: items, Total: len(items)})
-	default:
-		writeErr(w, api.ErrDaemonBadInput, "unknown mode action: "+req.Action)
 	}
-}
-
-func (d *Daemon) batchRoute(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		WIIDs []string `json:"wi_ids"`
-	}
-	if !decodeBody(w, r, &body) {
-		return
-	}
-	if len(body.WIIDs) == 0 {
-		writeErr(w, api.ErrDaemonBadInput, "batch_submit requires a non-empty wi_ids set")
-		return
-	}
-	if err := d.modes.AdmitBatch(); err != nil {
-		writeAdmissionErr(w, err)
-		return
-	}
-	// The whole confirmed wave is enqueued (04 §12 ruling 0: never
-	// refuse the batch for exceeding the cap — pending entries
-	// backfill as slots open); duplicates of locally active/pending
-	// ids are skipped, the wave is never widened. Every entry is
-	// canonicalized (F2) so the queue and the runtime agree on keys.
-	// polyforge#113: an entry whose project is unmapped has no capsule
-	// home on this machine — it is skipped loudly (the wave is never
-	// widened with unplaceable work).
-	submitted := make([]string, 0, len(body.WIIDs))
-	for _, wi := range body.WIIDs {
-		canonical := wi
-		priority := "normal"
-		project := ""
-		if item, err := d.hub.GetWorkItem(wi); err == nil && item != nil {
-			if item.ID != "" {
-				canonical = item.ID
-			}
-			priority = item.Priority
-			project = item.ProjectName
-		}
-		if project != "" {
-			if _, merr := d.cfg.Mapping.WorkspaceFor(project); merr != nil {
-				fmt.Fprintf(os.Stderr, "daemon: batch_submit skipped %s: project %q is not in the [workspace] mapping (`pf doctor` checks the mapping)\n", canonical, project)
-				continue
-			}
-		}
-		d.rt.NoteAlias(wi, canonical)
-		if _, live := d.rt.Info(canonical); live || d.q.IsPending(canonical) {
-			continue
-		}
-		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: priority, Intent: "claim"})
-		submitted = append(submitted, canonical)
-	}
-	writeJSON(w, http.StatusOK, batchResponse{Submitted: len(submitted), WorkItemIDs: submitted})
+	d.persistModeQuietly()
+	writeJSON(w, http.StatusOK, opsConfigResponse{Auto: d.modes.Auto(), Max: d.q.MaxConcurrent()})
 }
 
 func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {

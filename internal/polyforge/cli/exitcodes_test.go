@@ -18,7 +18,7 @@ import (
 //	transport failure (daemon socket down, aihub unreachable) → 1
 //
 // Classes a verb cannot produce (backup has no local validation;
-// batch-confirm has no pre-wire validation; the daemon verb is
+// the daemon verb is
 // help-only) are absent from that verb's table and reported in the fix
 // summary as semantic blanks, never silently skipped.
 
@@ -52,7 +52,7 @@ var wireClasses = []struct {
 }
 
 // TestAihubFaceVerbExitCodeGoldens: every direct-to-aihub verb (data
-// plane, admin face, migrations), one golden table per verb.
+// plane, admin face), one golden table per verb.
 func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 	type spec struct {
 		name     string
@@ -87,14 +87,6 @@ func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 		{"rotate-secret", func(t *testing.T) []string {
 			return []string{"rotate-secret", "--mode", "rollback"}
 		}, []string{"rotate-secret"}, []string{"rotate-secret", "--no-such-flag"}},
-		{"migrate-memories", func(t *testing.T) []string {
-			return []string{"migrate-memories", "--from-jsonl", writeFileT(t, ""),
-				"--data-dir", t.TempDir(), "--project", "polyforge", "--dry-run"}
-		}, []string{"migrate-memories"}, []string{"migrate-memories", "--no-such-flag"}},
-		{"migrate-work-items", func(t *testing.T) []string {
-			return []string{"migrate-work-items", "--from", writeFileT(t, ""),
-				"--project", "polyforge", "--dry-run"}
-		}, []string{"migrate-work-items"}, []string{"migrate-work-items", "--no-such-flag"}},
 	}
 	for _, s := range specs {
 		t.Run(s.name, func(t *testing.T) {
@@ -183,18 +175,16 @@ func TestDaemonFaceVerbExitCodeGoldens(t *testing.T) {
 		localBad  []string
 		parseBad  []string
 	}
-	const observeBody = `{"work_item":"wi_x","project":"p","status":"running","generation":1}`
+	const watchBody = `{"work_item":"wi_x","project":"p","status":"running"}`
 	specs := []spec{
 		{"submit", []string{"submit", "wi_x"}, "POST /jobs/wi_x/claim",
 			`{"accepted":true,"work_item_id":"wi_x"}`, true,
 			[]string{"submit"}, []string{"submit", "--no-such-flag"}},
-		{"observe", []string{"observe", "wi_x"}, "GET /jobs/wi_x/observe",
-			observeBody, false, []string{"observe"}, []string{"observe", "--no-such-flag"}},
+		{"watch", []string{"watch", "wi_x", "--once"}, "GET /jobs/wi_x/watch",
+			watchBody, false, []string{"watch", "--once"}, []string{"watch", "--no-such-flag"}},
 		{"answer", []string{"answer", "wi_x", "--question", "q_1", "--text", "yes", "--by", "usr_1"},
 			"POST /jobs/wi_x/answer", `{"applied":true,"delivered":true}`, false,
 			[]string{"answer", "wi_x"}, []string{"answer", "--no-such-flag"}},
-		{"batch-confirm", []string{"batch-confirm"}, "POST /mode",
-			`{"items":[]}`, false, nil, []string{"batch-confirm", "--no-such-flag"}},
 		{"pause", []string{"pause", "wi_x"}, "POST /jobs/wi_x/pause", `{}`, false,
 			[]string{"pause"}, []string{"pause", "--no-such-flag"}},
 		{"wrap", []string{"wrap", "wi_x"}, "POST /jobs/wi_x/wrap", `{}`, false,
@@ -203,7 +193,7 @@ func TestDaemonFaceVerbExitCodeGoldens(t *testing.T) {
 			`{"work_item_id":"wi_x","branch":"polyforge/wi_x","repos":[]}`, false,
 			[]string{"ship"}, []string{"ship", "--no-such-flag"}},
 		{"ops", []string{"ops", "status"}, "GET /status",
-			`{"machine_id":"m1","mode":"interactive","shutting_down":false,"jobs":[],` +
+			`{"machine_id":"m1","auto":false,"shutting_down":false,"jobs":[],` +
 				`"queue":{"pending":0,"running":0,"max_concurrent":2}}`, false,
 			[]string{"ops", "bogus-action"}, []string{"ops", "--no-such-flag"}},
 	}
@@ -328,18 +318,15 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 	if code, _, _ := runPf(t, nil, "daemon", "--no-such-flag"); code != 2 {
 		t.Errorf("flag parse: exit = %d, want 2", code)
 	}
-	// Sanity: the registry really is the full 28-verb set (16 routing +
-	// ship + 6 admin + 2 migrations + doctor + watch-probe + daemon; the
-	// 26th was the M3 machines liveness face, lane hb-m3; doctor is the
-	// #113 machine health face; watch-probe is the watch lane's one-shot
-	// data face, wi_LMSxPTQTtz5x).
+	// Sanity: the registry really is the full 22-verb set (11 routing +
+	// ship + 6 admin + doctor + daemon + chat + watch; watch replaced the
+	// retired watch-probe; doctor is the #113 machine health face).
 	want := []string{
-		"file", "queue", "cancel", "recall", "remember", "takeover", "unblock",
-		"verify-session",
-		"submit", "observe", "answer", "batch-confirm", "pause", "resume",
-		"wrap", "ops", "ship", "users", "api-keys", "machines", "projects",
-		"backup", "rotate-secret", "migrate-memories", "migrate-work-items",
-		"doctor", "watch-probe", "daemon",
+		"file", "queue", "cancel", "recall", "remember",
+		"submit", "answer", "pause", "resume",
+		"wrap", "ops", "chat", "watch", "ship", "users", "api-keys", "machines", "projects",
+		"backup", "rotate-secret",
+		"doctor", "daemon",
 	}
 	if len(commands) != len(want) {
 		t.Fatalf("registry has %d commands, want %d", len(commands), len(want))

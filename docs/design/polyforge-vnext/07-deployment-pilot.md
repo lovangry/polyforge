@@ -1,5 +1,7 @@
 # 07 — Deployment / Pilot：一期部署形态、回归清单与否决门槛
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 | 权威项 | 值 |
 |---|---|
 | 文档定位 | 一期部署形态（SQLite + 本地目录）、安装/升级/回滚顺序、13 条回归清单（#699…#780）、Pilot 范围/指标/否决门槛、与旧 aihub 系统的并存与切换 |

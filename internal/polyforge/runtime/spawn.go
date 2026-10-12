@@ -1,10 +1,8 @@
 // spawn.go: the WI-agent spawner for the pi harness. Ports the v0
 // supervisor's LIVE-TESTED RPC protocol layer: stdin carries one JSON
 // command object per line ({"id":..,"type":"prompt","message":..}), stdout
-// is a record stream where the assistant message_end record is the ack
-// carrier, response records correlate command ids, and daemon→agent control
-// lines ride prompt commands whose message text is the control JSON
-// VERBATIM. Isolation, env sanitization and the spawn journal land here.
+// is a record stream whose response records correlate command ids.
+// Isolation, env sanitization and the spawn journal land here.
 package runtime
 
 import (
@@ -20,12 +18,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
-	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/common/spawn"
 )
 
 // piIsolationFlags is the WI-agent birth isolation profile: the named flag
@@ -36,7 +33,7 @@ import (
 // are a different resource family and stay reachable.
 //
 // --no-extensions is DELIBERATELY ABSENT and must stay absent (the v0
-// supervisor's live-tested baseline, v0/internal/mainagent/supervisor.go:
+// supervisor's live-tested baseline, v0/internal/mainagent/supervisor.go (git history):
 // it silences the operator's extension UI noise but also removes the
 // harness-native subagent tool — which is extension-provided — and with
 // it the whole step-agent dispatch path; the harness has no built-in
@@ -52,33 +49,19 @@ var piIsolationFlags = []string{
 
 // piCommand is one stdin command of the real pi RPC protocol. Every
 // command MAY carry a string id; the matching response record repeats it.
-// streamingBehavior "steer" queues a control prompt for delivery after the
-// current assistant turn — the safe-boundary discipline the control
-// contract demands; the initial prompt needs none (the agent is idle at
-// derivation).
 type piCommand struct {
-	ID                string `json:"id,omitempty"`
-	Type              string `json:"type"` // "prompt"
-	Message           string `json:"message"`
-	StreamingBehavior string `json:"streamingBehavior,omitempty"`
+	ID      string `json:"id,omitempty"`
+	Type    string `json:"type"` // "prompt"
+	Message string `json:"message"`
 }
 
-// stdout record probe shapes: response records repeat our command ids;
-// message_end is the authoritative final assistant message (the ack
-// carrier — message_update deltas stream the same text piecemeal and are
-// never scanned, so one ack is never queued twice).
+// stdout record probe shape: response records repeat our command ids.
 type stdoutRecord struct {
-	Type    string          `json:"type"`
-	Command string          `json:"command"` // "prompt" on response records
-	ID      *string         `json:"id"`
-	Success *bool           `json:"success"`
-	Error   string          `json:"error"`
-	Message json.RawMessage `json:"message"`
-}
-
-type assistantMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Type    string  `json:"type"`
+	Command string  `json:"command"` // "prompt" on response records
+	ID      *string `json:"id"`
+	Success *bool   `json:"success"`
+	Error   string  `json:"error"`
 }
 
 // ---------------------------------------------------------------------------
@@ -143,18 +126,15 @@ func newPiSpawner(cfg *Config) *piSpawner {
 	return &piSpawner{cfg: cfg}
 }
 
-// recordTaps wires the runtime Config's RecordTap into the process's
-// stdout tap chain: the production daemon binds RecordTap to its observe
-// adapter, so EVERY raw stdout record the spawner reads also reaches
-// the Observe lane's stream monitoring. Without the binding the record
-// stream (and with it the whole detection face) would be blind in
-// production.
+// recordTaps wires the dispatch's OnRecord callback into the process's
+// stdout tap chain: the driver's harness translator hangs on it, so every
+// raw stdout record the spawner reads also reaches the supervisor's
+// per-dispatch state.
 func (s *piSpawner) recordTaps(p SpawnParams) []func(string) {
-	if s.cfg.RecordTap == nil {
+	if p.OnRecord == nil {
 		return nil
 	}
-	wi, tap := p.WorkItemID, s.cfg.RecordTap
-	return []func(string){func(line string) { tap(wi, []byte(line)) }}
+	return []func(string){p.OnRecord}
 }
 
 func (s *piSpawner) bin() string {
@@ -216,26 +196,15 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		// compensation lives in pitranscript.go (F3).
 		"PI_SESSION_DIR=" + filepath.Join(p.CapsuleDir, capsule.DirSession),
 		"PF_WI_ID=" + p.WorkItemID, // layer-4 cleanup marker (deliberate addition)
+		// second marker half: the sweep needs BOTH, so a daemon never
+		// reaps another daemon's step process for the same WI id.
+		"PF_DAEMON_ID=" + s.cfg.MachineID,
 		// v1.5 B2/B3 identity: the PUBLIC session handle and the monotonic
-		// derivation counter — the agent's flush fence keys. The SECRET
+		// derivation counter. The SECRET
 		// session id is deliberately ABSENT (it must never reach agent
 		// env; it lives only in state.json and the one-shot askpass).
 		"PF_SESSION_HANDLE=" + p.SessionHandle,
 		"PF_SPAWN_N=" + strconv.Itoa(p.SpawnN),
-		// polyforge#81 context identity: the execution-role marker. The
-		// skill routes on it at load time (EXECUTION = a WI agent: no
-		// supervision duties); step subagents inherit it through plain
-		// env propagation, needing no extra daemon code. Deliberate
-		// addition, same family as PF_WI_ID: the sanitize point above
-		// strips every inherited PF_* first, so a parent shell's
-		// spoofed PF_AGENT_ROLE cannot survive into the child.
-		"PF_AGENT_ROLE=wi-agent",
-	}
-	if s.cfg.SocketPath != "" {
-		// deliberate addition, same mechanism as PF_WI_ID: the env sanitize
-		// point strips every inherited PF_*, so the daemon's UDS path (the
-		// agent's flush(reason) proxy, §五) is handed back explicitly.
-		additions = append(additions, "PF_DAEMON_SOCKET="+s.cfg.SocketPath)
 	}
 	cmd.Env = newEnvSanitizer(s.cfg.EnvSecrets...).childEnv(additions...)
 	return cmd
@@ -256,15 +225,37 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	// Own pipes (not cmd.StdoutPipe): cmd.Wait would close the read end
+	// the instant the process exits and could drop the tail of the
+	// stream — exactly the records (the error turn's agent_end) the exit
+	// classification needs. With plain *os.File sinks Wait copies
+	// nothing, and the reader sees EOF once every writer is gone.
+	outR, outW, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	cmd.Stderr = os.Stderr
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		outR.Close()
+		outW.Close()
+		return nil, err
+	}
+	cmd.Stdout = outW
+	cmd.Stderr = errW
 	if err := cmd.Start(); err != nil {
+		outR.Close()
+		outW.Close()
+		errR.Close()
+		errW.Close()
 		return nil, fmt.Errorf("runtime: harness start failed: %w", err)
 	}
-	proc := newProc(cmd, stdin, stdout, s.recordTaps(p)...)
+	outW.Close()
+	errW.Close()
+	proc := newProcOpts(cmd, stdin, outR, procOpts{
+		taps:   s.recordTaps(p),
+		stderr: errR,
+		onExit: p.OnExit,
+	})
 	// Layer-0 enrollment: move the agent (and with it every descendant) into
 	// the per-WI cgroup. Unavailable cgroups degrade silently — layers 1-4
 	// remain the kill path.
@@ -285,6 +276,18 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 	}
 	if err := proc.writeCommand(piCommand{ID: "pf-init", Type: "prompt", Message: p.InitialPrompt}); err != nil {
 		_ = proc.Terminate(5 * time.Second)
+		// A harness that died at startup (an unresolvable pinned model, a
+		// bad credential) never read the prompt: its stderr is the only
+		// explanation, and the driver classifies the failure from it (a
+		// model-class text advances the candidate chain, F4).
+		select {
+		case <-proc.exited:
+		case <-time.After(2 * time.Second):
+		}
+		detail := strings.TrimSpace(proc.tail.String())
+		if detail != "" {
+			return nil, fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w; harness stderr: %s", err, detail)
+		}
 		return nil, fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w", err)
 	}
 	return proc, nil
@@ -334,7 +337,7 @@ func writeSpawnJournal(p SpawnParams, pid int, startedAt string, spawnToken stri
 
 // maxSpawnNFromJournal answers the highest spawn_n the capsule's spawn
 // journal records (0 when absent/unreadable): the B2 fresh-clone source —
-// a takeover or attach that cloned this capsule from the bare repo
+// a re-claim or attach that cloned this capsule from the bare repo
 // continues the derivation counter where the capsule's history left off.
 func maxSpawnNFromJournal(capsuleDir string) int {
 	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.DirRuntimeState, "spawn-journal.jsonl"))
@@ -366,13 +369,19 @@ const (
 
 var errControlTooLong = fmt.Errorf("runtime: control line exceeded the bounded reader limit")
 
+// procOpts carries the optional wiring of newProcOpts.
+type procOpts struct {
+	taps   []func(string)
+	stderr io.ReadCloser // when set, drained into a bounded tail (mirrored to os.Stderr)
+	onExit func(spawn.ExitInfo)
+}
+
 // proc wraps one derived harness process.
 type proc struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	startedAt string
-	taps      []func(string) // stdout record taps (the observe adapter binding)
-	acks      ackHub
+	taps      []func(string) // stdout record taps (the translator binding)
 
 	mu   sync.Mutex // guards stdin writes
 	pend sync.Mutex // guards pending ids (own lock: stdin writes may block)
@@ -380,27 +389,64 @@ type proc struct {
 	pending map[string]bool
 	exited  chan struct{}
 	exitErr error
+	exit    spawn.ExitInfo // valid once exited is closed
+	tail    *tailBuffer
+}
+
+// tailBuffer keeps the last stderrTailBytes bytes written to it.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+const stderrTailBytes = 4096
+
+func (t *tailBuffer) Write(b []byte) (int, error) {
+	t.mu.Lock()
+	t.buf = append(t.buf, b...)
+	if len(t.buf) > stderrTailBytes {
+		t.buf = append([]byte(nil), t.buf[len(t.buf)-stderrTailBytes:]...)
+	}
+	t.mu.Unlock()
+	return len(b), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
 }
 
 func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...func(string)) *proc {
+	return newProcOpts(cmd, stdin, stdout, procOpts{taps: taps})
+}
+
+func newProcOpts(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, o procOpts) *proc {
 	p := &proc{
 		cmd:       cmd,
 		stdin:     stdin,
 		startedAt: nowStamp(),
 		pending:   map[string]bool{},
-		acks:      newAckHub(),
 		exited:    make(chan struct{}),
-		taps:      taps,
+		taps:      o.taps,
+		tail:      &tailBuffer{},
+	}
+	readerDone := make(chan struct{})
+	stderrDone := make(chan struct{})
+	if o.stderr != nil {
+		go func() {
+			defer close(stderrDone)
+			_, _ = io.Copy(io.MultiWriter(os.Stderr, p.tail), o.stderr)
+			o.stderr.Close()
+		}()
+	} else {
+		close(stderrDone)
 	}
 	go func() {
-		// cmd.Wait blocks on inherited pipes: a grandchild (model
-		// provider connection, spawned tool) that inherited stdout keeps
-		// the pipe open past the pi process's own exit, wedging Wait and
-		// the exited channel forever (#92). The bound: a goroutine races
-		// the Wait with a generous process-exit check; when the direct
-		// child is gone but Wait hasn't returned (pipe still held), we
-		// kill the process group (Setpgid makes the child the leader —
-		// killing it releases the pipe) and unblock Wait.
+		// A grandchild (model provider connection, spawned tool) that
+		// inherited stdout keeps the pipe open past the pi process's own
+		// exit (#92): the exit sequence below waits for the reader only a
+		// bounded moment, and the group kill releases the pipe.
 		done := make(chan struct{})
 		go func() {
 			p.exitErr = cmd.Wait()
@@ -411,6 +457,26 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 		for {
 			select {
 			case <-done:
+				// Let the stdout reader AND the stderr copier drain what the
+				// dead process left in its pipes before the exit is
+				// announced: the last records (the error turn's agent_end)
+				// and the stderr tail decide the exit's class. Bounded: a
+				// grandchild holding a pipe must not hold the exit back.
+				drainDeadline := time.Now().Add(500 * time.Millisecond)
+				for _, ch := range []chan struct{}{readerDone, stderrDone} {
+					wait := time.Until(drainDeadline)
+					if wait < 0 {
+						wait = 0
+					}
+					select {
+					case <-ch:
+					case <-time.After(wait):
+					}
+				}
+				p.exit = p.exitInfo()
+				if o.onExit != nil {
+					o.onExit(p.exit)
+				}
 				close(p.exited)
 				return
 			case <-ticker.C:
@@ -423,6 +489,7 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 		}
 	}()
 	go func() {
+		defer close(readerDone)
 		br := bufio.NewReaderSize(stdout, 64*1024)
 		for {
 			line, tooLong, rerr := readBoundedLine(br, maxControlLineBytes)
@@ -443,6 +510,28 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 		}
 	}()
 	return p
+}
+
+// exitInfo reads the finished process's status.
+func (p *proc) exitInfo() spawn.ExitInfo {
+	info := spawn.ExitInfo{Code: -1, StderrTail: strings.TrimSpace(p.tail.String())}
+	if ps := p.cmd.ProcessState; ps != nil {
+		info.Code = ps.ExitCode()
+		if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			info.Signal = ws.Signal().String()
+		}
+	}
+	return info
+}
+
+// ExitInfo implements spawn.ExitReporter; meaningful once Done().
+func (p *proc) ExitInfo() spawn.ExitInfo {
+	select {
+	case <-p.exited:
+		return p.exit
+	default:
+		return spawn.ExitInfo{Code: -1}
+	}
 }
 
 func (p *proc) PID() int          { return p.cmd.Process.Pid }
@@ -486,104 +575,16 @@ func (p *proc) writeCommand(c piCommand) error {
 	return nil
 }
 
-// SendControl delivers one daemon→agent control method (§五 stdio channel:
-// the probe only since polyforge#106 — the answer relay and the
-// stop-notice delivery died with the WI-Agent engine): the
-// protocol.ControlMsg JSON line is the message text of a prompt command
-// VERBATIM — the agent parses the user message text exactly as the raw
-// line. steer keeps the command legal while a turn is in flight and
-// delivers at the next boundary.
-func (p *proc) SendControl(m protocol.ControlMsg) error {
-	line, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	return p.writeCommand(piCommand{
-		ID: nextCommandID(), Type: "prompt",
-		Message: string(line), StreamingBehavior: "steer",
-	})
-}
-
-// WaitControlAck awaits the agent's ack of exactly m, bounded like every
-// control wait. The match is (method, correlation): the correlation token
-// of m is the question id (pf/answer) or the nonce (pf/probe) when those
-// are set, otherwise the numeric Seq — and the ack satisfies the wait by
-// echoing that token (Ref for string tokens, Seq for numeric ones).
-func (p *proc) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error {
-	deadline := time.Now().Add(bound)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	qctx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-	w := p.acks.register(m)
-	defer p.acks.unregister(w)
-	if ack := p.acks.claim(w); ack != nil {
-		return ackOutcome(m, *ack)
-	}
-	select {
-	case ack := <-w.ch:
-		return ackOutcome(m, ack)
-	case <-qctx.Done():
-		return fmt.Errorf("runtime: no ack for %s: %w", m.Method, qctx.Err())
-	case <-p.exited:
-		return fmt.Errorf("runtime: no ack for %s: agent exited", m.Method)
-	}
-}
-
-func ackOutcome(m protocol.ControlMsg, ack protocol.ControlAck) error {
-	if ack.OK {
-		return nil
-	}
-	return fmt.Errorf("runtime: agent refused %s: %s", m.Method, ack.Error)
-}
-
-// ackTokenOf is the correlation token a control message carries:
-// pf/probe → the nonce, everything else → the numeric seq.
-func ackTokenOf(m protocol.ControlMsg) string {
-	if m.Method == protocol.ControlProbe && m.Nonce != "" {
-		return m.Nonce
-	}
-	return strconv.FormatInt(m.Seq, 10)
-}
-
-// ackMatches decides whether an incoming ack answers the message m: the
-// method must agree and the echoed token must agree (Ref for the string
-// tokens, Seq for the numeric one). A method whose message carries no
-// correlation at all (Seq 0) matches its tokenless ack.
-func ackMatches(m protocol.ControlMsg, ack protocol.ControlAck) bool {
-	if ack.Method != m.Method {
-		return false
-	}
-	token := ackTokenOf(m)
-	if ack.Ref != "" {
-		return ack.Ref == token
-	}
-	return strconv.FormatInt(ack.Seq, 10) == token
-}
-
 // classify sorts one stdout line: response records repeating OUR command
-// ids are observed (success=false is logged, never an ack) and dropped;
-// message_end records carrying an assistant message are the ack carrier —
-// their text is scanned line-by-line for the closed ack shape and every
-// match is ROUTED to the waiter whose (method, correlation) it answers;
-// everything else is bulk.
+// ids are observed (success=false is logged) and dropped; everything else
+// is bulk.
 func (p *proc) classify(line string) {
 	var rec stdoutRecord
 	if json.Unmarshal([]byte(line), &rec) != nil || rec.Type == "" {
 		return // non-record noise: bulk
 	}
-	switch rec.Type {
-	case "response":
+	if rec.Type == "response" {
 		p.observeResponse(rec)
-	case "message_end":
-		text, ok := assistantText(rec.Message)
-		if !ok {
-			return
-		}
-		for _, l := range strings.Split(text, "\n") {
-			p.controlCandidate(l)
-		}
 	}
 }
 
@@ -600,66 +601,6 @@ func (p *proc) observeResponse(rec stdoutRecord) {
 	}
 }
 
-// controlCandidate routes one ack-shaped line: a JSON object carrying a
-// control method of the closed vocabulary is delivered to the waiter it
-// answers — by (method, correlation), so concurrent waiters never steal
-// each other's acks. Refusals (ok=false) are delivered too: the waiter
-// must learn its method was refused, not time out on a dropped line. An
-// ack that answers no live waiter (a late echo of a dead wait) is
-// dropped.
-func (p *proc) controlCandidate(line string) {
-	s := strings.TrimSpace(line)
-	if !strings.HasPrefix(s, "{") {
-		return
-	}
-	var ack protocol.ControlAck
-	if json.Unmarshal([]byte(s), &ack) != nil || ack.Method == "" {
-		return
-	}
-	switch ack.Method {
-	case protocol.ControlProbe:
-		// closed vocabulary (polyforge#106: the probe is the only control
-		// method the stdio channel still carries)
-	default:
-		return
-	}
-	p.acks.deliver(ack)
-}
-
-func assistantText(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 {
-		return "", false
-	}
-	var m assistantMessage
-	if json.Unmarshal(raw, &m) != nil || m.Role != "assistant" {
-		return "", false
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(m.Content, &blocks); err == nil {
-		var b strings.Builder
-		for _, blk := range blocks {
-			if blk.Type == "text" {
-				b.WriteString(blk.Text)
-			}
-		}
-		return b.String(), true
-	}
-	var s string
-	if json.Unmarshal(m.Content, &s) == nil {
-		return s, true
-	}
-	return "", false
-}
-
-var msgID int64
-
-func nextCommandID() string {
-	return "pf-" + strconv.FormatInt(atomic.AddInt64(&msgID, 1), 10)
-}
-
 // Terminate kills the WHOLE process group and proves it empty: SIGTERM to
 // -pgid, bounded wait for the group (not merely the leader), SIGKILL, wait
 // again.
@@ -669,108 +610,6 @@ func (p *proc) Terminate(bound time.Duration) error {
 	}
 	// Setpgid: the child IS the group leader.
 	return killGroup(p.cmd.Process.Pid, bound)
-}
-
-// ---------------------------------------------------------------------------
-// The ack hub: per-waiter ack routing. The review's dual-key fix: a single
-// FIFO let concurrent waiters consume each other's lines and never matched
-// the echoed correlation. Each waiter registers under its own control
-// message; an incoming ack is handed to the FIRST waiter whose (method,
-// correlation) it satisfies. An ack that races ahead of its waiter —
-// SendControl returns before WaitControlAck parks the wait, and a fast
-// agent may ack in between — parks in the hub's bounded orphan backlog
-// and is claimed by the waiter at registration, so nothing is lost on
-// that path either.
-
-const maxAckBacklog = 16 // bounds both the per-waiter and orphan backlogs
-
-// ackHub routes control acks to the waiter that asked for them.
-type ackHub struct {
-	mu      sync.Mutex
-	next    uint64
-	waiters map[uint64]*ackWaiter
-	orphans []protocol.ControlAck // acks that arrived before their waiter
-}
-
-func newAckHub() ackHub {
-	return ackHub{waiters: map[uint64]*ackWaiter{}}
-}
-
-// ackWaiter is one outstanding WaitControlAck.
-type ackWaiter struct {
-	id      uint64
-	msg     protocol.ControlMsg
-	ch      chan protocol.ControlAck
-	backlog []protocol.ControlAck
-}
-
-// register parks one waiter for m. The returned waiter's channel is
-// buffered 1; an ack that raced ahead of the registration is served
-// first through claim.
-func (h *ackHub) register(m protocol.ControlMsg) *ackWaiter {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.next++
-	w := &ackWaiter{id: h.next, msg: m, ch: make(chan protocol.ControlAck, 1)}
-	h.waiters[w.id] = w
-	return w
-}
-
-func (h *ackHub) unregister(w *ackWaiter) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.waiters, w.id)
-}
-
-// claim hands w one ack answering its message: its channel (already
-// delivered) first, then its backlog, then the hub's orphan backlog (the
-// SendControl→WaitControlAck race window).
-func (h *ackHub) claim(w *ackWaiter) *protocol.ControlAck {
-	select {
-	case ack := <-w.ch:
-		return &ack
-	default:
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(w.backlog) > 0 {
-		ack := w.backlog[0]
-		w.backlog = w.backlog[1:]
-		return &ack
-	}
-	for i, orphan := range h.orphans {
-		if ackMatches(w.msg, orphan) {
-			h.orphans = append(h.orphans[:i], h.orphans[i+1:]...)
-			ack := orphan
-			return &ack
-		}
-	}
-	return nil
-}
-
-// deliver routes one parsed ack to the first waiter it answers. A waiter
-// with a full channel parks the ack in its bounded backlog; an ack that
-// answers nobody YET parks in the bounded orphan backlog (its waiter may
-// be one SendControl-return away); beyond the bound it is dropped.
-func (h *ackHub) deliver(ack protocol.ControlAck) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, w := range h.waiters {
-		if !ackMatches(w.msg, ack) {
-			continue
-		}
-		select {
-		case w.ch <- ack:
-		default:
-			if len(w.backlog) < maxAckBacklog {
-				w.backlog = append(w.backlog, ack)
-			}
-		}
-		return
-	}
-	if len(h.orphans) < maxAckBacklog {
-		h.orphans = append(h.orphans, ack)
-	}
 }
 
 // readBoundedLine reads one newline-terminated line, never accumulating

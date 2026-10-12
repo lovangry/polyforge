@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -292,14 +291,12 @@ func Open(dataDir string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("core: migrate memory stamps: %w", err)
 	}
-	// seq-fix lane: global seq numbering becomes per-project. The UNIQUE
-	// column constraint cannot be altered in place, so databases created
-	// by an older build are rebuilt (renumbering per project, relative
-	// order preserved). Fresh installs get the new shape from the DDL and
-	// this is a detected no-op.
-	if err := migrateSeqPerProject(sqlDB); err != nil {
+	// work_items.seq is numbered per project: UNIQUE(project_id, seq). A
+	// database still carrying the old global UNIQUE(seq) is refused — there
+	// is no in-place migration; rebuild it offline.
+	if err := requirePerProjectSeq(sqlDB); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("core: migrate per-project seq: %w", err)
+		return nil, err
 	}
 	return &DB{sqlDB}, nil
 }
@@ -390,187 +387,27 @@ func migrateSessions(db *sql.DB) error {
 }
 
 // ---------------------------------------------------------------------------
-// Per-project seq migration (seq-fix lane)
+// Per-project seq shape check (no migration)
 
-// seqMigColumns is the full work_items column set the rebuild knows
-// about: the DDL columns plus the session columns migrateSessions
-// guarantees. migrateSeqPerProject refuses to run when the live table
-// carries anything else — an additive column added later must extend
-// this migration consciously, never be silently dropped by the rebuild.
-var seqMigColumns = []string{
-	"id", "seq", "project_id", "goal", "content", "parent_id", "status",
-	"priority", "milestone", "labels", "attrs", "reporter", "assignee",
-	"waiting_on", "bundle_name", "bundle_digest", "workflow_budget_baseline",
-	"created_at", "updated_at", "closed_at",
-	"session_hash", "session_fingerprint", "session_machine",
-	"session_owner", "session_started_at", "clean_pause",
-}
-
-// seqMigWorkItemsDDL is the rebuilt work_items shape: the DDL above with
-// the seq uniqueness scoped UNIQUE(project_id, seq). Created under a
-// throwaway name, filled row-by-row (seq renumbered per project), then
-// swapped in.
-const seqMigWorkItemsDDL = `CREATE TABLE work_items_seqmig (
-  id           TEXT PRIMARY KEY,
-  seq          INTEGER NOT NULL,
-  project_id   TEXT NOT NULL REFERENCES projects(id),
-  goal         TEXT NOT NULL,
-  content      TEXT,
-  parent_id    TEXT REFERENCES work_items(id),
-  status       TEXT NOT NULL DEFAULT 'queued'
-               CHECK (status IN ('queued','running','paused','blocked',
-                                 'wrapped','failed','canceled')),
-  priority     TEXT NOT NULL DEFAULT 'normal'
-               CHECK (priority IN ('low','normal','high','urgent')),
-  milestone    TEXT,
-  labels       TEXT NOT NULL DEFAULT '[]',
-  attrs        TEXT NOT NULL DEFAULT '{}',
-  reporter     TEXT NOT NULL REFERENCES users(id),
-  assignee     TEXT REFERENCES users(id),
-  waiting_on   TEXT,
-  bundle_name  TEXT,
-  bundle_digest TEXT,
-  workflow_budget_baseline TEXT,
-  created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL,
-  closed_at    TEXT,
-  session_hash        TEXT,
-  session_fingerprint TEXT,
-  session_machine     TEXT,
-  session_owner       TEXT,
-  session_started_at  TEXT,
-  clean_pause         INTEGER NOT NULL DEFAULT 0,
-  UNIQUE (project_id, seq)
-);`
-
-// seqMigIndexes recreates the work_items secondary indexes after the
-// table swap (DROP TABLE took them with the old table).
-const seqMigIndexes = `
-CREATE INDEX IF NOT EXISTS idx_wi_status     ON work_items(status, priority DESC, created_at);
-CREATE INDEX IF NOT EXISTS idx_wi_assignee   ON work_items(assignee) WHERE status IN ('running','paused','blocked');
-CREATE INDEX IF NOT EXISTS idx_wi_waiting_on ON work_items(waiting_on) WHERE waiting_on IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_wi_parent     ON work_items(parent_id) WHERE parent_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_wi_milestone  ON work_items(project_id, milestone) WHERE milestone IS NOT NULL;`
-
-// migrateSeqPerProject turns a globally-unique work_items.seq into the
-// per-project UNIQUE(project_id, seq) shape. Guard: any UNIQUE index on
-// (seq) alone means the old shape — the rebuild swaps the table for the
-// per-project one, renumbering seq 1..n WITHIN each project with the old
-// global seq order preserved (the old seqs were globally unique, so the
-// old order IS the per-project relative order). Idempotent: a database
-// already carrying UNIQUE(project_id, seq) (fresh DDL installs, re-opens)
-// is detected and left alone; safe on empty databases (nothing to copy).
-//
-// The table swap follows the standard SQLite rebuild recipe: foreign
-// keys off, one transaction (create → copy → drop → rename → re-index),
-// PRAGMA foreign_key_check before commit. Core opens its database with
-// MaxOpenConns(1), so the PRAGMA and the transaction share one
-// connection. Pre-existing FK violations are counted, never judged: the
-// rebuild must not ADD any (ids are copied verbatim), but a legacy
-// database may already carry dangling references this migration does not
-// fix.
-func migrateSeqPerProject(db *sql.DB) error {
-	needed, err := seqMigrationNeeded(db)
+// requirePerProjectSeq fails loudly when work_items still has the old
+// global UNIQUE index on (seq) alone.
+func requirePerProjectSeq(db *sql.DB) error {
+	old, err := hasGlobalSeqUnique(db)
 	if err != nil {
-		return fmt.Errorf("probe seq uniqueness: %w", err)
+		return fmt.Errorf("core: probe seq uniqueness: %w", err)
 	}
-	if !needed {
-		return nil
-	}
-	// Refuse to rebuild a table this migration does not fully know.
-	if err := seqMigColumnsKnown(db); err != nil {
-		return err
-	}
-	// Renumber: per project, old global seq order preserved.
-	type wiKey struct {
-		id, project string
-		seq         int64
-	}
-	rows, err := db.Query(`SELECT id, project_id, seq FROM work_items
-		ORDER BY project_id, seq, created_at, id`)
-	if err != nil {
-		return fmt.Errorf("read rows: %w", err)
-	}
-	var ordered []wiKey
-	for rows.Next() {
-		var k wiKey
-		if err := rows.Scan(&k.id, &k.project, &k.seq); err != nil {
-			rows.Close()
-			return fmt.Errorf("read rows: %w", err)
-		}
-		ordered = append(ordered, k)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("read rows: %w", err)
-	}
-	newSeq := make(map[string]int64, len(ordered))
-	counters := map[string]int64{}
-	for _, k := range ordered {
-		counters[k.project]++
-		newSeq[k.id] = counters[k.project]
-	}
-	before, err := countFKViolations(db)
-	if err != nil {
-		return fmt.Errorf("fk check: %w", err)
-	}
-	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-		return fmt.Errorf("fk off: %w", err)
-	}
-	defer db.Exec(`PRAGMA foreign_keys=ON`)
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(seqMigWorkItemsDDL); err != nil {
-		return fmt.Errorf("create rebuild table: %w", err)
-	}
-	// INSERT ... SELECT with seq overridden; every other column verbatim.
-	cols := strings.Join(seqMigColumns, ", ")
-	sel := make([]string, len(seqMigColumns))
-	for i, c := range seqMigColumns {
-		if c == "seq" {
-			sel[i] = "?2"
-		} else {
-			sel[i] = c
-		}
-	}
-	stmt := `INSERT INTO work_items_seqmig (` + cols + `) SELECT ` + strings.Join(sel, ", ") +
-		` FROM work_items WHERE id=?1`
-	for _, k := range ordered {
-		if _, err := tx.Exec(stmt, k.id, newSeq[k.id]); err != nil {
-			return fmt.Errorf("copy %s: %w", k.id, err)
-		}
-	}
-	if _, err := tx.Exec(`DROP TABLE work_items`); err != nil {
-		return fmt.Errorf("drop old table: %w", err)
-	}
-	if _, err := tx.Exec(`ALTER TABLE work_items_seqmig RENAME TO work_items`); err != nil {
-		return fmt.Errorf("rename: %w", err)
-	}
-	if _, err := tx.Exec(seqMigIndexes); err != nil {
-		return fmt.Errorf("recreate indexes: %w", err)
-	}
-	after, err := countFKViolationsTx(tx)
-	if err != nil {
-		return fmt.Errorf("fk check: %w", err)
-	}
-	if after > before {
-		return fmt.Errorf("rebuild would introduce %d new fk violation(s); refusing", after-before)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
+	if old {
+		return fmt.Errorf("core: work_items.seq is globally UNIQUE (pre per-project numbering); this build requires UNIQUE(project_id, seq) and does not migrate — rebuild the table offline")
 	}
 	return nil
 }
 
-// seqMigrationNeeded reports whether work_items still carries a UNIQUE
+// hasGlobalSeqUnique reports whether work_items carries a UNIQUE
 // index on (seq) alone (the old global shape). The index names are
 // collected BEFORE inspecting each one: Core runs a one-connection
 // pool, and a nested Query while the outer rows are still open would
 // deadlock the pool.
-func seqMigrationNeeded(db *sql.DB) (bool, error) {
+func hasGlobalSeqUnique(db *sql.DB) (bool, error) {
 	rows, err := db.Query(`SELECT name FROM pragma_index_list('work_items')
 		WHERE "unique"=1 AND origin='u'`)
 	if err != nil {
@@ -617,54 +454,6 @@ func indexColumns(db *sql.DB, index string) ([]string, error) {
 		cols = append(cols, c)
 	}
 	return cols, rows.Err()
-}
-
-// seqMigColumnsKnown refuses the rebuild when the live work_items table
-// has columns this migration does not know (a later additive migration
-// must extend seqMigColumns first).
-func seqMigColumnsKnown(db *sql.DB) error {
-	rows, err := db.Query(`SELECT name FROM pragma_table_info('work_items')`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	known := map[string]bool{}
-	for _, c := range seqMigColumns {
-		known[c] = true
-	}
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return err
-		}
-		if !known[c] {
-			return fmt.Errorf("work_items has column %q, which the per-project seq rebuild does not know; extend seqMigColumns before migrating", c)
-		}
-	}
-	return rows.Err()
-}
-
-// countFKViolations counts the violation rows PRAGMA foreign_key_check
-// reports (the PRAGMA runs regardless of the foreign_keys setting).
-func countFKViolations(db *sql.DB) (int, error) { return countFKViolationsQ(db) }
-
-func countFKViolationsTx(tx *sql.Tx) (int, error) { return countFKViolationsQ(tx) }
-
-type fkCheckRunner interface {
-	Query(string, ...any) (*sql.Rows, error)
-}
-
-func countFKViolationsQ(q fkCheckRunner) (int, error) {
-	rows, err := q.Query(`PRAGMA foreign_key_check`)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-	n := 0
-	for rows.Next() {
-		n++
-	}
-	return n, rows.Err()
 }
 
 // Now returns the canonical RFC3339 UTC timestamp for all Core columns.

@@ -101,7 +101,7 @@ type Identity struct {
 // copy of the work item's task definition (goal, content, labels,
 // priority, milestone, bundle pin and project name). v1 has NO
 // agent→server read path (ruling C3: the whole agent contact surface is
-// the capsule plus the flush control channel), so this file is the ONE
+// the capsule), so this file is the ONE
 // authoritative statement of what the WI agent is working on — the
 // claim answer is its only source, and recovery re-materializes it from
 // aihub when a legacy capsule predates it.
@@ -147,8 +147,8 @@ const (
 )
 
 // Execution is runtime-state/execution.json (03 §4.2): the single source of
-// truth the WI Agent writes and the daemon observes (ruling C3: agent is
-// zero-blocking; observe watches this file).
+// truth the daemon's Go driver writes (the single writer) and observe
+// watches (ruling C3: the agent is zero-blocking).
 type Execution struct {
 	CapsuleID      string           `json:"capsule_id"`
 	WorkItemID     string           `json:"work_item_id"`
@@ -161,6 +161,10 @@ type Execution struct {
 	BudgetConsumed Budget           `json:"budget_consumed"`
 	UpdatedAt      string           `json:"updated_at"`
 	Version        int64            `json:"version"`
+	// BlockedReason names why the driver parked the workflow blocked on
+	// its own authority (host-class fault, failure counter at its bound);
+	// empty when blocked on an honest incomplete result or not blocked.
+	BlockedReason string `json:"blocked_reason,omitempty"`
 }
 
 // Step statuses.
@@ -176,16 +180,58 @@ type Step struct {
 	// run under (the F4 lane: the executor records the candidate it
 	// dispatched with into every step-starting execution.json write, so
 	// the observe face can render it — the daemon never derives it).
-	Model              string             `json:"model,omitempty"`
-	Output             map[string]any     `json:"output,omitempty"`
-	StepStartedAt      string             `json:"step_started_at,omitempty"`
-	StepStartRefs      map[string]RepoRef `json:"step_start_refs,omitempty"`
-	BudgetConsumed     Budget             `json:"budget_consumed"`
-	Attempts           []Attempt          `json:"attempts"`
-	Answers            []ArchivedAnswer   `json:"answers"`
-	PendingQuestion    *PendingQuestion   `json:"pending_question,omitempty"`
-	PendingRewindInput *RewindInput       `json:"pending_rewind_input,omitempty"`
+	Model          string             `json:"model,omitempty"`
+	Output         map[string]any     `json:"output,omitempty"`
+	StepStartedAt  string             `json:"step_started_at,omitempty"`
+	StepStartRefs  map[string]RepoRef `json:"step_start_refs,omitempty"`
+	BudgetConsumed Budget             `json:"budget_consumed"`
+	Attempts       []Attempt          `json:"attempts"`
+	Answers        []ArchivedAnswer   `json:"answers"`
+	// AnswerBase is len(Answers) at the step's last gate-fail rewind: the
+	// answers at index >= AnswerBase form the step's CURRENT attempt chain
+	// (the human-gate guarantee counts only those). Zero until a rewind.
+	AnswerBase         int              `json:"answer_base,omitempty"`
+	PendingQuestion    *PendingQuestion `json:"pending_question,omitempty"`
+	PendingRewindInput *RewindInput     `json:"pending_rewind_input,omitempty"`
+	// Supervision is the step's failure ledger and relaxed supervision
+	// thresholds (v2-converge 2.3/2.4): execution.json is the single
+	// authority for them, so a restart resumes the same counts.
+	Supervision *StepSupervision `json:"supervision,omitempty"`
 }
+
+// StepSupervision is one step's driver-owned supervision state.
+type StepSupervision struct {
+	// FailureCount counts failed dispatches since the last reset (gate
+	// rewind into the step, switch to a new candidate, human continue).
+	FailureCount int `json:"failure_count,omitempty"`
+	// LongTaskTimeouts counts step_timeout_long_task verdicts since the
+	// last reset; the second one blocks the step.
+	LongTaskTimeouts int `json:"long_task_timeouts,omitempty"`
+	// RelaxedToolMs / RelaxedWallMs are the relaxed Y and T (each
+	// relaxation doubles); zero = never relaxed.
+	RelaxedToolMs int64 `json:"relaxed_tool_ms,omitempty"`
+	RelaxedWallMs int64 `json:"relaxed_wall_ms,omitempty"`
+	// RuntimeBaseMs is the part of the step's booked wall time the T clock
+	// no longer counts: a switch to a new candidate model (or a human
+	// continue) starts a fresh T window instead of handing the newcomer a
+	// budget the previous one already spent. The cumulative step runtime
+	// T is judged against is budget_consumed.wall_ms - runtime_base_ms.
+	RuntimeBaseMs int64 `json:"runtime_base_ms,omitempty"`
+	// NextDispatch shapes the next dispatch after a failure: "" resumes
+	// the transcript, "fresh" starts a new conversation with the previous
+	// transcript as read-only reference. Cleared by the next step_start.
+	NextDispatch string `json:"next_dispatch,omitempty"`
+	// RejectRelaunches counts the driver relaunches a persistently
+	// rejected result envelope forced (the in-process rejection bound
+	// spent). Persisted because the in-memory rejection counter dies with
+	// the driver; the bound blocks the step. Reset by an accepted result
+	// and by a human continue.
+	RejectRelaunches int `json:"reject_relaunches,omitempty"`
+}
+
+// NextDispatchFresh is the StepSupervision.NextDispatch value that
+// orders a fresh conversation.
+const NextDispatchFresh = "fresh"
 
 type Attempt struct {
 	Cause          string          `json:"cause"`
@@ -203,6 +249,11 @@ type Attempt struct {
 	// AcceptedResultID is the R13 envelope result_id committed at the
 	// R14 commit point — populated only for accepted step results.
 	AcceptedResultID string `json:"accepted_result_id,omitempty"`
+	// FailureCause is the supervision sub-class of an infra_failure
+	// attempt (harness_silent, model_error, model_hung, tool_hung,
+	// step_timeout_long_task, step_timeout_slow_model, exit_model_class,
+	// exit_host_class, exit_other, driver_stalled, daemon_restart).
+	FailureCause string `json:"failure_cause,omitempty"`
 }
 
 type Budget struct {

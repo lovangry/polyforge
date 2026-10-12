@@ -34,15 +34,9 @@ package test
 //
 // Both cases run with a live mid-step driver WI (delayed envelope
 // write), mirroring the production incident shape: two driver WIs were
-// mid-flight when the daemon exited. The daemon is booted with a
-// shortened flush(shutdown) window (--shutdown-flush-wait, the
-// polyforge#110 rewind): a driver WI has no flush face, so the bounded
-// wait degrades on timeout exactly as in production — only sooner —
-// and the attribution lines (written at sequence ENTRY, before the
-// latch) are independent of the window's length. The production 60s
-// default stays untouched; the shortened window keeps this scenario's
-// runtime (two shutdowns) inside the ./test/ package's default `go
-// test` budget. On failure the test prints every shutdown-related log
+// mid-flight when the daemon exited. The attribution lines are written
+// at sequence ENTRY, before the latch. On failure the test prints every
+// shutdown-related log
 // line from both runs as the observed evidence.
 
 import (
@@ -90,7 +84,7 @@ func TestV1WI110ShutdownAttributionRepro(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
-		d := newV1Daemon(t, inst, optShutdownFlushWait(1*time.Second))
+		d := newV1Daemon(t, inst)
 		d.start()
 		d.pf(t, "submit", wi)
 		waitSpawnCount(t, d, wi, 1, 30*time.Second)

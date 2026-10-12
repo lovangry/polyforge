@@ -61,8 +61,7 @@ type parkedSpawner struct {
 
 func (s *parkedSpawner) Spawn(ctx context.Context, p runtime.SpawnParams) (runtime.AgentHandle, error) {
 	s.calls.Add(1)
-	a := &fakeAgent{ackFn: func(string) error { <-s.release; return nil }}
-	return a, nil
+	return &fakeAgent{}, nil
 }
 
 func (s *parkedSpawner) callCount() int { return int(s.calls.Load()) }
@@ -175,13 +174,12 @@ func e2eConfig(sock, ws, data, hubBase string, hub *fakeHub, sp runtime.Spawner)
 		// polyforge#106: the engine seam is bound like every other
 		// in-process test (the driver is the only engine; the fake starter
 		// scripts it through the test's spawner).
-		AgentStarter:      fakeEngineStarter(),
-		ObservePoll:       10 * time.Millisecond,
-		DrainInterval:     10 * time.Millisecond,
-		DispatchTick:      10 * time.Millisecond,
-		ShutdownFlushWait: 200 * time.Millisecond,
-		ShutdownBudget:    30 * time.Second,
-		ExitPoll:          10 * time.Millisecond,
+		AgentStarter:   fakeEngineStarter(),
+		ObservePoll:    10 * time.Millisecond,
+		DrainInterval:  10 * time.Millisecond,
+		DispatchTick:   10 * time.Millisecond,
+		ShutdownBudget: 30 * time.Second,
+		ExitPoll:       10 * time.Millisecond,
 	}
 }
 

@@ -25,7 +25,7 @@ package test
 // --api-key, --machine-id, --data-dir, --workflows-dir, --pi-bin,
 // --config) — never through the mapping-retired workspace/project
 // flags. The only `--project` bytes in this file are LIVE CLI surface
-// (queue / file create / remember / recall / batch-confirm), which the
+// (queue / file create / remember / recall), which the
 // change keeps.
 //
 // Self-policing: the retired env/flag tokens this suite polices are
@@ -257,10 +257,6 @@ func w113DOptArgs(a ...string) w113DOpt {
 	return func(d *w113Daemon) { d.extraArgs = append(d.extraArgs, a...) }
 }
 
-func w113DOptEnv(kv ...string) w113DOpt {
-	return func(d *w113Daemon) { d.extraEnv = append(d.extraEnv, kv...) }
-}
-
 // w113NewDaemon prepares (without starting) a daemon on the surviving
 // flag surface. inst may be nil for refusal paths that never reach the
 // wire (the binary cache is shared either way).
@@ -324,7 +320,7 @@ func (d *w113Daemon) boot(bound time.Duration) (served bool, output string, code
 		"--api-key", d.apiKey,
 		"--machine-id", d.machineID,
 		"--data-dir", d.dataDir,
-		"--workflows-dir", filepath.Join(d.root, "workflows"),
+		"--workflows-dir", strippedWorkflowsDir(d.t, filepath.Join(d.root, "workflows")),
 		"--pi-bin", d.fakepi,
 	}
 	if d.config != "" {
@@ -416,9 +412,12 @@ func (d *w113Daemon) crash() {
 	if d.cmd == nil || d.cmd.Process == nil {
 		d.t.Fatal("w113 crash: daemon not running")
 	}
+	// drain a push the daemon had in flight (see v1Daemon.crash)
+	gits := gitDescendants(d.cmd.Process.Pid)
 	_ = d.cmd.Process.Kill()
 	<-d.waitExit
 	d.cmd = nil
+	waitPIDsGone(gits, 10*time.Second)
 }
 
 // socketExists reports whether the UDS socket file is on disk.
@@ -762,7 +761,13 @@ func w113InstallPrep(t *testing.T) *w113InstallCtx {
 	}
 
 	// The /usr/local/bin write gate (the installer hard-codes it), with
-	// snapshot/restore of any pre-existing pf binary.
+	// snapshot/restore of any pre-existing pf binary. Opt-in only: the
+	// restore runs in t.Cleanup, so a test process killed mid-run (a
+	// -timeout panic, a stopped CI job) leaves the test build installed
+	// as the host's real pf. Never touch a host binary by default.
+	if os.Getenv("POLYFORGE_TEST_SYSTEM_INSTALL") != "1" {
+		t.Skip("installer scenarios write the host's /usr/local/bin/pf; set POLYFORGE_TEST_SYSTEM_INSTALL=1 to run them on a disposable host")
+	}
 	probe := "/usr/local/bin/.w113probe"
 	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
 		t.Skipf("installer scenarios need write access to /usr/local/bin: %v", err)
@@ -1063,49 +1068,6 @@ func TestW113DuplicateProjectInOneListRejected(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// S06/S08-env — the retired env vars are refused at daemon startup.
-// ---------------------------------------------------------------------------
-
-// TestW113DaemonRefusesRetiredEnv pins criteria #4 and #5's env half:
-// the daemon refuses to start when the retired default-project env var
-// (S06) or the retired workspace env mirror (S08) is set — before
-// loading or serving anything, naming the variable; the socket is
-// never created. The mapping in cli.toml is the only workspace source.
-func TestW113DaemonRefusesRetiredEnv(t *testing.T) {
-	ws := t.TempDir()
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		"http://127.0.0.1:1", "w113key", "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	cases := []struct {
-		name string
-		kv   string
-		tok  string
-	}{
-		{"retired default-project var", w113EnvProjectTok() + "=ieops", w113EnvProjectTok()},
-		{"retired workspace var", w113EnvWorkspaceTok() + "=" + ws, w113EnvWorkspaceTok()},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			d := w113NewDaemon(t, nil, w113DOptConfig(cfg), w113DOptEnv(c.kv))
-			served, output, code := d.boot(30 * time.Second)
-			if served {
-				d.stop()
-				t.Fatalf("daemon silently accepted the retired %s variable: it booted and served", c.tok)
-			}
-			if code != 1 {
-				t.Fatalf("daemon under %s: exit %d, want 1 (output %q)", c.tok, code, output)
-			}
-			if !strings.Contains(output, c.tok) {
-				t.Fatalf("daemon under %s exited without naming the variable (output %q)", c.tok, output)
-			}
-			if d.socketExists() {
-				t.Fatalf("daemon under %s still created its socket", c.tok)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // S07 — the retired default-project env var has no effect on the CLI.
 // ---------------------------------------------------------------------------
 
@@ -1325,7 +1287,7 @@ func TestW113DaemonValidatesAllMappedWorkspaces(t *testing.T) {
 // `e2e` and workspace B mapping `ieops`, claims land the capsules at
 // A/capsules/<wi> and B/capsules/<wi>, each workspace's top level
 // holds only capsules/, `pf ops status` names BOTH workspaces, and the
-// WI-anchored `pf observe` works with no project anywhere (unchanged
+// WI-anchored `pf watch --once` works with no project anywhere (unchanged
 // face).
 func TestW113CrossProjectClaimsRoutePerWorkspace(t *testing.T) {
 	inst := newV1Install(t)
@@ -1379,17 +1341,16 @@ func TestW113CrossProjectClaimsRoutePerWorkspace(t *testing.T) {
 		}
 	}
 
-	// WI-anchored verbs need no project: observe works exactly as
+	// WI-anchored verbs need no project: watch --once works exactly as
 	// before, deriving the project from the WI via the hub.
-	d.pfWant(inst, -1, "observe", wiA)
+	d.pfWant(inst, -1, "watch", wiA, "--once")
 }
 
 // ---------------------------------------------------------------------------
 // S13 — unmapped project claim refused loudly, before any side effect.
 // ---------------------------------------------------------------------------
 
-// TestW113UnmappedProjectClaimRefused pins criterion #10: a claim (or
-// takeover) for a work item whose project exists on aihub but is NOT in
+// TestW113UnmappedProjectClaimRefused pins criterion #10: a claim for a work item whose project exists on aihub but is NOT in
 // the machine's mapping is rejected with an error naming the project
 // and pointing at the mapping / `pf doctor`, BEFORE any capsule is
 // created and before the aihub-side claim state changes.
@@ -1411,7 +1372,6 @@ func TestW113UnmappedProjectClaimRefused(t *testing.T) {
 	before := inst.wiStatus(t, wi)
 	for _, argv := range [][]string{
 		{"submit", wi},
-		{"submit", wi, "--takeover"},
 	} {
 		out, code := d.pf(inst, argv...)
 		if code != 1 {
@@ -1778,81 +1738,11 @@ func TestW113QueueNoMappingFailsLoudly(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// S22 — batch-confirm: all-mapped default, --project scoping validated.
-// ---------------------------------------------------------------------------
-
-// TestW113BatchConfirmAllMappedAndScoped pins criterion #17: without a
-// domain the scheduler recommendation covers both mapped projects'
-// ready queues, merged; `--project P` scopes to P (validated against
-// the mapping — unmapped fails with guidance).
-func TestW113BatchConfirmAllMappedAndScoped(t *testing.T) {
-	inst := newV1Install(t)
-	w113EnsureProject(t, inst, "ieops")
-	wsA := filepath.Join(t.TempDir(), "w113wsA")
-	wsB := filepath.Join(t.TempDir(), "w113wsB")
-	for _, ws := range []string{wsA, wsB} {
-		if err := os.MkdirAll(ws, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{
-			{key: wsA, projects: []string{"e2e"}},
-			{key: wsB, projects: []string{"ieops"}},
-		})
-	goalA := "w113 batch-confirm ready alpha"
-	goalB := "w113 batch-confirm ready beta"
-	w113NewWI(t, inst, "e2e", goalA, envelopeQuickFix())
-	w113NewWI(t, inst, "ieops", goalB, envelopeQuickFix())
-
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
-
-	// No domain: the recommendation covers BOTH projects' ready queues,
-	// merged.
-	out := d.pfWant(inst, -1, "batch-confirm")
-	if !strings.Contains(out, "2 recommended") {
-		t.Fatalf("pf batch-confirm (all mapped): expected the merged recommendation of 2, output %q", out)
-	}
-	for _, tok := range []string{goalA, goalB} {
-		if !strings.Contains(out, tok) {
-			t.Fatalf("pf batch-confirm (all mapped): the merged recommendation misses %q (output %q)", tok, out)
-		}
-	}
-
-	// Scoped to one mapped project: only that project's ready queue.
-	scoped := d.pfWant(inst, -1, "batch-confirm", "--project", "e2e")
-	if !strings.Contains(scoped, "1 recommended") {
-		t.Fatalf("pf batch-confirm --project e2e: expected exactly 1 recommended, output %q", scoped)
-	}
-	if !strings.Contains(scoped, goalA) {
-		t.Fatalf("pf batch-confirm --project e2e: the scoped recommendation misses e2e's item (output %q)", scoped)
-	}
-	if strings.Contains(scoped, goalB) {
-		t.Fatalf("pf batch-confirm --project e2e: the scoped recommendation leaks ieops's item (output %q)", scoped)
-	}
-
-	// Unmapped scope: fails with a naming error and guidance.
-	out3, code3 := d.pf(inst, "batch-confirm", "--project", "ghostproj")
-	if code3 != 1 {
-		t.Fatalf("pf batch-confirm --project ghostproj: exit %d, want 1 (output %q)", code3, out3)
-	}
-	if !strings.Contains(out3, "ghostproj") {
-		t.Fatalf("pf batch-confirm --project ghostproj: error does not name the project (output %q)", out3)
-	}
-	if !strings.Contains(out3, "[workspace") && !strings.Contains(out3, "doctor") && !strings.Contains(out3, "mapping") {
-		t.Fatalf("pf batch-confirm --project ghostproj: error does not point at the mapping (output %q)", out3)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// S23 — daemon drain iterates all mapped projects.
+// S23 — the auto-pull iterates all mapped projects.
 // ---------------------------------------------------------------------------
 
 // TestW113DrainIteratesAllMappedProjects pins criterion #17's daemon
-// half: a daemon in drain mode fetches the ready queue and iterates ALL
+// half: a daemon with auto on fetches the ready queue and iterates ALL
 // mapped projects — no daemon-level project scope exists anymore.
 func TestW113DrainIteratesAllMappedProjects(t *testing.T) {
 	inst := newV1Install(t)
@@ -1873,7 +1763,7 @@ func TestW113DrainIteratesAllMappedProjects(t *testing.T) {
 	wiA := w113NewWI(t, inst, "e2e", "w113 drain across workspaces alpha", envelopeQuickFix())
 	wiB := w113NewWI(t, inst, "ieops", "w113 drain across workspaces beta", envelopeQuickFix())
 
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptArgs("--mode", "drain"))
+	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptArgs("--auto"))
 	d.start()
 	defer d.stop()
 
@@ -1903,18 +1793,6 @@ func TestW113DoctorHealthyMachine(t *testing.T) {
 	d := w113NewDaemon(t, inst, w113DOptConfig(cfgPath))
 	w113ConfigFile(t, cfgPath, inst.url, inst.adminKey, d.sock,
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	// The healthy machine of the watch lane (wi_LMSxPTQTtz5x) also
-	// covers the per-harness summarize-model entries: a reachable
-	// harness without a non-empty watch.summarize_model entry now fails
-	// the doctor's health report, so the healthy fixture covers both.
-	cfgRaw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	covered := string(cfgRaw) + "\n[watch.summarize_model.pi]\nmodel = \"prov/pi\"\n\n[watch.summarize_model.claude]\nmodel = \"prov/claude\"\n"
-	if err := os.WriteFile(cfgPath, []byte(covered), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	d.start()
 	defer d.stop()
 
@@ -2349,7 +2227,7 @@ func TestW113DesignDocsTeachMappingContract(t *testing.T) {
 
 // TestW113SkillsTeachMappingContract pins criterion #26's automated
 // floor: SKILL.md's config-contract section and the file, queue,
-// remember, recall and batch-confirm fragments all teach the
+// remember and recall fragments all teach the
 // `[workspace` mapping shape. (The teaching-quality judgment is the
 // manual document-only review in artifacts/e2e-scenarios.md.)
 func TestW113SkillsTeachMappingContract(t *testing.T) {
@@ -2360,7 +2238,6 @@ func TestW113SkillsTeachMappingContract(t *testing.T) {
 		filepath.Join(root, "skills", "polyforge", "verbs", "queue.md"),
 		filepath.Join(root, "skills", "polyforge", "verbs", "remember.md"),
 		filepath.Join(root, "skills", "polyforge", "verbs", "recall.md"),
-		filepath.Join(root, "skills", "polyforge", "verbs", "batch-confirm.md"),
 	}
 	for _, f := range files {
 		raw, err := os.ReadFile(f)

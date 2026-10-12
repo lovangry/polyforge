@@ -3,7 +3,7 @@ name: feature-full
 steps:
   - { id: grill, context_policy: fresh, handoff: true, kind: qa, interactive: true, budget: { wall_minutes: 30 } }
   - { id: spec, context_policy: inherit, handoff: true, kind: spec, budget: { wall_minutes: 15 } }
-  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, interactive: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { action: rewind, target: spec } }
+  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, interactive: true, requires_human_answer: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { action: rewind, target: spec } }
   - { id: plan, context_policy: inherit, handoff: true, kind: author, budget: { wall_minutes: 15 } }
   - { id: e2e-author, context_policy: fresh, handoff: true, kind: author, budget: { wall_minutes: 15 } }
   - { id: e2e-baseline, context_policy: fresh, handoff: true, kind: code, gate: false, budget: { wall_minutes: 20 } }
@@ -19,7 +19,7 @@ defaults:
 
 # feature-full — reference flow
 
-This is the flow-level narrative the WI Agent loads at step 0. It explains how the
+This is the flow-level narrative for the workflow. It explains how the
 eleven steps compose and what flows between them; it is not itself a structural
 schema — the frontmatter `steps` array above is the *only* execution order
 (`01-workflow-skills.md` §4.1 rule V3). Nothing here overrides it.

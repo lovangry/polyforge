@@ -1,7 +1,7 @@
 // Package server is the v1 AIHub HTTP face: the business endpoints
 // (v0 openapi surface minus every SYNC-*/revision-chain route), the
 // admin face, the v1.5 session endpoints (claim/session-verify/
-// session-attach/force-takeover/session-end), and the /git/{wi}.git/...
+// session-attach/force-end-session/session-end), and the /git/{wi}.git/...
 // proxy mount. Every error is the typed common/api errStatus envelope;
 // auth is the Bearer API key.
 package server
@@ -74,16 +74,18 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-verify", s.auth(s.hSessionVerify))
 	m.HandleFunc("GET /api/v1/work-items/{id}/session", s.auth(s.hSessionHolder))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-attach", s.auth(s.hSessionAttach))
-	m.HandleFunc("POST /api/v1/work-items/{id}/force-takeover", s.auth(s.hForceTakeover))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-end", s.auth(s.hSessionEnd))
-	// Finding 3 (v1.5 review): the blocked state's exit door — the human
-	// unblock that returns a bounded-fail verdict to the queued pool.
-	m.HandleFunc("POST /api/v1/work-items/{id}/unblock", s.auth(s.hUnblockWI))
+	// Recovery door: an admin/maintainer force-ends a stuck holder's session
+	// (WI -> queued); any daemon then claims it normally.
+	m.HandleFunc("POST /api/v1/work-items/{id}/force-end-session", s.auth(s.hForceEndSession))
 	// polyforge#116: the §6.4 owner doors on a workflow parked blocked —
 	// resume (the owner's re-dispatch-in-place verdict, claimed back
 	// immediately) and the terminate verdict (pf wrap --fail on a parked WI).
 	m.HandleFunc("POST /api/v1/work-items/{id}/resume-blocked", s.auth(s.hResumeBlockedWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/terminate-blocked", s.auth(s.hTerminateBlockedWI))
+	// The read-only authorization probe of the abandon-a-repair-pending-WI
+	// door (the daemon ends the session; the human is checked here first).
+	m.HandleFunc("GET /api/v1/work-items/{id}/close-auth", s.auth(s.hCloseAuthWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
 	m.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.auth(s.hDeps))
 	// Ship ledger (polyforge#123, P1b): the ship bridge records each
@@ -119,7 +121,6 @@ func (s *Server) routes() {
 	m.HandleFunc("PATCH /api/v1/projects/{id}", s.auth(s.hPatchProject))
 	m.HandleFunc("POST /api/v1/projects/{id}/rotate-identifier", s.authAdmin(s.hRotateIdentifier))
 	m.HandleFunc("POST /api/v1/admin/backup", s.authAdmin(s.hBackup))
-	m.HandleFunc("POST /api/v1/admin/import-work-item", s.authAdmin(s.hImportWorkItem))
 	m.HandleFunc("POST /api/v1/service/rotate-secret", s.authAdmin(s.hRotateSecret))
 
 	// Git proxy (own auth: session-scoped Basic credential).
@@ -460,6 +461,22 @@ func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request, idn *identity)
 	s.writeWI(w, http.StatusOK, wi)
 }
 
+// ownerMaintainerOrAdmin is the one authorization of the human decisions on
+// a work item — cancel (abandon) and the blocked exits (continue /
+// terminate; v2-converge §7, §11 item 7): the WI's reporter (the task
+// owner), a project maintainer, or a global admin.
+func (s *Server) ownerMaintainerOrAdmin(idn *identity, projectID, wiID string) bool {
+	if idn.Role == "admin" {
+		return true
+	}
+	var reporter string
+	if err := s.DB.QueryRow(`SELECT reporter FROM work_items WHERE id=?1`, wiID).Scan(&reporter); err == nil && reporter == idn.UserID {
+		return true
+	}
+	role, err := s.memberRole(projectID, idn.UserID)
+	return err == nil && role == "maintainer"
+}
+
 func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -467,18 +484,7 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 		return
 	}
 	// Cancel authorization: reporter, project maintainer, or admin (02 §6.5).
-	allowed := idn.Role == "admin"
-	if !allowed {
-		var reporter string
-		if rerr := s.DB.QueryRow(`SELECT reporter FROM work_items WHERE id=?1`, id).Scan(&reporter); rerr == nil {
-			allowed = reporter == idn.UserID
-		}
-		role, merr := s.memberRole(projectID, idn.UserID)
-		if merr == nil && role == "maintainer" {
-			allowed = true
-		}
-	}
-	if !allowed {
+	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
 		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "cancel requires reporter, maintainer or admin"))
 		return
 	}
@@ -589,10 +595,10 @@ func (s *Server) hShipLedger(w http.ResponseWriter, r *http.Request, idn *identi
 
 // ---------------------------------------------------------------------------
 // v1.5 session endpoints (contract §1). The claim path is the machine
-// execution surface (any valid key, scope-checked); force-takeover keeps
-// the v1 human decision gate (admin or project maintainer).
+// execution surface (any valid key, scope-checked); force-end-session keeps
+// the human decision gate (admin or project maintainer).
 
-// sessionClaimEnvelope is the claim/attach/takeover response: the SAME
+// sessionClaimEnvelope is the claim/attach response: the SAME
 // shape as api.SessionClaimResponse (which cannot gain fields — Phase 0
 // owns it), with the work item served as the m4 audit view so its JSON
 // carries the public session block.
@@ -676,7 +682,7 @@ func (s *Server) hSessionVerify(w http.ResponseWriter, r *http.Request, idn *ide
 // hSessionHolder serves the §1.7 public holder read: who holds this
 // WI right now, in PUBLIC fields only. It deliberately uses the WI
 // read gate (wiProject + requireRead), not scopeCheck — any project
-// viewer may ask (the operator's takeover-decision input); non-members
+// viewer may ask (the operator's recovery-decision input); non-members
 // get the standard hidden-not-found answer. All three holder states
 // (unheld / held-paused / held-running) are ordinary 200 answers;
 // the hash and secret never appear in any response.
@@ -718,11 +724,10 @@ func (s *Server) hSessionAttach(w http.ResponseWriter, r *http.Request, idn *ide
 	s.sessionClaimResponse(w, id, claim, err)
 }
 
-// hForceTakeover serves the atomic session swap. Takeover is a
-// privileged operation: admin or project maintainer (the v1 human
-// decision gate, kept for v1.5) — plus the #109 machine self-takeover
-// admission (see takeoverAdmitted).
-func (s *Server) hForceTakeover(w http.ResponseWriter, r *http.Request, idn *identity) {
+// hForceEndSession serves the admin/maintainer force-end of a held session
+// (WI -> queued, session cleared, the old secret fenced). Authorization is
+// admin or project maintainer: the human recovery decision.
+func (s *Server) hForceEndSession(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
@@ -732,70 +737,39 @@ func (s *Server) hForceTakeover(w http.ResponseWriter, r *http.Request, idn *ide
 		writeErr(w, err)
 		return
 	}
-	// The request is decoded BEFORE the gate: the machine admission reads
-	// the requested machine identity from it.
-	var req api.SessionClaimRequest
+	if !s.adminOrMaintainer(idn, projectID) {
+		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "end-session requires admin or project maintainer"))
+		return
+	}
+	var req api.ForceEndSessionRequest
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
 	}
-	if !s.takeoverAdmitted(idn, projectID, req) {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "",
-			"force-takeover requires admin or project maintainer (a machine-credential caller may take over only onto its own machine)"))
+	if err := s.Sessions.ForceEnd(id, req.Reason, idn.UserID); err != nil {
+		writeErr(w, err)
 		return
 	}
-	req.WorkItemID = id
-	claim, err := s.Sessions.Takeover(id, req, idn.UserID)
-	s.sessionClaimResponse(w, id, claim, err)
+	wi, err := s.WIs.Get(id, core.GetOptions{})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, err := s.WIs.View(wi)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
-// takeoverAdmitted is the force-takeover authorization gate (#109).
-// Three admissions:
-//
-//   - global admin — the v1 human decision gate, unchanged;
-//   - project maintainer — the human decision gate's project face, unchanged;
-//   - a MACHINE-credential caller (kind='machine', the daemon's own
-//     registration shape) with project membership taking over ONTO
-//     ITSELF: machine_id in the request must be the machine identity the
-//     caller's credential represents. This is the executor's self-service
-//     recovery (`pf submit <id> --takeover` fencing a dead or foreign
-//     holder) — the same power a plain claim on a queued WI already
-//     grants a project writer, scoped so a machine can never hand a
-//     foreign work item to a third identity. Humans keep the v1 gate:
-//     a non-admin, non-maintainer human is refused exactly as before.
-func (s *Server) takeoverAdmitted(idn *identity, projectID string, req api.SessionClaimRequest) bool {
+// adminOrMaintainer is the human recovery gate (no reporter admission).
+func (s *Server) adminOrMaintainer(idn *identity, projectID string) bool {
 	if idn.Role == "admin" {
 		return true
 	}
 	role, err := s.memberRole(projectID, idn.UserID)
-	if err != nil {
-		return false
-	}
-	if role == "maintainer" {
-		return true
-	}
-	if idn.Kind != "machine" || role != "writer" {
-		return false
-	}
-	if strings.TrimSpace(req.MachineID) == "" {
-		return false
-	}
-	machine, err := s.machineIDOfUser(idn.UserID)
-	if err != nil || machine == "" || machine != req.MachineID {
-		return false
-	}
-	return true
-}
-
-// machineIDOfUser resolves the machine identity a machine user
-// represents ("" when the user has no machines row).
-func (s *Server) machineIDOfUser(userID string) (string, error) {
-	var id string
-	err := s.DB.QueryRow(`SELECT id FROM machines WHERE user_id=?1`, userID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return id, err
+	return err == nil && role == "maintainer"
 }
 
 // hSessionEnd serves the session-fenced terminal verdict (wrapped|
@@ -834,48 +808,11 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 	writeJSON(w, http.StatusOK, view)
 }
 
-// hUnblockWI serves the blocked exit door (v1.5 review Finding 3):
-// status blocked → queued, waiting_on cleared, event wi_unblocked. The
-// authorization mirrors force-takeover — a human decision gate, admin
-// or project maintainer — because unblock overrides what the runtime
-// judged a terminal-enough verdict to stop work for.
-func (s *Server) hUnblockWI(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if idn.Role != "admin" {
-		role, merr := s.memberRole(projectID, idn.UserID)
-		if merr != nil || role != "maintainer" {
-			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "unblock requires admin or project maintainer"))
-			return
-		}
-	}
-	wi, err := s.WIs.Unblock(id, idn.UserID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
-}
-
 // hResumeBlockedWI serves the §6.4 owner resume verdict's hub door
 // (polyforge#116): the door `pf resume` exercises on a workflow parked
-// blocked on an honest incomplete result. Authorization is the CLAIM
-// gate's (any project member), NOT the unblock gate's admin/maintainer:
-// this door exercises the right the blocked verdict itself grants ("the
-// owner holds the next move") rather than overriding it — the
-// pool-return override stays admin-gated on Unblock.
+// blocked on an honest incomplete result. Authorization (v2-converge §7):
+// the WI's reporter, a project maintainer, or an admin — the same gate as
+// terminate-blocked and cancel.
 func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -884,6 +821,10 @@ func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *i
 	}
 	if err := scopeCheck(idn, projectID); err != nil {
 		writeErr(w, err)
+		return
+	}
+	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
+		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "resume-blocked requires the work item's reporter, a project maintainer or admin"))
 		return
 	}
 	wi, err := s.WIs.ResumeBlocked(id, idn.UserID)
@@ -900,9 +841,8 @@ func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *i
 }
 
 // hTerminateBlockedWI serves the §6.4 owner terminate verdict's hub door
-// (polyforge#116): `pf wrap --fail` on a parked workflow. Authorization
-// mirrors Unblock — admin or project maintainer: landing a terminal
-// verdict overrides what the runtime judged a wait-on-owner state.
+// (polyforge#116): `pf wrap --fail` on a parked workflow. Authorization is
+// the unified blocked-exit gate: reporter, project maintainer, or admin.
 func (s *Server) hTerminateBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -913,12 +853,9 @@ func (s *Server) hTerminateBlockedWI(w http.ResponseWriter, r *http.Request, idn
 		writeErr(w, err)
 		return
 	}
-	if idn.Role != "admin" {
-		role, merr := s.memberRole(projectID, idn.UserID)
-		if merr != nil || role != "maintainer" {
-			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "terminate-blocked requires admin or project maintainer"))
-			return
-		}
+	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
+		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "terminate-blocked requires the work item's reporter, a project maintainer or admin"))
+		return
 	}
 	wi, err := s.WIs.TerminateBlocked(id, idn.UserID)
 	if err != nil {
@@ -931,6 +868,29 @@ func (s *Server) hTerminateBlockedWI(w http.ResponseWriter, r *http.Request, idn
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// hCloseAuthWI serves GET /api/v1/work-items/{id}/close-auth: a read-only
+// probe of the human close authorization (reporter, project maintainer or
+// admin — the same gate as cancel and the blocked exits). It mutates
+// nothing. The CLI runs it with the human's own key before asking the local
+// daemon to abandon a repair_pending WI, whose session only the daemon can
+// end (the hub's cancel refuses a running WI).
+func (s *Server) hCloseAuthWI(w http.ResponseWriter, r *http.Request, idn *identity) {
+	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := scopeCheck(idn, projectID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
+		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "closing a work item requires its reporter, a project maintainer or admin"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"authorized": true, "work_item_id": id})
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,7 +1063,7 @@ func (s *Server) machinesStaleAfter() time.Duration {
 // machineStatus is one machines read-face row: the stored liveness
 // projection plus the server-computed stale boolean and age. An
 // unparseable last_heartbeat_at reports stale=false with no age —
-// "cannot judge" is not "dead" (gate-metrics reports it the same way).
+// "cannot judge" is not "dead".
 type machineStatus struct {
 	ID                  string   `json:"id"`
 	UserID              string   `json:"user_id"`
@@ -1457,25 +1417,6 @@ func firstRunes(s string, n int) string {
 }
 
 func (s *Server) hRebuildIndex(w http.ResponseWriter, r *http.Request, idn *identity) {
-	// ?project=<id-or-name> scopes the reconcile to one project (seq-fix
-	// lane 3a/3c): the rebuild touches only that project's authority tree
-	// and answers its reindexed count — the migrate-memories path pairs
-	// the scope with the placed tree its count step compares against.
-	// Absent: the full rebuild (server boot reconcile semantics).
-	if project := r.URL.Query().Get("project"); project != "" {
-		projectID, err := s.projectIDOf(project)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		n, err := s.Mems.RebuildIndexProject(projectID)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"reindexed": n, "project": projectID})
-		return
-	}
 	n, err := s.Mems.RebuildIndex()
 	if err != nil {
 		writeErr(w, err)
@@ -1516,32 +1457,18 @@ func (s *Server) hListUsers(w http.ResponseWriter, r *http.Request, idn *identit
 }
 
 func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request, idn *identity) {
-	// The scope field is accepted under BOTH wire names (#11): the CLI
-	// sends project_id, older callers sent project_scope. Both present and
-	// disagreeing is a 400; either one alone works.
 	var req struct {
-		UserID       string  `json:"user_id"`
-		Name         string  `json:"name"`
-		ProjectID    *string `json:"project_id,omitempty"`
-		ProjectScope *string `json:"project_scope,omitempty"`
+		UserID    string  `json:"user_id"`
+		Name      string  `json:"name"`
+		ProjectID *string `json:"project_id,omitempty"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
 	}
 	scope := ""
-	switch {
-	case req.ProjectID != nil && req.ProjectScope != nil:
-		if *req.ProjectID != *req.ProjectScope {
-			writeErr(w, core.Fail(api.ErrCoreBadInput, "",
-				"project_id and project_scope both present but disagree"))
-			return
-		}
+	if req.ProjectID != nil {
 		scope = *req.ProjectID
-	case req.ProjectID != nil:
-		scope = *req.ProjectID
-	case req.ProjectScope != nil:
-		scope = *req.ProjectScope
 	}
 	key, err := s.Admin.CreateAPIKey(req.UserID, req.Name, scope)
 	if err != nil {
@@ -1675,33 +1602,6 @@ func (s *Server) hBackup(w http.ResponseWriter, r *http.Request, idn *identity) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"backup": name})
-}
-
-// hImportWorkItem is the migration-only record import (admin face; see
-// core/import.go for the face constraints). A same-id re-import answers
-// 200 with outcome=skipped-existing — idempotent re-runs count skips, they
-// do not error. With overwrite:true a same-id record is rewritten in
-// place and the answer carries outcome=overwritten.
-func (s *Server) hImportWorkItem(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req core.ImportRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	res, err := s.WIs.Import(req)
-	if err != nil {
-		if core.IsImportAlreadyExists(err) {
-			writeJSON(w, http.StatusOK, &core.ImportResult{Outcome: core.ImportSkipped})
-			return
-		}
-		writeErr(w, err)
-		return
-	}
-	if res.Outcome == core.ImportOverwritten {
-		writeJSON(w, http.StatusOK, res) // a rewrite, not a creation
-		return
-	}
-	writeJSON(w, http.StatusCreated, res)
 }
 
 func (s *Server) hRotateSecret(w http.ResponseWriter, r *http.Request, idn *identity) {

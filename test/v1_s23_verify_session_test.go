@@ -1,13 +1,12 @@
 package test
 
 // v1_s23_verify_session_test.go: the v1.5 §1.7 public holder read face —
-// GET /api/v1/work-items/{id}/session plus the `pf verify-session <wi>`
-// operator verb — end to end over the REAL aihub binary and the REAL pf
+// GET /api/v1/work-items/{id}/session — end to end over the REAL aihub binary and the REAL pf
 // CLI. The spec's contract under test:
 //
 //   - the tri-state (unheld / held-paused / held-running) is three
 //     ORDINARY HTTP 200 answers — an existing-but-unheld work item is
-//     never a 404/409, so a takeover-decision script needs no error
+//     never a 404/409, so a recovery-decision script needs no error
 //     handling to tell "free" from "taken";
 //   - the response carries only the public audit fields (the m4
 //     SessionPublic set: fingerprint, machine, owner, started_at,
@@ -16,9 +15,6 @@ package test
 //   - authorization is the same read gate as GET /work-items/{id}
 //     (requireRead after wiProject): a project VIEWER member reads, a
 //     non-member stays hidden behind the ordinary WI-read refusal;
-//   - the CLI verb exits 0 in all three tri-states, reports the holder
-//     values (text) and the endpoint JSON (--json), and never carries
-//     the session secret;
 //   - the frozen §1.2 compare-only session-verify answers exactly as
 //     before, and the contract doc carries the new §1.7.
 //
@@ -374,79 +370,6 @@ func TestV1S23SessionHolderRead(t *testing.T) {
 	}
 	if mismatch.Matches || mismatch.CurrentFingerprint != api.SessionFingerprint(secretV) {
 		t.Fatalf("1.2 verify mismatch wrong: %+v (%s)", mismatch, raw)
-	}
-}
-
-// TestV1S23VerifySessionVerb drives the `pf verify-session <wi>` operator
-// verb (the real CLI binary, direct to the aihub — no daemon involved)
-// across the whole tri-state: held/running, held/paused and unheld each
-// exit 0 (the harness's pf enforces the exit code), the text rendering
-// reports the holder's public values, --json emits the endpoint's JSON,
-// and no output ever carries the session secret.
-func TestV1S23VerifySessionVerb(t *testing.T) {
-	inst := newV1Install(t)
-	wiHeld := inst.newWI(t, "s23: verify-session verb on a held WI", nil, nil)
-	wiFree := inst.newWI(t, "s23: verify-session verb on an unheld WI", nil, nil)
-	secret := "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
-	s23Claim(t, inst, wiHeld, secret, "m-e2e-verb", "s23-op2")
-
-	// Held/running, text: exit 0 (enforced by pf), the holder's public
-	// values on stdout — and never the secret.
-	out := inst.pf(t, "verify-session", wiHeld)
-	for _, want := range []string{
-		api.SessionFingerprint(secret), "m-e2e-verb", "s23-op2", "running",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("held/running text verb lost %q: %q", want, out)
-		}
-	}
-	if strings.Contains(out, secret) {
-		t.Fatalf("held/running text verb leaks the secret: %q", out)
-	}
-
-	// Held/running, --json: the endpoint's own JSON (compared field by
-	// field against a raw wire read of the endpoint). --json is the
-	// GLOBAL prefix flag, per the CLI's parseCommandArgs convention.
-	jout := inst.pf(t, "--json", "verify-session", wiHeld)
-	_, wire := s23HTTP(t, "GET",
-		inst.url+"/api/v1/work-items/"+wiHeld+"/session", inst.adminKey, nil)
-	if hj, hw := s23DecodeHolder(t, jout), s23DecodeHolder(t, wire); hj != hw {
-		t.Fatalf("--json verb != endpoint JSON: verb %+v, wire %+v (%s)", hj, hw, jout)
-	}
-	if strings.Contains(jout, secret) {
-		t.Fatalf("--json verb leaks the secret: %q", jout)
-	}
-
-	// Held/paused: the second tri-state — still exit 0, still the holder
-	// (the retained row plus clean_pause), in text and --json.
-	if err := inst.client.SessionEnd(wiHeld, api.SessionEndRequest{
-		SessionID: secret, Status: "paused", CleanPause: true,
-	}); err != nil {
-		t.Fatalf("pause %s: %v", wiHeld, err)
-	}
-	out = inst.pf(t, "verify-session", wiHeld)
-	if !strings.Contains(out, "paused") || !strings.Contains(out, api.SessionFingerprint(secret)) {
-		t.Fatalf("held/paused text verb wrong: %q", out)
-	}
-	jout = inst.pf(t, "--json", "verify-session", wiHeld)
-	h := s23DecodeHolder(t, jout)
-	if h.Status != "paused" || !h.Held || !h.CleanPause ||
-		h.Fingerprint != api.SessionFingerprint(secret) {
-		t.Fatalf("held/paused --json verb wrong: %+v (%s)", h, jout)
-	}
-
-	// Unheld/queued: the verb treats it as an ordinary answer — exit 0
-	// in both text and --json (a takeover-decision script needs no error
-	// handling), and the JSON shows the unheld state.
-	out = inst.pf(t, "verify-session", wiFree)
-	if !strings.Contains(out, wiFree) || !strings.Contains(out, "queued") {
-		t.Fatalf("unheld text verb wrong: %q", out)
-	}
-	jout = inst.pf(t, "--json", "verify-session", wiFree)
-	h = s23DecodeHolder(t, jout)
-	if h.WorkItemID != wiFree || h.Status != "queued" || h.Held || h.CleanPause ||
-		h.MachineID != "" || h.Owner != "" || h.StartedAt != "" {
-		t.Fatalf("unheld --json verb wrong: %+v (%s)", h, jout)
 	}
 }
 

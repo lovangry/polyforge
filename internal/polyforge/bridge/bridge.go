@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/driver"
 	rt "github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // Handle implements rt.AgentHandle over a running Driver.Run.
@@ -75,60 +75,6 @@ func (h *Handle) Terminate(bound time.Duration) error {
 		return fmt.Errorf("bridge: driver did not exit within %s", bound)
 	}
 }
-func (h *Handle) SendControl(m protocol.ControlMsg) error {
-	// Probe semantics for the driver bridge (the #99 verification
-	// lesson): the driver engine has no stdio control channel, so the
-	// old answer — always-fail — turned every watchdog probe into a
-	// false recovery. The supervised liveness of a driver WI IS the
-	// driver goroutine itself: a probe arriving while Run is live is
-	// acknowledged (the engine is working — the step process's long
-	// tool calls legitimately stay record-silent for the whole
-	// HangWindow); a probe on a dead driver fails and recovery owns it
-	// (onExit reaches the same verdict without the probe anyway).
-	//
-	// polyforge#114 — the ack's SUBJECT, stated as a warning: this
-	// verdict is DRIVER-alive (the daemon-side driver goroutine), not
-	// step-process liveness and never step progress. A wedged step
-	// process (open turn, no envelope, no exit) blocks stepRun.Wait
-	// forever, so doneSet stays false and this branch acks the wedge
-	// indefinitely; routing the probe down the step process's own stdio
-	// channel does not help either — the wedged process's stdin reader
-	// answers while its work goroutine sits parked (the transport echo
-	// 04-local-runtime.md §6.2a warns about; reproduced in
-	// wi_u0xTEIz0gxi4 experiment E). An ack from here therefore carries
-	// NO information about the subject whose silence armed the hang
-	// criterion, and the observer must not treat it as unconditional
-	// proof of life: the monitor judges progress on its own record-stream
-	// witness (StreamHeartbeat.LastProgressAt, which no ack moves) and
-	// bounds it with the wall backstop (observe's checkWallBackstop,
-	// --wall-window). This branch stays as-is: within the wall bound an
-	// ack is the only thing keeping a legitimately slow, record-silent
-	// step alive (the pre-#99 false-positive it exists to prevent);
-	// past the bound the monitor stops believing it.
-	if m.Method == protocol.ControlProbe {
-		h.mu.Lock()
-		alive := !h.doneSet
-		h.mu.Unlock()
-		if alive {
-			return nil
-		}
-		return fmt.Errorf("bridge: driver not running")
-	}
-	return fmt.Errorf("bridge: control messages not supported on driver handle")
-}
-
-func (h *Handle) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error {
-	if m.Method == protocol.ControlProbe {
-		// the SendControl probe verdict above IS the ack: an accepted
-		// probe was answered synchronously (the engine is live); there is
-		// no asynchronous ack to wait for. See the #114 subject warning on
-		// SendControl: this ack is driver-alive, never step progress —
-		// the observer's wall backstop owns the verdict past the absolute
-		// bound.
-		return h.SendControl(m)
-	}
-	return fmt.Errorf("bridge: no control ack channel on driver handle")
-}
 
 // Config carries what the bridge needs from the runtime's job.
 type Config struct {
@@ -148,6 +94,16 @@ type Config struct {
 	// start is a re-derivation ("" on a fresh claim). Operator-shaped
 	// causes archive nothing — a deliberate stop is not a model verdict.
 	InterruptedCause string
+	// Log receives the driver's events (the daemon's durable per-WI
+	// event log); nil = driver events go to stderr only.
+	Log driver.EventLogger
+	// Link is the WI's supervision link (facts out, verdicts in, harness
+	// tracker); nil = unsupervised.
+	Link *supervise.Link
+	// Limits are the global supervision defaults (X, Y, T).
+	Limits supervise.Defaults
+	// Harness names the step harness ("" = pi).
+	Harness string
 }
 
 // interruptedFromCause maps the recovery lane's cause onto the driver's
@@ -155,8 +111,9 @@ type Config struct {
 // fault table, and an OPERATOR-classified cause archives NOTHING (an
 // interruption is a stop, not a model verdict — the
 // attach-after-graceful-shutdown resume keeps today's no-advance
-// behavior). Everything else defaults provider-class, exactly the
-// bounded side of the policy.
+// behavior). Everything else is archived with its class — and an
+// unclassified cause (a daemon restart, a driver relaunch) carries NO
+// class and so never advances the candidate pointer (v2-converge 2.3).
 func interruptedFromCause(cause string) *driver.InterruptedDispatch {
 	if cause == "" {
 		return nil
@@ -185,6 +142,8 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 	adapter, err := driver.NewStepSpawnAdapter(driver.StepSpawnAdapter{
 		WI:      wiInfo,
 		Spawner: cfg.Spawner,
+		Link:    cfg.Link,
+		Harness: cfg.Harness,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bridge: adapter: %w", err)
@@ -205,11 +164,21 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 		return nil, fmt.Errorf("bridge: spawn journal unreadable: %w", err)
 	}
 
+	if cfg.Link != nil {
+		cfg.Link.Reset() // a new driver epoch: no fence or verdict of a predecessor may leak in
+	}
+	logger := cfg.Log
+	if logger == nil {
+		logger = &stdLogger{}
+	}
 	drv, err := driver.New(driver.Config{
 		WI:             wiInfo,
 		Spawner:        adapter,
 		SpawnN:         stepSeed,
-		Log:            &stdLogger{},
+		Log:            logger,
+		Link:           cfg.Link,
+		Limits:         cfg.Limits,
+		Harness:        cfg.Harness,
 		StepCandidates: cfg.StepCandidates,
 		Interrupted:    interruptedFromCause(cfg.InterruptedCause),
 	})

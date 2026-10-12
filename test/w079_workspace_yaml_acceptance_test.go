@@ -638,12 +638,15 @@ func TestW079FixYamlAndReclaimIsClean(t *testing.T) {
 	// The operator fixes the yaml; the WI is re-claimed.
 	w079Yaml(t, ws, "projects:\n  e2e:\n    repos:\n      - name: w79src\n        path: .repo/w79src\nworkflow_defaults:\n  model_candidates: [w079-reclaimed]\n")
 	if status := inst.wiStatus(t, wi); status == "blocked" {
-		if out := d.pfWant(inst, -1, "unblock", wi); !strings.Contains(out, "unblocked") {
-			t.Fatalf("unblock answer: %q", out)
+		// continue = `pf resume` (the blocked door: hub resume-blocked +
+		// the daemon's synchronous re-claim; v2-converge §7).
+		if out := d.pfWant(inst, -1, "resume", wi); !strings.Contains(out, "resumed") {
+			t.Fatalf("resume answer: %q", out)
 		}
+	} else {
+		inst.waitWIStatus(t, wi, "queued", 30*time.Second)
+		d.pfWant(inst, -1, "submit", wi)
 	}
-	inst.waitWIStatus(t, wi, "queued", 30*time.Second)
-	d.pfWant(inst, -1, "submit", wi)
 	capDir := w079Capsule(ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113WaitCompleted(t, capDir, 240*time.Second)
@@ -821,6 +824,12 @@ func TestW079FlowDefaultReplacesWeakDefaultStepLevelWins(t *testing.T) {
 	}
 }
 
+// w079ProviderErr is the stderr text a crashing fake harness leaves behind:
+// a MODEL-class reason, so the driver's exit classification advances the
+// candidate chain (v2-converge 2.3 — a bare crash is an unclassified exit
+// and retries the same model).
+const w079ProviderErr = "upstream provider error: 529 overloaded (fake harness injected)"
+
 // TestW079RotationAdvancesAndCapsOnEffectiveList pins the rotation
 // composition on the post-precedence list: two provider-class infra
 // failures advance the pointer along the yaml step_kinds list (two
@@ -851,8 +860,8 @@ func TestW079RotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 			wi := w113NewWI(t, inst, "e2e", "w079 rotation on the effective list: "+c.name,
 				[]map[string]any{
 					{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
-					{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "before"},
-					{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "before"},
+					{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "before", "crash_stderr": w079ProviderErr},
+					{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "before", "crash_stderr": w079ProviderErr},
 					{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 					{"do": "envelope", "id": "verification", "outcome": "completed"},
 					{"do": "envelope", "id": "release", "outcome": "completed"},
@@ -897,7 +906,7 @@ func TestW079GateFailRewindResetsEffectiveHead(t *testing.T) {
 	wi := w113NewWI(t, inst, "e2e", "w079 gate-fail rewind resets the effective head",
 		[]map[string]any{
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
-			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "before"},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "before", "crash_stderr": w079ProviderErr},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "gate_failed", "output": verdict},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
@@ -941,7 +950,7 @@ func TestW079RotationUntouchedWithoutYaml(t *testing.T) {
 	wi := w113NewWI(t, inst, "e2e", "w079 rotation untouched without a yaml",
 		[]map[string]any{
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
-			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "before"},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "before", "crash_stderr": w079ProviderErr},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "gate_failed", "output": verdict},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
@@ -1010,9 +1019,14 @@ func TestW079MidflightYamlEditReindexesOnRestart(t *testing.T) {
 	if got != "w079-n1" && got != "w079-n2" {
 		t.Fatalf("fix model after the recovery %q, want one of the EDITED list [w079-n1 w079-n2] — the recomputation must index the re-derived effective list", got)
 	}
-	providerInfra, _ := w079AttemptStats(t, capDir, "fix")
-	if providerInfra < 1 {
-		t.Fatalf("fix archived %d provider-class infra failures, want at least 1 (the killed in-flight dispatch)", providerInfra)
+	// v2-converge 2.3: a daemon restart is NOT a model verdict — the killed
+	// in-flight dispatch advances nothing, so the re-derived effective list
+	// is indexed from its HEAD.
+	if providerInfra, _ := w079AttemptStats(t, capDir, "fix"); providerInfra != 0 {
+		t.Fatalf("fix archived %d provider-class infra failures, want 0 (a daemon restart never advances the pointer)", providerInfra)
+	}
+	if got != "w079-n1" {
+		t.Fatalf("fix model after the restart %q, want the head of the edited list w079-n1 (restart re-dispatch: same pointer)", got)
 	}
 }
 
@@ -1159,11 +1173,8 @@ func TestW079RecoveryContractForLocallySourcedClones(t *testing.T) {
 		t.Fatalf("claim-time baseline %q, want the local HEAD %s", id.Repos["w079src"], origHead)
 	}
 	// The agent's uncommitted edits in the worktree are the live scene.
-	// The witness is a docs-path file on purpose (polyforge#123): the
-	// seal-time release-intent gate counts untracked non-docs repo files
-	// as releaseable changes, and this scenario's WI wraps — its marker
-	// exists to detect a re-clone/reset (any surviving file proves that,
-	// extension aside), not to be a releaseable delta.
+	// The marker exists to detect a re-clone/reset: any surviving file
+	// proves that, whatever its extension.
 	if err := os.WriteFile(filepath.Join(reposDir, "w079-keep.md"), []byte("in flight\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -48,6 +48,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/spawn"
 	"github.com/silgrid/polyforge/internal/common/workflow"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 const (
@@ -89,6 +90,12 @@ type StepSpawnAdapter struct {
 	// CgroupPath is the per-WI cgroup v2 dir ("" = layer 0
 	// unavailable) — passed through to SpawnParams.
 	CgroupPath string
+	// Link is the per-WI supervision link: the harness translator of
+	// every dispatch folds the step process's stdout records into the
+	// dispatch's Tracker on it. nil = no harness tracking.
+	Link *supervise.Link
+	// Harness names the harness ("" = pi); picks the translator.
+	Harness string
 	// PollInterval is the envelope-collection cadence (tests tighten
 	// it; default defaultEnvelopePoll).
 	PollInterval time.Duration
@@ -150,16 +157,20 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		return nil, err
 	}
 	parts := promptParts{
-		WIID:           a.WI.ID,
-		StepID:         sp.StepID,
-		SpawnN:         sp.SpawnN,
-		ContextMode:    policy,
-		Definition:     def,
-		Rewind:         sp.RewindInput,
-		Answers:        sp.Answers,
-		HandoffDue:     spec.Handoff,
-		Gate:           spec.Gate,
-		PriorRejection: sp.PriorRejection,
+		WIID:                    a.WI.ID,
+		StepID:                  sp.StepID,
+		SpawnN:                  sp.SpawnN,
+		ContextMode:             policy,
+		Definition:              def,
+		Rewind:                  sp.RewindInput,
+		Answers:                 sp.Answers,
+		HandoffDue:              spec.Handoff,
+		Gate:                    spec.Gate,
+		PriorRejection:          sp.PriorRejection,
+		PriorEndedWithoutResult: sp.PriorEndedWithoutResult,
+
+		RequireCommandEvidence: spec.RequiresCommandEvidence || sp.StepID == verificationStepID,
+		RequiresHumanAnswer:    spec.RequiresHumanAnswer,
 	}
 	if policy == ContextInherit {
 		h, err := a.resolveHandoff(sp.StepID)
@@ -178,24 +189,46 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 
 	handle := a.sessionHandle()
 	var transcript string
-	if sp.Resume {
+	resume := sp.Resume
+	if resume {
 		transcript, err = a.latestJournalTranscript()
 		if err != nil {
 			return nil, err
 		}
-	} else {
+		if !usableTranscript(transcript) {
+			// nothing readable to resume (the previous dispatch died before
+			// the harness wrote its session): start the conversation fresh
+			// rather than hand the harness a path that cannot resume
+			resume, transcript = false, ""
+		}
+	}
+	if sp.Fresh && parts.Reference == "" {
+		// a retry starts a NEW conversation; the previous transcript, when
+		// readable, rides the prompt as a read-only reference
+		if prev, perr := a.latestJournalTranscript(); perr == nil && usableTranscript(prev) {
+			parts.Reference = prev
+		}
+	}
+	if transcript == "" {
 		transcript = filepath.Join(a.WI.CapsuleDir, capsule.DirSession, "session-"+spawnToken(handle, sp.SpawnN)+".jsonl")
 	}
+	translator, sink := a.newTranslator(sp.SpawnN)
 	p := spawn.Params{
 		WorkItemID:     a.WI.ID,
 		CapsuleDir:     a.WI.CapsuleDir,
 		SessionHandle:  handle,
 		SpawnN:         int(sp.SpawnN),
 		TranscriptPath: transcript,
-		Resume:         sp.Resume,
+		Resume:         resume,
 		InitialPrompt:  assembleStepPrompt(parts),
 		CgroupPath:     a.CgroupPath,
 		Model:          sp.Model,
+	}
+	if translator != nil {
+		p.OnRecord = func(line string) { translator.Feed([]byte(line)) }
+		p.OnExit = func(info spawn.ExitInfo) {
+			translator.Exit(supervise.ExitInfo{Code: info.Code, Signal: info.Signal, LastError: tailLine(info.StderrTail)})
+		}
 	}
 	token := spawnToken(handle, sp.SpawnN)
 	p.Journal = func(pid int, startedAt string) error {
@@ -205,6 +238,14 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 	if err != nil {
 		return nil, fmt.Errorf("driver: step %s spawn %d derivation failed: %w", sp.StepID, sp.SpawnN, err)
 	}
+	meta := RunMeta{
+		PID: h.PID(), TranscriptPath: transcript, Harness: a.harnessName(),
+		Granularity: supervise.GranularityToken, Resumed: resume,
+	}
+	meta.StartedAt = time.Now()
+	if translator != nil {
+		meta.Granularity = translator.Granularity()
+	}
 	return &stepRun{
 		capsuleRoot: a.WI.CapsuleDir,
 		wiID:        a.WI.ID,
@@ -212,7 +253,53 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		handle:      h,
 		dropPath:    pendingResultPath(a.WI.CapsuleDir, sp.SpawnN),
 		poll:        a.PollInterval,
+		meta:        meta,
+		sink:        sink,
 	}, nil
+}
+
+func (a *StepSpawnAdapter) harnessName() string {
+	if a.Harness != "" {
+		return a.Harness
+	}
+	return "pi"
+}
+
+// newTranslator builds the dispatch's harness translator over its
+// Tracker (nil/nil without a link or for a harness without a translator).
+func (a *StepSpawnAdapter) newTranslator(spawnN int64) (supervise.Translator, *supervise.Tracker) {
+	if a.Link == nil {
+		return nil, nil
+	}
+	tr := a.Link.Tracker(spawnN)
+	switch a.harnessName() {
+	case "pi":
+		return supervise.NewPi(tr), tr
+	}
+	return nil, nil
+}
+
+// usableTranscript reports whether a transcript path names a non-empty
+// regular file.
+func usableTranscript(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular() && st.Size() > 0
+}
+
+// tailLine reduces a stderr tail to its last few non-empty lines.
+func tailLine(tail string) string {
+	lines := strings.Split(strings.TrimSpace(tail), "\n")
+	var keep []string
+	for i := len(lines) - 1; i >= 0 && len(keep) < 3; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			keep = append([]string{l}, keep...)
+		}
+	}
+	out := strings.Join(keep, " | ")
+	if len(out) > 500 {
+		out = out[len(out)-500:]
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +329,19 @@ type promptParts struct {
 	// dispatch's rejected envelope (the in-process retry lane): the
 	// author sees exactly what to fix instead of blindly re-authoring.
 	PriorRejection string
+	// PriorEndedWithoutResult: the previous dispatch's turn ended without
+	// the result envelope being written (retry feedback).
+	PriorEndedWithoutResult bool
+	// RequireCommandEvidence marks a step whose completed result must
+	// carry command_evidence (verification / requires_command_evidence):
+	// the contract states the entry shape and the rule.
+	RequireCommandEvidence bool
+	// RequiresHumanAnswer marks a requires_human_answer step: the
+	// contract states that a human answer must precede completion.
+	RequiresHumanAnswer bool
+	// Reference is the previous attempt's transcript path (a fresh retry
+	// carries it as read-only reference material; "" = none).
+	Reference string
 }
 
 // handoffSection is one producing step's handoff artifact, injected
@@ -286,6 +386,15 @@ func assembleStepPrompt(p promptParts) string {
 		b.WriteString("Your previous envelope for this step was rejected by the driver's validation:\n\n")
 		b.WriteString(p.PriorRejection)
 		b.WriteString("\n\nFix the defect and write a corrected envelope. Compute artifact digests programmatically (e.g. sha256sum + jq into the JSON) — never hand-transcribe them; re-check every required field the error names.\n")
+	}
+	if p.PriorEndedWithoutResult {
+		b.WriteString("\n# Previous turn ended WITHOUT a result envelope\n\n")
+		b.WriteString("Your previous turn on this step ended without you writing the result envelope. Finishing your reply is not delivering: the step only completes when the result envelope file is written (see the delivery contract below). Do the remaining work, then WRITE the envelope before you stop.\n")
+	}
+	if p.Reference != "" {
+		b.WriteString("\n# Previous attempt (read-only reference)\n\n")
+		fmt.Fprintf(&b, "A previous attempt of this step ended without delivering a result. Its conversation transcript is at `%s` (JSONL, capsule path). "+
+			"Read it ONLY for context about what was already tried; do not modify it, and start this attempt's work from scratch rather than replaying it.\n", p.Reference)
 	}
 	if len(p.Answers) > 0 {
 		b.WriteString("\n# Answered questions (this step's history — continue from it)\n\n")
@@ -340,6 +449,16 @@ func deliveryContract(p promptParts) string {
 		b.WriteString("; this step DECLARES handoff, so a completed result must also carry `handoff_ref` — the same {path, sha256, bytes} shape — naming the artifact the next inherit step continues from")
 	}
 	b.WriteString("; a `needs_input` result carries `question_id` and `question` instead. End your turn once the file is written.\n")
+	if p.RequireCommandEvidence {
+		b.WriteString("\nCommand evidence: this step requires `command_evidence` — a list of OBJECTS " +
+			"`{\"argv\": [\"go\", \"test\", \"./...\"], \"exit_code\": 0, \"duration_ms\": 1200}`, never strings. " +
+			"Run at least one real check command and report every command you ran with its measured `duration_ms` (> 0); " +
+			"an empty list, an entry without `argv`, or one without a positive `duration_ms` is rejected. Never fabricate an entry.\n")
+	}
+	if p.RequiresHumanAnswer {
+		b.WriteString("\nHuman answer: this step requires a human answer before completion: return `needs_input` first; " +
+			"a `completed` envelope without an answer in this round is rejected.\n")
+	}
 	if p.Gate {
 		b.WriteString("\nGate verdict binding: this step is a GATE (the workflow declares it `gate: true`), " +
 			"and the top-level `verdict` field of your `output` is the business verdict. " +
@@ -496,7 +615,7 @@ func (a *StepSpawnAdapter) newestAcceptedResult(stepID string) (*StepResult, err
 		}
 	}
 	if acceptedID == "" {
-		return nil, nil // done but no accepted id (legacy state)
+		return nil, nil // done but no accepted id (no accepted attempt recorded)
 	}
 	// Load the archived envelope with that exact result_id.
 	res, err := newestArchivedResult(a.WI.CapsuleDir, stepID)
@@ -753,6 +872,53 @@ type stepRun struct {
 	handle      spawn.Handle
 	dropPath    string
 	poll        time.Duration
+	meta        RunMeta
+	sink        *supervise.Tracker
+}
+
+// Meta implements MetaRun.
+func (r *stepRun) Meta() RunMeta { return r.meta }
+
+// exited builds the ExitedError of a process that is gone without a
+// usable envelope: exit status, stderr tail and the harness's last
+// signal (whether it ended on an error turn).
+func (r *stepRun) exited(defect error) error {
+	ee := &ExitedError{Step: r.sp.StepID, SpawnN: r.sp.SpawnN, ExitCode: -1}
+	var parts []string
+	add := func(t string) {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			return
+		}
+		for _, p := range parts {
+			if p == t {
+				return
+			}
+		}
+		parts = append(parts, t)
+	}
+	if er, ok := r.handle.(spawn.ExitReporter); ok {
+		info := er.ExitInfo()
+		ee.ExitCode, ee.Signal = info.Code, info.Signal
+		add(tailLine(info.StderrTail))
+	}
+	if r.sink != nil {
+		snap := r.sink.Snapshot(time.Now())
+		ee.TurnError = snap.TurnError
+		ee.TurnOK = snap.TurnEnded && !snap.TurnError
+		if snap.Exit != nil {
+			if ee.ExitCode < 0 {
+				ee.ExitCode, ee.Signal = snap.Exit.Code, snap.Exit.Signal
+			}
+			add(snap.Exit.LastError)
+		}
+		add(snap.LastError)
+	}
+	ee.LastError = strings.Join(parts, " | ")
+	if defect != nil {
+		ee.Detail = "unusable result envelope: " + defect.Error()
+	}
+	return ee
 }
 
 func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
@@ -795,12 +961,14 @@ func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
 			return res, nil
 		}
 		if r.handle.Done() {
-			if defect != nil {
-				return nil, fmt.Errorf("driver: step %s spawn %d exited leaving an unusable result envelope: %w",
-					r.sp.StepID, r.sp.SpawnN, defect)
+			// one last look: the envelope may have landed between the
+			// collect above and the exit
+			if res2, defect2 := r.collect(); res2 != nil {
+				continue // collected on the next pass
+			} else if defect2 != nil {
+				defect = defect2
 			}
-			return nil, fmt.Errorf("driver: step %s spawn %d exited without writing a result envelope to %s",
-				r.sp.StepID, r.sp.SpawnN, r.dropPath)
+			return nil, r.exited(defect)
 		}
 		select {
 		case <-ctx.Done():
@@ -838,10 +1006,37 @@ func (r *stepRun) collect() (*StepResult, error) {
 		if json.Unmarshal(raw, &shadow) == nil {
 			// Zero out the malformed field and re-parse the rest.
 			var m map[string]interface{}
+			var dropped []string
 			if json.Unmarshal(raw, &m) == nil {
+				// Keep the well-formed object entries (a mixed or partly
+				// string-typed list must not drop real evidence before the
+				// V4 gate looks at it); string entries are discarded.
 				delete(m, "command_evidence")
+				var elems []json.RawMessage
+				if json.Unmarshal(shadow.CommandEvidence, &elems) == nil {
+					kept := []json.RawMessage{}
+					for i, el := range elems {
+						var ce CommandEvidence
+						t := strings.TrimSpace(string(el))
+						switch {
+						case !strings.HasPrefix(t, "{"):
+							dropped = append(dropped, fmt.Sprintf("command_evidence[%d] is not an OBJECT", i))
+						default:
+							if uerr := json.Unmarshal(el, &ce); uerr != nil {
+								dropped = append(dropped, fmt.Sprintf("command_evidence[%d] could not be decoded: %v (started_at must be RFC3339, argv a string list, numbers numeric)", i, uerr))
+							} else {
+								kept = append(kept, el)
+							}
+						}
+					}
+					if len(kept) > 0 {
+						m["command_evidence"] = kept
+					}
+				}
 				if cleaned, jerr := json.Marshal(m); jerr == nil {
+					res = StepResult{} // the failed first decode leaves partial fields (e.g. a zeroed evidence entry)
 					if uerr := json.Unmarshal(cleaned, &res); uerr == nil {
+						res.evidenceDropped = dropped
 						goto parsed
 					}
 				}

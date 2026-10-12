@@ -6,7 +6,7 @@ package core
 // create/patch body and are validated as ONE triple; the base is frozen
 // inside the create transaction and immutable after (no UPDATE path — a
 // changed inventory means a new WI). This file ports the v0 validation
-// block (v0/internal/core/workitem/workitem.go:186-212) into the v1
+// block (v0/internal/core/workitem/workitem.go:186-212, git history) into the v1
 // core, closing the TODO(v1) §4.5 checkout-hash gap the WI goal names:
 // a ProjectRepo-style entry with name+URL but a missing/blank HEAD sha
 // can no longer slip through as a half-empty triple.

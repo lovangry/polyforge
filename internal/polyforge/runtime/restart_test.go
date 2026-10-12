@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -97,9 +98,10 @@ func TestRestartReconciliationMatrix(t *testing.T) {
 					}
 					assertNoRT(t, toOB)
 				case v.status == api.StatusBlocked:
-					// 不动 (M2): nothing killed, nothing revived, record kept
+					// M2: nothing revived, record kept; crash orphans (and only
+					// they) are reaped — the sleeper carries the WI marker
 					if local {
-						mustBeAlive(t, pid)
+						waitDead(t, pid)
 						if recs := loadRecords(t, r); len(recs) != 1 || recs[0].WorkItemID != wi {
 							t.Fatalf("blocked record must be kept, got %+v", recs)
 						}
@@ -321,7 +323,7 @@ func TestRestartReleasesForeignHolder(t *testing.T) {
 	wi := "wi_foreign"
 	pid, startedAt := spawnSleeper(t, wi)
 	rec := matrixRecord(r, wi, pid, startedAt)
-	// the takeover happened while we were down: another session holds it
+	// a force-end + re-claim happened while we were down: another session holds it
 	other := fakeSession(wi + "-other")
 	hub.hold(wi, other, api.StatusRunning)
 	// the local capsule scene exists
@@ -439,4 +441,76 @@ func TestRestartKeepsRecordWhenAihubUnreachable(t *testing.T) {
 		t.Fatal("no verdict ⇒ no spawn")
 	}
 	_ = killFn(-pid, 9)
+}
+
+// aihub down at boot: the record stays verify_pending (no agent, no
+// verdict guessed), the daemon retries the verify with backoff in-process,
+// and once aihub answers the record proceeds through restartOne (here: the
+// hub says wrapped, so the record is dropped) without a daemon restart.
+func TestRestartVerifyRetriesUntilAihubComesUp(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, hub, sp)
+	wi := "wi_verify_retry"
+	hub.lookupErr[wi] = errLookupBoom
+	pid, startedAt := spawnSleeper(t, wi)
+	rec := matrixRecord(r, wi, pid, startedAt)
+	writeStateFile(t, r, []*jobRecord{rec})
+
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	ji, ok := r.Info(wi)
+	if !ok || !ji.VerifyPending {
+		t.Fatalf("an unverifiable record must be verify_pending, got %+v ok=%v", ji, ok)
+	}
+	time.Sleep(60 * time.Millisecond) // a few failed retries
+	if _, ok := r.Info(wi); !ok {
+		t.Fatal("record dropped while aihub is still down")
+	}
+
+	hub.mu.Lock()
+	delete(hub.lookupErr, wi)
+	hub.mu.Unlock()
+	hub.hold(wi, rec.SessionID, api.StatusWrapped)
+	waitFor(t, "the retried verify to settle the record", func() bool {
+		_, ok := r.Info(wi)
+		return !ok
+	})
+	waitDead(t, pid)
+	if sp.callCount() != 0 {
+		t.Fatal("a terminal verdict must not spawn")
+	}
+}
+
+// A blocked verdict reaps the crash orphans named only by the spawn
+// journal (record pid 0), while keeping the record and reviving nothing.
+func TestRestartBlockedReapsJournaledOrphansOnly(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, hub, sp)
+	wi := "wi_blk_reap"
+	hub.status[wi] = api.StatusBlocked
+	pid, startedAt := startTree(t, wi)
+	bystander, _ := spawnSleeper(t, "wi_other") // different WI: must survive
+	defer func() { _ = killFn(-bystander, 9) }()
+	rec := matrixRecord(r, wi, 0, "")
+	if err := os.MkdirAll(rec.CapsuleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJournalPID(t, rec.CapsuleDir, pid, startedAt)
+	writeStateFile(t, r, []*jobRecord{rec})
+
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	waitDead(t, pid)
+	mustBeAlive(t, bystander)
+	if recs := loadRecords(t, r); len(recs) != 1 || recs[0].WorkItemID != wi {
+		t.Fatalf("blocked record must be kept, got %+v", recs)
+	}
+	if sp.callCount() != 0 {
+		t.Fatal("blocked must not spawn")
+	}
+	assertNoRT(t, toOB)
 }

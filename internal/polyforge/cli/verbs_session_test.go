@@ -1,264 +1,16 @@
 package cli
 
 // verbs_session_test.go: the v1.5 session-model verb goldens —
-// takeover (force-takeover §1.4), the pause clean_pause flag ordering,
+// the pause clean_pause flag ordering, ops end-session,
 // and the resume flag-clear semantics.
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
-
-	"github.com/silgrid/polyforge/internal/common/api"
 )
-
-const cannedSessionClaim = `{"claim":{"work_item_id":"wi_abc",` +
-	`"session_fingerprint":"ab12cd34ef56aa00","machine_id":"m-b","owner":"op",` +
-	`"bundle_name":"quick-fix","bundle_digest":"d0","claimed_at":"t0"},` +
-	`"work_item":` + cannedWI + `}`
-
-// TestTakeoverHappyPath: `pf takeover <id> --reason ...` mints a fresh
-// 32-byte session secret, POSTs force-takeover with it (plus the LOCAL
-// DAEMON's machine id (#109), owner, reason, idempotency key), hands
-// the secret to the local daemon for durable custody (#109), and
-// renders the response's PUBLIC fingerprint — never the secret.
-func TestTakeoverHappyPath(t *testing.T) {
-	var rec reqRecorder
-	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || !strings.HasSuffix(r.URL.Path, "/force-takeover") {
-			w.WriteHeader(http.StatusNotFound)
-			io.WriteString(w, `{"code":"CORE-404","detail":"wrong route"}`)
-			return
-		}
-		io.WriteString(w, cannedSessionClaim)
-	})
-	d := newDaemonFixture(t)
-	// The daemon's own machine identity (GET /status) is the mint's
-	// machine (#109) — pinned to m-b to match the canned claim answer.
-	d.answer("GET", "/status", `{"machine_id":"m-b","mode":"interactive","workspaces":["/srv/pf-ws"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
-	d.answer("POST", "/jobs/wi_abc/adopt-session", `{"adopted":true,"work_item_id":"wi_abc","session_fingerprint":"ab12cd34ef56aa00"}`)
-
-	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_API_KEY": "key-admin",
-		"PF_USER_ID": "usr_1", "PF_DAEMON_SOCKET": d.sock,
-	}, "takeover", "wi_abc", "--reason", "holder machine died mid-drill")
-	if code != 0 {
-		t.Fatalf("takeover: code=%d stderr=%s", code, stderr)
-	}
-	for _, want := range []string{
-		"took over wi_abc",
-		"session: ab12cd34ef56aa00 (machine m-b, owner op)",
-		"fenced at its next push",
-	} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("stdout missing %q:\n%s", want, stdout)
-		}
-	}
-	if strings.Contains(stdout, "sess") && strings.Count(stdout, "ab12cd34ef56aa00") == 0 {
-		t.Errorf("stdout must carry the public fingerprint: %s", stdout)
-	}
-
-	// The request shape: session_id is 64 hex chars (32 bytes) and is
-	// NOT echoed anywhere in the CLI output. (The recorder captured the
-	// body before the handler ran — read it from there.)
-	var gotBody map[string]any
-	if err := json.Unmarshal([]byte(rec.last().Body), &gotBody); err != nil {
-		t.Fatalf("takeover request body must decode: %v (%s)", err, rec.last().Body)
-	}
-	sid, _ := gotBody["session_id"].(string)
-	if len(sid) != 64 {
-		t.Fatalf("session_id must be 32 bytes hex (64 chars), got %q", sid)
-	}
-	if _, err := hex.DecodeString(sid); err != nil {
-		t.Fatalf("session_id must be hex: %v", err)
-	}
-	if strings.Contains(stdout, sid) {
-		t.Fatal("the session SECRET must never be printed")
-	}
-	if gotBody["reason"] != "holder machine died mid-drill" {
-		t.Errorf("reason = %v", gotBody["reason"])
-	}
-	if gotBody["work_item_id"] != "wi_abc" {
-		t.Errorf("work_item_id = %v", gotBody["work_item_id"])
-	}
-	if gotBody["owner"] != "usr_1" {
-		t.Errorf("owner = %v, want the configured user id", gotBody["owner"])
-	}
-	if ik, _ := gotBody["idempotency_key"].(string); ik == "" || !strings.HasPrefix(ik, "tk_") {
-		t.Errorf("idempotency_key = %v, want a fresh tk_ key", gotBody["idempotency_key"])
-	}
-	if m, _ := gotBody["machine_id"].(string); m != "m-b" {
-		t.Errorf("machine_id = %v, want the local daemon's own id (GET /status, #109)", m)
-	}
-	// The custody handoff (#109): the minted secret went to the daemon's
-	// adopt-session route — the SAME secret the hub swap presented — and
-	// the operator-facing output names the custody, not an orphan.
-	var adoptBody map[string]any
-	var adoptSeen bool
-	for _, r := range d.rec.all() {
-		if r.Method == "POST" && r.Path == "/jobs/wi_abc/adopt-session" {
-			adoptSeen = true
-			if err := json.Unmarshal([]byte(r.Body), &adoptBody); err != nil {
-				t.Fatalf("adopt body must decode: %v (%s)", err, r.Body)
-			}
-		}
-	}
-	if !adoptSeen {
-		t.Fatalf("takeover must hand the minted secret to the daemon (POST /jobs/wi_abc/adopt-session); daemon saw: %v", d.rec.all())
-	}
-	if adoptBody["session_id"] != sid {
-		t.Errorf("adopt session_id = %v, want the minted secret", adoptBody["session_id"])
-	}
-	if !strings.Contains(stdout, "custody") || strings.Contains(stdout, "orphan session after this") {
-		t.Errorf("stdout must name the daemon custody (#109), not the old orphan note: %s", stdout)
-	}
-	// The call rode the caller's api key.
-	if last := rec.last(); last.Header.Get("Authorization") != "Bearer key-admin" {
-		t.Errorf("Authorization = %q", last.Header.Get("Authorization"))
-	}
-}
-
-// TestTakeoverJSONMode: --json emits the response envelope verbatim
-// (machine consumers get one JSON document).
-func TestTakeoverJSONMode(t *testing.T) {
-	aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, cannedSessionClaim)
-	})
-	d := newDaemonFixture(t)
-	d.answer("POST", "/jobs/wi_abc/adopt-session", `{"adopted":true,"work_item_id":"wi_abc","session_fingerprint":"ab12cd34ef56aa00"}`)
-	code, stdout, _ := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
-	}, "--json", "takeover", "wi_abc", "--reason", "drill")
-	if code != 0 {
-		t.Fatalf("takeover --json: code=%d", code)
-	}
-	var resp api.SessionClaimResponse
-	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
-		t.Fatalf("json output must be the SessionClaimResponse: %v (%s)", err, stdout)
-	}
-	if resp.Claim.WorkItemID != "wi_abc" || resp.Claim.SessionFingerprint != "ab12cd34ef56aa00" {
-		t.Fatalf("claim = %+v", resp.Claim)
-	}
-}
-
-// TestTakeoverMissingReason: --reason is required; a missing/blank one
-// is a local validation refusal — exit 1, no wire contact.
-func TestTakeoverMissingReason(t *testing.T) {
-	var rec reqRecorder
-	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, cannedSessionClaim)
-	})
-	for _, args := range [][]string{
-		{"takeover", "wi_abc"},
-		{"takeover", "wi_abc", "--reason", "   "},
-		{"takeover"},
-	} {
-		code, _, stderr := runPf(t, map[string]string{"PF_SERVER": aihub.URL}, args...)
-		if code != 1 {
-			t.Errorf("%v: exit = %d, want 1", args, code)
-		}
-		if !strings.Contains(stderr, "--reason") && !strings.Contains(stderr, "exactly one work item") {
-			t.Errorf("%v: stderr must name the local validation refusal: %s", args, stderr)
-		}
-	}
-	if n := len(rec.all()); n != 0 {
-		t.Errorf("local validation must not contact the server; got %d requests", n)
-	}
-}
-
-// TestTakeoverWireErrorClasses: the typed envelope keeps the standard
-// exit-code mapping (4xx → 1, 5xx → 2). The local daemon is reachable
-// (fixture) — the refusal rides the hub face.
-func TestTakeoverWireErrorClasses(t *testing.T) {
-	for _, cls := range []struct {
-		name   string
-		status int
-		body   string
-		want   int
-	}{
-		{"typed-4xx", http.StatusConflict, `{"code":"CORE-409","detail":"ALREADY_HELD"}`, 1},
-		{"typed-5xx", http.StatusInternalServerError, `{"code":"CORE-500","detail":"boom"}`, 2},
-	} {
-		aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(cls.status)
-			io.WriteString(w, cls.body)
-		})
-		d := newDaemonFixture(t)
-		code, _, stderr := runPf(t, map[string]string{
-			"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
-		}, "takeover", "wi_abc", "--reason", "drill")
-		if code != cls.want {
-			t.Errorf("%s: exit = %d, want %d", cls.name, code, cls.want)
-		}
-		if !strings.Contains(stderr, "CORE-") {
-			t.Errorf("%s: stderr must carry the typed code: %s", cls.name, stderr)
-		}
-	}
-}
-
-// TestTakeoverRequiresLocalDaemon (#109): with no local daemon
-// reachable the verb refuses BEFORE minting or touching the hub — a
-// takeover whose session no daemon holds is exactly the #97 orphan
-// wedge. Same for a --machine that does not match the daemon's own id:
-// a session labeled for a machine that will never hold the secret is
-// the same unusable mint.
-func TestTakeoverRequiresLocalDaemon(t *testing.T) {
-	var rec reqRecorder
-	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, cannedSessionClaim)
-	})
-	// No daemon at the socket (the fixture-free dead path).
-	code, _, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": "/nonexistent/polyforge.sock",
-	}, "takeover", "wi_abc", "--reason", "drill")
-	if code != 1 {
-		t.Errorf("no-daemon takeover: exit = %d, want 1", code)
-	}
-	if !strings.Contains(stderr, "no local daemon reachable") {
-		t.Errorf("stderr must name the refusal: %s", stderr)
-	}
-	if n := len(rec.all()); n != 0 {
-		t.Errorf("the refusal must contact no hub (no mint, no swap); got %d calls", n)
-	}
-
-	// --machine mismatch: refused the same way, before the hub.
-	d := newDaemonFixture(t) // default /status: machine m1
-	code, _, stderr = runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
-	}, "takeover", "wi_abc", "--reason", "drill", "--machine", "m-elsewhere")
-	if code != 1 {
-		t.Errorf("machine-mismatch takeover: exit = %d, want 1", code)
-	}
-	if !strings.Contains(stderr, "does not match this box's daemon") {
-		t.Errorf("stderr must name the mismatch refusal: %s", stderr)
-	}
-	if n := len(rec.all()); n != 0 {
-		t.Errorf("the mismatch refusal must contact no hub; got %d calls", n)
-	}
-}
-
-// TestTakeoverAdoptFailureIsLoud (#109): if the hub swap landed but the
-// custody handoff to the daemon failed, the verb exits non-zero and
-// says the session is an orphan until a daemon-side takeover fences it
-// — never a silent exit-0 "success" over a lost secret.
-func TestTakeoverAdoptFailureIsLoud(t *testing.T) {
-	aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, cannedSessionClaim)
-	})
-	d := newDaemonFixture(t) // no adopt-session answer → 404
-	code, _, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
-	}, "takeover", "wi_abc", "--reason", "drill")
-	if code != 1 {
-		t.Fatalf("failed custody: exit = %d, want 1", code)
-	}
-	if !strings.Contains(stderr, "orphan until a daemon-side takeover fences it") {
-		t.Errorf("stderr must carry the orphan warning and the recovery path: %s", stderr)
-	}
-}
 
 // TestResumeFlagClearSemantics: v1.5 resume clears clean_pause on the
 // hub (PATCH, flag=false) and claims nothing locally — no daemon route
@@ -293,6 +45,54 @@ func TestResumeFlagClearSemantics(t *testing.T) {
 	}
 }
 
+// TestWrapFailBlockedLandsDoorWithHumanKey: `pf wrap --fail` on a WI parked
+// blocked posts aihub's terminate-blocked door directly with the human's api
+// key and never contacts the daemon; a refused door (non-owner) is typed.
+func TestWrapFailBlockedLandsDoorWithHumanKey(t *testing.T) {
+	blockedWI := `{"id":"wi_blocked","slug":"pf-43","seq":43,"project":"polyforge","goal":"g",` +
+		`"status":"blocked","priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z",` +
+		`"updated_at":"2026-10-01T00:00:00Z"}`
+	var rec reqRecorder
+	hub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, blockedWI)
+	})
+	d := newDaemonFixture(t)
+	code, stdout, stderr := runPf(t, map[string]string{
+		"PF_SERVER": hub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
+	}, "wrap", "wi_blocked", "--fail")
+	if code != 0 || !strings.Contains(stdout, "fail requested for wi_blocked") {
+		t.Fatalf("wrap --fail: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	var door *capturedRequest
+	for _, r := range rec.all() {
+		r := r
+		if r.Method == "POST" && r.Path == "/api/v1/work-items/wi_blocked/terminate-blocked" {
+			door = &r
+		}
+	}
+	if door == nil || !strings.Contains(door.Header.Get("Authorization"), "human-key") {
+		t.Fatalf("the terminate door must be posted with the human's key: %+v", rec.all())
+	}
+	if n := len(d.rec.all()); n != 0 {
+		t.Errorf("the daemon must not be contacted: %v", d.rec.all())
+	}
+
+	deny := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `{"code":"AUTH-403","detail":"terminate-blocked requires the work item's reporter, a project maintainer or admin"}`)
+			return
+		}
+		io.WriteString(w, blockedWI)
+	})
+	code, _, stderr = runPf(t, map[string]string{
+		"PF_SERVER": deny.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "plain",
+	}, "wrap", "wi_blocked", "--fail")
+	if code != 1 || !strings.Contains(stderr, "AUTH-403") {
+		t.Errorf("non-owner must be refused: code=%d stderr=%s", code, stderr)
+	}
+}
+
 // TestResumeBlockedDoorWiring (polyforge#116): a workflow parked blocked
 // answers the §6.4 owner move, not the pause copy — the hub status picks
 // the door, and the blocked door contacts the daemon's resume-blocked
@@ -309,7 +109,7 @@ func TestResumeBlockedDoorWiring(t *testing.T) {
 	d := newDaemonFixture(t)
 	d.answer("POST", "/jobs/wi_blocked/resume-blocked", `{"resumed":true,"work_item_id":"wi_blocked"}`)
 	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
+		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
 	}, "resume", "wi_blocked")
 	if code != 0 {
 		t.Fatalf("resume: code=%d stderr=%s", code, stderr)
@@ -320,10 +120,45 @@ func TestResumeBlockedDoorWiring(t *testing.T) {
 	if !strings.Contains(stdout, "resumed wi_blocked") || !strings.Contains(stdout, "parked blocked") {
 		t.Errorf("stdout must carry the §6.4 owner-move copy: %s", stdout)
 	}
+	// The hub door is landed by the CLI with the HUMAN's key, before the
+	// daemon is contacted.
+	var door *capturedRequest
+	for _, r := range aihubRec.all() {
+		r := r
+		if r.Method == "POST" && r.Path == "/api/v1/work-items/wi_blocked/resume-blocked" {
+			door = &r
+		}
+	}
+	if door == nil {
+		t.Fatalf("the CLI must call the hub resume-blocked door itself: %+v", aihubRec.all())
+	}
+	if got := door.Header.Get("Authorization"); !strings.Contains(got, "human-key") {
+		t.Errorf("the door must carry the human's api key, got %q", got)
+	}
 	// The daemon's owner-move route is contacted exactly once.
 	calls := d.rec.all()
 	if len(calls) != 1 || calls[0].Path != "/jobs/wi_blocked/resume-blocked" {
 		t.Errorf("resume must contact the daemon's resume-blocked route once: %+v", calls)
+	}
+	// A refused door (non-owner member) stops before the daemon is asked.
+	d2 := newDaemonFixture(t)
+	d2.answer("POST", "/jobs/wi_blocked/resume-blocked", `{"resumed":true,"work_item_id":"wi_blocked"}`)
+	deny := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `{"code":"AUTH-403","detail":"resume-blocked requires the work item's reporter, a project maintainer or admin"}`)
+			return
+		}
+		io.WriteString(w, blockedWI)
+	})
+	code, _, stderr = runPf(t, map[string]string{
+		"PF_SERVER": deny.URL, "PF_DAEMON_SOCKET": d2.sock, "PF_API_KEY": "plain-member-key",
+	}, "resume", "wi_blocked")
+	if code != 1 || !strings.Contains(stderr, "AUTH-403") {
+		t.Errorf("a non-owner member must be refused: code=%d stderr=%s", code, stderr)
+	}
+	if n := len(d2.rec.all()); n != 0 {
+		t.Errorf("a refused door must not contact the daemon: %v", d2.rec.all())
 	}
 	// No clean_pause PATCH lands for a blocked WI (the pause copy's door).
 	for _, r := range aihubRec.all() {
@@ -415,155 +250,265 @@ func TestPauseRefusalWritesNothing(t *testing.T) {
 	}
 }
 
-// TestUnblockHappyPath (Finding 3, v1.5 review): `pf unblock <id>` POSTs
-// the exit-door route directly to aihub and renders the returned work
-// item's new queued status.
-func TestUnblockHappyPath(t *testing.T) {
-	var rec reqRecorder
-	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, strings.Replace(cannedWI, `"queued"`, `"queued"`, 1))
-	})
-	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": srv.URL, "PF_API_KEY": "key-admin",
-	}, "unblock", "wi_abc")
-	if code != 0 {
-		t.Fatalf("unblock: code=%d stderr=%s", code, stderr)
+// TestResumeDispatchByWIState pins the three-way `pf resume` order (D1+D2
+// merge): blocked -> human-key door then daemon resume-blocked; not blocked
+// and parked repair_pending on THIS daemon -> the daemon's in-place resume
+// route (no resume-blocked door, no daemon claim); otherwise -> the plain
+// clean_pause PATCH with no daemon route.
+func TestResumeDispatchByWIState(t *testing.T) {
+	wiWith := func(status string, clean bool) string {
+		return `{"id":"wi_abc","slug":"pf-42","seq":42,"project":"polyforge","goal":"g","status":"` + status +
+			`","clean_pause":` + map[bool]string{true: "true", false: "false"}[clean] +
+			`,"priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`
 	}
-	if got := rec.last(); got.Method != "POST" || got.Path != "/api/v1/work-items/wi_abc/unblock" {
-		t.Errorf("request = %s %s, want POST /api/v1/work-items/wi_abc/unblock", got.Method, got.Path)
+	const repairStatus = `{"machine_id":"m1","auto":false,"workspaces":["/w"],"shutting_down":false,` +
+		`"jobs":[{"work_item_id":"wi_abc","status":"repair_pending","repair_reason":"capsule_missing"}],"queue":{"pending":0,"running":0,"max_concurrent":2}}`
+	cases := []struct {
+		name         string
+		hubStatus    string
+		clean        bool
+		repair       bool
+		wantPatch    bool
+		wantDoor     bool
+		wantDaemon   []string // POST paths expected on the daemon
+		wantStdoutIn string
+	}{
+		{"paused", "paused", true, false, true, false, nil, "clean_pause cleared"},
+		{"blocked", "blocked", false, false, false, true, []string{"/jobs/wi_abc/resume-blocked"}, "parked blocked"},
+		{"repair_pending running", "running", false, true, false, false, []string{"/jobs/wi_abc/resume"}, "repair_pending"},
+		{"repair_pending paused", "paused", true, true, true, false, []string{"/jobs/wi_abc/resume"}, "repair_pending"},
 	}
-	if !strings.Contains(stdout, "unblocked pf-42 (status queued; claimable again)") {
-		t.Errorf("stdout = %q", stdout)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec reqRecorder
+			aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, wiWith(tc.hubStatus, tc.clean))
+			})
+			d := newDaemonFixture(t)
+			if tc.repair {
+				d.answer("GET", "/status", repairStatus)
+			}
+			d.answer("POST", "/jobs/wi_abc/resume-blocked", `{"resumed":true,"work_item_id":"wi_abc"}`)
+			d.answer("POST", "/jobs/wi_abc/resume", `{"accepted":true,"work_item_id":"wi_abc"}`)
+			code, stdout, stderr := runPf(t, map[string]string{
+				"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
+			}, "resume", "wi_abc")
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%s", code, stderr)
+			}
+			if !strings.Contains(stdout, tc.wantStdoutIn) {
+				t.Errorf("stdout missing %q: %s", tc.wantStdoutIn, stdout)
+			}
+			var patched, door bool
+			for _, r := range rec.all() {
+				if r.Method == "PATCH" {
+					patched = true
+				}
+				if r.Method == "POST" && strings.HasSuffix(r.Path, "/resume-blocked") {
+					door = true
+				}
+			}
+			if patched != tc.wantPatch || door != tc.wantDoor {
+				t.Errorf("patch=%v (want %v) door=%v (want %v)", patched, tc.wantPatch, door, tc.wantDoor)
+			}
+			var posts []string
+			for _, r := range d.rec.all() {
+				if r.Method == "POST" {
+					posts = append(posts, r.Path)
+				}
+			}
+			if strings.Join(posts, ",") != strings.Join(tc.wantDaemon, ",") {
+				t.Errorf("daemon POSTs = %v, want %v", posts, tc.wantDaemon)
+			}
+		})
 	}
 }
 
-// TestUnblockRefusalClasses: a typed wire refusal (NOT_BLOCKED /
-// AUTH-403) surfaces as exit 1 with the typed envelope on stderr.
-func TestUnblockRefusalClasses(t *testing.T) {
-	srv := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		io.WriteString(w, `{"code":"CORE-409","detail":"unblock requires a blocked work item (got queued)","extra":{"reason":"NOT_BLOCKED"}}`)
-	})
-	code, _, stderr := runPf(t, map[string]string{
-		"PF_SERVER": srv.URL, "PF_API_KEY": "key-admin",
-	}, "unblock", "wi_abc")
-	if code != 1 {
-		t.Fatalf("refused unblock: exit=%d, want 1 (stderr=%s)", code, stderr)
+// TestAbandonRepairPendingDispatch pins the give-up door of a WI the local
+// daemon holds parked repair_pending: `pf cancel` / `pf wrap --fail` run the
+// read-only human-key authorization probe at aihub FIRST, then ask the
+// daemon (canceled / failed). A refused probe never reaches the daemon.
+func TestAbandonRepairPendingDispatch(t *testing.T) {
+	const wiJSON = `{"id":"wi_abc","slug":"pf-42","seq":42,"project":"polyforge","goal":"g","status":"running","priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`
+	const repairStatus = `{"machine_id":"m1","auto":false,"workspaces":["/w"],"shutting_down":false,` +
+		`"jobs":[{"work_item_id":"wi_abc","status":"repair_pending","repair_reason":"capsule_missing"}],"queue":{"pending":0,"running":0,"max_concurrent":2}}`
+	cases := []struct {
+		name        string
+		args        []string
+		authorized  bool
+		wantVerdict string // "" = the daemon must not be asked
+		wantCode0   bool
+	}{
+		{"cancel", []string{"cancel", "wi_abc"}, true, "canceled", true},
+		{"wrap --fail", []string{"wrap", "wi_abc", "--fail"}, true, "failed", true},
+		{"cancel refused by authorization", []string{"cancel", "wi_abc"}, false, "", false},
+		{"wrap --fail refused by authorization", []string{"wrap", "wi_abc", "--fail"}, false, "", false},
 	}
-	if !strings.Contains(stderr, "CORE-409") || !strings.Contains(stderr, "blocked work item") {
-		t.Errorf("stderr must carry the typed refusal: %s", stderr)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec reqRecorder
+			aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/cancel"):
+					w.WriteHeader(http.StatusConflict)
+					io.WriteString(w, `{"error":{"code":"CORE-409","detail":"running work item: end its session before cancelling"}}`)
+				case strings.HasSuffix(r.URL.Path, "/close-auth"):
+					if !tc.authorized {
+						w.WriteHeader(http.StatusForbidden)
+						io.WriteString(w, `{"error":{"code":"AUTH-403","detail":"closing a work item requires its reporter, a project maintainer or admin"}}`)
+						return
+					}
+					io.WriteString(w, `{"authorized":true,"work_item_id":"wi_abc"}`)
+				default:
+					io.WriteString(w, wiJSON)
+				}
+			})
+			d := newDaemonFixture(t)
+			d.answer("GET", "/status", repairStatus)
+			d.answer("POST", "/jobs/wi_abc/abandon-repair", `{"work_item_id":"wi_abc","outcome":"abandoned","status":"x"}`)
+			code, stdout, stderr := runPf(t, map[string]string{
+				"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
+			}, tc.args...)
+			if (code == 0) != tc.wantCode0 {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+			}
+			var posts []capturedRequest
+			for _, r := range d.rec.all() {
+				if r.Method == "POST" {
+					posts = append(posts, r)
+				}
+			}
+			if tc.wantVerdict == "" {
+				if len(posts) != 0 {
+					t.Fatalf("the daemon must not be asked, got %v", posts)
+				}
+				return
+			}
+			if len(posts) != 1 || posts[0].Path != "/jobs/wi_abc/abandon-repair" || !strings.Contains(posts[0].Body, `"verdict":"`+tc.wantVerdict+`"`) {
+				t.Fatalf("want one abandon-repair POST with verdict %s, got %+v", tc.wantVerdict, posts)
+			}
+			var probed bool
+			for _, r := range rec.all() {
+				probed = probed || strings.HasSuffix(r.Path, "/close-auth")
+			}
+			if !probed {
+				t.Error("the human-key authorization probe must run before the daemon")
+			}
+			if !strings.Contains(stdout, "abandoned") {
+				t.Errorf("stdout: %s", stdout)
+			}
+		})
 	}
 }
 
-// §1.7 holder-read goldens: `pf verify-session <wi>` renders the held
-// tri-state's public fields, hands the unheld answer through as an
-// ordinary exit-0 answer, and rides GET /work-items/{id}/session with
-// the caller's bearer key. No secret ever appears — the verb only ever
-// sees the public audit fields.
-const cannedHeldHolder = `{"work_item_id":"wi_abc","status":"running",` +
-	`"session_fingerprint":"ab12cd34ef56aa00","machine_id":"m-b",` +
-	`"session_owner":"op","session_started_at":"t0","clean_pause":false}`
-
-const cannedUnheldHolder = `{"work_item_id":"wi_abc","status":"queued","clean_pause":false}`
-
-// TestVerifySessionHeldText: a held-running WI renders the holder's
-// public fields and exits 0; the request is the §1.7 GET on the
-// caller's bearer key.
-func TestVerifySessionHeldText(t *testing.T) {
+// Without a local repair_pending job the original cancel error surfaces and
+// the daemon is never asked to abandon anything.
+func TestCancelRunningNotParkedKeepsHubError(t *testing.T) {
 	var rec reqRecorder
 	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, cannedHeldHolder)
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusConflict)
+			io.WriteString(w, `{"error":{"code":"CORE-409","detail":"running work item: end its session before cancelling"}}`)
+			return
+		}
+		io.WriteString(w, `{"id":"wi_abc","slug":"pf-42","seq":42,"project":"polyforge","goal":"g","status":"running","priority":"normal","reporter":"usr_1","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`)
 	})
-	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_API_KEY": "key-admin",
-	}, "verify-session", "wi_abc")
-	if code != 0 {
-		t.Fatalf("verify-session: code=%d stderr=%s", code, stderr)
+	d := newDaemonFixture(t)
+	d.answer("GET", "/status", `{"machine_id":"m1","auto":false,"workspaces":["/w"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
+	code, _, stderr := runPf(t, map[string]string{"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "k"}, "cancel", "wi_abc")
+	if code == 0 || !strings.Contains(stderr, "CORE-409") {
+		t.Fatalf("want the hub's CORE-409, code=%d stderr=%s", code, stderr)
 	}
-	for _, want := range []string{
-		"verify-session wi_abc: held (status running)",
-		"session: ab12cd34ef56aa00 (machine m-b, owner op)",
-		"started: t0",
-		"clean_pause: false",
-	} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("stdout missing %q:\n%s", want, stdout)
+	for _, r := range d.rec.all() {
+		if r.Method == "POST" {
+			t.Fatalf("daemon must not be asked: %+v", r)
 		}
 	}
-	// The request shape: GET /api/v1/work-items/{id}/session, bearer key.
+}
+
+// TestOpsEndSessionHappyPath: `pf ops end-session <wi> --reason ...` POSTs
+// the force-end-session route with the {reason} body on the caller's key
+// and tells the operator the WI is queued and claimable via `pf submit`.
+func TestOpsEndSessionHappyPath(t *testing.T) {
+	var rec reqRecorder
+	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	code, stdout, stderr := runPf(t, map[string]string{"PF_SERVER": aihub.URL},
+		"ops", "end-session", "wi_abc", "--reason", "holder machine died")
+	if code != 0 {
+		t.Fatalf("end-session: code=%d stderr=%s", code, stderr)
+	}
 	got := rec.last()
-	if got.Method != "GET" || got.Path != "/api/v1/work-items/wi_abc/session" {
-		t.Errorf("request = %s %s, want GET /api/v1/work-items/wi_abc/session", got.Method, got.Path)
+	if got.Method != "POST" || got.Path != "/api/v1/work-items/wi_abc/force-end-session" {
+		t.Fatalf("request = %s %s", got.Method, got.Path)
 	}
-	if got.Header.Get("Authorization") != "Bearer key-admin" {
-		t.Errorf("Authorization = %q", got.Header.Get("Authorization"))
+	var body map[string]any
+	if err := json.Unmarshal([]byte(got.Body), &body); err != nil {
+		t.Fatalf("body must decode: %v (%s)", err, got.Body)
 	}
-	if got.Body != "" {
-		t.Errorf("the holder read must send no body, got %q", got.Body)
+	if body["reason"] != "holder machine died" || len(body) != 1 {
+		t.Errorf("body = %v, want only {reason}", body)
 	}
-}
-
-// TestVerifySessionHeldJSON: --json emits the endpoint response
-// verbatim (decodes as the §1.7 wire type).
-func TestVerifySessionHeldJSON(t *testing.T) {
-	aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, cannedHeldHolder)
-	})
-	code, stdout, _ := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL,
-	}, "--json", "verify-session", "wi_abc")
-	if code != 0 {
-		t.Fatalf("verify-session --json: code=%d", code)
-	}
-	var resp api.SessionHolderResponse
-	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
-		t.Fatalf("json output must be the SessionHolderResponse: %v (%s)", err, stdout)
-	}
-	if resp.WorkItemID != "wi_abc" || resp.Status != "running" ||
-		resp.SessionFingerprint != "ab12cd34ef56aa00" || resp.MachineID != "m-b" ||
-		resp.SessionOwner != "op" || resp.SessionStartedAt != "t0" || resp.CleanPause {
-		t.Fatalf("holder = %+v", resp)
-	}
-	if strings.Contains(stdout, "session_id") {
-		t.Fatalf("--json must never carry a session secret: %s", stdout)
+	if !strings.Contains(stdout, "queued") || !strings.Contains(stdout, "pf submit wi_abc") {
+		t.Errorf("stdout must mention queued and pf submit: %s", stdout)
 	}
 }
 
-// TestVerifySessionUnheldIsAnAnswer: the unheld state is an ordinary
-// exit-0 answer in BOTH renderings — never an error (the takeover-
-// decision script needs no error handling to tell free from taken).
-func TestVerifySessionUnheldIsAnAnswer(t *testing.T) {
-	// Text mode.
+// TestOpsEndSessionJSON: --json emits the work item id + queued status.
+func TestOpsEndSessionJSON(t *testing.T) {
 	aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, cannedUnheldHolder)
+		w.WriteHeader(http.StatusNoContent)
 	})
-	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL,
-	}, "verify-session", "wi_abc")
+	code, stdout, stderr := runPf(t, map[string]string{"PF_SERVER": aihub.URL},
+		"--json", "ops", "end-session", "wi_abc", "--reason", "drill")
 	if code != 0 {
-		t.Fatalf("unheld text: code=%d stderr=%s", code, stderr)
+		t.Fatalf("end-session --json: code=%d stderr=%s", code, stderr)
 	}
-	if !strings.Contains(stdout, "nobody holds it (status queued)") {
-		t.Errorf("unheld text = %q", stdout)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("json output must decode: %v (%s)", err, stdout)
 	}
+	if out["work_item_id"] != "wi_abc" || out["status"] != "queued" {
+		t.Errorf("json = %v", out)
+	}
+}
 
-	// --json mode: the unheld endpoint JSON, still exit 0.
-	aihub2 := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, cannedUnheldHolder)
+// TestOpsEndSessionRefusals: a missing/blank --reason or a missing id is
+// refused before any request is sent.
+func TestOpsEndSessionRefusals(t *testing.T) {
+	var rec reqRecorder
+	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
 	})
-	code, stdout, _ = runPf(t, map[string]string{
-		"PF_SERVER": aihub2.URL,
-	}, "--json", "verify-session", "wi_abc")
-	if code != 0 {
-		t.Fatalf("unheld --json: code=%d", code)
+	for _, args := range [][]string{
+		{"ops", "end-session", "wi_abc"},
+		{"ops", "end-session", "wi_abc", "--reason", "   "},
+		{"ops", "end-session", "--reason", "drill"},
+	} {
+		code, _, stderr := runPf(t, map[string]string{"PF_SERVER": aihub.URL}, args...)
+		if code == 0 {
+			t.Errorf("%v: must be refused", args)
+		}
+		if stderr == "" {
+			t.Errorf("%v: refusal must explain itself", args)
+		}
 	}
-	var resp api.SessionHolderResponse
-	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
-		t.Fatalf("unheld --json must decode: %v (%s)", err, stdout)
+	if n := len(rec.all()); n != 0 {
+		t.Errorf("refused invocations must send nothing, saw %d requests", n)
 	}
-	if resp.WorkItemID != "wi_abc" || resp.Status != "queued" || resp.CleanPause ||
-		resp.SessionFingerprint != "" || resp.MachineID != "" ||
-		resp.SessionOwner != "" || resp.SessionStartedAt != "" {
-		t.Fatalf("unheld holder = %+v", resp)
+}
+
+// TestOpsEndSessionForbidden: a 403 from aihub surfaces as an error with
+// the typed code and the standard 4xx exit code (1).
+func TestOpsEndSessionForbidden(t *testing.T) {
+	aihub := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"code":"AUTH-403","detail":"force-end-session requires admin or a project maintainer"}`)
+	})
+	code, _, stderr := runPf(t, map[string]string{"PF_SERVER": aihub.URL},
+		"ops", "end-session", "wi_abc", "--reason", "drill")
+	if code != 1 || !strings.Contains(stderr, "AUTH-403") {
+		t.Fatalf("403: exit=%d stderr=%s", code, stderr)
 	}
 }

@@ -2,7 +2,7 @@
 // authoritative memory.md files and the reconcile procedure.
 //
 // Semantics are ported from the pilot-validated v0 implementation
-// (/v0/internal/memory, design authority 06-memory-search.md): the
+// (v0/internal/memory in git history, design authority 06-memory-search.md): the
 // three-step write order (tmp+fsync → Core tx → rename), the INV-7f
 // serving gate (row content_sha verified against the live file before
 // anything is served), file-wins reconciliation (INV-7c) and the

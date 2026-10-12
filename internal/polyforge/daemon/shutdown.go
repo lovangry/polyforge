@@ -6,10 +6,10 @@ package daemon
 //  1. latch shutting_down FIRST (external submissions now answer
 //     DAEMON-410 and the drain loop stops fetching — the same latch,
 //     two block paths);
-//  2. wait, bounded per job, for the agent's flush(shutdown) — its own
-//     commit-and-ack of what exists — or degrade on timeout (the data
-//     is in the working tree; the recovery engine's
-//     commit-dirty-on-recover picks it up at the next start);
+//  2. (no per-job grace: the driver owns the step state machine and
+//     there is no agent to ask for a final flush — uncommitted state
+//     in the working tree is picked up by the recovery engine's
+//     commit-dirty-on-recover at the next start);
 //  4. seal: stop the observe lane (no recovery signal may fire against
 //     the teardown), terminate every live agent tree, persist the
 //     bookkeeping (Runtime's state.json + the daemon state file);
@@ -30,13 +30,11 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"syscall"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
@@ -164,6 +162,7 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	// the daemon's stderr: the sink a post-mortem of the process
 	// window reads.
 	fmt.Fprintf(os.Stderr, "daemon: shutdown: cause=%s\n", cause)
+	d.recordLastShutdown(cause)
 
 	// Step 1: the latch, before any other action.
 	d.modes.SetShuttingDown()
@@ -172,17 +171,10 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	// set only shrinks from this moment (no source may add a job).
 	live := d.liveJobs()
 
-	// Step 2 (polyforge#106): the pf/stop_notice delivery face is
-	// deleted with the WI-Agent lane — the driver owns the step state
-	// machine, so there is no agent to notify "stop advancing". The
-	// bounded flush(shutdown) wait below is the sequence's only
-	// per-job grace.
-	//
-	// The bounded flush(shutdown) wait, one window per job in
-	// parallel (bounded by the overall ctx regardless).
-	if err := d.awaitShutdownFlushes(ctx, live); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon: shutdown flush wait: %v\n", err)
-	}
+	// Step 2 (polyforge#106): the pf/stop_notice delivery face and the
+	// agent's flush(shutdown) wait are deleted with the WI-Agent lane —
+	// the driver owns the step state machine, so there is no agent to
+	// notify or wait on.
 
 	// Step 4a: stop the observe lane FIRST and WAIT for every monitor to
 	// be gone — a monitor that watched the teardown would fire
@@ -269,65 +261,4 @@ func (d *Daemon) liveJobs() []runtime.JobInfo {
 		out = append(out, ji)
 	}
 	return out
-}
-
-// awaitShutdownFlushes waits, per job, for the monitor's shutdown-flush
-// commit to land (the agent's flush(shutdown) acked path writes an
-// EvPublished{shutdown:true} event) or the per-job window to expire.
-// A timeout DEGRADES — it never blocks the sequence.
-func (d *Daemon) awaitShutdownFlushes(ctx context.Context, live []runtime.JobInfo) error {
-	if len(live) == 0 {
-		return nil
-	}
-	type res struct {
-		wi      string
-		flushed bool
-	}
-	resCh := make(chan res, len(live))
-	for _, ji := range live {
-		go func(wi string) {
-			deadline := time.Now().Add(d.cfg.ShutdownFlushWait)
-			for time.Now().Before(deadline) {
-				if shutdownFlushed(d.obs.Events(), wi) {
-					resCh <- res{wi: wi, flushed: true}
-					return
-				}
-				select {
-				case <-ctx.Done():
-					resCh <- res{wi: wi}
-					return
-				case <-time.After(50 * time.Millisecond):
-				}
-			}
-			resCh <- res{wi: wi}
-		}(ji.WorkItem)
-	}
-	for range live {
-		r := <-resCh
-		if !r.flushed {
-			fmt.Fprintf(os.Stderr, "daemon: %s: no flush(shutdown) within the window — degrading (uncommitted state rides the recovery engine)\n", r.wi)
-		}
-	}
-	return ctx.Err()
-}
-
-// shutdownFlushed reports whether the monitor already committed this
-// work item's shutdown flush (the EvPublished event with the shutdown
-// marker written by observe's flushShutdown).
-func shutdownFlushed(log *observe.EventLog, wi string) bool {
-	if log == nil {
-		return false
-	}
-	for _, e := range log.Since(wi) {
-		if e.Kind != observe.EvPublished {
-			continue
-		}
-		var body struct {
-			Shutdown bool `json:"shutdown"`
-		}
-		if len(e.Body) > 0 && json.Unmarshal(e.Body, &body) == nil && body.Shutdown {
-			return true
-		}
-	}
-	return false
 }

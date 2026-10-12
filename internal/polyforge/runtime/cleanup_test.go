@@ -41,7 +41,7 @@ func spawnTreeCmd(wi string) *exec.Cmd {
 	c := exec.Command("sh", "-c", "sleep 300 & exec sleep 300")
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if wi != "" {
-		c.Env = append(os.Environ(), "PF_WI_ID="+wi)
+		c.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=")
 	}
 	return c
 }
@@ -189,7 +189,7 @@ func TestCleanupLayer4EnvMarkerSweep(t *testing.T) {
 	wi := "wi_c5_marker"
 	cmd := exec.Command("sleep", "300")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi)
+	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

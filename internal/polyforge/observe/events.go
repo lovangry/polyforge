@@ -2,18 +2,26 @@ package observe
 
 // events.go: the daemon events file + per-WI serving ring.
 //
-// Every observation the monitor makes is appended as ONE JSONL line to
-// <DataDir>/events.log using common/protocol.EventEntry (the wire-stable
-// shape the CLI and the aihub read face share). The same entries are kept
-// in an in-memory ring per work item (bounded, live view only) which is
-// what GET /jobs/{id}/observe serves: the events layer of the JobView
-// projection. The execution-state authority is NEVER here — it stays the
-// capsule's runtime-state/execution.json (INV-1); events are news, not
-// state.
+// Every observation the supervisor makes AND every driver event is
+// appended as ONE JSONL line to <DataDir>/events.log using
+// common/protocol.EventEntry (the wire-stable shape the CLI and the
+// aihub read face share). Each line carries its per-WI id (seq),
+// MONOTONIC across daemon restarts: on open the counters are rebuilt from
+// the durable files (plus a small snapshot written at rotation, so a WI
+// whose newest lines rotated away keeps counting forward). The file
+// rotates by size (events.log -> events.log.1 -> ...). The same entries
+// are kept in an in-memory ring per work item, pre-filled from the file
+// at open; the observe face serves the ring and falls back to the
+// durable files for a cursor older than the ring retains (history
+// survives restarts). The execution-state authority is NEVER here — it
+// stays the capsule's runtime-state/execution.json (INV-1); events are
+// news, not state, and an append failure is a logged degradation, never
+// a correctness dependency.
 
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -22,36 +30,19 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
-// Event kinds emitted by the observe lane. A closed set: execution
-// progress (job lifecycle), infrastructure news (the infra_incident
-// family, payload kind ∈ {provider_error, retry, hang_suspected,
-// hang_cleared, idle_suspect, idle_cleared}) and the push bookkeeping.
+// Event kinds emitted by the supervisor. Driver events (step_started,
+// step_done, needs_input, answered, interrupted, rewind, terminal,
+// step_failed, blocked, ...) land in the same log through the daemon
+// binding. A closed set per emitter: job lifecycle, supervisor verdicts
+// and the push bookkeeping.
 const (
-	EvJobStarted     = "job_started"
-	EvAgentRecovered = "wi_agent_rederived"
-	EvNeedsRecovery  = "needs_recovery"
-	EvInfraIncident  = "infra_incident"
-	EvNeedsInput     = "needs_input"
-	EvAnswered       = "answered"
-	// EvAnswerRedelivery is the F9 attach-time re-delivery record: an
-	// answer that was delivered but never consumed is re-sent to a newly
-	// attached agent instance (RTStarted/RTRecovered landing). One event
-	// per attempt; a failed re-delivery carries its error and the ledger
-	// keeps the answer re-deliverable.
-	EvAnswerRedelivery = "answer_redelivery"
-	// EvAnswerLedger is the persisted-answer-ledger bookkeeping record
-	// (answers.json under the daemon data directory). Payload `detail`
-	// is a closed set: "quarantine" (an unreadable/unparsable/unknown
-	// -version file was moved aside to answers.json.corrupt-<ts> and the
-	// daemon started with an empty ledger) and "write_failed" (one
-	// best-effort persist did not reach disk). Daemon-scope: appended
-	// with wi="" — the ledger spans every work item, and a load-time
-	// quarantine happens before any monitor exists.
-	EvAnswerLedger     = "answer_ledger"
+	EvJobStarted       = "job_started"
+	EvAgentRecovered   = "wi_agent_rederived"
+	EvNeedsRecovery    = "needs_recovery"
+	EvNeedsInput       = "needs_input"
 	EvPublished        = "published"
 	EvPushFailed       = "push_failed"
 	EvPushBackpressure = "push_backpressure"
-	EvWrapBlocked      = "wrap_blocked"
 	// EvPushPoisonedLocal is the V8-repair classification of the LOCAL
 	// gitlink precheck refusal (gitops' typed GIT-412
 	// LOCAL_GITLINK_DETECTED — the poison never entered local history).
@@ -64,57 +55,17 @@ const (
 	// already-committed gitlink (should one ever occur again) stays an
 	// ordinary push_failed and is counted, unchanged.
 	EvPushPoisonedLocal = "push_poisoned_local"
-	// EvWrapEvidenceRefused is the V4 fail-closed gate's record: a
-	// flush(wrap) was refused with DAEMON-400 VERIFICATION_EVIDENCE_MISSING
-	// because an executed verification step carries no structured command
-	// evidence. The attempt is NOT terminal — the agent appends the
-	// evidence and re-flushes — so this is neither wrap_blocked nor any
-	// push bookkeeping; the refusal happened before any commit attempt.
-	EvWrapEvidenceRefused = "wrap_evidence_refused"
-	// EvWrapIntentRefused is the release-intent wrap gate's record
-	// (polyforge#123, P1a): a flush(wrap) was refused with DAEMON-400
-	// RELEASE_INTENT_MISSING because releaseable code changed with no
-	// covering entry in artifacts/release-intent.json (or the fragment was
-	// schema-invalid). Same non-terminal shape as the evidence refusal —
-	// the agent writes the fragment and re-flushes — so this is neither
-	// wrap_blocked nor any push bookkeeping.
-	EvWrapIntentRefused = "wrap_intent_refused"
 	// EvTranscriptMissing is the F3 typed warning: a commit-boundary
 	// transcript sync could not locate the derivation's live harness
 	// transcript (the harness wrote nothing under its session store).
 	// Advisory only — the commit/push proceed without the transcript;
 	// one event per attempt, never a spam loop.
 	EvTranscriptMissing = "transcript_missing"
-	// EvVersionStagnant is the C3' belt-and-braces warning: execution.json
-	// was rewritten (mtime advanced) N consecutive times WITHOUT a
-	// top-level Version bump — the archival contract is violated, the
-	// monitor schedules a fallback commit anyway, and the event names the
-	// violation so the operator can fix the agent's write path. Version
-	// stays the primary archival semantic.
-	EvVersionStagnant = "version_stagnant"
-	// EvNoProgress is the F15c owner face: the agent's stream has
-	// carried NO progress record for longer than the idle window — the
-	// same progress-silence signal the hang/idle watchdogs judge, landed
-	// in the events log so the owner can see a stalled job even while
-	// the watchdogs are still inside their probe/confirmation cycle.
-	// Throttled to at most one event per window; cleared by resumed
-	// progress, a probe round and recovery adoption. Exempt while a
-	// question is pending (needs_input is designed stillness and already
-	// owns the QUESTION face) and in every suppressed state.
-	EvNoProgress = "no_progress"
-	EvJobStopped = "job_stopped"
-	// The F6-B memory channel bookkeeping: one event per UDS recall /
-	// remember the daemon proxied (payload: top_k + hit count, or the
-	// stored id/type/visibility — plus the write_ms timing on remember,
-	// see EvMemoryRemember). Observability only — the routes are
-	// stateless proxies and carry no monitor state.
-	// EvMemoryRemember is the memory channel's write half: the body
-	// carries the stored id/type/visibility plus write_ms — the
-	// Store.Create commit round-trip in milliseconds as seen at the
-	// append site (M6's write→retrievable latency sample; observed-only,
-	// idempotent replays timed just as honestly as fresh writes).
-	EvMemoryRecall   = "memory_recall"
-	EvMemoryRemember = "memory_remember"
+	// EvSupervisorVerdict records one supervisor verdict (step_dead with
+	// its cause and evidence, or driver_stalled) at the moment it is sent
+	// to the driver.
+	EvSupervisorVerdict = "supervisor_verdict"
+	EvJobStopped        = "job_stopped"
 	// EvDrainDegraded is the drain loop's authorization-class degraded
 	// signal (daemon/daemon.go fetchDrainWave): a drain-mode wave fetch of
 	// the ready queue was denied for authorization reasons (typed aihub
@@ -137,19 +88,26 @@ const (
 	// session-verify could not reach aihub. Log-only by contract — no
 	// action is ever taken on a transport error; the retry is bounded.
 	EvSessionVerifyFailed = "session_verify_failed"
-)
-
-// Infra-incident payload kinds (04 §5.1a tenth-event family).
-const (
-	IncidentProviderError = "provider_error"
-	IncidentRetry         = "retry"
-	HangSuspected         = "hang_suspected"
-	HangCleared           = "hang_cleared"
-	// IdleSuspected/IdleCleared are the F5 idle watchdog's probe
-	// bookkeeping: the same confirmation-probe in/out shape as the hang
-	// pair, fired when the stream is quiet with NO turn in flight.
-	IdleSuspected = "idle_suspect"
-	IdleCleared   = "idle_cleared"
+	// EvSubmitRejected (v2 §5): an accepted submit's StartIntent failed at
+	// dispatch (live or replayed after a restart); body carries the error,
+	// intent and the entry's submitted_at/origin. The submit was answered
+	// `accepted` earlier, so this durable event is how watchers learn it
+	// did not start.
+	EvSubmitRejected = "submit_rejected"
+	// EvSubmitDropped (v2 §5): a persisted submit was NOT replayed after a
+	// restart (resume intent, or aihub no longer shows the WI
+	// queued, or the claiming journal already owns it); body names why.
+	EvSubmitDropped = "submit_dropped"
+	// EvCapsuleMissing / EvProjectUnmapped (v2 §6): the WI was parked
+	// repair_pending at restart; body names the path/project and the fix.
+	// Emitted by the runtime (runtime.RepairCapsuleMissing/Unmapped carry
+	// the same strings).
+	EvCapsuleMissing  = "capsule_missing"
+	EvProjectUnmapped = "project_unmapped"
+	// EvDaemonRestarted (v2 §6): written into every WI the daemon
+	// recovered or parked after restart reconciliation; body carries the
+	// previous shutdown cause when known (#110) else "unknown".
+	EvDaemonRestarted = "daemon_restarted"
 )
 
 // RingCap bounds the per-WI live view served over observe.
@@ -158,47 +116,177 @@ const RingCap = 500
 // EventsFile is the JSONL file name inside the daemon data directory.
 const EventsFile = "events.log"
 
+// eventsSeqFile is the counter snapshot written at rotation.
+const eventsSeqFile = "events.seq"
+
+// Rotation defaults: the file rotates when it reaches
+// DefaultEventsMaxBytes and DefaultEventsKeep rotated generations stay.
+const (
+	DefaultEventsMaxBytes = 16 << 20
+	DefaultEventsKeep     = 3
+	// HistoryCap bounds one durable-history answer.
+	HistoryCap = 5000
+)
+
+// EventLogOpts tunes rotation (zero = the defaults).
+type EventLogOpts struct {
+	MaxBytes int64
+	Keep     int
+}
+
 // EventLog appends protocol.EventEntry lines to the daemon events file
 // and mirrors them into per-WI rings. Safe for concurrent use: monitor
-// goroutines, flush sub-goroutines and the HTTP read face all touch it.
+// goroutines, push sub-goroutines, the driver and the HTTP read face all
+// touch it.
 type EventLog struct {
-	mu   sync.Mutex
-	f    *os.File
-	path string
+	mu       sync.Mutex
+	f        *os.File
+	path     string
+	dir      string
+	size     int64
+	maxBytes int64
+	keep     int
 	// rings holds per-WI protocol.EventEntry values. Seq is the per-WI
 	// MONOTONIC append ordinal — the total appended count at write time,
-	// not a ring index: truncation only bounds RETENTION, never the
-	// numbering, so a client's ?after cursor keeps working across ring
-	// turnover (#21). The ring is the ONLY seq authority: the durable
-	// file keeps writing the bare entry without one (a daemon restart
-	// legitimately renumbers seq from 1, so written-back seqs would
-	// collide with earlier runs' lines).
+	// persisted on every line and rebuilt from the files at open, so the
+	// numbering survives truncation of the ring AND daemon restarts (a
+	// client's ?after cursor keeps working throughout).
 	rings  map[string][]protocol.EventEntry
 	totals map[string]int64 // per-WI append count: the monotonic seq source
 }
 
 // NewEventLog opens (creating if needed) <dataDir>/events.log.
 func NewEventLog(dataDir string) (*EventLog, error) {
+	return NewEventLogOpts(dataDir, EventLogOpts{})
+}
+
+// NewEventLogOpts is NewEventLog with explicit rotation tuning.
+func NewEventLogOpts(dataDir string, o EventLogOpts) (*EventLog, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dataDir, EventsFile),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if o.MaxBytes <= 0 {
+		o.MaxBytes = DefaultEventsMaxBytes
+	}
+	if o.Keep <= 0 {
+		o.Keep = DefaultEventsKeep
+	}
+	l := &EventLog{
+		path:     filepath.Join(dataDir, EventsFile),
+		dir:      dataDir,
+		maxBytes: o.MaxBytes,
+		keep:     o.Keep,
+		rings:    map[string][]protocol.EventEntry{},
+		totals:   map[string]int64{},
+	}
+	l.loadSnapshot()
+	// rebuild counters + rings from the durable files (oldest first)
+	for _, e := range l.scanFiles() {
+		if e.Seq <= 0 {
+			continue // not a valid persisted event (ids are always persisted)
+		}
+		if e.Seq > l.totals[e.WI] {
+			l.totals[e.WI] = e.Seq
+		}
+		ring := append(l.rings[e.WI], e)
+		if len(ring) > RingCap {
+			ring = ring[len(ring)-RingCap:]
+		}
+		l.rings[e.WI] = ring
+	}
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	return &EventLog{f: f, path: filepath.Join(dataDir, EventsFile),
-		rings: map[string][]protocol.EventEntry{}, totals: map[string]int64{}}, nil
+	if st, err := f.Stat(); err == nil {
+		l.size = st.Size()
+	}
+	l.f = f
+	return l, nil
 }
 
 // Path returns the events file location (diagnostic/tests).
 func (l *EventLog) Path() string { return l.path }
 
+func (l *EventLog) rotatedPath(i int) string { return fmt.Sprintf("%s.%d", l.path, i) }
+
+// loadSnapshot reads the rotation-time counter snapshot.
+func (l *EventLog) loadSnapshot() {
+	raw, err := os.ReadFile(filepath.Join(l.dir, eventsSeqFile))
+	if err != nil {
+		return
+	}
+	var m map[string]int64
+	if json.Unmarshal(raw, &m) == nil {
+		for wi, n := range m {
+			if n > l.totals[wi] {
+				l.totals[wi] = n
+			}
+		}
+	}
+}
+
+// writeSnapshotLocked persists the counters (tmp + rename).
+func (l *EventLog) writeSnapshotLocked() {
+	raw, err := json.Marshal(l.totals)
+	if err != nil {
+		return
+	}
+	tmp := filepath.Join(l.dir, eventsSeqFile+".tmp")
+	if os.WriteFile(tmp, raw, 0o644) == nil {
+		_ = os.Rename(tmp, filepath.Join(l.dir, eventsSeqFile))
+	}
+}
+
+// scanFiles parses every durable generation, oldest first.
+func (l *EventLog) scanFiles() []protocol.EventEntry {
+	var out []protocol.EventEntry
+	paths := make([]string, 0, l.keep+1)
+	for i := l.keep; i >= 1; i-- {
+		paths = append(paths, l.rotatedPath(i))
+	}
+	paths = append(paths, l.path)
+	for _, p := range paths {
+		es, _ := ReadEventsFile(p)
+		out = append(out, es...)
+	}
+	return out
+}
+
+// rotateLocked moves the full file aside and opens a fresh one. The
+// counter snapshot is written FIRST so ids stay monotonic even when the
+// generation holding a WI's newest line is later dropped.
+func (l *EventLog) rotateLocked() error {
+	l.writeSnapshotLocked()
+	if err := l.f.Close(); err != nil {
+		return err
+	}
+	_ = os.Remove(l.rotatedPath(l.keep))
+	for i := l.keep - 1; i >= 1; i-- {
+		_ = os.Rename(l.rotatedPath(i), l.rotatedPath(i+1))
+	}
+	if err := os.Rename(l.path, l.rotatedPath(1)); err != nil {
+		// keep appending to the oversized file rather than lose the log
+		f, oerr := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if oerr == nil {
+			l.f = f
+		}
+		return err
+	}
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	l.f, l.size = f, 0
+	return nil
+}
+
 // Append writes one event for work item wi. body may be nil. The file
-// write is best-effort by design (§五: a needs_input flush degrades to
-// "write events file, do not block the agent"): an I/O failure is
-// returned to the caller, but the ring entry is recorded either way so
-// the live observe face keeps working.
+// write is best-effort by design (§五: an events-file failure never
+// blocks the agent, and execution.json stays the authority): an I/O
+// failure is returned to the caller as a degradation signal, but the
+// ring entry (and the in-memory counter) is recorded either way so the
+// live observe face keeps working.
 func (l *EventLog) Append(wi, kind string, body any) error {
 	entry := protocol.EventEntry{
 		At:   time.Now().UTC().Format(time.RFC3339Nano),
@@ -212,19 +300,28 @@ func (l *EventLog) Append(wi, kind string, body any) error {
 		}
 		entry.Body = raw
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.totals[wi]++
+	entry.Seq = l.totals[wi]
 	line, err := json.Marshal(entry)
 	if err != nil {
 		return err
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	_, werr := l.f.Write(append(line, '\n'))
-	l.totals[wi]++
-	seq := l.totals[wi]
-	// The file line above keeps the wire-stable bare shape (no seq);
-	// the ring entry is the one that carries it, so the serve face can
-	// hand clients their next ?after cursor.
-	entry.Seq = seq
+	line = append(line, '\n')
+	var werr error
+	if l.f == nil {
+		werr = os.ErrClosed
+	} else {
+		n, e := l.f.Write(line)
+		l.size += int64(n)
+		werr = e
+		if werr == nil && l.size >= l.maxBytes {
+			if rerr := l.rotateLocked(); rerr != nil {
+				werr = rerr
+			}
+		}
+	}
 	ring := append(l.rings[wi], entry)
 	if len(ring) > RingCap {
 		ring = ring[len(ring)-RingCap:]
@@ -233,9 +330,8 @@ func (l *EventLog) Append(wi, kind string, body any) error {
 	return werr
 }
 
-// Since returns the ring entries for wi (at most RingCap, oldest first).
-// The live view only: a daemon restart empties it, and the file remains
-// the durable record.
+// Since returns the ring entries for wi (at most RingCap, oldest first):
+// the live view, pre-filled from the durable file at open.
 func (l *EventLog) Since(wi string) []protocol.EventEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -244,18 +340,46 @@ func (l *EventLog) Since(wi string) []protocol.EventEntry {
 	return out
 }
 
-// SinceAfter returns the retained entries for wi whose seq is strictly
-// greater than after — the GET /jobs/{id}/observe ?after cursor (#21).
-// Because seq counts TOTAL appends, not ring slots, an after value that
-// falls in the truncated span simply yields the whole retained ring.
+// SinceAfter returns the entries for wi whose seq is strictly greater
+// than after — the GET /jobs/{id}/observe ?after cursor (#21). The ring
+// answers when it still holds the cursor's successor; a cursor older than
+// the ring (or from before a restart that outlived the ring) is served
+// from the DURABLE files, so history is never limited to the in-memory
+// ring (at most HistoryCap entries per answer, oldest first).
 func (l *EventLog) SinceAfter(wi string, after int64) []protocol.EventEntry {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	ring := l.rings[wi]
-	out := make([]protocol.EventEntry, 0, len(ring))
-	for _, e := range ring {
-		if e.Seq > after {
-			out = append(out, e)
+	total := l.totals[wi]
+	covered := len(ring) > 0 && ring[0].Seq <= after+1
+	if covered || total <= after {
+		out := make([]protocol.EventEntry, 0, len(ring))
+		for _, e := range ring {
+			if e.Seq > after {
+				out = append(out, e)
+			}
+		}
+		l.mu.Unlock()
+		return out
+	}
+	l.mu.Unlock()
+	return l.History(wi, after)
+}
+
+// History reads the durable files for wi's entries with seq > after
+// (oldest first, at most HistoryCap). It is read-only and runs outside
+// the append lock; a concurrent rotation can only make it see a
+// generation boundary twice, which the seq filter absorbs.
+func (l *EventLog) History(wi string, after int64) []protocol.EventEntry {
+	var out []protocol.EventEntry
+	seen := map[int64]bool{}
+	for _, e := range l.scanFiles() {
+		if e.WI != wi || e.Seq <= after || seen[e.Seq] {
+			continue
+		}
+		seen[e.Seq] = true
+		out = append(out, e)
+		if len(out) >= HistoryCap {
+			break
 		}
 	}
 	return out
@@ -265,10 +389,15 @@ func (l *EventLog) SinceAfter(wi string, after int64) []protocol.EventEntry {
 func (l *EventLog) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.f.Close()
+	if l.f == nil {
+		return nil
+	}
+	err := l.f.Close()
+	l.f = nil
+	return err
 }
 
-// ReadEventsFile parses the whole events file (test/diagnostic face).
+// ReadEventsFile parses one events file (test/diagnostic face).
 func ReadEventsFile(path string) ([]protocol.EventEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {

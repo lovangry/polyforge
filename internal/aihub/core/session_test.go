@@ -2,7 +2,7 @@ package core
 
 // session_test.go — the v1.5 session model's core-level red lines (Lane A
 // verification list): CAS race, idempotent replay, compare-only verify,
-// attach gates, takeover swap + audit event, session-end fence + full
+// attach gates, force-end + audit event, session-end fence + full
 // field clear, claim gates, the pause/clean_pause distinction, and the
 // git credential's session path.
 
@@ -129,11 +129,9 @@ func TestSessionClaimIdempotentReplay(t *testing.T) {
 	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: secret, IdempotencyKey: "key-1"}, env.UserIDB); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "IDEMPOTENCY_KEY_REUSED" {
 		t.Fatalf("key reuse across callers not refused: %v", err)
 	}
-	// Takeover swaps the session: the cached response is now stale.
-	if _, err := m.Takeover(id, api.SessionClaimRequest{
-		SessionID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Reason: "machine lost",
-	}, env.UserID); err != nil {
-		t.Fatalf("takeover: %v", err)
+	// A force-end clears the session: the cached response is now stale.
+	if err := m.ForceEnd(id, "machine lost", env.UserID); err != nil {
+		t.Fatalf("force-end: %v", err)
 	}
 	_, err := m.Claim(id, api.SessionClaimRequest{SessionID: secret, IdempotencyKey: "key-1"}, env.UserID)
 	if !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
@@ -226,7 +224,7 @@ func TestSessionAttachGates(t *testing.T) {
 	if !found {
 		t.Fatalf("session_attached event missing")
 	}
-	// Operator pause (clean_pause): attach refuses, only takeover (or a
+	// Operator pause (clean_pause): attach refuses, only a force-end (or a
 	// CLI unpause) may resume.
 	if err := m.Pause(id, secret, true, "operator pause", env.UserID); err != nil {
 		t.Fatalf("clean pause: %v", err)
@@ -240,32 +238,36 @@ func TestSessionAttachGates(t *testing.T) {
 	}
 }
 
-// TestSessionTakeover: the swap is atomic, the OLD fingerprint rides the
-// session_superseded event (m4), the old secret dies at the git face, the
-// new one works, and takeover is idempotent on its key.
-func TestSessionTakeover(t *testing.T) {
+// TestSessionForceEnd: a running WI holding a session is force-ended back to
+// queued, EVERY session field is cleared, the old secret dies everywhere
+// (git face, End, Pause, Verify), the OLD fingerprint/machine ride the
+// session_superseded event, and a paused holder is ended the same way.
+func TestSessionForceEnd(t *testing.T) {
 	env, m := sessionEnv(t)
-	id := mustCreateExecWI(t, env, "takeover goal", nil, "")
+	id := mustCreateExecWI(t, env, "force-end goal", nil, "")
 	oldSecret := "01010101010101010101010101010101"
 	mustSessionClaim(t, m, env, id, oldSecret, "t-1")
 
-	newSecret := "02020202020202020202020202020202"
-	claim, err := m.Takeover(id, api.SessionClaimRequest{
-		SessionID: newSecret, MachineID: "m2", Owner: "op2", Reason: "machine lost", IdempotencyKey: "tk-1",
-	}, env.UserID)
-	if err != nil {
-		t.Fatalf("takeover: %v", err)
+	if err := m.ForceEnd(id, "machine lost", env.UserID); err != nil {
+		t.Fatalf("force-end: %v", err)
 	}
-	if claim.SessionFingerprint != api.SessionFingerprint(newSecret) {
-		t.Fatalf("takeover answered the wrong fingerprint: %+v", claim)
+	st, hash, fp, _, _, _, cp := rowSession(t, env, id)
+	if st != api.StatusQueued || cp || (hash != nil && *hash != "") || (fp != nil && *fp != "") {
+		t.Fatalf("force-end did not clear the session: status=%s clean=%v hash=%v fp=%v", st, cp, hash, fp)
 	}
 	if fp, err := env.Owners.CheckSessionCredential(id, id, oldSecret); err == nil {
 		t.Fatalf("old secret still authenticates (fp=%s)", fp)
 	}
-	if fp, err := env.Owners.CheckSessionCredential(id, id, newSecret); err != nil || fp != api.SessionFingerprint(newSecret) {
-		t.Fatalf("new secret rejected: %v %q", err, fp)
+	if err := m.End(id, api.SessionEndRequest{SessionID: oldSecret, Status: api.StatusWrapped}, env.UserID); !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
+		t.Fatalf("old secret can still end: %v", err)
 	}
-	// The audit event carries the OLD fingerprint.
+	if err := m.Pause(id, oldSecret, false, "", env.UserID); !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
+		t.Fatalf("old secret can still pause: %v", err)
+	}
+	if v, err := m.Verify(id, oldSecret); err != nil || v.Matches {
+		t.Fatalf("old secret still verifies: %+v %v", v, err)
+	}
+	// The audit event carries the OLD fingerprint and the transition.
 	found := false
 	events, _ := env.WIs.Events(id)
 	for _, e := range events {
@@ -277,30 +279,57 @@ func TestSessionTakeover(t *testing.T) {
 		if err := json.Unmarshal(e.Payload, &p); err != nil {
 			t.Fatalf("superseded payload: %v", err)
 		}
-		if p["old_session_fingerprint"] != api.SessionFingerprint(oldSecret) {
-			t.Fatalf("superseded event lost the old fingerprint: %s", e.Payload)
+		if p["old_session_fingerprint"] != api.SessionFingerprint(oldSecret) ||
+			p["from"] != api.StatusRunning || p["to"] != api.StatusQueued || p["reason"] != "machine lost" {
+			t.Fatalf("superseded event payload wrong: %s", e.Payload)
 		}
 	}
 	if !found {
 		t.Fatalf("session_superseded event missing")
 	}
-	// Idempotency: the same key replays the same new session.
-	again, err := m.Takeover(id, api.SessionClaimRequest{
-		SessionID: "03030303030303030303030303030303", Reason: "retry", IdempotencyKey: "tk-1",
-	}, env.UserID)
-	if err != nil {
-		t.Fatalf("takeover replay: %v", err)
+	// The WI is claimable again by a fresh session.
+	mustSessionClaim(t, m, env, id, "02020202020202020202020202020202", "t-2")
+
+	// A paused holder is force-ended too.
+	pid := mustCreateExecWI(t, env, "force-end paused", nil, "")
+	pSecret := "05050505050505050505050505050505"
+	mustSessionClaim(t, m, env, pid, pSecret, "t-3")
+	if err := m.Pause(pid, pSecret, true, "operator", env.UserID); err != nil {
+		t.Fatalf("pause: %v", err)
 	}
-	if again.SessionFingerprint != claim.SessionFingerprint {
-		t.Fatalf("takeover replay minted another session: %+v", again)
+	if err := m.ForceEnd(pid, "operator walked away", env.UserID); err != nil {
+		t.Fatalf("force-end of paused WI: %v", err)
 	}
-	// Takeover of a queued WI refuses (NOT_TAKEOVERABLE); reason required.
-	qid := mustCreateExecWI(t, env, "queued takeover", nil, "")
-	if _, err := m.Takeover(qid, api.SessionClaimRequest{SessionID: "17171717171717171717171717171717", Reason: "r"}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_TAKEOVERABLE" {
-		t.Fatalf("takeover of queued WI allowed: %v", err)
+	st, hash, _, _, _, _, cp = rowSession(t, env, pid)
+	if st != api.StatusQueued || cp || (hash != nil && *hash != "") {
+		t.Fatalf("paused force-end wrong: status=%s clean=%v hash=%v", st, cp, hash)
 	}
-	if _, err := m.Takeover(id, api.SessionClaimRequest{SessionID: "0404", Reason: ""}, env.UserID); !IsCode(err, api.ErrCoreBadInput) {
-		t.Fatalf("empty reason accepted: %v", err)
+	if err := m.End(pid, api.SessionEndRequest{SessionID: pSecret, Status: api.StatusWrapped}, env.UserID); !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
+		t.Fatalf("paused-holder old secret can still end: %v", err)
+	}
+}
+
+// TestSessionForceEndRefusals: reason required, a queued (unheld) WI is
+// NOT_HELD, a terminal WI is Gone.
+func TestSessionForceEndRefusals(t *testing.T) {
+	env, m := sessionEnv(t)
+	qid := mustCreateExecWI(t, env, "queued force-end", nil, "")
+	if err := m.ForceEnd(qid, "r", env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_HELD" {
+		t.Fatalf("force-end of queued WI allowed: %v", err)
+	}
+	id := mustCreateExecWI(t, env, "refusals", nil, "")
+	secret := "06060606060606060606060606060606"
+	mustSessionClaim(t, m, env, id, secret, "r-1")
+	for _, reason := range []string{"", "   "} {
+		if err := m.ForceEnd(id, reason, env.UserID); !IsCode(err, api.ErrCoreBadInput) {
+			t.Fatalf("empty reason %q accepted: %v", reason, err)
+		}
+	}
+	if err := m.End(id, api.SessionEndRequest{SessionID: secret, Status: api.StatusWrapped}, env.UserID); err != nil {
+		t.Fatalf("end: %v", err)
+	}
+	if err := m.ForceEnd(id, "r", env.UserID); !IsCode(err, api.ErrCoreGone) || ErrorReason(err) != "TERMINAL_STATE" {
+		t.Fatalf("force-end of terminal WI allowed: %v", err)
 	}
 }
 
@@ -507,14 +536,12 @@ func TestCheckSessionCredentialSessionPath(t *testing.T) {
 	if !IsCode(err, api.ErrGitForbidden) || ErrorReason(err) != "PAUSED" {
 		t.Fatalf("paused push not refused: %v", err)
 	}
-	// After takeover the old secret is dead even while running.
+	// After a force-end the old secret is dead.
 	if _, err := m.Attach(id, api.SessionAttachRequest{SessionID: secret}, env.UserID); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if _, err := m.Takeover(id, api.SessionClaimRequest{
-		SessionID: "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c", Reason: "swap",
-	}, env.UserID); err != nil {
-		t.Fatalf("takeover: %v", err)
+	if err := m.ForceEnd(id, "swap", env.UserID); err != nil {
+		t.Fatalf("force-end: %v", err)
 	}
 	if _, err := env.Owners.CheckSessionCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) {
 		t.Fatalf("superseded secret still valid: %v", err)

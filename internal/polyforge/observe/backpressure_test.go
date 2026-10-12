@@ -15,6 +15,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 func TestBackpressureFiveFailedPushesWriteDegradationEvent(t *testing.T) {
@@ -41,10 +42,10 @@ func TestBackpressureFiveFailedPushesWriteDegradationEvent(t *testing.T) {
 	soon(t, time.Second, "steps-reason degradation event", func() bool {
 		return len(backpressureByReason(m, "steps")) >= 1
 	})
-	// The agent is NOT killed and the monitor still classifies records.
-	feed(h, fxTextDelta)
+	// The agent is NOT killed and the monitor still consumes facts.
+	m.link.Fact(supervise.StepStarted{Step: "code", SpawnN: 1, StartedAt: time.Now()})
 	soon(t, 300*time.Millisecond, "monitor alive during degradation", func() bool {
-		return m.stream.heartbeat().Records >= 1
+		return m.activity().InDispatch
 	})
 
 	// Recovery of the push path resets the episode: no further

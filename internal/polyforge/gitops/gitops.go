@@ -306,6 +306,18 @@ func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 	return localSHA, pushed, timings, perr
 }
 
+// Head answers the capsule's current HEAD commit SHA ("" with an error
+// for an unborn branch / unreadable repo). Read-only.
+func Head(o Opts) (string, error) {
+	release := Lock(o.WorkItemID)
+	defer release()
+	out, err := git(o.Env(), o.CapsuleDir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // nextSeq derives the next Polyforge-Seq trailer value from the capsule's
 // commit count (monotonic per WI, survives a lost state.json, and safe to
 // recompute: only a landed commit moves the count). An unborn branch (no
@@ -537,6 +549,35 @@ func Clone(o Opts) error {
 	return err
 }
 
+// RemotePublished answers whether the WI's bare repo holds published
+// progress (a refs/heads/*). (false, nil) means provably nothing
+// published: no remote configured, the repo absent, or reachable and
+// empty. Any other failure (transport, auth) is an error: "unknown" is
+// never read as "nothing published".
+func RemotePublished(o Opts) (bool, error) {
+	if o.RemoteURL == "" {
+		return false, nil
+	}
+	release := Lock(o.WorkItemID)
+	defer release()
+	additions, cleanup, err := credentialEnv(o)
+	if err != nil {
+		return false, err
+	}
+	defer cleanup()
+	env := append(os.Environ(), additions...)
+	out, err := git(env, "", "ls-remote", o.RemoteURL, "refs/heads/*")
+	if err != nil {
+		low := strings.ToLower(err.Error())
+		if strings.Contains(low, "does not appear to be a git repository") ||
+			(strings.Contains(low, "repository") && strings.Contains(low, "not found")) {
+			return false, nil // the bare repo does not exist: nothing published
+		}
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // InitLocal initializes the capsule worktree without a remote: the
 // fresh-derivation fallback when the bare repo is unreachable. Takes the
 // per-WI lock.
@@ -646,13 +687,17 @@ func ExternalizeGitDir(o Opts) error {
 		}
 		return fmt.Errorf("gitops: capsule %s has a pointer but no git-dir at %s", o.CapsuleDir, o.GitDir)
 	}
+	// An existing target here is a STALE git-dir (a previous session's
+	// HEAD/index): silently adopting it (or merging the fresh clone over
+	// it) leaves a worktree at the remote tip under a diverged history.
+	// Fail loudly; the caller quarantines the unit before cloning.
+	if _, serr := os.Lstat(o.GitDir); serr == nil {
+		return fmt.Errorf("gitops: refusing to externalize %s: git-dir target %s already exists (stale git-dir from a previous session; quarantine it first)", inner, o.GitDir)
+	} else if !os.IsNotExist(serr) {
+		return serr
+	}
 	if err := crossDeviceMove(inner, o.GitDir); err != nil {
-		if !os.IsExist(err) {
-			return err
-		}
-		if err := os.RemoveAll(inner); err != nil {
-			return err
-		}
+		return err
 	}
 	if err := os.WriteFile(inner, []byte("gitdir: "+o.GitDir+"\n"), 0o644); err != nil {
 		return err

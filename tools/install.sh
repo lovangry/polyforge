@@ -172,7 +172,7 @@ else
     --config "$CFG" \
     -api-key "$KEY" \
     -machine-id "m-$MACHINE_ID" \
-    -mode interactive \
+    -auto=false \
     -data-dir "$DAEMON_DATA" \
     -socket "$DAEMON_SOCKET" \
     -workflows-dir "$WORKFLOWS" \
@@ -197,5 +197,5 @@ echo "== 5/5 verify"
   && echo "   ✓ daemon alive" \
   || echo "   ✗ daemon not responding"
 echo ""
-echo "Done. Daily use: 'pf queue' / 'pf submit <wi>' / 'pf observe <wi>'"
+echo "Done. Daily use: 'pf queue' / 'pf submit <wi>' / 'pf watch <wi> --once'"
 echo "From a pi session: just ask naturally (polyforge skill routes)."

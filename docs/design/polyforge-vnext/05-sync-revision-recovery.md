@@ -1,5 +1,7 @@
 # 05 — Sync / Revision / Recovery：单一发布路径、不可变 Revision、先数据后状态与 takeover fencing
 
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+
 | 权威项 | 值 |
 |---|---|
 | 文档定位 | 全扫描发布的单一路径（watcher dirty 标记 + 四类触发事件）、不可变 Revision 数据模型与文件格式、HEAD 推进、先数据后状态、同步传输机制（裁定）、takeover fencing、删除保护、崩溃恢复 |

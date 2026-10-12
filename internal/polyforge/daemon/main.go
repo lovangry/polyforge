@@ -11,8 +11,8 @@ package daemon
 // --config file, defaulting to the standard cli.toml location) is the
 // only workspace source — the daemon refuses to start without a non-empty
 // mapping, validates every mapped workspace, routes capsules per project
-// through the inverse mapping, and iterates all mapped projects in batch
-// and drain. The retired selection surfaces (the -workspace flag, the
+// through the inverse mapping, and iterates all mapped projects when
+// auto-pulling. The retired selection surfaces (the -workspace flag, the
 // --project flag and their env mirrors) are refused loudly at boot.
 
 import (
@@ -32,19 +32,6 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 )
 
-// retiredEnvNames are the retired selection environment variables
-// (polyforge#113), assembled from fragments so the source bytes never
-// carry them contiguously (the greppable floor — the same posture as
-// legacyLaneEnvPrefix below): the ambient default-project variable and
-// the daemon workspace mirror. A daemon whose environment carries either
-// is refused BEFORE anything is loaded or served — silently ignoring
-// them would be exactly the acceptance the spec forbids. The boot
-// refusal names whatever it matched at runtime.
-var retiredEnvNames = []string{
-	"PF_" + "PROJECT",
-	"POLYFORGE_" + "WORKSPACE",
-}
-
 // Main executes `pf daemon <flags>` and returns the process exit code.
 func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("pf daemon", flag.ContinueOnError)
@@ -53,7 +40,8 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	socket := fs.String("socket", "", "unix socket path (env PF_DAEMON_SOCKET; default /run/polyforge.sock)")
 	server := fs.String("server", "", "aihub base URL (env PF_SERVER)")
 	apiKey := fs.String("api-key", "", "machine aihub api key (env PF_API_KEY)")
-	machineID := fs.String("machine-id", "", "machine identity (env POLYFORGE_MACHINE_ID; default m-<hostname>)")
+	machineID := fs.String("machine-id", "", "daemon id (env POLYFORGE_MACHINE_ID; default m-<hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start")
+	displayName := fs.String("display-name", "", "daemon display name shown by `pf ops status` (env POLYFORGE_DISPLAY_NAME; default hostname)")
 	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
 	piBin := fs.String("pi-bin", "", "harness binary (default pi)")
@@ -62,23 +50,17 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	gitRemoteBase := fs.String("git-remote-base", "", "aihub bare-repo base URL (default <server>/git)")
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
 	recallTopK := fs.Int("recall-topk", 0, "claim-time memory snapshot hit count (env POLYFORGE_RECALL_TOPK; default 10, max 50)")
-	mode := fs.String("mode", "", "initial mode: interactive|batch|drain (default interactive)")
-	// Observe supervision windows (#12): Go duration strings, flags only
-	// (no env fallbacks). Omitted or zero keeps observe's own default.
-	hangWindow := fs.Duration("hang-window", 0, "stream-silence window while a turn is in flight before the liveness probe arms (default 10m)")
-	idleWindow := fs.Duration("idle-window", 0, "no-record-no-turn quiet window before the idle watchdog probes (default 10m)")
-	probeTimeout := fs.Duration("probe-timeout", 0, "liveness-probe ack bound (default 2m)")
-	wallWindow := fs.Duration("wall-window", 0, "absolute wall-clock backstop on a derivation's progress silence that no probe ack can reset; also bounds a never-closing turn and caps the tool-dispatch exemption at 4x this window (polyforge#114/#124; default 15m; negative disables)")
+	auto := fs.Bool("auto", false, "auto-pull: the daemon claims ready-queue work itself (default off; unset keeps the persisted switch)")
+	// Supervision bounds (v2-converge 2.4): Go duration strings, flags
+	// only (no env fallbacks). Omitted or zero keeps the documented
+	// default; a step may override them in workflow.md.
+	silenceWindow := fs.Duration("silence-window", 0, "X: no real work signal after dispatch, or no model output while waiting for the model, before the step is judged dead (default 10m for token-level harnesses, 30m for message-level)")
+	toolWindow := fs.Duration("tool-window", 0, "Y: one tool running longer than this is judged hung (default 30m)")
+	stepTimeout := fs.Duration("step-timeout", 0, "T: cumulative step runtime bound across its dispatches (default 90m; a step's budget.wall_minutes overrides it)")
+	stallWindow := fs.Duration("stall-window", 0, "N: the driver between steps (not waiting on a human) for longer than this is judged stalled (default 10m; negative disables)")
+	modelErrorGrace := fs.Duration("model-error-grace", 0, "grace after a turn ends on a model error before the step is judged dead (default 1m)")
 	revalidateEvery := fs.Duration("revalidate-every", 0, "M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
 	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "machines heartbeat cadence (0 = disabled)")
-	// The graceful sequence's per-job flush(shutdown) wait (polyforge#110
-	// rewind): flags-only like the observe windows above — a harness
-	// shutting a daemon down over a live driver job (no flush face, so
-	// the bounded wait always degrades on timeout) shortens the window
-	// instead of spending the production 60s per live job. Omitted or
-	// zero keeps the production default; the sequence's semantics are
-	// unchanged either way.
-	shutdownFlushWait := fs.Duration("shutdown-flush-wait", 0, "per-job flush(shutdown) wait before the graceful sequence degrades (default 60s)")
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}
@@ -86,35 +68,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "pf daemon: unexpected arguments %v\n", fs.Args())
 		return 2
 	}
-	// The WI-Agent legacy lane hatch is retired (polyforge#106): a daemon
-	// whose environment carries the retired variable is refused BEFORE
-	// anything is loaded or served — the engine selection the variable
-	// used to force no longer exists, and silently ignoring it would be
-	// exactly the acceptance the spec forbids.
-	for _, kv := range os.Environ() {
-		name, _, ok := strings.Cut(kv, "=")
-		if ok && strings.HasPrefix(name, legacyLaneEnvPrefix) {
-			fmt.Fprintf(stderr, "pf daemon: refusing to start: the environment variable %s is set, but the legacy WI-Agent lane it selected was deleted (polyforge#106); unset it — the driver engine is the only engine\n", name)
-			return 1
-		}
-	}
-	// The ambient selection variables are retired (polyforge#113): no
-	// default project exists anywhere and the workspace comes only from
-	// the config's [workspace] mapping. Refuse before ANYTHING is loaded
-	// or served, naming the variable and the per-invocation replacement.
-	for _, kv := range os.Environ() {
-		name, val, ok := strings.Cut(kv, "=")
-		if !ok || val == "" {
-			continue
-		}
-		for _, retired := range retiredEnvNames {
-			if name == retired {
-				fmt.Fprintf(stderr, "pf daemon: refusing to start: the environment variable %s is retired (polyforge#113) — there is no ambient project or workspace selection anymore; the [workspace.\"<path>\"] mapping in the config decides capsule placement, and project scoping is per-invocation --project on the read verbs\n", name)
-				return 1
-			}
-		}
-	}
-
+	autoCfg := resolveAuto(fs, *auto)
 	shared, err := cli.LoadConfig(*cfgPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
@@ -154,9 +108,24 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *machineID == "" {
 		*machineID = os.Getenv("POLYFORGE_MACHINE_ID")
 	}
+	// v2 identity: <data-dir>/daemon-id is THE id once written; a flag/env
+	// value that disagrees refuses to start (never silently switch).
+	explicitID := *machineID != ""
 	if *machineID == "" {
 		host, _ := os.Hostname()
 		*machineID = "m-" + strings.ToLower(host)
+	}
+	id, err := ResolveDaemonID(*dataDir, *machineID, explicitID)
+	if err != nil {
+		fmt.Fprintf(stderr, "pf daemon: refusing to start: %v\n", err)
+		return 1
+	}
+	*machineID = id
+	if *displayName == "" {
+		*displayName = os.Getenv("POLYFORGE_DISPLAY_NAME")
+	}
+	if *displayName == "" {
+		*displayName, _ = os.Hostname()
 	}
 	if *workflowsDir == "" {
 		*workflowsDir = "workflows"
@@ -180,6 +149,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	cfg := Config{
 		MachineID:           *machineID,
+		DisplayName:         *displayName,
 		SocketPath:          *socket,
 		Mapping:             shared.Mapping,
 		DataDir:             *dataDir,
@@ -191,17 +161,16 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		APIKey:              *apiKey,
 		MaxConcurrent:       *maxConcurrent,
 		RecallTopK:          *recallTopK,
-		Mode:                *mode,
+		Auto:                autoCfg,
 		HeartbeatEvery:      *heartbeatEvery,
-		ShutdownFlushWait:   *shutdownFlushWait,
 		Hub:                 aihubclient.New(*server, *apiKey),
-		// Zero fields fall through to observe's own fill() defaults, so a
-		// daemon started without these flags keeps the production windows.
-		Observe: ObserveWindows{
-			HangWindow:             *hangWindow,
-			IdleWindow:             *idleWindow,
-			ProbeTimeout:           *probeTimeout,
-			WallBackstop:           *wallWindow,
+		// Zero fields fall through to the documented defaults.
+		Supervision: SupervisionConfig{
+			SilenceWindow:          *silenceWindow,
+			ToolWindow:             *toolWindow,
+			StepTimeout:            *stepTimeout,
+			StallWindow:            *stallWindow,
+			ModelErrorGrace:        *modelErrorGrace,
 			SessionRevalidateEvery: *revalidateEvery,
 		},
 	}
@@ -236,11 +205,17 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// legacyLaneEnvPrefix is the retired WI-Agent lane-selection environment
-// variable family prefix (polyforge#106), assembled from fragments so the
-// source bytes never carry the retired name contiguously (the grep-clean
-// gate scans for it; the boot refusal still names whatever it matches at
-// runtime). The family prefix deliberately matches near-miss spellings of
-// the retired name too: a hatch is a deliberate opt-in, and anything that
-// looks like one is refused loudly, never silently ignored.
-var legacyLaneEnvPrefix = "PFV1" + "_" + "LEGACY" + "_" + "LAN"
+// resolveAuto maps -auto to the initial auto switch (nil = unspecified:
+// the persisted switch wins).
+func resolveAuto(fs *flag.FlagSet, auto bool) *bool {
+	autoSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "auto" {
+			autoSet = true
+		}
+	})
+	if !autoSet {
+		return nil
+	}
+	return &auto
+}
