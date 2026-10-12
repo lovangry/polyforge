@@ -19,7 +19,7 @@
 #   - the version to deploy exists in the shared publish root as
 #     releases/<tag>/{aihub,pf,SHA256SUMS} (the release procedure's
 #     published layout, checksum manifest included);
-#   - the pf binary on THIS host works well enough to run `pf upgrade`;
+#   - each work machine can run tools/install.sh (gh authenticated);
 #   - you are a human who has decided to deploy (this script never decides
 #     anything by itself).
 #
@@ -55,9 +55,9 @@ done
 
 echo "== deploy plan for $TAG =="
 echo "1. (service host) upgrade the aihub service binary to $TAG, restart the service, watch it come back healthy."
-echo "2. (each work machine, ONE at a time) run: pf upgrade   # downloads $TAG, verifies SHA256SUMS, quiesces, replaces, restarts the daemon"
+echo "2. (each work machine, ONE at a time) re-run: tools/install.sh <api-key>   # installs the latest release, verifies SHA256, stops the daemon, replaces the binary, restarts the daemon"
 echo "3. (after each machine) confirm the machine reports healthy and --version prints $TAG before touching the next one."
-echo "Rollback: redeploy the previous tag's binaries the same way (per machine: pf upgrade from the previous release directory; service host: restore the previous aihub binary and restart)."
+echo "Rollback: redeploy the previous tag's binaries the same way (per machine: stop the daemon, put releases/<prev-tag>/pf at /usr/local/bin/pf, restart the daemon; service host: restore the previous aihub binary and restart)."
 echo
 if [ -n "$DRY" ]; then
   echo "dry-run: nothing executed."
@@ -83,13 +83,13 @@ echo "  <restart the aihub service the way this host runs it>   # e.g. systemctl
 echo "  aihub --version   # must print $TAG"
 echo
 echo "  # --- each work machine, ONE at a time (wait for green between machines) ---"
-echo "  pf upgrade        # downloads $TAG, verifies its SHA256SUMS, quiesces, replaces, restarts the daemon"
+echo "  tools/install.sh <api-key>   # installs the latest release (verifies SHA256), stops the daemon, replaces the binary, restarts it"
 echo "  pf --version      # must print $TAG"
 echo "  pf ops status     # machine healthy before the next one"
 echo
 echo "  # --- rollback (any machine, including the service host) ---"
 echo "  # redeploy the previous tag from the publish root the same way:"
 echo "  #   service host: install the previous releases/<prev-tag>/aihub and restart."
-echo "  #   work machine: pf upgrade against releases/<prev-tag>/ (or restore the previous binary and restart the daemon)."
+echo "  #   work machine: stop the daemon, install releases/<prev-tag>/pf over /usr/local/bin/pf, restart the daemon."
 echo
 echo "deploy: follow the sequence above. This script's whole authority was the plan and your yes."
