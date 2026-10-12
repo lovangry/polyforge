@@ -390,11 +390,13 @@ func TestRunGateFailRewindRecovers(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	// The dispatch ledger: the full recovery, exactly the s12 shape.
-	// The gate's re-dispatch is a RESUME: the rewind never resets the
-	// gate itself (INV-1g — its candidate pointer is preserved).
+	// The gate's re-dispatch is FRESH (resume=false): its prior
+	// conversation judged the version the rewind just discarded. The
+	// rewind still never resets the gate itself (INV-1g — its candidate
+	// pointer is preserved).
 	got := sp.dispatched()
 	want := []string{"build@1(resume=false)", "polish@2(resume=false)", "check@3(resume=false)",
-		"build@4(resume=false)", "polish@5(resume=false)", "check@6(resume=true)"}
+		"build@4(resume=false)", "polish@5(resume=false)", "check@6(resume=false)"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("dispatch ledger:\n got  %v\n want %v", got, want)
 	}
@@ -402,6 +404,9 @@ func TestRunGateFailRewindRecovers(t *testing.T) {
 	// result's full output payload, verbatim (the judgment in full).
 	if ri := sp.spawnAt(3).RewindInput; ri == nil || string(ri.Reason) != `{"verdict":"FAIL: tests red"}` || ri.ToStep != "build" {
 		t.Fatalf("the rewind verdict must ride the target's dispatch: %+v", ri)
+	}
+	if g := sp.spawnAt(5); g.Resume || !g.Fresh {
+		t.Fatalf("a gate re-entered after its own gate-fail rewind must dispatch Fresh, not Resume: %+v", g)
 	}
 	exec := readExec(t, execPath)
 	if exec.WorkflowStatus != StatusCompleted {
