@@ -17,10 +17,9 @@
 //     http:// and https:// remotes;
 //   - pushes carry --push-option=session-fingerprint=<fp> (v1.5 §1.6
 //     fencing-on-use backup layer: Opts.Fingerprint, the PUBLIC
-//     session handle). An absent fingerprint sends NO push option —
-//     correct for pre-session pushes of non-WI repos and for local
-//     pushes the hook must not fence; the hook only compares when both
-//     sides of the fence exist;
+//     session handle). The runtime always sets it; the aihub hook
+//     REQUIRES the option on every push that travels through its git
+//     proxy;
 //   - an index.lock that has outlived the stale bound is removed at
 //     acquisition (see cleanStaleLocks for why age, not PID, is the only
 //     safe signal);

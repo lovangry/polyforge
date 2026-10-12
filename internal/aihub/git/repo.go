@@ -94,9 +94,6 @@ func (m *Manager) EnsureBare(wiID string) error {
 		if err := writeHook(filepath.Join(dir, "hooks", "pre-receive"), m.MaxBlobBytes); err != nil {
 			return err
 		}
-		if err := m.ensurePushOptions(dir); err != nil {
-			return err
-		}
 		m.known[wiID] = true
 		return nil
 	}
@@ -106,7 +103,10 @@ func (m *Manager) EnsureBare(wiID string) error {
 	if _, err := git(dir, nil, "config", "core.hooksPath", "hooks"); err != nil {
 		return err
 	}
-	if err := m.ensurePushOptions(dir); err != nil {
+	// git's protocol rule: a server that does not advertise push options
+	// REJECTS any push that carries them, and every daemon push carries
+	// --push-option=session-fingerprint=<fp>.
+	if _, err := git(dir, nil, "config", "receive.advertisePushOptions", "true"); err != nil {
 		return err
 	}
 	if _, err := git(dir, nil, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
@@ -117,16 +117,4 @@ func (m *Manager) EnsureBare(wiID string) error {
 	}
 	m.known[wiID] = true
 	return nil
-}
-
-// ensurePushOptions idempotently sets receive.advertisePushOptions=true on
-// a bare repo. git's protocol rule: a server that does not advertise push
-// options REJECTS any push that carries them — and the pf gitops choke
-// point sends --push-option=session-fingerprint=<fp> on EVERY push
-// (v1.5 §1.6 backup layer), so without this config every push to an aihub
-// bare repo fails. Both the fresh-creation and the pre-existing-repo
-// paths run it.
-func (m *Manager) ensurePushOptions(dir string) error {
-	_, err := git(dir, nil, "config", "receive.advertisePushOptions", "true")
-	return err
 }
