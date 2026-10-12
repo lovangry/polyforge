@@ -34,9 +34,9 @@ visibility V)`.
 
 | Code | When | What to tell the user |
 |---|---|---|
-| `CORE-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / the config's `api_key`. |
+| `AUTH-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / the config's `api_key`. |
 | `MEM-400` | Blank content, missing `--type`, or an invalid type/visibility | Give real content and a valid type/visibility — read `detail` for the exact field. |
-| `MEM-404` | Unknown or missing project | The project does not exist (or you cannot see it) — check `--project` / the config's `project`. |
+| `MEM-404` | Unknown or missing project | The project does not exist (or you cannot see it) — check `--project` (there is no default project; it must be listed in a cli.toml `[workspace]` section). |
 | `MEM-413` | Content (or the whole authority document) exceeds 1 MiB | Split the memory or trim the content. |
 | `MEM-500` | The memory store failed to persist the authority file | Nothing was saved — retry; if it persists, the server's data dir is unhealthy. |
 
