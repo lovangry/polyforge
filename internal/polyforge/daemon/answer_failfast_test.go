@@ -19,8 +19,8 @@ import (
 func TestAnswerWithoutLiveBridgeHandleFailsFast(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	payload := cli.AnswerPayload{
-		QuestionID: "q_ff", AnswerID: "a_ff",
-		AnswerText: "fail fast", AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "u_1",
+		QuestionID: "q_ff",
+		AnswerText: "fail fast", AnsweredBy: "u_1",
 	}
 
 	// (1) Not monitored at all (an idle daemon): the observe fallthrough

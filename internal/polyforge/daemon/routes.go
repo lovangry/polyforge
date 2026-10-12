@@ -157,12 +157,8 @@ func writeAdmissionErr(w http.ResponseWriter, err error) {
 // handler assembles the full route table.
 func (d *Daemon) handler() http.Handler {
 	mux := http.NewServeMux()
-	obs := d.obs.Handler()
-	// The observe lane's own routes, mounted verbatim (04 §5.1a).
-	mux.Handle("GET /jobs/{wi}/observe", obs)
 	// v2 (polyforge#106): answer routes through the driver bridge when
-	// the WI's job carries a bridge Handle; otherwise the observe
-	// lane's honest no-live-handle refusal applies.
+	// the WI's job carries a bridge Handle; otherwise it refuses.
 	mux.HandleFunc("POST /jobs/{wi}/answer", func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
 		if h := d.rt.DriverAnswerHandle(wi); h != nil {
@@ -179,13 +175,10 @@ func (d *Daemon) handler() http.Handler {
 			if payload.AnsweredBy == "" {
 				payload.AnsweredBy = r.Header.Get("X-PF-User")
 			}
-			// When the CLI couldn't pre-resolve the question ID (observe
-			// face returns 404 for driver WIs), read it from the capsule's
-			// execution.json pending_question.
+			// No question named: the daemon resolves the pending one from
+			// the capsule's execution.json.
 			if payload.QuestionID == "" {
-				if qid := d.pendingQuestionID(wi); qid != "" {
-					payload.QuestionID = qid
-				}
+				payload.QuestionID = d.pendingQuestionID(wi)
 			}
 			if payload.QuestionID == "" {
 				http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
@@ -196,10 +189,15 @@ func (d *Daemon) handler() http.Handler {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+			json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "question_id": payload.QuestionID})
 			return
 		}
-		obs.ServeHTTP(w, r)
+		if _, live := d.rt.Info(d.canonWI(wi)); !live {
+			writeErr(w, api.ErrDaemonNotFound, "work item is not running on this daemon")
+			return
+		}
+		writeErr(w, api.ErrDaemonConflict,
+			"no live bridge handle for work item "+wi+": the workflow is between derivations — retry after the daemon re-derives it")
 	})
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute("claim"))
 	mux.HandleFunc("POST /jobs/{wi}/resume", d.submitRoute("resume"))
@@ -558,10 +556,6 @@ func (d *Daemon) terminalOf(wi string) (string, error) {
 const reasonPaused = protocol.FinishPaused
 
 func (d *Daemon) pauseRoute(w http.ResponseWriter, r *http.Request) {
-	var body struct{}
-	if !decodeBody(w, r, &body) {
-		return
-	}
 	d.closeJob(w, r.Context(), r.PathValue("wi"), reasonPaused)
 }
 
@@ -725,8 +719,7 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 // pendingQuestionID reads the capsule's execution.json to find the
-// current pending question ID (driver WIs: the observe face doesn't
-// carry it, but execution.json does).
+// current pending question ID.
 func (d *Daemon) pendingQuestionID(wi string) string {
 	wid := d.rt.CanonicalID(wi)
 	if wid == "" {

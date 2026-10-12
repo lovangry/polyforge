@@ -6,14 +6,11 @@ package test
 // components — runtime.New (lifecycle + recovery engine), observe.New
 // (the per-WI supervisor), runtime.DefaultSpawner (the real pi-spawner
 // that derives the real fakepi process), the driver bridge with its
-// supervision link, and observe.Handler (the real UDS answer/observe
-// routes) — with the observe config injected.
+// supervision link — with the observe config injected.
 
 import (
 	"context"
 	"encoding/json"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,16 +62,12 @@ type inprocRig struct {
 	inst      *v1Install
 	rt        *runtime.Runtime
 	obs       *observe.Observe
-	sock      string
 	dataDir   string
 	workspace string
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
-
-	lst net.Listener
-	srv *http.Server
 
 	adaptMu  sync.Mutex
 	adapters map[string]*inprocAdapter
@@ -104,13 +97,11 @@ func optBackpressure(after time.Duration, steps int) inprocObsTune {
 // assembly instead of forking the helper.
 func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inprocRig {
 	t.Helper()
-	sockBase := shortTmp("/tmp", "pfv1inproc")
-	sock := filepath.Join(sockBase, "o.sock")
 	dataDir := t.TempDir()
 	workspace := t.TempDir()
 
 	rig := &inprocRig{
-		t: t, inst: inst, sock: sock, dataDir: dataDir, workspace: workspace,
+		t: t, inst: inst, dataDir: dataDir, workspace: workspace,
 		adapters: map[string]*inprocAdapter{},
 		done:     make(chan struct{}),
 		sup:      supervise.NewRegistry(),
@@ -188,17 +179,6 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 	go func() { rig.obs.Run(rig.ctx); close(rig.done) }()
 	go rig.bridge(rtMsgs, attachCh)
 
-	// The observe lane's own UDS face: the real routes (answer/
-	// observe) on a real listener, so the answer/observe calls are
-	// production-shaped.
-	lst, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatalf("inproc UDS listen: %v", err)
-	}
-	rig.lst = lst
-	rig.srv = &http.Server{Handler: rig.obs.Handler()}
-	go func() { _ = rig.srv.Serve(lst) }()
-
 	t.Cleanup(func() {
 		// Teardown order: cancel the loops, then TERMINATE every live
 		// agent handle the runtime still holds — the in-process runtime
@@ -213,7 +193,6 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 				_ = ji.Agent.Terminate(5 * time.Second)
 			}
 		}
-		_ = rig.srv.Close()
 		select {
 		case <-rig.done:
 		case <-time.After(5 * time.Second):

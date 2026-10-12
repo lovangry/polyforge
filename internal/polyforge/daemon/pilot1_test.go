@@ -47,11 +47,11 @@ func TestSlugLifecycleEndToEnd(t *testing.T) {
 		t.Fatalf("canonical paths must not carry the slug separator: %+v", ji)
 	}
 
-	// observe BY SLUG resolves the same monitor (the daemon's resolver:
-	// alias first, aihub otherwise).
+	// the watch snapshot BY SLUG resolves the same work item (the
+	// daemon's resolver: alias first, aihub otherwise).
 	td.waitMonitored(t, canonical)
-	if _, err := td.client.Observe("proj#7", 0); err != nil {
-		t.Fatalf("observe by slug: %v", err)
+	if snap, err := td.client.WatchSnapshot("proj#7", 0); err != nil || snap.WorkItem != canonical || !snap.Known {
+		t.Fatalf("watch by slug: %+v %v", snap, err)
 	}
 
 	// pause BY SLUG closes the canonical job: the pilot's exact flow

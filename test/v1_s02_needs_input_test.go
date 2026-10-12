@@ -36,9 +36,9 @@ func TestV1S02NeedsInputLoop(t *testing.T) {
 	// surface through the status/ops faces derived from the durable
 	// execution.json.
 	waitQuestion(t, d, wi, qid, 30*time.Second)
-	jv := d.observe(t, wi)
-	if jv.Pending == nil || !strings.Contains(jv.Pending.Question, "lean or compatible") {
-		t.Fatalf("pending question text wrong: %+v", jv.Pending)
+	pq := d.watch(t, wi).Execution.PendingQuestion
+	if pq == nil || !strings.Contains(pq.Question, "lean or compatible") {
+		t.Fatalf("pending question text wrong: %+v", pq)
 	}
 	ops := d.pf(t, "ops", "status")
 	if !strings.Contains(ops, qid) {

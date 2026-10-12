@@ -221,9 +221,9 @@ func TestV1S16DuplicateDropSameIDIsIdempotent(t *testing.T) {
 
 	// Exactly one pending question, with its text intact.
 	waitQuestion(t, d, wi, qid, 30*time.Second)
-	jv := d.observe(t, wi)
-	if jv.Pending == nil || jv.Pending.ID != qid || !strings.Contains(jv.Pending.Question, "one pending or two") {
-		t.Fatalf("the duplicate write disturbed the pending: %+v", jv.Pending)
+	pq := d.watch(t, wi).Execution.PendingQuestion
+	if pq == nil || pq.ID != qid || !strings.Contains(pq.Question, "one pending or two") {
+		t.Fatalf("the duplicate write disturbed the pending: %+v", pq)
 	}
 	if n := countOf(d.eventKinds(t, wi), "needs_input"); n != 1 {
 		t.Fatalf("needs_input fired %d times, want 1 (the duplicate drop is consumed once)", n)
@@ -279,7 +279,6 @@ func TestV1S16DuplicateDropSameIDIsIdempotent(t *testing.T) {
 func TestV1S16ZeroLandingAnswerSurvivesDaemonCrash(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_f9d"
-	const answerID = "a_f9d"
 	const answerText = "Yes: the capsule is the crash's only memory of it."
 	wi := inst.newWI(t, "s16 D: zero-landing answer across a daemon crash",
 		[]map[string]any{
@@ -300,10 +299,10 @@ func TestV1S16ZeroLandingAnswerSurvivesDaemonCrash(t *testing.T) {
 
 	// Zero landings by construction: the DRIVER consumes the answer
 	// daemon-side; the parked step process's journal stays silent no
-	// matter what the timing is. The CLI's answer id comes back delivered.
+	// matter what the timing is. The CLI reports the question delivered.
 	out := d.pf(t, "answer", wi, "--text", answerText, "--question", qid,
-		"--answer-id", answerID, "--by", "usr_root")
-	if !strings.Contains(out, answerID) || !strings.Contains(out, "delivered") {
+		"--by", "usr_root")
+	if !strings.Contains(out, qid) || !strings.Contains(out, "delivered") {
 		t.Fatalf("answer outcome: %q", out)
 	}
 	capDir := d.capsuleDir(wi)

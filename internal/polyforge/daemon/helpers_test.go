@@ -634,13 +634,12 @@ func (td *testDaemon) waitLive(t *testing.T, wi string) {
 	}
 }
 
-// waitMonitored blocks until the observe route answers for the work item
-// (the per-WI monitor is attached).
+// waitMonitored blocks until the per-WI observe monitor is attached.
 func (td *testDaemon) waitMonitored(t *testing.T, wi string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, err := td.client.Observe(wi, 0); err == nil {
+		if _, ok := td.obs.Progress(wi); ok {
 			return
 		}
 		if time.Now().After(deadline) {

@@ -45,20 +45,20 @@ func TestV1S14ConcurrentTwoWI(t *testing.T) {
 	waitSpawnCount(t, d, wiA, 1, 30*time.Second)
 	waitSpawnCount(t, d, wiB, 1, 30*time.Second)
 
-	// Each observe projection shows its own step table, never the peer's.
-	waitUntil(t, 30*time.Second, "A's steps never showed", func() bool {
-		jv := d.observe(t, wiA)
-		return jv.Steps["grill"] != nil && jv.Steps["fix"] != nil
-	})
-	waitUntil(t, 30*time.Second, "B's steps never showed", func() bool {
-		jv := d.observe(t, wiB)
-		return jv.Steps["grill"] != nil && jv.Steps["fix"] != nil
-	})
-	if jv := d.observe(t, wiA); jv.WorkItem != wiA {
-		t.Fatalf("observe projection of A names %q", jv.WorkItem)
+	// Each watch snapshot shows its own step table, never the peer's.
+	hasSteps := func(wi string) bool {
+		x := d.watch(t, wi).Execution
+		_, grill := x.Steps["grill"]
+		_, fix := x.Steps["fix"]
+		return grill && fix
 	}
-	if jv := d.observe(t, wiB); len(jv.Steps) != 4 {
-		t.Fatalf("observe projection of B crossed streams: %+v", jv.Steps)
+	waitUntil(t, 30*time.Second, "A's steps never showed", func() bool { return hasSteps(wiA) })
+	waitUntil(t, 30*time.Second, "B's steps never showed", func() bool { return hasSteps(wiB) })
+	if s := d.watch(t, wiA); s.WorkItem != wiA {
+		t.Fatalf("watch snapshot of A names %q", s.WorkItem)
+	}
+	if s := d.watch(t, wiB); len(s.Execution.Steps) != 4 {
+		t.Fatalf("watch snapshot of B crossed streams: %+v", s.Execution.Steps)
 	}
 
 	// T8: while both run, the hub names two DISTINCT session

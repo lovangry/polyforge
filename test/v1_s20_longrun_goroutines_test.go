@@ -24,11 +24,7 @@ package test
 // adapters/monitors must retire before the next one starts.
 
 import (
-	"context"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"runtime"
 	"testing"
 	"time"
@@ -71,31 +67,6 @@ func s20MinGoroutines(n int, gap time.Duration) int {
 		}
 	}
 	return min
-}
-
-// s20RigObserveStatus GETs /jobs/<wi>/observe over the rig's REAL
-// observe UDS face and returns the HTTP status: 404 (DAEMON-404,
-// "work item is not monitored on this daemon") once the per-WI monitor
-// has retired — the production-shaped retire signal. DisableKeepAlives
-// keeps this helper itself fd/goroutine-clean: a pooled UDS connection
-// would park reader/writer goroutines in THIS process and pollute the
-// very count this scenario measures.
-func s20RigObserveStatus(rig *inprocRig, wi string) int {
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return net.Dial("unix", rig.sock)
-		},
-		DisableKeepAlives: true,
-	}
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
-	defer transport.CloseIdleConnections()
-	resp, err := client.Get("http://rig/jobs/" + wi + "/observe")
-	if err != nil {
-		return -1
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode
 }
 
 // s20RigAdapterRetired reports whether the observe adapter of wi has
@@ -155,10 +126,10 @@ func TestV1S20LongRunGoroutines(t *testing.T) {
 			}
 			return true
 		})
-		// The per-WI observe monitor retired (its UDS face answers
-		// 404, not a projection).
+		// The per-WI observe monitor retired.
 		waitUntil(t, 30*time.Second, fmt.Sprintf("observe monitor of %s never retired", wi), func() bool {
-			return s20RigObserveStatus(rig, wi) == http.StatusNotFound
+			_, monitored := rig.obs.Progress(wi)
+			return !monitored
 		})
 		// The observe adapter saw the agent handle finish.
 		waitUntil(t, 30*time.Second, fmt.Sprintf("observe adapter of %s never retired", wi), func() bool {

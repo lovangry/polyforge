@@ -23,26 +23,37 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 )
 
-// daemonEventCount scans the daemon's durable events log for entries of
-// one kind at daemon scope (wi=""). eventsOf filters per-WI entries
-// only, so the daemon-scope degraded signal needs its own scan.
-func daemonEventCount(t *testing.T, d *v1Daemon, kind string) int {
+// daemonEvents reads the daemon's durable events log (every scope).
+func daemonEvents(t *testing.T, d *v1Daemon) []protocol.EventEntry {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(d.dataDir, "events.log"))
 	if os.IsNotExist(err) {
-		return 0
+		return nil
 	}
 	if err != nil {
 		t.Fatalf("events.log: %v", err)
 	}
-	n := 0
+	var out []protocol.EventEntry
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		var e protocol.EventEntry
-		if json.Unmarshal([]byte(line), &e) == nil && e.Kind == kind {
+		if json.Unmarshal([]byte(line), &e) == nil {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// daemonEventCount counts the durable events of one kind (the daemon-scope
+// degraded signal is wi="", which per-WI event reads never see).
+func daemonEventCount(t *testing.T, d *v1Daemon, kind string) int {
+	t.Helper()
+	n := 0
+	for _, e := range daemonEvents(t, d) {
+		if e.Kind == kind {
 			n++
 		}
 	}
@@ -92,11 +103,11 @@ func TestV1S17DrainKeyRevokedDegradedSignal(t *testing.T) {
 
 	// The wave claims A on its own (5s wave period) and A parks. The
 	// poll tolerates "not monitored yet": until the wave claims the
-	// ticket the observe route answers DAEMON-404 by design.
+	// ticket the watch snapshot is not Known by design.
 	waitUntil(t, 60*time.Second, "wave member never parked on needs_input", func() bool {
-		jv := observeSoft(d, wiA)
-		return jv != nil && jv.Status == protocol.JobNeedsInput &&
-			jv.Pending != nil && jv.Pending.ID == qid
+		s := watchSoft(d, wiA)
+		return s != nil && s.Execution != nil && s.Execution.PendingQuestion != nil &&
+			s.Execution.PendingQuestion.ID == qid
 	})
 
 	// Determinism guard: the key is still valid, so no degraded signal
@@ -120,11 +131,10 @@ func TestV1S17DrainKeyRevokedDegradedSignal(t *testing.T) {
 		t.Fatalf("degraded event count %d after multiple denied waves, want 1 (edge-triggered per episode)", n)
 	}
 
-	// The event is readable from the parked member's observe view
-	// (daemon-scope entries merge into the JobView events layer) and
-	// carries the pinned payload.
+	// The event is a daemon-scope entry (wi="") of the durable events
+	// log and carries the pinned payload.
 	var gotBody map[string]any
-	for _, e := range d.observe(t, wiA).Events {
+	for _, e := range daemonEvents(t, d) {
 		if e.Kind != observe.EvDrainDegraded {
 			continue
 		}
@@ -137,7 +147,7 @@ func TestV1S17DrainKeyRevokedDegradedSignal(t *testing.T) {
 		break
 	}
 	if gotBody == nil {
-		t.Fatalf("drain_degraded not readable from %s's observe view", wiA)
+		t.Fatalf("drain_degraded not in the durable events log")
 	}
 	if gotBody["project"] != v1Project || gotBody["class"] != "authorization" {
 		t.Fatalf("drain_degraded payload wrong: %v", gotBody)

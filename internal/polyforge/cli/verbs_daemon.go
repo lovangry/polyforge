@@ -1,18 +1,14 @@
 package cli
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
 // ---------------------------------------------------------------------------
@@ -73,19 +69,17 @@ func submitPrecheck(ctx *Context, wiID string) error {
 
 // ---------------------------------------------------------------------------
 // answer — answer the pending needs_input question: --question names
-// it explicitly, or the unique pending question is used (the JobView
-// carries at most one).
+// it explicitly, or the daemon resolves the unique pending question.
 // ---------------------------------------------------------------------------
 
 var cmdAnswer = &Command{
 	Name:    "answer",
 	Group:   GroupExec,
 	Summary: "Answer the pending needs_input question of a WI",
-	Usage:   "pf answer <id> --text \"...\" [--question q_xxx] [--answer-id a_xxxx] [--by user]",
+	Usage:   "pf answer <id> --text \"...\" [--question q_xxx] [--by user]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("question", "", "question id (default: the unique pending question)")
 		fs.String("text", "", "natural-language answer (required)")
-		fs.String("answer-id", "", "explicit answer id (default: generated a_ + 6 chars)")
 		fs.String("by", "", "answerer user id (default: config user_id / PF_USER_ID)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -104,60 +98,29 @@ var cmdAnswer = &Command{
 			return fmt.Errorf("answer: answered_by identity required (--by or PF_USER_ID / user_id in config)")
 		}
 		d := ctx.daemon()
+		// An empty --question lets the daemon resolve the pending one.
 		question := stringFlag(fs, "question")
-		if question == "" {
-			// Interactive default: the unique pending question. Two cases
-			// (owner ruling on 9f4d3a2's over-broad fallback):
-			//   (1) observe SUCCEEDS with no pending question → refuse:
-			//       there is genuinely nothing to answer, and POSTing an
-			//       empty question_id silently delivers nowhere.
-			//   (2) observe FAILS (driver WIs get DAEMON-404) → fall
-			//       through with an empty question: the daemon answer
-			//       route's pendingQuestionID fallback resolves it.
-			raw, err := d.Observe(args[0], 0)
-			if err == nil {
-				var jv protocol.JobView
-				if uerr := json.Unmarshal(raw, &jv); uerr == nil {
-					if jv.Pending == nil {
-						return fmt.Errorf("answer: %s has no pending question (see `pf watch %s --once`)", args[0], args[0])
-					}
-					question = jv.Pending.ID
-				}
-				// Undecodable body: Pending == nil cannot be established,
-				// so treat it like an observe failure — fall through.
-			}
-			// question may remain "" (driver WI, observe 404): the daemon
-			// answer route's pendingQuestionID fallback handles it.
-		}
-		answerID := stringFlag(fs, "answer-id")
-		if answerID == "" {
-			answerID = newAnswerID()
-		}
 		payload := AnswerPayload{
 			QuestionID: question,
-			AnswerID:   answerID,
 			AnswerText: text,
-			AnsweredAt: time.Now().UTC().Format(time.RFC3339),
 			AnsweredBy: who,
 		}
 		raw, err := d.Answer(args[0], payload)
 		if err != nil {
 			return err
 		}
+		var ans struct {
+			QuestionID string `json:"question_id"`
+		}
+		_ = json.Unmarshal(raw, &ans)
+		if ans.QuestionID == "" {
+			ans.QuestionID = payload.QuestionID
+		}
 		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "answer %s delivered for question %s\n", payload.AnswerID, payload.QuestionID)
+			fmt.Fprintf(ctx.Stdout, "answer delivered for question %s\n", ans.QuestionID)
 		})
 		return nil
 	},
-}
-
-// newAnswerID mints an answer id: "a_" + 6 random hex chars.
-func newAnswerID() string {
-	b := make([]byte, 3)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("a_%06x", time.Now().UnixNano()&0xffffff)
-	}
-	return "a_" + hex.EncodeToString(b)
 }
 
 // ---------------------------------------------------------------------------
