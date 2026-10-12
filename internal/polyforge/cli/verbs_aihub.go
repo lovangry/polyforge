@@ -22,6 +22,7 @@ import (
 
 var cmdFile = &Command{
 	Name:    "file",
+	Group:   GroupData,
 	Summary: "Create, edit or show a work item",
 	Usage: "pf file create --project P --goal G [flags] | --stdin\n" +
 		"pf file edit <id> [flags] | --stdin\n" +
@@ -380,6 +381,7 @@ func parseAttrValue(v string) (any, error) {
 
 var cmdQueue = &Command{
 	Name:    "queue",
+	Group:   GroupData,
 	Summary: "List work items / show the ready queue",
 	Usage: "pf queue [--project P] [--status S] [--limit N]\n" +
 		"pf queue --ready [--project P]\n\n" +
@@ -538,6 +540,7 @@ func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 
 var cmdCancel = &Command{
 	Name:    "cancel",
+	Group:   GroupData,
 	Summary: "Cancel (abandon) a queued/paused/blocked work item (no live session)",
 	Usage:   "pf cancel <id>",
 	Setup:   func(fs *flag.FlagSet) {},
@@ -565,6 +568,7 @@ var cmdCancel = &Command{
 
 var cmdRecall = &Command{
 	Name:    "recall",
+	Group:   GroupData,
 	Summary: "Search project memories",
 	Usage:   "pf recall --project P <query> [--type T] [--tags a,b] [--limit N]",
 	Setup: func(fs *flag.FlagSet) {
@@ -656,6 +660,7 @@ func recallTypeFilter(memType string) (string, error) {
 
 var cmdRemember = &Command{
 	Name:    "remember",
+	Group:   GroupData,
 	Summary: "Store a project memory (the write face of `recall`)",
 	Usage: "pf remember --project P --type T [--title S] [--visibility V] [--tags a,b] " +
 		"[--work-item ID] <content | - (stdin) | @file>",
@@ -798,6 +803,7 @@ func daemonStatusOf(ctx *Context) (*StatusResponse, error) {
 // response carries the PUBLIC fingerprint only — never the secret.
 var cmdTakeover = &Command{
 	Name:    "takeover",
+	Group:   GroupData,
 	Summary: "Force-takeover a running/paused WI to a fresh session (v1.5 §1.4; fences the old holder)",
 	Usage:   "pf takeover <id> --reason <text> [--machine ID] [--owner ID] [--json]",
 	Setup: func(fs *flag.FlagSet) {
@@ -885,6 +891,7 @@ var cmdTakeover = &Command{
 // secret ever travels through this face, and never the hash.
 var cmdVerifySession = &Command{
 	Name:    "verify-session",
+	Group:   GroupData,
 	Summary: "Show who holds a WI right now (v1.5 §1.7 public holder read; takeover-decision input)",
 	Usage:   "pf verify-session <id> [--json]",
 	Setup:   func(fs *flag.FlagSet) {},

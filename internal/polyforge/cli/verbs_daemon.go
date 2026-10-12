@@ -19,6 +19,7 @@ import (
 
 var cmdSubmit = &Command{
 	Name:    "submit",
+	Group:   GroupExec,
 	Summary: "Submit a WI for execution on this machine (claim, or takeover)",
 	Usage:   "pf submit <id> [--takeover] [--priority low|normal|high|urgent]",
 	Setup: func(fs *flag.FlagSet) {
@@ -85,8 +86,9 @@ func submitPrecheck(ctx *Context, wiID string) error {
 
 var cmdObserve = &Command{
 	Name:    "observe",
-	Summary: "Observe WI progress (daemon projection: steps, budget, question, events)",
-	Usage:   "pf observe <id> [--after N] [--read-through=false]",
+	Group:   GroupExec,
+	Summary: "DEPRECATED, use `pf watch <wi> --once`: observe WI progress (daemon projection)",
+	Usage:   "pf observe <id> [--after N] [--read-through=false]   (deprecated alias of the watch lane: use `pf watch <id> --once`)",
 	Setup: func(fs *flag.FlagSet) {
 		fs.Int64("after", 0, "last received event cursor (first call: 0)")
 		fs.Bool("read-through", true, "on the daemon's not-monitored answer, fall back to the aihub progress read-through (layer=read-through)")
@@ -174,6 +176,7 @@ func observeReadThrough(ctx *Context, wiID string, daemonErr error) error {
 
 var cmdAnswer = &Command{
 	Name:    "answer",
+	Group:   GroupExec,
 	Summary: "Answer the pending needs_input question of a WI",
 	Usage:   "pf answer <id> --text \"...\" [--question q_xxx] [--answer-id a_xxxx] [--by user]",
 	Setup: func(fs *flag.FlagSet) {
@@ -261,6 +264,7 @@ func newAnswerID() string {
 
 var cmdBatchConfirm = &Command{
 	Name:    "batch-confirm",
+	Group:   GroupExec,
 	Summary: "Batch wave: show the recommendation, confirm and submit it",
 	Usage: "pf batch-confirm [--project P]    # show the recommended wave only (no Job is created)\n" +
 		"pf batch-confirm --all           # confirm and submit the whole recommendation\n" +
@@ -338,6 +342,7 @@ var cmdBatchConfirm = &Command{
 
 var cmdPause = &Command{
 	Name:    "pause",
+	Group:   GroupExec,
 	Summary: "Pause a running WI at the next safe boundary (operator pause: clean_pause on the hub)",
 	Usage:   "pf pause <id>",
 	Setup:   func(fs *flag.FlagSet) {},
@@ -408,6 +413,7 @@ func setCleanPause(ctx *Context, wiID string, value bool) string {
 
 var cmdResume = &Command{
 	Name:    "resume",
+	Group:   GroupExec,
 	Summary: "Continue a paused WI (clean_pause=false) or a blocked one (reporter, maintainer or admin); abandon with pf cancel",
 	Usage:   "pf resume <id>",
 	Setup:   func(fs *flag.FlagSet) {},
@@ -503,6 +509,7 @@ func localRepairPending(ctx *Context, wiID string) bool {
 
 var cmdWrap = &Command{
 	Name:    "wrap",
+	Group:   GroupExec,
 	Summary: "Wrap a running WI as terminal success (--fail = the owner's failed verdict; to abandon a blocked WI use pf cancel)",
 	Usage:   "pf wrap <id> [--fail]",
 	Setup: func(fs *flag.FlagSet) {
@@ -553,6 +560,7 @@ var cmdWrap = &Command{
 
 var cmdShip = &Command{
 	Name:    "ship",
+	Group:   GroupDelivery,
 	Summary: "Push a closed WI's sealed capsule commits to git origin (branch polyforge/<id>)",
 	Usage: "pf ship <id>\n" +
 		"\n" +
@@ -590,6 +598,7 @@ var cmdShip = &Command{
 
 var cmdOps = &Command{
 	Name:    "ops",
+	Group:   GroupExec,
 	Summary: "Daemon ops: local job status, mode switching, graceful shutdown",
 	Usage: "pf ops status\n" +
 		"pf ops mode                                   # query the current mode (via status)\n" +
@@ -796,6 +805,7 @@ The full ` + "`pf daemon --help`" + ` flag surface is documented in the README.`
 
 var cmdDaemon = &Command{
 	Name:    "daemon",
+	Group:   GroupProcess,
 	Summary: "Run the local pf daemon (assembled: main.go intercepts `pf daemon` before CLI dispatch; this verb serves `pf help daemon` only)",
 	Usage:   daemonUsage,
 	Setup:   func(fs *flag.FlagSet) {},

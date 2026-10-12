@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -61,19 +60,19 @@ type doctorReport struct {
 // specifics — the missing path, the project and its workspace, the
 // retired key).
 const (
-	docChConfig     = "config"
-	docChMapping    = "workspace mapping"
-	docChDirs       = "workspace dirs"
-	docChProjects   = "aihub projects"
-	docChFaces      = "release/deploy faces"
-	docChServer     = "server reach"
-	docChSocket     = "daemon socket"
-	docChAuth       = "auth"
-	docChWatchModel = "watch.summarize_model"
+	docChConfig   = "config"
+	docChMapping  = "workspace mapping"
+	docChDirs     = "workspace dirs"
+	docChProjects = "aihub projects"
+	docChFaces    = "release/deploy faces"
+	docChServer   = "server reach"
+	docChSocket   = "daemon socket"
+	docChAuth     = "auth"
 )
 
 var cmdDoctor = &Command{
 	Name:         "doctor",
+	Group:        GroupDiag,
 	Summary:      "Check this machine's health: config, workspace mapping, connectivity",
 	Usage:        "pf doctor [--json]",
 	NoConfigLoad: true,
@@ -130,7 +129,7 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	cfg, err := LoadConfig(ctx.ConfigPath)
 	if err != nil {
 		add(docChConfig, "fail", err.Error()+" — see the install docs for the migration steps")
-		for _, name := range []string{docChMapping, docChDirs, docChFaces, docChProjects, docChServer, docChSocket, docChAuth, docChWatchModel} {
+		for _, name := range []string{docChMapping, docChDirs, docChFaces, docChProjects, docChServer, docChSocket, docChAuth} {
 			add(name, "skip", "config-dependent check not run: the config could not be loaded")
 		}
 		return doctorReport{OK: false, Checks: checks}
@@ -139,42 +138,6 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	if where == "" {
 		where = DefaultConfigPath()
 	}
-	// The watch summarize-model check LEADS the report (still computed
-	// from the loaded config): its name is the operator's first look at
-	// the watch lane's health, and leading it keeps the check
-	// unambiguous against other checks' details, which embed config and
-	// socket paths (wi_LMSxPTQTtz5x).
-	var watchModelStatus, watchModelDetail string
-	{
-		var reachable []string
-		for _, h := range []string{"pi", "claude"} {
-			if _, lerr := exec.LookPath(h); lerr == nil {
-				reachable = append(reachable, h)
-			}
-		}
-		switch {
-		case len(reachable) == 0:
-			watchModelStatus, watchModelDetail = "skip", "not run: no harness binary (pi, claude) is reachable on this machine"
-		default:
-			var missing []string
-			for _, h := range reachable {
-				if strings.TrimSpace(cfg.WatchSummarize[h]) == "" {
-					missing = append(missing, h)
-				}
-			}
-			if len(missing) > 0 {
-				watchModelStatus = "fail"
-				watchModelDetail = fmt.Sprintf("watch.summarize_model entry missing or empty for the reachable harness(es) %s — add to %s:\n"+
-					"  [watch.summarize_model.<harness>]\n"+
-					"  model = \"<provider>/<model>\"\n"+
-					"then run pf doctor again", strings.Join(missing, ", "), where)
-			} else {
-				watchModelStatus = "pass"
-				watchModelDetail = fmt.Sprintf("watch.summarize_model covered for every reachable harness (%s)", strings.Join(reachable, ", "))
-			}
-		}
-	}
-	add(docChWatchModel, watchModelStatus, watchModelDetail)
 	add(docChConfig, "pass", "loaded from "+where)
 
 	// Mapping absent: the fresh-template shape (zero [workspace]

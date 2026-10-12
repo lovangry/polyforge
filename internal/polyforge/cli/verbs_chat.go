@@ -13,6 +13,7 @@ import (
 // credential.
 var cmdChat = &Command{
 	Name:    "chat",
+	Group:   GroupExec,
 	Summary: "Harness chat identity: get the chat id for a harness session",
 	Usage:   "pf chat init --harness claude|pi --harness-session ID [--json]",
 	Setup:   func(fs *flag.FlagSet) {},
