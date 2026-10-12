@@ -171,6 +171,8 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 	}
 	drv, err := driver.New(driver.Config{
 		WI:             wiInfo,
+		BundleDir:      adapter.BundleDir,
+		Workflow:       adapter.Workflow, // parsed once, shared with the adapter
 		Spawner:        adapter,
 		SpawnN:         stepSeed,
 		Log:            logger,

@@ -705,6 +705,7 @@ steps:
     model_candidates: [prov/c]
   - id: check
     gate: true
+    context_policy: fresh
     on_fail:
       action: rewind
       target: code
@@ -715,7 +716,7 @@ steps:
 	if err := os.WriteFile(filepath.Join(dir, "workflow.md"), []byte(fm), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	wf, err := loadWorkflow(dir)
+	wf, err := LoadWorkflow(dir)
 	if err != nil {
 		t.Fatalf("loadWorkflow: %v", err)
 	}
@@ -725,7 +726,7 @@ steps:
 	if len(wf.Steps) != 3 || wf.Steps[0].ID != "spec" || wf.Steps[2].ID != "check" {
 		t.Fatalf("order is the declaration order: %+v", wf.Steps)
 	}
-	if wf.Steps[0].ContextPolicy != "fresh" {
+	if wf.Steps[0].ContextPolicy != ContextInherit {
 		t.Fatalf("spec step: %+v", wf.Steps[0])
 	}
 	if wf.Steps[1].ContextPolicy != "inherit" || len(wf.Steps[1].ModelCandidates) != 1 || wf.Steps[1].ModelCandidates[0] != "prov/c" {

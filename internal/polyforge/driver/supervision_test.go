@@ -506,7 +506,7 @@ func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(md), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	wf, err := loadWorkflow(bundle)
+	wf, err := LoadWorkflow(bundle)
 	if err != nil {
 		t.Fatal(err)
 	}

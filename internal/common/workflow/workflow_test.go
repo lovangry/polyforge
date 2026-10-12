@@ -31,17 +31,17 @@ steps:
 `
 
 func TestSplitFrontmatter(t *testing.T) {
-	front, ok := SplitFrontmatter([]byte(fmFixture))
+	front, _, ok := SplitFrontmatter([]byte(fmFixture))
 	if !ok {
 		t.Fatal("a well-formed fence must split")
 	}
 	if !strings.Contains(string(front), "model_candidates") {
 		t.Fatalf("front block must carry the candidate keys: %q", front)
 	}
-	if _, ok := SplitFrontmatter([]byte("# no frontmatter\n")); ok {
+	if _, _, ok := SplitFrontmatter([]byte("# no frontmatter\n")); ok {
 		t.Fatal("a file without a fence must not split")
 	}
-	if _, ok := SplitFrontmatter([]byte("---\nname: torn")); ok {
+	if _, _, ok := SplitFrontmatter([]byte("---\nname: torn")); ok {
 		t.Fatal("an unterminated fence must not split")
 	}
 }

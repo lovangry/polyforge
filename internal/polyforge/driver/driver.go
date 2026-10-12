@@ -31,9 +31,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
-	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
-	"gopkg.in/yaml.v3"
 )
 
 // WIInfo identifies the work item one Driver drives.
@@ -119,10 +117,6 @@ type InterruptedDispatch struct {
 type Driver struct {
 	wi       WIInfo
 	workflow *Workflow
-	// extWF is the extended (driver) workflow: context_policy, declared
-	// inputs/outputs, handoff duty. Loaded via ParseDriverWorkflow — the
-	// single authoritative source for both sequencing and prompt assembly.
-	extWF    *DriverWorkflow
 	exec     *capsule.Execution
 	execPath string
 
@@ -194,19 +188,11 @@ func New(cfg Config) (*Driver, error) {
 		if bundleDir == "" {
 			return nil, fmt.Errorf("driver: config without a bundle name or dir")
 		}
-		loaded, err := loadWorkflow(bundleDir)
+		loaded, err := LoadWorkflow(bundleDir)
 		if err != nil {
 			return nil, err
 		}
 		wf = loaded
-	}
-	// Load the extended workflow (context_policy, inputs, outputs, handoff).
-	// Single source of truth for sequencing + prompt assembly (review fix 5).
-	var ext *DriverWorkflow
-	if bundleDir != "" {
-		if extLoaded, err := LoadDriverWorkflow(bundleDir); err == nil {
-			ext = extLoaded
-		}
 	}
 	if len(wf.Steps) == 0 {
 		return nil, fmt.Errorf("driver: workflow has no steps")
@@ -225,7 +211,6 @@ func New(cfg Config) (*Driver, error) {
 	return &Driver{
 		wi:             cfg.WI,
 		workflow:       wf,
-		extWF:          ext,
 		exec:           exec,
 		execPath:       execPath,
 		spawnN:         cfg.SpawnN,
@@ -561,7 +546,6 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 		sp.PriorEndedWithoutResult = true
 	}
 	if spec := d.workflow.step(stepID); spec != nil {
-		sp.ContextMode = spec.ContextPolicy
 		sp.Model = d.modelForLocked(stepID)
 	}
 	sp.SpawnN = d.spawnN + 1
@@ -745,9 +729,6 @@ type StepSpawn struct {
 	// Model is the resolved candidate ("" = the harness adapter's
 	// default; no candidate list is in effect).
 	Model string
-	// ContextMode is the step's context_policy ("inherit" or "fresh";
-	// the adapter decides what inheritance means at prompt assembly).
-	ContextMode string
 	// Resume marks a re-dispatch of an in_progress step (answer
 	// continuation, crash recovery, recovery-lane re-derivation).
 	Resume bool
@@ -831,28 +812,14 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 		spec.HumanAnswers = currentChainAnswers(st)
 	}
 	d.mu.Unlock()
-	// Declared outputs, handoff duty and gate-ness from the extended
-	// workflow (gate-ness feeds the verdict binding — the #106 lesson).
-	if d.extWF != nil {
-		for _, ds := range d.extWF.Steps {
-			if ds.ID == stepID {
-				spec.Outputs = ds.Outputs
-				spec.HandoffRequired = ds.Handoff
-				spec.Gate = ds.Gate
-				spec.RequiresHumanAnswer = ds.RequiresHumanAnswer
-				spec.RequireCommandEvidence = ds.RequiresCommandEvidence
-				break
-			}
-		}
-	} else if d.workflow != nil {
-		// Fallback: the sequencing workflow carries the same Handoff
-		// declaration (tests inject Workflow directly without a bundle dir).
-		if ss := d.workflow.step(stepID); ss != nil {
-			spec.HandoffRequired = ss.Handoff
-			spec.Gate = ss.Gate
-			spec.RequiresHumanAnswer = ss.RequiresHumanAnswer
-			spec.RequireCommandEvidence = ss.RequiresCommandEvidence
-		}
+	// Declared outputs, handoff duty and gate-ness (gate-ness feeds the
+	// verdict binding — the #106 lesson).
+	if ss := d.workflow.step(stepID); ss != nil {
+		spec.Outputs = ss.Outputs
+		spec.HandoffRequired = ss.Handoff
+		spec.Gate = ss.Gate
+		spec.RequiresHumanAnswer = ss.RequiresHumanAnswer
+		spec.RequireCommandEvidence = ss.RequiresCommandEvidence
 	}
 	if stepID == verificationStepID {
 		spec.RequireCommandEvidence = true
@@ -899,183 +866,6 @@ func (d *Driver) verdictFor(stepID string, res *StepResult) *GateVerdict {
 		v.TargetStep = ""
 	}
 	return v
-}
-
-// ---------------------------------------------------------------------------
-// Workflow graph (the driver's read of the bundle frontmatter).
-
-// Workflow is the execution graph: the step order IS the declaration
-// order (rule V3), plus the rewind bounds (rule V6 defaults 4/2).
-type Workflow struct {
-	Steps      []StepSpec
-	MaxTotal   int
-	MaxPerStep int
-}
-
-// StepSpec is one workflow step as the driver needs it: identity and
-// order, the candidate chain, gate policy and context policy. The
-// prompt body and declared artifact INPUTS are the spawn adapter's to
-// assemble (spawn.go); this is the sequencing surface.
-type StepSpec struct {
-	ID              string
-	Gate            bool
-	ContextPolicy   string // "inherit" or "fresh" (default fresh)
-	ModelCandidates []string
-	OnFail          *OnFail
-	// Handoff marks a step that must produce a handoff artifact for the
-	// next inherit step (validated on its completed results).
-	Handoff bool
-	// RequiresHumanAnswer / RequiresCommandEvidence mirror the
-	// DriverStep fields of the same name (workflow_ext.go).
-	RequiresHumanAnswer     bool
-	RequiresCommandEvidence bool
-	// Step-level supervision overrides (workflow.md frontmatter): T is
-	// the existing budget.wall_minutes, X is silence_minutes, Y is
-	// tool_minutes. Zero = the global default.
-	SilenceMinutes int
-	ToolMinutes    int
-	WallMinutes    int
-}
-
-// OnFail is the gate FAIL policy (01 §4.1): rewind with a target, or
-// terminate (the default).
-type OnFail struct {
-	Action         string // "rewind" | "terminate"
-	Target         string
-	IncludeVerdict bool
-}
-
-func (w *Workflow) indexOf(stepID string) (int, bool) {
-	for i, s := range w.Steps {
-		if s.ID == stepID {
-			return i, true
-		}
-	}
-	return 0, false
-}
-
-func (w *Workflow) step(stepID string) *StepSpec {
-	if i, ok := w.indexOf(stepID); ok {
-		return &w.Steps[i]
-	}
-	return nil
-}
-
-const (
-	defaultMaxRewindTotal   = 4
-	defaultMaxRewindPerStep = 2
-)
-
-// loadWorkflow reads the materialized bundle's workflow.md frontmatter
-// into the driver's sequencing surface. The common/workflow reader
-// deliberately exposes only the candidate chain (the F4 lane); the
-// driver needs the graph fields too (gate/on_fail/rewind bounds/
-// context policy), so it reuses the shared frontmatter SPLITTER and
-// parses the block with its own richer (loose, read-only) schema —
-// bundle validation stays aihub's job at WI creation.
-func loadWorkflow(bundleDir string) (*Workflow, error) {
-	raw, err := os.ReadFile(filepath.Join(bundleDir, "workflow.md"))
-	if err != nil {
-		return nil, fmt.Errorf("driver: bundle workflow.md unreadable: %w", err)
-	}
-	front, ok := workflow.SplitFrontmatter(raw)
-	if !ok {
-		return nil, fmt.Errorf("driver: bundle workflow.md has no frontmatter block")
-	}
-	var doc fmDoc
-	if err := yaml.Unmarshal(front, &doc); err != nil {
-		return nil, fmt.Errorf("driver: bundle frontmatter unparsable: %w", err)
-	}
-	wf := &Workflow{MaxTotal: defaultMaxRewindTotal, MaxPerStep: defaultMaxRewindPerStep}
-	if doc.Rewind != nil {
-		if doc.Rewind.MaxTotal != nil {
-			wf.MaxTotal = *doc.Rewind.MaxTotal
-		}
-		if doc.Rewind.MaxPerStep != nil {
-			wf.MaxPerStep = *doc.Rewind.MaxPerStep
-		}
-	}
-	for _, s := range doc.Steps {
-		if s.ID == "" {
-			return nil, fmt.Errorf("driver: workflow step without an id")
-		}
-		spec := StepSpec{
-			ID:              s.ID,
-			Gate:            s.Gate,
-			ModelCandidates: s.ModelCandidates,
-		}
-		if s.ContextPolicy != "" {
-			spec.ContextPolicy = s.ContextPolicy
-		} else {
-			spec.ContextPolicy = "fresh"
-		}
-		if s.Handoff {
-			spec.Handoff = true
-		}
-		spec.RequiresHumanAnswer = s.RequiresHumanAnswer
-		spec.RequiresCommandEvidence = s.RequiresCommandEvidence
-		spec.SilenceMinutes = s.SilenceMinutes
-		spec.ToolMinutes = s.ToolMinutes
-		if s.Budget != nil {
-			spec.WallMinutes = s.Budget.WallMinutes
-		}
-		if s.OnFail != nil {
-			of := &OnFail{Action: s.OnFail.Action, Target: s.OnFail.Target}
-			if s.OnFail.IncludeVerdict == nil || *s.OnFail.IncludeVerdict {
-				of.IncludeVerdict = true
-			}
-			spec.OnFail = of
-		}
-		if spec.ModelCandidates == nil && doc.Defaults != nil {
-			spec.ModelCandidates = doc.Defaults.ModelCandidates
-		}
-		wf.Steps = append(wf.Steps, spec)
-	}
-	return wf, nil
-}
-
-// The loose frontmatter schema the driver parses (a superset of the
-// common/workflow read surface; unknown keys are ignored).
-type fmDoc struct {
-	Defaults *fmDefaults `yaml:"defaults"`
-	Rewind   *fmRewind   `yaml:"rewind"`
-	Steps    []fmStep    `yaml:"steps"`
-}
-
-type fmDefaults struct {
-	ModelCandidates []string `yaml:"model_candidates"`
-}
-
-type fmRewind struct {
-	MaxTotal   *int `yaml:"max_total"`
-	MaxPerStep *int `yaml:"max_per_step"`
-}
-
-type fmStep struct {
-	ID              string    `yaml:"id"`
-	Gate            bool      `yaml:"gate"`
-	Handoff         bool      `yaml:"handoff"`
-	ContextPolicy   string    `yaml:"context_policy"`
-	ModelCandidates []string  `yaml:"model_candidates"`
-	OnFail          *fmOnFail `yaml:"on_fail"`
-
-	RequiresHumanAnswer     bool `yaml:"requires_human_answer"`
-	RequiresCommandEvidence bool `yaml:"requires_command_evidence"`
-
-	// supervision overrides (v2-converge 2.4)
-	SilenceMinutes int       `yaml:"silence_minutes"`
-	ToolMinutes    int       `yaml:"tool_minutes"`
-	Budget         *fmBudget `yaml:"budget"`
-}
-
-type fmBudget struct {
-	WallMinutes int `yaml:"wall_minutes"`
-}
-
-type fmOnFail struct {
-	Action         string `yaml:"action"`
-	Target         string `yaml:"target"`
-	IncludeVerdict *bool  `yaml:"include_verdict"`
 }
 
 // ---------------------------------------------------------------------------

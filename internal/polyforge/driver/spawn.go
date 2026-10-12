@@ -81,9 +81,9 @@ type StepSpawnAdapter struct {
 	// BundleDir is the materialized workflow bundle root (workflow.md
 	// + steps/). Default: <CapsuleDir>/workflows/<BundleName>.
 	BundleDir string
-	// Workflow is the extended frontmatter parse (workflow_ext.go);
-	// nil → loaded from BundleDir at construction.
-	Workflow *DriverWorkflow
+	// Workflow is the parsed workflow.md (workflow.go), shared with the
+	// driver; nil → loaded from BundleDir at construction.
+	Workflow *Workflow
 	// Spawner derives the step processes. Required; production binds
 	// runtime.DefaultSpawner(&runtime.Config{...}) so isolation, env
 	// sanitization and the model pin keep their single home.
@@ -124,7 +124,7 @@ func NewStepSpawnAdapter(a StepSpawnAdapter) (*StepSpawnAdapter, error) {
 		a.BundleDir = filepath.Join(a.WI.CapsuleDir, capsule.DirWorkflows, a.WI.BundleName)
 	}
 	if a.Workflow == nil {
-		wf, err := LoadDriverWorkflow(a.BundleDir)
+		wf, err := LoadWorkflow(a.BundleDir)
 		if err != nil {
 			return nil, err
 		}
@@ -137,19 +137,16 @@ func NewStepSpawnAdapter(a StepSpawnAdapter) (*StepSpawnAdapter, error) {
 }
 
 // SpawnStep derives one step process for the driver's dispatch order.
-// The context policy is the ADAPTER's own extended parse's (the
-// frontmatter authority for v2 bundles); StepSpawn.ContextMode is the
-// sequencing surface's advisory copy and is deliberately not trusted
-// here — the two loaders carry different default eras.
+// The context policy comes from the shared workflow parse.
 func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun, error) {
-	fmt.Fprintf(os.Stderr, "driver: SpawnStep: step=%s spawn=%d policy=%s\n", sp.StepID, sp.SpawnN, sp.ContextMode)
-	spec := a.Workflow.StepByID(sp.StepID)
+	fmt.Fprintf(os.Stderr, "driver: SpawnStep: step=%s spawn=%d\n", sp.StepID, sp.SpawnN)
+	spec := a.Workflow.step(sp.StepID)
 	if spec == nil {
 		return nil, fmt.Errorf("driver: step %q is not in the workflow bundle", sp.StepID)
 	}
 	policy := spec.ContextPolicy
 	switch policy {
-	case ContextInherit, ContextFresh: // ParseDriverWorkflow defaults inherit
+	case ContextInherit, ContextFresh: // parseWorkflow defaults inherit
 	default:
 		return nil, fmt.Errorf("driver: step %q has unknown context_policy %q", sp.StepID, policy)
 	}
@@ -493,29 +490,13 @@ func readStepDefinition(bundleDir, stepID string) (string, error) {
 }
 
 // stepDefBody strips a leading YAML frontmatter block (the same fence
-// shape workflow.md uses — detection reuses the shared splitter, the
-// body cut is a local line scan). A file without a closed frontmatter
-// block is body in full.
+// shape workflow.md uses) via the shared splitter. A file without a
+// closed frontmatter block is body in full.
 func stepDefBody(raw []byte) string {
-	if _, ok := workflow.SplitFrontmatter(raw); !ok {
-		return strings.TrimSpace(string(raw))
+	if _, body, ok := workflow.SplitFrontmatter(raw); ok {
+		raw = body
 	}
-	s := string(raw)
-	nl := strings.IndexByte(s, '\n')
-	rest := s[nl+1:]
-	for off := 0; off < len(rest); {
-		eol := strings.IndexByte(rest[off:], '\n')
-		var line string
-		if eol < 0 {
-			line, off = rest[off:], len(rest)
-		} else {
-			line, off = rest[off:off+eol], off+eol+1
-		}
-		if strings.TrimRight(line, " \r") == "---" {
-			return strings.TrimSpace(rest[off:])
-		}
-	}
-	return strings.TrimSpace(s) // unclosed fence: not frontmatter
+	return strings.TrimSpace(string(raw))
 }
 
 // readCapsuleFile reads one capsule-relative artifact, jailed to the
@@ -587,9 +568,7 @@ func (a *StepSpawnAdapter) newestAcceptedResult(stepID string) (*StepResult, err
 	data, err := os.ReadFile(execPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// No execution.json (early startup / isolated adapter test):
-			// fall back to the archived envelope scan (pre-R14 behavior).
-			return newestArchivedResult(a.WI.CapsuleDir, stepID)
+			return nil, nil // no execution.json: nothing is accepted
 		}
 		return nil, fmt.Errorf("driver: read execution.json for accepted-result check: %w", err)
 	}

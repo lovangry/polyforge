@@ -145,6 +145,10 @@ func grillDone(t *testing.T, capDir string) {
 		Output:          json.RawMessage(`{}`),
 		HandoffRef:      &ArtifactRef{Path: "artifacts/fix-memo.md", SHA256: hashOfFile(t, capDir, "artifacts/fix-memo.md"), Bytes: 19},
 	})
+	// the acceptance gate: the envelope counts only once execution.json
+	// records the step done with that result_id
+	writeCapsuleFile(t, capDir, "runtime-state/execution.json",
+		`{"steps":{"grill":{"status":"done","attempts":[{"accepted_result_id":"319584c8-10e7-5703-8b0f-4af0a03f8657"}]}}}`)
 }
 
 // ---------------------------------------------------------------------------
