@@ -26,6 +26,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,8 +99,12 @@ func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err == nil {
 		var perr error
-		flat, sections, perr = parseConfigTOML(string(data))
+		flat, sections, perr = parseConfigTOML(path, string(data))
 		if perr != nil {
+			var uk *unknownKeyError
+			if errors.As(perr, &uk) {
+				return cfg, perr
+			}
 			return cfg, fmt.Errorf("config %s: %w", path, perr)
 		}
 		applyConfigFile(&cfg, flat)
@@ -123,7 +128,7 @@ func LoadConfig(path string) (Config, error) {
 func applyConfigFile(cfg *Config, kv map[string]string) {
 	for k, v := range kv {
 		switch k {
-		case "server", "url": // "url" was the installer's original spelling
+		case "server":
 			cfg.Server = v
 		case "api_key":
 			cfg.APIKey = v
@@ -165,14 +170,20 @@ type workspaceSection struct {
 }
 
 // The known flat keys: root-level wherever they appear in the file.
-var coreFlatKeys = map[string]bool{"server": true, "url": true, "api_key": true, "daemon_socket": true, "user_id": true}
+var coreFlatKeys = map[string]bool{"server": true, "api_key": true, "daemon_socket": true, "user_id": true}
+
+// unknownKeyError is the refusal of a top-level key outside the known set.
+type unknownKeyError struct{ key, file string }
+
+func (e *unknownKeyError) Error() string {
+	return fmt.Sprintf("unknown key %q in %s", e.key, e.file)
+}
 
 // parseConfigTOML parses the TOML subset documented for cli.toml:
 //
-//   - `key = "value"` flat string keys: the known set (server/url alias,
-//     api_key, daemon_socket, user_id) is stored; the known keys are
-//     root-level wherever they appear; unknown flat keys at the top
-//     level are stored and ignored;
+//   - `key = "value"` flat string keys: the known set (server, api_key,
+//     daemon_socket, user_id) is stored; the known keys are root-level
+//     wherever they appear; any other top-level key is an error;
 //   - one section family: `[workspace."<path>"]` (quoted key mandatory)
 //     — inside, only `projects = ["a", "b"]`.
 //
@@ -183,7 +194,7 @@ var coreFlatKeys = map[string]bool{"server": true, "url": true, "api_key": true,
 // containing a backslash is rejected — and values are taken literally
 // between their quotes. A `#` inside a quoted value is data, not a
 // comment.
-func parseConfigTOML(text string) (map[string]string, []workspaceSection, error) {
+func parseConfigTOML(file, text string) (map[string]string, []workspaceSection, error) {
 	flat := map[string]string{}
 	var sections []workspaceSection
 	var (
@@ -250,16 +261,7 @@ func parseConfigTOML(text string) (map[string]string, []workspaceSection, error)
 		if key == "projects" {
 			return nil, nil, fmt.Errorf("line %d: `projects` belongs inside a [workspace.\"<path>\"] section, not the top level", ln+1)
 		}
-		// Unknown top-level flat keys are stored (the retired-key check in
-		// LoadConfig reads them; applyConfigFile ignores the rest).
-		inner, ierr := parseQuotedValue(val, ln+1)
-		if ierr != nil {
-			return nil, nil, ierr
-		}
-		if _, dup := flat[key]; dup {
-			return nil, nil, fmt.Errorf("line %d: duplicate key %q", ln+1, key)
-		}
-		flat[key] = inner
+		return nil, nil, &unknownKeyError{key: key, file: file}
 	}
 	return flat, sections, nil
 }
