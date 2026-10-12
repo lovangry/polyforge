@@ -40,8 +40,9 @@ package runtime
 //	  relaunch" is exactly this).
 //	verify does not match + paused/clean_pause under another session →
 //	  drop the record: restart must NOT auto-resume it.
-//	aihub unreachable → keep the record, try again on the next restart —
-//	  never guess a verdict.
+//	aihub unreachable → keep the record (shown verify_pending) and retry
+//	  the verify in-process with backoff until aihub answers, then proceed
+//	  as above — never guess a verdict.
 //
 // A mid-flight record whose capsule directory is missing, or whose project
 // fell out of the [workspace] mapping, is NOT a startup failure (v2-converge
@@ -170,6 +171,33 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		_ = r.restartOne(ctx, rec)
 	}
 	return r.persist()
+}
+
+// retryVerify is the background half of a failed restart verify
+// (verify_pending): re-run the whole restartOne reconciliation on the
+// end_pending backoff until aihub gives a verdict, so the WI proceeds
+// without waiting for the next daemon restart. One goroutine per WI.
+func (r *Runtime) retryVerify(j *job) {
+	r.goRetry("verify:"+j.wi, func() bool {
+		r.opMu.Lock()
+		defer r.opMu.Unlock()
+		if cur := r.jobOf(j.wi); cur != j {
+			return true // dropped or replaced meanwhile: nothing to verify
+		}
+		j.mu.Lock()
+		pending := j.verifyPending
+		j.mu.Unlock()
+		if !pending {
+			return true
+		}
+		if err := r.restartOne(context.Background(), j.record()); err != nil {
+			return false
+		}
+		if err := r.persist(); err != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
+		}
+		return true
+	})
 }
 
 // restartRelease is the superseded-at-restart path: the WI is held by
@@ -354,10 +382,23 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 	}
 	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
 	if err != nil {
-		// aihub unreachable for this WI: keep the record, try again on
-		// the next restart — never guess a verdict.
-		fmt.Fprintf(os.Stderr, "runtime: %s: session verify failed, record kept: %v\n", rec.WorkItemID, err)
+		// aihub unreachable for this WI: keep the record and retry the
+		// verify in-process with backoff (like end_pending) until it
+		// yields a verdict — never guess one, never wait for the next
+		// daemon restart.
+		fmt.Fprintf(os.Stderr, "runtime: %s: session verify failed, record kept, retrying: %v\n", rec.WorkItemID, err)
+		if j := r.jobOf(rec.WorkItemID); j != nil {
+			j.mu.Lock()
+			j.verifyPending = true
+			j.mu.Unlock()
+			r.retryVerify(j)
+		}
 		return fmt.Errorf("runtime: %s: session verify failed: %w", rec.WorkItemID, err)
+	}
+	if j := r.jobOf(rec.WorkItemID); j != nil {
+		j.mu.Lock()
+		j.verifyPending = false
+		j.mu.Unlock()
 	}
 	if v.Matches {
 		switch v.Status {
