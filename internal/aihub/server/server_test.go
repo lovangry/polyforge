@@ -382,6 +382,19 @@ func TestMemoryOverHTTP(t *testing.T) {
 	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=brown+fox", e.key, nil, &search); code != 200 || search.Total != 1 {
 		t.Fatalf("search: %d %s", code, raw)
 	}
+	// Per-id read (polyforge#132, the faces `pf memory show` consumes):
+	// the default face is metadata only (no body); ?format=content is the
+	// body as text/markdown (the stored file: front-matter, then the body).
+	var meta map[string]any
+	if code, raw := e.do(t, "GET", "/api/v1/memories/"+created.ID, e.key, nil, &meta); code != 200 || meta["id"] != created.ID {
+		t.Fatalf("get metadata: %d %s", code, raw)
+	}
+	if _, has := meta["content"]; has {
+		t.Fatalf("metadata face must not carry the body: %v", meta)
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/memories/"+created.ID+"?format=content", e.key, nil, nil); code != 200 || !strings.HasSuffix(string(raw), "\nthe quick brown fox over http") {
+		t.Fatalf("get content: %d %q", code, raw)
+	}
 	// Redact → GET is a 404.
 	if code, _ := e.do(t, "POST", "/api/v1/memories/"+created.ID+"/redact", e.key, nil, nil); code != 200 {
 		t.Fatalf("redact: %d", code)
