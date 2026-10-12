@@ -252,6 +252,44 @@ func TestRecordedReposSurviveAnEmptyInventory(t *testing.T) {
 	}
 }
 
+// An empty-at-claim repo records baseline "" (key present). Its worktree
+// may hold agent edits: it takes the carried-forward path, and a restore
+// that would fail (unreachable hub) must neither run nor delete the dir.
+func TestEmptyBaselineRepoKeepsAgentEdits(t *testing.T) {
+	g := newCarrierRig(t, "wi_emptybase", true)
+	r := g.r
+	capDir := testCapsuleDir(r, g.wi)
+	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	edit := filepath.Join(repoDir, "agent.txt")
+	if err := os.WriteFile(edit, []byte("agent work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(capsule.Identity{WorkItemID: g.wi, Repos: map[string]string{"app": ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(capDir, capsule.CapsuleJSON), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j := &job{wi: g.wi, capsuleDir: capDir, repos: []api.ProjectRepo{{Name: "app", URL: g.source}}}
+	j.git = r.gitOptsForTest(t, g)
+	j.git.RemoteURL = filepath.Join(t.TempDir(), "no-such-hub.git") // any restore fails
+
+	shas, err := r.cloneTaskRepos(context.Background(), j)
+	if err != nil {
+		t.Fatalf("cloneTaskRepos: %v", err)
+	}
+	if sha, ok := shas["app"]; !ok || sha != "" {
+		t.Fatalf("empty baseline must carry forward as \"\": %v", shas)
+	}
+	if b, err := os.ReadFile(edit); err != nil || string(b) != "agent work" {
+		t.Fatalf("agent edits lost: %q, %v", b, err)
+	}
+}
+
 // gitOptsForTest builds the capsule gitops.Opts the rig's claim would
 // (RemoteURL = the WI's hub bare repo).
 func (r *Runtime) gitOptsForTest(t *testing.T, g *carrierRig) gitops.Opts {

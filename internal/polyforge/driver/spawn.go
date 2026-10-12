@@ -38,6 +38,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -196,6 +197,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 			return nil, err
 		}
 		if !usableTranscript(transcript) {
+			// (also the no-journal-line-for-this-step shape: "" is unusable)
 			// nothing readable to resume (the previous dispatch died before
 			// the harness wrote its session): start the conversation fresh
 			// rather than hand the harness a path that cannot resume
@@ -702,9 +704,14 @@ func (a *StepSpawnAdapter) sessionHandle() string {
 // the highest-ordinal spawn-journal line OF THE GIVEN STEP declaring a
 // transcript (the capsule-side session copy the runtime mechanism
 // resumes from). Another step's conversation is never a candidate: the
-// journal is capsule-wide and interleaves every step's spawns.
+// journal is capsule-wide and interleaves every step's spawns. A step
+// with no journal line (or no journal) answers ("", nil): the caller
+// degrades to a fresh dispatch; only an unreadable journal is an error.
 func (a *StepSpawnAdapter) latestJournalTranscript(stepID string) (string, error) {
 	raw, err := os.ReadFile(filepath.Join(a.WI.CapsuleDir, capsule.DirRuntimeState, spawnJournalFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil // no journal yet: no transcript to resume
+	}
 	if err != nil {
 		return "", fmt.Errorf("driver: resume ordered but the capsule spawn journal is unreadable: %w", err)
 	}
@@ -726,9 +733,6 @@ func (a *StepSpawnAdapter) latestJournalTranscript(stepID string) (string, error
 		if e.StepID == stepID && e.Transcript != "" && e.SpawnN > bestN {
 			bestN, best = e.SpawnN, e.Transcript
 		}
-	}
-	if best == "" {
-		return "", fmt.Errorf("driver: resume ordered but the spawn journal records no prior transcript for step %q", stepID)
 	}
 	return best, nil
 }

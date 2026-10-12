@@ -9,6 +9,7 @@ package gitops
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -252,11 +253,49 @@ func TestTaskRefDivergenceIsRejectedAndRaisedAsEvent(t *testing.T) {
 	}
 }
 
+// nonEnglishLocale returns an installed non-C/POSIX/English locale name
+// (as `locale -a` lists it), or "" when none is available.
+func nonEnglishLocale() string {
+	out, err := exec.Command("locale", "-a").Output()
+	if err != nil {
+		return ""
+	}
+	for _, l := range strings.Fields(string(out)) {
+		if l == "C" || l == "POSIX" || strings.HasPrefix(l, "C.") || strings.HasPrefix(l, "en") {
+			continue
+		}
+		return l
+	}
+	return ""
+}
+
+// CEnv is deterministic: it drops every inherited LC_ALL/LANGUAGE and
+// pins LC_ALL=C last, whatever the daemon's own environment says.
+func TestCEnvPinsCLocale(t *testing.T) {
+	got := CEnv([]string{"PATH=/bin", "LC_ALL=zh_CN.UTF-8", "LANGUAGE=zh_CN", "LANG=zh_CN.UTF-8"})
+	var lcAll []string
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "LANGUAGE=") {
+			t.Fatalf("LANGUAGE leaked: %v", got)
+		}
+		if strings.HasPrefix(kv, "LC_ALL=") {
+			lcAll = append(lcAll, kv)
+		}
+	}
+	if len(lcAll) != 1 || lcAll[0] != "LC_ALL=C" || got[len(got)-1] != "LC_ALL=C" {
+		t.Fatalf("LC_ALL must be exactly one trailing LC_ALL=C: %v", got)
+	}
+}
+
 // IsNonFastForward must match REAL git push output, and git must run
 // under the C locale however the daemon's environment is set.
 func TestIsNonFastForwardOnRealGitOutput(t *testing.T) {
 	setIdentity(t)
-	t.Setenv("LC_ALL", "zh_CN.UTF-8")
+	loc := nonEnglishLocale()
+	if loc == "" {
+		t.Skip("no non-English locale installed (locale -a): the C-locale guarantee cannot be exercised against real git")
+	}
+	t.Setenv("LC_ALL", loc)
 	t.Setenv("LANGUAGE", "zh_CN")
 	base := t.TempDir()
 	bare := filepath.Join(base, "b.git")
