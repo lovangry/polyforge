@@ -34,23 +34,16 @@ every ambiguity you can find as a question, not an assumption.
    on an empty list"), non-functional constraints ("does this need to be backward
    compatible with X"), and anything that smells like an unstated assumption.
 2. BATCH your questions (owner ruling 2026-10-02): collect ALL material
-   ambiguities you can find first, then ask them in ONE needs_input flush as a
-   NUMBERED list (each item one focused question, answerable in one line each) —
+   ambiguities you can find first, then ask them in ONE needs_input envelope as a
+   NUMBERED list (each item one focused question, answerable in one line each) -
    the owner answers all of them in one reply (same numbering). Only a question
    whose content GENUINELY depends on an earlier answer may wait for a
-   follow-up flush; do not drip independent questions one at a time.
-   Mechanism note: the pending-question slot is single, so the numbered list
-   rides in one question body with one question_id, and the combined answer
-   comes back as one relayed text. The needs_input mechanism, inline: mint the
-   `question_id` once and persist it in `pending_question` in the same atomic
-   write that opens the question; call flush(needs_input) carrying that id; when
-   the answer arrives, archive it to `steps.<id>.answers[]` and clear
-   `pending_question`, continuing this same step in place. If you crash while a
-   question is pending, your successor re-presents the exact same persisted id -
-   a question id is terminated only by consumption (answer archived AND
-   pending_question cleared), never by a re-derivation.
-   feeds the answer back to you when it arrives. Do not fabricate or guess at an answer
-   you did not receive.
+   follow-up dispatch; do not drip independent questions one at a time.
+   The numbered list rides in one question body with one `question_id`, and the
+   combined answer comes back as one text. To ask: mint a `question_id`, return a result envelope with `outcome: "needs_input"`, that
+   `question_id` and the `question` text, and end your turn. The answer arrives in the NEXT
+   dispatch of this step under "# Answered questions" - continue from it; never fabricate
+   or guess an answer you did not receive.
 3. Append every question and its answer to `artifacts/grill-qa.md` under a `## grill`
    heading, in the order asked, as they come in — this file is shared with `spec` (which
    reads it as primary input) and later with `grill-review` (which appends its own

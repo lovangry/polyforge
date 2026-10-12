@@ -42,16 +42,12 @@ requester, so whatever `fix` needs to know must end up in your memo.
    wrong or missing, what "fixed" looks like, edge cases the requester cares about, and
    anything that smells like an unstated assumption.
 2. BATCH your questions (owner ruling 2026-10-02): collect all material ambiguities
-   first, then ask them in ONE needs_input flush as a NUMBERED list (one focused
-   question per item, answerable in one line each) via the interactive needs_input
-   mechanism your WI Agent drives. That mechanism, inline: mint the `question_id`
-   once and persist it in `pending_question` in the same atomic write that opens the
-   question; call flush(needs_input) carrying that id; when the answer arrives,
-   archive it to `steps.<id>.answers[]` and clear `pending_question`, continuing
-   this same step in place. If you crash while a question is pending, your successor
-   re-presents the exact same persisted id - never a fresh mint. Only a follow-up
-   whose content genuinely depends on an earlier answer waits. Do not
-   fabricate or guess an answer you did not receive. Append every question and answer to
+   first, then ask them in ONE needs_input envelope as a NUMBERED list (one focused
+   question per item, answerable in one line each): mint a `question_id`, return a result envelope with `outcome: "needs_input"`, that
+   `question_id` and the `question` text, and end your turn. The answer arrives in the NEXT
+   dispatch of this step under "# Answered questions" - continue from it; never fabricate
+   or guess an answer you did not receive. Only a follow-up
+   whose content genuinely depends on an earlier answer waits for a later dispatch. Append every question and answer to
    `artifacts/grill-qa.md` under a `## grill` heading as they come in.
 3. Do not over-interrogate. This lane exists for small, well-understood changes: if after
    reading the goal you cannot find a materially ambiguous point, record that and move
