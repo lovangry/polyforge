@@ -768,46 +768,6 @@ steps:
 	}
 }
 
-// candidateOrdinal: the §6.3 recomputation (1-based, capped, restarted
-// after the last rewind archive).
-func TestCandidateOrdinal(t *testing.T) {
-	st := &capsule.Step{}
-	if got := candidateOrdinal(st, 0); got != 0 {
-		t.Fatalf("no-candidate fallback is 0, got %d", got)
-	}
-	// No archives: first candidate.
-	if got := candidateOrdinal(st, 3); got != 1 {
-		t.Fatalf("fresh step ordinal 1, got %d", got)
-	}
-	// Unclassified infra failures (a daemon restart, a driver relaunch)
-	// NEVER advance the pointer.
-	st.Attempts = append(st.Attempts,
-		capsule.Attempt{Cause: CauseInfraFailure},
-		capsule.Attempt{Cause: CauseInfraFailure},
-	)
-	if got := candidateOrdinal(st, 3); got != 1 {
-		t.Fatalf("unclassified failures must not advance: %d", got)
-	}
-	// Two provider-class infra failures advance twice; the cap holds the
-	// last entry.
-	st.Attempts = []capsule.Attempt{
-		{Cause: CauseInfraFailure, FaultClass: string(FaultProvider)},
-		{Cause: CauseInfraFailure, FaultClass: string(FaultProvider)},
-	}
-	if got := candidateOrdinal(st, 3); got != 3 {
-		t.Fatalf("ordinal after 2 infra failures: %d", got)
-	}
-	if got := candidateOrdinal(st, 2); got != 2 {
-		t.Fatalf("cap at list length: %d", got)
-	}
-	// A rewind archive restarts the count (the pointer resets with the
-	// pending reset, INV-1g).
-	st.Attempts = append(st.Attempts, capsule.Attempt{Cause: CauseGateFailRewind})
-	if got := candidateOrdinal(st, 3); got != 1 {
-		t.Fatalf("count restarts after the rewind archive: %d", got)
-	}
-}
-
 func sha256Hex(t *testing.T, b []byte) string {
 	t.Helper()
 	sum := sha256.Sum256(b)

@@ -106,23 +106,21 @@ type Config struct {
 	Harness string
 }
 
+// causeOperatorShutdown is the recovery lane's cause for a session
+// attach after a graceful operator shutdown (runtime/restart.go): an
+// interruption is a stop, not a model verdict, so it archives nothing.
+const causeOperatorShutdown = "operator daemon shutdown"
+
 // interruptedFromCause maps the recovery lane's cause onto the driver's
-// interrupted-dispatch archive: the cause runs through the driver's
-// fault table, and an OPERATOR-classified cause archives NOTHING (an
-// interruption is a stop, not a model verdict — the
-// attach-after-graceful-shutdown resume keeps today's no-advance
-// behavior). Everything else is archived with its class — and an
-// unclassified cause (a daemon restart, a driver relaunch) carries NO
-// class and so never advances the candidate pointer (v2-converge 2.3).
+// interrupted-dispatch archive. An empty cause or an operator shutdown
+// archives nothing; every other cause is archived verbatim as an
+// audit-only attempt (it is never model-class, so it never advances the
+// candidate pointer).
 func interruptedFromCause(cause string) *driver.InterruptedDispatch {
-	if cause == "" {
+	if cause == "" || cause == causeOperatorShutdown {
 		return nil
 	}
-	fc := driver.ClassifyFault(errors.New(cause))
-	if fc == driver.FaultOperator {
-		return nil
-	}
-	return &driver.InterruptedDispatch{FaultClass: fc, Detail: cause}
+	return &driver.InterruptedDispatch{Detail: cause}
 }
 
 // Start instantiates the driver over the capsule and runs it.

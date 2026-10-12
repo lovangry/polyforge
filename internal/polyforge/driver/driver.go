@@ -105,12 +105,11 @@ type Config struct {
 }
 
 // InterruptedDispatch records one derivation that ended without a
-// result: its classified fault and the recovery cause. The driver
-// archives it as the step's infra_failure attempt (the candidate
-// pointer's input) when the recovery lane re-derives.
+// result: the recovery cause. The driver archives it as an audit-only
+// infra_failure attempt (never model-class, so never a candidate
+// advance) when the recovery lane re-derives.
 type InterruptedDispatch struct {
-	FaultClass FaultClass
-	Detail     string
+	Detail string
 }
 
 // Driver is the per-WI execution driver. One Driver per work item; Run
@@ -263,18 +262,16 @@ func (d *Driver) Run(ctx context.Context) error {
 	}
 	// polyforge#79 era: the recovery integration's interrupted-dispatch
 	// archive (the recovery lane triggers it; the single execution.json
-	// writer performs it). ONE infra_failure attempt for the derivation
-	// that died without a result, BEFORE the re-derivation dispatches —
-	// the archived-attempt recomputation then indexes it (a
-	// provider-class archive is what advances the candidate pointer;
-	// operator-class causes never reach this hook — the bridge filters
-	// them).
+	// writer performs it). ONE audit-only infra_failure attempt for the
+	// derivation that died without a result, BEFORE the re-derivation
+	// dispatches. It is not model-class, so it never moves the candidate
+	// pointer; an operator shutdown never reaches this hook (the bridge
+	// filters it).
 	if d.cfg.Interrupted != nil {
 		if err := d.transition(TransitionRequest{
-			Kind:       TransInterrupted,
-			FaultClass: string(d.cfg.Interrupted.FaultClass),
-			Reason:     d.cfg.Interrupted.Detail,
-			SpawnN:     d.currentSpawnN(),
+			Kind:   TransInterrupted,
+			Reason: d.cfg.Interrupted.Detail,
+			SpawnN: d.currentSpawnN(),
 		}); err != nil {
 			return fmt.Errorf("driver: interrupted-dispatch archive failed: %w", err)
 		}
@@ -399,12 +396,10 @@ func (d *Driver) Run(ctx context.Context) error {
 			d.priorRejection[stepID] = feedback
 			d.mu.Unlock()
 			if count > maxEnvelopeRejects {
-				if PolicyFor(FaultSchema).Report {
-					d.emit("schema_fault", map[string]any{
-						"step": stepID, "spawn_n": n, "rejections": count,
-						"detail": "persistent envelope rejection: the result contract is broken, not the model; reported to the owner",
-					})
-				}
+				d.emit("schema_fault", map[string]any{
+					"step": stepID, "spawn_n": n, "rejections": count,
+					"detail": "persistent envelope rejection: the result contract is broken, not the model; reported to the owner",
+				})
 				// the in-memory counter dies with this driver: persist the
 				// escalation so a relaunch loop is bounded (the third one
 				// blocks the step instead of relaunching)
@@ -1135,51 +1130,6 @@ func skeletonExecution(wi WIInfo, wf *Workflow) *capsule.Execution {
 
 func capsuleIDFor(wi string) string { return "cap_" + wi }
 
-// candidateOrdinal recomputes the effective model-candidate ordinal
-// from the attempts[] archive alone (01 §6.3 step 4 — the pointer is
-// NOT a persisted field, so a crash-recovered driver derives the same
-// ordinal as its predecessor): ordinal = 1 + the count of infra_failure
-// entries after the last gate_fail_rewind entry, capped by the list
-// length. 1-BASED (ordinal 1 is the first dispatch's candidate).
-// listLen <= 0 is the no-candidate fallback: 0, meaning the harness
-// adapter's default stays in effect. The core loop itself never
-// archives infra failures — that is the recovery integration's write —
-// but the recomputation runs on every dispatch so the pointer is
-// correct the moment that lane starts feeding it.
-func candidateOrdinal(st *capsule.Step, listLen int) int {
-	if listLen <= 0 {
-		return 0
-	}
-	// Delegate to the unified fault-class-aware CandidatePointer (R4):
-	// provider-class infra failures advance; host/operator/schema do NOT.
-	// Build a candidates list of the right length for the pointer formula.
-	cands := make([]string, listLen)
-	for i := range cands {
-		cands[i] = fmt.Sprintf("c%d", i)
-	}
-	ord := CandidatePointer(attemptsToPointer(st), cands)
-	if ord < 0 {
-		return 0
-	}
-	return ord + 1 // CandidatePointer is 0-based; driver ordinal is 1-based
-}
-
-// attemptsToPointer converts the capsule attempt archive to the
-// candidates.go input shape (fault-class aware).
-func attemptsToPointer(st *capsule.Step) []StepAttempt {
-	if st == nil {
-		return nil
-	}
-	out := make([]StepAttempt, len(st.Attempts))
-	for i, a := range st.Attempts {
-		// An empty class is an unknown fault: it never advances the
-		// candidate pointer (v2-converge 2.3 — daemon restarts and other
-		// unclassified interruptions must not switch models).
-		out[i] = StepAttempt{Cause: a.Cause, FaultClass: FaultClass(a.FaultClass)}
-	}
-	return out
-}
-
 // effectiveCandidates answers the step's effective candidate list: the
 // polyforge#79 post-precedence map when the claim/recovery supplied
 // one, the bundle's own resolution otherwise.
@@ -1196,12 +1146,11 @@ func (d *Driver) effectiveCandidates(stepID string) []string {
 }
 
 // modelForLocked resolves the step's effective model for the NEXT
-// dispatch (the candidate at the recomputed ordinal; "" when no
+// dispatch (the candidate at the recomputed pointer; "" when no
 // candidate list is in effect). The recomputation runs over the
 // EFFECTIVE list (polyforge#79): the post-precedence list the claim
 // carried — or the recovery re-derived — never the raw bundle parse
-// alone. Rotation semantics are untouched: provider-class infra
-// failures alone advance (bounded, capped at list end), a gate-FAIL
+// alone. Model-class infra failures alone advance (bounded, capped at list end), a gate-FAIL
 // rewind resets to the head.
 func (d *Driver) modelForLocked(stepID string) string {
 	list := d.effectiveCandidates(stepID)
@@ -1212,9 +1161,5 @@ func (d *Driver) modelForLocked(stepID string) string {
 	if st == nil {
 		return list[0]
 	}
-	ord := candidateOrdinal(st, len(list))
-	if ord <= 0 {
-		return ""
-	}
-	return list[ord-1]
+	return list[CandidatePointer(st.Attempts, list)]
 }

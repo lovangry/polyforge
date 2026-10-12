@@ -179,12 +179,12 @@ func TestDeathCauseTableSameModelRetry(t *testing.T) {
 		}
 		var found bool
 		for _, a := range st.Attempts {
-			if a.Cause == CauseInfraFailure && a.FailureCause == cause && a.FaultClass == "" {
+			if a.Cause == CauseInfraFailure && a.FailureCause == cause {
 				found = true
 			}
 		}
 		if !found {
-			t.Fatalf("%s: attempts %+v must record the cause sub-class with no fault class", cause, st.Attempts)
+			t.Fatalf("%s: attempts %+v must record the cause sub-class", cause, st.Attempts)
 		}
 	}
 }
@@ -198,8 +198,8 @@ func TestDeathCauseTableModelClassSwitchesCandidate(t *testing.T) {
 	if st.Supervision == nil || st.Supervision.FailureCount != 0 {
 		t.Fatalf("a switch to a new candidate resets the counter: %+v", st.Supervision)
 	}
-	if st.Attempts[0].FaultClass != string(FaultProvider) || st.Attempts[0].FailureCause != FailExitModel {
-		t.Fatalf("attempt %+v must carry provider class + cause", st.Attempts[0])
+	if st.Attempts[0].FailureCause != FailExitModel {
+		t.Fatalf("attempt %+v must carry the cause", st.Attempts[0])
 	}
 	if sw := env.log.byKind("candidate_switched"); len(sw) != 1 || sw[0].body["from"] != "a" || sw[0].body["to"] != "b" {
 		t.Fatalf("candidate_switched events: %+v", sw)
@@ -223,8 +223,8 @@ func TestDeathCauseTableHostClassBlocksWithoutSwitching(t *testing.T) {
 	if n := len(env.sp.dispatched()); n != 1 {
 		t.Fatalf("a host fault must not redispatch (no model switch): %v", env.models())
 	}
-	if x.Steps["s"].Attempts[0].FaultClass != string(FaultHost) {
-		t.Fatalf("attempt %+v must carry the host class", x.Steps["s"].Attempts[0])
+	if x.Steps["s"].Attempts[0].FailureCause != FailExitHost {
+		t.Fatalf("attempt %+v must carry the host cause", x.Steps["s"].Attempts[0])
 	}
 	bl := env.log.byKind("blocked")
 	if len(bl) != 1 || bl[0].body["report"] != true {
@@ -346,16 +346,9 @@ func TestCandidatesExhaustedCountsAsSameModelRetry(t *testing.T) {
 	}
 }
 
-func TestPolicyForIsWired(t *testing.T) {
-	// host -> block+report, provider -> advance, schema -> report
-	if p := PolicyFor(FaultHost); !p.Block || !p.Report || p.Advance {
-		t.Fatalf("host policy %+v", p)
-	}
-	if p := PolicyFor(FaultSchema); !p.Report || p.Block || p.Advance {
-		t.Fatalf("schema policy %+v", p)
-	}
-	// persistent envelope rejection reports (the schema class) before the
-	// loop gives up
+func TestPersistentEnvelopeRejectionReports(t *testing.T) {
+	// persistent envelope rejection reports (the result contract is
+	// broken, not the model) before the loop gives up
 	env := newSupEnv(t, nil, spec("s"))
 	var script []fakeEntry
 	for i := 0; i < maxEnvelopeRejects+2; i++ {
@@ -792,8 +785,8 @@ func TestEndedWithoutResultVerdictRetriesSameModelWithFeedback(t *testing.T) {
 	if st.Supervision == nil || st.Supervision.FailureCount != 1 {
 		t.Fatalf("counted failure: %+v", st.Supervision)
 	}
-	if a := st.Attempts[0]; a.FailureCause != FailEndedWithoutResult || a.FaultClass != "" {
-		t.Fatalf("attempt %+v must carry the cause with no fault class", a)
+	if a := st.Attempts[0]; a.FailureCause != FailEndedWithoutResult {
+		t.Fatalf("attempt %+v must carry the cause", a)
 	}
 	if env.sp.spawnAt(0).PriorEndedWithoutResult || !env.sp.spawnAt(1).PriorEndedWithoutResult {
 		t.Fatalf("only the retry tells the agent its previous turn ended without a result: %+v / %+v",

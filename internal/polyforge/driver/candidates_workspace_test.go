@@ -73,8 +73,8 @@ func seedExecution(t *testing.T, execPath, stepID, status string, attempts []cap
 	}
 }
 
-func infraAttempt(n int, class string) capsule.Attempt {
-	return capsule.Attempt{Cause: CauseInfraFailure, FaultClass: class, AttemptSeq: n}
+func infraAttempt(n int, failureCause string) capsule.Attempt {
+	return capsule.Attempt{Cause: CauseInfraFailure, FailureCause: failureCause, AttemptSeq: n}
 }
 
 // The archived-attempt recomputation indexes the EFFECTIVE list: the
@@ -119,25 +119,25 @@ func TestRotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 		{
 			"two provider failures pin the third entry",
 			[]string{"eff-a", "eff-b", "eff-c"},
-			[]capsule.Attempt{infraAttempt(1, "provider"), infraAttempt(2, "provider")},
+			[]capsule.Attempt{infraAttempt(1, FailExitModel), infraAttempt(2, FailExitModel)},
 			"eff-c",
 		},
 		{
 			"two failures on a two-entry list cap at the end",
 			[]string{"eff-a", "eff-b"},
-			[]capsule.Attempt{infraAttempt(1, "provider"), infraAttempt(2, "provider")},
+			[]capsule.Attempt{infraAttempt(1, FailExitModel), infraAttempt(2, FailExitModel)},
 			"eff-b",
 		},
 		{
 			"host-class failures never advance",
 			[]string{"eff-a", "eff-b"},
-			[]capsule.Attempt{infraAttempt(1, "host"), infraAttempt(2, "host")},
+			[]capsule.Attempt{infraAttempt(1, FailExitHost), infraAttempt(2, FailExitHost)},
 			"eff-a",
 		},
 		{
 			"a gate-fail rewind resets to the head",
 			[]string{"eff-a", "eff-b"},
-			[]capsule.Attempt{infraAttempt(1, "provider"), {Cause: CauseGateFailRewind, AttemptSeq: 2}},
+			[]capsule.Attempt{infraAttempt(1, FailExitModel), {Cause: CauseGateFailRewind, AttemptSeq: 2}},
 			"eff-a",
 		},
 	}
@@ -202,9 +202,9 @@ func TestPresentEmptyEffectiveEntryGoverns(t *testing.T) {
 }
 
 // The recovery integration's interrupted-dispatch archive: ONE
-// infra_failure attempt (the recovery cause's classified fault) lands on
+// audit-only infra_failure attempt lands on
 // the in_progress step before the re-dispatch, and the re-dispatch's
-// model is the recomputed candidate AFTER it.
+// model stays the chain head.
 func TestInterruptedDispatchArchivesOnce(t *testing.T) {
 	dir := t.TempDir()
 	execPath := filepath.Join(dir, capsule.ExecutionJSON)
@@ -219,7 +219,7 @@ func TestInterruptedDispatchArchivesOnce(t *testing.T) {
 		StepCandidates: map[string][]string{
 			"fix": {"eff-a", "eff-b"},
 		},
-		Interrupted: &InterruptedDispatch{FaultClass: FaultProvider, Detail: "daemon_restart"},
+		Interrupted: &InterruptedDispatch{Detail: "daemon_restart"},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -239,8 +239,8 @@ func TestInterruptedDispatchArchivesOnce(t *testing.T) {
 	if len(attempts) != 2 {
 		t.Fatalf("fix attempts %d, want 2 (the interrupted archive + the accepted result)", len(attempts))
 	}
-	if attempts[0].Cause != CauseInfraFailure || attempts[0].FaultClass != string(FaultProvider) {
-		t.Fatalf("first attempt %+v, want the archived infra_failure (provider)", attempts[0])
+	if attempts[0].Cause != CauseInfraFailure || attempts[0].FailureCause != "daemon_restart" {
+		t.Fatalf("first attempt %+v, want the archived infra_failure", attempts[0])
 	}
 	if !strings.Contains(attempts[0].Detail, "daemon_restart") {
 		t.Fatalf("the archive must carry the recovery cause as its detail: %+v", attempts[0])
@@ -248,10 +248,9 @@ func TestInterruptedDispatchArchivesOnce(t *testing.T) {
 	if attempts[1].Cause != "accepted" {
 		t.Fatalf("second attempt %+v, want the accepted result", attempts[1])
 	}
-	// The re-dispatch was model-pinned AFTER the archive: one provider
-	// failure → the second entry of the effective list.
-	if got := sp.spawnAt(0).Model; got != "eff-b" {
-		t.Fatalf("re-dispatch model %q, want eff-b (the recomputation indexed the archive)", got)
+	// The interruption is audit only: the pointer stays on the head.
+	if got := sp.spawnAt(0).Model; got != "eff-a" {
+		t.Fatalf("re-dispatch model %q, want eff-a (an interruption never advances)", got)
 	}
 }
 
@@ -296,7 +295,7 @@ func TestInterruptedDispatchNoArchiveShapes(t *testing.T) {
 		Workflow:    &Workflow{Steps: []StepSpec{{ID: "fix", ContextPolicy: "fresh"}}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:     &fakeSpawner{},
 		Log:         &eventLog{},
-		Interrupted: &InterruptedDispatch{FaultClass: FaultProvider, Detail: "agent_death"},
+		Interrupted: &InterruptedDispatch{Detail: "agent_death"},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
