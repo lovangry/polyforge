@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -240,18 +239,11 @@ func (j *job) record() *jobRecord {
 }
 
 func jobFromRecord(rec *jobRecord) *job {
-	fp := rec.SessionFingerprint
-	if fp == "" && rec.SessionID != "" {
-		fp = api.SessionFingerprint(rec.SessionID)
-	}
 	return &job{
-		wi:        rec.WorkItemID,
-		project:   rec.Project,
-		sessionID: rec.SessionID,
-		// SessionFingerprint is recomputed from the secret when the
-		// stored copy is empty (defensive: the two are redundant by
-		// construction).
-		sessionFingerprint: fp,
+		wi:                 rec.WorkItemID,
+		project:            rec.Project,
+		sessionID:          rec.SessionID,
+		sessionFingerprint: rec.SessionFingerprint,
 		state:              JobState(rec.State),
 		stopReason:         rec.StopReason,
 		sealedPush:         rec.SealedPush,
@@ -261,7 +253,7 @@ func jobFromRecord(rec *jobRecord) *job {
 			// Secret = the session id (the push password),
 			// Fingerprint = the PUBLIC handle (§1.6 backup layer).
 			WorkItemID:  rec.WorkItemID,
-			Fingerprint: fp,
+			Fingerprint: rec.SessionFingerprint,
 			CapsuleDir:  rec.CapsuleDir,
 			GitDir:      rec.GitDir,
 			RemoteURL:   rec.RemoteURL,

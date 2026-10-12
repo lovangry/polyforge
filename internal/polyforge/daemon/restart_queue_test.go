@@ -3,7 +3,7 @@ package daemon
 // restart_queue_test.go pins v2-converge §5/§6 at the daemon seam:
 //   - the persisted submit queue survives a restart and replays (only
 //     plain claim intents, only while aihub still shows the WI queued);
-//   - a dispatch-time StartIntent failure lands as a durable
+//   - a dispatch-time Start failure lands as a durable
 //     submit_rejected event instead of a stderr line;
 //   - a mid-flight WI whose capsule is missing parks repair_pending while
 //     every other WI recovers, the daemon starts, `pf resume` after the
@@ -29,7 +29,7 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
-// rejectHub fails every claim — the dispatch-time StartIntent refusal.
+// rejectHub fails every claim — the dispatch-time Start refusal.
 type rejectHub struct{ *fakeHub }
 
 func (h *rejectHub) SessionClaim(api.SessionClaimRequest) (*api.SessionClaimResponse, error) {

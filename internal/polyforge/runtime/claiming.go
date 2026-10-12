@@ -18,7 +18,7 @@ package runtime
 //
 // The file is a map keyed by the SUBMITTED id spelling (a slug is legal:
 // the claim endpoint accepts id-or-slug), so clearClaiming and the
-// restart replay agree on keys. opMu serializes every writer (StartIntent
+// restart replay agree on keys. opMu serializes every writer (Start
 // and Restart both hold it), so no lock beyond the file's own atomic
 // write is needed.
 

@@ -391,7 +391,7 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	// every claim on d.runCtx for the same reason.
 	d.rt.NoteOrigin(canonical, body.Origin.origin())
 	cursor := d.lastSeq(canonical)
-	if err := d.rt.StartIntent(d.runCtx, canonical, "claim"); err != nil {
+	if err := d.rt.Start(d.runCtx, canonical); err != nil {
 		writeErrOf(w, err)
 		return
 	}

@@ -19,12 +19,8 @@ import (
 
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/version"
 )
-
-// heartbeatRuntimeVersion identifies the daemon's wire generation in
-// machines.runtime_version. Generation-scoped, not build-scoped: bump it
-// with the protocol generation, not per commit.
-const heartbeatRuntimeVersion = "v1.5"
 
 // heartbeatBackoffCap bounds the failure backoff at 16× the base cadence
 // (16m at the 60s default). The operator still sees every failure in the
@@ -52,14 +48,7 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 		case <-timer.C:
 			if err := d.sendHeartbeat(); err != nil {
 				failStreak++
-				shift := failStreak
-				if shift > 4 {
-					shift = 4 // 16× base == heartbeatBackoffCap
-				}
-				delay = base << uint(shift)
-				if max := base * heartbeatBackoffCap; delay > max {
-					delay = max
-				}
+				delay = nextHeartbeatDelay(base, failStreak)
 				fmt.Fprintf(os.Stderr, "daemon: heartbeat failed (%d consecutive): %v; retry in %s\n",
 					failStreak, err, delay)
 			} else {
@@ -82,7 +71,7 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 func (d *Daemon) sendHeartbeat() error {
 	res, err := d.hub.Heartbeat(aihubclient.MachineHeartbeat{
 		MachineID:      d.cfg.MachineID,
-		RuntimeVersion: heartbeatRuntimeVersion,
+		RuntimeVersion: version.Version,
 		Mode:           d.modes.HeartbeatMode(),
 		LiveWIIDs:      liveWIIDs(d.rt.List()),
 	})
