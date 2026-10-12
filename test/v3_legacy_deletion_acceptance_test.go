@@ -77,7 +77,7 @@ func v3SpecFloorTerms() []string {
 		v3Tok("ensure", "Materialized"),               // the retired materialization guard
 		v3Tok("Remote", "Published"),                  // the retired published-remote probe
 		v3Tok("Job", "View"),                          // the retired observe job view
-		v3Tok("rotate", "-", "secret"),                // the retired rotate-secret verb
+		v3Tok("rotate", "-", "secret"),                // the retired secret-rotation verb
 		v3Tok("Candidates", "For", "("),               // the retired candidates accessor (the live recovery helper has a longer name)
 		v3Tok("jobs/{wi}/", "observe"),                // the retired observe route
 		v3Tok("Start", "Intent"),                      // the retired start-intent plumbing
