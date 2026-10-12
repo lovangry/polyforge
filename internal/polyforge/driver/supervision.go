@@ -486,6 +486,25 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 	return dec
 }
 
+// applyRejectEscalatedLocked counts one envelope-rejection escalation
+// (a driver relaunch) in the step's persisted ledger; the bound blocks.
+func (d *Driver) applyRejectEscalatedLocked(req TransitionRequest, info *appliedInfo) error {
+	if err := d.requireRunningStep(req.StepID); err != nil {
+		return err
+	}
+	st := d.exec.Steps[req.StepID]
+	if st.Supervision == nil {
+		st.Supervision = &capsule.StepSupervision{}
+	}
+	st.Supervision.RejectRelaunches++
+	if st.Supervision.RejectRelaunches >= maxRejectRelaunches {
+		d.exec.WorkflowStatus = StatusBlocked
+		d.exec.BlockedReason = fmt.Sprintf("step %s: the result envelope was rejected through %d driver relaunches (bound %d): %s",
+			req.StepID, st.Supervision.RejectRelaunches, maxRejectRelaunches, req.Reason)
+	}
+	return nil
+}
+
 // applyStepFailedLocked records one failed dispatch: the attempt (with
 // its cause sub-class), the failure counter, the relaxed thresholds, the
 // next dispatch's shape and — when the decision blocks — the blocked

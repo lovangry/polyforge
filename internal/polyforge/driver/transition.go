@@ -106,6 +106,11 @@ const (
 	// when the death-cause table says so, the blocked status — in one
 	// atomic execution.json write.
 	TransStepFailed TransitionKind = "step_failed"
+	// TransRejectEscalated persists one spent in-process envelope-rejection
+	// bound (the driver is about to be relaunched): it counts the
+	// relaunch in the step's supervision ledger and, at the bound, blocks
+	// the step instead.
+	TransRejectEscalated TransitionKind = "reject_escalated"
 )
 
 // TransitionRequest is one submitted execution.json mutation. SpawnN is
@@ -255,6 +260,8 @@ func (d *Driver) applyLocked(req TransitionRequest, info *appliedInfo) error {
 		return d.applyInterruptedLocked(req)
 	case TransStepFailed:
 		return d.applyStepFailedLocked(req, info)
+	case TransRejectEscalated:
+		return d.applyRejectEscalatedLocked(req, info)
 	default:
 		return fmt.Errorf("driver: unknown transition kind %q", req.Kind)
 	}
@@ -343,6 +350,7 @@ func (d *Driver) applyUnblockLocked() error {
 		st.Supervision.FailureCount = 0
 		st.Supervision.LongTaskTimeouts = 0
 		st.Supervision.NextDispatch = ""
+		st.Supervision.RejectRelaunches = 0
 		st.Supervision.RuntimeBaseMs = st.BudgetConsumed.WallMs // a fresh T window
 	}
 	return nil
@@ -409,6 +417,9 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 	}
 	if st.Status != capsule.StepInProgress {
 		return fmt.Errorf("driver: step %q is %s; only an in_progress step accepts results", req.StepID, st.Status)
+	}
+	if st.Supervision != nil {
+		st.Supervision.RejectRelaunches = 0 // an accepted result ends the rejection streak
 	}
 	if req.WallMs > 0 {
 		// the finished dispatch's wall time joins the step's cumulative
@@ -872,6 +883,18 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 	case TransStepFailed:
 		kind = "step_failed"
 		d.failureEventsLocked(req, info, body)
+	case TransRejectEscalated:
+		kind = "reject_escalated"
+		body["step"] = req.StepID
+		body["detail"] = req.Reason
+		if st := d.exec.Steps[req.StepID]; st != nil && st.Supervision != nil {
+			body["reject_relaunches"] = st.Supervision.RejectRelaunches
+		}
+		if d.exec.WorkflowStatus == StatusBlocked {
+			info.extra = append(info.extra, appliedEvent{"blocked", map[string]any{
+				"step": req.StepID, "cause": "envelope_rejected", "reason": d.exec.BlockedReason, "report": true,
+			}})
+		}
 	}
 	if kind == "" {
 		return

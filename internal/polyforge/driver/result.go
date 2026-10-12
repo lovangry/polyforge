@@ -80,6 +80,12 @@ const verificationStepID = "verification"
 // genuinely broken author from looping forever.
 const maxEnvelopeRejects = 3
 
+// maxRejectRelaunches bounds the driver relaunches a persistently
+// rejected envelope may cost (persisted per step in execution.json,
+// because the in-process counter resets on every relaunch): the third
+// escalation blocks the step instead of relaunching again.
+const maxRejectRelaunches = 3
+
 // Outcome is the closed result-verdict set of the envelope.
 type Outcome string
 
