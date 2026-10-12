@@ -435,7 +435,7 @@ func TestLiveTranscriptTailSyncedBeforeCommit(t *testing.T) {
 			spawn2At := now.Add(-time.Minute)
 			step1Live := filepath.Join(storeDir, "step1.jsonl")
 			step2Live := filepath.Join(storeDir, "step2.jsonl")
-			step2Dst := filepath.Join(j.capsuleDir, "session", "step2.jsonl")
+			step2Dst := sessionPathFor(j.capsuleDir, "tok2")
 			must := func(err error) {
 				t.Helper()
 				if err != nil {
@@ -453,8 +453,8 @@ func TestLiveTranscriptTailSyncedBeforeCommit(t *testing.T) {
 			must(os.MkdirAll(filepath.Dir(journal), 0o755))
 			var lines string
 			for _, e := range []capsule.SpawnJournalEntry{
-				{StepID: "s1", SpawnN: 1, StartedAt: spawn2At.Add(-time.Hour).UTC().Format(time.RFC3339Nano), Transcript: j.transcript},
-				{StepID: "s2", SpawnN: 2, StartedAt: spawn2At.UTC().Format(time.RFC3339Nano), Transcript: step2Dst},
+				{StepID: "s1", SpawnN: 1, SpawnToken: "tok1", StartedAt: spawn2At.Add(-time.Hour).UTC().Format(time.RFC3339Nano), Transcript: j.transcript},
+				{StepID: "s2", SpawnN: 2, SpawnToken: "tok2", StartedAt: spawn2At.UTC().Format(time.RFC3339Nano), Transcript: step2Dst},
 			} {
 				b, err := json.Marshal(e)
 				must(err)
@@ -470,7 +470,7 @@ func TestLiveTranscriptTailSyncedBeforeCommit(t *testing.T) {
 			if raw, err := os.ReadFile(j.transcript); err != nil || string(raw) != "step one\n" {
 				t.Fatalf("step 1's file must be untouched: %q (%v)", raw, err)
 			}
-			cmd := exec.Command("git", "show", "HEAD:session/step2.jsonl")
+			cmd := exec.Command("git", "show", "HEAD:session/session-tok2.jsonl")
 			cmd.Env = j.git.Env()
 			cmd.Dir = j.capsuleDir
 			if out, err := cmd.CombinedOutput(); err != nil || string(out) != "step two\nstep two tail\n" {
@@ -478,4 +478,105 @@ func TestLiveTranscriptTailSyncedBeforeCommit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The spawn journal is agent-writable: a forged latest line must not make
+// the runtime write outside session/ or onto an earlier step's file.
+func TestLiveTranscriptSyncRefusesForgedJournalDestination(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "victim.jsonl")
+	for _, tc := range []struct {
+		name string
+		// forge builds the (earlier, latest) journal lines
+		forge func(j *job, step1 string) (capsule.SpawnJournalEntry, capsule.SpawnJournalEntry)
+	}{
+		{"outside the capsule", func(j *job, step1 string) (capsule.SpawnJournalEntry, capsule.SpawnJournalEntry) {
+			return capsule.SpawnJournalEntry{SpawnToken: "tok1", Transcript: step1},
+				capsule.SpawnJournalEntry{SpawnToken: "tok2", Transcript: outside}
+		}},
+		{"traversal inside the capsule", func(j *job, step1 string) (capsule.SpawnJournalEntry, capsule.SpawnJournalEntry) {
+			return capsule.SpawnJournalEntry{SpawnToken: "tok1", Transcript: step1},
+				capsule.SpawnJournalEntry{SpawnToken: "tok2", Transcript: filepath.Join(j.capsuleDir, "session", "..", "capsule.json")}
+		}},
+		{"step 1's file", func(j *job, step1 string) (capsule.SpawnJournalEntry, capsule.SpawnJournalEntry) {
+			return capsule.SpawnJournalEntry{SpawnToken: "tok1", Transcript: step1},
+				capsule.SpawnJournalEntry{SpawnToken: "tok2", Transcript: step1}
+		}},
+		{"step 1's token and file", func(j *job, step1 string) (capsule.SpawnJournalEntry, capsule.SpawnJournalEntry) {
+			return capsule.SpawnJournalEntry{SpawnToken: "tok1", Transcript: step1},
+				capsule.SpawnJournalEntry{SpawnToken: "tok1", Transcript: step1}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := &scriptedSpawner{}
+			r, _, _ := newTestRuntime(t, newFakeHub(), sp)
+			j := seedJob(r, "wi_forge")
+			initGitCapsule(t, j)
+			r.cfg.HarnessSessionsRoot = t.TempDir()
+			storeDir := filepath.Join(r.cfg.HarnessSessionsRoot, piSessionDirName(j.capsuleDir))
+			if err := os.MkdirAll(storeDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(storeDir, "live.jsonl"), []byte("LIVE\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			step1 := sessionPathFor(j.capsuleDir, "tok1")
+			if err := os.MkdirAll(filepath.Dir(step1), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(step1, []byte("step one\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(outside, []byte("victim\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			a, b := tc.forge(j, step1)
+			a.StartedAt = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+			b.StartedAt = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+			var lines string
+			for _, e := range []capsule.SpawnJournalEntry{a, b} {
+				raw, _ := json.Marshal(e)
+				lines += string(raw) + "\n"
+			}
+			journal := filepath.Join(j.capsuleDir, capsule.DirRuntimeState, capsule.SpawnJournalFile)
+			if err := os.MkdirAll(filepath.Dir(journal), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(journal, []byte(lines), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			capJSON := filepath.Join(j.capsuleDir, "capsule.json")
+			_ = os.WriteFile(capJSON, []byte("{}"), 0o644)
+
+			r.syncLiveTranscript(j.capsuleDir)
+
+			for path, want := range map[string]string{step1: "step one\n", outside: "victim\n", capJSON: "{}"} {
+				if raw, _ := os.ReadFile(path); string(raw) != want {
+					t.Fatalf("%s was overwritten: %q", path, raw)
+				}
+			}
+		})
+	}
+
+	// control: the honest shape still syncs
+	t.Run("honest line syncs", func(t *testing.T) {
+		sp := &scriptedSpawner{}
+		r, _, _ := newTestRuntime(t, newFakeHub(), sp)
+		j := seedJob(r, "wi_honest")
+		initGitCapsule(t, j)
+		r.cfg.HarnessSessionsRoot = t.TempDir()
+		storeDir := filepath.Join(r.cfg.HarnessSessionsRoot, piSessionDirName(j.capsuleDir))
+		_ = os.MkdirAll(storeDir, 0o755)
+		_ = os.WriteFile(filepath.Join(storeDir, "live.jsonl"), []byte("LIVE\n"), 0o644)
+		dst := sessionPathFor(j.capsuleDir, "tok2")
+		_ = os.MkdirAll(filepath.Dir(dst), 0o755)
+		e := capsule.SpawnJournalEntry{SpawnToken: "tok2", Transcript: dst, StartedAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)}
+		raw, _ := json.Marshal(e)
+		journal := filepath.Join(j.capsuleDir, capsule.DirRuntimeState, capsule.SpawnJournalFile)
+		_ = os.MkdirAll(filepath.Dir(journal), 0o755)
+		_ = os.WriteFile(journal, append(raw, '\n'), 0o644)
+		r.syncLiveTranscript(j.capsuleDir)
+		if got, _ := os.ReadFile(dst); string(got) != "LIVE\n" {
+			t.Fatalf("honest destination not synced: %q", got)
+		}
+	})
 }

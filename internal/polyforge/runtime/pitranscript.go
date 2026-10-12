@@ -151,11 +151,57 @@ func (r *Runtime) syncLiveTranscript(capsuleDir string) {
 	if err != nil {
 		return
 	}
-	src := LocateLiveTranscript(r.cfg.HarnessSessionsRoot, capsuleDir, spawnAt)
-	if src == "" || src == last.Transcript {
+	// The journal is agent-writable: the destination is never taken from
+	// it verbatim (see trustedTranscriptDest).
+	dst, ok := trustedTranscriptDest(capsuleDir, entries)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "runtime: transcript sync skipped: the latest spawn-journal line names an untrusted destination %q\n", last.Transcript)
 		return
 	}
-	if err := sessionjsonl.CopyReadonly(src, last.Transcript); err != nil {
+	src := LocateLiveTranscript(r.cfg.HarnessSessionsRoot, capsuleDir, spawnAt)
+	if src == "" || src == dst {
+		return
+	}
+	if err := sessionjsonl.CopyReadonly(src, dst); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: transcript sync before commit failed: %v\n", err)
 	}
+}
+
+// trustedTranscriptDest validates the latest spawn-journal line's
+// transcript destination before the runtime writes to it. The agent can
+// forge journal lines, so the path must (1) equal the one this runtime
+// derives itself for that spawn token (sessionPathFor), (2) resolve inside
+// <capsuleDir>/session/ with symlinks on the parent resolved and the file
+// itself not a symlink, and (3) not be the destination of any EARLIER
+// journal line (a forged line aimed at step 1's file). It answers the
+// validated path, or false to skip the sync.
+func trustedTranscriptDest(capsuleDir string, entries []capsule.SpawnJournalEntry) (string, bool) {
+	last := entries[len(entries)-1]
+	if last.SpawnToken == "" || strings.ContainsAny(last.SpawnToken, `/\`) {
+		return "", false
+	}
+	want := sessionPathFor(capsuleDir, last.SpawnToken)
+	if filepath.Clean(last.Transcript) != want {
+		return "", false
+	}
+	for _, e := range entries[:len(entries)-1] {
+		if e.SpawnToken == last.SpawnToken || (e.Transcript != "" && filepath.Clean(e.Transcript) == want) {
+			return "", false
+		}
+	}
+	sessDir, err := filepath.EvalSymlinks(filepath.Join(capsuleDir, capsule.DirSession))
+	if err != nil {
+		return "", false
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(want))
+	if err != nil {
+		return "", false
+	}
+	if rel, err := filepath.Rel(sessDir, parent); err != nil || rel != "." {
+		return "", false
+	}
+	if fi, err := os.Lstat(want); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return "", false
+	}
+	return want, true
 }
