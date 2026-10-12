@@ -36,7 +36,7 @@ intent is ambiguous, **ask rather than guess**.
 This skill is the **only** thing a user harness installs. Pi: one `skills`
 path line in settings, pointing directly at `skills/polyforge/` inside the
 local checkout — zero copying, no bundling. Claude Code: `tools/install.sh`
-copies it to `~/.claude/skills/polyforge`. There is no executor skill: the
+replaces `~/.claude/skills/polyforge` from its release checkout. There is no executor skill: the
 **Go driver** owns workflow execution — the daemon binds it
 unconditionally, version-locked to the daemon release, and no harness
 installs or runs a workflow. A user harness never executes a workflow:
@@ -146,6 +146,9 @@ job has no owner), starts — as `[polyforge] N WIs need you: ...`.
   {"statusLine": {"type": "command",
     "command": "pf watch --statusline --harness-session -"}}
   ```
+
+  (install.sh never edits `statusLine`; it prints this snippet when yours does
+  not use `pf watch`.)
 
   (With the variable available, `pf watch --chat "$PF_CHAT_ID" --statusline`
   is equivalent; `--harness-session <id> [--harness claude]` takes an explicit
@@ -261,12 +264,14 @@ credential; `pf submit` sends it (plus the `PF_USER_ID` owner) so the daemon
 records the job's origin. Step agents never see it. The model does not handle
 it: a harness adapter sets it.
 
-- **Claude Code**: register `hooks/claude-session-start.sh` as a SessionStart
-  hook in `~/.claude/settings.json` (path = this checkout's absolute path):
+- **Claude Code**: `tools/install.sh` registers `hooks/claude-session-start.sh`
+  as a SessionStart hook in `~/.claude/settings.json` (once; absolute path
+  `~/.claude/skills/polyforge/hooks/claude-session-start.sh`, stable across
+  upgrades). By hand the entry is:
 
   ```json
   {"hooks": {"SessionStart": [{"hooks": [
-    {"type": "command", "command": "/path/to/skills/polyforge/hooks/claude-session-start.sh"}
+    {"type": "command", "command": "/home/you/.claude/skills/polyforge/hooks/claude-session-start.sh"}
   ]}]}}
   ```
 
