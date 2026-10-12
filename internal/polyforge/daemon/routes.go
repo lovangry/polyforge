@@ -57,8 +57,11 @@ type statusJob struct {
 	// (a job the runtime calls running but the monitor holds a pending
 	// question for is presented as needs_input — an agent blocked on a
 	// human must never read as merely busy).
-	NeedsInput bool   `json:"needs_input,omitempty"`
-	QuestionID string `json:"question_id,omitempty"`
+	NeedsInput bool `json:"needs_input,omitempty"`
+	// RepairReason is set with Status "repair_pending": capsule_missing |
+	// project_unmapped (v2 §6).
+	RepairReason string `json:"repair_reason,omitempty"`
+	QuestionID   string `json:"question_id,omitempty"`
 	// LastProgressAgoSec is the F15c owner face: whole seconds since the
 	// job's stream last proved AGENT progress (nil = no progress record
 	// yet — the CLI renders "-"). UI-noise records never refresh it, so
@@ -139,6 +142,18 @@ func writeErrOf(w http.ResponseWriter, err error) {
 		return
 	}
 	writeErr(w, api.ErrDaemonInternal, err.Error())
+}
+
+// writeRepairErr answers a RepairResume refusal: the unmapped project keeps
+// the DAEMON-412 placement code, a missing capsule the new DAEMON-517;
+// both explain exactly what to restore.
+func writeRepairErr(w http.ResponseWriter, err error) {
+	var unm *runtime.UnmappedMidflightError
+	if errors.As(err, &unm) {
+		writeErr(w, api.ErrDaemonUnmappedProject, err.Error())
+		return
+	}
+	writeErr(w, api.ErrDaemonRepairPending, err.Error())
 }
 
 func writeAdmissionErr(w http.ResponseWriter, err error) {
@@ -252,6 +267,10 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		wi := r.PathValue("wi")
 		var body struct {
 			Priority string `json:"priority"`
+			// Origin/ChatID are carried verbatim into the persisted queue
+			// entry (v2 §5); this layer attaches no meaning to them.
+			Origin map[string]any `json:"origin"`
+			ChatID string         `json:"chat_id"`
 		}
 		if !decodeBody(w, r, &body) {
 			return
@@ -270,6 +289,19 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// path resolves (or refuses) server-side, exactly as before.
 		canonical := d.canonWI(wi)
 		d.rt.NoteAlias(wi, canonical)
+		// v2 §6 "continue": a repair_pending WI (capsule missing / project
+		// unmapped at restart) is resumed IN PLACE with its kept session —
+		// re-check first; still broken answers the typed error.
+		if intent == "resume" {
+			if held, rerr := d.rt.RepairResume(d.runCtx, canonical); held {
+				if rerr != nil {
+					writeRepairErr(w, rerr)
+					return
+				}
+				writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
+				return
+			}
+		}
 		// The live check is the runtime's own job set (the queue's slot
 		// marks are accounting, reconciled a tick later); a pending
 		// duplicate is refused on the queue.
@@ -301,7 +333,20 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		}
 		// Accepted = enqueued; the dispatcher spawns within one tick,
 		// priority-desc against the machine's concurrency cap.
-		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent})
+		origin := body.Origin
+		if body.ChatID != "" {
+			if origin == nil {
+				origin = map[string]any{}
+			}
+			if _, has := origin["chat_id"]; !has {
+				origin["chat_id"] = body.ChatID
+			}
+		}
+		// `accepted` is answered only once the entry is on disk (v2 §5).
+		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent, Origin: origin}); err != nil {
+			writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+err.Error())
+			return
+		}
 		writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
 	}
 }
@@ -572,7 +617,7 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	// no queue slot — the ops face must not count it as running work.
 	running := 0
 	for _, ji := range d.rt.List() {
-		if ji.State != runtime.StatePaused {
+		if ji.State != runtime.StatePaused && ji.RepairPending == "" {
 			running++
 		}
 		sj := statusJob{
@@ -583,6 +628,13 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 			SpawnN:             ji.SpawnN,
 			SessionFingerprint: ji.SessionFingerprint,
 			AgentPID:           ji.AgentPID,
+		}
+		if ji.RepairPending != "" {
+			// v2 §6: parked at restart (capsule missing / project
+			// unmapped), session kept — shown as repair_pending, the
+			// reason kind alongside.
+			sj.Status = "repair_pending"
+			sj.RepairReason = ji.RepairPending
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID
@@ -743,7 +795,10 @@ func (d *Daemon) batchRoute(w http.ResponseWriter, r *http.Request) {
 		if _, live := d.rt.Info(canonical); live || d.q.IsPending(canonical) {
 			continue
 		}
-		d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: priority, Intent: "claim"})
+		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: priority, Intent: "claim"}); err != nil {
+			writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+err.Error())
+			return
+		}
 		submitted = append(submitted, canonical)
 	}
 	writeJSON(w, http.StatusOK, batchResponse{Submitted: len(submitted), WorkItemIDs: submitted})

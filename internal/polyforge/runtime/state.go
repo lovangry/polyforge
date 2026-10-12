@@ -167,6 +167,9 @@ type jobRecord struct {
 	BundleDigest   string `json:"bundle_digest"`
 	AgentPID       int    `json:"agent_pid"`
 	AgentStart     string `json:"agent_started_at"`
+	// RepairPending is the v2 §6 local pending-repair mark (see
+	// job.repairPending): "capsule_missing" | "project_unmapped" | "".
+	RepairPending string `json:"repair_pending,omitempty"`
 }
 
 func (j *job) record() *jobRecord {
@@ -194,6 +197,7 @@ func (j *job) record() *jobRecord {
 		BundleDigest:       j.bundleDigest,
 		AgentPID:           j.agentPID,
 		AgentStart:         j.agentStartedAt,
+		RepairPending:      j.repairPending,
 	}
 }
 
@@ -237,6 +241,7 @@ func jobFromRecord(rec *jobRecord) *job {
 		bundleDigest:   rec.BundleDigest,
 		agentPID:       rec.AgentPID,
 		agentStartedAt: rec.AgentStart,
+		repairPending:  rec.RepairPending,
 	}
 }
 

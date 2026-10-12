@@ -295,7 +295,14 @@ type job struct {
 	// the same marker the hub does; false everywhere else (a graceful
 	// shutdown keeps it false — the attach-on-restart shape, M3).
 	cleanPause bool
-	mu         sync.Mutex
+	// repairPending is the v2 §6 local "pending repair" mark: the record's
+	// capsule is missing / its project is unmapped at restart. Non-empty =
+	// the reason kind (RepairCapsuleMissing | RepairProjectUnmapped). The
+	// job is parked — record and SESSION kept, no agent, no hub call —
+	// until the next start or `pf resume` re-checks it. Orthogonal to
+	// state (the pre-park state is what the in-place resume continues).
+	repairPending string
+	mu            sync.Mutex
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries

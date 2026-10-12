@@ -173,8 +173,11 @@ type StatusJob struct {
 	AgentPID           int    `json:"agent_pid,omitempty"`
 	// NeedsInput/QuestionID are the D6 owner face: a job presented as
 	// needs_input carries its pending question's id.
-	NeedsInput bool   `json:"needs_input,omitempty"`
-	QuestionID string `json:"question_id,omitempty"`
+	NeedsInput bool `json:"needs_input,omitempty"`
+	// RepairReason accompanies Status "repair_pending" (v2 §6):
+	// capsule_missing | project_unmapped.
+	RepairReason string `json:"repair_reason,omitempty"`
+	QuestionID   string `json:"question_id,omitempty"`
 	// LastProgressAgoSec is the F15c owner face: whole seconds since the
 	// job's stream last proved agent progress (nil = none yet — rendered
 	// "-" in the LAST-PROGRESS column).

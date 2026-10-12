@@ -155,22 +155,42 @@ func rankOf(priority string) int {
 	return priorityRank["normal"]
 }
 
+// qEntry is one pending submit. The JSON tags are the persisted shape
+// (submit-queue.json, v2-converge §5): the answered `accepted` must
+// survive a daemon restart.
 type qEntry struct {
-	WorkItemID string
-	Priority   string
-	EnqueuedAt time.Time
-	Intent     string // claim | resume | takeover
+	WorkItemID string    `json:"work_item_id"`
+	Priority   string    `json:"priority,omitempty"`
+	EnqueuedAt time.Time `json:"enqueued_at"`
+	Intent     string    `json:"intent"` // claim | resume | takeover
+	// SubmittedAt is the wall time the submit was accepted (replay
+	// evidence; EnqueuedAt is the FIFO key and equals it for live submits).
+	SubmittedAt time.Time `json:"submitted_at"`
+	// Origin is the generic origin/chat carrier (v2 §5: "entries carry
+	// origin"): whatever the submit request's `origin` object (and
+	// `chat_id`) held, stored verbatim. The identity track fills it; this
+	// layer invents no identity logic.
+	Origin map[string]any `json:"origin,omitempty"`
 }
 
 type jobQueue struct {
 	mu      sync.Mutex
 	pending []qEntry
-	running map[string]bool
-	maxConc int
+	// inflight holds entries Take()n but not yet Settled: the dispatcher
+	// popped them and the claim has not finished. They stay in the
+	// persisted file so a crash between the pop and the claim journal
+	// cannot lose an accepted submit; replay's aihub check + claiming
+	// dedupe make a re-attempt harmless.
+	inflight map[string]qEntry
+	running  map[string]bool
+	maxConc  int
+	// persist, when non-nil, atomically rewrites the queue file from the
+	// given snapshot (pending + inflight). Called under mu.
+	persist func([]qEntry) error
 }
 
 func NewJobQueue(maxConc int) *jobQueue {
-	return &jobQueue{running: map[string]bool{}, maxConc: maxConc}
+	return &jobQueue{running: map[string]bool{}, inflight: map[string]qEntry{}, maxConc: maxConc}
 }
 
 func (q *jobQueue) SetMaxConcurrent(n int) error {
@@ -189,13 +209,63 @@ func (q *jobQueue) MaxConcurrent() int {
 	return q.maxConc
 }
 
-func (q *jobQueue) Enqueue(e qEntry) {
+// snapshotLocked is the persisted view: inflight first (older), then
+// pending. Caller holds mu.
+func (q *jobQueue) snapshotLocked() []qEntry {
+	out := make([]qEntry, 0, len(q.inflight)+len(q.pending))
+	for _, e := range q.inflight {
+		out = append(out, e)
+	}
+	out = append(out, q.pending...)
+	return out
+}
+
+func (q *jobQueue) persistLocked() error {
+	if q.persist == nil {
+		return nil
+	}
+	return q.persist(q.snapshotLocked())
+}
+
+// Enqueue appends one entry and persists the queue BEFORE returning: the
+// caller answers `accepted` only on a nil error, so an accepted submit is
+// always on disk. A persist failure rolls the entry back.
+func (q *jobQueue) Enqueue(e qEntry) error {
+	now := time.Now()
 	if e.EnqueuedAt.IsZero() {
-		e.EnqueuedAt = time.Now()
+		e.EnqueuedAt = now
+	}
+	if e.SubmittedAt.IsZero() {
+		e.SubmittedAt = e.EnqueuedAt
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.pending = append(q.pending, e)
+	if err := q.persistLocked(); err != nil {
+		q.pending = q.pending[:len(q.pending)-1]
+		return err
+	}
+	return nil
+}
+
+// Settle ends the inflight state of a Take()n entry (the claim attempt
+// finished — success or failure) and persists the dequeue.
+func (q *jobQueue) Settle(wi string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, ok := q.inflight[wi]; !ok {
+		return nil
+	}
+	delete(q.inflight, wi)
+	return q.persistLocked()
+}
+
+// Flush persists the current state (used after a replay pass that only
+// dropped entries).
+func (q *jobQueue) Flush() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.persistLocked()
 }
 
 func (q *jobQueue) IsPending(wi string) bool {
@@ -247,6 +317,8 @@ func (q *jobQueue) Take() *qEntry {
 	}
 	e := q.pending[best]
 	q.pending = append(q.pending[:best], q.pending[best+1:]...)
+	q.inflight[e.WorkItemID] = e // persisted until Settle; a persist error here is non-fatal (the entry is merely re-listed on disk)
+	_ = q.persistLocked()
 	return &e
 }
 
@@ -343,4 +415,67 @@ func (d *Daemon) persistModeQuietly() {
 	if err := d.persistDaemonState(); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: state persist failed: %v\n", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Persisted submit queue (v2-converge §5): <DataDir>/submit-queue.json,
+// atomic tmp+fsync+rename on every enqueue / dequeue.
+
+const submitQueueFile = "submit-queue.json"
+
+type submitQueueState struct {
+	Version int      `json:"version"`
+	Entries []qEntry `json:"entries"`
+}
+
+func (d *Daemon) queuePath() string {
+	return filepath.Join(d.cfg.DataDir, submitQueueFile)
+}
+
+func (d *Daemon) persistQueue(entries []qEntry) error {
+	blob, err := json.MarshalIndent(&submitQueueState{Version: 1, Entries: entries}, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := d.queuePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(blob); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// loadPersistedQueue reads the previous run's queue file (missing = none).
+// An unparsable file is set aside as submit-queue.json.corrupt and
+// reported — never silently dropped, never fatal to the start.
+func (d *Daemon) loadPersistedQueue() []qEntry {
+	raw, err := os.ReadFile(d.queuePath())
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "daemon: %s unreadable: %v\n", submitQueueFile, err)
+		}
+		return nil
+	}
+	var st submitQueueState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		_ = os.Rename(d.queuePath(), d.queuePath()+".corrupt")
+		fmt.Fprintf(os.Stderr, "daemon: %s unparsable (set aside as .corrupt): %v\n", submitQueueFile, err)
+		return nil
+	}
+	return st.Entries
 }

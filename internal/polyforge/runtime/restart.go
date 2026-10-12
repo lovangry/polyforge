@@ -152,136 +152,11 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		if rec.SessionID == "" {
 			continue
 		}
-		if j := r.jobOf(rec.WorkItemID); j != nil && j.liveAgent() {
-			continue // already running under this daemon: not a restart case
-		}
-		v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
-		if err != nil {
-			// aihub unreachable for this WI: keep the record, try again on
-			// the next restart — never guess a verdict.
-			fmt.Fprintf(os.Stderr, "runtime: %s: session verify failed, record kept: %v\n", rec.WorkItemID, err)
-			continue
-		}
-		if v.Matches {
-			switch v.Status {
-			case api.StatusRunning:
-				// crash-mid-run under this session: recover-resume the
-				// local capsule (a mid-seal record finishes its stop).
-				// The mid-flight capsule must be present at its mapped
-				// base (#103/#113): a miss is a HARD restart failure —
-				// never a rebuild-from-remote, and the daemon does not
-				// start.
-				if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
-					return err
-				}
-				if serr := r.restartRunning(ctx, rec); serr != nil {
-					fmt.Fprintf(os.Stderr, "runtime: %s: restart recovery failed: %v\n", rec.WorkItemID, serr)
-				}
-			case api.StatusPaused:
-				if v.CleanPause {
-					// NEW-3 (crash window): a TERMINAL stop_reason on the retained
-					// record is a pending close — stopOp's fromPaused branch
-					// persists the wrap/fail/blocked intent on the record BEFORE
-					// the terminal SessionEnd goes out, and a daemon crash in that
-					// window leaves the hub still answering paused+clean under our
-					// (matching) session. Replay the close instead of reconciling
-					// back to a plain retained pause: the SessionEnd is fenced on
-					// the session secret the verify just proved matches, so the
-					// terminal verdict lands (Paused → Done is a legal edge — the
-					// same alreadySealing=true shape the StateSealing finisher
-					// uses). A replay failure keeps the record and its intent —
-					// the next restart re-verifies and retries.
-					if j := r.jobOf(rec.WorkItemID); j != nil && isTerminalStopReason(rec.StopReason) {
-						if r.cfg.EventTap != nil {
-							r.cfg.EventTap(rec.WorkItemID, "pending_close_replay", map[string]any{
-								"reason":              rec.StopReason,
-								"session_fingerprint": j.fingerprint(),
-								"note":                "crash between the retained-record close persist and SessionEnd; terminal close replayed at restart",
-							})
-						}
-						fmt.Fprintf(os.Stderr, "runtime: %s: pending %s close of the retained paused record — replaying (crash window, NEW-3)\n", rec.WorkItemID, rec.StopReason)
-						// The close replay proceeds against the local capsule
-						// (#103): absent at the active base, the wrap/fail
-						// intent must not be "replayed" out of thin air — a
-						// hard restart failure instead.
-						if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
-							return err
-						}
-						j.mu.Lock()
-						sealed := j.sealedPush
-						j.mu.Unlock()
-						if err := r.stopOp(ctx, j, rec.StopReason, true, sealed); err != nil {
-							fmt.Fprintf(os.Stderr, "runtime: %s: pending close replay failed, record kept: %v\n", rec.WorkItemID, err)
-						}
-						continue
-					}
-					// Operator pause (Finding 2, v1.5 review): the record is
-					// RETAINED, never auto-resumed. Its state is reconciled to
-					// Paused (a torn record from a crash window is the only way
-					// it can disagree — the pause close persists Paused first)
-					// and nothing else happens: no attach, no spawn, no hub
-					// transition. The operator's `pf resume` clears the hub
-					// flag and the NEXT restart attaches through the branch
-					// below.
-					if j := r.jobOf(rec.WorkItemID); j != nil {
-						j.mu.Lock()
-						if j.state != StatePaused {
-							j.state = StatePaused // crash-window reconcile (direct set: the hub is the authority)
-						}
-						j.cleanPause = true
-						j.mu.Unlock()
-					}
-					fmt.Fprintf(os.Stderr, "runtime: %s: cleanly paused; record retained (no auto-resume until the operator clears clean_pause)\n", rec.WorkItemID)
-				} else if aerr := r.restartAttach(ctx, rec); aerr != nil {
-					// attach refused (taken over in the window, or the hub
-					// disagree): keep the record — the next restart
-					// re-verifies with a fresh verdict. A missing mid-flight
-					// capsule (typed) is different (#103): hard restart
-					// failure — the resume must never proceed without the
-					// local scene, and never rebuild it from the remote.
-					var miss *MissingCapsuleError
-					if errors.As(aerr, &miss) {
-						return aerr
-					}
-					fmt.Fprintf(os.Stderr, "runtime: %s: session attach failed, record kept: %v\n", rec.WorkItemID, aerr)
-				}
-			case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
-				r.restartDrop(rec)
-			default:
-				// queued/blocked while our session still matches (a torn
-				// server state): treat as not-ours, drop the record.
-				fmt.Fprintf(os.Stderr, "runtime: %s: hub says %s with our session; record dropped\n", rec.WorkItemID, v.Status)
-				r.forgetRecord(rec)
-			}
-			continue
-		}
-		// verify does NOT match: our session is no longer the holder (or
-		// the row is gone entirely).
-		switch v.Status {
-		case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
-			// the close settled server-side before the crash: collect any
-			// local residue and drop the record — no quarantine, the
-			// terminal scene is the preserved artifact.
-			r.restartDrop(rec)
-		case api.StatusBlocked:
-			// M2 storm guard: the bounded-fail verdict stands — no
-			// revival, no kill, no quarantine; the record is kept so the
-			// next boot re-checks (the unblock path re-claims through the
-			// normal start, which quarantines the old scene itself).
-		case api.StatusQueued:
-			// back in the pool: our claim is gone. A local tree (if any)
-			// is a writer of a session nobody holds — collect it and drop
-			// the record; the capsule stays for the next claim's
-			// quarantine-or-clone decision.
-			fmt.Fprintf(os.Stderr, "runtime: %s: session ended server-side (queued); record dropped\n", rec.WorkItemID)
-			r.restartDrop(rec)
-		default:
-			// running or paused under ANOTHER session (the takeover
-			// happened while we were down): release — kill any local
-			// tree, quarantine the capsule, drop the record. NO hub
-			// transition: the new owner owns the work.
-			r.restartRelease(rec, v.CurrentFingerprint)
-		}
+		// One bad record never aborts the daemon (v2 §6): a missing
+		// capsule / unmapped project parks that WI alone; everything else
+		// keeps its record-kept posture. The error return is the
+		// aihub-unreachable verdict only, which Restart logs and moves on.
+		_ = r.restartOne(ctx, rec)
 	}
 	return r.persist()
 }
@@ -438,4 +313,250 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job, rec
 	j.mu.Unlock()
 	r.recoverCore(ctx, j, recoveryCause, detail)
 	return nil
+}
+
+// restartOne reconciles ONE recorded job with aihub (the body Restart
+// runs per record, and the re-check RepairResume re-runs for a parked
+// WI). The error return is the aihub-unreachable verdict only — a bad
+// capsule / unmapped project parks the WI (parkRepair) and returns nil.
+func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
+	if j := r.jobOf(rec.WorkItemID); j != nil {
+		j.mu.Lock()
+		j.repairPending = "" // re-evaluated below; parkRepair re-marks it
+		j.mu.Unlock()
+	}
+	if rec.SessionID == "" {
+		return nil
+	}
+	if j := r.jobOf(rec.WorkItemID); j != nil && j.liveAgent() {
+		return nil // already running under this daemon: not a restart case
+	}
+	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+	if err != nil {
+		// aihub unreachable for this WI: keep the record, try again on
+		// the next restart — never guess a verdict.
+		fmt.Fprintf(os.Stderr, "runtime: %s: session verify failed, record kept: %v\n", rec.WorkItemID, err)
+		return fmt.Errorf("runtime: %s: session verify failed: %w", rec.WorkItemID, err)
+	}
+	if v.Matches {
+		switch v.Status {
+		case api.StatusRunning:
+			// crash-mid-run under this session: recover-resume the
+			// local capsule (a mid-seal record finishes its stop).
+			// The mid-flight capsule must be present at its mapped
+			// base (#103/#113): a miss PARKS this WI alone as
+			// repair_pending (v2 §6) — never a rebuild-from-remote,
+			// never a daemon abort; the session is kept.
+			if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
+				r.parkRepair(rec, err)
+				return nil
+			}
+			if serr := r.restartRunning(ctx, rec); serr != nil {
+				fmt.Fprintf(os.Stderr, "runtime: %s: restart recovery failed: %v\n", rec.WorkItemID, serr)
+			}
+		case api.StatusPaused:
+			if v.CleanPause {
+				// NEW-3 (crash window): a TERMINAL stop_reason on the retained
+				// record is a pending close — stopOp's fromPaused branch
+				// persists the wrap/fail/blocked intent on the record BEFORE
+				// the terminal SessionEnd goes out, and a daemon crash in that
+				// window leaves the hub still answering paused+clean under our
+				// (matching) session. Replay the close instead of reconciling
+				// back to a plain retained pause: the SessionEnd is fenced on
+				// the session secret the verify just proved matches, so the
+				// terminal verdict lands (Paused → Done is a legal edge — the
+				// same alreadySealing=true shape the StateSealing finisher
+				// uses). A replay failure keeps the record and its intent —
+				// the next restart re-verifies and retries.
+				if j := r.jobOf(rec.WorkItemID); j != nil && isTerminalStopReason(rec.StopReason) {
+					if r.cfg.EventTap != nil {
+						r.cfg.EventTap(rec.WorkItemID, "pending_close_replay", map[string]any{
+							"reason":              rec.StopReason,
+							"session_fingerprint": j.fingerprint(),
+							"note":                "crash between the retained-record close persist and SessionEnd; terminal close replayed at restart",
+						})
+					}
+					fmt.Fprintf(os.Stderr, "runtime: %s: pending %s close of the retained paused record — replaying (crash window, NEW-3)\n", rec.WorkItemID, rec.StopReason)
+					// The close replay proceeds against the local capsule
+					// (#103): absent at the active base, the wrap/fail
+					// intent must not be "replayed" out of thin air — the
+					// WI parks as repair_pending instead.
+					if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
+						r.parkRepair(rec, err)
+						return nil
+					}
+					j.mu.Lock()
+					sealed := j.sealedPush
+					j.mu.Unlock()
+					if err := r.stopOp(ctx, j, rec.StopReason, true, sealed); err != nil {
+						fmt.Fprintf(os.Stderr, "runtime: %s: pending close replay failed, record kept: %v\n", rec.WorkItemID, err)
+					}
+					return nil
+				}
+				// Operator pause (Finding 2, v1.5 review): the record is
+				// RETAINED, never auto-resumed. Its state is reconciled to
+				// Paused (a torn record from a crash window is the only way
+				// it can disagree — the pause close persists Paused first)
+				// and nothing else happens: no attach, no spawn, no hub
+				// transition. The operator's `pf resume` clears the hub
+				// flag and the NEXT restart attaches through the branch
+				// below.
+				if j := r.jobOf(rec.WorkItemID); j != nil {
+					j.mu.Lock()
+					if j.state != StatePaused {
+						j.state = StatePaused // crash-window reconcile (direct set: the hub is the authority)
+					}
+					j.cleanPause = true
+					j.mu.Unlock()
+				}
+				fmt.Fprintf(os.Stderr, "runtime: %s: cleanly paused; record retained (no auto-resume until the operator clears clean_pause)\n", rec.WorkItemID)
+			} else if aerr := r.restartAttach(ctx, rec); aerr != nil {
+				// attach refused (taken over in the window, or the hub
+				// disagree): keep the record — the next restart
+				// re-verifies with a fresh verdict. A missing mid-flight
+				// capsule / unmapped project (typed, #103/#113) parks the
+				// WI as repair_pending: the resume must never proceed
+				// without the local scene, and never rebuild it from the
+				// remote.
+				var miss *MissingCapsuleError
+				var unm *UnmappedMidflightError
+				if errors.As(aerr, &miss) || errors.As(aerr, &unm) {
+					r.parkRepair(rec, aerr)
+					return nil
+				}
+				fmt.Fprintf(os.Stderr, "runtime: %s: session attach failed, record kept: %v\n", rec.WorkItemID, aerr)
+			}
+		case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
+			r.restartDrop(rec)
+		default:
+			// queued/blocked while our session still matches (a torn
+			// server state): treat as not-ours, drop the record.
+			fmt.Fprintf(os.Stderr, "runtime: %s: hub says %s with our session; record dropped\n", rec.WorkItemID, v.Status)
+			r.forgetRecord(rec)
+		}
+		return nil
+	}
+	// verify does NOT match: our session is no longer the holder (or
+	// the row is gone entirely).
+	switch v.Status {
+	case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
+		// the close settled server-side before the crash: collect any
+		// local residue and drop the record — no quarantine, the
+		// terminal scene is the preserved artifact.
+		r.restartDrop(rec)
+	case api.StatusBlocked:
+		// M2 storm guard: the bounded-fail verdict stands — no
+		// revival, no kill, no quarantine; the record is kept so the
+		// next boot re-checks (the unblock path re-claims through the
+		// normal start, which quarantines the old scene itself).
+	case api.StatusQueued:
+		// back in the pool: our claim is gone. A local tree (if any)
+		// is a writer of a session nobody holds — collect it and drop
+		// the record; the capsule stays for the next claim's
+		// quarantine-or-clone decision.
+		fmt.Fprintf(os.Stderr, "runtime: %s: session ended server-side (queued); record dropped\n", rec.WorkItemID)
+		r.restartDrop(rec)
+	default:
+		// running or paused under ANOTHER session (the takeover
+		// happened while we were down): release — kill any local
+		// tree, quarantine the capsule, drop the record. NO hub
+		// transition: the new owner owns the work.
+		r.restartRelease(rec, v.CurrentFingerprint)
+	}
+	return nil
+}
+
+// Pending-repair reason kinds (v2 §6) — also the durable event kinds.
+const (
+	RepairCapsuleMissing  = "capsule_missing"
+	RepairProjectUnmapped = "project_unmapped"
+)
+
+// parkRepair parks ONE mid-flight record whose capsule is missing or
+// whose project is unmapped (v2 §6, replacing the whole-daemon startup
+// abort): the record is kept, the SESSION is kept (no SessionEnd, no
+// quarantine, no clone, no hub transition), the job is marked
+// repair_pending, and a durable event names the path/project and the fix.
+// It is retried on the next daemon start and by RepairResume.
+func (r *Runtime) parkRepair(rec *jobRecord, cause error) {
+	j := r.jobOf(rec.WorkItemID)
+	if j == nil {
+		j = jobFromRecord(rec)
+		r.mu.Lock()
+		r.jobs[rec.WorkItemID] = j
+		r.mu.Unlock()
+	}
+	kind := RepairCapsuleMissing
+	body := map[string]any{"work_item": rec.WorkItemID, "project": rec.Project, "error": cause.Error()}
+	var miss *MissingCapsuleError
+	var unm *UnmappedMidflightError
+	switch {
+	case errors.As(cause, &unm):
+		kind = RepairProjectUnmapped
+		body["project"] = unm.Project
+		body["fix"] = fmt.Sprintf("re-add project %q to a [workspace.\"<path>\"] section of the daemon config, then run `pf resume %s` (or restart the daemon)", unm.Project, rec.WorkItemID)
+	case errors.As(cause, &miss):
+		body["path"] = miss.Dir
+		body["fix"] = fmt.Sprintf("restore the capsule directory at %s, then run `pf resume %s` (or restart the daemon); it is never rebuilt from the remote", miss.Dir, rec.WorkItemID)
+	}
+	j.mu.Lock()
+	j.repairPending = kind
+	j.mu.Unlock()
+	if r.cfg.EventTap != nil {
+		r.cfg.EventTap(rec.WorkItemID, kind, body)
+	}
+	fmt.Fprintf(os.Stderr, "runtime: %s: parked as repair_pending (%s), session kept: %v\n", rec.WorkItemID, kind, cause)
+}
+
+// RepairPendingError is the typed answer of RepairResume when the
+// capsule / mapping is still broken (or aihub could not verify).
+type RepairPendingError struct {
+	WI    string
+	Cause error // *MissingCapsuleError | *UnmappedMidflightError | nil
+	Msg   string
+}
+
+func (e *RepairPendingError) Error() string {
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	return e.Msg
+}
+
+func (e *RepairPendingError) Unwrap() error { return e.Cause }
+
+// RepairResume is the owner's "continue" for a repair_pending WI (v2 §6):
+// re-check the capsule/mapping; still broken → the typed error (the WI
+// stays parked); fixed → resume IN PLACE with the same session through
+// the existing restart reconciliation (verify → attach/recover-resume) —
+// never a re-claim, so the restored local scene is not quarantined or
+// re-cloned. held=false when wi is not parked here (the caller falls
+// through to its normal resume path).
+func (r *Runtime) RepairResume(ctx context.Context, wi string) (held bool, err error) {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	j := r.resolveJob(wi)
+	if j == nil {
+		return false, nil
+	}
+	j.mu.Lock()
+	kind := j.repairPending
+	j.mu.Unlock()
+	if kind == "" {
+		return false, nil
+	}
+	rec := j.record()
+	if cerr := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); cerr != nil {
+		return true, &RepairPendingError{WI: rec.WorkItemID, Cause: cerr}
+	}
+	if rerr := r.restartOne(ctx, rec); rerr != nil {
+		j.mu.Lock()
+		j.repairPending = kind // aihub unreachable: stay parked
+		j.mu.Unlock()
+		return true, &RepairPendingError{WI: rec.WorkItemID, Msg: "capsule is back but aihub could not be reached to verify the session; still parked: " + rerr.Error()}
+	}
+	if perr := r.persist(); perr != nil {
+		return true, perr
+	}
+	return true, nil
 }
