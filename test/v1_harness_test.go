@@ -126,6 +126,11 @@ type v1Install struct {
 	// human gate flag stripped so unattended plans run.
 	gateQuickFixGrill bool
 	strippedWF        string
+	// stripWallBudgets removes every step-level `budget: { wall_minutes }`
+	// override from the daemon's workflow copy, so the daemon-wide
+	// --step-timeout flag (T) governs the scenario (a step's own
+	// wall_minutes is minutes-granular and would otherwise win).
+	stripWallBudgets bool
 
 	// wis holds every work item this scenario created (through newWI or
 	// trackWI): the post-teardown orphan sweep (sweepOrphans) kills and
@@ -619,20 +624,28 @@ func optAPIKey(key string) daemonOpt {
 	return func(d *v1Daemon) { d.apiKey = key }
 }
 
-// optObserveWindows injects the observe supervision windows through the
-// real `pf daemon` flags (#12). A zero duration omits its flag, leaving
-// that window at the production default. (The fourth #12 window is
-// deleted — its consumer went with the driver cutover; a stale usage
-// now fails loudly at flag parse.)
-func optObserveWindows(hang, idle, probe time.Duration) daemonOpt {
+// supBounds are the supervision bounds a scenario injects through the
+// real `pf daemon` flags (v2-converge 2.4). A zero duration omits its
+// flag, leaving that bound at the production default.
+type supBounds struct {
+	silence, tool, stepTimeout, stall, modelErrorGrace time.Duration
+}
+
+// optSupervision injects the supervision bounds through the daemon's own
+// flags — the same real path an operator uses, so the whole production
+// chain (flag → config → driver thresholds → supervisor rules → driver
+// verdict handling) is the thing under test.
+func optSupervision(b supBounds) daemonOpt {
 	return func(d *v1Daemon) {
 		for _, f := range []struct {
 			name string
 			val  time.Duration
 		}{
-			{"--hang-window", hang},
-			{"--idle-window", idle},
-			{"--probe-timeout", probe},
+			{"--silence-window", b.silence},
+			{"--tool-window", b.tool},
+			{"--step-timeout", b.stepTimeout},
+			{"--stall-window", b.stall},
+			{"--model-error-grace", b.modelErrorGrace},
 		} {
 			if f.val > 0 {
 				d.extraArgs = append(d.extraArgs, f.name, f.val.String())
@@ -1322,11 +1335,15 @@ type execStepView struct {
 	PendingQuestion    *map[string]any  `json:"pending_question"`
 	PendingRewindInput *map[string]any  `json:"pending_rewind_input"`
 	BudgetConsumed     map[string]any   `json:"budget_consumed"`
+	// Supervision is the driver-owned failure ledger and relaxed bounds
+	// (v2-converge 2.3/2.4).
+	Supervision map[string]any `json:"supervision"`
 }
 
 // executionView is the loose read shape of runtime-state/execution.json.
 type executionView struct {
 	WorkflowStatus string                   `json:"workflow_status"`
+	BlockedReason  string                   `json:"blocked_reason"`
 	CurrentStep    string                   `json:"current_step"`
 	Version        int64                    `json:"version"`
 	BudgetConsumed map[string]any           `json:"budget_consumed"`
@@ -1618,19 +1635,6 @@ func writePlanExtra(t *testing.T, inst *v1Install, wi string, actions, resume []
 	if err := os.WriteFile(filepath.Join(inst.planDir, wi+".json"), blob, 0o644); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// answerControls extracts the fake agent's pf/answer control landings
-// (in journal order) from one capsule.
-func answerControls(t *testing.T, capDir string) []map[string]any {
-	t.Helper()
-	var out []map[string]any
-	for _, rec := range fakeJournal(t, capDir) {
-		if rec["type"] == "control" && rec["method"] == "pf/answer" {
-			out = append(out, rec)
-		}
-	}
-	return out
 }
 
 // restartSameDaemon re-execs a daemon on the SAME socket, data dir and

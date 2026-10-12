@@ -7,17 +7,12 @@
 //
 //   - stdin: one JSON command object per line; prompt commands
 //     {"id":..,"type":"prompt","message":..} are the only commands
-//     honored; the daemon's one control method (pf/probe) rides a
-//     prompt command whose message text is the protocol.ControlMsg
-//     JSON line VERBATIM (on the driver lane the bridge answers probes
-//     from the driver goroutine's liveness — this stdin face stays for
-//     the transport contract only);
+//     honored (the liveness probe died with the guessing supervision
+//     lanes — v2-converge 2.3);
 //   - stdout: response records {"id","type":"response","command":"prompt",
 //     "success":true} echo the command id; assistant text rides the
-//     message_start/message_update/message_end event burst; the control
-//     ACK is a JSON line embedded in a MULTI-LINE assistant message
-//     (the v1 ack contract: the ack carries method + correlation —
-//     pf/probe echoes the nonce in "ref");
+//     message_start/message_update/message_end event burst; tool
+//     executions ride tool_execution_start/tool_execution_end;
 //   - capsule-side execution state: runtime-state/execution.json is
 //     written atomically (tmp+rename) with a MONOTONIC Version per
 //     write — the v1 zero-blocking agent contract (ruling C3) the
@@ -105,12 +100,21 @@ func main() {
 		})
 		os.Exit(9)
 	}
+	if bad := drv.badModel(); bad != "" {
+		// the model-pin failure (F4): the harness cannot resolve the
+		// pinned model and exits non-zero at startup with the error on
+		// stderr — an exit WITHOUT a result envelope, model-class.
+		drv.journal("model_fail", map[string]any{"model": bad, "spawn_n": drv.spawnN, "pid": os.Getpid()})
+		fmt.Fprintf(os.Stderr, "error: model %q not found (unknown model); available models: none\n", bad)
+		os.Exit(1)
+	}
 	drv.journal("spawn", map[string]any{
 		"pid":     os.Getpid(),
 		"handle":  drv.handle,
 		"spawn_n": drv.spawnN,
 		"resume":  drv.resumed,
 		"session": drv.sessionArg,
+		"model":   pinnedModelOf(),
 		"wi":      drv.wi,
 	})
 	go runDriveLoop(drv)
@@ -134,50 +138,16 @@ func main() {
 		emitRecord(map[string]any{
 			"id": cmd.ID, "type": "response", "command": "prompt", "success": true,
 		})
-		var ctl struct {
-			Method string `json:"method"`
-			Seq    int64  `json:"seq"`
-			Nonce  string `json:"nonce"`
-		}
-		if json.Unmarshal([]byte(cmd.Message), &ctl) != nil || ctl.Method == "" {
-			// free text (the initial instruction): a plain assistant turn
-			emitAssistantTurn(drv, "fakepi: instruction received; standing by for control methods.", "")
-			continue
-		}
-		switch ctl.Method {
-		case "pf/probe":
-			if drv.suppressProbeAck() {
-				// the hang scenario: no ack, the liveness probe must time out
-				drv.journal("control", map[string]any{"method": "pf/probe", "suppressed": true, "nonce": ctl.Nonce})
-				continue
-			}
-			ack := map[string]any{"method": "pf/probe", "ok": true}
-			if ctl.Nonce != "" {
-				ack["ref"] = ctl.Nonce
-			} else {
-				ack["seq"] = ctl.Seq
-			}
-			ackViaAssistantMessage(ack)
-			drv.journal("control", map[string]any{"method": "pf/probe", "ref": ctl.Nonce})
-		default:
-			// polyforge#106: the answer relay and the stop-notice delivery
-			// died with the WI-Agent engine — the channel's only method is
-			// the probe; anything else is journaled as the unknown it is.
-			drv.journal("control", map[string]any{"method": ctl.Method, "unknown": true})
+		// the initial instruction: a plain assistant turn — unless this
+		// dispatch's action is the zero-signal harness (Silent: not even
+		// the greeting turn; rule 0's shape)
+		if !drv.silentThisSpawn() {
+			emitAssistantTurn(drv, "fakepi: instruction received; standing by.", "")
 		}
 	}
 	// stdin EOF (the daemon died): park alive — the crash drills need
 	// the WI agent to survive the parent's kill.
 	parkForever()
-}
-
-// ackViaAssistantMessage acks one control method the way the v1 transport
-// contract defines: the ack JSON line is embedded in a MULTI-LINE
-// assistant message — never a raw stdout line.
-func ackViaAssistantMessage(ack map[string]any) {
-	raw, _ := json.Marshal(ack)
-	text := "control method received; acking at a safe boundary\n" + string(raw) + "\nstanding by"
-	emitAssistantTurn(drv, text, "")
 }
 
 // emitAssistantTurn streams one complete assistant message as the real

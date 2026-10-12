@@ -5,120 +5,87 @@ import (
 	"time"
 )
 
-// v1_s21: the F15 progress-semantics regression, driver/envelope edition.
-// The pilot's double-blind wedge (#46) was pinned by three shapes on the
-// WI-Agent record stream; the driver-era faces re-express the fix's heart
-// — the PROGRESS classification at the owner face — on the driver's step
-// processes, whose records reach the monitor through the same production
-// record tap:
+// v1_s21: the F15 progress-semantics regression and the #99 parked-
+// question stillness, v2 supervisor edition (v2-converge 2.3 "real
+// output": only work-class harness signals count as life). The pilot's
+// double-blind wedge (#46) was a turn stuck on an in-flight model call
+// while an extension's UI chatter kept streaming records — under the old
+// "any record refreshes the heartbeat" rule the stream looked forever
+// fresh. Two shapes on the driver's step processes, whose stdout reaches
+// the supervisor through the harness translator:
 //
-//   - shape A (the on-machine incident's classification half): a step
-//     process streaming extension_ui_request records (UI noise — NEVER
-//     progress) while its workflow parks on an open question:
-//     LAST-PROGRESS goes STALE through the noise.
-//   - shape B (legal slow work): message_update deltas (the progress
-//     family) keep LAST-PROGRESS FRESH.
-//   - the parked question is designed stillness: with the question open
-//     the watchdogs are exempt (the #99 pending-question exemption), so
-//     neither shape fires a recovery, a probe or an incident — asserted
-//     explicitly in both shapes.
+//   - shape A: a step process emitting ONLY extension_ui_request records
+//     (UI noise — never work) is silence: rule 0 judges it harness_silent
+//     within the silence window although records keep flowing, the ops
+//     status shows a step age with NO last-work age meanwhile, and the
+//     driver's same-model retry then proceeds to a parked question;
+//   - shape B (legal slow work): an open turn whose model keeps
+//     streaming deltas stays alive past many silence windows — LAST-WORK
+//     stays fresh, no verdict fires.
 //
-// RETIRED SUB-ASSERTIONS (Phase-4 ticket polyforge#106): the legacy
-// shape C (no turn + no progress + UI noise → the IDLE recovery fires
-// exactly as without the noise) needed an agent that suppresses liveness
-// probes while staying alive — a WI-Agent RPC control-channel shape. The
-// driver bridge acks probes for every LIVE driver and the parked
-// question exempts the idle path entirely, so the idle-recovery limb has
-// no driver counterpart; it retires with this comment (deletion is
-// #106's), not silently.
+// Both shapes then park on a question for several windows with the
+// supervision bounds shrunk to seconds: NO dispatch timer and NO stall
+// clock may run while a human is asked (#99 — there is no step process),
+// and the answer completes the run.
 func TestV1S21F15ProgressSemantics(t *testing.T) {
 	inst := newV1Install(t)
-	d := newV1Daemon(t, inst, optObserveWindows(2*time.Second, 2*time.Second, 2*time.Second))
+	d := newV1Daemon(t, inst, optSupervision(supBounds{
+		silence: 2 * time.Second, stall: 2 * time.Second, tool: 30 * time.Second,
+	}))
 	d.start()
 
 	// ------------------------------------------------------------------
-	// shape A: UI noise never proves progress — LAST-PROGRESS goes stale
-	// through it.
+	// shape A: UI noise is not work — silence, judged harness_silent.
 
-	wiA := inst.newWI(t, "s21-A: UI noise never proves progress (stale reads stale)",
+	wiA := inst.newWI(t, "s21-A: UI noise never proves progress (rule 0)",
 		[]map[string]any{
-			// The envelope action opens a stdout turn and streams
-			// extension_ui_request records for 4s BEFORE the envelope
-			// write: the step process stays alive and the UI records keep
-			// flowing while LAST-PROGRESS (anchored on PROGRESS records
-			// only) goes stale.
+			// Ordinal 1: the zero-work harness streaming UI chatter.
+			{"do": "envelope", "id": "grill", "silent": true, "noise": "ui", "noise_ms": 50},
+			// Ordinal 2: the same-model retry parks on a question.
 			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": "q_s21a",
-				"question":  "s21-A: park here (the test answers after the staleness pin).",
-				"open_turn": true, "noise": "ui", "noise_ms": 50, "ms": 4000},
+				"question": "s21-A: park here (the test answers after the stillness pin)."},
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d.pf(t, "submit", wiA)
-	capA := d.capsuleDir(wiA)
-	// The boot turn is the stream's progress anchor; the UI noise that
-	// follows never refreshes it. The staleness pin lands WHILE the
-	// process is still alive and streaming (the 4s delay): LAST-PROGRESS
-	// reads >= 2s while UI records keep arriving (the column is anchored
-	// on PROGRESS records, not on record freshness — the pin the pilot
-	// lacked for 2.7 hours).
-	waitUntil(t, 15*time.Second, "shape A: LAST-PROGRESS never went stale through the UI noise", func() bool {
+	// While the chattering dispatch is alive its step age grows and its
+	// last-work age stays absent: the owner face tells "records flowing"
+	// from "work happening".
+	waitUntil(t, 15*time.Second, "shape A: STEP-AGE never showed without LAST-WORK through the UI noise", func() bool {
 		for _, j := range d.status(t).Jobs {
-			if j.WorkItemID == wiA && j.LastProgressAgoSec != nil && *j.LastProgressAgoSec >= 2 {
+			if j.WorkItemID == wiA && j.StepAgeSec != nil && *j.StepAgeSec >= 1 && j.LastWorkAgoSec == nil {
 				return true
 			}
 		}
 		return false
 	})
-	staleAt := time.Now()
-	_ = staleAt
+	rec := waitForEvent(t, d, wiA, "supervisor_verdict", 30*time.Second)
+	var v struct {
+		Verdict  string `json:"verdict"`
+		Cause    string `json:"cause"`
+		Evidence string `json:"evidence"`
+	}
+	eventBody(t, rec, &v)
+	if v.Verdict != "step_dead" || v.Cause != "harness_silent" {
+		t.Fatalf("shape A: verdict %+v, want step_dead harness_silent (UI noise is silence)", v)
+	}
 	waitQuestion(t, d, wiA, "q_s21a", 30*time.Second)
-	// Designed stillness: NO recovery ever fires — not through the
-	// streaming window, not through the park. (The pre-park window may
-	// legitimately draw the hang_suspected incident and the F15c
-	// no_progress owner event — the turn is in flight and the progress
-	// clock is stale THROUGH the noise, which is the F15 classification
-	// working as designed — but the probe proves liveness and the
-	// recovery never comes; the parked question then exempts the
-	// watchdogs entirely.)
-	if n := countOf(d.eventKinds(t, wiA), "needs_recovery"); n != 0 {
-		t.Fatalf("shape A: needs_recovery fired %d times against UI noise + a parked question: %v",
-			n, d.eventKinds(t, wiA))
-	}
-	for _, e := range d.eventsOf(t, wiA) {
-		if e.Kind == "infra_incident" {
-			var b struct {
-				Kind string `json:"kind"`
-			}
-			eventBody(t, e, &b)
-			switch b.Kind {
-			case "hang_suspected", "hang_cleared":
-				// the suspicion through the noise, and its clearance when
-				// the parked question exempted the criterion — the F15
-				// classification at work; never a recovery.
-			default:
-				t.Fatalf("shape A: unexpected incident kind %q", b.Kind)
-			}
-		}
-	}
-	for _, rec := range fakeJournal(t, capA) {
-		if rec["type"] == "control" && rec["method"] == "pf/probe" {
-			t.Fatal("shape A: a liveness probe was sent against a parked question")
-		}
-	}
-	// The owner answers; the workflow completes and the terminal wiring
-	// wraps it (the noise's stillness never degraded the run).
+
+	// #99: parked on a human for several windows of every bound — nothing
+	// may fire (no step process exists; the stall clock is exempt).
+	time.Sleep(6 * time.Second)
+	assertQuietWhileParked(t, d, wiA, 1)
 	answerQuestion(t, d, wiA, "q_s21a", "Shape A done.")
 	waitWorkflowStatus(t, d, wiA, "completed", 120*time.Second)
 	inst.waitWIStatus(t, wiA, "wrapped", 60*time.Second)
 	killOrphans(wiA)
 
 	// ------------------------------------------------------------------
-	// shape B: legal slow work — progress-family deltas keep
-	// LAST-PROGRESS fresh.
+	// shape B: legal slow work — a streaming model is alive.
 
-	wiB := inst.newWI(t, "s21-B: progress deltas prove progress (fresh stays fresh)",
+	wiB := inst.newWI(t, "s21-B: model deltas prove progress (alive stays alive)",
 		[]map[string]any{
 			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": "q_s21b",
 				"question":  "s21-B: park here.",
@@ -132,10 +99,6 @@ func TestV1S21F15ProgressSemantics(t *testing.T) {
 	d.pf(t, "submit", wiB)
 	t.Cleanup(func() { killOrphans(wiB) })
 
-	// While the process is alive and the message_update deltas stream
-	// (the 6s pre-write window), LAST-PROGRESS stays fresh — the deltas
-	// ARE the progress family. Four hang windows' worth of streaming:
-	// nothing fires.
 	waitUntil(t, 15*time.Second, "shape B: the progress stream never started", func() bool {
 		for _, rec := range fakeJournal(t, capB) {
 			if rec["type"] == "ui_noise" && rec["kind"] == "progress" {
@@ -144,42 +107,45 @@ func TestV1S21F15ProgressSemantics(t *testing.T) {
 		}
 		return false
 	})
-	deadline := time.Now().Add(4 * time.Second)
+	// Three silence windows of streaming: LAST-WORK stays fresh, nothing
+	// fires.
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, j := range d.status(t).Jobs {
-			if j.WorkItemID == wiB {
-				if j.LastProgressAgoSec != nil && *j.LastProgressAgoSec > 2 {
-					t.Fatalf("shape B: LAST-PROGRESS stale (%vs) while progress deltas stream", *j.LastProgressAgoSec)
-				}
+			if j.WorkItemID == wiB && j.LastWorkAgoSec != nil && *j.LastWorkAgoSec > 2 {
+				t.Fatalf("shape B: LAST-WORK stale (%vs) while the model streams deltas", *j.LastWorkAgoSec)
 			}
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	for _, kind := range []string{"needs_recovery", "no_progress"} {
-		if evs := eventsOfKind(t, d, wiB, kind); len(evs) != 0 {
-			t.Fatalf("shape B: %s fired for a progressing stream: %s", kind, evs[0])
-		}
+	if n := countOf(d.eventKinds(t, wiB), "supervisor_verdict"); n != 0 {
+		t.Fatalf("shape B: the supervisor judged a streaming model dead: %v", d.eventKinds(t, wiB))
 	}
-	for _, e := range d.eventsOf(t, wiB) {
-		if e.Kind == "infra_incident" {
-			var b struct {
-				Kind string `json:"kind"`
-			}
-			eventBody(t, e, &b)
-			t.Fatalf("shape B: a watchdog incident fired for a progressing stream: %s", b.Kind)
-		}
-	}
-	for _, rec := range fakeJournal(t, capB) {
-		if rec["type"] == "control" && rec["method"] == "pf/probe" {
-			t.Fatal("shape B: a liveness probe was sent while progress streamed")
-		}
-	}
-	// The envelope lands when the streaming window ends; the workflow
-	// parks, the owner answers, the run completes (the stillness never
-	// degraded anything).
 	waitQuestion(t, d, wiB, "q_s21b", 30*time.Second)
+	time.Sleep(6 * time.Second)
+	assertQuietWhileParked(t, d, wiB, 0)
 	answerQuestion(t, d, wiB, "q_s21b", "Shape B done.")
 	waitWorkflowStatus(t, d, wiB, "completed", 120*time.Second)
+}
+
+// assertQuietWhileParked pins the #99 stillness: with a question open for
+// several windows of every bound, the supervisor issued no more than the
+// expected number of verdicts (wantVerdicts: the earlier legitimate
+// ones), and neither a driver stall nor a recovery fired.
+func assertQuietWhileParked(t *testing.T, d *v1Daemon, wi string, wantVerdicts int) {
+	t.Helper()
+	kinds := d.eventKinds(t, wi)
+	if n := countOf(kinds, "supervisor_verdict"); n != wantVerdicts {
+		t.Fatalf("supervisor verdicts while parked: %d, want %d: %v", n, wantVerdicts, kinds)
+	}
+	for _, e := range d.eventsOf(t, wi) {
+		if e.Kind == "supervisor_verdict" && wantVerdicts == 0 {
+			t.Fatalf("unexpected verdict: %s", e.Body)
+		}
+	}
+	if n := countOf(kinds, "needs_recovery"); n != 0 {
+		t.Fatalf("a recovery fired while a human was asked: %v", kinds)
+	}
 }
 
 // journalHas reports whether the fake agent's journal carries one step

@@ -1,7 +1,6 @@
 package test
 
 import (
-	"encoding/json"
 	"syscall"
 	"testing"
 	"time"
@@ -9,14 +8,14 @@ import (
 
 // v1_s05: the step process is killed with SIGKILL. The driver's step
 // processes ARE the supervised units: the killed grill dispatch never
-// writes its result envelope, the driver surfaces the envelope-less exit,
-// and the recovery engine re-dispatches the step in place under the NEXT
-// spawn ordinal — the v1.5 B2 rule: the ONLY identity change across a
-// recovery is spawn_n++ — and the workflow completes and wraps inside the
-// SAME session (T4: the session fingerprint never moves on same-machine
-// recovery). Exactly one recovery for the kill (the storm guard) plus
-// exactly the completion signal, and the derivation counters are asserted
-// from the spawn journal.
+// writes its result envelope, the DRIVER surfaces the envelope-less exit
+// itself (exit_other: a same-model retry) and re-dispatches the step in
+// place under the NEXT spawn ordinal — the v1.5 B2 rule: the ONLY
+// identity change across a retry is spawn_n++ — and the workflow
+// completes and wraps inside the SAME session (T4: the session
+// fingerprint never moves). The kill never reaches the recovery engine:
+// the whole run fires exactly the completion signal, and the derivation
+// counters are asserted from the spawn journal.
 func TestV1S05AgentKill9(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s05: agent killed mid-run",
@@ -49,31 +48,21 @@ func TestV1S05AgentKill9(t *testing.T) {
 		t.Fatalf("kill -9 %d: %v", pid, err)
 	}
 
-	// The observe lane detected the death and the runtime recovered.
-	waitUntil(t, 30*time.Second, "no needs_recovery after the kill", func() bool {
-		for _, e := range d.eventsOf(t, wi) {
-			if e.Kind == "needs_recovery" {
-				return true
-			}
-		}
-		return false
-	})
-	// The recovery reason is the confirmed death.
-	var reason string
-	for _, e := range d.eventsOf(t, wi) {
-		if e.Kind == "needs_recovery" {
-			var body struct {
-				Reason string `json:"reason"`
-			}
-			_ = json.Unmarshal(e.Body, &body)
-			reason = body.Reason
-		}
+	// The DRIVER detected the exit-without-result itself (v2-converge 2.3:
+	// the one failure it sees directly): ONE failure record, same-model
+	// retry, resume shape — no recovery engine involved.
+	rec := waitForEvent(t, d, wi, "step_failed", 60*time.Second)
+	var body struct {
+		Cause       string `json:"cause"`
+		Disposition string `json:"disposition"`
+		Count       int    `json:"failure_count"`
 	}
-	if reason != "agent_death" {
-		t.Fatalf("recovery reason %q, want agent_death", reason)
+	eventBody(t, rec, &body)
+	if body.Cause != "exit_other" || body.Disposition != "retry_same_model" || body.Count != 1 {
+		t.Fatalf("step_failed = %+v, want exit_other/retry_same_model/1 for the killed process", body)
 	}
 
-	// T4 (B2): the recovery re-derived under a NEW counter but the SAME
+	// T4 (B2): the retry re-derived under a NEW counter but the SAME
 	// session — same-machine recovery never changes session ownership.
 	if sessAfter := inst.sessionOf(t, wi); sessAfter.Fingerprint != sessBefore.Fingerprint {
 		t.Fatalf("same-machine recovery changed the session: %q -> %q",
@@ -83,22 +72,22 @@ func TestV1S05AgentKill9(t *testing.T) {
 	// The re-dispatched workflow finished, and the terminal wiring wrapped.
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 
-	// Exactly one recovery for the kill plus exactly the completion
-	// signal (the storm guard; the wrap is the completed-exit translation).
+	// The kill never reached the recovery engine: the ONLY recovery signal
+	// of the whole run is the completion wrap, and nothing was re-derived.
 	kinds := d.eventKinds(t, wi)
-	if n := countOf(kinds, "needs_recovery"); n != 2 {
-		t.Fatalf("needs_recovery fired %d times, want 2 (the kill + the completion signal): %v", n, kinds)
+	if n := countOf(kinds, "needs_recovery"); n != 1 {
+		t.Fatalf("needs_recovery fired %d times, want 1 (the completion signal only): %v", n, kinds)
 	}
-	if n := countOf(kinds, "wi_agent_rederived"); n != 1 {
-		t.Fatalf("re-derivation count %d, want 1: %v", n, kinds)
+	if n := countOf(kinds, "wi_agent_rederived"); n != 0 {
+		t.Fatalf("re-derivation count %d, want 0 (the driver retried in place): %v", n, kinds)
 	}
 
-	// The spawn journal: the kill consumed ordinal 1 and the recovery
+	// The spawn journal: the kill consumed ordinal 1 and the driver
 	// re-dispatched grill in place as a RESUME under ordinal 2 (the B2
 	// fence key), then the fresh dispatches of the tail.
 	spawns := waitSpawnCount(t, d, wi, 5, 60*time.Second)
 	if spawns[0]["resume"] != false || spawns[1]["resume"] != true {
-		t.Fatalf("the recovery re-dispatch was not a resume: %+v %+v", spawns[0], spawns[1])
+		t.Fatalf("the retry was not a resume: %+v %+v", spawns[0], spawns[1])
 	}
 	if n1, _ := spawns[0]["spawn_n"].(float64); n1 != 1 {
 		t.Fatalf("first derivation counter wrong: %+v", spawns[0])
