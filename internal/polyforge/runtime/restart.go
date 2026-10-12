@@ -268,6 +268,10 @@ func (r *Runtime) Restart(ctx context.Context) error {
 			// revival, no kill, no quarantine; the record is kept so the
 			// next boot re-checks (the unblock path re-claims through the
 			// normal start, which quarantines the old scene itself).
+			// Crash orphans are the one exception: no live step process
+			// is legitimate for a blocked WI, and they would keep writing
+			// the scene — reap only (no session action).
+			r.reapOrphans(rec.WorkItemID, rec.CapsuleDir)
 		case api.StatusQueued:
 			// back in the pool: our claim is gone. A local tree (if any)
 			// is a writer of a session nobody holds — collect it and drop
