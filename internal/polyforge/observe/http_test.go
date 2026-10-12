@@ -16,20 +16,21 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 type harness struct {
 	o          *Observe
-	rt         chan Attach
-	ob         chan protocol.OBMsg
+	rt         *supervise.Queue[Attach]
+	ob         *supervise.Queue[protocol.OBMsg]
 	srv        *httptest.Server
 	capsuleDir string
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	rt := make(chan Attach, 8)
-	ob := make(chan protocol.OBMsg, 64)
+	rt := supervise.NewQueue[Attach]()
+	ob := supervise.NewQueue[protocol.OBMsg]()
 	dataDir := t.TempDir()
 	capsuleDir := filepath.Join(t.TempDir(), "capsule")
 	if err := os.MkdirAll(filepath.Join(capsuleDir, "runtime-state"), 0o755); err != nil {
@@ -59,14 +60,14 @@ func newHarness(t *testing.T) *harness {
 
 func (hs *harness) start(t *testing.T, h Handle) {
 	t.Helper()
-	hs.rt <- Attach{
+	hs.rt.Push(Attach{
 		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_http", SpawnN: 1},
 		Handle: h,
 		WI: WIInfo{
 			WorkItem: "wi_http", Project: "proj", CapsuleDir: hs.capsuleDir,
 			BundleName: "bundle-x",
 		},
-	}
+	})
 }
 
 func (hs *harness) get(t *testing.T, path string) (int, []byte) {
@@ -174,7 +175,7 @@ func TestHTTPObserveAfterFinishIs404(t *testing.T) {
 	})
 
 	// RTFinished tears the monitor down; the lane's routes answer 404.
-	hs.rt <- Attach{Msg: protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: "wi_http"}}
+	hs.rt.Push(Attach{Msg: protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: "wi_http"}})
 	soon(t, time.Second, "monitor removed", func() bool {
 		code, _ := hs.get(t, "/jobs/wi_http/observe")
 		return code == http.StatusNotFound

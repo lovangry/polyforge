@@ -162,9 +162,9 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 		})
 	}
 
-	rtMsgs := make(chan protocol.RTMsg, 64)
-	obMsgs := make(chan protocol.OBMsg, 64)
-	attachCh := make(chan observe.Attach, 64)
+	rtMsgs := supervise.NewQueue[protocol.RTMsg]()
+	obMsgs := supervise.NewQueue[protocol.OBMsg]()
+	attachCh := supervise.NewQueue[observe.Attach]()
 
 	rig.rt = runtime.New(rtCfg, inst.client, sp, rtMsgs, obMsgs)
 	obCfg := observe.Config{
@@ -241,14 +241,12 @@ func (r *inprocRig) installAdapter(ji runtime.JobInfo) *inprocAdapter {
 
 // bridge translates RT messages into observe attachments (the daemon's
 // bridge shape, minus the daemon-only bookkeeping).
-func (r *inprocRig) bridge(rtMsgs <-chan protocol.RTMsg, attachCh chan<- observe.Attach) {
+func (r *inprocRig) bridge(rtMsgs *supervise.Queue[protocol.RTMsg], attachCh *supervise.Queue[observe.Attach]) {
 	for {
-		select {
-		case <-r.ctx.Done():
-			return
-		case msg, ok := <-rtMsgs:
+		for {
+			msg, ok := rtMsgs.Pop()
 			if !ok {
-				return
+				break
 			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
@@ -266,11 +264,12 @@ func (r *inprocRig) bridge(rtMsgs <-chan protocol.RTMsg, attachCh chan<- observe
 					}
 				}
 			}
-			select {
-			case attachCh <- at:
-			case <-r.ctx.Done():
-				return
-			}
+			attachCh.Push(at)
+		}
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-rtMsgs.Notify():
 		}
 	}
 }

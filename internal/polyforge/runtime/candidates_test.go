@@ -18,6 +18,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 func TestSpawnModelPinRidesArgv(t *testing.T) {
@@ -211,21 +212,20 @@ func TestStaleClaimingEntryDropped(t *testing.T) {
 // newTestRuntimeAt builds a runtime whose DataDir (and therefore the
 // state.json and claiming-journal paths) is the CALLER's directory, so two
 // runtimes can share one bookkeeping tree across a simulated restart.
-func newTestRuntimeAt(t *testing.T, hub Aihub, sp Spawner, dataDir string) (*Runtime, chan protocol.RTMsg, chan protocol.OBMsg) {
+func newTestRuntimeAt(t *testing.T, hub Aihub, sp Spawner, dataDir string) (*Runtime, *supervise.Queue[protocol.RTMsg], *supervise.Queue[protocol.OBMsg]) {
 	t.Helper()
 	cfg := Config{
 		MachineID:     "m-test",
 		Mapping:       mappingFor(filepath.Join(t.TempDir(), "ws")),
 		DataDir:       dataDir,
 		MaxRecoveries: 2,
-		SendBound:     2 * time.Second,
 		// episodes, not wall time (see newTestRuntime)
 		RecoveryStabilityWindow: time.Nanosecond,
 		// polyforge#106: the driver is the only engine (see newTestRuntime)
 		AgentStarter: scriptedEngineStarter(sp),
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
 	return r, toOB, fromOB
 }

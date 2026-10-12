@@ -47,14 +47,14 @@ func newLiveFixture(t *testing.T, capsuleDir, liveDir string) liveFixture {
 }
 
 // adopt delivers the per-derivation transcript facts through the
-// production path: an RTRecovered attachment on rtCh.
+// production path: an RTRecovered attachment on rtQ.
 func adopt(t *testing.T, m *Monitor, h Handle, wi WIInfo) {
 	t.Helper()
-	m.rtCh <- Attach{
+	m.rtQ.Push(Attach{
 		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: wi.WorkItem, SpawnN: 2},
 		Handle: h,
 		WI:     wi,
-	}
+	})
 	// the adoption and the driver's facts race on the select: wait until
 	// the attachment landed before any commit boundary is announced
 	soon(t, 2*time.Second, "transcript facts adopted", func() bool { return m.currentSpawn() == 2 })

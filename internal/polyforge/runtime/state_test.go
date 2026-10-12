@@ -181,9 +181,9 @@ func TestRunLoopDrivesRecovery(t *testing.T) {
 		_ = r.Run(ctx)
 		close(done)
 	}()
-	fromOB <- protocol.OBMsg{
+	fromOB.Push(protocol.OBMsg{
 		Kind: protocol.OBNeedsRecovery, SpawnN: j.spawnN, WorkItem: wi, Reason: protocol.RecoverDeath,
-	}
+	})
 	msg := recvRT(t, toOB)
 	if msg.Kind != protocol.RTRecovered {
 		t.Fatalf("expected RTRecovered, got %+v", msg)

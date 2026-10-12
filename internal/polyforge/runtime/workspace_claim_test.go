@@ -15,6 +15,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // newWorkspaceTestRuntime builds a runtime whose workspace mapping names
@@ -38,13 +39,12 @@ func newWorkspaceTestRuntime(t *testing.T, hub Aihub, project string) (*Runtime,
 		// it through the single engine seam.
 		AgentStarter:  scriptedEngineStarter(sp),
 		MaxRecoveries: 2,
-		SendBound:     2 * time.Second,
 		// The storm guard's window is collapsed: test episodes are
 		// separated by handleOB calls, not real time.
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 	return r, ws, sp

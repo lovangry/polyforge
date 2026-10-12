@@ -397,9 +397,7 @@ func (r *Runtime) recoveryStabilityWindow() time.Duration {
 // — the hub clears the session row and marks the WI blocked, which the
 // claim gate excludes until a human intervenes (M2). The storm guard's
 // "never a third relaunch" contract is preserved: restart sees blocked
-// and leaves the record untouched. RTFinished(blocked) follows — on
-// sendRelease, so a full observe channel defers rather than drops it
-// (NEW-2: every RTFinished is a terminal release). Before the verdict the
+// and leaves the record untouched. RTFinished(blocked) follows. Before the verdict the
 // agent tree is killed and the dirty capsule committed+pushed best-effort
 // (polyforge#116: the parked verdict must reach the chain; v2-converge §6
 // bug 4: every branch, not just the blocked one). A SessionEnd the hub does

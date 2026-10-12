@@ -201,9 +201,9 @@ type Daemon struct {
 	rt  *runtime.Runtime
 	obs *observe.Observe
 
-	rtMsgs   chan protocol.RTMsg
-	obMsgs   chan protocol.OBMsg
-	attachCh chan observe.Attach
+	rtMsgs   *supervise.Queue[protocol.RTMsg]
+	obMsgs   *supervise.Queue[protocol.OBMsg]
+	attachCh *supervise.Queue[observe.Attach]
 
 	// sealGuard serializes the close paths (CLI wrap/pause): exactly one
 	// close may run per work item; the late arrival answers DAEMON-409.
@@ -361,9 +361,9 @@ func New(cfg Config) (*Daemon, error) {
 		hub:      cfg.Hub,
 		modes:    NewModeCtl(),
 		q:        NewJobQueue(cfg.MaxConcurrent, func() map[string]bool { return d.occupiedSlots() }),
-		rtMsgs:   make(chan protocol.RTMsg, 64),
-		obMsgs:   make(chan protocol.OBMsg, 64),
-		attachCh: make(chan observe.Attach, 64),
+		rtMsgs:   supervise.NewQueue[protocol.RTMsg](),
+		obMsgs:   supervise.NewQueue[protocol.OBMsg](),
+		attachCh: supervise.NewQueue[observe.Attach](),
 		sealedWI: map[string]bool{},
 		adapters: map[string]*agentAdapter{},
 		shutDone: make(chan struct{}),
@@ -669,17 +669,13 @@ func (d *Daemon) reattachRecovered() {
 		if ji.Agent == nil {
 			continue
 		}
-		select {
-		case d.attachCh <- d.buildAttach(protocol.RTMsg{
+		d.attachCh.Push(d.buildAttach(protocol.RTMsg{
 			Kind: protocol.RTStarted, SpawnN: ji.SpawnN,
 			WorkItem: ji.WorkItem, AgentPID: ji.AgentPID,
 			// the in-process secret re-arms the M4 revalidation for
 			// reattached jobs (it rides RTMsg, never a log surface).
 			SessionID: ji.SessionID,
-		}, ji):
-		case <-d.runCtx.Done():
-			return
-		}
+		}, ji))
 	}
 }
 
@@ -746,12 +742,10 @@ func (d *Daemon) canonWI(wi string) string {
 // only control vocabulary).
 func (d *Daemon) bridge() {
 	for {
-		select {
-		case <-d.runCtx.Done():
-			return
-		case msg, ok := <-d.rtMsgs:
+		for {
+			msg, ok := d.rtMsgs.Pop()
 			if !ok {
-				return
+				break
 			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
@@ -759,11 +753,12 @@ func (d *Daemon) bridge() {
 					at = d.buildAttach(msg, ji)
 				}
 			}
-			select {
-			case d.attachCh <- at:
-			case <-d.runCtx.Done():
-				return
-			}
+			d.attachCh.Push(at)
+		}
+		select {
+		case <-d.runCtx.Done():
+			return
+		case <-d.rtMsgs.Notify():
 		}
 	}
 }

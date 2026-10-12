@@ -190,6 +190,20 @@ func (q *Queue[T]) Drain() []T {
 	return out
 }
 
+// Pop takes the oldest queued item.
+func (q *Queue[T]) Pop() (v T, ok bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return v, false
+	}
+	v = q.items[0]
+	var zero T
+	q.items[0] = zero
+	q.items = q.items[1:]
+	return v, true
+}
+
 // Len reports the queued item count (diagnostics).
 func (q *Queue[T]) Len() int {
 	q.mu.Lock()

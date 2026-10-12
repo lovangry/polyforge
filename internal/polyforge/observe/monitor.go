@@ -13,7 +13,7 @@ package observe
 //     step_waiting_human/answered, step_ended, exec_committed) — an
 //     unbounded in-process queue, never dropped;
 //   - the confirmed driver-exit signal (Handle.Exit) → recovery;
-//   - RT messages (RTRecovered rides rtCh; RTFinished rides stopCh);
+//   - RT messages (RTRecovered rides rtQ; RTFinished rides stopCh);
 //   - results of the sub-goroutines (push / verify);
 //   - the tick (judging, push retry backoff, backpressure, M4).
 //
@@ -149,7 +149,7 @@ type Monitor struct {
 	wi   WIInfo
 	cfg  monitorCfg
 	log  *EventLog
-	ob   chan<- protocol.OBMsg
+	ob   *supervise.Queue[protocol.OBMsg]
 	link *supervise.Link
 
 	// handle attachment (monitor-goroutine only).
@@ -165,7 +165,7 @@ type Monitor struct {
 	sessionID string
 	exitCh    <-chan struct{}
 
-	rtCh   chan Attach
+	rtQ    *supervise.Queue[Attach]
 	stopCh chan struct{}
 	stop   sync.Once
 
@@ -278,8 +278,10 @@ func (m *Monitor) run() {
 		case <-m.stopCh:
 			m.awaitPushInFlight()
 			return
-		case at := <-m.rtCh:
-			m.onRecovered(at)
+		case <-m.rtQ.Notify():
+			for at, ok := m.rtQ.Pop(); ok; at, ok = m.rtQ.Pop() {
+				m.onRecovered(at)
+			}
 		case <-m.exitCh:
 			m.onExit()
 		case <-m.link.Facts.Notify():
@@ -587,18 +589,9 @@ func (m *Monitor) needRecovery(reason, detail string) {
 	})
 }
 
-// sendOB is non-blocking by construction: the monitor may never block in
-// a case, so a full OB channel drops the message (with an event) rather
-// than stalling supervision. Runtime drains the channel in production.
-func (m *Monitor) sendOB(msg protocol.OBMsg) {
-	select {
-	case m.ob <- msg:
-	default:
-		_ = m.log.Append(m.wi.WorkItem, EvNeedsRecovery, map[string]any{
-			"dropped": msg.Kind, "reason": "OB channel full",
-		})
-	}
-}
+// sendOB queues one message for the Runtime; the queue is unbounded, so
+// the monitor never blocks and a recovery request is never dropped.
+func (m *Monitor) sendOB(msg protocol.OBMsg) { m.ob.Push(msg) }
 
 // ---------------------------------------------------------------------------
 // recovery lifecycle

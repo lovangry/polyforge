@@ -31,6 +31,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
@@ -83,14 +84,6 @@ type Config struct {
 	// budget — the #97 death loop). A re-entry after a stable gap resets
 	// the storm ledger: an isolated later failure is a fresh episode.
 	RecoveryStabilityWindow time.Duration
-	SendBound               time.Duration // bound on one RT→OB send (default 5s)
-	// ReleaseRetryWindow bounds the release lane (NEW-2): how long a
-	// deferred observe release (RTFinished) whose first bounded send
-	// expired on a full channel keeps retrying before it is dropped for
-	// good. Default 2 minutes — a momentary full channel (many closes at
-	// once) delays the release; only a channel wedged past the window
-	// loses it, loudly.
-	ReleaseRetryWindow time.Duration // total retry bound for a deferred release (default 2min)
 	// EndRetryBase/EndRetryMax shape the backoff of the durable
 	// SessionEnd(blocked) retry (end_pending records and the re-claim
 	// abandon lane): first retry after Base, doubling up to Max
@@ -132,12 +125,6 @@ func (c *Config) fill() {
 	if c.RecoveryStabilityWindow <= 0 {
 		c.RecoveryStabilityWindow = 60 * time.Second
 	}
-	if c.SendBound <= 0 {
-		c.SendBound = 5 * time.Second
-	}
-	if c.ReleaseRetryWindow <= 0 {
-		c.ReleaseRetryWindow = 2 * time.Minute
-	}
 	if c.RecallTopK <= 0 {
 		c.RecallTopK = defaultRecallTopK
 	}
@@ -154,8 +141,8 @@ type Runtime struct {
 	cfg     Config
 	hub     Aihub
 	spawner Spawner
-	toOB    chan<- protocol.RTMsg
-	fromOB  <-chan protocol.OBMsg
+	toOB    *supervise.Queue[protocol.RTMsg]
+	fromOB  *supervise.Queue[protocol.OBMsg]
 
 	mu   sync.Mutex
 	jobs map[string]*job
@@ -174,17 +161,6 @@ type Runtime struct {
 	opMu      sync.Mutex
 	statePath string
 
-	// The release lane (NEW-2): pending observe releases (RTFinished)
-	// whose first bounded send expired on a full channel, plus the
-	// lane's done signal. Both are built lazily under relMu by the first
-	// deferred release; relDone is closed by Close (runtime shutdown).
-	// The lane keeps a full-channel release alive (bounded by
-	// ReleaseRetryWindow per message) instead of destroying it — the
-	// one message kind no successor event ever re-derives.
-	relMu    sync.Mutex
-	relQueue chan protocol.RTMsg
-	relDone  chan struct{}
-
 	// The durable-close retry lane (endpending.go): WIs whose
 	// SessionEnd(blocked) retry goroutine is running (one per WI), and
 	// the stop signal Close fires.
@@ -193,13 +169,6 @@ type Runtime struct {
 	endStop     chan struct{}
 	endStopOnce sync.Once
 }
-
-// releaseQueueCap bounds the lane's pending set: a wedged Observe must
-// never grow the runtime's memory without bound. A queue this deep
-// means hundreds of closes each stacked behind a channel undrained
-// past SendBound — overflow is dropped loudly, the same loss the
-// pre-lane send path had.
-const releaseQueueCap = 256
 
 // job is one WI's runtime bookkeeping.
 
@@ -338,7 +307,7 @@ type job struct {
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries
 // Observe→Runtime messages; both sides speak only common/protocol types.
-func New(cfg Config, hub Aihub, spawner Spawner, toOB chan<- protocol.RTMsg, fromOB <-chan protocol.OBMsg) *Runtime {
+func New(cfg Config, hub Aihub, spawner Spawner, toOB *supervise.Queue[protocol.RTMsg], fromOB *supervise.Queue[protocol.OBMsg]) *Runtime {
 	cfg.fill()
 	return &Runtime{
 		cfg:       cfg,
@@ -367,14 +336,17 @@ func DefaultSpawner(cfg *Config) Spawner {
 // drops a same-derivation WINeedsRecovery).
 func (r *Runtime) Run(ctx context.Context) error {
 	for {
+		for {
+			msg, ok := r.fromOB.Pop()
+			if !ok {
+				break
+			}
+			r.handleOB(ctx, msg)
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case msg, ok := <-r.fromOB:
-			if !ok {
-				return nil
-			}
-			r.handleOB(ctx, msg)
+		case <-r.fromOB.Notify():
 		}
 	}
 }
@@ -431,131 +403,19 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	}
 }
 
-// send delivers one RT→Observe message, bounded so a wedged Observe
-// cannot wedge the Runtime. It serves only the re-derivable kinds
-// (RTStarted, RTRecovered): a drop is final for the message, but a
-// successor lifecycle event replaces it (§二). The terminal observe
-// release (RTFinished) must NOT ride this path — see sendRelease.
-func (r *Runtime) send(msg protocol.RTMsg) {
-	select {
-	case r.toOB <- msg:
-	case <-time.After(r.cfg.SendBound):
-		fmt.Fprintf(os.Stderr, "runtime: %s: RT message %s dropped (observe channel full)\n", msg.WorkItem, msg.Kind)
-	}
-}
+// send queues one RT→Observe message. The queue is unbounded and never
+// drops: lifecycle facts must reach Observe (v2-converge §2.2), and the
+// sender never blocks.
+func (r *Runtime) send(msg protocol.RTMsg) { r.toOB.Push(msg) }
 
-// sendRelease delivers one observe-release message. Every RTFinished is
-// terminal for its lineage in this daemon — no successor event ever
-// re-derives it, and on the observe side it is the only runtime-driven
-// stop signal for the monitor (NEW-2: a drop leaked the superseded or
-// paused monitor forever, the superseded one re-emitting OBSuperseded
-// on every revalidation retry). The first attempt is bounded by
-// SendBound exactly like send, so a wedged Observe still never wedges
-// the close callers; on expiry the release is re-armed on the release
-// lane instead of destroyed: one lane goroutine keeps attempting
-// delivery, each message for at most ReleaseRetryWindow in total, then
-// drops it loudly. Only the lane goroutine keeps waiting — the close
-// path itself returns after the first bounded attempt.
-func (r *Runtime) sendRelease(msg protocol.RTMsg) {
-	select {
-	case r.toOB <- msg:
-	case <-time.After(r.cfg.SendBound):
-		fmt.Fprintf(os.Stderr, "runtime: %s: RT message %s deferred to the release lane (observe channel full)\n", msg.WorkItem, msg.Kind)
-		r.rearmRelease(msg)
-	}
-}
-
-// rearmRelease parks one undeliverable release message on the release
-// lane, building the lane lazily. Bounded twice over: the queue is
-// capped (releaseQueueCap — overflow is dropped loudly) and each parked
-// message carries its own ReleaseRetryWindow deadline on the lane.
-func (r *Runtime) rearmRelease(msg protocol.RTMsg) {
-	r.relMu.Lock()
-	defer r.relMu.Unlock()
-	if r.relDone != nil {
-		select {
-		case <-r.relDone:
-			// Close already ran: the lane is gone, and a release armed
-			// now could only park past the shutdown. Drop loudly.
-			fmt.Fprintf(os.Stderr, "runtime: %s: RT message %s dropped (release lane closed)\n", msg.WorkItem, msg.Kind)
-			return
-		default:
-		}
-	}
-	if r.relQueue == nil {
-		r.relQueue = make(chan protocol.RTMsg, releaseQueueCap)
-		r.relDone = make(chan struct{})
-		go r.runReleaseLane(r.relQueue, r.relDone)
-	}
-	select {
-	case r.relQueue <- msg:
-	default:
-		// The lane is a bound, not an unbounded mailbox.
-		fmt.Fprintf(os.Stderr, "runtime: %s: RT message %s dropped (release lane full)\n", msg.WorkItem, msg.Kind)
-	}
-}
-
-// runReleaseLane is the lane goroutine: one message at a time, it keeps
-// handing each parked release to the observe channel until room
-// appears, the message's total retry window expires (loud drop) or the
-// runtime closes — pending releases are abandoned at shutdown (the
-// daemon's shutdown sequence stops the observe lane first, so nothing
-// can consume the channel anymore).
-func (r *Runtime) runReleaseLane(queue <-chan protocol.RTMsg, done <-chan struct{}) {
-	for {
-		// done has PRIORITY: a closed lane abandons everything promptly.
-		// Without this pre-check the receive select below has both cases
-		// ready (a parked message + closed done) and Go picks randomly —
-		// the merge-suite run measured exactly that 50% race against the
-		// abandon-on-Close contract.
-		select {
-		case <-done:
-			return
-		default:
-		}
-		var msg protocol.RTMsg
-		select {
-		case msg = <-queue:
-		case <-done:
-			return
-		}
-		select {
-		case <-done:
-			return
-		default:
-		}
-		select {
-		case r.toOB <- msg:
-		case <-time.After(r.cfg.ReleaseRetryWindow):
-			fmt.Fprintf(os.Stderr, "runtime: %s: RT message %s dropped (observe channel full for the whole retry window)\n", msg.WorkItem, msg.Kind)
-		case <-done:
-			return
-		}
-	}
-}
-
-// Close stops the release lane (NEW-2) and abandons any release still
-// parked on it. Call once the runtime message loop (Run) has returned
-// and no close can be in flight (the daemon's shutdown sequence); it is
-// idempotent. A runtime whose Close is never called still terminates:
-// every parked release is deadline-bounded and the lane goroutine only
-// ever blocks on the queue or the done signal.
+// Close stops the durable-close retry goroutines. Call once the runtime
+// message loop (Run) has returned; it is idempotent.
 func (r *Runtime) Close() {
 	r.endStopOnce.Do(func() {
 		if r.endStop != nil {
 			close(r.endStop)
 		}
 	})
-	r.relMu.Lock()
-	defer r.relMu.Unlock()
-	if r.relDone == nil {
-		return
-	}
-	select {
-	case <-r.relDone:
-	default:
-		close(r.relDone)
-	}
 }
 
 func (r *Runtime) jobOf(wi string) *job {
@@ -1616,10 +1476,8 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	// prunes the fence map and drops the ledger entries. It also closes
 	// Finding 1(b)'s re-emit loop: the superseded monitor keeps
 	// re-emitting OBSuperseded until exactly this release arrives.
-	// re-derive or re-send these two messages. NEW-2: the release rides
-	// sendRelease, so a full observe channel defers it (bounded retry)
-	// instead of destroying it — the re-emit loop closes even then.
-	r.sendRelease(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishSuperseded})
+	// re-derive or re-send these two messages.
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishSuperseded})
 	_ = ctx
 }
 
@@ -1730,7 +1588,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	r.sendRelease(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: finalReason})
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: finalReason})
 	return nil
 }
 
@@ -1815,9 +1673,8 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job, alreadyPushed bool) error
 	}
 	// The observe release (Finding 4): stops the monitor loop, prunes the
 	// latestSpawn entry, forgets the ledger. The retained record keeps
-	// its bookkeeping only. NEW-2: sendRelease keeps the release alive
-	// across a momentarily full channel (bounded retry, never a drop).
-	r.sendRelease(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishPaused})
+	// its bookkeeping only.
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishPaused})
 	_ = ctx
 	return nil
 }

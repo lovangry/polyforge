@@ -24,6 +24,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // ---------------------------------------------------------------------------
@@ -363,7 +364,7 @@ func testCapsuleDir(r *Runtime, wi string) string {
 	return filepath.Join(ws, "capsules", wi)
 }
 
-func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protocol.RTMsg, chan protocol.OBMsg) {
+func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, *supervise.Queue[protocol.RTMsg], *supervise.Queue[protocol.OBMsg]) {
 	t.Helper()
 	cfg := Config{
 		MachineID: "m-test",
@@ -373,15 +374,14 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protoco
 		// through the single engine seam (a derivation is a Spawn call).
 		AgentStarter:  scriptedEngineStarter(sp),
 		MaxRecoveries: 2,
-		SendBound:     2 * time.Second,
 		// Test episodes are separated by handleOB calls, not real time:
 		// the entry-rate storm guard's window is collapsed to nothing so
 		// every recovery models a fresh episode (the storm tests override
 		// this with a real window to drive the guard itself).
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
 	return r, toOB, fromOB
 }
@@ -522,23 +522,26 @@ func bareHasMain(t *testing.T, bare string) bool {
 // ---------------------------------------------------------------------------
 // assertions
 
-func recvRT(t *testing.T, ch chan protocol.RTMsg) protocol.RTMsg {
+func recvRT(t *testing.T, q *supervise.Queue[protocol.RTMsg]) protocol.RTMsg {
 	t.Helper()
-	select {
-	case m := <-ch:
-		return m
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for an RT message")
-		return protocol.RTMsg{}
+	deadline := time.After(5 * time.Second)
+	for {
+		if m, ok := q.Pop(); ok {
+			return m
+		}
+		select {
+		case <-q.Notify():
+		case <-deadline:
+			t.Fatal("timed out waiting for an RT message")
+			return protocol.RTMsg{}
+		}
 	}
 }
 
-func assertNoRT(t *testing.T, ch chan protocol.RTMsg) {
+func assertNoRT(t *testing.T, q *supervise.Queue[protocol.RTMsg]) {
 	t.Helper()
-	select {
-	case m := <-ch:
+	if m, ok := q.Pop(); ok {
 		t.Fatalf("unexpected RT message: %+v", m)
-	default:
 	}
 }
 
