@@ -4,7 +4,7 @@ package daemon
 // cfg.HeartbeatEvery the daemon POSTs /api/v1/machines/heartbeat: machine
 // identity, current mode and the WI ids it holds live. The server stamps
 // last_heartbeat_at itself — the payload carries no client timestamp (one
-// clock, no skew; gate-metrics judges against the server-stamped value).
+// clock, no skew; readers judge against the server-stamped value).
 // Failures are log-only with a bounded backoff: a liveness signal must
 // never take the daemon down, must never block Run, and must never
 // hot-loop against a dead aihub. Disabled entirely by

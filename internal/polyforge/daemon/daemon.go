@@ -519,11 +519,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// snapshot (stale agent pids, superseded lineages).
 	prevShutdown := d.takeLastShutdown()
 	if err := d.rt.Restart(d.runCtx); err != nil {
-		// Startup abort (#103): the runtime could not be reconciled — for
-		// a recorded mid-flight work item whose capsule is missing at the
-		// active workspace, serving would present clients an unreconciled
-		// runtime and proceed with a WI whose local scene is gone (the
-		// silent-proceed behavior the spec forbids). Unwind as a startup
+		// Startup abort: the runtime could not be reconciled as a whole
+		// (a missing capsule or an unmapped project is NOT such a case —
+		// v2-converge §6 parks only that work item repair_pending and
+		// Restart returns nil), so serving would present clients an
+		// unreconciled runtime. Unwind as a startup
 		// abort: close the face this process bound but never served, stop
 		// the lanes, collect any agent the reconciliation already
 		// recovered, and persist NOTHING — state.json stays the

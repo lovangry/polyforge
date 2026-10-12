@@ -121,7 +121,7 @@ connectivity faces.
 
 ```
 bin/pf --config /tmp/pf-quickstart/cli.toml submit <WI_ID>
-bin/pf --config /tmp/pf-quickstart/cli.toml observe <WI_ID>
+bin/pf --config /tmp/pf-quickstart/cli.toml watch <WI_ID> --once
 ```
 
 The submit claims the work item and the daemon's **Go execution driver**
@@ -132,12 +132,16 @@ each step's result envelope, validating it, and advancing the workflow. A
 plain submit is the ordinary claim — `pf submit <id> --takeover` is the admin
 force-takeover path. A WI whose holder is gone or superseded moves with
 `pf takeover <id> --reason <text>`, which swaps the session under it
-(the old holder is fenced at its next push). Observe shows the live
-projection, leading with the `session:` line — the current holder's
-public session fingerprint, never the secret — then current step, step
-table, budget and the event log. Give the first step a few minutes: once
-the driver commits the first `runtime-state/execution.json` version, observe
-shows a `current step:` line and a `published` event.
+(the old holder is fenced at its next push). `pf watch <id> --once` shows a
+snapshot read from the capsule's `execution.json`: status, current step and
+how long it has run, the pending question and the latest events;
+`pf watch --chat "$PF_CHAT_ID" --wait-decision` is the resident per-chat
+watcher that wakes a harness session only for human decisions (see
+`skills/polyforge/SKILL.md`). `pf observe <id>` is the deprecated alias of the
+older projection view (it still leads with the `session:` line — the current
+holder's public session fingerprint, never the secret). Give the first step a
+few minutes: once the driver commits the first `runtime-state/execution.json`
+version, the snapshot shows a current step and a `published` event.
 
 **8. Wrap the run.** Wrap seals the capsule's current state and ends
 the session as terminal success:
@@ -153,7 +157,9 @@ fingerprint). Note: wrapping before the
 capsule's first commit lands leaves no revision to seal — the close
 degrades to `blocked`, and the WI is not claimable again until
 `pf resume <WI_ID>` continues it, or `pf cancel <WI_ID>` abandons it (the task's
-reporter, a project maintainer or an admin).
+reporter, a project maintainer or an admin; the same two moves apply to a WI the
+daemon parked `repair_pending` after a restart — see the failure codes below;
+`pf wrap <WI_ID> --fail` records the owner's failed verdict instead).
 `pf pause <WI_ID>` sets a clean_pause (a daemon restart will not
 auto-resume it); `pf resume <WI_ID>` clears the flag and the holder
 daemon re-attaches on its next start — to continue immediately, use
@@ -168,7 +174,9 @@ kill <AIHUB_PID>
 
 ## Architecture
 
-Design record: `docs/design/polyforge-vnext/v1-architecture-spec.md`
+Design record: `docs/design/polyforge-vnext/v1-architecture-spec.md`, as
+superseded in part by `docs/design/polyforge-vnext/v2-converge.md` (the
+design authority; conflicts resolve in its favor)
 (full design record: `v1-spec-full.md`; the frozen v0 pilot tree was removed from the working tree and lives in git history / the `v0-archive` tag; restore with `git checkout v0-archive -- v0`).
 The subsections below describe the code as it actually exists in this tree —
 the live code is the authority; design-doc references are for traceability.
@@ -188,10 +196,12 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/aihub/memory` | Core-side memory store: FTS5-trigram full-text search, authoritative `memory.md` files and the reconcile procedure. |
 | `internal/aihub/server` | The v1 AIHub HTTP face: business endpoints (v0 openapi surface minus every SYNC-*/revision-chain route), the admin face, and the `/git/{wi}.git/...` proxy mount; Bearer API key auth, typed `api.Error` envelope. |
 | `internal/polyforge/aihubclient` | Shared HTTP client for the aihub server, used by runtime, observe and the CLI verbs; decodes the typed error envelope back into `*api.Error`. |
-| `internal/polyforge/cli` | The `pf` client CLI: 13 user verbs + the M1–M5 management face, the daemon client over the UDS socket, config resolution, and the v0 migration paths. |
+| `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, submit, `watch`, answer, batch-confirm, pause, resume, wrap, ops), `chat`, `ship`, the M1–M5 management face, the daemon client over the UDS socket, config resolution, and the v0 migration paths. |
 | `internal/polyforge/daemon` | Phase-3 assembly of the local work machine: the UDS HTTP face, Runtime + Observe wired over the five protocol messages, admission modes, the pending-job dispatcher, the drain loop, the ship delivery bridge and the graceful shutdown sequence. |
 | `internal/polyforge/gitops` | Shared capsule-git operations layer used by Runtime (clone at start, dirty-commit at recover) and Observe (async commit+push); owns the per-WI git mutex and the `Polyforge-Seq` trailer derivation. |
 | `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, and the observe/answer HTTP face over the monitors. |
+| `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules, human gate, V4 command-evidence gate). |
+| `internal/polyforge/watcher` | The `pf watch` engine: decision classification (fixed-template wake-up lines) and the resident per-chat watcher with its progress file. |
 | `internal/polyforge/runtime` | Runtime lane: the WI lifecycle manager (Start/Stop/Recover/Restart), the pi-harness agent spawner, the six-layer process cleanup and the recovery engine. |
 
 Binaries: `cmd/aihub` (server binary) and `cmd/pf` (work-machine binary:
@@ -201,17 +211,20 @@ CLI verbs + `pf daemon`).
 
 The routes mounted by the daemon's local Unix-socket HTTP face
 (`internal/polyforge/daemon/routes.go`). **Face** marks who calls the route:
-`user` = the operator's CLI / observe tooling (the in-capsule agent's
-lifeline proxies — flush/recall/remember — were retired with the WI-Agent
-lane, polyforge#106).
+`user` = the operator's CLI / observe tooling. (The in-capsule agent's
+lifeline proxies and the flush lane were retired with the WI-Agent lane,
+polyforge#106; no step process reaches the daemon socket by design.)
 
 | Method | Path | Role | Face |
 | --- | --- | --- | --- |
 | GET | `/jobs/{wi}/observe` | Live observe view of one job's transcript stream (mounted verbatim from the Observe handler). | user |
 | POST | `/jobs/{wi}/answer` | Answer a pending agent question. | user |
 | POST | `/jobs/{wi}/claim` | Submit family: enqueue a claim of a queued work item. | user |
-| POST | `/jobs/{wi}/resume` | Submit family: enqueue a resume (fresh generation) of a paused item. | user |
+| POST | `/jobs/{wi}/resume` | Submit family: enqueue a resume of a paused item; for a WI parked `repair_pending` it re-checks the capsule/mapping and resumes in place with the kept session (still broken → `DAEMON-517` / `DAEMON-412`). | user |
+| POST | `/jobs/{wi}/resume-blocked` | The claim/start half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
+| POST | `/jobs/{wi}/abandon-repair` | Give up a `repair_pending` WI (`pf cancel` → verdict `canceled`, `pf wrap --fail` → `failed`): ends the kept session with the stored secret, drops the parked record, writes `repair_abandoned`. The CLI passes aihub's `close-auth` probe with the human's key first. | user |
 | POST | `/jobs/{wi}/takeover` | Submit family: enqueue a takeover of an item running elsewhere. | user |
+| POST | `/jobs/{wi}/adopt-session` | Take custody of an externally minted session secret (the CLI takeover's handoff); verify-backed. | user |
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
 | POST | `/jobs/{wi}/wrap` | CLI close path: seal the job with reason `wrap` or `fail`. | user |
 | POST | `/jobs/{wi}/ship` | Delivery bridge: push the sealed capsule's task repos to their origins as branch `polyforge/<wi>` (+ PR when a credential exists). | user |
@@ -219,10 +232,29 @@ lane, polyforge#106).
 | POST | `/mode` | Mode actions: `set` / `drain` / `abort-drain` / `get_recommendation`. | user |
 | POST | `/batch_submit` | Submit a whole confirmed wave of work items at once. | user |
 | POST | `/shutdown` | Trigger the bounded graceful shutdown sequence. | user |
+| POST | `/chat/init` | `pf chat init`: the chat id of a harness session (created on first use). | user |
+| GET | `/jobs/{wi}/watch` | `pf watch <wi> --once`: per-WI snapshot (status, step, pending question, events). | user |
+| GET | `/chats/{id}/subscriptions` | A chat's daemon-held subscriptions and its progress-file path. | user |
+| POST | `/chats/{id}/subscribe`, `/unsubscribe` | Subscribe / drop a work item for a chat. | user |
+| POST | `/chats/{id}/ack` | Acknowledge consumed events / delivered decisions (advances the cursor). | user |
+| POST | `/chats/{id}/heartbeat` | Resident-watcher liveness for a chat. | user |
+| GET | `/chats/{id}/attention` | Pending decisions for a chat (and for work items nobody watches). | user |
 
 Authoritative source for this table is the code itself — the
 `mux.Handle`/`mux.HandleFunc` mount list in `internal/polyforge/daemon/routes.go`;
 design-doc references (e.g. `04-local-runtime.md §5.1`) are for traceability only.
+
+### Failure codes of the recovery / re-claim paths
+
+| Code | Meaning | Operator move |
+| --- | --- | --- |
+| `DAEMON-516` | Re-claim clone refusal: the capsule clone failed for a WI with published progress (or its progress cannot be determined), so a local init — which would restart the workflow at step 1 — is refused. The claim is abandoned back to blocked. | Fix aihub reachability / credentials, then `pf resume <id>`. |
+| `DAEMON-517` | The WI is parked `repair_pending` on this daemon (restart found its capsule missing or its project unmapped); the detail names the path. The session is kept; nothing is rebuilt from the remote. | Restore the capsule directory (or re-add the project to `[workspace]`) and `pf resume <id>`; or give up with `pf cancel <id>` / `pf wrap --fail <id>`. |
+| `DAEMON-518` | A blocked WI continued on a different daemon than the one that sealed it, and the aihub capsule head is not the sealed head. | Continue it on the sealing machine, or abandon with `pf cancel <id>`. |
+
+A missing capsule is no longer a startup failure: only the affected WI parks
+`repair_pending` (listed by `pf ops status`, announced by a `capsule_missing` /
+`project_unmapped` event); the daemon starts and every other WI recovers.
 
 ### Release flow
 
@@ -260,6 +292,28 @@ pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
     go build ./...
     go test ./...
 
+## `pf` commands
+
+`pf [--json] [--config PATH] [--server URL] [--api-key KEY] [--socket PATH]
+[--user ID] <verb> ...` (global flags before the verb; env `PF_SERVER`,
+`PF_API_KEY`, `PF_DAEMON_SOCKET`, `PF_USER_ID`; `PF_CHAT_ID` is the
+notification label a harness adapter sets for the chat). `pf help` prints the
+registry; `pf <verb> -help` one verb's face. The routing skill's fragments
+(`skills/polyforge/verbs/`) carry each verb's success and failure shapes.
+
+| Face | Verbs |
+| --- | --- |
+| aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember`, `takeover`, `verify-session` |
+| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`; `observe` is its deprecated alias), `answer`, `batch-confirm`, `pause`, `resume`, `wrap`, `ship`, `ops`, `chat init` |
+| management | `users`, `api-keys`, `projects`, `machines`, `backup`, `rotate-secret` |
+| local | `daemon` (run the work machine), `doctor`, `migrate-memories`, `migrate-work-items` |
+
+Human moves: continue = `pf resume <id>` (a paused, blocked or repair_pending
+WI), abandon = `pf cancel <id>` (queued, paused, blocked, or repair_pending on
+this daemon), owner's failed verdict = `pf wrap <id> --fail`. These run with the
+human's own api key: aihub's door checks the WI's reporter, a project
+maintainer or an admin. There is no `unblock` verb.
+
 ## `pf daemon` flags
 
 `pf daemon` runs the local work machine (Runtime + Observe over the UDS
@@ -274,8 +328,18 @@ the `PF_*` entries.
 | `--socket PATH` | `PF_DAEMON_SOCKET` | `/run/polyforge.sock` | Unix socket the daemon's UDS HTTP face listens on. |
 | `--server URL` | `PF_SERVER` | — | aihub base URL the daemon talks to. |
 | `--api-key KEY` | `PF_API_KEY` | — | Machine aihub credential (never reaches an agent env). |
-| `--machine-id ID` | `POLYFORGE_MACHINE_ID` | `m-<hostname>` | Machine identity claims and leases are recorded under. |
+| `--machine-id ID` | `POLYFORGE_MACHINE_ID` | `m-<hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
+| `--display-name NAME` | `POLYFORGE_DISPLAY_NAME` | hostname | Daemon display name shown by `pf ops status`. |
 | `--data-dir DIR` | `POLYFORGE_DATA_DIR` | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
+| `--workflows-dir DIR` | — | `./workflows` | Workflow-bundle checkout the executor reads. |
+| `--pi-bin PATH` | — | `pi` | Harness binary the agent processes are derived from. |
+| `--harness-sessions-root DIR` | `POLYFORGE_HARNESS_SESSIONS_ROOT` | `~/.pi/agent/sessions` | Harness session store for the live-transcript sync. |
+| `--cgroup-root DIR` | `POLYFORGE_CGROUP_ROOT` | — | cgroup v2 root used for layer-0 agent cleanup. |
+| `--git-remote-base URL` | — | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
+| `--max-concurrent-jobs N` | — | `4` | Cross-mode cap on concurrently running jobs. |
+| `--recall-topk N` | `POLYFORGE_RECALL_TOPK` | `10` (max 50) | Claim-time memory snapshot hit count. |
+| `--mode M` | — | `interactive` | Initial mode (`interactive\|batch\|drain`); an explicit flag overrides the persisted mode. |
+| `--heartbeat-every D` | — | `60s` | Machines heartbeat cadence (`0` disables). |
 
 The workspace mapping (polyforge#113) replaces the retired workspace and
 project launch surfaces: the `[workspace."<path>"]` sections of the
@@ -288,15 +352,6 @@ when any is missing or unusable (or when the config carries zero
 sections). Capsules route per claimed project through the inverse
 mapping; batch and drain cover all mapped projects. `pf doctor` checks
 the mapping.
-
-| `--workflows-dir DIR` | — | `./workflows` | Workflow-bundle checkout the executor reads. |
-| `--pi-bin PATH` | — | `pi` | Harness binary the agent processes are derived from. |
-| `--harness-sessions-root DIR` | `POLYFORGE_HARNESS_SESSIONS_ROOT` | `~/.pi/agent/sessions` | Harness session store for the live-transcript sync. |
-| `--cgroup-root DIR` | `POLYFORGE_CGROUP_ROOT` | — | cgroup v2 root used for layer-0 agent cleanup. |
-| `--git-remote-base URL` | — | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
-| `--max-concurrent-jobs N` | — | `4` | Cross-mode cap on concurrently running jobs. |
-| `--recall-topk N` | `POLYFORGE_RECALL_TOPK` | `10` (max 50) | Claim-time memory snapshot hit count. |
-| `--mode M` | — | `interactive` | Initial mode (`interactive\|batch\|drain`); an explicit flag overrides the persisted mode. |
 
 Observe supervision windows — Go duration strings (e.g. `700ms`, `5m`),
 flags only (no environment fallbacks). Omitting a flag, or passing `0`,

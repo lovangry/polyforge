@@ -61,8 +61,9 @@ type Config struct {
 	// "<path>"] sections) and the runtime routes every capsule through it
 	// — <mapped-workspace>/capsules/<wi> per the claim answer's project.
 	// There is no single workspace and no default project anymore. The
-	// daemon refuses to start when the mapping is empty or a recorded
-	// mid-flight project falls out of it (restart.go).
+	// daemon refuses to start when the mapping is empty; a recorded
+	// mid-flight project that falls out of it parks only that work item
+	// repair_pending (restart.go, v2-converge §6).
 	Mapping       *mapping.Plan
 	DataDir       string // state.json + external git-dirs live here
 	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
@@ -330,7 +331,11 @@ type job struct {
 	// end_pending job (see StateEndPending).
 	endNote string
 	endHead string
-	mu      sync.Mutex
+	// endStatus is the verdict of the pending SessionEnd; "" = blocked
+	// (the bounded-fail close). "canceled" / "failed" ride an abandoned
+	// repair_pending WI (AbandonRepair).
+	endStatus string
+	mu        sync.Mutex
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries

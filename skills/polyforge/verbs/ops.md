@@ -42,6 +42,11 @@ pf ops shutdown                                      # graceful shutdown
   wedged reads as STALE, not fresh. A LAST-PROGRESS over ~10 minutes on
   a non-`needs_input` job is a stalled job — report it to the owner
   before anything else (see SKILL.md's turn-start obligation).
+  A job with STATUS `repair_pending` is a work item the daemon parked at
+  restart because its capsule directory is missing (`capsule_missing`) or
+  its project is no longer mapped (`project_unmapped`); its session is
+  kept. The owner's moves: fix the cause and `pf resume <id>`, or give up
+  with `pf cancel <id>` / `pf wrap <id> --fail`.
 - `mode` bare: `mode: <current>`; every mode transition answers with the
   new mode (and the effective concurrency on `set`).
 - `shutdown`: `graceful shutdown requested; the daemon quiesces and exits`

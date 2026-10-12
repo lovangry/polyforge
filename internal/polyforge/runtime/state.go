@@ -186,6 +186,9 @@ type jobRecord struct {
 	// sealing daemon pushed (the cross-daemon continue check, §7).
 	EndNote string `json:"end_note,omitempty"`
 	EndHead string `json:"end_head,omitempty"`
+	// EndStatus is the pending SessionEnd verdict when it is not blocked
+	// (an abandoned repair_pending WI: canceled | failed).
+	EndStatus string `json:"end_status,omitempty"`
 }
 
 // Origin kinds.
@@ -232,6 +235,7 @@ func (j *job) record() *jobRecord {
 		RepairPending:      j.repairPending,
 		EndNote:            j.endNote,
 		EndHead:            j.endHead,
+		EndStatus:          j.endStatus,
 	}
 }
 
@@ -279,6 +283,7 @@ func jobFromRecord(rec *jobRecord) *job {
 		repairPending:  rec.RepairPending,
 		endNote:        rec.EndNote,
 		endHead:        rec.EndHead,
+		endStatus:      rec.EndStatus,
 	}
 }
 

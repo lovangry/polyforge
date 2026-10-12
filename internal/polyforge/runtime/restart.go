@@ -42,6 +42,18 @@ package runtime
 //	  drop the record: restart must NOT auto-resume it.
 //	aihub unreachable → keep the record, try again on the next restart —
 //	  never guess a verdict.
+//
+// A mid-flight record whose capsule directory is missing, or whose project
+// fell out of the [workspace] mapping, is NOT a startup failure (v2-converge
+// §6): that ONE work item parks repair_pending (parkRepair — the record and
+// the session are kept, no hub transition, a capsule_missing /
+// project_unmapped event names the path or project and the fix), the daemon
+// starts and every other work item reconciles as above. The owner's moves on
+// a parked WI: fix the cause and `pf resume` (RepairResume continues the SAME
+// session in place, retried on every daemon start too), or give up with
+// `pf cancel` / `pf wrap --fail` (AbandonRepair ends the session canceled /
+// failed). An end_pending record (a bounded-fail verdict the hub has not yet
+// heard) is retried first, needing no capsule.
 
 import (
 	"context"
@@ -59,29 +71,32 @@ import (
 // workspace — the operator has not moved it to the new base (or it was
 // lost). The daemon never rebuilds such a capsule from the remote: the
 // capsule git chain IS the revision chain, and a re-clone would silently
-// discard unpublished local state. Remediation is manual: restore the
-// capsule directory under <workspace>/capsules/<wi_id>, then restart.
+// discard unpublished local state. At restart it parks ONLY that work item
+// repair_pending (v2-converge §6; it is not a startup failure). Remediation
+// is manual: restore the capsule directory under <workspace>/capsules/<wi_id>,
+// then `pf resume <wi>` (or restart the daemon).
 type MissingCapsuleError struct {
 	WI  string
 	Dir string
 }
 
 func (e *MissingCapsuleError) Error() string {
-	return fmt.Sprintf("work item %s: mid-flight capsule missing at %s — it is NOT recoverable from the remote (unpublished local state would be lost); restore the capsule to that path manually, then restart the daemon", e.WI, e.Dir)
+	return fmt.Sprintf("work item %s: mid-flight capsule missing at %s — it is NOT recoverable from the remote (unpublished local state would be lost); restore the capsule to that path manually, then `pf resume %s` (or restart the daemon); or give up with `pf cancel %s`", e.WI, e.Dir, e.WI, e.WI)
 }
 
 // UnmappedMidflightError is the #113 mid-flight failure posture: a
 // recorded work item's project has no workspace in the CURRENT mapping
 // (the operator's config edit dropped its section). The capsule is NOT
-// relocated — the operator re-adds the workspace section, then restarts;
-// the existing no-rebuild rule stands.
+// relocated; at restart ONLY that work item parks repair_pending (v2-converge
+// §6) — the operator re-adds the workspace section, then `pf resume <wi>` (or
+// restarts); the existing no-rebuild rule stands.
 type UnmappedMidflightError struct {
 	WI      string
 	Project string
 }
 
 func (e *UnmappedMidflightError) Error() string {
-	return fmt.Sprintf("work item %s: mid-flight project %q is not in the [workspace] mapping — the capsule is NOT relocated and the work item is not recoverable until its workspace is re-added to the mapping in the config, then the daemon is restarted (`pf doctor` checks the mapping)", e.WI, e.Project)
+	return fmt.Sprintf("work item %s: mid-flight project %q is not in the [workspace] mapping — the capsule is NOT relocated and the work item is not recoverable until its workspace is re-added to the mapping in the config, then `pf resume %s` (or restart the daemon) (`pf doctor` checks the mapping)", e.WI, e.Project, e.WI)
 }
 
 // requireMidflightCapsule enforces the no-silent-rebuild contract for a
@@ -571,6 +586,64 @@ func (r *Runtime) RepairResume(ctx context.Context, wi string) (held bool, err e
 	}
 	if perr := r.persist(); perr != nil {
 		return true, perr
+	}
+	return true, nil
+}
+
+// EventRepairAbandoned is the durable event of AbandonRepair.
+const EventRepairAbandoned = "repair_abandoned"
+
+// AbandonRepair is the owner's "give up" for a repair_pending WI (v2 §6):
+// the WI is still running at aihub under this daemon's kept session, so
+// the data-plane cancel is refused; the daemon holds the only copy of the
+// session secret and ends the session itself — status is api.StatusCanceled
+// (`pf cancel`) or api.StatusFailed (`pf wrap --fail`). The caller (the
+// CLI) has already verified the human is reporter / maintainer / admin at
+// aihub. A SessionEnd the hub does not acknowledge keeps the record in the
+// durable end_pending lane with this verdict and retries (endpending.go);
+// the parked record is dropped either way. held=false when wi is not
+// parked here.
+func (r *Runtime) AbandonRepair(wi, status, note string) (held bool, err error) {
+	if status != api.StatusCanceled && status != api.StatusFailed {
+		return false, fmt.Errorf("runtime: abandon verdict must be canceled or failed, got %q", status)
+	}
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	j := r.resolveJob(wi)
+	if j == nil {
+		return false, nil
+	}
+	j.mu.Lock()
+	kind := j.repairPending
+	secret := j.sessionID
+	j.mu.Unlock()
+	if kind == "" {
+		return false, nil
+	}
+	settled := r.endAtHub(j.wi, secret, status, note, "")
+	j.mu.Lock()
+	j.repairPending = ""
+	j.endNote, j.endHead, j.endStatus = note, "", status
+	if settled {
+		j.state = StateDone
+	} else {
+		j.state = StateEndPending
+	}
+	j.mu.Unlock()
+	if settled {
+		r.dropJob(j)
+	}
+	if perr := r.persist(); perr != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+	}
+	if r.cfg.EventTap != nil {
+		r.cfg.EventTap(j.wi, EventRepairAbandoned, map[string]any{
+			"work_item": j.wi, "verdict": status, "was": kind, "session_ended": settled,
+		})
+	}
+	if !settled {
+		fmt.Fprintf(os.Stderr, "runtime: %s: abandon (%s) not acknowledged by the hub — record kept end_pending, retrying\n", j.wi, status)
+		r.retryEndPending(j)
 	}
 	return true, nil
 }

@@ -12,9 +12,11 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -274,5 +276,105 @@ func TestRestartParksOnlyBadWIAndRepairResumeSameSession(t *testing.T) {
 	// a second call is not parked any more: falls through to the normal path
 	if held, _ := r.RepairResume(context.Background(), bad.WorkItemID); held {
 		t.Error("a repaired WI is no longer held")
+	}
+}
+
+func parkOne(t *testing.T, hub *fakeHub, wi string) (*Runtime, *jobRecord, *[]string) {
+	t.Helper()
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, hub, sp)
+	r.cfg.EndRetryBase = 10 * time.Millisecond
+	r.cfg.EndRetryMax = 20 * time.Millisecond
+	t.Cleanup(r.Close)
+	events := tapEvents(r)
+	rec := matrixRecord(r, wi, 0, "")
+	hub.hold(wi, rec.SessionID, api.StatusRunning)
+	writeStateFile(t, r, []*jobRecord{rec})
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertParked(t, r, hub, sp, wi, RepairCapsuleMissing, events)
+	return r, rec, events
+}
+
+// Abandon: the daemon ends the kept session with the verdict (the stored
+// secret), drops the parked record and writes an event.
+func TestAbandonRepairEndsSessionAndDropsRecord(t *testing.T) {
+	for _, verdict := range []string{api.StatusCanceled, api.StatusFailed} {
+		t.Run(verdict, func(t *testing.T) {
+			hub := newFakeHub()
+			wi := "wi_abandon_" + verdict
+			r, rec, events := parkOne(t, hub, wi)
+			held, err := r.AbandonRepair(wi, verdict, "owner gave up")
+			if !held || err != nil {
+				t.Fatalf("AbandonRepair: held=%v err=%v", held, err)
+			}
+			end := hub.lastEnd()
+			if end.Status != verdict || end.SessionID != rec.SessionID || end.Note != "owner gave up" {
+				t.Fatalf("SessionEnd must carry the verdict and the stored secret, got %+v", end)
+			}
+			if hub.status[wi] != verdict {
+				t.Errorf("hub status = %q, want %s", hub.status[wi], verdict)
+			}
+			if r.jobOf(wi) != nil || len(loadRecords(t, r)) != 0 {
+				t.Fatal("the parked record must be dropped")
+			}
+			found := false
+			for _, k := range *events {
+				found = found || k == EventRepairAbandoned
+			}
+			if !found {
+				t.Errorf("want a %s event, got %v", EventRepairAbandoned, *events)
+			}
+			if held, _ := r.AbandonRepair(wi, verdict, ""); held {
+				t.Error("a dropped WI is no longer held")
+			}
+		})
+	}
+}
+
+// An unacknowledged abandon keeps the record in the durable end_pending
+// lane WITH the abandon verdict (not blocked) and retries until it lands.
+func TestAbandonRepairSessionEndFailureRetriesWithVerdict(t *testing.T) {
+	hub := newFakeHub()
+	wi := "wi_abandon_retry"
+	r, rec, _ := parkOne(t, hub, wi)
+	hub.mu.Lock()
+	hub.end[wi] = fmt.Errorf("aihub unreachable (scripted)")
+	hub.mu.Unlock()
+
+	held, err := r.AbandonRepair(wi, api.StatusCanceled, "n")
+	if !held || err != nil {
+		t.Fatalf("held=%v err=%v", held, err)
+	}
+	recs := loadRecords(t, r)
+	if len(recs) != 1 || recs[0].State != string(StateEndPending) || recs[0].EndStatus != api.StatusCanceled ||
+		recs[0].RepairPending != "" || recs[0].SessionID != rec.SessionID {
+		t.Fatalf("durable record must be end_pending(canceled) with the secret, got %+v", recs)
+	}
+	if ji, _ := r.Info(wi); ji.RepairPending != "" {
+		t.Errorf("an abandoned WI must not read repair_pending: %+v", ji)
+	}
+	hub.mu.Lock()
+	delete(hub.end, wi)
+	hub.mu.Unlock()
+	waitFor(t, "the retry to land the canceled close", func() bool { return r.jobOf(wi) == nil })
+	if hub.lastEnd().Status != api.StatusCanceled {
+		t.Fatalf("retry must send the abandon verdict, got %+v", hub.lastEnd())
+	}
+	waitFor(t, "state.json to drop the record", func() bool { return len(loadRecords(t, r)) == 0 })
+}
+
+func TestAbandonRepairRejectsOtherVerdictsAndNonParked(t *testing.T) {
+	hub := newFakeHub()
+	r, _, _ := parkOne(t, hub, "wi_abandon_bad")
+	if _, err := r.AbandonRepair("wi_abandon_bad", api.StatusWrapped, ""); err == nil {
+		t.Error("wrapped is not an abandon verdict")
+	}
+	if held, _ := r.AbandonRepair("wi_unknown", api.StatusCanceled, ""); held {
+		t.Error("an unknown WI is not held")
+	}
+	if hub.endCount() != 0 {
+		t.Errorf("no SessionEnd may fire, got %d", hub.endCount())
 	}
 }

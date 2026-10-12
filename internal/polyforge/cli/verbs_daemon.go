@@ -503,6 +503,34 @@ func localRepairPending(ctx *Context, wiID string) bool {
 	return false
 }
 
+// abandonRepairPending is the give-up door of a WI the LOCAL daemon holds
+// parked repair_pending (capsule missing / project unmapped at restart): the
+// WI is still `running` at aihub under the daemon's kept session, so the
+// hub's cancel refuses it and only the daemon holds the secret to end that
+// session. Authorization follows the continue/abandon doors: the HUMAN's own
+// key is checked at aihub first (reporter / maintainer / admin, a read-only
+// probe), and only then is the daemon asked — its machine key is not that
+// caller. verdict is "canceled" (pf cancel) or "failed" (pf wrap --fail).
+// handled=false with a nil error means the WI is not parked here and the
+// caller proceeds with its normal path.
+func abandonRepairPending(ctx *Context, id, verdict string) (handled bool, err error) {
+	wi, gerr := ctx.aihub().GetWorkItem(id)
+	if gerr != nil || wi.Status != api.StatusRunning || !localRepairPending(ctx, wi.ID) {
+		return false, nil
+	}
+	if err := ctx.aihub().CloseAuth(id); err != nil {
+		return true, err
+	}
+	raw, err := ctx.daemon().AbandonRepair(id, verdict)
+	if err != nil {
+		return true, err
+	}
+	ctx.finish(raw, func() {
+		fmt.Fprintf(ctx.Stdout, "%s %s: the repair_pending work item was abandoned — the daemon ended its session and dropped the parked record\n", verdict, id)
+	})
+	return true, nil
+}
+
 // ---------------------------------------------------------------------------
 // wrap — wrap (or fail) a running WI via the daemon.
 // ---------------------------------------------------------------------------
@@ -529,6 +557,9 @@ var cmdWrap = &Command{
 		// against the person typing, not the daemon's machine key). No
 		// daemon step follows: the bounded close already dropped the job.
 		if reason == "fail" {
+			if abandoned, aerr := abandonRepairPending(ctx, args[0], "failed"); abandoned || aerr != nil {
+				return aerr
+			}
 			if wi, gerr := ctx.aihub().GetWorkItem(args[0]); gerr == nil && wi.Status == api.StatusBlocked {
 				raw, err := ctx.aihub().TerminateBlockedWorkItem(args[0])
 				if err != nil {

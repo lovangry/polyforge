@@ -37,6 +37,8 @@ raw answer `{accepted, work_item_id}`.
 | `DAEMON-409` | The work item is already active or queued on this daemon, or drain mode rejects an external submit (the drain loop is the only job-creation entrance there) | Wait for the running attempt, or leave drain first (`pf ops mode abort-drain`). |
 | `DAEMON-410` (`SHUTTING_DOWN`) | The daemon is in graceful shutdown | Wait for the shutdown to finish and the daemon to restart, then submit again. |
 | `DAEMON-400` | Malformed request body | Fix the invocation. |
+| `DAEMON-412` | The work item's project is not in the `[workspace]` mapping of this machine (refused before any capsule or claim state exists) | Add the project to a `[workspace."<path>"]` section; `pf doctor` checks the mapping. |
+| `DAEMON-516` | (surfaces as a `submit_rejected` event) re-claim clone refusal: the capsule clone failed for a work item with published progress, so a local init that would restart at step 1 is refused | Fix aihub reachability / credentials, then `pf resume <id>`. |
 | `dial unix …` | The daemon is not running on this machine | Start it (`pf daemon`) or check `--socket` / `PF_DAEMON_SOCKET`. |
 
 The claim itself happens asynchronously in the daemon's dispatcher: a
@@ -44,6 +46,16 @@ server-side refusal (e.g. `CORE-409`, someone else holds the active
 generation) surfaces in the daemon log and the job never appears in
 `pf ops status` — observe/status is the follow-up, not the submit answer.
 For a takeover refused as non-admin, the same path reports `CORE-403`.
+
+## Takeover and holder check
+
+`pf takeover <id> --reason <text> [--machine ID] [--owner ID]` moves a work
+item whose holder is gone or superseded: it swaps the session under it (the
+old holder is fenced at its next push) and hands the minted secret to the
+local daemon's custody. `pf verify-session <id>` is the read-only check of who
+holds the work item (public fingerprint, machine, owner; never the secret).
+Both are data-plane CLI verbs with their own typed errors; they belong to this
+fragment's intent family ("take it over").
 
 ## Watching what you submitted
 
