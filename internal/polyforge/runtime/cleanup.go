@@ -55,10 +55,10 @@ type procIdent struct {
 
 // CleanupTarget names one WI's agent tree.
 type CleanupTarget struct {
-	PID        int
-	Pgid       int // 0 ⇒ use PID (the agent spawns as its own group leader)
-	StartedAt  string
-	WIID       string
+	PID       int
+	Pgid      int // 0 ⇒ use PID (the agent spawns as its own group leader)
+	StartedAt string
+	WIID      string
 	// DaemonID is the second env-marker half (PF_DAEMON_ID): the L4 sweep
 	// kills only processes carrying BOTH this WI's and this daemon's
 	// markers, so a daemon whose WI moved to another daemon on the same
