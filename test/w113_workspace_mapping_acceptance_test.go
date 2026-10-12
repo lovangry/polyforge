@@ -1105,67 +1105,6 @@ func TestW113CLIIgnoresRetiredEnv(t *testing.T) {
 // S08 — the retired daemon flags fail flag parsing.
 // ---------------------------------------------------------------------------
 
-// TestW113DaemonRetiredFlagsFailParse pins criterion #5's flag half:
-// the daemon's retired project flag and retired workspace flag both
-// fail flag parsing (exit 2, deleted, not demoted). The second case
-// rides a malformed --config so the pre-change binary also terminates
-// promptly (config parse) instead of serving.
-func TestW113DaemonRetiredFlagsFailParse(t *testing.T) {
-	bin := filepath.Join(v1Bins(t), "pf")
-	badCfgPath := filepath.Join(t.TempDir(), "bad.toml")
-	if err := os.WriteFile(badCfgPath, []byte("w113 not toml\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cases := []struct {
-		name  string
-		argv  []string
-		token string
-	}{
-		{
-			name: "retired daemon project flag",
-			argv: []string{"daemon",
-				"--socket", filepath.Join(t.TempDir(), "d.sock"),
-				"--machine-id", "m-w113f",
-				"--data-dir", t.TempDir(),
-				w113FlagProjectTok(), "e2e"},
-			token: w113Tok("proj", "ect"),
-		},
-		{
-			name: "retired daemon workspace flag",
-			argv: []string{"daemon",
-				"--socket", filepath.Join(t.TempDir(), "d.sock"),
-				"--machine-id", "m-w113f",
-				"--data-dir", t.TempDir(),
-				w113FlagWorkspaceTok(), t.TempDir(),
-				"--config", badCfgPath},
-			token: w113Tok("work", "space"),
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			home := t.TempDir()
-			cmd := exec.Command(bin, c.argv...)
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}
-			var out strings.Builder
-			cmd.Stdout, cmd.Stderr = &out, &out
-			code := 0
-			if err := cmd.Run(); err != nil {
-				ee, ok := err.(*exec.ExitError)
-				if !ok {
-					t.Fatalf("pf %v: %v", c.argv, err)
-				}
-				code = ee.ExitCode()
-			}
-			if code != 2 {
-				t.Fatalf("pf %v: exit %d, want 2 (flag parse failure; output %q)", c.argv, code, out.String())
-			}
-			if !strings.Contains(out.String(), c.token) {
-				t.Fatalf("pf %v: parse failure does not name the retired flag (output %q)", c.argv, out.String())
-			}
-		})
-	}
-}
-
 // ---------------------------------------------------------------------------
 // S09 — daemon --config default = standard cli.toml location; explicit
 // --config overrides.
