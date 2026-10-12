@@ -150,6 +150,9 @@ type Runtime struct {
 	aliases map[string]string
 	// origins: submit origins noted by the daemon, consumed at job creation.
 	origins map[string]Origin
+	// manualModels: `pf submit --models` lists noted by the daemon,
+	// consumed by the next Start of that work item (like origins).
+	manualModels map[string][]string
 
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
@@ -240,6 +243,9 @@ type job struct {
 	// present-empty entry governs and means no switchable chain). In-
 	// memory only; the durable snapshot is the capsule.json audit.
 	stepCandidates map[string][]string
+	// manualModels is the work item's `pf submit --models` list (top
+	// precedence level; audited in capsule.json manual_candidates).
+	manualModels []string
 
 	agent          AgentHandle
 	agentPID       int
@@ -444,6 +450,29 @@ func (r *Runtime) NoteOrigin(wi string, o Origin) {
 	r.mu.Unlock()
 }
 
+// NoteModels records the manual `pf submit --models` list the NEXT
+// Start of wi will compose as the top precedence level. A nil/empty list
+// notes nothing.
+func (r *Runtime) NoteModels(wi string, models []string) {
+	if len(models) == 0 {
+		return
+	}
+	r.mu.Lock()
+	if r.manualModels == nil {
+		r.manualModels = map[string][]string{}
+	}
+	r.manualModels[wi] = models
+	r.mu.Unlock()
+}
+
+func (r *Runtime) takeModels(wi string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m := r.manualModels[wi]
+	delete(r.manualModels, wi)
+	return m
+}
+
 // takeOrigin pops the noted origin for any of the given id spellings.
 func (r *Runtime) takeOrigin(ids ...string) *Origin {
 	r.mu.Lock()
@@ -557,6 +586,7 @@ func mintSessionID() (string, error) {
 func (r *Runtime) Start(ctx context.Context, wi string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
+	manual := r.takeModels(wi) // always consumed: a refused start must not leak it
 	if j := r.jobOf(wi); j != nil {
 		if st, _ := j.snapshot(); st != StatePaused {
 			return fmt.Errorf("runtime: %s already active (state %s)", wi, st)
@@ -598,7 +628,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	// D4) and either finish the start or compensate with
 	// SessionEnd(blocked).
 	key := randomKey()
-	if err := r.noteClaiming(wi, sessionID, key); err != nil {
+	if err := r.noteClaiming(wi, sessionID, key, manual); err != nil {
 		return fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", wi, err)
 	}
 	req := api.SessionClaimRequest{
@@ -615,7 +645,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		r.clearClaiming(wi)
 		return err
 	}
-	return r.startClaimed(ctx, wi, sessionID, resp, wcfg)
+	return r.startClaimed(ctx, wi, sessionID, resp, wcfg, manual)
 }
 
 // startClaimed carries one OPEN claim (fresh or replayed) to a live agent.
@@ -637,7 +667,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 // separator into the harness's session directory naming, so slugs never
 // reach any path. The submitted spelling is registered as an alias so
 // lookups by it still resolve.
-func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse, wcfg *workspace.Config) error {
+func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse, wcfg *workspace.Config, manual []string) error {
 	c := resp.Claim
 	// canonical id resolution (F2): the claim answer's work item is the
 	// authority; the claim's own WorkItemID and the answered record's ID
@@ -700,6 +730,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		repos:        c.Repos,
 		item:         &resp.WorkItem,
 		origin:       r.takeOrigin(wi, id),
+		manualModels: manual,
 	}
 	// polyforge#113: the capsule routes by the claim answer's project
 	// through the inverse mapping. An unmapped answer here (a mapping
@@ -719,10 +750,19 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	// claim (Start / the journal replay); compose the per-step candidates
 	// for the claimed project from that snapshot.
 	j.workspaceYaml = wcfg
-	j.stepCandidates = workspace.ComposeCandidates(r.readBundleFrontmatter(j.bundleName), wcfg, j.project)
+	fm := r.readBundleFrontmatter(j.bundleName)
+	j.stepCandidates = workspace.ComposeCandidates(fm, wcfg, j.project, j.manualModels)
 
 	if err := r.prepareCapsule(j); err != nil {
 		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
+	}
+	// A re-claim (pf resume of a blocked WI) carries no new --models: the
+	// capsule just restored from its remote still names the earlier list.
+	if len(j.manualModels) == 0 {
+		if m := readCapsuleManualModels(j.capsuleDir); len(m) > 0 {
+			j.manualModels = m
+			j.stepCandidates = workspace.ComposeCandidates(fm, wcfg, j.project, m)
+		}
 	}
 	if err := r.verifySealedHead(j, c); err != nil {
 		return r.abandonClaim(j, wi, err, err.Error())
@@ -1134,7 +1174,9 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 // rehydrates — when the workspace yaml governs this project's models. A
 // claim the yaml does not touch records nothing.
 func stampWorkspaceAudit(j *job, idn *capsule.Identity) {
-	if j.workspaceYaml == nil || j.workspaceYaml.Models[j.project] == nil {
+	if len(j.manualModels) > 0 {
+		idn.ManualCandidates = j.manualModels
+	} else if j.workspaceYaml == nil || j.workspaceYaml.Models[j.project] == nil {
 		return
 	}
 	if len(j.stepCandidates) > 0 {

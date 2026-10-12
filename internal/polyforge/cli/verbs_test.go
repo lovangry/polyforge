@@ -908,3 +908,41 @@ func TestDaemonHelpTeachesMapping(t *testing.T) {
 		}
 	}
 }
+
+// pf submit --models: parsed (spaces trimmed), validated locally before
+// any request, and carried to the daemon's claim route.
+func TestVerbSubmitModels(t *testing.T) {
+	var aihubRec reqRecorder
+	aihub := newFakeAihub(t, &aihubRec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedWI)
+	})
+	d := newDaemonFixture(t)
+	d.answer("POST", "/jobs/wi_abc/claim", `{"accepted":true,"work_item_id":"wi_abc"}`)
+	env := map[string]string{"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock}
+
+	for _, bad := range []string{"a,,b", "a,a", " ", ",", "a, a"} {
+		before := len(aihubRec.all())
+		code, _, stderr := runPf(t, env, "submit", "wi_abc", "--models", bad)
+		if code == 0 || !strings.Contains(stderr, "--models") {
+			t.Fatalf("--models %q: code=%d stderr=%q, want a bad-input refusal", bad, code, stderr)
+		}
+		if len(aihubRec.all()) != before || len(d.rec.all()) != 0 {
+			t.Fatalf("--models %q must be refused before any request", bad)
+		}
+	}
+
+	if code, _, stderr := runPf(t, env, "submit", "wi_abc", "--models", " p/a , p/b"); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	got := d.rec.all()
+	if len(got) != 1 || !strings.Contains(got[0].Body, `"models":["p/a","p/b"]`) {
+		t.Fatalf("claim body = %+v, want the trimmed models list", got)
+	}
+	// without the flag the body carries no models key
+	if code, _, stderr := runPf(t, env, "submit", "wi_abc"); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if got := d.rec.all(); strings.Contains(got[1].Body, "models") {
+		t.Fatalf("plain submit body must not carry models: %s", got[1].Body)
+	}
+}

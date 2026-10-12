@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // ---------------------------------------------------------------------------
@@ -19,18 +20,29 @@ var cmdSubmit = &Command{
 	Name:    "submit",
 	Group:   GroupExec,
 	Summary: "Submit a WI for execution on this machine (claim)",
-	Usage:   "pf submit <id> [--priority low|normal|high|urgent]",
+	Usage:   "pf submit <id> [--priority low|normal|high|urgent] [--models a,b,c]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("priority", "normal", "queue priority (low|normal|high|urgent)")
+		fs.String("models", "", "manual model candidates for EVERY step of this WI, comma-separated, in order "+
+			"(precedence: --models > workspace yaml models.<project>.<kind> > yaml models.<project>.default > "+
+			"bundle step model_candidates > bundle defaults.model_candidates)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
 			return fmt.Errorf("submit: expected exactly one work item id")
 		}
+		var models []string
+		if fs.Lookup("models").Value.String() != "" {
+			var merr error
+			models, merr = workspace.NormalizeModels(strings.Split(stringFlag(fs, "models"), ","))
+			if merr != nil {
+				return fmt.Errorf("submit: --models: %w", merr)
+			}
+		}
 		if err := submitPrecheck(ctx, args[0]); err != nil {
 			return err
 		}
-		raw, err := ctx.daemon().Claim(args[0], stringFlag(fs, "priority"))
+		raw, err := ctx.daemon().ClaimWithModels(args[0], stringFlag(fs, "priority"), models)
 		if err != nil {
 			return err
 		}

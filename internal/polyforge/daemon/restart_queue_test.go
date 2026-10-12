@@ -129,6 +129,50 @@ func TestSubmitQueueSurvivesRestartAndReplays(t *testing.T) {
 	waitFor(t, "queue file drained", 5*time.Second, func() bool { return len(readQueueFile(t, data)) == 0 })
 }
 
+// A submit's manual --models list is validated at the route and persisted
+// in the queue file, survives a restart, and rides the replayed claim.
+func TestSubmitModelsPersistedAndValidated(t *testing.T) {
+	setGitIdentity(t)
+	var data, hubBase string
+	hub := newFakeHub()
+	const wi = "wi_q_models"
+	td1 := newTestDaemon(t, func(c *Config) {
+		c.Hub = hub
+		c.DispatchTick = time.Hour
+		data, hubBase = c.DataDir, c.GitRemoteBase
+	})
+	mkBare(t, hubBase, wi)
+	hub.status[wi] = api.StatusQueued
+	for _, bad := range []string{`[]`, `["a",""]`, `["a","a"]`, `["a"," a "]`} {
+		if code := postSubmit(t, td1.sock, "/jobs/"+wi+"/claim", `{"models":`+bad+`}`); code != 400 {
+			t.Fatalf("models %s: status %d, want 400", bad, code)
+		}
+	}
+	if code := postSubmit(t, td1.sock, "/jobs/"+wi+"/claim", `{"models":[" p/a ","p/b"]}`); code != 200 {
+		t.Fatalf("submit status %d", code)
+	}
+	ents := readQueueFile(t, data)
+	if len(ents) != 1 || strings.Join(ents[0].Models, ",") != "p/a,p/b" {
+		t.Fatalf("persisted queue = %+v, want the trimmed models list", ents)
+	}
+	shutdownAndWait(t, td1)
+
+	td2 := newTestDaemon(t, func(c *Config) {
+		c.Hub = hub
+		c.DataDir, c.GitRemoteBase = data, hubBase
+		c.SocketPath = filepath.Join(filepath.Dir(data), "s2.sock")
+	})
+	td2.waitLive(t, wi)
+	ji, _ := td2.rt.Info(wi)
+	raw, err := os.ReadFile(filepath.Join(ji.CapsuleDir, "capsule.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"manual_candidates": [`) || !strings.Contains(string(raw), `"p/a"`) || !strings.Contains(string(raw), `"p/b"`) {
+		t.Fatalf("replayed claim lost the manual list: %s", raw)
+	}
+}
+
 // Replay drops what must not run: a WI aihub shows claimed elsewhere, and
 // resume and unknown intents — each with a submit_dropped event.
 func TestSubmitReplayDropsClaimedAndNonClaimIntents(t *testing.T) {

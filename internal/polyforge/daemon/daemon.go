@@ -860,6 +860,7 @@ func (d *Daemon) dispatch() {
 			return
 		}
 		d.rt.NoteOrigin(e.WorkItemID, e.Origin)
+		d.rt.NoteModels(e.WorkItemID, e.Models)
 		err := d.rt.Start(d.runCtx, e.WorkItemID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)

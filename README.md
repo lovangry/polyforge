@@ -227,7 +227,7 @@ daemon socket by design.)
 | Method | Path | Role | Face |
 | --- | --- | --- | --- |
 | POST | `/jobs/{wi}/answer` | Answer a pending agent question. | user |
-| POST | `/jobs/{wi}/claim` | Submit family: enqueue a claim of a queued work item. | user |
+| POST | `/jobs/{wi}/claim` | Submit family: enqueue a claim of a queued work item (optional body `models`: the manual candidate list of `pf submit --models`). | user |
 | POST | `/jobs/{wi}/resume` | Submit family: enqueue a resume of a paused item. | user |
 | POST | `/jobs/{wi}/resume-blocked` | The claim/start half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
@@ -376,9 +376,12 @@ models:
                                       # author, code, gate, review)
 ```
 
-For a step of the claimed project the list is: its kind list, else the
-project's `default`, else the workflow bundle's own candidates (a
-declared-but-empty list governs: no switchable chain). A project not
+For a step of the claimed project the list is, highest first: the work
+item's manual `pf submit <id> --models a,b,c` list (every step; local to
+this machine, kept across daemon restart and `pf resume`), else the
+step's kind list, else the project's `default`, else the workflow
+bundle's step-level candidates, else the bundle's `defaults` (a
+declared-but-empty yaml list governs: no switchable chain). A project not
 listed, or an absent or comments-only file, keeps the bundle's. The
 daemon reads and validates the file BEFORE the aihub claim: an invalid
 file refuses the work item with DAEMON-414 (`pf submit` shows it; auto-pull

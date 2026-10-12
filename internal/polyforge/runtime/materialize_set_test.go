@@ -282,7 +282,7 @@ func TestMaterializeSetClaimReplayReusesTrustedSnapshot(t *testing.T) {
 	delete(r.jobs, "wi_f7e")
 	r.mu.Unlock()
 	writeStateFile(t, r, nil)
-	if err := r.noteClaiming("wi_f7e", session, randomKey()); err != nil {
+	if err := r.noteClaiming("wi_f7e", session, randomKey(), nil); err != nil {
 		t.Fatal(err)
 	}
 

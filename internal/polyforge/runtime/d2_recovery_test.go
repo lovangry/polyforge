@@ -189,7 +189,7 @@ func TestEndPendingSettlesWhenSessionNoLongerHoldsWI(t *testing.T) {
 func TestAbandonClaimRetriesSessionEnd(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)
-	if err := r.noteClaiming(j.wi, j.sessionID, "k1"); err != nil {
+	if err := r.noteClaiming(j.wi, j.sessionID, "k1", nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")

@@ -125,6 +125,9 @@ type qEntry struct {
 	Priority   string    `json:"priority,omitempty"`
 	EnqueuedAt time.Time `json:"enqueued_at"`
 	Intent     string    `json:"intent"` // claim | resume
+	// Models is the manual `pf submit --models` candidate list (top
+	// precedence level); persisted so a restart before the claim keeps it.
+	Models []string `json:"models,omitempty"`
 	// SubmittedAt is the wall time the submit was accepted (replay
 	// evidence; EnqueuedAt is the FIFO key and equals it for live submits).
 	SubmittedAt time.Time `json:"submitted_at"`

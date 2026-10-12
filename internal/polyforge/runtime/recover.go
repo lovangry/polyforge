@@ -302,6 +302,20 @@ func readCapsuleEffectiveCandidates(capsuleDir string) map[string][]string {
 	return idn.EffectiveCandidates
 }
 
+// readCapsuleManualModels reads the manual_candidates audit of the
+// capsule.json on disk (nil when absent).
+func readCapsuleManualModels(capsuleDir string) []string {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.CapsuleJSON))
+	if err != nil {
+		return nil
+	}
+	var idn capsule.Identity
+	if json.Unmarshal(raw, &idn) != nil {
+		return nil
+	}
+	return idn.ManualCandidates
+}
+
 // recovered finishes a successful re-derivation. A successful recovery
 // RESETS the failure budget — the counter is spent by failures only.
 // v1.5: RTRecovered carries SpawnN (the B2 fence key) and the in-process

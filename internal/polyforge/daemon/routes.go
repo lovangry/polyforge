@@ -21,6 +21,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // The wire answer shapes — byte-identical to the CLI's decode structs
@@ -234,10 +235,19 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		wi := r.PathValue("wi")
 		var body struct {
 			Priority string     `json:"priority"`
+			Models   []string   `json:"models,omitempty"` // manual candidate list (pf submit --models)
 			Origin   *reqOrigin `json:"origin,omitempty"`
 		}
 		if !decodeBody(w, r, &body) {
 			return
+		}
+		if body.Models != nil {
+			m, merr := workspace.NormalizeModels(body.Models)
+			if merr != nil {
+				writeErr(w, api.ErrDaemonBadInput, "models: "+merr.Error())
+				return
+			}
+			body.Models = m
 		}
 		if err := d.modes.AdmitSubmit(); err != nil {
 			writeAdmissionErr(w, err)
@@ -288,7 +298,7 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// priority-desc against the machine's concurrency cap.
 		// `accepted` is answered only once the entry is on disk (v2 §5).
 		cursor := d.lastSeq(canonical)
-		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent, Origin: body.Origin.origin()}); err != nil {
+		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent, Models: body.Models, Origin: body.Origin.origin()}); err != nil {
 			writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+err.Error())
 			return
 		}
