@@ -3,7 +3,7 @@ package observe
 // observe.go: the Observe hub — the lane's root object. It owns the
 // events log, spawns one per-WI monitor goroutine per RTStarted, routes
 // RTRecovered/WIFinished to the right monitor, and exposes the HTTP face
-// (observe/answer/flush) over the monitors. Runtime talks to Observe
+// (observe/answer) over the monitors. Runtime talks to Observe
 // through exactly two channels carrying the five protocol messages (the
 // agent Handle rides WITH the lifecycle message as the attachment this
 // lane needs to observe and control — it is not a third message kind).
@@ -38,8 +38,7 @@ type Config struct {
 	// It must be buffered (Runtime drains it; the monitor never blocks
 	// on a send and drops only if the buffer is full).
 	OB chan protocol.OBMsg
-	// DataDir hosts the daemon events file (events.log) and the
-	// persisted answer ledger (answers.json).
+	// DataDir hosts the daemon events file (events.log).
 	DataDir string
 	// PushFunc overrides the capsule commit+push operation (tests).
 	PushFunc PushFunc
@@ -56,12 +55,6 @@ type Config struct {
 	// calls by the operator's submitted spelling find the monitor.
 	// nil = no resolution (the route id must already be canonical).
 	Resolve func(wi string) string
-	// MemoryFace is the F6-B narrow aihub memory proxy the recall/remember
-	// UDS routes call behind the flush-mode attempt fence. The daemon
-	// binds it to the shared aihub client (agents hold no aihub
-	// credential — every server call is the daemon's); nil disables both
-	// routes with the typed not-configured refusal. See memory.go.
-	MemoryFace MemoryFace
 	// SessionVerify is the v1.5 M4 revalidation seam: the periodic
 	// per-RUNNING-job session-verify the monitor tick piggybacks
 	// (session.go). The daemon binds the shared aihub client; nil — the
@@ -89,8 +82,7 @@ type Config struct {
 	PushRetryBackoff  time.Duration // async push retry spacing after a failure (10s)
 	BackpressureSteps int           // N consecutive failed pushes before the degradation event (5)
 	BackpressureAfter time.Duration // T without a successful push before the degradation event (30min)
-	FlushBound        time.Duration // per-flush bound (protocol.FlushTimeout, 60s)
-	CallTimeout       time.Duration // HTTP-face wait for a monitor answer (65s)
+	PushBound         time.Duration // per-push bound (protocol.PushTimeout, 60s)
 	OBCapacity        int           // OB channel buffer check (64)
 	// VersionStagnantTicks is the C3' belt-and-braces bound: consecutive
 	// same-Version execution.json rewrites before a fallback commit + one
@@ -126,11 +118,8 @@ func (c *Config) fill() {
 	if c.BackpressureAfter == 0 {
 		c.BackpressureAfter = 30 * time.Minute
 	}
-	if c.FlushBound == 0 {
-		c.FlushBound = protocol.FlushTimeout
-	}
-	if c.CallTimeout == 0 {
-		c.CallTimeout = protocol.FlushTimeout + 5*time.Second
+	if c.PushBound == 0 {
+		c.PushBound = protocol.PushTimeout
 	}
 	if c.OBCapacity == 0 {
 		c.OBCapacity = 64
@@ -174,43 +163,21 @@ func defaultPush(ctx context.Context, o gitops.Opts, message string) (string, bo
 
 // Observe is the hub.
 type Observe struct {
-	cfg Config
-	log *EventLog
-	// ledger is the DAEMON-WIDE answer ledger, loaded from
-	// <DataDir>/answers.json in New() and shared by every monitor. One
-	// ledger, one file, keyed per work item inside: a restarted daemon's
-	// first instance attachment already sees the restored awaiting set,
-	// and an answer_id that settled before the restart still replays its
-	// recorded outcome. The capsule stays the authority for binding.
-	ledger *AnswerLedger
-
+	cfg      Config
+	log      *EventLog
 	mu       sync.Mutex
 	monitors map[string]*Monitor
 
 	wg sync.WaitGroup
 }
 
-// New validates the config, opens the events log and LOADS the
-// persisted answer ledger.
-//
-// The load happens here, before New can hand back a hub, and therefore
-// before any RTStarted/RTRecovered attachment, any attach-time
-// redeliverAwaiting and any HTTP answer submission can run — the
-// ordering F9 cross-restart re-delivery depends on. It never fails the
-// daemon: a missing file is first boot and a corrupt one is quarantined
-// with one recorded event (spec A3).
+// New validates the config and opens the events log.
 func New(cfg Config) (*Observe, error) {
 	cfg.fill()
 	log, err := NewEventLog(cfg.DataDir)
 	if err != nil {
 		return nil, err
 	}
-	// Daemon-scope bookkeeping: the ledger spans every work item and a
-	// load-time quarantine happens before any monitor exists, so its
-	// events are appended with wi="".
-	ledger := NewAnswerLedgerAt(cfg.DataDir, func(kind string, body map[string]any) {
-		_ = log.Append("", kind, body)
-	})
 	if cfg.RT == nil || cfg.OB == nil {
 		log.Close()
 		return nil, errConfig("RT and OB channels are both required")
@@ -219,7 +186,7 @@ func New(cfg Config) (*Observe, error) {
 		log.Close()
 		return nil, errConfig("OB channel must be buffered")
 	}
-	return &Observe{cfg: cfg, log: log, ledger: ledger,
+	return &Observe{cfg: cfg, log: log,
 		monitors: map[string]*Monitor{}}, nil
 }
 
@@ -287,12 +254,6 @@ func (o *Observe) onAttach(at Attach) {
 			})
 		}
 	case protocol.RTFinished:
-		// Retention (spec A4): a finished work item can neither receive a
-		// re-delivery nor be re-answered, so its ledger entries — both
-		// halves — are dropped from memory and from the file. This is the
-		// only pruning that touches AWAITING entries; the load-time
-		// age-out never does.
-		o.ledger.ForgetWorkItem(wi)
 		if m := o.takeMonitor(wi); m != nil {
 			m.requestStop() // monitor emits its own job_stopped event
 		}
@@ -345,9 +306,8 @@ func (o *Observe) setMonitor(wi string, m *Monitor) {
 }
 
 // MarkClosing arms the expected-death suppression for a daemon-initiated
-// close: the agent's imminent death raises no recovery, and the monitor
-// already shares the flush(wrap) sealing flag — the same suppression, no
-// new state. No monitor (never monitored) is a no-op.
+// close: the agent's imminent death raises no recovery (the monitor's
+// sealing flag). No monitor (never monitored) is a no-op.
 func (o *Observe) MarkClosing(wi string) {
 	if m := o.lookup(wi); m != nil {
 		m.markClosing()
@@ -375,26 +335,20 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 			PushRetryBackoff:     o.cfg.PushRetryBackoff,
 			BackpressureSteps:    o.cfg.BackpressureSteps,
 			BackpressureAfter:    o.cfg.BackpressureAfter,
-			FlushBound:           o.cfg.FlushBound,
+			PushBound:            o.cfg.PushBound,
 			VersionStagnantTicks: o.cfg.VersionStagnantTicks,
 			revalidate:           o.cfg.SessionRevalidateEvery,
 			verify:               o.cfg.SessionVerify,
 			push:                 o.cfg.PushFunc,
 			locateLive:           o.cfg.LocateLive,
 		},
-		log: o.log,
-		ob:  o.cfg.OB,
-		// the SHARED daemon-wide ledger, not a per-monitor one: the
-		// persisted file is single and keyed by work item.
-		ledger: o.ledger,
-
-		rtCh:    make(chan Attach, 4),
-		stopCh:  make(chan struct{}),
-		flushCh: make(chan FlushCall, 8),
+		log:    o.log,
+		ob:     o.cfg.OB,
+		rtCh:   make(chan Attach, 4),
+		stopCh: make(chan struct{}),
 
 		gate:       make(chan struct{}, 1),
 		pushDone:   make(chan pushResult, 1),
-		wrapDone:   make(chan wrapResult, 1),
 		probeDone:  make(chan probeResult, 1),
 		verifyDone: make(chan verifyResult, 1),
 
@@ -423,6 +377,3 @@ func (m *Monitor) attach(at Attach) {
 
 // Events exposes the log (diagnostic/tests).
 func (o *Observe) Events() *EventLog { return o.log }
-
-// Ledger exposes the daemon-wide answer ledger (diagnostic/tests).
-func (o *Observe) Ledger() *AnswerLedger { return o.ledger }

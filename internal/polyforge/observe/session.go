@@ -14,9 +14,7 @@ package observe
 //     landed on another daemon). The monitor emits OBSuperseded to the
 //     runtime channel — the runtime kills the tree, quarantines the
 //     capsule and releases the record — and stops supervising the work
-//     item locally: detection and pushes are suppressed, and flushes
-//     are answered with the STALE_SPAWN
-//     refusal. The daemon
+//     item locally: detection and pushes are suppressed. The daemon
 //     makes NO hub transition: superseded is not terminal, and the work
 //     item belongs to the new owner. The supersession VERDICT is
 //     latched once, but the EMISSION is retryable (Finding 1(b), v1.5
@@ -87,7 +85,7 @@ type verifyResult struct {
 // sub-goroutine — the select loop never blocks on the network.
 //
 // Finding 1(b) (v1.5 review): a SUPERSEDED job stays in the revalidation
-// set — its latch suppresses detection/push/flush, but the periodic
+// set — its latch suppresses detection/push, but the periodic
 // verify must keep running so the OBSuperseded emission stays retryable
 // until the runtime's release (RTFinished, Finding 4) stops the loop.
 // sessionFingerprint derives the PUBLIC handle of this monitor's
@@ -112,7 +110,7 @@ func (m *Monitor) checkRevalidate() {
 	}
 	m.stateMu.Lock()
 	// superseded is deliberately ABSENT: see the doc comment above.
-	active := !m.recovering && !m.wrapped && !m.blocked && !m.sealing
+	active := !m.recovering && !m.sealing
 	m.stateMu.Unlock()
 	if !active {
 		return

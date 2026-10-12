@@ -26,21 +26,21 @@ func pristineBundle(t *testing.T) (workflowsDir, pinned string) {
 	t.Helper()
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "demo-bundle")
-	if err := os.MkdirAll(filepath.Join(bundle, "agents"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(bundle, "steps"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte("# demo\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// CRLF on disk: the digest input is the LF-normalized content
-	if err := os.WriteFile(filepath.Join(bundle, "agents", "step.md"), []byte("do the thing\r\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(bundle, "steps", "step.md"), []byte("do the thing\r\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	wfSum := sha256.Sum256([]byte("# demo\n"))
 	stepSum := sha256.Sum256([]byte("do the thing\n"))
 	pinned = workflow.Digest([]workflow.FileEntry{
 		{Path: "workflow.md", Sha256: hex.EncodeToString(wfSum[:]), Bytes: 7},
-		{Path: "agents/step.md", Sha256: hex.EncodeToString(stepSum[:]), Bytes: 13},
+		{Path: "steps/step.md", Sha256: hex.EncodeToString(stepSum[:]), Bytes: 13},
 	})
 	return dir, pinned
 }
@@ -56,7 +56,7 @@ func TestMaterializeTamperedPinnedBundleRejected(t *testing.T) {
 	setGitIdentity(t)
 	wfDir, pinned := pristineBundle(t)
 	// the checkout was tampered after the pin was recorded
-	if err := os.WriteFile(filepath.Join(wfDir, "demo-bundle", "agents", "step.md"),
+	if err := os.WriteFile(filepath.Join(wfDir, "demo-bundle", "steps", "step.md"),
 		[]byte("do the EVIL thing\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -7,7 +7,6 @@ package daemon
 // envelope).
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -21,7 +20,6 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
-	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
 // TestSubmitAndStatus pins the claim round trip: SubmitResponse shape,
@@ -130,9 +128,9 @@ type adoptedJournalRec struct {
 }
 
 // TestObserveAnswerFlush walks the observe lane's own routes end to end
-// through the daemon socket: JobView, flush(needs_input), the pending
-// projection, the answer relay consumed by the (fake) agent.
-func TestObserveAnswerFlush(t *testing.T) {
+// through the daemon socket: JobView, a driver-persisted pending question
+// projected from execution.json, and the answer route's refusal.
+func TestObserveAnswerPending(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_b")
 	td.waitMonitored(t, "wi_b")
@@ -152,22 +150,20 @@ func TestObserveAnswerFlush(t *testing.T) {
 		t.Fatalf("job view missing spawn/events: %+v", jv)
 	}
 
-	// The agent's needs_input lifeline (ruling C2: UDS proxy).
-	fraw, err := td.client.Flush("wi_b", protocol.FlushRequest{
-		WorkItem: "wi_b", SpawnN: jv.SpawnN,
-		Reason: protocol.FlushNeedsInput, QuestionID: "q_abc123",
-		Question: "which flavor?", Step: "spec",
-	})
-	if err != nil {
-		t.Fatalf("flush(needs_input): %v", err)
-	}
-	var ack protocol.FlushAck
-	if err := json.Unmarshal(fraw, &ack); err != nil || !ack.OK {
-		t.Fatalf("flush(needs_input) ack = %s (%v)", fraw, err)
+	// The driver parks on a question: pending_question lands in
+	// execution.json and the monitor's poll projects it.
+	td.seedPendingQuestion(t, "wi_b", "q_abc123", "spec", "which flavor?")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		raw, _ = td.client.Observe("wi_b", 0)
+		jv = protocol.JobView{}
+		json.Unmarshal(raw, &jv)
+		if jv.Pending != nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	raw, _ = td.client.Observe("wi_b", 0)
-	json.Unmarshal(raw, &jv)
 	if jv.Status != protocol.JobNeedsInput || jv.Pending == nil || jv.Pending.ID != "q_abc123" {
 		t.Fatalf("needs_input projection = %s / %+v", jv.Status, jv.Pending)
 	}
@@ -193,66 +189,11 @@ func TestObserveAnswerFlush(t *testing.T) {
 	}
 }
 
-// TestWrapDualPathArbitration is the load-bearing close arbitration:
-// the CLI wrap (Runtime.Stop) and the agent's flush(wrap) (Observe →
-// OBCompleted → Runtime) racing on one work item must produce exactly
-// one winner; the late arrival answers the typed DAEMON-409.
-func TestWrapDualPathArbitration(t *testing.T) {
-	// (a) flush(wrap) first, its commit+push deliberately slow so the
-	// seal guard is observably held; the CLI wrap must get DAEMON-409.
-	td := newTestDaemon(t, func(c *Config) {
-		c.PushFunc = func(ctx context.Context, o gitops.Opts, msg string) (string, bool, gitops.PushTimings, error) {
-			time.Sleep(400 * time.Millisecond)
-			return gitops.CommitPush(o, msg)
-		}
-	})
-	td.submitClaim(t, "wi_c")
-	td.waitMonitored(t, "wi_c")
-	// The flush face is attempt-fenced (#8): play the agent with its
-	// CURRENT attempt id, as the live one would.
-	craw, err := td.client.Observe("wi_c", 0)
-	if err != nil {
-		t.Fatalf("observe wi_c: %v", err)
-	}
-	var cjv protocol.JobView
-	if err := json.Unmarshal(craw, &cjv); err != nil || cjv.SpawnN == 0 {
-		t.Fatalf("wi_c view undecodable: %v (%s)", err, craw)
-	}
-
-	flushDone := make(chan error, 1)
-	go func() {
-		_, err := td.client.Flush("wi_c", protocol.FlushRequest{
-			WorkItem: "wi_c", SpawnN: cjv.SpawnN,
-			Reason: protocol.FlushWrap, FinalStatus: "wrapped",
-		})
-		flushDone <- err
-	}()
-	// Let the flush claim the guard (its first action on the route).
-	time.Sleep(120 * time.Millisecond)
-	if _, err := td.client.Wrap("wi_c", "wrap"); err == nil {
-		t.Fatal("concurrent CLI wrap succeeded; want DAEMON-409")
-	} else {
-		var ae *api.Error
-		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict {
-			t.Fatalf("CLI wrap error = %v, want DAEMON-409", err)
-		}
-	}
-	if err := <-flushDone; err != nil {
-		t.Fatalf("flush(wrap) winner failed: %v", err)
-	}
-	// The winner sealed exactly once: one end-generation, terminal.
-	waitGone(t, td, "wi_c")
-	if td.hub.endCount() != 1 {
-		t.Fatalf("end-generation calls = %d, want 1", td.hub.endCount())
-	}
-	if st := td.hub.lastEnd().Status; st != protocol.FinishWrapped {
-		t.Fatalf("end status = %q, want wrapped", st)
-	}
-
-	// (b) the reverse: CLI wrap first with the server-side end call
-	// parked, so the wrap route holds the guard in sealing; the agent's
-	// flush(wrap) must get DAEMON-409; releasing the park completes the
-	// wrap as the winner.
+// TestCloseArbitration is the load-bearing close arbitration: a CLI wrap
+// holding the seal guard (its server-side end call parked) makes a
+// concurrent wrap and a concurrent pause answer the typed DAEMON-409;
+// releasing the park completes the first wrap as the one winner.
+func TestCloseArbitration(t *testing.T) {
 	td2 := newTestDaemon(t, nil)
 	td2.hub.mu.Lock()
 	td2.hub.blockEnd = make(chan struct{})
@@ -266,23 +207,17 @@ func TestWrapDualPathArbitration(t *testing.T) {
 		wrapDone <- err
 	}()
 	waitState(t, td2, "wi_d", "sealing")
-	draw, err := td2.client.Observe("wi_d", 0)
-	if err != nil {
-		t.Fatalf("observe wi_d: %v", err)
-	}
-	var djv protocol.JobView
-	if err := json.Unmarshal(draw, &djv); err != nil || djv.SpawnN == 0 {
-		t.Fatalf("wi_d view undecodable: %v (%s)", err, draw)
-	}
-	if _, err := td2.client.Flush("wi_d", protocol.FlushRequest{
-		WorkItem: "wi_d", SpawnN: djv.SpawnN,
-		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
-	}); err == nil {
-		t.Fatal("flush(wrap) during the CLI close succeeded; want DAEMON-409")
-	} else {
+	for name, call := range map[string]func() error{
+		"wrap":  func() error { _, err := td2.client.Wrap("wi_d", "wrap"); return err },
+		"pause": func() error { _, err := td2.client.Pause("wi_d"); return err },
+	} {
+		err := call()
+		if err == nil {
+			t.Fatalf("concurrent %s during the CLI close succeeded; want DAEMON-409", name)
+		}
 		var ae *api.Error
 		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict {
-			t.Fatalf("flush(wrap) error = %v, want DAEMON-409", err)
+			t.Fatalf("concurrent %s error = %v, want DAEMON-409", name, err)
 		}
 	}
 	close(td2.hub.blockEnd)
@@ -290,6 +225,9 @@ func TestWrapDualPathArbitration(t *testing.T) {
 		t.Fatalf("CLI wrap winner failed: %v", err)
 	}
 	waitGone(t, td2, "wi_d")
+	if td2.hub.endCount() != 1 {
+		t.Fatalf("end-generation calls = %d, want 1", td2.hub.endCount())
+	}
 }
 
 // TestWrapAlreadyTerminalGraceful: a wrap of an already-sealed work item
@@ -750,22 +688,8 @@ func TestStatusShowsNeedsInput(t *testing.T) {
 		t.Fatalf("pre-question status = %+v", j)
 	}
 
-	// the agent blocks on a human (ruling C2 lifeline)
-	raw, err := td.client.Observe("wi_askst", 0)
-	if err != nil {
-		t.Fatalf("observe: %v", err)
-	}
-	var jv protocol.JobView
-	if err := json.Unmarshal(raw, &jv); err != nil {
-		t.Fatalf("observe undecodable: %v", err)
-	}
-	if _, err := td.client.Flush("wi_askst", protocol.FlushRequest{
-		WorkItem: "wi_askst", SpawnN: jv.SpawnN,
-		Reason: protocol.FlushNeedsInput, QuestionID: "q_d6001",
-		Question: "pick one", Step: "spec",
-	}); err != nil {
-		t.Fatalf("flush(needs_input): %v", err)
-	}
+	// the driver parks on a human question (pending_question persisted)
+	td.seedPendingQuestion(t, "wi_askst", "q_d6001", "spec", "pick one")
 
 	// /status presents needs_input + the question id (the monitor's
 	// projection is applied on the read, so a small poll window is legal)

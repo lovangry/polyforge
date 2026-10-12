@@ -7,7 +7,7 @@
 // v1 deltas vs v0 (removed from the tree; in git history):
 //   - SYNC-* and revision-chain endpoints are deleted (git IS the chain).
 //   - New GIT-* error codes for the git-http-backend proxy surface.
-//   - DAEMON-* codes retained; publish_request becomes flush(reason).
+//   - DAEMON-* codes retained; publish_request is deleted.
 package api
 
 import (

@@ -315,25 +315,9 @@ func TestIdleExemptWhilePendingQuestion(t *testing.T) {
 	feed(h, fxMsgEndStop)
 	feed(h, fxTurnEndStop)
 
-	// Arm a pending question (flush(needs_input)): waiting for a human
+	// Arm a pending question (pending question): waiting for a human
 	// answer is a designed standstill — never idle.
-	resp := make(chan protocol.FlushAck, 1)
-	m.flushCh <- FlushCall{
-		Req: protocol.FlushRequest{
-			WorkItem:   "wi_test",
-			SpawnN:     1,
-			Reason:     protocol.FlushNeedsInput,
-			QuestionID: "q_1",
-			Question:   "which way?",
-			Step:       "code",
-		},
-		Resp: resp,
-	}
-	select {
-	case <-resp:
-	case <-time.After(2 * time.Second):
-		t.Fatal("flush(needs_input) was never answered")
-	}
+	writePendingQuestion(t, m, "q_1", "which way?", "code")
 
 	time.Sleep(150 * time.Millisecond)
 	if h.sentCount() != 0 {
@@ -365,23 +349,7 @@ func TestHangExemptWhilePendingQuestion(t *testing.T) {
 	feed(h, fxTurnStart)
 
 	// Arm the pending question.
-	resp := make(chan protocol.FlushAck, 1)
-	m.flushCh <- FlushCall{
-		Req: protocol.FlushRequest{
-			WorkItem:   "wi_test",
-			SpawnN:     1,
-			Reason:     protocol.FlushNeedsInput,
-			QuestionID: "q_1",
-			Question:   "which way?",
-			Step:       "code",
-		},
-		Resp: resp,
-	}
-	select {
-	case <-resp:
-	case <-time.After(2 * time.Second):
-		t.Fatal("flush(needs_input) was never answered")
-	}
+	writePendingQuestion(t, m, "q_1", "which way?", "code")
 
 	time.Sleep(150 * time.Millisecond)
 	if h.sentCount() != 0 {
@@ -467,25 +435,15 @@ func TestMonitorNotBlockedByPushInFlight(t *testing.T) {
 	})
 }
 
-func TestExpectedExitAfterWrapIsSilent(t *testing.T) {
+// A daemon-initiated close arms the sealing suppression (markClosing):
+// the agent's process exit that follows is EXPECTED, not a death.
+func TestExpectedExitAfterMarkClosingIsSilent(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, ob := newTestMonitor(t, h, nil)
 
-	// A successful wrap seals the attempt...
-	fc := FlushCall{Req: protocol.FlushRequest{SpawnN: 1, Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped}, Resp: make(chan protocol.FlushAck, 1)}
-	m.flushCh <- fc
-	ack := <-fc.Resp
-	if !ack.OK {
-		t.Fatalf("wrap ack: %+v", ack)
-	}
-	msg := waitOB(t, ob, "WICompleted")
-	if msg.Kind != protocol.OBCompleted || msg.Reason != protocol.FinishWrapped {
-		t.Fatalf("WICompleted: %+v", msg)
-	}
-
-	// ...so the agent's process exit afterwards is EXPECTED, not a death.
+	m.markClosing()
 	h.die()
-	expectNoOB(t, ob, 250*time.Millisecond, "post-wrap exit")
+	expectNoOB(t, ob, 250*time.Millisecond, "post-close exit")
 }
 
 func TestMonitorNotBlockedByProbeWait(t *testing.T) {
@@ -813,19 +771,7 @@ func TestNoProgressExemptWhilePendingQuestion(t *testing.T) {
 		c.HangWindow = time.Hour
 	})
 
-	resp := make(chan protocol.FlushAck, 1)
-	m.flushCh <- FlushCall{
-		Req: protocol.FlushRequest{
-			WorkItem: "wi_test", SpawnN: 1, Reason: protocol.FlushNeedsInput,
-			QuestionID: "q_np", Question: "which way?", Step: "code",
-		},
-		Resp: resp,
-	}
-	select {
-	case <-resp:
-	case <-time.After(2 * time.Second):
-		t.Fatal("flush(needs_input) was never answered")
-	}
+	writePendingQuestion(t, m, "q_np", "which way?", "code")
 
 	time.Sleep(150 * time.Millisecond)
 	if n := len(eventsOf(m, EvNoProgress)); n != 0 {

@@ -257,7 +257,7 @@ func (q *jobQueue) MarkRunning(wi string) {
 }
 
 // Reconcile frees the slots of jobs the runtime no longer holds (a
-// wrap/pause/flush-path close ends a job without telling the queue).
+// wrap/pause close ends a job without telling the queue).
 func (q *jobQueue) Reconcile(live map[string]bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()

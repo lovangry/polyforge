@@ -6,9 +6,9 @@
 //	  file, queue, cancel, recall — plus the management face M1–M5
 //	  (users, api-keys, projects, backup, rotate-secret).
 //
-//	Local daemon UDS HTTP face (04 §5.1 minus publish_request; flush
-//	replaces it, ruling C2 — the client surface is pinned in
-//	internal/common/protocol and daemon.go below):
+//	Local daemon UDS HTTP face (04 §5.1 minus publish_request — the
+//	client surface is pinned in internal/common/protocol and daemon.go
+//	below):
 //	  submit, observe, answer, batch-confirm, pause, resume, wrap,
 //	  ops, ship.
 //

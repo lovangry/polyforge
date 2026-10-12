@@ -8,10 +8,6 @@ package test
 // content-floor pattern (test/w079_*, test/w113_* read the skill surfaces
 // via v1Root(t) and assert what the docs must teach):
 //
-//   - SKILL.md has a TOP role-detection section routing
-//     PF_AGENT_ROLE=wi-agent (EXECUTION: skip all supervision duties, run
-//     the workflow) vs marker-absent (SUPERVISION: interactive session,
-//     bound duties only);
 //   - SKILL.md teaches BOUND-ONLY needs_input and LAST-PROGRESS
 //     presentation, the watchers-directory bound set, name-only
 //     machine-global listing on an explicit ask, and the unchanged daemon
@@ -21,16 +17,15 @@ package test
 //     adopted binding's answer-presentation duty, concurrent-session
 //     header authority, legacy #76-header scripts) and does NOT teach
 //     automatic same-workspace adoption;
-//   - verbs/submit.md and verbs/resume.md carry the role gate and the
-//     explicit-adoption wording in the fragments' own words;
+//   - verbs/submit.md and verbs/resume.md carry the explicit-adoption
+//     wording in the fragments' own words;
 //   - no bootstrap resurrection: skills/polyforge's top level stays
 //     SKILL.md + scripts/ + verbs/, and no using-polyforge-shaped file
 //     appears anywhere the docs live.
 //
-// Spawn-env floors are NOT duplicated here: internal/polyforge/runtime is
-// covered by its own unit tests (TestSpawnEnvSanitized /
-// TestSpawnSessionIdentityEnvReachesChild) and by the acceptance suite's
-// real-daemon env face; this file pins documents only.
+// The PF_AGENT_ROLE execution-role marker and the SKILL.md role-detection
+// section it routed were deleted (#136: step processes never load the
+// skill, so the marker had no reader); their pins were removed with them.
 
 import (
 	"os"
@@ -40,21 +35,14 @@ import (
 	"testing"
 )
 
-// w081FloorSkill loads SKILL.md and returns the top slice (above the
-// first standing section, "## Install surface" — the only place the
-// role-detection section may live) and the full text.
-func w081FloorSkill(t *testing.T) (top, full string) {
+// w081FloorSkill loads SKILL.md and returns its full text.
+func w081FloorSkill(t *testing.T) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(v1Root(t), "skills", "polyforge", "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	full = string(raw)
-	cut := strings.Index(full, "## Install surface")
-	if cut < 0 {
-		t.Fatal("SKILL.md lost its Install surface anchor — the top-slice floor lost its subject")
-	}
-	return full[:cut], full
+	return string(raw)
 }
 
 // w081FloorSection returns the text between two section headings.
@@ -91,41 +79,6 @@ func w081FloorHasWord(text, tok string) bool {
 	return re.MatchString(text)
 }
 
-// TestW081FloorRoleDetectionSectionRoutesBothLanes pins the load-time
-// routing contract on SKILL.md's top slice: it keys on the
-// PF_AGENT_ROLE=wi-agent marker, names both lanes, and the EXECUTION lane
-// names every supervision duty it skips AND the execution duty it keeps.
-func TestW081FloorRoleDetectionSectionRoutesBothLanes(t *testing.T) {
-	top, _ := w081FloorSkill(t)
-	for _, tok := range []string{"PF_AGENT_ROLE", "wi-agent", "EXECUTION", "SUPERVISION"} {
-		if !strings.Contains(top, tok) {
-			t.Fatalf("SKILL.md's top role-detection section does not carry %q", tok)
-		}
-	}
-	// The EXECUTION skip list must name each supervision duty: watcher
-	// setup, session-start reconciliation, needs_input presentation,
-	// stall reporting.
-	for _, tok := range []string{"watcher", "reconciliation", "needs_input", "stall"} {
-		if !strings.Contains(top, tok) {
-			t.Fatalf("the EXECUTION skip list does not name the supervision duty %q", tok)
-		}
-	}
-	// The EXECUTION lane keeps the execution duty: run the workflow,
-	// write artifacts, commit and push.
-	for _, tok := range []string{"workflow", "artifacts", "commit and push"} {
-		if !strings.Contains(top, tok) {
-			t.Fatalf("the EXECUTION lane does not carry the execution duty %q", tok)
-		}
-	}
-	// The SUPERVISION lane: an interactive session whose duties are
-	// bound-only.
-	for _, tok := range []string{"interactive", "BOUND-ONLY"} {
-		if !strings.Contains(top, tok) {
-			t.Fatalf("the SUPERVISION lane does not carry %q (interactive session, bound duties only)", tok)
-		}
-	}
-}
-
 // TestW081FloorTurnStartDutyIsBoundOnly pins the #117 correction's taught
 // contract: the turn-start obligation section derives a BOUND set from the
 // watchers directory (own session_id headers + explicit adoption), gates
@@ -133,7 +86,7 @@ func TestW081FloorRoleDetectionSectionRoutesBothLanes(t *testing.T) {
 // unbound jobs proactively (name-only on an explicit machine-global ask),
 // and leaves machine-level stall recovery with the daemon's watchdogs.
 func TestW081FloorTurnStartDutyIsBoundOnly(t *testing.T) {
-	_, full := w081FloorSkill(t)
+	full := w081FloorSkill(t)
 	section := w081FloorSection(t, full, "## Turn-start obligation", "## The watch lane")
 	// The bound set: derived from the watchers directory (session_id
 	// headers), plus explicit adoption — and `pf ops status` alone
@@ -175,7 +128,7 @@ func TestW081FloorTurnStartDutyIsBoundOnly(t *testing.T) {
 // sessions keep the header authoritative; legacy #76-header scripts
 // follow the identical rule.
 func TestW081FloorAdoptionIsAskToAdoptWithHeaderRewrite(t *testing.T) {
-	_, full := w081FloorSkill(t)
+	full := w081FloorSkill(t)
 	lane := w081FloorWatchLane(t, full)
 	if !strings.Contains(lane, "adopt") {
 		t.Fatal("the watch-lane teaching never mentions adoption — the ask-to-adopt channel for predecessor scripts is unspecified")
@@ -263,26 +216,18 @@ func TestW081FloorNoAutomaticAdoptionTeaching(t *testing.T) {
 	}
 }
 
-// TestW081FloorVerbFragmentsCarryRoleGateAndAdoption pins the touched
-// verb fragments' contract in the fragments' own words: submit's arm step
-// and resume's re-arm lane both route by the marker (EXECUTION agents arm
-// nothing) and state the ownership rule — another session's script is
-// reachable only through ask-to-adopt, with resume carrying the explicit
-// consent + header-rewrite wording.
-func TestW081FloorVerbFragmentsCarryRoleGateAndAdoption(t *testing.T) {
+// TestW081FloorVerbFragmentsCarryAdoptionRule pins the touched verb
+// fragments' contract in the fragments' own words: submit's arm step and
+// resume's re-arm lane state the ownership rule — another session's
+// script is reachable only through ask-to-adopt, with resume carrying the
+// explicit consent + header-rewrite wording.
+func TestW081FloorVerbFragmentsCarryAdoptionRule(t *testing.T) {
 	for _, frag := range []string{"submit.md", "resume.md"} {
 		raw, err := os.ReadFile(filepath.Join(v1Root(t), "skills", "polyforge", "verbs", frag))
 		if err != nil {
 			t.Fatal(err)
 		}
 		text := string(raw)
-		// The role gate: keyed on the marker, EXECUTION skips the
-		// watcher duty, SUPERVISION (interactive, no marker) arms.
-		for _, tok := range []string{"PF_AGENT_ROLE", "wi-agent", "EXECUTION", "SUPERVISION"} {
-			if !strings.Contains(text, tok) {
-				t.Fatalf("verbs/%s does not carry the role gate token %q", frag, tok)
-			}
-		}
 		// The ownership/adoption wording in the fragment's own words.
 		for _, tok := range []string{"session_id", "ask-to-adopt"} {
 			if !strings.Contains(text, tok) {

@@ -27,31 +27,14 @@ import (
 // family, payload kind ∈ {provider_error, retry, hang_suspected,
 // hang_cleared, idle_suspect, idle_cleared}) and the push bookkeeping.
 const (
-	EvJobStarted     = "job_started"
-	EvAgentRecovered = "wi_agent_rederived"
-	EvNeedsRecovery  = "needs_recovery"
-	EvInfraIncident  = "infra_incident"
-	EvNeedsInput     = "needs_input"
-	EvAnswered       = "answered"
-	// EvAnswerRedelivery is the F9 attach-time re-delivery record: an
-	// answer that was delivered but never consumed is re-sent to a newly
-	// attached agent instance (RTStarted/RTRecovered landing). One event
-	// per attempt; a failed re-delivery carries its error and the ledger
-	// keeps the answer re-deliverable.
-	EvAnswerRedelivery = "answer_redelivery"
-	// EvAnswerLedger is the persisted-answer-ledger bookkeeping record
-	// (answers.json under the daemon data directory). Payload `detail`
-	// is a closed set: "quarantine" (an unreadable/unparsable/unknown
-	// -version file was moved aside to answers.json.corrupt-<ts> and the
-	// daemon started with an empty ledger) and "write_failed" (one
-	// best-effort persist did not reach disk). Daemon-scope: appended
-	// with wi="" — the ledger spans every work item, and a load-time
-	// quarantine happens before any monitor exists.
-	EvAnswerLedger     = "answer_ledger"
+	EvJobStarted       = "job_started"
+	EvAgentRecovered   = "wi_agent_rederived"
+	EvNeedsRecovery    = "needs_recovery"
+	EvInfraIncident    = "infra_incident"
+	EvNeedsInput       = "needs_input"
 	EvPublished        = "published"
 	EvPushFailed       = "push_failed"
 	EvPushBackpressure = "push_backpressure"
-	EvWrapBlocked      = "wrap_blocked"
 	// EvPushPoisonedLocal is the V8-repair classification of the LOCAL
 	// gitlink precheck refusal (gitops' typed GIT-412
 	// LOCAL_GITLINK_DETECTED — the poison never entered local history).
@@ -64,13 +47,6 @@ const (
 	// already-committed gitlink (should one ever occur again) stays an
 	// ordinary push_failed and is counted, unchanged.
 	EvPushPoisonedLocal = "push_poisoned_local"
-	// EvWrapEvidenceRefused is the V4 fail-closed gate's record: a
-	// flush(wrap) was refused with DAEMON-400 VERIFICATION_EVIDENCE_MISSING
-	// because an executed verification step carries no structured command
-	// evidence. The attempt is NOT terminal — the agent appends the
-	// evidence and re-flushes — so this is neither wrap_blocked nor any
-	// push bookkeeping; the refusal happened before any commit attempt.
-	EvWrapEvidenceRefused = "wrap_evidence_refused"
 	// EvTranscriptMissing is the F3 typed warning: a commit-boundary
 	// transcript sync could not locate the derivation's live harness
 	// transcript (the harness wrote nothing under its session store).
@@ -95,18 +71,6 @@ const (
 	// owns the QUESTION face) and in every suppressed state.
 	EvNoProgress = "no_progress"
 	EvJobStopped = "job_stopped"
-	// The F6-B memory channel bookkeeping: one event per UDS recall /
-	// remember the daemon proxied (payload: top_k + hit count, or the
-	// stored id/type/visibility — plus the write_ms timing on remember,
-	// see EvMemoryRemember). Observability only — the routes are
-	// stateless proxies and carry no monitor state.
-	// EvMemoryRemember is the memory channel's write half: the body
-	// carries the stored id/type/visibility plus write_ms — the
-	// Store.Create commit round-trip in milliseconds as seen at the
-	// append site (M6's write→retrievable latency sample; observed-only,
-	// idempotent replays timed just as honestly as fresh writes).
-	EvMemoryRecall   = "memory_recall"
-	EvMemoryRemember = "memory_remember"
 	// EvDrainDegraded is the drain loop's authorization-class degraded
 	// signal (daemon/daemon.go fetchDrainWave): a drain-mode wave fetch of
 	// the ready queue was denied for authorization reasons (typed aihub
@@ -152,7 +116,7 @@ const EventsFile = "events.log"
 
 // EventLog appends protocol.EventEntry lines to the daemon events file
 // and mirrors them into per-WI rings. Safe for concurrent use: monitor
-// goroutines, flush sub-goroutines and the HTTP read face all touch it.
+// goroutines, push sub-goroutines and the HTTP read face all touch it.
 type EventLog struct {
 	mu   sync.Mutex
 	f    *os.File
@@ -187,8 +151,8 @@ func NewEventLog(dataDir string) (*EventLog, error) {
 func (l *EventLog) Path() string { return l.path }
 
 // Append writes one event for work item wi. body may be nil. The file
-// write is best-effort by design (§五: a needs_input flush degrades to
-// "write events file, do not block the agent"): an I/O failure is
+// write is best-effort by design (§五: an events-file failure never
+// blocks the agent): an I/O failure is
 // returned to the caller, but the ring entry is recorded either way so
 // the live observe face keeps working.
 func (l *EventLog) Append(wi, kind string, body any) error {

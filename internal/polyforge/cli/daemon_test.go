@@ -254,29 +254,6 @@ func TestDaemonClientTypedErrorDecoding(t *testing.T) {
 	}
 }
 
-// TestDaemonClientFlushRoute pins the flush route (ruling C2:
-// publish_request is replaced by flush on the UDS proxy face).
-func TestDaemonClientFlushRoute(t *testing.T) {
-	d := newDaemonFixture(t)
-	d.answer("POST", "/jobs/wi_abc/flush", `{"ok":true,"local_commit":"sha1","pushed":true}`)
-	c := NewDaemonClient(d.sock)
-	req := protocol.FlushRequest{
-		WorkItem: "wi_abc",
-		SpawnN:   1,
-		Reason:   protocol.FlushWrap,
-	}
-	if _, err := c.Flush("wi_abc", req); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-	got := d.rec.last()
-	if got.Method != "POST" || got.Path != "/jobs/wi_abc/flush" {
-		t.Errorf("request = %s %s", got.Method, got.Path)
-	}
-	if !strings.Contains(got.Body, `"reason":"wrap"`) {
-		t.Errorf("body = %s", got.Body)
-	}
-}
-
 // TestDaemonClientStatusRoundtrip pins GET /status decoding.
 func TestDaemonClientStatusRoundtrip(t *testing.T) {
 	d := newDaemonFixture(t)

@@ -154,23 +154,7 @@ func TestW124TurnDurationPendingExempt(t *testing.T) {
 	feed(h, fxMsgStart)
 
 	// Arm the pending question.
-	resp := make(chan protocol.FlushAck, 1)
-	m.flushCh <- FlushCall{
-		Req: protocol.FlushRequest{
-			WorkItem:   "wi_test",
-			SpawnN:     1,
-			Reason:     protocol.FlushNeedsInput,
-			QuestionID: "q_w124_turn",
-			Question:   "parked",
-			Step:       "code",
-		},
-		Resp: resp,
-	}
-	select {
-	case <-resp:
-	case <-time.After(2 * time.Second):
-		t.Fatal("flush(needs_input) was never answered")
-	}
+	writePendingQuestion(t, m, "q_w124_turn", "parked", "code")
 
 	// 6 wall windows — past the 4x turn bound with slack: nothing fires,
 	// no probe leaves.

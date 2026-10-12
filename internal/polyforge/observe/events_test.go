@@ -130,16 +130,14 @@ func TestHTTPObserveAfterCursor(t *testing.T) {
 		code, _ := hs.get(t, "/jobs/wi_http/observe")
 		return code == 200
 	})
-	// Generate a handful of events through the real flush face (each
+	// Generate a handful of events through execution.json (each
 	// distinct question_id is one needs_input event).
+	m := hs.o.lookup("wi_http")
+	if m == nil {
+		t.Fatal("monitor not registered")
+	}
 	for i := 0; i < 3; i++ {
-		code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-			WorkItem: "wi_http", SpawnN: 1,
-			Reason: protocol.FlushNeedsInput, QuestionID: "q_http_" + strconv.Itoa(i), Question: "again?",
-		}, nil)
-		if code != 200 {
-			t.Fatalf("needs_input flush: %d %s", code, body)
-		}
+		writePendingQuestion(t, m, "q_http_"+strconv.Itoa(i), "again?", "code")
 	}
 	soon(t, time.Second, "events appended", func() bool {
 		return len(hs.o.Events().Since("wi_http")) >= 4 // job_started + 3 needs_input

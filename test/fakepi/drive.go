@@ -10,15 +10,10 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,14 +83,10 @@ type planAction struct {
 	// root-cause consuming artifacts/repro.md).
 	Files map[string]string `json:"files,omitempty"`
 
-	// FlushWrap runs a flush(wrap) round trip BEFORE ("before") or AFTER
-	// ("after") the envelope write — the seal-gate cycle shapes.
-	FlushWrap string `json:"flush_wrap,omitempty"`
 	// Evidence carries extra structured command-evidence entries
 	// (merged with the synthetic one; suppressed entirely by
 	// NoEvidence). The driver copies command_evidence onto
-	// execution.json's steps.<id>.output.commands — the face the wrap
-	// evidence gate judges.
+	// execution.json's steps.<id>.output.commands.
 	Evidence []map[string]any `json:"evidence,omitempty"`
 	// OpenTurn opens a stdout turn and leaves it open before the
 	// envelope write (the F15 record-stream shapes on driver step
@@ -201,10 +192,9 @@ type driveEnv struct {
 	wi string
 	// handle is the PUBLIC session fingerprint (PF_SESSION_HANDLE,
 	// display only); spawnN is the v1.5 B2 derivation counter
-	// (PF_SPAWN_N) — the flush fence identity.
+	// (PF_SPAWN_N).
 	handle     string
 	spawnN     int
-	socket     string // PF_DAEMON_SOCKET
 	sessionArg string
 	resumed    bool
 
@@ -238,7 +228,6 @@ func newDriveEnv() *driveEnv {
 		wi:         wi,
 		handle:     capsuleSessionHandle(),
 		spawnN:     spawnN,
-		socket:     os.Getenv("PF_DAEMON_SOCKET"),
 		sessionArg: transcriptPathOf(),
 		resumed:    hasSessionArg(),
 		ackProbe:   pl.AckProbe == nil || *pl.AckProbe,
@@ -386,10 +375,6 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 		d.unpoisonGitlink(false)
 	}
 	sleepMS(act.MS) // the delayed-envelope-write shape (the hang lane)
-	if act.FlushWrap == "before" {
-		ok, errText := d.flushWrapVerbose("wrapped")
-		d.journal("flush", map[string]any{"reason": "wrap", "final_status": "wrapped", "ok": ok, "error": errText})
-	}
 	// Extra capsule-relative files, verbatim content (the declared-input
 	// producer: a downstream step's declared inputs must exist at its
 	// dispatch).
@@ -431,9 +416,8 @@ func pinnedModelOf() string {
 // — two atomic writes, Version increasing each time (the async push
 // surface the observe lane polls). The done write carries the step's
 // structured command evidence (output.commands) — the #29 command-audit
-// contract every real driver honors and the wrap gate enforces — unless
-// the plan action suppressed it (the evidence-gate scenario's broken
-// shape).
+// contract every real driver honors — unless the plan action suppressed
+// it (the evidence-gate scenario's broken shape).
 func (x *execState) step(id string) *execStep {
 	st := x.Steps[id]
 	if st == nil {
@@ -443,21 +427,6 @@ func (x *execState) step(id string) *execStep {
 	return st
 }
 
-// askAndWait persists the open pending_question (BEFORE the flush, the
-// idempotent double-source contract), fires the real flush(needs_input)
-// over the UDS proxy, then parks until the control loop's answer
-// consumption signals this question id. The SAME step continues in
-// place once the answer lands (the interactive contract: the step is
-// started, parks on its open question, never re-dispatches).
-//
-// F9 contract behavior (mirroring the executor skill): the question id
-// is MINTED ONCE and lives in execution.json — whatever the plan says,
-// a pending question already persisted for this step IS the question's
-// identity, and a re-derived instance re-presents that id verbatim,
-// never a fresh one. An answer that already landed for that id (the
-// daemon re-delivers delivered-but-unconsumed answers at attachment,
-// and the re-delivery can outrun the plan) is consumed silently, with
-// no re-ask.
 func (d *driveEnv) beginOpenTurn(journalKind string) {
 	d.mu.Lock()
 	d.hanging = true
@@ -508,11 +477,6 @@ func (d *driveEnv) suppressProbeAck() bool {
 	return d.hanging || !d.ackProbe
 }
 
-// beginShutdownFlush performs the agent's flush(shutdown) once: commit
-// what exists, ack the result, never wait — the graceful-shutdown
-// contract (§五). The intent is journaled BEFORE the call: the daemon
-// may tear the process down the instant its own push event lands, so
-// a post-call journal line would race the teardown.
 func (d *driveEnv) loadExec() *execState {
 	raw, err := os.ReadFile(execPath)
 	if err != nil {
@@ -826,88 +790,4 @@ func (d *driveEnv) spawnNumber() int64 {
 		return n
 	}
 	return 1
-}
-
-// flushOnce is one flush round trip. retry reports whether the failure
-// is the transient spawn-window shape worth retrying; errText carries the
-// refusal verbatim for the journal.
-func (d *driveEnv) flushOnce(reason string, raw []byte) (ok bool, errText string, retry bool) {
-	conn, err := net.Dial("unix", d.socket)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): dial: %v\n", reason, err)
-		return false, err.Error(), true // the listener may not be up yet
-	}
-	defer conn.Close()
-	req, err := http.NewRequest("POST", "http://daemon/jobs/"+d.wi+"/flush", bytes.NewReader(raw))
-	if err != nil {
-		return false, err.Error(), false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Transport: &http.Transport{
-		DialContext: func(context.Context, string, string) (net.Conn, error) { return conn, nil },
-	}}).Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): %v\n", reason, err)
-		return false, err.Error(), true
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != 200 {
-		fmt.Fprintf(os.Stderr, "fakepi: flush(%s): HTTP %d: %s\n", reason, resp.StatusCode, out)
-		// a close/recovery race is transient; a stale counter is forever.
-		// "instance just spawned" is the flushGate's typed RECOVERING
-		// transient (the recovery window — the wording is the daemon's,
-		// unchanged in v1.5); "already in progress" is a close genuinely
-		// holding the seal guard.
-		return false, string(out), bytes.Contains(out, []byte("already in progress")) ||
-			bytes.Contains(out, []byte("instance just spawned")) ||
-			resp.StatusCode >= 500
-	}
-	var fa struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error,omitempty"`
-	}
-	_ = json.Unmarshal(out, &fa)
-	return fa.OK, fa.Error, false
-}
-
-// flushAck is flush carrying the ack's error text (the typed refusals —
-// DAEMON-400 VERIFICATION_EVIDENCE_MISSING among them — must be
-// assertable from the journal, not just as a boolean).
-func (d *driveEnv) flushAck(reason string, extra map[string]any) (bool, string) {
-	if d.socket == "" {
-		fmt.Fprintln(os.Stderr, "fakepi: PF_DAEMON_SOCKET not set; flush unavailable")
-		return false, "PF_DAEMON_SOCKET not set"
-	}
-	body := map[string]any{
-		"work_item": d.wi,
-		"spawn_n":   d.spawnN,
-		"reason":    reason,
-	}
-	for k, v := range extra {
-		body[k] = v
-	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return false, err.Error()
-	}
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		ok, errText, retry := d.flushOnce(reason, raw)
-		if ok {
-			return true, ""
-		}
-		if !retry || time.Now().After(deadline) {
-			return false, errText
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-}
-
-// flushWrapVerbose is flushWrap carrying the ack's error text (the typed
-// refusal — DAEMON-400 VERIFICATION_EVIDENCE_MISSING — must be assertable
-// from the journal).
-func (d *driveEnv) flushWrapVerbose(finalStatus string) (bool, string) {
-	ack, errText := d.flushAck("wrap", map[string]any{"final_status": finalStatus})
-	return ack, errText
 }

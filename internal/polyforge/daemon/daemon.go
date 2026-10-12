@@ -9,8 +9,8 @@
 // Design authority: docs/design/polyforge-vnext/v1-architecture-spec.md
 // (rulings C1–C3), v1-spec-full.md (§一 §二 §五 §十一), 04-local-runtime.md
 // (§3 modes, §5 routes/error codes, §6.1 admission, §6.5 shutdown — the
-// v0-era publish machinery it describes is deleted per C2/C3; flush is
-// the only archival verb and Observe, not a publish loop, executes it).
+// v0-era publish machinery it describes is deleted per C2/C3; Observe,
+// not a publish loop, executes the archival push).
 package daemon
 
 import (
@@ -127,12 +127,11 @@ type Config struct {
 	// (hang watchdog, idle watchdog, liveness-probe bound, answer-ack
 	// window). Zero fields keep the observe defaults
 	// (10min / 10min / 2min / 2min).
-	Observe           ObserveWindows
-	DrainInterval     time.Duration // drain wave-fetch period (5s)
-	DispatchTick      time.Duration // dispatcher/backfill period (200ms)
-	ShutdownFlushWait time.Duration // per-job flush(shutdown) wait (60s)
-	ShutdownBudget    time.Duration // whole-shutdown ceiling (5min)
-	ExitPoll          time.Duration // adapter exit-poll period (200ms)
+	Observe        ObserveWindows
+	DrainInterval  time.Duration // drain wave-fetch period (5s)
+	DispatchTick   time.Duration // dispatcher/backfill period (200ms)
+	ShutdownBudget time.Duration // whole-shutdown ceiling (5min)
+	ExitPoll       time.Duration // adapter exit-poll period (200ms)
 }
 
 // ObserveWindows is the observe-lane supervision-window subset of the
@@ -180,9 +179,6 @@ func (c *Config) fill() {
 	if c.DispatchTick == 0 {
 		c.DispatchTick = 200 * time.Millisecond
 	}
-	if c.ShutdownFlushWait == 0 {
-		c.ShutdownFlushWait = 60 * time.Second
-	}
 	if c.ShutdownBudget == 0 {
 		c.ShutdownBudget = 5 * time.Minute
 	}
@@ -205,9 +201,8 @@ type Daemon struct {
 	obMsgs   chan protocol.OBMsg
 	attachCh chan observe.Attach
 
-	// sealGuard serializes the two close paths (CLI wrap/pause vs the
-	// agent's flush(wrap)): exactly one close may run per work item; the
-	// late arrival answers DAEMON-409 (the wrap dual-path arbitration).
+	// sealGuard serializes the close paths (CLI wrap/pause): exactly one
+	// close may run per work item; the late arrival answers DAEMON-409.
 	sealMu   sync.Mutex
 	sealedWI map[string]bool
 
@@ -302,7 +297,6 @@ func New(cfg Config) (*Daemon, error) {
 		PiBin:               cfg.PiBin,
 		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
 		CgroupRoot:          cfg.CgroupRoot,
-		SocketPath:          cfg.SocketPath, // the spawned agent's PF_DAEMON_SOCKET (flush proxy, §五)
 		EnvSecrets:          []string{cfg.APIKey},
 	}
 	// Runtime-sourced diagnostic events (a seal push that failed after
@@ -380,9 +374,6 @@ func New(cfg Config) (*Daemon, error) {
 		// a superseded daemon learns within ~5min even with zero push
 		// traffic; unit-tested in observe, daemon-wired here).
 		SessionVerify: cfg.Hub,
-		// F6-B: the narrow memory channel's proxy seam — recall/remember
-		// over the UDS face, all daemon-side against aihub (memface.go).
-		MemoryFace: memFace{hub: cfg.Hub},
 		// Bug-4 seam: the supervision windows pass through; zero fields
 		// keep the observe defaults.
 		HangWindow:   cfg.Observe.HangWindow,
@@ -855,7 +846,7 @@ func (d *Daemon) tapRecord(wi string, line []byte) {
 
 // dispatch starts pending jobs into free slots, priority-desc then FIFO,
 // and reconciles the queue's running marks against the runtime's live
-// job set first (a job sealed by wrap/pause/the flush path frees its
+// job set first (a job sealed by wrap/pause frees its
 // slot without telling the queue).
 func (d *Daemon) dispatch() {
 	if d.modes.ShuttingDown() {
@@ -1008,16 +999,6 @@ func (d *Daemon) releaseSeal(wi string) {
 	d.sealMu.Lock()
 	delete(d.sealedWI, wi)
 	d.sealMu.Unlock()
-}
-
-// sealHeld reports whether a close path currently holds the seal guard
-// of wi (the wrap dual-path arbitration's non-claiming read; the flush
-// gate distinguishes a REAL in-progress close from the recovery
-// window's transient).
-func (d *Daemon) sealHeld(wi string) bool {
-	d.sealMu.Lock()
-	defer d.sealMu.Unlock()
-	return d.sealedWI[wi]
 }
 
 // terminalStatus reports whether an aihub status is terminal for the

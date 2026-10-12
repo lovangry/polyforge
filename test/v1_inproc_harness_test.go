@@ -174,7 +174,6 @@ func newInprocRig(t *testing.T, inst *v1Install, hangWindow, probeTimeout time.D
 		WorkflowsDir:  filepath.Join(inst.root, "workflows"),
 		Harness:       "pi",
 		PiBin:         inst.fakepiPath,
-		SocketPath:    sock,
 	}
 	// The tap rides the spawner's SHARED config (DefaultSpawner takes it
 	// by pointer), so the binding order is no longer load-bearing — kept

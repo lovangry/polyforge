@@ -4,13 +4,13 @@ Execution-plane verb: routed to the local daemon (the wrap route). `wrap`
 is a terminal outcome: the generation closes for good, the capsule is
 sealed read-only and pushed, and no re-claim happens automatically.
 
-**Two paths close a work item, and they arbitrate.** The human path is this
-verb; the agent path is the executor's own `flush(wrap)` call (the agent
-finishing its workflow on its own). Exactly one close wins: the daemon's
-seal guard makes the late arrival answer `DAEMON-409` while the first close
-is in flight, and a close that finds the work item already terminal answers
-gracefully (`already_terminal`), never a hard error. The winner performs
-the final commit+push and ends the generation exactly once.
+**Closes arbitrate.** The human path is this verb (or `pause`); the
+workflow's own terminal exit is closed by the daemon's recovery engine.
+Exactly one close wins: the daemon's seal guard makes the late arrival
+answer `DAEMON-409` while the first close is in flight, and a close that
+finds the work item already terminal answers gracefully
+(`already_terminal`), never a hard error. The winner performs the final
+commit+push and ends the generation exactly once.
 
 ## Triggers
 
@@ -42,7 +42,7 @@ wrap answers the graceful `already_terminal` shape, not an error.
 |---|---|---|
 | `DAEMON-404` | No local job and the work item is not blocked or terminal on the server | It is not running here — check observe; if it runs elsewhere, wrap it there. |
 | (no code) `the workflow is parked blocked …` | A close of a workflow parked blocked on an incomplete result (polyforge#116): a `--fail` close is the §6.4 owner's terminate verdict and lands `failed` at the hub (the terminate-blocked door); a plain `wrap` (success) or a `pause` of a parked workflow is refused — a parked workflow never completed, so there is nothing to seal | Use `pf wrap <id> --fail` to terminate the parked workflow, or `pf resume <id>` to continue it in place. |
-| `DAEMON-409` | A close is already in progress for this job — the agent's own wrap flush, another pause/wrap, or a mid-recovery state | Wait for the in-flight close to settle, then observe; the work item is being closed exactly once either way. |
+| `DAEMON-409` | A close is already in progress for this job — another pause/wrap, or a mid-recovery state | Wait for the in-flight close to settle, then observe; the work item is being closed exactly once either way. |
 | `CORE-*` passthrough (e.g. `CORE-403`, `CORE-409`) | The server-side end-generation was refused | The typed Core verdict arrives verbatim — typically the generation is no longer yours to end; act per its detail. |
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |
 | `dial unix …` | Daemon not running | Nothing is executing here — start the daemon or check `--socket`. |

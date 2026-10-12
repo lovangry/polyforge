@@ -32,28 +32,6 @@ through the same AIHub authentication as any other HTTP client, and daemon
 mediation does not loosen Core-side validation. If no intent fits or the
 intent is ambiguous, **ask rather than guess**.
 
-## Agent role detection (read your own env first)
-
-Before acting on any duty below, check your own spawn environment for
-`PF_AGENT_ROLE`. This skill serves two different kinds of session, and every
-supervision duty is routed by which one you are:
-
-- **`PF_AGENT_ROLE=wi-agent` present → EXECUTION role.** You are a WI agent
-  the daemon spawned to drive one work item's workflow. Skip ALL supervision
-  duties: no watcher setup, no session-start reconciliation, no
-  needs_input presentation, no stall reporting — the watcher, needs_input
-  and stall machinery of the sections below belongs to interactive
-  sessions, not to you. Run the workflow you were derived for: execute the
-  step, write artifacts, commit and push.
-- **Marker absent → SUPERVISION role.** You are an interactive session (the
-  owner's harness). You carry the routing and the supervision duties as
-  documented here — but the turn-start and watch-lane duties apply
-  BOUND-ONLY: you present and answer for work items bound to THIS session
-  only (the bound-set rule of the turn-start obligation section below).
-
-The daemon injects exactly the value `wi-agent` into WI-agent processes; an
-interactive session carries no marker and is SUPERVISION.
-
 ## Install surface
 
 This skill is the **only** thing a user harness installs. Pi: one `skills`
@@ -324,8 +302,8 @@ pf [global flags] <verb> [verb flags] [positional args]
   (non-fast-forward, gitlink, blob size, sequence-trailer violations),
   `DAEMON-*` the local daemon face, `CAP-*` capsule lifecycle. The v0
   `SYNC-*` family is deleted — git IS the revision chain in v1; the daemon's
-  archival verb is `flush(reason)`, and only the WI Agent's executor ever
-  calls it.
+  archival push is the daemon's own (the observe lane's periodic
+  commit+push and the close paths' seal push).
 - A daemon-face failure to dial (`dial unix ...`) means the daemon is not
   running on this machine — start it (`pf daemon`) or check `--socket`; it is
   not a typed verdict about any work item.

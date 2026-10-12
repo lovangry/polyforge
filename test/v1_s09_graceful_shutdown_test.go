@@ -7,18 +7,16 @@ import (
 )
 
 // v1_s09: graceful shutdown with a running driver workflow. The shutdown
-// sequence latches shutting_down, notifies every live agent (the driver
-// bridge carries no control channel — the notice is best-effort by
-// contract), waits bounded for the agents' flush(shutdown) (a driver WI
-// has no flush face: the wait degrades on timeout, exactly as designed —
-// uncommitted state rides the recovery engine), stops the observe lane,
+// sequence latches shutting_down (no per-agent notice or flush wait: the
+// driver owns the step state machine and uncommitted state rides the
+// recovery engine), stops the observe lane,
 // terminates every agent tree (the driver handle's Terminate unwinds Run
 // and its live step process with it), and the daemon PROCESS exits. The
 // work item is NOT closed: aihub still shows running under the SAME
 // session (M3), and a restarted daemon reconciles and resumes through the
 // recovery engine. The stop_notice/flush(shutdown) journal-ordering faces
 // of the legacy scenario are the WI-Agent RPC control channel — retired
-// pending Phase-4 #106 (the driver-era teardown faces are the process
+// (the driver-era teardown faces are the process
 // exit, the orphan scan and the session record).
 func TestV1S09GracefulShutdown(t *testing.T) {
 	inst := newV1Install(t)
@@ -46,10 +44,7 @@ func TestV1S09GracefulShutdown(t *testing.T) {
 	}
 
 	// Graceful shutdown through the real CLI. The daemon answers, then
-	// runs the bounded sequence and the process exits. (The per-job
-	// flush(shutdown) wait degrades on timeout for a driver WI — the
-	// sequence stays bounded by its budget; the exit bound here covers
-	// that wait plus the teardown.)
+	// runs the bounded sequence and the process exits.
 	d.pf(t, "ops", "shutdown")
 	if !d.exitedWithin(90 * time.Second) {
 		t.Fatalf("daemon process did not exit after shutdown (log tail: %s)", d.logTail())

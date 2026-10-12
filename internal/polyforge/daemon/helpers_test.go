@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
@@ -550,18 +551,17 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 		// a FAKE engine starter that delegates to the fake spawner so the
 		// scripted WI-Agent semantics (spawn call params, agent handles)
 		// stay assertable without a real driver.
-		Mapping:           mappingFor(ws),
-		DataDir:           data,
-		GitRemoteBase:     hubBase,
-		MaxConcurrent:     4,
-		Hub:               hub,
-		Spawner:           sp,
-		AgentStarter:      fakeEngineStarter(),
-		ObservePoll:       10 * time.Millisecond,
-		DrainInterval:     10 * time.Millisecond,
-		DispatchTick:      10 * time.Millisecond,
-		ShutdownFlushWait: 100 * time.Millisecond,
-		ExitPoll:          10 * time.Millisecond,
+		Mapping:       mappingFor(ws),
+		DataDir:       data,
+		GitRemoteBase: hubBase,
+		MaxConcurrent: 4,
+		Hub:           hub,
+		Spawner:       sp,
+		AgentStarter:  fakeEngineStarter(),
+		ObservePoll:   10 * time.Millisecond,
+		DrainInterval: 10 * time.Millisecond,
+		DispatchTick:  10 * time.Millisecond,
+		ExitPoll:      10 * time.Millisecond,
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -616,6 +616,47 @@ func (td *testDaemon) submitClaim(t *testing.T, wi string) {
 		t.Fatalf("submit answer = %+v, want accepted for %s", sr, wi)
 	}
 	td.waitLive(t, wi)
+}
+
+// seedPendingQuestion plays the driver's needs_input park: it writes an
+// open pending_question for the step into the capsule's execution.json
+// (Version bumped, atomic tmp+rename) so the observe monitor's
+// pollExecution/applyPendingFromExec projects it.
+func (td *testDaemon) seedPendingQuestion(t *testing.T, wi, qid, step, question string) {
+	t.Helper()
+	path := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", wi, filepath.FromSlash(capsule.ExecutionJSON))
+	exec := capsule.Execution{WorkItemID: wi, Steps: map[string]*capsule.Step{}}
+	if raw, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(raw, &exec)
+		if exec.Steps == nil {
+			exec.Steps = map[string]*capsule.Step{}
+		}
+	}
+	st := exec.Steps[step]
+	if st == nil {
+		st = &capsule.Step{Status: capsule.StepInProgress}
+		exec.Steps[step] = st
+	}
+	st.PendingQuestion = &capsule.PendingQuestion{
+		ID: qid, Step: step, Question: question,
+		AskedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	exec.CurrentStep = step
+	exec.Version++
+	blob, err := json.Marshal(exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // waitLive blocks until the work item holds a runtime job.

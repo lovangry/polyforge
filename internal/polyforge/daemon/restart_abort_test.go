@@ -59,19 +59,18 @@ func TestRunAbortsWhenMidflightCapsuleMissing(t *testing.T) {
 	hub := newFakeHub()
 	sp := &fakeSpawner{}
 	cfg := Config{
-		MachineID:         "m-test",
-		SocketPath:        filepath.Join(dir, "s.sock"),
-		Mapping:           mappingFor(ws),
-		DataDir:           data,
-		GitRemoteBase:     hubBase,
-		MaxConcurrent:     4,
-		Hub:               hub,
-		Spawner:           sp,
-		ObservePoll:       10 * time.Millisecond,
-		DrainInterval:     10 * time.Millisecond,
-		DispatchTick:      10 * time.Millisecond,
-		ShutdownFlushWait: 100 * time.Millisecond,
-		ExitPoll:          10 * time.Millisecond,
+		MachineID:     "m-test",
+		SocketPath:    filepath.Join(dir, "s.sock"),
+		Mapping:       mappingFor(ws),
+		DataDir:       data,
+		GitRemoteBase: hubBase,
+		MaxConcurrent: 4,
+		Hub:           hub,
+		Spawner:       sp,
+		ObservePoll:   10 * time.Millisecond,
+		DrainInterval: 10 * time.Millisecond,
+		DispatchTick:  10 * time.Millisecond,
+		ExitPoll:      10 * time.Millisecond,
 	}
 	d, err := New(cfg)
 	if err != nil {

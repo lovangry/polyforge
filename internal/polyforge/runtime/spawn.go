@@ -1,10 +1,8 @@
 // spawn.go: the WI-agent spawner for the pi harness. Ports the v0
 // supervisor's LIVE-TESTED RPC protocol layer: stdin carries one JSON
 // command object per line ({"id":..,"type":"prompt","message":..}), stdout
-// is a record stream where the assistant message_end record is the ack
-// carrier, response records correlate command ids, and daemon→agent control
-// lines ride prompt commands whose message text is the control JSON
-// VERBATIM. Isolation, env sanitization and the spawn journal land here.
+// is a record stream whose response records correlate command ids.
+// Isolation, env sanitization and the spawn journal land here.
 package runtime
 
 import (
@@ -20,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -52,33 +49,19 @@ var piIsolationFlags = []string{
 
 // piCommand is one stdin command of the real pi RPC protocol. Every
 // command MAY carry a string id; the matching response record repeats it.
-// streamingBehavior "steer" queues a control prompt for delivery after the
-// current assistant turn — the safe-boundary discipline the control
-// contract demands; the initial prompt needs none (the agent is idle at
-// derivation).
 type piCommand struct {
-	ID                string `json:"id,omitempty"`
-	Type              string `json:"type"` // "prompt"
-	Message           string `json:"message"`
-	StreamingBehavior string `json:"streamingBehavior,omitempty"`
+	ID      string `json:"id,omitempty"`
+	Type    string `json:"type"` // "prompt"
+	Message string `json:"message"`
 }
 
-// stdout record probe shapes: response records repeat our command ids;
-// message_end is the authoritative final assistant message (the ack
-// carrier — message_update deltas stream the same text piecemeal and are
-// never scanned, so one ack is never queued twice).
+// stdout record probe shape: response records repeat our command ids.
 type stdoutRecord struct {
-	Type    string          `json:"type"`
-	Command string          `json:"command"` // "prompt" on response records
-	ID      *string         `json:"id"`
-	Success *bool           `json:"success"`
-	Error   string          `json:"error"`
-	Message json.RawMessage `json:"message"`
-}
-
-type assistantMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Type    string  `json:"type"`
+	Command string  `json:"command"` // "prompt" on response records
+	ID      *string `json:"id"`
+	Success *bool   `json:"success"`
+	Error   string  `json:"error"`
 }
 
 // ---------------------------------------------------------------------------
@@ -217,25 +200,11 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		"PI_SESSION_DIR=" + filepath.Join(p.CapsuleDir, capsule.DirSession),
 		"PF_WI_ID=" + p.WorkItemID, // layer-4 cleanup marker (deliberate addition)
 		// v1.5 B2/B3 identity: the PUBLIC session handle and the monotonic
-		// derivation counter — the agent's flush fence keys. The SECRET
+		// derivation counter. The SECRET
 		// session id is deliberately ABSENT (it must never reach agent
 		// env; it lives only in state.json and the one-shot askpass).
 		"PF_SESSION_HANDLE=" + p.SessionHandle,
 		"PF_SPAWN_N=" + strconv.Itoa(p.SpawnN),
-		// polyforge#81 context identity: the execution-role marker. The
-		// skill routes on it at load time (EXECUTION = a WI agent: no
-		// supervision duties); step subagents inherit it through plain
-		// env propagation, needing no extra daemon code. Deliberate
-		// addition, same family as PF_WI_ID: the sanitize point above
-		// strips every inherited PF_* first, so a parent shell's
-		// spoofed PF_AGENT_ROLE cannot survive into the child.
-		"PF_AGENT_ROLE=wi-agent",
-	}
-	if s.cfg.SocketPath != "" {
-		// deliberate addition, same mechanism as PF_WI_ID: the env sanitize
-		// point strips every inherited PF_*, so the daemon's UDS path (the
-		// agent's flush(reason) proxy, §五) is handed back explicitly.
-		additions = append(additions, "PF_DAEMON_SOCKET="+s.cfg.SocketPath)
 	}
 	cmd.Env = newEnvSanitizer(s.cfg.EnvSecrets...).childEnv(additions...)
 	return cmd
@@ -372,7 +341,6 @@ type proc struct {
 	stdin     io.WriteCloser
 	startedAt string
 	taps      []func(string) // stdout record taps (the observe adapter binding)
-	acks      ackHub
 
 	mu   sync.Mutex // guards stdin writes
 	pend sync.Mutex // guards pending ids (own lock: stdin writes may block)
@@ -388,7 +356,6 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 		stdin:     stdin,
 		startedAt: nowStamp(),
 		pending:   map[string]bool{},
-		acks:      newAckHub(),
 		exited:    make(chan struct{}),
 		taps:      taps,
 	}
@@ -486,104 +453,28 @@ func (p *proc) writeCommand(c piCommand) error {
 	return nil
 }
 
-// SendControl delivers one daemon→agent control method (§五 stdio channel:
-// the probe only since polyforge#106 — the answer relay and the
-// stop-notice delivery died with the WI-Agent engine): the
-// protocol.ControlMsg JSON line is the message text of a prompt command
-// VERBATIM — the agent parses the user message text exactly as the raw
-// line. steer keeps the command legal while a turn is in flight and
-// delivers at the next boundary.
-func (p *proc) SendControl(m protocol.ControlMsg) error {
-	line, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	return p.writeCommand(piCommand{
-		ID: nextCommandID(), Type: "prompt",
-		Message: string(line), StreamingBehavior: "steer",
-	})
+// SendControl / WaitControlAck complete the supervised handle face
+// (spawn.Handle). The stdio control channel died with the WI-Agent
+// engine (polyforge#106) and the liveness probe is answered by the driver
+// bridge, so a bare harness process carries no control channel.
+func (p *proc) SendControl(protocol.ControlMsg) error {
+	return fmt.Errorf("runtime: control messages not supported on a harness process")
 }
 
-// WaitControlAck awaits the agent's ack of exactly m, bounded like every
-// control wait. The match is (method, correlation): the correlation token
-// of m is the question id (pf/answer) or the nonce (pf/probe) when those
-// are set, otherwise the numeric Seq — and the ack satisfies the wait by
-// echoing that token (Ref for string tokens, Seq for numeric ones).
-func (p *proc) WaitControlAck(ctx context.Context, m protocol.ControlMsg, bound time.Duration) error {
-	deadline := time.Now().Add(bound)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	qctx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-	w := p.acks.register(m)
-	defer p.acks.unregister(w)
-	if ack := p.acks.claim(w); ack != nil {
-		return ackOutcome(m, *ack)
-	}
-	select {
-	case ack := <-w.ch:
-		return ackOutcome(m, ack)
-	case <-qctx.Done():
-		return fmt.Errorf("runtime: no ack for %s: %w", m.Method, qctx.Err())
-	case <-p.exited:
-		return fmt.Errorf("runtime: no ack for %s: agent exited", m.Method)
-	}
-}
-
-func ackOutcome(m protocol.ControlMsg, ack protocol.ControlAck) error {
-	if ack.OK {
-		return nil
-	}
-	return fmt.Errorf("runtime: agent refused %s: %s", m.Method, ack.Error)
-}
-
-// ackTokenOf is the correlation token a control message carries:
-// pf/probe → the nonce, everything else → the numeric seq.
-func ackTokenOf(m protocol.ControlMsg) string {
-	if m.Method == protocol.ControlProbe && m.Nonce != "" {
-		return m.Nonce
-	}
-	return strconv.FormatInt(m.Seq, 10)
-}
-
-// ackMatches decides whether an incoming ack answers the message m: the
-// method must agree and the echoed token must agree (Ref for the string
-// tokens, Seq for the numeric one). A method whose message carries no
-// correlation at all (Seq 0) matches its tokenless ack.
-func ackMatches(m protocol.ControlMsg, ack protocol.ControlAck) bool {
-	if ack.Method != m.Method {
-		return false
-	}
-	token := ackTokenOf(m)
-	if ack.Ref != "" {
-		return ack.Ref == token
-	}
-	return strconv.FormatInt(ack.Seq, 10) == token
+func (p *proc) WaitControlAck(context.Context, protocol.ControlMsg, time.Duration) error {
+	return fmt.Errorf("runtime: no control ack channel on a harness process")
 }
 
 // classify sorts one stdout line: response records repeating OUR command
-// ids are observed (success=false is logged, never an ack) and dropped;
-// message_end records carrying an assistant message are the ack carrier —
-// their text is scanned line-by-line for the closed ack shape and every
-// match is ROUTED to the waiter whose (method, correlation) it answers;
-// everything else is bulk.
+// ids are observed (success=false is logged) and dropped; everything else
+// is bulk.
 func (p *proc) classify(line string) {
 	var rec stdoutRecord
 	if json.Unmarshal([]byte(line), &rec) != nil || rec.Type == "" {
 		return // non-record noise: bulk
 	}
-	switch rec.Type {
-	case "response":
+	if rec.Type == "response" {
 		p.observeResponse(rec)
-	case "message_end":
-		text, ok := assistantText(rec.Message)
-		if !ok {
-			return
-		}
-		for _, l := range strings.Split(text, "\n") {
-			p.controlCandidate(l)
-		}
 	}
 }
 
@@ -600,66 +491,6 @@ func (p *proc) observeResponse(rec stdoutRecord) {
 	}
 }
 
-// controlCandidate routes one ack-shaped line: a JSON object carrying a
-// control method of the closed vocabulary is delivered to the waiter it
-// answers — by (method, correlation), so concurrent waiters never steal
-// each other's acks. Refusals (ok=false) are delivered too: the waiter
-// must learn its method was refused, not time out on a dropped line. An
-// ack that answers no live waiter (a late echo of a dead wait) is
-// dropped.
-func (p *proc) controlCandidate(line string) {
-	s := strings.TrimSpace(line)
-	if !strings.HasPrefix(s, "{") {
-		return
-	}
-	var ack protocol.ControlAck
-	if json.Unmarshal([]byte(s), &ack) != nil || ack.Method == "" {
-		return
-	}
-	switch ack.Method {
-	case protocol.ControlProbe:
-		// closed vocabulary (polyforge#106: the probe is the only control
-		// method the stdio channel still carries)
-	default:
-		return
-	}
-	p.acks.deliver(ack)
-}
-
-func assistantText(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 {
-		return "", false
-	}
-	var m assistantMessage
-	if json.Unmarshal(raw, &m) != nil || m.Role != "assistant" {
-		return "", false
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(m.Content, &blocks); err == nil {
-		var b strings.Builder
-		for _, blk := range blocks {
-			if blk.Type == "text" {
-				b.WriteString(blk.Text)
-			}
-		}
-		return b.String(), true
-	}
-	var s string
-	if json.Unmarshal(m.Content, &s) == nil {
-		return s, true
-	}
-	return "", false
-}
-
-var msgID int64
-
-func nextCommandID() string {
-	return "pf-" + strconv.FormatInt(atomic.AddInt64(&msgID, 1), 10)
-}
-
 // Terminate kills the WHOLE process group and proves it empty: SIGTERM to
 // -pgid, bounded wait for the group (not merely the leader), SIGKILL, wait
 // again.
@@ -669,108 +500,6 @@ func (p *proc) Terminate(bound time.Duration) error {
 	}
 	// Setpgid: the child IS the group leader.
 	return killGroup(p.cmd.Process.Pid, bound)
-}
-
-// ---------------------------------------------------------------------------
-// The ack hub: per-waiter ack routing. The review's dual-key fix: a single
-// FIFO let concurrent waiters consume each other's lines and never matched
-// the echoed correlation. Each waiter registers under its own control
-// message; an incoming ack is handed to the FIRST waiter whose (method,
-// correlation) it satisfies. An ack that races ahead of its waiter —
-// SendControl returns before WaitControlAck parks the wait, and a fast
-// agent may ack in between — parks in the hub's bounded orphan backlog
-// and is claimed by the waiter at registration, so nothing is lost on
-// that path either.
-
-const maxAckBacklog = 16 // bounds both the per-waiter and orphan backlogs
-
-// ackHub routes control acks to the waiter that asked for them.
-type ackHub struct {
-	mu      sync.Mutex
-	next    uint64
-	waiters map[uint64]*ackWaiter
-	orphans []protocol.ControlAck // acks that arrived before their waiter
-}
-
-func newAckHub() ackHub {
-	return ackHub{waiters: map[uint64]*ackWaiter{}}
-}
-
-// ackWaiter is one outstanding WaitControlAck.
-type ackWaiter struct {
-	id      uint64
-	msg     protocol.ControlMsg
-	ch      chan protocol.ControlAck
-	backlog []protocol.ControlAck
-}
-
-// register parks one waiter for m. The returned waiter's channel is
-// buffered 1; an ack that raced ahead of the registration is served
-// first through claim.
-func (h *ackHub) register(m protocol.ControlMsg) *ackWaiter {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.next++
-	w := &ackWaiter{id: h.next, msg: m, ch: make(chan protocol.ControlAck, 1)}
-	h.waiters[w.id] = w
-	return w
-}
-
-func (h *ackHub) unregister(w *ackWaiter) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.waiters, w.id)
-}
-
-// claim hands w one ack answering its message: its channel (already
-// delivered) first, then its backlog, then the hub's orphan backlog (the
-// SendControl→WaitControlAck race window).
-func (h *ackHub) claim(w *ackWaiter) *protocol.ControlAck {
-	select {
-	case ack := <-w.ch:
-		return &ack
-	default:
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(w.backlog) > 0 {
-		ack := w.backlog[0]
-		w.backlog = w.backlog[1:]
-		return &ack
-	}
-	for i, orphan := range h.orphans {
-		if ackMatches(w.msg, orphan) {
-			h.orphans = append(h.orphans[:i], h.orphans[i+1:]...)
-			ack := orphan
-			return &ack
-		}
-	}
-	return nil
-}
-
-// deliver routes one parsed ack to the first waiter it answers. A waiter
-// with a full channel parks the ack in its bounded backlog; an ack that
-// answers nobody YET parks in the bounded orphan backlog (its waiter may
-// be one SendControl-return away); beyond the bound it is dropped.
-func (h *ackHub) deliver(ack protocol.ControlAck) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, w := range h.waiters {
-		if !ackMatches(w.msg, ack) {
-			continue
-		}
-		select {
-		case w.ch <- ack:
-		default:
-			if len(w.backlog) < maxAckBacklog {
-				w.backlog = append(w.backlog, ack)
-			}
-		}
-		return
-	}
-	if len(h.orphans) < maxAckBacklog {
-		h.orphans = append(h.orphans, ack)
-	}
 }
 
 // readBoundedLine reads one newline-terminated line, never accumulating

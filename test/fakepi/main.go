@@ -137,8 +137,6 @@ func main() {
 		var ctl struct {
 			Method string `json:"method"`
 			Seq    int64  `json:"seq"`
-			ID     string `json:"id"`
-			Answer string `json:"answer"`
 			Nonce  string `json:"nonce"`
 		}
 		if json.Unmarshal([]byte(cmd.Message), &ctl) != nil || ctl.Method == "" {

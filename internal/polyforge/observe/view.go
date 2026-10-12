@@ -31,7 +31,7 @@ import (
 func (m *Monitor) JobView() *protocol.JobView {
 	m.stateMu.Lock()
 	pending := m.pending
-	sealing, wrapped, blocked := m.sealing, m.wrapped, m.blocked
+	sealing := m.sealing
 	spawn := m.spawnN
 	fp := ""
 	if m.sessionID != "" {
@@ -88,11 +88,10 @@ func (m *Monitor) JobView() *protocol.JobView {
 	}
 
 	// status derivation, most specific first. A terminal derivation
-	// (wrap acked or wrap-blocked) or a terminal workflow_status in the
-	// authoritative file wins; then the seal-in-progress window; then the
+	// workflow_status in the authoritative file wins; then the seal-in-progress window; then the
 	// needs_input exemption; otherwise the job is running.
 	switch {
-	case wrapped || blocked || isTerminalStatus(exec.WorkflowStatus):
+	case isTerminalStatus(exec.WorkflowStatus):
 		view.Status = protocol.JobDone
 	case sealing:
 		view.Status = protocol.JobSealing

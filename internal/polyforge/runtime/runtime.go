@@ -91,10 +91,6 @@ type Config struct {
 	// once) delays the release; only a channel wedged past the window
 	// loses it, loudly.
 	ReleaseRetryWindow time.Duration // total retry bound for a deferred release (default 2min)
-	// SocketPath is the daemon's UDS listen path, injected into every
-	// spawned agent as PF_DAEMON_SOCKET so the agent can call
-	// flush(reason) on the proxy (§五).
-	SocketPath string
 	// EventTap, when non-nil, receives runtime-sourced diagnostic events
 	// (kind "push_failed" on a seal push that failed after its retries)
 	// so they land in the daemon's durable events log next to the
@@ -126,7 +122,7 @@ type Config struct {
 
 func (c *Config) fill() {
 	// The harness adapter defaults to the only one that exists today
-	// (the pi spawner); it decides the F7 discovery-copy directory.
+	// (the pi spawner).
 	if c.Harness == "" {
 		c.Harness = "pi"
 	}
@@ -231,11 +227,11 @@ type job struct {
 	state              JobState
 	stopReason         string // sealed-in reason while SEALING (restart can finish the stop)
 	// sealedPush records that the final capsule state was ALREADY
-	// committed and pushed by the flush(wrap) half of the dual close
-	// (the flaw fix): the stopOp half then skips its own seal push. It is
+	// committed and pushed by the driver's own publish (the terminal
+	// close of recover.go): stopOp then skips its own seal push. It is
 	// set when the SEALING transition records the reason and persisted
-	// with it, so a crash between the flush's push and SessionEnd keeps
-	// the restart's stop finisher from re-pushing either.
+	// with it, so a crash between that push and SessionEnd keeps the
+	// restart's stop finisher from re-pushing either.
 	sealedPush bool
 	capsuleDir string
 	git        gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
@@ -358,7 +354,7 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	// verify in flight while a recovery bumps spawn N→N+1 emitted
 	// OBSuperseded(N), the fence dropped it at the counter mismatch, and
 	// the freshly-derived agent of a WI held elsewhere ran unsupervised
-	// forever (detection/push/flush/revalidation all suppressed, the
+	// forever (detection/push/revalidation all suppressed, the
 	// monitor latched). Every other OB kind stays fenced (B2).
 	if msg.Kind != protocol.OBSuperseded && msg.SpawnN != spawn {
 		return // stale handle: dropped (recovery-loop guard, §二)
@@ -393,28 +389,6 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 			return
 		}
 		r.recoverOp(ctx, j, msg.Reason, msg.Detail)
-	case protocol.OBCompleted:
-		if state != StateRunning {
-			return
-		}
-		// The terminal vocabulary (wrapped|failed|blocked) passes through
-		// VERBATIM: flush(wrap)'s blocked outcome (3 failed seals) must
-		// reach aihub as blocked, not be silently upgraded to wrapped.
-		//
-		// wrapped|failed additionally mean the monitor's flushWrap has
-		// ALREADY committed and pushed the final state ("wrap: <status>",
-		// its EvPublished) — the dual-path close's other half, this very
-		// Stop, must not push a second time: the session row is cleared
-		// once the sealed state settles, and a redundant seal push
-		// fails against it (the real-machine push_failed: a successful
-		// wrap push followed one second later by a seal push refused with
-		// GIT-500). The blocked vocabulary is the exception: the flush
-		// itself failed to push, so the stop retries the push before
-		// degrading — exactly the pre-existing semantics.
-		sealedByFlush := msg.Reason != protocol.FinishBlocked
-		if err := r.stopWith(ctx, msg.WorkItem, msg.Reason, sealedByFlush); err != nil {
-			fmt.Fprintf(os.Stderr, "runtime: %s: stop after completion failed: %v\n", msg.WorkItem, err)
-		}
 	}
 }
 
@@ -1221,7 +1195,7 @@ func quarantineCapsule(capsuleDir, gitDir string) error {
 	return os.Rename(capsuleDir, capsuleDir+".quarantined."+ts)
 }
 
-// materialize lays out the capsule: workflows/, agents/, .pi/agents/,
+// materialize lays out the capsule: workflows/, agents/,
 // capsule.json, session.json, .gitignore and the runtime-state/ tree.
 // The bundle is materialized as ONE atomic set with a completion marker
 // (F7, materialize.go): a pinned bundle digest is verified against the
@@ -1309,9 +1283,8 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// plus a notice, never a failed spawn (see recall.go).
 	r.writeRecalledMemories(j)
 	// F7: the bundle copy is ONE atomic set with a completion marker
-	// (materialize.go): the authority copy lands under workflows/<bundle>
-	// and agents/, the harness DISCOVERY copies under .pi/agents/, and
-	// sync/materialized.json gates every later consumer.
+	// (materialize.go): the bundle lands under workflows/<bundle> and
+	// agents/, and sync/materialized.json gates every later consumer.
 	return r.materializeBundle(j)
 }
 
@@ -1494,22 +1467,13 @@ func atomicWriteFileMode(dst string, in io.Reader, perm os.FileMode) error {
 // with its reason) so a restart finishes the close — never a silent
 // half-seal.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
-	return r.stopWith(ctx, wi, reason, false)
-}
-
-// stopWith is Stop plus the dual-close seal knowledge: sealedByFlush
-// names a close whose final capsule state the agent's flush(wrap) path
-// has ALREADY committed and pushed, so stopOp skips its own seal push
-// (see handleOB's OBCompleted branch). The CLI close paths pass false
-// there: their seal push is the only one that ever ran.
-func (r *Runtime) stopWith(ctx context.Context, wi, reason string, sealedByFlush bool) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	j := r.resolveJob(wi)
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
-	return r.stopOp(ctx, j, reason, false, sealedByFlush)
+	return r.stopOp(ctx, j, reason, false, false)
 }
 
 // supersedeOp is the OBSuperseded response (v1.5 M4 + m3): the periodic
@@ -1559,7 +1523,7 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	_ = ctx
 }
 
-func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, sealedByFlush bool) error {
+func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, alreadyPushed bool) error {
 	// Finding 2 (v1.5 review, MAJOR): the operator pause is its own close.
 	// It does NOT pass through SEALING (no terminal verdict follows), it
 	// retains the record (the secret must survive locally for the M3
@@ -1568,7 +1532,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// job — a repeat pause is answered by the daemon's already-paused
 	// graceful path before it ever gets here.
 	if reason == protocol.FinishPaused && !alreadySealing {
-		return r.pauseOp(ctx, j, sealedByFlush)
+		return r.pauseOp(ctx, j, alreadyPushed)
 	}
 	if !alreadySealing {
 		// Closing a RETAINED paused record (wrap/fail after an operator
@@ -1582,7 +1546,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		if fromPaused {
 			j.mu.Lock()
 			j.stopReason = reason
-			j.sealedPush = sealedByFlush
+			j.sealedPush = alreadyPushed
 			j.mu.Unlock()
 			r.persist()
 		} else {
@@ -1591,10 +1555,10 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 			}
 			j.mu.Lock()
 			j.stopReason = reason
-			// Persisted with the reason: a daemon crash between the flush's
+			// Persisted with the reason: a daemon crash between the earlier
 			// push and SessionEnd must not make the restart's stop finisher
 			// re-push either.
-			j.sealedPush = sealedByFlush
+			j.sealedPush = alreadyPushed
 			j.mu.Unlock()
 			r.persist()
 		}
@@ -1602,15 +1566,13 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// Six-layer teardown: no writer survives into the sealed scene.
 	r.killAgentTree(j)
 
-	// Final push (flush(wrap) semantics, §五) — UNLESS the flush path
-	// already sealed: then the final state is committed, pushed and
-	// published, the transcript rode that push, and a second push can
-	// only fail against the revoked attempt credential (the real-machine
-	// push_failed one second after a successful wrap push). Only the
-	// read-only seal and the terminal close remain for this half of the
-	// dual path.
+	// Final push (§五) — UNLESS the final state was already committed
+	// and pushed (alreadyPushed: the terminal close of recover.go, the
+	// C3 engine published the terminal execution.json): a second push
+	// can only race it or fail against the revoked attempt credential.
+	// Only the read-only seal and the terminal close remain.
 	finalReason := reason
-	if !sealedByFlush {
+	if !alreadyPushed {
 		// F3: the dead derivation's live transcript rides the seal commit
 		// (C1) — sync before the push, best-effort.
 		r.syncTranscriptBeforeSeal(j)
@@ -1701,13 +1663,13 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 // that shape (verify matches + running + a local Paused record →
 // resume through the recovery engine), so the error is loud but never
 // a dangling half-close.
-func (r *Runtime) pauseOp(ctx context.Context, j *job, sealedByFlush bool) error {
+func (r *Runtime) pauseOp(ctx context.Context, j *job, alreadyPushed bool) error {
 	if err := j.transition(StatePaused); err != nil {
 		return err
 	}
 	j.mu.Lock()
 	j.stopReason = protocol.FinishPaused
-	j.sealedPush = sealedByFlush
+	j.sealedPush = alreadyPushed
 	j.cleanPause = true
 	j.mu.Unlock()
 	r.persist()
@@ -1724,7 +1686,7 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job, sealedByFlush bool) error
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	if !sealedByFlush {
+	if !alreadyPushed {
 		// F3: the dead derivation's live transcript rides the pause commit
 		// (C1) — sync before the push, best-effort.
 		r.syncTranscriptBeforeSeal(j)
