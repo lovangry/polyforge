@@ -148,9 +148,10 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 			return FailExitHost, ee.ExitCode, ee.Error()
 		case ee.TurnError || modelPatterns.MatchString(text):
 			return FailExitModel, ee.ExitCode, ee.Error()
-		case ee.TurnOK:
-			// the turn ended normally and the process is gone with no
-			// result: the agent stopped without delivering
+		case ee.TurnOK && ee.ExitCode == 0 && ee.Signal == "":
+			// the turn ended normally and the process then exited CLEANLY
+			// with no result: the agent stopped without delivering (a kill
+			// or crash after an ok turn is still exit_other)
 			return FailEndedWithoutResult, ee.ExitCode, ee.Error()
 		default:
 			return FailExitOther, ee.ExitCode, ee.Error()

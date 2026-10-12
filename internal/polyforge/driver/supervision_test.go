@@ -801,6 +801,12 @@ func TestClassifyEndedOKExitIsEndedWithoutResult(t *testing.T) {
 	if got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 0, TurnOK: true}); got != FailEndedWithoutResult {
 		t.Fatalf("clean exit after an ok-ended turn: %q", got)
 	}
+	if got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: -1, Signal: "killed", TurnOK: true}); got != FailExitOther {
+		t.Fatalf("a kill after an ok turn stays exit_other: %q", got)
+	}
+	if got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 101, TurnOK: true}); got != FailExitOther {
+		t.Fatalf("a crash after an ok turn stays exit_other: %q", got)
+	}
 	if got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 1, TurnError: true}); got != FailExitModel {
 		t.Fatalf("an error-ended turn stays model-class: %q", got)
 	}

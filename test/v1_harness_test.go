@@ -137,6 +137,12 @@ type v1Install struct {
 	// then asserts gone every live process carrying one of these WIs'
 	// PF_WI_ID env marker at the scenario's final cleanup.
 	wis []string
+
+	// daemons are the scenario's started daemon processes (every
+	// v1Daemon.start registers): the terminal-settle wait asks each one
+	// whether a finished work item's close has fully drained.
+	dmu     sync.Mutex
+	daemons []*v1Daemon
 }
 
 // newV1Install boots a real aihub on a free loopback port, harvests the
@@ -782,6 +788,11 @@ func (d *v1Daemon) start() {
 		d.t.Fatal(err)
 	}
 	d.cmd = cmd
+	if d.inst != nil {
+		d.inst.dmu.Lock()
+		d.inst.daemons = append(d.inst.daemons, d)
+		d.inst.dmu.Unlock()
+	}
 	d.waitedExit = make(chan error, 1)
 	go func() { d.waitedExit <- cmd.Wait() }()
 	t := d.t
@@ -991,6 +1002,70 @@ func (u *v1Install) waitWIStatus(t *testing.T, wi, status string, bound time.Dur
 	t.Helper()
 	waitUntil(t, bound, fmt.Sprintf("work item %s never reached status %q (now %q)", wi, status, u.wiStatus(t, wi)),
 		func() bool { return u.wiStatus(t, wi) == status })
+	if status == "wrapped" {
+		// the server-side wrap lands before the daemon's own terminal close
+		// (job release, monitor stop, final push) has drained: a scenario
+		// that returns right here races the teardown of the aihub data dir
+		u.settleClose(wi)
+	}
+}
+
+// settleClose waits (softly: never fails the scenario) until every
+// started daemon has drained the terminal close of wi — the job gone from
+// its status face and its monitor stopped — so a test that ends at the
+// terminal state does not race the final push against temp-dir cleanup.
+func (u *v1Install) settleClose(wi string) {
+	u.dmu.Lock()
+	ds := append([]*v1Daemon(nil), u.daemons...)
+	u.dmu.Unlock()
+	for _, d := range ds {
+		d.settleClose(wi)
+	}
+}
+
+// settleClose is the per-daemon half of v1Install.settleClose.
+func (d *v1Daemon) settleClose(wi string) {
+	if d.cmd == nil || d.client == nil {
+		return
+	}
+	held := func() bool {
+		raw, err := d.client.Status()
+		if err != nil {
+			return false // daemon gone: nothing left to drain
+		}
+		var st cli.StatusResponse
+		if json.Unmarshal(raw, &st) != nil {
+			return false
+		}
+		for _, j := range st.Jobs {
+			if j.WorkItemID == wi {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(12 * time.Second)
+	for held() && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	// a monitor that started must also have stopped (job_stopped is its
+	// last act; the final published push precedes it)
+	stopped := func() bool {
+		started, stopped := false, false
+		for _, e := range d.eventsOf(d.t, wi) {
+			switch e.Kind {
+			case "job_started":
+				started, stopped = true, false
+			case "job_stopped":
+				stopped = true
+			}
+		}
+		return !started || stopped
+	}
+	deadline = time.Now().Add(6 * time.Second)
+	for !stopped() && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // waitForEvent polls the daemon's durable events.log until one event of
@@ -1417,6 +1492,12 @@ func waitWorkflowStatus(t *testing.T, d *v1Daemon, wi, want string, bound time.D
 	waitExecution(t, d.capsuleDir(wi), bound,
 		fmt.Sprintf("workflow_status never reached %q", want),
 		func(x *executionView) bool { return x.WorkflowStatus == want })
+	if want == "completed" {
+		// completed is the driver's last write; the daemon's terminal
+		// close (final push, wrap, job release) still follows — drain it
+		// before the scenario can end and tear the data dir down
+		d.settleClose(wi)
+	}
 }
 
 // waitStepStatus polls the capsule's execution.json until one step's

@@ -109,7 +109,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 |---|---|
 | 退出未交结果（其余） | 同模型重试 |
 | `harness_silent` | 同模型重试 |
-| `ended_without_result` | 同模型重试；重试的 prompt 明确告知"上一轮已结束但没有写结果信封"。进程在正常结束一轮后退出且无结果，也归此类 |
+| `ended_without_result` | 同模型重试；重试的 prompt 明确告知"上一轮已结束但没有写结果信封"。进程在正常结束一轮后以退出码 0 自行退出且无结果，也归此类（被杀 / 崩溃仍是退出其余） |
 | `model_error`、`model_hung`、`step_timeout_slow_model`、退出（模型类） | 换下一个候选模型 |
 | `tool_hung` | 同模型重试，并**放宽 Y**（同 T 的放宽规则） |
 | `step_timeout_long_task` | 同模型重试并放宽 T；再超时 → blocked |
