@@ -3,7 +3,7 @@ package test
 // v1_s16: F9 — the needs_input question/answer protocol's resilience,
 // driver/envelope edition. The legacy suite proved the protocol's
 // fractures on the WI-Agent RPC face (pf/answer control relays, the
-// flush proxy, agent-side acks); every one of those faces is re-expressed
+// flush proxy, agent-side acks — all since deleted); every one of those faces is re-expressed
 // here on the driver's answer path, where the CONSUMER of an answer is
 // the DRIVER itself (the D9 archive-and-clear write on execution.json —
 // there is no agent ack anywhere), the pending question's durable home
@@ -134,7 +134,7 @@ func TestV1S16AnswerAutoRedeliveryAfterKill9(t *testing.T) {
 // Scenario B: the empty question_id is refused fail-closed by the
 // driver's needs_input transition.
 
-func TestV1S16EmptyQuestionIDFlushRefused(t *testing.T) {
+func TestV1S16EmptyQuestionIDRefused(t *testing.T) {
 	inst := newV1Install(t)
 	const goodQID = "q_f9b_live"
 	// Ordinal 1 is the MALFORMED shape: a needs_input envelope whose
@@ -211,7 +211,7 @@ func TestV1S16EmptyQuestionIDFlushRefused(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Scenario C: the same drop path written twice is consumed exactly once.
 
-func TestV1S16DuplicateFlushSameIDIsIdempotent(t *testing.T) {
+func TestV1S16DuplicateDropSameIDIsIdempotent(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_f9c"
 	wi := inst.newWI(t, "s16 C: duplicate drop-path write is consumed once",

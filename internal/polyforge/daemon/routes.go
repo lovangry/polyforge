@@ -1,7 +1,7 @@
 package daemon
 
-// routes.go: the daemon's UDS HTTP face. The observe lane's three routes
-// (observe/answer/flush) are mounted VERBATIM from observe.Handler();
+// routes.go: the daemon's UDS HTTP face. The observe lane's routes
+// (observe/answer) are mounted from observe.Handler();
 // everything else translates the CLI contract (internal/polyforge/cli/
 // daemon.go — the pinned route family) into Runtime calls. Every error
 // answer is the TOP-LEVEL api.Error envelope {code, detail} (the same
@@ -158,13 +158,11 @@ func writeAdmissionErr(w http.ResponseWriter, err error) {
 func (d *Daemon) handler() http.Handler {
 	mux := http.NewServeMux()
 	obs := d.obs.Handler()
-	// The observe lane's own three routes, mounted verbatim (04 §5.1a /
-	// ruling C2): the flush route passes through the wrap arbitration
-	// gate first (the dual-path close must be one winner, one 409).
+	// The observe lane's own routes, mounted verbatim (04 §5.1a).
 	mux.Handle("GET /jobs/{wi}/observe", obs)
 	// v2 (polyforge#106): answer routes through the driver bridge when
 	// the WI's job carries a bridge Handle; otherwise the observe
-	// lane's agent-facing answer path applies.
+	// lane's honest no-live-handle refusal applies.
 	mux.HandleFunc("POST /jobs/{wi}/answer", func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
 		if h := d.rt.DriverAnswerHandle(wi); h != nil {
@@ -209,14 +207,6 @@ func (d *Daemon) handler() http.Handler {
 		}
 		obs.ServeHTTP(w, r)
 	})
-	mux.Handle("POST /jobs/{wi}/flush", d.flushGate(obs))
-	// F6-B: the narrow memory channel — mounted verbatim from the
-	// observe lane, whose serveFlush fence semantics the two routes
-	// share (the flush route alone passes through the wrap arbitration
-	// gate first; recall/remember are stateless proxies and carry no
-	// close semantics at all).
-	mux.Handle("POST /jobs/{wi}/recall", obs)
-	mux.Handle("POST /jobs/{wi}/remember", obs)
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute("claim"))
 	mux.HandleFunc("POST /jobs/{wi}/resume", d.submitRoute("resume"))
 	// polyforge#116: the §6.4 owner move on a workflow parked blocked on an
@@ -430,7 +420,7 @@ func (d *Daemon) adoptSessionRoute(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------------------
 // pause / wrap: the CLI close paths. Both pass the seal guard; the loser
-// of a race with the agent's flush(wrap) answers DAEMON-409, and a close
+// of a race between two closes answers DAEMON-409, and a close
 // that finds the work item already terminal answers gracefully (the
 // arbitration's idempotency contract).
 
@@ -565,53 +555,6 @@ func (d *Daemon) wrapRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.closeJob(w, r.Context(), r.PathValue("wi"), reason)
-}
-
-// ---------------------------------------------------------------------------
-// flush gate: the wrap arbitration on the agent's own flush path. Only
-// reason=wrap claims the seal guard (needs_input and shutdown are the
-// agent's ordinary lifeline, never a close). The recovery window — new
-// instance alive, recovered() not yet back to RUNNING — is answered
-// with the typed retryable RECOVERING transient, never a "close in
-// progress" refusal: no close is in progress there.
-func (d *Daemon) flushGate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wi := d.canonWI(r.PathValue("wi")) // F2: gate on the canonical job
-		raw, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-		if err != nil {
-			writeErr(w, api.ErrDaemonBadInput, "body read: "+err.Error())
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(raw))
-		var req protocol.FlushRequest
-		if json.Unmarshal(raw, &req) == nil && req.Reason == protocol.FlushWrap {
-			if ji, ok := d.rt.Info(wi); ok {
-				if ji.State == runtime.StateSealing {
-					writeErr(w, api.ErrDaemonConflict, "work item is sealing; a close is already in progress")
-					return
-				}
-				if ji.State == runtime.StateRecovering {
-					if d.sealHeld(wi) {
-						// close holds the guard with its Stop queued behind
-						// the recovery: genuinely "close in progress".
-						writeErr(w, api.ErrDaemonConflict, "a close is already in progress for this work item")
-						return
-					}
-					// no close anywhere: the recovery window answers the
-					// typed retryable RECOVERING transient.
-					writeErr(w, api.ErrDaemonConflict,
-						"work item is recovering; instance just spawned; retry shortly")
-					return
-				}
-			}
-			if !d.claimSeal(wi) {
-				writeErr(w, api.ErrDaemonConflict, "a close is already in progress for this work item")
-				return
-			}
-			defer d.releaseSeal(wi)
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // ---------------------------------------------------------------------------

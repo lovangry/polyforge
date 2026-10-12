@@ -4,14 +4,8 @@ package runtime
 // SET with a completion marker, ported from v0's 03 §4.5 semantics
 // (v0/internal/capsule/materialize.go):
 //
-//   - the authority copies stay where they were: the full bundle tree
-//     under workflows/<bundle>/ and the step-agent definitions under
-//     agents/;
-//   - the harness DISCOVERY copies additionally land under .pi/agents/
-//     (pi resolves project-level agents from the subagent's cwd; a
-//     capsule without that directory makes the lookup LEAK upward to the
-//     workspace-level .pi/agents, pulling unrelated definitions into the
-//     resolution face — the F7 misplacement);
+//   - the full bundle tree lands under workflows/<bundle>/ and the
+//     step definitions (the bundle's steps/) under agents/;
 //   - the completion marker sync/materialized.json records the pinned
 //     bundle identity (name/digest), the adapter set and the full
 //     targets list, written ATOMICALLY AFTER the last target rename and
@@ -53,9 +47,6 @@ const (
 	// relMaterializeStaging is the staging tree under sync/ where every
 	// target is copied before any live path is touched.
 	relMaterializeStaging = "sync/materialize-staging"
-	// relDiscoveryAgents is the pi harness's project-level agent
-	// discovery directory (03 §4.5: agents/*.md → .pi/agents/).
-	relDiscoveryAgents = ".pi/agents"
 	// gitignoreSyncLine is appended to the capsule .gitignore: sync/ is
 	// daemon-private staging/marker state and never enters the chain.
 	gitignoreSyncLine = "/sync/\n"
@@ -63,7 +54,7 @@ const (
 
 // materializeMarkerRecord is the content of the completion marker. The
 // field set is v0's: the pinned bundle identity, the adapter set the
-// discovery copies were materialized for, the full targets list the
+// snapshot was materialized for, the full targets list the
 // trust gate walks, and the completion timestamp.
 type materializeMarkerRecord struct {
 	BundleName   string   `json:"bundle_name"`
@@ -74,17 +65,6 @@ type materializeMarkerRecord struct {
 	// recorded target is missing on disk is not a complete snapshot.
 	Targets     []string `json:"targets"`
 	CompletedAt string   `json:"completed_at"`
-}
-
-// discoveryRel answers the harness's project-level agent discovery
-// directory ("" = the harness has none and no discovery copies land).
-// Today only the pi adapter exists; anything else keeps the authority
-// copy under agents/ and no discovery face.
-func (r *Runtime) discoveryRel() string {
-	if r.cfg.Harness == "pi" {
-		return relDiscoveryAgents
-	}
-	return ""
 }
 
 // sameAdapterSet compares two adapter lists as sets (order is an
@@ -122,12 +102,12 @@ func sameAdapterSet(a, b []string) bool {
 //
 // Torn or partial state answers false and the caller re-materializes.
 // The pilot's manual compensation (a marker written by hand next to
-// hand-copied .pi/agents) either carries the same identity — then it
+// hand-copied targets) either carries the same identity — then it
 // validates and is taken over untouched — or it does not, and the
 // idempotent re-materialization rebuilds the identical set and rewrites
 // the marker: smooth either way.
 func (r *Runtime) materializationComplete(j *job) bool {
-	if j.bundleName == "" || j.bundleDigest == "" || r.discoveryRel() == "" {
+	if j.bundleName == "" || j.bundleDigest == "" {
 		return false // no expectation, no trust (fail closed)
 	}
 	raw, err := os.ReadFile(filepath.Join(j.capsuleDir, filepath.FromSlash(RelMaterializeMarker)))
@@ -228,39 +208,17 @@ func (r *Runtime) materializeBundleSet(j *job, src string) error {
 	} else {
 		fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s carries no pinned content digest; materialized without verification\n", j.wi, j.bundleName)
 	}
-	// v2: the step definitions live under steps/ (no discovery copy —
-	// the Go driver reads them directly; no .pi/agents/ harness
-	// materialization). Legacy bundles with agents/ fall back to the
-	// old copy for the WI-Agent path.
+	// The workflow tree (already staged above) is always a swap piece;
+	// the step definitions live under steps/ and are staged to the
+	// capsule's agents/ dir (the Go driver reads them directly — no
+	// harness discovery copy). A bundle without steps/ simply has no
+	// second piece.
 	pieces := []string{wfRel}
 	if dirExists(filepath.Join(src, "steps")) {
 		pieces = append(pieces, capsule.DirAgents) // capsule dir name unchanged (steps/ content)
-		for _, rel := range pieces {
-			srcDir := src
-			if rel == capsule.DirAgents {
-				srcDir = filepath.Join(src, "steps")
-			}
-			if err := copyTree(srcDir, filepath.Join(stage, filepath.FromSlash(rel))); err != nil {
-				os.RemoveAll(stage)
-				return err
-			}
-		}
-	} else if dirExists(filepath.Join(src, "agents")) {
-		// legacy bundle (agents/): old materialization + discovery copy
-		pieces = append(pieces, capsule.DirAgents)
-		if d := r.discoveryRel(); d != "" {
-			pieces = append(pieces, d)
-		}
-		for _, rel := range pieces {
-			srcDir := src
-			switch rel {
-			case capsule.DirAgents, r.discoveryRel():
-				srcDir = filepath.Join(src, "agents")
-			}
-			if err := copyTree(srcDir, filepath.Join(stage, filepath.FromSlash(rel))); err != nil {
-				os.RemoveAll(stage)
-				return err
-			}
+		if err := copyTree(filepath.Join(src, "steps"), filepath.Join(stage, filepath.FromSlash(capsule.DirAgents))); err != nil {
+			os.RemoveAll(stage)
+			return err
 		}
 	}
 	// targets records every staged file, in sorted order for a stable

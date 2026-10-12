@@ -112,7 +112,7 @@ func testCfg() monitorCfg {
 		PushRetryBackoff:  2 * time.Millisecond,
 		BackpressureSteps: 5,
 		BackpressureAfter: 30 * time.Minute,
-		FlushBound:        time.Second,
+		PushBound:         time.Second,
 		push: func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			return "sha_default", true, gitops.PushTimings{}, nil
 		},
@@ -147,13 +147,10 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, ch
 		cfg:        cfg,
 		log:        log,
 		ob:         ob,
-		ledger:     NewAnswerLedger(),
 		rtCh:       make(chan Attach, 4),
 		stopCh:     make(chan struct{}),
-		flushCh:    make(chan FlushCall, 8),
 		gate:       make(chan struct{}, 1),
 		pushDone:   make(chan pushResult, 1),
-		wrapDone:   make(chan wrapResult, 1),
 		probeDone:  make(chan probeResult, 1),
 		verifyDone: make(chan verifyResult, 1),
 		hangAnchor: time.Now(),
@@ -209,6 +206,76 @@ func (m *Monitor) writeExec(t *testing.T, version int64, currentStep string) {
 	if err := os.Rename(tmp, path); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writePendingQuestion seeds an open pending question the way the driver
+// does: the step's pending_question lands in execution.json (Version
+// bumped) and the monitor's poll picks it up (applyPendingFromExec).
+// It waits until the monitor's pending projection reflects it.
+func writePendingQuestion(t *testing.T, m *Monitor, qid, question, step string) {
+	t.Helper()
+	writePendingQuestionAt(t, m, qid, question, step, time.Now().UTC().Format(time.RFC3339Nano))
+}
+
+// writePendingQuestionAt is writePendingQuestion with an explicit
+// asked_at (the one field an idempotent re-presentation moves).
+func writePendingQuestionAt(t *testing.T, m *Monitor, qid, question, step, askedAt string) {
+	t.Helper()
+	path := filepath.Join(m.wi.CapsuleDir, "runtime-state", "execution.json")
+	var version int64 = 1
+	var prev time.Time
+	if raw, err := os.ReadFile(path); err == nil {
+		var old struct {
+			Version int64 `json:"version"`
+		}
+		if json.Unmarshal(raw, &old) == nil {
+			version = old.Version + 1
+		}
+		if st, err := os.Stat(path); err == nil {
+			prev = st.ModTime()
+		}
+	}
+	exec := map[string]any{
+		"capsule_id":      "cap_wi_test",
+		"work_item_id":    "wi_test",
+		"generation":      int64(1),
+		"current_step":    step,
+		"workflow_status": "running",
+		"steps": map[string]any{
+			step: map[string]any{
+				"status":   "in_progress",
+				"attempts": []any{},
+				"answers":  []any{},
+				"pending_question": map[string]any{
+					"id": qid, "step": step, "question": question, "asked_at": askedAt,
+				},
+			},
+		},
+		"review_rounds": map[string]int64{},
+		"updated_at":    time.Now().UTC().Format(time.RFC3339Nano),
+		"version":       version,
+	}
+	raw, err := json.Marshal(exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mt := time.Now()
+	if !mt.After(prev) {
+		mt = prev.Add(time.Millisecond)
+	}
+	os.Chtimes(tmp, mt, mt)
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	soon(t, 2*time.Second, "pending question "+qid+" projected", func() bool {
+		m.stateMu.Lock()
+		defer m.stateMu.Unlock()
+		return m.pending != nil && m.pending.ID == qid && m.pending.AskedAt == askedAt
+	})
 }
 
 // waitOB reads one OB message or fails the test on timeout.

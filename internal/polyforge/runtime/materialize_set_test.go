@@ -2,8 +2,8 @@ package runtime
 
 // materialize_set_test.go: the F7 lane — the bundle materialization as
 // one atomic set with a completion marker (03 §4.5 semantics): the full
-// materialization shape (authority copies + .pi/agents discovery
-// copies + marker targets), the trust gate's reuse rule (marker present
+// materialization shape (workflows/<bundle> + the steps/ → agents/ copy +
+// marker targets), the trust gate's reuse rule (marker present
 // and targets whole → untouched), the torn-snapshot rebuild (marker
 // gone → re-materialize + marker rewritten), and the adoption of the
 // pilot's hand-compensated scene (a manual marker that predates the
@@ -55,27 +55,30 @@ func readMarker(t *testing.T, capDir string) materializeMarkerRecord {
 	return m
 }
 
-// The full materialization: workflows/<bundle>/ tree, agents/ authority
-// copies, .pi/agents discovery copies, and a marker whose targets list
-// covers every file on disk.
+// The full materialization: workflows/<bundle>/ tree, the bundle's steps/
+// staged to the capsule's agents/, and a marker whose targets list covers
+// every file on disk.
 func TestMaterializeSetCompleteShape(t *testing.T) {
 	_, capDir, _ := startedWithBundle(t, "wi_f7a")
 
 	for _, rel := range []string{
 		"workflows/demo-bundle/workflow.md",
-		"workflows/demo-bundle/agents/step.md",
+		"workflows/demo-bundle/steps/step.md",
 		"agents/step.md",
-		".pi/agents/step.md",
 	} {
 		if _, err := os.Stat(filepath.Join(capDir, filepath.FromSlash(rel))); err != nil {
 			t.Fatalf("materialized target missing: %s: %v", rel, err)
 		}
 	}
-	// The discovery copy is byte-identical to the authority copy.
+	// No harness discovery copy any more.
+	if _, err := os.Stat(filepath.Join(capDir, ".pi", "agents")); !os.IsNotExist(err) {
+		t.Fatalf(".pi/agents discovery copy must not be materialized: %v", err)
+	}
+	// The capsule copy is byte-identical to the bundle's step.
 	auth, _ := os.ReadFile(filepath.Join(capDir, "agents", "step.md"))
-	disc, err := os.ReadFile(filepath.Join(capDir, ".pi", "agents", "step.md"))
-	if err != nil || string(auth) != string(disc) {
-		t.Fatalf("discovery copy diverged from the authority copy (%v)", err)
+	src, err := os.ReadFile(filepath.Join(capDir, "workflows", "demo-bundle", "steps", "step.md"))
+	if err != nil || string(auth) != string(src) {
+		t.Fatalf("agents/ copy diverged from the bundle's steps/ (%v)", err)
 	}
 	m := readMarker(t, capDir)
 	if m.BundleName != "demo-bundle" || m.BundleDigest == "" {
@@ -85,10 +88,9 @@ func TestMaterializeSetCompleteShape(t *testing.T) {
 		t.Fatalf("marker adapters = %v", m.Adapters)
 	}
 	want := map[string]bool{
-		"workflows/demo-bundle/workflow.md":    false,
-		"workflows/demo-bundle/agents/step.md": false,
-		"agents/step.md":                       false,
-		".pi/agents/step.md":                   false,
+		"workflows/demo-bundle/workflow.md":   false,
+		"workflows/demo-bundle/steps/step.md": false,
+		"agents/step.md":                      false,
 	}
 	if len(m.Targets) != len(want) {
 		t.Fatalf("marker targets = %v", m.Targets)
@@ -144,7 +146,7 @@ func splitLines(s string) []string {
 
 // A trusted snapshot is left untouched: the gate (marker present and
 // every recorded target whole) short-circuits the re-materialization, so
-// neither the discovery copies nor the marker churn.
+// neither the staged copies nor the marker churn.
 func TestMaterializeSetTrustedSnapshotUntouched(t *testing.T) {
 	r, capDir, j := startedWithBundle(t, "wi_f7b")
 	before := readMarker(t, capDir)
@@ -171,13 +173,13 @@ func TestMaterializeSetTrustedSnapshotUntouched(t *testing.T) {
 func TestMaterializeSetTornSnapshotRebuilt(t *testing.T) {
 	r, capDir, j := startedWithBundle(t, "wi_f7c")
 
-	// (a) torn: marker gone, one discovery copy vandalized.
+	// (a) torn: marker gone, one staged copy vandalized.
 	os.Remove(filepath.Join(capDir, filepath.FromSlash(RelMaterializeMarker)))
-	os.Remove(filepath.Join(capDir, ".pi", "agents", "step.md"))
+	os.Remove(filepath.Join(capDir, "workflows", "demo-bundle", "workflow.md"))
 
 	r.ensureMaterialized(j)
 
-	if _, err := os.Stat(filepath.Join(capDir, ".pi", "agents", "step.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(capDir, "workflows", "demo-bundle", "workflow.md")); err != nil {
 		t.Fatalf("torn snapshot not rebuilt: %v", err)
 	}
 	m := readMarker(t, capDir)
@@ -206,19 +208,18 @@ func TestMaterializeSetTornSnapshotRebuilt(t *testing.T) {
 // The pilot's hand-compensated scene is adopted smoothly: a manually
 // written marker that predates the product fix (identity recorded, but
 // without the adapter set the gate expects) fails the gate and the
-// idempotent rebuild rewrites it — the hand-copied .pi/agents survives
+// idempotent rebuild rewrites it — the hand-copied targets survive
 // byte-identical either way.
 func TestMaterializeSetAdoptsPilotCompensation(t *testing.T) {
 	r, capDir, j := startedWithBundle(t, "wi_f7d")
 
-	// Recreate the pilot's shape: marker dropped, hand-copied discovery
-	// dir, hand-written marker WITHOUT adapters (the pre-fix manual
-	// format).
+	// Recreate the pilot's shape: marker dropped, hand-copied targets,
+	// hand-written marker WITHOUT adapters (the pre-fix manual format).
 	os.Remove(filepath.Join(capDir, filepath.FromSlash(RelMaterializeMarker)))
 	manual, _ := json.Marshal(map[string]any{
 		"bundle_name":   "demo-bundle",
 		"bundle_digest": j.bundleDigest,
-		"targets":       []string{"agents/step.md", ".pi/agents/step.md"},
+		"targets":       []string{"agents/step.md"},
 		"completed_at":  "2026-10-01T00:00:00Z",
 	})
 	if err := os.WriteFile(filepath.Join(capDir, filepath.FromSlash(RelMaterializeMarker)), manual, 0o644); err != nil {
@@ -234,9 +235,9 @@ func TestMaterializeSetAdoptsPilotCompensation(t *testing.T) {
 	if len(m.Adapters) != 1 || m.Adapters[0] != "pi" {
 		t.Fatalf("manual marker not rewritten with the product format: %+v", m)
 	}
-	disc, err := os.ReadFile(filepath.Join(capDir, ".pi", "agents", "step.md"))
-	if err != nil || len(disc) == 0 {
-		t.Fatalf("hand-copied discovery dir lost in the adoption: %v", err)
+	kept, err := os.ReadFile(filepath.Join(capDir, "agents", "step.md"))
+	if err != nil || len(kept) == 0 {
+		t.Fatalf("hand-copied target lost in the adoption: %v", err)
 	}
 	if !r.materializationComplete(j) {
 		t.Fatal("gate must validate the adopted scene")
@@ -287,5 +288,39 @@ func TestMaterializeSetClaimReplayReusesTrustedSnapshot(t *testing.T) {
 	if after.CompletedAt != before.CompletedAt {
 		t.Fatalf("claim replay churned a trusted snapshot (%s → %s)",
 			before.CompletedAt, after.CompletedAt)
+	}
+}
+
+// A bundle with neither steps/ nor agents/ still gets its workflows/<bundle>
+// tree copied and a valid completion marker (the latent bug: the workflow
+// tree copy used to hang off the presence of a step directory).
+func TestMaterializeBundleWithoutStepsStillCopiesWorkflowTree(t *testing.T) {
+	setGitIdentity(t)
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "demo-bundle")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte("# demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hub := newFakeHub()
+	hub.digest = nameDerivedDigest("demo-bundle")
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	r.cfg.WorkflowsDir = dir
+	if err := r.Start(context.Background(), "wi_f7nos"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Stop(context.Background(), "wi_f7nos", protocol.FinishWrapped) })
+	capDir := testCapsuleDir(r, "wi_f7nos")
+	if _, err := os.Stat(filepath.Join(capDir, "workflows", "demo-bundle", "workflow.md")); err != nil {
+		t.Fatalf("workflow tree not materialized: %v", err)
+	}
+	m := readMarker(t, capDir)
+	if len(m.Targets) != 1 || m.Targets[0] != "workflows/demo-bundle/workflow.md" {
+		t.Fatalf("marker targets = %v", m.Targets)
+	}
+	if !r.materializationComplete(r.jobOf("wi_f7nos")) {
+		t.Fatal("gate must validate a steps-less bundle's snapshot")
 	}
 }

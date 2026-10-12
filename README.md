@@ -180,7 +180,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | --- | --- |
 | `internal/common/api` | Shared business contract between aihub and pf: work items, projects, users, generations, memories, and the typed error-code registry (`CORE-*`, `DAEMON-*`, `GIT-*`). |
 | `internal/common/capsule` | Execution-capsule contract shared by pf (runtime creates capsules, observe commits them) and aihub (serves the matching bare repos; git-dir lives outside the capsule). |
-| `internal/common/protocol` | The three in-machine contracts: Runtime↔Observe messages, the agent-side control surface (stdio answers + the UDS `flush(reason)` proxy), and the pf CLI↔daemon UDS HTTP API surface. |
+| `internal/common/protocol` | The three in-machine contracts: Runtime↔Observe messages, the liveness-probe control message, and the pf CLI↔daemon UDS HTTP API surface. |
 | `internal/common/workflow` | Workflow-bundle digest contract shared by pf (bundle materialization with digest verification) and aihub (serves bundle bytes, validates digests at claim time). |
 | `internal/aihub/core` | aihub persistent layer: SQLite store (single writer, WAL), the work-item state machine, claim/generation arbitration with attempt-scoped push credentials, the ready queue and the admin face. |
 | `internal/aihub/git` | aihub git surface: per-WI bare-repo lifecycle, the git-http-backend smart-protocol proxy, attempt-scoped credential auth (generation fencing) and the pre-receive hook enforcing the capsule-chain invariants. |
@@ -190,7 +190,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/polyforge/cli` | The `pf` client CLI: 13 user verbs + the M1–M5 management face, the daemon client over the UDS socket, config resolution, and the v0 migration paths. |
 | `internal/polyforge/daemon` | Phase-3 assembly of the local work machine: the UDS HTTP face, Runtime + Observe wired over the five protocol messages, admission modes, the pending-job dispatcher, the drain loop, the ship delivery bridge and the graceful shutdown sequence. |
 | `internal/polyforge/gitops` | Shared capsule-git operations layer used by Runtime (clone at start, dirty-commit at recover) and Observe (async commit+push); owns the per-WI git mutex and the `Polyforge-Seq` trailer derivation. |
-| `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, and the observe/answer/flush/recall/remember HTTP face over the monitors. |
+| `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, and the observe/answer HTTP face over the monitors. |
 | `internal/polyforge/runtime` | Runtime lane: the WI lifecycle manager (Start/Stop/Recover/Restart), the pi-harness agent spawner, the six-layer process cleanup and the recovery engine. |
 
 Binaries: `cmd/aihub` (server binary) and `cmd/pf` (work-machine binary:
@@ -200,16 +200,14 @@ CLI verbs + `pf daemon`).
 
 The routes mounted by the daemon's local Unix-socket HTTP face
 (`internal/polyforge/daemon/routes.go`). **Face** marks who calls the route:
-`user` = the operator's CLI / observe tooling; `agent` = the in-capsule
-agent's lifeline proxies.
+`user` = the operator's CLI / observe tooling (the in-capsule agent's
+lifeline proxies — flush/recall/remember — were retired with the WI-Agent
+lane, polyforge#106).
 
 | Method | Path | Role | Face |
 | --- | --- | --- | --- |
 | GET | `/jobs/{wi}/observe` | Live observe view of one job's transcript stream (mounted verbatim from the Observe handler). | user |
 | POST | `/jobs/{wi}/answer` | Answer a pending agent question. | user |
-| POST | `/jobs/{wi}/flush` | Agent lifeline: `flush(reason)` close/publish signal (reason=wrap passes the close-arbitration gate first). | agent |
-| POST | `/jobs/{wi}/recall` | Lifeline proxy: stateless memory search against the aihub memory face. | agent |
-| POST | `/jobs/{wi}/remember` | Lifeline proxy: stateless memory write-back to the aihub memory face. | agent |
 | POST | `/jobs/{wi}/claim` | Submit family: enqueue a claim of a queued work item. | user |
 | POST | `/jobs/{wi}/resume` | Submit family: enqueue a resume (fresh generation) of a paused item. | user |
 | POST | `/jobs/{wi}/takeover` | Submit family: enqueue a takeover of an item running elsewhere. | user |

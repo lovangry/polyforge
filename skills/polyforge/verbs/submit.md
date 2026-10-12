@@ -24,7 +24,7 @@ api key, so obviously doomed submissions fail fast with a visible verdict.
 ## Success
 
 `submitted <id> (accepted by the local daemon)` — acceptance means the daemon
-queued the job; its dispatcher derives the persistent WI Agent within a
+queued the job; its dispatcher derives the Go driver for it within a
 moment, priority-desc against the machine's concurrency cap. `--json`: the
 raw answer `{accepted, work_item_id}`.
 
@@ -47,14 +47,7 @@ For a takeover refused as non-admin, the same path reports `CORE-403`.
 
 ## Watch lane: arm the watcher
 
-Role gate first: if your env carries `PF_AGENT_ROLE=wi-agent` you are an
-EXECUTION agent — arm nothing here. Watcher setup is a SUPERVISION duty of
-the interactive session; skip this whole section and continue with the
-workflow you were derived for (the role-detection section at the top of
-`SKILL.md` routes it).
-
-If you are an interactive session (no marker), arm the session-side watcher
-after a successful submit — for a plain claim AND for `--takeover` alike:
+Arm the session-side watcher after a successful submit — for a plain claim AND for `--takeover` alike:
 copy `skills/polyforge/scripts/watch.sh` verbatim to
 `<workspace>/.polyforge/watchers/<wi>.sh`, prepend the three header lines
 (`# pf-watcher wi: <wi id>` / `# pf-watcher session_id: <YOUR session's

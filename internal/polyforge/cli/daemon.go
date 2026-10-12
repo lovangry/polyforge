@@ -14,13 +14,12 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
 // DaemonClient speaks the daemon's UDS HTTP face: HTTP over the local
 // unix socket (/run/polyforge.sock by default). The route family is the
-// v0 daemon surface minus publish_request — flush replaces it (ruling
-// C2, docs/design/polyforge-vnext/04-local-runtime.md §5.1):
+// v0 daemon surface minus publish_request
+// (docs/design/polyforge-vnext/04-local-runtime.md §5.1):
 //
 //	POST /jobs/{id}/claim|resume|takeover   body {"priority":"normal"}
 //	POST /jobs/{id}/adopt-session           body = AdoptSessionRequest (#109:
@@ -29,7 +28,6 @@ import (
 //	GET  /jobs/{id}/observe?after=<cursor>  answer = protocol.JobView
 //	POST /jobs/{id}/answer                  body = the five-field relay
 //	                                        message itself (00 §3.4a)
-//	POST /jobs/{id}/flush                   body = protocol.FlushRequest
 //	POST /jobs/{id}/pause  {}               POST /jobs/{id}/wrap {"reason"}
 //	POST /jobs/{id}/ship  {}                 GET  /status
 //	POST /mode {"action":...}               POST /batch_submit {"wi_ids":[]}
@@ -282,13 +280,6 @@ func (d *DaemonClient) Observe(wiID string, after int64) (json.RawMessage, error
 func (d *DaemonClient) Answer(wiID string, payload AnswerPayload) (json.RawMessage, error) {
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/answer", "", payload,
 		map[string]string{"X-PF-User": payload.AnsweredBy})
-}
-
-// Flush is the agent-side UDS proxy call (ruling C2/C3: flush replaces
-// publish_request). The CLI itself never drives it; the method exists so
-// the client surface covers the full daemon route family.
-func (d *DaemonClient) Flush(wiID string, req protocol.FlushRequest) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/flush", "", req, nil)
 }
 
 // Pause asks the daemon to pause a running WI. The v1.5 operator pause

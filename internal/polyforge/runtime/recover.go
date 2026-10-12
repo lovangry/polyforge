@@ -70,8 +70,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		r.boundedFail(ctx, j, err.Error())
 		return
 	}
-	// v2 terminal wiring (the #99 finale): the driver has no flush(wrap)
-	// call — Run returning nil IS its completion signal, and the
+	// v2 terminal wiring (the #99 finale): Run returning nil IS the
+	// driver's completion signal, and the
 	// monitor's onExit rightly reports "agent process exited" without
 	// knowing the difference. Before any recovery machinery runs, the
 	// capsule's terminal workflow_status is translated into the WI's
@@ -83,7 +83,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	switch capsuleWorkflowStatus(j.capsuleDir) {
 	case capsule.WorkflowStatusCompleted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)
-		// sealedByFlush: the C3 engine already committed and pushed the
+		// alreadyPushed: the C3 engine already committed and pushed the
 		// terminal execution.json version (every transition bumps Version
 		// and publishes); the final push here would only race it.
 		if err := r.stopOp(ctx, j, protocol.FinishWrapped, false, true); err != nil {
@@ -182,8 +182,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 
 	// F7 repair: a capsule whose materialized bundle set is missing its
 	// completion marker (a crash-torn snapshot) — or predates the product
-	// fix entirely — gets the set idempotently rebuilt, discovery copies
-	// and marker included, before the next derivation wakes up. The
+	// fix entirely — gets the set idempotently rebuilt, marker
+	// included, before the next derivation wakes up. The
 	// rebuild never breaks a scene the dead agents already read (staged
 	// renames, identical content). Best-effort, never blocks recovery.
 	r.ensureMaterialized(j)

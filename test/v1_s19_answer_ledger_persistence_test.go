@@ -3,9 +3,10 @@ package test
 // v1_s19: answer durability across restarts and crashes, driver/envelope
 // edition. On the driver path the CONSUMER of an answer is the DRIVER
 // (the D9 archive-and-clear write on the capsule's execution.json) — the
-// capsule is the answer's persistent authority, and the daemon-private
-// answers.json ledger belongs to the legacy agent-relay path. The four
-// scenarios re-express the durability contract on those faces:
+// capsule is the answer's persistent authority (the daemon-private
+// answers.json ledger and its quarantine scenario were retired with the
+// legacy agent-relay path). The three scenarios pin the durability
+// contract on those faces:
 //
 //   - A: an open question is ON DISK (execution.json pending_question:
 //     id, question, step, asked_at) while the workflow parks; the
@@ -17,9 +18,6 @@ package test
 //     (from the durable file), never re-run: the restarted daemon
 //     re-derives nothing, the spawn journal and the execution state are
 //     byte-identical, and the WI stays wrapped.
-//   - D: a corrupt answers.json is quarantined at startup (the observe
-//     lane's own boot behavior, engine-agnostic), and the daemon serves
-//     a normal driver question/answer run afterwards.
 import (
 	"encoding/json"
 	"fmt"
@@ -244,94 +242,4 @@ func TestV1S19FinalOutcomeReplayedAfterDaemonCrash(t *testing.T) {
 	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {
 		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
 	}
-}
-
-// ---------------------------------------------------------------------
-// Scenario D: a corrupt answers.json is quarantined at startup, never
-// fatal — the daemon boots with an empty ledger and serves a normal
-// driver run.
-
-func TestV1S19CorruptLedgerFileQuarantinedAtStartup(t *testing.T) {
-	inst := newV1Install(t)
-	d := newV1Daemon(t, inst)
-
-	// A file that is neither valid JSON nor a known version.
-	const garbage = "{not json at all — s19 corruption probe"
-	if err := os.WriteFile(answersPath(d), []byte(garbage), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// The daemon must still come up (start() fails the test otherwise).
-	d.start()
-
-	// The bad file is moved aside, verbatim, under the quarantine name.
-	var quarantined []string
-	waitUntil(t, 20*time.Second, "the corrupt ledger was never quarantined", func() bool {
-		hits, err := filepath.Glob(filepath.Join(d.dataDir, "answers.json.corrupt-*"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		quarantined = hits
-		return len(hits) > 0
-	})
-	if len(quarantined) != 1 {
-		t.Fatalf("quarantine files: %v, want exactly 1", quarantined)
-	}
-	saved, err := os.ReadFile(quarantined[0])
-	if err != nil {
-		t.Fatalf("read quarantined ledger: %v", err)
-	}
-	if string(saved) != garbage {
-		t.Fatalf("the quarantined file is not the original bytes: %q", saved)
-	}
-	stamp := strings.TrimPrefix(filepath.Base(quarantined[0]), "answers.json.corrupt-")
-	if _, perr := time.Parse(time.RFC3339, stamp); perr != nil {
-		t.Fatalf("quarantine suffix %q is not an RFC3339 UTC stamp: %v", stamp, perr)
-	}
-	// The corrupt file is no longer in the live path (either removed or
-	// replaced by a fresh, empty, valid ledger).
-	if raw := readAnswersFile(t, d); raw != "" {
-		var doc map[string]any
-		if err := json.Unmarshal([]byte(raw), &doc); err != nil {
-			t.Fatalf("the live ledger after quarantine is still unparsable: %v\n%s", err, raw)
-		}
-		if strings.Contains(raw, "corruption probe") {
-			t.Fatalf("the corrupt bytes are still in the live ledger:\n%s", raw)
-		}
-	}
-
-	// The startup recorded the quarantine (the spec requires one event;
-	// it does not pin the kind's spelling, so the token is matched
-	// loosely against the durable event log).
-	logPath := filepath.Join(d.dataDir, "events.log")
-	waitUntil(t, 20*time.Second, "no quarantine event in "+logPath, func() bool {
-		raw, err := os.ReadFile(logPath)
-		if err != nil {
-			return false
-		}
-		low := strings.ToLower(string(raw))
-		return strings.Contains(low, "quarantin") || strings.Contains(low, "corrupt")
-	})
-
-	// And the daemon is fully functional on the empty ledger: a normal
-	// driver question/answer run still completes.
-	const qid = "q_s19d"
-	wi := inst.newWI(t, "s19 D: normal run after a quarantined ledger",
-		[]map[string]any{
-			{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": qid,
-				"question": "Does the daemon still serve answers?"},
-			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
-			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
-			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
-		}, nil)
-	t.Cleanup(func() { killOrphans(wi) })
-	d.pf(t, "submit", wi)
-	waitQuestion(t, d, wi, qid, 30*time.Second)
-	answerQuestion(t, d, wi, qid, "It does.")
-	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
-	if _, err := os.Stat(answersPath(d)); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("stat %s after the run: %v", answersPath(d), err)
-	}
-	fmt.Fprintf(os.Stderr, "s19 D: quarantined %s\n", filepath.Base(quarantined[0]))
 }

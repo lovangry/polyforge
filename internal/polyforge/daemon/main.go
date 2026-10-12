@@ -71,14 +71,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	wallWindow := fs.Duration("wall-window", 0, "absolute wall-clock backstop on a derivation's progress silence that no probe ack can reset; also bounds a never-closing turn and caps the tool-dispatch exemption at 4x this window (polyforge#114/#124; default 15m; negative disables)")
 	revalidateEvery := fs.Duration("revalidate-every", 0, "M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
 	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "machines heartbeat cadence (0 = disabled)")
-	// The graceful sequence's per-job flush(shutdown) wait (polyforge#110
-	// rewind): flags-only like the observe windows above — a harness
-	// shutting a daemon down over a live driver job (no flush face, so
-	// the bounded wait always degrades on timeout) shortens the window
-	// instead of spending the production 60s per live job. Omitted or
-	// zero keeps the production default; the sequence's semantics are
-	// unchanged either way.
-	shutdownFlushWait := fs.Duration("shutdown-flush-wait", 0, "per-job flush(shutdown) wait before the graceful sequence degrades (default 60s)")
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}
@@ -193,7 +185,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		RecallTopK:          *recallTopK,
 		Mode:                *mode,
 		HeartbeatEvery:      *heartbeatEvery,
-		ShutdownFlushWait:   *shutdownFlushWait,
 		Hub:                 aihubclient.New(*server, *apiKey),
 		// Zero fields fall through to observe's own fill() defaults, so a
 		// daemon started without these flags keeps the production windows.

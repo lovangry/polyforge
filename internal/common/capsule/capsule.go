@@ -101,7 +101,7 @@ type Identity struct {
 // copy of the work item's task definition (goal, content, labels,
 // priority, milestone, bundle pin and project name). v1 has NO
 // agent→server read path (ruling C3: the whole agent contact surface is
-// the capsule plus the flush control channel), so this file is the ONE
+// the capsule), so this file is the ONE
 // authoritative statement of what the WI agent is working on — the
 // claim answer is its only source, and recovery re-materializes it from
 // aihub when a legacy capsule predates it.

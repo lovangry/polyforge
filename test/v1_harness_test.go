@@ -633,22 +633,6 @@ func optObserveWindows(hang, idle, probe time.Duration) daemonOpt {
 	}
 }
 
-// optShutdownFlushWait injects the graceful sequence's per-job
-// flush(shutdown) wait through the real `pf daemon` flag
-// (--shutdown-flush-wait, polyforge#110 rewind). A non-positive duration
-// omits the flag, leaving the production 60s default. A scenario that
-// shuts a daemon down over a live driver job (no flush face — the
-// bounded wait always degrades on timeout) shortens the window instead
-// of spending 60s per live job; the sequence and its semantics are
-// unchanged.
-func optShutdownFlushWait(wait time.Duration) daemonOpt {
-	return func(d *v1Daemon) {
-		if wait > 0 {
-			d.extraArgs = append(d.extraArgs, "--shutdown-flush-wait", wait.String())
-		}
-	}
-}
-
 // optMode pre-seeds the daemon state file with an initial mode (read at
 // boot; used to start straight in drain).
 func optMode(mode string) daemonOpt {
@@ -1641,80 +1625,8 @@ func answerControls(t *testing.T, capDir string) []map[string]any {
 	return out
 }
 
-// ---------------------------------------------------------------------------
-// The observe answer-ledger file helpers (black box: the file's PATH and
-// its `version` field are the only structural facts the spec pins;
-// everything else is asserted on the values that must survive verbatim).
-// Shared by the answer-resilience scenarios.
-
-// answersPath is the persisted ledger of one daemon: `answers.json`
-// directly under the observe data dir — the same dir that hosts
-// events.log.
-func answersPath(d *v1Daemon) string { return filepath.Join(d.dataDir, "answers.json") }
-
-// readAnswersFile returns the raw bytes of the persisted ledger ("" when
-// the file does not exist yet).
-func readAnswersFile(t *testing.T, d *v1Daemon) string {
-	t.Helper()
-	raw, err := os.ReadFile(answersPath(d))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return ""
-		}
-		t.Fatalf("read %s: %v", answersPath(d), err)
-	}
-	return string(raw)
-}
-
-// answersFileHas reports whether the persisted ledger currently mentions
-// every one of the given values (the relay fields are stored verbatim,
-// so their VALUES must be findable whatever the surrounding key names).
-func answersFileHas(t *testing.T, d *v1Daemon, values ...string) bool {
-	t.Helper()
-	raw := readAnswersFile(t, d)
-	if raw == "" {
-		return false
-	}
-	for _, v := range values {
-		if !strings.Contains(raw, v) {
-			return false
-		}
-	}
-	return true
-}
-
-// assertLedgerFileShape pins the format contract: parsable UTF-8 JSON,
-// an explicit integer `version` of 1, mode 0600, and no in-flight
-// marker anywhere in the bytes (the in-flight state is memory-only).
-func assertLedgerFileShape(t *testing.T, d *v1Daemon) map[string]any {
-	t.Helper()
-	path := answersPath(d)
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("persisted ledger %s missing: %v", path, err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("persisted ledger mode %04o, want 0600 (answer_text is owner-authored content)", perm)
-	}
-	raw := readAnswersFile(t, d)
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
-		t.Fatalf("persisted ledger is not JSON: %v\n%s", err, raw)
-	}
-	ver, ok := doc["version"].(float64)
-	if !ok || int(ver) != 1 {
-		t.Fatalf("persisted ledger version = %v, want the integer 1: %s", doc["version"], raw)
-	}
-	for _, marker := range []string{"inflight", "in_flight", "in-flight"} {
-		if strings.Contains(strings.ToLower(raw), marker) {
-			t.Fatalf("persisted ledger carries an in-flight marker %q (settled states only): %s", marker, raw)
-		}
-	}
-	return doc
-}
-
 // restartSameDaemon re-execs a daemon on the SAME socket, data dir and
-// workspace (so the persisted ledger, events.log and capsules are
+// workspace (so events.log and capsules are
 // exactly what the new process re-opens) — the s08 restart shape, with
 // the observe-window flags carried over.
 func restartSameDaemon(t *testing.T, d *v1Daemon, logName string) *v1Daemon {

@@ -119,13 +119,6 @@ func TestStaleSpawnNDropped(t *testing.T) {
 	}
 	assertNoRT(t, toOB)
 
-	// stale completion is equally fenced
-	r.handleOB(context.Background(), protocol.OBMsg{
-		Kind: protocol.OBCompleted, SpawnN: 42, WorkItem: wi, Reason: "wrapped",
-	})
-	if hub.endCount() != 0 {
-		t.Fatal("stale completion must not end the session")
-	}
 	_ = fromOB
 }
 
@@ -210,54 +203,4 @@ func TestRunLoopDrivesRecovery(t *testing.T) {
 	case <-timeAfter():
 		t.Fatal("Run did not exit on ctx cancel")
 	}
-}
-
-// TestOBCompletedDrivesStop: Observe's completion message (flush(wrap)
-// landed) drives the seal path with the final status it carries.
-func TestOBCompletedDrivesStop(t *testing.T) {
-	setGitIdentity(t)
-	hub := newFakeHub()
-	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
-	wi := "wi_completed"
-	j := seedJob(r, wi)
-	initGitCapsule(t, j)
-	installOldAgent(t, &scriptedSpawner{ /* separate spawner: no derivation here */ }, j)
-
-	r.handleOB(context.Background(), protocol.OBMsg{
-		Kind: protocol.OBCompleted, SpawnN: j.spawnN, WorkItem: wi, Reason: "wrapped",
-	})
-
-	msg := recvRT(t, toOB)
-	if msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishWrapped {
-		t.Fatalf("completion must seal wrapped, got %+v", msg)
-	}
-	if hub.endCount() != 1 || hub.lastEnd().Status != protocol.FinishWrapped {
-		t.Fatalf("end-generation must be driven by the completion, got %+v", hub.lastEnd())
-	}
-	if r.jobOf(wi) != nil {
-		t.Fatal("completed job must leave the live set")
-	}
-	unseal(t, testWorkspace(r))
-}
-
-// TestOBCompletedFailedReason: the failed final status is carried through.
-func TestOBCompletedFailedReason(t *testing.T) {
-	setGitIdentity(t)
-	hub := newFakeHub()
-	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
-	wi := "wi_failed"
-	j := seedJob(r, wi)
-	initGitCapsule(t, j)
-
-	r.handleOB(context.Background(), protocol.OBMsg{
-		Kind: protocol.OBCompleted, SpawnN: j.spawnN, WorkItem: wi, Reason: "failed",
-	})
-	msg := recvRT(t, toOB)
-	if msg.Reason != protocol.FinishFailed {
-		t.Fatalf("failed completion must seal failed, got %+v", msg)
-	}
-	if hub.lastEnd().Status != protocol.FinishFailed {
-		t.Fatalf("end-generation status must be failed, got %+v", hub.lastEnd())
-	}
-	unseal(t, testWorkspace(r))
 }

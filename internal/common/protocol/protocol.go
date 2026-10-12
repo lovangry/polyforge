@@ -4,9 +4,7 @@
 //
 //  1. Runtime ↔ Observe messages (5 kinds, every message carries the
 //     per-WI derivation counter spawn_n).
-//  2. The agent-side control surface, split across two transports (ruling C2):
-//     - stdio control channel (daemon→agent): answer, stop_notice, probe
-//     - UDS proxy (agent→daemon): flush(reason)  [replaces publish_request]
+//  2. The liveness-probe control message (daemon→agent handle).
 //  3. The pf CLI ↔ daemon UDS HTTP API surface (04 §5).
 package protocol
 
@@ -62,7 +60,6 @@ type OBMsgKind string
 
 const (
 	OBNeedsRecovery OBMsgKind = "wi_needs_recovery" // agent died/hung; Runtime recovers
-	OBCompleted     OBMsgKind = "wi_completed"      // flush(wrap) landed; final state attached
 	// OBSuperseded (v1.5 M4): the periodic session revalidation learned
 	// this WI is held by another daemon. Runtime's response is NOT a
 	// recovery — it kills the tree, quarantines the capsule and drops the
@@ -107,13 +104,12 @@ const (
 )
 
 // ---------------------------------------------------------------------------
-// 2. Agent-side control surface (ruling C2: two transports, two method sets)
+// 2. Liveness-probe control surface
 // ---------------------------------------------------------------------------
 
-// --- stdio control channel: daemon writes one JSON line to agent stdin,
-// agent acknowledges on stdout. One method only (polyforge#106: the
-// answer relay and the stop-notice delivery died with the WI-Agent
-// engine; the probe is the channel's kept occupant). ---
+// The probe is the control channel's only method (polyforge#106 retired
+// the answer relay and the stop-notice delivery with the WI-Agent
+// engine; the remaining flush/stdio remnants were deleted after it).
 
 const (
 	// ControlProbe asks the agent to prove liveness within the 2-minute
@@ -121,73 +117,32 @@ const (
 	ControlProbe = "pf/probe"
 )
 
-// ControlMsg is the stdio control-channel envelope. Seq is the numeric
-// correlation token (monotonic per sender); pf/answer additionally
-// carries the question id in ID and pf/probe its nonce in Nonce — the
-// ack MUST echo one of them so concurrent waits cannot steal each
+// ControlMsg is the control envelope. Seq is the numeric correlation
+// token (monotonic per sender); pf/probe carries its nonce in Nonce —
+// the ack MUST echo one of them so concurrent waits cannot steal each
 // other's acks.
 type ControlMsg struct {
 	Method string `json:"method"`
 	Seq    int64  `json:"seq,omitempty"`
-	ID     string `json:"id,omitempty"`     // answer: question id
-	Answer string `json:"answer,omitempty"` // answer: human text
-	Nonce  string `json:"nonce,omitempty"`  // probe: echo this back
+	Nonce  string `json:"nonce,omitempty"` // probe: echo this back
 }
 
-// ControlAck is the agent's stdout reply to a control method. It MUST
-// echo the correlation token of the message it answers: the numeric Seq
-// and/or Ref (pf/answer → the question id, pf/probe → the nonce). The
+// ControlAck is the reply to a control method. It MUST echo the
+// correlation token of the message it answers: the numeric Seq and/or
+// Ref (pf/probe → the nonce). The
 // daemon-side wait matches on (method, correlation) — an ack that
 // echoes neither token matches nothing.
 type ControlAck struct {
 	Method string `json:"method"` // echoes the method
 	Seq    int64  `json:"seq,omitempty"`
-	Ref    string `json:"ref,omitempty"` // echoes answer question id / probe nonce
+	Ref    string `json:"ref,omitempty"` // echoes the probe nonce
 	OK     bool   `json:"ok"`
 	Error  string `json:"error,omitempty"`
 }
 
-// --- UDS proxy: the agent calls daemon endpoints over the UDS socket. ---
-
-// Flush reasons (ruling C3: only these three block the agent).
-const (
-	FlushNeedsInput = "needs_input" // human answer required before continuing
-	FlushWrap       = "wrap"        // final result; seal + push before ack
-	FlushShutdown   = "shutdown"    // daemon is closing; commit what exists
-)
-
-// FlushRequest is the agent→daemon flush(reason) call on the UDS proxy.
-type FlushRequest struct {
-	WorkItem string `json:"work_item"`
-	// v1.5 B2: the per-WI monotonic derivation counter. The flush fence
-	// validates spawn_n against the monitor's current/latest-announced
-	// derivation; an absent counter (0) is refused fail-closed.
-	SpawnN int    `json:"spawn_n"`
-	Reason string `json:"reason"` // one of the Flush* constants
-	// needs_input only:
-	QuestionID string `json:"question_id,omitempty"`
-	Question   string `json:"question,omitempty"`
-	Step       string `json:"step,omitempty"`
-	// wrap only:
-	FinalStatus string `json:"final_status,omitempty"` // wrapped|failed
-	Result      []byte `json:"result,omitempty"`
-}
-
-// FlushAck answers a flush. Per review ruling, the ack distinguishes local
-// commit from server push: LocalCommit is the capsule-local git commit;
-// Pushed means aihub accepted the push.
-type FlushAck struct {
-	OK          bool   `json:"ok"`
-	LocalCommit string `json:"local_commit,omitempty"` // local commit SHA
-	Pushed      bool   `json:"pushed"`
-	// PushedTo (bare repo ref) has never been written by any flush path
-	// yet; kept for the multi-machine visibility answers it will carry.
-	PushedTo string `json:"pushed_to,omitempty"`
-	Error    string `json:"error,omitempty"`
-}
-
-// FlushTimeout is the hard bound on any flush call (v1-spec-full §五).
-const FlushTimeout = 60 * 1e9 // 60 seconds (ns, for time.Duration)
+// PushTimeout is the hard bound on one capsule commit+push (the
+// monitor's periodic push; v1-spec-full §五).
+const PushTimeout = 60 * 1e9 // 60 seconds (ns, for time.Duration)
 
 // ---------------------------------------------------------------------------
 // 3. pf CLI ↔ daemon UDS HTTP API (04 §5.1; v0 surface minus publish_request)

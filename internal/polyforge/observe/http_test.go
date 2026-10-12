@@ -1,7 +1,7 @@
 package observe
 
-// http_test.go: the three UDS routes end-to-end through the hub —
-// observe (JobView), answer (relay) and flush — plus 404 semantics.
+// http_test.go: the UDS routes end-to-end through the hub — observe
+// (JobView) and answer (the no-relay refusal) — plus 404 semantics.
 
 import (
 	"bytes"
@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
@@ -43,7 +42,7 @@ func newHarness(t *testing.T) *harness {
 		PushFunc: func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			return "sha_http", true, gitops.PushTimings{}, nil
 		},
-		CallTimeout: 500 * time.Millisecond,
+		PollInterval: 10 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -124,19 +123,13 @@ func TestHTTPRoutesEndToEnd(t *testing.T) {
 		t.Fatalf("view: %+v", view)
 	}
 
-	// flush(needs_input): the agent UDS face entry.
-	flushBody := protocol.FlushRequest{
-		WorkItem: "wi_http", SpawnN: 1,
-		Reason: protocol.FlushNeedsInput, QuestionID: "q_http", Question: "proceed?",
+	// A pending question persisted in execution.json (the driver's
+	// write) surfaces through the monitor's poll.
+	m := hs.o.lookup("wi_http")
+	if m == nil {
+		t.Fatal("monitor not registered")
 	}
-	code, body = hs.post(t, "/jobs/wi_http/flush", flushBody, nil)
-	if code != http.StatusOK {
-		t.Fatalf("flush: %d %s", code, body)
-	}
-	var ack protocol.FlushAck
-	if err := json.Unmarshal(body, &ack); err != nil || !ack.OK {
-		t.Fatalf("flush ack: %v %s", err, body)
-	}
+	writePendingQuestion(t, m, "q_http", "proceed?", "code")
 
 	// The observe view now shows needs_input.
 	_, body = hs.get(t, "/jobs/wi_http/observe")
@@ -153,26 +146,10 @@ func TestHTTPRoutesEndToEnd(t *testing.T) {
 	if code != http.StatusConflict {
 		t.Fatalf("answer on the relayless face: %d %s", code, body)
 	}
-	if !jsonContains(body, "bridge") {
+	if !bytes.Contains(body, []byte("bridge")) {
 		t.Fatalf("the answer refusal must name the missing bridge handle: %s", body)
 	}
 
-	// flush(wrap): the ack distinguishes local commit and push.
-	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", SpawnN: 1,
-		Reason: protocol.FlushWrap, FinalStatus: protocol.FinishWrapped,
-	}, nil)
-	if code != http.StatusOK {
-		t.Fatalf("wrap flush: %d %s", code, body)
-	}
-	_ = json.Unmarshal(body, &ack)
-	if !ack.OK || ack.LocalCommit != "sha_http" || !ack.Pushed {
-		t.Fatalf("wrap ack: %+v (%s)", ack, body)
-	}
-	msg := waitOB(t, hs.ob, "WICompleted via HTTP path")
-	if msg.Kind != protocol.OBCompleted {
-		t.Fatalf("OB message: %+v", msg)
-	}
 }
 
 func TestHTTPUnknownWorkItemIs404(t *testing.T) {
@@ -202,66 +179,4 @@ func TestHTTPObserveAfterFinishIs404(t *testing.T) {
 		code, _ := hs.get(t, "/jobs/wi_http/observe")
 		return code == http.StatusNotFound
 	})
-}
-
-func TestHTTPFlushRejectsBadReason(t *testing.T) {
-	h := newFakeHandle("att_bad")
-	hs := newHarness(t)
-	hs.start(t, h)
-	soon(t, time.Second, "job registered", func() bool {
-		code, _ := hs.get(t, "/jobs/wi_http/observe")
-		return code == http.StatusOK
-	})
-	code, _ := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{Reason: "publish_request"}, nil)
-	if code != http.StatusBadRequest {
-		t.Fatalf("unknown reason: %d", code)
-	}
-}
-
-// TestHTTPFlushStaleSpawnRefused (#8/B2): the flush face is spawn-fenced.
-// A zombie survivor of a superseded derivation — or any request not
-// naming the monitor's CURRENT derivation counter — answers DAEMON-409
-// STALE_SPAWN and never reaches the monitor: no seal, no OBCompleted,
-
-func TestHTTPFlushNeedsInputEmptyQuestionIDFailClosed(t *testing.T) {
-	h := newFakeHandle("att_cur")
-	hs := newHarness(t)
-	hs.start(t, h)
-	soon(t, time.Second, "job registered", func() bool {
-		code, _ := hs.get(t, "/jobs/wi_http/observe")
-		return code == http.StatusOK
-	})
-
-	code, body := hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", SpawnN: 1,
-		Reason: protocol.FlushNeedsInput, QuestionID: "", Question: "which?",
-	}, nil)
-	if code != http.StatusBadRequest {
-		t.Fatalf("empty question_id flush: %d %s, want 400", code, body)
-	}
-	if !bytes.Contains(body, []byte(api.ErrDaemonBadInput)) {
-		t.Fatalf("refusal must carry DAEMON-400: %s", body)
-	}
-
-	// Fail-closed, not fail-deaf: no pending question was minted and the
-	// live attempt's own needs_input flush still works.
-	_, body = hs.get(t, "/jobs/wi_http/observe")
-	var view protocol.JobView
-	if err := json.Unmarshal(body, &view); err != nil {
-		t.Fatalf("view decode: %v (%s)", err, body)
-	}
-	if view.Pending != nil {
-		t.Fatalf("the refused flush must not mint a pending: %+v", view.Pending)
-	}
-	code, body = hs.post(t, "/jobs/wi_http/flush", protocol.FlushRequest{
-		WorkItem: "wi_http", SpawnN: 1,
-		Reason: protocol.FlushNeedsInput, QuestionID: "q_live", Question: "which?",
-	}, nil)
-	if code != http.StatusOK {
-		t.Fatalf("live needs_input flush after the refusal: %d %s", code, body)
-	}
-	var ack protocol.FlushAck
-	if err := json.Unmarshal(body, &ack); err != nil || !ack.OK {
-		t.Fatalf("live needs_input ack: %v (%s)", err, body)
-	}
 }

@@ -4,8 +4,7 @@ Execution-plane verb: routed to the local daemon (status / mode / shutdown
 routes). Machine-local operations only: what this daemon is managing, how
 it accepts work, and how it stops. Graceful shutdown is a
 process-lifecycle action and is **not** drain — the shutdown sequence
-notifies every live agent, waits bounded for their closing flushes, seals
-and exits; drain is a resident mode that keeps claiming queued work.
+terminates every live agent tree, persists its bookkeeping and exits; drain is a resident mode that keeps claiming queued work.
 
 ## Triggers
 
@@ -46,9 +45,10 @@ pf ops shutdown                                      # graceful shutdown
 - `mode` bare: `mode: <current>`; every mode transition answers with the
   new mode (and the effective concurrency on `set`).
 - `shutdown`: `graceful shutdown requested; the daemon quiesces and exits`
-  — the sequence notifies every live agent (`pf/stop_notice`), waits
-  bounded for each agent's closing `flush(shutdown)`, terminates the agent
-  trees, persists the bookkeeping and exits within its five-minute budget.
+  — the sequence terminates the live agent trees, persists the
+  bookkeeping and exits within its five-minute budget (there is no
+  per-agent flush wait: uncommitted state is picked up by the recovery
+  engine at the next start).
   Interrupted work items stay running server-side; the next daemon start
   recovers them through the transcript-resume engine.
 

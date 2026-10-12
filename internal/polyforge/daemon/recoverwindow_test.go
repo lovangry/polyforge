@@ -3,10 +3,9 @@ package daemon
 // recoverwindow_test.go: the recovery-window regressions of the e2e bug
 // lane. Two pins:
 //
-//   - Bug 2: the NEW instance's flush(wrap) arriving inside the recovery
-//     window (state still RECOVERING, no close anywhere) is answered with
-//     the typed retryable transient, never the semantically wrong "a
-//     close is already in progress".
+//   - Bug 2: the recovery window (state RECOVERING) passes, the monitor
+//     adopts the recovered derivation, and a CLI wrap then closes the
+//     work item exactly once.
 //
 //   - Bug 4 + the record-stream assembly: the daemon.Config Observe seam
 //     carries the supervision windows into the assembled observe lane,
@@ -23,14 +22,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 // ---------------------------------------------------------------------------
-// Bug 2: flush(wrap) in the recovery window.
+// Bug 2: the recovery window, then a single close.
 
 // parkingSpawner parks every spawn AFTER the first (the recovery engine's
 // re-derivation), holding the runtime in StateRecovering until released —
@@ -47,7 +45,7 @@ func (s *parkingSpawner) Spawn(ctx context.Context, p runtime.SpawnParams) (runt
 	return s.fakeSpawner.Spawn(ctx, p)
 }
 
-func TestFlushWrapDuringRecoveryWindowAnswersRetryableTransient(t *testing.T) {
+func TestRecoveryWindowThenWrapClosesOnce(t *testing.T) {
 	park := make(chan struct{})
 	var sp *parkingSpawner
 	td := newTestDaemon(t, func(c *Config) {
@@ -62,34 +60,11 @@ func TestFlushWrapDuringRecoveryWindowAnswersRetryableTransient(t *testing.T) {
 	sp.agentOf(0).Terminate(0)
 	waitState(t, td, "wi_rw", "recovering")
 
-	// The NEW instance's flush(wrap) in the window: no close is in
-	// progress anywhere, so the answer must be the typed retryable
-	// transient — never "a close is already in progress".
-	_, err := td.client.Flush("wi_rw", protocol.FlushRequest{
-		WorkItem: "wi_rw", Reason: protocol.FlushWrap, FinalStatus: "wrapped",
-	})
-	if err == nil {
-		t.Fatal("recovery-window flush(wrap) succeeded; want the retryable DAEMON-409")
-	}
-	var ae *api.Error
-	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict {
-		t.Fatalf("recovery-window flush(wrap) error = %v, want DAEMON-409", err)
-	}
-	if !strings.Contains(ae.Detail, "instance just spawned") {
-		t.Fatalf("recovery-window answer must name the typed transient, got %q", ae.Detail)
-	}
-	if strings.Contains(ae.Detail, "already in progress") {
-		t.Fatalf("no close is in progress; the answer must not claim one: %q", ae.Detail)
-	}
-
-	// The window passes: the re-derivation completes and the (retrying)
-	// flush now takes the ordinary winner path — one seal, one
-	// end-generation, terminal.
+	// The window passes: the re-derivation completes.
 	close(park)
 	waitState(t, td, "wi_rw", "running")
 	// The monitor's adoption of the new derivation lags the RUNNING flip
-	// by the attachment pipeline; the flush must name the ADOPTED counter,
-	// so wait for the view to carry it before playing the agent's retry.
+	// by the attachment pipeline; wait for the view to carry it.
 	var rjv protocol.JobView
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -108,11 +83,8 @@ func TestFlushWrapDuringRecoveryWindowAnswersRetryableTransient(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if _, err := td.client.Flush("wi_rw", protocol.FlushRequest{
-		WorkItem: "wi_rw", SpawnN: rjv.SpawnN,
-		Reason: protocol.FlushWrap, FinalStatus: "wrapped",
-	}); err != nil {
-		t.Fatalf("post-window flush(wrap): %v", err)
+	if _, err := td.client.Wrap("wi_rw", "wrap"); err != nil {
+		t.Fatalf("post-window wrap: %v", err)
 	}
 	waitGone(t, td, "wi_rw")
 	if td.hub.endCount() != 1 {

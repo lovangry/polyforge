@@ -13,8 +13,7 @@ package observe
 //   - the confirmed process-exit signal (Handle.Exit) → death detection;
 //   - the execution.json poll (~500ms tick; mtime+Version change);
 //   - RT messages (WIRecovered rides rtCh; WIFinished rides stopCh);
-//   - CLI answer requests and agent flush calls (HTTP face → channels);
-//   - results of the sub-goroutines (push/probe/answer/wrap);
+//   - results of the sub-goroutines (push/probe/verify);
 //   - the stop signal.
 //
 // RECOVERING: after WINeedsRecovery is sent the monitor enters the
@@ -33,7 +32,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,10 +42,6 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
 )
 
-// wrapRetries is the §五 bound: a wrap flush retries three times before
-// the work item is transitioned to blocked.
-const wrapRetries = 3
-
 // sameErrorCap is the V8-repair retry bound: after this many consecutive
 // async push failures carrying the IDENTICAL error, the retry round is
 // halted (one degraded push_backpressure event with reason "same_error")
@@ -55,8 +49,7 @@ const wrapRetries = 3
 // successful push re-arms it. The pilot's poison-chain storm (#48) was
 // 185 consecutive identical failures at a ~10s cadence with no bound;
 // the cap turns every such deterministic-failure shape into at most
-// sameErrorCap attempts per round. Wrap/seal pushes are already bounded
-// (wrapRetries) and are not affected.
+// sameErrorCap attempts per round.
 const sameErrorCap = 5
 
 // toolDispatchWindow is the #83 tool-execution exemption's bound: how
@@ -151,12 +144,6 @@ type Handle interface {
 	SendControl(ctx context.Context, msg protocol.ControlMsg) (protocol.ControlAck, error)
 }
 
-// FlushCall is one agent flush(reason) routed to the monitor.
-type FlushCall struct {
-	Req  protocol.FlushRequest
-	Resp chan protocol.FlushAck // buffered 1
-}
-
 type pushResult struct {
 	version  int64
 	sha      string
@@ -169,19 +156,6 @@ type pushResult struct {
 type probeResult struct {
 	ack protocol.ControlAck
 	err error
-}
-
-type wrapResult struct {
-	ok          bool
-	refused     bool   // a fail-closed wrap gate refused the seal before any push attempt
-	code        string // the refusal's typed code (VERIFICATION_EVIDENCE_MISSING); "" = the evidence gate
-	sha         string
-	pushed      bool
-	timings     gitops.PushTimings // the settled (successful, or last) attempt's latency samples
-	err         string
-	version     int64
-	finalStatus string
-	call        FlushCall
 }
 
 // monitorCfg carries the tunables (defaults in observe.go Config).
@@ -212,7 +186,7 @@ type monitorCfg struct {
 	PushRetryBackoff  time.Duration
 	BackpressureSteps int
 	BackpressureAfter time.Duration
-	FlushBound        time.Duration
+	PushBound         time.Duration
 	// VersionStagnantTicks is the C3' belt-and-braces bound (0 = the
 	// default 3): consecutive same-Version rewrites before a fallback
 	// commit. Injectable so tests shrink the window.
@@ -241,9 +215,7 @@ type Monitor struct {
 	handle Handle
 	// spawnN is the v1.5 B2 derivation counter of the CURRENTLY ADOPTED
 	// derivation (guarded by stateMu for the HTTP fence's read). It is
-	// fed from RTMsg.SpawnN at RTStarted/RTRecovered adoption; the flush
-	// fence (http.go serveFlush) compares FlushRequest.SpawnN against it
-	// and against the hub's latest ANNOUNCED counter (Observe.spawnKnown).
+	// fed from RTMsg.SpawnN at RTStarted/RTRecovered adoption.
 	spawnN int
 	// sessionID is the v1.5 session secret carried in-process on the
 	// RTStarted/RTRecovered message (M4 revalidation input). It lives
@@ -255,10 +227,9 @@ type Monitor struct {
 	exitCh    <-chan struct{}
 	stream    *streamState
 
-	rtCh    chan Attach
-	stopCh  chan struct{}
-	stop    sync.Once
-	flushCh chan FlushCall
+	rtCh   chan Attach
+	stopCh chan struct{}
+	stop   sync.Once
 
 	// execution.json polling state (monitor goroutine only).
 	execPath      string
@@ -278,7 +249,6 @@ type Monitor struct {
 	// the single-in-flight push gate.
 	gate     chan struct{}
 	pushDone chan pushResult
-	wrapDone chan wrapResult
 
 	// backpressure bookkeeping (monitor goroutine only).
 	failedPushes int
@@ -338,26 +308,15 @@ type Monitor struct {
 	trSpawnAt        time.Time // the derivation's birth moment
 	transcriptWarned bool      // one transcript_missing event per attempt
 
-	// ledger is the hub's SHARED, daemon-wide answer ledger (one
-	// answers.json for the whole daemon, keyed per work item inside),
-	// handed down by Observe.newMonitor. A monitor never owns one: an
-	// answer accepted before a daemon restart must still be visible to
-	// the monitor that comes back for the same work item. Unit tests
-	// that build a monitor directly hand it a memory-only ledger.
-	ledger *AnswerLedger
-
-	// stateMu guards the fields every goroutine (HTTP view, flush/answer
+	// stateMu guards the fields every goroutine (HTTP view, push
 	// sub-goroutines) reads.
 	stateMu    sync.Mutex
 	pending    *protocol.PendingView
 	sealing    bool
-	wrapped    bool // attempt reached a terminal state via flush(wrap)
-	blocked    bool
 	recovering bool
 	// superseded is the v1.5 M4 state: the periodic session-verify
 	// answered matches=false — another daemon holds the work item. The
-	// monitor stops supervising (detection and pushes are suppressed;
-	// flushes are answered with the STALE_SPAWN refusal) but keeps
+	// monitor stops supervising (detection and pushes are suppressed) but keeps
 	// draining its channels and KEEPS REVALIDATING until Runtime's
 	// release (RTFinished, sent by supersedeOp — v1.5 review Finding 4)
 	// stops the loop: the OBSuperseded emission is retryable (Finding
@@ -410,14 +369,10 @@ func (m *Monitor) run() {
 			m.onTick()
 		case res := <-m.pushDone:
 			m.onPushResult(res)
-		case wr := <-m.wrapDone:
-			m.onWrapResult(wr)
 		case pr := <-m.probeDone:
 			m.onProbeResult(pr)
 		case res := <-m.verifyDone:
 			m.onVerifyResult(res)
-		case call := <-m.flushCh:
-			m.onFlush(call)
 		}
 	}
 }
@@ -510,12 +465,12 @@ func (m *Monitor) drainIncidents() {
 
 // onExit handles the CONFIRMED process-exit signal (the handle adapter
 // already waited on the process — this is the confirmation). An expected
-// exit (wrap sealed, blocked, or a signal already sent for this attempt)
-// is silent.
+// exit (a daemon-initiated close, or a signal already sent for this
+// attempt) is silent.
 func (m *Monitor) onExit() {
 	m.exitCh = nil // fires once per handle
 	m.stateMu.Lock()
-	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
+	suppressed := m.recovering || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if suppressed {
 		return
@@ -530,7 +485,7 @@ func (m *Monitor) onExit() {
 // same-attempt signals (§三).
 func (m *Monitor) needRecovery(reason, detail string) {
 	m.stateMu.Lock()
-	if m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded {
+	if m.recovering || m.sealing || m.superseded {
 		m.stateMu.Unlock()
 		return
 	}
@@ -583,7 +538,7 @@ func (m *Monitor) checkHang() {
 	}
 	m.stateMu.Lock()
 	pending := m.pending != nil
-	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
+	suppressed := m.recovering || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if pending {
 		// Pending-question exemption (the #99 lesson): a driver parked on
@@ -660,7 +615,7 @@ func (m *Monitor) checkIdle() {
 	}
 	m.stateMu.Lock()
 	pending := m.pending != nil
-	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
+	suppressed := m.recovering || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if pending {
 		return // needs_input: waiting for a human answer is designed stillness
@@ -725,7 +680,7 @@ func (m *Monitor) checkWallBackstop() {
 	}
 	m.stateMu.Lock()
 	pending := m.pending != nil
-	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
+	suppressed := m.recovering || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if pending || suppressed {
 		return
@@ -821,7 +776,7 @@ func (m *Monitor) checkTurnDuration() {
 	}
 	m.stateMu.Lock()
 	pending := m.pending != nil
-	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
+	suppressed := m.recovering || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if pending || suppressed {
 		return
@@ -861,7 +816,7 @@ func (m *Monitor) checkNoProgress() {
 	}
 	m.stateMu.Lock()
 	pending := m.pending != nil
-	suppressed := m.recovering || m.wrapped || m.blocked || m.sealing || m.superseded
+	suppressed := m.recovering || m.sealing || m.superseded
 	m.stateMu.Unlock()
 	if pending || suppressed {
 		return
@@ -1062,8 +1017,7 @@ func (m *Monitor) stagnantBound() int {
 
 // applyPendingFromExec reconciles the pending-question projection with
 // the authoritative file (the agent persists pending_question in
-// execution.json BEFORE calling flush(needs_input); both sources are
-// idempotent by question id).
+// execution.json; the projection is idempotent by question id).
 func (m *Monitor) applyPendingFromExec(exec *capsule.Execution) {
 	var pv *protocol.PendingView
 	if s := exec.Steps[exec.CurrentStep]; s != nil && s.PendingQuestion != nil {
@@ -1071,8 +1025,7 @@ func (m *Monitor) applyPendingFromExec(exec *capsule.Execution) {
 		if q.ID == "" {
 			// F10: a schema-invalid pending (id missing — e.g. the agent wrote
 			// the wire field name instead of the schema's `id`) must NOT
-			// clobber a valid pending the flush face already recorded, and
-			// must not become an unanswerable projection: ignore it for the
+			// clobber a valid recorded pending, and must not become an unanswerable projection: ignore it for the
 			// pending projection, one event per invalid sighting.
 			_ = m.log.Append(m.wi.WorkItem, "pending_invalid", map[string]any{
 				"step": q.Step, "hint": "execution.json pending_question.id missing; see skill §7.2",
@@ -1104,9 +1057,9 @@ func (m *Monitor) applyPending(pv *protocol.PendingView) {
 		return
 	case m.pending != nil && m.pending.ID == pv.ID:
 		// Idempotent re-present of the SAME question id (a recovered
-		// derivation re-flushing its persisted pending question, or the
+		// derivation re-presenting its persisted pending question, or the
 		// execution.json poll reconciling): refresh the asked_at — the one
-		// observable a repeated flush moves — but never open a second
+		// observable a repeat moves — but never open a second
 		// pending, never re-announce, and never let a text-less re-present
 		// erase the recorded question. One question id is one needs_input,
 		// minted once (F9).
@@ -1252,8 +1205,7 @@ func (m *Monitor) schedulePush() {
 	// until the next commit boundary — an execution.json Version the
 	// round did NOT already see — re-arms it. dirtyVersion only moves
 	// forward on fresh agent work (pollExecution), so a frozen poisoned
-	// tree cannot spin the retry loop; the wrap/seal path stays
-	// available (bounded by wrapRetries) and is not gated here.
+	// tree cannot spin the retry loop.
 	if m.retryHalted {
 		if m.dirtyVersion <= m.retryHaltedAt {
 			return
@@ -1277,7 +1229,7 @@ func (m *Monitor) schedulePush() {
 		// precedes the push in THIS goroutine, so the transcript lands in
 		// the commit it belongs to — and never blocks the select loop.
 		m.syncTranscript(tr)
-		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.FlushBound)
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.PushBound)
 		defer cancel()
 		message := fmt.Sprintf("observe: execution v%d", version)
 		if stagnant {
@@ -1349,8 +1301,7 @@ func (m *Monitor) onPushResult(res pushResult) {
 			"streak": m.sameErrStreak, "error": m.lastPushErr,
 			"note": "async push retry halted for this round (" +
 				strconv.Itoa(sameErrorCap) + " consecutive identical errors); " +
-				"resumes at the next execution.json Version bump (commit boundary) or a successful push; " +
-				"wrap/seal pushes stay available and bounded",
+				"resumes at the next execution.json Version bump (commit boundary) or a successful push",
 		})
 	}
 	// V8 classification: the LOCAL gitlink precheck refusal is its own
@@ -1405,342 +1356,18 @@ func (m *Monitor) checkBackpressure() {
 }
 
 // ---------------------------------------------------------------------------
-// flush(reason) handling (the UDS face entry)
-
-func (m *Monitor) onFlush(call FlushCall) {
-	switch call.Req.Reason {
-	case protocol.FlushNeedsInput:
-		m.flushNeedsInput(call)
-	case protocol.FlushWrap:
-		m.flushWrap(call)
-	case protocol.FlushShutdown:
-		m.flushShutdown(call)
-	default:
-		call.Resp <- protocol.FlushAck{OK: false, Error: "unknown flush reason: " + call.Req.Reason}
-	}
-}
-
-// flushNeedsInput records the pending question (idempotent by question
-// id) and acks IMMEDIATELY: the ack is the agent's license to block on
-// the human, and it never touches the push path ("不阻塞 push" — the
-// question itself reaches the capsule through the agent's own
-// execution.json write and is committed by the async push like any
-// other change).
-//
-// Degrade semantics (§五): this path cannot fail the agent. A malformed
-// request is the only refusal — and since F9 the HTTP face fail-closes
-// an empty question_id with DAEMON-400 before the call ever reaches
-// here, so this guard is the belt-and-braces for direct-channel callers.
-func (m *Monitor) flushNeedsInput(call FlushCall) {
-	req := call.Req
-	if req.QuestionID == "" {
-		_ = m.log.Append(m.wi.WorkItem, EvNeedsInput, map[string]any{
-			"error": "flush(needs_input) without question_id; degraded",
-		})
-		call.Resp <- protocol.FlushAck{OK: false, Error: "question_id required"}
-		return
-	}
-	m.applyPending(&protocol.PendingView{
-		ID: req.QuestionID, Step: req.Step, Question: req.Question,
-		AskedAt: time.Now().UTC().Format(time.RFC3339Nano),
-	})
-	call.Resp <- protocol.FlushAck{OK: true}
-}
-
-// flushWrap seals the attempt: commit+push with the single-in-flight
-// guarantee, retried up to three times inside the flush bound. Success
-// distinguishes the local commit from the server push in the ack; after
-// three failures the work item transitions to blocked and the monitor
-// reports OBCompleted(blocked).
-func (m *Monitor) flushWrap(call FlushCall) {
-	m.stateMu.Lock()
-	if m.sealing {
-		m.stateMu.Unlock()
-		call.Resp <- protocol.FlushAck{OK: false, Error: "wrap flush already in flight"}
-		return
-	}
-	m.sealing = true
-	m.stateMu.Unlock()
-
-	version := m.dirtyVersion
-	finalStatus := call.Req.FinalStatus
-	tr := m.transcriptSnapshot() // captured before the goroutine (F3)
-	go func() {
-		// V4 evidence gate (fail-closed, in THIS sub-goroutine — the
-		// select never blocks): a seal attempt whose executed
-		// verification step carries no structured command evidence is
-		// refused before any commit/push is attempted, with the typed
-		// DAEMON-400 VERIFICATION_EVIDENCE_MISSING ack naming the work
-		// item and the step. The refusal is NOT terminal: the agent
-		// appends the evidence (taken from the actual command results)
-		// and re-flushes. See wrapEvidenceMissing for the predicate.
-		if missing, detail := m.wrapEvidenceMissing(); missing {
-			m.wrapDone <- wrapResult{
-				ok: false, refused: true, code: codeEvidenceMissing, err: detail,
-				version: version, finalStatus: finalStatus, call: call,
-			}
-			return
-		}
-		// seal flush: the transcript copy must ride the seal commit (C1)
-		// — sync before the first push attempt, inside the gate.
-		m.syncTranscript(tr)
-		deadline := time.Now().Add(m.cfg.FlushBound)
-		var (
-			lastSHA, lastErr string
-			pushed, ok       bool
-			psha             string
-			pt               gitops.PushTimings
-		)
-		for try := 1; try <= wrapRetries && !ok; try++ {
-			m.gate <- struct{}{} // wait out any in-flight async push
-			ctx, cancel := context.WithDeadline(context.Background(), deadline)
-			sha, p, t, err := m.cfg.push(ctx, m.wi.Git, "wrap: "+finalStatus)
-			cancel()
-			<-m.gate
-			psha, pushed, pt = sha, p, t
-			if err == nil {
-				ok = true
-				break
-			}
-			lastSHA, lastErr = sha, err.Error()
-			if !time.Now().Before(deadline) {
-				break // the 60s protocol bound is spent
-			}
-		}
-		m.wrapDone <- wrapResult{
-			ok: ok, sha: pickSHA(ok, psha, lastSHA), pushed: pushed, timings: pt,
-			err: lastErr, version: version, finalStatus: finalStatus, call: call,
-		}
-	}()
-}
-
-func pickSHA(ok bool, a, b string) string {
-	if ok {
-		return a
-	}
-	return b
-}
-
-// ---------------------------------------------------------------------------
-// V4 wrap gate: verification evidence (fail-closed)
-
-// verificationStepID is the step id every reference bundle's verification
-// gate carries (bug-fix / chore / feature-full / quick-fix), and the exact
-// steps key the M4 read-through (tools/gate-metrics) hardcodes — the
-// wrap gate and the metric must judge the same face, or the gate would
-// seal exactly what the metric then counts as evidence-less.
-const verificationStepID = "verification"
-
-// The wrap gate's typed refusal code (the DAEMON-400 family): the ack
-// text prefixes the code, the event log records the kind, and the agent's
-// recovery is to fix what is missing and re-flush.
-const codeEvidenceMissing = "VERIFICATION_EVIDENCE_MISSING"
-
-// wrapEvidenceMissing answers whether the seal must be refused: some
-// EXECUTED verification step in the capsule's execution.json carries no
-// structured command evidence — no readable {argv, exit_code, duration_ms}
-// entry in steps.verification.output.commands. "Executed" matches the M4
-// denominator exactly (any status other than empty/pending); an absent
-// or unexecuted verification step is outside both the metric and this
-// gate. An unreadable/unparsable file fails OPEN here (same tolerance as
-// pollExecution's torn-read path: the write is tmp+rename atomic, so a
-// persistent read failure means no step was ever observed — nothing to
-// gate). Reads happen in the flushWrap sub-goroutine; the select loop
-// never blocks on this check.
-func (m *Monitor) wrapEvidenceMissing() (bool, string) {
-	data, err := os.ReadFile(m.execPath)
-	if err != nil {
-		return false, ""
-	}
-	var exec capsule.Execution
-	if json.Unmarshal(data, &exec) != nil {
-		return false, ""
-	}
-	st := exec.Steps[verificationStepID]
-	if st == nil || st.Status == "" || st.Status == capsule.StepPending {
-		return false, "" // not executed: outside the M4 denominator, outside the gate
-	}
-	if stepHasCommandEvidence(st.Output) {
-		return false, ""
-	}
-	detail := fmt.Sprintf("work item %s: step %q (status %s) records no structured command evidence in steps.%s.output.commands — append at least one readable {argv, exit_code, duration_ms} entry taken directly from the command result (the step executor's §4 command audit contract), then re-flush",
-		m.wi.WorkItem, verificationStepID, st.Status, verificationStepID)
-	return true, detail
-}
-
-// stepHasCommandEvidence reports whether the step's output carries at
-// least one readable command-audit entry — the M4 evidence predicate,
-// mirrored bit for bit from tools/gate-metrics's commandEvidence
-// (INV-D3: exit_code readable; any non-empty output is NOT evidence).
-func stepHasCommandEvidence(output map[string]any) bool {
-	if output == nil {
-		return false
-	}
-	cmds, ok := output["commands"].([]any)
-	if !ok {
-		return false // old schema: no commands field at all
-	}
-	for _, c := range cmds {
-		if commandEvidenceReadable(c) {
-			return true
-		}
-	}
-	return false
-}
-
-// commandEvidenceReadable judges ONE output.commands entry: a readable
-// {argv, exit_code, duration_ms} record — argv a non-empty argv array or
-// a non-blank command string, exit_code and duration_ms both present.
-func commandEvidenceReadable(v any) bool {
-	e, ok := v.(map[string]any)
-	if !ok {
-		return false
-	}
-	switch argv := e["argv"].(type) {
-	case []any:
-		if len(argv) == 0 {
-			return false
-		}
-	case string:
-		if strings.TrimSpace(argv) == "" {
-			return false
-		}
-	default:
-		return false
-	}
-	return e["exit_code"] != nil && e["duration_ms"] != nil
-}
-
-func (m *Monitor) onWrapResult(wr wrapResult) {
-	if wr.refused {
-		// The fail-closed evidence gate's refusal: un-arm the seal guard,
-		// answer the typed DAEMON-400, and leave the attempt RUNNING — no
-		// blocked transition, no OBCompleted, no push bookkeeping (no
-		// commit was attempted). The step executor's contract is to supply
-		// the missing command evidence and re-flush.
-		m.stateMu.Lock()
-		m.sealing = false
-		m.stateMu.Unlock()
-		code := wr.code
-		if code == "" {
-			code = codeEvidenceMissing
-		}
-		ack := protocol.FlushAck{
-			OK:    false,
-			Error: "DAEMON-400 " + code + ": " + wr.err,
-		}
-		_ = m.log.Append(m.wi.WorkItem, EvWrapEvidenceRefused, map[string]any{
-			"error": ack.Error, "final_status": wr.finalStatus,
-			"spawn_n": m.currentSpawn(),
-		})
-		wr.call.Resp <- ack
-		return
-	}
-	ack := protocol.FlushAck{OK: wr.ok, LocalCommit: wr.sha, Pushed: wr.pushed && wr.ok}
-	if wr.ok {
-		m.stateMu.Lock()
-		m.sealing = false
-		// Terminal for the attempt: a later process exit is expected
-		// and never a recovery signal.
-		m.wrapped = true
-		m.stateMu.Unlock()
-		if wr.version > m.pushedVersion {
-			m.pushedVersion = wr.version
-		}
-		m.lastPushOK = time.Now()
-		m.failedPushes = 0
-		m.pushDegraded = false
-		m.timeDegraded = false
-		m.lastPushErr = ""
-		m.sameErrStreak = 0
-		m.retryHalted = false
-		_ = m.log.Append(m.wi.WorkItem, EvPublished, map[string]any{
-			"wrap": true, "local_commit": wr.sha, "pushed": wr.pushed, "final_status": wr.finalStatus,
-			"commit_ms": wr.timings.CommitMS, "push_ms": wr.timings.PushMS,
-		})
-		reason := wr.finalStatus
-		if reason != protocol.FinishFailed {
-			reason = protocol.FinishWrapped
-		}
-		m.sendOB(protocol.OBMsg{
-			Kind: protocol.OBCompleted, SpawnN: m.currentSpawn(),
-			WorkItem: m.wi.WorkItem, Reason: reason,
-		})
-	} else {
-		m.stateMu.Lock()
-		m.sealing = false
-		m.blocked = true
-		m.stateMu.Unlock()
-		ack.Error = "wrap flush failed after " + strconv.Itoa(wrapRetries) + " retries"
-		if wr.err != "" {
-			ack.Error += ": " + wr.err
-		}
-		_ = m.log.Append(m.wi.WorkItem, EvWrapBlocked, map[string]any{
-			"error": wr.err, "local_commit": wr.sha,
-		})
-		m.sendOB(protocol.OBMsg{
-			Kind: protocol.OBCompleted, SpawnN: m.currentSpawn(),
-			WorkItem: m.wi.WorkItem, Reason: protocol.FinishBlocked,
-			Detail: "wrap flush failed 3 times; transitioned to blocked",
-		})
-	}
-	wr.call.Resp <- ack
-}
-
-// flushShutdown is the daemon-close flush: commit what exists, ack the
-// result, never wait (§五: a failed shutdown flush does not hold the
-// agent — the data is in the local commit).
-func (m *Monitor) flushShutdown(call FlushCall) {
-	tr := m.transcriptSnapshot() // captured before the goroutine (F3)
-	go func() {
-		m.gate <- struct{}{}
-		// the closing flush commits what exists — the transcript included
-		// (F3): copy before the push, inside the gate.
-		m.syncTranscript(tr)
-		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.FlushBound)
-		sha, pushed, timings, err := m.cfg.push(ctx, m.wi.Git, "shutdown flush")
-		cancel()
-		<-m.gate
-		ack := protocol.FlushAck{OK: err == nil, LocalCommit: sha, Pushed: pushed && err == nil}
-		if err != nil {
-			ack.Error = err.Error()
-			_ = m.log.Append(m.wi.WorkItem, EvPushFailed, map[string]any{
-				"shutdown": true, "error": ack.Error,
-			})
-		} else {
-			_ = m.log.Append(m.wi.WorkItem, EvPublished, map[string]any{
-				"shutdown": true, "local_commit": sha, "pushed": pushed,
-				"commit_ms": timings.CommitMS, "push_ms": timings.PushMS,
-			})
-		}
-		call.Resp <- ack
-	}()
-}
-
-// ---------------------------------------------------------------------------
 // state read face (HTTP view + sub-goroutines)
 
 // currentSpawn answers the derivation counter the monitor has ADOPTED
-// (B2 fence input for the HTTP read face; stateMu-guarded — serveFlush
-// reads it cross-goroutine).
+// (stateMu-guarded — the HTTP read face reads it cross-goroutine).
 func (m *Monitor) currentSpawn() int {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
 	return m.spawnN
 }
 
-// canonicalWI answers the CANONICAL work-item id this monitor is keyed
-// by (the F2 authority: a slug or any other submitted spelling that
-// reached the monitor through lookup is an alias only — memory
-// attribution must never record it).
-func (m *Monitor) canonicalWI() string {
-	return m.wi.WorkItem
-}
-
 // markClosing arms the expected-exit suppression (the daemon-initiated
-// close path; see Observe.MarkClosing). The flag is the same one the
-// flush(wrap) path arms, so onExit's suppression set needs no new
-// member.
+// close path; see Observe.MarkClosing).
 func (m *Monitor) markClosing() {
 	m.stateMu.Lock()
 	m.sealing = true

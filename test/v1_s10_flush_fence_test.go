@@ -22,6 +22,8 @@ import (
 // proxy. The sub-assertions are retired with this comment (deletion is
 // #106's), not silently dropped.
 //
+// (The flush route and protocol.FlushRequest themselves are deleted.)
+//
 // LIVE REMAINDER, re-expressed on the driver's spawn/drop contract: the
 // result-envelope drop path is ordinal-keyed AND ordinal-fenced.
 // pending-results/<n>.json is only ever read by the dispatch holding
@@ -32,7 +34,7 @@ import (
 // parked question and the durable state are undisturbed), the REAL
 // derivation's envelope is accepted exactly once, and the stale forged
 // file never enters the accepted record.
-func TestV1S10FlushSpawnFence(t *testing.T) {
+func TestV1S10SpawnDropPathFence(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_s10_fence"
 	wi := inst.newWI(t, "s10: the spawn/drop-path fence",

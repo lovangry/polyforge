@@ -125,10 +125,8 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 		t.Fatalf("verify calls after supersession: %d, want >= 2 (the re-emission engine)", verifier.calls)
 	}
 
-	// polyforge#106: the superseded session's flush refusal (the
-	// STALE_SPAWN shape) is retired with the legacy flush fence — the
-	// superseded monitor's protective surface is the server-side push
-	// fencing, not a local refusal.
+	// The superseded monitor's protective surface is the server-side
+	// push fencing, not a local refusal.
 }
 
 // TestRevalidateMatchIsQuiet: matches=true → no OB message, no event,
@@ -146,14 +144,9 @@ func TestRevalidateMatchIsQuiet(t *testing.T) {
 	if verifier.calls == 0 {
 		t.Fatal("the revalidation never ran")
 	}
-	// The live derivation's flushes keep working.
-	ack := doFlush(m, FlushCall{
-		Req:  protocol.FlushRequest{WorkItem: "wi_test", SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: "q_m", Question: "ok?"},
-		Resp: make(chan protocol.FlushAck, 1),
-	})
-	if !ack.OK {
-		t.Fatalf("live flush after a matching verify: %+v", ack)
-	}
+	// The live derivation keeps being observed: a pending question
+	// persisted in execution.json is still projected.
+	writePendingQuestion(t, m, "q_m", "ok?", "code")
 }
 
 // TestRevalidateTransportErrorNeverActs: a verify that fails on the
@@ -179,15 +172,9 @@ func TestRevalidateTransportErrorNeverActs(t *testing.T) {
 	soon(t, 2*time.Second, "the verify was never retried", func() bool {
 		return verifier.calls >= 2
 	})
-	// The monitor still behaves normally: the live derivation's flush
-	// keeps its ordinary path.
-	ack := doFlush(m, FlushCall{
-		Req:  protocol.FlushRequest{WorkItem: "wi_test", SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: "q_t", Question: "ok?"},
-		Resp: make(chan protocol.FlushAck, 1),
-	})
-	if !ack.OK {
-		t.Fatalf("live flush after transport errors: %+v", ack)
-	}
+	// The monitor still behaves normally: the execution.json poll keeps
+	// projecting a pending question.
+	writePendingQuestion(t, m, "q_t", "ok?", "code")
 }
 
 // TestRevalidateDisabledWithoutVerifier: no verifier bound (the

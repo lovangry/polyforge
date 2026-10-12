@@ -72,13 +72,7 @@ terminate verdict for a parked workflow.
 
 ## Watch lane: re-arm the watcher
 
-Role gate first: if your env carries `PF_AGENT_ROLE=wi-agent` you are an
-EXECUTION agent — re-arm nothing and skip this whole section; watcher setup,
-reconciliation and presentation are SUPERVISION duties of the interactive
-session (the role-detection section at the top of `SKILL.md` routes it).
-
-If you are an interactive session (no marker): when this session
-interactively resumes a work item it had been watching — `pf resume` after
+When this session interactively resumes a work item it had been watching — `pf resume` after
 a pause, the owner-resume of a parked workflow, or any resume of a WI this
 session previously armed whose watcher is no longer running — RE-ARM the
 session-side watcher: copy `skills/polyforge/scripts/watch.sh` verbatim to

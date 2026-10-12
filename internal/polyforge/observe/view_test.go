@@ -11,16 +11,11 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
-// armQuestion records an open pending question through the kept
-// flush(needs_input) face (the answer-relay helpers died with the
-// relay, polyforge#106).
+// armQuestion records an open pending question through execution.json
+// (the driver's own write; the monitor's poll projects it).
 func armQuestion(t *testing.T, m *Monitor, qid string) {
 	t.Helper()
-	fc := FlushCall{Req: protocol.FlushRequest{SpawnN: 1, Reason: protocol.FlushNeedsInput, QuestionID: qid, Question: "pick one"}, Resp: make(chan protocol.FlushAck, 1)}
-	m.flushCh <- fc
-	if ack := <-fc.Resp; !ack.OK {
-		t.Fatalf("needs_input ack: %+v", ack)
-	}
+	writePendingQuestion(t, m, qid, "pick one", "code")
 }
 
 func TestJobViewProjectionFromExecutionFile(t *testing.T) {

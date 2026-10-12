@@ -200,7 +200,7 @@ type StreamIncident struct {
 }
 
 // streamState is the per-handle record-stream bookkeeping. Its own mutex
-// because the monitor goroutine updates it on every record while flush
+// because the monitor goroutine updates it on every record while push
 // and view sub-goroutines only read snapshots.
 type streamState struct {
 	mu sync.Mutex
