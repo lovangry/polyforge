@@ -21,6 +21,20 @@ CFG="$HOME/.config/polyforge/cli.toml"
 DAEMON_DATA="$HOME/.local/share/polyforge"
 DAEMON_SOCKET="$DAEMON_DATA/daemon.sock"
 
+# daemon_running: true while a daemon answers on the socket, or still
+# holds its data-dir lock (quiescing after the socket went quiet). The
+# lock is an flock held for the daemon's lifetime and released by the
+# kernel at exit, so a free lock means the process is really gone.
+daemon_running() {
+  if [ -S "$DAEMON_SOCKET" ] && curl -s -m 2 --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | grep -q machine_id; then
+    return 0
+  fi
+  if [ -f "$DAEMON_DATA/daemon.lock" ] && command -v flock >/dev/null 2>&1; then
+    flock -n "$DAEMON_DATA/daemon.lock" -c true 2>/dev/null || return 0
+  fi
+  return 1
+}
+
 # ─── 1. pf binary: install or update ───────────────────────────────
 echo "== 1/5 pf binary"
 command -v gh >/dev/null 2>&1 || { echo "ERROR: gh not found"; exit 1; }
@@ -45,10 +59,26 @@ else
     [ "$GOT" = "$EXP" ] || { echo "ERROR: SHA mismatch"; rm -rf "$TMP"; exit 1; }
   fi
   mkdir -p /usr/local/bin
-  # stop daemon if running (graceful)
-  if [ -S "$DAEMON_SOCKET" ]; then
-    curl -s -X POST --unix-socket "$DAEMON_SOCKET" http://localhost/ops/shutdown 2>/dev/null
-    sleep 2
+  # stop the daemon gracefully, then wait until it is really gone: the
+  # binary is never swapped under a live daemon.
+  if daemon_running; then
+    echo "   stopping daemon (graceful)"
+    if [ -x "$BIN" ] && "$BIN" ops shutdown >/dev/null 2>&1; then
+      :
+    else
+      curl -s -m 5 -X POST --unix-socket "$DAEMON_SOCKET" http://localhost/shutdown >/dev/null 2>&1 || true
+    fi
+    WAITED=0
+    while daemon_running; do
+      if [ "$WAITED" -ge 60 ]; then
+        echo "ERROR: daemon did not stop within 60s; binary NOT replaced. Check: tail $DAEMON_DATA/daemon.log"
+        rm -rf "$TMP"
+        exit 1
+      fi
+      sleep 1
+      WAITED=$((WAITED + 1))
+    done
+    echo "   daemon stopped"
   fi
   mv "$TMP/pf-linux-amd64" "$BIN" && chmod +x "$BIN"
   rm -rf "$TMP"
@@ -167,10 +197,10 @@ else
   fi
   # polyforge#113: the mapping-bearing config is the daemon's only
   # workspace source — the daemon argv carries neither a workspace nor a
-  # project flag, ever.
+  # project flag, ever. The api_key is read from the same config, so it
+  # never appears in argv.
   nohup "$BIN" daemon \
     --config "$CFG" \
-    -api-key "$KEY" \
     -machine-id "m-$MACHINE_ID" \
     -auto=false \
     -data-dir "$DAEMON_DATA" \
@@ -192,7 +222,7 @@ fi
 echo "== 5/5 verify"
 "$BIN" queue --project polyforge > /dev/null 2>&1 \
   && echo "   ✓ pf queue works" \
-  || echo "   ✗ pf queue failed — check key ($KEY)"
+  || echo "   ✗ pf queue failed — check api_key in $CFG"
 [ -S "$DAEMON_SOCKET" ] && curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | grep -q machine_id \
   && echo "   ✓ daemon alive" \
   || echo "   ✗ daemon not responding"
