@@ -298,7 +298,7 @@ func (r *Runtime) restartRelease(rec *jobRecord, currentFingerprint string) {
 	if j.agentPID > 0 {
 		r.killAgentTree(j)
 	}
-	if err := quarantineCapsule(j.capsuleDir); err != nil {
+	if err := quarantineCapsule(j.capsuleDir, j.git.GitDir); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: release quarantine failed (scene left in place): %v\n", rec.WorkItemID, err)
 	}
 	r.forgetRecord(rec)
