@@ -607,7 +607,7 @@ func (r *Runtime) NoteAlias(alias, canonical string) {
 }
 
 // NoteOrigin records the origin the NEXT job started for wi will carry.
-// The daemon calls it right before StartIntent; startClaimed consumes it.
+// The daemon calls it right before Start; startClaimed consumes it.
 func (r *Runtime) NoteOrigin(wi string, o Origin) {
 	r.mu.Lock()
 	if r.origins == nil {
@@ -732,16 +732,9 @@ func mintSessionID() (string, error) {
 // Start (§一 Runtime): claim → clone/init capsule → materialize → spawn →
 // RTStarted.
 
-// Start claims wi and runs it to a live agent (a plain claim). Idempotency
-// rides on the claim idempotency key: a retry after a lost response
-// re-claims the same session server-side (D4). See StartIntent for the
-// resume intents.
-func (r *Runtime) Start(ctx context.Context, wi string) error {
-	return r.StartIntent(ctx, wi, "claim")
-}
-
-// StartIntent claims wi with an explicit claim intent (claim|resume) and
-// runs it to a live agent. Both map onto the CAS SessionClaim (a paused
+// Start claims wi and runs it to a live agent. Idempotency rides on the
+// claim idempotency key: a retry after a lost response re-claims the same
+// session server-side (D4). The claim is the CAS SessionClaim (a paused
 // or held WI answers NOT_CLAIMABLE/ALREADY_HELD — the honest refusal,
 // never a guess; a WI whose holder is dead is first force-ended by an
 // admin, `pf ops end-session`, which returns it to queued for an
@@ -749,7 +742,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 // call (B1): a crash between journal and call is recoverable by replay,
 // a crash after the call by verify — the ambiguous-claim window is
 // closed from both sides.
-func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
+func (r *Runtime) Start(ctx context.Context, wi string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	if j := r.jobOf(wi); j != nil {
@@ -938,7 +931,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	// where the capsule's history left off; a brand-new capsule answers
 	// 0 and the first derivation is #1.
 	j.mu.Lock()
-	j.spawnN = maxSpawnNFromJournal(j.capsuleDir)
+	j.spawnN = spawnJournalMaxN(j.capsuleDir)
 	j.mu.Unlock()
 	if err := r.materialize(ctx, j); err != nil {
 		// A typed task-repo clone failure (DAEMON-507) keeps its detail as
@@ -1194,30 +1187,19 @@ func (r *Runtime) prepareCapsule(j *job) error {
 	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {
 		return err
 	}
-	if err := gitops.Clone(o); err != nil {
-		// A clone failure may fall back to a purely local init ONLY for
-		// a WI that has never published a revision (first claim of a
-		// fresh WI, or no remote configured). For a WI with published
-		// progress an init would drop execution.json and silently
-		// restart the workflow from step 1: refuse loudly instead (the
-		// caller abandons the claim through the claiming-journal lane).
-		published, perr := gitops.RemotePublished(o)
-		switch {
-		case perr != nil:
-			return &api.Error{Code: api.ErrDaemonCapsuleClone,
-				Detail: fmt.Sprintf("capsule clone failed (%v) and the remote's published state cannot be determined (%v); refusing a local init that could restart the workflow", err, perr)}
-		case published:
-			return &api.Error{Code: api.ErrDaemonCapsuleClone,
-				Detail: fmt.Sprintf("capsule clone failed (%v) for a work item with published progress; refusing a local init that would restart the workflow from step 1", err)}
+	if o.RemoteURL == "" {
+		// No capsule remote (tests only; aihub always supplies one at
+		// claim): a purely local init.
+		if err := gitops.InitLocal(o); err != nil {
+			return fmt.Errorf("runtime: %s: local init: %w", j.wi, err)
 		}
-		// Nothing published: remove any torn partial clone, then init.
-		if rerr := os.RemoveAll(o.CapsuleDir); rerr != nil {
-			return fmt.Errorf("runtime: %s: capsule clone failed (%v); cleanup: %w", j.wi, err, rerr)
-		}
-		if lerr := gitops.InitLocal(o); lerr != nil {
-			return fmt.Errorf("runtime: %s: capsule clone failed: %w", j.wi, err)
-		}
-		fmt.Fprintf(os.Stderr, "runtime: %s: capsule clone failed (%v); nothing published, fell back to local init\n", j.wi, err)
+	} else if err := gitops.Clone(o); err != nil {
+		// aihub creates the bare repo at claim, so a clone failure is
+		// never "nothing published yet": refuse loudly (the caller
+		// abandons the claim) rather than init locally and restart the
+		// workflow from step 1.
+		return &api.Error{Code: api.ErrDaemonCapsuleClone,
+			Detail: fmt.Sprintf("capsule clone failed: %v", err)}
 	}
 	return gitops.ExternalizeGitDir(o)
 }

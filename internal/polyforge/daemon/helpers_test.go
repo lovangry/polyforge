@@ -649,3 +649,10 @@ func (td *testDaemon) waitMonitored(t *testing.T, wi string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// DirectShutdownCause attributes the shutdown to a direct in-process
+// Shutdown call — test harnesses and embedders only; no production
+// call site uses it (production triggers name their real cause).
+func DirectShutdownCause() ShutdownCause {
+	return ShutdownCause{Kind: CauseDirect, Detail: "in-process Shutdown call"}
+}

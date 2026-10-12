@@ -151,7 +151,9 @@ func TestMaterializeSetTrustedSnapshotUntouched(t *testing.T) {
 	r, capDir, j := startedWithBundle(t, "wi_f7b")
 	before := readMarker(t, capDir)
 
-	r.ensureMaterialized(j) // the recovery-path entry; a trusted set is a no-op
+	if err := r.materializeBundle(j); err != nil {
+		t.Fatal(err)
+	} // a trusted set is a no-op
 
 	after := readMarker(t, capDir)
 	if after.CompletedAt != before.CompletedAt {
@@ -177,7 +179,9 @@ func TestMaterializeSetTornSnapshotRebuilt(t *testing.T) {
 	os.Remove(filepath.Join(capDir, filepath.FromSlash(RelMaterializeMarker)))
 	os.Remove(filepath.Join(capDir, "workflows", "demo-bundle", "workflow.md"))
 
-	r.ensureMaterialized(j)
+	if err := r.materializeBundle(j); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := os.Stat(filepath.Join(capDir, "workflows", "demo-bundle", "workflow.md")); err != nil {
 		t.Fatalf("torn snapshot not rebuilt: %v", err)
@@ -196,7 +200,9 @@ func TestMaterializeSetTornSnapshotRebuilt(t *testing.T) {
 	if r.materializationComplete(j) {
 		t.Fatal("gate validated a snapshot with a missing target")
 	}
-	r.ensureMaterialized(j)
+	if err := r.materializeBundle(j); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(capDir, "agents", "step.md")); err != nil {
 		t.Fatalf("missing target not restored: %v", err)
 	}
@@ -229,7 +235,9 @@ func TestMaterializeSetAdoptsPilotCompensation(t *testing.T) {
 		t.Fatal("a marker without the adapter set must not validate")
 	}
 
-	r.ensureMaterialized(j)
+	if err := r.materializeBundle(j); err != nil {
+		t.Fatal(err)
+	}
 
 	m := readMarker(t, capDir)
 	if len(m.Adapters) != 1 || m.Adapters[0] != "pi" {
@@ -322,5 +330,38 @@ func TestMaterializeBundleWithoutStepsStillCopiesWorkflowTree(t *testing.T) {
 	}
 	if !r.materializationComplete(r.jobOf("wi_f7nos")) {
 		t.Fatal("gate must validate a steps-less bundle's snapshot")
+	}
+}
+
+// Recovery never re-pins: a workflows-dir source that moved past the claim
+// pin leaves the job's pin and the capsule snapshot untouched (the
+// relaunch uses the capsule's own copy), and a missing snapshot is a
+// blocked finish, not a silent rebuild.
+func TestRecoveryUsesClaimSnapshotNeverRepins(t *testing.T) {
+	r, capDir, j := startedWithBundle(t, "wi_norepin")
+	pinned := j.bundleDigest
+	src := filepath.Join(r.cfg.WorkflowsDir, "demo-bundle", "workflow.md")
+	if err := os.WriteFile(src, []byte("# evolved after claim\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if j.bundleDigest != pinned {
+		t.Fatalf("recovery re-pinned %s -> %s", pinned, j.bundleDigest)
+	}
+	got, _ := os.ReadFile(filepath.Join(capDir, "workflows", "demo-bundle", "workflow.md"))
+	if string(got) == "# evolved after claim\n" {
+		t.Fatal("recovery re-materialized from the moved source")
+	}
+
+	// A missing snapshot is not rebuilt: the WI blocks.
+	if err := os.Remove(filepath.Join(capDir, filepath.FromSlash(RelMaterializeMarker))); err != nil {
+		t.Fatal(err)
+	}
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if _, err := os.Stat(filepath.Join(capDir, filepath.FromSlash(RelMaterializeMarker))); err == nil {
+		t.Fatal("recovery rebuilt the snapshot instead of blocking")
+	}
+	if st, _ := j.snapshot(); st == StateRunning || st == StateRecovering {
+		t.Fatalf("a missing snapshot must end the run, state %s", st)
 	}
 }

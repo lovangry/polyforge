@@ -21,7 +21,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/spawn"
 )
 
@@ -190,11 +189,6 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 	cmd := exec.Command(s.bin(), args...)
 	cmd.Dir = p.CapsuleDir // cwd = capsule root
 	additions := []string{
-		// DEAD MARKER: the harness IGNORES this variable for transcript
-		// placement (its session store answers to its own *_SESSION_DIR
-		// name); kept only for harness-internal use — the daemon-side
-		// compensation lives in pitranscript.go (F3).
-		"PI_SESSION_DIR=" + filepath.Join(p.CapsuleDir, capsule.DirSession),
 		"PF_WI_ID=" + p.WorkItemID, // layer-4 cleanup marker (deliberate addition)
 		// second marker half: the sweep needs BOTH, so a daemon never
 		// reaps another daemon's step process for the same WI id.
@@ -293,81 +287,14 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 	return proc, nil
 }
 
-// writeSpawnJournal appends one spawn identity line to the capsule's
-// runtime-state/spawn-journal.jsonl. v1.5 (contract §4.3): the line gains
-// the additive spawn_n field (the derivation ordinal — the last line
-// carries the latest derivation, so a fresh clone on another machine
-// re-seeds its counter from the max) and the public session_handle. The
-// v1 synthetic session_id value is DROPPED: in v1.5 that name means the
-// SECRET, which must never land in the capsule (B3). The display token
-// rides the spawn_token key: the fossil `instance` key name is renamed
-// (value unchanged, pure display) — legacy capsules' old lines carrying
-// `instance` still parse fine, every reader is loose (map/struct with
-// only the keys it needs).
-func writeSpawnJournal(p SpawnParams, pid int, startedAt string, spawnToken string) error {
-	entry := map[string]any{
-		"at":             nowStamp(),
-		"work_item":      p.WorkItemID,
-		"spawn_token":    spawnToken,
-		"pid":            pid,
-		"started_at":     startedAt,
-		"session_handle": p.SessionHandle,
-		"spawn_n":        p.SpawnN,
-		"resume":         p.Resume,
-		"transcript":     p.TranscriptPath,
-	}
-	blob, err := json.Marshal(entry)
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(p.CapsuleDir, capsule.DirRuntimeState, "spawn-journal.jsonl")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(append(blob, '\n')); err != nil {
-		return err
-	}
-	return f.Sync()
-}
-
-// maxSpawnNFromJournal answers the highest spawn_n the capsule's spawn
-// journal records (0 when absent/unreadable): the B2 fresh-clone source —
-// a re-claim or attach that cloned this capsule from the bare repo
-// continues the derivation counter where the capsule's history left off.
-func maxSpawnNFromJournal(capsuleDir string) int {
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.DirRuntimeState, "spawn-journal.jsonl"))
-	if err != nil {
-		return 0
-	}
-	max := 0
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var e struct {
-			SpawnN int `json:"spawn_n"`
-		}
-		if json.Unmarshal([]byte(line), &e) == nil && e.SpawnN > max {
-			max = e.SpawnN
-		}
-	}
-	return max
-}
-
 // ---------------------------------------------------------------------------
 // Proc: the supervised handle.
 
 const (
-	maxControlLineBytes = 4 << 20
+	maxRecordLineBytes = 4 << 20
 )
 
-var errControlTooLong = fmt.Errorf("runtime: control line exceeded the bounded reader limit")
+var errRecordTooLong = fmt.Errorf("runtime: stdout line exceeded the bounded reader limit")
 
 // procOpts carries the optional wiring of newProcOpts.
 type procOpts struct {
@@ -415,10 +342,6 @@ func (t *tailBuffer) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return string(t.buf)
-}
-
-func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...func(string)) *proc {
-	return newProcOpts(cmd, stdin, stdout, procOpts{taps: taps})
 }
 
 func newProcOpts(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, o procOpts) *proc {
@@ -492,7 +415,7 @@ func newProcOpts(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, o pr
 		defer close(readerDone)
 		br := bufio.NewReaderSize(stdout, 64*1024)
 		for {
-			line, tooLong, rerr := readBoundedLine(br, maxControlLineBytes)
+			line, tooLong, rerr := readBoundedLine(br, maxRecordLineBytes)
 			if rerr != nil {
 				if rerr != io.EOF {
 					fmt.Fprintf(os.Stderr, "runtime: harness stdout read failed: %v\n", rerr)
@@ -500,7 +423,7 @@ func newProcOpts(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, o pr
 				return
 			}
 			if tooLong {
-				fmt.Fprintf(os.Stderr, "runtime: control line over %d bytes dropped: %v\n", maxControlLineBytes, errControlTooLong)
+				fmt.Fprintf(os.Stderr, "runtime: stdout line over %d bytes dropped: %v\n", maxRecordLineBytes, errRecordTooLong)
 				continue // keep draining as bulk, never block the child
 			}
 			for _, t := range p.taps {

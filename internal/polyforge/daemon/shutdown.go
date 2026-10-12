@@ -114,13 +114,6 @@ func ServeErrorShutdownCause(err error) ShutdownCause {
 	return ShutdownCause{Kind: CauseServeError, Detail: fmt.Sprintf("%v", err)}
 }
 
-// DirectShutdownCause attributes the shutdown to a direct in-process
-// Shutdown call — test harnesses and embedders only; no production
-// call site uses it (production triggers name their real cause).
-func DirectShutdownCause() ShutdownCause {
-	return ShutdownCause{Kind: CauseDirect, Detail: "in-process Shutdown call"}
-}
-
 // Shutdown runs the graceful shutdown sequence. Concurrent callers JOIN
 // the first sequence (never race it: a second sequence that skipped
 // every job would let the process exit mid-close) and receive its

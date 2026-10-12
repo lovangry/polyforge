@@ -162,21 +162,16 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// wakes up blind to its own goal. Best-effort, idempotent.
 	r.ensureWorkItemFile(j)
 
-	// F7 repair: a capsule whose materialized bundle set is missing its
-	// completion marker (a crash-torn snapshot) — or predates the product
-	// fix entirely — gets the set idempotently rebuilt, marker
-	// included, before the next derivation wakes up. The
-	// rebuild never breaks a scene the dead agents already read (staged
-	// renames, identical content). Best-effort, never blocks recovery.
-	r.ensureMaterialized(j)
-
-	// v2 bundle freshness (the stale-capsule lesson): the operator may
-	// have evolved the workflow bundle under workflows-dir AFTER this
-	// WI's claim; recovery is the heal point where the capsule is
-	// re-pinned to the checkout's current content and re-materialized,
-	// so the relaunched driver validates against the CURRENT graph
-	// instead of the claim-era one. Best-effort, loud on failure.
-	r.refreshBundle(j)
+	// The bundle is pinned at claim (v2-converge §2.4): recovery relaunches
+	// from the capsule's own materialized snapshot and never re-pins or
+	// re-materializes from the current checkout. A missing or untrusted
+	// snapshot is a loud terminal condition, not a silent rebuild.
+	if r.cfg.WorkflowsDir != "" && j.bundleName != "" && !r.materializationComplete(j) {
+		r.boundedFail(ctx, j, fmt.Sprintf(
+			"the capsule's materialized snapshot of bundle %s is missing or incomplete; recovery never re-pins to the current checkout (the bundle is pinned at claim)",
+			j.bundleName))
+		return
+	}
 
 	// The engine binding is the driver or NOTHING (polyforge#106): the
 	// legacy in-package WI-Agent spawn is deleted, so a nil starter is a
@@ -218,7 +213,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		// The journal is the one ledger every derivation appends to;
 		// seeding past its max restores the fence.
 		j.mu.Lock()
-		if m := maxSpawnNFromJournal(j.capsuleDir); m > j.spawnN {
+		if m := spawnJournalMaxN(j.capsuleDir); m > j.spawnN {
 			j.spawnN = m
 		}
 		j.spawnN++

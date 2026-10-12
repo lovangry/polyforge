@@ -606,38 +606,8 @@ func Clone(o Opts) error {
 	return err
 }
 
-// RemotePublished answers whether the WI's bare repo holds published
-// progress (a refs/heads/*). (false, nil) means provably nothing
-// published: no remote configured, the repo absent, or reachable and
-// empty. Any other failure (transport, auth) is an error: "unknown" is
-// never read as "nothing published".
-func RemotePublished(o Opts) (bool, error) {
-	if o.RemoteURL == "" {
-		return false, nil
-	}
-	release := Lock(o.WorkItemID)
-	defer release()
-	additions, cleanup, err := credentialEnv(o)
-	if err != nil {
-		return false, err
-	}
-	defer cleanup()
-	env := append(os.Environ(), additions...)
-	out, err := git(env, "", "ls-remote", o.RemoteURL, "refs/heads/*")
-	if err != nil {
-		low := strings.ToLower(err.Error())
-		if strings.Contains(low, "does not appear to be a git repository") ||
-			(strings.Contains(low, "repository") && strings.Contains(low, "not found")) {
-			return false, nil // the bare repo does not exist: nothing published
-		}
-		return false, err
-	}
-	return strings.TrimSpace(out) != "", nil
-}
-
-// InitLocal initializes the capsule worktree without a remote: the
-// fresh-derivation fallback when the bare repo is unreachable. Takes the
-// per-WI lock.
+// InitLocal initializes the capsule worktree without a remote (no
+// RemoteURL configured; tests only). Takes the per-WI lock.
 func InitLocal(o Opts) error {
 	release := Lock(o.WorkItemID)
 	defer release()

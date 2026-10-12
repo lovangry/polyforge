@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
@@ -669,4 +671,39 @@ func spawnOrphaningSleeper(wi string) (*orphaningAgent, error) {
 		return nil, err
 	}
 	return &orphaningAgent{handle: h, orphanPID: pid}, nil
+}
+
+// writeSpawnJournal appends one journal line in the driver adapter's
+// shape (the production writer lives in the driver; tests only need the
+// ledger it leaves behind).
+func writeSpawnJournal(p SpawnParams, pid int, startedAt string, spawnToken string) error {
+	blob, err := json.Marshal(map[string]any{
+		"at":             nowStamp(),
+		"work_item":      p.WorkItemID,
+		"spawn_token":    spawnToken,
+		"pid":            pid,
+		"started_at":     startedAt,
+		"session_handle": p.SessionHandle,
+		"spawn_n":        p.SpawnN,
+		"resume":         p.Resume,
+		"transcript":     p.TranscriptPath,
+	})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(p.CapsuleDir, capsule.DirRuntimeState, capsule.SpawnJournalFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(blob, '\n'))
+	return err
+}
+
+func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...func(string)) *proc {
+	return newProcOpts(cmd, stdin, stdout, procOpts{taps: taps})
 }

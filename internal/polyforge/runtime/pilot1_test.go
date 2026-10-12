@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,7 +40,9 @@ func TestStartSlugClaimRunsUnderCanonicalID(t *testing.T) {
 
 	base := t.TempDir()
 	r.cfg.GitRemoteBase = base
-	_ = base // no bare repo needed: the clone falls back to local init
+	if out, err := exec.Command("git", "init", "--bare", filepath.Join(base, "wi_canon7.git")).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
 
 	ctx := context.Background()
 	slug := "proj#7"

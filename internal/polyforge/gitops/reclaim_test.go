@@ -33,27 +33,3 @@ func TestExternalizeGitDirRefusesExistingTarget(t *testing.T) {
 		t.Fatal("the existing target must be left untouched")
 	}
 }
-
-func TestRemotePublished(t *testing.T) {
-	setIdentity(t)
-	o, barePath := testOpts(t, "wi_pub")
-	if p, err := RemotePublished(o); err != nil || p {
-		t.Fatalf("absent repo: published=%v err=%v, want false,nil", p, err)
-	}
-	mkBare(t, barePath, true)
-	if p, err := RemotePublished(o); err != nil || p {
-		t.Fatalf("empty repo: published=%v err=%v, want false,nil", p, err)
-	}
-	mkCapsule(t, o)
-	writeDirty(t, o, "f.txt", "x\n")
-	if _, _, _, err := CommitPush(o, "x"); err != nil {
-		t.Fatal(err)
-	}
-	if p, err := RemotePublished(o); err != nil || !p {
-		t.Fatalf("published repo: published=%v err=%v, want true,nil", p, err)
-	}
-	o.RemoteURL = "http://127.0.0.1:1/x.git"
-	if _, err := RemotePublished(o); err == nil {
-		t.Fatal("transport failure must be an error, not 'nothing published'")
-	}
-}
