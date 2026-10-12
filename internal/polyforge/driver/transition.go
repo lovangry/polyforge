@@ -535,6 +535,13 @@ func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) e
 	// requires_human_answer gate on re-entry (human-gate bypass).
 	if gst := d.exec.Steps[gate]; gst != nil {
 		gst.AnswerBase = len(gst.Answers)
+		// Its conversation judged the version now being redone: the
+		// re-entry must start a NEW conversation (prior transcript as
+		// read-only reference at most), never resume that judgment.
+		if gst.Supervision == nil {
+			gst.Supervision = &capsule.StepSupervision{}
+		}
+		gst.Supervision.NextDispatch = capsule.NextDispatchFresh
 	}
 	if v.IncludeVerdict {
 		d.exec.Steps[target].PendingRewindInput = &capsule.RewindInput{

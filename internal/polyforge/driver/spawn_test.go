@@ -236,11 +236,35 @@ func TestSpawnStepFreshPromptOmitsHandoff(t *testing.T) {
 	}
 }
 
+// TestLatestJournalTranscriptFiltersByStep: the capsule journal
+// interleaves every step's spawns; a resume of step X must never pick
+// the higher-ordinal transcript of another step (the review-inside-
+// e2e-run's-conversation bug), and lines without a step id never match.
+func TestLatestJournalTranscriptFiltersByStep(t *testing.T) {
+	ad, _, capDir := spawnEnv(t)
+	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+		`{"spawn_n":1,"step_id":"review","transcript":"/t/review1.jsonl"}
+{"spawn_n":2,"step_id":"code","transcript":"/t/code2.jsonl"}
+{"spawn_n":3,"step_id":"e2e-run","transcript":"/t/e2e3.jsonl"}
+{"spawn_n":4,"transcript":"/t/untagged4.jsonl"}
+{"spawn_n":5,"step_id":"review","transcript":""}
+`)
+	for step, want := range map[string]string{"review": "/t/review1.jsonl", "code": "/t/code2.jsonl", "e2e-run": "/t/e2e3.jsonl"} {
+		got, err := ad.latestJournalTranscript(step)
+		if err != nil || got != want {
+			t.Fatalf("step %s: got (%q, %v) want %q", step, got, err, want)
+		}
+	}
+	if got, err := ad.latestJournalTranscript("polish"); err != nil || got != "" {
+		t.Fatalf("a step with no journal line answers (\"\", nil), got (%q, %v)", got, err)
+	}
+}
+
 func TestSpawnStepResumeUsesJournal(t *testing.T) {
 	ad, sp, capDir := spawnEnv(t)
 	writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "the fix summary")
-	journal := `{"spawn_n":1,"transcript":"/old/t1.jsonl","work_item":"wi_sp"}
-{"spawn_n":3,"transcript":"/live/t3.jsonl","work_item":"wi_sp"}
+	journal := `{"spawn_n":1,"step_id":"verification","transcript":"/old/t1.jsonl","work_item":"wi_sp"}
+{"spawn_n":3,"step_id":"verification","transcript":"/live/t3.jsonl","work_item":"wi_sp"}
 `
 	liveT3 := filepath.Join(capDir, "session", "live-t3.jsonl")
 	writeCapsuleFile(t, capDir, "session/live-t3.jsonl", `{"t":"turn"}`+"\n")
@@ -624,7 +648,7 @@ func TestAppendSpawnJournalRepairsTornTail(t *testing.T) {
 		"{\"spawn_n\":7}\n{\"spawn_n\":8, \"trans") // torn: no trailing newline
 
 	p := spawn.Params{WorkItemID: "wi_sp", SpawnN: 9, TranscriptPath: "t"}
-	if err := ad.appendSpawnJournal(p, "s9", 4242, nowStampX()); err != nil {
+	if err := ad.appendSpawnJournal(p, "code", "s9", 4242, nowStampX()); err != nil {
 		t.Fatalf("appendSpawnJournal: %v", err)
 	}
 
@@ -666,7 +690,7 @@ func TestSpawnStepFreshRetryCarriesPreviousTranscriptAsReference(t *testing.T) {
 	prev := filepath.Join(capDir, "session", "prev.jsonl")
 	writeCapsuleFile(t, capDir, "session/prev.jsonl", `{"t":"turn"}`+"\n")
 	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
-		`{"spawn_n":3,"transcript":"`+prev+`","work_item":"wi_sp"}`+"\n")
+		`{"spawn_n":3,"step_id":"verification","transcript":"`+prev+`","work_item":"wi_sp"}`+"\n")
 
 	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 4, Fresh: true}); err != nil {
 		t.Fatalf("SpawnStep: %v", err)
@@ -695,6 +719,37 @@ func TestSpawnStepFreshRetryCarriesPreviousTranscriptAsReference(t *testing.T) {
 	}
 }
 
+// TestSpawnStepNeverResumesOrReferencesAnotherStepsTranscript: with a
+// journal whose highest ordinal belongs to a different step, a resume
+// of "verification" attaches its OWN transcript and a fresh dispatch
+// references only its own — never the foreign one.
+func TestSpawnStepNeverResumesOrReferencesAnotherStepsTranscript(t *testing.T) {
+	ad, sp, capDir := spawnEnv(t)
+	writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "the fix summary")
+	own := filepath.Join(capDir, "session", "own.jsonl")
+	foreign := filepath.Join(capDir, "session", "foreign.jsonl")
+	writeCapsuleFile(t, capDir, "session/own.jsonl", `{"t":"turn"}`+"\n")
+	writeCapsuleFile(t, capDir, "session/foreign.jsonl", `{"t":"turn"}`+"\n")
+	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+		`{"spawn_n":1,"step_id":"verification","transcript":"`+own+`"}`+"\n"+
+			`{"spawn_n":2,"step_id":"other","transcript":"`+foreign+`"}`+"\n")
+
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 3, Resume: true}); err != nil {
+		t.Fatalf("SpawnStep resume: %v", err)
+	}
+	p, _ := sp.last()
+	if !p.Resume || p.TranscriptPath != own {
+		t.Fatalf("resume must use the step's own transcript: resume=%v transcript=%q", p.Resume, p.TranscriptPath)
+	}
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 4, Fresh: true}); err != nil {
+		t.Fatalf("SpawnStep fresh: %v", err)
+	}
+	p, _ = sp.last()
+	if p.Resume || p.TranscriptPath == foreign || strings.Contains(p.InitialPrompt, foreign) || !strings.Contains(p.InitialPrompt, own) {
+		t.Fatalf("fresh dispatch must reference only its own transcript: %+v\n%s", p, p.InitialPrompt)
+	}
+}
+
 // TestSpawnStepResumeWithoutReadableTranscriptDegradesToFresh: a resume
 // whose declared transcript was never written (the dispatch died before
 // the harness created its session) starts the conversation fresh instead
@@ -703,13 +758,38 @@ func TestSpawnStepResumeWithoutReadableTranscriptDegradesToFresh(t *testing.T) {
 	ad, sp, capDir := spawnEnv(t)
 	writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "s")
 	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
-		`{"spawn_n":3,"transcript":"/does/not/exist.jsonl","work_item":"wi_sp"}`+"\n")
+		`{"spawn_n":3,"step_id":"verification","transcript":"/does/not/exist.jsonl","work_item":"wi_sp"}`+"\n")
 	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 4, Resume: true}); err != nil {
 		t.Fatalf("SpawnStep: %v", err)
 	}
 	p, _ := sp.last()
 	if p.Resume {
 		t.Fatalf("an unreadable transcript cannot be resumed: %+v", p)
+	}
+}
+
+// TestSpawnStepResumeWithoutJournalLineDegradesToFresh: a resume for a
+// step with no spawn-journal line of its own (other steps' lines, or no
+// journal at all) is a plain fresh dispatch, not an error.
+func TestSpawnStepResumeWithoutJournalLineDegradesToFresh(t *testing.T) {
+	for name, journal := range map[string]string{
+		"other-step-only": `{"spawn_n":3,"step_id":"other","transcript":"/t/o.jsonl"}` + "\n" + `{"spawn_n":4,"transcript":"/t/untagged.jsonl"}` + "\n",
+		"no-journal":      "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ad, sp, capDir := spawnEnv(t)
+			writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "s")
+			if journal != "" {
+				writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl", journal)
+			}
+			if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 4, Resume: true}); err != nil {
+				t.Fatalf("resume without a journal line must degrade, not fail: %v", err)
+			}
+			p, _ := sp.last()
+			if p.Resume || strings.Contains(p.TranscriptPath, "/t/") {
+				t.Fatalf("expected a fresh dispatch: %+v", p)
+			}
+		})
 	}
 }
 

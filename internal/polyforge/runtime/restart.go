@@ -157,7 +157,7 @@ func (r *Runtime) Restart(ctx context.Context) error {
 			continue
 		}
 		r.mu.Lock()
-		r.jobs[rec.WorkItemID] = jobFromRecord(rec)
+		r.jobs[rec.WorkItemID] = r.restoredJob(rec)
 		r.mu.Unlock()
 	}
 	for _, rec := range st.Jobs {
@@ -207,7 +207,7 @@ func (r *Runtime) retryVerify(j *job) {
 func (r *Runtime) restartRelease(rec *jobRecord, currentFingerprint string) {
 	j := r.jobOf(rec.WorkItemID)
 	if j == nil {
-		j = jobFromRecord(rec)
+		j = r.restoredJob(rec)
 	}
 	r.killAgentTree(j) // pid 0 (driver lane) reaps via journal + env marker
 	if err := quarantineCapsule(j.capsuleDir, j.git.GitDir); err != nil {
@@ -248,7 +248,7 @@ func (r *Runtime) restartAttach(ctx context.Context, rec *jobRecord) error {
 	}); err != nil {
 		return err
 	}
-	return r.restartResume(ctx, rec, j, "operator daemon shutdown", "session attach after a graceful shutdown")
+	return r.restartResume(ctx, rec, j, causeOperatorAttach, "session attach after a graceful shutdown")
 }
 
 // restartDrop handles aihub's terminal verdicts: no revival. A local
@@ -257,7 +257,7 @@ func (r *Runtime) restartAttach(ctx context.Context, rec *jobRecord) error {
 func (r *Runtime) restartDrop(rec *jobRecord) {
 	j := r.jobOf(rec.WorkItemID)
 	if j == nil {
-		j = jobFromRecord(rec)
+		j = r.restoredJob(rec)
 	}
 	// dead or alive: either way the tree's orphans must not survive
 	// (killAgentTree's identity guard refuses to signal a reused pid)
@@ -280,7 +280,7 @@ func (r *Runtime) restartRunning(ctx context.Context, rec *jobRecord) error {
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no seeded record", rec.WorkItemID)
 	}
-	return r.restartResume(ctx, rec, j, "daemon_restart", "daemon restart (crash mid-run)")
+	return r.restartResume(ctx, rec, j, causeDaemonRestart, "daemon restart (crash mid-run)")
 }
 
 // isTerminalStopReason reports whether a persisted stop_reason is a
@@ -547,7 +547,7 @@ const (
 func (r *Runtime) parkRepair(rec *jobRecord, cause error) {
 	j := r.jobOf(rec.WorkItemID)
 	if j == nil {
-		j = jobFromRecord(rec)
+		j = r.restoredJob(rec)
 		r.mu.Lock()
 		r.jobs[rec.WorkItemID] = j
 		r.mu.Unlock()
@@ -684,3 +684,9 @@ func (r *Runtime) AbandonRepair(wi, status, note string) (held bool, err error) 
 	}
 	return true, nil
 }
+
+// Recovery causes that are lifecycle events, exempt from the storm ledger.
+const (
+	causeDaemonRestart  = "daemon_restart"
+	causeOperatorAttach = "operator daemon shutdown"
+)

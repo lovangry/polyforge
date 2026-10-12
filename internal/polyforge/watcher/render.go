@@ -24,6 +24,9 @@ func StateLabel(s *protocol.WatchSnapshot) string {
 	if j := s.Job; j != nil && j.RepairReason != "" {
 		return StateRepair + " (" + clean(j.RepairReason) + ")"
 	}
+	if sr, ok := statusRules[s.HubStatus]; ok && s.HubStatus != "" {
+		return sr.Class // closed by hand: the hub status outranks a stale execution.json
+	}
 	ex := s.Execution
 	if ex == nil {
 		return StateQueued

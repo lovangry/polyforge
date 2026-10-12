@@ -564,3 +564,39 @@ func TestEnsureDirRefusesUnsafeTmpFallback(t *testing.T) {
 		t.Fatal("a symlink planted at the fallback name must be refused")
 	}
 }
+
+// A manual close leaves execution.json at `running`; the hub status the
+// daemon reports once the job is no longer local decides.
+func TestHubStatusDecidesAfterManualClose(t *testing.T) {
+	for _, tc := range []struct {
+		hub, class string
+		done       bool
+	}{
+		{"wrapped", "completed", true},
+		{"failed", "failed", true},
+		{"canceled", "canceled", true},
+		{"paused", "paused", false},
+		{"blocked", "blocked", false},
+	} {
+		snap := running("wi_1", "s1")
+		snap.HubStatus = tc.hub
+		res := Evaluate(sub("wi_1", 0), snap)
+		if len(res.Decisions) != 1 || res.Decisions[0].Class != tc.class || res.Done != tc.done {
+			t.Fatalf("hub %s: decisions=%+v done=%v, want %s done=%v", tc.hub, res.Decisions, res.Done, tc.class, tc.done)
+		}
+		if StateLabel(snap) != tc.class {
+			t.Fatalf("hub %s: label %q", tc.hub, StateLabel(snap))
+		}
+		// delivered once
+		again := Evaluate(sub("wi_1", 0, res.Notified...), snap)
+		if len(again.Decisions) != 0 {
+			t.Fatalf("hub %s repeated: %+v", tc.hub, again.Decisions)
+		}
+	}
+	// a still-running hub status is not a decision
+	snap := running("wi_1", "s1")
+	snap.HubStatus = "running"
+	if res := Evaluate(sub("wi_1", 0), snap); len(res.Decisions) != 0 || res.Done {
+		t.Fatalf("running must not decide: %+v", res)
+	}
+}

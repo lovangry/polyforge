@@ -721,3 +721,51 @@ func TestBlockedSealHeadRoundTrip(t *testing.T) {
 		t.Fatalf("a pause must clear the seal: %v", wi.Attrs)
 	}
 }
+
+// TestSessionClaimRequiresWriter: the claim route enforces writer
+// membership like every sibling write route — an outsider key is refused
+// (typed 403), a member writer and a global admin are accepted.
+func TestSessionClaimRequiresWriter(t *testing.T) {
+	e := newSrvEnv(t)
+	id := createExecWIOverHTTP(t, e, "claim authz")
+
+	outsider, err := e.admin.CreateUser("outsider", "outsider@example.com", "writer", "human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	okey, err := e.admin.CreateAPIKey(outsider.ID, "o", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := func(key string) (int, []byte) {
+		return e.do(t, "POST", "/api/v1/work-items/"+id+"/claim", key,
+			map[string]string{"machine_id": "m1", "session_id": "s-" + key[:8], "idempotency_key": "k-" + key[:8]}, nil)
+	}
+	// Outsider: the WI is visible to wiProject, but the claim is refused.
+	code, raw := claim(okey.Plain)
+	if code != 403 {
+		t.Fatalf("outsider claim: %d %s", code, raw)
+	}
+	if c, _ := errEnvelope(t, raw); c != string(api.ErrAuthForbidden) {
+		t.Fatalf("outsider code = %q, want %s: %s", c, api.ErrAuthForbidden, raw)
+	}
+	// Viewer membership is not enough either.
+	if err := e.admin.AddMember(e.adminProjectID(t, "alpha"), outsider.ID, "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	if code, raw := claim(okey.Plain); code != 403 {
+		t.Fatalf("viewer claim: %d %s", code, raw)
+	}
+	// Writer member: accepted.
+	if err := e.admin.AddMember(e.adminProjectID(t, "alpha"), outsider.ID, "writer"); err != nil {
+		t.Fatal(err)
+	}
+	if code, raw := claim(okey.Plain); code != 200 && code != 201 {
+		t.Fatalf("writer claim: %d %s", code, raw)
+	}
+	// Admin: accepted (a fresh WI so the CAS has no holder).
+	id = createExecWIOverHTTP(t, e, "claim authz admin")
+	if code, raw := claim(e.key); code != 200 && code != 201 {
+		t.Fatalf("admin claim: %d %s", code, raw)
+	}
+}

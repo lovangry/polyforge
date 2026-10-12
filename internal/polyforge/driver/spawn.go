@@ -38,6 +38,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,11 +192,12 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 	var transcript string
 	resume := sp.Resume
 	if resume {
-		transcript, err = a.latestJournalTranscript()
+		transcript, err = a.latestJournalTranscript(sp.StepID)
 		if err != nil {
 			return nil, err
 		}
 		if !usableTranscript(transcript) {
+			// (also the no-journal-line-for-this-step shape: "" is unusable)
 			// nothing readable to resume (the previous dispatch died before
 			// the harness wrote its session): start the conversation fresh
 			// rather than hand the harness a path that cannot resume
@@ -205,7 +207,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 	if sp.Fresh && parts.Reference == "" {
 		// a retry starts a NEW conversation; the previous transcript, when
 		// readable, rides the prompt as a read-only reference
-		if prev, perr := a.latestJournalTranscript(); perr == nil && usableTranscript(prev) {
+		if prev, perr := a.latestJournalTranscript(sp.StepID); perr == nil && usableTranscript(prev) {
 			parts.Reference = prev
 		}
 	}
@@ -232,7 +234,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 	}
 	token := spawnToken(handle, sp.SpawnN)
 	p.Journal = func(pid int, startedAt string) error {
-		return a.appendSpawnJournal(p, token, pid, startedAt)
+		return a.appendSpawnJournal(p, sp.StepID, token, pid, startedAt)
 	}
 	h, err := a.Spawner.Spawn(ctx, p)
 	if err != nil {
@@ -699,10 +701,17 @@ func (a *StepSpawnAdapter) sessionHandle() string {
 }
 
 // latestJournalTranscript answers the resume source for a re-dispatch:
-// the highest-ordinal spawn-journal line's declared transcript (the
-// capsule-side session copy the runtime mechanism resumes from).
-func (a *StepSpawnAdapter) latestJournalTranscript() (string, error) {
+// the highest-ordinal spawn-journal line OF THE GIVEN STEP declaring a
+// transcript (the capsule-side session copy the runtime mechanism
+// resumes from). Another step's conversation is never a candidate: the
+// journal is capsule-wide and interleaves every step's spawns. A step
+// with no journal line (or no journal) answers ("", nil): the caller
+// degrades to a fresh dispatch; only an unreadable journal is an error.
+func (a *StepSpawnAdapter) latestJournalTranscript(stepID string) (string, error) {
 	raw, err := os.ReadFile(filepath.Join(a.WI.CapsuleDir, capsule.DirRuntimeState, spawnJournalFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil // no journal yet: no transcript to resume
+	}
 	if err != nil {
 		return "", fmt.Errorf("driver: resume ordered but the capsule spawn journal is unreadable: %w", err)
 	}
@@ -714,29 +723,27 @@ func (a *StepSpawnAdapter) latestJournalTranscript() (string, error) {
 			continue
 		}
 		var e struct {
+			StepID     string `json:"step_id"`
 			SpawnN     int    `json:"spawn_n"`
 			Transcript string `json:"transcript"`
 		}
 		if json.Unmarshal([]byte(line), &e) != nil {
 			continue // loose reader: skip anything unparsable
 		}
-		if e.Transcript != "" && e.SpawnN > bestN {
+		if e.StepID == stepID && e.Transcript != "" && e.SpawnN > bestN {
 			bestN, best = e.SpawnN, e.Transcript
 		}
-	}
-	if best == "" {
-		return "", fmt.Errorf("driver: resume ordered but the spawn journal records no prior transcript")
 	}
 	return best, nil
 }
 
 // appendSpawnJournal appends one spawn identity line through
 // SpawnParams.Journal — the same document shape the runtime lane
-// writes (at, work_item, spawn_token, pid, started_at,
+// writes (at, work_item, step_id, spawn_token, pid, started_at,
 // session_handle, spawn_n, resume, transcript), so the B2 counter
 // stays continuous across both spawners and every reader (loose by
 // contract) keeps parsing.
-func (a *StepSpawnAdapter) appendSpawnJournal(p spawn.Params, token string, pid int, startedAt string) error {
+func (a *StepSpawnAdapter) appendSpawnJournal(p spawn.Params, stepID, token string, pid int, startedAt string) error {
 	now := time.Now()
 	if a.Now != nil {
 		now = a.Now()
@@ -744,6 +751,7 @@ func (a *StepSpawnAdapter) appendSpawnJournal(p spawn.Params, token string, pid 
 	entry := map[string]any{
 		"at":             now.UTC().Format(time.RFC3339Nano),
 		"work_item":      p.WorkItemID,
+		"step_id":        stepID,
 		"spawn_token":    token,
 		"pid":            pid,
 		"started_at":     startedAt,

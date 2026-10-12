@@ -261,9 +261,9 @@ A missing capsule is no longer a startup failure: only the affected WI parks
 
 The platform ships with zero release-specific code: release logic lives in
 the project bundle's release step (`steps/release.md`), and the platform's
-own release is one instance of that same hook. `pf upgrade` is a deployment
-pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
-`00-architecture.md §3.3`).
+own release is one instance of that same hook. Deploying to a work machine is
+re-running `tools/install.sh`; it is a deployment pipeline, not a release
+system (`07-deployment-pilot.md §1.1/§6.3`, `00-architecture.md §3.3`).
 
 ```
  RELEASE: bundle release-step hook (no platform release code)
@@ -281,9 +281,9 @@ pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
                                    --  SHA256SUMS (checksum manifest)
                               |
                               v
- DEPLOYMENT: `pf upgrade` (pipeline, not a release system)
+ DEPLOYMENT: re-run `tools/install.sh` (pipeline, not a release system)
  +-----------------------------------------------------------+
- |  download -> sha256 verify -> quiesce -> replace -> restart  |
+ |  download -> sha256 verify -> stop daemon -> replace -> restart  |
  +-----------------------------------------------------------+
 ```
 

@@ -315,3 +315,35 @@ func TestIdempotentCreate(t *testing.T) {
 		t.Fatalf("cross-owner key reuse not rejected: %v", err)
 	}
 }
+
+// TestSearchOperatorTokensQuoted: tokens carrying FTS5 operator characters
+// are matched as literal phrases — they neither error nor widen to every
+// memory.
+func TestSearchOperatorTokensQuoted(t *testing.T) {
+	e := newEnv(t)
+	e.create(t, "Run the pre-commit hook before pushing.")
+	e.create(t, "Unrelated note about trigram indexes.")
+	e.create(t, `He said "quoted (paren) text" and a:b key.`)
+
+	cases := []struct {
+		q    string
+		want int
+	}{
+		{"pre-commit", 1},
+		{"a:b", 1},
+		{"(paren)", 1},
+		{`"quoted`, 1},
+		{"unknown-token", 0},
+		{`"(*)"`, 0},
+		{"***", 0},
+	}
+	for _, c := range cases {
+		hits, err := e.store.Search(c.q, "", nil, 10, nil)
+		if err != nil {
+			t.Fatalf("Search(%q): %v", c.q, err)
+		}
+		if len(hits) != c.want {
+			t.Fatalf("Search(%q) = %d hits, want %d", c.q, len(hits), c.want)
+		}
+	}
+}

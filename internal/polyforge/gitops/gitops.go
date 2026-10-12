@@ -97,6 +97,10 @@ type Opts struct {
 	RemoteURL   string // aihub git proxy URL, e.g. http://host:8420/git/wi_xxx.git
 	Username    string // push credential username (= work item id)
 	Secret      string // push credential secret (v1.5: the session id; askpass only — never argv, never env)
+	// EventSink receives the durable error events the gitops lanes raise
+	// (e.g. EventTaskRefDiverged), already bound to this work item by the
+	// runtime. nil drops them.
+	EventSink func(kind string, body map[string]any)
 }
 
 // Env returns the environment every raw git invocation against this
@@ -108,14 +112,50 @@ func (o Opts) Env() []string {
 	)
 }
 
+// CEnv returns env (nil = inherited environ) pinned to the C locale:
+// LC_ALL=C and no LANGUAGE, so git's messages are never translated and
+// the output this package (and ship) pattern-matches stays stable.
+func CEnv(env []string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "LC_ALL=") || strings.HasPrefix(kv, "LANGUAGE=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "LC_ALL=C")
+}
+
+// exitCoder is satisfied by *exec.ExitError.
+type exitCoder interface{ ExitCode() int }
+
+// gitError is the failure of one git invocation: the formatted message
+// plus the underlying exec error (for exit-code checks).
+type gitError struct {
+	msg string
+	err error
+}
+
+func (e *gitError) Error() string { return e.msg }
+func (e *gitError) Unwrap() error { return e.err }
+
+// exitCode answers err's git exit code (-1 when it is not an exit error).
+func exitCode(err error) int {
+	var ec exitCoder
+	if errors.As(err, &ec) {
+		return ec.ExitCode()
+	}
+	return -1
+}
+
 // git runs git once with the given environment (nil = inherit) and dir.
 // It is a var so the tests can probe the argv the package builds.
 var git = func(env []string, dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
-	if env == nil {
-		env = os.Environ()
-	}
-	cmd.Env = env
+	cmd.Env = CEnv(env)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -126,7 +166,7 @@ var git = func(env []string, dir string, args ...string) (string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return stdout.String(), fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+		return stdout.String(), &gitError{msg: fmt.Sprintf("git %s: %s", strings.Join(args, " "), msg), err: err}
 	}
 	return stdout.String(), nil
 }
@@ -474,6 +514,18 @@ func pushTaskRefsLocked(o Opts) {
 		args = append(args, o.RemoteURL, "HEAD:"+TaskRefName(e.Name()))
 		if out, err := git(env, dir, args...); err != nil {
 			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %v: %s\n", o.WorkItemID, e.Name(), err, strings.TrimSpace(out))
+			// Never force: a non-fast-forward rejection means the carrier
+			// and this worktree DIVERGED (e.g. a re-claim that started
+			// from a clone lacking the carried commits). The carrier is
+			// left untouched and the divergence is raised as an error
+			// event, not left to stderr.
+			if IsNonFastForward(err, out) && o.EventSink != nil {
+				o.EventSink(EventTaskRefDiverged, map[string]any{
+					"repo":  e.Name(),
+					"ref":   TaskRefName(e.Name()),
+					"error": err.Error(),
+				})
+			}
 		}
 	}
 }
@@ -501,10 +553,15 @@ func FetchTaskRef(o Opts, dir, name string) (string, error) {
 	}
 	defer cleanup()
 	env := append(os.Environ(), additions...)
-	if _, err := git(env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, TaskRefName(name)); err != nil {
-		if strings.Contains(err.Error(), "couldn't find remote ref") {
+	// ls-remote --exit-code answers 2 when no ref matches: the
+	// language-independent "no carrier yet" signal (never git's message).
+	if _, err := git(env, dir, "ls-remote", "--exit-code", o.RemoteURL, TaskRefName(name)); err != nil {
+		if exitCode(err) == 2 {
 			return "", nil // no carrier recorded yet: first claim, nothing to restore
 		}
+		return "", err
+	}
+	if _, err := git(env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, TaskRefName(name)); err != nil {
 		return "", err
 	}
 	out, err := git(env, dir, "rev-parse", "FETCH_HEAD")
@@ -857,4 +914,20 @@ func cleanStaleLocks(gitDir string) error {
 		return nil
 	}
 	return os.Remove(lockPath)
+}
+
+// EventTaskRefDiverged is the error event kind raised when the carrier
+// push of one task repo is rejected non-fast-forward.
+const EventTaskRefDiverged = "task_ref_diverged"
+
+// IsNonFastForward reports a push refused because the remote ref is not an
+// ancestor of the pushed commit. It matches git's C-locale output
+// ("! [rejected] HEAD -> main (non-fast-forward)" / "(fetch first)"), so
+// callers must run git under CEnv. err may be nil; out is the push output.
+func IsNonFastForward(err error, out string) bool {
+	msg := out
+	if err != nil {
+		msg += " " + err.Error()
+	}
+	return strings.Contains(msg, "non-fast-forward") || strings.Contains(msg, "(fetch first)")
 }

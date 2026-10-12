@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
 const ghTimeout = 60 * time.Second
@@ -226,7 +227,7 @@ func (d *Daemon) shipOneRepo(ctx context.Context, capDir, name, branch, wi strin
 	} else {
 		pushOut, perr := gitCombined(ctx, dir, "-c", "core.hooksPath=", "push", origin, head+":refs/heads/"+branch)
 		if perr != nil {
-			if isNonFastForward(pushOut) {
+			if gitops.IsNonFastForward(perr, pushOut) {
 				return nil, shipErr(api.ErrDaemonConflict,
 					"repo %s: remote branch %s moved past the sealed commit during the push; ship never force-pushes: %s",
 					name, branch, strings.TrimSpace(pushOut))
@@ -241,14 +242,9 @@ func (d *Daemon) shipOneRepo(ctx context.Context, capDir, name, branch, wi strin
 	return oc, nil
 }
 
-func isNonFastForward(out string) bool {
-	return strings.Contains(out, "non-fast-forward") ||
-		strings.Contains(out, "fetch first") ||
-		strings.Contains(out, "(rejected)")
-}
-
 func gitCombined(ctx context.Context, dir string, args ...string) (string, error) {
 	c := exec.CommandContext(ctx, "git", args...)
+	c.Env = gitops.CEnv(nil)
 	if dir != "" {
 		c.Dir = dir
 	}

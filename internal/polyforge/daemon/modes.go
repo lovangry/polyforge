@@ -141,15 +141,19 @@ type jobQueue struct {
 	// cannot lose an accepted submit; replay's aihub check + claiming
 	// dedupe make a re-attempt harmless.
 	inflight map[string]qEntry
-	running  map[string]bool
+	// occupied returns the WIs holding a concurrency slot, derived from
+	// the runtime's live job list — the single source of truth, so jobs
+	// recovered by a restart or resumed by a repair count like dispatched
+	// ones (there is no separate running set to drift).
+	occupied func() map[string]bool
 	maxConc  int
 	// persist, when non-nil, atomically rewrites the queue file from the
 	// given snapshot (pending + inflight). Called under mu.
 	persist func([]qEntry) error
 }
 
-func NewJobQueue(maxConc int) *jobQueue {
-	return &jobQueue{running: map[string]bool{}, inflight: map[string]qEntry{}, maxConc: maxConc}
+func NewJobQueue(maxConc int, occupied func() map[string]bool) *jobQueue {
+	return &jobQueue{occupied: occupied, inflight: map[string]qEntry{}, maxConc: maxConc}
 }
 
 func (q *jobQueue) SetMaxConcurrent(n int) error {
@@ -241,7 +245,7 @@ func (q *jobQueue) IsPending(wi string) bool {
 func (q *jobQueue) IsRunning(wi string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.running[wi]
+	return q.occupied()[wi]
 }
 
 func (q *jobQueue) LenPending() int {
@@ -254,16 +258,16 @@ func (q *jobQueue) LenPending() int {
 func (q *jobQueue) SlotFree() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return len(q.running) < q.maxConc
+	return len(q.occupied()) < q.maxConc
 }
 
 // Take pops the next pending entry IF a slot is free (04 §6.1d backfill:
-// strictly priority desc, then FIFO). The caller marks the slot via
-// MarkRunning after a successful start.
+// strictly priority desc, then FIFO). A started job occupies its slot by
+// appearing in the runtime's live list.
 func (q *jobQueue) Take() *qEntry {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.pending) == 0 || len(q.running) >= q.maxConc {
+	if len(q.pending) == 0 || len(q.occupied()) >= q.maxConc {
 		return nil
 	}
 	best := 0
@@ -279,24 +283,6 @@ func (q *jobQueue) Take() *qEntry {
 	q.inflight[e.WorkItemID] = e // persisted until Settle; a persist error here is non-fatal (the entry is merely re-listed on disk)
 	_ = q.persistLocked()
 	return &e
-}
-
-func (q *jobQueue) MarkRunning(wi string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.running[wi] = true
-}
-
-// Reconcile frees the slots of jobs the runtime no longer holds (a
-// wrap/pause close ends a job without telling the queue).
-func (q *jobQueue) Reconcile(live map[string]bool) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for wi := range q.running {
-		if !live[wi] {
-			delete(q.running, wi)
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------

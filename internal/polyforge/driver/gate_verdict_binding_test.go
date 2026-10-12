@@ -196,7 +196,7 @@ func TestRunGateVerdictBindingRewindsAndLogs(t *testing.T) {
 	}
 
 	if got := sp.dispatched(); fmt.Sprint(got) != fmt.Sprint([]string{
-		"fix@1(resume=false)", "review@2(resume=false)", "fix@3(resume=false)", "review@4(resume=true)",
+		"fix@1(resume=false)", "review@2(resume=false)", "fix@3(resume=false)", "review@4(resume=false)",
 	}) {
 		t.Fatalf("dispatch ledger: %v", got)
 	}
