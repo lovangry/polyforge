@@ -160,6 +160,9 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		HandoffDue:     spec.Handoff,
 		Gate:           spec.Gate,
 		PriorRejection: sp.PriorRejection,
+
+		RequireCommandEvidence: spec.RequiresCommandEvidence || sp.StepID == verificationStepID,
+		RequiresHumanAnswer:    spec.RequiresHumanAnswer,
 	}
 	if policy == ContextInherit {
 		h, err := a.resolveHandoff(sp.StepID)
@@ -242,6 +245,13 @@ type promptParts struct {
 	// dispatch's rejected envelope (the in-process retry lane): the
 	// author sees exactly what to fix instead of blindly re-authoring.
 	PriorRejection string
+	// RequireCommandEvidence marks a step whose completed result must
+	// carry command_evidence (verification / requires_command_evidence):
+	// the contract states the entry shape and the rule.
+	RequireCommandEvidence bool
+	// RequiresHumanAnswer marks a requires_human_answer step: the
+	// contract states that a human answer must precede completion.
+	RequiresHumanAnswer bool
 }
 
 // handoffSection is one producing step's handoff artifact, injected
@@ -340,6 +350,16 @@ func deliveryContract(p promptParts) string {
 		b.WriteString("; this step DECLARES handoff, so a completed result must also carry `handoff_ref` — the same {path, sha256, bytes} shape — naming the artifact the next inherit step continues from")
 	}
 	b.WriteString("; a `needs_input` result carries `question_id` and `question` instead. End your turn once the file is written.\n")
+	if p.RequireCommandEvidence {
+		b.WriteString("\nCommand evidence: this step requires `command_evidence` — a list of OBJECTS " +
+			"`{\"argv\": [\"go\", \"test\", \"./...\"], \"exit_code\": 0, \"duration_ms\": 1200}`, never strings. " +
+			"Run at least one real check command and report every command you ran with its measured `duration_ms` (> 0); " +
+			"an empty list, an entry without `argv`, or one without a positive `duration_ms` is rejected. Never fabricate an entry.\n")
+	}
+	if p.RequiresHumanAnswer {
+		b.WriteString("\nHuman answer: this step requires a human answer before completion: return `needs_input` first; " +
+			"a `completed` envelope without an answer in this round is rejected.\n")
+	}
 	if p.Gate {
 		b.WriteString("\nGate verdict binding: this step is a GATE (the workflow declares it `gate: true`), " +
 			"and the top-level `verdict` field of your `output` is the business verdict. " +
@@ -838,6 +858,7 @@ func (r *stepRun) collect() (*StepResult, error) {
 		if json.Unmarshal(raw, &shadow) == nil {
 			// Zero out the malformed field and re-parse the rest.
 			var m map[string]interface{}
+			var dropped []string
 			if json.Unmarshal(raw, &m) == nil {
 				// Keep the well-formed object entries (a mixed or partly
 				// string-typed list must not drop real evidence before the
@@ -846,10 +867,18 @@ func (r *stepRun) collect() (*StepResult, error) {
 				var elems []json.RawMessage
 				if json.Unmarshal(shadow.CommandEvidence, &elems) == nil {
 					kept := []json.RawMessage{}
-					for _, el := range elems {
+					for i, el := range elems {
 						var ce CommandEvidence
-						if t := strings.TrimSpace(string(el)); strings.HasPrefix(t, "{") && json.Unmarshal(el, &ce) == nil {
-							kept = append(kept, el)
+						t := strings.TrimSpace(string(el))
+						switch {
+						case !strings.HasPrefix(t, "{"):
+							dropped = append(dropped, fmt.Sprintf("command_evidence[%d] is not an OBJECT", i))
+						default:
+							if uerr := json.Unmarshal(el, &ce); uerr != nil {
+								dropped = append(dropped, fmt.Sprintf("command_evidence[%d] could not be decoded: %v (started_at must be RFC3339, argv a string list, numbers numeric)", i, uerr))
+							} else {
+								kept = append(kept, el)
+							}
 						}
 					}
 					if len(kept) > 0 {
@@ -859,6 +888,7 @@ func (r *stepRun) collect() (*StepResult, error) {
 				if cleaned, jerr := json.Marshal(m); jerr == nil {
 					res = StepResult{} // the failed first decode leaves partial fields (e.g. a zeroed evidence entry)
 					if uerr := json.Unmarshal(cleaned, &res); uerr == nil {
+						res.evidenceDropped = dropped
 						goto parsed
 					}
 				}

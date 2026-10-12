@@ -1,8 +1,8 @@
 package test
 
 // v2_driver_guarantees_test.go: the driver's mechanical guarantees (v2
-// §2.3) end to end with the real daemon + fakepi: the human gate on the
-// SHIPPED quick-fix bundle and the V4 verification-evidence gate. Both
+// §2.3) end to end with the real daemon + fakepi: the human gate on a
+// quick-fix copy whose grill declares the flag and the V4 verification-evidence gate. Both
 // land on the in-process REJECTED-rewrite lane (the daemon log carries
 // the envelope_rejected detail), not the recovery lane.
 
@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-func TestV2HumanGateShippedBundle(t *testing.T) {
+func TestV2HumanGateGuaranteeEndToEnd(t *testing.T) {
 	inst := newV1Install(t)
-	inst.keepHumanGates = true // the shipped quick-fix declares requires_human_answer on grill
+	inst.gateQuickFixGrill = true // test-local bundle: quick-fix grill + requires_human_answer (the shipped grills allow zero questions)
 	const qid = "q_v2gate"
 	wi := inst.newWI(t, "v2: completed grill refused until a human answered",
 		[]map[string]any{

@@ -117,6 +117,11 @@ type StepResult struct {
 	Question        string            `json:"question,omitempty"`    // the question text for needs_input
 	CommandEvidence []CommandEvidence `json:"command_evidence"`
 	SubmittedAt     time.Time         `json:"submitted_at"`
+
+	// evidenceDropped records why the tolerant re-parse discarded
+	// command_evidence entries (set by the collector, never serialized);
+	// the evidence gate quotes it so a rejection names the real reason.
+	evidenceDropped []string
 }
 
 // ArtifactRef pins one artifact file: capsule-relative path plus the
@@ -130,8 +135,9 @@ type ArtifactRef struct {
 }
 
 // CommandEvidence is one recorded command the step process ran, kept in
-// the envelope for audit (the operator face renders it; validation
-// never branches on it).
+// the envelope for audit (the operator face renders it). Validation of
+// a verification step checks argv non-emptiness and duration_ms > 0
+// (checkCommandEvidence); exit_code and started_at are not enforced.
 type CommandEvidence struct {
 	Argv       []string  `json:"argv"`
 	Cwd        string    `json:"cwd"`
@@ -197,8 +203,8 @@ type ResultSpec struct {
 	HumanAnswers int
 	// RequireCommandEvidence mirrors requires_command_evidence: true (or
 	// the step id "verification"): an accepted completed result must carry
-	// at least one command_evidence entry with a non-empty argv, an
-	// exit_code and a duration_ms (the V4 gate).
+	// at least one command_evidence entry, each with a non-empty argv and
+	// duration_ms > 0 (the V4 gate; exit_code presence is not checkable).
 	RequireCommandEvidence bool
 }
 
@@ -349,6 +355,9 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	}
 	if spec.RequireCommandEvidence {
 		if err := checkCommandEvidence(res.CommandEvidence); err != nil {
+			if len(res.evidenceDropped) > 0 {
+				err = fmt.Errorf("%w (entries dropped while parsing the envelope: %s)", err, strings.Join(res.evidenceDropped, "; "))
+			}
 			return fmt.Errorf("driver: step %q completed without verification evidence: %w", spec.StepID, err)
 		}
 	}
@@ -390,14 +399,13 @@ func needsInputQuestion(res *StepResult) (id, text string, err error) {
 }
 
 // checkCommandEvidence enforces the V4 evidence shape: at least one entry,
-// every entry with a non-empty argv, an exit_code and a duration_ms.
-// exit_code and duration_ms are numeric fields whose zero value is
-// legitimate for exit_code; "present" is judged on the stored struct by
-// argv non-emptiness plus a non-negative duration_ms, and an entry the
-// tolerant re-parse could not decode never reaches here as a struct.
+// every entry with a non-empty argv and duration_ms > 0. exit_code's
+// zero value is legitimate and its presence cannot be checked on the
+// decoded struct, so it is not enforced. An entry the tolerant re-parse
+// could not decode never reaches here as a struct (see evidenceDropped).
 func checkCommandEvidence(ev []CommandEvidence) error {
 	if len(ev) == 0 {
-		return errors.New("command_evidence is empty — a verification step must carry at least one entry, each an OBJECT {\"argv\": [...], \"exit_code\": N, \"duration_ms\": N}, not a string")
+		return errors.New("command_evidence is empty — a verification step must carry at least one entry, each an OBJECT {\"argv\": [...], \"exit_code\": N, \"duration_ms\": N} (duration_ms > 0)")
 	}
 	for i, e := range ev {
 		if len(e.Argv) == 0 || strings.TrimSpace(strings.Join(e.Argv, "")) == "" {

@@ -1483,8 +1483,9 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 // STALE and a blocked verdict would sabotage the new owner), runs NO
 // recovery, and instead: kills the local tree, quarantines the capsule
 // in place (capsules/<id>.quarantined.<ts>), drops the state.json record
-// and emits the owner-visible event — the answer ledger did not travel,
-// so "answers may be lost; question re-opened" (m3).
+// and emits the owner-visible event — the local capsule (and any answers
+// recorded in it) did not travel, so "answers may be lost; question
+// re-opened" (m3).
 func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()

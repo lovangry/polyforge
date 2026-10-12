@@ -77,3 +77,51 @@ func TestRunVerificationRequiresEvidence(t *testing.T) {
 		t.Fatalf("accepted evidence must stay in the stored output: %+v", st)
 	}
 }
+
+// TestRunHumanGateGateFailRewindNeedsFreshAnswer drives the real
+// transitions: a human-gate gate asks, is answered, fails and rewinds;
+// on re-entry a completed result without a NEW answer is rejected.
+func TestRunHumanGateGateFailRewindNeedsFreshAnswer(t *testing.T) {
+	gate := gateSpec("grill-review", "spec")
+	gate.RequiresHumanAnswer = true
+	d, sp, execPath := runEnv(t, spec("spec"), gate)
+	sp.script = []fakeEntry{
+		done(`{}`),                 // spec
+		asks("q_1", "right?"),      // grill-review round 1
+		gateFAIL(),                 // after the human said "not right": rewind to spec
+		done(`{}`),                 // spec again
+		done(`{"verdict":"PASS"}`), // grill-review without a new answer: rejected
+		asks("q_2", "now right?"),  // the rewrite asks
+		done(`{"verdict":"PASS"}`), // after the new answer: accepted
+	}
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- d.Run(context.Background()) }()
+	waitUntil(t, "round-1 question", func() bool {
+		exec := tryReadExec(execPath)
+		return exec != nil && exec.Steps["grill-review"].PendingQuestion != nil
+	})
+	if err := d.Answer("q_1", "not right", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "round-2 question after the rejected pass", func() bool {
+		exec := tryReadExec(execPath)
+		if exec == nil {
+			return false
+		}
+		pq := exec.Steps["grill-review"].PendingQuestion
+		return pq != nil && pq.ID == "q_2"
+	})
+	if fb := sp.spawnAt(5).PriorRejection; !strings.Contains(fb, "requires a human answer: return needs_input first") {
+		t.Fatalf("a pass without a fresh answer must be rejected, feedback: %q", fb)
+	}
+	if err := d.Answer("q_2", "yes", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-doneCh; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	exec := readExec(t, execPath)
+	if exec.WorkflowStatus != StatusCompleted || exec.Steps["grill-review"].Status != capsule.StepDone {
+		t.Fatalf("workflow must complete after the fresh answer: %+v", exec.Steps["grill-review"])
+	}
+}

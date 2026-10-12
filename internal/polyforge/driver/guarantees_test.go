@@ -139,9 +139,21 @@ func TestVerificationEvidenceFromStepIDAndField(t *testing.T) {
 }
 
 func TestShippedBundlesDeclareHumanGates(t *testing.T) {
+	// Only steps whose text REQUIRES a human confirmation carry the flag:
+	// the grills allow zero questions, so they must not.
 	want := map[string][]string{
-		"feature-full": {"grill", "grill-review"},
-		"quick-fix":    {"grill"},
+		"feature-full": {"grill-review"},
+	}
+	for bundle, ids := range map[string][]string{"feature-full": {"grill"}, "quick-fix": {"grill"}} {
+		wf, err := LoadDriverWorkflow(filepath.Join("..", "..", "..", "workflows", bundle))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range ids {
+			if s := wf.StepByID(id); s == nil || s.RequiresHumanAnswer {
+				t.Fatalf("%s/%s allows zero questions and must not declare requires_human_answer", bundle, id)
+			}
+		}
 	}
 	for bundle, ids := range want {
 		wf, err := LoadDriverWorkflow(filepath.Join("..", "..", "..", "workflows", bundle))
@@ -185,5 +197,47 @@ func TestTolerantReparseKeepsObjectEvidence(t *testing.T) {
 	}
 	if err := checkCommandEvidence(res.CommandEvidence); err == nil || !strings.Contains(err.Error(), "OBJECT") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestDeliveryContractStatesGuaranteesOnlyWhenTheyApply(t *testing.T) {
+	const evLine = "Command evidence: this step requires `command_evidence`"
+	const humanLine = "this step requires a human answer before completion: return `needs_input` first; a `completed` envelope without an answer in this round is rejected"
+	plain := deliveryContract(promptParts{WIID: "wi", StepID: "a", SpawnN: 1})
+	for _, l := range []string{evLine, humanLine} {
+		if strings.Contains(plain, l) {
+			t.Fatalf("plain step must not carry %q", l)
+		}
+	}
+	ev := deliveryContract(promptParts{WIID: "wi", StepID: "verification", SpawnN: 1, RequireCommandEvidence: true})
+	if !strings.Contains(ev, evLine) || !strings.Contains(ev, `"duration_ms": 1200`) || !strings.Contains(ev, "(> 0)") {
+		t.Fatalf("evidence step must state the object shape and rule:\n%s", ev)
+	}
+	if strings.Contains(ev, humanLine) {
+		t.Fatal("evidence step must not carry the human-answer line")
+	}
+	hu := deliveryContract(promptParts{WIID: "wi", StepID: "g", SpawnN: 1, RequiresHumanAnswer: true})
+	if !strings.Contains(hu, humanLine) || strings.Contains(hu, evLine) {
+		t.Fatalf("human-gate step must state only the human-answer rule:\n%s", hu)
+	}
+}
+
+func TestTolerantReparseNamesBadStartedAt(t *testing.T) {
+	dir := t.TempDir()
+	drop := filepath.Join(dir, "1.json")
+	raw := `{"protocol_version":1,"result_id":"r1","outcome":"completed","output":{},
+	 "command_evidence":[{"argv":["go","test"],"exit_code":0,"duration_ms":42,"started_at":"yesterday"}]}`
+	if err := os.WriteFile(drop, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &stepRun{dropPath: drop, sp: StepSpawn{StepID: "verification", SpawnN: 1}, wiID: "wi"}
+	res, err := r.collect()
+	if err != nil || res == nil {
+		t.Fatalf("collect: %v %v", res, err)
+	}
+	spec := ResultSpec{WIID: "wi", StepID: "verification", SpawnN: 1, RequireCommandEvidence: true}
+	err = ValidateStepResult(res, spec)
+	if err == nil || !strings.Contains(err.Error(), "started_at must be RFC3339") || !strings.Contains(err.Error(), "command_evidence[0] could not be decoded") {
+		t.Fatalf("rejection must name the real reason, got %v", err)
 	}
 }
