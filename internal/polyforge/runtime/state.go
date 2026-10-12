@@ -45,12 +45,19 @@ const (
 	// so the holder daemon's restart can attach (M3) once the operator
 	// clears clean_pause. No read-only seal, no dropJob, no DONE.
 	StatePaused JobState = "paused"
+	// StateEndPending is the durable "blocked, but the hub has not heard"
+	// state (v2-converge §6 bug 5): a bounded-fail whose SessionEnd(blocked)
+	// failed keeps the record — the session secret only that record holds —
+	// and retries the close (in-process with backoff, and at every daemon
+	// start) until the hub accepts it. Only then is the record dropped.
+	StateEndPending JobState = "end_pending"
 )
 
 var legalEdges = map[JobState][]JobState{
 	StateRunning:    {StateSealing, StateRecovering, StatePaused},
 	StateSealing:    {StateDone},
-	StateRecovering: {StateRunning, StateSealing, StateDone},
+	StateRecovering: {StateRunning, StateSealing, StateDone, StateEndPending},
+	StateEndPending: {StateDone},
 	StatePaused:     {StateRunning, StateDone},
 }
 
@@ -174,6 +181,11 @@ type jobRecord struct {
 	// RepairPending is the v2 §6 local pending-repair mark (see
 	// job.repairPending): "capsule_missing" | "project_unmapped" | "".
 	RepairPending string `json:"repair_pending,omitempty"`
+	// EndNote/EndHead persist the pending SessionEnd(blocked) of an
+	// end_pending record: the verdict's note and the capsule head the
+	// sealing daemon pushed (the cross-daemon continue check, §7).
+	EndNote string `json:"end_note,omitempty"`
+	EndHead string `json:"end_head,omitempty"`
 }
 
 // Origin kinds.
@@ -218,6 +230,8 @@ func (j *job) record() *jobRecord {
 		AgentStart:         j.agentStartedAt,
 		Origin:             j.origin,
 		RepairPending:      j.repairPending,
+		EndNote:            j.endNote,
+		EndHead:            j.endHead,
 	}
 }
 
@@ -263,6 +277,8 @@ func jobFromRecord(rec *jobRecord) *job {
 		agentStartedAt: rec.AgentStart,
 		origin:         rec.Origin,
 		repairPending:  rec.RepairPending,
+		endNote:        rec.EndNote,
+		endHead:        rec.EndHead,
 	}
 }
 

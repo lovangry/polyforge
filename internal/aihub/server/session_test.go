@@ -604,3 +604,148 @@ func TestUnblockOverHTTP(t *testing.T) {
 		t.Fatalf("terminal unblock: %d %s", code, raw)
 	}
 }
+
+// TestBlockedExitsUnifiedAuthorization (v2-converge §7, §11 item 7): the
+// blocked exits — resume-blocked (continue), terminate-blocked and unblock —
+// and cancel (abandon) are open to exactly the work item's reporter, a
+// project maintainer, or an admin. A plain project member (writer) who is
+// none of those is refused on EVERY door — resume-blocked used to check the
+// key scope only.
+func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
+	e := newSrvEnv(t)
+	mk := func(name, role string) (string, string) {
+		u, err := e.admin.CreateUser(name, name+"@example.com", "writer", "human")
+		if err != nil {
+			t.Fatal(err)
+		}
+		k, err := e.admin.CreateAPIKey(u.ID, name, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u.ID, k.Plain
+	}
+	repID, repKey := mk("reporterx", "writer")
+	otherID, otherKey := mk("memberx", "writer")
+	maintID, maintKey := mk("maintx", "maintainer")
+	_, outKey := mk("outsiderx", "writer")
+	if _, err := e.admin.PatchProject("alpha", core.ProjectPatchRequest{
+		Members: &[]api.ProjectMember{
+			{UserID: repID, Role: "writer"},
+			{UserID: otherID, Role: "writer"},
+			{UserID: maintID, Role: "maintainer"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	block := func(goal, secret string) string {
+		var wi struct {
+			ID string `json:"id"`
+		}
+		if code, raw := e.do(t, "POST", "/api/v1/work-items", repKey,
+			map[string]any{"project": "alpha", "goal": goal, "bundle_name": "demo-bundle"}, &wi); code != 201 {
+			t.Fatalf("reporter create: %d %s", code, raw)
+		}
+		if code, raw, _ := sessClaim(t, e, wi.ID, secret, "k-"+secret[:4]); code != 200 {
+			t.Fatalf("claim: %d %s", code, raw)
+		}
+		if code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/session-end", e.key,
+			map[string]string{"session_id": secret, "status": "blocked"}, nil); code != 200 {
+			t.Fatalf("block: %d %s", code, raw)
+		}
+		return wi.ID
+	}
+	s := func(n byte) string { return strings.Repeat(string(rune('a'+n)), 32) }
+	id := block("blocked auth", s(1))
+
+	for _, door := range []string{"resume-blocked", "terminate-blocked", "unblock"} {
+		for who, key := range map[string]string{"plain member": otherKey, "outsider": outKey} {
+			if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/"+door, key, map[string]any{}, nil); code != 403 && code != 404 {
+				t.Fatalf("%s on %s must be refused, got %d %s", who, door, code, raw)
+			}
+		}
+	}
+	// cancel (abandon) answers the same set
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/cancel", otherKey, map[string]any{}, nil); code != 403 {
+		t.Fatalf("plain member cancel: %d %s", code, raw)
+	}
+
+	// the reporter continues
+	var got struct {
+		Status string `json:"status"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/resume-blocked", repKey, map[string]any{}, &got); code != 200 || got.Status != "queued" {
+		t.Fatalf("reporter resume-blocked: %d %s", code, raw)
+	}
+	// a maintainer continues another blocked WI
+	id2 := block("blocked auth 2", s(2))
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id2+"/resume-blocked", maintKey, map[string]any{}, &got); code != 200 || got.Status != "queued" {
+		t.Fatalf("maintainer resume-blocked: %d %s", code, raw)
+	}
+	// an admin terminates a third
+	id3 := block("blocked auth 3", s(3))
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id3+"/terminate-blocked", e.key, map[string]any{}, &got); code != 200 || got.Status != "failed" {
+		t.Fatalf("admin terminate-blocked: %d %s", code, raw)
+	}
+	// the reporter abandons a fourth
+	id4 := block("blocked auth 4", s(4))
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id4+"/cancel", repKey, map[string]any{}, &got); code != 200 || got.Status != "canceled" {
+		t.Fatalf("reporter cancel of a blocked WI: %d %s", code, raw)
+	}
+}
+
+// TestBlockedSealHeadRoundTrip (v2-converge §7): the blocked verdict's
+// head_sha is recorded with the sealing machine and answered on the next
+// claim; a non-blocked close clears it (no stale seal on later claims); a
+// blocked verdict without a head (an abandoned claim) keeps the standing
+// seal.
+func TestBlockedSealHeadRoundTrip(t *testing.T) {
+	e := newSrvEnv(t)
+	id := createExecWIOverHTTP(t, e, "sealed head")
+	end := func(secret string, body map[string]string) {
+		t.Helper()
+		body["session_id"] = secret
+		if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key, body, nil); code != 200 {
+			t.Fatalf("session-end %v: %d %s", body, code, raw)
+		}
+	}
+	unblock := func() {
+		t.Helper()
+		if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/resume-blocked", e.key, map[string]any{}, nil); code != 200 {
+			t.Fatalf("resume-blocked: %d %s", code, raw)
+		}
+	}
+	s1, s2, s3 := strings.Repeat("a1", 16), strings.Repeat("b2", 16), strings.Repeat("c3", 16)
+
+	_, _, first := sessClaim(t, e, id, s1, "seal-1")
+	if first.Claim.SealedHead != "" {
+		t.Fatalf("a fresh WI has no seal: %+v", first.Claim)
+	}
+	end(s1, map[string]string{"status": "blocked", "head_sha": "abc123"})
+	unblock()
+	code, raw, second := sessClaim(t, e, id, s2, "seal-2")
+	if code != 200 || second.Claim.SealedHead != "abc123" || second.Claim.SealedMachine != "m1" {
+		t.Fatalf("the claim must answer the sealed head + machine: %d %s", code, raw)
+	}
+	// an abandoned claim (blocked, no head) keeps the standing seal
+	end(s2, map[string]string{"status": "blocked", "note": "refused"})
+	unblock()
+	_, _, third := sessClaim(t, e, id, s3, "seal-3")
+	if third.Claim.SealedHead != "abc123" {
+		t.Fatalf("a head-less blocked verdict must keep the seal: %+v", third.Claim)
+	}
+	// a pause clears it
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/session-end", e.key,
+		map[string]any{"session_id": s3, "status": "paused", "clean_pause": true}, nil); code != 200 {
+		t.Fatalf("pause: %d %s", code, raw)
+	}
+	var wi struct {
+		Attrs map[string]any `json:"attrs"`
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/work-items/"+id, e.key, nil, &wi); code != 200 {
+		t.Fatalf("get: %d %s", code, raw)
+	}
+	if _, has := wi.Attrs["blocked_seal"]; has {
+		t.Fatalf("a pause must clear the seal: %v", wi.Attrs)
+	}
+}

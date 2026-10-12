@@ -350,7 +350,9 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 // resumeBlockedRoute serves POST /jobs/{id}/resume-blocked — the owner's
 // resume verdict on a workflow parked blocked on an honest incomplete
 // result. The bounded close dropped the job and ended the session, so this
-// route re-establishes execution: the hub's resume-blocked door first
+// route re-establishes execution AFTER the CLI has landed the hub's
+// resume-blocked door with the human's own credential (never the daemon's
+// machine key — the door's owner/maintainer/admin check is about the human):
 // (blocked → queued, the claim gate stays queued-only), then a plain claim
 // that runs synchronously — the claim/start path's owner move
 // (bridge.Start → driver.ResumeCurrent) unblocks the parked workflow and
@@ -386,10 +388,11 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, api.ErrDaemonConflict, "work item is already queued on this daemon")
 		return
 	}
-	if _, err := d.hub.ResumeBlockedWorkItem(canonical); err != nil {
-		writeErrOf(w, err)
-		return
-	}
+	// The hub's resume-blocked door is NOT called here (v2-converge §7):
+	// its owner/maintainer/admin check must evaluate the HUMAN who typed
+	// `pf resume`, so the CLI lands the door with the user's own api key
+	// first; this route is only the claim/start half. A WI still blocked
+	// at the hub is refused by the claim gate itself.
 	// The daemon's run context, NOT the HTTP request's: the claim's ctx
 	// is the driver's parent (bridge.Start derives from it) — a request-
 	// scoped ctx would cancel the driver mid-dispatch the moment the CLI
@@ -468,9 +471,8 @@ func (d *Daemon) adoptSessionRoute(w http.ResponseWriter, r *http.Request) {
 // workflow is parked blocked on an honest incomplete result (polyforge#116):
 // the bounded close dropped the job, so the owner's moves on this state are
 // the §6.4 face, not a runtime close — `--fail` is the owner's terminate
-// verdict, landed at the hub by the terminate-blocked door (the
-// session-fenced session-end is unavailable: the bounded close cleared the
-// session); a wrap (success) or a pause of a parked workflow has nothing to
+// verdict, landed by the CLI at the hub's terminate-blocked door with the
+// human's key (refused here with a hint); a wrap (success) or a pause of a parked workflow has nothing to
 // seal — refused with the owner-move copy. Returns true when it answered;
 // a non-blocked work item falls through to the caller's terminalOf/404.
 func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
@@ -478,18 +480,18 @@ func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
 	if err != nil || item == nil || item.Status != api.StatusBlocked {
 		return false
 	}
+	// The terminate verdict (`--fail`) is NOT landed here: the hub's
+	// terminate-blocked door authorizes the HUMAN (reporter / maintainer /
+	// admin), so the CLI calls it with the user's own key; the daemon's
+	// machine key is not that caller. There is no local state to clean —
+	// the bounded close already dropped the job.
 	if reason == protocol.FinishFailed {
-		if _, err := d.hub.TerminateBlockedWorkItem(wi); err != nil {
-			writeErrOf(w, err)
-			return true
-		}
-		writeJSON(w, http.StatusOK, closeResponse{
-			WorkItemID: wi, Outcome: "terminated", Status: api.StatusFailed, Reason: reason,
-		})
+		writeErr(w, api.ErrDaemonConflict,
+			"the workflow is parked blocked — its failed verdict is landed by the CLI with your own credential (`pf wrap --fail <id>` from an up-to-date pf), or abandon it with `pf cancel <id>`")
 		return true
 	}
 	writeErr(w, api.ErrDaemonConflict,
-		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue in place or `pf wrap --fail <id>` to terminate; there is no completed run to wrap or pause")
+		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon (`pf wrap --fail <id>` records a failed verdict); there is no completed run to wrap or pause")
 	return true
 }
 

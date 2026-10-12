@@ -293,6 +293,54 @@ func TestResumeFlagClearSemantics(t *testing.T) {
 	}
 }
 
+// TestWrapFailBlockedLandsDoorWithHumanKey: `pf wrap --fail` on a WI parked
+// blocked posts aihub's terminate-blocked door directly with the human's api
+// key and never contacts the daemon; a refused door (non-owner) is typed.
+func TestWrapFailBlockedLandsDoorWithHumanKey(t *testing.T) {
+	blockedWI := `{"id":"wi_blocked","slug":"pf-43","seq":43,"project":"polyforge","goal":"g",` +
+		`"status":"blocked","priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z",` +
+		`"updated_at":"2026-10-01T00:00:00Z"}`
+	var rec reqRecorder
+	hub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, blockedWI)
+	})
+	d := newDaemonFixture(t)
+	code, stdout, stderr := runPf(t, map[string]string{
+		"PF_SERVER": hub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
+	}, "wrap", "wi_blocked", "--fail")
+	if code != 0 || !strings.Contains(stdout, "fail requested for wi_blocked") {
+		t.Fatalf("wrap --fail: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	var door *capturedRequest
+	for _, r := range rec.all() {
+		r := r
+		if r.Method == "POST" && r.Path == "/api/v1/work-items/wi_blocked/terminate-blocked" {
+			door = &r
+		}
+	}
+	if door == nil || !strings.Contains(door.Header.Get("Authorization"), "human-key") {
+		t.Fatalf("the terminate door must be posted with the human's key: %+v", rec.all())
+	}
+	if n := len(d.rec.all()); n != 0 {
+		t.Errorf("the daemon must not be contacted: %v", d.rec.all())
+	}
+
+	deny := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `{"code":"AUTH-403","detail":"terminate-blocked requires the work item's reporter, a project maintainer or admin"}`)
+			return
+		}
+		io.WriteString(w, blockedWI)
+	})
+	code, _, stderr = runPf(t, map[string]string{
+		"PF_SERVER": deny.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "plain",
+	}, "wrap", "wi_blocked", "--fail")
+	if code != 1 || !strings.Contains(stderr, "AUTH-403") {
+		t.Errorf("non-owner must be refused: code=%d stderr=%s", code, stderr)
+	}
+}
+
 // TestResumeBlockedDoorWiring (polyforge#116): a workflow parked blocked
 // answers the §6.4 owner move, not the pause copy — the hub status picks
 // the door, and the blocked door contacts the daemon's resume-blocked
@@ -309,7 +357,7 @@ func TestResumeBlockedDoorWiring(t *testing.T) {
 	d := newDaemonFixture(t)
 	d.answer("POST", "/jobs/wi_blocked/resume-blocked", `{"resumed":true,"work_item_id":"wi_blocked"}`)
 	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
+		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
 	}, "resume", "wi_blocked")
 	if code != 0 {
 		t.Fatalf("resume: code=%d stderr=%s", code, stderr)
@@ -320,10 +368,45 @@ func TestResumeBlockedDoorWiring(t *testing.T) {
 	if !strings.Contains(stdout, "resumed wi_blocked") || !strings.Contains(stdout, "parked blocked") {
 		t.Errorf("stdout must carry the §6.4 owner-move copy: %s", stdout)
 	}
+	// The hub door is landed by the CLI with the HUMAN's key, before the
+	// daemon is contacted.
+	var door *capturedRequest
+	for _, r := range aihubRec.all() {
+		r := r
+		if r.Method == "POST" && r.Path == "/api/v1/work-items/wi_blocked/resume-blocked" {
+			door = &r
+		}
+	}
+	if door == nil {
+		t.Fatalf("the CLI must call the hub resume-blocked door itself: %+v", aihubRec.all())
+	}
+	if got := door.Header.Get("Authorization"); !strings.Contains(got, "human-key") {
+		t.Errorf("the door must carry the human's api key, got %q", got)
+	}
 	// The daemon's owner-move route is contacted exactly once.
 	calls := d.rec.all()
 	if len(calls) != 1 || calls[0].Path != "/jobs/wi_blocked/resume-blocked" {
 		t.Errorf("resume must contact the daemon's resume-blocked route once: %+v", calls)
+	}
+	// A refused door (non-owner member) stops before the daemon is asked.
+	d2 := newDaemonFixture(t)
+	d2.answer("POST", "/jobs/wi_blocked/resume-blocked", `{"resumed":true,"work_item_id":"wi_blocked"}`)
+	deny := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `{"code":"AUTH-403","detail":"resume-blocked requires the work item's reporter, a project maintainer or admin"}`)
+			return
+		}
+		io.WriteString(w, blockedWI)
+	})
+	code, _, stderr = runPf(t, map[string]string{
+		"PF_SERVER": deny.URL, "PF_DAEMON_SOCKET": d2.sock, "PF_API_KEY": "plain-member-key",
+	}, "resume", "wi_blocked")
+	if code != 1 || !strings.Contains(stderr, "AUTH-403") {
+		t.Errorf("a non-owner member must be refused: code=%d stderr=%s", code, stderr)
+	}
+	if n := len(d2.rec.all()); n != 0 {
+		t.Errorf("a refused door must not contact the daemon: %v", d2.rec.all())
 	}
 	// No clean_pause PATCH lands for a blocked WI (the pause copy's door).
 	for _, r := range aihubRec.all() {
@@ -415,43 +498,30 @@ func TestPauseRefusalWritesNothing(t *testing.T) {
 	}
 }
 
-// TestUnblockHappyPath (Finding 3, v1.5 review): `pf unblock <id>` POSTs
-// the exit-door route directly to aihub and renders the returned work
-// item's new queued status.
-func TestUnblockHappyPath(t *testing.T) {
+// TestUnblockVerbRemoved (v2-converge §7): the separate `pf unblock` verb is
+// gone — blocked has two actions, continue (`pf resume`) and abandon
+// (`pf cancel`). Invoking the old spelling prints a one-line hint and makes
+// no network call; the help face no longer lists it.
+func TestUnblockVerbRemoved(t *testing.T) {
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, strings.Replace(cannedWI, `"queued"`, `"queued"`, 1))
-	})
-	code, stdout, stderr := runPf(t, map[string]string{
-		"PF_SERVER": srv.URL, "PF_API_KEY": "key-admin",
-	}, "unblock", "wi_abc")
-	if code != 0 {
-		t.Fatalf("unblock: code=%d stderr=%s", code, stderr)
-	}
-	if got := rec.last(); got.Method != "POST" || got.Path != "/api/v1/work-items/wi_abc/unblock" {
-		t.Errorf("request = %s %s, want POST /api/v1/work-items/wi_abc/unblock", got.Method, got.Path)
-	}
-	if !strings.Contains(stdout, "unblocked pf-42 (status queued; claimable again)") {
-		t.Errorf("stdout = %q", stdout)
-	}
-}
-
-// TestUnblockRefusalClasses: a typed wire refusal (NOT_BLOCKED /
-// AUTH-403) surfaces as exit 1 with the typed envelope on stderr.
-func TestUnblockRefusalClasses(t *testing.T) {
-	srv := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		io.WriteString(w, `{"code":"CORE-409","detail":"unblock requires a blocked work item (got queued)","extra":{"reason":"NOT_BLOCKED"}}`)
+		io.WriteString(w, cannedWI)
 	})
 	code, _, stderr := runPf(t, map[string]string{
 		"PF_SERVER": srv.URL, "PF_API_KEY": "key-admin",
 	}, "unblock", "wi_abc")
-	if code != 1 {
-		t.Fatalf("refused unblock: exit=%d, want 1 (stderr=%s)", code, stderr)
+	if code != 2 || !strings.Contains(stderr, "pf resume (continue) or pf cancel (abandon)") {
+		t.Fatalf("unblock hint: code=%d stderr=%q", code, stderr)
 	}
-	if !strings.Contains(stderr, "CORE-409") || !strings.Contains(stderr, "blocked work item") {
-		t.Errorf("stderr must carry the typed refusal: %s", stderr)
+	if n := len(rec.all()); n != 0 {
+		t.Errorf("the removed verb must not call aihub; saw %d calls", n)
+	}
+	_, stdout, _ := runPf(t, nil, "help")
+	if strings.Contains(stdout, "unblock") {
+		t.Errorf("help must not list unblock: %s", stdout)
+	}
+	if !strings.Contains(stdout, "abandon") {
+		t.Errorf("help must point cancel at abandon: %s", stdout)
 	}
 }
 
@@ -565,5 +635,79 @@ func TestVerifySessionUnheldIsAnAnswer(t *testing.T) {
 		resp.SessionFingerprint != "" || resp.MachineID != "" ||
 		resp.SessionOwner != "" || resp.SessionStartedAt != "" {
 		t.Fatalf("unheld holder = %+v", resp)
+	}
+}
+
+// TestResumeDispatchByWIState pins the three-way `pf resume` order (D1+D2
+// merge): blocked -> human-key door then daemon resume-blocked; not blocked
+// and parked repair_pending on THIS daemon -> the daemon's in-place resume
+// route (no resume-blocked door, no daemon claim); otherwise -> the plain
+// clean_pause PATCH with no daemon route.
+func TestResumeDispatchByWIState(t *testing.T) {
+	wiWith := func(status string, clean bool) string {
+		return `{"id":"wi_abc","slug":"pf-42","seq":42,"project":"polyforge","goal":"g","status":"` + status +
+			`","clean_pause":` + map[bool]string{true: "true", false: "false"}[clean] +
+			`,"priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`
+	}
+	const repairStatus = `{"machine_id":"m1","mode":"interactive","workspaces":["/w"],"shutting_down":false,` +
+		`"jobs":[{"work_item_id":"wi_abc","status":"repair_pending","repair_reason":"capsule_missing"}],"queue":{"pending":0,"running":0,"max_concurrent":2}}`
+	cases := []struct {
+		name         string
+		hubStatus    string
+		clean        bool
+		repair       bool
+		wantPatch    bool
+		wantDoor     bool
+		wantDaemon   []string // POST paths expected on the daemon
+		wantStdoutIn string
+	}{
+		{"paused", "paused", true, false, true, false, nil, "clean_pause cleared"},
+		{"blocked", "blocked", false, false, false, true, []string{"/jobs/wi_abc/resume-blocked"}, "parked blocked"},
+		{"repair_pending running", "running", false, true, false, false, []string{"/jobs/wi_abc/resume"}, "repair_pending"},
+		{"repair_pending paused", "paused", true, true, true, false, []string{"/jobs/wi_abc/resume"}, "repair_pending"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec reqRecorder
+			aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, wiWith(tc.hubStatus, tc.clean))
+			})
+			d := newDaemonFixture(t)
+			if tc.repair {
+				d.answer("GET", "/status", repairStatus)
+			}
+			d.answer("POST", "/jobs/wi_abc/resume-blocked", `{"resumed":true,"work_item_id":"wi_abc"}`)
+			d.answer("POST", "/jobs/wi_abc/resume", `{"accepted":true,"work_item_id":"wi_abc"}`)
+			code, stdout, stderr := runPf(t, map[string]string{
+				"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
+			}, "resume", "wi_abc")
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%s", code, stderr)
+			}
+			if !strings.Contains(stdout, tc.wantStdoutIn) {
+				t.Errorf("stdout missing %q: %s", tc.wantStdoutIn, stdout)
+			}
+			var patched, door bool
+			for _, r := range rec.all() {
+				if r.Method == "PATCH" {
+					patched = true
+				}
+				if r.Method == "POST" && strings.HasSuffix(r.Path, "/resume-blocked") {
+					door = true
+				}
+			}
+			if patched != tc.wantPatch || door != tc.wantDoor {
+				t.Errorf("patch=%v (want %v) door=%v (want %v)", patched, tc.wantPatch, door, tc.wantDoor)
+			}
+			var posts []string
+			for _, r := range d.rec.all() {
+				if r.Method == "POST" {
+					posts = append(posts, r.Path)
+				}
+			}
+			if strings.Join(posts, ",") != strings.Join(tc.wantDaemon, ",") {
+				t.Errorf("daemon POSTs = %v, want %v", posts, tc.wantDaemon)
+			}
+		})
 	}
 }

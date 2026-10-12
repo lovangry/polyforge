@@ -385,9 +385,10 @@ func setCleanPause(ctx *Context, wiID string, value bool) string {
 //
 //   - a workflow parked BLOCKED on an honest incomplete result (§6.5
 //     step 5: workflow_status=blocked, position frozen, the owner holds
-//     the next move) gets the §6.4 owner move: the daemon's resume-blocked
-//     route returns the WI to claimable at the hub and re-establishes
-//     execution over the parked capsule — the frozen current step
+//     the next move) gets the §6.4 owner move: the CLI lands the hub's
+//     resume-blocked door with the human's own credential (authorization
+//     is reporter / maintainer / admin), then the daemon's route claims
+//     it and re-establishes execution over the parked capsule — the frozen current step
 //     re-dispatches in place as a fresh derivation. It must never answer
 //     the pause copy again (nothing here was ever paused).
 //   - every other status keeps the operator-pause door exactly as it was:
@@ -407,7 +408,7 @@ func setCleanPause(ctx *Context, wiID string, value bool) string {
 
 var cmdResume = &Command{
 	Name:    "resume",
-	Summary: "Resume a paused WI (clean_pause=false), or a workflow parked blocked (the §6.4 owner move)",
+	Summary: "Continue a paused WI (clean_pause=false) or a blocked one (reporter, maintainer or admin); abandon with pf cancel",
 	Usage:   "pf resume <id>",
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -421,6 +422,32 @@ var cmdResume = &Command{
 		if err != nil {
 			return err
 		}
+		// Dispatch order, decided by WI state (v2 merge of D1 + D2):
+		//  1. hub status blocked  -> the human-key resume-blocked door, then
+		//     the daemon's claim/start (below).
+		//  2. not blocked, and THIS daemon holds the WI parked repair_pending
+		//     (capsule missing / project unmapped at restart; the session is
+		//     kept) -> the daemon re-checks and resumes it in place
+		//     (RepairResume); a paused WI has its clean_pause
+		//     cleared first so the in-place attach is not held back.
+		//  3. otherwise (paused) -> clear clean_pause on the hub; no daemon.
+		// end_pending (D2) is a distinct local state with no door of its own:
+		// the daemon retries its SessionEnd itself.
+		if wi.Status != api.StatusBlocked && localRepairPending(ctx, wi.ID) {
+			if wi.Status == api.StatusPaused {
+				if err := patchCleanPause(ctx, args[0], false); err != nil {
+					return err
+				}
+			}
+			raw, err := ctx.daemon().Resume(args[0], "")
+			if err != nil {
+				return err
+			}
+			ctx.finish(raw, func() {
+				fmt.Fprintf(ctx.Stdout, "resumed %s: the repair_pending work item was re-checked and continues in place with its kept session\n", args[0])
+			})
+			return nil
+		}
 		if wi.Status != api.StatusBlocked {
 			if err := patchCleanPause(ctx, args[0], false); err != nil {
 				return err
@@ -429,6 +456,14 @@ var cmdResume = &Command{
 			fmt.Fprintln(ctx.Stdout, "(its machine re-attaches on the next daemon start; a work item whose holder is gone moves with `pf takeover <id> --reason ...`)")
 			fmt.Fprintln(ctx.Stdout, "(a live holder daemon does NOT pick this up until its next start; to continue immediately use `pf takeover`)")
 			return nil
+		}
+		// The authorization-bearing step runs with the HUMAN's own api key
+		// (data plane, like `pf cancel`): the hub's resume-blocked door
+		// checks reporter / project maintainer / admin against the caller,
+		// and the daemon's machine key is not that caller. Only then does
+		// the local daemon claim and start the WI.
+		if _, err := ctx.aihub().ResumeBlockedWorkItem(args[0]); err != nil {
+			return err
 		}
 		raw, err := ctx.daemon().ResumeBlocked(args[0])
 		if err != nil {
@@ -442,16 +477,36 @@ var cmdResume = &Command{
 	},
 }
 
+// localRepairPending reports whether the local daemon holds wiID parked as
+// repair_pending. Any daemon failure (not running, wrong socket) is "no":
+// the plain paused path never needs the daemon.
+func localRepairPending(ctx *Context, wiID string) bool {
+	raw, err := ctx.daemon().Status()
+	if err != nil {
+		return false
+	}
+	var st StatusResponse
+	if json.Unmarshal(raw, &st) != nil {
+		return false
+	}
+	for _, j := range st.Jobs {
+		if j.WorkItemID == wiID && j.Status == "repair_pending" {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------------------------------------------------------------------------
 // wrap — wrap (or fail) a running WI via the daemon.
 // ---------------------------------------------------------------------------
 
 var cmdWrap = &Command{
 	Name:    "wrap",
-	Summary: "Wrap a running WI as terminal success (--fail for terminal failure)",
+	Summary: "Wrap a running WI as terminal success (--fail = the owner's failed verdict; to abandon a blocked WI use pf cancel)",
 	Usage:   "pf wrap <id> [--fail]",
 	Setup: func(fs *flag.FlagSet) {
-		fs.Bool("fail", false, "end the session with reason=fail instead of wrap")
+		fs.Bool("fail", false, "end the session with reason=fail instead of wrap (the owner's failed verdict; to abandon a blocked WI use pf cancel)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
@@ -460,6 +515,23 @@ var cmdWrap = &Command{
 		reason := "wrap"
 		if boolFlag(fs, "fail") {
 			reason = "fail"
+		}
+		// A WI parked blocked has no local job: `--fail` is the owner's
+		// terminate verdict, landed at the hub's terminate-blocked door with
+		// the HUMAN's own api key (reporter / maintainer / admin is checked
+		// against the person typing, not the daemon's machine key). No
+		// daemon step follows: the bounded close already dropped the job.
+		if reason == "fail" {
+			if wi, gerr := ctx.aihub().GetWorkItem(args[0]); gerr == nil && wi.Status == api.StatusBlocked {
+				raw, err := ctx.aihub().TerminateBlockedWorkItem(args[0])
+				if err != nil {
+					return err
+				}
+				ctx.finish(raw, func() {
+					fmt.Fprintf(ctx.Stdout, "%s requested for %s (the parked workflow was terminated at the hub)\n", reason, args[0])
+				})
+				return nil
+			}
 		}
 		raw, err := ctx.daemon().Wrap(args[0], reason)
 		if err != nil {

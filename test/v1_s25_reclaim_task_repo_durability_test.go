@@ -85,14 +85,13 @@ func TestV1S25ReclaimTaskRepoNotDurable(t *testing.T) {
 		t.Fatal("the capsule chain does not carry execution.json — the re-claim could not even restore the execution state")
 	}
 
-	// The human's half of the contract: unblock the bounded-fail verdict
-	// back into the queued pool, then re-submit (re-claim).
-	out := d.pf(t, "unblock", wi)
-	if !strings.Contains(out, "unblocked") {
-		t.Fatalf("unblock answer: %q", out)
+	// The human's half of the contract: continue the bounded-fail verdict
+	// (`pf resume` = the blocked door plus the synchronous re-claim;
+	// v2-converge §7).
+	out := d.pf(t, "resume", wi)
+	if !strings.Contains(out, "resumed") {
+		t.Fatalf("resume answer: %q", out)
 	}
-	inst.waitWIStatus(t, wi, "queued", 30*time.Second)
-	d.pf(t, "submit", wi)
 
 	// The re-claim quarantined the dead session's capsule and
 	// re-materialized a fresh one at the same path, with a FRESH clone

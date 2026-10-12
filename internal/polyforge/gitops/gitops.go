@@ -306,6 +306,18 @@ func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 	return localSHA, pushed, timings, perr
 }
 
+// Head answers the capsule's current HEAD commit SHA ("" with an error
+// for an unborn branch / unreadable repo). Read-only.
+func Head(o Opts) (string, error) {
+	release := Lock(o.WorkItemID)
+	defer release()
+	out, err := git(o.Env(), o.CapsuleDir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // nextSeq derives the next Polyforge-Seq trailer value from the capsule's
 // commit count (monotonic per WI, survives a lost state.json, and safe to
 // recompute: only a landed commit moves the count). An unborn branch (no

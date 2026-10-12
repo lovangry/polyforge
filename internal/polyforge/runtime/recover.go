@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/workflow"
@@ -110,8 +109,6 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		// commit+push the parked state — journal, step output and the blocked
 		// verdict together. The §6.4 owner moves (resume / wrap --fail) and
 		// every re-materialization read exactly this state.
-		r.killAgentTree(j)
-		commitDirty(r, j)
 		r.boundedFail(ctx, j, "workflow blocked: the owner holds the next move (resume / rewind / wrap --fail)")
 		return
 	}
@@ -451,31 +448,26 @@ func (r *Runtime) recoveryStabilityWindow() time.Duration {
 // "never a third relaunch" contract is preserved: restart sees blocked
 // and leaves the record untouched. RTFinished(blocked) follows — on
 // sendRelease, so a full observe channel defers rather than drops it
-// (NEW-2: every RTFinished is a terminal release). The parked capsule's
-// chain durability is the CALLER's seal (the blocked branch commits and
-// pushes before calling here — polyforge#116): this close itself
-// publishes nothing, exactly like before.
+// (NEW-2: every RTFinished is a terminal release). Before the verdict the
+// agent tree is killed and the dirty capsule committed+pushed best-effort
+// (polyforge#116: the parked verdict must reach the chain; v2-converge §6
+// bug 4: every branch, not just the blocked one). A SessionEnd the hub does
+// not acknowledge keeps the record end_pending and retries (§6 bug 5,
+// endpending.go) — the WI is never orphaned running at aihub.
 func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
-	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
-		SessionID: j.sessionID,
-		Status:    api.StatusBlocked,
-		Note:      detail,
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bounded-fail session-end failed (restart will reconcile): %v\n", j.wi, err)
+	// No writer may outlive the verdict, and the last local work must
+	// reach aihub before the WI is handed to its owner (v2-converge §6
+	// bug 4): every bounded-fail branch — missing capsule, storm guard,
+	// legacy-only refusal, budget exhaustion — kills the driver/agent tree
+	// and commits+pushes best-effort here, not in the callers. The head
+	// the capsule ends at rides the blocked verdict (cross-daemon continue
+	// check, §7).
+	r.killAgentTree(j)
+	head := ""
+	if dirExists(j.capsuleDir) {
+		head = commitDirty(r, j)
 	}
-	if err := j.transition(StateDone); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bounded fail could not reach DONE: %v\n", j.wi, err)
-	}
-	r.dropJob(j)
-	if err := r.persist(); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
-	}
-	r.sendRelease(protocol.RTMsg{
-		Kind:     protocol.RTFinished,
-		WorkItem: j.wi,
-		Reason:   protocol.FinishBlocked,
-		Detail:   detail,
-	})
+	r.finishBlocked(j, detail, head)
 	_ = ctx
 }
 
@@ -485,13 +477,14 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 // HEAD push), so the next boundary sees an honest remote state. Errors
 // are the caller's to log; the LOCAL commit is the durable half and it
 // stands on its own.
-func commitDirty(r *Runtime, j *job) {
+func commitDirty(r *Runtime, j *job) string {
 	// F3: the dead agent's live transcript rides this dirty commit too.
 	r.syncTranscriptBeforeSeal(j)
 	sha, _, _, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)
 	}
+	return sha
 }
 
 // killAgentTree tears the current agent's whole tree down through the six

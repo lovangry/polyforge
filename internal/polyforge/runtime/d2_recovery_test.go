@@ -1,0 +1,334 @@
+package runtime
+
+// D2 recovery-closure regressions (v2-converge §6 bugs 1/4/5, quarantine
+// atomicity, §7 cross-daemon continue guard).
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+)
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Bug 4: the legacy-only refusal branch (and every other boundedFail
+// caller) kills the live agent tree and commits+pushes the last local work
+// BEFORE the verdict, and the blocked verdict carries the pushed head.
+func TestBoundedFailKillsAgentAndPushesDirtyWork(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, hub, sp)
+	j := seedJob(r, "wi_d2_commit")
+	bare := initGitCapsule(t, j)
+	writeLegacyExecution(t, j.capsuleDir, "running")
+	h := installOldAgent(t, sp, j)
+	pid := h.PID()
+	if err := os.WriteFile(filepath.Join(j.capsuleDir, "last-work.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
+		t.Fatalf("expected RTFinished(blocked), got %+v", msg)
+	}
+	waitDead(t, pid)
+	if !bareHasMain(t, bare) {
+		t.Fatal("the dirty capsule must be pushed to aihub before the WI is blocked")
+	}
+	head, err := gitops.Head(j.git)
+	if err != nil || head == "" {
+		t.Fatalf("head: %q %v", head, err)
+	}
+	if got := hub.lastEnd().HeadSHA; got != head {
+		t.Fatalf("the blocked verdict must carry the sealed head %s, got %q", head, got)
+	}
+}
+
+// Bug 4, missing-capsule branch: no live driver may survive the verdict
+// (there is nothing to commit, and the commit step must not choke).
+func TestBoundedFailMissingCapsuleKillsAgent(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, hub, sp)
+	j := seedJob(r, "wi_d2_missing")
+	h := installOldAgent(t, sp, j)
+	pid := h.PID()
+	if err := os.RemoveAll(j.capsuleDir); err != nil {
+		t.Fatal(err)
+	}
+	r.recoverOp(context.Background(), j, "daemon_restart", "x")
+	if msg := recvRT(t, toOB); msg.Reason != protocol.FinishBlocked {
+		t.Fatalf("expected blocked, got %+v", msg)
+	}
+	waitDead(t, pid)
+	if hub.lastEnd().HeadSHA != "" {
+		t.Fatalf("no capsule, no head: %+v", hub.lastEnd())
+	}
+}
+
+func endPendingRuntime(t *testing.T, hub *fakeHub) (*Runtime, *job, chan protocol.RTMsg) {
+	t.Helper()
+	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	r.cfg.EndRetryBase = 10 * time.Millisecond
+	r.cfg.EndRetryMax = 20 * time.Millisecond
+	t.Cleanup(r.Close)
+	j := seedJob(r, "wi_d2_end")
+	hub.hold(j.wi, j.sessionID, api.StatusRunning)
+	if err := j.transition(StateRecovering); err != nil { // boundedFail's real entry state
+		t.Fatal(err)
+	}
+	return r, j, toOB
+}
+
+// Bug 5: a SessionEnd failure keeps the record end_pending (persisted with
+// the secret) and retries with backoff until the hub accepts; only then is
+// the record dropped.
+func TestBoundedFailSessionEndFailureKeepsRecordAndRetries(t *testing.T) {
+	hub := newFakeHub()
+	r, j, toOB := endPendingRuntime(t, hub)
+	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
+
+	r.boundedFail(context.Background(), j, "boom")
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
+		t.Fatalf("observe must be released blocked, got %+v", msg)
+	}
+	if r.jobOf(j.wi) == nil {
+		t.Fatal("an unacknowledged blocked close must keep the job record")
+	}
+	recs := loadRecords(t, r)
+	if len(recs) != 1 || recs[0].State != string(StateEndPending) || recs[0].SessionID != j.sessionID || recs[0].EndNote != "boom" {
+		t.Fatalf("the durable record must be end_pending carrying secret+note, got %+v", recs)
+	}
+	time.Sleep(60 * time.Millisecond) // a few failed retries
+	if r.jobOf(j.wi) == nil {
+		t.Fatal("record dropped while the hub is still unreachable")
+	}
+
+	hub.mu.Lock()
+	delete(hub.end, j.wi)
+	hub.mu.Unlock()
+	waitFor(t, "the retry to land the blocked close", func() bool { return r.jobOf(j.wi) == nil })
+	if hub.lastEnd().Status != api.StatusBlocked || hub.lastEnd().Note != "boom" {
+		t.Fatalf("retry must send the recorded verdict, got %+v", hub.lastEnd())
+	}
+	waitFor(t, "state.json to drop the record", func() bool { return len(loadRecords(t, r)) == 0 })
+}
+
+// Bug 5, daemon-start half: a restarted daemon retries an end_pending
+// record's close before anything else.
+func TestRestartRetriesEndPendingRecord(t *testing.T) {
+	hub := newFakeHub()
+	r, j, _ := endPendingRuntime(t, hub)
+	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
+	r.boundedFail(context.Background(), j, "boom")
+	r.Close()
+
+	// fresh daemon over the same DataDir, hub reachable again
+	r2, toOB2, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	r2.cfg = r.cfg
+	r2.statePath = r.statePath
+	r2.cfg.EndRetryBase = 10 * time.Millisecond
+	t.Cleanup(r2.Close)
+	hub.mu.Lock()
+	delete(hub.end, j.wi)
+	hub.mu.Unlock()
+	if err := r2.Restart(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_ = toOB2
+	if hub.endCount() != 1 || hub.lastEnd().Status != api.StatusBlocked {
+		t.Fatalf("restart must replay the blocked close, got %+v", hub.lastEnd())
+	}
+	if r2.jobOf(j.wi) != nil || len(loadRecords(t, r2)) != 0 {
+		t.Fatal("the settled end_pending record must be dropped")
+	}
+}
+
+// A close whose answer was lost (the hub already ended our session) is
+// settled by the verify fallback — never retried forever.
+func TestEndPendingSettlesWhenSessionNoLongerHoldsWI(t *testing.T) {
+	hub := newFakeHub()
+	r, j, _ := endPendingRuntime(t, hub)
+	hub.end[j.wi] = fmt.Errorf("answer lost (scripted)")
+	hub.mu.Lock()
+	hub.held[j.wi] = "" // the close landed server-side
+	hub.status[j.wi] = api.StatusBlocked
+	hub.mu.Unlock()
+	r.boundedFail(context.Background(), j, "boom")
+	if r.jobOf(j.wi) != nil {
+		t.Fatal("a session that no longer holds the WI settles the close")
+	}
+}
+
+// Bug 1: the clone-failure compensation is not one-shot — the claiming
+// journal entry stays, and the SessionEnd(blocked) is retried until it lands.
+func TestAbandonClaimRetriesSessionEnd(t *testing.T) {
+	hub := newFakeHub()
+	r, j, _ := endPendingRuntime(t, hub)
+	if err := r.noteClaiming(j.wi, j.sessionID, "k1"); err != nil {
+		t.Fatal(err)
+	}
+	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
+	orig := fmt.Errorf("capsule clone failed")
+	if got := r.abandonClaim(j, j.wi, orig, "clone"); got != orig {
+		t.Fatalf("the original error must be returned, got %v", got)
+	}
+	if _, ok := r.loadClaiming()[j.wi]; !ok {
+		t.Fatal("the journal entry must stay while the close is unacknowledged")
+	}
+	hub.mu.Lock()
+	delete(hub.end, j.wi)
+	hub.mu.Unlock()
+	waitFor(t, "the journal entry to clear", func() bool { _, ok := r.loadClaiming()[j.wi]; return !ok })
+	if hub.lastEnd().Status != api.StatusBlocked {
+		t.Fatalf("expected the blocked close, got %+v", hub.lastEnd())
+	}
+}
+
+// Quarantine is all-or-nothing: a failed worktree move puts the git-dir back.
+func TestQuarantineCapsuleRollsBackOnSecondMoveFailure(t *testing.T) {
+	base := t.TempDir()
+	capDir := filepath.Join(base, "capsules", "wi_q")
+	gitDir := filepath.Join(base, "git", "wi_q.git")
+	for _, d := range []string{capDir, gitDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orig := renameFn
+	defer func() { renameFn = orig }()
+	renameFn = func(from, to string) error {
+		if from == capDir {
+			return fmt.Errorf("injected EXDEV")
+		}
+		return os.Rename(from, to)
+	}
+	err := quarantineCapsule(capDir, gitDir)
+	if err == nil || !strings.Contains(err.Error(), "git-dir restored") {
+		t.Fatalf("expected a restored-failure error, got %v", err)
+	}
+	if !dirExists(gitDir) || !dirExists(capDir) {
+		t.Fatal("the scene must be whole again (git-dir back, worktree untouched)")
+	}
+	ents, _ := os.ReadDir(filepath.Dir(gitDir))
+	if len(ents) != 1 {
+		t.Fatalf("no quarantined leftovers expected, got %v", ents)
+	}
+
+	// and the success path still moves both under one timestamp
+	renameFn = os.Rename
+	if err := quarantineCapsule(capDir, gitDir); err != nil {
+		t.Fatal(err)
+	}
+	if dirExists(gitDir) || dirExists(capDir) {
+		t.Fatal("both must have moved aside")
+	}
+}
+
+// The restore itself failing is reported (split scene named, never silent).
+func TestQuarantineCapsuleReportsFailedRestore(t *testing.T) {
+	base := t.TempDir()
+	capDir := filepath.Join(base, "c")
+	gitDir := filepath.Join(base, "g")
+	_ = os.MkdirAll(capDir, 0o755)
+	_ = os.MkdirAll(gitDir, 0o755)
+	orig := renameFn
+	defer func() { renameFn = orig }()
+	renameFn = func(from, to string) error {
+		if from == capDir || strings.Contains(from, ".quarantined.") {
+			return fmt.Errorf("injected")
+		}
+		return os.Rename(from, to)
+	}
+	err := quarantineCapsule(capDir, gitDir)
+	if err == nil || !strings.Contains(err.Error(), "split the scene") {
+		t.Fatalf("expected the split-scene report, got %v", err)
+	}
+}
+
+// §7: a continue claimed by a DIFFERENT machine refuses a clone whose head
+// is not the sealing daemon's recorded head; the same machine, or a match,
+// proceeds.
+func TestVerifySealedHead(t *testing.T) {
+	hub := newFakeHub()
+	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	_ = toOB
+	j := seedJob(r, "wi_d2_head")
+	initGitCapsule(t, j)
+	head, err := gitops.Head(j.git)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		c       api.SessionClaim
+		wantErr bool
+	}{
+		{"no seal recorded", api.SessionClaim{}, false},
+		{"same machine is not gated", api.SessionClaim{SealedHead: "deadbeef", SealedMachine: "m-test"}, false},
+		{"other machine, head matches", api.SessionClaim{SealedHead: head, SealedMachine: "m-other"}, false},
+		{"other machine, stale clone", api.SessionClaim{SealedHead: "deadbeef", SealedMachine: "m-other"}, true},
+	}
+	for _, tc := range cases {
+		err := r.verifySealedHead(j, tc.c)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("%s: err=%v wantErr=%v", tc.name, err, tc.wantErr)
+		}
+		if err != nil && !strings.Contains(err.Error(), api.ErrDaemonSealedHeadMismatch) {
+			t.Fatalf("%s: the refusal must be typed %s, got %v", tc.name, api.ErrDaemonSealedHeadMismatch, err)
+		}
+	}
+}
+
+// D1 x D2: end_pending and repair_pending are distinct states. An
+// end_pending record whose capsule is gone is NOT parked repair_pending at
+// restart (its SessionEnd retry needs no capsule), RepairResume does not
+// hold it, and the retry still settles the close.
+func TestEndPendingIsNotRepairPending(t *testing.T) {
+	hub := newFakeHub()
+	r, j, _ := endPendingRuntime(t, hub)
+	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
+	r.boundedFail(context.Background(), j, "boom")
+	r.Close()
+	if j.capsuleDir != "" {
+		_ = os.RemoveAll(j.capsuleDir)
+	}
+
+	r2, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	r2.cfg = r.cfg
+	r2.statePath = r.statePath
+	r2.cfg.EndRetryBase = 10 * time.Millisecond
+	t.Cleanup(r2.Close)
+	hub.mu.Lock()
+	delete(hub.end, j.wi)
+	hub.mu.Unlock()
+	if err := r2.Restart(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if ji, ok := r2.Info(j.wi); ok && ji.RepairPending != "" {
+		t.Fatalf("an end_pending record must never be parked repair_pending, got %q", ji.RepairPending)
+	}
+	if held, _ := r2.RepairResume(context.Background(), j.wi); held {
+		t.Fatal("RepairResume must not hold an end_pending WI")
+	}
+	if hub.endCount() < 1 || hub.lastEnd().Status != api.StatusBlocked {
+		t.Fatalf("the blocked close must still be retried, got %+v", hub.lastEnd())
+	}
+}

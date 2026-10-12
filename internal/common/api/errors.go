@@ -129,6 +129,11 @@ const (
 	// item is parked repair_pending and its capsule directory is still
 	// missing; the detail names the path to restore. The session is kept.
 	ErrDaemonRepairPending = "DAEMON-517"
+	// ErrDaemonSealedHeadMismatch is the cross-daemon continue refusal
+	// (v2-converge §7): a blocked WI continued on a different daemon than
+	// the one that sealed it, whose aihub capsule head is not the head the
+	// sealing daemon recorded — the clone would be pre-blocked state.
+	ErrDaemonSealedHeadMismatch = "DAEMON-518"
 
 	// CAP — capsule lifecycle errors (03 §5.3)
 	ErrCapBadInput      = "CAP-400"

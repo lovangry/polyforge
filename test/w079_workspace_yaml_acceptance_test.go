@@ -638,12 +638,15 @@ func TestW079FixYamlAndReclaimIsClean(t *testing.T) {
 	// The operator fixes the yaml; the WI is re-claimed.
 	w079Yaml(t, ws, "projects:\n  e2e:\n    repos:\n      - name: w79src\n        path: .repo/w79src\nworkflow_defaults:\n  model_candidates: [w079-reclaimed]\n")
 	if status := inst.wiStatus(t, wi); status == "blocked" {
-		if out := d.pfWant(inst, -1, "unblock", wi); !strings.Contains(out, "unblocked") {
-			t.Fatalf("unblock answer: %q", out)
+		// continue = `pf resume` (the blocked door: hub resume-blocked +
+		// the daemon's synchronous re-claim; v2-converge §7).
+		if out := d.pfWant(inst, -1, "resume", wi); !strings.Contains(out, "resumed") {
+			t.Fatalf("resume answer: %q", out)
 		}
+	} else {
+		inst.waitWIStatus(t, wi, "queued", 30*time.Second)
+		d.pfWant(inst, -1, "submit", wi)
 	}
-	inst.waitWIStatus(t, wi, "queued", 30*time.Second)
-	d.pfWant(inst, -1, "submit", wi)
 	capDir := w079Capsule(ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113WaitCompleted(t, capDir, 240*time.Second)

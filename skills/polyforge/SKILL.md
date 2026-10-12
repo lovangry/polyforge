@@ -59,7 +59,7 @@ accepts an id.
 | show me this work item / 看看这个票 / 详情 | `verbs/file.md` (show) | AIHub |
 | what's ready / what can I claim today / show the queue / 今天有什么活 / 就绪队列 | `verbs/queue.md` | AIHub |
 | list work items / filter by status / 列一下所有票 / 按状态筛 | `verbs/queue.md` | AIHub |
-| cancel it / drop it / don't want it anymore / 不要了 / 取消这个票 / 作废 | `verbs/cancel.md` | AIHub |
+| cancel it / drop it / abandon it / don't want it anymore / 不要了 / 取消这个票 / 作废 / 放弃 | `verbs/cancel.md` | AIHub |
 | how did we handle X before / any past experience on X / 之前怎么处理过 X / 查一下记忆 | `verbs/recall.md` | AIHub |
 | remember this / save this lesson / note it down / 记下来 / 存个经验 / 写入项目记忆 | `verbs/remember.md` | AIHub |
 | run it / submit it / start this work item / execute / 跑起来 / 执行这个 WI / 提交执行 | `verbs/submit.md` | daemon |
@@ -68,7 +68,7 @@ accepts an id.
 | answer the question / reply to needs_input / 回答问题 / 它在问我 / 答一下 | `verbs/answer.md` | daemon |
 | run a batch / show the wave recommendation / confirm this batch / 跑一批 / 看看推荐哪批 / 确认这一波 | `verbs/batch-confirm.md` | daemon |
 | pause it / stop for now / hold on / 暂停 / 先停一下 / 挂起 | `verbs/pause.md` | daemon |
-| resume it / continue the paused one / 恢复执行 / 接着跑（已暂停的） | `verbs/resume.md` | daemon |
+| resume it / continue the paused or blocked one / 恢复执行 / 接着跑（已暂停或已阻塞的）/ 继续 | `verbs/resume.md` | daemon |
 | wrap it up / we're done / mark it failed / 收尾 / 完事了 / 判完成 / 判失败 | `verbs/wrap.md` | daemon |
 | ship it / push the wrapped commits to origin / deliver the branch / open the PR / 推上去 / 交付 | `verbs/ship.md` | daemon |
 | daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / switch mode / drain / shutdown / 升级前自检 / 启停 / 切换模式 / 优雅停机 | `verbs/ops.md` | daemon |
@@ -78,10 +78,13 @@ accepts an id.
 | help / what skills / usage / 速查 / 怎么用 | `verbs/help.md` | CLI |
 
 Disambiguation: "continue / go on" **mid-run** routes to `observe`, not
-`resume` — `resume` only reactivates a **paused** WI and is always a fresh
-claim. "Stop" of a whole work item routes to `pause` (reversible) or
-`wrap --fail` (terminal), never to `cancel` (which only applies to WIs with
-no active execution). "Ship / deliver / push it" routes to `ship` — the git
+`resume` — `resume` is "continue": it reactivates a **paused** WI or a
+**blocked** one (always a fresh claim). A blocked WI has exactly two human
+moves: continue = `resume`, abandon = `cancel` (there is no `unblock` verb;
+both are allowed to the task's reporter, a project maintainer or an admin).
+"Stop" of a running work item routes to `pause` (reversible) or
+`wrap --fail` (the owner's failed verdict), never to `cancel` (which only
+applies to WIs with no active execution — queued, paused or blocked). "Ship / deliver / push it" routes to `ship` — the git
 delivery of an already-closed WI's sealed commits — never to `submit`
 (which starts execution).
 

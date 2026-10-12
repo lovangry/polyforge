@@ -331,6 +331,18 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 	if j := r.jobOf(rec.WorkItemID); j != nil && j.liveAgent() {
 		return nil // already running under this daemon: not a restart case
 	}
+	// end_pending (v2-converge §6 bug 5): a bounded-fail whose
+	// SessionEnd(blocked) never reached the hub. The record carries the
+	// only copy of the session secret — retry the close now (and in the
+	// background) before anything else; never verify-and-guess. Distinct
+	// from repair_pending: the close needs no capsule, so a missing
+	// capsule never parks it.
+	if rec.State == string(StateEndPending) {
+		if j := r.jobOf(rec.WorkItemID); j != nil {
+			r.restartEndPending(j)
+		}
+		return nil
+	}
 	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
 	if err != nil {
 		// aihub unreachable for this WI: keep the record, try again on

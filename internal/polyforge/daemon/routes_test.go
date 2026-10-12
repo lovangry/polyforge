@@ -242,8 +242,10 @@ func TestResumeBlockedOwnerMove(t *testing.T) {
 	const wi = "wi_parked"
 	// The hub names the WI blocked with no session (the bounded close's
 	// shape — M2).
+	// The CLI has already landed the hub's resume-blocked door with the
+	// human's credential: the WI is queued when the daemon route runs.
 	td.hub.mu.Lock()
-	td.hub.status[wi] = api.StatusBlocked
+	td.hub.status[wi] = api.StatusQueued
 	td.hub.mu.Unlock()
 	mkBare(t, td.cfg.GitRemoteBase, wi)
 
@@ -262,11 +264,10 @@ func TestResumeBlockedOwnerMove(t *testing.T) {
 		t.Fatalf("resume-blocked answer = %+v, want resumed for %s", rr, wi)
 	}
 	td.waitLive(t, wi)
-	// The hub door landed exactly once (blocked → queued; the claim went
-	// live after it).
+	// The daemon must NOT call the hub's resume door with its machine key.
 	td.hub.mu.Lock()
-	if len(td.hub.resumeBlockeds) != 1 || td.hub.resumeBlockeds[0] != wi {
-		t.Fatalf("the hub resume door fired %v, want once for %s", td.hub.resumeBlockeds, wi)
+	if len(td.hub.resumeBlockeds) != 0 {
+		t.Fatalf("the daemon route fired the hub resume door %v; the human's CLI owns that call", td.hub.resumeBlockeds)
 	}
 	td.hub.mu.Unlock()
 
@@ -289,20 +290,14 @@ func TestTerminateBlockedOwnerVerdict(t *testing.T) {
 	td.hub.status[wi] = api.StatusBlocked
 	td.hub.mu.Unlock()
 
-	raw, err := td.client.Wrap(wi, "fail")
-	if err != nil {
-		t.Fatalf("wrap --fail on a parked workflow: %v", err)
-	}
-	var cr closeResponse
-	if err := json.Unmarshal(raw, &cr); err != nil {
-		t.Fatalf("wrap answer undecodable: %v", err)
-	}
-	if cr.Outcome != "terminated" || cr.Status != "failed" || cr.Reason != "failed" {
-		t.Fatalf("the terminate verdict answer = %+v, want terminated/failed", cr)
+	// `--fail` on a parked workflow is landed by the CLI with the human's
+	// key; the daemon route refuses with a hint and never calls the door.
+	if _, err := td.client.Wrap(wi, "fail"); err == nil || !strings.Contains(err.Error(), "your own credential") {
+		t.Fatalf("daemon wrap --fail on a parked workflow must refuse with the CLI hint, got %v", err)
 	}
 	td.hub.mu.Lock()
-	if len(td.hub.terminateBlockeds) != 1 || td.hub.terminateBlockeds[0] != wi {
-		t.Fatalf("the hub terminate door fired %v, want once for %s", td.hub.terminateBlockeds, wi)
+	if len(td.hub.terminateBlockeds) != 0 {
+		t.Fatalf("the daemon fired the hub terminate door %v with its machine key", td.hub.terminateBlockeds)
 	}
 	td.hub.mu.Unlock()
 

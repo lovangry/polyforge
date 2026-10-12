@@ -538,7 +538,7 @@ func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 
 var cmdCancel = &Command{
 	Name:    "cancel",
-	Summary: "Cancel a queued/paused/blocked work item (no live session)",
+	Summary: "Cancel (abandon) a queued/paused/blocked work item (no live session)",
 	Usage:   "pf cancel <id>",
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -553,37 +553,6 @@ var cmdCancel = &Command{
 			var wi api.WorkItem
 			if err := json.Unmarshal(raw, &wi); err == nil {
 				fmt.Fprintf(ctx.Stdout, "cancelled %s (status %s)\n", wi.Slug, wi.Status)
-			}
-		})
-		return nil
-	},
-}
-
-// ---------------------------------------------------------------------------
-// unblock — the blocked state's exit door (v1.5 review Finding 3, direct
-// to aihub): returns a bounded-fail verdict to the queued pool. The
-// daemon needs no runtime change — a queued WI is claimable again
-// through the ordinary drain/submit flow. Authorization mirrors
-// force-takeover (admin or project maintainer).
-// ---------------------------------------------------------------------------
-
-var cmdUnblock = &Command{
-	Name:    "unblock",
-	Summary: "Return a blocked WI to the queued pool (the bounded-fail exit door; admin or maintainer)",
-	Usage:   "pf unblock <id>",
-	Setup:   func(fs *flag.FlagSet) {},
-	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		if len(args) != 1 {
-			return fmt.Errorf("unblock: expected exactly one work item id")
-		}
-		raw, err := ctx.aihub().UnblockWorkItem(args[0])
-		if err != nil {
-			return err
-		}
-		ctx.finish(raw, func() {
-			var wi api.WorkItem
-			if err := json.Unmarshal(raw, &wi); err == nil {
-				fmt.Fprintf(ctx.Stdout, "unblocked %s (status %s; claimable again)\n", wi.Slug, wi.Status)
 			}
 		})
 		return nil
