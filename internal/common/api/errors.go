@@ -120,6 +120,11 @@ const (
 	// typed error instead of silently skipping the record.
 	ErrDaemonShipLedger = "DAEMON-514"
 	ErrDaemonInternal   = "DAEMON-500"
+	// ErrDaemonCapsuleClone is the re-claim clone refusal: the capsule
+	// clone failed for a work item that has published progress (or whose
+	// published state cannot be determined), so a local init — which
+	// would restart the workflow from step 1 — is refused.
+	ErrDaemonCapsuleClone = "DAEMON-516"
 
 	// CAP — capsule lifecycle errors (03 §5.3)
 	ErrCapBadInput      = "CAP-400"
