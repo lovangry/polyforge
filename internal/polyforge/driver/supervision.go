@@ -146,13 +146,15 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 		switch {
 		case hostPatterns.MatchString(text):
 			return FailExitHost, ee.ExitCode, ee.Error()
-		case ee.TurnError || modelPatterns.MatchString(text):
-			return FailExitModel, ee.ExitCode, ee.Error()
 		case ee.TurnOK && ee.ExitCode == 0 && ee.Signal == "":
 			// the turn ended normally and the process then exited CLEANLY
 			// with no result: the agent stopped without delivering (a kill
-			// or crash after an ok turn is still exit_other)
+			// or crash after an ok turn is still exit_other). Evaluated
+			// before any text match: leftover stderr must never turn a
+			// clean stop into a model fault that burns a candidate.
 			return FailEndedWithoutResult, ee.ExitCode, ee.Error()
+		case ee.TurnError || modelPatterns.MatchString(text):
+			return FailExitModel, ee.ExitCode, ee.Error()
 		default:
 			return FailExitOther, ee.ExitCode, ee.Error()
 		}
@@ -161,6 +163,12 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 	// reading the drop, ...). Host-class when the OS says so.
 	if isHostError(err) {
 		return FailExitHost, -1, err.Error()
+	}
+	// A harness that died at startup never read its prompt (EPIPE on the
+	// write); the error carries its stderr, and a model-class text there
+	// advances the candidate chain (F4).
+	if modelPatterns.MatchString(err.Error()) {
+		return FailExitModel, -1, err.Error()
 	}
 	return FailExitOther, -1, err.Error()
 }
@@ -476,6 +484,25 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 		dec.Fresh = dec.Count >= 2 // 1st retry resumes the transcript, 2nd+ starts fresh
 	}
 	return dec
+}
+
+// applyRejectEscalatedLocked counts one envelope-rejection escalation
+// (a driver relaunch) in the step's persisted ledger; the bound blocks.
+func (d *Driver) applyRejectEscalatedLocked(req TransitionRequest, info *appliedInfo) error {
+	if err := d.requireRunningStep(req.StepID); err != nil {
+		return err
+	}
+	st := d.exec.Steps[req.StepID]
+	if st.Supervision == nil {
+		st.Supervision = &capsule.StepSupervision{}
+	}
+	st.Supervision.RejectRelaunches++
+	if st.Supervision.RejectRelaunches >= maxRejectRelaunches {
+		d.exec.WorkflowStatus = StatusBlocked
+		d.exec.BlockedReason = fmt.Sprintf("step %s: the result envelope was rejected through %d driver relaunches (bound %d): %s",
+			req.StepID, st.Supervision.RejectRelaunches, maxRejectRelaunches, req.Reason)
+	}
+	return nil
 }
 
 // applyStepFailedLocked records one failed dispatch: the attempt (with

@@ -64,7 +64,7 @@ type Command struct {
 // commands is the full registry (help grouping is per-command metadata,
 // Command.Group, not position): the 12 routing verbs first — 5 direct
 // to aihub (file, queue, cancel, recall, remember; the blocked exits are
-// `resume` = continue and `cancel` = abandon, v2-converge §7) + 7 on the daemon UDS face (submit, observe,
+// `resume` = continue and `cancel` = abandon, v2-converge §7) + 7 on the daemon UDS face (submit, watch,
 // answer, pause, resume, wrap, ops) — then ship (the wrap→git
 // delivery bridge, daemon face), then the management face M1–M5, then the
 // machine health face (doctor, #113), then the daemon

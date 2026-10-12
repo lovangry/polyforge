@@ -121,6 +121,10 @@ func TestClassifyWaitFailure(t *testing.T) {
 		{"harness-reported ENOSPC", &ExitedError{ExitCode: 1, LastError: "write: no space left on device"}, FailExitHost},
 		{"harness-reported EACCES", &ExitedError{ExitCode: 1, LastError: "open /x: permission denied"}, FailExitHost},
 		{"host outranks a model-looking error turn", &ExitedError{ExitCode: 1, TurnError: true, LastError: "ENOSPC: no space left"}, FailExitHost},
+		{"startup death: prompt write EPIPE carrying a model stderr", errors.New(`runtime: initial prompt injection failed (process torn down): write |1: broken pipe; harness stderr: Error: model "x/y" not found`), FailExitModel},
+		{"startup death: 401 on stderr", errors.New("runtime: initial prompt injection failed (process torn down): broken pipe; harness stderr: 401 Unauthorized"), FailExitModel},
+		{"startup death with no explanation", errors.New("runtime: initial prompt injection failed (process torn down): broken pipe"), FailExitOther},
+		{"stale model text cannot taint a clean ok-turn exit", &ExitedError{ExitCode: 0, TurnOK: true, LastError: "rate limit 429 (earlier, retried)"}, FailEndedWithoutResult},
 		{"plain crash", &ExitedError{ExitCode: 101}, FailExitOther},
 		{"operator kill", &ExitedError{ExitCode: -1, Signal: "killed"}, FailExitOther},
 		{"driver's own ENOSPC", fmt.Errorf("staging: %w", syscall.ENOSPC), FailExitHost},
@@ -816,5 +820,19 @@ func TestRetryPromptNamesEndedWithoutResult(t *testing.T) {
 	p := promptParts{PriorEndedWithoutResult: true}
 	if out := assembleStepPrompt(p); !strings.Contains(out, "ended without you writing the result envelope") {
 		t.Fatalf("retry prompt must tell the agent: %q", out)
+	}
+}
+
+func TestStartupDeathWithModelStderrAdvancesCandidate(t *testing.T) {
+	env := newSupEnv(t, nil, chain("s", "a", "b"))
+	env.sp.script = []fakeEntry{
+		{spawnErr: errors.New(`runtime: initial prompt injection failed (process torn down): write |1: broken pipe; harness stderr: Error: model "a" not found`)},
+		done(`{"ok":true}`),
+	}
+	if err := env.d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if m := env.models(); len(m) != 2 || m[0] != "a" || m[1] != "b" {
+		t.Fatalf("models %v, want a then b (a startup model fault advances the candidate)", m)
 	}
 }

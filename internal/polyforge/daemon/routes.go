@@ -489,6 +489,10 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
 		return
 	}
+	if ji.VerifyPending {
+		writeErr(w, api.ErrDaemonConflict, wi+" is verify_pending — the daemon is still retrying its session verify with aihub; retry shortly")
+		return
+	}
 	if ji.RepairPending != "" {
 		writeErr(w, api.ErrDaemonConflict, wi+" is parked repair_pending — fix the cause and `pf resume "+wi+"`, or give it up with `pf cancel "+wi+"` / `pf wrap --fail "+wi+"`")
 		return
@@ -616,6 +620,10 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			// reason kind alongside.
 			sj.Status = "repair_pending"
 			sj.RepairReason = ji.RepairPending
+		}
+		if ji.VerifyPending {
+			// restart verify could not reach aihub: retried with backoff
+			sj.Status = "verify_pending"
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID

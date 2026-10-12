@@ -320,6 +320,11 @@ type job struct {
 	// until the next start or `pf resume` re-checks it. Orthogonal to
 	// state (the pre-park state is what the in-place resume continues).
 	repairPending string
+	// verifyPending marks a record whose restart SessionVerify could not
+	// reach aihub: it keeps its place (no agent yet) while the daemon
+	// retries the verify with backoff, then proceeds through restartOne.
+	// In-memory only — a daemon restart re-verifies everything anyway.
+	verifyPending bool
 	// endNote/endHead: the pending SessionEnd(blocked) verdict of an
 	// end_pending job (see StateEndPending).
 	endNote string

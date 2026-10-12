@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -440,6 +441,46 @@ func TestRestartKeepsRecordWhenAihubUnreachable(t *testing.T) {
 		t.Fatal("no verdict ⇒ no spawn")
 	}
 	_ = killFn(-pid, 9)
+}
+
+// aihub down at boot: the record stays verify_pending (no agent, no
+// verdict guessed), the daemon retries the verify with backoff in-process,
+// and once aihub answers the record proceeds through restartOne (here: the
+// hub says wrapped, so the record is dropped) without a daemon restart.
+func TestRestartVerifyRetriesUntilAihubComesUp(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, hub, sp)
+	wi := "wi_verify_retry"
+	hub.lookupErr[wi] = errLookupBoom
+	pid, startedAt := spawnSleeper(t, wi)
+	rec := matrixRecord(r, wi, pid, startedAt)
+	writeStateFile(t, r, []*jobRecord{rec})
+
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	ji, ok := r.Info(wi)
+	if !ok || !ji.VerifyPending {
+		t.Fatalf("an unverifiable record must be verify_pending, got %+v ok=%v", ji, ok)
+	}
+	time.Sleep(60 * time.Millisecond) // a few failed retries
+	if _, ok := r.Info(wi); !ok {
+		t.Fatal("record dropped while aihub is still down")
+	}
+
+	hub.mu.Lock()
+	delete(hub.lookupErr, wi)
+	hub.mu.Unlock()
+	hub.hold(wi, rec.SessionID, api.StatusWrapped)
+	waitFor(t, "the retried verify to settle the record", func() bool {
+		_, ok := r.Info(wi)
+		return !ok
+	})
+	waitDead(t, pid)
+	if sp.callCount() != 0 {
+		t.Fatal("a terminal verdict must not spawn")
+	}
 }
 
 // A blocked verdict reaps the crash orphans named only by the spawn

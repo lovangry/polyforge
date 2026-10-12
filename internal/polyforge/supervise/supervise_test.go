@@ -413,3 +413,21 @@ func TestSummarizeTool(t *testing.T) {
 		}
 	}
 }
+
+func TestNewModelActivityClearsStaleLastError(t *testing.T) {
+	c := &fixClock{now: time.Unix(1000, 0)}
+	tr := newTrackerAt(c, Thresholds{})
+	tr.ErrorSeen("429 rate limit (retried)")
+	if tr.Snapshot(c.now).LastError == "" {
+		t.Fatal("error must be recorded")
+	}
+	tr.WaitingModel()
+	if got := tr.Snapshot(c.now).LastError; got != "" {
+		t.Fatalf("a new turn must clear the stale error, got %q", got)
+	}
+	tr.ErrorSeen("again")
+	tr.ModelOutput(OutputThinking)
+	if got := tr.Snapshot(c.now).LastError; got != "" {
+		t.Fatalf("new model output must clear the stale error, got %q", got)
+	}
+}

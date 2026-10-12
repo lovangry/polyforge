@@ -133,6 +133,7 @@ func (t *Tracker) WaitingModel() {
 	t.turnEnded = false
 	t.turnErr = false
 	t.turnErrText = ""
+	t.lastError = "" // stale evidence of an earlier turn must not outlive it
 }
 
 // ModelOutput implements Sink.
@@ -143,7 +144,8 @@ func (t *Tracker) ModelOutput(OutputKind) {
 	t.workLocked()
 	t.lastOutput = now
 	t.turnErr = false // the harness produced more output: it went on
-	if !t.waiting {   // output without a seen turn_start: still a model phase
+	t.lastError = ""
+	if !t.waiting { // output without a seen turn_start: still a model phase
 		t.waiting = true
 		t.waitingSince = now
 	}

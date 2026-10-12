@@ -405,6 +405,20 @@ func (d *Driver) Run(ctx context.Context) error {
 						"detail": "persistent envelope rejection: the result contract is broken, not the model; reported to the owner",
 					})
 				}
+				// the in-memory counter dies with this driver: persist the
+				// escalation so a relaunch loop is bounded (the third one
+				// blocks the step instead of relaunching)
+				if err := d.transition(TransitionRequest{
+					Kind: TransRejectEscalated, StepID: stepID, SpawnN: n, Reason: verr.Error(),
+				}); err != nil {
+					return fmt.Errorf("driver: step %s rejection escalation record failed: %w", stepID, err)
+				}
+				d.mu.Lock()
+				blocked := d.exec.WorkflowStatus == StatusBlocked
+				d.mu.Unlock()
+				if blocked {
+					return nil
+				}
 				return fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d): %w",
 					stepID, n, count, maxEnvelopeRejects, verr)
 			}
