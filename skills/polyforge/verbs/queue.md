@@ -51,7 +51,7 @@ paste the CLI's terminal table (its GOAL column is width-truncated). Instead:
 
 | Code | When | What to tell the user |
 |---|---|---|
-| `CORE-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
+| `AUTH-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
 | `CORE-400` | Bad filter value | A filter flag is malformed — read `detail` and fix the flag. |
 | `CORE-404` | Unknown project | No such project (or no access to it) — that is aihub's own answer for an explicit `--project`; read-only queries are never locally rejected. |
 | (no code) `queue: --project is required — no [workspace] mapping` | No `--project` and no mapping configured | Add a `[workspace."<path>"]` section to cli.toml (`pf doctor` checks the mapping) or pass `--project P`. |

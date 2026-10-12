@@ -51,7 +51,7 @@ truncated regardless of `--max-bytes`:
 
 | Code | When | What to tell the user |
 |---|---|---|
-| `CORE-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / the config's `api_key`. |
+| `AUTH-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / the config's `api_key`. |
 | `MEM-404` | Unknown or invisible memory id | No such memory (or it is not visible to you) — the id comes from a `recall` hit (`items[].id`). |
 | `MEM-500` | The memory store failed the read | Nothing was shown — retry; if it persists the server's memory store is unhealthy. |
 

@@ -2,7 +2,7 @@
 
 Execution-plane verb with two doors; the hub status of the work item picks
 the door. This is the human "continue" (the "abandon" of a blocked or paused
-work item is `cancel`; the separate `unblock` verb no longer exists). The
+work item is `cancel`). The
 blocked door is open to the task's reporter, a project maintainer or an
 admin.
 
@@ -74,8 +74,7 @@ work item stays parked. To give up instead: `pf cancel <id>` or
   continue it / bring it back / pick it up again
 - 中文: 恢复执行 / 继续 / 把暂停的那个恢复 / 阻塞了继续跑 / 重新跑起来
 
-"Unblock it" and "give up on it" are not this verb's second spelling:
-continue is `resume`; abandon is `cancel`.
+Continue is `resume`; abandon is `cancel`.
 
 ## Command
 
@@ -92,7 +91,7 @@ refused before anything else happens.
 |---|---|---|
 | `CORE-404` | Unknown or invisible id (CLI precheck) | No such work item — check the `wi_` id. |
 | (no code) `submit: <id> is terminal (<status>)` | The work item is wrapped/failed/cancelled | A finished work item cannot be resumed — file a new one. |
-| `DAEMON-409` | The work item is already active or queued on this daemon | Observe to see the running attempt. |
+| `DAEMON-409` | The work item is already active or queued on this daemon | `pf watch <id> --once` shows the running attempt. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | Graceful shutdown in progress | Wait for restart, then resume. |
 | `AUTH-403` (from the resume door) | The caller is not the work item's reporter, a project maintainer or an admin | Ask the task owner or a maintainer to continue it. |
 | `DAEMON-517` | The work item is parked `repair_pending` on this daemon (restart found its capsule missing) and the capsule is still missing | Restore the capsule directory named in the detail (the session is kept), then `pf resume` again; or give up with `pf cancel <id>`. |
@@ -100,12 +99,12 @@ refused before anything else happens.
 | `DAEMON-516` | The claim behind the resume could not clone the capsule for a work item with published progress; a local init would restart the workflow at step 1, so it is refused and the claim returns to blocked | Fix aihub reachability / credentials, then `pf resume` again. |
 | `DAEMON-518` | A different daemon than the sealing one claimed the continue and the aihub capsule head is not the sealed head | Continue it on the machine that sealed it, or abandon with `pf cancel <id>`. |
 | `CORE-409 NOT_BLOCKED` | The resume door on a work item that is no longer blocked | The state moved — check `pf queue`/`pf watch <id> --once`; a paused WI unpauses with this same verb. |
-| `CORE-409 NOT_CLAIMABLE` (from the resume door) | The blocked WI still carries a session (a half-settled close) | Nobody may resume it until the holder settles — check the holder daemon or take over as admin. |
-| `CORE-404` (from the resume door, on claim) | Another machine claimed the work item between the door and the claim | It resumed elsewhere — observe there. |
+| `CORE-409 NOT_CLAIMABLE` (from the resume door) | The blocked WI still carries a session (a half-settled close) | Nobody may resume it until the holder settles — check the holder daemon, or an admin/maintainer ends the session with `pf ops end-session`. |
+| `CORE-404` (from the resume door, on claim) | Another machine claimed the work item between the door and the claim | It resumed elsewhere — watch it there. |
 | `dial unix …` | Daemon not running | The blocked-door resume re-establishes execution, so a daemon must be involved — start the daemon or check `--socket`. |
 
 Do not route "continue / go on" of a **running** work item here — that is
-`observe`. The §6.4 sibling moves of Door 2 (rewind to a step, terminate
+`watch`. The §6.4 sibling moves of Door 2 (rewind to a step, terminate
 the WI) are not exposed on this verb: `pf cancel <id>` abandons a blocked
 work item, and `pf wrap --fail <id>` records the owner's failed verdict.
 

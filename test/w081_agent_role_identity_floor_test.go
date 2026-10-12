@@ -76,7 +76,7 @@ func TestW081FloorRetiredWatchLaneIsGone(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "skills", "polyforge", "scripts", "watch.sh")); err == nil {
 		t.Fatal("skills/polyforge/scripts/watch.sh must be deleted")
 	}
-	for _, rel := range []string{"SKILL.md", "verbs/submit.md", "verbs/resume.md", "verbs/observe.md", "verbs/doctor.md", "verbs/help.md", "verbs/init.md"} {
+	for _, rel := range []string{"SKILL.md", "verbs/submit.md", "verbs/resume.md", "verbs/watch.md", "verbs/doctor.md", "verbs/help.md", "verbs/init.md"} {
 		raw, err := os.ReadFile(filepath.Join(root, "skills", "polyforge", filepath.FromSlash(rel)))
 		if err != nil {
 			t.Fatal(err)
