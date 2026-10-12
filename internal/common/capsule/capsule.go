@@ -161,6 +161,10 @@ type Execution struct {
 	BudgetConsumed Budget           `json:"budget_consumed"`
 	UpdatedAt      string           `json:"updated_at"`
 	Version        int64            `json:"version"`
+	// BlockedReason names why the driver parked the workflow blocked on
+	// its own authority (host-class fault, failure counter at its bound);
+	// empty when blocked on an honest incomplete result or not blocked.
+	BlockedReason string `json:"blocked_reason,omitempty"`
 }
 
 // Step statuses.
@@ -189,7 +193,33 @@ type Step struct {
 	AnswerBase         int              `json:"answer_base,omitempty"`
 	PendingQuestion    *PendingQuestion `json:"pending_question,omitempty"`
 	PendingRewindInput *RewindInput     `json:"pending_rewind_input,omitempty"`
+	// Supervision is the step's failure ledger and relaxed supervision
+	// thresholds (v2-converge 2.3/2.4): execution.json is the single
+	// authority for them, so a restart resumes the same counts.
+	Supervision *StepSupervision `json:"supervision,omitempty"`
 }
+
+// StepSupervision is one step's driver-owned supervision state.
+type StepSupervision struct {
+	// FailureCount counts failed dispatches since the last reset (gate
+	// rewind into the step, switch to a new candidate, human continue).
+	FailureCount int `json:"failure_count,omitempty"`
+	// LongTaskTimeouts counts step_timeout_long_task verdicts since the
+	// last reset; the second one blocks the step.
+	LongTaskTimeouts int `json:"long_task_timeouts,omitempty"`
+	// RelaxedToolMs / RelaxedWallMs are the relaxed Y and T (each
+	// relaxation doubles); zero = never relaxed.
+	RelaxedToolMs int64 `json:"relaxed_tool_ms,omitempty"`
+	RelaxedWallMs int64 `json:"relaxed_wall_ms,omitempty"`
+	// NextDispatch shapes the next dispatch after a failure: "" resumes
+	// the transcript, "fresh" starts a new conversation with the previous
+	// transcript as read-only reference. Cleared by the next step_start.
+	NextDispatch string `json:"next_dispatch,omitempty"`
+}
+
+// NextDispatchFresh is the StepSupervision.NextDispatch value that
+// orders a fresh conversation.
+const NextDispatchFresh = "fresh"
 
 type Attempt struct {
 	Cause          string          `json:"cause"`
@@ -207,6 +237,11 @@ type Attempt struct {
 	// AcceptedResultID is the R13 envelope result_id committed at the
 	// R14 commit point — populated only for accepted step results.
 	AcceptedResultID string `json:"accepted_result_id,omitempty"`
+	// FailureCause is the supervision sub-class of an infra_failure
+	// attempt (harness_silent, model_error, model_hung, tool_hung,
+	// step_timeout_long_task, step_timeout_slow_model, exit_model_class,
+	// exit_host_class, exit_other, driver_stalled, daemon_restart).
+	FailureCause string `json:"failure_cause,omitempty"`
 }
 
 type Budget struct {
