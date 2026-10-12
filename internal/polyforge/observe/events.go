@@ -88,7 +88,7 @@ const (
 	// session-verify could not reach aihub. Log-only by contract — no
 	// action is ever taken on a transport error; the retry is bounded.
 	EvSessionVerifyFailed = "session_verify_failed"
-	// EvSubmitRejected (v2 §5): an accepted submit's StartIntent failed at
+	// EvSubmitRejected (v2 §5): an accepted submit's runtime Start failed at
 	// dispatch (live or replayed after a restart); body carries the error,
 	// intent and the entry's submitted_at/origin. The submit was answered
 	// `accepted` earlier, so this durable event is how watchers learn it

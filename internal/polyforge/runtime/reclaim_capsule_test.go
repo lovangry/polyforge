@@ -132,18 +132,27 @@ func TestPrepareCapsuleCloneFailurePublishedRefusesInit(t *testing.T) {
 	}
 }
 
-// Any clone failure (transport error, absent repo) is a typed refusal.
+// Any clone failure (transport error, absent repo) is a typed refusal:
+// aihub creates the bare repo at claim, so "nothing published" is never
+// inferred from a failed clone.
 func TestPrepareCapsuleCloneFailureRefusesInit(t *testing.T) {
-	r := &Runtime{}
-	j := reclaimJob(t, "wi_clone_unknown", "fp")
-	j.git.RemoteURL = "http://127.0.0.1:1/wi.git"
-	err := r.prepareCapsule(j)
-	var ae *api.Error
-	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonCapsuleClone {
-		t.Fatalf("want typed %s error, got %T: %v", api.ErrDaemonCapsuleClone, err, err)
-	}
-	if dirExists(j.capsuleDir) {
-		t.Fatal("no capsule may be initialised on an undeterminable remote")
+	for name, remote := range map[string]string{
+		"transport": "http://127.0.0.1:1/wi.git",
+		"absent":    filepath.Join(t.TempDir(), "absent.git"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &Runtime{}
+			j := reclaimJob(t, "wi_clone_"+name, "fp")
+			j.git.RemoteURL = remote
+			err := r.prepareCapsule(j)
+			var ae *api.Error
+			if !errors.As(err, &ae) || ae.Code != api.ErrDaemonCapsuleClone {
+				t.Fatalf("want typed %s error, got %T: %v", api.ErrDaemonCapsuleClone, err, err)
+			}
+			if dirExists(j.capsuleDir) {
+				t.Fatal("no capsule may be initialised on a failed clone")
+			}
+		})
 	}
 }
 

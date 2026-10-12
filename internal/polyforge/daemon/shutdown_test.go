@@ -65,8 +65,8 @@ func TestShutdownSequence(t *testing.T) {
 
 // TestRestartWiring: a recorded job whose aihub verdict is running is
 // recovered at daemon start (transcript resume through the recovery
-// engine) and re-attached to a fresh monitor — the observe route
-// answers for it.
+// engine) and re-attached to a fresh monitor — the observe
+// lane reports it.
 func TestRestartWiring(t *testing.T) {
 	setGitIdentity(t)
 	dir := t.TempDir()

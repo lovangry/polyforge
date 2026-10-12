@@ -14,7 +14,7 @@ package git
 //     sets; the default matches capsule.MaxBlobBytes);
 //   - the session-fingerprint push option must be present and equal
 //     PF_EXPECTED_FINGERPRINT whenever the push came through the proxy,
-//     which sets that variable (session fencing backup layer: the proxy
+//     which sets that variable (session fencing: the proxy
 //     derives it from the session the Basic credential authenticated
 //     against, so a superseded session's fingerprint can never push even
 //     with a leaked secret). A direct local push with no
@@ -49,7 +49,7 @@ TRAILER="${GIT_PF_SEQ_TRAILER:-Polyforge-Seq}"
 zero=0000000000000000000000000000000000000000
 reject() { echo "aihub: $*" >&2; exit 1; }
 
-# Session fencing backup layer (v1.5 §1.6): the proxy exports
+# Session fencing (v1.5 §1.6): the proxy exports
 # PF_EXPECTED_FINGERPRINT — the public session fingerprint the Basic
 # credential authenticated against — and git exposes the push's options
 # as GIT_PUSH_OPTION_COUNT + GIT_PUSH_OPTION_0..N (only when the repo

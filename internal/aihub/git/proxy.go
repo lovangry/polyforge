@@ -73,8 +73,9 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Basic auth against the session (v1.5 §1.6): the password is the
-	// session secret. The returned handle is the push-option backup
-	// layer's expected value: the session's PUBLIC fingerprint. It rides the
+	// session secret. The returned handle is the push-option fence's
+	// expected value (REQUIRED on every proxied push): the session's PUBLIC
+	// fingerprint. It rides the
 	// CGI environment as PF_EXPECTED_FINGERPRINT so the pre-receive hook
 	// can compare it with the push's --push-option=session-fingerprint=<fp>
 	// (http-backend passes its env through to receive-pack and thus to the

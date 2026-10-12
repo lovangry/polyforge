@@ -45,7 +45,7 @@ type InputRef struct {
 // UnmarshalYAML accepts the mapping form ({artifact: path}) and the
 // plain scalar form (a bare path): the read surface is deliberately
 // loose about spelling and strict about content — the path rules are
-// enforced after parse (ValidateDriverWorkflow).
+// enforced after parse (validateWorkflow).
 func (r *InputRef) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind == yaml.ScalarNode {
 		r.Artifact = strings.TrimSpace(node.Value)
@@ -150,7 +150,7 @@ func LoadWorkflow(bundleDir string) (*Workflow, error) {
 
 // parseWorkflow parses one frontmatter block, filling the defaults: context_policy inherit, rewind bounds
 // 4/2, workflow-level default model candidates. Judging the filled
-// values is ValidateDriverWorkflow's job.
+// values is validateWorkflow's job.
 func parseWorkflow(front []byte) (*Workflow, error) {
 	var doc extDoc
 	if err := yaml.Unmarshal(front, &doc); err != nil {
@@ -205,7 +205,7 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 	return wf, nil
 }
 
-// ValidateDriverWorkflow refuses what the spawn adapter cannot honor:
+// validateWorkflow refuses what the spawn adapter cannot honor:
 // missing/duplicate step ids, context policies outside the closed set
 // (every step carries one after parseWorkflow — the inherit
 // default), gate steps that are not fresh (a gate must judge on its
