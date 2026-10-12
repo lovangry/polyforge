@@ -432,7 +432,7 @@ func (u *v1Install) newWI(t *testing.T, goal string, actions, resumeActions []ma
 		Project:    v1Project,
 		Goal:       goal,
 		BundleName: strPtr("quick-fix"),
-		Attrs:      map[string]any{"requires_human_session": false},
+		Attrs:      nil,
 	})
 	if err != nil {
 		t.Fatalf("create work item: %v", err)
@@ -1696,4 +1696,18 @@ func restartSameDaemon(t *testing.T, d *v1Daemon, logName string) *v1Daemon {
 	t.Cleanup(func() { d2.stop() })
 	d2.start()
 	return d2
+}
+
+// listWorkItems reads GET /api/v1/work-items through the raw client and
+// decodes the items (test-only; the CLI itself consumes the raw body).
+func listWorkItems(inst *v1Install, project, status string) ([]api.WorkItem, error) {
+	raw, err := inst.client.ListWorkItemsRaw(project, status, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out api.ListResponse[api.WorkItem]
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
 }

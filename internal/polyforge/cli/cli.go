@@ -90,7 +90,6 @@ var commands = []*Command{
 	cmdMachines,
 	cmdProjects,
 	cmdBackup,
-	cmdRotateSecret,
 	cmdDoctor,
 	cmdDaemon,
 }

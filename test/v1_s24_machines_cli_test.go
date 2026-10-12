@@ -60,9 +60,13 @@ func TestV1S24MachinesListCLI(t *testing.T) {
 	}
 
 	// The typed client sees exactly the one machine.
-	list, err := inst.client.ListMachines()
+	var list aihubclient.MachinesList
+	rawList, err := inst.client.ListMachinesRaw()
 	if err != nil {
 		t.Fatalf("list machines: %v", err)
+	}
+	if err := json.Unmarshal(rawList, &list); err != nil {
+		t.Fatalf("list machines decode: %v", err)
 	}
 	if list.Count != 1 || len(list.Machines) != 1 || list.Machines[0].ID != "m-s24" {
 		t.Fatalf("machines baseline wrong: count %d, machines %+v", list.Count, list.Machines)
@@ -214,13 +218,13 @@ func TestV1S24MachinesListCLI(t *testing.T) {
 	}
 
 	// --- the admin gate: one non-admin refusal through the real CLI.
-	// s23MintKey (the s23 file, same package) mints a human writer user
+	// s24MintKey mints a human writer user
 	// + API key — non-admin by construction. This s24-local exec runs the
 	// real pf with the same env recipe as inst.pf but that key: the
 	// server's authAdmin gate (role != "admin" ⇒ 403) answers before
 	// any row is rendered, surfacing as a CLI error with a non-zero
 	// exit, and the combined output carries no machine rows.
-	_, nonAdminKey := s23MintKey(t, inst, "s24-nonadmin")
+	_, nonAdminKey := s24MintKey(t, inst, "s24-nonadmin")
 	refused := s24PfAs(t, inst, nonAdminKey, "machines", "list")
 	for _, leak := range []string{"m-s24", "alive", "STALE"} {
 		if strings.Contains(refused, leak) {
@@ -342,4 +346,36 @@ func s24Backdate(t *testing.T, inst *v1Install, machineID string, age time.Durat
 	if _, err := db.Exec(`UPDATE machines SET last_heartbeat_at=? WHERE id=?`, stamp, machineID); err != nil {
 		t.Fatalf("backdate %s: %v", machineID, err)
 	}
+}
+
+// s24MintKey creates one user plus an API key for the auth matrix and
+// returns (user id, key plaintext).
+func s24MintKey(t *testing.T, inst *v1Install, name string) (string, string) {
+	t.Helper()
+	raw, err := inst.client.CreateUser(aihubclient.UserCreateRequest{
+		DisplayName: name,
+		Email:       name + "@s24.invalid", // core requires email for human users
+		UserType:    "human",
+		Role:        "writer",
+	})
+	if err != nil {
+		t.Fatalf("create user %s: %v", name, err)
+	}
+	var user struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &user); err != nil || user.ID == "" {
+		t.Fatalf("user answer for %s: %v (%s)", name, err, raw)
+	}
+	raw, err = inst.client.CreateApiKey(aihubclient.ApiKeyCreateRequest{UserID: user.ID})
+	if err != nil {
+		t.Fatalf("mint key for %s: %v", name, err)
+	}
+	var key struct {
+		Plain string `json:"plain"`
+	}
+	if err := json.Unmarshal(raw, &key); err != nil || key.Plain == "" {
+		t.Fatalf("key answer for %s: %v (%s)", name, err, raw)
+	}
+	return user.ID, key.Plain
 }

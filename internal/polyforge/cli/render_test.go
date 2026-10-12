@@ -34,31 +34,6 @@ pf-2  -        queued   -                 normal    -         a goal that is def
 `)
 }
 
-func TestGoldenReadyWITable(t *testing.T) {
-	bundle := "bundle-x"
-	items := []WIView{
-		{WorkItem: api.WorkItem{Slug: "pf-1", Status: "queued", Priority: "normal", BundleName: &bundle, Goal: "fix the thing"}},
-	}
-	unclassified := []WIView{
-		{WorkItem: api.WorkItem{Slug: "pf-2", Status: "queued", Priority: "normal", Goal: "another goal"}},
-	}
-	var b bytes.Buffer
-	renderReadyWITable(&b, items, unclassified)
-	golden(t, "ReadyWITable", b.String(),
-		`SLUG  PROJECT  STATUS  SESSION  PRIORITY  BUNDLE    GOAL           SEGMENT
-----  -------  ------  -------  --------  --------  -------------  ------------
-pf-1  -        queued  -        normal    bundle-x  fix the thing  items
-pf-2  -        queued  -        normal    -         another goal   unclassified
-`)
-
-	b.Reset()
-	renderReadyWITable(&b, nil, nil)
-	golden(t, "ReadyWITableEmpty", b.String(),
-		`SLUG  PROJECT  STATUS  SESSION  PRIORITY  BUNDLE  GOAL  SEGMENT
-----  -------  ------  -------  --------  ------  ----  -------
-`)
-}
-
 func TestGoldenStatus(t *testing.T) {
 	s := StatusResponse{
 		MachineID:  "m1",

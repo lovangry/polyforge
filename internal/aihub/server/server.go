@@ -1,6 +1,5 @@
-// Package server is the v1 AIHub HTTP face: the business endpoints
-// (v0 openapi surface minus every SYNC-*/revision-chain route), the
-// admin face, the v1.5 session endpoints (claim/session-verify/
+// Package server is the AIHub HTTP face: the business endpoints, the
+// admin face, the session endpoints (claim/session-verify/
 // session-attach/force-end-session/session-end), and the /git/{wi}.git/...
 // proxy mount. Every error is the typed common/api errStatus envelope;
 // auth is the Bearer API key.
@@ -69,10 +68,8 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/v1/work-items/{id}", s.auth(s.hGetWI))
 	m.HandleFunc("PATCH /api/v1/work-items/{id}", s.auth(s.hPatchWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/cancel", s.auth(s.hCancelWI))
-	m.HandleFunc("GET /api/v1/work-items/{id}/progress", s.auth(s.hProgress))
 	m.HandleFunc("POST /api/v1/work-items/{id}/claim", s.auth(s.hSessionClaim))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-verify", s.auth(s.hSessionVerify))
-	m.HandleFunc("GET /api/v1/work-items/{id}/session", s.auth(s.hSessionHolder))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-attach", s.auth(s.hSessionAttach))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-end", s.auth(s.hSessionEnd))
 	// Recovery door: an admin/maintainer force-ends a stuck holder's session
@@ -91,7 +88,6 @@ func (s *Server) routes() {
 	// Ship ledger (polyforge#123, P1b): the ship bridge records each
 	// pushed repo's branch top; anyone who can read the WI queries it.
 	m.HandleFunc("POST /api/v1/work-items/{id}/ship-ledger", s.auth(s.hRecordShipLedger))
-	m.HandleFunc("GET /api/v1/work-items/{id}/ship-ledger", s.auth(s.hShipLedger))
 	m.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking}/{kind}", s.auth(s.hDelDep))
 	m.HandleFunc("GET /api/v1/projects/{project}/ready-queue", s.auth(s.hReadyQueue))
 	m.HandleFunc("POST /api/v1/machines/heartbeat", s.auth(s.hHeartbeat))
@@ -99,12 +95,9 @@ func (s *Server) routes() {
 
 	// Memory face.
 	m.HandleFunc("POST /api/v1/memories", s.auth(s.hCreateMemory))
-	m.HandleFunc("GET /api/v1/memories", s.auth(s.hListMemories))
-	m.HandleFunc("POST /api/v1/memories/search", s.auth(s.hSearchMemoryPOST))
 	m.HandleFunc("GET /api/v1/memories/search", s.auth(s.hSearchMemory))
 	m.HandleFunc("POST /api/v1/memories/rebuild-index", s.authAdmin(s.hRebuildIndex))
 	m.HandleFunc("GET /api/v1/memories/{id}", s.auth(s.hGetMemory))
-	m.HandleFunc("PATCH /api/v1/memories/{id}", s.auth(s.hPatchMemory))
 	m.HandleFunc("POST /api/v1/memories/{id}/redact", s.auth(s.hRedactMemory))
 
 	// Admin face.
@@ -119,9 +112,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/v1/projects", s.authAdmin(s.hListProjects))
 	m.HandleFunc("GET /api/v1/projects/{id}", s.authAdmin(s.hGetProject))
 	m.HandleFunc("PATCH /api/v1/projects/{id}", s.auth(s.hPatchProject))
-	m.HandleFunc("POST /api/v1/projects/{id}/rotate-identifier", s.authAdmin(s.hRotateIdentifier))
 	m.HandleFunc("POST /api/v1/admin/backup", s.authAdmin(s.hBackup))
-	m.HandleFunc("POST /api/v1/service/rotate-secret", s.authAdmin(s.hRotateSecret))
 
 	// Git proxy (own auth: session-scoped Basic credential).
 	m.Handle("/git/", http.HandlerFunc(s.Git.HandleGit))
@@ -500,53 +491,6 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 	s.writeWI(w, http.StatusOK, wi)
 }
 
-// hProgress serves GET /api/v1/work-items/{id}/progress (02 §5.2): the
-// read-only progress projection. The server reads its own local bare
-// repo HEAD's runtime-state/execution.json and passes it through
-// VERBATIM in `progress` — no field pruning, no re-representation in
-// Core's data model, no materialized cache (INV-1). Authorization is
-// the ordinary object-data rule: project-member canRead (membership OR
-// global admin) with the caller's ordinary API key; a non-readable WI
-// stays hidden behind CORE-404 like every other GET route.
-func (s *Server) hProgress(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.requireRead(w, idn, projectID, "work item %s", r.PathValue("id")) {
-		return
-	}
-	hp, err := s.Git.ReadHeadProgress(id)
-	if err != nil {
-		if errors.Is(err, git.ErrNoPublishedProgress) {
-			// §5.2: never-published WIs answer CORE-504 — no invented HEAD
-			// data is fabricated for a WI whose chain is still empty.
-			writeErr(w, core.Fail(api.ErrCoreProgressUnavailable, "",
-				"no published revision for %s yet (read-through has no readable object)", id))
-			return
-		}
-		writeErr(w, core.Fail(api.ErrCoreInternal, "", "read HEAD progress: %v", err))
-		return
-	}
-	if !json.Valid(hp.Content) {
-		writeErr(w, core.Fail(api.ErrCoreProgressUnavailable, "",
-			"the published execution state of %s is not valid JSON", id))
-		return
-	}
-	// The published file body passes through VERBATIM and is not
-	// re-represented: the v1 head_generation read-out (the published
-	// execution.json's top-level `generation` field) is deleted with the
-	// capsule lineage it surfaced (v1.5 session model).
-	writeJSON(w, http.StatusOK, &api.ProgressResponse{
-		WorkItemID:    id,
-		HeadSeq:       hp.Seq,
-		Progress:      json.RawMessage(hp.Content),
-		HeadUpdatedAt: hp.UpdatedAt.UTC().Format(time.RFC3339),
-		FreshnessNote: api.ProgressFreshnessNote,
-	})
-}
-
 // ---------------------------------------------------------------------------
 // Ship ledger (polyforge#123, P1b): record on ship, queryable per WI.
 
@@ -574,27 +518,6 @@ func (s *Server) hRecordShipLedger(w http.ResponseWriter, r *http.Request, idn *
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded", "work_item_id": id})
-}
-
-// hShipLedger serves GET /api/v1/work-items/{id}/ship-ledger: the
-// queryable face — one row per shipped repo (repo, branch, branch-top
-// SHA, pushed_at), ordered by repo name; a WI with no recorded ship
-// serves an empty array.
-func (s *Server) hShipLedger(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.requireRead(w, idn, projectID, "work item %s", id) {
-		return
-	}
-	out, err := s.Ships.Ledger(id)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
 }
 
 // ---------------------------------------------------------------------------
@@ -675,30 +598,6 @@ func (s *Server) hSessionVerify(w http.ResponseWriter, r *http.Request, idn *ide
 		return
 	}
 	resp, err := s.Sessions.Verify(id, req.SessionID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// hSessionHolder serves the §1.7 public holder read: who holds this
-// WI right now, in PUBLIC fields only. It deliberately uses the WI
-// read gate (wiProject + requireRead), not scopeCheck — any project
-// viewer may ask (the operator's recovery-decision input); non-members
-// get the standard hidden-not-found answer. All three holder states
-// (unheld / held-paused / held-running) are ordinary 200 answers;
-// the hash and secret never appear in any response.
-func (s *Server) hSessionHolder(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.requireRead(w, idn, projectID, "work item %s", r.PathValue("id")) {
-		return
-	}
-	resp, err := s.Sessions.Holder(id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1232,30 +1131,6 @@ func (s *Server) memRead(idOrSlug string, idn *identity) (*memory.Entry, []byte,
 	return e, content, nil
 }
 
-func (s *Server) hPatchMemory(w http.ResponseWriter, r *http.Request, idn *identity) {
-	memID := r.PathValue("id")
-	e, _, err := s.memRead(memID, idn)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := s.memWriteAllowed(idn, e.ProjectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	var req memory.UpdateRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	updated, err := s.Mems.Update(memID, req)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, updated)
-}
-
 func (s *Server) hRedactMemory(w http.ResponseWriter, r *http.Request, idn *identity) {
 	memID := r.PathValue("id")
 	e, _, err := s.memRead(memID, idn)
@@ -1274,32 +1149,6 @@ func (s *Server) hRedactMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	writeJSON(w, http.StatusOK, map[string]string{"id": memID, "status": "redacted"})
 }
 
-func (s *Server) hListMemories(w http.ResponseWriter, r *http.Request, idn *identity) {
-	project := r.URL.Query().Get("project")
-	if project == "" {
-		writeErr(w, core.Fail(api.ErrMemBadInput, "", "project query parameter required"))
-		return
-	}
-	projectID, err := s.projectIDOf(project)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := s.memReadAllowed(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	items, err := s.Mems.List(projectID, s.memAllowed(idn))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if items == nil {
-		items = []memory.Entry{}
-	}
-	writeJSON(w, http.StatusOK, api.ListResponse[memory.Entry]{Items: items, Total: len(items)})
-}
-
 func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *identity) {
 	q := r.URL.Query()
 	var tags []string
@@ -1311,21 +1160,6 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	s.hSearchRun(w, q.Get("q"), q.Get("type"), tags, limit, excerpt, idn)
 }
 
-func (s *Server) hSearchMemoryPOST(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req struct {
-		Q       string   `json:"q"`
-		Type    string   `json:"type,omitempty"`
-		Tags    []string `json:"tags,omitempty"`
-		Limit   int      `json:"limit,omitempty"`
-		Excerpt int      `json:"excerpt,omitempty"`
-	}
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	s.hSearchRun(w, req.Q, req.Type, req.Tags, req.Limit, req.Excerpt, idn)
-}
-
 // maxMemoryExcerptRunes bounds the content excerpt a search answer may
 // carry (the F6 recall faces ask for bounded excerpts; the cap keeps a
 // hostile/absent caller from turning search into a full-content dump).
@@ -1334,7 +1168,7 @@ const maxMemoryExcerptRunes = 8192
 // memoryHit is one search answer row with a content excerpt attached:
 // every memory.Entry field (embedded, marshaled flat) plus the first
 // excerpt runes of the authority content. Only served when the caller
-// asked for an excerpt — the plain search answer stays the v0 shape.
+// asked for an excerpt — the plain search answer carries no excerpt.
 type memoryHit struct {
 	memory.Entry
 	ContentExcerpt string `json:"content_excerpt,omitempty"`
@@ -1370,7 +1204,7 @@ func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags [
 	}
 	// The excerpt extension (F6): a caller that names an excerpt length
 	// gets each hit with a bounded content prefix attached. Purely
-	// additive — an absent/zero excerpt keeps the exact v0 answer shape.
+	// additive — an absent/zero excerpt keeps the plain answer shape.
 	if excerpt > 0 {
 		if excerpt > maxMemoryExcerptRunes {
 			excerpt = maxMemoryExcerptRunes
@@ -1494,7 +1328,7 @@ func (s *Server) hCreateProject(w http.ResponseWriter, r *http.Request, idn *ide
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, p) // identifier plaintext rides once
+	writeJSON(w, http.StatusCreated, p)
 }
 
 func (s *Server) hListProjects(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -1513,15 +1347,6 @@ func (s *Server) hGetProject(w http.ResponseWriter, r *http.Request, idn *identi
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
-}
-
-func (s *Server) hRotateIdentifier(w http.ResponseWriter, r *http.Request, idn *identity) {
-	plain, err := s.Admin.RotateIdentifier(r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"identifier": plain}) // once
 }
 
 func (s *Server) hGetUser(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -1599,25 +1424,4 @@ func (s *Server) hBackup(w http.ResponseWriter, r *http.Request, idn *identity) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"backup": name})
-}
-
-func (s *Server) hRotateSecret(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req struct {
-		Mode         string `json:"mode"`
-		GraceSeconds int64  `json:"grace_seconds"`
-	}
-	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	mode := req.Mode
-	if mode == "" {
-		mode = "grace" // v0 default
-	}
-	epoch, err := s.Admin.RotateSecret(mode, req.GraceSeconds, idn.UserID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"epoch": epoch, "mode": mode})
 }

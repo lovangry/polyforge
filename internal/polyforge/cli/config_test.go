@@ -276,3 +276,39 @@ func TestConfigWatchSectionIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigProductionShapeLoads pins that a cli.toml shaped like the
+// deployed one (server, api_key, daemon_socket, user_id + workspace
+// sections) still loads under the strict top-level key rule.
+func TestConfigProductionShapeLoads(t *testing.T) {
+	clearEnv(t)
+	ws := t.TempDir()
+	path := writeTempConfig(t, "server = \"http://hub:8420\"\n"+
+		"api_key = \"k_secret\"\n"+
+		"daemon_socket = \"/run/pf/daemon.sock\"\n"+
+		"user_id = \"usr_1\"\n\n"+
+		"[workspace.\""+ws+"\"]\nprojects = [\"polyforge\"]\n")
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("production-shaped config must load: %v", err)
+	}
+	if cfg.Server != "http://hub:8420" || cfg.APIKey != "k_secret" ||
+		cfg.DaemonSocket != "/run/pf/daemon.sock" || cfg.UserID != "usr_1" {
+		t.Fatalf("flat keys not applied: %+v", cfg)
+	}
+}
+
+// TestConfigUnknownTopLevelKeyRefused: an unknown top-level key is an
+// error (not silently ignored); `url`, the retired alias of `server`, is
+// one of them.
+func TestConfigUnknownTopLevelKeyRefused(t *testing.T) {
+	clearEnv(t)
+	for _, k := range []string{"url", "project", "foo"} {
+		path := writeTempConfig(t, "server = \"http://x\"\n"+k+" = \"v\"\n")
+		_, err := LoadConfig(path)
+		want := `unknown key "` + k + `" in ` + path
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("key %q: err = %v, want it to contain %q", k, err, want)
+		}
+	}
+}

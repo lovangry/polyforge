@@ -770,15 +770,12 @@ type ListFilters struct {
 	Priority  string
 	Milestone string
 	// Limit caps the page. 0 = the production default (500, the queue
-	// views). Explicit values are clamped to maxListLimit (50000): the
-	// cutover target carries projects with 1000+ records and the
-	// migration count-reconciliation must see whole projects (the
-	// rehearsal measured a false "500 < 678" on exactly this cap).
+	// views). Explicit values are clamped to maxListLimit.
 	Limit int
 }
 
 // maxListLimit clamps an explicit list page.
-const maxListLimit = 50000
+const maxListLimit = 1000
 
 const defaultListLimit = 500
 

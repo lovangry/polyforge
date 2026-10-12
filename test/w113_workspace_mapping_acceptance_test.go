@@ -453,7 +453,7 @@ func w113NewWI(t *testing.T, inst *v1Install, project, goal string, actions []ma
 		Project:    project,
 		Goal:       goal,
 		BundleName: strPtr("quick-fix"),
-		Attrs:      map[string]any{"requires_human_session": false},
+		Attrs:      nil,
 	})
 	if err != nil {
 		t.Fatalf("create work item in %s: %v", project, err)
@@ -942,8 +942,7 @@ func TestW113MappingInvalidKeysRejected(t *testing.T) {
 
 // TestW113OldShapeConfigRefusedEverywhere pins criterion #2: a config
 // carrying the flat `project` key is refused by every pf command and
-// the daemon with migration guidance naming the retired key, the new
-// `[workspace]` shape and `pf doctor`.
+// the daemon as an unknown top-level key (naming the key and the file).
 func TestW113OldShapeConfigRefusedEverywhere(t *testing.T) {
 	inst := newV1Install(t)
 	oldShape := "server = " + strconv.Quote(inst.url) + "\n" +
@@ -959,7 +958,7 @@ func TestW113OldShapeConfigRefusedEverywhere(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("%s on old-shape config: exit %d, want 1 (output %q)", what, code, out)
 		}
-		for _, tok := range []string{"project", "[workspace", "doctor"} {
+		for _, tok := range []string{`unknown key "project" in ` + cfgPath} {
 			if !strings.Contains(out, tok) {
 				t.Fatalf("%s on old-shape config: error misses the %q guidance token (output %q)", what, tok, out)
 			}

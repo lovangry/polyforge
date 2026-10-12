@@ -103,55 +103,16 @@ func (c *Client) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	return &wi, nil
 }
 
-// GetProgress reads the §5.2 progress read-through projection.
-func (c *Client) GetProgress(idOrSlug string) (*api.ProgressResponse, error) {
-	var p api.ProgressResponse
-	if err := c.Do("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/progress", nil, &p); err != nil {
-		return nil, err
-	}
-	return &p, nil
-}
-
-// GetProgressRaw reads the progress projection undecoded (--json
-// passthrough: the server body reaches the caller verbatim).
-func (c *Client) GetProgressRaw(idOrSlug string) (json.RawMessage, error) {
-	return c.raw("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/progress", nil)
-}
-
-// ListWorkItems filters by project and status (queue views).
-func (c *Client) ListWorkItems(project string, status string) ([]api.WorkItem, error) {
-	q := url.Values{}
-	if project != "" {
-		q.Set("project", project)
-	}
-	if status != "" {
-		q.Set("status", status)
-	}
-	var resp struct {
-		Items []api.WorkItem `json:"items"`
-		Total int            `json:"total"`
-	}
-	if err := c.Do("GET", "/api/v1/work-items?"+q.Encode(), nil, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Items, nil
-}
-
-// Queue returns ready work items for autonomous claiming (the daemon auto-pull).
-// Both executable segments count as takeable: items (classified
-// requires_human_session=false) and unclassified (classification missing —
-// per the ready-queue contract the segment that means "takeable now by an
-// agent"; a claim resolves the classification). needs_human_session is
-// NEVER included — a human session is a claim precondition there.
+// Queue returns the ready queue's executable items for autonomous
+// claiming (the daemon auto-pull).
 func (c *Client) Queue(project string) ([]api.WorkItem, error) {
 	var resp struct {
-		Items   []api.WorkItem `json:"items"`
-		Unknown []api.WorkItem `json:"unclassified"`
+		Items []api.WorkItem `json:"items"`
 	}
 	if err := c.Do("GET", "/api/v1/projects/"+url.PathEscape(project)+"/ready-queue", nil, &resp); err != nil {
 		return nil, err
 	}
-	return append(resp.Items, resp.Unknown...), nil
+	return resp.Items, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -204,15 +165,9 @@ func (c *Client) CancelWorkItem(id string) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(id)+"/cancel", map[string]any{})
 }
 
-// ListWorkItemsRaw is the raw-body variant of ListWorkItems (same wire
-// filter keys).
-func (c *Client) ListWorkItemsRaw(project, status string) (json.RawMessage, error) {
-	return c.ListWorkItemsRawLimit(project, status, 0)
-}
-
-// ListWorkItemsRawLimit is the limit-aware variant (the migration
-// count-reconciliation needs whole projects; 0 = the server default).
-func (c *Client) ListWorkItemsRawLimit(project, status string, limit int) (json.RawMessage, error) {
+// ListWorkItemsRaw lists work items undecoded (0 limit = the server
+// default cap).
+func (c *Client) ListWorkItemsRaw(project, status string, limit int) (json.RawMessage, error) {
 	q := url.Values{}
 	if project != "" {
 		q.Set("project", project)
@@ -337,12 +292,6 @@ type RepoRef struct {
 	URL  string `json:"url"`
 }
 
-// RotateSecretRequest is the M5 body (grace | rollback).
-type RotateSecretRequest struct {
-	Mode         string `json:"mode"`
-	GraceSeconds int64  `json:"grace_seconds,omitempty"`
-}
-
 // CreateUser issues a user (M1).
 func (c *Client) CreateUser(req UserCreateRequest) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/users", req)
@@ -403,22 +352,6 @@ func (c *Client) Backup() (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/admin/backup", map[string]any{})
 }
 
-// RotateSecret rotates the service secret (M5).
-func (c *Client) RotateSecret(req RotateSecretRequest) (json.RawMessage, error) {
-	return c.raw("POST", "/api/v1/service/rotate-secret", req)
-}
-
-// RebuildMemoryIndex triggers the explicit reconcile/backfill (admin).
-func (c *Client) RebuildMemoryIndex() (int, error) {
-	var out struct {
-		Reindexed int `json:"reindexed"`
-	}
-	if err := c.Do("POST", "/api/v1/memories/rebuild-index", map[string]any{}, &out); err != nil {
-		return 0, err
-	}
-	return out.Reindexed, nil
-}
-
 // ---------------------------------------------------------------------------
 // Machines faces (M3 heartbeat wiring).
 
@@ -474,15 +407,6 @@ type MachinesList struct {
 	Machines          []MachineStatus `json:"machines"`
 	StaleAfterSeconds int64           `json:"stale_after_seconds"`
 	Count             int             `json:"count"`
-}
-
-// ListMachines reads the machines liveness face (admin credential).
-func (c *Client) ListMachines() (*MachinesList, error) {
-	var out MachinesList
-	if err := c.Do("GET", "/api/v1/machines", nil, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 // ListMachinesRaw reads the machines liveness face undecoded (--json
@@ -571,16 +495,4 @@ func (c *Client) CloseAuth(idOrSlug string) error {
 func (c *Client) RecordShipLedger(wi string, req api.ShipLedgerRequest) error {
 	_, err := c.raw("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/ship-ledger", req)
 	return err
-}
-
-// ShipLedger reads the WI's ship ledger (the queryable face): one row per
-// shipped repo — repo, branch, branch-top SHA, pushed_at — ordered by
-// repo name.
-func (c *Client) ShipLedger(wi string) (*api.ShipLedgerResponse, error) {
-	var out api.ShipLedgerResponse
-	err := c.Do("GET", "/api/v1/work-items/"+url.PathEscape(wi)+"/ship-ledger", nil, &out)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
 }

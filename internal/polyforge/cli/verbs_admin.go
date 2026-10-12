@@ -12,7 +12,7 @@ import (
 
 // Management face M1–M5 (same port, same auth, admin unless noted).
 // Semantics ported from the v0 CLI: users, api-keys, projects
-// (incl. membership), backup, rotate-secret.
+// (incl. membership), backup.
 
 // ---------------------------------------------------------------------------
 // users (M1)
@@ -360,7 +360,7 @@ func projectsMembers(ctx *Context, client *aihubclient.Client, args []string) er
 }
 
 // ---------------------------------------------------------------------------
-// backup (M4) and rotate-secret (M5)
+// backup (M4)
 // ---------------------------------------------------------------------------
 
 var cmdBackup = &Command{
@@ -383,46 +383,6 @@ var cmdBackup = &Command{
 			} else {
 				printJSON(ctx.Stdout, raw)
 			}
-		})
-		return nil
-	},
-}
-
-var cmdRotateSecret = &Command{
-	Name:    "rotate-secret",
-	Group:   GroupMgmt,
-	Summary: "Rotate the service secret (M5, admin only)",
-	Usage: "pf rotate-secret --mode grace --grace-seconds N\n" +
-		"pf rotate-secret --mode rollback",
-	Setup: func(fs *flag.FlagSet) {
-		fs.String("mode", "", "grace (old epochs valid for a window) | rollback (immediate, permanent)")
-		fs.Int64("grace-seconds", 0, "grace window seconds (mode=grace)")
-	},
-	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		if len(args) != 0 {
-			return fmt.Errorf("rotate-secret: unexpected arguments %v", args)
-		}
-		mode := stringFlag(fs, "mode")
-		grace := int64Flag(fs, "grace-seconds")
-		switch mode {
-		case "grace":
-			if grace <= 0 {
-				return fmt.Errorf("rotate-secret: --grace-seconds is required for mode=grace")
-			}
-		case "rollback":
-			grace = 0 // grace_seconds MUST be 0 for rollback
-		default:
-			return fmt.Errorf("rotate-secret: --mode must be grace|rollback")
-		}
-		raw, err := ctx.aihub().RotateSecret(aihubclient.RotateSecretRequest{
-			Mode:         mode,
-			GraceSeconds: grace,
-		})
-		if err != nil {
-			return err
-		}
-		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "service secret rotated (mode=%s)\n", mode)
 		})
 		return nil
 	},

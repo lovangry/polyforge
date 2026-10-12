@@ -167,7 +167,7 @@ func newWIWithBundle(t *testing.T, inst *v1Install, goal, bundle string, actions
 		Project:    v1Project,
 		Goal:       goal,
 		BundleName: strPtr(bundle),
-		Attrs:      map[string]any{"requires_human_session": false},
+		Attrs:      nil,
 	})
 	if err != nil {
 		t.Fatalf("create work item: %v", err)

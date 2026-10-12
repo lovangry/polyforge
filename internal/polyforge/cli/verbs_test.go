@@ -215,35 +215,23 @@ func TestVerbQueueMergedAllMapped(t *testing.T) {
 }
 
 func TestVerbQueueReadyHumanOutput(t *testing.T) {
-	unclassified := strings.Replace(cannedWI, "pf-42", "pf-99", 1)
-	body := `{"items":[` + cannedWI + `],"unclassified":[` + unclassified + `],` +
-		`"needs_human_session":[` + cannedWI + `],"running":[],"stalled":[],"paused":[],"stale_running":[]}`
+	second := strings.Replace(cannedWI, "pf-42", "pf-99", 1)
+	body := `{"items":[` + cannedWI + `,` + second + `],"running":[],"paused":[]}`
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, body)
 	})
 	env := map[string]string{"PF_SERVER": srv.URL}
 
-	// Human mode: count is items+unclassified, non-takeable segments are
-	// ignored, items come first, and a SEGMENT column tells them apart.
+	// Human mode: the count and rows are the items segment only.
 	code, stdout, stderr := runPf(t, env, "queue", "--project", "polyforge", "--ready")
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
-	for _, want := range []string{
-		"2 work item(s)",
-		"SEGMENT",
-		"pf-42",
-		"items",
-		"pf-99",
-		"unclassified",
-	} {
+	for _, want := range []string{"2 work item(s)", "pf-42", "pf-99"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout missing %q:\n%s", want, stdout)
 		}
-	}
-	if strings.Index(stdout, "pf-42") > strings.Index(stdout, "pf-99") {
-		t.Errorf("items must be listed before unclassified:\n%s", stdout)
 	}
 
 	// --json stays verbatim passthrough of the full server body.
@@ -286,10 +274,9 @@ pf-1  polyforge  running  ab12cd34ef56aa00  high      -       fix the thing
 pf-2  polyforge  queued   -                 normal    -       another goal
 `)
 
-	// --ready form: same additive decode, same SESSION column, across
-	// both takeable segments.
+	// --ready form: same additive decode, same SESSION column.
 	srv = newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"items":[`+held+`],"unclassified":[`+unheld+`]}`)
+		io.WriteString(w, `{"items":[`+held+`,`+unheld+`]}`)
 	})
 	env = map[string]string{"PF_SERVER": srv.URL}
 	code, stdout, stderr = runPf(t, env, "queue", "--project", "polyforge", "--ready")
@@ -298,10 +285,10 @@ pf-2  polyforge  queued   -                 normal    -       another goal
 	}
 	golden(t, "QueueReadySessionColumn", stdout,
 		`2 work item(s)
-SLUG  PROJECT    STATUS   SESSION           PRIORITY  BUNDLE  GOAL           SEGMENT
-----  ---------  -------  ----------------  --------  ------  -------------  ------------
-pf-1  polyforge  running  ab12cd34ef56aa00  high      -       fix the thing  items
-pf-2  polyforge  queued   -                 normal    -       another goal   unclassified
+SLUG  PROJECT    STATUS   SESSION           PRIORITY  BUNDLE  GOAL
+----  ---------  -------  ----------------  --------  ------  -------------
+pf-1  polyforge  running  ab12cd34ef56aa00  high      -       fix the thing
+pf-2  polyforge  queued   -                 normal    -       another goal
 `)
 }
 
@@ -599,8 +586,6 @@ func TestAdminVerbsRequestShapes(t *testing.T) {
 			io.WriteString(w, `{"id":"prj_1","name":"polyforge","visible":true,"members":[],"created_at":"t","updated_at":"t"}`)
 		case strings.HasSuffix(r.URL.Path, "/backup"):
 			io.WriteString(w, `{"backup":"/var/backups/snap.db"}`)
-		case strings.HasSuffix(r.URL.Path, "/rotate-secret"):
-			io.WriteString(w, `{"rotated":true}`)
 		}
 	})
 	env := map[string]string{"PF_SERVER": srv.URL}
@@ -695,14 +680,6 @@ func TestAdminVerbsRequestShapes(t *testing.T) {
 	}
 	if got := rec.last(); got.Method != "POST" || got.Path != "/api/v1/admin/backup" {
 		t.Errorf("backup = %s %s", got.Method, got.Path)
-	}
-
-	if code, _, stderr := runPf(t, env, "rotate-secret", "--mode", "grace", "--grace-seconds", "300"); code != 0 {
-		t.Fatalf("rotate-secret: %d %s", code, stderr)
-	}
-	if got := rec.last(); got.Path != "/api/v1/service/rotate-secret" ||
-		!strings.Contains(got.Body, `"mode":"grace"`) || !strings.Contains(got.Body, `"grace_seconds":300`) {
-		t.Errorf("rotate-secret = %s %s %s", got.Method, got.Path, got.Body)
 	}
 }
 

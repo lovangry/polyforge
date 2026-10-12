@@ -175,23 +175,6 @@ func renderWITable(w io.Writer, items []WIView) {
 	printTable(w, []string{"SLUG", "PROJECT", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "GOAL"}, rows)
 }
 
-// renderReadyWITable renders the ready-queue table: items first, then
-// unclassified, with a SEGMENT column carrying the wire segment key
-// ("items" / "unclassified"). Both segments are takeable.
-func renderReadyWITable(w io.Writer, items, unclassified []WIView) {
-	segments := []struct {
-		key string
-		wis []WIView
-	}{{"items", items}, {"unclassified", unclassified}}
-	rows := make([][]string, 0, len(items)+len(unclassified))
-	for _, seg := range segments {
-		for _, it := range seg.wis {
-			rows = append(rows, append(wiRow(it), seg.key))
-		}
-	}
-	printTable(w, []string{"SLUG", "PROJECT", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "GOAL", "SEGMENT"}, rows)
-}
-
 // renderWIDetail renders the detail record. The v1.5 session block
 // (fingerprint, machine, owner, started-at, clean_pause — the m4 public
 // audit fields) renders whenever the server body carries them.

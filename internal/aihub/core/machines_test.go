@@ -3,13 +3,9 @@ package core
 // machines_test.go: the M3 heartbeat face at the Core level — upsert
 // idempotency (register once, refresh forever), the keep-vs-replace
 // semantics of the liveness projection (mode, live_wi_ids), the admin
-// read model, and the guarded machines-column migration for databases
-// created before the face was wired.
+// read model.
 
 import (
-	"database/sql"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -142,103 +138,5 @@ func TestHeartbeatBadInput(t *testing.T) {
 	env := newEnv(t)
 	if _, err := env.Admin.Heartbeat(MachineHeartbeat{MachineID: "  "}); !IsCode(err, "CORE-400") {
 		t.Fatalf("blank machine_id must be CORE-400: %v", err)
-	}
-}
-
-// TestMachinesColumnsMigrationFromLegacyDatabase opens a database whose
-// machines table predates the M3 heartbeat wiring (no mode/live_wi_ids)
-// and asserts Open migrates it in place and the face works on it.
-func TestMachinesColumnsMigrationFromLegacyDatabase(t *testing.T) {
-	dir := t.TempDir()
-	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "aihub.db")+"?_pragma=journal_mode(WAL)")
-	if err != nil {
-		t.Fatalf("open raw: %v", err)
-	}
-	// The pre-wiring machines shape plus the users row it references.
-	if _, err := raw.Exec(`CREATE TABLE users (
-  id TEXT PRIMARY KEY, display_name TEXT NOT NULL, email TEXT,
-  kind TEXT NOT NULL CHECK (kind IN ('human','machine')),
-  role TEXT NOT NULL DEFAULT 'writer' CHECK (role IN ('admin','writer')),
-  created_at TEXT NOT NULL
-);`); err != nil {
-		t.Fatalf("users table: %v", err)
-	}
-	if _, err := raw.Exec(`CREATE TABLE machines (
-  id          TEXT PRIMARY KEY,
-  user_id     TEXT NOT NULL REFERENCES users(id),
-  runtime_version TEXT,
-  last_heartbeat_at TEXT NOT NULL
-);`); err != nil {
-		t.Fatalf("machines table: %v", err)
-	}
-	if _, err := raw.Exec(`INSERT INTO users(id, display_name, kind, created_at)
-		VALUES ('mac_old', 'machine mac_old', 'machine', 't')`); err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
-	if _, err := raw.Exec(`INSERT INTO machines(id, user_id, runtime_version, last_heartbeat_at)
-		VALUES ('m-legacy', 'mac_old', 'v1', '2026-01-01T00:00:00Z')`); err != nil {
-		t.Fatalf("seed machine: %v", err)
-	}
-	raw.Close()
-
-	db, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open through core: %v", err)
-	}
-	defer db.Close()
-	admin := NewAdminManager(db)
-	ms, err := admin.Machines()
-	if err != nil {
-		t.Fatalf("read after migration: %v", err)
-	}
-	if len(ms) != 1 || ms[0].ID != "m-legacy" {
-		t.Fatalf("legacy row preserved: %+v %v", ms, err)
-	}
-	if ms[0].Mode != "" || len(ms[0].LiveWIIDs) != 0 {
-		t.Fatalf("legacy row reads as unlived: %+v", ms[0])
-	}
-	// And the face works on the migrated table.
-	h, err := admin.Heartbeat(MachineHeartbeat{MachineID: "m-legacy", Mode: "interactive", LiveWIIDs: []string{"wi_x"}})
-	if err != nil || h.Registered {
-		t.Fatalf("heartbeat on migrated row: %+v %v", h, err)
-	}
-	ms, _ = admin.Machines()
-	if ms[0].Mode != "interactive" || len(ms[0].LiveWIIDs) != 1 || ms[0].LiveWIIDs[0] != "wi_x" {
-		t.Fatalf("projection on migrated row: %+v", ms[0])
-	}
-}
-
-// TestMachinesMigrationIdempotentReopen: a second Open on a migrated (or
-// fresh) database is a no-op — the guards hold.
-func TestMachinesMigrationIdempotentReopen(t *testing.T) {
-	dir := t.TempDir()
-	db, err := Open(dir)
-	if err != nil {
-		t.Fatalf("first open: %v", err)
-	}
-	db.Close()
-	db2, err := Open(dir)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer db2.Close()
-	var names []string
-	rows, err := db2.Query(`SELECT name FROM pragma_table_info('machines')`)
-	if err != nil {
-		t.Fatalf("pragma: %v", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		names = append(names, n)
-	}
-	got := strings.Join(names, ",")
-	for _, want := range []string{"mode", "live_wi_ids"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("machines columns after reopen lack %s: %s", want, got)
-		}
 	}
 }

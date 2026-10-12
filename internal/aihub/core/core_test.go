@@ -52,7 +52,7 @@ func newEnv(t *testing.T) *testEnv {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	env.Project = p.Project.ID
+	env.Project = p.ID
 	return env
 }
 
@@ -253,8 +253,8 @@ func TestTerminalTransitions(t *testing.T) {
 // is pinned in session_test.go's TestSessionClaimGates.)
 func TestRegistrationTicketNeverQueued(t *testing.T) {
 	env := newEnv(t)
-	exec := mustCreateExecWI(t, env, "queue exec", map[string]any{"requires_human_session": false}, "")
-	reg := mustCreateWI(t, env, "queue registry", map[string]any{"requires_human_session": false}, "")
+	exec := mustCreateExecWI(t, env, "queue exec", nil, "")
+	reg := mustCreateWI(t, env, "queue registry", nil, "")
 	q, err := env.WIs.ReadyQueue("alpha")
 	if err != nil {
 		t.Fatalf("queue: %v", err)
@@ -262,7 +262,7 @@ func TestRegistrationTicketNeverQueued(t *testing.T) {
 	if len(q.Items) != 1 || q.Items[0].ID != exec {
 		t.Fatalf("executable segment = %+v, want only %s", q.Items, exec)
 	}
-	for _, seg := range [][]WIView{q.Items, q.NeedsHumanSession, q.Unknown} {
+	for _, seg := range [][]WIView{q.Items} {
 		for _, wi := range seg {
 			if wi.ID == reg {
 				t.Fatalf("registration ticket appeared in an executable segment")
@@ -274,20 +274,18 @@ func TestRegistrationTicketNeverQueued(t *testing.T) {
 func TestReadyQueueOrdering(t *testing.T) {
 	env := newEnv(t)
 	m := NewSessionManager(env.DB)
-	// Created in an order that does NOT match priority order; each gets a
-	// requires_human_session classification. These are EXECUTION tickets:
-	// registration tickets never appear in the executable segments.
-	mustCreateExecWI(t, env, "low", map[string]any{"requires_human_session": false}, api.PriorityLow)
-	urgID := mustCreateExecWI(t, env, "urgent", map[string]any{"requires_human_session": false}, api.PriorityUrgent)
-	normID := mustCreateExecWI(t, env, "normal", map[string]any{"requires_human_session": false}, api.PriorityNormal)
-	mustCreateExecWI(t, env, "needs human", map[string]any{"requires_human_session": true}, "")
-	mustCreateExecWI(t, env, "unclassified", nil, "")
+	// Created in an order that does NOT match priority order. These are
+	// EXECUTION tickets: registration tickets never appear in the
+	// executable segment.
+	mustCreateExecWI(t, env, "low", nil, api.PriorityLow)
+	urgID := mustCreateExecWI(t, env, "urgent", nil, api.PriorityUrgent)
+	normID := mustCreateExecWI(t, env, "normal", nil, api.PriorityNormal)
 	// A running and a paused WI for the visibility segments.
-	rid := mustCreateExecWI(t, env, "running one", map[string]any{"requires_human_session": false}, "")
+	rid := mustCreateExecWI(t, env, "running one", nil, "")
 	if _, err := m.Claim(rid, api.SessionClaimRequest{SessionID: "20202020202020202020202020202020"}, env.UserID); err != nil {
 		t.Fatalf("claim running: %v", err)
 	}
-	pid := mustCreateExecWI(t, env, "paused one", map[string]any{"requires_human_session": false}, "")
+	pid := mustCreateExecWI(t, env, "paused one", nil, "")
 	psecret := "21212121212121212121212121212121"
 	if _, err := m.Claim(pid, api.SessionClaimRequest{SessionID: psecret}, env.UserID); err != nil {
 		t.Fatalf("claim paused: %v", err)
@@ -296,7 +294,7 @@ func TestReadyQueueOrdering(t *testing.T) {
 		t.Fatalf("pause: %v", err)
 	}
 	// A waiting_on-tagged queued WI is not executable.
-	wid := mustCreateWI(t, env, "waiting", map[string]any{"requires_human_session": false}, "")
+	wid := mustCreateWI(t, env, "waiting", nil, "")
 	if _, err := env.WIs.Patch(wid, map[string]json.RawMessage{"waiting_on": json.RawMessage(`"owner"`)}); err != nil {
 		t.Fatalf("patch waiting_on: %v", err)
 	}
@@ -305,19 +303,13 @@ func TestReadyQueueOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("queue: %v", err)
 	}
-	// items: exactly the three classified-false executables, ordered
+	// items: exactly the three executables, ordered
 	// urgent → normal → low by priority (created_at is a tiebreak).
 	if len(q.Items) != 3 {
 		t.Fatalf("items = %d, want 3: %+v", len(q.Items), q.Items)
 	}
 	if q.Items[0].ID != urgID || q.Items[1].ID != normID {
 		t.Fatalf("priority ordering wrong: %s, %s", q.Items[0].ID, q.Items[1].ID)
-	}
-	if len(q.NeedsHumanSession) != 1 || q.NeedsHumanSession[0].Goal != "needs human" {
-		t.Fatalf("needs_human_session segment wrong: %+v", q.NeedsHumanSession)
-	}
-	if len(q.Unknown) != 1 || q.Unknown[0].Goal != "unclassified" {
-		t.Fatalf("unclassified segment wrong: %+v", q.Unknown)
 	}
 	if len(q.Running) != 1 || q.Running[0].ID != rid {
 		t.Fatalf("running segment wrong: %+v", q.Running)
@@ -326,7 +318,7 @@ func TestReadyQueueOrdering(t *testing.T) {
 		t.Fatalf("paused segment wrong: %+v", q.Paused)
 	}
 	// The waiting_on-tagged WI is in NO executable segment.
-	for _, seg := range [][]WIView{q.Items, q.NeedsHumanSession, q.Unknown} {
+	for _, seg := range [][]WIView{q.Items} {
 		for _, wi := range seg {
 			if wi.ID == wid {
 				t.Fatalf("waiting WI appeared in an executable segment")
@@ -388,18 +380,6 @@ func TestAdminFaces(t *testing.T) {
 	users, err := env.Admin.ListUsers()
 	if err != nil || len(users) != 3 { // admin + writer + machine
 		t.Fatalf("users: %v %d", err, len(users))
-	}
-	// Rotate identifier: the plaintext changes and is returned once.
-	plain1, err := env.Admin.RotateIdentifier("alpha")
-	if err != nil || plain1 == "" {
-		t.Fatalf("rotate: %v", err)
-	}
-	plain2, err := env.Admin.RotateIdentifier("alpha")
-	if err != nil || plain2 == "" || plain2 == plain1 {
-		t.Fatalf("rotate 2: %v", err)
-	}
-	if _, err := env.Admin.RotateIdentifier("nope"); !IsCode(err, api.ErrCoreNotFound) {
-		t.Fatalf("rotate unknown: %v", err)
 	}
 }
 

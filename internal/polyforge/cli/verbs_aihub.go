@@ -444,27 +444,12 @@ var cmdQueue = &Command{
 		if boolFlag(fs, "ready") {
 			raw, err = ctx.aihub().ReadyQueueRaw(proj)
 		} else {
-			raw, err = ctx.aihub().ListWorkItemsRawLimit(proj, stringFlag(fs, "status"), limit)
+			raw, err = ctx.aihub().ListWorkItemsRaw(proj, stringFlag(fs, "status"), limit)
 		}
 		if err != nil {
 			return err
 		}
-		if boolFlag(fs, "ready") {
-			// Ready queue: the takeable set is items + unclassified (the same
-			// union aihubclient.Queue() implements). --json stays raw
-			// passthrough of the full server body (all 7 sections).
-			ctx.finish(raw, func() {
-				var l struct {
-					Items        []WIView `json:"items"`
-					Unclassified []WIView `json:"unclassified"`
-				}
-				if err := json.Unmarshal(raw, &l); err == nil {
-					fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items)+len(l.Unclassified))
-					renderReadyWITable(ctx.Stdout, l.Items, l.Unclassified)
-				}
-			})
-			return nil
-		}
+		// Both faces render the items segment; --json is the raw server body.
 		ctx.finish(raw, func() {
 			var l struct {
 				Items []WIView `json:"items"`
@@ -488,10 +473,9 @@ var cmdQueue = &Command{
 // then the server's own order within each project.
 func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 	projects := ctx.Cfg.Mapping.Projects()
-	var items, unclassified []WIView
-	total := 0
+	var items []WIView
 	for _, p := range projects {
-		raw, err := ctx.aihub().ListWorkItemsRawLimit(p, status, limit)
+		raw, err := ctx.aihub().ListWorkItemsRaw(p, status, limit)
 		if ready {
 			raw, err = ctx.aihub().ReadyQueueRaw(p)
 		}
@@ -499,36 +483,25 @@ func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 			return fmt.Errorf("queue: project %s: %w", p, err)
 		}
 		var l struct {
-			Items        []WIView `json:"items"`
-			Unclassified []WIView `json:"unclassified"`
+			Items []WIView `json:"items"`
 		}
 		if err := json.Unmarshal(raw, &l); err != nil {
 			return fmt.Errorf("queue: project %s: %w", p, err)
 		}
 		items = append(items, l.Items...)
-		unclassified = append(unclassified, l.Unclassified...)
-		total += len(l.Items) + len(l.Unclassified)
 	}
 	if ctx.JSON {
-		// ONE merged document: items (plus unclassified in ready mode).
+		// ONE merged document.
 		doc := struct {
-			Items        []WIView `json:"items"`
-			Unclassified []WIView `json:"unclassified,omitempty"`
-			Total        int      `json:"total"`
-		}{Items: items, Total: total}
-		if ready {
-			doc.Unclassified = unclassified
-		}
+			Items []WIView `json:"items"`
+			Total int      `json:"total"`
+		}{Items: items, Total: len(items)}
 		if b, err := json.Marshal(doc); err == nil {
 			ctx.Out(b)
 		}
 		return nil
 	}
-	fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", total)
-	if ready {
-		renderReadyWITable(ctx.Stdout, items, unclassified)
-		return nil
-	}
+	fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(items))
 	renderWITable(ctx.Stdout, items)
 	return nil
 }

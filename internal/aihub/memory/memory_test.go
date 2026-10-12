@@ -89,22 +89,12 @@ func TestFtsRoundTrip(t *testing.T) {
 		t.Fatalf("type filter should exclude: %v", hits)
 	}
 
-	// Update: the FTS row follows the new content (delete-then-insert).
-	if _, err := e.store.Update(entry.ID, UpdateRequest{Content: "rewritten body talks about frobnicators now"}); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if hits, _ = e.store.Search("xyzzyplugh", "", nil, 10, nil); len(hits) != 0 {
-		t.Fatalf("stale FTS row survived the update")
-	}
-	if hits, _ = e.store.Search("frobnicators", "", nil, 10, nil); len(hits) != 1 {
-		t.Fatalf("updated content not indexed")
-	}
 	// The authority file content matches what was written.
 	content, err := e.store.Content(entry.ID)
 	if err != nil {
 		t.Fatalf("content: %v", err)
 	}
-	if !strings.Contains(string(content), "frobnicators") {
+	if !strings.Contains(string(content), "xyzzyplugh") {
 		t.Fatalf("authority file stale: %s", content)
 	}
 	if !strings.HasPrefix(string(content), "---\n") {
@@ -118,7 +108,7 @@ func TestFtsRoundTrip(t *testing.T) {
 	if _, err := e.store.Get(entry.ID); err == nil || err.(*APIError).Code != "MEM-404" {
 		t.Fatalf("redacted entry still served: %v", err)
 	}
-	if hits, _ = e.store.Search("frobnicators", "", nil, 10, nil); len(hits) != 0 {
+	if hits, _ = e.store.Search("xyzzyplugh", "", nil, 10, nil); len(hits) != 0 {
 		t.Fatalf("redacted entry still searchable")
 	}
 }

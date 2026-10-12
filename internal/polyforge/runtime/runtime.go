@@ -1139,21 +1139,14 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	if err != nil {
 		return err
 	}
-	// BaseCommit semantics (aligned with v0, multi-repo shape): the
-	// per-repo claim-time baselines live in the Repos map above and are
-	// authoritative; BaseCommit stays EMPTY rather than singling out one
-	// repo's SHA as "the" baseline — with several task repos there is no
-	// single main repo to pick, and any choice would silently lie.
-	// v1.5: the generation/attempt lineage fields stay at their zero
-	// values (the capsule Identity shape is frozen in common/); session
-	// ownership lives in the daemon-private sync/session-handle marker.
+	// Session ownership lives in the daemon-private sync/session-handle
+	// marker, not in the identity.
 	idn := capsule.Identity{
 		WorkItemID:   j.wi,
 		CapsuleID:    "cap_" + j.wi,
 		Project:      j.project,
 		BundleName:   j.bundleName,
 		BundleDigest: j.bundleDigest,
-		BaseCommit:   "",
 		Repos:        repoSHAs,
 		CreatedAt:    nowStamp(),
 	}
