@@ -159,7 +159,7 @@ func (r *Runtime) finishBlocked(j *job, detail, head string) {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	r.sendRelease(protocol.RTMsg{
+	r.send(protocol.RTMsg{
 		Kind:     protocol.RTFinished,
 		WorkItem: j.wi,
 		Reason:   protocol.FinishBlocked,

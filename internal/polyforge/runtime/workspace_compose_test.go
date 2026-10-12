@@ -16,6 +16,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/workflow"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // frontmatterBundle writes a demo bundle whose workflow.md carries real
@@ -74,11 +75,10 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 		DataDir:                 filepath.Join(t.TempDir(), "data"),
 		AgentStarter:            scriptedEngineStarter(sp),
 		MaxRecoveries:           2,
-		SendBound:               2 * time.Second,
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 
@@ -125,11 +125,10 @@ func TestClaimComposeWithoutYamlIsBundleOnly(t *testing.T) {
 		DataDir:                 filepath.Join(t.TempDir(), "data"),
 		AgentStarter:            scriptedEngineStarter(sp),
 		MaxRecoveries:           2,
-		SendBound:               2 * time.Second,
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 

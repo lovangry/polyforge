@@ -41,7 +41,7 @@ func TestSameIDRepresentRefreshesAskedAtWithoutNewEvent(t *testing.T) {
 	// projection's asked_at. The needs_input EVENT is the driver's (it
 	// lands in the same log at the park transition): the supervisor's
 	// projection must never add a second copy.
-	if got := len(eventsOf(m, EvNeedsInput)); got != 0 {
+	if got := len(eventsOf(m, "needs_input")); got != 0 {
 		t.Fatalf("the supervisor must not duplicate the driver's needs_input event: got %d", got)
 	}
 	if pending == nil || pending.ID != "qF9" || pending.AskedAt != "2026-10-01T00:00:02Z" {

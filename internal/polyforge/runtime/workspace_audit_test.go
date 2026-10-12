@@ -19,6 +19,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 func readIdentity(t *testing.T, capDir string) (*capsule.Identity, string) {
@@ -54,11 +55,10 @@ func newAuditRuntime(t *testing.T, repos []api.ProjectRepo) (*Runtime, string) {
 		DataDir:                 filepath.Join(t.TempDir(), "data"),
 		AgentStarter:            scriptedEngineStarter(sp),
 		MaxRecoveries:           2,
-		SendBound:               2 * time.Second,
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 	return r, ws

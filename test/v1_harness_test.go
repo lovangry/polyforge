@@ -921,18 +921,18 @@ func (d *v1Daemon) status(t *testing.T) cli.StatusResponse {
 	return st
 }
 
-// observe reads the JobView projection for wi.
-func (d *v1Daemon) observe(t *testing.T, wi string) *protocol.JobView {
+// watch reads the daemon's watch snapshot for wi (Execution is non-nil:
+// the snapshot must know the work item).
+func (d *v1Daemon) watch(t *testing.T, wi string) *protocol.WatchSnapshot {
 	t.Helper()
-	raw, err := d.client.Observe(wi, 0)
+	snap, err := d.client.WatchSnapshot(wi, 0)
 	if err != nil {
-		t.Fatalf("observe %s: %v (log tail: %s)", wi, err, d.logTail())
+		t.Fatalf("watch %s: %v (log tail: %s)", wi, err, d.logTail())
 	}
-	var jv protocol.JobView
-	if err := json.Unmarshal(raw, &jv); err != nil {
-		t.Fatalf("observe %s undecodable: %v (%s)", wi, err, raw)
+	if snap.Execution == nil {
+		t.Fatalf("watch %s: no execution in %+v (log tail: %s)", wi, snap, d.logTail())
 	}
-	return &jv
+	return snap
 }
 
 // capsuleDir is this daemon's capsule root for wi.
@@ -1650,19 +1650,15 @@ func countOf(list []string, s string) int {
 	return n
 }
 
-// observeSoft is observe that tolerates the not-yet-monitored window:
-// until the auto wave claims the ticket, the observe route answers
-// DAEMON-404 by design, and a poll must retry rather than fail.
-func observeSoft(d *v1Daemon, wi string) *protocol.JobView {
-	raw, err := d.client.Observe(wi, 0)
-	if err != nil {
+// watchSoft is watch that tolerates the not-yet-known window: until the
+// auto wave claims the ticket the snapshot is not Known, and a poll must
+// retry rather than fail.
+func watchSoft(d *v1Daemon, wi string) *protocol.WatchSnapshot {
+	snap, err := d.client.WatchSnapshot(wi, 0)
+	if err != nil || !snap.Known {
 		return nil
 	}
-	var jv protocol.JobView
-	if json.Unmarshal(raw, &jv) != nil {
-		return nil
-	}
-	return &jv
+	return snap
 }
 
 // writePlanExtra rewrites the fake agent's plan file with extra top-level

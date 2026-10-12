@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
 // daemonFixture serves the daemon UDS surface with a recording mux plus
@@ -70,47 +69,6 @@ func (d *daemonFixture) answer(method, path string, body string) {
 	}
 }
 
-func TestDaemonClientObserveRoundtrip(t *testing.T) {
-	d := newDaemonFixture(t)
-	jv := protocol.JobView{
-		WorkItem:    "wi_abc",
-		Project:     "polyforge",
-		Status:      protocol.JobRunning,
-		SpawnN:      1,
-		BundleName:  "bundle-x",
-		CurrentStep: "implement",
-		Steps: map[string]*protocol.StepView{
-			"spec":      {Status: "completed", Attempts: 1, Model: "m"},
-			"implement": {Status: "in_progress", Attempts: 1, Model: "m"},
-		},
-		Budget:  json.RawMessage(`{"requests":{"used":3,"ceiling":50}}`),
-		Pending: &protocol.PendingView{ID: "q_1", Step: "implement", Question: "Ship now?", AskedAt: "2026-10-01T00:00:00Z"},
-		Events: []protocol.EventEntry{
-			{At: "2026-10-01T00:00:01Z", Kind: "step_started"},
-			{At: "2026-10-01T00:00:02Z", Kind: "needs_input", Body: json.RawMessage(`{"question_id":"q_1"}`)},
-		},
-	}
-	d.answer("GET", "/jobs/wi_abc/observe", jsonBody(jv))
-
-	c := NewDaemonClient(d.sock)
-	raw, err := c.Observe("wi_abc", 5)
-	if err != nil {
-		t.Fatalf("Observe: %v", err)
-	}
-	got := d.rec.last()
-	if got.Method != "GET" || got.Path != "/jobs/wi_abc/observe?after=5" {
-		t.Errorf("request = %s %s, want GET /jobs/wi_abc/observe?after=5", got.Method, got.Path)
-	}
-	var back protocol.JobView
-	if err := json.Unmarshal(raw, &back); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if back.WorkItem != "wi_abc" || back.CurrentStep != "implement" ||
-		back.Pending == nil || back.Pending.ID != "q_1" || len(back.Events) != 2 {
-		t.Errorf("JobView roundtrip mismatch: %+v", back)
-	}
-}
-
 func TestDaemonClientSubmitFamilyRoundtrip(t *testing.T) {
 	d := newDaemonFixture(t)
 	for _, intent := range []string{"claim", "resume"} {
@@ -155,9 +113,7 @@ func TestDaemonClientAnswerRoundtrip(t *testing.T) {
 
 	payload := AnswerPayload{
 		QuestionID: "q_1",
-		AnswerID:   "a_abc123",
 		AnswerText: "yes, proceed",
-		AnsweredAt: "2026-10-01T00:00:00Z",
 		AnsweredBy: "usr_9",
 	}
 	if _, err := c.Answer("wi_abc", payload); err != nil {
@@ -167,7 +123,7 @@ func TestDaemonClientAnswerRoundtrip(t *testing.T) {
 	if got.Method != "POST" || got.Path != "/jobs/wi_abc/answer" {
 		t.Errorf("request = %s %s", got.Method, got.Path)
 	}
-	// The relay message IS the body (five fields, verbatim), and the
+	// The payload IS the body (three fields, verbatim), and the
 	// caller identity travels in X-PF-User.
 	if got.Header.Get("X-PF-User") != "usr_9" {
 		t.Errorf("X-PF-User = %q, want usr_9", got.Header.Get("X-PF-User"))
@@ -336,19 +292,14 @@ wi_old     needs_input  -                 -      43         -         -         
 	golden(t, "OpsStatusSessionColumns", stdout, b.String())
 }
 
-// TestAnswerUniquePendingResolution: without --question, the answer verb
-// resolves the WI's single pending question from the observe projection;
-// with no pending question it refuses.
-func TestAnswerUniquePendingResolution(t *testing.T) {
-	jv := protocol.JobView{
-		WorkItem: "wi_abc", Project: "p", Status: protocol.JobNeedsInput,
-		Pending: &protocol.PendingView{ID: "q_9", Step: "implement", Question: "Ship?", AskedAt: "t"},
-	}
+// TestAnswerWithoutQuestionLeavesResolutionToDaemon: without --question the
+// answer verb posts an empty question_id (the daemon resolves the unique
+// pending question) and prints the id the daemon names in its reply.
+func TestAnswerWithoutQuestionLeavesResolutionToDaemon(t *testing.T) {
 	d := newDaemonFixture(t)
-	d.answer("GET", "/jobs/wi_abc/observe", jsonBody(jv))
-	d.answer("POST", "/jobs/wi_abc/answer", `{"applied":true,"delivered":true}`)
+	d.answer("POST", "/jobs/wi_abc/answer", `{"status":"accepted","question_id":"q_9"}`)
 
-	code, _, stderr := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock, "PF_USER_ID": "usr_9"},
+	code, stdout, stderr := runPf(t, map[string]string{"PF_DAEMON_SOCKET": d.sock, "PF_USER_ID": "usr_9"},
 		"answer", "wi_abc", "--text", "yes")
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
@@ -357,19 +308,11 @@ func TestAnswerUniquePendingResolution(t *testing.T) {
 	if got.Path != "/jobs/wi_abc/answer" {
 		t.Fatalf("request path = %s", got.Path)
 	}
-	if !strings.Contains(got.Body, `"question_id":"q_9"`) || !strings.Contains(got.Body, `"answered_by":"usr_9"`) {
+	if !strings.Contains(got.Body, `"question_id":""`) || !strings.Contains(got.Body, `"answered_by":"usr_9"`) {
 		t.Errorf("answer body = %s", got.Body)
 	}
-
-	// No pending question → refusal, no answer call.
-	d2 := newDaemonFixture(t)
-	empty := jv
-	empty.Pending = nil
-	d2.answer("GET", "/jobs/wi_abc/observe", jsonBody(empty))
-	code, _, stderr = runPf(t, map[string]string{"PF_DAEMON_SOCKET": d2.sock, "PF_USER_ID": "usr_9"},
-		"answer", "wi_abc", "--text", "yes")
-	if code != 1 || !strings.Contains(stderr, "no pending question") {
-		t.Errorf("no-pending: code=%d stderr=%s", code, stderr)
+	if !strings.Contains(stdout, "question q_9") {
+		t.Errorf("stdout = %q, want the daemon-resolved question id", stdout)
 	}
 }
 

@@ -7,13 +7,8 @@ package observe
 // history is served from the durable files, not only the in-memory ring.
 
 import (
-	"encoding/json"
 	"os"
-	"strconv"
 	"testing"
-	"time"
-
-	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
 // Seqs keep counting up after the ring has truncated: the last retained
@@ -121,74 +116,6 @@ func TestSinceAfterCursor(t *testing.T) {
 	}
 	if got[0].Seq != 4 {
 		t.Fatalf("truncated-span oldest seq: got %d", got[0].Seq)
-	}
-}
-
-// The HTTP face honors ?after: same filtering over the wire, plus the
-// bad-cursor 400.
-func TestHTTPObserveAfterCursor(t *testing.T) {
-	h := newFakeHandle("att_cur")
-	hs := newHarness(t)
-	hs.start(t, h)
-	soon(t, time.Second, "job registered", func() bool {
-		code, _ := hs.get(t, "/jobs/wi_http/observe")
-		return code == 200
-	})
-	// Generate a handful of events (driver events share this log).
-	m := hs.o.lookup("wi_http")
-	if m == nil {
-		t.Fatal("monitor not registered")
-	}
-	for i := 0; i < 3; i++ {
-		_ = hs.o.Events().Append("wi_http", EvNeedsInput, map[string]any{"question_id": "q_http_" + strconv.Itoa(i)})
-	}
-	soon(t, time.Second, "events appended", func() bool {
-		return len(hs.o.Events().Since("wi_http")) >= 4 // job_started + 3 needs_input
-	})
-	ring := hs.o.Events().Since("wi_http")
-	maxSeq := ring[len(ring)-1].Seq
-
-	// after=0 (the default shape): the whole ring.
-	_, body := hs.get(t, "/jobs/wi_http/observe?after=0")
-	var view protocol.JobView
-	if err := json.Unmarshal(body, &view); err != nil {
-		t.Fatalf("view decode: %v (%s)", err, body)
-	}
-	if len(view.Events) != len(ring) {
-		t.Fatalf("after=0 events: got %d, want %d", len(view.Events), len(ring))
-	}
-	// Served entries carry their seq (#21 gap: the client's next cursor is
-	// the last event's seq, so the EventEntry wire must expose it).
-	if got := view.Events[len(view.Events)-1].Seq; got != maxSeq {
-		t.Fatalf("last served seq: got %d, want %d (the ring's newest)", got, maxSeq)
-	}
-	// The file layer's wire shape is unchanged: bare entries, no seq.
-	// after=maxSeq: nothing new.
-	_, body = hs.get(t, "/jobs/wi_http/observe?after="+strconv.FormatInt(maxSeq, 10))
-	if err := json.Unmarshal(body, &view); err != nil {
-		t.Fatalf("view decode: %v (%s)", err, body)
-	}
-	if len(view.Events) != 0 {
-		t.Fatalf("after=max events: got %d, want 0", len(view.Events))
-	}
-	// after=maxSeq-2: exactly the last two.
-	_, body = hs.get(t, "/jobs/wi_http/observe?after="+strconv.FormatInt(maxSeq-2, 10))
-	if err := json.Unmarshal(body, &view); err != nil {
-		t.Fatalf("view decode: %v (%s)", err, body)
-	}
-	if len(view.Events) != 2 {
-		t.Fatalf("after=max-2 events: got %d, want 2", len(view.Events))
-	}
-	// A malformed cursor is DAEMON-400.
-	if code, _ := hs.get(t, "/jobs/wi_http/observe?after=abc"); code != 400 {
-		t.Fatalf("bad cursor: got %d, want 400", code)
-	}
-	if code, _ := hs.get(t, "/jobs/wi_http/observe?after=-1"); code != 400 {
-		t.Fatalf("negative cursor: got %d, want 400", code)
-	}
-	// No cursor at all: the full projection (backward-compatible).
-	if code, _ := hs.get(t, "/jobs/wi_http/observe"); code != 200 {
-		t.Fatal("cursor-less observe must keep working")
 	}
 }
 

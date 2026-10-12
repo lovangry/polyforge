@@ -13,7 +13,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -60,22 +59,11 @@ func TestRecoveryWindowThenWrapClosesOnce(t *testing.T) {
 	close(park)
 	waitState(t, td, "wi_rw", "running")
 	// The monitor's adoption of the new derivation lags the RUNNING flip
-	// by the attachment pipeline; wait for the view to carry it.
-	var rjv protocol.JobView
+	// by the attachment pipeline; wait for it to drain.
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		rraw, rerr := td.client.Observe("wi_rw", 0)
-		if rerr != nil {
-			t.Fatalf("observe wi_rw: %v", rerr)
-		}
-		if err := json.Unmarshal(rraw, &rjv); err != nil || rjv.SpawnN == 0 {
-			t.Fatalf("wi_rw view undecodable: %v (%s)", err, rraw)
-		}
-		if rjv.SpawnN == 2 { // adopted: the recovered derivation's counter
-			break
-		}
+	for td.rtMsgs.Len() != 0 || td.attachCh.Len() != 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("monitor never adopted the recovered derivation (view spawn_n %d)", rjv.SpawnN)
+			t.Fatal("the attachment pipeline never drained")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -115,35 +115,7 @@ const PushTimeout = 60 * 1e9 // 60 seconds (ns, for time.Duration)
 const (
 	JobRunning    = "running"
 	JobNeedsInput = "needs_input"
-	JobSealing    = "sealing"
-	JobDone       = "done"
 )
-
-// JobView is the observe projection served over UDS (04 §5.1a).
-// SessionFingerprint is the PUBLIC session handle (B3: never the
-// secret). The v1 attempt_id and workflow-generation fields are deleted
-// with the lineage they named (v1.5 session model).
-type JobView struct {
-	WorkItem           string               `json:"work_item"`
-	Project            string               `json:"project"`
-	Status             string               `json:"status"`
-	SpawnN             int                  `json:"spawn_n"`
-	SessionFingerprint string               `json:"session_fingerprint,omitempty"`
-	BundleName         string               `json:"bundle_name"`
-	CurrentStep        string               `json:"current_step"`
-	Steps              map[string]*StepView `json:"steps"`
-	Budget             json.RawMessage      `json:"budget,omitempty"`
-	Pending            *PendingView         `json:"pending_question,omitempty"`
-	Events             []EventEntry         `json:"events"`
-}
-
-type StepView struct {
-	Status    string `json:"status"`
-	Attempts  int    `json:"attempts"`
-	StartedAt string `json:"started_at,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Output    string `json:"output,omitempty"`
-}
 
 type PendingView struct {
 	ID       string `json:"id"`

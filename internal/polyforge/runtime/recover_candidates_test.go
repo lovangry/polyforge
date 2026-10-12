@@ -22,6 +22,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // recordingStarter wraps the scripted engine starter and records every
@@ -68,11 +69,10 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 		Mapping:                 mappingFor(ws, "proj"),
 		DataDir:                 filepath.Join(t.TempDir(), "data"),
 		MaxRecoveries:           2,
-		SendBound:               2 * time.Second,
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 	rec := &recordingStarter{base: scriptedEngineStarter(sp)}
@@ -132,11 +132,10 @@ func TestRecoveryReconstructedJobReDerivesFreshYaml(t *testing.T) {
 		DataDir:                 filepath.Join(t.TempDir(), "data"),
 		AgentStarter:            scriptedEngineStarter(sp),
 		MaxRecoveries:           2,
-		SendBound:               2 * time.Second,
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, newFakeHub(), sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 	ws, err := r.cfg.Mapping.WorkspaceFor("proj")
@@ -185,11 +184,10 @@ func TestRecoveryYamlUnreadableFallsBackToAudit(t *testing.T) {
 		DataDir:                 filepath.Join(t.TempDir(), "data"),
 		AgentStarter:            scriptedEngineStarter(sp),
 		MaxRecoveries:           2,
-		SendBound:               2 * time.Second,
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, newFakeHub(), sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 	ws, err := r.cfg.Mapping.WorkspaceFor("proj")
@@ -227,11 +225,10 @@ func TestRecoveryAuditlessCapsuleRehydratesNil(t *testing.T) {
 		DataDir:                 filepath.Join(t.TempDir(), "data"),
 		AgentStarter:            scriptedEngineStarter(sp),
 		MaxRecoveries:           2,
-		SendBound:               2 * time.Second,
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, newFakeHub(), sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 	j := seedJob(r, "wi_w079rec4")

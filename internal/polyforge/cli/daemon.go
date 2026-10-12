@@ -23,7 +23,6 @@ import (
 // (docs/design/polyforge-vnext/04-local-runtime.md §5.1):
 //
 //	POST /jobs/{id}/claim|resume            body {"priority":"normal"}
-//	GET  /jobs/{id}/observe?after=<cursor>  answer = protocol.JobView
 //	POST /jobs/{id}/answer                  body = the five-field relay
 //	                                        message itself (00 §3.4a)
 //	POST /jobs/{id}/pause  {}               POST /jobs/{id}/wrap {"reason"}
@@ -150,13 +149,11 @@ func parseWireError(status int, body []byte) *api.Error {
 	}
 }
 
-// AnswerPayload is the answer relay message (00 §3.4a, single authority):
-// the daemon forwards it verbatim, never parses or rewrites it.
+// AnswerPayload is the POST /jobs/{id}/answer body. An empty QuestionID
+// lets the daemon resolve the work item's pending question.
 type AnswerPayload struct {
 	QuestionID string `json:"question_id"`
-	AnswerID   string `json:"answer_id"`
 	AnswerText string `json:"answer_text"`
-	AnsweredAt string `json:"answered_at"`
 	AnsweredBy string `json:"answered_by"`
 }
 
@@ -294,13 +291,6 @@ func (d *DaemonClient) submit(wiID, intent, priority string) (json.RawMessage, e
 		d.withOrigin(map[string]any{"priority": priority}), nil)
 }
 
-// Observe pulls the observe projection (protocol.JobView). after is the
-// last received event cursor (first call: 0).
-func (d *DaemonClient) Observe(wiID string, after int64) (json.RawMessage, error) {
-	return d.do("GET", "/jobs/"+url.PathEscape(wiID)+"/observe",
-		"after="+strconv.FormatInt(after, 10), nil, nil)
-}
-
 // Answer relays an answer to a needs_input step. The relay message is
 // the request body itself; the caller identity travels in the X-PF-User
 // header and must match answered_by (00 §3.4a identity rule).
@@ -309,12 +299,10 @@ func (d *DaemonClient) Answer(wiID string, payload AnswerPayload) (json.RawMessa
 		map[string]string{"X-PF-User": payload.AnsweredBy})
 }
 
-// Pause asks the daemon to pause a running WI. The v1.5 operator pause
-// carries clean_pause=true in the body as well: the daemon's own hub
-// transition can set the flag from it (wired at merge), independent of
-// the CLI-side PATCH the pause verb also issues.
+// Pause asks the daemon to pause a running WI (no body: the daemon's close
+// path carries the clean_pause semantics itself).
 func (d *DaemonClient) Pause(wiID string) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/pause", "", map[string]any{"clean_pause": true}, nil)
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/pause", "", nil, nil)
 }
 
 // Wrap asks the daemon to wrap (or fail, when reason=="fail") a running

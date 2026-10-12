@@ -55,45 +55,39 @@ func TestSubmitAndStatus(t *testing.T) {
 	}
 }
 
-// TestObserveAnswerFlush walks the observe lane's own routes end to end
-// through the daemon socket: JobView, a driver-persisted pending question
-// projected from execution.json, and the answer route's refusal.
+// TestObserveAnswerPending walks the watch snapshot end to end through the
+// daemon socket: a driver-persisted pending question projected from
+// execution.json, and the answer route's refusal.
 func TestObserveAnswerPending(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_b")
 	td.waitMonitored(t, "wi_b")
 
-	raw, err := td.client.Observe("wi_b", 0)
+	snap, err := td.client.WatchSnapshot("wi_b", 0)
 	if err != nil {
-		t.Fatalf("observe: %v", err)
+		t.Fatalf("watch: %v", err)
 	}
-	var jv protocol.JobView
-	if err := json.Unmarshal(raw, &jv); err != nil {
-		t.Fatalf("observe undecodable: %v", err)
+	if snap.WorkItem != "wi_b" || !snap.Known || snap.Job == nil || snap.Job.Status != protocol.JobRunning {
+		t.Fatalf("watch snapshot = %+v", snap)
 	}
-	if jv.WorkItem != "wi_b" || jv.Project != "proj" || jv.Status != protocol.JobRunning {
-		t.Fatalf("job view = %+v", jv)
-	}
-	if jv.SpawnN == 0 || len(jv.Events) == 0 {
-		t.Fatalf("job view missing spawn/events: %+v", jv)
+	if len(snap.Events) == 0 {
+		t.Fatalf("watch snapshot missing events: %+v", snap)
 	}
 
 	// The driver parks on a question: pending_question lands in
-	// execution.json and the monitor's poll projects it.
+	// execution.json and the snapshot projects it.
 	td.seedPendingQuestion(t, "wi_b", "q_abc123", "spec", "which flavor?")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		raw, _ = td.client.Observe("wi_b", 0)
-		jv = protocol.JobView{}
-		json.Unmarshal(raw, &jv)
-		if jv.Pending != nil || time.Now().After(deadline) {
+		snap, _ = td.client.WatchSnapshot("wi_b", 0)
+		if (snap != nil && snap.Execution != nil && snap.Execution.PendingQuestion != nil) || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-
-	if jv.Status != protocol.JobNeedsInput || jv.Pending == nil || jv.Pending.ID != "q_abc123" {
-		t.Fatalf("needs_input projection = %s / %+v", jv.Status, jv.Pending)
+	if snap == nil || snap.Execution == nil || snap.Execution.PendingQuestion == nil ||
+		snap.Execution.PendingQuestion.ID != "q_abc123" {
+		t.Fatalf("needs_input projection = %+v", snap)
 	}
 
 	// polyforge#106: the answer relay lane is deleted — the WI's engine
@@ -101,8 +95,8 @@ func TestObserveAnswerPending(t *testing.T) {
 	// refuses fast with the typed no-bridge-handle 409 and NO relay
 	// reaches the agent.
 	araw, aerr := td.client.Answer("wi_b", cli.AnswerPayload{
-		QuestionID: "q_abc123", AnswerID: "a_xy1234",
-		AnswerText: "mint", AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "u_1",
+		QuestionID: "q_abc123",
+		AnswerText: "mint", AnsweredBy: "u_1",
 	})
 	if aerr == nil {
 		t.Fatalf("answer with no live bridge handle was accepted: %s", araw)

@@ -39,6 +39,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 func TestRestartForgetsPendingWrapOfRetainedPausedRecord(t *testing.T) {
@@ -53,8 +54,8 @@ func TestRestartForgetsPendingWrapOfRetainedPausedRecord(t *testing.T) {
 	// -- Phase 1: the operator pause, through the real close path.
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
-	toOB1 := make(chan protocol.RTMsg, 64)
-	r1 := New(cfg, hub, sp, toOB1, make(chan protocol.OBMsg, 64))
+	toOB1 := supervise.NewQueue[protocol.RTMsg]()
+	r1 := New(cfg, hub, sp, toOB1, supervise.NewQueue[protocol.OBMsg]())
 	wi := "wi_new3"
 	sess := fakeSession(wi)
 	hub.hold(wi, sess, api.StatusRunning)
@@ -108,8 +109,8 @@ func TestRestartForgetsPendingWrapOfRetainedPausedRecord(t *testing.T) {
 		events = append(events, wiID+"/"+kind)
 		mu.Unlock()
 	}
-	toOB2 := make(chan protocol.RTMsg, 64)
-	r2 := New(cfg2, hub2, sp2, toOB2, make(chan protocol.OBMsg, 64))
+	toOB2 := supervise.NewQueue[protocol.RTMsg]()
+	r2 := New(cfg2, hub2, sp2, toOB2, supervise.NewQueue[protocol.OBMsg]())
 	restartErr := r2.Restart(context.Background())
 
 	// -- EXPECTED: the pending wrap close is replayed to the hub (a

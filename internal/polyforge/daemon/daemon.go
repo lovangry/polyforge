@@ -201,9 +201,9 @@ type Daemon struct {
 	rt  *runtime.Runtime
 	obs *observe.Observe
 
-	rtMsgs   chan protocol.RTMsg
-	obMsgs   chan protocol.OBMsg
-	attachCh chan observe.Attach
+	rtMsgs   *supervise.Queue[protocol.RTMsg]
+	obMsgs   *supervise.Queue[protocol.OBMsg]
+	attachCh *supervise.Queue[observe.Attach]
 
 	// sealGuard serializes the close paths (CLI wrap/pause): exactly one
 	// close may run per work item; the late arrival answers DAEMON-409.
@@ -297,16 +297,15 @@ func New(cfg Config) (*Daemon, error) {
 	cfg.fill()
 
 	rtCfg := runtime.Config{
-		MachineID:           cfg.MachineID,
-		Mapping:             cfg.Mapping,
-		DataDir:             cfg.DataDir,
-		GitRemoteBase:       cfg.GitRemoteBase,
-		WorkflowsDir:        cfg.WorkflowsDir,
-		Harness:             cfg.Harness,
-		PiBin:               cfg.PiBin,
-		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
-		CgroupRoot:          cfg.CgroupRoot,
-		EnvSecrets:          []string{cfg.APIKey},
+		MachineID:     cfg.MachineID,
+		Mapping:       cfg.Mapping,
+		DataDir:       cfg.DataDir,
+		GitRemoteBase: cfg.GitRemoteBase,
+		WorkflowsDir:  cfg.WorkflowsDir,
+		Harness:       cfg.Harness,
+		PiBin:         cfg.PiBin,
+		CgroupRoot:    cfg.CgroupRoot,
+		EnvSecrets:    []string{cfg.APIKey},
 	}
 	// Runtime-sourced diagnostic events (a seal push that failed after
 	// its retries, pilot item 3) land in the observe lane's durable
@@ -361,9 +360,9 @@ func New(cfg Config) (*Daemon, error) {
 		hub:      cfg.Hub,
 		modes:    NewModeCtl(),
 		q:        NewJobQueue(cfg.MaxConcurrent, func() map[string]bool { return d.occupiedSlots() }),
-		rtMsgs:   make(chan protocol.RTMsg, 64),
-		obMsgs:   make(chan protocol.OBMsg, 64),
-		attachCh: make(chan observe.Attach, 64),
+		rtMsgs:   supervise.NewQueue[protocol.RTMsg](),
+		obMsgs:   supervise.NewQueue[protocol.OBMsg](),
+		attachCh: supervise.NewQueue[observe.Attach](),
 		sealedWI: map[string]bool{},
 		adapters: map[string]*agentAdapter{},
 		shutDone: make(chan struct{}),
@@ -384,8 +383,8 @@ func New(cfg Config) (*Daemon, error) {
 		DataDir:      cfg.DataDir,
 		PollInterval: cfg.ObservePoll,
 		PushFunc:     cfg.PushFunc,
-		// F3: the live-transcript locator the monitor's commit-boundary
-		// sync calls when the runtime recorded no live path; the F2 slug
+		// F3: the live-transcript locator the monitor's per-dispatch
+		// commit-boundary sync calls; the F2 slug
 		// resolver lets CLI-side route calls by the operator's spelling
 		// (a "<project>#<seq>") find the canonically-keyed monitor.
 		LocateLive: func(capsuleDir string, spawnAt time.Time) string {
@@ -669,38 +668,28 @@ func (d *Daemon) reattachRecovered() {
 		if ji.Agent == nil {
 			continue
 		}
-		select {
-		case d.attachCh <- d.buildAttach(protocol.RTMsg{
+		d.attachCh.Push(d.buildAttach(protocol.RTMsg{
 			Kind: protocol.RTStarted, SpawnN: ji.SpawnN,
 			WorkItem: ji.WorkItem, AgentPID: ji.AgentPID,
 			// the in-process secret re-arms the M4 revalidation for
 			// reattached jobs (it rides RTMsg, never a log surface).
 			SessionID: ji.SessionID,
-		}, ji):
-		case <-d.runCtx.Done():
-			return
-		}
+		}, ji))
 	}
 }
 
 // buildAttach turns one runtime snapshot into an observe attachment:
 // the protocol message plus the agent handle adapted to observe's face.
-// The per-derivation transcript facts (F3: the capsule copy path, the
-// live file, the spawn moment) ride the WIInfo the monitor's
-// commit-boundary transcript sync reads.
 func (d *Daemon) buildAttach(msg protocol.RTMsg, ji runtime.JobInfo) observe.Attach {
 	return observe.Attach{
 		Msg:    msg,
 		Handle: d.installAdapter(ji),
 		WI: observe.WIInfo{
-			WorkItem:       ji.WorkItem,
-			Project:        ji.Project,
-			CapsuleDir:     ji.CapsuleDir,
-			BundleName:     ji.BundleName,
-			Git:            ji.Git,
-			Transcript:     ji.Transcript,
-			LiveTranscript: ji.LiveTranscript,
-			SpawnAt:        ji.SpawnAt,
+			WorkItem:   ji.WorkItem,
+			Project:    ji.Project,
+			CapsuleDir: ji.CapsuleDir,
+			BundleName: ji.BundleName,
+			Git:        ji.Git,
 		},
 	}
 }
@@ -746,12 +735,10 @@ func (d *Daemon) canonWI(wi string) string {
 // only control vocabulary).
 func (d *Daemon) bridge() {
 	for {
-		select {
-		case <-d.runCtx.Done():
-			return
-		case msg, ok := <-d.rtMsgs:
+		for {
+			msg, ok := d.rtMsgs.Pop()
 			if !ok {
-				return
+				break
 			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
@@ -759,11 +746,12 @@ func (d *Daemon) bridge() {
 					at = d.buildAttach(msg, ji)
 				}
 			}
-			select {
-			case d.attachCh <- at:
-			case <-d.runCtx.Done():
-				return
-			}
+			d.attachCh.Push(at)
+		}
+		select {
+		case <-d.runCtx.Done():
+			return
+		case <-d.rtMsgs.Notify():
 		}
 	}
 }

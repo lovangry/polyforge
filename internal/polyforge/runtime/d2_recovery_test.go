@@ -15,6 +15,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -89,7 +90,7 @@ func TestBoundedFailMissingCapsuleKillsAgent(t *testing.T) {
 	}
 }
 
-func endPendingRuntime(t *testing.T, hub *fakeHub) (*Runtime, *job, chan protocol.RTMsg) {
+func endPendingRuntime(t *testing.T, hub *fakeHub) (*Runtime, *job, *supervise.Queue[protocol.RTMsg]) {
 	t.Helper()
 	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.EndRetryBase = 10 * time.Millisecond

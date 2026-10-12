@@ -392,9 +392,7 @@ func (r *Runtime) recoveryStabilityWindow() time.Duration {
 // — the hub clears the session row and marks the WI blocked, which the
 // claim gate excludes until a human intervenes (M2). The storm guard's
 // "never a third relaunch" contract is preserved: restart sees blocked
-// and leaves the record untouched. RTFinished(blocked) follows — on
-// sendRelease, so a full observe channel defers rather than drops it
-// (NEW-2: every RTFinished is a terminal release). Before the verdict the
+// and leaves the record untouched. RTFinished(blocked) follows. Before the verdict the
 // agent tree is killed and the dirty capsule committed+pushed best-effort
 // (polyforge#116: the parked verdict must reach the chain; v2-converge §6
 // bug 4: every branch, not just the blocked one). A SessionEnd the hub does
@@ -424,8 +422,6 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 // are the caller's to log; the LOCAL commit is the durable half and it
 // stands on its own.
 func commitDirty(r *Runtime, j *job) string {
-	// F3: the dead agent's live transcript rides this dirty commit too.
-	r.syncTranscriptBeforeSeal(j)
 	sha, _, _, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)
