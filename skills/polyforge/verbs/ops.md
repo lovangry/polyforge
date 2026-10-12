@@ -1,4 +1,4 @@
-# ops — daemon operations: status, auto-pull, max jobs, graceful shutdown
+# ops — daemon operations: status, auto-pull, max jobs, graceful shutdown; end-session recovery
 
 Execution-plane verb: routed to the local daemon (status / ops-config /
 shutdown routes). Machine-local operations only: what this daemon is
@@ -19,6 +19,9 @@ the daemon lives.
   pre-upgrade check
 - 中文: 升级前自检 / 启停 / 守护进程状态 / 本机在跑什么 / 开启自动领取 /
   关闭自动领取 / 优雅停机 / 调大并发
+- EN (recovery): take over a stuck work item / its daemon is dead / the
+  machine holding it is gone / force-end the session
+- 中文 (恢复): 接管卡住的 WI / 持有它的机器挂了 / 强制结束会话
 
 ## Command
 
@@ -27,10 +30,21 @@ pf ops status                                        # local jobs + auto/max + q
 pf ops auto [on|off]                                 # bare: show; on: pull the ready queue itself; off: explicit pf submit only
 pf ops max [N]                                       # bare: show; N >= 1: max concurrent jobs
 pf ops shutdown                                      # graceful shutdown
+pf ops end-session <wi> --reason <text>              # force-end a stuck holder's session (aihub-direct)
 ```
 
 To see what is ready before turning auto on (or to submit by hand), use
 `pf queue --ready`.
+
+`end-session` is the one `ops` action that does not touch the local daemon:
+it calls aihub with the CALLER's own key (admin or project maintainer,
+checked server-side), ends the running/paused session without the holder's
+secret, and returns the work item to `queued`; the old holder is fenced (its
+secret no longer matches). Then any daemon claims it with a plain
+`pf submit <wi>` — progress is restored from the aihub capsule revision chain
+and the driver continues from the recorded current step. Failures: `AUTH-403`
+(not admin/maintainer), `CORE-409` (`NOT_HELD`: not running/paused, nothing to
+end), `CORE-410` (terminal).
 
 ## Success
 

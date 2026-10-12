@@ -95,7 +95,7 @@ const (
 	// did not start.
 	EvSubmitRejected = "submit_rejected"
 	// EvSubmitDropped (v2 §5): a persisted submit was NOT replayed after a
-	// restart (takeover/resume intent, or aihub no longer shows the WI
+	// restart (resume intent, or aihub no longer shows the WI
 	// queued, or the claiming journal already owns it); body names why.
 	EvSubmitDropped = "submit_dropped"
 	// EvCapsuleMissing / EvProjectUnmapped (v2 §6): the WI was parked

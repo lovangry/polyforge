@@ -322,7 +322,7 @@ func TestRestartReleasesForeignHolder(t *testing.T) {
 	wi := "wi_foreign"
 	pid, startedAt := spawnSleeper(t, wi)
 	rec := matrixRecord(r, wi, pid, startedAt)
-	// the takeover happened while we were down: another session holds it
+	// a force-end + re-claim happened while we were down: another session holds it
 	other := fakeSession(wi + "-other")
 	hub.hold(wi, other, api.StatusRunning)
 	// the local capsule scene exists

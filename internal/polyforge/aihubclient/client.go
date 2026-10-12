@@ -1,5 +1,5 @@
 // Package aihubclient is the shared HTTP client for the aihub server, used
-// by runtime (session claim/attach/takeover/end), observe (read-through)
+// by runtime (session claim/attach/force-end/end), observe (read-through)
 // and the CLI verbs. Wire types come from internal/common/api; error
 // decoding maps the typed errStatus envelope back into *api.Error.
 package aihubclient
@@ -472,13 +472,13 @@ func (c *Client) SessionAttach(wi string, req api.SessionAttachRequest) (*api.Se
 	return &out, nil
 }
 
-// ForceTakeover atomically swaps the session to this daemon's new secret.
-func (c *Client) ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
-	var out api.SessionClaimResponse
-	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/force-takeover", req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+// ForceEndSession is the admin/maintainer recovery door: it ends the held
+// session (WI running|paused -> queued, old secret fenced); any daemon then
+// claims the WI normally. Authorization is server-side (admin or project
+// maintainer).
+func (c *Client) ForceEndSession(wi, reason string) error {
+	return c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/force-end-session",
+		api.ForceEndSessionRequest{Reason: reason}, nil)
 }
 
 // SessionVerify is the compare-only holder check (B3: no secret echo).
@@ -486,17 +486,6 @@ func (c *Client) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse
 	var out api.SessionVerifyResponse
 	req := api.SessionVerifyRequest{SessionID: sessionID}
 	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(wi)+"/session-verify", req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-// SessionHolder is the §1.7 public holder read: who holds this WI
-// right now, in PUBLIC fields only (any project viewer may ask; the
-// unheld state is an ordinary answer with the holder fields omitted).
-func (c *Client) SessionHolder(wi string) (*api.SessionHolderResponse, error) {
-	var out api.SessionHolderResponse
-	if err := c.Do("GET", "/api/v1/work-items/"+url.PathEscape(wi)+"/session", nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -510,7 +499,7 @@ func (c *Client) SessionEnd(wi string, req api.SessionEndRequest) error {
 
 // UnblockWorkItem is the blocked state's exit door (v1.5 review
 // Finding 3): status blocked → queued. Authorization is server-side
-// (admin or project maintainer — the force-takeover gate).
+// (admin or project maintainer — the force-end gate).
 func (c *Client) UnblockWorkItem(idOrSlug string) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/unblock", map[string]any{})
 }

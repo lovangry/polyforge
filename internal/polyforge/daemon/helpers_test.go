@@ -102,13 +102,12 @@ func (s *fakeSpawner) lastParams() runtime.SpawnParams {
 // tests need; a HELD wi answers matches only for its own secret.
 
 type fakeHub struct {
-	mu        sync.Mutex
-	status    map[string]string
-	held      map[string]string
-	claims    []api.SessionClaimRequest
-	takeovers []api.SessionClaimRequest
-	ends      []endCall
-	attaches  []api.SessionAttachRequest
+	mu       sync.Mutex
+	status   map[string]string
+	held     map[string]string
+	claims   []api.SessionClaimRequest
+	ends     []endCall
+	attaches []api.SessionAttachRequest
 	// verifies records the wi of every SessionVerify call (the M4
 	// revalidation seam the -revalidate-every flag test pins).
 	verifies []string
@@ -183,13 +182,6 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 		},
 		WorkItem: api.WorkItem{ID: id, ProjectName: "proj"},
 	}, nil
-}
-
-func (h *fakeHub) ForceTakeover(wi string, req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
-	h.mu.Lock()
-	h.takeovers = append(h.takeovers, req)
-	h.mu.Unlock()
-	return h.SessionClaim(req)
 }
 
 func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error) {

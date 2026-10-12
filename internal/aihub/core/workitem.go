@@ -4,8 +4,8 @@ package core
 //
 // v1.5 state machine (statuses in common/api): queued → running (the
 // session CAS claim), running → paused/blocked (session-end), paused →
-// running (session-attach, M3), running/paused → running (force-
-// takeover), running → wrapped/failed (session-end), queued/paused/
+// running (session-attach, M3), running/paused → queued (force-end
+// by an admin/maintainer: the recovery door), running → wrapped/failed (session-end), queued/paused/
 // blocked → canceled (cancel), blocked → queued (unblock — the human
 // exit door of the bounded-fail verdict, v1.5 review Finding 3: since
 // session-end(blocked) became the STANDARD compensation (abandonClaim,
@@ -607,7 +607,7 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error)
 		return nil, Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is already terminal (%s)", status)
 	}
 	if status == api.StatusRunning {
-		return nil, Fail(api.ErrCoreConflict, "", "running work item: end its session (pause/block/takeover) before cancelling")
+		return nil, Fail(api.ErrCoreConflict, "", "running work item: end its session (pause/block/force-end) before cancelling")
 	}
 	now := Now()
 	// Guarded: only a cancelable row flips; 0 rows = concurrent transition.

@@ -129,10 +129,15 @@ takes over: an in-daemon engine that reads and writes
 `runtime-state/execution.json` (its single state authority) and spawns one
 **step process** per workflow step — real `pi` harness sessions — collecting
 each step's result envelope, validating it, and advancing the workflow. A
-plain submit is the ordinary claim — `pf submit <id> --takeover` is the admin
-force-takeover path. A WI whose holder is gone or superseded moves with
-`pf takeover <id> --reason <text>`, which swaps the session under it
-(the old holder is fenced at its next push). `pf watch <id> --once` shows a
+plain submit is the ordinary claim. A WI whose holder daemon is dead or
+stuck is recovered in two ordinary steps: an admin or project maintainer runs
+`pf ops end-session <id> --reason <text>` (the session is ended, the WI is
+`queued` again, and the old holder is fenced — its secret no longer matches, so
+its pushes and verdicts are refused and its own session revalidation makes it
+release), then any daemon claims it with a plain `pf submit <id>`; the claim
+restores progress from the aihub capsule revision chain (and the task repos'
+`refs/pf-task` carrier refs) and the driver continues from the recorded current
+step. `pf watch <id> --once` shows a
 snapshot read from the capsule's `execution.json`: status, current step and
 how long it has run, the pending question and the latest events;
 `pf watch --chat "$PF_CHAT_ID" --wait-decision` is the resident per-chat
@@ -162,8 +167,8 @@ daemon parked `repair_pending` after a restart — see the failure codes below;
 `pf wrap <WI_ID> --fail` records the owner's failed verdict instead).
 `pf pause <WI_ID>` sets a clean_pause (a daemon restart will not
 auto-resume it); `pf resume <WI_ID>` clears the flag and the holder
-daemon re-attaches on its next start — to continue immediately, use
-`pf takeover`.
+daemon re-attaches on its next start — to move it elsewhere (or immediately),
+`pf ops end-session <id> --reason <text>` then `pf submit <id>`.
 
 **9. Tear down:**
 
@@ -223,8 +228,6 @@ polyforge#106; no step process reaches the daemon socket by design.)
 | POST | `/jobs/{wi}/resume` | Submit family: enqueue a resume of a paused item; for a WI parked `repair_pending` it re-checks the capsule/mapping and resumes in place with the kept session (still broken → `DAEMON-517` / `DAEMON-412`). | user |
 | POST | `/jobs/{wi}/resume-blocked` | The claim/start half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
 | POST | `/jobs/{wi}/abandon-repair` | Give up a `repair_pending` WI (`pf cancel` → verdict `canceled`, `pf wrap --fail` → `failed`): ends the kept session with the stored secret, drops the parked record, writes `repair_abandoned`. The CLI passes aihub's `close-auth` probe with the human's key first. | user |
-| POST | `/jobs/{wi}/takeover` | Submit family: enqueue a takeover of an item running elsewhere. | user |
-| POST | `/jobs/{wi}/adopt-session` | Take custody of an externally minted session secret (the CLI takeover's handoff); verify-backed. | user |
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
 | POST | `/jobs/{wi}/wrap` | CLI close path: seal the job with reason `wrap` or `fail`. | user |
 | POST | `/jobs/{wi}/ship` | Delivery bridge: push the sealed capsule's task repos to their origins as branch `polyforge/<wi>` (+ PR when a credential exists). | user |
@@ -302,8 +305,8 @@ registry; `pf <verb> -help` one verb's face. The routing skill's fragments
 
 | Face | Verbs |
 | --- | --- |
-| aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember`, `takeover`, `verify-session` |
-| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`; `observe` is its deprecated alias), `answer`, `pause`, `resume`, `wrap`, `ship`, `ops`, `chat init` |
+| aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember` |
+| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`; `observe` is its deprecated alias), `answer`, `pause`, `resume`, `wrap`, `ship`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
 | management | `users`, `api-keys`, `projects`, `machines`, `backup`, `rotate-secret` |
 | local | `daemon` (run the work machine), `doctor` |
 

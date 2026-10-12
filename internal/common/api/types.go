@@ -149,7 +149,7 @@ type ListResponse[T any] struct {
 // ---------------------------------------------------------------------------
 // v1.5 session model wire types (docs/design/polyforge-vnext/v1.5-api-contract.md).
 
-// SessionClaim is the v1.5 claim/attach/takeover response envelope. The
+// SessionClaim is the v1.5 claim/attach response envelope. The
 // session_id is a SECRET minted by the daemon; it is never echoed here —
 // only its public fingerprint travels (B3 identity/credential split).
 type SessionClaim struct {
@@ -175,16 +175,20 @@ type SessionClaimResponse struct {
 	WorkItem WorkItem     `json:"work_item"`
 }
 
-// SessionClaimRequest is the CAS claim body (also force-takeover, where
-// Reason is required). session_id is the client-minted secret, journaled
-// durably BEFORE this call (B1).
+// SessionClaimRequest is the CAS claim body. session_id is the
+// client-minted secret, journaled durably BEFORE this call (B1).
 type SessionClaimRequest struct {
 	WorkItemID     string `json:"work_item_id"`
 	SessionID      string `json:"session_id"`
 	MachineID      string `json:"machine_id"`
 	Owner          string `json:"owner"`
-	Reason         string `json:"reason,omitempty"` // takeover only; required there
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+// ForceEndSessionRequest is the admin/maintainer force-end body (reason
+// required; it lands in the session_superseded audit event).
+type ForceEndSessionRequest struct {
+	Reason string `json:"reason"`
 }
 
 // SessionAttachRequest resumes a paused WI under the SAME session (M3:

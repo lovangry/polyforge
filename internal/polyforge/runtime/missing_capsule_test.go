@@ -7,7 +7,7 @@ package runtime
 // entry refuses with *MissingCapsuleError, the recovery engine refuses
 // with a loud blocked verdict — and NO code path rebuilds, re-clones or
 // re-materializes the scene: the clone stays confined to the
-// fresh-claim/takeover lane (prepareCapsule).
+// fresh-claim/re-claim lane (prepareCapsule).
 
 import (
 	"context"

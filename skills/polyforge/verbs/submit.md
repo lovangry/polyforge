@@ -1,24 +1,26 @@
 # submit — submit a work item for execution on this machine
 
 Execution-plane verb: the `pf` CLI talks to the local daemon over its unix
-socket (claim / resume / takeover route family). Explicit submit of
+socket (claim / resume route family). Explicit submit of
 exactly one work item; always legal, also while the daemon's auto-pull
 (`pf ops auto on`) is on. To see what is ready, use `pf queue --ready`.
 
 ## Triggers
 
-- EN: run it / submit it / start this work item / execute / take this one /
-  force takeover / take it over from that machine
-- 中文: 跑起来 / 执行这个 WI / 提交执行 / 认领开跑 / 接管 / 强制接管
+- EN: run it / submit it / start this work item / execute / take this one
+- 中文: 跑起来 / 执行这个 WI / 提交执行 / 认领开跑
+
+"Take it over from that (dead/stuck) machine" is NOT a submit flag: end the
+stuck session first with `pf ops end-session` (see `verbs/ops.md`), then
+submit as usual.
 
 ## Command
 
 ```
-pf submit <id> [--takeover] [--priority low|normal|high|urgent]
+pf submit <id> [--priority low|normal|high|urgent]
 ```
 
-`--takeover` asks the daemon for the admin force-takeover claim instead of a
-plain claim. `--priority` defaults to `normal`. Before the daemon is
+`--priority` defaults to `normal`. Before the daemon is
 involved, the CLI prechecks the work item against Core with the caller's own
 api key, so obviously doomed submissions fail fast with a visible verdict.
 
@@ -46,17 +48,16 @@ The claim itself happens asynchronously in the daemon's dispatcher: a
 server-side refusal (e.g. `CORE-409`, someone else holds the active
 generation) surfaces in the daemon log and the job never appears in
 `pf ops status` — observe/status is the follow-up, not the submit answer.
-For a takeover refused as non-admin, the same path reports `CORE-403`.
 
-## Takeover and holder check
+## Recovering a work item held by a dead or stuck daemon
 
-`pf takeover <id> --reason <text> [--machine ID] [--owner ID]` moves a work
-item whose holder is gone or superseded: it swaps the session under it (the
-old holder is fenced at its next push) and hands the minted secret to the
-local daemon's custody. `pf verify-session <id>` is the read-only check of who
-holds the work item (public fingerprint, machine, owner; never the secret).
-Both are data-plane CLI verbs with their own typed errors; they belong to this
-fragment's intent family ("take it over").
+There is no takeover flag or verb. An admin or project maintainer ends the
+stale session (`pf ops end-session <id> --reason <text>`, see `verbs/ops.md`):
+the work item goes back to `queued` and the old holder is fenced. Then
+`pf submit <id>` on any daemon is the ordinary claim, which restores progress
+from the capsule revision chain and continues from the recorded current step.
+A `CORE-409 NOT_CLAIMABLE`/`ALREADY_HELD` answer on submit means the session
+has not been ended yet.
 
 ## Watching what you submitted
 

@@ -80,7 +80,7 @@ func (m *ModeCtl) SetAuto(on bool) error {
 	return nil
 }
 
-// AdmitSubmit decides a single claim/resume/takeover: always legal (also
+// AdmitSubmit decides a single claim/resume: always legal (also
 // while auto is on) except once shutting_down is latched (DAEMON-410).
 func (m *ModeCtl) AdmitSubmit() error {
 	m.mu.Lock()
@@ -122,7 +122,7 @@ type qEntry struct {
 	WorkItemID string    `json:"work_item_id"`
 	Priority   string    `json:"priority,omitempty"`
 	EnqueuedAt time.Time `json:"enqueued_at"`
-	Intent     string    `json:"intent"` // claim | resume | takeover
+	Intent     string    `json:"intent"` // claim | resume
 	// SubmittedAt is the wall time the submit was accepted (replay
 	// evidence; EnqueuedAt is the FIFO key and equals it for live submits).
 	SubmittedAt time.Time `json:"submitted_at"`

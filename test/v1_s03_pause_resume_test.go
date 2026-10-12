@@ -134,7 +134,7 @@ func TestV1S03PauseResume(t *testing.T) {
 
 	inst.waitWIStatus(t, wi, "running", 30*time.Second)
 	// The attach kept the session: same public fingerprint as before the
-	// whole pause/resume cycle (a takeover would have swapped it).
+	// whole pause/resume cycle (a force-end + re-claim would have swapped it).
 	sess = inst.sessionOf(t, wi)
 	if sess.Fingerprint != sessBefore.Fingerprint {
 		t.Fatalf("the attach changed the session: %q, want %q", sess.Fingerprint, sessBefore.Fingerprint)

@@ -92,45 +92,37 @@ func TestListMachinesPinsRouteAndDecoding(t *testing.T) {
 	}
 }
 
-// TestSessionHolderPinsRouteAndDecoding (§1.7): the client method hits
-// GET /api/v1/work-items/{wi}/session with the bearer key and decodes
-// both the held body and the unheld (flat-omitted) body.
-func TestSessionHolderPinsRouteAndDecoding(t *testing.T) {
-	held := `{"work_item_id":"wi_x","status":"running",` +
-		`"session_fingerprint":"cafe0123abcd4567","machine_id":"m1",` +
-		`"session_owner":"op","session_started_at":"2026-10-01T00:00:00Z",` +
-		`"clean_pause":false}`
-	unheld := `{"work_item_id":"wi_x","status":"queued","clean_pause":false}`
-	body := held
+// TestForceEndSessionPinsRouteAndBody: the client method POSTs
+// /api/v1/work-items/{wi}/force-end-session with the bearer key and the
+// {"reason"} body, and surfaces a refusal envelope as an error.
+func TestForceEndSessionPinsRouteAndBody(t *testing.T) {
 	var gotMethod, gotPath, gotAuth string
+	var gotBody map[string]string
+	status := http.StatusOK
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(body))
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = w.Write([]byte(`{"id":"wi_x","status":"queued"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"error":{"code":"CORE-409","message":"not held","reason":"NOT_HELD"}}`))
 	}))
 	defer srv.Close()
 	c := New(srv.URL, "k")
 
-	resp, err := c.SessionHolder("wi_x")
-	if err != nil {
-		t.Fatalf("held: %v", err)
+	if err := c.ForceEndSession("wi_x", "holder machine lost"); err != nil {
+		t.Fatalf("force-end: %v", err)
 	}
-	if gotMethod != "GET" || gotPath != "/api/v1/work-items/wi_x/session" || gotAuth != "Bearer k" {
+	if gotMethod != "POST" || gotPath != "/api/v1/work-items/wi_x/force-end-session" || gotAuth != "Bearer k" {
 		t.Fatalf("request shape: %s %s auth=%q", gotMethod, gotPath, gotAuth)
 	}
-	if resp.WorkItemID != "wi_x" || resp.Status != "running" ||
-		resp.SessionFingerprint != "cafe0123abcd4567" || resp.MachineID != "m1" ||
-		resp.SessionOwner != "op" || resp.SessionStartedAt != "2026-10-01T00:00:00Z" || resp.CleanPause {
-		t.Fatalf("held decode: %+v", resp)
+	if gotBody["reason"] != "holder machine lost" {
+		t.Fatalf("body: %v", gotBody)
 	}
-
-	body = unheld
-	resp, err = c.SessionHolder("wi_x")
-	if err != nil {
-		t.Fatalf("unheld: %v", err)
-	}
-	if resp.WorkItemID != "wi_x" || resp.Status != "queued" || resp.CleanPause ||
-		resp.SessionFingerprint != "" || resp.MachineID != "" ||
-		resp.SessionOwner != "" || resp.SessionStartedAt != "" {
-		t.Fatalf("unheld decode: %+v", resp)
+	status = http.StatusConflict
+	if err := c.ForceEndSession("wi_x", "again"); err == nil {
+		t.Fatalf("refusal envelope must surface as an error")
 	}
 }

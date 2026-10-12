@@ -71,7 +71,7 @@ const (
 
 	// GIT — v1 git proxy surface (pre-receive rejects, auth, protocol)
 	ErrGitBadRequest   = "GIT-400" // smart-HTTP method/target mismatch at the proxy
-	ErrGitUnauthorized = "GIT-401" // attempt-scoped credential rejected (takeover fencing)
+	ErrGitUnauthorized = "GIT-401" // attempt-scoped credential rejected (stale-session fencing)
 	ErrGitForbidden    = "GIT-403"
 	ErrGitNotFound     = "GIT-404"
 	ErrGitNonFF        = "GIT-409" // non-fast-forward push
