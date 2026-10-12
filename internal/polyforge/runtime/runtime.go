@@ -886,6 +886,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			RemoteURL:   r.remoteURLFor(id),
 			Username:    id,
 			Secret:      sessionID, // v1.5: the session secret IS the push password
+			EventSink:   r.gitEventSink(id),
 		},
 		bundleName:   c.BundleName,
 		bundleDigest: c.BundleDigest,

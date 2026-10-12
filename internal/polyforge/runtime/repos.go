@@ -18,11 +18,13 @@ package runtime
 // push credential does, via the gitops choke point).
 //
 // Recovery contract: a repos/<name> that already exists at materialize
-// time (a same-generation husk from a crashed Start, or an in-place
-// materialize rerun) is NEVER fetched, reset or re-cloned — the agent's
-// uncommitted edits in that worktree are the live scene a later
-// commit-dirty/ship path needs. Existence is verified, the recorded
-// baseline is carried forward, nothing else is touched.
+// time AND has a baseline recorded in the prior capsule.json (a
+// same-generation husk from a crashed Start, or an in-place materialize
+// rerun) is NEVER fetched, reset or re-cloned — the agent's uncommitted
+// edits in that worktree are the live scene a later commit-dirty/ship
+// path needs. A directory with NO recorded baseline is the crash window
+// between the clone and the capsule.json write: an untouched fresh
+// clone, which takes the carrier restore like any new clone.
 //
 // Durability contract (polyforge#108): a repos/<name> that does NOT
 // exist at materialize time — the bounded-fail re-claim shape, where
@@ -44,6 +46,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -59,36 +62,54 @@ import (
 // error — the caller closes the attempt as blocked, never a daemon crash.
 func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string, error) {
 	out := map[string]string{}
-	if len(j.repos) == 0 {
-		return out, nil
-	}
 	// The prior capsule.json (same-generation husk) is read BEFORE this
 	// materialize overwrites it: recorded baselines are claim-time facts
 	// and must survive a re-materialize even if the agent has since
 	// committed (moved HEAD).
 	prior := readCapsuleRepos(j.capsuleDir)
-	for _, pr := range j.repos {
+	// The required set is the claim inventory UNION the repos the prior
+	// capsule.json recorded: an inventory that went empty (or lost a
+	// repo) must not silently drop a task repo the WI already works in.
+	repos := append([]api.ProjectRepo(nil), j.repos...)
+	inInventory := map[string]bool{}
+	for _, pr := range repos {
+		inInventory[pr.Name] = true
+	}
+	var recorded []string
+	for name := range prior {
+		if !inInventory[name] {
+			recorded = append(recorded, name)
+		}
+	}
+	sort.Strings(recorded)
+	for _, name := range recorded {
+		repos = append(repos, api.ProjectRepo{Name: name})
+	}
+	for _, pr := range repos {
 		if !safeRepoName(pr.Name) {
 			return nil, repoCloneErr(j.wi, pr, "repo name %q is not a single safe path element", pr.Name)
 		}
 		dir := filepath.Join(j.capsuleDir, capsule.DirRepos, pr.Name)
-		if dirExists(dir) {
-			// Resume/recovery shape: presence is the check; the baseline
-			// is the recorded one, falling back to the worktree's HEAD
-			// only when no prior record exists (a torn first Start).
+		exists := dirExists(dir)
+		if exists {
+			// Resume/recovery shape: presence is the check; a recorded
+			// baseline is carried forward untouched.
 			if sha, ok := prior[pr.Name]; ok && sha != "" {
 				out[pr.Name] = sha
 				continue
 			}
-			sha, err := gitHeadSHA(ctx, dir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: HEAD unreadable in existing worktree: %v\n", j.wi, pr.Name, err)
+			// No recorded baseline: the previous Start died between the
+			// clone and the capsule.json write, so the directory is an
+			// untouched fresh clone (the agent never ran). It takes the
+			// same carrier restore as a new clone, instead of adopting
+			// the origin's HEAD as the baseline.
+		} else {
+			if pr.URL == "" {
+				return nil, repoCloneErr(j.wi, pr, "recorded in the prior capsule.json but absent from the project inventory and missing on disk: no URL to clone from")
 			}
-			out[pr.Name] = sha
-			continue
-		}
-		if err := gitClone(ctx, pr.URL, dir); err != nil {
-			return nil, repoCloneErr(j.wi, pr, "clone failed: %v", err)
+			if err := gitClone(ctx, pr.URL, dir); err != nil {
+				return nil, repoCloneErr(j.wi, pr, "clone failed: %v", err)
+			}
 		}
 		// A clone of a history-less remote succeeds with no HEAD: the
 		// baseline is then empty, which is honest — there is no commit
@@ -99,11 +120,17 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		}
 		// Durability lane (polyforge#108): when a previous session
 		// published its head to the WI's carrier ref, the fresh origin
-		// clone is moved there — the recorded baseline then names the
-		// scene the workflow actually left behind, not the origin's
-		// default branch. Quiet "" = no carrier (first claim); anything
-		// else logs loudly and keeps the plain clone.
-		if restored := r.restoreTaskRepoState(ctx, j, pr.Name, dir); restored != "" {
+		// clone is moved there. ("", nil) = no carrier (first claim). A
+		// carrier that exists but cannot be restored FAILS the claim
+		// (typed DAEMON-507, the WI closes blocked, the carrier stays
+		// safe on aihub) and the half-restored clone is removed so a
+		// retry re-clones it cleanly.
+		restored, rerr := r.restoreTaskRepoState(ctx, j, pr.Name, dir)
+		if rerr != nil {
+			_ = os.RemoveAll(dir)
+			return nil, repoCloneErr(j.wi, pr, "task_repo_restore_failed: %v (the WI's commits are safe on %s at aihub; fix the cause and resume)", rerr, gitops.TaskRefName(pr.Name))
+		}
+		if restored != "" {
 			sha = restored
 		}
 		out[pr.Name] = sha
@@ -113,42 +140,52 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 
 // restoreTaskRepoState moves a FRESH task-repo clone to the head the
 // previous session left in the WI's carrier ref (gitops.TaskRefName):
-// fetch the ref, point the checked-out branch at it, sync index and
-// worktree. "" answers "nothing restored" — no carrier recorded yet (the
-// normal first-claim shape, quiet), an unreachable carrier, or an
-// unusable ref (each logged loudly); the caller then keeps the plain
-// origin clone and its HEAD as the baseline. Non-destructive by
-// construction: the worktree is a just-created clone with no local
-// state — update-ref works for a born or unborn branch, and reset --hard
-// syncs index+worktree to the branch it now names.
-func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, name, dir string) string {
+// fetch the ref, point a local branch at it, sync index and worktree.
+// ("", nil) means "nothing to restore" — only the first-claim shape, no
+// carrier recorded. Every other outcome is either the restored SHA or an
+// error: a repo that HAS a carrier must never proceed on a clone lacking
+// the WI's commits (principle: never silently lose or rebuild work), and
+// a carrier that cannot be read is not evidence there is none.
+//
+// The branch is the clone's checked-out branch when HEAD is symbolic; a
+// clone sourced from a detached-HEAD checkout (locally sourced clones,
+// w079) has none, so the carrier tip lands on the deterministic branch
+// carrierFallbackBranch. Non-destructive by construction: the worktree
+// is a just-created clone with no local state.
+func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, name, dir string) (string, error) {
+	ref := gitops.TaskRefName(name)
 	sha, err := gitops.FetchTaskRef(j.git, dir, name)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: carrier fetch failed (task-repo state may be lost on re-claim): %v\n", j.wi, name, err)
-		return ""
+		return "", fmt.Errorf("carrier %s fetch failed: %w", ref, err)
 	}
 	if sha == "" {
-		return "" // no carrier recorded: first claim, nothing to restore
+		return "", nil // no carrier recorded: first claim, nothing to restore
 	}
 	if cur, err := gitHeadSHA(ctx, dir); err == nil && cur == sha {
-		return sha // the origin clone already stands on the carried head
+		return sha, nil // the origin clone already stands on the carried head
 	}
-	branch, err := gitTask(ctx, dir, "symbolic-ref", "--short", "HEAD")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: carrier restore skipped (branch unreadable): %v\n", j.wi, name, err)
-		return ""
+	if out, err := gitTask(ctx, dir, "cat-file", "-e", sha+"^{commit}"); err != nil {
+		return "", fmt.Errorf("carrier %s names %s, which is not a readable commit: %v: %s", ref, sha, err, strings.TrimSpace(out))
 	}
-	if out, err := gitTask(ctx, dir, "update-ref", "-m", "pf: restore task-repo state across re-claim", "refs/heads/"+strings.TrimSpace(branch), sha); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: carrier restore failed (update-ref): %v: %s\n", j.wi, name, err, strings.TrimSpace(out))
-		return ""
+	branch := carrierFallbackBranch
+	if b, err := gitTask(ctx, dir, "symbolic-ref", "--short", "HEAD"); err == nil && strings.TrimSpace(b) != "" {
+		branch = strings.TrimSpace(b)
 	}
-	if out, err := gitTask(ctx, dir, "reset", "--hard", "--quiet"); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: carrier restore failed (reset): %v: %s\n", j.wi, name, err, strings.TrimSpace(out))
-		return ""
+	// checkout --force -B: attaches HEAD to the branch (a detached or
+	// unborn HEAD included) and syncs index+worktree to it.
+	if out, err := gitTask(ctx, dir, "checkout", "--force", "--quiet", "-B", branch, sha); err != nil {
+		return "", fmt.Errorf("carrier %s restore failed (checkout %s): %v: %s", ref, branch, err, strings.TrimSpace(out))
 	}
-	fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: restored the previous session's head %s from the capsule carrier ref\n", j.wi, name, sha)
-	return sha
+	if cur, err := gitHeadSHA(ctx, dir); err != nil || cur != sha {
+		return "", fmt.Errorf("carrier %s restore failed: HEAD is %q after restore, want %s (%v)", ref, cur, sha, err)
+	}
+	fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: restored the previous session's head %s from the capsule carrier ref (branch %s)\n", j.wi, name, sha, branch)
+	return sha, nil
 }
+
+// carrierFallbackBranch names the local branch a carrier is restored onto
+// when the fresh clone has no checked-out branch (detached-HEAD source).
+const carrierFallbackBranch = "pf-carrier"
 
 // gitTask runs one git command inside a task-repo worktree: the
 // worktree's OWN git-dir (never the capsule's external GIT_DIR binding —
@@ -228,4 +265,14 @@ func readCapsuleRepos(capsuleDir string) map[string]string {
 		return nil
 	}
 	return idn.Repos
+}
+
+// gitEventSink binds the durable EventTap to one WI for the gitops lanes
+// (task_ref_diverged); nil when no tap is configured.
+func (r *Runtime) gitEventSink(wi string) func(kind string, body map[string]any) {
+	tap := r.cfg.EventTap
+	if tap == nil {
+		return nil
+	}
+	return func(kind string, body map[string]any) { tap(wi, kind, body) }
 }
