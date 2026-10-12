@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,10 +21,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // ---------------------------------------------------------------------------
@@ -363,7 +368,7 @@ func testCapsuleDir(r *Runtime, wi string) string {
 	return filepath.Join(ws, "capsules", wi)
 }
 
-func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protocol.RTMsg, chan protocol.OBMsg) {
+func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, *supervise.Queue[protocol.RTMsg], *supervise.Queue[protocol.OBMsg]) {
 	t.Helper()
 	cfg := Config{
 		MachineID: "m-test",
@@ -373,15 +378,14 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, chan protoco
 		// through the single engine seam (a derivation is a Spawn call).
 		AgentStarter:  scriptedEngineStarter(sp),
 		MaxRecoveries: 2,
-		SendBound:     2 * time.Second,
 		// Test episodes are separated by handleOB calls, not real time:
 		// the entry-rate storm guard's window is collapsed to nothing so
 		// every recovery models a fresh episode (the storm tests override
 		// this with a real window to drive the guard itself).
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
 	return r, toOB, fromOB
 }
@@ -522,23 +526,26 @@ func bareHasMain(t *testing.T, bare string) bool {
 // ---------------------------------------------------------------------------
 // assertions
 
-func recvRT(t *testing.T, ch chan protocol.RTMsg) protocol.RTMsg {
+func recvRT(t *testing.T, q *supervise.Queue[protocol.RTMsg]) protocol.RTMsg {
 	t.Helper()
-	select {
-	case m := <-ch:
-		return m
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for an RT message")
-		return protocol.RTMsg{}
+	deadline := time.After(5 * time.Second)
+	for {
+		if m, ok := q.Pop(); ok {
+			return m
+		}
+		select {
+		case <-q.Notify():
+		case <-deadline:
+			t.Fatal("timed out waiting for an RT message")
+			return protocol.RTMsg{}
+		}
 	}
 }
 
-func assertNoRT(t *testing.T, ch chan protocol.RTMsg) {
+func assertNoRT(t *testing.T, q *supervise.Queue[protocol.RTMsg]) {
 	t.Helper()
-	select {
-	case m := <-ch:
+	if m, ok := q.Pop(); ok {
 		t.Fatalf("unexpected RT message: %+v", m)
-	default:
 	}
 }
 
@@ -598,7 +605,7 @@ func writeStateFile(t *testing.T, r *Runtime, recs []*jobRecord) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := atomicWrite(r.statePath, blob, stateFilePerm); err != nil {
+	if err := atomicfile.Write(r.statePath, blob, stateFilePerm); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -669,4 +676,39 @@ func spawnOrphaningSleeper(wi string) (*orphaningAgent, error) {
 		return nil, err
 	}
 	return &orphaningAgent{handle: h, orphanPID: pid}, nil
+}
+
+// writeSpawnJournal appends one journal line in the driver adapter's
+// shape (the production writer lives in the driver; tests only need the
+// ledger it leaves behind).
+func writeSpawnJournal(p SpawnParams, pid int, startedAt string, spawnToken string) error {
+	blob, err := json.Marshal(map[string]any{
+		"at":             nowStamp(),
+		"work_item":      p.WorkItemID,
+		"spawn_token":    spawnToken,
+		"pid":            pid,
+		"started_at":     startedAt,
+		"session_handle": p.SessionHandle,
+		"spawn_n":        p.SpawnN,
+		"resume":         p.Resume,
+		"transcript":     p.TranscriptPath,
+	})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(p.CapsuleDir, capsule.DirRuntimeState, capsule.SpawnJournalFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(blob, '\n'))
+	return err
+}
+
+func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...func(string)) *proc {
+	return newProcOpts(cmd, stdin, stdout, procOpts{taps: taps})
 }

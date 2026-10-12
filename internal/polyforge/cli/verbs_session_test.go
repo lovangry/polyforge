@@ -250,10 +250,8 @@ func TestPauseRefusalWritesNothing(t *testing.T) {
 	}
 }
 
-// TestResumeDispatchByWIState pins the three-way `pf resume` order (D1+D2
-// merge): blocked -> human-key door then daemon resume-blocked; not blocked
-// and parked repair_pending on THIS daemon -> the daemon's in-place resume
-// route (no resume-blocked door, no daemon claim); otherwise -> the plain
+// TestResumeDispatchByWIState pins the two-way `pf resume` order: blocked ->
+// human-key door then daemon resume-blocked; otherwise (paused) -> the plain
 // clean_pause PATCH with no daemon route.
 func TestResumeDispatchByWIState(t *testing.T) {
 	wiWith := func(status string, clean bool) string {
@@ -261,22 +259,17 @@ func TestResumeDispatchByWIState(t *testing.T) {
 			`","clean_pause":` + map[bool]string{true: "true", false: "false"}[clean] +
 			`,"priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`
 	}
-	const repairStatus = `{"machine_id":"m1","auto":false,"workspaces":["/w"],"shutting_down":false,` +
-		`"jobs":[{"work_item_id":"wi_abc","status":"repair_pending","repair_reason":"capsule_missing"}],"queue":{"pending":0,"running":0,"max_concurrent":2}}`
 	cases := []struct {
 		name         string
 		hubStatus    string
 		clean        bool
-		repair       bool
 		wantPatch    bool
 		wantDoor     bool
 		wantDaemon   []string // POST paths expected on the daemon
 		wantStdoutIn string
 	}{
-		{"paused", "paused", true, false, true, false, nil, "clean_pause cleared"},
-		{"blocked", "blocked", false, false, false, true, []string{"/jobs/wi_abc/resume-blocked"}, "parked blocked"},
-		{"repair_pending running", "running", false, true, false, false, []string{"/jobs/wi_abc/resume"}, "repair_pending"},
-		{"repair_pending paused", "paused", true, true, true, false, []string{"/jobs/wi_abc/resume"}, "repair_pending"},
+		{"paused", "paused", true, true, false, nil, "clean_pause cleared"},
+		{"blocked", "blocked", false, false, true, []string{"/jobs/wi_abc/resume-blocked"}, "parked blocked"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -285,9 +278,6 @@ func TestResumeDispatchByWIState(t *testing.T) {
 				io.WriteString(w, wiWith(tc.hubStatus, tc.clean))
 			})
 			d := newDaemonFixture(t)
-			if tc.repair {
-				d.answer("GET", "/status", repairStatus)
-			}
 			d.answer("POST", "/jobs/wi_abc/resume-blocked", `{"resumed":true,"work_item_id":"wi_abc"}`)
 			d.answer("POST", "/jobs/wi_abc/resume", `{"accepted":true,"work_item_id":"wi_abc"}`)
 			code, stdout, stderr := runPf(t, map[string]string{
@@ -321,108 +311,6 @@ func TestResumeDispatchByWIState(t *testing.T) {
 				t.Errorf("daemon POSTs = %v, want %v", posts, tc.wantDaemon)
 			}
 		})
-	}
-}
-
-// TestAbandonRepairPendingDispatch pins the give-up door of a WI the local
-// daemon holds parked repair_pending: `pf cancel` / `pf wrap --fail` run the
-// read-only human-key authorization probe at aihub FIRST, then ask the
-// daemon (canceled / failed). A refused probe never reaches the daemon.
-func TestAbandonRepairPendingDispatch(t *testing.T) {
-	const wiJSON = `{"id":"wi_abc","slug":"pf-42","seq":42,"project":"polyforge","goal":"g","status":"running","priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`
-	const repairStatus = `{"machine_id":"m1","auto":false,"workspaces":["/w"],"shutting_down":false,` +
-		`"jobs":[{"work_item_id":"wi_abc","status":"repair_pending","repair_reason":"capsule_missing"}],"queue":{"pending":0,"running":0,"max_concurrent":2}}`
-	cases := []struct {
-		name        string
-		args        []string
-		authorized  bool
-		wantVerdict string // "" = the daemon must not be asked
-		wantCode0   bool
-	}{
-		{"cancel", []string{"cancel", "wi_abc"}, true, "canceled", true},
-		{"wrap --fail", []string{"wrap", "wi_abc", "--fail"}, true, "failed", true},
-		{"cancel refused by authorization", []string{"cancel", "wi_abc"}, false, "", false},
-		{"wrap --fail refused by authorization", []string{"wrap", "wi_abc", "--fail"}, false, "", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var rec reqRecorder
-			aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/cancel"):
-					w.WriteHeader(http.StatusConflict)
-					io.WriteString(w, `{"error":{"code":"CORE-409","detail":"running work item: end its session before cancelling"}}`)
-				case strings.HasSuffix(r.URL.Path, "/close-auth"):
-					if !tc.authorized {
-						w.WriteHeader(http.StatusForbidden)
-						io.WriteString(w, `{"error":{"code":"AUTH-403","detail":"closing a work item requires its reporter, a project maintainer or admin"}}`)
-						return
-					}
-					io.WriteString(w, `{"authorized":true,"work_item_id":"wi_abc"}`)
-				default:
-					io.WriteString(w, wiJSON)
-				}
-			})
-			d := newDaemonFixture(t)
-			d.answer("GET", "/status", repairStatus)
-			d.answer("POST", "/jobs/wi_abc/abandon-repair", `{"work_item_id":"wi_abc","outcome":"abandoned","status":"x"}`)
-			code, stdout, stderr := runPf(t, map[string]string{
-				"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
-			}, tc.args...)
-			if (code == 0) != tc.wantCode0 {
-				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
-			}
-			var posts []capturedRequest
-			for _, r := range d.rec.all() {
-				if r.Method == "POST" {
-					posts = append(posts, r)
-				}
-			}
-			if tc.wantVerdict == "" {
-				if len(posts) != 0 {
-					t.Fatalf("the daemon must not be asked, got %v", posts)
-				}
-				return
-			}
-			if len(posts) != 1 || posts[0].Path != "/jobs/wi_abc/abandon-repair" || !strings.Contains(posts[0].Body, `"verdict":"`+tc.wantVerdict+`"`) {
-				t.Fatalf("want one abandon-repair POST with verdict %s, got %+v", tc.wantVerdict, posts)
-			}
-			var probed bool
-			for _, r := range rec.all() {
-				probed = probed || strings.HasSuffix(r.Path, "/close-auth")
-			}
-			if !probed {
-				t.Error("the human-key authorization probe must run before the daemon")
-			}
-			if !strings.Contains(stdout, "abandoned") {
-				t.Errorf("stdout: %s", stdout)
-			}
-		})
-	}
-}
-
-// Without a local repair_pending job the original cancel error surfaces and
-// the daemon is never asked to abandon anything.
-func TestCancelRunningNotParkedKeepsHubError(t *testing.T) {
-	var rec reqRecorder
-	aihub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" {
-			w.WriteHeader(http.StatusConflict)
-			io.WriteString(w, `{"error":{"code":"CORE-409","detail":"running work item: end its session before cancelling"}}`)
-			return
-		}
-		io.WriteString(w, `{"id":"wi_abc","slug":"pf-42","seq":42,"project":"polyforge","goal":"g","status":"running","priority":"normal","reporter":"usr_1","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`)
-	})
-	d := newDaemonFixture(t)
-	d.answer("GET", "/status", `{"machine_id":"m1","auto":false,"workspaces":["/w"],"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":2}}`)
-	code, _, stderr := runPf(t, map[string]string{"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "k"}, "cancel", "wi_abc")
-	if code == 0 || !strings.Contains(stderr, "CORE-409") {
-		t.Fatalf("want the hub's CORE-409, code=%d stderr=%s", code, stderr)
-	}
-	for _, r := range d.rec.all() {
-		if r.Method == "POST" {
-			t.Fatalf("daemon must not be asked: %+v", r)
-		}
 	}
 }
 

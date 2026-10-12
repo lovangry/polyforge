@@ -46,15 +46,15 @@ package runtime
 //
 // A mid-flight record whose capsule directory is missing, or whose project
 // fell out of the [workspace] mapping, is NOT a startup failure (v2-converge
-// §6): that ONE work item parks repair_pending (parkRepair — the record and
-// the session are kept, no hub transition, a capsule_missing /
-// project_unmapped event names the path or project and the fix), the daemon
-// starts and every other work item reconciles as above. The owner's moves on
-// a parked WI: fix the cause and `pf resume` (RepairResume continues the SAME
-// session in place, retried on every daemon start too), or give up with
-// `pf cancel` / `pf wrap --fail` (AbandonRepair ends the session canceled /
-// failed). An end_pending record (a bounded-fail verdict the hub has not yet
-// heard) is retried first, needing no capsule.
+// §6): that ONE work item goes through the ordinary bounded-fail close
+// (blockUnrecoverable — SessionEnd(blocked) with a reason naming the missing
+// path or the unmapped project, a capsule_missing / project_unmapped event
+// for `pf watch`), the daemon starts and every other work item reconciles as
+// above. The WI is then plain `blocked` at aihub and nothing stays parked
+// locally; the owner fixes the cause if any and `pf resume`s (a fresh
+// re-claim from the capsule chain and the task-repo carrier), or cancels it
+// through the ordinary blocked exits. An end_pending record (a bounded-fail
+// verdict the hub has not yet heard) is retried first, needing no capsule.
 
 import (
 	"context"
@@ -72,10 +72,9 @@ import (
 // workspace — the operator has not moved it to the new base (or it was
 // lost). The daemon never rebuilds such a capsule from the remote: the
 // capsule git chain IS the revision chain, and a re-clone would silently
-// discard unpublished local state. At restart it parks ONLY that work item
-// repair_pending (v2-converge §6; it is not a startup failure). Remediation
-// is manual: restore the capsule directory under <workspace>/capsules/<wi_id>,
-// then `pf resume <wi>` (or restart the daemon).
+// discard unpublished local state. At restart it blocks ONLY that work item
+// (v2-converge §6; it is not a startup failure); `pf resume <wi>` re-claims
+// it from the capsule chain.
 type MissingCapsuleError struct {
 	WI  string
 	Dir string
@@ -88,9 +87,9 @@ func (e *MissingCapsuleError) Error() string {
 // UnmappedMidflightError is the #113 mid-flight failure posture: a
 // recorded work item's project has no workspace in the CURRENT mapping
 // (the operator's config edit dropped its section). The capsule is NOT
-// relocated; at restart ONLY that work item parks repair_pending (v2-converge
-// §6) — the operator re-adds the workspace section, then `pf resume <wi>` (or
-// restarts); the existing no-rebuild rule stands.
+// relocated; at restart ONLY that work item is blocked (v2-converge §6) —
+// the operator re-adds the workspace section, then `pf resume <wi>`; the
+// existing no-rebuild rule stands.
 type UnmappedMidflightError struct {
 	WI      string
 	Project string
@@ -353,15 +352,10 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job, rec
 }
 
 // restartOne reconciles ONE recorded job with aihub (the body Restart
-// runs per record, and the re-check RepairResume re-runs for a parked
-// WI). The error return is the aihub-unreachable verdict only — a bad
-// capsule / unmapped project parks the WI (parkRepair) and returns nil.
+// runs per record). The error return is the aihub-unreachable verdict only
+// — a bad capsule / unmapped project blocks the WI (blockUnrecoverable) and
+// returns nil.
 func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
-	if j := r.jobOf(rec.WorkItemID); j != nil {
-		j.mu.Lock()
-		j.repairPending = "" // re-evaluated below; parkRepair re-marks it
-		j.mu.Unlock()
-	}
 	if rec.SessionID == "" {
 		return nil
 	}
@@ -371,9 +365,8 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 	// end_pending (v2-converge §6 bug 5): a bounded-fail whose
 	// SessionEnd(blocked) never reached the hub. The record carries the
 	// only copy of the session secret — retry the close now (and in the
-	// background) before anything else; never verify-and-guess. Distinct
-	// from repair_pending: the close needs no capsule, so a missing
-	// capsule never parks it.
+	// background) before anything else; never verify-and-guess. The
+	// close needs no capsule, so a missing capsule never blocks it.
 	if rec.State == string(StateEndPending) {
 		if j := r.jobOf(rec.WorkItemID); j != nil {
 			r.restartEndPending(j)
@@ -406,11 +399,11 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 			// crash-mid-run under this session: recover-resume the
 			// local capsule (a mid-seal record finishes its stop).
 			// The mid-flight capsule must be present at its mapped
-			// base (#103/#113): a miss PARKS this WI alone as
-			// repair_pending (v2 §6) — never a rebuild-from-remote,
-			// never a daemon abort; the session is kept.
+			// base (#103/#113): a miss BLOCKS this WI alone at
+			// aihub (v2 §6) — never a rebuild-from-remote, never a daemon
+			// abort.
 			if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
-				r.parkRepair(rec, err)
+				r.blockUnrecoverable(ctx, rec, err)
 				return nil
 			}
 			if serr := r.restartRunning(ctx, rec); serr != nil {
@@ -442,9 +435,9 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 					// The close replay proceeds against the local capsule
 					// (#103): absent at the active base, the wrap/fail
 					// intent must not be "replayed" out of thin air — the
-					// WI parks as repair_pending instead.
+					// WI is blocked instead.
 					if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
-						r.parkRepair(rec, err)
+						r.blockUnrecoverable(ctx, rec, err)
 						return nil
 					}
 					j.mu.Lock()
@@ -476,20 +469,20 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 				// attach refused (taken over in the window, or the hub
 				// disagree): keep the record — the next restart
 				// re-verifies with a fresh verdict. A missing mid-flight
-				// capsule / unmapped project (typed, #103/#113) parks the
-				// WI as repair_pending: the resume must never proceed
-				// without the local scene, and never rebuild it from the
-				// remote.
+				// capsule / unmapped project (typed, #103/#113) blocks the
+				// WI: the resume must never proceed without the local
+				// scene, and never rebuild it from the remote.
 				var miss *MissingCapsuleError
 				var unm *UnmappedMidflightError
 				if errors.As(aerr, &miss) || errors.As(aerr, &unm) {
-					r.parkRepair(rec, aerr)
+					r.blockUnrecoverable(ctx, rec, aerr)
 					return nil
 				}
 				fmt.Fprintf(os.Stderr, "runtime: %s: session attach failed, record kept: %v\n", rec.WorkItemID, aerr)
 			}
 		case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
 			r.restartDrop(rec)
+			r.clearManualModels(rec.WorkItemID)
 		default:
 			// queued/blocked while our session still matches (a torn
 			// server state): treat as not-ours, drop the record.
@@ -506,6 +499,7 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 		// local residue and drop the record — no quarantine, the
 		// terminal scene is the preserved artifact.
 		r.restartDrop(rec)
+		r.clearManualModels(rec.WorkItemID)
 	case api.StatusBlocked:
 		// M2 storm guard: the bounded-fail verdict stands — no
 		// revival, no kill, no quarantine; the record is kept so the
@@ -532,19 +526,21 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 	return nil
 }
 
-// Pending-repair reason kinds (v2 §6) — also the durable event kinds.
+// Restart-time block reason kinds — also the durable event kinds.
 const (
-	RepairCapsuleMissing  = "capsule_missing"
-	RepairProjectUnmapped = "project_unmapped"
+	EventCapsuleMissing  = "capsule_missing"
+	EventProjectUnmapped = "project_unmapped"
 )
 
-// parkRepair parks ONE mid-flight record whose capsule is missing or
-// whose project is unmapped (v2 §6, replacing the whole-daemon startup
-// abort): the record is kept, the SESSION is kept (no SessionEnd, no
-// quarantine, no clone, no hub transition), the job is marked
-// repair_pending, and a durable event names the path/project and the fix.
-// It is retried on the next daemon start and by RepairResume.
-func (r *Runtime) parkRepair(rec *jobRecord, cause error) {
+// blockUnrecoverable is the restart posture for ONE mid-flight record whose
+// capsule is missing or whose project is unmapped: it takes the ordinary
+// bounded-fail path (SessionEnd(blocked) with a reason naming the cause, the
+// orphan sweep, the durable end_pending retry), so the work item shows
+// `blocked` at aihub — the owner's `pf resume` re-claims it from the capsule
+// chain and the task-repo carrier — and nothing stays parked locally. The
+// daemon starts and every other work item reconciles as usual. A durable
+// event names the cause for `pf watch`.
+func (r *Runtime) blockUnrecoverable(ctx context.Context, rec *jobRecord, cause error) {
 	j := r.jobOf(rec.WorkItemID)
 	if j == nil {
 		j = r.restoredJob(rec)
@@ -552,137 +548,33 @@ func (r *Runtime) parkRepair(rec *jobRecord, cause error) {
 		r.jobs[rec.WorkItemID] = j
 		r.mu.Unlock()
 	}
-	kind := RepairCapsuleMissing
-	body := map[string]any{"work_item": rec.WorkItemID, "project": rec.Project, "error": cause.Error()}
+	kind := EventCapsuleMissing
+	body := map[string]any{"work_item": rec.WorkItemID, "project": rec.Project}
+	var detail string
 	var miss *MissingCapsuleError
 	var unm *UnmappedMidflightError
 	switch {
 	case errors.As(cause, &unm):
-		kind = RepairProjectUnmapped
+		kind = EventProjectUnmapped
 		body["project"] = unm.Project
-		body["fix"] = fmt.Sprintf("re-add project %q to a [workspace.\"<path>\"] section of the daemon config, then run `pf resume %s` (or restart the daemon)", unm.Project, rec.WorkItemID)
+		detail = fmt.Sprintf("project %q is not in the daemon's [workspace] mapping — re-add it to the config, then `pf resume %s`", unm.Project, rec.WorkItemID)
 	case errors.As(cause, &miss):
 		body["path"] = miss.Dir
-		body["fix"] = fmt.Sprintf("restore the capsule directory at %s, then run `pf resume %s` (or restart the daemon); it is never rebuilt from the remote", miss.Dir, rec.WorkItemID)
+		detail = fmt.Sprintf("capsule missing at %s — it is never rebuilt from the remote; `pf resume %s` re-claims the work item from its capsule chain", miss.Dir, rec.WorkItemID)
+	default:
+		detail = cause.Error()
 	}
-	j.mu.Lock()
-	j.repairPending = kind
-	j.mu.Unlock()
+	body["reason"] = detail
 	if r.cfg.EventTap != nil {
 		r.cfg.EventTap(rec.WorkItemID, kind, body)
 	}
-	fmt.Fprintf(os.Stderr, "runtime: %s: parked as repair_pending (%s), session kept: %v\n", rec.WorkItemID, kind, cause)
-}
-
-// RepairPendingError is the typed answer of RepairResume when the
-// capsule / mapping is still broken (or aihub could not verify).
-type RepairPendingError struct {
-	WI    string
-	Cause error // *MissingCapsuleError | *UnmappedMidflightError | nil
-	Msg   string
-}
-
-func (e *RepairPendingError) Error() string {
-	if e.Cause != nil {
-		return e.Cause.Error()
-	}
-	return e.Msg
-}
-
-func (e *RepairPendingError) Unwrap() error { return e.Cause }
-
-// RepairResume is the owner's "continue" for a repair_pending WI (v2 §6):
-// re-check the capsule/mapping; still broken → the typed error (the WI
-// stays parked); fixed → resume IN PLACE with the same session through
-// the existing restart reconciliation (verify → attach/recover-resume) —
-// never a re-claim, so the restored local scene is not quarantined or
-// re-cloned. held=false when wi is not parked here (the caller falls
-// through to its normal resume path).
-func (r *Runtime) RepairResume(ctx context.Context, wi string) (held bool, err error) {
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
-	j := r.resolveJob(wi)
-	if j == nil {
-		return false, nil
-	}
+	fmt.Fprintf(os.Stderr, "runtime: %s: blocked at restart: %s\n", rec.WorkItemID, detail)
+	// the record is a restart-reconciled job: enter the recovery state so
+	// boundedFail's closing edge (-> done | end_pending) is a legal one
 	j.mu.Lock()
-	kind := j.repairPending
+	j.state = StateRecovering
 	j.mu.Unlock()
-	if kind == "" {
-		return false, nil
-	}
-	rec := j.record()
-	if cerr := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); cerr != nil {
-		return true, &RepairPendingError{WI: rec.WorkItemID, Cause: cerr}
-	}
-	if rerr := r.restartOne(ctx, rec); rerr != nil {
-		j.mu.Lock()
-		j.repairPending = kind // aihub unreachable: stay parked
-		j.mu.Unlock()
-		return true, &RepairPendingError{WI: rec.WorkItemID, Msg: "capsule is back but aihub could not be reached to verify the session; still parked: " + rerr.Error()}
-	}
-	if perr := r.persist(); perr != nil {
-		return true, perr
-	}
-	return true, nil
-}
-
-// EventRepairAbandoned is the durable event of AbandonRepair.
-const EventRepairAbandoned = "repair_abandoned"
-
-// AbandonRepair is the owner's "give up" for a repair_pending WI (v2 §6):
-// the WI is still running at aihub under this daemon's kept session, so
-// the data-plane cancel is refused; the daemon holds the only copy of the
-// session secret and ends the session itself — status is api.StatusCanceled
-// (`pf cancel`) or api.StatusFailed (`pf wrap --fail`). The caller (the
-// CLI) has already verified the human is reporter / maintainer / admin at
-// aihub. A SessionEnd the hub does not acknowledge keeps the record in the
-// durable end_pending lane with this verdict and retries (endpending.go);
-// the parked record is dropped either way. held=false when wi is not
-// parked here.
-func (r *Runtime) AbandonRepair(wi, status, note string) (held bool, err error) {
-	if status != api.StatusCanceled && status != api.StatusFailed {
-		return false, fmt.Errorf("runtime: abandon verdict must be canceled or failed, got %q", status)
-	}
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
-	j := r.resolveJob(wi)
-	if j == nil {
-		return false, nil
-	}
-	j.mu.Lock()
-	kind := j.repairPending
-	secret := j.sessionID
-	j.mu.Unlock()
-	if kind == "" {
-		return false, nil
-	}
-	settled := r.endAtHub(j.wi, secret, status, note, "")
-	j.mu.Lock()
-	j.repairPending = ""
-	j.endNote, j.endHead, j.endStatus = note, "", status
-	if settled {
-		j.state = StateDone
-	} else {
-		j.state = StateEndPending
-	}
-	j.mu.Unlock()
-	if settled {
-		r.dropJob(j)
-	}
-	if perr := r.persist(); perr != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
-	}
-	if r.cfg.EventTap != nil {
-		r.cfg.EventTap(j.wi, EventRepairAbandoned, map[string]any{
-			"work_item": j.wi, "verdict": status, "was": kind, "session_ended": settled,
-		})
-	}
-	if !settled {
-		fmt.Fprintf(os.Stderr, "runtime: %s: abandon (%s) not acknowledged by the hub — record kept end_pending, retrying\n", j.wi, status)
-		r.retryEndPending(j)
-	}
-	return true, nil
+	r.boundedFail(ctx, j, detail)
 }
 
 // Recovery causes that are lifecycle events, exempt from the storm ledger.

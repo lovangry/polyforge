@@ -32,8 +32,7 @@ type Rule struct {
 // new workflow_status, to statusRules). Nothing else needs to change.
 var eventRules = map[string]Rule{
 	// a step waits for a human answer / gate
-	"needs_input":        {Class: "needs_input", Phrase: "a step is waiting for a human answer", StateBacked: true},
-	"step_waiting_human": {Class: "needs_input", Phrase: "a step is waiting for a human answer", StateBacked: true},
+	"needs_input": {Class: "needs_input", Phrase: "a step is waiting for a human answer", StateBacked: true},
 	// workflow terminal (the outcome comes from workflow_status, below)
 	"terminal": {Class: "terminal", Phrase: "the workflow reached an end state", StateBacked: true},
 	// a step was judged dead / the model candidates ran out
@@ -42,26 +41,29 @@ var eventRules = map[string]Rule{
 	// daemon-side submit and restart signals
 	"submit_rejected":  {Class: "submit_rejected", Phrase: "a submit was accepted but did not start"},
 	"submit_dropped":   {Class: "submit_dropped", Phrase: "a queued submit was dropped"},
-	"capsule_missing":  {Class: "capsule_missing", Phrase: "the local capsule is missing and the work item needs repair", StateBacked: true},
-	"project_unmapped": {Class: "project_unmapped", Phrase: "the project is not mapped on this daemon and the work item needs repair", StateBacked: true},
 	"daemon_restarted": {Class: "daemon_restarted", Phrase: "the daemon restarted"},
 }
 
-// statusRules maps an execution.json workflow_status to its terminal
-// decision. Final statuses end the subscription; blocked does not (the
-// human can continue the work item).
+// statusRules maps a status to its terminal decision: the driver's
+// execution.json workflow_status (completed, failed_gate,
+// failed_rewind_exhausted, blocked) and the aihub status the daemon
+// reports once the job is no longer local (wrapped, failed, canceled,
+// paused, blocked — the driver never writes those four words to
+// execution.json). Final statuses end the subscription; blocked and
+// paused do not (the human can continue the work item).
 var statusRules = map[string]struct {
 	Rule
 	Final bool
 }{
+	// execution.json workflow_status
 	"completed":               {Rule{Class: "completed", Phrase: "the workflow completed"}, true},
-	"wrapped":                 {Rule{Class: "completed", Phrase: "the workflow completed"}, true},
-	"failed":                  {Rule{Class: "failed", Phrase: "the workflow failed"}, true},
 	"failed_gate":             {Rule{Class: "failed", Phrase: "the workflow failed"}, true},
 	"failed_rewind_exhausted": {Rule{Class: "failed", Phrase: "the workflow failed"}, true},
 	"blocked":                 {Rule{Class: "blocked", Phrase: "the workflow is blocked and needs a human"}, false},
-	// closed by hand (aihub status; execution.json is not rewritten by a
-	// manual close): canceled is final, paused can be resumed.
+	// aihub status after a manual close (execution.json is not rewritten
+	// by it): wrapped / failed / canceled are final, paused can be resumed.
+	"wrapped":  {Rule{Class: "completed", Phrase: "the workflow completed"}, true},
+	"failed":   {Rule{Class: "failed", Phrase: "the workflow failed"}, true},
 	"canceled": {Rule{Class: "canceled", Phrase: "the work item was canceled"}, true},
 	"paused":   {Rule{Class: "paused", Phrase: "the work item was paused"}, false},
 }
@@ -179,11 +181,6 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 	if j := snap.Job; j != nil {
 		if pendingID == "" && j.QuestionID != "" && (j.Status == protocol.JobNeedsInput) {
 			pendingID = j.QuestionID
-		}
-		if j.RepairReason != "" {
-			if r, ok := eventRules[j.RepairReason]; ok {
-				fire(r.Class, r)
-			}
 		}
 	}
 	if pendingID != "" {

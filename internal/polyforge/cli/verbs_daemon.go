@@ -1,18 +1,15 @@
 package cli
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // ---------------------------------------------------------------------------
@@ -23,18 +20,29 @@ var cmdSubmit = &Command{
 	Name:    "submit",
 	Group:   GroupExec,
 	Summary: "Submit a WI for execution on this machine (claim)",
-	Usage:   "pf submit <id> [--priority low|normal|high|urgent]",
+	Usage:   "pf submit <id> [--priority low|normal|high|urgent] [--models a,b,c]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("priority", "normal", "queue priority (low|normal|high|urgent)")
+		fs.String("models", "", "manual model candidates for EVERY step of this WI, comma-separated, in order "+
+			"(precedence: --models > workspace yaml models.<project>.<kind> > yaml models.<project>.default > "+
+			"bundle step model_candidates > bundle defaults.model_candidates)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
 			return fmt.Errorf("submit: expected exactly one work item id")
 		}
+		var models []string
+		if fs.Lookup("models").Value.String() != "" {
+			var merr error
+			models, merr = workspace.NormalizeModels(strings.Split(stringFlag(fs, "models"), ","))
+			if merr != nil {
+				return fmt.Errorf("submit: --models: %w", merr)
+			}
+		}
 		if err := submitPrecheck(ctx, args[0]); err != nil {
 			return err
 		}
-		raw, err := ctx.daemon().Claim(args[0], stringFlag(fs, "priority"))
+		raw, err := ctx.daemon().ClaimWithModels(args[0], stringFlag(fs, "priority"), models)
 		if err != nil {
 			return err
 		}
@@ -73,19 +81,17 @@ func submitPrecheck(ctx *Context, wiID string) error {
 
 // ---------------------------------------------------------------------------
 // answer — answer the pending needs_input question: --question names
-// it explicitly, or the unique pending question is used (the JobView
-// carries at most one).
+// it explicitly, or the daemon resolves the unique pending question.
 // ---------------------------------------------------------------------------
 
 var cmdAnswer = &Command{
 	Name:    "answer",
 	Group:   GroupExec,
 	Summary: "Answer the pending needs_input question of a WI",
-	Usage:   "pf answer <id> --text \"...\" [--question q_xxx] [--answer-id a_xxxx] [--by user]",
+	Usage:   "pf answer <id> --text \"...\" [--question q_xxx] [--by user]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("question", "", "question id (default: the unique pending question)")
 		fs.String("text", "", "natural-language answer (required)")
-		fs.String("answer-id", "", "explicit answer id (default: generated a_ + 6 chars)")
 		fs.String("by", "", "answerer user id (default: config user_id / PF_USER_ID)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -104,60 +110,29 @@ var cmdAnswer = &Command{
 			return fmt.Errorf("answer: answered_by identity required (--by or PF_USER_ID / user_id in config)")
 		}
 		d := ctx.daemon()
+		// An empty --question lets the daemon resolve the pending one.
 		question := stringFlag(fs, "question")
-		if question == "" {
-			// Interactive default: the unique pending question. Two cases
-			// (owner ruling on 9f4d3a2's over-broad fallback):
-			//   (1) observe SUCCEEDS with no pending question → refuse:
-			//       there is genuinely nothing to answer, and POSTing an
-			//       empty question_id silently delivers nowhere.
-			//   (2) observe FAILS (driver WIs get DAEMON-404) → fall
-			//       through with an empty question: the daemon answer
-			//       route's pendingQuestionID fallback resolves it.
-			raw, err := d.Observe(args[0], 0)
-			if err == nil {
-				var jv protocol.JobView
-				if uerr := json.Unmarshal(raw, &jv); uerr == nil {
-					if jv.Pending == nil {
-						return fmt.Errorf("answer: %s has no pending question (see `pf watch %s --once`)", args[0], args[0])
-					}
-					question = jv.Pending.ID
-				}
-				// Undecodable body: Pending == nil cannot be established,
-				// so treat it like an observe failure — fall through.
-			}
-			// question may remain "" (driver WI, observe 404): the daemon
-			// answer route's pendingQuestionID fallback handles it.
-		}
-		answerID := stringFlag(fs, "answer-id")
-		if answerID == "" {
-			answerID = newAnswerID()
-		}
 		payload := AnswerPayload{
 			QuestionID: question,
-			AnswerID:   answerID,
 			AnswerText: text,
-			AnsweredAt: time.Now().UTC().Format(time.RFC3339),
 			AnsweredBy: who,
 		}
 		raw, err := d.Answer(args[0], payload)
 		if err != nil {
 			return err
 		}
+		var ans struct {
+			QuestionID string `json:"question_id"`
+		}
+		_ = json.Unmarshal(raw, &ans)
+		if ans.QuestionID == "" {
+			ans.QuestionID = payload.QuestionID
+		}
 		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "answer %s delivered for question %s\n", payload.AnswerID, payload.QuestionID)
+			fmt.Fprintf(ctx.Stdout, "answer delivered for question %s\n", ans.QuestionID)
 		})
 		return nil
 	},
-}
-
-// newAnswerID mints an answer id: "a_" + 6 random hex chars.
-func newAnswerID() string {
-	b := make([]byte, 3)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("a_%06x", time.Now().UnixNano()&0xffffff)
-	}
-	return "a_" + hex.EncodeToString(b)
 }
 
 // ---------------------------------------------------------------------------
@@ -248,29 +223,9 @@ var cmdResume = &Command{
 		// Dispatch order, decided by WI state (v2 merge of D1 + D2):
 		//  1. hub status blocked  -> the human-key resume-blocked door, then
 		//     the daemon's claim/start (below).
-		//  2. not blocked, and THIS daemon holds the WI parked repair_pending
-		//     (capsule missing / project unmapped at restart; the session is
-		//     kept) -> the daemon re-checks and resumes it in place
-		//     (RepairResume); a paused WI has its clean_pause
-		//     cleared first so the in-place attach is not held back.
-		//  3. otherwise (paused) -> clear clean_pause on the hub; no daemon.
+		//  2. otherwise (paused) -> clear clean_pause on the hub; no daemon.
 		// end_pending (D2) is a distinct local state with no door of its own:
 		// the daemon retries its SessionEnd itself.
-		if wi.Status != api.StatusBlocked && localRepairPending(ctx, wi.ID) {
-			if wi.Status == api.StatusPaused {
-				if err := patchCleanPause(ctx, args[0], false); err != nil {
-					return err
-				}
-			}
-			raw, err := ctx.daemon().Resume(args[0], "")
-			if err != nil {
-				return err
-			}
-			ctx.finish(raw, func() {
-				fmt.Fprintf(ctx.Stdout, "resumed %s: the repair_pending work item was re-checked and continues in place with its kept session\n", args[0])
-			})
-			return nil
-		}
 		if wi.Status != api.StatusBlocked {
 			if err := patchCleanPause(ctx, args[0], false); err != nil {
 				return err
@@ -292,60 +247,20 @@ var cmdResume = &Command{
 		if err != nil {
 			return err
 		}
+		var ans struct {
+			Deferred bool `json:"deferred"`
+		}
+		_ = json.Unmarshal(raw, &ans)
 		ctx.finish(raw, func() {
+			if ans.Deferred {
+				fmt.Fprintf(ctx.Stdout, "resumed %s: the hub is unreachable right now; the claim is queued in the daemon and will run when the hub is reachable (retried with backoff; watch it with `pf watch <id> --once`)\n", args[0])
+				return
+			}
 			fmt.Fprintf(ctx.Stdout, "resumed %s: the workflow was parked blocked (incomplete result) — the §6.4 owner move re-established execution over the parked capsule\n", args[0])
 			fmt.Fprintln(ctx.Stdout, "(the frozen current step re-dispatches in place as a fresh derivation; watch it with `pf watch <id> --once`)")
 		})
 		return nil
 	},
-}
-
-// localRepairPending reports whether the local daemon holds wiID parked as
-// repair_pending. Any daemon failure (not running, wrong socket) is "no":
-// the plain paused path never needs the daemon.
-func localRepairPending(ctx *Context, wiID string) bool {
-	raw, err := ctx.daemon().Status()
-	if err != nil {
-		return false
-	}
-	var st StatusResponse
-	if json.Unmarshal(raw, &st) != nil {
-		return false
-	}
-	for _, j := range st.Jobs {
-		if j.WorkItemID == wiID && j.Status == "repair_pending" {
-			return true
-		}
-	}
-	return false
-}
-
-// abandonRepairPending is the give-up door of a WI the LOCAL daemon holds
-// parked repair_pending (capsule missing / project unmapped at restart): the
-// WI is still `running` at aihub under the daemon's kept session, so the
-// hub's cancel refuses it and only the daemon holds the secret to end that
-// session. Authorization follows the continue/abandon doors: the HUMAN's own
-// key is checked at aihub first (reporter / maintainer / admin, a read-only
-// probe), and only then is the daemon asked — its machine key is not that
-// caller. verdict is "canceled" (pf cancel) or "failed" (pf wrap --fail).
-// handled=false with a nil error means the WI is not parked here and the
-// caller proceeds with its normal path.
-func abandonRepairPending(ctx *Context, id, verdict string) (handled bool, err error) {
-	wi, gerr := ctx.aihub().GetWorkItem(id)
-	if gerr != nil || wi.Status != api.StatusRunning || !localRepairPending(ctx, wi.ID) {
-		return false, nil
-	}
-	if err := ctx.aihub().CloseAuth(id); err != nil {
-		return true, err
-	}
-	raw, err := ctx.daemon().AbandonRepair(id, verdict)
-	if err != nil {
-		return true, err
-	}
-	ctx.finish(raw, func() {
-		fmt.Fprintf(ctx.Stdout, "%s %s: the repair_pending work item was abandoned — the daemon ended its session and dropped the parked record\n", verdict, id)
-	})
-	return true, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -374,9 +289,6 @@ var cmdWrap = &Command{
 		// against the person typing, not the daemon's machine key). No
 		// daemon step follows: the bounded close already dropped the job.
 		if reason == "fail" {
-			if abandoned, aerr := abandonRepairPending(ctx, args[0], "failed"); abandoned || aerr != nil {
-				return aerr
-			}
 			if wi, gerr := ctx.aihub().GetWorkItem(args[0]); gerr == nil && wi.Status == api.StatusBlocked {
 				raw, err := ctx.aihub().TerminateBlockedWorkItem(args[0])
 				if err != nil {

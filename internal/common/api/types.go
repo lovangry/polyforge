@@ -70,7 +70,6 @@ type Project struct {
 	Repos       []ProjectRepo   `json:"repos"`
 	Visible     bool            `json:"visible"`
 	Members     []ProjectMember `json:"members"`
-	Identifier  string          `json:"identifier"`
 	CreatedAt   string          `json:"created_at"`
 	UpdatedAt   string          `json:"updated_at"`
 }
@@ -103,40 +102,18 @@ type APIToken struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// ProgressResponse is the §5.2 read-through answer (02-aihub-core.md):
-// HEAD metadata plus the verbatim runtime-state/execution.json content
-// of the WI's last published revision. Progress passes through
-// unchanged — Core never re-represents execution state in its own data
-// model (INV-1). The v1 head_generation field is deleted with the
-// capsule lineage it read out of the published file (v1.5 session
-// model).
-type ProgressResponse struct {
-	WorkItemID    string          `json:"work_item_id"`
-	HeadSeq       int64           `json:"head_seq"`
-	Progress      json.RawMessage `json:"progress"`
-	HeadUpdatedAt string          `json:"head_updated_at"`
-	FreshnessNote string          `json:"freshness_note"`
-}
-
-// ProgressFreshnessNote marks read-through data as as-of the most
-// recent publish (02 §5.2: freshness = HEAD update time; AIHub never
-// pulls live state from a daemon or agent).
-const ProgressFreshnessNote = "data is as of the most recent publish"
-
 // Memory (06).
 type Memory struct {
-	ID             string   `json:"id"`
-	Project        string   `json:"project"`
-	Type           string   `json:"type"`
-	Content        string   `json:"content"`
-	ContextSnippet string   `json:"context_snippet"`
-	Tags           []string `json:"tags"`
-	Visibility     string   `json:"visibility"` // admin|private|project|team|public
-	BaseStrength   int      `json:"base_strength"`
-	CreatedAt      string   `json:"created_at"`
-	UpdatedAt      string   `json:"updated_at"`
-	Related        []string `json:"related_memory_ids"`
-	WorkItemID     string   `json:"work_item_id,omitempty"`
+	ID         string   `json:"id"`
+	Project    string   `json:"project"`
+	Type       string   `json:"type"`
+	Content    string   `json:"content"`
+	Tags       []string `json:"tags"`
+	Visibility string   `json:"visibility"` // admin|private|project|team|public
+	CreatedAt  string   `json:"created_at"`
+	UpdatedAt  string   `json:"updated_at"`
+	Related    []string `json:"related_memory_ids"`
+	WorkItemID string   `json:"work_item_id,omitempty"`
 }
 
 // ListResponse is the envelope for list endpoints.
@@ -220,7 +197,7 @@ type SessionVerifyResponse struct {
 // terminal verdict sets the status and clears the session row entirely.
 type SessionEndRequest struct {
 	SessionID string `json:"session_id"`
-	Status    string `json:"status"` // wrapped|failed|canceled|blocked|paused (canceled: the abandon of a repair_pending WI, ended by its holder daemon)
+	Status    string `json:"status"` // wrapped|failed|blocked|paused
 	Note      string `json:"note,omitempty"`
 	// CleanPause rides the paused verdict only (merge amend: the atomic
 	// pause transition — session KEPT, clean_pause set — is the M3 pause;
@@ -232,24 +209,6 @@ type SessionEndRequest struct {
 	// machine) so a continue claimed by a DIFFERENT daemon can refuse a
 	// clone whose head is not this one (the #116 stale-state hazard).
 	HeadSHA string `json:"head_sha,omitempty"`
-}
-
-// SessionHolderResponse is the §1.7 public holder read
-// (GET /api/v1/work-items/{id}/session): who holds the WI now, in PUBLIC
-// fields only — the same audit set as the m4 SessionPublic block, with
-// machine_id spelled per the endpoint contract. The holder fields are
-// flat-omitted when nobody holds the WI (the §1.2 precedent of simply
-// omitting the fingerprint when unheld); the tri-state
-// (unheld / held-paused / held-running) is three ordinary 200 answers.
-// NEVER session_hash, never the secret (B3).
-type SessionHolderResponse struct {
-	WorkItemID         string `json:"work_item_id"`
-	Status             string `json:"status"`
-	SessionFingerprint string `json:"session_fingerprint,omitempty"`
-	MachineID          string `json:"machine_id,omitempty"`
-	SessionOwner       string `json:"session_owner,omitempty"`
-	SessionStartedAt   string `json:"session_started_at,omitempty"`
-	CleanPause         bool   `json:"clean_pause"`
 }
 
 // SessionFingerprint derives the public handle from the secret:
@@ -284,20 +243,4 @@ type ShipLedgerEntry struct {
 type ShipLedgerRequest struct {
 	Branch string            `json:"branch,omitempty"`
 	Repos  []ShipLedgerEntry `json:"repos"`
-}
-
-// ShipLedgerRow is one recorded ledger row (the GET answer's entry):
-// where this WI's copy of the repo lives in git, and when it was recorded.
-type ShipLedgerRow struct {
-	Repo         string `json:"repo"`
-	Branch       string `json:"branch"`
-	BranchTopSHA string `json:"branch_top_sha"`
-	PushedAt     string `json:"pushed_at"`
-}
-
-// ShipLedgerResponse is GET /api/v1/work-items/{id}/ship-ledger: the WI's
-// ledger, one row per shipped repo, ordered by repo name.
-type ShipLedgerResponse struct {
-	WorkItemID string          `json:"work_item_id"`
-	Repos      []ShipLedgerRow `json:"repos"`
 }

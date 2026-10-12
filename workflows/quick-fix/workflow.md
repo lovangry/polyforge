@@ -4,11 +4,10 @@ description: Light remediation flow - one interactive checkpoint, a single fix p
 rewind:
   max_total: 2
   max_per_step: 2
-budget: { requests: 60, tokens: 150000, wall_minutes: 180 }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: grill, context_policy: fresh, handoff: true, kind: spec, interactive: true, budget: { wall_minutes: 30 } }
+  - { id: grill, context_policy: fresh, handoff: true, kind: spec, budget: { wall_minutes: 30 } }
   - { id: fix, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
   - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
   - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: fix } }
@@ -18,8 +17,7 @@ steps:
 
 This is the flow-level narrative for the workflow. It explains how the four
 steps compose and what flows between them; it is not itself a structural schema — the
-frontmatter `steps` array above is the *only* execution order (`01-workflow-skills.md`
-§4.1 rule V3). Nothing here overrides it.
+frontmatter `steps` array above is the *only* execution order. Nothing here overrides it.
 
 ## Shape of the flow
 
@@ -39,21 +37,15 @@ separate review pass, that is a signal it was misrouted — cancel and re-file a
 
 ## Why `grill` is `kind: spec` (not `kind: qa`)
 
-In `feature-full`, the pre-spec clarification step is `kind: qa` and the schema
-structurally guarantees it precedes the spec step (rule V10: any `kind: qa` non-gate step
-requires a `kind: spec` step to exist later in the array). This bundle deliberately has
-no separate spec authoring step, so a non-gate `kind: qa` checkpoint is not expressible
-here — and it should not be: this step does not stop at gathering answers, it commits
-them to a micro-spec (`artifacts/fix-memo.md`) that `fix` implements directly. That is
-spec work, so it is declared `kind: spec`, `interactive: true`. Interactive steps have no
-positional restriction (rule V4), so the checkpoint is legal in first position.
+In `feature-full`, the pre-spec clarification step is `kind: qa` and a separate `spec` step
+follows it. This bundle deliberately has no separate spec authoring step: the `grill` step does not
+stop at gathering answers, it commits them to a micro-spec (`artifacts/fix-memo.md`) that `fix`
+implements directly. That is spec work, so it is declared `kind: spec`.
 
 ## Artifact flow between steps
 
-Nothing here is wired through frontmatter. Every step's output is a path recorded in
-`execution.json`'s `steps.<id>.output`, pointing at a file under `artifacts/`
-(`03-execution-capsule.md` §4.2). Downstream steps read their inputs by following that
-convention, not by any declared edge:
+Every step's output is a path recorded in `execution.json`'s `steps.<id>.output`, pointing at a
+file under `artifacts/`; no step declares frontmatter `inputs:`, so downstream steps read upstream artifacts by that convention:
 
 | step | primary artifact it writes | who reads it |
 |---|---|---|
@@ -64,11 +56,9 @@ convention, not by any declared edge:
 
 ## Rewind boundaries
 
-Both gates in this flow declare `on_fail: {action: rewind, target: fix}` — the mechanism
-is `01-workflow-skills.md` §6.2, this section explains the choice. Rule V5 requires a
-rewind target to exist in the `steps` array and sit strictly earlier than the failing
-step; both candidates available to `release` (`verification`, `fix`) satisfy that
-mechanically, and this bundle picks `fix` deliberately:
+Both gates in this flow declare `on_fail: {action: rewind, target: fix}` — this section explains the choice. A rewind target must exist in the `steps` array and sit strictly
+earlier than the failing step; both candidates available to `release` (`verification`, `fix`) satisfy
+that mechanically, and this bundle picks `fix` deliberately:
 
 - **`verification` FAILs -> rewind to `fix`.** Verification is the machine gate
   (build/lint/tests); a failure means the tree is wrong, and `fix` is the only step that
@@ -91,30 +81,21 @@ not more loops.
 
 ## Budget guidance
 
-The frontmatter workflow-level budget (`requests: 60, tokens: 150000, wall_minutes: 180`)
-is sized for one pass over four steps plus at most the declared two rewinds. This is the
-tightest reference budget on purpose: the lane's contract is that the WI is small. Do
-not raise the budget to make an oversized WI fit — re-route the WI instead. Hitting the
-budget is a resource ceiling (`WF-103 OVER_BUDGET`), unrelated to gate verdicts, and
-never triggers rewind.
+There is no workflow-level budget; the bounds are the rewind limits above and each step's wall estimate. This is
+the tightest reference lane on purpose: the lane's contract is that the WI is small. Do not raise a step's wall to
+make an oversized WI fit — re-route the WI instead.
 
-Every step also declares its own `budget.wall_minutes` — `grill: 30` (interactive, the
-user's own thinking time is inside the step), `fix: 30`, `verification: 20`,
-`release: 20`, summing to 100 minutes, comfortably under the 180-minute workflow
-ceiling so one in-budget pass never busts it. These are not decorative: the daemon
-watchdog's absolute backstop over a single agent instance is `max(3× the step's
-declared wall, 15 min)`, and a step that declares nothing falls back to a 5-minute
-assumed wall, collapsing the backstop to its 15-minute floor. Measured attempts span
-2–5 minutes healthy and 15–52 minutes in the slow tail, so an undeclared step gets
-bounded-terminated while still legitimately working. Declared walls stay within
-`[5, 60]` by convention (enforced by `internal/workflow/schema/bundles_test.go`): at
-least 5 so the backstop is genuinely `3× wall` rather than clamped to the floor, at
-most 60 so one attempt never books more than an hour.
+Every step declares its own `budget.wall_minutes` — `grill: 30` (the user's own thinking time is inside the
+step), `fix: 30`, `verification: 20`, `release: 20`, 100 minutes in total.
+
+The declared wall is an estimate, not a limit: the daemon bounds a step's total runtime across its
+dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
+A step that declares nothing gets the default, so declare a wall only for a step that legitimately
+needs more than 90 minutes in total.
 
 ## The release step (per-project convention)
 
-`release` is an ordinary step slot, not a distinct mechanism (`01-workflow-skills.md`
-§4.2). `agents/release.md` ships as a template skeleton: version source, build, tag,
+`release` is an ordinary step slot, not a distinct mechanism. `steps/release.md` ships as a template skeleton: version source, build, tag,
 publish target, channel promotion are all per-project TODOs each consuming project
 fills in, keeping the frontmatter contract (`name`, `description`, `tools`, `output`)
 intact.

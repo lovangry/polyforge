@@ -14,7 +14,6 @@ import (
 
 const fmFixture = `---
 name: demo
-budget: { requests: 10, tokens: 1000, wall_minutes: 5 }
 defaults:
   model_candidates: [prov-a/model-a1, prov-a/model-a2, prov-b/model-b1]
 steps:
@@ -31,17 +30,17 @@ steps:
 `
 
 func TestSplitFrontmatter(t *testing.T) {
-	front, ok := SplitFrontmatter([]byte(fmFixture))
+	front, _, ok := SplitFrontmatter([]byte(fmFixture))
 	if !ok {
 		t.Fatal("a well-formed fence must split")
 	}
 	if !strings.Contains(string(front), "model_candidates") {
 		t.Fatalf("front block must carry the candidate keys: %q", front)
 	}
-	if _, ok := SplitFrontmatter([]byte("# no frontmatter\n")); ok {
+	if _, _, ok := SplitFrontmatter([]byte("# no frontmatter\n")); ok {
 		t.Fatal("a file without a fence must not split")
 	}
-	if _, ok := SplitFrontmatter([]byte("---\nname: torn")); ok {
+	if _, _, ok := SplitFrontmatter([]byte("---\nname: torn")); ok {
 		t.Fatal("an unterminated fence must not split")
 	}
 }
@@ -60,18 +59,23 @@ func TestReadFrontmatterParsesCandidates(t *testing.T) {
 		t.Fatal("a present frontmatter must parse")
 	}
 	want := []string{"prov-a/model-a1", "prov-a/model-a2", "prov-b/model-b1"}
-	got := fm.CandidatesFor("draft")
-	if len(got) != len(want) {
-		t.Fatalf("defaults candidates = %v, want %v", got, want)
+	if fm.Defaults == nil || len(fm.Defaults.ModelCandidates) != len(want) {
+		t.Fatalf("defaults candidates = %+v, want %v", fm.Defaults, want)
 	}
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("defaults candidates = %v, want %v", got, want)
+		if fm.Defaults.ModelCandidates[i] != want[i] {
+			t.Fatalf("defaults candidates = %v, want %v", fm.Defaults.ModelCandidates, want)
 		}
 	}
-	// the per-step override wins for the step that declares one
-	if o := fm.CandidatesFor("gate"); len(o) != 1 || o[0] != "prov-b/model-b2" {
-		t.Fatalf("per-step override = %v, want [prov-b/model-b2]", o)
+	// the per-step override is carried verbatim
+	var gate *FrontmatterStep
+	for i := range fm.Steps {
+		if fm.Steps[i].ID == "gate" {
+			gate = &fm.Steps[i]
+		}
+	}
+	if gate == nil || len(gate.ModelCandidates) != 1 || gate.ModelCandidates[0] != "prov-b/model-b2" {
+		t.Fatalf("per-step override = %+v, want [prov-b/model-b2]", gate)
 	}
 }
 
@@ -98,17 +102,5 @@ func TestReadFrontmatterAbsentConditions(t *testing.T) {
 	}
 	if fm, err = ReadFrontmatter(p2); fm != nil || err == nil {
 		t.Fatalf("torn yaml must answer (nil, err), got (%v, %v)", fm, err)
-	}
-}
-
-func TestCandidatesForNilFrontmatter(t *testing.T) {
-	var fm *Frontmatter
-	if c := fm.CandidatesFor("any"); c != nil {
-		t.Fatalf("nil frontmatter has no candidates, got %v", c)
-	}
-	// a frontmatter without defaults and without the step
-	f := &Frontmatter{Steps: []FrontmatterStep{{ID: "x"}}}
-	if c := f.CandidatesFor("y"); c != nil {
-		t.Fatalf("no defaults and no step override must answer nil, got %v", c)
 	}
 }

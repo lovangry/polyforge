@@ -29,11 +29,9 @@ type planAction struct {
 	Do       string `json:"do"`
 	ID       string `json:"id"`       // step id / question id
 	Question string `json:"question"` // ask: the question text
-	Count    int    `json:"count"`    // provider_error: number of error turns
 	MS       int    `json:"ms"`       // sleep / ui_noise: milliseconds
 	Name     string `json:"name"`     // repo: the repos/ subdirectory
 	Origin   string `json:"origin"`   // repo: the origin remote URL
-	Kind     string `json:"kind"`     // ui_noise: "ui" (default) | "progress"
 	// Envelope mode (v2 Driver): the outcome and handoff flags for the
 	// result-envelope action.
 	Outcome string `json:"outcome,omitempty"` // envelope: completed|needs_input|gate_failed|incomplete
@@ -179,43 +177,6 @@ type plan struct {
 	FailSpawnFresh bool `json:"fail_spawn_fresh"`
 }
 
-// execState mirrors the execution.json contract (03 §4.2 wire shape; the
-// observe lane unmarshals the real capsule.Execution, so the fields here
-// are a subset that keeps every unmarshal honest).
-type execState struct {
-	CapsuleID      string               `json:"capsule_id"`
-	WorkItemID     string               `json:"work_item_id"`
-	CurrentStep    string               `json:"current_step"`
-	WorkflowStatus string               `json:"workflow_status"`
-	Steps          map[string]*execStep `json:"steps"`
-	UpdatedAt      string               `json:"updated_at"`
-	Version        int64                `json:"version"`
-}
-
-type execStep struct {
-	Status          string           `json:"status"`
-	Model           string           `json:"model,omitempty"` // the pinned candidate this derivation was spawned with
-	StepStartedAt   string           `json:"step_started_at,omitempty"`
-	Output          map[string]any   `json:"output,omitempty"` // the step result + the command-audit evidence array
-	Attempts        []any            `json:"attempts"`
-	Answers         []archivedAnswer `json:"answers"`
-	PendingQuestion *pendingQuestion `json:"pending_question,omitempty"`
-}
-
-type pendingQuestion struct {
-	ID       string `json:"id"`
-	Step     string `json:"step"`
-	Question string `json:"question"`
-	AskedAt  string `json:"asked_at"`
-}
-
-type archivedAnswer struct {
-	QuestionID string `json:"question_id"`
-	Answer     string `json:"answer"`
-	AnsweredBy string `json:"answered_by"`
-	AnsweredAt string `json:"answered_at"`
-}
-
 // driveEnv is the shared state of one fake agent process.
 type driveEnv struct {
 	wi string
@@ -227,8 +188,7 @@ type driveEnv struct {
 	sessionArg string
 	resumed    bool
 
-	mu         sync.Mutex // guards exec, journal, transcript, askWaiters
-	exec       *execState
+	mu         sync.Mutex // guards journal, transcript
 	plan       *plan
 	transcript string
 	// mustFail: this derivation is scripted to die at birth, before it
@@ -258,17 +218,6 @@ func newDriveEnv() *driveEnv {
 		sessionArg: transcriptPathOf(),
 		resumed:    hasSessionArg(),
 		transcript: transcriptPathOf(),
-	}
-	d.exec = d.loadExec()
-	if d.exec == nil {
-		capID := "cap_" + wi
-		d.exec = &execState{
-			CapsuleID:      capID,
-			WorkItemID:     wi,
-			WorkflowStatus: "running",
-			Steps:          map[string]*execStep{},
-			Version:        0,
-		}
 	}
 	if d.resumed && len(pl.ResumeActions) > 0 {
 		pl.Actions = pl.ResumeActions
@@ -421,10 +370,10 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 		// No execution.json write here: on the driver lane the DRIVER is
 		// execution.json's single writer, and the envelope this action
 		// precedes IS the version bump (the push lane's commit boundary).
-		d.poisonGitlink(false)
+		d.poisonGitlink()
 	}
 	if act.UnpoisonGitlink {
-		d.unpoisonGitlink(false)
+		d.unpoisonGitlink()
 	}
 	sleepMS(act.MS) // the delayed-envelope-write shape (the hang lane)
 	// Extra capsule-relative files, verbatim content (the declared-input
@@ -570,44 +519,6 @@ func (d *driveEnv) emitToolRun(name string, ms int, hang bool) {
 	d.journal("tool_end", map[string]any{"name": name})
 }
 
-func (d *driveEnv) loadExec() *execState {
-	raw, err := os.ReadFile(execPath)
-	if err != nil {
-		return nil
-	}
-	var x execState
-	if json.Unmarshal(raw, &x) != nil {
-		return nil
-	}
-	if x.Steps == nil {
-		x.Steps = map[string]*execStep{}
-	}
-	return &x
-}
-
-// commit applies mut under the lock and lands the state atomically with
-// the version bump (one write per mutation — Version strictly increases).
-func (d *driveEnv) commit(mut func(*execState)) {
-	d.mu.Lock()
-	d.exec.Version++
-	mut(d.exec)
-	d.exec.UpdatedAt = nowStamp()
-	raw, err := json.Marshal(d.exec)
-	path := execPath
-	d.mu.Unlock()
-	if err != nil {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, path)
-}
-
 // appendTranscript lands one JSONL line on the harness transcript — the
 // recovery engine's resume discriminator reads this file (exists,
 // non-empty, first line parses as a JSON record).
@@ -668,9 +579,8 @@ func withKind(body map[string]any, kind string) map[string]any {
 
 // poisonGitlink lays an embedded git repository (with its own commit —
 // the shape `git add -A` stages as a mode-160000 gitlink) OUTSIDE the
-// gitignored repos/ tree, and bumps the Version so the observe lane's
-// async push picks the change up on the next tick.
-func (d *driveEnv) poisonGitlink(bumpVersion bool) {
+// gitignored repos/ tree.
+func (d *driveEnv) poisonGitlink() {
 	dir := filepath.Join("poison")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
@@ -689,25 +599,15 @@ func (d *driveEnv) poisonGitlink(bumpVersion bool) {
 		os.WriteFile(filepath.Join(dir, "inner.txt"), []byte("embedded history for "+d.wi+"\n"), 0o644) == nil &&
 		run("-c", "user.name=fake-agent", "-c", "user.email=fake-agent@invalid", "add", "-A") == nil &&
 		run("-c", "user.name=fake-agent", "-c", "user.email=fake-agent@invalid", "commit", "-q", "-m", "embedded history") == nil
-	if bumpVersion {
-		// The legacy agent-as-writer bump (the legacy RPC action flows).
-		// The envelope-mode caller must NOT write execution.json — the
-		// driver is its single writer.
-		d.commit(func(x *execState) {})
-	}
 	d.journal("poison_gitlink", map[string]any{"path": "poison", "laid": ok})
 }
 
 // unpoisonGitlink performs the refusal message's documented cleanup —
-// delete the embedded repository's .git — and bumps the Version: the
-// formerly embedded files become plain untracked work, and the next
-// commit boundary re-arms the halted push round.
-func (d *driveEnv) unpoisonGitlink(bumpVersion bool) {
+// delete the embedded repository's .git: the formerly embedded files
+// become plain untracked work.
+func (d *driveEnv) unpoisonGitlink() {
 	err := os.RemoveAll(filepath.Join("poison", ".git"))
 	// the staged gitlink (if the index still carried one) goes with it
-	if bumpVersion {
-		d.commit(func(x *execState) {})
-	}
 	d.journal("unpoison_gitlink", map[string]any{"path": "poison", "err": errString(err)})
 }
 

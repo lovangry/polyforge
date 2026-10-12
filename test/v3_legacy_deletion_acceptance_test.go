@@ -30,7 +30,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -57,17 +56,32 @@ func v3Tok(parts ...string) string {
 // covered by the document scenarios, not by a blind token scan.
 func v3SpecFloorTerms() []string {
 	return []string{
-		v3Tok("use", "-", "driver"),              // both dash spellings of the retired engine flag, and every pin of them
-		v3Tok("Use", "Driver"),                   // the engine Config plumbing (and its Explicit sibling)
-		v3Tok("spawn", "Agent"),                  // the legacy recover cascade's spawn entry
-		v3Tok("resume", "Source"),                // the resume→fresh cascade discriminator
-		v3Tok("transcript", "Readable"),          // the cascade's transcript probe
-		v3Tok("build", "Prompt"),                 // the WI-Agent prompt assembly face
-		v3Tok("Executor", "Prompt", "File"),      // the executor prompt Config plumbing
-		v3Tok("executor", "-", "prompt"),         // the daemon flag (and every help-text mention)
-		v3Tok("PFV1", "_", "LEGACY", "_LAN"),     // the retired test hatch, everywhere
-		v3Tok("pf", "-", "execute"),              // the deleted skill, on code/build surfaces
-		v3Tok("wrap", "_", "unless", "_refused"), // a fakepi RPC action with no kept homonym
+		v3Tok("use", "-", "driver"),                   // both dash spellings of the retired engine flag, and every pin of them
+		v3Tok("Use", "Driver"),                        // the engine Config plumbing (and its Explicit sibling)
+		v3Tok("spawn", "Agent"),                       // the legacy recover cascade's spawn entry
+		v3Tok("resume", "Source"),                     // the resume→fresh cascade discriminator
+		v3Tok("transcript", "Readable"),               // the cascade's transcript probe
+		v3Tok("build", "Prompt"),                      // the WI-Agent prompt assembly face
+		v3Tok("Executor", "Prompt", "File"),           // the executor prompt Config plumbing
+		v3Tok("executor", "-", "prompt"),              // the daemon flag (and every help-text mention)
+		v3Tok("PFV1", "_", "LEGACY", "_LAN"),          // the retired test hatch, everywhere
+		v3Tok("pf", "-", "execute"),                   // the deleted skill, on code/build surfaces
+		v3Tok("wrap", "_", "unless", "_refused"),      // a fakepi RPC action with no kept homonym
+		v3Tok("answer", "-", "ack", "-", "window"),    // the retired answer-ack knob: flag spelling
+		v3Tok("Answer", "Ack", "Window"),              // ... and its Go identifier
+		v3Tok("answer", "Ack", "Window"),              // ... and the harness var spelling
+		v3Tok("Fault", "Class"),                       // the retired fault-classification type
+		v3Tok("Classify", "Fault"),                    // ... and its classifier
+		v3Tok("repair", "_", "pending"),               // the retired repair-pending state
+		v3Tok("refresh", "Bundle"),                    // the retired bundle re-materialization hook
+		v3Tok("ensure", "Materialized"),               // the retired materialization guard
+		v3Tok("Remote", "Published"),                  // the retired published-remote probe
+		v3Tok("Job", "View"),                          // the retired observe job view
+		v3Tok("rotate", "-", "secret"),                // the retired secret-rotation verb
+		v3Tok("Candidates", "For", "("),               // the retired candidates accessor (the live recovery helper has a longer name)
+		v3Tok("jobs/{wi}/", "observe"),                // the retired observe route
+		v3Tok("Start", "Intent"),                      // the retired start-intent plumbing
+		v3Tok("sync", "Transcript", "Before", "Seal"), // the job-level seal-time transcript overwrite
 	}
 }
 
@@ -449,63 +463,6 @@ func TestV3AnswerWithoutLiveBridgeFailsFast(t *testing.T) {
 // Scenario S1 — retired engine flags fail loudly at parse.
 // ---------------------------------------------------------------------------
 
-// TestV3RemovedEngineFlagsFailLoudly invokes the real `pf daemon` binary
-// with each retired flag and requires a loud parse failure naming that
-// flag. The invocation deliberately omits --workspace so the pre-change
-// binary terminates promptly too (workspace validation fails fast) —
-// which keeps the failure assertion-level before the change: the exit is
-// non-zero but the output names the workspace, never the retired flag.
-// After the change the flag parse fails first and names the flag.
-func TestV3RemovedEngineFlagsFailLoudly(t *testing.T) {
-	// Only the real pf binary is needed — no aihub, no daemon: the flag
-	// parse fails (or, pre-change, the missing-workspace validation
-	// fails) long before anything boots.
-	inst := &v1Install{pfPath: filepath.Join(v1Bins(t), "pf")}
-	cases := []struct {
-		name string
-		argv []string
-		want string // the token the loud error must name (assembled)
-	}{
-		{"retired engine flag, single dash", []string{"-" + v3Tok("use", "-", "driver")}, v3Tok("use", "-", "driver")},
-		{"retired engine flag, double dash", []string{"--" + v3Tok("use", "-", "driver")}, v3Tok("use", "-", "driver")},
-		{"retired executor prompt flag", []string{"--" + v3Tok("executor", "-", "prompt"), "/dev/null"}, v3Tok("executor", "-", "prompt")},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			home := t.TempDir()
-			args := append([]string{
-				"daemon",
-				"--socket", filepath.Join(t.TempDir(), "d.sock"),
-				"--machine-id", "m-v3flags",
-				"--data-dir", t.TempDir(),
-			}, c.argv...)
-			cmd := exec.Command(inst.pfPath, args...)
-			// A minimal, hermetic environment: no shared CLI config, no
-			// POLYFORGE_* fallbacks — the only failure cause can be the
-			// retired flag itself (post-change) or the missing workspace
-			// (pre-change).
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}
-			var out strings.Builder
-			cmd.Stdout, cmd.Stderr = &out, &out
-			code := 0
-			if err := cmd.Run(); err != nil {
-				ee, ok := err.(*exec.ExitError)
-				if !ok {
-					t.Fatalf("pf %v: %v", args, err)
-				}
-				code = ee.ExitCode()
-			}
-			if code == 0 {
-				t.Fatalf("pf %v was silently accepted (exit 0, output %q)", c.argv, out.String())
-			}
-			if !strings.Contains(out.String(), c.want) {
-				t.Fatalf("pf %v failed (exit %d) without naming the retired flag %q — output %q",
-					c.argv, code, c.want, out.String())
-			}
-		})
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Scenario S5 — grep-clean for the deleted faces.
 // ---------------------------------------------------------------------------
@@ -651,7 +608,7 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 	var surfaces []string
 	surfaces = append(surfaces, filepath.Join(root, "README.md"))
 	// The 8 non-pilot design docs: 00–06 and 08 (07-deployment-pilot.md
-	// is the pilot register; docs/pilot/* is a separate historical tree).
+	// is the pilot register).
 	for _, n := range []string{
 		"00-architecture.md", "01-workflow-skills.md", "02-aihub-core.md",
 		"03-execution-capsule.md", "04-local-runtime.md",
@@ -715,32 +672,14 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario S8 — historical registers stay untouched; the v0 archive is gone.
+// Scenario S8 — the v0 archive is gone.
 // ---------------------------------------------------------------------------
 
-// TestV3HistoricalRegistersAndV0Untouched pins the byte-identity
-// invariants against the pre-change tree authority (HEAD bb7ab95, per
-// the spec): docs/pilot/* carries no diff and no new untracked files; and
-// the frozen v0/ reference tree has been dropped from the working tree
-// (it lives in git history only).
-func TestV3HistoricalRegistersAndV0Untouched(t *testing.T) {
+// TestV3V0ArchiveAbsent pins that the frozen v0/ reference tree has
+// been dropped from the working tree (it lives in git history only, tag
+// v0-archive).
+func TestV3V0ArchiveAbsent(t *testing.T) {
 	root := v1Root(t)
-	const base = "bb7ab95"
-
-	for _, dir := range []string{"docs/pilot"} {
-		// No modifications or deletions against the pre-change tree.
-		if out, code := v3Git(t, root, "diff", "--stat", base, "--", dir); code != 0 {
-			t.Fatalf("git diff %s %s: exit %d, output %q", base, dir, code, out)
-		} else if strings.TrimSpace(out) != "" {
-			t.Fatalf("%s changed against %s (must be byte-identical):\n%s", dir, base, out)
-		}
-		// No new untracked files either.
-		if out, code := v3Git(t, root, "ls-files", "--others", "--exclude-standard", dir); code != 0 {
-			t.Fatalf("git ls-files %s: exit %d, output %q", dir, code, out)
-		} else if strings.TrimSpace(out) != "" {
-			t.Fatalf("new untracked files under %s (must stay byte-identical):\n%s", dir, out)
-		}
-	}
 
 	// The v0/ reference tree was dropped from the working tree (it lives
 	// in git history only): no directory and no tracked file remains.
@@ -774,25 +713,3 @@ func v3Git(t *testing.T, dir string, args ...string) (string, int) {
 // ---------------------------------------------------------------------------
 // Scenario S9 — the delivery shape.
 // ---------------------------------------------------------------------------
-
-// TestV3DeliveryShapeSequentialCommits pins the delivery floor: the
-// change lands as at least 5 sequential commits on top of the pre-change
-// tree authority (bb7ab95), the ticket's batch order floor. RED before
-// any commit exists, GREEN on the delivered branch. The per-batch
-// greenness of each commit is the flow's own gate (document scenario),
-// not a single-tree assertion.
-func TestV3DeliveryShapeSequentialCommits(t *testing.T) {
-	root := v1Root(t)
-	const base = "bb7ab95"
-	out, code := v3Git(t, root, "rev-list", "--count", base+"..HEAD")
-	if code != 0 {
-		t.Fatalf("git rev-list --count %s..HEAD: exit %d, output %q", base, code, out)
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(out))
-	if err != nil {
-		t.Fatalf("rev-list count unparsable: %q", out)
-	}
-	if n < 5 {
-		t.Fatalf("delivery carries %d commit(s) on top of %s; the ticket's batch floor is 5+ sequential commits", n, base)
-	}
-}

@@ -406,8 +406,8 @@ func cacheIdempotentClaimTx(tx *sql.Tx, key, wiID, callerIdentity string, claim 
 }
 
 // projectReposTx reads the project's task-repo inventory on the claim's
-// own snapshot (v0 claim semantics: the runtime clones each entry into
-// the capsule before the agent starts).
+// own snapshot (the runtime clones each entry into the capsule before the
+// agent starts).
 func projectReposTx(tx *sql.Tx, projectID string) ([]api.ProjectRepo, error) {
 	var reposJSON string
 	err := tx.QueryRow(`SELECT repos FROM projects WHERE id=?1`, projectID).Scan(&reposJSON)
@@ -452,37 +452,6 @@ func (m *SessionManager) Verify(wiID, sessionID string) (*api.SessionVerifyRespo
 	if sessionHeld(row) {
 		resp.CurrentFingerprint = row.Fingerprint.String
 		resp.Matches = api.SessionHashHex(sessionID) == row.Hash.String
-	}
-	return resp, nil
-}
-
-// ---------------------------------------------------------------------------
-// Holder (contract §1.7, the public holder read)
-
-// Holder answers "who holds this work item now" in PUBLIC fields only:
-// the same audit set as the m4 SessionPublic block (machine_id spelled
-// per the endpoint contract). The unheld state is an ordinary answer —
-// the holder fields stay empty (flat omitted on the wire, the §1.2
-// fingerprint-omission precedent) — so the operator tri-state
-// (unheld / held-paused / held-running) is three 200 answers, never an
-// error. No state change, no event. By construction the hash and the
-// secret never reach the response: only the public columns are mapped,
-// and the hash column is read solely to tell held from unheld.
-func (m *SessionManager) Holder(wiID string) (*api.SessionHolderResponse, error) {
-	row, err := loadSessionRow(m.db, wiID)
-	if err != nil {
-		return nil, err
-	}
-	resp := &api.SessionHolderResponse{
-		WorkItemID: wiID,
-		Status:     row.Status,
-		CleanPause: row.CleanPause,
-	}
-	if sessionHeld(row) {
-		resp.SessionFingerprint = row.Fingerprint.String
-		resp.MachineID = row.Machine.String
-		resp.SessionOwner = row.Owner.String
-		resp.SessionStartedAt = row.StartedAt.String
 	}
 	return resp, nil
 }
@@ -690,12 +659,12 @@ func blockedSealTx(tx txExecer, wiID string) (head, machine string) {
 }
 
 // End is the session-fenced terminal verdict: hash matches → set the
-// status (wrapped|failed|canceled|blocked), CLEAR the session row entirely (M2:
+// status (wrapped|failed|blocked), CLEAR the session row entirely (M2:
 // blocked = status blocked + cleared session, excluded from the claim
 // gate until a human unblocks), event session_ended.
 func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdentity string) error {
 	switch req.Status {
-	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked, api.StatusCanceled:
+	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked:
 	case api.StatusPaused:
 		// Merge amend (Lane B/C complaint): "paused" routes to the M3
 		// pause transition — the session is KEPT (restart attaches), the
@@ -703,7 +672,7 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 		// three terminal verdicts clear the session row.
 		return m.Pause(wiID, req.SessionID, req.CleanPause, req.Note, callerIdentity)
 	default:
-		return Fail(api.ErrCoreBadInput, "", "status must be one of wrapped|failed|canceled|blocked|paused")
+		return Fail(api.ErrCoreBadInput, "", "status must be one of wrapped|failed|blocked|paused")
 	}
 	tx, err := m.db.Begin()
 	if err != nil {
@@ -724,7 +693,7 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 		"session_hash=NULL", "session_fingerprint=NULL", "session_machine=NULL",
 		"session_owner=NULL", "session_started_at=NULL", "clean_pause=0"}
 	args := []any{req.Status, now}
-	if req.Status == api.StatusWrapped || req.Status == api.StatusFailed || req.Status == api.StatusCanceled {
+	if req.Status == api.StatusWrapped || req.Status == api.StatusFailed {
 		sets = append(sets, "closed_at=?")
 		args = append(args, now)
 	}

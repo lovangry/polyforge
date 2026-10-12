@@ -179,6 +179,20 @@ func (p *Plan) Projects() []string {
 	return out
 }
 
+// ProjectsOf answers the projects one workspace maps, in array order
+// (nil when the workspace is not mapped).
+func (p *Plan) ProjectsOf(workspace string) []string {
+	if p == nil {
+		return nil
+	}
+	for _, e := range p.entries {
+		if e.Workspace == workspace {
+			return append([]string(nil), e.Projects...)
+		}
+	}
+	return nil
+}
+
 // WorkspaceFor resolves the inverse: the one workspace whose projects
 // list carries project. An unmapped project answers the typed
 // *UnmappedError (the daemon claim path re-surfaces it as DAEMON-4xx).

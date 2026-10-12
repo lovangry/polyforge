@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,12 +24,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
@@ -61,21 +63,19 @@ type Config struct {
 	// — <mapped-workspace>/capsules/<wi> per the claim answer's project.
 	// There is no single workspace and no default project anymore. The
 	// daemon refuses to start when the mapping is empty; a recorded
-	// mid-flight project that falls out of it parks only that work item
-	// repair_pending (restart.go, v2-converge §6).
+	// mid-flight project that falls out of it blocks only that work item
+	// at aihub (restart.go, blockUnrecoverable).
 	Mapping       *mapping.Plan
 	DataDir       string // state.json + external git-dirs live here
 	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
 	Harness       string // harness adapter name ("pi")
 	PiBin         string // harness binary (default "pi")
+	CgroupRoot    string // cgroup v2 root; empty ⇒ layer-0 unavailable
 	// HarnessSessionsRoot overrides the harness's default session store
-	// (~/.pi/agent/sessions) for the live-transcript locator (F3): the
-	// production default is right; tests and relocated installs point
-	// it at a scratch tree. Empty = the default.
+	// (the live-transcript locator of the seal/pause/bounded-fail sync).
 	HarnessSessionsRoot string
-	CgroupRoot          string // cgroup v2 root; empty ⇒ layer-0 unavailable
-	MaxRecoveries       int    // consecutive FAILED recoveries before bounded fail (default 2)
+	MaxRecoveries       int // consecutive FAILED recoveries before bounded fail (default 2)
 	// RecoveryStabilityWindow bounds the v2 entry-rate storm guard: a
 	// recoverCore that re-fires inside this window (default 60s) counts
 	// one storm unit; MaxRecoveries rapid re-entries bounded-fail the WI
@@ -83,14 +83,6 @@ type Config struct {
 	// budget — the #97 death loop). A re-entry after a stable gap resets
 	// the storm ledger: an isolated later failure is a fresh episode.
 	RecoveryStabilityWindow time.Duration
-	SendBound               time.Duration // bound on one RT→OB send (default 5s)
-	// ReleaseRetryWindow bounds the release lane (NEW-2): how long a
-	// deferred observe release (RTFinished) whose first bounded send
-	// expired on a full channel keeps retrying before it is dropped for
-	// good. Default 2 minutes — a momentary full channel (many closes at
-	// once) delays the release; only a channel wedged past the window
-	// loses it, loudly.
-	ReleaseRetryWindow time.Duration // total retry bound for a deferred release (default 2min)
 	// EndRetryBase/EndRetryMax shape the backoff of the durable
 	// SessionEnd(blocked) retry (end_pending records and the re-claim
 	// abandon lane): first retry after Base, doubling up to Max
@@ -132,12 +124,6 @@ func (c *Config) fill() {
 	if c.RecoveryStabilityWindow <= 0 {
 		c.RecoveryStabilityWindow = 60 * time.Second
 	}
-	if c.SendBound <= 0 {
-		c.SendBound = 5 * time.Second
-	}
-	if c.ReleaseRetryWindow <= 0 {
-		c.ReleaseRetryWindow = 2 * time.Minute
-	}
 	if c.RecallTopK <= 0 {
 		c.RecallTopK = defaultRecallTopK
 	}
@@ -154,8 +140,8 @@ type Runtime struct {
 	cfg     Config
 	hub     Aihub
 	spawner Spawner
-	toOB    chan<- protocol.RTMsg
-	fromOB  <-chan protocol.OBMsg
+	toOB    *supervise.Queue[protocol.RTMsg]
+	fromOB  *supervise.Queue[protocol.OBMsg]
 
 	mu   sync.Mutex
 	jobs map[string]*job
@@ -167,23 +153,17 @@ type Runtime struct {
 	aliases map[string]string
 	// origins: submit origins noted by the daemon, consumed at job creation.
 	origins map[string]Origin
+	// manualModels: `pf submit --models` lists noted by the daemon,
+	// consumed by the next Start of that work item (like origins).
+	manualModels map[string][]string
+	// manualMu guards the daemon-local manual-models.json (manualmodels.go).
+	manualMu sync.Mutex
 
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
 	// machine never sees two drivers at once.
 	opMu      sync.Mutex
 	statePath string
-
-	// The release lane (NEW-2): pending observe releases (RTFinished)
-	// whose first bounded send expired on a full channel, plus the
-	// lane's done signal. Both are built lazily under relMu by the first
-	// deferred release; relDone is closed by Close (runtime shutdown).
-	// The lane keeps a full-channel release alive (bounded by
-	// ReleaseRetryWindow per message) instead of destroying it — the
-	// one message kind no successor event ever re-derives.
-	relMu    sync.Mutex
-	relQueue chan protocol.RTMsg
-	relDone  chan struct{}
 
 	// The durable-close retry lane (endpending.go): WIs whose
 	// SessionEnd(blocked) retry goroutine is running (one per WI), and
@@ -193,13 +173,6 @@ type Runtime struct {
 	endStop     chan struct{}
 	endStopOnce sync.Once
 }
-
-// releaseQueueCap bounds the lane's pending set: a wedged Observe must
-// never grow the runtime's memory without bound. A queue this deep
-// means hundreds of closes each stacked behind a channel undrained
-// past SendBound — overflow is dropped loudly, the same loss the
-// pre-lane send path had.
-const releaseQueueCap = 256
 
 // job is one WI's runtime bookkeeping.
 
@@ -248,19 +221,12 @@ type job struct {
 	// set when the SEALING transition records the reason and persisted
 	// with it, so a crash between that push and SessionEnd keeps the
 	// restart's stop finisher from re-pushing either.
-	sealedPush bool
-	capsuleDir string
-	git        gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
-	transcript string
-	// liveTranscript is the file the CURRENT derivation appends to: the
-	// harness-store path a fresh pi derivation really writes (the harness
-	// ignores PI_SESSION_DIR), or — for a resumed derivation — the very
-	// file --session points at. Empty while not yet located (the observe
-	// lane re-locates at its sync points; the recovery engine at its
-	// resume decision).
-	liveTranscript string
-	bundleName     string
-	bundleDigest   string
+	sealedPush   bool
+	capsuleDir   string
+	git          gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
+	transcript   string
+	bundleName   string
+	bundleDigest string
 	// origin is how the job was submitted (nil = unknown).
 	origin *Origin
 	// item is the claim answer's work-item snapshot (the F1 materializer
@@ -274,25 +240,17 @@ type job struct {
 	// not part of the persisted job record.
 	repos []api.ProjectRepo
 
-	// workspaceRoot/workspaceYaml are the polyforge#79 claim-time read:
-	// the mapped workspace's root and its strictly-validated
-	// .polyforge.yaml (nil when the workspace carries none). Read FRESH
-	// on every claim — an edit governs the next claim with no daemon
-	// restart. In-memory only: the durable snapshot is the capsule.json
-	// audit materialize writes (the recovery path rehydrates from
-	// there).
-	workspaceRoot string
+	// workspaceYaml is the claim's pre-claim-validated .polyforge.yaml
+	// (nil when the workspace carries none). In-memory only.
 	workspaceYaml *workspace.Config
 	// stepCandidates is the polyforge#79 claim-time compose: the
 	// per-step post-precedence candidate lists (step id → list; a
 	// present-empty entry governs and means no switchable chain). In-
 	// memory only; the durable snapshot is the capsule.json audit.
 	stepCandidates map[string][]string
-	// repoSources is the polyforge#79 local-source record: repo name →
-	// the source actually cloned from (the resolved local checkout for
-	// yaml-sourced clones). In-memory only; the durable copy is the
-	// capsule.json audit.
-	repoSources map[string]string
+	// manualModels is the work item's `pf submit --models` list (top
+	// precedence level; kept daemon-side in manual-models.json).
+	manualModels []string
 
 	agent          AgentHandle
 	agentPID       int
@@ -313,13 +271,6 @@ type job struct {
 	// the same marker the hub does; false everywhere else (a graceful
 	// shutdown keeps it false — the attach-on-restart shape, M3).
 	cleanPause bool
-	// repairPending is the v2 §6 local "pending repair" mark: the record's
-	// capsule is missing / its project is unmapped at restart. Non-empty =
-	// the reason kind (RepairCapsuleMissing | RepairProjectUnmapped). The
-	// job is parked — record and SESSION kept, no agent, no hub call —
-	// until the next start or `pf resume` re-checks it. Orthogonal to
-	// state (the pre-park state is what the in-place resume continues).
-	repairPending string
 	// verifyPending marks a record whose restart SessionVerify could not
 	// reach aihub: it keeps its place (no agent yet) while the daemon
 	// retries the verify with backoff, then proceeds through restartOne.
@@ -329,16 +280,12 @@ type job struct {
 	// end_pending job (see StateEndPending).
 	endNote string
 	endHead string
-	// endStatus is the verdict of the pending SessionEnd; "" = blocked
-	// (the bounded-fail close). "canceled" / "failed" ride an abandoned
-	// repair_pending WI (AbandonRepair).
-	endStatus string
-	mu        sync.Mutex
+	mu      sync.Mutex
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries
 // Observe→Runtime messages; both sides speak only common/protocol types.
-func New(cfg Config, hub Aihub, spawner Spawner, toOB chan<- protocol.RTMsg, fromOB <-chan protocol.OBMsg) *Runtime {
+func New(cfg Config, hub Aihub, spawner Spawner, toOB *supervise.Queue[protocol.RTMsg], fromOB *supervise.Queue[protocol.OBMsg]) *Runtime {
 	cfg.fill()
 	return &Runtime{
 		cfg:       cfg,
@@ -367,14 +314,17 @@ func DefaultSpawner(cfg *Config) Spawner {
 // drops a same-derivation WINeedsRecovery).
 func (r *Runtime) Run(ctx context.Context) error {
 	for {
+		for {
+			msg, ok := r.fromOB.Pop()
+			if !ok {
+				break
+			}
+			r.handleOB(ctx, msg)
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case msg, ok := <-r.fromOB:
-			if !ok {
-				return nil
-			}
-			r.handleOB(ctx, msg)
+		case <-r.fromOB.Notify():
 		}
 	}
 }
@@ -431,131 +381,19 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	}
 }
 
-// send delivers one RT→Observe message, bounded so a wedged Observe
-// cannot wedge the Runtime. It serves only the re-derivable kinds
-// (RTStarted, RTRecovered): a drop is final for the message, but a
-// successor lifecycle event replaces it (§二). The terminal observe
-// release (RTFinished) must NOT ride this path — see sendRelease.
-func (r *Runtime) send(msg protocol.RTMsg) {
-	select {
-	case r.toOB <- msg:
-	case <-time.After(r.cfg.SendBound):
-		fmt.Fprintf(os.Stderr, "runtime: %s: RT message %s dropped (observe channel full)\n", msg.WorkItem, msg.Kind)
-	}
-}
+// send queues one RT→Observe message. The queue is unbounded and never
+// drops: lifecycle facts must reach Observe (v2-converge §2.2), and the
+// sender never blocks.
+func (r *Runtime) send(msg protocol.RTMsg) { r.toOB.Push(msg) }
 
-// sendRelease delivers one observe-release message. Every RTFinished is
-// terminal for its lineage in this daemon — no successor event ever
-// re-derives it, and on the observe side it is the only runtime-driven
-// stop signal for the monitor (NEW-2: a drop leaked the superseded or
-// paused monitor forever, the superseded one re-emitting OBSuperseded
-// on every revalidation retry). The first attempt is bounded by
-// SendBound exactly like send, so a wedged Observe still never wedges
-// the close callers; on expiry the release is re-armed on the release
-// lane instead of destroyed: one lane goroutine keeps attempting
-// delivery, each message for at most ReleaseRetryWindow in total, then
-// drops it loudly. Only the lane goroutine keeps waiting — the close
-// path itself returns after the first bounded attempt.
-func (r *Runtime) sendRelease(msg protocol.RTMsg) {
-	select {
-	case r.toOB <- msg:
-	case <-time.After(r.cfg.SendBound):
-		fmt.Fprintf(os.Stderr, "runtime: %s: RT message %s deferred to the release lane (observe channel full)\n", msg.WorkItem, msg.Kind)
-		r.rearmRelease(msg)
-	}
-}
-
-// rearmRelease parks one undeliverable release message on the release
-// lane, building the lane lazily. Bounded twice over: the queue is
-// capped (releaseQueueCap — overflow is dropped loudly) and each parked
-// message carries its own ReleaseRetryWindow deadline on the lane.
-func (r *Runtime) rearmRelease(msg protocol.RTMsg) {
-	r.relMu.Lock()
-	defer r.relMu.Unlock()
-	if r.relDone != nil {
-		select {
-		case <-r.relDone:
-			// Close already ran: the lane is gone, and a release armed
-			// now could only park past the shutdown. Drop loudly.
-			fmt.Fprintf(os.Stderr, "runtime: %s: RT message %s dropped (release lane closed)\n", msg.WorkItem, msg.Kind)
-			return
-		default:
-		}
-	}
-	if r.relQueue == nil {
-		r.relQueue = make(chan protocol.RTMsg, releaseQueueCap)
-		r.relDone = make(chan struct{})
-		go r.runReleaseLane(r.relQueue, r.relDone)
-	}
-	select {
-	case r.relQueue <- msg:
-	default:
-		// The lane is a bound, not an unbounded mailbox.
-		fmt.Fprintf(os.Stderr, "runtime: %s: RT message %s dropped (release lane full)\n", msg.WorkItem, msg.Kind)
-	}
-}
-
-// runReleaseLane is the lane goroutine: one message at a time, it keeps
-// handing each parked release to the observe channel until room
-// appears, the message's total retry window expires (loud drop) or the
-// runtime closes — pending releases are abandoned at shutdown (the
-// daemon's shutdown sequence stops the observe lane first, so nothing
-// can consume the channel anymore).
-func (r *Runtime) runReleaseLane(queue <-chan protocol.RTMsg, done <-chan struct{}) {
-	for {
-		// done has PRIORITY: a closed lane abandons everything promptly.
-		// Without this pre-check the receive select below has both cases
-		// ready (a parked message + closed done) and Go picks randomly —
-		// the merge-suite run measured exactly that 50% race against the
-		// abandon-on-Close contract.
-		select {
-		case <-done:
-			return
-		default:
-		}
-		var msg protocol.RTMsg
-		select {
-		case msg = <-queue:
-		case <-done:
-			return
-		}
-		select {
-		case <-done:
-			return
-		default:
-		}
-		select {
-		case r.toOB <- msg:
-		case <-time.After(r.cfg.ReleaseRetryWindow):
-			fmt.Fprintf(os.Stderr, "runtime: %s: RT message %s dropped (observe channel full for the whole retry window)\n", msg.WorkItem, msg.Kind)
-		case <-done:
-			return
-		}
-	}
-}
-
-// Close stops the release lane (NEW-2) and abandons any release still
-// parked on it. Call once the runtime message loop (Run) has returned
-// and no close can be in flight (the daemon's shutdown sequence); it is
-// idempotent. A runtime whose Close is never called still terminates:
-// every parked release is deadline-bounded and the lane goroutine only
-// ever blocks on the queue or the done signal.
+// Close stops the durable-close retry goroutines. Call once the runtime
+// message loop (Run) has returned; it is idempotent.
 func (r *Runtime) Close() {
 	r.endStopOnce.Do(func() {
 		if r.endStop != nil {
 			close(r.endStop)
 		}
 	})
-	r.relMu.Lock()
-	defer r.relMu.Unlock()
-	if r.relDone == nil {
-		return
-	}
-	select {
-	case <-r.relDone:
-	default:
-		close(r.relDone)
-	}
 }
 
 func (r *Runtime) jobOf(wi string) *job {
@@ -576,7 +414,7 @@ func (r *Runtime) persist() error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(r.statePath, blob, stateFilePerm)
+	return atomicfile.Write(r.statePath, blob, stateFilePerm)
 }
 
 func (r *Runtime) dropJob(j *job) {
@@ -607,7 +445,7 @@ func (r *Runtime) NoteAlias(alias, canonical string) {
 }
 
 // NoteOrigin records the origin the NEXT job started for wi will carry.
-// The daemon calls it right before StartIntent; startClaimed consumes it.
+// The daemon calls it right before Start; startClaimed consumes it.
 func (r *Runtime) NoteOrigin(wi string, o Origin) {
 	r.mu.Lock()
 	if r.origins == nil {
@@ -615,6 +453,29 @@ func (r *Runtime) NoteOrigin(wi string, o Origin) {
 	}
 	r.origins[wi] = o
 	r.mu.Unlock()
+}
+
+// NoteModels records the manual `pf submit --models` list the NEXT
+// Start of wi will compose as the top precedence level. A nil/empty list
+// notes nothing.
+func (r *Runtime) NoteModels(wi string, models []string) {
+	if len(models) == 0 {
+		return
+	}
+	r.mu.Lock()
+	if r.manualModels == nil {
+		r.manualModels = map[string][]string{}
+	}
+	r.manualModels[wi] = models
+	r.mu.Unlock()
+}
+
+func (r *Runtime) takeModels(wi string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m := r.manualModels[wi]
+	delete(r.manualModels, wi)
+	return m
 }
 
 // takeOrigin pops the noted origin for any of the given id spellings.
@@ -691,21 +552,6 @@ func sessionPathFor(capsuleDir, token string) string {
 	return filepath.Join(capsuleDir, capsule.DirSession, "session-"+token+".jsonl")
 }
 
-// harnessSessionsRoot answers the configured harness session store.
-func (r *Runtime) harnessSessionsRoot() string {
-	if r.cfg.HarnessSessionsRoot != "" {
-		return r.cfg.HarnessSessionsRoot
-	}
-	return HarnessSessionsRootDefault()
-}
-
-// locateLive locates the live transcript of a derivation born at
-// spawnAt (the F3 face over the shared helper; "" = not there yet or
-// never — a typed warning condition, never an error).
-func (r *Runtime) locateLive(capsuleDir string, spawnAt time.Time) string {
-	return LocateLiveTranscript(r.harnessSessionsRoot(), capsuleDir, spawnAt)
-}
-
 // randomKey mints an idempotency key (NOT a secret: it only needs
 // uniqueness for the server's D4 replay dedup).
 func randomKey() string {
@@ -732,16 +578,9 @@ func mintSessionID() (string, error) {
 // Start (§一 Runtime): claim → clone/init capsule → materialize → spawn →
 // RTStarted.
 
-// Start claims wi and runs it to a live agent (a plain claim). Idempotency
-// rides on the claim idempotency key: a retry after a lost response
-// re-claims the same session server-side (D4). See StartIntent for the
-// resume intents.
-func (r *Runtime) Start(ctx context.Context, wi string) error {
-	return r.StartIntent(ctx, wi, "claim")
-}
-
-// StartIntent claims wi with an explicit claim intent (claim|resume) and
-// runs it to a live agent. Both map onto the CAS SessionClaim (a paused
+// Start claims wi and runs it to a live agent. Idempotency rides on the
+// claim idempotency key: a retry after a lost response re-claims the same
+// session server-side (D4). The claim is the CAS SessionClaim (a paused
 // or held WI answers NOT_CLAIMABLE/ALREADY_HELD — the honest refusal,
 // never a guess; a WI whose holder is dead is first force-ended by an
 // admin, `pf ops end-session`, which returns it to queued for an
@@ -749,9 +588,10 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 // call (B1): a crash between journal and call is recoverable by replay,
 // a crash after the call by verify — the ambiguous-claim window is
 // closed from both sides.
-func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
+func (r *Runtime) Start(ctx context.Context, wi string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
+	manual := r.takeModels(wi) // always consumed: a refused start must not leak it
 	if j := r.jobOf(wi); j != nil {
 		if st, _ := j.snapshot(); st != StatePaused {
 			return fmt.Errorf("runtime: %s already active (state %s)", wi, st)
@@ -762,22 +602,31 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		// plain claim of the paused-held WI is refused by the hub's own
 		// ALREADY_HELD gate).
 	}
-	// polyforge#113 placement pre-check: resolve the work item (read-only
-	// GetWorkItem) BEFORE anything is journaled or claimed, and refuse an
-	// unmapped project with the typed DAEMON-412 — before any capsule
-	// exists and before the aihub-side claim state changes. The mapping
-	// governs placement, not knowledge: the hub read is a projection, not
-	// a mutation. A FAILED read refuses nothing here — the claim call is
-	// the authority for WI existence, and startClaimed re-checks the
-	// claim answer's project (the D5 compensation covers the race).
-	if probe, perr := r.hub.GetWorkItem(wi); perr == nil && probe != nil && probe.ProjectName != "" {
-		if _, merr := r.cfg.Mapping.WorkspaceFor(probe.ProjectName); merr != nil {
-			return &api.Error{
-				Code: api.ErrDaemonUnmappedProject,
-				Detail: fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)",
-					probe.ProjectName),
-			}
+	// Pre-claim placement + workspace-yaml check (polyforge#113, #79):
+	// resolve the work item's project (read-only GetWorkItem), then load
+	// its workspace's .polyforge.yaml strictly — BEFORE anything is
+	// journaled or claimed. An unmapped project (DAEMON-412) or an
+	// invalid yaml (DAEMON-414) refuses here: no capsule, and the WI stays
+	// queued at aihub so another machine may take it — a bad local file
+	// must not block the team's task. A failed probe claims nothing
+	// either (no project, no workspace to read): the caller retries.
+	probe, perr := r.hub.GetWorkItem(wi)
+	if perr != nil {
+		var ae *api.Error
+		if errors.As(perr, &ae) && ae.HTTPStatus() < 500 {
+			// the hub answered and refused (unknown WI, forbidden): final
+			return fmt.Errorf("runtime: %s: work-item probe refused (not claiming): %w", wi, perr)
 		}
+		// transport loss or a hub 5xx: typed transient, the caller retries
+		return &api.Error{Code: api.ErrDaemonHubUnavailable,
+			Detail: fmt.Sprintf("%s: work-item probe failed (not claiming; retry later): %v", wi, perr)}
+	}
+	if probe == nil || probe.ProjectName == "" {
+		return fmt.Errorf("runtime: %s: work-item probe answered no project (not claiming)", wi)
+	}
+	wcfg, werr := r.LoadWorkspace(probe.ProjectName)
+	if werr != nil {
+		return werr
 	}
 	sessionID, err := mintSessionID()
 	if err != nil {
@@ -791,7 +640,7 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 	// D4) and either finish the start or compensate with
 	// SessionEnd(blocked).
 	key := randomKey()
-	if err := r.noteClaiming(wi, sessionID, key); err != nil {
+	if err := r.noteClaiming(wi, sessionID, key, manual); err != nil {
 		return fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", wi, err)
 	}
 	req := api.SessionClaimRequest{
@@ -808,7 +657,7 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 		r.clearClaiming(wi)
 		return err
 	}
-	return r.startClaimed(ctx, wi, sessionID, resp)
+	return r.startClaimed(ctx, wi, sessionID, resp, wcfg, manual)
 }
 
 // startClaimed carries one OPEN claim (fresh or replayed) to a live agent.
@@ -830,7 +679,7 @@ func (r *Runtime) StartIntent(ctx context.Context, wi, intent string) error {
 // separator into the harness's session directory naming, so slugs never
 // reach any path. The submitted spelling is registered as an alias so
 // lookups by it still resolve.
-func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse) error {
+func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse, wcfg *workspace.Config, manual []string) error {
 	c := resp.Claim
 	// canonical id resolution (F2): the claim answer's work item is the
 	// authority; the claim's own WorkItemID and the answered record's ID
@@ -872,6 +721,16 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		// the server side). Refuse rather than adopt someone else's claim.
 		return fmt.Errorf("runtime: %s: claim answer fingerprint %s does not match this session (%s)", id, c.SessionFingerprint, fp)
 	}
+	// The manual `pf submit --models` list is daemon-local: a submit that
+	// carries one records it under the daemon's data dir; a re-claim
+	// (pf resume of a blocked WI) carries none and reads it back from
+	// there. Never from the capsule — the agent writes there and the
+	// capsule travels to other machines with the WI.
+	if len(manual) > 0 {
+		r.saveManualModels(id, manual)
+	} else {
+		manual = r.loadManualModels(id)
+	}
 	j := &job{
 		wi:                 id,
 		project:            resp.WorkItem.ProjectName,
@@ -893,6 +752,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		repos:        c.Repos,
 		item:         &resp.WorkItem,
 		origin:       r.takeOrigin(wi, id),
+		manualModels: manual,
 	}
 	// polyforge#113: the capsule routes by the claim answer's project
 	// through the inverse mapping. An unmapped answer here (a mapping
@@ -901,30 +761,19 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	// no capsule directory is ever touched.
 	capDir, rerr := r.capsuleDirForProject(j.project, id)
 	if rerr != nil {
-		err2 := &api.Error{
-			Code: api.ErrDaemonUnmappedProject,
-			Detail: fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)",
-				j.project),
-		}
+		err2 := unmappedProjectError(j.project)
 		return r.abandonClaim(j, wi, err2, err2.Detail)
 	}
 	j.capsuleDir = capDir
 	j.git.CapsuleDir = capDir
 	j.transcript = sessionPathFor(j.capsuleDir, fp)
 
-	// polyforge#79: the workspace yaml is read FRESH on every claim (the
-	// read lives in the claim path, so an edit governs the next claim
-	// with no daemon restart) and an invalid one refuses the claim BEFORE
-	// any capsule state exists — the same abandonClaim lane as the
-	// unmapped-project refusal above (DAEMON-414).
-	if err := r.readWorkspaceYaml(j); err != nil {
-		note := err.Error()
-		var ae *api.Error
-		if errors.As(err, &ae) && ae.Detail != "" {
-			note = ae.Detail
-		}
-		return r.abandonClaim(j, wi, err, note)
-	}
+	// polyforge#79: the workspace yaml was loaded and validated BEFORE the
+	// claim (Start / the journal replay); compose the per-step candidates
+	// for the claimed project from that snapshot.
+	j.workspaceYaml = wcfg
+	fm := r.readBundleFrontmatter(j.bundleName)
+	j.stepCandidates = workspace.ComposeCandidates(fm, wcfg, j.project, j.manualModels)
 
 	if err := r.prepareCapsule(j); err != nil {
 		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
@@ -938,7 +787,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	// where the capsule's history left off; a brand-new capsule answers
 	// 0 and the first derivation is #1.
 	j.mu.Lock()
-	j.spawnN = maxSpawnNFromJournal(j.capsuleDir)
+	j.spawnN = spawnJournalMaxN(j.capsuleDir)
 	j.mu.Unlock()
 	if err := r.materialize(ctx, j); err != nil {
 		// A typed task-repo clone failure (DAEMON-507) keeps its detail as
@@ -1029,71 +878,36 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	return nil
 }
 
-// readWorkspaceYaml is the polyforge#79 claim-time read (fresh, no
-// cache): resolve the workspace root through the same inverse mapping
-// placement used (the WorkspaceFor source capsuleDirForProject keys
-// off), strictly validate <root>/.polyforge.yaml through the shared
-// loader, and stash the parsed snapshot on the job (nil when the
-// workspace carries no yaml — absent-equivalent, behavior unchanged).
-// An invalid yaml returns the typed DAEMON-414 refusal; the caller
-// compensates through abandonClaim and nothing materializes.
-//
-// When the yaml carries a present `projects` section, the claimed
-// project MUST be listed (DAEMON-415 otherwise — no silent registry
-// fallback), and the job's repo inventory is built WHOLLY from the yaml
-// entries: name + source = the workspace root joined with the entry's
-// workspace-root-relative `path`, which flows through the existing
-// cloneTaskRepos/gitClone seam verbatim (the recovery contract and the
-// DAEMON-507 lane hold unchanged for locally-sourced clones).
-func (r *Runtime) readWorkspaceYaml(j *job) error {
-	ws, err := r.cfg.Mapping.WorkspaceFor(j.project)
-	if err != nil {
-		// Unreachable on this path (the capsule-routing site just resolved
-		// the same inverse), but never guess: a workspace that cannot be
-		// resolved carries no yaml layer.
-		return nil
+// unmappedProjectError is the typed DAEMON-412 placement refusal.
+func unmappedProjectError(project string) *api.Error {
+	return &api.Error{
+		Code: api.ErrDaemonUnmappedProject,
+		Detail: fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)",
+			project),
 	}
-	j.workspaceRoot = ws
-	wcfg, err := workspace.Load(ws)
-	if err != nil {
-		return &api.Error{
-			Code:   api.ErrDaemonWorkspaceYaml,
-			Detail: fmt.Sprintf("the workspace yaml refused the claim of %s before any capsule was created: %v", j.wi, err),
-		}
-	}
-	j.workspaceYaml = wcfg
-	r.composeStepCandidates(j)
-	if wcfg == nil || wcfg.Projects == nil {
-		return nil // no projects section: the registry inventory stands
-	}
-	entry, listed := wcfg.Projects[j.project]
-	if !listed || entry == nil {
-		return &api.Error{
-			Code: api.ErrDaemonProjectNotListed,
-			Detail: fmt.Sprintf("the workspace yaml refused the claim of %s: project %q is not listed in the projects section of %s — the section is the authoritative repo inventory and no registry fallback is offered; list %q there or remove the section",
-				j.wi, j.project, workspace.PathFor(ws), j.project),
-		}
-	}
-	repos := make([]api.ProjectRepo, 0, len(entry.Repos))
-	sources := make(map[string]string, len(entry.Repos))
-	for _, re := range entry.Repos {
-		src := workspace.ResolveRepoSource(ws, re)
-		repos = append(repos, api.ProjectRepo{Name: re.Name, URL: src})
-		sources[re.Name] = src
-	}
-	j.repos = repos         // the yaml inventory WHOLLY replaces the claim answer's
-	j.repoSources = sources // repo name → resolved local checkout (the audit's repo_sources)
-	return nil
 }
 
-// composeStepCandidates is the polyforge#79 claim-time compose: the
-// four-level precedence over the pinned bundle's frontmatter (read from
-// the daemon checkout at WorkflowsDir/<bundle>; no bundle ⇒ nil — the
-// yaml still stashes for the audit) and the claim's workspace yaml. The
-// composed map rides the job into the driver (AgentStartInput → bridge →
-// driver.Config) and into the capsule audit.
-func (r *Runtime) composeStepCandidates(j *job) {
-	j.stepCandidates = workspace.ComposeCandidates(r.readBundleFrontmatter(j.bundleName), j.workspaceYaml)
+// LoadWorkspace is the polyforge#79 pre-claim read (fresh, no cache, so
+// an edit governs the next claim with no daemon restart): resolve the
+// project's workspace through the inverse mapping (DAEMON-412 when
+// unmapped) and strictly validate <root>/.polyforge.yaml through the
+// shared loader (DAEMON-414 when invalid). The parsed config is nil when
+// the workspace carries no yaml (absent-equivalent: bundle defaults).
+// Nothing is claimed or created by it; the daemon's submit face and
+// auto-pull call it too, so a refusal reaches the operator before enqueue.
+func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
+	ws, err := r.cfg.Mapping.WorkspaceFor(project)
+	if err != nil {
+		return nil, unmappedProjectError(project)
+	}
+	wcfg, err := workspace.Load(ws)
+	if err != nil {
+		return nil, &api.Error{
+			Code:   api.ErrDaemonWorkspaceYaml,
+			Detail: fmt.Sprintf("the workspace yaml of project %q refused the claim before it was made (the work item stays queued): %v", project, err),
+		}
+	}
+	return wcfg, nil
 }
 
 // readBundleFrontmatter reads the pinned bundle's workflow.md
@@ -1194,30 +1008,19 @@ func (r *Runtime) prepareCapsule(j *job) error {
 	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {
 		return err
 	}
-	if err := gitops.Clone(o); err != nil {
-		// A clone failure may fall back to a purely local init ONLY for
-		// a WI that has never published a revision (first claim of a
-		// fresh WI, or no remote configured). For a WI with published
-		// progress an init would drop execution.json and silently
-		// restart the workflow from step 1: refuse loudly instead (the
-		// caller abandons the claim through the claiming-journal lane).
-		published, perr := gitops.RemotePublished(o)
-		switch {
-		case perr != nil:
-			return &api.Error{Code: api.ErrDaemonCapsuleClone,
-				Detail: fmt.Sprintf("capsule clone failed (%v) and the remote's published state cannot be determined (%v); refusing a local init that could restart the workflow", err, perr)}
-		case published:
-			return &api.Error{Code: api.ErrDaemonCapsuleClone,
-				Detail: fmt.Sprintf("capsule clone failed (%v) for a work item with published progress; refusing a local init that would restart the workflow from step 1", err)}
+	if o.RemoteURL == "" {
+		// No capsule remote (tests only; aihub always supplies one at
+		// claim): a purely local init.
+		if err := gitops.InitLocal(o); err != nil {
+			return fmt.Errorf("runtime: %s: local init: %w", j.wi, err)
 		}
-		// Nothing published: remove any torn partial clone, then init.
-		if rerr := os.RemoveAll(o.CapsuleDir); rerr != nil {
-			return fmt.Errorf("runtime: %s: capsule clone failed (%v); cleanup: %w", j.wi, err, rerr)
-		}
-		if lerr := gitops.InitLocal(o); lerr != nil {
-			return fmt.Errorf("runtime: %s: capsule clone failed: %w", j.wi, err)
-		}
-		fmt.Fprintf(os.Stderr, "runtime: %s: capsule clone failed (%v); nothing published, fell back to local init\n", j.wi, err)
+	} else if err := gitops.Clone(o); err != nil {
+		// aihub creates the bare repo at claim, so a clone failure is
+		// never "nothing published yet": refuse loudly (the caller
+		// abandons the claim) rather than init locally and restart the
+		// workflow from step 1.
+		return &api.Error{Code: api.ErrDaemonCapsuleClone,
+			Detail: fmt.Sprintf("capsule clone failed: %v", err)}
 	}
 	return gitops.ExternalizeGitDir(o)
 }
@@ -1324,21 +1127,14 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	if err != nil {
 		return err
 	}
-	// BaseCommit semantics (aligned with v0, multi-repo shape): the
-	// per-repo claim-time baselines live in the Repos map above and are
-	// authoritative; BaseCommit stays EMPTY rather than singling out one
-	// repo's SHA as "the" baseline — with several task repos there is no
-	// single main repo to pick, and any choice would silently lie.
-	// v1.5: the generation/attempt lineage fields stay at their zero
-	// values (the capsule Identity shape is frozen in common/); session
-	// ownership lives in the daemon-private sync/session-handle marker.
+	// Session ownership lives in the daemon-private sync/session-handle
+	// marker, not in the identity.
 	idn := capsule.Identity{
 		WorkItemID:   j.wi,
 		CapsuleID:    "cap_" + j.wi,
 		Project:      j.project,
 		BundleName:   j.bundleName,
 		BundleDigest: j.bundleDigest,
-		BaseCommit:   "",
 		Repos:        repoSHAs,
 		CreatedAt:    nowStamp(),
 	}
@@ -1348,7 +1144,7 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// (omitempty, never fabricated) and its legacy fields are unchanged.
 	stampWorkspaceAudit(j, &idn)
 	blob, _ := json.MarshalIndent(idn, "", "  ")
-	if err := atomicWrite(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
+	if err := atomicfile.Write(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
 		return err
 	}
 	// v1.5: the session ownership marker — this session's fingerprint,
@@ -1365,7 +1161,7 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 		UpdatedAt:      nowStamp(),
 	}
 	sblob, _ := json.MarshalIndent(sess, "", "  ")
-	if err := atomicWrite(filepath.Join(j.capsuleDir, capsule.SessionJSON), sblob, 0o644); err != nil {
+	if err := atomicfile.Write(filepath.Join(j.capsuleDir, capsule.SessionJSON), sblob, 0o644); err != nil {
 		return err
 	}
 	// Task-repo inventory and the F1 task-definition file land before
@@ -1387,52 +1183,16 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	return r.materializeBundle(j)
 }
 
-// stampWorkspaceAudit fills the polyforge#79 audit fields of the
-// capsule identity from the job's claim-time snapshot: the parsed yaml
-// verbatim (the same structures the shared loader answered), the
-// per-step post-precedence candidate lists, and the resolved repo
-// sources — the workspace-root-joined local checkout for yaml-sourced
-// clones, the registry URLs for registry clones under a yaml that
-// governs nothing on the repo side. A no-yaml claim records nothing.
+// stampWorkspaceAudit records the claim-time effective candidate lists
+// in the capsule identity — the audit AND the snapshot recovery
+// rehydrates — when the workspace yaml governs this project's models. A
+// claim the yaml does not touch records nothing.
 func stampWorkspaceAudit(j *job, idn *capsule.Identity) {
-	if j.workspaceYaml == nil {
+	if len(j.manualModels) == 0 && (j.workspaceYaml == nil || j.workspaceYaml.Models[j.project] == nil) {
 		return
 	}
-	projects := map[string]capsule.WorkspaceProjectAudit{}
-	for name, proj := range j.workspaceYaml.Projects {
-		if proj == nil {
-			continue
-		}
-		repos := make([]capsule.WorkspaceRepoAudit, 0, len(proj.Repos))
-		for _, re := range proj.Repos {
-			repos = append(repos, capsule.WorkspaceRepoAudit{Name: re.Name, Path: re.Path})
-		}
-		projects[name] = capsule.WorkspaceProjectAudit{Repos: repos}
-	}
-	doc := &capsule.WorkspaceYamlAuditDoc{Projects: projects}
-	if wd := j.workspaceYaml.WorkflowDefaults; wd != nil {
-		doc.WorkflowDefaults = &capsule.WorkspaceDefaultsAuditDoc{
-			ModelCandidates: wd.ModelCandidates,
-			StepKinds:       wd.StepKinds,
-		}
-	}
-	idn.WorkspaceYaml = doc
 	if len(j.stepCandidates) > 0 {
 		idn.EffectiveCandidates = j.stepCandidates
-	}
-	if len(j.repoSources) > 0 {
-		idn.RepoSources = j.repoSources
-	} else {
-		// A yaml that governs nothing on the repo side (workflow-only):
-		// the audit still records the sources actually cloned from — the
-		// claim answer's registry URLs.
-		reg := map[string]string{}
-		for _, pr := range j.repos {
-			reg[pr.Name] = pr.URL
-		}
-		if len(reg) > 0 {
-			idn.RepoSources = reg
-		}
 	}
 }
 
@@ -1500,7 +1260,7 @@ func (r *Runtime) writeWorkItemDoc(j *job, item *api.WorkItem) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(filepath.Join(j.capsuleDir, filepath.FromSlash(capsule.WorkItemJSON)), blob, 0o644)
+	return atomicfile.Write(filepath.Join(j.capsuleDir, filepath.FromSlash(capsule.WorkItemJSON)), blob, 0o644)
 }
 
 func copyTree(src, dst string) error {
@@ -1519,37 +1279,12 @@ func copyTree(src, dst string) error {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		in, ierr := os.Open(p)
+		data, ierr := os.ReadFile(p)
 		if ierr != nil {
 			return ierr
 		}
-		defer in.Close()
-		if werr := atomicWriteFileMode(target, in, 0o444); werr != nil {
-			return werr
-		}
-		return nil
+		return atomicfile.Write(target, data, 0o444)
 	})
-}
-
-func atomicWriteFileMode(dst string, in io.Reader, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	tmp := dst + ".mtmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(f, in); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, dst)
 }
 
 // ---------------------------------------------------------------------------
@@ -1616,10 +1351,8 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	// prunes the fence map and drops the ledger entries. It also closes
 	// Finding 1(b)'s re-emit loop: the superseded monitor keeps
 	// re-emitting OBSuperseded until exactly this release arrives.
-	// re-derive or re-send these two messages. NEW-2: the release rides
-	// sendRelease, so a full observe channel defers it (bounded retry)
-	// instead of destroying it — the re-emit loop closes even then.
-	r.sendRelease(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishSuperseded})
+	// re-derive or re-send these two messages.
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishSuperseded})
 	_ = ctx
 }
 
@@ -1673,16 +1406,13 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// Only the read-only seal and the terminal close remain.
 	finalReason := reason
 	if !alreadyPushed {
-		// F3: the dead derivation's live transcript rides the seal commit
-		// (C1) — sync before the push, best-effort.
-		r.syncTranscriptBeforeSeal(j)
-
 		// The seq trailer is gitops' business (derived in-lock).
 		// CommitPush is honest on every path — including a clean tree,
 		// where it pushes the standing HEAD — so a failed first push is
 		// retried directly via gitops.Push below. A persistently failed
 		// push degrades the terminal reason to blocked — the local commit
 		// keeps the bytes, but the server never heard the final state.
+		r.syncLiveTranscript(j.capsuleDir)
 		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
 		for i := 0; i < 2 && perr != nil; i++ {
 			_, perr = gitops.Push(j.git)
@@ -1727,10 +1457,15 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		return err
 	}
 	r.dropJob(j)
+	if finalReason != protocol.FinishBlocked {
+		// terminal on this daemon: the manual --models list dies with it
+		// (a blocked end keeps it for the re-claim).
+		r.clearManualModels(j.wi)
+	}
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	r.sendRelease(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: finalReason})
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: finalReason})
 	return nil
 }
 
@@ -1787,9 +1522,7 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job, alreadyPushed bool) error
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
 	if !alreadyPushed {
-		// F3: the dead derivation's live transcript rides the pause commit
-		// (C1) — sync before the push, best-effort.
-		r.syncTranscriptBeforeSeal(j)
+		r.syncLiveTranscript(j.capsuleDir)
 		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+protocol.FinishPaused)
 		for i := 0; i < 2 && perr != nil; i++ {
 			_, perr = gitops.Push(j.git)
@@ -1815,9 +1548,8 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job, alreadyPushed bool) error
 	}
 	// The observe release (Finding 4): stops the monitor loop, prunes the
 	// latestSpawn entry, forgets the ledger. The retained record keeps
-	// its bookkeeping only. NEW-2: sendRelease keeps the release alive
-	// across a momentarily full channel (bounded retry, never a drop).
-	r.sendRelease(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishPaused})
+	// its bookkeeping only.
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishPaused})
 	_ = ctx
 	return nil
 }

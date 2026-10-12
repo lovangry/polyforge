@@ -7,10 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 )
 
 // ChatIDRe is the legal shape of a chat id (it names files).
@@ -199,15 +200,7 @@ func writeAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	tmp := path + "." + strconv.Itoa(os.Getpid()) + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return atomicfile.Write(path, data, perm)
 }
 
 // ReadStatusline answers what `--statusline` prints: the progress file of

@@ -27,6 +27,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
@@ -39,7 +41,6 @@ const (
 	EvJobStarted       = "job_started"
 	EvAgentRecovered   = "wi_agent_rederived"
 	EvNeedsRecovery    = "needs_recovery"
-	EvNeedsInput       = "needs_input"
 	EvPublished        = "published"
 	EvPushFailed       = "push_failed"
 	EvPushBackpressure = "push_backpressure"
@@ -71,8 +72,7 @@ const (
 	// the ready queue was denied for authorization reasons (typed aihub
 	// error with HTTP 401/403/404 — e.g. the machine key revoked mid-run).
 	// Daemon-scope: appended with wi="" (the fetch owns no job) and
-	// merged into every live monitor's JobView events layer, so any
-	// observe view can read it. Edge-triggered once per silent→degraded
+	// kept in the durable events log only. Edge-triggered once per silent→degraded
 	// episode; the episode clears on the next successful fetch. Denial
 	// MUST surface as this event, never as silent idling; transport-class
 	// losses (network/5xx) stay silent idle, unchanged.
@@ -88,7 +88,7 @@ const (
 	// session-verify could not reach aihub. Log-only by contract — no
 	// action is ever taken on a transport error; the retry is bounded.
 	EvSessionVerifyFailed = "session_verify_failed"
-	// EvSubmitRejected (v2 §5): an accepted submit's StartIntent failed at
+	// EvSubmitRejected (v2 §5): an accepted submit's runtime Start failed at
 	// dispatch (live or replayed after a restart); body carries the error,
 	// intent and the entry's submitted_at/origin. The submit was answered
 	// `accepted` earlier, so this durable event is how watchers learn it
@@ -98,12 +98,6 @@ const (
 	// restart (resume intent, or aihub no longer shows the WI
 	// queued, or the claiming journal already owns it); body names why.
 	EvSubmitDropped = "submit_dropped"
-	// EvCapsuleMissing / EvProjectUnmapped (v2 §6): the WI was parked
-	// repair_pending at restart; body names the path/project and the fix.
-	// Emitted by the runtime (runtime.RepairCapsuleMissing/Unmapped carry
-	// the same strings).
-	EvCapsuleMissing  = "capsule_missing"
-	EvProjectUnmapped = "project_unmapped"
 	// EvDaemonRestarted (v2 §6): written into every WI the daemon
 	// recovered or parked after restart reconciliation; body carries the
 	// previous shutdown cause when known (#110) else "unknown".
@@ -232,10 +226,7 @@ func (l *EventLog) writeSnapshotLocked() {
 	if err != nil {
 		return
 	}
-	tmp := filepath.Join(l.dir, eventsSeqFile+".tmp")
-	if os.WriteFile(tmp, raw, 0o644) == nil {
-		_ = os.Rename(tmp, filepath.Join(l.dir, eventsSeqFile))
-	}
+	_ = atomicfile.Write(filepath.Join(l.dir, eventsSeqFile), raw, 0o644)
 }
 
 // scanFiles parses every durable generation, oldest first.
@@ -341,7 +332,7 @@ func (l *EventLog) Since(wi string) []protocol.EventEntry {
 }
 
 // SinceAfter returns the entries for wi whose seq is strictly greater
-// than after — the GET /jobs/{id}/observe ?after cursor (#21). The ring
+// than after — the watch snapshot's ?after cursor (#21). The ring
 // answers when it still holds the cursor's successor; a cursor older than
 // the ring (or from before a restart that outlived the ring) is served
 // from the DURABLE files, so history is never limited to the in-memory

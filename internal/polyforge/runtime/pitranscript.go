@@ -10,13 +10,11 @@ package runtime
 //	~/.pi/agent/sessions/<dashified-capsule-dir>--/<ts>-<uuid>.jsonl
 //
 // — and nothing ever reaches the capsule's declared session/ path. The
-// fix follows the v0 late conclusion: the DAEMON owns the sync (locate
-// after spawn, copy into the capsule at every commit boundary, before
-// the commit so the transcript rides git history — ruling C1), and the
-// recovery engine resumes from the capsule copy with the live file as
-// the fallback. The spawn-side env additions are deliberately untouched
-// (the isolation flags and the sanitize point are pinned by v0's
-// measured baseline); this file is the daemon-side compensation.
+// fix: the observe monitor owns the sync (locate after spawn, copy into
+// the capsule at every commit boundary of the dispatch, before the
+// commit so the transcript rides git history — ruling C1), per dispatch
+// onto the path its step_started fact names. This file only holds the
+// locator the monitor calls.
 //
 // The session-directory naming rule is the harness's own, mirrored here
 // verbatim from its source: the resolved cwd is stripped of its one
@@ -32,6 +30,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
 )
 
 // locateSlack is how far before the spawn moment a live transcript's
@@ -127,53 +128,80 @@ func LocateLiveTranscript(sessionsRoot, capsuleDir string, notBefore time.Time) 
 	return best
 }
 
-// copyTranscriptReadonly copies the live transcript onto the capsule's
-// declared session path. "Read-only" is about the SOURCE: it is opened
-// for reading only, never truncated, never renamed. The destination is
-// written atomically (tmp+rename) with 0644 — deliberately writable,
-// because the resume path hands the very same file back to the harness
-// as its --session continuation target, and the harness must be able to
-// append to it.
-func copyTranscriptReadonly(src, dst string) error {
-	if src == "" || dst == "" {
-		return nil
-	}
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	return atomicWrite(dst, data, 0o644)
-}
-
-// syncTranscriptBeforeSeal is the RUNTIME half of the F3 transcript
-// sync: the two commit points the observe lane cannot see — the seal
-// push of a CLI-driven Stop (pause/wrap) and the commit-dirty-on-recover
-// — copy the dead derivation's live transcript into the capsule before
-// their commit, so the transcript rides the chain (ruling C1) even when
-// the last step boundary is long past. Best-effort and quiet: the commit
-// proceeds without the transcript when the source cannot be read.
-func (r *Runtime) syncTranscriptBeforeSeal(j *job) {
-	j.mu.Lock()
-	src := j.liveTranscript
-	startedAt := j.agentStartedAt
-	dst := j.transcript
-	capsuleDir := j.capsuleDir
-	j.mu.Unlock()
-	if dst == "" {
+// syncLiveTranscript copies the CURRENT dispatch's live harness
+// transcript onto that dispatch's own capsule session path (the latest
+// spawn-journal entry's transcript) so a seal / pause / bounded-fail
+// commit carries the tail written since the last commit boundary. It is
+// synchronous and best-effort (a missing source or journal is a no-op:
+// the commit proceeds without the tail) and touches only the latest
+// dispatch's file — an earlier step's transcript is never overwritten.
+// A resumed dispatch already appends to the capsule file itself. Callers
+// run it after the agent tree is killed and BEFORE the commit and the
+// read-only seal.
+func (r *Runtime) syncLiveTranscript(capsuleDir string) {
+	entries, _ := capsule.ReadSpawnJournal(capsuleDir)
+	if len(entries) == 0 {
 		return
 	}
-	if src == "" {
-		if spawnAt, err := time.Parse(time.RFC3339Nano, startedAt); err == nil {
-			src = r.locateLive(capsuleDir, spawnAt)
-		}
+	last := entries[len(entries)-1]
+	if last.Transcript == "" || last.Resume {
+		return
 	}
+	spawnAt, err := time.Parse(time.RFC3339Nano, last.StartedAt)
+	if err != nil {
+		return
+	}
+	// The journal is agent-writable: the destination is never taken from
+	// it verbatim (see trustedTranscriptDest).
+	dst, ok := trustedTranscriptDest(capsuleDir, entries)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "runtime: transcript sync skipped: the latest spawn-journal line names an untrusted destination %q\n", last.Transcript)
+		return
+	}
+	src := LocateLiveTranscript(r.cfg.HarnessSessionsRoot, capsuleDir, spawnAt)
 	if src == "" || src == dst {
 		return
 	}
-	if err := copyTranscriptReadonly(src, dst); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: seal transcript sync skipped: %v\n", j.wi, err)
+	if err := sessionjsonl.CopyReadonly(src, dst); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: transcript sync before commit failed: %v\n", err)
 	}
+}
+
+// trustedTranscriptDest validates the latest spawn-journal line's
+// transcript destination before the runtime writes to it. The agent can
+// forge journal lines, so the path must (1) equal the one this runtime
+// derives itself for that spawn token (sessionPathFor), (2) resolve inside
+// <capsuleDir>/session/ with symlinks on the parent resolved and the file
+// itself not a symlink, and (3) not be the destination of any EARLIER
+// journal line (a forged line aimed at step 1's file). It answers the
+// validated path, or false to skip the sync.
+func trustedTranscriptDest(capsuleDir string, entries []capsule.SpawnJournalEntry) (string, bool) {
+	last := entries[len(entries)-1]
+	if last.SpawnToken == "" || strings.ContainsAny(last.SpawnToken, `/\`) {
+		return "", false
+	}
+	want := sessionPathFor(capsuleDir, last.SpawnToken)
+	if filepath.Clean(last.Transcript) != want {
+		return "", false
+	}
+	for _, e := range entries[:len(entries)-1] {
+		if e.SpawnToken == last.SpawnToken || (e.Transcript != "" && filepath.Clean(e.Transcript) == want) {
+			return "", false
+		}
+	}
+	sessDir, err := filepath.EvalSymlinks(filepath.Join(capsuleDir, capsule.DirSession))
+	if err != nil {
+		return "", false
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(want))
+	if err != nil {
+		return "", false
+	}
+	if rel, err := filepath.Rel(sessDir, parent); err != nil || rel != "." {
+		return "", false
+	}
+	if fi, err := os.Lstat(want); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return "", false
+	}
+	return want, true
 }

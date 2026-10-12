@@ -12,13 +12,13 @@ package git
 //     previous tip;
 //   - blob size ≤ MaxBlobBytes (via the GIT_PF_MAX_BLOB env the proxy
 //     sets; the default matches capsule.MaxBlobBytes);
-//   - the session-fingerprint push option, when both sides of the
-//     comparison exist, must equal PF_EXPECTED_FINGERPRINT (v1.5 session
-//     fencing backup layer, contract §1.6: the proxy derives it from the
-//     session the Basic credential authenticated against, so a superseded
-//     session's fingerprint can never push even with a leaked secret).
-//     (the same structure the v1 attempt-id backup layer used; the
-//     values are the session model's).
+//   - the session-fingerprint push option must be present and equal
+//     PF_EXPECTED_FINGERPRINT whenever the push came through the proxy,
+//     which sets that variable (session fencing: the proxy
+//     derives it from the session the Basic credential authenticated
+//     against, so a superseded session's fingerprint can never push even
+//     with a leaked secret). A direct local push with no
+//     PF_EXPECTED_FINGERPRINT has nothing to compare and is not fenced.
 //
 // The refs/pf-task/<repo> namespace is the task-repo durability lane
 // (polyforge#108): the daemon's publish boundary mirrors each task
@@ -49,7 +49,7 @@ TRAILER="${GIT_PF_SEQ_TRAILER:-Polyforge-Seq}"
 zero=0000000000000000000000000000000000000000
 reject() { echo "aihub: $*" >&2; exit 1; }
 
-# Session fencing backup layer (v1.5 §1.6): the proxy exports
+# Session fencing (v1.5 §1.6): the proxy exports
 # PF_EXPECTED_FINGERPRINT — the public session fingerprint the Basic
 # credential authenticated against — and git exposes the push's options
 # as GIT_PUSH_OPTION_COUNT + GIT_PUSH_OPTION_0..N (only when the repo
@@ -57,21 +57,16 @@ reject() { echo "aihub: $*" >&2; exit 1; }
 # Find session-fingerprint=<value> among them and compare it STRICTLY
 # with the expected fingerprint.
 #
-# When the comparison is enforced — only when BOTH sides exist:
-#   - the push carries no session-fingerprint option at all: nothing to
-#     compare, the gate stays open (older clients, and plain
-#     fetch/upload traffic that never reaches a hook);
-#   - PF_EXPECTED_FINGERPRINT is absent — a push that did not travel
-#     through the proxy, e.g. a direct local test push against the bare
-#     repo — has nothing to compare against, and the gate stays open:
-#     the proxy is the only party that can vouch for which session a
-#     credential belongs to, and inventing an expectation here would
-#     fence off exactly the local tooling that must keep working.
-# A mismatch (both present, different values) rejects the WHOLE push.
-poptcount="${GIT_PUSH_OPTION_COUNT:-0}"
-case "$poptcount" in ''|*[!0-9]*) poptcount=0 ;; esac
-sent_fp=""
-if [ -n "${PF_EXPECTED_FINGERPRINT:-}" ] && [ "$poptcount" -gt 0 ]; then
+# A push that travelled through the proxy (PF_EXPECTED_FINGERPRINT set)
+# MUST carry the option and it MUST match: a missing option, like a
+# mismatch, rejects the WHOLE push. A push that did not travel through
+# the proxy (e.g. a direct local test push against the bare repo) has
+# nothing to compare against and the gate stays open: the proxy is the
+# only party that can vouch for which session a credential belongs to.
+if [ -n "${PF_EXPECTED_FINGERPRINT:-}" ]; then
+  poptcount="${GIT_PUSH_OPTION_COUNT:-0}"
+  case "$poptcount" in ''|*[!0-9]*) poptcount=0 ;; esac
+  sent_fp=""
   i=0
   while [ "$i" -lt "$poptcount" ]; do
     eval "opt=\"\${GIT_PUSH_OPTION_$i:-}\""
@@ -80,7 +75,8 @@ if [ -n "${PF_EXPECTED_FINGERPRINT:-}" ] && [ "$poptcount" -gt 0 ]; then
     esac
     i=$((i+1))
   done
-  if [ -n "$sent_fp" ] && [ "$sent_fp" != "$PF_EXPECTED_FINGERPRINT" ]; then
+  [ -n "$sent_fp" ] || reject "push carries no session-fingerprint push option (required)"
+  if [ "$sent_fp" != "$PF_EXPECTED_FINGERPRINT" ]; then
     reject "session-fingerprint push option '$sent_fp' does not match the credential's session fingerprint '$PF_EXPECTED_FINGERPRINT'"
   fi
 fi

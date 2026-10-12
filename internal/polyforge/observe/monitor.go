@@ -13,7 +13,7 @@ package observe
 //     step_waiting_human/answered, step_ended, exec_committed) — an
 //     unbounded in-process queue, never dropped;
 //   - the confirmed driver-exit signal (Handle.Exit) → recovery;
-//   - RT messages (RTRecovered rides rtCh; RTFinished rides stopCh);
+//   - RT messages (RTRecovered rides rtQ; RTFinished rides stopCh);
 //   - results of the sub-goroutines (push / verify);
 //   - the tick (judging, push retry backoff, backpressure, M4).
 //
@@ -74,16 +74,6 @@ type WIInfo struct {
 	CapsuleDir string
 	BundleName string
 	Git        gitops.Opts
-	// Transcript is the capsule-side declared session path of the
-	// current derivation (the live-transcript sync's destination until
-	// the first step_started names the dispatch's own).
-	Transcript string
-	// LiveTranscript is the file the current derivation appends to (the
-	// runtime's recorded live path; "" = locate on demand below).
-	LiveTranscript string
-	// SpawnAt is the current derivation's birth moment (the on-demand
-	// locator's floor).
-	SpawnAt time.Time
 }
 
 // Handle is the driver face a monitor watches. Implemented by the
@@ -149,7 +139,7 @@ type Monitor struct {
 	wi   WIInfo
 	cfg  monitorCfg
 	log  *EventLog
-	ob   chan<- protocol.OBMsg
+	ob   *supervise.Queue[protocol.OBMsg]
 	link *supervise.Link
 
 	// handle attachment (monitor-goroutine only).
@@ -165,7 +155,7 @@ type Monitor struct {
 	sessionID string
 	exitCh    <-chan struct{}
 
-	rtCh   chan Attach
+	rtQ    *supervise.Queue[Attach]
 	stopCh chan struct{}
 	stop   sync.Once
 
@@ -278,8 +268,10 @@ func (m *Monitor) run() {
 		case <-m.stopCh:
 			m.awaitPushInFlight()
 			return
-		case at := <-m.rtCh:
-			m.onRecovered(at)
+		case <-m.rtQ.Notify():
+			for at, ok := m.rtQ.Pop(); ok; at, ok = m.rtQ.Pop() {
+				m.onRecovered(at)
+			}
 		case <-m.exitCh:
 			m.onExit()
 		case <-m.link.Facts.Notify():
@@ -587,18 +579,9 @@ func (m *Monitor) needRecovery(reason, detail string) {
 	})
 }
 
-// sendOB is non-blocking by construction: the monitor may never block in
-// a case, so a full OB channel drops the message (with an event) rather
-// than stalling supervision. Runtime drains the channel in production.
-func (m *Monitor) sendOB(msg protocol.OBMsg) {
-	select {
-	case m.ob <- msg:
-	default:
-		_ = m.log.Append(m.wi.WorkItem, EvNeedsRecovery, map[string]any{
-			"dropped": msg.Kind, "reason": "OB channel full",
-		})
-	}
-}
+// sendOB queues one message for the Runtime; the queue is unbounded, so
+// the monitor never blocks and a recovery request is never dropped.
+func (m *Monitor) sendOB(msg protocol.OBMsg) { m.ob.Push(msg) }
 
 // ---------------------------------------------------------------------------
 // recovery lifecycle
@@ -620,17 +603,12 @@ func (m *Monitor) onRecovered(at Attach) {
 	m.act = nil
 	m.stateMu.Unlock()
 	m.setPhase(phaseBetween)
-	// The successor derivation carries its own transcript facts: adopt
-	// them for the sync points that follow (F3) until its first
-	// step_started names the dispatch's own.
-	if at.WI.WorkItem != "" {
-		m.setTranscriptInfo(at.WI)
-	} else {
-		m.stateMu.Lock()
-		m.transcriptWarned = false
-		m.stateMu.Unlock()
-	}
+	// No dispatch is in flight until the successor's first step_started
+	// names its transcript: nothing to sync in between, and the dead
+	// dispatch's destination must never receive the successor's file.
+	m.trDst, m.trSrc, m.trSpawnAt = "", "", time.Time{}
 	m.stateMu.Lock()
+	m.transcriptWarned = false
 	m.recovering = false
 	m.spawnN = at.Msg.SpawnN
 	m.sessionID = at.Msg.SessionID
@@ -721,19 +699,6 @@ func (m *Monitor) transcriptSnapshot() transcriptSnapshot {
 	return transcriptSnapshot{dst: m.trDst, src: m.trSrc, spawnAt: m.trSpawnAt}
 }
 
-// setTranscriptInfo adopts the per-derivation transcript facts of an
-// attachment (monitor goroutine only; observe.attach and onRecovered).
-// transcriptWarned is stateMu-guarded: a push sub-goroutine claims the
-// once-per-attempt warning concurrently with this reset.
-func (m *Monitor) setTranscriptInfo(wi WIInfo) {
-	m.trDst = wi.Transcript
-	m.trSrc = wi.LiveTranscript
-	m.trSpawnAt = wi.SpawnAt
-	m.stateMu.Lock()
-	m.transcriptWarned = false
-	m.stateMu.Unlock()
-}
-
 // claimTranscriptWarning claims the once-per-attempt transcript_missing
 // warning (push sub-goroutines): true exactly once per derivation.
 func (m *Monitor) claimTranscriptWarning() bool {
@@ -773,7 +738,7 @@ func (m *Monitor) syncTranscript(s transcriptSnapshot) {
 	if src == s.dst {
 		return // a resumed derivation already writes into the capsule
 	}
-	if err := copyFileReadonly(src, s.dst); err != nil {
+	if err := sessionjsonl.CopyReadonly(src, s.dst); err != nil {
 		if m.claimTranscriptWarning() {
 			_ = m.log.Append(m.wi.WorkItem, EvTranscriptMissing, map[string]any{
 				"detail":  fmt.Sprintf("transcript sync failed: %v", err),
@@ -781,30 +746,6 @@ func (m *Monitor) syncTranscript(s transcriptSnapshot) {
 			})
 		}
 	}
-}
-
-// copyFileReadonly copies src onto dst without ever opening the source
-// for writing (the source is the harness's own session store). The source
-// read goes through the ONE session-jsonl parser (wi_LMSxPTQTtz5x step
-// sync_face_tail): the whole-file tail extraction preserves the raw bytes,
-// so the session-jsonl storage format has a single parsing source in the
-// repo (the stdout-wire parser stream.go is a different vocabulary and
-// stays untouched). The destination semantics are unchanged: tmp+rename,
-// 0644.
-func copyFileReadonly(src, dst string) error {
-	recs, err := sessionjsonl.Tail(src, 0)
-	if err != nil {
-		return err
-	}
-	data := sessionjsonl.MarshalRaw(recs)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	tmp := dst + ".tsync.tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, dst)
 }
 
 // schedulePush starts one async commit+push sub-goroutine when a newer

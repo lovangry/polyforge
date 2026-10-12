@@ -27,6 +27,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // fakeVerifier is the SessionVerifier test double.
@@ -42,7 +43,7 @@ func (f *fakeVerifier) SessionVerify(wi, sid string) (*api.SessionVerifyResponse
 
 // newSessionTestMonitor builds a monitor whose attachment carried a
 // session id and whose cfg binds the given verifier + shrunk cadence.
-func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, cadence time.Duration) (*Monitor, chan protocol.OBMsg) {
+func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, cadence time.Duration) (*Monitor, *supervise.Queue[protocol.OBMsg]) {
 	t.Helper()
 	h := newFakeHandle("att_s")
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
@@ -50,13 +51,13 @@ func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, c
 		c.verify = verifier
 	})
 	// The session id rides the RTStarted/RTRecovered message in
-	// production; re-attach through rtCh so the monitor goroutine
+	// production; re-attach through rtQ so the monitor goroutine
 	// adopts it under the same lock discipline as a real recovery.
-	m.rtCh <- Attach{
+	m.rtQ.Push(Attach{
 		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 1, SessionID: sid},
 		Handle: h,
 		WI:     m.wi,
-	}
+	})
 	soon(t, 2*time.Second, "session attach never adopted", func() bool {
 		m.stateMu.Lock()
 		defer m.stateMu.Unlock()
@@ -91,8 +92,8 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 	// Finding 1(b) (v1.5 review): the emission is RETRYABLE. While the
 	// latch is set the revalidation KEEPS RUNNING and every unmatched
 	// verdict re-emits OBSuperseded — the old contract fired exactly
-	// once, so a delivery dropped on a full OB channel (or fenced out
-	// at the runtime's spawn counter) was lost forever and the agent of
+	// once, so a delivery fenced out
+	// at the runtime's spawn counter was lost forever and the agent of
 	// a WI held elsewhere ran unsupervised. The re-emissions keep
 	// arriving until the runtime's release (RTFinished, Finding 4)
 	// stops this loop — nothing releases this monitor, so they must

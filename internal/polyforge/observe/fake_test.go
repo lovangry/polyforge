@@ -57,7 +57,7 @@ func testCfg() monitorCfg {
 
 // newTestMonitor builds a monitor wired to a temp capsule + events log
 // and runs it. The returned cleanup stops it.
-func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, chan protocol.OBMsg) {
+func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, *supervise.Queue[protocol.OBMsg]) {
 	t.Helper()
 	dir := t.TempDir()
 	log, err := NewEventLog(dir)
@@ -68,7 +68,7 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, ch
 	if err := os.MkdirAll(filepath.Join(capsuleDir, "runtime-state"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ob := make(chan protocol.OBMsg, 64)
+	ob := supervise.NewQueue[protocol.OBMsg]()
 	cfg := testCfg()
 	if mod != nil {
 		mod(&cfg)
@@ -84,7 +84,7 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, ch
 		log:        log,
 		ob:         ob,
 		link:       supervise.NewLink("wi_test"),
-		rtCh:       make(chan Attach, 4),
+		rtQ:        supervise.NewQueue[Attach](),
 		stopCh:     make(chan struct{}),
 		gate:       make(chan struct{}, 1),
 		pushDone:   make(chan pushResult, 1),
@@ -254,24 +254,35 @@ func writePendingQuestionAt(t *testing.T, m *Monitor, qid, question, step, asked
 }
 
 // waitOB reads one OB message or fails the test on timeout.
-func waitOB(t *testing.T, ob chan protocol.OBMsg, what string) protocol.OBMsg {
+func waitOB(t *testing.T, ob *supervise.Queue[protocol.OBMsg], what string) protocol.OBMsg {
 	t.Helper()
-	select {
-	case msg := <-ob:
-		return msg
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for OB message %s", what)
-		return protocol.OBMsg{}
+	deadline := time.After(2 * time.Second)
+	for {
+		if msg, ok := ob.Pop(); ok {
+			return msg
+		}
+		select {
+		case <-ob.Notify():
+		case <-deadline:
+			t.Fatalf("timed out waiting for OB message %s", what)
+			return protocol.OBMsg{}
+		}
 	}
 }
 
 // expectNoOB asserts no OB message arrives within d.
-func expectNoOB(t *testing.T, ob chan protocol.OBMsg, d time.Duration, what string) {
+func expectNoOB(t *testing.T, ob *supervise.Queue[protocol.OBMsg], d time.Duration, what string) {
 	t.Helper()
-	select {
-	case msg := <-ob:
-		t.Fatalf("unexpected OB message %s: %+v", what, msg)
-	case <-time.After(d):
+	deadline := time.After(d)
+	for {
+		if msg, ok := ob.Pop(); ok {
+			t.Fatalf("unexpected OB message %s: %+v", what, msg)
+		}
+		select {
+		case <-ob.Notify():
+		case <-deadline:
+			return
+		}
 	}
 }
 

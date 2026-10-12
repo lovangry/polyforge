@@ -1,10 +1,8 @@
 package core
 
-// Ready queue: the LCRS segments the drain-mode daemon consumes.
-// Simplified per the v1 lane scope: items / needs_human_session /
-// unclassified (the three executable segments, split by the WI's
-// requires_human_session classification) + running / paused visibility
-// segments. Ordering inside every segment: priority → created_at.
+// Ready queue: the executable segment (items) the daemon's auto-pull
+// consumes, plus running / paused visibility segments. Ordering inside
+// every segment: priority → created_at.
 
 import (
 	"database/sql"
@@ -15,36 +13,10 @@ import (
 
 // ReadyQueue is the response shape of GET /api/v1/projects/{p}/ready-queue.
 type ReadyQueue struct {
-	Project           string   `json:"project"`
-	Items             []WIView `json:"items"`               // executable, no human session needed
-	NeedsHumanSession []WIView `json:"needs_human_session"` // executable, needs a human
-	Unknown           []WIView `json:"unclassified"`        // executable, classification missing
-	Running           []WIView `json:"running"`
-	Paused            []WIView `json:"paused"`
-}
-
-// rhs classification of a queued WI: true / false / missing.
-type rhsClass int
-
-const (
-	rhsMissing rhsClass = iota
-	rhsTrue
-	rhsFalse
-)
-
-func classifyRHS(wi *api.WorkItem) rhsClass {
-	v, ok := wi.Attrs["requires_human_session"]
-	if !ok {
-		return rhsMissing
-	}
-	b, isBool := v.(bool)
-	if !isBool {
-		return rhsMissing
-	}
-	if b {
-		return rhsTrue
-	}
-	return rhsFalse
+	Project string   `json:"project"`
+	Items   []WIView `json:"items"` // executable: queued, unblocked, not a registration ticket
+	Running []WIView `json:"running"`
+	Paused  []WIView `json:"paused"`
 }
 
 var priorityRank = map[string]int{
@@ -73,12 +45,10 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 		return nil, err
 	}
 	q := &ReadyQueue{
-		Project:           projectName,
-		Items:             []WIView{},
-		NeedsHumanSession: []WIView{},
-		Unknown:           []WIView{},
-		Running:           []WIView{},
-		Paused:            []WIView{},
+		Project: projectName,
+		Items:   []WIView{},
+		Running: []WIView{},
+		Paused:  []WIView{},
 	}
 	// Loaded per candidate below: bundle_name decides execution vs
 	// registration ticket (02 §5.1b: the executable segments always exclude
@@ -152,19 +122,10 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 			if blocked {
 				continue
 			}
-			switch classifyRHS(c.wi) {
-			case rhsTrue:
-				q.NeedsHumanSession = append(q.NeedsHumanSession, *c.view)
-			case rhsFalse:
-				q.Items = append(q.Items, *c.view)
-			default:
-				q.Unknown = append(q.Unknown, *c.view)
-			}
+			q.Items = append(q.Items, *c.view)
 		}
 	}
 	sortBy(&q.Items)
-	sortBy(&q.NeedsHumanSession)
-	sortBy(&q.Unknown)
 	sortBy(&q.Running)
 	sortBy(&q.Paused)
 	return q, nil

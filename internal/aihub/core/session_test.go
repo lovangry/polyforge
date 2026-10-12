@@ -505,6 +505,30 @@ func TestSessionClaimGates(t *testing.T) {
 	}
 }
 
+// A held session whose stored fingerprint is empty/NULL/divergent must be
+// refused: the proxy would otherwise hand the hook an empty expected
+// fingerprint, which skips the push-option fence.
+func TestCheckSessionCredentialRejectsBadFingerprint(t *testing.T) {
+	env, m := sessionEnv(t)
+	secret := "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+	id := mustCreateExecWI(t, env, "fp guard", nil, "")
+	mustSessionClaim(t, m, env, id, secret, "p-1")
+	for _, bad := range []string{"", "deadbeefdeadbeef"} {
+		if _, err := env.DB.Exec(`UPDATE work_items SET session_fingerprint=?1 WHERE id=?2`, bad, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.Owners.CheckSessionCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) || ErrorReason(err) != "BAD_FINGERPRINT" {
+			t.Fatalf("fingerprint %q not refused: %v", bad, err)
+		}
+	}
+	if _, err := env.DB.Exec(`UPDATE work_items SET session_fingerprint=NULL WHERE id=?1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Owners.CheckSessionCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) {
+		t.Fatalf("NULL fingerprint not refused: %v", err)
+	}
+}
+
 // TestCheckSessionCredentialSessionPath: the git credential check validates
 // hex(sha256(password)) == session_hash AND status==running (M3); the
 // mismatch names the current holder fingerprint.
@@ -636,74 +660,5 @@ func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 	}
 	if view2.SessionFingerprint != "" || view2.CleanPause {
 		t.Fatalf("unheld view block not empty: %+v", view2.SessionPublic)
-	}
-}
-
-// TestSessionHolderPublicRead (§1.7): the public holder read maps the
-// held, paused, and unheld (zero-block) rows into the additive wire
-// type — and never carries the hash or the secret.
-func TestSessionHolderPublicRead(t *testing.T) {
-	env, m := sessionEnv(t)
-	secret := "20202020202020202020202020202020"
-
-	// Unheld (queued): an ordinary answer with the empty block.
-	id := mustCreateExecWI(t, env, "holder goal", nil, "")
-	resp, err := m.Holder(id)
-	if err != nil {
-		t.Fatalf("holder unheld: %v", err)
-	}
-	if resp.WorkItemID != id || resp.Status != api.StatusQueued || resp.CleanPause ||
-		resp.SessionFingerprint != "" || resp.MachineID != "" ||
-		resp.SessionOwner != "" || resp.SessionStartedAt != "" {
-		t.Fatalf("unheld holder wrong: %+v", resp)
-	}
-	blob, err := json.Marshal(resp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(blob), "session_hash") || strings.Contains(string(blob), secret) {
-		t.Fatalf("unheld holder leaks: %s", blob)
-	}
-
-	// Held + running: the public audit fields map across.
-	claim := mustSessionClaim(t, m, env, id, secret, "h-1")
-	resp, err = m.Holder(id)
-	if err != nil {
-		t.Fatalf("holder held: %v", err)
-	}
-	if resp.Status != api.StatusRunning || resp.SessionFingerprint != api.SessionFingerprint(secret) ||
-		resp.SessionFingerprint != claim.SessionFingerprint ||
-		resp.MachineID != "m1" || resp.SessionOwner != "op" ||
-		resp.SessionStartedAt == "" || resp.CleanPause {
-		t.Fatalf("held holder wrong: %+v", resp)
-	}
-	blob, err = json.Marshal(resp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(blob), "session_hash") || strings.Contains(string(blob), secret) ||
-		strings.Contains(string(blob), api.SessionHashHex(secret)) {
-		t.Fatalf("held holder leaks the hash or secret: %s", blob)
-	}
-
-	// Held + paused (the M3 transition keeps the row; §1.5 amend): the
-	// holder fields are retained and clean_pause rides along.
-	if err := m.Pause(id, secret, true, "operator", env.UserID); err != nil {
-		t.Fatalf("operator pause: %v", err)
-	}
-	resp, err = m.Holder(id)
-	if err != nil {
-		t.Fatalf("holder paused: %v", err)
-	}
-	if resp.Status != api.StatusPaused || !resp.CleanPause ||
-		resp.SessionFingerprint != api.SessionFingerprint(secret) ||
-		resp.MachineID != "m1" || resp.SessionOwner != "op" ||
-		resp.SessionStartedAt == "" {
-		t.Fatalf("paused holder wrong: %+v", resp)
-	}
-
-	// Unknown WI: the typed CORE-404.
-	if _, err := m.Holder("wi_nosuchthing"); !IsCode(err, api.ErrCoreNotFound) {
-		t.Fatalf("unknown WI holder: %v", err)
 	}
 }

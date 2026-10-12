@@ -36,6 +36,8 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/workflow"
@@ -267,7 +269,7 @@ func (r *Runtime) materializeBundleSet(j *job, src string) error {
 	if merr != nil {
 		return merr
 	}
-	if err := atomicWrite(markerPath, blob, 0o444); err != nil {
+	if err := atomicfile.Write(markerPath, blob, 0o444); err != nil {
 		return err
 	}
 	// The staging tree is empty now (every piece was renamed out);
@@ -295,88 +297,6 @@ func stagedTargets(stage string) ([]string, error) {
 	})
 	sort.Strings(out)
 	return out, err
-}
-
-// ensureMaterialized is the recovery-path backfill (the ensureWorkItemFile
-// pattern applied to the materialized set): a capsule whose marker is
-// missing or untrustworthy — a crash-torn snapshot, or the F7-era scene
-// the pilot compensated by hand before the product fix existed — gets
-// the set idempotently rebuilt before the next derivation wakes up.
-// Best-effort by design: a failure is loud but never blocks recovery.
-func (r *Runtime) ensureMaterialized(j *job) {
-	if r.cfg.WorkflowsDir == "" || j.bundleName == "" {
-		return
-	}
-	src := filepath.Join(r.cfg.WorkflowsDir, j.bundleName)
-	if !dirExists(src) {
-		return
-	}
-	if r.materializationComplete(j) {
-		return // trusted: the scene is left untouched
-	}
-	_ = r.materializeBundleSet(j, src)
-}
-
-// refreshBundle is the v2 recovery-time bundle freshness heal (the
-// stale-capsule lesson): a capsule materialized at claim time carries
-// the claim-era bundle bytes, and an operator who later evolves the
-// workflows-dir source leaves the capsule validating against a graph
-// the daemon no longer ships (observed as context_policy parse
-// failures on recovery). Recovery is the heal point: when the source
-// tree's content digest has moved past the job's pin, the pin is
-// re-pointed at the source and the bundle set re-materialized — the
-// relaunched driver then loads the CURRENT graph. This also upgrades
-// the name-derived stand-in pins aihub mints when it carries no content
-// hash (claim-time verification skips those; the heal makes the pin a
-// real content digest, and the re-materialization is idempotent from
-// then on). Best-effort and loud: any failure keeps the pinned scene
-// and recovery proceeds.
-func (r *Runtime) refreshBundle(j *job) {
-	if r.cfg.WorkflowsDir == "" || j.bundleName == "" {
-		return
-	}
-	j.mu.Lock()
-	name, pinned := j.bundleName, j.bundleDigest
-	j.mu.Unlock()
-	src := filepath.Join(r.cfg.WorkflowsDir, name)
-	if !dirExists(src) {
-		return
-	}
-	entries, err := bundleEntries(src)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bundle freshness check could not walk %s: %v\n", j.wi, src, err)
-		return
-	}
-	got := workflow.Digest(entries)
-	if got == pinned {
-		return // source matches the pin: nothing to heal
-	}
-	// Source moved past the pin: re-pin, drop the trust marker (so the
-	// next materializationComplete fails) and re-materialize from the
-	// source. The staged swap verifies the staged tree against the NEW
-	// pin before touching any live target.
-	j.mu.Lock()
-	j.bundleDigest = got
-	j.mu.Unlock()
-	marker := filepath.Join(j.capsuleDir, filepath.FromSlash(RelMaterializeMarker))
-	if rerr := os.Remove(marker); rerr != nil && !os.IsNotExist(rerr) {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bundle refresh could not drop the materialization marker: %v\n", j.wi, rerr)
-		return
-	}
-	if merr := r.materializeBundle(j); merr != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bundle refresh re-materialization failed (pinned scene kept): %v\n", j.wi, merr)
-		return
-	}
-	if perr := r.persist(); perr != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
-	}
-	if r.cfg.EventTap != nil {
-		r.cfg.EventTap(j.wi, "bundle_refreshed", map[string]any{
-			"bundle": name, "from_digest": pinned, "to_digest": got,
-			"note": "workflows-dir source moved past the claim-time pin; capsule re-pinned and re-materialized at recovery",
-		})
-	}
-	fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s re-pinned %s → %s (source moved past the claim pin)\n", j.wi, name, pinned, got)
 }
 
 // nameDerivedDigest is the name-derived stand-in aihub stores when a work

@@ -1,9 +1,8 @@
 package daemon
 
-// routes.go: the daemon's UDS HTTP face. The observe lane's routes
-// (observe/answer) are mounted from observe.Handler();
-// everything else translates the CLI contract (internal/polyforge/cli/
-// daemon.go — the pinned route family) into Runtime calls. Every error
+// routes.go: the daemon's UDS HTTP face. Every route translates the CLI
+// contract (internal/polyforge/cli/verbs_daemon.go — the pinned route
+// family) into Runtime/observe calls. Every error
 // answer is the TOP-LEVEL api.Error envelope {code, detail} (the same
 // typed shape the aihub face uses; DAEMON-* codes per 04 §5.2).
 
@@ -22,6 +21,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // The wire answer shapes — byte-identical to the CLI's decode structs
@@ -47,11 +47,8 @@ type statusJob struct {
 	// (a job the runtime calls running but the monitor holds a pending
 	// question for is presented as needs_input — an agent blocked on a
 	// human must never read as merely busy).
-	NeedsInput bool `json:"needs_input,omitempty"`
-	// RepairReason is set with Status "repair_pending": capsule_missing |
-	// project_unmapped (v2 §6).
-	RepairReason string `json:"repair_reason,omitempty"`
-	QuestionID   string `json:"question_id,omitempty"`
+	NeedsInput bool   `json:"needs_input,omitempty"`
+	QuestionID string `json:"question_id,omitempty"`
 	// StepAgeSec / LastWorkAgoSec are the owner liveness face (the ops
 	// status columns): whole seconds since the current dispatch began and
 	// since its harness last did REAL work (nil = no dispatch in flight,
@@ -94,7 +91,7 @@ type opsConfigResponse struct {
 
 type closeResponse struct {
 	WorkItemID string `json:"work_item_id"`
-	// Outcome: sealed | already_terminal | already_paused | abandoned (a repair_pending give-up) — plus
+	// Outcome: sealed | already_terminal | already_paused — plus
 	// "terminated" (polyforge#116): a parked workflow's §6.4 terminate
 	// verdict, landed at the hub by the terminate-blocked door (no local
 	// seal exists — the bounded close already sealed the parked capsule).
@@ -109,6 +106,10 @@ type closeResponse struct {
 type resumeBlockedResponse struct {
 	Resumed    bool   `json:"resumed"`
 	WorkItemID string `json:"work_item_id"`
+	// Deferred: the hub was unreachable (DAEMON-503) when the claim ran;
+	// the claim is queued in the persisted submit queue and retried with
+	// backoff, exactly like a submit.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -133,18 +134,6 @@ func writeErrOf(w http.ResponseWriter, err error) {
 	writeErr(w, api.ErrDaemonInternal, err.Error())
 }
 
-// writeRepairErr answers a RepairResume refusal: the unmapped project keeps
-// the DAEMON-412 placement code, a missing capsule the new DAEMON-517;
-// both explain exactly what to restore.
-func writeRepairErr(w http.ResponseWriter, err error) {
-	var unm *runtime.UnmappedMidflightError
-	if errors.As(err, &unm) {
-		writeErr(w, api.ErrDaemonUnmappedProject, err.Error())
-		return
-	}
-	writeErr(w, api.ErrDaemonRepairPending, err.Error())
-}
-
 func writeAdmissionErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errShuttingDown):
@@ -157,12 +146,8 @@ func writeAdmissionErr(w http.ResponseWriter, err error) {
 // handler assembles the full route table.
 func (d *Daemon) handler() http.Handler {
 	mux := http.NewServeMux()
-	obs := d.obs.Handler()
-	// The observe lane's own routes, mounted verbatim (04 §5.1a).
-	mux.Handle("GET /jobs/{wi}/observe", obs)
 	// v2 (polyforge#106): answer routes through the driver bridge when
-	// the WI's job carries a bridge Handle; otherwise the observe
-	// lane's honest no-live-handle refusal applies.
+	// the WI's job carries a bridge Handle; otherwise it refuses.
 	mux.HandleFunc("POST /jobs/{wi}/answer", func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
 		if h := d.rt.DriverAnswerHandle(wi); h != nil {
@@ -179,13 +164,10 @@ func (d *Daemon) handler() http.Handler {
 			if payload.AnsweredBy == "" {
 				payload.AnsweredBy = r.Header.Get("X-PF-User")
 			}
-			// When the CLI couldn't pre-resolve the question ID (observe
-			// face returns 404 for driver WIs), read it from the capsule's
-			// execution.json pending_question.
+			// No question named: the daemon resolves the pending one from
+			// the capsule's execution.json.
 			if payload.QuestionID == "" {
-				if qid := d.pendingQuestionID(wi); qid != "" {
-					payload.QuestionID = qid
-				}
+				payload.QuestionID = d.pendingQuestionID(wi)
 			}
 			if payload.QuestionID == "" {
 				http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
@@ -196,10 +178,15 @@ func (d *Daemon) handler() http.Handler {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+			json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "question_id": payload.QuestionID})
 			return
 		}
-		obs.ServeHTTP(w, r)
+		if _, live := d.rt.Info(d.canonWI(wi)); !live {
+			writeErr(w, api.ErrDaemonNotFound, "work item is not running on this daemon")
+			return
+		}
+		writeErr(w, api.ErrDaemonConflict,
+			"no live bridge handle for work item "+wi+": the workflow is between derivations — retry after the daemon re-derives it")
 	})
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute("claim"))
 	mux.HandleFunc("POST /jobs/{wi}/resume", d.submitRoute("resume"))
@@ -208,9 +195,6 @@ func (d *Daemon) handler() http.Handler {
 	// live driver, no bridge handle and no job record; the owner's moves
 	// are their own route, not a runtime call.
 	mux.HandleFunc("POST /jobs/{wi}/resume-blocked", d.resumeBlockedRoute)
-	// v2 §6 abandon: the give-up of a repair_pending WI (session ended by
-	// the daemon after the CLI's human-key authorization step).
-	mux.HandleFunc("POST /jobs/{wi}/abandon-repair", d.abandonRepairRoute)
 	mux.HandleFunc("POST /jobs/{wi}/pause", d.pauseRoute)
 	mux.HandleFunc("POST /jobs/{wi}/wrap", d.wrapRoute)
 	mux.HandleFunc("POST /jobs/{wi}/ship", d.shipRoute)
@@ -255,10 +239,19 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		wi := r.PathValue("wi")
 		var body struct {
 			Priority string     `json:"priority"`
+			Models   []string   `json:"models,omitempty"` // manual candidate list (pf submit --models)
 			Origin   *reqOrigin `json:"origin,omitempty"`
 		}
 		if !decodeBody(w, r, &body) {
 			return
+		}
+		if body.Models != nil {
+			m, merr := workspace.NormalizeModels(body.Models)
+			if merr != nil {
+				writeErr(w, api.ErrDaemonBadInput, "models: "+merr.Error())
+				return
+			}
+			body.Models = m
 		}
 		if err := d.modes.AdmitSubmit(); err != nil {
 			writeAdmissionErr(w, err)
@@ -274,21 +267,6 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// path resolves (or refuses) server-side, exactly as before.
 		canonical := d.canonWI(wi)
 		d.rt.NoteAlias(wi, canonical)
-		// v2 §6 "continue": a repair_pending WI (capsule missing / project
-		// unmapped at restart) is resumed IN PLACE with its kept session —
-		// re-check first; still broken answers the typed error.
-		if intent == "resume" {
-			cursor := d.lastSeq(canonical)
-			if held, rerr := d.rt.RepairResume(d.runCtx, canonical); held {
-				if rerr != nil {
-					writeRepairErr(w, rerr)
-					return
-				}
-				d.autoSubscribe(body.Origin, canonical, cursor)
-				writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
-				return
-			}
-		}
 		// The live check is the runtime's own job set (the queue's slot
 		// marks are accounting, reconciled a tick later); a pending
 		// duplicate is refused on the queue.
@@ -307,14 +285,16 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 			writeErr(w, api.ErrDaemonConflict, "work item is already queued on this daemon")
 			return
 		}
-		// polyforge#113 placement pre-check, synchronous on the submit
-		// face: the work item's project must be mapped, or the refusal
-		// reaches the operator's CLI (typed DAEMON-412) BEFORE the job is
-		// enqueued and before any capsule or server-side claim state
-		// exists. The dispatcher's runtime-side guard is the backstop.
+		// Pre-claim placement + workspace-yaml check, synchronous on the
+		// submit face: an unmapped project (DAEMON-412) or an invalid
+		// workspace yaml (DAEMON-414) reaches the operator's CLI BEFORE
+		// the job is enqueued and before any capsule or server-side claim
+		// state exists. The runtime's own pre-claim check is the
+		// backstop. A failed probe refuses nothing here (the submit is
+		// durable-queued; the dispatcher retries the probe at Start).
 		if probe, err := d.hub.GetWorkItem(canonical); err == nil && probe != nil && probe.ProjectName != "" {
-			if _, merr := d.cfg.Mapping.WorkspaceFor(probe.ProjectName); merr != nil {
-				writeErr(w, api.ErrDaemonUnmappedProject, fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)", probe.ProjectName))
+			if _, lerr := d.rt.LoadWorkspace(probe.ProjectName); lerr != nil {
+				writeErrOf(w, lerr)
 				return
 			}
 		}
@@ -322,7 +302,7 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// priority-desc against the machine's concurrency cap.
 		// `accepted` is answered only once the entry is on disk (v2 §5).
 		cursor := d.lastSeq(canonical)
-		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent, Origin: body.Origin.origin()}); err != nil {
+		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent, Models: body.Models, Origin: body.Origin.origin()}); err != nil {
 			writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+err.Error())
 			return
 		}
@@ -391,51 +371,26 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	// every claim on d.runCtx for the same reason.
 	d.rt.NoteOrigin(canonical, body.Origin.origin())
 	cursor := d.lastSeq(canonical)
-	if err := d.rt.StartIntent(d.runCtx, canonical, "claim"); err != nil {
+	if err := d.rt.Start(d.runCtx, canonical); err != nil {
+		// The CLI already flipped the WI blocked -> queued at the hub; a
+		// transient hub loss before the claim must not strand it there:
+		// queue the claim like a submit (persisted, retried with backoff).
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
+			if qerr := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: "claim", Origin: body.Origin.origin()}); qerr != nil {
+				writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+qerr.Error())
+				return
+			}
+			fmt.Fprintf(os.Stderr, "daemon: resume %s deferred, queued for the claim: %v\n", canonical, err)
+			d.autoSubscribe(body.Origin, canonical, cursor)
+			writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical, Deferred: true})
+			return
+		}
 		writeErrOf(w, err)
 		return
 	}
 	d.autoSubscribe(body.Origin, canonical, cursor)
 	writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical})
-}
-
-// abandonRepairRoute serves POST /jobs/{id}/abandon-repair — the give-up of
-// a WI parked repair_pending (v2 §6). The WI is still running at aihub under
-// this daemon's kept session, so the hub's cancel refuses it and only the
-// daemon holds the secret to end that session (canceled for `pf cancel`,
-// failed for `pf wrap --fail`; a refused SessionEnd is retried through the
-// end_pending lane). Like the resume-blocked door, the human authorization
-// (reporter / maintainer / admin) is the CLI's job and runs with the human's
-// own key BEFORE this route; this is the daemon half. A WI that is not
-// parked here answers DAEMON-404.
-func (d *Daemon) abandonRepairRoute(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Verdict string `json:"verdict"`
-	}
-	if !decodeBody(w, r, &body) {
-		return
-	}
-	var status string
-	switch body.Verdict {
-	case "canceled":
-		status = api.StatusCanceled
-	case "failed":
-		status = api.StatusFailed
-	default:
-		writeErr(w, api.ErrDaemonBadInput, "verdict must be canceled or failed")
-		return
-	}
-	wi := d.canonWI(r.PathValue("wi"))
-	held, err := d.rt.AbandonRepair(wi, status, "abandoned while parked repair_pending by the owner ("+body.Verdict+")")
-	if err != nil {
-		writeErrOf(w, err)
-		return
-	}
-	if !held {
-		writeErr(w, api.ErrDaemonNotFound, wi+" is not parked repair_pending on this daemon")
-		return
-	}
-	writeJSON(w, http.StatusOK, closeResponse{WorkItemID: wi, Outcome: "abandoned", Status: status})
 }
 
 // ---------------------------------------------------------------------------
@@ -491,10 +446,6 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	}
 	if ji.VerifyPending {
 		writeErr(w, api.ErrDaemonConflict, wi+" is verify_pending — the daemon is still retrying its session verify with aihub; retry shortly")
-		return
-	}
-	if ji.RepairPending != "" {
-		writeErr(w, api.ErrDaemonConflict, wi+" is parked repair_pending — fix the cause and `pf resume "+wi+"`, or give it up with `pf cancel "+wi+"` / `pf wrap --fail "+wi+"`")
 		return
 	}
 	if ji.State == runtime.StateSealing || ji.State == runtime.StateRecovering {
@@ -558,10 +509,6 @@ func (d *Daemon) terminalOf(wi string) (string, error) {
 const reasonPaused = protocol.FinishPaused
 
 func (d *Daemon) pauseRoute(w http.ResponseWriter, r *http.Request) {
-	var body struct{}
-	if !decodeBody(w, r, &body) {
-		return
-	}
 	d.closeJob(w, r.Context(), r.PathValue("wi"), reasonPaused)
 }
 
@@ -601,7 +548,7 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 	// no queue slot — the ops face must not count it as running work.
 	running := 0
 	for _, ji := range d.rt.List() {
-		if ji.State != runtime.StatePaused && ji.RepairPending == "" {
+		if ji.State != runtime.StatePaused {
 			running++
 		}
 		sj := statusJob{
@@ -613,13 +560,6 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			SessionFingerprint: ji.SessionFingerprint,
 			AgentPID:           ji.AgentPID,
 			Origin:             ji.Origin,
-		}
-		if ji.RepairPending != "" {
-			// v2 §6: parked at restart (capsule missing / project
-			// unmapped), session kept — shown as repair_pending, the
-			// reason kind alongside.
-			sj.Status = "repair_pending"
-			sj.RepairReason = ji.RepairPending
 		}
 		if ji.VerifyPending {
 			// restart verify could not reach aihub: retried with backoff
@@ -725,8 +665,7 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 // pendingQuestionID reads the capsule's execution.json to find the
-// current pending question ID (driver WIs: the observe face doesn't
-// carry it, but execution.json does).
+// current pending question ID.
 func (d *Daemon) pendingQuestionID(wi string) string {
 	wid := d.rt.CanonicalID(wi)
 	if wid == "" {

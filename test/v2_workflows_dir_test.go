@@ -19,8 +19,7 @@ import (
 var humanGateFlag = regexp.MustCompile(`,\s*requires_human_answer:\s*true`)
 
 // stepWallBudget matches one step-level `budget: { wall_minutes: N }`
-// override (the flow-map holds ONLY wall_minutes; the workflow-level
-// budget carries other keys and is left alone).
+// override (the flow-map holds ONLY wall_minutes).
 var stepWallBudget = regexp.MustCompile(`,\s*budget:\s*\{\s*wall_minutes:\s*\d+\s*\}`)
 
 // workflowsPath answers the --workflows-dir the daemon should use.
@@ -48,7 +47,7 @@ func addGrillHumanGate(t testing.TB, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := strings.Replace(string(raw), "interactive: true, budget", "interactive: true, requires_human_answer: true, budget", 1)
+	out := strings.Replace(string(raw), "kind: spec, budget", "kind: spec, requires_human_answer: true, budget", 1)
 	if out == string(raw) {
 		t.Fatal("quick-fix grill line not found for the human-gate copy")
 	}

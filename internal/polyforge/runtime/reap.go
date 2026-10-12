@@ -17,12 +17,10 @@
 package runtime
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
@@ -38,22 +36,11 @@ func journalPIDs(capsuleDir string) []journalPID {
 	if capsuleDir == "" {
 		return nil
 	}
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.DirRuntimeState, "spawn-journal.jsonl"))
-	if err != nil {
-		return nil
-	}
+	entries, _ := capsule.ReadSpawnJournal(capsuleDir)
 	var out []journalPID
 	seen := map[journalPID]bool{}
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var e struct {
-			PID       int    `json:"pid"`
-			StartedAt string `json:"started_at"`
-		}
-		if json.Unmarshal([]byte(line), &e) != nil || e.PID <= 1 {
+	for _, e := range entries {
+		if e.PID <= 1 {
 			continue
 		}
 		k := journalPID{e.PID, e.StartedAt}
@@ -117,4 +104,11 @@ func (r *Runtime) reapOrphans(wi, capsuleDir string) {
 	if rep, err := Cleanup(CleanupTarget{WIID: wi, DaemonID: r.cfg.MachineID, CapsuleDir: capsuleDir, CgroupPath: cg}, cleanupBound); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: orphan env-marker sweep incomplete: %v (warnings: %v)\n", wi, err, rep.Warnings)
 	}
+}
+
+// spawnJournalMaxN is the B2 fresh-clone counter seed: the highest
+// spawn_n the capsule journal records (0 when absent or unreadable).
+func spawnJournalMaxN(capsuleDir string) int {
+	n, _ := capsule.SpawnJournalMaxN(capsuleDir)
+	return n
 }

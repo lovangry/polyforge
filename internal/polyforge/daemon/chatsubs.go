@@ -31,6 +31,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -90,7 +92,7 @@ func (s *subStore) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(s.path, blob, 0o600)
+	return atomicfile.Write(s.path, blob, 0o600)
 }
 
 func (s *subStore) chatLocked(id string, create bool) *chatDoc {
@@ -325,8 +327,6 @@ func (d *Daemon) attention(chat, owner string, mark bool) ([]protocol.ChatAttent
 	for _, j := range jobs {
 		reason := ""
 		switch {
-		case j.Status == "repair_pending":
-			reason = "repair_pending"
 		case j.NeedsInput:
 			reason = "needs_input"
 		default:
@@ -416,7 +416,7 @@ func (d *Daemon) watchSnapshot(wi string, after int64) protocol.WatchSnapshot {
 		}
 		snap.Known = true
 		localLive = j.Status != string(runtime.StatePaused)
-		wj := &protocol.WatchJob{Status: j.Status, RepairReason: j.RepairReason,
+		wj := &protocol.WatchJob{Status: j.Status,
 			QuestionID: j.QuestionID, LastProgressAgoSec: j.LastWorkAgoSec}
 		if j.Origin != nil {
 			wj.Origin = &protocol.WatchOrigin{Kind: j.Origin.Kind, ChatID: j.Origin.ChatID, Owner: j.Origin.Owner}

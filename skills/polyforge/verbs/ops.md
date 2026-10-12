@@ -54,29 +54,28 @@ end), `CORE-410` (terminal).
   `[workspace]` section the daemon routes capsules into, polyforge#113;
   per-WI capsules live at `<workspace>/capsules/<wi_id>`), and a
   jobs table (WORK
-  ITEM, STATUS, ATTEMPT, AGENT PID, QUESTION, LAST-PROGRESS). This is
+  ITEM, STATUS, SESSION, SPAWN, AGENT PID, QUESTION, STEP-AGE, LAST-WORK;
+  plus ORIGIN when some job has one). This is
   bookkeeping about what this machine manages — not workflow execution
-  progress (observe is the progress verb) — with one deliberately
-  progress-shaped exception: LAST-PROGRESS is mm:ss since the job's
-  stream last proved **agent progress** (`-` when no progress record
-  exists). UI noise never refreshes it, so a job that is chattering but
-  wedged reads as STALE, not fresh. A LAST-PROGRESS over ~10 minutes on
-  a non-`needs_input` job is a stalled job — report it to the owner
-  before anything else (see SKILL.md's turn-start obligation).
-  A job with STATUS `repair_pending` is a work item the daemon parked at
-  restart because its capsule directory is missing (`capsule_missing`) or
-  its project is no longer mapped (`project_unmapped`); its session is
-  kept. The owner's moves: fix the cause and `pf resume <id>`, or give up
+  progress (`pf watch` is the progress verb) — with two deliberately
+  progress-shaped exceptions: STEP-AGE is mm:ss since the current dispatch
+  began, and LAST-WORK is mm:ss since its harness last did real work (`-`
+  when there is none). UI noise never refreshes LAST-WORK, so a job that is
+  chattering but wedged reads as stale, not fresh. A LAST-WORK over ~10
+  minutes on a non-`needs_input` job is a stalled job — report it to the owner.
+  A work item whose capsule directory is missing at restart
+  (`capsule_missing`) or whose project is no longer mapped
+  (`project_unmapped`) is not listed here: the daemon sets it `blocked` at
+  the hub (reason note names the cause; the event shows in `pf watch`).
+  The owner's moves: fix the cause if any and `pf resume <id>`, or give up
   with `pf cancel <id>` / `pf wrap <id> --fail`.
 - `auto` / `max` bare: `auto: on|off` / `max: N`; a change answers with
   the effective `{"auto":..,"max":..}`.
 - `shutdown`: `graceful shutdown requested; the daemon quiesces and exits`
   — the sequence terminates the live agent trees, persists the
-  bookkeeping and exits within its five-minute budget (there is no
-  per-agent flush wait: uncommitted state is picked up by the recovery
-  engine at the next start).
-  Interrupted work items stay running server-side; the next daemon start
-  recovers them through the transcript-resume engine.
+  bookkeeping and exits within its five-minute budget. Interrupted work
+  items stay running server-side; the next daemon start recovers them and
+  commits any uncommitted working-tree state.
 
 ## Failure branches
 

@@ -1,7 +1,7 @@
 package runtime
 
-// workspace_compose_test.go: the claim-time compose wiring — the four
-// level precedence runs ONCE per claim over the pinned bundle's
+// workspace_compose_test.go: the claim-time compose wiring — the
+// precedence runs ONCE per claim over the pinned bundle's
 // frontmatter (read from the daemon checkout) and the claim's workspace
 // yaml, and the composed map rides the job.
 
@@ -16,6 +16,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/workflow"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // frontmatterBundle writes a demo bundle whose workflow.md carries real
@@ -74,15 +75,14 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 		DataDir:                 filepath.Join(t.TempDir(), "data"),
 		AgentStarter:            scriptedEngineStarter(sp),
 		MaxRecoveries:           2,
-		SendBound:               2 * time.Second,
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 
-	writeWorkspaceYaml(t, ws, "workflow_defaults:\n  step_kinds:\n    code: [w79/code-a, w79/code-b]\n")
+	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    code: [w79/code-a, w79/code-b]\n")
 	if err := r.Start(context.Background(), "wi_w079comp"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -125,11 +125,10 @@ func TestClaimComposeWithoutYamlIsBundleOnly(t *testing.T) {
 		DataDir:                 filepath.Join(t.TempDir(), "data"),
 		AgentStarter:            scriptedEngineStarter(sp),
 		MaxRecoveries:           2,
-		SendBound:               2 * time.Second,
 		RecoveryStabilityWindow: time.Nanosecond,
 	}
-	toOB := make(chan protocol.RTMsg, 64)
-	fromOB := make(chan protocol.OBMsg, 64)
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
 	r.cfg.WorkflowsDir = wfDir
 

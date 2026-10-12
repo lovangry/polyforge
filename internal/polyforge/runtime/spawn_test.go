@@ -90,7 +90,7 @@ func TestSpawnEnvSanitized(t *testing.T) {
 		t.Fatal("the blacklist must not strip unrelated variables")
 	}
 	for _, want := range []string{
-		"PF_WI_ID=wi_env", "PF_DAEMON_ID=m-env", "PI_SESSION_DIR=/caps/session",
+		"PF_WI_ID=wi_env", "PF_DAEMON_ID=m-env",
 		// v1.5 B2/B3: the PUBLIC session handle and the monotonic
 		// derivation counter
 		"PF_SESSION_HANDLE=ab12cd34",
@@ -208,16 +208,16 @@ func TestSpawnJournalWritten(t *testing.T) {
 	if n := strings.Count(string(raw2), "\n"); n != 2 {
 		t.Fatalf("journal must append, found %d lines", n)
 	}
-	if got := maxSpawnNFromJournal(capDir); got != 1 {
-		t.Fatalf("maxSpawnNFromJournal = %d, want 1", got)
+	if got := spawnJournalMaxN(capDir); got != 1 {
+		t.Fatalf("spawnJournalMaxN = %d, want 1", got)
 	}
 }
 
-// maxSpawnNFromJournal: the B2 fresh-clone source — the highest recorded
+// spawnJournalMaxN: the B2 fresh-clone source — the highest recorded
 // spawn_n wins, missing/unparsable journals answer 0.
 func TestMaxSpawnNFromJournal(t *testing.T) {
 	capDir := t.TempDir()
-	if got := maxSpawnNFromJournal(capDir); got != 0 {
+	if got := spawnJournalMaxN(capDir); got != 0 {
 		t.Fatalf("absent journal must answer 0, got %d", got)
 	}
 	path := filepath.Join(capDir, capsuleDirRuntimeState, "spawn-journal.jsonl")
@@ -232,8 +232,8 @@ func TestMaxSpawnNFromJournal(t *testing.T) {
 	if err := os.WriteFile(path, lines, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := maxSpawnNFromJournal(capDir); got != 5 {
-		t.Fatalf("maxSpawnNFromJournal = %d, want 5", got)
+	if got := spawnJournalMaxN(capDir); got != 5 {
+		t.Fatalf("spawnJournalMaxN = %d, want 5", got)
 	}
 }
 

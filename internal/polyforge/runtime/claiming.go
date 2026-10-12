@@ -18,18 +18,21 @@ package runtime
 //
 // The file is a map keyed by the SUBMITTED id spelling (a slug is legal:
 // the claim endpoint accepts id-or-slug), so clearClaiming and the
-// restart replay agree on keys. opMu serializes every writer (StartIntent
+// restart replay agree on keys. opMu serializes every writer (Start
 // and Restart both hold it), so no lock beyond the file's own atomic
 // write is needed.
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -50,6 +53,9 @@ type claimingRec struct {
 	IdempotencyKey string `json:"idempotency_key"` // the D4 replay token
 	MachineID      string `json:"machine_id"`
 	At             string `json:"at"`
+	// Models is the manual `pf submit --models` list of this start, so a
+	// crash-replayed claim keeps it.
+	Models []string `json:"models,omitempty"`
 }
 
 func (r *Runtime) claimingPath() string {
@@ -100,14 +106,14 @@ func (r *Runtime) writeClaiming(items map[string]*claimingRec) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(r.claimingPath(), blob, stateFilePerm)
+	return atomicfile.Write(r.claimingPath(), blob, stateFilePerm)
 }
 
 // noteClaiming journals one claim intention — the minted session secret
 // plus the idempotency key — BEFORE the claim call. A write failure is
 // fatal to the start (the caller refuses to claim): a claim we cannot
 // journal is exactly the dangling-session risk this file exists to close.
-func (r *Runtime) noteClaiming(wi, sessionID, key string) error {
+func (r *Runtime) noteClaiming(wi, sessionID, key string, models []string) error {
 	items := r.loadClaiming()
 	items[wi] = &claimingRec{
 		WorkItemID:     wi,
@@ -115,6 +121,7 @@ func (r *Runtime) noteClaiming(wi, sessionID, key string) error {
 		IdempotencyKey: key,
 		MachineID:      r.cfg.MachineID,
 		At:             nowStamp(),
+		Models:         models,
 	}
 	return r.writeClaiming(items)
 }
@@ -191,7 +198,25 @@ func (r *Runtime) resumeClaiming(ctx context.Context) {
 			r.clearClaiming(wi)
 			continue
 		}
-		if err := r.startClaimed(ctx, rec.WorkItemID, rec.SessionID, resp); err != nil {
+		// The claim is already open server-side, so this is the one place
+		// the yaml is read after a claim: an invalid file here
+		// compensates with the D5 blocked end like any post-claim refusal.
+		wcfg, werr := r.LoadWorkspace(resp.WorkItem.ProjectName)
+		if werr != nil {
+			var ae *api.Error
+			note := werr.Error()
+			if errors.As(werr, &ae) && ae.Detail != "" {
+				note = ae.Detail
+			}
+			id := resp.WorkItem.ID
+			if id == "" {
+				id = resp.Claim.WorkItemID
+			}
+			r.abandonClaim(&job{wi: id, sessionID: rec.SessionID}, rec.WorkItemID, werr, note)
+			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused (session ended blocked): %v\n", wi, werr)
+			continue
+		}
+		if err := r.startClaimed(ctx, rec.WorkItemID, rec.SessionID, resp, wcfg, rec.Models); err != nil {
 			// startClaimed already compensated (blocked) and cleared
 			// the entry; the log line is for the operator.
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay start failed (session ended blocked): %v\n", wi, err)

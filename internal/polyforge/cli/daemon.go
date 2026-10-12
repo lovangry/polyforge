@@ -23,7 +23,6 @@ import (
 // (docs/design/polyforge-vnext/04-local-runtime.md §5.1):
 //
 //	POST /jobs/{id}/claim|resume            body {"priority":"normal"}
-//	GET  /jobs/{id}/observe?after=<cursor>  answer = protocol.JobView
 //	POST /jobs/{id}/answer                  body = the five-field relay
 //	                                        message itself (00 §3.4a)
 //	POST /jobs/{id}/pause  {}               POST /jobs/{id}/wrap {"reason"}
@@ -150,13 +149,11 @@ func parseWireError(status int, body []byte) *api.Error {
 	}
 }
 
-// AnswerPayload is the answer relay message (00 §3.4a, single authority):
-// the daemon forwards it verbatim, never parses or rewrites it.
+// AnswerPayload is the POST /jobs/{id}/answer body. An empty QuestionID
+// lets the daemon resolve the work item's pending question.
 type AnswerPayload struct {
 	QuestionID string `json:"question_id"`
-	AnswerID   string `json:"answer_id"`
 	AnswerText string `json:"answer_text"`
-	AnsweredAt string `json:"answered_at"`
 	AnsweredBy string `json:"answered_by"`
 }
 
@@ -202,11 +199,8 @@ type StatusJob struct {
 	AgentPID           int    `json:"agent_pid,omitempty"`
 	// NeedsInput/QuestionID are the D6 owner face: a job presented as
 	// needs_input carries its pending question's id.
-	NeedsInput bool `json:"needs_input,omitempty"`
-	// RepairReason accompanies Status "repair_pending" (v2 §6):
-	// capsule_missing | project_unmapped.
-	RepairReason string `json:"repair_reason,omitempty"`
-	QuestionID   string `json:"question_id,omitempty"`
+	NeedsInput bool   `json:"needs_input,omitempty"`
+	QuestionID string `json:"question_id,omitempty"`
 	// StepAgeSec / LastWorkAgoSec are the owner liveness face: whole
 	// seconds since the current dispatch began and since its harness last
 	// did real work (nil = none — rendered "-" in the STEP-AGE and
@@ -259,14 +253,19 @@ type ShipResponse struct {
 // Claim submits a single-WI interactive claim request. priority defaults
 // to "normal" server-side; empty keeps the default.
 func (d *DaemonClient) Claim(wiID, priority string) (json.RawMessage, error) {
-	return d.submit(wiID, "claim", priority)
+	return d.submit(wiID, "claim", priority, nil)
+}
+
+// ClaimWithModels is Claim carrying the manual `--models` candidate list.
+func (d *DaemonClient) ClaimWithModels(wiID, priority string, models []string) (json.RawMessage, error) {
+	return d.submit(wiID, "claim", priority, models)
 }
 
 // Resume submits a resume request — the daemon claims the paused WI
 // into a new session (attach semantics belong to the daemon restart
 // path, not the CLI).
 func (d *DaemonClient) Resume(wiID, priority string) (json.RawMessage, error) {
-	return d.submit(wiID, "resume", priority)
+	return d.submit(wiID, "resume", priority, nil)
 }
 
 // ResumeBlocked submits the §6.4 owner move for a workflow parked blocked
@@ -278,27 +277,16 @@ func (d *DaemonClient) ResumeBlocked(wiID string) (json.RawMessage, error) {
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-blocked", "", d.withOrigin(map[string]any{}), nil)
 }
 
-// AbandonRepair asks the daemon to give up a repair_pending WI it holds:
-// it ends the kept session with verdict ("canceled" | "failed") and drops
-// the parked record. The caller has already passed the aihub human-key
-// authorization probe (CloseAuth).
-func (d *DaemonClient) AbandonRepair(wiID, verdict string) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/abandon-repair", "", map[string]any{"verdict": verdict}, nil)
-}
-
-func (d *DaemonClient) submit(wiID, intent, priority string) (json.RawMessage, error) {
+func (d *DaemonClient) submit(wiID, intent, priority string, models []string) (json.RawMessage, error) {
 	if priority == "" {
 		priority = "normal"
 	}
+	body := map[string]any{"priority": priority}
+	if len(models) > 0 {
+		body["models"] = models
+	}
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/"+intent, "",
-		d.withOrigin(map[string]any{"priority": priority}), nil)
-}
-
-// Observe pulls the observe projection (protocol.JobView). after is the
-// last received event cursor (first call: 0).
-func (d *DaemonClient) Observe(wiID string, after int64) (json.RawMessage, error) {
-	return d.do("GET", "/jobs/"+url.PathEscape(wiID)+"/observe",
-		"after="+strconv.FormatInt(after, 10), nil, nil)
+		d.withOrigin(body), nil)
 }
 
 // Answer relays an answer to a needs_input step. The relay message is
@@ -309,12 +297,10 @@ func (d *DaemonClient) Answer(wiID string, payload AnswerPayload) (json.RawMessa
 		map[string]string{"X-PF-User": payload.AnsweredBy})
 }
 
-// Pause asks the daemon to pause a running WI. The v1.5 operator pause
-// carries clean_pause=true in the body as well: the daemon's own hub
-// transition can set the flag from it (wired at merge), independent of
-// the CLI-side PATCH the pause verb also issues.
+// Pause asks the daemon to pause a running WI (no body: the daemon's close
+// path carries the clean_pause semantics itself).
 func (d *DaemonClient) Pause(wiID string) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/pause", "", map[string]any{"clean_pause": true}, nil)
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/pause", "", nil, nil)
 }
 
 // Wrap asks the daemon to wrap (or fail, when reason=="fail") a running

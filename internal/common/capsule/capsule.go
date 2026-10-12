@@ -17,34 +17,6 @@ package capsule
 
 import "encoding/json"
 
-// WorkspaceYamlAuditDoc is the polyforge#79 audit shape of the parsed
-// `.polyforge.yaml` (projects + workflow_defaults, verbatim — declared
-// repo list order intact, no normalization or redaction). It is the
-// JSON encoding of the same structures the shared strict-schema loader
-// answered, so no second mapping layer exists between the loader and
-// the record.
-type WorkspaceYamlAuditDoc struct {
-	Projects         map[string]WorkspaceProjectAudit `json:"projects,omitempty"`
-	WorkflowDefaults *WorkspaceDefaultsAuditDoc       `json:"workflow_defaults,omitempty"`
-}
-
-// WorkspaceProjectAudit is one project entry of the audited yaml.
-type WorkspaceProjectAudit struct {
-	Repos []WorkspaceRepoAudit `json:"repos"`
-}
-
-// WorkspaceRepoAudit is one repo entry of the audited yaml.
-type WorkspaceRepoAudit struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-}
-
-// WorkspaceDefaultsAuditDoc is the audited yaml's workflow_defaults.
-type WorkspaceDefaultsAuditDoc struct {
-	ModelCandidates []string            `json:"model_candidates,omitempty"`
-	StepKinds       map[string][]string `json:"step_kinds,omitempty"`
-}
-
 // Capsule directory layout (relative to capsule root).
 const (
 	DirAgents       = "agents"        // materialized step-agent definitions
@@ -63,38 +35,25 @@ const (
 // GitignoreContent is the .gitignore written at capsule init (ruling C1).
 const GitignoreContent = "/repos/\n/artifacts/release-*/\n"
 
-// Identity is capsule.json (03 §2.2). The declared BaseCommit pins the task
-// repos; CapsuleRepo is the bare repo this worktree pushes to. The v1
-// generation/attempt_id lineage fields are deleted (v1.5 session model):
-// legacy capsules still carrying those keys parse fine — encoding/json
-// ignores unknown keys (pinned by TestLooseParseLegacyCapsuleKeys).
+// Identity is capsule.json (03 §2.2). Repos pins each task repo's claim-time
+// SHA. The v1 generation/attempt_id lineage fields and base_commit are
+// deleted: capsules still carrying those keys parse fine — encoding/json
+// ignores unknown keys.
 type Identity struct {
 	WorkItemID   string            `json:"work_item_id"`
 	CapsuleID    string            `json:"capsule_id"`
 	Project      string            `json:"project"`
 	BundleName   string            `json:"bundle_name"`
 	BundleDigest string            `json:"bundle_digest"`
-	BaseCommit   string            `json:"base_commit"` // task repo baseline each step starts from
-	Repos        map[string]string `json:"repos"`       // repo name -> checked-out SHA at claim
+	Repos        map[string]string `json:"repos"` // repo name -> checked-out SHA at claim
 	CreatedAt    string            `json:"created_at"`
 
-	// WorkspaceYaml is the polyforge#79 audit: the parsed .polyforge.yaml
-	// verbatim (projects + workflow_defaults, declared repo list order
-	// intact). nil (omitted) when the claim carried no yaml — a no-yaml
-	// claim records no yaml audit content, never a fabricated one. Legacy
-	// capsules decode loose: the key is simply absent on old reads.
-	WorkspaceYaml *WorkspaceYamlAuditDoc `json:"workspace_yaml,omitempty"`
 	// EffectiveCandidates is the polyforge#79 audit: the per-step
-	// post-precedence candidate list the claim actually applied (step id
-	// → list; a present-empty list governs and means no switchable
-	// chain). Doubles as the claim-time SNAPSHOT the recovery path
-	// rehydrates from.
+	// post-precedence candidate list the claim actually applied when the
+	// workspace yaml governs the project (step id → list; a present-empty
+	// list governs and means no switchable chain). Doubles as the
+	// claim-time SNAPSHOT the recovery path rehydrates from.
 	EffectiveCandidates map[string][]string `json:"effective_candidates,omitempty"`
-	// RepoSources is the polyforge#79 audit: repo name → the source
-	// actually cloned from (the resolved local checkout path for
-	// yaml-sourced clones, the registry URL for registry clones under a
-	// yaml that governs nothing on the repo side).
-	RepoSources map[string]string `json:"repo_sources,omitempty"`
 }
 
 // WorkItemDoc is runtime-state/work-item.json: the daemon-materialized
@@ -123,7 +82,7 @@ type WorkItemDoc struct {
 // used by the recovery engine (v1-spec-full §七; discriminator =
 // transcript exists). The v1 attempt_id/generation lineage fields are
 // deleted (v1.5 session model); legacy files carrying those keys parse
-// fine (TestLooseParseLegacyCapsuleKeys).
+// fine (encoding/json ignores unknown keys).
 type Session struct {
 	Harness        string `json:"harness"`         // pi|cc
 	SessionID      string `json:"session_id"`      // harness-native session identifier
@@ -180,13 +139,12 @@ type Step struct {
 	// run under (the F4 lane: the executor records the candidate it
 	// dispatched with into every step-starting execution.json write, so
 	// the observe face can render it — the daemon never derives it).
-	Model          string             `json:"model,omitempty"`
-	Output         map[string]any     `json:"output,omitempty"`
-	StepStartedAt  string             `json:"step_started_at,omitempty"`
-	StepStartRefs  map[string]RepoRef `json:"step_start_refs,omitempty"`
-	BudgetConsumed Budget             `json:"budget_consumed"`
-	Attempts       []Attempt          `json:"attempts"`
-	Answers        []ArchivedAnswer   `json:"answers"`
+	Model          string           `json:"model,omitempty"`
+	Output         map[string]any   `json:"output,omitempty"`
+	StepStartedAt  string           `json:"step_started_at,omitempty"`
+	BudgetConsumed Budget           `json:"budget_consumed"`
+	Attempts       []Attempt        `json:"attempts"`
+	Answers        []ArchivedAnswer `json:"answers"`
 	// AnswerBase is len(Answers) at the step's last gate-fail rewind: the
 	// answers at index >= AnswerBase form the step's CURRENT attempt chain
 	// (the human-gate guarantee counts only those). Zero until a rewind.
@@ -243,9 +201,6 @@ type Attempt struct {
 	RewindGate     string          `json:"rewind_gate,omitempty"`
 	InterruptedAt  string          `json:"interrupted_at,omitempty"`
 	Detail         string          `json:"detail,omitempty"`
-	// FaultClass records the classified failure category (R4):
-	// provider / host / operator / schema. Empty for non-infra attempts.
-	FaultClass string `json:"fault_class,omitempty"`
 	// AcceptedResultID is the R13 envelope result_id committed at the
 	// R14 commit point — populated only for accepted step results.
 	AcceptedResultID string `json:"accepted_result_id,omitempty"`

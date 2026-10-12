@@ -432,7 +432,7 @@ func (u *v1Install) newWI(t *testing.T, goal string, actions, resumeActions []ma
 		Project:    v1Project,
 		Goal:       goal,
 		BundleName: strPtr("quick-fix"),
-		Attrs:      map[string]any{"requires_human_session": false},
+		Attrs:      nil,
 	})
 	if err != nil {
 		t.Fatalf("create work item: %v", err)
@@ -921,18 +921,18 @@ func (d *v1Daemon) status(t *testing.T) cli.StatusResponse {
 	return st
 }
 
-// observe reads the JobView projection for wi.
-func (d *v1Daemon) observe(t *testing.T, wi string) *protocol.JobView {
+// watch reads the daemon's watch snapshot for wi (Execution is non-nil:
+// the snapshot must know the work item).
+func (d *v1Daemon) watch(t *testing.T, wi string) *protocol.WatchSnapshot {
 	t.Helper()
-	raw, err := d.client.Observe(wi, 0)
+	snap, err := d.client.WatchSnapshot(wi, 0)
 	if err != nil {
-		t.Fatalf("observe %s: %v (log tail: %s)", wi, err, d.logTail())
+		t.Fatalf("watch %s: %v (log tail: %s)", wi, err, d.logTail())
 	}
-	var jv protocol.JobView
-	if err := json.Unmarshal(raw, &jv); err != nil {
-		t.Fatalf("observe %s undecodable: %v (%s)", wi, err, raw)
+	if snap.Execution == nil {
+		t.Fatalf("watch %s: no execution in %+v (log tail: %s)", wi, snap, d.logTail())
 	}
-	return &jv
+	return snap
 }
 
 // capsuleDir is this daemon's capsule root for wi.
@@ -1597,6 +1597,40 @@ func waitSpawnCount(t *testing.T, d *v1Daemon, wi string, n int, bound time.Dura
 	return spawnJournal(t, d.capsuleDir(wi))
 }
 
+// waitSpawnTranscript waits until the n-th spawn's agent child has
+// written its harness transcript (the file the spawn journal names, or
+// the fakepi journal's n-th "spawn" record when no path is recorded).
+// The spawn-journal line is written by the PARENT before the child
+// starts, but the driver only resumes from a transcript that exists and
+// is non-empty — a kill landing in that gap silently downgrades the
+// retry to a fresh dispatch. Tests that kill/crash right after
+// waitSpawnCount and assert on resume must wait here first.
+func waitSpawnTranscript(t *testing.T, d *v1Daemon, wi string, n int, bound time.Duration) {
+	t.Helper()
+	capDir := d.capsuleDir(wi)
+	waitUntil(t, bound, fmt.Sprintf("spawn %d never wrote its transcript", n), func() bool {
+		entries := spawnJournal(t, capDir)
+		if len(entries) < n {
+			return false
+		}
+		path, _ := entries[n-1]["transcript"].(string)
+		if path == "" {
+			spawns := 0
+			for _, r := range fakeJournal(t, capDir) {
+				if r["type"] == "spawn" {
+					spawns++
+				}
+			}
+			return spawns >= n
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(capDir, path)
+		}
+		st, err := os.Stat(path)
+		return err == nil && st.Mode().IsRegular() && st.Size() > 0
+	})
+}
+
 // latestSpawnPID reads the newest spawn-journal entry's pid — the live
 // step process a scenario SIGKILLs (driver WIs carry no agent pid on the
 // status face; the step process IS the supervised unit).
@@ -1650,19 +1684,15 @@ func countOf(list []string, s string) int {
 	return n
 }
 
-// observeSoft is observe that tolerates the not-yet-monitored window:
-// until the auto wave claims the ticket, the observe route answers
-// DAEMON-404 by design, and a poll must retry rather than fail.
-func observeSoft(d *v1Daemon, wi string) *protocol.JobView {
-	raw, err := d.client.Observe(wi, 0)
-	if err != nil {
+// watchSoft is watch that tolerates the not-yet-known window: until the
+// auto wave claims the ticket the snapshot is not Known, and a poll must
+// retry rather than fail.
+func watchSoft(d *v1Daemon, wi string) *protocol.WatchSnapshot {
+	snap, err := d.client.WatchSnapshot(wi, 0)
+	if err != nil || !snap.Known {
 		return nil
 	}
-	var jv protocol.JobView
-	if json.Unmarshal(raw, &jv) != nil {
-		return nil
-	}
-	return &jv
+	return snap
 }
 
 // writePlanExtra rewrites the fake agent's plan file with extra top-level
@@ -1700,4 +1730,18 @@ func restartSameDaemon(t *testing.T, d *v1Daemon, logName string) *v1Daemon {
 	t.Cleanup(func() { d2.stop() })
 	d2.start()
 	return d2
+}
+
+// listWorkItems reads GET /api/v1/work-items through the raw client and
+// decodes the items (test-only; the CLI itself consumes the raw body).
+func listWorkItems(inst *v1Install, project, status string) ([]api.WorkItem, error) {
+	raw, err := inst.client.ListWorkItemsRaw(project, status, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out api.ListResponse[api.WorkItem]
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
 }

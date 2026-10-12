@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"errors"
+	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"os"
 	"path/filepath"
 	"testing"
@@ -173,7 +174,7 @@ func TestMaxConcurrentCountsJobsStartedOutsideTheQueue(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) { c.MaxConcurrent = 2 })
 	for _, wi := range []string{"wi_rec1", "wi_rec2"} {
 		mkBare(t, td.cfg.GitRemoteBase, wi)
-		if err := td.rt.StartIntent(td.runCtx, wi, "claim"); err != nil {
+		if err := td.rt.Start(td.runCtx, wi); err != nil {
 			t.Fatalf("start %s directly: %v", wi, err)
 		}
 	}
@@ -189,5 +190,142 @@ func TestMaxConcurrentCountsJobsStartedOutsideTheQueue(t *testing.T) {
 	}
 	if td.q.LenPending() != 2 {
 		t.Fatalf("pending = %d, want 2 queued submits", td.q.LenPending())
+	}
+}
+
+// TestInvalidWorkspaceYamlRefusedBeforeClaim: an invalid .polyforge.yaml
+// makes the manual submit answer DAEMON-414 synchronously and makes
+// auto-pull skip the project — nothing is claimed at the hub either way
+// (the WI stays queued for other machines); fixing the file lets the
+// next wave pull it.
+func TestInvalidWorkspaceYamlRefusedBeforeClaim(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	ws, err := td.cfg.Mapping.WorkspaceFor("proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlPath := filepath.Join(ws, ".polyforge.yaml")
+	if err := os.WriteFile(yamlPath, []byte("workflow_defaults:\n  model_candidates: [\"x\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mkBare(t, td.cfg.GitRemoteBase, "wi_manual")
+	_, cerr := td.client.Claim("wi_manual", "normal")
+	var ae *api.Error
+	if !errors.As(cerr, &ae) || ae.Code != api.ErrDaemonWorkspaceYaml {
+		t.Fatalf("submit over an invalid yaml = %v, want DAEMON-414", cerr)
+	}
+	seedReady(td, t, "wi_a1")
+	if err := td.modes.SetAuto(true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // ~30 drain ticks
+	td.hub.mu.Lock()
+	claims := len(td.hub.claims)
+	td.hub.mu.Unlock()
+	if claims != 0 || liveCount(td) != 0 || td.q.LenPending() != 0 {
+		t.Fatalf("invalid yaml must claim and enqueue nothing: claims=%d live=%d pending=%d", claims, liveCount(td), td.q.LenPending())
+	}
+	if err := os.WriteFile(yamlPath, []byte("models:\n  proj:\n    code: [\"x\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	td.waitLive(t, "wi_a1")
+}
+
+// TestTransientProbeFailureKeepsSubmitQueued: an explicit submit whose
+// pre-claim hub probe hits a transient blip at dispatch time is not
+// dropped — it stays queued, no submit_rejected is recorded, and the next
+// dispatch tick claims it once the hub answers again.
+func TestTransientProbeFailureKeepsSubmitQueued(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	mkBare(t, td.cfg.GitRemoteBase, "wi_blip")
+	// call 1 is the submit route's own (advisory) probe, call 2 the
+	// dispatcher's Start probe: both fail; the third succeeds.
+	td.hub.mu.Lock()
+	td.hub.probeFails = 2
+	td.hub.mu.Unlock()
+	if _, err := td.client.Claim("wi_blip", "normal"); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	td.waitLive(t, "wi_blip")
+	for _, e := range td.obs.Events().Since("wi_blip") {
+		if e.Kind == observe.EvSubmitRejected {
+			t.Fatalf("a transient probe failure must not reject the submit: %+v", e)
+		}
+	}
+}
+
+// DAEMON-503 backoff: 1s, 2s, 4s ... capped at 30s.
+func TestDeferralBackoffGrowsAndCaps(t *testing.T) {
+	want := []time.Duration{1, 2, 4, 8, 16, 30, 30, 30}
+	for i, w := range want {
+		if got := deferralBackoff(i + 1); got != w*time.Second {
+			t.Fatalf("backoff(%d) = %v, want %v", i+1, got, w*time.Second)
+		}
+	}
+	if got := deferralBackoff(1000); got != deferralMax {
+		t.Fatalf("backoff(1000) = %v, want the cap", got)
+	}
+}
+
+// A deferred entry is skipped by Take until its NotBefore, so another
+// pending entry (even a lower-priority one) proceeds; the deferred entry is
+// never dropped, keeps its rank, and its backoff persists with it.
+func TestRequeueBackoffDoesNotBlockOthers(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	q := NewJobQueue(4, func() map[string]bool { return map[string]bool{} })
+	q.now = func() time.Time { return now }
+	var persisted []qEntry
+	q.persist = func(es []qEntry) error { persisted = append([]qEntry(nil), es...); return nil }
+
+	if err := q.Enqueue(qEntry{WorkItemID: "wi_bad", Priority: "urgent", Intent: "claim"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Enqueue(qEntry{WorkItemID: "wi_ok", Priority: "low", Intent: "claim"}); err != nil {
+		t.Fatal(err)
+	}
+	e := q.Take()
+	if e == nil || e.WorkItemID != "wi_bad" || e.Deferrals != 0 {
+		t.Fatalf("first take = %+v, want wi_bad (urgent)", e)
+	}
+	if err := q.Requeue("wi_bad"); err != nil {
+		t.Fatal(err)
+	}
+	// the persisted entry carries the backoff (survives a restart)
+	var saved *qEntry
+	for i := range persisted {
+		if persisted[i].WorkItemID == "wi_bad" {
+			saved = &persisted[i]
+		}
+	}
+	if saved == nil || saved.Deferrals != 1 || !saved.NotBefore.Equal(now.Add(time.Second)) {
+		t.Fatalf("persisted wi_bad = %+v, want deferrals 1 and not_before now+1s", saved)
+	}
+	// not due: the lower-priority entry proceeds, then nothing is takeable
+	if e := q.Take(); e == nil || e.WorkItemID != "wi_ok" {
+		t.Fatalf("second take = %+v, want wi_ok", e)
+	}
+	if e := q.Take(); e != nil {
+		t.Fatalf("a not-due entry was taken: %+v", e)
+	}
+	if !q.IsPending("wi_bad") {
+		t.Fatal("the deferred entry must stay pending")
+	}
+	// due again: back first by rank; a second deferral doubles the wait
+	now = now.Add(time.Second)
+	e = q.Take()
+	if e == nil || e.WorkItemID != "wi_bad" || e.Deferrals != 1 {
+		t.Fatalf("take after the backoff = %+v", e)
+	}
+	_ = q.Requeue("wi_bad")
+	if e := q.Take(); e != nil {
+		t.Fatalf("second backoff not honored: %+v", e)
+	}
+	now = now.Add(2*time.Second - time.Millisecond)
+	if e := q.Take(); e != nil {
+		t.Fatalf("taken 1ms early: %+v", e)
+	}
+	now = now.Add(time.Millisecond)
+	if e := q.Take(); e == nil {
+		t.Fatal("not taken once due")
 	}
 }

@@ -35,15 +35,14 @@ string clears it), `--waiting-on`, `--attr`.
 
 `show` takes exactly one id (or slug) and renders the detail record.
 
-`--project` inference (polyforge#79): when the flag is omitted, the CLI
-resolves the working directory against the `[workspace]` mapping — a cwd
-inside exactly one mapped workspace whose `.polyforge.yaml` lists exactly
-ONE project gets that project as the default and the create proceeds as if
-the flag had been passed. A yaml listing two or more projects errors asking
-for `--project` (never a silent pick); a workspace without the yaml (or a
-cwd matching no mapped workspace) keeps the #113 required-flag error; an
-INVALID yaml surfaces its typed error naming the file and the reason. An
-explicit `--project` always bypasses inference byte-for-byte.
+`--project` inference: when the flag is omitted, the CLI resolves the
+working directory against the cli.toml `[workspace."<path>"]` mapping — a
+cwd inside exactly one mapped workspace that lists exactly ONE project
+gets that project as the default and the create proceeds as if the flag
+had been passed. A workspace listing two or more projects errors asking
+for `--project` (never a silent pick); a cwd matching no mapped workspace
+keeps the #113 required-flag error. An explicit `--project` always
+bypasses inference byte-for-byte.
 
 ## Success
 
@@ -55,12 +54,11 @@ assignee, waiting, created (and closed when terminal).
 
 | Code | When | What to tell the user |
 |---|---|---|
-| `CORE-401` | api key missing or invalid | The AIHub credential is rejected — check `--api-key` / `PF_API_KEY` / the config's `api_key`. |
+| `AUTH-401` | api key missing or invalid | The AIHub credential is rejected — check `--api-key` / `PF_API_KEY` / the config's `api_key`. |
 | `CORE-400` | Invalid field or type; a workflow-frontmatter rule failed at create (`detail` names the rule); an `--attr` key hit the execution-state blacklist | The request body is wrong — read `detail` for the exact field/rule and fix the flags. |
 | `CORE-404` | Unknown or invisible work item id, unknown project | No such work item (or you cannot see it) — check the `wi_` id and the project name. |
 | `CORE-409` | Create-time conflict (e.g. duplicate) | The state machine refuses this write — read `detail`. |
 | `CORE-410` | PATCH of a terminal work item (wrapped/failed/cancelled) | This work item is closed and can no longer be edited — file a new one instead. |
-| `CORE-503` | AIHub busy | Retry shortly; nothing was written. |
 
 Exit 2 with a `pf:` usage line (no typed code) means a local flag/argument
 mistake — read the message, fix the invocation.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/version"
 )
 
 func TestLiveWIIDs(t *testing.T) {
@@ -82,7 +83,7 @@ func TestHeartbeatLoopTicksPayloadAndStops(t *testing.T) {
 	waitFor(t, "first heartbeat ticks", 3*time.Second, func() bool { return heartbeatCount(td.hub) >= 3 })
 	payloads := td.hub.heartbeatsSnapshot()
 	p := payloads[0]
-	if p.MachineID != "m-test" || p.Mode != "manual" || p.RuntimeVersion != heartbeatRuntimeVersion {
+	if p.MachineID != "m-test" || p.Mode != "manual" || p.RuntimeVersion != version.Version {
 		t.Fatalf("payload identity: %+v", p)
 	}
 	if p.LiveWIIDs == nil {

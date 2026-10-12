@@ -19,6 +19,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // seedPendingCloseOfRetainedPause drives the real paths into the NEW-3
@@ -38,8 +39,8 @@ func seedPendingCloseOfRetainedPause(t *testing.T, wi string, reason string) (*R
 	}
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
-	toOB := make(chan protocol.RTMsg, 64)
-	r := New(cfg, hub, sp, toOB, make(chan protocol.OBMsg, 64))
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	r := New(cfg, hub, sp, toOB, supervise.NewQueue[protocol.OBMsg]())
 	sess := fakeSession(wi)
 	hub.hold(wi, sess, api.StatusRunning)
 	j := seedJob(r, wi)
@@ -85,7 +86,7 @@ func restartOver(t *testing.T, r *Runtime, wi, sess string, endErr error, events
 		hub2.end[wi] = endErr
 	}
 	sp2 := &scriptedSpawner{}
-	r2 := New(cfg2, hub2, sp2, make(chan protocol.RTMsg, 64), make(chan protocol.OBMsg, 64))
+	r2 := New(cfg2, hub2, sp2, supervise.NewQueue[protocol.RTMsg](), supervise.NewQueue[protocol.OBMsg]())
 	return r2, hub2, r2.Restart(context.Background())
 }
 
@@ -207,8 +208,8 @@ func TestRestartPlainRetainedPauseIsNotReplayed(t *testing.T) {
 	}
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
-	toOB := make(chan protocol.RTMsg, 64)
-	r := New(cfg, hub, sp, toOB, make(chan protocol.OBMsg, 64))
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	r := New(cfg, hub, sp, toOB, supervise.NewQueue[protocol.OBMsg]())
 	wi := "wi_new3_plainpause"
 	sess := fakeSession(wi)
 	hub.hold(wi, sess, api.StatusRunning)
@@ -233,7 +234,7 @@ func TestRestartPlainRetainedPauseIsNotReplayed(t *testing.T) {
 	hub2 := newFakeHub()
 	hub2.hold(wi, sess, api.StatusPaused)
 	hub2.cleanPause[wi] = true
-	r2 := New(cfg2, hub2, sp, make(chan protocol.RTMsg, 64), make(chan protocol.OBMsg, 64))
+	r2 := New(cfg2, hub2, sp, supervise.NewQueue[protocol.RTMsg](), supervise.NewQueue[protocol.OBMsg]())
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}

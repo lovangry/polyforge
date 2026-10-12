@@ -453,7 +453,7 @@ func w113NewWI(t *testing.T, inst *v1Install, project, goal string, actions []ma
 		Project:    project,
 		Goal:       goal,
 		BundleName: strPtr("quick-fix"),
-		Attrs:      map[string]any{"requires_human_session": false},
+		Attrs:      nil,
 	})
 	if err != nil {
 		t.Fatalf("create work item in %s: %v", project, err)
@@ -942,8 +942,7 @@ func TestW113MappingInvalidKeysRejected(t *testing.T) {
 
 // TestW113OldShapeConfigRefusedEverywhere pins criterion #2: a config
 // carrying the flat `project` key is refused by every pf command and
-// the daemon with migration guidance naming the retired key, the new
-// `[workspace]` shape and `pf doctor`.
+// the daemon as an unknown top-level key (naming the key and the file).
 func TestW113OldShapeConfigRefusedEverywhere(t *testing.T) {
 	inst := newV1Install(t)
 	oldShape := "server = " + strconv.Quote(inst.url) + "\n" +
@@ -959,7 +958,7 @@ func TestW113OldShapeConfigRefusedEverywhere(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("%s on old-shape config: exit %d, want 1 (output %q)", what, code, out)
 		}
-		for _, tok := range []string{"project", "[workspace", "doctor"} {
+		for _, tok := range []string{`unknown key "project" in ` + cfgPath} {
 			if !strings.Contains(out, tok) {
 				t.Fatalf("%s on old-shape config: error misses the %q guidance token (output %q)", what, tok, out)
 			}
@@ -1104,67 +1103,6 @@ func TestW113CLIIgnoresRetiredEnv(t *testing.T) {
 // ---------------------------------------------------------------------------
 // S08 — the retired daemon flags fail flag parsing.
 // ---------------------------------------------------------------------------
-
-// TestW113DaemonRetiredFlagsFailParse pins criterion #5's flag half:
-// the daemon's retired project flag and retired workspace flag both
-// fail flag parsing (exit 2, deleted, not demoted). The second case
-// rides a malformed --config so the pre-change binary also terminates
-// promptly (config parse) instead of serving.
-func TestW113DaemonRetiredFlagsFailParse(t *testing.T) {
-	bin := filepath.Join(v1Bins(t), "pf")
-	badCfgPath := filepath.Join(t.TempDir(), "bad.toml")
-	if err := os.WriteFile(badCfgPath, []byte("w113 not toml\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cases := []struct {
-		name  string
-		argv  []string
-		token string
-	}{
-		{
-			name: "retired daemon project flag",
-			argv: []string{"daemon",
-				"--socket", filepath.Join(t.TempDir(), "d.sock"),
-				"--machine-id", "m-w113f",
-				"--data-dir", t.TempDir(),
-				w113FlagProjectTok(), "e2e"},
-			token: w113Tok("proj", "ect"),
-		},
-		{
-			name: "retired daemon workspace flag",
-			argv: []string{"daemon",
-				"--socket", filepath.Join(t.TempDir(), "d.sock"),
-				"--machine-id", "m-w113f",
-				"--data-dir", t.TempDir(),
-				w113FlagWorkspaceTok(), t.TempDir(),
-				"--config", badCfgPath},
-			token: w113Tok("work", "space"),
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			home := t.TempDir()
-			cmd := exec.Command(bin, c.argv...)
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}
-			var out strings.Builder
-			cmd.Stdout, cmd.Stderr = &out, &out
-			code := 0
-			if err := cmd.Run(); err != nil {
-				ee, ok := err.(*exec.ExitError)
-				if !ok {
-					t.Fatalf("pf %v: %v", c.argv, err)
-				}
-				code = ee.ExitCode()
-			}
-			if code != 2 {
-				t.Fatalf("pf %v: exit %d, want 2 (flag parse failure; output %q)", c.argv, code, out.String())
-			}
-			if !strings.Contains(out.String(), c.token) {
-				t.Fatalf("pf %v: parse failure does not name the retired flag (output %q)", c.argv, out.String())
-			}
-		})
-	}
-}
 
 // ---------------------------------------------------------------------------
 // S09 — daemon --config default = standard cli.toml location; explicit
@@ -1460,12 +1398,14 @@ func TestW113InflightCapsulesKeepHomesAcrossRestart(t *testing.T) {
 // relocated.
 // ---------------------------------------------------------------------------
 
-// TestW113UnmappedMidflightWIFailsLoudly pins criterion #11's failure
+// TestW113UnmappedMidflightWIBlocksThenResumes pins criterion #11's failure
 // posture: a mid-flight capsule for a workspace the operator failed to
-// re-add to the mapping makes the restart loud (startup refusal or
-// recovered-job failure — the spec leaves the surface open) naming the
-// project, and the capsule is NOT relocated to another workspace.
-func TestW113UnmappedMidflightWIFailsLoudly(t *testing.T) {
+// re-add to the mapping does not stop the daemon — that work item alone is
+// set to the ordinary aihub `blocked` status with a reason naming the
+// project, nothing stays parked locally, and the capsule is NOT relocated to
+// another workspace. Once the mapping is restored, `pf resume` re-claims it
+// and the workflow finishes.
+func TestW113UnmappedMidflightWIBlocksThenResumes(t *testing.T) {
 	inst := newV1Install(t)
 	w113EnsureProject(t, inst, "ieops")
 	wsA := filepath.Join(t.TempDir(), "w113wsA")
@@ -1502,21 +1442,23 @@ func TestW113UnmappedMidflightWIFailsLoudly(t *testing.T) {
 	d.crash()
 
 	// The operator rewrote the config WITHOUT wsX's mapping (the failed
-	// re-add): restart must be loud about `ieops`.
+	// re-add): the daemon still starts and blocks that work item alone.
 	w113ConfigFile(t, fullCfgPath, inst.url, inst.adminKey, "",
 		[]w113WS{{key: wsA, projects: []string{"e2e"}}})
 	d2 := w113NewDaemon(t, inst,
 		w113DOptConfig(fullCfgPath), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	served, output, _ := d2.boot(30 * time.Second)
-	if served {
-		// The recovered-job shape: the failure surfaces in the running
-		// daemon's diagnostics.
-		waitUntil(t, 30*time.Second, "the restarted daemon never diagnosed the unmapped mid-flight work item", func() bool {
-			return strings.Contains(d2.logTail(), "ieops")
-		})
-	} else if !strings.Contains(output, "ieops") {
-		t.Fatalf("daemon restart without the ieops workspace: exit diagnostics do not name the project (output %q)", output)
+	if !served {
+		t.Fatalf("an unmapped mid-flight project must not stop the daemon: %s", output)
 	}
+	inst.waitWIStatus(t, wi, "blocked", 60*time.Second)
+	if raw := wiRawWithEvents(t, inst, wi); !strings.Contains(raw, "ieops") || !strings.Contains(raw, "[workspace] mapping") {
+		t.Fatalf("the blocked reason does not name the project: %s", raw)
+	}
+	waitUntil(t, 20*time.Second, "the unmapped WI is still held by the daemon", func() bool {
+		snap, _ := d2.pf(inst, "ops", "status")
+		return !strings.Contains(snap, wi)
+	})
 
 	// No relocation: the capsule stays under wsX, nothing appears under
 	// any other workspace.
@@ -1525,6 +1467,24 @@ func TestW113UnmappedMidflightWIFailsLoudly(t *testing.T) {
 	}
 	if _, err := os.Stat(w113Capsule(wsA, wi)); err == nil {
 		t.Fatalf("the mid-flight capsule was relocated to %s", w113Capsule(wsA, wi))
+	}
+
+	// The operator restores the mapping and the human resumes: the work
+	// item is re-claimed under its project's workspace and finishes.
+	d2.stop()
+	w113ConfigFile(t, fullCfgPath, inst.url, inst.adminKey, "",
+		[]w113WS{
+			{key: wsA, projects: []string{"e2e"}},
+			{key: wsX, projects: []string{"ieops"}},
+		})
+	d3 := w113NewDaemon(t, inst,
+		w113DOptConfig(fullCfgPath), w113DOptSock(sock), w113DOptDataDir(dataDir))
+	d3.start()
+	defer d3.stop()
+	d3.pfWant(inst, 0, "resume", wi)
+	inst.waitWIStatus(t, wi, "wrapped", 180*time.Second)
+	if _, err := os.Stat(w113Capsule(wsA, wi)); err == nil {
+		t.Fatalf("the resumed work item was placed under %s", w113Capsule(wsA, wi))
 	}
 }
 

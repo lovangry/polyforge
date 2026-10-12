@@ -644,23 +644,6 @@ func VerifyArtifact(capsuleRoot string, ref ArtifactRef) error {
 	return nil
 }
 
-// HashFile answers the lowercase-hex SHA-256 and byte length of one
-// file. The staging side uses it to build manifest entries; the
-// verification side (VerifyArtifact) recomputes and compares.
-func HashFile(path string) (sha256Hex string, bytes int64, err error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", 0, err
-	}
-	defer f.Close()
-	h := sha256.New()
-	n, err := io.Copy(h, f)
-	if err != nil {
-		return "", 0, err
-	}
-	return hex.EncodeToString(h.Sum(nil)), n, nil
-}
-
 // hasArtifact answers whether the envelope declares an artifact at rel.
 func hasArtifact(refs []ArtifactRef, rel string) bool {
 	for _, a := range refs {

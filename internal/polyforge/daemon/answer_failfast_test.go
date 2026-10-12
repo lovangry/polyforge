@@ -8,19 +8,21 @@ package daemon
 // the route and the in-process fakes it needs are daemon-side.)
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 func TestAnswerWithoutLiveBridgeHandleFailsFast(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	payload := cli.AnswerPayload{
-		QuestionID: "q_ff", AnswerID: "a_ff",
-		AnswerText: "fail fast", AnsweredAt: "2026-01-01T00:00:00Z", AnsweredBy: "u_1",
+		QuestionID: "q_ff",
+		AnswerText: "fail fast", AnsweredBy: "u_1",
 	}
 
 	// (1) Not monitored at all (an idle daemon): the observe fallthrough
@@ -49,5 +51,46 @@ func TestAnswerWithoutLiveBridgeHandleFailsFast(t *testing.T) {
 	}
 	if !strings.Contains(ae.Detail, "bridge") {
 		t.Fatalf("the refusal must name the missing bridge handle: %q", ae.Detail)
+	}
+}
+
+// answerAgent is a fake engine handle that carries the bridge's Answer
+// method, so the answer route takes its driver branch.
+type answerAgent struct {
+	runtime.AgentHandle
+	answered chan string
+}
+
+func (a *answerAgent) Answer(questionID, answer, answeredBy string) error {
+	a.answered <- questionID
+	return nil
+}
+
+// A driver-branch answer that names no question while the capsule carries
+// no pending one is refused ANSWER-400 and never reaches the handle.
+func TestAnswerWithNoPendingQuestionIsRefused(t *testing.T) {
+	aa := &answerAgent{answered: make(chan string, 1)}
+	td := newTestDaemon(t, func(c *Config) {
+		inner := fakeEngineStarter()
+		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+			h, err := inner(ctx, in)
+			if err != nil {
+				return nil, err
+			}
+			aa.AgentHandle = h
+			return aa, nil
+		}
+	})
+	td.submitClaim(t, "wi_nq")
+	td.waitMonitored(t, "wi_nq")
+	_, err := td.client.Answer("wi_nq", cli.AnswerPayload{AnswerText: "x", AnsweredBy: "u_1"})
+	var ae *api.Error
+	if !errors.As(err, &ae) || ae.Code != "ANSWER-400" {
+		t.Fatalf("answer with no pending question = %v, want ANSWER-400", err)
+	}
+	select {
+	case q := <-aa.answered:
+		t.Fatalf("the handle must not be reached, got question %q", q)
+	default:
 	}
 }

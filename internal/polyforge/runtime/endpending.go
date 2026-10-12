@@ -23,15 +23,9 @@ import (
 // and only its answer was lost, or another session took over) — in both
 // cases nothing is left to end.
 func (r *Runtime) endBlockedAtHub(wi, secret, note, head string) bool {
-	return r.endAtHub(wi, secret, api.StatusBlocked, note, head)
-}
-
-// endAtHub is endBlockedAtHub for any session-end verdict (the abandon
-// path ends a repair_pending WI canceled / failed).
-func (r *Runtime) endAtHub(wi, secret, status, note, head string) bool {
 	err := r.hub.SessionEnd(wi, api.SessionEndRequest{
 		SessionID: secret,
-		Status:    status,
+		Status:    api.StatusBlocked,
 		Note:      note,
 		HeadSHA:   head,
 	})
@@ -42,7 +36,7 @@ func (r *Runtime) endAtHub(wi, secret, status, note, head string) bool {
 		fmt.Fprintf(os.Stderr, "runtime: %s: blocked close failed (%v) but the session no longer holds the work item (status %s) — settled\n", wi, err, v.Status)
 		return true
 	}
-	fmt.Fprintf(os.Stderr, "runtime: %s: session-end(%s) failed (will retry): %v\n", wi, status, err)
+	fmt.Fprintf(os.Stderr, "runtime: %s: session-end(blocked) failed (will retry): %v\n", wi, err)
 	return false
 }
 
@@ -86,12 +80,9 @@ func (r *Runtime) goRetry(key string, attempt func() bool) {
 // settled (record dropped).
 func (r *Runtime) endPendingAttempt(j *job) bool {
 	j.mu.Lock()
-	secret, note, head, status := j.sessionID, j.endNote, j.endHead, j.endStatus
+	secret, note, head := j.sessionID, j.endNote, j.endHead
 	j.mu.Unlock()
-	if status == "" {
-		status = api.StatusBlocked
-	}
-	if !r.endAtHub(j.wi, secret, status, note, head) {
+	if !r.endBlockedAtHub(j.wi, secret, note, head) {
 		return false
 	}
 	if err := j.transition(StateDone); err != nil {
@@ -159,7 +150,7 @@ func (r *Runtime) finishBlocked(j *job, detail, head string) {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	r.sendRelease(protocol.RTMsg{
+	r.send(protocol.RTMsg{
 		Kind:     protocol.RTFinished,
 		WorkItem: j.wi,
 		Reason:   protocol.FinishBlocked,

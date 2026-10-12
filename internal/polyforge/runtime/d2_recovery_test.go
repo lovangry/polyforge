@@ -15,6 +15,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -89,7 +90,7 @@ func TestBoundedFailMissingCapsuleKillsAgent(t *testing.T) {
 	}
 }
 
-func endPendingRuntime(t *testing.T, hub *fakeHub) (*Runtime, *job, chan protocol.RTMsg) {
+func endPendingRuntime(t *testing.T, hub *fakeHub) (*Runtime, *job, *supervise.Queue[protocol.RTMsg]) {
 	t.Helper()
 	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.EndRetryBase = 10 * time.Millisecond
@@ -188,7 +189,7 @@ func TestEndPendingSettlesWhenSessionNoLongerHoldsWI(t *testing.T) {
 func TestAbandonClaimRetriesSessionEnd(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)
-	if err := r.noteClaiming(j.wi, j.sessionID, "k1"); err != nil {
+	if err := r.noteClaiming(j.wi, j.sessionID, "k1", nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
@@ -303,11 +304,10 @@ func TestVerifySealedHead(t *testing.T) {
 	}
 }
 
-// D1 x D2: end_pending and repair_pending are distinct states. An
-// end_pending record whose capsule is gone is NOT parked repair_pending at
-// restart (its SessionEnd retry needs no capsule), RepairResume does not
-// hold it, and the retry still settles the close.
-func TestEndPendingIsNotRepairPending(t *testing.T) {
+// An end_pending record whose capsule is gone still retries its SessionEnd at
+// restart (the close needs no capsule — it is never re-blocked with a
+// missing-capsule reason of its own), and the retry settles the close.
+func TestEndPendingWithGoneCapsuleStillRetries(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
@@ -328,13 +328,7 @@ func TestEndPendingIsNotRepairPending(t *testing.T) {
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if ji, ok := r2.Info(j.wi); ok && ji.RepairPending != "" {
-		t.Fatalf("an end_pending record must never be parked repair_pending, got %q", ji.RepairPending)
-	}
-	if held, _ := r2.RepairResume(context.Background(), j.wi); held {
-		t.Fatal("RepairResume must not hold an end_pending WI")
-	}
-	if hub.endCount() < 1 || hub.lastEnd().Status != api.StatusBlocked {
+	if hub.endCount() < 1 || hub.lastEnd().Status != api.StatusBlocked || hub.lastEnd().Note != "boom" {
 		t.Fatalf("the blocked close must still be retried, got %+v", hub.lastEnd())
 	}
 }

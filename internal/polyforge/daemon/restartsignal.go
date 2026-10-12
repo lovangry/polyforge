@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
+
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 )
@@ -33,13 +35,7 @@ func (d *Daemon) recordLastShutdown(cause ShutdownCause) {
 		return
 	}
 	path := filepath.Join(d.cfg.DataDir, lastShutdownFile)
-	if os.MkdirAll(d.cfg.DataDir, 0o755) != nil {
-		return
-	}
-	tmp := path + ".tmp"
-	if os.WriteFile(tmp, blob, 0o600) == nil {
-		_ = os.Rename(tmp, path)
-	}
+	_ = atomicfile.Write(path, blob, 0o600)
 }
 
 // takeLastShutdown reads and consumes the previous run's shutdown record.
@@ -60,17 +56,13 @@ func (d *Daemon) takeLastShutdown() map[string]any {
 }
 
 // announceRestart writes the durable daemon_restarted event into every WI
-// the daemon recovered or parked (v2 §6 bug 8).
+// the daemon recovered (v2 §6 bug 8).
 func (d *Daemon) announceRestart(prev map[string]any) {
 	if d.obs == nil {
 		return
 	}
 	for _, ji := range d.rt.List() {
 		body := map[string]any{"previous_shutdown": prev, "state": string(ji.State)}
-		if ji.RepairPending != "" {
-			body["state"] = "repair_pending"
-			body["repair_reason"] = ji.RepairPending
-		}
 		_ = d.obs.Events().Append(ji.WorkItem, observe.EvDaemonRestarted, body)
 	}
 }

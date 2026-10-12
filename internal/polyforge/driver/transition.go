@@ -30,9 +30,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
@@ -128,7 +128,6 @@ type TransitionRequest struct {
 	Model      string          // step_start: the pinned candidate this dispatch runs under
 	Status     string          // terminal: the target workflow_status
 	Reason     string          // terminal/rewind reason; answer: the answer text
-	FaultClass string          // interrupted: the classified fault of the dead derivation
 	QuestionID string          // answer: the question id being answered
 	AnsweredBy string          // answer: who answered ("" → "owner")
 	// Failure carries a step_failed write's failed-dispatch record.
@@ -209,8 +208,8 @@ func (d *Driver) transition(req TransitionRequest) error {
 		d.exec = snap
 		return fmt.Errorf("driver: execution state unserializable: %w", err)
 	}
-	if err := atomicPersist(d.execPath, blob, 0o644); err != nil {
-		if errors.Is(err, ErrDirSyncFailed) {
+	if err := atomicfile.Write(d.execPath, blob, 0o644); err != nil {
+		if errors.Is(err, atomicfile.ErrDirSync) {
 			// Post-rename failure: disk may hold the new state. Latch
 			// degraded — do NOT roll back memory (review fix 6).
 			d.degraded = true
@@ -763,15 +762,14 @@ func (d *Driver) applyInterruptedLocked(req TransitionRequest) error {
 	}
 	// The interruption is audit only: it is NOT a counted failure (the
 	// per-step failure counter is untouched — a daemon restart or driver
-	// relaunch must not push a step towards blocked) and, with no fault
-	// class, never advances the candidate pointer.
+	// relaunch must not push a step towards blocked) and its cause is not
+	// model-class, so it never advances the candidate pointer.
 	cause := "driver_relaunch"
 	if req.Reason == "daemon_restart" {
 		cause = "daemon_restart"
 	}
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,
-		FaultClass:    req.FaultClass,
 		FailureCause:  cause,
 		AttemptSeq:    seq + 1,
 		StartedAt:     st.StepStartedAt,
@@ -885,7 +883,6 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 	case TransInterrupted:
 		kind = "interrupted"
 		body["step"] = d.exec.CurrentStep
-		body["fault_class"] = req.FaultClass
 		body["detail"] = req.Reason
 	case TransStepFailed:
 		kind = "step_failed"
@@ -923,7 +920,6 @@ func (d *Driver) failureEventsLocked(req TransitionRequest, info *appliedInfo, b
 	body["step"] = req.StepID
 	body["cause"] = dec.Cause
 	body["detail"] = req.Failure.Detail
-	body["fault_class"] = string(dec.FaultClass)
 	body["disposition"] = dec.disposition()
 	body["failure_count"] = dec.Count
 	body["next_dispatch"] = "resume"
@@ -957,58 +953,6 @@ func (d *Driver) failureEventsLocked(req TransitionRequest, info *appliedInfo, b
 			"step": req.StepID, "cause": dec.Cause, "reason": dec.BlockReason, "report": dec.Report,
 		}})
 	}
-}
-
-// atomicPersist lands data at path with the §4.2 contract, extended one
-// step past the runtime's own atomicWrite: after the rename, the parent
-// directory is fsynced too, so a crash cannot resurrect the old name
-// the rename already replaced. The tmp file is a dot-file sibling
-// (.execution.json.tmp in the runtime-state directory — the exact name
-// the design doc pins) and is removed on every failure path.
-// ErrDirSyncFailed marks a post-rename persistence failure: the file
-// was replaced but the parent-directory fsync could not confirm the
-// rename is durable. Callers must treat state as uncertain.
-var ErrDirSyncFailed = errors.New("driver: rename committed but directory fsync failed")
-
-func atomicPersist(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp := filepath.Join(dir, "."+filepath.Base(path)+".tmp")
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	// The rename is durable only once the directory entry is: fsync the
-	// parent so the replacement itself survives a crash.
-	df, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("%w: open dir: %v", ErrDirSyncFailed, err)
-	}
-	defer df.Close()
-	if err := df.Sync(); err != nil {
-		return fmt.Errorf("%w: %v", ErrDirSyncFailed, err)
-	}
-	return nil
 }
 
 // cloneExec deep-copies an execution state (JSON round-trip — every

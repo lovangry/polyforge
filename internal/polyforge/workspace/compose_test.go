@@ -1,8 +1,8 @@
 package workspace
 
-// compose_test.go: the four-level precedence chain, table-driven over
-// the spec's Scenario blocks (Requirement 3). Fixture model ids are
-// provider-qualified placeholders; no real model names appear.
+// compose_test.go: the precedence chain (project kind > project default
+// > bundle step > bundle default), table-driven. Fixture model ids are
+// placeholders.
 
 import (
 	"reflect"
@@ -19,170 +19,136 @@ func bundleWith(defaults []string, steps []workflow.FrontmatterStep) *workflow.F
 	return fm
 }
 
-// yamlWith builds a workspace yaml Config the way the loader would.
-func yamlWith(modelCandidates []string, stepKinds map[string][]string) *Config {
-	wd := &WorkflowDefaults{}
-	if modelCandidates != nil {
-		wd.ModelCandidates = modelCandidates
-	}
-	if stepKinds != nil {
-		wd.StepKinds = stepKinds
-	}
-	return &Config{WorkflowDefaults: wd}
+func models(project string, entry map[string][]string) *Config {
+	return &Config{Models: map[string]map[string][]string{project: entry}}
 }
 
-// yaml step_kinds[kind] wholly replaces the bundle step-level list for
-// EVERY kind:code step; unlisted kinds keep the bundle's own resolution.
-func TestComposeStepKindsReplacesEveryKindStep(t *testing.T) {
-	fm := bundleWith([]string{"prov/weak-a", "prov/weak-b"}, []workflow.FrontmatterStep{
+var testBundle = func() *workflow.Frontmatter {
+	return bundleWith([]string{"prov/weak-a"}, []workflow.FrontmatterStep{
 		{ID: "grill", Kind: "spec"},
-		{ID: "fix", Kind: "code", ModelCandidates: []string{"prov/flash", "prov/glm"}},
-		{ID: "release", Kind: "code", ModelCandidates: []string{"prov/glm", "prov/opus"}},
+		{ID: "fix", Kind: "code", ModelCandidates: []string{"prov/flash"}},
+		{ID: "release", Kind: "code"},
 		{ID: "verification", Kind: "gate"},
 	})
-	got := ComposeCandidates(fm, yamlWith(nil, map[string][]string{"code": {"w79/code-a", "w79/code-b"}}))
+}
+
+// A project kind list wholly replaces every step of that kind (a bundle
+// step-level list included); other kinds keep bundle resolution.
+func TestComposeProjectKindReplacesEveryKindStep(t *testing.T) {
+	got := ComposeCandidates(testBundle(), models("p", map[string][]string{"code": {"y/c1", "y/c2"}}), "p", nil)
 	want := map[string][]string{
-		"grill":        {"prov/weak-a", "prov/weak-b"}, // unlisted kind: bundle weak default
-		"fix":          {"w79/code-a", "w79/code-b"},   // the per-kind pin replaces the step-level list
-		"release":      {"w79/code-a", "w79/code-b"},   // …for every kind:code step
-		"verification": {"prov/weak-a", "prov/weak-b"},
+		"grill":        {"prov/weak-a"},
+		"fix":          {"y/c1", "y/c2"},
+		"release":      {"y/c1", "y/c2"},
+		"verification": {"prov/weak-a"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("compose = %v, want %v", got, want)
 	}
 }
 
-// step_kinds is keyed by the step's KIND: a spec pin hits the
-// kind-spec step while the kind-code fix keeps its own bundle list.
-func TestComposeStepKindsKindScoping(t *testing.T) {
-	fm := bundleWith([]string{"prov/weak-a"}, []workflow.FrontmatterStep{
-		{ID: "grill", Kind: "spec"},
-		{ID: "fix", Kind: "code", ModelCandidates: []string{"prov/flash"}},
-		{ID: "release", Kind: "code"},
-	})
-	got := ComposeCandidates(fm, yamlWith(nil, map[string][]string{"spec": {"w79/spec-x"}}))
+// The project default governs every step lacking a kind list, beating
+// the bundle's step-level and default lists; a kind list beats it.
+func TestComposeProjectDefaultAndKindPrecedence(t *testing.T) {
+	got := ComposeCandidates(testBundle(), models("p", map[string][]string{"default": {"y/d"}, "gate": {"y/g"}}), "p", nil)
 	want := map[string][]string{
-		"grill":   {"w79/spec-x"},
-		"fix":     {"prov/flash"},
-		"release": {"prov/weak-a"},
+		"grill":        {"y/d"},
+		"fix":          {"y/d"},
+		"release":      {"y/d"},
+		"verification": {"y/g"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("compose = %v, want %v", got, want)
 	}
 }
 
-// Bundle step-level list beats the yaml flow default; the flow default
-// replaces the bundle's WEAK default for steps without a step-level list.
-func TestComposeFlowDefaultVsStepLevel(t *testing.T) {
-	fm := bundleWith([]string{"prov/weak-a", "prov/weak-b"}, []workflow.FrontmatterStep{
-		{ID: "grill", Kind: "spec"},
-		{ID: "fix", Kind: "code", ModelCandidates: []string{"prov/flash"}},
-		{ID: "release", Kind: "code", ModelCandidates: []string{"prov/glm"}},
-	})
-	got := ComposeCandidates(fm, yamlWith([]string{"w79/flow-a", "w79/flow-b"}, nil))
-	want := map[string][]string{
-		"grill":   {"w79/flow-a", "w79/flow-b"}, // the flow default replaces the weak default
-		"fix":     {"prov/flash"},               // …never a step-specific list
-		"release": {"prov/glm"},
+// A declared-empty list is present and governs: no fall-through.
+func TestComposePresentEmptyGoverns(t *testing.T) {
+	got := ComposeCandidates(testBundle(), models("p", map[string][]string{"default": {"y/d"}, "code": {}}), "p", nil)
+	if l, ok := got["fix"]; !ok || l == nil || len(l) != 0 {
+		t.Fatalf("fix = %#v, want present-empty", got["fix"])
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("compose = %v, want %v", got, want)
+	if !reflect.DeepEqual(got["grill"], []string{"y/d"}) {
+		t.Fatalf("grill = %v", got["grill"])
 	}
-}
-
-// A yaml-silent step keeps the bundle's resolution exactly; with no
-// list anywhere the map has no entry (no switchable chain — the
-// harness adapter's default model stays in effect).
-func TestComposeYamlSilentAndNoChainAnywhere(t *testing.T) {
-	fm := bundleWith([]string{"prov/weak-a"}, []workflow.FrontmatterStep{
-		{ID: "grill", Kind: "spec"},
-		{ID: "naked", Kind: "code"},
-	})
-	// A workflow-only yaml (no step_kinds) leaves the bundle untouched.
-	got := ComposeCandidates(fm, yamlWith([]string{"w79/flow-a"}, nil))
-	want := map[string][]string{
-		"grill": {"w79/flow-a"},
-		"naked": {"w79/flow-a"},
+	got = ComposeCandidates(testBundle(), models("p", map[string][]string{"default": {}}), "p", nil)
+	for id, l := range got {
+		if len(l) != 0 {
+			t.Fatalf("%s = %v, want empty (default [] governs)", id, l)
+		}
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("compose = %v, want %v", got, want)
-	}
-
-	// A nil yaml: bundle-only behavior.
-	got = ComposeCandidates(fm, nil)
-	want = map[string][]string{
-		"grill": {"prov/weak-a"},
-		"naked": {"prov/weak-a"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("compose(nil yaml) = %v, want %v", got, want)
-	}
-
-	// No chain anywhere: no entries at all.
-	fm2 := bundleWith(nil, []workflow.FrontmatterStep{
-		{ID: "grill", Kind: "spec"},
-		{ID: "fix", Kind: "code"},
-	})
-	if got := ComposeCandidates(fm2, nil); got != nil {
-		t.Fatalf("no chain anywhere must answer nil, got %v", got)
-	}
-	if got := ComposeCandidates(fm2, &Config{}); got != nil {
-		t.Fatalf("an empty yaml over a silent bundle must answer nil, got %v", got)
+	if len(got) != 4 {
+		t.Fatalf("present-empty entries must exist for every step: %v", got)
 	}
 }
 
-// Declared-empty lists are PRESENT levels: they govern (no switchable
-// chain) and never fall through.
-func TestComposeEmptyListsGovern(t *testing.T) {
-	fm := bundleWith([]string{"prov/weak-a"}, []workflow.FrontmatterStep{
-		{ID: "fix", Kind: "code", ModelCandidates: []string{"prov/flash"}},
-		{ID: "release", Kind: "code"},
-		{ID: "grill", Kind: "spec"},
-	})
-	// step_kinds[code]: [] wholly governs both kind:code steps…
-	got := ComposeCandidates(fm, yamlWith(nil, map[string][]string{"code": {}}))
-	want := map[string][]string{
-		"fix":     {},
-		"release": {},
-		"grill":   {"prov/weak-a"},
+// A project the yaml does not list, a nil config, and a nil bundle.
+func TestComposeUnlistedNilAndBundleOnly(t *testing.T) {
+	bundleOnly := map[string][]string{
+		"grill":        {"prov/weak-a"},
+		"fix":          {"prov/flash"},
+		"release":      {"prov/weak-a"},
+		"verification": {"prov/weak-a"},
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("compose = %v, want %v", got, want)
+	cfg := models("p", map[string][]string{"default": {"y/d"}})
+	if got := ComposeCandidates(testBundle(), cfg, "other", nil); !reflect.DeepEqual(got, bundleOnly) {
+		t.Fatalf("unlisted project = %v, want bundle-only %v", got, bundleOnly)
 	}
-	// …and the yaml flow default [] governs the unlisted kind too
-	// (replacing the bundle's weak default with no chain at all).
-	got = ComposeCandidates(fm, yamlWith([]string{}, nil))
-	want = map[string][]string{
-		"fix":     {"prov/flash"},
-		"release": {},
-		"grill":   {},
+	if got := ComposeCandidates(testBundle(), nil, "p", nil); !reflect.DeepEqual(got, bundleOnly) {
+		t.Fatalf("nil config = %v, want bundle-only", got)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("compose(flow []) = %v, want %v", got, want)
+	if got := ComposeCandidates(nil, cfg, "p", nil); got != nil {
+		t.Fatalf("nil bundle = %v, want nil", got)
+	}
+	if got := ComposeCandidates(bundleWith(nil, []workflow.FrontmatterStep{{ID: "a", Kind: "code"}}), nil, "p", nil); got != nil {
+		t.Fatalf("no list anywhere = %v, want nil", got)
 	}
 }
 
-// The bundle's declared-empty step-level list governs over the yaml
-// flow default (level 2 beats level 3), mirroring the driver parse's
-// nil-collapse semantics.
-func TestComposeBundleEmptyStepLevelBeatsYamlFlowDefault(t *testing.T) {
-	fm := bundleWith([]string{"prov/weak-a"}, []workflow.FrontmatterStep{
-		{ID: "release", Kind: "code", ModelCandidates: []string{}},
-	})
-	got := ComposeCandidates(fm, yamlWith([]string{"w79/flow-a"}, nil))
-	want := map[string][]string{"release": {}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("compose = %v, want %v", got, want)
+// Two projects in one yaml compose independently.
+func TestComposeOtherProjectUnaffected(t *testing.T) {
+	cfg := &Config{Models: map[string]map[string][]string{
+		"a": {"code": {"y/a"}},
+		"b": {"code": {"y/b"}},
+	}}
+	if got := ComposeCandidates(testBundle(), cfg, "a", nil); !reflect.DeepEqual(got["fix"], []string{"y/a"}) {
+		t.Fatalf("a fix = %v", got["fix"])
+	}
+	if got := ComposeCandidates(testBundle(), cfg, "b", nil); !reflect.DeepEqual(got["fix"], []string{"y/b"}) {
+		t.Fatalf("b fix = %v", got["fix"])
 	}
 }
 
-// A nil/absent bundle answers nil — the yaml alone has no steps to key
-// on (the runtime still stashes the yaml for the audit).
-func TestComposeNilBundle(t *testing.T) {
-	if got := ComposeCandidates(nil, yamlWith([]string{"a"}, nil)); got != nil {
-		t.Fatalf("nil frontmatter must answer nil, got %v", got)
+func TestComposeManualBeatsEveryOtherLevel(t *testing.T) {
+	manual := []string{"man/a", "man/b"}
+	cfg := models("p", map[string][]string{"default": {"y/d"}, "code": {"y/c"}})
+	for _, c := range []*Config{cfg, nil} {
+		got := ComposeCandidates(testBundle(), c, "p", manual)
+		for _, step := range []string{"grill", "fix", "release"} {
+			if !reflect.DeepEqual(got[step], manual) {
+				t.Fatalf("step %s = %v, want the manual list over yaml kind/default and bundle", step, got[step])
+			}
+		}
 	}
-	if got := ComposeCandidates(&workflow.Frontmatter{}, yamlWith([]string{"a"}, nil)); got != nil {
-		t.Fatalf("frontmatter without steps must answer nil, got %v", got)
+	// a present-empty yaml level does not beat the manual list either
+	if got := ComposeCandidates(testBundle(), models("p", map[string][]string{"default": {}}), "p", manual); !reflect.DeepEqual(got["grill"], manual) {
+		t.Fatalf("manual must beat a present-empty yaml level, got %v", got["grill"])
+	}
+	// no manual list: unchanged
+	if got := ComposeCandidates(testBundle(), cfg, "p", nil); !reflect.DeepEqual(got["fix"], []string{"y/c"}) {
+		t.Fatalf("without a manual list the yaml chain governs, got %v", got["fix"])
+	}
+}
+
+func TestNormalizeModels(t *testing.T) {
+	if got, err := NormalizeModels([]string{" a/x ", "b"}); err != nil || !reflect.DeepEqual(got, []string{"a/x", "b"}) {
+		t.Fatalf("got %v, %v", got, err)
+	}
+	for name, in := range map[string][]string{
+		"empty list": nil, "empty id": {"a", ""}, "blank id": {"a", "  "}, "duplicate": {"a", "b", " a"},
+	} {
+		if _, err := NormalizeModels(in); err == nil {
+			t.Fatalf("%s: want an error", name)
+		}
 	}
 }

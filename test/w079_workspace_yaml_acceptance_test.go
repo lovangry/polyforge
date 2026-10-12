@@ -1,36 +1,24 @@
 package test
 
-// w079_workspace_yaml_acceptance_test.go: the polyforge#79 acceptance
-// suite — authored against the SPEC (the capsule's artifacts/spec.md:
-// its `## Acceptance criteria` and `#### Scenario` blocks), BEFORE the
-// implementation lands, mirroring the w113 authoring convention. It
-// pins the workspace-`.polyforge.yaml` contract through the project's
-// real e2e surfaces only: the pf/aihub/fakepi binaries, the `pf` CLI,
-// the daemon's UDS face, cli.toml, real git and the real filesystem —
-// never implementation internals.
+// w079_workspace_yaml_acceptance_test.go: the acceptance suite for the
+// workspace `.polyforge.yaml` — per-project model candidates. It pins the
+// contract through the project's real e2e surfaces only: the
+// pf/aihub/fakepi binaries, the `pf` CLI, the daemon's UDS face, cli.toml,
+// real git and the real filesystem.
 //
-// Suite posture (see artifacts/e2e-scenarios.md for the full mapping):
-//   - New-behavior bars are RED on the pre-implementation tree
-//     (e2e-baseline) — assertion-level reds, never build reds: this file
-//     compiles and vets against the tree as it stands today. They must
-//     go green when the change lands the spec.
-//   - Kept-face guards (absent-yaml behavior at HEAD, bundle step-level
-//     candidate precedence, rotation semantics, registry sourcing when
-//     no projects section applies, the #113 required-project error,
-//     placement via the cli.toml mapping, the installer's workspace
-//     blindness) are green BOTH before and after the change.
-//   - Document-only scenarios (the agent-driven workspace-init flow's
-//     judgment halves, drift surfacing teaching quality, the
-//     no-candidate-chain adapter default) live in
-//     artifacts/e2e-scenarios.md; the greppable floors below pin their
-//     machine-checkable halves.
+// The file's closed grammar (everything else is a load error):
 //
-// Daemon argv discipline: every `pf daemon` this suite launches rides
-// the w113 fixture's surviving flag surface only (--socket, --api-key,
-// --machine-id, --data-dir, --workflows-dir, --pi-bin, --config). The
-// suite never touches the not-yet-existing yaml surface through
-// anything but the yaml FILE at the workspace root and the real claim
-// lane.
+//	models:
+//	  <project>:
+//	    default: [model-id, ...]   # optional: every step of the project
+//	    <kind>: [model-id, ...]    # optional: qa|spec|author|code|gate|review
+//
+// Per step: project kind list > project default > bundle step list >
+// bundle defaults. The daemon reads and validates the file BEFORE the
+// aihub claim: an invalid file refuses with DAEMON-414 (surfaced to
+// `pf submit`), the WI stays queued (never claimed, not even
+// transiently), no capsule exists. Repo lists come from the aihub
+// registry; `pf file create` infers --project from the cli.toml mapping.
 
 import (
 	"encoding/json"
@@ -228,110 +216,107 @@ func w079AttemptStats(t *testing.T, capDir, step string) (providerInfra, gateRew
 	}
 	for _, a := range st.Attempts {
 		cause, _ := a["cause"].(string)
-		fc, _ := a["fault_class"].(string)
+		fc, _ := a["failure_cause"].(string)
 		switch {
 		case cause == "gate_fail_rewind":
 			gateRewind++
-		case cause == "infra_failure" && fc == "provider":
+		case cause == "infra_failure" && isModelClassCause(fc):
 			providerInfra++
 		}
 	}
 	return
 }
 
-// w079WaitRefusal polls until the claim of wi is refused: the combined
-// submit output + daemon log names every needle, the aihub-side status
-// settles into queued or blocked (never running — pre-claim refusals
-// leave the WI queued, abandonClaim-shaped ones leave it blocked), and
-// no capsule dir for wi exists under ws. A status that goes running /
-// wrapped / failed fails fast — the claim was accepted, which is the
-// red bar of the pre-implementation tree.
-func w079WaitRefusal(t *testing.T, d *w113Daemon, inst *v1Install, ws, wi, submitOut string, bound time.Duration, needles ...string) {
+// w079Refused asserts one pre-claim refusal of wi: the `pf submit`
+// itself failed (the daemon's synchronous pre-check surfaces the typed
+// DAEMON-414 to the submitter) with every needle in its output, and the
+// outcome is STABLE — polled for a few seconds, the WI never leaves
+// queued at aihub (it is never claimed, not even transiently), no
+// capsule exists for it, and the daemon keeps serving.
+func w079Refused(t *testing.T, d *w113Daemon, inst *v1Install, ws, wi, submitOut string, submitCode int, needles ...string) {
 	t.Helper()
-	deadline := time.Now().Add(bound)
-	for {
-		hay := submitOut + "\n" + d.logTail()
-		matched := true
-		for _, n := range needles {
-			if !strings.Contains(hay, n) {
-				matched = false
-				break
-			}
+	if submitCode == 0 {
+		t.Fatalf("pf submit of %s succeeded; want a DAEMON-414 refusal (output %q)", wi, submitOut)
+	}
+	for _, n := range append([]string{"DAEMON-414"}, needles...) {
+		if !strings.Contains(submitOut, n) {
+			t.Fatalf("submit refusal of %s misses %q (output %q)", wi, n, submitOut)
 		}
-		status := inst.wiStatus(t, wi)
-		if matched && (status == "blocked" || status == "queued") {
-			if _, err := os.Stat(w079Capsule(ws, wi)); err == nil {
-				t.Fatalf("refused claim of %s still materialized a capsule at %s", wi, w079Capsule(ws, wi))
-			}
-			return
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if status := inst.wiStatus(t, wi); status != "queued" {
+			t.Fatalf("refused work item %s left the queued state: status %q — a pre-claim refusal must never claim it (log tail %s)", wi, status, d.logTail())
 		}
-		switch status {
-		case "running", "wrapped", "failed":
-			t.Fatalf("claim of %s was ACCEPTED (status %q) — the yaml did not refuse it (needles %v; submit output %q; log tail %s)",
-				wi, status, needles, submitOut, d.logTail())
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("claim of %s was never refused within %v (status %q; needles %v; submit output %q; log tail %s)",
-				wi, bound, status, needles, submitOut, d.logTail())
+		if _, err := os.Stat(w079Capsule(ws, wi)); err == nil {
+			t.Fatalf("refused claim of %s materialized a capsule at %s", wi, w079Capsule(ws, wi))
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	d.pfWant(inst, -1, "ops", "status")
+}
+
+// w079Run submits wi and waits for the completed, wrapped run; answers
+// the capsule dir.
+func w079Run(t *testing.T, d *w113Daemon, inst *v1Install, ws, wi string) string {
+	t.Helper()
+	d.pfWant(inst, -1, "submit", wi)
+	capDir := w079Capsule(ws, wi)
+	w113WaitCapsule(t, capDir, 90*time.Second)
+	w113WaitCompleted(t, capDir, 240*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
+	return capDir
+}
+
+// w079Setup starts one daemon over the given workspace→projects mapping.
+func w079Setup(t *testing.T, inst *v1Install, wss ...w113WS) *w113Daemon {
+	t.Helper()
+	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"), inst.url, inst.adminKey, "", wss)
+	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
+	d.start()
+	t.Cleanup(d.stop)
+	return d
 }
 
 // ---------------------------------------------------------------------------
 // Read/failure semantics.
 // ---------------------------------------------------------------------------
 
-// TestW079AbsentAndEmptyYamlRunExactlyAsHead pins the kept faces of the
-// read semantics: a workspace with NO .polyforge.yaml, and one whose
-// file is comments-only (parses to zero sections, [spec-decided] #3),
-// both behave exactly as at HEAD — the repo inventory comes from the
-// aihub registry, the models come from bundle frontmatter alone, the
-// legacy capsule.json fields (Repos name→SHA) are unchanged, and NO
-// yaml audit content is fabricated. Green before AND after the change.
+// TestW079AbsentAndEmptyYamlRunExactlyAsHead pins the kept faces: a
+// workspace with NO .polyforge.yaml, one whose file is comments-only,
+// and one whose models section does not list the claimed project all
+// behave as bundle-only — the repo inventory comes from the aihub
+// registry, models from bundle frontmatter alone, the legacy capsule.json
+// fields are unchanged and no yaml audit content is fabricated.
 func TestW079AbsentAndEmptyYamlRunExactlyAsHead(t *testing.T) {
 	remoteURL, remoteHead := w079Remote(t, "w079reg.txt", "registry marker\n")
 	inst := newV1InstallRepos(t, []api.ProjectRepo{{Name: "w079reg", URL: remoteURL}})
 	ws := t.TempDir()
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
+	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 
-	// (a) no yaml at all.
 	wiA := w113NewWI(t, inst, "e2e", "w079 absent-yaml run exactly as head", envelopeQuickFix())
-	d.pfWant(inst, -1, "submit", wiA)
-	capA := w079Capsule(ws, wiA)
-	w113WaitCapsule(t, capA, 90*time.Second)
-	w113WaitCompleted(t, capA, 240*time.Second)
-	inst.waitWIStatus(t, wiA, "wrapped", 90*time.Second)
+	capA := w079Run(t, d, inst, ws, wiA)
 
-	// (b) a comments-only yaml: zero sections, valid, a no-op.
 	w079Yaml(t, ws, "# w079: comments only — no sections at all.\n# a second comment line.\n")
 	wiB := w113NewWI(t, inst, "e2e", "w079 comments-only yaml is a no-op", envelopeQuickFix())
-	d.pfWant(inst, -1, "submit", wiB)
-	capB := w079Capsule(ws, wiB)
-	w113WaitCapsule(t, capB, 90*time.Second)
-	w113WaitCompleted(t, capB, 240*time.Second)
-	inst.waitWIStatus(t, wiB, "wrapped", 90*time.Second)
+	capB := w079Run(t, d, inst, ws, wiB)
 
-	for name, capDir := range map[string]string{"absent yaml": capA, "comments-only yaml": capB} {
+	w079Yaml(t, ws, "models:\n  w079other:\n    default: [w079-other-model]\n")
+	wiC := w113NewWI(t, inst, "e2e", "w079 unlisted project keeps bundle models", envelopeQuickFix())
+	capC := w079Run(t, d, inst, ws, wiC)
+
+	for name, capDir := range map[string]string{"absent yaml": capA, "comments-only yaml": capB, "project not listed": capC} {
 		raw := w079CapsuleRaw(t, capDir)
-		if strings.Contains(raw, "yaml") {
+		if strings.Contains(raw, "yaml") || strings.Contains(raw, "effective_candidates") || strings.Contains(raw, "w079-other-model") {
 			t.Fatalf("%s: capsule.json fabricated yaml audit content (raw %q)", name, raw)
 		}
 		id := w079IdentityOf(t, capDir)
 		if len(id.Repos) != 1 || id.Repos["w079reg"] != remoteHead {
-			t.Fatalf("%s: legacy Repos baselines changed: %v (want w079reg=%s)", name, id.Repos, remoteHead)
-		}
-		if id.Project != "e2e" || id.BundleName != "quick-fix" {
-			t.Fatalf("%s: legacy identity fields changed: %+v", name, id)
+			t.Fatalf("%s: Repos baselines changed: %v (want w079reg=%s)", name, id.Repos, remoteHead)
 		}
 		marker, err := os.ReadFile(filepath.Join(capDir, "repos", "w079reg", "w079reg.txt"))
 		if err != nil || string(marker) != "registry marker\n" {
-			t.Fatalf("%s: the registry clone did not land as at HEAD: %q, %v", name, marker, err)
+			t.Fatalf("%s: the registry clone did not land: %q, %v", name, marker, err)
 		}
 		if got := w079Model(t, capDir, "fix"); got != w079FixStepHead {
 			t.Fatalf("%s: fix model %q, want the bundle step-level head %q", name, got, w079FixStepHead)
@@ -342,486 +327,232 @@ func TestW079AbsentAndEmptyYamlRunExactlyAsHead(t *testing.T) {
 	}
 }
 
-// TestW079OneDaemonTwoWorkspacesTwoYamls pins the multi-workspace
-// contract AND the WI's integration criterion: one daemon, two
-// workspaces, two different yamls, the SAME bundle — each claim applies
-// only its own workspace's yaml (models, repo sets, resolved source
-// paths, audit content), never a cross-workspace leak. RED
-// pre-implementation (the yaml governs nothing yet).
+// TestW079PerProjectModelPrecedence pins the chain inside ONE workspace
+// serving three projects: project kind list > project default > bundle.
+// e2e declares default + code (every step gets the default except the
+// kind:code steps), ieops declares only a default (it beats even the
+// bundle's step-level lists), and a third project the yaml does not list
+// stays bundle-only — no cross-project leak.
+func TestW079PerProjectModelPrecedence(t *testing.T) {
+	inst := newV1Install(t)
+	w113EnsureProject(t, inst, "ieops")
+	w113EnsureProject(t, inst, "w079third")
+	ws := t.TempDir()
+	w079Yaml(t, ws, `models:
+  e2e:
+    default: [w079-e2e-def]
+    code: [w079-e2e-code-a, w079-e2e-code-b]
+  ieops:
+    default: [w079-ieops-def]
+`)
+	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e", "ieops", "w079third"}})
+
+	wiE := w113NewWI(t, inst, "e2e", "w079 e2e models", envelopeQuickFix())
+	wiI := w113NewWI(t, inst, "ieops", "w079 ieops models", envelopeQuickFix())
+	wiT := w113NewWI(t, inst, "w079third", "w079 unlisted project models", envelopeQuickFix())
+	capE := w079Run(t, d, inst, ws, wiE)
+	capI := w079Run(t, d, inst, ws, wiI)
+	capT := w079Run(t, d, inst, ws, wiT)
+
+	for step, want := range map[string]string{
+		"grill": "w079-e2e-def", "verification": "w079-e2e-def",
+		"fix": "w079-e2e-code-a", "release": "w079-e2e-code-a",
+	} {
+		if got := w079Model(t, capE, step); got != want {
+			t.Fatalf("e2e %s model %q, want %q (project kind > project default)", step, got, want)
+		}
+	}
+	for _, step := range []string{"grill", "verification", "fix", "release"} {
+		if got := w079Model(t, capI, step); got != "w079-ieops-def" {
+			t.Fatalf("ieops %s model %q, want its project default w079-ieops-def (beats the bundle's step-level list)", step, got)
+		}
+	}
+	if got := w079Model(t, capT, "fix"); got != w079FixStepHead {
+		t.Fatalf("unlisted project fix model %q, want the bundle step-level head %q", got, w079FixStepHead)
+	}
+	if got := w079Model(t, capT, "grill"); got != w079DefaultsHead {
+		t.Fatalf("unlisted project grill model %q, want the bundle defaults head %q", got, w079DefaultsHead)
+	}
+	if raw := w079CapsuleRaw(t, capT); strings.Contains(raw, "w079-e2e") || strings.Contains(raw, "w079-ieops") {
+		t.Fatalf("the unlisted project's capsule leaks another project's models: %s", raw)
+	}
+	if raw := w079CapsuleRaw(t, capE); !strings.Contains(raw, "w079-e2e-code-a") || strings.Contains(raw, "w079-ieops") {
+		t.Fatalf("e2e's audit record is wrong (raw %s)", raw)
+	}
+}
+
+// TestW079ProjectKindOnlyFallsThroughToBundle pins the scoping of a
+// kind-only entry: a `spec` list hits the grill step (kind spec) while
+// kind:code steps keep the bundle's own resolution.
+func TestW079ProjectKindOnlyFallsThroughToBundle(t *testing.T) {
+	inst := newV1Install(t)
+	ws := t.TempDir()
+	w079Yaml(t, ws, "models:\n  e2e:\n    spec: [w079-spec-x]\n")
+	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
+	capDir := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 kind-only list", envelopeQuickFix()))
+	if got := w079Model(t, capDir, "grill"); got != "w079-spec-x" {
+		t.Fatalf("grill (kind spec) model %q, want w079-spec-x", got)
+	}
+	if got := w079Model(t, capDir, "fix"); got != w079FixStepHead {
+		t.Fatalf("fix model %q, want its bundle step-level head %q", got, w079FixStepHead)
+	}
+	if got := w079Model(t, capDir, "verification"); got != w079DefaultsHead {
+		t.Fatalf("verification model %q, want the bundle defaults head %q", got, w079DefaultsHead)
+	}
+}
+
+// TestW079OneDaemonTwoWorkspacesTwoYamls: one daemon, two workspaces,
+// two different yamls, the SAME bundle — each claim applies only its own
+// workspace's yaml.
 func TestW079OneDaemonTwoWorkspacesTwoYamls(t *testing.T) {
 	inst := newV1Install(t)
 	w113EnsureProject(t, inst, "ieops")
 	wsA := filepath.Join(t.TempDir(), "wsA")
 	wsB := filepath.Join(t.TempDir(), "wsB")
-	localA := w079GitRepo(t, filepath.Join(wsA, ".repo", "w79a"), "w79a-local.txt", "w79a local checkout\n")
-	localB := w079GitRepo(t, filepath.Join(wsB, ".repo", "w79b"), "w79b-local.txt", "w79b local checkout\n")
-	w079Yaml(t, wsA, "projects:\n  e2e:\n    repos:\n      - name: w79a\n        path: .repo/w79a\nworkflow_defaults:\n  model_candidates: [w079a-flow]\n")
-	w079Yaml(t, wsB, "projects:\n  ieops:\n    repos:\n      - name: w79b\n        path: .repo/w79b\nworkflow_defaults:\n  step_kinds:\n    code: [w079b-code]\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{
-			{key: wsA, projects: []string{"e2e"}},
-			{key: wsB, projects: []string{"ieops"}},
-		})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
+	for _, p := range []string{wsA, wsB} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w079Yaml(t, wsA, "models:\n  e2e:\n    default: [w079a-flow]\n")
+	w079Yaml(t, wsB, "models:\n  ieops:\n    code: [w079b-code]\n")
+	d := w079Setup(t, inst, w113WS{key: wsA, projects: []string{"e2e"}}, w113WS{key: wsB, projects: []string{"ieops"}})
 
 	wiA := w113NewWI(t, inst, "e2e", "w079 two-workspace claim A", envelopeQuickFix())
 	wiB := w113NewWI(t, inst, "ieops", "w079 two-workspace claim B", envelopeQuickFix())
-	d.pfWant(inst, -1, "submit", wiA)
-	d.pfWant(inst, -1, "submit", wiB)
-	capA, capB := w079Capsule(wsA, wiA), w079Capsule(wsB, wiB)
-	w113WaitCapsule(t, capA, 90*time.Second)
-	w113WaitCapsule(t, capB, 90*time.Second)
-	w113WaitCompleted(t, capA, 240*time.Second)
-	w113WaitCompleted(t, capB, 240*time.Second)
-	inst.waitWIStatus(t, wiA, "wrapped", 90*time.Second)
-	inst.waitWIStatus(t, wiB, "wrapped", 90*time.Second)
+	capA := w079Run(t, d, inst, wsA, wiA)
+	capB := w079Run(t, d, inst, wsB, wiB)
 
-	// Each workspace's own yaml governs its claim — models.
 	if got := w079Model(t, capA, "grill"); got != "w079a-flow" {
-		t.Fatalf("A grill model %q, want the yaml flow default head w079a-flow", got)
-	}
-	if got := w079Model(t, capA, "fix"); got != w079FixStepHead {
-		t.Fatalf("A fix model %q, want the bundle step-level head %q (the flow default never beats a step-level list)", got, w079FixStepHead)
+		t.Fatalf("A grill model %q, want w079a-flow", got)
 	}
 	if got := w079Model(t, capB, "fix"); got != "w079b-code" {
-		t.Fatalf("B fix model %q, want the yaml step_kinds pin w079b-code", got)
+		t.Fatalf("B fix model %q, want w079b-code", got)
 	}
 	if got := w079Model(t, capB, "release"); got != "w079b-code" {
-		t.Fatalf("B release model %q, want the yaml step_kinds pin w079b-code (every kind:code step)", got)
+		t.Fatalf("B release model %q, want w079b-code (every kind:code step)", got)
 	}
 	if got := w079Model(t, capB, "grill"); got != w079DefaultsHead {
-		t.Fatalf("B grill model %q, want the bundle defaults head %q (B's yaml is silent for kind spec)", got, w079DefaultsHead)
+		t.Fatalf("B grill model %q, want the bundle defaults head %q", got, w079DefaultsHead)
 	}
-
-	// Each workspace's own repo set, cloned from its own local checkout.
-	markerA, err := os.ReadFile(filepath.Join(capA, "repos", "w79a", "w79a-local.txt"))
-	if err != nil || string(markerA) != "w79a local checkout\n" {
-		t.Fatalf("A did not clone w79a from its local checkout: %q, %v", markerA, err)
-	}
-	markerB, err := os.ReadFile(filepath.Join(capB, "repos", "w79b", "w79b-local.txt"))
-	if err != nil || string(markerB) != "w79b local checkout\n" {
-		t.Fatalf("B did not clone w79b from its local checkout: %q, %v", markerB, err)
-	}
-	if _, err := os.Stat(filepath.Join(capA, "repos", "w79b")); err == nil {
-		t.Fatal("A's capsule carries B's repo — a cross-workspace leak")
-	}
-	if _, err := os.Stat(filepath.Join(capB, "repos", "w79a")); err == nil {
-		t.Fatal("B's capsule carries A's repo — a cross-workspace leak")
-	}
-	idA, idB := w079IdentityOf(t, capA), w079IdentityOf(t, capB)
-	if idA.Repos["w79a"] != localA {
-		t.Fatalf("A's w79a baseline %q, want the local checkout HEAD %s", idA.Repos["w79a"], localA)
-	}
-	if idB.Repos["w79b"] != localB {
-		t.Fatalf("B's w79b baseline %q, want the local checkout HEAD %s", idB.Repos["w79b"], localB)
-	}
-
-	// The audit record, per capsule, with no cross-workspace leak.
 	rawA, rawB := w079CapsuleRaw(t, capA), w079CapsuleRaw(t, capB)
-	for _, tok := range []string{"w079a-flow", filepath.Join(wsA, ".repo", "w79a"), "w79a"} {
-		if !strings.Contains(rawA, tok) {
-			t.Fatalf("A's capsule.json audit misses %q (raw %s)", tok, rawA)
-		}
-		if strings.Contains(rawB, tok) {
-			t.Fatalf("B's capsule.json audit leaks A's token %q — a cross-workspace leak", tok)
-		}
+	if !strings.Contains(rawA, "w079a-flow") || strings.Contains(rawB, "w079a-flow") {
+		t.Fatalf("A's audit missing or leaking into B (A %s, B %s)", rawA, rawB)
 	}
-	for _, tok := range []string{"w079b-code", filepath.Join(wsB, ".repo", "w79b"), "w79b"} {
-		if !strings.Contains(rawB, tok) {
-			t.Fatalf("B's capsule.json audit misses %q (raw %s)", tok, rawB)
-		}
-		if strings.Contains(rawA, tok) {
-			t.Fatalf("A's capsule.json audit leaks B's token %q — a cross-workspace leak", tok)
-		}
+	if !strings.Contains(rawB, "w079b-code") || strings.Contains(rawA, "w079b-code") {
+		t.Fatalf("B's audit missing or leaking into A (A %s, B %s)", rawA, rawB)
 	}
 }
 
-// TestW079YamlEditGovernsNextClaimNoRestart pins the fresh-per-claim
-// read: an edit to the workspace yaml takes effect on the NEXT claim,
-// with no daemon restart (the same daemon process serves both claims —
-// its pid is asserted alive throughout). RED pre-implementation.
+// TestW079YamlEditGovernsNextClaimNoRestart: an edit takes effect on the
+// NEXT claim with no daemon restart (same pid throughout).
 func TestW079YamlEditGovernsNextClaimNoRestart(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	localV1 := w079GitRepo(t, filepath.Join(ws, ".repo", "w79v1"), "w79v1.txt", "yaml v1 source\n")
-	localV2 := w079GitRepo(t, filepath.Join(ws, ".repo", "w79v2"), "w79v2.txt", "yaml v2 source\n")
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos:\n      - name: w79src\n        path: .repo/w79v1\nworkflow_defaults:\n  model_candidates: [w079-edit-v1]\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
+	w079Yaml(t, ws, "models:\n  e2e:\n    default: [w079-edit-v1]\n")
+	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 	pid := d.cmd.Process.Pid
 
-	// Claim 1 under yaml v1.
-	wiA := w113NewWI(t, inst, "e2e", "w079 edit-next-claim first claim", envelopeQuickFix())
-	d.pfWant(inst, -1, "submit", wiA)
-	capA := w079Capsule(ws, wiA)
-	w113WaitCapsule(t, capA, 90*time.Second)
-	w113WaitCompleted(t, capA, 240*time.Second)
-	inst.waitWIStatus(t, wiA, "wrapped", 90*time.Second)
+	capA := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 edit first claim", envelopeQuickFix()))
 	if got := w079Model(t, capA, "grill"); got != "w079-edit-v1" {
-		t.Fatalf("claim 1 grill model %q, want the v1 flow default w079-edit-v1", got)
+		t.Fatalf("claim 1 grill model %q, want w079-edit-v1", got)
 	}
-	if id := w079IdentityOf(t, capA); id.Repos["w79src"] != localV1 {
-		t.Fatalf("claim 1 w79src baseline %q, want the v1 local HEAD %s", id.Repos["w79src"], localV1)
-	}
-	if b, err := os.ReadFile(filepath.Join(capA, "repos", "w79src", "w79v1.txt")); err != nil || string(b) != "yaml v1 source\n" {
-		t.Fatalf("claim 1 did not clone from the v1 local checkout: %q, %v", b, err)
-	}
-
-	// The edit — the daemon keeps running, untouched.
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos:\n      - name: w79src\n        path: .repo/w79v2\nworkflow_defaults:\n  model_candidates: [w079-edit-v2]\n")
-
-	// Claim 2, same daemon, same socket, same mapping: the NEW yaml
-	// governs.
-	wiB := w113NewWI(t, inst, "e2e", "w079 edit-next-claim second claim", envelopeQuickFix())
-	d.pfWant(inst, -1, "submit", wiB)
-	capB := w079Capsule(ws, wiB)
-	w113WaitCapsule(t, capB, 90*time.Second)
-	w113WaitCompleted(t, capB, 240*time.Second)
-	inst.waitWIStatus(t, wiB, "wrapped", 90*time.Second)
+	w079Yaml(t, ws, "models:\n  e2e:\n    default: [w079-edit-v2]\n")
+	capB := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 edit second claim", envelopeQuickFix()))
 	if got := w079Model(t, capB, "grill"); got != "w079-edit-v2" {
-		t.Fatalf("claim 2 grill model %q, want the edited v2 flow default w079-edit-v2 — the edit must govern the next claim with no restart", got)
+		t.Fatalf("claim 2 grill model %q, want w079-edit-v2 — the edit must govern the next claim", got)
 	}
-	if b, err := os.ReadFile(filepath.Join(capB, "repos", "w79src", "w79v2.txt")); err != nil || string(b) != "yaml v2 source\n" {
-		t.Fatalf("claim 2 did not clone from the edited v2 local checkout: %q, %v", b, err)
+	if raw := w079CapsuleRaw(t, capB); strings.Contains(raw, "w079-edit-v1") {
+		t.Fatalf("claim 2's audit carries the pre-edit token (raw %s)", raw)
 	}
-	if id := w079IdentityOf(t, capB); id.Repos["w79src"] != localV2 {
-		t.Fatalf("claim 2 w79src baseline %q, want the v2 local HEAD %s", id.Repos["w79src"], localV2)
-	}
-	rawB := w079CapsuleRaw(t, capB)
-	for _, tok := range []string{"w079-edit-v2", filepath.Join(ws, ".repo", "w79v2")} {
-		if !strings.Contains(rawB, tok) {
-			t.Fatalf("claim 2's audit record misses the edited-yaml token %q (raw %s)", tok, rawB)
-		}
-	}
-	if strings.Contains(rawB, "w079-edit-v1") {
-		t.Fatalf("claim 2's audit record still carries the pre-edit yaml token (raw %s)", rawB)
-	}
-
-	// The same daemon process served both claims — never restarted.
 	if err := syscall.Kill(pid, 0); err != nil {
-		t.Fatalf("the daemon process %d did not survive the yaml edit (restart required): %v", pid, err)
+		t.Fatalf("the daemon process %d did not survive the yaml edit: %v", pid, err)
 	}
 }
 
-// TestW079InvalidYamlRefusesClaimBeforeMaterialization pins the strict
-// schema: every invalid shape refuses the claim with a typed error
-// naming .polyforge.yaml (and, where the spec pins it, the offending
-// key), the WI stays queued/blocked, nothing materializes, and the
-// daemon survives. RED pre-implementation (every case is accepted at
-// HEAD).
-func TestW079InvalidYamlRefusesClaimBeforeMaterialization(t *testing.T) {
+// TestW079InvalidYamlRefusesWithoutClaim pins the strict schema: every
+// invalid shape (the retired `projects:` / `workflow_defaults:` shapes
+// included) refuses the work item BEFORE the aihub claim — `pf submit`
+// surfaces the typed DAEMON-414 naming .polyforge.yaml, the WI stays
+// queued (never even transiently running), no capsule exists, and the
+// daemon keeps serving.
+func TestW079InvalidYamlRefusesWithoutClaim(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
+	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 
 	cases := []struct {
 		name    string
 		yaml    string
 		needles []string
 	}{
-		{
-			name:    "torn yaml",
-			yaml:    "projects:\n  e2e:\n    repos: [\n      - name: w79src\n",
-			needles: []string{".polyforge.yaml"},
-		},
-		{
-			name:    "unknown top-level key project",
-			yaml:    "project: e2e\nprojects:\n  e2e:\n    repos: []\n",
-			needles: []string{".polyforge.yaml", "project"},
-		},
-		{
-			name:    "unknown top-level key workflow_default",
-			yaml:    "workflow_default:\n  model_candidates: [a]\n",
-			needles: []string{".polyforge.yaml", "workflow_default"},
-		},
-		{
-			name:    "unknown nested key on a repo entry",
-			yaml:    "projects:\n  e2e:\n    repos:\n      - name: w79src\n        paths: .repo/w79src\n",
-			needles: []string{".polyforge.yaml", "paths"},
-		},
-		{
-			name:    "unknown nested key under workflow_defaults",
-			yaml:    "workflow_defaults:\n  model_candidate: [a]\n",
-			needles: []string{".polyforge.yaml", "model_candidate"},
-		},
-		{
-			name:    "step_kinds key outside the V8 vocabulary",
-			yaml:    "workflow_defaults:\n  step_kinds:\n    w079boguskind: [a]\n",
-			needles: []string{".polyforge.yaml", "w079boguskind"},
-		},
-		{
-			name:    "project entry without repos",
-			yaml:    "projects:\n  e2e: {}\n",
-			needles: []string{".polyforge.yaml"},
-		},
-		{
-			name:    "empty model-id string",
-			yaml:    "workflow_defaults:\n  model_candidates: [\"\"]\n",
-			needles: []string{".polyforge.yaml"},
-		},
-		{
-			name:    "type mismatch on projects",
-			yaml:    "projects: 42\n",
-			needles: []string{".polyforge.yaml"},
-		},
-		{
-			name:    "duplicate key",
-			yaml:    "projects:\n  e2e:\n    repos: []\n  w079dup:\n    repos: []\n  w079dup:\n    repos: []\n",
-			needles: []string{".polyforge.yaml", "w079dup"},
-		},
-		{
-			name:    "unsafe repo name",
-			yaml:    "projects:\n  e2e:\n    repos:\n      - name: ../w079escape\n        path: .repo/w79src\n",
-			needles: []string{".polyforge.yaml"},
-		},
-		{
-			name:    "absolute repo path",
-			yaml:    "projects:\n  e2e:\n    repos:\n      - name: w79src\n        path: /tmp/w079absolute\n",
-			needles: []string{".polyforge.yaml"},
-		},
-		{
-			name:    "parent-escaping repo path",
-			yaml:    "projects:\n  e2e:\n    repos:\n      - name: w79src\n        path: ../w079esc\n",
-			needles: []string{".polyforge.yaml"},
-		},
+		{"torn yaml", "models:\n  e2e:\n    default: [\n", nil},
+		{"old shape projects", "projects:\n  e2e:\n    repos: []\n", []string{"projects"}},
+		{"old shape workflow_defaults", "workflow_defaults:\n  model_candidates: [a]\n", []string{"workflow_defaults"}},
+		{"unknown top-level key", "model:\n  e2e:\n    default: [a]\n", []string{"model"}},
+		{"unknown kind", "models:\n  e2e:\n    w079boguskind: [a]\n", []string{"w079boguskind"}},
+		{"empty project entry", "models:\n  e2e:\n", nil},
+		{"null list", "models:\n  e2e:\n    code:\n", nil},
+		{"list not a list", "models:\n  e2e:\n    default: abc\n", nil},
+		{"empty model id", "models:\n  e2e:\n    default: [\"\"]\n", nil},
+		{"type mismatch on models", "models: 42\n", nil},
+		{"duplicate project key", "models:\n  e2e:\n    default: [a]\n  w079dup:\n    default: [a]\n  w079dup:\n    default: [b]\n", []string{"w079dup"}},
+		{"duplicate list key", "models:\n  e2e:\n    default: [a]\n    default: [b]\n", []string{"default"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			w079Yaml(t, ws, c.yaml)
 			wi := w113NewWI(t, inst, "e2e", "w079 invalid yaml: "+c.name, envelopeQuickFix())
-			out, _ := d.pf(inst, "submit", wi)
-			w079WaitRefusal(t, d, inst, ws, wi, out, 60*time.Second, c.needles...)
-			// The daemon survives the refusal and keeps serving.
-			d.pfWant(inst, -1, "ops", "status")
+			out, code := d.pf(inst, "submit", wi)
+			w079Refused(t, d, inst, ws, wi, out, code, append([]string{".polyforge.yaml"}, c.needles...)...)
 		})
 	}
 }
 
-// TestW079FixYamlAndReclaimIsClean pins the fix-and-retry cycle: a
-// claim refused for an invalid yaml leaves no half-materialized state,
-// and after the operator fixes the file the re-claim succeeds cleanly —
-// exactly one capsule, no husks, a coherent audit record. RED
-// pre-implementation (the torn yaml is ignored and the claim runs).
-func TestW079FixYamlAndReclaimIsClean(t *testing.T) {
+// TestW079FixYamlAndResubmitIsClean: a refusal leaves the WI queued with
+// no capsule; after the operator fixes the file, resubmitting runs it
+// cleanly under the fixed yaml — exactly one capsule.
+func TestW079FixYamlAndResubmitIsClean(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	localHead := w079GitRepo(t, filepath.Join(ws, ".repo", "w79src"), "w79src.txt", "w079 local source\n")
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos:\n      - name: w79src\n        path: .repo/w79src\n   BAD KEY\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
+	w079Yaml(t, ws, "models:\n  e2e:\n    default: [w079-ok]\n   BAD KEY\n")
+	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 
-	wi := w113NewWI(t, inst, "e2e", "w079 fix-and-reclaim cycle", envelopeQuickFix())
-	out, _ := d.pf(inst, "submit", wi)
-	w079WaitRefusal(t, d, inst, ws, wi, out, 60*time.Second, ".polyforge.yaml")
+	wi := w113NewWI(t, inst, "e2e", "w079 fix-and-resubmit cycle", envelopeQuickFix())
+	out, code := d.pf(inst, "submit", wi)
+	w079Refused(t, d, inst, ws, wi, out, code, ".polyforge.yaml")
 	if ents, err := os.ReadDir(filepath.Join(ws, "capsules")); err == nil && len(ents) != 0 {
-		t.Fatalf("the refused claim left capsule husks: %v", ents)
-	} else if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("read %s: %v", filepath.Join(ws, "capsules"), err)
+		t.Fatalf("the refused submit left capsule husks: %v", ents)
 	}
 
-	// The operator fixes the yaml; the WI is re-claimed.
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos:\n      - name: w79src\n        path: .repo/w79src\nworkflow_defaults:\n  model_candidates: [w079-reclaimed]\n")
-	if status := inst.wiStatus(t, wi); status == "blocked" {
-		// continue = `pf resume` (the blocked door: hub resume-blocked +
-		// the daemon's synchronous re-claim; v2-converge §7).
-		if out := d.pfWant(inst, -1, "resume", wi); !strings.Contains(out, "resumed") {
-			t.Fatalf("resume answer: %q", out)
-		}
-	} else {
-		inst.waitWIStatus(t, wi, "queued", 30*time.Second)
-		d.pfWant(inst, -1, "submit", wi)
-	}
-	capDir := w079Capsule(ws, wi)
-	w113WaitCapsule(t, capDir, 90*time.Second)
-	w113WaitCompleted(t, capDir, 240*time.Second)
-	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
-
-	// Exactly one capsule — no husk, no half-written record.
+	w079Yaml(t, ws, "models:\n  e2e:\n    default: [w079-reclaimed]\n")
+	capDir := w079Run(t, d, inst, ws, wi)
 	if got := w113TopLevel(t, filepath.Join(ws, "capsules")); len(got) != 1 || got[0] != wi {
 		t.Fatalf("capsules dir holds %v, want exactly [%s]", got, wi)
 	}
-	id := w079IdentityOf(t, capDir)
-	if id.Repos["w79src"] != localHead {
-		t.Fatalf("post-fix w79src baseline %q, want the local HEAD %s", id.Repos["w79src"], localHead)
-	}
 	if got := w079Model(t, capDir, "grill"); got != "w079-reclaimed" {
-		t.Fatalf("post-fix grill model %q, want the fixed yaml's w079-reclaimed", got)
-	}
-	if raw := w079CapsuleRaw(t, capDir); !strings.Contains(raw, filepath.Join(ws, ".repo", "w79src")) {
-		t.Fatalf("post-fix audit record misses the resolved repo source path (raw %s)", raw)
+		t.Fatalf("post-fix grill model %q, want w079-reclaimed", got)
 	}
 }
 
-// TestW079UnlistedProjectRefusesClaim pins [spec-decided] #5: a
-// projects section that does not list the claimed project refuses the
-// claim before materialization with a typed error naming the drift —
-// no silent registry fallback. RED pre-implementation (the yaml is
-// ignored and the claim runs off the registry).
-func TestW079UnlistedProjectRefusesClaim(t *testing.T) {
-	remoteURL, _ := w079Remote(t, "w079reg.txt", "registry marker\n")
-	inst := newV1InstallRepos(t, []api.ProjectRepo{{Name: "w079reg", URL: remoteURL}})
-	ws := t.TempDir()
-	w079Yaml(t, ws, "projects:\n  w079other:\n    repos: []\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
-
-	wi := w113NewWI(t, inst, "e2e", "w079 unlisted project refusal", envelopeQuickFix())
-	out, _ := d.pf(inst, "submit", wi)
-	w079WaitRefusal(t, d, inst, ws, wi, out, 60*time.Second, ".polyforge.yaml", "e2e")
-	// No registry fallback filled the gap.
-	if _, err := os.Stat(filepath.Join(w079Capsule(ws, wi), "repos", "w079reg")); err == nil {
-		t.Fatal("the unlisted-project refusal fell back to cloning the registry repo")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Model candidates — the four-level precedence chain.
-// ---------------------------------------------------------------------------
-
-// TestW079StepKindsReplacesEveryCodeKindStep pins the outermost
-// precedence level: yaml step_kinds[code] wholly replaces the bundle's
-// step-level list for EVERY kind:code step of the bundle (quick-fix's
-// fix AND release — the same closed kind vocabulary feature-full
-// uses), while unlisted kinds keep the bundle's own resolution. RED
-// pre-implementation.
-func TestW079StepKindsReplacesEveryCodeKindStep(t *testing.T) {
+// TestW079InvalidYamlOfOneWorkspaceDoesNotBlockAnother: a bad file in one
+// workspace refuses only that workspace's projects; the daemon keeps
+// serving the other.
+func TestW079InvalidYamlOfOneWorkspaceDoesNotBlockAnother(t *testing.T) {
 	inst := newV1Install(t)
-	ws := t.TempDir()
-	w079Yaml(t, ws, "workflow_defaults:\n  step_kinds:\n    code: [w079-code-a, w079-code-b]\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
-
-	wi := w113NewWI(t, inst, "e2e", "w079 step_kinds wholly replaces code-kind steps", envelopeQuickFix())
-	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(ws, wi)
-	w113WaitCapsule(t, capDir, 90*time.Second)
-	w113WaitCompleted(t, capDir, 240*time.Second)
-
-	// Both kind:code steps run under the per-kind pin.
-	for _, step := range []string{"fix", "release"} {
-		if got := w079Model(t, capDir, step); got != "w079-code-a" {
-			t.Fatalf("%s model %q, want the yaml step_kinds head w079-code-a (the per-kind pin wholly replaces the bundle's step-level list)", step, got)
+	w113EnsureProject(t, inst, "ieops")
+	wsA, wsB := filepath.Join(t.TempDir(), "wsA"), filepath.Join(t.TempDir(), "wsB")
+	for _, p := range []string{wsA, wsB} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
 		}
 	}
-	// Unlisted kinds resolve from the bundle exactly as today.
-	if got := w079Model(t, capDir, "grill"); got != w079DefaultsHead {
-		t.Fatalf("grill model %q, want the bundle defaults head %q (kind spec is unlisted)", got, w079DefaultsHead)
-	}
-	if got := w079Model(t, capDir, "verification"); got != w079DefaultsHead {
-		t.Fatalf("verification model %q, want the bundle defaults head %q (kind gate is unlisted)", got, w079DefaultsHead)
-	}
-}
-
-// TestW079StepKindsOtherKindAndStepLevelFallThrough pins the kind
-// scoping: step_kinds is keyed by the step's V8 KIND, not its id — a
-// step_kinds entry for kind spec hits the grill step while the
-// kind:code fix step keeps its own bundle step-level list. RED
-// pre-implementation.
-func TestW079StepKindsOtherKindAndStepLevelFallThrough(t *testing.T) {
-	inst := newV1Install(t)
-	ws := t.TempDir()
-	w079Yaml(t, ws, "workflow_defaults:\n  step_kinds:\n    spec: [w079-spec-x]\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
-
-	wi := w113NewWI(t, inst, "e2e", "w079 step_kinds kind scoping", envelopeQuickFix())
-	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(ws, wi)
-	w113WaitCapsule(t, capDir, 90*time.Second)
-	w113WaitCompleted(t, capDir, 240*time.Second)
-
-	if got := w079Model(t, capDir, "grill"); got != "w079-spec-x" {
-		t.Fatalf("grill (kind spec) model %q, want the yaml step_kinds pin w079-spec-x", got)
-	}
-	if got := w079Model(t, capDir, "fix"); got != w079FixStepHead {
-		t.Fatalf("fix (kind code, unlisted) model %q, want its own bundle step-level head %q", got, w079FixStepHead)
-	}
-	if got := w079Model(t, capDir, "release"); got != w079DefaultsHead {
-		t.Fatalf("release (kind code, unlisted) model %q, want the bundle step-level head %q", got, w079DefaultsHead)
-	}
-}
-
-// TestW079FlowDefaultReplacesWeakDefaultStepLevelWins pins the two
-// middle levels: the yaml's workflow_defaults.model_candidates
-// replaces the bundle's WEAK defaults head for steps without a
-// step-level list, and never beats a step-level list the bundle author
-// pinned. The yaml is workflow-only (no projects section), so the repo
-// inventory still comes from the registry — and the audit records the
-// flow default and the verbatim yaml. RED pre-implementation (the
-// yaml governs nothing yet).
-func TestW079FlowDefaultReplacesWeakDefaultStepLevelWins(t *testing.T) {
-	remoteURL, remoteHead := w079Remote(t, "w079reg.txt", "registry marker\n")
-	inst := newV1InstallRepos(t, []api.ProjectRepo{{Name: "w079reg", URL: remoteURL}})
-	ws := t.TempDir()
-	w079Yaml(t, ws, "workflow_defaults:\n  model_candidates: [w079-flow-a, w079-flow-b]\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
-
-	wi := w113NewWI(t, inst, "e2e", "w079 flow default vs step-level list", envelopeQuickFix())
-	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(ws, wi)
-	w113WaitCapsule(t, capDir, 90*time.Second)
-	w113WaitCompleted(t, capDir, 240*time.Second)
-	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
-
-	// The flow default replaces the bundle's weak default…
-	if got := w079Model(t, capDir, "grill"); got != "w079-flow-a" {
-		t.Fatalf("grill model %q, want the yaml flow default w079-flow-a", got)
-	}
-	if got := w079Model(t, capDir, "verification"); got != "w079-flow-a" {
-		t.Fatalf("verification model %q, want the yaml flow default w079-flow-a", got)
-	}
-	// …and never a step-specific list.
-	if got := w079Model(t, capDir, "fix"); got != w079FixStepHead {
-		t.Fatalf("fix model %q, want its own bundle step-level head %q", got, w079FixStepHead)
-	}
-	if got := w079Model(t, capDir, "release"); got != w079DefaultsHead {
-		t.Fatalf("release model %q, want its own bundle step-level head %q", got, w079DefaultsHead)
-	}
-
-	// No projects section: the registry stays the repo source, exactly
-	// as at HEAD, and the audit carries the yaml-governed decisions.
-	if id := w079IdentityOf(t, capDir); id.Repos["w079reg"] != remoteHead {
-		t.Fatalf("registry baseline %q, want the remote HEAD %s (a workflow-only yaml takes over nothing on the repo side)", id.Repos["w079reg"], remoteHead)
-	}
-	raw := w079CapsuleRaw(t, capDir)
-	for _, tok := range []string{"w079-flow-a", "w079-flow-b", "model_candidates"} {
-		if !strings.Contains(raw, tok) {
-			t.Fatalf("the audit record of a yaml-governed claim misses %q (raw %s)", tok, raw)
-		}
-	}
+	w079Yaml(t, wsA, "projects: {}\n")
+	d := w079Setup(t, inst, w113WS{key: wsA, projects: []string{"e2e"}}, w113WS{key: wsB, projects: []string{"ieops"}})
+	wiA := w113NewWI(t, inst, "e2e", "w079 bad workspace", envelopeQuickFix())
+	out, code := d.pf(inst, "submit", wiA)
+	w079Refused(t, d, inst, wsA, wiA, out, code, ".polyforge.yaml")
+	w079Run(t, d, inst, wsB, w113NewWI(t, inst, "ieops", "w079 good workspace", envelopeQuickFix()))
 }
 
 // w079ProviderErr is the stderr text a crashing fake harness leaves behind:
@@ -832,7 +563,7 @@ const w079ProviderErr = "upstream provider error: 529 overloaded (fake harness i
 
 // TestW079RotationAdvancesAndCapsOnEffectiveList pins the rotation
 // composition on the post-precedence list: two provider-class infra
-// failures advance the pointer along the yaml step_kinds list (two
+// failures advance the pointer along the yaml per-project kind list (two
 // crashes are inside the recovery budget; a third would trip the storm
 // guard), and the pin is capped at the list end — never beyond, never
 // wrapping. RED pre-implementation (the effective list is the bundle's).
@@ -849,7 +580,7 @@ func TestW079RotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			inst := newV1Install(t)
 			ws := t.TempDir()
-			w079Yaml(t, ws, "workflow_defaults:\n  step_kinds:\n    "+c.stepKind+"\n")
+			w079Yaml(t, ws, "models:\n  e2e:\n    "+c.stepKind+"\n")
 			cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 				inst.url, inst.adminKey, "",
 				[]w113WS{{key: ws, projects: []string{"e2e"}}})
@@ -891,7 +622,7 @@ func TestW079RotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 func TestW079GateFailRewindResetsEffectiveHead(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "workflow_defaults:\n  step_kinds:\n    code: [w079g-a, w079g-b]\n")
+	w079Yaml(t, ws, "models:\n  e2e:\n    code: [w079g-a, w079g-b]\n")
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
@@ -972,24 +703,21 @@ func TestW079RotationUntouchedWithoutYaml(t *testing.T) {
 	}
 }
 
-// TestW079MidflightYamlEditReindexesOnRestart pins the archived-attempt
-// recomputation across a mid-flight yaml edit: a work item in flight
-// under one step_kinds list, a daemon crash, a yaml edit, and the
-// recovery restart — the re-derivation resolves the step's model from
-// the NEWLY effective list (the archived provider failure indexes the
-// re-derived chain), never from the pre-edit one. RED
-// pre-implementation.
-func TestW079MidflightYamlEditReindexesOnRestart(t *testing.T) {
+// TestW079RestartKeepsClaimTimeSnapshot: recovery rehydrates the
+// claim-time effective-candidates snapshot from capsule.json and never
+// re-reads the yaml — a mid-flight edit plus a daemon restart does not
+// change the in-flight work item's models.
+func TestW079RestartKeepsClaimTimeSnapshot(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "workflow_defaults:\n  step_kinds:\n    code: [w079-m1, w079-m2]\n")
+	w079Yaml(t, ws, "models:\n  e2e:\n    code: [w079-m1, w079-m2]\n")
 	sock := filepath.Join(shortTmp("/tmp", "w079sock"), "d.sock")
 	dataDir := t.TempDir()
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
 
-	wi := w113NewWI(t, inst, "e2e", "w079 mid-flight yaml edit re-indexes the chain",
+	wi := w113NewWI(t, inst, "e2e", "w079 restart keeps the snapshot",
 		[]map[string]any{
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 8000},
@@ -1003,314 +731,67 @@ func TestW079MidflightYamlEditReindexesOnRestart(t *testing.T) {
 	capDir := w079Capsule(ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113StepStatus(t, capDir, "fix", "in_progress", 90*time.Second)
-	time.Sleep(2 * time.Second) // into the delayed fix dispatch
+	time.Sleep(2 * time.Second)
 
-	// Crash the daemon mid-flight, edit the yaml, restart on the SAME
-	// socket/data/mapping — the recovery re-derives under the new list.
 	d.crash()
-	w079Yaml(t, ws, "workflow_defaults:\n  step_kinds:\n    code: [w079-n1, w079-n2]\n")
+	w079Yaml(t, ws, "models:\n  e2e:\n    code: [w079-n1, w079-n2]\n")
 	d2 := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d2.start()
 	defer d2.stop()
 	w113WaitCompleted(t, capDir, 300*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 
-	got := w079Model(t, capDir, "fix")
-	if got != "w079-n1" && got != "w079-n2" {
-		t.Fatalf("fix model after the recovery %q, want one of the EDITED list [w079-n1 w079-n2] — the recomputation must index the re-derived effective list", got)
-	}
-	// v2-converge 2.3: a daemon restart is NOT a model verdict — the killed
-	// in-flight dispatch advances nothing, so the re-derived effective list
-	// is indexed from its HEAD.
-	if providerInfra, _ := w079AttemptStats(t, capDir, "fix"); providerInfra != 0 {
-		t.Fatalf("fix archived %d provider-class infra failures, want 0 (a daemon restart never advances the pointer)", providerInfra)
-	}
-	if got != "w079-n1" {
-		t.Fatalf("fix model after the restart %q, want the head of the edited list w079-n1 (restart re-dispatch: same pointer)", got)
+	if got := w079Model(t, capDir, "fix"); got != "w079-m1" {
+		t.Fatalf("fix model after the restart %q, want the claim-time head w079-m1 (recovery rehydrates the snapshot, never the edited yaml)", got)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Repo source — the yaml projects section replaces the aihub registry.
+// pf file create — project inference from the cli.toml mapping.
 // ---------------------------------------------------------------------------
 
-// TestW079ListedReposCloneFromLocalCheckout pins the local-source
-// contract: for a project listed in the yaml, each listed repo clones
-// into repos/<name> FROM the resolved local checkout (workspace root +
-// path:), the registry URL is ignored, the baseline SHA is recorded as
-// today, and the audit carries the resolved source path and the
-// verbatim yaml. The yaml is model-silent, so candidates stay
-// bundle-only. RED pre-implementation (the registry clone wins).
-func TestW079ListedReposCloneFromLocalCheckout(t *testing.T) {
-	remoteURL, remoteHead := w079Remote(t, "w079registry.txt", "registry source\n")
-	inst := newV1InstallRepos(t, []api.ProjectRepo{{Name: "w079src", URL: remoteURL}})
-	ws := t.TempDir()
-	localHead := w079GitRepo(t, filepath.Join(ws, ".repo", "w079src"), "w079local.txt", "local source\n")
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos:\n      - name: w079src\n        path: .repo/w079src\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
-
-	wi := w113NewWI(t, inst, "e2e", "w079 listed repos clone from the local checkout", envelopeQuickFix())
-	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(ws, wi)
-	w113WaitCapsule(t, capDir, 90*time.Second)
-	w113WaitCompleted(t, capDir, 240*time.Second)
-	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
-
-	// Cloned FROM the local checkout, not the registry URL.
-	if b, err := os.ReadFile(filepath.Join(capDir, "repos", "w079src", "w079local.txt")); err != nil || string(b) != "local source\n" {
-		t.Fatalf("repos/w079src was not cloned from the local checkout: %q, %v", b, err)
-	}
-	if _, err := os.Stat(filepath.Join(capDir, "repos", "w079src", "w079registry.txt")); err == nil {
-		t.Fatal("repos/w079src carries the registry remote's marker — the registry URL was used, not the local checkout")
-	}
-	// The claim-time baseline is the local checkout's HEAD, recorded as
-	// today — and the registry's HEAD is NOT what got recorded.
-	id := w079IdentityOf(t, capDir)
-	if id.Repos["w079src"] != localHead {
-		t.Fatalf("w079src baseline %q, want the local checkout HEAD %s", id.Repos["w079src"], localHead)
-	}
-	if localHead == remoteHead {
-		t.Fatal("fixture defect: the local and registry HEADs are identical; the baseline assertion is vacuous")
-	}
-	// Models stay bundle-only (the yaml is model-silent).
-	if got := w079Model(t, capDir, "fix"); got != w079FixStepHead {
-		t.Fatalf("fix model %q, want the bundle step-level head %q (a projects-only yaml is model-silent)", got, w079FixStepHead)
-	}
-	// The audit: the resolved source path and the verbatim yaml.
-	raw := w079CapsuleRaw(t, capDir)
-	for _, tok := range []string{filepath.Join(ws, ".repo", "w079src"), "w079src", ".repo/w079src"} {
-		if !strings.Contains(raw, tok) {
-			t.Fatalf("the audit record misses %q (raw %s)", tok, raw)
-		}
-	}
-}
-
-// TestW079EmptyReposListReplacesRegistryWholly pins the empty-list
-// rule: a listed project with repos: [] clones NOTHING — the empty
-// list is the authoritative inventory and the registry entry is not
-// consulted, no fallback fills the gap. RED pre-implementation (the
-// two registry repos are cloned at HEAD).
-func TestW079EmptyReposListReplacesRegistryWholly(t *testing.T) {
-	urlA, _ := w079Remote(t, "w079ra.txt", "registry A\n")
-	urlB, _ := w079Remote(t, "w079rb.txt", "registry B\n")
-	inst := newV1InstallRepos(t, []api.ProjectRepo{
-		{Name: "w079one", URL: urlA},
-		{Name: "w079two", URL: urlB},
-	})
-	ws := t.TempDir()
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos: []\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
-
-	wi := w113NewWI(t, inst, "e2e", "w079 empty repos list replaces the registry wholly", envelopeQuickFix())
-	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(ws, wi)
-	w113WaitCapsule(t, capDir, 90*time.Second)
-	w113WaitCompleted(t, capDir, 240*time.Second)
-	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
-
-	// Nothing cloned: repos/ is absent or empty.
-	reposDir := filepath.Join(capDir, "repos")
-	if ents, err := os.ReadDir(reposDir); err == nil && len(ents) != 0 {
-		t.Fatalf("repos/ holds %v, want nothing — the empty list is the authoritative inventory", ents)
-	} else if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("read %s: %v", reposDir, err)
-	}
-	if id := w079IdentityOf(t, capDir); len(id.Repos) != 0 {
-		t.Fatalf("capsule.json Repos %v, want empty", id.Repos)
-	}
-}
-
-// TestW079RecoveryContractForLocallySourcedClones pins the recovery
-// contract for local-source clones: a repos/<name> that already exists
-// at materialize time is never re-cloned, re-fetched or reset from the
-// local checkout — presence is verified, the recorded baseline carries
-// forward. The local checkout itself is MUTATED after the claim, so a
-// re-clone would be detectable in both the baseline and the worktree
-// HEAD. RED pre-implementation (no local clone happens at all).
-func TestW079RecoveryContractForLocallySourcedClones(t *testing.T) {
+// TestW079SingleProjectWorkspaceInfersDefault: a cwd inside a mapped
+// workspace that lists exactly ONE project gets that project as the
+// create's default.
+func TestW079SingleProjectWorkspaceInfersDefault(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	localDir := filepath.Join(ws, ".repo", "w079src")
-	origHead := w079GitRepo(t, localDir, "w079src.txt", "original scene\n")
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos:\n      - name: w079src\n        path: .repo/w079src\n")
-	sock := filepath.Join(shortTmp("/tmp", "w079sock"), "d.sock")
-	dataDir := t.TempDir()
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-
-	wi := w113NewWI(t, inst, "e2e", "w079 recovery contract for locally-sourced clones",
-		[]map[string]any{
-			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
-			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 12000},
-			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
-			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
-		})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
-	d.start()
-	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(ws, wi)
-	w113WaitCapsule(t, capDir, 90*time.Second)
-	w113StepStatus(t, capDir, "fix", "in_progress", 90*time.Second)
-
-	// The local-source clone landed and the baseline was recorded.
-	reposDir := filepath.Join(capDir, "repos", "w079src")
-	if b, err := os.ReadFile(filepath.Join(reposDir, "w079src.txt")); err != nil || string(b) != "original scene\n" {
-		t.Fatalf("repos/w079src was not cloned from the local checkout: %q, %v", b, err)
-	}
-	if id := w079IdentityOf(t, capDir); id.Repos["w079src"] != origHead {
-		t.Fatalf("claim-time baseline %q, want the local HEAD %s", id.Repos["w079src"], origHead)
-	}
-	// The agent's uncommitted edits in the worktree are the live scene.
-	// The marker exists to detect a re-clone/reset: any surviving file
-	// proves that, whatever its extension.
-	if err := os.WriteFile(filepath.Join(reposDir, "w079-keep.md"), []byte("in flight\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// The local checkout MOVES ON (the operator commits there).
-	if err := os.WriteFile(filepath.Join(localDir, "w079-moved.txt"), []byte("moved on\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitRun(t, localDir, "add", ".")
-	gitRun(t, localDir, "commit", "-m", "w079 the local checkout moves on")
-	mutatedHead := strings.TrimSpace(gitRun(t, localDir, "rev-parse", "HEAD"))
-
-	// Crash and restart on the same scene: recovery reconciles in place.
-	d.crash()
-	d2 := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
-	d2.start()
-	defer d2.stop()
-	w113WaitCompleted(t, capDir, 300*time.Second)
-	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
-
-	// Never re-cloned / re-fetched / reset: the marker survives, the
-	// worktree HEAD and the recorded baseline are the claim-time facts.
-	if b, err := os.ReadFile(filepath.Join(reposDir, "w079-keep.md")); err != nil || string(b) != "in flight\n" {
-		t.Fatalf("the in-flight marker was lost — repos/w079src was re-cloned or reset: %q, %v", b, err)
-	}
-	if head := strings.TrimSpace(gitRun(t, reposDir, "rev-parse", "HEAD")); head != origHead {
-		t.Fatalf("repos/w079src HEAD %q after recovery, want the claim-time %q (the mutated local HEAD is %q)", head, origHead, mutatedHead)
-	}
-	if id := w079IdentityOf(t, capDir); id.Repos["w079src"] != origHead {
-		t.Fatalf("the recorded baseline moved to %q after recovery, want the claim-time %q", id.Repos["w079src"], origHead)
-	}
-}
-
-// TestW079MissingLocalCheckoutBlocksNeverFallsBack pins [spec-decided]
-// #6: a listed repo whose resolved local checkout is missing on disk
-// fails through the typed materialization-failure lane — the attempt
-// closes blocked, the daemon never crashes, and the registry URL is
-// NEVER used as a fallback. RED pre-implementation (the registry clone
-// for the same name succeeds at HEAD).
-func TestW079MissingLocalCheckoutBlocksNeverFallsBack(t *testing.T) {
-	remoteURL, _ := w079Remote(t, "w079gone.txt", "registry fallback\n")
-	inst := newV1InstallRepos(t, []api.ProjectRepo{{Name: "w079gone", URL: remoteURL}})
-	ws := t.TempDir()
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos:\n      - name: w079gone\n        path: .repo/absent\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg))
-	d.start()
-	defer d.stop()
-
-	wi := w113NewWI(t, inst, "e2e", "w079 missing local checkout", envelopeQuickFix())
-	out, _ := d.pf(inst, "submit", wi)
-	// The clone-failure lane: the attempt closes blocked (the log names
-	// the repo), never a daemon crash.
-	waitUntil(t, 90*time.Second, "the missing-local-checkout claim never settled into blocked", func() bool {
-		return inst.wiStatus(t, wi) == "blocked"
-	})
-	if !strings.Contains(out+"\n"+d.logTail(), "w079gone") {
-		t.Fatalf("the clone-failure diagnostics never named the repo w079gone (submit output %q, log tail %s)", out, d.logTail())
-	}
-	// NEVER a registry-URL fallback: no clone of w079gone anywhere.
-	if b, err := os.ReadFile(filepath.Join(w079Capsule(ws, wi), "repos", "w079gone", "w079gone.txt")); err == nil {
-		t.Fatalf("the claim fell back to cloning the registry URL: %q", b)
-	}
-	if _, err := os.Stat(filepath.Join(w079Capsule(ws, wi), "repos", "w079gone")); err == nil {
-		t.Fatal("repos/w079gone exists — the registry URL was consulted for a yaml-listed repo")
-	}
-	// The daemon survives and keeps serving.
-	d.pfWant(inst, -1, "ops", "status")
-}
-
-// ---------------------------------------------------------------------------
-// pf file create — single-project-yaml inference.
-// ---------------------------------------------------------------------------
-
-// TestW079SingleProjectYamlInfersDefault pins the inference: a cwd
-// inside a mapped workspace whose yaml lists exactly ONE project gets
-// that project as the create's default — the verb proceeds exactly as
-// if --project had been passed. RED pre-implementation (the #113
-// required-project error fires).
-func TestW079SingleProjectYamlInfersDefault(t *testing.T) {
-	inst := newV1Install(t)
-	ws := t.TempDir()
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos: []\n")
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
 
 	goal := "w079 inferred default project goal"
-	out := w079PfWant(t, inst, -1, w079Env{config: cfg, cwd: ws},
-		"file", "create", "--goal", goal)
+	out := w079PfWant(t, inst, -1, w079Env{config: cfg, cwd: ws}, "file", "create", "--goal", goal)
 	if !strings.Contains(out, goal) {
 		t.Fatalf("pf file create (inferred): output does not carry the created item (output %q)", out)
 	}
-	items, err := inst.client.ListWorkItems("e2e", "")
+	items, err := listWorkItems(inst, "e2e", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
 	for _, it := range items {
 		if it.Goal == goal {
-			found = true
-			if it.ProjectName != "e2e" {
-				t.Fatalf("the inferred create landed in project %q, want e2e", it.ProjectName)
-			}
+			return
 		}
 	}
-	if !found {
-		t.Fatalf("the inferred create produced no work item in e2e (items %+v, output %q)", items, out)
-	}
+	t.Fatalf("the inferred create produced no work item in e2e (items %+v)", items)
 }
 
-// TestW079MultiProjectYamlAsksForProject pins the ambiguity guard: a
-// workspace yaml listing two or more projects, `pf file create` without
-// --project errors asking for --project — it never silently picks an
-// entry. Kept face: green before AND after (the #113 error asks for
-// --project today; the change must not make it ambient).
-func TestW079MultiProjectYamlAsksForProject(t *testing.T) {
+// TestW079MultiProjectWorkspaceAsksForProject: a workspace mapping two
+// projects never silently picks one.
+func TestW079MultiProjectWorkspaceAsksForProject(t *testing.T) {
 	inst := newV1Install(t)
 	w113EnsureProject(t, inst, "w079second")
 	ws := t.TempDir()
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos: []\n  w079second:\n    repos: []\n")
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: ws, projects: []string{"e2e", "w079second"}}})
-
-	out, code := w079Pf(t, inst, w079Env{config: cfg, cwd: ws},
-		"file", "create", "--goal", "w079 multi-project no pick")
-	if code != 1 {
-		t.Fatalf("pf file create (multi-project yaml, no --project): exit %d, want 1 (output %q)", code, out)
-	}
-	if !strings.Contains(out, "--project") {
-		t.Fatalf("the error does not ask for --project (output %q)", out)
+	out, code := w079Pf(t, inst, w079Env{config: cfg, cwd: ws}, "file", "create", "--goal", "w079 multi-project no pick")
+	if code != 1 || !strings.Contains(out, "--project") {
+		t.Fatalf("pf file create (two projects, no --project): exit %d, output %q; want exit 1 asking for --project", code, out)
 	}
 	for _, project := range []string{"e2e", "w079second"} {
-		items, err := inst.client.ListWorkItems(project, "")
+		items, err := listWorkItems(inst, project, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1320,44 +801,27 @@ func TestW079MultiProjectYamlAsksForProject(t *testing.T) {
 	}
 }
 
-// TestW079NoYamlRequiredProjectErrorStands pins the kept face: a
-// matched workspace WITHOUT a yaml (or a cwd matching no workspace)
-// keeps today's #113 error — --project required, pointing at the
-// [workspace] mapping and pf doctor. Green before AND after.
-func TestW079NoYamlRequiredProjectErrorStands(t *testing.T) {
+// TestW079UnmatchedCwdRequiredProjectErrorStands: a cwd matching no
+// mapped workspace keeps the #113 required-project error.
+func TestW079UnmatchedCwdRequiredProjectErrorStands(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-
-	out, code := w079Pf(t, inst, w079Env{config: cfg, cwd: ws},
-		"file", "create", "--goal", "w079 no yaml no default")
+	out, code := w079Pf(t, inst, w079Env{config: cfg, cwd: t.TempDir()}, "file", "create", "--goal", "w079 unmatched cwd no default")
 	if code != 1 {
-		t.Fatalf("pf file create (no yaml): exit %d, want 1 (output %q)", code, out)
+		t.Fatalf("pf file create (unmatched cwd): exit %d, want 1 (output %q)", code, out)
 	}
 	for _, tok := range []string{"--project", "required", "[workspace", "doctor"} {
 		if !strings.Contains(out, tok) {
-			t.Fatalf("pf file create (no yaml): the #113 error lost the %q guidance token (output %q)", tok, out)
+			t.Fatalf("the #113 error lost the %q guidance token (output %q)", tok, out)
 		}
-	}
-
-	// A cwd matching no mapped workspace keeps the same error.
-	out2, code2 := w079Pf(t, inst, w079Env{config: cfg, cwd: t.TempDir()},
-		"file", "create", "--goal", "w079 unmatched cwd no default")
-	if code2 != 1 {
-		t.Fatalf("pf file create (unmatched cwd): exit %d, want 1 (output %q)", code2, out2)
-	}
-	if !strings.Contains(out2, "required") {
-		t.Fatalf("pf file create (unmatched cwd): no required-project error (output %q)", out2)
 	}
 }
 
-// TestW079ExplicitProjectBypassesInference pins the bypass: an explicit
-// --project is byte-for-byte today's behavior — inference is not
-// consulted (an explicit e2e wins over a yaml whose single listed
-// project is a different one) and an INVALID yaml never breaks an
-// explicit create. Kept face: green before AND after.
+// TestW079ExplicitProjectBypassesInference: an explicit --project wins,
+// and a broken .polyforge.yaml never affects file creation.
 func TestW079ExplicitProjectBypassesInference(t *testing.T) {
 	inst := newV1Install(t)
 	w113EnsureProject(t, inst, "w079second")
@@ -1365,116 +829,67 @@ func TestW079ExplicitProjectBypassesInference(t *testing.T) {
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: ws, projects: []string{"e2e", "w079second"}}})
-
-	// A valid yaml whose single listed project is NOT the explicit one.
-	w079Yaml(t, ws, "projects:\n  w079second:\n    repos: []\n")
-	goal := "w079 explicit project wins over inference"
-	w079PfWant(t, inst, -1, w079Env{config: cfg, cwd: ws},
-		"file", "create", "--project", "e2e", "--goal", goal)
-	items, err := inst.client.ListWorkItems("e2e", "")
+	w079Yaml(t, ws, "models: [\n")
+	goal := "w079 explicit project over invalid yaml"
+	w079PfWant(t, inst, -1, w079Env{config: cfg, cwd: ws}, "file", "create", "--project", "e2e", "--goal", goal)
+	items, err := listWorkItems(inst, "e2e", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
 	for _, it := range items {
 		if it.Goal == goal && it.ProjectName == "e2e" {
-			found = true
+			return
 		}
 	}
-	if !found {
-		t.Fatalf("the explicit --project e2e create did not land in e2e (items %+v)", items)
-	}
-
-	// An invalid yaml never breaks an explicit create.
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos: [\n")
-	goal2 := "w079 explicit project over invalid yaml"
-	w079PfWant(t, inst, -1, w079Env{config: cfg, cwd: ws},
-		"file", "create", "--project", "e2e", "--goal", goal2)
-	items2, err := inst.client.ListWorkItems("e2e", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	found2 := false
-	for _, it := range items2 {
-		if it.Goal == goal2 && it.ProjectName == "e2e" {
-			found2 = true
-		}
-	}
-	if !found2 {
-		t.Fatalf("the explicit --project create under an invalid yaml did not land in e2e (items %+v)", items2)
-	}
-}
-
-// TestW079InvalidYamlUnderInferenceFailsLoudly pins [spec-decided] #7's
-// failure posture: an invalid yaml under inference surfaces the typed
-// yaml error (naming the file and the reason), never a silent skip to
-// the generic required-flag error. RED pre-implementation (the generic
-// #113 error fires and does not name the file).
-func TestW079InvalidYamlUnderInferenceFailsLoudly(t *testing.T) {
-	inst := newV1Install(t)
-	ws := t.TempDir()
-	w079Yaml(t, ws, "projects:\n  e2e:\n    repos: [\n")
-	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
-		inst.url, inst.adminKey, "",
-		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-
-	out, code := w079Pf(t, inst, w079Env{config: cfg, cwd: ws},
-		"file", "create", "--goal", "w079 invalid yaml under inference")
-	if code != 1 {
-		t.Fatalf("pf file create (invalid yaml, no --project): exit %d, want 1 (output %q)", code, out)
-	}
-	if !strings.Contains(out, ".polyforge.yaml") {
-		t.Fatalf("the inference failure does not name .polyforge.yaml — the typed yaml error must surface, not a silent skip to the required-flag error (output %q)", out)
-	}
+	t.Fatalf("the explicit --project e2e create did not land in e2e (items %+v)", items)
 }
 
 // ---------------------------------------------------------------------------
 // Skill documentation — the greppable floors.
 // ---------------------------------------------------------------------------
 
-// TestW079InitFragmentPointerAndWorkspaceInit pins the init rewrite's
-// machine-checkable floor: verbs/init.md carries the machine-level
-// POINTER (the README install section and tools/install.sh) AND the
-// workspace-level init content (the .polyforge.yaml flow: scan,
-// selective sync, the [workspace] mapping re-derivation). RED
-// pre-implementation (the fragment knows nothing of the yaml).
-func TestW079InitFragmentPointerAndWorkspaceInit(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(v1Root(t), "skills", "polyforge", "verbs", "init.md"))
+func w079Doc(t *testing.T, parts ...string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(append([]string{v1Root(t)}, parts...)...))
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(raw)
-	for _, tok := range []string{"README", "install.sh", ".polyforge.yaml", "[workspace", "scan", "sync"} {
-		if !strings.Contains(text, tok) {
-			t.Fatalf("verbs/init.md does not carry the %q half of the rewrite (file must teach the machine pointer AND the workspace-init flow)", tok)
+	return string(raw)
+}
+
+// TestW079InitFragmentPointerAndWorkspaceInit: verbs/init.md carries the
+// machine-level POINTER and the workspace-level init content (scan,
+// selective sync, the [workspace] mapping, the models yaml).
+func TestW079InitFragmentPointerAndWorkspaceInit(t *testing.T) {
+	text := w079Doc(t, "skills", "polyforge", "verbs", "init.md")
+	for _, tok := range []string{"README", "install.sh", ".polyforge.yaml", "[workspace", "scan", "sync", "models:"} {
+		if !strings.Contains(strings.ToLower(text), strings.ToLower(tok)) {
+			t.Fatalf("verbs/init.md does not carry %q", tok)
 		}
 	}
 }
 
-// TestW079SkillTeachesYamlTopologyAndDrift pins the routing-skill
-// floor: SKILL.md's session rules teach the session-start
-// .polyforge.yaml topology read and the yaml/cli.toml drift surfacing
-// (the relocations that supersede the deleted bootstrap.md). RED
-// pre-implementation.
-func TestW079SkillTeachesYamlTopologyAndDrift(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(v1Root(t), "skills", "polyforge", "SKILL.md"))
-	if err != nil {
-		t.Fatal(err)
+// TestW079SkillTeachesModelsYaml: SKILL.md's session rule teaches the
+// per-project models file and the pre-claim refusal, and none of the
+// retired sections.
+func TestW079SkillTeachesModelsYaml(t *testing.T) {
+	text := w079Doc(t, "skills", "polyforge", "SKILL.md")
+	for _, tok := range []string{".polyforge.yaml", "`models`", "DAEMON-414"} {
+		if !strings.Contains(text, tok) {
+			t.Fatalf("SKILL.md does not teach %q", tok)
+		}
 	}
-	text := string(raw)
-	if !strings.Contains(text, ".polyforge.yaml") {
-		t.Fatal("SKILL.md's session rules do not teach the session-start .polyforge.yaml topology read")
-	}
-	if !strings.Contains(text, "drift") && !strings.Contains(text, "mismatch") {
-		t.Fatal("SKILL.md does not teach the yaml/cli.toml drift surfacing")
+	for _, retired := range []string{"workflow_defaults", "`projects` section", "drift"} {
+		if strings.Contains(text, retired) {
+			t.Fatalf("SKILL.md still teaches the retired %q", retired)
+		}
 	}
 }
 
-// TestW079ShipFragmentRoutesRepoPathsViaYaml pins the repo-path routing
-// floor: the verb fragments that point at repo locations (ship.md, the
-// fragment that names repos/<name> worktrees at HEAD) route through the
-// yaml projects section. RED pre-implementation.
-func TestW079ShipFragmentRoutesRepoPathsViaYaml(t *testing.T) {
+// TestW079ShipFragmentRoutesRepoPathsViaRegistry: the verb fragments that
+// name repos/<name> worktrees say the inventory is the aihub registry's,
+// never the yaml's.
+func TestW079ShipFragmentRoutesRepoPathsViaRegistry(t *testing.T) {
 	verbsDir := filepath.Join(v1Root(t), "skills", "polyforge", "verbs")
 	ents, err := os.ReadDir(verbsDir)
 	if err != nil {
@@ -1490,15 +905,18 @@ func TestW079ShipFragmentRoutesRepoPathsViaYaml(t *testing.T) {
 			t.Fatal(rerr)
 		}
 		if !strings.Contains(string(raw), "repos/") {
-			continue // this fragment does not route repo paths
+			continue
 		}
 		checked++
-		if !strings.Contains(string(raw), ".polyforge.yaml") {
-			t.Fatalf("%s routes repo paths but does not teach the yaml projects section as their source", e.Name())
+		if !strings.Contains(string(raw), "registry") {
+			t.Fatalf("%s routes repo paths but does not name the aihub registry as their source", e.Name())
+		}
+		if strings.Contains(string(raw), "`projects` section") {
+			t.Fatalf("%s still teaches the retired yaml projects section", e.Name())
 		}
 	}
 	if checked == 0 {
-		t.Fatal("no verb fragment routes repo paths — the floor lost its subject (ship.md named repos/<name> at HEAD)")
+		t.Fatal("no verb fragment routes repo paths — the floor lost its subject")
 	}
 }
 
@@ -1602,12 +1020,12 @@ func w079ScanRestartLines(path, text string, restarts, negations []string, hits 
 // Placement invariants.
 // ---------------------------------------------------------------------------
 
-// TestW079PlacementFollowsCliTomlOnlyUnderYamlDrift pins the placement
-// invariant under drift: a workspace whose yaml claims a project the
+// TestW079PlacementFollowsCliTomlOnly pins the placement
+// invariant: a workspace whose yaml names a project the
 // cli.toml mapping routes ELSEWHERE has no effect — the claim lands in
 // the mapped workspace, the yaml is not a placement source. Kept face:
 // green before AND after (placement reads cli.toml only).
-func TestW079PlacementFollowsCliTomlOnlyUnderYamlDrift(t *testing.T) {
+func TestW079PlacementFollowsCliTomlOnly(t *testing.T) {
 	inst := newV1Install(t)
 	w113EnsureProject(t, inst, "ieops")
 	wsX := filepath.Join(t.TempDir(), "wsX") // its yaml claims e2e
@@ -1615,7 +1033,7 @@ func TestW079PlacementFollowsCliTomlOnlyUnderYamlDrift(t *testing.T) {
 	if err := os.MkdirAll(wsX, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	w079Yaml(t, wsX, "projects:\n  e2e:\n    repos: []\nworkflow_defaults:\n  model_candidates: [w079-drift-model]\n")
+	w079Yaml(t, wsX, "models:\n  e2e:\n    default: [w079-drift-model]\n")
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{

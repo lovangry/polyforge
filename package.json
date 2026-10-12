@@ -1,7 +1,7 @@
 {
   "name": "polyforge",
   "version": "1.0.0",
-  "description": "Polyforge v1.0.0 \u2014 polyforge routing skill",
+  "description": "Polyforge routing skill",
   "keywords": [
     "pi-package"
   ],

@@ -59,9 +59,6 @@ import (
 	"time"
 )
 
-// execPath is the capsule-side execution state file (cwd = capsule dir).
-const execPath = "runtime-state/execution.json"
-
 // journalPath is the fake agent's own assertion ledger inside the
 // capsule (logs/ is a committed sync surface, so the journal rides the
 // capsule git chain and is assertable from the sealed scene too).

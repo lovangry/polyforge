@@ -1,18 +1,13 @@
 package driver
 
-// workflow_ext.go: the extended workflow frontmatter read surface for
-// the v2 driver lane — the fields the spawn adapter (spawn.go) needs
-// that the sequencing surface (driver.go's loadWorkflow) deliberately
-// does not carry: context_policy (inherit|fresh), declared inputs
-// (R11: the artifact paths whose content a step's prompt must carry),
-// declared outputs (path + JSON schema type — the envelope's
-// declared-output duty) and the handoff duty. Parsed into the
-// PARALLEL DriverWorkflow type: the shared common/workflow reader
-// stays the minimal F4 candidate-chain surface, and full bundle
-// VALIDATION stays aihub's job at WI creation — this is a loose,
-// read-only parse that fills defaults and refuses what it cannot
-// honor (unknown policies, non-capsule-relative artifact paths, gate
-// steps that are not fresh).
+// workflow.go: the ONE parse of a bundle's workflow.md frontmatter. The
+// driver (sequencing, supervision overrides, result duties) and the
+// spawn adapter (prompt assembly) read the same Workflow value, parsed
+// once in driver.New / NewStepSpawnAdapter. The read is loose (unknown
+// keys ignored) and full bundle VALIDATION stays aihub's job at WI
+// creation; this refuses only what the driver cannot honor (unknown
+// context policies, non-capsule-relative artifact paths, gate steps
+// that are not fresh) and surfaces every parse error.
 
 import (
 	"fmt"
@@ -22,6 +17,11 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	defaultMaxRewindTotal   = 4
+	defaultMaxRewindPerStep = 2
 )
 
 // Context policies (the frontmatter extension vocabulary).
@@ -45,7 +45,7 @@ type InputRef struct {
 // UnmarshalYAML accepts the mapping form ({artifact: path}) and the
 // plain scalar form (a bare path): the read surface is deliberately
 // loose about spelling and strict about content — the path rules are
-// enforced after parse (ValidateDriverWorkflow).
+// enforced after parse (validateWorkflow).
 func (r *InputRef) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind == yaml.ScalarNode {
 		r.Artifact = strings.TrimSpace(node.Value)
@@ -61,13 +61,26 @@ func (r *InputRef) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// DriverStep is one step of the extended frontmatter: the sequencing
-// identity plus the context/artifact surface the spawn adapter
-// assembles prompts from.
-type DriverStep struct {
-	ID      string
-	Kind    string
-	Gate    bool
+// Workflow is the execution graph: the step order IS the declaration
+// order (rule V3), plus the rewind bounds.
+type Workflow struct {
+	Steps      []StepSpec
+	MaxTotal   int
+	MaxPerStep int
+}
+
+// StepSpec is one workflow step: identity and order, the candidate
+// chain, gate policy, context policy and the artifact surface the spawn
+// adapter assembles prompts from.
+type StepSpec struct {
+	ID   string
+	Gate bool
+	// ContextPolicy is ContextInherit (the default) or ContextFresh.
+	ContextPolicy   string
+	ModelCandidates []string
+	OnFail          *OnFail
+	// Handoff marks a step that must produce a handoff artifact for the
+	// next inherit step (validated on its completed results).
 	Handoff bool
 	// RequiresHumanAnswer mirrors `requires_human_answer: true`: the step
 	// may not complete until a human answered at least one of its
@@ -76,73 +89,74 @@ type DriverStep struct {
 	// RequiresCommandEvidence mirrors `requires_command_evidence: true`
 	// (the V4 gate; implied for a step whose id is "verification").
 	RequiresCommandEvidence bool
-	// ContextPolicy is ContextInherit (the default) or ContextFresh.
-	ContextPolicy string
 	// Inputs are the declared input artifacts (R11), in declaration
 	// order.
 	Inputs []InputRef
 	// Outputs are the declared outputs the completed step's envelope
 	// must deliver (path + JSON schema type).
 	Outputs []OutputSpec
-	// ModelCandidates is the step's candidate chain (per-step override
-	// or the workflow-level defaults).
-	ModelCandidates []string
-	OnFail          *OnFail
+	// Step-level supervision overrides: T is budget.wall_minutes, X is
+	// silence_minutes, Y is tool_minutes. Zero = the global default.
+	SilenceMinutes int
+	ToolMinutes    int
+	WallMinutes    int
 }
 
-// DriverWorkflow is the parallel frontmatter type: the step order IS
-// the declaration order (rule V3), plus the rewind bounds. It coexists
-// with the sequencing Workflow (driver.go) — same workflow.md, one
-// consumer each.
-type DriverWorkflow struct {
-	Name       string
-	Steps      []DriverStep
-	MaxTotal   int
-	MaxPerStep int
+// OnFail is the gate FAIL policy (01 §4.1): rewind with a target, or
+// terminate (the default).
+type OnFail struct {
+	Action         string // "rewind" | "terminate"
+	Target         string
+	IncludeVerdict bool
 }
 
-// StepByID answers the step spec for id (nil when absent).
-func (w *DriverWorkflow) StepByID(id string) *DriverStep {
-	for i := range w.Steps {
-		if w.Steps[i].ID == id {
-			return &w.Steps[i]
+func (w *Workflow) indexOf(stepID string) (int, bool) {
+	for i, s := range w.Steps {
+		if s.ID == stepID {
+			return i, true
 		}
+	}
+	return -1, false
+}
+
+// step answers the step spec for id (nil when absent).
+func (w *Workflow) step(id string) *StepSpec {
+	if i, ok := w.indexOf(id); ok {
+		return &w.Steps[i]
 	}
 	return nil
 }
 
-// LoadDriverWorkflow reads a materialized bundle's workflow.md and
-// parses its frontmatter into the extended type, then validates it.
-func LoadDriverWorkflow(bundleDir string) (*DriverWorkflow, error) {
+// LoadWorkflow reads a materialized bundle's workflow.md, parses its
+// frontmatter and validates it.
+func LoadWorkflow(bundleDir string) (*Workflow, error) {
 	raw, err := os.ReadFile(filepath.Join(bundleDir, "workflow.md"))
 	if err != nil {
 		return nil, fmt.Errorf("driver: bundle workflow.md unreadable: %w", err)
 	}
-	front, ok := workflow.SplitFrontmatter(raw)
+	front, _, ok := workflow.SplitFrontmatter(raw)
 	if !ok {
 		return nil, fmt.Errorf("driver: bundle workflow.md has no frontmatter block")
 	}
-	wf, err := ParseDriverWorkflow(front)
+	wf, err := parseWorkflow(front)
 	if err != nil {
 		return nil, err
 	}
-	if err := ValidateDriverWorkflow(wf); err != nil {
+	if err := validateWorkflow(wf); err != nil {
 		return nil, err
 	}
 	return wf, nil
 }
 
-// ParseDriverWorkflow parses one frontmatter block into the extended
-// type, filling the defaults: context_policy inherit, rewind bounds
+// parseWorkflow parses one frontmatter block, filling the defaults: context_policy inherit, rewind bounds
 // 4/2, workflow-level default model candidates. Judging the filled
-// values is ValidateDriverWorkflow's job.
-func ParseDriverWorkflow(front []byte) (*DriverWorkflow, error) {
+// values is validateWorkflow's job.
+func parseWorkflow(front []byte) (*Workflow, error) {
 	var doc extDoc
 	if err := yaml.Unmarshal(front, &doc); err != nil {
 		return nil, fmt.Errorf("driver: bundle frontmatter unparsable: %w", err)
 	}
-	wf := &DriverWorkflow{
-		Name:       doc.Name,
+	wf := &Workflow{
 		MaxTotal:   defaultMaxRewindTotal,
 		MaxPerStep: defaultMaxRewindPerStep,
 	}
@@ -155,9 +169,8 @@ func ParseDriverWorkflow(front []byte) (*DriverWorkflow, error) {
 		}
 	}
 	for _, s := range doc.Steps {
-		step := DriverStep{
+		step := StepSpec{
 			ID:                      s.ID,
-			Kind:                    s.Kind,
 			Gate:                    s.Gate,
 			Handoff:                 s.Handoff,
 			ContextPolicy:           s.ContextPolicy,
@@ -165,6 +178,11 @@ func ParseDriverWorkflow(front []byte) (*DriverWorkflow, error) {
 			RequiresCommandEvidence: s.RequiresCommandEvidence,
 			Inputs:                  append([]InputRef(nil), s.Inputs...),
 			ModelCandidates:         s.ModelCandidates,
+			SilenceMinutes:          s.SilenceMinutes,
+			ToolMinutes:             s.ToolMinutes,
+		}
+		if s.Budget != nil {
+			step.WallMinutes = s.Budget.WallMinutes
 		}
 		if step.ContextPolicy == "" {
 			step.ContextPolicy = ContextInherit // the declared default
@@ -187,13 +205,13 @@ func ParseDriverWorkflow(front []byte) (*DriverWorkflow, error) {
 	return wf, nil
 }
 
-// ValidateDriverWorkflow refuses what the spawn adapter cannot honor:
+// validateWorkflow refuses what the spawn adapter cannot honor:
 // missing/duplicate step ids, context policies outside the closed set
-// (every step carries one after ParseDriverWorkflow — the inherit
+// (every step carries one after parseWorkflow — the inherit
 // default), gate steps that are not fresh (a gate must judge on its
 // own declared inputs, never on an inherited persuasive context), and
 // artifact paths that are not capsule-relative.
-func ValidateDriverWorkflow(wf *DriverWorkflow) error {
+func validateWorkflow(wf *Workflow) error {
 	if wf == nil || len(wf.Steps) == 0 {
 		return fmt.Errorf("driver: workflow has no steps")
 	}
@@ -264,10 +282,8 @@ func checkRelPath(rel string) error {
 	return nil
 }
 
-// The loose frontmatter schema the extended reader parses (a superset
-// of the sequencing reader's; unknown keys are ignored).
+// The loose frontmatter schema (unknown keys are ignored).
 type extDoc struct {
-	Name     string       `yaml:"name"`
 	Defaults *extDefaults `yaml:"defaults"`
 	Rewind   *extRewind   `yaml:"rewind"`
 	Steps    []extStep    `yaml:"steps"`
@@ -284,7 +300,6 @@ type extRewind struct {
 
 type extStep struct {
 	ID                      string      `yaml:"id"`
-	Kind                    string      `yaml:"kind"`
 	Gate                    bool        `yaml:"gate"`
 	Handoff                 bool        `yaml:"handoff"`
 	RequiresHumanAnswer     bool        `yaml:"requires_human_answer"`
@@ -294,6 +309,13 @@ type extStep struct {
 	Outputs                 []extOutput `yaml:"outputs"`
 	ModelCandidates         []string    `yaml:"model_candidates"`
 	OnFail                  *extOnFail  `yaml:"on_fail"`
+	SilenceMinutes          int         `yaml:"silence_minutes"`
+	ToolMinutes             int         `yaml:"tool_minutes"`
+	Budget                  *extBudget  `yaml:"budget"`
+}
+
+type extBudget struct {
+	WallMinutes int `yaml:"wall_minutes"`
 }
 
 type extOutput struct {

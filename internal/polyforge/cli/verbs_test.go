@@ -215,35 +215,23 @@ func TestVerbQueueMergedAllMapped(t *testing.T) {
 }
 
 func TestVerbQueueReadyHumanOutput(t *testing.T) {
-	unclassified := strings.Replace(cannedWI, "pf-42", "pf-99", 1)
-	body := `{"items":[` + cannedWI + `],"unclassified":[` + unclassified + `],` +
-		`"needs_human_session":[` + cannedWI + `],"running":[],"stalled":[],"paused":[],"stale_running":[]}`
+	second := strings.Replace(cannedWI, "pf-42", "pf-99", 1)
+	body := `{"items":[` + cannedWI + `,` + second + `],"running":[],"paused":[]}`
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, body)
 	})
 	env := map[string]string{"PF_SERVER": srv.URL}
 
-	// Human mode: count is items+unclassified, non-takeable segments are
-	// ignored, items come first, and a SEGMENT column tells them apart.
+	// Human mode: the count and rows are the items segment only.
 	code, stdout, stderr := runPf(t, env, "queue", "--project", "polyforge", "--ready")
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
-	for _, want := range []string{
-		"2 work item(s)",
-		"SEGMENT",
-		"pf-42",
-		"items",
-		"pf-99",
-		"unclassified",
-	} {
+	for _, want := range []string{"2 work item(s)", "pf-42", "pf-99"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout missing %q:\n%s", want, stdout)
 		}
-	}
-	if strings.Index(stdout, "pf-42") > strings.Index(stdout, "pf-99") {
-		t.Errorf("items must be listed before unclassified:\n%s", stdout)
 	}
 
 	// --json stays verbatim passthrough of the full server body.
@@ -286,10 +274,9 @@ pf-1  polyforge  running  ab12cd34ef56aa00  high      -       fix the thing
 pf-2  polyforge  queued   -                 normal    -       another goal
 `)
 
-	// --ready form: same additive decode, same SESSION column, across
-	// both takeable segments.
+	// --ready form: same additive decode, same SESSION column.
 	srv = newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"items":[`+held+`],"unclassified":[`+unheld+`]}`)
+		io.WriteString(w, `{"items":[`+held+`,`+unheld+`]}`)
 	})
 	env = map[string]string{"PF_SERVER": srv.URL}
 	code, stdout, stderr = runPf(t, env, "queue", "--project", "polyforge", "--ready")
@@ -298,10 +285,10 @@ pf-2  polyforge  queued   -                 normal    -       another goal
 	}
 	golden(t, "QueueReadySessionColumn", stdout,
 		`2 work item(s)
-SLUG  PROJECT    STATUS   SESSION           PRIORITY  BUNDLE  GOAL           SEGMENT
-----  ---------  -------  ----------------  --------  ------  -------------  ------------
-pf-1  polyforge  running  ab12cd34ef56aa00  high      -       fix the thing  items
-pf-2  polyforge  queued   -                 normal    -       another goal   unclassified
+SLUG  PROJECT    STATUS   SESSION           PRIORITY  BUNDLE  GOAL
+----  ---------  -------  ----------------  --------  ------  -------------
+pf-1  polyforge  running  ab12cd34ef56aa00  high      -       fix the thing
+pf-2  polyforge  queued   -                 normal    -       another goal
 `)
 }
 
@@ -599,8 +586,6 @@ func TestAdminVerbsRequestShapes(t *testing.T) {
 			io.WriteString(w, `{"id":"prj_1","name":"polyforge","visible":true,"members":[],"created_at":"t","updated_at":"t"}`)
 		case strings.HasSuffix(r.URL.Path, "/backup"):
 			io.WriteString(w, `{"backup":"/var/backups/snap.db"}`)
-		case strings.HasSuffix(r.URL.Path, "/rotate-secret"):
-			io.WriteString(w, `{"rotated":true}`)
 		}
 	})
 	env := map[string]string{"PF_SERVER": srv.URL}
@@ -695,14 +680,6 @@ func TestAdminVerbsRequestShapes(t *testing.T) {
 	}
 	if got := rec.last(); got.Method != "POST" || got.Path != "/api/v1/admin/backup" {
 		t.Errorf("backup = %s %s", got.Method, got.Path)
-	}
-
-	if code, _, stderr := runPf(t, env, "rotate-secret", "--mode", "grace", "--grace-seconds", "300"); code != 0 {
-		t.Fatalf("rotate-secret: %d %s", code, stderr)
-	}
-	if got := rec.last(); got.Path != "/api/v1/service/rotate-secret" ||
-		!strings.Contains(got.Body, `"mode":"grace"`) || !strings.Contains(got.Body, `"grace_seconds":300`) {
-		t.Errorf("rotate-secret = %s %s %s", got.Method, got.Path, got.Body)
 	}
 }
 
@@ -932,24 +909,40 @@ func TestDaemonHelpTeachesMapping(t *testing.T) {
 	}
 }
 
-// TestHelpSurfaceNoMigration pins the #103 AC16 surface: no migration
-// subcommand appears on the pf verb surface — `pf help` (and the daemon
-// flag face) never mention migration; capsule migration is a manual
-// operator procedure documented in the migration runbook. The one-shot
-// v0→v1 migration verbs are deleted (v2 M1).
-func TestHelpSurfaceNoMigration(t *testing.T) {
-	code, stdout, stderr := runPf(t, map[string]string{}, "help")
-	if code != 0 {
+// pf submit --models: parsed (spaces trimmed), validated locally before
+// any request, and carried to the daemon's claim route.
+func TestVerbSubmitModels(t *testing.T) {
+	var aihubRec reqRecorder
+	aihub := newFakeAihub(t, &aihubRec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedWI)
+	})
+	d := newDaemonFixture(t)
+	d.answer("POST", "/jobs/wi_abc/claim", `{"accepted":true,"work_item_id":"wi_abc"}`)
+	env := map[string]string{"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock}
+
+	for _, bad := range []string{"a,,b", "a,a", " ", ",", "a, a"} {
+		before := len(aihubRec.all())
+		code, _, stderr := runPf(t, env, "submit", "wi_abc", "--models", bad)
+		if code == 0 || !strings.Contains(stderr, "--models") {
+			t.Fatalf("--models %q: code=%d stderr=%q, want a bad-input refusal", bad, code, stderr)
+		}
+		if len(aihubRec.all()) != before || len(d.rec.all()) != 0 {
+			t.Fatalf("--models %q must be refused before any request", bad)
+		}
+	}
+
+	if code, _, stderr := runPf(t, env, "submit", "wi_abc", "--models", " p/a , p/b"); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
-	if strings.Contains(strings.ToLower(stdout), "migrat") {
-		t.Errorf("pf help surfaces a migration subcommand:\n%s", stdout)
+	got := d.rec.all()
+	if len(got) != 1 || !strings.Contains(got[0].Body, `"models":["p/a","p/b"]`) {
+		t.Fatalf("claim body = %+v, want the trimmed models list", got)
 	}
-	code, stdout, stderr = runPf(t, map[string]string{}, "help", "daemon")
-	if code != 0 {
+	// without the flag the body carries no models key
+	if code, _, stderr := runPf(t, env, "submit", "wi_abc"); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
-	if strings.Contains(strings.ToLower(stdout), "migrat") {
-		t.Errorf("pf help daemon surfaces a migration flag:\n%s", stdout)
+	if got := d.rec.all(); strings.Contains(got[1].Body, "models") {
+		t.Fatalf("plain submit body must not carry models: %s", got[1].Body)
 	}
 }

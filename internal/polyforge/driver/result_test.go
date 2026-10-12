@@ -7,8 +7,11 @@ package driver
 // absolute paths, no .. escapes, no symlink exits).
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -458,4 +461,21 @@ func TestStepResultJSONRoundTrip(t *testing.T) {
 			t.Fatalf("envelope JSON must carry tag %q", tag)
 		}
 	}
+}
+
+// HashFile answers the lowercase-hex SHA-256 and byte length of one
+// file. The staging side uses it to build manifest entries; the
+// verification side (VerifyArtifact) recomputes and compares.
+func HashFile(path string) (sha256Hex string, bytes int64, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), n, nil
 }

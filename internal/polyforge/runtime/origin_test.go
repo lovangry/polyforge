@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestOriginPersistsAndLegacyRecordsLoad(t *testing.T) {
+func TestOriginPersists(t *testing.T) {
 	rec := &jobRecord{WorkItemID: "wi_o", State: string(StateRunning), Origin: &Origin{Kind: OriginChat, ChatID: "chat_1", Owner: "usr_1"}}
 	raw, _ := json.Marshal(rec)
 	var back jobRecord
@@ -17,21 +17,6 @@ func TestOriginPersistsAndLegacyRecordsLoad(t *testing.T) {
 	got := jobFromRecord(&back).record().Origin
 	if got == nil || *got != *rec.Origin {
 		t.Fatalf("origin roundtrip: %+v", got)
-	}
-	// a record written before origin existed loads with origin absent
-	var legacy jobRecord
-	if err := json.Unmarshal([]byte(`{"work_item_id":"wi_old","state":"running"}`), &legacy); err != nil {
-		t.Fatal(err)
-	}
-	if j := jobFromRecord(&legacy); j.origin != nil || j.record().Origin != nil {
-		t.Fatal("legacy record must keep origin absent")
-	}
-	if out, _ := json.Marshal(jobFromRecord(&legacy).record()); json.Valid(out) && string(out) != "" {
-		var m map[string]any
-		_ = json.Unmarshal(out, &m)
-		if _, ok := m["origin"]; ok {
-			t.Fatal("absent origin must be omitted from state.json")
-		}
 	}
 }
 

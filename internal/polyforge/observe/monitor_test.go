@@ -69,7 +69,7 @@ func TestStormGuardSingleNeedsRecoveryPerAttempt(t *testing.T) {
 	// Recovery: a NEW attempt re-arms the guard. Its death is reported
 	// again — with the new derivation counter.
 	h2 := newFakeHandle("att_2")
-	m.rtCh <- Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 2}, Handle: h2}
+	m.rtQ.Push(Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 2}, Handle: h2})
 	soon(t, 500*time.Millisecond, "recovery adopted", func() bool {
 		return m.currentSpawn() == 2
 	})

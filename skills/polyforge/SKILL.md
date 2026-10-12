@@ -1,6 +1,6 @@
 ---
 name: polyforge
-description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, observe, answer, pause, resume, wrap, ops) or the ship delivery bridge, each carried by a fragment under verbs/; data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
+description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, watch, answer, pause, resume, wrap, ops) or the ship delivery bridge, plus the machine verbs doctor, init and help, each carried by a fragment under verbs/ (`pf watch` is the progress verb: snapshot, resident watcher, subscriptions; `pf chat` carries the chat identity); data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
 license: proprietary
 compatibility:
   harnesses: [pi, claude]
@@ -11,14 +11,13 @@ compatibility:
 You are the routing layer of a user's harness session. Your whole job: read the
 user's request, decide which of the 13 routing verbs it is (or whether it is
 the `ship` delivery bridge), and run the `pf` CLI verb that carries it.
-Nothing else. The split between the target faces is fixed (the v1
-architecture's routing table):
+Nothing else. The split between the target faces is fixed (the architecture's routing table):
 
 - **Data-plane verbs** (`file`, `queue`, `cancel`, `recall`, `remember`, `memory`): pure
   Core data reads/writes that do not touch any execution scene. The `pf` CLI
   talks HTTP **direct to AIHub** (single port, `Authorization: Bearer
   <api_key>`); the daemon is not involved.
-- **Execution-plane verbs** (`submit`, `observe` = `pf watch`, `answer`,
+- **Execution-plane verbs** (`submit`, `watch`, `answer`,
   `pause`, `resume`, `wrap`, `ops`): semantically bound to this machine's local
   execution scene. The `pf` CLI talks to the **local daemon over its unix
   domain socket** (default `/run/polyforge.sock`); the daemon translates each
@@ -36,10 +35,9 @@ intent is ambiguous, **ask rather than guess**.
 
 This skill is the **only** thing a user harness installs. Pi: one `skills`
 path line in settings, pointing directly at `skills/polyforge/` inside the
-local checkout — zero copying, no bundling. Claude Code: installed via the
-plugin marketplace. No executor skill exists any more (polyforge#106
-deleted the agent-side executor skill with the WI-Agent engine it
-served): the **Go driver** owns workflow execution — the daemon binds it
+local checkout — zero copying, no bundling. Claude Code: `tools/install.sh`
+copies it to `~/.claude/skills/polyforge`. There is no executor skill: the
+**Go driver** owns workflow execution — the daemon binds it
 unconditionally, version-locked to the daemon release, and no harness
 installs or runs a workflow. A user harness never executes a workflow:
 in an interactive session the user only submits intents, observes
@@ -65,7 +63,7 @@ accepts an id.
 | show that memory's full body / open the stored note / 看看记忆正文 / 打开那条记忆 | `verbs/memory.md` | AIHub |
 | run it / submit it / start this work item / execute / 跑起来 / 执行这个 WI / 提交执行 | `verbs/submit.md` | daemon |
 | take over a stuck work item / its machine is dead / force takeover / 接管 / 强制接管 | `verbs/ops.md` (`pf ops end-session`, then `verbs/submit.md`) | AIHub + daemon |
-| how's it going / show progress / what step is it on / watch this one / follow it / 看看进度 / 跑到哪了 / 观察一下 / 盯着 | `verbs/observe.md` (`pf watch`) | daemon |
+| how's it going / show progress / what step is it on / watch this one / follow it / 看看进度 / 跑到哪了 / 观察一下 / 盯着 | `verbs/watch.md` (`pf watch`) | daemon |
 | answer the question / reply to needs_input / 回答问题 / 它在问我 / 答一下 | `verbs/answer.md` | daemon |
 | pause it / stop for now / hold on / 暂停 / 先停一下 / 挂起 | `verbs/pause.md` | daemon |
 | resume it / continue the paused or blocked one / 恢复执行 / 接着跑（已暂停或已阻塞的）/ 继续 | `verbs/resume.md` | daemon |
@@ -77,19 +75,18 @@ accepts an id.
 | init this workspace / initialize the workspace / write the workspace yaml / 初始化工作区 / 生成工作区配置 | `verbs/init.md` (workspace init) | CLI |
 | help / what skills / usage / 速查 / 怎么用 | `verbs/help.md` | CLI |
 
-Disambiguation: "continue / go on" **mid-run** routes to `observe` (`pf watch <wi> --once`), not
-`resume` — `resume` is "continue": it reactivates a **paused** WI or a
-**blocked** one (always a fresh claim). A blocked WI has exactly two human
-moves: continue = `resume`, abandon = `cancel` (there is no `unblock` verb;
-both are allowed to the task's reporter, a project maintainer or an admin).
-The same two moves apply to a WI the local daemon parked `repair_pending`
-after a restart (capsule missing / project unmapped; `pf ops status` lists
-it): continue = fix the cause then `resume`, abandon = `cancel` (or
-`wrap --fail` for the failed verdict).
+Disambiguation: "continue / go on" **mid-run** routes to `watch` (`pf watch <wi> --once`), not
+`resume` — `resume` is "continue": it reactivates a **paused** WI (a hub
+PATCH only — the kept session is re-attached by its holder daemon) or a
+**blocked** one (the daemon re-claims it and resumes from the checkpoint). A blocked WI has exactly two human
+moves: continue = `resume`, abandon = `cancel` (both are allowed to the task's reporter, a project maintainer or an admin).
+A WI whose capsule directory went missing, or whose project lost its
+`[workspace]` mapping, across a daemon restart is simply set `blocked` (the
+reason note names the cause): fix the cause if any, then `resume`, or `cancel`
+(or `wrap --fail` for the failed verdict).
 "Stop" of a running work item routes to `pause` (reversible) or
 `wrap --fail` (the owner's failed verdict), never to `cancel` (which only
-applies to WIs with no active execution — queued, paused, blocked, or parked
-`repair_pending` on this daemon). "Ship / deliver / push it" routes to `ship` — the git
+applies to WIs with no active execution — queued, paused or blocked). "Ship / deliver / push it" routes to `ship` — the git
 delivery of an already-closed WI's sealed commits — never to `submit`
 (which starts execution).
 
@@ -104,7 +101,8 @@ proactive face, and it carries exactly two kinds of signal:
   context.
 - **Decisions** — a question to answer or gate to pass, a failed / blocked /
   completed workflow, a step judged dead, candidates exhausted, a rejected or
-  dropped submit, a capsule or project needing repair, a daemon restart.
+  dropped submit, a blocked work item (including a missing capsule or an
+  unmapped project), a daemon restart.
   These wake you with ONE fixed-template line:
   `[polyforge] <wi> <kind> — <short fixed phrase>; this is a human decision,
   the agent must not answer it`.
@@ -173,7 +171,7 @@ the turn arrives.
 
 ## Session rules
 
-Four standing rules, binding on every polyforge session:
+Five standing rules, binding on every polyforge session:
 
 1. **Surface discipline — the `pf` CLI is the only client.** All AIHub
    data-plane interaction goes through the `pf` CLI; never issue a raw
@@ -195,20 +193,15 @@ Four standing rules, binding on every polyforge session:
 4. **Hand over an outcome, not a path.** When handing work to an
    executor, specify the outcome plus its acceptance criteria — never an
    execution path.
-5. **Workspace topology comes from `.polyforge.yaml`.** At session start
-   in a workspace, read the workspace root's `.polyforge.yaml` (when one
-   exists): its `projects` section is the authoritative repo inventory —
-   each entry's workspace-root-relative `path:` is where the local
-   checkout lives, and the daemon clones the capsule's `repos/<name>`
-   worktrees from there at claim — and its `workflow_defaults` is the
-   workflow-level model pinning. If the yaml's projects disagree with the
-   cli.toml `[workspace]` mapping, surface the disagreement as
-   configuration drift: tell the owner which side carries what and
-   re-derive the cli.toml mapping from the yaml (the yaml wins every
-   conflict; nothing rewrites cli.toml behind the operator's back, and
-   the daemon keeps reading cli.toml for placement until the mapping is
-   re-derived). A workspace without the yaml simply has no yaml layer:
-   the registry inventory and the mapping stand unchanged.
+5. **Workspace model pinning lives in `.polyforge.yaml`.** A workspace
+   root may carry a `.polyforge.yaml` whose only section is `models`:
+   per project, a `default` candidate list and/or per-step-kind lists
+   (kinds `qa`, `spec`, `author`, `code`, `gate`, `review`). The daemon
+   reads it fresh before every claim; an invalid file refuses the claim
+   (DAEMON-414) WITHOUT claiming — the work item stays queued for other
+   machines. The repo inventory and clone URLs always come from the aihub
+   project registry; the cli.toml `[workspace]` mapping is the only
+   placement source.
 
 ## The `pf` CLI: shared invocation contract
 
@@ -237,17 +230,11 @@ pf [global flags] <verb> [verb flags] [positional args]
   `--project` and validate it against the mapping; `queue` without
   `--project` covers all mapped projects; one daemon serves every mapped
   workspace and routes capsules to `<workspace>/capsules/<wi>` by the
-  claimed work item's project. When a workspace carries a
-  `.polyforge.yaml`, THAT file is the single authoritative workspace
-  definition: the `[workspace]` section is its derived artifact (the
-  init verb's workspace flow re-derives the mapping from the yaml's
-  projects), and the yaml's `projects` entries are the repo inventory a
-  claim clones from instead of the aihub registry.
+  claimed work item's project.
 - **Output**: human mode renders per-verb views; `--json` emits the response
   body raw, as-is (machine consumption).
 - **Errors**: every non-2xx answer — from AIHub AND from the daemon — is the
-  SAME typed envelope, `{code, detail}` at the top level (v1
-  `internal/common/api`; the CLI's daemon client in
+  SAME typed envelope, `{code, detail}` at the top level (`internal/common/api`; the CLI's daemon client in
   `internal/polyforge/cli/daemon.go` is the authority). Human mode prints
   `pf: CORE-409: <detail>` — the typed code prominent, never doubled, never
   a stack trace; `--json` prints the raw envelope on stderr. Exit codes: 0
@@ -259,10 +246,7 @@ pf [global flags] <verb> [verb flags] [positional args]
   `CORE-*` work-item/project/user business errors, `MEM-*` memory search,
   `AUTH-*` HTTP-boundary auth, `GIT-*` the git push-proxy surface
   (non-fast-forward, gitlink, blob size, sequence-trailer violations),
-  `DAEMON-*` the local daemon face, `CAP-*` capsule lifecycle. The v0
-  `SYNC-*` family is deleted — git IS the revision chain in v1; the daemon's
-  archival push is the daemon's own (the observe lane's periodic
-  commit+push and the close paths' seal push).
+  `DAEMON-*` the local daemon face, `CAP-*` capsule lifecycle.
 - A daemon-face failure to dial (`dial unix ...`) means the daemon is not
   running on this machine — start it (`pf daemon`) or check `--socket`; it is
   not a typed verdict about any work item.

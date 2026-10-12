@@ -13,10 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -165,11 +163,6 @@ type jobRecord struct {
 	StormFails     int    `json:"storm_fails"`
 	LastRecoveryAt string `json:"last_recovery_at,omitempty"`
 	Transcript     string `json:"transcript"`
-	// LiveTranscript is the file the current derivation appends to (a
-	// fresh pi derivation's harness-store live path, or the resume
-	// source); "" while not located. Restart keeps it so the resume
-	// discriminator's live fallback survives a daemon restart.
-	LiveTranscript string `json:"live_transcript,omitempty"`
 	BundleName     string `json:"bundle_name"`
 	BundleDigest   string `json:"bundle_digest"`
 	AgentPID       int    `json:"agent_pid"`
@@ -178,17 +171,15 @@ type jobRecord struct {
 	// records written before it existed: such a job loads fine and is
 	// treated as owned by the WI reporter by later consumers.
 	Origin *Origin `json:"origin,omitempty"`
-	// RepairPending is the v2 §6 local pending-repair mark (see
-	// job.repairPending): "capsule_missing" | "project_unmapped" | "".
-	RepairPending string `json:"repair_pending,omitempty"`
 	// EndNote/EndHead persist the pending SessionEnd(blocked) of an
 	// end_pending record: the verdict's note and the capsule head the
 	// sealing daemon pushed (the cross-daemon continue check, §7).
 	EndNote string `json:"end_note,omitempty"`
 	EndHead string `json:"end_head,omitempty"`
-	// EndStatus is the pending SessionEnd verdict when it is not blocked
-	// (an abandoned repair_pending WI: canceled | failed).
-	EndStatus string `json:"end_status,omitempty"`
+	// StepCandidates is the claim-time per-step candidate snapshot a
+	// recovery re-derivation dispatches under; kept here (daemon-private)
+	// rather than read back from the agent-writable capsule.json.
+	StepCandidates map[string][]string `json:"step_candidates,omitempty"`
 }
 
 // Origin kinds.
@@ -226,32 +217,23 @@ func (j *job) record() *jobRecord {
 		StormFails:         j.stormFails,
 		LastRecoveryAt:     stampIfSet(j.lastRecoveryAt),
 		Transcript:         j.transcript,
-		LiveTranscript:     j.liveTranscript,
 		BundleName:         j.bundleName,
 		BundleDigest:       j.bundleDigest,
 		AgentPID:           j.agentPID,
 		AgentStart:         j.agentStartedAt,
 		Origin:             j.origin,
-		RepairPending:      j.repairPending,
 		EndNote:            j.endNote,
 		EndHead:            j.endHead,
-		EndStatus:          j.endStatus,
+		StepCandidates:     j.stepCandidates,
 	}
 }
 
 func jobFromRecord(rec *jobRecord) *job {
-	fp := rec.SessionFingerprint
-	if fp == "" && rec.SessionID != "" {
-		fp = api.SessionFingerprint(rec.SessionID)
-	}
 	return &job{
-		wi:        rec.WorkItemID,
-		project:   rec.Project,
-		sessionID: rec.SessionID,
-		// SessionFingerprint is recomputed from the secret when the
-		// stored copy is empty (defensive: the two are redundant by
-		// construction).
-		sessionFingerprint: fp,
+		wi:                 rec.WorkItemID,
+		project:            rec.Project,
+		sessionID:          rec.SessionID,
+		sessionFingerprint: rec.SessionFingerprint,
 		state:              JobState(rec.State),
 		stopReason:         rec.StopReason,
 		sealedPush:         rec.SealedPush,
@@ -261,7 +243,7 @@ func jobFromRecord(rec *jobRecord) *job {
 			// Secret = the session id (the push password),
 			// Fingerprint = the PUBLIC handle (§1.6 backup layer).
 			WorkItemID:  rec.WorkItemID,
-			Fingerprint: fp,
+			Fingerprint: rec.SessionFingerprint,
 			CapsuleDir:  rec.CapsuleDir,
 			GitDir:      rec.GitDir,
 			RemoteURL:   rec.RemoteURL,
@@ -274,16 +256,14 @@ func jobFromRecord(rec *jobRecord) *job {
 		stormFails:     rec.StormFails,
 		lastRecoveryAt: parseStamp(rec.LastRecoveryAt),
 		transcript:     rec.Transcript,
-		liveTranscript: rec.LiveTranscript,
 		bundleName:     rec.BundleName,
 		bundleDigest:   rec.BundleDigest,
 		agentPID:       rec.AgentPID,
 		agentStartedAt: rec.AgentStart,
 		origin:         rec.Origin,
-		repairPending:  rec.RepairPending,
 		endNote:        rec.EndNote,
 		endHead:        rec.EndHead,
-		endStatus:      rec.EndStatus,
+		stepCandidates: rec.StepCandidates,
 	}
 }
 
@@ -302,50 +282,6 @@ func loadState(path string) (*stateFile, error) {
 		return nil, fmt.Errorf("runtime: state file unparsable: %w", err)
 	}
 	return &st, nil
-}
-
-// atomicWrite lands data at path via tmp+fsync+rename (the same contract
-// every daemon-side state file uses).
-func atomicWrite(path string, data []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	// A unique temp name per write: two concurrent persists of the same
-	// file must not share (and rename away) one fixed ".tmp".
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	// fsync the directory so the rename itself survives a power loss.
-	if d, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = d.Sync()
-		d.Close()
-	}
-	return nil
 }
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }

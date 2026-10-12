@@ -1,6 +1,6 @@
 package test
 
-// v1_s19: answer durability across restarts and crashes, driver/envelope
+// v1_s19_answer_persistence_test.go: answer durability across restarts and crashes, driver/envelope
 // edition. On the driver path the CONSUMER of an answer is the DRIVER
 // (the D9 archive-and-clear write on the capsule's execution.json) — the
 // capsule is the answer's persistent authority (the daemon-private
@@ -67,9 +67,9 @@ func TestV1S19AwaitingAnswerIsPersistedToDisk(t *testing.T) {
 	}
 	// The QUESTION column mirrors the durable record (the D6 owner face),
 	// and the workflow is parked, not blocked.
-	jv := d.observe(t, wi)
-	if jv.Pending == nil || jv.Pending.ID != qid || !strings.Contains(jv.Pending.Question, "restart?") {
-		t.Fatalf("the QUESTION face does not mirror the durable record: %+v", jv.Pending)
+	wq := d.watch(t, wi).Execution.PendingQuestion
+	if wq == nil || wq.ID != qid || !strings.Contains(wq.Question, "restart?") {
+		t.Fatalf("the QUESTION face does not mirror the durable record: %+v", wq)
 	}
 	if st := inst.wiStatus(t, wi); st != "running" {
 		t.Fatalf("parked workflow status %q, want running", st)
@@ -77,11 +77,10 @@ func TestV1S19AwaitingAnswerIsPersistedToDisk(t *testing.T) {
 
 	// The answer's durable home is the same file: the D9 write archives
 	// the pair and clears the pending question in ONE atomic transition.
-	const answerID = "a_s19a"
 	const answerText = "Yes: the capsule is the authority."
 	out := d.pf(t, "answer", wi, "--text", answerText, "--question", qid,
-		"--answer-id", answerID, "--by", "usr_root")
-	if !strings.Contains(out, answerID) || !strings.Contains(out, "delivered") {
+		"--by", "usr_root")
+	if !strings.Contains(out, qid) || !strings.Contains(out, "delivered") {
 		t.Fatalf("answer outcome: %q", out)
 	}
 	waitNoQuestion(t, d, wi, 30*time.Second)

@@ -201,9 +201,9 @@ type Daemon struct {
 	rt  *runtime.Runtime
 	obs *observe.Observe
 
-	rtMsgs   chan protocol.RTMsg
-	obMsgs   chan protocol.OBMsg
-	attachCh chan observe.Attach
+	rtMsgs   *supervise.Queue[protocol.RTMsg]
+	obMsgs   *supervise.Queue[protocol.OBMsg]
+	attachCh *supervise.Queue[observe.Attach]
 
 	// sealGuard serializes the close paths (CLI wrap/pause): exactly one
 	// close may run per work item; the late arrival answers DAEMON-409.
@@ -228,6 +228,12 @@ type Daemon struct {
 	// drain ticker goroutine touches it (fetchAutoWave), so it carries
 	// no lock.
 	drainDegraded bool
+	// yamlRefused is project → the last workspace-yaml refusal logged for
+	// it: auto-pull skips a project whose .polyforge.yaml is invalid
+	// (nothing is claimed, the WIs stay queued for other machines) and
+	// logs a given refusal once, not every tick. Same single-goroutine
+	// ownership as drainDegraded.
+	yamlRefused map[string]string
 
 	// sup hands out the per-WI supervision links shared by the driver
 	// bridge (facts out, verdicts in, harness trackers) and the observe
@@ -304,8 +310,8 @@ func New(cfg Config) (*Daemon, error) {
 		WorkflowsDir:        cfg.WorkflowsDir,
 		Harness:             cfg.Harness,
 		PiBin:               cfg.PiBin,
-		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
 		CgroupRoot:          cfg.CgroupRoot,
+		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
 		EnvSecrets:          []string{cfg.APIKey},
 	}
 	// Runtime-sourced diagnostic events (a seal push that failed after
@@ -361,9 +367,9 @@ func New(cfg Config) (*Daemon, error) {
 		hub:      cfg.Hub,
 		modes:    NewModeCtl(),
 		q:        NewJobQueue(cfg.MaxConcurrent, func() map[string]bool { return d.occupiedSlots() }),
-		rtMsgs:   make(chan protocol.RTMsg, 64),
-		obMsgs:   make(chan protocol.OBMsg, 64),
-		attachCh: make(chan observe.Attach, 64),
+		rtMsgs:   supervise.NewQueue[protocol.RTMsg](),
+		obMsgs:   supervise.NewQueue[protocol.OBMsg](),
+		attachCh: supervise.NewQueue[observe.Attach](),
 		sealedWI: map[string]bool{},
 		adapters: map[string]*agentAdapter{},
 		shutDone: make(chan struct{}),
@@ -384,8 +390,8 @@ func New(cfg Config) (*Daemon, error) {
 		DataDir:      cfg.DataDir,
 		PollInterval: cfg.ObservePoll,
 		PushFunc:     cfg.PushFunc,
-		// F3: the live-transcript locator the monitor's commit-boundary
-		// sync calls when the runtime recorded no live path; the F2 slug
+		// F3: the live-transcript locator the monitor's per-dispatch
+		// commit-boundary sync calls; the F2 slug
 		// resolver lets CLI-side route calls by the operator's spelling
 		// (a "<project>#<seq>") find the canonically-keyed monitor.
 		LocateLive: func(capsuleDir string, spawnAt time.Time) string {
@@ -539,7 +545,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.rt.Restart(d.runCtx); err != nil {
 		// Startup abort: the runtime could not be reconciled as a whole
 		// (a missing capsule or an unmapped project is NOT such a case —
-		// v2-converge §6 parks only that work item repair_pending and
+		// v2-converge §6 blocks only that work item at aihub and
 		// Restart returns nil), so serving would present clients an
 		// unreconciled runtime. Unwind as a startup
 		// abort: close the face this process bound but never served, stop
@@ -669,38 +675,28 @@ func (d *Daemon) reattachRecovered() {
 		if ji.Agent == nil {
 			continue
 		}
-		select {
-		case d.attachCh <- d.buildAttach(protocol.RTMsg{
+		d.attachCh.Push(d.buildAttach(protocol.RTMsg{
 			Kind: protocol.RTStarted, SpawnN: ji.SpawnN,
 			WorkItem: ji.WorkItem, AgentPID: ji.AgentPID,
 			// the in-process secret re-arms the M4 revalidation for
 			// reattached jobs (it rides RTMsg, never a log surface).
 			SessionID: ji.SessionID,
-		}, ji):
-		case <-d.runCtx.Done():
-			return
-		}
+		}, ji))
 	}
 }
 
 // buildAttach turns one runtime snapshot into an observe attachment:
 // the protocol message plus the agent handle adapted to observe's face.
-// The per-derivation transcript facts (F3: the capsule copy path, the
-// live file, the spawn moment) ride the WIInfo the monitor's
-// commit-boundary transcript sync reads.
 func (d *Daemon) buildAttach(msg protocol.RTMsg, ji runtime.JobInfo) observe.Attach {
 	return observe.Attach{
 		Msg:    msg,
 		Handle: d.installAdapter(ji),
 		WI: observe.WIInfo{
-			WorkItem:       ji.WorkItem,
-			Project:        ji.Project,
-			CapsuleDir:     ji.CapsuleDir,
-			BundleName:     ji.BundleName,
-			Git:            ji.Git,
-			Transcript:     ji.Transcript,
-			LiveTranscript: ji.LiveTranscript,
-			SpawnAt:        ji.SpawnAt,
+			WorkItem:   ji.WorkItem,
+			Project:    ji.Project,
+			CapsuleDir: ji.CapsuleDir,
+			BundleName: ji.BundleName,
+			Git:        ji.Git,
 		},
 	}
 }
@@ -746,12 +742,10 @@ func (d *Daemon) canonWI(wi string) string {
 // only control vocabulary).
 func (d *Daemon) bridge() {
 	for {
-		select {
-		case <-d.runCtx.Done():
-			return
-		case msg, ok := <-d.rtMsgs:
+		for {
+			msg, ok := d.rtMsgs.Pop()
 			if !ok {
-				return
+				break
 			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
@@ -759,11 +753,12 @@ func (d *Daemon) bridge() {
 					at = d.buildAttach(msg, ji)
 				}
 			}
-			select {
-			case d.attachCh <- at:
-			case <-d.runCtx.Done():
-				return
-			}
+			d.attachCh.Push(at)
+		}
+		select {
+		case <-d.runCtx.Done():
+			return
+		case <-d.rtMsgs.Notify():
 		}
 	}
 }
@@ -841,14 +836,13 @@ func (l driverEventLog) Append(wi, kind string, body any) error {
 
 // occupiedSlots is the set of WIs holding a concurrency slot: the
 // runtime's live jobs, whoever started them (dispatch, restart recovery,
-// resume-blocked, repair). Finding 2 (v1.5 review): a RETAINED paused job
+// resume-blocked). Finding 2 (v1.5 review): a RETAINED paused job
 // holds no agent and no writer — it must not pin a slot (four
-// operator-paused jobs would otherwise starve the whole daemon); a
-// repair_pending park holds no agent and no slot either.
+// operator-paused jobs would otherwise starve the whole daemon).
 func (d *Daemon) occupiedSlots() map[string]bool {
 	live := map[string]bool{}
 	for _, ji := range d.rt.List() {
-		if ji.State == runtime.StatePaused || ji.RepairPending != "" {
+		if ji.State == runtime.StatePaused {
 			continue
 		}
 		live[ji.WorkItem] = true
@@ -867,7 +861,22 @@ func (d *Daemon) dispatch() {
 			return
 		}
 		d.rt.NoteOrigin(e.WorkItemID, e.Origin)
-		err := d.rt.StartIntent(d.runCtx, e.WorkItemID, e.Intent)
+		d.rt.NoteModels(e.WorkItemID, e.Models)
+		err := d.rt.Start(d.runCtx, e.WorkItemID)
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
+			// The hub could not be reached before the claim: nothing was
+			// claimed, so the accepted submit stays queued and is retried
+			// with backoff (never dropped on a transient blip, never
+			// blocking the other entries). One log line per episode.
+			if e.Deferrals == 0 {
+				fmt.Fprintf(os.Stderr, "daemon: start %s (%s) deferred, will retry with backoff: %v\n", e.WorkItemID, e.Intent, err)
+			}
+			if rerr := d.q.Requeue(e.WorkItemID); rerr != nil {
+				fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, rerr)
+			}
+			continue
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)
 			// The submit was answered `accepted`: record the refusal as a
@@ -876,9 +885,6 @@ func (d *Daemon) dispatch() {
 		}
 		if serr := d.q.Settle(e.WorkItemID); serr != nil {
 			fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, serr)
-		}
-		if err != nil {
-			continue // slot stays free; the next pending entry backfills
 		}
 	}
 }
@@ -902,6 +908,17 @@ func (d *Daemon) fetchAutoWave() {
 	var items []api.WorkItem
 	degraded := false
 	for _, project := range d.cfg.Mapping.Projects() {
+		if _, lerr := d.rt.LoadWorkspace(project); lerr != nil {
+			if d.yamlRefused == nil {
+				d.yamlRefused = map[string]string{}
+			}
+			if d.yamlRefused[project] != lerr.Error() {
+				d.yamlRefused[project] = lerr.Error()
+				fmt.Fprintf(os.Stderr, "daemon: drain skips project %q (nothing claimed): %v\n", project, lerr)
+			}
+			continue
+		}
+		delete(d.yamlRefused, project)
 		pis, err := d.hub.Queue(project)
 		if err != nil {
 			if authDenied(err) {

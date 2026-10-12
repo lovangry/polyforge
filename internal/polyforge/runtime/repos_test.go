@@ -142,7 +142,7 @@ func TestRematerializePreservesRepoScene(t *testing.T) {
 	delete(r.jobs, "wi_repo2")
 	r.mu.Unlock()
 	writeStateFile(t, r, nil)
-	if err := r.noteClaiming("wi_repo2", session, randomKey()); err != nil {
+	if err := r.noteClaiming("wi_repo2", session, randomKey(), nil); err != nil {
 		t.Fatal(err)
 	}
 

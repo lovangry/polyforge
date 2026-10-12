@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,8 +109,33 @@ func (e *gitEnv) credURL(wiID, secret string) string {
 	return strings.Replace(base, "http://", "http://"+wiID+":"+secret+"@", 1)
 }
 
-// runGit runs git in dir with the given env additions.
+// runGit runs git in dir. A push to a credentialed proxy URL carries the
+// session-fingerprint push option the way the daemon's gitops layer does
+// (the hook requires it); runGitRaw sends exactly the given args.
 func runGit(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	if len(args) > 1 && args[0] == "push" {
+		hasOpt := false
+		var fp string
+		for _, a := range args[1:] {
+			if strings.HasPrefix(a, "--push-option=") {
+				hasOpt = true
+			}
+			if u, err := url.Parse(a); err == nil && u.User != nil {
+				if pw, ok := u.User.Password(); ok {
+					fp = api.SessionFingerprint(pw)
+				}
+			}
+		}
+		if !hasOpt && fp != "" {
+			args = append([]string{"push", "--push-option=session-fingerprint=" + fp}, args[1:]...)
+		}
+	}
+	return runGitRaw(t, dir, args...)
+}
+
+// runGitRaw runs git in dir with exactly the given args.
+func runGitRaw(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -206,37 +232,29 @@ func TestPushOptionAdvertisedAndFenced(t *testing.T) {
 	if fp == "" {
 		t.Fatalf("claim result carries no session fingerprint")
 	}
-	// The bare repo advertises push options — both on fresh creation and
-	// idempotently for a pre-existing repo (re-EnsureBare must not regress
-	// it).
+	// A freshly created bare repo advertises push options.
 	out := mustGit(t, e.mgr.RepoDir(wiID), "config", "receive.advertisePushOptions")
 	if strings.TrimSpace(out) != "true" {
 		t.Fatalf("receive.advertisePushOptions = %q, want true", strings.TrimSpace(out))
-	}
-	if err := e.mgr.EnsureBare(wiID); err != nil {
-		t.Fatalf("re-ensure bare: %v", err)
-	}
-	out = mustGit(t, e.mgr.RepoDir(wiID), "config", "receive.advertisePushOptions")
-	if strings.TrimSpace(out) != "true" {
-		t.Fatalf("receive.advertisePushOptions after re-ensure = %q", strings.TrimSpace(out))
 	}
 
 	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
 	commitSeq(t, wt, "a.txt", "one\n", 1)
-	// A push WITHOUT the option still succeeds through the proxy (the
-	// hook only compares when both sides of the fence exist).
-	if err := push(t, wt, cred); err != nil {
-		t.Fatalf("option-less push rejected: %v", err)
+	// A push WITHOUT the option is refused through the proxy: the option
+	// is required whenever the proxy vouches for a session.
+	out, err := runGitRaw(t, wt, "push", cred, "HEAD:refs/heads/main")
+	if err == nil || !strings.Contains(out, "no session-fingerprint push option") {
+		t.Fatalf("option-less push through the proxy accepted or wrongly rejected: %v (%s)", err, out)
 	}
-	// The matching session-fingerprint option succeeds.
+	// The matching session-fingerprint option succeeds (same commit).
 	commitSeq(t, wt, "b.txt", "two\n", 2)
 	if out, err := pushWithFingerprint(t, wt, cred, fp); err != nil {
 		t.Fatalf("push with the matching session-fingerprint option failed: %v (%s)", err, out)
 	}
 	// A foreign fingerprint is rejected by the pre-receive hook.
 	commitSeq(t, wt, "c.txt", "three\n", 3)
-	out, err := pushWithFingerprint(t, wt, cred, "deadbeefdeadbeef")
+	out, err = pushWithFingerprint(t, wt, cred, "deadbeefdeadbeef")
 	if err == nil {
 		t.Fatalf("push with a foreign session-fingerprint accepted: %s", out)
 	}

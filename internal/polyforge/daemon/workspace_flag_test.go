@@ -1,8 +1,7 @@
 package daemon
 
 // workspace_flag_test.go pins the #113 launch surface at the daemon's
-// real entry (Main): the retired workspace/project selection flags fail
-// flag PARSING (exit 2 — deleted, never demoted), the retired selection
+// real entry (Main): the retired selection
 // environment variables refuse the boot BEFORE anything is loaded or
 // served (exit 1, naming the variable), a config with zero [workspace]
 // sections refuses startup naming the shape and `pf doctor`, and a
@@ -17,37 +16,6 @@ import (
 	"strings"
 	"testing"
 )
-
-// TestRetiredSelectionFlagsFailAtParse: the deleted -workspace and
-// --project flags (either dash spelling) are unknown-flag parse failures
-// — the daemon never starts and the error names the flag.
-func TestRetiredSelectionFlagsFailAtParse(t *testing.T) {
-	cases := []struct {
-		name string
-		flag string
-	}{
-		{"retired workspace flag, single dash", flagTok("-", "work", "space")},
-		{"retired workspace flag, double dash", flagTok("--", "work", "space")},
-		{"retired project flag, single dash", flagTok("-", "proj", "ect")},
-		{"retired project flag, double dash", flagTok("--", "proj", "ect")},
-	}
-	// Go's flag package normalizes the double-dash spelling in its
-	// "not defined" message, so the named-token assertion uses the
-	// single-dash form (a substring of the double-dash one).
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			var stderr bytes.Buffer
-			code := Main([]string{"--socket", "/nonexistent-probe.sock", c.flag, "/tmp/x"}, nil, &bytes.Buffer{}, &stderr)
-			if code != 2 {
-				t.Fatalf("exit = %d, want 2 (flag parse failure), stderr: %q", code, stderr.String())
-			}
-			named := flagTok("-", strings.TrimLeft(c.flag, "-"))
-			if !strings.Contains(stderr.String(), named) {
-				t.Fatalf("parse error %q does not name the retired flag %q", stderr.String(), named)
-			}
-		})
-	}
-}
 
 // TestNoMappingRefusesAtMain: a config with zero [workspace] sections —
 // the fresh-install template shape — refuses startup (exit 1) naming the
@@ -100,6 +68,3 @@ func TestMappingConfiguredBootReachesWorkspaceValidation(t *testing.T) {
 		t.Fatalf("validation failure %q does not name the mapped workspace", stderr.String())
 	}
 }
-
-// flagTok joins flag-name fragments.
-func flagTok(parts ...string) string { return strings.Join(parts, "") }

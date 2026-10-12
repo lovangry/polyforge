@@ -3,7 +3,7 @@
 > 状态：**r3，owner 裁决已全部纳入，待审阅**（2026-10-12）。
 > 来源：2026-10-12 owner 与 review 会话的完整讨论；r2 吸收了一次独立深度审查（25 个漏洞 + 历史回归对照，附录 A/B），owner 已同意其 18 条修补默认值。
 > 本文取代的范围：04 §6.2 监督车道、v1.5-session-model 中 watch/adoption 相关描述、`skills/polyforge/scripts/watch.sh`。
-> 落地进度（集成分支 `v2/converge`）：见第 8 节状态列、第 10 节映射与文末「已知缺口」；监督重写（第 2 节、`pf watch` 进展字段）在另一分支进行。
+> 落地进度：本文第 2–8 节的设计均已落地（含监督重写与 `pf watch` 进展字段）；见第 8 节状态列、第 10 节映射与文末「已知缺口」。
 > 落地方式：**快速落地**——直接切换到新设计，不走"新旧并行观察 → 再删旧"的分阶段迁移（owner 2026-10-12）。
 
 ---
@@ -54,7 +54,7 @@
 - harness 的海量输出**只保留最新状态**（合并，不排队）。
 - 持久化：`execution.json` 是**唯一权威**（进度、待答问题、失败计数、放宽后的阈值、终态）；事件日志是**补充记录**——driver 事件也写入（替代只打 stderr 的 `stdLogger`），每条事件带**跨重启单调递增 id**（不再每次重启从 1 重编），文件按大小轮转；磁盘满时事件追加失败只降级为日志告警，权威仍在 `execution.json`。
 - supervisor 不再轮询 `execution.json` 作为主路径；推送进度到 aihub 改由事件触发，**保留退避与同错熔断**（F18/F22 教训：曾 185 次推送风暴）。
-- 转录同步（F3）以最近一次 `step_started.transcript_path` 为源，commit 前同步。
+- 转录同步（F3）以最近一次 `step_started.transcript_path` 为源，commit 前同步。（现状：job 级的 seal 前转录同步 `syncTranscriptBeforeSeal` 已删除；capsule 内转录靠提交边界同步。）
 
 **driver → supervisor（事实）**
 
@@ -127,8 +127,9 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - 存放：`execution.json` 该 step 的字段（attempts 记录带 cause 子类）。
 - 计入：上表除"daemon 重启"外的所有死因。**信封被拒（#107 进程内重试，独立上限）不计入。**
 - 清零：gate rewind 回到该步、换到新候选模型、人工"继续"。
-- daemon 重启触发的中断**不归档为失败、不推进候选指针**（修正现状：`ClassifyFault` 默认 provider 导致重启切模型，`driver/candidates.go:201`）。
-- `PolicyFor` 中 host→block、schema→report 当前未接入生产，按上表落实。
+- daemon 重启触发的中断**不归档为失败、不推进候选指针**；一般地，被中断的 attempt 永不推进候选指针。（现状：`FaultClass` 分类层已删除，改为**死因规则**——只有模型类死因 `model_error`、`model_hung`、`step_timeout_slow_model`、`exit_model_class` 推进候选指针；指针在 gate_fail rewind 时重置；见 `driver/candidates.go`、`driver/supervision.go`。事件体与 attempts 记录带 `failure_cause`，不再有 `fault_class`。）
+- （现状：候选列表五级优先，高到低：`pf submit --models a,b,c` 的手工列表（仅由本 daemon 保存、按 WI、作用于该 WI 的每一步；随 submit 队列落盘，认领时写入 daemon 数据目录的 `manual-models.json`（不进 capsule），本机 daemon 重启、恢复、`pf resume` 重新认领均沿用，WI 终态（wrapped/failed/canceled）时删除；在另一台机器上重新认领则没有该列表，使用那台机器自己的设置）> 工作区 yaml 文件的 `models.<project>.<kind>` > `models.<project>.default` > bundle 步骤自带 `model_candidates` > bundle `defaults.model_candidates`；推进/重置语义不变。见 `workspace/compose.go`。）
+- 失败处理按死因表（上节）执行；`PolicyFor` / provider·host·operator·schema 分类已随 FaultClass 层删除（`driver/supervision.go`）。
 
 ### 2.4 阈值（已定）
 
@@ -214,7 +215,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - 形态（**已落地**，分支 `v2/m2-modes`）：`pf ops auto on|off` + `pf ops max N`，自动领取与手动提交并存。`auto off` = 只有显式 `pf submit`；`auto on` = daemon 另外自己拉 aihub 就绪队列（即原 drain 循环，origin 仍为 `auto`）。已删除 interactive/batch/drain 三模式、`abort-drain`、`batch-confirm`、`batch_submit`、`get_recommendation`（只是原样转发就绪队列，改用 `pf queue --ready`）、DAEMON-409「drain 是唯一建 job 入口」拒绝。`status` 头为 `auto: on|off  max: N`；heartbeat 体仍带 mode 字符串（`auto` / `manual`）以兼容 aihub。daemon 旗标 `-auto`（`-mode` 别名与 `daemon-state.json` 旧 `mode` 字段的迁移均已删除，见第 262 行「兼容垫片」：v2 不留向后兼容代码）。drain 作为产品能力仍属「暂不做」范围（跨 daemon 通信 #84 未到），但架构上已可用。
 - **名额已满时的提交**：daemon 排队队列**持久化到 daemon 数据目录**（方案 B），重启不丢。重放规则（r2 补）：
   - 条目带 origin 与提交时间；
-  - **只重放普通提交，不重放 takeover**；
+  - 只重放普通提交；
   - 重放前先查 aihub 状态（已被领取 / 已结束则丢弃）；
   - 与 B1 claiming journal 重放去重，避免同一 WI 双重领取；
   - 被拒一律发决策事件给订阅者 / 负责人。
@@ -225,11 +226,11 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 **原则**：session 是唯一的锁；`execution.json` 是唯一的进度账本；推到 aihub git 才算保存；**绝不悄悄从远端重建本地现场**（#103）。
 
 **已定**
-- 某 WI 的 capsule 在重启时缺失 / 项目未映射：**只该 WI 进入"待修复"**——本地标记、**session 保留**、写明原因并发决策事件；daemon 照常启动、其余 WI 照常恢复。人恢复目录 / 补映射后，由**同一 session 原地续跑**（不走重新领取，避免隔离 + 克隆把人刚恢复的本地现场丢掉）。人也可选择"放弃"：`pf cancel <wi>` / `pf wrap --fail <wi>` 先用**人自己的 key** 调 aihub 只读授权探针（`GET /work-items/{id}/close-auth`：负责人 / maintainer / admin），再由 daemon 用保存的 session secret 结束 session（`canceled` / `failed`；失败走 end_pending 持续重试），丢弃待修复记录并写 `repair_abandoned` 事件。
+- 某 WI 的 capsule 在重启时缺失 / 项目未映射（cli.toml 无该项目的 workspace 映射）：**只该 WI 被置为普通的 aihub `blocked`**——经与其他 blocked 结局相同的 bounded-fail 收尾发 SessionEnd(blocked)，原因备注写明成因（"capsule missing at <path> …" / "project <p> is not in the daemon's [workspace] mapping …"）；**本地不停放任何东西**（无本地 job 记录、无槽位），仍写 `capsule_missing` / `project_unmapped` 事件（`pf watch` 可见）；daemon 照常启动、其余 WI 照常恢复。人（如需）先修复成因（补映射），再 `pf resume <wi>`：这是普通的 blocked 门（resume-blocked + daemon claim）= 从 aihub capsule 链 + task-repo 载体 ref（`refs/pf-task/<name>`）**重新领取**；死现场（如有）被隔离，已完成的步骤不重跑，最后一次推送之后发布的工作丢失。`pf cancel <wi>` / `pf wrap --fail <wi>` 就是普通的 blocked 出口（hub cancel / terminate-blocked）。session-end 只接受 wrapped|failed|blocked|paused。
 - **不加租约**（保留 v1.5 裁决：领取永不驱逐活着的持有者，接管是单独的特权操作）。改为 WI 级"失联"提示：**WI 失联 = 其持有 daemon 的心跳超时（统一一个阈值，替代 aihub 展示层的 5 分钟与本文早先的 15 分钟两套），或该 WI 从该 daemon 心跳上报的在跑列表中消失**；在 `pf queue`/`pf watch` 提示"可接管"并发事件。
 - 同一步失败计数上限（2.3）；driver 异常退出界（2.3）。
 
-**待修 bug（已核实或读码得出）**
+**曾经的缺陷（均已修复，保留作回归清单）**
 1. 重新领取时克隆失败会退化为本地 init，`execution.json` 丢失，工作流从第 1 步重来（`runtime/runtime.go:1143-1153`）→ 改为本地"待 blocked"，保留现场，**持续重试 SessionEnd**（克隆失败多半因 aihub 不可达，此时 SessionEnd 也会失败，不能假设立刻 blocked 成功）；修复须保留 #108 的 task-ref 拉取（`FetchTaskRef`）。
 2. 同机重新领取接上旧 git-dir（`gitops.go:649-656`，ENOTEMPTY 被 `os.IsExist` 视为已存在）。
 3. daemon 崩溃后 step 进程及其子进程不回收（`recover.go:534-545`）→ 重启时按 spawn journal 中的 pid 与 `PF_WI_ID` + `PF_DAEMON_ID` 双环境标记（同机另一 daemon 的同 WI 进程不受影响）回收（四层清理对 pid=0 也执行）。
@@ -239,7 +240,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 7. 重启后 `pf observe` 只读内存事件环，历史从头开始（由 2.2 的持久事件 + 单调 id 解决）。
 8. 重启后无任何"daemon 重启过"的信号给会话（→ 决策事件）。
 
-**文档对齐**：正常关停后 WI 在 aihub 上是 `running`（不是文档所说 paused）；resume-blocked 是从 aihub 重新克隆（不是"原地继续"）。
+**事实澄清**：正常关停后 WI 在 aihub 上保持 `running`（session 保留），下次 daemon 启动时恢复。
 
 ## 7. 生命周期简化（已定方向）
 
@@ -257,9 +258,9 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | 二（#106 残骸） | flush 车道全套、answer 缓存/ledger、recall/remember 代理路由、step 进程 stdio 控制通道、`PF_DAEMON_SOCKET`（**仅作为 step 环境变量**删除；CLI/daemon 的 `--socket`/`PF_DAEMON_SOCKET` 是用户面配置，保留）、`PF_AGENT_ROLE`（#81）；步骤文本旧协议（#137） | **集成分支已完成**（`34fdf86`、`5f4fc3c`、`4c4564f`）；`agents/` 布局兼容（#136）**未单独核对** |
 | 三（改逻辑，随本设计） | supervisor 猜测型车道（hang/idle/probe/wall/turn_duration/工具豁免/问题豁免/ack veto）→ 2.3 规则（**M4 重验保留**）；watch.sh → `pf watch`；三模式 → 第 5 节 | `pf watch`（Go）、watch.sh / watch-probe 删除：**已完成**（`f642e06`、`c01bd94`）；supervisor 车道重写：**已完成**（`internal/polyforge/supervise`、`driver/supervision.go`）；三模式简化：**已完成**（`v2/m2-modes`：`pf ops auto on|off` + `pf ops max N`，守护进程旗标 `-auto`，无兼容别名） |
 | 四 | takeover/adopt-session 简化（先验证"结束会话后重新领取能从断点继续"）；心跳保留并修权限漏洞 | takeover 简化：**已验证并完成**——验收测试 `test/v2_m3_end_session_recovery_test.go`（A 完成两步后被 SIGKILL → 管理员强制结束会话 → B 普通领取，从中断步继续、A 的任务仓提交经 `refs/pf-task` 还原、旧密钥写入被拒、A 重启后释放不复活）通过后，删除 `pf takeover`、`pf submit --takeover`、`pf verify-session`、daemon `takeover`/`adopt-session` 路由、`runtime/adopted.go` 托管、aihub `force-takeover` 端点；恢复路径 = 管理员/维护者 `pf ops end-session <wi> --reason ...`（aihub `POST /work-items/{id}/force-end-session`，WI→queued，审计事件 `session_superseded`）+ 任意 daemon 普通 `pf submit`；**M4 重验保留**。心跳权限漏洞：未动 |
-| 已完成 | release-intent 门禁（#139，commit a159c8c）；driver 机械保证（needs_input 校验、仅 feature-full grill-review 的 `requires_human_answer`、V4 command_evidence 门禁，`f00b398`）；重新领取两个 bug（git-dir 隔离、克隆失败拒绝 InitLocal / DAEMON-516）；身份模型（daemon-id 文件、`pf chat init`、`PF_CHAT_ID`、origin）；持久化提交队列 + 待修复停放 + `pf resume` 续跑（DAEMON-517）+ `daemon_restarted`/`submit_*` 事件；bounded-fail 杀树 + 推送、end_pending 重试、隔离原子性、继续/放弃走人的 key（`pf resume`/`pf cancel`/`pf wrap --fail`）、`unblock` 动词移除、blocked 封存跨 daemon 校验（DAEMON-518）；待修复 WI 的放弃路径；孤儿 step 进程回收；`atomicWrite` 修复 | 已完成（`v2/final`）；含孤儿回收的双标记边界（`PF_WI_ID` + `PF_DAEMON_ID`，同机多 daemon 互不误杀）|
+| 已完成 | release-intent 门禁（#139，commit a159c8c）；driver 机械保证（needs_input 校验、仅 feature-full grill-review 的 `requires_human_answer`、V4 command_evidence 门禁，`f00b398`）；重新领取两个 bug（git-dir 隔离、克隆失败拒绝 InitLocal / DAEMON-516）；身份模型（daemon-id 文件、`pf chat init`、`PF_CHAT_ID`、origin）；持久化提交队列 + 待修复停放 + `pf resume` 续跑（DAEMON-517；此后已并入 blocked，见第6节）+ `daemon_restarted`/`submit_*` 事件；bounded-fail 杀树 + 推送、end_pending 重试、隔离原子性、继续/放弃走人的 key（`pf resume`/`pf cancel`/`pf wrap --fail`）、`unblock` 动词移除、blocked 封存跨 daemon 校验（DAEMON-518）；待修复 WI 的放弃路径（此后已并入 blocked，见第6节）；孤儿 step 进程回收；`atomicWrite` 修复 | 已完成（`v2/final`）；含孤儿回收的双标记边界（`PF_WI_ID` + `PF_DAEMON_ID`，同机多 daemon 互不误杀）|
 | 迁移代码 | v0→v1 迁移（`migrate-memories`/`migrate-work-items`、`core/import.go`、`tools/v0export`、`seed-v1.sh` 等）：owner 裁定提前删除，不再设观察期 | **已完成**（`v2/m1-migrate`） |
-| 兼容垫片 | owner 裁定 v2 不留向后兼容代码：`-mode` 别名、`daemon-state.json` 的 `mode` 迁移、`pf observe` 别名、`pf unblock` 提示桩、aihub `unblock` 端点与 `WIManager.Unblock`、`[watch.*]`/`watch_*` 配置容忍、`project_scope` 别名、对遗留 `takeover` 队列项的专名处理 | **已完成**（`v2/final`）；配置加载现对未知 section（含 `[watch.*]`）报错，未知顶层平铺键仍被忽略 |
+| 兼容垫片 | owner 裁定 v2 不留向后兼容代码：`-mode` 别名、`daemon-state.json` 的 `mode` 迁移、`pf observe` 别名、`pf unblock` 提示桩、aihub `unblock` 端点与 `WIManager.Unblock`、`[watch.*]`/`watch_*` 配置容忍、`project_scope` 别名、对遗留 `takeover` 队列项的专名处理 | **已完成**（`v2/final`）；配置加载现对未知 section（含 `[watch.*]`）报错，未知顶层平铺键同样报错（含已移除的 `url` 别名；`533e032`） |
 
 ## 9. 快速落地顺序
 
@@ -273,7 +274,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 3. **监督替换（同一批上线）**：driver ↔ supervisor 契约 + 判死规则 + 死因处理 + 失败计数 + 阈值 + 恢复引擎的 driver 异常退出界 + **孤儿 step 进程回收（第 6 节 bug 3，必须同批——否则"重启后同模型重派"会与孤儿进程双写同一 capsule，#99 教训）**。
 4. **`pf watch`**：Go 实现、双通道、固定模板唤醒、订阅/游标存 daemon、Claude Code statusLine 与唤醒适配、pi 扩展；删除 watch.sh / watch-probe。
 5. **身份模型**：daemon id 存放迁移、`PF_CHAT_ID`、负责人、origin、通知路由。
-6. **恢复与重启其余 bug**（第 6 节 4、5、6、8）+ 坏任务"待修复"原地续跑 + 持久化排队队列（含重放规则）+ "继续"范围校验。
+6. **恢复与重启其余 bug**（第 6 节 4、5、6、8）+ 坏任务置 blocked 后 `pf resume` 重新领取（原"待修复"原地续跑，此后已并入 blocked，见第6节） + 持久化排队队列（含重放规则）+ "继续"范围校验。
 7. **减法一、二档**（可与 2–6 并行）。
 8. 之后：权限隔离（#135）、按步骤选 harness、drain + 跨 daemon 通信（#84）。
 
@@ -318,7 +319,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | 6 | 高 | 事件日志 best-effort、seq 不跨重启 | 2.2 execution.json 权威 + 单调 id；3.1 重连先核对状态 |
 | 7 | 高 | daemon id 新生成会被 aihub 拒绝注册 | 4：沿用 machine-id 字符串 |
 | 8 | 高 | 孤儿回收晚于"重启同模型重派"（#99 回归） | 9：同批上线 |
-| 9 | 高 | 坏任务 blocked 后继续会重新克隆（#103 回归）；克隆失败时 SessionEnd 也会失败 | 6：待修复 + session 保留 + 原地续跑；bug 1 持续重试 |
+| 9 | 高 | 坏任务 blocked 后继续会重新克隆（#103 回归）；克隆失败时 SessionEnd 也会失败 | 6：置 blocked + `pf resume` 重新领取（原待修复原地续跑，此后已并入 blocked，见第6节）；bug 1 持续重试 |
 | 10 | 高 | watch 状态/唤醒/映射/队列文件 agent 可写 | 3.1、3.2、4、5：存 daemon 数据目录、固定模板 |
 | 11 | 中 | 工具超时重试不放宽（#83 回归）；阈值受 bundle 钉住 | 2.3 tool_hung 放宽；2.4 覆盖对之后领取的 WI 生效 |
 | 12 | 中 | 零事件只能靠 T 兜底（#114 退化） | 2.3 规则 ⓪ |
@@ -346,7 +347,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | #97 快速死亡死循环 | 恢复引擎 driver 异常退出界（保留 storm guard 语义） |
 | #99 等人期间假卡死 | 等人期间无进程、不计时 |
 | #99 双写者 | 孤儿回收与监督替换同批 |
-| #103 绝不悄悄重建 | 坏任务"待修复"原地续跑 |
+| #103 绝不悄悄重建 | 坏任务置 blocked，人显式 `pf resume` 才重新领取（原"待修复"原地续跑，此后已并入 blocked，见第6节） |
 | #108 task-repo 持久 | 保留 FetchTaskRef |
 | #114 探针洗白 / 零事件 | 无探针 + 规则 ⓪ + ④ |
 | #116 blocked 前状态 | 继续范围校验 |
@@ -371,7 +372,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 ## 附录 C：已知缺口（集成分支，2026-10-12）
 
 - **(a) bundle digest 描述与代码不一致**：01 §4.5 描述的是 RFC 8785 canonical-JSON bundle digest，但在线的 `Digest` 实现是"路径 + sha + 长度"拼接。**以代码为准**（`internal/common/workflow`，golden 向量在活测试中），01 §4.5 待更正。
-- **(b) 人工确认保证只约束诚实的 agent，直到 #135 落地**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证，但不可信的 step agent 仍可写 capsule、可触达 daemon 的 UDS socket，从而绕过。真正的隔离是 #135（第 9 节 8）。同一缺口的一个具体实例：daemon 的 abandon-repair 路由（放弃 repair_pending WI）信任 CLI 侧的人类密钥检查，因此任何能连上 UDS socket 的客户端都可以放弃一个 repair_pending 的 WI，直到 #135 落地。
+- **(b) 人工确认保证只约束诚实的 agent，直到 #135 落地**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证，但不可信的 step agent 仍可写 capsule、可触达 daemon 的 UDS socket，从而绕过。真正的隔离是 #135（第 9 节 8）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
 - **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
 
 ## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`）

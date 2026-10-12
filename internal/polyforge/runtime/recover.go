@@ -25,9 +25,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
-	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // cleanupBound bounds one teardown's waits inside the six-layer cleanup.
@@ -162,21 +160,16 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// wakes up blind to its own goal. Best-effort, idempotent.
 	r.ensureWorkItemFile(j)
 
-	// F7 repair: a capsule whose materialized bundle set is missing its
-	// completion marker (a crash-torn snapshot) — or predates the product
-	// fix entirely — gets the set idempotently rebuilt, marker
-	// included, before the next derivation wakes up. The
-	// rebuild never breaks a scene the dead agents already read (staged
-	// renames, identical content). Best-effort, never blocks recovery.
-	r.ensureMaterialized(j)
-
-	// v2 bundle freshness (the stale-capsule lesson): the operator may
-	// have evolved the workflow bundle under workflows-dir AFTER this
-	// WI's claim; recovery is the heal point where the capsule is
-	// re-pinned to the checkout's current content and re-materialized,
-	// so the relaunched driver validates against the CURRENT graph
-	// instead of the claim-era one. Best-effort, loud on failure.
-	r.refreshBundle(j)
+	// The bundle is pinned at claim (v2-converge §2.4): recovery relaunches
+	// from the capsule's own materialized snapshot and never re-pins or
+	// re-materializes from the current checkout. A missing or untrusted
+	// snapshot is a loud terminal condition, not a silent rebuild.
+	if r.cfg.WorkflowsDir != "" && j.bundleName != "" && !r.materializationComplete(j) {
+		r.boundedFail(ctx, j, fmt.Sprintf(
+			"the capsule's materialized snapshot of bundle %s is missing or incomplete; recovery never re-pins to the current checkout (the bundle is pinned at claim)",
+			j.bundleName))
+		return
+	}
 
 	// The engine binding is the driver or NOTHING (polyforge#106): the
 	// legacy in-package WI-Agent spawn is deleted, so a nil starter is a
@@ -199,10 +192,10 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// effectiveCandidatesForRecovery) ride every relaunch attempt, and
 	// the interrupted dispatch (the death that forced this recovery)
 	// is archived by the driver before the re-dispatch: the
-	// recomputation then advances on provider-class causes alone. The
-	// archive signal is the raw cause — the bridge classifies it and
-	// filters operator-shaped stops (a deliberate stop is not a model
-	// verdict).
+	// recomputation then advances on model-class causes alone
+	// (driver.IsModelClass). The archive signal is the raw cause — the
+	// bridge classifies it and filters operator-shaped stops (a
+	// deliberate stop is not a model verdict).
 	stepCandidates := r.effectiveCandidatesForRecovery(j)
 	interruptedCause := cause
 	for {
@@ -218,7 +211,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		// The journal is the one ledger every derivation appends to;
 		// seeding past its max restores the fence.
 		j.mu.Lock()
-		if m := maxSpawnNFromJournal(j.capsuleDir); m > j.spawnN {
+		if m := spawnJournalMaxN(j.capsuleDir); m > j.spawnN {
 			j.spawnN = m
 		}
 		j.spawnN++
@@ -279,66 +272,15 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 
 // effectiveCandidatesForRecovery answers the per-step effective
 // candidate lists a recovery re-derivation dispatches under
-// (polyforge#79):
-//
-//   - a LIVE job carries its claim-time snapshot — an in-process
-//     recovery keeps the claim-time list (an edit governs the NEXT
-//     claim, never an in-flight job's recomputation);
-//   - a restart-reconstructed job carries no snapshot: the effective
-//     lists re-derive from the workspace yaml FRESH through the same
-//     compose, so the archived-attempt recomputation indexes the
-//     re-derived list (the mid-flight-edit restart shape);
-//   - a yaml that fails to re-read falls back to the capsule.json
-//     audit — the claim-time snapshot materialize wrote;
-//   - an audit-less capsule rehydrates to nil (bundle-only, today's
-//     behavior).
+// (polyforge#79): the job's claim-time snapshot — live, or rehydrated
+// from the daemon-private state.json record (never from capsule.json,
+// which the agent can write). nil means bundle-only behavior. The yaml
+// is never re-read here: an edit governs the NEXT claim, never an
+// in-flight job.
 func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
 	j.mu.Lock()
-	snap := j.stepCandidates
-	j.mu.Unlock()
-	if snap != nil {
-		return snap
-	}
-	if ws, werr := r.cfg.Mapping.WorkspaceFor(j.project); werr == nil {
-		wcfg, cerr := workspace.Load(ws)
-		if cerr != nil {
-			fmt.Fprintf(os.Stderr, "runtime: %s: workspace yaml unreadable at recovery (%v); the claim-time audit stands\n", j.wi, cerr)
-		} else {
-			return workspace.ComposeCandidates(r.readCapsuleBundleFrontmatter(j), wcfg)
-		}
-	}
-	return readCapsuleEffectiveCandidates(j.capsuleDir)
-}
-
-// readCapsuleBundleFrontmatter reads the job's MATERIALIZED bundle
-// frontmatter from the capsule — the claim-era graph the driver
-// validates against (never the daemon checkout, which the operator may
-// have evolved).
-func (r *Runtime) readCapsuleBundleFrontmatter(j *job) *workflow.Frontmatter {
-	if j.bundleName == "" || j.capsuleDir == "" {
-		return nil
-	}
-	fm, err := workflow.ReadFrontmatter(filepath.Join(j.capsuleDir, capsule.DirWorkflows, j.bundleName, "workflow.md"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: materialized bundle frontmatter unreadable (treating as absent): %v\n", j.wi, err)
-		return nil
-	}
-	return fm
-}
-
-// readCapsuleEffectiveCandidates reads the effective_candidates audit
-// of the capsule.json on disk (nil when absent — an audit-less capsule
-// rehydrates to nil, bundle-only behavior).
-func readCapsuleEffectiveCandidates(capsuleDir string) map[string][]string {
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.CapsuleJSON))
-	if err != nil {
-		return nil
-	}
-	var idn capsule.Identity
-	if json.Unmarshal(raw, &idn) != nil {
-		return nil
-	}
-	return idn.EffectiveCandidates
+	defer j.mu.Unlock()
+	return j.stepCandidates
 }
 
 // recovered finishes a successful re-derivation. A successful recovery
@@ -397,9 +339,7 @@ func (r *Runtime) recoveryStabilityWindow() time.Duration {
 // — the hub clears the session row and marks the WI blocked, which the
 // claim gate excludes until a human intervenes (M2). The storm guard's
 // "never a third relaunch" contract is preserved: restart sees blocked
-// and leaves the record untouched. RTFinished(blocked) follows — on
-// sendRelease, so a full observe channel defers rather than drops it
-// (NEW-2: every RTFinished is a terminal release). Before the verdict the
+// and leaves the record untouched. RTFinished(blocked) follows. Before the verdict the
 // agent tree is killed and the dirty capsule committed+pushed best-effort
 // (polyforge#116: the parked verdict must reach the chain; v2-converge §6
 // bug 4: every branch, not just the blocked one). A SessionEnd the hub does
@@ -429,8 +369,7 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 // are the caller's to log; the LOCAL commit is the durable half and it
 // stands on its own.
 func commitDirty(r *Runtime, j *job) string {
-	// F3: the dead agent's live transcript rides this dirty commit too.
-	r.syncTranscriptBeforeSeal(j)
+	r.syncLiveTranscript(j.capsuleDir)
 	sha, _, _, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)

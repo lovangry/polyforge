@@ -4,8 +4,8 @@ package core
 // (polyforge#123, P1b). The daemon's ship bridge reports, per repo it
 // pushed (or idempotently re-used), the branch-top SHA it left in the
 // repo's git origin; this manager upserts the row so the ledger always
-// answers "where does this WI's copy of the repo live in git", queryable
-// per WI (GET /api/v1/work-items/{id}/ship-ledger).
+// answers "where does this WI's copy of the repo live in git". There is no
+// HTTP read face: the table is read from SQLite by operators.
 //
 // Accounting, not execution state (INV-1): rows describe git remotes'
 // branch tops, never workflow progress. Recording is the ship bridge's
@@ -100,45 +100,4 @@ func (m *ShipLedgerManager) Record(wiIDOrSlug, branch string, entries []api.Ship
 		}
 	}
 	return tx.Commit()
-}
-
-// Ledger answers the WI's ledger, one row per recorded repo, ordered by
-// repo name. A WI with no recorded ship serves an empty array (never a
-// fabricated row).
-func (m *ShipLedgerManager) Ledger(wiIDOrSlug string) (*api.ShipLedgerResponse, error) {
-	id, err := m.wis.Resolve(wiIDOrSlug)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := m.db.Query(`SELECT repo, branch, branch_top_sha, pushed_at FROM wi_ship_ledger
-		WHERE work_item_id=?1 ORDER BY repo`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := &api.ShipLedgerResponse{WorkItemID: id, Repos: []api.ShipLedgerRow{}}
-	for rows.Next() {
-		var r api.ShipLedgerRow
-		var branch string
-		if err := rows.Scan(&r.Repo, &branch, &r.BranchTopSHA, &r.PushedAt); err != nil {
-			return nil, err
-		}
-		r.Branch = branch
-		out.Repos = append(out.Repos, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// ledgerCount is a small internal face used by tests (and future
-// audits): how many rows the WI's ledger carries.
-func (m *ShipLedgerManager) ledgerCount(wiID string) (int, error) {
-	var n int
-	err := m.db.QueryRow(`SELECT COUNT(*) FROM wi_ship_ledger WHERE work_item_id=?1`, wiID).Scan(&n)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
-	return n, err
 }

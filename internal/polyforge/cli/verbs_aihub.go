@@ -7,12 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
-	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // ---------------------------------------------------------------------------
@@ -54,13 +52,13 @@ var osGetwd = os.Getwd
 // workspace, no yaml). It never mutates.
 const requiredProjectFlagError = "file create: --project is required — there is no default project (polyforge#113); workspaces and their projects are declared in [workspace.\"<path>\"] sections of cli.toml (`pf doctor` checks the mapping)"
 
-// inferProjectFromCwd is the polyforge#79 file-create default: the
-// process cwd resolved against the expanded [workspace] mapping by
+// inferProjectFromCwd is the file-create default: the process cwd
+// resolved against the expanded [workspace] mapping of cli.toml by
 // containment (cwd equal to or inside the workspace root). Exactly one
-// containing workspace whose yaml lists exactly ONE project answers it —
-// the create proceeds as if --project had been passed. Every other shape
-// asks for --project or surfaces the typed yaml error; inference never
-// silently degrades and never ambient-picks (the #113 principle).
+// containing workspace that lists exactly ONE project answers it — the
+// create proceeds as if --project had been passed. Every other shape
+// asks for --project; inference never ambient-picks (the #113
+// principle).
 func inferProjectFromCwd(ctx *Context) (string, error) {
 	cwd, err := osGetwd()
 	if err != nil || ctx.Cfg.Mapping == nil || ctx.Cfg.Mapping.Empty() {
@@ -78,27 +76,11 @@ func inferProjectFromCwd(ctx *Context) (string, error) {
 	case len(containing) > 1:
 		return "", fmt.Errorf("file create: --project is required — the working directory is inside more than one mapped workspace (%s); pass --project explicitly (placement stays unambiguous, polyforge#113)", strings.Join(containing, ", "))
 	}
-	wcfg, err := workspace.Load(containing[0])
-	if err != nil {
-		return "", fmt.Errorf("file create: %v", err)
+	projects := ctx.Cfg.Mapping.ProjectsOf(containing[0])
+	if len(projects) != 1 {
+		return "", fmt.Errorf("file create: --project is required — workspace %s maps %d projects (%s); pass --project explicitly (no default is invented)", containing[0], len(projects), strings.Join(projects, ", "))
 	}
-	if wcfg == nil || len(wcfg.Projects) == 0 {
-		// No yaml (absent-equivalent) or a workflow-only yaml: no project
-		// inventory to infer from — today's required-flag error stands.
-		return "", fmt.Errorf(requiredProjectFlagError)
-	}
-	if len(wcfg.Projects) > 1 {
-		names := make([]string, 0, len(wcfg.Projects))
-		for name := range wcfg.Projects {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		return "", fmt.Errorf("file create: --project is required — %s lists %d projects (%s); pass --project explicitly (no default is invented)", workspace.PathFor(containing[0]), len(names), strings.Join(names, ", "))
-	}
-	for name := range wcfg.Projects {
-		return name, nil
-	}
-	return "", fmt.Errorf(requiredProjectFlagError) // unreachable
+	return projects[0], nil
 }
 
 // requireMappedProject validates a placement-adjacent verb's --project
@@ -160,9 +142,9 @@ func fileCreate(ctx *Context, args []string) error {
 		req.Goal = *goal
 	}
 	if req.Project == "" {
-		// polyforge#79 inference: the cwd → workspace → yaml default. It
+		// polyforge#79 inference: the cwd → mapped workspace. It
 		// answers a project, the #113 required-flag error (verbatim), or
-		// the typed yaml/ambiguity error — never a silent skip.
+		// the ambiguity error — never a silent skip.
 		proj, err := inferProjectFromCwd(ctx)
 		if err != nil {
 			return err
@@ -444,27 +426,12 @@ var cmdQueue = &Command{
 		if boolFlag(fs, "ready") {
 			raw, err = ctx.aihub().ReadyQueueRaw(proj)
 		} else {
-			raw, err = ctx.aihub().ListWorkItemsRawLimit(proj, stringFlag(fs, "status"), limit)
+			raw, err = ctx.aihub().ListWorkItemsRaw(proj, stringFlag(fs, "status"), limit)
 		}
 		if err != nil {
 			return err
 		}
-		if boolFlag(fs, "ready") {
-			// Ready queue: the takeable set is items + unclassified (the same
-			// union aihubclient.Queue() implements). --json stays raw
-			// passthrough of the full server body (all 7 sections).
-			ctx.finish(raw, func() {
-				var l struct {
-					Items        []WIView `json:"items"`
-					Unclassified []WIView `json:"unclassified"`
-				}
-				if err := json.Unmarshal(raw, &l); err == nil {
-					fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items)+len(l.Unclassified))
-					renderReadyWITable(ctx.Stdout, l.Items, l.Unclassified)
-				}
-			})
-			return nil
-		}
+		// Both faces render the items segment; --json is the raw server body.
 		ctx.finish(raw, func() {
 			var l struct {
 				Items []WIView `json:"items"`
@@ -488,10 +455,9 @@ var cmdQueue = &Command{
 // then the server's own order within each project.
 func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 	projects := ctx.Cfg.Mapping.Projects()
-	var items, unclassified []WIView
-	total := 0
+	var items []WIView
 	for _, p := range projects {
-		raw, err := ctx.aihub().ListWorkItemsRawLimit(p, status, limit)
+		raw, err := ctx.aihub().ListWorkItemsRaw(p, status, limit)
 		if ready {
 			raw, err = ctx.aihub().ReadyQueueRaw(p)
 		}
@@ -499,36 +465,25 @@ func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 			return fmt.Errorf("queue: project %s: %w", p, err)
 		}
 		var l struct {
-			Items        []WIView `json:"items"`
-			Unclassified []WIView `json:"unclassified"`
+			Items []WIView `json:"items"`
 		}
 		if err := json.Unmarshal(raw, &l); err != nil {
 			return fmt.Errorf("queue: project %s: %w", p, err)
 		}
 		items = append(items, l.Items...)
-		unclassified = append(unclassified, l.Unclassified...)
-		total += len(l.Items) + len(l.Unclassified)
 	}
 	if ctx.JSON {
-		// ONE merged document: items (plus unclassified in ready mode).
+		// ONE merged document.
 		doc := struct {
-			Items        []WIView `json:"items"`
-			Unclassified []WIView `json:"unclassified,omitempty"`
-			Total        int      `json:"total"`
-		}{Items: items, Total: total}
-		if ready {
-			doc.Unclassified = unclassified
-		}
+			Items []WIView `json:"items"`
+			Total int      `json:"total"`
+		}{Items: items, Total: len(items)}
 		if b, err := json.Marshal(doc); err == nil {
 			ctx.Out(b)
 		}
 		return nil
 	}
-	fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", total)
-	if ready {
-		renderReadyWITable(ctx.Stdout, items, unclassified)
-		return nil
-	}
+	fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(items))
 	renderWITable(ctx.Stdout, items)
 	return nil
 }
@@ -540,7 +495,7 @@ func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 var cmdCancel = &Command{
 	Name:    "cancel",
 	Group:   GroupData,
-	Summary: "Cancel (abandon) a queued/paused/blocked work item, or one parked repair_pending on this daemon",
+	Summary: "Cancel (abandon) a queued/paused/blocked work item",
 	Usage:   "pf cancel <id>",
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -549,12 +504,6 @@ var cmdCancel = &Command{
 		}
 		raw, err := ctx.aihub().CancelWorkItem(args[0])
 		if err != nil {
-			// A repair_pending WI is still `running` at aihub under THIS
-			// daemon's kept session, so the hub's cancel refuses it; the
-			// daemon holds the secret and ends the session itself.
-			if abandoned, aerr := abandonRepairPending(ctx, args[0], "canceled"); abandoned || aerr != nil {
-				return aerr
-			}
 			return err
 		}
 		ctx.finish(raw, func() {

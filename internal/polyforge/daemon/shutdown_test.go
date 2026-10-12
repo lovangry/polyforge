@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 // TestShutdownSequence: two live jobs → the sequence is fast (no per-job
@@ -65,8 +65,8 @@ func TestShutdownSequence(t *testing.T) {
 
 // TestRestartWiring: a recorded job whose aihub verdict is running is
 // recovered at daemon start (transcript resume through the recovery
-// engine) and re-attached to a fresh monitor — the observe route
-// answers for it.
+// engine) and re-attached to a fresh monitor — the observe
+// lane reports it.
 func TestRestartWiring(t *testing.T) {
 	setGitIdentity(t)
 	dir := t.TempDir()
@@ -132,18 +132,9 @@ func TestRestartWiring(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// The recovered job is supervised again: the observe route answers
-	// with its attempt identity.
+	// The recovered job is supervised again, with its attempt identity.
 	td.waitMonitored(t, wi)
-	raw, err := td.client.Observe(wi, 0)
-	if err != nil {
-		t.Fatalf("observe after restart: %v", err)
-	}
-	var jv protocol.JobView
-	if err := json.Unmarshal(raw, &jv); err != nil {
-		t.Fatalf("observe undecodable: %v", err)
-	}
-	if jv.WorkItem != wi || jv.SpawnN == 0 || jv.Status != protocol.JobRunning {
-		t.Fatalf("restarted job view = %+v", jv)
+	if ji, ok := td.rt.Info(wi); !ok || ji.SpawnN == 0 || ji.State != runtime.StateRunning {
+		t.Fatalf("restarted job = %+v (live %v)", ji, ok)
 	}
 }

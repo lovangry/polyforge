@@ -3,8 +3,8 @@ package observe
 // observe.go: the Observe hub — the supervisor's root object. It owns
 // the events log (driver events land in it too, durably), spawns one
 // per-WI supervisor goroutine per RTStarted, routes RTRecovered/WIFinished
-// to the right monitor, and exposes the HTTP face (observe/answer) over
-// the monitors. Runtime talks to Observe through exactly two channels
+// to the right monitor, and exposes the monitors' read faces (Activities,
+// PendingInputs, Progress, the events log) to the daemon. Runtime talks to Observe through exactly two channels
 // carrying the five protocol messages (the driver Handle rides WITH the
 // lifecycle message as the attachment — it is not a third message kind).
 
@@ -24,9 +24,7 @@ import (
 type Attach struct {
 	Msg    protocol.RTMsg
 	Handle Handle // nil for RTFinished
-	// WI is required on RTStarted and re-read on RTRecovered: the
-	// successor derivation carries its own per-derivation facts (F3
-	// transcript info), which the monitor adopts alongside the handle.
+	// WI is required on RTStarted.
 	WI WIInfo
 }
 
@@ -34,20 +32,19 @@ type Attach struct {
 type Config struct {
 	// RT is the Runtime→Observe lifecycle channel (RTStarted/
 	// RTRecovered/RTFinished). Runtime writes; Observe reads.
-	RT <-chan Attach
-	// OB is the Observe→Runtime channel (WINeedsRecovery, WICompleted).
-	// It must be buffered (Runtime drains it; the monitor never blocks
-	// on a send and drops only if the buffer is full).
-	OB chan protocol.OBMsg
+	RT *supervise.Queue[Attach]
+	// OB is the Observe→Runtime queue (WINeedsRecovery, WICompleted).
+	// Unbounded: a send never blocks and never drops.
+	OB *supervise.Queue[protocol.OBMsg]
 	// DataDir hosts the daemon events file (events.log).
 	DataDir string
 	// PushFunc overrides the capsule commit+push operation (tests).
 	PushFunc PushFunc
 	// LocateLive, when non-nil, resolves the live harness transcript of a
 	// derivation (capsuleDir + spawn moment → absolute .jsonl path; "" =
-	// not found). The monitor calls it at its commit-boundary sync points
-	// when the runtime-attached WIInfo carries no recorded live path —
-	// the F3 daemon-side transcript sync. nil disables the sync entirely
+	// not found). The monitor calls it at each dispatch's commit-boundary
+	// sync points (the F3 daemon-side transcript sync, onto the path the
+	// dispatch's step_started names). nil disables the sync entirely
 	// (unit tests that never exercise it).
 	LocateLive func(capsuleDir string, spawnAt time.Time) string
 	// Resolve maps a non-canonical work-item id form (a "<project>#<seq>"
@@ -80,7 +77,6 @@ type Config struct {
 	BackpressureSteps int           // N consecutive failed pushes before the degradation event (5)
 	BackpressureAfter time.Duration // T without a successful push before the degradation event (30min)
 	PushBound         time.Duration // per-push bound (protocol.PushTimeout, 60s)
-	OBCapacity        int           // OB channel buffer check (64)
 }
 
 func (c *Config) fill() {
@@ -104,9 +100,6 @@ func (c *Config) fill() {
 	}
 	if c.PushBound == 0 {
 		c.PushBound = protocol.PushTimeout
-	}
-	if c.OBCapacity == 0 {
-		c.OBCapacity = 64
 	}
 	if c.SessionRevalidateEvery == 0 {
 		c.SessionRevalidateEvery = defaultRevalidateEvery
@@ -161,11 +154,7 @@ func New(cfg Config) (*Observe, error) {
 	}
 	if cfg.RT == nil || cfg.OB == nil {
 		log.Close()
-		return nil, errConfig("RT and OB channels are both required")
-	}
-	if cap(cfg.OB) < 1 {
-		log.Close()
-		return nil, errConfig("OB channel must be buffered")
+		return nil, errConfig("RT and OB queues are both required")
 	}
 	return &Observe{cfg: cfg, log: log,
 		monitors: map[string]*Monitor{}}, nil
@@ -175,7 +164,7 @@ type errConfig string
 
 func (e errConfig) Error() string { return "observe: " + string(e) }
 
-// Run drives the hub until ctx is cancelled (or the RT channel closes).
+// Run drives the hub until ctx is cancelled .
 // On exit it stops every monitor, waits for them and closes the events
 // log.
 func (o *Observe) Run(ctx context.Context) {
@@ -185,14 +174,17 @@ func (o *Observe) Run(ctx context.Context) {
 		_ = o.log.Close()
 	}()
 	for {
+		for {
+			at, ok := o.cfg.RT.Pop()
+			if !ok {
+				break
+			}
+			o.onAttach(at)
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case at, ok := <-o.cfg.RT:
-			if !ok {
-				return
-			}
-			o.onAttach(at)
+		case <-o.cfg.RT.Notify():
 		}
 	}
 }
@@ -228,13 +220,7 @@ func (o *Observe) onAttach(at Attach) {
 			})
 			return
 		}
-		select {
-		case m.rtCh <- at:
-		default:
-			_ = o.log.Append(wi, EvJobStopped, map[string]any{
-				"error": "RTRecovered dropped: monitor rt queue full",
-			})
-		}
+		m.rtQ.Push(at)
 	case protocol.RTFinished:
 		if m := o.takeMonitor(wi); m != nil {
 			m.requestStop() // monitor emits its own job_stopped event
@@ -330,7 +316,7 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 		log:    o.log,
 		ob:     o.cfg.OB,
 		link:   link,
-		rtCh:   make(chan Attach, 4),
+		rtQ:    supervise.NewQueue[Attach](),
 		stopCh: make(chan struct{}),
 
 		gate:       make(chan struct{}, 1),
@@ -352,7 +338,6 @@ func (m *Monitor) attach(at Attach) {
 	m.spawnN = at.Msg.SpawnN
 	m.sessionID = at.Msg.SessionID
 	m.stateMu.Unlock()
-	m.setTranscriptInfo(at.WI)
 }
 
 // Events exposes the log (diagnostic/tests).
