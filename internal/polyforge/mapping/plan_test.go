@@ -173,3 +173,24 @@ func TestNilPlanIsEmpty(t *testing.T) {
 		t.Fatal("nil plan must refuse every project")
 	}
 }
+
+func TestProjectsOf(t *testing.T) {
+	wsA := t.TempDir()
+	wsB := t.TempDir()
+	p, err := Build([]Entry{
+		{Workspace: wsA, Projects: []string{"a1", "a2"}},
+		{Workspace: wsB, Projects: []string{"b1"}},
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := strings.Join(p.ProjectsOf(wsA), ","); got != "a1,a2" {
+		t.Fatalf("ProjectsOf(wsA) = %q", got)
+	}
+	if got := p.ProjectsOf(wsB); len(got) != 1 || got[0] != "b1" {
+		t.Fatalf("ProjectsOf(wsB) = %v", got)
+	}
+	if got := p.ProjectsOf(t.TempDir()); got != nil {
+		t.Fatalf("unmapped workspace = %v, want nil", got)
+	}
+}

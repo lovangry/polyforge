@@ -7,12 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
-	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // ---------------------------------------------------------------------------
@@ -54,13 +52,13 @@ var osGetwd = os.Getwd
 // workspace, no yaml). It never mutates.
 const requiredProjectFlagError = "file create: --project is required — there is no default project (polyforge#113); workspaces and their projects are declared in [workspace.\"<path>\"] sections of cli.toml (`pf doctor` checks the mapping)"
 
-// inferProjectFromCwd is the polyforge#79 file-create default: the
-// process cwd resolved against the expanded [workspace] mapping by
+// inferProjectFromCwd is the file-create default: the process cwd
+// resolved against the expanded [workspace] mapping of cli.toml by
 // containment (cwd equal to or inside the workspace root). Exactly one
-// containing workspace whose yaml lists exactly ONE project answers it —
-// the create proceeds as if --project had been passed. Every other shape
-// asks for --project or surfaces the typed yaml error; inference never
-// silently degrades and never ambient-picks (the #113 principle).
+// containing workspace that lists exactly ONE project answers it — the
+// create proceeds as if --project had been passed. Every other shape
+// asks for --project; inference never ambient-picks (the #113
+// principle).
 func inferProjectFromCwd(ctx *Context) (string, error) {
 	cwd, err := osGetwd()
 	if err != nil || ctx.Cfg.Mapping == nil || ctx.Cfg.Mapping.Empty() {
@@ -78,27 +76,11 @@ func inferProjectFromCwd(ctx *Context) (string, error) {
 	case len(containing) > 1:
 		return "", fmt.Errorf("file create: --project is required — the working directory is inside more than one mapped workspace (%s); pass --project explicitly (placement stays unambiguous, polyforge#113)", strings.Join(containing, ", "))
 	}
-	wcfg, err := workspace.Load(containing[0])
-	if err != nil {
-		return "", fmt.Errorf("file create: %v", err)
+	projects := ctx.Cfg.Mapping.ProjectsOf(containing[0])
+	if len(projects) != 1 {
+		return "", fmt.Errorf("file create: --project is required — workspace %s maps %d projects (%s); pass --project explicitly (no default is invented)", containing[0], len(projects), strings.Join(projects, ", "))
 	}
-	if wcfg == nil || len(wcfg.Projects) == 0 {
-		// No yaml (absent-equivalent) or a workflow-only yaml: no project
-		// inventory to infer from — today's required-flag error stands.
-		return "", fmt.Errorf(requiredProjectFlagError)
-	}
-	if len(wcfg.Projects) > 1 {
-		names := make([]string, 0, len(wcfg.Projects))
-		for name := range wcfg.Projects {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		return "", fmt.Errorf("file create: --project is required — %s lists %d projects (%s); pass --project explicitly (no default is invented)", workspace.PathFor(containing[0]), len(names), strings.Join(names, ", "))
-	}
-	for name := range wcfg.Projects {
-		return name, nil
-	}
-	return "", fmt.Errorf(requiredProjectFlagError) // unreachable
+	return projects[0], nil
 }
 
 // requireMappedProject validates a placement-adjacent verb's --project

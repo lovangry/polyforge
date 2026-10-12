@@ -40,16 +40,11 @@ fails, 2 usage errors. `--json` emits one machine document:
 Checks that cannot be proven (config unloadable, aihub unreachable) are
 reported `skip` — a skip never pretends to be a pass.
 
-## The yaml ↔ cli.toml drift read (session-side)
+## Workspace yaml
 
-`pf doctor` reads cli.toml only — placement keeps reading the
-`[workspace]` mapping exactly as before (polyforge#79 adds no placement
-source). The drift comparison is the SESSION's job on top of this face:
-read the workspace `.polyforge.yaml`'s `projects` keys and the config's
-`[workspace."<path>"]` sections; when they disagree, surface it as
-configuration drift with the guidance to re-derive cli.toml from the yaml
-(the yaml wins every conflict; nothing rewrites cli.toml silently). The
-checks above prove the machine face; the yaml read rides on top of it.
+`pf doctor` reads cli.toml only. A workspace's `.polyforge.yaml` (per-project
+model candidates) is validated by the daemon before each claim, not by
+doctor: an invalid file shows up as a DAEMON-414 refusal on `pf submit`.
 
 ## Success
 

@@ -263,7 +263,7 @@ func TestAbandonedClaimKeepsJournalWhenCloseFails(t *testing.T) {
 	}
 	hub := newFakeHub()
 	hub.digest = pinned
-	hub.lookupErr["wi_closefail"] = errLookupBoom // the hub close fails
+	hub.end["wi_closefail"] = errLookupBoom // the hub close fails
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
 

@@ -228,6 +228,12 @@ type Daemon struct {
 	// drain ticker goroutine touches it (fetchAutoWave), so it carries
 	// no lock.
 	drainDegraded bool
+	// yamlRefused is project → the last workspace-yaml refusal logged for
+	// it: auto-pull skips a project whose .polyforge.yaml is invalid
+	// (nothing is claimed, the WIs stay queued for other machines) and
+	// logs a given refusal once, not every tick. Same single-goroutine
+	// ownership as drainDegraded.
+	yamlRefused map[string]string
 
 	// sup hands out the per-WI supervision links shared by the driver
 	// bridge (facts out, verdicts in, harness trackers) and the observe
@@ -889,6 +895,17 @@ func (d *Daemon) fetchAutoWave() {
 	var items []api.WorkItem
 	degraded := false
 	for _, project := range d.cfg.Mapping.Projects() {
+		if _, lerr := d.rt.LoadWorkspace(project); lerr != nil {
+			if d.yamlRefused == nil {
+				d.yamlRefused = map[string]string{}
+			}
+			if d.yamlRefused[project] != lerr.Error() {
+				d.yamlRefused[project] = lerr.Error()
+				fmt.Fprintf(os.Stderr, "daemon: drain skips project %q (nothing claimed): %v\n", project, lerr)
+			}
+			continue
+		}
+		delete(d.yamlRefused, project)
 		pis, err := d.hub.Queue(project)
 		if err != nil {
 			if authDenied(err) {

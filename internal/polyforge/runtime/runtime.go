@@ -232,25 +232,14 @@ type job struct {
 	// not part of the persisted job record.
 	repos []api.ProjectRepo
 
-	// workspaceRoot/workspaceYaml are the polyforge#79 claim-time read:
-	// the mapped workspace's root and its strictly-validated
-	// .polyforge.yaml (nil when the workspace carries none). Read FRESH
-	// on every claim — an edit governs the next claim with no daemon
-	// restart. In-memory only: the durable snapshot is the capsule.json
-	// audit materialize writes (the recovery path rehydrates from
-	// there).
-	workspaceRoot string
+	// workspaceYaml is the claim's pre-claim-validated .polyforge.yaml
+	// (nil when the workspace carries none). In-memory only.
 	workspaceYaml *workspace.Config
 	// stepCandidates is the polyforge#79 claim-time compose: the
 	// per-step post-precedence candidate lists (step id → list; a
 	// present-empty entry governs and means no switchable chain). In-
 	// memory only; the durable snapshot is the capsule.json audit.
 	stepCandidates map[string][]string
-	// repoSources is the polyforge#79 local-source record: repo name →
-	// the source actually cloned from (the resolved local checkout for
-	// yaml-sourced clones). In-memory only; the durable copy is the
-	// capsule.json audit.
-	repoSources map[string]string
 
 	agent          AgentHandle
 	agentPID       int
@@ -578,22 +567,24 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		// plain claim of the paused-held WI is refused by the hub's own
 		// ALREADY_HELD gate).
 	}
-	// polyforge#113 placement pre-check: resolve the work item (read-only
-	// GetWorkItem) BEFORE anything is journaled or claimed, and refuse an
-	// unmapped project with the typed DAEMON-412 — before any capsule
-	// exists and before the aihub-side claim state changes. The mapping
-	// governs placement, not knowledge: the hub read is a projection, not
-	// a mutation. A FAILED read refuses nothing here — the claim call is
-	// the authority for WI existence, and startClaimed re-checks the
-	// claim answer's project (the D5 compensation covers the race).
-	if probe, perr := r.hub.GetWorkItem(wi); perr == nil && probe != nil && probe.ProjectName != "" {
-		if _, merr := r.cfg.Mapping.WorkspaceFor(probe.ProjectName); merr != nil {
-			return &api.Error{
-				Code: api.ErrDaemonUnmappedProject,
-				Detail: fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)",
-					probe.ProjectName),
-			}
-		}
+	// Pre-claim placement + workspace-yaml check (polyforge#113, #79):
+	// resolve the work item's project (read-only GetWorkItem), then load
+	// its workspace's .polyforge.yaml strictly — BEFORE anything is
+	// journaled or claimed. An unmapped project (DAEMON-412) or an
+	// invalid yaml (DAEMON-414) refuses here: no capsule, and the WI stays
+	// queued at aihub so another machine may take it — a bad local file
+	// must not block the team's task. A failed probe claims nothing
+	// either (no project, no workspace to read): the caller retries.
+	probe, perr := r.hub.GetWorkItem(wi)
+	if perr != nil {
+		return fmt.Errorf("runtime: %s: work-item probe failed (not claiming; retry later): %w", wi, perr)
+	}
+	if probe == nil || probe.ProjectName == "" {
+		return fmt.Errorf("runtime: %s: work-item probe answered no project (not claiming)", wi)
+	}
+	wcfg, werr := r.LoadWorkspace(probe.ProjectName)
+	if werr != nil {
+		return werr
 	}
 	sessionID, err := mintSessionID()
 	if err != nil {
@@ -624,7 +615,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		r.clearClaiming(wi)
 		return err
 	}
-	return r.startClaimed(ctx, wi, sessionID, resp)
+	return r.startClaimed(ctx, wi, sessionID, resp, wcfg)
 }
 
 // startClaimed carries one OPEN claim (fresh or replayed) to a live agent.
@@ -646,7 +637,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 // separator into the harness's session directory naming, so slugs never
 // reach any path. The submitted spelling is registered as an alias so
 // lookups by it still resolve.
-func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse) error {
+func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse, wcfg *workspace.Config) error {
 	c := resp.Claim
 	// canonical id resolution (F2): the claim answer's work item is the
 	// authority; the claim's own WorkItemID and the answered record's ID
@@ -717,30 +708,18 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	// no capsule directory is ever touched.
 	capDir, rerr := r.capsuleDirForProject(j.project, id)
 	if rerr != nil {
-		err2 := &api.Error{
-			Code: api.ErrDaemonUnmappedProject,
-			Detail: fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)",
-				j.project),
-		}
+		err2 := unmappedProjectError(j.project)
 		return r.abandonClaim(j, wi, err2, err2.Detail)
 	}
 	j.capsuleDir = capDir
 	j.git.CapsuleDir = capDir
 	j.transcript = sessionPathFor(j.capsuleDir, fp)
 
-	// polyforge#79: the workspace yaml is read FRESH on every claim (the
-	// read lives in the claim path, so an edit governs the next claim
-	// with no daemon restart) and an invalid one refuses the claim BEFORE
-	// any capsule state exists — the same abandonClaim lane as the
-	// unmapped-project refusal above (DAEMON-414).
-	if err := r.readWorkspaceYaml(j); err != nil {
-		note := err.Error()
-		var ae *api.Error
-		if errors.As(err, &ae) && ae.Detail != "" {
-			note = ae.Detail
-		}
-		return r.abandonClaim(j, wi, err, note)
-	}
+	// polyforge#79: the workspace yaml was loaded and validated BEFORE the
+	// claim (Start / the journal replay); compose the per-step candidates
+	// for the claimed project from that snapshot.
+	j.workspaceYaml = wcfg
+	j.stepCandidates = workspace.ComposeCandidates(r.readBundleFrontmatter(j.bundleName), wcfg, j.project)
 
 	if err := r.prepareCapsule(j); err != nil {
 		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
@@ -845,71 +824,36 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	return nil
 }
 
-// readWorkspaceYaml is the polyforge#79 claim-time read (fresh, no
-// cache): resolve the workspace root through the same inverse mapping
-// placement used (the WorkspaceFor source capsuleDirForProject keys
-// off), strictly validate <root>/.polyforge.yaml through the shared
-// loader, and stash the parsed snapshot on the job (nil when the
-// workspace carries no yaml — absent-equivalent, behavior unchanged).
-// An invalid yaml returns the typed DAEMON-414 refusal; the caller
-// compensates through abandonClaim and nothing materializes.
-//
-// When the yaml carries a present `projects` section, the claimed
-// project MUST be listed (DAEMON-415 otherwise — no silent registry
-// fallback), and the job's repo inventory is built WHOLLY from the yaml
-// entries: name + source = the workspace root joined with the entry's
-// workspace-root-relative `path`, which flows through the existing
-// cloneTaskRepos/gitClone seam verbatim (the recovery contract and the
-// DAEMON-507 lane hold unchanged for locally-sourced clones).
-func (r *Runtime) readWorkspaceYaml(j *job) error {
-	ws, err := r.cfg.Mapping.WorkspaceFor(j.project)
-	if err != nil {
-		// Unreachable on this path (the capsule-routing site just resolved
-		// the same inverse), but never guess: a workspace that cannot be
-		// resolved carries no yaml layer.
-		return nil
+// unmappedProjectError is the typed DAEMON-412 placement refusal.
+func unmappedProjectError(project string) *api.Error {
+	return &api.Error{
+		Code: api.ErrDaemonUnmappedProject,
+		Detail: fmt.Sprintf("project %q is not in the [workspace] mapping of this machine — the claim is refused before any capsule is created; add the project to a [workspace.\"<path>\"] section in the config (`pf doctor` checks the mapping)",
+			project),
 	}
-	j.workspaceRoot = ws
-	wcfg, err := workspace.Load(ws)
-	if err != nil {
-		return &api.Error{
-			Code:   api.ErrDaemonWorkspaceYaml,
-			Detail: fmt.Sprintf("the workspace yaml refused the claim of %s before any capsule was created: %v", j.wi, err),
-		}
-	}
-	j.workspaceYaml = wcfg
-	r.composeStepCandidates(j)
-	if wcfg == nil || wcfg.Projects == nil {
-		return nil // no projects section: the registry inventory stands
-	}
-	entry, listed := wcfg.Projects[j.project]
-	if !listed || entry == nil {
-		return &api.Error{
-			Code: api.ErrDaemonProjectNotListed,
-			Detail: fmt.Sprintf("the workspace yaml refused the claim of %s: project %q is not listed in the projects section of %s — the section is the authoritative repo inventory and no registry fallback is offered; list %q there or remove the section",
-				j.wi, j.project, workspace.PathFor(ws), j.project),
-		}
-	}
-	repos := make([]api.ProjectRepo, 0, len(entry.Repos))
-	sources := make(map[string]string, len(entry.Repos))
-	for _, re := range entry.Repos {
-		src := workspace.ResolveRepoSource(ws, re)
-		repos = append(repos, api.ProjectRepo{Name: re.Name, URL: src})
-		sources[re.Name] = src
-	}
-	j.repos = repos         // the yaml inventory WHOLLY replaces the claim answer's
-	j.repoSources = sources // repo name → resolved local checkout (the audit's repo_sources)
-	return nil
 }
 
-// composeStepCandidates is the polyforge#79 claim-time compose: the
-// four-level precedence over the pinned bundle's frontmatter (read from
-// the daemon checkout at WorkflowsDir/<bundle>; no bundle ⇒ nil — the
-// yaml still stashes for the audit) and the claim's workspace yaml. The
-// composed map rides the job into the driver (AgentStartInput → bridge →
-// driver.Config) and into the capsule audit.
-func (r *Runtime) composeStepCandidates(j *job) {
-	j.stepCandidates = workspace.ComposeCandidates(r.readBundleFrontmatter(j.bundleName), j.workspaceYaml)
+// LoadWorkspace is the polyforge#79 pre-claim read (fresh, no cache, so
+// an edit governs the next claim with no daemon restart): resolve the
+// project's workspace through the inverse mapping (DAEMON-412 when
+// unmapped) and strictly validate <root>/.polyforge.yaml through the
+// shared loader (DAEMON-414 when invalid). The parsed config is nil when
+// the workspace carries no yaml (absent-equivalent: bundle defaults).
+// Nothing is claimed or created by it; the daemon's submit face and
+// auto-pull call it too, so a refusal reaches the operator before enqueue.
+func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
+	ws, err := r.cfg.Mapping.WorkspaceFor(project)
+	if err != nil {
+		return nil, unmappedProjectError(project)
+	}
+	wcfg, err := workspace.Load(ws)
+	if err != nil {
+		return nil, &api.Error{
+			Code:   api.ErrDaemonWorkspaceYaml,
+			Detail: fmt.Sprintf("the workspace yaml of project %q refused the claim before it was made (the work item stays queued): %v", project, err),
+		}
+	}
+	return wcfg, nil
 }
 
 // readBundleFrontmatter reads the pinned bundle's workflow.md
@@ -1185,52 +1129,16 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	return r.materializeBundle(j)
 }
 
-// stampWorkspaceAudit fills the polyforge#79 audit fields of the
-// capsule identity from the job's claim-time snapshot: the parsed yaml
-// verbatim (the same structures the shared loader answered), the
-// per-step post-precedence candidate lists, and the resolved repo
-// sources — the workspace-root-joined local checkout for yaml-sourced
-// clones, the registry URLs for registry clones under a yaml that
-// governs nothing on the repo side. A no-yaml claim records nothing.
+// stampWorkspaceAudit records the claim-time effective candidate lists
+// in the capsule identity — the audit AND the snapshot recovery
+// rehydrates — when the workspace yaml governs this project's models. A
+// claim the yaml does not touch records nothing.
 func stampWorkspaceAudit(j *job, idn *capsule.Identity) {
-	if j.workspaceYaml == nil {
+	if j.workspaceYaml == nil || j.workspaceYaml.Models[j.project] == nil {
 		return
 	}
-	projects := map[string]capsule.WorkspaceProjectAudit{}
-	for name, proj := range j.workspaceYaml.Projects {
-		if proj == nil {
-			continue
-		}
-		repos := make([]capsule.WorkspaceRepoAudit, 0, len(proj.Repos))
-		for _, re := range proj.Repos {
-			repos = append(repos, capsule.WorkspaceRepoAudit{Name: re.Name, Path: re.Path})
-		}
-		projects[name] = capsule.WorkspaceProjectAudit{Repos: repos}
-	}
-	doc := &capsule.WorkspaceYamlAuditDoc{Projects: projects}
-	if wd := j.workspaceYaml.WorkflowDefaults; wd != nil {
-		doc.WorkflowDefaults = &capsule.WorkspaceDefaultsAuditDoc{
-			ModelCandidates: wd.ModelCandidates,
-			StepKinds:       wd.StepKinds,
-		}
-	}
-	idn.WorkspaceYaml = doc
 	if len(j.stepCandidates) > 0 {
 		idn.EffectiveCandidates = j.stepCandidates
-	}
-	if len(j.repoSources) > 0 {
-		idn.RepoSources = j.repoSources
-	} else {
-		// A yaml that governs nothing on the repo side (workflow-only):
-		// the audit still records the sources actually cloned from — the
-		// claim answer's registry URLs.
-		reg := map[string]string{}
-		for _, pr := range j.repos {
-			reg[pr.Name] = pr.URL
-		}
-		if len(reg) > 0 {
-			idn.RepoSources = reg
-		}
 	}
 }
 

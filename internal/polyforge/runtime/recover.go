@@ -25,9 +25,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
-	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // cleanupBound bounds one teardown's waits inside the six-layer cleanup.
@@ -274,19 +272,11 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 
 // effectiveCandidatesForRecovery answers the per-step effective
 // candidate lists a recovery re-derivation dispatches under
-// (polyforge#79):
-//
-//   - a LIVE job carries its claim-time snapshot — an in-process
-//     recovery keeps the claim-time list (an edit governs the NEXT
-//     claim, never an in-flight job's recomputation);
-//   - a restart-reconstructed job carries no snapshot: the effective
-//     lists re-derive from the workspace yaml FRESH through the same
-//     compose, so the archived-attempt recomputation indexes the
-//     re-derived list (the mid-flight-edit restart shape);
-//   - a yaml that fails to re-read falls back to the capsule.json
-//     audit — the claim-time snapshot materialize wrote;
-//   - an audit-less capsule rehydrates to nil (bundle-only, today's
-//     behavior).
+// (polyforge#79): a LIVE job carries its claim-time snapshot; a
+// restart-reconstructed job rehydrates the capsule.json audit the claim
+// wrote (an audit-less capsule answers nil — bundle-only behavior). The
+// yaml is never re-read here: an edit governs the NEXT claim, never an
+// in-flight job.
 func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
 	j.mu.Lock()
 	snap := j.stepCandidates
@@ -294,31 +284,7 @@ func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
 	if snap != nil {
 		return snap
 	}
-	if ws, werr := r.cfg.Mapping.WorkspaceFor(j.project); werr == nil {
-		wcfg, cerr := workspace.Load(ws)
-		if cerr != nil {
-			fmt.Fprintf(os.Stderr, "runtime: %s: workspace yaml unreadable at recovery (%v); the claim-time audit stands\n", j.wi, cerr)
-		} else {
-			return workspace.ComposeCandidates(r.readCapsuleBundleFrontmatter(j), wcfg)
-		}
-	}
 	return readCapsuleEffectiveCandidates(j.capsuleDir)
-}
-
-// readCapsuleBundleFrontmatter reads the job's MATERIALIZED bundle
-// frontmatter from the capsule — the claim-era graph the driver
-// validates against (never the daemon checkout, which the operator may
-// have evolved).
-func (r *Runtime) readCapsuleBundleFrontmatter(j *job) *workflow.Frontmatter {
-	if j.bundleName == "" || j.capsuleDir == "" {
-		return nil
-	}
-	fm, err := workflow.ReadFrontmatter(filepath.Join(j.capsuleDir, capsule.DirWorkflows, j.bundleName, "workflow.md"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: materialized bundle frontmatter unreadable (treating as absent): %v\n", j.wi, err)
-		return nil
-	}
-	return fm
 }
 
 // readCapsuleEffectiveCandidates reads the effective_candidates audit

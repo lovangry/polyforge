@@ -191,20 +191,15 @@ Five standing rules, binding on every polyforge session:
 4. **Hand over an outcome, not a path.** When handing work to an
    executor, specify the outcome plus its acceptance criteria — never an
    execution path.
-5. **Workspace topology comes from `.polyforge.yaml`.** At session start
-   in a workspace, read the workspace root's `.polyforge.yaml` (when one
-   exists): its `projects` section is the authoritative repo inventory —
-   each entry's workspace-root-relative `path:` is where the local
-   checkout lives, and the daemon clones the capsule's `repos/<name>`
-   worktrees from there at claim — and its `workflow_defaults` is the
-   workflow-level model pinning. If the yaml's projects disagree with the
-   cli.toml `[workspace]` mapping, surface the disagreement as
-   configuration drift: tell the owner which side carries what and
-   re-derive the cli.toml mapping from the yaml (the yaml wins every
-   conflict; nothing rewrites cli.toml behind the operator's back, and
-   the daemon keeps reading cli.toml for placement until the mapping is
-   re-derived). A workspace without the yaml simply has no yaml layer:
-   the registry inventory and the mapping stand unchanged.
+5. **Workspace model pinning lives in `.polyforge.yaml`.** A workspace
+   root may carry a `.polyforge.yaml` whose only section is `models`:
+   per project, a `default` candidate list and/or per-step-kind lists
+   (kinds `qa`, `spec`, `author`, `code`, `gate`, `review`). The daemon
+   reads it fresh before every claim; an invalid file refuses the claim
+   (DAEMON-414) WITHOUT claiming — the work item stays queued for other
+   machines. The repo inventory and clone URLs always come from the aihub
+   project registry; the cli.toml `[workspace]` mapping is the only
+   placement source.
 
 ## The `pf` CLI: shared invocation contract
 
@@ -233,12 +228,7 @@ pf [global flags] <verb> [verb flags] [positional args]
   `--project` and validate it against the mapping; `queue` without
   `--project` covers all mapped projects; one daemon serves every mapped
   workspace and routes capsules to `<workspace>/capsules/<wi>` by the
-  claimed work item's project. When a workspace carries a
-  `.polyforge.yaml`, THAT file is the single authoritative workspace
-  definition: the `[workspace]` section is its derived artifact (the
-  init verb's workspace flow re-derives the mapping from the yaml's
-  projects), and the yaml's `projects` entries are the repo inventory a
-  claim clones from instead of the aihub registry.
+  claimed work item's project.
 - **Output**: human mode renders per-verb views; `--json` emits the response
   body raw, as-is (machine consumption).
 - **Errors**: every non-2xx answer — from AIHub AND from the daemon — is the

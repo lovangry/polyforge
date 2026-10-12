@@ -208,7 +208,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/polyforge/mapping` | The workspace→projects plan read from cli.toml's `[workspace]` sections, and its validated inverse (project → workspace). |
 | `internal/polyforge/sessionjsonl` | The single parser of the harness session-jsonl format (live transcript tail extraction). |
 | `internal/polyforge/supervise` | The driver↔supervisor contract: facts, verdicts and the per-WI link (v2-converge §2.2–2.5). |
-| `internal/polyforge/workspace` | The `.polyforge.yaml` workspace-defaults loader shared by claim-time reads, candidate compose and `pf file create` project inference. |
+| `internal/polyforge/workspace` | The `.polyforge.yaml` per-project model-candidates loader, read and validated by the daemon before every claim (an invalid file refuses the claim without claiming). |
 | `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, and the answer HTTP face over the monitors. |
 | `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules, human gate, command-evidence gate). |
 | `internal/polyforge/watcher` | The `pf watch` engine: decision classification (fixed-template wake-up lines) and the resident per-chat watcher with its progress file. |
@@ -361,6 +361,30 @@ when any is missing or unusable (or when the config carries zero
 sections). Capsules route per claimed project through the inverse
 mapping; the auto-pull covers all mapped projects. `pf doctor` checks
 the mapping.
+
+Per-project model candidates. A workspace root may carry a
+`.polyforge.yaml` whose only section is `models` (strict: unknown keys at
+any level, duplicate keys, type mismatches, empty model ids and unknown
+kinds are load errors; the old `projects:` / `workflow_defaults:` shapes
+fail loudly):
+
+```yaml
+models:
+  polyforge:                          # a project of this workspace
+    default: ["model-a", "model-b"]   # optional: every step of the project
+    code: ["model-c"]                 # optional: one step kind (qa, spec,
+                                      # author, code, gate, review)
+```
+
+For a step of the claimed project the list is: its kind list, else the
+project's `default`, else the workflow bundle's own candidates (a
+declared-but-empty list governs: no switchable chain). A project not
+listed, or an absent or comments-only file, keeps the bundle's. The
+daemon reads and validates the file BEFORE the aihub claim: an invalid
+file refuses the work item with DAEMON-414 (`pf submit` shows it; auto-pull
+skips that project and logs once) and nothing is claimed, so the work item
+stays queued for other machines. Repo lists and clone URLs always come from
+the aihub project registry.
 
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
 `5m`), flags only (no environment fallbacks). Omitting a flag, or passing

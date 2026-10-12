@@ -34,7 +34,7 @@ func carrierGit(t *testing.T, dir string, args ...string) string {
 }
 
 // carrierRig: a workspace runtime whose "app" repo is cloned from a local
-// checkout, a WI hub bare repo for the carrier lane, and the first claim
+// checkout (served as the registry URL), a WI hub bare repo for the carrier lane, and the first claim
 // done with one work commit published to the carrier. Answers the pieces
 // the re-claim scenarios need.
 type carrierRig struct {
@@ -51,11 +51,10 @@ type carrierRig struct {
 func newCarrierRig(t *testing.T, wi string, publishCarrier bool) *carrierRig {
 	t.Helper()
 	hub := newFakeHub()
-	hub.repos = []api.ProjectRepo{{Name: "app", URL: "file:///nonexistent-registry"}}
 	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
 	source := filepath.Join(ws, ".repo", "app")
 	srcHead := w079GitRepo(t, source, "local.txt", "local source\n")
-	writeWorkspaceYaml(t, ws, "projects:\n  proj:\n    repos:\n      - name: app\n        path: .repo/app\n")
+	hub.repos = []api.ProjectRepo{{Name: "app", URL: "file://" + source}}
 
 	hubRoot := t.TempDir()
 	hubBare := filepath.Join(hubRoot, wi+".git")
