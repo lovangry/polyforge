@@ -56,12 +56,14 @@ case "$1" in
   images) for f in "$S/img/"*; do [ -e "$f" ] && basename "$f"; done; exit 0 ;;
   inspect)
     c="$S/container"; [ -f "$c" ] || exit 1
+    bad=false; [ -n "$FAKE_BAD_IMG" ] && [ "$(cat "$c")" = "$FAKE_BAD_IMG" ] && bad=true
     case "$3" in
-      '{{.State.Status}}') echo running ;; '{{.State.Running}}') echo true ;;
+      '{{.State.Status}}') echo running ;; '{{.State.Running}}') if $bad; then echo false; else echo true; fi ;;
       '{{.Config.Image}}') cat "$c" ;;
     esac; exit 0 ;;
   exec)
-    c="$S/container"; f="$S/img/$(key "$(cat "$c")")"; echo "aihub $(sed -n 2p "$f")"; exit 0 ;;
+    c="$S/container"; [ -n "$FAKE_BAD_IMG" ] && [ "$(cat "$c")" = "$FAKE_BAD_IMG" ] && exit 1
+    f="$S/img/$(key "$(cat "$c")")"; echo "aihub $(sed -n 2p "$f")"; exit 0 ;;
   cp)
     c="$S/container"; v=$(sed -n 2p "$S/img/$(key "$(cat "$c")")")
     dest="${3}"; printf '#!/bin/sh\necho "aihub %s"\n' "$v" > "$dest"; exit 0 ;;
@@ -72,7 +74,9 @@ case "$1" in
     printf 'sha256:built%s\n%s\n\n' "$v" "$v" > "$S/img/$(key "$t")"; exit 0 ;;
   compose)
     shift; f=""; while [ $# -gt 0 ]; do case "$1" in -f) f="$2"; shift 2 ;; -p) shift 2 ;; config) [ -f "$f" ]; exit $? ;; up) break ;; *) shift ;; esac; done
-    img=$(sed -n 's/^    image: //p' "$f" | head -1); printf '%s\n' "$img" > "$S/container"; exit 0 ;;
+    img=$(sed -n 's/^    image: //p' "$f" | head -1)
+    [ -n "$FAKE_FAIL_UP_IMG" ] && [ "$img" = "$FAKE_FAIL_UP_IMG" ] && { echo "fake: compose up failed" >&2; exit 1; }
+    printf '%s\n' "$img" > "$S/container"; exit 0 ;;
 esac
 echo "fake docker: unhandled: $*" >&2; exit 99
 `
@@ -156,7 +160,7 @@ func (d *deployWorld) release(tag string, withImage bool, digestInRelease, regis
 
 func newDeployWorld(t *testing.T, oldVer string) *deployWorld {
 	t.Helper()
-	for _, tool := range []string{"python3", "rsync", "sha256sum"} {
+	for _, tool := range []string{"python3", "rsync", "sha256sum", "flock", "mkfifo"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not available", tool)
 		}
@@ -194,7 +198,7 @@ c.commit()`
 		"PATH="+d.path, "FAKE_W="+w, "TMPDIR="+w,
 		"HOME="+filepath.Join(w, "home"), "DOCKER_CONFIG="+filepath.Join(w, "home", ".docker"),
 		"AIHUB_HOST=fakehost", "AIHUB_DATA="+data,
-		"BACKUP_ROOT="+filepath.Join(w, "backups"), "COMPOSE_FILE="+compose,
+		"BACKUP_ROOT="+filepath.Join(w, "backups"), "DEPLOY_LOCK_FILE="+filepath.Join(w, "srv", "deploy.lock"), "COMPOSE_FILE="+compose,
 		"WAIT_SECS=4", "POLL_SECS=1", "UP_WAIT_SECS=5")
 	return d
 }
@@ -239,14 +243,14 @@ func TestReleaseDeployImagePullSwap(t *testing.T) {
 	d := newDeployWorld(t, "v2.2.1")
 	d.release("v2.2.1", true, digOld, digOld) // rollback target has a GHCR image too
 	d.release("v2.3.0", true, digNew, digNew)
-	out, err := d.run("deploy\n", "v2.3.0")
+	out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
 	if err != nil {
 		t.Fatalf("deploy failed: %v\n%s", err, out)
 	}
 	for _, want := range []string{
 		"digest " + digNew + " verified", "rollback image: v2.2.1 has a GHCR image",
 		"image polyforge/aihub:v2.3.0 shipped", "container image: polyforge/aihub:v2.3.0",
-		"container running, version v2.3.0", "downtime:",
+		"container running, version v2.3.0", "downtime:", "deployed=v2.3.0 previous=v2.2.1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q\n%s", want, out)
@@ -283,7 +287,7 @@ func TestReleaseDeployLegacyRollbackBuild(t *testing.T) {
 	d := newDeployWorld(t, "v2.2.0")
 	d.release("v2.2.0", false, "", "") // first time: no GHCR image for the running version
 	d.release("v2.3.0", true, digNew, digNew)
-	out, err := d.run("deploy\n", "v2.3.0")
+	out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
 	if err != nil {
 		t.Fatalf("deploy failed: %v\n%s", err, out)
 	}
@@ -302,7 +306,7 @@ func TestReleaseDeployDigestMismatchStopsBeforeServerChange(t *testing.T) {
 	d := newDeployWorld(t, "v2.2.1")
 	d.release("v2.2.1", true, digOld, digOld)
 	d.release("v2.3.0", true, digNew, digOld) // registry image carries a different digest
-	out, err := d.run("deploy\n", "v2.3.0")
+	out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
 	if err == nil {
 		t.Fatalf("deploy must fail on a digest mismatch\n%s", out)
 	}
@@ -322,7 +326,7 @@ func TestReleaseDeployNoImageAssetFailsAtPreflight(t *testing.T) {
 	d := newDeployWorld(t, "v2.2.1")
 	d.release("v2.2.1", true, digOld, digOld)
 	d.release("v2.3.0", false, "", "")
-	out, err := d.run("deploy\n", "v2.3.0", "--dry-run")
+	out, err := d.run("", "v2.3.0", "--dry-run")
 	if err == nil || !strings.Contains(out, "has no asset aihub-image.digest") {
 		t.Fatalf("expected a clean preflight failure, err=%v\n%s", err, out)
 	}

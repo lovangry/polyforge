@@ -48,12 +48,43 @@
 #   7 verify      image + version, logs panic/fatal, counts >= baseline, pf smoke
 #   8 rollback    concrete commands printed; final summary
 #
+# Safety rails:
+#   * Confirmation is a mandatory flag, never a prompt: --confirm <version> must
+#     equal the positional version (refused BEFORE any network work otherwise).
+#   * Server-side deploy lock (see "Deploy lock" below): two deploys can never
+#     mutate the server at once; held from step 2 through verification/rollback.
+#   * AUTO-ROLLBACK: if the swap or the post-swap verification fails, the script
+#     itself points the compose file back at the previous image, recreates the
+#     service and verifies that the OLD version answers. Data restore stays
+#     manual (it needs a stop) - the commands are printed.
+#
 # Usage:
-#   sh .polyforge/deploy.sh <tag> [--dry-run] [--force]
+#   .polyforge/deploy.sh <version> --confirm <version> [--dry-run] [--force]
+#     --confirm  REQUIRED for a real deploy; must equal <version>. There is
+#                deliberately no prompt and no --yes.
 #     --dry-run  steps 0-1 run for real (strictly read-only on the server),
-#                steps 2-8 are printed as a plan; nothing is changed.
+#                steps 2-8 are printed as a plan; nothing is changed, no lock
+#                is taken. --confirm is not required (if given it must match).
 #     --force    allow re-deploying the running version / a downgrade.
-#   There is deliberately NO --yes: the human types 'deploy'.
+#
+# Exit codes (the last stdout line is machine-readable on 0 / 10 / 11):
+#   0   deployed.            deployed=<version> previous=<old>
+#   1   refused, preflight failure, or any failure BEFORE the swap: nothing on
+#       the running service changed
+#   2   usage error
+#   3   deploy lock held by another deploy: nothing changed
+#   10  deploy failed AFTER the swap and was ROLLED BACK: production runs the
+#       old version again.   deployed=ROLLED_BACK previous=<old> attempted=<version>
+#   11  deploy failed AND the rollback failed: production state is uncertain;
+#       loud manual instructions are printed.  deployed=UNKNOWN previous=<old> attempted=<version>
+#
+# Deploy lock: `flock -n` on the server (DEPLOY_LOCK_FILE, default
+# /data/aihub-app/.deploy.lock) taken through a long-lived background ssh
+# session that runs `flock -n <file> sh -c 'echo LOCKED; exec cat'`. The lock
+# lives exactly as long as that remote `cat` has an open stdin, i.e. as long as
+# this script (or its ssh connection) lives: if the script is killed, the
+# machine loses power or the connection drops, sshd closes the pipe, cat exits
+# and the kernel drops the flock. No pid file, no stale lock to clean up.
 #
 # Environment (defaults):
 #   AIHUB_HOST=root@10.146.0.34   AIHUB_CONTAINER=aihub   AIHUB_DATA=/data/aihub
@@ -61,24 +92,33 @@
 #   GH_REPO=silgrid/polyforge   GHCR_IMAGE=ghcr.io/silgrid/aihub   AIHUB_PORT=8080   WAIT_SECS=60
 #   COMPOSE_FILE=/data/aihub-app/docker-compose.yml  COMPOSE_PROJECT=aihub-app  AIHUB_SERVICE=aihub
 #   DRAIN_SECS=5 (stop_grace_period)   MAX_DOWNTIME_SECS=10 (warn)   UP_WAIT_SECS=30 (fail)
+#   DEPLOY_LOCK_FILE=/data/aihub-app/.deploy.lock (on the server)   LOCK_WAIT_SECS=20
 set -eu
 
+USAGE="usage: .polyforge/deploy.sh <version> --confirm <version> [--dry-run] [--force]"
 TAG=""
 DRY=""
 FORCE=""
-for a in "$@"; do
+CONFIRM=""
+CONFIRM_SET=""
+while [ $# -gt 0 ]; do
+  a="$1"; shift
   case "$a" in
     --dry-run) DRY=1 ;;
     --force) FORCE=1 ;;
-    --yes|-y) echo "deploy: --yes is not allowed - the human gate stays (type 'deploy' at the prompt)" >&2; exit 2 ;;
-    -*) echo "deploy: unknown flag $a (use --dry-run, --force)" >&2; exit 2 ;;
+    --confirm)
+      if [ $# -lt 1 ]; then echo "deploy: --confirm needs a value (the version again)" >&2; echo "$USAGE" >&2; exit 2; fi
+      CONFIRM="$1"; CONFIRM_SET=1; shift ;;
+    --confirm=*) CONFIRM="${a#--confirm=}"; CONFIRM_SET=1 ;;
+    --yes|-y) echo "deploy: --yes is not allowed - confirm with --confirm <version>" >&2; exit 2 ;;
+    -*) echo "deploy: unknown flag $a (use --confirm <version>, --dry-run, --force)" >&2; exit 2 ;;
     *)
-      if [ -n "$TAG" ]; then echo "deploy: more than one tag given" >&2; exit 2; fi
+      if [ -n "$TAG" ]; then echo "deploy: more than one version given" >&2; exit 2; fi
       TAG="$a" ;;
   esac
 done
 if [ -z "$TAG" ]; then
-  echo "usage: sh .polyforge/deploy.sh <tag> [--dry-run] [--force]" >&2
+  echo "$USAGE" >&2
   exit 2
 fi
 case "$TAG" in
@@ -88,6 +128,18 @@ esac
 case "$TAG" in
   *[!A-Za-z0-9._-]*) echo "deploy: tag has unexpected characters (got \"$TAG\")" >&2; exit 2 ;;
 esac
+# The confirmation gate: a deploy happens because a person typed the version
+# twice, never because an automation decided to. Checked before ANY network work.
+if [ -n "$CONFIRM_SET" ] && [ "$CONFIRM" != "$TAG" ]; then
+  echo "deploy: REFUSED - --confirm \"$CONFIRM\" does not equal the version \"$TAG\". Nothing was touched." >&2
+  echo "$USAGE" >&2
+  exit 1
+fi
+if [ -z "$DRY" ] && [ -z "$CONFIRM_SET" ]; then
+  echo "deploy: REFUSED - a real deploy needs --confirm $TAG (no prompt, no --yes). Nothing was touched." >&2
+  echo "$USAGE" >&2
+  exit 1
+fi
 
 AIHUB_HOST="${AIHUB_HOST:-root@10.146.0.34}"
 AIHUB_CONTAINER="${AIHUB_CONTAINER:-aihub}"
@@ -100,6 +152,8 @@ POLL_SECS="${POLL_SECS:-2}"
 DRAIN_SECS="${DRAIN_SECS:-5}"
 MAX_DOWNTIME_SECS="${MAX_DOWNTIME_SECS:-10}"
 UP_WAIT_SECS="${UP_WAIT_SECS:-30}"
+DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/data/aihub-app/.deploy.lock}"
+LOCK_WAIT_SECS="${LOCK_WAIT_SECS:-20}"
 COMPOSE_FILE="${COMPOSE_FILE:-/data/aihub-app/docker-compose.yml}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-aihub-app}"
 AIHUB_SERVICE="${AIHUB_SERVICE:-aihub}"
@@ -113,8 +167,10 @@ ASSET_PF="pf-linux-amd64"
 ASSET_DIGEST="aihub-image.digest"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pf-deploy.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
-SWAPPED=""   # the rename over /aihub was attempted (service may run the new binary)
+SWAPPED=""   # the compose up was attempted (service may run the new image)
+ROLLING=""   # the automatic rollback is running
+FINISHED=""  # the deploy completed and verified
+LOCK_PID=""
 STEP="0"
 OLDVER=""; OLDIMG=""; NEWIMG=""; COMPOSE_BAK=""; DOCKERFILE=""; TS=""; BIN_SAVED=""; SRV_BACKUP=""; LOCAL_BACKUP=""
 NEW_LOCAL_ID=""; OLD_LOCAL_ID=""; OLD_HAS_GHCR=""
@@ -123,6 +179,61 @@ rssh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$AIHUB_HOST" "$@"; }
 dk() { rssh docker "$@"; }
 step() { STEP="$1"; printf '\n== step %s: %s ==\n' "$1" "$2"; }
 note() { printf '   %s\n' "$*"; }
+
+# release_lock: closing the fifo ends the remote `cat`; the kill is the belt
+# to that pair of braces. Idempotent.
+release_lock() {
+  if [ -n "$LOCK_PID" ]; then
+    exec 7>&-
+    kill "$LOCK_PID" 2>/dev/null || true
+    wait "$LOCK_PID" 2>/dev/null || true
+    LOCK_PID=""
+  fi
+}
+cleanup() { release_lock; rm -rf "$WORK"; }
+# on_exit: any unexpected exit (set -e, signal) after the swap still rolls back.
+on_exit() {
+  rc=$?
+  if [ -n "$SWAPPED" ] && [ -z "$FINISHED" ] && [ -z "$ROLLING" ]; then
+    echo "deploy: unexpected exit (status $rc) after the swap - rolling back" >&2
+    auto_rollback "unexpected exit, status $rc"
+  fi
+  cleanup
+  exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# take_lock: see "Deploy lock" in the header. Exit 3 when held, 1 on any other failure.
+take_lock() {
+  mkfifo "$WORK/lock.in" || die "mkfifo failed"
+  exec 7<>"$WORK/lock.in"   # we hold the write side: EOF for the remote cat only when we die
+  : >"$WORK/lock.out"
+  # fd 7 is closed for the ssh child so that only THIS script keeps the pipe open.
+  rssh "flock -n '$DEPLOY_LOCK_FILE' sh -c 'echo LOCKED; exec cat'; rc=\$?; [ \$rc -eq 1 ] && echo LOCK-BUSY; exit \$rc" \
+    <"$WORK/lock.in" >"$WORK/lock.out" 2>&1 7>&- &
+  LOCK_PID=$!
+  lw=0
+  while :; do
+    grep -q '^LOCKED' "$WORK/lock.out" && return 0
+    if ! kill -0 "$LOCK_PID" 2>/dev/null; then
+      grep -q '^LOCKED' "$WORK/lock.out" && return 0
+      break
+    fi
+    if [ "$lw" -ge $((LOCK_WAIT_SECS * 5)) ]; then break; fi
+    sleep 0.2; lw=$((lw + 1))
+  done
+  if grep -q '^LOCK-BUSY' "$WORK/lock.out"; then
+    release_lock
+    printf '\ndeploy: LOCK HELD - another deploy holds %s on %s. Nothing was changed.\n' "$DEPLOY_LOCK_FILE" "$AIHUB_HOST" >&2
+    exit 3
+  fi
+  out="$(head -3 "$WORK/lock.out" | tr '\n' ' ')"
+  release_lock
+  die "could not take the deploy lock $DEPLOY_LOCK_FILE on $AIHUB_HOST (flock missing? no answer in ${LOCK_WAIT_SECS}s?): $out"
+}
 
 rollback_text() {
   cat <<EOF
@@ -140,15 +251,61 @@ rollback_text() {
 EOF
 }
 
+# rollback_failed_report: loud manual instructions when the automatic rollback failed.
+rollback_failed_report() {
+  cat >&2 <<EOT
+
+#############################################################################
+#  ROLLBACK FAILED - production state is UNCERTAIN.  ACT BY HAND, NOW.      #
+#############################################################################
+The deploy of $TAG failed after the swap AND the automatic rollback to $OLDVER failed.
+Manual rollback commands (check each result):
+EOT
+  rollback_text >&2
+  echo "deployed=UNKNOWN previous=$OLDVER attempted=$TAG"
+}
+
 die() {
   printf '\ndeploy: FAILED at step %s: %s\n' "$STEP" "$*" >&2
+  if [ -n "$ROLLING" ]; then
+    rollback_failed_report
+    exit 11
+  fi
   if [ -z "$SWAPPED" ]; then
     echo "deploy: the service was never interrupted (never stopped, never recreated); backups and images already made are left in place." >&2
-  else
-    echo "deploy: the container was recreated on the new image but did not verify. Rollback commands:" >&2
-    rollback_text >&2
+    exit 1
   fi
-  exit 1
+  auto_rollback "$*"
+}
+
+# auto_rollback <reason>: compose back to the previous image, recreate, verify
+# that the OLD version answers (same wait_version as the new one). Never returns:
+# exit 10 = rolled back, 11 = rollback failed (die handles that).
+auto_rollback() {
+  ROLLING=1; STEP="auto-rollback"
+  {
+    echo
+    echo "deploy: !!! the new version FAILED after the swap: $1"
+    echo "deploy: !!! AUTOMATIC ROLLBACK to $OLDVER ($OLDIMG) starting"
+  } >&2
+  rssh "sed -i 's|image: $NEWIMG|image: $OLDIMG|' '$COMPOSE_FILE'" || die "rollback: could not point $COMPOSE_FILE back at $OLDIMG"
+  swap_up || die "rollback: docker compose up of $OLDIMG failed or no HTTP answer within ${UP_WAIT_SECS}s (\"$down\")"
+  img_now="$(dk inspect -f '{{.Config.Image}}' "$AIHUB_CONTAINER" 2>/dev/null || true)"
+  [ "$img_now" = "$OLDIMG" ] || die "rollback: container image is \"$img_now\", expected $OLDIMG"
+  wait_version "$OLDVER" || die "rollback: after ${WAIT_SECS}s container running=$LAST_RUN, version=\"$LAST_VER\" (wanted $OLDVER)"
+  {
+    echo
+    echo "#############################################################################"
+    echo "#  ROLLED BACK: the deploy of $TAG failed; production runs $OLDVER again."
+    echo "#############################################################################"
+    echo "reason: $1"
+    echo "verified: container image $OLDIMG, version $OLDVER answers, HTTP up (${down}s)"
+    echo "data: untouched by the rollback; backups at $AIHUB_HOST:$SRV_BACKUP and $LOCAL_BACKUP."
+    echo "only if the DATA is damaged (needs a STOP = real downtime), by hand:"
+    echo "  ssh $AIHUB_HOST \"docker stop $AIHUB_CONTAINER && mv $AIHUB_DATA $AIHUB_DATA.failed-$TS && cp -a $SRV_BACKUP $AIHUB_DATA && docker start $AIHUB_CONTAINER\""
+  } >&2
+  echo "deployed=ROLLED_BACK previous=$OLDVER attempted=$TAG"
+  exit 10
 }
 
 # vcmp A B -> -1 / 0 / 1 comparing vMAJOR.MINOR.PATCH numerically.
@@ -384,6 +541,28 @@ else:
     open(path + ".tmp", "w").write(text)
     os.replace(path + ".tmp", path)
 '
+# swap_up: compose up -d --no-deps <svc> on the server, then poll HTTP; sets $down
+# (seconds, or the failure token). Used by the deploy and by the rollback.
+# shellcheck disable=SC2016
+RESTART_SNIP='
+cf="$1"; proj="$2"; svc="$3"; port="$4"; limit="$5"
+t0=$(date +%s.%N)
+docker compose -f "$cf" -p "$proj" up -d --no-deps "$svc" </dev/null >/dev/null 2>&1 || { echo "UP-FAILED"; exit 3; }
+while :; do
+  code=$(curl -s -m 1 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port/" </dev/null 2>/dev/null || true)
+  case "$code" in [1-5][0-9][0-9]) break ;; esac
+  now=$(date +%s.%N)
+  if awk "BEGIN{exit !($now - $t0 > $limit)}"; then echo "NOT-UP"; exit 4; fi
+  sleep 0.2
+done
+t1=$(date +%s.%N)
+awk "BEGIN{printf \"%.1f\\n\", $t1 - $t0}"
+'
+swap_up() {
+  down=""
+  down="$(printf '%s\n' "$RESTART_SNIP" | rssh sh -s -- "$COMPOSE_FILE" "$COMPOSE_PROJECT" "$AIHUB_SERVICE" "$AIHUB_PORT" "$UP_WAIT_SECS")"
+}
+
 compose_edit() { printf '%s\n' "$PYCOMPOSE" | rssh python3 - "$COMPOSE_FILE" "$AIHUB_SERVICE" "$NEWIMG" "$DRAIN_SECS" "$1"; }
 
 # ---------------------------------------------------------------- step 0
@@ -511,6 +690,8 @@ cat <<EOF
                      docker tag on the server -> $NEWIMG ; verify git, curl in it
                      back up $COMPOSE_FILE -> $COMPOSE_BAK ; edit ONLY service $AIHUB_SERVICE (planned diff below) ; docker compose config -q (failure -> backup restored, stop)
                      docker compose -f $COMPOSE_FILE -p $COMPOSE_PROJECT up -d --no-deps $AIHUB_SERVICE ; poll http://127.0.0.1:$AIHUB_PORT/ every 0.2s ; print downtime (warn > ${MAX_DOWNTIME_SECS}s, fail if not up in ${UP_WAIT_SECS}s)
+   (a failure from the swap on AUTO-ROLLS BACK to $OLDIMG and exits 10; rollback failure exits 11)
+   lock               flock -n $DEPLOY_LOCK_FILE on $AIHUB_HOST held from step 2 to exit (not taken in dry-run)
 7. verify            container image == $NEWIMG ; wait <= ${WAIT_SECS}s for 'docker exec $AIHUB_CONTAINER /aihub -version' == $TAG ; docker logs --since <start>: print error lines, FAIL on panic/fatal
                      integrity + row counts >= frozen baseline (read-only); local 'pf queue --limit 1'
 8. rollback + summary; rollback commands for this run:
@@ -528,15 +709,14 @@ if [ -n "$DRY" ]; then
   exit 0
 fi
 
-# The human confirm gate: the deploy happens because a person typed
-# 'deploy', never because an automation decided to.
-printf "Deploy %s to %s now? The backup runs online; the service restarts once on the new binary (seconds of downtime). Type 'deploy' to proceed: " "$TAG" "$AIHUB_HOST"
-ANSWER=""
-read -r ANSWER || true
-if [ "$ANSWER" != "deploy" ]; then
-  echo "deploy: aborted by the operator (nothing was touched)."
-  exit 1
-fi
+# From here on the server is mutated: take the deploy lock first (held until exit).
+step lock "server-side deploy lock"
+take_lock
+note "lock $DEPLOY_LOCK_FILE held on $AIHUB_HOST until this script exits"
+# Re-read the running version under the lock: a deploy that finished between our
+# preflight and the lock would make OLDVER (and the rollback target) stale.
+nowv="$(dk exec "$AIHUB_CONTAINER" /aihub -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
+[ "$nowv" = "$OLDVER" ] || die "the running version changed to \"$nowv\" (was $OLDVER at preflight) - another deploy ran meanwhile; re-run"
 
 # ---------------------------------------------------------------- step 2
 step 2 "save the old binary"
@@ -646,24 +826,7 @@ note "compose file edited and validated (docker compose config -q ok)"
 # (c) swap: recreate only the aihub service on the new image, time until HTTP answers.
 START_AT="$(rssh "date -u +%Y-%m-%dT%H:%M:%SZ")"
 SWAPPED=1   # from here on a failure means "rollback"
-# shellcheck disable=SC2016
-RESTART_SNIP='
-cf="$1"; proj="$2"; svc="$3"; port="$4"; limit="$5"
-t0=$(date +%s.%N)
-docker compose -f "$cf" -p "$proj" up -d --no-deps "$svc" </dev/null >/dev/null 2>&1 || { echo "UP-FAILED"; exit 3; }
-while :; do
-  code=$(curl -s -m 1 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port/" </dev/null 2>/dev/null || true)
-  case "$code" in [1-5][0-9][0-9]) break ;; esac
-  now=$(date +%s.%N)
-  if awk "BEGIN{exit !($now - $t0 > $limit)}"; then echo "NOT-UP"; exit 4; fi
-  sleep 0.2
-done
-t1=$(date +%s.%N)
-awk "BEGIN{printf \"%.1f\\n\", $t1 - $t0}"
-'
-down=""
-down="$(printf '%s\n' "$RESTART_SNIP" | rssh sh -s -- "$COMPOSE_FILE" "$COMPOSE_PROJECT" "$AIHUB_SERVICE" "$AIHUB_PORT" "$UP_WAIT_SECS")" \
-  || die "swap did not complete: \"$down\" (docker compose up failed, or no HTTP answer within ${UP_WAIT_SECS}s)"
+swap_up || die "swap did not complete: \"$down\" (docker compose up failed, or no HTTP answer within ${UP_WAIT_SECS}s)"
 note "downtime: ${down}s (compose up -d --no-deps $AIHUB_SERVICE until HTTP answers; old container drained <= ${DRAIN_SECS}s)"
 if awk -v d="$down" -v m="$MAX_DOWNTIME_SECS" 'BEGIN{exit !(d + 0 > m + 0)}'; then
   note "WARNING: downtime ${down}s exceeded ${MAX_DOWNTIME_SECS}s"
@@ -715,3 +878,5 @@ echo "  baseline counts (snapshot; files: memory/ $MEM_FILES, git/ $GIT_FILES at
 show_counts "$WORK/frozen.counts"
 echo
 echo "work machines: re-run tools/install.sh <api-key> on each, one at a time"
+FINISHED=1
+echo "deployed=$TAG previous=$OLDVER"
