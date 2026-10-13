@@ -116,7 +116,7 @@
 | INV-5 | 过期 owner generation 不得发布 HEAD（takeover fencing） | `05-sync-revision-recovery.md#§2.9` |
 | INV-6 | harness-native subagent 不得写 `runtime-state/`（Capsule 执行权威文件），也不得读写 Daemon 凭证与 Daemon state；只有该 WI 的 WI Agent 进程可写 `runtime-state/`。该约束在 v1 host-native 同 UID 形态下是**防误写**措施（权限位 + 路径不暴露），**不是安全边界**，不构成机制级隔离（B02 裁定，见 §8） | `03-execution-capsule.md#§6.2`、`04-local-runtime.md#§8`、本文 §8 |
 | INV-7 | Memory 权威内容为 Markdown 文件；HTML 与搜索索引均为派生物，可由权威内容全量重建 | `06-memory-search.md#§2.1`/§4 |
-| INV-8 | WI 记录对 workflow 只保留三个 scalar：`bundle_name` + `bundle_digest` + `workflow_budget_baseline`（DDL 权威 `02-aihub-core.md#§4.2`）；AIHub Core **不存储 resolved steps 或任何解析结果**。WI 创建时 AIHub 服务端读本机 checkout 内该 bundle 的 workflow.md **frontmatter** 做校验并按唯一规则计算 bundle digest，**不解析正文、不落任何解析结果**；三列随创建事务写入，其中 `bundle_name`/`bundle_digest` 为**首次认领冻结**（R2 窗口：queued 且从未认领时可经 `PATCH` 三向变更，`02-aihub-core.md#§2.6` INV-2e/§4.5），首次认领后不存在任何重新固定/替换窗口。**不可变的对象是 WI 记录的 bundle 引用（`bundle_name`/`bundle_digest`），不存在 Core 侧的「版本锁定」承诺**（B07 裁定）：执行侧以 pin digest 为校验目标——WI Agent 第 0 步从本机 checkout 物化 bundle 并按 digest 校验；本机 checkout 与 pin 不一致属**配置事故**（告警、继续执行，v1 信任内网），不存在任何 Core 侧阻断或版本回取路径 | `01-workflow-skills.md#§4.6`、`02-aihub-core.md#§4.4`/§4.5、`03-execution-capsule.md#§4.5` |
+| INV-8 | WI 记录对 workflow 只保留一个 scalar：`bundle_name`（DDL 权威 `02-aihub-core.md#§4.2`；digest 列已删，polyforge#149 B9）；AIHub Core **不存储 resolved steps 或任何解析结果**。WI 创建时 AIHub 服务端读本机 checkout 内该 bundle 的 workflow.md **frontmatter** 做校验，**不解析正文、不落任何解析结果**；随创建事务写入的只有 `bundle_name` 与 `repo_inventory_base`，其中 `bundle_name` 为**首次认领冻结**（R2 窗口：queued 且从未认领时可经 `PATCH` 三向变更，`02-aihub-core.md#§2.6` INV-2e/§4.5），首次认领后不存在任何重新固定/替换窗口。**不可变的对象是 WI 记录的 bundle 引用（`bundle_name`），不存在 Core 侧的「版本锁定」承诺**（B07 裁定）：执行侧从本机 checkout 按 `bundle_name` 物化 bundle，不再做 digest 校验（校验链已删，polyforge#149 B9）；本机 checkout 缺该 bundle 属**配置事故**（告警、继续执行，v1 信任内网），不存在任何 Core 侧阻断或版本回取路径 | `01-workflow-skills.md#§4.6`、`02-aihub-core.md#§4.4`/§4.5、`03-execution-capsule.md#§4.5` |
 | INV-9 | 业务 gate FAIL（有界 on_fail rewind）与基础设施失败（当前 step resume）语义严格区分 | `01-workflow-skills.md#§6` |
 | INV-10 | 一期 AIHub 的外部持久化依赖仅为 SQLite + 本地目录；不依赖 PostgreSQL/JuiceFS/S3 | `02-aihub-core.md#§1`、`07-deployment-pilot.md#§2` |
 | INV-11 | 全扫描发布只在四类事件（+ 可选 milestone）上触发；触发**请求**由该事件的责任方发起（step 完成/中断/WI 结果由 WI Agent 发起，优雅停机由 Daemon 自己发起），但实际的全量扫描与发布动作**由 Daemon 机械执行**，不存在任何一方绕过 Daemon 直接改写 Revision/HEAD 的路径；watcher 只能把 Capsule 标记 dirty，不得自行发起扫描或发布 | `04-local-runtime.md#§6.3`/§6.4、`05-sync-revision-recovery.md#§2.4`/§6 |
@@ -494,7 +494,7 @@ per-step isolation**：
 | WI 记录（id/goal/content/labels/priority/status/attrs） | Core | SQLite | `02-aihub-core.md#§4.2` |
 | assignee / waiting_on | Core | SQLite 列 | `02-aihub-core.md#§2.4`/§4.2 |
 | owner generation（仲裁与历史） | Core | SQLite 表 | `02-aihub-core.md#§2.3`/§4.3 |
-| WI 的 workflow 引用（`bundle_name` / `bundle_digest` / `workflow_budget_baseline` 三 scalar；Core 不存 resolved steps 或任何解析结果） | Core | SQLite 列（`work_items` 三列） | `02-aihub-core.md#§4.2`/§4.4 |
+| WI 的 workflow 引用（`bundle_name` 一个 scalar；Core 不存 resolved steps 或任何解析结果） | Core | SQLite 列（`work_items.bundle_name`） | `02-aihub-core.md#§4.2`/§4.4 |
 | WI 事件流（审计） | Core | SQLite 表 | `02-aihub-core.md#§4.7` |
 | Capsule Revision 登记 + HEAD 指针 | Core | SQLite 表 | `05-sync-revision-recovery.md#§4`、`02-aihub-core.md#§4.8` |
 | Revision 数据文件（manifest + 分块） | AIHub 本地目录（远端面） | 文件系统 | `05-sync-revision-recovery.md#§4` |
@@ -623,23 +623,23 @@ origin，人工桥接验证可行后收编为一等动词）按同一判据落�
 以下用编号步骤描述端到端主流程的责任分工（细节均在各权威文档，本节不重复接口签名，也不作为
 可执行伪代码使用）：
 
-0. **（claim 之前，随 WI 创建事务一次完成）** workflow 的选择→frontmatter 校验→digest 固化在
+0. **（claim 之前，随 WI 创建事务一次完成）** workflow 的选择→frontmatter 校验在
    WI 创建事务内由 **AIHub Core 服务端完成**（`01-workflow-skills.md#§4.6`、`02-aihub-core.md#§4.5`）：
-   AIHub 读本机 checkout 内该 bundle 的 workflow.md **frontmatter** 做校验并按唯一规则计算 bundle
-   digest，**不解析正文、不落任何解析结果**；随创建事务落库的只有 `bundle_name`、`bundle_digest`、
-   `workflow_budget_baseline` 三个 scalar 与 `repo_inventory_base`（`02-aihub-core.md#§4.6`）。三列
-   中的 `bundle_name`/`bundle_digest` 为**首次认领冻结**（INV-8，R2 窗口）：首次认领之前（queued 且
+   AIHub 读本机 checkout 内该 bundle 的 workflow.md **frontmatter** 做校验，
+   **不解析正文、不落任何解析结果**；随创建事务落库的只有 `bundle_name`
+   一个 scalar 与 `repo_inventory_base`（`02-aihub-core.md#§4.6`；digest 列已删，
+   polyforge#149 B9）。`bundle_name` 为**首次认领冻结**（INV-8，R2 窗口）：首次认领之前（queued 且
    从未认领）仍可经 `PATCH` 三向变更（NULL→X / X→Y / X→NULL 解绑），认领后冻结，变更 workflow 引用
-   的唯一路径是取消当前 WI 并新建；`workflow_budget_baseline` 与 `repo_inventory_base` 维持创建事务冻结。
+   的唯一路径是取消当前 WI 并新建；`repo_inventory_base` 维持创建事务冻结。
 1. 用户在 Harness 中表达意图；路由 Skill 把意图映射为对本机 Daemon 的一次操作请求（`00-architecture.md#§3.1`）。
 2. Daemon 按 Interactive/Batch/Drain 判据（`00-architecture.md#§3.4`）决定是否创建 Job；claim 请求与
-   Job 记录只携带 WI 记录中的 `bundle_name` 与 `bundle_digest`；**claim 响应携带 `bundle_name`+`bundle_digest`+预算基线**
+   Job 记录只携带 WI 记录中的 `bundle_name`；**claim 响应携带 `bundle_name`**
    （`02-aihub-core.md#§8` 执行面规则——机器不做任何 claim 前的数据面读取即可完成执行路径）——Daemon 不查询、不拉取任何 resolved steps
    （Core 中不存在该数据，INV-8）。Daemon 向 AIHub 申请 owner
    generation（`02-aihub-core.md#§5.1`），创建该 WI 的 Capsule（含 worktree/repo inventory 检出，`03-execution-capsule.md#§4.2`），
    物化 bundle 并启动**Daemon 内的 Go driver**（`00-architecture.md#§3.6`/§3.6a，每 WI 一份）。
 3. **Go driver**是执行引擎：从本机 checkout 物化 `bundle_name` 指向的 bundle（`steps/*.md`
-   与 `workflow.md` 快照，`03-execution-capsule.md#§4.5`）并按 `bundle_digest` 校验一致性，加载
+   与 `workflow.md` 快照，`03-execution-capsule.md#§4.5`；不做 digest 校验——校验链已删，polyforge#149 B9），加载
    workflow 图后按 step 图逐个**派生短驻 harness step 进程**（envelope 一次一步，`01-workflow-skills.md#§6`）：
    每个 step 进程把结果信封写入 capsule，driver 校验后单一 transition 推进
    `runtime-state/execution.json`（`03-execution-capsule.md#§4.2`）；

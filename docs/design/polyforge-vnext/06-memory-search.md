@@ -27,7 +27,7 @@
 - **分享链接（A18 裁定）**：分享链接由 owner 显式动作生成（`POST share`），不构成第六种可见性分级取值，入口文案为显式例外（§5.1）。
 - **wrap 摘要条目（A13 裁定）**：WI wrap 时写入一条 wrap 摘要 Memory 条目，正文不含对 session transcript 归档的任何引用（§2.1）。
 - **检索过滤顺序（A17 裁定）**：检索/列表先按 project membership 过滤，再在候选集内应用可见性分级（权威声明在 §7）。
-- **存量迁移（A12 裁定）**：现有 aihub memory 一次性导出为 Markdown 权威文件 + `rebuild-index`，管理 CLI 直写文件、不走 API（§10.1 迁移契约，含 B03 的映射规则、导入顺序与迁移后校验）。
+- **存量迁移（A12 裁定）**：现有 aihub memory 一次性导出为 Markdown 权威文件后全量重建索引（启动期对账自动执行，polyforge#149：在线重建端点已删），管理 CLI 直写文件、不走 API（§10.1 迁移契约，含 B03 的映射规则、导入顺序与迁移后校验）。
 
 ### 1.2 非目标 <!-- §1.2 -->
 
@@ -199,8 +199,9 @@ INV-7c/INV-7f 覆盖「元数据与权威文件摘要不一致」的窗口（B5 
 
 - **文本索引（v1 唯一索引层）**：`memory_fts`（FTS5，`02-aihub-core.md#§4.9`）——**tokenizer 固定为 trigram**（FTS5 `tokenize='trigram'`）：按 3 字符滑窗切分，使任意子串检索对中文等无空格分词边界的语言同样成立（中文子串检索直接由滑窗保证，不依赖分词器/词典等语言学前置）。正文抽取规则：frontmatter 剥离后，Markdown
   结构字符（`#*_>`）剔除、代码块保留原文。
-- **可重建性**：`POST /api/v1/memories/rebuild-index`（§5.1）从权威 Markdown 全量重建 FTS 索引
-  （以及 §4.3 的 HTML 派生与 `source_markdown_sha`/`html_sha` 双摘要）；重建**只依赖** `<data_dir>/memory/` 下的
+- **可重建性**：从权威 Markdown 全量重建 FTS 索引（以及 §4.3 的 HTML 派生与
+  `source_markdown_sha`/`html_sha` 双摘要）——重建由 aihub 启动期的后台对账执行
+  （`RebuildIndex`；在线重建端点已删，polyforge#149 dead-code）；重建**只依赖** `<data_dir>/memory/` 下的
   Markdown 文件，不需要任何不可再生数据。v1 不存在任何语义/向量索引层（B02 裁定，§10.3）。
 
 ### 4.5 实时检索（权威语义：固定可计算阈值，与 M6/PILOT-V6 同一数值；v1 检索路径唯一 = FTS 文本检索） <!-- §4.5 -->
@@ -277,7 +278,7 @@ INV-7c/INV-7f 覆盖「元数据与权威文件摘要不一致」的窗口（B5 
 | `/api/v1/memories/{id}/redact` | POST | 软删除（§2.1；写路径先获取 §4.6 的备份屏障读锁） | MEM-404 / MEM-409 |
 | `/api/v1/memories/{id}/share` | POST | 生成分享链接（A18 裁定，见下；仅 owner 可调用） | MEM-404 / MEM-403 |
 | `/api/v1/memories/search?q=&type=&tags=&limit=` | GET | 实时文本检索（§4.5；v1 唯一检索路径，无 `semantic` 参数） | MEM-400 |
-| `/api/v1/memories/rebuild-index` | POST | 全量重建（§4.4） | MEM-502 |
+| （在线重建端点已删，polyforge#149 dead-code：重建走启动期对账，§4.4） | — | 全量重建（§4.4） | — |
 
 **分享链接（A18 裁定，权威）**：分享链接**只能由该条 Memory 的 owner 经显式动作生成**——`POST /api/v1/memories/{id}/share`，非 owner 调用返回 `MEM-403`。它是一条由 owner 显式授予的、超出该条目 `visibility` 分级的独立访问通道，**不构成第六种可见性分级取值**：`visibility` 的取值域仍只有 `private|project|team|public|admin` 五种（§4.2），分享动作不写改 frontmatter 的 `visibility` 字段。**入口文案为显式例外**：各入口（UI/CLI）呈现分享动作时，文案必须把它表述为「owner 显式授予的、对其可见性分级的一次例外」，不得表述为又一种 visibility 取值或与分级并列的常规选项——链接的生成动作即例外的全部授权依据，无默认开启、无隐式入口。
 
@@ -370,8 +371,8 @@ INV-7c/INV-7f 覆盖「元数据与权威文件摘要不一致」的窗口（B5 
 
 ### 5.3 重建流程（索引丢失恢复） <!-- §5.3 -->
 
-`POST /api/v1/memories/rebuild-index` 按以下编号步骤全量重建（覆盖两个目录：正常 `memory.md`
-与 `_redacted/` 下已软删的内容）；启动时的对账与定期调度任务执行同一流程：
+全量重建（`RebuildIndex`，aihub 启动期后台对账执行；在线端点已删，polyforge#149）按以下编号步骤进行（覆盖两个目录：正常 `memory.md`
+与 `_redacted/` 下已软删的内容）：
 
 1. **清扫临时文件（B5）**：遍历并删除 `<data_dir>/memory/**/memory.md.tmp` 残留——它们只
    可能是写序②前崩溃的遗留物（§5.2），权威路径从未被其影响，删除即完成该次回滚的收尾；同时
@@ -506,7 +507,8 @@ INV-7c/INV-7f 覆盖「元数据与权威文件摘要不一致」的窗口（B5 
 - **仅 FTS 丢失专项**（§5.3 无条件重建分支）：构造 Markdown 权威内容与 `memories`
   元数据完全匹配（`row.content_sha == 当前文件 sha`，无需补建或更新任何元数据字段）的
   前提下，单独删除该 `mem_id` 在 `memory_fts` 中的记录（模拟索引自身损坏/丢失，不动
-  Markdown 与 `memories` 行）→ 调用 `rebuild-index` 后断言该 `mem_id` 重新可被文本检索命中，
+  Markdown 与 `memories` 行）→ 触发一次重建（重启 aihub 让启动对账执行，或直接调用
+  `RebuildIndex`）后断言该 `mem_id` 重新可被文本检索命中，
   且本轮重建未触发任何 `memories` 行写入、未触发重新派生 HTML（断言 FTS 重建不依赖于
   元数据是否需要补建/更新这一判定结果）。
 - **B12 专项**：模拟"③ rename 已执行、HTML 派生动作未执行"崩溃窗口（在写序③之后、派生
@@ -554,7 +556,7 @@ INV-7c/INV-7f 覆盖「元数据与权威文件摘要不一致」的窗口（B5 
 - **WI id（`work_item_id`）**：不迁移旧 WI（执行状态不迁移，见上），故**不做 id 映射**——frontmatter 中的旧 `work_item_id` 值**置空**，并在迁移报告中记入置空清单（条目 `mem_id` + 原值），供人工后续按需补挂新 WI 引用。`related` 中的 `mem_…` 引用在同批迁移内天然保持有效（`mem_id` 不变）；指向不在迁移范围内的 `mem_id` 时置空该项并记入同一清单。
 - **不可解析关联的分层处置（与 `02-aihub-core.md#§4.9` 的 NOT NULL/FK 约束一致）**：`project_id`/`owner_user_id` 是**必需身份，不置空**——旧 project 名无法映射时，迁移工具先在目标库按旧名建占位 `projects` 行（visible=false）再挂 FK；旧 user 无法映射时，先建占位 machine user（display_name=旧名+`(imported)`）再挂 owner；两者记入「占位身份清单」供人工合并。**可空关联**（`work_item_id`、`related` 条目）才适用「置空 + 记入不可解析清单」——不猜值、不静默丢弃、不因单条解析失败中断整批迁移。
 
-**导入顺序（B03 裁定）**：① `projects` / `users`（含 machine user）先建——全部 id 映射就位；② memory 文件落位——CLI 按 frontmatter 直写 `<data_dir>/memory/<new_project_id>/<mem_id>/memory.md`；③ 调用 `POST /api/v1/memories/rebuild-index`（§5.3，与启动对账同一流程）从 Markdown 权威文件全量重建元数据与 FTS——存量条目落入 §5.3 第 3 步「有文件无行」补建分支（该分支保留的「经权威写路径之外的手工放置/导入」覆盖面正是为迁移预留）。此后权威恒为文件，存量数据库内容不再被任何读路径引用。
+**导入顺序（B03 裁定）**：① `projects` / `users`（含 machine user）先建——全部 id 映射就位；② memory 文件落位——CLI 按 frontmatter 直写 `<data_dir>/memory/<new_project_id>/<mem_id>/memory.md`；③ 重启 aihub（§5.3，启动对账同一流程）从 Markdown 权威文件全量重建元数据与 FTS——存量条目落入 §5.3 第 3 步「有文件无行」补建分支（该分支保留的「经权威写路径之外的手工放置/导入」覆盖面正是为迁移预留）。此后权威恒为文件，存量数据库内容不再被任何读路径引用。
 
 **迁移后校验（B03 裁定）**：① **条数对账**——重建后 `memories` 行数 = 导出条目数（active 与 redacted 分列比对）；② **`content_sha` 抽样**——按固定比例随机抽取条目，现读现算 `memory.md` 的 sha256 与 `memories.content_sha` 比对，任一抽样不一致即迁移缺陷（抽样只为控成本，一致性本身不分级）；③ **检索冒烟**——对每条抽样条目以其正文 3 字符子串做 `q=` 检索，断言可命中；④ **置空清点**——迁移报告中的置空清单条数与实际置空条目数一致。校验失败 → 修复后整批重跑：迁移是幂等的一次性动作，重跑以文件为准重建（§5.3 同一流程），不产生重复行。
 ### 10.2 引入顺序 <!-- §10.2 -->

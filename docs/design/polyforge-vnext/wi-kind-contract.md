@@ -6,14 +6,14 @@
 
 ## 1. `bundle_name` 的请求与响应字段
 
-- **create**（`POST /api/v1/work-items`）：请求体可选 `bundle_name`（非空字符串）与可选 `bundle_digest`（sha256 hex；仅可随 `bundle_name` 携带，单独携带 → `CORE-400`）。非空 = 执行票；NULL / 缺省 = 纯登记票。
-- **PATCH**（`PATCH /api/v1/work-items/{id}`）：`bundle_name` 为 R2 窗口内可更新键（string 或 null）；`null` = 解绑（同步清空 `bundle_digest`，票回到 ready queue「待选 bundle」分段）。`bundle_digest` 只可随 `bundle_name` 携带。
-- **落库规则（create 与 PATCH 共用同一代码路径）**：digest = 请求显式携带值，否则 stand-in `sha256("bundle-name:"+名)`；`workflow_budget_baseline` 恒为 NULL；`wi_repo_inventory` 不受 PATCH 影响。
-- **响应面**：WI 视图（GET 详情 / 列表 / queue 条目）携带 `bundle_name` / `bundle_digest`（既有字段，形状不变）。
+- **create**（`POST /api/v1/work-items`）：请求体可选 `bundle_name`（非空字符串）。非空 = 执行票；NULL / 缺省 = 纯登记票。（digest 链已删，polyforge#149 B9：载荷携带 digest 字段会被忽略，不再落库。）
+- **PATCH**（`PATCH /api/v1/work-items/{id}`）：`bundle_name` 为 R2 窗口内可更新键（string 或 null）；`null` = 解绑（票回到 ready queue「待选 bundle」分段）。digest 键已从可更新键集合删除（polyforge#149 B9）：携带该键的 PATCH 整体拒绝 `CORE-400`（未知/不可更新字段）。
+- **落库规则（create 与 PATCH 共用同一代码路径）**：bundle 引用即 `bundle_name` 本身，无 digest（不再派生 stand-in，也不接受显式 pin）；`wi_repo_inventory` 不受 PATCH 影响。
+- **响应面**：WI 视图（GET 详情 / 列表 / queue 条目）携带 `bundle_name`（既有字段，形状不变）。
 
 ## 2. R2 窗口语义（首次认领冻结）
 
-- **窗口**：`status='queued'` 且**从未认领**（无活跃 session 行且无 `session_claimed` 事件；force-end 后 session 行清空但认领事件仍在，冻结保持）。窗口内三向 PATCH 均接受：NULL→X（补挂）、X→Y（换名）、X→NULL（解绑清空 digest）。
+- **窗口**：`status='queued'` 且**从未认领**（无活跃 session 行且无 `session_claimed` 事件；force-end 后 session 行清空但认领事件仍在，冻结保持）。窗口内三向 PATCH 均接受：NULL→X（补挂）、X→Y（换名）、X→NULL（解绑）。
 - `waiting_on` 非空**不**单独拒绝窗口内 PATCH（是否出现在待选分段是队列过滤问题，不是不可变问题）。
 - **窗口外拒绝且不写库**：
   - 已认领 / 非 queued → `CORE-400`，`reason=IMMUTABLE`
