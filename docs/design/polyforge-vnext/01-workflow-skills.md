@@ -111,7 +111,9 @@ Step 元素字段：
 | `kind` | string | 必填 | one of `qa`\|`spec`\|`author`\|`code`\|`gate`\|`review`（V8）；分类分桶（§9）与结构约束（V10）的判定依据 |
 | `interactive` | bool | 可选，缺省 false | true 表示需要人在会话内驱动（grill/grill-review 等）；无位置限制（规则 V4） |
 | `gate` | bool | 可选，缺省 false | true 表示本 step 产出业务判定（review/verification/grill-review 皆可）；`interactive` 与 `gate` 可同时为 true |
-| `on_fail` | OnFail | 可选，仅 `gate: true` 的 step 允许携带 | `OnFail = {action: rewind\|terminate（缺省 terminate）, target: 更早的 step id（action=rewind 时必填）, include_verdict: bool（缺省 true）}` |
+| `on_fail` | OnFail | 可选，仅 `gate: true` 的 step 允许携带 | `OnFail = {action: rewind, target: 更早的 step id（必填）}`；**polyforge#147 C5 起 driver 侧 bundle 解析器只认 `action: rewind`**——`terminate` 选项与 `include_verdict` 键已删除（gate FAIL 判定全文一律随 `pending_rewind_input` 送达 target，不再可关），未声明 `on_fail` 即 §6.2 第 1 步的 `failed_gate` 终止 |
+| `context_policy` | string | 可选，缺省 `inherit` | `inherit`\|`fresh`：见 §4.4a。`inherit` 的 step 续上上游交接（派发输入带 handoff 文件正文），`fresh` 从零开始；`gate: true` 的 step 必须是 `fresh`（闸只凭自己的输入判，不继承有倾向性的上下文） |
+| `handoff` | bool | 可选，缺省 false | true 表示本 step 必须写交接文件 `artifacts/handoff-<step-id>.md`：见 §4.4a |
 | `budget` | Budget | 可选 | step 级，覆盖/叠加 workflow 级，结构同 §6.6 |
 | `model_candidates` | []string | 可选 | 覆盖 `defaults`（整体替换，非合并）；有序，切换语义见 §6.3（V9） |
 
@@ -149,8 +151,9 @@ vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontm
 7. `code`（`kind: code`；消费 `plan` 的产物与 `e2e-baseline` 铺好的验收 bar）
 8. `e2e-run`（`kind: code`，`gate: true`；复跑 `e2e-author` 编写的同一套场景；`on_fail: {action: rewind, target: code}`）
 9. `review`（`kind: review`，`gate: true`；`on_fail: {action: rewind, target: code}`）
-10. `verification`（`kind: gate`，`gate: true`；最后一道机器闸，在 `review` 之后、`release` 之前复跑完整绿灯 bar；`on_fail: {action: rewind, target: code}`）
-11. `release`（发版钩子槽位：`kind: code` 缺省或 `gate` 按项目自选，`gate: true` 建议；`on_fail` 按项目自定，缺省 `{action: rewind, target: review}`）
+10. `verification`（`kind: gate`，`gate: true`；最后一道机器闸，在 `review` 之后复跑完整绿灯 bar，也是流程的最后一步；`on_fail: {action: rewind, target: code}`）
+
+> **polyforge#147 C10 修订**：参考 bundle `feature-full` / `bug-fix` / `quick-fix` 的 **release step 已删除**（连同三份 `steps/release.md` 模板与 driver 内的 release 专属绑定）——流程到 `verification` 即收尾。下面关于 release 槽位、dispatcher 与凭据两分的裁定是**设计层记录**，待通用 release bundle 另票落地时复用；当前树上没有任何 release step 与 release 专属代码。
 
 **release step（发版钩子，定稿裁定）**：release 是 bundle 内的一个普通 step 槽位——平台零发版专用代码，全部复用既有 step 机器（inputs/output schema/worktree/预算/rewind/边界同步）。不新增 step kind：沿用 `code`（缺省，产生版本号 commit/tag 的 diff）或 `gate`（纯验证型发版），按项目自选；失败语义建议 `gate: true`——发版失败属业务判定，走既有有界 `on_fail` rewind。`agents/release.md` 是随参考 bundle 交付的模板骨架（版本号来源/构建/打 tag/上传目标/渠道晋升，全为 TODO 占位），各项目在各自 bundle 中自填——发版逻辑 per-project，多项目天然隔离。平台自身的发版（`aihub` 服务二进制与工作机二进制二产物）是同一钩子的一个实例，不另立发版模型；`pf upgrade` 只是消费已发布制品的部署管道（`07-deployment-pilot.md#§6`）。
 
@@ -166,7 +169,7 @@ vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontm
 
 - step 间数据流不入结构 schema（§4.1）：上游产物落 Capsule `artifacts/` 与 `execution.json` 的 `steps.<id>.output`（`03-execution-capsule.md#§4.2`），下游 step 的 agent 指令（§4.4 正文）按产物路径约定读取。grill 的问答记录（`artifacts/grill-qa.md`，§4.3）即按此约定被 `spec` 与 `grill-review` 消费。
 - `grill` 在 `spec` 之前、`grill-review` 在 `spec` 之后：两者都是普通 step，位置由数组顺序表达；`grill` 先于全部 `kind: spec` step 由 V10 结构性保证，`grill-review`（`gate: true` 的 qa step）的位置由 bundle 作者在数组中排定。
-- `grill-review` 是两段式 grill 的既定实现（不是待设计的回调）：其 PASS/FAIL 判定复用 §6.2 既有 rewind 机制；FAIL 且目标为 `spec` 时，`include_verdict`（缺省 true）把用户的修改意见随目标 step 输入一并送回，不引入任何新状态或恢复机制。
+- `grill-review` 是两段式 grill 的既定实现（不是待设计的回调）：其 PASS/FAIL 判定复用 §6.2 既有 rewind 机制；FAIL 且目标为 `spec` 时，FAIL 判定全文随目标 step 的输入一并送回（polyforge#147 C5 起 `include_verdict` 键已删，送回是无条件的），不引入任何新状态或恢复机制。
 - `review` 的位置自由度由 `kind: review` 表达（V8：可插在任意合法位置）；WI 创建固化后，执行序即 frontmatter `steps` 数组顺序，运行时不再漂移。
 
 ### 4.3 grill 的两段式行为 <!-- §4.3 -->
@@ -208,6 +211,16 @@ frontmatter 字段：
 **输出契约（INV-1h）**：step agent 的最终输出必须是符合 `output` schema 的 JSON，**不符合即按该 step 的基础设施失败处理**（§6.3，原地重派并推进候选指针），不产出业务判定、不触发 gate（与 `03-execution-capsule.md#§4.5` 一致）。「不符合」的判定来源有两个（polyforge#27 修订）：一是执行侧自查（WI Agent 读取 schema 的既有路径）；二是**发布时机械校验**——每次全扫描发布（HEAD 推进）时，Daemon 侧校验器从已固化进 staging 的快照字节中逐 step 比对每个已完成 step 的输出与其 pinned `output` JSON Schema。校验器是 draft-07 的机械完整实现，schema-authoring 规则与本仓 bundle 测试（`internal/workflow/schema`）强制的同一契约：参考 bundle 的 output schema 只使用标准 draft-07 关键字，真校验器接入即同一契约生效，不要求改写任何既有 schema。该检查只读将随本次发布写入 Revision 的快照字节，**绝不触碰 Capsule 内 `runtime-state/` 活文件**（INV-6：runtime-state 是 WI Agent 的单写者私有域，Daemon 的校验只在发布面读已发布快照；Capsule 侧契约的权威在 `03-execution-capsule.md#§5.1a`）。失配分类不变：不合 schema = 该 step 的基础设施失败（§6.3），不产出业务判定、不新增终态。
 
 正文为自然语言执行指令，由该 step 的 WI Agent 在派生 step agent 时组装进其 prompt（WI Agent 驱动逻辑的一部分，`00-architecture.md#§3.6`），不属于 harness 适配器或 Daemon 的实现细节。model/候选声明位置一律在 workflow.md frontmatter 的 step/defaults 字段（§4.1）——保证模型选择是流程作者的决定，而非 step skill 作者的决定。
+
+### 4.4a step 间上下文传递：`context_policy` 与 `handoff`（polyforge#147） <!-- §4.4a -->
+
+step 之间只有两种上下文关系，两者都由 workflow.md frontmatter 的 step 键声明，**语义全在路径约定上，没有任何摘要/清单校验**：
+
+- **`context_policy: inherit`（缺省）**：本 step 是上游工作的延续。派发时 driver 取**最近一个已 done 且声明了 `handoff: true` 的更早 step**，按约定路径 `artifacts/handoff-<step-id>.md` 读出其交接文件正文，原样拼进本 step 的派发 prompt（「Handoff from step …」小节）；没有这样的上游、或文件不在，就只是少了那一段，不是失败。
+- **`context_policy: fresh`**：本 step 从零开始，不注入任何上游交接正文；它要读的上游产物按**产物路径约定**自取（`artifacts/<name>.md`，§4.2 要点一）。`gate: true` 的 step 一律 `fresh`（解析器强制）。
+- **`handoff: true`**：本 step **必须**在收尾前把交接内容写成文件 `artifacts/handoff-<step-id>.md`（路径由 step id 机械决定，step 模板的 Handoff duty 一节即此约定的文案）。下游 inherit step 按这同一条路径读取。
+
+**无摘要校验（C2/C3 裁定）**：结果信封是最小契约——`outcome` + `output`（`needs_input` 另带 `question_id` + `question`）——信封里**没有** `handoff_ref`、没有 sha256、没有 bytes、没有 artifacts 清单。交接文件的存在与内容由路径约定承载：写在约定路径上就算交接完成，driver 不校验摘要、不比对清单、不因为缺少摘要字段判信封不合格；交接文件缺失时 inherit step 的派发只是少了那段正文，不构成信封级失败。产物同理：step 产出一律写进 `artifacts/` 下由各 step 指令点名的路径，下游按路径读。
 
 ### 4.5 digest 计算（唯一规则：RFC 8785 canonical JSON，MUST NOT 裸换行拼接） <!-- §4.5 -->
 

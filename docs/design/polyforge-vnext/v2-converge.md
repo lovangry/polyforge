@@ -99,7 +99,8 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 | 细分 | 判据 | 处理 |
 |---|---|---|
-| 模型类 | 退出前最后信号为"本轮出错"，或退出码 / 错误文本命中模型类特征（模型名不可解析、401/鉴权失败、配额等） | 同 `model_error`：换模型（F4 教训：模型 pin 失败必须推进候选） |
+| 模型类 | 退出前最后信号为"本轮出错"，或退出码 / 错误文本命中模型类特征（模型名不可解析、401/鉴权失败等） | 同 `model_error`：换模型（F4 教训：模型 pin 失败必须推进候选） |
+| 限流类（polyforge#147 D7） | 错误文本命中限流特征（429 / rate limit / too many requests / overloaded / 配额 / 余额·账单），判在模型类之前 | `rate_limited`：原模型退避重试，不推进候选指针、不计失败计数 |
 | 机器类 | driver 自身 I/O 错误（ENOSPC、EACCES 等）或翻译器上报的宿主错误 | 机器问题 |
 | 其余 | — | 同模型重试 |
 
@@ -110,9 +111,11 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | 退出未交结果（其余） | 同模型重试 |
 | `harness_silent` | 同模型重试 |
 | `ended_without_result` | 同模型重试；重试的 prompt 明确告知"上一轮已结束但没有写结果信封"。进程在正常结束一轮后以退出码 0 自行退出且无结果，也归此类（被杀 / 崩溃仍是退出其余） |
-| `model_error`、`model_hung`、`step_timeout_slow_model`、退出（模型类） | 换下一个候选模型 |
+| `model_error`、`model_hung`、退出（模型类） | 换下一个候选模型 |
+| `step_timeout_slow_model` | **放宽 T（翻倍，写入 `execution.json`）后换下一个候选模型**（polyforge#147 D6）：新候选在**放宽后的完整额度**下运行，累计耗时连续结转但严格低于翻倍后的界——绝不在启动瞬间即被判超时 |
+| `rate_limited`（429 / rate limit / too many requests / overloaded / quota / insufficient / billing / credit） | **不换模型**：原模型退避重试（polyforge#147 D7），退避 1s 起逐次翻倍、单次上限 300s；**不另设重试次数上限**，唯一的界是该步累计 T；**不放宽 T**（只有超时类死因放宽）；不计入失败计数 |
 | `tool_hung` | 同模型重试，并**放宽 Y**（同 T 的放宽规则） |
-| `step_timeout_long_task` | 同模型重试并放宽 T；再超时 → blocked |
+| `step_timeout_long_task` | 同模型重试（**不换模型**）并放宽 T（翻倍并持久化）；再超时 → blocked |
 | 机器问题 | blocked，通知人，不换模型 |
 | daemon 重启 | 同模型重新派发，**不计失败** |
 | `driver_stalled` | 终止当前 git/推送子进程，driver 重拉（计入 driver 异常退出界） |
@@ -125,7 +128,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 **失败计数（r2 补）**
 - 存放：`execution.json` 该 step 的字段（attempts 记录带 cause 子类）。
-- 计入：上表除"daemon 重启"外的所有死因。**信封被拒（#107 进程内重试，独立上限）不计入。**
+- 计入：上表除"daemon 重启"与"限流类 `rate_limited`"（polyforge#147 D7：退避重试只受 T 约束）外的所有死因。**信封被拒不计入**——polyforge#147 C4 起它不再走"进程内重试耗尽后重启 driver"的升级车道：进程内重试 3 次仍不合格 → 该步直接 blocked，原因码 `result_invalid`，不重启 driver、不路由 `on_fail`（rewind 只留给评审 FAIL 裁决）。
 - 清零：gate rewind 回到该步、换到新候选模型、人工"继续"。
 - daemon 重启触发的中断**不归档为失败、不推进候选指针**；一般地，被中断的 attempt 永不推进候选指针。（现状：`FaultClass` 分类层已删除，改为**死因规则**——只有模型类死因 `model_error`、`model_hung`、`step_timeout_slow_model`、`exit_model_class` 推进候选指针；指针在 gate_fail rewind 时重置；见 `driver/candidates.go`、`driver/supervision.go`。事件体与 attempts 记录带 `failure_cause`，不再有 `fault_class`。）
 - （现状：候选列表五级优先，高到低：`pf submit --models a,b,c` 的手工列表（仅由本 daemon 保存、按 WI、作用于该 WI 的每一步；随 submit 队列落盘，认领时写入 daemon 数据目录的 `manual-models.json`（不进 capsule），本机 daemon 重启、恢复、`pf resume` 重新认领均沿用，WI 终态（wrapped/failed/canceled）时删除；在另一台机器上重新认领则没有该列表，使用那台机器自己的设置）> 工作区 yaml 文件的 `models.<project>.<kind>` > `models.<project>.default` > bundle 步骤自带 `model_candidates` > bundle `defaults.model_candidates`；推进/重置语义不变。见 `workspace/compose.go`。）
@@ -137,8 +140,9 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - **T 的 step 级覆盖复用现有 `budget.wall_minutes`**，但它是**估计值而非硬上限**（bundle 里现有的 15–30 分钟都是估计）：声明了 `wall_minutes` 的 step，总时长界 **T = max(3 × wall_minutes, 全局 `--step-timeout` 默认)**；未声明则就是全局默认。不新增键；X、Y 的 step 级覆盖在 frontmatter 新增。覆盖值随 bundle 在领取时钉住，对之后领取的 WI 生效。
 - X 默认按 harness 翻译器声明的**输出粒度**取：逐字粒度（思考时也有输出）可短（例 10 分钟）；整条粒度或模型不返回思考内容时放长（例 30 分钟）。"模型不返回思考内容"在模型配置中声明。
 - Y 默认 30 分钟（#83 教训）；T 默认 60–90 分钟（#117 教训）；N 默认 10 分钟。
-- **放宽**：每次放宽翻倍，写入 `execution.json`，重启后沿用。
-- T 按**整个步骤累计**（跨该步的多次派发），不是每次派发重置。
+- **放宽**：每次放宽翻倍（放宽后的界 = 放宽前界 × 2），写入 `execution.json`（`steps.<id>.supervision.relaxed_wall_ms` / `relaxed_tool_ms`），重启后沿用。**只有超时类死因放宽 T**（`step_timeout_slow_model` 与 `step_timeout_long_task` 各自在处置时放宽一次）；换模型、人工继续、限流退避一律不放宽（polyforge#147 D6）。
+- T 按**整个步骤累计**（跨该步的多次派发、跨换模型、跨人工继续连续累计，polyforge#147 D6 起不再有任何"重开窗口"的 rebase——`runtime_base_ms` 已删）；**只计 agent 实际运行时间**：等人回答（needs_input）的挂钟时间、限流退避的等待时间都不计入。
+- **rewind 重跑清零**：gate FAIL rewind 回到某步时，该步的累计 T 归零（旧窗口的记账随归档 attempt 留存）。
 
 ### 2.5 harness 翻译器
 
@@ -151,6 +155,14 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | Codex | **`codex app-server`**（JSON-RPC），**不用 `exec --json`** | ✅ `item/reasoning/textDelta` 等 | 0.162.1 源码；`exec --json` 会过滤掉回复/思考的开始事件且无增量 |
 
 第一版只实现 pi 翻译器；Claude Code / Codex 随"按步骤选 harness"落地，接入时按当时最新版本复核协议。
+
+### 2.6 结果信封、`context_policy` 与 `handoff`（polyforge#147 定稿）
+
+**结果信封 = 最小契约**：step agent 把**一个** JSON 对象写到约定位置 `runtime-state/pending-results/<spawn_n>.json`（位置与命名不变），内容只有 `outcome` + `output`，`needs_input` 时另带 `question_id` + `question`，再加上派发身份围栏（`wi_id` / `step_id` / `spawn_n`）。`protocol_version`、`result_id`、`artifacts` 哈希清单、`handoff_ref` 摘要引用、`command_evidence` 结构化证据列表**全部删除**，driver 不再校验它们，缺这些旧字段 MUST NOT 判不合格；宽容重解析/补全层一并删除，不留兼容分支。验证类步骤的命令证据改为在 `output` 内自报（argv / exit_code / duration_ms），不新增协议字段。
+
+**`context_policy`（step 键，`inherit`\|`fresh`，缺省 `inherit`）**：声明一个 step 与上游的上下文关系。`inherit` = 本 step 续上游的活：派发时 driver 找**最近一个已 done 且声明 `handoff: true` 的更早 step**，按路径约定 `artifacts/handoff-<step-id>.md` 读出交接正文，原样拼进派发 prompt 的「Handoff from step …」小节；`fresh` = 从零开始，不注入交接正文，要读的上游产物按产物路径约定自取。`gate: true` 的 step 强制 `fresh`——闸只凭自己的输入判，不继承有倾向性的上下文。
+
+**`handoff`（step 键，bool，缺省 false）**：`true` 的 step 必须在收尾前把交接内容写成 `artifacts/handoff-<step-id>.md`。**路径约定就是全部契约**：没有摘要、没有字节数、没有信封字段，driver 不校验交接文件的哈希、不比对清单；交接文件不在时，下游 inherit step 的派发只是少了那一段正文，不构成信封级失败。权威细节见 `01-workflow-skills.md#§4.4a`。
 
 ## 3. 人工协同：`pf watch`（已定）
 
@@ -259,6 +271,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | 三（改逻辑，随本设计） | supervisor 猜测型车道（hang/idle/probe/wall/turn_duration/工具豁免/问题豁免/ack veto）→ 2.3 规则（**M4 重验保留**）；watch.sh → `pf watch`；三模式 → 第 5 节 | `pf watch`（Go）、watch.sh / watch-probe 删除：**已完成**（`f642e06`、`c01bd94`）；supervisor 车道重写：**已完成**（`internal/polyforge/supervise`、`driver/supervision.go`）；三模式简化：**已完成**（`v2/m2-modes`：`pf ops auto on|off` + `pf ops max N`，守护进程旗标 `-auto`，无兼容别名） |
 | 四 | takeover/adopt-session 简化（先验证"结束会话后重新领取能从断点继续"）；心跳保留并修权限漏洞 | takeover 简化：**已验证并完成**——验收测试 `test/v2_m3_end_session_recovery_test.go`（A 完成两步后被 SIGKILL → 管理员强制结束会话 → B 普通领取，从中断步继续、A 的任务仓提交经 `refs/pf-task` 还原、旧密钥写入被拒、A 重启后释放不复活）通过后，删除 `pf takeover`、`pf submit --takeover`、`pf verify-session`、daemon `takeover`/`adopt-session` 路由、`runtime/adopted.go` 托管、aihub `force-takeover` 端点；恢复路径 = 管理员/维护者 `pf ops end-session <wi> --reason ...`（aihub `POST /work-items/{id}/force-end-session`，WI→queued，审计事件 `session_superseded`）+ 任意 daemon 普通 `pf submit`；**M4 重验保留**。心跳权限漏洞：未动 |
 | 已完成 | release-intent 门禁（#139，commit a159c8c）；driver 机械保证（needs_input 校验、仅 feature-full grill-review 的 `requires_human_answer`、V4 command_evidence 门禁，`f00b398`）；重新领取两个 bug（git-dir 隔离、克隆失败拒绝 InitLocal / DAEMON-516）；身份模型（daemon-id 文件、`pf chat init`、`PF_CHAT_ID`、origin）；持久化提交队列 + 待修复停放 + `pf resume` 续跑（DAEMON-517；此后已并入 blocked，见第6节）+ `daemon_restarted`/`submit_*` 事件；bounded-fail 杀树 + 推送、end_pending 重试、隔离原子性、继续/放弃走人的 key（`pf resume`/`pf cancel`/`pf wrap --fail`）、`unblock` 动词移除、blocked 封存跨 daemon 校验（DAEMON-518）；待修复 WI 的放弃路径（此后已并入 blocked，见第6节）；孤儿 step 进程回收；`atomicWrite` 修复 | 已完成（`v2/final`）；含孤儿回收的双标记边界（`PF_WI_ID` + `PF_DAEMON_ID`，同机多 daemon 互不误杀）|
+| 审计减法 A（polyforge#147） | 结果信封瘦身为最小契约（`protocol_version`/`result_id`/`artifacts` 清单/`handoff_ref` 摘要/`command_evidence` 与其宽容层全删，§2.6）；拒绝重启层删除（3 次进程内重试仍不合格 → blocked `result_invalid`）；未用 frontmatter 键删除（`inputs`/`outputs`+`schema`/`requires_command_evidence`/`silence_minutes`/`tool_minutes`/`include_verdict`/`on_fail: terminate`）；三个 bundle 的 release step 与 driver release 硬绑定删除；driver 死代码（`Driver.Rewind`/`Terminate`、`Budget.USD`/`Tokens`、stdLogger 兜底、调试输出）删除；T 累计语义归位（`runtime_base_ms` 删）+ 超时类死因放宽翻倍（D6）；限流类死因独立成类、原模型退避重试（D7） | **已完成**（本票；交付清单见 WI capsule 的 `artifacts/code-summary.md`） |
 | 迁移代码 | v0→v1 迁移（`migrate-memories`/`migrate-work-items`、`core/import.go`、`tools/v0export`、`seed-v1.sh` 等）：owner 裁定提前删除，不再设观察期 | **已完成**（`v2/m1-migrate`） |
 | 兼容垫片 | owner 裁定 v2 不留向后兼容代码：`-mode` 别名、`daemon-state.json` 的 `mode` 迁移、`pf observe` 别名、`pf unblock` 提示桩、aihub `unblock` 端点与 `WIManager.Unblock`、`[watch.*]`/`watch_*` 配置容忍、`project_scope` 别名、对遗留 `takeover` 队列项的专名处理 | **已完成**（`v2/final`）；配置加载现对未知 section（含 `[watch.*]`）报错，未知顶层平铺键同样报错（含已移除的 `url` 别名；`533e032`） |
 
@@ -385,7 +398,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 **规则 ① 与 T 的后续修订（集成分支）**：规则 ① 扩展到正常结束的轮次（`ended_without_result`，见 2.3 表）；T 取 `max(3 × wall_minutes, 全局默认)`（见 2.4）。
 
-**阈值配置名**：旗标 `--silence-window`（X）、`--tool-window`（Y）、`--step-timeout`（T）、`--stall-window`（N）、`--model-error-grace`（规则 ① 宽限）；step 级覆盖在 workflow.md：`budget.wall_minutes`（T）、`silence_minutes`（X）、`tool_minutes`（Y）。旧旗标 `--hang-window/--idle-window/--probe-timeout/--wall-window` 已删，传入即解析失败。
+**阈值配置名**：旗标 `--silence-window`（X）、`--tool-window`（Y）、`--step-timeout`（T）、`--stall-window`（N）、`--model-error-grace`（规则 ① 宽限）；step 级覆盖在 workflow.md 只剩 `budget.wall_minutes`（T）——polyforge#147 C5 删除了从未被 bundle 使用的 `silence_minutes` / `tool_minutes` 键，X、Y 只有全局默认。旧旗标 `--hang-window/--idle-window/--probe-timeout/--wall-window` 已删，传入即解析失败。
 
 **与正文的实现差异（均为补充，不改契约语义）**
 - 事实集合多一条 `exec_committed{version}`：事件触发推送需要"driver 提交了新 Version"的提示，否则只能回到轮询 `execution.json`。
