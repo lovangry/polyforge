@@ -279,7 +279,7 @@ func fileEdit(ctx *Context, args []string) error {
 	}
 	if bundle.IsSet() {
 		if bundle.Val() == "" {
-			body["bundle_name"] = nil // JSON null unbinds name and digest
+			body["bundle_name"] = nil // JSON null unbinds the name
 		} else {
 			body["bundle_name"] = bundle.Val()
 		}
