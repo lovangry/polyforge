@@ -61,12 +61,19 @@ const EvEnvelopeRejected = "envelope_rejected"
 // the verdict.
 const EvGateVerdictBound = "gate_verdict_bound"
 
-// releaseStepID is the step id whose output schema carries the extended
-// verdict vocabulary [pass, defer, fail] (polyforge#123): the only step a
-// defer verdict validates on, and the only step the release verdict
-// binding (rule 3c below) judges. It mirrors the workflow bundles' step
-// declaration the same way verificationStepID does in observe.
-const releaseStepID = "release"
+// releaseStepID and deployStepID are the step ids of the `release`
+// workflow bundle (the only place a release or deploy happens). They are
+// the steps the release verdict binding (rule 3c below) judges: `release`
+// owns the closed vocabulary [pass, fail] (a release WI with no procedure
+// is an error, never a defer) and its pass must name the published
+// artifacts; `deploy` owns [pass, defer, fail] — defer validates on it
+// and nowhere else, because a project may release without deploying. They
+// mirror the bundle's step declarations the same way verificationStepID
+// does in observe.
+const (
+	releaseStepID = "release"
+	deployStepID  = "deploy"
+)
 
 // verificationStepID is the conventional id of the V4 verification step:
 // a completed result for it owes command evidence (ResultSpec.RequireCommandEvidence).
@@ -228,18 +235,20 @@ type ResultSpec struct {
 //     re-bind is visible to the caller: res.Outcome differs from the
 //     delivered outcome after this call, and the Run loop logs it as
 //     an EvGateVerdictBound event;
-//     3c. release verdict binding (the release step only, polyforge#123):
-//     a completed envelope for the release step whose output carries a
-//     top-level verdict is judged against the extended release verdict
-//     vocabulary — pass owes a non-empty version plus at least one
-//     artifacts_published entry, fail owes a non-empty fail_reason,
-//     defer owes neither version nor artifacts_published, and anything
-//     else is outside the closed [pass, defer, fail] set. A defer
-//     verdict on any OTHER step is a validation error: defer validates
-//     nowhere but the release step. The gate binding above stays
-//     prefix-fail only, so a defer verdict clears the release gate and
-//     the workflow proceeds to wrap, while a fail verdict (with its
-//     fail_reason) still re-binds to gate_failed and rewinds.
+//     3c. release verdict binding (the release bundle's `release` and
+//     `deploy` steps only): a completed envelope for one of them whose
+//     output carries a top-level verdict is judged against that step's
+//     vocabulary. On `release`: pass owes a non-empty version plus at
+//     least one artifacts_published entry, fail owes a non-empty
+//     fail_reason, and anything else (defer included) is outside the
+//     closed [pass, fail] set. On `deploy`: pass owes a non-empty
+//     version (the version now serving), fail owes a non-empty
+//     fail_reason, defer (no deploy procedure in the capsule) owes
+//     neither, and anything else is outside [pass, defer, fail]. A
+//     defer verdict on any OTHER step is a validation error. The gate
+//     binding above stays prefix-fail only, so a defer verdict clears
+//     the deploy gate and the workflow proceeds, while a fail verdict
+//     (with its fail_reason) still re-binds to gate_failed.
 //  4. substance: every artifact the envelope declares must exist under
 //     the capsule with matching size and SHA-256, and — for completed
 //     results — every declared output must be delivered and the output
@@ -464,15 +473,15 @@ func failVerdictInOutput(output json.RawMessage) (string, bool) {
 }
 
 // releaseVerdictBinding judges one completed envelope against the release
-// step's extended verdict contract (polyforge#123). It reads only the
-// top-level scalar fields the release output schema names and mirrors the
-// failVerdictInOutput tolerance: an output that is not a JSON object, or
-// whose verdict is absent/non-string, is not this binding's business (the
-// declared-schema lane stays its authority). On the release step the
-// vocabulary is closed — pass owes a non-empty version plus at least one
-// artifacts_published entry, fail owes a non-empty fail_reason, defer owes
-// neither version nor artifacts_published — and defer is illegal on every
-// other step.
+// bundle's verdict contract. It reads only the top-level scalar fields the
+// output schemas name and mirrors the failVerdictInOutput tolerance: an
+// output that is not a JSON object, or whose verdict is absent/non-string,
+// is not this binding's business (the declared-schema lane stays its
+// authority). `release`: closed vocabulary [pass, fail]; pass owes a
+// non-empty version plus at least one artifacts_published entry. `deploy`:
+// [pass, defer, fail]; pass owes a non-empty version, defer owes neither
+// version nor artifacts_published. fail owes a non-empty fail_reason on
+// both, and defer is illegal on every other step.
 func releaseVerdictBinding(res *StepResult) error {
 	if len(res.Output) == 0 {
 		return nil
@@ -492,35 +501,44 @@ func releaseVerdictBinding(res *StepResult) error {
 	}
 	verdict := strings.ToLower(strings.TrimSpace(v))
 	isRelease := res.StepID == releaseStepID
+	isDeploy := res.StepID == deployStepID
+	bound := isRelease || isDeploy
 	switch {
 	case verdict == "defer":
-		if !isRelease {
+		if !isDeploy {
 			return fmt.Errorf("driver: step %q output carries verdict %q — defer validates nowhere but the %s step's schema",
-				res.StepID, v, releaseStepID)
+				res.StepID, v, deployStepID)
 		}
 		if nonEmptyJSONString(probe.Version) || len(probe.ArtifactsPublished) > 0 {
-			return fmt.Errorf("driver: release output verdict %q owes neither version nor artifacts_published — a defer releases nothing; report pass with the produced version/artifacts or defer with none", v)
+			return fmt.Errorf("driver: deploy output verdict %q owes neither version nor artifacts_published — a defer deploys nothing; report pass with the deployed version or defer with none", v)
 		}
 		return nil
 	case strings.HasPrefix(verdict, "fail"):
-		if !isRelease {
+		if !bound {
 			return nil // the gate binding's business, not this one
 		}
 		if !nonEmptyJSONString(probe.FailReason) {
-			return fmt.Errorf("driver: release output verdict %q requires a non-empty fail_reason — the on_fail rewind input must say what went wrong", v)
+			return fmt.Errorf("driver: %s output verdict %q requires a non-empty fail_reason — the failure must say what went wrong", res.StepID, v)
 		}
 		return nil
 	case verdict == "pass":
-		if !isRelease {
-			return nil
-		}
-		if !nonEmptyJSONString(probe.Version) || len(probe.ArtifactsPublished) == 0 {
-			return fmt.Errorf("driver: release output verdict %q requires a non-empty version and at least one artifacts_published entry — pass means something was actually published", v)
+		switch {
+		case isRelease:
+			if !nonEmptyJSONString(probe.Version) || len(probe.ArtifactsPublished) == 0 {
+				return fmt.Errorf("driver: release output verdict %q requires a non-empty version and at least one artifacts_published entry — pass means something was actually published", v)
+			}
+		case isDeploy:
+			if !nonEmptyJSONString(probe.Version) {
+				return fmt.Errorf("driver: deploy output verdict %q requires a non-empty version — pass means that version is now serving", v)
+			}
 		}
 		return nil
 	default:
 		if isRelease {
-			return fmt.Errorf("driver: release output verdict %q is outside the closed release vocabulary [pass, defer, fail]", v)
+			return fmt.Errorf("driver: release output verdict %q is outside the closed release vocabulary [pass, fail]", v)
+		}
+		if isDeploy {
+			return fmt.Errorf("driver: deploy output verdict %q is outside the closed deploy vocabulary [pass, defer, fail]", v)
 		}
 		return nil
 	}
