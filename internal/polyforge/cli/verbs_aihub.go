@@ -214,9 +214,11 @@ func fileEdit(ctx *Context, args []string) error {
 		priority  optString
 		milestone optString
 		waitingOn optString
+		bundle    optString
 		attrs     kvList
 		useStdin  = f.Bool("stdin", false, "read the full PATCH-body JSON from stdin")
 	)
+	f.Var(&bundle, "bundle", "bundle_name (empty string unbinds); aihub accepts it only while the work item is queued and never claimed")
 	f.Var(&goal, "goal", "new goal")
 	f.Var(&content, "content", "new markdown background; '-' reads stdin, '@file' reads a file")
 	f.Var(&labels, "label", "labels (repeatable; replaces the whole set)")
@@ -274,6 +276,13 @@ func fileEdit(ctx *Context, args []string) error {
 	}
 	if waitingOn.IsSet() {
 		body["waiting_on"] = waitingOn.Ptr()
+	}
+	if bundle.IsSet() {
+		if bundle.Val() == "" {
+			body["bundle_name"] = nil // JSON null unbinds name and digest
+		} else {
+			body["bundle_name"] = bundle.Val()
+		}
 	}
 	if len(attrs) > 0 {
 		m := map[string]any{}
