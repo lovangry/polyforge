@@ -184,8 +184,11 @@ session 数据。
 
 ### 5.2 错误码表（前缀 `DAEMON`，`00-architecture.md#§5` 分配） <!-- §5.2 -->
 
+**错误信封是唯一的**（审计减法 pass B，D12）：Daemon 本机面的每一个失败响应都是顶层 `{code, detail}` 的 `api.Error`，`code` 一律是 `DAEMON-*`。`POST /jobs/{wi}/answer` 过去自造的 `BAD-400` / `ANSWER-400` / `ANSWER-409` 字面量已删除——报文无法解码、没有待答问题、多个待答问题未用 `--question` 指名，都是 `DAEMON-400`（HTTP 400）；已被消费/无活动派生是 `DAEMON-409`（HTTP 409）；该 WI 不在本机运行是 `DAEMON-404`。HTTP 状态码由 `code` 推出，不另设本地变体。
+
 | 码 | 语义 |
 |---|---|
+| `DAEMON-400` | 请求报文非法：无法解码，或 `answer` 在该 WI 上找不到待答问题 / 有多个待答问题而未用 `--question` 指名（审计减法 pass B，D12：此前是自造的 `BAD-400`/`ANSWER-400`） |
 | `DAEMON-404` | 对象不存在 |
 | `DAEMON-403` | `proxy_call` 请求方身份与目标 WI 不符，或请求的 `operation` 不在 §5.3 白名单内（`PROXY_OPERATION_NOT_ALLOWED`）；或 `answer` 的 `answered_by` 与请求认证身份不一致（`00-architecture.md#§3.4a`） |
 | `DAEMON-409` | 模式冲突（例如 Drain 中收到 `mode set` 之外的切换请求；或 Drain 模式下对单条 `claim`/`resume`/`takeover`/`batch_submit` 的拒绝——因为 Drain 自己的内部循环才是该模式下创建 Job 的唯一入口（§6.1c），这是模式互斥，不意味着 Drain 停止了创建 Job；或对不处于 needs_input 的 step 调用 `answer`，或 `answer` 的 `question_id` 不匹配/已被消费——比对/去重/过期规则权威在 `00-architecture.md#§3.4a`） |

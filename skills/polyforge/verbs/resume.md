@@ -49,15 +49,22 @@ capsule head equals the head the sealing daemon recorded at block time —
 the sealing daemon's last push did not land, so continue it on that
 machine, or abandon with `pf cancel <id>`.
 
+`pf wrap <id> --fail` is NOT a door into a parked workflow: it answers
+that there is no running job here and points back at these two moves
+(continue with `pf resume`, abandon with `pf cancel`), touching nothing.
+
 A blocked workflow must never answer the pause copy, and a plain claim
 (`pf submit`) of a parked work item still refuses (`CORE-409
 NOT_CLAIMABLE`) — the owner's moves go through this door, not through the
 claim gate.
 
-A work item whose capsule directory was missing at daemon restart, or whose
-project had no `[workspace]` mapping, is set to this same `blocked` status (the
-reason note names the cause; a `capsule_missing` / `project_unmapped` event shows in
-`pf watch`). Restore the mapping if that was the cause, then `pf resume <id>`:
+A work item whose capsule directory was missing at daemon restart, whose
+project had no `[workspace]` mapping, or whose restart-time session verify
+could not reach aihub (the reason note then names the unreachable hub and
+the incomplete verify — there is no local pending state and no background
+retry; the daemon parks the work item and waits for the owner), is set to
+this same `blocked` status (the reason note names the cause; a
+`capsule_missing` / `project_unmapped` event shows in `pf watch`). Restore the mapping if that was the cause, then `pf resume <id>`:
 it is a fresh re-claim from the aihub capsule chain plus the task-repo carrier
 refs (`refs/pf-task/<name>`); the dead scene (if any) is quarantined, completed
 steps are not re-run, and work published after the last push is lost.
@@ -89,7 +96,7 @@ refused before anything else happens.
 | `DAEMON-410` (`SHUTTING_DOWN`) | Graceful shutdown in progress | Wait for restart, then resume. |
 | `AUTH-403` (from the resume door) | The caller is not the work item's reporter, a project maintainer or an admin | Ask the task owner or a maintainer to continue it. |
 | `DAEMON-503` | The hub was unreachable when the daemon went to claim after the resume door | Not an error: the claim is queued in the daemon (persisted, retried with backoff) and `pf resume` answers `resumed ...: the hub is unreachable right now; the claim is queued`. Do not run `pf resume` again — it would only find the work item already queued (`DAEMON-409`). |
-| `DAEMON-412` | The project is not in the `[workspace]` mapping (a claim/submit for an unmapped project) | Re-add the project to a `[workspace."<path>"]` section (`pf doctor` checks it), then `pf resume`. |
+| `DAEMON-412` | The project has no `[workspace]` mapping on this machine (a claim/submit cannot place its capsule) | Re-add the project to a `[workspace."<path>"]` section (`pf doctor` checks it), then `pf resume`. |
 | `DAEMON-516` | The claim behind the resume could not clone the capsule for a work item with published progress; a local init would restart the workflow at step 1, so it is refused and the claim returns to blocked | Fix aihub reachability / credentials, then `pf resume` again. |
 | `DAEMON-518` | A different daemon than the sealing one claimed the continue and the aihub capsule head is not the sealed head | Continue it on the machine that sealed it, or abandon with `pf cancel <id>`. |
 | `CORE-409 NOT_BLOCKED` | The resume door on a work item that is no longer blocked | The state moved — check `pf queue`/`pf watch <id> --once`; a paused WI unpauses with this same verb. |

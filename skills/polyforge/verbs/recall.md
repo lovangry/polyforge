@@ -17,10 +17,10 @@ pf recall [--project P] <query> [--type T] [--tags a,b] [--limit N]
 ```
 
 The query is the positional argument; `--project` is REQUIRED
-(polyforge#113 — no default project exists) and validated against the
-`[workspace]` mapping in cli.toml: an unmapped project fails loudly
-naming it. The routing flow derives the value from the WI under
-discussion. `--type` filters one memory type (e.g. `experience.debug`);
+(polyforge#113 — no default project exists) but NOT restricted to the
+machine's `[workspace]` mapping: memory lives in AIHub, so recall works
+for any project the api key can see, mapped here or not. The routing
+flow derives the value from the WI under discussion. `--type` filters one memory type (e.g. `experience.debug`);
 `--tags` is comma-separated and an entry must contain all of them;
 `--limit` caps results.
 
