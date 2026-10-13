@@ -390,12 +390,14 @@ func renderApiKeys(w io.Writer, raw json.RawMessage) {
 	printTable(w, []string{"ID", "USER", "SCOPE", "REVOKED"}, rows)
 }
 
-// renderMachines renders the machines liveness list (M3, admin read
-// face): RUNTIME is the machine's reported go version ("-" when it has
+// renderMachines renders the daemon liveness list (M3, admin read
+// face): RUNTIME is the daemon's reported go version ("-" when it has
 // none), LIVE WI the bare count of live work item ids, and STATE the
-// server-computed stale projection (STALE vs alive).
+// server-computed stale projection (STALE vs alive). The aihub-side
+// registration keeps its machine vocabulary; the user-facing wording
+// names daemons.
 func renderMachines(w io.Writer, list *aihubclient.MachinesList) {
-	fmt.Fprintf(w, "machines: %d (stale threshold %ds)\n", list.Count, list.StaleAfterSeconds)
+	fmt.Fprintf(w, "daemons: %d (stale threshold %ds)\n", list.Count, list.StaleAfterSeconds)
 	rows := make([][]string, 0, len(list.Machines))
 	for _, m := range list.Machines {
 		age := "?"

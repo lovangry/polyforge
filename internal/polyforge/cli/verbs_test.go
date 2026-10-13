@@ -805,7 +805,7 @@ func TestMachinesListRequestShapeAndHumanRender(t *testing.T) {
 	if got.Header.Get("Authorization") != "Bearer k_cli" {
 		t.Errorf("auth = %q", got.Header.Get("Authorization"))
 	}
-	if !strings.Contains(stdout, "machines: 1 (stale threshold 120s)\n") {
+	if !strings.Contains(stdout, "daemons: 1 (stale threshold 120s)\n") {
 		t.Errorf("stdout header missing: %q", stdout)
 	}
 	// The full row: runtime rendered, LIVE WI the bare count 2 (never the

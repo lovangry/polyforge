@@ -67,7 +67,7 @@ func TestObserveAnswerPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("watch: %v", err)
 	}
-	if snap.WorkItem != "wi_b" || !snap.Known || snap.Job == nil || snap.Job.Status != protocol.JobRunning {
+	if snap.WorkItem != "wi_b" || !snap.Known || snap.Job == nil || snap.Job.Status != "running" {
 		t.Fatalf("watch snapshot = %+v", snap)
 	}
 	if len(snap.Events) == 0 {

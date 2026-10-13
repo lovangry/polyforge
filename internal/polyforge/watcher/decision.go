@@ -68,12 +68,6 @@ var statusRules = map[string]struct {
 	"paused":   {Rule{Class: "paused", Phrase: "the work item was paused"}, false},
 }
 
-// ClassifyEvent looks an event kind up in the decision table.
-func ClassifyEvent(kind string) (Rule, bool) {
-	r, ok := eventRules[kind]
-	return r, ok
-}
-
 // Decision is one delivered human decision.
 type Decision struct {
 	WI     string

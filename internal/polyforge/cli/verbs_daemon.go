@@ -576,10 +576,8 @@ var cmdDaemon = &Command{
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		// In a correct build this Run is unreachable: cmd/pf/main.go
 		// intercepts `pf daemon` argv and calls daemon.Main. If it is
-		// ever reached, do not lie about the daemon — reprint the help.
-		fmt.Fprintln(ctx.Stdout, daemonUsage)
-		fmt.Fprintln(ctx.Stdout, "\n(this path is help-only: cmd/pf/main.go intercepts `pf daemon` and")
-		fmt.Fprintln(ctx.Stdout, "runs internal/polyforge/daemon.Main directly)")
+		// ever reached, the only honest answer is the launch-surface help.
+		fmt.Fprint(ctx.Stdout, daemonUsage)
 		return nil
 	},
 }

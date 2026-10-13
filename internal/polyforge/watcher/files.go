@@ -193,9 +193,6 @@ func (s *StatusSink) Write(lines []string) (string, error) {
 	return "", firstErr
 }
 
-// Used is the path the last successful write landed on.
-func (s *StatusSink) Used() string { return s.used }
-
 func writeAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
