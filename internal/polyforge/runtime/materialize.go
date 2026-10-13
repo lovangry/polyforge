@@ -7,7 +7,7 @@ package runtime
 //   - the full bundle tree lands under workflows/<bundle>/ and the
 //     step definitions (the bundle's steps/) under agents/;
 //   - the completion marker sync/materialized.json records the pinned
-//     bundle identity (name/digest), the adapter set and the full
+//     bundle identity (name), the adapter set and the full
 //     targets list, written ATOMICALLY AFTER the last target rename and
 //     removed BEFORE the first live mutation — the ONLY "snapshot is
 //     complete" signal any consumer may trust.
@@ -27,9 +27,6 @@ package runtime
 // that reason — and is rebuilt by every new generation.
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,9 +35,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
-	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
-	"github.com/silgrid/polyforge/internal/common/workflow"
 )
 
 const (
@@ -59,9 +54,8 @@ const (
 // snapshot was materialized for, the full targets list the
 // trust gate walks, and the completion timestamp.
 type materializeMarkerRecord struct {
-	BundleName   string   `json:"bundle_name"`
-	BundleDigest string   `json:"bundle_digest"`
-	Adapters     []string `json:"adapters"`
+	BundleName string   `json:"bundle_name"`
+	Adapters   []string `json:"adapters"`
 	// Targets lists every materialized file's capsule-relative path
 	// (slash-separated). The trust gate walks this list: a marker whose
 	// recorded target is missing on disk is not a complete snapshot.
@@ -93,7 +87,7 @@ func sameAdapterSet(a, b []string) bool {
 // identity and therefore trustworthy. A parseable marker alone proves
 // nothing — the gate additionally requires:
 //
-//   - the marker's recorded identity (bundle name, digest, adapter set)
+//   - the marker's recorded identity (bundle name, adapter set)
 //     matches the job's pin — a snapshot materialized for a different
 //     bundle is not this WI's snapshot;
 //   - every recorded target actually exists on disk (a deleted file
@@ -109,7 +103,7 @@ func sameAdapterSet(a, b []string) bool {
 // idempotent re-materialization rebuilds the identical set and rewrites
 // the marker: smooth either way.
 func (r *Runtime) materializationComplete(j *job) bool {
-	if j.bundleName == "" || j.bundleDigest == "" {
+	if j.bundleName == "" {
 		return false // no expectation, no trust (fail closed)
 	}
 	raw, err := os.ReadFile(filepath.Join(j.capsuleDir, filepath.FromSlash(RelMaterializeMarker)))
@@ -120,7 +114,7 @@ func (r *Runtime) materializationComplete(j *job) bool {
 	if json.Unmarshal(raw, &m) != nil {
 		return false
 	}
-	if m.BundleName != j.bundleName || m.BundleDigest != j.bundleDigest {
+	if m.BundleName != j.bundleName {
 		return false
 	}
 	if !sameAdapterSet(m.Adapters, []string{r.cfg.Harness}) {
@@ -144,9 +138,7 @@ func (r *Runtime) materializationComplete(j *job) bool {
 }
 
 // materializeBundle lays out the bundle targets as one atomic set (or
-// reuses a trusted complete snapshot). Claim-time entry: a digest
-// divergence between the checkout and the pin is REFUSED (CAP-405)
-// before any live target is touched.
+// reuses a trusted complete snapshot). Claim-time entry.
 func (r *Runtime) materializeBundle(j *job) error {
 	if r.cfg.WorkflowsDir == "" || j.bundleName == "" {
 		return nil
@@ -186,29 +178,6 @@ func (r *Runtime) materializeBundleSet(j *job, src string) error {
 	if err := copyTree(src, filepath.Join(stage, filepath.FromSlash(wfRel))); err != nil {
 		os.RemoveAll(stage)
 		return err
-	}
-	// Digest verification (§4.5), moved BEFORE the first live mutation:
-	// the STAGED tree is walked and hashed, and the aggregate must equal
-	// the pinned digest — a bundle whose checkout diverged from its pin
-	// is refused with the live scene untouched and the old marker still
-	// standing. The name-derived stand-in (and an absent digest) was
-	// never a content pin: verification is skipped with a notice.
-	if j.bundleDigest != "" && j.bundleDigest != nameDerivedDigest(j.bundleName) {
-		entries, err := bundleEntries(filepath.Join(stage, filepath.FromSlash(wfRel)))
-		if err != nil {
-			os.RemoveAll(stage)
-			return err
-		}
-		if got := workflow.Digest(entries); got != j.bundleDigest {
-			os.RemoveAll(stage)
-			return &api.Error{
-				Code: api.ErrCapCheckoutDiver,
-				Detail: fmt.Sprintf("bundle %s digest mismatch: pinned %s, materialized tree %s",
-					j.bundleName, j.bundleDigest, got),
-			}
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s carries no pinned content digest; materialized without verification\n", j.wi, j.bundleName)
 	}
 	// The workflow tree (already staged above) is always a swap piece;
 	// the step definitions live under steps/ and are staged to the
@@ -260,11 +229,10 @@ func (r *Runtime) materializeBundleSet(j *job, src string) error {
 	// Phase 4 — trust: the fresh marker lands LAST, atomically
 	// (tmp+fsync+rename, the same contract as every capsule state file).
 	blob, merr := json.MarshalIndent(materializeMarkerRecord{
-		BundleName:   j.bundleName,
-		BundleDigest: j.bundleDigest,
-		Adapters:     []string{r.cfg.Harness},
-		Targets:      targets,
-		CompletedAt:  nowStamp(),
+		BundleName:  j.bundleName,
+		Adapters:    []string{r.cfg.Harness},
+		Targets:     targets,
+		CompletedAt: nowStamp(),
 	}, "", "  ")
 	if merr != nil {
 		return merr
@@ -296,47 +264,5 @@ func stagedTargets(stage string) ([]string, error) {
 		return nil
 	})
 	sort.Strings(out)
-	return out, err
-}
-
-// nameDerivedDigest is the name-derived stand-in aihub stores when a work
-// item pins a bundle by name only (core/workitem.go's default:
-// sha256Hex("bundle-name:"+name)). A pinned digest equal to it is not a
-// content pin, so materialization cannot verify against it.
-func nameDerivedDigest(name string) string {
-	sum := sha256.Sum256([]byte("bundle-name:" + name))
-	return hex.EncodeToString(sum[:])
-}
-
-// bundleEntries walks the (staged) bundle tree and derives the digest
-// input set: one FileEntry per regular file, path slash-separated
-// relative to the bundle root, SHA-256 over the LF-normalized content,
-// byte length of the normalized content.
-func bundleEntries(root string) ([]workflow.FileEntry, error) {
-	var out []workflow.FileEntry
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, werr error) error {
-		if werr != nil {
-			return werr
-		}
-		if d.IsDir() || !d.Type().IsRegular() {
-			return nil
-		}
-		rel, rerr := filepath.Rel(root, p)
-		if rerr != nil {
-			return rerr
-		}
-		raw, rerr := os.ReadFile(p)
-		if rerr != nil {
-			return rerr
-		}
-		norm := bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
-		sum := sha256.Sum256(norm)
-		out = append(out, workflow.FileEntry{
-			Path:   filepath.ToSlash(rel),
-			Sha256: hex.EncodeToString(sum[:]),
-			Bytes:  uint64(len(norm)),
-		})
-		return nil
-	})
 	return out, err
 }

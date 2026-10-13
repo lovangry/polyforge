@@ -86,13 +86,12 @@ func mustCreateExecWI(t *testing.T, env *testEnv, goal string, attrs map[string]
 		priority = api.PriorityNormal
 	}
 	wi, err := env.WIs.Create(CreateRequest{
-		Project:      "alpha",
-		Goal:         goal,
-		Attrs:        attrs,
-		Priority:     priority,
-		Reporter:     env.UserID,
-		BundleName:   strPtrTest("demo-bundle"),
-		BundleDigest: strPtrTest("digest-of-demo-bundle"),
+		Project:    "alpha",
+		Goal:       goal,
+		Attrs:      attrs,
+		Priority:   priority,
+		Reporter:   env.UserID,
+		BundleName: strPtrTest("demo-bundle"),
 	})
 	if err != nil {
 		t.Fatalf("create exec wi: %v", err)
@@ -150,11 +149,10 @@ func TestWorkItemCRUD(t *testing.T) {
 	}); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "EXECUTION_STATE_REJECTED" {
 		t.Fatalf("execution-state attrs not rejected: %v", err)
 	}
-	// Execution ticket: bundle_name pins the workflow reference; a missing
-	// client digest gets the deterministic stand-in (full §4.5 checkout
-	// hashing is future work). The reference freezes at FIRST CLAIM (the
-	// R2 window, w140): this ticket is queued and never claimed, so the
-	// PATCH re-derives the stand-in digest from the new name.
+	// Execution ticket: bundle_name pins the workflow reference (the name
+	// is the reference — the digest chain is deleted, polyforge#149). The
+	// reference freezes at FIRST CLAIM (the R2 window, w140): this ticket
+	// is queued and never claimed, so the PATCH renames the reference.
 	exec, err := env.WIs.Create(CreateRequest{
 		Project: "alpha", Goal: "exec ticket", Reporter: env.UserID,
 		BundleName: strPtrTest("demo-bundle"),
@@ -162,16 +160,15 @@ func TestWorkItemCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exec create: %v", err)
 	}
-	if exec.BundleName == nil || *exec.BundleName != "demo-bundle" || exec.BundleDigest == nil || *exec.BundleDigest == "" {
+	if exec.BundleName == nil || *exec.BundleName != "demo-bundle" {
 		t.Fatalf("bundle reference not persisted: %+v", exec)
 	}
 	patched, err := env.WIs.Patch(exec.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"other"`)})
 	if err != nil {
 		t.Fatalf("bundle patch inside the R2 window (queued, never claimed) refused: %v", err)
 	}
-	if patched.BundleName == nil || *patched.BundleName != "other" ||
-		patched.BundleDigest == nil || *patched.BundleDigest != Sha256Hex("bundle-name:other") {
-		t.Fatalf("bundle patch did not re-derive the stand-in digest: %+v", patched)
+	if patched.BundleName == nil || *patched.BundleName != "other" {
+		t.Fatalf("bundle patch did not rename the reference: %+v", patched)
 	}
 	// Empty goal, unknown project.
 	if _, err := env.WIs.Create(CreateRequest{Project: "alpha", Goal: "  ", Reporter: env.UserID}); !IsCode(err, api.ErrCoreBadInput) {

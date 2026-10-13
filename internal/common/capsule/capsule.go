@@ -40,13 +40,12 @@ const GitignoreContent = "/repos/\n/artifacts/release-*/\n"
 // deleted: capsules still carrying those keys parse fine — encoding/json
 // ignores unknown keys.
 type Identity struct {
-	WorkItemID   string            `json:"work_item_id"`
-	CapsuleID    string            `json:"capsule_id"`
-	Project      string            `json:"project"`
-	BundleName   string            `json:"bundle_name"`
-	BundleDigest string            `json:"bundle_digest"`
-	Repos        map[string]string `json:"repos"` // repo name -> checked-out SHA at claim
-	CreatedAt    string            `json:"created_at"`
+	WorkItemID string            `json:"work_item_id"`
+	CapsuleID  string            `json:"capsule_id"`
+	Project    string            `json:"project"`
+	BundleName string            `json:"bundle_name"`
+	Repos      map[string]string `json:"repos"` // repo name -> checked-out SHA at claim
+	CreatedAt  string            `json:"created_at"`
 
 	// EffectiveCandidates is the polyforge#79 audit: the per-step
 	// post-precedence candidate list the claim actually applied when the
@@ -65,17 +64,16 @@ type Identity struct {
 // claim answer is its only source, and recovery re-materializes it from
 // aihub when a legacy capsule predates it.
 type WorkItemDoc struct {
-	ID           string   `json:"id"`
-	Slug         string   `json:"slug,omitempty"`
-	Project      string   `json:"project"`
-	Goal         string   `json:"goal"`
-	Content      *string  `json:"content"`
-	Labels       []string `json:"labels"`
-	Priority     string   `json:"priority"`
-	Milestone    *string  `json:"milestone"`
-	BundleName   string   `json:"bundle_name"`
-	BundleDigest string   `json:"bundle_digest"`
-	UpdatedAt    string   `json:"updated_at"`
+	ID         string   `json:"id"`
+	Slug       string   `json:"slug,omitempty"`
+	Project    string   `json:"project"`
+	Goal       string   `json:"goal"`
+	Content    *string  `json:"content"`
+	Labels     []string `json:"labels"`
+	Priority   string   `json:"priority"`
+	Milestone  *string  `json:"milestone"`
+	BundleName string   `json:"bundle_name"`
+	UpdatedAt  string   `json:"updated_at"`
 }
 
 // Session is session.json: per-derivation harness session bookkeeping
@@ -111,7 +109,6 @@ const (
 type Execution struct {
 	CapsuleID      string           `json:"capsule_id"`
 	WorkItemID     string           `json:"work_item_id"`
-	BundleDigest   string           `json:"bundle_digest"`
 	CurrentStep    string           `json:"current_step"`
 	WorkflowStatus string           `json:"workflow_status"`
 	Steps          map[string]*Step `json:"steps"`

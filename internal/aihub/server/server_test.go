@@ -217,7 +217,6 @@ func TestClaimFlowOverHTTP(t *testing.T) {
 			MachineID          string `json:"machine_id"`
 			Owner              string `json:"owner"`
 			BundleName         string `json:"bundle_name"`
-			BundleDigest       string `json:"bundle_digest"`
 			ClaimedAt          string `json:"claimed_at"`
 		} `json:"claim"`
 		WorkItem struct {
@@ -239,10 +238,10 @@ func TestClaimFlowOverHTTP(t *testing.T) {
 	if strings.Contains(string(raw), secret) || strings.Contains(string(raw), "session_hash") {
 		t.Fatalf("claim response leaks the secret or the hash: %s", raw)
 	}
-	// #5: the bundle pin rides the claim object itself (the runtime reads
-	// it from resp.Claim, never from resp.WorkItem).
-	if resp.Claim.BundleName != "demo-bundle" || resp.Claim.BundleDigest == "" {
-		t.Fatalf("claim bundle fields wrong: %+v", resp.Claim)
+	// #5: the bundle name rides the claim object itself (the runtime
+	// reads it from resp.Claim, never from resp.WorkItem).
+	if resp.Claim.BundleName != "demo-bundle" {
+		t.Fatalf("claim bundle name wrong: %+v", resp.Claim)
 	}
 	if resp.WorkItem.Status != "running" {
 		t.Fatalf("work item not running after claim: %+v", resp.WorkItem)

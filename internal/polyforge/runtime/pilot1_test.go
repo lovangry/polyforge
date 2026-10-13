@@ -143,8 +143,8 @@ func TestWorkItemFileMaterializedAtStart(t *testing.T) {
 	if len(doc.Labels) != 1 || doc.Labels[0] != "pilot" || doc.Priority != api.PriorityHigh {
 		t.Fatalf("work-item.json must carry labels/priority: %+v", doc)
 	}
-	if doc.BundleName != "demo-bundle" || doc.BundleDigest != "deadbeef" {
-		t.Fatalf("work-item.json must carry the bundle pin: %+v", doc)
+	if doc.BundleName != "demo-bundle" {
+		t.Fatalf("work-item.json must carry the bundle name: %+v", doc)
 	}
 	if doc.Content == nil || *doc.Content != bg {
 		t.Fatalf("work-item.json must carry the content verbatim: %+v", doc.Content)

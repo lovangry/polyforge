@@ -164,7 +164,6 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 			WorkItemID:         id,
 			SessionFingerprint: api.SessionFingerprint(req.SessionID),
 			BundleName:         "demo-bundle",
-			BundleDigest:       "deadbeef",
 		},
 		WorkItem: api.WorkItem{ID: id, ProjectName: "proj"},
 	}, nil

@@ -55,7 +55,7 @@ func testEnv(t *testing.T, steps ...StepSpec) (*Driver, *eventLog, *clock, strin
 	log := &eventLog{}
 	clk := &clock{t: time.Date(2026, 9, 20, 8, 0, 0, 0, time.UTC)}
 	d, err := New(Config{
-		WI:       WIInfo{ID: "wi_t1", CapsuleDir: dir, BundleName: "b", BundleDigest: "dgest1"},
+		WI:       WIInfo{ID: "wi_t1", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: steps, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:  &fakeSpawner{},
@@ -151,7 +151,7 @@ func TestTransitionInitWritesSkeleton(t *testing.T) {
 	if exec.Version != 1 {
 		t.Fatalf("init must write version 1, got %d", exec.Version)
 	}
-	if exec.CapsuleID != "cap_wi_t1" || exec.WorkItemID != "wi_t1" || exec.BundleDigest != "dgest1" {
+	if exec.CapsuleID != "cap_wi_t1" || exec.WorkItemID != "wi_t1" {
 		t.Fatalf("bad identity: %+v", exec)
 	}
 	for _, id := range []string{"a", "b"} {

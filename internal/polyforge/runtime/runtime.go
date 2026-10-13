@@ -183,7 +183,6 @@ type AgentStartInput struct {
 	Project       string
 	CapsuleDir    string
 	BundleName    string
-	BundleDigest  string
 	SessionHandle string // public fingerprint
 	SpawnN        int64
 	// StepCandidates is the polyforge#79 effective per-step candidate
@@ -221,12 +220,11 @@ type job struct {
 	// set when the SEALING transition records the reason and persisted
 	// with it, so a crash between that push and SessionEnd keeps the
 	// restart's stop finisher from re-pushing either.
-	sealedPush   bool
-	capsuleDir   string
-	git          gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
-	transcript   string
-	bundleName   string
-	bundleDigest string
+	sealedPush bool
+	capsuleDir string
+	git        gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
+	transcript string
+	bundleName string
 	// origin is how the job was submitted (nil = unknown).
 	origin *Origin
 	// item is the claim answer's work-item snapshot (the F1 materializer
@@ -747,7 +745,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			EventSink:   r.gitEventSink(id),
 		},
 		bundleName:   c.BundleName,
-		bundleDigest: c.BundleDigest,
 		repos:        c.Repos,
 		item:         &resp.WorkItem,
 		origin:       r.takeOrigin(wi, id),
@@ -825,7 +822,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			Project:       j.project,
 			CapsuleDir:    j.capsuleDir,
 			BundleName:    j.bundleName,
-			BundleDigest:  j.bundleDigest,
 			SessionHandle: j.sessionFingerprint,
 			SpawnN:        spawnN,
 			Spawner:       r.spawner,
@@ -1129,13 +1125,12 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// Session ownership lives in the daemon-private sync/session-handle
 	// marker, not in the identity.
 	idn := capsule.Identity{
-		WorkItemID:   j.wi,
-		CapsuleID:    "cap_" + j.wi,
-		Project:      j.project,
-		BundleName:   j.bundleName,
-		BundleDigest: j.bundleDigest,
-		Repos:        repoSHAs,
-		CreatedAt:    nowStamp(),
+		WorkItemID: j.wi,
+		CapsuleID:  "cap_" + j.wi,
+		Project:    j.project,
+		BundleName: j.bundleName,
+		Repos:      repoSHAs,
+		CreatedAt:  nowStamp(),
 	}
 	// polyforge#79: the claim-time snapshot doubles as the audit record —
 	// the parsed yaml verbatim, the per-step post-precedence candidate
@@ -1237,17 +1232,16 @@ func (r *Runtime) writeWorkItemDoc(j *job, item *api.WorkItem) error {
 		return err
 	}
 	doc := &capsule.WorkItemDoc{
-		ID:           j.wi,
-		Slug:         item.Slug,
-		Project:      j.project,
-		Goal:         item.Goal,
-		Content:      item.Content,
-		Labels:       item.Labels,
-		Priority:     item.Priority,
-		Milestone:    item.Milestone,
-		BundleName:   j.bundleName,
-		BundleDigest: j.bundleDigest,
-		UpdatedAt:    nowStamp(),
+		ID:         j.wi,
+		Slug:       item.Slug,
+		Project:    j.project,
+		Goal:       item.Goal,
+		Content:    item.Content,
+		Labels:     item.Labels,
+		Priority:   item.Priority,
+		Milestone:  item.Milestone,
+		BundleName: j.bundleName,
+		UpdatedAt:  nowStamp(),
 	}
 	if doc.Labels == nil {
 		doc.Labels = []string{}

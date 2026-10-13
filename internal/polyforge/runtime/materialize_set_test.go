@@ -24,9 +24,8 @@ import (
 func startedWithBundle(t *testing.T, wi string) (*Runtime, string, *job) {
 	t.Helper()
 	setGitIdentity(t)
-	wfDir, pinned := pristineBundle(t)
+	wfDir := pristineBundle(t)
 	hub := newFakeHub()
-	hub.digest = pinned
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
 	if err := r.Start(context.Background(), wi); err != nil {
@@ -81,7 +80,7 @@ func TestMaterializeSetCompleteShape(t *testing.T) {
 		t.Fatalf("agents/ copy diverged from the bundle's steps/ (%v)", err)
 	}
 	m := readMarker(t, capDir)
-	if m.BundleName != "demo-bundle" || m.BundleDigest == "" {
+	if m.BundleName != "demo-bundle" {
 		t.Fatalf("marker identity = %+v", m)
 	}
 	if len(m.Adapters) != 1 || m.Adapters[0] != "pi" {
@@ -223,10 +222,9 @@ func TestMaterializeSetAdoptsPilotCompensation(t *testing.T) {
 	// hand-written marker WITHOUT adapters (the pre-fix manual format).
 	os.Remove(filepath.Join(capDir, filepath.FromSlash(RelMaterializeMarker)))
 	manual, _ := json.Marshal(map[string]any{
-		"bundle_name":   "demo-bundle",
-		"bundle_digest": j.bundleDigest,
-		"targets":       []string{"agents/step.md"},
-		"completed_at":  "2026-10-01T00:00:00Z",
+		"bundle_name":  "demo-bundle",
+		"targets":      []string{"agents/step.md"},
+		"completed_at": "2026-10-01T00:00:00Z",
 	})
 	if err := os.WriteFile(filepath.Join(capDir, filepath.FromSlash(RelMaterializeMarker)), manual, 0o644); err != nil {
 		t.Fatal(err)
@@ -258,9 +256,8 @@ func TestMaterializeSetAdoptsPilotCompensation(t *testing.T) {
 // reuses the trusted snapshot instead of churning it.
 func TestMaterializeSetClaimReplayReusesTrustedSnapshot(t *testing.T) {
 	setGitIdentity(t)
-	wfDir, pinned := pristineBundle(t)
+	wfDir := pristineBundle(t)
 	hub := newFakeHub()
-	hub.digest = pinned
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
 
@@ -313,7 +310,6 @@ func TestMaterializeBundleWithoutStepsStillCopiesWorkflowTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	hub := newFakeHub()
-	hub.digest = nameDerivedDigest("demo-bundle")
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = dir
 	if err := r.Start(context.Background(), "wi_f7nos"); err != nil {
@@ -333,21 +329,17 @@ func TestMaterializeBundleWithoutStepsStillCopiesWorkflowTree(t *testing.T) {
 	}
 }
 
-// Recovery never re-pins: a workflows-dir source that moved past the claim
-// pin leaves the job's pin and the capsule snapshot untouched (the
-// relaunch uses the capsule's own copy), and a missing snapshot is a
-// blocked finish, not a silent rebuild.
+// Recovery never re-materializes a moved source: a workflows-dir source
+// that evolved after the claim leaves the capsule snapshot untouched
+// (the relaunch uses the capsule's own copy), and a missing snapshot is
+// a blocked finish, not a silent rebuild.
 func TestRecoveryUsesClaimSnapshotNeverRepins(t *testing.T) {
 	r, capDir, j := startedWithBundle(t, "wi_norepin")
-	pinned := j.bundleDigest
 	src := filepath.Join(r.cfg.WorkflowsDir, "demo-bundle", "workflow.md")
 	if err := os.WriteFile(src, []byte("# evolved after claim\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
-	if j.bundleDigest != pinned {
-		t.Fatalf("recovery re-pinned %s -> %s", pinned, j.bundleDigest)
-	}
 	got, _ := os.ReadFile(filepath.Join(capDir, "workflows", "demo-bundle", "workflow.md"))
 	if string(got) == "# evolved after claim\n" {
 		t.Fatal("recovery re-materialized from the moved source")

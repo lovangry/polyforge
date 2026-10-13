@@ -848,9 +848,6 @@ func TestRacePatchBundleVsClaim(t *testing.T) {
 		if got.BundleName == nil || *got.BundleName != want {
 			t.Fatalf("round %d: bundle = %v, want %s (patchErr=%v)", i, got.BundleName, want, patchErr)
 		}
-		if got.BundleDigest == nil || *got.BundleDigest != Sha256Hex("bundle-name:"+want) {
-			t.Fatalf("round %d: digest %v does not match bundle %s (half-written reference)", i, got.BundleDigest, want)
-		}
 		// frozen at the claim: any later bundle PATCH is refused.
 		if _, err := env.WIs.Patch(wi.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"w140-race1-late"`)}); err == nil {
 			t.Fatalf("round %d: bundle PATCH after the claim succeeded; the bundle must be frozen", i)

@@ -156,7 +156,7 @@ func runEnv(t *testing.T, steps ...StepSpec) (*Driver, *fakeSpawner, string) {
 	execPath := filepath.Join(dir, capsule.ExecutionJSON)
 	sp := &fakeSpawner{}
 	d, err := New(Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: steps, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:  sp,
@@ -252,7 +252,7 @@ func TestRunResumeOfCrashedInProgressStep(t *testing.T) {
 	// leaves the step in_progress on disk; the next Run re-dispatches it.
 	dir := t.TempDir()
 	execPath := filepath.Join(dir, capsule.ExecutionJSON)
-	exec := skeletonExecution(WIInfo{ID: "wi_run", BundleDigest: "dg"}, &Workflow{Steps: []StepSpec{spec("a")}})
+	exec := skeletonExecution(WIInfo{ID: "wi_run"}, &Workflow{Steps: []StepSpec{spec("a")}})
 	exec.Steps["a"].Status = capsule.StepInProgress
 	exec.CurrentStep = "a"
 	exec.Version = 2 // init + the crashed start write
@@ -334,7 +334,7 @@ func TestRunNeedsInputSurvivesRestart(t *testing.T) {
 	sp := &fakeSpawner{script: []fakeEntry{asks("q_9", "shape?")}}
 	mk := func(sp *fakeSpawner) *Driver {
 		d, err := New(Config{
-			WI:       WIInfo{ID: "wi_r2", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+			WI:       WIInfo{ID: "wi_r2", CapsuleDir: dir, BundleName: "b"},
 			ExecPath: execPath,
 			Workflow: &Workflow{Steps: []StepSpec{spec("s")}, MaxTotal: 4, MaxPerStep: 2},
 			Spawner:  sp,
@@ -621,7 +621,7 @@ func TestRunArtifactValidation(t *testing.T) {
 
 	mkDriver := func(sp *fakeSpawner) *Driver {
 		d, err := New(Config{
-			WI:       WIInfo{ID: "wi_v", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+			WI:       WIInfo{ID: "wi_v", CapsuleDir: dir, BundleName: "b"},
 			ExecPath: execPath,
 			Workflow: &Workflow{Steps: []StepSpec{{ID: "a", ContextPolicy: "fresh", Handoff: true}}, MaxTotal: 4, MaxPerStep: 2},
 			Spawner:  sp,
@@ -856,7 +856,7 @@ func TestRejectionRelaunchesArePersistedAndBounded(t *testing.T) {
 	round := func() (*Driver, error) {
 		sp := &fakeSpawner{script: []fakeEntry{badHash(), badHash(), badHash(), badHash()}}
 		d, err := New(Config{
-			WI:       WIInfo{ID: "wi_rej", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+			WI:       WIInfo{ID: "wi_rej", CapsuleDir: dir, BundleName: "b"},
 			ExecPath: execPath,
 			Workflow: &Workflow{Steps: []StepSpec{{ID: "fix"}}, MaxTotal: 4, MaxPerStep: 2},
 			Spawner:  sp,

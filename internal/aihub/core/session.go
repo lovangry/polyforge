@@ -59,15 +59,14 @@ type queryRower interface {
 // sessionRow is the session block of a work_items row (plus the fields
 // the claim/diagnosis paths need on the same read).
 type sessionRow struct {
-	Status       string
-	Hash         sql.NullString
-	Fingerprint  sql.NullString
-	Machine      sql.NullString
-	StartedAt    sql.NullString
-	CleanPause   bool
-	BundleName   sql.NullString
-	BundleDigest sql.NullString
-	ProjectID    string
+	Status      string
+	Hash        sql.NullString
+	Fingerprint sql.NullString
+	Machine     sql.NullString
+	StartedAt   sql.NullString
+	CleanPause  bool
+	BundleName  sql.NullString
+	ProjectID   string
 }
 
 // sessionHeld reports whether the row carries a live session.
@@ -78,10 +77,10 @@ func sessionHeld(r *sessionRow) bool { return r.Hash.Valid && r.Hash.String != "
 func loadSessionRow(q queryRower, wiID string) (*sessionRow, error) {
 	var r sessionRow
 	err := q.QueryRow(`SELECT status, session_hash, session_fingerprint, session_machine,
-		session_started_at, clean_pause, bundle_name, bundle_digest, project_id
+		session_started_at, clean_pause, bundle_name, project_id
 		FROM work_items WHERE id=?1`, wiID).
 		Scan(&r.Status, &r.Hash, &r.Fingerprint, &r.Machine, &r.StartedAt,
-			&r.CleanPause, &r.BundleName, &r.BundleDigest, &r.ProjectID)
+			&r.CleanPause, &r.BundleName, &r.ProjectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
 	}
@@ -429,7 +428,6 @@ func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, calle
 		SessionFingerprint: fp,
 		MachineID:          req.MachineID,
 		BundleName:         row.BundleName.String,
-		BundleDigest:       row.BundleDigest.String,
 		ClaimedAt:          now,
 	}
 	claim.Repos, err = projectReposTx(tx, row.ProjectID)
@@ -612,7 +610,6 @@ func (m *SessionManager) Attach(wiID string, req api.SessionAttachRequest, calle
 		SessionFingerprint: row.Fingerprint.String,
 		MachineID:          req.MachineID,
 		BundleName:         row.BundleName.String,
-		BundleDigest:       row.BundleDigest.String,
 		ClaimedAt:          row.StartedAt.String, // the session's own start
 	}, nil
 }

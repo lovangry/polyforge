@@ -45,8 +45,7 @@ type CreateRequest struct {
 	// while the WI is queued and never claimed, PATCH may set, rename or
 	// clear bundle_name through the shared persist path (bundleRef);
 	// after the first claim it is immutable again (INV-2e as amended).
-	BundleName   *string `json:"bundle_name"`
-	BundleDigest *string `json:"bundle_digest"` // optional client-supplied pin; defaulted below
+	BundleName *string `json:"bundle_name"`
 	// Repo-reference triple (02 §4.6, the surface the TODO(v1) §4.5
 	// checkout-hash comment guarded): the declaration (name/url/subdir)
 	// and the frozen base sha arrive as two arrays and are validated as
@@ -203,14 +202,12 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	seq := maxSeq.Int64 + 1
 
 	// Bundle reference (02 §4.4/§4.5): a non-empty bundle_name makes an
-	// execution ticket. The pair resolves through the ONE shared persist
-	// path (bundleRef — the same helper the PATCH entry uses), so both
-	// entries observe the identical rule: a client-pinned digest wins,
-	// otherwise the deterministic name-derived stand-in lands so the
-	// reference triple is never half-empty. Full §4.5 fixation (re-hashing
-	// the bundle checkout server-side at create time) is not wired in this
-	// round. TODO(v1): §4.5 checkout hash.
-	bundleName, bundleDigest := bundleRef(req.BundleName, req.BundleDigest)
+	// execution ticket. The name resolves through the ONE shared persist
+	// path (bundleRef — the same helper the PATCH entry uses): a nil/empty
+	// name resolves to NULL. Full §4.5 fixation is deleted with the digest
+	// chain (polyforge#149): the reference is the name, and the bundle's
+	// truth is the materialized checkout.
+	bundleName := bundleRef(req.BundleName)
 
 	id, err := NewID("wi_")
 	if err != nil {
@@ -220,11 +217,11 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	labels, _ := json.Marshal(req.Labels)
 	attrs, _ := json.Marshal(req.Attrs)
 	if _, err := tx.Exec(`INSERT INTO work_items(id, seq, project_id, goal, content, parent_id,
-		status, priority, milestone, labels, attrs, reporter, bundle_name, bundle_digest, created_at, updated_at)
-		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15)`,
+		status, priority, milestone, labels, attrs, reporter, bundle_name, created_at, updated_at)
+		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14)`,
 		id, seq, projectID, req.Goal, nullableString(req.Content), nullableString(req.ParentID),
 		api.StatusQueued, req.Priority, nullableString(req.Milestone), string(labels), string(attrs), req.Reporter,
-		bundleName, bundleDigest, now); err != nil {
+		bundleName, now); err != nil {
 		return nil, err
 	}
 	if err := appendEventTx(tx, id, now, req.Reporter, "work_item_filed", nil); err != nil {
@@ -309,16 +306,16 @@ func (m *WIManager) Get(idOrSlug string, opts GetOptions) (*api.WorkItem, error)
 
 func (m *WIManager) load(id string) (*api.WorkItem, error) {
 	var wi api.WorkItem
-	var content, parent, milestone, assignee, waitingOn, bundle, bundleDigest, budget,
+	var content, parent, milestone, assignee, waitingOn, bundle, budget,
 		closed sql.NullString
 	var labels, attrs string
 	err := m.db.QueryRow(`SELECT w.id, w.seq, w.project_id, p.name, w.goal, w.content, w.parent_id,
 		w.status, w.priority, w.milestone, w.labels, w.attrs, w.reporter, w.assignee, w.waiting_on,
-		w.bundle_name, w.bundle_digest, w.workflow_budget_baseline, w.created_at, w.updated_at, w.closed_at
+		w.bundle_name, w.workflow_budget_baseline, w.created_at, w.updated_at, w.closed_at
 		FROM work_items w JOIN projects p ON p.id=w.project_id WHERE w.id=?1`, id).
 		Scan(&wi.ID, &wi.Seq, &wi.ProjectID, &wi.ProjectName, &wi.Goal, &content, &parent,
 			&wi.Status, &wi.Priority, &milestone, &labels, &attrs, &wi.Reporter, &assignee, &waitingOn,
-			&bundle, &bundleDigest, &budget, &wi.CreatedAt, &wi.UpdatedAt, &closed)
+			&bundle, &budget, &wi.CreatedAt, &wi.UpdatedAt, &closed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
 	}
@@ -349,10 +346,6 @@ func (m *WIManager) load(id string) (*api.WorkItem, error) {
 	if bundle.Valid {
 		b := bundle.String
 		wi.BundleName = &b
-	}
-	if bundleDigest.Valid {
-		b := bundleDigest.String
-		wi.BundleDigest = &b
 	}
 	if budget.Valid && budget.String != "" {
 		wi.BudgetBaseline = json.RawMessage(budget.String)
@@ -418,23 +411,15 @@ func appendEventTx(tx *sql.Tx, wiID, at, actor, eventType string, payload map[st
 }
 
 // bundleRef is the ONE bundle-reference persist path, shared by create
-// and PATCH (spec: both entries MUST hit the same code path). digest =
-// the explicit request pin when present, else the deterministic
-// sha256("bundle-name:"+name) stand-in — the reference triple is never
-// half-empty. A nil/empty name resolves to (NULL, NULL): unbinding
-// clears the name AND the digest together. workflow_budget_baseline
-// stays NULL and wi_repo_inventory is untouched on either entry.
-func bundleRef(name, explicitDigest *string) (bundleName, bundleDigest any) {
+// and PATCH (spec: both entries MUST hit the same code path). A nil/empty
+// name resolves to NULL: an unbind clears the reference.
+// workflow_budget_baseline stays NULL and wi_repo_inventory is untouched
+// on either entry.
+func bundleRef(name *string) (bundleName any) {
 	if name == nil || *name == "" {
-		return nil, nil
+		return nil
 	}
-	bundleName = *name
-	if explicitDigest != nil && *explicitDigest != "" {
-		bundleDigest = *explicitDigest
-	} else {
-		bundleDigest = Sha256Hex("bundle-name:" + *name)
-	}
-	return bundleName, bundleDigest
+	return *name
 }
 
 // patchableFields (02 §5.1 row 3). Workflow refs and parent are immutable.
@@ -444,21 +429,19 @@ func bundleRef(name, explicitDigest *string) (bundleName, bundleDigest any) {
 // wired at merge, the whitelist entry was missed there (found by the
 // Lane D e2e s03 pause/resume scenario).
 //
-// bundle_name/bundle_digest ride the R2 window (w140): they are
-// patchable exactly while the WI is queued and never claimed — the
-// window gate below refuses them everywhere else.
+// bundle_name rides the R2 window (w140): it is patchable exactly
+// while the WI is queued and never claimed — the window gate below
+// refuses it everywhere else.
 var patchableFields = map[string]bool{
 	"goal": true, "content": true, "labels": true, "priority": true,
 	"milestone": true, "waiting_on": true, "clean_pause": true,
-	"bundle_name": true, "bundle_digest": true,
+	"bundle_name": true,
 }
 
-// bundlePatch is a parsed PATCH bundle_name/bundle_digest pair. Name
-// nil = the JSON-null unbind (clears name AND digest); Name non-empty =
-// bind or rename.
+// bundlePatch is a parsed PATCH bundle_name field. Name nil = the
+// JSON-null unbind; Name non-empty = bind or rename.
 type bundlePatch struct {
-	Name   *string
-	Digest *string
+	Name *string
 }
 
 // binding reports whether the patch binds a non-NULL bundle (the
@@ -466,17 +449,14 @@ type bundlePatch struct {
 // parser already rejected an empty name).
 func (b *bundlePatch) binding() bool { return b != nil && b.Name != nil }
 
-// parseBundlePatch extracts the bundle fields from a PATCH body. Absent
-// both → nil (not a bundle patch); malformed shapes → typed CORE-400.
+// parseBundlePatch extracts the bundle name from a PATCH body. Absent →
+// nil (not a bundle patch); malformed shapes → typed CORE-400. A PATCH
+// body carrying a digest key is refused by the patchable-fields gate
+// below (the key is not patchable).
 func parseBundlePatch(fields map[string]json.RawMessage) (*bundlePatch, error) {
 	raw, hasName := fields["bundle_name"]
-	rawDigest, hasDigest := fields["bundle_digest"]
-	if !hasName && !hasDigest {
-		return nil, nil
-	}
 	if !hasName {
-		return nil, Fail(api.ErrCoreBadInput, "",
-			"bundle_digest requires bundle_name (the digest pins a name; an unbind clears both)")
+		return nil, nil
 	}
 	var bp bundlePatch
 	if json.Unmarshal(raw, &bp.Name) != nil {
@@ -485,18 +465,6 @@ func parseBundlePatch(fields map[string]json.RawMessage) (*bundlePatch, error) {
 	if bp.Name != nil && *bp.Name == "" {
 		return nil, Fail(api.ErrCoreBadInput, "",
 			"bundle_name must be a non-empty string or null (null unbinds)")
-	}
-	if hasDigest {
-		if json.Unmarshal(rawDigest, &bp.Digest) != nil {
-			return nil, Fail(api.ErrCoreBadInput, "", "bundle_digest must be a string or null")
-		}
-		if bp.Digest != nil && *bp.Digest == "" {
-			bp.Digest = nil
-		}
-		if bp.Name == nil && bp.Digest != nil {
-			return nil, Fail(api.ErrCoreBadInput, "",
-				"bundle_digest requires a non-null bundle_name")
-		}
 	}
 	return &bp, nil
 }
@@ -707,9 +675,9 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 				return nil, err
 			}
 		}
-		name, digest := bundleRef(bp.Name, bp.Digest)
-		sets = append(sets, "bundle_name=?", "bundle_digest=?")
-		args = append(args, name, digest)
+		name := bundleRef(bp.Name)
+		sets = append(sets, "bundle_name=?")
+		args = append(args, name)
 	}
 	args = append(args, id)
 	q := `UPDATE work_items SET ` + strings.Join(sets, ",") + ` WHERE id=?`

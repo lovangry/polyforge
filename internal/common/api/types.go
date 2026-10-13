@@ -36,7 +36,6 @@ type WorkItem struct {
 	Assignee       *string         `json:"assignee"`
 	WaitingOn      *string         `json:"waiting_on"`
 	BundleName     *string         `json:"bundle_name"`
-	BundleDigest   *string         `json:"bundle_digest"`
 	BudgetBaseline json.RawMessage `json:"workflow_budget_baseline"`
 	CreatedAt      string          `json:"created_at"`
 	UpdatedAt      string          `json:"updated_at"`
@@ -134,7 +133,6 @@ type SessionClaim struct {
 	SessionFingerprint string        `json:"session_fingerprint"`
 	MachineID          string        `json:"machine_id"`
 	BundleName         string        `json:"bundle_name"`
-	BundleDigest       string        `json:"bundle_digest"`
 	ClaimedAt          string        `json:"claimed_at"`
 	Repos              []ProjectRepo `json:"repos,omitempty"`
 	// SealedHead/SealedMachine are the blocked verdict's recorded capsule

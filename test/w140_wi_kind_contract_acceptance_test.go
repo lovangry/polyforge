@@ -32,8 +32,6 @@ package test
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -50,12 +48,6 @@ import (
 // Small helpers (all w140-prefixed; the shared v1-harness helpers —
 // newV1Install, sessionClaimReq, strPtr, w113JSONDocOf — are reused as-is).
 // ---------------------------------------------------------------------------
-
-// w140Sha is the stand-in digest rule: sha256("bundle-name:"+name).
-func w140Sha(name string) string {
-	sum := sha256.Sum256([]byte("bundle-name:" + name))
-	return hex.EncodeToString(sum[:])
-}
 
 // w140Setup boots the real aihub and one fresh scratch project.
 func w140Setup(t *testing.T, name string) *v1Install {
@@ -247,7 +239,7 @@ var w140FrozenViewKeys = map[string]bool{
 	"goal": true, "content": true, "parent_id": true, "status": true,
 	"priority": true, "milestone": true, "labels": true, "attrs": true,
 	"reporter": true, "assignee": true, "waiting_on": true,
-	"bundle_name": true, "bundle_digest": true, "workflow_budget_baseline": true,
+	"bundle_name": true, "workflow_budget_baseline": true,
 	"created_at": true, "updated_at": true, "closed_at": true,
 	"session_fingerprint": true, "session_machine": true,
 	"session_started_at": true, "clean_pause": true, "repo_inventory": true,
@@ -306,39 +298,43 @@ func w140Pf(t *testing.T, inst *v1Install, args ...string) (string, int) {
 // AC 1 + 2 (create/PATCH share the bundle persist path; R2 three-way).
 // ---------------------------------------------------------------------------
 
-// TestW140BundlePersistSharedPath: digest = explicit request value or
-// the sha256("bundle-name:"+name) stand-in, on BOTH create and PATCH
-// (shared path ⇒ same observable rule); workflow_budget_baseline stays
-// NULL; the R2 window allows NULL→X, X→Y (with or without explicit
-// digest) and X→NULL (unbind clears digest). RED on pre-implementation
-// tree at every PATCH assertion.
+// TestW140BundlePersistSharedPath: the bundle reference is the NAME only
+// (the digest chain is deleted, polyforge#149) on BOTH create and PATCH
+// (shared path ⇒ same observable rule); a payload or PATCH body carrying
+// a digest field is simply not persisted / refused unpatchable;
+// workflow_budget_baseline stays NULL; the R2 window allows NULL→X,
+// X→Y and X→NULL (unbind clears the reference).
 func TestW140BundlePersistSharedPath(t *testing.T) {
 	inst := w140Setup(t, "w140-persist")
 
-	// create without explicit digest → stand-in digest.
-	a := w140Create(t, inst, "w140-persist", "w140 stand-in digest at create", strPtr("w140-alpha"), nil)
+	// create with a name only → the name is the reference.
+	a := w140Create(t, inst, "w140-persist", "w140 named reference at create", strPtr("w140-alpha"), nil)
 	va := w140View(t, inst, a)
 	if got := va["bundle_name"]; got != "w140-alpha" {
 		t.Fatalf("create: bundle_name = %v, want w140-alpha", got)
 	}
-	if got := va["bundle_digest"]; got != w140Sha("w140-alpha") {
-		t.Fatalf("create: bundle_digest = %v, want stand-in %s", got, w140Sha("w140-alpha"))
+	if got, ok := va["bundle_digest"]; ok {
+		t.Fatalf("create: bundle_digest = %v (ok=%v), want the key gone", got, ok)
 	}
 	if got, ok := va["workflow_budget_baseline"]; !ok || got != nil {
 		t.Fatalf("create: workflow_budget_baseline = %v (ok=%v), want JSON null", got, ok)
 	}
 
-	// create with explicit digest → request value wins.
+	// create with a digest field in the payload → not persisted, never
+	// served back (the field does not exist).
 	b := w140CreateRaw(t, inst, map[string]any{
-		"project": "w140-persist", "goal": "w140 explicit digest at create",
+		"project": "w140-persist", "goal": "w140 digest field in the payload",
 		"bundle_name": "w140-beta", "bundle_digest": strings.Repeat("ab", 32),
 	})
 	vb := w140View(t, inst, b)
-	if got := vb["bundle_digest"]; got != strings.Repeat("ab", 32) {
-		t.Fatalf("create: explicit bundle_digest = %v, want %s", got, strings.Repeat("ab", 32))
+	if got := vb["bundle_name"]; got != "w140-beta" {
+		t.Fatalf("create with digest field: bundle_name = %v, want w140-beta", got)
+	}
+	if got, ok := vb["bundle_digest"]; ok {
+		t.Fatalf("create with digest field: bundle_digest = %v (ok=%v), want the key gone", got, ok)
 	}
 
-	// PATCH X→Y inside the R2 window → stand-in digest of the new name.
+	// PATCH X→Y inside the R2 window → the rename.
 	if err := w140Patch(inst, a, map[string]any{"bundle_name": "w140-gamma"}); err != nil {
 		t.Fatalf("PATCH bundle_name X→Y in R2 window (queued, never claimed, no children): %v", err)
 	}
@@ -346,34 +342,31 @@ func TestW140BundlePersistSharedPath(t *testing.T) {
 	if got := va["bundle_name"]; got != "w140-gamma" {
 		t.Fatalf("PATCH X→Y: bundle_name = %v, want w140-gamma", got)
 	}
-	if got := va["bundle_digest"]; got != w140Sha("w140-gamma") {
-		t.Fatalf("PATCH X→Y: bundle_digest = %v, want stand-in %s", got, w140Sha("w140-gamma"))
-	}
 	if got, ok := va["workflow_budget_baseline"]; !ok || got != nil {
 		t.Fatalf("PATCH X→Y: workflow_budget_baseline = %v (ok=%v), want JSON null", got, ok)
 	}
 
-	// PATCH with explicit digest → request value wins on the same path.
+	// PATCH carrying a digest field → refused CORE-400 (unpatchable key),
+	// nothing bound.
 	if err := w140Patch(inst, a, map[string]any{
 		"bundle_name": "w140-delta", "bundle_digest": strings.Repeat("cd", 32),
-	}); err != nil {
-		t.Fatalf("PATCH bundle_name with explicit digest in R2 window: %v", err)
+	}); err == nil {
+		t.Fatalf("PATCH with bundle_digest: want the unpatchable-field refusal")
+	} else if ae, ok := err.(*api.Error); !ok || ae.Code != api.ErrCoreBadInput {
+		t.Fatalf("PATCH with bundle_digest: want CORE-400, got %v", err)
 	}
 	va = w140View(t, inst, a)
-	if got := va["bundle_digest"]; got != strings.Repeat("cd", 32) {
-		t.Fatalf("PATCH with explicit digest: bundle_digest = %v, want %s", got, strings.Repeat("cd", 32))
+	if got := va["bundle_name"]; got != "w140-gamma" {
+		t.Fatalf("refused PATCH changed bundle_name = %v, want w140-gamma", got)
 	}
 
-	// PATCH X→NULL (unbind) → name AND digest cleared together.
+	// PATCH X→NULL (unbind) → the reference clears.
 	if err := w140Patch(inst, a, map[string]any{"bundle_name": nil}); err != nil {
 		t.Fatalf("PATCH bundle_name X→NULL (unbind) in R2 window: %v", err)
 	}
 	va = w140View(t, inst, a)
 	if got, ok := va["bundle_name"]; !ok || got != nil {
 		t.Fatalf("unbind: bundle_name = %v (ok=%v), want JSON null", got, ok)
-	}
-	if got, ok := va["bundle_digest"]; !ok || got != nil {
-		t.Fatalf("unbind: bundle_digest = %v (ok=%v), want JSON null (cleared with the name)", got, ok)
 	}
 	if got := va["status"]; got != "queued" {
 		t.Fatalf("unbind: status = %v, want queued (no state written)", got)

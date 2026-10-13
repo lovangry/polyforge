@@ -39,8 +39,8 @@ func mustClaim(t *testing.T, env *testEnv, wiID string) string {
 	return secret
 }
 
-// patchBundle is the typed PATCH helper for bundle fields.
-func patchBundle(t *testing.T, env *testEnv, id string, name, digest *string) (*api.WorkItem, error) {
+// patchBundle is the typed PATCH helper for the bundle name field.
+func patchBundle(t *testing.T, env *testEnv, id string, name *string) (*api.WorkItem, error) {
 	t.Helper()
 	fields := map[string]json.RawMessage{}
 	if name != nil {
@@ -49,61 +49,46 @@ func patchBundle(t *testing.T, env *testEnv, id string, name, digest *string) (*
 	} else {
 		fields["bundle_name"] = json.RawMessage("null")
 	}
-	if digest != nil {
-		raw, _ := json.Marshal(*digest)
-		fields["bundle_digest"] = raw
-	}
 	return env.WIs.Patch(id, fields)
 }
 
 // TestPatchBundleR2ThreeWay walks NULL→X / X→Y / X→NULL inside the R2
-// window: the digest follows the shared persist path (explicit pin wins,
-// otherwise the stand-in of the NEW name), the unbind clears name AND
-// digest together, and workflow_budget_baseline stays JSON null
-// throughout.
+// window: the name follows the shared persist path, the unbind clears
+// the reference, and workflow_budget_baseline stays JSON null
+// throughout. The digest chain is deleted (polyforge#149): a PATCH body
+// carrying bundle_digest is refused as an unpatchable field.
 func TestPatchBundleR2ThreeWay(t *testing.T) {
 	env := newEnv(t)
 
-	// NULL→X: stand-in digest of the new name.
+	// NULL→X: the bind.
 	id := mustCreateWI(t, env, "w140 three-way target", nil, "")
-	got, err := patchBundle(t, env, id, strPtrTest("w140-x"), nil)
+	got, err := patchBundle(t, env, id, strPtrTest("w140-x"))
 	if err != nil {
 		t.Fatalf("NULL→X refused inside the R2 window: %v", err)
 	}
-	if got.BundleName == nil || *got.BundleName != "w140-x" ||
-		got.BundleDigest == nil || *got.BundleDigest != Sha256Hex("bundle-name:w140-x") {
-		t.Fatalf("NULL→X: bundle pair = %v/%v, want w140-x/%s",
-			got.BundleName, got.BundleDigest, Sha256Hex("bundle-name:w140-x"))
+	if got.BundleName == nil || *got.BundleName != "w140-x" {
+		t.Fatalf("NULL→X: bundle name = %v, want w140-x", got.BundleName)
 	}
 	if got.BudgetBaseline != nil {
 		t.Fatalf("NULL→X: workflow_budget_baseline = %s, want JSON null", got.BudgetBaseline)
 	}
 
-	// X→Y without an explicit digest: the stand-in re-derives.
-	got, err = patchBundle(t, env, id, strPtrTest("w140-y"), nil)
+	// X→Y: the rename.
+	got, err = patchBundle(t, env, id, strPtrTest("w140-y"))
 	if err != nil {
 		t.Fatalf("X→Y refused inside the R2 window: %v", err)
 	}
-	if got.BundleDigest == nil || *got.BundleDigest != Sha256Hex("bundle-name:w140-y") {
-		t.Fatalf("X→Y: digest = %v, want stand-in of w140-y", got.BundleDigest)
+	if got.BundleName == nil || *got.BundleName != "w140-y" {
+		t.Fatalf("X→Y: bundle name = %v, want w140-y", got.BundleName)
 	}
 
-	// X→Y with an explicit digest: the request pin wins (same path).
-	got, err = patchBundle(t, env, id, strPtrTest("w140-z"), strPtrTest("w140-explicit-pin"))
-	if err != nil {
-		t.Fatalf("X→Y with explicit digest refused: %v", err)
-	}
-	if got.BundleDigest == nil || *got.BundleDigest != "w140-explicit-pin" {
-		t.Fatalf("X→Y explicit digest: digest = %v, want the request pin", got.BundleDigest)
-	}
-
-	// X→NULL: name AND digest clear together; status stays queued.
-	got, err = patchBundle(t, env, id, nil, nil)
+	// X→NULL: the unbind; status stays queued.
+	got, err = patchBundle(t, env, id, nil)
 	if err != nil {
 		t.Fatalf("X→NULL (unbind) refused inside the R2 window: %v", err)
 	}
-	if got.BundleName != nil || got.BundleDigest != nil {
-		t.Fatalf("unbind left the reference half-set: %v/%v", got.BundleName, got.BundleDigest)
+	if got.BundleName != nil {
+		t.Fatalf("unbind left the reference set: %v", got.BundleName)
 	}
 	if got.Status != api.StatusQueued {
 		t.Fatalf("unbind wrote a status: %s", got.Status)
@@ -112,11 +97,11 @@ func TestPatchBundleR2ThreeWay(t *testing.T) {
 		t.Fatalf("unbind: workflow_budget_baseline = %s, want JSON null", got.BudgetBaseline)
 	}
 
-	// digest-only and empty-name shapes are typed bad input.
+	// a digest-carrying body and an empty-name shape are typed bad input.
 	if _, err := env.WIs.Patch(id, map[string]json.RawMessage{"bundle_digest": json.RawMessage(`"x"`)}); !IsCode(err, api.ErrCoreBadInput) {
-		t.Fatalf("digest without name: want CORE-400, got %v", err)
+		t.Fatalf("bundle_digest field: want CORE-400 (not patchable), got %v", err)
 	}
-	if _, err := patchBundle(t, env, id, strPtrTest(""), nil); !IsCode(err, api.ErrCoreBadInput) {
+	if _, err := patchBundle(t, env, id, strPtrTest("")); !IsCode(err, api.ErrCoreBadInput) {
 		t.Fatalf("empty bundle_name: want CORE-400, got %v", err)
 	}
 }
@@ -133,7 +118,7 @@ func TestPatchBundleWindowRefusals(t *testing.T) {
 	// running (claimed, live session) → IMMUTABLE.
 	running := mustCreateBound(t, env, "w140 running refusal", "w140-w-r")
 	mustClaim(t, env, running)
-	if _, err := patchBundle(t, env, running, strPtrTest("w140-w-r2"), nil); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "IMMUTABLE" {
+	if _, err := patchBundle(t, env, running, strPtrTest("w140-w-r2")); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "IMMUTABLE" {
 		t.Fatalf("running: want CORE-400/IMMUTABLE, got %v", err)
 	}
 
@@ -143,7 +128,7 @@ func TestPatchBundleWindowRefusals(t *testing.T) {
 	if err := m.End(failed, api.SessionEndRequest{SessionID: secret, Status: api.StatusFailed}, env.UserID); err != nil {
 		t.Fatalf("fail %s: %v", failed, err)
 	}
-	if _, err := patchBundle(t, env, failed, strPtrTest("w140-w-f2"), nil); !IsCode(err, api.ErrCoreGone) || ErrorReason(err) != "TERMINAL_STATE" {
+	if _, err := patchBundle(t, env, failed, strPtrTest("w140-w-f2")); !IsCode(err, api.ErrCoreGone) || ErrorReason(err) != "TERMINAL_STATE" {
 		t.Fatalf("failed: want CORE-410/TERMINAL_STATE, got %v", err)
 	}
 
@@ -152,7 +137,7 @@ func TestPatchBundleWindowRefusals(t *testing.T) {
 	if _, err := env.WIs.Cancel(canceled, env.UserID); err != nil {
 		t.Fatalf("cancel %s: %v", canceled, err)
 	}
-	if _, err := patchBundle(t, env, canceled, strPtrTest("w140-w-c2"), nil); !IsCode(err, api.ErrCoreGone) || ErrorReason(err) != "TERMINAL_STATE" {
+	if _, err := patchBundle(t, env, canceled, strPtrTest("w140-w-c2")); !IsCode(err, api.ErrCoreGone) || ErrorReason(err) != "TERMINAL_STATE" {
 		t.Fatalf("canceled: want CORE-410/TERMINAL_STATE, got %v", err)
 	}
 
@@ -164,7 +149,7 @@ func TestPatchBundleWindowRefusals(t *testing.T) {
 	if err := m.ForceEnd(requeued, "w140 unit force-end", env.UserID); err != nil {
 		t.Fatalf("force-end %s: %v", requeued, err)
 	}
-	if _, err := patchBundle(t, env, requeued, strPtrTest("w140-w-r4"), nil); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "IMMUTABLE" {
+	if _, err := patchBundle(t, env, requeued, strPtrTest("w140-w-r4")); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "IMMUTABLE" {
 		t.Fatalf("force-ended (claim event remains): want CORE-400/IMMUTABLE, got %v", err)
 	}
 
@@ -190,7 +175,7 @@ func TestPatchBundleWaitingOnNotRefused(t *testing.T) {
 	if _, err := env.WIs.Patch(id, map[string]json.RawMessage{"waiting_on": json.RawMessage(`"owner"`)}); err != nil {
 		t.Fatalf("patch waiting_on: %v", err)
 	}
-	got, err := patchBundle(t, env, id, strPtrTest("w140-wait-b"), nil)
+	got, err := patchBundle(t, env, id, strPtrTest("w140-wait-b"))
 	if err != nil {
 		t.Fatalf("bundle PATCH with waiting_on non-empty refused: %v", err)
 	}
@@ -220,10 +205,10 @@ func TestPatchBundleRepoInventoryUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inventory read: %v", err)
 	}
-	if _, err := patchBundle(t, env, wi.ID, strPtrTest("w140-inv-b"), nil); err != nil {
+	if _, err := patchBundle(t, env, wi.ID, strPtrTest("w140-inv-b")); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	if _, err := patchBundle(t, env, wi.ID, nil, nil); err != nil {
+	if _, err := patchBundle(t, env, wi.ID, nil); err != nil {
 		t.Fatalf("unbind: %v", err)
 	}
 	after, err := env.WIs.repoInventoryOf(wi.ID)
@@ -254,14 +239,14 @@ func TestPatchBundleWithChildrenRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create child: %v", err)
 	}
-	if _, err := patchBundle(t, env2, p2.ID, strPtrTest("w140-sym-p"), nil); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "HAS_CHILDREN_NO_BUNDLE" {
+	if _, err := patchBundle(t, env2, p2.ID, strPtrTest("w140-sym-p")); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "HAS_CHILDREN_NO_BUNDLE" {
 		t.Fatalf("bind on parent with children: want CORE-400/HAS_CHILDREN_NO_BUNDLE, got %v", err)
 	}
 	// ... and a terminal child still counts as a child.
 	if _, err := env2.WIs.Cancel(c2.ID, env2.UserID); err != nil {
 		t.Fatalf("cancel child: %v", err)
 	}
-	if _, err := patchBundle(t, env2, p2.ID, strPtrTest("w140-sym-p"), nil); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "HAS_CHILDREN_NO_BUNDLE" {
+	if _, err := patchBundle(t, env2, p2.ID, strPtrTest("w140-sym-p")); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "HAS_CHILDREN_NO_BUNDLE" {
 		t.Fatalf("bind on parent whose child is terminal: want CORE-400/HAS_CHILDREN_NO_BUNDLE, got %v", err)
 	}
 	got, err := env2.WIs.Get(p2.ID, GetOptions{})
@@ -335,7 +320,7 @@ func TestRaceBindBundleVsNewChild(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, patchErr = patchBundle(t, env, parent.ID, strPtrTest("w140-race2-bound"), nil)
+			_, patchErr = patchBundle(t, env, parent.ID, strPtrTest("w140-race2-bound"))
 		}()
 		go func() {
 			defer wg.Done()

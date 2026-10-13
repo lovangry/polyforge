@@ -113,7 +113,6 @@ CREATE TABLE IF NOT EXISTS work_items (
   assignee     TEXT REFERENCES users(id),
   waiting_on   TEXT,
   bundle_name  TEXT,
-  bundle_digest TEXT,
   workflow_budget_baseline TEXT,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,

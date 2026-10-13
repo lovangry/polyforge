@@ -118,7 +118,7 @@ func spawnEnv(t *testing.T) (*StepSpawnAdapter, *captureSpawner, string) {
 	writeCapsuleFile(t, capDir, capsule.SessionJSON, `{"harness":"pi","session_id":"ab12cd34"}`)
 	sp := &captureSpawner{}
 	ad, err := NewStepSpawnAdapter(StepSpawnAdapter{
-		WI:           WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "quick-fix-x", BundleDigest: "dg"},
+		WI:           WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "quick-fix-x"},
 		Spawner:      sp,
 		PollInterval: 2 * time.Millisecond,
 	})

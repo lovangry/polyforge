@@ -144,7 +144,6 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 			WI:            in.WI,
 			CapsuleDir:    in.CapsuleDir,
 			BundleName:    in.BundleName,
-			BundleDigest:  in.BundleDigest,
 			SessionHandle: in.SessionHandle,
 			SpawnN:        in.SpawnN,
 			Spawner:       in.Spawner,
