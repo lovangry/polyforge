@@ -280,11 +280,16 @@ The platform ships with zero release-specific code: release logic lives in
 the project bundle's release step (`steps/release.md`), and the platform's
 own release is one instance of that same hook. Deploying a work machine is
 re-running `tools/install.sh`; deploying the aihub service host is
-`sh .polyforge/deploy.sh <tag>` (human-gated: ONLINE verified full backup; it
-builds `polyforge/aihub:<tag>` next to the running service, edits only the aihub
-service of the server's compose file, and recreates just that container - seconds
+`sh .polyforge/deploy.sh <tag>` (human-gated: ONLINE verified full backup; run on a
+machine with `gh` and `docker` logged in to the private `ghcr.io/silgrid/aihub`
+- the server never holds GitHub credentials. It pulls `ghcr.io/silgrid/aihub:<tag>`,
+checks the repo digest against the release's `aihub-image.digest` (itself checked
+via `SHA256SUMS`), runs `docker save | ssh docker load`, verifies the image ID on
+the server and tags it `polyforge/aihub:<tag>`; it then edits only the aihub
+service of the server's compose file and recreates just that container - seconds
 of downtime, measured and printed; post-swap checks, printed rollback to the
-`polyforge/aihub:<old>` image it also builds; `--dry-run` shows the plan and the
+`polyforge/aihub:<old>` image (shipped the same way when the old release has a
+GHCR image, else built on the server from the saved old binary); `--dry-run` shows the plan and the
 compose diff). It is a
 deployment pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`, `00-architecture.md §3.3`).
 

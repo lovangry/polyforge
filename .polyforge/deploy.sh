@@ -12,28 +12,39 @@
 # Scope: the aihub SERVICE HOST only. Work machines are out of scope (they
 # re-run tools/install.sh, one at a time - printed at the end).
 #
-# What it does: promote an already-released version (GitHub release assets
-# aihub-linux-amd64, pf-linux-amd64, SHA256SUMS) onto the aihub docker
-# service. Downtime is SECONDS: every backup step runs ONLINE (the service
-# keeps running); the new image is built next to the running container; only
-# the final `docker compose up -d --no-deps aihub` (container recreate)
-# interrupts service. Images are built by this script, never by compose, so a
-# recreate can no longer silently revert the binary to an older image.
+# What it does: promote an already-released version onto the aihub docker
+# service. The release (release.sh) publishes the aihub image to the PRIVATE
+# GHCR repo ghcr.io/silgrid/aihub:<tag> plus the release assets
+# aihub-linux-amd64, pf-linux-amd64, aihub-image.digest, SHA256SUMS. This
+# script runs on the DEPLOYER machine (which holds the GitHub / GHCR
+# credentials), pulls that image, verifies it, and ships it to the server with
+# `docker save | ssh docker load`: the server never holds GitHub credentials
+# and never builds the release image. Downtime is SECONDS: every backup step
+# runs ONLINE (the service keeps running); the new image is loaded next to the
+# running container; only the final `docker compose up -d --no-deps aihub`
+# (container recreate) interrupts service. Images are never built by compose,
+# so a recreate can no longer silently revert the binary to an older image.
 #
-#   0 preflight   tag, assets + sha256, Dockerfile, ssh, container, compose file,
-#                 versions, disk space
+#   0 preflight   tag, release assets + SHA256SUMS (covers the binaries and
+#                 aihub-image.digest), docker pull ghcr.io/silgrid/aihub:<tag> on
+#                 this machine, repo digest == aihub-image.digest, /aihub -version,
+#                 ssh, container, compose file, versions, disk space
 #   1 baseline    read-only: integrity_check, table row counts, file counts, sizes
 #   2 save old binary   docker cp <container>:/aihub -> <root>/aihub-bin-<old>-<TS>;
-#                       build the rollback image polyforge/aihub:<old> from it
+#                       rollback image polyforge/aihub:<old>: if the old release has
+#                       a GHCR image, ship it like the new one; otherwise (releases
+#                       before the GHCR image existed, e.g. v2.2.0) build it on the
+#                       server from the saved old binary
 #   3 online backup     rsync memory/ git/ (pass 1) -> sqlite backup-API snapshot
 #                       of aihub.db -> rsync catch-up; snapshot integrity + counts
 #   4 consistency       memories rows in the snapshot == memory.md files in the backup
 #   5 off-host          rsync backup to BACKUP_ROOT, manifests equal, integrity + counts
-#   6 build + swap      scp assets, sha256 on the server, docker build
-#                       polyforge/aihub:<tag> (verify -version/git/curl), back up
-#                       and edit ONLY the aihub service of the compose file (image,
-#                       no build:, stop_grace_period), compose config -q,
-#                       compose up -d --no-deps aihub, poll HTTP, print downtime
+#   6 load + swap       docker save | ssh docker load (service keeps running), verify
+#                       the image ID on the server == the verified local one, tag it
+#                       polyforge/aihub:<tag>, back up and edit ONLY the aihub service
+#                       of the compose file (image, no build:, stop_grace_period),
+#                       compose config -q, compose up -d --no-deps aihub, poll HTTP,
+#                       print downtime
 #   7 verify      image + version, logs panic/fatal, counts >= baseline, pf smoke
 #   8 rollback    concrete commands printed; final summary
 #
@@ -46,8 +57,8 @@
 #
 # Environment (defaults):
 #   AIHUB_HOST=root@10.146.0.34   AIHUB_CONTAINER=aihub   AIHUB_DATA=/data/aihub
-#   BACKUP_ROOT=/data/polyforge-backups (local)   RELEASE_STAGE=/data/releases (server)
-#   GH_REPO=silgrid/polyforge   AIHUB_PORT=8080   WAIT_SECS=60
+#   BACKUP_ROOT=/data/polyforge-backups (local)
+#   GH_REPO=silgrid/polyforge   GHCR_IMAGE=ghcr.io/silgrid/aihub   AIHUB_PORT=8080   WAIT_SECS=60
 #   COMPOSE_FILE=/data/aihub-app/docker-compose.yml  COMPOSE_PROJECT=aihub-app  AIHUB_SERVICE=aihub
 #   DRAIN_SECS=5 (stop_grace_period)   MAX_DOWNTIME_SECS=10 (warn)   UP_WAIT_SECS=30 (fail)
 set -eu
@@ -82,7 +93,6 @@ AIHUB_HOST="${AIHUB_HOST:-root@10.146.0.34}"
 AIHUB_CONTAINER="${AIHUB_CONTAINER:-aihub}"
 AIHUB_DATA="${AIHUB_DATA:-/data/aihub}"
 BACKUP_ROOT="${BACKUP_ROOT:-/data/polyforge-backups}"
-RELEASE_STAGE="${RELEASE_STAGE:-/data/releases}"
 GH_REPO="${GH_REPO:-silgrid/polyforge}"
 AIHUB_PORT="${AIHUB_PORT:-8080}"
 WAIT_SECS="${WAIT_SECS:-60}"
@@ -94,17 +104,20 @@ COMPOSE_FILE="${COMPOSE_FILE:-/data/aihub-app/docker-compose.yml}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-aihub-app}"
 AIHUB_SERVICE="${AIHUB_SERVICE:-aihub}"
 IMAGE_REPO="${IMAGE_REPO:-polyforge/aihub}"
+GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/silgrid/aihub}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRV_ROOT="$(dirname "$AIHUB_DATA")"   # where the server-side backups/binaries live
 KEY_TABLES="work_items memories projects users api_keys machines"
 ASSET_AIHUB="aihub-linux-amd64"
 ASSET_PF="pf-linux-amd64"
+ASSET_DIGEST="aihub-image.digest"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pf-deploy.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 SWAPPED=""   # the rename over /aihub was attempted (service may run the new binary)
 STEP="0"
-OLDVER=""; OLDIMG=""; NEWIMG=""; COMPOSE_BAK=""; DOCKERFILE=""; TS=""; BIN_SAVED=""; SRV_BACKUP=""; LOCAL_BACKUP=""; STAGE_DIR=""
+OLDVER=""; OLDIMG=""; NEWIMG=""; COMPOSE_BAK=""; DOCKERFILE=""; TS=""; BIN_SAVED=""; SRV_BACKUP=""; LOCAL_BACKUP=""
+NEW_LOCAL_ID=""; OLD_LOCAL_ID=""; OLD_HAS_GHCR=""
 
 rssh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$AIHUB_HOST" "$@"; }
 dk() { rssh docker "$@"; }
@@ -113,8 +126,9 @@ note() { printf '   %s\n' "$*"; }
 
 rollback_text() {
   cat <<EOF
-  # point the aihub service back at the rollback image $OLDIMG (built in step 2
-  # from the saved old binary) and recreate it (seconds of downtime):
+  # point the aihub service back at the rollback image $OLDIMG (prepared in step 2:
+  # the old GHCR image, or built from the saved old binary) and recreate it
+  # (seconds of downtime):
   ssh $AIHUB_HOST "sed -i 's|image: $NEWIMG|image: $OLDIMG|' $COMPOSE_FILE"
   ssh $AIHUB_HOST docker compose -f $COMPOSE_FILE -p $COMPOSE_PROJECT up -d --no-deps $AIHUB_SERVICE
   ssh $AIHUB_HOST docker exec $AIHUB_CONTAINER /aihub -version   # must print $OLDVER
@@ -237,10 +251,12 @@ wait_version() { # wait_version <want>  -> 0 when running and version==want
 }
 
 # shellcheck disable=SC2016
-# build_image <image> <binary-on-server> <expected-version>: builds on the
-# server in a fresh temp context (service keeps running), then verifies.
+# build_image <image> <binary-on-server> <expected-version>: LEGACY rollback
+# path only - builds on the server in a fresh temp context (service keeps
+# running), then verifies. The release image itself is never built here.
 build_image() {
   img="$1"; bin="$2"; want="$3"
+  [ -n "$DOCKERFILE" ] || die "no deploy/Dockerfile available for the legacy rollback image build"
   ctx="$SRV_ROOT/aihub-build-$TS-$$"
   rssh "mkdir -p '$ctx' && cp '$bin' '$ctx/aihub'" || die "cannot prepare build context $ctx"
   scp -o BatchMode=yes "$DOCKERFILE" "$AIHUB_HOST:$ctx/Dockerfile" >"$WORK/scpdf.log" 2>&1 || die "scp Dockerfile failed: $(cat "$WORK/scpdf.log")"
@@ -254,6 +270,68 @@ build_image() {
   dk run --rm --entrypoint git "$img" --version >/dev/null 2>&1 || die "image $img: git --version does not work"
   dk run --rm --entrypoint curl "$img" --version >/dev/null 2>&1 || die "image $img: curl --version does not work"
   note "image $img built; /aihub -version = $want; git and curl work"
+}
+
+# ghcr_login: log in to ghcr.io from the gh credentials unless already logged in.
+ghcr_login() {
+  if grep -q '"ghcr.io"' "${DOCKER_CONFIG:-$HOME/.docker}/config.json" 2>/dev/null; then return 0; fi
+  gh auth token | docker login ghcr.io -u "$(gh api user -q .login)" --password-stdin >"$WORK/login.log" 2>&1 \
+    || die "docker login ghcr.io failed (gh auth status?): $(tail -3 "$WORK/login.log")"
+}
+
+# fetch_release <tag> <dir> <required-digest 1|0>: download the release assets
+# and verify them against SHA256SUMS (which covers the binaries and the image
+# digest file). Prints nothing; sets nothing; dies on any problem.
+fetch_release() {
+  ft="$1"; fd="$2"; need="$3"
+  mkdir -p "$fd"
+  gh release download "$ft" -R "$GH_REPO" -D "$fd" -p "$ASSET_AIHUB" -p "$ASSET_PF" -p "$ASSET_DIGEST" -p SHA256SUMS >"$WORK/gh.log" 2>&1 \
+    || die "gh release download $ft failed: $(cat "$WORK/gh.log")"
+  for f in "$ASSET_AIHUB" "$ASSET_PF" SHA256SUMS; do
+    [ -s "$fd/$f" ] || die "release $ft has no asset $f"
+  done
+  if [ "$need" = 1 ] && [ ! -s "$fd/$ASSET_DIGEST" ]; then
+    die "release $ft has no asset $ASSET_DIGEST - it was not published with a GHCR image; nothing to deploy"
+  fi
+  (cd "$fd" && sha256sum -c SHA256SUMS) >"$WORK/sha.log" 2>&1 || die "sha256sum -c of release $ft failed: $(cat "$WORK/sha.log")"
+  if [ -s "$fd/$ASSET_DIGEST" ]; then
+    grep -q "[[:space:]]$ASSET_DIGEST\$" "$fd/SHA256SUMS" || die "release $ft: $ASSET_DIGEST is not covered by SHA256SUMS"
+  fi
+}
+
+# pull_verified <tag> <release-dir> <want-version>: pull the GHCR image on THIS
+# machine, require its repo digest == the release's aihub-image.digest and
+# /aihub -version == <want-version>. Sets PULLED_ID to the local image ID.
+pull_verified() {
+  pt="$1"; pd="$2"; pv="$3"
+  pref="$GHCR_IMAGE:$pt"
+  want="$(head -1 "$pd/$ASSET_DIGEST" | tr -d ' \r')"
+  case "$want" in "$GHCR_IMAGE"@sha256:[0-9a-f]*) ;; *) die "$ASSET_DIGEST of $pt is not \"$GHCR_IMAGE@sha256:<hex>\" (got \"$want\")" ;; esac
+  docker pull "$pref" >"$WORK/pull.log" 2>&1 || die "docker pull $pref failed: $(tail -3 "$WORK/pull.log")"
+  if ! docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$pref" 2>/dev/null | grep -qxF "$want"; then
+    die "pulled $pref has repo digests [$(docker image inspect -f '{{.RepoDigests}}' "$pref" 2>/dev/null)] but the release says $want - refusing (nothing on the server was touched)"
+  fi
+  got="$(docker run --rm --entrypoint /aihub "$pref" -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
+  [ "$got" = "$pv" ] || die "image $pref: /aihub -version prints \"$got\", expected $pv (nothing on the server was touched)"
+  PULLED_ID="$(docker image inspect -f '{{.Id}}' "$pref")"
+  note "pulled $pref: digest $want verified; /aihub -version = $pv; image $PULLED_ID"
+}
+
+# ship_image <tag> <local-image-id> <polyforge-image>: docker save | ssh docker load,
+# verify the image ID on the server, tag <polyforge-image>, verify -version/git/curl.
+ship_image() {
+  st="$1"; sid="$2"; simg="$3"
+  sref="$GHCR_IMAGE:$st"
+  docker save -o "$WORK/image-$st.tar" "$sref" || die "docker save $sref failed"
+  rssh docker load <"$WORK/image-$st.tar" >"$WORK/load.log" 2>&1 || die "docker load on $AIHUB_HOST failed: $(tail -3 "$WORK/load.log")"
+  rm -f "$WORK/image-$st.tar"
+  sgot="$(dk image inspect -f '{{.Id}}' "$sref" 2>/dev/null || true)"
+  [ "$sgot" = "$sid" ] || die "image ID on the server is \"$sgot\", expected $sid (service untouched)"
+  dk tag "$sref" "$simg" || die "docker tag $sref $simg failed on the server"
+  dk rmi "$sref" >/dev/null 2>&1 || true   # drop the ghcr name: compose only ever sees local polyforge/aihub tags
+  dk run --rm --entrypoint git "$simg" --version >/dev/null 2>&1 || die "image $simg: git --version does not work"
+  dk run --rm --entrypoint curl "$simg" --version >/dev/null 2>&1 || die "image $simg: curl --version does not work"
+  note "image $simg shipped; server image ID == $sid; git and curl work"
 }
 
 # The compose edit (python3 stdlib, line-based, scoped to the aihub service block):
@@ -311,28 +389,26 @@ compose_edit() { printf '%s\n' "$PYCOMPOSE" | rssh python3 - "$COMPOSE_FILE" "$A
 # ---------------------------------------------------------------- step 0
 step 0 "preflight"
 note "target: $TAG on $AIHUB_HOST (container $AIHUB_CONTAINER, data $AIHUB_DATA)"
-for c in gh ssh scp rsync python3 sha256sum; do
+for c in gh docker ssh scp rsync python3 sha256sum; do
   command -v "$c" >/dev/null 2>&1 || die "local tool $c not found on PATH"
 done
 
 REL="$WORK/release"
-mkdir -p "$REL"
 note "downloading release assets of $GH_REPO $TAG ..."
-gh release download "$TAG" -R "$GH_REPO" -D "$REL" -p "$ASSET_AIHUB" -p "$ASSET_PF" -p SHA256SUMS >"$WORK/gh.log" 2>&1 \
-  || die "gh release download $TAG failed: $(cat "$WORK/gh.log")"
-for f in "$ASSET_AIHUB" "$ASSET_PF" SHA256SUMS; do
-  [ -s "$REL/$f" ] || die "release $TAG has no asset $f"
-done
-(cd "$REL" && sha256sum -c SHA256SUMS) >"$WORK/sha.log" 2>&1 || die "local sha256sum -c failed: $(cat "$WORK/sha.log")"
-note "assets verified locally: $(tr '\n' ' ' <"$WORK/sha.log")"
+fetch_release "$TAG" "$REL" 1
+note "assets verified locally (SHA256SUMS covers $(awk '{print $2}' "$REL/SHA256SUMS" | tr '\n' ' '))"
+ghcr_login
+pull_verified "$TAG" "$REL" "$TAG"
+NEW_LOCAL_ID="$PULLED_ID"
+# deploy/Dockerfile is needed ONLY for the legacy rollback-image path (an old
+# release without a GHCR image); the new image is never built here.
 DOCKERFILE="$WORK/Dockerfile"
 if git -C "$SCRIPT_DIR" show "$TAG:deploy/Dockerfile" >"$DOCKERFILE" 2>/dev/null && [ -s "$DOCKERFILE" ]; then
-  note "Dockerfile: deploy/Dockerfile at tag $TAG"
+  :
 elif [ -s "$SCRIPT_DIR/../deploy/Dockerfile" ]; then
   cp "$SCRIPT_DIR/../deploy/Dockerfile" "$DOCKERFILE"
-  note "WARNING: tag $TAG not in the local repo; using the working-tree deploy/Dockerfile"
 else
-  die "no deploy/Dockerfile found (neither at tag $TAG nor in the working tree)"
+  DOCKERFILE=""
 fi
 
 rssh true >/dev/null 2>&1 || die "ssh to $AIHUB_HOST failed (BatchMode)"
@@ -352,6 +428,27 @@ if [ "$TAG" = "$OLDVER" ] || [ "$cmp" = "0" ]; then
 elif [ "$cmp" = "-1" ]; then
   [ -n "$FORCE" ] || die "$TAG is OLDER than the running $OLDVER - a downgrade needs --force"
   note "WARNING: downgrade $OLDVER -> $TAG (--force)"
+fi
+
+# The rollback image: the old release's GHCR image when it has one (a release
+# that published aihub-image.digest), else the legacy build from the saved old
+# binary (releases before the GHCR image existed, e.g. v2.2.0).
+if gh release view "$OLDVER" -R "$GH_REPO" --json assets -q '.assets[].name' >"$WORK/oldassets.txt" 2>"$WORK/oldrel.err"; then
+  if grep -qx "$ASSET_DIGEST" "$WORK/oldassets.txt"; then OLD_HAS_GHCR=1; fi
+else
+  note "WARNING: cannot read release $OLDVER of $GH_REPO ($(head -1 "$WORK/oldrel.err")); the rollback image falls back to a build from the saved old binary"
+fi
+if [ "$OLD_HAS_GHCR" = 1 ] && [ "$OLDVER" != "$TAG" ]; then
+  note "rollback image: $OLDVER has a GHCR image - pulling and verifying it"
+  fetch_release "$OLDVER" "$WORK/release-old" 1
+  pull_verified "$OLDVER" "$WORK/release-old" "$OLDVER"
+  OLD_LOCAL_ID="$PULLED_ID"
+elif [ "$OLD_HAS_GHCR" = 1 ]; then
+  OLD_LOCAL_ID="$NEW_LOCAL_ID"
+  note "rollback image: same version as the target (--force); reusing the verified pull"
+else
+  note "rollback image: $OLDVER has no GHCR image - will build it from the saved old binary on the server (legacy path)"
+  [ -n "$DOCKERFILE" ] || die "no deploy/Dockerfile found (neither at tag $TAG nor in the working tree) - needed for the legacy rollback image of $OLDVER"
 fi
 
 rssh "test -f '$COMPOSE_FILE'" || die "compose file $COMPOSE_FILE not found on $AIHUB_HOST"
@@ -388,16 +485,20 @@ TS="$(date -u +%Y%m%dT%H%M%SZ)"
 BIN_SAVED="$SRV_ROOT/aihub-bin-$OLDVER-$TS"
 SRV_BACKUP="$SRV_ROOT/aihub-backup-$OLDVER-$TS"
 LOCAL_BACKUP="$BACKUP_ROOT/aihub-backup-$OLDVER-$TS"
-STAGE_DIR="$RELEASE_STAGE/$TAG"
 OLDIMG="$IMAGE_REPO:$OLDVER"
 NEWIMG="$IMAGE_REPO:$TAG"
 COMPOSE_BAK="$COMPOSE_FILE.bak-$TS"
+if [ -n "$OLD_HAS_GHCR" ]; then
+  OLD_PLAN="docker save $GHCR_IMAGE:$OLDVER | ssh docker load, verify image ID, tag $OLDIMG"
+else
+  OLD_PLAN="legacy: docker build from the saved old binary + deploy/Dockerfile (no GHCR image for $OLDVER)"
+fi
 
 echo
 echo "== plan for steps 2-8 (ONLINE backup; the only interruption is one container recreate) =="
 cat <<EOF
 2. save old binary   ssh $AIHUB_HOST docker cp $AIHUB_CONTAINER:/aihub $BIN_SAVED
-                     build rollback image $OLDIMG from it (if absent): docker build in a temp context with deploy/Dockerfile; verify -version == $OLDVER
+                     rollback image $OLDIMG (if absent on the server): $OLD_PLAN; verify -version == $OLDVER
 3. online backup     (service keeps running; NO docker stop anywhere)
                      rsync -a $AIHUB_DATA/ -> $SRV_BACKUP/   (pass 1, excluding aihub.db, -wal, -shm, service.lock)
                      python3 sqlite3 backup API: $AIHUB_DATA/aihub.db (ro) -> $SRV_BACKUP/aihub.db ; integrity_check + counts >= baseline
@@ -405,8 +506,9 @@ cat <<EOF
 4. consistency       rows in the snapshot's memories == memory.md files under $SRV_BACKUP/memory (retry up to 2x; still different -> stop, nothing changed)
 5. off-host copy     rsync $AIHUB_HOST:$SRV_BACKUP/ -> $LOCAL_BACKUP/
                      server manifest == local manifest; integrity_check ok + row counts == frozen baseline on the local aihub.db
-6. build + swap      scp $ASSET_AIHUB $ASSET_PF SHA256SUMS -> $AIHUB_HOST:$STAGE_DIR/ ; sha256sum -c there; chmod +x
-                     docker build -t $NEWIMG (temp context: Dockerfile + $ASSET_AIHUB as aihub) while the service runs; verify -version == $TAG, git, curl
+6. load + swap       (already verified in step 0 on this machine: $GHCR_IMAGE:$TAG repo digest == $ASSET_DIGEST, -version == $TAG)
+                     docker save $GHCR_IMAGE:$TAG | ssh $AIHUB_HOST docker load  (service keeps running); server image ID == $NEW_LOCAL_ID
+                     docker tag on the server -> $NEWIMG ; verify git, curl in it
                      back up $COMPOSE_FILE -> $COMPOSE_BAK ; edit ONLY service $AIHUB_SERVICE (planned diff below) ; docker compose config -q (failure -> backup restored, stop)
                      docker compose -f $COMPOSE_FILE -p $COMPOSE_PROJECT up -d --no-deps $AIHUB_SERVICE ; poll http://127.0.0.1:$AIHUB_PORT/ every 0.2s ; print downtime (warn > ${MAX_DOWNTIME_SECS}s, fail if not up in ${UP_WAIT_SECS}s)
 7. verify            container image == $NEWIMG ; wait <= ${WAIT_SECS}s for 'docker exec $AIHUB_CONTAINER /aihub -version' == $TAG ; docker logs --since <start>: print error lines, FAIL on panic/fatal
@@ -422,7 +524,7 @@ echo "   work machines: re-run tools/install.sh <api-key> on each, one at a time
 echo
 
 if [ -n "$DRY" ]; then
-  echo "dry-run: steps 0-1 ran read-only; steps 2-8 above were NOT executed. Nothing was changed."
+  echo "dry-run: steps 0-1 ran read-only (the image pull is local to this machine); steps 2-8 above were NOT executed. Nothing was changed."
   exit 0
 fi
 
@@ -447,6 +549,10 @@ if rssh docker image inspect "$OLDIMG" >/dev/null 2>&1; then
   got="$(dk run --rm --entrypoint /aihub "$OLDIMG" -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
   [ "$got" = "$OLDVER" ] || die "image $OLDIMG already exists but its /aihub reports \"$got\", not $OLDVER - a rollback to it would be wrong; remove/retag it by hand"
   note "rollback image $OLDIMG already exists and reports $OLDVER"
+elif [ -n "$OLD_HAS_GHCR" ]; then
+  ship_image "$OLDVER" "$OLD_LOCAL_ID" "$OLDIMG"
+  got="$(dk run --rm --entrypoint /aihub "$OLDIMG" -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
+  [ "$got" = "$OLDVER" ] || die "rollback image $OLDIMG reports \"$got\", expected $OLDVER"
 else
   build_image "$OLDIMG" "$BIN_SAVED" "$OLDVER"
 fi
@@ -523,14 +629,9 @@ counts_cmp "$WORK/frozen.counts" "$WORK/local.counts" eq || die "row counts of t
 note "local row counts equal the frozen baseline"
 
 # ---------------------------------------------------------------- step 6
-step 6 "build image, edit compose, swap (the only interruption: one container recreate)"
-rssh "mkdir -p '$STAGE_DIR'" || die "mkdir $STAGE_DIR failed"
-scp -o BatchMode=yes "$REL/$ASSET_AIHUB" "$REL/$ASSET_PF" "$REL/SHA256SUMS" "$AIHUB_HOST:$STAGE_DIR/" >"$WORK/scp.log" 2>&1 \
-  || die "scp to $STAGE_DIR failed: $(cat "$WORK/scp.log")"
-rssh "cd '$STAGE_DIR' && sha256sum -c SHA256SUMS" >"$WORK/sha2.log" 2>&1 || die "sha256sum -c on the server failed: $(cat "$WORK/sha2.log")"
-note "staged assets verified on the server: $STAGE_DIR"
-rssh "chmod +x '$STAGE_DIR/$ASSET_AIHUB' '$STAGE_DIR/$ASSET_PF'" || die "chmod failed"
-build_image "$NEWIMG" "$STAGE_DIR/$ASSET_AIHUB" "$TAG"
+step 6 "load image, edit compose, swap (the only interruption: one container recreate)"
+ship_image "$TAG" "$NEW_LOCAL_ID" "$NEWIMG"
+dk run --rm --entrypoint /aihub "$NEWIMG" -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' | grep -qx "$TAG" || die "image $NEWIMG on the server does not report $TAG (service untouched)"
 # (b) compose: back up, edit ONLY the aihub service, validate, show the diff.
 rssh "cp -p '$COMPOSE_FILE' '$COMPOSE_BAK'" || die "cannot back up $COMPOSE_FILE"
 note "compose backup: $COMPOSE_BAK"
@@ -610,7 +711,6 @@ echo "  version:        $OLDVER -> $TAG   (downtime ${down}s)"
 echo "  old binary:     $AIHUB_HOST:$BIN_SAVED"
 echo "  server backup:  $AIHUB_HOST:$SRV_BACKUP"
 echo "  local backup:   $LOCAL_BACKUP"
-echo "  staged release: $AIHUB_HOST:$STAGE_DIR"
 echo "  baseline counts (snapshot; files: memory/ $MEM_FILES, git/ $GIT_FILES at step 1):"
 show_counts "$WORK/frozen.counts"
 echo
