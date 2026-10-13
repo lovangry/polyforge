@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -115,8 +116,8 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	if req.Goal == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "goal required")
 	}
-	if len(req.Goal) > api.MaxGoalBytes {
-		return nil, Fail(api.ErrCoreBadInput, "", "goal exceeds %d bytes", api.MaxGoalBytes)
+	if utf8.RuneCountInString(req.Goal) > api.MaxGoalRunes {
+		return nil, Fail(api.ErrCoreBadInput, "", "goal exceeds %d characters", api.MaxGoalRunes)
 	}
 	if req.Priority == "" {
 		req.Priority = api.PriorityNormal
@@ -613,7 +614,7 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 		switch field {
 		case "goal":
 			var v string
-			if json.Unmarshal(raw, &v) != nil || strings.TrimSpace(v) == "" || len(v) > api.MaxGoalBytes {
+			if json.Unmarshal(raw, &v) != nil || strings.TrimSpace(v) == "" || utf8.RuneCountInString(v) > api.MaxGoalRunes {
 				return nil, Fail(api.ErrCoreBadInput, "", "bad goal")
 			}
 			sets, args = append(sets, "goal=?"), append(args, v)

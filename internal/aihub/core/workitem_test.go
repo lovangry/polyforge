@@ -8,6 +8,7 @@ package core
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 
@@ -409,5 +410,32 @@ func TestPatchWaitingOnValueDomain(t *testing.T) {
 	}
 	if got.WaitingOn != nil {
 		t.Fatalf("null clear left waiting_on=%v", *got.WaitingOn)
+	}
+}
+
+// TestGoalLimitCountedInRunes (polyforge#149 D3): the goal cap counts
+// CHARACTERS, not bytes — a 500-character CJK goal (1500 bytes) is
+// accepted through create and PATCH; 501 characters is refused on both.
+func TestGoalLimitCountedInRunes(t *testing.T) {
+	env := newEnv(t)
+	cjk := strings.Repeat("目", 500) // 500 characters, 1500 bytes
+	wi, err := env.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: cjk, Reporter: env.UserID,
+	})
+	if err != nil {
+		t.Fatalf("create with a 500-character (1500-byte) goal refused: %v", err)
+	}
+	id := wi.ID
+	if _, err := env.WIs.Patch(id, map[string]json.RawMessage{"goal": json.RawMessage(`"` + cjk + `"`)}); err != nil {
+		t.Fatalf("PATCH with a 500-character goal refused: %v", err)
+	}
+	long := strings.Repeat("目", 501)
+	if _, err := env.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: long, Reporter: env.UserID,
+	}); !IsCode(err, api.ErrCoreBadInput) {
+		t.Fatalf("create with a 501-character goal: want CORE-400, got %v", err)
+	}
+	if _, err := env.WIs.Patch(id, map[string]json.RawMessage{"goal": json.RawMessage(`"` + long + `"`)}); !IsCode(err, api.ErrCoreBadInput) {
+		t.Fatalf("PATCH with a 501-character goal: want CORE-400, got %v", err)
 	}
 }
