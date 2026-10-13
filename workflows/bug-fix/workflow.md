@@ -1,6 +1,6 @@
 ---
 name: bug-fix
-description: Root-cause lane - reproduce the failure first, prove the cause before fixing, then run the fix/verification/review/release tail.
+description: Root-cause lane - reproduce the failure first, prove the cause before fixing, then run the fix/verification/review tail.
 rewind:
   max_total: 4
   max_per_step: 2
@@ -16,19 +16,18 @@ steps:
   - { id: fix, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
   - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
   - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
-  - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: review } }
 ---
 
 # bug-fix — root-cause lane
 
-This is the flow-level narrative for the workflow. It explains how the six
+This is the flow-level narrative for the workflow. It explains how the five
 steps compose and what flows between them; it is not itself a structural schema — the
 frontmatter `steps` array above is the *only* execution order. Nothing here overrides it.
 
 ## Shape of the flow
 
 ```
-repro --> root-cause --> fix --> verification --> review --> release
+repro --> root-cause --> fix --> verification --> review
    ^         |                     |                |            |
    |   (FAIL: rewind to repro)  (FAIL: rewind to fix)  (FAIL: rewind to fix)  (FAIL: rewind to review)
 ```
@@ -68,10 +67,9 @@ those artifact paths.
 |---|---|---|
 | `repro` | `artifacts/repro.md` (commands, environment, observed vs expected), plus a failing test under `repos/<name>/**` when one is authored | `root-cause`, `verification` |
 | `root-cause` | `artifacts/root-cause.md` (verdict, cause, evidence) | `fix`, `review` |
-| `fix` | changes under `repos/<name>/**`, `artifacts/fix-summary.md`, and the repro pinned as a regression test (required output `regression_test`; waived only with a review-visible reason) | `verification`, `review`, `release` |
+| `fix` | changes under `repos/<name>/**`, `artifacts/fix-summary.md`, and the repro pinned as a regression test (required output `regression_test`; waived only with a review-visible reason) | `verification`, `review` |
 | `verification` | `artifacts/verification-report.md` (verdict) | `review` |
-| `review` | `artifacts/review.md` (verdict) | `release` |
-| `release` | `artifacts/release-notes.md`, tag/version metadata | (terminal) |
+| `review` | `artifacts/review.md` (verdict) | (terminal) |
 
 The repro artifact is the spine of the lane: `root-cause` cites it as evidence, and
 `verification` re-runs it — the originally failing case passing on the fixed tree is the
@@ -94,9 +92,6 @@ exist and sit strictly earlier than the failing step. This section explains the 
   with the blocking findings attached; `root-cause` is NOT a rewind target — if the
   review verdict says the diagnosis itself was wrong, `fix`'s re-run is expected to say
   so in its output and stop honestly rather than re-litigate the cause mid-flow.
-- **`release` FAILs -> rewind to `review`** (feature-full's default convention): a
-  release failure is normally a release-blocking review concern resurfacing at ship time
-  or a readiness judgment, not automatically evidence the code is wrong.
 
 Workflow-level rewind bounds: `max_total: 4`, `max_per_step: 2`. A diagnosis-fix loop
 that cannot converge in four bounded rewinds is telling you the WI is mis-scoped —
@@ -108,17 +103,15 @@ There is no workflow-level budget; the bounds are the rewind limits above and ea
 with slow CI should raise the per-step `budget.wall_minutes` on `fix` rather than shrinking the verification set.
 
 Every step declares its own `budget.wall_minutes`: the code-writing steps `repro`/`fix` get 30, and
-`root-cause`, `verification`, `review` and `release` 20 each — 140 minutes in total.
+`root-cause`, `verification` and `review` 20 each — 120 minutes in total.
 
 The declared wall is an estimate, not a limit: the daemon bounds a step's total runtime across its
 dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
 A step that declares nothing gets the default, so declare a wall only for a step that legitimately
 needs more than 90 minutes in total.
 
-## The release step (per-project convention)
+## No release slot
 
-`release` is an ordinary step slot reusing every existing step primitive
-`steps/release.md` ships as a template skeleton —
-version source, build, tag, publish target, channel promotion are per-project TODOs
-each consuming project fills in, keeping the frontmatter contract (`name`,
-`description`, `tools`, `output`) intact.
+This bundle has no release step. Releases and deploys never ride a delivery lane: they
+happen only through the dedicated `release` workflow bundle (a separate WI), so shipping
+is always an explicit, separately-gated act on a verified origin head.

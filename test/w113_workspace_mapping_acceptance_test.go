@@ -1359,7 +1359,6 @@ func TestW113InflightCapsulesKeepHomesAcrossRestart(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 4000},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := w113NewDaemon(t, inst,
 		w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
@@ -1430,7 +1429,6 @@ func TestW113UnmappedMidflightWIBlocksThenResumes(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 4000},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		})
 	d := w113NewDaemon(t, inst,
 		w113DOptConfig(fullCfgPath), w113DOptSock(sock), w113DOptDataDir(dataDir))

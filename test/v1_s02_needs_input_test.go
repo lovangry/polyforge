@@ -26,7 +26,6 @@ func TestV1S02NeedsInputLoop(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -88,7 +87,7 @@ func TestV1S02NeedsInputLoop(t *testing.T) {
 	// The re-dispatch face: grill was answered and COMPLETED by its
 	// second derivation (the envelope plan's second grill action), then
 	// the workflow advanced — every step done.
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}

@@ -82,7 +82,6 @@ func TestV1WI110ShutdownAttributionRepro(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true, "ms": 60000},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 		d := newV1Daemon(t, inst)
 		d.start()

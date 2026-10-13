@@ -50,7 +50,6 @@ func TestV1S17BackpressureSteps(t *testing.T) {
 		map[string]any{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		map[string]any{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 		map[string]any{"do": "envelope", "id": "verification", "outcome": "completed"},
-		map[string]any{"do": "envelope", "id": "release", "outcome": "completed"},
 	)
 	wi := inst.newWI(t, "s17: push backpressure (steps trigger, aihub outage)", actions, nil)
 	d := newV1Daemon(t, inst)
@@ -159,7 +158,7 @@ func TestV1S17BackpressureSteps(t *testing.T) {
 	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 	x := readExecution(t, d.capsuleDir(wi))
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}

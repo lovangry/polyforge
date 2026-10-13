@@ -169,7 +169,6 @@ func TestV1T7PreClaimCrashJournalReplay(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	t.Cleanup(func() { killOrphans(wi) })
 
@@ -250,8 +249,8 @@ func TestV1T7PreClaimCrashJournalReplay(t *testing.T) {
 	// dispatches, no re-derivations — and the wrap cleared the session
 	// row.
 	spawns := spawnJournal(t, d2.capsuleDir(wi))
-	if len(spawns) != 4 {
-		t.Fatalf("spawn journal has %d entries, want 4 (the adopted start's single pass): %+v", len(spawns), spawns)
+	if len(spawns) != 3 {
+		t.Fatalf("spawn journal has %d entries, want 3 (the adopted start's single pass): %+v", len(spawns), spawns)
 	}
 	for _, s := range spawns {
 		if s["resume"] != false {

@@ -22,7 +22,6 @@ func TestV1S17SealCrashResume(t *testing.T) {
 			// process dies (exit 101) before the driver's teardown.
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "after"},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -71,12 +70,12 @@ func TestV1S17SealCrashResume(t *testing.T) {
 	// The spawn journal holds exactly the four step dispatches (no
 	// re-derivation), the whole chain is done, and the only recovery
 	// signal in the events log is the completion translation.
-	spawns := waitSpawnCount(t, d, wi, 4, 30*time.Second)
-	if len(spawns) != 4 {
-		t.Fatalf("spawn journal has %d entries, want 4 (no re-derivation): %+v", len(spawns), spawns)
+	spawns := waitSpawnCount(t, d, wi, 3, 30*time.Second)
+	if len(spawns) != 3 {
+		t.Fatalf("spawn journal has %d entries, want 3 (no re-derivation): %+v", len(spawns), spawns)
 	}
 	x = readExecution(t, capDir)
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}

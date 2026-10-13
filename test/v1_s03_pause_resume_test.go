@@ -39,7 +39,6 @@ func TestV1S03PauseResume(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -170,7 +169,7 @@ func TestV1S03PauseResume(t *testing.T) {
 	// interruption (derivation 1 pre-pause, the resume re-dispatch
 	// after the attach — the second entry is a RESUME).
 	x := readExecution(t, d2.capsuleDir(wi))
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}
@@ -180,10 +179,10 @@ func TestV1S03PauseResume(t *testing.T) {
 	}
 	spawns := spawnJournal(t, d2.capsuleDir(wi))
 	// The whole post-resume workflow rode the SAME session: the attach
-	// re-dispatch (a resume, ordinal 2) plus the fresh dispatches of fix,
-	// verification and release.
-	if len(spawns) != 5 || spawns[1]["resume"] != true || spawns[2]["resume"] != false {
-		t.Fatalf("spawn journal after the cycle: %d entries (want 5, second a resume then fresh dispatches)", len(spawns))
+	// re-dispatch (a resume, ordinal 2) plus the fresh dispatches of fix
+	// and verification.
+	if len(spawns) != 4 || spawns[1]["resume"] != true || spawns[2]["resume"] != false {
+		t.Fatalf("spawn journal after the cycle: %d entries (want 4, second a resume then fresh dispatches)", len(spawns))
 	}
 
 	// And no orphan of the paused close survived the whole cycle.

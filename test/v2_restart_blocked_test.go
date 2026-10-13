@@ -39,7 +39,6 @@ func TestV2RestartCapsuleMissingBlocksThenResumeFromCheckpoint(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed", "ms": 120000},
 			// the post-resume dispatch of verification
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	other := inst.newWI(t, "restart: bystander recovers normally",
 		[]map[string]any{
@@ -47,7 +46,6 @@ func TestV2RestartCapsuleMissingBlocksThenResumeFromCheckpoint(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 120000},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	t.Cleanup(func() { killOrphans(wi); killOrphans(other) })
 
@@ -138,18 +136,18 @@ func TestV2RestartCapsuleMissingBlocksThenResumeFromCheckpoint(t *testing.T) {
 		t.Fatalf("the fix step's work.txt is missing after the resume: %q, %v", b, err)
 	}
 	// completed steps were NOT re-run: every dispatch after the loss is
-	// verification or release
+	// verification
 	spawns := spawnJournal(t, d2.capsuleDir(wi))
 	if len(spawns) <= preSpawns {
 		t.Fatalf("the resume dispatched nothing (%d entries, %d before)", len(spawns), preSpawns)
 	}
 	for _, s := range spawns[preSpawns:] {
-		if id, _ := s["step_id"].(string); id != "verification" && id != "release" {
+		if id, _ := s["step_id"].(string); id != "verification" {
 			t.Fatalf("a completed step was re-run after the resume: %v (spawns %v)", s["step_id"], spawns)
 		}
 	}
 	x := readExecution(t, d2.capsuleDir(wi))
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}
@@ -170,7 +168,6 @@ func TestV2RestartSnapshotMissingBlocksThenResumeRematerializes(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 120000},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	t.Cleanup(func() { killOrphans(wi) })
 	d := newV1Daemon(t, inst)

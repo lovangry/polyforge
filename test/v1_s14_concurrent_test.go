@@ -57,7 +57,7 @@ func TestV1S14ConcurrentTwoWI(t *testing.T) {
 	if s := d.watch(t, wiA); s.WorkItem != wiA {
 		t.Fatalf("watch snapshot of A names %q", s.WorkItem)
 	}
-	if s := d.watch(t, wiB); len(s.Execution.Steps) != 4 {
+	if s := d.watch(t, wiB); len(s.Execution.Steps) != 3 {
 		t.Fatalf("watch snapshot of B crossed streams: %+v", s.Execution.Steps)
 	}
 
@@ -83,7 +83,7 @@ func TestV1S14ConcurrentTwoWI(t *testing.T) {
 	for _, wi := range []string{wiA, wiB} {
 		waitWorkflowStatus(t, d, wi, "completed", 30*time.Second)
 		x := readExecution(t, d.capsuleDir(wi))
-		if len(x.Steps) != 4 {
+		if len(x.Steps) != 3 {
 			t.Fatalf("%s: step table crossed streams: %v", wi, x.Steps)
 		}
 		env := archivedEnvelope(t, d.capsuleDir(wi), "grill", 1)

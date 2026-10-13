@@ -43,7 +43,6 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 			// still live — the wrap must never outrun the recovery push.
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 15000},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -140,7 +139,7 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 	// The driver faces: the whole chain done, the poisoned ordinal's
 	// envelope archived.
 	x := readExecution(t, d.capsuleDir(wi))
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}

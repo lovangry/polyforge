@@ -32,7 +32,7 @@ Read the memo in full before starting; it is the only written instruction this l
 produces, so if it is genuinely insufficient to implement from, do not guess your way
 past the gap - report it in `summary` and hand the attempt off honestly. If this is a
 rewind re-entry, also read `execution.json`'s `pending_rewind_input` for this step (a
-`verification` or `release` FAIL verdict) and address every point it raises first.
+`verification` FAIL verdict) and address every point it raises first.
 
 ## Discipline
 
@@ -43,7 +43,7 @@ rewind re-entry, also read `execution.json`'s `pending_rewind_input` for this st
 - **Commit per compilable unit** with a message that names what it fixes. A quick fix is
   usually one or two commits - do not accumulate everything into one undifferentiated
   commit, and do not pad the change with drive-by edits the memo did not ask for: scope
-  creep is the classic failure mode of this lane, and `verification` and `release` read
+  creep is the classic failure mode of this lane, and `verification` reads
   the diff against the memo.
 - **Stay inside the memo's `## Non-goals`.** If you believe an exclusion is wrong, say
   so in `summary` - do not silently include it.
@@ -53,7 +53,7 @@ rewind re-entry, also read `execution.json`'s `pending_rewind_input` for this st
 If the fix turns out infeasible as written, or the build cannot be made green within
 reasonable effort, do not fabricate a passing `build_status: green`. Leave it `red`,
 explain the blocker in `summary`, and let the honest state surface: a dishonest green
-here corrupts `verification` and `release` downstream.
+here corrupts `verification` downstream.
 
 ## Output
 

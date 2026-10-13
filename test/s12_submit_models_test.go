@@ -30,7 +30,6 @@ func TestS12ManualModelsBeatYamlAndAdvanceOnModelFailure(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "before", "crash_stderr": w079ProviderErr},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		})
 	d.pfWant(inst, -1, "submit", wi, "--models", "s12-m1, s12-m2,s12-m3")
 	capDir := w079Capsule(ws, wi)
@@ -38,7 +37,7 @@ func TestS12ManualModelsBeatYamlAndAdvanceOnModelFailure(t *testing.T) {
 	w113WaitCompleted(t, capDir, 300*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
 
-	for step, want := range map[string]string{"grill": "s12-m1", "verification": "s12-m1", "release": "s12-m1", "fix": "s12-m2"} {
+	for step, want := range map[string]string{"grill": "s12-m1", "verification": "s12-m1", "fix": "s12-m2"} {
 		if got := w079Model(t, capDir, step); got != want {
 			t.Fatalf("step %s model %q, want %q (manual list; fix advanced once on the provider failure)", step, got, want)
 		}
@@ -90,7 +89,6 @@ func TestS12ManualModelsSurviveDaemonRestart(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 8000},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		})
 	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d.start()
@@ -108,7 +106,7 @@ func TestS12ManualModelsSurviveDaemonRestart(t *testing.T) {
 	w113WaitCompleted(t, capDir, 300*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 
-	for _, step := range []string{"grill", "fix", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if got := w079Model(t, capDir, step); got != "s12-m1" {
 			t.Fatalf("step %s model %q after the restart, want the manual head s12-m1", step, got)
 		}
@@ -127,7 +125,6 @@ func TestS12ManualModelsSurviveReclaim(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed", "ms": 120000},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	t.Cleanup(func() { killOrphans(wi) })
 
@@ -165,7 +162,7 @@ func TestS12ManualModelsSurviveReclaim(t *testing.T) {
 	d2.pf(t, "resume", wi)
 	inst.waitWIStatus(t, wi, "wrapped", 180*time.Second)
 	capDir := d2.capsuleDir(wi)
-	for _, step := range []string{"verification", "release"} {
+	for _, step := range []string{"verification"} {
 		if got := w079Model(t, capDir, step); got != "s12-r1" {
 			t.Fatalf("step %s model %q after the re-claim, want the manual head s12-r1", step, got)
 		}

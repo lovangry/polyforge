@@ -49,7 +49,6 @@ func w114Plan() []map[string]any {
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "verification", "outcome": "completed"},
-		{"do": "envelope", "id": "release", "outcome": "completed"},
 	}
 }
 
@@ -214,8 +213,8 @@ func TestW114StepWedgeOperatorKillRecovers(t *testing.T) {
 		t.Fatalf("step_failed = %+v, want exit_other/retry_same_model/resume/1", f)
 	}
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
-	spawns := waitSpawnCount(t, d, wi, 5, 60*time.Second)
-	if len(spawns) != 5 || spawns[1]["resume"] != true {
+	spawns := waitSpawnCount(t, d, wi, 4, 60*time.Second)
+	if len(spawns) != 4 || spawns[1]["resume"] != true {
 		t.Fatalf("the retry was not an in-place resume: %+v", spawns)
 	}
 	if n := countOf(d.eventKinds(t, wi), "supervisor_verdict"); n != 0 {

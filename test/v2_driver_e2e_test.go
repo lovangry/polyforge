@@ -20,13 +20,11 @@ func TestV2DriverEndToEnd(t *testing.T) {
 	// grill: handoff (needs to produce handoff for fix)
 	// fix: handoff
 	// verification: completed
-	// release: completed
 	wi := inst.newWI(t, "v2 driver e2e: envelope-driven quick-fix",
 		[]map[string]any{
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -58,7 +56,7 @@ func TestV2DriverEndToEnd(t *testing.T) {
 		t.Fatalf("execution.json unparsable: %v", err)
 	}
 	steps, _ := exec["steps"].(map[string]any)
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		st, ok := steps[step].(map[string]any)
 		if !ok {
 			t.Fatalf("step %s missing from execution.json", step)
