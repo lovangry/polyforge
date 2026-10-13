@@ -287,28 +287,6 @@ func loadState(path string) (*stateFile, error) {
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
-// stampIfSet renders t as RFC3339Nano ("" for the zero time — the
-// never-recovered marker).
-func stampIfSet(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format(time.RFC3339Nano)
-}
-
-// parseStamp is stampIfSet's inverse; an unparsable value reads as
-// never (a torn record must never look like a live storm window).
-func parseStamp(s string) time.Time {
-	if s == "" {
-		return time.Time{}
-	}
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		return time.Time{}
-	}
-	return t
-}
-
 // restoredJob is jobFromRecord plus the runtime-owned wiring (the gitops
 // event sink) a bare record cannot carry.
 func (r *Runtime) restoredJob(rec *jobRecord) *job {
