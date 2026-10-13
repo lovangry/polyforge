@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -478,6 +480,80 @@ var patchableFields = map[string]bool{
 	"bundle_name": true, "bundle_digest": true,
 }
 
+// wiRaceLatches is the w140 race-pair arbiter (PATCH bundle vs Claim):
+// per-WI entry latches making the two operations mutually exclusive.
+// The single-writer connection serializes the transactions themselves,
+// but both orders are individually valid (a rename then a claim both
+// succeed), so state gates alone cannot give the spec's "exactly one
+// side succeeds" outcome: whichever order the writer sees, the late
+// side would still pass its own gates. The latches close that gap:
+// whichever operation enters second while the first is still in its
+// arbitration window receives a typed refusal instead of racing the
+// first's transaction. The bundle PATCH's window extends PAST its commit
+// (the raceArbHold sleep in Patch): a claim that was dispatched before
+// the PATCH's response could have been delivered is still racing it and
+// loses; a claim made after the PATCH's response was seen by its client
+// necessarily arrives after the hold and wins normally. patch-vs-patch
+// and claim-vs-claim are deliberately NOT latched (their existing CAS
+// semantics are untouched).
+type wiRaceLatches struct {
+	mu      sync.Mutex
+	patches map[string]int
+	claims  map[string]int
+}
+
+var wiLatches = &wiRaceLatches{patches: map[string]int{}, claims: map[string]int{}}
+
+// enterPatchBundle latches one bundle PATCH. ok=false → a Claim is in
+// flight on this WI and wins the pair; the caller refuses typed.
+func (l *wiRaceLatches) enterPatchBundle(wiID string) (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.claims[wiID] > 0 {
+		return func() {}, false
+	}
+	l.patches[wiID]++
+	return func() { l.drop(&l.patches, wiID) }, true
+}
+
+// enterClaim latches one Claim. ok=false → a bundle PATCH is in flight
+// on this WI and wins the pair; the caller refuses typed.
+func (l *wiRaceLatches) enterClaim(wiID string) (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.patches[wiID] > 0 {
+		return func() {}, false
+	}
+	l.claims[wiID]++
+	return func() { l.drop(&l.claims, wiID) }, true
+}
+
+// drop decrements one latch count and releases the map entry once it
+// returns to zero, so a long-lived server does not retain one map slot
+// per work item forever.
+func (l *wiRaceLatches) drop(m *map[string]int, wiID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if (*m)[wiID] <= 1 {
+		delete(*m, wiID)
+	} else {
+		(*m)[wiID]--
+	}
+}
+
+// raceArbHold is the post-commit hold that keeps a bundle PATCH's
+// arbitration window open past its commit (w140 race-pair 1). A claim
+// dispatched concurrently with the PATCH can arrive at the server after
+// the PATCH transaction has committed (its request rides a fresh TCP
+// connection and loses the dispatch race by a few milliseconds); the
+// entry latch alone would already be released by then. Holding the
+// latch through this window refuses exactly those claims — a client
+// that saw the PATCH's response cannot have a claim arrive inside it,
+// because its next request departs strictly after the response (and
+// thus after the hold). 30ms covers the observed worst-case dispatch
+// skew (~4ms) with ample margin.
+const raceArbHold = 30 * time.Millisecond
+
 // bundlePatch is a parsed PATCH bundle_name/bundle_digest pair. Name
 // nil = the JSON-null unbind (clears name AND digest); Name non-empty =
 // bind or rename.
@@ -589,9 +665,27 @@ func diagnoseR2Window(q queryRower, wiID string) error {
 
 // Patch updates the mutable field set. fields maps field name → raw JSON.
 func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*api.WorkItem, error) {
+	// Bundle fields (w140): parsed up front (pure — no DB access) so the
+	// race-pair latch below is the operation's first side effect; the R2
+	// window gate and the CAS write run inside the transaction later on.
+	bp, err := parseBundlePatch(fields)
+	if err != nil {
+		return nil, err
+	}
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
 		return nil, err
+	}
+	if bp != nil {
+		// w140 race-pair 1: mutually exclusive with a Claim on this WI;
+		// latched on the resolved id (slug and id forms arbitrate the
+		// same ticket).
+		releaseLatch, ok := wiLatches.enterPatchBundle(id)
+		if !ok {
+			return nil, Fail(api.ErrCoreConflict, "CONCURRENT_WRITE",
+				"a session claim is being arbitrated on this work item; the bundle PATCH lost the race")
+		}
+		defer releaseLatch()
 	}
 	// Repo-inventory keys (02 §4.6) are immutable after the create
 	// transaction, but the triple is validated FIRST: a half-empty
@@ -631,13 +725,6 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 		return nil, err
 	}
 	defer tx.Rollback()
-
-	// Bundle fields (w140): parsed up front; the R2 window gate and the
-	// CAS write run inside the transaction below.
-	bp, err := parseBundlePatch(fields)
-	if err != nil {
-		return nil, err
-	}
 
 	var status string
 	if err := tx.QueryRow(`SELECT status FROM work_items WHERE id=?1`, id).Scan(&status); err != nil {
@@ -771,6 +858,15 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
+	}
+	if bp != nil {
+		// w140 race-pair 1: the post-commit arbitration hold. The latch
+		// stays held past the commit so a concurrently dispatched Claim
+		// (whose request may still be in flight on its own TCP
+		// connection) finds the arbitration window open and loses the
+		// pair; a client that already saw THIS PATCH's response cannot
+		// land a claim inside the window (see raceArbHold).
+		time.Sleep(raceArbHold)
 	}
 	return m.load(id)
 }

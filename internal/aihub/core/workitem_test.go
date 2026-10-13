@@ -8,6 +8,7 @@ package core
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -314,4 +315,76 @@ func TestPatchBundleWithChildrenRefused(t *testing.T) {
 	if rc.ParentID == nil || *rc.ParentID != r.ID {
 		t.Fatalf("child parent_id = %v, want %s", rc.ParentID, r.ID)
 	}
+}
+
+// TestRaceBindBundleVsNewChild: PATCH bundle (NULL→X) vs create of a
+// child under the same ticket (the w140 race pair 2) — exactly one wins
+// per round and the final state never shows children ∧ bound bundle.
+func TestRaceBindBundleVsNewChild(t *testing.T) {
+	env := newEnv(t)
+	patchWins, createWins := 0, 0
+	for i := 0; i < 10; i++ {
+		parent, err := env.WIs.Create(CreateRequest{Project: "alpha", Goal: "w140 race2 parent", Reporter: env.UserID})
+		if err != nil {
+			t.Fatalf("create parent: %v", err)
+		}
+		var patchErr, createErr error
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, patchErr = patchBundle(t, env, parent.ID, strPtrTest("w140-race2-bound"), nil)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, createErr = env.WIs.Create(CreateRequest{
+				Project: "alpha", Goal: "w140 race2 child", Reporter: env.UserID, ParentID: strPtrTest(parent.ID),
+			})
+		}()
+		close(start)
+		wg.Wait()
+
+		if (patchErr == nil) == (createErr == nil) {
+			t.Fatalf("round %d: exactly one of bind-bundle / new-child must win (patchErr=%v createErr=%v)", i, patchErr, createErr)
+		}
+		got, err := env.WIs.Get(parent.ID, GetOptions{})
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		children := 0
+		kids, err := env.WIs.List(ListFilters{Project: "alpha"})
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		for _, k := range kids {
+			if k.ParentID != nil && *k.ParentID == parent.ID {
+				children++
+			}
+		}
+		bound := got.BundleName != nil
+		if createErr == nil {
+			createWins++
+			if bound {
+				t.Fatalf("round %d: create won but the parent is ALSO bundle-bound (children ∧ bundle must not coexist)", i)
+			}
+			if children == 0 {
+				t.Fatalf("round %d: create won but no child row landed", i)
+			}
+		} else {
+			patchWins++
+			if !IsCode(createErr, api.ErrCoreBadInput) {
+				t.Fatalf("round %d: losing create is not a typed refusal: %v", i, createErr)
+			}
+			if !bound {
+				t.Fatalf("round %d: PATCH won but the parent has no bundle", i)
+			}
+			if children != 0 {
+				t.Fatalf("round %d: PATCH won but a child landed anyway (children ∧ bundle must not coexist)", i)
+			}
+		}
+	}
+	t.Logf("w140 race2: PATCH won %d, create won %d", patchWins, createWins)
 }

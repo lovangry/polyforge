@@ -793,3 +793,73 @@ func env2GetWI(t *testing.T, env *testEnv, id string) *api.WorkItem {
 	}
 	return wi
 }
+
+// TestRacePatchBundleVsClaim: PATCH bundle vs session Claim on one
+// queued, never-claimed, childless ticket (the w140 race pair 1) —
+// exactly one wins per round; the loser gets a typed refusal; if the
+// PATCH wins the ticket stays claimable afterwards.
+func TestRacePatchBundleVsClaim(t *testing.T) {
+	env, m := sessionEnv(t)
+	patchWins, claimWins := 0, 0
+	for i := 0; i < 10; i++ {
+		bundle := "w140-race1-original"
+		wi, err := env.WIs.Create(CreateRequest{
+			Project: "alpha", Goal: "w140 race1", Reporter: env.UserID,
+			BundleName: strPtrTest(bundle),
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		var patchErr, claimErr error
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, patchErr = env.WIs.Patch(wi.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"w140-race1-renamed"`)})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, claimErr = m.Claim(wi.ID, api.SessionClaimRequest{SessionID: "w140-race1-secret"}, env.UserID)
+		}()
+		close(start)
+		wg.Wait()
+
+		if (patchErr == nil) == (claimErr == nil) {
+			t.Fatalf("round %d: exactly one of PATCH bundle / Claim must win (patchErr=%v claimErr=%v)", i, patchErr, claimErr)
+		}
+		got, err := env.WIs.Get(wi.ID, GetOptions{})
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if claimErr == nil {
+			claimWins++
+			if patchErr != nil && !IsCode(patchErr, api.ErrCoreBadInput) && !IsCode(patchErr, api.ErrCoreConflict) {
+				t.Fatalf("round %d: losing PATCH is not a typed refusal: %v", i, patchErr)
+			}
+			if got.Status != api.StatusRunning {
+				t.Fatalf("round %d: claim won but status = %s", i, got.Status)
+			}
+			if got.BundleName == nil || *got.BundleName != bundle {
+				t.Fatalf("round %d: claim won but the lost PATCH wrote: bundle = %v", i, got.BundleName)
+			}
+		} else {
+			patchWins++
+			if !IsCode(claimErr, api.ErrCoreConflict) {
+				t.Fatalf("round %d: losing Claim is not a typed conflict refusal: %v", i, claimErr)
+			}
+			if got.BundleName == nil || *got.BundleName != "w140-race1-renamed" {
+				t.Fatalf("round %d: PATCH won but bundle = %v", i, got.BundleName)
+			}
+			// winner-consistency: still claimable afterwards.
+			if _, err := m.Claim(wi.ID, api.SessionClaimRequest{SessionID: "w140-race1-secret-2"}, env.UserID); err != nil {
+				t.Fatalf("round %d: PATCH won but the ticket is no longer claimable: %v", i, err)
+			}
+		}
+	}
+	if patchWins == 0 {
+		t.Logf("w140 race1: PATCH never won (%d claim wins) — arbiter one-sided this run", claimWins)
+	}
+}

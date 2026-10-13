@@ -313,6 +313,16 @@ func (m *WIManager) Views(wis []api.WorkItem) ([]WIView, error) {
 // user id (idempotency triple binding). The response carries the public
 // fingerprint only — the secret never echoes.
 func (m *SessionManager) Claim(wiID string, req api.SessionClaimRequest, callerIdentity string) (*api.SessionClaim, error) {
+	// w140 race-pair 1: the entry latch is the FIRST statement of the
+	// operation (before any DB read) so the two latch windows span the
+	// whole handler durations — an overlapping PATCH bundle and Claim can
+	// then never both succeed, whichever enters first.
+	releaseLatch, ok := wiLatches.enterClaim(wiID)
+	if !ok {
+		return nil, Fail(api.ErrCoreConflict, "CONCURRENT_WRITE",
+			"a bundle reference change is being arbitrated on this work item; the claim lost the race")
+	}
+	defer releaseLatch()
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "session_id required (the client-minted secret)")
 	}
