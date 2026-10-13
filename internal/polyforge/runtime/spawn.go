@@ -24,20 +24,29 @@ import (
 
 // piIsolationFlags is the WI-agent birth isolation profile: the named flag
 // set that keeps a spawned agent from inheriting the OPERATOR's global
-// harness configuration (global skills, context files and prompt
+// harness instruction surfaces (global skills, context files and prompt
 // templates). The agent's only instruction of record is the initial prompt
 // injected at derivation; a capsule's materialized step-agent definitions
 // are a different resource family and stay reachable.
 //
-// --no-extensions is DELIBERATELY ABSENT and must stay absent (the v0
-// supervisor's live-tested baseline, v0/internal/mainagent/supervisor.go (git history):
-// it silences the operator's extension UI noise but also removes the
+// --no-extensions is DELIBERATELY ABSENT and must stay absent: it
+// silences the operator's extension UI noise but also removes the
 // harness-native subagent tool — which is extension-provided — and with
 // it the whole step-agent dispatch path; the harness has no built-in
-// subagent facility to fall back on). The residual exposure of
-// extension-registered harness background tasks is closed by instruction
-// instead (the executor rules forbid a WI agent from using any harness
-// background-task mechanism).
+// subagent facility to fall back to.
+//
+// The residual exposure this profile could never close — extension-
+// registered HARNESS BACKGROUND TASKS (the operator's user-level
+// packages, e.g. npm:pi-background-tasks, declared in the agent
+// directory's settings.json) — is closed MECHANICALLY instead
+// (addendum 2, owner ruling A): the step process runs with
+// PI_CODING_AGENT_DIR pointing at the dedicated daemon-owned step
+// agent directory (runtime/stepagentdir.go), a minimal snapshot
+// (auth.json/models.json/agents — never settings.json) that is
+// re-synced before every spawn. A global reinstall lands in the
+// operator's directory and never reaches the step process; the
+// isolation is the harness adapter layer's guarantee (see
+// docs/design/polyforge-vnext/v2-converge.md), not an instruction.
 var piIsolationFlags = []string{
 	"--no-skills",
 	"--no-context-files",
@@ -162,17 +171,14 @@ func (s *piSpawner) bin() string {
 // infrastructure failure the recovery engine should see. So the pin
 // rides argv.
 //
-// Residual settings pollution, deliberately accepted and documented: the
-// operator's agent-directory settings (per-model max_tokens-style
-// overrides, thinking budgets, models.json entries) remain inherited —
-// relocating the agent dir would also relocate the operator's PROVIDER
-// CREDENTIALS (they live in the same directory), leaving the WI agent
-// unable to call any model; copying them into the capsule is forbidden.
-// The argv pin removes the defaultModel inheritance vector; every other
-// operator preference keeps applying at the harness's own defaults. No
-// max_tokens is set here — the pinned model's own default is the
-// conservative choice (an invented cap is exactly the v0 settings-
-// pollution failure shape, from the other side).
+// The operator's agent-directory settings no longer leak into the step
+// process at all (addendum 2): the dedicated step agent directory
+// (PI_CODING_AGENT_DIR, re-synced before every spawn) holds only the
+// minimal set — credentials, model configuration, subagent definitions —
+// and NO settings.json, so no operator preference (a defaultModel
+// override, a package declaration) applies. The old "residual settings
+// pollution, deliberately accepted" caveat is resolved by that
+// relocation; the argv pin stays for the loud-failure property above.
 func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 	args := []string{"--mode", "rpc"}
 	args = append(args, piIsolationFlags...)
@@ -192,18 +198,38 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		// reaps another daemon's step process for the same WI id.
 		"PF_DAEMON_ID=" + s.cfg.MachineID,
 	}
+	// addendum 2 (owner ruling A): the step process's harness identity is
+	// the DEDICATED agent directory — not the operator's — plus its own
+	// session store. Only a real runtime (DataDir set) redirects: a bare
+	// Config (unit tests of the argv shape) has no data dir to own.
+	if s.cfg.DataDir != "" {
+		sessions := s.cfg.HarnessSessionsRoot
+		if sessions == "" {
+			sessions = s.cfg.StepAgentSessionsDir()
+		}
+		additions = append(additions,
+			"PI_CODING_AGENT_DIR="+s.cfg.StepAgentDir(),
+			"PI_CODING_AGENT_SESSION_DIR="+sessions,
+		)
+	}
 	cmd.Env = newEnvSanitizer(s.cfg.EnvSecrets...).childEnv(additions...)
 	return cmd
 }
 
 // Spawn derives one persistent agent process: process group (the agent is
 // its own group leader so the cleanup layers can collect step agents and
-// command children), cgroup enrollment (best-effort layer-0), identity
-// journal BEFORE the spawn returns, then the initial prompt as the
-// session's first command.
+// command children), the dedicated step agent directory re-synced BEFORE
+// the process is born (a torn credential copy is a spawn-refusing error,
+// never a silently degraded step agent), identity journal BEFORE the
+// spawn returns, then the initial prompt as the session's first command.
 func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, error) {
 	if p.InitialPrompt == "" {
 		return nil, fmt.Errorf("runtime: spawn without an initial prompt")
+	}
+	if s.cfg.DataDir != "" {
+		if err := s.cfg.SyncStepAgentDir(); err != nil {
+			return nil, err
+		}
 	}
 	cmd := s.buildCmd(p)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

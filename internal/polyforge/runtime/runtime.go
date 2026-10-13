@@ -73,8 +73,20 @@ type Config struct {
 	PiBin         string // harness binary (default "pi")
 	// HarnessSessionsRoot overrides the harness's default session store
 	// (the live-transcript locator of the seal/pause/bounded-fail sync).
+	// The default is the dedicated step-agent-sessions dir under DataDir
+	// (addendum 2): the step processes run with
+	// PI_CODING_AGENT_SESSION_DIR pointing at the same place.
 	HarnessSessionsRoot string
-	MaxRecoveries       int // consecutive recovery failures before bounded fail (default 2; C7 — the only recovery ledger)
+	// OperatorAgentDir is the SOURCE of the dedicated step agent
+	// directory's minimal set (addendum 2, owner ruling A): the
+	// operator's agent dir by default; a flag/env-configured source is
+	// Explicit — a missing auth.json there is a spawn-refusing error,
+	// while the implicit default without file credentials is carried on
+	// with a warning (the harness adapter may hold credentials
+	// elsewhere).
+	OperatorAgentDir         string
+	OperatorAgentDirExplicit bool
+	MaxRecoveries            int // consecutive recovery failures before bounded fail (default 2; C7 — the only recovery ledger)
 	// EndRetryBase/EndRetryMax shape the backoff of the durable
 	// SessionEnd(blocked) retry (end_pending records and the re-claim
 	// abandon lane): first retry after Base, doubling up to Max
@@ -109,6 +121,18 @@ func (c *Config) fill() {
 	// (the pi spawner).
 	if c.Harness == "" {
 		c.Harness = "pi"
+	}
+	if c.OperatorAgentDir == "" {
+		c.OperatorAgentDir = OperatorAgentDirDefault()
+		c.OperatorAgentDirExplicit = false
+	}
+	// addendum 2: step processes run with their own session store
+	// (PI_CODING_AGENT_SESSION_DIR under the data dir), so the
+	// live-transcript locator's root follows them there by default. An
+	// explicit override (tests, relocated installs) still governs both
+	// sides — the spawner passes this same value to the child.
+	if c.HarnessSessionsRoot == "" && c.DataDir != "" {
+		c.HarnessSessionsRoot = c.StepAgentSessionsDir()
 	}
 	if c.MaxRecoveries <= 0 {
 		c.MaxRecoveries = 2

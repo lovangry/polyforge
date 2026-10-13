@@ -522,7 +522,17 @@ Launch flags (with environment variable and default, where one exists):
       harness binary (default pi)
   --harness-sessions-root PATH
       harness session store root for the live-transcript sync
-      (env POLYFORGE_HARNESS_SESSIONS_ROOT; default ~/.pi/agent/sessions)
+      (env POLYFORGE_HARNESS_SESSIONS_ROOT; default
+      <data-dir>/step-agent-sessions — the step processes' own session
+      store, which the daemon also passes them)
+  --operator-agent-dir PATH
+      SOURCE of the dedicated step agent directory: the daemon copies
+      the minimal set (auth.json, models.json, agents/) from here into
+      <data-dir>/step-agent and every step agent runs against THAT
+      directory, so the operator's own harness settings — user-level
+      packages included — never reach a step agent
+      (env POLYFORGE_OPERATOR_AGENT_DIR; default ~/.pi/agent). A
+      configured source without a readable auth.json refuses the start.
   --git-remote-base URL
       aihub bare-repo base URL (default <server>/git)
   --max-concurrent-jobs N

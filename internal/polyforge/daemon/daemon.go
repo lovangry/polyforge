@@ -86,10 +86,17 @@ type Config struct {
 	WorkflowsDir  string // daemon checkout's workflows/
 	PiBin         string
 	// HarnessSessionsRoot overrides the harness's default session store
-	// for the live-transcript locator (F3); "" = ~/.pi/agent/sessions.
+	// for the live-transcript locator (F3); "" = the dedicated
+	// step-agent-sessions dir under DataDir (addendum 2).
 	HarnessSessionsRoot string
-	APIKey              string // machine credential; NEVER reaches an agent env
-	MaxConcurrent       int    // cross-mode concurrency cap (default 4)
+	// OperatorAgentDir is the SOURCE of the dedicated step agent
+	// directory's minimal set (addendum 2, owner ruling A): the
+	// operator's agent dir by default. Explicit (flag/env) sources whose
+	// auth.json is missing refuse the daemon start.
+	OperatorAgentDir         string
+	OperatorAgentDirExplicit bool
+	APIKey                   string // machine credential; NEVER reaches an agent env
+	MaxConcurrent            int    // cross-mode concurrency cap (default 4)
 	// RecallTopK is the F6-A claim-time memory snapshot's hit count
 	// (0 = the runtime default, 10; bounded at 50 there).
 	RecallTopK int
@@ -301,17 +308,33 @@ func New(cfg Config) (*Daemon, error) {
 	}
 	cfg.fill()
 
+	// addendum 2 (owner ruling A): the dedicated step agent directory is
+	// synced at daemon start (and re-checked before every spawn by the
+	// spawner itself). A source that is explicitly configured but cannot
+	// present its credentials refuses startup; the implicit default
+	// without file credentials carries on with a warning.
 	rtCfg := runtime.Config{
-		MachineID:           cfg.MachineID,
-		Mapping:             cfg.Mapping,
-		DataDir:             cfg.DataDir,
-		GitRemoteBase:       cfg.GitRemoteBase,
-		WorkflowsDir:        cfg.WorkflowsDir,
-		Harness:             cfg.Harness,
-		PiBin:               cfg.PiBin,
-		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
-		EnvSecrets:          []string{cfg.APIKey},
+		MachineID:                cfg.MachineID,
+		Mapping:                  cfg.Mapping,
+		DataDir:                  cfg.DataDir,
+		GitRemoteBase:            cfg.GitRemoteBase,
+		WorkflowsDir:             cfg.WorkflowsDir,
+		Harness:                  cfg.Harness,
+		PiBin:                    cfg.PiBin,
+		HarnessSessionsRoot:      cfg.HarnessSessionsRoot,
+		OperatorAgentDir:         cfg.OperatorAgentDir,
+		OperatorAgentDirExplicit: cfg.OperatorAgentDirExplicit,
+		EnvSecrets:               []string{cfg.APIKey},
 	}
+	rtCfg.FillDefaults()
+	if err := rtCfg.SyncStepAgentDir(); err != nil {
+		return nil, err
+	}
+	// The step processes' session store is the locator's root too: the
+	// filled runtime value (the dedicated step-agent-sessions dir, or the
+	// operator's explicit override) governs both the child env and the
+	// live-transcript scan below.
+	cfg.HarnessSessionsRoot = rtCfg.HarnessSessionsRoot
 	// Runtime-sourced diagnostic events (a seal push that failed after
 	// its retries, pilot item 3) land in the observe lane's durable
 	// events log next to its own entries; the tap reads d.obs at call
