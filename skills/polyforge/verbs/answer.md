@@ -17,7 +17,11 @@ pf answer <id> --text "..." [--question q_xxx] [--by user]
 ```
 
 `--question` is the `question_id` the `pf watch --once` output showed; it may be
-omitted when exactly one question is pending (the default). `--text` is the
+omitted when exactly one question is pending (the default). With ZERO or
+SEVERAL pending questions a no-id answer is refused typed (`ANSWER-400`)
+and nothing is delivered — with several, the error names the open
+questions: pick one and pass its id via `--question` (a guess would
+deliver the answer to an arbitrary question). `--text` is the
 natural-language answer — required. Without `--question` the daemon answers
 the step's currently pending question; there is no idempotent replay (see
 Success). `--by` is the answerer's user id, defaulting to the config's
@@ -39,7 +43,8 @@ confirm the first answer landed.
 | Code | When | What to tell the user |
 |---|---|---|
 | `ANSWER-409` | The `question_id` does not match the waiting step's persisted question, was already consumed, or another delivery of the same answer is in flight | The question is stale or mistyped — run `pf watch <id> --once` again, take the currently printed `question_id`, and answer that one; for an in-flight duplicate, simply retry shortly. |
-| `ANSWER-400` | No `--question` was given and the work item has no pending question | Nothing is waiting for an answer — check `pf watch <id> --once`; do not retry blindly. |
+| `ANSWER-400` | No `--question` was given and the work item has NO pending question | Nothing is waiting for an answer — check `pf watch <id> --once`; do not retry blindly. |
+| `ANSWER-400` (several open questions) | No `--question` was given and the work item has TWO OR MORE pending questions (the error names them) | The daemon refuses to guess which one you meant — run `pf watch <id> --once`, pick the question you intend, and answer with `--question <id>`. |
 | `DAEMON-409` | The work item has no live driver handle (the workflow is between derivations) | Retry shortly, after the daemon re-derives the workflow. |
 | `DAEMON-403` | The `--by` identity does not match the request's caller identity | The answerer identity and the caller identity must be the same — fix `--by` / `PF_USER_ID`, or answer as yourself. |
 | `DAEMON-404` | No local job for this work item | The work item is not running on this machine — answer from the machine that runs it. |

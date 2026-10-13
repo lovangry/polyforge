@@ -1307,7 +1307,7 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
-	return r.stopOp(ctx, j, reason, false, false)
+	return r.stopOp(ctx, j, reason, false, false, "")
 }
 
 // supersedeOp is the OBSuperseded response (v1.5 M4 + m3): the periodic
@@ -1356,7 +1356,12 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	_ = ctx
 }
 
-func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, alreadyPushed bool) error {
+// stopOp runs one close to the end. reason is the close verdict (a
+// terminal wrapped|failed|blocked, or paused — the operator pause); note
+// is the human-facing elaboration the SessionEnd carries ("" for the
+// ordinary closes — the interrupted-seal finisher names its
+// cause-unknown close here).
+func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, alreadyPushed bool, note string) error {
 	// Finding 2 (v1.5 review, MAJOR): the operator pause is its own close.
 	// It does NOT pass through SEALING (no terminal verdict follows), it
 	// retains the record (the secret must survive locally for the M3
@@ -1444,6 +1449,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
 		SessionID:  j.sessionID,
 		Status:     finalReason,
+		Note:       note,
 		CleanPause: finalReason == api.StatusPaused,
 	}); err != nil {
 		return fmt.Errorf("runtime: %s: session-end failed (job left sealing): %w", j.wi, err)

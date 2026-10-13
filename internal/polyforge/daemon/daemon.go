@@ -891,13 +891,20 @@ func (d *Daemon) dispatch() {
 
 // fetchAutoWave pulls the ready queue and enqueues what is claimable
 // (04 §6.1c): only with auto on, never once shutting_down latched, and
-// only while a concurrency slot is free. Authorization-class denials
+// never beyond the concurrency it can actually start — the wave's
+// free-slot budget is spent per enqueued entry (audit B3a: one wave
+// enqueues at most the CURRENT free-slot count; the rest of the ready
+// queue stays on aihub for the next wave). Authorization-class denials
 // raise the degraded signal — a typed drain_degraded event in the
 // observe lane's durable log, once per silent→degraded episode (the
 // flag clears on the next successful fetch); transport-class losses
 // stay silent idle.
 func (d *Daemon) fetchAutoWave() {
-	if !d.modes.AdmitAutoPull() || !d.q.SlotFree() {
+	if !d.modes.AdmitAutoPull() {
+		return
+	}
+	budget := d.q.FreeSlots()
+	if budget <= 0 {
 		return
 	}
 	// polyforge#113: no daemon-level project scope exists — the drain
@@ -941,6 +948,9 @@ func (d *Daemon) fetchAutoWave() {
 		d.drainDegraded = false // episode cleared: this fetch fully succeeded
 	}
 	for _, it := range items {
+		if budget == 0 {
+			break // the wave spent its slots; the next wave claims the rest
+		}
 		if it.BundleName == nil {
 			continue // registration tickets never execute
 		}
@@ -949,6 +959,36 @@ func (d *Daemon) fetchAutoWave() {
 		}
 		if err := d.q.Enqueue(qEntry{WorkItemID: it.ID, Priority: it.Priority, Intent: "claim", Origin: runtime.Origin{Kind: runtime.OriginAuto}}); err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: drain enqueue %s: queue persist failed: %v\n", it.ID, err)
+			continue // nothing landed: the budget is not spent
+		}
+		budget--
+	}
+}
+
+// autoOffPurge removes the submit queue's not-yet-started origin=auto
+// entries (v2-converge §5: auto off = only explicit pf submit; audit
+// B3b) — they would otherwise start later as slots free (dispatch runs
+// regardless of the switch) and replay after a restart. Each dropped
+// entry lands a submit_dropped event; a persist failure is loud and
+// leaves the queue as it was (the switch itself already flipped).
+func (d *Daemon) autoOffPurge() {
+	dropped, err := d.q.PurgeOrigin(runtime.OriginAuto)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: auto-off queue purge failed: %v\n", err)
+		return
+	}
+	for _, e := range dropped {
+		fmt.Fprintf(os.Stderr, "daemon: auto off: pending %s (%s) dropped from the submit queue\n", e.WorkItemID, e.Intent)
+		if d.obs != nil {
+			body := map[string]any{
+				"reason":       "auto off",
+				"intent":       e.Intent,
+				"submitted_at": e.SubmittedAt.UTC().Format(time.RFC3339Nano),
+			}
+			if e.Origin.Kind != "" {
+				body["origin"] = e.Origin
+			}
+			_ = d.obs.Events().Append(e.WorkItemID, observe.EvSubmitDropped, body)
 		}
 	}
 }
