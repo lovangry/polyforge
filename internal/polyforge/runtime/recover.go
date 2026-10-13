@@ -76,9 +76,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// capsule's terminal workflow_status is translated into the WI's
 	// close: completed wraps, failed fails, blocked hands the WI to its
 	// owner (the hub's blocked verdict is the unblock door). Without
-	// this the terminal exit bounced through death-recovery into the
-	// storm guard and closed the WI as blocked instead of wrapped —
-	// within one second, exactly as the guard was designed to.
+	// this the terminal exit bounced through death-recovery and closed
+	// the WI as blocked instead of wrapped.
 	switch capsuleWorkflowStatus(j.capsuleDir) {
 	case capsule.WorkflowStatusCompleted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)

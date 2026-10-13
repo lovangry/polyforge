@@ -25,7 +25,7 @@ type JobState string
 //
 //	RUNNING → SEALING → DONE                  (stop path)
 //	RUNNING → RECOVERING → RUNNING            (recovery succeeded)
-//	RUNNING → RECOVERING → DONE               (bounded fail, storm guard)
+//	RUNNING → RECOVERING → DONE               (bounded fail)
 //	RUNNING → PAUSED                          (operator pause close, Finding 2)
 //	PAUSED → RUNNING                          (restart attach/resume, M3)
 //	PAUSED → DONE                             (later close of a retained record)
@@ -288,7 +288,7 @@ func loadState(path string) (*stateFile, error) {
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 // stampIfSet renders t as RFC3339Nano ("" for the zero time — the
-// storm guard's never-recovered marker).
+// never-recovered marker).
 func stampIfSet(t time.Time) string {
 	if t.IsZero() {
 		return ""

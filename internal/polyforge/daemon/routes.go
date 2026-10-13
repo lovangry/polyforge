@@ -60,6 +60,11 @@ type statusJob struct {
 	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
 	// Origin is how the job was submitted; may be absent.
 	Origin *runtime.Origin `json:"origin,omitempty"`
+	// StopReason is the recorded verdict of a close in flight or
+	// settled (wrapped/failed/blocked/paused) — empty while the job
+	// runs. The attention face (D9) derives the terminal decision
+	// classes from it.
+	StopReason string `json:"stop_reason,omitempty"`
 }
 
 type queueStats struct {
@@ -540,6 +545,7 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			SessionFingerprint: ji.SessionFingerprint,
 			AgentPID:           ji.AgentPID,
 			Origin:             ji.Origin,
+			StopReason:         ji.StopReason,
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID

@@ -36,8 +36,8 @@ package runtime
 //	verify does not match + terminal status → drop the record: the
 //	  close settled server-side before the crash.
 //	verify does not match + blocked → leave everything untouched (M2:
-//	  the bounded-fail verdict stands; the storm guard's "never a third
-//	  relaunch" is exactly this).
+//	  the bounded-fail verdict stands; consecutive-failure accounting's
+//	  "never a third relaunch" is exactly this).
 //	verify does not match + paused/clean_pause under another session →
 //	  drop the record: restart must NOT auto-resume it.
 //	aihub unreachable → park the work item blocked (the C6 posture): the
@@ -492,7 +492,7 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 		r.restartDrop(rec)
 		r.clearManualModels(rec.WorkItemID)
 	case api.StatusBlocked:
-		// M2 storm guard: the bounded-fail verdict stands — no
+		// M2: the bounded-fail verdict stands — no
 		// revival, no kill, no quarantine; the record is kept so the
 		// next boot re-checks (the unblock path re-claims through the
 		// normal start, which quarantines the old scene itself).
