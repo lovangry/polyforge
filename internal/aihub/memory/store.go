@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/aihub/core"
+	"github.com/silgrid/polyforge/internal/common/api"
 )
 
 // fileStamp is the freshness stamp a memories row carries (polyforge#129):
@@ -361,7 +362,7 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 		if err != nil {
 			// A typed refusal, never a degrade to a full scan: answering
 			// every memory for a query FTS could not parse is a leak.
-			return nil, errf("MEM-503", "", "fts: %v", err)
+			return nil, errf(api.ErrMemUnavailable, "", "fts: %v", err)
 		} else {
 			for rows.Next() {
 				var c candRow
@@ -442,7 +443,7 @@ func (s *Store) scanBodies() ([]candRow, error) {
 	rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
 		JOIN memory_fts f ON f.mem_id = m.id WHERE m.status='active'`)
 	if err != nil {
-		return nil, errf("MEM-503", "", "scan: %v", err)
+		return nil, errf(api.ErrMemUnavailable, "", "scan: %v", err)
 	}
 	var out []candRow
 	for rows.Next() {
