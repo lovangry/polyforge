@@ -280,8 +280,9 @@ The platform ships with zero release-specific code: release logic lives in
 the project bundle's release step (`steps/release.md`), and the platform's
 own release is one instance of that same hook. Deploying a work machine is
 re-running `tools/install.sh`; deploying the aihub service host is
-`sh .polyforge/deploy.sh <tag>` (human-gated: verified full backup, binary
-swap, post-swap checks, printed rollback; `--dry-run` shows the plan). It is a
+`sh .polyforge/deploy.sh <tag>` (human-gated: ONLINE verified full backup, then one
+restart on the new binary - seconds of downtime, measured and printed -
+post-swap checks, printed rollback; `--dry-run` shows the plan). It is a
 deployment pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`, `00-architecture.md §3.3`).
 
 ```
@@ -332,8 +333,8 @@ registry; `pf <verb> -help` one verb's face. The routing skill's fragments
 server's data dir `backups/`, on the same disk. It does NOT include memory
 content (memory text lives only as files under `memory/`; the DB holds only its
 sha/length) nor the git repos (`git/`). For a full backup use the backup steps
-of `sh .polyforge/deploy.sh <tag>` (stop, copy the whole data dir, verify
-manifests, off-host copy) or copy the whole data dir yourself.
+of `sh .polyforge/deploy.sh <tag>` (online sqlite snapshot + rsync of the whole
+data dir, consistency check, off-host copy) or copy the whole data dir yourself.
 
 Human moves: continue = `pf resume <id>` (a paused or blocked
 WI), abandon = `pf cancel <id>` (queued, paused or blocked), owner's failed verdict = `pf wrap <id> --fail`. These run with the

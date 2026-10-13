@@ -14,17 +14,20 @@
 #
 # What it does: promote an already-released version (GitHub release assets
 # aihub-linux-amd64, pf-linux-amd64, SHA256SUMS) onto the aihub docker
-# container, with a verified full backup (server + off-host) taken while the
-# service is stopped, a post-swap verification, and concrete rollback commands.
+# container. Downtime is SECONDS: every backup step runs ONLINE (the service
+# keeps running); only the final `docker restart` interrupts service.
 #
 #   0 preflight   tag, assets + sha256, ssh, container, versions, disk space
-#   1 baseline    read-only: integrity_check, table row counts, file counts
+#   1 baseline    read-only: integrity_check, table row counts, file counts, sizes
 #   2 save old binary   docker cp <container>:/aihub -> <root>/aihub-bin-<old>-<TS>
-#   3 stop + copy data  docker stop; cp -a <data> -> <root>/aihub-backup-<old>-<TS>
-#   4 manifests   sha256 manifest live == server backup
-#   5 off-host    rsync backup to BACKUP_ROOT, manifest + integrity + counts
-#   6 stage + swap  scp assets, sha256sum -c on the server, docker cp, start
-#   7 verify      version, logs, row counts, HTTP/pf smoke
+#   3 online backup     rsync memory/ git/ (pass 1) -> sqlite backup-API snapshot
+#                       of aihub.db -> rsync catch-up; snapshot integrity + counts
+#   4 consistency       memories rows in the snapshot == memory.md files in the backup
+#   5 off-host          rsync backup to BACKUP_ROOT, manifests equal, integrity + counts
+#   6 stage + swap      scp assets, sha256 on the server, docker cp as /aihub.new,
+#                       `/aihub.new -version` == tag, atomic mv over /aihub,
+#                       docker restart -t DRAIN_SECS, poll HTTP, print downtime
+#   7 verify      version, logs panic/fatal, counts >= baseline, HTTP/pf smoke
 #   8 rollback    concrete commands printed; final summary
 #
 # Usage:
@@ -38,6 +41,7 @@
 #   AIHUB_HOST=root@10.146.0.34   AIHUB_CONTAINER=aihub   AIHUB_DATA=/data/aihub
 #   BACKUP_ROOT=/data/polyforge-backups (local)   RELEASE_STAGE=/data/releases (server)
 #   GH_REPO=silgrid/polyforge   AIHUB_PORT=8080   WAIT_SECS=60
+#   DRAIN_SECS=5 (docker restart -t)   MAX_DOWNTIME_SECS=10 (warn)   UP_WAIT_SECS=30 (fail)
 set -eu
 
 TAG=""
@@ -75,6 +79,9 @@ GH_REPO="${GH_REPO:-silgrid/polyforge}"
 AIHUB_PORT="${AIHUB_PORT:-8080}"
 WAIT_SECS="${WAIT_SECS:-60}"
 POLL_SECS="${POLL_SECS:-2}"
+DRAIN_SECS="${DRAIN_SECS:-5}"
+MAX_DOWNTIME_SECS="${MAX_DOWNTIME_SECS:-10}"
+UP_WAIT_SECS="${UP_WAIT_SECS:-30}"
 SRV_ROOT="$(dirname "$AIHUB_DATA")"   # where the server-side backups/binaries live
 KEY_TABLES="work_items memories projects users api_keys machines"
 ASSET_AIHUB="aihub-linux-amd64"
@@ -82,8 +89,7 @@ ASSET_PF="pf-linux-amd64"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pf-deploy.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-STOPPED=""   # container stopped by this run and not yet restarted
-SWAPPED=""   # new binary copied into the container
+SWAPPED=""   # the rename over /aihub was attempted (service may run the new binary)
 STEP="0"
 OLDVER=""; TS=""; BIN_SAVED=""; SRV_BACKUP=""; LOCAL_BACKUP=""; STAGE_DIR=""
 
@@ -94,33 +100,24 @@ note() { printf '   %s\n' "$*"; }
 
 rollback_text() {
   cat <<EOF
-  # stop the new service
-  ssh $AIHUB_HOST docker stop $AIHUB_CONTAINER
-  # put the old binary back
-  ssh $AIHUB_HOST docker cp $BIN_SAVED $AIHUB_CONTAINER:/aihub
-  # OPTIONAL, only if the data is damaged: restore the data dir from the backup
-  ssh $AIHUB_HOST "mv $AIHUB_DATA $AIHUB_DATA.failed-$TS && cp -a $SRV_BACKUP $AIHUB_DATA"
-  # start and verify
-  ssh $AIHUB_HOST docker start $AIHUB_CONTAINER
+  # put the old binary back (same minimal-downtime pattern, a few seconds)
+  ssh $AIHUB_HOST docker cp $BIN_SAVED $AIHUB_CONTAINER:/aihub.old
+  ssh $AIHUB_HOST docker exec $AIHUB_CONTAINER mv /aihub.old /aihub
+  ssh $AIHUB_HOST docker restart -t 5 $AIHUB_CONTAINER
   ssh $AIHUB_HOST docker exec $AIHUB_CONTAINER /aihub -version   # must print $OLDVER
+  # OPTIONAL, ONLY if the data is damaged (this needs a STOP = real downtime; the backup's
+  # aihub.db is the consistent snapshot):
+  ssh $AIHUB_HOST "docker stop $AIHUB_CONTAINER && mv $AIHUB_DATA $AIHUB_DATA.failed-$TS && cp -a $SRV_BACKUP $AIHUB_DATA && docker start $AIHUB_CONTAINER"
 EOF
 }
 
 die() {
   printf '\ndeploy: FAILED at step %s: %s\n' "$STEP" "$*" >&2
-  if [ -n "$STOPPED" ] && [ -z "$SWAPPED" ]; then
-    echo "deploy: the container was stopped by this run; starting it again on the OLD binary ($OLDVER)..." >&2
-    if dk start "$AIHUB_CONTAINER" >/dev/null 2>&1; then
-      STOPPED=""
-      echo "deploy: container started again on the old binary. Nothing was swapped; data untouched (backup left in place: $SRV_BACKUP)." >&2
-    else
-      echo "deploy: COULD NOT restart the container. Start it by hand: ssh $AIHUB_HOST docker start $AIHUB_CONTAINER" >&2
-    fi
-  elif [ -n "$SWAPPED" ]; then
-    echo "deploy: the new binary is in place but did not verify. Rollback commands:" >&2
-    rollback_text >&2
+  if [ -z "$SWAPPED" ]; then
+    echo "deploy: the service was never interrupted (no stop, no restart, binary not replaced); backups already taken are left in place." >&2
   else
-    echo "deploy: nothing was changed on the server." >&2
+    echo "deploy: the new binary was put in place but the service did not verify. Rollback commands:" >&2
+    rollback_text >&2
   fi
   exit 1
 }
@@ -281,6 +278,10 @@ show_counts "$WORK/base.counts"
 MEM_FILES="$(rssh "find '$AIHUB_DATA/memory' -type f | wc -l" | tr -d ' ')"
 GIT_FILES="$(rssh "find '$AIHUB_DATA/git' -type f | wc -l" | tr -d ' ')"
 note "files: memory/ $MEM_FILES, git/ $GIT_FILES"
+for d in aihub.db aihub.db-wal memory git; do
+  kb="$(rssh "du -sk '$AIHUB_DATA/$d' 2>/dev/null || echo 0" | awk '{print $1}')"
+  note "size: $d $((${kb:-0} / 1024)) MiB"
+done
 
 # ------------------------------------------------------- plan (2-8)
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -290,19 +291,22 @@ LOCAL_BACKUP="$BACKUP_ROOT/aihub-backup-$OLDVER-$TS"
 STAGE_DIR="$RELEASE_STAGE/$TAG"
 
 echo
-echo "== plan for steps 2-8 =="
+echo "== plan for steps 2-8 (ONLINE backup; the only interruption is the final restart) =="
 cat <<EOF
 2. save old binary   ssh $AIHUB_HOST docker cp $AIHUB_CONTAINER:/aihub $BIN_SAVED
-3. stop + copy data  ssh $AIHUB_HOST docker stop $AIHUB_CONTAINER
-                     ssh $AIHUB_HOST cp -a $AIHUB_DATA $SRV_BACKUP
-4. manifests         sha256 (find -type f | sort) of $AIHUB_DATA vs $SRV_BACKUP must be identical
+3. online backup     (service keeps running; NO docker stop anywhere)
+                     rsync -a $AIHUB_DATA/ -> $SRV_BACKUP/   (pass 1, excluding aihub.db, -wal, -shm, service.lock)
+                     python3 sqlite3 backup API: $AIHUB_DATA/aihub.db (ro) -> $SRV_BACKUP/aihub.db ; integrity_check + counts >= baseline
+                     rsync -a again (catch-up, files at least as new as the DB)
+4. consistency       rows in the snapshot's memories == memory.md files under $SRV_BACKUP/memory (retry up to 2x; still different -> stop, nothing changed)
 5. off-host copy     rsync $AIHUB_HOST:$SRV_BACKUP/ -> $LOCAL_BACKUP/
-                     local manifest == server manifest; integrity_check ok + row counts == baseline on the local aihub.db
-6. stage + swap      scp $ASSET_AIHUB $ASSET_PF SHA256SUMS -> $AIHUB_HOST:$STAGE_DIR/
-                     sha256sum -c there; chmod +x; docker cp $STAGE_DIR/$ASSET_AIHUB $AIHUB_CONTAINER:/aihub; docker start $AIHUB_CONTAINER
-7. verify            wait <= ${WAIT_SECS}s for 'docker exec $AIHUB_CONTAINER /aihub -version' == $TAG and container running
-                     docker logs --since <start>: print error lines, FAIL on panic/fatal
-                     row counts >= baseline (read-only); HTTP check http://127.0.0.1:$AIHUB_PORT/ on the host answers; local 'pf queue --limit 1'
+                     server manifest == local manifest; integrity_check ok + row counts == frozen baseline on the local aihub.db
+6. stage + swap      scp $ASSET_AIHUB $ASSET_PF SHA256SUMS -> $AIHUB_HOST:$STAGE_DIR/ ; sha256sum -c there; chmod +x
+                     docker cp $STAGE_DIR/$ASSET_AIHUB $AIHUB_CONTAINER:/aihub.new ; docker exec $AIHUB_CONTAINER /aihub.new -version == $TAG
+                     docker exec $AIHUB_CONTAINER mv /aihub.new /aihub   (atomic rename)
+                     docker restart -t $DRAIN_SECS $AIHUB_CONTAINER ; poll http://127.0.0.1:$AIHUB_PORT/ every 0.2s ; print downtime (warn > ${MAX_DOWNTIME_SECS}s, fail if not up in ${UP_WAIT_SECS}s)
+7. verify            wait <= ${WAIT_SECS}s for 'docker exec $AIHUB_CONTAINER /aihub -version' == $TAG ; docker logs --since <start>: print error lines, FAIL on panic/fatal
+                     integrity + row counts >= frozen baseline (read-only); local 'pf queue --limit 1'
 8. rollback + summary; rollback commands for this run:
 EOF
 rollback_text
@@ -317,7 +321,7 @@ fi
 
 # The human confirm gate: the deploy happens because a person typed
 # 'deploy', never because an automation decided to.
-printf "Deploy %s to %s now? This STOPS the aihub service while the data is copied (downtime), then swaps the binary. Type 'deploy' to proceed: " "$TAG" "$AIHUB_HOST"
+printf "Deploy %s to %s now? The backup runs online; the service restarts once on the new binary (seconds of downtime). Type 'deploy' to proceed: " "$TAG" "$AIHUB_HOST"
 ANSWER=""
 read -r ANSWER || true
 if [ "$ANSWER" != "deploy" ]; then
@@ -334,38 +338,63 @@ saved_v="$(rssh "'$BIN_SAVED' -version" 2>/dev/null | awk 'NF{v=$NF} END{print v
 note "old binary saved: $BIN_SAVED ($OLDVER)"
 
 # ---------------------------------------------------------------- step 3
-step 3 "stop the container, copy the data dir"
-dk stop "$AIHUB_CONTAINER" >"$WORK/stop.log" 2>&1 || die "docker stop failed: $(cat "$WORK/stop.log")"
-STOPPED=1
-note "container stopped (service is DOWN from here)"
-rssh "test ! -e '$SRV_BACKUP' && cp -a '$AIHUB_DATA' '$SRV_BACKUP'" || die "cp -a $AIHUB_DATA $SRV_BACKUP failed (target exists, or disk full)"
-note "data copied to $SRV_BACKUP"
+step 3 "online backup (service keeps running)"
+# sqlite online snapshot via the backup API (consistent even under WAL writes).
+# shellcheck disable=SC2016
+PYSNAP='
+import os, sqlite3, sys
+src, dst = sys.argv[1], sys.argv[2]
+for suf in ("", "-wal", "-shm"):
+    if os.path.exists(dst + suf):
+        os.remove(dst + suf)
+s = sqlite3.connect("file:" + src + "?mode=ro", uri=True, timeout=30)
+d = sqlite3.connect(dst)
+s.backup(d)
+d.execute("pragma journal_mode=delete")
+d.close()
+s.close()
+'
+rsync_pass() {
+  rssh rsync -a --exclude=/aihub.db --exclude=/aihub.db-wal --exclude=/aihub.db-shm --exclude=/service.lock "$AIHUB_DATA/" "$SRV_BACKUP/" >"$WORK/rs.log" 2>&1 \
+    || die "rsync $AIHUB_DATA -> $SRV_BACKUP failed: $(tail -5 "$WORK/rs.log")"
+}
+snapshot() {
+  printf '%s\n' "$PYSNAP" | rssh python3 - "$AIHUB_DATA/aihub.db" "$SRV_BACKUP/aihub.db" >"$WORK/snap.log" 2>&1 \
+    || die "sqlite backup of aihub.db failed: $(tail -5 "$WORK/snap.log")"
+  probe_to remote "$SRV_BACKUP/aihub.db" copy "$WORK/frozen.counts"
+  counts_cmp "$WORK/base.counts" "$WORK/frozen.counts" ge >"$WORK/drift.txt" || { cat "$WORK/drift.txt" >&2; die "snapshot has FEWER rows than the step-1 baseline"; }
+}
+rssh "test ! -e '$SRV_BACKUP' && mkdir -p '$SRV_BACKUP'" || die "cannot create $SRV_BACKUP (exists?)"
+rsync_pass; note "rsync pass 1 (bulk) done"
+snapshot;   note "sqlite snapshot taken; snapshot integrity_check ok"
+rsync_pass; note "rsync pass 2 (catch-up) done"
+cat "$WORK/drift.txt"
+note "snapshot row counts (frozen baseline from here):"
+show_counts "$WORK/frozen.counts"
 
 # ---------------------------------------------------------------- step 4
-step 4 "manifests: live vs server backup"
-manifest_cmd() { printf "cd '%s' && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2" "$1"; }
-rssh "$(manifest_cmd "$AIHUB_DATA")" >"$WORK/live.manifest" || die "manifest of $AIHUB_DATA failed"
-rssh "$(manifest_cmd "$SRV_BACKUP")" >"$WORK/srvbak.manifest" || die "manifest of $SRV_BACKUP failed"
-if ! cmp -s "$WORK/live.manifest" "$WORK/srvbak.manifest"; then
-  diff "$WORK/live.manifest" "$WORK/srvbak.manifest" | head -20 >&2 || true
-  die "manifest of the live data dir and the server backup DIFFER"
-fi
-note "manifests identical ($(wc -l <"$WORK/live.manifest" | tr -d ' ') files)"
-# The service was live during step 1; the stopped copy is the authoritative
-# baseline for everything below. Report (do not fail on) drift since step 1.
-probe_to remote "$SRV_BACKUP/aihub.db" copy "$WORK/frozen.counts"
-note "server backup db: integrity_check ok"
-if counts_cmp "$WORK/base.counts" "$WORK/frozen.counts" eq >"$WORK/drift.txt"; then
-  note "row counts of the stopped copy equal the step-1 baseline"
-else
-  note "row counts moved between step 1 (live) and the stop; the stopped copy is the baseline from here:"
-  cat "$WORK/drift.txt"
-fi
+step 4 "consistency: memories rows vs memory files"
+# Each memories row is exactly one <data>/memory/<project>/<id>/memory.md (or the
+# same under _redacted/ for redacted rows): internal/aihub/memory/store.go.
+tries=0
+while :; do
+  rows="$(awk '$1 == "memories" {print $2}' "$WORK/frozen.counts")"
+  files="$(rssh "find '$SRV_BACKUP/memory' -type f -name memory.md | wc -l" | tr -d ' ')"
+  note "snapshot memories rows: $rows ; memory.md files in the backup: $files"
+  [ "$rows" = "$files" ] && break
+  tries=$((tries + 1))
+  [ "$tries" -le 2 ] || die "memories rows ($rows) != memory files ($files) after 2 retries - memory is being written during the backup or files are missing; re-run (nothing was changed)"
+  note "mismatch: re-snapshot + catch-up (retry $tries)"
+  snapshot; rsync_pass
+done
+note "consistent"
 
 # ---------------------------------------------------------------- step 5
 step 5 "off-host copy"
 mkdir -p "$BACKUP_ROOT" || die "cannot create $BACKUP_ROOT"
 [ ! -e "$LOCAL_BACKUP" ] || die "$LOCAL_BACKUP already exists"
+manifest_cmd() { printf "cd '%s' && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2" "$1"; }
+rssh "$(manifest_cmd "$SRV_BACKUP")" >"$WORK/srvbak.manifest" || die "manifest of $SRV_BACKUP failed"
 rsync -a -e "ssh -o BatchMode=yes" "$AIHUB_HOST:$SRV_BACKUP/" "$LOCAL_BACKUP/" >"$WORK/rsync.log" 2>&1 \
   || die "rsync to $LOCAL_BACKUP failed: $(tail -5 "$WORK/rsync.log")"
 (cd "$LOCAL_BACKUP" && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2) >"$WORK/local.manifest" || die "local manifest failed"
@@ -373,27 +402,50 @@ if ! cmp -s "$WORK/srvbak.manifest" "$WORK/local.manifest"; then
   diff "$WORK/srvbak.manifest" "$WORK/local.manifest" | head -20 >&2 || true
   die "local copy $LOCAL_BACKUP differs from the server backup"
 fi
-note "local manifest identical to the server manifest"
+note "server and local manifests identical ($(wc -l <"$WORK/local.manifest" | tr -d ' ') files)"
 probe_to local "$LOCAL_BACKUP/aihub.db" copy "$WORK/local.counts"
 note "local aihub.db: integrity_check ok"
 counts_cmp "$WORK/frozen.counts" "$WORK/local.counts" eq || die "row counts of the local copy differ from the baseline"
-note "local row counts equal the baseline"
+note "local row counts equal the frozen baseline"
 
 # ---------------------------------------------------------------- step 6
-step 6 "stage + swap"
+step 6 "stage + swap (the only interruption: one restart)"
 rssh "mkdir -p '$STAGE_DIR'" || die "mkdir $STAGE_DIR failed"
 scp -o BatchMode=yes "$REL/$ASSET_AIHUB" "$REL/$ASSET_PF" "$REL/SHA256SUMS" "$AIHUB_HOST:$STAGE_DIR/" >"$WORK/scp.log" 2>&1 \
   || die "scp to $STAGE_DIR failed: $(cat "$WORK/scp.log")"
 rssh "cd '$STAGE_DIR' && sha256sum -c SHA256SUMS" >"$WORK/sha2.log" 2>&1 || die "sha256sum -c on the server failed: $(cat "$WORK/sha2.log")"
 note "staged assets verified on the server: $STAGE_DIR"
 rssh "chmod +x '$STAGE_DIR/$ASSET_AIHUB' '$STAGE_DIR/$ASSET_PF'" || die "chmod failed"
+dk cp "$STAGE_DIR/$ASSET_AIHUB" "$AIHUB_CONTAINER:/aihub.new" >"$WORK/cp2.log" 2>&1 || die "docker cp of the new binary (as /aihub.new) failed: $(cat "$WORK/cp2.log")"
+newv="$(dk exec "$AIHUB_CONTAINER" /aihub.new -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
+[ "$newv" = "$TAG" ] || die "/aihub.new in the container reports version \"$newv\", expected $TAG (not renamed)"
+note "/aihub.new reports $TAG"
 START_AT="$(rssh "date -u +%Y-%m-%dT%H:%M:%SZ")"
-SWAPPED=1   # from the first byte copied in, failures mean "rollback", not "restart old"
-dk cp "$STAGE_DIR/$ASSET_AIHUB" "$AIHUB_CONTAINER:/aihub" >"$WORK/cp2.log" 2>&1 || die "docker cp of the new binary failed: $(cat "$WORK/cp2.log")"
-note "new binary copied into the container"
-dk start "$AIHUB_CONTAINER" >"$WORK/start.log" 2>&1 || die "docker start failed: $(cat "$WORK/start.log")"
-STOPPED=""
-note "container started (service coming back up)"
+SWAPPED=1   # from the rename on, failures mean "rollback"
+dk exec "$AIHUB_CONTAINER" mv /aihub.new /aihub >"$WORK/mv.log" 2>&1 || die "mv /aihub.new /aihub failed: $(cat "$WORK/mv.log")"
+note "binary renamed over /aihub (the running process is unaffected until the restart)"
+# shellcheck disable=SC2016
+RESTART_SNIP='
+c="$1"; port="$2"; drain="$3"; limit="$4"
+t0=$(date +%s.%N)
+docker restart -t "$drain" "$c" </dev/null >/dev/null 2>&1 || { echo "RESTART-FAILED"; exit 3; }
+while :; do
+  code=$(curl -s -m 1 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port/" </dev/null 2>/dev/null || true)
+  case "$code" in [1-5][0-9][0-9]) break ;; esac
+  now=$(date +%s.%N)
+  if awk "BEGIN{exit !($now - $t0 > $limit)}"; then echo "NOT-UP"; exit 4; fi
+  sleep 0.2
+done
+t1=$(date +%s.%N)
+awk "BEGIN{printf \"%.1f\\n\", $t1 - $t0}"
+'
+down=""
+down="$(printf '%s\n' "$RESTART_SNIP" | rssh sh -s -- "$AIHUB_CONTAINER" "$AIHUB_PORT" "$DRAIN_SECS" "$UP_WAIT_SECS")" \
+  || die "restart did not complete: \"$down\" (docker restart failed, or no HTTP answer within ${UP_WAIT_SECS}s)"
+note "downtime: ${down}s (docker restart -t $DRAIN_SECS until HTTP answers)"
+if awk -v d="$down" -v m="$MAX_DOWNTIME_SECS" 'BEGIN{exit !(d + 0 > m + 0)}'; then
+  note "WARNING: downtime ${down}s exceeded ${MAX_DOWNTIME_SECS}s"
+fi
 
 # ---------------------------------------------------------------- step 7
 step 7 "verify"
@@ -415,11 +467,7 @@ probe_to remote "$AIHUB_DATA/aihub.db" ro "$WORK/after.counts"
 note "integrity_check ok after the swap"
 counts_cmp "$WORK/frozen.counts" "$WORK/after.counts" ge || die "row counts after the swap are BELOW the baseline"
 note "row counts >= baseline"
-code="$(rssh "curl -s -m 10 -o /dev/null -w '%{http_code}' http://127.0.0.1:$AIHUB_PORT/" 2>/dev/null || true)"
-case "$code" in
-  [1-5][0-9][0-9]) note "HTTP http://127.0.0.1:$AIHUB_PORT/ on the host answers: $code (any status = the server is serving)" ;;
-  *) die "the API does not answer HTTP on the host port $AIHUB_PORT (curl said \"$code\")" ;;
-esac
+note "HTTP answered during the restart poll (any status = serving)"
 if command -v pf >/dev/null 2>&1; then
   if pf queue --limit 1 >"$WORK/pf.out" 2>&1; then
     note "local 'pf queue --limit 1': ok ($(head -1 "$WORK/pf.out"))"
@@ -434,12 +482,12 @@ echo "rollback commands for this run (not executed):"
 rollback_text
 echo
 echo "== summary =="
-echo "  version:        $OLDVER -> $TAG"
+echo "  version:        $OLDVER -> $TAG   (downtime ${down}s)"
 echo "  old binary:     $AIHUB_HOST:$BIN_SAVED"
 echo "  server backup:  $AIHUB_HOST:$SRV_BACKUP"
 echo "  local backup:   $LOCAL_BACKUP"
 echo "  staged release: $AIHUB_HOST:$STAGE_DIR"
-echo "  baseline counts (stopped copy; files: memory/ $MEM_FILES, git/ $GIT_FILES at step 1):"
+echo "  baseline counts (snapshot; files: memory/ $MEM_FILES, git/ $GIT_FILES at step 1):"
 show_counts "$WORK/frozen.counts"
 echo
 echo "work machines: re-run tools/install.sh <api-key> on each, one at a time"
