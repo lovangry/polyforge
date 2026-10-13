@@ -29,7 +29,6 @@ type Server struct {
 	Sessions *core.SessionManager
 	Admin    *core.AdminManager
 	Mems     *memory.Store
-	Ships    *core.ShipLedgerManager
 	Git      *git.Manager
 	DataDir  string
 
@@ -51,7 +50,6 @@ func New(db *core.DB, dataDir string, gitMgr *git.Manager) *Server {
 		Sessions: core.NewSessionManager(db),
 		Admin:    core.NewAdminManager(db),
 		Mems:     memory.NewStore(db, dataDir),
-		Ships:    core.NewShipLedgerManager(db, core.NewWIManager(db)),
 		Git:      gitMgr,
 		DataDir:  dataDir,
 	}
@@ -75,16 +73,12 @@ func (s *Server) routes() {
 	// Recovery door: an admin/maintainer force-ends a stuck holder's session
 	// (WI -> queued); any daemon then claims it normally.
 	m.HandleFunc("POST /api/v1/work-items/{id}/force-end-session", s.auth(s.hForceEndSession))
-	// polyforge#116: the §6.4 owner doors on a workflow parked blocked —
-	// resume (the owner's re-dispatch-in-place verdict, claimed back
-	// immediately) and the terminate verdict (pf wrap --fail on a parked WI).
+	// polyforge#116: the §6.4 owner resume door on a workflow parked
+	// blocked — resume (the owner's re-dispatch-in-place verdict, claimed
+	// back immediately). The abandon exit is cancel.
 	m.HandleFunc("POST /api/v1/work-items/{id}/resume-blocked", s.auth(s.hResumeBlockedWI))
-	m.HandleFunc("POST /api/v1/work-items/{id}/terminate-blocked", s.auth(s.hTerminateBlockedWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
 	m.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.auth(s.hDeps))
-	// Ship ledger (polyforge#123, P1b): the ship bridge records each
-	// pushed repo's branch top; anyone who can read the WI queries it.
-	m.HandleFunc("POST /api/v1/work-items/{id}/ship-ledger", s.auth(s.hRecordShipLedger))
 	m.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking}/{kind}", s.auth(s.hDelDep))
 	m.HandleFunc("GET /api/v1/projects/{project}/ready-queue", s.auth(s.hReadyQueue))
 	m.HandleFunc("POST /api/v1/machines/heartbeat", s.auth(s.hHeartbeat))
@@ -93,8 +87,12 @@ func (s *Server) routes() {
 	// Memory face.
 	m.HandleFunc("POST /api/v1/memories", s.auth(s.hCreateMemory))
 	m.HandleFunc("GET /api/v1/memories/search", s.auth(s.hSearchMemory))
-	m.HandleFunc("POST /api/v1/memories/rebuild-index", s.authAdmin(s.hRebuildIndex))
 	m.HandleFunc("GET /api/v1/memories/{id}", s.auth(s.hGetMemory))
+	// The memory index-rebuild endpoint is deleted (polyforge#149
+	// dead-code): the boot-time reconcile is the only rebuild. A literal
+	// 404 tombstone is registered so the dead path cannot ride the {id}
+	// wildcard to a 405 ambiguity — the answer is a plain not-found.
+	m.HandleFunc("POST /api/v1/memories/rebuild-index", http.NotFound)
 	m.HandleFunc("POST /api/v1/memories/{id}/redact", s.auth(s.hRedactMemory))
 
 	// Admin face.
@@ -178,9 +176,6 @@ type identity struct {
 func (s *Server) authenticate(r *http.Request) (*identity, error) {
 	h := r.Header.Get("Authorization")
 	token := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-	if token == "" {
-		token = strings.TrimSpace(r.Header.Get("X-API-Key"))
-	}
 	if token == "" {
 		return nil, core.Fail(api.ErrAuthUnauthorized, "", "missing api key")
 	}
@@ -351,9 +346,8 @@ func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity
 }
 
 // writeWI wraps a WorkItem with its public session audit block (m4:
-// session_fingerprint / session_machine / session_owner /
-// session_started_at / clean_pause; NEVER session_hash, never the
-// secret) and writes it.
+// session_fingerprint / session_machine / session_started_at /
+// clean_pause; NEVER session_hash, never the secret) and writes it.
 func (s *Server) writeWI(w http.ResponseWriter, status int, wi *api.WorkItem) {
 	view, err := s.WIs.View(wi)
 	if err != nil {
@@ -450,8 +444,8 @@ func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request, idn *identity)
 }
 
 // ownerMaintainerOrAdmin is the one authorization of the human decisions on
-// a work item — cancel (abandon) and the blocked exits (continue /
-// terminate; v2-converge §7, §11 item 7): the WI's reporter (the task
+// a work item — cancel (abandon) and the blocked exit (continue;
+// v2-converge §7, §11 item 7): the WI's reporter (the task
 // owner), a project maintainer, or a global admin.
 func (s *Server) ownerMaintainerOrAdmin(idn *identity, projectID, wiID string) bool {
 	if idn.Role == "admin" {
@@ -486,35 +480,6 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 		return
 	}
 	s.writeWI(w, http.StatusOK, wi)
-}
-
-// ---------------------------------------------------------------------------
-// Ship ledger (polyforge#123, P1b): record on ship, queryable per WI.
-
-// hRecordShipLedger serves POST /api/v1/work-items/{id}/ship-ledger: the
-// ship bridge's per-run recording face. Authorization is the ordinary
-// object-data WRITE rule (the same face the daemon's other reporting
-// calls use). Recording is an upsert per (WI, repo): the ledger answers
-// the LATEST delivery, not the history — the push history lives in git.
-func (s *Server) hRecordShipLedger(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.requireWrite(w, idn, projectID) {
-		return
-	}
-	var req api.ShipLedgerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, core.Fail(api.ErrCoreBadInput, "", "ship-ledger body is not valid JSON: %v", err))
-		return
-	}
-	if err := s.Ships.Record(id, req.Branch, req.Repos); err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded", "work_item_id": id})
 }
 
 // ---------------------------------------------------------------------------
@@ -711,7 +676,7 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 // (polyforge#116): the door `pf resume` exercises on a workflow parked
 // blocked on an honest incomplete result. Authorization (v2-converge §7):
 // the WI's reporter, a project maintainer, or an admin — the same gate as
-// terminate-blocked and cancel.
+// cancel.
 func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -727,36 +692,6 @@ func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *i
 		return
 	}
 	wi, err := s.WIs.ResumeBlocked(id, idn.UserID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
-}
-
-// hTerminateBlockedWI serves the §6.4 owner terminate verdict's hub door
-// (polyforge#116): `pf wrap --fail` on a parked workflow. Authorization is
-// the unified blocked-exit gate: reporter, project maintainer, or admin.
-func (s *Server) hTerminateBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "terminate-blocked requires the work item's reporter, a project maintainer or admin"))
-		return
-	}
-	wi, err := s.WIs.TerminateBlocked(id, idn.UserID)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1219,15 +1154,6 @@ func firstRunes(s string, n int) string {
 		c++
 	}
 	return s
-}
-
-func (s *Server) hRebuildIndex(w http.ResponseWriter, r *http.Request, idn *identity) {
-	n, err := s.Mems.RebuildIndex()
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]int{"reindexed": n})
 }
 
 // ---------------------------------------------------------------------------

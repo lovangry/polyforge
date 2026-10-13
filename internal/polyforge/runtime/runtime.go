@@ -183,7 +183,6 @@ type AgentStartInput struct {
 	Project       string
 	CapsuleDir    string
 	BundleName    string
-	BundleDigest  string
 	SessionHandle string // public fingerprint
 	SpawnN        int64
 	// StepCandidates is the polyforge#79 effective per-step candidate
@@ -221,12 +220,11 @@ type job struct {
 	// set when the SEALING transition records the reason and persisted
 	// with it, so a crash between that push and SessionEnd keeps the
 	// restart's stop finisher from re-pushing either.
-	sealedPush   bool
-	capsuleDir   string
-	git          gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
-	transcript   string
-	bundleName   string
-	bundleDigest string
+	sealedPush bool
+	capsuleDir string
+	git        gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
+	transcript string
+	bundleName string
 	// origin is how the job was submitted (nil = unknown).
 	origin *Origin
 	// item is the claim answer's work-item snapshot (the F1 materializer
@@ -647,7 +645,6 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		WorkItemID:     wi,
 		SessionID:      sessionID,
 		MachineID:      r.cfg.MachineID,
-		Owner:          r.cfg.MachineID,
 		IdempotencyKey: key,
 	}
 	resp, err := r.hub.SessionClaim(req)
@@ -748,7 +745,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			EventSink:   r.gitEventSink(id),
 		},
 		bundleName:   c.BundleName,
-		bundleDigest: c.BundleDigest,
 		repos:        c.Repos,
 		item:         &resp.WorkItem,
 		origin:       r.takeOrigin(wi, id),
@@ -791,8 +787,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	j.mu.Unlock()
 	if err := r.materialize(ctx, j); err != nil {
 		// A typed task-repo clone failure (DAEMON-507) keeps its detail as
-		// the close note; every other materialization failure (CAP-405
-		// digest divergence included) names itself.
+		// the close note; every other materialization failure names itself.
 		note := err.Error()
 		var ae *api.Error
 		if errors.As(err, &ae) && ae.Code == api.ErrDaemonSpawnFail && ae.Detail != "" {
@@ -826,7 +821,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			Project:       j.project,
 			CapsuleDir:    j.capsuleDir,
 			BundleName:    j.bundleName,
-			BundleDigest:  j.bundleDigest,
 			SessionHandle: j.sessionFingerprint,
 			SpawnN:        spawnN,
 			Spawner:       r.spawner,
@@ -1100,9 +1094,8 @@ var renameFn = os.Rename
 // materialize lays out the capsule: workflows/, agents/,
 // capsule.json, session.json, .gitignore and the runtime-state/ tree.
 // The bundle is materialized as ONE atomic set with a completion marker
-// (F7, materialize.go): a pinned bundle digest is verified against the
-// STAGED tree before any live target is touched (CAP-405 on divergence,
-// name-derived stand-ins excepted). The claim's task-repo
+// (F7, materialize.go; no digest verification — the digest chain is
+// deleted, polyforge#149 B9). The claim's task-repo
 // inventory is cloned into repos/<name> BEFORE the capsule identity is
 // written, so the recorded baselines are the true claim-time SHAs.
 func (r *Runtime) materialize(ctx context.Context, j *job) error {
@@ -1130,13 +1123,12 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// Session ownership lives in the daemon-private sync/session-handle
 	// marker, not in the identity.
 	idn := capsule.Identity{
-		WorkItemID:   j.wi,
-		CapsuleID:    "cap_" + j.wi,
-		Project:      j.project,
-		BundleName:   j.bundleName,
-		BundleDigest: j.bundleDigest,
-		Repos:        repoSHAs,
-		CreatedAt:    nowStamp(),
+		WorkItemID: j.wi,
+		CapsuleID:  "cap_" + j.wi,
+		Project:    j.project,
+		BundleName: j.bundleName,
+		Repos:      repoSHAs,
+		CreatedAt:  nowStamp(),
 	}
 	// polyforge#79: the claim-time snapshot doubles as the audit record —
 	// the parsed yaml verbatim, the per-step post-precedence candidate
@@ -1238,17 +1230,16 @@ func (r *Runtime) writeWorkItemDoc(j *job, item *api.WorkItem) error {
 		return err
 	}
 	doc := &capsule.WorkItemDoc{
-		ID:           j.wi,
-		Slug:         item.Slug,
-		Project:      j.project,
-		Goal:         item.Goal,
-		Content:      item.Content,
-		Labels:       item.Labels,
-		Priority:     item.Priority,
-		Milestone:    item.Milestone,
-		BundleName:   j.bundleName,
-		BundleDigest: j.bundleDigest,
-		UpdatedAt:    nowStamp(),
+		ID:         j.wi,
+		Slug:       item.Slug,
+		Project:    j.project,
+		Goal:       item.Goal,
+		Content:    item.Content,
+		Labels:     item.Labels,
+		Priority:   item.Priority,
+		Milestone:  item.Milestone,
+		BundleName: j.bundleName,
+		UpdatedAt:  nowStamp(),
 	}
 	if doc.Labels == nil {
 		doc.Labels = []string{}
@@ -1307,7 +1298,7 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
-	return r.stopOp(ctx, j, reason, false, false)
+	return r.stopOp(ctx, j, reason, false, false, "")
 }
 
 // supersedeOp is the OBSuperseded response (v1.5 M4 + m3): the periodic
@@ -1356,7 +1347,12 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	_ = ctx
 }
 
-func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, alreadyPushed bool) error {
+// stopOp runs one close to the end. reason is the close verdict (a
+// terminal wrapped|failed|blocked, or paused — the operator pause); note
+// is the human-facing elaboration the SessionEnd carries ("" for the
+// ordinary closes — the interrupted-seal finisher names its
+// cause-unknown close here).
+func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, alreadyPushed bool, note string) error {
 	// Finding 2 (v1.5 review, MAJOR): the operator pause is its own close.
 	// It does NOT pass through SEALING (no terminal verdict follows), it
 	// retains the record (the secret must survive locally for the M3
@@ -1444,6 +1440,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
 		SessionID:  j.sessionID,
 		Status:     finalReason,
+		Note:       note,
 		CleanPause: finalReason == api.StatusPaused,
 	}); err != nil {
 		return fmt.Errorf("runtime: %s: session-end failed (job left sealing): %w", j.wi, err)

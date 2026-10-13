@@ -79,7 +79,7 @@ whether they pass — no subjective judgment about design quality belongs here (
 Do not report `pass` on a check you skipped because it seemed slow or you assumed it
 would pass — mark it `skipped` with a reason, and let that visibly not-checked status be
 what it is. A false `pass` here defeats the entire purpose of a last machine gate:
-release would ship on an unchecked tree.
+a later release would ship an unchecked tree.
 
 ## Evidence obligation
 

@@ -405,11 +405,10 @@ func TestReadyQueueCarriesSessionBlock(t *testing.T) {
 }
 
 // TestBlockedExitsUnifiedAuthorization (v2-converge §7, §11 item 7): the
-// blocked exits — resume-blocked (continue) and terminate-blocked —
-// and cancel (abandon) are open to exactly the work item's reporter, a
-// project maintainer, or an admin. A plain project member (writer) who is
-// none of those is refused on EVERY door — resume-blocked used to check the
-// key scope only.
+// blocked exits — resume-blocked (continue) — and cancel (abandon) are
+// open to exactly the work item's reporter, a project maintainer, or an
+// admin. A plain project member (writer) who is none of those is refused
+// on EVERY door — resume-blocked used to check the key scope only.
 func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
 	e := newSrvEnv(t)
 	mk := func(name, role string) (string, string) {
@@ -457,7 +456,7 @@ func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
 	s := func(n byte) string { return strings.Repeat(string(rune('a'+n)), 32) }
 	id := block("blocked auth", s(1))
 
-	for _, door := range []string{"resume-blocked", "terminate-blocked"} {
+	for _, door := range []string{"resume-blocked"} {
 		for who, key := range map[string]string{"plain member": otherKey, "outsider": outKey} {
 			if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/"+door, key, map[string]any{}, nil); code != 403 && code != 404 {
 				t.Fatalf("%s on %s must be refused, got %d %s", who, door, code, raw)
@@ -481,10 +480,10 @@ func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
 	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id2+"/resume-blocked", maintKey, map[string]any{}, &got); code != 200 || got.Status != "queued" {
 		t.Fatalf("maintainer resume-blocked: %d %s", code, raw)
 	}
-	// an admin terminates a third
+	// an admin abandons a third
 	id3 := block("blocked auth 3", s(3))
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id3+"/terminate-blocked", e.key, map[string]any{}, &got); code != 200 || got.Status != "failed" {
-		t.Fatalf("admin terminate-blocked: %d %s", code, raw)
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id3+"/cancel", e.key, map[string]any{}, &got); code != 200 || got.Status != "canceled" {
+		t.Fatalf("admin abandon: %d %s", code, raw)
 	}
 	// the reporter abandons a fourth
 	id4 := block("blocked auth 4", s(4))
@@ -594,5 +593,133 @@ func TestSessionClaimRequiresWriter(t *testing.T) {
 	id = createExecWIOverHTTP(t, e, "claim authz admin")
 	if code, raw := claim(e.key); code != 200 && code != 201 {
 		t.Fatalf("admin claim: %d %s", code, raw)
+	}
+}
+
+// TestReporterGateContinueAbandonOnly (polyforge#149 D5, ruling B): the
+// task owner IS the work item's reporter. A non-maintainer/non-admin
+// REPORTER may continue a resume-blocked WI and abandon (cancel) a
+// queued/paused/blocked WI; a project maintainer and a global admin may
+// do the same; the reporter is still DENIED ForceEnd and every other
+// admin/maintainer-only recovery gate (no gate widening).
+func TestReporterGateContinueAbandonOnly(t *testing.T) {
+	e := newSrvEnv(t)
+	alpha := e.adminProjectID(t, "alpha")
+
+	mk := func(name, role string) (string, string) {
+		u, err := e.admin.CreateUser(name, name+"@example.com", role, "human")
+		if err != nil {
+			t.Fatal(err)
+		}
+		k, err := e.admin.CreateAPIKey(u.ID, name, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u.ID, k.Plain
+	}
+	repID, repKey := mk("repd5", "writer")
+	maintID, maintKey := mk("maintd5", "writer")
+	_, outKey := mk("outd5", "writer")
+	if _, err := e.admin.PatchProject("alpha", core.ProjectPatchRequest{
+		Members: &[]api.ProjectMember{
+			{UserID: repID, Role: "writer"},
+			{UserID: maintID, Role: "maintainer"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secret := func(n byte) string { return strings.Repeat(string(rune('0'+n)), 32) }
+
+	// The reporter creates and parks a WI blocked (the frozen-ticket
+	// shape); continue (resume-blocked) is the reporter's door.
+	block := func(goal string, n byte) string {
+		var wi struct {
+			ID string `json:"id"`
+		}
+		if code, raw := e.do(t, "POST", "/api/v1/work-items", repKey,
+			map[string]any{"project": "alpha", "goal": goal, "bundle_name": "demo-bundle"}, &wi); code != 201 {
+			t.Fatalf("reporter create: %d %s", code, raw)
+		}
+		if code, raw, _ := sessClaim(t, e, wi.ID, secret(n), "d5-"+string(rune('0'+n))); code != 200 {
+			t.Fatalf("claim: %d %s", code, raw)
+		}
+		if code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/session-end", e.key,
+			map[string]string{"session_id": secret(n), "status": "blocked"}, nil); code != 200 {
+			t.Fatalf("block: %d %s", code, raw)
+		}
+		return wi.ID
+	}
+	var got struct {
+		Status string `json:"status"`
+	}
+
+	// The REPORTER continues a parked WI (blocked → queued).
+	c := block("d5 reporter continue", 1)
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+c+"/resume-blocked", repKey, map[string]any{}, &got); code != 200 || got.Status != "queued" {
+		t.Fatalf("reporter continue: %d %s %s", code, raw, got.Status)
+	}
+	// A maintainer and an admin may continue too.
+	c2 := block("d5 maintainer continue", 2)
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+c2+"/resume-blocked", maintKey, map[string]any{}, &got); code != 200 || got.Status != "queued" {
+		t.Fatalf("maintainer continue: %d %s %s", code, raw, got.Status)
+	}
+	c3 := block("d5 admin continue", 3)
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+c3+"/resume-blocked", e.key, map[string]any{}, &got); code != 200 || got.Status != "queued" {
+		t.Fatalf("admin continue: %d %s %s", code, raw, got.Status)
+	}
+
+	// The REPORTER abandons (cancel) a blocked WI (blocked → canceled).
+	ab := block("d5 reporter abandon blocked", 4)
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+ab+"/cancel", repKey, map[string]any{}, &got); code != 200 || got.Status != "canceled" {
+		t.Fatalf("reporter abandon (blocked): %d %s %s", code, raw, got.Status)
+	}
+	// The reporter abandons a QUEUED WI.
+	var qw struct {
+		ID string `json:"id"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items", repKey,
+		map[string]any{"project": "alpha", "goal": "d5 queued abandon", "bundle_name": "demo-bundle"}, &qw); code != 201 {
+		t.Fatalf("queued create: %d %s", code, raw)
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+qw.ID+"/cancel", repKey, map[string]any{}, &got); code != 200 || got.Status != "canceled" {
+		t.Fatalf("reporter abandon (queued): %d %s %s", code, raw, got.Status)
+	}
+	// An outsider (plain writer, not the reporter) is refused on both
+	// exits.
+	x := block("d5 outsider refused", 5)
+	if code, _ := e.do(t, "POST", "/api/v1/work-items/"+x+"/resume-blocked", outKey, map[string]any{}, nil); code != 403 {
+		t.Fatalf("outsider continue: want 403, got %d", code)
+	}
+	if code, _ := e.do(t, "POST", "/api/v1/work-items/"+x+"/cancel", outKey, map[string]any{}, nil); code != 403 {
+		t.Fatalf("outsider abandon: want 403, got %d", code)
+	}
+
+	// The reporter is DENIED the admin/maintainer-only recovery gates:
+	// force-end-session on their own RUNNING WI.
+	var ow struct {
+		ID string `json:"id"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items", repKey,
+		map[string]any{"project": "alpha", "goal": "d5 reporter force-end denied", "bundle_name": "demo-bundle"}, &ow); code != 201 {
+		t.Fatalf("own create: %d %s", code, raw)
+	}
+	own := ow.ID
+	if code, raw, _ := sessClaim(t, e, own, secret(7), "d5-fe"); code != 200 {
+		t.Fatalf("claim: %d %s", code, raw)
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+own+"/force-end-session", repKey,
+		map[string]string{"reason": "holder lost"}, nil); code != 403 {
+		t.Fatalf("reporter force-end-session: want 403, got %d %s", code, raw)
+	}
+	// ...and the project PATCH gate.
+	if code, raw := e.do(t, "PATCH", "/api/v1/projects/"+alpha, repKey,
+		map[string]any{"description": "no"}, nil); code != 403 {
+		t.Fatalf("reporter project PATCH: want 403, got %d %s", code, raw)
+	}
+	// A maintainer may force-end (the recovery gate itself stays open to
+	// its intended audience).
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+own+"/force-end-session", maintKey,
+		map[string]string{"reason": "holder lost"}, &got); code != 200 || got.Status != "queued" {
+		t.Fatalf("maintainer force-end-session: %d %s %s", code, raw, got.Status)
 	}
 }

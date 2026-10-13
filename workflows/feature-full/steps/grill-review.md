@@ -53,7 +53,7 @@ not grading the spec's writing quality, you are checking for a match against int
    objection precisely in `fail_reason` - required by the schema on any fail verdict. Do
    not soften, summarize away, or "fix it
    yourself and call it pass" — a fail here is what drives the bounded rewind to `spec`
-   (`on_fail: {action: rewind, target: spec}` in the workflow frontmatter), and the spec
+   (`on_fail: {target: spec}` in the workflow frontmatter), and the spec
    author on the next pass depends on `fail_reason` being the user's actual words.
 
 ## Judgment, not scoring

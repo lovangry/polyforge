@@ -142,7 +142,6 @@ type WIView struct {
 	api.WorkItem
 	SessionFingerprint string `json:"session_fingerprint,omitempty"`
 	SessionMachine     string `json:"session_machine,omitempty"`
-	SessionOwner       string `json:"session_owner,omitempty"`
 	SessionStartedAt   string `json:"session_started_at,omitempty"`
 	CleanPause         bool   `json:"clean_pause,omitempty"`
 }
@@ -202,8 +201,8 @@ func renderWIDetail(w io.Writer, wi *WIView) {
 	}
 	if wi.SessionFingerprint != "" {
 		fmt.Fprintf(w, "  session:  %s", wi.SessionFingerprint)
-		if wi.SessionMachine != "" || wi.SessionOwner != "" {
-			fmt.Fprintf(w, " (machine %s, owner %s)", orDash(wi.SessionMachine), orDash(wi.SessionOwner))
+		if wi.SessionMachine != "" {
+			fmt.Fprintf(w, " (machine %s)", orDash(wi.SessionMachine))
 		}
 		if wi.SessionStartedAt != "" {
 			fmt.Fprintf(w, " since %s", wi.SessionStartedAt)

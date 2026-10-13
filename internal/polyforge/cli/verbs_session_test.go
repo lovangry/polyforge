@@ -45,10 +45,13 @@ func TestResumeFlagClearSemantics(t *testing.T) {
 	}
 }
 
-// TestWrapFailBlockedLandsDoorWithHumanKey: `pf wrap --fail` on a WI parked
-// blocked posts aihub's terminate-blocked door directly with the human's api
-// key and never contacts the daemon; a refused door (non-owner) is typed.
-func TestWrapFailBlockedLandsDoorWithHumanKey(t *testing.T) {
+// TestWrapFailBlockedHasNoHubDoor: `pf wrap --fail` on a WI parked
+// blocked no longer lands any hub verdict door — the blocked-specific
+// branch is deleted, so the request goes to the daemon's plain wrap
+// route; with no local job for a parked workflow the daemon refuses and
+// the CLI exits non-zero. Blocked work items recover only via continue
+// (`pf resume`) or abandon (`pf cancel`).
+func TestWrapFailBlockedHasNoHubDoor(t *testing.T) {
 	blockedWI := `{"id":"wi_blocked","slug":"pf-43","seq":43,"project":"polyforge","goal":"g",` +
 		`"status":"blocked","priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z",` +
 		`"updated_at":"2026-10-01T00:00:00Z"}`
@@ -57,39 +60,26 @@ func TestWrapFailBlockedLandsDoorWithHumanKey(t *testing.T) {
 		io.WriteString(w, blockedWI)
 	})
 	d := newDaemonFixture(t)
+	// No /jobs/wi_blocked/wrap answer is scripted: a parked workflow has
+	// no local job, so the daemon answers DAEMON-404.
 	code, stdout, stderr := runPf(t, map[string]string{
 		"PF_SERVER": hub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
 	}, "wrap", "wi_blocked", "--fail")
-	if code != 0 || !strings.Contains(stdout, "fail requested for wi_blocked") {
-		t.Fatalf("wrap --fail: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	if code == 0 {
+		t.Fatalf("wrap --fail on a blocked WI must fail (no hub door, no daemon job): code=%d stdout=%s stderr=%s", code, stdout, stderr)
 	}
-	var door *capturedRequest
-	for _, r := range rec.all() {
+	if n := len(rec.all()); n != 0 {
+		t.Errorf("the CLI must not contact aihub (no hub verdict door exists): %v", rec.all())
+	}
+	var wrapReq *capturedRequest
+	for _, r := range d.rec.all() {
 		r := r
-		if r.Method == "POST" && r.Path == "/api/v1/work-items/wi_blocked/terminate-blocked" {
-			door = &r
+		if r.Method == "POST" && r.Path == "/jobs/wi_blocked/wrap" {
+			wrapReq = &r
 		}
 	}
-	if door == nil || !strings.Contains(door.Header.Get("Authorization"), "human-key") {
-		t.Fatalf("the terminate door must be posted with the human's key: %+v", rec.all())
-	}
-	if n := len(d.rec.all()); n != 0 {
-		t.Errorf("the daemon must not be contacted: %v", d.rec.all())
-	}
-
-	deny := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" {
-			w.WriteHeader(http.StatusForbidden)
-			io.WriteString(w, `{"code":"AUTH-403","detail":"terminate-blocked requires the work item's reporter, a project maintainer or admin"}`)
-			return
-		}
-		io.WriteString(w, blockedWI)
-	})
-	code, _, stderr = runPf(t, map[string]string{
-		"PF_SERVER": deny.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "plain",
-	}, "wrap", "wi_blocked", "--fail")
-	if code != 1 || !strings.Contains(stderr, "AUTH-403") {
-		t.Errorf("non-owner must be refused: code=%d stderr=%s", code, stderr)
+	if wrapReq == nil {
+		t.Fatalf("the daemon's plain wrap route must carry the request: %v", d.rec.all())
 	}
 }
 

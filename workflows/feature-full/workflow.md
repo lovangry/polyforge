@@ -39,8 +39,7 @@ demonstrably-red bar), a build lane that implements against that executable
 acceptance (`code` continues `e2e-baseline`'s session via its inherit handoff, then
 `e2e-run` re-runs the same authored suite as the hard rerun gate, rewinding to `code`
 on red), a judgment pair (`review` first, then `verification` as the last machine
-gate) that ends the flow — the workflow wraps on the last step, with no release
-step of its own (shipping is the project's business, outside the bundle).
+gate). There is no release slot: shipping is the separate `release` bundle.
 
 ## Artifact flow between steps
 
@@ -109,3 +108,9 @@ The declared wall is an estimate, not a limit: the daemon bounds a step's total 
 dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
 A step that declares nothing gets the default, so declare a wall only for a step that legitimately
 needs more than 90 minutes in total.
+
+## No release slot
+
+This bundle has no release step. Releases and deploys never ride a delivery lane: they
+happen only through the dedicated `release` workflow bundle (a separate WI), so shipping
+is always an explicit, separately-gated act on a verified origin head.

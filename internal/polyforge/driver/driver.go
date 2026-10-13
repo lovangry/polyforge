@@ -36,10 +36,9 @@ import (
 
 // WIInfo identifies the work item one Driver drives.
 type WIInfo struct {
-	ID           string
-	CapsuleDir   string
-	BundleName   string
-	BundleDigest string
+	ID         string
+	CapsuleDir string
+	BundleName string
 }
 
 // EventLogger is the driver's event emission face — the shape of
@@ -871,7 +870,6 @@ func skeletonExecution(wi WIInfo, wf *Workflow) *capsule.Execution {
 	exec := &capsule.Execution{
 		CapsuleID:      capsuleIDFor(wi.ID),
 		WorkItemID:     wi.ID,
-		BundleDigest:   wi.BundleDigest,
 		WorkflowStatus: StatusRunning,
 		Steps:          map[string]*capsule.Step{},
 	}

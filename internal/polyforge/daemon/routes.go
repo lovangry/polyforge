@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -91,10 +92,7 @@ type opsConfigResponse struct {
 
 type closeResponse struct {
 	WorkItemID string `json:"work_item_id"`
-	// Outcome: sealed | already_terminal | already_paused — plus
-	// "terminated" (polyforge#116): a parked workflow's §6.4 terminate
-	// verdict, landed at the hub by the terminate-blocked door (no local
-	// seal exists — the bounded close already sealed the parked capsule).
+	// Outcome: sealed | already_terminal | already_paused.
 	Outcome string `json:"outcome"`
 	Status  string `json:"status,omitempty"`
 	Reason  string `json:"reason,omitempty"`
@@ -165,13 +163,28 @@ func (d *Daemon) handler() http.Handler {
 				payload.AnsweredBy = r.Header.Get("X-PF-User")
 			}
 			// No question named: the daemon resolves the pending one from
-			// the capsule's execution.json.
+			// the capsule's execution.json — accepted ONLY when exactly one
+			// question is pending (audit B10). Zero or several is a typed
+			// refusal pointing at --question: a guess across several open
+			// questions would deliver the answer to an arbitrary one (the
+			// steps map's iteration order) and is never honest.
 			if payload.QuestionID == "" {
-				payload.QuestionID = d.pendingQuestionID(wi)
-			}
-			if payload.QuestionID == "" {
-				http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
-				return
+				ids := d.pendingQuestionIDs(wi)
+				switch len(ids) {
+				case 0:
+					http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
+					return
+				case 1:
+					payload.QuestionID = ids[0]
+				default:
+					body, _ := json.Marshal(map[string]string{
+						"code": "ANSWER-400",
+						"detail": fmt.Sprintf("this work item has %d pending questions (%s) — answer a specific one with --question",
+							len(ids), strings.Join(ids, ", ")),
+					})
+					http.Error(w, string(body), 400)
+					return
+				}
 			}
 			if err := h.Answer(payload.QuestionID, payload.AnswerText, payload.AnsweredBy); err != nil {
 				http.Error(w, `{"code":"ANSWER-409","detail":"`+err.Error()+`"}`, 409)
@@ -401,29 +414,19 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 
 // parkedWIClose handles a close that finds no local job because the
 // workflow is parked blocked on an honest incomplete result (polyforge#116):
-// the bounded close dropped the job, so the owner's moves on this state are
-// the §6.4 face, not a runtime close — `--fail` is the owner's terminate
-// verdict, landed by the CLI at the hub's terminate-blocked door with the
-// human's key (refused here with a hint); a wrap (success) or a pause of a parked workflow has nothing to
-// seal — refused with the owner-move copy. Returns true when it answered;
-// a non-blocked work item falls through to the caller's terminalOf/404.
+// the bounded close dropped the job, so a wrap (success) or a `--fail` of
+// a parked workflow has nothing to seal — refused with the owner-move
+// copy: the blocked exits are continue (`pf resume`) and abandon
+// (`pf cancel`). Returns true when it answered; a non-blocked work item
+// falls through to the caller's terminalOf/404.
 func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
+	_ = reason
 	item, err := d.hub.GetWorkItem(wi)
 	if err != nil || item == nil || item.Status != api.StatusBlocked {
 		return false
 	}
-	// The terminate verdict (`--fail`) is NOT landed here: the hub's
-	// terminate-blocked door authorizes the HUMAN (reporter / maintainer /
-	// admin), so the CLI calls it with the user's own key; the daemon's
-	// machine key is not that caller. There is no local state to clean —
-	// the bounded close already dropped the job.
-	if reason == protocol.FinishFailed {
-		writeErr(w, api.ErrDaemonConflict,
-			"the workflow is parked blocked — its failed verdict is landed by the CLI with your own credential (`pf wrap --fail <id>` from an up-to-date pf), or abandon it with `pf cancel <id>`")
-		return true
-	}
 	writeErr(w, api.ErrDaemonConflict,
-		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon (`pf wrap --fail <id>` records a failed verdict); there is no completed run to wrap or pause")
+		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon; there is no completed run to wrap or fail")
 	return true
 }
 
@@ -635,6 +638,13 @@ func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 			writeAdmissionErr(w, err)
 			return
 		}
+		if !*req.Auto {
+			// v2-converge §5 (audit B3b): auto off = only explicit pf
+			// submit — the not-yet-started origin=auto entries leave the
+			// queue (and the persisted file a restart replays); explicit
+			// (cli/chat) entries ride untouched.
+			d.autoOffPurge()
+		}
 	}
 	if req.Max != nil {
 		if err := d.q.SetMaxConcurrent(*req.Max); err != nil {
@@ -664,9 +674,12 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// pendingQuestionID reads the capsule's execution.json to find the
-// current pending question ID.
-func (d *Daemon) pendingQuestionID(wi string) string {
+// pendingQuestionIDs reads the capsule's execution.json and returns the
+// ids of ALL currently open pending questions (empty when none). The
+// steps map's iteration order is meaningless, so callers must not treat
+// the result's order as a choice: the answer route accepts a no-id
+// answer only when exactly one id comes back (audit B10).
+func (d *Daemon) pendingQuestionIDs(wi string) []string {
 	wid := d.rt.CanonicalID(wi)
 	if wid == "" {
 		wid = wi
@@ -674,7 +687,7 @@ func (d *Daemon) pendingQuestionID(wi string) string {
 	execPath := filepath.Join(d.rt.CapsuleDirFor(wid), "runtime-state", "execution.json")
 	data, err := os.ReadFile(execPath)
 	if err != nil {
-		return ""
+		return nil
 	}
 	var exec struct {
 		Steps map[string]struct {
@@ -684,12 +697,13 @@ func (d *Daemon) pendingQuestionID(wi string) string {
 		} `json:"steps"`
 	}
 	if json.Unmarshal(data, &exec) != nil {
-		return ""
+		return nil
 	}
+	var ids []string
 	for _, st := range exec.Steps {
 		if st.PendingQuestion != nil && st.PendingQuestion.ID != "" {
-			return st.PendingQuestion.ID
+			ids = append(ids, st.PendingQuestion.ID)
 		}
 	}
-	return ""
+	return ids
 }

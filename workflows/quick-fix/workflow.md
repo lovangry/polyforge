@@ -80,3 +80,9 @@ The declared wall is an estimate, not a limit: the daemon bounds a step's total 
 dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
 A step that declares nothing gets the default, so declare a wall only for a step that legitimately
 needs more than 90 minutes in total.
+
+## No release slot
+
+This bundle has no release step. Releases and deploys never ride a delivery lane: they
+happen only through the dedicated `release` workflow bundle (a separate WI), so shipping
+is always an explicit, separately-gated act on a verified origin head.

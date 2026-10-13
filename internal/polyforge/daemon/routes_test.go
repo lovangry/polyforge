@@ -196,34 +196,30 @@ func TestResumeBlockedOwnerMove(t *testing.T) {
 	}
 }
 
-// TestTerminateBlockedOwnerVerdict (polyforge#116): the §6.4 terminate
-// verdict's face — a close that finds no local job because the workflow
-// is parked blocked lands the owner's kill verdict at the hub
-// (the terminate-blocked door) instead of DAEMON-404; a wrap (success)
-// and a pause of a parked workflow answer the owner-move refusal — there
-// is nothing to seal.
-func TestTerminateBlockedOwnerVerdict(t *testing.T) {
+// TestParkedWICloseRefusal (polyforge#116): a close — wrap (success) or
+// `--fail` — that finds no local job because the workflow is parked
+// blocked answers the owner-move refusal (continue or abandon only);
+// there is nothing to seal, and no hub door is fired.
+func TestParkedWICloseRefusal(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	const wi = "wi_parked"
 	td.hub.mu.Lock()
 	td.hub.status[wi] = api.StatusBlocked
 	td.hub.mu.Unlock()
 
-	// `--fail` on a parked workflow is landed by the CLI with the human's
-	// key; the daemon route refuses with a hint and never calls the door.
-	if _, err := td.client.Wrap(wi, "fail"); err == nil || !strings.Contains(err.Error(), "your own credential") {
-		t.Fatalf("daemon wrap --fail on a parked workflow must refuse with the CLI hint, got %v", err)
+	// `--fail` on a parked workflow has no hub door and no local job —
+	// the daemon refuses with the owner-move copy.
+	if _, err := td.client.Wrap(wi, "fail"); err == nil || !strings.Contains(err.Error(), "pf resume") {
+		t.Fatalf("daemon wrap --fail on a parked workflow must refuse with the owner-move copy, got %v", err)
 	}
 	td.hub.mu.Lock()
-	if len(td.hub.terminateBlockeds) != 0 {
-		t.Fatalf("the daemon fired the hub terminate door %v with its machine key", td.hub.terminateBlockeds)
+	if len(td.hub.resumeBlockeds) != 0 {
+		t.Fatalf("the daemon fired a hub owner door %v with its machine key", td.hub.resumeBlockeds)
 	}
 	td.hub.mu.Unlock()
 
-	// A wrap (success) or a pause of a STILL-parked workflow has nothing
-	// to seal — the owner's moves are the §6.4 face, not a runtime close.
-	// (After the terminate verdict the WI is terminal, and a close answers
-	// the graceful already_terminal shape — the arbitration's idempotency.)
+	// A wrap (success) of a STILL-parked workflow has nothing to seal —
+	// the owner's moves are continue/abandon, not a runtime close.
 	const wi2 = "wi_parked2"
 	td.hub.mu.Lock()
 	td.hub.status[wi2] = api.StatusBlocked
@@ -232,7 +228,7 @@ func TestTerminateBlockedOwnerVerdict(t *testing.T) {
 		t.Fatal("wrap (success) on a parked workflow must be refused")
 	}
 	// A pause of a parked workflow: same refusal — the owner's moves are
-	// the §6.4 face, not a runtime close.
+	// continue/abandon, not a runtime close.
 	if _, err := td.client.Pause(wi2); err == nil {
 		t.Fatal("pause on a parked workflow must be refused")
 	}

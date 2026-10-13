@@ -85,7 +85,7 @@ catch one.
 
 This step is declared `kind: review` in the workflow frontmatter, which the schema
 grants positional freedom (rule V8) — in this bundle it sits between `verification` and
-`release` because release-readiness judgment needs both the mechanical results and the
+the end of the lane because ship-readiness judgment needs both the mechanical results and the
 evidence chain in hand.
 
 ## Output

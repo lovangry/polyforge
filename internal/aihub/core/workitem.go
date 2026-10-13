@@ -7,7 +7,7 @@ package core
 // running (session-attach, M3), running/paused → queued (force-end
 // by an admin/maintainer: the recovery door), running → wrapped/failed (session-end), queued/paused/
 // blocked → canceled (cancel); the blocked exits are resume-blocked
-// (continue) and terminate-blocked / cancel (abandon).
+// (continue) and cancel (abandon).
 // Terminal states are read-only (CORE-410).
 
 import (
@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -41,10 +42,11 @@ type CreateRequest struct {
 	Reporter  string         `json:"reporter"` // user id (from auth)
 	// BundleName non-empty marks an execution ticket; NULL leaves a pure
 	// registration ticket (02 §4.4: not claimable, CORE-409 NOT_CLAIMABLE).
-	// The bundle reference triple is immutable after the create
-	// transaction (INV-2e); there is no UPDATE path.
-	BundleName   *string `json:"bundle_name"`
-	BundleDigest *string `json:"bundle_digest"` // optional client-supplied pin; defaulted below
+	// The bundle reference freezes at FIRST CLAIM (the R2 window, w140):
+	// while the WI is queued and never claimed, PATCH may set, rename or
+	// clear bundle_name through the shared persist path (bundleRef);
+	// after the first claim it is immutable again (INV-2e as amended).
+	BundleName *string `json:"bundle_name"`
 	// Repo-reference triple (02 §4.6, the surface the TODO(v1) §4.5
 	// checkout-hash comment guarded): the declaration (name/url/subdir)
 	// and the frozen base sha arrive as two arrays and are validated as
@@ -114,8 +116,8 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	if req.Goal == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "goal required")
 	}
-	if len(req.Goal) > api.MaxGoalBytes {
-		return nil, Fail(api.ErrCoreBadInput, "", "goal exceeds %d bytes", api.MaxGoalBytes)
+	if utf8.RuneCountInString(req.Goal) > api.MaxGoalRunes {
+		return nil, Fail(api.ErrCoreBadInput, "", "goal exceeds %d characters", api.MaxGoalRunes)
 	}
 	if req.Priority == "" {
 		req.Priority = api.PriorityNormal
@@ -201,20 +203,12 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	seq := maxSeq.Int64 + 1
 
 	// Bundle reference (02 §4.4/§4.5): a non-empty bundle_name makes an
-	// execution ticket. Full §4.5 fixation (re-hashing the bundle checkout
-	// server-side at create time) is not wired in this round; a client may
-	// pin the digest explicitly via bundle_digest, and otherwise the
-	// server stores a deterministic name-derived stand-in so the
-	// reference triple is never half-empty. TODO(v1): §4.5 checkout hash.
-	var bundleName, bundleDigest any
-	if req.BundleName != nil && *req.BundleName != "" {
-		bundleName = *req.BundleName
-		if req.BundleDigest != nil && *req.BundleDigest != "" {
-			bundleDigest = *req.BundleDigest
-		} else {
-			bundleDigest = Sha256Hex("bundle-name:" + *req.BundleName)
-		}
-	}
+	// execution ticket. The name resolves through the ONE shared persist
+	// path (bundleRef — the same helper the PATCH entry uses): a nil/empty
+	// name resolves to NULL. Full §4.5 fixation is deleted with the digest
+	// chain (polyforge#149): the reference is the name, and the bundle's
+	// truth is the materialized checkout.
+	bundleName := bundleRef(req.BundleName)
 
 	id, err := NewID("wi_")
 	if err != nil {
@@ -224,11 +218,11 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	labels, _ := json.Marshal(req.Labels)
 	attrs, _ := json.Marshal(req.Attrs)
 	if _, err := tx.Exec(`INSERT INTO work_items(id, seq, project_id, goal, content, parent_id,
-		status, priority, milestone, labels, attrs, reporter, bundle_name, bundle_digest, created_at, updated_at)
-		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15)`,
+		status, priority, milestone, labels, attrs, reporter, bundle_name, created_at, updated_at)
+		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14)`,
 		id, seq, projectID, req.Goal, nullableString(req.Content), nullableString(req.ParentID),
 		api.StatusQueued, req.Priority, nullableString(req.Milestone), string(labels), string(attrs), req.Reporter,
-		bundleName, bundleDigest, now); err != nil {
+		bundleName, now); err != nil {
 		return nil, err
 	}
 	if err := appendEventTx(tx, id, now, req.Reporter, "work_item_filed", nil); err != nil {
@@ -313,16 +307,15 @@ func (m *WIManager) Get(idOrSlug string, opts GetOptions) (*api.WorkItem, error)
 
 func (m *WIManager) load(id string) (*api.WorkItem, error) {
 	var wi api.WorkItem
-	var content, parent, milestone, assignee, waitingOn, bundle, bundleDigest, budget,
-		closed sql.NullString
+	var content, parent, milestone, assignee, waitingOn, bundle, closed sql.NullString
 	var labels, attrs string
 	err := m.db.QueryRow(`SELECT w.id, w.seq, w.project_id, p.name, w.goal, w.content, w.parent_id,
 		w.status, w.priority, w.milestone, w.labels, w.attrs, w.reporter, w.assignee, w.waiting_on,
-		w.bundle_name, w.bundle_digest, w.workflow_budget_baseline, w.created_at, w.updated_at, w.closed_at
+		w.bundle_name, w.created_at, w.updated_at, w.closed_at
 		FROM work_items w JOIN projects p ON p.id=w.project_id WHERE w.id=?1`, id).
 		Scan(&wi.ID, &wi.Seq, &wi.ProjectID, &wi.ProjectName, &wi.Goal, &content, &parent,
 			&wi.Status, &wi.Priority, &milestone, &labels, &attrs, &wi.Reporter, &assignee, &waitingOn,
-			&bundle, &bundleDigest, &budget, &wi.CreatedAt, &wi.UpdatedAt, &closed)
+			&bundle, &wi.CreatedAt, &wi.UpdatedAt, &closed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
 	}
@@ -353,13 +346,6 @@ func (m *WIManager) load(id string) (*api.WorkItem, error) {
 	if bundle.Valid {
 		b := bundle.String
 		wi.BundleName = &b
-	}
-	if bundleDigest.Valid {
-		b := bundleDigest.String
-		wi.BundleDigest = &b
-	}
-	if budget.Valid && budget.String != "" {
-		wi.BudgetBaseline = json.RawMessage(budget.String)
 	}
 	if closed.Valid {
 		c := closed.String
@@ -421,19 +407,137 @@ func appendEventTx(tx *sql.Tx, wiID, at, actor, eventType string, payload map[st
 	return err
 }
 
-// Patchable fields (02 §5.1 row 3). Workflow refs and parent are immutable.
+// bundleRef is the ONE bundle-reference persist path, shared by create
+// and PATCH (spec: both entries MUST hit the same code path). A nil/empty
+// name resolves to NULL: an unbind clears the reference.
+func bundleRef(name *string) (bundleName any) {
+	if name == nil || *name == "" {
+		return nil
+	}
+	return *name
+}
+
+// patchableFields (02 §5.1 row 3). Workflow refs and parent are immutable.
 // clean_pause rides the whitelist per the v1.5 contract §1.5 AMEND
 // ("pf resume clears the flag via WI PATCH (whitelist gained
 // clean_pause)") — the operator resume face; the update half below was
 // wired at merge, the whitelist entry was missed there (found by the
 // Lane D e2e s03 pause/resume scenario).
+//
+// bundle_name rides the R2 window (w140): it is patchable exactly
+// while the WI is queued and never claimed — the window gate below
+// refuses it everywhere else.
 var patchableFields = map[string]bool{
 	"goal": true, "content": true, "labels": true, "priority": true,
 	"milestone": true, "waiting_on": true, "clean_pause": true,
+	"bundle_name": true,
+}
+
+// bundlePatch is a parsed PATCH bundle_name field. Name nil = the
+// JSON-null unbind; Name non-empty = bind or rename.
+type bundlePatch struct {
+	Name *string
+}
+
+// binding reports whether the patch binds a non-NULL bundle (the
+// symmetric child rule applies only to binding, not to unbinding; the
+// parser already rejected an empty name).
+func (b *bundlePatch) binding() bool { return b != nil && b.Name != nil }
+
+// parseBundlePatch extracts the bundle name from a PATCH body. Absent →
+// nil (not a bundle patch); malformed shapes → typed CORE-400. A PATCH
+// body carrying a digest key is refused by the patchable-fields gate
+// below (the key is not patchable).
+func parseBundlePatch(fields map[string]json.RawMessage) (*bundlePatch, error) {
+	raw, hasName := fields["bundle_name"]
+	if !hasName {
+		return nil, nil
+	}
+	var bp bundlePatch
+	if json.Unmarshal(raw, &bp.Name) != nil {
+		return nil, Fail(api.ErrCoreBadInput, "", "bundle_name must be a string or null")
+	}
+	if bp.Name != nil && *bp.Name == "" {
+		return nil, Fail(api.ErrCoreBadInput, "",
+			"bundle_name must be a non-empty string or null (null unbinds)")
+	}
+	return &bp, nil
+}
+
+// refuseBundleWithChildrenTx is the symmetric children-side rule (w140,
+// spec R-对称-1): a ticket WITH children must never GAIN a bundle —
+// children count in any status (terminal included). The PATCH bind entry
+// runs it inside its transaction and re-validates it in the guarded
+// write; the create entry cannot violate it (a created row is childless
+// by construction) but runs the mirror rule instead: a bundle-bound
+// ticket is never a parent (PARENT_NOT_REGISTRY, below).
+func refuseBundleWithChildrenTx(q queryRower, wiID string) error {
+	var n int
+	if err := q.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=?1`, wiID).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return Fail(api.ErrCoreBadInput, "HAS_CHILDREN_NO_BUNDLE",
+			"work item has %d child ticket(s); a ticket with children cannot bind a workflow bundle", n)
+	}
+	return nil
+}
+
+// diagnoseR2Window is the R2 bundle-PATCH gate's error face (w140). The
+// window is status==queued AND never claimed; "never claimed" uses the
+// claimTx judgment (spec Assumption 4): no live session row AND no
+// session_claimed event — a force-end clears the session row but the
+// claim event remains, and the freeze stays. waiting_on is deliberately
+// NOT consulted: a waiting ticket inside the window still accepts the
+// PATCH (whether it executes is a queue-segment question, not an
+// immutability one).
+func diagnoseR2Window(q queryRower, wiID string) error {
+	var status string
+	var session, fp sql.NullString
+	err := q.QueryRow(`SELECT status, session_hash, session_fingerprint FROM work_items WHERE id=?1`, wiID).
+		Scan(&status, &session, &fp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
+	}
+	if err != nil {
+		return err
+	}
+	if isTerminal(status) {
+		return Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", status)
+	}
+	if session.Valid && session.String != "" {
+		return Fail(api.ErrCoreBadInput, "IMMUTABLE",
+			"bundle_name froze at first claim (session %s holds the work item)", fp.String)
+	}
+	if status != api.StatusQueued {
+		return Fail(api.ErrCoreBadInput, "IMMUTABLE",
+			"bundle_name is only patchable while queued and never claimed (R2 window); the work item is %s", status)
+	}
+	var claims int
+	if err := q.QueryRow(`SELECT COUNT(*) FROM wi_events
+		WHERE work_item_id=?1 AND event_type='session_claimed'`, wiID).Scan(&claims); err != nil {
+		return err
+	}
+	if claims > 0 {
+		return Fail(api.ErrCoreBadInput, "IMMUTABLE",
+			"bundle_name froze at first claim (a session_claimed event exists)")
+	}
+	return nil
 }
 
 // Patch updates the mutable field set. fields maps field name → raw JSON.
 func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*api.WorkItem, error) {
+	// Bundle fields (w140): parsed up front (pure — no DB access); the R2
+	// window gate and the CAS write run inside the transaction later on.
+	// Concurrency with Claim needs no extra arbitration: the single-writer
+	// connection serializes the two transactions and each one's CAS keeps
+	// the end state consistent — a claim first freezes the bundle (this
+	// write then finds a claimed row and is refused IMMUTABLE), a PATCH
+	// first is simply the bundle the later claim freezes.
+	bp, err := parseBundlePatch(fields)
+	if err != nil {
+		return nil, err
+	}
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
 		return nil, err
@@ -510,7 +614,7 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 		switch field {
 		case "goal":
 			var v string
-			if json.Unmarshal(raw, &v) != nil || strings.TrimSpace(v) == "" || len(v) > api.MaxGoalBytes {
+			if json.Unmarshal(raw, &v) != nil || strings.TrimSpace(v) == "" || utf8.RuneCountInString(v) > api.MaxGoalRunes {
 				return nil, Fail(api.ErrCoreBadInput, "", "bad goal")
 			}
 			sets, args = append(sets, "goal=?"), append(args, v)
@@ -553,12 +657,55 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 			sets, args = append(sets, "waiting_on=?"), append(args, nullableString(v))
 		}
 	}
+	if bp != nil {
+		// R2 window: fast-fail diagnosis on this snapshot; the guarded
+		// write below re-validates the same gates CAS-style (0 rows = the
+		// race was lost, re-diagnosed for the precise wire error).
+		if err := diagnoseR2Window(tx, id); err != nil {
+			return nil, err
+		}
+		if bp.binding() {
+			// Symmetric child rule, inside the same transaction (w140).
+			if err := refuseBundleWithChildrenTx(tx, id); err != nil {
+				return nil, err
+			}
+		}
+		name := bundleRef(bp.Name)
+		sets = append(sets, "bundle_name=?")
+		args = append(args, name)
+	}
 	args = append(args, id)
-	res, err := tx.Exec(`UPDATE work_items SET `+strings.Join(sets, ",")+` WHERE id=?`, args...)
+	q := `UPDATE work_items SET ` + strings.Join(sets, ",") + ` WHERE id=?`
+	if bp != nil {
+		// claimTx-style CAS guard (w140): only a queued, never-claimed row
+		// may take a bundle write, so a concurrent Claim makes THIS write
+		// a 0-row no-op instead of interleaving with it.
+		q += ` AND status='queued' AND session_hash IS NULL
+			AND (SELECT COUNT(*) FROM wi_events e
+			     WHERE e.work_item_id=work_items.id AND e.event_type='session_claimed')=0`
+		if bp.binding() {
+			// The symmetric child rule rides the same guarded write: a
+			// child that landed concurrently makes THIS write a 0-row
+			// no-op (bind-bundle vs new-child: exactly one wins, w140).
+			q += ` AND (SELECT COUNT(*) FROM work_items c WHERE c.parent_id=work_items.id)=0`
+		}
+	}
+	res, err := tx.Exec(q, args...)
 	if err != nil {
 		return nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		if bp != nil {
+			if derr := diagnoseR2Window(tx, id); derr != nil {
+				return nil, derr
+			}
+			if bp.binding() {
+				if derr := refuseBundleWithChildrenTx(tx, id); derr != nil {
+					return nil, derr
+				}
+			}
+			return nil, Fail(api.ErrCoreConflict, "RACE_LOST", "state changed concurrently")
+		}
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
 	}
 	if err := appendEventTx(tx, id, Now(), "", "wi_content_updated", nil); err != nil {
@@ -570,11 +717,12 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 	return m.load(id)
 }
 
+// validWaitingOn accepts the two LIVE values (the rewind-fix retention:
+// 'owner' and 'dependency:<slug>') plus the empty clear. The dead
+// branches ('gate' and 'runtime:*') are deleted (polyforge#149).
 func validWaitingOn(wo string) bool {
 	switch {
-	case wo == "" || wo == "owner" || wo == "gate":
-		return true
-	case strings.HasPrefix(wo, "runtime:") && len(wo) > len("runtime:"):
+	case wo == "" || wo == "owner":
 		return true
 	case strings.HasPrefix(wo, "dependency:") && len(wo) > len("dependency:"):
 		return true
@@ -613,7 +761,7 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error)
 	// stay "held" (M2's clearing rule applies to every terminal transition).
 	res, err := tx.Exec(`UPDATE work_items SET status=?, closed_at=?, updated_at=?,
 		waiting_on=NULL, session_hash=NULL, session_fingerprint=NULL, session_machine=NULL,
-		session_owner=NULL, session_started_at=NULL, clean_pause=0
+		session_started_at=NULL, clean_pause=0
 		WHERE id=? AND status IN (?,?,?)`,
 		api.StatusCanceled, now, now, id, api.StatusQueued, api.StatusPaused, api.StatusBlocked)
 	if err != nil {
@@ -642,8 +790,7 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error)
 // holder). Effect: status→queued, waiting_on=NULL, event wi_resumed; the
 // claim gate (unchanged: queued only) then admits the WI like any queued
 // ticket. Authorization (server layer, v2-converge §7): the WI's reporter,
-// a project maintainer, or an admin — the same gate as
-// TerminateBlocked and cancel.
+// a project maintainer, or an admin — the same gate as cancel.
 func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem, error) {
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
@@ -689,71 +836,6 @@ func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem,
 	}
 	if err := appendEventTx(tx, id, now, actor, "wi_resumed",
 		map[string]any{"from": api.StatusBlocked, "to": api.StatusQueued}); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return m.load(id)
-}
-
-// TerminateBlocked is the §6.4 owner terminate verdict's hub door
-// (polyforge#116): `pf wrap --fail` on a workflow parked blocked. The bounded
-// close dropped the job and cleared the session, so a session-fenced
-// session-end is unavailable there — this is the door that lands the owner's
-// kill verdict. Gate: status==blocked AND the session row is EMPTY (the M2
-// invariant). Effect: status→failed, closed_at set,
-// waiting_on cleared, event wi_failed_blocked; a wrapped (success) verdict is
-// not a door here — a parked workflow has no completed output to wrap, and
-// the owner's continuing move is ResumeBlocked. Authorization is the unified
-// blocked-exit gate (reporter, project maintainer, admin).
-func (m *WIManager) TerminateBlocked(idOrSlug string, actor string) (*api.WorkItem, error) {
-	id, err := m.Resolve(idOrSlug)
-	if err != nil {
-		return nil, err
-	}
-	tx, err := m.db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	var status string
-	var session sql.NullString
-	if err := tx.QueryRow(`SELECT status, session_hash FROM work_items WHERE id=?1`, id).
-		Scan(&status, &session); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
-		}
-		return nil, err
-	}
-	if isTerminal(status) {
-		return nil, Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", status)
-	}
-	if status != api.StatusBlocked {
-		return nil, Fail(api.ErrCoreConflict, "NOT_BLOCKED",
-			"terminate requires a blocked work item (got %s)", status)
-	}
-	if session.Valid && session.String != "" {
-		return nil, Fail(api.ErrCoreConflict, "SESSION_HELD",
-			"a blocked work item must carry no session (M2 cleared it); refuse rather than orphan the holder")
-	}
-	now := Now()
-	// Guarded: only a blocked row flips; 0 rows = concurrent transition.
-	// The session row stays cleared (it already is): a terminal WI must
-	// never stay "held" (M2's clearing rule applies to every terminal
-	// transition).
-	res, err := tx.Exec(`UPDATE work_items SET status=?, closed_at=?, updated_at=?,
-		waiting_on=NULL, session_hash=NULL, session_fingerprint=NULL, session_machine=NULL,
-		session_owner=NULL, session_started_at=NULL, clean_pause=0
-		WHERE id=? AND status=?`, api.StatusFailed, now, now, id, api.StatusBlocked)
-	if err != nil {
-		return nil, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, Fail(api.ErrCoreConflict, "", "state changed concurrently")
-	}
-	if err := appendEventTx(tx, id, now, actor, "wi_failed_blocked",
-		map[string]any{"from": api.StatusBlocked, "to": api.StatusFailed}); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

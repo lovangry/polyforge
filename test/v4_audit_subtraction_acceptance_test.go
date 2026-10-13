@@ -928,9 +928,9 @@ func v4RetiredTokens() []string {
 		v4Tok(`yaml:"`, `silence_minutes"`),
 		v4Tok(`yaml:"`, `tool_minutes"`),
 		v4Tok(`yaml:"`, `include_verdict"`),
-		// C10: the driver's release hard-binding.
-		v4Tok("release", "StepID"),
-		v4Tok("release", "VerdictBinding"),
+		// C10's deletion of the driver's release verdict binding is
+		// superseded by polyforge#134: the release bundle's release and
+		// deploy steps depend on it, so the binding is NOT a retired face.
 		// Dead code.
 		v4Tok("func (d *Driver) ", "Rewind"),
 		v4Tok("func (d *Driver) ", "Terminate"),

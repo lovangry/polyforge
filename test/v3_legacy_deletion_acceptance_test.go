@@ -629,7 +629,7 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 		surfaces = append(surfaces, filepath.Join(root, "skills", "polyforge", n))
 	}
 	// Every workflow step file across the bundles.
-	for _, bundle := range []string{"bug-fix", "chore", "feature-full", "quick-fix"} {
+	for _, bundle := range []string{"bug-fix", "chore", "feature-full", "quick-fix", "release"} {
 		matches, _ := filepath.Glob(filepath.Join(root, "workflows", bundle, "steps", "*.md"))
 		surfaces = append(surfaces, matches...)
 	}

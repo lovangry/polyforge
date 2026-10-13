@@ -26,7 +26,7 @@ func sessionEnv(t *testing.T) (*testEnv, *SessionManager) {
 func mustSessionClaim(t *testing.T, m *SessionManager, env *testEnv, wiID, secret, key string) *api.SessionClaim {
 	t.Helper()
 	claim, err := m.Claim(wiID, api.SessionClaimRequest{
-		SessionID: secret, MachineID: "m1", Owner: "op", IdempotencyKey: key,
+		SessionID: secret, MachineID: "m1", IdempotencyKey: key,
 	}, env.UserID)
 	if err != nil {
 		t.Fatalf("session claim: %v", err)
@@ -36,12 +36,12 @@ func mustSessionClaim(t *testing.T, m *SessionManager, env *testEnv, wiID, secre
 
 // rowSession reads the raw session columns for direct assertions
 // (nil pointers = NULL columns).
-func rowSession(t *testing.T, env *testEnv, wiID string) (status string, hash, fp, machine, owner, started *string, cleanPause bool) {
+func rowSession(t *testing.T, env *testEnv, wiID string) (status string, hash, fp, machine, started *string, cleanPause bool) {
 	t.Helper()
-	var h, f, m, o, st sql.NullString
+	var h, f, m, st sql.NullString
 	err := env.DB.QueryRow(`SELECT status, session_hash, session_fingerprint, session_machine,
-		session_owner, session_started_at, clean_pause FROM work_items WHERE id=?1`, wiID).
-		Scan(&status, &h, &f, &m, &o, &st, &cleanPause)
+		session_started_at, clean_pause FROM work_items WHERE id=?1`, wiID).
+		Scan(&status, &h, &f, &m, &st, &cleanPause)
 	if err != nil {
 		t.Fatalf("read session row: %v", err)
 	}
@@ -53,9 +53,6 @@ func rowSession(t *testing.T, env *testEnv, wiID string) (status string, hash, f
 	}
 	if m.Valid {
 		machine = &m.String
-	}
-	if o.Valid {
-		owner = &o.String
 	}
 	if st.Valid {
 		started = &st.String
@@ -80,7 +77,7 @@ func TestSessionClaimCASRace(t *testing.T) {
 			defer wg.Done()
 			results[i], errs[i] = m.Claim(id, api.SessionClaimRequest{
 				SessionID: api.SessionFingerprint("racer") + strings.Repeat(string(rune('a'+i)), 60),
-				MachineID: "m", Owner: "op", IdempotencyKey: "race-" + string(rune('a'+i)),
+				MachineID: "m", IdempotencyKey: "race-" + string(rune('a'+i)),
 			}, env.UserID)
 		}(i)
 	}
@@ -106,7 +103,7 @@ func TestSessionClaimCASRace(t *testing.T) {
 	// The winner's write landed: running, hash = sha256 of the winner's
 	// secret (the claim itself never exposes the secret, so recompute via
 	// the known racer-secret scheme is impossible here — assert shape).
-	status, hash, fp, _, _, _, _ := rowSession(t, env, id)
+	status, hash, fp, _, _, _ := rowSession(t, env, id)
 	if status != api.StatusRunning || hash == nil || *hash == "" || fp == nil || *fp != winner.SessionFingerprint {
 		t.Fatalf("winner's write did not land: status=%s hash=%v fp=%v", status, *hash, *fp)
 	}
@@ -229,7 +226,7 @@ func TestSessionAttachGates(t *testing.T) {
 	if err := m.Pause(id, secret, true, "operator pause", env.UserID); err != nil {
 		t.Fatalf("clean pause: %v", err)
 	}
-	st, _, _, _, _, _, cp := rowSession(t, env, id)
+	st, _, _, _, _, cp := rowSession(t, env, id)
 	if st != api.StatusPaused || !cp {
 		t.Fatalf("clean pause did not land: status=%s clean_pause=%v", st, cp)
 	}
@@ -251,7 +248,7 @@ func TestSessionForceEnd(t *testing.T) {
 	if err := m.ForceEnd(id, "machine lost", env.UserID); err != nil {
 		t.Fatalf("force-end: %v", err)
 	}
-	st, hash, fp, _, _, _, cp := rowSession(t, env, id)
+	st, hash, fp, _, _, cp := rowSession(t, env, id)
 	if st != api.StatusQueued || cp || (hash != nil && *hash != "") || (fp != nil && *fp != "") {
 		t.Fatalf("force-end did not clear the session: status=%s clean=%v hash=%v fp=%v", st, cp, hash, fp)
 	}
@@ -300,7 +297,7 @@ func TestSessionForceEnd(t *testing.T) {
 	if err := m.ForceEnd(pid, "operator walked away", env.UserID); err != nil {
 		t.Fatalf("force-end of paused WI: %v", err)
 	}
-	st, hash, _, _, _, _, cp = rowSession(t, env, pid)
+	st, hash, _, _, _, cp = rowSession(t, env, pid)
 	if st != api.StatusQueued || cp || (hash != nil && *hash != "") {
 		t.Fatalf("paused force-end wrong: status=%s clean=%v hash=%v", st, cp, hash)
 	}
@@ -356,10 +353,10 @@ func TestSessionEndFenceAndClear(t *testing.T) {
 	if err := m.End(id, api.SessionEndRequest{SessionID: secret, Status: api.StatusBlocked, Note: "bounded fail"}, env.UserID); err != nil {
 		t.Fatalf("session-end blocked: %v", err)
 	}
-	status, hash, fp, machine, owner, started, clean := rowSession(t, env, id)
-	if status != api.StatusBlocked || hash != nil || fp != nil || machine != nil || owner != nil || started != nil || clean {
-		t.Fatalf("blocked did not clear the session row: status=%s hash=%v fp=%v machine=%v owner=%v started=%v clean=%v",
-			status, hash, fp, machine, owner, started, clean)
+	status, hash, fp, machine, started, clean := rowSession(t, env, id)
+	if status != api.StatusBlocked || hash != nil || fp != nil || machine != nil || started != nil || clean {
+		t.Fatalf("blocked did not clear the session row: status=%s hash=%v fp=%v machine=%v started=%v clean=%v",
+			status, hash, fp, machine, started, clean)
 	}
 	// Blocked is NOT claimable (M2): excluded until a human unblocks.
 	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_CLAIMABLE" {
@@ -383,22 +380,19 @@ func TestSessionEndFenceAndClear(t *testing.T) {
 	}
 }
 
-// TestOwnerDoorsOnBlockedWI (polyforge#116): the §6.4 owner doors on a
-// workflow parked blocked on an honest incomplete result. The resume
-// door (blocked → queued for the owner's re-claim — the claim gate
-// itself stays queued-only, so a plain claim still refuses) and the
-// terminate door (blocked → failed, closed_at set). Both refuse a
-// non-blocked work item; both record their event.
+// TestOwnerDoorsOnBlockedWI (polyforge#116): the §6.4 owner exits on a
+// workflow parked blocked on an honest incomplete result. Continue
+// (resume: blocked → queued for the owner's re-claim — the claim gate
+// itself stays queued-only, so a plain claim still refuses) and abandon
+// (cancel: blocked → canceled). The resume door refuses a non-blocked
+// work item and records its event.
 func TestOwnerDoorsOnBlockedWI(t *testing.T) {
 	env, m := sessionEnv(t)
 	id := mustCreateExecWI(t, env, "owner doors on blocked", nil, "")
 
-	// The doors refuse a non-blocked work item (the parked shape only).
+	// The resume door refuses a non-blocked work item (the parked shape only).
 	if _, err := env.WIs.ResumeBlocked(id, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_BLOCKED" {
 		t.Fatalf("the resume door accepted a queued WI: %v", err)
-	}
-	if _, err := env.WIs.TerminateBlocked(id, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_BLOCKED" {
-		t.Fatalf("the terminate door accepted a queued WI: %v", err)
 	}
 
 	// Park blocked the way the runtime's bounded close does: session
@@ -433,36 +427,37 @@ func TestOwnerDoorsOnBlockedWI(t *testing.T) {
 	reclaim := "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
 	mustSessionClaim(t, m, env, id, reclaim, "e-2")
 
-	// Park blocked again; the terminate door lands failed with closed_at
-	// and the session row cleared (M2 holds on every terminal transition).
+	// Park blocked again; the abandon exit (cancel) lands canceled with
+	// closed_at and the session row cleared (M2 holds on every terminal
+	// transition).
 	if err := m.End(id, api.SessionEndRequest{SessionID: reclaim, Status: api.StatusBlocked, Note: "incomplete again"}, env.UserID); err != nil {
 		t.Fatalf("second session-end blocked: %v", err)
 	}
-	if _, err := env.WIs.TerminateBlocked(id, env.UserID); err != nil {
-		t.Fatalf("terminate-blocked: %v", err)
+	if _, err := env.WIs.Cancel(id, env.UserID); err != nil {
+		t.Fatalf("abandon (cancel) of the parked WI: %v", err)
 	}
 	wi, err = env.WIs.Get(id, GetOptions{})
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if wi.Status != api.StatusFailed {
-		t.Fatalf("the terminate door must land failed: %s", wi.Status)
+	if wi.Status != api.StatusCanceled {
+		t.Fatalf("the abandon exit must land canceled: %s", wi.Status)
 	}
 	if wi.ClosedAt == nil {
-		t.Fatalf("the terminate door must set closed_at")
+		t.Fatalf("the abandon exit must set closed_at")
 	}
-	status, hash, _, _, _, _, _ := rowSession(t, env, id)
-	if status != api.StatusFailed || hash != nil {
-		t.Fatalf("the terminate door must leave the session cleared: status=%s hash=%v", status, hash)
+	status, hash, _, _, _, _ := rowSession(t, env, id)
+	if status != api.StatusCanceled || hash != nil {
+		t.Fatalf("the abandon exit must leave the session cleared: status=%s hash=%v", status, hash)
 	}
-	// The doors record their events.
+	// The exits record their events.
 	found := map[string]bool{}
 	events, _ := env.WIs.Events(id)
 	for _, e := range events {
 		found[e.Type] = true
 	}
-	if !found["wi_resumed"] || !found["wi_failed_blocked"] {
-		t.Fatalf("the doors' events missing: %v", found)
+	if !found["wi_resumed"] || !found["work_item_canceled"] {
+		t.Fatalf("the exits' events missing: %v", found)
 	}
 }
 
@@ -589,7 +584,7 @@ func TestSessionPauseCleanFlagDistinction(t *testing.T) {
 	if err := m.Pause(id, secret, false, "", env.UserID); err != nil {
 		t.Fatalf("shutdown pause: %v", err)
 	}
-	st, hash, _, _, _, _, cp := rowSession(t, env, id)
+	st, hash, _, _, _, cp := rowSession(t, env, id)
 	if st != api.StatusPaused || cp || hash == nil || *hash != api.SessionHashHex(secret) {
 		t.Fatalf("shutdown pause wrong: status=%s clean=%v hash=%v", st, cp, hash)
 	}
@@ -601,7 +596,7 @@ func TestSessionPauseCleanFlagDistinction(t *testing.T) {
 	if err := m.Pause(id, secret, true, "operator", env.UserID); err != nil {
 		t.Fatalf("operator pause: %v", err)
 	}
-	st, hash, _, _, _, _, cp = rowSession(t, env, id)
+	st, hash, _, _, _, cp = rowSession(t, env, id)
 	if st != api.StatusPaused || !cp || hash == nil {
 		t.Fatalf("operator pause wrong: status=%s clean=%v", st, cp)
 	}
@@ -640,7 +635,7 @@ func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 		t.Fatalf("view: %v", err)
 	}
 	if view.SessionFingerprint != api.SessionFingerprint(secret) ||
-		view.SessionMachine != "m1" || view.SessionOwner != "op" ||
+		view.SessionMachine != "m1" ||
 		view.SessionStartedAt == "" || view.CleanPause {
 		t.Fatalf("view session block wrong: %+v", view.SessionPublic)
 	}
@@ -661,4 +656,202 @@ func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 	if view2.SessionFingerprint != "" || view2.CleanPause {
 		t.Fatalf("unheld view block not empty: %+v", view2.SessionPublic)
 	}
+}
+
+// TestDerivedParentStatus: the w140 derived epic block — additive on the
+// WI view (and queue), tracking the children (complete when every child
+// is terminal with ≥1 wrapped, in_progress otherwise), never writing a
+// terminal status, auto-returning to in_progress when a new child lands.
+func TestDerivedParentStatus(t *testing.T) {
+	env, m := sessionEnv(t)
+	parent, err := env.WIs.Create(CreateRequest{Project: "alpha", Goal: "derive parent", Reporter: env.UserID})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	mkChild := func(goal, bundle string) string {
+		wi, err := env.WIs.Create(CreateRequest{
+			Project: "alpha", Goal: goal, Reporter: env.UserID,
+			BundleName: strPtrTest(bundle), ParentID: strPtrTest(parent.ID),
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", goal, err)
+		}
+		return wi.ID
+	}
+	c1 := mkChild("derive child one", "w140-d-c1")
+	c2 := mkChild("derive child two", "w140-d-c2")
+
+	// stage 0: children queued → in progress, census visible.
+	v0, err := env.WIs.Get(parent.ID, GetOptions{})
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	view0, err := env.WIs.View(v0)
+	if err != nil {
+		t.Fatalf("view parent: %v", err)
+	}
+	if view0.Derived == nil || !view0.Derived.HasChildren ||
+		view0.Derived.ChildrenTotal != 2 || view0.Derived.Completion != DerivedCompletionInProgress {
+		t.Fatalf("stage 0 derived = %+v, want has_children/total 2/in_progress", view0.Derived)
+	}
+
+	// stage 1: all children terminal with ≥1 wrapped → complete, and the
+	// stored status stays queued (nothing is ever written).
+	if _, err := m.Claim(c1, api.SessionClaimRequest{SessionID: "w140-d-s1"}, env.UserID); err != nil {
+		t.Fatalf("claim c1: %v", err)
+	}
+	if err := m.End(c1, api.SessionEndRequest{SessionID: "w140-d-s1", Status: api.StatusWrapped}, env.UserID); err != nil {
+		t.Fatalf("wrap c1: %v", err)
+	}
+	if _, err := m.Claim(c2, api.SessionClaimRequest{SessionID: "w140-d-s2"}, env.UserID); err != nil {
+		t.Fatalf("claim c2: %v", err)
+	}
+	if err := m.End(c2, api.SessionEndRequest{SessionID: "w140-d-s2", Status: api.StatusFailed}, env.UserID); err != nil {
+		t.Fatalf("fail c2: %v", err)
+	}
+	v1, err := env.WIs.Get(parent.ID, GetOptions{})
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	view1, err := env.WIs.View(v1)
+	if err != nil {
+		t.Fatalf("view parent: %v", err)
+	}
+	if v1.Status != api.StatusQueued || v1.ClosedAt != nil {
+		t.Fatalf("stage 1 wrote a state: status %s closed %v", v1.Status, v1.ClosedAt)
+	}
+	if view1.Derived == nil || view1.Derived.Completion != DerivedCompletionComplete ||
+		view1.Derived.ChildrenTerminal != 2 || view1.Derived.ChildrenWrapped != 1 {
+		t.Fatalf("stage 1 derived = %+v, want complete 2/2 terminal, 1 wrapped", view1.Derived)
+	}
+
+	// stage 2: a new child lands → auto back to in-progress, no reopen op.
+	mkChild("derive child three", "w140-d-c3")
+	v2, err := env.WIs.Get(parent.ID, GetOptions{})
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	view2, err := env.WIs.View(v2)
+	if err != nil {
+		t.Fatalf("view parent: %v", err)
+	}
+	if v2.Status != api.StatusQueued {
+		t.Fatalf("stage 2 status = %s, want queued", v2.Status)
+	}
+	if view2.Derived == nil || view2.Derived.Completion != DerivedCompletionInProgress ||
+		view2.Derived.ChildrenTotal != 3 {
+		t.Fatalf("stage 2 derived = %+v, want in_progress with total 3", view2.Derived)
+	}
+
+	// additivity: a childless ticket carries NO derived key on the wire.
+	solo := mustCreateWI(t, env, "derive childless", nil, "")
+	vs, err := env.WIs.View(env2GetWI(t, env, solo))
+	if err != nil {
+		t.Fatalf("view solo: %v", err)
+	}
+	rawSolo, err := json.Marshal(vs)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var soloDoc map[string]json.RawMessage
+	if err := json.Unmarshal(rawSolo, &soloDoc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := soloDoc["derived"]; ok {
+		t.Fatalf("childless ticket exposes a derived block (must be omitted): %v", soloDoc["derived"])
+	}
+
+	// the queue view carries the block too, and the epic parent queues nowhere
+	// (items: the bound queued child c3; pending: the childless solo ticket).
+	q, err := env.WIs.ReadyQueue("alpha")
+	if err != nil {
+		t.Fatalf("ready queue: %v", err)
+	}
+	if len(q.Items) != 1 || len(q.PendingBundles) != 1 {
+		t.Fatalf("queue segments: items %d pending %d, want c3 in items and the solo ticket pending", len(q.Items), len(q.PendingBundles))
+	}
+	for _, seg := range [][]WIView{q.Items, q.PendingBundles, q.Running, q.Paused} {
+		for _, entry := range seg {
+			if entry.ID == parent.ID {
+				t.Fatalf("epic parent %s appears in a queue segment", parent.ID)
+			}
+		}
+	}
+}
+
+// env2GetWI re-reads a WI by id (helper keeping the test above terse).
+func env2GetWI(t *testing.T, env *testEnv, id string) *api.WorkItem {
+	t.Helper()
+	wi, err := env.WIs.Get(id, GetOptions{})
+	if err != nil {
+		t.Fatalf("get %s: %v", id, err)
+	}
+	return wi
+}
+
+// TestRacePatchBundleVsClaim: PATCH bundle vs session Claim on one
+// queued, never-claimed, childless ticket (the w140 race pair 1). The
+// single-writer connection serializes the two transactions and no extra
+// arbitration exists: the Claim always succeeds; the PATCH succeeds iff
+// it was serialized first (the claim then froze the renamed bundle) and
+// is otherwise a typed refusal that wrote nothing. Either way the end
+// state is consistent and the bundle is frozen afterwards.
+func TestRacePatchBundleVsClaim(t *testing.T) {
+	env, m := sessionEnv(t)
+	const original, renamed = "w140-race1-original", "w140-race1-renamed"
+	patchWins, claimFirst := 0, 0
+	for i := 0; i < 10; i++ {
+		wi, err := env.WIs.Create(CreateRequest{
+			Project: "alpha", Goal: "w140 race1", Reporter: env.UserID,
+			BundleName: strPtrTest(original),
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		var patchErr, claimErr error
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, patchErr = env.WIs.Patch(wi.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"` + renamed + `"`)})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, claimErr = m.Claim(wi.ID, api.SessionClaimRequest{SessionID: "w140-race1-secret"}, env.UserID)
+		}()
+		close(start)
+		wg.Wait()
+
+		if claimErr != nil {
+			t.Fatalf("round %d: a concurrent bundle PATCH must never refuse the claim: %v", i, claimErr)
+		}
+		got, err := env.WIs.Get(wi.ID, GetOptions{})
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got.Status != api.StatusRunning {
+			t.Fatalf("round %d: status = %s, want running", i, got.Status)
+		}
+		want := original
+		if patchErr == nil {
+			patchWins++
+			want = renamed
+		} else {
+			claimFirst++
+			if !IsCode(patchErr, api.ErrCoreBadInput) && !IsCode(patchErr, api.ErrCoreConflict) {
+				t.Fatalf("round %d: a PATCH serialized after the claim is not a typed refusal: %v", i, patchErr)
+			}
+		}
+		if got.BundleName == nil || *got.BundleName != want {
+			t.Fatalf("round %d: bundle = %v, want %s (patchErr=%v)", i, got.BundleName, want, patchErr)
+		}
+		// frozen at the claim: any later bundle PATCH is refused.
+		if _, err := env.WIs.Patch(wi.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"w140-race1-late"`)}); err == nil {
+			t.Fatalf("round %d: bundle PATCH after the claim succeeded; the bundle must be frozen", i)
+		}
+	}
+	t.Logf("w140 race1: PATCH serialized first %d, claim first %d of 10 rounds", patchWins, claimFirst)
 }

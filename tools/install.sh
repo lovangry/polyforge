@@ -339,15 +339,16 @@ else
   # polyforge#113: the mapping-bearing config is the daemon's only
   # workspace source — the daemon argv carries neither a workspace nor a
   # project flag, ever. The api_key is read from the same config, so it
-  # never appears in argv.
+  # never appears in argv. The daemon's OWN persisted settings (and its
+  # first-boot defaults) govern auto and max-concurrent-jobs — the
+  # installer never forces operator settings on the argv (audit B4: an
+  # upgrade must not wipe daemon-state.json's auto/max).
   nohup "$BIN" daemon \
     --config "$CFG" \
     -machine-id "m-$MACHINE_ID" \
-    -auto=false \
     -data-dir "$DAEMON_DATA" \
     -socket "$DAEMON_SOCKET" \
     -workflows-dir "$WORKFLOWS" \
-    -max-concurrent-jobs 4 \
     > "$DAEMON_DATA/daemon.log" 2>&1 &
   DAEMON_PID=$!
   sleep 3

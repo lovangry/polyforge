@@ -103,12 +103,10 @@ type fakeHub struct {
 	// verifies records the wi of every SessionVerify call (the M4
 	// revalidation seam the -revalidate-every flag test pins).
 	verifies []string
-	// resumeBlockeds/terminateBlockeds record the wi of every §6.4 owner
-	// door call (polyforge#116): the resume door (resume-blocked route)
-	// and the terminate door (wrap --fail on a parked workflow).
-	resumeBlockeds    []string
-	terminateBlockeds []string
-	queues            []api.WorkItem
+	// resumeBlockeds records the wi of every §6.4 owner resume call
+	// (polyforge#116): the resume door (resume-blocked route).
+	resumeBlockeds []string
+	queues         []api.WorkItem
 	// reporters maps a canonical id to the WI reporter (owner fallback).
 	reporters map[string]string
 	blockEnd  chan struct{} // non-nil: SessionEnd parks until closed
@@ -136,13 +134,6 @@ type fakeHub struct {
 	heartbeats        []aihubclient.MachineHeartbeat
 	heartbeatErr      error
 	heartbeatAttempts int
-	// shipLedgerCalls/shipLedgers are the ship-ledger seam
-	// (polyforge#123, P1b): every RecordShipLedger call lands here in
-	// call order; ledgerErr, when non-nil, fails every call (the typed
-	// ship-failure test's fault injector).
-	shipLedgerCalls []string
-	shipLedgers     map[string][]api.ShipLedgerEntry
-	ledgerErr       error
 }
 
 type endCall struct {
@@ -173,7 +164,6 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 			WorkItemID:         id,
 			SessionFingerprint: api.SessionFingerprint(req.SessionID),
 			BundleName:         "demo-bundle",
-			BundleDigest:       "deadbeef",
 		},
 		WorkItem: api.WorkItem{ID: id, ProjectName: "proj"},
 	}, nil
@@ -249,11 +239,10 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	return &api.WorkItem{ID: id, Status: st, ProjectName: "proj", Reporter: h.reporters[id]}, nil
 }
 
-// ResumeBlockedWorkItem / TerminateBlockedWorkItem are the §6.4 owner
-// doors (polyforge#116): the resume door returns the WI to claimable
-// (queued, session cleared), the terminate door lands failed. Both
-// record the transition in the status map; the returned view is unused
-// by the routes (only the error matters).
+// ResumeBlockedWorkItem is the §6.4 owner resume door (polyforge#116):
+// the resume door returns the WI to claimable (queued, session cleared).
+// It records the transition in the status map; the returned view is
+// unused by the routes (only the error matters).
 func (h *fakeHub) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -262,16 +251,6 @@ func (h *fakeHub) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error
 	delete(h.held, id)
 	h.resumeBlockeds = append(h.resumeBlockeds, id)
 	return json.RawMessage(`{"id":"` + id + `","status":"` + api.StatusQueued + `"}`), nil
-}
-
-func (h *fakeHub) TerminateBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	id := h.canonicalID(idOrSlug)
-	h.status[id] = api.StatusFailed
-	delete(h.held, id)
-	h.terminateBlockeds = append(h.terminateBlockeds, id)
-	return json.RawMessage(`{"id":"` + id + `","status":"` + api.StatusFailed + `"}`), nil
 }
 
 func (h *fakeHub) Queue(project string) ([]api.WorkItem, error) {
@@ -322,24 +301,6 @@ func (h *fakeHub) Do(method, path string, body, out any) error {
 		return &api.Error{Code: api.ErrDaemonInternal, Detail: "fakeHub: Do call not scripted"}
 	}
 	return fn(method, path, body, out)
-}
-
-// RecordShipLedger records the ship bridge's ledger calls (polyforge#123,
-// P1b seam): every (wi, entries) lands in shipLedgers in call order;
-// ledgerErr, when non-nil, is what the call answers instead (the typed
-// ship-failure test scripts it).
-func (h *fakeHub) RecordShipLedger(wi string, req api.ShipLedgerRequest) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.ledgerErr != nil {
-		return h.ledgerErr
-	}
-	if h.shipLedgers == nil {
-		h.shipLedgers = map[string][]api.ShipLedgerEntry{}
-	}
-	h.shipLedgerCalls = append(h.shipLedgerCalls, wi)
-	h.shipLedgers[wi] = append(h.shipLedgers[wi], req.Repos...)
-	return nil
 }
 
 func (h *fakeHub) verifyCount() int {

@@ -20,7 +20,6 @@ func TestV2DriverEndToEnd(t *testing.T) {
 	// grill: handoff (needs to produce handoff for fix)
 	// fix: handoff
 	// verification: completed
-	// release: completed
 	wi := inst.newWI(t, "v2 driver e2e: envelope-driven quick-fix",
 		[]map[string]any{
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},

@@ -81,7 +81,7 @@ quality belongs here (`review` handles that next).
 ## Honesty
 
 Do not report `pass` on a check you skipped because it seemed slow — mark it `skipped`
-with a reason. A false `pass` here hands a broken fix to `review` and `release`.
+with a reason. A false `pass` here hands a broken fix to `review` and, from there, to whoever ships it.
 
 ## Evidence obligation
 

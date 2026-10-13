@@ -10,8 +10,8 @@
 //  1. shape     — the outcome is in the closed set
 //  2. binding   — wi_id/step_id identity and the spawn_n fence
 //  3. substance — the needs_input question pair, the gate verdict
-//     binding, the human-gate guarantee, the step's declared output
-//     schema and the verification evidence duty
+//     binding, the human-gate guarantee and the release/deploy verdict
+//     binding
 //
 // The MINIMAL CONTRACT (polyforge#147 审计减法 A): an envelope is the
 // outcome + output pair (needs_input adds question_id + question),
@@ -57,6 +57,20 @@ const EvEnvelopeRejected = "envelope_rejected"
 // result.json); this event is the news that its ROUTING was bound to
 // the verdict.
 const EvGateVerdictBound = "gate_verdict_bound"
+
+// releaseStepID and deployStepID are the step ids of the `release`
+// workflow bundle (the only place a release or deploy happens). They are
+// the steps the release verdict binding (rule 3c below) judges: `release`
+// owns the closed vocabulary [pass, fail] (a release WI with no procedure
+// is an error, never a defer) and its pass must name the published
+// artifacts; `deploy` owns [pass, defer, fail] — defer validates on it
+// and nowhere else, because a project may release without deploying. They
+// mirror the bundle's step declarations the same way verificationStepID
+// does in observe.
+const (
+	releaseStepID = "release"
+	deployStepID  = "deploy"
+)
 
 // maxEnvelopeRejects bounds the in-process re-dispatch lane: a step
 // whose envelopes keep failing validation this many times CONSECUTIVELY
@@ -152,6 +166,23 @@ type ResultSpec struct {
 //     event;
 //     3b'. the human-gate guarantee (#138): judged on the DELIVERED
 //     outcome so a gate-fail verdict cannot dodge the human either;
+//     3c. release verdict binding (the release bundle's `release` and
+//     `deploy` steps only, judged on the DELIVERED outcome): a
+//     completed envelope for one of them whose output carries a
+//     top-level verdict is judged against that step's vocabulary. On
+//     `release`: pass owes a non-empty version plus at least one
+//     artifacts_published entry, fail owes a non-empty fail_reason,
+//     and anything else (defer included) is outside the closed
+//     [pass, fail] set. On `deploy`: pass owes a non-empty version
+//     (the version now serving), fail owes a non-empty fail_reason,
+//     defer (no deploy procedure in the capsule) owes neither, and
+//     anything else is outside [pass, defer, fail]. A defer verdict on
+//     any OTHER step is a validation error. The gate binding above
+//     stays prefix-fail only, so a defer verdict clears the deploy
+//     gate and the workflow proceeds, while a fail verdict (with its
+//     fail_reason) still re-binds to gate_failed. A binding error is
+//     an envelope rejection (the in-process retry lane), never a
+//     silent reclassification.
 //
 // The minimal contract: an envelope missing the retired protocol
 // fields is never judged invalid for its absence — there is no
@@ -204,6 +235,15 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	if delivered == OutcomeCompleted && spec.RequiresHumanAnswer && spec.HumanAnswers <= 0 {
 		return fmt.Errorf("driver: step %q requires a human answer: return needs_input first (a completed result is refused until a human has answered a question in this attempt)",
 			spec.StepID)
+	}
+	// 3c. the release verdict binding: judged on the DELIVERED outcome
+	// (a completed envelope). A binding error is an envelope rejection
+	// (the in-process retry lane re-dispatches the step with the typed
+	// reason) — never a silent reclassification.
+	if delivered == OutcomeCompleted {
+		if err := releaseVerdictBinding(res); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -279,4 +319,84 @@ func failVerdictInOutput(output json.RawMessage) (string, bool) {
 		return s, true
 	}
 	return "", false
+}
+
+// releaseVerdictBinding judges one completed envelope against the release
+// bundle's verdict contract. It reads only the top-level scalar fields the
+// output schemas name and mirrors the failVerdictInOutput tolerance: an
+// output that is not a JSON object, or whose verdict is absent/non-string,
+// is not this binding's business (the declared-schema lane stays its
+// authority). `release`: closed vocabulary [pass, fail]; pass owes a
+// non-empty version plus at least one artifacts_published entry. `deploy`:
+// [pass, defer, fail]; pass owes a non-empty version, defer owes neither
+// version nor artifacts_published. fail owes a non-empty fail_reason on
+// both, and defer is illegal on every other step.
+func releaseVerdictBinding(res *StepResult) error {
+	if len(res.Output) == 0 {
+		return nil
+	}
+	var probe struct {
+		Verdict            any   `json:"verdict"`
+		Version            any   `json:"version"`
+		ArtifactsPublished []any `json:"artifacts_published"`
+		FailReason         any   `json:"fail_reason"`
+	}
+	if err := json.Unmarshal(res.Output, &probe); err != nil {
+		return nil // not a decodable output object: not this binding's business
+	}
+	v, ok := probe.Verdict.(string)
+	if !ok {
+		return nil
+	}
+	verdict := strings.ToLower(strings.TrimSpace(v))
+	isRelease := res.StepID == releaseStepID
+	isDeploy := res.StepID == deployStepID
+	bound := isRelease || isDeploy
+	switch {
+	case verdict == "defer":
+		if !isDeploy {
+			return fmt.Errorf("driver: step %q output carries verdict %q — defer validates nowhere but the %s step's schema",
+				res.StepID, v, deployStepID)
+		}
+		if nonEmptyJSONString(probe.Version) || len(probe.ArtifactsPublished) > 0 {
+			return fmt.Errorf("driver: deploy output verdict %q owes neither version nor artifacts_published — a defer deploys nothing; report pass with the deployed version or defer with none", v)
+		}
+		return nil
+	case strings.HasPrefix(verdict, "fail"):
+		if !bound {
+			return nil // the gate binding's business, not this one
+		}
+		if !nonEmptyJSONString(probe.FailReason) {
+			return fmt.Errorf("driver: %s output verdict %q requires a non-empty fail_reason — the failure must say what went wrong", res.StepID, v)
+		}
+		return nil
+	case verdict == "pass":
+		switch {
+		case isRelease:
+			if !nonEmptyJSONString(probe.Version) || len(probe.ArtifactsPublished) == 0 {
+				return fmt.Errorf("driver: release output verdict %q requires a non-empty version and at least one artifacts_published entry — pass means something was actually published", v)
+			}
+		case isDeploy:
+			if !nonEmptyJSONString(probe.Version) {
+				return fmt.Errorf("driver: deploy output verdict %q requires a non-empty version — pass means that version is now serving", v)
+			}
+		}
+		return nil
+	default:
+		if isRelease {
+			return fmt.Errorf("driver: release output verdict %q is outside the closed release vocabulary [pass, fail]", v)
+		}
+		if isDeploy {
+			return fmt.Errorf("driver: deploy output verdict %q is outside the closed deploy vocabulary [pass, defer, fail]", v)
+		}
+		return nil
+	}
+}
+
+// nonEmptyJSONString answers whether one decoded JSON field carries a
+// non-blank string value (absent, non-string and blank all count as
+// empty — the release schema's minLength: 1 discipline).
+func nonEmptyJSONString(v any) bool {
+	s, ok := v.(string)
+	return ok && strings.TrimSpace(s) != ""
 }

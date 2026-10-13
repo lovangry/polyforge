@@ -82,7 +82,6 @@ type Config struct {
 	WI            string
 	CapsuleDir    string
 	BundleName    string
-	BundleDigest  string
 	SessionHandle string
 	SpawnN        int64
 	Spawner       rt.Spawner
@@ -131,10 +130,9 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 	}
 
 	wiInfo := driver.WIInfo{
-		ID:           cfg.WI,
-		CapsuleDir:   cfg.CapsuleDir,
-		BundleName:   cfg.BundleName,
-		BundleDigest: cfg.BundleDigest,
+		ID:         cfg.WI,
+		CapsuleDir: cfg.CapsuleDir,
+		BundleName: cfg.BundleName,
 	}
 
 	// Build the step spawn adapter (per-step process derivation).

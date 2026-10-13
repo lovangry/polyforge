@@ -133,9 +133,9 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 
 	// The plan B follows. Spawn ordinals are chain-wide (B re-seeds its
 	// derivation counter from the cloned spawn journal: its first
-	// dispatch is #4): #4 re-dispatches the interrupted last step and
-	// parks on it, so the WI stays held by B (with a LIVE step process)
-	// while A restarts below.
+	// dispatch is #4): #4 re-runs the interrupted verification step and
+	// parks on it (the last step) so the WI stays held by B while A
+	// restarts below.
 	inst.setPlan(t, wi, []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
@@ -156,13 +156,12 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 		t.Fatal("B holds A's session")
 	}
 
-	// B resumed at the interrupted step and parked on it.
+	// B resumed at the interrupted step (the last one) and parks on it.
 	waitStepStatus(t, daemonB, wi, "verification", "in_progress", 90*time.Second)
 	capB := daemonB.capsuleDir(wi)
-	waitUntil(t, 60*time.Second, "B's step never parked", func() bool {
-		for _, rec := range spawnJournal(t, capB) {
-			n, _ := rec["spawn_n"].(float64)
-			if rec["step_id"] == "verification" && int(n) > preSpawns {
+	waitUntil(t, 60*time.Second, "B's verification never parked", func() bool {
+		for _, rec := range fakeJournal(t, capB) {
+			if n, _ := rec["spawn_n"].(float64); rec["type"] == "park" && int(n) > preSpawns {
 				return true
 			}
 		}
@@ -178,6 +177,11 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 		if p, _ := rec["path"].(string); rec["type"] == "envelope" && strings.HasPrefix(p, capB+string(filepath.Separator)) {
 			stepsRun = append(stepsRun, rec["step"].(string))
 		}
+		// B's parked step writes no envelope: its park record (spawn
+		// ordinal past A's) marks the step B ran.
+		if n, _ := rec["spawn_n"].(float64); rec["type"] == "park" && int(n) > preSpawns {
+			stepsRun = append(stepsRun, rec["step"].(string))
+		}
 	}
 	if contains(stepsRun, "grill") || contains(stepsRun, "fix") {
 		t.Fatalf("B re-ran a completed step: B's envelope writes %v", stepsRun)
@@ -187,7 +191,7 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 		t.Fatalf("B's execution state wrong: %s (current %s)", execDigest(x), x.CurrentStep)
 	}
 	if n := len(spawnJournal(t, capB)); n != preSpawns+1 {
-		t.Fatalf("B's spawn journal holds %d dispatches, want %d (A's 3 + the verification re-dispatch)", n, preSpawns+1)
+		t.Fatalf("B's spawn journal holds %d dispatches, want %d (A's 3 + the re-run verification)", n, preSpawns+1)
 	}
 
 	// A's task-repo commit, carried through aihub, is in B's clone.

@@ -113,6 +113,19 @@ func TestVerbFileShowAndEditRequestShape(t *testing.T) {
 	if got.Body != `{"priority":"low"}` {
 		t.Errorf("edit body = %s, want only the priority key", got.Body)
 	}
+
+	// --bundle binds a name; an empty value is the JSON-null unbind.
+	for _, c := range []struct{ val, want string }{
+		{"release", `{"bundle_name":"release"}`},
+		{"", `{"bundle_name":null}`},
+	} {
+		if code, _, stderr := runPf(t, env, "file", "edit", "wi_abc", "--bundle", c.val); code != 0 {
+			t.Fatalf("edit --bundle %q: code=%d stderr=%s", c.val, code, stderr)
+		}
+		if got := rec.last(); got.Body != c.want {
+			t.Errorf("edit --bundle %q body = %s, want %s", c.val, got.Body, c.want)
+		}
+	}
 }
 
 func TestVerbQueueRequestShape(t *testing.T) {

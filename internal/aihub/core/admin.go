@@ -417,8 +417,7 @@ type CreateProjectRequest struct {
 	Visible     *bool             `json:"visible"`
 }
 
-// CreateProject inserts a project. identifier_hash is a legacy NOT NULL
-// column without a default; it is written as ”.
+// CreateProject inserts a project.
 func (m *AdminManager) CreateProject(req CreateProjectRequest) (*api.Project, error) {
 	if !projectNameRe.MatchString(req.Name) {
 		return nil, Fail(api.ErrCoreBadInput, "", "project name must be 1-40 chars of [a-z0-9-_]")
@@ -439,8 +438,8 @@ func (m *AdminManager) CreateProject(req CreateProjectRequest) (*api.Project, er
 		return nil, err
 	}
 	now := Now()
-	if _, err := m.db.Exec(`INSERT INTO projects(id, name, description, repos, visible, identifier_hash, created_at, updated_at)
-		VALUES (?1,?2,?3,?4,?5,'',?6,?6)`,
+	if _, err := m.db.Exec(`INSERT INTO projects(id, name, description, repos, visible, created_at, updated_at)
+		VALUES (?1,?2,?3,?4,?5,?6,?6)`,
 		id, req.Name, req.Description, string(repos), visible, now); err != nil {
 		if isUniqueViolation(err) {
 			return nil, Fail(api.ErrCoreConflict, "", "project %q already exists", req.Name)

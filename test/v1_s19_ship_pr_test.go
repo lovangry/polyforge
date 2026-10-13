@@ -11,7 +11,10 @@ package test
 // github.com with head branch polyforge/<wi>, and that a second ship
 // reuses the SAME single OPEN PR instead of duplicating it.
 //
-// The scenario SKIPS (never hard-fails) when a gate is missing:
+// The scenario is OPT-IN: it creates a real repo and PR with the machine's
+// gh, so it only runs with POLYFORGE_TEST_REAL_GITHUB=1 (the release gate's
+// `make test` never creates real GitHub objects).
+// It SKIPS (never hard-fails) when a gate is missing:
 // testing.Short() (no network in the short lane), the gh binary absent,
 // or gh not authenticated. Each skip message names the missing gate.
 // There is no lane guard of any kind: a driver-pinned scenario has no
@@ -135,6 +138,9 @@ func TestV1S19ShipPR(t *testing.T) {
 	// daemon boots — the gates run first thing, exactly as before. (The
 	// gates are inlined here — the same shape as the harness's requireGh
 	// helper — so this file carries its own gate literals.)
+	if os.Getenv("POLYFORGE_TEST_REAL_GITHUB") != "1" {
+		t.Skip("this e2e creates a real private GitHub repo + PR with this machine's gh; set POLYFORGE_TEST_REAL_GITHUB=1 to run it")
+	}
 	if testing.Short() {
 		t.Skipf("short mode: skipping the real-github ship PR e2e (network + gh required)")
 	}

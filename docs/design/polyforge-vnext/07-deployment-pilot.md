@@ -47,7 +47,7 @@
 - **不实现外部 tracker sync（Jira/GitHub Issues 等双向同步）**：v1 期间该能力由并存的旧
   aihub 系统承担（§2.1）；现行 `/pf-sync` 入口的处置（不迁移为 skill）仍以
   `00-architecture.md#§11.1` 迁移矩阵为准，本条裁定的是**能力范围**而非入口去向。
-- **发版（release）= bundle 内 release step 钩子（定稿裁定）**：平台零发版专用代码；发版逻辑长在项目
+- **发版（release）= bundle 内 release step 钩子（定稿裁定；〔已被 2026-10-13 取代：release 槽位已从交付 bundle 删除，发版只经 `workflows/release/`，见 `01-workflow-skills.md`「发版独立成 bundle」〕）**：平台零发版专用代码；发版逻辑长在项目
   bundle 的 `agents/release.md`（模板随参考 bundle 交付，`01-workflow-skills.md#§4.2`），多项目天然隔离。
   平台自身发版（`aihub` 服务二进制与工作机二进制二产物）是同一钩子的实例，不另立发版模型。
   **`pf upgrade` 是部署管道而非发版系统**：只负责下载已发布制品、校验 sha256、quiesce、替换二进制、拉起
@@ -59,7 +59,7 @@
   权限面）是刻意留白的后续设计——P2 子票裁定，本层只定"两凭据分离"这一合同。本项目自身的两个 procedure
   （repo 内 `.polyforge/release.sh` 发版、`.polyforge/deploy.sh` 部署）即这两类凭据的消费方，模板与 dispatcher
   对其内容不做任何假设（`01-workflow-skills.md#§4.2` 的 dispatcher 裁定）。
-- **deploy face 永远人门控（polyforge#123）**：`.polyforge/deploy.sh|.md` 是项目 repo 内的部署 procedure
+- **deploy face 永远人门控（polyforge#123；〔已被 2026-10-13 取代：deploy 现由 release bundle 的 `deploy` step 触发，防线为 `--confirm <version>`、服务器侧锁、失败自动回滚，见 `01-workflow-skills.md`〕）**：`.polyforge/deploy.sh|.md` 是项目 repo 内的部署 procedure
   （aihub 升级 + 每台工作机 `pf upgrade` 序列，含回滚），**只由人触发**——任何自动化路径（workflow step、
   daemon lane、release procedure）不得引用或触发它；本部署面不为其开设任何 CLI verb，§6 的升级序列由人在
   各机器上手动执行。deploy 不是发版（release 产出制品，deploy 只把已发布版本装上机器），二者凭据亦分离
@@ -230,7 +230,7 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 
 1. 在主机创建 `<data_dir>`（权限 `0750`，属主为服务运行用户）。
 2. 部署 `aihub` 二进制；启用并启动 systemd 单元 `polyforge-aihub`：启动序列内部依次完成
-   `service.lock` 获取 → schema 迁移到 v1（`02-aihub-core.md#§11`）→ 自注册（`02-aihub-core.md#§4.10` `core_meta`）。
+   `service.lock` 获取 → schema 安装（`CREATE TABLE IF NOT EXISTS`；无迁移）→ 后台 memory 对账（启动期 `RebuildIndex`）。
 3. 在每台工作机部署单一工作机二进制（`pf`，含 `daemon` 子命令），并按该机器操作系统配置其进程监督方式，使 `daemon` 子命令在监督下长驻运行（§3）：**Linux** 工作机
    注册并启用 systemd 单元 `polyforge-daemon`（ExecStart 指向 `<binary> daemon`）；**macOS** 工作机安装
    launchd agent/daemon（`plist` 设 `KeepAlive`，随登录/开机拉起）或由操作者以前台常驻 `<binary> daemon` 方式运行并自行负责重启——两者均需
@@ -247,7 +247,7 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
    （`01-workflow-skills.md#§2.1`/§4.6）——在 AIHub 服务主机与各工作机确认 aihub checkout 内
    `workflows/<bundle-name>/`（`workflow.md` + `agents/*.md`）存在即可；创建 WI 时由 AIHub 服务端从
    本机 checkout 读取并固化三 scalar（`02-aihub-core.md#§4.5`），执行侧由 WI Agent 第 0 步从工作机本机
-   checkout 物化并按 `bundle_digest` 校验（`03-execution-capsule.md#§4.5`）。
+   checkout 物化（不做 digest 校验——校验链已删，polyforge#149 B9；`03-execution-capsule.md#§4.5`）。
 5. 把路由 skill 安排到参与 Pilot 的用户 harness——用户机器的部署物到此为止只有工作机二进制与路由
    skill 引用（§2.3）：Pi 侧在 settings 的 skills 配置中加一行路径，指向本机 aihub checkout 内的
    `skills/polyforge/`（零复制）；Claude Code 侧经 plugin marketplace 安装
@@ -391,7 +391,7 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
   schema 落地的情况。若迁移前状态本身已不可用，唯一恢复路径是 `pf-deploy rollback` 到最近一次
   §6.2 备份点。
 - **误起第二个 aihub 进程**：`02-aihub-core.md#§2.2` 的 `service.lock`（第二层，先于本文的写屏障存在）使后起
-  进程立即以 `CORE-508` 退出，不进入任何写路径。
+  进程立即以启动期锁拒绝退出，不进入任何写路径。
 - **升级窗内新 claim/发布请求**：一律走正常的失败→退避重试路径（同第一条），不存在"升级期间
   的特殊 API 契约"。
 
@@ -591,7 +591,7 @@ Agent 独占写入的 `runtime-state/execution.json`（INV-6）才具备 INV-D3 
      恢复到最近备份点。
   2. 升级窗口内工作机 Daemon 断连 1 小时：预期 WI Agent 侧退避重试（`05-sync-revision-recovery.md#§6`），AIHub 恢复后
      由下一次 `00-architecture.md#§4.3` 触发事件驱动一次全扫描收敛，无数据丢失。
-  3. 两个 `aihub` 进程在同一主机并发启动：预期后起进程以 `CORE-508` 立即退出。
+  3. 两个 `aihub` 进程在同一主机并发启动：预期后起进程立即退出（启动期锁拒绝）。
   4. 对处于 running/paused/blocked 状态的 WI 发起删除：预期 `05` `SYNC-409`，文件系统内容不变。
   5. tombstone 窗口（24h）内撤销删除：预期该 WI 的 Revision 数据与 Memory 引用完整恢复。
 
@@ -865,7 +865,7 @@ Core 侧转为 `blocked`/`waiting_on=owner`；Core 事件流中不出现 `WF-101
   Job 执行模式（Interactive/Batch/Drain）与优雅停机联调（`00-architecture.md#§3.4`/§3.5、`04-local-runtime.md#§6`）→ Pilot 启动
   （§9.1）。每一步完成的判据是该步所属权威文档 §6/§9 定义的自检通过，不是某个预定的日期。
 - 一期从无到有，**不迁移执行状态**（workflow-v2 执行状态不迁移，`00-architecture.md#§1.2`）；
-  **Memory 存量是唯一迁移项**（`06-memory-search.md#§10`：一次性导出为 Markdown 权威文件 + `rebuild-index`）；
+  **Memory 存量是唯一迁移项**（`06-memory-search.md#§10`：一次性导出为 Markdown 权威文件，重启 aihub 让启动对账全量重建索引）；
   升级/回滚序列见 §6.3/§6.4。
 - Pilot 达标（30 天或 40 张 WI 观测期内未触发 §9.3 任一门槛，且 Interactive/Batch/Drain 三种
   模式与至少一次优雅停机均已被实际触发，§9.1）→ **切换**：生产工作整体迁往 vNext AIHub

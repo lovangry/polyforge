@@ -12,11 +12,15 @@ import (
 )
 
 // ReadyQueue is the response shape of GET /api/v1/projects/{p}/ready-queue.
+// pending_bundles is the w140 additive segment: registration tickets
+// (no bundle) that are childless, queued, unblocked and not waiting —
+// the 待选 bundle candidates a client may bind a workflow onto.
 type ReadyQueue struct {
-	Project string   `json:"project"`
-	Items   []WIView `json:"items"` // executable: queued, unblocked, not a registration ticket
-	Running []WIView `json:"running"`
-	Paused  []WIView `json:"paused"`
+	Project        string   `json:"project"`
+	Items          []WIView `json:"items"` // executable: queued, unblocked, not a registration ticket
+	Running        []WIView `json:"running"`
+	Paused         []WIView `json:"paused"`
+	PendingBundles []WIView `json:"pending_bundles"` // w140: 待选 bundle (additive; old clients ignore it)
 }
 
 var priorityRank = map[string]int{
@@ -45,15 +49,18 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 		return nil, err
 	}
 	q := &ReadyQueue{
-		Project: projectName,
-		Items:   []WIView{},
-		Running: []WIView{},
-		Paused:  []WIView{},
+		Project:        projectName,
+		Items:          []WIView{},
+		Running:        []WIView{},
+		Paused:         []WIView{},
+		PendingBundles: []WIView{},
 	}
 	// Loaded per candidate below: bundle_name decides execution vs
 	// registration ticket (02 §5.1b: the executable segments always exclude
-	// registration tickets — they cannot be claimed, #17).
-	rows, err := m.db.Query(`SELECT id, COALESCE(waiting_on,''), bundle_name IS NULL FROM work_items
+	// registration tickets — they cannot be claimed, #17); the child count
+	// feeds the w140 pending-bundle segment (an epic never queues).
+	rows, err := m.db.Query(`SELECT id, COALESCE(waiting_on,''), bundle_name IS NULL,
+		(SELECT COUNT(*) FROM work_items c WHERE c.parent_id=work_items.id) FROM work_items
 		WHERE project_id=? AND status IN ('queued','running','paused')`, projectID)
 	if err != nil {
 		return nil, err
@@ -63,18 +70,20 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 		view         *WIView
 		waitingOn    string
 		registration bool
+		children     int
 	}
 	var cands []cand
 	var ids []string
 	for rows.Next() {
 		var id, waiting string
 		var registration bool
-		if err := rows.Scan(&id, &waiting, &registration); err != nil {
+		var children int
+		if err := rows.Scan(&id, &waiting, &registration, &children); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		ids = append(ids, id)
-		cands = append(cands, cand{waitingOn: waiting, registration: registration})
+		cands = append(cands, cand{waitingOn: waiting, registration: registration, children: children})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -86,13 +95,19 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	if err != nil {
 		return nil, err
 	}
+	// One grouped derived-epic read (w140): every queue entry carries the
+	// additive derived block (parents show their child census).
+	derivedBlocks, err := m.db.derivedBatch(ids)
+	if err != nil {
+		return nil, err
+	}
 	for i := range cands {
 		wi, err := m.load(ids[i])
 		if err != nil {
 			return nil, err
 		}
 		cands[i].wi = wi
-		cands[i].view = &WIView{WorkItem: *wi, SessionPublic: sessionBlocks[ids[i]]}
+		cands[i].view = &WIView{WorkItem: *wi, SessionPublic: sessionBlocks[ids[i]], Derived: derivedBlocks[ids[i]]}
 	}
 	sortBy := func(list *[]WIView) {
 		// stable priority→created_at ordering
@@ -110,6 +125,21 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 			q.Paused = append(q.Paused, *c.view)
 		case api.StatusQueued:
 			if c.registration {
+				// w140: the 待选 bundle segment (additive): a childless
+				// registration ticket that would execute if it had a
+				// bundle — the same exclusions as the executable segment
+				// (waiting_on and unfinished blocks edges). An epic
+				// (has children) never queues: it is neither executable
+				// (no bundle, #17) nor a pending-bundle candidate.
+				if c.children == 0 && c.waitingOn == "" {
+					blocked, err := m.hasUnfinishedBlockers(c.wi.ID)
+					if err != nil {
+						return nil, err
+					}
+					if !blocked {
+						q.PendingBundles = append(q.PendingBundles, *c.view)
+					}
+				}
 				continue // registration tickets never execute (#17)
 			}
 			if c.waitingOn != "" {
@@ -128,5 +158,6 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	sortBy(&q.Items)
 	sortBy(&q.Running)
 	sortBy(&q.Paused)
+	sortBy(&q.PendingBundles)
 	return q, nil
 }

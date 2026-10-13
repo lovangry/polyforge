@@ -56,9 +56,8 @@ func (rs *recordingStarter) last() AgentStartInput {
 // relaunch as the raw recovery cause.
 func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	setGitIdentity(t)
-	wfDir, pinned := frontmatterBundle(t, w079Frontmatter)
+	wfDir := frontmatterBundle(t, w079Frontmatter)
 	hub := newFakeHub()
-	hub.digest = pinned
 	ws := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
@@ -124,7 +123,7 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 // effective_candidates in the capsule, changes nothing.
 func TestRecoveryReconstructedJobRehydratesRecordNotYamlOrCapsule(t *testing.T) {
 	setGitIdentity(t)
-	wfDir, _ := frontmatterBundle(t, w079Frontmatter)
+	wfDir := frontmatterBundle(t, w079Frontmatter)
 	sp := &scriptedSpawner{}
 	cfg := Config{
 		MachineID:               "m-test",
@@ -171,7 +170,7 @@ func TestRecoveryReconstructedJobRehydratesRecordNotYamlOrCapsule(t *testing.T) 
 // rehydrates to nil: bundle-only behavior, exactly today's.
 func TestRecoveryAuditlessCapsuleRehydratesNil(t *testing.T) {
 	setGitIdentity(t)
-	wfDir, _ := frontmatterBundle(t, w079Frontmatter)
+	wfDir := frontmatterBundle(t, w079Frontmatter)
 	sp := &scriptedSpawner{}
 	cfg := Config{
 		MachineID:               "m-test",

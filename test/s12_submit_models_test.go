@@ -106,7 +106,7 @@ func TestS12ManualModelsSurviveDaemonRestart(t *testing.T) {
 	w113WaitCompleted(t, capDir, 300*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 
-	for _, step := range []string{"grill", "fix"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if got := w079Model(t, capDir, step); got != "s12-m1" {
 			t.Fatalf("step %s model %q after the restart, want the manual head s12-m1", step, got)
 		}

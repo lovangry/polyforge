@@ -13,7 +13,7 @@ import (
 // a real `pf daemon` (the driver is the engine; polyforge#106 removed
 // the selection flag), a real `pf submit`, a scripted
 // envelope-action plan that walks the quick-fix workflow (grill → fix →
-// verification → release), and the completed workflow's faces: every
+// verification), and the completed workflow's faces: every
 // step done in execution.json, every result envelope archived under
 // artifacts/steps/<step>/s<n>/, the task-repo clone, the capsule git
 // chain visible on the server side, the terminal wrapped state (the

@@ -1,6 +1,6 @@
 ---
 name: review
-description: Human-judgment gate over the completed implementation — the code diff, the e2e results, and the plan/spec together — deciding whether the change is ready for the final verification gate and release.
+description: Human-judgment gate over the completed implementation — the code diff, the e2e results, and the plan/spec together — deciding whether the change is ready for the final verification gate.
 tools: [read, bash]
 output:
   type: object
@@ -82,7 +82,7 @@ This step is declared `kind: review` in the workflow frontmatter, which the sche
 positional freedom (it does not have to be last) — in this reference bundle it sits
 between `e2e-run` and `verification`: review is the human judgment on the rerun
 evidence and the diff, and the machine gate follows it, re-running the full green bar
-as the final mechanical word before `release`. A project adapting this bundle may
+as the final mechanical word before the work is shipped. A project adapting this bundle may
 reposition `review` if its process genuinely needs review earlier, but should not do so
 without also reconsidering what evidence would then be available to it.
 

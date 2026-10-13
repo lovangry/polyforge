@@ -215,7 +215,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | **chat**（原称 session，改名 `PF_CHAT_ID`，避免与 v1.5"session_id = 推送凭证"重名） | 由 **pf 生成**，会话启动时由 Claude Code SessionStart 钩子 / pi 扩展调用 pf 生成，经环境变量 **`PF_CHAT_ID`** 注入每条命令（CC：`CLAUDE_ENV_FILE`，按会话隔离，已核实 `~/.claude/session-env/<id>/`；pi：`tool_call` 钩子改写命令）。模型不经手；上下文只放一句提示，丢失不影响功能。**resume 同一对话 = 同一 chat**（harness 会话 → chat id 映射存于 daemon 数据目录） |
 | 隔离 | 每会话独立进程；daemon 派生 step 时清除所有 `PF_*`（`runtime/spawn.go:115`），step agent 拿不到 chat id |
 | 性质 | `PF_CHAT_ID` 是"通知谁"的**标签，不是凭证**，不得用于权限判断；不得写入任何共享或 agent 可写的文件 |
-| **负责人** | 交互提交的 WI：提交人（`PF_USER_ID`）；自动领取的 WI：reporter；无来源记录的在途 WI：reporter |
+| **负责人** | 该 WI 的 **reporter**（创建它的认证用户；交互提交、自动领取与在途 WI 一律如此——aihub 没有比 reporter 更可信的身份来源，D5 裁定）。门范围：负责人可 continue（resume-blocked）与 abandon（cancel）；ForceEnd 等恢复门仍限 admin/maintainer |
 | **任务来源 origin** | 每个 WI 的 daemon 侧记录：`chat`（含 chat id、负责人）或 `auto`（仅负责人） |
 | 通知路由 | 有订阅 chat → 通知 chat；否则 → 通知负责人（其下次任一会话启动时提示，可选择订阅；将来经 #84 推外部渠道） |
 
@@ -238,7 +238,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 **原则**：session 是唯一的锁；`execution.json` 是唯一的进度账本；推到 aihub git 才算保存；**绝不悄悄从远端重建本地现场**（#103）。
 
 **已定**
-- 某 WI 的 capsule 在重启时缺失 / 项目未映射（cli.toml 无该项目的 workspace 映射）：**只该 WI 被置为普通的 aihub `blocked`**——经与其他 blocked 结局相同的 bounded-fail 收尾发 SessionEnd(blocked)，原因备注写明成因（"capsule missing at <path> …" / "project <p> is not in the daemon's [workspace] mapping …"）；**本地不停放任何东西**（无本地 job 记录、无槽位），仍写 `capsule_missing` / `project_unmapped` 事件（`pf watch` 可见）；daemon 照常启动、其余 WI 照常恢复。人（如需）先修复成因（补映射），再 `pf resume <wi>`：这是普通的 blocked 门（resume-blocked + daemon claim）= 从 aihub capsule 链 + task-repo 载体 ref（`refs/pf-task/<name>`）**重新领取**；死现场（如有）被隔离，已完成的步骤不重跑，最后一次推送之后发布的工作丢失。`pf cancel <wi>` / `pf wrap --fail <wi>` 就是普通的 blocked 出口（hub cancel / terminate-blocked）。session-end 只接受 wrapped|failed|blocked|paused。
+- 某 WI 的 capsule 在重启时缺失 / 项目未映射（cli.toml 无该项目的 workspace 映射）：**只该 WI 被置为普通的 aihub `blocked`**——经与其他 blocked 结局相同的 bounded-fail 收尾发 SessionEnd(blocked)，原因备注写明成因（"capsule missing at <path> …" / "project <p> is not in the daemon's [workspace] mapping …"）；**本地不停放任何东西**（无本地 job 记录、无槽位），仍写 `capsule_missing` / `project_unmapped` 事件（`pf watch` 可见）；daemon 照常启动、其余 WI 照常恢复。人（如需）先修复成因（补映射），再 `pf resume <wi>`：这是普通的 blocked 门（resume-blocked + daemon claim）= 从 aihub capsule 链 + task-repo 载体 ref（`refs/pf-task/<name>`）**重新领取**；死现场（如有）被隔离，已完成的步骤不重跑，最后一次推送之后发布的工作丢失。`pf cancel <wi>` 就是普通的 blocked 放弃出口（hub cancel；`pf wrap --fail <wi>` 对 parked 工作流不再有任何 hub 门，见 §6.4 收紧）。session-end 只接受 wrapped|failed|blocked|paused。
 - **不加租约**（保留 v1.5 裁决：领取永不驱逐活着的持有者，接管是单独的特权操作）。改为 WI 级"失联"提示：**WI 失联 = 其持有 daemon 的心跳超时（统一一个阈值，替代 aihub 展示层的 5 分钟与本文早先的 15 分钟两套），或该 WI 从该 daemon 心跳上报的在跑列表中消失**；在 `pf queue`/`pf watch` 提示"可接管"并发事件。
 - 同一步失败计数上限（2.3）；driver 异常退出界（2.3）。
 
@@ -257,7 +257,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 ## 7. 生命周期简化（已定方向）
 
 - "resume"现有 5 种含义 → 对人只保留 **暂停 / 继续**；系统内部自动处理统一称 **恢复（recover）**，不再叫 resume。
-- blocked 三扇门（unblock / resume-blocked / terminate-blocked）→ **继续 / 放弃**两个动作。
+- blocked 两扇门（unblock / resume-blocked）→ **继续 / 放弃**两个动作（terminate 门已删，polyforge#149）。
 - **"继续"的范围（r2 补）**：默认由**原持有 daemon 原地继续**；跨 daemon 继续前，必须确认 aihub 上的 capsule 版本等于原 daemon 封存时的版本，否则拒绝（#116 教训：防止拿到 blocked 之前的旧状态）。
 - 继续 / 放弃的权限（已定）：**任务负责人、项目 maintainer、admin** 均可；顺带修 resume-blocked 只查 key scope 不查成员。
 - WI 依赖关系保留（#120 已解冻）。
@@ -271,7 +271,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | 三（改逻辑，随本设计） | supervisor 猜测型车道（hang/idle/probe/wall/turn_duration/工具豁免/问题豁免/ack veto）→ 2.3 规则（**M4 重验保留**）；watch.sh → `pf watch`；三模式 → 第 5 节 | `pf watch`（Go）、watch.sh / watch-probe 删除：**已完成**（`f642e06`、`c01bd94`）；supervisor 车道重写：**已完成**（`internal/polyforge/supervise`、`driver/supervision.go`）；三模式简化：**已完成**（`v2/m2-modes`：`pf ops auto on|off` + `pf ops max N`，守护进程旗标 `-auto`，无兼容别名） |
 | 四 | takeover/adopt-session 简化（先验证"结束会话后重新领取能从断点继续"）；心跳保留并修权限漏洞 | takeover 简化：**已验证并完成**——验收测试 `test/v2_m3_end_session_recovery_test.go`（A 完成两步后被 SIGKILL → 管理员强制结束会话 → B 普通领取，从中断步继续、A 的任务仓提交经 `refs/pf-task` 还原、旧密钥写入被拒、A 重启后释放不复活）通过后，删除 `pf takeover`、`pf submit --takeover`、`pf verify-session`、daemon `takeover`/`adopt-session` 路由、`runtime/adopted.go` 托管、aihub `force-takeover` 端点；恢复路径 = 管理员/维护者 `pf ops end-session <wi> --reason ...`（aihub `POST /work-items/{id}/force-end-session`，WI→queued，审计事件 `session_superseded`）+ 任意 daemon 普通 `pf submit`；**M4 重验保留**。心跳权限漏洞：未动 |
 | 已完成 | release-intent 门禁（#139，commit a159c8c）；driver 机械保证（needs_input 校验、仅 feature-full grill-review 的 `requires_human_answer`、V4 command_evidence 门禁，`f00b398`）；重新领取两个 bug（git-dir 隔离、克隆失败拒绝 InitLocal / DAEMON-516）；身份模型（daemon-id 文件、`pf chat init`、`PF_CHAT_ID`、origin）；持久化提交队列 + 待修复停放 + `pf resume` 续跑（DAEMON-517；此后已并入 blocked，见第6节）+ `daemon_restarted`/`submit_*` 事件；bounded-fail 杀树 + 推送、end_pending 重试、隔离原子性、继续/放弃走人的 key（`pf resume`/`pf cancel`/`pf wrap --fail`）、`unblock` 动词移除、blocked 封存跨 daemon 校验（DAEMON-518）；待修复 WI 的放弃路径（此后已并入 blocked，见第6节）；孤儿 step 进程回收；`atomicWrite` 修复 | 已完成（`v2/final`）；含孤儿回收的双标记边界（`PF_WI_ID` + `PF_DAEMON_ID`，同机多 daemon 互不误杀）|
-| 审计减法 A（polyforge#147） | 结果信封瘦身为最小契约（`protocol_version`/`result_id`/`artifacts` 清单/`handoff_ref` 摘要/`command_evidence` 与其宽容层全删，§2.6）；拒绝重启层删除（3 次进程内重试仍不合格 → blocked `result_invalid`）；未用 frontmatter 键删除（`inputs`/`outputs`+`schema`/`requires_command_evidence`/`silence_minutes`/`tool_minutes`/`include_verdict`/`on_fail: terminate`）；三个 bundle 的 release step 与 driver release 硬绑定删除；driver 死代码（`Driver.Rewind`/`Terminate`、`Budget.USD`/`Tokens`、stdLogger 兜底、调试输出）删除；T 累计语义归位（`runtime_base_ms` 删）+ 超时类死因放宽翻倍（D6）；限流类死因独立成类、原模型退避重试（D7） | **已完成**（本票；交付清单见 WI capsule 的 `artifacts/code-summary.md`） |
+| 审计减法 A（polyforge#147） | 结果信封瘦身为最小契约（`protocol_version`/`result_id`/`artifacts` 清单/`handoff_ref` 摘要/`command_evidence` 与其宽容层全删，§2.6）；拒绝重启层删除（3 次进程内重试仍不合格 → blocked `result_invalid`）；未用 frontmatter 键删除（`inputs`/`outputs`+`schema`/`requires_command_evidence`/`silence_minutes`/`tool_minutes`/`include_verdict`/`on_fail: terminate`）；三个 bundle 的 release step 删除（与 #134 一致；driver 的 release/deploy verdict binding 按 #134 保留，供 `workflows/release` bundle 使用，作用于最小信封的 `output`）；driver 死代码（`Driver.Rewind`/`Terminate`、`Budget.USD`/`Tokens`、stdLogger 兜底、调试输出）删除；T 累计语义归位（`runtime_base_ms` 删）+ 超时类死因放宽翻倍（D6）；限流类死因独立成类、原模型退避重试（D7） | **已完成**（本票；交付清单见 WI capsule 的 `artifacts/code-summary.md`） |
 | 迁移代码 | v0→v1 迁移（`migrate-memories`/`migrate-work-items`、`core/import.go`、`tools/v0export`、`seed-v1.sh` 等）：owner 裁定提前删除，不再设观察期 | **已完成**（`v2/m1-migrate`） |
 | 兼容垫片 | owner 裁定 v2 不留向后兼容代码：`-mode` 别名、`daemon-state.json` 的 `mode` 迁移、`pf observe` 别名、`pf unblock` 提示桩、aihub `unblock` 端点与 `WIManager.Unblock`、`[watch.*]`/`watch_*` 配置容忍、`project_scope` 别名、对遗留 `takeover` 队列项的专名处理 | **已完成**（`v2/final`）；配置加载现对未知 section（含 `[watch.*]`）报错，未知顶层平铺键同样报错（含已移除的 `url` 别名；`533e032`） |
 
@@ -317,6 +317,19 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 5. **#87、#88**：保留至"失联提示 + 接管"落地后再清理；接管（`pf ops end-session`）已落地，现可清理。
 6. **epic/task 概念（#133/#134）**：保留。
 7. **继续 / 放弃权限**：任务负责人、项目 maintainer、admin。
+
+## 12. polyforge#140 裁决（2026-10-13，拆分 a：wi-kind 契约——父子与 bundle 规则）
+
+拆分 a（aihub 端 + 设计文档）落地 grill-review 的调整 1–6（w140 裁决记录；拆分 b 承接客户端面：CLI/skills/daemon submit 预检）。接口细节（字段、reason 清单、响应形状、部署与回滚）权威在 `wi-kind-contract.md`；本节登记裁决本身：
+
+1. **epic 由数据派生，不落列**：不引入 `work_items.kind` 列、无迁移、无 PARENT_NOT_EPIC/EPIC_NO_BUNDLE 等新错误码；有子票（`parent_id` 指向它）即 epic，可选 `epic` label 仅展示，服务端不据此强制任何行为。
+2. **父子规则对称化**：两条对称规则取代旧“父票必须 epic”的单向表述——①有子票的票不可绑定 bundle（create 与 PATCH 共用同一校验路径，`CORE-400`，`reason=HAS_CHILDREN_NO_BUNDLE`）；②已绑 bundle 的票不可作父票（沿用 `PARENT_NOT_REGISTRY` 语义，不留旧名别名）。bundle 只落在叶子上，epic/父票永远是登记票。
+3. **R2 窗口**：`bundle_name` 的固化时点从“建票即冻结”改为**首次认领冻结**（R2 窗口：status=queued ∧ 从未认领；waiting_on 非空不单独拒绝）；窗口内 `PATCH bundle_name` 三向变更（NULL→X / X→Y / X→NULL 解绑），与 create 共用同一落库路径（引用即名字本身——digest 链已删，polyforge#149 B9：不再派生 stand-in，也不接受显式 digest）；`wi_repo_inventory` 不触碰。
+4. **待选 bundle 分段**：ready queue 新增“待选 bundle”分段——bundle 为空 ∧ 无子票 ∧ queued 的票，与可执行分段同样排除 waiting_on 非空与依赖未完成的票；epic 不出现在任何分段；响应形状只做加法（不改名不删减旧字段）。
+5. **父票完成状态由子票派生、不写终态**：全部子票终态且 ≥1 wrapped → 派生“完成”，否则“进行中”（附子票计数：总数/已终态/wrapped）；父票库内 status 保持 queued，任何终态不写；新增子票自动回到“进行中”（纯读派生，无重开写路径）；暴露只做加法。
+6. **执行中发现的问题不挂子票**（本票及后续执行期行为约束）：范围内→顺手修（改动重新声明进 touched files）；越界不阻塞→新票 + `related`；阻塞→新票 + `blocks` 依赖；方向错误→`wrap --fail`/`cancel` 后新开 task。四分支均不向正在执行的票挂子票。
+
+**并发（两组，均有测试覆盖）**：只靠单写者事务串行化加各自的 CAS，不另设仲裁（不用内存闩、不用定时等待）。PATCH bundle vs Claim：绑定或改名的 PATCH 不会让 Claim 失败（解绑若排在前，Claim 按无 bundle 票被拒）；PATCH 排在 Claim 之前则 Claim 冻结新 bundle，排在之后则被拒且不写库（`CORE-400 reason=IMMUTABLE`，或 `CORE-409 reason=RACE_LOST`）——两种次序的终态都正确。绑定 bundle vs 新增子票：恰好一方成功，终态不同时出现“有子票 ∧ bundle 非空”。
 
 ---
 

@@ -3,8 +3,15 @@
 # backup and restore are always whole-volume operations.
 services:
   aihub:
-    build: { context: ., dockerfile: deploy/Dockerfile }
-    # or: image: <registry>/polyforge-aihub:<tag>
+    # Images are built by .polyforge/release.sh (docker build from deploy/Dockerfile
+    # + the released binary, pushed to ghcr.io/silgrid/aihub:<tag>) and pulled /
+    # loaded by .polyforge/deploy.sh (deploy.sh builds only the legacy rollback
+    # image of a release that predates the GHCR image), never by compose: a
+    # container recreate must not silently fall back to an older image. Production pins the literal tag
+    # (polyforge/aihub:<tag>); here it comes from the environment.
+    image: polyforge/aihub:${AIHUB_TAG:?set AIHUB_TAG to a built tag}
+    # drain window for in-flight HTTP on stop (aihub waits up to 10s itself)
+    stop_grace_period: 5s
     container_name: aihub
     ports: ["8080:8080"]
     volumes: ["/data/aihub:/data"]

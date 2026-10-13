@@ -10,7 +10,6 @@ package runtime
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,37 +44,29 @@ func TestSpawnModelPinRidesArgv(t *testing.T) {
 	}
 }
 
-// A materialization failure (CAP-405 digest divergence) closes the fresh
-// generation BLOCKED — never an orphaned running generation (D5) — and
-// settles the claiming journal.
+// A materialization failure closes the fresh generation BLOCKED — never
+// an orphaned running generation (D5) — and settles the claiming
+// journal. (The digest-divergence trigger is gone with the digest chain,
+// polyforge#149: the failure here is a typed task-repo clone refusal —
+// an unsafe repo name in the claim inventory.)
 func TestMaterializeFailureBlocksGeneration(t *testing.T) {
 	setGitIdentity(t)
-	wfDir, pinned := pristineBundle(t)
-	if err := os.WriteFile(filepath.Join(wfDir, "demo-bundle", "steps", "step.md"),
-		[]byte("tampered after the pin\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	wfDir := pristineBundle(t)
 	hub := newFakeHub()
-	hub.digest = pinned
+	hub.repos = []api.ProjectRepo{{Name: "../escape"}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
 
 	err := r.Start(context.Background(), "wi_cap405")
 	if err == nil {
-		t.Fatal("Start must refuse a diverged pinned bundle")
-	}
-	if ae, ok := err.(*api.Error); !ok || ae.Code != api.ErrCapCheckoutDiver {
-		t.Fatalf("expected CAP-405, got %v", err)
+		t.Fatal("Start must refuse an unmaterializable inventory")
 	}
 	if n := hub.endCount(); n != 1 {
 		t.Fatalf("the failed start must close the generation exactly once, got %d", n)
 	}
 	end := hub.lastEnd()
 	if end.Status != api.StatusBlocked || end.SessionID == "" || end.Note == "" {
-		t.Fatalf("CAP-405 must close blocked on the session, got %+v", end)
-	}
-	if end.Note == "" {
-		t.Fatalf("the blocked close must carry a note, got %+v", end)
+		t.Fatalf("the materialization failure must close blocked on the session, got %+v", end)
 	}
 	// the claiming journal settled with it
 	if items := r.loadClaiming(); len(items) != 0 {
@@ -256,19 +247,15 @@ func idxOf(args []string, want string) int {
 // stays closed even across a failing close.
 func TestAbandonedClaimKeepsJournalWhenCloseFails(t *testing.T) {
 	setGitIdentity(t)
-	wfDir, pinned := pristineBundle(t)
-	if err := os.WriteFile(filepath.Join(wfDir, "demo-bundle", "steps", "step.md"),
-		[]byte("tampered after the pin\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	wfDir := pristineBundle(t)
 	hub := newFakeHub()
-	hub.digest = pinned
-	hub.end["wi_closefail"] = errLookupBoom // the hub close fails
+	hub.repos = []api.ProjectRepo{{Name: "../escape"}} // the materialize refusal
+	hub.end["wi_closefail"] = errLookupBoom            // the hub close fails
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
 
 	if err := r.Start(context.Background(), "wi_closefail"); err == nil {
-		t.Fatal("Start must fail on the diverged bundle")
+		t.Fatal("Start must fail on the unmaterializable inventory")
 	}
 	// the close never landed: the entry must survive for the next restart
 	items := r.loadClaiming()

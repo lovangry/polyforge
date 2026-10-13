@@ -36,7 +36,7 @@ deliberate omissions define it:
   and re-file on `feature-full` or `bug-fix`.
 - **No release slot.** Chores do not ship. They merge as ordinary commits and ride the
   project's next release train; the release hook belongs to whichever WI carries that
-  release (release is an ordinary step slot, and this bundle simply does not include one).
+  release (releases happen only via the dedicated `release` bundle, which this bundle never includes).
 
 ## Artifact flow between steps
 

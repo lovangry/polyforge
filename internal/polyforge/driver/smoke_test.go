@@ -53,7 +53,7 @@ fi
 # Determine which step this is from the step definition header in the prompt.
 if echo "$PROMPT" | grep -q "smoke-step:verification"; then
   OUTCOME="completed"
-elif echo "$PROMPT" | grep -q "smoke-step:release"; then
+elif echo "$PROMPT" | grep -q "smoke-step:finalize"; then
   OUTCOME="completed"
 else
   # fix step (or any code step)
@@ -104,7 +104,7 @@ func TestSmokeEndToEnd(t *testing.T) {
 		}
 	}
 
-	// --- Write a minimal v2 workflow (quick-fix shape: grill→fix→verification→release) ---
+	// --- Write a minimal v2 workflow (quick-fix shape: grill→fix→verification→finalize) ---
 	wfYAML := `---
 name: smoke-bundle
 description: Phase-1 smoke test bundle
@@ -112,7 +112,7 @@ steps:
   - { id: grill, kind: spec, context_policy: fresh, handoff: true, interactive: true }
   - { id: fix, kind: code, context_policy: inherit, handoff: true }
   - { id: verification, kind: gate, gate: true, context_policy: fresh }
-  - { id: release, kind: code, gate: true, context_policy: inherit }
+  - { id: finalize, kind: code, gate: true, context_policy: inherit }
 ---`
 	if err := os.WriteFile(filepath.Join(capsuleDir, "workflows/smoke-bundle/workflow.md"), []byte(wfYAML), 0o644); err != nil {
 		t.Fatal(err)
@@ -123,7 +123,7 @@ steps:
 		"grill":        "---\nname: grill\n---\nsmoke-step:grill — ask questions\nOutput a question JSON if you need input.",
 		"fix":          "---\nname: fix\n---\nsmoke-step:fix — implement the fix\nWrite your result envelope.",
 		"verification": "---\nname: verification\n---\nsmoke-step:verification — run tests\nWrite your result envelope.",
-		"release":      "---\nname: release\n---\nsmoke-step:release — ship it\nWrite your result envelope.",
+		"finalize":     "---\nname: finalize\n---\nsmoke-step:finalize — wrap up\nWrite your result envelope.",
 	}
 	for id, body := range steps {
 		p := filepath.Join(capsuleDir, "workflows/smoke-bundle/steps", id+".md")

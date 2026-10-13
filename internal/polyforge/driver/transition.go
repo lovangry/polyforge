@@ -260,7 +260,6 @@ func (d *Driver) applyInitLocked() error {
 	}
 	d.exec.CapsuleID = capsuleIDFor(d.wi.ID)
 	d.exec.WorkItemID = d.wi.ID
-	d.exec.BundleDigest = d.wi.BundleDigest
 	d.exec.WorkflowStatus = StatusRunning
 	d.exec.CurrentStep = ""
 	return nil

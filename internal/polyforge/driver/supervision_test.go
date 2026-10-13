@@ -68,7 +68,7 @@ func newSupEnv(t *testing.T, mod func(*Config), steps ...StepSpec) *supEnv {
 	link := supervise.NewLink("wi_run")
 	log := &safeLog{}
 	cfg := Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: steps, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:  sp,
@@ -428,7 +428,7 @@ func TestRelaxedBoundsSurviveRestart(t *testing.T) {
 	sp2 := &fakeSpawner{script: []fakeEntry{done(`{}`)}}
 	link2 := supervise.NewLink("wi_run")
 	d2, err := New(Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: filepath.Dir(env.execPath), BundleName: "b", BundleDigest: "dg"},
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: filepath.Dir(env.execPath), BundleName: "b"},
 		ExecPath: env.execPath, Workflow: &Workflow{Steps: []StepSpec{spec("s")}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner: sp2, Link: link2, SpawnN: env.d.SpawnN(),
 		Limits: supervise.Defaults{StepTimeout: time.Hour},

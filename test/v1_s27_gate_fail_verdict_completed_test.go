@@ -4,15 +4,15 @@ package test
 // (the bug-fix lane's review) whose result envelope carries verdict
 // "fail" in its OUTPUT JSON but outcome "completed" — the exact shape
 // the #106 review step delivered. The driver never reads a verdict
-// inside output, so the FAIL verdict advanced the workflow past the
-// gate instead of firing the on_fail rewind to fix.
+// inside output, so the FAIL verdict advanced the workflow to completion
+// instead of firing the on_fail rewind to fix.
 //
 // This scenario pins the work item's e2e acceptance (wi_7omkUJfGaJIS):
 // the rewind MUST fire from review's fail verdict. It FAILS on the
 // current code: the workflow completes with zero rewinds, review is
-// archived as done with the fail verdict and the lane wraps anyway —
-// the near-miss without #106's lucky save (nothing downstream
-// cross-checks review's verdict, so nothing masks the symptom).
+// archived as done with the fail verdict and the lane ends there —
+// the near-miss without #106's lucky save (review is the lane's last
+// step, so nothing downstream masks the symptom).
 
 import (
 	"encoding/json"
@@ -34,7 +34,7 @@ func TestV1S27GateFailVerdictInsideCompletedEnvelopeMustRewind(t *testing.T) {
 	// The bug-fix lane, scripted per spawn ordinal (the Nth envelope
 	// action fires for spawn N — across fresh and re-dispatched spawns
 	// alike, so the entries after #5 only ever fire when the rewind
-	// machinery works; on the buggy driver the lane completes at #6).
+	// machinery works; on the buggy driver the lane completes at #5).
 	plan := []map[string]any{
 		{"do": "envelope", "id": "repro", "outcome": "completed", "handoff": true,
 			"files": map[string]string{"artifacts/repro.md": "# repro\n\nfake agent reproduction record\n"}},
@@ -49,8 +49,6 @@ func TestV1S27GateFailVerdictInsideCompletedEnvelopeMustRewind(t *testing.T) {
 			"fail_reason": "the fix suppresses the symptom at one call site; the cause is still reachable",
 			"findings":    []map[string]any{{"severity": "blocking", "detail": "root cause not removed"}},
 		}},
-		// On the buggy driver the lane simply wraps here, review's fail
-		// verdict swallowed by outcome completed.
 	}
 
 	wi := newWIWithBundle(t, inst, "s27: review fail verdict rides a completed envelope (#106 shape)", "bug-fix", plan)

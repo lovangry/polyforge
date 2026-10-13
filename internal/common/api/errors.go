@@ -43,17 +43,14 @@ const (
 	ErrCoreConflict  = "CORE-409"
 	ErrCoreGone      = "CORE-410"
 	ErrCoreInternal  = "CORE-500"
-	ErrCoreLockHeld  = "CORE-508"
 
 	// MEM — memory errors (06 §5)
-	ErrMemBadInput    = "MEM-400"
-	ErrMemForbidden   = "MEM-403"
-	ErrMemNotFound    = "MEM-404"
-	ErrMemConflict    = "MEM-409"
-	ErrMemTooLarge    = "MEM-413"
-	ErrMemInternal    = "MEM-500"
-	ErrMemUpstream    = "MEM-502"
-	ErrMemUnavailable = "MEM-503"
+	ErrMemBadInput  = "MEM-400"
+	ErrMemForbidden = "MEM-403"
+	ErrMemNotFound  = "MEM-404"
+	ErrMemConflict  = "MEM-409"
+	ErrMemTooLarge  = "MEM-413"
+	ErrMemInternal  = "MEM-500"
 
 	// AUTH — authentication/authorization at the HTTP boundary
 	ErrAuthUnauthorized = "AUTH-401"
@@ -87,12 +84,7 @@ const (
 	ErrDaemonGone          = "DAEMON-410"
 	ErrDaemonSpawnFail     = "DAEMON-507"
 	ErrDaemonShipPreflight = "DAEMON-512"
-	// ErrDaemonShipLedger is the polyforge#123 ship-ledger refusal: the
-	// aihub ledger recording failed after (or between) the pushes — the
-	// ledger is accounting, not best-effort, so the ship op fails with the
-	// typed error instead of silently skipping the record.
-	ErrDaemonShipLedger = "DAEMON-514"
-	ErrDaemonInternal   = "DAEMON-500"
+	ErrDaemonInternal      = "DAEMON-500"
 	// ErrDaemonHubUnavailable is the transient pre-claim refusal: the
 	// work-item probe could not reach the hub (transport loss or a 5xx).
 	// Nothing was claimed; the caller retries.
@@ -107,7 +99,4 @@ const (
 	// the one that sealed it, whose aihub capsule head is not the head the
 	// sealing daemon recorded — the clone would be pre-blocked state.
 	ErrDaemonSealedHeadMismatch = "DAEMON-518"
-
-	// CAP — capsule lifecycle errors (03 §5.3)
-	ErrCapCheckoutDiver = "CAP-405"
 )

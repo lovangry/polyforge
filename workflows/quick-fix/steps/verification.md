@@ -1,6 +1,6 @@
 ---
 name: verification
-description: Machine-checkable gate that the build, lint, and tests pass on the fix step's output before the release attempt.
+description: Machine-checkable gate that the build, lint, and tests pass on the fix step's output before the change is shipped.
 tools: [read, bash]
 output:
   type: object
@@ -56,7 +56,7 @@ You are a machine-checkable gate, not a human-style code review. Your only job i
 the project's build, lint, and test commands against the tree `fix` produced and report
 whether they pass - no subjective judgment about design quality belongs here. In this
 lane there is no separate review step behind you, so you are also the last mechanical
-line of defense before `release`: run the full standard set, not a smoke subset.
+line of defense before the change ships: run the full standard set, not a smoke subset.
 
 ## What to do
 
@@ -82,7 +82,7 @@ line of defense before `release`: run the full standard set, not a smoke subset.
 
 Do not report `pass` on a check you skipped because it seemed slow or you assumed it
 would pass - mark it `skipped` with a reason and let that visibly not-checked status be
-what it is. A false `pass` here ships straight into `release`.
+what it is. A false `pass` here ships a broken fix straight to whoever releases it.
 
 ## Evidence obligation
 

@@ -69,6 +69,7 @@ accepts an id.
 | resume it / continue the paused or blocked one / 恢复执行 / 接着跑（已暂停或已阻塞的）/ 继续 | `verbs/resume.md` | daemon |
 | wrap it up / we're done / mark it failed / 收尾 / 完事了 / 判完成 / 判失败 | `verbs/wrap.md` | daemon |
 | ship it / push the wrapped commits to origin / deliver the branch / open the PR / 推上去 / 交付 | `verbs/ship.md` | daemon |
+| cut a release / publish a version / deploy it / 发版 / 发布新版本 / 部署上线 | `verbs/file.md` (create, `--bundle release`) | AIHub |
 | daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / auto-pull on/off / max concurrent jobs / shutdown / 升级前自检 / 启停 / 自动领取开关 / 调并发 / 优雅停机 | `verbs/ops.md` | daemon |
 | is this machine healthy / diagnose / check the mapping / why won't the daemon start / 连不上 / 诊断 / 体检 / 检查映射 | `verbs/doctor.md` | CLI (config + aihub + daemon reads) |
 | init / install / upgrade / machine setup / 装机 / 升级 | `verbs/init.md` (machine pointer) | CLI |
@@ -89,6 +90,13 @@ reason note names the cause): fix the cause if any, then `resume`, or `cancel`
 applies to WIs with no active execution — queued, paused or blocked). "Ship / deliver / push it" routes to `ship` — the git
 delivery of an already-closed WI's sealed commits — never to `submit`
 (which starts execution).
+
+"Release / deploy / 发版 / 部署" is neither `ship` nor a delivery lane: it routes to `file` with
+`--bundle release` (the project-agnostic release bundle: release, then an independent verify,
+then deploy). Put any bump keyword the user named (`major`/`minor`/`patch`) verbatim in `--goal`;
+otherwise name none and let the repo's procedure default. Never file a release on a delivery
+bundle (`feature-full`, `bug-fix`, `quick-fix`, `chore` have no release step), and never run a
+release or deploy procedure from this skill directly.
 
 ## Human coordination: `pf watch` (subscription = adoption)
 

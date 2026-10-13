@@ -49,7 +49,6 @@ type fakeHub struct {
 	attaches   []api.SessionAttachRequest
 	ends       []api.SessionEndRequest
 	end        map[string]error  // wi → end-error scripting (per wi)
-	digest     string            // claim-time bundle digest (default "deadbeef")
 	repos      []api.ProjectRepo // claim-served task-repo inventory (nil = none)
 	// canonical maps an id-or-slug form (e.g. "proj#7") to the canonical
 	// work-item id the claim answer carries (F2 tests); nil entry = the
@@ -102,16 +101,11 @@ func (h *fakeHub) itemFor(id string) api.WorkItem {
 }
 
 func (h *fakeHub) claimResponse(wi, sessionID string) *api.SessionClaimResponse {
-	digest := h.digest
-	if digest == "" {
-		digest = "deadbeef"
-	}
 	return &api.SessionClaimResponse{
 		Claim: api.SessionClaim{
 			WorkItemID:         wi,
 			SessionFingerprint: api.SessionFingerprint(sessionID),
 			BundleName:         "demo-bundle",
-			BundleDigest:       digest,
 			Repos:              h.repos,
 		},
 		WorkItem: h.itemFor(wi),

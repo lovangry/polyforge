@@ -33,6 +33,15 @@ pf ops shutdown                                      # graceful shutdown
 pf ops end-session <wi> --reason <text>              # force-end a stuck holder's session (aihub-direct)
 ```
 
+`pf ops auto off` is more than the switch: the queue's not-yet-started
+`origin=auto` entries are REMOVED at the same time (from memory and from
+the persisted `submit-queue.json` a restart replays — auto off = only
+explicit `pf submit`, v2-converge §5), each with a `submit_dropped` event
+in `pf watch`; explicit `pf submit` / chat entries ride untouched, and so
+do entries already being claimed. A restart with auto off replays the
+same rule: the previous process's auto entries are dropped, never
+re-admitted.
+
 To see what is ready before turning auto on (or to submit by hand), use
 `pf queue --ready`.
 
