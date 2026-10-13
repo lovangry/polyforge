@@ -716,11 +716,12 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 	return m.load(id)
 }
 
+// validWaitingOn accepts the two LIVE values (the rewind-fix retention:
+// 'owner' and 'dependency:<slug>') plus the empty clear. The dead
+// branches ('gate' and 'runtime:*') are deleted (polyforge#149).
 func validWaitingOn(wo string) bool {
 	switch {
-	case wo == "" || wo == "owner" || wo == "gate":
-		return true
-	case strings.HasPrefix(wo, "runtime:") && len(wo) > len("runtime:"):
+	case wo == "" || wo == "owner":
 		return true
 	case strings.HasPrefix(wo, "dependency:") && len(wo) > len("dependency:"):
 		return true

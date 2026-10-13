@@ -146,3 +146,72 @@ func TestReadyQueuePendingBundleSegment(t *testing.T) {
 		t.Fatalf("unbound ticket %s did not return to the pending-bundle segment", v)
 	}
 }
+
+// TestReadyQueueWaitingOnRetainedValueExclusion (polyforge#149): a
+// queued ticket holding EITHER retained waiting_on value ('owner' or
+// 'dependency:<slug>') is excluded from the executable `items` segment
+// AND the `pending_bundles` segment; clearing waiting_on re-includes it.
+func TestReadyQueueWaitingOnRetainedValueExclusion(t *testing.T) {
+	env := newEnv(t)
+	mk := func(goal string, bundle *string) string {
+		wi, err := env.WIs.Create(CreateRequest{
+			Project: "alpha", Goal: goal, Reporter: env.UserID,
+			BundleName: bundle,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", goal, err)
+		}
+		return wi.ID
+	}
+	wo := mk("waiting owner ticket", nil)               // waiting_on=owner
+	wd := mk("waiting dependency ticket", nil)          // waiting_on=dependency:slug
+	bo := mk("bound waiting owner", strPtrTest("q-wo")) // bound + waiting_on=owner
+
+	patch := func(id, v string) {
+		t.Helper()
+		if _, err := env.WIs.Patch(id, map[string]json.RawMessage{
+			"waiting_on": json.RawMessage(`"` + v + `"`),
+		}); err != nil {
+			t.Fatalf("patch waiting_on=%q on %s: %v", v, id, err)
+		}
+	}
+	patch(wo, "owner")
+	patch(wd, "dependency:demo-bundle")
+	patch(bo, "owner")
+
+	q, err := env.WIs.ReadyQueue("alpha")
+	if err != nil {
+		t.Fatalf("ready queue: %v", err)
+	}
+	for _, id := range []string{wo, wd, bo} {
+		if hasQueuedID(queueIDs(t, q, "items"), id) {
+			t.Fatalf("waiting ticket %s appears in the executable segment", id)
+		}
+		if hasQueuedID(queueIDs(t, q, "pending_bundles"), id) {
+			t.Fatalf("waiting ticket %s appears in the pending-bundles segment", id)
+		}
+	}
+
+	// clearing waiting_on re-includes both (the plain segments by kind).
+	clear := func(id string) {
+		t.Helper()
+		if _, err := env.WIs.Patch(id, map[string]json.RawMessage{"waiting_on": json.RawMessage("null")}); err != nil {
+			t.Fatalf("clear waiting_on on %s: %v", id, err)
+		}
+	}
+	clear(wo)
+	clear(bo)
+	q2, err := env.WIs.ReadyQueue("alpha")
+	if err != nil {
+		t.Fatalf("ready queue 2: %v", err)
+	}
+	if !hasQueuedID(queueIDs(t, q2, "pending_bundles"), wo) {
+		t.Fatalf("cleared ticket %s not re-included in pending_bundles", wo)
+	}
+	if !hasQueuedID(queueIDs(t, q2, "items"), bo) {
+		t.Fatalf("cleared bound ticket %s not re-included in items", bo)
+	}
+	if hasQueuedID(queueIDs(t, q2, "items"), wd) || hasQueuedID(queueIDs(t, q2, "pending_bundles"), wd) {
+		t.Fatalf("still-waiting ticket %s leaked into a segment", wd)
+	}
+}

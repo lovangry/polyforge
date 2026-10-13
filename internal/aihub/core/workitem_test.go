@@ -365,3 +365,49 @@ func TestRaceBindBundleVsNewChild(t *testing.T) {
 	}
 	t.Logf("w140 race2: PATCH won %d, create won %d", patchWins, createWins)
 }
+
+// TestPatchWaitingOnValueDomain (polyforge#149): the two LIVE values
+// ('owner' and 'dependency:<slug>') are accepted and persist; the two
+// dead branches ('gate' and 'runtime:*') are rejected with the
+// validation error and write nothing. The empty clear stays valid.
+func TestPatchWaitingOnValueDomain(t *testing.T) {
+	env := newEnv(t)
+	id := mustCreateWI(t, env, "waiting_on value domain", nil, "")
+
+	patch := func(v string) (*api.WorkItem, error) {
+		return env.WIs.Patch(id, map[string]json.RawMessage{
+			"waiting_on": json.RawMessage(`"` + v + `"`),
+		})
+	}
+	// the retained values persist (read back the same value).
+	for _, live := range []string{"owner", "dependency:demo-bundle"} {
+		got, err := patch(live)
+		if err != nil {
+			t.Fatalf("waiting_on=%q: want accepted, got %v", live, err)
+		}
+		if got.WaitingOn == nil || *got.WaitingOn != live {
+			t.Fatalf("waiting_on=%q did not persist (read back %v)", live, got.WaitingOn)
+		}
+	}
+	// the dead branches are rejected and write nothing.
+	for _, dead := range []string{"gate", "runtime:spawn", "runtime:anything"} {
+		if _, err := patch(dead); !IsCode(err, api.ErrCoreBadInput) {
+			t.Fatalf("waiting_on=%q: want CORE-400, got %v", dead, err)
+		}
+		got, gerr := env.WIs.Get(id, GetOptions{})
+		if gerr != nil {
+			t.Fatal(gerr)
+		}
+		if got.WaitingOn == nil || *got.WaitingOn == dead {
+			t.Fatalf("the refused waiting_on=%q persisted (%v)", dead, got.WaitingOn)
+		}
+	}
+	// the null clear is accepted.
+	got, err := env.WIs.Patch(id, map[string]json.RawMessage{"waiting_on": json.RawMessage("null")})
+	if err != nil {
+		t.Fatalf("null clear: %v", err)
+	}
+	if got.WaitingOn != nil {
+		t.Fatalf("null clear left waiting_on=%v", *got.WaitingOn)
+	}
+}
