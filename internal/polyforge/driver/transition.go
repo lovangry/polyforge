@@ -134,15 +134,10 @@ type TransitionRequest struct {
 // the workflow declared plus the verdict text the gate produced.
 type GateVerdict struct {
 	GateStepID string
-	// Action is "rewind" or "terminate"; anything else (including "")
-	// is terminate — the §6.2 default for gates without on_fail.
-	Action string
-	// TargetStep is the on_fail rewind target; required for rewind.
+	// TargetStep is the on_fail rewind target: a gate FAIL always
+	// rewinds to it. An empty target means the gate declared no rewind
+	// edge and the workflow fails on the verdict.
 	TargetStep string
-	// IncludeVerdict routes the FAIL verdict text to the target's
-	// pending_rewind_input (D8) so the rewound step's next dispatch is
-	// guaranteed to see it.
-	IncludeVerdict bool
 	// VerdictText is the FAIL judgment in full.
 	VerdictText string
 }
@@ -414,9 +409,6 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 		if err != nil {
 			return err
 		}
-		if len(res.CommandEvidence) > 0 {
-			out["commands"] = res.CommandEvidence // B10: the only accepted command evidence
-		}
 		st.Status = capsule.StepDone
 		st.Output = out
 		// Commit point: archive the accepted attempt (the step's attempt
@@ -488,11 +480,11 @@ func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) e
 	if err := d.requireRunningStep(gate); err != nil {
 		return err
 	}
-	if v.Action != "rewind" { // terminate is the default (01 §6.2 step 1)
+	target := v.TargetStep
+	if target == "" { // no rewind edge declared: the gate verdict is terminal
 		d.exec.WorkflowStatus = StatusFailedGate
 		return nil
 	}
-	target := v.TargetStep
 	tIdx, ok := d.workflow.indexOf(target)
 	if !ok {
 		return fmt.Errorf("driver: rewind target %q is not in the workflow", target)
@@ -521,11 +513,11 @@ func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) e
 		}
 		gst.Supervision.NextDispatch = capsule.NextDispatchFresh
 	}
-	if v.IncludeVerdict {
-		d.exec.Steps[target].PendingRewindInput = &capsule.RewindInput{
-			ToStep: target,
-			Reason: v.VerdictText,
-		}
+	// The FAIL verdict text rides to the target's pending_rewind_input
+	// (D8) so the rewound step's next dispatch is guaranteed to see it.
+	d.exec.Steps[target].PendingRewindInput = &capsule.RewindInput{
+		ToStep: target,
+		Reason: v.VerdictText,
 	}
 	return nil
 }

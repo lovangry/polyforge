@@ -197,16 +197,13 @@ func isHostError(err error) bool {
 // ---------------------------------------------------------------------------
 // Thresholds.
 
-// stepLimits answers the bases of one step: global defaults overridden by
-// the workflow's step-level values.
+// stepLimits answers the bases of one step: the global defaults, with
+// the wall base raised around the step's budget estimate.
 func (d *Driver) stepBases(stepID string) (silence, tool, wall time.Duration) {
 	def := d.cfg.Limits.Fill()
 	tool, wall = def.Tool, def.StepTimeout
 	silence = 0 // resolved per harness below
 	if spec := d.workflow.step(stepID); spec != nil {
-		if spec.ToolMinutes > 0 {
-			tool = time.Duration(spec.ToolMinutes) * time.Minute
-		}
 		if spec.WallMinutes > 0 {
 			// budget.wall_minutes is an ESTIMATE, not a hard limit: the
 			// step's total-time bound is generous around it, never below
@@ -214,9 +211,6 @@ func (d *Driver) stepBases(stepID string) (silence, tool, wall time.Duration) {
 			if est := time.Duration(spec.WallMinutes) * time.Minute * WallEstimateFactor; est > wall {
 				wall = est
 			}
-		}
-		if spec.SilenceMinutes > 0 {
-			silence = time.Duration(spec.SilenceMinutes) * time.Minute
 		}
 	}
 	return silence, tool, wall

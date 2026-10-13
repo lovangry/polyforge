@@ -42,31 +42,3 @@ func TestV2HumanGateGuaranteeEndToEnd(t *testing.T) {
 	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 }
-
-func TestV2VerificationEvidenceRejectedInProcess(t *testing.T) {
-	inst := newV1Install(t)
-	wi := inst.newWI(t, "v2: evidence-less verification refused, rewrite accepted",
-		[]map[string]any{
-			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
-			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
-			{"do": "envelope", "id": "verification", "outcome": "completed", "no_evidence": true},
-			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
-		}, nil)
-	d := newV1Daemon(t, inst)
-	d.start()
-	d.pf(t, "submit", wi)
-
-	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
-	rej := waitForEvent(t, d, wi, "envelope_rejected", 30*time.Second)
-	if !strings.Contains(string(rej.Body), "completed without verification evidence") {
-		t.Fatalf("the evidence-less verification was not rejected in-process: %s", rej.Body)
-	}
-	x := readExecution(t, d.capsuleDir(wi))
-	if x.Steps["verification"].Output["commands"] == nil {
-		t.Fatalf("accepted verification must keep its evidence: %+v", x.Steps["verification"].Output)
-	}
-	// let the terminal wrap (and the final publish before it) finish before
-	// the scenario's teardown removes the install
-	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
-}

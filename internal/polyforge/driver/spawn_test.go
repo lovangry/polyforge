@@ -128,8 +128,8 @@ func spawnEnv(t *testing.T) (*StepSpawnAdapter, *captureSpawner, string) {
 	return ad, sp, capDir
 }
 
-// grillDone lays out the post-grill capsule: the declared fix inputs,
-// the handoff FILE at the convention path the next inherit step reads
+// grillDone lays out the post-grill capsule: the artifacts the next
+// step reads by path convention, the handoff FILE at the convention path the next inherit step reads
 // (artifacts/handoff-grill.md — polyforge#147: path convention, no
 // digest), and grill's archived envelope (minimal contract).
 func grillDone(t *testing.T, capDir string) {
@@ -190,7 +190,6 @@ func TestSpawnStepInheritPromptAssembly(t *testing.T) {
 		"Handoff from step \"grill\"",   // handoff section
 		"artifacts/handoff-grill.md",    // the handoff file (path convention)
 		"handoff from grill",            // handoff content
-		"the q/a log",                   // declared input content
 		"FAIL: tests red",               // rewind verdict
 		"q_1", "yes, vendored",          // Q&A history
 		"runtime-state/pending-results/2.json", // delivery path
@@ -223,8 +222,10 @@ func TestSpawnStepFreshPromptOmitsHandoff(t *testing.T) {
 	if strings.Contains(prompt, "tools: [go]") {
 		t.Fatalf("step-definition frontmatter must be stripped\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "the fix summary") {
-		t.Fatalf("prompt missing declared input content\n%s", prompt)
+	// Nothing is injected: a fresh step reads its upstream artifacts by
+	// path convention (polyforge#147 — the inputs lane is retired).
+	if strings.Contains(prompt, "the fix summary") {
+		t.Fatalf("fresh prompt must not inject artifact content\n%s", prompt)
 	}
 	if strings.Contains(prompt, "the micro-spec body") || strings.Contains(prompt, "Handoff from step") {
 		t.Fatalf("fresh prompt must not carry a handoff\n%s", prompt)
@@ -234,7 +235,7 @@ func TestSpawnStepFreshPromptOmitsHandoff(t *testing.T) {
 	}
 	// verification declares no handoff: the contract must not demand one
 	if strings.Contains(prompt, "DECLARES handoff") {
-		t.Fatalf("fresh non-handoff step must not owe a handoff_ref\n%s", prompt)
+		t.Fatalf("fresh non-handoff step must not owe a handoff artifact\n%s", prompt)
 	}
 }
 
@@ -336,13 +337,13 @@ func TestSpawnStepInputFormErrors(t *testing.T) {
 	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "nope", SpawnN: 1}); err == nil {
 		t.Fatal("unknown step must fail")
 	}
-	// missing declared input (grill-qa.md removed)
+	// A retired declared-input file's absence is NO LONGER an error:
+	// the step reads what it needs by path convention (polyforge#147).
 	if err := os.Remove(filepath.Join(capDir, "artifacts", "grill-qa.md")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2})
-	if err == nil || !strings.Contains(err.Error(), "grill-qa.md") {
-		t.Fatalf("missing declared input must fail naming it, got %v", err)
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2}); err != nil {
+		t.Fatalf("a missing artifact must not break dispatch: %v", err)
 	}
 
 	// missing step definition

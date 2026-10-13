@@ -32,10 +32,6 @@ type planAction struct {
 	// result-envelope action.
 	Outcome string `json:"outcome,omitempty"` // envelope: completed|needs_input|gate_failed|incomplete
 	Handoff bool   `json:"handoff,omitempty"` // envelope: produce handoff_ref
-	// NoEvidence suppresses the step's structured command evidence (the
-	// wrap-evidence-gate scenario scripts a verification step whose
-	// output carries no commands record, then repairs it).
-	NoEvidence bool `json:"no_evidence,omitempty"`
 
 	// --- envelope-mode extensions (polyforge#105, confined to fakepi) ---
 
@@ -82,11 +78,6 @@ type planAction struct {
 	// root-cause consuming artifacts/repro.md).
 	Files map[string]string `json:"files,omitempty"`
 
-	// Evidence carries extra structured command-evidence entries
-	// (merged with the synthetic one; suppressed entirely by
-	// NoEvidence). The driver copies command_evidence onto
-	// execution.json's steps.<id>.output.commands.
-	Evidence []map[string]any `json:"evidence,omitempty"`
 	// OpenTurn opens a stdout turn and leaves it open before the
 	// envelope write (the F15 record-stream shapes on driver step
 	// processes).
@@ -312,7 +303,7 @@ func sleepMS(n int) {
 // runEnvelopeAction performs one envelope action in full: the optional
 // pre-write side effects (turn/noise records, repo, poison shapes, the
 // ms delay), the crash shapes, and the envelope write itself (question
-// text, output payload, command evidence, duplicates).
+// text, output payload, duplicates).
 func (d *driveEnv) runEnvelopeAction(act planAction) {
 	if act.Silent {
 		// The zero-signal harness: no record at all (UI noise optionally),
@@ -672,9 +663,8 @@ func (d *driveEnv) makeRepo(name, origin string) {
 // purpose (the driver refuses a needs_input result without question
 // text — the scripted refusal shape). The output payload defaults to a
 // summary object and is replaced verbatim by the action's own when
-// present. Structured command evidence rides command_evidence (the
-// driver copies it onto execution.json's output.commands — the face the
-// wrap evidence gate judges) unless the action suppressed it.
+// present. The envelope is the MINIMAL CONTRACT (polyforge#147):
+// identity/fence + outcome/output (+ the question pair), nothing else.
 func (d *driveEnv) writeEnvelope(act planAction) {
 	outcome := act.Outcome
 	if outcome == "" {
@@ -692,28 +682,13 @@ func (d *driveEnv) writeEnvelope(act planAction) {
 	if output == nil {
 		output = map[string]interface{}{"summary": "envelope action"}
 	}
-	var evidence []interface{}
-	if !act.NoEvidence {
-		evidence = append(evidence, map[string]any{
-			"argv":        []any{"fakepi", "envelope", stepID},
-			"cwd":         capsuleRoot,
-			"exit_code":   0,
-			"duration_ms": 40,
-			"started_at":  nowStamp(),
-		})
-		for _, e := range act.Evidence {
-			evidence = append(evidence, e)
-		}
-	}
-
 	envelope := map[string]interface{}{
-		"wi_id":            os.Getenv("PF_WI_ID"),
-		"step_id":          stepID,
-		"spawn_n":          parseIntDefault(spawnN, 1),
-		"outcome":          outcome,
-		"output":           output,
-		"command_evidence": evidence,
-		"submitted_at":     time.Now().UTC().Format(time.RFC3339),
+		"wi_id":        os.Getenv("PF_WI_ID"),
+		"step_id":      stepID,
+		"spawn_n":      parseIntDefault(spawnN, 1),
+		"outcome":      outcome,
+		"output":       output,
+		"submitted_at": time.Now().UTC().Format(time.RFC3339),
 	}
 	if outcome == "needs_input" {
 		// Verbatim, empty included: the empty question_id is the scripted
@@ -749,7 +724,7 @@ func (d *driveEnv) writeEnvelope(act planAction) {
 	}
 	d.journal("envelope", map[string]any{"step": stepID, "outcome": outcome,
 		"path": dropPath, "question_id": act.QuestionID, "dup": dupes,
-		"evidence": !act.NoEvidence, "crash": act.Crash})
+		"crash": act.Crash})
 }
 
 // capsuleRoot answers the capsule directory: the fakepi runs with the

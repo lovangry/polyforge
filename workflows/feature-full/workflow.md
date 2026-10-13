@@ -3,15 +3,15 @@ name: feature-full
 steps:
   - { id: grill, context_policy: fresh, handoff: true, kind: qa, budget: { wall_minutes: 30 } }
   - { id: spec, context_policy: inherit, handoff: true, kind: spec, budget: { wall_minutes: 15 } }
-  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, requires_human_answer: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { action: rewind, target: spec } }
+  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, requires_human_answer: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { target: spec } }
   - { id: plan, context_policy: inherit, handoff: true, kind: author, budget: { wall_minutes: 15 } }
   - { id: e2e-author, context_policy: fresh, handoff: true, kind: author, budget: { wall_minutes: 15 } }
   - { id: e2e-baseline, context_policy: fresh, handoff: true, kind: code, gate: false, budget: { wall_minutes: 20 } }
   - { id: code, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: e2e-run, context_policy: fresh, handoff: true, kind: code, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
-  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
-  - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, budget: { wall_minutes: 15 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: review } }
+  - { id: e2e-run, context_policy: fresh, handoff: true, kind: code, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
+  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
+  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
+  - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, budget: { wall_minutes: 15 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { target: review } }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 ---

@@ -500,6 +500,10 @@ func TestStepTimeoutAccumulatesAcrossDispatches(t *testing.T) {
 
 // --- thresholds from workflow.md --------------------------------------
 
+// TestStepOverridesFromWorkflowFrontmatter: budget.wall_minutes is the
+// ONLY per-step threshold face left (polyforge#147 C5 retired the
+// per-step silence_minutes / tool_minutes overrides — those keys are no
+// longer read, and the global defaults hold for every step).
 func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "workflows", "b")
@@ -507,7 +511,7 @@ func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 		t.Fatal(err)
 	}
 	md := "---\nname: b\nsteps:\n" +
-		"  - { id: slow, budget: { wall_minutes: 45 }, silence_minutes: 20, tool_minutes: 60 }\n" +
+		"  - { id: slow, budget: { wall_minutes: 45 }, silence_minutes: 20, tool_minutes: 60 }\n" + // the retired keys are ignored
 		"  - { id: small, budget: { wall_minutes: 15 } }\n" +
 		"  - { id: plain }\n---\n# b\n"
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(md), 0o644); err != nil {
@@ -518,7 +522,7 @@ func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 		t.Fatal(err)
 	}
 	slow := wf.step("slow")
-	if slow.WallMinutes != 45 || slow.SilenceMinutes != 20 || slow.ToolMinutes != 60 {
+	if slow.WallMinutes != 45 {
 		t.Fatalf("overrides parsed as %+v", slow)
 	}
 	d, err := New(Config{
@@ -539,8 +543,8 @@ func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 	if small.StepTimeout != 90*time.Minute {
 		t.Fatalf("a 15m estimate must not shrink T below the 90m global default: %+v", small)
 	}
-	if th.StepTimeout != 135*time.Minute || th.Silence != 20*time.Minute || th.Tool != 60*time.Minute {
-		t.Fatalf("slow step thresholds %+v", th)
+	if th.StepTimeout != 135*time.Minute || th.Silence != 10*time.Minute || th.Tool != 30*time.Minute {
+		t.Fatalf("slow step thresholds (only the wall estimate is honored) %+v", th)
 	}
 	if plain.StepTimeout != 90*time.Minute || plain.Tool != 30*time.Minute || plain.Silence != 10*time.Minute {
 		t.Fatalf("plain step must take the global defaults (X 10m token-level): %+v", plain)

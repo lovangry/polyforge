@@ -428,7 +428,8 @@ func TestRunGateFailRewindRecovers(t *testing.T) {
 }
 
 func TestRunGateFailTerminate(t *testing.T) {
-	// A gate with no on_fail policy terminates failed_gate (WF-102).
+	// A gate with no on_fail rewind target has no rewind edge: its FAIL
+	// verdict ends the workflow failed_gate (WF-102).
 	d, sp, execPath := runEnv(t, spec("a"), StepSpec{ID: "check", Gate: true, ContextPolicy: "fresh"})
 	sp.script = []fakeEntry{done(`{}`), gateFAIL()}
 	if err := d.Run(context.Background()); err != nil {
@@ -676,7 +677,6 @@ steps:
     gate: true
     context_policy: fresh
     on_fail:
-      action: rewind
       target: code
 ---
 # body is never parsed
@@ -705,8 +705,8 @@ steps:
 		t.Fatalf("defaults chain applies: %+v", wf.Steps[0].ModelCandidates)
 	}
 	of := wf.Steps[2].OnFail
-	if of == nil || of.Action != "rewind" || of.Target != "code" || !of.IncludeVerdict {
-		t.Fatalf("on_fail defaults: %+v", of)
+	if of == nil || of.Target != "code" {
+		t.Fatalf("on_fail target: %+v", of)
 	}
 
 	// The driver built over the bundle directory resolves paths by

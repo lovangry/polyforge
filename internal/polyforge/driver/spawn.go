@@ -161,8 +161,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		PriorRejection:          sp.PriorRejection,
 		PriorEndedWithoutResult: sp.PriorEndedWithoutResult,
 
-		RequireCommandEvidence: spec.RequiresCommandEvidence || sp.StepID == verificationStepID,
-		RequiresHumanAnswer:    spec.RequiresHumanAnswer,
+		RequiresHumanAnswer: spec.RequiresHumanAnswer,
 	}
 	if policy == ContextInherit {
 		h, err := a.resolveHandoff(sp.StepID)
@@ -170,13 +169,6 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 			return nil, err
 		}
 		parts.Handoff = h
-	}
-	for _, in := range spec.Inputs {
-		content, err := readCapsuleFile(a.WI.CapsuleDir, in.Artifact)
-		if err != nil {
-			return nil, fmt.Errorf("driver: step %q declared input unreadable: %w", sp.StepID, err)
-		}
-		parts.Inputs = append(parts.Inputs, inputSection{Path: in.Artifact, Content: content})
 	}
 
 	handle := a.sessionHandle()
@@ -308,9 +300,9 @@ type promptParts struct {
 	Rewind      *capsule.RewindInput
 	Answers     []capsule.ArchivedAnswer
 	Handoff     *handoffSection
-	Inputs      []inputSection
-	// HandoffDue marks a step whose completed result must carry a
-	// handoff_ref (the delivery contract states the duty only then).
+	// HandoffDue marks a step that must produce a handoff artifact at
+	// the conventional path (the delivery contract states the duty only
+	// then).
 	HandoffDue bool
 	// Gate marks a workflow-declared gate step (gate: true): the
 	// delivery contract states the verdict binding for it — a fail
@@ -325,10 +317,6 @@ type promptParts struct {
 	// PriorEndedWithoutResult: the previous dispatch's turn ended without
 	// the result envelope being written (retry feedback).
 	PriorEndedWithoutResult bool
-	// RequireCommandEvidence marks a step whose completed result must
-	// carry command_evidence (verification / requires_command_evidence):
-	// the contract states the entry shape and the rule.
-	RequireCommandEvidence bool
 	// RequiresHumanAnswer marks a requires_human_answer step: the
 	// contract states that a human answer must precede completion.
 	RequiresHumanAnswer bool
@@ -345,12 +333,6 @@ type handoffSection struct {
 	Content  []byte
 }
 
-// inputSection is one declared input artifact's content.
-type inputSection struct {
-	Path    string
-	Content []byte
-}
-
 // assembleStepPrompt builds the step process's one instruction of
 // record: identity, the context-policy contract, the step definition,
 // the rewind verdict being consumed, the Q&A history a resumed step
@@ -363,7 +345,7 @@ func assembleStepPrompt(p promptParts) string {
 	case ContextInherit:
 		b.WriteString("Context policy: INHERIT — this step continues the previous step's work; the handoff below (when present) is the upstream continuation.\n\n")
 	case ContextFresh:
-		b.WriteString("Context policy: FRESH — this step starts from a clean context; nothing from previous steps is carried in except the declared inputs below.\n\n")
+		b.WriteString("Context policy: FRESH — this step starts from a clean context; nothing from previous steps is carried in: read whatever upstream artifacts your instructions name, by their path.\n\n")
 	}
 	b.WriteString("# Step definition\n\n")
 	b.WriteString(p.Definition)
@@ -400,14 +382,6 @@ func assembleStepPrompt(p promptParts) string {
 		b.Write(p.Handoff.Content)
 		b.WriteString("\n")
 	}
-	if len(p.Inputs) > 0 {
-		b.WriteString("\n# Declared inputs\n")
-		for _, in := range p.Inputs {
-			fmt.Fprintf(&b, "\n## %s\n\n", in.Path)
-			b.Write(in.Content)
-			b.WriteString("\n")
-		}
-	}
 	b.WriteString(deliveryContract(p))
 	return b.String()
 }
@@ -435,7 +409,6 @@ func deliveryContract(p promptParts) string {
 		"  \"spawn_n\": %d,\n"+
 		"  \"outcome\": \"completed\" | \"gate_failed\" | \"needs_input\" | \"incomplete\",\n"+
 		"  \"output\": { },\n"+
-		"  \"command_evidence\": [],\n"+
 		"  \"submitted_at\": \"<RFC3339>\"\n"+
 		"}\n```\n\n", p.WIID, p.StepID, p.SpawnN)
 	b.WriteString("Rules: `output` is a JSON object; every file this step produced that downstream steps or the owner consume is written under `artifacts/` and named by its path in the step's own instructions — the driver and downstream readers work by path convention, never by manifest")
@@ -443,12 +416,6 @@ func deliveryContract(p promptParts) string {
 		b.WriteString("; this step DECLARES handoff, so write the handoff file at `artifacts/handoff-" + p.StepID + ".md` — the next inherit step reads it by that path convention")
 	}
 	b.WriteString("; a `needs_input` result carries `question_id` and `question` instead. End your turn once the file is written.\n")
-	if p.RequireCommandEvidence {
-		b.WriteString("\nCommand evidence: this step requires `command_evidence` — a list of OBJECTS " +
-			"`{\"argv\": [\"go\", \"test\", \"./...\"], \"exit_code\": 0, \"duration_ms\": 1200}`, never strings. " +
-			"Run at least one real check command and report every command you ran with its measured `duration_ms` (> 0); " +
-			"an empty list, an entry without `argv`, or one without a positive `duration_ms` is rejected. Never fabricate an entry.\n")
-	}
 	if p.RequiresHumanAnswer {
 		b.WriteString("\nHuman answer: this step requires a human answer before completion: return `needs_input` first; " +
 			"a `completed` envelope without an answer in this round is rejected.\n")
@@ -492,6 +459,25 @@ func stepDefBody(raw []byte) string {
 		raw = body
 	}
 	return strings.TrimSpace(string(raw))
+}
+
+// checkRelPath asserts one capsule-relative path: non-empty, not
+// absolute, no parent escape (the capsule jail of every file the
+// prompt assembler reads).
+func checkRelPath(rel string) error {
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return fmt.Errorf("empty artifact path")
+	}
+	if filepath.IsAbs(rel) || strings.HasPrefix(rel, "/") {
+		return fmt.Errorf("path %q must be capsule-relative", rel)
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == ".." {
+			return fmt.Errorf("parent escape in path %q", rel)
+		}
+	}
+	return nil
 }
 
 // readCapsuleFile reads one capsule-relative artifact, jailed to the

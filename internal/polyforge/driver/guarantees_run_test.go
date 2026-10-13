@@ -58,26 +58,6 @@ func TestRunHumanGateRejectsCompletedUntilAnswered(t *testing.T) {
 	}
 }
 
-func TestRunVerificationRequiresEvidence(t *testing.T) {
-	d, sp, execPath := runEnv(t, StepSpec{ID: "verification"})
-	withEv := done(`{}`)
-	withEv.res.CommandEvidence = goodEvidence()
-	sp.script = []fakeEntry{done(`{}`), withEv}
-	if err := d.Run(context.Background()); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if n := len(sp.spawns); n != 2 {
-		t.Fatalf("evidence-less completion must be re-dispatched once, got %d spawns", n)
-	}
-	if !strings.Contains(sp.spawnAt(1).PriorRejection, "verification evidence") {
-		t.Fatalf("feedback: %q", sp.spawnAt(1).PriorRejection)
-	}
-	st := readExec(t, execPath).Steps["verification"]
-	if st.Status != capsule.StepDone || st.Output["commands"] == nil {
-		t.Fatalf("accepted evidence must stay in the stored output: %+v", st)
-	}
-}
-
 // TestRunHumanGateGateFailRewindNeedsFreshAnswer drives the real
 // transitions: a human-gate gate asks, is answered, fails and rewinds;
 // on re-entry a completed result without a NEW answer is rejected.

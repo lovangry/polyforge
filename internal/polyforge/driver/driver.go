@@ -794,8 +794,8 @@ func (d *Driver) validateResultStrict(res *StepResult, stepID string, n int64) e
 }
 
 // buildResultSpec assembles the read-only validation snapshot from the
-// driver's current durable state (the workflow's declared outputs, gate
-// policy, human-answer duty and the answers of the current attempt chain).
+// driver's current durable state (gate policy, human-answer duty and
+// the answers of the current attempt chain).
 func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	spec := ResultSpec{
 		WIID:   d.wi.ID,
@@ -810,13 +810,8 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	// Declared outputs, gate-ness and duties (gate-ness feeds the
 	// verdict binding — the #106 lesson).
 	if ss := d.workflow.step(stepID); ss != nil {
-		spec.Outputs = ss.Outputs
 		spec.Gate = ss.Gate
 		spec.RequiresHumanAnswer = ss.RequiresHumanAnswer
-		spec.RequireCommandEvidence = ss.RequiresCommandEvidence
-	}
-	if stepID == verificationStepID {
-		spec.RequireCommandEvidence = true
 	}
 	return spec
 }
@@ -839,9 +834,10 @@ func parseOutput(raw json.RawMessage) (map[string]any, error) {
 }
 
 // verdictFor assembles the gate FAIL policy the transition applies:
-// the workflow's on_fail declaration (terminate is the default when
-// absent) plus the verdict text — the result's output payload in full,
-// or a synthesized note when the gate produced none.
+// the workflow's on_fail rewind target (absent = no rewind edge, the
+// workflow fails on the gate) plus the verdict text — the result's
+// output payload in full, or a synthesized note when the gate produced
+// none.
 func (d *Driver) verdictFor(stepID string, res *StepResult) *GateVerdict {
 	v := &GateVerdict{
 		GateStepID:  stepID,
@@ -851,13 +847,7 @@ func (d *Driver) verdictFor(stepID string, res *StepResult) *GateVerdict {
 		v.VerdictText = fmt.Sprintf("gate %s FAIL (spawn %d)", stepID, res.SpawnN)
 	}
 	if spec := d.workflow.step(stepID); spec != nil && spec.OnFail != nil {
-		v.Action = spec.OnFail.Action
 		v.TargetStep = spec.OnFail.Target
-		v.IncludeVerdict = spec.OnFail.IncludeVerdict
-	}
-	if v.Action != "rewind" {
-		v.Action = "terminate"
-		v.TargetStep = ""
 	}
 	return v
 }

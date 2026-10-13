@@ -9,8 +9,8 @@ defaults:
 steps:
   - { id: grill, context_policy: fresh, handoff: true, kind: spec, budget: { wall_minutes: 30 } }
   - { id: fix, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
-  - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { action: rewind, target: fix } }
+  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: fix } }
+  - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { target: fix } }
 ---
 
 # quick-fix — light remediation flow
@@ -56,7 +56,7 @@ file under `artifacts/`; no step declares frontmatter `inputs:`, so downstream s
 
 ## Rewind boundaries
 
-Both gates in this flow declare `on_fail: {action: rewind, target: fix}` — this section explains the choice. A rewind target must exist in the `steps` array and sit strictly
+Both gates in this flow declare `on_fail: {target: fix}` — this section explains the choice. A rewind target must exist in the `steps` array and sit strictly
 earlier than the failing step; both candidates available to `release` (`verification`, `fix`) satisfy
 that mechanically, and this bundle picks `fix` deliberately:
 

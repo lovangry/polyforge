@@ -75,7 +75,7 @@ func gateSpec(id, target string) StepSpec {
 		ID:            id,
 		Gate:          true,
 		ContextPolicy: "fresh",
-		OnFail:        &OnFail{Action: "rewind", Target: target, IncludeVerdict: true},
+		OnFail:        &OnFail{Target: target},
 	}
 }
 
@@ -340,10 +340,6 @@ func TestTransitionStepResultCompleted(t *testing.T) {
 	mustInit(t, d)
 	mustStart(t, d, "a", 1)
 	res := completedResult("a", 1, `{"summary":"A"}`)
-	res.CommandEvidence = []CommandEvidence{{
-		Argv: []string{"go", "test", "./..."}, Cwd: "/w", ExitCode: 0,
-		StartedAt: time.Now(), DurationMs: 1200, LogPath: "logs/a.log",
-	}}
 	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: res}); err != nil {
 		t.Fatalf("result: %v", err)
 	}
@@ -351,15 +347,10 @@ func TestTransitionStepResultCompleted(t *testing.T) {
 	if st.Status != capsule.StepDone || st.Output["summary"] != "A" {
 		t.Fatalf("completed must record done + output: %+v", st)
 	}
-	// Snapshot deep-copies via JSON, so the evidence comes back as the
-	// generic decode — assert on the re-marshaled shape (B10 keys).
-	cmds, ok := st.Output["commands"].([]any)
-	if !ok || len(cmds) != 1 {
-		t.Fatalf("B10 command evidence must land in output.commands: %+v", st.Output["commands"])
-	}
-	cmd, _ := cmds[0].(map[string]any)
-	if cmd["log_path"] != "logs/a.log" || cmd["duration_ms"] != float64(1200) {
-		t.Fatalf("bad evidence entry: %+v", cmd)
+	// The stored output is the envelope's output VERBATIM: the driver
+	// adds no evidence key of its own (polyforge#147 C5).
+	if _, ok := st.Output["commands"]; ok {
+		t.Fatalf("the driver must not synthesize an evidence key: %+v", st.Output)
 	}
 }
 
@@ -511,8 +502,8 @@ func TestTransitionGateFailRewind(t *testing.T) {
 	}
 	if err := d.transition(TransitionRequest{
 		Kind: TransGateFail, StepID: "check", SpawnN: 3,
-		Gate: &GateVerdict{GateStepID: "check", Action: "rewind", TargetStep: "build",
-			IncludeVerdict: true, VerdictText: "FAIL: tests red"},
+		Gate: &GateVerdict{GateStepID: "check", TargetStep: "build",
+			VerdictText: "FAIL: tests red"},
 	}); err != nil {
 		t.Fatalf("gate_fail: %v", err)
 	}
@@ -577,7 +568,7 @@ func TestTransitionGateFailBounds(t *testing.T) {
 		}
 		if err := d.transition(TransitionRequest{
 			Kind: TransGateFail, StepID: "check", SpawnN: n + 1,
-			Gate: &GateVerdict{GateStepID: "check", Action: "rewind", TargetStep: "a", IncludeVerdict: true, VerdictText: "v"},
+			Gate: &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
 		}); err != nil {
 			t.Fatalf("gate_fail (round %d): %v", round, err)
 		}
@@ -618,7 +609,7 @@ func TestTransitionGateFailBounds(t *testing.T) {
 	// First rewind to a passes (per-step count 0 → 1)...
 	if err := d2.transition(TransitionRequest{
 		Kind: TransGateFail, StepID: "check", SpawnN: 2,
-		Gate: &GateVerdict{GateStepID: "check", Action: "rewind", TargetStep: "a", VerdictText: "v"},
+		Gate: &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
 	}); err != nil {
 		t.Fatalf("first rewind: %v", err)
 	}
@@ -636,7 +627,7 @@ func TestTransitionGateFailBounds(t *testing.T) {
 	}
 	if err := d2.transition(TransitionRequest{
 		Kind: TransGateFail, StepID: "check", SpawnN: 4,
-		Gate: &GateVerdict{GateStepID: "check", Action: "rewind", TargetStep: "a", VerdictText: "v"},
+		Gate: &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
 	}); err != nil {
 		t.Fatalf("second rewind: %v", err)
 	}
@@ -659,10 +650,10 @@ func TestTransitionGateFailTerminateAndIllegalTarget(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("gate result: %v", err)
 	}
-	// terminate (the default policy too) → failed_gate.
+	// no rewind target declared → failed_gate.
 	if err := d.transition(TransitionRequest{
 		Kind: TransGateFail, StepID: "check", SpawnN: 2,
-		Gate: &GateVerdict{GateStepID: "check", Action: "", VerdictText: "v"},
+		Gate: &GateVerdict{GateStepID: "check", VerdictText: "v"},
 	}); err != nil {
 		t.Fatalf("terminate: %v", err)
 	}
@@ -689,7 +680,7 @@ func TestTransitionGateFailTerminateAndIllegalTarget(t *testing.T) {
 	for _, bad := range []string{"check", "nope"} {
 		err := d2.transition(TransitionRequest{
 			Kind: TransGateFail, StepID: "check", SpawnN: 1,
-			Gate: &GateVerdict{GateStepID: "check", Action: "rewind", TargetStep: bad, VerdictText: "v"},
+			Gate: &GateVerdict{GateStepID: "check", TargetStep: bad, VerdictText: "v"},
 		})
 		if err == nil {
 			t.Fatalf("rewind target %q must be refused", bad)

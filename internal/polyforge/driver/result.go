@@ -65,10 +65,6 @@ const EvGateVerdictBound = "gate_verdict_bound"
 // declaration the same way verificationStepID does in observe.
 const releaseStepID = "release"
 
-// verificationStepID is the conventional id of the V4 verification step:
-// a completed result for it owes command evidence (ResultSpec.RequireCommandEvidence).
-const verificationStepID = "verification"
-
 // maxEnvelopeRejects bounds the in-process re-dispatch lane: a step
 // whose envelopes keep failing validation this many times CONSECUTIVELY
 // goes BLOCKED with the result_invalid cause code (no driver relaunch,
@@ -106,36 +102,14 @@ func (o Outcome) Valid() bool {
 // by path convention, and an envelope missing any retired field is
 // never judged invalid for its absence.
 type StepResult struct {
-	WIID            string            `json:"wi_id"`
-	StepID          string            `json:"step_id"`
-	SpawnN          int64             `json:"spawn_n"` // fencing: only the current spawn's results count
-	Outcome         Outcome           `json:"outcome"`
-	Output          json.RawMessage   `json:"output"`                // step-specific output JSON, schema-checked
-	QuestionID      string            `json:"question_id,omitempty"` // set when Outcome == needs_input
-	Question        string            `json:"question,omitempty"`    // the question text for needs_input
-	CommandEvidence []CommandEvidence `json:"command_evidence"`
-	SubmittedAt     time.Time         `json:"submitted_at,omitempty"`
-}
-
-// CommandEvidence is one recorded command the step process ran, kept in
-// the envelope for audit (the operator face renders it). Validation of
-// a verification step checks argv non-emptiness and duration_ms > 0
-// (checkCommandEvidence); exit_code and started_at are not enforced.
-type CommandEvidence struct {
-	Argv       []string  `json:"argv"`
-	Cwd        string    `json:"cwd"`
-	ExitCode   int       `json:"exit_code"`
-	StartedAt  time.Time `json:"started_at"`
-	DurationMs int64     `json:"duration_ms"`
-	LogPath    string    `json:"log_path"`
-}
-
-// OutputSpec is one entry of a step's declared outputs (the workflow
-// frontmatter extension): the artifact path the completed step must
-// deliver plus the JSON type the step's result output must carry.
-type OutputSpec struct {
-	Path   string `json:"path"`
-	Schema string `json:"schema"` // "", "any", "object", "array", "string", "number", "boolean"
+	WIID        string          `json:"wi_id"`
+	StepID      string          `json:"step_id"`
+	SpawnN      int64           `json:"spawn_n"` // fencing: only the current spawn's results count
+	Outcome     Outcome         `json:"outcome"`
+	Output      json.RawMessage `json:"output"`                // step-specific output JSON, schema-checked
+	QuestionID  string          `json:"question_id,omitempty"` // set when Outcome == needs_input
+	Question    string          `json:"question,omitempty"`    // the question text for needs_input
+	SubmittedAt time.Time       `json:"submitted_at,omitempty"`
 }
 
 // Validation verdicts.
@@ -145,17 +119,13 @@ var (
 )
 
 // ResultSpec carries everything ValidateStepResult judges an envelope
-// against: the binding and fence of the CURRENT spawn, the step's
-// declared outputs, the gate verdict binding, the human-gate guarantee
-// and the verification evidence duty. It is a read-only snapshot: the
+// against: the binding and fence of the CURRENT spawn, the gate verdict
+// binding and the human-gate guarantee. It is a read-only snapshot: the
 // mutations happen at the commit point, never here.
 type ResultSpec struct {
 	WIID   string
 	StepID string
 	SpawnN int64
-	// Outputs are the step's declared outputs (frontmatter outputs:);
-	// the output schema is enforced for completed results only.
-	Outputs []OutputSpec
 	// Gate mirrors the step's gate: true declaration — the verdict
 	// binding applies (a completed envelope carrying a fail verdict is
 	// re-bound to gate_failed, never accepted as a completed step).
@@ -170,11 +140,6 @@ type ResultSpec struct {
 	// the step (see currentChainAnswers). Answers only enter the record
 	// through the answer transition, so every entry is a human's.
 	HumanAnswers int
-	// RequireCommandEvidence mirrors requires_command_evidence: true (or
-	// the step id "verification"): an accepted completed result must carry
-	// at least one command_evidence entry, each with a non-empty argv and
-	// duration_ms > 0 (the V4 gate; exit_code presence is not checkable).
-	RequireCommandEvidence bool
 }
 
 // ValidateStepResult runs the staging gates over one envelope:
@@ -207,18 +172,15 @@ type ResultSpec struct {
 //     prefix-fail only, so a defer verdict clears the release gate and
 //     the workflow proceeds to wrap, while a fail verdict (with its
 //     fail_reason) still re-binds to gate_failed and rewinds.
-//  4. for completed results, the output JSON must match every
-//     declared output's schema and the verification evidence duty must
-//     be met.
 //
 // The minimal contract: an envelope missing the retired protocol
 // fields is never judged invalid for its absence — there is no
 // protocol version, no envelope id, no artifact manifest, no handoff
 // digest reference and no hash or manifest verification anywhere.
 //
-// Non-completed outcomes (gate_failed, needs_input, incomplete) skip
-// the declared-output and evidence enforcement: their disposition rides
-// other channels (the gate verdict, the pending question).
+// Non-completed outcomes (gate_failed, needs_input, incomplete) carry
+// their disposition on other channels (the gate verdict, the pending
+// question).
 func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	if res == nil {
 		return errors.New("driver: nil step result")
@@ -272,21 +234,6 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 			return err
 		}
 	}
-	if res.Outcome != OutcomeCompleted {
-		return nil
-	}
-	// Completed: the output must match every declared output's schema,
-	// and the evidence duty must be met.
-	for _, out := range spec.Outputs {
-		if err := ValidateOutputSchema(res.Output, out.Schema); err != nil {
-			return fmt.Errorf("driver: output for declared %q: %w", out.Path, err)
-		}
-	}
-	if spec.RequireCommandEvidence {
-		if err := checkCommandEvidence(res.CommandEvidence); err != nil {
-			return fmt.Errorf("driver: step %q completed without verification evidence: %w", spec.StepID, err)
-		}
-	}
 	return nil
 }
 
@@ -322,26 +269,6 @@ func needsInputQuestion(res *StepResult) (id, text string, err error) {
 			strings.Join(missing, " and "))
 	}
 	return id, text, nil
-}
-
-// checkCommandEvidence enforces the V4 evidence shape: at least one entry,
-// every entry with a non-empty argv and duration_ms > 0. exit_code's
-// zero value is legitimate and its presence cannot be checked on the
-// decoded struct, so it is not enforced. An entry the tolerant re-parse
-// could not decode never reaches here as a struct (see evidenceDropped).
-func checkCommandEvidence(ev []CommandEvidence) error {
-	if len(ev) == 0 {
-		return errors.New("command_evidence is empty — a verification step must carry at least one entry, each an OBJECT {\"argv\": [...], \"exit_code\": N, \"duration_ms\": N} (duration_ms > 0)")
-	}
-	for i, e := range ev {
-		if len(e.Argv) == 0 || strings.TrimSpace(strings.Join(e.Argv, "")) == "" {
-			return fmt.Errorf("command_evidence[%d] has an empty argv", i)
-		}
-		if e.DurationMs <= 0 {
-			return fmt.Errorf("command_evidence[%d] (%s) has no duration_ms (must be > 0)", i, e.Argv[0])
-		}
-	}
-	return nil
 }
 
 // currentChainAnswers counts the human answers of a step's current attempt
@@ -452,54 +379,6 @@ func releaseVerdictBinding(res *StepResult) error {
 func nonEmptyJSONString(v any) bool {
 	s, ok := v.(string)
 	return ok && strings.TrimSpace(s) != ""
-}
-
-// ValidateOutputSchema checks one result output against a declared
-// schema type name. The v2 schema surface is deliberately a closed
-// JSON-type set (the frontmatter extension): object|array|string|
-// number|boolean, plus "" / "any" for unconstrained. An unknown name is
-// an error, not a pass — a typo in a bundle must fail loudly at the
-// envelope, never slip through as "unconstrained".
-func ValidateOutputSchema(output json.RawMessage, schema string) error {
-	switch schema {
-	case "", "any":
-		if len(output) == 0 {
-			return nil
-		}
-		var probe any
-		if err := json.Unmarshal(output, &probe); err != nil {
-			return fmt.Errorf("driver: output is not valid JSON: %w", err)
-		}
-		return nil
-	case "object":
-		return checkJSONType(output, "object", func(v any) bool { _, ok := v.(map[string]any); return ok })
-	case "array":
-		return checkJSONType(output, "array", func(v any) bool { _, ok := v.([]any); return ok })
-	case "string":
-		return checkJSONType(output, "string", func(v any) bool { _, ok := v.(string); return ok })
-	case "number":
-		return checkJSONType(output, "number", func(v any) bool { _, ok := v.(float64); return ok })
-	case "boolean":
-		return checkJSONType(output, "boolean", func(v any) bool { _, ok := v.(bool); return ok })
-	default:
-		return fmt.Errorf("driver: unknown output schema %q", schema)
-	}
-}
-
-// checkJSONType unmarshals output once and asserts its dynamic JSON
-// type; null never satisfies a typed schema.
-func checkJSONType(output json.RawMessage, want string, ok func(any) bool) error {
-	if len(output) == 0 {
-		return fmt.Errorf("driver: output is empty, schema wants %s", want)
-	}
-	var probe any
-	if err := json.Unmarshal(output, &probe); err != nil {
-		return fmt.Errorf("driver: output is not valid JSON: %w", err)
-	}
-	if probe == nil || !ok(probe) {
-		return fmt.Errorf("driver: output schema wants %s, got JSON %s", want, jsonTypeName(probe))
-	}
-	return nil
 }
 
 // jsonTypeName answers the JSON type name of one decoded value for

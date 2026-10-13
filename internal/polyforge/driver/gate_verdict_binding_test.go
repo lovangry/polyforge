@@ -97,28 +97,6 @@ func TestValidateStepResultGateVerdictBinding(t *testing.T) {
 			res:       gateRes(OutcomeGateFailed, `{"verdict":"pass"}`),
 			wantBound: false,
 		},
-		{
-			// The binding runs BEFORE substance: a gate-fail report owes
-			// no completed duties (declared outputs).
-			name: "bound gate-fail report owes no declared outputs",
-			spec: ResultSpec{WIID: "wi_run", StepID: "review", SpawnN: 1, Gate: true,
-				Outputs: []OutputSpec{{Path: "artifacts/review.md", Schema: "object"}}},
-			res:       gateRes(OutcomeCompleted, failOutput),
-			wantBound: true,
-		},
-		{
-			// Same envelope without the fail verdict: the completed duty
-			// bites (the binding must not be a general amnesty) — the
-			// declared output's schema is enforced on the completed
-			// outcome.
-			name: "unbound completed still owes the declared output schema",
-			spec: ResultSpec{WIID: "wi_run", StepID: "review", SpawnN: 1, Gate: true,
-				Outputs: []OutputSpec{{Path: "artifacts/review.md", Schema: "array"}}},
-			res:        gateRes(OutcomeCompleted, `{"verdict":"pass"}`),
-			wantBound:  false,
-			wantErr:    true,
-			wantErrSub: "schema wants array",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
