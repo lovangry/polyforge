@@ -19,12 +19,20 @@ curl -s -H "Authorization: token $(gh auth token)" \
 server host with `PF_HOST=<host>` if it ever moves.)
 
 It installs the `pf` binary (SHA-verified from the release server), writes
-`~/.config/polyforge/cli.toml`, installs the `skills/polyforge` routing
-skill (pi harness → pi package; other harnesses with a skills dir →
-directory copy; otherwise CLI-only), and verifies connectivity. Execution
-machines (ones that run a pf daemon) add the daemon per `tools/install.sh` — the
-admin registers the machine identity first. Daily use from a session is
-natural language via the `polyforge` routing skill; from a terminal it's
+`~/.config/polyforge/cli.toml` (never rewritten), and keeps its own checkout
+of the release tag in `~/.local/share/polyforge/release/<tag>` (stable
+symlink `release/current`, previous version kept). From that checkout it
+installs the `skills/polyforge` routing skill for each harness it finds,
+independently: Claude Code (`~/.claude` or `claude` on PATH) gets the skill
+replaced wholesale in `~/.claude/skills/polyforge` plus a SessionStart hook
+registered once in `~/.claude/settings.json`; pi (on PATH) gets its polyforge
+package entry pinned to the same tag as the binary. Then it starts the
+daemon with `-workflows-dir release/current/workflows` (once a `[workspace]`
+mapping exists; a daemon already running with a different workflows dir is
+reported, never auto-restarted) and verifies connectivity. The admin
+registers the machine identity first. Re-running the same command upgrades
+and is idempotent. Daily use from a session is natural language via the
+`polyforge` routing skill; from a terminal it's
 `pf queue`, `pf submit`, `pf answer`, `pf ops status`, …
 
 ## Quickstart (developers — from-zero smoke run)

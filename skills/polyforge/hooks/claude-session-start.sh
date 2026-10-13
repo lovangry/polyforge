@@ -4,7 +4,9 @@
 # Reads the hook JSON on stdin (session_id, source), asks the local daemon
 # for the chat id of this Claude session via `pf chat init` (a resumed
 # session gets the same id), exports PF_CHAT_ID for every later Bash call
-# through $CLAUDE_ENV_FILE, and prints a one-line context note.
+# through $CLAUDE_ENV_FILE, and prints one JSON object: systemMessage shows
+# the id to the human, additionalContext hands it to the model (plain
+# stdout would reach the model only).
 # The id is a notification label, not a credential. When pf or the daemon
 # is unavailable this exits 0 with no output.
 
@@ -32,5 +34,7 @@ esac
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
 	printf 'export PF_CHAT_ID=%s\n' "$chat" >>"$CLAUDE_ENV_FILE" 2>/dev/null || true
 fi
-printf 'polyforge chat id: %s\n' "$chat"
+# stdout carries nothing but this object (Claude Code parses it as JSON);
+# the id is a plain token, so no escaping is needed
+printf '{"systemMessage":"polyforge chat id: %s","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"polyforge chat id: %s (PF_CHAT_ID is set for pf commands)"}}\n' "$chat" "$chat"
 exit 0
