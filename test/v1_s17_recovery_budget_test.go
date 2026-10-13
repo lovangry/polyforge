@@ -31,7 +31,6 @@ func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "verification", "outcome": "completed"},
-		{"do": "envelope", "id": "release", "outcome": "completed"},
 	}
 	wi := inst.newWI(t, "s17: every re-derivation fails at birth", actions, nil)
 	// ONE plan for the whole run: the original derivation executes the

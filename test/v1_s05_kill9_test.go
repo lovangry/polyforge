@@ -27,7 +27,6 @@ func TestV1S05AgentKill9(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -86,7 +85,7 @@ func TestV1S05AgentKill9(t *testing.T) {
 	// The spawn journal: the kill consumed ordinal 1 and the driver
 	// re-dispatched grill in place as a RESUME under ordinal 2 (the B2
 	// fence key), then the fresh dispatches of the tail.
-	spawns := waitSpawnCount(t, d, wi, 5, 60*time.Second)
+	spawns := waitSpawnCount(t, d, wi, 4, 60*time.Second)
 	if spawns[0]["resume"] != false || spawns[1]["resume"] != true {
 		t.Fatalf("the retry was not a resume: %+v %+v", spawns[0], spawns[1])
 	}
@@ -101,7 +100,7 @@ func TestV1S05AgentKill9(t *testing.T) {
 	// envelope is the CONTINUATION's (ordinal 2), and the sealed chain
 	// carries the spawn journal.
 	x := readExecution(t, d.capsuleDir(wi))
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}

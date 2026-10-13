@@ -276,29 +276,102 @@ ordinary blocked exits.
 
 ### Release flow
 
-The platform ships with zero release-specific code: release logic lives in
-the project bundle's release step (`steps/release.md`), and the platform's
-own release is one instance of that same hook. Deploying to a work machine is
-re-running `tools/install.sh`; it is a deployment pipeline, not a release
-system (`07-deployment-pilot.md §1.1/§6.3`, `00-architecture.md §3.3`).
+The platform ships with zero release-specific code in its engine: a release is a
+work item filed against the project-agnostic `release` workflow bundle
+(`workflows/release/`), and the delivery lanes (`feature-full`, `bug-fix`,
+`quick-fix`, `chore`) never release or deploy. Trigger it by filing a release WI
+(`pf file --bundle release ...`, or ask the routing skill: "release" / "deploy" /
+"发版" files that WI). If the goal names a bump (`major`, `minor`, `patch`) it is
+passed verbatim to the repo's procedure; otherwise the repo default applies.
+
+The bundle has three steps, each `gate: true`, fresh context, with command
+evidence required; a failure terminates the WI (published tags, releases and
+images are immutable, so there is no rewind into a re-release):
+
+1. `release` - fetches and resets the capsule clone to origin's default-branch
+   head, records the pre-release remote tag list, checks the procedure supports
+   `--verify`, then runs `.polyforge/release.sh [bump]` (which runs the repo's
+   test gate itself). No procedure in the capsule is a FAIL; two repos carrying
+   one is `PF-RELEASE-AMBIGUOUS_OWNER`.
+2. `verify` - a fresh judge that trusts nothing from step 1: release commit vs
+   origin head, the new tag exists and points at it, every older tag is
+   unchanged, release notes are non-empty, then `.polyforge/release.sh --verify
+   <version>`. Only a pass writes the verified version that `deploy` reads.
+3. `deploy` - runs `.polyforge/deploy.sh <version> --confirm <version>` for the
+   verified version only (never "latest"). A project with no `deploy.sh`
+   defers (it releases without deploying). The procedure ends with production
+   on the new version or rolled back; a rollback is a step FAIL.
+
+A failed `deploy` ends the WI failed with production on the old version (rolled
+back, or refused before touching it). Redeploy the already-verified version by
+running `.polyforge/deploy.sh <version> --confirm <version>` directly (a human or
+an agent); never by filing a new release WI, which would cut a duplicate version
+of the same commit (this repo's `release.sh` refuses that).
+
+Per-repo procedure contract (the repo owns the procedure; the bundle only
+dispatches):
+
+- `.polyforge/release.sh [bump]` releases origin's default-branch head, exits
+  non-zero on any failure, and prints `version=<tag>`, `commit=<sha>`,
+  `notes=<location>` lines at the end.
+- `.polyforge/release.sh --verify <version>` is a read-only audit of a published
+  release (format, ordering, artifacts, integrity); exit 0 only if all pass.
+- `.polyforge/deploy.sh <version> --confirm <version>` deploys exactly that
+  version; production ends on it or rolled back, rollback exits non-zero.
+
+This repository's own procedures: `release.sh` (vX.Y.Z, bump `major|minor|patch`,
+default `minor`) refuses a dirty tree or a HEAD that is not the fetched
+`origin/main` or a HEAD that already carries a release tag on origin, runs `make test`
+(including the e2e suite; the real-GitHub ship-PR e2e is skipped unless
+`POLYFORGE_TEST_REAL_GITHUB=1`), takes the version floor from the highest semver
+among the ORIGIN tags only (an unreadable `ls-remote` is fatal), builds the two
+binaries and the `ghcr.io/silgrid/aihub:<tag>` image, claims the version by
+pushing the git tag (fails if it exists: nothing is published), pushes the
+image, writes `aihub-image.digest` after the push, then `SHA256SUMS` and
+`gh release create` with the four assets (`aihub-linux-amd64`, `pf-linux-amd64`,
+`aihub-image.digest`, `SHA256SUMS`). `aihub-image.digest` holds the bare image digest
+`sha256:<64 hex>`; `deploy.sh` looks for `ghcr.io/silgrid/aihub@<that digest>` among
+the pulled image's repo digests. `release.sh --verify <version>` also requires the
+version to be strictly greater than every other tag on origin. It never deletes or
+overwrites a tag, release or image; a failure after the tag push burns the version
+(cut the next one).
+
+`deploy.sh` deploys the aihub service host: it requires `--confirm <version>`
+equal to the version argument (no prompt), takes a server-side lock for the
+whole mutating part (fails fast if another deploy holds it), runs on a machine
+with `gh` and `docker` logged in to the private `ghcr.io/silgrid/aihub` - the
+server never holds GitHub credentials. Steps: ONLINE verified full backup; pull
+`ghcr.io/silgrid/aihub:<tag>`, check the repo digest against the release's
+`aihub-image.digest` (itself checked via `SHA256SUMS`), `docker save | ssh
+docker load`, verify the image ID on the server and tag it
+`polyforge/aihub:<tag>`; edit only the aihub service of the server's compose
+file and recreate just that container (seconds of downtime, measured and
+printed); post-swap checks. If post-swap verification fails or the service does
+not come back, it AUTOMATICALLY rolls the compose image back to
+`polyforge/aihub:<old>`, recreates, verifies the old version answers and prints
+`ROLLED BACK` (distinct non-zero exit; if the rollback itself fails it prints
+loud manual instructions). Data restore stays manual (it needs a stop).
+`--dry-run` shows the plan and the compose diff; `--force` is a human-only
+override. Deploying a work machine is re-running `tools/install.sh`. It is a
+deployment pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
+`00-architecture.md §3.3`).
 
 ```
- RELEASE: bundle release-step hook (no platform release code)
+ RELEASE: a WI on the `release` bundle (no platform release code)
  +-----------------------------------------------------------+
- | project bundle release step (`steps/release.md`);       |
- | the platform's own release = one instance of that hook   |
+ | release (.polyforge/release.sh) -> verify (fresh judge,   |
+ | release.sh --verify) -> deploy (.polyforge/deploy.sh)     |
  +----------------------------+----------------------------+
                               |
                               v
                mono-repo git tag (single semver per tag)
                               |
                               v
-                releases/<tag>/  --  aihub      (server binary)
-                                   --  pf        (work-machine binary)
-                                   --  SHA256SUMS (checksum manifest)
+        GitHub release: aihub-linux-amd64, pf-linux-amd64,
+        aihub-image.digest, SHA256SUMS  +  ghcr.io image <tag>
                               |
                               v
- DEPLOYMENT: re-run `tools/install.sh` (pipeline, not a release system)
+ DEPLOYMENT: `deploy.sh` for the aihub host; re-run `tools/install.sh` on work machines
  +-----------------------------------------------------------+
  |  download -> sha256 verify -> stop daemon -> replace -> restart  |
  +-----------------------------------------------------------+
@@ -309,6 +382,11 @@ system (`07-deployment-pilot.md §1.1/§6.3`, `00-architecture.md §3.3`).
     make check     # build + vet + test, all packages
     go build ./...
     go test ./...
+
+Opt-in tests (skipped with a clear message unless their variable is set):
+`POLYFORGE_TEST_REAL_GITHUB=1` runs the ship-PR e2e, which creates a REAL private
+GitHub repo and PR with this machine's `gh`; `POLYFORGE_TEST_SYSTEM_INSTALL=1` runs
+the installer scenarios, which write `/usr/local/bin/pf` (disposable hosts only).
 
 ## `pf` commands
 
@@ -323,8 +401,18 @@ registry; `pf <verb> -help` one verb's face. The routing skill's fragments
 | --- | --- |
 | aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember`, `memory` |
 | daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ship`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
-| management | `users`, `api-keys`, `projects`, `machines`, `backup` |
+| management | `users`, `api-keys`, `projects`, `machines`, `backup` (DB-only snapshot, see below) |
 | local | `daemon` (run the work machine), `doctor` |
+
+`pf backup` writes a consistent DB-only snapshot (`VACUUM INTO`) under the
+server's data dir `backups/`, on the same disk. It does NOT include memory
+content (memory text lives only as files under `memory/`; the DB holds only its
+sha/length) nor the git repos (`git/`). For a full backup take the
+sqlite backup-API snapshot of `aihub.db` (not a plain file copy of a live WAL
+database) and rsync `memory/` and `git/` alongside it, as `deploy.sh` does. There
+is no backup-only mode: `deploy.sh`'s online backup (snapshot, rsync catch-up,
+consistency check, off-host copy) runs only as part of a deploy, so an ad-hoc full
+backup is these manual steps (or a copy of the whole data dir while aihub is stopped).
 
 Human moves: continue = `pf resume <id>` (a paused or blocked
 WI), abandon = `pf cancel <id>` (queued, paused or blocked), owner's failed verdict = `pf wrap <id> --fail`. These run with the

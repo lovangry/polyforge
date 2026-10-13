@@ -99,7 +99,6 @@ func healthyTail() []map[string]any {
 	return []map[string]any{
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "verification", "outcome": "completed"},
-		{"do": "envelope", "id": "release", "outcome": "completed"},
 	}
 }
 
@@ -347,7 +346,6 @@ func TestV2ModelPinFailureAdvancesCandidate(t *testing.T) {
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true}, // spawn 2 dies at birth: never reached
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "verification", "outcome": "completed"},
-		{"do": "envelope", "id": "release", "outcome": "completed"},
 	}
 	wi := inst.newWI(t, "f4: model pin failure exit", actions, nil)
 	writePlanExtra(t, inst, wi, actions, nil, map[string]any{"bad_models": []string{"sub2api-glm/glm-5.3-flash"}})

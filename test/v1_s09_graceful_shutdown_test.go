@@ -28,7 +28,6 @@ func TestV1S09GracefulShutdown(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -95,12 +94,12 @@ func TestV1S09GracefulShutdown(t *testing.T) {
 
 	// The resume re-dispatched grill in place (a RESUME under the next
 	// ordinal), then the tail ran fresh.
-	spawns := waitSpawnCount(t, d2, wi, 5, 60*time.Second)
+	spawns := waitSpawnCount(t, d2, wi, 4, 60*time.Second)
 	if spawns[1]["resume"] != true {
 		t.Fatalf("post-shutdown restart did not resume: %+v", spawns[1])
 	}
 	x := readExecution(t, capDir)
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}

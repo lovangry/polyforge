@@ -52,7 +52,6 @@ func TestV1S16AnswerAutoRedeliveryAfterKill9(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 3000},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 
 	d := newV1Daemon(t, inst)
@@ -107,7 +106,7 @@ func TestV1S16AnswerAutoRedeliveryAfterKill9(t *testing.T) {
 		t.Fatalf("sealed execution.json still carries a pending question:\n%s", exec)
 	}
 	x = readExecution(t, capDir)
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}
@@ -141,7 +140,6 @@ func TestV1S16EmptyQuestionIDRefused(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -193,8 +191,8 @@ func TestV1S16EmptyQuestionIDRefused(t *testing.T) {
 	}
 	// The refusal cost exactly one re-dispatch: six derivations, in plan
 	// order, and the sealed chain carries the whole story.
-	if n := len(spawnJournal(t, capDir)); n != 6 {
-		t.Fatalf("spawn journal has %d entries, want 6 (the refused dispatch consumed ordinal 1)", n)
+	if n := len(spawnJournal(t, capDir)); n != 5 {
+		t.Fatalf("spawn journal has %d entries, want 5 (the refused dispatch consumed ordinal 1)", n)
 	}
 }
 
@@ -213,7 +211,6 @@ func TestV1S16DuplicateDropSameIDIsIdempotent(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -288,7 +285,6 @@ func TestV1S16ZeroLandingAnswerSurvivesDaemonCrash(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 3000},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 
 	d := newV1Daemon(t, inst)
@@ -353,7 +349,7 @@ func TestV1S16ZeroLandingAnswerSurvivesDaemonCrash(t *testing.T) {
 		t.Fatalf("needs_input fired %d times, want 1: %v", n, d2.eventKinds(t, wi))
 	}
 	x = readExecution(t, capDir)
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}

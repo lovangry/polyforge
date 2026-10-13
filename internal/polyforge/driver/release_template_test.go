@@ -1,13 +1,13 @@
 package driver
 
-// release_template_test.go: content regression pin for the shared release
-// step templates after polyforge#123's dispatcher rework. The three
-// templates are project-generic dispatchers; the release procedure itself
-// lives in each project's repo (.polyforge/release.sh|.md). These tests
-// grep the templates for polyforge-private procedure markers and pin the
-// one-dispatcher-body convention and the sanctioned output-schema
-// extension (verdict enum [pass, defer, fail]), so a future edit cannot
-// quietly re-inline a private procedure or fork the bodies per lane.
+// release_template_test.go: content pins for the release workflow bundle
+// (workflows/release) and for its absence from the delivery bundles.
+//
+// The release bundle is project-generic: the procedures live in each
+// project's repo (.polyforge/release.sh, .polyforge/deploy.sh), so the
+// shared text must carry no polyforge-private procedure markers. And
+// releases happen ONLY through this bundle: no delivery lane (feature-full,
+// bug-fix, quick-fix, chore) may carry a release step.
 
 import (
 	"os"
@@ -16,222 +16,140 @@ import (
 	"testing"
 )
 
-// releaseBundles are the three bundles whose shared release template the
-// rework rewrote; each is pinned independently (all three must stay
-// consistent).
-var releaseBundles = []string{"bug-fix", "feature-full", "quick-fix"}
-
-// releaseTemplatePath answers one bundle's shared release template path,
-// relative to this package's directory (internal/polyforge/driver → the
-// repo root is three levels up).
-func releaseTemplatePath(bundle string) string {
-	return filepath.Join("..", "..", "..", "workflows", bundle, "steps", "release.md")
+func bundlePath(bundle string, elem ...string) string {
+	return filepath.Join(append([]string{"..", "..", "..", "workflows", bundle}, elem...)...)
 }
 
-// readReleaseTemplate reads one shared release template, failing loudly.
-func readReleaseTemplate(t *testing.T, bundle string) string {
+func readBundleFile(t *testing.T, bundle string, elem ...string) string {
 	t.Helper()
-	raw, err := os.ReadFile(releaseTemplatePath(bundle))
+	raw, err := os.ReadFile(bundlePath(bundle, elem...))
 	if err != nil {
-		t.Fatalf("cannot read the shared %s release template: %v", bundle, err)
+		t.Fatalf("cannot read %s: %v", bundlePath(bundle, elem...), err)
 	}
 	return string(raw)
 }
 
-// templateBody returns the template's body lines (everything after the
-// closing frontmatter fence), trimmed per line.
-func templateBody(t *testing.T, bundle string) []string {
-	t.Helper()
-	lines := strings.Split(readReleaseTemplate(t, bundle), "\n")
-	if strings.TrimSpace(lines[0]) != "---" {
-		t.Fatalf("%s: no frontmatter opening fence", releaseTemplatePath(bundle))
-	}
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			var out []string
-			for _, ln := range lines[i+1:] {
-				out = append(out, strings.TrimSpace(ln))
-			}
-			return out
-		}
-	}
-	t.Fatalf("%s: no frontmatter closing fence", releaseTemplatePath(bundle))
-	return nil
-}
-
-// requireLine asserts one exact (trimmed) line exists in lines.
-func requireLine(t *testing.T, lines []string, want string) {
-	t.Helper()
-	for _, ln := range lines {
-		if strings.TrimSpace(ln) == want {
-			return
-		}
-	}
-	t.Fatalf("template frontmatter lost the pinned line %q (the frontmatter contract must stay byte-identical to shipped except the sanctioned verdict enum extension)", want)
-}
-
-// privateProcedureMarkers are the polyforge-private procedure markers that
-// MUST NOT survive in any of the three shared templates: the procedure
-// moved to the repo's .polyforge/release.sh and the dispatcher ships
-// project-generic (P0d/P0a). Case-insensitive.
+// privateProcedureMarkers are polyforge-private procedure markers that
+// MUST NOT appear anywhere in the shared release bundle text.
+// Case-insensitive.
 var privateProcedureMarkers = []string{
-	"releases_root",               // the intranet publish root variable
-	"gowork=off make release",     // the private build line
-	"sha256sums",                  // the private checksum manifest
-	"polyforge release procedure", // the inlined private procedure section
-	`mkdir "$releases_root`,       // the private atomic version claim
-	"sort -vu",                    // the private union-floor command
-	"git tag -l",                  // the private floor computation
-	"intranet",                    // the private distribution story
-	"aihub",                       // private build/deploy targets
-	"-ldflags",                    // the private ldflags stamp
-	"pf upgrade",                  // the private upgrade sequence
-	"checksum",                    // the private manifest prose
-	"00-architecture.md",          // private design-doc refs
+	"releases_root",
+	"gowork=off make release",
+	"sha256sums",
+	"polyforge release procedure",
+	`mkdir "$releases_root`,
+	"sort -vu",
+	"git tag -l",
+	"intranet",
+	"aihub",
+	"-ldflags",
+	"pf upgrade",
+	"checksum",
+	"00-architecture.md",
 	"07-deployment-pilot.md",
+	"ghcr.io",
+	"docker",
 }
 
-// multisetDiff returns the lines of a that are not covered by b (multiset
-// semantics: duplicate counts matter).
-func multisetDiff(a, b []string) []string {
-	counts := map[string]int{}
-	for _, l := range b {
-		counts[l]++
+// TestReleaseBundleCarriesNoPrivateProcedure pins the project-generic
+// posture of every file in the release bundle.
+func TestReleaseBundleCarriesNoPrivateProcedure(t *testing.T) {
+	files, err := filepath.Glob(bundlePath("release", "*.md"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	var out []string
-	for _, l := range a {
-		if counts[l] > 0 {
-			counts[l]--
-		} else {
-			out = append(out, l)
+	steps, _ := filepath.Glob(bundlePath("release", "steps", "*.md"))
+	files = append(files, steps...)
+	if len(files) != 4 {
+		t.Fatalf("release bundle has %d markdown files (%v), want workflow.md + 3 steps", len(files), files)
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	return out
-}
-
-// TestReleaseTemplatesCarryNoPrivateProcedure pins the dispatcher posture:
-// none of the three shared release templates carries polyforge-private
-// procedure content — the procedure lives in the repo's own
-// .polyforge/release.sh, and the templates stay project-generic.
-func TestReleaseTemplatesCarryNoPrivateProcedure(t *testing.T) {
-	for _, bundle := range releaseBundles {
-		t.Run(bundle, func(t *testing.T) {
-			raw := strings.ToLower(readReleaseTemplate(t, bundle))
-			if strings.TrimSpace(raw) == "" {
-				t.Fatalf("%s: the shared release template is empty", releaseTemplatePath(bundle))
+		low := strings.ToLower(string(raw))
+		for _, m := range privateProcedureMarkers {
+			if strings.Contains(low, m) {
+				t.Fatalf("%s carries polyforge-private procedure text %q - the procedure lives in the repo's .polyforge/*.sh, never in the shared bundle", f, m)
 			}
-			for _, marker := range privateProcedureMarkers {
-				if strings.Contains(raw, marker) {
-					t.Fatalf("the shared %s release template carries polyforge-private procedure text %q — the procedure lives in the repo's .polyforge/release.sh, never in the shared template", bundle, marker)
-				}
-			}
-		})
-	}
-}
-
-// TestReleaseDispatcherBodySharedAcrossBundles pins the one-dispatcher
-// convention: bug-fix and feature-full share one dispatcher body
-// byte-for-byte; quick-fix is that body plus exactly ONE extra pinned line
-// stating this bundle always defers; the shared body never inspects ticket
-// type (no bundle name appears in it); the procedure-file contract (both
-// file spellings, defer-on-absent, the one-owner rule) is stated; and no
-// bundle's dispatcher ever references the deploy procedure files (deploy is
-// never triggered by an automated workflow step).
-func TestReleaseDispatcherBodySharedAcrossBundles(t *testing.T) {
-	ff := templateBody(t, "feature-full")
-	bf := templateBody(t, "bug-fix")
-	qf := templateBody(t, "quick-fix")
-
-	if strings.Join(bf, "\n") != strings.Join(ff, "\n") {
-		t.Fatalf("the bug-fix and feature-full release bodies differ — the three shared templates must share ONE dispatcher body (bug-fix keeps full dispatcher semantics)")
-	}
-	extra := multisetDiff(qf, ff)
-	if len(extra) != 1 {
-		t.Fatalf("the quick-fix release body differs from the shared dispatcher by %d lines, want exactly one pinned always-defer line (diff: %q)", len(extra), extra)
-	}
-	if !strings.Contains(strings.ToLower(extra[0]), "defer") {
-		t.Fatalf("the quick-fix body's single extra line is not the always-defer pin: %q", extra[0])
-	}
-
-	shared := strings.Join(ff, "\n")
-	for _, bundle := range releaseBundles {
-		if strings.Contains(shared, bundle) {
-			t.Fatalf("the shared dispatcher body names the bundle %q — the dispatcher must not inspect ticket type", bundle)
-		}
-	}
-	for _, needle := range []string{".polyforge/release.sh", ".polyforge/release.md", "defer", "owner"} {
-		if !strings.Contains(shared, needle) {
-			t.Fatalf("the shared dispatcher body does not state the procedure-file contract (missing %q)", needle)
-		}
-	}
-	for _, bundle := range releaseBundles {
-		body := strings.Join(templateBody(t, bundle), "\n")
-		if strings.Contains(body, ".polyforge/deploy") {
-			t.Fatalf("the shared %s release dispatcher references .polyforge/deploy — deploy must never be triggered by an automated workflow step", bundle)
 		}
 	}
 }
 
-// TestReleaseSchemaAdmitsDeferVerdict pins the output-schema half of the
-// verdict-enum extension: each shared release template's frontmatter keeps
-// name/description/tools byte-identical to shipped, carries the extended
-// top-level verdict enum [pass, defer, fail], keeps the pass and fail oneOf
-// branches exactly as shipped (fail still requires fail_reason), and gains
-// exactly one defer branch that requires neither version nor
-// artifacts_published.
-func TestReleaseSchemaAdmitsDeferVerdict(t *testing.T) {
-	shippedDescription := map[string]string{
-		"feature-full": "description: Project-specific release hook — cut a version, build/tag/publish per this project's own convention, after review has passed. Template; each project fills in its own procedure.",
-		"bug-fix":      "description: Project-specific release hook - cut a version, build/tag/publish per this project's own convention, after review has passed. Template; each project fills in its own procedure.",
-		"quick-fix":    "description: Project-specific release hook - cut a version, build/tag/publish per this project's own convention, after verification has passed. Template; each project fills in its own procedure.",
+// TestReleaseBundleShape pins the step list, gates, evidence flags, the
+// absence of rewinds, and the per-step contract text.
+func TestReleaseBundleShape(t *testing.T) {
+	wf, err := LoadWorkflow(bundlePath("release"))
+	if err != nil {
+		t.Fatalf("release bundle must load and validate: %v", err)
 	}
-	for _, bundle := range releaseBundles {
-		t.Run(bundle, func(t *testing.T) {
-			lines := strings.Split(readReleaseTemplate(t, bundle), "\n")
-			requireLine(t, lines, "name: release")
-			requireLine(t, lines, shippedDescription[bundle])
-			requireLine(t, lines, "tools: [read, bash]")
-			// The sanctioned extension, and only it.
-			requireLine(t, lines, "enum: [pass, defer, fail]")
-			// The pass branch stays as shipped.
-			requireLine(t, lines, "verdict: { type: string, enum: [pass] }")
-			requireLine(t, lines, "required: [verdict, version, artifacts_published]")
-			// The fail branch stays as shipped (fail still rewinds, with a
-			// required fail_reason).
-			requireLine(t, lines, "verdict: { type: string, enum: [fail] }")
-			requireLine(t, lines, "fail_reason: { type: string, minLength: 1 }")
-			requireLine(t, lines, "required: [verdict, fail_reason]")
-			// Exactly one defer branch, owing neither version nor
-			// artifacts_published.
-			deferIdx, count := -1, 0
-			for i, ln := range lines {
-				if strings.Contains(ln, "enum: [defer]") {
-					count++
-					deferIdx = i
-				}
+	var ids []string
+	for _, s := range wf.Steps {
+		ids = append(ids, s.ID)
+		if !s.Gate || s.ContextPolicy != ContextFresh || !s.RequiresCommandEvidence {
+			t.Fatalf("step %q must be gate + fresh + requires_command_evidence (gate=%v ctx=%q evidence=%v)", s.ID, s.Gate, s.ContextPolicy, s.RequiresCommandEvidence)
+		}
+		if s.OnFail != nil {
+			t.Fatalf("step %q must not declare on_fail: a failed release or deploy must terminate, never rewind into a re-release (immutability)", s.ID)
+		}
+	}
+	if got, want := strings.Join(ids, ","), "release,verify,deploy"; got != want {
+		t.Fatalf("release bundle steps = %s, want %s", got, want)
+	}
+	if in := wf.step("verify").Inputs; len(in) != 1 || in[0].Artifact != "artifacts/release-record.json" {
+		t.Fatalf("verify must declare artifacts/release-record.json as its input, got %v", in)
+	}
+	if in := wf.step("deploy").Inputs; len(in) != 1 || in[0].Artifact != "artifacts/verified-version.json" {
+		t.Fatalf("deploy must declare artifacts/verified-version.json as its only version input, got %v", in)
+	}
+
+	rel := readBundleFile(t, "release", "steps", "release.md")
+	for _, needle := range []string{
+		"`.polyforge/release.sh`", "PF-RELEASE-AMBIGUOUS_OWNER", "--verify", "git fetch origin",
+		"git ls-remote --tags origin", "verbatim", "enum: [pass, fail]",
+	} {
+		if !strings.Contains(rel, needle) {
+			t.Fatalf("release step lost its contract text %q", needle)
+		}
+	}
+	if strings.Contains(rel, "enum: [pass, defer, fail]") || strings.Contains(rel, "enum: [defer]") {
+		t.Fatal("the release step must not admit a defer verdict: a release WI without a procedure is an error")
+	}
+
+	ver := readBundleFile(t, "release", "steps", "verify.md")
+	for _, needle := range []string{"release-record.json", "verified-version.json", "ls-remote", "merge-base --is-ancestor", "--verify V", "immutab", "gh release view"} {
+		if !strings.Contains(ver, needle) {
+			t.Fatalf("verify step lost its check text %q", needle)
+		}
+	}
+
+	dep := readBundleFile(t, "release", "steps", "deploy.md")
+	for _, needle := range []string{"`.polyforge/deploy.sh`", "--confirm V", "PF-DEPLOY-AMBIGUOUS_OWNER", "defer", `"latest"`, "enum: [pass, defer, fail]", "rolled_back"} {
+		if !strings.Contains(dep, needle) {
+			t.Fatalf("deploy step lost its contract text %q", needle)
+		}
+	}
+}
+
+// TestDeliveryBundlesCarryNoReleaseStep pins decision B: releases happen
+// only via workflows/release.
+func TestDeliveryBundlesCarryNoReleaseStep(t *testing.T) {
+	for _, bundle := range []string{"feature-full", "bug-fix", "quick-fix", "chore"} {
+		if _, err := os.Stat(bundlePath(bundle, "steps", "release.md")); err == nil {
+			t.Fatalf("%s still ships steps/release.md - releases happen only via the release bundle", bundle)
+		}
+		wf, err := LoadWorkflow(bundlePath(bundle))
+		if err != nil {
+			t.Fatalf("%s: %v", bundle, err)
+		}
+		for _, s := range wf.Steps {
+			if s.ID == "release" || s.ID == "deploy" {
+				t.Fatalf("%s declares a %q step", bundle, s.ID)
 			}
-			if count != 1 {
-				t.Fatalf("the %s release schema carries %d defer oneOf branches, want exactly 1", bundle, count)
+			if s.OnFail != nil && s.OnFail.Target == "release" {
+				t.Fatalf("%s step %q rewinds to release", bundle, s.ID)
 			}
-			var req string
-			for j := deferIdx + 1; j < len(lines); j++ {
-				ln := lines[j]
-				if strings.TrimSpace(ln) == "---" || strings.HasPrefix(ln, "    - ") {
-					break
-				}
-				if strings.Contains(ln, "required:") {
-					req = strings.TrimSpace(ln)
-				}
-			}
-			if req == "" {
-				t.Fatalf("the %s defer oneOf branch has no required: line", bundle)
-			}
-			if !strings.Contains(req, "verdict") {
-				t.Fatalf("the %s defer branch's required line does not pin the verdict: %q", bundle, req)
-			}
-			if strings.Contains(req, "version") || strings.Contains(req, "artifacts_published") {
-				t.Fatalf("the %s defer branch must not require version/artifacts_published: %q", bundle, req)
-			}
-		})
+		}
 	}
 }

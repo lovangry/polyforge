@@ -47,7 +47,6 @@ func TestV1S21F15ProgressSemantics(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d.pf(t, "submit", wiA)
 	// While the chattering dispatch is alive its step age grows and its
@@ -93,7 +92,6 @@ func TestV1S21F15ProgressSemantics(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	capB := d.capsuleDir(wiB)
 	d.pf(t, "submit", wiB)
