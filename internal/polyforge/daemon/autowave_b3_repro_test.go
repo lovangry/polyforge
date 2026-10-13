@@ -110,7 +110,7 @@ func TestAutoOffClearsPendingAutoEntries(t *testing.T) {
 	}
 
 	// one EXPLICIT submit rides alongside — auto off must not touch it.
-	if _, err := td.client.Claim("wi_b3_manual", "normal"); err != nil {
+	if _, err := td.client.ClaimWithModels("wi_b3_manual", "normal", nil); err != nil {
 		t.Fatalf("explicit claim: %v", err)
 	}
 

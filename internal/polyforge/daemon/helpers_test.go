@@ -561,7 +561,7 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 func (td *testDaemon) submitClaim(t *testing.T, wi string) {
 	t.Helper()
 	mkBare(t, td.cfg.GitRemoteBase, wi)
-	raw, err := td.client.Claim(wi, "normal")
+	raw, err := td.client.ClaimWithModels(wi, "normal", nil)
 	if err != nil {
 		t.Fatalf("claim %s: %v", wi, err)
 	}

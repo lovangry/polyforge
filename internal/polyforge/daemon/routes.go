@@ -205,7 +205,6 @@ func (d *Daemon) handler() http.Handler {
 			"no live bridge handle for work item "+wi+": the workflow is between derivations — retry after the daemon re-derives it")
 	})
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute("claim"))
-	mux.HandleFunc("POST /jobs/{wi}/resume", d.submitRoute("resume"))
 	// polyforge#116: the §6.4 owner move on a workflow parked blocked on an
 	// honest incomplete result — the state the bounded close leaves has no
 	// live driver, no bridge handle and no job record; the owner's moves
@@ -415,42 +414,11 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 // that finds the work item already terminal answers gracefully (the
 // arbitration's idempotency contract).
 
-// parkedWIClose handles a close that finds no local job because the
-// workflow is parked blocked on an honest incomplete result (polyforge#116):
-// the bounded close dropped the job, so the owner's moves on this state are
-// the §6.4 face, not a runtime close — `--fail` is the owner's terminate
-// verdict, landed by the CLI at the hub's terminate-blocked door with the
-// human's key (refused here with a hint); a wrap (success) or a pause of a parked workflow has nothing to
-// seal — refused with the owner-move copy. Returns true when it answered;
-// a non-blocked work item falls through to the caller's terminalOf/404.
-func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
-	item, err := d.hub.GetWorkItem(wi)
-	if err != nil || item == nil || item.Status != api.StatusBlocked {
-		return false
-	}
-	// The terminate verdict (`--fail`) is NOT landed here: the hub's
-	// terminate-blocked door authorizes the HUMAN (reporter / maintainer /
-	// admin), so the CLI calls it with the user's own key; the daemon's
-	// machine key is not that caller. There is no local state to clean —
-	// the bounded close already dropped the job.
-	if reason == protocol.FinishFailed {
-		writeErr(w, api.ErrDaemonConflict,
-			"the workflow is parked blocked — its failed verdict is landed by the CLI with your own credential (`pf wrap --fail <id>` from an up-to-date pf), or abandon it with `pf cancel <id>`")
-		return true
-	}
-	writeErr(w, api.ErrDaemonConflict,
-		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon (`pf wrap --fail <id>` records a failed verdict); there is no completed run to wrap or pause")
-	return true
-}
-
 // closeJob runs one CLI-side close through Runtime.Stop.
 func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason string) {
 	wi = d.canonWI(wi) // a slug spelling closes the canonical job (F2)
 	ji, ok := d.rt.Info(wi)
 	if !ok {
-		if d.parkedWIClose(w, wi, reason) {
-			return
-		}
 		if st, terr := d.terminalOf(wi); terr == nil {
 			writeJSON(w, http.StatusOK, closeResponse{
 				WorkItemID: wi, Outcome: "already_terminal", Status: st,

@@ -196,46 +196,36 @@ func TestResumeBlockedOwnerMove(t *testing.T) {
 	}
 }
 
-// TestTerminateBlockedOwnerVerdict (polyforge#116): the §6.4 terminate
-// verdict's face — a close that finds no local job because the workflow
-// is parked blocked lands the owner's kill verdict at the hub
-// (the terminate-blocked door) instead of DAEMON-404; a wrap (success)
-// and a pause of a parked workflow answer the owner-move refusal — there
-// is nothing to seal.
-func TestTerminateBlockedOwnerVerdict(t *testing.T) {
+// TestParkedWICloseIsGone (audit-subtraction pass B): the parkedWIClose
+// compat face is deleted — a close that finds no local job because the
+// workflow is parked blocked is no longer intercepted with owner-move
+// copy. Blocked work items are not terminal, so the close answers the
+// plain DAEMON-404 no-local-job shape; the owner's moves are the CLI's
+// dedicated faces (pf resume drives §6.4, wrap --fail prints the
+// blocked hint client-side, pf cancel abandons at the hub).
+func TestParkedWICloseIsGone(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	const wi = "wi_parked"
 	td.hub.mu.Lock()
 	td.hub.status[wi] = api.StatusBlocked
 	td.hub.mu.Unlock()
 
-	// `--fail` on a parked workflow is landed by the CLI with the human's
-	// key; the daemon route refuses with a hint and never calls the door.
-	if _, err := td.client.Wrap(wi, "fail"); err == nil || !strings.Contains(err.Error(), "your own credential") {
-		t.Fatalf("daemon wrap --fail on a parked workflow must refuse with the CLI hint, got %v", err)
+	// A close of a parked workflow finds no local job and the hub status
+	// is not terminal: DAEMON-404, no owner-move interception.
+	if _, err := td.client.Wrap(wi, "fail"); err == nil || !strings.Contains(err.Error(), "no local job") {
+		t.Fatalf("daemon close of a parked workflow must answer the plain no-local-job shape, got %v", err)
+	}
+	if _, err := td.client.Wrap(wi, "wrap"); err == nil || !strings.Contains(err.Error(), "no local job") {
+		t.Fatalf("daemon wrap of a parked workflow must answer the plain no-local-job shape, got %v", err)
+	}
+	if _, err := td.client.Pause(wi); err == nil || !strings.Contains(err.Error(), "no local job") {
+		t.Fatalf("daemon pause of a parked workflow must answer the plain no-local-job shape, got %v", err)
 	}
 	td.hub.mu.Lock()
 	if len(td.hub.terminateBlockeds) != 0 {
 		t.Fatalf("the daemon fired the hub terminate door %v with its machine key", td.hub.terminateBlockeds)
 	}
 	td.hub.mu.Unlock()
-
-	// A wrap (success) or a pause of a STILL-parked workflow has nothing
-	// to seal — the owner's moves are the §6.4 face, not a runtime close.
-	// (After the terminate verdict the WI is terminal, and a close answers
-	// the graceful already_terminal shape — the arbitration's idempotency.)
-	const wi2 = "wi_parked2"
-	td.hub.mu.Lock()
-	td.hub.status[wi2] = api.StatusBlocked
-	td.hub.mu.Unlock()
-	if _, err := td.client.Wrap(wi2, "wrap"); err == nil {
-		t.Fatal("wrap (success) on a parked workflow must be refused")
-	}
-	// A pause of a parked workflow: same refusal — the owner's moves are
-	// the §6.4 face, not a runtime close.
-	if _, err := td.client.Pause(wi2); err == nil {
-		t.Fatal("pause on a parked workflow must be refused")
-	}
 }
 
 func TestWrapAlreadyTerminalGraceful(t *testing.T) {
@@ -327,7 +317,7 @@ func TestOpsAutoAndMax(t *testing.T) {
 		t.Fatalf("state not applied: auto=%v max=%d", td.modes.Auto(), td.q.MaxConcurrent())
 	}
 	// A manual submit is ALLOWED while auto is on (no DAEMON-409).
-	if _, err := td.client.Claim("wi_z", "normal"); err != nil {
+	if _, err := td.client.ClaimWithModels("wi_z", "normal", nil); err != nil {
 		t.Fatalf("claim while auto on: %v", err)
 	}
 	if _, err := td.client.OpsConfig(cli.OpsConfigRequest{Auto: &off}); err != nil {
@@ -347,7 +337,7 @@ func TestOpsAutoAndMax(t *testing.T) {
 	}
 	// A submit and an auto switch during shutdown answer DAEMON-410.
 	td.modes.SetShuttingDown()
-	if _, err := td.client.Claim("wi_y", "normal"); err == nil {
+	if _, err := td.client.ClaimWithModels("wi_y", "normal", nil); err == nil {
 		t.Fatal("claim during shutdown succeeded")
 	} else {
 		var ae *api.Error
@@ -366,7 +356,7 @@ func TestSubmitDispatchBackfill(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) { c.MaxConcurrent = 1 })
 	for _, wi := range []string{"wi_p", "wi_q", "wi_r"} {
 		mkBare(t, td.cfg.GitRemoteBase, wi)
-		if _, err := td.client.Claim(wi, "normal"); err != nil {
+		if _, err := td.client.ClaimWithModels(wi, "normal", nil); err != nil {
 			t.Fatalf("claim %s: %v", wi, err)
 		}
 	}

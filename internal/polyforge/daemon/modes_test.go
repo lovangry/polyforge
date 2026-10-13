@@ -161,7 +161,7 @@ func TestAutoOnPullsUpToMax(t *testing.T) {
 		}
 	}
 	mkBare(t, td.cfg.GitRemoteBase, "wi_manual")
-	if _, err := td.client.Claim("wi_manual", "normal"); err != nil {
+	if _, err := td.client.ClaimWithModels("wi_manual", "normal", nil); err != nil {
 		t.Fatalf("manual submit while auto on: %v", err)
 	}
 }
@@ -180,7 +180,7 @@ func TestMaxConcurrentCountsJobsStartedOutsideTheQueue(t *testing.T) {
 	}
 	for _, wi := range []string{"wi_q1", "wi_q2"} {
 		mkBare(t, td.cfg.GitRemoteBase, wi)
-		if _, err := td.client.Claim(wi, "normal"); err != nil {
+		if _, err := td.client.ClaimWithModels(wi, "normal", nil); err != nil {
 			t.Fatalf("claim %s: %v", wi, err)
 		}
 	}
@@ -209,7 +209,7 @@ func TestInvalidWorkspaceYamlRefusedBeforeClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	mkBare(t, td.cfg.GitRemoteBase, "wi_manual")
-	_, cerr := td.client.Claim("wi_manual", "normal")
+	_, cerr := td.client.ClaimWithModels("wi_manual", "normal", nil)
 	var ae *api.Error
 	if !errors.As(cerr, &ae) || ae.Code != api.ErrDaemonWorkspaceYaml {
 		t.Fatalf("submit over an invalid yaml = %v, want DAEMON-414", cerr)
@@ -243,7 +243,7 @@ func TestTransientProbeFailureKeepsSubmitQueued(t *testing.T) {
 	td.hub.mu.Lock()
 	td.hub.probeFails = 2
 	td.hub.mu.Unlock()
-	if _, err := td.client.Claim("wi_blip", "normal"); err != nil {
+	if _, err := td.client.ClaimWithModels("wi_blip", "normal", nil); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	td.waitLive(t, "wi_blip")

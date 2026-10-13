@@ -39,7 +39,7 @@ func TestSubmitBodyCarriesOrigin(t *testing.T) {
 	d.answer("POST", "/jobs/wi_abc/claim", `{"accepted":true,"work_item_id":"wi_abc"}`)
 	c := NewDaemonClient(d.sock)
 	c.Origin = &SubmitOrigin{ChatID: "chat_z", Owner: "usr_1"}
-	if _, err := c.Claim("wi_abc", ""); err != nil {
+	if _, err := c.ClaimWithModels("wi_abc", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if b := d.rec.last().Body; !strings.Contains(b, `"origin":{"chat_id":"chat_z","owner":"usr_1"}`) {
