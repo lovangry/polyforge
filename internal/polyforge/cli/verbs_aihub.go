@@ -526,7 +526,7 @@ var cmdRecall = &Command{
 	Summary: "Search project memories",
 	Usage:   "pf recall --project P <query> [--type T] [--tags a,b] [--limit N]",
 	Setup: func(fs *flag.FlagSet) {
-		fs.String("project", "", "project name (required; validated against the [workspace] mapping)")
+		fs.String("project", "", "project name (required)")
 		fs.String("q", "", "query text (alternative to the positional argument)")
 		fs.String("type", "", "memory type filter: exact (experience.debug), prefix (experience.*), or * (all types)")
 		fs.String("tags", "", "comma-separated tags")
@@ -554,10 +554,7 @@ var cmdRecall = &Command{
 		}
 		proj := stringFlag(fs, "project")
 		if proj == "" {
-			return fmt.Errorf("recall: --project is required — there is no default project (polyforge#113); the routing skill derives it from the WI under discussion, and [workspace.\"<path>\"] sections of cli.toml declare the mapping (`pf doctor` checks it)")
-		}
-		if err := requireMappedProject(ctx, "recall", proj); err != nil {
-			return err
+			return fmt.Errorf("recall: --project is required — there is no default project (polyforge#113); the routing skill derives it from the WI under discussion")
 		}
 		var tagList []string
 		if tags := stringFlag(fs, "tags"); tags != "" {
@@ -619,7 +616,7 @@ var cmdRemember = &Command{
 	Usage: "pf remember --project P --type T [--title S] [--visibility V] [--tags a,b] " +
 		"[--work-item ID] <content | - (stdin) | @file>",
 	Setup: func(fs *flag.FlagSet) {
-		fs.String("project", "", "project name (required; validated against the [workspace] mapping)")
+		fs.String("project", "", "project name (required)")
 		fs.String("type", "", "memory type (required, e.g. experience.debug, fact.note)")
 		fs.String("title", "", "memory title")
 		fs.String("visibility", "project", "admin|private|project|team|public")
@@ -633,10 +630,7 @@ var cmdRemember = &Command{
 		}
 		proj := stringFlag(fs, "project")
 		if proj == "" {
-			return fmt.Errorf("remember: --project is required — there is no default project (polyforge#113); [workspace.\"<path>\"] sections of cli.toml declare the mapping (`pf doctor` checks it)")
-		}
-		if err := requireMappedProject(ctx, "remember", proj); err != nil {
-			return err
+			return fmt.Errorf("remember: --project is required — there is no default project (polyforge#113)")
 		}
 		// The content: positional text, '-' for stdin, '@file' for a file.
 		var content string
