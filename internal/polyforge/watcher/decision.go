@@ -73,6 +73,11 @@ type Decision struct {
 	WI     string
 	Class  string
 	Phrase string
+	// QuestionID is the pending question id of a needs_input decision
+	// (D11): the wake line carries it — charset-filtered, the same
+	// filter as WI ids — so the owner can answer without free text
+	// ever leaving the question. Empty for every other class.
+	QuestionID string
 	// Key identifies a state-derived decision for dedupe ("" for event
 	// decisions, which the cursor dedupes).
 	Key string
@@ -83,9 +88,15 @@ type Decision struct {
 const suffix = "this is a human decision, the agent must not answer it"
 
 // Line renders the decision from the FIXED template. The WI id is the
-// daemon's canonical id, reduced to a safe charset; nothing else varies.
+// daemon's canonical id, reduced to a safe charset; a needs_input
+// decision also carries the pending question id (D11), through the
+// same filter; nothing else varies.
 func (d Decision) Line() string {
-	return fmt.Sprintf("[polyforge] %s %s — %s; %s", safeID(d.WI), d.Class, d.Phrase, suffix)
+	qid := ""
+	if d.QuestionID != "" {
+		qid = " " + safeID(d.QuestionID)
+	}
+	return fmt.Sprintf("[polyforge] %s %s%s — %s; %s", safeID(d.WI), d.Class, qid, d.Phrase, suffix)
 }
 
 // AttentionLine is the fixed-template notice for WIs that need a human but
@@ -179,7 +190,14 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 	}
 	if pendingID != "" {
 		r := eventRules["needs_input"]
-		fire("needs_input:"+pendingID, r)
+		key := "needs_input:" + pendingID
+		cur[key] = true
+		if !have[key] {
+			res.Decisions = append(res.Decisions, Decision{
+				WI: snap.WorkItem, Class: r.Class, Phrase: r.Phrase,
+				QuestionID: pendingID, Key: key,
+			})
+		}
 	}
 
 	// 2. events after the cursor, in seq order; state-backed kinds are
