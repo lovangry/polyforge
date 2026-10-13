@@ -302,6 +302,12 @@ images are immutable, so there is no rewind into a re-release):
    defers (it releases without deploying). The procedure ends with production
    on the new version or rolled back; a rollback is a step FAIL.
 
+A failed `deploy` ends the WI failed with production on the old version (rolled
+back, or refused before touching it). Redeploy the already-verified version by
+running `.polyforge/deploy.sh <version> --confirm <version>` directly (a human or
+an agent); never by filing a new release WI, which would cut a duplicate version
+of the same commit (this repo's `release.sh` refuses that).
+
 Per-repo procedure contract (the repo owns the procedure; the bundle only
 dispatches):
 
@@ -315,14 +321,20 @@ dispatches):
 
 This repository's own procedures: `release.sh` (vX.Y.Z, bump `major|minor|patch`,
 default `minor`) refuses a dirty tree or a HEAD that is not the fetched
-`origin/main`, runs `make test` (including the e2e suite), takes the version
-floor from the highest semver among origin and local tags, builds the two
+`origin/main` or a HEAD that already carries a release tag on origin, runs `make test`
+(including the e2e suite; the real-GitHub ship-PR e2e is skipped unless
+`POLYFORGE_TEST_REAL_GITHUB=1`), takes the version floor from the highest semver
+among the ORIGIN tags only (an unreadable `ls-remote` is fatal), builds the two
 binaries and the `ghcr.io/silgrid/aihub:<tag>` image, claims the version by
 pushing the git tag (fails if it exists: nothing is published), pushes the
 image, writes `aihub-image.digest` after the push, then `SHA256SUMS` and
 `gh release create` with the four assets (`aihub-linux-amd64`, `pf-linux-amd64`,
-`aihub-image.digest`, `SHA256SUMS`). It never deletes or overwrites a tag,
-release or image.
+`aihub-image.digest`, `SHA256SUMS`). `aihub-image.digest` holds the bare image digest
+`sha256:<64 hex>`; `deploy.sh` looks for `ghcr.io/silgrid/aihub@<that digest>` among
+the pulled image's repo digests. `release.sh --verify <version>` also requires the
+version to be strictly greater than every other tag on origin. It never deletes or
+overwrites a tag, release or image; a failure after the tag push burns the version
+(cut the next one).
 
 `deploy.sh` deploys the aihub service host: it requires `--confirm <version>`
 equal to the version argument (no prompt), takes a server-side lock for the
@@ -371,6 +383,11 @@ deployment pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
     go build ./...
     go test ./...
 
+Opt-in tests (skipped with a clear message unless their variable is set):
+`POLYFORGE_TEST_REAL_GITHUB=1` runs the ship-PR e2e, which creates a REAL private
+GitHub repo and PR with this machine's `gh`; `POLYFORGE_TEST_SYSTEM_INSTALL=1` runs
+the installer scenarios, which write `/usr/local/bin/pf` (disposable hosts only).
+
 ## `pf` commands
 
 `pf [--json] [--config PATH] [--server URL] [--api-key KEY] [--socket PATH]
@@ -390,9 +407,12 @@ registry; `pf <verb> -help` one verb's face. The routing skill's fragments
 `pf backup` writes a consistent DB-only snapshot (`VACUUM INTO`) under the
 server's data dir `backups/`, on the same disk. It does NOT include memory
 content (memory text lives only as files under `memory/`; the DB holds only its
-sha/length) nor the git repos (`git/`). For a full backup use the backup steps
-of `sh .polyforge/deploy.sh <tag>` (online sqlite snapshot + rsync of the whole
-data dir, consistency check, off-host copy) or copy the whole data dir yourself.
+sha/length) nor the git repos (`git/`). For a full backup take the
+sqlite backup-API snapshot of `aihub.db` (not a plain file copy of a live WAL
+database) and rsync `memory/` and `git/` alongside it, as `deploy.sh` does. There
+is no backup-only mode: `deploy.sh`'s online backup (snapshot, rsync catch-up,
+consistency check, off-host copy) runs only as part of a deploy, so an ad-hoc full
+backup is these manual steps (or a copy of the whole data dir while aihub is stopped).
 
 Human moves: continue = `pf resume <id>` (a paused or blocked
 WI), abandon = `pf cancel <id>` (queued, paused or blocked), owner's failed verdict = `pf wrap <id> --fail`. These run with the

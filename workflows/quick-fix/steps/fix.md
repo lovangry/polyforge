@@ -22,7 +22,7 @@ output:
       description: Build/test status of the tree at the end of this step's execution. Must be green unless this attempt is being deliberately handed off incomplete.
     summary:
       type: string
-      description: Short prose summary of what was implemented, for verification, release, and rewind context.
+      description: Short prose summary of what was implemented, for verification and rewind context.
 ---
 
 # fix
@@ -58,7 +58,7 @@ here corrupts `verification` downstream.
 ## Output
 
 Emit the final JSON object per the schema above: every commit actually made, the final
-build status, and a prose summary useful to the next reader (verification, release, or a
+build status, and a prose summary useful to the next reader (verification or a
 future rewound instance of this very step).
 
 ## Handoff duty

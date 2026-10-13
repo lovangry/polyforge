@@ -62,7 +62,7 @@ rewinding `verify` or `deploy` back into `release` would try to publish a second
 release for the same intent, either colliding with the claimed version or silently
 burning a new one. A failed release lane therefore stops, with the failing step's
 `fail_reason` and command evidence as the record, and a human decides: re-file a new
-release WI (a new version), or repair the procedure first. In particular:
+release WI (a new version) for NEW code, or repair the procedure first. In particular:
 
 - `release` FAIL: nothing, or only part of a release, was published. The reason says
   exactly what exists; nothing is ever deleted or overwritten automatically.
@@ -72,8 +72,21 @@ release WI (a new version), or repair the procedure first. In particular:
   the rollback itself failed (loud manual instructions are in the reason). Any of these
   needs a human to look; the WI ends failed, not "done".
 
-The `rewind` bounds above are therefore inert; they are declared at the minimum only
-because the engine requires sane bounds for any bundle.
+### Redeploying after a failed deploy
+
+A failed `deploy` ends the WI failed, and production is on the OLD version (the
+procedure rolled back automatically, or refused before touching it). The release itself
+is already published and verified, so fixing the cause (the environment, not the code)
+and deploying again is a deploy-only action: a human or an agent runs the project's
+procedure directly, `.polyforge/deploy.sh <version> --confirm <version>`, for the
+already-verified version. Never file a new release WI for that: a second release of the
+same commit would cut a duplicate version, and a project's release procedure may refuse
+it outright. A new release WI is only for new code.
+
+The `rewind` bounds above are inert: no step declares `on_fail`, so nothing ever rewinds.
+They are declared at 1/1 only to keep the minimum explicit; if they were absent (or not
+positive) the engine would fall back to its defaults (4 total, 2 per step), which would
+also never be used.
 
 ## Budget guidance
 
