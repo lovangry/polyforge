@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -165,13 +166,28 @@ func (d *Daemon) handler() http.Handler {
 				payload.AnsweredBy = r.Header.Get("X-PF-User")
 			}
 			// No question named: the daemon resolves the pending one from
-			// the capsule's execution.json.
+			// the capsule's execution.json — accepted ONLY when exactly one
+			// question is pending (audit B10). Zero or several is a typed
+			// refusal pointing at --question: a guess across several open
+			// questions would deliver the answer to an arbitrary one (the
+			// steps map's iteration order) and is never honest.
 			if payload.QuestionID == "" {
-				payload.QuestionID = d.pendingQuestionID(wi)
-			}
-			if payload.QuestionID == "" {
-				http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
-				return
+				ids := d.pendingQuestionIDs(wi)
+				switch len(ids) {
+				case 0:
+					http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
+					return
+				case 1:
+					payload.QuestionID = ids[0]
+				default:
+					body, _ := json.Marshal(map[string]string{
+						"code": "ANSWER-400",
+						"detail": fmt.Sprintf("this work item has %d pending questions (%s) — answer a specific one with --question",
+							len(ids), strings.Join(ids, ", ")),
+					})
+					http.Error(w, string(body), 400)
+					return
+				}
 			}
 			if err := h.Answer(payload.QuestionID, payload.AnswerText, payload.AnsweredBy); err != nil {
 				http.Error(w, `{"code":"ANSWER-409","detail":"`+err.Error()+`"}`, 409)
@@ -671,9 +687,12 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// pendingQuestionID reads the capsule's execution.json to find the
-// current pending question ID.
-func (d *Daemon) pendingQuestionID(wi string) string {
+// pendingQuestionIDs reads the capsule's execution.json and returns the
+// ids of ALL currently open pending questions (empty when none). The
+// steps map's iteration order is meaningless, so callers must not treat
+// the result's order as a choice: the answer route accepts a no-id
+// answer only when exactly one id comes back (audit B10).
+func (d *Daemon) pendingQuestionIDs(wi string) []string {
 	wid := d.rt.CanonicalID(wi)
 	if wid == "" {
 		wid = wi
@@ -681,7 +700,7 @@ func (d *Daemon) pendingQuestionID(wi string) string {
 	execPath := filepath.Join(d.rt.CapsuleDirFor(wid), "runtime-state", "execution.json")
 	data, err := os.ReadFile(execPath)
 	if err != nil {
-		return ""
+		return nil
 	}
 	var exec struct {
 		Steps map[string]struct {
@@ -691,12 +710,13 @@ func (d *Daemon) pendingQuestionID(wi string) string {
 		} `json:"steps"`
 	}
 	if json.Unmarshal(data, &exec) != nil {
-		return ""
+		return nil
 	}
+	var ids []string
 	for _, st := range exec.Steps {
 		if st.PendingQuestion != nil && st.PendingQuestion.ID != "" {
-			return st.PendingQuestion.ID
+			ids = append(ids, st.PendingQuestion.ID)
 		}
 	}
-	return ""
+	return ids
 }
