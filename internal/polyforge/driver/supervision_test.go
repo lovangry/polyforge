@@ -723,10 +723,12 @@ func TestEventAppendFailureNeverBreaksTheRun(t *testing.T) {
 	}
 }
 
-func TestCandidateSwitchStartsAFreshTWindow(t *testing.T) {
-	// the slow model already spent T: its replacement must not be killed
-	// the moment it starts (T is cumulative per step, but a new candidate
-	// is a new chance)
+// TestCandidateSwitchKeepsTCumulative: T accumulates across the WHOLE
+// step (polyforge#147 D6) — a candidate switch does NOT reopen the
+// window. The successor runs with the predecessor's spent time carried
+// over; what keeps it alive is the relaxation a timeout-class disposal
+// applied, not a rebased clock.
+func TestCandidateSwitchKeepsTCumulative(t *testing.T) {
 	var mu sync.Mutex
 	tick := 0
 	env := newSupEnv(t, func(c *Config) {
@@ -751,18 +753,18 @@ func TestCandidateSwitchStartsAFreshTWindow(t *testing.T) {
 	if len(started) != 2 {
 		t.Fatalf("step_started facts: %d", len(started))
 	}
-	if prior := started[1].Thresholds.PriorRuntime; prior != 0 {
-		t.Fatalf("after a candidate switch the T window restarts, prior runtime %v", prior)
+	if prior := started[1].Thresholds.PriorRuntime; prior != 40*time.Minute {
+		t.Fatalf("T is cumulative across the switch, prior runtime %v want 40m", prior)
 	}
-	// accounting keeps every booked millisecond; the T base is only the
-	// first (switched-away) dispatch's share
-	if st := env.exec(t).Steps["s"]; st.Supervision.RuntimeBaseMs != (40*time.Minute).Milliseconds() ||
-		st.BudgetConsumed.WallMs <= st.Supervision.RuntimeBaseMs {
-		t.Fatalf("booked wall time vs T base: %+v / %+v", st.BudgetConsumed, st.Supervision)
+	// accounting keeps every booked millisecond and nothing rebases it
+	if st := env.exec(t).Steps["s"]; st.BudgetConsumed.WallMs < (40 * time.Minute).Milliseconds() {
+		t.Fatalf("booked wall time: %+v", st.BudgetConsumed)
 	}
 }
 
-func TestHumanContinueStartsAFreshTWindow(t *testing.T) {
+// TestHumanContinueKeepsTCumulative: the human "continue" resets the
+// failure ledger but NOT the step's cumulative runtime (D6).
+func TestHumanContinueKeepsTCumulative(t *testing.T) {
 	env := newSupEnv(t, nil, spec("s"))
 	env.sp.script = []fakeEntry{failEntryFor(FailExitOther), failEntryFor(FailExitOther), failEntryFor(FailExitOther)}
 	if err := env.d.Run(context.Background()); err != nil {
@@ -772,9 +774,11 @@ func TestHumanContinueStartsAFreshTWindow(t *testing.T) {
 		t.Fatalf("continue: %v", err)
 	}
 	st := env.exec(t).Steps["s"]
-	if st.Supervision.RuntimeBaseMs != st.BudgetConsumed.WallMs {
-		t.Fatalf("a human continue restarts the T window: %+v / %+v", st.BudgetConsumed, st.Supervision)
+	if st.Supervision.FailureCount != 0 || st.Supervision.LongTaskTimeouts != 0 {
+		t.Fatalf("a human continue resets the failure ledger: %+v", st.Supervision)
 	}
+	// Nothing rebases the step's cumulative runtime: the only zeroing
+	// of T is a rewind's fresh start (D6).
 }
 
 // --- ended_without_result (rule 1, ok-ended turn) ---------------------------

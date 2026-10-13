@@ -234,10 +234,10 @@ func (d *Driver) effectiveThresholdsLocked(stepID string, gran supervise.Granula
 				th.StepTimeout = r
 			}
 		}
+		// T is CUMULATIVE over the whole step (polyforge#147 D6): a
+		// switch to another candidate or a human continue does not
+		// reopen the window — only a rewind's fresh start zeroes it.
 		spent := st.BudgetConsumed.WallMs
-		if st.Supervision != nil {
-			spent -= st.Supervision.RuntimeBaseMs
-		}
 		if spent < 0 {
 			spent = 0
 		}
@@ -447,17 +447,18 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 			cur = tool
 		}
 		dec.RelaxToolMs = (2 * cur).Milliseconds()
+	case FailStepTimeoutSlowModel:
+		// A timeout-class death relaxes the step's wall budget x2 and
+		// persists it (polyforge#147 D6): the next candidate runs under
+		// the DOUBLED bound, with the cumulative runtime carried over —
+		// never judged timed out at its own startup.
+		dec.RelaxWallMs = d.doubledWallLocked(stepID, sup)
 	case FailStepTimeoutLongTask:
 		if sup.LongTaskTimeouts >= 1 && !dec.Block {
 			dec.Block = true
 			dec.BlockReason = "second step timeout (step_timeout_long_task) after T was already relaxed: " + f.Detail
 		} else {
-			_, _, wall := d.stepBases(stepID)
-			cur := time.Duration(sup.RelaxedWallMs) * time.Millisecond
-			if cur < wall {
-				cur = wall
-			}
-			dec.RelaxWallMs = (2 * cur).Milliseconds()
+			dec.RelaxWallMs = d.doubledWallLocked(stepID, sup)
 		}
 	}
 	if dec.Switch {
@@ -473,6 +474,19 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 		dec.Fresh = dec.Count >= 2 // 1st retry resumes the transcript, 2nd+ starts fresh
 	}
 	return dec
+}
+
+// doubledWallLocked answers the step's relaxed wall budget after one
+// more relaxation: the current bound (the persisted relaxed value, or
+// the step's base when it was never relaxed) doubled. Only timeout-class
+// deaths call it — every other disposal leaves T alone.
+func (d *Driver) doubledWallLocked(stepID string, sup capsule.StepSupervision) int64 {
+	_, _, wall := d.stepBases(stepID)
+	cur := time.Duration(sup.RelaxedWallMs) * time.Millisecond
+	if cur < wall {
+		cur = wall
+	}
+	return (2 * cur).Milliseconds()
 }
 
 // applyStepFailedLocked records one failed dispatch: the attempt (with
@@ -525,11 +539,6 @@ func (d *Driver) applyStepFailedLocked(req TransitionRequest, info *appliedInfo)
 	if f.WallMs > 0 {
 		st.BudgetConsumed.WallMs += f.WallMs
 		d.exec.BudgetConsumed.WallMs += f.WallMs
-	}
-	if dec.Switch {
-		// the new candidate gets a fresh T window (the old one's slow or
-		// hung time is not its to repay)
-		sup.RuntimeBaseMs = st.BudgetConsumed.WallMs
 	}
 	if dec.Block {
 		d.exec.WorkflowStatus = StatusBlocked

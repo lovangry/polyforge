@@ -334,7 +334,6 @@ func (d *Driver) applyUnblockLocked() error {
 		st.Supervision.FailureCount = 0
 		st.Supervision.LongTaskTimeouts = 0
 		st.Supervision.NextDispatch = ""
-		st.Supervision.RuntimeBaseMs = st.BudgetConsumed.WallMs // a fresh T window
 	}
 	return nil
 }

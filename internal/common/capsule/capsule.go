@@ -169,12 +169,6 @@ type StepSupervision struct {
 	// relaxation doubles); zero = never relaxed.
 	RelaxedToolMs int64 `json:"relaxed_tool_ms,omitempty"`
 	RelaxedWallMs int64 `json:"relaxed_wall_ms,omitempty"`
-	// RuntimeBaseMs is the part of the step's booked wall time the T clock
-	// no longer counts: a switch to a new candidate model (or a human
-	// continue) starts a fresh T window instead of handing the newcomer a
-	// budget the previous one already spent. The cumulative step runtime
-	// T is judged against is budget_consumed.wall_ms - runtime_base_ms.
-	RuntimeBaseMs int64 `json:"runtime_base_ms,omitempty"`
 	// NextDispatch shapes the next dispatch after a failure: "" resumes
 	// the transcript, "fresh" starts a new conversation with the previous
 	// transcript as read-only reference. Cleared by the next step_start.
