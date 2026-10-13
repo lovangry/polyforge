@@ -152,7 +152,9 @@ func TestWorkItemCRUD(t *testing.T) {
 	}
 	// Execution ticket: bundle_name pins the workflow reference; a missing
 	// client digest gets the deterministic stand-in (full §4.5 checkout
-	// hashing is future work), and the triple is PATCH-immutable.
+	// hashing is future work). The reference freezes at FIRST CLAIM (the
+	// R2 window, w140): this ticket is queued and never claimed, so the
+	// PATCH re-derives the stand-in digest from the new name.
 	exec, err := env.WIs.Create(CreateRequest{
 		Project: "alpha", Goal: "exec ticket", Reporter: env.UserID,
 		BundleName: strPtrTest("demo-bundle"),
@@ -163,8 +165,13 @@ func TestWorkItemCRUD(t *testing.T) {
 	if exec.BundleName == nil || *exec.BundleName != "demo-bundle" || exec.BundleDigest == nil || *exec.BundleDigest == "" {
 		t.Fatalf("bundle reference not persisted: %+v", exec)
 	}
-	if _, err := env.WIs.Patch(exec.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"other"`)}); !IsCode(err, api.ErrCoreBadInput) {
-		t.Fatalf("bundle patch not rejected: %v", err)
+	patched, err := env.WIs.Patch(exec.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"other"`)})
+	if err != nil {
+		t.Fatalf("bundle patch inside the R2 window (queued, never claimed) refused: %v", err)
+	}
+	if patched.BundleName == nil || *patched.BundleName != "other" ||
+		patched.BundleDigest == nil || *patched.BundleDigest != Sha256Hex("bundle-name:other") {
+		t.Fatalf("bundle patch did not re-derive the stand-in digest: %+v", patched)
 	}
 	// Empty goal, unknown project.
 	if _, err := env.WIs.Create(CreateRequest{Project: "alpha", Goal: "  ", Reporter: env.UserID}); !IsCode(err, api.ErrCoreBadInput) {

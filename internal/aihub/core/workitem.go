@@ -41,8 +41,10 @@ type CreateRequest struct {
 	Reporter  string         `json:"reporter"` // user id (from auth)
 	// BundleName non-empty marks an execution ticket; NULL leaves a pure
 	// registration ticket (02 §4.4: not claimable, CORE-409 NOT_CLAIMABLE).
-	// The bundle reference triple is immutable after the create
-	// transaction (INV-2e); there is no UPDATE path.
+	// The bundle reference freezes at FIRST CLAIM (the R2 window, w140):
+	// while the WI is queued and never claimed, PATCH may set, rename or
+	// clear bundle_name through the shared persist path (bundleRef);
+	// after the first claim it is immutable again (INV-2e as amended).
 	BundleName   *string `json:"bundle_name"`
 	BundleDigest *string `json:"bundle_digest"` // optional client-supplied pin; defaulted below
 	// Repo-reference triple (02 §4.6, the surface the TODO(v1) §4.5
@@ -201,20 +203,14 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	seq := maxSeq.Int64 + 1
 
 	// Bundle reference (02 §4.4/§4.5): a non-empty bundle_name makes an
-	// execution ticket. Full §4.5 fixation (re-hashing the bundle checkout
-	// server-side at create time) is not wired in this round; a client may
-	// pin the digest explicitly via bundle_digest, and otherwise the
-	// server stores a deterministic name-derived stand-in so the
-	// reference triple is never half-empty. TODO(v1): §4.5 checkout hash.
-	var bundleName, bundleDigest any
-	if req.BundleName != nil && *req.BundleName != "" {
-		bundleName = *req.BundleName
-		if req.BundleDigest != nil && *req.BundleDigest != "" {
-			bundleDigest = *req.BundleDigest
-		} else {
-			bundleDigest = Sha256Hex("bundle-name:" + *req.BundleName)
-		}
-	}
+	// execution ticket. The pair resolves through the ONE shared persist
+	// path (bundleRef — the same helper the PATCH entry uses), so both
+	// entries observe the identical rule: a client-pinned digest wins,
+	// otherwise the deterministic name-derived stand-in lands so the
+	// reference triple is never half-empty. Full §4.5 fixation (re-hashing
+	// the bundle checkout server-side at create time) is not wired in this
+	// round. TODO(v1): §4.5 checkout hash.
+	bundleName, bundleDigest := bundleRef(req.BundleName, req.BundleDigest)
 
 	id, err := NewID("wi_")
 	if err != nil {
@@ -421,19 +417,164 @@ func appendEventTx(tx *sql.Tx, wiID, at, actor, eventType string, payload map[st
 	return err
 }
 
-// Patchable fields (02 §5.1 row 3). Workflow refs and parent are immutable.
+// bundleRef is the ONE bundle-reference persist path, shared by create
+// and PATCH (spec: both entries MUST hit the same code path). digest =
+// the explicit request pin when present, else the deterministic
+// sha256("bundle-name:"+name) stand-in — the reference triple is never
+// half-empty. A nil/empty name resolves to (NULL, NULL): unbinding
+// clears the name AND the digest together. workflow_budget_baseline
+// stays NULL and wi_repo_inventory is untouched on either entry.
+func bundleRef(name, explicitDigest *string) (bundleName, bundleDigest any) {
+	if name == nil || *name == "" {
+		return nil, nil
+	}
+	bundleName = *name
+	if explicitDigest != nil && *explicitDigest != "" {
+		bundleDigest = *explicitDigest
+	} else {
+		bundleDigest = Sha256Hex("bundle-name:" + *name)
+	}
+	return bundleName, bundleDigest
+}
+
+// patchableFields (02 §5.1 row 3). Workflow refs and parent are immutable.
 // clean_pause rides the whitelist per the v1.5 contract §1.5 AMEND
 // ("pf resume clears the flag via WI PATCH (whitelist gained
 // clean_pause)") — the operator resume face; the update half below was
 // wired at merge, the whitelist entry was missed there (found by the
 // Lane D e2e s03 pause/resume scenario).
+//
+// bundle_name/bundle_digest ride the R2 window (w140): they are
+// patchable exactly while the WI is queued and never claimed — the
+// window gate below refuses them everywhere else.
 var patchableFields = map[string]bool{
 	"goal": true, "content": true, "labels": true, "priority": true,
 	"milestone": true, "waiting_on": true, "clean_pause": true,
+	"bundle_name": true, "bundle_digest": true,
+}
+
+// bundlePatch is a parsed PATCH bundle_name/bundle_digest pair. Name
+// nil = the JSON-null unbind (clears name AND digest); Name non-empty =
+// bind or rename.
+type bundlePatch struct {
+	Name   *string
+	Digest *string
+}
+
+// binding reports whether the patch binds a non-NULL bundle (the
+// symmetric child rule applies only to binding, not to unbinding; the
+// parser already rejected an empty name).
+func (b *bundlePatch) binding() bool { return b != nil && b.Name != nil }
+
+// parseBundlePatch extracts the bundle fields from a PATCH body. Absent
+// both → nil (not a bundle patch); malformed shapes → typed CORE-400.
+func parseBundlePatch(fields map[string]json.RawMessage) (*bundlePatch, error) {
+	raw, hasName := fields["bundle_name"]
+	rawDigest, hasDigest := fields["bundle_digest"]
+	if !hasName && !hasDigest {
+		return nil, nil
+	}
+	if !hasName {
+		return nil, Fail(api.ErrCoreBadInput, "",
+			"bundle_digest requires bundle_name (the digest pins a name; an unbind clears both)")
+	}
+	var bp bundlePatch
+	if json.Unmarshal(raw, &bp.Name) != nil {
+		return nil, Fail(api.ErrCoreBadInput, "", "bundle_name must be a string or null")
+	}
+	if bp.Name != nil && *bp.Name == "" {
+		return nil, Fail(api.ErrCoreBadInput, "",
+			"bundle_name must be a non-empty string or null (null unbinds)")
+	}
+	if hasDigest {
+		if json.Unmarshal(rawDigest, &bp.Digest) != nil {
+			return nil, Fail(api.ErrCoreBadInput, "", "bundle_digest must be a string or null")
+		}
+		if bp.Digest != nil && *bp.Digest == "" {
+			bp.Digest = nil
+		}
+		if bp.Name == nil && bp.Digest != nil {
+			return nil, Fail(api.ErrCoreBadInput, "",
+				"bundle_digest requires a non-null bundle_name")
+		}
+	}
+	return &bp, nil
+}
+
+// refuseBundleWithChildrenTx is the symmetric children-side rule (w140,
+// spec R-对称-1): a ticket WITH children must never GAIN a bundle —
+// children count in any status (terminal included). The PATCH bind entry
+// runs it inside its transaction and re-validates it in the guarded
+// write; the create entry cannot violate it (a created row is childless
+// by construction) but runs the mirror rule instead: a bundle-bound
+// ticket is never a parent (PARENT_NOT_REGISTRY, below).
+func refuseBundleWithChildrenTx(q queryRower, wiID string) error {
+	var n int
+	if err := q.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=?1`, wiID).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return Fail(api.ErrCoreBadInput, "HAS_CHILDREN_NO_BUNDLE",
+			"work item has %d child ticket(s); a ticket with children cannot bind a workflow bundle", n)
+	}
+	return nil
+}
+
+// diagnoseR2Window is the R2 bundle-PATCH gate's error face (w140). The
+// window is status==queued AND never claimed; "never claimed" uses the
+// claimTx judgment (spec Assumption 4): no live session row AND no
+// session_claimed event — a force-end clears the session row but the
+// claim event remains, and the freeze stays. waiting_on is deliberately
+// NOT consulted: a waiting ticket inside the window still accepts the
+// PATCH (whether it executes is a queue-segment question, not an
+// immutability one).
+func diagnoseR2Window(q queryRower, wiID string) error {
+	var status string
+	var session, fp sql.NullString
+	err := q.QueryRow(`SELECT status, session_hash, session_fingerprint FROM work_items WHERE id=?1`, wiID).
+		Scan(&status, &session, &fp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
+	}
+	if err != nil {
+		return err
+	}
+	if isTerminal(status) {
+		return Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", status)
+	}
+	if session.Valid && session.String != "" {
+		return Fail(api.ErrCoreBadInput, "IMMUTABLE",
+			"bundle_name froze at first claim (session %s holds the work item)", fp.String)
+	}
+	if status != api.StatusQueued {
+		return Fail(api.ErrCoreBadInput, "IMMUTABLE",
+			"bundle_name is only patchable while queued and never claimed (R2 window); the work item is %s", status)
+	}
+	var claims int
+	if err := q.QueryRow(`SELECT COUNT(*) FROM wi_events
+		WHERE work_item_id=?1 AND event_type='session_claimed'`, wiID).Scan(&claims); err != nil {
+		return err
+	}
+	if claims > 0 {
+		return Fail(api.ErrCoreBadInput, "IMMUTABLE",
+			"bundle_name froze at first claim (a session_claimed event exists)")
+	}
+	return nil
 }
 
 // Patch updates the mutable field set. fields maps field name → raw JSON.
 func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*api.WorkItem, error) {
+	// Bundle fields (w140): parsed up front (pure — no DB access); the R2
+	// window gate and the CAS write run inside the transaction later on.
+	// Concurrency with Claim needs no extra arbitration: the single-writer
+	// connection serializes the two transactions and each one's CAS keeps
+	// the end state consistent — a claim first freezes the bundle (this
+	// write then finds a claimed row and is refused IMMUTABLE), a PATCH
+	// first is simply the bundle the later claim freezes.
+	bp, err := parseBundlePatch(fields)
+	if err != nil {
+		return nil, err
+	}
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
 		return nil, err
@@ -553,12 +694,55 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 			sets, args = append(sets, "waiting_on=?"), append(args, nullableString(v))
 		}
 	}
+	if bp != nil {
+		// R2 window: fast-fail diagnosis on this snapshot; the guarded
+		// write below re-validates the same gates CAS-style (0 rows = the
+		// race was lost, re-diagnosed for the precise wire error).
+		if err := diagnoseR2Window(tx, id); err != nil {
+			return nil, err
+		}
+		if bp.binding() {
+			// Symmetric child rule, inside the same transaction (w140).
+			if err := refuseBundleWithChildrenTx(tx, id); err != nil {
+				return nil, err
+			}
+		}
+		name, digest := bundleRef(bp.Name, bp.Digest)
+		sets = append(sets, "bundle_name=?", "bundle_digest=?")
+		args = append(args, name, digest)
+	}
 	args = append(args, id)
-	res, err := tx.Exec(`UPDATE work_items SET `+strings.Join(sets, ",")+` WHERE id=?`, args...)
+	q := `UPDATE work_items SET ` + strings.Join(sets, ",") + ` WHERE id=?`
+	if bp != nil {
+		// claimTx-style CAS guard (w140): only a queued, never-claimed row
+		// may take a bundle write, so a concurrent Claim makes THIS write
+		// a 0-row no-op instead of interleaving with it.
+		q += ` AND status='queued' AND session_hash IS NULL
+			AND (SELECT COUNT(*) FROM wi_events e
+			     WHERE e.work_item_id=work_items.id AND e.event_type='session_claimed')=0`
+		if bp.binding() {
+			// The symmetric child rule rides the same guarded write: a
+			// child that landed concurrently makes THIS write a 0-row
+			// no-op (bind-bundle vs new-child: exactly one wins, w140).
+			q += ` AND (SELECT COUNT(*) FROM work_items c WHERE c.parent_id=work_items.id)=0`
+		}
+	}
+	res, err := tx.Exec(q, args...)
 	if err != nil {
 		return nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		if bp != nil {
+			if derr := diagnoseR2Window(tx, id); derr != nil {
+				return nil, derr
+			}
+			if bp.binding() {
+				if derr := refuseBundleWithChildrenTx(tx, id); derr != nil {
+					return nil, derr
+				}
+			}
+			return nil, Fail(api.ErrCoreConflict, "RACE_LOST", "state changed concurrently")
+		}
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
 	}
 	if err := appendEventTx(tx, id, Now(), "", "wi_content_updated", nil); err != nil {

@@ -248,8 +248,8 @@ key、claim 响应、Job 创建意图、Harness session identity 均先于对应
    第 9 步作为 WI Agent 启动参数（可随第 4/5 步的 `pending_jobs[]` 记录与 claim 响应回写一并留存）；
    预算基线经同一端点表的 `GET /api/v1/work-items/{id}/budget` 按需读取。workflow 的校验与固化是 WI
    创建事务内的服务端内部步骤（`01-workflow-skills.md#§4.6`、`02-aihub-core.md#§4.5`），创建必先于
-   claim，三列为 NOT NULL 且写入后不可变（`02-aihub-core.md#§2.6` INV-2e）——不存在「未完成固定的 WI
-   可被 claim」的路径，因此本步**没有**任何 resolved-steps 存在性查询，也不存在对应的拒绝分支（原
+   claim；执行票的 `bundle_name`/`bundle_digest` 为**首次认领冻结**（R2 窗口内可经 PATCH 变更，`02-aihub-core.md#§2.6`
+   INV-2e/§4.5）——不存在「未绑 bundle 的 WI 可被 claim」的路径（`NOT_CLAIMABLE`），因此本步**没有**任何 resolved-steps 存在性查询，也不存在对应的拒绝分支（原
    `DAEMON-425 WORKFLOW_NOT_PINNED` 已随之删除）；WI 不存在时本步以透传的 `CORE-404` 终止，不继续
    后续步骤。
 4. **持久化 Job 创建意图**：生成本次 claim 的 idempotency key（不存在则新生，存在则复用同一 key 重试），

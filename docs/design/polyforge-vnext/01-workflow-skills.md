@@ -55,12 +55,12 @@
 
 ### 2.2 本文新增不变量 <!-- §2.2 -->
 
-- INV-1a（派生自 `00-architecture.md#§2.3` INV-8）：本 WI 的 bundle **引用**（`bundle_name`+`bundle_digest`）创建后不可变；已物化进 Capsule 的快照在该 generation 生命周期内只读不变（WI Agent 只读该快照，绝不现场重读 checkout 原文）；**跨 generation/跨机的重新物化以 pin digest 为校验目标，本机 checkout 漂移属配置事故（告警继续，v1 信任内网）**——Core 不存任何解析结果，也不承诺 checkout 侧的版本锁定（`02-aihub-core.md#§4.4`）。bundle 原文此后再变更不影响本 WI。
+- INV-1a（派生自 `00-architecture.md#§2.3` INV-8）：本 WI 的 bundle **引用**（`bundle_name`+`bundle_digest`）**首次认领冻结**（R2 窗口：queued 且从未认领时可经 `PATCH` 变更，`02-aihub-core.md#§4.5`）；已物化进 Capsule 的快照在该 generation 生命周期内只读不变（WI Agent 只读该快照，绝不现场重读 checkout 原文）；**跨 generation/跨机的重新物化以 pin digest 为校验目标，本机 checkout 漂移属配置事故（告警继续，v1 信任内网）**——Core 不存任何解析结果，也不承诺 checkout 侧的版本锁定（`02-aihub-core.md#§4.4`）。bundle 原文此后再变更不影响本 WI。
 - INV-1b（派生自 INV-9）：rewind 只由业务 gate FAIL 触发；一切基础设施失败永远原地 resume，不回退。
 - INV-1c：每个 workflow 实例的累计 rewind 次数受上界约束且计入预算（§6.2/§6.6）。
 - INV-1d：rewind 目标必然使 `[target, gate)` 区间内全部 step 被重置为 `pending`（§6.2）；旧产物归档为历史尝试而非当前输入，不存在第二种失效机制。
 - INV-1e：`next_step_by_order` 返回空结果有且只有两种原因——「执行图全部 step 已到达终止态（done 或 skipped）」与「workflow 已进入失败终态（`failed_gate` 或 `failed_rewind_exhausted`）」；驱动主循环必须先判定是哪一种，才能决定是记 `completed` 并触发 wrap，还是保持失败终态、不触发 wrap（§6.5）。
-- INV-1f：WI 的 workflow 引用三列（`bundle_name`/`bundle_digest`/`workflow_budget_baseline`，`02-aihub-core.md#§4.4`）随创建事务写入后即不可变（`02-aihub-core.md#§2.6` INV-2e）；不存在任何重新固定/替换窗口；变更 workflow 的唯一路径是取消当前 WI 并新建 WI（§4.6）。
+- INV-1f：WI 的 workflow 引用三列（`bundle_name`/`bundle_digest`/`workflow_budget_baseline`，`02-aihub-core.md#§4.4`）随创建事务写入；其中 `bundle_name`/`bundle_digest` 为**首次认领冻结**（R2 窗口：queued 且从未认领时可经 `PATCH` 三向变更，`02-aihub-core.md#§2.6` INV-2e/§4.5），认领后不存在任何重新固定/替换窗口；变更已认领 WI 的 workflow 的唯一路径是取消当前 WI 并新建 WI（§4.6）。
 - INV-1g（model_candidates 裁决）：模型候选的权威位置只在 workflow.md frontmatter；候选指针**只由基础设施失败的原地重派按序推进**，切换次数以候选列表长度为上界（§6.3）；业务 gate FAIL **绝不切换候选**——它保持当前候选走 §6.2 的 rewind 语义，不存在「gate FAIL 后换模型重试」的路径。
 - INV-1h（输出契约）：step skill frontmatter 不写 `model`；step agent 的最终输出必须是符合其 `output` JSON Schema 的 JSON，不符合即按该 step 的基础设施失败原地重派（§4.4/§6.3），不产出业务判定、不触发 gate。
 
@@ -311,7 +311,7 @@ bundleDigest := sha256.Sum256(canonical)
 1. **提交**：提交方（路由 Skill `file` 动词 / `pf` CLI 代表用户）经 `pf` CLI **直连** AIHub 发起 `POST /api/v1/work-items`（`02-aihub-core.md#§5.1`；`file` 属数据面动词，按 `00-architecture.md#§5.1` 分流表直连 AIHub、不经 Daemon），body 必带 `bundle_name`；不存在「已注册 bundle 列表」接口——提交方按 bundle 名直接提交，可用集合就是 AIHub 本机 checkout 的 `workflows/` 目录内容（部署配置给定，不落库、不经 API）。
 2. **frontmatter 校验**：AIHub 服务端读本机 aihub checkout 内 `workflows/<bundle>/workflow.md` 的 frontmatter，按 §4.1 的 V 规则全集校验；对 `agents/<id>.md` 只做存在性检查（V7）。任一规则失败 → 创建整体失败（`CORE-400`，`detail.rule_id` 命中 V 编号，`02-aihub-core.md#§4.5`）。校验过程只做纯数据校验，不执行 bundle 内任何内容，校验中间结果不落库。
 3. **digest 固化**：校验通过后按 §4.5 计算 `bundle_digest`，在同一创建事务内把 `bundle_name`、`bundle_digest`、workflow 级 budget 的三个基线 scalar 写入 `work_items`，与 repo inventory 冻结（`02-aihub-core.md#§4.6`）一并提交。落库的只有 name + digest + 三个基线 scalar（INV-1f；`02-aihub-core.md#§2.6` INV-2e）。
-4. **不可变**：三列创建后不存在任何 UPDATE 路径，也不存在「claim 前整体替换」窗口；若确需变更 workflow，唯一路径是取消（terminal cancel）当前 WI（`02-aihub-core.md#§6.5`）并新建一个 WI 重新走创建流程；不存在让同一个 WI 回到「未固化」状态的路径（INV-1f）。
+4. **首次认领冻结**：三列中的 `bundle_name`/`bundle_digest` 在 R2 窗口（queued 且从未认领）内存在唯一的 UPDATE 路径——`PATCH bundle_name` 三向变更（与创建共用同一落库路径，`02-aihub-core.md#§4.5`）；首次认领后不存在任何 UPDATE 路径，也不存在「认领后整体替换」窗口；若确需变更已认领 WI 的 workflow，唯一路径是取消（terminal cancel）当前 WI（`02-aihub-core.md#§6.5`）并新建一个 WI 重新走创建流程；不存在让同一个已认领 WI 回到「未固化」状态的路径（INV-1f）。
 5. **漂移告警**：Core 不存 bundle 内容；每次创建 WI 都对本 checkout 重算一次 `bundle_digest`，同一 `bundle_name` 的当前 digest 与仍有未终态 WI 引用的旧 digest 不同时产生漂移告警（监控指标，不改写任何已落库值；权威见 `02-aihub-core.md#§4.4`）。
 6. **执行侧如何取得内容**：不从 Core 取——Core 无任何文件取回端点（`02-aihub-core.md#§4.4`）。WI Agent 第 0 步从执行机本机 aihub checkout 物化 `workflow.md` 与 `agents/*.md` 进 Capsule 并按 pin 的 `bundle_digest` 校验（`03-execution-capsule.md#§4.5`）；Daemon 的 claim 预检只确认 WI 的 `bundle_name`/`bundle_digest` 存在（`04-local-runtime.md#§6.1`），不代行校验、不拉取任何步骤集。
 7. **与 WI Agent 凭证边界的关系（呼应 §5.1 与 `00-architecture.md#§5`/`#§8`）**：上述 1–6 步全部由提交方与 AIHub 服务端完成；WI Agent 自始至终**不持有任何 Core API key 或 Revision 发布 token**，只能通过 `04-local-runtime.md#§5.3` 的 Daemon 本地认证代理调用允许的 WI 生命周期/读操作（Revision 发布权仅属 Daemon）。

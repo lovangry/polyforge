@@ -662,3 +662,204 @@ func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 		t.Fatalf("unheld view block not empty: %+v", view2.SessionPublic)
 	}
 }
+
+// TestDerivedParentStatus: the w140 derived epic block — additive on the
+// WI view (and queue), tracking the children (complete when every child
+// is terminal with ≥1 wrapped, in_progress otherwise), never writing a
+// terminal status, auto-returning to in_progress when a new child lands.
+func TestDerivedParentStatus(t *testing.T) {
+	env, m := sessionEnv(t)
+	parent, err := env.WIs.Create(CreateRequest{Project: "alpha", Goal: "derive parent", Reporter: env.UserID})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	mkChild := func(goal, bundle string) string {
+		wi, err := env.WIs.Create(CreateRequest{
+			Project: "alpha", Goal: goal, Reporter: env.UserID,
+			BundleName: strPtrTest(bundle), ParentID: strPtrTest(parent.ID),
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", goal, err)
+		}
+		return wi.ID
+	}
+	c1 := mkChild("derive child one", "w140-d-c1")
+	c2 := mkChild("derive child two", "w140-d-c2")
+
+	// stage 0: children queued → in progress, census visible.
+	v0, err := env.WIs.Get(parent.ID, GetOptions{})
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	view0, err := env.WIs.View(v0)
+	if err != nil {
+		t.Fatalf("view parent: %v", err)
+	}
+	if view0.Derived == nil || !view0.Derived.HasChildren ||
+		view0.Derived.ChildrenTotal != 2 || view0.Derived.Completion != DerivedCompletionInProgress {
+		t.Fatalf("stage 0 derived = %+v, want has_children/total 2/in_progress", view0.Derived)
+	}
+
+	// stage 1: all children terminal with ≥1 wrapped → complete, and the
+	// stored status stays queued (nothing is ever written).
+	if _, err := m.Claim(c1, api.SessionClaimRequest{SessionID: "w140-d-s1"}, env.UserID); err != nil {
+		t.Fatalf("claim c1: %v", err)
+	}
+	if err := m.End(c1, api.SessionEndRequest{SessionID: "w140-d-s1", Status: api.StatusWrapped}, env.UserID); err != nil {
+		t.Fatalf("wrap c1: %v", err)
+	}
+	if _, err := m.Claim(c2, api.SessionClaimRequest{SessionID: "w140-d-s2"}, env.UserID); err != nil {
+		t.Fatalf("claim c2: %v", err)
+	}
+	if err := m.End(c2, api.SessionEndRequest{SessionID: "w140-d-s2", Status: api.StatusFailed}, env.UserID); err != nil {
+		t.Fatalf("fail c2: %v", err)
+	}
+	v1, err := env.WIs.Get(parent.ID, GetOptions{})
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	view1, err := env.WIs.View(v1)
+	if err != nil {
+		t.Fatalf("view parent: %v", err)
+	}
+	if v1.Status != api.StatusQueued || v1.ClosedAt != nil {
+		t.Fatalf("stage 1 wrote a state: status %s closed %v", v1.Status, v1.ClosedAt)
+	}
+	if view1.Derived == nil || view1.Derived.Completion != DerivedCompletionComplete ||
+		view1.Derived.ChildrenTerminal != 2 || view1.Derived.ChildrenWrapped != 1 {
+		t.Fatalf("stage 1 derived = %+v, want complete 2/2 terminal, 1 wrapped", view1.Derived)
+	}
+
+	// stage 2: a new child lands → auto back to in-progress, no reopen op.
+	mkChild("derive child three", "w140-d-c3")
+	v2, err := env.WIs.Get(parent.ID, GetOptions{})
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	view2, err := env.WIs.View(v2)
+	if err != nil {
+		t.Fatalf("view parent: %v", err)
+	}
+	if v2.Status != api.StatusQueued {
+		t.Fatalf("stage 2 status = %s, want queued", v2.Status)
+	}
+	if view2.Derived == nil || view2.Derived.Completion != DerivedCompletionInProgress ||
+		view2.Derived.ChildrenTotal != 3 {
+		t.Fatalf("stage 2 derived = %+v, want in_progress with total 3", view2.Derived)
+	}
+
+	// additivity: a childless ticket carries NO derived key on the wire.
+	solo := mustCreateWI(t, env, "derive childless", nil, "")
+	vs, err := env.WIs.View(env2GetWI(t, env, solo))
+	if err != nil {
+		t.Fatalf("view solo: %v", err)
+	}
+	rawSolo, err := json.Marshal(vs)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var soloDoc map[string]json.RawMessage
+	if err := json.Unmarshal(rawSolo, &soloDoc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := soloDoc["derived"]; ok {
+		t.Fatalf("childless ticket exposes a derived block (must be omitted): %v", soloDoc["derived"])
+	}
+
+	// the queue view carries the block too, and the epic parent queues nowhere
+	// (items: the bound queued child c3; pending: the childless solo ticket).
+	q, err := env.WIs.ReadyQueue("alpha")
+	if err != nil {
+		t.Fatalf("ready queue: %v", err)
+	}
+	if len(q.Items) != 1 || len(q.PendingBundles) != 1 {
+		t.Fatalf("queue segments: items %d pending %d, want c3 in items and the solo ticket pending", len(q.Items), len(q.PendingBundles))
+	}
+	for _, seg := range [][]WIView{q.Items, q.PendingBundles, q.Running, q.Paused} {
+		for _, entry := range seg {
+			if entry.ID == parent.ID {
+				t.Fatalf("epic parent %s appears in a queue segment", parent.ID)
+			}
+		}
+	}
+}
+
+// env2GetWI re-reads a WI by id (helper keeping the test above terse).
+func env2GetWI(t *testing.T, env *testEnv, id string) *api.WorkItem {
+	t.Helper()
+	wi, err := env.WIs.Get(id, GetOptions{})
+	if err != nil {
+		t.Fatalf("get %s: %v", id, err)
+	}
+	return wi
+}
+
+// TestRacePatchBundleVsClaim: PATCH bundle vs session Claim on one
+// queued, never-claimed, childless ticket (the w140 race pair 1). The
+// single-writer connection serializes the two transactions and no extra
+// arbitration exists: the Claim always succeeds; the PATCH succeeds iff
+// it was serialized first (the claim then froze the renamed bundle) and
+// is otherwise a typed refusal that wrote nothing. Either way the end
+// state is consistent and the bundle is frozen afterwards.
+func TestRacePatchBundleVsClaim(t *testing.T) {
+	env, m := sessionEnv(t)
+	const original, renamed = "w140-race1-original", "w140-race1-renamed"
+	patchWins, claimFirst := 0, 0
+	for i := 0; i < 10; i++ {
+		wi, err := env.WIs.Create(CreateRequest{
+			Project: "alpha", Goal: "w140 race1", Reporter: env.UserID,
+			BundleName: strPtrTest(original),
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		var patchErr, claimErr error
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, patchErr = env.WIs.Patch(wi.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"` + renamed + `"`)})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, claimErr = m.Claim(wi.ID, api.SessionClaimRequest{SessionID: "w140-race1-secret"}, env.UserID)
+		}()
+		close(start)
+		wg.Wait()
+
+		if claimErr != nil {
+			t.Fatalf("round %d: a concurrent bundle PATCH must never refuse the claim: %v", i, claimErr)
+		}
+		got, err := env.WIs.Get(wi.ID, GetOptions{})
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got.Status != api.StatusRunning {
+			t.Fatalf("round %d: status = %s, want running", i, got.Status)
+		}
+		want := original
+		if patchErr == nil {
+			patchWins++
+			want = renamed
+		} else {
+			claimFirst++
+			if !IsCode(patchErr, api.ErrCoreBadInput) && !IsCode(patchErr, api.ErrCoreConflict) {
+				t.Fatalf("round %d: a PATCH serialized after the claim is not a typed refusal: %v", i, patchErr)
+			}
+		}
+		if got.BundleName == nil || *got.BundleName != want {
+			t.Fatalf("round %d: bundle = %v, want %s (patchErr=%v)", i, got.BundleName, want, patchErr)
+		}
+		if got.BundleDigest == nil || *got.BundleDigest != Sha256Hex("bundle-name:"+want) {
+			t.Fatalf("round %d: digest %v does not match bundle %s (half-written reference)", i, got.BundleDigest, want)
+		}
+		// frozen at the claim: any later bundle PATCH is refused.
+		if _, err := env.WIs.Patch(wi.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"w140-race1-late"`)}); err == nil {
+			t.Fatalf("round %d: bundle PATCH after the claim succeeded; the bundle must be frozen", i)
+		}
+	}
+	t.Logf("w140 race1: PATCH serialized first %d, claim first %d of 10 rounds", patchWins, claimFirst)
+}

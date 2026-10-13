@@ -96,7 +96,7 @@
   - `POST .../work-items`（创建，body 可选携带 `attrs`）与 `PATCH .../work-items/{id}`（更新）两条写路径，对 `attrs` 顶层键名做同一词表黑名单校验；命中即 `CORE-400 EXECUTION_STATE_REJECTED`。`attrs` 只用于 §4.2 拆分原则之外的业务级自由属性，不是执行态的后门；创建与更新共用同一份校验函数与同一份词表（§5.1a），不因“新建时还没有历史状态”而豁免创建路径的校验。
   - 两处校验共用 §5.1a 的同一份执行态键名词表，新增执行态概念必须先扩词表再实现。
 - INV-2d：`claim_idempotency` 命中判定必须同时校验 `idempotency_key`、调用方身份（`caller_identity`）与 `work_item_id` 三者一致，缺一不可（§6.6 详述），防止跨身份或跨 WI 误命中缓存响应。
-- INV-2e：WI 的 workflow 引用三列（`work_items.bundle_name`/`bundle_digest`/`workflow_budget_baseline`，§4.4）随创建事务写入后即不可变，不存在任何 UPDATE 路径（NULL 与非 NULL 之间同样不可变更：登记票不得事后补挂 workflow，见 §4.4）；任何预算调整均以独立可追加记录（`workflow_budget_increments`）落地，不重写基线（§6.7）。
+- INV-2e：WI 的 workflow 引用三列（`work_items.bundle_name`/`bundle_digest`/`workflow_budget_baseline`，§4.4）中，`bundle_name`/`bundle_digest` 为**首次认领冻结**：R2 窗口（status=queued ∧ 从未认领）内可经 `PATCH` 三向变更（NULL↔非 NULL 含解绑，与创建共用同一落库路径 §4.5），首次认领后即不可变（不存在认领后的 UPDATE 路径）；`workflow_budget_baseline` 建 NULL 后无 UPDATE 路径；任何预算调整均以独立可追加记录（`workflow_budget_increments`）落地，不重写基线（§6.7）。
 
 ## 3. 模块与代码目录 <!-- §3 -->
 
@@ -156,9 +156,9 @@ CREATE TABLE work_items (
   assignee     TEXT REFERENCES users(id),   -- 当前活跃 generation 行的 owner（§2.4）
   waiting_on   TEXT,                        -- §2.4 取值域；非空 = 阻塞可见信号
   bundle_name  TEXT,                        -- workflow bundle 名；NULL = 纯登记票（不可 claim、不可 submit，§4.4）
-  bundle_digest TEXT,                       -- sha256 hex（`01-workflow-skills.md#§4.5`）；与 bundle_name 同 NULL；非空时为创建时固化的
-                                             -- bundle 摘要（§4.4），随创建写入后不可变——不可变的是 WI 记录中的引用本身，
-                                             -- 不构成 Core 侧的版本锁定承诺（§4.4）
+  bundle_digest TEXT,                       -- sha256 hex（`01-workflow-skills.md#§4.5`）；与 bundle_name 同 NULL；非空时为首次认领冻结时点的
+                                             -- bundle 摘要（§4.4；R2 窗口内随 bundle_name 变更重派生），认领后不可变——不可变的是 WI 记录中的
+                                             -- 引用本身，不构成 Core 侧的版本锁定承诺（§4.4）
   workflow_budget_baseline TEXT,            -- JSON {"requests":int|null,"tokens":int|null,"wall_minutes":int|null}；与 bundle_name
                                              -- 同 NULL；非空时为创建时从 workflow.md frontmatter 的 workflow 级 budget
                                              -- 抄录（§4.5）的基线，此后不可变（INV-2e）
@@ -175,7 +175,7 @@ CREATE INDEX idx_wi_parent      ON work_items(parent_id) WHERE parent_id IS NOT 
 CREATE INDEX idx_wi_milestone   ON work_items(project_id, milestone) WHERE milestone IS NOT NULL;  -- 里程碑过滤/列表
 ```
 
-**attrs 拆分原则（权威）**：满足任一条件者必须独立成列——①参与状态机或 UNIQUE 约束（`status`、`seq`）；②有高频查询/排序需求且语义稳定（`assignee`、`waiting_on`、`priority`、`milestone`、`project_id`、`closed_at`）；③被外键引用（`project_id`、`reporter`、`parent_id`）。其余一律留在 `attrs` JSON 内，不得为省一次 JSON 提取而升列。workflow 引用三列（§4.4）按条件②升列：语义不可变、被生效额度计算（§4.5a）与漂移巡检（§4.4）高频读取，且不可变性必须在列级（无 UPDATE 路径）强制，不适合沉入 `attrs`。一期拆分冻结如上；后续升列必须经 §11 迁移并保持 `attrs` 内旧键读兼容一个版本。
+**attrs 拆分原则（权威）**：满足任一条件者必须独立成列——①参与状态机或 UNIQUE 约束（`status`、`seq`）；②有高频查询/排序需求且语义稳定（`assignee`、`waiting_on`、`priority`、`milestone`、`project_id`、`closed_at`）；③被外键引用（`project_id`、`reporter`、`parent_id`）。其余一律留在 `attrs` JSON 内，不得为省一次 JSON 提取而升列。workflow 引用三列（§4.4）按条件②升列：语义稳定（`bundle_name`/`bundle_digest` 首次认领冻结后不可变、`workflow_budget_baseline` 建 NULL 后不变）、被生效额度计算（§4.5a）与漂移巡检（§4.4）高频读取，且冻结语义须在写路径（R2 窗口门控，§4.5）强制，不适合沉入 `attrs`。一期拆分冻结如上；后续升列必须经 §11 迁移并保持 `attrs` 内旧键读兼容一个版本。
 
 **`wi_type` 删除（裁定）**：`work_items` 不存在任何 WI 类型分类列。WI 的分类需求由两处既有机制承载，不再引入第三处：执行形态由 workflow 引用三列区分（执行票 vs 登记票，§4.4），其余业务分类（如 feature/fix 等）作为 `attrs` 内自由属性携带（受 INV-2c 词表约束），不设列、不承诺过滤索引。
 
@@ -203,9 +203,9 @@ CREATE TABLE wi_dependencies (
 **`parent_id`（epic-lite）约束（写路径强制）**：
 
 - **深度限 1 层**：子票的父票自身 `parent_id` 必为 NULL（父票不得再有 parent）；违反 → `CORE-400`（`reason=PARENT_DEPTH`）。不存在第 2 层及更深的层级。
-- **父票必为登记票**：父票的 `bundle_name`（连同 `bundle_digest`/`workflow_budget_baseline`）必为 NULL（§4.4 三列同 NULL 约束）；带非空 workflow 引用三列的执行票不得作为 parent（`CORE-400`，`reason=PARENT_NOT_REGISTRY`）。
+- **父票必为登记票（对称规则）**：父票的 `bundle_name`（连同 `bundle_digest`）必为 NULL——已绑 bundle 的票不得作为 parent（`CORE-400`，`reason=PARENT_NOT_REGISTRY`）；对称地，已有子票（任意子票状态，含已终态）的票不得绑定非 NULL `bundle_name`（create 与 `PATCH` 共用同一校验路径，`CORE-400`，`reason=HAS_CHILDREN_NO_BUNDLE`，§4.5）：bundle 只落在叶子上，epic/父票永远是登记票（w140 裁决，`v2-converge.md#§12`）。
 - **同 project**：子票 `project_id` 必须等于父票 `project_id`（`CORE-400`，`reason=PARENT_PROJECT_MISMATCH`）。
-- **不可变**：`parent_id` 随创建事务写入后不存在任何 UPDATE 路径（与 workflow 三列同等处置，`PATCH` 可更新字段集不含它）；子票自身可以是登记票或执行票。
+- **不可变**：`parent_id` 随创建事务写入后不存在任何 UPDATE 路径（`PATCH` 可更新字段集不含它；workflow 三列已改按 R2 窗口处置，见 §4.5）；子票自身可以是登记票或执行票。
 - **父不可依赖子**：见上表约束；子票清单查询经 `idx_wi_parent` 索引支撑（§4.2）。
 
 ### 4.3 `owner_generations` 与 `claim_idempotency` <!-- §4.3 -->
@@ -242,11 +242,11 @@ CREATE TABLE claim_idempotency (
 
 **WI 记录对 workflow 只保留引用**（skill 层定稿裁决）：`bundle_name`、`bundle_digest`、`workflow_budget_baseline` 三列（DDL 见 §4.2）**是 WI pin 的唯一数据模型**——不存在任何第二张表或第二组列承载 WI 对 workflow 的固定信息，resolved steps、逐文件 `content_sha`、frontmatter 解析结果一律不落库。Core 不存储 resolved steps 大 JSON，也不保留任何 bundle 目录/注册/文件内容职责——原 `workflow_bundles`/`workflow_bundle_versions`/`workflow_bundle_files`/`workflow_pins` 四表整体删除，对应端点（bundle 注册表、bundle 文件取回、workflow-pin）一并删除（§5.1）。
 
-**NULL = 纯登记票**：三列可空，且由 §4.2 的 CHECK 强制同 NULL 或同非 NULL。`bundle_name IS NULL` 的 WI 是**纯登记票**（registration-only）：仅承载 goal/content/labels/attrs/parent_id 等登记信息——**不可 claim**（`CORE-409`（`reason=NOT_CLAIMABLE`），§6.1；无 owner_generations 行、无 Capsule 现场），**不可 submit**（块上传与 manifest 提交端点一律 `CORE-409`，无 Revision 可发布）；状态机上只能停在 `queued` 或被 `cancel`（§6.5）。非 NULL 时即为**执行票**，受 §4.5 创建时校验与固化约束。NULL 与非 NULL 之间不存在任何 UPDATE 路径（INV-2e）：登记票不得事后补挂 workflow，执行票不得降级为登记票——不存在 NULL→非 NULL 的任何升级路径；要执行某登记票承载的内容，唯一路径是为它创建子票（epic-lite，§4.2a；子票自身可为执行票），父票保持登记票不变。epic 父票（§4.2a）必为登记票。
+**NULL = 纯登记票**：三列可空；`bundle_name`/`bundle_digest` 同 NULL 或同非 NULL 由写路径强制（§4.5 的共用落库路径，代码 DDL 不落 CHECK；存量异常行按字面数据展示、不拒读）。`bundle_name IS NULL` 的 WI 是**纯登记票**（registration-only）：仅承载 goal/content/labels/attrs/parent_id 等登记信息——**不可 claim**（`CORE-409`（`reason=NOT_CLAIMABLE`），§6.1；无 owner_generations 行、无 Capsule 现场），**不可 submit**（块上传与 manifest 提交端点一律 `CORE-409`，无 Revision 可发布）；状态机上只能停在 `queued` 或被 `cancel`（§6.5）。非 NULL 时即为**执行票**，受 §4.5 创建时校验与固化约束。NULL 与非 NULL 之间在 R2 窗口（queued ∧ 从未认领）内可经 `PATCH bundle_name` 双向变更（登记票可在窗口内补挂 workflow，执行票可解绑降回登记票；§4.5），首次认领后不存在任何 UPDATE 路径（INV-2e）；要执行某登记票承载的内容，可在 R2 窗口内直接补挂 bundle（§4.5），或将内容拆为子票（epic-lite，§4.2a；子票自身可为执行票），父票保持登记票不变。epic 父票（§4.2a）必为登记票（对称规则，§4.2a）。
 
 **AIHub 完全退出 step skill / subagent 文本管理**：不存储、不解析、不校验内容、不分发任何 step skill 或 subagent 定义正文——这些是 harness 层事务；创建事务对 `agents/*.md` 仅做存在性检查与按字节摘要（仅作为 digest 计算输入，`01-workflow-skills.md#§4.1` V7），摘要结果本身不落库。执行侧（WI Agent/Daemon 所在机器）以 `bundle_name` + `bundle_digest` 为键在本地 bundle 目录取得内容并自行按 digest 规则校验（计算规则权威在 `01-workflow-skills.md#§4.5`；本地 bundle 与 digest 不符即 `WF-203` 的重建场景完全在 harness 侧完成，Core 无任何文件取回端点）。 〔#111分类：删→驱动〕
 
-**不可变（对象是 WI 记录的 bundle 引用；B07 裁定）**：三列随创建事务（§4.5）写入后不存在任何 UPDATE 路径（INV-2e）；`PATCH /api/v1/work-items/{id}` 的可更新字段集不含这三个键名，携带即 `CORE-400`。不可变的是 **WI 记录的 bundle 引用（`bundle_name`/`bundle_digest`）**（`00-architecture.md#§2.3` INV-8 的 Core 侧）——Core 只承诺该引用创建后不再变更，**不存在 Core 侧的「版本锁定」承诺**：执行侧以 pin digest 为校验目标，本机 checkout 与 pin 不一致属配置事故（告警、继续执行，v1 信任内网；`01-workflow-skills.md#§5.2` WF-203 与 `03-execution-capsule.md#§4.5` 的「告警不硬拒」），Core 无任何阻断或版本回取路径。变更 workflow 引用的唯一路径是取消当前 WI 并新建（不存在「claim 前整体替换」窗口，§4.5）。
+**首次认领冻结（对象是 WI 记录的 bundle 引用；B07 裁定，w140 修订）**：`bundle_name`/`bundle_digest` 随创建事务（§4.5）写入，在 R2 窗口（queued ∧ 从未认领）内可经 `PATCH /api/v1/work-items/{id}` 的 `bundle_name` 键三向变更（NULL→X / X→Y / X→NULL 解绑；携带 `bundle_digest` 时须随 `bundle_name`，显式值胜出 stand-in；§4.5）；首次认领后冻结（INV-2e），窗口外携带即拒：已认领/非 queued → `CORE-400`（`reason=IMMUTABLE`），终态 → `CORE-410`（`reason=TERMINAL_STATE`）。`workflow_budget_baseline` 无 UPDATE 路径。冻结的对象是 **WI 记录的 bundle 引用（`bundle_name`/`bundle_digest`）在首次认领之后的状态**（`00-architecture.md#§2.3` INV-8 的 Core 侧）——Core 只承诺该引用认领后不再变更，**不存在 Core 侧的「版本锁定」承诺**：执行侧以 pin digest 为校验目标，本机 checkout 与 pin 不一致属配置事故（告警、继续执行，v1 信任内网；`01-workflow-skills.md#§5.2` WF-203 与 `03-execution-capsule.md#§4.5` 的「告警不硬拒」），Core 无任何阻断或版本回取路径。变更已认领 WI 的 workflow 引用的唯一路径是取消当前 WI 并新建（不存在「认领后整体替换」窗口，§4.5）。
 
 **漂移告警**：Core 不存 bundle 内容、无法自行复算历史 digest；每次创建 WI 都按 §4.5 对本 checkout 重算一次 `bundle_digest`，若发现同一 `bundle_name` 的当前 digest 与仍有未终态 WI 引用的旧 digest 不同，产生漂移告警（作为监控指标上报，不新增事件类型、不改写任何已落库值；处置归人）。
 
@@ -261,7 +261,9 @@ CREATE TABLE claim_idempotency (
 1. **读取对象**：创建 body 携带非空 `bundle_name`；AIHub 服务端读本机 aihub checkout 内该 bundle 的 workflow.md **frontmatter**。checkout 路径与 bundle 定位规则是部署配置项（随部署给定），不落库、不经 API。对 `agents/*.md` 只做存在性检查与按字节摘要（digest 计算输入，`01-workflow-skills.md#§4.1` V7），不解析、不校验其内容、不落库（§4.4）。
 2. **严格校验（仅作用于 frontmatter，结果不落库）**：按 `01-workflow-skills.md#§4.1` 的 V 规则全集校验 workflow.md 的 frontmatter（唯一结构 schema）——含各字段类型与取值、`on_fail` rewind 目标存在且更早（V5）、budget 数值类型与 >0（V6）等。**Markdown 正文不解析、不校验、不落库**——正文是 WI Agent 第 0 步加载的流程级说明（`03-execution-capsule.md#§4.5`），不在 AIHub 校验边界内。任一规则失败 → 创建整体失败 `CORE-400`（`detail` 携带命中的 `rule_id`）。 〔#111分类：删→驱动〕
 3. **digest 固化**：校验通过后按唯一规则（`01-workflow-skills.md#§4.5`）计算 `bundle_digest`（输入集 = `workflow.md` 与 `agents/*.md` 全部文件的字节内容），把 `bundle_name`、`bundle_digest` 与 workflow 级 budget 的三个基线 scalar 写入 `work_items`（§4.2/§4.4），与 repo inventory 冻结（§4.6）在同一创建事务内提交。frontmatter 解析结果、逐文件 `content_sha` 等一切校验/摘要中间产物**不落库**——落库的只有 `bundle_name` + `bundle_digest` + 三个基线 scalar（三 scalar 即 WI pin 的全部数据，§4.4）。
-4. **无重新固定路径**：三列不可变（INV-2e）；不存在「claim 前整体替换 pin」的窗口，确需变更 workflow 只能取消当前 WI（§6.5）并新建 WI 重新走创建流程。
+4. **无（认领后的）重新固定路径**：三列首次认领冻结（INV-2e）；R2 窗口内 `PATCH bundle_name` 是唯一的重新固定路径（见下段），认领后不存在「整体替换 pin」的窗口，确需变更 workflow 只能取消当前 WI（§6.5）并新建 WI 重新走创建流程。
+
+**R2 窗口与 PATCH 落库（w140 裁决，首次认领冻结）**：`bundle_name`/`bundle_digest` 的固化时点为**首次认领冻结**——R2 窗口（`status='queued'` 且从未认领：无活跃 session 行且无 `session_claimed` 事件）内，`PATCH /api/v1/work-items/{id}` 携带 `bundle_name`（可选 `bundle_digest`）被接受：NULL→X 补挂、X→Y 换名、X→NULL 解绑（同步清空 digest，票回到 ready queue 待选 bundle 分段）；写路径与创建共用同一落库规则（digest = 请求显式值，否则 stand-in `sha256("bundle-name:"+名)`；`workflow_budget_baseline` 恒 NULL，`wi_repo_inventory` 不触碰），窗口判定不看 `waiting_on`。窗口外拒绝且不写库：已认领/非 queued → `CORE-400 reason=IMMUTABLE`，终态 → `CORE-410 reason=TERMINAL_STATE`。对称规则（§4.2a）：有子票的票拒绝非 NULL 绑定（`CORE-400 reason=HAS_CHILDREN_NO_BUNDLE`）。并发：PATCH bundle vs Claim 不另设仲裁，单写者事务串行化加各自 CAS 保证终态一致——绑定或改名的 PATCH 不会让 Claim 失败，PATCH 排在其前则 Claim 冻结新 bundle，排在其后则被拒（`CORE-400 reason=IMMUTABLE`，或复查无具体原因时 `CORE-409 reason=RACE_LOST`），均不写库；绑定 bundle vs 新增子票以创建事务内父票 bundle 复查互斥，终态不同时出现「有子票 ∧ bundle 非空」。接口契约（字段、reason 清单、响应形状、部署与回滚）权威：`wi-kind-contract.md`。
 
 ### 4.5a `workflow_budget_increments`（预算增量，独立可追加记录） <!-- §4.5a -->
 
@@ -506,7 +508,7 @@ F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-se
 | **A. WI 业务（6 行：行 1–6）** | | | | | |
 | 1 | POST | `/api/v1/work-items` | `pf` CLI（路由 skill/CI/人） | 创建 WI（`queued`）；body 可带 `bundle_name`（非空 = 执行票，走 §4.5 校验/固化；NULL/缺省 = 纯登记票，跳过，§4.4）、可选 `parent_id`（epic-lite，写路径约束 §4.2a）、`repo_inventory`+`repo_inventory_base`（§4.6）与 `attrs`（业务级自由属性，受 INV-2c 黑名单校验，§5.1a）；服务端在同一事务内完成 workflow.md frontmatter 校验与三 scalar 固化（§4.5） | CORE-400（含 frontmatter 校验失败，`detail` 携带命中 `rule_id`）/ CORE-409 |
 | 2 | GET | `/api/v1/work-items?project=&status=&assignee=&waiting_on=&parent=&milestone=` | `pf` CLI | 列表/过滤；`parent=` 经 `idx_wi_parent`、`milestone=` 经 `idx_wi_milestone`（§4.2）；结果先经 §4.10 权限硬边界裁剪 | CORE-400 |
-| 3 | GET/PATCH | `/api/v1/work-items/{id}?include=events,deps,children` | `pf` CLI（只读详情亦经 Daemon 本地认证代理，`04-local-runtime.md#§5.3`） | 详情（基本记录 + `repo_inventory` 含 base；`include` 参数权威定义见 §5.1c）/ 更新 goal、content、labels、priority、milestone、waiting_on（`attrs` 受 INV-2c 黑名单校验；workflow 三列与 `parent_id` 不可变，INV-2e/§4.2a）。同路径 GET+PATCH 计 1 行（计数口径见上） | CORE-404 / CORE-409 / CORE-410 / CORE-400 |
+| 3 | GET/PATCH | `/api/v1/work-items/{id}?include=events,deps,children` | `pf` CLI（只读详情亦经 Daemon 本地认证代理，`04-local-runtime.md#§5.3`） | 详情（基本记录 + `repo_inventory` 含 base；`include` 参数权威定义见 §5.1c；w140 新增只读派生 `derived` 块（有子票时，`wi-kind-contract.md`））/ 更新 goal、content、labels、priority、milestone、waiting_on（`attrs` 受 INV-2c 黑名单校验；`bundle_name`/`bundle_digest` 仅 R2 窗口内可 PATCH（§4.5），认领后不可变 INV-2e；`workflow_budget_baseline` 与 `parent_id` 不可变 §4.2a）。同路径 GET+PATCH 计 1 行（计数口径见上） | CORE-404 / CORE-409 / CORE-410 / CORE-400 |
 | 4 | GET | `/api/v1/ready-queue?project=` | `pf` CLI | 就绪队列：扁平 `{executable, blocked}` 两数组响应，schema 权威见 §5.1b；结果先经 §4.10 裁剪 | CORE-400 / CORE-404 |
 | 5 | POST | `/api/v1/work-items/{id}/cancel` | `pf` CLI（reporter / 该 project maintainer / admin，§6.5） | 终止 `queued`/`paused`/`blocked` 的 WI（不要求活跃 generation） | CORE-409（状态不属于三者之一）/ CORE-410 |
 | 6 | GET | `/api/v1/work-items/{id}/progress` | 任意客户端（人/CI；`observe` 经 Daemon 本地认证代理） | read-through 进度（§5.2） | CORE-404 / CORE-504 |
@@ -580,6 +582,7 @@ token 与 `(wi_id, generation, machine_id)` 三元绑定；换机器重放同一
 - **排序**：两数组内均按 `priority`（`urgent`→`high`→`normal`→`low`）→ `created_at`（先创建在前）。
 - **v1 无分页**：全量返回，不设 cursor/limit；规模出现压力后再议（§12）。
 - `running` WI（含心跳过期的 stale running）不出现在任一数组——就绪队列只回答「什么可立即认领、什么在等待」；stale 检测在 §9 监控面暴露，接管由人决策（行 8），Core 不自动接管（§7）。
+- **w140 增量（只做加法，`wi-kind-contract.md`）**：在线实现的 ready-queue 响应（`project`/`items`/`running`/`paused`）新增「待选 bundle」分段（`pending_bundles`：bundle 为空 ∧ 无子票 ∧ queued 且等待/依赖排除同上）与条目级只读派生 `derived` 块（父票完成状态，不写终态）；旧字段不改名不删减，本节两数组口径为 pre-w140 vnext 目标形状，与在线实现的既有出入维持以代码为准。
 - `slug` 为展示名 `<project-name>#<seq>`（如 `aihub#793`，`seq` 见 §4.2）；调用方对该 project 无访问资格（membership OR 全局 admin 均不满足，§4.10）时整个查询按不存在处理（`CORE-404`）；全局 admin 不受 membership 限制。
 
 ### 5.1c `GET /work-items/{id}` 的 `include` 参数（events/deps/children 拼详情；A9 裁定） <!-- §5.1c -->
