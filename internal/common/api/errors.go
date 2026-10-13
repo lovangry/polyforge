@@ -99,7 +99,4 @@ const (
 	// the one that sealed it, whose aihub capsule head is not the head the
 	// sealing daemon recorded — the clone would be pre-blocked state.
 	ErrDaemonSealedHeadMismatch = "DAEMON-518"
-
-	// CAP — capsule lifecycle errors (03 §5.3)
-	ErrCapCheckoutDiver = "CAP-405"
 )

@@ -238,7 +238,9 @@ WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 
 
 1. 对声明清单中的每个 `repo_entry = {name, url, subdir?, base}`：目标目录 `dir = <capsule>/repos/<name>`。
 2. 若 `dir` 已存在且其 `HEAD == base`：校验工作树无未预期的脏改动痕迹与声明不符后直接复用，不重新克隆。
-3. 若 `dir` 已存在且 `HEAD != base`：返回 `CAP-405 CHECKOUT_DIVERGED`（人工处理，绝不自动强制重置）。
+3. 若 `dir` 已存在：直接复用（存在性即判据——记录的基线随 prior capsule.json 原样保留；
+不自动重置、不强制重置，漂移属人工处理范畴。检出/克隆失败是 typed 的 `DAEMON-507`，
+绝不静默退化）。
 4. 若 `dir` 不存在：`git clone --no-checkout <url> dir && git -C dir checkout <base>`。
 5. 写入 `<capsule>/repos/<name>/inventory.json` 快照，记录 `{name, url, base, checked_out_at, head_at_checkout}`。
 
@@ -348,7 +350,6 @@ Native runner：v1 trusted internal repo，host-native，不引入 per-step isol
 | `CAP-401` | RUNNER_UNAVAILABLE：宿主机缺少命令声明的可执行文件或必要 shell |
 | `CAP-403` | STATE_WRITE_DENIED：subagent 对 `runtime-state/` 的写被拒绝（§6.2，宿主机返回 `EACCES`） |
 | `CAP-404` | inventory 声明的 repo 不存在或未检出 |
-| `CAP-405` | CHECKOUT_DIVERGED：检出基线与声明 base 不一致（拒绝自动强推，须人工处理） |
 | `CAP-406` | SYMLINK_ESCAPE_DENIED：Revision 恢复落盘时检测到 symlink 路径逃逸尝试（§6.3，修复 B07） |
 | `CAP-409` | CAPSULE_FENCED：调用方携带的 generation 与本地 `capsule.json` 已记录的不一致（正常路径下应先被 `02-aihub-core.md#§5.1` `CORE-403 STALE_GENERATION` 拦下，本错误码是本地二道防线） |
 | `CAP-500` | RUNNER_CRASHED：命令进程组异常死亡，转 `01-workflow-skills.md#§6.3` 基础设施失败 |
@@ -449,7 +450,7 @@ v1 trusted internal repo，host-native，不引入 per-step isolation；INV-6（
 ## 10. 测试与故障注入 <!-- §10 -->
 
 - 身份/绑定：篡改 `capsule.json.generation` → `capsule_create` 返回 `CAP-409`。
-- inventory：base commit 前移 → `CAP-405`。
+- inventory：克隆/检出失败 → `DAEMON-507`（typed 的任务 repo 克隆失败，关闭为 blocked）。
 - **INV-6 写保护测试（B02 误写口径）**：subagent 进程内尝试 `echo x > runtime-state/execution.json`（预期 `CAP-403`/`EACCES`）——这是**防误写**断言，保留；对「不可见」面（`capsule.json`/`sync/`/Daemon state）**不做**「读取必然失败」的验收断言——host-native 同 UID 下这些路径物理可读，「不可见」是工作目录约定层面的构造性保证（§5.2/§6.2 的 B02 口径），不是可断言的运行时边界。机械可断言的只有构造面本身：WI Agent 构造的 `RunCommand.spec` 从不携带 `repos/<name>`/`artifacts` 之外的 `cwd`，且 `env` 中不含 `runtime-state` 路径与任何凭证（§5.1）。 〔#111分类：删→驱动〕
 - **symlink 逃逸测试（B07，§6.3 场景的机械化版本）**：①创建 Capsule 并完成 inventory 检出；②在 `repos/<name>/` 内创建 `evil -> ../../runtime-state`；③触发一次声明目标为 `repos/<name>/evil/execution.json` 的 Revision 恢复；④断言返回 `CAP-406`，`runtime-state/execution.json` 内容与恢复前逐字节相同，且恢复操作未部分落盘任何其它文件。
 - 超时命令：预期进程组被杀、`killed=true`，结果记基础设施失败。

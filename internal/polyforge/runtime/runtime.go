@@ -787,8 +787,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	j.mu.Unlock()
 	if err := r.materialize(ctx, j); err != nil {
 		// A typed task-repo clone failure (DAEMON-507) keeps its detail as
-		// the close note; every other materialization failure (CAP-405
-		// digest divergence included) names itself.
+		// the close note; every other materialization failure names itself.
 		note := err.Error()
 		var ae *api.Error
 		if errors.As(err, &ae) && ae.Code == api.ErrDaemonSpawnFail && ae.Detail != "" {
@@ -1095,9 +1094,8 @@ var renameFn = os.Rename
 // materialize lays out the capsule: workflows/, agents/,
 // capsule.json, session.json, .gitignore and the runtime-state/ tree.
 // The bundle is materialized as ONE atomic set with a completion marker
-// (F7, materialize.go): a pinned bundle digest is verified against the
-// STAGED tree before any live target is touched (CAP-405 on divergence,
-// name-derived stand-ins excepted). The claim's task-repo
+// (F7, materialize.go; no digest verification — the digest chain is
+// deleted, polyforge#149 B9). The claim's task-repo
 // inventory is cloned into repos/<name> BEFORE the capsule identity is
 // written, so the recorded baselines are the true claim-time SHAs.
 func (r *Runtime) materialize(ctx context.Context, j *job) error {
