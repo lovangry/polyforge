@@ -53,7 +53,7 @@
 **单 active Service**：一个 AIHub 部署中，任何时刻至多一个 aihub 进程可写 Core（`00-architecture.md#§2.3` INV-2）。保证手段三层：
 
 1. **部署层**：一期一台主机一个 systemd 单元，systemd 保证单实例。
-2. **文件锁层**：进程启动时对 `<data_dir>/service.lock` 取排他非阻塞锁；取锁失败即立即退出（锁被占用的启动期拒绝）。
+2. **文件锁层**：进程启动时对 `<data_dir>/service.lock` 取排他非阻塞锁；取锁失败即退出（`CORE-508 LOCK_HELD`）。
 3. **Core 层**：service 自注册行（§4.10）记录 `service_id` 与心跳时间戳；所有写 API 校验调用方携带的 `service_id` 等于当前注册行，不等即拒绝（`CORE-509 STALE_SERVICE`）——防止「旧进程未死透、新进程已接管」的双写窗口。
 
 ### 2.3 owner generation（权威定义：概念与生命周期；存储见 §4.3） <!-- §2.3 -->
@@ -623,6 +623,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 | CORE-503 | Core 忙（事务超时） |
 | CORE-504 | 进度不可得（read-through 无可读对象，§5.2） |
 | CORE-507 | 本地存储不可用（写失败、磁盘满） |
+| CORE-508 | service.lock 已被持有（启动期） |
 | — | （启动期锁拒绝：`cmd/aihub` 的文件锁直接退出，不经注册表错误码——polyforge#149 删除了未用的注册表常量） |
 | CORE-509 | STALE_SERVICE：service_id 非当前注册行 |
 
@@ -761,7 +762,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 - 非活跃 WI 取消测试：分别对 `queued`/`paused`/`blocked`（含由 `failed_gate`/`failed_rewind_exhausted` 映射而来的 `blocked`）构造 cancel 请求，断言均无需持有活跃 generation 令牌即可成功。
 - 凭证轮换测试：轮换后旧 token 在宽限期内仍可验证但提示 `secret_epoch`；宽限期外旧 token 拒绝为 `secret_rotated_expired`；`reauthorize` 成功后 generation 不变但 token 已更新；重放旧 `idempotency_key` 在轮换后不返回已失效 token。
 - 预算口径测试：断言 Core 的 `work_items` 行在预算增量前后字节不变（Core 不持有预算数据，polyforge#149）。
-- **可注入故障类别**：SQLite 文件损坏（预期 `CORE-507` 停服 + 备份恢复路径）；磁盘满（预期写失败原子回滚，无半写）；kill -9 写事务中（预期 WAL 回放后无半写）；service.lock 双进程（预期第二进程立即退出，启动期锁拒绝）；心跳停止超过阈值（预期机器标记 stale、其 running WI 不出现在就绪队列任一数组（§5.1b）且无自动接管）。
+- **可注入故障类别**：SQLite 文件损坏（预期 `CORE-507` 停服 + 备份恢复路径）；磁盘满（预期写失败原子回滚，无半写）；kill -9 写事务中（预期 WAL 回放后无半写）；service.lock 双进程（预期 `CORE-508` 第二进程退出）；心跳停止超过阈值（预期机器标记 stale、其 running WI 不出现在就绪队列任一数组（§5.1b）且无自动接管）。
 
 ## 11. 迁移与 rollout <!-- §11 -->
 
