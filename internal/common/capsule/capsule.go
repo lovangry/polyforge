@@ -179,12 +179,6 @@ type StepSupervision struct {
 	// the transcript, "fresh" starts a new conversation with the previous
 	// transcript as read-only reference. Cleared by the next step_start.
 	NextDispatch string `json:"next_dispatch,omitempty"`
-	// RejectRelaunches counts the driver relaunches a persistently
-	// rejected result envelope forced (the in-process rejection bound
-	// spent). Persisted because the in-memory rejection counter dies with
-	// the driver; the bound blocks the step. Reset by an accepted result
-	// and by a human continue.
-	RejectRelaunches int `json:"reject_relaunches,omitempty"`
 }
 
 // NextDispatchFresh is the StepSupervision.NextDispatch value that

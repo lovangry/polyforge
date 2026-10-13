@@ -355,11 +355,18 @@ func TestPersistentEnvelopeRejectionReports(t *testing.T) {
 		script = append(script, fakeEntry{res: &StepResult{Outcome: OutcomeCompleted, SpawnN: 99, Output: []byte(`{}`)}})
 	}
 	env.sp.script = script
-	if err := env.d.Run(context.Background()); err == nil {
-		t.Fatal("a persistently rejected envelope ends Run with an error (the driver-crash path)")
+	if err := env.d.Run(context.Background()); err != nil {
+		t.Fatalf("a persistently rejected envelope blocks the step cleanly (no relaunch lane): %v", err)
 	}
 	if rep := env.log.byKind("schema_fault"); len(rep) != 1 {
 		t.Fatalf("schema_fault report events: %+v", rep)
+	}
+	x := env.exec(t)
+	if x.WorkflowStatus != StatusBlocked || !strings.Contains(x.BlockedReason, "result_invalid") {
+		t.Fatalf("status %q reason %q, want blocked with result_invalid", x.WorkflowStatus, x.BlockedReason)
+	}
+	if x.RewindStats.Count != 0 {
+		t.Fatalf("a result-invalid block must not fire a rewind: %+v", x.RewindStats)
 	}
 }
 

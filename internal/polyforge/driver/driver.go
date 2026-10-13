@@ -385,21 +385,23 @@ func (d *Driver) Run(ctx context.Context) error {
 					"step": stepID, "spawn_n": n, "rejections": count,
 					"detail": "persistent envelope rejection: the result contract is broken, not the model; reported to the owner",
 				})
-				// the in-memory counter dies with this driver: persist the
-				// escalation so a relaunch loop is bounded (the third one
-				// blocks the step instead of relaunching)
+				// the in-process retry bound is spent: the step goes BLOCKED
+				// with the result_invalid cause code — no driver relaunch
+				// through the recovery lane, no on_fail routing (rewind stays
+				// reserved for review FAIL verdicts).
 				if err := d.transition(TransitionRequest{
-					Kind: TransRejectEscalated, StepID: stepID, SpawnN: n, Reason: verr.Error(),
+					Kind: TransStepFailed, StepID: stepID, SpawnN: n,
+					Failure: &StepFailure{Cause: FailResultInvalid, Detail: verr.Error()},
 				}); err != nil {
-					return fmt.Errorf("driver: step %s rejection escalation record failed: %w", stepID, err)
+					return fmt.Errorf("driver: step %s result-invalid block failed: %w", stepID, err)
 				}
 				d.mu.Lock()
 				blocked := d.exec.WorkflowStatus == StatusBlocked
 				d.mu.Unlock()
 				if blocked {
-					return nil
+					return nil // blocked, not relaunchable: a clean stop
 				}
-				return fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d): %w",
+				return fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d) but the block did not land: %w",
 					stepID, n, count, maxEnvelopeRejects, verr)
 			}
 			continue // in-process re-dispatch: the step is still in_progress

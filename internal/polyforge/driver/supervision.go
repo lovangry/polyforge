@@ -55,6 +55,11 @@ const (
 	// FailExitOther: any other exit without a result (crash, operator
 	// kill, envelope never written).
 	FailExitOther = "exit_other"
+	// FailResultInvalid: the step's result envelope stayed structurally
+	// invalid through the in-process retry bound (maxEnvelopeRejects).
+	// A step-content failure, not infrastructure: it blocks the step —
+	// no relaunch, no on_fail routing.
+	FailResultInvalid = "result_invalid"
 )
 
 // WallEstimateFactor scales a step's declared budget.wall_minutes into its
@@ -416,6 +421,11 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 	}
 	cands := d.effectiveCandidates(stepID)
 	switch {
+	case f.Cause == FailResultInvalid:
+		dec.Block = true
+		dec.Report = true
+		dec.BlockReason = fmt.Sprintf("step %s: result_invalid: the result envelope stayed invalid through the in-process retry bound (%d): %s",
+			stepID, maxEnvelopeRejects, f.Detail)
 	case f.Cause == FailExitHost:
 		dec.Block = true
 		dec.Report = true
@@ -469,25 +479,6 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 		dec.Fresh = dec.Count >= 2 // 1st retry resumes the transcript, 2nd+ starts fresh
 	}
 	return dec
-}
-
-// applyRejectEscalatedLocked counts one envelope-rejection escalation
-// (a driver relaunch) in the step's persisted ledger; the bound blocks.
-func (d *Driver) applyRejectEscalatedLocked(req TransitionRequest, info *appliedInfo) error {
-	if err := d.requireRunningStep(req.StepID); err != nil {
-		return err
-	}
-	st := d.exec.Steps[req.StepID]
-	if st.Supervision == nil {
-		st.Supervision = &capsule.StepSupervision{}
-	}
-	st.Supervision.RejectRelaunches++
-	if st.Supervision.RejectRelaunches >= maxRejectRelaunches {
-		d.exec.WorkflowStatus = StatusBlocked
-		d.exec.BlockedReason = fmt.Sprintf("step %s: the result envelope was rejected through %d driver relaunches (bound %d): %s",
-			req.StepID, st.Supervision.RejectRelaunches, maxRejectRelaunches, req.Reason)
-	}
-	return nil
 }
 
 // applyStepFailedLocked records one failed dispatch: the attempt (with

@@ -71,17 +71,12 @@ const verificationStepID = "verification"
 
 // maxEnvelopeRejects bounds the in-process re-dispatch lane: a step
 // whose envelopes keep failing validation this many times CONSECUTIVELY
-// escalates to the recovery lane (the storm guard bounds whatever
-// follows). The #97/#107 history: hand-transcribed digest typos and
-// missing handoff refs — the retries fix the author, the bound keeps a
-// genuinely broken author from looping forever.
+// goes BLOCKED with the result_invalid cause code (no driver relaunch,
+// no recovery lane, no on_fail routing — rewind stays reserved for
+// review FAIL verdicts). The #97/#107 history: hand-transcribed digest
+// typos and missing handoff refs — the retries fix the author, the bound
+// keeps a genuinely broken author from looping forever.
 const maxEnvelopeRejects = 3
-
-// maxRejectRelaunches bounds the driver relaunches a persistently
-// rejected envelope may cost (persisted per step in execution.json,
-// because the in-process counter resets on every relaunch): the third
-// escalation blocks the step instead of relaunching again.
-const maxRejectRelaunches = 3
 
 // Outcome is the closed result-verdict set of the envelope.
 type Outcome string

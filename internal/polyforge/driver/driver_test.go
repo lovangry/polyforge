@@ -586,16 +586,20 @@ func TestRunContextCancelDuringDispatch(t *testing.T) {
 func TestRunStaleResultFenceRejected(t *testing.T) {
 	d, sp, _ := runEnv(t, spec("a"))
 	// the in-process retry lane re-dispatches on rejection; a stale fence
-	// stays stale, so the bound escalates with the fence error wrapped.
+	// stays stale, so the bound blocks the step with the result_invalid
+	// cause code (the fence error rides the blocked reason detail).
 	stale := fakeEntry{res: &StepResult{Outcome: OutcomeCompleted, SpawnN: 99}}
 	script := make([]fakeEntry, 0, maxEnvelopeRejects+1)
 	for i := 0; i <= maxEnvelopeRejects; i++ {
 		script = append(script, stale)
 	}
 	sp.script = script
-	err := d.Run(context.Background())
-	if !errors.Is(err, ErrStaleFence) {
-		t.Fatalf("a stale-envelope result must be rejected by the fence, got %v", err)
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("a spent rejection bound must BLOCK, not error: %v", err)
+	}
+	x := d.Snapshot()
+	if x.WorkflowStatus != StatusBlocked || !strings.Contains(x.BlockedReason, "result_invalid") {
+		t.Fatalf("status %q reason %q, want blocked with result_invalid", x.WorkflowStatus, x.BlockedReason)
 	}
 	// The start write landed; the result did not mutate anything.
 	if st := d.Snapshot().Steps["a"]; st.Status != capsule.StepInProgress {
@@ -636,16 +640,20 @@ func TestRunMinimalContractAccepted(t *testing.T) {
 
 	// A structurally invalid envelope (a needs_input without its question
 	// pair — invalid under the old AND the new contract) is rejected —
-	// the retry lane re-dispatches, so the escalation (not the first
-	// rejection) is what surfaces the error.
+	// the retry lane re-dispatches, and the spent bound blocks the step
+	// with the result_invalid cause code (no relaunch, no error return).
 	os.Remove(execPath)
 	badScript := []fakeEntry{}
 	for i := 0; i <= maxEnvelopeRejects; i++ {
 		badScript = append(badScript, badQuestion())
 	}
 	sp = &fakeSpawner{script: badScript}
-	if err := mkDriver(sp).Run(context.Background()); err == nil {
-		t.Fatal("a needs_input envelope without its question pair must be rejected")
+	if err := mkDriver(sp).Run(context.Background()); err != nil {
+		t.Fatalf("the spent bound must block cleanly, not error: %v", err)
+	}
+	x := readExec(t, execPath)
+	if x.WorkflowStatus != StatusBlocked || !strings.Contains(x.BlockedReason, "result_invalid") {
+		t.Fatalf("status %q reason %q, want blocked with result_invalid", x.WorkflowStatus, x.BlockedReason)
 	}
 }
 
@@ -766,26 +774,29 @@ func TestRunRejectedEnvelopeRetriesInProcess(t *testing.T) {
 	}
 }
 
-func TestRunRejectedEnvelopeEscalatesAfterBound(t *testing.T) {
-	d, sp, _ := runEnv(t, StepSpec{ID: "fix"})
-	// maxEnvelopeRejects rejections then the bound escalates
+func TestRunRejectedEnvelopeBlocksResultInvalidAfterBound(t *testing.T) {
+	d, sp, execPath := runEnv(t, StepSpec{ID: "fix"})
+	// maxEnvelopeRejects rejections then the bound blocks the step
 	sp.script = []fakeEntry{badQuestion(), badQuestion(), badQuestion(), badQuestion()}
 
-	err := d.Run(context.Background())
-	if err == nil {
-		t.Fatal("a persistently broken envelope author must escalate to an error")
-	}
-	if !strings.Contains(err.Error(), "consecutive rejections") {
-		t.Fatalf("the escalation must name the consecutive-rejection bound, got %v", err)
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("a spent in-process retry bound must BLOCK cleanly, not error (no relaunch): %v", err)
 	}
 	if n := len(sp.spawns); n != maxEnvelopeRejects+1 {
-		t.Fatalf("exactly limit+1 dispatches before escalation, got %d", n)
+		t.Fatalf("exactly limit+1 dispatches before the block, got %d", n)
 	}
 	// every re-dispatch carried the feedback
 	for i := 1; i <= maxEnvelopeRejects; i++ {
 		if sp.spawnAt(i).PriorRejection == "" {
 			t.Fatalf("re-dispatch %d must carry the rejection feedback", i)
 		}
+	}
+	exec := loadExecFile(t, execPath)
+	if exec.WorkflowStatus != StatusBlocked || !strings.Contains(exec.BlockedReason, "result_invalid") {
+		t.Fatalf("status %q reason %q, want blocked with the result_invalid cause code", exec.WorkflowStatus, exec.BlockedReason)
+	}
+	if exec.RewindStats.Count != 0 {
+		t.Fatalf("a result-invalid block must not route on_fail (fire a rewind): rewind_stats=%+v", exec.RewindStats)
 	}
 }
 
@@ -802,45 +813,42 @@ func loadExecFile(t *testing.T, path string) *capsule.Execution {
 	return &exec
 }
 
-func TestRejectionRelaunchesArePersistedAndBounded(t *testing.T) {
+func TestRejectionBoundBlocksOnceWithoutRelaunch(t *testing.T) {
 	dir := t.TempDir()
 	execPath := filepath.Join(dir, capsule.ExecutionJSON)
 	log := &eventLog{}
-	round := func() (*Driver, error) {
-		sp := &fakeSpawner{script: []fakeEntry{badQuestion(), badQuestion(), badQuestion(), badQuestion()}}
-		d, err := New(Config{
-			WI:       WIInfo{ID: "wi_rej", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
-			ExecPath: execPath,
-			Workflow: &Workflow{Steps: []StepSpec{{ID: "fix"}}, MaxTotal: 4, MaxPerStep: 2},
-			Spawner:  sp,
-			Log:      log,
-		})
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		return d, d.Run(context.Background())
+	sp := &fakeSpawner{script: []fakeEntry{badQuestion(), badQuestion(), badQuestion(), badQuestion()}}
+	d, err := New(Config{
+		WI:       WIInfo{ID: "wi_rej", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+		ExecPath: execPath,
+		Workflow: &Workflow{Steps: []StepSpec{{ID: "fix"}}, MaxTotal: 4, MaxPerStep: 2},
+		Spawner:  sp,
+		Log:      log,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	// each relaunch is a fresh driver: its in-memory counter starts at zero
-	for i := 1; i < maxRejectRelaunches; i++ {
-		if _, err := round(); err == nil {
-			t.Fatalf("relaunch round %d must still escalate to an error", i)
-		}
-		if got := readExec(t, execPath).Steps["fix"].Supervision.RejectRelaunches; got != i {
-			t.Fatalf("round %d: persisted reject_relaunches %d", i, got)
-		}
-	}
-	if _, err := round(); err != nil {
+	// ONE driver run carries the whole retry lane; a clean nil return is
+	// the contract (an error return is what the recovery/relaunch lane
+	// feeds on -- it must not fire for a result-invalid block).
+	if err := d.Run(context.Background()); err != nil {
 		t.Fatalf("the bound must block cleanly, not error: %v", err)
 	}
+	if n := len(sp.spawns); n != maxEnvelopeRejects+1 {
+		t.Fatalf("exactly limit+1 dispatches before the block, got %d", n)
+	}
 	x := readExec(t, execPath)
-	if x.WorkflowStatus != StatusBlocked || !strings.Contains(x.BlockedReason, "rejected through") {
-		t.Fatalf("status %q reason %q, want blocked on the rejection bound", x.WorkflowStatus, x.BlockedReason)
+	if x.WorkflowStatus != StatusBlocked || !strings.Contains(x.BlockedReason, "result_invalid") {
+		t.Fatalf("status %q reason %q, want blocked with result_invalid", x.WorkflowStatus, x.BlockedReason)
 	}
 	if n := log.count("blocked"); n != 1 {
 		t.Fatalf("one blocked event expected, got %d", n)
 	}
-	if n := log.count("reject_escalated"); n != maxRejectRelaunches {
-		t.Fatalf("reject_escalated events %d, want %d", n, maxRejectRelaunches)
+	if n := log.count("step_failed"); n != 1 {
+		t.Fatalf("one step_failed (result_invalid) event expected, got %d", n)
+	}
+	if x.RewindStats.Count != 0 {
+		t.Fatalf("a result-invalid block must not fire a rewind: rewind_stats=%+v", x.RewindStats)
 	}
 }
 
