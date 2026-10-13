@@ -276,7 +276,9 @@ it: a harness adapter sets it.
   ```
 
   It appends `export PF_CHAT_ID=<id>` to `$CLAUDE_ENV_FILE` and prints one
-  context line; it is silent when pf or the daemon is unavailable.
+  JSON object: `systemMessage` shows `polyforge chat id: <id>` to the human,
+  `additionalContext` gives the model the same id. It is silent when pf or
+  the daemon is unavailable.
 - **pi**: the `extensions/pf-chat.ts` extension is listed in this package's
   `pi.extensions` manifest; it runs `pf chat init` on session start and
   prefixes every bash tool call with `PF_CHAT_ID=<id>`.
