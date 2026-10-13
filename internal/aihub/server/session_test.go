@@ -405,11 +405,10 @@ func TestReadyQueueCarriesSessionBlock(t *testing.T) {
 }
 
 // TestBlockedExitsUnifiedAuthorization (v2-converge §7, §11 item 7): the
-// blocked exits — resume-blocked (continue) and terminate-blocked —
-// and cancel (abandon) are open to exactly the work item's reporter, a
-// project maintainer, or an admin. A plain project member (writer) who is
-// none of those is refused on EVERY door — resume-blocked used to check the
-// key scope only.
+// blocked exits — resume-blocked (continue) — and cancel (abandon) are
+// open to exactly the work item's reporter, a project maintainer, or an
+// admin. A plain project member (writer) who is none of those is refused
+// on EVERY door — resume-blocked used to check the key scope only.
 func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
 	e := newSrvEnv(t)
 	mk := func(name, role string) (string, string) {
@@ -457,7 +456,7 @@ func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
 	s := func(n byte) string { return strings.Repeat(string(rune('a'+n)), 32) }
 	id := block("blocked auth", s(1))
 
-	for _, door := range []string{"resume-blocked", "terminate-blocked"} {
+	for _, door := range []string{"resume-blocked"} {
 		for who, key := range map[string]string{"plain member": otherKey, "outsider": outKey} {
 			if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id+"/"+door, key, map[string]any{}, nil); code != 403 && code != 404 {
 				t.Fatalf("%s on %s must be refused, got %d %s", who, door, code, raw)
@@ -481,10 +480,10 @@ func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
 	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id2+"/resume-blocked", maintKey, map[string]any{}, &got); code != 200 || got.Status != "queued" {
 		t.Fatalf("maintainer resume-blocked: %d %s", code, raw)
 	}
-	// an admin terminates a third
+	// an admin abandons a third
 	id3 := block("blocked auth 3", s(3))
-	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id3+"/terminate-blocked", e.key, map[string]any{}, &got); code != 200 || got.Status != "failed" {
-		t.Fatalf("admin terminate-blocked: %d %s", code, raw)
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+id3+"/cancel", e.key, map[string]any{}, &got); code != 200 || got.Status != "canceled" {
+		t.Fatalf("admin abandon: %d %s", code, raw)
 	}
 	// the reporter abandons a fourth
 	id4 := block("blocked auth 4", s(4))

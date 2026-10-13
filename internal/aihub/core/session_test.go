@@ -383,22 +383,19 @@ func TestSessionEndFenceAndClear(t *testing.T) {
 	}
 }
 
-// TestOwnerDoorsOnBlockedWI (polyforge#116): the §6.4 owner doors on a
-// workflow parked blocked on an honest incomplete result. The resume
-// door (blocked → queued for the owner's re-claim — the claim gate
-// itself stays queued-only, so a plain claim still refuses) and the
-// terminate door (blocked → failed, closed_at set). Both refuse a
-// non-blocked work item; both record their event.
+// TestOwnerDoorsOnBlockedWI (polyforge#116): the §6.4 owner exits on a
+// workflow parked blocked on an honest incomplete result. Continue
+// (resume: blocked → queued for the owner's re-claim — the claim gate
+// itself stays queued-only, so a plain claim still refuses) and abandon
+// (cancel: blocked → canceled). The resume door refuses a non-blocked
+// work item and records its event.
 func TestOwnerDoorsOnBlockedWI(t *testing.T) {
 	env, m := sessionEnv(t)
 	id := mustCreateExecWI(t, env, "owner doors on blocked", nil, "")
 
-	// The doors refuse a non-blocked work item (the parked shape only).
+	// The resume door refuses a non-blocked work item (the parked shape only).
 	if _, err := env.WIs.ResumeBlocked(id, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_BLOCKED" {
 		t.Fatalf("the resume door accepted a queued WI: %v", err)
-	}
-	if _, err := env.WIs.TerminateBlocked(id, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_BLOCKED" {
-		t.Fatalf("the terminate door accepted a queued WI: %v", err)
 	}
 
 	// Park blocked the way the runtime's bounded close does: session
@@ -433,36 +430,37 @@ func TestOwnerDoorsOnBlockedWI(t *testing.T) {
 	reclaim := "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
 	mustSessionClaim(t, m, env, id, reclaim, "e-2")
 
-	// Park blocked again; the terminate door lands failed with closed_at
-	// and the session row cleared (M2 holds on every terminal transition).
+	// Park blocked again; the abandon exit (cancel) lands canceled with
+	// closed_at and the session row cleared (M2 holds on every terminal
+	// transition).
 	if err := m.End(id, api.SessionEndRequest{SessionID: reclaim, Status: api.StatusBlocked, Note: "incomplete again"}, env.UserID); err != nil {
 		t.Fatalf("second session-end blocked: %v", err)
 	}
-	if _, err := env.WIs.TerminateBlocked(id, env.UserID); err != nil {
-		t.Fatalf("terminate-blocked: %v", err)
+	if _, err := env.WIs.Cancel(id, env.UserID); err != nil {
+		t.Fatalf("abandon (cancel) of the parked WI: %v", err)
 	}
 	wi, err = env.WIs.Get(id, GetOptions{})
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if wi.Status != api.StatusFailed {
-		t.Fatalf("the terminate door must land failed: %s", wi.Status)
+	if wi.Status != api.StatusCanceled {
+		t.Fatalf("the abandon exit must land canceled: %s", wi.Status)
 	}
 	if wi.ClosedAt == nil {
-		t.Fatalf("the terminate door must set closed_at")
+		t.Fatalf("the abandon exit must set closed_at")
 	}
 	status, hash, _, _, _, _, _ := rowSession(t, env, id)
-	if status != api.StatusFailed || hash != nil {
-		t.Fatalf("the terminate door must leave the session cleared: status=%s hash=%v", status, hash)
+	if status != api.StatusCanceled || hash != nil {
+		t.Fatalf("the abandon exit must leave the session cleared: status=%s hash=%v", status, hash)
 	}
-	// The doors record their events.
+	// The exits record their events.
 	found := map[string]bool{}
 	events, _ := env.WIs.Events(id)
 	for _, e := range events {
 		found[e.Type] = true
 	}
-	if !found["wi_resumed"] || !found["wi_failed_blocked"] {
-		t.Fatalf("the doors' events missing: %v", found)
+	if !found["wi_resumed"] || !found["work_item_canceled"] {
+		t.Fatalf("the exits' events missing: %v", found)
 	}
 }
 

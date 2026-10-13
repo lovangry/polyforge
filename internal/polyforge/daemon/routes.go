@@ -92,10 +92,7 @@ type opsConfigResponse struct {
 
 type closeResponse struct {
 	WorkItemID string `json:"work_item_id"`
-	// Outcome: sealed | already_terminal | already_paused — plus
-	// "terminated" (polyforge#116): a parked workflow's §6.4 terminate
-	// verdict, landed at the hub by the terminate-blocked door (no local
-	// seal exists — the bounded close already sealed the parked capsule).
+	// Outcome: sealed | already_terminal | already_paused.
 	Outcome string `json:"outcome"`
 	Status  string `json:"status,omitempty"`
 	Reason  string `json:"reason,omitempty"`
@@ -417,29 +414,19 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 
 // parkedWIClose handles a close that finds no local job because the
 // workflow is parked blocked on an honest incomplete result (polyforge#116):
-// the bounded close dropped the job, so the owner's moves on this state are
-// the §6.4 face, not a runtime close — `--fail` is the owner's terminate
-// verdict, landed by the CLI at the hub's terminate-blocked door with the
-// human's key (refused here with a hint); a wrap (success) or a pause of a parked workflow has nothing to
-// seal — refused with the owner-move copy. Returns true when it answered;
-// a non-blocked work item falls through to the caller's terminalOf/404.
+// the bounded close dropped the job, so a wrap (success) or a `--fail` of
+// a parked workflow has nothing to seal — refused with the owner-move
+// copy: the blocked exits are continue (`pf resume`) and abandon
+// (`pf cancel`). Returns true when it answered; a non-blocked work item
+// falls through to the caller's terminalOf/404.
 func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
+	_ = reason
 	item, err := d.hub.GetWorkItem(wi)
 	if err != nil || item == nil || item.Status != api.StatusBlocked {
 		return false
 	}
-	// The terminate verdict (`--fail`) is NOT landed here: the hub's
-	// terminate-blocked door authorizes the HUMAN (reporter / maintainer /
-	// admin), so the CLI calls it with the user's own key; the daemon's
-	// machine key is not that caller. There is no local state to clean —
-	// the bounded close already dropped the job.
-	if reason == protocol.FinishFailed {
-		writeErr(w, api.ErrDaemonConflict,
-			"the workflow is parked blocked — its failed verdict is landed by the CLI with your own credential (`pf wrap --fail <id>` from an up-to-date pf), or abandon it with `pf cancel <id>`")
-		return true
-	}
 	writeErr(w, api.ErrDaemonConflict,
-		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon (`pf wrap --fail <id>` records a failed verdict); there is no completed run to wrap or pause")
+		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon; there is no completed run to wrap or fail")
 	return true
 }
 

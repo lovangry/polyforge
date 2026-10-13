@@ -103,12 +103,10 @@ type fakeHub struct {
 	// verifies records the wi of every SessionVerify call (the M4
 	// revalidation seam the -revalidate-every flag test pins).
 	verifies []string
-	// resumeBlockeds/terminateBlockeds record the wi of every §6.4 owner
-	// door call (polyforge#116): the resume door (resume-blocked route)
-	// and the terminate door (wrap --fail on a parked workflow).
-	resumeBlockeds    []string
-	terminateBlockeds []string
-	queues            []api.WorkItem
+	// resumeBlockeds records the wi of every §6.4 owner resume call
+	// (polyforge#116): the resume door (resume-blocked route).
+	resumeBlockeds []string
+	queues         []api.WorkItem
 	// reporters maps a canonical id to the WI reporter (owner fallback).
 	reporters map[string]string
 	blockEnd  chan struct{} // non-nil: SessionEnd parks until closed
@@ -242,11 +240,10 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	return &api.WorkItem{ID: id, Status: st, ProjectName: "proj", Reporter: h.reporters[id]}, nil
 }
 
-// ResumeBlockedWorkItem / TerminateBlockedWorkItem are the §6.4 owner
-// doors (polyforge#116): the resume door returns the WI to claimable
-// (queued, session cleared), the terminate door lands failed. Both
-// record the transition in the status map; the returned view is unused
-// by the routes (only the error matters).
+// ResumeBlockedWorkItem is the §6.4 owner resume door (polyforge#116):
+// the resume door returns the WI to claimable (queued, session cleared).
+// It records the transition in the status map; the returned view is
+// unused by the routes (only the error matters).
 func (h *fakeHub) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -255,16 +252,6 @@ func (h *fakeHub) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error
 	delete(h.held, id)
 	h.resumeBlockeds = append(h.resumeBlockeds, id)
 	return json.RawMessage(`{"id":"` + id + `","status":"` + api.StatusQueued + `"}`), nil
-}
-
-func (h *fakeHub) TerminateBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	id := h.canonicalID(idOrSlug)
-	h.status[id] = api.StatusFailed
-	delete(h.held, id)
-	h.terminateBlockeds = append(h.terminateBlockeds, id)
-	return json.RawMessage(`{"id":"` + id + `","status":"` + api.StatusFailed + `"}`), nil
 }
 
 func (h *fakeHub) Queue(project string) ([]api.WorkItem, error) {

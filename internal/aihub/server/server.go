@@ -73,11 +73,10 @@ func (s *Server) routes() {
 	// Recovery door: an admin/maintainer force-ends a stuck holder's session
 	// (WI -> queued); any daemon then claims it normally.
 	m.HandleFunc("POST /api/v1/work-items/{id}/force-end-session", s.auth(s.hForceEndSession))
-	// polyforge#116: the §6.4 owner doors on a workflow parked blocked —
-	// resume (the owner's re-dispatch-in-place verdict, claimed back
-	// immediately) and the terminate verdict (pf wrap --fail on a parked WI).
+	// polyforge#116: the §6.4 owner resume door on a workflow parked
+	// blocked — resume (the owner's re-dispatch-in-place verdict, claimed
+	// back immediately). The abandon exit is cancel.
 	m.HandleFunc("POST /api/v1/work-items/{id}/resume-blocked", s.auth(s.hResumeBlockedWI))
-	m.HandleFunc("POST /api/v1/work-items/{id}/terminate-blocked", s.auth(s.hTerminateBlockedWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
 	m.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.auth(s.hDeps))
 	m.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking}/{kind}", s.auth(s.hDelDep))
@@ -445,8 +444,8 @@ func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request, idn *identity)
 }
 
 // ownerMaintainerOrAdmin is the one authorization of the human decisions on
-// a work item — cancel (abandon) and the blocked exits (continue /
-// terminate; v2-converge §7, §11 item 7): the WI's reporter (the task
+// a work item — cancel (abandon) and the blocked exit (continue;
+// v2-converge §7, §11 item 7): the WI's reporter (the task
 // owner), a project maintainer, or a global admin.
 func (s *Server) ownerMaintainerOrAdmin(idn *identity, projectID, wiID string) bool {
 	if idn.Role == "admin" {
@@ -677,7 +676,7 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 // (polyforge#116): the door `pf resume` exercises on a workflow parked
 // blocked on an honest incomplete result. Authorization (v2-converge §7):
 // the WI's reporter, a project maintainer, or an admin — the same gate as
-// terminate-blocked and cancel.
+// cancel.
 func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -693,36 +692,6 @@ func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *i
 		return
 	}
 	wi, err := s.WIs.ResumeBlocked(id, idn.UserID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
-}
-
-// hTerminateBlockedWI serves the §6.4 owner terminate verdict's hub door
-// (polyforge#116): `pf wrap --fail` on a parked workflow. Authorization is
-// the unified blocked-exit gate: reporter, project maintainer, or admin.
-func (s *Server) hTerminateBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "terminate-blocked requires the work item's reporter, a project maintainer or admin"))
-		return
-	}
-	wi, err := s.WIs.TerminateBlocked(id, idn.UserID)
 	if err != nil {
 		writeErr(w, err)
 		return
