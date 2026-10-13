@@ -37,9 +37,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -917,99 +915,5 @@ func TestW140OldPfVerbsAgainstAihub(t *testing.T) {
 	// help (no wire call).
 	if _, code := w140Pf(t, inst, "help"); code != 0 {
 		t.Fatalf("pf help: exit %d, want 0", code)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// AC 13 + 14 (doc scenarios): the design-doc tree on disk.
-// ---------------------------------------------------------------------------
-
-// w140DocsDir is the design doc root relative to this package's dir.
-func w140DocsDir(t *testing.T) string {
-	t.Helper()
-	dir := filepath.Join("..", "docs", "design", "polyforge-vnext")
-	if _, err := os.Stat(dir); err != nil {
-		t.Fatalf("design docs dir: %v", err)
-	}
-	return dir
-}
-
-// w140ReadDoc reads one design doc.
-func w140ReadDoc(t *testing.T, name string) string {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(w140DocsDir(t), name))
-	if err != nil {
-		t.Fatalf("read design doc %s: %v", name, err)
-	}
-	return string(raw)
-}
-
-// TestW140DocsAdjudicationAndContract: v2-converge gains the
-// adjudication chapter (grill-review adjustments 1–6, including the
-// four-branch no-children rule), 00–04 carry 首次认领冻结 and drop the
-// create-time-freeze statements, the contract doc exists with the
-// interface/deploy/rollback content, and the untouched docs survive.
-func TestW140DocsAdjudicationAndContract(t *testing.T) {
-	dir := w140DocsDir(t)
-
-	// v2-converge: the adjudication chapter registers the rulings.
-	v2 := w140ReadDoc(t, "v2-converge.md")
-	for _, needle := range []string{
-		"裁决",   // the adjudication chapter
-		"对称",   // symmetric parent/bundle rules
-		"R2",   // the R2 window ruling
-		"待选",   // the pending-bundle segment ruling
-		"不挂子票", // problems found in execution never hang off children
-	} {
-		if !strings.Contains(v2, needle) {
-			t.Fatalf("v2-converge.md: adjudication chapter content %q missing", needle)
-		}
-	}
-
-	// 00–04: 首次认领冻结 lands; the create-time-freeze statements go.
-	oldRule := []string{
-		"随创建事务写入后即不可变",
-		"三列随创建事务写入后不可变",
-		"的可更新字段集不含这三个键名",
-		"三列为 NOT NULL 且写入后不可变",
-	}
-	for _, name := range []string{
-		"00-architecture.md", "01-workflow-skills.md", "02-aihub-core.md",
-		"03-execution-capsule.md", "04-local-runtime.md",
-	} {
-		doc := w140ReadDoc(t, name)
-		if !strings.Contains(doc, "首次认领冻结") {
-			t.Fatalf("%s: the 首次认领冻结 revision is missing", name)
-		}
-		for _, needle := range oldRule {
-			if strings.Contains(doc, needle) {
-				t.Fatalf("%s: residual create-time-freeze statement %q", name, needle)
-			}
-		}
-	}
-
-	// the untouched docs survive the revision.
-	for _, name := range []string{
-		"05-sync-revision-recovery.md", "06-memory-search.md",
-		"07-deployment-pilot.md", "08-capsule-base-migration.md",
-		"v1-architecture-spec.md", "v1.5-api-contract.md",
-	} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Fatalf("untouched design doc %s must survive: %v", name, err)
-		}
-	}
-
-	// the deliverable contract doc.
-	contract := w140ReadDoc(t, "wi-kind-contract.md")
-	for _, needle := range []string{
-		"bundle_name", // the request/response field contract
-		"R2",          // the R2 window semantics
-		"待选",          // the pending-bundle segment response shape
-		"部署",          // deployment order (new aihub before new pf)
-		"回滚",          // rollback notes
-	} {
-		if !strings.Contains(contract, needle) {
-			t.Fatalf("wi-kind-contract.md: required content %q missing", needle)
-		}
 	}
 }

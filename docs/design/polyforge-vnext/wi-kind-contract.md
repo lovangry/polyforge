@@ -17,12 +17,12 @@
 - `waiting_on` 非空**不**单独拒绝窗口内 PATCH（是否出现在待选分段是队列过滤问题，不是不可变问题）。
 - **窗口外拒绝且不写库**：
   - 已认领 / 非 queued → `CORE-400`，`reason=IMMUTABLE`
-  - 终态（wrapped / failed / cancelled）→ `CORE-410`，`reason=TERMINAL_STATE`
+  - 终态（wrapped / failed / canceled）→ `CORE-410`，`reason=TERMINAL_STATE`
 - **对称父子规则**：
-  - 有子票（任意子票状态，含已终态）→ PATCH 绑非 NULL bundle 拒绝：`CORE-400`，`reason=HAS_CHILDREN_NO_BUNDLE`（create 与 PATCH 命中同一校验逻辑；create 新票天然无子票）
+  - 有子票（任意子票状态，含已终态）→ PATCH 绑非 NULL bundle 拒绝：`CORE-400`，`reason=HAS_CHILDREN_NO_BUNDLE`（只有 PATCH 会触发：create 出的新票天然无子票；create 侧对应的是下一条 PARENT_NOT_REGISTRY）
   - 已绑 bundle 的票作 parent 的 create 拒绝：`CORE-400`，`reason=PARENT_NOT_REGISTRY`（沿用原语义，无旧名别名）
 - **并发（两组；终态一致，被拒的一方得到 typed 拒绝且不写库）**：
-  - PATCH bundle vs Claim：不另设仲裁，单写者事务串行化 + 各自的 CAS 保证终态一致。Claim 总是成功；PATCH 若排在 Claim 之前则成功（Claim 冻结的是新 bundle），若排在之后则被拒：通常为 `CORE-400 reason=IMMUTABLE`（已有认领），守卫写 0 行且复查找不到具体原因时为 `CORE-409 reason=RACE_LOST`。之后的任何 bundle PATCH 都被拒（已冻结）。
+  - PATCH bundle vs Claim：不另设仲裁，单写者事务串行化 + 各自的 CAS 保证终态一致。绑定或改名的 PATCH 不会让 Claim 失败（解绑 X→NULL 若排在前，Claim 按无 bundle 票照常被拒 NOT_CLAIMABLE）；PATCH 若排在 Claim 之前则成功（Claim 冻结的是新 bundle），若排在之后则被拒：通常为 `CORE-400 reason=IMMUTABLE`（已有认领），`CORE-409 reason=RACE_LOST` 为防御性兜底（单写者单连接下实际不会出现）。之后的任何 bundle PATCH 都被拒（已冻结）。
   - 绑定 bundle vs 新增子票：创建事务内父票 bundle 复查 + 绑定的守卫写复查子票；终态不同时出现「有子票 ∧ bundle 非空」。
 - **Claim 无 bundle 票**仍被拒：`CORE-409`，`reason=NOT_CLAIMABLE`（现行路径不变）。
 
@@ -41,7 +41,7 @@
 }
 ```
 
-  - `completion = "complete"` 当且仅当全部子票终态（wrapped / failed / cancelled）且 ≥1 wrapped；否则 `"in_progress"`。
+  - `completion = "complete"` 当且仅当全部子票终态（wrapped / failed / canceled）且 ≥1 wrapped；否则 `"in_progress"`。
   - 派生纯读：父票库内 `status` 恒为 `queued`，任何终态不写；新增子票自动回到 `"in_progress"`，无重开操作。
   - 存量违规行（bundle 非空且有子票）不迁移、不拒读，按字面数据展示；对称规则只约束新写入。
 

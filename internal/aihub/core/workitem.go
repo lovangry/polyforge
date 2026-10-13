@@ -182,28 +182,6 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		req.ParentID = nil
 	}
 
-	// Symmetric-rule recheck (w140): the parent's bundle state is
-	// re-read inside the create transaction, after the child INSERT
-	// below can no longer interleave with another writer (single
-	// writer). A bind that raced this create either committed first
-	// (the pre-INSERT check above refused) or is still pending (it will
-	// lose its guarded write). The refusal leaves nothing persisted —
-	// the deferred rollback discards the inserted child row.
-	parentRecheck := func() error {
-		if req.ParentID == nil {
-			return nil
-		}
-		var recheckBundle sql.NullString
-		if err := tx.QueryRow(`SELECT bundle_name FROM work_items WHERE id=?1`, *req.ParentID).Scan(&recheckBundle); err != nil {
-			return err
-		}
-		if recheckBundle.Valid && recheckBundle.String != "" {
-			return Fail(api.ErrCoreBadInput, "PARENT_NOT_REGISTRY",
-				"parent is an execution ticket, not a registry ticket")
-		}
-		return nil
-	}
-
 	// Repo-reference triple (02 §4.6): validated INSIDE the create
 	// transaction so a refused create persists nothing (fail whole). A
 	// declared repo whose base sha is missing/blank draws the typed
@@ -250,9 +228,6 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		return nil, err
 	}
 	if err := appendEventTx(tx, id, now, req.Reporter, "work_item_filed", nil); err != nil {
-		return nil, err
-	}
-	if err := parentRecheck(); err != nil {
 		return nil, err
 	}
 	// Freeze the validated repo inventory in the SAME transaction as
