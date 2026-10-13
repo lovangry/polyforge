@@ -428,10 +428,6 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
 		return
 	}
-	if ji.VerifyPending {
-		writeErr(w, api.ErrDaemonConflict, wi+" is verify_pending — the daemon is still retrying its session verify with aihub; retry shortly")
-		return
-	}
 	if ji.State == runtime.StateSealing || ji.State == runtime.StateRecovering {
 		writeErr(w, api.ErrDaemonConflict, "work item is "+string(ji.State)+"; a close is already in progress")
 		return
@@ -544,10 +540,6 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			SessionFingerprint: ji.SessionFingerprint,
 			AgentPID:           ji.AgentPID,
 			Origin:             ji.Origin,
-		}
-		if ji.VerifyPending {
-			// restart verify could not reach aihub: retried with backoff
-			sj.Status = "verify_pending"
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID

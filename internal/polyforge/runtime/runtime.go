@@ -261,11 +261,6 @@ type job struct {
 	// the same marker the hub does; false everywhere else (a graceful
 	// shutdown keeps it false — the attach-on-restart shape, M3).
 	cleanPause bool
-	// verifyPending marks a record whose restart SessionVerify could not
-	// reach aihub: it keeps its place (no agent yet) while the daemon
-	// retries the verify with backoff, then proceeds through restartOne.
-	// In-memory only — a daemon restart re-verifies everything anyway.
-	verifyPending bool
 	// endNote/endHead: the pending SessionEnd(blocked) verdict of an
 	// end_pending job (see StateEndPending).
 	endNote string

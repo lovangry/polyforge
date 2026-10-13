@@ -40,9 +40,11 @@ package runtime
 //	  relaunch" is exactly this).
 //	verify does not match + paused/clean_pause under another session →
 //	  drop the record: restart must NOT auto-resume it.
-//	aihub unreachable → keep the record (shown verify_pending) and retry
-//	  the verify in-process with backoff until aihub answers, then proceed
-//	  as above — never guess a verdict.
+//	aihub unreachable → park the work item blocked (the C6 posture): the
+//	  blocked reason names the unreachable-aihub restart and the
+//	  incomplete session verify, and the owner's `pf resume` takes the
+//	  ordinary blocked → resume path once the hub answers — never a
+//	  local verify-pending state, never a background retry.
 //
 // A mid-flight record whose capsule directory is missing, or whose project
 // fell out of the [workspace] mapping, is NOT a startup failure (v2-converge
@@ -97,6 +99,20 @@ type UnmappedMidflightError struct {
 
 func (e *UnmappedMidflightError) Error() string {
 	return fmt.Sprintf("work item %s: mid-flight project %q is not in the [workspace] mapping — the capsule is NOT relocated and the work item is not recoverable until its workspace is re-added to the mapping in the config, then `pf resume %s` (or restart the daemon) (`pf doctor` checks the mapping)", e.WI, e.Project, e.WI)
+}
+
+// SessionVerifyOutageError is the C6 restart posture: the restart-time
+// session verify could not reach aihub. The WI parks in the ORDINARY
+// blocked state (no local verify_pending state, no background retry) —
+// the reason names the outage literally, and the owner's `pf resume`
+// takes the ordinary blocked → resume path once the hub answers.
+type SessionVerifyOutageError struct {
+	WI  string
+	Err error
+}
+
+func (e *SessionVerifyOutageError) Error() string {
+	return fmt.Sprintf("work item %s: the restart found aihub unreachable — the session verify is incomplete (%v); the work item is parked blocked and `pf resume %s` re-claims it from its capsule chain once the hub answers", e.WI, e.Err, e.WI)
 }
 
 // requireMidflightCapsule enforces the no-silent-rebuild contract for a
@@ -170,33 +186,6 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		_ = r.restartOne(ctx, rec)
 	}
 	return r.persist()
-}
-
-// retryVerify is the background half of a failed restart verify
-// (verify_pending): re-run the whole restartOne reconciliation on the
-// end_pending backoff until aihub gives a verdict, so the WI proceeds
-// without waiting for the next daemon restart. One goroutine per WI.
-func (r *Runtime) retryVerify(j *job) {
-	r.goRetry("verify:"+j.wi, func() bool {
-		r.opMu.Lock()
-		defer r.opMu.Unlock()
-		if cur := r.jobOf(j.wi); cur != j {
-			return true // dropped or replaced meanwhile: nothing to verify
-		}
-		j.mu.Lock()
-		pending := j.verifyPending
-		j.mu.Unlock()
-		if !pending {
-			return true
-		}
-		if err := r.restartOne(context.Background(), j.record()); err != nil {
-			return false
-		}
-		if err := r.persist(); err != nil {
-			fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
-		}
-		return true
-	})
 }
 
 // restartRelease is the superseded-at-restart path: the WI is held by
@@ -384,23 +373,16 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 	}
 	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
 	if err != nil {
-		// aihub unreachable for this WI: keep the record and retry the
-		// verify in-process with backoff (like end_pending) until it
-		// yields a verdict — never guess one, never wait for the next
-		// daemon restart.
-		fmt.Fprintf(os.Stderr, "runtime: %s: session verify failed, record kept, retrying: %v\n", rec.WorkItemID, err)
-		if j := r.jobOf(rec.WorkItemID); j != nil {
-			j.mu.Lock()
-			j.verifyPending = true
-			j.mu.Unlock()
-			r.retryVerify(j)
-		}
-		return fmt.Errorf("runtime: %s: session verify failed: %w", rec.WorkItemID, err)
-	}
-	if j := r.jobOf(rec.WorkItemID); j != nil {
-		j.mu.Lock()
-		j.verifyPending = false
-		j.mu.Unlock()
+		// C6 (audit-subtraction pass B): a failed restart-time session
+		// verify (aihub unreachable) parks the WI in the ordinary blocked
+		// state — no local verify_pending state, no background retry. The
+		// blocked reason names the outage literally, so the owner can act
+		// directly: `pf resume` takes the ordinary blocked → resume path
+		// once the hub answers. With the hub unreachable the close itself
+		// lands as end_pending and retries (the durable lane).
+		fmt.Fprintf(os.Stderr, "runtime: %s: session verify failed at restart (aihub unreachable): %v\n", rec.WorkItemID, err)
+		r.blockUnrecoverable(ctx, rec, &SessionVerifyOutageError{WI: rec.WorkItemID, Err: err})
+		return nil
 	}
 	if v.Matches {
 		switch v.Status {
@@ -537,8 +519,9 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 
 // Restart-time block reason kinds — also the durable event kinds.
 const (
-	EventCapsuleMissing  = "capsule_missing"
-	EventProjectUnmapped = "project_unmapped"
+	EventCapsuleMissing      = "capsule_missing"
+	EventProjectUnmapped     = "project_unmapped"
+	EventSessionVerifyOutage = "session_verify_outage"
 )
 
 // blockUnrecoverable is the restart posture for ONE mid-flight record whose
@@ -562,11 +545,15 @@ func (r *Runtime) blockUnrecoverable(ctx context.Context, rec *jobRecord, cause 
 	var detail string
 	var miss *MissingCapsuleError
 	var unm *UnmappedMidflightError
+	var outage *SessionVerifyOutageError
 	switch {
 	case errors.As(cause, &unm):
 		kind = EventProjectUnmapped
 		body["project"] = unm.Project
 		detail = fmt.Sprintf("project %q is not in the daemon's [workspace] mapping — re-add it to the config, then `pf resume %s`", unm.Project, rec.WorkItemID)
+	case errors.As(cause, &outage):
+		kind = EventSessionVerifyOutage
+		detail = cause.Error()
 	case errors.As(cause, &miss):
 		body["path"] = miss.Dir
 		detail = fmt.Sprintf("capsule missing at %s — it is never rebuilt from the remote; `pf resume %s` re-claims the work item from its capsule chain", miss.Dir, rec.WorkItemID)
