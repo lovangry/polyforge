@@ -987,8 +987,8 @@ func (r *Runtime) prepareCapsule(j *job) error {
 	if o.RemoteURL == "" {
 		// A capsule whose origin cannot be resolved is never silently
 		// init'ed locally and restarted from step 1 (the audit's
-		// dead-code sweep: gitops.InitLocal's production-reachable path
-		// is gone; aihub always supplies the remote at claim). Loud and
+		// dead-code sweep: the local-init escape hatch's production-reachable
+		// path is gone; aihub always supplies the remote at claim). Loud and
 		// typed: the caller abandons the claim.
 		return &api.Error{Code: api.ErrDaemonCapsuleClone,
 			Detail: fmt.Sprintf("capsule clone failed: no remote URL is configured for %s — aihub always supplies one at claim; refusing a local init", j.wi)}

@@ -186,8 +186,7 @@ type jobRecord struct {
 
 // Origin kinds.
 const (
-	OriginChat = "chat" // interactive submit from a harness chat
-	OriginCLI  = "cli"  // interactive/batch submit without a chat
+	OriginChat = "chat" // interactive submit — a harness chat when ChatID is set, a chat-less manual submit when it is empty
 	OriginAuto = "auto" // auto-claim (pf ops auto on)
 )
 
@@ -313,7 +312,24 @@ func parseStamp(s string) time.Time {
 // restoredJob is jobFromRecord plus the runtime-owned wiring (the gitops
 // event sink) a bare record cannot carry.
 func (r *Runtime) restoredJob(rec *jobRecord) *job {
+	normalizeOrigin(rec)
 	j := jobFromRecord(rec)
 	j.git.EventSink = r.gitEventSink(rec.WorkItemID)
 	return j
+}
+
+// normalizeOrigin applies the decode default for a persisted origin: a
+// kind the current code does not recognize (a record written by an
+// older build) is read as a chat-less manual submit — kind chat, an
+// empty ChatID, the owner as recorded. The default is a plain
+// unknown-kind default (never a branch keyed on a historical kind).
+func normalizeOrigin(rec *jobRecord) {
+	if rec.Origin == nil {
+		return
+	}
+	switch rec.Origin.Kind {
+	case OriginChat, OriginAuto:
+	default:
+		rec.Origin = &Origin{Kind: OriginChat, Owner: rec.Origin.Owner}
+	}
 }

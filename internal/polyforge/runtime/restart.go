@@ -103,7 +103,7 @@ func (e *UnmappedMidflightError) Error() string {
 
 // SessionVerifyOutageError is the C6 restart posture: the restart-time
 // session verify could not reach aihub. The WI parks in the ORDINARY
-// blocked state (no local verify_pending state, no background retry) —
+// blocked state (no local verify-parking state, no background retry) —
 // the reason names the outage literally, and the owner's `pf resume`
 // takes the ordinary blocked → resume path once the hub answers.
 type SessionVerifyOutageError struct {
@@ -375,7 +375,7 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 	if err != nil {
 		// C6 (audit-subtraction pass B): a failed restart-time session
 		// verify (aihub unreachable) parks the WI in the ordinary blocked
-		// state — no local verify_pending state, no background retry. The
+		// state — no local verify-parking state, no background retry. The
 		// blocked reason names the outage literally, so the owner can act
 		// directly: `pf resume` takes the ordinary blocked → resume path
 		// once the hub answers. With the hub unreachable the close itself

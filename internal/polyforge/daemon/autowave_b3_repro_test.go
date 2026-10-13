@@ -125,8 +125,8 @@ func TestAutoOffClearsPendingAutoEntries(t *testing.T) {
 		switch e.Origin.Kind {
 		case runtime.OriginAuto:
 			auto++
-		case runtime.OriginCLI:
-			manual++
+		case runtime.OriginChat:
+			manual++ // the explicit submit is a chat origin (chat-less: empty ChatID)
 		}
 	}
 	if auto != 0 {
