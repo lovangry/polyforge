@@ -95,13 +95,19 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	if err != nil {
 		return nil, err
 	}
+	// One grouped derived-epic read (w140): every queue entry carries the
+	// additive derived block (parents show their child census).
+	derivedBlocks, err := m.db.derivedBatch(ids)
+	if err != nil {
+		return nil, err
+	}
 	for i := range cands {
 		wi, err := m.load(ids[i])
 		if err != nil {
 			return nil, err
 		}
 		cands[i].wi = wi
-		cands[i].view = &WIView{WorkItem: *wi, SessionPublic: sessionBlocks[ids[i]]}
+		cands[i].view = &WIView{WorkItem: *wi, SessionPublic: sessionBlocks[ids[i]], Derived: derivedBlocks[ids[i]]}
 	}
 	sortBy := func(list *[]WIView) {
 		// stable priority→created_at ordering
