@@ -228,17 +228,17 @@ type Daemon struct {
 	shutMu      sync.Mutex
 	shutdownErr error
 
-	// drainDegraded is the drain degraded-signal episode flag: set when
-	// the first drain_degraded event of a silent→degraded transition has
-	// been emitted, cleared on the next successful wave fetch. Only the
-	// drain ticker goroutine touches it (fetchAutoWave), so it carries
-	// no lock.
-	drainDegraded bool
+	// queueFetchDenied is the denial episode flag: set when the first
+	// queue_fetch_denied event of a healthy→denied transition has been
+	// emitted, cleared on the next successful wave fetch. Only the
+	// auto-pull ticker goroutine touches it (fetchAutoWave), so it
+	// carries no lock.
+	queueFetchDenied bool
 	// yamlRefused is project → the last workspace-yaml refusal logged for
 	// it: auto-pull skips a project whose .polyforge.yaml is invalid
 	// (nothing is claimed, the WIs stay queued for other machines) and
 	// logs a given refusal once, not every tick. Same single-goroutine
-	// ownership as drainDegraded.
+	// ownership as queueFetchDenied.
 	yamlRefused map[string]string
 
 	// sup hands out the per-WI supervision links shared by the driver
@@ -916,8 +916,8 @@ func (d *Daemon) dispatch() {
 // free-slot budget is spent per enqueued entry (audit B3a: one wave
 // enqueues at most the CURRENT free-slot count; the rest of the ready
 // queue stays on aihub for the next wave). Authorization-class denials
-// raise the degraded signal — a typed drain_degraded event in the
-// observe lane's durable log, once per silent→degraded episode (the
+// raise the denial signal — a typed queue_fetch_denied event in the
+// observe lane's durable log, once per healthy→denied episode (the
 // flag clears on the next successful fetch); transport-class losses
 // stay silent idle.
 func (d *Daemon) fetchAutoWave() {
@@ -930,11 +930,11 @@ func (d *Daemon) fetchAutoWave() {
 	}
 	// polyforge#113: no daemon-level project scope exists — the drain
 	// wave iterates ALL mapped projects. A per-project authorization-class
-	// denial raises the degraded signal naming THAT project; healthy
+	// denial raises the denial signal naming THAT project; healthy
 	// projects still enqueue (partial coverage beats none, and the
-	// degraded episode is visible).
+	// denial episode is visible).
 	var items []api.WorkItem
-	degraded := false
+	denied := false
 	for _, project := range d.cfg.Mapping.Projects() {
 		if _, lerr := d.rt.LoadWorkspace(project); lerr != nil {
 			if d.yamlRefused == nil {
@@ -950,11 +950,11 @@ func (d *Daemon) fetchAutoWave() {
 		pis, err := d.hub.Queue(project)
 		if err != nil {
 			if authDenied(err) {
-				degraded = true
-				fmt.Fprintf(os.Stderr, "daemon: drain fetch degraded: ready queue of project %q denied (%v)\n", project, err)
-				if !d.drainDegraded && d.obs != nil {
-					d.drainDegraded = true
-					_ = d.obs.Events().Append("", observe.EvDrainDegraded, map[string]any{
+				denied = true
+				fmt.Fprintf(os.Stderr, "daemon: auto-pull fetch denied: ready queue of project %q refused authorization (%v)\n", project, err)
+				if !d.queueFetchDenied && d.obs != nil {
+					d.queueFetchDenied = true
+					_ = d.obs.Events().Append("", observe.EvQueueFetchDenied, map[string]any{
 						"project": project,
 						"class":   "authorization",
 						"error":   err.Error(),
@@ -965,8 +965,8 @@ func (d *Daemon) fetchAutoWave() {
 		}
 		items = append(items, pis...)
 	}
-	if !degraded {
-		d.drainDegraded = false // episode cleared: this fetch fully succeeded
+	if !denied {
+		d.queueFetchDenied = false // episode cleared: this fetch fully succeeded
 	}
 	for _, it := range items {
 		if budget == 0 {
