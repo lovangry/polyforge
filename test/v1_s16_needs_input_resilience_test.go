@@ -258,7 +258,7 @@ func TestV1S16DuplicateDropSameIDIsIdempotent(t *testing.T) {
 	attempts := x.Steps["grill"].Attempts
 	accepted := 0
 	for _, a := range attempts {
-		if a["accepted_result_id"] != nil {
+		if a["cause"] == "accepted" {
 			accepted++
 		}
 	}

@@ -781,42 +781,34 @@ type StepRun interface {
 
 // validateResultStrict is the accept-path check before the step_result
 // transition. It builds a ResultSpec from the driver's current state and
-// delegates to result.ValidateStepResult (the R14 staging gates: shape,
-// binding/fencing, idempotency, output schema, handoff duty, artifact
-// verification under os.OpenRoot jail). A failure is an infrastructure-class
-// rejection — Run surfaces it and the recovery lane owns re-derivation.
+// delegates to ValidateStepResult (the staging gates: shape, binding and
+// fencing, the needs_input question pair, the verdict binding, the
+// human-gate guarantee, the output schema and the evidence duty). A
+// failure is an infrastructure-class rejection — Run surfaces it and the
+// recovery lane owns re-derivation.
 func (d *Driver) validateResultStrict(res *StepResult, stepID string, n int64) error {
 	spec := d.buildResultSpec(stepID, n)
 	return ValidateStepResult(res, spec)
 }
 
 // buildResultSpec assembles the read-only validation snapshot from the
-// driver's current durable state (the extended workflow's declared outputs
-// and handoff duty, plus the accepted result ids already committed).
+// driver's current durable state (the workflow's declared outputs, gate
+// policy, human-answer duty and the answers of the current attempt chain).
 func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	spec := ResultSpec{
-		WIID:        d.wi.ID,
-		StepID:      stepID,
-		SpawnN:      n,
-		AcceptedIDs: make(map[string]bool),
-		CapsuleRoot: d.cfg.WI.CapsuleDir,
+		WIID:   d.wi.ID,
+		StepID: stepID,
+		SpawnN: n,
 	}
-	// Accepted IDs: harvest from the step's committed attempt records.
 	d.mu.Lock()
 	if st, ok := d.exec.Steps[stepID]; ok {
-		for _, at := range st.Attempts {
-			if at.AcceptedResultID != "" {
-				spec.AcceptedIDs[at.AcceptedResultID] = true
-			}
-		}
 		spec.HumanAnswers = currentChainAnswers(st)
 	}
 	d.mu.Unlock()
-	// Declared outputs, handoff duty and gate-ness (gate-ness feeds the
+	// Declared outputs, gate-ness and duties (gate-ness feeds the
 	// verdict binding — the #106 lesson).
 	if ss := d.workflow.step(stepID); ss != nil {
 		spec.Outputs = ss.Outputs
-		spec.HandoffRequired = ss.Handoff
 		spec.Gate = ss.Gate
 		spec.RequiresHumanAnswer = ss.RequiresHumanAnswer
 		spec.RequireCommandEvidence = ss.RequiresCommandEvidence
@@ -854,7 +846,7 @@ func (d *Driver) verdictFor(stepID string, res *StepResult) *GateVerdict {
 		VerdictText: strings.TrimSpace(string(res.Output)),
 	}
 	if v.VerdictText == "" {
-		v.VerdictText = fmt.Sprintf("gate %s FAIL (spawn %d, result %s)", stepID, res.SpawnN, res.ResultID)
+		v.VerdictText = fmt.Sprintf("gate %s FAIL (spawn %d)", stepID, res.SpawnN)
 	}
 	if spec := d.workflow.step(stepID); spec != nil && spec.OnFail != nil {
 		v.Action = spec.OnFail.Action

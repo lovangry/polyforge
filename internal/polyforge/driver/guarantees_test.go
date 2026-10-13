@@ -7,7 +7,6 @@ package driver
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,7 +22,7 @@ func TestNeedsInputEnvelopeValidation(t *testing.T) {
 	mk := func() *fixture {
 		f := newFixture(t, false)
 		f.res.Outcome = OutcomeNeedsInput
-		f.res.Artifacts, f.res.Output = nil, nil
+		f.res.Output = nil
 		return f
 	}
 	f := mk()
@@ -63,7 +62,7 @@ func TestHumanGateGuarantee(t *testing.T) {
 	}
 	// needs_input is still allowed on a human-gate step.
 	q := *f.res
-	q.Outcome, q.QuestionID, q.Question, q.Artifacts, q.Output = OutcomeNeedsInput, "q1", "ok?", nil, nil
+	q.Outcome, q.QuestionID, q.Question, q.Output = OutcomeNeedsInput, "q1", "ok?", nil
 	if err := ValidateStepResult(&q, f.spec); err != nil {
 		t.Fatalf("needs_input must stay legal on a human-gate step: %v", err)
 	}
@@ -168,38 +167,6 @@ func TestShippedBundlesDeclareHumanGates(t *testing.T) {
 	}
 }
 
-func TestTolerantReparseKeepsObjectEvidence(t *testing.T) {
-	dir := t.TempDir()
-	drop := filepath.Join(dir, "1.json")
-	raw := `{"protocol_version":1,"result_id":"r1","outcome":"completed","output":{},
-	 "command_evidence":["ran go test", {"argv":["go","test"],"exit_code":0,"duration_ms":42}]}`
-	if err := os.WriteFile(drop, []byte(raw), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	r := &stepRun{dropPath: drop, sp: StepSpawn{StepID: "verification", SpawnN: 1}, wiID: "wi"}
-	res, err := r.collect()
-	if err != nil || res == nil {
-		t.Fatalf("collect: %v %v", res, err)
-	}
-	if len(res.CommandEvidence) != 1 || res.CommandEvidence[0].DurationMs != 42 {
-		t.Fatalf("object evidence entry must survive the tolerant re-parse: %+v", res.CommandEvidence)
-	}
-	if err := checkCommandEvidence(res.CommandEvidence); err != nil {
-		t.Fatal(err)
-	}
-	// all-strings: dropped, and the gate then rejects with the object hint.
-	if err := os.WriteFile(drop, []byte(`{"protocol_version":1,"result_id":"r1","outcome":"completed","output":{},"command_evidence":["x"]}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	res, err = r.collect()
-	if err != nil || len(res.CommandEvidence) != 0 {
-		t.Fatalf("string-only evidence must be dropped: %+v %v", res, err)
-	}
-	if err := checkCommandEvidence(res.CommandEvidence); err == nil || !strings.Contains(err.Error(), "OBJECT") {
-		t.Fatalf("got %v", err)
-	}
-}
-
 func TestDeliveryContractStatesGuaranteesOnlyWhenTheyApply(t *testing.T) {
 	const evLine = "Command evidence: this step requires `command_evidence`"
 	const humanLine = "this step requires a human answer before completion: return `needs_input` first; a `completed` envelope without an answer in this round is rejected"
@@ -219,25 +186,5 @@ func TestDeliveryContractStatesGuaranteesOnlyWhenTheyApply(t *testing.T) {
 	hu := deliveryContract(promptParts{WIID: "wi", StepID: "g", SpawnN: 1, RequiresHumanAnswer: true})
 	if !strings.Contains(hu, humanLine) || strings.Contains(hu, evLine) {
 		t.Fatalf("human-gate step must state only the human-answer rule:\n%s", hu)
-	}
-}
-
-func TestTolerantReparseNamesBadStartedAt(t *testing.T) {
-	dir := t.TempDir()
-	drop := filepath.Join(dir, "1.json")
-	raw := `{"protocol_version":1,"result_id":"r1","outcome":"completed","output":{},
-	 "command_evidence":[{"argv":["go","test"],"exit_code":0,"duration_ms":42,"started_at":"yesterday"}]}`
-	if err := os.WriteFile(drop, []byte(raw), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	r := &stepRun{dropPath: drop, sp: StepSpawn{StepID: "verification", SpawnN: 1}, wiID: "wi"}
-	res, err := r.collect()
-	if err != nil || res == nil {
-		t.Fatalf("collect: %v %v", res, err)
-	}
-	spec := ResultSpec{WIID: "wi", StepID: "verification", SpawnN: 1, RequireCommandEvidence: true}
-	err = ValidateStepResult(res, spec)
-	if err == nil || !strings.Contains(err.Error(), "started_at must be RFC3339") || !strings.Contains(err.Error(), "command_evidence[0] could not be decoded") {
-		t.Fatalf("rejection must name the real reason, got %v", err)
 	}
 }

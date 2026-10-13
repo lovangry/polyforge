@@ -128,27 +128,25 @@ func spawnEnv(t *testing.T) (*StepSpawnAdapter, *captureSpawner, string) {
 	return ad, sp, capDir
 }
 
-// grillDone lays out the post-grill capsule: the handoff artifact, the
-// declared fix inputs and grill's archived envelope carrying the
-// handoff_ref.
+// grillDone lays out the post-grill capsule: the declared fix inputs,
+// the handoff FILE at the convention path the next inherit step reads
+// (artifacts/handoff-grill.md — polyforge#147: path convention, no
+// digest), and grill's archived envelope (minimal contract).
 func grillDone(t *testing.T, capDir string) {
 	t.Helper()
 	writeCapsuleFile(t, capDir, "artifacts/fix-memo.md", "the micro-spec body")
 	writeCapsuleFile(t, capDir, "artifacts/grill-qa.md", "the q/a log")
+	writeCapsuleFile(t, capDir, "artifacts/handoff-grill.md", "handoff from grill: the micro-spec is at artifacts/fix-memo.md")
 	writeArchivedResult(t, capDir, "grill", 1, &StepResult{
-		ProtocolVersion: 1,
-		ResultID:        "319584c8-10e7-5703-8b0f-4af0a03f8657",
-		WIID:            "wi_sp",
-		StepID:          "grill",
-		SpawnN:          1,
-		Outcome:         OutcomeCompleted,
-		Output:          json.RawMessage(`{}`),
-		HandoffRef:      &ArtifactRef{Path: "artifacts/fix-memo.md", SHA256: hashOfFile(t, capDir, "artifacts/fix-memo.md"), Bytes: 19},
+		WIID:    "wi_sp",
+		StepID:  "grill",
+		SpawnN:  1,
+		Outcome: OutcomeCompleted,
+		Output:  json.RawMessage(`{}`),
 	})
-	// the acceptance gate: the envelope counts only once execution.json
-	// records the step done with that result_id
+	// the acceptance gate: execution.json records the step done
 	writeCapsuleFile(t, capDir, "runtime-state/execution.json",
-		`{"steps":{"grill":{"status":"done","attempts":[{"accepted_result_id":"319584c8-10e7-5703-8b0f-4af0a03f8657"}]}}}`)
+		`{"steps":{"grill":{"status":"done"}}}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -190,13 +188,13 @@ func TestSpawnStepInheritPromptAssembly(t *testing.T) {
 	for _, want := range []string{
 		"fix: implement the micro-spec", // step definition body
 		"Handoff from step \"grill\"",   // handoff section
-		"artifacts/fix-memo.md",         // handoff path
-		"the micro-spec body",           // handoff content
+		"artifacts/handoff-grill.md",    // the handoff file (path convention)
+		"handoff from grill",            // handoff content
 		"the q/a log",                   // declared input content
 		"FAIL: tests red",               // rewind verdict
 		"q_1", "yes, vendored",          // Q&A history
 		"runtime-state/pending-results/2.json", // delivery path
-		"handoff_ref",                          // fix declares handoff
+		"artifacts/handoff-fix.md",             // fix declares handoff: the convention path
 		"INHERIT",                              // context note
 	} {
 		if !strings.Contains(prompt, want) {
@@ -425,14 +423,11 @@ func TestSpawnStepGatePromptStatesVerdictBinding(t *testing.T) {
 
 func validEnvelope(wi, step string, n int64) []byte {
 	res := &StepResult{
-		ProtocolVersion: 1,
-		ResultID:        "162bc0dd-9635-5323-b170-99044b484a69",
-		WIID:            wi,
-		StepID:          step,
-		SpawnN:          n,
-		Outcome:         OutcomeCompleted,
-		Output:          json.RawMessage(`{"summary":"done"}`),
-		Artifacts:       []ArtifactRef{},
+		WIID:    wi,
+		StepID:  step,
+		SpawnN:  n,
+		Outcome: OutcomeCompleted,
+		Output:  json.RawMessage(`{"summary":"done"}`),
 	}
 	blob, _ := json.MarshalIndent(res, "", "  ")
 	return blob
@@ -464,8 +459,8 @@ func TestStepRunWaitCollectsAndArchivesEnvelope(t *testing.T) {
 	if err := json.Unmarshal(raw, &archived); err != nil {
 		t.Fatalf("archived envelope unparsable: %v", err)
 	}
-	if archived.ResultID != res.ResultID {
-		t.Fatalf("archived result_id %q != %q", archived.ResultID, res.ResultID)
+	if archived.Outcome != OutcomeCompleted || archived.StepID != "verification" {
+		t.Fatalf("archived envelope lost its binding: %+v", archived)
 	}
 	// the process was torn down after collection
 	_, h := sp.last()
@@ -547,7 +542,7 @@ func TestStepRunWaitTornWriteHeals(t *testing.T) {
 	}
 	drop := pendingResultPath(capDir, 8)
 	// a write in flight: torn JSON first, the complete envelope after
-	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/pending-results/8.json", `{"protocol_version":1`)
+	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/pending-results/8.json", `{"wi_id":"wi_sp"`)
 	go func() {
 		time.Sleep(8 * time.Millisecond)
 		if err := os.WriteFile(drop, validEnvelope("wi_sp", "verification", 8), 0o644); err != nil {
@@ -558,7 +553,7 @@ func TestStepRunWaitTornWriteHeals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	if res.ResultID != "162bc0dd-9635-5323-b170-99044b484a69" {
+	if res.Outcome != OutcomeCompleted || res.StepID != "verification" {
 		t.Fatalf("healed envelope: %+v", res)
 	}
 }

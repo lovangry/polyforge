@@ -60,9 +60,6 @@ const (
 	CauseInfraFailure   = "infra_failure"
 )
 
-// protocolVersion is the R13 result-envelope version this driver speaks.
-const protocolVersion = 1
-
 // ErrStaleFence marks a transition refused by the spawn fence: the
 // request names a derivation that is no longer current (B2 carried into
 // the driver — only the current spawn may mutate execution.json).
@@ -384,17 +381,11 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 	if res.StepID != "" && res.StepID != req.StepID {
 		return fmt.Errorf("driver: result envelope names step %q, request says %q", res.StepID, req.StepID)
 	}
-	if res.ResultID == "" {
-		return fmt.Errorf("driver: result envelope without result_id (idempotency key)")
-	}
 	if res.SpawnN != req.SpawnN {
 		return fmt.Errorf("%w: result envelope spawn %d, request spawn %d", ErrStaleFence, res.SpawnN, req.SpawnN)
 	}
 	if res.WIID != "" && res.WIID != d.wi.ID {
 		return fmt.Errorf("driver: result envelope names work item %q, this driver drives %q", res.WIID, d.wi.ID)
-	}
-	if res.ProtocolVersion != protocolVersion {
-		return fmt.Errorf("driver: result envelope protocol_version %d, this driver speaks %d", res.ProtocolVersion, protocolVersion)
 	}
 	switch res.Outcome {
 	case OutcomeCompleted, OutcomeGateFailed, OutcomeNeedsInput, OutcomeIncomplete:
@@ -439,13 +430,12 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 		}
 		st.Status = capsule.StepDone
 		st.Output = out
-		// R14 commit point: persist the accepted result_id for restart-safe
-		// idempotency (duplicate delivery returns ErrDuplicateResult).
+		// Commit point: archive the accepted attempt (the step's attempt
+		// ledger; the candidate pointer recomputes over it).
 		st.Attempts = append(st.Attempts, capsule.Attempt{
-			Cause:            "accepted",
-			AttemptSeq:       len(st.Attempts) + 1,
-			StartedAt:        time.Now().UTC().Format(time.RFC3339),
-			AcceptedResultID: res.ResultID,
+			Cause:      "accepted",
+			AttemptSeq: len(st.Attempts) + 1,
+			StartedAt:  time.Now().UTC().Format(time.RFC3339),
 		})
 	case OutcomeGateFailed:
 		out, err := parseOutput(res.Output)
@@ -833,7 +823,6 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 			return
 		}
 		body["step"] = req.StepID
-		body["result_id"] = req.Result.ResultID
 		switch req.Result.Outcome {
 		case OutcomeCompleted:
 			kind = "step_done"

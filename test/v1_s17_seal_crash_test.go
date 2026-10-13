@@ -48,7 +48,7 @@ func TestV1S17SealCrashResume(t *testing.T) {
 	x := readExecution(t, capDir)
 	accepted := 0
 	for _, a := range x.Steps["fix"].Attempts {
-		if a["accepted_result_id"] != nil {
+		if a["cause"] == "accepted" {
 			accepted++
 		}
 	}

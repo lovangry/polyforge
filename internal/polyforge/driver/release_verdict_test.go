@@ -21,13 +21,11 @@ import (
 // bound to the given step.
 func releaseRes(step string, outcome Outcome, output string) *StepResult {
 	return &StepResult{
-		ProtocolVersion: 1,
-		ResultID:        "22222222-2222-4222-8222-222222222222",
-		WIID:            "wi_run",
-		StepID:          step,
-		SpawnN:          1,
-		Outcome:         outcome,
-		Output:          json.RawMessage(output),
+		WIID:    "wi_run",
+		StepID:  step,
+		SpawnN:  1,
+		Outcome: outcome,
+		Output:  json.RawMessage(output),
 	}
 }
 

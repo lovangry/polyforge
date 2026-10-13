@@ -21,19 +21,17 @@ package driver
 //     point / cgroup enrollment stay in their one place
 //     (runtime/spawn.go).
 //
-//   - RESULT COLLECTION. The step process delivers its R13 envelope by
+//   - RESULT COLLECTION. The step process delivers its envelope by
 //     writing it to runtime-state/pending-results/<spawn_n>.json (the
 //     delivery contract in the prompt states the path and the shape).
-//     The run collects it, stamps it into the R14 staging location
-//     artifacts/steps/<step>/s<spawn_n>/result.json — durably
-//     discoverable: the NEXT inherit step's handoff is read from
-//     exactly there — consumes the drop (single-shot collection) and
-//     tears the process down. A crash between the envelope write and
-//     collection loses nothing durable: the drop path is keyed by the
-//     spawn ordinal, every re-dispatch takes a fresh ordinal (B2 — the
-//     driver-path relaunches advance the counter too), and a collected
-//     drop is removed, so a stale drop file is never mistaken for a
-//     live derivation's result.
+//     The run collects it, stamps it into the staging location
+//     artifacts/steps/<step>/s<spawn_n>/result.json, consumes the drop
+//     (single-shot collection) and tears the process down. A crash
+//     between the envelope write and collection loses nothing durable:
+//     the drop path is keyed by the spawn ordinal, every re-dispatch
+//     takes a fresh ordinal (B2 — the driver-path relaunches advance
+//     the counter too), and a collected drop is removed, so a stale
+//     drop file is never mistaken for a live derivation's result.
 
 import (
 	"context"
@@ -415,11 +413,15 @@ func assembleStepPrompt(p promptParts) string {
 }
 
 // deliveryContract states the envelope delivery path and shape: the
-// single channel the driver reads a result from. For a gate step it
-// also states the verdict binding (the #106 lesson): the output's
-// top-level fail verdict and the envelope outcome must agree — a fail
-// verdict requires gate_failed, and the driver re-binds a completed
-// envelope carrying one fail-closed.
+// single channel the driver reads a result from. The MINIMAL CONTRACT
+// (polyforge#147): the envelope is the outcome + output pair (needs_input
+// adds the question pair) plus the dispatch identity — no protocol
+// version stamp, no envelope id, no artifact manifest, no handoff
+// digest reference; downstream and handoff readers work by path
+// convention. For a gate step it also states the verdict binding (the
+// #106 lesson): the output's top-level fail verdict and the envelope
+// outcome must agree — a fail verdict requires gate_failed, and the
+// driver re-binds a completed envelope carrying one fail-closed.
 func deliveryContract(p promptParts) string {
 	rel := capsule.DirRuntimeState + "/" + dirPendingResults + "/" + strconv.FormatInt(p.SpawnN, 10) + ".json"
 	var b strings.Builder
@@ -428,20 +430,17 @@ func deliveryContract(p promptParts) string {
 		"to `%s` (capsule-relative; your working directory IS the capsule root; create the directory if needed), "+
 		"then end your turn. The execution driver collects the envelope from that path; nothing else you print is read as a result.\n\n", rel)
 	fmt.Fprintf(&b, "```json\n{\n"+
-		"  \"protocol_version\": %d,\n"+
-		"  \"result_id\": \"<fresh UUID>\",\n"+
 		"  \"wi_id\": %q,\n"+
 		"  \"step_id\": %q,\n"+
 		"  \"spawn_n\": %d,\n"+
 		"  \"outcome\": \"completed\" | \"gate_failed\" | \"needs_input\" | \"incomplete\",\n"+
 		"  \"output\": { },\n"+
-		"  \"artifacts\": [ {\"path\": \"<capsule-relative>\", \"sha256\": \"<sha256 hex>\", \"bytes\": 0} ],\n"+
 		"  \"command_evidence\": [],\n"+
 		"  \"submitted_at\": \"<RFC3339>\"\n"+
-		"}\n```\n\n", ResultProtocolVersion, p.WIID, p.StepID, p.SpawnN)
-	b.WriteString("Rules: `output` is a JSON object; `artifacts` must list every file this step produced that downstream steps or the owner consume, with sha256/bytes matching the bytes on disk")
+		"}\n```\n\n", p.WIID, p.StepID, p.SpawnN)
+	b.WriteString("Rules: `output` is a JSON object; every file this step produced that downstream steps or the owner consume is written under `artifacts/` and named by its path in the step's own instructions — the driver and downstream readers work by path convention, never by manifest")
 	if p.HandoffDue {
-		b.WriteString("; this step DECLARES handoff, so a completed result must also carry `handoff_ref` — the same {path, sha256, bytes} shape — naming the artifact the next inherit step continues from")
+		b.WriteString("; this step DECLARES handoff, so write the handoff file at `artifacts/handoff-" + p.StepID + ".md` — the next inherit step reads it by that path convention")
 	}
 	b.WriteString("; a `needs_input` result carries `question_id` and `question` instead. End your turn once the file is written.\n")
 	if p.RequireCommandEvidence {
@@ -508,13 +507,15 @@ func readCapsuleFile(root, rel string) ([]byte, error) {
 // Handoff resolution.
 
 // resolveHandoff finds the handoff an inherit step continues from: the
-// NEAREST earlier step declaring handoff whose newest archived result
-// envelope completed with a handoff_ref — its artifact content is the
-// injection. No earlier handoff-declaring step at all answers (nil,
-// nil) (a first step may legitimately inherit nothing); a handoff step
-// without any archived envelope is an infrastructure inconsistency and
-// fails loud (the driver would not have advanced past an un-done
-// producer, so the envelope cannot be honestly missing).
+// NEAREST earlier step declaring handoff whose execution.json record is
+// done — its handoff artifact is read from the CONVENTION PATH
+// artifacts/handoff-<step>.md (polyforge#147: path convention, no
+// manifest, no digest verification). No earlier handoff-declaring step
+// at all answers (nil, nil) (a first step may legitimately inherit
+// nothing); a done producer whose convention-path file is unreadable is
+// an infrastructure inconsistency and fails loud (the driver would not
+// have advanced past an un-done producer, and the delivery contract
+// tells the step to write the file exactly there).
 func (a *StepSpawnAdapter) resolveHandoff(stepID string) (*handoffSection, error) {
 	idx := -1
 	for i := range a.Workflow.Steps {
@@ -531,114 +532,49 @@ func (a *StepSpawnAdapter) resolveHandoff(stepID string) (*handoffSection, error
 		if !prod.Handoff {
 			continue
 		}
-		res, err := a.newestAcceptedResult(prod.ID)
+		done, err := a.producerDone(prod.ID)
 		if err != nil {
 			return nil, err
 		}
-		if res == nil {
-			return nil, fmt.Errorf("driver: step %q declares handoff but has no ACCEPTED result (execution.json status=done + AcceptedResultID), needed by inherit step %q",
+		if !done {
+			return nil, fmt.Errorf("driver: step %q declares handoff but is not done (execution.json), needed by inherit step %q",
 				prod.ID, stepID)
 		}
-		if res.Outcome != OutcomeCompleted || res.HandoffRef == nil {
-			continue // a superseded cycle's envelope: keep looking upstream
-		}
-		// Verify the handoff artifact hash before injection (review fix 7).
-		if err := VerifyArtifact(a.WI.CapsuleDir, *res.HandoffRef); err != nil {
-			return nil, fmt.Errorf("driver: handoff artifact of step %q failed verification: %w", prod.ID, err)
-		}
-		content, err := readCapsuleFile(a.WI.CapsuleDir, res.HandoffRef.Path)
+		rel := capsule.DirArtifacts + "/handoff-" + prod.ID + ".md"
+		content, err := readCapsuleFile(a.WI.CapsuleDir, rel)
 		if err != nil {
-			return nil, fmt.Errorf("driver: handoff artifact of step %q unreadable: %w", prod.ID, err)
+			return nil, fmt.Errorf("driver: handoff artifact of step %q unreadable at %s (path convention): %w", prod.ID, rel, err)
 		}
-		return &handoffSection{FromStep: prod.ID, Path: res.HandoffRef.Path, Content: content}, nil
+		return &handoffSection{FromStep: prod.ID, Path: rel, Content: content}, nil
 	}
 	return nil, nil
 }
 
-// newestAcceptedResult resolves the latest ACCEPTED result envelope for
-// a step: it reads execution.json to check the step's status is done and
-// finds the AcceptedResultID, then loads that exact archived envelope.
-// Unaccepted/staged envelopes are NEVER returned (review fix 7).
-func (a *StepSpawnAdapter) newestAcceptedResult(stepID string) (*StepResult, error) {
+// producerDone reads execution.json and answers whether the step's
+// record is done. No execution.json (a fresh capsule) or an absent
+// record answers false.
+func (a *StepSpawnAdapter) producerDone(stepID string) (bool, error) {
 	execPath := filepath.Join(a.WI.CapsuleDir, "runtime-state", "execution.json")
 	data, err := os.ReadFile(execPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil // no execution.json: nothing is accepted
+			return false, nil // no execution.json: nothing is done
 		}
-		return nil, fmt.Errorf("driver: read execution.json for accepted-result check: %w", err)
+		return false, fmt.Errorf("driver: read execution.json for handoff-producer check: %w", err)
 	}
 	var exec struct {
 		Steps map[string]struct {
-			Status   string `json:"status"`
-			Attempts []struct {
-				AcceptedResultID string `json:"accepted_result_id"`
-			} `json:"attempts"`
+			Status string `json:"status"`
 		} `json:"steps"`
 	}
 	if err := json.Unmarshal(data, &exec); err != nil {
-		return nil, fmt.Errorf("driver: parse execution.json: %w", err)
+		return false, fmt.Errorf("driver: parse execution.json: %w", err)
 	}
 	st, ok := exec.Steps[stepID]
-	if !ok || st.Status != "done" {
-		return nil, nil // not accepted
+	if !ok {
+		return false, nil
 	}
-	// Find the accepted result_id.
-	acceptedID := ""
-	for i := len(st.Attempts) - 1; i >= 0; i-- {
-		if st.Attempts[i].AcceptedResultID != "" {
-			acceptedID = st.Attempts[i].AcceptedResultID
-			break
-		}
-	}
-	if acceptedID == "" {
-		return nil, nil // done but no accepted id (no accepted attempt recorded)
-	}
-	// Load the archived envelope with that exact result_id.
-	res, err := newestArchivedResult(a.WI.CapsuleDir, stepID)
-	if err != nil {
-		return nil, err
-	}
-	if res == nil || res.ResultID != acceptedID {
-		return nil, nil // archived envelope doesn't match the accepted id
-	}
-	return res, nil
-}
-
-// newestArchivedResult reads the highest-ordinal archived envelope of
-// one step (artifacts/steps/<step>/s<N>/result.json); nil when none is
-// archived yet.
-func newestArchivedResult(capsuleRoot, stepID string) (*StepResult, error) {
-	dir := filepath.Join(capsuleRoot, capsule.DirArtifacts, "steps", stepID)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	bestN := int64(-1)
-	best := ""
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if n, ok := parseSpawnToken(e.Name()); ok && n > bestN {
-			bestN, best = n, e.Name()
-		}
-	}
-	if bestN < 0 {
-		return nil, nil
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, best, "result.json"))
-	if err != nil {
-		return nil, err
-	}
-	var res StepResult
-	if err := json.Unmarshal(raw, &res); err != nil {
-		return nil, fmt.Errorf("driver: archived result envelope of step %q (token %s) torn: %w", stepID, best, err)
-	}
-	return &res, nil
+	return st.Status == "done", nil
 }
 
 // parseSpawnToken decodes one archive token directory name ("s<N>",
@@ -854,8 +790,8 @@ func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
 		}
 		res, defect := r.collect()
 		if res != nil {
-			fmt.Fprintf(os.Stderr, "driver: stepRun.Wait COLLECTED: step=%s spawn=%d result_id=%s\n",
-				r.sp.StepID, r.sp.SpawnN, res.ResultID)
+			fmt.Fprintf(os.Stderr, "driver: stepRun.Wait COLLECTED: step=%s spawn=%d\n",
+				r.sp.StepID, r.sp.SpawnN)
 		} else if defect != nil && tick%30 == 1 {
 			fmt.Fprintf(os.Stderr, "driver: stepRun.Wait defect: step=%s spawn=%d err=%v\n",
 				r.sp.StepID, r.sp.SpawnN, defect)
@@ -919,66 +855,12 @@ func (r *stepRun) collect() (*StepResult, error) {
 	}
 	var res StepResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		// Tolerant re-parse: step agents persistently write command_evidence
-		// as a string list instead of the object array. Re-parse with a
-		// string-tolerant shadow and salvage the envelope (the evidence
-		// descriptions become log notes, not machine-parsed objects).
-		var shadow struct {
-			CommandEvidence json.RawMessage `json:"command_evidence"`
-		}
-		if json.Unmarshal(raw, &shadow) == nil {
-			// Zero out the malformed field and re-parse the rest.
-			var m map[string]interface{}
-			var dropped []string
-			if json.Unmarshal(raw, &m) == nil {
-				// Keep the well-formed object entries (a mixed or partly
-				// string-typed list must not drop real evidence before the
-				// V4 gate looks at it); string entries are discarded.
-				delete(m, "command_evidence")
-				var elems []json.RawMessage
-				if json.Unmarshal(shadow.CommandEvidence, &elems) == nil {
-					kept := []json.RawMessage{}
-					for i, el := range elems {
-						var ce CommandEvidence
-						t := strings.TrimSpace(string(el))
-						switch {
-						case !strings.HasPrefix(t, "{"):
-							dropped = append(dropped, fmt.Sprintf("command_evidence[%d] is not an OBJECT", i))
-						default:
-							if uerr := json.Unmarshal(el, &ce); uerr != nil {
-								dropped = append(dropped, fmt.Sprintf("command_evidence[%d] could not be decoded: %v (started_at must be RFC3339, argv a string list, numbers numeric)", i, uerr))
-							} else {
-								kept = append(kept, el)
-							}
-						}
-					}
-					if len(kept) > 0 {
-						m["command_evidence"] = kept
-					}
-				}
-				if cleaned, jerr := json.Marshal(m); jerr == nil {
-					res = StepResult{} // the failed first decode leaves partial fields (e.g. a zeroed evidence entry)
-					if uerr := json.Unmarshal(cleaned, &res); uerr == nil {
-						res.evidenceDropped = dropped
-						goto parsed
-					}
-				}
-			}
-		}
 		return nil, fmt.Errorf("envelope at %s is not valid JSON: %w", r.dropPath, err)
 	}
-parsed:
-	// Light completion checks — the lenient fields a well-meaning
-	// process may omit are filled from the dispatch identity; the
-	// fence and the closed sets are enforced (full R14 validation is
-	// the driver core's accept gate).
-	if res.ProtocolVersion == 0 {
-		res.ProtocolVersion = ResultProtocolVersion
-	}
-	if res.ProtocolVersion != ResultProtocolVersion {
-		return nil, fmt.Errorf("%w: envelope speaks %d, driver speaks %d",
-			ErrProtocolMismatch, res.ProtocolVersion, ResultProtocolVersion)
-	}
+	// Light completion checks — the identity fields a minimal-contract
+	// envelope may leave to the dispatch are filled from the dispatch
+	// identity; the fence and the closed sets are enforced (full
+	// validation is the driver core's accept gate).
 	if res.StepID == "" {
 		res.StepID = r.sp.StepID
 	}

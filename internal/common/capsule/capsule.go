@@ -201,9 +201,6 @@ type Attempt struct {
 	RewindGate     string          `json:"rewind_gate,omitempty"`
 	InterruptedAt  string          `json:"interrupted_at,omitempty"`
 	Detail         string          `json:"detail,omitempty"`
-	// AcceptedResultID is the R13 envelope result_id committed at the
-	// R14 commit point — populated only for accepted step results.
-	AcceptedResultID string `json:"accepted_result_id,omitempty"`
 	// FailureCause is the supervision sub-class of an infra_failure
 	// attempt (harness_silent, model_error, model_hung, tool_hung,
 	// step_timeout_long_task, step_timeout_slow_model, exit_model_class,

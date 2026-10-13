@@ -7,7 +7,6 @@ package driver
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
@@ -61,12 +59,6 @@ func (r *fakeRun) Wait(ctx context.Context) (*StepResult, error) {
 	}
 	if clone.SpawnN == 0 {
 		clone.SpawnN = r.sp.SpawnN
-	}
-	if clone.ProtocolVersion == 0 {
-		clone.ProtocolVersion = 1
-	}
-	if clone.ResultID == "" {
-		clone.ResultID = uuid.NewString()
 	}
 	return &clone, nil
 }
@@ -137,16 +129,16 @@ func (s *fakeSpawner) spawnAt(i int) StepSpawn {
 
 // entry builders.
 func done(out string) fakeEntry {
-	return fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(out)}}
+	return fakeEntry{res: &StepResult{Outcome: OutcomeCompleted, Output: json.RawMessage(out)}}
 }
 func asks(qid, q string) fakeEntry {
-	return fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeNeedsInput, QuestionID: qid, Question: q}}
+	return fakeEntry{res: &StepResult{Outcome: OutcomeNeedsInput, QuestionID: qid, Question: q}}
 }
 func gateFAIL() fakeEntry {
-	return fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeGateFailed, Output: json.RawMessage(`{"verdict":"FAIL: tests red"}`)}}
+	return fakeEntry{res: &StepResult{Outcome: OutcomeGateFailed, Output: json.RawMessage(`{"verdict":"FAIL: tests red"}`)}}
 }
 func incomplete() fakeEntry {
-	return fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeIncomplete, Output: json.RawMessage(`{"partial":true}`)}}
+	return fakeEntry{res: &StepResult{Outcome: OutcomeIncomplete, Output: json.RawMessage(`{"partial":true}`)}}
 }
 
 // runEnv builds a fresh capsule + driver over a scripted spawner.
@@ -595,7 +587,7 @@ func TestRunStaleResultFenceRejected(t *testing.T) {
 	d, sp, _ := runEnv(t, spec("a"))
 	// the in-process retry lane re-dispatches on rejection; a stale fence
 	// stays stale, so the bound escalates with the fence error wrapped.
-	stale := fakeEntry{res: &StepResult{ProtocolVersion: 1, ResultID: "319584c8-10e7-5703-8b0f-4af0a03f8657", Outcome: OutcomeCompleted, SpawnN: 99}}
+	stale := fakeEntry{res: &StepResult{Outcome: OutcomeCompleted, SpawnN: 99}}
 	script := make([]fakeEntry, 0, maxEnvelopeRejects+1)
 	for i := 0; i <= maxEnvelopeRejects; i++ {
 		script = append(script, stale)
@@ -611,13 +603,14 @@ func TestRunStaleResultFenceRejected(t *testing.T) {
 	}
 }
 
-func TestRunArtifactValidation(t *testing.T) {
+func TestRunMinimalContractAccepted(t *testing.T) {
+	// The MINIMAL CONTRACT (polyforge#147): a completed envelope with ONLY
+	// the outcome + output pair and the identity/fence fields is accepted;
+	// there is no artifact manifest, no protocol stamp and no handoff
+	// digest reference — a handoff-declaring step's completed result owes
+	// none of them (the handoff is a path-convention read).
 	dir := t.TempDir()
 	execPath := filepath.Join(dir, capsule.ExecutionJSON)
-	art := filepath.Join(dir, "artifacts", "memo.md")
-	os.MkdirAll(filepath.Dir(art), 0o755)
-	body := []byte("# memo\n")
-	os.WriteFile(art, body, 0o644)
 
 	mkDriver := func(sp *fakeSpawner) *Driver {
 		d, err := New(Config{
@@ -632,59 +625,27 @@ func TestRunArtifactValidation(t *testing.T) {
 		return d
 	}
 
-	// A missing handoff on a handoff-declaring step is rejected — the
-	// retry lane re-dispatches, so the escalation (not the first
-	// rejection) is what surfaces the error.
-	missing := []fakeEntry{}
-	for i := 0; i <= maxEnvelopeRejects; i++ {
-		missing = append(missing, done(`{}`))
-	}
-	sp := &fakeSpawner{script: missing}
-	if err := mkDriver(sp).Run(context.Background()); err == nil {
-		t.Fatal("a handoff-declaring step must produce a handoff_ref")
-	}
-
-	// A wrong hash is rejected; the correct manifest is accepted.
-	sum := sha256Hex(t, body)
-	bad := fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(`{}`),
-		HandoffRef: &ArtifactRef{Path: "artifacts/memo.md", SHA256: "deadbeef", Bytes: int64(len(body))}}}
-	os.Remove(execPath)
-	badScript := []fakeEntry{}
-	for i := 0; i <= maxEnvelopeRejects; i++ {
-		badScript = append(badScript, bad)
-	}
-	sp = &fakeSpawner{script: badScript}
-	if err := mkDriver(sp).Run(context.Background()); err == nil {
-		t.Fatal("a hash mismatch must be rejected")
-	}
-
-	os.Remove(execPath)
-	good := fakeEntry{res: &StepResult{
-		ProtocolVersion: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(`{}`),
-		HandoffRef: &ArtifactRef{Path: "artifacts/memo.md", SHA256: sum, Bytes: int64(len(body))},
-		Artifacts:  []ArtifactRef{{Path: "artifacts/memo.md", SHA256: sum, Bytes: int64(len(body))}},
-	}}
-	sp = &fakeSpawner{script: []fakeEntry{good}}
+	// A handoff-declaring step's minimal completed result is accepted.
+	sp := &fakeSpawner{script: []fakeEntry{done(`{"summary":"ok"}`)}}
 	if err := mkDriver(sp).Run(context.Background()); err != nil {
-		t.Fatalf("a correct manifest must be accepted: %v", err)
+		t.Fatalf("a handoff-declaring step's minimal result must be accepted: %v", err)
 	}
 	if s := readExec(t, execPath).WorkflowStatus; s != StatusCompleted {
 		t.Fatalf("completed: %q", s)
 	}
 
-	// Path escapes never reach the filesystem.
+	// A structurally invalid envelope (a needs_input without its question
+	// pair — invalid under the old AND the new contract) is rejected —
+	// the retry lane re-dispatches, so the escalation (not the first
+	// rejection) is what surfaces the error.
 	os.Remove(execPath)
-	escape := fakeEntry{res: &StepResult{
-		ProtocolVersion: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(`{}`),
-		Artifacts: []ArtifactRef{{Path: "../outside.md", SHA256: sum, Bytes: int64(len(body))}},
-	}}
-	escapeScript := []fakeEntry{}
+	badScript := []fakeEntry{}
 	for i := 0; i <= maxEnvelopeRejects; i++ {
-		escapeScript = append(escapeScript, escape)
+		badScript = append(badScript, badQuestion())
 	}
-	sp = &fakeSpawner{script: escapeScript}
+	sp = &fakeSpawner{script: badScript}
 	if err := mkDriver(sp).Run(context.Background()); err == nil {
-		t.Fatal("a parent-escaping artifact path must be rejected")
+		t.Fatal("a needs_input envelope without its question pair must be rejected")
 	}
 }
 
@@ -769,27 +730,19 @@ steps:
 	}
 }
 
-func sha256Hex(t *testing.T, b []byte) string {
-	t.Helper()
-	sum := sha256.Sum256(b)
-	return fmt.Sprintf("%x", sum)
-}
-
 // ---------------------------------------------------------------------------
 // In-process envelope-rejection retry lane (the #97/#107 lessons).
 
-// badHash builds a completed result whose artifact manifest points at a
-// file that does not exist — deterministic substance-gate rejection.
-func badHash() fakeEntry {
-	return fakeEntry{res: &StepResult{
-		ProtocolVersion: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(`{}`),
-		Artifacts: []ArtifactRef{{Path: "artifacts/missing.md", SHA256: "deadbeef", Bytes: 1}},
-	}}
+// badQuestion builds a needs_input result without its question pair —
+// deterministic substance-gate rejection (invalid under the old AND the
+// new contract).
+func badQuestion() fakeEntry {
+	return fakeEntry{res: &StepResult{Outcome: OutcomeNeedsInput}}
 }
 
 func TestRunRejectedEnvelopeRetriesInProcess(t *testing.T) {
 	d, sp, execPath := runEnv(t, StepSpec{ID: "fix"})
-	sp.script = []fakeEntry{badHash(), done(`{}`)}
+	sp.script = []fakeEntry{badQuestion(), done(`{}`)}
 
 	if err := d.Run(context.Background()); err != nil {
 		t.Fatalf("a recoverable envelope rejection must NOT fail the run: %v", err)
@@ -799,7 +752,7 @@ func TestRunRejectedEnvelopeRetriesInProcess(t *testing.T) {
 	}
 	// the re-dispatch carries the rejection as visible prompt feedback
 	second := sp.spawnAt(1)
-	if second.PriorRejection == "" || !strings.Contains(second.PriorRejection, "artifact") {
+	if second.PriorRejection == "" || !strings.Contains(second.PriorRejection, "question") {
 		t.Fatalf("the re-dispatch must carry the validation error verbatim, got %q", second.PriorRejection)
 	}
 	// and the step is done with the second envelope
@@ -816,7 +769,7 @@ func TestRunRejectedEnvelopeRetriesInProcess(t *testing.T) {
 func TestRunRejectedEnvelopeEscalatesAfterBound(t *testing.T) {
 	d, sp, _ := runEnv(t, StepSpec{ID: "fix"})
 	// maxEnvelopeRejects rejections then the bound escalates
-	sp.script = []fakeEntry{badHash(), badHash(), badHash(), badHash()}
+	sp.script = []fakeEntry{badQuestion(), badQuestion(), badQuestion(), badQuestion()}
 
 	err := d.Run(context.Background())
 	if err == nil {
@@ -854,7 +807,7 @@ func TestRejectionRelaunchesArePersistedAndBounded(t *testing.T) {
 	execPath := filepath.Join(dir, capsule.ExecutionJSON)
 	log := &eventLog{}
 	round := func() (*Driver, error) {
-		sp := &fakeSpawner{script: []fakeEntry{badHash(), badHash(), badHash(), badHash()}}
+		sp := &fakeSpawner{script: []fakeEntry{badQuestion(), badQuestion(), badQuestion(), badQuestion()}}
 		d, err := New(Config{
 			WI:       WIInfo{ID: "wi_rej", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
 			ExecPath: execPath,

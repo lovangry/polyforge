@@ -303,7 +303,7 @@ func TestEnvelopeRejectionsAreNotCounted(t *testing.T) {
 	// feed the failure counter.
 	env := newSupEnv(t, nil, spec("s"))
 	// a result with a wrong spawn fence is rejected at validation
-	rejected := fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeCompleted, SpawnN: 99, Output: []byte(`{}`)}}
+	rejected := fakeEntry{res: &StepResult{Outcome: OutcomeCompleted, SpawnN: 99, Output: []byte(`{}`)}}
 	env.sp.script = []fakeEntry{rejected, done(`{}`)}
 	if err := env.d.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -352,7 +352,7 @@ func TestPersistentEnvelopeRejectionReports(t *testing.T) {
 	env := newSupEnv(t, nil, spec("s"))
 	var script []fakeEntry
 	for i := 0; i < maxEnvelopeRejects+2; i++ {
-		script = append(script, fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeCompleted, SpawnN: 99, Output: []byte(`{}`)}})
+		script = append(script, fakeEntry{res: &StepResult{Outcome: OutcomeCompleted, SpawnN: 99, Output: []byte(`{}`)}})
 	}
 	env.sp.script = script
 	if err := env.d.Run(context.Background()); err == nil {
