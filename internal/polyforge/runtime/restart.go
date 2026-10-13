@@ -312,17 +312,26 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job, rec
 	r.reapOrphans(rec.WorkItemID, j.capsuleDir)
 	state, _ := j.snapshot()
 	if state == StateSealing {
-		// finish the interrupted close — the sealed reason passes through
-		// verbatim (wrapped|failed|blocked); anything a crashed stop never
-		// wrote reads as the safest default
+		// finish the interrupted close — a RECORDED verdict passes through
+		// verbatim (wrapped|failed|blocked). A reason the crashed stop never
+		// wrote is NOBODY's verdict: finishing it wrapped would report a
+		// success no one decided, so the close finishes BLOCKED — with a
+		// note naming the interrupted, cause-unknown seal — and a human
+		// decides (audit B2).
 		reason := j.stopReason
+		note := ""
 		if !isTerminalStopReason(reason) {
-			reason = protocol.FinishWrapped
+			reason = protocol.FinishBlocked
+			note = "seal interrupted by a daemon crash before any verdict was recorded (cause unknown) — finished blocked for a human to decide"
+			fmt.Fprintf(os.Stderr, "runtime: %s: interrupted seal with no recorded verdict finished blocked (the human decides)\n", rec.WorkItemID)
+			if r.cfg.EventTap != nil {
+				r.cfg.EventTap(rec.WorkItemID, "interrupted_seal", map[string]any{"note": note})
+			}
 		}
 		j.mu.Lock()
 		sealed := j.sealedPush
 		j.mu.Unlock()
-		return r.stopOp(ctx, j, reason, true, sealed)
+		return r.stopOp(ctx, j, reason, true, sealed, note)
 	}
 	if state == StateDone {
 		r.forgetRecord(rec)
@@ -443,7 +452,7 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 					j.mu.Lock()
 					sealed := j.sealedPush
 					j.mu.Unlock()
-					if err := r.stopOp(ctx, j, rec.StopReason, true, sealed); err != nil {
+					if err := r.stopOp(ctx, j, rec.StopReason, true, sealed, ""); err != nil {
 						fmt.Fprintf(os.Stderr, "runtime: %s: pending close replay failed, record kept: %v\n", rec.WorkItemID, err)
 					}
 					return nil

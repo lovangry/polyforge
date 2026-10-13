@@ -83,13 +83,13 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		// alreadyPushed: the C3 engine already committed and pushed the
 		// terminal execution.json version (every transition bumps Version
 		// and publishes); the final push here would only race it.
-		if err := r.stopOp(ctx, j, protocol.FinishWrapped, false, true); err != nil {
+		if err := r.stopOp(ctx, j, protocol.FinishWrapped, false, true, ""); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: terminal wrap failed (record kept for the next restart): %v\n", j.wi, err)
 		}
 		return
 	case capsule.WorkflowStatusFailedGate, capsule.WorkflowStatusFailedRewindExhausted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow failed (%s) — closing failed (recovery cause %q)\n", j.wi, capsuleWorkflowStatus(j.capsuleDir), cause)
-		if err := r.stopOp(ctx, j, protocol.FinishFailed, false, true); err != nil {
+		if err := r.stopOp(ctx, j, protocol.FinishFailed, false, true, ""); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: terminal fail close failed (record kept for the next restart): %v\n", j.wi, err)
 		}
 		return
