@@ -135,7 +135,7 @@ internal/runner/    # Native runner：RunCommand 实现、runtime-state 写保�
 
 ### 4.1 repo inventory：声明格式 <!-- §4.1 -->
 
-WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 8。**权威存储在 `02-aihub-core.md#§4.6` `wi_repo_inventory` 表**（本文不重复定义存储）：创建时写入 `name`/`url`/`subdir`，`base` 为 NULL；**base commit 在 WI 创建事务中与 bundle digest 一并冻结**（`02-aihub-core.md#§4.6` 的 `POST /api/v1/work-items` 创建请求体 `repo_inventory_base` 字段），此后不可变。Daemon 丢失本地声明（takeover/重新检出）时通过 `GET /api/v1/work-items/{id}/repo-inventory`（`02-aihub-core.md#§5.1`）重建清单，不依赖本地缓存或推断。
+WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 8。**权威存储在 `02-aihub-core.md#§4.6` `wi_repo_inventory` 表**（本文不重复定义存储）：创建时写入 `name`/`url`/`subdir`，`base` 为 NULL；**base commit 在 WI 创建事务中冻结**（`02-aihub-core.md#§4.6` 的 `POST /api/v1/work-items` 创建请求体 `repo_inventory_base` 字段），此后不可变（`wi_repo_inventory` 不受 bundle 变更影响）；`bundle_digest` 的冻结时点为**首次认领冻结**（R2 窗口内可随 `bundle_name` 变更重派生，`02-aihub-core.md#§4.5`）。Daemon 丢失本地声明（takeover/重新检出）时通过 `GET /api/v1/work-items/{id}/repo-inventory`（`02-aihub-core.md#§5.1`）重建清单，不依赖本地缓存或推断。
 
 ### 4.2 `runtime-state/execution.json`：完整文件格式（权威，INV-1 的唯一执行权威文件） <!-- §4.2 -->
 
@@ -316,7 +316,7 @@ WI Agent 是唯一调用方；harness-native subagent 的命令都经其所属 s
 每次全扫描发布（HEAD 推进）在 staging 固化（`05-sync-revision-recovery.md#§6` 第 4 步）之后、manifest 提交与 HEAD 推进（第 5–6 步）之前，挂载一次输出契约的机械校验步。它是 M 检查面（发布面机械证据通道）的新成员：与 `07-deployment-pilot.md#§9.2` 的 M4/M5 同属「机械证据优先于自报」的谱系，把执法对象从命令证据扩展到输出 schema 合规。六步发布序列的权威仍在 `05-sync-revision-recovery.md#§6`，本节只定义该检查步的 Capsule 侧契约，不构成第二条发布路径：
 
 1. **校验输入（INV-6 边界，本节权威）**：只读 staging 内已固化的 `runtime-state/execution.json` 快照副本——即将随本次发布写入 Revision 的字节——中每个 `status == "done"` 的 step 的 `output`（§4.2）。**绝不读取 Capsule 活目录内的 `runtime-state/`**：runtime-state 是 WI Agent 的单写者私有域（INV-6/§2.3），Daemon 的这次读取只发生在发布面、只针对已固化字节，与 `05-sync-revision-recovery.md#§6` 第 4 步「只读取 staging，不重新读取活动的同步根目录」同一纪律。校验输入恒等于被发布字节，校验结论与 Revision 记录因此不可能分叉。 〔#111分类：删→驱动〕
-2. **校验目标**：各 step 的 pinned `output` JSON Schema，从 Capsule 内第 0 步物化、经 `bundle_digest` 校验的只读 workflow 快照（§4.5）读取 `agents/<step-id>.md` frontmatter 的 `output`；与 WI 创建时固化的 bundle 引用（`01-workflow-skills.md#§2.2` INV-1a/INV-1f）同源，不存在「校验用 schema 与执行用 schema 不同源」的窗口。
+2. **校验目标**：各 step 的 pinned `output` JSON Schema，从 Capsule 内第 0 步物化、经 `bundle_digest` 校验的只读 workflow 快照（§4.5）读取 `agents/<step-id>.md` frontmatter 的 `output`；与 WI 首次认领冻结时点的 bundle 引用（`01-workflow-skills.md#§2.2` INV-1a/INV-1f）同源，不存在「校验用 schema 与执行用 schema 不同源」的窗口。
 3. **校验器**：draft-07 的机械完整实现；schema-authoring 规则与本仓 bundle 测试（`internal/workflow/schema`）强制的同一契约——参考 bundle 的 output schema 只用标准 draft-07 关键字（required/enum/minItems/minLength/oneOf/contains 等），真校验器接入即同一契约生效，不要求改写任何既有 schema（`01-workflow-skills.md#§4.4`）。
 4. **失配分类（INV-1h 既有分类，不新增终态）**：任一 done step 的 `output` 不合其 schema = 该 step 的基础设施失败（`01-workflow-skills.md#§4.4`/`01-workflow-skills.md#§6.3`）：不产出业务判定、不触发 gate。校验结果随 `04-local-runtime.md#§5.1` `publish_request` 的响应返回给 WI Agent——发布边界即 step 完成边界，命中者通常即刚完成的当前 step；若命中更早的 done step（其字节在完成后被改写，本身即异常现场），处理相同：该 step 原地重派。发布本身不受失配拦截：HEAD 照常推进，失配字节作为可审计历史留在 Revision 链上；WI Agent 随后按 `01-workflow-skills.md#§6.3` 第 2b 条追加 `infra_failure` attempt 并原地 resume（同一次原子写入内 `status` 由 `done` 改回 `in_progress`，§4.2），候选指针按其第 4 步有界规则推进。校验步是检测信号，不是发布否决项：`05` 六步序列与 Core 侧校验链均不变，候选/预算耗尽后的 `blocked` 收尾路径（§4.2）也因发布不被拦截而始终可 flush。 〔#111分类：删→驱动〕
 
