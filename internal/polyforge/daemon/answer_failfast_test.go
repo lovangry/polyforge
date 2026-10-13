@@ -67,7 +67,7 @@ func (a *answerAgent) Answer(questionID, answer, answeredBy string) error {
 }
 
 // A driver-branch answer that names no question while the capsule carries
-// no pending one is refused ANSWER-400 and never reaches the handle.
+// no pending one is refused DAEMON-400 and never reaches the handle.
 func TestAnswerWithNoPendingQuestionIsRefused(t *testing.T) {
 	aa := &answerAgent{answered: make(chan string, 1)}
 	td := newTestDaemon(t, func(c *Config) {
@@ -85,8 +85,8 @@ func TestAnswerWithNoPendingQuestionIsRefused(t *testing.T) {
 	td.waitMonitored(t, "wi_nq")
 	_, err := td.client.Answer("wi_nq", cli.AnswerPayload{AnswerText: "x", AnsweredBy: "u_1"})
 	var ae *api.Error
-	if !errors.As(err, &ae) || ae.Code != "ANSWER-400" {
-		t.Fatalf("answer with no pending question = %v, want ANSWER-400", err)
+	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonBadInput {
+		t.Fatalf("answer with no pending question = %v, want DAEMON-400", err)
 	}
 	select {
 	case q := <-aa.answered:

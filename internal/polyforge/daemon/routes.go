@@ -164,7 +164,7 @@ func (d *Daemon) handler() http.Handler {
 				AnsweredBy string `json:"answered_by"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				http.Error(w, `{"code":"BAD-400","detail":"decode: `+err.Error()+`"}`, 400)
+				writeErr(w, api.ErrDaemonBadInput, "decode: "+err.Error())
 				return
 			}
 			if payload.AnsweredBy == "" {
@@ -180,22 +180,19 @@ func (d *Daemon) handler() http.Handler {
 				ids := d.pendingQuestionIDs(wi)
 				switch len(ids) {
 				case 0:
-					http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
+					writeErr(w, api.ErrDaemonBadInput, "no pending question found for this work item")
 					return
 				case 1:
 					payload.QuestionID = ids[0]
 				default:
-					body, _ := json.Marshal(map[string]string{
-						"code": "ANSWER-400",
-						"detail": fmt.Sprintf("this work item has %d pending questions (%s) — answer a specific one with --question",
-							len(ids), strings.Join(ids, ", ")),
-					})
-					http.Error(w, string(body), 400)
+					writeErr(w, api.ErrDaemonBadInput,
+						fmt.Sprintf("this work item has %d pending questions (%s) — answer a specific one with --question",
+							len(ids), strings.Join(ids, ", ")))
 					return
 				}
 			}
 			if err := h.Answer(payload.QuestionID, payload.AnswerText, payload.AnsweredBy); err != nil {
-				http.Error(w, `{"code":"ANSWER-409","detail":"`+err.Error()+`"}`, 409)
+				writeErr(w, api.ErrDaemonConflict, err.Error())
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
