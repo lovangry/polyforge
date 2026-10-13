@@ -84,9 +84,6 @@ type StepSpawnAdapter struct {
 	// runtime.DefaultSpawner(&runtime.Config{...}) so isolation, env
 	// sanitization and the model pin keep their single home.
 	Spawner spawn.Spawner
-	// CgroupPath is the per-WI cgroup v2 dir ("" = layer 0
-	// unavailable) — passed through to SpawnParams.
-	CgroupPath string
 	// Link is the per-WI supervision link: the harness translator of
 	// every dispatch folds the step process's stdout records into the
 	// dispatch's Tracker on it. nil = no harness tracking.
@@ -216,7 +213,6 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		TranscriptPath: transcript,
 		Resume:         resume,
 		InitialPrompt:  assembleStepPrompt(parts),
-		CgroupPath:     a.CgroupPath,
 		Model:          sp.Model,
 	}
 	if translator != nil {

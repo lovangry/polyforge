@@ -53,7 +53,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -236,44 +235,74 @@ func parkForever() {
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
-// capsuleSessionHandle reads the PUBLIC session fingerprint from the
-// spawn env (PF_SESSION_HANDLE, the v1.5 B3 identity: display only,
-// NEVER a credential — the session secret never reaches agent env).
-func capsuleSessionHandle() string {
-	return os.Getenv("PF_SESSION_HANDLE")
+// capsule spawn journal (runtime-state/spawn-journal.jsonl) is the loose
+// identity source for the derivation: the entry the parent wrote for THIS
+// process (pid-matched, appended right after fork — before the initial
+// prompt) carries the session handle, the derivation counter and the
+// transcript path. The deleted PF_SESSION_HANDLE / PF_SPAWN_N env
+// injections (audit subtraction pass B) are re-sourced from here.
+type spawnJournalEntry struct {
+	PID           int    `json:"pid"`
+	WorkItem      string `json:"work_item"`
+	SessionHandle string `json:"session_handle"`
+	SpawnN        int    `json:"spawn_n"`
+	Transcript    string `json:"transcript"`
 }
 
-// spawnNOf reads the derivation counter from the spawn env (0 when
-// absent — never a legal derivation, which is exactly the fail-closed
-// fence value the daemon refuses).
-func spawnNOf() int {
-	n, err := strconv.Atoi(os.Getenv("PF_SPAWN_N"))
-	if err != nil {
-		return 0
+// spawnJournalSelf answers this process's spawn-journal entry: the last
+// line of the capsule journal whose pid is ours. The parent appends the
+// line right after fork, so a freshly started child can beat the append
+// by microseconds — bounded wait, then the last entry stands (the
+// derivation lanes are serialized per WI).
+func spawnJournalSelf(wi string) (spawnJournalEntry, bool) {
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		e, ok := lastSpawnEntry(wi)
+		if ok && (e.PID == os.Getpid() || time.Now().After(deadline)) {
+			return e, true
+		}
+		if time.Now().After(deadline) {
+			return e, ok
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	return n
+}
+
+// lastSpawnEntry reads the newest journal line (loose: unparsable lines
+// are skipped; a missing journal is not an error — the caller parks).
+func lastSpawnEntry(wi string) (spawnJournalEntry, bool) {
+	path := filepath.Join("runtime-state", "spawn-journal.jsonl")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return spawnJournalEntry{}, false
+	}
+	var last spawnJournalEntry
+	found := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var e spawnJournalEntry
+		if json.Unmarshal([]byte(line), &e) != nil {
+			continue
+		}
+		if wi != "" && e.WorkItem != "" && e.WorkItem != wi {
+			continue
+		}
+		last, found = e, true
+	}
+	return last, found
 }
 
 // transcriptPathOf resolves this process's transcript file: the --session
-// argv on a resume derivation, else the token-named capsule copy the
-// runtime declared for this derivation (session/session-<handle>.jsonl
-// for the first derivation, session/session-<handle>#<N-1>.jsonl for a
-// fresh re-derivation #N — the path the runtime records in session.json
-// and the spawn journal, rekeyed onto the session handle in v1.5).
-func transcriptPathOf() string {
+// argv on a resume derivation, else the transcript path the runtime
+// declared for this derivation in the spawn journal.
+func transcriptPathOf(entry spawnJournalEntry) string {
 	args := os.Args
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "--session" {
 			return args[i+1]
 		}
 	}
-	handle := capsuleSessionHandle()
-	if handle == "" {
-		return ""
-	}
-	token := handle
-	if n := spawnNOf(); n > 1 {
-		token = fmt.Sprintf("%s#%d", handle, n-1)
-	}
-	return filepath.Join("session", "session-"+token+".jsonl")
+	return entry.Transcript
 }

@@ -14,8 +14,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -193,12 +191,6 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		// second marker half: the sweep needs BOTH, so a daemon never
 		// reaps another daemon's step process for the same WI id.
 		"PF_DAEMON_ID=" + s.cfg.MachineID,
-		// v1.5 B2/B3 identity: the PUBLIC session handle and the monotonic
-		// derivation counter. The SECRET
-		// session id is deliberately ABSENT (it must never reach agent
-		// env; it lives only in state.json and the one-shot askpass).
-		"PF_SESSION_HANDLE=" + p.SessionHandle,
-		"PF_SPAWN_N=" + strconv.Itoa(p.SpawnN),
 	}
 	cmd.Env = newEnvSanitizer(s.cfg.EnvSecrets...).childEnv(additions...)
 	return cmd
@@ -250,15 +242,6 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 		stderr: errR,
 		onExit: p.OnExit,
 	})
-	// Layer-0 enrollment: move the agent (and with it every descendant) into
-	// the per-WI cgroup. Unavailable cgroups degrade silently — layers 1-4
-	// remain the kill path.
-	if p.CgroupPath != "" {
-		if err := os.WriteFile(filepath.Join(p.CgroupPath, "cgroup.procs"),
-			[]byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "runtime: %s: cgroup enrollment unavailable, layer 0 degrades: %v\n", p.WorkItemID, err)
-		}
-	}
 	// Identity journal before Spawn returns: a crash between derivation and
 	// the runtime's persisted record must never leave an undiscoverable
 	// orphan. Its failure tears the fresh process down.

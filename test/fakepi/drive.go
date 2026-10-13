@@ -196,14 +196,18 @@ type driveEnv struct {
 	mustFail bool
 }
 
-// newDriveEnv assembles the executor from the spawn env + the plan file.
+// newDriveEnv assembles the executor from the spawn identity (the capsule
+// spawn journal's entry for THIS process — pid-matched; the deleted
+// PF_SESSION_HANDLE / PF_SPAWN_N env injections are re-sourced from there,
+// audit subtraction pass B) + the plan file.
 // A missing plan parks the agent loudly (the scenario fails on its own
 // bounded wait — never a silent no-op).
 func newDriveEnv() *driveEnv {
 	wi := os.Getenv("PF_WI_ID")
-	spawnN := spawnNOf()
-	if wi == "" || spawnN <= 0 {
-		fmt.Fprintln(os.Stderr, "fakepi: PF_WI_ID/PF_SPAWN_N not set; parking")
+	entry, ok := spawnJournalSelf(wi)
+	spawnN := entry.SpawnN
+	if !ok || spawnN <= 0 {
+		fmt.Fprintln(os.Stderr, "fakepi: PF_WI_ID unset or the spawn journal carries no derivation for this process; parking")
 		return nil
 	}
 	pl, path := loadPlan(wi)
@@ -213,11 +217,11 @@ func newDriveEnv() *driveEnv {
 	}
 	d := &driveEnv{
 		wi:         wi,
-		handle:     capsuleSessionHandle(),
+		handle:     entry.SessionHandle,
 		spawnN:     spawnN,
-		sessionArg: transcriptPathOf(),
+		sessionArg: transcriptPathOf(entry),
 		resumed:    hasSessionArg(),
-		transcript: transcriptPathOf(),
+		transcript: transcriptPathOf(entry),
 	}
 	if d.resumed && len(pl.ResumeActions) > 0 {
 		pl.Actions = pl.ResumeActions
@@ -682,10 +686,7 @@ func (d *driveEnv) writeEnvelope(act planAction) {
 	}
 	stepID := act.ID
 	capsuleRoot := d.capsuleRoot()
-	spawnN := os.Getenv("PF_SPAWN_N")
-	if spawnN == "" {
-		spawnN = "1"
-	}
+	spawnN := strconv.Itoa(d.spawnN)
 	dropPath := filepath.Join(capsuleRoot, "runtime-state", "pending-results", spawnN+".json")
 
 	output := act.Output
@@ -777,10 +778,11 @@ func parseIntDefault(s string, def int64) int64 {
 	return def
 }
 
-// spawnNumber answers this derivation's PF_SPAWN_N (1 when unset).
+// spawnNumber answers this derivation's counter (the spawn-journal
+// identity; 1 when unset).
 func (d *driveEnv) spawnNumber() int64 {
-	if n, err := strconv.ParseInt(os.Getenv("PF_SPAWN_N"), 10, 64); err == nil {
-		return n
+	if d.spawnN > 0 {
+		return int64(d.spawnN)
 	}
 	return 1
 }

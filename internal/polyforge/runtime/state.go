@@ -133,7 +133,7 @@ type jobRecord struct {
 	// never in logs or events.
 	SessionID string `json:"session_id"`
 	// SessionFingerprint is the PUBLIC handle (hex(sha256(secret))[:16]):
-	// the value logs, events and PF_SESSION_HANDLE carry.
+	// the value logs and events carry.
 	SessionFingerprint string `json:"session_fingerprint"`
 	State              string `json:"state"`
 	StopReason         string `json:"stop_reason,omitempty"`

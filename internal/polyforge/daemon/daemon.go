@@ -88,7 +88,6 @@ type Config struct {
 	// HarnessSessionsRoot overrides the harness's default session store
 	// for the live-transcript locator (F3); "" = ~/.pi/agent/sessions.
 	HarnessSessionsRoot string
-	CgroupRoot          string
 	APIKey              string // machine credential; NEVER reaches an agent env
 	MaxConcurrent       int    // cross-mode concurrency cap (default 4)
 	// RecallTopK is the F6-A claim-time memory snapshot's hit count
@@ -310,7 +309,6 @@ func New(cfg Config) (*Daemon, error) {
 		WorkflowsDir:        cfg.WorkflowsDir,
 		Harness:             cfg.Harness,
 		PiBin:               cfg.PiBin,
-		CgroupRoot:          cfg.CgroupRoot,
 		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
 		EnvSecrets:          []string{cfg.APIKey},
 	}

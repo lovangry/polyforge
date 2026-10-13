@@ -91,13 +91,17 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	}
 	for _, want := range []string{
 		"PF_WI_ID=wi_env", "PF_DAEMON_ID=m-env",
-		// v1.5 B2/B3: the PUBLIC session handle and the monotonic
-		// derivation counter
-		"PF_SESSION_HANDLE=ab12cd34",
-		"PF_SPAWN_N=2",
 	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env must carry %q, got:\n%s", want, env)
+		}
+	}
+	// The injected-but-unread PF_SESSION_HANDLE / PF_SPAWN_N were deleted
+	// with the audit's dead-code sweep: the derivation identity reaches
+	// the harness through the capsule spawn journal, never env.
+	for _, gone := range []string{"PF_SESSION_HANDLE=", "PF_SPAWN_N="} {
+		if strings.Contains(env, gone) {
+			t.Fatalf("the deleted %s must not be injected, got:\n%s", gone, env)
 		}
 	}
 }
@@ -115,9 +119,10 @@ func TestSpawnEnvRetiredVarsNeverInjected(t *testing.T) {
 }
 
 // TestSpawnSessionIdentityEnvReachesChild drives the REAL spawn path
-// (scripted harness) and proves the child's environment carries the v1.5
-// identity pair — PF_SESSION_HANDLE (the public fingerprint) and
-// PF_SPAWN_N (the derivation counter) — and NOT the session secret.
+// (scripted harness) and proves the child's environment carries the
+// cleanup markers and NOT the deleted identity pair (PF_SESSION_HANDLE /
+// PF_SPAWN_N reach the harness through the capsule spawn journal) nor
+// the session secret.
 func TestSpawnSessionIdentityEnvReachesChild(t *testing.T) {
 	capDir, sp := scriptedHarness(t)
 	envDump := filepath.Join(capDir, "child-env.txt")
@@ -145,11 +150,11 @@ func TestSpawnSessionIdentityEnvReachesChild(t *testing.T) {
 		t.Fatalf("the harness never dumped its env: %v", err)
 	}
 	fp := api.SessionFingerprint(secret)
-	if !strings.Contains(string(raw), `"PF_SESSION_HANDLE=`+fp+`"`) {
-		t.Fatalf("child env must carry the public session handle, got:\n%s", raw)
+	if strings.Contains(string(raw), "PF_SESSION_HANDLE=") || strings.Contains(string(raw), "PF_SPAWN_N=") {
+		t.Fatalf("the deleted identity env must not reach the child, got:\n%s", raw)
 	}
-	if !strings.Contains(string(raw), `"PF_SPAWN_N=2"`) {
-		t.Fatalf("child env must carry the derivation counter, got:\n%s", raw)
+	if strings.Contains(string(raw), fp) {
+		t.Fatalf("the public fingerprint is journal-only now; it must not ride the env, got:\n%s", raw)
 	}
 	if strings.Contains(string(raw), "PF_AGENT_ROLE") {
 		t.Fatalf("the retired role marker must not reach the child, got:\n%s", raw)

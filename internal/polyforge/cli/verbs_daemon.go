@@ -530,8 +530,6 @@ Launch flags (with environment variable and default, where one exists):
   --harness-sessions-root PATH
       harness session store root for the live-transcript sync
       (env POLYFORGE_HARNESS_SESSIONS_ROOT; default ~/.pi/agent/sessions)
-  --cgroup-root PATH
-      cgroup v2 root for layer-0 cleanup (env POLYFORGE_CGROUP_ROOT)
   --git-remote-base URL
       aihub bare-repo base URL (default <server>/git)
   --max-concurrent-jobs N

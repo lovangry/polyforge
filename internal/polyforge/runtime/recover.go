@@ -416,7 +416,6 @@ func (r *Runtime) killAgentTree(j *job) {
 		WIID:       j.wi,
 		DaemonID:   r.cfg.MachineID,
 		CapsuleDir: j.capsuleDir,
-		CgroupPath: r.cgroupPathFor(j.wi),
 	}, cleanupBound)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: agent tree cleanup incomplete: %v (warnings: %v)\n", j.wi, err, rep.Warnings)

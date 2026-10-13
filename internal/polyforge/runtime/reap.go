@@ -87,7 +87,6 @@ func journalPIDIsOurs(jp journalPID, wi, daemonID string) bool {
 // when the WI has no capsule yet. Failures are logged, never fatal: the
 // caller's re-dispatch proceeds either way.
 func (r *Runtime) reapOrphans(wi, capsuleDir string) {
-	cg := r.cgroupPathFor(wi)
 	for _, jp := range journalPIDs(capsuleDir) {
 		if !journalPIDIsOurs(jp, wi, r.cfg.MachineID) {
 			fmt.Fprintf(os.Stderr, "runtime: %s: journal pid %d no longer matches its recorded identity (pid reuse); not signaled\n", wi, jp.pid)
@@ -96,12 +95,12 @@ func (r *Runtime) reapOrphans(wi, capsuleDir string) {
 		// WIID "" here: the env sweep runs once, below.
 		if rep, err := Cleanup(CleanupTarget{
 			PID: jp.pid, Pgid: jp.pid, StartedAt: jp.startedAt,
-			CapsuleDir: capsuleDir, CgroupPath: cg,
+			CapsuleDir: capsuleDir,
 		}, cleanupBound); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: orphan step tree %d cleanup incomplete: %v (warnings: %v)\n", wi, jp.pid, err, rep.Warnings)
 		}
 	}
-	if rep, err := Cleanup(CleanupTarget{WIID: wi, DaemonID: r.cfg.MachineID, CapsuleDir: capsuleDir, CgroupPath: cg}, cleanupBound); err != nil {
+	if rep, err := Cleanup(CleanupTarget{WIID: wi, DaemonID: r.cfg.MachineID, CapsuleDir: capsuleDir}, cleanupBound); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: orphan env-marker sweep incomplete: %v (warnings: %v)\n", wi, err, rep.Warnings)
 	}
 }

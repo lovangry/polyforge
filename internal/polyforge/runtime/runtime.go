@@ -71,7 +71,6 @@ type Config struct {
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
 	Harness       string // harness adapter name ("pi")
 	PiBin         string // harness binary (default "pi")
-	CgroupRoot    string // cgroup v2 root; empty ⇒ layer-0 unavailable
 	// HarnessSessionsRoot overrides the harness's default session store
 	// (the live-transcript locator of the seal/pause/bounded-fail sync).
 	HarnessSessionsRoot string
@@ -507,15 +506,6 @@ func (r *Runtime) Resolve(id string) string {
 		return id // a job key is canonical by construction (F2)
 	}
 	return r.aliases[id]
-}
-
-// cgroupPathFor returns the per-WI cgroup v2 directory (layer 0); empty
-// config root means cgroups are off and layer 0 degrades away.
-func (r *Runtime) cgroupPathFor(wi string) string {
-	if r.cfg.CgroupRoot == "" {
-		return ""
-	}
-	return filepath.Join(r.cfg.CgroupRoot, "polyforge-"+wi)
 }
 
 // capsuleDirForProject resolves the capsule base for one project through
