@@ -452,13 +452,14 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 	return nil
 }
 
-// applyGateFailLocked consumes one gate FAIL policy (01 §6.2): terminate
-// (or a gate without on_fail) ends the workflow failed_gate (WF-102);
-// rewind first checks BOTH bounds — a hit ends failed_rewind_exhausted
-// (WF-101) before any mutation — then archives every step in
+// applyGateFailLocked consumes one gate FAIL policy (01 §6.2): a gate
+// without on_fail ends the workflow failed_gate (WF-102); a gate with
+// on_fail: rewind first checks BOTH bounds — a hit ends
+// failed_rewind_exhausted (WF-101) before any mutation — then archives
+// every step in
 // [target, gate) as a gate_fail_rewind attempt, resets each to pending
-// with output cleared, moves the position back to target and (with
-// include_verdict, the default) persists the FAIL verdict as the
+// with output cleared, moves the position back to target and persists
+// the FAIL verdict (the full verdict text, unconditionally) as the
 // target's pending_rewind_input. The gate itself is neither archived
 // nor reset: it stays in_progress holding its verdict output (only its
 // AnswerBase advances, so a human gate needs a fresh answer on re-entry),

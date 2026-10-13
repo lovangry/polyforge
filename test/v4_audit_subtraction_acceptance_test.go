@@ -374,6 +374,24 @@ func TestV4ThreeRejectsBlockResultInvalidNoRelaunch(t *testing.T) {
 	// re-derivation count (what the deleted escalation lane actually did),
 	// with the recovery signal bounded to that single blocked-exit
 	// translation.
+	//
+	// TOCTOU guard (rewind fix, polyforge#147): the blocked status lands
+	// in execution.json BEFORE the driver process has exited, and the
+	// needs_recovery translation is written asynchronously by the
+	// monitor in its onExit path AFTER the exit — so asserting on the
+	// event log the instant blocked is observed races the monitor. Wait,
+	// bounded, for the driver job to leave the daemon's live set (the
+	// s17 kept-face pattern) AND for the needs_recovery event to land
+	// (this suite's waitForEvent helper) before reading the kinds.
+	waitUntil(t, 30*time.Second, "the blocked job never left the daemon's live set", func() bool {
+		for _, j := range d.status(t).Jobs {
+			if j.WorkItemID == wi {
+				return false
+			}
+		}
+		return true
+	})
+	waitForEvent(t, d, wi, "needs_recovery", 30*time.Second)
 	kinds := d.eventKinds(t, wi)
 	if n := countOf(kinds, "wi_agent_rederived"); n != 0 {
 		t.Fatalf("SYMPTOM: the rejection escalated through the recovery lane: %d driver re-derivations (%v)", n, kinds)
