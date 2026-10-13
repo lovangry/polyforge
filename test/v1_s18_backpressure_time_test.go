@@ -38,7 +38,6 @@ func TestV1S18BackpressureTime(t *testing.T) {
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true, "ms": 8000},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 8000},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "handoff": true, "ms": 8000},
-		{"do": "envelope", "id": "release", "outcome": "completed", "ms": 6000},
 	}
 	wi := inst.newWI(t, "s18: push backpressure (time trigger, inproc rig)",
 		actions, nil)

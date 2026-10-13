@@ -116,7 +116,6 @@ func TestV1S19AwaitingAnswerRedeliveredAfterDaemonCrash(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 
 	d := newV1Daemon(t, inst)
@@ -172,7 +171,7 @@ func TestV1S19AwaitingAnswerRedeliveredAfterDaemonCrash(t *testing.T) {
 		t.Fatalf("sealed execution.json misses the persisted question id %s:\n%s", qid, exec)
 	}
 	x := readExecution(t, d2.capsuleDir(wi))
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}
@@ -203,8 +202,8 @@ func TestV1S19FinalOutcomeReplayedAfterDaemonCrash(t *testing.T) {
 		t.Fatal(err)
 	}
 	spawnsBefore := len(spawnJournal(t, capDir))
-	if spawnsBefore != 4 {
-		t.Fatalf("spawn journal has %d entries, want 4 (one pass)", spawnsBefore)
+	if spawnsBefore != 3 {
+		t.Fatalf("spawn journal has %d entries, want 3 (one pass)", spawnsBefore)
 	}
 
 	// Crash the daemon AFTER the terminal outcome; restart on the same

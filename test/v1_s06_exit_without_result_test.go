@@ -31,7 +31,6 @@ func TestV1S06HangRecovery(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -65,8 +64,8 @@ func TestV1S06HangRecovery(t *testing.T) {
 	}
 
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
-	spawns := waitSpawnCount(t, d, wi, 5, 60*time.Second)
-	if len(spawns) != 5 || spawns[1]["resume"] != true {
+	spawns := waitSpawnCount(t, d, wi, 4, 60*time.Second)
+	if len(spawns) != 4 || spawns[1]["resume"] != true {
 		t.Fatalf("the retry was not an in-place resume: %+v", spawns)
 	}
 	x := readExecution(t, capDir)

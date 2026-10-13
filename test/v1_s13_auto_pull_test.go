@@ -38,7 +38,7 @@ func TestV1S13AutoPull(t *testing.T) {
 	for _, wi := range []string{wiA, wiB, wiC} {
 		waitWorkflowStatus(t, d, wi, "completed", 30*time.Second)
 		x := readExecution(t, d.capsuleDir(wi))
-		for _, step := range []string{"grill", "fix", "verification", "release"} {
+		for _, step := range []string{"grill", "fix", "verification"} {
 			if st := x.Steps[step]; st == nil || st.Status != "done" {
 				t.Fatalf("%s: step %s not done: %+v", wi, step, st)
 			}

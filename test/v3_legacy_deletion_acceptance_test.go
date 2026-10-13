@@ -317,7 +317,6 @@ func TestV3DriverLifecycleProductionArgv(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 4000},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 
 	sockBase := filepath.Join(t.TempDir(), "sock")
@@ -373,7 +372,7 @@ func TestV3DriverLifecycleProductionArgv(t *testing.T) {
 		return ws == "completed"
 	})
 	exec := v3ReadExec(t, capDir)
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if got := v3StepStatus(exec, step); got != "done" {
 			t.Fatalf("step %s: expected done, got %q", step, got)
 		}
@@ -420,7 +419,6 @@ func TestV3AnswerWithoutLiveBridgeFailsFast(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 
 	sock1 := filepath.Join(t.TempDir(), "s1", "d.sock")

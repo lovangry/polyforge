@@ -1653,7 +1653,6 @@ func envelopeQuickFix() []map[string]any {
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "verification", "outcome": "completed"},
-		{"do": "envelope", "id": "release", "outcome": "completed"},
 	}
 }
 

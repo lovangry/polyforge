@@ -254,7 +254,7 @@ func TestTransitionStepStartFreshConsumesRewindInput(t *testing.T) {
 	d.mu.Lock()
 	d.exec.Steps["a"].PendingRewindInput = &capsule.RewindInput{ToStep: "a", Reason: "fix it harder"}
 	d.exec.Steps["a"].Output = map[string]any{"stale": true}
-	d.exec.Steps["a"].BudgetConsumed = capsule.Budget{Tokens: 42}
+	d.exec.Steps["a"].BudgetConsumed = capsule.Budget{WallMs: 42}
 	d.mu.Unlock()
 
 	before := clk.t
@@ -264,7 +264,7 @@ func TestTransitionStepStartFreshConsumesRewindInput(t *testing.T) {
 	if st.Status != capsule.StepInProgress || st.PendingRewindInput != nil {
 		t.Fatalf("start must flip to in_progress and consume the rewind verdict: %+v", st)
 	}
-	if st.Output != nil || st.BudgetConsumed.Tokens != 0 {
+	if st.Output != nil || st.BudgetConsumed.WallMs != 0 {
 		t.Fatalf("a fresh start reopens a clean window: output=%v budget=%+v", st.Output, st.BudgetConsumed)
 	}
 	if st.Model != "prov/m1" || st.StepStartedAt == "" || st.StepStartedAt <= before.Format(time.RFC3339Nano) {
@@ -712,7 +712,7 @@ func TestTransitionOperatorRewindFromBlocked(t *testing.T) {
 		t.Fatalf("incomplete: %v", err)
 	}
 	// The owner's verdict: rewind to a.
-	if err := d.Rewind("a", "owner: wrong premise"); err != nil {
+	if err := d.transition(TransitionRequest{Kind: TransRewind, StepID: "a", Reason: "owner: wrong premise", SpawnN: d.currentSpawnN()}); err != nil {
 		t.Fatalf("operator rewind: %v", err)
 	}
 	snap := d.Snapshot()
@@ -743,7 +743,7 @@ func TestTransitionOperatorRewindFromBlocked(t *testing.T) {
 		t.Fatalf("position/stats: current=%q stats=%+v", snap.CurrentStep, snap.RewindStats)
 	}
 	// While running with an open question the rewind is refused.
-	if err := d.Rewind("a", "too late"); err == nil {
+	if err := d.transition(TransitionRequest{Kind: TransRewind, StepID: "a", Reason: "too late", SpawnN: d.currentSpawnN()}); err == nil {
 		t.Fatal("a rewind past a non-current target must be refused (c is current)")
 	}
 }
@@ -774,23 +774,23 @@ func TestTransitionBudgetUpdate(t *testing.T) {
 	mustStart(t, d, "a", 1)
 	if err := d.transition(TransitionRequest{
 		Kind: TransBudgetUpdate, StepID: "a", SpawnN: 1,
-		Budget: &capsule.Budget{USD: 0.25, WallMs: 1000, Tokens: 500},
+		Budget: &capsule.Budget{WallMs: 1000},
 	}); err != nil {
 		t.Fatalf("budget: %v", err)
 	}
 	// StepID empty credits the CURRENT step.
 	if err := d.transition(TransitionRequest{
 		Kind: TransBudgetUpdate, SpawnN: 1,
-		Budget: &capsule.Budget{USD: 0.10, Tokens: 100},
+		Budget: &capsule.Budget{WallMs: 500},
 	}); err != nil {
 		t.Fatalf("budget (current step): %v", err)
 	}
 	snap := d.Snapshot()
 	st := snap.Steps["a"]
-	if st.BudgetConsumed.USD != 0.35 || st.BudgetConsumed.WallMs != 1000 || st.BudgetConsumed.Tokens != 600 {
+	if st.BudgetConsumed.WallMs != 1500 {
 		t.Fatalf("step budget must accumulate: %+v", st.BudgetConsumed)
 	}
-	if snap.BudgetConsumed.USD != 0.35 || snap.BudgetConsumed.Tokens != 600 {
+	if snap.BudgetConsumed.WallMs != 1500 {
 		t.Fatalf("workflow budget aggregates the same deltas: %+v", snap.BudgetConsumed)
 	}
 }

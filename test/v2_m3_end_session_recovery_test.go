@@ -133,14 +133,14 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 
 	// The plan B follows. Spawn ordinals are chain-wide (B re-seeds its
 	// derivation counter from the cloned spawn journal: its first
-	// dispatch is #4): #4 completes the interrupted step, #5 parks on the
-	// release so the WI stays held by B while A restarts below.
+	// dispatch is #4): #4 re-dispatches the interrupted last step and
+	// parks on it, so the WI stays held by B (with a LIVE step process)
+	// while A restarts below.
 	inst.setPlan(t, wi, []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "verification", "park": true},
-		{"do": "envelope", "id": "verification", "outcome": "completed"},
-		{"do": "envelope", "id": "release", "park": true},
+		{"do": "envelope", "id": "verification", "park": true},
 	})
 
 	// Daemon B: another machine, another data dir, a PLAIN claim.
@@ -156,10 +156,18 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 		t.Fatal("B holds A's session")
 	}
 
-	// B resumed at the step after the last completed one.
-	waitStepStatus(t, daemonB, wi, "verification", "done", 90*time.Second)
-	waitStepStatus(t, daemonB, wi, "release", "in_progress", 60*time.Second)
+	// B resumed at the interrupted step and parked on it.
+	waitStepStatus(t, daemonB, wi, "verification", "in_progress", 90*time.Second)
 	capB := daemonB.capsuleDir(wi)
+	waitUntil(t, 60*time.Second, "B's step never parked", func() bool {
+		for _, rec := range spawnJournal(t, capB) {
+			n, _ := rec["spawn_n"].(float64)
+			if rec["step_id"] == "verification" && int(n) > preSpawns {
+				return true
+			}
+		}
+		return false
+	})
 	// fakepi's journal rides the chain, so B's capsule carries whatever
 	// prefix of A's records had been pushed when A was killed (the
 	// journal under logs/ is not part of the synced premise above, so
@@ -171,18 +179,15 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 			stepsRun = append(stepsRun, rec["step"].(string))
 		}
 	}
-	if len(stepsRun) == 0 || contains(stepsRun, "grill") || contains(stepsRun, "fix") {
-		t.Fatalf("B re-ran a completed step or ran nothing: B's envelope writes %v", stepsRun)
-	}
-	if stepsRun[0] != "verification" {
-		t.Fatalf("B did not resume at the interrupted step: %v", stepsRun)
+	if contains(stepsRun, "grill") || contains(stepsRun, "fix") {
+		t.Fatalf("B re-ran a completed step: B's envelope writes %v", stepsRun)
 	}
 	x := readExecution(t, capB)
-	if x.CurrentStep != "release" || x.Steps["grill"].Status != "done" || x.Steps["fix"].Status != "done" {
+	if x.CurrentStep != "verification" || x.Steps["grill"].Status != "done" || x.Steps["fix"].Status != "done" {
 		t.Fatalf("B's execution state wrong: %s (current %s)", execDigest(x), x.CurrentStep)
 	}
-	if n := len(spawnJournal(t, capB)); n != preSpawns+2 {
-		t.Fatalf("B's spawn journal holds %d dispatches, want %d (A's 3 + verification + release)", n, preSpawns+2)
+	if n := len(spawnJournal(t, capB)); n != preSpawns+1 {
+		t.Fatalf("B's spawn journal holds %d dispatches, want %d (A's 3 + the verification re-dispatch)", n, preSpawns+1)
 	}
 
 	// A's task-repo commit, carried through aihub, is in B's clone.
@@ -197,16 +202,16 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 	// Late writes from A's old secret are rejected, now naming B.
 	assertStaleWritesRejected(t, inst, wi, oldSecret, sessB.Fingerprint)
 
-	// B keeps running with its release step parked: a LIVE step process
+	// B keeps running with its verification step parked: a LIVE step process
 	// for the same WI id on the same kernel. A's restart release sweeps
 	// by PF_WI_ID AND PF_DAEMON_ID, so it must leave B's process alone
 	// (on one host both daemons share the kernel).
 	stBefore := inst.wiStatus(t, wi)
 	stepPIDsBefore := daemonStepPIDs(wi, "m-e2e-b")
 	if len(stepPIDsBefore) == 0 {
-		t.Fatal("B's parked release step has no live process to protect")
+		t.Fatal("B's parked verification step has no live process to protect")
 	}
-	spawnsAtRelease := len(spawnJournal(t, capB))
+	spawnsAtPark := len(spawnJournal(t, capB))
 
 	// A restarts later: its restart session verify sees the WI is held by
 	// another session and releases — no resurrection, no double-run, no
@@ -247,8 +252,8 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 	}
 	// No double-run: B's chain-wide dispatch count did not move.
 	time.Sleep(2 * time.Second)
-	if n := len(spawnJournal(t, capB)); n != spawnsAtRelease {
-		t.Fatalf("a dispatch appeared after A's restart: %d, want %d", n, spawnsAtRelease)
+	if n := len(spawnJournal(t, capB)); n != spawnsAtPark {
+		t.Fatalf("a dispatch appeared after A's restart: %d, want %d", n, spawnsAtPark)
 	}
 }
 

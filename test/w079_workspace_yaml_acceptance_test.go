@@ -356,13 +356,13 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 
 	for step, want := range map[string]string{
 		"grill": "w079-e2e-def", "verification": "w079-e2e-def",
-		"fix": "w079-e2e-code-a", "release": "w079-e2e-code-a",
+		"fix": "w079-e2e-code-a",
 	} {
 		if got := w079Model(t, capE, step); got != want {
 			t.Fatalf("e2e %s model %q, want %q (project kind > project default)", step, got, want)
 		}
 	}
-	for _, step := range []string{"grill", "verification", "fix", "release"} {
+	for _, step := range []string{"grill", "verification", "fix"} {
 		if got := w079Model(t, capI, step); got != "w079-ieops-def" {
 			t.Fatalf("ieops %s model %q, want its project default w079-ieops-def (beats the bundle's step-level list)", step, got)
 		}
@@ -428,9 +428,6 @@ func TestW079OneDaemonTwoWorkspacesTwoYamls(t *testing.T) {
 	}
 	if got := w079Model(t, capB, "fix"); got != "w079b-code" {
 		t.Fatalf("B fix model %q, want w079b-code", got)
-	}
-	if got := w079Model(t, capB, "release"); got != "w079b-code" {
-		t.Fatalf("B release model %q, want w079b-code (every kind:code step)", got)
 	}
 	if got := w079Model(t, capB, "grill"); got != w079DefaultsHead {
 		t.Fatalf("B grill model %q, want the bundle defaults head %q", got, w079DefaultsHead)
@@ -595,7 +592,6 @@ func TestW079RotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 					{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "crash": "before", "crash_stderr": w079ProviderErr},
 					{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 					{"do": "envelope", "id": "verification", "outcome": "completed"},
-					{"do": "envelope", "id": "release", "outcome": "completed"},
 				})
 			d.pfWant(inst, -1, "submit", wi)
 			capDir := w079Capsule(ws, wi)
@@ -642,7 +638,6 @@ func TestW079GateFailRewindResetsEffectiveHead(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "gate_failed", "output": verdict},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		})
 	d.pfWant(inst, -1, "submit", wi)
 	capDir := w079Capsule(ws, wi)
@@ -686,7 +681,6 @@ func TestW079RotationUntouchedWithoutYaml(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "gate_failed", "output": verdict},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		})
 	d.pfWant(inst, -1, "submit", wi)
 	capDir := w079Capsule(ws, wi)
@@ -723,7 +717,6 @@ func TestW079RestartKeepsClaimTimeSnapshot(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 8000},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		})
 	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d.start()

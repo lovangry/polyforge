@@ -609,31 +609,6 @@ func (d *Driver) Answer(questionID, answer, answeredBy string) error {
 	return nil
 }
 
-// Rewind is the operator rewind verdict: archive and reset
-// [toStep, current), position back to toStep (the owner's §6.4 move
-// after an incomplete result, or an in-flight correction). See
-// applyRewindLocked for the open-question refusal while running.
-func (d *Driver) Rewind(toStep, reason string) error {
-	return d.transition(TransitionRequest{
-		Kind:   TransRewind,
-		StepID: toStep,
-		Reason: reason,
-		SpawnN: d.currentSpawnN(),
-	})
-}
-
-// Terminate lands a terminal workflow_status with a reason (the owner's
-// kill verdict from blocked, or the daemon's close path). completed is
-// refused unless every step is done — that status is the loop's alone.
-func (d *Driver) Terminate(status, reason string) error {
-	return d.transition(TransitionRequest{
-		Kind:   TransTerminal,
-		Status: status,
-		Reason: reason,
-		SpawnN: d.currentSpawnN(),
-	})
-}
-
 // ResumeCurrent is the owner's third §6.4 verdict after an incomplete
 // result: write running back over the parked workflow (03 §4.2: the
 // owner's follow-up writes running back) and wake the loop, whose own

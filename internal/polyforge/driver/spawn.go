@@ -133,7 +133,6 @@ func NewStepSpawnAdapter(a StepSpawnAdapter) (*StepSpawnAdapter, error) {
 // SpawnStep derives one step process for the driver's dispatch order.
 // The context policy comes from the shared workflow parse.
 func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun, error) {
-	fmt.Fprintf(os.Stderr, "driver: SpawnStep: step=%s spawn=%d\n", sp.StepID, sp.SpawnN)
 	spec := a.Workflow.step(sp.StepID)
 	if spec == nil {
 		return nil, fmt.Errorf("driver: step %q is not in the workflow bundle", sp.StepID)
@@ -767,21 +766,8 @@ func (r *stepRun) exited(defect error) error {
 }
 
 func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
-	tick := 0
 	for {
-		tick++
-		if tick%30 == 1 { // every ~30 polls (15s at default 500ms), log alive
-			fmt.Fprintf(os.Stderr, "driver: stepRun.Wait alive: step=%s spawn=%d tick=%d drop=%s done=%v\n",
-				r.sp.StepID, r.sp.SpawnN, tick, r.dropPath, r.handle.Done())
-		}
 		res, defect := r.collect()
-		if res != nil {
-			fmt.Fprintf(os.Stderr, "driver: stepRun.Wait COLLECTED: step=%s spawn=%d\n",
-				r.sp.StepID, r.sp.SpawnN)
-		} else if defect != nil && tick%30 == 1 {
-			fmt.Fprintf(os.Stderr, "driver: stepRun.Wait defect: step=%s spawn=%d err=%v\n",
-				r.sp.StepID, r.sp.SpawnN, defect)
-		}
 		if res != nil {
 			if err := r.archive(res); err != nil {
 				_ = r.handle.Terminate(teardownBound)

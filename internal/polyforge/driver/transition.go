@@ -655,12 +655,8 @@ func (d *Driver) applyBudgetLocked(req TransitionRequest) error {
 	if st == nil {
 		return fmt.Errorf("driver: budget_update for unknown step %q", stepID)
 	}
-	st.BudgetConsumed.USD += req.Budget.USD
 	st.BudgetConsumed.WallMs += req.Budget.WallMs
-	st.BudgetConsumed.Tokens += req.Budget.Tokens
-	d.exec.BudgetConsumed.USD += req.Budget.USD
 	d.exec.BudgetConsumed.WallMs += req.Budget.WallMs
-	d.exec.BudgetConsumed.Tokens += req.Budget.Tokens
 	return nil
 }
 
@@ -842,9 +838,7 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 	case TransBudgetUpdate:
 		kind = "budget_update"
 		body["step"] = req.StepID
-		body["usd"] = d.exec.BudgetConsumed.USD
 		body["wall_ms"] = d.exec.BudgetConsumed.WallMs
-		body["tokens"] = d.exec.BudgetConsumed.Tokens
 	case TransAnswer:
 		kind = "answered"
 		body["step"] = d.exec.CurrentStep

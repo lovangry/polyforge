@@ -29,7 +29,6 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -116,7 +115,7 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	if x.BudgetConsumed == nil {
 		t.Fatal("execution.json carries no budget_consumed face")
 	}
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		st := x.Steps[step]
 		if st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
@@ -124,7 +123,7 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	}
 	// The envelope face: every step's collected result envelope is
 	// archived in the R14 staging location, in spawn order.
-	for i, step := range []string{"grill", "fix", "verification", "release"} {
+	for i, step := range []string{"grill", "fix", "verification"} {
 		env := archivedEnvelope(t, capDir, step, i+1)
 		if env["step_id"] != step || env["outcome"] != "completed" {
 			t.Fatalf("archived envelope of %s wrong: %v", step, env)

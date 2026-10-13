@@ -474,7 +474,7 @@ func TestRunOperatorRewindFromBlockedThenComplete(t *testing.T) {
 		t.Fatalf("blocked shape: %+v", exec)
 	}
 	// The owner's verdict: rewind to a, then the flow completes.
-	if err := d.Rewind("a", "owner: wrong premise"); err != nil {
+	if err := d.transition(TransitionRequest{Kind: TransRewind, StepID: "a", Reason: "owner: wrong premise", SpawnN: d.currentSpawnN()}); err != nil {
 		t.Fatalf("rewind: %v", err)
 	}
 	if s := readExec(t, execPath).CurrentStep; s != "a" {

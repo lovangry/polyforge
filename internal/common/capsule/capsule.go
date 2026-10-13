@@ -203,9 +203,7 @@ type Attempt struct {
 }
 
 type Budget struct {
-	USD    float64 `json:"usd"`
-	WallMs int64   `json:"wall_ms"`
-	Tokens int64   `json:"tokens"`
+	WallMs int64 `json:"wall_ms"`
 }
 
 type RepoRef struct {

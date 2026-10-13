@@ -25,7 +25,6 @@ func TestV1S08DaemonRestart(t *testing.T) {
 			// Ordinal 3: the post-restart resume dispatch of fix.
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
-			{"do": "envelope", "id": "release", "outcome": "completed"},
 		}, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
@@ -109,7 +108,7 @@ func TestV1S08DaemonRestart(t *testing.T) {
 	// place, and the reattached monitor watched the new derivation to its
 	// end (job_started on the restarted daemon's watch).
 	x := readExecution(t, capDir)
-	for _, step := range []string{"grill", "fix", "verification", "release"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
 			t.Fatalf("step %s: %+v, want done", step, st)
 		}

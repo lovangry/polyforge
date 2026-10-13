@@ -4,15 +4,15 @@ package test
 // (the bug-fix lane's review) whose result envelope carries verdict
 // "fail" in its OUTPUT JSON but outcome "completed" — the exact shape
 // the #106 review step delivered. The driver never reads a verdict
-// inside output, so the FAIL verdict advanced the workflow to release
-// instead of firing the on_fail rewind to fix.
+// inside output, so the FAIL verdict advanced the workflow past the
+// gate instead of firing the on_fail rewind to fix.
 //
 // This scenario pins the work item's e2e acceptance (wi_7omkUJfGaJIS):
 // the rewind MUST fire from review's fail verdict. It FAILS on the
 // current code: the workflow completes with zero rewinds, review is
-// archived as done with the fail verdict, and release runs anyway —
-// the near-miss without #106's lucky save (the scripted release here
-// does not cross-check review's verdict, so nothing masks the symptom).
+// archived as done with the fail verdict and the lane wraps anyway —
+// the near-miss without #106's lucky save (nothing downstream
+// cross-checks review's verdict, so nothing masks the symptom).
 
 import (
 	"encoding/json"
@@ -49,9 +49,8 @@ func TestV1S27GateFailVerdictInsideCompletedEnvelopeMustRewind(t *testing.T) {
 			"fail_reason": "the fix suppresses the symptom at one call site; the cause is still reachable",
 			"findings":    []map[string]any{{"severity": "blocking", "detail": "root cause not removed"}},
 		}},
-		// Buggy-world spawn 6: release, dispatched because review's fail
-		// verdict was swallowed by outcome completed.
-		{"do": "envelope", "id": "release", "outcome": "completed"},
+		// On the buggy driver the lane simply wraps here, review's fail
+		// verdict swallowed by outcome completed.
 	}
 
 	wi := newWIWithBundle(t, inst, "s27: review fail verdict rides a completed envelope (#106 shape)", "bug-fix", plan)

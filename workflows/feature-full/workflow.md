@@ -11,7 +11,6 @@ steps:
   - { id: e2e-run, context_policy: fresh, handoff: true, kind: code, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
   - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
   - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
-  - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, budget: { wall_minutes: 15 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5], on_fail: { target: review } }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 ---
@@ -19,18 +18,18 @@ defaults:
 # feature-full — reference flow
 
 This is the flow-level narrative for the workflow. It explains how the
-eleven steps compose and what flows between them; it is not itself a structural
+ten steps compose and what flows between them; it is not itself a structural
 schema — the frontmatter `steps` array above is the *only* execution order. Nothing here overrides it.
 
 ## Shape of the flow
 
 ```
-grill --> spec --> grill-review --> plan --> e2e-author --> e2e-baseline --> code --> e2e-run --> review --> verification --> release
+grill --> spec --> grill-review --> plan --> e2e-author --> e2e-baseline --> code --> e2e-run --> review --> verification
 ```
 
-The five gate FAIL edges, each declared in the frontmatter as that gate's `on_fail`
-rewind target: `grill-review` --> `spec`, `e2e-run` --> `code`, `review` --> `code`,
-`verification` --> `code`, and `release` --> `review`.
+The four gate FAIL edges, each declared in the frontmatter as that gate's `on_fail`
+rewind target: `grill-review` --> `spec`, `e2e-run` --> `code`, `review` --> `code`
+and `verification` --> `code`.
 
 The flow has two front-loaded interactive checkpoints (`grill`, `grill-review`) that
 replace a heavy spec-review loop with a leaner two-pass confirmation, an acceptance
@@ -40,7 +39,8 @@ demonstrably-red bar), a build lane that implements against that executable
 acceptance (`code` continues `e2e-baseline`'s session via its inherit handoff, then
 `e2e-run` re-runs the same authored suite as the hard rerun gate, rewinding to `code`
 on red), a judgment pair (`review` first, then `verification` as the last machine
-gate), and a release slot at the end that is a normal step, not a special mechanism.
+gate) that ends the flow — the workflow wraps on the last step, with no release
+step of its own (shipping is the project's business, outside the bundle).
 
 ## Artifact flow between steps
 
@@ -57,9 +57,8 @@ file under `artifacts/`; no step declares frontmatter `inputs:`, so downstream s
 | `e2e-baseline` | `artifacts/e2e-baseline.md` (the laid bar: one fail entry per scenario with evidence) | `code` (primary, via its inherit handoff), `review` (consultative) |
 | `code` | changes under `repos/<name>/**`, `artifacts/code-summary.md` | `e2e-run`, `verification`, `review` |
 | `e2e-run` | `artifacts/e2e-results.md` (rerun verdict + per-scenario results) | `review` |
-| `review` | `artifacts/review.md` (verdict) | `verification`, `release` |
-| `verification` | `artifacts/verification-report.md` (verdict) | `release` |
-| `release` | `artifacts/release-notes.md`, tag/version metadata | (terminal) |
+| `review` | `artifacts/review.md` (verdict) | `verification` |
+| `verification` | `artifacts/verification-report.md` (verdict) | (terminal) |
 
 `grill` and `grill-review` share one running document, `artifacts/grill-qa.md`, sectioned
 by step id: `grill` appends its question/answer pairs first, `spec` reads the whole file
@@ -67,8 +66,8 @@ for context, and `grill-review` appends its own confirmation pass underneath.
 
 ## Rewind boundaries
 
-Every gate in this flow declares its rewind target in the frontmatter `on_fail` — five
-gates, three distinct targets (`spec`, `code`, `review`). This section only explains
+Every gate in this flow declares its rewind target in the frontmatter `on_fail` — four
+gates, two distinct targets (`spec`, `code`). This section only explains
 *why* each target was picked:
 
 - **`grill-review` FAILs -> rewind to `spec`.** The user's confirmation pass found the
@@ -89,15 +88,8 @@ gates, three distinct targets (`spec`, `code`, `review`). This section only expl
   step consuming the verdict text (the flow does not need a third rewind target for
   this).
 - **`verification` FAILs -> rewind to `code`.** Verification is the last machine gate:
-  it re-runs the full green bar as the final mechanical check, after `review` and
-  before `release`; a failure here means the implementation itself needs another pass,
-  not the plan.
-- **`release` FAILs -> rewind to `review`** (this bundle's default; a project may
-  override `release`'s `on_fail.target` to `code` if its release gate is really a code
-  gate). A release failure re-runs review because the failure is normally either a
-  release-blocking review comment resurfacing at ship time, or a release-gate check that
-  is itself business judgment about readiness — not automatically evidence the code is
-  wrong.
+  it re-runs the full green bar as the final mechanical check, after `review`; a
+  failure here means the implementation itself needs another pass, not the plan.
 
 Workflow-level rewind bounds: this bundle's frontmatter deliberately omits the
 `rewind` block, so the driver defaults apply — `max_total: 4`, `max_per_step: 2`. A gate that keeps failing past those bounds ends
@@ -110,23 +102,10 @@ with larger codebases or slower CI should raise the per-step `budget.wall_minute
 
 Every step declares its own `budget.wall_minutes`: the checkpoints `grill` and `grill-review` get 30 (the
 user's own thinking time is inside the step), the authoring steps `spec`/`plan`/`e2e-author` 15, the e2e
-executions `e2e-baseline`/`e2e-run` 20, `code` 30, `release` 15, and the judgment gates `verification`/`review`
-20 — 230 minutes in total.
+executions `e2e-baseline`/`e2e-run` 20, `code` 30, and the judgment gates `verification`/`review`
+20 — 215 minutes in total.
 
 The declared wall is an estimate, not a limit: the daemon bounds a step's total runtime across its
 dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
 A step that declares nothing gets the default, so declare a wall only for a step that legitimately
 needs more than 90 minutes in total.
-
-## The release step (per-project convention)
-
-`release` is an ordinary step slot, not a distinct mechanism — it reuses every existing
-step primitive (inputs, `output` schema, worktree, wall estimate, rewind). The version shipped in this reference bundle
-(`steps/release.md`) is deliberately generic: it defines the shape of a release step
-(what a release verdict/output looks like) without hard-wiring a specific version scheme,
-build system, tagging convention, or publish target, because those are legitimately
-per-project. Each project consuming this bundle as a template is expected to replace the
-body of `steps/release.md` with its own concrete release procedure while keeping the
-frontmatter contract (`name`, `description`, `tools`, `output`) intact. The platform's
-own release of aihub and the work-machine binary (two build outputs) is just one
-instance of this same hook, not a special case.
