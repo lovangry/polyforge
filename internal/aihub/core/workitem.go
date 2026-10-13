@@ -182,6 +182,28 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		req.ParentID = nil
 	}
 
+	// Symmetric-rule recheck (w140): the parent's bundle state is
+	// re-read inside the create transaction, after the child INSERT
+	// below can no longer interleave with another writer (single
+	// writer). A bind that raced this create either committed first
+	// (the pre-INSERT check above refused) or is still pending (it will
+	// lose its guarded write). The refusal leaves nothing persisted —
+	// the deferred rollback discards the inserted child row.
+	parentRecheck := func() error {
+		if req.ParentID == nil {
+			return nil
+		}
+		var recheckBundle sql.NullString
+		if err := tx.QueryRow(`SELECT bundle_name FROM work_items WHERE id=?1`, *req.ParentID).Scan(&recheckBundle); err != nil {
+			return err
+		}
+		if recheckBundle.Valid && recheckBundle.String != "" {
+			return Fail(api.ErrCoreBadInput, "PARENT_NOT_REGISTRY",
+				"parent is an execution ticket, not a registry ticket")
+		}
+		return nil
+	}
+
 	// Repo-reference triple (02 §4.6): validated INSIDE the create
 	// transaction so a refused create persists nothing (fail whole). A
 	// declared repo whose base sha is missing/blank draws the typed
@@ -228,6 +250,9 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		return nil, err
 	}
 	if err := appendEventTx(tx, id, now, req.Reporter, "work_item_filed", nil); err != nil {
+		return nil, err
+	}
+	if err := parentRecheck(); err != nil {
 		return nil, err
 	}
 	// Freeze the validated repo inventory in the SAME transaction as
@@ -461,6 +486,11 @@ type bundlePatch struct {
 	Digest *string
 }
 
+// binding reports whether the patch binds a non-NULL bundle (the
+// symmetric child rule applies only to binding, not to unbinding; the
+// parser already rejected an empty name).
+func (b *bundlePatch) binding() bool { return b != nil && b.Name != nil }
+
 // parseBundlePatch extracts the bundle fields from a PATCH body. Absent
 // both → nil (not a bundle patch); malformed shapes → typed CORE-400.
 func parseBundlePatch(fields map[string]json.RawMessage) (*bundlePatch, error) {
@@ -494,6 +524,25 @@ func parseBundlePatch(fields map[string]json.RawMessage) (*bundlePatch, error) {
 		}
 	}
 	return &bp, nil
+}
+
+// refuseBundleWithChildrenTx is the symmetric children-side rule (w140,
+// spec R-对称-1): a ticket WITH children must never GAIN a bundle —
+// children count in any status (terminal included). The PATCH bind entry
+// runs it inside its transaction and re-validates it in the guarded
+// write; the create entry cannot violate it (a created row is childless
+// by construction) but runs the mirror rule instead: a bundle-bound
+// ticket is never a parent (PARENT_NOT_REGISTRY, below).
+func refuseBundleWithChildrenTx(q queryRower, wiID string) error {
+	var n int
+	if err := q.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=?1`, wiID).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return Fail(api.ErrCoreBadInput, "HAS_CHILDREN_NO_BUNDLE",
+			"work item has %d child ticket(s); a ticket with children cannot bind a workflow bundle", n)
+	}
+	return nil
 }
 
 // diagnoseR2Window is the R2 bundle-PATCH gate's error face (w140). The
@@ -673,6 +722,12 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 		if err := diagnoseR2Window(tx, id); err != nil {
 			return nil, err
 		}
+		if bp.binding() {
+			// Symmetric child rule, inside the same transaction (w140).
+			if err := refuseBundleWithChildrenTx(tx, id); err != nil {
+				return nil, err
+			}
+		}
 		name, digest := bundleRef(bp.Name, bp.Digest)
 		sets = append(sets, "bundle_name=?", "bundle_digest=?")
 		args = append(args, name, digest)
@@ -686,6 +741,12 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 		q += ` AND status='queued' AND session_hash IS NULL
 			AND (SELECT COUNT(*) FROM wi_events e
 			     WHERE e.work_item_id=work_items.id AND e.event_type='session_claimed')=0`
+		if bp.binding() {
+			// The symmetric child rule rides the same guarded write: a
+			// child that landed concurrently makes THIS write a 0-row
+			// no-op (bind-bundle vs new-child: exactly one wins, w140).
+			q += ` AND (SELECT COUNT(*) FROM work_items c WHERE c.parent_id=work_items.id)=0`
+		}
 	}
 	res, err := tx.Exec(q, args...)
 	if err != nil {
@@ -695,6 +756,11 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 		if bp != nil {
 			if derr := diagnoseR2Window(tx, id); derr != nil {
 				return nil, derr
+			}
+			if bp.binding() {
+				if derr := refuseBundleWithChildrenTx(tx, id); derr != nil {
+					return nil, derr
+				}
 			}
 			return nil, Fail(api.ErrCoreConflict, "RACE_LOST", "state changed concurrently")
 		}

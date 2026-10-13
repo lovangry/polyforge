@@ -234,3 +234,84 @@ func TestPatchBundleRepoInventoryUntouched(t *testing.T) {
 		t.Fatalf("bundle PATCH mutated the frozen inventory: before %+v after %+v", before, after)
 	}
 }
+
+// TestPatchBundleWithChildrenRefused: the symmetric children-side rule —
+// a ticket WITH children never gains a bundle, children counting in any
+// status (terminal included), and the refusal writes nothing.
+func TestPatchBundleWithChildrenRefused(t *testing.T) {
+	// The children side: file a real child under the parent.
+	env2 := newEnv(t)
+	p2, err := env2.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: "w140 parent", Reporter: env2.UserID,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	c2, err := env2.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: "w140 child", Reporter: env2.UserID, ParentID: strPtrTest(p2.ID),
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if _, err := patchBundle(t, env2, p2.ID, strPtrTest("w140-sym-p"), nil); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "HAS_CHILDREN_NO_BUNDLE" {
+		t.Fatalf("bind on parent with children: want CORE-400/HAS_CHILDREN_NO_BUNDLE, got %v", err)
+	}
+	// ... and a terminal child still counts as a child.
+	if _, err := env2.WIs.Cancel(c2.ID, env2.UserID); err != nil {
+		t.Fatalf("cancel child: %v", err)
+	}
+	if _, err := patchBundle(t, env2, p2.ID, strPtrTest("w140-sym-p"), nil); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "HAS_CHILDREN_NO_BUNDLE" {
+		t.Fatalf("bind on parent whose child is terminal: want CORE-400/HAS_CHILDREN_NO_BUNDLE, got %v", err)
+	}
+	got, err := env2.WIs.Get(p2.ID, GetOptions{})
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if got.BundleName != nil {
+		t.Fatalf("refused PATCH wrote: bundle_name = %v, want null", got.BundleName)
+	}
+
+	// The create-side mirror: a bundle-bound ticket is never a parent.
+	q, err := env2.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: "w140 bound ticket", Reporter: env2.UserID,
+		BundleName: strPtrTest("w140-sym-q"),
+	})
+	if err != nil {
+		t.Fatalf("create bound ticket: %v", err)
+	}
+	before, err := env2.WIs.List(ListFilters{Project: "alpha"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if _, err := env2.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: "w140 child under bound parent", Reporter: env2.UserID,
+		ParentID: strPtrTest(q.ID),
+	}); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "PARENT_NOT_REGISTRY" {
+		t.Fatalf("create child under bound parent: want CORE-400/PARENT_NOT_REGISTRY, got %v", err)
+	}
+	after, err := env2.WIs.List(ListFilters{Project: "alpha"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("refused create persisted a row: %d before, %d after", len(before), len(after))
+	}
+
+	// ... and the unbound parent accepts children (parent_id lands).
+	r, err := env2.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: "w140 unbound parent", Reporter: env2.UserID,
+	})
+	if err != nil {
+		t.Fatalf("create unbound parent: %v", err)
+	}
+	rc, err := env2.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: "w140 child under unbound parent", Reporter: env2.UserID,
+		ParentID: strPtrTest(r.ID),
+	})
+	if err != nil {
+		t.Fatalf("create child under unbound parent: %v", err)
+	}
+	if rc.ParentID == nil || *rc.ParentID != r.ID {
+		t.Fatalf("child parent_id = %v, want %s", rc.ParentID, r.ID)
+	}
+}
