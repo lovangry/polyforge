@@ -117,7 +117,11 @@ func TestClassifyWaitFailure(t *testing.T) {
 		{"unparseable model on stderr", &ExitedError{ExitCode: 1, LastError: `error: model "x/y" not found (unknown model)`}, FailExitModel},
 		{"401 auth", &ExitedError{ExitCode: 1, LastError: "provider returned 401 Unauthorized"}, FailExitModel},
 		{"invalid api key", &ExitedError{ExitCode: 1, LastError: "Invalid API key provided"}, FailExitModel},
-		{"quota", &ExitedError{ExitCode: 1, LastError: "You exceeded your current quota"}, FailExitModel},
+		// polyforge#147 D7: the throttle signatures are their own class —
+		// the same model is retried after a backoff, the chain stays put.
+		{"quota", &ExitedError{ExitCode: 1, LastError: "You exceeded your current quota"}, FailRateLimited},
+		{"429", &ExitedError{ExitCode: 1, LastError: "provider returned HTTP 429"}, FailRateLimited},
+		{"overloaded outranks an error turn", &ExitedError{ExitCode: 1, TurnError: true, LastError: "upstream overloaded"}, FailRateLimited},
 		{"harness-reported ENOSPC", &ExitedError{ExitCode: 1, LastError: "write: no space left on device"}, FailExitHost},
 		{"harness-reported EACCES", &ExitedError{ExitCode: 1, LastError: "open /x: permission denied"}, FailExitHost},
 		{"host outranks a model-looking error turn", &ExitedError{ExitCode: 1, TurnError: true, LastError: "ENOSPC: no space left"}, FailExitHost},

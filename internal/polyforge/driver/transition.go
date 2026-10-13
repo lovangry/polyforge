@@ -883,6 +883,9 @@ func (d *Driver) failureEventsLocked(req TransitionRequest, info *appliedInfo, b
 	if dec.RelaxWallMs > 0 {
 		body["relaxed_wall_ms"] = dec.RelaxWallMs
 	}
+	if dec.Backoff > 0 {
+		body["backoff_ms"] = dec.Backoff.Milliseconds()
+	}
 	if dec.Switch {
 		body["from_model"], body["to_model"] = dec.From, dec.To
 		info.extra = append(info.extra, appliedEvent{"candidate_switched", map[string]any{

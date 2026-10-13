@@ -38,6 +38,13 @@ const (
 	CauseToolHung             Cause = "tool_hung"               // rule 3
 	CauseStepTimeoutLongTask  Cause = "step_timeout_long_task"  // rule 4a
 	CauseStepTimeoutSlowModel Cause = "step_timeout_slow_model" // rule 4b
+	// CauseRateLimited is the provider's throttle (429 / rate limit /
+	// overloaded / quota / billing-credit), judged by the driver's own
+	// exit classification rather than by a supervisor rule
+	// (polyforge#147 D7). It is deliberately NOT model-class: the
+	// provider is busy, not broken, so the same model is retried after a
+	// backoff and the candidate chain stays where it is.
+	CauseRateLimited Cause = "rate_limited"
 )
 
 // Outcome is how a dispatch ended, as reported by step_ended.

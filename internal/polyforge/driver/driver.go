@@ -100,6 +100,10 @@ type Config struct {
 	MaxStepFailures int
 	// Now overrides the clock (tests).
 	Now func() time.Time
+	// Sleep overrides the driver's waits (the D7 rate-limit backoff);
+	// nil = a real timer cut short by the context. Tests inject a
+	// recorder so the backoff curve is asserted without the wall time.
+	Sleep func(ctx context.Context, d time.Duration)
 }
 
 // InterruptedDispatch records one derivation that ended without a
@@ -302,7 +306,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			// a failed dispatch like any other — classified, counted,
 			// retried or blocked.
 			cause, code, detail := classifyWaitFailure(fmt.Errorf("driver: step %s spawn %d failed: %w", stepID, n, err))
-			if blocked, ferr := d.failDispatch(stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
+			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
 				return ferr
 			} else if blocked {
 				return nil
@@ -317,7 +321,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			d.emit("step_dead", map[string]any{
 				"step": stepID, "spawn_n": n, "cause": verdict.Cause, "evidence": verdict.Evidence,
 			})
-			if blocked, ferr := d.failDispatch(stepID, n, dispatchedAt, string(verdict.Cause), -1, verdict.Evidence); ferr != nil {
+			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, string(verdict.Cause), -1, verdict.Evidence); ferr != nil {
 				return ferr
 			} else if blocked {
 				return nil
@@ -335,7 +339,7 @@ func (d *Driver) Run(ctx context.Context) error {
 				return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, werr)
 			}
 			cause, code, detail := classifyWaitFailure(werr)
-			if blocked, ferr := d.failDispatch(stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
+			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
 				return ferr
 			} else if blocked {
 				return nil
@@ -348,7 +352,7 @@ func (d *Driver) Run(ctx context.Context) error {
 		if verr := d.validateResultStrict(res, stepID, n); verr != nil {
 			// Envelope-authoring errors are STEP-CONTENT failures, not
 			// infrastructure (the #97/#107 lessons: a hand-transcribed digest
-			// typo, a missing handoff_ref — each used to cost a whole driver
+			// typo, a missing handoff digest — each used to cost a whole driver
 			// restart through the recovery lane, and two rejections inside
 			// the storm window bounded-failed the WI outright). The driver
 			// re-dispatches the step in-process with the rejection as visible

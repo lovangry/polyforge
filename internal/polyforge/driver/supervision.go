@@ -45,6 +45,12 @@ const (
 	FailToolHung             = string(supervise.CauseToolHung)
 	FailStepTimeoutLongTask  = string(supervise.CauseStepTimeoutLongTask)
 	FailStepTimeoutSlowModel = string(supervise.CauseStepTimeoutSlowModel)
+	// FailRateLimited: the provider throttled the dispatch (429, rate
+	// limit, overloaded, quota, billing credit). Not model-class
+	// (polyforge#147 D7): the SAME model is retried after an exponential
+	// backoff, with no retry-count bound of its own — only the step's
+	// cumulative runtime T limits the retries.
+	FailRateLimited = string(supervise.CauseRateLimited)
 	// FailExitModel: the process exited without a result and the last
 	// signal was an error turn, or its exit text names a model problem
 	// (unparseable model, 401/auth, quota).
@@ -69,6 +75,48 @@ const WallEstimateFactor = 3
 // DefaultMaxStepFailures is the per-step failure counter bound (v2-converge
 // 2.3): the third counted failure blocks the step.
 const DefaultMaxStepFailures = 3
+
+// The D7 rate-limit backoff (polyforge#147): the first throttled
+// dispatch is retried after RateLimitBackoffBase, each consecutive one
+// after twice the previous wait, never longer than RateLimitBackoffMax.
+// There is no retry-count bound: the step's cumulative runtime T is the
+// only limit, and a T exhaustion takes the ordinary timeout path.
+const (
+	RateLimitBackoffBase = 1 * time.Second
+	RateLimitBackoffMax  = 300 * time.Second
+)
+
+// rateLimitBackoff answers the wait before the (streak+1)-th throttled
+// dispatch of a step: the base doubled once per already-recorded
+// consecutive rate-limit death, capped.
+func rateLimitBackoff(streak int) time.Duration {
+	d := RateLimitBackoffBase
+	for i := 0; i < streak; i++ {
+		if d >= RateLimitBackoffMax {
+			break
+		}
+		d *= 2
+	}
+	if d > RateLimitBackoffMax {
+		d = RateLimitBackoffMax
+	}
+	return d
+}
+
+// rateLimitStreak counts the step's trailing consecutive rate-limit
+// infra failures (the archived attempts are the authority, like the
+// candidate pointer): a dispatch that died of anything else — or a
+// delivered result — ends the streak and the backoff starts over.
+func rateLimitStreak(attempts []capsule.Attempt) int {
+	n := 0
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if attempts[i].FailureCause != FailRateLimited {
+			break
+		}
+		n++
+	}
+	return n
+}
 
 // ErrDriverStalled is Run's error when the supervisor's driver_stalled
 // verdict reached the loop: the recovery engine relaunches the driver
@@ -139,7 +187,13 @@ var (
 	// model-class: the model/provider side is broken, a different model
 	// may work (F4: a pinned model that cannot resolve must advance the
 	// candidate chain).
-	modelPatterns = regexp.MustCompile(`(?i)(model\W.{0,60}(not found|unknown|unresolved|cannot be resolved|could not be resolved|not resolve|invalid|unavailable|not available|unsupported|does not exist)|(unknown|invalid|unparse?able|unresolved|unsupported|no such) model|no models? (found|available|match)|\b401\b|\b403\b|unauthori[sz]ed|authentication|invalid api key|incorrect api key|api key|quota|insufficient|billing|credit|rate.?limit|\b429\b|overloaded)`)
+	modelPatterns = regexp.MustCompile(`(?i)(model\W.{0,60}(not found|unknown|unresolved|cannot be resolved|could not be resolved|not resolve|invalid|unavailable|not available|unsupported|does not exist)|(unknown|invalid|unparse?able|unresolved|unsupported|no such) model|no models? (found|available|match)|\b401\b|\b403\b|unauthori[sz]ed|authentication|invalid api key|incorrect api key|api key)`)
+	// rate-limit class (polyforge#147 D7): the provider is throttling or
+	// out of allowance. Another model would be throttled just the same
+	// (and a switch would burn the chain), so these never advance the
+	// candidate pointer: the driver waits out a backoff and retries the
+	// SAME model.
+	rateLimitPatterns = regexp.MustCompile(`(?i)(\b429\b|rate.?limit|too many requests|overloaded|quota|insufficient|billing|credit)`)
 )
 
 // classifyWaitFailure maps a Wait error (not a cancellation) onto a
@@ -158,6 +212,10 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 			// before any text match: leftover stderr must never turn a
 			// clean stop into a model fault that burns a candidate.
 			return FailEndedWithoutResult, ee.ExitCode, ee.Error()
+		case rateLimitPatterns.MatchString(text):
+			// evaluated before the model class: a throttle is the
+			// provider being busy, not the model being broken
+			return FailRateLimited, ee.ExitCode, ee.Error()
 		case ee.TurnError || modelPatterns.MatchString(text):
 			return FailExitModel, ee.ExitCode, ee.Error()
 		default:
@@ -171,7 +229,10 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 	}
 	// A harness that died at startup never read its prompt (EPIPE on the
 	// write); the error carries its stderr, and a model-class text there
-	// advances the candidate chain (F4).
+	// advances the candidate chain (F4) — a throttle text does not.
+	if rateLimitPatterns.MatchString(err.Error()) {
+		return FailRateLimited, -1, err.Error()
+	}
 	if modelPatterns.MatchString(err.Error()) {
 		return FailExitModel, -1, err.Error()
 	}
@@ -393,6 +454,9 @@ type failureDecision struct {
 	RelaxToolMs int64
 	RelaxWallMs int64
 	Fresh       bool
+	// Backoff is the wait the driver owes before the next dispatch of
+	// this step (D7: a rate-limit disposal only ever backs off).
+	Backoff time.Duration
 }
 
 func (dec failureDecision) disposition() string {
@@ -424,6 +488,11 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 		dec.Block = true
 		dec.Report = true
 		dec.BlockReason = fmt.Sprintf("host-class fault (%s): the machine, not the model, is broken: %s", f.Cause, f.Detail)
+	case f.Cause == FailRateLimited:
+		// D7: the provider throttled us. No switch (the chain is not
+		// spent by someone else's quota) and no block — the backoff
+		// before the next dispatch is the whole disposal.
+		dec.Backoff = rateLimitBackoff(rateLimitStreak(st.Attempts))
 	case IsModelClass(f.Cause):
 		ptr := CandidatePointer(st.Attempts, cands)
 		switch {
@@ -464,6 +533,12 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 	if dec.Switch {
 		dec.Count = 0 // a new candidate starts a fresh ledger
 		dec.Fresh = true
+	} else if f.Cause == FailRateLimited {
+		// D7: a throttle is not the step failing. The counter that
+		// blocks never moves (no retry bound below T) and the retry
+		// resumes the transcript it already has.
+		dec.Count = sup.FailureCount
+		dec.Fresh = false
 	} else {
 		dec.Count = sup.FailureCount + 1
 		if dec.Count >= d.maxStepFailures() && !dec.Block {
@@ -603,7 +678,7 @@ func (d *Driver) bookWall(stepID string, since time.Time) {
 // applies the death-cause table. blocked reports that the decision
 // parked the workflow (Run then exits cleanly: the owner holds the next
 // move).
-func (d *Driver) failDispatch(stepID string, n int64, since time.Time, cause string, exitCode int, detail string) (blocked bool, err error) {
+func (d *Driver) failDispatch(ctx context.Context, stepID string, n int64, since time.Time, cause string, exitCode int, detail string) (blocked bool, err error) {
 	d.addUnbooked(stepID, since)
 	wall := d.takeUnbooked(stepID)
 	last := detail
@@ -622,7 +697,51 @@ func (d *Driver) failDispatch(stepID string, n int64, since time.Time, cause str
 	d.mu.Lock()
 	blocked = d.exec.WorkflowStatus == StatusBlocked
 	d.mu.Unlock()
+	if !blocked && cause == FailRateLimited {
+		d.rateLimitWait(ctx, stepID)
+	}
 	return blocked, nil
+}
+
+// rateLimitWait waits out the provider's throttle before the step is
+// dispatched again on the SAME model (D7): the exponential backoff
+// grows with the step's trailing streak of rate-limit deaths (the
+// attempts just archived are the authority) and is capped at
+// RateLimitBackoffMax. The wait is not agent runtime, so it never
+// enters the step's cumulative T.
+func (d *Driver) rateLimitWait(ctx context.Context, stepID string) {
+	d.mu.Lock()
+	streak := 0
+	if st := d.exec.Steps[stepID]; st != nil {
+		streak = rateLimitStreak(st.Attempts)
+	}
+	d.mu.Unlock()
+	if streak <= 0 {
+		streak = 1
+	}
+	wait := rateLimitBackoff(streak - 1) // the archived death is this one
+	d.emit("rate_limited", map[string]any{
+		"step": stepID, "consecutive": streak, "backoff_ms": wait.Milliseconds(),
+		"note": "provider throttle: the same model is retried after the backoff; only the step's cumulative runtime T bounds the retries",
+	})
+	d.sleep(ctx, wait)
+}
+
+// sleep waits for d (tests inject Config.Sleep), cut short by ctx.
+func (d *Driver) sleep(ctx context.Context, wait time.Duration) {
+	if wait <= 0 {
+		return
+	}
+	if d.cfg.Sleep != nil {
+		d.cfg.Sleep(ctx, wait)
+		return
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // announceWaiting sends step_waiting_human for the current step's open
