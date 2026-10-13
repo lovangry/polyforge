@@ -283,10 +283,10 @@ var cmdWrap = &Command{
 		if boolFlag(fs, "fail") {
 			reason = "fail"
 		}
-		// A WI parked blocked has no local job and no hub door for a
-		// failed verdict: the blocked exits are continue (`pf resume`) and
-		// abandon (`pf cancel`) — `wrap --fail` on a parked WI therefore
-		// fails at the daemon (no local job), never at the hub.
+		// A WI parked blocked has no hub door for a failed verdict: the
+		// blocked exits are continue (`pf resume`) and abandon
+		// (`pf cancel`). The daemon refuses `wrap` and `wrap --fail` on a
+		// parked-blocked WI with DAEMON-409 naming those two moves.
 		raw, err := ctx.daemon().Wrap(args[0], reason)
 		if err != nil {
 			return err
