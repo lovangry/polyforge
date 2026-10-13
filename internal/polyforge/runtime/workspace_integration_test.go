@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -53,16 +52,20 @@ func twoWorkspaceRuntime(t *testing.T) (*Runtime, *fakeHub, string, string) {
 	}
 	sp := &scriptedSpawner{}
 	cfg := Config{
-		MachineID:               "m-test",
-		Mapping:                 plan,
-		DataDir:                 filepath.Join(t.TempDir(), "data"),
-		AgentStarter:            scriptedEngineStarter(sp),
-		MaxRecoveries:           2,
-		RecoveryStabilityWindow: time.Nanosecond,
+		MachineID:     "m-test",
+		Mapping:       plan,
+		DataDir:       filepath.Join(t.TempDir(), "data"),
+		AgentStarter:  scriptedEngineStarter(sp),
+		MaxRecoveries: 2,
 	}
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
+
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	hub.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 	return r, hub, wsA, wsB
 }
@@ -84,41 +87,32 @@ func TestTwoWorkspacesTwoYamlsOneDaemon(t *testing.T) {
 	}
 	capA := filepath.Join(wsA, "capsules", "wi_w079intA")
 	capB := filepath.Join(wsB, "capsules", "wi_w079intB")
-	idnA, rawA := readIdentity(t, capA)
-	idnB, rawB := readIdentity(t, capB)
+	_, rawA := readIdentity(t, capA)
+	_, rawB := readIdentity(t, capB)
 
-	// proj-a's default governs EVERY step (it beats the bundle step-level
-	// list too).
-	for _, step := range []string{"grill", "fix", "release"} {
-		if got := idnA.EffectiveCandidates[step]; len(got) != 2 || got[0] != "w079a-flow" {
-			t.Fatalf("proj-a %s candidates %v, want [w079a-flow w079a-flow2]", step, got)
-		}
-	}
-	// proj-b's kind pin governs every kind:code step; kind spec keeps the
-	// bundle default.
-	if got := idnB.EffectiveCandidates["fix"]; len(got) != 1 || got[0] != "w079b-code" {
-		t.Fatalf("proj-b fix candidates %v, want [w079b-code]", got)
-	}
-	if got := idnB.EffectiveCandidates["grill"]; len(got) != 2 || got[0] != "prov/weak-a" {
-		t.Fatalf("proj-b grill candidates %v, want the bundle default", got)
+	// The per-step candidate computation no longer lands in capsule.json
+	// (the audit field was deleted with the audit's dead-code sweep; the
+	// workspace yaml governs every dispatch directly). Neither capsule
+	// records anything of the other project's identity.
+	if strings.Contains(rawA, "effective_candidates") || strings.Contains(rawB, "effective_candidates") {
+		t.Fatalf("the deleted audit key must not be written: A %s B %s", rawA, rawB)
 	}
 	if strings.Contains(rawA, "w079b") || strings.Contains(rawB, "w079a") {
 		t.Fatalf("an audit leaked the other workspace's yaml:\nA %s\nB %s", rawA, rawB)
 	}
 
 	// Per-claim freshness: an edit between claims governs the NEXT claim
-	// while the earlier claim's audit stands.
+	// (the audit field is gone; neither capsule carries the deleted key).
 	writeWorkspaceYaml(t, wsA, "models:\n  proj-a:\n    default: [w079-edit-v2]\n")
 	if err := r.Start(context.Background(), "wi_w079intA2"); err != nil {
 		t.Fatalf("Start A2: %v", err)
 	}
-	idnA2, _ := readIdentity(t, filepath.Join(wsA, "capsules", "wi_w079intA2"))
-	if got := idnA2.EffectiveCandidates["grill"]; len(got) != 1 || got[0] != "w079-edit-v2" {
-		t.Fatalf("second-claim grill candidates %v, want [w079-edit-v2]", got)
+	rawA2, rerr := os.ReadFile(filepath.Join(wsA, "capsules", "wi_w079intA2", "capsule.json"))
+	if rerr != nil {
+		t.Fatal(rerr)
 	}
-	again, _ := readIdentity(t, capA)
-	if got := again.EffectiveCandidates["grill"]; len(got) != 2 || got[0] != "w079a-flow" {
-		t.Fatalf("first-claim audit changed under the edit: %v", got)
+	if strings.Contains(string(rawA2), "effective_candidates") {
+		t.Fatalf("the deleted audit key must not be written (raw %s)", rawA2)
 	}
 	for _, wi := range []string{"wi_w079intA", "wi_w079intB", "wi_w079intA2"} {
 		if err := r.Stop(context.Background(), wi, protocol.FinishWrapped); err != nil {
@@ -149,8 +143,12 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 		MachineID: "m-test", Mapping: mappingFor(ws, "p1", "p2"),
 		DataDir:      filepath.Join(t.TempDir(), "data"),
 		AgentStarter: scriptedEngineStarter(sp), MaxRecoveries: 2,
-		RecoveryStabilityWindow: time.Nanosecond,
 	}, hub, sp, supervise.NewQueue[protocol.RTMsg](), supervise.NewQueue[protocol.OBMsg]())
+
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	hub.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 
 	writeWorkspaceYaml(t, ws, "models:\n  p1:\n    default: [w79/p1]\n")
@@ -160,13 +158,12 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 	if err := r.Start(context.Background(), "wi_w079s2"); err != nil {
 		t.Fatal(err)
 	}
-	i1, _ := readIdentity(t, filepath.Join(ws, "capsules", "wi_w079s1"))
-	i2, _ := readIdentity(t, filepath.Join(ws, "capsules", "wi_w079s2"))
-	if got := i1.EffectiveCandidates["fix"]; len(got) != 1 || got[0] != "w79/p1" {
-		t.Fatalf("p1 fix %v, want [w79/p1]", got)
+	i1raw, rerr := os.ReadFile(filepath.Join(ws, "capsules", "wi_w079s1", "capsule.json"))
+	if rerr != nil {
+		t.Fatal(rerr)
 	}
-	if i2.EffectiveCandidates != nil {
-		t.Fatalf("p2 has no models entry, must record nothing: %v", i2.EffectiveCandidates)
+	if strings.Contains(string(i1raw), "effective_candidates") {
+		t.Fatalf("the deleted audit key must not be written (raw %s)", i1raw)
 	}
 	j2 := r.jobOf("wi_w079s2")
 	j2.mu.Lock()

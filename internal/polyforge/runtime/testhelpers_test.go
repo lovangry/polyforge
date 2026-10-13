@@ -61,6 +61,12 @@ type fakeHub struct {
 	// SAME claim answer (same session, same bundle pin) instead of
 	// opening a new one.
 	keyClaims map[string]*api.SessionClaimResponse
+	// capsuleRepoBase, when set, makes SessionClaim materialize the EMPTY
+	// bare capsule repo aihub creates at claim (the production contract):
+	// the runtime's claim-time clone path has a remote to clone. The
+	// runtime's no-remote local init is a typed refusal since the audit's
+	// dead-code sweep (gitops.InitLocal's production path is gone).
+	capsuleRepoBase string
 }
 
 func newFakeHub() *fakeHub {
@@ -122,6 +128,18 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.claims = append(h.claims, req)
+	// The aihub claim contract: aihub creates the bare repo at claim. The
+	// fake hub materializes it when the test wired capsuleRepoBase, so
+	// the runtime's clone path has a remote.
+	if h.capsuleRepoBase != "" {
+		id := h.canonicalID(req.WorkItemID)
+		bare := filepath.Join(h.capsuleRepoBase, id+".git")
+		if _, err := os.Stat(bare); err != nil {
+			if out, cerr := exec.Command("git", "init", "--bare", "-q", bare).CombinedOutput(); cerr != nil {
+				return nil, &api.Error{Code: "CORE-500", Detail: fmt.Sprintf("bare capsule repo %s: %v: %s", bare, cerr, out)}
+			}
+		}
+	}
 	// idempotent replay (the aihub contract): same key → same answer,
 	// provided the cached session is still the live one (D4)
 	if req.IdempotencyKey != "" {
@@ -382,11 +400,17 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, *supervise.Q
 		// the entry-rate storm guard's window is collapsed to nothing so
 		// every recovery models a fresh episode (the storm tests override
 		// this with a real window to drive the guard itself).
-		RecoveryStabilityWindow: time.Nanosecond,
 	}
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
+	// The claim-time capsule remote: aihub creates the bare repo at claim
+	// (the fake hub implements the contract; the runtime's no-remote
+	// local init is a typed refusal since the audit's dead-code sweep).
+	if fh, ok := hub.(*fakeHub); ok {
+		fh.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+		r.cfg.GitRemoteBase = fh.capsuleRepoBase
+	}
 	return r, toOB, fromOB
 }
 

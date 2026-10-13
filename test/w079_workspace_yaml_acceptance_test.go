@@ -376,8 +376,12 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 	if raw := w079CapsuleRaw(t, capT); strings.Contains(raw, "w079-e2e") || strings.Contains(raw, "w079-ieops") {
 		t.Fatalf("the unlisted project's capsule leaks another project's models: %s", raw)
 	}
-	if raw := w079CapsuleRaw(t, capE); !strings.Contains(raw, "w079-e2e-code-a") || strings.Contains(raw, "w079-ieops") {
-		t.Fatalf("e2e's audit record is wrong (raw %s)", raw)
+	// e2e's capsule records no effective-candidates audit (the field was
+	// deleted with the audit's dead-code sweep — the yaml governs
+	// dispatches directly; the model pins above are the behavior) and
+	// leaks nothing of the other project's.
+	if raw := w079CapsuleRaw(t, capE); strings.Contains(raw, "effective_candidates") || strings.Contains(raw, "w079-ieops") {
+		t.Fatalf("e2e's capsule must carry no effective-candidates audit and leak nothing: %s", raw)
 	}
 }
 
@@ -432,12 +436,16 @@ func TestW079OneDaemonTwoWorkspacesTwoYamls(t *testing.T) {
 	if got := w079Model(t, capB, "grill"); got != w079DefaultsHead {
 		t.Fatalf("B grill model %q, want the bundle defaults head %q", got, w079DefaultsHead)
 	}
+	// Neither capsule carries a candidate audit (the effective-candidates
+	// field was deleted with the audit's dead-code sweep — the yaml
+	// governs dispatches directly; the model pins above are the
+	// behavior), and neither leaks the other project's models.
 	rawA, rawB := w079CapsuleRaw(t, capA), w079CapsuleRaw(t, capB)
-	if !strings.Contains(rawA, "w079a-flow") || strings.Contains(rawB, "w079a-flow") {
-		t.Fatalf("A's audit missing or leaking into B (A %s, B %s)", rawA, rawB)
+	if strings.Contains(rawA, "effective_candidates") || strings.Contains(rawA, "w079b-code") {
+		t.Fatalf("A's capsule must carry no candidate audit and leak nothing (raw %s)", rawA)
 	}
-	if !strings.Contains(rawB, "w079b-code") || strings.Contains(rawA, "w079b-code") {
-		t.Fatalf("B's audit missing or leaking into A (A %s, B %s)", rawA, rawB)
+	if strings.Contains(rawB, "effective_candidates") || strings.Contains(rawB, "w079a-flow") {
+		t.Fatalf("B's capsule must carry no candidate audit and leak nothing (raw %s)", rawB)
 	}
 }
 

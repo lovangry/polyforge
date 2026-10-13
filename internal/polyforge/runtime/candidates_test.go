@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -220,13 +219,18 @@ func newTestRuntimeAt(t *testing.T, hub Aihub, sp Spawner, dataDir string) (*Run
 		DataDir:       dataDir,
 		MaxRecoveries: 2,
 		// episodes, not wall time (see newTestRuntime)
-		RecoveryStabilityWindow: time.Nanosecond,
 		// polyforge#106: the driver is the only engine (see newTestRuntime)
 		AgentStarter: scriptedEngineStarter(sp),
 	}
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	if fh, ok := hub.(*fakeHub); ok {
+		fh.capsuleRepoBase = filepath.Join(dataDir, "capsule-remotes")
+		r.cfg.GitRemoteBase = fh.capsuleRepoBase
+	}
 	return r, toOB, fromOB
 }
 

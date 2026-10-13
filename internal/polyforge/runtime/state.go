@@ -156,17 +156,19 @@ type jobRecord struct {
 	// recoveries continue from it; a fresh clone (re-claim on another machine) re-seeds it
 	// from the capsule's spawn journal.
 	SpawnN       int `json:"spawn_n"`
-	RecoverFails int `json:"recover_fails"` // consecutive failed recoveries
-	// StormFails/LastRecoveryAt persist the entry-rate storm guard (v2):
-	// rapid recoverCore re-entries survive a daemon crash inside the
-	// storm window. RFC3339Nano; zero = never recovered.
-	StormFails     int    `json:"storm_fails"`
-	LastRecoveryAt string `json:"last_recovery_at,omitempty"`
-	Transcript     string `json:"transcript"`
-	BundleName     string `json:"bundle_name"`
-	BundleDigest   string `json:"bundle_digest"`
-	AgentPID       int    `json:"agent_pid"`
-	AgentStart     string `json:"agent_started_at"`
+	RecoverFails int `json:"recover_fails"` // consecutive recovery failures (C7)
+	// AcceptedAtRelaunch is the accepted-result count (the capsule's
+	// execution state) the last relaunch started from — the watermark the
+	// next recovery entry compares progress against. Survives a crash
+	// with the counter itself.
+	AcceptedAtRelaunch int64 `json:"accepted_at_relaunch,omitempty"`
+	// RecoveryRelaunch persists lastRelaunchRecovery (see job).
+	RecoveryRelaunch bool   `json:"recovery_relaunch,omitempty"`
+	Transcript       string `json:"transcript"`
+	BundleName       string `json:"bundle_name"`
+	BundleDigest     string `json:"bundle_digest"`
+	AgentPID         int    `json:"agent_pid"`
+	AgentStart       string `json:"agent_started_at"`
 	// Origin is how the job was submitted (v2 identity model). Absent on
 	// records written before it existed: such a job loads fine and is
 	// treated as owned by the WI reporter by later consumers.
@@ -214,8 +216,8 @@ func (j *job) record() *jobRecord {
 		CleanPause:         j.cleanPause,
 		SpawnN:             j.spawnN,
 		RecoverFails:       j.recoverFails,
-		StormFails:         j.stormFails,
-		LastRecoveryAt:     stampIfSet(j.lastRecoveryAt),
+		AcceptedAtRelaunch: j.acceptedAtRelaunch,
+		RecoveryRelaunch:   j.lastRelaunchRecovery,
 		Transcript:         j.transcript,
 		BundleName:         j.bundleName,
 		BundleDigest:       j.bundleDigest,
@@ -250,20 +252,20 @@ func jobFromRecord(rec *jobRecord) *job {
 			Username:    rec.WorkItemID,
 			Secret:      rec.SessionID,
 		},
-		cleanPause:     rec.CleanPause,
-		spawnN:         rec.SpawnN,
-		recoverFails:   rec.RecoverFails,
-		stormFails:     rec.StormFails,
-		lastRecoveryAt: parseStamp(rec.LastRecoveryAt),
-		transcript:     rec.Transcript,
-		bundleName:     rec.BundleName,
-		bundleDigest:   rec.BundleDigest,
-		agentPID:       rec.AgentPID,
-		agentStartedAt: rec.AgentStart,
-		origin:         rec.Origin,
-		endNote:        rec.EndNote,
-		endHead:        rec.EndHead,
-		stepCandidates: rec.StepCandidates,
+		cleanPause:           rec.CleanPause,
+		spawnN:               rec.SpawnN,
+		recoverFails:         rec.RecoverFails,
+		acceptedAtRelaunch:   rec.AcceptedAtRelaunch,
+		lastRelaunchRecovery: rec.RecoveryRelaunch,
+		transcript:           rec.Transcript,
+		bundleName:           rec.BundleName,
+		bundleDigest:         rec.BundleDigest,
+		agentPID:             rec.AgentPID,
+		agentStartedAt:       rec.AgentStart,
+		origin:               rec.Origin,
+		endNote:              rec.EndNote,
+		endHead:              rec.EndHead,
+		stepCandidates:       rec.StepCandidates,
 	}
 }
 

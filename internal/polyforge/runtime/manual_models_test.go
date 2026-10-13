@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -32,13 +31,17 @@ func newManualRuntime(t *testing.T, hub *fakeHub) (*Runtime, string) {
 	}
 	sp := &scriptedSpawner{}
 	r := New(Config{
-		MachineID:               "m-test",
-		Mapping:                 mappingFor(ws, "proj"),
-		DataDir:                 filepath.Join(t.TempDir(), "data"),
-		AgentStarter:            scriptedEngineStarter(sp),
-		MaxRecoveries:           2,
-		RecoveryStabilityWindow: time.Nanosecond,
+		MachineID:     "m-test",
+		Mapping:       mappingFor(ws, "proj"),
+		DataDir:       filepath.Join(t.TempDir(), "data"),
+		AgentStarter:  scriptedEngineStarter(sp),
+		MaxRecoveries: 2,
 	}, hub, sp, supervise.NewQueue[protocol.RTMsg](), supervise.NewQueue[protocol.OBMsg]())
+
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	hub.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 	return r, ws
 }
@@ -69,8 +72,11 @@ func TestManualModelsBeatYamlAndAreAudited(t *testing.T) {
 	if got := r.loadManualModels("wi_man"); strings.Join(got, ",") != "m/one,m/two" {
 		t.Fatalf("daemon-side manual record %v", got)
 	}
-	if got := readCapsuleIdentity(t, j.capsuleDir).EffectiveCandidates; len(got) != len(j.stepCandidates) {
-		t.Fatalf("capsule effective_candidates %v", got)
+	// The capsule identity no longer records the per-step effective
+	// candidates (audit subtraction pass B): the daemon-private state.json
+	// snapshot and the workspace yaml govern dispatches.
+	if raw, rerr := os.ReadFile(filepath.Join(j.capsuleDir, "capsule.json")); rerr == nil && strings.Contains(string(raw), "effective_candidates") {
+		t.Fatalf("capsule.json must not carry the effective-candidates audit: %s", raw)
 	}
 	if raw, _ := os.ReadFile(filepath.Join(j.capsuleDir, "capsule.json")); strings.Contains(string(raw), "manual_candidates") {
 		t.Fatalf("capsule.json must not carry the manual list: %s", raw)

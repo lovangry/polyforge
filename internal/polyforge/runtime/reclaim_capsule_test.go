@@ -157,15 +157,17 @@ func TestPrepareCapsuleCloneFailureRefusesInit(t *testing.T) {
 }
 
 // No RemoteURL configured (tests only) inits locally.
-func TestPrepareCapsuleNoRemoteInitsLocally(t *testing.T) {
+func TestPrepareCapsuleNoRemoteRefusesLoudly(t *testing.T) {
 	setGitIdentity(t)
 	r := &Runtime{}
 	j := reclaimJob(t, "wi_fresh", "fp")
 	j.git.RemoteURL = ""
-	if err := r.prepareCapsule(j); err != nil {
-		t.Fatalf("no-remote claim must init locally: %v", err)
+	err := r.prepareCapsule(j)
+	var ae *api.Error
+	if err == nil || !errors.As(err, &ae) || ae.Code != api.ErrDaemonCapsuleClone {
+		t.Fatalf("a no-remote claim must refuse with the typed clone error, got %v", err)
 	}
-	if !isRegularFile(filepath.Join(j.capsuleDir, ".git")) || !dirExists(j.git.GitDir) {
-		t.Fatal("capsule must be initialised with an external git-dir")
+	if !strings.Contains(ae.Detail, "no remote URL") || !strings.Contains(ae.Detail, "refusing a local init") {
+		t.Fatalf("the refusal must name the missing remote and the refusal: %q", ae.Detail)
 	}
 }

@@ -69,7 +69,7 @@ func TestStateMachineIllegalEdges(t *testing.T) {
 		// terminal-close wiring (the #99 finale): a recovery that finds
 		// the driver's workflow already terminal translates directly
 		// into the sealing close (stopOp from RECOVERING) instead of
-		// relaunching into the storm guard. It was illegal before that
+		// relaunching into the recovery ledger. It was illegal before that
 		// wiring existed.
 		{StateRecovering, StateRecovering},
 		// Finding 2: the retained paused record cannot re-pause, seal or

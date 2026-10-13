@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -49,21 +48,28 @@ func newAuditRuntime(t *testing.T, repos []api.ProjectRepo) (*Runtime, string) {
 	}
 	sp := &scriptedSpawner{}
 	cfg := Config{
-		MachineID:               "m-test",
-		Mapping:                 mappingFor(ws, "proj"),
-		DataDir:                 filepath.Join(t.TempDir(), "data"),
-		AgentStarter:            scriptedEngineStarter(sp),
-		MaxRecoveries:           2,
-		RecoveryStabilityWindow: time.Nanosecond,
+		MachineID:     "m-test",
+		Mapping:       mappingFor(ws, "proj"),
+		DataDir:       filepath.Join(t.TempDir(), "data"),
+		AgentStarter:  scriptedEngineStarter(sp),
+		MaxRecoveries: 2,
 	}
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
+
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	hub.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 	return r, ws
 }
 
-// A claim whose project has a models entry writes effective_candidates.
+// A claim whose project has a models entry dispatches under the yaml's
+// precedence (the governing source at every dispatch) and records NO
+// effective-candidates audit — the field was deleted with the audit's
+// dead-code sweep.
 func TestGovernedClaimWritesAuditRecord(t *testing.T) {
 	r, ws := newAuditRuntime(t, nil)
 	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    default: [w79/flow-a, w79/flow-b]\n")
@@ -71,9 +77,9 @@ func TestGovernedClaimWritesAuditRecord(t *testing.T) {
 	if err := r.Start(context.Background(), "wi_w079aud"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	idn, raw := readIdentity(t, testCapsuleDir(r, "wi_w079aud"))
-	if got := idn.EffectiveCandidates["grill"]; len(got) != 2 || got[0] != "w79/flow-a" {
-		t.Fatalf("grill effective candidates %v, want [w79/flow-a w79/flow-b]", got)
+	_, raw := readIdentity(t, testCapsuleDir(r, "wi_w079aud"))
+	if strings.Contains(raw, "effective_candidates") {
+		t.Fatalf("the deleted audit key must not be written (raw %s)", raw)
 	}
 	if strings.Contains(raw, "workspace_yaml") || strings.Contains(raw, "repo_sources") {
 		t.Fatalf("the retired audit keys must not be written (raw %s)", raw)
@@ -96,9 +102,9 @@ func TestUngovernedClaimWritesNoAuditContent(t *testing.T) {
 		if err := r.Start(context.Background(), "wi_w079noaud"); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		idn, _ := readIdentity(t, testCapsuleDir(r, "wi_w079noaud"))
-		if idn.EffectiveCandidates != nil {
-			t.Fatalf("yaml %q: an ungoverned claim must record no audit content: %+v", yaml, idn)
+		idn, raw := readIdentity(t, testCapsuleDir(r, "wi_w079noaud"))
+		if strings.Contains(raw, "effective_candidates") {
+			t.Fatalf("yaml %q: an ungoverned claim must record no audit content (raw %s)", yaml, raw)
 		}
 		if idn.Repos["w079reg"] != remoteHead {
 			t.Fatalf("legacy Repos baseline changed: %v", idn.Repos)

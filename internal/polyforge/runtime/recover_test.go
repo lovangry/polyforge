@@ -2,8 +2,8 @@ package runtime
 
 // Recovery-engine regressions (v1-spec-full §七) driven with REAL child
 // processes as the "agents": transcript present → resume; absent → fresh;
-// two consecutive resume failures → fresh; storm guard / fresh failure →
-// bounded fail (RTFinished(blocked)).
+// two consecutive resume failures → fresh; the single consecutive-failures
+// ledger (C7) → bounded fail (RTFinished(blocked)).
 
 import (
 	"context"
@@ -95,10 +95,11 @@ func TestRecoverBudgetSpentAfterPersistedFailure(t *testing.T) {
 	}
 }
 
-// TestRecoverBudgetResetOnSuccess: one failed ladder attempt followed by
-// a successful relaunch RESETS the budget — a later, independent failure
-// episode starts from zero, not from the inherited count.
-func TestRecoverBudgetResetOnSuccess(t *testing.T) {
+// TestRecoverBudgetResetsOnAcceptedResult: one failed ladder attempt
+// followed by a successful relaunch leaves the failed attempt on the
+// ledger (C7: only an accepted result resets); once a step's result IS
+// accepted, the next death episode starts from zero.
+func TestRecoverBudgetResetsOnAcceptedResult(t *testing.T) {
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, newFakeHub(), sp)
 	wi := "wi_reset"
@@ -120,9 +121,11 @@ func TestRecoverBudgetResetOnSuccess(t *testing.T) {
 	j.mu.Lock()
 	fails := j.recoverFails
 	j.mu.Unlock()
-	if fails != 0 {
-		t.Fatalf("a successful recovery must reset the budget, got %d", fails)
+	if fails != 1 {
+		t.Fatalf("the relaunch alone must not reset the ledger (C7), got %d", fails)
 	}
+	// the re-dispatched step's result is accepted: real progress resets
+	writeAcceptedExecutionState(t, j.capsuleDir, 1)
 	// a SECOND death episode starts from a clean budget: one scripted
 	// failure is absorbed by a retry, not a bounded fail
 	sp.mu.Lock()
@@ -131,7 +134,13 @@ func TestRecoverBudgetResetOnSuccess(t *testing.T) {
 	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
 	msg2 := recvRT(t, toOB)
 	if msg2.Kind != protocol.RTRecovered {
-		t.Fatalf("the reset budget must absorb an isolated failure, got %+v", msg2)
+		t.Fatalf("the reset ledger must absorb an isolated failure, got %+v", msg2)
+	}
+	j.mu.Lock()
+	fails = j.recoverFails
+	j.mu.Unlock()
+	if fails != 1 {
+		t.Fatalf("the fresh episode must hold exactly its own failed attempt, got %d", fails)
 	}
 	if h := j.agent; h != nil {
 		_ = h.Terminate(2e9)
@@ -164,54 +173,58 @@ func TestRecoverSingleFreshFailureIsRetriedNotTerminal(t *testing.T) {
 	j.mu.Lock()
 	fails := j.recoverFails
 	j.mu.Unlock()
-	if fails != 0 {
-		t.Fatalf("the successful retry must reset the budget, got %d", fails)
+	if fails != 1 {
+		t.Fatalf("the relaunch must not reset the ledger (C7: only an accepted result does); the failed attempt is on the record, got %d", fails)
 	}
 	if h := j.agent; h != nil {
 		_ = h.Terminate(2e9)
 	}
 }
 
-// TestRecoverStormGuardBlocksRapidRefire: the #97 shape — every relaunch
-// SUCCEEDS as a spawn and dies within seconds, refiring recovery at ~1
-// Hz. The legacy budget never saw these (each relaunch reset it); the
-// entry-rate ledger counts rapid re-entries and bounded-fails the WI on
-// the MaxRecoveries-th rapid refire.
-func TestRecoverStormGuardBlocksRapidRefire(t *testing.T) {
+// TestRecoverNoProgressRelaunchesBound: the #97 shape — every relaunch
+// SUCCEEDS as a spawn and dies within seconds, refiring recovery with no
+// accepted step result ever landing. The legacy budget never saw these
+// (each relaunch reset it); the single consecutive-failures ledger (C7)
+// counts each progress-less recovery relaunch and bounded-fails the WI at
+// MaxRecoveries.
+func TestRecoverNoProgressRelaunchesBound(t *testing.T) {
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, newFakeHub(), sp)
-	r.cfg.RecoveryStabilityWindow = 60 * time.Second // the production window
 	wi := "wi_stormrate"
 	j := seedJob(r, wi)
 	installOldAgent(t, sp, j)
 
-	// two back-to-back relaunches succeed (storm ledger 0 then 1 —
-	// below the bound of MaxRecoveries=2)
-	for i := 0; i < 2; i++ {
-		r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
-		if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
-			t.Fatalf("rapid recovery %d must still relaunch (ledger below the bound), got %+v", i+1, msg)
-		}
+	// the original claim's death is a trigger, not a recovery failure:
+	// the first recovery relaunches from a zero ledger
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+		t.Fatalf("the first recovery must relaunch, got %+v", msg)
 	}
-	// the third rapid refire reaches the bound: bounded fail, never a
-	// fourth relaunch
+	// the second progress-less recovery counts the failed first relaunch
+	// (ledger 1 — below the bound of MaxRecoveries=2) and relaunches
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+		t.Fatalf("recovery 2 must still relaunch (ledger below the bound), got %+v", msg)
+	}
+	// the third progress-less recovery counts the second relaunch and
+	// reaches the bound: bounded fail, never a fourth relaunch
 	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
 	msg := recvRT(t, toOB)
 	if msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
-		t.Fatalf("the third rapid refire must bounded-fail, got %+v", msg)
+		t.Fatalf("the third progress-less recovery must bounded-fail, got %+v", msg)
 	}
 	if n := sp.callCount(); n != 3 { // install + two relaunches, NOT three
-		t.Fatalf("the storm must stop at two relaunches, got %d spawns", n)
+		t.Fatalf("the progress-less loop must stop at two relaunches, got %d spawns", n)
 	}
 }
 
-// TestRecoverStormLedgerResetsAfterStabilityWindow: a recovery that
-// arrives after a stable gap starts a fresh episode — an isolated later
-// failure is never poisoned by an earlier storm.
-func TestRecoverStormLedgerResetsAfterStabilityWindow(t *testing.T) {
+// TestRecoverAcceptedResultResetsLedger: real progress is the only reset
+// (C7) — a recovery that follows an accepted step result starts from a
+// zero ledger, so an isolated later failure is never poisoned by earlier
+// ones; and the reset is the RESULT, never the relaunch itself.
+func TestRecoverAcceptedResultResetsLedger(t *testing.T) {
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, newFakeHub(), sp)
-	r.cfg.RecoveryStabilityWindow = 15 * time.Millisecond
 	wi := "wi_stormgap"
 	j := seedJob(r, wi)
 	installOldAgent(t, sp, j)
@@ -220,21 +233,47 @@ func TestRecoverStormLedgerResetsAfterStabilityWindow(t *testing.T) {
 	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
 		t.Fatalf("first recovery must relaunch, got %+v", msg)
 	}
-	// inside the window: ledger 1 — still below the bound, relaunches
+	// a progress-less re-entry counts (ledger 1) — still below the bound
 	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
 	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
-		t.Fatalf("in-window refire must still relaunch below the bound, got %+v", msg)
+		t.Fatalf("recovery 2 must still relaunch below the bound, got %+v", msg)
 	}
-	// past the window: the ledger resets, the episode is fresh
-	j.mu.Lock()
-	j.lastRecoveryAt = time.Now().Add(-time.Hour)
-	j.mu.Unlock()
+	// a step's result is accepted (the driver's R14 commit shape): the
+	// next recovery entry resets the ledger — the episode is fresh
+	writeAcceptedExecutionState(t, j.capsuleDir, 1)
 	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
 	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
-		t.Fatalf("a post-gap recovery must relaunch with a fresh ledger, got %+v", msg)
+		t.Fatalf("a post-progress recovery must relaunch with a reset ledger, got %+v", msg)
+	}
+	j.mu.Lock()
+	fails := j.recoverFails
+	j.mu.Unlock()
+	if fails != 0 {
+		t.Fatalf("an accepted step result must reset the ledger, got %d", fails)
 	}
 	if h := j.agent; h != nil {
 		_ = h.Terminate(2e9)
+	}
+}
+
+// writeAcceptedExecutionState records n accepted step results in the
+// capsule's execution state (the driver's R14 commit shape) — the real
+// progress signal the C7 ledger reads.
+func writeAcceptedExecutionState(t *testing.T, capDir string, n int) {
+	t.Helper()
+	dir := filepath.Join(capDir, "runtime-state")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	attempts := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		attempts = append(attempts, fmt.Sprintf(
+			`{"cause":"accepted","attempt_seq":%d,"started_at":"2026-10-13T10:00:00Z","accepted_result_id":"res_%d"}`, i, i))
+	}
+	blob := `{"work_item_id":"wi","current_step":"grill","workflow_status":"running","bundle_digest":"d0",` +
+		`"steps":{"grill":{"status":"done","attempts":[` + strings.Join(attempts, ",") + `]}}}`
+	if err := os.WriteFile(filepath.Join(dir, "execution.json"), []byte(blob), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -414,14 +453,13 @@ func TestRecoverDeadOldAgentWithOrphans(t *testing.T) {
 	}
 }
 
-// TestRecoverStormLedgerExemptsDaemonRestart: restarts and attaches are
-// lifecycle events, not failures (v2-converge §2.3) — three of them inside
-// the stability window leave the WI running and the ledger untouched, while
-// a real storm still bounded-fails afterwards.
-func TestRecoverStormLedgerExemptsDaemonRestart(t *testing.T) {
+// TestRecoverLedgerExemptsDaemonRestart: restarts and attaches are
+// lifecycle events, not failures (v2-converge §2.3) — any number of them
+// leaves the WI running and the consecutive-failures ledger untouched,
+// while progress-less death recoveries still bounded-fail afterwards.
+func TestRecoverLedgerExemptsDaemonRestart(t *testing.T) {
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, newFakeHub(), sp)
-	r.cfg.RecoveryStabilityWindow = 60 * time.Second
 	j := seedJob(r, "wi_restartloop")
 	installOldAgent(t, sp, j)
 
@@ -432,24 +470,24 @@ func TestRecoverStormLedgerExemptsDaemonRestart(t *testing.T) {
 		}
 	}
 	j.mu.Lock()
-	storm, last := j.stormFails, j.lastRecoveryAt
+	fails := j.recoverFails
 	j.mu.Unlock()
-	if storm != 0 || !last.IsZero() {
-		t.Fatalf("restart causes must not touch the storm ledger, got storm=%d last=%v", storm, last)
+	if fails != 0 {
+		t.Fatalf("restart causes must not touch the consecutive-failures ledger, got %d", fails)
 	}
-	// real refires are still bounded
-	for i := 0; i < 2; i++ {
-		r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
-		if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
-			t.Fatalf("rapid recovery %d must relaunch, got %+v", i+1, msg)
-		}
+	// progress-less death recoveries still bound: the restart relaunch's
+	// own lack of progress counts (it was a recovery relaunch), and the
+	// next one reaches MaxRecoveries
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+		t.Fatalf("the first death recovery must relaunch (ledger below the bound), got %+v", msg)
 	}
-	r.recoverOp(context.Background(), j, causeDaemonRestart, "") // must not reset the storm
+	r.recoverOp(context.Background(), j, causeDaemonRestart, "") // exempt: no count, no reset
 	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
 		t.Fatalf("got %+v", msg)
 	}
 	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
 	if msg := recvRT(t, toOB); msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
-		t.Fatalf("a real storm must still bounded-fail after restarts, got %+v", msg)
+		t.Fatalf("progress-less recoveries must still bounded-fail after restarts, got %+v", msg)
 	}
 }

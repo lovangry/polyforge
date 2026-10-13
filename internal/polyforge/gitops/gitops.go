@@ -605,8 +605,11 @@ func Clone(o Opts) error {
 	return err
 }
 
-// InitLocal initializes the capsule worktree without a remote (no
-// RemoteURL configured; tests only). Takes the per-WI lock.
+// InitLocal initializes the capsule worktree without a remote. TEST-ONLY:
+// production never init's a capsule locally — aihub always supplies the
+// remote at claim, and the runtime's RemoteURL == "" branch is a loud
+// typed error (a capsule whose origin cannot be resolved is never
+// silently restarted from step 1). Takes the per-WI lock.
 func InitLocal(o Opts) error {
 	release := Lock(o.WorkItemID)
 	defer release()

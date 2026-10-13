@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/workflow"
@@ -70,16 +69,20 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 	}
 	sp := &scriptedSpawner{}
 	cfg := Config{
-		MachineID:               "m-test",
-		Mapping:                 mappingFor(ws, "proj"),
-		DataDir:                 filepath.Join(t.TempDir(), "data"),
-		AgentStarter:            scriptedEngineStarter(sp),
-		MaxRecoveries:           2,
-		RecoveryStabilityWindow: time.Nanosecond,
+		MachineID:     "m-test",
+		Mapping:       mappingFor(ws, "proj"),
+		DataDir:       filepath.Join(t.TempDir(), "data"),
+		AgentStarter:  scriptedEngineStarter(sp),
+		MaxRecoveries: 2,
 	}
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
+
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	hub.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 
 	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    code: [w79/code-a, w79/code-b]\n")
@@ -120,16 +123,20 @@ func TestClaimComposeWithoutYamlIsBundleOnly(t *testing.T) {
 	}
 	sp := &scriptedSpawner{}
 	cfg := Config{
-		MachineID:               "m-test",
-		Mapping:                 mappingFor(ws, "proj"),
-		DataDir:                 filepath.Join(t.TempDir(), "data"),
-		AgentStarter:            scriptedEngineStarter(sp),
-		MaxRecoveries:           2,
-		RecoveryStabilityWindow: time.Nanosecond,
+		MachineID:     "m-test",
+		Mapping:       mappingFor(ws, "proj"),
+		DataDir:       filepath.Join(t.TempDir(), "data"),
+		AgentStarter:  scriptedEngineStarter(sp),
+		MaxRecoveries: 2,
 	}
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
+
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	hub.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 
 	if err := r.Start(context.Background(), "wi_w079comp2"); err != nil {
