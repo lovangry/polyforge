@@ -40,6 +40,7 @@ case "$1" in
       '{{.Id}}') echo "$id" ;;
       '{{range .RepoDigests}}{{println .}}{{end}}') [ -n "$dg" ] && echo "$dg" ;;
       '{{.RepoDigests}}') echo "[$dg]" ;;
+      '{{.Size}}') echo "${FAKE_IMAGE_SIZE:-1000}" ;;
     esac
     exit 0 ;;
   run)
@@ -50,6 +51,10 @@ case "$1" in
     exit 0 ;;
   save) shift; [ "$1" = -o ] && { cp "$S/img/$(key "$3")" "$2.body"; { echo "$3"; cat "$2.body"; } > "$2"; rm -f "$2.body"; }; exit 0 ;;
   load) ref=$(head -1 /dev/stdin >/dev/null 2>&1; true); in="$(cat)"; ref=$(printf '%s\n' "$in" | sed -n 1p)
+        # simulate the lock ssh session dying while this image is being loaded
+        if [ -n "$FAKE_KILL_LOCK_ON_LOAD" ] && [ "$ref" = "$FAKE_KILL_LOCK_ON_LOAD" ]; then
+          lp=$(cat "$FAKE_W/lockpid"); pkill -KILL -P "$lp"; kill -KILL "$lp"; sleep 0.3
+        fi
         printf '%s\n' "$in" | sed 1d > "$S/img/$(key "$ref")"; echo "Loaded image: $ref"; exit 0 ;;
   tag) cp "$S/img/$(key "$2")" "$S/img/$(key "$3")"; exit 0 ;;
   rmi) rm -f "$S/img/$(key "$2")"; exit 0 ;;
@@ -67,13 +72,16 @@ case "$1" in
   cp)
     c="$S/container"; v=$(sed -n 2p "$S/img/$(key "$(cat "$c")")")
     dest="${3}"; printf '#!/bin/sh\necho "aihub %s"\n' "$v" > "$dest"; exit 0 ;;
-  logs) exit 0 ;;
+  logs) [ -n "$FAKE_LOGS_FILE" ] && cat "$FAKE_LOGS_FILE"
+        # simulate a TERM signal reaching the deploy script right after the swap
+        if [ -n "$FAKE_TERM_ON_LOGS" ]; then kill -TERM "$(cat "$FAKE_W/deploypid")"; sleep 1; fi
+        exit 0 ;;
   build)
     shift; t=""; while [ $# -gt 0 ]; do case "$1" in -t) t="$2"; shift 2 ;; *) ctx="$1"; shift ;; esac; done
     v=$(sh "$ctx/aihub" -version | awk '{print $NF}')
     printf 'sha256:built%s\n%s\n\n' "$v" "$v" > "$S/img/$(key "$t")"; exit 0 ;;
   compose)
-    shift; f=""; while [ $# -gt 0 ]; do case "$1" in -f) f="$2"; shift 2 ;; -p) shift 2 ;; config) [ -f "$f" ]; exit $? ;; up) break ;; *) shift ;; esac; done
+    shift; f=""; while [ $# -gt 0 ]; do case "$1" in -f) f="$2"; shift 2 ;; -p) shift 2 ;; config) [ -f "$f" ]; exit $? ;; version) exit 0 ;; up) break ;; *) shift ;; esac; done
     img=$(sed -n 's/^    image: //p' "$f" | head -1)
     [ -n "$FAKE_FAIL_UP_IMG" ] && [ "$img" = "$FAKE_FAIL_UP_IMG" ] && { echo "fake: compose up failed" >&2; exit 1; }
     printf '%s\n' "$img" > "$S/container"; exit 0 ;;
@@ -86,6 +94,10 @@ while [ $# -gt 0 ]; do case "$1" in -o) shift 2 ;; *) break ;; esac; done
 shift   # host
 export FAKE_SIDE=server
 echo "ssh $*" >> "$FAKE_W/log-ssh"
+case "$*" in flock\ -n*) echo $$ > "$FAKE_W/lockpid" ;; esac
+if [ -n "$FAKE_MISSING_TOOL" ]; then
+  exec sh -c "command() { [ \"\$2\" = $FAKE_MISSING_TOOL ] && return 1; type \"\$2\" >/dev/null 2>&1; }; $*"
+fi
 exec sh -c "$*"
 `
 
@@ -147,7 +159,7 @@ func (d *deployWorld) release(tag string, withImage bool, digestInRelease, regis
 		wf(t, filepath.Join(rel, "aihub-image.digest"), digestInRelease+"\n", 0o644)
 		files = append(files, "aihub-image.digest")
 		wf(t, filepath.Join(d.w, "registry", "ghcr.io_silgrid_aihub_"+tag),
-			fmt.Sprintf("sha256:id%s\n%s\n%s\n", tag, tag, registryDigest), 0o644)
+			fmt.Sprintf("sha256:id%s\n%s\n%s\n", tag, tag, repoDigestOf(registryDigest)), 0o644)
 	}
 	cmd := exec.Command("sha256sum", files...)
 	cmd.Dir = rel
@@ -236,8 +248,19 @@ func (d *deployWorld) serverDockerMutations() []string {
 	return m
 }
 
-const digOld = "ghcr.io/silgrid/aihub@sha256:1111111111111111111111111111111111111111111111111111111111111111"
-const digNew = "ghcr.io/silgrid/aihub@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+// The release digest files hold the canonical bare "sha256:<64 hex>" (the
+// format release.sh writes); the fake registry reports it as
+// "ghcr.io/silgrid/aihub@<digest>" (imageRepoDigest, shared with
+// release_script_test.go).
+const digOld = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+const digNew = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
+func repoDigestOf(d string) string {
+	if d == "" {
+		return ""
+	}
+	return imageRepoDigest(d)
+}
 
 func TestReleaseDeployImagePullSwap(t *testing.T) {
 	d := newDeployWorld(t, "v2.2.1")
@@ -348,5 +371,59 @@ func TestReleaseDeployDryRunIsReadOnly(t *testing.T) {
 	}
 	if m := d.serverDockerMutations(); len(m) != 0 {
 		t.Errorf("dry-run changed the server: %v", m)
+	}
+}
+
+// CROSS-SCRIPT CONTRACT: the aihub-image.digest that release.sh really produced
+// (the release fake run) passes deploy.sh's preflight (stubbed registry /
+// server). Both scripts share relFakeDigest + imageRepoDigest.
+func TestReleaseScriptDigestFileFeedsDeployPreflight(t *testing.T) {
+	rw := newRelWorld(t, []string{"v1.2.0"}, nil)
+	if out, err := rw.run(nil); err != nil {
+		t.Fatalf("release failed: %v\n%s", err, out)
+	}
+	produced := filepath.Join(rw.fakeRel, "v1.3.0")
+	if b, _ := os.ReadFile(filepath.Join(produced, "aihub-image.digest")); strings.TrimSpace(string(b)) != relFakeDigest {
+		t.Fatalf("release.sh wrote %q, want the canonical %q", b, relFakeDigest)
+	}
+	d := newDeployWorld(t, "v1.2.0")
+	d.release("v1.2.0", true, digOld, digOld)
+	for _, f := range []string{"aihub-linux-amd64", "pf-linux-amd64", "aihub-image.digest", "SHA256SUMS"} {
+		b, err := os.ReadFile(filepath.Join(produced, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wf(t, filepath.Join(d.w, "ghrel", "v1.3.0", f), string(b), 0o644)
+	}
+	// the registry's image carries the repo digest the release's push produced
+	wf(t, filepath.Join(d.w, "registry", "ghcr.io_silgrid_aihub_v1.3.0"),
+		fmt.Sprintf("sha256:idv1.3.0\nv1.3.0\n%s\n", imageRepoDigest(relFakeDigest)), 0o644)
+	out, err := d.run("", "v1.3.0", "--dry-run")
+	if err != nil {
+		t.Fatalf("deploy preflight rejected release.sh's own digest file: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "digest "+relFakeDigest+" verified") {
+		t.Errorf("digest not verified\n%s", out)
+	}
+}
+
+func TestDeployRejectsNonCanonicalDigestFile(t *testing.T) {
+	for name, content := range map[string]string{
+		"repo@digest form": imageRepoDigest(digNew),
+		"short hex":        "sha256:2222",
+		"upper hex":        "sha256:" + strings.Repeat("A", 64),
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := newDeployWorld(t, "v2.2.1")
+			d.release("v2.2.1", true, digOld, digOld)
+			d.release("v2.3.0", true, content, digNew)
+			out, err := d.run("", "v2.3.0", "--dry-run")
+			if err == nil || !strings.Contains(out, "is not sha256:<64 hex>") {
+				t.Fatalf("expected a canonical-format refusal: %v\n%s", err, out)
+			}
+			if m := d.serverDockerMutations(); len(m) != 0 {
+				t.Errorf("server was changed: %v", m)
+			}
+		})
 	}
 }

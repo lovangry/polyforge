@@ -1,13 +1,17 @@
 #!/bin/sh
-# polyforge's deploy face (polyforge#123): the project-owned, HUMAN-GATED
-# counterpart to .polyforge/release.sh.
+# polyforge's deploy face (polyforge#123): the project-owned counterpart to
+# .polyforge/release.sh.
 #
 # Contract (the one sentence that matters):
 #
-#     A deploy is always triggered by a human running this script (or its
-#     documented equivalent). NO automated path - no workflow step, no
-#     daemon lane, no release procedure - may ever trigger a deploy. The
-#     shared release dispatcher deliberately never references this file.
+#     A deploy of an already released and verified version is run by an agent
+#     (the release workflow's deploy step) or a human, and only ever with an
+#     explicit `--confirm <version>` equal to the version (never "latest", no
+#     prompt, no --yes). It takes a server-side lock for the whole mutating
+#     part and ends with production on the new version, or - if anything fails
+#     after the swap - rolled back to the previous one (exit 10). A failed
+#     deploy is redeployed by running this script again with the same
+#     version, never by cutting a new release of the same commit.
 #
 # Scope: the aihub SERVICE HOST only. Work machines are out of scope (they
 # re-run tools/install.sh, one at a time - printed at the end).
@@ -51,8 +55,9 @@
 # Safety rails:
 #   * Confirmation is a mandatory flag, never a prompt: --confirm <version> must
 #     equal the positional version (refused BEFORE any network work otherwise).
-#   * Server-side deploy lock (see "Deploy lock" below): two deploys can never
-#     mutate the server at once; held from step 2 through verification/rollback.
+#   * Server-side deploy lock (see "Deploy lock" below): two deploys can not
+#     mutate the server at once; held from step 2 through verification/rollback,
+#     and the lock session is checked before every long step and before the swap.
 #   * AUTO-ROLLBACK: if the swap or the post-swap verification fails, the script
 #     itself points the compose file back at the previous image, recreates the
 #     service and verifies that the OLD version answers. Data restore stays
@@ -81,10 +86,17 @@
 # Deploy lock: `flock -n` on the server (DEPLOY_LOCK_FILE, default
 # /data/aihub-app/.deploy.lock) taken through a long-lived background ssh
 # session that runs `flock -n <file> sh -c 'echo LOCKED; exec cat'`. The lock
-# lives exactly as long as that remote `cat` has an open stdin, i.e. as long as
-# this script (or its ssh connection) lives: if the script is killed, the
-# machine loses power or the connection drops, sshd closes the pipe, cat exits
-# and the kernel drops the flock. No pid file, no stale lock to clean up.
+# lives exactly as long as that remote `cat` has an open stdin. If this script
+# is killed or the ssh client dies, sshd closes the pipe, cat exits and the
+# kernel drops the flock: no pid file to clean up. On a network PARTITION the
+# server only notices when its TCP keepalive / sshd timeout fires, so the lock
+# can outlive this script for a while (fail-safe: it blocks other deploys, it
+# never lets two run). The reverse case - the lock session dying while this
+# script keeps running (ssh killed, connection lost; the client notices within
+# ServerAliveInterval 15s x ServerAliveCountMax 4) - is detected: the session
+# is checked (`kill -0`) before each long step and right before the swap, and
+# the deploy dies ("deploy lock session died") instead of running unlocked. If
+# it is noticed after the swap, the rollback still runs and reports it.
 #
 # Environment (defaults):
 #   AIHUB_HOST=root@10.146.0.34   AIHUB_CONTAINER=aihub   AIHUB_DATA=/data/aihub
@@ -176,6 +188,16 @@ OLDVER=""; OLDIMG=""; NEWIMG=""; COMPOSE_BAK=""; DOCKERFILE=""; TS=""; BIN_SAVED
 NEW_LOCAL_ID=""; OLD_LOCAL_ID=""; OLD_HAS_GHCR=""
 
 rssh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$AIHUB_HOST" "$@"; }
+# check_lock [restore-compose]: the lock session (background ssh) must still be
+# alive; otherwise another deploy could be running unlocked.
+check_lock() {
+  if [ -n "$LOCK_PID" ] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+    if [ -n "${1:-}" ]; then
+      rssh "cp -p '$COMPOSE_BAK' '$COMPOSE_FILE'" || echo "deploy: COULD NOT restore $COMPOSE_BAK -> $COMPOSE_FILE, do it by hand" >&2
+    fi
+    die "deploy lock session died (ssh to $AIHUB_HOST dropped): refusing to continue without the lock"
+  fi
+}
 dk() { rssh docker "$@"; }
 step() { STEP="$1"; printf '\n== step %s: %s ==\n' "$1" "$2"; }
 note() { printf '   %s\n' "$*"; }
@@ -196,7 +218,11 @@ on_exit() {
   rc=$?
   if [ -n "$SWAPPED" ] && [ -z "$FINISHED" ] && [ -z "$ROLLING" ]; then
     echo "deploy: unexpected exit (status $rc) after the swap - rolling back" >&2
-    auto_rollback "unexpected exit, status $rc"
+    # auto_rollback always exits: run it in a subshell so that the cleanup below
+    # (lock release, $WORK removal) still happens; its exit code (10 rolled back,
+    # 11 rollback failed) is the outcome that is reported.
+    rc=0
+    ( auto_rollback "unexpected exit, status $rc" ) || rc=$?
   fi
   cleanup
   exit "$rc"
@@ -212,7 +238,8 @@ take_lock() {
   exec 7<>"$WORK/lock.in"   # we hold the write side: EOF for the remote cat only when we die
   : >"$WORK/lock.out"
   # fd 7 is closed for the ssh child so that only THIS script keeps the pipe open.
-  rssh "flock -n '$DEPLOY_LOCK_FILE' sh -c 'echo LOCKED; exec cat'; rc=\$?; [ \$rc -eq 1 ] && echo LOCK-BUSY; exit \$rc" \
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$AIHUB_HOST" \
+    "flock -n '$DEPLOY_LOCK_FILE' sh -c 'echo LOCKED; exec cat'; rc=\$?; [ \$rc -eq 1 ] && echo LOCK-BUSY; exit \$rc" \
     <"$WORK/lock.in" >"$WORK/lock.out" 2>&1 7>&- &
   LOCK_PID=$!
   lw=0
@@ -283,6 +310,9 @@ die() {
 # exit 10 = rolled back, 11 = rollback failed (die handles that).
 auto_rollback() {
   ROLLING=1; STEP="auto-rollback"
+  if [ -n "$LOCK_PID" ] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+    echo "deploy: WARNING: the deploy lock session died - another deploy may be running; rolling back anyway" >&2
+  fi
   {
     echo
     echo "deploy: !!! the new version FAILED after the swap: $1"
@@ -463,14 +493,24 @@ pull_verified() {
   pt="$1"; pd="$2"; pv="$3"
   pref="$GHCR_IMAGE:$pt"
   want="$(head -1 "$pd/$ASSET_DIGEST" | tr -d ' \r')"
-  case "$want" in "$GHCR_IMAGE"@sha256:[0-9a-f]*) ;; *) die "$ASSET_DIGEST of $pt is not \"$GHCR_IMAGE@sha256:<hex>\" (got \"$want\")" ;; esac
+  # canonical format (written by release.sh): the bare digest sha256:<64 hex>;
+  # the repo digest to look for is "$GHCR_IMAGE@<digest>".
+  printf '%s\n' "$want" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "$ASSET_DIGEST of $pt is not sha256:<64 hex> (got \"$want\")"
+  wantref="$GHCR_IMAGE@$want"
   docker pull "$pref" >"$WORK/pull.log" 2>&1 || die "docker pull $pref failed: $(tail -3 "$WORK/pull.log")"
-  if ! docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$pref" 2>/dev/null | grep -qxF "$want"; then
-    die "pulled $pref has repo digests [$(docker image inspect -f '{{.RepoDigests}}' "$pref" 2>/dev/null)] but the release says $want - refusing (nothing on the server was touched)"
+  if ! docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$pref" 2>/dev/null | grep -qxF "$wantref"; then
+    die "pulled $pref has repo digests [$(docker image inspect -f '{{.RepoDigests}}' "$pref" 2>/dev/null)] but the release says $wantref - refusing (nothing on the server was touched)"
   fi
   got="$(docker run --rm --entrypoint /aihub "$pref" -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
   [ "$got" = "$pv" ] || die "image $pref: /aihub -version prints \"$got\", expected $pv (nothing on the server was touched)"
   PULLED_ID="$(docker image inspect -f '{{.Id}}' "$pref")"
+  # the `docker save` tar is written under $WORK: it needs room there (L9).
+  isz="$(docker image inspect -f '{{.Size}}' "$pref" 2>/dev/null || true)"
+  case "$isz" in ''|*[!0-9]*) die "could not read the size of $pref (got \"$isz\")" ;; esac
+  tfree="$(df -Pk "$WORK" | awk 'NR==2{print $4}')"
+  case "$tfree" in ''|*[!0-9]*) die "could not read the free space of $WORK" ;; esac
+  need_kb=$((isz / 1024 + isz / 10240 + 1))
+  [ "$tfree" -ge "$need_kb" ] || die "not enough free space in $WORK for the docker save tar of $pref: ${tfree} KiB free, need ~${need_kb} KiB (set TMPDIR to a bigger disk)"
   note "pulled $pref: digest $want verified; /aihub -version = $pv; image $PULLED_ID"
 }
 
@@ -592,6 +632,12 @@ fi
 
 rssh true >/dev/null 2>&1 || die "ssh to $AIHUB_HOST failed (BatchMode)"
 note "ssh $AIHUB_HOST: reachable"
+# server tools (read-only): everything the later steps run over ssh.
+# shellcheck disable=SC2016
+missing="$(rssh 'for c in docker python3 rsync flock curl; do command -v "$c" >/dev/null 2>&1 || printf "%s " "$c"; done' 2>/dev/null || true)"
+[ -z "$missing" ] || die "required tool(s) missing on $AIHUB_HOST: $missing- install them before deploying (nothing was changed)"
+rssh docker compose version >/dev/null 2>&1 || die "docker compose (v2 plugin) is not available on $AIHUB_HOST (docker compose version failed)"
+note "server tools present: docker (+compose) python3 rsync flock curl"
 
 state="$(dk inspect -f '{{.State.Status}}' "$AIHUB_CONTAINER" 2>/dev/null || true)"
 [ -n "$state" ] || die "container $AIHUB_CONTAINER does not exist on $AIHUB_HOST"
@@ -692,14 +738,19 @@ cat <<EOF
                      docker compose -f $COMPOSE_FILE -p $COMPOSE_PROJECT up -d --no-deps $AIHUB_SERVICE ; poll http://127.0.0.1:$AIHUB_PORT/ every 0.2s ; print downtime (warn > ${MAX_DOWNTIME_SECS}s, fail if not up in ${UP_WAIT_SECS}s)
    (a failure from the swap on AUTO-ROLLS BACK to $OLDIMG and exits 10; rollback failure exits 11)
    lock               flock -n $DEPLOY_LOCK_FILE on $AIHUB_HOST held from step 2 to exit (not taken in dry-run)
-7. verify            container image == $NEWIMG ; wait <= ${WAIT_SECS}s for 'docker exec $AIHUB_CONTAINER /aihub -version' == $TAG ; docker logs --since <start>: print error lines, FAIL on panic/fatal
+7. verify            container image == $NEWIMG ; wait <= ${WAIT_SECS}s for 'docker exec $AIHUB_CONTAINER /aihub -version' == $TAG ; docker logs --since <start>: print error lines, FAIL on Go runtime panic/fatal error
                      integrity + row counts >= frozen baseline (read-only); local 'pf queue --limit 1'
 8. rollback + summary; rollback commands for this run:
 EOF
 rollback_text
 echo
 echo "planned compose change (read-only preview of $COMPOSE_FILE):"
-compose_edit diff 2>&1 | sed 's/^/   | /' || true
+if compose_edit diff >"$WORK/plan.diff" 2>&1; then
+  sed 's/^/   | /' "$WORK/plan.diff"
+else
+  sed 's/^/   | /' "$WORK/plan.diff" >&2
+  die "cannot compute the compose edit of $COMPOSE_FILE (service $AIHUB_SERVICE): the real deploy would fail the same way. Nothing was changed."
+fi
 echo
 echo "   work machines: re-run tools/install.sh <api-key> on each, one at a time"
 echo
@@ -720,6 +771,7 @@ nowv="$(dk exec "$AIHUB_CONTAINER" /aihub -version 2>/dev/null | awk 'NF{v=$NF} 
 
 # ---------------------------------------------------------------- step 2
 step 2 "save the old binary"
+check_lock
 dk cp "$AIHUB_CONTAINER:/aihub" "$BIN_SAVED" >"$WORK/cp.log" 2>&1 || die "docker cp of the old binary failed: $(cat "$WORK/cp.log")"
 rssh "test -s '$BIN_SAVED' && chmod +x '$BIN_SAVED'" || die "saved binary $BIN_SAVED is missing or empty"
 saved_v="$(rssh "'$BIN_SAVED' -version" 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
@@ -755,10 +807,12 @@ d.close()
 s.close()
 '
 rsync_pass() {
+  check_lock
   rssh rsync -a --exclude=/aihub.db --exclude=/aihub.db-wal --exclude=/aihub.db-shm --exclude=/service.lock "$AIHUB_DATA/" "$SRV_BACKUP/" >"$WORK/rs.log" 2>&1 \
     || die "rsync $AIHUB_DATA -> $SRV_BACKUP failed: $(tail -5 "$WORK/rs.log")"
 }
 snapshot() {
+  check_lock
   printf '%s\n' "$PYSNAP" | rssh python3 - "$AIHUB_DATA/aihub.db" "$SRV_BACKUP/aihub.db" >"$WORK/snap.log" 2>&1 \
     || die "sqlite backup of aihub.db failed: $(tail -5 "$WORK/snap.log")"
   probe_to remote "$SRV_BACKUP/aihub.db" copy "$WORK/frozen.counts"
@@ -791,6 +845,7 @@ note "consistent"
 
 # ---------------------------------------------------------------- step 5
 step 5 "off-host copy"
+check_lock
 mkdir -p "$BACKUP_ROOT" || die "cannot create $BACKUP_ROOT"
 [ ! -e "$LOCAL_BACKUP" ] || die "$LOCAL_BACKUP already exists"
 manifest_cmd() { printf "cd '%s' && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2" "$1"; }
@@ -810,9 +865,11 @@ note "local row counts equal the frozen baseline"
 
 # ---------------------------------------------------------------- step 6
 step 6 "load image, edit compose, swap (the only interruption: one container recreate)"
+check_lock
 ship_image "$TAG" "$NEW_LOCAL_ID" "$NEWIMG"
 dk run --rm --entrypoint /aihub "$NEWIMG" -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' | grep -qx "$TAG" || die "image $NEWIMG on the server does not report $TAG (service untouched)"
 # (b) compose: back up, edit ONLY the aihub service, validate, show the diff.
+check_lock
 rssh "cp -p '$COMPOSE_FILE' '$COMPOSE_BAK'" || die "cannot back up $COMPOSE_FILE"
 note "compose backup: $COMPOSE_BAK"
 compose_edit diff >"$WORK/compose.diff" || die "cannot compute the compose edit: $(cat "$WORK/compose.diff")"
@@ -825,6 +882,7 @@ fi
 note "compose file edited and validated (docker compose config -q ok)"
 # (c) swap: recreate only the aihub service on the new image, time until HTTP answers.
 START_AT="$(rssh "date -u +%Y-%m-%dT%H:%M:%SZ")"
+check_lock restore   # the last look at the lock before the swap (restores the compose file when it died)
 SWAPPED=1   # from here on a failure means "rollback"
 swap_up || die "swap did not complete: \"$down\" (docker compose up failed, or no HTTP answer within ${UP_WAIT_SECS}s)"
 note "downtime: ${down}s (compose up -d --no-deps $AIHUB_SERVICE until HTTP answers; old container drained <= ${DRAIN_SECS}s)"
@@ -847,9 +905,11 @@ if grep -Ei 'error' "$WORK/logs.txt" >"$WORK/logs.err"; then
 else
   note "no error lines in the logs since $START_AT"
 fi
-if grep -Ei 'panic|fatal' "$WORK/logs.txt" >"$WORK/logs.bad"; then
+# Go runtime signatures only: a bare "fatal"/"panic" substring would also match
+# the git proxy forwarding git's own "fatal: ..." stderr (internal/aihub/git/proxy.go).
+if grep -E '^(panic:|fatal error:|goroutine [0-9]+ \[)' "$WORK/logs.txt" >"$WORK/logs.bad"; then
   head -20 "$WORK/logs.bad" | sed 's/^/     /' >&2
-  die "panic/fatal in the service log since the restart"
+  die "Go runtime panic / fatal error in the service log since the restart"
 fi
 probe_to remote "$AIHUB_DATA/aihub.db" ro "$WORK/after.counts"
 note "integrity_check ok after the swap"
