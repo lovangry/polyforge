@@ -14,7 +14,14 @@ import (
 	"testing"
 )
 
+// The CROSS-SCRIPT CONTRACT fixture, shared with deploy_image_test.go: the
+// canonical aihub-image.digest content is the bare "sha256:<64 hex>" that
+// release.sh writes and deploy.sh consumes (its repo digest is
+// "ghcr.io/silgrid/aihub@" + that).
 const relFakeDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+// imageRepoDigest is the RepoDigests entry the registry reports for a digest.
+func imageRepoDigest(digest string) string { return "ghcr.io/silgrid/aihub@" + digest }
 
 type relWorld struct {
 	t       *testing.T
@@ -90,12 +97,13 @@ func newRelWorld(t *testing.T, originTags, localTags []string) *relWorld {
 
 	relWrite(t, filepath.Join(w.bin, "git"), fmt.Sprintf(`#!/bin/sh
 case "$1" in push) echo "git $*" >> "$CALLLOG" ;; esac
+if [ "$1" = ls-remote ] && [ -n "$FAKE_LSREMOTE_FAIL" ]; then echo "fatal: unable to access" >&2; exit 128; fi
 exec %s "$@"
 `, realGit), 0o755)
 	relWrite(t, filepath.Join(w.bin, "docker"), `#!/bin/sh
 case "$1" in
   build) echo "docker $*" >> "$CALLLOG" ;;
-  push) echo "docker $*" >> "$CALLLOG" ;;
+  push) echo "docker $*" >> "$CALLLOG"; [ -n "$FAKE_PUSH_FAIL" ] && exit 1 ;;
   inspect) echo "docker inspect" >> "$CALLLOG"; echo "ghcr.io/silgrid/aihub@$FAKE_PUSH_DIGEST" ;;
   login) echo "docker login" >> "$CALLLOG"; cat >/dev/null ;;
   buildx) echo "Name: x"; echo "Digest: $FAKE_REGISTRY_DIGEST" ;;
@@ -249,7 +257,8 @@ func TestReleaseScriptVersionFloorAndBump(t *testing.T) {
 		{"patch", []string{"v1.2.0", "v1.10.1"}, nil, []string{"patch"}, "v1.10.2"},
 		{"major", []string{"v1.2.0", "v1.10.1"}, nil, []string{"major"}, "v2.0.0"},
 		{"origin newer than local", []string{"v1.2.0", "v3.1.4"}, nil, []string{"patch"}, "v3.1.5"},
-		{"local newer than origin", []string{"v1.2.0"}, []string{"v1.9.0"}, nil, "v1.10.0"},
+		// local tags are NOT a source of truth: only origin counts
+		{"local tag newer than origin is ignored", []string{"v1.2.0"}, []string{"v1.9.0"}, nil, "v1.3.0"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -265,7 +274,7 @@ func TestReleaseScriptVersionFloorAndBump(t *testing.T) {
 	}
 	t.Run("origin tag unseen locally is honored", func(t *testing.T) {
 		w := newRelWorld(t, []string{"v1.2.0"}, nil)
-		relGit(t, w.work, "tag", "-a", "-m", "x", "v7.0.0")
+		relGit(t, w.work, "tag", "-a", "-m", "x", "v7.0.0", "HEAD~1")
 		relGit(t, w.work, "push", "-q", "origin", "v7.0.0")
 		relGit(t, w.work, "tag", "-d", "v7.0.0")
 		out, err := w.run(nil)
@@ -293,6 +302,64 @@ func TestReleaseScriptTagTakenOnOriginStopsBeforePublish(t *testing.T) {
 	}
 	if relGit(t, w.work, "tag", "-l", "v1.3.0") != "" {
 		t.Fatal("our local claim tag was left behind")
+	}
+}
+
+func TestReleaseScriptLsRemoteFailureIsFatalBeforeAnyWork(t *testing.T) {
+	w := newRelWorld(t, []string{"v1.2.0"}, []string{"v9.0.0"})
+	out, err := w.run([]string{"FAKE_LSREMOTE_FAIL=1"})
+	if err == nil || !strings.Contains(out, "ls-remote") {
+		t.Fatalf("expected a fatal ls-remote failure: %v\n%s", err, out)
+	}
+	if c := w.calls(); len(c) != 0 {
+		t.Fatalf("work happened despite the failing ls-remote (tests/build/push): %v", c)
+	}
+}
+
+func TestReleaseScriptRefusesAnAlreadyReleasedHead(t *testing.T) {
+	for name, annotated := range map[string]bool{"annotated tag": true, "lightweight tag": false} {
+		t.Run(name, func(t *testing.T) {
+			w := newRelWorld(t, []string{"v1.2.0"}, nil)
+			// a previous release run already tagged exactly this commit on origin
+			if annotated {
+				relGit(t, w.work, "tag", "-a", "-m", "v1.3.0", "v1.3.0")
+			} else {
+				relGit(t, w.work, "tag", "v1.3.0")
+			}
+			relGit(t, w.work, "push", "-q", "origin", "v1.3.0")
+			relGit(t, w.work, "tag", "-d", "v1.3.0")
+			out, err := w.run(nil)
+			if err == nil {
+				t.Fatalf("expected a refusal\n%s", out)
+			}
+			for _, want := range []string{"already released as v1.3.0", ".polyforge/deploy.sh v1.3.0 --confirm v1.3.0"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("message lacks %q\n%s", want, out)
+				}
+			}
+			if c := w.calls(); len(c) != 0 {
+				t.Fatalf("something ran before the refusal: %v", c)
+			}
+			if got := w.originTags(); strings.Contains(got, "v1.4.0") {
+				t.Fatalf("a duplicate version was cut: %q", got)
+			}
+		})
+	}
+}
+
+func TestReleaseScriptPostFailTextIsAccurate(t *testing.T) {
+	w := newRelWorld(t, []string{"v1.2.0"}, nil)
+	out, err := w.run([]string{"FAKE_PUSH_FAIL=1"})
+	if err == nil {
+		t.Fatalf("expected failure\n%s", out)
+	}
+	for _, want := range []string{"BURNED", "immutable", "artifacts/release-v1.3.0/aihub", "staging directory"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("post-fail text lacks %q\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "delete the tag by hand") {
+		t.Errorf("must not suggest deleting a pushed tag\n%s", out)
 	}
 }
 
@@ -405,6 +472,12 @@ func TestReleaseScriptVerify(t *testing.T) {
 		{name: "digest mismatch", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
 			env: []string{"FAKE_REGISTRY_DIGEST=sha256:bbbb"}, fail: "digest mismatch"},
 		{name: "non-monotonic", tag: "v1.2.0", origin: []string{"v1.02.0", "v1.2.0"}, fail: "monotonic"},
+		{name: "newer tag exists", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0", "v1.4.0"}, fail: "not strictly greater"},
+		{name: "equal key spelling exists", tag: "v1.3.0", origin: []string{"v1.3.0", "v1.03.0"}, fail: "not strictly greater"},
+		{name: "digest file not canonical", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
+			mut: func(f map[string]string) { f["aihub-image.digest"] = imageRepoDigest(relFakeDigest) + "\n" }, fail: "aihub-image.digest format"},
+		{name: "ls-remote fails", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
+			env: []string{"FAKE_LSREMOTE_FAIL=1"}, fail: "ls-remote"},
 		{name: "bad format", tag: "1.3", origin: []string{"v1.2.0"}, fail: "tag format"},
 		{name: "tag not on origin", tag: "v1.3.0", origin: []string{"v1.2.0"}, fail: "not found on origin"},
 	}

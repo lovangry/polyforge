@@ -7,26 +7,34 @@
 #   sh .polyforge/release.sh --help
 #
 # Version scheme: vX.Y.Z semver. The floor is the highest semver among the tags
-# on origin (git ls-remote) and the local tags; the bump is applied to it.
+# on ORIGIN (git ls-remote; local tags are ignored, and a failing ls-remote is
+# fatal - there is no silent fallback); the bump is applied to it.
 #
 # Release, in order (nothing is published before the gate passes):
 #   1. refuse a dirty worktree; fetch origin; refuse unless HEAD == origin/main;
-#   2. test gate (GOWORK=off make test, includes the long e2e);
-#   3. compute the version; build the binaries (GOWORK=off make release
+#      refuse if HEAD already carries a release tag on origin (a second release
+#      of the same commit: redeploy the existing version instead); compute the
+#      version from the origin tags;
+#   2. test gate (GOWORK=off make test, includes the long e2e; the opt-in
+#      real-GitHub e2e is skipped unless POLYFORGE_TEST_REAL_GITHUB=1);
+#   3. build the binaries (GOWORK=off make release
 #      VERSION=<tag>) -> aihub-linux-amd64, pf-linux-amd64; build the image from
 #      deploy/Dockerfile tagged ghcr.io/silgrid/aihub:<tag>;
 #   4. git tag <tag> + git push origin <tag> (NO force): the atomic claim of the
 #      version. If the tag exists on origin the run stops, nothing published;
-#   5. docker push; write aihub-image.digest (sha256:<hex>, known only after the
-#      push); SHA256SUMS over the three files;
+#   5. docker push; write aihub-image.digest (the bare image digest
+#      sha256:<64 hex>, known only after the push; the canonical format that
+#      deploy.sh consumes); SHA256SUMS over the three files;
 #   6. gh release create <tag> with the 4 assets, notes from
 #      docs/release-notes/<tag>.md (generated from git log when absent).
 # Last lines on stdout: version=<tag>, commit=<sha>, notes=<release url>.
 #
-# --verify <tag> (no mutation, no tests, no build): tag format and strict
-# monotonicity vs the previous tag on origin; release exists with EXACTLY the 4
-# assets; sha256sum -c SHA256SUMS on the downloaded assets; the registry digest
-# of ghcr.io/silgrid/aihub:<tag> equals aihub-image.digest. Exit 0 iff all pass.
+# --verify <tag> (no mutation, no tests, no build): tag format; strict
+# monotonicity (the tag must be strictly greater than EVERY other release tag on
+# origin); release exists with EXACTLY the 4
+# assets; sha256sum -c SHA256SUMS on the downloaded assets; aihub-image.digest is
+# exactly sha256:<64 hex> and the registry digest of ghcr.io/silgrid/aihub:<tag>
+# equals it. Exit 0 iff all pass.
 #
 # Nothing is ever deleted, overwritten or forced. If a step fails after the tag
 # was pushed, the script prints recovery instructions and does NOT undo anything.
@@ -60,9 +68,19 @@ usage: release.sh [major|minor|patch]     cut a release (default: minor)
 USAGE
 }
 
-# remote_tags: semver tags on the remote, one per line (peeled refs folded).
-remote_tags() {
-  git ls-remote --tags "$REMOTE" 2>/dev/null | sed -n 's|^[0-9a-f]*[[:space:]]*refs/tags/||p' | sed 's/\^{}$//' | grep -E "$SEMVER_RE" | sort -Vu || true
+# ls_tags: raw `git ls-remote --tags` output of the remote ("<sha> <ref>" lines,
+# annotated tags also as <ref>^{}); returns non-zero when ls-remote fails.
+ls_tags() {
+  git ls-remote --tags "$REMOTE" 2>/dev/null
+}
+# tags_of <ls-remote output>: semver tags, one per line (peeled refs folded).
+tags_of() {
+  printf '%s\n' "$1" | sed -n 's|^[0-9a-f]*[[:space:]]*refs/tags/||p' | sed 's/\^{}$//' | grep -E "$SEMVER_RE" | sort -Vu || true
+}
+# tags_at <ls-remote output> <commit>: semver tags whose commit (peeled for
+# annotated tags, direct for lightweight ones) is <commit>.
+tags_at() {
+  printf '%s\n' "$1" | awk -v c="$2" '$1 == c {print $2}' | sed -n 's|^refs/tags/||p' | sed 's/\^{}$//' | grep -E "$SEMVER_RE" | sort -Vu || true
 }
 
 case "${1:-}" in
@@ -81,7 +99,7 @@ if [ "${1:-}" = "--verify" ]; then
   # 1. tag format + strict monotonicity against the previous origin tag.
   if printf '%s\n' "$VTAG" | grep -Eq "$SEMVER_RE"; then
     pass "tag format: $VTAG"
-    RT=$(remote_tags)
+    if LS=$(ls_tags); then RT=$(tags_of "$LS"); else RT=""; fail "git ls-remote --tags $REMOTE failed: cannot check the tag ordering"; fi
     if printf '%s\n' "$RT" | grep -qx "$VTAG"; then
       pass "tag exists on $REMOTE"
     else
@@ -90,18 +108,23 @@ if [ "${1:-}" = "--verify" ]; then
     key() { printf '%s\n' "$1" | sed 's/^v//' | awk -F. '{printf "%012d%012d%012d", $1, $2, $3}'; }
     gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | LC_ALL=C sort | tail -n1)" = "$1" ]; }
     MYKEY=$(key "$VTAG")
-    PREV=""; PREVKEY=""
+    # $VTAG must be strictly greater than every OTHER tag on origin: a tag with a
+    # key >= ours (a newer release, or a spelling like v1.02.0 of the same key)
+    # means $VTAG is not the latest release.
+    NOTGT=""; OTHERS=0; HIGH=""
     for t in $(printf '%s\n' "$RT" | grep -vx "$VTAG" || true); do
+      OTHERS=$((OTHERS + 1))
       k=$(key "$t")
-      if gt "$k" "$MYKEY"; then continue; fi
-      if [ -z "$PREVKEY" ] || gt "$k" "$PREVKEY"; then PREV=$t; PREVKEY=$k; fi
+      if [ "$k" = "$MYKEY" ] || gt "$k" "$MYKEY"; then NOTGT="$NOTGT $t"; else
+        if [ -z "$HIGH" ] || gt "$k" "$(key "$HIGH")"; then HIGH=$t; fi
+      fi
     done
-    if [ -z "$PREV" ]; then
-      pass "monotonic: no lower tag on $REMOTE (first release)"
-    elif gt "$MYKEY" "$PREVKEY"; then
-      pass "monotonic: $VTAG > previous $PREV"
+    if [ -n "$NOTGT" ]; then
+      fail "monotonic: $VTAG is not strictly greater than every other tag on $REMOTE (not greater:$NOTGT)"
+    elif [ "$OTHERS" -eq 0 ]; then
+      pass "monotonic: no other tag on $REMOTE (first release)"
     else
-      fail "monotonic: $VTAG is not strictly greater than $PREV"
+      pass "monotonic: $VTAG > every other tag on $REMOTE (highest other $HIGH)"
     fi
   else
     fail "tag format: \"$VTAG\" does not match $SEMVER_RE"
@@ -139,6 +162,11 @@ pf-linux-amd64"
     fi
     # 4. registry digest == aihub-image.digest.
     WANTD=$(tr -d ' \t\r\n' <"$VWORK/dl/aihub-image.digest" 2>/dev/null || true)
+    if printf '%s' "$WANTD" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+      pass "aihub-image.digest format: sha256:<64 hex>"
+    else
+      fail "aihub-image.digest format: \"${WANTD:-<empty>}\" is not sha256:<64 hex>"
+    fi
     GOTD=$(docker buildx imagetools inspect "$IMAGE:$VTAG" 2>/dev/null | awk '/^Digest:/{print $2; exit}' || true)
     if [ -z "$GOTD" ]; then
       GOTD=$(docker manifest inspect -v "$IMAGE:$VTAG" 2>/dev/null | sed -n 's/.*"Digest": *"\(sha256:[0-9a-f]*\)".*/\1/p' | head -1 || true)
@@ -176,13 +204,18 @@ COMMIT=$(git rev-parse HEAD)
 OMAIN=$(git rev-parse "refs/remotes/$REMOTE/$BRANCH" 2>/dev/null) || die "$REMOTE/$BRANCH not found"
 [ "$COMMIT" = "$OMAIN" ] || die "HEAD ($COMMIT) is not $REMOTE/$BRANCH ($OMAIN); release only from the pushed tip of $BRANCH"
 
-# 2. test gate.
-echo "release: running test gate"
-if [ -n "${RELEASE_TEST_CMD:-}" ]; then sh -c "$RELEASE_TEST_CMD"; else GOWORK=off make test; fi
+# 1b. the origin tags are the only source of truth: a failing ls-remote is fatal.
+LS=$(ls_tags) || die "git ls-remote --tags $REMOTE failed - cannot read the origin tags; nothing built or published"
+# A commit that already carries a release tag on origin was released: a second
+# release would cut a duplicate version of the same commit.
+HEADTAGS=$(tags_at "$LS" "$COMMIT" | tr '\n' ' ')
+if [ -n "${HEADTAGS%% }" ]; then
+  die "HEAD ($COMMIT) is already released as ${HEADTAGS%% } on $REMOTE; nothing published. Do not cut a second version of the same commit: to deploy it (again), run .polyforge/deploy.sh ${HEADTAGS%% *} --confirm ${HEADTAGS%% *}"
+fi
 
-# 3. version = bump(max semver of origin tags U local tags).
-FLOOR=$({ remote_tags; git tag -l 'v*' | grep -E "$SEMVER_RE" || true; } | sort -Vu | tail -1)
-[ -n "$FLOOR" ] || die "no vX.Y.Z tag on $REMOTE or locally - refusing to invent a base version"
+# version = bump(max semver of the ORIGIN tags); local tags are ignored.
+FLOOR=$(tags_of "$LS" | tail -1)
+[ -n "$FLOOR" ] || die "no vX.Y.Z tag on $REMOTE - refusing to invent a base version"
 _v=${FLOOR#v}; _maj=${_v%%.*}; _r=${_v#*.}; _min=${_r%%.*}; _pat=${_r#*.}
 case "$BUMP" in
   minor) _min=$((_min + 1)); _pat=0 ;;
@@ -192,9 +225,13 @@ esac
 TAG="v${_maj}.${_min}.${_pat}"
 echo "release: floor $FLOOR -> version $TAG ($BUMP bump), commit $COMMIT"
 PREVTAG="$FLOOR"
-if git ls-remote --tags "$REMOTE" "refs/tags/$TAG" | grep -q .; then
+if printf '%s\n' "$LS" | grep -q "[[:space:]]refs/tags/$TAG\(\^{}\)\{0,1\}\$"; then
   die "tag $TAG already exists on $REMOTE; nothing published"
 fi
+
+# 2. test gate.
+echo "release: running test gate"
+if [ -n "${RELEASE_TEST_CMD:-}" ]; then sh -c "$RELEASE_TEST_CMD"; else GOWORK=off make test; fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -254,10 +291,17 @@ POSTFAIL() {
 release: FAILED AFTER THE TAG WAS PUSHED ($TAG at $COMMIT).
 Nothing has been deleted or rolled back automatically. Decide by hand:
   - tag $TAG is on $REMOTE; the version is burnt, do not reuse it for other code;
+  - tag $TAG is pushed and immutable (never delete or move it): this version
+    is BURNED. Do not retry it; cut the next version with a new release run
+    (note: a new run refuses to release a commit that already carries a tag, so
+    the next version needs a new commit on $BRANCH);
   - the image $IMAGE:$TAG and/or the GitHub release may be missing or partial;
-  - either finish manually (docker push, aihub-image.digest, SHA256SUMS,
-    gh release create $TAG) or abandon $TAG and release the next version
-    (an owner may delete the tag by hand if nothing was published).
+  - local files that survive: artifacts/release-$TAG/aihub and
+    artifacts/release-$TAG/pf (the built binaries) and the local docker image
+    $IMAGE:$TAG. The staging directory (checksums, aihub-image.digest, notes)
+    is removed when this script exits;
+  - finishing $TAG by hand (docker push, a digest file, SHA256SUMS, gh release
+    create) is possible but must be audited with release.sh --verify $TAG.
   failing step: $1
 ##########################################################################
 MSG
