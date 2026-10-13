@@ -17,6 +17,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 const lastShutdownFile = "last-shutdown.json"
@@ -121,6 +122,14 @@ func (d *Daemon) replaySubmitQueue() {
 		}
 		if e.Intent != "claim" {
 			d.dropReplay(e, fmt.Sprintf("intent %q is not replayed (only plain claim submits are)", e.Intent))
+			continue
+		}
+		if e.Origin.Kind == runtime.OriginAuto && !d.modes.Auto() {
+			// v2-converge §5 at replay (audit B3b): the previous process's
+			// auto entries must not re-enter a machine the operator turned
+			// auto off on — the same rule the live auto-off purge applies;
+			// explicit (cli/chat) entries replay as before.
+			d.dropReplay(e, "auto is off on this machine (only explicit pf submit replays)")
 			continue
 		}
 		if _, live := d.rt.Info(e.WorkItemID); live {

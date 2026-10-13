@@ -635,6 +635,13 @@ func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 			writeAdmissionErr(w, err)
 			return
 		}
+		if !*req.Auto {
+			// v2-converge §5 (audit B3b): auto off = only explicit pf
+			// submit — the not-yet-started origin=auto entries leave the
+			// queue (and the persisted file a restart replays); explicit
+			// (cli/chat) entries ride untouched.
+			d.autoOffPurge()
+		}
 	}
 	if req.Max != nil {
 		if err := d.q.SetMaxConcurrent(*req.Max); err != nil {

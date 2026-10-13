@@ -289,6 +289,37 @@ func (q *jobQueue) Flush() error {
 	return q.persistLocked()
 }
 
+// PurgeOrigin drops every not-yet-started (pending) entry of the given
+// origin kind from the queue and persists the result (audit B3b: auto
+// off = only explicit pf submit, v2-converge §5). Inflight entries —
+// already Take()n and mid-claim — are untouched. Returns the dropped
+// entries; a persist failure rolls the queue back and is the error
+// return.
+func (q *jobQueue) PurgeOrigin(kind string) ([]qEntry, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	original := make([]qEntry, len(q.pending))
+	copy(original, q.pending)
+	kept := q.pending[:0]
+	var dropped []qEntry
+	for _, e := range q.pending {
+		if e.Origin.Kind == kind {
+			dropped = append(dropped, e)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if len(dropped) == 0 {
+		return nil, nil
+	}
+	q.pending = kept
+	if err := q.persistLocked(); err != nil {
+		q.pending = original
+		return nil, err
+	}
+	return dropped, nil
+}
+
 func (q *jobQueue) IsPending(wi string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -312,11 +343,21 @@ func (q *jobQueue) LenPending() int {
 	return len(q.pending)
 }
 
-// SlotFree reports whether a spawn slot is open.
-func (q *jobQueue) SlotFree() bool {
+// FreeSlots reports how many spawn slots are open right now (the wave
+// budget fetchAutoWave spends per enqueued entry, audit B3a).
+func (q *jobQueue) FreeSlots() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return len(q.occupied()) < q.maxConc
+	n := q.maxConc - len(q.occupied())
+	if n < 0 {
+		n = 0
+	}
+	return n
+}
+
+// SlotFree reports whether a spawn slot is open.
+func (q *jobQueue) SlotFree() bool {
+	return q.FreeSlots() > 0
 }
 
 // Take pops the next DUE pending entry IF a slot is free (04 §6.1d
