@@ -224,13 +224,12 @@ func TestClaimFlowOverHTTP(t *testing.T) {
 			Status             string `json:"status"`
 			SessionFingerprint string `json:"session_fingerprint"`
 			SessionMachine     string `json:"session_machine"`
-			SessionOwner       string `json:"session_owner"`
 			SessionStartedAt   string `json:"session_started_at"`
 			CleanPause         bool   `json:"clean_pause"`
 		} `json:"work_item"`
 	}
 	code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/claim", e.key,
-		map[string]string{"session_id": secret, "machine_id": "m1", "owner": "op", "idempotency_key": "http-1"}, &resp)
+		map[string]string{"session_id": secret, "machine_id": "m1", "idempotency_key": "http-1"}, &resp)
 	if code != 200 {
 		t.Fatalf("claim: %d %s", code, raw)
 	}
@@ -250,7 +249,7 @@ func TestClaimFlowOverHTTP(t *testing.T) {
 	}
 	// The WorkItem JSON carries the m4 public audit block (never a hash).
 	if resp.WorkItem.SessionFingerprint != resp.Claim.SessionFingerprint ||
-		resp.WorkItem.SessionMachine != "m1" || resp.WorkItem.SessionOwner != "op" ||
+		resp.WorkItem.SessionMachine != "m1" ||
 		resp.WorkItem.SessionStartedAt == "" || resp.WorkItem.CleanPause {
 		t.Fatalf("work item session audit fields wrong: %+v", resp.WorkItem)
 	}

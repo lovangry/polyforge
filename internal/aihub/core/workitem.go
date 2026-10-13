@@ -797,7 +797,7 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error)
 	// stay "held" (M2's clearing rule applies to every terminal transition).
 	res, err := tx.Exec(`UPDATE work_items SET status=?, closed_at=?, updated_at=?,
 		waiting_on=NULL, session_hash=NULL, session_fingerprint=NULL, session_machine=NULL,
-		session_owner=NULL, session_started_at=NULL, clean_pause=0
+		session_started_at=NULL, clean_pause=0
 		WHERE id=? AND status IN (?,?,?)`,
 		api.StatusCanceled, now, now, id, api.StatusQueued, api.StatusPaused, api.StatusBlocked)
 	if err != nil {

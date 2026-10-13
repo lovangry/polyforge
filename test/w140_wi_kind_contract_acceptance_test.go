@@ -249,7 +249,7 @@ var w140FrozenViewKeys = map[string]bool{
 	"reporter": true, "assignee": true, "waiting_on": true,
 	"bundle_name": true, "bundle_digest": true, "workflow_budget_baseline": true,
 	"created_at": true, "updated_at": true, "closed_at": true,
-	"session_fingerprint": true, "session_machine": true, "session_owner": true,
+	"session_fingerprint": true, "session_machine": true,
 	"session_started_at": true, "clean_pause": true, "repo_inventory": true,
 }
 

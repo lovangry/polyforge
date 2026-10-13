@@ -647,7 +647,6 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		WorkItemID:     wi,
 		SessionID:      sessionID,
 		MachineID:      r.cfg.MachineID,
-		Owner:          r.cfg.MachineID,
 		IdempotencyKey: key,
 	}
 	resp, err := r.hub.SessionClaim(req)

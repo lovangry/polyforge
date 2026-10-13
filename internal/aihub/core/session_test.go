@@ -26,7 +26,7 @@ func sessionEnv(t *testing.T) (*testEnv, *SessionManager) {
 func mustSessionClaim(t *testing.T, m *SessionManager, env *testEnv, wiID, secret, key string) *api.SessionClaim {
 	t.Helper()
 	claim, err := m.Claim(wiID, api.SessionClaimRequest{
-		SessionID: secret, MachineID: "m1", Owner: "op", IdempotencyKey: key,
+		SessionID: secret, MachineID: "m1", IdempotencyKey: key,
 	}, env.UserID)
 	if err != nil {
 		t.Fatalf("session claim: %v", err)
@@ -36,12 +36,12 @@ func mustSessionClaim(t *testing.T, m *SessionManager, env *testEnv, wiID, secre
 
 // rowSession reads the raw session columns for direct assertions
 // (nil pointers = NULL columns).
-func rowSession(t *testing.T, env *testEnv, wiID string) (status string, hash, fp, machine, owner, started *string, cleanPause bool) {
+func rowSession(t *testing.T, env *testEnv, wiID string) (status string, hash, fp, machine, started *string, cleanPause bool) {
 	t.Helper()
-	var h, f, m, o, st sql.NullString
+	var h, f, m, st sql.NullString
 	err := env.DB.QueryRow(`SELECT status, session_hash, session_fingerprint, session_machine,
-		session_owner, session_started_at, clean_pause FROM work_items WHERE id=?1`, wiID).
-		Scan(&status, &h, &f, &m, &o, &st, &cleanPause)
+		session_started_at, clean_pause FROM work_items WHERE id=?1`, wiID).
+		Scan(&status, &h, &f, &m, &st, &cleanPause)
 	if err != nil {
 		t.Fatalf("read session row: %v", err)
 	}
@@ -53,9 +53,6 @@ func rowSession(t *testing.T, env *testEnv, wiID string) (status string, hash, f
 	}
 	if m.Valid {
 		machine = &m.String
-	}
-	if o.Valid {
-		owner = &o.String
 	}
 	if st.Valid {
 		started = &st.String
@@ -80,7 +77,7 @@ func TestSessionClaimCASRace(t *testing.T) {
 			defer wg.Done()
 			results[i], errs[i] = m.Claim(id, api.SessionClaimRequest{
 				SessionID: api.SessionFingerprint("racer") + strings.Repeat(string(rune('a'+i)), 60),
-				MachineID: "m", Owner: "op", IdempotencyKey: "race-" + string(rune('a'+i)),
+				MachineID: "m", IdempotencyKey: "race-" + string(rune('a'+i)),
 			}, env.UserID)
 		}(i)
 	}
@@ -106,7 +103,7 @@ func TestSessionClaimCASRace(t *testing.T) {
 	// The winner's write landed: running, hash = sha256 of the winner's
 	// secret (the claim itself never exposes the secret, so recompute via
 	// the known racer-secret scheme is impossible here — assert shape).
-	status, hash, fp, _, _, _, _ := rowSession(t, env, id)
+	status, hash, fp, _, _, _ := rowSession(t, env, id)
 	if status != api.StatusRunning || hash == nil || *hash == "" || fp == nil || *fp != winner.SessionFingerprint {
 		t.Fatalf("winner's write did not land: status=%s hash=%v fp=%v", status, *hash, *fp)
 	}
@@ -229,7 +226,7 @@ func TestSessionAttachGates(t *testing.T) {
 	if err := m.Pause(id, secret, true, "operator pause", env.UserID); err != nil {
 		t.Fatalf("clean pause: %v", err)
 	}
-	st, _, _, _, _, _, cp := rowSession(t, env, id)
+	st, _, _, _, _, cp := rowSession(t, env, id)
 	if st != api.StatusPaused || !cp {
 		t.Fatalf("clean pause did not land: status=%s clean_pause=%v", st, cp)
 	}
@@ -251,7 +248,7 @@ func TestSessionForceEnd(t *testing.T) {
 	if err := m.ForceEnd(id, "machine lost", env.UserID); err != nil {
 		t.Fatalf("force-end: %v", err)
 	}
-	st, hash, fp, _, _, _, cp := rowSession(t, env, id)
+	st, hash, fp, _, _, cp := rowSession(t, env, id)
 	if st != api.StatusQueued || cp || (hash != nil && *hash != "") || (fp != nil && *fp != "") {
 		t.Fatalf("force-end did not clear the session: status=%s clean=%v hash=%v fp=%v", st, cp, hash, fp)
 	}
@@ -300,7 +297,7 @@ func TestSessionForceEnd(t *testing.T) {
 	if err := m.ForceEnd(pid, "operator walked away", env.UserID); err != nil {
 		t.Fatalf("force-end of paused WI: %v", err)
 	}
-	st, hash, _, _, _, _, cp = rowSession(t, env, pid)
+	st, hash, _, _, _, cp = rowSession(t, env, pid)
 	if st != api.StatusQueued || cp || (hash != nil && *hash != "") {
 		t.Fatalf("paused force-end wrong: status=%s clean=%v hash=%v", st, cp, hash)
 	}
@@ -356,10 +353,10 @@ func TestSessionEndFenceAndClear(t *testing.T) {
 	if err := m.End(id, api.SessionEndRequest{SessionID: secret, Status: api.StatusBlocked, Note: "bounded fail"}, env.UserID); err != nil {
 		t.Fatalf("session-end blocked: %v", err)
 	}
-	status, hash, fp, machine, owner, started, clean := rowSession(t, env, id)
-	if status != api.StatusBlocked || hash != nil || fp != nil || machine != nil || owner != nil || started != nil || clean {
-		t.Fatalf("blocked did not clear the session row: status=%s hash=%v fp=%v machine=%v owner=%v started=%v clean=%v",
-			status, hash, fp, machine, owner, started, clean)
+	status, hash, fp, machine, started, clean := rowSession(t, env, id)
+	if status != api.StatusBlocked || hash != nil || fp != nil || machine != nil || started != nil || clean {
+		t.Fatalf("blocked did not clear the session row: status=%s hash=%v fp=%v machine=%v started=%v clean=%v",
+			status, hash, fp, machine, started, clean)
 	}
 	// Blocked is NOT claimable (M2): excluded until a human unblocks.
 	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_CLAIMABLE" {
@@ -449,7 +446,7 @@ func TestOwnerDoorsOnBlockedWI(t *testing.T) {
 	if wi.ClosedAt == nil {
 		t.Fatalf("the abandon exit must set closed_at")
 	}
-	status, hash, _, _, _, _, _ := rowSession(t, env, id)
+	status, hash, _, _, _, _ := rowSession(t, env, id)
 	if status != api.StatusCanceled || hash != nil {
 		t.Fatalf("the abandon exit must leave the session cleared: status=%s hash=%v", status, hash)
 	}
@@ -587,7 +584,7 @@ func TestSessionPauseCleanFlagDistinction(t *testing.T) {
 	if err := m.Pause(id, secret, false, "", env.UserID); err != nil {
 		t.Fatalf("shutdown pause: %v", err)
 	}
-	st, hash, _, _, _, _, cp := rowSession(t, env, id)
+	st, hash, _, _, _, cp := rowSession(t, env, id)
 	if st != api.StatusPaused || cp || hash == nil || *hash != api.SessionHashHex(secret) {
 		t.Fatalf("shutdown pause wrong: status=%s clean=%v hash=%v", st, cp, hash)
 	}
@@ -599,7 +596,7 @@ func TestSessionPauseCleanFlagDistinction(t *testing.T) {
 	if err := m.Pause(id, secret, true, "operator", env.UserID); err != nil {
 		t.Fatalf("operator pause: %v", err)
 	}
-	st, hash, _, _, _, _, cp = rowSession(t, env, id)
+	st, hash, _, _, _, cp = rowSession(t, env, id)
 	if st != api.StatusPaused || !cp || hash == nil {
 		t.Fatalf("operator pause wrong: status=%s clean=%v", st, cp)
 	}
@@ -638,7 +635,7 @@ func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 		t.Fatalf("view: %v", err)
 	}
 	if view.SessionFingerprint != api.SessionFingerprint(secret) ||
-		view.SessionMachine != "m1" || view.SessionOwner != "op" ||
+		view.SessionMachine != "m1" ||
 		view.SessionStartedAt == "" || view.CleanPause {
 		t.Fatalf("view session block wrong: %+v", view.SessionPublic)
 	}

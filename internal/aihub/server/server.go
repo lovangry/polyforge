@@ -345,9 +345,8 @@ func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity
 }
 
 // writeWI wraps a WorkItem with its public session audit block (m4:
-// session_fingerprint / session_machine / session_owner /
-// session_started_at / clean_pause; NEVER session_hash, never the
-// secret) and writes it.
+// session_fingerprint / session_machine / session_started_at /
+// clean_pause; NEVER session_hash, never the secret) and writes it.
 func (s *Server) writeWI(w http.ResponseWriter, status int, wi *api.WorkItem) {
 	view, err := s.WIs.View(wi)
 	if err != nil {

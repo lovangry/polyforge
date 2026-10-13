@@ -133,7 +133,6 @@ type SessionClaim struct {
 	WorkItemID         string        `json:"work_item_id"`
 	SessionFingerprint string        `json:"session_fingerprint"`
 	MachineID          string        `json:"machine_id"`
-	Owner              string        `json:"owner"`
 	BundleName         string        `json:"bundle_name"`
 	BundleDigest       string        `json:"bundle_digest"`
 	ClaimedAt          string        `json:"claimed_at"`
@@ -158,7 +157,6 @@ type SessionClaimRequest struct {
 	WorkItemID     string `json:"work_item_id"`
 	SessionID      string `json:"session_id"`
 	MachineID      string `json:"machine_id"`
-	Owner          string `json:"owner"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
@@ -174,7 +172,6 @@ type SessionAttachRequest struct {
 	WorkItemID string `json:"work_item_id"`
 	SessionID  string `json:"session_id"`
 	MachineID  string `json:"machine_id"`
-	Owner      string `json:"owner"`
 }
 
 // SessionVerifyRequest is the compare-only body (B3: the hub stores only

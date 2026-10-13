@@ -204,7 +204,7 @@ func TestTerminalTransitions(t *testing.T) {
 	if wi.Status != api.StatusWrapped || wi.ClosedAt == nil {
 		t.Fatalf("wrap did not terminalize: %+v", wi)
 	}
-	status, hash, _, _, _, _, _ := rowSession(t, env, id)
+	status, hash, _, _, _, _ := rowSession(t, env, id)
 	if status != api.StatusWrapped || hash != nil {
 		t.Fatalf("wrap did not clear the session row: status=%s hash=%v", status, hash)
 	}

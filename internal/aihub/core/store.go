@@ -127,7 +127,6 @@ CREATE TABLE IF NOT EXISTS work_items (
   session_hash        TEXT,
   session_fingerprint TEXT,
   session_machine     TEXT,
-  session_owner       TEXT,
   session_started_at  TEXT,
   clean_pause         INTEGER NOT NULL DEFAULT 0,
   -- per-project display seq (seq-fix lane owner ruling).

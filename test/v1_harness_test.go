@@ -489,7 +489,6 @@ func (u *v1Install) wiStatus(t *testing.T, wi string) string {
 type wiSession struct {
 	Fingerprint string `json:"session_fingerprint"`
 	Machine     string `json:"session_machine"`
-	Owner       string `json:"session_owner"`
 	StartedAt   string `json:"session_started_at"`
 	CleanPause  bool   `json:"clean_pause"`
 }
@@ -522,7 +521,6 @@ func sessionClaimReq(wi string) api.SessionClaimRequest {
 		WorkItemID:     wi,
 		SessionID:      hex.EncodeToString(b),
 		MachineID:      "m-e2e-probe",
-		Owner:          "m-e2e-probe",
 		IdempotencyKey: hex.EncodeToString(k),
 	}
 }

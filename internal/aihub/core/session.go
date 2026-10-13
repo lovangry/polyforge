@@ -63,7 +63,6 @@ type sessionRow struct {
 	Hash         sql.NullString
 	Fingerprint  sql.NullString
 	Machine      sql.NullString
-	Owner        sql.NullString
 	StartedAt    sql.NullString
 	CleanPause   bool
 	BundleName   sql.NullString
@@ -79,9 +78,9 @@ func sessionHeld(r *sessionRow) bool { return r.Hash.Valid && r.Hash.String != "
 func loadSessionRow(q queryRower, wiID string) (*sessionRow, error) {
 	var r sessionRow
 	err := q.QueryRow(`SELECT status, session_hash, session_fingerprint, session_machine,
-		session_owner, session_started_at, clean_pause, bundle_name, bundle_digest, project_id
+		session_started_at, clean_pause, bundle_name, bundle_digest, project_id
 		FROM work_items WHERE id=?1`, wiID).
-		Scan(&r.Status, &r.Hash, &r.Fingerprint, &r.Machine, &r.Owner, &r.StartedAt,
+		Scan(&r.Status, &r.Hash, &r.Fingerprint, &r.Machine, &r.StartedAt,
 			&r.CleanPause, &r.BundleName, &r.BundleDigest, &r.ProjectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
@@ -98,7 +97,6 @@ func loadSessionRow(q queryRower, wiID string) (*sessionRow, error) {
 type SessionPublic struct {
 	SessionFingerprint string `json:"session_fingerprint,omitempty"`
 	SessionMachine     string `json:"session_machine,omitempty"`
-	SessionOwner       string `json:"session_owner,omitempty"`
 	SessionStartedAt   string `json:"session_started_at,omitempty"`
 	CleanPause         bool   `json:"clean_pause"`
 }
@@ -213,18 +211,18 @@ type WIView struct {
 // sessionPublicOf reads one WI's public session block.
 func (db *DB) sessionPublicOf(wiID string) (SessionPublic, error) {
 	var sp SessionPublic
-	var fp, machine, owner, started sql.NullString
-	err := db.QueryRow(`SELECT session_fingerprint, session_machine, session_owner,
+	var fp, machine, started sql.NullString
+	err := db.QueryRow(`SELECT session_fingerprint, session_machine,
 		session_started_at, clean_pause FROM work_items WHERE id=?1`, wiID).
-		Scan(&fp, &machine, &owner, &started, &sp.CleanPause)
+		Scan(&fp, &machine, &started, &sp.CleanPause)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sp, Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
 	}
 	if err != nil {
 		return sp, err
 	}
-	sp.SessionFingerprint, sp.SessionMachine, sp.SessionOwner, sp.SessionStartedAt =
-		fp.String, machine.String, owner.String, started.String
+	sp.SessionFingerprint, sp.SessionMachine, sp.SessionStartedAt =
+		fp.String, machine.String, started.String
 	return sp, nil
 }
 
@@ -260,7 +258,7 @@ func (db *DB) sessionPublicBatch(ids []string) (map[string]SessionPublic, error)
 		placeholders = append(placeholders, "?"+strconv.Itoa(i+1))
 		args = append(args, id)
 	}
-	rows, err := db.Query(`SELECT id, session_fingerprint, session_machine, session_owner,
+	rows, err := db.Query(`SELECT id, session_fingerprint, session_machine,
 		session_started_at, clean_pause FROM work_items WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return nil, err
@@ -268,13 +266,13 @@ func (db *DB) sessionPublicBatch(ids []string) (map[string]SessionPublic, error)
 	defer rows.Close()
 	for rows.Next() {
 		var id string
-		var fp, machine, owner, started sql.NullString
+		var fp, machine, started sql.NullString
 		var sp SessionPublic
-		if err := rows.Scan(&id, &fp, &machine, &owner, &started, &sp.CleanPause); err != nil {
+		if err := rows.Scan(&id, &fp, &machine, &started, &sp.CleanPause); err != nil {
 			return nil, err
 		}
-		sp.SessionFingerprint, sp.SessionMachine, sp.SessionOwner, sp.SessionStartedAt =
-			fp.String, machine.String, owner.String, started.String
+		sp.SessionFingerprint, sp.SessionMachine, sp.SessionStartedAt =
+			fp.String, machine.String, started.String
 		out[id] = sp
 	}
 	return out, rows.Err()
@@ -402,19 +400,15 @@ func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, calle
 	hash := api.SessionHashHex(req.SessionID)
 	fp := api.SessionFingerprint(req.SessionID)
 	now := Now()
-	owner := req.Owner
-	if owner == "" {
-		owner = callerIdentity
-	}
 	var machineAny any
 	if req.MachineID != "" {
 		machineAny = req.MachineID
 	}
 	res, err := tx.Exec(`UPDATE work_items SET status='running', session_hash=?1, session_fingerprint=?2,
-		session_machine=?3, session_owner=?4, session_started_at=?5, clean_pause=0, assignee=?6,
-		waiting_on=NULL, updated_at=?5
-		WHERE id=?7 AND status='queued' AND session_hash IS NULL`,
-		hash, fp, machineAny, owner, now, callerIdentity, wiID)
+		session_machine=?3, session_started_at=?4, clean_pause=0, assignee=?5,
+		waiting_on=NULL, updated_at=?4
+		WHERE id=?6 AND status='queued' AND session_hash IS NULL`,
+		hash, fp, machineAny, now, callerIdentity, wiID)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +428,6 @@ func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, calle
 		WorkItemID:         wiID,
 		SessionFingerprint: fp,
 		MachineID:          req.MachineID,
-		Owner:              owner,
 		BundleName:         row.BundleName.String,
 		BundleDigest:       row.BundleDigest.String,
 		ClaimedAt:          now,
@@ -451,7 +444,7 @@ func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, calle
 		}
 	}
 	if err := appendEventTx(tx, wiID, now, callerIdentity, "session_claimed",
-		map[string]any{"session_fingerprint": fp, "machine_id": req.MachineID, "owner": owner}); err != nil {
+		map[string]any{"session_fingerprint": fp, "machine_id": req.MachineID}); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -590,13 +583,6 @@ func (m *SessionManager) Attach(wiID string, req api.SessionAttachRequest, calle
 			"attach requires a paused, non-clean-paused work item (got status %s, clean_pause %v)",
 			row.Status, row.CleanPause)
 	}
-	owner := req.Owner
-	if owner == "" {
-		owner = row.Owner.String
-	}
-	if owner == "" {
-		owner = callerIdentity
-	}
 	var machineAny any
 	if req.MachineID != "" {
 		machineAny = req.MachineID
@@ -604,10 +590,10 @@ func (m *SessionManager) Attach(wiID string, req api.SessionAttachRequest, calle
 		machineAny = row.Machine // keep the recorded machine
 	}
 	now := Now()
-	res, err := tx.Exec(`UPDATE work_items SET status='running', session_machine=?1, session_owner=?2,
-		assignee=?3, updated_at=?4
-		WHERE id=?5 AND status='paused' AND session_hash=?6 AND clean_pause=0`,
-		machineAny, owner, callerIdentity, now, wiID, row.Hash.String)
+	res, err := tx.Exec(`UPDATE work_items SET status='running', session_machine=?1,
+		assignee=?2, updated_at=?3
+		WHERE id=?4 AND status='paused' AND session_hash=?5 AND clean_pause=0`,
+		machineAny, callerIdentity, now, wiID, row.Hash.String)
 	if err != nil {
 		return nil, err
 	}
@@ -615,7 +601,7 @@ func (m *SessionManager) Attach(wiID string, req api.SessionAttachRequest, calle
 		return nil, Fail(api.ErrCoreConflict, "NOT_ATTACHABLE", "state changed concurrently")
 	}
 	if err := appendEventTx(tx, wiID, now, callerIdentity, "session_attached",
-		map[string]any{"session_fingerprint": row.Fingerprint.String, "machine_id": req.MachineID, "owner": owner}); err != nil {
+		map[string]any{"session_fingerprint": row.Fingerprint.String, "machine_id": req.MachineID}); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -625,7 +611,6 @@ func (m *SessionManager) Attach(wiID string, req api.SessionAttachRequest, calle
 		WorkItemID:         wiID,
 		SessionFingerprint: row.Fingerprint.String,
 		MachineID:          req.MachineID,
-		Owner:              owner,
 		BundleName:         row.BundleName.String,
 		BundleDigest:       row.BundleDigest.String,
 		ClaimedAt:          row.StartedAt.String, // the session's own start
@@ -669,7 +654,7 @@ func (m *SessionManager) ForceEnd(wiID, reason, callerIdentity string) error {
 	// Fenced on the hash read in this snapshot: a concurrent end/swap
 	// refuses instead of ending someone else's fresh session.
 	res, err := tx.Exec(`UPDATE work_items SET status='queued', session_hash=NULL, session_fingerprint=NULL,
-		session_machine=NULL, session_owner=NULL, session_started_at=NULL, clean_pause=0,
+		session_machine=NULL, session_started_at=NULL, clean_pause=0,
 		waiting_on=NULL, updated_at=?1
 		WHERE id=?2 AND session_hash=?3 AND status IN ('running','paused')`, now, wiID, row.Hash.String)
 	if err != nil {
@@ -795,7 +780,7 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 	now := Now()
 	sets := []string{"status=?", "updated_at=?",
 		"session_hash=NULL", "session_fingerprint=NULL", "session_machine=NULL",
-		"session_owner=NULL", "session_started_at=NULL", "clean_pause=0"}
+		"session_started_at=NULL", "clean_pause=0"}
 	args := []any{req.Status, now}
 	if req.Status == api.StatusWrapped || req.Status == api.StatusFailed {
 		sets = append(sets, "closed_at=?")
