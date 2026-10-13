@@ -113,6 +113,13 @@ func main() {
 		"session": drv.sessionArg,
 		"model":   pinnedModelOf(),
 		"wi":      drv.wi,
+		// v4 acceptance ledger (audit-subtraction pass B): the derivation's
+		// full argv and the agent-directory override the launcher passed, so
+		// the e2e suite can pin the step agent's launch configuration
+		// (PI_CODING_AGENT_DIR present, --no-extensions absent) through the
+		// capsule's committed logs surface, without engine internals.
+		"argv":      os.Args,
+		"agent_dir": os.Getenv("PI_CODING_AGENT_DIR"),
 	})
 	go runDriveLoop(drv)
 
