@@ -87,12 +87,7 @@ const (
 	ErrDaemonGone          = "DAEMON-410"
 	ErrDaemonSpawnFail     = "DAEMON-507"
 	ErrDaemonShipPreflight = "DAEMON-512"
-	// ErrDaemonShipLedger is the polyforge#123 ship-ledger refusal: the
-	// aihub ledger recording failed after (or between) the pushes — the
-	// ledger is accounting, not best-effort, so the ship op fails with the
-	// typed error instead of silently skipping the record.
-	ErrDaemonShipLedger = "DAEMON-514"
-	ErrDaemonInternal   = "DAEMON-500"
+	ErrDaemonInternal      = "DAEMON-500"
 	// ErrDaemonHubUnavailable is the transient pre-claim refusal: the
 	// work-item probe could not reach the hub (transport loss or a 5xx).
 	// Nothing was claimed; the caller retries.

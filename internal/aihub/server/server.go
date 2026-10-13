@@ -29,7 +29,6 @@ type Server struct {
 	Sessions *core.SessionManager
 	Admin    *core.AdminManager
 	Mems     *memory.Store
-	Ships    *core.ShipLedgerManager
 	Git      *git.Manager
 	DataDir  string
 
@@ -51,7 +50,6 @@ func New(db *core.DB, dataDir string, gitMgr *git.Manager) *Server {
 		Sessions: core.NewSessionManager(db),
 		Admin:    core.NewAdminManager(db),
 		Mems:     memory.NewStore(db, dataDir),
-		Ships:    core.NewShipLedgerManager(db, core.NewWIManager(db)),
 		Git:      gitMgr,
 		DataDir:  dataDir,
 	}
@@ -82,9 +80,6 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/work-items/{id}/terminate-blocked", s.auth(s.hTerminateBlockedWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
 	m.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.auth(s.hDeps))
-	// Ship ledger (polyforge#123, P1b): the ship bridge records each
-	// pushed repo's branch top; anyone who can read the WI queries it.
-	m.HandleFunc("POST /api/v1/work-items/{id}/ship-ledger", s.auth(s.hRecordShipLedger))
 	m.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking}/{kind}", s.auth(s.hDelDep))
 	m.HandleFunc("GET /api/v1/projects/{project}/ready-queue", s.auth(s.hReadyQueue))
 	m.HandleFunc("POST /api/v1/machines/heartbeat", s.auth(s.hHeartbeat))
@@ -486,35 +481,6 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 		return
 	}
 	s.writeWI(w, http.StatusOK, wi)
-}
-
-// ---------------------------------------------------------------------------
-// Ship ledger (polyforge#123, P1b): record on ship, queryable per WI.
-
-// hRecordShipLedger serves POST /api/v1/work-items/{id}/ship-ledger: the
-// ship bridge's per-run recording face. Authorization is the ordinary
-// object-data WRITE rule (the same face the daemon's other reporting
-// calls use). Recording is an upsert per (WI, repo): the ledger answers
-// the LATEST delivery, not the history — the push history lives in git.
-func (s *Server) hRecordShipLedger(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.requireWrite(w, idn, projectID) {
-		return
-	}
-	var req api.ShipLedgerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, core.Fail(api.ErrCoreBadInput, "", "ship-ledger body is not valid JSON: %v", err))
-		return
-	}
-	if err := s.Ships.Record(id, req.Branch, req.Repos); err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded", "work_item_id": id})
 }
 
 // ---------------------------------------------------------------------------
