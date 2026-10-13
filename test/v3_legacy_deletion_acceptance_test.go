@@ -494,10 +494,14 @@ func TestV3GrepCleanDeletedFaces(t *testing.T) {
 }
 
 // v3WalkTextFiles walks root's regular files, skipping .git/, the frozen
-// v0/ archive, markdown (excluded from the gate by the spec), and
-// non-regular entries (symlinks — e.g. the shared-checkout links the
-// capsule materialization creates — and binary-looking files, sniffed
-// by a NUL byte in the first 512 bytes).
+// v0/ archive, testdata/ directories (real collected DATA fixtures —
+// e.g. the D15 replay fixture of the supervise package, captured pi
+// session records whose content legitimately discusses the retired
+// faces it replays — are not authored code/build surfaces), markdown
+// (excluded from the gate by the spec), and non-regular entries
+// (symlinks — e.g. the shared-checkout links the capsule materialization
+// creates — and binary-looking files, sniffed by a NUL byte in the first
+// 512 bytes).
 func v3WalkTextFiles(root string, fn func(path string, raw []byte)) error {
 	return filepath.WalkDir(root, func(path string, de os.DirEntry, err error) error {
 		if err != nil {
@@ -505,7 +509,7 @@ func v3WalkTextFiles(root string, fn func(path string, raw []byte)) error {
 		}
 		if de.IsDir() {
 			name := de.Name()
-			if name == ".git" || (name == "v0" && path == filepath.Join(root, "v0")) {
+			if name == ".git" || (name == "v0" && path == filepath.Join(root, "v0")) || name == "testdata" {
 				return filepath.SkipDir
 			}
 			return nil
