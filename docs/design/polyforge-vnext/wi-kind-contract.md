@@ -21,8 +21,8 @@
 - **对称父子规则**：
   - 有子票（任意子票状态，含已终态）→ PATCH 绑非 NULL bundle 拒绝：`CORE-400`，`reason=HAS_CHILDREN_NO_BUNDLE`（create 与 PATCH 命中同一校验逻辑；create 新票天然无子票）
   - 已绑 bundle 的票作 parent 的 create 拒绝：`CORE-400`，`reason=PARENT_NOT_REGISTRY`（沿用原语义，无旧名别名）
-- **并发仲裁（两组，恰一方成功，落败方 typed 拒绝）**：
-  - PATCH bundle vs Claim：单写者事务 + claimTx 同款 CAS（`UPDATE … WHERE status='queued' AND session_hash IS NULL`）+ per-WI 入口闩 / 提交后仲裁窗；落败方 `CORE-409`，`reason=CONCURRENT_WRITE`。PATCH 赢后票仍可被后续 Claim 认领。
+- **并发（两组；终态一致，被拒的一方得到 typed 拒绝且不写库）**：
+  - PATCH bundle vs Claim：不另设仲裁，单写者事务串行化 + 各自的 CAS 保证终态一致。Claim 总是成功；PATCH 若排在 Claim 之前则成功（Claim 冻结的是新 bundle），若排在之后则被拒：通常为 `CORE-400 reason=IMMUTABLE`（已有认领），守卫写 0 行且复查找不到具体原因时为 `CORE-409 reason=RACE_LOST`。之后的任何 bundle PATCH 都被拒（已冻结）。
   - 绑定 bundle vs 新增子票：创建事务内父票 bundle 复查 + 绑定的守卫写复查子票；终态不同时出现「有子票 ∧ bundle 非空」。
 - **Claim 无 bundle 票**仍被拒：`CORE-409`，`reason=NOT_CLAIMABLE`（现行路径不变）。
 

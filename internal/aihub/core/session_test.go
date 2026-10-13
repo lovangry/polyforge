@@ -795,17 +795,20 @@ func env2GetWI(t *testing.T, env *testEnv, id string) *api.WorkItem {
 }
 
 // TestRacePatchBundleVsClaim: PATCH bundle vs session Claim on one
-// queued, never-claimed, childless ticket (the w140 race pair 1) —
-// exactly one wins per round; the loser gets a typed refusal; if the
-// PATCH wins the ticket stays claimable afterwards.
+// queued, never-claimed, childless ticket (the w140 race pair 1). The
+// single-writer connection serializes the two transactions and no extra
+// arbitration exists: the Claim always succeeds; the PATCH succeeds iff
+// it was serialized first (the claim then froze the renamed bundle) and
+// is otherwise a typed refusal that wrote nothing. Either way the end
+// state is consistent and the bundle is frozen afterwards.
 func TestRacePatchBundleVsClaim(t *testing.T) {
 	env, m := sessionEnv(t)
-	patchWins, claimWins := 0, 0
+	const original, renamed = "w140-race1-original", "w140-race1-renamed"
+	patchWins, claimFirst := 0, 0
 	for i := 0; i < 10; i++ {
-		bundle := "w140-race1-original"
 		wi, err := env.WIs.Create(CreateRequest{
 			Project: "alpha", Goal: "w140 race1", Reporter: env.UserID,
-			BundleName: strPtrTest(bundle),
+			BundleName: strPtrTest(original),
 		})
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -817,7 +820,7 @@ func TestRacePatchBundleVsClaim(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, patchErr = env.WIs.Patch(wi.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"w140-race1-renamed"`)})
+			_, patchErr = env.WIs.Patch(wi.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"` + renamed + `"`)})
 		}()
 		go func() {
 			defer wg.Done()
@@ -827,39 +830,36 @@ func TestRacePatchBundleVsClaim(t *testing.T) {
 		close(start)
 		wg.Wait()
 
-		if (patchErr == nil) == (claimErr == nil) {
-			t.Fatalf("round %d: exactly one of PATCH bundle / Claim must win (patchErr=%v claimErr=%v)", i, patchErr, claimErr)
+		if claimErr != nil {
+			t.Fatalf("round %d: a concurrent bundle PATCH must never refuse the claim: %v", i, claimErr)
 		}
 		got, err := env.WIs.Get(wi.ID, GetOptions{})
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
-		if claimErr == nil {
-			claimWins++
-			if patchErr != nil && !IsCode(patchErr, api.ErrCoreBadInput) && !IsCode(patchErr, api.ErrCoreConflict) {
-				t.Fatalf("round %d: losing PATCH is not a typed refusal: %v", i, patchErr)
-			}
-			if got.Status != api.StatusRunning {
-				t.Fatalf("round %d: claim won but status = %s", i, got.Status)
-			}
-			if got.BundleName == nil || *got.BundleName != bundle {
-				t.Fatalf("round %d: claim won but the lost PATCH wrote: bundle = %v", i, got.BundleName)
-			}
-		} else {
+		if got.Status != api.StatusRunning {
+			t.Fatalf("round %d: status = %s, want running", i, got.Status)
+		}
+		want := original
+		if patchErr == nil {
 			patchWins++
-			if !IsCode(claimErr, api.ErrCoreConflict) {
-				t.Fatalf("round %d: losing Claim is not a typed conflict refusal: %v", i, claimErr)
-			}
-			if got.BundleName == nil || *got.BundleName != "w140-race1-renamed" {
-				t.Fatalf("round %d: PATCH won but bundle = %v", i, got.BundleName)
-			}
-			// winner-consistency: still claimable afterwards.
-			if _, err := m.Claim(wi.ID, api.SessionClaimRequest{SessionID: "w140-race1-secret-2"}, env.UserID); err != nil {
-				t.Fatalf("round %d: PATCH won but the ticket is no longer claimable: %v", i, err)
+			want = renamed
+		} else {
+			claimFirst++
+			if !IsCode(patchErr, api.ErrCoreBadInput) && !IsCode(patchErr, api.ErrCoreConflict) {
+				t.Fatalf("round %d: a PATCH serialized after the claim is not a typed refusal: %v", i, patchErr)
 			}
 		}
+		if got.BundleName == nil || *got.BundleName != want {
+			t.Fatalf("round %d: bundle = %v, want %s (patchErr=%v)", i, got.BundleName, want, patchErr)
+		}
+		if got.BundleDigest == nil || *got.BundleDigest != Sha256Hex("bundle-name:"+want) {
+			t.Fatalf("round %d: digest %v does not match bundle %s (half-written reference)", i, got.BundleDigest, want)
+		}
+		// frozen at the claim: any later bundle PATCH is refused.
+		if _, err := env.WIs.Patch(wi.ID, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"w140-race1-late"`)}); err == nil {
+			t.Fatalf("round %d: bundle PATCH after the claim succeeded; the bundle must be frozen", i)
+		}
 	}
-	if patchWins == 0 {
-		t.Logf("w140 race1: PATCH never won (%d claim wins) — arbiter one-sided this run", claimWins)
-	}
+	t.Logf("w140 race1: PATCH serialized first %d, claim first %d of 10 rounds", patchWins, claimFirst)
 }
