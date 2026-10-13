@@ -1,0 +1,451 @@
+package test
+
+// Fake-env tests for .polyforge/release.sh: a local bare repo is origin, and
+// git/docker/gh are stubs first on PATH that append to a call log. No network,
+// no docker, no gh, no real remote is ever touched.
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const relFakeDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+type relWorld struct {
+	t       *testing.T
+	root    string
+	origin  string
+	work    string
+	bin     string
+	log     string
+	fakeRel string
+	script  string
+}
+
+func relWrite(t *testing.T, path, body string, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func relGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	c := exec.Command("git", args...)
+	c.Dir = dir
+	c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e")
+	out, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// newRelWorld builds origin (bare) + a clone on main at origin/main, with the
+// given tags pushed to origin and localOnly tags kept only in the clone.
+func newRelWorld(t *testing.T, originTags, localTags []string) *relWorld {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	script, err := filepath.Abs(filepath.Join("..", ".polyforge", "release.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	w := &relWorld{t: t, root: root, origin: filepath.Join(root, "origin.git"), work: filepath.Join(root, "work"),
+		bin: filepath.Join(root, "bin"), log: filepath.Join(root, "calls.log"), fakeRel: filepath.Join(root, "fakegh"), script: script}
+	relGit(t, root, "init", "-q", "--bare", "-b", "main", w.origin)
+	relGit(t, root, "clone", "-q", w.origin, w.work)
+	relGit(t, w.work, "checkout", "-q", "-b", "main")
+	relWrite(t, filepath.Join(w.work, "deploy", "Dockerfile"), "FROM scratch\n", 0o644)
+	relWrite(t, filepath.Join(w.work, "README"), "x\n", 0o644)
+	relGit(t, w.work, "add", "-A")
+	relGit(t, w.work, "commit", "-q", "-m", "first")
+	for _, tg := range originTags {
+		relGit(t, w.work, "tag", "-a", "-m", tg, tg)
+	}
+	relGit(t, w.work, "push", "-q", "origin", "main")
+	if len(originTags) > 0 {
+		relGit(t, w.work, "push", "-q", "origin", "--tags")
+	}
+	// a second commit so a log range exists
+	relWrite(t, filepath.Join(w.work, "second"), "2\n", 0o644)
+	relGit(t, w.work, "add", "-A")
+	relGit(t, w.work, "commit", "-q", "-m", "second change")
+	relGit(t, w.work, "push", "-q", "origin", "main")
+	for _, tg := range localTags {
+		relGit(t, w.work, "tag", "-a", "-m", tg, tg)
+	}
+	relWrite(t, w.log, "", 0o644)
+
+	relWrite(t, filepath.Join(w.bin, "git"), fmt.Sprintf(`#!/bin/sh
+case "$1" in push) echo "git $*" >> "$CALLLOG" ;; esac
+exec %s "$@"
+`, realGit), 0o755)
+	relWrite(t, filepath.Join(w.bin, "docker"), `#!/bin/sh
+case "$1" in
+  build) echo "docker $*" >> "$CALLLOG" ;;
+  push) echo "docker $*" >> "$CALLLOG" ;;
+  inspect) echo "docker inspect" >> "$CALLLOG"; echo "ghcr.io/silgrid/aihub@$FAKE_PUSH_DIGEST" ;;
+  login) echo "docker login" >> "$CALLLOG"; cat >/dev/null ;;
+  buildx) echo "Name: x"; echo "Digest: $FAKE_REGISTRY_DIGEST" ;;
+esac
+exit 0
+`, 0o755)
+	relWrite(t, filepath.Join(w.bin, "gh"), `#!/bin/sh
+cmd="$1 $2"
+case "$cmd" in
+  "release create")
+    echo "gh release create $3" >> "$CALLLOG"
+    tag="$3"; shift 3
+    mkdir -p "$FAKE_GH/$tag"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --notes-file) cp "$2" "$FAKE_GH/$tag/.body"; shift 2 ;;
+        --title|-R) shift 2 ;;
+        --verify-tag) shift ;;
+        *) cp "$1" "$FAKE_GH/$tag/"; shift ;;
+      esac
+    done
+    echo "https://github.com/silgrid/polyforge/releases/tag/$tag" ;;
+  "release view")
+    d="$FAKE_GH/$3"; [ -d "$d" ] || { echo "release not found" >&2; exit 1; }
+    case "$*" in *.body*) cat "$d/.body" ;; *) ls "$d" ;; esac ;;
+  "release download")
+    d="$FAKE_GH/$3"; shift 3
+    out=.; while [ $# -gt 0 ]; do case "$1" in -D) out="$2"; shift 2 ;; *) shift ;; esac; done
+    for f in "$d"/*; do cp "$f" "$out/"; done ;;
+  "auth token") echo "gh auth token" >> "$CALLLOG"; echo tok ;;
+  "api user") echo me ;;
+esac
+exit 0
+`, 0o755)
+	return w
+}
+
+func (w *relWorld) env(extra ...string) []string {
+	dockerCfg := filepath.Join(w.root, "dockercfg")
+	if _, err := os.Stat(dockerCfg); err != nil {
+		relWrite(w.t, filepath.Join(dockerCfg, "config.json"), `{"auths":{"ghcr.io":{}}}`, 0o644)
+	}
+	env := append(os.Environ(),
+		"PATH="+w.bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"CALLLOG="+w.log, "FAKE_GH="+w.fakeRel, "FAKE_PUSH_DIGEST="+relFakeDigest, "FAKE_REGISTRY_DIGEST="+relFakeDigest,
+		"DOCKER_CONFIG="+dockerCfg, "HOME="+w.root,
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
+		"RELEASE_TEST_CMD=echo tests >> \"$CALLLOG\"",
+		"RELEASE_BUILD_CMD=echo build >> \"$CALLLOG\"; mkdir -p artifacts/release-$TAG; echo aihub-bin > artifacts/release-$TAG/aihub; echo pf-bin > artifacts/release-$TAG/pf",
+	)
+	return append(env, extra...)
+}
+
+func (w *relWorld) run(extra []string, args ...string) (string, error) {
+	c := exec.Command("sh", append([]string{w.script}, args...)...)
+	c.Dir = w.work
+	c.Env = w.env(extra...)
+	out, err := c.CombinedOutput()
+	return string(out), err
+}
+
+func (w *relWorld) calls() []string {
+	b, _ := os.ReadFile(w.log)
+	var out []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func (w *relWorld) originTags() string {
+	return relGit(w.t, w.origin, "tag", "-l")
+}
+
+func relIndex(calls []string, prefix string) int {
+	for i, c := range calls {
+		if strings.HasPrefix(c, prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestReleaseScriptHappyPathOrderAndAssets(t *testing.T) {
+	w := newRelWorld(t, []string{"v1.2.0"}, nil)
+	out, err := w.run(nil)
+	if err != nil {
+		t.Fatalf("release failed: %v\n%s", err, out)
+	}
+	calls := w.calls()
+	order := []string{"tests", "build", "docker build", "git push", "docker push", "docker inspect", "gh release create"}
+	last := -1
+	for _, p := range order {
+		i := relIndex(calls, p)
+		if i < 0 || i <= last {
+			t.Fatalf("effect %q out of order or missing in %v", p, calls)
+		}
+		last = i
+	}
+	for _, c := range calls {
+		if strings.Contains(c, "force") || (strings.HasPrefix(c, "git push") && strings.Contains(c, " -f")) {
+			t.Fatalf("forced operation: %s", c)
+		}
+	}
+	if !strings.Contains(strings.Join(calls, "\n"), "docker build -f deploy/Dockerfile -t ghcr.io/silgrid/aihub:v1.3.0") {
+		t.Fatalf("image build line wrong: %v", calls)
+	}
+	if got := w.originTags(); !strings.Contains(got, "v1.3.0") {
+		t.Fatalf("v1.3.0 not on origin: %q", got)
+	}
+	rel := filepath.Join(w.fakeRel, "v1.3.0")
+	for _, f := range []string{"aihub-linux-amd64", "pf-linux-amd64", "aihub-image.digest", "SHA256SUMS", ".body"} {
+		if _, err := os.Stat(filepath.Join(rel, f)); err != nil {
+			t.Fatalf("release missing %s: %v", f, err)
+		}
+	}
+	dg, _ := os.ReadFile(filepath.Join(rel, "aihub-image.digest"))
+	if strings.TrimSpace(string(dg)) != relFakeDigest {
+		t.Fatalf("digest file = %q", dg)
+	}
+	sums, _ := os.ReadFile(filepath.Join(rel, "SHA256SUMS"))
+	if n := strings.Count(string(sums), "\n"); n != 3 || strings.Contains(string(sums), "SHA256SUMS") {
+		t.Fatalf("SHA256SUMS should cover exactly 3 files: %q", sums)
+	}
+	head := relGit(t, w.work, "rev-parse", "HEAD")
+	tail := strings.Split(strings.TrimSpace(out), "\n")
+	tail = tail[len(tail)-3:]
+	want := []string{"version=v1.3.0", "commit=" + head, "notes=https://github.com/silgrid/polyforge/releases/tag/v1.3.0"}
+	for i := range want {
+		if tail[i] != want[i] {
+			t.Fatalf("tail line %d = %q want %q\n%s", i, tail[i], want[i], out)
+		}
+	}
+	// the script's own verify passes against what it just published
+	vout, verr := w.run(nil, "--verify", "v1.3.0")
+	if verr != nil {
+		t.Fatalf("verify of fresh release failed: %v\n%s", verr, vout)
+	}
+}
+
+func TestReleaseScriptVersionFloorAndBump(t *testing.T) {
+	cases := []struct {
+		name          string
+		origin, local []string
+		args          []string
+		want          string
+	}{
+		{"default minor", []string{"v1.2.0", "v1.10.1"}, nil, nil, "v1.11.0"},
+		{"patch", []string{"v1.2.0", "v1.10.1"}, nil, []string{"patch"}, "v1.10.2"},
+		{"major", []string{"v1.2.0", "v1.10.1"}, nil, []string{"major"}, "v2.0.0"},
+		{"origin newer than local", []string{"v1.2.0", "v3.1.4"}, nil, []string{"patch"}, "v3.1.5"},
+		{"local newer than origin", []string{"v1.2.0"}, []string{"v1.9.0"}, nil, "v1.10.0"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newRelWorld(t, c.origin, c.local)
+			out, err := w.run(nil, c.args...)
+			if err != nil {
+				t.Fatalf("release failed: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "version="+c.want+"\n") {
+				t.Fatalf("want version %s, got:\n%s", c.want, out)
+			}
+		})
+	}
+	t.Run("origin tag unseen locally is honored", func(t *testing.T) {
+		w := newRelWorld(t, []string{"v1.2.0"}, nil)
+		relGit(t, w.work, "tag", "-a", "-m", "x", "v7.0.0")
+		relGit(t, w.work, "push", "-q", "origin", "v7.0.0")
+		relGit(t, w.work, "tag", "-d", "v7.0.0")
+		out, err := w.run(nil)
+		if err != nil || !strings.Contains(out, "version=v7.1.0\n") {
+			t.Fatalf("err=%v\n%s", err, out)
+		}
+	})
+}
+
+func TestReleaseScriptTagTakenOnOriginStopsBeforePublish(t *testing.T) {
+	w := newRelWorld(t, []string{"v1.2.0"}, nil)
+	// a parallel release claims the computed version while we build
+	build := "echo build >> \"$CALLLOG\"; mkdir -p artifacts/release-$TAG; echo a > artifacts/release-$TAG/aihub; echo p > artifacts/release-$TAG/pf; " +
+		"git tag -a -m other \"$TAG\" HEAD~1 && git push -q origin \"$TAG\" && git tag -d \"$TAG\" >/dev/null"
+	out, err := w.run([]string{"RELEASE_BUILD_CMD=" + build})
+	if err == nil {
+		t.Fatalf("expected failure\n%s", out)
+	}
+	calls := w.calls()
+	if relIndex(calls, "docker push") >= 0 || relIndex(calls, "gh release create") >= 0 {
+		t.Fatalf("published despite taken tag: %v", calls)
+	}
+	if _, serr := os.Stat(filepath.Join(w.fakeRel, "v1.3.0")); serr == nil {
+		t.Fatal("release created")
+	}
+	if relGit(t, w.work, "tag", "-l", "v1.3.0") != "" {
+		t.Fatal("our local claim tag was left behind")
+	}
+}
+
+func TestReleaseScriptRefusals(t *testing.T) {
+	t.Run("dirty tree", func(t *testing.T) {
+		w := newRelWorld(t, []string{"v1.0.0"}, nil)
+		relWrite(t, filepath.Join(w.work, "README"), "dirty\n", 0o644)
+		out, err := w.run(nil)
+		if err == nil || !strings.Contains(out, "dirty") || len(w.calls()) != 0 {
+			t.Fatalf("err=%v calls=%v\n%s", err, w.calls(), out)
+		}
+	})
+	t.Run("HEAD not origin/main", func(t *testing.T) {
+		w := newRelWorld(t, []string{"v1.0.0"}, nil)
+		relWrite(t, filepath.Join(w.work, "third"), "3\n", 0o644)
+		relGit(t, w.work, "add", "-A")
+		relGit(t, w.work, "commit", "-q", "-m", "unpushed")
+		out, err := w.run(nil)
+		if err == nil || !strings.Contains(out, "not origin/main") || len(w.calls()) != 0 {
+			t.Fatalf("err=%v calls=%v\n%s", err, w.calls(), out)
+		}
+	})
+	t.Run("bad bump", func(t *testing.T) {
+		w := newRelWorld(t, []string{"v1.0.0"}, nil)
+		if _, err := w.run(nil, "huge"); err == nil {
+			t.Fatal("expected failure")
+		}
+	})
+}
+
+func TestReleaseScriptNotesGeneratedWhenMissing(t *testing.T) {
+	w := newRelWorld(t, []string{"v1.2.0"}, nil)
+	if out, err := w.run(nil); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	body, _ := os.ReadFile(filepath.Join(w.fakeRel, "v1.3.0", ".body"))
+	if !strings.Contains(string(body), "second change") || !strings.Contains(string(body), "v1.2.0") {
+		t.Fatalf("generated notes lack the log: %q", body)
+	}
+	if relGit(t, w.work, "status", "--porcelain", "--", "docs") != "" {
+		t.Fatal("generated notes were written into the worktree")
+	}
+}
+
+func TestReleaseScriptCommittedNotesUsedAsIs(t *testing.T) {
+	w := newRelWorld(t, []string{"v1.2.0"}, nil)
+	relWrite(t, filepath.Join(w.work, "docs", "release-notes", "v1.3.0.md"), "# hand written\n", 0o644)
+	relGit(t, w.work, "add", "-A")
+	relGit(t, w.work, "commit", "-q", "-m", "notes")
+	relGit(t, w.work, "push", "-q", "origin", "main")
+	if out, err := w.run(nil); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	body, _ := os.ReadFile(filepath.Join(w.fakeRel, "v1.3.0", ".body"))
+	if string(body) != "# hand written\n" {
+		t.Fatalf("notes = %q", body)
+	}
+}
+
+func TestReleaseScriptLoginWhenNotLoggedIn(t *testing.T) {
+	w := newRelWorld(t, []string{"v1.2.0"}, nil)
+	empty := filepath.Join(w.root, "emptycfg")
+	relWrite(t, filepath.Join(empty, "config.json"), `{}`, 0o644)
+	if out, err := w.run([]string{"DOCKER_CONFIG=" + empty}); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if relIndex(w.calls(), "docker login") < 0 {
+		t.Fatalf("no login: %v", w.calls())
+	}
+}
+
+// ---- --verify
+
+// publishFake plants a release in the fake gh store; mutate lets a case break it.
+func (w *relWorld) publishFake(tag string, files map[string]string) {
+	d := filepath.Join(w.fakeRel, tag)
+	for n, c := range files {
+		relWrite(w.t, filepath.Join(d, n), c, 0o644)
+	}
+	relWrite(w.t, filepath.Join(d, ".body"), "notes\n", 0o644)
+}
+
+func goodRelease() map[string]string {
+	f := map[string]string{"aihub-linux-amd64": "A", "pf-linux-amd64": "P", "aihub-image.digest": relFakeDigest + "\n"}
+	var sums strings.Builder
+	for _, n := range []string{"aihub-linux-amd64", "pf-linux-amd64", "aihub-image.digest"} {
+		fmt.Fprintf(&sums, "%x  %s\n", sha256.Sum256([]byte(f[n])), n)
+	}
+	f["SHA256SUMS"] = sums.String()
+	return f
+}
+
+func TestReleaseScriptVerify(t *testing.T) {
+	cases := []struct {
+		name   string
+		tag    string
+		origin []string
+		mut    func(f map[string]string)
+		env    []string
+		fail   string // substring of the FAIL line; empty = expect pass
+	}{
+		{name: "pass", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"}},
+		{name: "pass first release", tag: "v1.0.0", origin: []string{"v1.0.0"}},
+		{name: "checksum mismatch", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
+			mut: func(f map[string]string) { f["pf-linux-amd64"] = "tampered" }, fail: "sha256sum"},
+		{name: "wrong asset set", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
+			mut: func(f map[string]string) { f["extra.txt"] = "x" }, fail: "asset set"},
+		{name: "missing asset", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
+			mut: func(f map[string]string) { delete(f, "pf-linux-amd64") }, fail: "asset set"},
+		{name: "digest mismatch", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
+			env: []string{"FAKE_REGISTRY_DIGEST=sha256:bbbb"}, fail: "digest mismatch"},
+		{name: "non-monotonic", tag: "v1.2.0", origin: []string{"v1.02.0", "v1.2.0"}, fail: "monotonic"},
+		{name: "bad format", tag: "1.3", origin: []string{"v1.2.0"}, fail: "tag format"},
+		{name: "tag not on origin", tag: "v1.3.0", origin: []string{"v1.2.0"}, fail: "not found on origin"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newRelWorld(t, c.origin, nil)
+			f := goodRelease()
+			if c.mut != nil {
+				c.mut(f)
+			}
+			w.publishFake(c.tag, f)
+			before := relGit(t, w.origin, "tag", "-l")
+			out, err := w.run(c.env, "--verify", c.tag)
+			if c.fail == "" {
+				if err != nil || !strings.Contains(out, "PASS") || strings.Contains(out, "FAIL") {
+					t.Fatalf("expected pass: %v\n%s", err, out)
+				}
+			} else {
+				ok := false
+				for _, l := range strings.Split(out, "\n") {
+					if strings.HasPrefix(l, "FAIL") && strings.Contains(l, c.fail) {
+						ok = true
+					}
+				}
+				if err == nil || !ok {
+					t.Fatalf("expected FAIL containing %q: err=%v\n%s", c.fail, err, out)
+				}
+			}
+			if len(w.calls()) != 0 || relGit(t, w.origin, "tag", "-l") != before {
+				t.Fatalf("verify mutated state: calls=%v", w.calls())
+			}
+		})
+	}
+}
+
+func TestReleaseScriptHelpMentionsVerify(t *testing.T) {
+	w := newRelWorld(t, []string{"v1.0.0"}, nil)
+	for _, a := range []string{"--help", "-h"} {
+		out, err := w.run(nil, a)
+		if err != nil || !strings.Contains(out, "--verify") {
+			t.Fatalf("%s: %v\n%s", a, err, out)
+		}
+	}
+}
