@@ -306,16 +306,15 @@ func (m *WIManager) Get(idOrSlug string, opts GetOptions) (*api.WorkItem, error)
 
 func (m *WIManager) load(id string) (*api.WorkItem, error) {
 	var wi api.WorkItem
-	var content, parent, milestone, assignee, waitingOn, bundle, budget,
-		closed sql.NullString
+	var content, parent, milestone, assignee, waitingOn, bundle, closed sql.NullString
 	var labels, attrs string
 	err := m.db.QueryRow(`SELECT w.id, w.seq, w.project_id, p.name, w.goal, w.content, w.parent_id,
 		w.status, w.priority, w.milestone, w.labels, w.attrs, w.reporter, w.assignee, w.waiting_on,
-		w.bundle_name, w.workflow_budget_baseline, w.created_at, w.updated_at, w.closed_at
+		w.bundle_name, w.created_at, w.updated_at, w.closed_at
 		FROM work_items w JOIN projects p ON p.id=w.project_id WHERE w.id=?1`, id).
 		Scan(&wi.ID, &wi.Seq, &wi.ProjectID, &wi.ProjectName, &wi.Goal, &content, &parent,
 			&wi.Status, &wi.Priority, &milestone, &labels, &attrs, &wi.Reporter, &assignee, &waitingOn,
-			&bundle, &budget, &wi.CreatedAt, &wi.UpdatedAt, &closed)
+			&bundle, &wi.CreatedAt, &wi.UpdatedAt, &closed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
 	}
@@ -346,9 +345,6 @@ func (m *WIManager) load(id string) (*api.WorkItem, error) {
 	if bundle.Valid {
 		b := bundle.String
 		wi.BundleName = &b
-	}
-	if budget.Valid && budget.String != "" {
-		wi.BudgetBaseline = json.RawMessage(budget.String)
 	}
 	if closed.Valid {
 		c := closed.String
@@ -413,8 +409,6 @@ func appendEventTx(tx *sql.Tx, wiID, at, actor, eventType string, payload map[st
 // bundleRef is the ONE bundle-reference persist path, shared by create
 // and PATCH (spec: both entries MUST hit the same code path). A nil/empty
 // name resolves to NULL: an unbind clears the reference.
-// workflow_budget_baseline stays NULL and wi_repo_inventory is untouched
-// on either entry.
 func bundleRef(name *string) (bundleName any) {
 	if name == nil || *name == "" {
 		return nil

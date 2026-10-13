@@ -33,11 +33,6 @@ type DB struct {
 // work_items row itself (the session model — session_hash/
 // session_fingerprint/clean_pause).
 const DDL = `
-CREATE TABLE IF NOT EXISTS core_meta (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS users (
   id           TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
@@ -76,8 +71,6 @@ CREATE TABLE IF NOT EXISTS projects (
   description TEXT NOT NULL DEFAULT '',
   repos       TEXT NOT NULL DEFAULT '[]',
   visible     INTEGER NOT NULL DEFAULT 1,
-  scenario    TEXT,
-  identifier_hash TEXT NOT NULL,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL
 );
@@ -113,7 +106,6 @@ CREATE TABLE IF NOT EXISTS work_items (
   assignee     TEXT REFERENCES users(id),
   waiting_on   TEXT,
   bundle_name  TEXT,
-  workflow_budget_baseline TEXT,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
   closed_at    TEXT,

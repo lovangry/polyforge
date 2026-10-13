@@ -239,8 +239,8 @@ var w140FrozenViewKeys = map[string]bool{
 	"goal": true, "content": true, "parent_id": true, "status": true,
 	"priority": true, "milestone": true, "labels": true, "attrs": true,
 	"reporter": true, "assignee": true, "waiting_on": true,
-	"bundle_name": true, "workflow_budget_baseline": true,
-	"created_at": true, "updated_at": true, "closed_at": true,
+	"bundle_name": true,
+	"created_at":  true, "updated_at": true, "closed_at": true,
 	"session_fingerprint": true, "session_machine": true,
 	"session_started_at": true, "clean_pause": true, "repo_inventory": true,
 }
@@ -301,9 +301,8 @@ func w140Pf(t *testing.T, inst *v1Install, args ...string) (string, int) {
 // TestW140BundlePersistSharedPath: the bundle reference is the NAME only
 // (the digest chain is deleted, polyforge#149) on BOTH create and PATCH
 // (shared path ⇒ same observable rule); a payload or PATCH body carrying
-// a digest field is simply not persisted / refused unpatchable;
-// workflow_budget_baseline stays NULL; the R2 window allows NULL→X,
-// X→Y and X→NULL (unbind clears the reference).
+// a digest field is simply not persisted / refused unpatchable; the R2
+// window allows NULL→X, X→Y and X→NULL (unbind clears the reference).
 func TestW140BundlePersistSharedPath(t *testing.T) {
 	inst := w140Setup(t, "w140-persist")
 
@@ -316,10 +315,6 @@ func TestW140BundlePersistSharedPath(t *testing.T) {
 	if got, ok := va["bundle_digest"]; ok {
 		t.Fatalf("create: bundle_digest = %v (ok=%v), want the key gone", got, ok)
 	}
-	if got, ok := va["workflow_budget_baseline"]; !ok || got != nil {
-		t.Fatalf("create: workflow_budget_baseline = %v (ok=%v), want JSON null", got, ok)
-	}
-
 	// create with a digest field in the payload → not persisted, never
 	// served back (the field does not exist).
 	b := w140CreateRaw(t, inst, map[string]any{
@@ -342,10 +337,6 @@ func TestW140BundlePersistSharedPath(t *testing.T) {
 	if got := va["bundle_name"]; got != "w140-gamma" {
 		t.Fatalf("PATCH X→Y: bundle_name = %v, want w140-gamma", got)
 	}
-	if got, ok := va["workflow_budget_baseline"]; !ok || got != nil {
-		t.Fatalf("PATCH X→Y: workflow_budget_baseline = %v (ok=%v), want JSON null", got, ok)
-	}
-
 	// PATCH carrying a digest field → refused CORE-400 (unpatchable key),
 	// nothing bound.
 	if err := w140Patch(inst, a, map[string]any{

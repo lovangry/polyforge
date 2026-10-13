@@ -43,17 +43,14 @@ const (
 	ErrCoreConflict  = "CORE-409"
 	ErrCoreGone      = "CORE-410"
 	ErrCoreInternal  = "CORE-500"
-	ErrCoreLockHeld  = "CORE-508"
 
 	// MEM — memory errors (06 §5)
-	ErrMemBadInput    = "MEM-400"
-	ErrMemForbidden   = "MEM-403"
-	ErrMemNotFound    = "MEM-404"
-	ErrMemConflict    = "MEM-409"
-	ErrMemTooLarge    = "MEM-413"
-	ErrMemInternal    = "MEM-500"
-	ErrMemUpstream    = "MEM-502"
-	ErrMemUnavailable = "MEM-503"
+	ErrMemBadInput  = "MEM-400"
+	ErrMemForbidden = "MEM-403"
+	ErrMemNotFound  = "MEM-404"
+	ErrMemConflict  = "MEM-409"
+	ErrMemTooLarge  = "MEM-413"
+	ErrMemInternal  = "MEM-500"
 
 	// AUTH — authentication/authorization at the HTTP boundary
 	ErrAuthUnauthorized = "AUTH-401"

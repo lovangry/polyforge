@@ -13,33 +13,31 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 )
 
 // WorkItem is the server-side work item record (02 §4). Field semantics are
 // inherited from the v0 contract; JSON tags are wire-stable.
 type WorkItem struct {
-	ID             string          `json:"id"`
-	Slug           string          `json:"slug"`
-	Seq            int64           `json:"seq"`
-	ProjectID      string          `json:"project_id"`
-	ProjectName    string          `json:"project"`
-	Goal           string          `json:"goal"`
-	Content        *string         `json:"content"`
-	ParentID       *string         `json:"parent_id"`
-	Status         string          `json:"status"`
-	Priority       string          `json:"priority"`
-	Milestone      *string         `json:"milestone"`
-	Labels         []string        `json:"labels"`
-	Attrs          map[string]any  `json:"attrs"`
-	Reporter       string          `json:"reporter"`
-	Assignee       *string         `json:"assignee"`
-	WaitingOn      *string         `json:"waiting_on"`
-	BundleName     *string         `json:"bundle_name"`
-	BudgetBaseline json.RawMessage `json:"workflow_budget_baseline"`
-	CreatedAt      string          `json:"created_at"`
-	UpdatedAt      string          `json:"updated_at"`
-	ClosedAt       *string         `json:"closed_at"`
+	ID          string         `json:"id"`
+	Slug        string         `json:"slug"`
+	Seq         int64          `json:"seq"`
+	ProjectID   string         `json:"project_id"`
+	ProjectName string         `json:"project"`
+	Goal        string         `json:"goal"`
+	Content     *string        `json:"content"`
+	ParentID    *string        `json:"parent_id"`
+	Status      string         `json:"status"`
+	Priority    string         `json:"priority"`
+	Milestone   *string        `json:"milestone"`
+	Labels      []string       `json:"labels"`
+	Attrs       map[string]any `json:"attrs"`
+	Reporter    string         `json:"reporter"`
+	Assignee    *string        `json:"assignee"`
+	WaitingOn   *string        `json:"waiting_on"`
+	BundleName  *string        `json:"bundle_name"`
+	CreatedAt   string         `json:"created_at"`
+	UpdatedAt   string         `json:"updated_at"`
+	ClosedAt    *string        `json:"closed_at"`
 }
 
 // WI statuses (02 §4.1).
@@ -81,7 +79,7 @@ type ProjectRepo struct {
 
 type ProjectMember struct {
 	UserID string `json:"user_id"`
-	Role   string `json:"role"` // owner|maintainer|writer|viewer
+	Role   string `json:"role"` // maintainer|writer|viewer
 }
 
 // User (02 §2).

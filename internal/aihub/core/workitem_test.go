@@ -53,9 +53,9 @@ func patchBundle(t *testing.T, env *testEnv, id string, name *string) (*api.Work
 }
 
 // TestPatchBundleR2ThreeWay walks NULL→X / X→Y / X→NULL inside the R2
-// window: the name follows the shared persist path, the unbind clears
-// the reference, and workflow_budget_baseline stays JSON null
-// throughout. The digest chain is deleted (polyforge#149): a PATCH body
+// window: the name follows the shared persist path and the unbind
+// clears the reference. The digest chain is deleted (polyforge#149): a
+// PATCH body
 // carrying bundle_digest is refused as an unpatchable field.
 func TestPatchBundleR2ThreeWay(t *testing.T) {
 	env := newEnv(t)
@@ -69,10 +69,6 @@ func TestPatchBundleR2ThreeWay(t *testing.T) {
 	if got.BundleName == nil || *got.BundleName != "w140-x" {
 		t.Fatalf("NULL→X: bundle name = %v, want w140-x", got.BundleName)
 	}
-	if got.BudgetBaseline != nil {
-		t.Fatalf("NULL→X: workflow_budget_baseline = %s, want JSON null", got.BudgetBaseline)
-	}
-
 	// X→Y: the rename.
 	got, err = patchBundle(t, env, id, strPtrTest("w140-y"))
 	if err != nil {
@@ -93,10 +89,6 @@ func TestPatchBundleR2ThreeWay(t *testing.T) {
 	if got.Status != api.StatusQueued {
 		t.Fatalf("unbind wrote a status: %s", got.Status)
 	}
-	if got.BudgetBaseline != nil {
-		t.Fatalf("unbind: workflow_budget_baseline = %s, want JSON null", got.BudgetBaseline)
-	}
-
 	// a digest-carrying body and an empty-name shape are typed bad input.
 	if _, err := env.WIs.Patch(id, map[string]json.RawMessage{"bundle_digest": json.RawMessage(`"x"`)}); !IsCode(err, api.ErrCoreBadInput) {
 		t.Fatalf("bundle_digest field: want CORE-400 (not patchable), got %v", err)

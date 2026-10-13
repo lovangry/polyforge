@@ -87,7 +87,6 @@ func (s *Server) routes() {
 	// Memory face.
 	m.HandleFunc("POST /api/v1/memories", s.auth(s.hCreateMemory))
 	m.HandleFunc("GET /api/v1/memories/search", s.auth(s.hSearchMemory))
-	m.HandleFunc("POST /api/v1/memories/rebuild-index", s.authAdmin(s.hRebuildIndex))
 	m.HandleFunc("GET /api/v1/memories/{id}", s.auth(s.hGetMemory))
 	m.HandleFunc("POST /api/v1/memories/{id}/redact", s.auth(s.hRedactMemory))
 
@@ -172,9 +171,6 @@ type identity struct {
 func (s *Server) authenticate(r *http.Request) (*identity, error) {
 	h := r.Header.Get("Authorization")
 	token := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-	if token == "" {
-		token = strings.TrimSpace(r.Header.Get("X-API-Key"))
-	}
 	if token == "" {
 		return nil, core.Fail(api.ErrAuthUnauthorized, "", "missing api key")
 	}
@@ -1153,15 +1149,6 @@ func firstRunes(s string, n int) string {
 		c++
 	}
 	return s
-}
-
-func (s *Server) hRebuildIndex(w http.ResponseWriter, r *http.Request, idn *identity) {
-	n, err := s.Mems.RebuildIndex()
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]int{"reindexed": n})
 }
 
 // ---------------------------------------------------------------------------
