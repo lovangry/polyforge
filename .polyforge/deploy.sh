@@ -14,20 +14,27 @@
 #
 # What it does: promote an already-released version (GitHub release assets
 # aihub-linux-amd64, pf-linux-amd64, SHA256SUMS) onto the aihub docker
-# container. Downtime is SECONDS: every backup step runs ONLINE (the service
-# keeps running); only the final `docker restart` interrupts service.
+# service. Downtime is SECONDS: every backup step runs ONLINE (the service
+# keeps running); the new image is built next to the running container; only
+# the final `docker compose up -d --no-deps aihub` (container recreate)
+# interrupts service. Images are built by this script, never by compose, so a
+# recreate can no longer silently revert the binary to an older image.
 #
-#   0 preflight   tag, assets + sha256, ssh, container, versions, disk space
+#   0 preflight   tag, assets + sha256, Dockerfile, ssh, container, compose file,
+#                 versions, disk space
 #   1 baseline    read-only: integrity_check, table row counts, file counts, sizes
-#   2 save old binary   docker cp <container>:/aihub -> <root>/aihub-bin-<old>-<TS>
+#   2 save old binary   docker cp <container>:/aihub -> <root>/aihub-bin-<old>-<TS>;
+#                       build the rollback image polyforge/aihub:<old> from it
 #   3 online backup     rsync memory/ git/ (pass 1) -> sqlite backup-API snapshot
 #                       of aihub.db -> rsync catch-up; snapshot integrity + counts
 #   4 consistency       memories rows in the snapshot == memory.md files in the backup
 #   5 off-host          rsync backup to BACKUP_ROOT, manifests equal, integrity + counts
-#   6 stage + swap      scp assets, sha256 on the server, docker cp as /aihub.new,
-#                       `/aihub.new -version` == tag, atomic mv over /aihub,
-#                       docker restart -t DRAIN_SECS, poll HTTP, print downtime
-#   7 verify      version, logs panic/fatal, counts >= baseline, HTTP/pf smoke
+#   6 build + swap      scp assets, sha256 on the server, docker build
+#                       polyforge/aihub:<tag> (verify -version/git/curl), back up
+#                       and edit ONLY the aihub service of the compose file (image,
+#                       no build:, stop_grace_period), compose config -q,
+#                       compose up -d --no-deps aihub, poll HTTP, print downtime
+#   7 verify      image + version, logs panic/fatal, counts >= baseline, pf smoke
 #   8 rollback    concrete commands printed; final summary
 #
 # Usage:
@@ -41,7 +48,8 @@
 #   AIHUB_HOST=root@10.146.0.34   AIHUB_CONTAINER=aihub   AIHUB_DATA=/data/aihub
 #   BACKUP_ROOT=/data/polyforge-backups (local)   RELEASE_STAGE=/data/releases (server)
 #   GH_REPO=silgrid/polyforge   AIHUB_PORT=8080   WAIT_SECS=60
-#   DRAIN_SECS=5 (docker restart -t)   MAX_DOWNTIME_SECS=10 (warn)   UP_WAIT_SECS=30 (fail)
+#   COMPOSE_FILE=/data/aihub-app/docker-compose.yml  COMPOSE_PROJECT=aihub-app  AIHUB_SERVICE=aihub
+#   DRAIN_SECS=5 (stop_grace_period)   MAX_DOWNTIME_SECS=10 (warn)   UP_WAIT_SECS=30 (fail)
 set -eu
 
 TAG=""
@@ -82,6 +90,11 @@ POLL_SECS="${POLL_SECS:-2}"
 DRAIN_SECS="${DRAIN_SECS:-5}"
 MAX_DOWNTIME_SECS="${MAX_DOWNTIME_SECS:-10}"
 UP_WAIT_SECS="${UP_WAIT_SECS:-30}"
+COMPOSE_FILE="${COMPOSE_FILE:-/data/aihub-app/docker-compose.yml}"
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-aihub-app}"
+AIHUB_SERVICE="${AIHUB_SERVICE:-aihub}"
+IMAGE_REPO="${IMAGE_REPO:-polyforge/aihub}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRV_ROOT="$(dirname "$AIHUB_DATA")"   # where the server-side backups/binaries live
 KEY_TABLES="work_items memories projects users api_keys machines"
 ASSET_AIHUB="aihub-linux-amd64"
@@ -91,7 +104,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/pf-deploy.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 SWAPPED=""   # the rename over /aihub was attempted (service may run the new binary)
 STEP="0"
-OLDVER=""; TS=""; BIN_SAVED=""; SRV_BACKUP=""; LOCAL_BACKUP=""; STAGE_DIR=""
+OLDVER=""; OLDIMG=""; NEWIMG=""; COMPOSE_BAK=""; DOCKERFILE=""; TS=""; BIN_SAVED=""; SRV_BACKUP=""; LOCAL_BACKUP=""; STAGE_DIR=""
 
 rssh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$AIHUB_HOST" "$@"; }
 dk() { rssh docker "$@"; }
@@ -100,11 +113,13 @@ note() { printf '   %s\n' "$*"; }
 
 rollback_text() {
   cat <<EOF
-  # put the old binary back (same minimal-downtime pattern, a few seconds)
-  ssh $AIHUB_HOST docker cp $BIN_SAVED $AIHUB_CONTAINER:/aihub.old
-  ssh $AIHUB_HOST docker exec $AIHUB_CONTAINER mv /aihub.old /aihub
-  ssh $AIHUB_HOST docker restart -t 5 $AIHUB_CONTAINER
+  # point the aihub service back at the rollback image $OLDIMG (built in step 2
+  # from the saved old binary) and recreate it (seconds of downtime):
+  ssh $AIHUB_HOST "sed -i 's|image: $NEWIMG|image: $OLDIMG|' $COMPOSE_FILE"
+  ssh $AIHUB_HOST docker compose -f $COMPOSE_FILE -p $COMPOSE_PROJECT up -d --no-deps $AIHUB_SERVICE
   ssh $AIHUB_HOST docker exec $AIHUB_CONTAINER /aihub -version   # must print $OLDVER
+  # (the pre-deploy compose file is kept as $COMPOSE_BAK, but its image/build keys
+  #  point at the stale v1.0.0 image - do NOT use it to roll back the binary)
   # OPTIONAL, ONLY if the data is damaged (this needs a STOP = real downtime; the backup's
   # aihub.db is the consistent snapshot):
   ssh $AIHUB_HOST "docker stop $AIHUB_CONTAINER && mv $AIHUB_DATA $AIHUB_DATA.failed-$TS && cp -a $SRV_BACKUP $AIHUB_DATA && docker start $AIHUB_CONTAINER"
@@ -114,9 +129,9 @@ EOF
 die() {
   printf '\ndeploy: FAILED at step %s: %s\n' "$STEP" "$*" >&2
   if [ -z "$SWAPPED" ]; then
-    echo "deploy: the service was never interrupted (no stop, no restart, binary not replaced); backups already taken are left in place." >&2
+    echo "deploy: the service was never interrupted (never stopped, never recreated); backups and images already made are left in place." >&2
   else
-    echo "deploy: the new binary was put in place but the service did not verify. Rollback commands:" >&2
+    echo "deploy: the container was recreated on the new image but did not verify. Rollback commands:" >&2
     rollback_text >&2
   fi
   exit 1
@@ -221,6 +236,78 @@ wait_version() { # wait_version <want>  -> 0 when running and version==want
   done
 }
 
+# shellcheck disable=SC2016
+# build_image <image> <binary-on-server> <expected-version>: builds on the
+# server in a fresh temp context (service keeps running), then verifies.
+build_image() {
+  img="$1"; bin="$2"; want="$3"
+  ctx="$SRV_ROOT/aihub-build-$TS-$$"
+  rssh "mkdir -p '$ctx' && cp '$bin' '$ctx/aihub'" || die "cannot prepare build context $ctx"
+  scp -o BatchMode=yes "$DOCKERFILE" "$AIHUB_HOST:$ctx/Dockerfile" >"$WORK/scpdf.log" 2>&1 || die "scp Dockerfile failed: $(cat "$WORK/scpdf.log")"
+  if ! rssh docker build -t "$img" "$ctx" >"$WORK/build.log" 2>&1; then
+    rssh "rm -rf '$ctx'" || true
+    die "docker build $img failed: $(tail -8 "$WORK/build.log")"
+  fi
+  rssh "rm -rf '$ctx'" || true
+  got="$(dk run --rm --entrypoint /aihub "$img" -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
+  [ "$got" = "$want" ] || die "image $img: /aihub -version prints \"$got\", expected $want (service untouched)"
+  dk run --rm --entrypoint git "$img" --version >/dev/null 2>&1 || die "image $img: git --version does not work"
+  dk run --rm --entrypoint curl "$img" --version >/dev/null 2>&1 || die "image $img: curl --version does not work"
+  note "image $img built; /aihub -version = $want; git and curl work"
+}
+
+# The compose edit (python3 stdlib, line-based, scoped to the aihub service block):
+# image -> new tag, drop build:, stop_grace_period, add the healthcheck if absent.
+# mode diff = print a unified diff only; mode apply = write the file.
+PYCOMPOSE='
+import difflib, os, re, sys
+path, svc, image, grace, mode = sys.argv[1:6]
+src = open(path).read()
+lines = src.split("\n")
+start = None
+for i, l in enumerate(lines):
+    if re.match(r"^  " + re.escape(svc) + r":\s*$", l):
+        start = i
+        break
+if start is None:
+    sys.exit("service block \"  %s:\" not found (block-style yaml expected)" % svc)
+end = len(lines)
+for j in range(start + 1, len(lines)):
+    l = lines[j]
+    if l.strip() and not l.lstrip().startswith("#") and (len(l) - len(l.lstrip())) <= 2:
+        end = j
+        break
+while end > start + 1 and not lines[end - 1].strip():
+    end -= 1
+block = lines[start + 1:end]
+out, skip = [], False
+has_hc = any(re.match(r"^    healthcheck:", b) for b in block)
+for b in block:
+    ind = len(b) - len(b.lstrip())
+    if skip and (not b.strip() or ind > 4):
+        continue
+    skip = False
+    if re.match(r"^    (build|image|stop_grace_period):", b):
+        skip = True
+        continue
+    out.append(b)
+head = ["    image: " + image, "    stop_grace_period: " + grace + "s"]
+tail = [] if has_hc else [
+    "    healthcheck:",
+    "      # any HTTP answer proves the server is up (no unauthenticated health route)",
+    "      test: [\"CMD\", \"curl\", \"-s\", \"-o\", \"/dev/null\", \"http://127.0.0.1:8080/\"]",
+    "      interval: 30s", "      timeout: 3s", "      retries: 3"]
+new = lines[:start + 1] + head + out + tail + lines[end:]
+text = "\n".join(new)
+if mode == "diff":
+    d = "".join(difflib.unified_diff(src.splitlines(True), text.splitlines(True), path, path + " (new)"))
+    sys.stdout.write(d if d else "(no change)\n")
+else:
+    open(path + ".tmp", "w").write(text)
+    os.replace(path + ".tmp", path)
+'
+compose_edit() { printf '%s\n' "$PYCOMPOSE" | rssh python3 - "$COMPOSE_FILE" "$AIHUB_SERVICE" "$NEWIMG" "$DRAIN_SECS" "$1"; }
+
 # ---------------------------------------------------------------- step 0
 step 0 "preflight"
 note "target: $TAG on $AIHUB_HOST (container $AIHUB_CONTAINER, data $AIHUB_DATA)"
@@ -238,6 +325,15 @@ for f in "$ASSET_AIHUB" "$ASSET_PF" SHA256SUMS; do
 done
 (cd "$REL" && sha256sum -c SHA256SUMS) >"$WORK/sha.log" 2>&1 || die "local sha256sum -c failed: $(cat "$WORK/sha.log")"
 note "assets verified locally: $(tr '\n' ' ' <"$WORK/sha.log")"
+DOCKERFILE="$WORK/Dockerfile"
+if git -C "$SCRIPT_DIR" show "$TAG:deploy/Dockerfile" >"$DOCKERFILE" 2>/dev/null && [ -s "$DOCKERFILE" ]; then
+  note "Dockerfile: deploy/Dockerfile at tag $TAG"
+elif [ -s "$SCRIPT_DIR/../deploy/Dockerfile" ]; then
+  cp "$SCRIPT_DIR/../deploy/Dockerfile" "$DOCKERFILE"
+  note "WARNING: tag $TAG not in the local repo; using the working-tree deploy/Dockerfile"
+else
+  die "no deploy/Dockerfile found (neither at tag $TAG nor in the working tree)"
+fi
 
 rssh true >/dev/null 2>&1 || die "ssh to $AIHUB_HOST failed (BatchMode)"
 note "ssh $AIHUB_HOST: reachable"
@@ -258,6 +354,10 @@ elif [ "$cmp" = "-1" ]; then
   note "WARNING: downgrade $OLDVER -> $TAG (--force)"
 fi
 
+rssh "test -f '$COMPOSE_FILE'" || die "compose file $COMPOSE_FILE not found on $AIHUB_HOST"
+rssh docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" config -q >"$WORK/cfg0.log" 2>&1 || die "docker compose config -q fails on the CURRENT $COMPOSE_FILE: $(head -3 "$WORK/cfg0.log")"
+note "compose: $COMPOSE_FILE (project $COMPOSE_PROJECT, service $AIHUB_SERVICE) validates"
+note "images: $(rssh "docker images '$IMAGE_REPO' --format '{{.Repository}}:{{.Tag}}'" | tr '\n' ' ')"
 DATA_KB="$(rssh "du -sk '$AIHUB_DATA'" | awk '{print $1}')"
 FREE_KB="$(rssh "df -Pk '$SRV_ROOT'" | awk 'NR==2{print $4}')"
 case "$DATA_KB$FREE_KB" in ''|*[!0-9]*) die "could not read server disk sizes (du='$DATA_KB' df='$FREE_KB')" ;; esac
@@ -289,11 +389,15 @@ BIN_SAVED="$SRV_ROOT/aihub-bin-$OLDVER-$TS"
 SRV_BACKUP="$SRV_ROOT/aihub-backup-$OLDVER-$TS"
 LOCAL_BACKUP="$BACKUP_ROOT/aihub-backup-$OLDVER-$TS"
 STAGE_DIR="$RELEASE_STAGE/$TAG"
+OLDIMG="$IMAGE_REPO:$OLDVER"
+NEWIMG="$IMAGE_REPO:$TAG"
+COMPOSE_BAK="$COMPOSE_FILE.bak-$TS"
 
 echo
-echo "== plan for steps 2-8 (ONLINE backup; the only interruption is the final restart) =="
+echo "== plan for steps 2-8 (ONLINE backup; the only interruption is one container recreate) =="
 cat <<EOF
 2. save old binary   ssh $AIHUB_HOST docker cp $AIHUB_CONTAINER:/aihub $BIN_SAVED
+                     build rollback image $OLDIMG from it (if absent): docker build in a temp context with deploy/Dockerfile; verify -version == $OLDVER
 3. online backup     (service keeps running; NO docker stop anywhere)
                      rsync -a $AIHUB_DATA/ -> $SRV_BACKUP/   (pass 1, excluding aihub.db, -wal, -shm, service.lock)
                      python3 sqlite3 backup API: $AIHUB_DATA/aihub.db (ro) -> $SRV_BACKUP/aihub.db ; integrity_check + counts >= baseline
@@ -301,15 +405,18 @@ cat <<EOF
 4. consistency       rows in the snapshot's memories == memory.md files under $SRV_BACKUP/memory (retry up to 2x; still different -> stop, nothing changed)
 5. off-host copy     rsync $AIHUB_HOST:$SRV_BACKUP/ -> $LOCAL_BACKUP/
                      server manifest == local manifest; integrity_check ok + row counts == frozen baseline on the local aihub.db
-6. stage + swap      scp $ASSET_AIHUB $ASSET_PF SHA256SUMS -> $AIHUB_HOST:$STAGE_DIR/ ; sha256sum -c there; chmod +x
-                     docker cp $STAGE_DIR/$ASSET_AIHUB $AIHUB_CONTAINER:/aihub.new ; docker exec $AIHUB_CONTAINER /aihub.new -version == $TAG
-                     docker exec $AIHUB_CONTAINER mv /aihub.new /aihub   (atomic rename)
-                     docker restart -t $DRAIN_SECS $AIHUB_CONTAINER ; poll http://127.0.0.1:$AIHUB_PORT/ every 0.2s ; print downtime (warn > ${MAX_DOWNTIME_SECS}s, fail if not up in ${UP_WAIT_SECS}s)
-7. verify            wait <= ${WAIT_SECS}s for 'docker exec $AIHUB_CONTAINER /aihub -version' == $TAG ; docker logs --since <start>: print error lines, FAIL on panic/fatal
+6. build + swap      scp $ASSET_AIHUB $ASSET_PF SHA256SUMS -> $AIHUB_HOST:$STAGE_DIR/ ; sha256sum -c there; chmod +x
+                     docker build -t $NEWIMG (temp context: Dockerfile + $ASSET_AIHUB as aihub) while the service runs; verify -version == $TAG, git, curl
+                     back up $COMPOSE_FILE -> $COMPOSE_BAK ; edit ONLY service $AIHUB_SERVICE (planned diff below) ; docker compose config -q (failure -> backup restored, stop)
+                     docker compose -f $COMPOSE_FILE -p $COMPOSE_PROJECT up -d --no-deps $AIHUB_SERVICE ; poll http://127.0.0.1:$AIHUB_PORT/ every 0.2s ; print downtime (warn > ${MAX_DOWNTIME_SECS}s, fail if not up in ${UP_WAIT_SECS}s)
+7. verify            container image == $NEWIMG ; wait <= ${WAIT_SECS}s for 'docker exec $AIHUB_CONTAINER /aihub -version' == $TAG ; docker logs --since <start>: print error lines, FAIL on panic/fatal
                      integrity + row counts >= frozen baseline (read-only); local 'pf queue --limit 1'
 8. rollback + summary; rollback commands for this run:
 EOF
 rollback_text
+echo
+echo "planned compose change (read-only preview of $COMPOSE_FILE):"
+compose_edit diff 2>&1 | sed 's/^/   | /' || true
 echo
 echo "   work machines: re-run tools/install.sh <api-key> on each, one at a time"
 echo
@@ -336,6 +443,13 @@ rssh "test -s '$BIN_SAVED' && chmod +x '$BIN_SAVED'" || die "saved binary $BIN_S
 saved_v="$(rssh "'$BIN_SAVED' -version" 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
 [ "$saved_v" = "$OLDVER" ] || die "saved binary reports version \"$saved_v\", expected $OLDVER"
 note "old binary saved: $BIN_SAVED ($OLDVER)"
+if rssh docker image inspect "$OLDIMG" >/dev/null 2>&1; then
+  got="$(dk run --rm --entrypoint /aihub "$OLDIMG" -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
+  [ "$got" = "$OLDVER" ] || die "image $OLDIMG already exists but its /aihub reports \"$got\", not $OLDVER - a rollback to it would be wrong; remove/retag it by hand"
+  note "rollback image $OLDIMG already exists and reports $OLDVER"
+else
+  build_image "$OLDIMG" "$BIN_SAVED" "$OLDVER"
+fi
 
 # ---------------------------------------------------------------- step 3
 step 3 "online backup (service keeps running)"
@@ -409,26 +523,33 @@ counts_cmp "$WORK/frozen.counts" "$WORK/local.counts" eq || die "row counts of t
 note "local row counts equal the frozen baseline"
 
 # ---------------------------------------------------------------- step 6
-step 6 "stage + swap (the only interruption: one restart)"
+step 6 "build image, edit compose, swap (the only interruption: one container recreate)"
 rssh "mkdir -p '$STAGE_DIR'" || die "mkdir $STAGE_DIR failed"
 scp -o BatchMode=yes "$REL/$ASSET_AIHUB" "$REL/$ASSET_PF" "$REL/SHA256SUMS" "$AIHUB_HOST:$STAGE_DIR/" >"$WORK/scp.log" 2>&1 \
   || die "scp to $STAGE_DIR failed: $(cat "$WORK/scp.log")"
 rssh "cd '$STAGE_DIR' && sha256sum -c SHA256SUMS" >"$WORK/sha2.log" 2>&1 || die "sha256sum -c on the server failed: $(cat "$WORK/sha2.log")"
 note "staged assets verified on the server: $STAGE_DIR"
 rssh "chmod +x '$STAGE_DIR/$ASSET_AIHUB' '$STAGE_DIR/$ASSET_PF'" || die "chmod failed"
-dk cp "$STAGE_DIR/$ASSET_AIHUB" "$AIHUB_CONTAINER:/aihub.new" >"$WORK/cp2.log" 2>&1 || die "docker cp of the new binary (as /aihub.new) failed: $(cat "$WORK/cp2.log")"
-newv="$(dk exec "$AIHUB_CONTAINER" /aihub.new -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' || true)"
-[ "$newv" = "$TAG" ] || die "/aihub.new in the container reports version \"$newv\", expected $TAG (not renamed)"
-note "/aihub.new reports $TAG"
+build_image "$NEWIMG" "$STAGE_DIR/$ASSET_AIHUB" "$TAG"
+# (b) compose: back up, edit ONLY the aihub service, validate, show the diff.
+rssh "cp -p '$COMPOSE_FILE' '$COMPOSE_BAK'" || die "cannot back up $COMPOSE_FILE"
+note "compose backup: $COMPOSE_BAK"
+compose_edit diff >"$WORK/compose.diff" || die "cannot compute the compose edit: $(cat "$WORK/compose.diff")"
+sed 's/^/   | /' "$WORK/compose.diff"
+compose_edit apply >"$WORK/compose.log" 2>&1 || { rssh "cp -p '$COMPOSE_BAK' '$COMPOSE_FILE'" || true; die "compose edit failed (backup restored): $(cat "$WORK/compose.log")"; }
+if ! rssh docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" config -q >"$WORK/cfg.log" 2>&1; then
+  rssh "cp -p '$COMPOSE_BAK' '$COMPOSE_FILE'" || echo "deploy: COULD NOT restore $COMPOSE_BAK -> $COMPOSE_FILE, do it by hand" >&2
+  die "docker compose config -q rejected the edited file (backup restored, service untouched): $(head -5 "$WORK/cfg.log")"
+fi
+note "compose file edited and validated (docker compose config -q ok)"
+# (c) swap: recreate only the aihub service on the new image, time until HTTP answers.
 START_AT="$(rssh "date -u +%Y-%m-%dT%H:%M:%SZ")"
-SWAPPED=1   # from the rename on, failures mean "rollback"
-dk exec "$AIHUB_CONTAINER" mv /aihub.new /aihub >"$WORK/mv.log" 2>&1 || die "mv /aihub.new /aihub failed: $(cat "$WORK/mv.log")"
-note "binary renamed over /aihub (the running process is unaffected until the restart)"
+SWAPPED=1   # from here on a failure means "rollback"
 # shellcheck disable=SC2016
 RESTART_SNIP='
-c="$1"; port="$2"; drain="$3"; limit="$4"
+cf="$1"; proj="$2"; svc="$3"; port="$4"; limit="$5"
 t0=$(date +%s.%N)
-docker restart -t "$drain" "$c" </dev/null >/dev/null 2>&1 || { echo "RESTART-FAILED"; exit 3; }
+docker compose -f "$cf" -p "$proj" up -d --no-deps "$svc" </dev/null >/dev/null 2>&1 || { echo "UP-FAILED"; exit 3; }
 while :; do
   code=$(curl -s -m 1 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port/" </dev/null 2>/dev/null || true)
   case "$code" in [1-5][0-9][0-9]) break ;; esac
@@ -440,9 +561,9 @@ t1=$(date +%s.%N)
 awk "BEGIN{printf \"%.1f\\n\", $t1 - $t0}"
 '
 down=""
-down="$(printf '%s\n' "$RESTART_SNIP" | rssh sh -s -- "$AIHUB_CONTAINER" "$AIHUB_PORT" "$DRAIN_SECS" "$UP_WAIT_SECS")" \
-  || die "restart did not complete: \"$down\" (docker restart failed, or no HTTP answer within ${UP_WAIT_SECS}s)"
-note "downtime: ${down}s (docker restart -t $DRAIN_SECS until HTTP answers)"
+down="$(printf '%s\n' "$RESTART_SNIP" | rssh sh -s -- "$COMPOSE_FILE" "$COMPOSE_PROJECT" "$AIHUB_SERVICE" "$AIHUB_PORT" "$UP_WAIT_SECS")" \
+  || die "swap did not complete: \"$down\" (docker compose up failed, or no HTTP answer within ${UP_WAIT_SECS}s)"
+note "downtime: ${down}s (compose up -d --no-deps $AIHUB_SERVICE until HTTP answers; old container drained <= ${DRAIN_SECS}s)"
 if awk -v d="$down" -v m="$MAX_DOWNTIME_SECS" 'BEGIN{exit !(d + 0 > m + 0)}'; then
   note "WARNING: downtime ${down}s exceeded ${MAX_DOWNTIME_SECS}s"
 fi
@@ -450,6 +571,9 @@ fi
 # ---------------------------------------------------------------- step 7
 step 7 "verify"
 LAST_RUN=""; LAST_VER=""
+img_now="$(dk inspect -f '{{.Config.Image}}' "$AIHUB_CONTAINER" 2>/dev/null || true)"
+[ "$img_now" = "$NEWIMG" ] || die "container image is \"$img_now\", expected $NEWIMG"
+note "container image: $img_now"
 wait_version "$TAG" || die "after ${WAIT_SECS}s: container running=$LAST_RUN, version=\"$LAST_VER\" (wanted $TAG)"
 note "container running, version $TAG"
 dk logs --since "$START_AT" "$AIHUB_CONTAINER" >"$WORK/logs.txt" 2>&1 || true

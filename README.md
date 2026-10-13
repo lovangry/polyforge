@@ -280,9 +280,12 @@ The platform ships with zero release-specific code: release logic lives in
 the project bundle's release step (`steps/release.md`), and the platform's
 own release is one instance of that same hook. Deploying a work machine is
 re-running `tools/install.sh`; deploying the aihub service host is
-`sh .polyforge/deploy.sh <tag>` (human-gated: ONLINE verified full backup, then one
-restart on the new binary - seconds of downtime, measured and printed -
-post-swap checks, printed rollback; `--dry-run` shows the plan). It is a
+`sh .polyforge/deploy.sh <tag>` (human-gated: ONLINE verified full backup; it
+builds `polyforge/aihub:<tag>` next to the running service, edits only the aihub
+service of the server's compose file, and recreates just that container - seconds
+of downtime, measured and printed; post-swap checks, printed rollback to the
+`polyforge/aihub:<old>` image it also builds; `--dry-run` shows the plan and the
+compose diff). It is a
 deployment pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`, `00-architecture.md §3.3`).
 
 ```
