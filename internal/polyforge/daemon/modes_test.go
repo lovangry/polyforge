@@ -247,7 +247,7 @@ func TestTransientProbeFailureKeepsSubmitQueued(t *testing.T) {
 		t.Fatalf("submit: %v", err)
 	}
 	td.waitLive(t, "wi_blip")
-	for _, e := range td.obs.Events().Since("wi_blip") {
+	for _, e := range td.obs.Events().SinceAfter("wi_blip", 0) {
 		if e.Kind == observe.EvSubmitRejected {
 			t.Fatalf("a transient probe failure must not reject the submit: %+v", e)
 		}

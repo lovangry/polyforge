@@ -321,16 +321,6 @@ func (l *EventLog) Append(wi, kind string, body any) error {
 	return werr
 }
 
-// Since returns the ring entries for wi (at most RingCap, oldest first):
-// the live view, pre-filled from the durable file at open.
-func (l *EventLog) Since(wi string) []protocol.EventEntry {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]protocol.EventEntry, len(l.rings[wi]))
-	copy(out, l.rings[wi])
-	return out
-}
-
 // SinceAfter returns the entries for wi whose seq is strictly greater
 // than after — the watch snapshot's ?after cursor (#21). The ring
 // answers when it still holds the cursor's successor; a cursor older than

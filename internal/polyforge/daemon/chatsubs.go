@@ -381,7 +381,7 @@ func (d *Daemon) lastSeq(wi string) int64 {
 	if d.obs == nil {
 		return 0
 	}
-	ring := d.obs.Events().Since(wi)
+	ring := d.obs.Events().SinceAfter(wi, 0)
 	if len(ring) == 0 {
 		return 0
 	}

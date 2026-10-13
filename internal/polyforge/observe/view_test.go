@@ -66,7 +66,11 @@ func TestEventRingBounded(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := len(m.log.Since("wi_ring")); got != RingCap {
+	// The ring-bound pin goes through a cursor inside the ring window
+	// (the ring answers): EventLog.Since was deleted with the audit's
+	// dead-code sweep, and a seq floor of 0 would serve the durable
+	// files instead once the ring has rotated.
+	if got := len(m.log.SinceAfter("wi_ring", 50)); got != RingCap {
 		t.Fatalf("ring size: got %d, want %d", got, RingCap)
 	}
 }

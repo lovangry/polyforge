@@ -63,7 +63,7 @@ func TestRecoveryWindowThenWrapClosesOnce(t *testing.T) {
 	// by the attachment pipeline: poll until it logs agent_recovered for
 	// spawn 2 (the recovered derivation's counter).
 	adopted := func() bool {
-		for _, e := range td.obs.Events().Since("wi_rw") {
+		for _, e := range td.obs.Events().SinceAfter("wi_rw", 0) {
 			if e.Kind != observe.EvAgentRecovered {
 				continue
 			}
@@ -121,13 +121,13 @@ func TestSupervisionStallWindowDrivesRecoveryThenBlocks(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	var sawStall bool
-	for _, e := range td.obs.Events().Since("wi_stall") {
+	for _, e := range td.obs.Events().SinceAfter("wi_stall", 0) {
 		if e.Kind == observe.EvNeedsRecovery && strings.Contains(string(e.Body), protocol.RecoverDriverStalled) {
 			sawStall = true
 		}
 	}
 	if !sawStall {
-		t.Fatalf("no driver_stalled recovery event: %v", td.obs.Events().Since("wi_stall"))
+		t.Fatalf("no driver_stalled recovery event: %v", td.obs.Events().SinceAfter("wi_stall", 0))
 	}
 
 	// It keeps stalling: the storm guard parks the WI blocked.
