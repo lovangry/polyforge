@@ -305,6 +305,19 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 6. **epic/task 概念（#133/#134）**：保留。
 7. **继续 / 放弃权限**：任务负责人、项目 maintainer、admin。
 
+## 12. polyforge#140 裁决（2026-10-13，拆分 a：wi-kind 契约——父子与 bundle 规则）
+
+拆分 a（aihub 端 + 设计文档）落地 grill-review 的调整 1–6（w140 裁决记录；拆分 b 承接客户端面：CLI/skills/daemon submit 预检）。接口细节（字段、reason 清单、响应形状、部署与回滚）权威在 `wi-kind-contract.md`；本节登记裁决本身：
+
+1. **epic 由数据派生，不落列**：不引入 `work_items.kind` 列、无迁移、无 PARENT_NOT_EPIC/EPIC_NO_BUNDLE 等新错误码；有子票（`parent_id` 指向它）即 epic，可选 `epic` label 仅展示，服务端不据此强制任何行为。
+2. **父子规则对称化**：两条对称规则取代旧“父票必须 epic”的单向表述——①有子票的票不可绑定 bundle（create 与 PATCH 共用同一校验路径，`CORE-400`，`reason=HAS_CHILDREN_NO_BUNDLE`）；②已绑 bundle 的票不可作父票（沿用 `PARENT_NOT_REGISTRY` 语义，不留旧名别名）。bundle 只落在叶子上，epic/父票永远是登记票。
+3. **R2 窗口与 stand-in digest**：`bundle_name`/`bundle_digest` 的固化时点从“建票即冻结”改为**首次认领冻结**（R2 窗口：status=queued ∧ 从未认领；waiting_on 非空不单独拒绝）；窗口内 `PATCH bundle_name` 三向变更（NULL→X / X→Y / X→NULL 解绑同步清空 digest），与 create 共用同一落库路径（digest = 请求显式值，否则 `sha256("bundle-name:"+名)` stand-in）；`workflow_budget_baseline` 保持 NULL，`wi_repo_inventory` 不触碰。
+4. **待选 bundle 分段**：ready queue 新增“待选 bundle”分段——bundle 为空 ∧ 无子票 ∧ queued 的票，与可执行分段同样排除 waiting_on 非空与依赖未完成的票；epic 不出现在任何分段；响应形状只做加法（不改名不删减旧字段）。
+5. **父票完成状态由子票派生、不写终态**：全部子票终态且 ≥1 wrapped → 派生“完成”，否则“进行中”（附子票计数：总数/已终态/wrapped）；父票库内 status 保持 queued，任何终态不写；新增子票自动回到“进行中”（纯读派生，无重开写路径）；暴露只做加法。
+6. **执行中发现的问题不挂子票**（本票及后续执行期行为约束）：范围内→顺手修（改动重新声明进 touched files）；越界不阻塞→新票 + `related`；阻塞→新票 + `blocks` 依赖；方向错误→`wrap --fail`/`cancel` 后新开 task。四分支均不向正在执行的票挂子票。
+
+**并发仲裁（防竞态两组，均有测试覆盖）**：PATCH bundle vs Claim、绑定 bundle vs 新增子票，每组恰好一方成功、落败方 typed 拒绝（`CORE-409`，`reason=CONCURRENT_WRITE` 等）；实现为单写者事务 + claimTx 同款 CAS（`UPDATE … WHERE status='queued' AND session_hash IS NULL`），辅以 per-WI 入口闩与 bundle PATCH 的提交后仲裁窗，保证任一重叠序下不同时落双方写、终态不同时出现“有子票 ∧ bundle 非空”。
+
 ---
 
 ## 附录 A：r2 深度审查漏洞清单与处置
