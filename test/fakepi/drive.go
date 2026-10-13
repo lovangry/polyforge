@@ -31,7 +31,7 @@ type planAction struct {
 	// Envelope mode (v2 Driver): the outcome and handoff flags for the
 	// result-envelope action.
 	Outcome string `json:"outcome,omitempty"` // envelope: completed|needs_input|gate_failed|incomplete
-	Handoff bool   `json:"handoff,omitempty"` // envelope: produce handoff_ref
+	Handoff bool   `json:"handoff,omitempty"` // envelope: write the handoff artifact
 
 	// --- envelope-mode extensions (polyforge#105, confined to fakepi) ---
 
