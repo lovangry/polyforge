@@ -47,7 +47,7 @@
 - **不实现外部 tracker sync（Jira/GitHub Issues 等双向同步）**：v1 期间该能力由并存的旧
   aihub 系统承担（§2.1）；现行 `/pf-sync` 入口的处置（不迁移为 skill）仍以
   `00-architecture.md#§11.1` 迁移矩阵为准，本条裁定的是**能力范围**而非入口去向。
-- **发版（release）= bundle 内 release step 钩子（定稿裁定）**：平台零发版专用代码；发版逻辑长在项目
+- **发版（release）= bundle 内 release step 钩子（定稿裁定；〔已被 2026-10-13 取代：release 槽位已从交付 bundle 删除，发版只经 `workflows/release/`，见 `01-workflow-skills.md`「发版独立成 bundle」〕）**：平台零发版专用代码；发版逻辑长在项目
   bundle 的 `agents/release.md`（模板随参考 bundle 交付，`01-workflow-skills.md#§4.2`），多项目天然隔离。
   平台自身发版（`aihub` 服务二进制与工作机二进制二产物）是同一钩子的实例，不另立发版模型。
   **`pf upgrade` 是部署管道而非发版系统**：只负责下载已发布制品、校验 sha256、quiesce、替换二进制、拉起
@@ -59,7 +59,7 @@
   权限面）是刻意留白的后续设计——P2 子票裁定，本层只定"两凭据分离"这一合同。本项目自身的两个 procedure
   （repo 内 `.polyforge/release.sh` 发版、`.polyforge/deploy.sh` 部署）即这两类凭据的消费方，模板与 dispatcher
   对其内容不做任何假设（`01-workflow-skills.md#§4.2` 的 dispatcher 裁定）。
-- **deploy face 永远人门控（polyforge#123）**：`.polyforge/deploy.sh|.md` 是项目 repo 内的部署 procedure
+- **deploy face 永远人门控（polyforge#123；〔已被 2026-10-13 取代：deploy 现由 release bundle 的 `deploy` step 触发，防线为 `--confirm <version>`、服务器侧锁、失败自动回滚，见 `01-workflow-skills.md`〕）**：`.polyforge/deploy.sh|.md` 是项目 repo 内的部署 procedure
   （aihub 升级 + 每台工作机 `pf upgrade` 序列，含回滚），**只由人触发**——任何自动化路径（workflow step、
   daemon lane、release procedure）不得引用或触发它；本部署面不为其开设任何 CLI verb，§6 的升级序列由人在
   各机器上手动执行。deploy 不是发版（release 产出制品，deploy 只把已发布版本装上机器），二者凭据亦分离
