@@ -285,21 +285,41 @@ func upgradeStatements(block string) []string {
 
 // sqlVer is the first in-window instance directory: the release tag that
 // ships polyforge#149's schema delta (the next release after v2.3.0).
-const sqlVer = "v2.4.0"
+// sqlVer250 ships polyforge#157's (the repo inventory column).
+const (
+	sqlVer    = "v2.4.0"
+	sqlVer250 = "v2.5.0"
+)
 
-// loadSQLFile reads one file of deploy/sql/<ver>/ — the SQL deploy.sh
+// sqlVers lists every deploy/sql version in ascending order: a pre-#149
+// database needs all of them before the current code runs on it.
+var sqlVers = []string{sqlVer, sqlVer250}
+
+// loadSQLFile reads one file of deploy/sql/v2.4.0/.
+func loadSQLFile(t *testing.T, name string) string { return loadSQLFileOf(t, sqlVer, name) }
+
+// loadSQLFileOf reads one file of deploy/sql/<ver>/ — the SQL deploy.sh
 // executes inside the switch window (upgrade.sql / rollback.sql /
 // probe.sql).
-func loadSQLFile(t *testing.T, name string) string {
+func loadSQLFileOf(t *testing.T, ver, name string) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "sql", sqlVer, name))
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "sql", ver, name))
 	if err != nil {
-		t.Fatalf("read deploy/sql/%s/%s: %v", sqlVer, name, err)
+		t.Fatalf("read deploy/sql/%s/%s: %v", ver, name, err)
 	}
 	if len(upgradeStatements(string(raw))) == 0 {
-		t.Fatalf("deploy/sql/%s/%s carries no statements", sqlVer, name)
+		t.Fatalf("deploy/sql/%s/%s carries no statements", ver, name)
 	}
 	return string(raw)
+}
+
+// applyLaterUpgrades applies every deploy/sql version after v2.4.0 in
+// ascending order: the shape the current code needs.
+func applyLaterUpgrades(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, v := range sqlVers[1:] {
+		applySQLText(t, db, loadSQLFileOf(t, v, "upgrade.sql"))
+	}
 }
 
 // loadUpgradeDoc answers docs/upgrade.md's fenced sql blocks.
@@ -461,20 +481,26 @@ func isCleanupBlock(upper string) bool {
 	return strings.Contains(upper, "UPDATE") && strings.Contains(upper, "WAITING_ON")
 }
 
-// TestDocsQuoteTheWindowSQL: the upgrade block of docs/upgrade.md is
-// equal to deploy/sql/<ver>/upgrade.sql modulo comments/whitespace — the
-// file is the source of truth, the doc must not drift from it.
+// TestDocsQuoteTheWindowSQL: for every deploy/sql version, one upgrade
+// block of docs/upgrade.md is equal to deploy/sql/<ver>/upgrade.sql
+// modulo comments/whitespace, in version order — the file is the source
+// of truth, the doc must not drift from it.
 func TestDocsQuoteTheWindowSQL(t *testing.T) {
+	norm := func(s string) string { return strings.Join(upgradeStatements(s), "\n") }
+	var mandatory []string
 	for _, blk := range loadUpgradeDoc(t) {
 		if isMandatoryBlock(strings.ToUpper(blk)) {
-			norm := func(s string) string { return strings.Join(upgradeStatements(s), "\n") }
-			if norm(blk) != norm(loadSQLFile(t, "upgrade.sql")) {
-				t.Fatalf("docs/upgrade.md's upgrade block differs from deploy/sql/%s/upgrade.sql", sqlVer)
-			}
-			return
+			mandatory = append(mandatory, norm(blk))
 		}
 	}
-	t.Fatalf("docs/upgrade.md carries no mandatory block dropping wi_ship_ledger")
+	if len(mandatory) != len(sqlVers) {
+		t.Fatalf("docs/upgrade.md carries %d mandatory upgrade blocks, want one per version %v", len(mandatory), sqlVers)
+	}
+	for i, v := range sqlVers {
+		if mandatory[i] != norm(loadSQLFileOf(t, v, "upgrade.sql")) {
+			t.Fatalf("docs/upgrade.md's upgrade block %d differs from deploy/sql/%s/upgrade.sql", i+1, v)
+		}
+	}
 }
 
 // upgradeRun builds a real old database, applies the window upgrade SQL
@@ -486,6 +512,7 @@ func upgradeRun(t *testing.T, populate bool) {
 
 	applySQLText(t, raw, upSQL)
 	assertDeadGone(t, raw)
+	applyLaterUpgrades(t, raw)
 
 	if populate {
 		// The optional cleanup (docs/upgrade.md, manual) touches ONLY the
@@ -665,6 +692,7 @@ func TestUpgradeRollbackRoundTrip(t *testing.T) {
 	dataDir, raw := oldSchemaDB(t, true)
 	applySQLText(t, raw, loadSQLFile(t, "upgrade.sql"))
 	assertDeadGone(t, raw)
+	applyLaterUpgrades(t, raw)
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -695,7 +723,10 @@ func TestUpgradeRollbackRoundTrip(t *testing.T) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	applySQLText(t, db, loadSQLFile(t, "rollback.sql"))
+	// descending, like deploy.sh's auto-rollback
+	for i := len(sqlVers) - 1; i >= 0; i-- {
+		applySQLText(t, db, loadSQLFileOf(t, sqlVers[i], "rollback.sql"))
+	}
 	assertDeadShapesRestored(t, db)
 
 	// the dropped-column data is gone by the upgrade (that is what a

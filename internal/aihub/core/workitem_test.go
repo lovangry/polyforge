@@ -185,16 +185,16 @@ func TestPatchBundleWaitingOnNotRefused(t *testing.T) {
 // inventory keeps it verbatim through bundle binds and unbinds.
 func TestPatchBundleRepoInventoryUntouched(t *testing.T) {
 	env := newEnv(t)
+	reposProject(t, env)
 	wi, err := env.WIs.Create(CreateRequest{
-		Project: "alpha", Goal: "w140 inventory untouched", Reporter: env.UserID,
-		BundleName:        strPtrTest("w140-inv-a"),
-		RepoInventory:     []RepoDecl{decl("polyforge", "https://example.com/polyforge.git")},
-		RepoInventoryBase: []RepoBaseDecl{baseDecl("polyforge", "0123456789abcdef")},
+		Project: "bravo", Goal: "w140 inventory untouched", Reporter: env.UserID,
+		BundleName:    strPtrTest("w140-inv-a"),
+		RepoInventory: names("app"),
 	})
 	if err != nil {
 		t.Fatalf("create with inventory: %v", err)
 	}
-	before, err := env.WIs.repoInventoryOf(wi.ID)
+	before, err := repoInventoryOf(env.DB, wi.ID)
 	if err != nil {
 		t.Fatalf("inventory read: %v", err)
 	}
@@ -204,12 +204,12 @@ func TestPatchBundleRepoInventoryUntouched(t *testing.T) {
 	if _, err := patchBundle(t, env, wi.ID, nil); err != nil {
 		t.Fatalf("unbind: %v", err)
 	}
-	after, err := env.WIs.repoInventoryOf(wi.ID)
+	after, err := repoInventoryOf(env.DB, wi.ID)
 	if err != nil {
 		t.Fatalf("inventory read: %v", err)
 	}
 	if len(after) != len(before) || len(after) != 1 ||
-		after[0].Name != before[0].Name || after[0].Base != before[0].Base {
+		after[0] != before[0] {
 		t.Fatalf("bundle PATCH mutated the frozen inventory: before %+v after %+v", before, after)
 	}
 }

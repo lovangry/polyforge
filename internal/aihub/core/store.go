@@ -106,6 +106,11 @@ CREATE TABLE IF NOT EXISTS work_items (
   assignee     TEXT REFERENCES users(id),
   waiting_on   TEXT,
   bundle_name  TEXT,
+  -- §4.6 repo inventory: JSON array of project repo names [{"name":..}]
+  -- frozen at create (no UPDATE path; URLs are resolved from the project
+  -- at claim); NULL = no inventory (the claim then serves every project
+  -- repo). deploy/sql/v2.5.0 adds it to older databases.
+  repo_inventory TEXT,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
   closed_at    TEXT,
@@ -129,21 +134,6 @@ CREATE INDEX IF NOT EXISTS idx_wi_assignee   ON work_items(assignee) WHERE statu
 CREATE INDEX IF NOT EXISTS idx_wi_waiting_on ON work_items(waiting_on) WHERE waiting_on IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_wi_parent     ON work_items(parent_id) WHERE parent_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_wi_milestone  ON work_items(project_id, milestone) WHERE milestone IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS wi_repo_inventory (
-  -- §4.6: the WI repo-reference triple. The declaration (name/url/
-  -- subdir) and the frozen base sha are written ONLY inside the WI
-  -- create transaction; there is no UPDATE path (base immutable
-  -- after create — a changed inventory means a new WI).
-  work_item_id TEXT NOT NULL REFERENCES work_items(id),
-  position     INTEGER NOT NULL,            -- declaration order, 1..8
-  name         TEXT NOT NULL,               -- repo short name
-  url          TEXT NOT NULL,
-  subdir       TEXT,                        -- in-repo subdirectory anchor, nullable
-  base         TEXT,                        -- commit sha, frozen at create
-  PRIMARY KEY (work_item_id, position)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_name ON wi_repo_inventory(work_item_id, name);
 
 CREATE TABLE IF NOT EXISTS wi_dependencies (
   blocking_wi_id TEXT NOT NULL REFERENCES work_items(id),

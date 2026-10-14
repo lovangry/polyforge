@@ -135,7 +135,7 @@ internal/runner/    # Native runner：RunCommand 实现、runtime-state 写保�
 
 ### 4.1 repo inventory：声明格式 <!-- §4.1 -->
 
-WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 8。**权威存储在 `02-aihub-core.md#§4.6` `wi_repo_inventory` 表**（本文不重复定义存储）：创建时写入 `name`/`url`/`subdir`，`base` 为 NULL；**base commit 在 WI 创建事务中冻结**（`02-aihub-core.md#§4.6` 的 `POST /api/v1/work-items` 创建请求体 `repo_inventory_base` 字段），此后不可变（`wi_repo_inventory` 不受 bundle 变更影响；bundle 引用的冻结时点同 `bundle_name`：首次认领冻结，`02-aihub-core.md#§4.5`——digest 链已删，polyforge#149 B9）。Daemon 丢失本地声明（takeover/重新检出）时通过 `GET /api/v1/work-items/{id}/repo-inventory`（`02-aihub-core.md#§5.1`）重建清单，不依赖本地缓存或推断。
+WI 创建时可声明 repo inventory：`[{name}]`（项目仓库名），1 ≤ 条数 ≤ 8。**权威存储在 `02-aihub-core.md#§4.6` `work_items.repo_inventory` 列**（本文不重复定义存储）：创建事务内冻结，此后不可变（不受 bundle 变更影响）。只接受名字：url 在认领时从项目记录解析，客户端给的 `url`、`subdir`、`base` 一律在建票时被拒。认领答复的 `repos` 只含清单内仓库（无清单时为项目全部仓库），Daemon 逐个 clone 默认分支（§4.3）；重新认领时若 WI 的 carrier ref 存在，则恢复到上次 session 发布的 head。Daemon 丢失本地声明（takeover/重新检出）时通过认领答复重建清单，不依赖本地缓存或推断。
 
 ### 4.2 `runtime-state/execution.json`：完整文件格式（权威，INV-1 的唯一执行权威文件） <!-- §4.2 -->
 
@@ -214,7 +214,7 @@ WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 
   断定是本 step 写的。重新派发（rewind 回到该
   step、基础设施失败 resume）**不**更新该字段（保持第一次进入该 step 时的基线，保证多次 attempt
   的 diff 基线一致）。`07-deployment-pilot.md` 的 INV-D4/M4/M5 判定均必须比对该字段（HEAD+脏集）而非 `03-execution-capsule.md#§4.1`/
-  §4.3 的 WI 级 `repo_inventory_base`/`inventory.json`，后者是整个 WI 的起始基线，不能区分“本
+  §4.3 的 WI 级认领基线（`capsule.json` 的 `repos`），后者是整个 WI 的起始基线，不能区分“本
   step 自己改了什么”与“前面 step 留下的改动”。
 - `review_rounds`：**review 轮次**，`{<gate_step_id>: <int>}`，值等于该 gate step 自身 `attempts` 数组长度加当前一次未归档结果（即该 gate 已被评估的总次数）；与 `rewind_stats` 的关系是**派生但同一原子写入单元**内一起落盘，不是第二权威——`rewind_stats` 统计的是「触发了多少次回退」，`review_rounds` 统计的是「某个 gate 被评估了多少次」，两者口径不同，都从同一份 `steps` 归档结构机械推得。
 - `rewind_stats`：`{total, by_step}`，`total` 是全 workflow 累计触发的 rewind 次数，`by_step` 是按 `on_fail.target` 分组的计数；与 `01-workflow-skills.md#§6.2` `consumed_rewinds_total`/`rewinds_reached[target]` 逐字对应。
@@ -236,25 +236,12 @@ WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 
 
 ### 4.3 repo inventory：检出流程与基线 commit 记录 <!-- §4.3 -->
 
-1. 对声明清单中的每个 `repo_entry = {name, url, subdir?, base}`：目标目录 `dir = <capsule>/repos/<name>`。
-2. 若 `dir` 已存在且其 `HEAD == base`：校验工作树无未预期的脏改动痕迹与声明不符后直接复用，不重新克隆。
-3. 若 `dir` 已存在：直接复用（存在性即判据——记录的基线随 prior capsule.json 原样保留；
-不自动重置、不强制重置，漂移属人工处理范畴。检出/克隆失败是 typed 的 `DAEMON-507`，
-绝不静默退化）。
-4. 若 `dir` 不存在：`git clone --no-checkout <url> dir && git -C dir checkout <base>`。
-5. 写入 `<capsule>/repos/<name>/inventory.json` 快照，记录 `{name, url, base, checked_out_at, head_at_checkout}`。
+认领答复的 `repos`（`[{name, url}]`，url 由 AIHub 在认领时从项目 `projects.repos` 解析，`02-aihub-core.md#§4.6`）在 agent 启动前由 Daemon 逐个检出（`internal/polyforge/runtime/repos.go`）：
 
-`inventory.json`（每个 repo 目录内一份，聚合视图见下）：
-
-```json
-{ "digest": "sha256:...",
-  "repos": [
-    { "name": "ieops", "url": "git@...", "base": "<sha>",
-      "checked_out_at": "2026-09-20T08:00:05Z", "head_at_checkout": "<sha>" }
-  ] }
-```
-
-inventory 检出以**声明的 base commit 为唯一基线**——多仓 WI 的 patch 组装锚定到声明清单而非单一默认树；任何「声称改动」都可机械对照 `repos/<name>/` 工作树相对本节 §4.3 记录的 `base`/`head_at_checkout` 基线所得的 Git diff 校验，判据自包含于本文，不依赖外部校验契约。
+1. 对每个 `{name, url}`：目标目录 `dir = <capsule>/repos/<name>`。
+2. 若 `dir` 已存在：直接复用（存在性即判据——记录的基线随 prior capsule.json 原样保留；不自动重置、不强制重置，漂移属人工处理范畴）。
+3. 若 `dir` 不存在：`git clone -- <url> dir`（默认分支；不支持冻结 base commit）；该 WI 的 carrier ref 存在时（重新认领），把新 clone 移到上次 session 发布的 head。
+4. `capsule.json` 的 `repos`（name → 认领时 HEAD sha）记录每个仓库的基线。检出/克隆失败是 typed 的 `DAEMON-507`，绝不静默退化。
 
 ### 4.4 harness 会话目录：session 身份规则与本机会话数据的界限（`00-architecture.md#§3.6a` 会话数据落位的权威布局，本节是该规则的唯一权威定义，`04`/`05` 引用本节不重复定义） <!-- §4.4 -->
 

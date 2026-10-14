@@ -196,15 +196,15 @@ func (db *DB) derivedBatch(ids []string) (map[string]*DerivedEpic, error) {
 // marshals as the api.WorkItem JSON plus the SessionPublic fields
 // (embedded structs flatten); Phase 0's api.WorkItem itself is frozen and
 // gains nothing, so the block rides alongside it at the server boundary.
-// The frozen §4.6 repo inventory (base included) rides the same way: a
+// The frozen §4.6 repo inventory rides the same way: a
 // well-formed create must be observable on the WI view, not silently
 // discarded; it is omitted when the WI declared none. The w140 derived
 // epic block rides the same additive face (omitted for childless WIs).
 type WIView struct {
 	api.WorkItem
 	SessionPublic
-	RepoInventory []WIRepoEntry `json:"repo_inventory,omitempty"`
-	Derived       *DerivedEpic  `json:"derived,omitempty"`
+	RepoInventory []RepoDecl   `json:"repo_inventory,omitempty"`
+	Derived       *DerivedEpic `json:"derived,omitempty"`
 }
 
 // sessionPublicOf reads one WI's public session block.
@@ -226,14 +226,14 @@ func (db *DB) sessionPublicOf(wiID string) (SessionPublic, error) {
 }
 
 // View wraps one WorkItem with its public session audit block, its
-// frozen repo inventory (§4.6, base included) and its derived epic
+// frozen repo inventory (§4.6) and its derived epic
 // block (w140).
 func (m *WIManager) View(wi *api.WorkItem) (*WIView, error) {
 	sp, err := m.db.sessionPublicOf(wi.ID)
 	if err != nil {
 		return nil, err
 	}
-	inv, err := m.repoInventoryOf(wi.ID)
+	inv, err := repoInventoryOf(m.db, wi.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +430,7 @@ func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, calle
 		BundleName:         row.BundleName.String,
 		ClaimedAt:          now,
 	}
-	claim.Repos, err = projectReposTx(tx, row.ProjectID)
+	claim.Repos, err = claimReposTx(tx, wiID, row.ProjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -503,7 +503,7 @@ func cacheIdempotentClaimTx(tx *sql.Tx, key, wiID, callerIdentity string, claim 
 // projectReposTx reads the project's task-repo inventory on the claim's
 // own snapshot (the runtime clones each entry into the capsule before the
 // agent starts).
-func projectReposTx(tx *sql.Tx, projectID string) ([]api.ProjectRepo, error) {
+func projectReposTx(tx queryRower, projectID string) ([]api.ProjectRepo, error) {
 	var reposJSON string
 	err := tx.QueryRow(`SELECT repos FROM projects WHERE id=?1`, projectID).Scan(&reposJSON)
 	if errors.Is(err, sql.ErrNoRows) {
