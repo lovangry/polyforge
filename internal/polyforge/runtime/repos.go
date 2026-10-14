@@ -193,12 +193,12 @@ func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, name, dir st
 
 // restoreTaskWIP applies the previous session's uncommitted work
 // (gitops.TaskWIPRefName, polyforge#167) to a FRESH task-repo clone whose
-// HEAD is head: when the WIP commit's single parent is head, its tree is
-// checked out into the working tree through a temporary index —
-// read-tree + checkout-index -a -f, then the tracked files the WIP
-// deleted are removed — so HEAD, the branch and the repo's own index stay
-// on head and the work shows up as uncommitted changes, as the step left
-// it (staged and unstaged edits both come back unstaged). A WIP on
+// HEAD is head: when the WIP commit's single parent is head, git applies
+// the head→wip change to the working tree through a temporary copy of the
+// index (checkoutWIPTree: read-tree -m -u) — so HEAD, the branch and the
+// repo's own index stay on head and the work shows up as uncommitted
+// changes, as the step left it (staged and unstaged edits both come back
+// unstaged). A WIP on
 // another parent (the carrier moved past it, or the restore fell back)
 // is NOT applied: task_wip_not_applied is raised and the ref is left for
 // the next close to supersede. Best-effort by design — the committed head
@@ -248,40 +248,35 @@ func (r *Runtime) restoreTaskWIP(ctx context.Context, j *job, name, dir, head st
 	fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: restored the previous session's uncommitted work from %s (%s) onto %s\n", j.wi, name, ref, wip, head)
 }
 
-// checkoutWIPTree writes the tree of wip into dir's working tree without
-// touching HEAD or the repo's index (a temporary GIT_INDEX_FILE), then
-// removes the tracked files of head the WIP deleted.
+// checkoutWIPTree applies wip on top of head to dir's working tree
+// without touching HEAD or the repo's index: a COPY of the fresh clone's
+// index (which stands on head) becomes a temporary GIT_INDEX_FILE and git
+// itself carries the change over — `read-tree -m -u <head> <wip>` (a
+// two-tree fast-forward of the work tree). Git applies deletions, modes
+// and a directory turned symlink without ever following a symlink out of
+// the work tree; no file is removed by hand (a hand-written removal loop
+// once followed a dir→symlink change out of the repo).
 func checkoutWIPTree(ctx context.Context, dir, head, wip string) error {
+	gitDir, err := gitTask(ctx, dir, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return err
+	}
 	tmp, err := os.MkdirTemp("", "pf-wip-index-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	env := append(os.Environ(), "GIT_INDEX_FILE="+filepath.Join(tmp, "index"))
-	if _, err := gitTaskEnv(ctx, env, dir, "read-tree", wip); err != nil {
-		return err
-	}
-	if _, err := gitTaskEnv(ctx, env, dir, "checkout-index", "-a", "-f"); err != nil {
-		return err
-	}
-	out, err := gitTask(ctx, dir, "diff", "--name-only", "--no-renames", "--diff-filter=D", "-z", head, wip)
+	index := filepath.Join(tmp, "index")
+	b, err := os.ReadFile(filepath.Join(strings.TrimSpace(gitDir), "index"))
 	if err != nil {
 		return err
 	}
-	root := filepath.Clean(dir) + string(filepath.Separator)
-	for _, p := range strings.Split(out, "\x00") {
-		if p == "" {
-			continue
-		}
-		full := filepath.Join(dir, p)
-		if !strings.HasPrefix(full, root) {
-			continue // never outside the worktree
-		}
-		if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+	if err := os.WriteFile(index, b, 0o600); err != nil {
+		return err
 	}
-	return nil
+	env := append(os.Environ(), "GIT_INDEX_FILE="+index)
+	_, err = gitTaskEnv(ctx, env, dir, "read-tree", "-m", "-u", head, wip)
+	return err
 }
 
 // carrierFallbackBranch names the local branch a carrier is restored onto

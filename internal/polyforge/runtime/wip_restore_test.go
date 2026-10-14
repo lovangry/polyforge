@@ -268,3 +268,63 @@ func TestWrappedCloseLeavesNoWIPRef(t *testing.T) {
 		t.Fatalf("the wrapped close left refs/pf-wip/app = %s", wip)
 	}
 }
+
+// B1 regression: a WIP that turned a tracked directory into a symlink out
+// of the repo (HEAD tracks a/b.txt; the step ran `mv a ../shared && ln -s
+// ../shared a`) must be applied by git itself — the deleted a/b.txt is
+// never removed THROUGH the new symlink, so the file outside the repo
+// survives. HEAD and the repo's index stay on head.
+func TestWIPCheckoutNeverFollowsASymlinkOutOfTheRepo(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	carrierGit(t, repo, "init", "-q", "-b", "main")
+	writeFile(t, filepath.Join(repo, "a", "b.txt"), "tracked\n")
+	writeFile(t, filepath.Join(repo, "top.txt"), "top\n")
+	carrierGit(t, repo, "add", "-A")
+	carrierGit(t, repo, "commit", "-q", "-m", "base")
+	head := carrierGit(t, repo, "rev-parse", "HEAD")
+
+	// the step's work, committed elsewhere as the WIP
+	work := filepath.Join(root, "work")
+	carrierGit(t, root, "clone", "-q", repo, work)
+	if err := os.RemoveAll(filepath.Join(work, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../shared", filepath.Join(work, "a")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(work, "top.txt"), "top, edited\n")
+	carrierGit(t, work, "add", "-A")
+	carrierGit(t, work, "commit", "-q", "-m", "pf-wip")
+	wip := carrierGit(t, work, "rev-parse", "HEAD")
+	carrierGit(t, repo, "fetch", "-q", work, "HEAD")
+
+	// the file outside the repo the symlink points at
+	outside := filepath.Join(root, "shared", "b.txt")
+	if err := os.MkdirAll(filepath.Dir(outside), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, outside, "not the repo's\n")
+
+	if err := checkoutWIPTree(context.Background(), repo, head, wip); err != nil {
+		t.Fatalf("checkoutWIPTree: %v", err)
+	}
+	if b, err := os.ReadFile(outside); err != nil || string(b) != "not the repo's\n" {
+		t.Fatalf("the restore touched a file outside the repo: %q, %v", b, err)
+	}
+	if st, err := os.Lstat(filepath.Join(repo, "a")); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("a is not the WIP's symlink (%v)", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(repo, "top.txt")); string(b) != "top, edited\n" {
+		t.Fatalf("top.txt = %q", b)
+	}
+	if got := carrierGit(t, repo, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD moved to %s", got)
+	}
+	if staged := carrierGit(t, repo, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("the restore staged %q", staged)
+	}
+}

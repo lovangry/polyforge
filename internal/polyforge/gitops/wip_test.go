@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
@@ -189,5 +191,207 @@ func TestPushTaskWIPRunsFromATempRepo(t *testing.T) {
 		"--work-tree=" + repo, "add", "-A"}
 	if strings.Join(add, " ") != strings.Join(wantAdd, " ") {
 		t.Fatalf("WIP add argv = %q\nwant %q", add, wantAdd)
+	}
+}
+
+// wipTree answers the WIP ref's file list (and fails when there is none).
+func wipTree(t *testing.T, o Opts) (string, []string) {
+	t.Helper()
+	wip, ok := bareRefSHA(t, o.RemoteURL, TaskWIPRefName("demo-src"))
+	if !ok {
+		t.Fatal("no refs/pf-wip/demo-src")
+	}
+	return wip, strings.Fields(mustRun(t, "git", "--git-dir", o.RemoteURL, "ls-tree", "-r", "--name-only", wip))
+}
+
+// captureEvents binds o's event sink to a recorder.
+func captureEvents(o *Opts) func() []map[string]any {
+	var mu sync.Mutex
+	var evs []map[string]any
+	o.EventSink = func(kind string, body map[string]any) {
+		mu.Lock()
+		defer mu.Unlock()
+		b := map[string]any{"kind": kind}
+		for k, v := range body {
+			b[k] = v
+		}
+		evs = append(evs, b)
+	}
+	return func() []map[string]any { mu.Lock(); defer mu.Unlock(); return append([]map[string]any{}, evs...) }
+}
+
+func skippedText(evs []map[string]any) string {
+	var b strings.Builder
+	for _, e := range evs {
+		if e["kind"] == EventTaskWIPSkipped {
+			b.WriteString(e["skipped"].(string) + "\n")
+		}
+	}
+	return b.String()
+}
+
+// S1: an embedded repository — even one without a commit, which makes a
+// plain `add -A` fail outright — is left out and reported; the rest of
+// the uncommitted work is still saved.
+func TestPushTaskWIPSkipsEmbeddedRepos(t *testing.T) {
+	o, repo, _ := wipEnv(t, "wi_wip4")
+	events := captureEvents(&o)
+	writeT(t, filepath.Join(repo, "new.txt"), "keep me\n")
+	mustRun(t, "git", "init", "-q", filepath.Join(repo, "vendor", "empty"))
+	writeT(t, filepath.Join(repo, "vendor", "empty", "f.txt"), "x\n")
+	mustRun(t, "git", "init", "-q", filepath.Join(repo, "with space"))
+	writeT(t, filepath.Join(repo, "with space", "g.txt"), "y\n")
+	mustRun(t, "git", "-C", filepath.Join(repo, "with space"), "add", "-A")
+	mustRun(t, "git", "-C", filepath.Join(repo, "with space"), "commit", "-q", "-m", "nested")
+	PushTaskWIP(o, true, true)
+	_, files := wipTree(t, o)
+	if strings.Join(files, " ") != "hello.txt new.txt work.txt" {
+		t.Fatalf("WIP tree = %v, want the embedded repos left out", files)
+	}
+	sk := skippedText(events())
+	if !strings.Contains(sk, "vendor/empty (embedded git repository)") || !strings.Contains(sk, "with space (embedded git repository)") {
+		t.Fatalf("task_wip_skipped = %q, want both embedded repos named", sk)
+	}
+}
+
+// S2: a blob over the carrier limit is left out (a tracked one keeps its
+// HEAD content — never turned into a deletion); above the total cap the
+// largest changed files go first.
+func TestPushTaskWIPBoundsBlobsAndTotal(t *testing.T) {
+	o, repo, _ := wipEnv(t, "wi_wip5")
+	events := captureEvents(&o)
+	oldBlob, oldTotal := wipBlobCap, wipTotalCap
+	t.Cleanup(func() { wipBlobCap, wipTotalCap = oldBlob, oldTotal })
+	wipBlobCap, wipTotalCap = 100, 50
+	writeT(t, filepath.Join(repo, "hello.txt"), strings.Repeat("h", 200)) // tracked, over the blob cap
+	writeT(t, filepath.Join(repo, "huge.bin"), strings.Repeat("u", 150))  // untracked, over the blob cap
+	writeT(t, filepath.Join(repo, "a.txt"), strings.Repeat("a", 30))
+	writeT(t, filepath.Join(repo, "b.txt"), strings.Repeat("b", 20))
+	writeT(t, filepath.Join(repo, "c.txt"), strings.Repeat("c", 10))
+	PushTaskWIP(o, true, true)
+	wip, files := wipTree(t, o)
+	if strings.Join(files, " ") != "b.txt c.txt hello.txt work.txt" {
+		t.Fatalf("WIP tree = %v, want huge.bin and the largest (a.txt) left out, hello.txt kept", files)
+	}
+	if got := mustRun(t, "git", "--git-dir", o.RemoteURL, "show", wip+":hello.txt"); got != "hello\n" {
+		t.Fatalf("an over-limit tracked file must keep its HEAD content in the WIP, got %q", got)
+	}
+	sk := skippedText(events())
+	for _, p := range []string{"hello.txt (", "huge.bin (", "a.txt ("} {
+		if !strings.Contains(sk, p) {
+			t.Fatalf("task_wip_skipped = %q, want %s", sk, p)
+		}
+	}
+	if msg := mustRun(t, "git", "--git-dir", o.RemoteURL, "log", "-1", "--format=%B", wip); !strings.Contains(msg, "huge.bin") {
+		t.Fatalf("the WIP commit message does not record the left-out paths: %q", msg)
+	}
+}
+
+// N1: files whose attributes name the lfs or git-crypt filter are left
+// out (the snapshot applies no filter: raw content is the smudged form).
+func TestPushTaskWIPSkipsFilteredFiles(t *testing.T) {
+	o, repo, _ := wipEnv(t, "wi_wip6")
+	events := captureEvents(&o)
+	writeT(t, filepath.Join(repo, ".gitattributes"), "*.psd filter=lfs diff=lfs merge=lfs -text\nsecret/** filter=git-crypt diff=git-crypt\n")
+	writeT(t, filepath.Join(repo, "art.psd"), "big binary\n")
+	if err := os.MkdirAll(filepath.Join(repo, "secret"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeT(t, filepath.Join(repo, "secret", "key"), "plaintext\n")
+	PushTaskWIP(o, true, true)
+	_, files := wipTree(t, o)
+	if strings.Join(files, " ") != ".gitattributes hello.txt work.txt" {
+		t.Fatalf("WIP tree = %v, want the lfs/git-crypt files left out", files)
+	}
+	sk := skippedText(events())
+	if !strings.Contains(sk, "art.psd (filter=lfs") || !strings.Contains(sk, "secret/key (filter=git-crypt") {
+		t.Fatalf("task_wip_skipped = %q", sk)
+	}
+}
+
+// S4: the ignore rules the carrier env would drop still apply — the
+// operator's global ignore file (XDG default and core.excludesFile) and
+// the repo's own core.excludesFile.
+func TestPushTaskWIPHonoursGlobalAndRepoExcludes(t *testing.T) {
+	o, repo, _ := wipEnv(t, "wi_wip7")
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if err := os.MkdirAll(filepath.Join(xdg, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeT(t, filepath.Join(xdg, "git", "ignore"), "*.secret\n")
+	writeT(t, filepath.Join(repo, "x.secret"), "global-ignored\n")
+	writeT(t, filepath.Join(repo, "new.txt"), "keep\n")
+	PushTaskWIP(o, true, true)
+	if _, files := wipTree(t, o); strings.Join(files, " ") != "hello.txt new.txt work.txt" {
+		t.Fatalf("WIP tree = %v, want the XDG-ignored file left out", files)
+	}
+	// the operator's global core.excludesFile (a throwaway global config:
+	// never the real one TestMain exposes for the identity)
+	gc := filepath.Join(t.TempDir(), "gitconfig")
+	t.Setenv("GIT_CONFIG_GLOBAL", gc)
+	global := filepath.Join(t.TempDir(), "global-ignore")
+	writeT(t, global, "*.op\n")
+	mustRun(t, "git", "config", "--file", gc, "core.excludesFile", global)
+	writeT(t, filepath.Join(repo, "y.op"), "op-ignored\n")
+	PushTaskWIP(o, true, true)
+	if _, files := wipTree(t, o); strings.Join(files, " ") != "hello.txt new.txt work.txt" {
+		t.Fatalf("WIP tree = %v, want the globally ignored file left out", files)
+	}
+	// the repo's own core.excludesFile wins over the global one
+	repoIgnore := filepath.Join(t.TempDir(), "repo-ignore")
+	writeT(t, repoIgnore, "*.local\n*.op\n")
+	mustRun(t, "git", "-C", repo, "config", "core.excludesFile", repoIgnore)
+	writeT(t, filepath.Join(repo, "z.local"), "repo-ignored\n")
+	PushTaskWIP(o, true, true)
+	if _, files := wipTree(t, o); strings.Join(files, " ") != "hello.txt new.txt work.txt" {
+		t.Fatalf("WIP tree = %v, want the repo-excludesFile ignored file left out", files)
+	}
+}
+
+// S3: when the keep snapshot cannot be pushed, the older WIP ref is
+// dropped (it would otherwise be applied, stale, by the next re-claim)
+// and carrier_push_failed names the WIP ref.
+func TestPushTaskWIPFailureDropsOlderRef(t *testing.T) {
+	o, repo, _ := wipEnv(t, "wi_wip8")
+	events := captureEvents(&o)
+	writeT(t, filepath.Join(repo, "new.txt"), "v1\n")
+	PushTaskWIP(o, true, true)
+	if _, ok := bareRefSHA(t, o.RemoteURL, TaskWIPRefName("demo-src")); !ok {
+		t.Fatal("setup: no first WIP")
+	}
+	// the hub now refuses WIP updates (deletion still allowed)
+	hook := "#!/bin/sh\nzero=0000000000000000000000000000000000000000\nwhile read old new ref; do\n  case \"$ref\" in refs/pf-wip/*) [ \"$new\" = \"$zero\" ] || { echo refused >&2; exit 1; } ;; esac\ndone\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(o.RemoteURL, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeT(t, filepath.Join(repo, "new.txt"), "v2\n")
+	PushTaskWIP(o, true, true)
+	if wip, ok := bareRefSHA(t, o.RemoteURL, TaskWIPRefName("demo-src")); ok {
+		t.Fatalf("a failed WIP push left the older snapshot %s in place", wip)
+	}
+	var failed bool
+	for _, e := range events() {
+		if e["kind"] == EventCarrierPushFailed && e["ref"] == TaskWIPRefName("demo-src") {
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatalf("no carrier_push_failed for the WIP ref: %v", events())
+	}
+}
+
+// N2: an expired Deadline cuts every lane call: nothing is pushed.
+func TestPushTaskWIPHonoursDeadline(t *testing.T) {
+	o, repo, _ := wipEnv(t, "wi_wip9")
+	writeT(t, filepath.Join(repo, "new.txt"), "x\n")
+	o.Deadline = time.Now().Add(-time.Second)
+	start := time.Now()
+	PushTaskWIP(o, true, true)
+	if _, ok := bareRefSHA(t, o.RemoteURL, TaskWIPRefName("demo-src")); ok {
+		t.Fatal("a WIP was pushed past the deadline")
+	}
+	if el := time.Since(start); el > 30*time.Second {
+		t.Fatalf("the lane ran %s past an expired deadline", el)
 	}
 }

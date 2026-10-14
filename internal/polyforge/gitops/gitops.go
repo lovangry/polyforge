@@ -106,6 +106,29 @@ type Opts struct {
 	// carrier_push_failed (owned by the runtime job, so it ends with the
 	// job and starts fresh on a re-claim). nil raises every failure.
 	CarrierAlerts *CarrierAlerts
+	// Deadline, when set, bounds every carrier-lane git call (the task
+	// carrier and the WIP lane): each call's timeout is cut to the time
+	// left, and on expiry the git process group is killed — the graceful
+	// shutdown gives each job's WIP snapshot its own slice of the budget
+	// this way, so no push outlives the daemon. Zero = the lane's own
+	// timeouts only.
+	Deadline time.Time
+}
+
+// bound cuts a carrier-lane timeout to the time left before o.Deadline
+// (never below 1ms: a zero timeout would mean unbounded).
+func (o Opts) bound(d time.Duration) time.Duration {
+	if o.Deadline.IsZero() {
+		return d
+	}
+	left := time.Until(o.Deadline)
+	if left < time.Millisecond {
+		left = time.Millisecond
+	}
+	if left < d {
+		return left
+	}
+	return d
 }
 
 // Env returns the environment every raw git invocation against this
@@ -549,7 +572,7 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc) {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		objects, sha, reason := carrierSource(reposDir, e.Name())
+		objects, sha, reason := carrierSourceT(reposDir, e.Name(), o.bound(carrierCheckTimeout))
 		if reason != "" {
 			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s refused (task-repo state may not survive a re-claim): %s\n", o.WorkItemID, e.Name(), reason)
 			o.carrierFailed(e.Name(), chainOK, "carrier push refused: "+reason)
@@ -642,6 +665,11 @@ var carrierFlags = []string{
 // own .git. The calls only READ (rev-parse); none of them pushes or
 // holds the credential.
 func carrierSource(reposDir, name string) (objects, sha, reason string) {
+	return carrierSourceT(reposDir, name, carrierCheckTimeout)
+}
+
+// carrierSourceT is carrierSource with an explicit per-call timeout.
+func carrierSourceT(reposDir, name string, timeout time.Duration) (objects, sha, reason string) {
 	dir := filepath.Join(reposDir, name)
 	gitDir := filepath.Join(dir, ".git")
 	if reason := carrierLayoutRefusal(gitDir); reason != "" {
@@ -651,11 +679,11 @@ func carrierSource(reposDir, name string) (objects, sha, reason string) {
 	env := carrierEnv(reposDir)
 	// safe.directory: the repo may be owned by another uid (#135).
 	flags := append(append([]string{}, carrierFlags...), "-c", "safe.directory="+dir)
-	out, err := gitTimed(carrierCheckTimeout, env, dir, append(flags, "rev-parse", "--absolute-git-dir")...)
+	out, err := gitTimed(timeout, env, dir, append(flags, "rev-parse", "--absolute-git-dir")...)
 	if err != nil || strings.TrimSpace(out) != gitDir {
 		return "", "", "git does not resolve repos/" + name + " to its own .git directory"
 	}
-	head, err := gitTimed(carrierCheckTimeout, env, dir, append(flags, "rev-parse", "--verify", "-q", "HEAD^{commit}")...)
+	head, err := gitTimed(timeout, env, dir, append(flags, "rev-parse", "--verify", "-q", "HEAD^{commit}")...)
 	if err != nil {
 		return objects, "", "" // unborn HEAD
 	}
@@ -748,7 +776,7 @@ func pushCarrier(o Opts, reposDir, objects, sha, name string, credAdditions []st
 	if err != nil {
 		return out, err
 	}
-	if out, err := gitTimed(carrierCheckTimeout, env, tmp, append(carrierTmpFlags(tmp), "update-ref", "refs/pf-carrier/tmp", sha)...); err != nil {
+	if out, err := gitTimed(o.bound(carrierCheckTimeout), env, tmp, append(carrierTmpFlags(tmp), "update-ref", "refs/pf-carrier/tmp", sha)...); err != nil {
 		return out, err
 	}
 	return carrierPush(o, env, tmp, sha+":"+TaskRefName(name), credAdditions)
@@ -767,7 +795,7 @@ func carrierTempRepo(o Opts, env []string, objects string) (tmp, out string, err
 	if tmp, err = os.MkdirTemp(base, "pf-carrier-"); err != nil {
 		return "", "", err
 	}
-	if out, err := gitTimed(carrierCheckTimeout, env, tmp, "init", "-q", "--bare", "--template=", tmp); err != nil {
+	if out, err := gitTimed(o.bound(carrierCheckTimeout), env, tmp, "init", "-q", "--bare", "--template=", tmp); err != nil {
 		return tmp, out, err
 	}
 	if objects == "" {
@@ -808,7 +836,7 @@ func carrierPush(o Opts, env []string, tmp, refspec string, credAdditions []stri
 		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
 	}
 	args = append(args, o.RemoteURL, refspec)
-	return gitTimed(carrierPushTimeout, append(env, credAdditions...), tmp, args...)
+	return gitTimed(o.bound(carrierPushTimeout), append(env, credAdditions...), tmp, args...)
 }
 
 // carrierFailed raises carrier_push_failed for repo — only when the

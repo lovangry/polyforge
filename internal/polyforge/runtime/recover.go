@@ -403,18 +403,25 @@ func (r *Runtime) saveTaskWIP(j *job, keep, chainOK bool) {
 // SaveTaskWIP is the graceful-shutdown face of the WIP lane: called after
 // the shutdown terminated wi's agent tree, it snapshots the task repos'
 // uncommitted work (the session stays alive at the hub, so a re-claim
-// after the restart can still restore it). Bounded by ctx (the shutdown
-// budget): on expiry it returns and the snapshot is abandoned with the
-// process.
-func (r *Runtime) SaveTaskWIP(ctx context.Context, wi string) {
+// after the restart can still restore it). The snapshot gets its own
+// bound — at most `bound`, never past ctx's deadline (the shutdown
+// budget) — as the gitops Deadline: every git call of the lane is cut to
+// it and its process group killed on expiry, so no push outlives the
+// daemon. The caller is released at ctx's end at the latest.
+func (r *Runtime) SaveTaskWIP(ctx context.Context, wi string, bound time.Duration) {
 	j := r.jobOf(wi)
-	if j == nil {
+	if j == nil || !dirExists(j.capsuleDir) {
 		return
+	}
+	o := j.git
+	o.Deadline = time.Now().Add(bound)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(o.Deadline) {
+		o.Deadline = dl
 	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		r.saveTaskWIP(j, true, true)
+		gitops.PushTaskWIP(o, true, true)
 	}()
 	select {
 	case <-done:
