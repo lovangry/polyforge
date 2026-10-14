@@ -16,17 +16,17 @@ steps:
 
 # chore — deletion-type maintenance flow
 
-This is the flow-level narrative for the workflow. It explains how the four
+This is the flow-level narrative for the workflow. It explains how the five
 steps compose; it is not itself a structural schema — the frontmatter `steps` array above
 is the *only* execution order. Nothing here overrides it.
 
 ## Shape of the flow
 
 ```
-plan --> code --> review --> verification
-          ^          |             |
-          +----------+-------------+
-               (FAIL: rewind to code)
+plan --> code --> review --> verification --> deliver
+          ^          |             |             |
+          +----------+-------------+-------------+
+                     (FAIL: rewind to code)
 ```
 
 The lane covers deletion-type and maintenance work: dead-code and feature removal,
@@ -63,9 +63,10 @@ file under `artifacts/`; no step declares frontmatter `inputs:`, so downstream s
 | step | primary artifact it writes | who reads it |
 |---|---|---|
 | `plan` | `artifacts/plan.md` (may legitimately be a single trivial step for a small chore) | `code` |
-| `code` | changes under `repos/<name>/**`, `artifacts/code-summary.md` | `review`, `verification` |
-| `review` | `artifacts/review.md` (verdict) | `verification`, (rewind context for `code` via `pending_rewind_input`) |
-| `verification` | `artifacts/verification-report.md` (verdict) | (terminal) |
+| `code` | changes under `repos/<name>/**`, `artifacts/code-summary.md` | `review`, `verification`, `deliver` |
+| `review` | `artifacts/review.md` (verdict) | `verification`, `deliver` (the merge rule's independent review), (rewind context for `code` via `pending_rewind_input`) |
+| `verification` | `artifacts/verification-report.md` (verdict) | `deliver` |
+| `deliver` | the pushed feature branch, PR and merge outcome per repo, `artifacts/delivery.md` | (terminal) |
 
 ## `plan` is a normal step, not an optional one
 
@@ -84,9 +85,11 @@ exist and sit strictly earlier than the failing step. This section explains the 
 - **`review` FAILs -> rewind to `code`.** The owner-rules checklist or the
   plan-conformance judgment found the change wanting (undeclared writes, a
   half-finished deletion, a rule hit); `code` is the only step that can change the
-  tree, so both gates on this lane share it as their rewind target.
+  tree, so every gate on this lane shares it as its rewind target.
 - **`verification` FAILs -> rewind to `code`.** Build/lint/tests failed on the changed
   tree, and `code` is the only step that can change it.
+- **`deliver` FAILs ("back to code") -> rewind to `code`.** The human sent the delivery
+  back; `code` re-runs and the re-run delivery reuses the same branch and PR.
 
 Workflow-level rewind bounds are the tightest of the reference bundles:
 `max_total: 2`, `max_per_step: 2`. A chore that needs more than two bounded attempts to

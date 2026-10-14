@@ -19,18 +19,18 @@ defaults:
 # feature-full — reference flow
 
 This is the flow-level narrative for the workflow. It explains how the
-ten steps compose and what flows between them; it is not itself a structural
+eleven steps compose and what flows between them; it is not itself a structural
 schema — the frontmatter `steps` array above is the *only* execution order. Nothing here overrides it.
 
 ## Shape of the flow
 
 ```
-grill --> spec --> grill-review --> plan --> e2e-author --> e2e-baseline --> code --> e2e-run --> review --> verification
+grill --> spec --> grill-review --> plan --> e2e-author --> e2e-baseline --> code --> e2e-run --> review --> verification --> deliver
 ```
 
-The four gate FAIL edges, each declared in the frontmatter as that gate's `on_fail`
-rewind target: `grill-review` --> `spec`, `e2e-run` --> `code`, `review` --> `code`
-and `verification` --> `code`.
+The five gate FAIL edges, each declared in the frontmatter as that gate's `on_fail`
+rewind target: `grill-review` --> `spec`, `e2e-run` --> `code`, `review` --> `code`,
+`verification` --> `code` and `deliver` --> `code`.
 
 The flow has two front-loaded interactive checkpoints (`grill`, `grill-review`) that
 replace a heavy spec-review loop with a leaner two-pass confirmation, an acceptance
@@ -40,7 +40,8 @@ demonstrably-red bar), a build lane that implements against that executable
 acceptance (`code` continues `e2e-baseline`'s session via its inherit handoff, then
 `e2e-run` re-runs the same authored suite as the hard rerun gate, rewinding to `code`
 on red), a judgment pair (`review` first, then `verification` as the last machine
-gate). There is no release slot: shipping is the separate `release` bundle.
+gate), and the `deliver` step that pushes, opens and (rule-bound) merges the PR. There
+is no release slot: releasing and deploying is the separate `release` bundle.
 
 ## Artifact flow between steps
 
@@ -55,10 +56,11 @@ file under `artifacts/`; no step declares frontmatter `inputs:`, so downstream s
 | `plan` | `artifacts/plan.md` | `code` |
 | `e2e-author` | `artifacts/e2e-scenarios.md` (+ generated test files under `repos/<name>/**` if the project runs them from the tree) | `e2e-baseline`, `e2e-run` |
 | `e2e-baseline` | `artifacts/e2e-baseline.md` (the laid bar: one fail entry per scenario with evidence) | `code` (primary, via its inherit handoff), `review` (consultative) |
-| `code` | changes under `repos/<name>/**`, `artifacts/code-summary.md` | `e2e-run`, `verification`, `review` |
+| `code` | changes under `repos/<name>/**`, `artifacts/code-summary.md` | `e2e-run`, `verification`, `review`, `deliver` |
 | `e2e-run` | `artifacts/e2e-results.md` (rerun verdict + per-scenario results) | `review` |
-| `review` | `artifacts/review.md` (verdict) | `verification` |
-| `verification` | `artifacts/verification-report.md` (verdict) | (terminal) |
+| `review` | `artifacts/review.md` (verdict) | `verification`, `deliver` (the merge rule's independent review) |
+| `verification` | `artifacts/verification-report.md` (verdict) | `deliver` |
+| `deliver` | the pushed feature branch, PR and merge outcome per repo, `artifacts/delivery.md` | (terminal) |
 
 `grill` and `grill-review` share one running document, `artifacts/grill-qa.md`, sectioned
 by step id: `grill` appends its question/answer pairs first, `spec` reads the whole file
@@ -66,7 +68,7 @@ for context, and `grill-review` appends its own confirmation pass underneath.
 
 ## Rewind boundaries
 
-Every gate in this flow declares its rewind target in the frontmatter `on_fail` — four
+Every gate in this flow declares its rewind target in the frontmatter `on_fail` — five
 gates, two distinct targets (`spec`, `code`). This section only explains
 *why* each target was picked:
 
@@ -90,6 +92,8 @@ gates, two distinct targets (`spec`, `code`). This section only explains
 - **`verification` FAILs -> rewind to `code`.** Verification is the last machine gate:
   it re-runs the full green bar as the final mechanical check, after `review`; a
   failure here means the implementation itself needs another pass, not the plan.
+- **`deliver` FAILs ("back to code") -> rewind to `code`.** The human sent the delivery
+  back; `code` re-runs and the re-run delivery reuses the same branch and PR.
 
 Workflow-level rewind bounds: this bundle's frontmatter deliberately omits the
 `rewind` block, so the driver defaults apply — `max_total: 4`, `max_per_step: 2`. A gate that keeps failing past those bounds ends
