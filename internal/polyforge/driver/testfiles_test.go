@@ -68,8 +68,7 @@ func TestTestFilesAllCommittedAccepted(t *testing.T) {
 	caps := t.TempDir()
 	gitRepo(t, caps, "app", map[string]string{"e2e/a_test.go": "a", "e2e/b_test.go": "b"})
 	gitRepo(t, caps, "lib", map[string]string{"x_test.go": "x"})
-	// Plain repo-relative, repos/<name>/ prefixed and <name>/ shorthand.
-	res := testFilesResult("e2e/a_test.go", "repos/app/e2e/b_test.go", "x_test.go", "lib/x_test.go")
+	res := testFilesResult("e2e/a_test.go", "./e2e/b_test.go", "x_test.go")
 	if err := ValidateStepResult(res, testFilesSpec(caps)); err != nil {
 		t.Fatalf("committed test files must be accepted: %v", err)
 	}
@@ -84,7 +83,7 @@ func TestTestFilesUntrackedRejected(t *testing.T) {
 		t.Fatal("an untracked test file must be rejected")
 	}
 	msg := err.Error()
-	for _, want := range []string{"e2e/new_test.go (repos/app: not committed", "commit every declared test file"} {
+	for _, want := range []string{"e2e/new_test.go (not committed at HEAD in repos/app)", "BEFORE writing the result envelope", "git add -f"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("rejection must contain %q: %s", want, msg)
 		}
@@ -100,18 +99,36 @@ func TestTestFilesStagedOnlyRejected(t *testing.T) {
 	writeFile(t, dir, "e2e/new_test.go", "new")
 	runGit(t, dir, "add", "e2e/new_test.go")
 	err := ValidateStepResult(testFilesResult("e2e/new_test.go"), testFilesSpec(caps))
-	if err == nil || !strings.Contains(err.Error(), "e2e/new_test.go") {
+	if err == nil || !strings.Contains(err.Error(), "e2e/new_test.go (not committed at HEAD in repos/app)") {
 		t.Fatalf("a staged-but-uncommitted test file must be rejected by name: %v", err)
 	}
 }
 
-func TestTestFilesModifiedRejected(t *testing.T) {
+// A committed file with a later worktree edit passes: HEAD is what a
+// resume restores, and the gate deliberately never scans the worktree
+// (no git status in an untrusted repo).
+func TestTestFilesModifiedAfterCommitAccepted(t *testing.T) {
 	caps := t.TempDir()
 	dir := gitRepo(t, caps, "app", map[string]string{"e2e/a_test.go": "a"})
 	writeFile(t, dir, "e2e/a_test.go", "edited after commit")
-	err := ValidateStepResult(testFilesResult("e2e/a_test.go"), testFilesSpec(caps))
-	if err == nil || !strings.Contains(err.Error(), "e2e/a_test.go (repos/app: has uncommitted changes)") {
-		t.Fatalf("a modified-but-uncommitted test file must be rejected by name: %v", err)
+	if err := ValidateStepResult(testFilesResult("e2e/a_test.go"), testFilesSpec(caps)); err != nil {
+		t.Fatalf("a path committed at HEAD must be accepted: %v", err)
+	}
+}
+
+// The same path in two repos: committed in one is not enough when the
+// other holds an uncommitted copy.
+func TestTestFilesMultiRepoSamePathRejected(t *testing.T) {
+	caps := t.TempDir()
+	gitRepo(t, caps, "a", map[string]string{"e2e/s_test.go": "a"})
+	b := gitRepo(t, caps, "b", nil)
+	writeFile(t, b, "e2e/s_test.go", "b")
+	err := ValidateStepResult(testFilesResult("e2e/s_test.go"), testFilesSpec(caps))
+	if err == nil || !strings.Contains(err.Error(), "e2e/s_test.go (not committed at HEAD in repos/b)") {
+		t.Fatalf("an uncommitted copy in a second repo must be rejected by name: %v", err)
+	}
+	if strings.Contains(err.Error(), "repos/a") {
+		t.Fatalf("the repo holding the committed copy must not be named: %v", err)
 	}
 }
 
@@ -119,12 +136,48 @@ func TestTestFilesMissingRejected(t *testing.T) {
 	caps := t.TempDir()
 	gitRepo(t, caps, "app", map[string]string{"e2e/a_test.go": "a"})
 	err := ValidateStepResult(testFilesResult("e2e/ghost_test.go"), testFilesSpec(caps))
-	if err == nil || !strings.Contains(err.Error(), "e2e/ghost_test.go (does not exist") {
+	if err == nil || !strings.Contains(err.Error(), "e2e/ghost_test.go (does not exist in any task repo)") {
 		t.Fatalf("a nonexistent test file must be rejected by name: %v", err)
 	}
-	for _, p := range []string{"../escape_test.go", "/abs/x_test.go", "repos/nope/x_test.go"} {
+	// Not repo-relative, or the retired repos/<name>/ form.
+	for _, p := range []string{"../escape_test.go", "/abs/x_test.go", "repos/app/e2e/a_test.go", "app/e2e/a_test.go"} {
 		if err := ValidateStepResult(testFilesResult(p), testFilesSpec(caps)); err == nil || !strings.Contains(err.Error(), p) {
 			t.Fatalf("%s must be rejected by name: %v", p, err)
+		}
+	}
+}
+
+// TestTestFilesHostileRepoConfigNotExecuted: the task repo is agent-
+// controlled. A repo-local fsmonitor and a clean filter that a worktree
+// scan would run as the daemon must not run during the gate.
+func TestTestFilesHostileRepoConfigNotExecuted(t *testing.T) {
+	caps := t.TempDir()
+	dir := gitRepo(t, caps, "app", map[string]string{"e2e/a_test.go": "a"})
+	marks := t.TempDir()
+	fsmon := filepath.Join(marks, "fsmonitor.sh")
+	if err := os.WriteFile(fsmon, []byte("#!/bin/sh\ntouch "+filepath.Join(marks, "fsmonitor-ran")+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "config", "core.fsmonitor", fsmon)
+	runGit(t, dir, "config", "filter.evil.clean", "touch "+filepath.Join(marks, "filter-ran")+"; cat")
+	writeFile(t, dir, ".gitattributes", "* filter=evil\n")
+	writeFile(t, dir, "e2e/a_test.go", "b") // same size: a scan must hash it through the filter
+	writeFile(t, dir, "e2e/new_test.go", "new")
+
+	err := ValidateStepResult(testFilesResult("e2e/a_test.go", "e2e/new_test.go"), testFilesSpec(caps))
+	if err == nil || !strings.Contains(err.Error(), "e2e/new_test.go (not committed at HEAD in repos/app)") {
+		t.Fatalf("the gate must still run and reject the untracked path: %v", err)
+	}
+	for _, m := range []string{"fsmonitor-ran", "filter-ran"} {
+		if _, serr := os.Stat(filepath.Join(marks, m)); serr == nil {
+			t.Fatalf("hostile repo config executed during the gate: %s", m)
+		}
+	}
+	// Control: the planted config is live — a worktree scan does run it.
+	runGit(t, dir, "status", "--porcelain")
+	for _, m := range []string{"fsmonitor-ran", "filter-ran"} {
+		if _, serr := os.Stat(filepath.Join(marks, m)); serr != nil {
+			t.Fatalf("control: git status should have run the planted %s (test setup is not hostile)", m)
 		}
 	}
 }

@@ -180,10 +180,11 @@ type ResultSpec struct {
 	RequireCommandEvidence bool
 	// ReposDir is the capsule's task-repo root (<capsule>/repos). When
 	// set, a completed result whose output declares a non-empty
-	// test_files list is accepted only if every listed path is committed
-	// at HEAD and clean in its task repo (polyforge#156: a resume
-	// restores task repos at their carrier ref, i.e. HEAD only, so an
-	// uncommitted authored test would be lost).
+	// test_files list is accepted only if every listed (repo-relative)
+	// path exists in a task repo and is committed at HEAD in every task
+	// repo where it exists (polyforge#156: a resume restores task repos
+	// at their carrier ref, i.e. HEAD only, so an uncommitted authored
+	// test would be lost).
 	ReposDir string
 }
 
@@ -226,7 +227,7 @@ type ResultSpec struct {
 //     each with a non-empty argv and duration_ms > 0;
 //  5. the committed-test-files gate (ReposDir set, any step): a
 //     completed result whose output declares test_files must have every
-//     listed path committed and clean in its task repo
+//     listed path committed at HEAD in its task repo(s)
 //     (checkTestFilesCommitted) — rejected like the evidence gate.
 //
 // The minimal contract: an envelope missing the retired protocol
