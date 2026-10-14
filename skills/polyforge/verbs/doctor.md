@@ -2,7 +2,8 @@
 
 CLI-meta verb: one command reports whether this machine can do its job —
 the config, the `[workspace]` mapping (polyforge#113) and the three
-connectivity faces (aihub server reach, local daemon socket, auth). It
+connectivity faces (aihub server reach, local daemon socket, auth), plus
+whether each harness will display polyforge progress. It
 is a pure read face: nothing is mutated, nothing is auto-fixed (there is
 no `--fix`; remediation is always manual, the check detail names it).
 
@@ -17,12 +18,15 @@ no `--fix`; remediation is always manual, the check detail names it).
 ## Command
 
 ```
-pf doctor [--json]
+pf doctor [--harness] [--json]
 ```
+
+`--harness` runs only the two progress-display checks (no config, no
+network); `tools/install.sh` prints its rows.
 
 Exit codes follow the repo convention: 0 every check passes, 1 any check
 fails, 2 usage errors. `--json` emits one machine document:
-`{"ok": <bool>, "checks": [{"name", "status": "pass"|"fail"|"skip",
+`{"ok": <bool>, "checks": [{"name", "status": "pass"|"fail"|"skip"|"warn",
 "detail"}]}`.
 
 ## The checks
@@ -39,6 +43,16 @@ fails, 2 usage errors. `--json` emits one machine document:
 
 Checks that cannot be proven (config unloadable, aihub unreachable) are
 reported `skip` — a skip never pretends to be a pass.
+
+## Progress display (presentation only — never `fail`, never moves the exit code)
+
+| Check | `pass` | `warn` (detail carries the fix) | `skip` |
+|---|---|---|---|
+| `claude progress display` | `~/.claude/settings.json`'s statusLine command runs `pf watch --statusline`, directly or in a script file it names | no statusLine → the full `"statusLine"` snippet; a statusLine without pf → an append-style snippet that runs the user's command first, keeps its output, then the progress rows; unreadable/malformed settings → "cannot tell" | no `~/.claude` |
+| `pi progress display` | pi settings list the polyforge package (or `pf-chat.ts` itself) | the `pi install …` line; malformed settings → "cannot tell" | no pi agent dir (`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) |
+
+The judgement is static: the statusLine command is read, never run, and
+no user file is ever written — the user pastes the snippet.
 
 ## Workspace yaml
 

@@ -26,7 +26,11 @@ installs the `skills/polyforge` routing skill for each harness it finds,
 independently: Claude Code (`~/.claude` or `claude` on PATH) gets the skill
 replaced wholesale in `~/.claude/skills/polyforge` plus a SessionStart hook
 registered once in `~/.claude/settings.json`; pi (on PATH) gets its polyforge
-package entry pinned to the same tag as the binary. Then it starts the
+package entry pinned to the same tag as the binary. It then reports
+whether each harness will display polyforge progress (the `pf doctor
+--harness` check: Claude Code's statusLine running `pf watch --statusline`,
+pi's pf-chat extension) and prints a copyable snippet when not — it never
+edits your statusLine. Then it starts the
 daemon with `-workflows-dir release/current/workflows` (once a `[workspace]`
 mapping exists; a daemon already running with a different workflows dir is
 reported, never auto-restarted) and verifies connectivity. The admin

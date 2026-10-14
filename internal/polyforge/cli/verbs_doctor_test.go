@@ -112,6 +112,9 @@ func TestDoctorHealthyMachineAllPassExit0(t *testing.T) {
 	srv := aiSever(t, &reqRecorder{}, map[string]bool{"polyforge": true}, 0, "")
 	sock := liveDaemonSocket(t, "m-h")
 	env := doctorServerConfig(t, srv.URL, "k_ok", sock, "polyforge")
+	env["HOME"] = displayHome(t, `{"statusLine":{"type":"command","command":"pf watch --statusline --harness-session -"}}`,
+		`{"packages":["git:git@github.com:silgrid/polyforge.git@v9"]}`)
+	env["PI_CODING_AGENT_DIR"] = ""
 	code, stdout, doc := doctorStatus(t, env, "--json", "doctor")
 	if code != 0 {
 		t.Fatalf("healthy machine: exit %d, want 0 (output %s)", code, stdout)

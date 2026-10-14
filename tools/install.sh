@@ -238,9 +238,6 @@ else:
         json.dump(cfg, f, indent=2); f.write("\n")
     os.replace(path + ".tmp", path)
     print("   claude SessionStart hook registered")
-sl = cfg.get("statusLine")
-if "pf watch" not in json.dumps(sl or {}):
-    print('   hint: for the progress line set in %s: "statusLine": {"type": "command", "command": "pf watch --statusline --harness-session -"}' % path)
 PYEOF
 fi
 
@@ -286,6 +283,9 @@ PYEOF
     fi
   fi
 fi
+# Progress display: the same judgement as `pf doctor` (reads only; a
+# warn row carries the copyable snippet — user files are never edited).
+"$BIN" doctor --harness 2>/dev/null | sed -e '/^ok:/d' -e '/^$/d' -e 's/^/   /'
 command -v pi >/dev/null 2>&1 || [ -d "$HOME/.claude" ] || command -v claude >/dev/null 2>&1 \
   || echo "   no pi/claude — CLI only (skills optional)"
 
