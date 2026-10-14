@@ -317,8 +317,10 @@ func TestV2StepTimeoutLongTaskRelaxesThenBlocks(t *testing.T) {
 		t.Fatalf("execution.json: status %q reason %q", x.WorkflowStatus, x.BlockedReason)
 	}
 	sup := x.Steps["grill"].Supervision
-	if sup == nil || sup["relaxed_wall_ms"] != float64(6000) {
-		t.Fatalf("the relaxed T must persist: %+v", sup)
+	// the blocking second timeout doubles T again (6s -> 12s) before it
+	// parks, so a human continue runs under a fresh window
+	if sup == nil || sup["relaxed_wall_ms"] != float64(12000) {
+		t.Fatalf("the relaxed T must persist (doubled again by the blocking timeout): %+v", sup)
 	}
 	// T accumulates across dispatches: the second dispatch was judged
 	// against the runtime the first already spent (it was killed well
@@ -431,15 +433,16 @@ func TestV2DaemonRestartNotCountedSameModel(t *testing.T) {
 }
 
 // TestV2DriverCrashLoopBoundedThenBlocked: #97. A driver that keeps dying
-// (here: the step's envelope is rejected beyond the in-process retry
-// bound every time, which ends Run with an error) is relaunched by the
-// recovery engine — and only a bounded number of times: the storm guard
-// parks the work item blocked instead of looping forever.
+// is relaunched by the recovery engine — and only a bounded number of
+// times: the storm guard parks the work item blocked instead of looping
+// forever. The death here: grill completes but leaves a DIRECTORY at its
+// handoff convention path, so the next inherit step's handoff read fails
+// with a non-absence I/O error (a missing handoff file is merely
+// omitted; an unreadable one is an infrastructure inconsistency).
 func TestV2DriverCrashLoopBoundedThenBlocked(t *testing.T) {
 	inst := newV1Install(t)
 	bad := map[string]any{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": false,
-		"output": map[string]any{"summary": "no handoff_ref although the step declares handoff"}}
-	// grill declares handoff: every envelope without handoff_ref is rejected
+		"files": map[string]string{"artifacts/handoff-grill.md/not-a-file": "x"}}
 	var actions []map[string]any
 	for i := 0; i < 24; i++ {
 		actions = append(actions, bad)

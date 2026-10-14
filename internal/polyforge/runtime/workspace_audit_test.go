@@ -38,9 +38,8 @@ func readIdentity(t *testing.T, capDir string) (*capsule.Identity, string) {
 func newAuditRuntime(t *testing.T, repos []api.ProjectRepo) (*Runtime, string) {
 	t.Helper()
 	setGitIdentity(t)
-	wfDir, pinned := frontmatterBundle(t, w079Frontmatter)
+	wfDir := frontmatterBundle(t, w079Frontmatter)
 	hub := newFakeHub()
-	hub.digest = pinned
 	hub.repos = repos
 	ws := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(ws, 0o755); err != nil {

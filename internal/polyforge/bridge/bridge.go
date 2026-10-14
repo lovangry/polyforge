@@ -82,7 +82,6 @@ type Config struct {
 	WI            string
 	CapsuleDir    string
 	BundleName    string
-	BundleDigest  string
 	SessionHandle string
 	SpawnN        int64
 	Spawner       rt.Spawner
@@ -131,10 +130,9 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 	}
 
 	wiInfo := driver.WIInfo{
-		ID:           cfg.WI,
-		CapsuleDir:   cfg.CapsuleDir,
-		BundleName:   cfg.BundleName,
-		BundleDigest: cfg.BundleDigest,
+		ID:         cfg.WI,
+		CapsuleDir: cfg.CapsuleDir,
+		BundleName: cfg.BundleName,
 	}
 
 	// Build the step spawn adapter (per-step process derivation).
@@ -166,17 +164,13 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 	if cfg.Link != nil {
 		cfg.Link.Reset() // a new driver epoch: no fence or verdict of a predecessor may leak in
 	}
-	logger := cfg.Log
-	if logger == nil {
-		logger = &stdLogger{}
-	}
 	drv, err := driver.New(driver.Config{
 		WI:             wiInfo,
 		BundleDir:      adapter.BundleDir,
 		Workflow:       adapter.Workflow, // parsed once, shared with the adapter
 		Spawner:        adapter,
 		SpawnN:         int64(stepSeed),
-		Log:            logger,
+		Log:            cfg.Log,
 		Link:           cfg.Link,
 		Limits:         cfg.Limits,
 		Harness:        cfg.Harness,
@@ -232,11 +226,4 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 	_ = drv // the runtime advances its own counter via the job
 
 	return h, nil
-}
-
-type stdLogger struct{}
-
-func (l *stdLogger) Append(wi, kind string, body interface{}) error {
-	fmt.Fprintf(os.Stderr, "bridge/driver: %s: %s: %v\n", wi, kind, body)
-	return nil
 }

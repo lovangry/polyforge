@@ -203,7 +203,7 @@ session 数据。
 
 **存在理由**：执行侧自始至终不持有 AIHub API key 或 Revision 发布凭证（与 §8 一致），但执行引擎
 需要调用一组有限的 WI 生命周期/只读操作（读取该 WI 的 workflow 引用与预算（`bundle_name`/
-`bundle_digest`/budget 基线与有效上界）、读写 Memory）。这些调用均经本地代理中转，执行引擎本身从不持有任何可直接呼叫 AIHub
+budget 口径（执行侧账本）与读写 Memory）。这些调用均经本地代理中转，执行引擎本身从不持有任何可直接呼叫 AIHub
 的凭证。【polyforge#106 修订注记】原 v1 的代理对端是 WI Agent 进程；driver 时代引擎运行在
 Daemon 进程内，本节保留为历史裁定记录，其 SO_PEERCRED 对端校验随对端形态更新。
 
@@ -215,7 +215,7 @@ Daemon 进程内，本节保留为历史裁定记录，其 SO_PEERCRED 对端校
 
 | `operation` | 转发目标 | 说明 |
 |---|---|---|
-| `read_workflow_ref` | `02-aihub-core.md#§5.1` 的 WI 详情读取（GET）与 `GET /api/v1/work-items/{id}/budget` | 只读：返回该 WI 的 `bundle_name`/`bundle_digest`（WI 详情）与预算基线/各维度有效上界（budget）；Core 不存储 resolved steps（`00-architecture.md#§2.3` INV-8），不存在对它的读取变体，也不存在写入变体 |
+| `read_workflow_ref` | `02-aihub-core.md#§5.1` 的 WI 详情读取（GET）与 `GET /api/v1/work-items/{id}/budget` | 只读：返回该 WI 的 `bundle_name`（WI 详情；digest 链已删，polyforge#149 B9）与预算口径（执行侧账本，`runtime-state/execution.json` 的 `budget_consumed`）；Core 不存储 resolved steps（`00-architecture.md#§2.3` INV-8），不存在对它的读取变体，也不存在写入变体 |
 | `report_step_result` | `02-aihub-core.md#§5.1` WI 生命周期写入（pause/block/unblock/wrap/fail 等）；其中收尾变体（`02-aihub-core.md#§6.4` 的四个结束 generation 的端点）必须携带 Daemon 经 §6.2 A / `05-sync-revision-recovery.md#§6.1` 生成的 `flush_evidence`，代理仅签名转发、不构造不校验证据内容 | 仅限发起方自己的 WI，参数 `work_item_id` 必须与本次连接对应的 Job 一致 |
 | `memory_read` / `memory_write` | `06-memory-search.md#§5.1` | 仅限本 WI 上下文内的调用 |
 | `publish_request` | 本文 §6.4 | 已在 §5.1 列为独立操作，此处仅列出以说明它同样不需要 AIHub 凭证 |
@@ -247,12 +247,12 @@ key、claim 响应、Job 创建意图、Harness session identity 均先于对应
    即被类型化拒绝 `DAEMON-412`，不写认领日志、不建 Capsule、不改变服务端认领状态）、目标 workspace（启动时已校验存在，且 Daemon 只写其中的 `capsules/` 子树）可用、Daemon 数据目录可写、Capsule 根可写、磁盘余量高于阈值、AIHub 可达。任一项失败立即返回 `DAEMON-507 PREFLIGHT_FAILED`（映射缺失为 `DAEMON-412`），**不发起**后续任何服务端调用——不产生「claim 成功却无本地现场」的情形。
 2. 预检通过后，按 `00-architecture.md#§3.4` 的 Interactive/Batch/Drain 判据确认本次请求在当前模式下是否被接受（例如 Drain 模式下对单条 `claim` 一律 `DAEMON-409`，因为 Drain 只接受来自 §6.1c 内部循环的提交，不接受外部单条 claim；这与优雅停机的 `DAEMON-410 SHUTTING_DOWN` 拒绝外部提交是两回事——前者是模式互斥，Drain 本身仍在持续创建 Job，后者才是真正停止创建新 Job）。
 3. **读取 workflow 引用（pin 已随创建事务完成，无独立确认步骤）**：经 `02-aihub-core.md#§5.1` 的 WI
-   详情读取（GET，只读、不消耗任何 owner generation）取得该 WI 的 `bundle_name` 与 `bundle_digest`，供
+   详情读取（GET，只读、不消耗任何 owner generation）取得该 WI 的 `bundle_name`，供
    第 9 步作为 WI Agent 启动参数（可随第 4/5 步的 `pending_jobs[]` 记录与 claim 响应回写一并留存）；
    预算基线经同一端点表的 `GET /api/v1/work-items/{id}/budget` 按需读取。workflow 的校验与固化是 WI
    创建事务内的服务端内部步骤（`01-workflow-skills.md#§4.6`、`02-aihub-core.md#§4.5`），创建必先于
-   claim，三列为 NOT NULL 且写入后不可变（`02-aihub-core.md#§2.6` INV-2e）——不存在「未完成固定的 WI
-   可被 claim」的路径，因此本步**没有**任何 resolved-steps 存在性查询，也不存在对应的拒绝分支（原
+   claim；执行票的 `bundle_name` 为**首次认领冻结**（R2 窗口内可经 PATCH 变更，`02-aihub-core.md#§2.6`
+   INV-2e/§4.5）——不存在「未绑 bundle 的 WI 可被 claim」的路径（`NOT_CLAIMABLE`），因此本步**没有**任何 resolved-steps 存在性查询，也不存在对应的拒绝分支（原
    `DAEMON-425 WORKFLOW_NOT_PINNED` 已随之删除）；WI 不存在时本步以透传的 `CORE-404` 终止，不继续
    后续步骤。
 4. **持久化 Job 创建意图**：生成本次 claim 的 idempotency key（不存在则新生，存在则复用同一 key 重试），
@@ -276,8 +276,8 @@ key、claim 响应、Job 创建意图、Harness session identity 均先于对应
    WI-Agent 引擎删除）。引擎与 Daemon 同一份发行物交付，升级 Daemon 即升级引擎，不存在独立的
    引擎版本协商面。harness（Pi/Claude）仅作为 step 派生的宿主适配器（envelope 一次一步）。
 9. 【polyforge#106 修订】绑定执行引擎（Daemon 内的 Go driver，`00-architecture.md#§3.6` 修订注记），把
-   Capsule 路径、**claim 响应携带的** `bundle_name`+`bundle_digest`+预算基线（Core 在 claim 事务内随 generation/token 一并返回——因此执行路径**不需要任何数据面详情读取**：机器的执行面授权由 key scope 与 claim 端点承载，数据面 membership 不可见性不构成障碍，`02-aihub-core.md#§8` 执行面规则）作为输入传入。driver 从本机 checkout 物化
-   `workflows/<bundle_name>/` 并按 `bundle_digest` 校验（`03-execution-capsule.md#§4.5`）后加载
+   Capsule 路径、**claim 响应携带的** `bundle_name`（Core 在 claim 事务内随 generation/token 一并返回——因此执行路径**不需要任何数据面详情读取**：机器的执行面授权由 key scope 与 claim 端点承载，数据面 membership 不可见性不构成障碍，`02-aihub-core.md#§8` 执行面规则）作为输入传入。driver 从本机 checkout 物化
+   `workflows/<bundle_name>/`（不做 digest 校验——校验链已删，polyforge#149 B9；`03-execution-capsule.md#§4.5`）后加载
    `workflow.md` 正文驱动执行，按 step 图逐 step 派生短驻 harness 进程（envelope 一次一步；
    claim/resume/takeover 不分叉），并在整个 WI 生命周期内持续驱动（不因单个 step 结束而
    停止，INV-D4）。Daemon 不注入任何步骤集——Core 不存储 resolved steps
@@ -560,7 +560,7 @@ Daemon 在整个 Job 生命周期中**不直接执行任何 step 命令**。命�
    a. 检查 `main_agent_pid` 对应的操作系统进程是否仍存在（`kill -0` 等价检查）。
    b. **pid 复用防护**：若进程存在，进一步比对该 pid 当前的进程创建时间戳与记录的 `main_agent_started_at` 是否一致（Linux 可读 `/proc/<pid>/stat` 的启动时间，macOS 可用 `ps -o lstart= -p <pid>`）。时间戳不一致 ⇒ 该 pid 已被无关的新进程复用，视为 WI Agent 已死，不得当作存活处理。
 3. **存活**（pid 存在且创建时间戳匹配）：不重新派生，**重接**该 WI Agent——Daemon 崩溃重启丢失的只是自己进程内的监督连接与 RPC 通道，不是该 WI Agent 本身（它是长驻进程，`00-architecture.md#§3.6`，从未随 Daemon 一起退出）；按记录的 `harness_session_id` 与 `harness_adapter` 重建对它的 RPC 连接与标准进程句柄观察（pid、退出码、stdout/stderr、进程组），重接不打扰其运行、不重置其 session、不重复派发任何 step；把该 Job 保留在内存中的活跃集合，`harness_session_id` 不变。
-4. **已死**（pid 不存在，或存在但创建时间戳不匹配）：**先回收残留进程组再重派**——WI Agent 进程已死，但其进程组内可能仍有孤儿存活（它派生的 step agent、经 `03-execution-capsule.md#§5.1` 启动的命令子进程），继续写入会违反 `03-execution-capsule.md#§7` 的单写者域并与新进程的写入短暂并存；Daemon 先向该 Job 记录的进程组（以 `main_agent_pid` 为组长派生，§6.1a）发 `SIGTERM`、超时仍存活则 `SIGKILL`（与 `03-execution-capsule.md#§6`/§7 的进程组回收口径一致），确认无残留写入者后，才按崩溃续跑规则重新驱动（polyforge#106：driver 时代的续跑是重新绑定 Daemon 内的 Go driver，deploy 时的 fail-closed 检查先行——in-flight 且无 driver journal 戳记的 legacy 胶囊拒绝恢复；传入该 WI 的 `bundle_name`+`bundle_digest` 与同一 session 语义）；续跑**不重新读取本机 checkout**（同代快照只读，`01-workflow-skills.md#§2.2` INV-1a/`03-execution-capsule.md#§4.5`）：同 generation 崩溃续跑**复用本机已物化的快照**（Capsule 内 `.pi/agents/` 与 `workflow.md` 副本仍在上次派生时物化的原样），仅当快照**缺失**（上次物化从未成功落盘）才按 `03-execution-capsule.md#§4.5` 从 checkout 物化——快照存在而与 pin digest 不一致时**告警、继续用既有快照**（该快照是本代已被接受的执行基准，不因 checkout 后续漂移而更换；跨代/跨机重建才按 pin digest 重新物化），随后读取该 Capsule 的 `runtime-state/execution.json`，从 `current_step`/`steps.<current_step>.status` 决定原地重派当前 step 还是推进到下一个 step（`03-execution-capsule.md#§7` 权威流程，本文不重复其判定细节），并更新 `daemon/state.json` 中该条目的 `main_agent_pid`/`main_agent_started_at`。
+4. **已死**（pid 不存在，或存在但创建时间戳不匹配）：**先回收残留进程组再重派**——WI Agent 进程已死，但其进程组内可能仍有孤儿存活（它派生的 step agent、经 `03-execution-capsule.md#§5.1` 启动的命令子进程），继续写入会违反 `03-execution-capsule.md#§7` 的单写者域并与新进程的写入短暂并存；Daemon 先向该 Job 记录的进程组（以 `main_agent_pid` 为组长派生，§6.1a）发 `SIGTERM`、超时仍存活则 `SIGKILL`（与 `03-execution-capsule.md#§6`/§7 的进程组回收口径一致），确认无残留写入者后，才按崩溃续跑规则重新驱动（polyforge#106：driver 时代的续跑是重新绑定 Daemon 内的 Go driver，deploy 时的 fail-closed 检查先行——in-flight 且无 driver journal 戳记的 legacy 胶囊拒绝恢复；传入该 WI 的 `bundle_name` 与同一 session 语义）；续跑**不重新读取本机 checkout**（同代快照只读，`01-workflow-skills.md#§2.2` INV-1a/`03-execution-capsule.md#§4.5`）：同 generation 崩溃续跑**复用本机已物化的快照**（Capsule 内 `.pi/agents/` 与 `workflow.md` 副本仍在上次派生时物化的原样），仅当快照**缺失**（上次物化从未成功落盘）才按 `03-execution-capsule.md#§4.5` 从 checkout 物化（不做内容校验——digest 校验链已删，polyforge#149 B9），随后读取该 Capsule 的 `runtime-state/execution.json`，从 `current_step`/`steps.<current_step>.status` 决定原地重派当前 step 还是推进到下一个 step（`03-execution-capsule.md#§7` 权威流程，本文不重复其判定细节），并更新 `daemon/state.json` 中该条目的 `main_agent_pid`/`main_agent_started_at`。
 5. 若某条 `jobs[]` 记录对应的 `capsule_id` 目录已不存在（被外部误删）：记为异常，不自动重建，转人工介入（不同于「WI Agent 已死但 Capsule 现场完好」的正常续跑路径）。
 6. 恢复完成后，Daemon 按正常职责继续驱动 watcher 与后续触发时机的机械发布。
 

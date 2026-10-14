@@ -283,6 +283,12 @@ var cmdWrap = &Command{
 		if boolFlag(fs, "fail") {
 			reason = "fail"
 		}
+		// A WI parked blocked has no hub door for a failed verdict: the
+		// blocked exits are continue (`pf resume`) and abandon
+		// (`pf cancel`). The daemon refuses `wrap` and `wrap --fail` on a
+		// parked-blocked WI with DAEMON-409 naming those two moves; when it
+		// cannot tell (no local job, DAEMON-404) `--fail` prints the same
+		// owner-move hint below.
 		raw, err := ctx.daemon().Wrap(args[0], reason)
 		if err != nil {
 			var ae *api.Error

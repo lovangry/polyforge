@@ -228,7 +228,6 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			Project:       j.project,
 			CapsuleDir:    j.capsuleDir,
 			BundleName:    j.bundleName,
-			BundleDigest:  j.bundleDigest,
 			SessionHandle: j.sessionFingerprint,
 			SpawnN:        ordinal,
 			Spawner:       r.spawner,
@@ -457,7 +456,7 @@ func acceptedResultCount(capsuleDir string) int64 {
 			continue
 		}
 		for _, at := range st.Attempts {
-			if at.Cause == "accepted" && at.AcceptedResultID != "" {
+			if at.Cause == "accepted" {
 				n++
 			}
 		}

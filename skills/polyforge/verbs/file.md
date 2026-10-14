@@ -33,7 +33,10 @@ registry ticket), `--parent ID`, `--attr key=json-value` (repeatable),
 
 `edit` flags (only the flags you pass are sent; `--label` replaces the whole
 set): `--goal`, `--content`, `--label`, `--priority`, `--milestone` (an empty
-string clears it), `--waiting-on`, `--attr`.
+string clears it), `--waiting-on`, `--attr`, `--bundle` (switch the work
+item's workflow bundle, e.g. `--bundle release`; an empty string unbinds it).
+aihub accepts a bundle change only while the work item is queued and has
+never been claimed — once a daemon has claimed it, the bundle is fixed.
 
 `show` takes exactly one id (or slug) and renders the detail record.
 

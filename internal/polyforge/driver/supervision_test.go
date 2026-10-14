@@ -68,7 +68,7 @@ func newSupEnv(t *testing.T, mod func(*Config), steps ...StepSpec) *supEnv {
 	link := supervise.NewLink("wi_run")
 	log := &safeLog{}
 	cfg := Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: steps, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:  sp,
@@ -117,7 +117,13 @@ func TestClassifyWaitFailure(t *testing.T) {
 		{"unparseable model on stderr", &ExitedError{ExitCode: 1, LastError: `error: model "x/y" not found (unknown model)`}, FailExitModel},
 		{"401 auth", &ExitedError{ExitCode: 1, LastError: "provider returned 401 Unauthorized"}, FailExitModel},
 		{"invalid api key", &ExitedError{ExitCode: 1, LastError: "Invalid API key provided"}, FailExitModel},
-		{"quota", &ExitedError{ExitCode: 1, LastError: "You exceeded your current quota"}, FailExitModel},
+		// polyforge#147 D7: only transient throttles are their own class —
+		// the same model is retried after a backoff, the chain stays put;
+		// allowance/permission problems stay model-class and switch.
+		{"quota is model-class", &ExitedError{ExitCode: 1, LastError: "You exceeded your current quota"}, FailExitModel},
+		{"403 insufficient permissions", &ExitedError{ExitCode: 1, LastError: "403 insufficient permissions"}, FailExitModel},
+		{"429", &ExitedError{ExitCode: 1, LastError: "provider returned HTTP 429"}, FailRateLimited},
+		{"overloaded outranks an error turn", &ExitedError{ExitCode: 1, TurnError: true, LastError: "upstream overloaded"}, FailRateLimited},
 		{"harness-reported ENOSPC", &ExitedError{ExitCode: 1, LastError: "write: no space left on device"}, FailExitHost},
 		{"harness-reported EACCES", &ExitedError{ExitCode: 1, LastError: "open /x: permission denied"}, FailExitHost},
 		{"host outranks a model-looking error turn", &ExitedError{ExitCode: 1, TurnError: true, LastError: "ENOSPC: no space left"}, FailExitHost},
@@ -303,7 +309,7 @@ func TestEnvelopeRejectionsAreNotCounted(t *testing.T) {
 	// feed the failure counter.
 	env := newSupEnv(t, nil, spec("s"))
 	// a result with a wrong spawn fence is rejected at validation
-	rejected := fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeCompleted, SpawnN: 99, Output: []byte(`{}`)}}
+	rejected := fakeEntry{res: &StepResult{Outcome: OutcomeCompleted, SpawnN: 99, Output: []byte(`{}`)}}
 	env.sp.script = []fakeEntry{rejected, done(`{}`)}
 	if err := env.d.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -352,14 +358,21 @@ func TestPersistentEnvelopeRejectionReports(t *testing.T) {
 	env := newSupEnv(t, nil, spec("s"))
 	var script []fakeEntry
 	for i := 0; i < maxEnvelopeRejects+2; i++ {
-		script = append(script, fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeCompleted, SpawnN: 99, Output: []byte(`{}`)}})
+		script = append(script, fakeEntry{res: &StepResult{Outcome: OutcomeCompleted, SpawnN: 99, Output: []byte(`{}`)}})
 	}
 	env.sp.script = script
-	if err := env.d.Run(context.Background()); err == nil {
-		t.Fatal("a persistently rejected envelope ends Run with an error (the driver-crash path)")
+	if err := env.d.Run(context.Background()); err != nil {
+		t.Fatalf("a persistently rejected envelope blocks the step cleanly (no relaunch lane): %v", err)
 	}
 	if rep := env.log.byKind("schema_fault"); len(rep) != 1 {
 		t.Fatalf("schema_fault report events: %+v", rep)
+	}
+	x := env.exec(t)
+	if x.WorkflowStatus != StatusBlocked || !strings.Contains(x.BlockedReason, "result_invalid") {
+		t.Fatalf("status %q reason %q, want blocked with result_invalid", x.WorkflowStatus, x.BlockedReason)
+	}
+	if x.RewindStats.Count != 0 {
+		t.Fatalf("a result-invalid block must not fire a rewind: %+v", x.RewindStats)
 	}
 }
 
@@ -417,7 +430,7 @@ func TestRelaxedBoundsSurviveRestart(t *testing.T) {
 	sp2 := &fakeSpawner{script: []fakeEntry{done(`{}`)}}
 	link2 := supervise.NewLink("wi_run")
 	d2, err := New(Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: filepath.Dir(env.execPath), BundleName: "b", BundleDigest: "dg"},
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: filepath.Dir(env.execPath), BundleName: "b"},
 		ExecPath: env.execPath, Workflow: &Workflow{Steps: []StepSpec{spec("s")}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner: sp2, Link: link2, SpawnN: env.d.SpawnN(),
 		Limits: supervise.Defaults{StepTimeout: time.Hour},
@@ -493,6 +506,10 @@ func TestStepTimeoutAccumulatesAcrossDispatches(t *testing.T) {
 
 // --- thresholds from workflow.md --------------------------------------
 
+// TestStepOverridesFromWorkflowFrontmatter: budget.wall_minutes is the
+// ONLY per-step threshold face left (polyforge#147 C5 retired the
+// per-step silence_minutes / tool_minutes overrides — those keys are no
+// longer read, and the global defaults hold for every step).
 func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "workflows", "b")
@@ -500,7 +517,7 @@ func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 		t.Fatal(err)
 	}
 	md := "---\nname: b\nsteps:\n" +
-		"  - { id: slow, budget: { wall_minutes: 45 }, silence_minutes: 20, tool_minutes: 60 }\n" +
+		"  - { id: slow, budget: { wall_minutes: 45 }, silence_minutes: 20, tool_minutes: 60 }\n" + // the retired keys are ignored
 		"  - { id: small, budget: { wall_minutes: 15 } }\n" +
 		"  - { id: plain }\n---\n# b\n"
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(md), 0o644); err != nil {
@@ -511,7 +528,7 @@ func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 		t.Fatal(err)
 	}
 	slow := wf.step("slow")
-	if slow.WallMinutes != 45 || slow.SilenceMinutes != 20 || slow.ToolMinutes != 60 {
+	if slow.WallMinutes != 45 {
 		t.Fatalf("overrides parsed as %+v", slow)
 	}
 	d, err := New(Config{
@@ -532,8 +549,8 @@ func TestStepOverridesFromWorkflowFrontmatter(t *testing.T) {
 	if small.StepTimeout != 90*time.Minute {
 		t.Fatalf("a 15m estimate must not shrink T below the 90m global default: %+v", small)
 	}
-	if th.StepTimeout != 135*time.Minute || th.Silence != 20*time.Minute || th.Tool != 60*time.Minute {
-		t.Fatalf("slow step thresholds %+v", th)
+	if th.StepTimeout != 135*time.Minute || th.Silence != 10*time.Minute || th.Tool != 30*time.Minute {
+		t.Fatalf("slow step thresholds (only the wall estimate is honored) %+v", th)
 	}
 	if plain.StepTimeout != 90*time.Minute || plain.Tool != 30*time.Minute || plain.Silence != 10*time.Minute {
 		t.Fatalf("plain step must take the global defaults (X 10m token-level): %+v", plain)
@@ -712,10 +729,12 @@ func TestEventAppendFailureNeverBreaksTheRun(t *testing.T) {
 	}
 }
 
-func TestCandidateSwitchStartsAFreshTWindow(t *testing.T) {
-	// the slow model already spent T: its replacement must not be killed
-	// the moment it starts (T is cumulative per step, but a new candidate
-	// is a new chance)
+// TestCandidateSwitchKeepsTCumulative: T accumulates across the WHOLE
+// step (polyforge#147 D6) — a candidate switch does NOT reopen the
+// window. The successor runs with the predecessor's spent time carried
+// over; what keeps it alive is the relaxation a timeout-class disposal
+// applied, not a rebased clock.
+func TestCandidateSwitchKeepsTCumulative(t *testing.T) {
 	var mu sync.Mutex
 	tick := 0
 	env := newSupEnv(t, func(c *Config) {
@@ -740,18 +759,18 @@ func TestCandidateSwitchStartsAFreshTWindow(t *testing.T) {
 	if len(started) != 2 {
 		t.Fatalf("step_started facts: %d", len(started))
 	}
-	if prior := started[1].Thresholds.PriorRuntime; prior != 0 {
-		t.Fatalf("after a candidate switch the T window restarts, prior runtime %v", prior)
+	if prior := started[1].Thresholds.PriorRuntime; prior != 40*time.Minute {
+		t.Fatalf("T is cumulative across the switch, prior runtime %v want 40m", prior)
 	}
-	// accounting keeps every booked millisecond; the T base is only the
-	// first (switched-away) dispatch's share
-	if st := env.exec(t).Steps["s"]; st.Supervision.RuntimeBaseMs != (40*time.Minute).Milliseconds() ||
-		st.BudgetConsumed.WallMs <= st.Supervision.RuntimeBaseMs {
-		t.Fatalf("booked wall time vs T base: %+v / %+v", st.BudgetConsumed, st.Supervision)
+	// accounting keeps every booked millisecond and nothing rebases it
+	if st := env.exec(t).Steps["s"]; st.BudgetConsumed.WallMs < (40 * time.Minute).Milliseconds() {
+		t.Fatalf("booked wall time: %+v", st.BudgetConsumed)
 	}
 }
 
-func TestHumanContinueStartsAFreshTWindow(t *testing.T) {
+// TestHumanContinueKeepsTCumulative: the human "continue" resets the
+// failure ledger but NOT the step's cumulative runtime (D6).
+func TestHumanContinueKeepsTCumulative(t *testing.T) {
 	env := newSupEnv(t, nil, spec("s"))
 	env.sp.script = []fakeEntry{failEntryFor(FailExitOther), failEntryFor(FailExitOther), failEntryFor(FailExitOther)}
 	if err := env.d.Run(context.Background()); err != nil {
@@ -761,9 +780,11 @@ func TestHumanContinueStartsAFreshTWindow(t *testing.T) {
 		t.Fatalf("continue: %v", err)
 	}
 	st := env.exec(t).Steps["s"]
-	if st.Supervision.RuntimeBaseMs != st.BudgetConsumed.WallMs {
-		t.Fatalf("a human continue restarts the T window: %+v / %+v", st.BudgetConsumed, st.Supervision)
+	if st.Supervision.FailureCount != 0 || st.Supervision.LongTaskTimeouts != 0 {
+		t.Fatalf("a human continue resets the failure ledger: %+v", st.Supervision)
 	}
+	// Nothing rebases the step's cumulative runtime: the only zeroing
+	// of T is a rewind's fresh start (D6).
 }
 
 // --- ended_without_result (rule 1, ok-ended turn) ---------------------------

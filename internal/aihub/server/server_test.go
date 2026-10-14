@@ -217,20 +217,18 @@ func TestClaimFlowOverHTTP(t *testing.T) {
 			MachineID          string `json:"machine_id"`
 			Owner              string `json:"owner"`
 			BundleName         string `json:"bundle_name"`
-			BundleDigest       string `json:"bundle_digest"`
 			ClaimedAt          string `json:"claimed_at"`
 		} `json:"claim"`
 		WorkItem struct {
 			Status             string `json:"status"`
 			SessionFingerprint string `json:"session_fingerprint"`
 			SessionMachine     string `json:"session_machine"`
-			SessionOwner       string `json:"session_owner"`
 			SessionStartedAt   string `json:"session_started_at"`
 			CleanPause         bool   `json:"clean_pause"`
 		} `json:"work_item"`
 	}
 	code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/claim", e.key,
-		map[string]string{"session_id": secret, "machine_id": "m1", "owner": "op", "idempotency_key": "http-1"}, &resp)
+		map[string]string{"session_id": secret, "machine_id": "m1", "idempotency_key": "http-1"}, &resp)
 	if code != 200 {
 		t.Fatalf("claim: %d %s", code, raw)
 	}
@@ -240,17 +238,17 @@ func TestClaimFlowOverHTTP(t *testing.T) {
 	if strings.Contains(string(raw), secret) || strings.Contains(string(raw), "session_hash") {
 		t.Fatalf("claim response leaks the secret or the hash: %s", raw)
 	}
-	// #5: the bundle pin rides the claim object itself (the runtime reads
-	// it from resp.Claim, never from resp.WorkItem).
-	if resp.Claim.BundleName != "demo-bundle" || resp.Claim.BundleDigest == "" {
-		t.Fatalf("claim bundle fields wrong: %+v", resp.Claim)
+	// #5: the bundle name rides the claim object itself (the runtime
+	// reads it from resp.Claim, never from resp.WorkItem).
+	if resp.Claim.BundleName != "demo-bundle" {
+		t.Fatalf("claim bundle name wrong: %+v", resp.Claim)
 	}
 	if resp.WorkItem.Status != "running" {
 		t.Fatalf("work item not running after claim: %+v", resp.WorkItem)
 	}
 	// The WorkItem JSON carries the m4 public audit block (never a hash).
 	if resp.WorkItem.SessionFingerprint != resp.Claim.SessionFingerprint ||
-		resp.WorkItem.SessionMachine != "m1" || resp.WorkItem.SessionOwner != "op" ||
+		resp.WorkItem.SessionMachine != "m1" ||
 		resp.WorkItem.SessionStartedAt == "" || resp.WorkItem.CleanPause {
 		t.Fatalf("work item session audit fields wrong: %+v", resp.WorkItem)
 	}

@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/silgrid/polyforge/internal/common/api"
 )
 
 // isNotFound reports the MEM-404 of s.load.
@@ -372,12 +374,12 @@ func (s *Store) rebuildIndex() (int, error) {
 		}
 	}
 	if err := s.sweepTransients(); err != nil {
-		return 0, errf("MEM-502", "", "sweep: %v", err)
+		return 0, errf(api.ErrMemUpstream, "", "sweep: %v", err)
 	}
 	var projDirs []string
 	all, err := os.ReadDir(filepath.Join(s.dataDir, "memory"))
 	if err != nil && !os.IsNotExist(err) {
-		return 0, errf("MEM-502", "", "walk: %v", err)
+		return 0, errf(api.ErrMemUpstream, "", "walk: %v", err)
 	}
 	for _, d := range all {
 		if d.IsDir() {
@@ -394,7 +396,7 @@ func (s *Store) rebuildIndex() (int, error) {
 	for _, dirProject := range projDirs {
 		memDirs, werr := os.ReadDir(filepath.Join(s.dataDir, "memory", dirProject))
 		if werr != nil {
-			return 0, errf("MEM-502", "", "walk: %v", werr)
+			return 0, errf(api.ErrMemUpstream, "", "walk: %v", werr)
 		}
 		for _, md := range memDirs {
 			if !md.IsDir() || md.Name() == "_redacted" {
@@ -403,7 +405,7 @@ func (s *Store) rebuildIndex() (int, error) {
 			scanned++
 			out, cerr := s.rebuildActiveEntry(dirProject, md.Name())
 			if cerr != nil {
-				return 0, errf("MEM-502", "", "rebuild %s: %v", md.Name(), cerr)
+				return 0, errf(api.ErrMemUpstream, "", "rebuild %s: %v", md.Name(), cerr)
 			}
 			switch out {
 			case rebuildQueue:
@@ -427,14 +429,14 @@ func (s *Store) rebuildIndex() (int, error) {
 			if os.IsNotExist(rerr) {
 				continue
 			}
-			return 0, errf("MEM-502", "", "walk: %v", rerr)
+			return 0, errf(api.ErrMemUpstream, "", "walk: %v", rerr)
 		}
 		for _, md := range redDirs {
 			if !md.IsDir() {
 				continue
 			}
 			if cerr := s.rebuildRedactedEntry(dirProject, md.Name()); cerr != nil {
-				return 0, errf("MEM-502", "", "rebuild %s: %v", md.Name(), cerr)
+				return 0, errf(api.ErrMemUpstream, "", "rebuild %s: %v", md.Name(), cerr)
 			}
 		}
 	}
@@ -446,14 +448,14 @@ func (s *Store) rebuildIndex() (int, error) {
 	// every pass.
 	rows, err := s.db.Query(`SELECT id FROM memories WHERE status='active'`)
 	if err != nil {
-		return 0, errf("MEM-502", "", "scan rows: %v", err)
+		return 0, errf(api.ErrMemUpstream, "", "scan rows: %v", err)
 	}
 	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return 0, errf("MEM-502", "", "scan rows: %v", err)
+			return 0, errf(api.ErrMemUpstream, "", "scan rows: %v", err)
 		}
 		ids = append(ids, id)
 	}
@@ -475,7 +477,7 @@ func (s *Store) rebuildIndex() (int, error) {
 			if ae, ok := cerr.(*APIError); ok && ae.Code == "MEM-400" {
 				continue // unparseable authority file: no branch can act
 			}
-			return 0, errf("MEM-502", "", "reconcile %s: %v", id, cerr)
+			return 0, errf(api.ErrMemUpstream, "", "reconcile %s: %v", id, cerr)
 		}
 		unlock()
 	}
@@ -497,7 +499,7 @@ func (s *Store) rebuildIndex() (int, error) {
 		}
 	})
 	if err != nil {
-		return 0, errf("MEM-502", "", "fts: %v", err)
+		return 0, errf(api.ErrMemUpstream, "", "fts: %v", err)
 	}
 	counted += n
 	// Dangling FTS rows die last.
@@ -507,10 +509,10 @@ func (s *Store) rebuildIndex() (int, error) {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`DELETE FROM memory_fts WHERE mem_id NOT IN (SELECT id FROM memories)`); err != nil {
-		return 0, errf("MEM-502", "", "fts: %v", err)
+		return 0, errf(api.ErrMemUpstream, "", "fts: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, errf("MEM-502", "", "commit: %v", err)
+		return 0, errf(api.ErrMemUpstream, "", "commit: %v", err)
 	}
 	report() // final report: totals for the whole pass
 	return counted, nil

@@ -25,8 +25,7 @@ import (
 func newWorkspaceTestRuntime(t *testing.T, hub Aihub, project string) (*Runtime, string, *scriptedSpawner) {
 	t.Helper()
 	setGitIdentity(t)
-	wfDir, pinned := pristineBundle(t)
-	hub.(*fakeHub).digest = pinned
+	wfDir := pristineBundle(t)
 	ws := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)

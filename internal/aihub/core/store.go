@@ -33,11 +33,6 @@ type DB struct {
 // work_items row itself (the session model — session_hash/
 // session_fingerprint/clean_pause).
 const DDL = `
-CREATE TABLE IF NOT EXISTS core_meta (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS users (
   id           TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
@@ -76,8 +71,6 @@ CREATE TABLE IF NOT EXISTS projects (
   description TEXT NOT NULL DEFAULT '',
   repos       TEXT NOT NULL DEFAULT '[]',
   visible     INTEGER NOT NULL DEFAULT 1,
-  scenario    TEXT,
-  identifier_hash TEXT NOT NULL,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL
 );
@@ -113,8 +106,6 @@ CREATE TABLE IF NOT EXISTS work_items (
   assignee     TEXT REFERENCES users(id),
   waiting_on   TEXT,
   bundle_name  TEXT,
-  bundle_digest TEXT,
-  workflow_budget_baseline TEXT,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
   closed_at    TEXT,
@@ -127,7 +118,6 @@ CREATE TABLE IF NOT EXISTS work_items (
   session_hash        TEXT,
   session_fingerprint TEXT,
   session_machine     TEXT,
-  session_owner       TEXT,
   session_started_at  TEXT,
   clean_pause         INTEGER NOT NULL DEFAULT 0,
   -- per-project display seq (seq-fix lane owner ruling).
@@ -154,22 +144,6 @@ CREATE TABLE IF NOT EXISTS wi_repo_inventory (
   PRIMARY KEY (work_item_id, position)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_name ON wi_repo_inventory(work_item_id, name);
-
-CREATE TABLE IF NOT EXISTS wi_ship_ledger (
-  -- polyforge#123 (P1b): the ship-time WI → repo → branch-top SHA
-  -- ledger. One row per (WI, repo); ship upserts the branch top it
-  -- pushed (or re-used), so the ledger always answers "where this WI's
-  -- copy of the repo lives in git". It is
-  -- recorded through POST /api/v1/work-items/{id}/ship-ledger by the ship
-  -- bridge (no HTTP read face). Not execution state (INV-1): it is delivery
-  -- accounting about git remotes, written by the daemon's ship bridge.
-  work_item_id   TEXT NOT NULL REFERENCES work_items(id),
-  repo           TEXT NOT NULL,               -- repo short name (inventory spelling)
-  branch         TEXT NOT NULL DEFAULT '',    -- the delivery branch (polyforge/<wi>)
-  branch_top_sha TEXT NOT NULL,               -- the pushed/re-used branch top
-  pushed_at      TEXT NOT NULL,               -- RFC3339, server-stamped at record time
-  PRIMARY KEY (work_item_id, repo)
-);
 
 CREATE TABLE IF NOT EXISTS wi_dependencies (
   blocking_wi_id TEXT NOT NULL REFERENCES work_items(id),

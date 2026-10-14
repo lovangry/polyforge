@@ -97,10 +97,7 @@ type opsConfigResponse struct {
 
 type closeResponse struct {
 	WorkItemID string `json:"work_item_id"`
-	// Outcome: sealed | already_terminal | already_paused — plus
-	// "terminated" (polyforge#116): a parked workflow's §6.4 terminate
-	// verdict, landed at the hub by the terminate-blocked door (no local
-	// seal exists — the bounded close already sealed the parked capsule).
+	// Outcome: sealed | already_terminal | already_paused.
 	Outcome string `json:"outcome"`
 	Status  string `json:"status,omitempty"`
 	Reason  string `json:"reason,omitempty"`
@@ -416,11 +413,31 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 // that finds the work item already terminal answers gracefully (the
 // arbitration's idempotency contract).
 
+// parkedWIClose handles a close that finds no local job because the
+// workflow is parked blocked on an honest incomplete result (polyforge#116):
+// the bounded close dropped the job, so a wrap (success) or a `--fail` of
+// a parked workflow has nothing to seal — refused with the owner-move
+// copy: the blocked exits are continue (`pf resume`) and abandon
+// (`pf cancel`). Returns true when it answered; a non-blocked work item
+// falls through to the caller's terminalOf/404.
+func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi string) bool {
+	item, err := d.hub.GetWorkItem(wi)
+	if err != nil || item == nil || item.Status != api.StatusBlocked {
+		return false
+	}
+	writeErr(w, api.ErrDaemonConflict,
+		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon; there is no completed run to wrap or fail")
+	return true
+}
+
 // closeJob runs one CLI-side close through Runtime.Stop.
 func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason string) {
 	wi = d.canonWI(wi) // a slug spelling closes the canonical job (F2)
 	ji, ok := d.rt.Info(wi)
 	if !ok {
+		if d.parkedWIClose(w, wi) {
+			return
+		}
 		if st, terr := d.terminalOf(wi); terr == nil {
 			writeJSON(w, http.StatusOK, closeResponse{
 				WorkItemID: wi, Outcome: "already_terminal", Status: st,

@@ -50,7 +50,6 @@ func seedExecution(t *testing.T, execPath, stepID, status string, attempts []cap
 	exec := capsule.Execution{
 		CapsuleID:      "cap_wi_run",
 		WorkItemID:     "wi_run",
-		BundleDigest:   "dg",
 		WorkflowStatus: capsule.WorkflowStatusRunning,
 		CurrentStep:    stepID,
 		Steps:          map[string]*capsule.Step{},
@@ -85,7 +84,7 @@ func TestEffectiveListSubstitutesBundleLists(t *testing.T) {
 	seedExecution(t, execPath, "fix", capsule.StepInProgress, nil)
 	sp := &fakeSpawner{}
 	d, err := New(Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: []StepSpec{
 			{ID: "fix", ContextPolicy: "fresh", ModelCandidates: []string{"bundle-x", "bundle-y"}},
@@ -148,7 +147,7 @@ func TestRotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 			seedExecution(t, execPath, "fix", capsule.StepInProgress, c.attempts)
 			sp := &fakeSpawner{}
 			d, err := New(Config{
-				WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+				WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 				ExecPath: execPath,
 				Workflow: &Workflow{Steps: []StepSpec{{ID: "fix", ContextPolicy: "fresh"}}, MaxTotal: 4, MaxPerStep: 2},
 				Spawner:  sp,
@@ -180,7 +179,7 @@ func TestPresentEmptyEffectiveEntryGoverns(t *testing.T) {
 	seedExecution(t, execPath, "fix", capsule.StepInProgress, nil)
 	sp := &fakeSpawner{}
 	d, err := New(Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: []StepSpec{
 			{ID: "fix", ContextPolicy: "fresh", ModelCandidates: []string{"bundle-x"}},
@@ -211,7 +210,7 @@ func TestInterruptedDispatchArchivesOnce(t *testing.T) {
 	seedExecution(t, execPath, "fix", capsule.StepInProgress, nil)
 	sp := &fakeSpawner{script: []fakeEntry{done(`{"summary":"ok"}`)}}
 	d, err := New(Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: []StepSpec{{ID: "fix", ContextPolicy: "fresh"}}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:  sp,
@@ -265,7 +264,7 @@ func TestInterruptedDispatchNoArchiveShapes(t *testing.T) {
 	seedExecution(t, execPath, "fix", capsule.StepInProgress, nil)
 	sp := &fakeSpawner{script: []fakeEntry{done(`{"summary":"ok"}`)}}
 	d, err := New(Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b", BundleDigest: "dg"},
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: []StepSpec{{ID: "fix", ContextPolicy: "fresh"}}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:  sp,
@@ -290,7 +289,7 @@ func TestInterruptedDispatchNoArchiveShapes(t *testing.T) {
 	seedExecution(t, execPath2, "fix", capsule.StepInProgress, nil)
 	seedPendingQuestion(t, execPath2, "fix", "q1", "what?")
 	d2, err := New(Config{
-		WI:          WIInfo{ID: "wi_run", CapsuleDir: dir2, BundleName: "b", BundleDigest: "dg"},
+		WI:          WIInfo{ID: "wi_run", CapsuleDir: dir2, BundleName: "b"},
 		ExecPath:    execPath2,
 		Workflow:    &Workflow{Steps: []StepSpec{{ID: "fix", ContextPolicy: "fresh"}}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:     &fakeSpawner{},

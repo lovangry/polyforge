@@ -13,34 +13,31 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 )
 
 // WorkItem is the server-side work item record (02 §4). Field semantics are
 // inherited from the v0 contract; JSON tags are wire-stable.
 type WorkItem struct {
-	ID             string          `json:"id"`
-	Slug           string          `json:"slug"`
-	Seq            int64           `json:"seq"`
-	ProjectID      string          `json:"project_id"`
-	ProjectName    string          `json:"project"`
-	Goal           string          `json:"goal"`
-	Content        *string         `json:"content"`
-	ParentID       *string         `json:"parent_id"`
-	Status         string          `json:"status"`
-	Priority       string          `json:"priority"`
-	Milestone      *string         `json:"milestone"`
-	Labels         []string        `json:"labels"`
-	Attrs          map[string]any  `json:"attrs"`
-	Reporter       string          `json:"reporter"`
-	Assignee       *string         `json:"assignee"`
-	WaitingOn      *string         `json:"waiting_on"`
-	BundleName     *string         `json:"bundle_name"`
-	BundleDigest   *string         `json:"bundle_digest"`
-	BudgetBaseline json.RawMessage `json:"workflow_budget_baseline"`
-	CreatedAt      string          `json:"created_at"`
-	UpdatedAt      string          `json:"updated_at"`
-	ClosedAt       *string         `json:"closed_at"`
+	ID          string         `json:"id"`
+	Slug        string         `json:"slug"`
+	Seq         int64          `json:"seq"`
+	ProjectID   string         `json:"project_id"`
+	ProjectName string         `json:"project"`
+	Goal        string         `json:"goal"`
+	Content     *string        `json:"content"`
+	ParentID    *string        `json:"parent_id"`
+	Status      string         `json:"status"`
+	Priority    string         `json:"priority"`
+	Milestone   *string        `json:"milestone"`
+	Labels      []string       `json:"labels"`
+	Attrs       map[string]any `json:"attrs"`
+	Reporter    string         `json:"reporter"`
+	Assignee    *string        `json:"assignee"`
+	WaitingOn   *string        `json:"waiting_on"`
+	BundleName  *string        `json:"bundle_name"`
+	CreatedAt   string         `json:"created_at"`
+	UpdatedAt   string         `json:"updated_at"`
+	ClosedAt    *string        `json:"closed_at"`
 }
 
 // WI statuses (02 §4.1).
@@ -82,7 +79,7 @@ type ProjectRepo struct {
 
 type ProjectMember struct {
 	UserID string `json:"user_id"`
-	Role   string `json:"role"` // owner|maintainer|writer|viewer
+	Role   string `json:"role"` // maintainer|writer|viewer
 }
 
 // User (02 §2).
@@ -133,9 +130,7 @@ type SessionClaim struct {
 	WorkItemID         string        `json:"work_item_id"`
 	SessionFingerprint string        `json:"session_fingerprint"`
 	MachineID          string        `json:"machine_id"`
-	Owner              string        `json:"owner"`
 	BundleName         string        `json:"bundle_name"`
-	BundleDigest       string        `json:"bundle_digest"`
 	ClaimedAt          string        `json:"claimed_at"`
 	Repos              []ProjectRepo `json:"repos,omitempty"`
 	// SealedHead/SealedMachine are the blocked verdict's recorded capsule
@@ -158,7 +153,6 @@ type SessionClaimRequest struct {
 	WorkItemID     string `json:"work_item_id"`
 	SessionID      string `json:"session_id"`
 	MachineID      string `json:"machine_id"`
-	Owner          string `json:"owner"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
@@ -174,7 +168,6 @@ type SessionAttachRequest struct {
 	WorkItemID string `json:"work_item_id"`
 	SessionID  string `json:"session_id"`
 	MachineID  string `json:"machine_id"`
-	Owner      string `json:"owner"`
 }
 
 // SessionVerifyRequest is the compare-only body (B3: the hub stores only
@@ -223,24 +216,4 @@ func SessionFingerprint(sessionID string) string {
 func SessionHashHex(sessionID string) string {
 	sum := sha256.Sum256([]byte(sessionID))
 	return hex.EncodeToString(sum[:])
-}
-
-// ---------------------------------------------------------------------------
-// Ship ledger (polyforge#123, P1b): the WI → repo → branch-top SHA
-// accounting aihub keeps of what ship actually pushed, queryable per WI.
-// ---------------------------------------------------------------------------
-
-// ShipLedgerEntry is one repo's branch-top report: the POST body's entry.
-// The SHA is what the daemon's ship bridge saw at the branch top it pushed
-// (or re-used) — self-recorded accounting, not re-verified server-side.
-type ShipLedgerEntry struct {
-	Repo         string `json:"repo"`
-	BranchTopSHA string `json:"branch_top_sha"`
-}
-
-// ShipLedgerRequest is the POST /api/v1/work-items/{id}/ship-ledger body:
-// the delivery branch plus the repos pushed by one ship run.
-type ShipLedgerRequest struct {
-	Branch string            `json:"branch,omitempty"`
-	Repos  []ShipLedgerEntry `json:"repos"`
 }

@@ -75,7 +75,7 @@
 
 ```json
 { "capsule_id": "cap_wi_793", "work_item_id": "wi_793", "generation": 3,
-  "machine_id": "m-01", "bundle_digest": "sha256:...", "status": "initializing|ready",
+  "machine_id": "m-01", "status": "initializing|ready",
   "created_at": "2026-09-20T08:00:00Z" }
 ```
 
@@ -135,7 +135,7 @@ internal/runner/    # Native runner：RunCommand 实现、runtime-state 写保�
 
 ### 4.1 repo inventory：声明格式 <!-- §4.1 -->
 
-WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 8。**权威存储在 `02-aihub-core.md#§4.6` `wi_repo_inventory` 表**（本文不重复定义存储）：创建时写入 `name`/`url`/`subdir`，`base` 为 NULL；**base commit 在 WI 创建事务中与 bundle digest 一并冻结**（`02-aihub-core.md#§4.6` 的 `POST /api/v1/work-items` 创建请求体 `repo_inventory_base` 字段），此后不可变。Daemon 丢失本地声明（takeover/重新检出）时通过 `GET /api/v1/work-items/{id}/repo-inventory`（`02-aihub-core.md#§5.1`）重建清单，不依赖本地缓存或推断。
+WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 8。**权威存储在 `02-aihub-core.md#§4.6` `wi_repo_inventory` 表**（本文不重复定义存储）：创建时写入 `name`/`url`/`subdir`，`base` 为 NULL；**base commit 在 WI 创建事务中冻结**（`02-aihub-core.md#§4.6` 的 `POST /api/v1/work-items` 创建请求体 `repo_inventory_base` 字段），此后不可变（`wi_repo_inventory` 不受 bundle 变更影响；bundle 引用的冻结时点同 `bundle_name`：首次认领冻结，`02-aihub-core.md#§4.5`——digest 链已删，polyforge#149 B9）。Daemon 丢失本地声明（takeover/重新检出）时通过 `GET /api/v1/work-items/{id}/repo-inventory`（`02-aihub-core.md#§5.1`）重建清单，不依赖本地缓存或推断。
 
 ### 4.2 `runtime-state/execution.json`：完整文件格式（权威，INV-1 的唯一执行权威文件） <!-- §4.2 -->
 
@@ -144,7 +144,6 @@ WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 
   "capsule_id": "cap_wi_793",
   "work_item_id": "wi_793",
   "generation": 3,
-  "bundle_digest": "sha256:...",
   "current_step": "code",
   "workflow_status": "running",
   "steps": {
@@ -239,7 +238,9 @@ WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 
 
 1. 对声明清单中的每个 `repo_entry = {name, url, subdir?, base}`：目标目录 `dir = <capsule>/repos/<name>`。
 2. 若 `dir` 已存在且其 `HEAD == base`：校验工作树无未预期的脏改动痕迹与声明不符后直接复用，不重新克隆。
-3. 若 `dir` 已存在且 `HEAD != base`：返回 `CAP-405 CHECKOUT_DIVERGED`（人工处理，绝不自动强制重置）。
+3. 若 `dir` 已存在：直接复用（存在性即判据——记录的基线随 prior capsule.json 原样保留；
+不自动重置、不强制重置，漂移属人工处理范畴。检出/克隆失败是 typed 的 `DAEMON-507`，
+绝不静默退化）。
 4. 若 `dir` 不存在：`git clone --no-checkout <url> dir && git -C dir checkout <base>`。
 5. 写入 `<capsule>/repos/<name>/inventory.json` 快照，记录 `{name, url, base, checked_out_at, head_at_checkout}`。
 
@@ -282,7 +283,7 @@ inventory 检出以**声明的 base commit 为唯一基线**——多仓 WI 的 
 **物化协议（WI Agent 第 0 步）**： 〔#111分类：删→驱动〕
 
 1. WI Agent 被派生后、驱动任何 step 之前的**第 0 步**，从本机 aihub checkout 的 `workflows/<bundle>/` 物化三项目标：`agents/*.md`（subagent 定义文件）→ `<capsule>/.pi/agents/`（pi 适配器）；同一来源按需复制到 `<capsule>/.claude/agents/`（claude 适配器，仅当该 WI 使用 claude 适配器时建立）；`workflow.md` → Capsule 根下 `workflow.md`（本 WI 执行图快照；或以 `workflow/` 目录形态存放，两种形态同一 capsule 内取其一）。 〔#111分类：删→驱动〕
-2. **复制后按 pin 的 `bundle_digest` 校验**：对物化产物按 `workflow.md` 与 `agents/*.md` 文件集合计算的 `bundle_digest` 做摘要比对；**不一致 = 告警，不硬拒**——v1 信任内网，本机 checkout 与 Core 同源，漂移属配置事故而非攻击面，告警事件供人工对账，执行继续。
+2. **不做内容校验（polyforge#149 B9：digest 校验链已删）**：物化只按 `bundle_name` 复制；本机 checkout 与 Core 同源（v1 信任内网），漂移属配置事故而非攻击面——缺 bundle/缺文件时告警事件供人工对账，执行继续。
 3. 物化产物是**只读快照**：WI Agent 第 0 步写入后不再修改；subagent 对其只读（§5.2），物化产物不是执行权威——执行进度的唯一权威恒为 `runtime-state/execution.json`（§4.2）。 〔#111分类：删→驱动〕
 
 **subagent 定义文件模型（Capsule 侧权威）**：每个定义文件是一个 `*.md`，元数据写在其 frontmatter，字段为 `name`/`description`/`tools`/`output`——`name` 是 harness 派生时引用的 subagent 名，`description` 供 WI Agent 选择与组装派生 prompt，`tools` 是工具面声明，`output` 是输出 JSON schema。**不写 `model` 字段**——模型选择是流程作者在 workflow 层的决定，不是 subagent 定义作者的决定。subagent 的最终输出必须是符合 `output` schema 的 JSON，**不符合即按基础设施失败处理**（`01-workflow-skills.md#§6.3`），不产出业务判定、不触发 gate。 〔#111分类：删→驱动〕
@@ -316,7 +317,7 @@ WI Agent 是唯一调用方；harness-native subagent 的命令都经其所属 s
 每次全扫描发布（HEAD 推进）在 staging 固化（`05-sync-revision-recovery.md#§6` 第 4 步）之后、manifest 提交与 HEAD 推进（第 5–6 步）之前，挂载一次输出契约的机械校验步。它是 M 检查面（发布面机械证据通道）的新成员：与 `07-deployment-pilot.md#§9.2` 的 M4/M5 同属「机械证据优先于自报」的谱系，把执法对象从命令证据扩展到输出 schema 合规。六步发布序列的权威仍在 `05-sync-revision-recovery.md#§6`，本节只定义该检查步的 Capsule 侧契约，不构成第二条发布路径：
 
 1. **校验输入（INV-6 边界，本节权威）**：只读 staging 内已固化的 `runtime-state/execution.json` 快照副本——即将随本次发布写入 Revision 的字节——中每个 `status == "done"` 的 step 的 `output`（§4.2）。**绝不读取 Capsule 活目录内的 `runtime-state/`**：runtime-state 是 WI Agent 的单写者私有域（INV-6/§2.3），Daemon 的这次读取只发生在发布面、只针对已固化字节，与 `05-sync-revision-recovery.md#§6` 第 4 步「只读取 staging，不重新读取活动的同步根目录」同一纪律。校验输入恒等于被发布字节，校验结论与 Revision 记录因此不可能分叉。 〔#111分类：删→驱动〕
-2. **校验目标**：各 step 的 pinned `output` JSON Schema，从 Capsule 内第 0 步物化、经 `bundle_digest` 校验的只读 workflow 快照（§4.5）读取 `agents/<step-id>.md` frontmatter 的 `output`；与 WI 创建时固化的 bundle 引用（`01-workflow-skills.md#§2.2` INV-1a/INV-1f）同源，不存在「校验用 schema 与执行用 schema 不同源」的窗口。
+2. **校验目标**：各 step 的 pinned `output` JSON Schema，从 Capsule 内第 0 步物化的只读 workflow 快照（§4.5）读取 `agents/<step-id>.md` frontmatter 的 `output`；与 WI 首次认领冻结时点的 bundle 引用（`01-workflow-skills.md#§2.2` INV-1a/INV-1f）同源，不存在「校验用 schema 与执行用 schema 不同源」的窗口。
 3. **校验器**：draft-07 的机械完整实现；schema-authoring 规则与本仓 bundle 测试（`internal/workflow/schema`）强制的同一契约——参考 bundle 的 output schema 只用标准 draft-07 关键字（required/enum/minItems/minLength/oneOf/contains 等），真校验器接入即同一契约生效，不要求改写任何既有 schema（`01-workflow-skills.md#§4.4`）。
 4. **失配分类（INV-1h 既有分类，不新增终态）**：任一 done step 的 `output` 不合其 schema = 该 step 的基础设施失败（`01-workflow-skills.md#§4.4`/`01-workflow-skills.md#§6.3`）：不产出业务判定、不触发 gate。校验结果随 `04-local-runtime.md#§5.1` `publish_request` 的响应返回给 WI Agent——发布边界即 step 完成边界，命中者通常即刚完成的当前 step；若命中更早的 done step（其字节在完成后被改写，本身即异常现场），处理相同：该 step 原地重派。发布本身不受失配拦截：HEAD 照常推进，失配字节作为可审计历史留在 Revision 链上；WI Agent 随后按 `01-workflow-skills.md#§6.3` 第 2b 条追加 `infra_failure` attempt 并原地 resume（同一次原子写入内 `status` 由 `done` 改回 `in_progress`，§4.2），候选指针按其第 4 步有界规则推进。校验步是检测信号，不是发布否决项：`05` 六步序列与 Core 侧校验链均不变，候选/预算耗尽后的 `blocked` 收尾路径（§4.2）也因发布不被拦截而始终可 flush。 〔#111分类：删→驱动〕
 
@@ -349,7 +350,6 @@ Native runner：v1 trusted internal repo，host-native，不引入 per-step isol
 | `CAP-401` | RUNNER_UNAVAILABLE：宿主机缺少命令声明的可执行文件或必要 shell |
 | `CAP-403` | STATE_WRITE_DENIED：subagent 对 `runtime-state/` 的写被拒绝（§6.2，宿主机返回 `EACCES`） |
 | `CAP-404` | inventory 声明的 repo 不存在或未检出 |
-| `CAP-405` | CHECKOUT_DIVERGED：检出基线与声明 base 不一致（拒绝自动强推，须人工处理） |
 | `CAP-406` | SYMLINK_ESCAPE_DENIED：Revision 恢复落盘时检测到 symlink 路径逃逸尝试（§6.3，修复 B07） |
 | `CAP-409` | CAPSULE_FENCED：调用方携带的 generation 与本地 `capsule.json` 已记录的不一致（正常路径下应先被 `02-aihub-core.md#§5.1` `CORE-403 STALE_GENERATION` 拦下，本错误码是本地二道防线） |
 | `CAP-500` | RUNNER_CRASHED：命令进程组异常死亡，转 `01-workflow-skills.md#§6.3` 基础设施失败 |
@@ -450,7 +450,7 @@ v1 trusted internal repo，host-native，不引入 per-step isolation；INV-6（
 ## 10. 测试与故障注入 <!-- §10 -->
 
 - 身份/绑定：篡改 `capsule.json.generation` → `capsule_create` 返回 `CAP-409`。
-- inventory：base commit 前移 → `CAP-405`。
+- inventory：克隆/检出失败 → `DAEMON-507`（typed 的任务 repo 克隆失败，关闭为 blocked）。
 - **INV-6 写保护测试（B02 误写口径）**：subagent 进程内尝试 `echo x > runtime-state/execution.json`（预期 `CAP-403`/`EACCES`）——这是**防误写**断言，保留；对「不可见」面（`capsule.json`/`sync/`/Daemon state）**不做**「读取必然失败」的验收断言——host-native 同 UID 下这些路径物理可读，「不可见」是工作目录约定层面的构造性保证（§5.2/§6.2 的 B02 口径），不是可断言的运行时边界。机械可断言的只有构造面本身：WI Agent 构造的 `RunCommand.spec` 从不携带 `repos/<name>`/`artifacts` 之外的 `cwd`，且 `env` 中不含 `runtime-state` 路径与任何凭证（§5.1）。 〔#111分类：删→驱动〕
 - **symlink 逃逸测试（B07，§6.3 场景的机械化版本）**：①创建 Capsule 并完成 inventory 检出；②在 `repos/<name>/` 内创建 `evil -> ../../runtime-state`；③触发一次声明目标为 `repos/<name>/evil/execution.json` 的 Revision 恢复；④断言返回 `CAP-406`，`runtime-state/execution.json` 内容与恢复前逐字节相同，且恢复操作未部分落盘任何其它文件。
 - 超时命令：预期进程组被杀、`killed=true`，结果记基础设施失败。
@@ -458,7 +458,7 @@ v1 trusted internal repo，host-native，不引入 per-step isolation；INV-6（
 - **D8 确定性恢复测试**：① rewind 落盘后、目标 step 派发前 kill WI Agent → 新 WI Agent 从 `pending_rewind_input` 机械重建派发输入（gate FAIL 判定全文到达 target），并在派发写入中清空该字段；② needs_input 边界（D9）：step 置入等待的写入落盘后 `pending_question` 非空且含 `content`，回答经 Daemon answer API 到达后 `pending_answer` 非空，续跑写入后 `pending_question` 为 `null` 且 `answers` 末条以同一 `question_id` 归档了 `{answer_text, answered_at, answered_by}`（修复 B9），此后同一 `question_id` 的重复回答被拒（`DAEMON-409`，`00-architecture.md#§3.4a`）；③ per-step `budget_consumed` 与顶层聚合一致，且一次 rewind 后的重跑消耗归属目标 step。 〔#111分类：删→驱动〕
 - **D13 cancel 三类路径测试**：`queued`/`paused`/`blocked` 直接取消成功且零发布动作；`running` WI 未经正常收尾直接调用 cancel 被拒（`02-aihub-core.md#§6.5`），先正常收尾（flush 落定）再取消成功；stale 代被接管后旧 Daemon 侧零发布、本机目录进 quarantine。
 - **待验证项（Claude 适配器，Pilot 前必须实测）**：`.claude/agents/` 在**非 git 根**的 capsule 目录下的 agent 发现行为——capsule 根本身不是 git 仓库根（git 根在各 `repos/<name>/` 内），Claude 定位项目级 agent 目录是否依赖 git 根、能否按 cwd 向上查找，尚未经源码或实测确认；若实测结论是「不做 git 根无法发现」，须在 claude 适配器层提供显式装载路径（把定义内容注入会话）作为替代。该项验证不得顺延到联调阶段之后。
-- **物化与防冲突测试（§4.5）**：① capsule 创建后断言 `.pi/agents/` 目录存在（可为空）；② 在工作区级放置一个同名 `.pi/agents/` 定义，从 capsule 内派生 subagent → 断言解析命中的是 capsule 内定义（agentScope="project" + 项目级覆盖 + 空目录防泄漏三层共同生效）；③ 物化产物与 pin 的 `bundle_digest` 不一致 → 断言产生告警且执行继续（不硬拒）；④ subagent 输出不符合定义文件 `output` schema → 断言按基础设施失败处理（`01-workflow-skills.md#§6.3`），不产出业务判定。
+- **物化与防冲突测试（§4.5）**：① capsule 创建后断言 `.pi/agents/` 目录存在（可为空）；② 在工作区级放置一个同名 `.pi/agents/` 定义，从 capsule 内派生 subagent → 断言解析命中的是 capsule 内定义（agentScope="project" + 项目级覆盖 + 空目录防泄漏三层共同生效）；③ 物化源缺 bundle/缺文件 → 断言产生告警且执行继续（不硬拒；不做内容校验，polyforge#149 B9）；④ subagent 输出不符合定义文件 `output` schema → 断言按基础设施失败处理（`01-workflow-skills.md#§6.3`），不产出业务判定。
 
 ## 11. 迁移与 rollout <!-- §11 -->
 

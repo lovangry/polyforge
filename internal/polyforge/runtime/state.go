@@ -166,7 +166,6 @@ type jobRecord struct {
 	RecoveryRelaunch bool   `json:"recovery_relaunch,omitempty"`
 	Transcript       string `json:"transcript"`
 	BundleName       string `json:"bundle_name"`
-	BundleDigest     string `json:"bundle_digest"`
 	AgentPID         int    `json:"agent_pid"`
 	AgentStart       string `json:"agent_started_at"`
 	// Origin is how the job was submitted (v2 identity model). Absent on
@@ -219,7 +218,6 @@ func (j *job) record() *jobRecord {
 		RecoveryRelaunch:   j.lastRelaunchRecovery,
 		Transcript:         j.transcript,
 		BundleName:         j.bundleName,
-		BundleDigest:       j.bundleDigest,
 		AgentPID:           j.agentPID,
 		AgentStart:         j.agentStartedAt,
 		Origin:             j.origin,
@@ -258,7 +256,6 @@ func jobFromRecord(rec *jobRecord) *job {
 		lastRelaunchRecovery: rec.RecoveryRelaunch,
 		transcript:           rec.Transcript,
 		bundleName:           rec.BundleName,
-		bundleDigest:         rec.BundleDigest,
 		agentPID:             rec.AgentPID,
 		agentStartedAt:       rec.AgentStart,
 		origin:               rec.Origin,

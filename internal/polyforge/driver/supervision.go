@@ -45,9 +45,17 @@ const (
 	FailToolHung             = string(supervise.CauseToolHung)
 	FailStepTimeoutLongTask  = string(supervise.CauseStepTimeoutLongTask)
 	FailStepTimeoutSlowModel = string(supervise.CauseStepTimeoutSlowModel)
+	// FailRateLimited: the provider throttled the dispatch (429, rate
+	// limit, too many requests, overloaded). Not model-class
+	// (polyforge#147 D7): the SAME model is retried after an exponential
+	// backoff, with no retry-count bound of its own — only the step's
+	// cumulative runtime T (which the backoff waits count into) limits
+	// the retries.
+	FailRateLimited = string(supervise.CauseRateLimited)
 	// FailExitModel: the process exited without a result and the last
 	// signal was an error turn, or its exit text names a model problem
-	// (unparseable model, 401/auth, quota).
+	// (unparseable model, 401/403/auth, quota, insufficient
+	// permissions/balance, billing credit).
 	FailExitModel = "exit_model_class"
 	// FailExitHost: the driver's own I/O failed (ENOSPC, EACCES, ...) or
 	// the harness reported a host error.
@@ -55,6 +63,11 @@ const (
 	// FailExitOther: any other exit without a result (crash, operator
 	// kill, envelope never written).
 	FailExitOther = "exit_other"
+	// FailResultInvalid: the step's result envelope stayed structurally
+	// invalid through the in-process retry bound (maxEnvelopeRejects).
+	// A step-content failure, not infrastructure: it blocks the step —
+	// no relaunch, no on_fail routing.
+	FailResultInvalid = "result_invalid"
 )
 
 // WallEstimateFactor scales a step's declared budget.wall_minutes into its
@@ -64,6 +77,48 @@ const WallEstimateFactor = 3
 // DefaultMaxStepFailures is the per-step failure counter bound (v2-converge
 // 2.3): the third counted failure blocks the step.
 const DefaultMaxStepFailures = 3
+
+// The D7 rate-limit backoff (polyforge#147): the first throttled
+// dispatch is retried after RateLimitBackoffBase, each consecutive one
+// after twice the previous wait, never longer than RateLimitBackoffMax.
+// There is no retry-count bound: the step's cumulative runtime T is the
+// only limit, and a T exhaustion takes the ordinary timeout path.
+const (
+	RateLimitBackoffBase = 1 * time.Second
+	RateLimitBackoffMax  = 300 * time.Second
+)
+
+// rateLimitBackoff answers the wait before the (streak+1)-th throttled
+// dispatch of a step: the base doubled once per already-recorded
+// consecutive rate-limit death, capped.
+func rateLimitBackoff(streak int) time.Duration {
+	d := RateLimitBackoffBase
+	for i := 0; i < streak; i++ {
+		if d >= RateLimitBackoffMax {
+			break
+		}
+		d *= 2
+	}
+	if d > RateLimitBackoffMax {
+		d = RateLimitBackoffMax
+	}
+	return d
+}
+
+// rateLimitStreak counts the step's trailing consecutive rate-limit
+// infra failures (the archived attempts are the authority, like the
+// candidate pointer): a dispatch that died of anything else — or a
+// delivered result — ends the streak and the backoff starts over.
+func rateLimitStreak(attempts []capsule.Attempt) int {
+	n := 0
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if attempts[i].FailureCause != FailRateLimited {
+			break
+		}
+		n++
+	}
+	return n
+}
 
 // ErrDriverStalled is Run's error when the supervisor's driver_stalled
 // verdict reached the loop: the recovery engine relaunches the driver
@@ -124,6 +179,9 @@ type StepFailure struct {
 	// WallMs is the dispatch's wall time, added to the step's cumulative
 	// runtime (the T accumulator).
 	WallMs int64
+	// Backoff is filled by the decision (D7): the wait the driver owes
+	// before the next dispatch, already booked into the step's T.
+	Backoff time.Duration
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +192,14 @@ var (
 	// model-class: the model/provider side is broken, a different model
 	// may work (F4: a pinned model that cannot resolve must advance the
 	// candidate chain).
-	modelPatterns = regexp.MustCompile(`(?i)(model\W.{0,60}(not found|unknown|unresolved|cannot be resolved|could not be resolved|not resolve|invalid|unavailable|not available|unsupported|does not exist)|(unknown|invalid|unparse?able|unresolved|unsupported|no such) model|no models? (found|available|match)|\b401\b|\b403\b|unauthori[sz]ed|authentication|invalid api key|incorrect api key|api key|quota|insufficient|billing|credit|rate.?limit|\b429\b|overloaded)`)
+	modelPatterns = regexp.MustCompile(`(?i)(model\W.{0,60}(not found|unknown|unresolved|cannot be resolved|could not be resolved|not resolve|invalid|unavailable|not available|unsupported|does not exist)|(unknown|invalid|unparse?able|unresolved|unsupported|no such) model|no models? (found|available|match)|\b401\b|\b403\b|unauthori[sz]ed|authentication|invalid api key|incorrect api key|api key|quota|insufficient|billing|credit)`)
+	// rate-limit class (polyforge#147 D7): ONLY transient throttling.
+	// Another model would be throttled just the same (and a switch would
+	// burn the chain), so these never advance the candidate pointer: the
+	// driver waits out a backoff and retries the SAME model. Allowance
+	// problems (quota, billing, credit, insufficient ...) are NOT here:
+	// they are model-class and switch candidates.
+	rateLimitPatterns = regexp.MustCompile(`(?i)(\b429\b|rate.?limit|too many requests|overloaded)`)
 )
 
 // classifyWaitFailure maps a Wait error (not a cancellation) onto a
@@ -153,7 +218,17 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 			// before any text match: leftover stderr must never turn a
 			// clean stop into a model fault that burns a candidate.
 			return FailEndedWithoutResult, ee.ExitCode, ee.Error()
-		case ee.TurnError || modelPatterns.MatchString(text):
+		case modelPatterns.MatchString(text):
+			// evaluated before the throttle class: a text that names a
+			// model/auth/allowance problem ("429 ... exceeded your
+			// current quota", "403 insufficient permissions") switches
+			// candidates even when it also carries a throttle signature
+			return FailExitModel, ee.ExitCode, ee.Error()
+		case rateLimitPatterns.MatchString(text):
+			// a pure throttle (the error turn it usually ends is the
+			// throttle itself): same-model backoff retry
+			return FailRateLimited, ee.ExitCode, ee.Error()
+		case ee.TurnError:
 			return FailExitModel, ee.ExitCode, ee.Error()
 		default:
 			return FailExitOther, ee.ExitCode, ee.Error()
@@ -166,9 +241,12 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 	}
 	// A harness that died at startup never read its prompt (EPIPE on the
 	// write); the error carries its stderr, and a model-class text there
-	// advances the candidate chain (F4).
+	// advances the candidate chain (F4) — a pure throttle text does not.
 	if modelPatterns.MatchString(err.Error()) {
 		return FailExitModel, -1, err.Error()
+	}
+	if rateLimitPatterns.MatchString(err.Error()) {
+		return FailRateLimited, -1, err.Error()
 	}
 	return FailExitOther, -1, err.Error()
 }
@@ -192,16 +270,13 @@ func isHostError(err error) bool {
 // ---------------------------------------------------------------------------
 // Thresholds.
 
-// stepLimits answers the bases of one step: global defaults overridden by
-// the workflow's step-level values.
+// stepLimits answers the bases of one step: the global defaults, with
+// the wall base raised around the step's budget estimate.
 func (d *Driver) stepBases(stepID string) (silence, tool, wall time.Duration) {
 	def := d.cfg.Limits.Fill()
 	tool, wall = def.Tool, def.StepTimeout
 	silence = 0 // resolved per harness below
 	if spec := d.workflow.step(stepID); spec != nil {
-		if spec.ToolMinutes > 0 {
-			tool = time.Duration(spec.ToolMinutes) * time.Minute
-		}
 		if spec.WallMinutes > 0 {
 			// budget.wall_minutes is an ESTIMATE, not a hard limit: the
 			// step's total-time bound is generous around it, never below
@@ -209,9 +284,6 @@ func (d *Driver) stepBases(stepID string) (silence, tool, wall time.Duration) {
 			if est := time.Duration(spec.WallMinutes) * time.Minute * WallEstimateFactor; est > wall {
 				wall = est
 			}
-		}
-		if spec.SilenceMinutes > 0 {
-			silence = time.Duration(spec.SilenceMinutes) * time.Minute
 		}
 	}
 	return silence, tool, wall
@@ -235,10 +307,10 @@ func (d *Driver) effectiveThresholdsLocked(stepID string, gran supervise.Granula
 				th.StepTimeout = r
 			}
 		}
+		// T is CUMULATIVE over the whole step (polyforge#147 D6): a
+		// switch to another candidate or a human continue does not
+		// reopen the window — only a rewind's fresh start zeroes it.
 		spent := st.BudgetConsumed.WallMs
-		if st.Supervision != nil {
-			spent -= st.Supervision.RuntimeBaseMs
-		}
 		if spent < 0 {
 			spent = 0
 		}
@@ -394,6 +466,9 @@ type failureDecision struct {
 	RelaxToolMs int64
 	RelaxWallMs int64
 	Fresh       bool
+	// Backoff is the wait the driver owes before the next dispatch of
+	// this step (D7: a rate-limit disposal only ever backs off).
+	Backoff time.Duration
 }
 
 func (dec failureDecision) disposition() string {
@@ -416,10 +491,20 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 	}
 	cands := d.effectiveCandidates(stepID)
 	switch {
+	case f.Cause == FailResultInvalid:
+		dec.Block = true
+		dec.Report = true
+		dec.BlockReason = fmt.Sprintf("step %s: result_invalid: the result envelope stayed invalid through the in-process retry bound (%d): %s",
+			stepID, maxEnvelopeRejects, f.Detail)
 	case f.Cause == FailExitHost:
 		dec.Block = true
 		dec.Report = true
 		dec.BlockReason = fmt.Sprintf("host-class fault (%s): the machine, not the model, is broken: %s", f.Cause, f.Detail)
+	case f.Cause == FailRateLimited:
+		// D7: the provider throttled us. No switch (the chain is not
+		// spent by someone else's quota) and no block — the backoff
+		// before the next dispatch is the whole disposal.
+		dec.Backoff = rateLimitBackoff(rateLimitStreak(st.Attempts))
 	case IsModelClass(f.Cause):
 		ptr := CandidatePointer(st.Attempts, cands)
 		switch {
@@ -443,22 +528,31 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 			cur = tool
 		}
 		dec.RelaxToolMs = (2 * cur).Milliseconds()
+	case FailStepTimeoutSlowModel:
+		// A timeout-class death relaxes the step's wall budget x2 and
+		// persists it (polyforge#147 D6): the next candidate runs under
+		// the DOUBLED bound, with the cumulative runtime carried over —
+		// never judged timed out at its own startup.
+		dec.RelaxWallMs = d.doubledWallLocked(stepID, sup)
 	case FailStepTimeoutLongTask:
+		// every long-task timeout doubles T — the second one too, before
+		// it blocks, so a human continue gets a fresh doubled window
+		// instead of dying on the bound it just exhausted
+		dec.RelaxWallMs = d.doubledWallLocked(stepID, sup)
 		if sup.LongTaskTimeouts >= 1 && !dec.Block {
 			dec.Block = true
 			dec.BlockReason = "second step timeout (step_timeout_long_task) after T was already relaxed: " + f.Detail
-		} else {
-			_, _, wall := d.stepBases(stepID)
-			cur := time.Duration(sup.RelaxedWallMs) * time.Millisecond
-			if cur < wall {
-				cur = wall
-			}
-			dec.RelaxWallMs = (2 * cur).Milliseconds()
 		}
 	}
 	if dec.Switch {
 		dec.Count = 0 // a new candidate starts a fresh ledger
 		dec.Fresh = true
+	} else if f.Cause == FailRateLimited {
+		// D7: a throttle is not the step failing. The counter that
+		// blocks never moves (no retry bound below T) and the retry
+		// resumes the transcript it already has.
+		dec.Count = sup.FailureCount
+		dec.Fresh = false
 	} else {
 		dec.Count = sup.FailureCount + 1
 		if dec.Count >= d.maxStepFailures() && !dec.Block {
@@ -471,23 +565,17 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 	return dec
 }
 
-// applyRejectEscalatedLocked counts one envelope-rejection escalation
-// (a driver relaunch) in the step's persisted ledger; the bound blocks.
-func (d *Driver) applyRejectEscalatedLocked(req TransitionRequest, info *appliedInfo) error {
-	if err := d.requireRunningStep(req.StepID); err != nil {
-		return err
+// doubledWallLocked answers the step's relaxed wall budget after one
+// more relaxation: the current bound (the persisted relaxed value, or
+// the step's base when it was never relaxed) doubled. Only timeout-class
+// deaths call it — every other disposal leaves T alone.
+func (d *Driver) doubledWallLocked(stepID string, sup capsule.StepSupervision) int64 {
+	_, _, wall := d.stepBases(stepID)
+	cur := time.Duration(sup.RelaxedWallMs) * time.Millisecond
+	if cur < wall {
+		cur = wall
 	}
-	st := d.exec.Steps[req.StepID]
-	if st.Supervision == nil {
-		st.Supervision = &capsule.StepSupervision{}
-	}
-	st.Supervision.RejectRelaunches++
-	if st.Supervision.RejectRelaunches >= maxRejectRelaunches {
-		d.exec.WorkflowStatus = StatusBlocked
-		d.exec.BlockedReason = fmt.Sprintf("step %s: the result envelope was rejected through %d driver relaunches (bound %d): %s",
-			req.StepID, st.Supervision.RejectRelaunches, maxRejectRelaunches, req.Reason)
-	}
-	return nil
+	return (2 * cur).Milliseconds()
 }
 
 // applyStepFailedLocked records one failed dispatch: the attempt (with
@@ -537,15 +625,13 @@ func (d *Driver) applyStepFailedLocked(req TransitionRequest, info *appliedInfo)
 	if dec.Fresh {
 		sup.NextDispatch = capsule.NextDispatchFresh
 	}
-	if f.WallMs > 0 {
-		st.BudgetConsumed.WallMs += f.WallMs
-		d.exec.BudgetConsumed.WallMs += f.WallMs
+	// D7: the backoff wait counts into the step's cumulative T (the
+	// owner's bound on same-model retries), booked with the dispatch.
+	if wall := f.WallMs + dec.Backoff.Milliseconds(); wall > 0 {
+		st.BudgetConsumed.WallMs += wall
+		d.exec.BudgetConsumed.WallMs += wall
 	}
-	if dec.Switch {
-		// the new candidate gets a fresh T window (the old one's slow or
-		// hung time is not its to repay)
-		sup.RuntimeBaseMs = st.BudgetConsumed.WallMs
-	}
+	f.Backoff = dec.Backoff
 	if dec.Block {
 		d.exec.WorkflowStatus = StatusBlocked
 		d.exec.BlockedReason = dec.BlockReason
@@ -609,7 +695,7 @@ func (d *Driver) bookWall(stepID string, since time.Time) {
 // applies the death-cause table. blocked reports that the decision
 // parked the workflow (Run then exits cleanly: the owner holds the next
 // move).
-func (d *Driver) failDispatch(stepID string, n int64, since time.Time, cause string, exitCode int, detail string) (blocked bool, err error) {
+func (d *Driver) failDispatch(ctx context.Context, stepID string, n int64, since time.Time, cause string, exitCode int, detail string) (blocked bool, err error) {
 	d.addUnbooked(stepID, since)
 	wall := d.takeUnbooked(stepID)
 	last := detail
@@ -617,18 +703,41 @@ func (d *Driver) failDispatch(stepID string, n int64, since time.Time, cause str
 		last = last[:500]
 	}
 	d.announceEnd(stepID, n, supervise.OutcomeExitedWithoutResult, exitCode, last)
+	f := &StepFailure{Cause: cause, Detail: detail, ExitCode: exitCode, WallMs: wall}
 	if err := d.transition(TransitionRequest{
 		Kind:    TransStepFailed,
 		StepID:  stepID,
 		SpawnN:  n,
-		Failure: &StepFailure{Cause: cause, Detail: detail, ExitCode: exitCode, WallMs: wall},
+		Failure: f,
 	}); err != nil {
 		return false, fmt.Errorf("driver: step %s dispatch %d failure record failed: %w", stepID, n, err)
 	}
 	d.mu.Lock()
 	blocked = d.exec.WorkflowStatus == StatusBlocked
 	d.mu.Unlock()
+	if !blocked {
+		// D7: wait out the throttle backoff the decision imposed (and
+		// already booked into T) before the same model is dispatched again
+		d.sleep(ctx, f.Backoff)
+	}
 	return blocked, nil
+}
+
+// sleep waits for d (tests inject Config.Sleep), cut short by ctx.
+func (d *Driver) sleep(ctx context.Context, wait time.Duration) {
+	if wait <= 0 {
+		return
+	}
+	if d.cfg.Sleep != nil {
+		d.cfg.Sleep(ctx, wait)
+		return
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // announceWaiting sends step_waiting_human for the current step's open

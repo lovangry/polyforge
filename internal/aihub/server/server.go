@@ -29,7 +29,6 @@ type Server struct {
 	Sessions *core.SessionManager
 	Admin    *core.AdminManager
 	Mems     *memory.Store
-	Ships    *core.ShipLedgerManager
 	Git      *git.Manager
 	DataDir  string
 
@@ -51,7 +50,6 @@ func New(db *core.DB, dataDir string, gitMgr *git.Manager) *Server {
 		Sessions: core.NewSessionManager(db),
 		Admin:    core.NewAdminManager(db),
 		Mems:     memory.NewStore(db, dataDir),
-		Ships:    core.NewShipLedgerManager(db, core.NewWIManager(db)),
 		Git:      gitMgr,
 		DataDir:  dataDir,
 	}
@@ -75,16 +73,12 @@ func (s *Server) routes() {
 	// Recovery door: an admin/maintainer force-ends a stuck holder's session
 	// (WI -> queued); any daemon then claims it normally.
 	m.HandleFunc("POST /api/v1/work-items/{id}/force-end-session", s.auth(s.hForceEndSession))
-	// polyforge#116: the §6.4 owner doors on a workflow parked blocked —
-	// resume (the owner's re-dispatch-in-place verdict, claimed back
-	// immediately) and the terminate verdict (pf wrap --fail on a parked WI).
+	// polyforge#116: the §6.4 owner resume door on a workflow parked
+	// blocked — resume (the owner's re-dispatch-in-place verdict, claimed
+	// back immediately). The abandon exit is cancel.
 	m.HandleFunc("POST /api/v1/work-items/{id}/resume-blocked", s.auth(s.hResumeBlockedWI))
-	m.HandleFunc("POST /api/v1/work-items/{id}/terminate-blocked", s.auth(s.hTerminateBlockedWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/dependencies", s.auth(s.hAddDep))
 	m.HandleFunc("GET /api/v1/work-items/{id}/dependencies", s.auth(s.hDeps))
-	// Ship ledger (polyforge#123, P1b): the ship bridge records each
-	// pushed repo's branch top; anyone who can read the WI queries it.
-	m.HandleFunc("POST /api/v1/work-items/{id}/ship-ledger", s.auth(s.hRecordShipLedger))
 	m.HandleFunc("DELETE /api/v1/work-items/{id}/dependencies/{blocking}/{kind}", s.auth(s.hDelDep))
 	m.HandleFunc("GET /api/v1/projects/{project}/ready-queue", s.auth(s.hReadyQueue))
 	m.HandleFunc("POST /api/v1/machines/heartbeat", s.auth(s.hHeartbeat))
@@ -93,7 +87,6 @@ func (s *Server) routes() {
 	// Memory face.
 	m.HandleFunc("POST /api/v1/memories", s.auth(s.hCreateMemory))
 	m.HandleFunc("GET /api/v1/memories/search", s.auth(s.hSearchMemory))
-	m.HandleFunc("POST /api/v1/memories/rebuild-index", s.authAdmin(s.hRebuildIndex))
 	m.HandleFunc("GET /api/v1/memories/{id}", s.auth(s.hGetMemory))
 	m.HandleFunc("POST /api/v1/memories/{id}/redact", s.auth(s.hRedactMemory))
 
@@ -178,9 +171,6 @@ type identity struct {
 func (s *Server) authenticate(r *http.Request) (*identity, error) {
 	h := r.Header.Get("Authorization")
 	token := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-	if token == "" {
-		token = strings.TrimSpace(r.Header.Get("X-API-Key"))
-	}
 	if token == "" {
 		return nil, core.Fail(api.ErrAuthUnauthorized, "", "missing api key")
 	}
@@ -351,9 +341,8 @@ func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity
 }
 
 // writeWI wraps a WorkItem with its public session audit block (m4:
-// session_fingerprint / session_machine / session_owner /
-// session_started_at / clean_pause; NEVER session_hash, never the
-// secret) and writes it.
+// session_fingerprint / session_machine / session_started_at /
+// clean_pause; NEVER session_hash, never the secret) and writes it.
 func (s *Server) writeWI(w http.ResponseWriter, status int, wi *api.WorkItem) {
 	view, err := s.WIs.View(wi)
 	if err != nil {
@@ -450,8 +439,8 @@ func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request, idn *identity)
 }
 
 // ownerMaintainerOrAdmin is the one authorization of the human decisions on
-// a work item — cancel (abandon) and the blocked exits (continue /
-// terminate; v2-converge §7, §11 item 7): the WI's reporter (the task
+// a work item — cancel (abandon) and the blocked exit (continue;
+// v2-converge §7, §11 item 7): the WI's reporter (the task
 // owner), a project maintainer, or a global admin.
 func (s *Server) ownerMaintainerOrAdmin(idn *identity, projectID, wiID string) bool {
 	if idn.Role == "admin" {
@@ -486,35 +475,6 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 		return
 	}
 	s.writeWI(w, http.StatusOK, wi)
-}
-
-// ---------------------------------------------------------------------------
-// Ship ledger (polyforge#123, P1b): record on ship, queryable per WI.
-
-// hRecordShipLedger serves POST /api/v1/work-items/{id}/ship-ledger: the
-// ship bridge's per-run recording face. Authorization is the ordinary
-// object-data WRITE rule (the same face the daemon's other reporting
-// calls use). Recording is an upsert per (WI, repo): the ledger answers
-// the LATEST delivery, not the history — the push history lives in git.
-func (s *Server) hRecordShipLedger(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.requireWrite(w, idn, projectID) {
-		return
-	}
-	var req api.ShipLedgerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, core.Fail(api.ErrCoreBadInput, "", "ship-ledger body is not valid JSON: %v", err))
-		return
-	}
-	if err := s.Ships.Record(id, req.Branch, req.Repos); err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded", "work_item_id": id})
 }
 
 // ---------------------------------------------------------------------------
@@ -711,7 +671,7 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 // (polyforge#116): the door `pf resume` exercises on a workflow parked
 // blocked on an honest incomplete result. Authorization (v2-converge §7):
 // the WI's reporter, a project maintainer, or an admin — the same gate as
-// terminate-blocked and cancel.
+// cancel.
 func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -727,36 +687,6 @@ func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *i
 		return
 	}
 	wi, err := s.WIs.ResumeBlocked(id, idn.UserID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
-}
-
-// hTerminateBlockedWI serves the §6.4 owner terminate verdict's hub door
-// (polyforge#116): `pf wrap --fail` on a parked workflow. Authorization is
-// the unified blocked-exit gate: reporter, project maintainer, or admin.
-func (s *Server) hTerminateBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "terminate-blocked requires the work item's reporter, a project maintainer or admin"))
-		return
-	}
-	wi, err := s.WIs.TerminateBlocked(id, idn.UserID)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -798,7 +728,9 @@ func (s *Server) hAddDep(w http.ResponseWriter, r *http.Request, idn *identity) 
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, s.depsView(blocked))
+	if deps := s.depsView(w, blocked); deps != nil {
+		writeJSON(w, http.StatusCreated, deps)
+	}
 }
 
 func (s *Server) hDeps(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -810,13 +742,20 @@ func (s *Server) hDeps(w http.ResponseWriter, r *http.Request, idn *identity) {
 	if !s.requireRead(w, idn, projectID, "work item %s", id) {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.depsView(id))
+	if deps := s.depsView(w, id); deps != nil {
+		writeJSON(w, http.StatusOK, deps)
+	}
 }
 
-func (s *Server) depsView(wiID string) *core.Deps {
+// depsView renders the dependency edges of wiID. A query failure is a
+// typed 5xx envelope via writeErr — never a false "no edges" answer
+// (audit B12: the empty lists stay reserved for a genuinely edge-free
+// work item). Answers nil after writing the error envelope.
+func (s *Server) depsView(w http.ResponseWriter, wiID string) *core.Deps {
 	deps, err := s.WIs.Dependencies(wiID)
 	if err != nil {
-		return &core.Deps{Blocking: []core.Edge{}, BlockedBy: []core.Edge{}}
+		writeErr(w, err)
+		return nil
 	}
 	return deps
 }
@@ -844,7 +783,9 @@ func (s *Server) hDelDep(w http.ResponseWriter, r *http.Request, idn *identity) 
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.depsView(blocked))
+	if deps := s.depsView(w, blocked); deps != nil {
+		writeJSON(w, http.StatusOK, deps)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,16 +952,27 @@ func (s *Server) memAllowed(idn *identity) func(*memory.Entry) bool {
 	}
 }
 
-func (s *Server) memReadAllowed(idn *identity, projectID string) error {
+// memReadAllowed is the coarse project gate of a memory READ. A denied
+// gate must answer the same not-found shape as a genuinely missing
+// memory — object existence must not leak (02-aihub-core.md §4.10: a
+// non-member's read is 404, only writes are 403) — so membership
+// denial and project-scope mismatch both land as MEM-404 carrying the
+// memory's own id, indistinguishable from memRead's visibility-tier
+// 404 below. The write path keeps MEM-403 (memWriteAllowed); real
+// storage errors still propagate.
+func (s *Server) memReadAllowed(idn *identity, projectID, memID string) error {
 	if idn.Role == "admin" {
 		return nil
 	}
-	ok, err := s.canRead(idn, projectID)
+	if err := scopeCheck(idn, projectID); err != nil {
+		return core.Fail(api.ErrMemNotFound, "", "memory %q", memID)
+	}
+	role, err := s.memberRole(projectID, idn.UserID)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return core.Fail(api.ErrMemForbidden, "", "no access to this project's memories")
+	if role == "" {
+		return core.Fail(api.ErrMemNotFound, "", "memory %q", memID)
 	}
 	return nil
 }
@@ -1091,7 +1043,7 @@ func (s *Server) memRead(idOrSlug string, idn *identity) (*memory.Entry, []byte,
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.memReadAllowed(idn, e.ProjectID); err != nil {
+	if err := s.memReadAllowed(idn, e.ProjectID, memID); err != nil {
 		return nil, nil, err
 	}
 	allowed := s.memAllowed(idn)
@@ -1131,7 +1083,27 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	excerpt, _ := strconv.Atoi(q.Get("excerpt"))
-	s.hSearchRun(w, q.Get("q"), q.Get("type"), tags, limit, excerpt, idn)
+	// project= narrows the search to one project (audit B5): the
+	// parameter used to be silently dropped, so every search spanned
+	// every project the caller could read. It is resolved, then
+	// read-gated with the same non-leaking not-found shape the rest of
+	// the read face uses (an unresolvable and an inaccessible project
+	// answer identically), and applied in the candidate predicate IN
+	// ADDITION to — never instead of — the membership and visibility
+	// layers (06-memory-search.md §7's fixed two-layer order).
+	project := ""
+	if p := q.Get("project"); p != "" {
+		projectID, err := s.projectIDOf(p)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		if !s.requireRead(w, idn, projectID, "project %q", p) {
+			return
+		}
+		project = projectID
+	}
+	s.hSearchRun(w, q.Get("q"), q.Get("type"), tags, project, limit, excerpt, idn)
 }
 
 // maxMemoryExcerptRunes bounds the content excerpt a search answer may
@@ -1154,7 +1126,7 @@ type memoryHitList struct {
 	Total int         `json:"total"`
 }
 
-func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags []string, limit, excerpt int, idn *identity) {
+func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags []string, project string, limit, excerpt int, idn *identity) {
 	// Membership-first filtering: restrict to the projects the caller can
 	// read before visibility tiers apply.
 	allowed := s.memAllowed(idn)
@@ -1165,6 +1137,11 @@ func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags [
 			if err != nil || !ok {
 				return false
 			}
+		}
+		// The requested project (B5) narrows the membership-filtered
+		// candidate set further; an empty value keeps the union.
+		if project != "" && e.ProjectID != project {
+			return false
 		}
 		return baseAllowed(e)
 	}
@@ -1219,15 +1196,6 @@ func firstRunes(s string, n int) string {
 		c++
 	}
 	return s
-}
-
-func (s *Server) hRebuildIndex(w http.ResponseWriter, r *http.Request, idn *identity) {
-	n, err := s.Mems.RebuildIndex()
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]int{"reindexed": n})
 }
 
 // ---------------------------------------------------------------------------

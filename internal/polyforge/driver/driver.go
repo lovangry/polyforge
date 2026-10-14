@@ -2,7 +2,8 @@
 // replacement for the LLM-driven WI Agent inside the daemon. The driver
 // reads runtime-state/execution.json to determine the current state,
 // spawns step processes (harness sessions) directly, validates step
-// results against the R13 envelope (artifacts verified by hash), writes
+// results against the minimal result envelope (outcome + output, plus
+// the V4 command-evidence gate; no hashes, no manifest), writes
 // execution.json exclusively through the single transition entry point
 // (transition.go), and advances the workflow on validated results.
 //
@@ -36,10 +37,9 @@ import (
 
 // WIInfo identifies the work item one Driver drives.
 type WIInfo struct {
-	ID           string
-	CapsuleDir   string
-	BundleName   string
-	BundleDigest string
+	ID         string
+	CapsuleDir string
+	BundleName string
 }
 
 // EventLogger is the driver's event emission face — the shape of
@@ -100,6 +100,10 @@ type Config struct {
 	MaxStepFailures int
 	// Now overrides the clock (tests).
 	Now func() time.Time
+	// Sleep overrides the driver's waits (the D7 rate-limit backoff);
+	// nil = a real timer cut short by the context. Tests inject a
+	// recorder so the backoff curve is asserted without the wall time.
+	Sleep func(ctx context.Context, d time.Duration)
 }
 
 // InterruptedDispatch records one derivation that ended without a
@@ -302,7 +306,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			// a failed dispatch like any other — classified, counted,
 			// retried or blocked.
 			cause, code, detail := classifyWaitFailure(fmt.Errorf("driver: step %s spawn %d failed: %w", stepID, n, err))
-			if blocked, ferr := d.failDispatch(stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
+			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
 				return ferr
 			} else if blocked {
 				return nil
@@ -317,7 +321,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			d.emit("step_dead", map[string]any{
 				"step": stepID, "spawn_n": n, "cause": verdict.Cause, "evidence": verdict.Evidence,
 			})
-			if blocked, ferr := d.failDispatch(stepID, n, dispatchedAt, string(verdict.Cause), -1, verdict.Evidence); ferr != nil {
+			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, string(verdict.Cause), -1, verdict.Evidence); ferr != nil {
 				return ferr
 			} else if blocked {
 				return nil
@@ -335,7 +339,7 @@ func (d *Driver) Run(ctx context.Context) error {
 				return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, werr)
 			}
 			cause, code, detail := classifyWaitFailure(werr)
-			if blocked, ferr := d.failDispatch(stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
+			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
 				return ferr
 			} else if blocked {
 				return nil
@@ -348,7 +352,7 @@ func (d *Driver) Run(ctx context.Context) error {
 		if verr := d.validateResultStrict(res, stepID, n); verr != nil {
 			// Envelope-authoring errors are STEP-CONTENT failures, not
 			// infrastructure (the #97/#107 lessons: a hand-transcribed digest
-			// typo, a missing handoff_ref — each used to cost a whole driver
+			// typo, a missing handoff digest — each used to cost a whole driver
 			// restart through the recovery lane, and two rejections inside
 			// the storm window bounded-failed the WI outright). The driver
 			// re-dispatches the step in-process with the rejection as visible
@@ -385,21 +389,23 @@ func (d *Driver) Run(ctx context.Context) error {
 					"step": stepID, "spawn_n": n, "rejections": count,
 					"detail": "persistent envelope rejection: the result contract is broken, not the model; reported to the owner",
 				})
-				// the in-memory counter dies with this driver: persist the
-				// escalation so a relaunch loop is bounded (the third one
-				// blocks the step instead of relaunching)
+				// the in-process retry bound is spent: the step goes BLOCKED
+				// with the result_invalid cause code — no driver relaunch
+				// through the recovery lane, no on_fail routing (rewind stays
+				// reserved for review FAIL verdicts).
 				if err := d.transition(TransitionRequest{
-					Kind: TransRejectEscalated, StepID: stepID, SpawnN: n, Reason: verr.Error(),
+					Kind: TransStepFailed, StepID: stepID, SpawnN: n,
+					Failure: &StepFailure{Cause: FailResultInvalid, Detail: verr.Error()},
 				}); err != nil {
-					return fmt.Errorf("driver: step %s rejection escalation record failed: %w", stepID, err)
+					return fmt.Errorf("driver: step %s result-invalid block failed: %w", stepID, err)
 				}
 				d.mu.Lock()
 				blocked := d.exec.WorkflowStatus == StatusBlocked
 				d.mu.Unlock()
 				if blocked {
-					return nil
+					return nil // blocked, not relaunchable: a clean stop
 				}
-				return fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d): %w",
+				return fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d) but the block did not land: %w",
 					stepID, n, count, maxEnvelopeRejects, verr)
 			}
 			continue // in-process re-dispatch: the step is still in_progress
@@ -607,31 +613,6 @@ func (d *Driver) Answer(questionID, answer, answeredBy string) error {
 	return nil
 }
 
-// Rewind is the operator rewind verdict: archive and reset
-// [toStep, current), position back to toStep (the owner's §6.4 move
-// after an incomplete result, or an in-flight correction). See
-// applyRewindLocked for the open-question refusal while running.
-func (d *Driver) Rewind(toStep, reason string) error {
-	return d.transition(TransitionRequest{
-		Kind:   TransRewind,
-		StepID: toStep,
-		Reason: reason,
-		SpawnN: d.currentSpawnN(),
-	})
-}
-
-// Terminate lands a terminal workflow_status with a reason (the owner's
-// kill verdict from blocked, or the daemon's close path). completed is
-// refused unless every step is done — that status is the loop's alone.
-func (d *Driver) Terminate(status, reason string) error {
-	return d.transition(TransitionRequest{
-		Kind:   TransTerminal,
-		Status: status,
-		Reason: reason,
-		SpawnN: d.currentSpawnN(),
-	})
-}
-
 // ResumeCurrent is the owner's third §6.4 verdict after an incomplete
 // result: write running back over the parked workflow (03 §4.2: the
 // owner's follow-up writes running back) and wake the loop, whose own
@@ -747,8 +728,8 @@ type StepSpawn struct {
 	Fresh bool
 	// PriorRejection is the verbatim validation error the PREVIOUS
 	// dispatch's envelope was rejected for (the in-process retry lane):
-	// the step author sees exactly what to fix — digests computed
-	// programmatically, required fields present — instead of blindly
+	// the step author sees exactly what to fix — required fields
+	// present, evidence carried — instead of blindly
 	// re-authoring. Empty on a fresh dispatch.
 	PriorRejection string
 	// PriorEndedWithoutResult tells the retry that the previous dispatch's
@@ -768,55 +749,38 @@ type StepRun interface {
 }
 
 // ---------------------------------------------------------------------------
-// Result envelope (R13).
-
-// StepResult is the R13 result envelope every step process returns.
-// SpawnN is the fencing key; ResultID the idempotency key (the R14
-// accept staging in result.go rides on it).
-
-// ---------------------------------------------------------------------------
-// Result validation (the core's accept gate; the full output-schema
-// validation is validate.go's later lane — this is the envelope,
-// output-shape, handoff and artifact-manifest layer).
+// Result validation (the core's accept gate on the minimal envelope).
 
 // validateResultStrict is the accept-path check before the step_result
 // transition. It builds a ResultSpec from the driver's current state and
-// delegates to result.ValidateStepResult (the R14 staging gates: shape,
-// binding/fencing, idempotency, output schema, handoff duty, artifact
-// verification under os.OpenRoot jail). A failure is an infrastructure-class
-// rejection — Run surfaces it and the recovery lane owns re-derivation.
+// delegates to ValidateStepResult (the staging gates: shape, binding and
+// fencing, the needs_input question pair, the verdict binding, the
+// human-gate guarantee, the release verdict binding and the V4
+// command-evidence gate). A
+// failure is an infrastructure-class rejection — Run surfaces it and the
+// recovery lane owns re-derivation.
 func (d *Driver) validateResultStrict(res *StepResult, stepID string, n int64) error {
 	spec := d.buildResultSpec(stepID, n)
 	return ValidateStepResult(res, spec)
 }
 
 // buildResultSpec assembles the read-only validation snapshot from the
-// driver's current durable state (the extended workflow's declared outputs
-// and handoff duty, plus the accepted result ids already committed).
+// driver's current durable state (gate policy, human-answer duty, the
+// answers of the current attempt chain and the command-evidence duty).
 func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	spec := ResultSpec{
-		WIID:        d.wi.ID,
-		StepID:      stepID,
-		SpawnN:      n,
-		AcceptedIDs: make(map[string]bool),
-		CapsuleRoot: d.cfg.WI.CapsuleDir,
+		WIID:   d.wi.ID,
+		StepID: stepID,
+		SpawnN: n,
 	}
-	// Accepted IDs: harvest from the step's committed attempt records.
 	d.mu.Lock()
 	if st, ok := d.exec.Steps[stepID]; ok {
-		for _, at := range st.Attempts {
-			if at.AcceptedResultID != "" {
-				spec.AcceptedIDs[at.AcceptedResultID] = true
-			}
-		}
 		spec.HumanAnswers = currentChainAnswers(st)
 	}
 	d.mu.Unlock()
-	// Declared outputs, handoff duty and gate-ness (gate-ness feeds the
+	// Declared outputs, gate-ness and duties (gate-ness feeds the
 	// verdict binding — the #106 lesson).
 	if ss := d.workflow.step(stepID); ss != nil {
-		spec.Outputs = ss.Outputs
-		spec.HandoffRequired = ss.Handoff
 		spec.Gate = ss.Gate
 		spec.RequiresHumanAnswer = ss.RequiresHumanAnswer
 		spec.RequireCommandEvidence = ss.RequiresCommandEvidence
@@ -845,25 +809,20 @@ func parseOutput(raw json.RawMessage) (map[string]any, error) {
 }
 
 // verdictFor assembles the gate FAIL policy the transition applies:
-// the workflow's on_fail declaration (terminate is the default when
-// absent) plus the verdict text — the result's output payload in full,
-// or a synthesized note when the gate produced none.
+// the workflow's on_fail rewind target (absent = no rewind edge, the
+// workflow fails on the gate) plus the verdict text — the result's
+// output payload in full, or a synthesized note when the gate produced
+// none.
 func (d *Driver) verdictFor(stepID string, res *StepResult) *GateVerdict {
 	v := &GateVerdict{
 		GateStepID:  stepID,
 		VerdictText: strings.TrimSpace(string(res.Output)),
 	}
 	if v.VerdictText == "" {
-		v.VerdictText = fmt.Sprintf("gate %s FAIL (spawn %d, result %s)", stepID, res.SpawnN, res.ResultID)
+		v.VerdictText = fmt.Sprintf("gate %s FAIL (spawn %d)", stepID, res.SpawnN)
 	}
 	if spec := d.workflow.step(stepID); spec != nil && spec.OnFail != nil {
-		v.Action = spec.OnFail.Action
 		v.TargetStep = spec.OnFail.Target
-		v.IncludeVerdict = spec.OnFail.IncludeVerdict
-	}
-	if v.Action != "rewind" {
-		v.Action = "terminate"
-		v.TargetStep = ""
 	}
 	return v
 }
@@ -908,7 +867,6 @@ func skeletonExecution(wi WIInfo, wf *Workflow) *capsule.Execution {
 	exec := &capsule.Execution{
 		CapsuleID:      capsuleIDFor(wi.ID),
 		WorkItemID:     wi.ID,
-		BundleDigest:   wi.BundleDigest,
 		WorkflowStatus: StatusRunning,
 		Steps:          map[string]*capsule.Step{},
 	}

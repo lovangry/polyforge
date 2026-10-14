@@ -110,7 +110,6 @@ func TestGoldenWIDetail(t *testing.T) {
 	// clean_pause — the public handle only, never the secret.
 	wi.SessionFingerprint = "ab12cd34ef56aa00"
 	wi.SessionMachine = "m-b"
-	wi.SessionOwner = "op"
 	wi.SessionStartedAt = "2026-10-01T00:00:00Z"
 	wi.CleanPause = true
 	b.Reset()
@@ -123,7 +122,7 @@ func TestGoldenWIDetail(t *testing.T) {
   milestone: m1
   labels:   infra
   bundle:   -
-  session:  ab12cd34ef56aa00 (machine m-b, owner op) since 2026-10-01T00:00:00Z
+  session:  ab12cd34ef56aa00 (machine m-b) since 2026-10-01T00:00:00Z
   clean-pause: yes (operator pause; restart will not auto-resume)
   created:  t0
 `)

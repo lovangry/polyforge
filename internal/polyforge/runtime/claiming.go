@@ -185,7 +185,6 @@ func (r *Runtime) resumeClaiming(ctx context.Context) {
 			WorkItemID:     rec.WorkItemID,
 			SessionID:      rec.SessionID,
 			MachineID:      rec.MachineID,
-			Owner:          rec.MachineID,
 			IdempotencyKey: rec.IdempotencyKey,
 		})
 		if err != nil {

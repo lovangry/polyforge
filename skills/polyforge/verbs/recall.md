@@ -35,7 +35,7 @@ table of ID, TYPE, CONTENT, UPDATED, TAGS.
 |---|---|---|
 | `AUTH-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
 | `MEM-400` | Blank query | Give the search words — an empty query is refused. |
-| `MEM-404` | Unknown or missing project | The project does not exist (or you cannot see it) — check `--project`; `pf doctor` checks the `[workspace]` mapping. |
+| `CORE-404` | Unknown project, or you are not a member of it | The project does not exist (or you cannot see it) — check `--project`; `pf doctor` checks the `[workspace]` mapping. |
 
 Zero hits are **not** an error: the table simply says `0 hit(s)`. Try
 different wording or drop a tag filter before concluding nothing is stored.

@@ -189,7 +189,7 @@ func TestV1S16EmptyQuestionIDRefused(t *testing.T) {
 	if len(x.Steps["grill"].Answers) != 1 || x.Steps["grill"].Answers[0]["question_id"] != goodQID {
 		t.Fatalf("the well-formed answer was not archived: %+v", x.Steps["grill"].Answers)
 	}
-	// The refusal cost exactly one re-dispatch: six derivations, in plan
+	// The refusal cost exactly one re-dispatch: five derivations, in plan
 	// order, and the sealed chain carries the whole story.
 	if n := len(spawnJournal(t, capDir)); n != 5 {
 		t.Fatalf("spawn journal has %d entries, want 5 (the refused dispatch consumed ordinal 1)", n)
@@ -255,7 +255,7 @@ func TestV1S16DuplicateDropSameIDIsIdempotent(t *testing.T) {
 	attempts := x.Steps["grill"].Attempts
 	accepted := 0
 	for _, a := range attempts {
-		if a["accepted_result_id"] != nil {
+		if a["cause"] == "accepted" {
 			accepted++
 		}
 	}

@@ -23,8 +23,7 @@ import (
 func newManualRuntime(t *testing.T, hub *fakeHub) (*Runtime, string) {
 	t.Helper()
 	setGitIdentity(t)
-	wfDir, pinned := frontmatterBundle(t, w079Frontmatter)
-	hub.digest = pinned
+	wfDir := frontmatterBundle(t, w079Frontmatter)
 	ws := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)

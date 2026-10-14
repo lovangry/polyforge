@@ -7,21 +7,17 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // frontmatterBundle writes a demo bundle whose workflow.md carries real
-// frontmatter (kinds + candidate layers) and answers the digest an
-// honest pin of that content would carry.
-func frontmatterBundle(t *testing.T, frontmatter string) (workflowsDir, pinned string) {
+// frontmatter (kinds + candidate layers) and answers the workflows dir.
+func frontmatterBundle(t *testing.T, frontmatter string) (workflowsDir string) {
 	t.Helper()
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "demo-bundle")
@@ -34,13 +30,7 @@ func frontmatterBundle(t *testing.T, frontmatter string) (workflowsDir, pinned s
 	if err := os.WriteFile(filepath.Join(bundle, "steps", "step.md"), []byte("do the thing\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fmSum := sha256.Sum256([]byte(frontmatter))
-	stepSum := sha256.Sum256([]byte("do the thing\n"))
-	pinned = workflow.Digest([]workflow.FileEntry{
-		{Path: "workflow.md", Sha256: hex.EncodeToString(fmSum[:]), Bytes: uint64(len(frontmatter))},
-		{Path: "steps/step.md", Sha256: hex.EncodeToString(stepSum[:]), Bytes: 13},
-	})
-	return dir, pinned
+	return dir
 }
 
 const w079Frontmatter = `---
@@ -60,9 +50,8 @@ steps:
 // the workspace yaml, keyed by step id.
 func TestClaimComposeRidesTheJob(t *testing.T) {
 	setGitIdentity(t)
-	wfDir, pinned := frontmatterBundle(t, w079Frontmatter)
+	wfDir := frontmatterBundle(t, w079Frontmatter)
 	hub := newFakeHub()
-	hub.digest = pinned
 	ws := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
@@ -114,9 +103,8 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 // the driver's parsed step lists, so substitution is a no-op.
 func TestClaimComposeWithoutYamlIsBundleOnly(t *testing.T) {
 	setGitIdentity(t)
-	wfDir, pinned := frontmatterBundle(t, w079Frontmatter)
+	wfDir := frontmatterBundle(t, w079Frontmatter)
 	hub := newFakeHub()
-	hub.digest = pinned
 	ws := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)

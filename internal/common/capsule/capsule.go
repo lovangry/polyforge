@@ -40,13 +40,12 @@ const GitignoreContent = "/repos/\n/artifacts/release-*/\n"
 // deleted: capsules still carrying those keys parse fine — encoding/json
 // ignores unknown keys.
 type Identity struct {
-	WorkItemID   string            `json:"work_item_id"`
-	CapsuleID    string            `json:"capsule_id"`
-	Project      string            `json:"project"`
-	BundleName   string            `json:"bundle_name"`
-	BundleDigest string            `json:"bundle_digest"`
-	Repos        map[string]string `json:"repos"` // repo name -> checked-out SHA at claim
-	CreatedAt    string            `json:"created_at"`
+	WorkItemID string            `json:"work_item_id"`
+	CapsuleID  string            `json:"capsule_id"`
+	Project    string            `json:"project"`
+	BundleName string            `json:"bundle_name"`
+	Repos      map[string]string `json:"repos"` // repo name -> checked-out SHA at claim
+	CreatedAt  string            `json:"created_at"`
 }
 
 // WorkItemDoc is runtime-state/work-item.json: the daemon-materialized
@@ -58,17 +57,16 @@ type Identity struct {
 // claim answer is its only source, and recovery re-materializes it from
 // aihub when a legacy capsule predates it.
 type WorkItemDoc struct {
-	ID           string   `json:"id"`
-	Slug         string   `json:"slug,omitempty"`
-	Project      string   `json:"project"`
-	Goal         string   `json:"goal"`
-	Content      *string  `json:"content"`
-	Labels       []string `json:"labels"`
-	Priority     string   `json:"priority"`
-	Milestone    *string  `json:"milestone"`
-	BundleName   string   `json:"bundle_name"`
-	BundleDigest string   `json:"bundle_digest"`
-	UpdatedAt    string   `json:"updated_at"`
+	ID         string   `json:"id"`
+	Slug       string   `json:"slug,omitempty"`
+	Project    string   `json:"project"`
+	Goal       string   `json:"goal"`
+	Content    *string  `json:"content"`
+	Labels     []string `json:"labels"`
+	Priority   string   `json:"priority"`
+	Milestone  *string  `json:"milestone"`
+	BundleName string   `json:"bundle_name"`
+	UpdatedAt  string   `json:"updated_at"`
 }
 
 // Session is session.json: per-derivation harness session bookkeeping
@@ -104,7 +102,6 @@ const (
 type Execution struct {
 	CapsuleID      string           `json:"capsule_id"`
 	WorkItemID     string           `json:"work_item_id"`
-	BundleDigest   string           `json:"bundle_digest"`
 	CurrentStep    string           `json:"current_step"`
 	WorkflowStatus string           `json:"workflow_status"`
 	Steps          map[string]*Step `json:"steps"`
@@ -162,22 +159,10 @@ type StepSupervision struct {
 	// relaxation doubles); zero = never relaxed.
 	RelaxedToolMs int64 `json:"relaxed_tool_ms,omitempty"`
 	RelaxedWallMs int64 `json:"relaxed_wall_ms,omitempty"`
-	// RuntimeBaseMs is the part of the step's booked wall time the T clock
-	// no longer counts: a switch to a new candidate model (or a human
-	// continue) starts a fresh T window instead of handing the newcomer a
-	// budget the previous one already spent. The cumulative step runtime
-	// T is judged against is budget_consumed.wall_ms - runtime_base_ms.
-	RuntimeBaseMs int64 `json:"runtime_base_ms,omitempty"`
 	// NextDispatch shapes the next dispatch after a failure: "" resumes
 	// the transcript, "fresh" starts a new conversation with the previous
 	// transcript as read-only reference. Cleared by the next step_start.
 	NextDispatch string `json:"next_dispatch,omitempty"`
-	// RejectRelaunches counts the driver relaunches a persistently
-	// rejected result envelope forced (the in-process rejection bound
-	// spent). Persisted because the in-memory rejection counter dies with
-	// the driver; the bound blocks the step. Reset by an accepted result
-	// and by a human continue.
-	RejectRelaunches int `json:"reject_relaunches,omitempty"`
 }
 
 // NextDispatchFresh is the StepSupervision.NextDispatch value that
@@ -194,9 +179,6 @@ type Attempt struct {
 	RewindGate     string          `json:"rewind_gate,omitempty"`
 	InterruptedAt  string          `json:"interrupted_at,omitempty"`
 	Detail         string          `json:"detail,omitempty"`
-	// AcceptedResultID is the R13 envelope result_id committed at the
-	// R14 commit point — populated only for accepted step results.
-	AcceptedResultID string `json:"accepted_result_id,omitempty"`
 	// FailureCause is the supervision sub-class of an infra_failure
 	// attempt (harness_silent, model_error, model_hung, tool_hung,
 	// step_timeout_long_task, step_timeout_slow_model, exit_model_class,
@@ -205,9 +187,7 @@ type Attempt struct {
 }
 
 type Budget struct {
-	USD    float64 `json:"usd"`
-	WallMs int64   `json:"wall_ms"`
-	Tokens int64   `json:"tokens"`
+	WallMs int64 `json:"wall_ms"`
 }
 
 type RepoRef struct {

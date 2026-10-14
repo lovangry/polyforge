@@ -636,7 +636,7 @@ func TestSessionPushAuthFencing(t *testing.T) {
 		t.Fatalf("force-end: %v", err)
 	}
 	if _, err := e.sessions.Claim(wiID, api.SessionClaimRequest{
-		SessionID: newSecret, MachineID: "m2", Owner: "op", IdempotencyKey: "idem2-" + wiID,
+		SessionID: newSecret, MachineID: "m2", IdempotencyKey: "idem2-" + wiID,
 	}, e.userID); err != nil {
 		t.Fatalf("re-claim after force-end: %v", err)
 	}

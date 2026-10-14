@@ -563,8 +563,11 @@ func TestW079InvalidYamlOfOneWorkspaceDoesNotBlockAnother(t *testing.T) {
 // w079ProviderErr is the stderr text a crashing fake harness leaves behind:
 // a MODEL-class reason, so the driver's exit classification advances the
 // candidate chain (v2-converge 2.3 — a bare crash is an unclassified exit
-// and retries the same model).
-const w079ProviderErr = "upstream provider error: 529 overloaded (fake harness injected)"
+// and retries the same model). Since polyforge#147 D7 the throttle texts
+// (429 / overloaded / quota / ...) are their own, NON-model class that
+// backs off on the same model, so this fixture names an unresolvable
+// model instead.
+const w079ProviderErr = `upstream provider error: model "fake/w079-missing" not found (fake harness injected)`
 
 // TestW079RotationAdvancesAndCapsOnEffectiveList pins the rotation
 // composition on the post-precedence list: two provider-class infra

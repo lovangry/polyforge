@@ -232,7 +232,6 @@ func (r *Runtime) restartAttach(ctx context.Context, rec *jobRecord) error {
 		WorkItemID: rec.WorkItemID,
 		SessionID:  rec.SessionID,
 		MachineID:  r.cfg.MachineID,
-		Owner:      r.cfg.MachineID,
 	}); err != nil {
 		return err
 	}

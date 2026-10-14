@@ -268,9 +268,9 @@ func writeAcceptedExecutionState(t *testing.T, capDir string, n int) {
 	attempts := make([]string, 0, n)
 	for i := 1; i <= n; i++ {
 		attempts = append(attempts, fmt.Sprintf(
-			`{"cause":"accepted","attempt_seq":%d,"started_at":"2026-10-13T10:00:00Z","accepted_result_id":"res_%d"}`, i, i))
+			`{"cause":"accepted","attempt_seq":%d,"started_at":"2026-10-13T10:00:00Z"}`, i))
 	}
-	blob := `{"work_item_id":"wi","current_step":"grill","workflow_status":"running","bundle_digest":"d0",` +
+	blob := `{"work_item_id":"wi","current_step":"grill","workflow_status":"running",` +
 		`"steps":{"grill":{"status":"done","attempts":[` + strings.Join(attempts, ",") + `]}}}`
 	if err := os.WriteFile(filepath.Join(dir, "execution.json"), []byte(blob), 0o644); err != nil {
 		t.Fatal(err)

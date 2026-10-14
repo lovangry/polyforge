@@ -60,9 +60,6 @@ const (
 	CauseInfraFailure   = "infra_failure"
 )
 
-// protocolVersion is the R13 result-envelope version this driver speaks.
-const protocolVersion = 1
-
 // ErrStaleFence marks a transition refused by the spawn fence: the
 // request names a derivation that is no longer current (B2 carried into
 // the driver — only the current spawn may mutate execution.json).
@@ -106,11 +103,6 @@ const (
 	// when the death-cause table says so, the blocked status — in one
 	// atomic execution.json write.
 	TransStepFailed TransitionKind = "step_failed"
-	// TransRejectEscalated persists one spent in-process envelope-rejection
-	// bound (the driver is about to be relaunched): it counts the
-	// relaunch in the step's supervision ledger and, at the bound, blocks
-	// the step instead.
-	TransRejectEscalated TransitionKind = "reject_escalated"
 )
 
 // TransitionRequest is one submitted execution.json mutation. SpawnN is
@@ -142,15 +134,10 @@ type TransitionRequest struct {
 // the workflow declared plus the verdict text the gate produced.
 type GateVerdict struct {
 	GateStepID string
-	// Action is "rewind" or "terminate"; anything else (including "")
-	// is terminate — the §6.2 default for gates without on_fail.
-	Action string
-	// TargetStep is the on_fail rewind target; required for rewind.
+	// TargetStep is the on_fail rewind target: a gate FAIL always
+	// rewinds to it. An empty target means the gate declared no rewind
+	// edge and the workflow fails on the verdict.
 	TargetStep string
-	// IncludeVerdict routes the FAIL verdict text to the target's
-	// pending_rewind_input (D8) so the rewound step's next dispatch is
-	// guaranteed to see it.
-	IncludeVerdict bool
 	// VerdictText is the FAIL judgment in full.
 	VerdictText string
 }
@@ -259,8 +246,6 @@ func (d *Driver) applyLocked(req TransitionRequest, info *appliedInfo) error {
 		return d.applyInterruptedLocked(req)
 	case TransStepFailed:
 		return d.applyStepFailedLocked(req, info)
-	case TransRejectEscalated:
-		return d.applyRejectEscalatedLocked(req, info)
 	default:
 		return fmt.Errorf("driver: unknown transition kind %q", req.Kind)
 	}
@@ -275,7 +260,6 @@ func (d *Driver) applyInitLocked() error {
 	}
 	d.exec.CapsuleID = capsuleIDFor(d.wi.ID)
 	d.exec.WorkItemID = d.wi.ID
-	d.exec.BundleDigest = d.wi.BundleDigest
 	d.exec.WorkflowStatus = StatusRunning
 	d.exec.CurrentStep = ""
 	return nil
@@ -349,8 +333,6 @@ func (d *Driver) applyUnblockLocked() error {
 		st.Supervision.FailureCount = 0
 		st.Supervision.LongTaskTimeouts = 0
 		st.Supervision.NextDispatch = ""
-		st.Supervision.RejectRelaunches = 0
-		st.Supervision.RuntimeBaseMs = st.BudgetConsumed.WallMs // a fresh T window
 	}
 	return nil
 }
@@ -384,17 +366,11 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 	if res.StepID != "" && res.StepID != req.StepID {
 		return fmt.Errorf("driver: result envelope names step %q, request says %q", res.StepID, req.StepID)
 	}
-	if res.ResultID == "" {
-		return fmt.Errorf("driver: result envelope without result_id (idempotency key)")
-	}
 	if res.SpawnN != req.SpawnN {
 		return fmt.Errorf("%w: result envelope spawn %d, request spawn %d", ErrStaleFence, res.SpawnN, req.SpawnN)
 	}
 	if res.WIID != "" && res.WIID != d.wi.ID {
 		return fmt.Errorf("driver: result envelope names work item %q, this driver drives %q", res.WIID, d.wi.ID)
-	}
-	if res.ProtocolVersion != protocolVersion {
-		return fmt.Errorf("driver: result envelope protocol_version %d, this driver speaks %d", res.ProtocolVersion, protocolVersion)
 	}
 	switch res.Outcome {
 	case OutcomeCompleted, OutcomeGateFailed, OutcomeNeedsInput, OutcomeIncomplete:
@@ -417,9 +393,6 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 	if st.Status != capsule.StepInProgress {
 		return fmt.Errorf("driver: step %q is %s; only an in_progress step accepts results", req.StepID, st.Status)
 	}
-	if st.Supervision != nil {
-		st.Supervision.RejectRelaunches = 0 // an accepted result ends the rejection streak
-	}
 	if req.WallMs > 0 {
 		// the finished dispatch's wall time joins the step's cumulative
 		// runtime (the T accumulator, human-wait time excluded by
@@ -439,13 +412,12 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 		}
 		st.Status = capsule.StepDone
 		st.Output = out
-		// R14 commit point: persist the accepted result_id for restart-safe
-		// idempotency (duplicate delivery returns ErrDuplicateResult).
+		// Commit point: archive the accepted attempt (the step's attempt
+		// ledger; the candidate pointer recomputes over it).
 		st.Attempts = append(st.Attempts, capsule.Attempt{
-			Cause:            "accepted",
-			AttemptSeq:       len(st.Attempts) + 1,
-			StartedAt:        time.Now().UTC().Format(time.RFC3339),
-			AcceptedResultID: res.ResultID,
+			Cause:      "accepted",
+			AttemptSeq: len(st.Attempts) + 1,
+			StartedAt:  time.Now().UTC().Format(time.RFC3339),
 		})
 	case OutcomeGateFailed:
 		out, err := parseOutput(res.Output)
@@ -482,13 +454,14 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 	return nil
 }
 
-// applyGateFailLocked consumes one gate FAIL policy (01 §6.2): terminate
-// (or a gate without on_fail) ends the workflow failed_gate (WF-102);
-// rewind first checks BOTH bounds — a hit ends failed_rewind_exhausted
-// (WF-101) before any mutation — then archives every step in
+// applyGateFailLocked consumes one gate FAIL policy (01 §6.2): a gate
+// without on_fail ends the workflow failed_gate (WF-102); a gate with
+// on_fail: rewind first checks BOTH bounds — a hit ends
+// failed_rewind_exhausted (WF-101) before any mutation — then archives
+// every step in
 // [target, gate) as a gate_fail_rewind attempt, resets each to pending
-// with output cleared, moves the position back to target and (with
-// include_verdict, the default) persists the FAIL verdict as the
+// with output cleared, moves the position back to target and persists
+// the FAIL verdict (the full verdict text, unconditionally) as the
 // target's pending_rewind_input. The gate itself is neither archived
 // nor reset: it stays in_progress holding its verdict output (only its
 // AnswerBase advances, so a human gate needs a fresh answer on re-entry),
@@ -509,11 +482,11 @@ func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) e
 	if err := d.requireRunningStep(gate); err != nil {
 		return err
 	}
-	if v.Action != "rewind" { // terminate is the default (01 §6.2 step 1)
+	target := v.TargetStep
+	if target == "" { // no rewind edge declared: the gate verdict is terminal
 		d.exec.WorkflowStatus = StatusFailedGate
 		return nil
 	}
-	target := v.TargetStep
 	tIdx, ok := d.workflow.indexOf(target)
 	if !ok {
 		return fmt.Errorf("driver: rewind target %q is not in the workflow", target)
@@ -541,12 +514,16 @@ func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) e
 			gst.Supervision = &capsule.StepSupervision{}
 		}
 		gst.Supervision.NextDispatch = capsule.NextDispatchFresh
+		// D6: a rewind resets T — the gate's re-entry judges the redone
+		// work in a fresh window, not on the runtime of the verdict it
+		// already delivered.
+		gst.BudgetConsumed = capsule.Budget{}
 	}
-	if v.IncludeVerdict {
-		d.exec.Steps[target].PendingRewindInput = &capsule.RewindInput{
-			ToStep: target,
-			Reason: v.VerdictText,
-		}
+	// The FAIL verdict text rides to the target's pending_rewind_input
+	// (D8) so the rewound step's next dispatch is guaranteed to see it.
+	d.exec.Steps[target].PendingRewindInput = &capsule.RewindInput{
+		ToStep: target,
+		Reason: v.VerdictText,
 	}
 	return nil
 }
@@ -684,12 +661,8 @@ func (d *Driver) applyBudgetLocked(req TransitionRequest) error {
 	if st == nil {
 		return fmt.Errorf("driver: budget_update for unknown step %q", stepID)
 	}
-	st.BudgetConsumed.USD += req.Budget.USD
 	st.BudgetConsumed.WallMs += req.Budget.WallMs
-	st.BudgetConsumed.Tokens += req.Budget.Tokens
-	d.exec.BudgetConsumed.USD += req.Budget.USD
 	d.exec.BudgetConsumed.WallMs += req.Budget.WallMs
-	d.exec.BudgetConsumed.Tokens += req.Budget.Tokens
 	return nil
 }
 
@@ -833,7 +806,6 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 			return
 		}
 		body["step"] = req.StepID
-		body["result_id"] = req.Result.ResultID
 		switch req.Result.Outcome {
 		case OutcomeCompleted:
 			kind = "step_done"
@@ -872,9 +844,7 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 	case TransBudgetUpdate:
 		kind = "budget_update"
 		body["step"] = req.StepID
-		body["usd"] = d.exec.BudgetConsumed.USD
 		body["wall_ms"] = d.exec.BudgetConsumed.WallMs
-		body["tokens"] = d.exec.BudgetConsumed.Tokens
 	case TransAnswer:
 		kind = "answered"
 		body["step"] = d.exec.CurrentStep
@@ -887,18 +857,6 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 	case TransStepFailed:
 		kind = "step_failed"
 		d.failureEventsLocked(req, info, body)
-	case TransRejectEscalated:
-		kind = "reject_escalated"
-		body["step"] = req.StepID
-		body["detail"] = req.Reason
-		if st := d.exec.Steps[req.StepID]; st != nil && st.Supervision != nil {
-			body["reject_relaunches"] = st.Supervision.RejectRelaunches
-		}
-		if d.exec.WorkflowStatus == StatusBlocked {
-			info.extra = append(info.extra, appliedEvent{"blocked", map[string]any{
-				"step": req.StepID, "cause": "envelope_rejected", "reason": d.exec.BlockedReason, "report": true,
-			}})
-		}
 	}
 	if kind == "" {
 		return
@@ -931,6 +889,9 @@ func (d *Driver) failureEventsLocked(req TransitionRequest, info *appliedInfo, b
 	}
 	if dec.RelaxWallMs > 0 {
 		body["relaxed_wall_ms"] = dec.RelaxWallMs
+	}
+	if dec.Backoff > 0 {
+		body["backoff_ms"] = dec.Backoff.Milliseconds()
 	}
 	if dec.Switch {
 		body["from_model"], body["to_model"] = dec.From, dec.To
