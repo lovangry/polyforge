@@ -169,7 +169,10 @@ pf-linux-amd64"
     fi
     GOTD=$(docker buildx imagetools inspect "$IMAGE:$VTAG" 2>/dev/null | awk '/^Digest:/{print $2; exit}' || true)
     if [ -z "$GOTD" ]; then
-      GOTD=$(docker manifest inspect -v "$IMAGE:$VTAG" 2>/dev/null | sed -n 's/.*"Digest": *"\(sha256:[0-9a-f]*\)".*/\1/p' | head -1 || true)
+      # no buildx: `docker manifest inspect -v` prints the manifest's own
+      # digest as "digest" (lowercase) inside "Descriptor"; the config and
+      # layer digests that follow are not it.
+      GOTD=$(docker manifest inspect -v "$IMAGE:$VTAG" 2>/dev/null | sed -n '/"Descriptor"/,/}/s/.*"[Dd]igest": *"\(sha256:[0-9a-f]*\)".*/\1/p' | head -1 || true)
     fi
     if [ -z "$GOTD" ]; then
       fail "registry digest of $IMAGE:$VTAG unreadable"

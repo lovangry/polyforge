@@ -142,7 +142,7 @@ owner_user_id: usr_…            # 必填（无此字段则 rebuild_index 无�
 title: …                        # 可选，≤120 字符
 tags: [a, b]                    # 可选
 visibility: project             # 必填 one of private|project|team|public|admin
-work_item_id: wi_…              # 可选
+work_item_id: wi_…              # 可选；创建时接受 id 或 <project>#<seq> slug、存规范 id；所属项目须与本条目相同（否则 CORE-400），未知/不可读为 CORE-404（polyforge#155）
 project_id:  prj_…             # 必填（rebuild 据此重建 project 归属；导入时由迁移工具按映射写入）
 idempotency_key: …            # 可选（wrap 摘要等幂等创建时写入；rebuild 有文件无行分支据 frontmatter
                                  # 恢复该列，保证 wrap-summary 键可从权威内容重建、补建不会重复）

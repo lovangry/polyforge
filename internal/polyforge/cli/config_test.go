@@ -17,7 +17,8 @@ func clearEnv(t *testing.T) {
 		t.Setenv(k, "")
 	}
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("HOME", t.TempDir()) // no ambient ~/.polyforge / ~/.config leaks in
+	t.Setenv("PI_CODING_AGENT_DIR", "") // doctor's pi check reads it
+	t.Setenv("HOME", t.TempDir())       // no ambient ~/.polyforge / ~/.config leaks in
 }
 
 func writeTempConfig(t *testing.T, content string) string {

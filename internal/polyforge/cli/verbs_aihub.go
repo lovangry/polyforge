@@ -630,7 +630,7 @@ var cmdRemember = &Command{
 		fs.String("title", "", "memory title")
 		fs.String("visibility", "project", "admin|private|project|team|public")
 		fs.String("tags", "", "comma-separated tags")
-		fs.String("work-item", "", "attributing work item id (optional)")
+		fs.String("work-item", "", "attributing work item id or <project>#<seq> slug (optional)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		memType := stringFlag(fs, "type")

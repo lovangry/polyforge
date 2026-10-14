@@ -1770,6 +1770,9 @@ func TestW113DoctorHealthyMachine(t *testing.T) {
 		t.Fatalf("pf doctor --json (healthy): ok is false (checks %+v, output %q)", doc.Checks, jout)
 	}
 	for _, c := range doc.Checks {
+		if c.Name == "claude progress display" || c.Name == "pi progress display" {
+			continue // presentation-only (polyforge#142): no harness in the scratch HOME
+		}
 		if c.Status != "pass" {
 			t.Fatalf("pf doctor --json (healthy): check %q is %q, want pass (output %q)", c.Name, c.Status, jout)
 		}

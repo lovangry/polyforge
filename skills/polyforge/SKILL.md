@@ -161,8 +161,10 @@ job has no owner), starts — as `[polyforge] N WIs need you: ...`.
     "command": "pf watch --statusline --harness-session -"}}
   ```
 
-  (install.sh never edits `statusLine`; it prints this snippet when yours does
-  not use `pf watch`.)
+  (install.sh never edits `statusLine`. `pf doctor` — and install.sh, which
+  prints the same check — tells whether yours runs `pf watch --statusline`,
+  directly or from a script it names, and otherwise prints this snippet or,
+  for an existing statusLine, an append-style one that keeps its output.)
 
   (With the variable available, `pf watch --chat "$PF_CHAT_ID" --statusline`
   is equivalent; `--harness-session <id> [--harness claude]` takes an explicit
