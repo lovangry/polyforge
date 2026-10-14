@@ -170,6 +170,10 @@ func (d *Daemon) handler() http.Handler {
 	// the WI's job carries a bridge Handle; otherwise it refuses.
 	mux.HandleFunc("POST /jobs/{wi}/answer", func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
+		if reason := d.answerFromStepProcess(r); reason != "" {
+			writeErr(w, api.ErrDaemonForbidden, reason)
+			return
+		}
 		if h := d.rt.DriverAnswerHandle(wi); h != nil {
 			// driver path: decode the same wire shape, deliver to bridge
 			var payload struct {
@@ -234,7 +238,6 @@ func (d *Daemon) handler() http.Handler {
 	mux.HandleFunc("POST /jobs/{wi}/resume-paused", d.resumePausedRoute)
 	mux.HandleFunc("POST /jobs/{wi}/pause", d.pauseRoute)
 	mux.HandleFunc("POST /jobs/{wi}/wrap", d.wrapRoute)
-	mux.HandleFunc("POST /jobs/{wi}/ship", d.shipRoute)
 	mux.HandleFunc("GET /status", d.statusRoute)
 	mux.HandleFunc("POST /ops/config", d.opsConfigRoute)
 	mux.HandleFunc("POST /shutdown", d.shutdownRoute)
@@ -744,6 +747,25 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 			_ = err
 		}
 	}()
+}
+
+// answerFromStepProcess is the #122 guard: a question is a human's to
+// answer, so the answer route refuses a request whose UDS peer — the
+// kernel's SO_PEERCRED record, never anything from the request body —
+// belongs to a step process tree of this daemon (runtime.StepProcessOrigin:
+// the PF_WI_ID/PF_DAEMON_ID markers on the peer, an ancestor or its
+// process-group leader). A request whose peer credential is unavailable
+// is refused too: the guard fails closed. It answers the refusal reason,
+// "" when the peer may answer.
+func (d *Daemon) answerFromStepProcess(r *http.Request) string {
+	cred, ok := requestPeerCred(r.Context())
+	if !ok {
+		return "answer refused: the caller's identity (UDS peer credential) is unavailable — only a human session may answer"
+	}
+	if stepWI, isStep := runtime.StepProcessOrigin(cred.pid, d.cfg.MachineID); isStep {
+		return fmt.Sprintf("answer refused: the caller (pid %d) belongs to the step process tree of work item %s — a step agent must never answer a question; only a human session may (polyforge#122)", cred.pid, stepWI)
+	}
+	return ""
 }
 
 // pendingQuestionIDs reads the capsule's execution.json and returns the

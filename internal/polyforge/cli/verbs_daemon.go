@@ -24,8 +24,8 @@ var cmdSubmit = &Command{
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("priority", "normal", "queue priority (low|normal|high|urgent)")
 		fs.String("models", "", "manual model candidates for EVERY step of this WI, comma-separated, in order "+
-			"(precedence: --models > workspace yaml models.<project>.<kind> > yaml models.<project>.default > "+
-			"bundle step model_candidates > bundle defaults.model_candidates)")
+			"(precedence: --models > workspace yaml models.<project>.<kind> > bundle step model_candidates > "+
+			"yaml models.<project>.default > bundle defaults.model_candidates)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
@@ -380,49 +380,6 @@ var cmdWrap = &Command{
 		}
 		ctx.finish(raw, func() {
 			fmt.Fprintf(ctx.Stdout, "%s requested for %s\n", reason, closeName(raw, args[0]))
-		})
-		return nil
-	},
-}
-
-// ---------------------------------------------------------------------------
-// ship — the wrap→git delivery bridge: push a closed WI's sealed capsule
-// commits to each inventory repo's origin as the fixed-name branch
-// polyforge/<project>-<seq>, then open/reuse a PR when a credential exists (a
-// missing PR credential is NOT an error; only the push credential is).
-// ---------------------------------------------------------------------------
-
-var cmdShip = &Command{
-	Name:    "ship",
-	Group:   GroupDelivery,
-	Summary: "Push a closed WI's sealed capsule commits to git origin (branch polyforge/<project>-<seq>)",
-	Usage: "pf ship <id>\n" +
-		"\n" +
-		"Typed errors:\n" +
-		"  DAEMON-404  this machine holds no sealed capsule for the WI\n" +
-		"  DAEMON-403  reserved branch target (main/master is never pushed)\n" +
-		"  DAEMON-409  the remote branch moved past the sealed commit\n" +
-		"              (never force-pushed over it)\n" +
-		"  DAEMON-512  push preflight failed: no usable local git push identity\n" +
-		"              or the origin is unreachable\n" +
-		"  DAEMON-503  the hub record naming the capsule and branch could not\n" +
-		"              be read (aihub unreachable; retry later)",
-	Setup: func(fs *flag.FlagSet) {},
-	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
-		if len(args) != 1 {
-			return fmt.Errorf("ship: expected exactly one work item id")
-		}
-		raw, err := ctx.daemon().Ship(args[0])
-		if err != nil {
-			return err
-		}
-		ctx.finish(raw, func() {
-			var sr ShipResponse
-			if err := json.Unmarshal(raw, &sr); err == nil {
-				renderShip(ctx.Stdout, &sr)
-			} else {
-				printJSON(ctx.Stdout, raw)
-			}
 		})
 		return nil
 	},

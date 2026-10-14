@@ -58,6 +58,12 @@ type StepSpec struct {
 	// may not complete until a human answered at least one of its
 	// questions in the current attempt chain (ResultSpec.HumanAnswers).
 	RequiresHumanAnswer bool
+	// HumanAnswerIfAsked mirrors `requires_human_answer: if_asked`
+	// (polyforge#164 H11): the step's questions are a human's to answer
+	// (the daemon refuses an answer from a step process tree), and a
+	// completion with ZERO human answers is accepted but recorded as the
+	// durable EvHumanGateUnasked event, which notifies the owner.
+	HumanAnswerIfAsked bool
 	// RequiresCommandEvidence mirrors `requires_command_evidence: true`
 	// (the V4 gate; implied for a step whose id is "verification").
 	RequiresCommandEvidence bool
@@ -136,7 +142,8 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 			Gate:                    s.Gate,
 			Handoff:                 s.Handoff,
 			ContextPolicy:           s.ContextPolicy,
-			RequiresHumanAnswer:     s.RequiresHumanAnswer,
+			RequiresHumanAnswer:     s.RequiresHumanAnswer.required,
+			HumanAnswerIfAsked:      s.RequiresHumanAnswer.ifAsked,
 			RequiresCommandEvidence: s.RequiresCommandEvidence,
 			ModelCandidates:         s.ModelCandidates,
 		}
@@ -211,12 +218,38 @@ type extStep struct {
 	ID                      string     `yaml:"id"`
 	Gate                    bool       `yaml:"gate"`
 	Handoff                 bool       `yaml:"handoff"`
-	RequiresHumanAnswer     bool       `yaml:"requires_human_answer"`
+	RequiresHumanAnswer     humanGate  `yaml:"requires_human_answer"`
 	RequiresCommandEvidence bool       `yaml:"requires_command_evidence"`
 	ContextPolicy           string     `yaml:"context_policy"`
 	ModelCandidates         []string   `yaml:"model_candidates"`
 	OnFail                  *extOnFail `yaml:"on_fail"`
 	Budget                  *extBudget `yaml:"budget"`
+}
+
+// humanGate is the requires_human_answer value: a bool (true = a human
+// answer must precede completion) or the string "if_asked" (questions
+// are human-only, zero questions pass with a recorded notification).
+type humanGate struct {
+	required bool
+	ifAsked  bool
+}
+
+// HumanGateIfAsked is the requires_human_answer value that allows a
+// zero-question completion (recorded and notified, never refused).
+const HumanGateIfAsked = "if_asked"
+
+func (h *humanGate) UnmarshalYAML(n *yaml.Node) error {
+	var b bool
+	if err := n.Decode(&b); err == nil {
+		h.required = b
+		return nil
+	}
+	var s string
+	if err := n.Decode(&s); err == nil && s == HumanGateIfAsked {
+		h.ifAsked = true
+		return nil
+	}
+	return fmt.Errorf("requires_human_answer: want true, false or %q, got %q", HumanGateIfAsked, n.Value)
 }
 
 type extBudget struct {

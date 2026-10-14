@@ -29,6 +29,9 @@ type fakeEntry struct {
 	hold bool // block Wait until ctx or Terminate
 	// spawnErr makes SpawnStep itself fail (a harness that died at startup).
 	spawnErr error
+	// act runs inside Wait before the result is returned: the step's
+	// work on the tree (e.g. a commit in a task repo).
+	act func()
 }
 
 type fakeRun struct {
@@ -46,6 +49,9 @@ func (r *fakeRun) Wait(ctx context.Context) (*StepResult, error) {
 			return nil, ctx.Err()
 		case <-r.rel:
 		}
+	}
+	if r.e.act != nil {
+		r.e.act()
 	}
 	if r.e.res == nil {
 		return nil, r.e.err

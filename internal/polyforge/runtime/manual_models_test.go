@@ -88,13 +88,20 @@ func TestManualModelsBeatYamlAndAreAudited(t *testing.T) {
 	}
 	r.clearManualModels("wi_man")
 
-	// a plain next start (auto-pulled shape) is unaffected: yaml default wins.
+	// a plain next start (auto-pulled shape) is unaffected: the yaml
+	// default governs every step without a list of its own (the fixture's
+	// fix and release steps keep their own lists — polyforge#164).
 	if err := r.Start(context.Background(), "wi_plain"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	own := map[string]string{"fix": "prov/flash,prov/glm", "release": "prov/glm"}
 	for step, got := range r.jobOf("wi_plain").stepCandidates {
-		if strings.Join(got, ",") != "a/one" {
-			t.Fatalf("plain step %s candidates %v, want the yaml default", step, got)
+		want := "a/one"
+		if l, ok := own[step]; ok {
+			want = l
+		}
+		if strings.Join(got, ",") != want {
+			t.Fatalf("plain step %s candidates %v, want %s", step, got, want)
 		}
 	}
 	if got := r.loadManualModels("wi_plain"); got != nil {

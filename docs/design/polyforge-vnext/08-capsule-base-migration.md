@@ -28,9 +28,9 @@ CLI 与 Daemon 读同一份配置；**不存在任何启动期 workspace 旗标�
 - 运行中的 WI 若其 project 已从映射中消失（操作者删节后重启），Daemon **硬失败并点名该 project**
   （`mid-flight project "…" is not in the [workspace] mapping`）——capsule **绝不**被搬迁到别的
   workspace。唯一的补救就是把该 project 的 workspace 节重新加回映射，再重启。
-- 终态（已 wrap/fail/cancel）的 capsule 留在原地不动；Daemon 工具面（`pf ship` 等）只在该 WI 的 project
+- 终态（已 wrap/fail/cancel）的 capsule 留在原地不动；Daemon 工具面（`pf watch` 等）只在该 WI 的 project
   **映射到的** workspace 里按 `capsules/<project>-<seq>` 寻找 capsule——把旧基底（连同该 project）重新加回映射即可让
-  `pf ship` 继续找到它。
+  它们继续找到它。（原文此处举的 `pf ship` 已由 polyforge#166 删除：交付改为 workflow 的 deliver 步骤。）
 
 ## 2. 迁移序列（人工，按序执行）<!-- §2 -->
 

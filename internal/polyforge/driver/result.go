@@ -41,6 +41,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/santhosh-tekuri/jsonschema/v5"
+
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
@@ -58,6 +60,13 @@ const EvEnvelopeRejected = "envelope_rejected"
 // result.json); this event is the news that its ROUTING was bound to
 // the verdict.
 const EvGateVerdictBound = "gate_verdict_bound"
+
+// EvHumanGateUnasked is the durable event kind recording that a
+// requires_human_answer: if_asked step (quick-fix grill) completed with
+// zero human answers (polyforge#164 H11). The completion is accepted —
+// zero questions is a legitimate outcome — but never silent: the event
+// is the record and the watcher's decision table notifies the owner.
+const EvHumanGateUnasked = "human_gate_unasked"
 
 // releaseStepID and deployStepID are the step ids of the `release`
 // workflow bundle (the only place a release or deploy happens). They are
@@ -126,6 +135,17 @@ type StepResult struct {
 	// command_evidence entries (set by the collector, never serialized);
 	// the evidence gate quotes it so a rejection names the real reason.
 	evidenceDropped []string
+	// rebaseline is set by ValidateStepResult when the step changed
+	// authored test files with a human's approval (the authored-tests
+	// gate): the accepted output is stamped with the new baseline.
+	rebaseline bool
+	// rebaselined names the authored test files a human-approved change
+	// touched (the authored_tests_rebaselined event body).
+	rebaselined []string
+	// schemaViolation is the declared-output-schema validation error of
+	// an accepted result while the schema lane records instead of
+	// enforcing (enforceOutputSchemas false); "" = conforming.
+	schemaViolation string
 }
 
 // verificationStepID is the conventional id of the V4 verification step:
@@ -186,6 +206,28 @@ type ResultSpec struct {
 	// at their carrier ref, i.e. HEAD only, so an uncommitted authored
 	// test would be lost).
 	ReposDir string
+	// OutputSchema is the step definition's declared output schema
+	// (polyforge#164 H3); nil = none declared, nothing validated.
+	OutputSchema *jsonschema.Schema
+	// AuthoredTests is the authored-tests baseline of the done steps
+	// before this one (polyforge#164 H4); nil = no authored tests.
+	AuthoredTests *AuthoredTests
+	// PreExisting is the pre-existing-failure boundary (polyforge#164
+	// S6): the tests that pin the change itself — the authored test_files
+	// of the done steps (e2e-author, repro) and bug-fix's regression_test
+	// paths — and whether the repro reproduced the bug (checkPreExisting).
+	PreExisting PreExistingRules
+	// ReviewPassed: the workflow's independent review (the `review` step)
+	// is done with a pass verdict and no blocking finding. The deliver
+	// binding (deliver.go) merges without a human only when it holds.
+	ReviewPassed bool
+	// HasReview: the workflow declares a review step.
+	HasReview bool
+	// VerifiedHeads / VerifiedTestBar: the verification step's record
+	// (task repo -> HEAD when it completed, driver-written; the test bar
+	// it named) — deliver_facts.go.
+	VerifiedHeads   map[string]string
+	VerifiedTestBar []testBarCmd
 }
 
 // ValidateStepResult runs the staging gates over one envelope:
@@ -228,7 +270,27 @@ type ResultSpec struct {
 //  5. the committed-test-files gate (ReposDir set, any step): a
 //     completed result whose output declares test_files must have every
 //     listed path committed at HEAD in its task repo(s)
-//     (checkTestFilesCommitted) — rejected like the evidence gate.
+//     (checkTestFilesCommitted) — rejected like the evidence gate;
+//  6. the declared output schema (OutputSchema set): a completed
+//     result's output must validate against the step definition's
+//     `output:` schema (polyforge#164 H3) — recorded as a violation,
+//     not rejected, while enforceOutputSchemas is false;
+//     6b. the pre-existing-failure boundary (any completed step,
+//     checkPreExisting): no repro check or authored/regression test may
+//     be classified pre_existing, a pre_existing check must name its base
+//     commit and be listed in pre_existing_failures, and a bug-fix
+//     verification pass must show the reproduced bug's repro check
+//     passing (polyforge#164 S6);
+//  7. the authored-tests gate (ReposDir and AuthoredTests set; the
+//     driver never sets AuthoredTests for `deliver`): the test files an
+//     earlier step authored must be unchanged since its commit, unless a
+//     human answered in this attempt chain (then res.rebaseline is set)
+//     (polyforge#164 H4);
+//  8. the delivery binding (the `deliver` step only, deliverBinding):
+//     recorded pushes target only the feature branch, merges use
+//     --merge, and a completed pass that merged outside the merge rule
+//     or left a PR unmerged owes a human answer — rejected like the
+//     evidence gate.
 //
 // The minimal contract: an envelope missing the retired protocol
 // fields is never judged invalid for its absence — there is no
@@ -307,6 +369,44 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	if res.Outcome == OutcomeCompleted && spec.ReposDir != "" {
 		if err := checkTestFilesCommitted(spec.ReposDir, res.Output); err != nil {
 			return fmt.Errorf("driver: step %q completed with %w", spec.StepID, err)
+		}
+	}
+	// 6. the declared output schema (polyforge#164 H3): the schema the
+	// prompt shows is the contract. While enforceOutputSchemas is false
+	// a violation is recorded (res.schemaViolation -> the
+	// output_schema_violation event), never rejected.
+	if res.Outcome == OutcomeCompleted && spec.OutputSchema != nil {
+		if err := checkOutputSchema(spec.OutputSchema, res.Output); err != nil {
+			if enforceOutputSchemas {
+				return fmt.Errorf("driver: step %q completed but its %w", spec.StepID, err)
+			}
+			res.schemaViolation = err.Error()
+		}
+	}
+	// 6b. the pre-existing-failure boundary (polyforge#164 S6): the tests
+	// that pin THIS change — the repro, the authored acceptance and
+	// regression tests — can never be excused as failing on the base.
+	if res.Outcome == OutcomeCompleted {
+		if err := checkPreExisting(res.Output, spec.PreExisting, spec.StepID == verificationStepID); err != nil {
+			return fmt.Errorf("driver: step %q completed with %w", spec.StepID, err)
+		}
+	}
+	// 7. the authored-tests gate (polyforge#164 H4).
+	if res.Outcome == OutcomeCompleted && spec.ReposDir != "" && spec.AuthoredTests != nil {
+		changed, err := checkAuthoredTestsUnchanged(spec.ReposDir, spec.AuthoredTests, spec.HumanAnswers)
+		if err != nil {
+			return fmt.Errorf("driver: step %q completed with %w", spec.StepID, err)
+		}
+		res.rebaseline = len(changed) > 0
+		res.rebaselined = changed
+	}
+	// 8. the delivery binding (polyforge#166, deliver.go): the deliver
+	// step's recorded pushes target only the feature branch and merge only
+	// with --merge; a merge outside the merge rule, or a PR left unmerged,
+	// needs a human answer.
+	if spec.StepID == deliverStepID {
+		if err := deliverBinding(res, delivered, spec); err != nil {
+			return err
 		}
 	}
 	return nil

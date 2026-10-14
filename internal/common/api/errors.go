@@ -86,7 +86,6 @@ const (
 	ErrDaemonConflict      = "DAEMON-409"
 	ErrDaemonGone          = "DAEMON-410"
 	ErrDaemonSpawnFail     = "DAEMON-507"
-	ErrDaemonShipPreflight = "DAEMON-512"
 	ErrDaemonInternal      = "DAEMON-500"
 	// ErrDaemonHubUnavailable is the transient pre-claim refusal: the
 	// work-item probe could not reach the hub (transport loss or a 5xx).

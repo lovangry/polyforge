@@ -26,8 +26,8 @@ on model-class failures like any list), kept by this daemon only (across its
 restarts and `pf resume`); a re-claim on another machine uses that machine's
 settings. Non-empty, comma-separated, no empty
 or duplicate ids, else a local bad-input refusal. Candidate precedence,
-highest first: `--models` > yaml `models.<project>.<kind>` > yaml
-`models.<project>.default` > bundle step `model_candidates` > bundle
+highest first: `--models` > yaml `models.<project>.<kind>` > bundle step
+`model_candidates` > yaml `models.<project>.default` > bundle
 `defaults.model_candidates`. Before the daemon is
 involved, the CLI prechecks the work item against Core with the caller's own
 api key, so obviously doomed submissions fail fast with a visible verdict.

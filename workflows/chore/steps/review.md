@@ -77,6 +77,12 @@ lane.
    `fail_reason` — concrete enough that `code`'s next attempt (which receives this
    text as its `pending_rewind_input`) does not have to guess what to change.
 
+**Do not run tests or builds.** This step reads and judges; it never runs the build or
+the test suite (`go test ./...`, `make test`, the full `./test`, `npm test`). The full
+bar runs exactly once per pass, in `verification` (after this step;
+`deliver` re-runs that same bar only after merging a moved default branch changed the tree). Reading a test
+file's source is part of the review; running it is not.
+
 ## Owner-rules checklist (any hit is a blocking finding)
 
 On top of the plan-conformance judgment above, check the diff against the owner's

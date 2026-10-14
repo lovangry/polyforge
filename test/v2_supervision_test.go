@@ -111,12 +111,14 @@ func plan(first []map[string]any) []map[string]any {
 // the next prompt, the session idles forever (35+ minutes observed).
 // Rule 1 judges it one grace after the error — the turn ended with an
 // error and no result file followed — and the driver advances the
-// candidate (a model-class death).
+// candidate (a model-class death). The error text here is a fatal
+// request error: a throttle or upstream-transient text takes the D7
+// same-model path instead (v2_live_error_turn_d7_test.go, polyforge#162).
 func TestV2F5FatalProviderErrorThenIdleModelError(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "f5: fatal provider error then idle",
 		plan([]map[string]any{
-			{"do": "envelope", "id": "grill", "error_turn": "provider overloaded (529): retries exhausted"},
+			{"do": "envelope", "id": "grill", "error_turn": "provider error: 400 invalid_request_error: messages must alternate between user and assistant"},
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		}), nil)
 	grace := 2 * time.Second
@@ -128,7 +130,7 @@ func TestV2F5FatalProviderErrorThenIdleModelError(t *testing.T) {
 	rec := waitForEvent(t, d, wi, "supervisor_verdict", 60*time.Second)
 	var v verdictEvent
 	eventBody(t, rec, &v)
-	if v.Verdict != "step_dead" || v.Cause != "model_error" || !strings.Contains(v.Evidence, "529") {
+	if v.Verdict != "step_dead" || v.Cause != "model_error" || !strings.Contains(v.Evidence, "invalid_request_error") {
 		t.Fatalf("verdict %+v, want step_dead model_error naming the provider error", v)
 	}
 	// within the grace (not instantly, not never): the verdict lands
@@ -340,13 +342,14 @@ func TestV2StepTimeoutLongTaskRelaxesThenBlocks(t *testing.T) {
 // re-pinning the dead model forever).
 func TestV2ModelPinFailureAdvancesCandidate(t *testing.T) {
 	inst := newV1Install(t)
-	// grill runs healthy on its first candidate; fix's first candidate
-	// (the flash model) cannot be resolved by this harness, so ordinal 2
-	// dies at birth and its action is never reached.
+	// grill and fix run healthy on their first candidate (the bundle
+	// defaults head); verification's first candidate (its flash-first
+	// step list, polyforge#164 S8) cannot be resolved by this harness, so
+	// ordinal 3 dies at birth and its action is never reached.
 	actions := []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
-		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true}, // spawn 2 dies at birth: never reached
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "verification", "outcome": "completed"}, // spawn 3 dies at birth: never reached
 		{"do": "envelope", "id": "verification", "outcome": "completed"},
 	}
 	wi := inst.newWI(t, "f4: model pin failure exit", actions, nil)
@@ -358,25 +361,25 @@ func TestV2ModelPinFailureAdvancesCandidate(t *testing.T) {
 
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 	fails := stepFailures(t, d, wi)
-	if len(fails) != 1 || fails[0].Step != "fix" || fails[0].Cause != "exit_model_class" || fails[0].Disposition != "switch_model" ||
+	if len(fails) != 1 || fails[0].Step != "verification" || fails[0].Cause != "exit_model_class" || fails[0].Disposition != "switch_model" ||
 		fails[0].From != "sub2api-glm/glm-5.3-flash" || fails[0].To != "sub2api-glm/glm-5.3" || fails[0].Count != 0 {
-		t.Fatalf("failure records %+v, want exit_model_class/switch_model flash -> glm-5.3 on fix", fails)
+		t.Fatalf("failure records %+v, want exit_model_class/switch_model flash -> glm-5.3 on verification", fails)
 	}
 	if vs := verdicts(t, d, wi); len(vs) != 0 {
 		t.Fatalf("an exit is the driver's own judgement, no supervisor verdict: %+v", vs)
 	}
 	x := readExecution(t, d.capsuleDir(wi))
 	var sawClass bool
-	for _, a := range x.Steps["fix"].Attempts {
+	for _, a := range x.Steps["verification"].Attempts {
 		if a["failure_cause"] == "exit_model_class" {
 			sawClass = true
 		}
 	}
 	if !sawClass {
-		t.Fatalf("the attempt must carry the cause sub-class: %+v", x.Steps["fix"].Attempts)
+		t.Fatalf("the attempt must carry the cause sub-class: %+v", x.Steps["verification"].Attempts)
 	}
-	if x.Steps["fix"].Model != "sub2api-glm/glm-5.3" {
-		t.Fatalf("fix finished on model %q, want the advanced candidate", x.Steps["fix"].Model)
+	if x.Steps["verification"].Model != "sub2api-glm/glm-5.3" {
+		t.Fatalf("verification finished on model %q, want the advanced candidate", x.Steps["verification"].Model)
 	}
 }
 

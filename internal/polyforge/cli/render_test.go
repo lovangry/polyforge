@@ -65,27 +65,6 @@ wi_ask         needs_input  -                 -      43         q_zz9     -     
 `)
 }
 
-func TestGoldenShip(t *testing.T) {
-	s := ShipResponse{
-		WorkItemID: "wi_abc",
-		Slug:       "polyforge#140",
-		Branch:     "polyforge/polyforge-140",
-		Repos: []ShipRepoOutcome{
-			{Name: "polyforge", Head: "deadbee", Branch: "polyforge/polyforge-140", Pushed: true, PRURL: "https://x/pr/1"},
-			{Name: "tsshd", Head: "cafe123", Branch: "polyforge/polyforge-140", Reused: true, CompareURL: "https://x/compare"},
-		},
-	}
-	var b bytes.Buffer
-	renderShip(&b, &s)
-	golden(t, "Ship", b.String(),
-		`shipped polyforge#140 → branch polyforge/polyforge-140
-  polyforge:         deadbee  pushed
-    pr:      https://x/pr/1
-  tsshd:             cafe123  reused (remote branch already at the sealed commit)
-    compare: https://x/compare
-`)
-}
-
 func TestGoldenWIDetail(t *testing.T) {
 	milestone := "m1"
 	labels := []string{"infra"}

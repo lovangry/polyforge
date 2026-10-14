@@ -55,7 +55,8 @@ func DisplayName(slug, id string) string {
 // PathName answers the path- and ref-safe readable name of a work item,
 // "<project>-<seq>": the slug with its "#" (a zsh EXTENDED_GLOB
 // metacharacter and the URL fragment separator) replaced by "-". It names
-// the capsule directory and the `pf ship` branch. Project names never
+// the capsule directory and the delivery branch
+// polyforge/<project>-<seq>. Project names never
 // contain "#", so the seq is always the part after the last "-". The id
 // is the answer when no slug is known, or when the slug is not of the
 // "<project>#<seq>" shape (it never becomes a path or ref component

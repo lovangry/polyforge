@@ -159,7 +159,7 @@ func TestAihubFaceVerbExitCodeGoldens(t *testing.T) {
 }
 
 // TestDaemonFaceVerbExitCodeGoldens: every daemon-UDS-face verb (the 8
-// execution-plane routing verbs, ship, ops), one golden table per verb.
+// execution-plane routing verbs, ops), one golden table per verb.
 // submit/resume additionally run the aihub precheck, answered 200 by a
 // fake aihub so the daemon route stays the class under test.
 func TestDaemonFaceVerbExitCodeGoldens(t *testing.T) {
@@ -186,9 +186,6 @@ func TestDaemonFaceVerbExitCodeGoldens(t *testing.T) {
 			[]string{"pause"}, []string{"pause", "--no-such-flag"}},
 		{"wrap", []string{"wrap", "wi_x"}, "POST /jobs/wi_x/wrap", `{}`, false,
 			[]string{"wrap"}, []string{"wrap", "--no-such-flag"}},
-		{"ship", []string{"ship", "wi_x"}, "POST /jobs/wi_x/ship",
-			`{"work_item_id":"wi_x","branch":"polyforge/wi_x","repos":[]}`, false,
-			[]string{"ship"}, []string{"ship", "--no-such-flag"}},
 		{"ops", []string{"ops", "status"}, "GET /status",
 			`{"machine_id":"m1","auto":false,"shutting_down":false,"jobs":[],` +
 				`"queue":{"pending":0,"running":0,"max_concurrent":2}}`, false,
@@ -315,13 +312,13 @@ func TestDaemonVerbHelpOnlyExitGoldens(t *testing.T) {
 	if code, _, _ := runPf(t, nil, "daemon", "--no-such-flag"); code != 2 {
 		t.Errorf("flag parse: exit = %d, want 2", code)
 	}
-	// Sanity: the registry really is the full 23-verb set (12 routing +
-	// ship + 6 admin + doctor + daemon + chat + watch; watch replaced the
+	// Sanity: the registry really is the full 21-verb set (12 routing +
+	// 5 admin + doctor + daemon + chat + watch; watch replaced the
 	// retired watch-probe; doctor is the #113 machine health face).
 	want := []string{
 		"file", "queue", "cancel", "recall", "remember", "memory",
 		"submit", "answer", "pause", "resume",
-		"wrap", "ops", "chat", "watch", "ship", "users", "api-keys", "machines", "projects",
+		"wrap", "ops", "chat", "watch", "users", "api-keys", "machines", "projects",
 		"backup",
 		"doctor", "daemon",
 	}

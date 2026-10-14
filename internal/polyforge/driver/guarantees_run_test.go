@@ -125,3 +125,51 @@ func TestRunHumanGateGateFailRewindNeedsFreshAnswer(t *testing.T) {
 		t.Fatalf("workflow must complete after the fresh answer: %+v", exec.Steps["grill-review"])
 	}
 }
+
+// polyforge#164 H11: an if_asked human checkpoint (quick-fix grill) may
+// complete with zero questions — an unattended lane runs on — but the
+// skipped checkpoint is recorded as the durable human_gate_unasked event
+// (which the watcher turns into an owner notification).
+func TestRunIfAskedZeroQuestionPassIsRecorded(t *testing.T) {
+	d, sp, execPath := runEnv(t, StepSpec{ID: "grill", HumanAnswerIfAsked: true}, spec("fix"))
+	sp.script = []fakeEntry{done(`{}`), done(`{}`)}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if exec := readExec(t, execPath); exec.WorkflowStatus != StatusCompleted || len(sp.dispatched()) != 2 {
+		t.Fatalf("a zero-question pass must be accepted, not refused: %s %v", exec.WorkflowStatus, sp.dispatched())
+	}
+	var unasked []loggedEvent
+	for _, e := range d.log.(*eventLog).entries {
+		if e.kind == EvHumanGateUnasked {
+			unasked = append(unasked, e)
+		}
+	}
+	if len(unasked) != 1 || unasked[0].body["step"] != "grill" {
+		t.Fatalf("exactly one human_gate_unasked record for grill, got %+v", unasked)
+	}
+}
+
+// An if_asked checkpoint that asked and got a human answer is a normal
+// pass: no unasked record.
+func TestRunIfAskedAnsweredPassIsNotFlagged(t *testing.T) {
+	d, sp, execPath := runEnv(t, StepSpec{ID: "grill", HumanAnswerIfAsked: true})
+	sp.script = []fakeEntry{asks("q_1", "which scope?"), done(`{}`)}
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- d.Run(context.Background()) }()
+	waitUntil(t, "the grill question", func() bool {
+		exec := tryReadExec(execPath)
+		return exec != nil && exec.Steps["grill"].PendingQuestion != nil
+	})
+	if err := d.Answer("q_1", "the narrow one", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-doneCh; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, e := range d.log.(*eventLog).entries {
+		if e.kind == EvHumanGateUnasked {
+			t.Fatalf("an answered checkpoint must not be flagged unasked: %+v", e)
+		}
+	}
+}

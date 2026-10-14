@@ -31,6 +31,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/santhosh-tekuri/jsonschema/v5"
+
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
@@ -159,6 +161,13 @@ type Driver struct {
 	// emitted for in this driver life (the park transition emits it; a
 	// restarted driver re-announces a question it finds parked).
 	inputEventFor string
+
+	// bundleDir is the materialized bundle root the step definitions
+	// (and their declared output schemas) are read from; "" = none.
+	bundleDir string
+	// schemas caches each step's declared output schema (nil entry =
+	// none declared or unloadable), loaded on first validation.
+	schemas map[string]*stepOutputSchema
 }
 
 // New builds a Driver: it resolves paths, loads the workflow graph from
@@ -225,6 +234,8 @@ func New(cfg Config) (*Driver, error) {
 		rejects:        make(map[string]int),
 		priorRejection: make(map[string]string),
 		unbooked:       make(map[string]int64),
+		bundleDir:      bundleDir,
+		schemas:        make(map[string]*stepOutputSchema),
 	}, nil
 }
 
@@ -321,7 +332,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			d.emit("step_dead", map[string]any{
 				"step": stepID, "spawn_n": n, "cause": verdict.Cause, "evidence": verdict.Evidence,
 			})
-			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, string(verdict.Cause), -1, verdict.Evidence); ferr != nil {
+			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, verdictCause(*verdict), -1, verdict.Evidence); ferr != nil {
 				return ferr
 			} else if blocked {
 				return nil
@@ -427,14 +438,18 @@ func (d *Driver) Run(ctx context.Context) error {
 		delete(d.priorRejection, stepID)
 		d.mu.Unlock()
 		if err := d.transition(TransitionRequest{
-			Kind:   TransStepResult,
-			StepID: stepID,
-			Result: res,
-			SpawnN: n,
-			WallMs: d.takeUnbooked(stepID),
+			Kind:                    TransStepResult,
+			StepID:                  stepID,
+			Result:                  res,
+			SpawnN:                  n,
+			WallMs:                  d.takeUnbooked(stepID),
+			TestFilesCommit:         d.testFilesStamp(res),
+			RebaselineAuthoredTests: res.rebaseline,
 		}); err != nil {
 			return fmt.Errorf("driver: step %s result transition failed: %w", stepID, err)
 		}
+		d.noteUnaskedHumanGate(stepID, n, res)
+		d.noteAcceptedResultRecords(stepID, n, res)
 
 		switch res.Outcome {
 		case OutcomeCompleted:
@@ -778,7 +793,20 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	if st, ok := d.exec.Steps[stepID]; ok {
 		spec.HumanAnswers = currentChainAnswers(st)
 	}
+	outputs := make(map[string]map[string]any, len(d.exec.Steps))
+	for id, st := range d.exec.Steps {
+		if st != nil && st.Status == capsule.StepDone {
+			outputs[id] = st.Output
+		}
+	}
+	if stepID == deliverStepID {
+		spec.ReviewPassed = reviewPassed(d.exec.Steps[reviewStepID])
+		spec.HasReview = d.workflow.step(reviewStepID) != nil
+		spec.VerifiedHeads, spec.VerifiedTestBar = verificationRecord(d.exec.Steps[verificationStepID])
+	}
 	d.mu.Unlock()
+	spec.OutputSchema = d.outputSchema(stepID)
+	spec.PreExisting = preExistingRulesOf(outputs)
 	// Declared outputs, gate-ness and duties (gate-ness feeds the
 	// verdict binding — the #106 lesson).
 	if ss := d.workflow.step(stepID); ss != nil {
@@ -791,8 +819,110 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	}
 	if d.wi.CapsuleDir != "" {
 		spec.ReposDir = filepath.Join(d.wi.CapsuleDir, capsule.DirRepos)
+		// deliver is exempt from the authored-tests gate: merging the
+		// latest default branch legitimately changes an authored test file
+		// upstream also edited, and restoring the author commit's blob
+		// would undo upstream's edit. Verification passed on the verified
+		// head; anything hand-made since is escalated by deliver_facts.go.
+		if stepID != deliverStepID {
+			spec.AuthoredTests = authoredTestsBefore(d.workflow, outputs, stepID)
+		}
 	}
 	return spec
+}
+
+// outputSchema answers stepID's declared output schema (cached; nil when
+// the step definition declares none). A declared schema that does not
+// load is reported once on stderr and validates nothing — the bundle
+// tests pin that every shipped schema compiles.
+func (d *Driver) outputSchema(stepID string) *jsonschema.Schema {
+	if d.bundleDir == "" {
+		return nil
+	}
+	d.mu.Lock()
+	if d.schemas == nil {
+		d.schemas = make(map[string]*stepOutputSchema)
+	}
+	s, ok := d.schemas[stepID]
+	d.mu.Unlock()
+	if !ok {
+		var err error
+		s, err = loadStepOutputSchema(d.bundleDir, stepID)
+		if err != nil {
+			// loud, never a silent nil: stderr AND a durable event
+			fmt.Fprintf(os.Stderr, "driver: %s: %v (output not schema-validated)\n", d.wi.ID, err)
+			d.emit(EvOutputSchemaUnloadable, map[string]any{"step": stepID, "error": err.Error()})
+			s = nil
+		}
+		d.mu.Lock()
+		d.schemas[stepID] = s
+		d.mu.Unlock()
+	}
+	if s == nil {
+		return nil
+	}
+	return s.Schema
+}
+
+// noteAcceptedResultRecords emits the durable records an accepted result
+// owes: an output that violates its declared schema while the schema lane
+// is record-only (polyforge#164 H3), and a human-approved re-baseline of
+// authored tests naming the files (H4).
+func (d *Driver) noteAcceptedResultRecords(stepID string, n int64, res *StepResult) {
+	if res.schemaViolation != "" {
+		d.emit(EvOutputSchemaViolation, map[string]any{
+			"step": stepID, "spawn_n": n,
+			"schema": dirStepDefs + "/" + stepID + ".md#/output",
+			"errors": res.schemaViolation,
+		})
+	}
+	if res.rebaseline {
+		d.emit(EvAuthoredTestsRebaselined, map[string]any{
+			"step": stepID, "spawn_n": n, "files": res.rebaselined,
+		})
+	}
+}
+
+// noteUnaskedHumanGate records a requires_human_answer: if_asked step
+// that completed with no human answer in its current attempt chain
+// (polyforge#164 H11): the completion stands (an unattended lane runs
+// on), but the skipped checkpoint is a durable EvHumanGateUnasked event,
+// and the watcher turns that event into an owner notification.
+func (d *Driver) noteUnaskedHumanGate(stepID string, n int64, res *StepResult) {
+	ss := d.workflow.step(stepID)
+	if res.Outcome != OutcomeCompleted || ss == nil || !ss.HumanAnswerIfAsked {
+		return
+	}
+	d.mu.Lock()
+	answers := 0
+	if st := d.exec.Steps[stepID]; st != nil {
+		answers = currentChainAnswers(st)
+	}
+	d.mu.Unlock()
+	if answers > 0 {
+		return
+	}
+	d.emit(EvHumanGateUnasked, map[string]any{"step": stepID, "spawn_n": n})
+}
+
+// testFilesStamp answers the authored-tests baseline to stamp for an
+// accepted completed result (polyforge#164 H4): the task repos' HEADs
+// when the output declares test_files (an authoring step) or when the
+// step changed authored tests with a human's approval (res.rebaseline:
+// the transition moves the stamp onto the authoring steps); nil
+// otherwise.
+func (d *Driver) testFilesStamp(res *StepResult) map[string]any {
+	if res.Outcome != OutcomeCompleted || d.wi.CapsuleDir == "" {
+		return nil
+	}
+	if len(declaredTestFiles(res.Output)) == 0 && !res.rebaseline {
+		return nil
+	}
+	heads := repoHeads(filepath.Join(d.wi.CapsuleDir, capsule.DirRepos))
+	if len(heads) == 0 {
+		return nil
+	}
+	return heads
 }
 
 // parseOutput coerces a result's output payload to a JSON object map

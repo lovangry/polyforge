@@ -52,7 +52,7 @@ requester, so whatever `fix` needs to know must end up in your memo.
 3. Do not over-interrogate. This lane exists for small, well-understood changes: if after
    reading the goal you cannot find a materially ambiguous point, record that and move
    on — a one-line fix with a clear repro needs zero questions, and that is a success,
-   not a shortcut.
+   not a shortcut. A zero-question pass is recorded and the owner is notified.
 4. Write `artifacts/fix-memo.md`, the micro-spec `fix` will implement. Keep it tight — a
    few lines each, not a feature-full spec:
    - `## What is broken or missing` - the precise behavior, not a paraphrase of the title

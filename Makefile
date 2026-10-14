@@ -17,8 +17,6 @@ test:
 	# go test suppresses skip messages unless -v (or -json) is on, so a plain
 	# `make test` does NOT show which tests skipped; run `go test -v ./...` when
 	# that evidence matters. Opt-in tests (skipped unless their env var is set):
-	#   POLYFORGE_TEST_REAL_GITHUB=1       v1_s19 ship-pr e2e: creates a REAL private
-	#                                      GitHub repo + PR with this machine's gh
 	#   POLYFORGE_TEST_SYSTEM_INSTALL=1    installer scenarios: write /usr/local/bin/pf
 	# Explicit -timeout: the ./test acceptance package runs longer than go's
 	# default 10m per-package timeout, which would panic on wall clock while

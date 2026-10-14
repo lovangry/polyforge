@@ -1,7 +1,7 @@
 package workspace
 
-// compose_test.go: the precedence chain (project kind > project default
-// > bundle step > bundle default), table-driven. Fixture model ids are
+// compose_test.go: the precedence chain (project kind > bundle step >
+// project default > bundle default), table-driven. Fixture model ids are
 // placeholders.
 
 import (
@@ -47,13 +47,15 @@ func TestComposeProjectKindReplacesEveryKindStep(t *testing.T) {
 	}
 }
 
-// The project default governs every step lacking a kind list, beating
-// the bundle's step-level and default lists; a kind list beats it.
+// The project default governs every step lacking both a kind list and a
+// step-level list, beating the bundle's defaults; a bundle step's own
+// list beats the project default (polyforge#164 H10); a kind list beats
+// both.
 func TestComposeProjectDefaultAndKindPrecedence(t *testing.T) {
 	got := ComposeCandidates(testBundle(), models("p", map[string][]string{"default": {"y/d"}, "gate": {"y/g"}}), "p", nil)
 	want := map[string][]string{
 		"grill":        {"y/d"},
-		"fix":          {"y/d"},
+		"fix":          {"prov/flash"},
 		"release":      {"y/d"},
 		"verification": {"y/g"},
 	}
@@ -73,6 +75,12 @@ func TestComposePresentEmptyGoverns(t *testing.T) {
 	}
 	got = ComposeCandidates(testBundle(), models("p", map[string][]string{"default": {}}), "p", nil)
 	for id, l := range got {
+		if id == "fix" {
+			if !reflect.DeepEqual(l, []string{"prov/flash"}) {
+				t.Fatalf("fix = %v, want its own step list (a step list outranks the project default)", l)
+			}
+			continue
+		}
 		if len(l) != 0 {
 			t.Fatalf("%s = %v, want empty (default [] governs)", id, l)
 		}

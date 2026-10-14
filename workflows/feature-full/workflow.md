@@ -1,16 +1,17 @@
 ---
 name: feature-full
 steps:
-  - { id: grill, context_policy: fresh, handoff: true, kind: qa, budget: { wall_minutes: 30 } }
-  - { id: spec, context_policy: inherit, handoff: true, kind: spec, budget: { wall_minutes: 15 } }
-  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, requires_human_answer: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { target: spec } }
-  - { id: plan, context_policy: inherit, handoff: true, kind: author, budget: { wall_minutes: 15 } }
-  - { id: e2e-author, context_policy: fresh, handoff: true, kind: author, budget: { wall_minutes: 15 } }
-  - { id: e2e-baseline, context_policy: fresh, handoff: true, kind: code, gate: false, budget: { wall_minutes: 20 } }
-  - { id: code, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: e2e-run, context_policy: fresh, handoff: true, kind: code, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
-  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
+  - { id: grill, context_policy: fresh, handoff: true, kind: qa }
+  - { id: spec, context_policy: inherit, handoff: true, kind: spec }
+  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, requires_human_answer: true, gate: true, on_fail: { target: spec } }
+  - { id: plan, context_policy: inherit, handoff: true, kind: author }
+  - { id: e2e-author, context_policy: fresh, handoff: true, kind: author }
+  - { id: e2e-baseline, context_policy: fresh, handoff: true, kind: code, gate: false, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: code, context_policy: inherit, handoff: true, kind: code }
+  - { id: e2e-run, context_policy: fresh, handoff: true, kind: code, gate: true, on_fail: { target: code }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, on_fail: { target: code } }
+  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, on_fail: { target: code }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: deliver, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, on_fail: { target: code } }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 ---
@@ -96,21 +97,33 @@ the workflow in `failed_rewind_exhausted`, not an infinite loop.
 
 ## Budget guidance
 
-There is no workflow-level budget; the bounds are the rewind limits above and each step's wall estimate. Projects
-with larger codebases or slower CI should raise the per-step `budget.wall_minutes` on `code`/`e2e-run`.
-
-Every step declares its own `budget.wall_minutes`: the checkpoints `grill` and `grill-review` get 30 (the
-user's own thinking time is inside the step), the authoring steps `spec`/`plan`/`e2e-author` 15, the e2e
-executions `e2e-baseline`/`e2e-run` 20, `code` 30, and the judgment gates `verification`/`review`
-20 — 215 minutes in total.
-
-The declared wall is an estimate, not a limit: the daemon bounds a step's total runtime across its
-dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
-A step that declares nothing gets the default, so declare a wall only for a step that legitimately
-needs more than 90 minutes in total.
+There is no workflow-level budget; the bounds are the rewind limits above and the daemon's
+per-step runtime bound. No step declares `budget.wall_minutes` (polyforge#164): the daemon
+bounds a step's total runtime across its dispatches at T = max(3 × `budget.wall_minutes`,
+the daemon's `--step-timeout`, default 90 minutes), so any estimate of 30 minutes or less is
+inert and T is 90 minutes for every step here. Declare a wall only for a step that
+legitimately needs more than 90 minutes in total (31 or more).
 
 ## No release slot
 
 This bundle has no release step. Releases and deploys never ride a delivery lane: they
 happen only through the dedicated `release` workflow bundle (a separate WI), so shipping
 is always an explicit, separately-gated act on a verified origin head.
+
+## Delivery: the `deliver` step
+
+`deliver` runs last, after every gate passed (a failing gate never reaches it). Per declared
+repo it fetches and merges the latest origin default branch (a conflict is resolved in the
+capsule, then the full test bar is re-run and a fresh-context reviewer checks the
+resolution), pushes ONLY the feature branch `polyforge/<project>-<seq>`, opens or reuses
+the PR, and merges it with `gh pr merge --merge` iff the independent review passed with no
+blocking finding, the tests passed, no conflict was LLM-resolved and its mechanical
+pre-flight (nothing uncommitted, no release residue) found nothing. Otherwise it asks a
+human-only question (merge / don't merge / back to code). The independent review is this workflow's `review` gate (`steps.review.output`). "Back to code" is a
+`gate_failed` verdict that rewinds to `code`; a re-run reuses the same branch and PR. The
+result records branch, PR URL and merge commit (or why not merged) per repo, plus the
+delivery note (`artifacts/delivery.md`). The driver refuses a completed `deliver` whose
+recorded commands push anything but the feature branch, merge other than `--merge`, or
+merge/leave unmerged outside the rule without a human answer. Step definition:
+`steps/deliver.md`. Releases stay in the separate `release` bundle, cut from the merged
+origin head.

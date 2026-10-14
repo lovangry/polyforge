@@ -816,3 +816,58 @@ func TestTaskCarrierBlobOverCarrierLimitRejected(t *testing.T) {
 		t.Fatalf("wrong rejection: %s", out)
 	}
 }
+
+// TestTaskWIPRefScratch (polyforge#167): refs/pf-wip/<repo> carries a
+// snapshot of a task repo's uncommitted work and is scratch — every close
+// supersedes it with a force push or deletes it. The hook accepts a
+// seq-less commit (gitlinks allowed), a non-fast-forward replacement and
+// deletion, and still refuses a new blob over the carrier limit.
+func TestTaskWIPRefScratch(t *testing.T) {
+	e := newGitEnv(t)
+	e.mgr.MaxBlobBytes = 512
+	e.mgr.MaxTaskBlobBytes = 4096
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
+	wt := newWorktree(t)
+	commitPlain(t, wt, "code.txt", "base\n")
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/pf-task/demo-src"); err != nil {
+		t.Fatalf("carrier push: %s", out)
+	}
+	// a 2 KiB blob: over the chain limit, under the carrier limit
+	if err := os.WriteFile(filepath.Join(wt, "mid.bin"), bytes.Repeat([]byte{1}, 2048), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, wt, "add", "-A")
+	mustGit(t, wt, "update-index", "--add", "--cacheinfo", "160000,0123456789012345678901234567890123456789,vendored-thing")
+	mustGit(t, wt, "commit", "-m", "pf-wip")
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/pf-wip/demo-src"); err != nil {
+		t.Fatalf("WIP push rejected: %s", out)
+	}
+	// superseded by a non-descendant snapshot (force)
+	mustGit(t, wt, "reset", "-q", "--hard", "HEAD~1")
+	commitPlain(t, wt, "other.txt", "another snapshot\n")
+	if out, err := runGit(t, wt, "push", cred, "+HEAD:refs/pf-wip/demo-src"); err != nil {
+		t.Fatalf("non-fast-forward WIP replacement rejected: %s", out)
+	}
+	// a new blob over the carrier limit is refused
+	if err := os.WriteFile(filepath.Join(wt, "big.bin"), bytes.Repeat([]byte{2}, 8192), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, wt, "add", "-A")
+	mustGit(t, wt, "commit", "-m", "big")
+	if out, err := runGit(t, wt, "push", cred, "+HEAD:refs/pf-wip/demo-src"); err == nil {
+		t.Fatalf("WIP push over the carrier limit accepted: %s", out)
+	} else if !strings.Contains(out, "blob exceeds the 4096-byte limit") {
+		t.Fatalf("wrong rejection: %s", out)
+	}
+	// deletion is allowed for the WIP ref only
+	if out, err := runGit(t, wt, "push", cred, ":refs/pf-wip/demo-src"); err != nil {
+		t.Fatalf("WIP ref deletion rejected: %s", out)
+	}
+	if out := mustGit(t, wt, "ls-remote", cred, "refs/pf-wip/demo-src"); strings.TrimSpace(out) != "" {
+		t.Fatalf("WIP ref still advertised after deletion: %s", out)
+	}
+	if out, err := runGit(t, wt, "push", cred, ":refs/pf-task/demo-src"); err == nil {
+		t.Fatalf("carrier ref deletion accepted: %s", out)
+	}
+}

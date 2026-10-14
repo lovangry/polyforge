@@ -67,7 +67,7 @@
     1. **WI 处于 `queued`/`paused`/`blocked`（无活跃 generation）**：人工直接经 Core 的 cancel 端点取消（`02-aihub-core.md#§6.5`），不需要任何活跃 generation token，也**不存在 flush**——本就没有活跃代，没有「先发布、后结束 generation」的对象。Capsule 侧若存在本机封存目录（`paused` 场景），保持只读现场，其后按删除保护流程清理。
     2. **WI 处于 `running`（有活跃 generation）**：Core 的 cancel 端点不作用于 running WI（`02-aihub-core.md#§6.5`）；owner 必须先走上面的正常收尾路径——先 flush 落定、generation 结束、WI 转 `paused`——再由人工按第 1 类取消，即「**先 flush 后 cancel**」，不存在跳过 flush 直接取消 running WI 的路径。
     3. **generation 已 stale 或已被 takeover**：走上面的第二类路径——kill 进程组 + 本机 quarantine，**不发布**（零 flush）；WI 的最终终止由新 generation 或人工在 Core 侧另行决定，旧代的本机目录不参与任何 flush。
-  两类路径封存后目录均保留（只读现场），等待恢复，或按 `05-sync-revision-recovery.md#§2.10` 删除保护流程清理。（基线修订 polyforge#37）封存目录对 ship 交付桥路径（`04-local-runtime.md#§5.1`）保持**只读可达**：ship 从封存 capsule 的 `repos/` 工作树读取封存时 HEAD 的字节并推送到 git origin，不写 capsule 内任何路径——「只读现场」的写禁令对 ship 同样成立，ship 不构成封存的任何写例外通道。「销毁」在 v1 指封存+移出活跃集合，不做磁盘删除；磁盘删除只经删除保护流程。本机 quarantine 只隔离**本机**目录，不影响旧 generation 若运行在另一台机器上时该远端机器本地目录的状态（该状态完全取决于那台机器上 Daemon 自己的收尾行为，见 §2.4）。
+  两类路径封存后目录均保留（只读现场），等待恢复，或按 `05-sync-revision-recovery.md#§2.10` 删除保护流程清理。（基线修订 polyforge#37）封存目录对 ship 交付桥路径 (removed by polyforge#166: delivery is the workflows' deliver step)（`04-local-runtime.md#§5.1`）保持**只读可达**：ship 从封存 capsule 的 `repos/` 工作树读取封存时 HEAD 的字节并推送到 git origin，不写 capsule 内任何路径——「只读现场」的写禁令对 ship 同样成立，ship 不构成封存的任何写例外通道。「销毁」在 v1 指封存+移出活跃集合，不做磁盘删除；磁盘删除只经删除保护流程。本机 quarantine 只隔离**本机**目录，不影响旧 generation 若运行在另一台机器上时该远端机器本地目录的状态（该状态完全取决于那台机器上 Daemon 自己的收尾行为，见 §2.4）。
 
 ### 2.2 与 WI 的绑定关系 <!-- §2.2 -->
 

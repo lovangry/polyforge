@@ -333,6 +333,26 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 	return FailExitOther, -1, err.Error()
 }
 
+// verdictCause answers the failure cause a supervisor verdict records.
+// A model_error verdict is an error-ended turn of a harness that stayed
+// ALIVE (pi --mode rpc idles after a provider error instead of exiting):
+// its error text goes through the same D7 classification an exited
+// dispatch's does (polyforge#162), so a throttle or an upstream transient
+// is a same-model backoff retry here too. Every other text keeps the
+// verdict's model_error (model-class: it switches candidates, exactly
+// what the exit path's error-turn fallback does).
+func verdictCause(v supervise.StepDead) string {
+	if v.Cause != supervise.CauseModelError || strings.TrimSpace(v.TurnError) == "" {
+		return string(v.Cause)
+	}
+	cause, _, _ := classifyWaitFailure(&ExitedError{Step: v.Step, SpawnN: v.SpawnN, ExitCode: -1, LastError: v.TurnError, TurnError: true})
+	switch cause {
+	case FailRateLimited, FailUpstreamTransient:
+		return cause
+	}
+	return string(v.Cause)
+}
+
 // isHostError reports whether err is the driver's own host fault.
 func isHostError(err error) bool {
 	if err == nil {

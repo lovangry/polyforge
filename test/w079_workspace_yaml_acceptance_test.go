@@ -13,8 +13,9 @@ package test
 //	    default: [model-id, ...]   # optional: every step of the project
 //	    <kind>: [model-id, ...]    # optional: qa|spec|author|code|gate|review
 //
-// Per step: project kind list > project default > bundle step list >
-// bundle defaults. The daemon reads and validates the file BEFORE the
+// Per step: project kind list > bundle step list > project default >
+// bundle defaults (polyforge#164: a step's own list outranks the project
+// default). The daemon reads and validates the file BEFORE the
 // aihub claim: an invalid file refuses with DAEMON-414 (surfaced to
 // `pf submit`), the WI stays queued (never claimed, not even
 // transiently), no capsule exists. Repo lists come from the aihub
@@ -34,11 +35,12 @@ import (
 )
 
 // The quick-fix bundle's pinned heads (frontmatter at HEAD): the
-// defaults head and the fix step's step-level head. Kept-face guards
-// assert these stay in effect wherever the yaml layer is silent.
+// defaults head and the verification step's step-level head (fix has no
+// list of its own). Kept-face guards assert these stay in effect
+// wherever the yaml layer is silent.
 const (
-	w079DefaultsHead = "sub2api-glm/glm-5.3"
-	w079FixStepHead  = "sub2api-glm/glm-5.3-flash"
+	w079DefaultsHead         = "sub2api-glm/glm-5.3"
+	w079VerificationStepHead = "sub2api-glm/glm-5.3-flash"
 )
 
 // ---------------------------------------------------------------------------
@@ -318,8 +320,11 @@ func TestW079AbsentAndEmptyYamlRunExactlyAsHead(t *testing.T) {
 		if err != nil || string(marker) != "registry marker\n" {
 			t.Fatalf("%s: the registry clone did not land: %q, %v", name, marker, err)
 		}
-		if got := w079Model(t, capDir, "fix"); got != w079FixStepHead {
-			t.Fatalf("%s: fix model %q, want the bundle step-level head %q", name, got, w079FixStepHead)
+		if got := w079Model(t, capDir, "verification"); got != w079VerificationStepHead {
+			t.Fatalf("%s: verification model %q, want the bundle step-level head %q", name, got, w079VerificationStepHead)
+		}
+		if got := w079Model(t, capDir, "fix"); got != w079DefaultsHead {
+			t.Fatalf("%s: fix model %q, want the bundle defaults head %q", name, got, w079DefaultsHead)
 		}
 		if got := w079Model(t, capDir, "grill"); got != w079DefaultsHead {
 			t.Fatalf("%s: grill model %q, want the bundle defaults head %q", name, got, w079DefaultsHead)
@@ -328,11 +333,13 @@ func TestW079AbsentAndEmptyYamlRunExactlyAsHead(t *testing.T) {
 }
 
 // TestW079PerProjectModelPrecedence pins the chain inside ONE workspace
-// serving three projects: project kind list > project default > bundle.
-// e2e declares default + code (every step gets the default except the
-// kind:code steps), ieops declares only a default (it beats even the
-// bundle's step-level lists), and a third project the yaml does not list
-// stays bundle-only — no cross-project leak.
+// serving three projects: project kind list > bundle step list > project
+// default > bundle defaults. e2e declares default + code (kind:code steps
+// get the code list, verification keeps its own step list, the rest get
+// the default), ieops declares only a default (it governs every step
+// without a list of its own, never a step's own list — polyforge#164),
+// and a third project the yaml does not list stays bundle-only — no
+// cross-project leak.
 func TestW079PerProjectModelPrecedence(t *testing.T) {
 	inst := newV1Install(t)
 	w113EnsureProject(t, inst, "ieops")
@@ -355,20 +362,23 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 	capT := w079Run(t, d, inst, ws, wiT)
 
 	for step, want := range map[string]string{
-		"grill": "w079-e2e-def", "verification": "w079-e2e-def",
+		"grill": "w079-e2e-def", "verification": w079VerificationStepHead,
 		"fix": "w079-e2e-code-a",
 	} {
 		if got := w079Model(t, capE, step); got != want {
-			t.Fatalf("e2e %s model %q, want %q (project kind > project default)", step, got, want)
+			t.Fatalf("e2e %s model %q, want %q (project kind > bundle step > project default)", step, got, want)
 		}
 	}
-	for _, step := range []string{"grill", "verification", "fix"} {
+	for _, step := range []string{"grill", "fix"} {
 		if got := w079Model(t, capI, step); got != "w079-ieops-def" {
-			t.Fatalf("ieops %s model %q, want its project default w079-ieops-def (beats the bundle's step-level list)", step, got)
+			t.Fatalf("ieops %s model %q, want its project default w079-ieops-def", step, got)
 		}
 	}
-	if got := w079Model(t, capT, "fix"); got != w079FixStepHead {
-		t.Fatalf("unlisted project fix model %q, want the bundle step-level head %q", got, w079FixStepHead)
+	if got := w079Model(t, capI, "verification"); got != w079VerificationStepHead {
+		t.Fatalf("ieops verification model %q, want its own step-level head %q (a step list outranks the project default)", got, w079VerificationStepHead)
+	}
+	if got := w079Model(t, capT, "verification"); got != w079VerificationStepHead {
+		t.Fatalf("unlisted project verification model %q, want the bundle step-level head %q", got, w079VerificationStepHead)
 	}
 	if got := w079Model(t, capT, "grill"); got != w079DefaultsHead {
 		t.Fatalf("unlisted project grill model %q, want the bundle defaults head %q", got, w079DefaultsHead)
@@ -397,11 +407,11 @@ func TestW079ProjectKindOnlyFallsThroughToBundle(t *testing.T) {
 	if got := w079Model(t, capDir, "grill"); got != "w079-spec-x" {
 		t.Fatalf("grill (kind spec) model %q, want w079-spec-x", got)
 	}
-	if got := w079Model(t, capDir, "fix"); got != w079FixStepHead {
-		t.Fatalf("fix model %q, want its bundle step-level head %q", got, w079FixStepHead)
+	if got := w079Model(t, capDir, "fix"); got != w079DefaultsHead {
+		t.Fatalf("fix model %q, want the bundle defaults head %q", got, w079DefaultsHead)
 	}
-	if got := w079Model(t, capDir, "verification"); got != w079DefaultsHead {
-		t.Fatalf("verification model %q, want the bundle defaults head %q", got, w079DefaultsHead)
+	if got := w079Model(t, capDir, "verification"); got != w079VerificationStepHead {
+		t.Fatalf("verification model %q, want its bundle step-level head %q", got, w079VerificationStepHead)
 	}
 }
 
@@ -703,8 +713,8 @@ func TestW079RotationUntouchedWithoutYaml(t *testing.T) {
 	if providerInfra != 1 || gateRewind != 1 {
 		t.Fatalf("fix attempts: %d provider infra, %d gate-fail rewinds; want 1/1", providerInfra, gateRewind)
 	}
-	if got := w079Model(t, capDir, "fix"); got != w079FixStepHead {
-		t.Fatalf("fix model after the rewind %q, want the bundle step-level head %q — rotation semantics must stay exactly as today", got, w079FixStepHead)
+	if got := w079Model(t, capDir, "fix"); got != w079DefaultsHead {
+		t.Fatalf("fix model after the rewind %q, want the bundle list head %q — rotation semantics must stay exactly as today", got, w079DefaultsHead)
 	}
 }
 
@@ -890,16 +900,23 @@ func TestW079SkillTeachesModelsYaml(t *testing.T) {
 	}
 }
 
-// TestW079ShipFragmentRoutesRepoPathsViaRegistry: the verb fragments that
-// name repos/<name> worktrees say the inventory is the aihub registry's,
-// never the yaml's.
-func TestW079ShipFragmentRoutesRepoPathsViaRegistry(t *testing.T) {
+// TestW079RepoInventoryComesFromTheRegistry: SKILL.md teaches that the
+// repo inventory (and clone URLs) come from the aihub project registry and
+// that the cli.toml [workspace] mapping is the only placement source —
+// never the yaml. Any verb fragment that names repos/<name> worktrees must
+// say the same. (The ship fragment used to be the one that did; pf ship is
+// gone — polyforge#166 — so the SKILL.md sentence is the pinned subject.)
+func TestW079RepoInventoryComesFromTheRegistry(t *testing.T) {
+	skill := strings.Join(strings.Fields(w079Doc(t, "skills", "polyforge", "SKILL.md")), " ")
+	const rule = "The repo inventory and clone URLs always come from the aihub project registry; the cli.toml `[workspace]` mapping is the only placement source."
+	if !strings.Contains(skill, rule) {
+		t.Fatalf("SKILL.md no longer teaches the registry rule: %q", rule)
+	}
 	verbsDir := filepath.Join(v1Root(t), "skills", "polyforge", "verbs")
 	ents, err := os.ReadDir(verbsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	checked := 0
 	for _, e := range ents {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
@@ -911,16 +928,12 @@ func TestW079ShipFragmentRoutesRepoPathsViaRegistry(t *testing.T) {
 		if !strings.Contains(string(raw), "repos/") {
 			continue
 		}
-		checked++
 		if !strings.Contains(string(raw), "registry") {
 			t.Fatalf("%s routes repo paths but does not name the aihub registry as their source", e.Name())
 		}
 		if strings.Contains(string(raw), "`projects` section") {
 			t.Fatalf("%s still teaches the retired yaml projects section", e.Name())
 		}
-	}
-	if checked == 0 {
-		t.Fatal("no verb fragment routes repo paths — the floor lost its subject")
 	}
 }
 
