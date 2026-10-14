@@ -1,20 +1,27 @@
-// result.go: the step result envelope (R13) and its pre-commit
-// validation — R14 steps 1–3, the STAGING half of the done commit
-// point. The atomic execution.json acceptance (R14 step 6) belongs to
-// transition.go; this file only answers "is this envelope acceptable".
+// result.go: the step result envelope and its pre-commit validation —
+// the STAGING half of the done commit point. The atomic execution.json
+// acceptance belongs to transition.go; this file only answers "is this
+// envelope acceptable".
 //
 // A result envelope is the one channel a step process uses to report
 // its outcome. The driver trusts nothing but the envelope, and the
-// envelope itself is trusted only after four gates, in order:
+// envelope itself is trusted only after three gates, in order:
 //
-//  1. shape     — protocol version, UUID result_id, known outcome
+//  1. shape     — the outcome is in the closed set
 //  2. binding   — wi_id/step_id identity and the spawn_n fence
-//  3. once-only — the result_id idempotency key (R14 step 1)
-//  4. substance — artifact files exist with matching hashes (R14
-//     step 3) and output matches the step's declared
-//     schema (R14 step 2)
+//  3. substance — the needs_input question pair, the gate verdict
+//     binding, the human-gate guarantee and the release/deploy verdict
+//     binding
 //
-// For a step the workflow declares gate: true there is a fifth rule,
+// The MINIMAL CONTRACT (polyforge#147 审计减法 A): an envelope is the
+// outcome + output pair (needs_input adds question_id + question),
+// written to the unchanged drop path; the driver judges only the
+// fields above. There is no protocol version stamp, no envelope id,
+// no artifact manifest, no handoff digest reference, and no hash or
+// manifest verification anywhere — downstream and handoff readers work
+// by path convention.
+//
+// For a step the workflow declares gate: true there is a further rule,
 // the VERDICT BINDING (the #106 lesson): a gate's business verdict —
 // the top-level "verdict" string in the output JSON — and the
 // envelope's routing outcome must agree in the fail direction. A
@@ -27,24 +34,14 @@
 package driver
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
-
-// ResultProtocolVersion is the result-envelope protocol this driver
-// speaks (R13). Envelopes carrying any other version are rejected
-// outright rather than best-effort parsed — a version this driver does
-// not know is a contract it cannot validate.
-const ResultProtocolVersion = 1
 
 // EvEnvelopeRejected is the durable event kind for the in-process
 // envelope-rejection retry lane (one event per rejection, carrying the
@@ -75,23 +72,14 @@ const (
 	deployStepID  = "deploy"
 )
 
-// verificationStepID is the conventional id of the V4 verification step:
-// a completed result for it owes command evidence (ResultSpec.RequireCommandEvidence).
-const verificationStepID = "verification"
-
 // maxEnvelopeRejects bounds the in-process re-dispatch lane: a step
 // whose envelopes keep failing validation this many times CONSECUTIVELY
-// escalates to the recovery lane (the storm guard bounds whatever
-// follows). The #97/#107 history: hand-transcribed digest typos and
-// missing handoff refs — the retries fix the author, the bound keeps a
-// genuinely broken author from looping forever.
+// goes BLOCKED with the result_invalid cause code (no driver relaunch,
+// no recovery lane, no on_fail routing — rewind stays reserved for
+// review FAIL verdicts). The #97/#107 history: hand-transcribed digest
+// typos and missing handoff refs — the retries fix the author, the bound
+// keeps a genuinely broken author from looping forever.
 const maxEnvelopeRejects = 3
-
-// maxRejectRelaunches bounds the driver relaunches a persistently
-// rejected envelope may cost (persisted per step in execution.json,
-// because the in-process counter resets on every relaunch): the third
-// escalation blocks the step instead of relaunching again.
-const maxRejectRelaunches = 3
 
 // Outcome is the closed result-verdict set of the envelope.
 type Outcome string
@@ -112,24 +100,26 @@ func (o Outcome) Valid() bool {
 	return false
 }
 
-// StepResult is the result envelope (R13): the step process's complete
-// and only report. Every field the driver needs to judge and archive
-// the step rides here — the commit-point code (transition.go) never
-// reaches back into the step process for more.
+// StepResult is the result envelope: the step process's complete and
+// only report. The MINIMAL CONTRACT (polyforge#147 审计减法 A): the
+// outcome + output pair — needs_input adds the question pair — plus the
+// identity/fence fields the driver judges the envelope against. There
+// is no protocol version stamp, no envelope id, no artifact manifest
+// and no handoff digest reference: downstream and handoff readers work
+// by path convention, and an envelope missing any retired field is
+// never judged invalid for its absence.
 type StepResult struct {
-	ProtocolVersion int               `json:"protocol_version"`
-	ResultID        string            `json:"result_id"` // UUID, idempotency key
-	WIID            string            `json:"wi_id"`
-	StepID          string            `json:"step_id"`
-	SpawnN          int64             `json:"spawn_n"` // fencing: only the current spawn's results count
-	Outcome         Outcome           `json:"outcome"`
-	Output          json.RawMessage   `json:"output"` // step-specific output JSON, schema-checked
-	Artifacts       []ArtifactRef     `json:"artifacts"`
-	HandoffRef      *ArtifactRef      `json:"handoff_ref"`           // required for completed inherit-source steps
-	QuestionID      string            `json:"question_id,omitempty"` // set when Outcome == needs_input
-	Question        string            `json:"question,omitempty"`    // the question text for needs_input
-	CommandEvidence []CommandEvidence `json:"command_evidence"`
-	SubmittedAt     time.Time         `json:"submitted_at"`
+	WIID       string          `json:"wi_id"`
+	StepID     string          `json:"step_id"`
+	SpawnN     int64           `json:"spawn_n"` // fencing: only the current spawn's results count
+	Outcome    Outcome         `json:"outcome"`
+	Output     json.RawMessage `json:"output"`                // step-specific output JSON, schema-checked
+	QuestionID string          `json:"question_id,omitempty"` // set when Outcome == needs_input
+	Question   string          `json:"question,omitempty"`    // the question text for needs_input
+	// CommandEvidence is the V4 command-evidence list: required (and
+	// checked) only on a step that owes it (ResultSpec.RequireCommandEvidence).
+	CommandEvidence []CommandEvidence `json:"command_evidence,omitempty"`
+	SubmittedAt     time.Time         `json:"submitted_at,omitempty"`
 
 	// evidenceDropped records why the tolerant re-parse discarded
 	// command_evidence entries (set by the collector, never serialized);
@@ -137,19 +127,13 @@ type StepResult struct {
 	evidenceDropped []string
 }
 
-// ArtifactRef pins one artifact file: capsule-relative path plus the
-// content hash and size it must verify against (R14 step 3). The driver
-// never hashes "whatever is there" — it hashes what is there and
-// compares to this manifest entry.
-type ArtifactRef struct {
-	Path   string `json:"path"` // capsule-relative
-	SHA256 string `json:"sha256"`
-	Bytes  int64  `json:"bytes"`
-}
+// verificationStepID is the conventional id of the V4 verification step:
+// a completed result for it owes command evidence (ResultSpec.RequireCommandEvidence).
+const verificationStepID = "verification"
 
 // CommandEvidence is one recorded command the step process ran, kept in
 // the envelope for audit (the operator face renders it). Validation of
-// a verification step checks argv non-emptiness and duration_ms > 0
+// an evidence-owing step checks argv non-emptiness and duration_ms > 0
 // (checkCommandEvidence); exit_code and started_at are not enforced.
 type CommandEvidence struct {
 	Argv       []string  `json:"argv"`
@@ -160,50 +144,24 @@ type CommandEvidence struct {
 	LogPath    string    `json:"log_path"`
 }
 
-// OutputSpec is one entry of a step's declared outputs (the workflow
-// frontmatter extension): the artifact path the completed step must
-// deliver plus the JSON type the step's result output must carry.
-type OutputSpec struct {
-	Path   string `json:"path"`
-	Schema string `json:"schema"` // "", "any", "object", "array", "string", "number", "boolean"
-}
-
-// Validation verdicts. ErrDuplicateResult is not an envelope failure:
-// it answers "this result_id is already committed" and the caller
-// treats the resubmission as an idempotent no-op (R14 step 1) instead
-// of re-applying the result.
+// Validation verdicts.
 var (
-	ErrProtocolMismatch = errors.New("driver: result protocol version mismatch")
 	ErrStaleSpawn       = fmt.Errorf("driver: result fenced out (spawn_n mismatch): %w", ErrStaleFence)
 	ErrIdentityMismatch = errors.New("driver: result bound to another work item/step")
-	ErrDuplicateResult  = errors.New("driver: result_id already accepted")
 )
 
 // ResultSpec carries everything ValidateStepResult judges an envelope
-// against: the binding and fence of the CURRENT spawn, the set of
-// already-committed result ids (idempotency), the step's declared
-// outputs and handoff duty, and the capsule root artifact paths resolve
-// under. It is a read-only snapshot: the mutation that adds a result_id
-// to AcceptedIDs happens at the commit point (R14 step 6), never here.
+// against: the binding and fence of the CURRENT spawn, the gate verdict
+// binding and the human-gate guarantee. It is a read-only snapshot: the
+// mutations happen at the commit point, never here.
 type ResultSpec struct {
 	WIID   string
 	StepID string
 	SpawnN int64
-	// AcceptedIDs holds the result ids already committed for this step.
-	AcceptedIDs map[string]bool
-	// Outputs are the step's declared outputs (frontmatter outputs:);
-	// presence is enforced for completed results only.
-	Outputs []OutputSpec
-	// HandoffRequired mirrors the step's handoff: true declaration —
-	// a completed handoff step must carry a verifiable handoff_ref.
-	HandoffRequired bool
 	// Gate mirrors the step's gate: true declaration — the verdict
 	// binding applies (a completed envelope carrying a fail verdict is
 	// re-bound to gate_failed, never accepted as a completed step).
 	Gate bool
-	// CapsuleRoot is the directory capsule-relative artifact paths
-	// resolve against (verification is jailed inside it).
-	CapsuleRoot string
 	// RequiresHumanAnswer mirrors the step's requires_human_answer: true
 	// declaration: a delivered completed result is rejected unless
 	// HumanAnswers > 0 (the human-gate guarantee, polyforge#138).
@@ -221,71 +179,57 @@ type ResultSpec struct {
 	RequireCommandEvidence bool
 }
 
-// ValidateStepResult runs the R14 staging gates over one envelope:
+// ValidateStepResult runs the staging gates over one envelope:
 //
-//  1. shape: protocol version, UUID result_id, known outcome;
+//  1. shape: the outcome is in the closed set;
 //  2. binding: wi_id/step_id match and spawn_n equals the current
 //     spawn (a result from a superseded spawn is fenced out);
-//  3. once-only: a result_id already in AcceptedIDs answers
-//     ErrDuplicateResult (wrap with errors.Is to detect);
+//  3. substance, in order:
+//     3a. a needs_input envelope owes its question pair (nameable
+//     before the process is gone — an in-process rewrite, never a
+//     recovery-lane error at the commit point);
 //     3b. verdict binding (gate steps only): a completed envelope whose
 //     output carries a top-level fail verdict is re-bound to
-//     gate_failed BEFORE substance is judged — a gate-fail report owes
-//     no completed duties (declared outputs, handoff_ref). The
-//     re-bind is visible to the caller: res.Outcome differs from the
-//     delivered outcome after this call, and the Run loop logs it as
-//     an EvGateVerdictBound event;
+//     gate_failed BEFORE anything else is judged. The re-bind is
+//     visible to the caller: res.Outcome differs from the delivered outcome after
+//     this call, and the Run loop logs it as an EvGateVerdictBound
+//     event;
+//     3b'. the human-gate guarantee (#138): judged on the DELIVERED
+//     outcome so a gate-fail verdict cannot dodge the human either;
 //     3c. release verdict binding (the release bundle's `release` and
-//     `deploy` steps only): a completed envelope for one of them whose
-//     output carries a top-level verdict is judged against that step's
-//     vocabulary. On `release`: pass owes a non-empty version plus at
-//     least one artifacts_published entry, fail owes a non-empty
-//     fail_reason, and anything else (defer included) is outside the
-//     closed [pass, fail] set. On `deploy`: pass owes a non-empty
-//     version (the version now serving), fail owes a non-empty
-//     fail_reason, defer (no deploy procedure in the capsule) owes
-//     neither, and anything else is outside [pass, defer, fail]. A
-//     defer verdict on any OTHER step is a validation error. The gate
-//     binding above stays prefix-fail only, so a defer verdict clears
-//     the deploy gate and the workflow proceeds, while a fail verdict
-//     (with its fail_reason) still re-binds to gate_failed.
-//  4. substance: every artifact the envelope declares must exist under
-//     the capsule with matching size and SHA-256, and — for completed
-//     results — every declared output must be delivered and the output
-//     JSON must match the declared schema, with the handoff_ref present
-//     when the step declares handoff.
+//     `deploy` steps only, judged on the DELIVERED outcome): a
+//     completed envelope for one of them whose output carries a
+//     top-level verdict is judged against that step's vocabulary. On
+//     `release`: pass owes a non-empty version plus at least one
+//     artifacts_published entry, fail owes a non-empty fail_reason,
+//     and anything else (defer included) is outside the closed
+//     [pass, fail] set. On `deploy`: pass owes a non-empty version
+//     (the version now serving), fail owes a non-empty fail_reason,
+//     defer (no deploy procedure in the capsule) owes neither, and
+//     anything else is outside [pass, defer, fail]. A defer verdict on
+//     any OTHER step is a validation error. The gate binding above
+//     stays prefix-fail only, so a defer verdict clears the deploy
+//     gate and the workflow proceeds, while a fail verdict (with its
+//     fail_reason) still re-binds to gate_failed. A binding error is
+//     an envelope rejection (the in-process retry lane), never a
+//     silent reclassification;
+//  4. the V4 command-evidence gate (RequireCommandEvidence steps): a
+//     completed result must carry at least one command_evidence entry,
+//     each with a non-empty argv and duration_ms > 0.
 //
-// Non-completed outcomes (gate_failed, needs_input, incomplete) skip
-// the declared-output and handoff enforcement: their disposition rides
-// other channels (the gate verdict, the pending question), but any
-// artifact reference they DO carry is still verified — a wrong hash is
-// a broken envelope whatever the outcome.
+// The minimal contract: an envelope missing the retired protocol
+// fields is never judged invalid for its absence — there is no
+// protocol version, no envelope id, no artifact manifest, no handoff
+// digest reference and no hash or manifest verification anywhere.
+//
+// Non-completed outcomes (gate_failed, needs_input, incomplete) carry
+// their disposition on other channels (the gate verdict, the pending
+// question).
 func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	if res == nil {
 		return errors.New("driver: nil step result")
 	}
 	// 1. shape.
-	if res.ProtocolVersion != ResultProtocolVersion {
-		return fmt.Errorf("%w: envelope speaks %d, driver speaks %d",
-			ErrProtocolMismatch, res.ProtocolVersion, ResultProtocolVersion)
-	}
-	if id := strings.TrimSpace(res.ResultID); id == "" {
-		return fmt.Errorf("driver: result_id is empty")
-	} else if len(id) > 128 {
-		return fmt.Errorf("driver: result_id %q exceeds 128 characters", id)
-	} else if strings.ContainsAny(id, " \t\r\n") {
-		return fmt.Errorf("driver: result_id %q contains whitespace", id)
-	} else {
-		// Tolerant id (the #97 lesson): a well-meaning step agent minted
-		// a readable slug ("grill-review-ask-batch-1") where the UUID
-		// contract asked for a random one. The id's whole duty is to be a
-		// non-empty, collision-honest idempotency key — a stable readable
-		// slug serves it as well as a UUID, and rejecting it sent the
-		// driver into a reject/relaunch death loop (nothing consumed the
-		// drop, so every restart re-collected the same envelope). Accept
-		// any single-token id; the prompt still asks for a fresh UUID.
-		res.ResultID = id
-	}
 	if !res.Outcome.Valid() {
 		return fmt.Errorf("driver: unknown outcome %q", res.Outcome)
 	}
@@ -297,10 +241,6 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	if res.SpawnN != spec.SpawnN {
 		return fmt.Errorf("%w: envelope carries spawn_n %d, current spawn is %d",
 			ErrStaleSpawn, res.SpawnN, spec.SpawnN)
-	}
-	// 3. once-only.
-	if spec.AcceptedIDs[res.ResultID] {
-		return fmt.Errorf("%w: %s", ErrDuplicateResult, res.ResultID)
 	}
 	// 3a. needs_input envelope shape: the question must be nameable
 	// BEFORE the process is gone, so a missing question_id/question is an
@@ -329,51 +269,44 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 		return fmt.Errorf("driver: step %q requires a human answer: return needs_input first (a completed result is refused until a human has answered a question in this attempt)",
 			spec.StepID)
 	}
-	// 3c. the release verdict binding (polyforge#123): judged on the
-	// DELIVERED outcome (a completed envelope), before substance. A
-	// binding error is an envelope rejection (the retry lane re-dispatches
-	// the step with the typed reason) — never a silent reclassification.
+	// 3c. the release verdict binding: judged on the DELIVERED outcome
+	// (a completed envelope). A binding error is an envelope rejection
+	// (the in-process retry lane re-dispatches the step with the typed
+	// reason) — never a silent reclassification.
 	if delivered == OutcomeCompleted {
 		if err := releaseVerdictBinding(res); err != nil {
 			return err
 		}
 	}
-	// 4. substance: verify everything the envelope names, whether or
-	// not the outcome demands it.
-	for i, a := range res.Artifacts {
-		if err := VerifyArtifact(spec.CapsuleRoot, a); err != nil {
-			return fmt.Errorf("driver: artifact[%d] %q: %w", i, a.Path, err)
-		}
-	}
-	if res.HandoffRef != nil {
-		if err := VerifyArtifact(spec.CapsuleRoot, *res.HandoffRef); err != nil {
-			return fmt.Errorf("driver: handoff_ref %q: %w", res.HandoffRef.Path, err)
-		}
-	}
-	if res.Outcome != OutcomeCompleted {
-		return nil
-	}
-	// Completed: every declared output delivered, output schema-clean,
-	// handoff present when the step owes one.
-	for _, out := range spec.Outputs {
-		if !hasArtifact(res.Artifacts, out.Path) {
-			return fmt.Errorf("driver: step %q declares output %q but the result carries no artifact for it",
-				spec.StepID, out.Path)
-		}
-		if err := ValidateOutputSchema(res.Output, out.Schema); err != nil {
-			return fmt.Errorf("driver: output for declared %q: %w", out.Path, err)
-		}
-	}
-	if spec.HandoffRequired && res.HandoffRef == nil {
-		return fmt.Errorf("driver: step %q declares handoff but the completed result carries no handoff_ref",
-			spec.StepID)
-	}
-	if spec.RequireCommandEvidence {
+	// 4. the V4 command-evidence gate: a completed result (after the
+	// verdict re-bind) of an evidence-owing step must carry well-formed
+	// command_evidence.
+	if res.Outcome == OutcomeCompleted && spec.RequireCommandEvidence {
 		if err := checkCommandEvidence(res.CommandEvidence); err != nil {
 			if len(res.evidenceDropped) > 0 {
 				err = fmt.Errorf("%w (entries dropped while parsing the envelope: %s)", err, strings.Join(res.evidenceDropped, "; "))
 			}
 			return fmt.Errorf("driver: step %q completed without verification evidence: %w", spec.StepID, err)
+		}
+	}
+	return nil
+}
+
+// checkCommandEvidence enforces the V4 evidence shape: at least one entry,
+// every entry with a non-empty argv and duration_ms > 0. exit_code's
+// zero value is legitimate and its presence cannot be checked on the
+// decoded struct, so it is not enforced. An entry the tolerant re-parse
+// could not decode never reaches here as a struct (see evidenceDropped).
+func checkCommandEvidence(ev []CommandEvidence) error {
+	if len(ev) == 0 {
+		return errors.New("command_evidence is empty — a verification step must carry at least one entry, each an OBJECT {\"argv\": [...], \"exit_code\": N, \"duration_ms\": N} (duration_ms > 0)")
+	}
+	for i, e := range ev {
+		if len(e.Argv) == 0 || strings.TrimSpace(strings.Join(e.Argv, "")) == "" {
+			return fmt.Errorf("command_evidence[%d] has an empty argv", i)
+		}
+		if e.DurationMs <= 0 {
+			return fmt.Errorf("command_evidence[%d] (%s) has no duration_ms (must be > 0)", i, e.Argv[0])
 		}
 	}
 	return nil
@@ -411,26 +344,6 @@ func needsInputQuestion(res *StepResult) (id, text string, err error) {
 			strings.Join(missing, " and "))
 	}
 	return id, text, nil
-}
-
-// checkCommandEvidence enforces the V4 evidence shape: at least one entry,
-// every entry with a non-empty argv and duration_ms > 0. exit_code's
-// zero value is legitimate and its presence cannot be checked on the
-// decoded struct, so it is not enforced. An entry the tolerant re-parse
-// could not decode never reaches here as a struct (see evidenceDropped).
-func checkCommandEvidence(ev []CommandEvidence) error {
-	if len(ev) == 0 {
-		return errors.New("command_evidence is empty — a verification step must carry at least one entry, each an OBJECT {\"argv\": [...], \"exit_code\": N, \"duration_ms\": N} (duration_ms > 0)")
-	}
-	for i, e := range ev {
-		if len(e.Argv) == 0 || strings.TrimSpace(strings.Join(e.Argv, "")) == "" {
-			return fmt.Errorf("command_evidence[%d] has an empty argv", i)
-		}
-		if e.DurationMs <= 0 {
-			return fmt.Errorf("command_evidence[%d] (%s) has no duration_ms (must be > 0)", i, e.Argv[0])
-		}
-	}
-	return nil
 }
 
 // currentChainAnswers counts the human answers of a step's current attempt
@@ -550,124 +463,4 @@ func releaseVerdictBinding(res *StepResult) error {
 func nonEmptyJSONString(v any) bool {
 	s, ok := v.(string)
 	return ok && strings.TrimSpace(s) != ""
-}
-
-// ValidateOutputSchema checks one result output against a declared
-// schema type name. The v2 schema surface is deliberately a closed
-// JSON-type set (the frontmatter extension): object|array|string|
-// number|boolean, plus "" / "any" for unconstrained. An unknown name is
-// an error, not a pass — a typo in a bundle must fail loudly at the
-// envelope, never slip through as "unconstrained".
-func ValidateOutputSchema(output json.RawMessage, schema string) error {
-	switch schema {
-	case "", "any":
-		if len(output) == 0 {
-			return nil
-		}
-		var probe any
-		if err := json.Unmarshal(output, &probe); err != nil {
-			return fmt.Errorf("driver: output is not valid JSON: %w", err)
-		}
-		return nil
-	case "object":
-		return checkJSONType(output, "object", func(v any) bool { _, ok := v.(map[string]any); return ok })
-	case "array":
-		return checkJSONType(output, "array", func(v any) bool { _, ok := v.([]any); return ok })
-	case "string":
-		return checkJSONType(output, "string", func(v any) bool { _, ok := v.(string); return ok })
-	case "number":
-		return checkJSONType(output, "number", func(v any) bool { _, ok := v.(float64); return ok })
-	case "boolean":
-		return checkJSONType(output, "boolean", func(v any) bool { _, ok := v.(bool); return ok })
-	default:
-		return fmt.Errorf("driver: unknown output schema %q", schema)
-	}
-}
-
-// checkJSONType unmarshals output once and asserts its dynamic JSON
-// type; null never satisfies a typed schema.
-func checkJSONType(output json.RawMessage, want string, ok func(any) bool) error {
-	if len(output) == 0 {
-		return fmt.Errorf("driver: output is empty, schema wants %s", want)
-	}
-	var probe any
-	if err := json.Unmarshal(output, &probe); err != nil {
-		return fmt.Errorf("driver: output is not valid JSON: %w", err)
-	}
-	if probe == nil || !ok(probe) {
-		return fmt.Errorf("driver: output schema wants %s, got JSON %s", want, jsonTypeName(probe))
-	}
-	return nil
-}
-
-// jsonTypeName answers the JSON type name of one decoded value for
-// error messages.
-func jsonTypeName(v any) string {
-	switch v.(type) {
-	case nil:
-		return "null"
-	case map[string]any:
-		return "object"
-	case []any:
-		return "array"
-	case string:
-		return "string"
-	case float64:
-		return "number"
-	case bool:
-		return "boolean"
-	default:
-		return fmt.Sprintf("%T", v)
-	}
-}
-
-// VerifyArtifact checks one artifact reference against the capsule
-// (R14 step 3): the path must be capsule-relative, the file must exist
-// as a regular file inside the capsule, and its byte length and
-// SHA-256 must match the manifest entry. The open goes through
-// os.OpenRoot, so a symlink planted inside the capsule cannot make the
-// driver hash a file beyond the capsule boundary.
-func VerifyArtifact(capsuleRoot string, ref ArtifactRef) error {
-	if strings.TrimSpace(ref.Path) == "" {
-		return errors.New("empty artifact path")
-	}
-	root, err := os.OpenRoot(capsuleRoot)
-	if err != nil {
-		return fmt.Errorf("open capsule root: %w", err)
-	}
-	defer root.Close()
-	f, err := root.Open(ref.Path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("not a regular file")
-	}
-	if info.Size() != ref.Bytes {
-		return fmt.Errorf("size mismatch: manifest says %d bytes, file has %d", ref.Bytes, info.Size())
-	}
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return err
-	}
-	sum := hex.EncodeToString(h.Sum(nil))
-	if !strings.EqualFold(sum, ref.SHA256) {
-		return fmt.Errorf("sha256 mismatch: manifest says %s, file hashes %s", ref.SHA256, sum)
-	}
-	return nil
-}
-
-// hasArtifact answers whether the envelope declares an artifact at rel.
-func hasArtifact(refs []ArtifactRef, rel string) bool {
-	for _, a := range refs {
-		if a.Path == rel {
-			return true
-		}
-	}
-	return false
 }

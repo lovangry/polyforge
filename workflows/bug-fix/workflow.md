@@ -10,12 +10,12 @@ steps:
   - { id: repro, context_policy: fresh, handoff: true, kind: code, budget: { wall_minutes: 30 } }
   # root-cause is a gate: it must run FRESH (the judge never inherits the
   # judged conversation — driver rule, separation of powers) and takes the
-  # repro record (artifacts/repro.md) through a DECLARED input: it reads the
+  # repro record (artifacts/repro.md) by path convention: it reads the
   # artifact, not the chat.
-  - { id: root-cause, context_policy: fresh, handoff: true, kind: qa, gate: true, budget: { wall_minutes: 20 }, inputs: [artifacts/repro.md], model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { action: rewind, target: repro } }
+  - { id: root-cause, context_policy: fresh, handoff: true, kind: qa, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { target: repro } }
   - { id: fix, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
-  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
+  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: fix } }
+  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: fix } }
 ---
 
 # bug-fix — root-cause lane
@@ -28,8 +28,8 @@ frontmatter `steps` array above is the *only* execution order. Nothing here over
 
 ```
 repro --> root-cause --> fix --> verification --> review
-   ^         |                     |                |            |
-   |   (FAIL: rewind to repro)  (FAIL: rewind to fix)  (FAIL: rewind to fix)  (FAIL: rewind to review)
+   ^         |                     |                |
+   |   (FAIL: rewind to repro)  (FAIL: rewind to fix)  (FAIL: rewind to fix)
 ```
 
 The lane exists for bugs whose cause is NOT already known. Its contract with the rest of
@@ -59,9 +59,9 @@ structurally load-bearing rather than cosmetic:
 ## Artifact flow between steps
 
 Every step's output is a path recorded in `execution.json`'s `steps.<id>.output`, pointing at a
-file under `artifacts/`. Downstream steps read their inputs by following that convention; a step
-can also declare `inputs:` in the frontmatter (as `root-cause` does below) to have the driver hand it
-those artifact paths.
+file under `artifacts/`. Downstream steps read the artifacts they need by following that path
+convention — the driver injects nothing and there is no frontmatter declaration for it
+(`root-cause`, for instance, simply reads `artifacts/repro.md`).
 
 | step | primary artifact it writes | who reads it |
 |---|---|---|

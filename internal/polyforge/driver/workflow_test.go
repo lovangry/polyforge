@@ -1,9 +1,12 @@
 package driver
 
 // workflow_ext_test.go: the extended frontmatter read surface — the
-// context_policy / inputs / outputs / handoff parse, the inherit
-// default, the gate-must-be-fresh rule, the artifact-path jail and the
-// schema-name closed set.
+// context_policy / handoff parse, the inherit default, the
+// gate-must-be-fresh rule, and the deliberate IGNORANCE of the retired
+// keys (polyforge#147: inputs / outputs / schema / silence_minutes /
+// tool_minutes / include_verdict / on_fail action are no longer read at
+// all). requires_command_evidence is NOT retired: it feeds the V4
+// command-evidence gate.
 
 import (
 	"os"
@@ -28,26 +31,15 @@ steps:
     kind: spec
     context_policy: fresh
     handoff: true
-    outputs:
-      - path: artifacts/fix-memo.md
-        schema: object
   - id: fix
     kind: code
     context_policy: inherit
     handoff: true
-    inputs:
-      - artifact: artifacts/fix-memo.md
-      - artifact: artifacts/grill-qa.md
-    outputs:
-      - path: artifacts/fix-summary.md
-        schema: object
   - id: verification
     kind: gate
     gate: true
     context_policy: fresh
-    inputs:
-      - artifacts/fix-summary.md
-    on_fail: { action: rewind, target: fix }
+    on_fail: { target: fix }
 `
 
 func mustParseExt(t *testing.T, front string) *Workflow {
@@ -77,28 +69,15 @@ func TestParseExtendedFrontmatter(t *testing.T) {
 	if !grill.Handoff || grill.ContextPolicy != ContextFresh {
 		t.Fatalf("grill handoff/policy: %v/%q", grill.Handoff, grill.ContextPolicy)
 	}
-	if len(grill.Outputs) != 1 || grill.Outputs[0].Path != "artifacts/fix-memo.md" || grill.Outputs[0].Schema != "object" {
-		t.Fatalf("grill outputs: %+v", grill.Outputs)
-	}
 	fix := wf.step("fix")
 	if fix.ContextPolicy != ContextInherit || !fix.Handoff {
 		t.Fatalf("fix policy/handoff: %q/%v", fix.ContextPolicy, fix.Handoff)
-	}
-	if len(fix.Inputs) != 2 || fix.Inputs[0].Artifact != "artifacts/fix-memo.md" || fix.Inputs[1].Artifact != "artifacts/grill-qa.md" {
-		t.Fatalf("fix inputs: %+v", fix.Inputs)
-	}
-	if len(fix.Outputs) != 1 || fix.Outputs[0].Schema != "object" {
-		t.Fatalf("fix outputs: %+v", fix.Outputs)
 	}
 	ver := wf.step("verification")
 	if !ver.Gate || ver.ContextPolicy != ContextFresh {
 		t.Fatalf("verification gate/policy: %v/%q", ver.Gate, ver.ContextPolicy)
 	}
-	// the scalar input form parses to the same InputRef
-	if len(ver.Inputs) != 1 || ver.Inputs[0].Artifact != "artifacts/fix-summary.md" {
-		t.Fatalf("verification inputs: %+v", ver.Inputs)
-	}
-	if ver.OnFail == nil || ver.OnFail.Action != "rewind" || ver.OnFail.Target != "fix" || !ver.OnFail.IncludeVerdict {
+	if ver.OnFail == nil || ver.OnFail.Target != "fix" {
 		t.Fatalf("verification on_fail: %+v", ver.OnFail)
 	}
 	// the defaults chain applies where no per-step chain is declared
@@ -149,24 +128,35 @@ func TestValidateUnknownContextPolicy(t *testing.T) {
 	}
 }
 
-func TestValidateArtifactPathJail(t *testing.T) {
-	cases := []string{
-		"steps:\n  - id: s\n    inputs:\n      - artifact: ../escape.md\n",                        // parent escape
-		"steps:\n  - id: s\n    inputs:\n      - artifact: /abs/escape.md\n",                      // absolute
-		"steps:\n  - id: s\n    inputs:\n      - artifact: \"\"\n",                                // empty
-		"steps:\n  - id: s\n    outputs:\n      - { path: ../out.md }\n",                          // output parent escape
-		"steps:\n  - id: s\n    outputs:\n      - { path: /abs/out.md }\n",                        // output absolute
-		"steps:\n  - id: s\n    outputs:\n      - { path: \"\" }\n",                               // output empty
-		"steps:\n  - id: s\n    outputs:\n      - { path: artifacts/x.md, schema: dictionary }\n", // unknown schema
+// TestRetiredFrontmatterKeysAreIgnored: the parser no longer reads the
+// retired keys (polyforge#147 C5) — a bundle that still carries them
+// parses and validates with the keys having NO effect at all (the loose
+// read ignores unknown keys; there is no field left to fill, no jail to
+// enforce, no schema vocabulary to police).
+func TestRetiredFrontmatterKeysAreIgnored(t *testing.T) {
+	front := "steps:\n" +
+		"  - id: s\n" +
+		"    inputs:\n" +
+		"      - artifact: ../escape.md\n" +
+		"      - /abs/also-escapes.md\n" +
+		"    outputs:\n" +
+		"      - { path: ../out.md, schema: dictionary }\n" +
+		"    silence_minutes: 11\n" +
+		"    tool_minutes: 22\n" +
+		"  - id: g\n" +
+		"    gate: true\n" +
+		"    context_policy: fresh\n" +
+		"    on_fail: { action: terminate, target: s, include_verdict: false }\n"
+	wf := mustParseExt(t, front)
+	if got := len(wf.Steps); got != 2 {
+		t.Fatalf("steps: %d", got)
 	}
-	for _, front := range cases {
-		wf, err := parseWorkflow([]byte(front))
-		if err != nil {
-			t.Fatalf("parse %q: %v", front, err)
-		}
-		if err := validateWorkflow(wf); err == nil {
-			t.Fatalf("frontmatter %q must be refused", front)
-		}
+	// Nothing of the retired keys survives into the step spec: the only
+	// on_fail face left is the rewind target (action/include_verdict are
+	// gone, and a declared "terminate" no longer buys a terminate edge).
+	g := wf.step("g")
+	if g.OnFail == nil || g.OnFail.Target != "s" {
+		t.Fatalf("on_fail target is the only surviving face: %+v", g.OnFail)
 	}
 }
 

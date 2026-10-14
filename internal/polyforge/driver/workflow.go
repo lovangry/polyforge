@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"gopkg.in/yaml.v3"
@@ -33,33 +32,6 @@ const (
 	// inputs only, never a handoff.
 	ContextFresh = "fresh"
 )
-
-// InputRef is one declared input artifact (R11): the capsule-relative
-// path of an upstream artifact whose content the step's prompt must
-// carry. The YAML surface accepts both spellings — `- artifact: path`
-// and the plain scalar `- path`.
-type InputRef struct {
-	Artifact string `json:"artifact"`
-}
-
-// UnmarshalYAML accepts the mapping form ({artifact: path}) and the
-// plain scalar form (a bare path): the read surface is deliberately
-// loose about spelling and strict about content — the path rules are
-// enforced after parse (validateWorkflow).
-func (r *InputRef) UnmarshalYAML(node *yaml.Node) error {
-	if node.Kind == yaml.ScalarNode {
-		r.Artifact = strings.TrimSpace(node.Value)
-		return nil
-	}
-	var m struct {
-		Artifact string `yaml:"artifact"`
-	}
-	if err := node.Decode(&m); err != nil {
-		return fmt.Errorf("driver: input entry must be \"- artifact: <path>\" or \"- <path>\": %w", err)
-	}
-	r.Artifact = strings.TrimSpace(m.Artifact)
-	return nil
-}
 
 // Workflow is the execution graph: the step order IS the declaration
 // order (rule V3), plus the rewind bounds.
@@ -89,25 +61,15 @@ type StepSpec struct {
 	// RequiresCommandEvidence mirrors `requires_command_evidence: true`
 	// (the V4 gate; implied for a step whose id is "verification").
 	RequiresCommandEvidence bool
-	// Inputs are the declared input artifacts (R11), in declaration
-	// order.
-	Inputs []InputRef
-	// Outputs are the declared outputs the completed step's envelope
-	// must deliver (path + JSON schema type).
-	Outputs []OutputSpec
-	// Step-level supervision overrides: T is budget.wall_minutes, X is
-	// silence_minutes, Y is tool_minutes. Zero = the global default.
-	SilenceMinutes int
-	ToolMinutes    int
-	WallMinutes    int
+	// The step's wall-budget estimate (budget.wall_minutes, T's base).
+	WallMinutes int
 }
 
-// OnFail is the gate FAIL policy (01 §4.1): rewind with a target, or
-// terminate (the default).
+// OnFail is the gate FAIL policy: the rewind target the gate's FAIL
+// verdict rewinds to (the terminate option is deleted — a gate FAIL
+// always rewinds to its declared target).
 type OnFail struct {
-	Action         string // "rewind" | "terminate"
-	Target         string
-	IncludeVerdict bool
+	Target string
 }
 
 func (w *Workflow) indexOf(stepID string) (int, bool) {
@@ -176,10 +138,7 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 			ContextPolicy:           s.ContextPolicy,
 			RequiresHumanAnswer:     s.RequiresHumanAnswer,
 			RequiresCommandEvidence: s.RequiresCommandEvidence,
-			Inputs:                  append([]InputRef(nil), s.Inputs...),
 			ModelCandidates:         s.ModelCandidates,
-			SilenceMinutes:          s.SilenceMinutes,
-			ToolMinutes:             s.ToolMinutes,
 		}
 		if s.Budget != nil {
 			step.WallMinutes = s.Budget.WallMinutes
@@ -187,15 +146,8 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 		if step.ContextPolicy == "" {
 			step.ContextPolicy = ContextInherit // the declared default
 		}
-		for _, o := range s.Outputs {
-			step.Outputs = append(step.Outputs, OutputSpec{Path: o.Path, Schema: o.Schema})
-		}
 		if s.OnFail != nil {
-			of := &OnFail{Action: s.OnFail.Action, Target: s.OnFail.Target}
-			if s.OnFail.IncludeVerdict == nil || *s.OnFail.IncludeVerdict {
-				of.IncludeVerdict = true
-			}
-			step.OnFail = of
+			step.OnFail = &OnFail{Target: s.OnFail.Target}
 		}
 		if step.ModelCandidates == nil && doc.Defaults != nil {
 			step.ModelCandidates = doc.Defaults.ModelCandidates
@@ -235,49 +187,6 @@ func validateWorkflow(wf *Workflow) error {
 			return fmt.Errorf("driver: gate step %q must run context_policy: %s (found %q)",
 				s.ID, ContextFresh, s.ContextPolicy)
 		}
-		for _, in := range s.Inputs {
-			if err := checkRelPath(in.Artifact); err != nil {
-				return fmt.Errorf("driver: step %q input: %w", s.ID, err)
-			}
-		}
-		for _, o := range s.Outputs {
-			if err := checkRelPath(o.Path); err != nil {
-				return fmt.Errorf("driver: step %q output: %w", s.ID, err)
-			}
-			if !validSchemaName(o.Schema) {
-				return fmt.Errorf("driver: step %q output %q carries unknown schema %q",
-					s.ID, o.Path, o.Schema)
-			}
-		}
-	}
-	return nil
-}
-
-// validSchemaName answers whether schema is a name of the closed
-// output-schema set (result.go's ValidateOutputSchema vocabulary);
-// "" and "any" mean unconstrained.
-func validSchemaName(schema string) bool {
-	switch schema {
-	case "", "any", "object", "array", "string", "number", "boolean":
-		return true
-	}
-	return false
-}
-
-// checkRelPath asserts one capsule-relative artifact path: non-empty,
-// not absolute, no parent escape.
-func checkRelPath(rel string) error {
-	rel = strings.TrimSpace(rel)
-	if rel == "" {
-		return fmt.Errorf("empty artifact path")
-	}
-	if filepath.IsAbs(rel) || strings.HasPrefix(rel, "/") {
-		return fmt.Errorf("path %q must be capsule-relative", rel)
-	}
-	for _, seg := range strings.Split(rel, "/") {
-		if seg == ".." {
-			return fmt.Errorf("parent escape in path %q", rel)
-		}
 	}
 	return nil
 }
@@ -299,32 +208,21 @@ type extRewind struct {
 }
 
 type extStep struct {
-	ID                      string      `yaml:"id"`
-	Gate                    bool        `yaml:"gate"`
-	Handoff                 bool        `yaml:"handoff"`
-	RequiresHumanAnswer     bool        `yaml:"requires_human_answer"`
-	RequiresCommandEvidence bool        `yaml:"requires_command_evidence"`
-	ContextPolicy           string      `yaml:"context_policy"`
-	Inputs                  []InputRef  `yaml:"inputs"`
-	Outputs                 []extOutput `yaml:"outputs"`
-	ModelCandidates         []string    `yaml:"model_candidates"`
-	OnFail                  *extOnFail  `yaml:"on_fail"`
-	SilenceMinutes          int         `yaml:"silence_minutes"`
-	ToolMinutes             int         `yaml:"tool_minutes"`
-	Budget                  *extBudget  `yaml:"budget"`
+	ID                      string     `yaml:"id"`
+	Gate                    bool       `yaml:"gate"`
+	Handoff                 bool       `yaml:"handoff"`
+	RequiresHumanAnswer     bool       `yaml:"requires_human_answer"`
+	RequiresCommandEvidence bool       `yaml:"requires_command_evidence"`
+	ContextPolicy           string     `yaml:"context_policy"`
+	ModelCandidates         []string   `yaml:"model_candidates"`
+	OnFail                  *extOnFail `yaml:"on_fail"`
+	Budget                  *extBudget `yaml:"budget"`
 }
 
 type extBudget struct {
 	WallMinutes int `yaml:"wall_minutes"`
 }
 
-type extOutput struct {
-	Path   string `yaml:"path"`
-	Schema string `yaml:"schema"`
-}
-
 type extOnFail struct {
-	Action         string `yaml:"action"`
-	Target         string `yaml:"target"`
-	IncludeVerdict *bool  `yaml:"include_verdict"`
+	Target string `yaml:"target"`
 }

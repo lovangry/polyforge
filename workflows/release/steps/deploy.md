@@ -50,7 +50,7 @@ is recorded as command evidence (a completed result without evidence is refused)
 
 ## 1. The version
 
-Read `artifacts/verified-version.json` (declared input): `{"version": "V", "commit": "C"}`.
+Read `artifacts/verified-version.json` (by path convention): `{"version": "V", "commit": "C"}`.
 `V` is the ONLY version this step may deploy. Never resolve "latest", never take a
 version from the WI text or from any other step's output. If the file is missing,
 unreadable or empty, `verdict: fail`.

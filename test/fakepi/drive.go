@@ -10,8 +10,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,8 +18,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // planAction is one scripted step of a derivation.
@@ -35,7 +31,7 @@ type planAction struct {
 	// Envelope mode (v2 Driver): the outcome and handoff flags for the
 	// result-envelope action.
 	Outcome string `json:"outcome,omitempty"` // envelope: completed|needs_input|gate_failed|incomplete
-	Handoff bool   `json:"handoff,omitempty"` // envelope: produce handoff_ref
+	Handoff bool   `json:"handoff,omitempty"` // envelope: write the handoff artifact
 	// NoEvidence suppresses the step's structured command evidence (the
 	// wrap-evidence-gate scenario scripts a verification step whose
 	// output carries no commands record, then repairs it).
@@ -661,20 +657,24 @@ func (d *driveEnv) makeRepo(name, origin string) {
 	d.journal("repo", map[string]any{"name": name, "origin": origin})
 }
 
-// writeEnvelope writes a v2 result envelope to the pending-results drop
+// writeEnvelope writes the result envelope to the pending-results drop
 // path for the current spawn. The drop path is derived from the
 // PF_SPAWN_N environment variable and the capsule root (PF_WI_ID env
 // carries the WI; the capsule root is the process cwd).
 //
-// The needs_input question text rides the ENVELOPE level
-// (question_id/question — the driver's delivery contract); an EMPTY
-// question_id is emitted verbatim on purpose (the driver refuses a
-// needs_input result without question text — the scripted refusal
-// shape). The output payload defaults to a summary object and is
-// replaced verbatim by the action's own when present. Structured command
-// evidence rides command_evidence (the driver copies it onto
-// execution.json's output.commands — the face the wrap evidence gate
-// judges) unless the action suppressed it.
+// The MINIMAL CONTRACT (polyforge#147): the envelope is the outcome +
+// output pair plus the dispatch identity — no protocol version stamp,
+// no envelope id, no artifact manifest, no handoff digest reference;
+// the handoff FILE is written to the convention path the next step
+// reads (artifacts/handoff-<step>.md). The needs_input question text
+// rides the ENVELOPE level (question_id/question — the driver's
+// delivery contract); an EMPTY question_id is emitted verbatim on
+// purpose (the driver refuses a needs_input result without question
+// text — the scripted refusal shape). The output payload defaults to a
+// summary object and is replaced verbatim by the action's own when
+// present. Structured command evidence rides command_evidence (the V4
+// gate; the driver copies it onto execution.json's output.commands)
+// unless the action suppressed it.
 func (d *driveEnv) writeEnvelope(act planAction) {
 	outcome := act.Outcome
 	if outcome == "" {
@@ -707,14 +707,11 @@ func (d *driveEnv) writeEnvelope(act planAction) {
 	}
 
 	envelope := map[string]interface{}{
-		"protocol_version": 1,
-		"result_id":        uuid.New().String(),
 		"wi_id":            os.Getenv("PF_WI_ID"),
 		"step_id":          stepID,
 		"spawn_n":          parseIntDefault(spawnN, 1),
 		"outcome":          outcome,
 		"output":           output,
-		"artifacts":        []interface{}{},
 		"command_evidence": evidence,
 		"submitted_at":     time.Now().UTC().Format(time.RFC3339),
 	}
@@ -725,18 +722,13 @@ func (d *driveEnv) writeEnvelope(act planAction) {
 		envelope["question"] = act.Question
 	}
 
-	// Handoff duty: write the handoff file and reference it.
+	// Handoff duty: write the handoff file to the convention path (the
+	// next inherit step reads it by path convention — no digest).
 	if act.Handoff {
 		hoPath := filepath.Join(capsuleRoot, "artifacts", "handoff-"+stepID+".md")
 		hoContent := "# Handoff from " + stepID + "\n\nSummary for next step.\n"
 		if err := os.MkdirAll(filepath.Dir(hoPath), 0o755); err == nil {
 			os.WriteFile(hoPath, []byte(hoContent), 0o644)
-			sum := sha256.Sum256([]byte(hoContent))
-			envelope["handoff_ref"] = map[string]interface{}{
-				"path":   "artifacts/handoff-" + stepID + ".md",
-				"sha256": hex.EncodeToString(sum[:]),
-				"bytes":  len(hoContent),
-			}
 		}
 	}
 
