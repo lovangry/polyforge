@@ -7,10 +7,22 @@
 // or WRITE the real install. Every test package calls Main from its
 // TestMain so HOME and the XDG/POLYFORGE_* roots point at a throwaway
 // directory for the whole package run.
+//
+// Git configuration is hermetic too: GIT_CONFIG_GLOBAL names a scratch
+// global config carrying only a test identity, and GIT_CONFIG_NOSYSTEM
+// drops the system file, so no test reads (or, through
+// `git config --global`, WRITES) the operator's real ~/.gitconfig, and no
+// operator setting (core.hooksPath, url.insteadOf, ...) changes what a
+// test observes. Main also guards the real file: its content is hashed
+// before and after the run and a change fails the package.
 package testenv
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,10 +30,21 @@ import (
 
 const activeEnv = "TESTENV_ISOLATED"
 
+// Test git identity written into the scratch global config.
+const (
+	TestGitName  = "pf-test"
+	TestGitEmail = "pf-test@invalid"
+)
+
 // Main isolates the process environment, runs the package's tests and
 // exits. Use as: func TestMain(m *testing.M) { testenv.Main(m) }.
-func Main(m *testing.M) {
-	code, err := run(m)
+//
+// atExit checks run after the tests, while the isolated environment is
+// still in place; an error from any of them is reported and fails the
+// run (e.g. the acceptance package asserts no process it started is
+// still alive).
+func Main(m *testing.M, atExit ...func() error) {
+	code, err := run(m, atExit)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "testenv:", err)
 		os.Exit(2)
@@ -29,12 +52,18 @@ func Main(m *testing.M) {
 	os.Exit(code)
 }
 
-func run(m *testing.M) (int, error) {
+func run(m *testing.M, atExit []func() error) (int, error) {
 	// A test binary re-exec'd as a helper subprocess inherits the already
 	// isolated environment: do not create (and leak) another home.
 	if os.Getenv(activeEnv) != "" {
 		return m.Run(), nil
 	}
+	// The operator's real global git config files, located BEFORE HOME is
+	// relocated, and their content fingerprint: the guard below fails the
+	// run if a test modified (or created) one.
+	guarded := realGitConfigs()
+	before := fingerprint(guarded)
+
 	os.Setenv(activeEnv, "1")
 	home, err := os.MkdirTemp("", "pf-test-home-")
 	if err != nil {
@@ -42,13 +71,15 @@ func run(m *testing.M) (int, error) {
 	}
 	defer os.RemoveAll(home)
 
-	// Keep the operator's git identity/config readable (commits in test
-	// repos need one) without letting HOME relocation hide it.
-	if realHome, herr := os.UserHomeDir(); herr == nil && os.Getenv("GIT_CONFIG_GLOBAL") == "" {
-		if gc := filepath.Join(realHome, ".gitconfig"); fileExists(gc) {
-			os.Setenv("GIT_CONFIG_GLOBAL", gc)
-		}
+	// Hermetic git: a scratch global config holding only the test
+	// identity (commits in test repos need one), and no system config.
+	gitGlobal := filepath.Join(home, ".gitconfig")
+	ident := "[user]\n\tname = " + TestGitName + "\n\temail = " + TestGitEmail + "\n"
+	if err := os.WriteFile(gitGlobal, []byte(ident), 0o600); err != nil {
+		return 0, err
 	}
+	os.Setenv("GIT_CONFIG_GLOBAL", gitGlobal)
+	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 
 	// Tests that shell out to the go toolchain (the acceptance harness
 	// builds binaries) must keep the real build/module caches.
@@ -84,10 +115,50 @@ func run(m *testing.M) (int, error) {
 	for _, k := range []string{"PF_DAEMON_SOCKET", "POLYFORGE_MACHINE_ID"} {
 		os.Unsetenv(k)
 	}
-	return m.Run(), nil
+	code := m.Run()
+	for _, check := range atExit {
+		if cerr := check(); cerr != nil {
+			fmt.Fprintln(os.Stderr, "testenv: FAIL:", cerr)
+			code = 1
+		}
+	}
+	if after := fingerprint(guarded); !bytes.Equal(before, after) {
+		fmt.Fprintf(os.Stderr, "testenv: FAIL: the operator's real global git config changed during the test run (%v): a test wrote past the hermetic GIT_CONFIG_GLOBAL\n", guarded)
+		code = 1
+	}
+	return code, nil
 }
 
-func fileExists(p string) bool {
-	st, err := os.Stat(p)
-	return err == nil && !st.IsDir()
+// realGitConfigs names the operator's real global git config files: the
+// classic ~/.gitconfig and the XDG $XDG_CONFIG_HOME/git/config (default
+// ~/.config/git/config). nil when no home is resolvable.
+func realGitConfigs() []string {
+	realHome, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	xdg := os.Getenv("XDG_CONFIG_HOME")
+	if xdg == "" {
+		xdg = filepath.Join(realHome, ".config")
+	}
+	return []string{filepath.Join(realHome, ".gitconfig"), filepath.Join(xdg, "git", "config")}
+}
+
+// fingerprint hashes the files' contents (a missing file hashes as
+// absent, so creating one is a change too).
+func fingerprint(paths []string) []byte {
+	h := sha256.New()
+	for _, p := range paths {
+		raw, err := os.ReadFile(p)
+		switch {
+		case err == nil:
+			fmt.Fprintf(h, "%s present %d\n", p, len(raw))
+			h.Write(raw)
+		case errors.Is(err, fs.ErrNotExist):
+			fmt.Fprintf(h, "%s absent\n", p)
+		default:
+			fmt.Fprintf(h, "%s unreadable %v\n", p, err)
+		}
+	}
+	return h.Sum(nil)
 }

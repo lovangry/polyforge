@@ -111,10 +111,11 @@ func TestDeployLockHeldFailsFastNothingMutated(t *testing.T) {
 	d := newReadyWorld(t)
 	lock := filepath.Join(d.w, "srv", "deploy.lock")
 	holder := exec.Command("flock", "-n", lock, "sleep", "120")
+	ownGroup(holder) // flock forks `sleep`: killing flock alone orphans it
 	if err := holder.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = holder.Process.Kill(); _ = holder.Wait() }()
+	defer func() { killGroup(holder); _ = holder.Wait() }()
 	for i := 0; i < 50 && d.lockFree(); i++ {
 		time.Sleep(100 * time.Millisecond)
 	}

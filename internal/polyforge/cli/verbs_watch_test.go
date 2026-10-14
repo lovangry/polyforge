@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -221,7 +223,6 @@ func TestWatchStatuslineHarnessSessionFromStdinIsCached(t *testing.T) {
 
 func TestWatchDaemonUnreachableKeepsRetryingLoudly(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	clearEnv(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
@@ -231,6 +232,14 @@ func TestWatchDaemonUnreachableKeepsRetryingLoudly(t *testing.T) {
 	go func() {
 		done <- Run([]string{"watch", "--wait-decision", "--no-parent-check", "--poll", "10ms"}, bytes.NewReader(nil), &stdout, &lockedBuf{b: &stderr})
 	}()
+	// The resident watcher never ends on its own here (that is the
+	// contract under test), and it keeps writing its status/pid files
+	// under XDG_RUNTIME_DIR every poll. Left running, it raced the
+	// TempDir cleanup ("directory not empty") and leaked into the rest of
+	// the package run. Stop it through its real interrupt path and wait
+	// for Run to return before any cleanup touches its directories
+	// (registered after the TempDirs, so it runs before them).
+	t.Cleanup(func() { stopResidentWatcher(t, done) })
 	deadline := time.After(3 * time.Second)
 	for {
 		if strings.Contains((&lockedBuf{b: &stderr}).String(), "daemon unreachable; progress paused") {
@@ -238,10 +247,45 @@ func TestWatchDaemonUnreachableKeepsRetryingLoudly(t *testing.T) {
 		}
 		select {
 		case code := <-done:
+			done <- code // let the cleanup see it ended
 			t.Fatalf("an unreachable daemon must not end the watcher (exit %d)", code)
 		case <-deadline:
 			t.Fatalf("no unreachable notice: %q", (&lockedBuf{b: &stderr}).String())
 		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// stopResidentWatcher ends an in-process resident watcher (`pf watch`
+// without a decision to wait for) the way a user does: SIGINT, which the
+// watcher's signal.NotifyContext turns into a clean return. The test
+// registers its own SIGINT channel first, so the signal can never fall
+// through to the default action and kill the test binary, whatever the
+// watcher's state. Waits for Run to return.
+func stopResidentWatcher(t *testing.T, done chan int) {
+	t.Helper()
+	select {
+	case <-done:
+		return
+	default:
+	}
+	guard := make(chan os.Signal, 1)
+	signal.Notify(guard, os.Interrupt)
+	defer signal.Stop(guard)
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	timeout := time.After(10 * time.Second)
+	for {
+		// re-sent until Run returns: the watcher may not have reached its
+		// NotifyContext yet when the first one lands
+		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+		select {
+		case <-done:
+			return
+		case <-timeout:
+			t.Error("the resident watcher did not stop on SIGINT")
+			return
+		case <-tick.C:
 		}
 	}
 }

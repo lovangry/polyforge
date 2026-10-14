@@ -666,10 +666,19 @@ func TestFactsOutOnTheContract(t *testing.T) {
 		x := tryReadExec(env.execPath)
 		return x != nil && x.Steps["grill"].PendingQuestion != nil
 	})
+	// Answer only once the step_waiting_human FACT is out. The parked
+	// question's transition (execution.json's PendingQuestion, the
+	// needs_input event) lands BEFORE the loop re-plans and announces the
+	// wait, so answering on those signals raced the driver goroutine:
+	// the test goroutine's step_answered could precede step_waiting_human,
+	// or (answered before the re-plan saw the question) suppress it.
+	var facts []supervise.Fact
 	waitUntil(t, "step_waiting_human", func() bool {
-		for _, e := range env.log.byKind("needs_input") {
-			_ = e
-			return true
+		facts = append(facts, env.link.Facts.Drain()...)
+		for _, f := range facts {
+			if _, ok := f.(supervise.StepWaitingHuman); ok {
+				return true
+			}
 		}
 		return false
 	})
@@ -679,9 +688,10 @@ func TestFactsOutOnTheContract(t *testing.T) {
 	if err := <-runDone; err != nil {
 		t.Fatal(err)
 	}
+	facts = append(facts, env.link.Facts.Drain()...)
 	var kinds []string
 	var versions []int64
-	for _, f := range env.link.Facts.Drain() {
+	for _, f := range facts {
 		switch v := f.(type) {
 		case supervise.StepStarted:
 			kinds = append(kinds, fmt.Sprintf("started#%d(%s,%s)", v.SpawnN, v.Step, v.Model))

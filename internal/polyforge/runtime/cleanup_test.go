@@ -16,6 +16,13 @@ import (
 	"time"
 )
 
+// runMarker scopes a test's PF_WI_ID / PF_DAEMON_ID marker value to this
+// test process. The env-marker layer scans the WHOLE host's /proc, so a
+// constant marker collides with the same test running concurrently in
+// another process (a second checkout, a release gate): one run's sweep
+// kills, or its scan counts, the other run's processes.
+func runMarker(base string) string { return base + "-" + strconv.Itoa(os.Getpid()) }
+
 // startTree spawns `sh -c "sleep 300 & exec sleep 300"` as its own group
 // leader: a parent with one grandchild in the same pgid.
 func startTree(t *testing.T, wi string) (pid int, startedAt string) {
@@ -26,6 +33,8 @@ func startTree(t *testing.T, wi string) (pid int, startedAt string) {
 		t.Fatal(err)
 	}
 	pid = cmd.Process.Pid
+	// the tree never outlives the test, whatever the test's path
+	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL); _ = cmd.Wait() })
 	// wait until the tree has both members
 	deadline := time.Now().Add(5 * time.Second)
 	for groupMemberCount(pid) < 2 {
@@ -66,8 +75,9 @@ func groupMemberCount(pgid int) int {
 }
 
 func TestCleanupFullTreeWithoutCgroup(t *testing.T) {
-	pid, startedAt := startTree(t, "wi_c1")
-	rep, err := Cleanup(CleanupTarget{PID: pid, Pgid: pid, StartedAt: startedAt, WIID: "wi_c1"}, 5*time.Second)
+	wi := runMarker("wi_c1")
+	pid, startedAt := startTree(t, wi)
+	rep, err := Cleanup(CleanupTarget{PID: pid, Pgid: pid, StartedAt: startedAt, WIID: wi}, 5*time.Second)
 	if err != nil {
 		t.Fatalf("cleanup errored: %v (report %+v)", err, rep)
 	}
@@ -135,7 +145,7 @@ func TestCleanupReusedRootPidIsNotKilled(t *testing.T) {
 }
 
 func TestCleanupLayer4EnvMarkerSweep(t *testing.T) {
-	wi := "wi_c5_marker"
+	wi := runMarker("wi_c5_marker")
 	cmd := exec.Command("sleep", "300")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=")
@@ -143,6 +153,7 @@ func TestCleanupLayer4EnvMarkerSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := cmd.Process.Pid
+	t.Cleanup(func() { _ = killFn(-pid, syscall.SIGKILL); _ = cmd.Wait() })
 	// the escapee sits OUTSIDE any target tree: only the env marker finds it
 	rep, err := Cleanup(CleanupTarget{WIID: wi}, 5*time.Second)
 	if err != nil {
@@ -165,7 +176,7 @@ func TestCleanupLayer5CwdScanWarnsOnly(t *testing.T) {
 	pid := cmd.Process.Pid
 	defer func() { _ = killFn(-pid, syscall.SIGKILL) }()
 
-	rep, err := Cleanup(CleanupTarget{WIID: "wi_nobody", CapsuleDir: capDir}, 3*time.Second)
+	rep, err := Cleanup(CleanupTarget{WIID: runMarker("wi_nobody"), CapsuleDir: capDir}, 3*time.Second)
 	if err != nil {
 		t.Fatalf("cleanup errored: %v", err)
 	}
