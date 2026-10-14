@@ -84,7 +84,7 @@ func deliverBinding(res *StepResult, delivered Outcome, spec ResultSpec) error {
 	if delivered != OutcomeCompleted || res.Outcome != OutcomeCompleted {
 		return nil
 	}
-	return deliverMergeRule(res.Output, branch, spec)
+	return deliverMergeRule(res, branch, spec)
 }
 
 // deliverRepo is the per-repo record of the deliver output.
@@ -100,12 +100,12 @@ type deliverRepo struct {
 	TestsPassed         *bool  `json:"tests_passed"`
 }
 
-func deliverMergeRule(output json.RawMessage, branch string, spec ResultSpec) error {
+func deliverMergeRule(res *StepResult, branch string, spec ResultSpec) error {
 	var out struct {
 		Verdict any           `json:"verdict"`
 		Repos   []deliverRepo `json:"repos"`
 	}
-	if len(output) == 0 || json.Unmarshal(output, &out) != nil {
+	if len(res.Output) == 0 || json.Unmarshal(res.Output, &out) != nil {
 		return fmt.Errorf("driver: deliver output must be an object with verdict and repos")
 	}
 	if v, _ := out.Verdict.(string); strings.ToLower(strings.TrimSpace(v)) != "pass" {
@@ -127,13 +127,13 @@ func deliverMergeRule(output json.RawMessage, branch string, spec ResultSpec) er
 			return fmt.Errorf("driver: deliver output repos[%d] has no name", i)
 		}
 		if strings.TrimSpace(r.SkippedReason) != "" {
+			if err := checkNothingToDeliver(spec.ReposDir, r.Name); err != nil {
+				return fmt.Errorf("driver: deliver output %s is skipped but %w", label, err)
+			}
 			continue
 		}
 		if err := checkDeliverBranch(r.Branch, branch); err != nil {
 			return fmt.Errorf("driver: deliver output %s: %w", label, err)
-		}
-		if strings.TrimSpace(r.PRURL) == "" {
-			return fmt.Errorf("driver: deliver output %s has no pr_url", label)
 		}
 		if r.Merged == nil {
 			return fmt.Errorf("driver: deliver output %s must say merged true or false", label)
@@ -145,16 +145,14 @@ func deliverMergeRule(output json.RawMessage, branch string, spec ResultSpec) er
 			human = append(human, r.Name+": left unmerged")
 			continue
 		}
-		if strings.TrimSpace(r.MergeCommit) == "" {
-			return fmt.Errorf("driver: deliver output %s is merged and owes its merge_commit", label)
+		if strings.TrimSpace(r.PRURL) == "" || strings.TrimSpace(r.MergeCommit) == "" {
+			return fmt.Errorf("driver: deliver output %s is merged and owes its pr_url and merge_commit", label)
 		}
-		switch {
-		case !spec.ReviewPassed:
-			human = append(human, r.Name+": merged without an independent review that passed with no blocking finding")
-		case r.TestsPassed == nil || !*r.TestsPassed:
-			human = append(human, r.Name+": merged without passing tests")
-		case r.LLMResolvedConflict:
-			human = append(human, r.Name+": merged after an LLM-resolved conflict")
+		f := deliverFacts(spec, r.Name, res.CommandEvidence)
+		f.selfReportedConflict = r.LLMResolvedConflict
+		f.selfReportedTestsFailed = r.TestsPassed != nil && !*r.TestsPassed
+		if ok, why := autoMergeEligible(f); !ok {
+			human = append(human, r.Name+": merged although "+why)
 		}
 	}
 	if len(human) > 0 && spec.HumanAnswers <= 0 {
@@ -232,8 +230,12 @@ func shellSegments(s string) [][]string {
 			cur = nil
 		}
 	}
-	for _, r := range s {
+	rs := []rune(s)
+	for k, r := range rs {
 		switch {
+		case r == '&' && quote == 0 && (k > 0 && (rs[k-1] == '>' || rs[k-1] == '<') || k+1 < len(rs) && rs[k+1] == '>'):
+			word.WriteRune(r) // a redirection (2>&1, &>file), not a separator
+			inWord = true
 		case quote != 0:
 			if r == quote {
 				quote = 0
@@ -288,13 +290,18 @@ func isAssignment(w string) bool {
 // git push, gh pr merge, the main-push override, and the script of a
 // shell -c wrapper (a few levels deep).
 func checkSegment(seg []string, branch string, depth int) error {
+	seg = dropRedirections(seg)
 	i := 0
+	var gitEnv []string
 	for i < len(seg) {
 		w := seg[i]
 		switch {
 		case isAssignment(w):
 			if strings.HasPrefix(w, mainPushOverride+"=") {
 				return fmt.Errorf("(%s): sets %s (the pre-push hook's human-only override)", strings.Join(seg, " "), mainPushOverride)
+			}
+			if strings.HasPrefix(w, "GIT_") {
+				gitEnv = append(gitEnv, w)
 			}
 			i++
 		case shellKeywords[w] || commandWrappers[filepath.Base(w)]:
@@ -305,13 +312,34 @@ func checkSegment(seg []string, branch string, depth int) error {
 				}
 			}
 		default:
-			return checkCommand(seg, i, branch, depth)
+			return checkCommand(seg, i, branch, depth, gitEnv)
 		}
 	}
 	return nil
 }
 
-func checkCommand(seg []string, i int, branch string, depth int) error {
+// dropRedirections removes shell redirections (>file, 2>&1, &>file,
+// < file, and the target word of a bare operator) from a simple command.
+func dropRedirections(seg []string) []string {
+	out := make([]string, 0, len(seg))
+	for k := 0; k < len(seg); k++ {
+		w := seg[k]
+		op := strings.TrimLeft(w, "0123456789")
+		if strings.HasPrefix(w, "&>") {
+			op = w
+		}
+		if !strings.HasPrefix(op, ">") && !strings.HasPrefix(op, "<") && !strings.HasPrefix(op, "&>") {
+			out = append(out, w)
+			continue
+		}
+		if strings.Trim(op, "<>&") == "" && k+1 < len(seg) {
+			k++ // bare operator: its target is the next word
+		}
+	}
+	return out
+}
+
+func checkCommand(seg []string, i int, branch string, depth int, gitEnv []string) error {
 	where := func(err error) error { return fmt.Errorf("(%s): %w", strings.Join(seg, " "), err) }
 	args := seg[i+1:]
 	switch filepath.Base(seg[i]) {
@@ -335,6 +363,9 @@ func checkCommand(seg []string, i int, branch string, depth int) error {
 			j++
 		}
 		if j < len(args) && args[j] == "push" {
+			if len(gitEnv) > 0 {
+				return where(fmt.Errorf("git push under %s (git configuration must not change for the push)", strings.Join(gitEnv, " ")))
+			}
 			if hooksOff {
 				return where(errors.New("git push with core.hooksPath overridden (it skips the pre-push hook)"))
 			}
@@ -354,6 +385,9 @@ func checkCommand(seg []string, i int, branch string, depth int) error {
 			if err := checkGHMerge(args[j+2:]); err != nil {
 				return where(err)
 			}
+		}
+		if j+1 < len(args) && args[j] == "repo" && args[j+1] == "sync" {
+			return where(errors.New("gh repo sync is forbidden in delivery (it can move the default branch)"))
 		}
 	default:
 		if !shells[filepath.Base(seg[i])] || depth >= 3 {
@@ -379,11 +413,10 @@ func checkPush(args []string, branch string) error {
 			continue
 		}
 		name, _, _ := strings.Cut(a, "=")
+		if f := forbiddenPushOption(name); f != "" {
+			return fmt.Errorf("git push %s (%s) is forbidden in delivery", name, f)
+		}
 		switch name {
-		case "--force", "--force-with-lease", "--force-if-includes", "--all", "--branches", "--mirror", "--tags", "--follow-tags", "--delete", "--prune", "--no-verify":
-			return fmt.Errorf("git push %s is forbidden in delivery", name)
-		case "--repo", "--receive-pack", "--exec":
-			return fmt.Errorf("git push %s is forbidden in delivery", name)
 		case "-o", "--push-option":
 			if !strings.Contains(a, "=") {
 				k++ // the option's value
@@ -414,6 +447,23 @@ func checkPush(args []string, branch string) error {
 	return nil
 }
 
+// forbiddenPushOptions are refused by name or by any abbreviation git
+// would accept for them (git takes unambiguous long-option prefixes).
+var forbiddenPushOptions = []string{"--force", "--force-with-lease", "--force-if-includes", "--all", "--branches",
+	"--mirror", "--tags", "--follow-tags", "--delete", "--prune", "--no-verify", "--repo", "--receive-pack", "--exec"}
+
+func forbiddenPushOption(name string) string {
+	if !strings.HasPrefix(name, "--") || len(name) < 3 {
+		return ""
+	}
+	for _, f := range forbiddenPushOptions {
+		if strings.HasPrefix(f, name) {
+			return f
+		}
+	}
+	return ""
+}
+
 func orPrefix(branch string) string {
 	if branch != "" {
 		return branch
@@ -429,7 +479,7 @@ func checkGHMerge(args []string) error {
 		switch a {
 		case "--merge", "-m":
 			merge = true
-		case "--squash", "-s", "--rebase", "-r", "--admin":
+		case "--squash", "-s", "--rebase", "-r", "--admin", "--auto":
 			return fmt.Errorf("gh pr merge %s is forbidden — merge with --merge", a)
 		}
 	}

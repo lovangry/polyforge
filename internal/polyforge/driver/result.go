@@ -190,6 +190,13 @@ type ResultSpec struct {
 	// is done with a pass verdict and no blocking finding. The deliver
 	// binding (deliver.go) merges without a human only when it holds.
 	ReviewPassed bool
+	// HasReview: the workflow declares a review step.
+	HasReview bool
+	// VerifiedHeads / VerifiedCommands: the driver's record of the
+	// verification step (task repo -> HEAD when it completed; the command
+	// evidence it was accepted with) — deliver_facts.go.
+	VerifiedHeads    map[string]string
+	VerifiedCommands []CommandEvidence
 }
 
 // ValidateStepResult runs the staging gates over one envelope:

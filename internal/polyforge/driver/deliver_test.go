@@ -10,27 +10,61 @@ package driver
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
-// deliverCapsule lays <tmp>/polyforge-166/repos/demo/.git and answers the
-// ReposDir, so the feature branch is polyforge/polyforge-166.
+// tgit runs git in dir for test fixtures: no global/system config, a
+// fixed identity.
+func tgit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@invalid", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@invalid")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// deliverCapsule lays <tmp>/polyforge-166/repos/demo (a real repo with
+// one commit) and answers the ReposDir, so the feature branch is
+// polyforge/polyforge-166.
 func deliverCapsule(t *testing.T) string {
 	t.Helper()
 	repos := filepath.Join(t.TempDir(), "polyforge-166", "repos")
-	if err := os.MkdirAll(filepath.Join(repos, "demo", ".git"), 0o755); err != nil {
+	dir := filepath.Join(repos, "demo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	tgit(t, dir, "init", "-q", "-b", "main")
+	dwrite(t, filepath.Join(dir, "a.txt"), "a\n")
+	tgit(t, dir, "add", "-A")
+	tgit(t, dir, "commit", "-q", "-m", "work")
 	return repos
 }
 
+func dwrite(t *testing.T, p, body string) {
+	t.Helper()
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// deliverSpec: verification passed on repos/demo's current HEAD.
 func deliverSpec(repos string, reviewPassed bool, answers int) ResultSpec {
+	head, _ := repoGit(filepath.Join(repos, "demo"), "rev-parse", "HEAD")
 	return ResultSpec{WIID: "wi_d", StepID: deliverStepID, SpawnN: 1, Gate: true,
-		RequireCommandEvidence: true, ReposDir: repos, ReviewPassed: reviewPassed, HumanAnswers: answers}
+		RequireCommandEvidence: true, ReposDir: repos, ReviewPassed: reviewPassed, HasReview: true, HumanAnswers: answers,
+		VerifiedHeads:    map[string]string{"demo": strings.TrimSpace(head)},
+		VerifiedCommands: []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && make test"}, DurationMs: 9}}}
 }
 
 func ev(cmds ...string) []CommandEvidence {
@@ -90,6 +124,22 @@ func TestDeliverCommandRule(t *testing.T) {
 		{"hooks bypass", []string{"git push --no-verify origin HEAD:polyforge/polyforge-166"}, "--no-verify"},
 		{"hooksPath override", []string{"git -c core.hooksPath=/dev/null push origin HEAD:polyforge/polyforge-166"}, "core.hooksPath"},
 		{"gh repo flag squash", []string{"gh -R o/r pr merge 1 --squash"}, "--squash"},
+		{"gh auto merge", []string{"gh pr merge 1 --merge --auto"}, "--auto"},
+		{"gh repo sync", []string{"gh repo sync o/r"}, "gh repo sync"},
+		// redirections are not refspecs
+		{"stderr redirect", []string{"git push origin HEAD:refs/heads/polyforge/polyforge-166 2>&1 | tail -5"}, ""},
+		{"stdout to null", []string{"git push -q origin HEAD:refs/heads/polyforge/polyforge-166 >/dev/null"}, ""},
+		{"bare redirect", []string{"git push origin HEAD:refs/heads/polyforge/polyforge-166 > push.log 2> err.log"}, ""},
+		{"both redirect", []string{"git push origin HEAD:refs/heads/polyforge/polyforge-166 &>push.log"}, ""},
+		{"redirect does not hide main", []string{"git push origin HEAD:main 2>&1"}, "not the work item's feature branch"},
+		// abbreviated long options git accepts
+		{"abbreviated force", []string{"git push --forc origin HEAD:polyforge/polyforge-166"}, "--force"},
+		{"abbreviated delete", []string{"git push --del origin polyforge/polyforge-166"}, "--delete"},
+		{"abbreviated no-verify", []string{"git push --no-ver origin HEAD:polyforge/polyforge-166"}, "--no-verify"},
+		{"allowed long options", []string{"git push --set-upstream --porcelain --atomic origin HEAD:polyforge/polyforge-166"}, ""},
+		// git configuration changed for the push
+		{"global config swapped", []string{"GIT_CONFIG_GLOBAL=/tmp/x git push origin HEAD:polyforge/polyforge-166"}, "GIT_CONFIG_GLOBAL"},
+		{"git dir swapped", []string{"GIT_DIR=/tmp/x.git git push origin HEAD:polyforge/polyforge-166"}, "GIT_DIR"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -133,7 +183,7 @@ func TestDeliverMergeRule(t *testing.T) {
 		{"llm-resolved conflict after a human answer", out(`{` + base + `,"merged":true,"merge_commit":"abc","tests_passed":true,"llm_resolved_conflict":true}`), true, 1, ""},
 		{"no passed review needs a human", mergedOut, false, 0, "independent review"},
 		{"no passed review after a human answer", mergedOut, false, 1, ""},
-		{"failed tests need a human", out(`{` + base + `,"merged":true,"merge_commit":"abc","tests_passed":false}`), true, 0, "passing tests"},
+		{"failed tests need a human", out(`{` + base + `,"merged":true,"merge_commit":"abc","tests_passed":false}`), true, 0, "reports failing tests"},
 		{"unmerged needs a human", out(`{` + base + `,"merged":false,"not_merged_reason":"human said no"}`), true, 0, "left unmerged"},
 		{"unmerged after a human answer", out(`{` + base + `,"merged":false,"not_merged_reason":"human said no"}`), true, 1, ""},
 		{"unmerged without reason", out(`{` + base + `,"merged":false}`), true, 1, "not_merged_reason"},
@@ -142,7 +192,6 @@ func TestDeliverMergeRule(t *testing.T) {
 		{"no pr", out(`{"name":"demo","branch":"polyforge/polyforge-166","merged":true,"merge_commit":"a","tests_passed":true}`), true, 0, "pr_url"},
 		{"wrong branch", out(`{"name":"demo","branch":"main","pr_url":"u","merged":true,"merge_commit":"a","tests_passed":true}`), true, 0, "feature branch"},
 		{"declared repo missing", out(`{"name":"other","skipped_reason":"nothing"}`), true, 0, `declared repo "demo"`},
-		{"skipped repo", out(`{"name":"demo","skipped_reason":"no commits beyond the baseline"}`), true, 0, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -182,4 +231,121 @@ func TestReviewPassed(t *testing.T) {
 			t.Errorf("%s: reviewPassed = %v, want %v", c.name, got, c.want)
 		}
 	}
+}
+
+// TestDeliverMergeFacts: the merge rule's facts come from the capsule, not
+// the step's self-report (polyforge#166 review B1).
+func TestDeliverMergeFacts(t *testing.T) {
+	// moved builds a repo whose HEAD moved past the verified commit by a
+	// merge of a side branch; resolve hand-edits the merge result.
+	moved := func(t *testing.T, conflict, handEdit bool) (string, ResultSpec) {
+		repos := deliverCapsule(t)
+		spec := deliverSpec(repos, true, 0)
+		dir := filepath.Join(repos, "demo")
+		base := tgit(t, dir, "rev-parse", "HEAD~0")
+		tgit(t, dir, "checkout", "-q", "-b", "side", base)
+		if conflict {
+			dwrite(t, filepath.Join(dir, "a.txt"), "side\n")
+		} else {
+			dwrite(t, filepath.Join(dir, "b.txt"), "b\n")
+		}
+		tgit(t, dir, "add", "-A")
+		tgit(t, dir, "commit", "-q", "-m", "side")
+		tgit(t, dir, "checkout", "-q", "main")
+		dwrite(t, filepath.Join(dir, "a.txt"), "main\n")
+		tgit(t, dir, "commit", "-q", "-am", "main work")
+		spec.VerifiedHeads["demo"] = tgit(t, dir, "rev-parse", "HEAD")
+		if conflict {
+			cmd := exec.Command("git", "merge", "-q", "--no-edit", "side")
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@i", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@i")
+			_ = cmd.Run() // conflicts
+			dwrite(t, filepath.Join(dir, "a.txt"), "main\nside\n")
+			tgit(t, dir, "add", "-A")
+			tgit(t, dir, "commit", "-q", "--no-edit")
+		} else {
+			tgit(t, dir, "merge", "-q", "--no-edit", "side")
+			if handEdit {
+				dwrite(t, filepath.Join(dir, "b.txt"), "edited\n")
+				tgit(t, dir, "add", "-A")
+				tgit(t, dir, "commit", "-q", "--amend", "--no-edit")
+			}
+		}
+		return repos, spec
+	}
+	rerun := []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && make test"}, DurationMs: 9, StartedAt: time.Now().Add(2 * time.Second)}}
+	stale := []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && make test"}, DurationMs: 9, StartedAt: time.Now().Add(-time.Hour)}}
+	push := ev(goodPush)
+	cases := []struct {
+		name               string
+		conflict, handEdit bool
+		evidence           []CommandEvidence
+		output             string
+		bad                string
+	}{
+		{"clean merge, tests not re-run", false, false, push, mergedOut, "tests are not shown to pass"},
+		{"clean merge, tests re-run before the merge", false, false, append(push, stale...), mergedOut, "tests are not shown to pass"},
+		{"clean merge, tests re-run after it", false, false, append(push, rerun...), mergedOut, ""},
+		{"hand-resolved conflict, flag says no conflict", true, false, append(push, rerun...), mergedOut, "had conflicts"},
+		{"clean merge edited by hand", false, true, append(push, rerun...), mergedOut, "differs from git's own merge result"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			repos, spec := moved(t, c.conflict, c.handEdit)
+			err := ValidateStepResult(deliverRes(OutcomeCompleted, c.output, c.evidence), spec)
+			switch {
+			case c.bad == "" && err != nil:
+				t.Fatalf("rejected: %v", err)
+			case c.bad != "" && (err == nil || !strings.Contains(err.Error(), c.bad)):
+				t.Fatalf("want rejection containing %q, got %v", c.bad, err)
+			}
+			if c.bad != "" { // the same result passes once a human answered
+				spec.HumanAnswers = 1
+				if err := ValidateStepResult(deliverRes(OutcomeCompleted, c.output, c.evidence), spec); err != nil {
+					t.Fatalf("rejected after a human answer: %v", err)
+				}
+			}
+			_ = repos
+		})
+	}
+	t.Run("non-merge commit after verification", func(t *testing.T) {
+		repos := deliverCapsule(t)
+		spec := deliverSpec(repos, true, 0)
+		dir := filepath.Join(repos, "demo")
+		dwrite(t, filepath.Join(dir, "a.txt"), "changed in deliver\n")
+		tgit(t, dir, "commit", "-q", "-am", "deliver edit")
+		err := ValidateStepResult(deliverRes(OutcomeCompleted, mergedOut, append(push, rerun...)), spec)
+		if err == nil || !strings.Contains(err.Error(), "not a two-parent merge") {
+			t.Fatalf("want a hand-made-change rejection, got %v", err)
+		}
+	})
+	t.Run("no verification record", func(t *testing.T) {
+		repos := deliverCapsule(t)
+		spec := deliverSpec(repos, true, 0)
+		spec.VerifiedHeads = nil
+		err := ValidateStepResult(deliverRes(OutcomeCompleted, mergedOut, push), spec)
+		if err == nil || !strings.Contains(err.Error(), "no verification record") {
+			t.Fatalf("want a missing-record rejection, got %v", err)
+		}
+	})
+	t.Run("skipped repo", func(t *testing.T) {
+		repos := deliverCapsule(t)
+		spec := deliverSpec(repos, true, 0)
+		skipped := `{"verdict":"pass","repos":[{"name":"demo","skipped_reason":"nothing to deliver"}]}`
+		capJSON := filepath.Join(filepath.Dir(repos), capsule.CapsuleJSON)
+		if err := ValidateStepResult(deliverRes(OutcomeCompleted, skipped, push), spec); err == nil || !strings.Contains(err.Error(), "baseline is not recorded") {
+			t.Fatalf("skip without a baseline: %v", err)
+		}
+		head := spec.VerifiedHeads["demo"]
+		dwrite(t, capJSON, `{"repos":{"demo":"`+head+`"}}`)
+		if err := ValidateStepResult(deliverRes(OutcomeCompleted, skipped, push), spec); err != nil {
+			t.Fatalf("skip at the baseline rejected: %v", err)
+		}
+		dir := filepath.Join(repos, "demo")
+		dwrite(t, filepath.Join(dir, "a.txt"), "more\n")
+		tgit(t, dir, "commit", "-q", "-am", "more")
+		if err := ValidateStepResult(deliverRes(OutcomeCompleted, skipped, push), spec); err == nil || !strings.Contains(err.Error(), "beyond its baseline") {
+			t.Fatalf("skip with commits: %v", err)
+		}
+	})
 }
