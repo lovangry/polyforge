@@ -40,7 +40,8 @@ wake-up line is a fixed template and carries no question or error text:
 present it to the human, never answer it yourself, and read the question text
 here (`--once`) only when asked. Progress lines, wake-up lines and
 `pf watch list` name the work item by its slug (`polyforge#140`); the id stands
-in only when no slug is known.
+in only when no slug is known. Quote a slug when you pass it back
+(`pf watch 'polyforge#140' --once`) — `#` is a zsh glob character.
 
 ## Failure branches
 

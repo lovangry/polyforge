@@ -51,7 +51,9 @@ success rendering and error branches. Work items carry server-minted ids
 for humans and resolve wherever the CLI accepts an id. Human-facing output —
 status line, wake-up lines, `pf watch`, `pf ops status`, verb confirmations —
 names a work item by its slug (the id only when no slug is known); `--json`
-keeps the id as the machine identifier.
+keeps the id as the machine identifier. Quote a slug in shell commands
+(`pf watch 'polyforge#140' --once`): `#` is a glob character under zsh
+EXTENDED_GLOB and starts a comment after whitespace.
 
 | Intent (EN / 中文) | Fragment | Face |
 |---|---|---|

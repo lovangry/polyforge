@@ -446,7 +446,8 @@ dirty 标记作为"是否值得扫一次"的提示，`watcher/` 绝不反向调�
   过滤，因为它不是 `repos/<name>/` 下的 git 工作树。
 - **session transcript 归档的同步确认（A14 裁定）**：`logs/` 已在同步根（上文），其子目录 `logs/session/` 随之天然在同步根内。session transcript 归档文件 `logs/session/<generation>.jsonl`（固定位置与命名规则的权威在 `03-execution-capsule.md#§4.4`：文件名与归档它的 generation 一一对应，**每次 end-generation（pause/block/wrap/fail）无例外**由 Daemon 从本机 `harness/<adapter>/session-data/` 复制写入——claude 适配器下，该源文件本身由 Daemon 在同一时点先从该 harness 的**默认会话位置**（本机、Capsule 外）只读采集进 `session-data/`，采集缺失为 `DAEMON-513` typed error（权威见 `03-execution-capsule.md#§4.4`、`04-local-runtime.md#§5.2`）——复制先于 final flush 的冻结扫描）**随该 generation 的 final flush（§6.1）即最后一次 Revision 一次性上传**；会话进行中该文件不存在，不存在逐边界重传的问题——裁定理由：CAS 按整文件内容寻址，transcript 在会话期间持续增长，若逐 Revision 边界同步，每次发布都要为整个文件重新上传一个块，成本随会话长度线性放大；按代一次性归档使每代 transcript 至多占用一个 CAS 块。归档文件只是审计材料，跨机重建不依赖它（§7.4）。
 - 内容寻址存储（CAS，唯一权威存储布局，`02-aihub-core.md#§4.11` 本地数据目录布局与此逐字一致）：数据块按其
-  内容 sha256 命名存放于 `<data_dir>/capsules/<wi>/rev/_cas/<sha256[:2]>/<sha256>`；
+  内容 sha256 命名存放于 `<data_dir>/capsules/<wi>/rev/_cas/<sha256[:2]>/<sha256>`（AIHub 侧数据目录，按 WI id
+  键控；与工作机的 capsule 目录名 `<project>-<seq>`（polyforge#144）无关）；
   manifest 落盘于 `<data_dir>/capsules/<wi>/rev/<seq>/manifest.json`（不存数据，只存操作
   清单 + 引用）；同块跨 Revision 去重。
 

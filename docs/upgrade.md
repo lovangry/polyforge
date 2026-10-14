@@ -164,10 +164,14 @@ end_pending when the daemon is upgraded keeps the capsule directory its
 `state.json` record names and continues there (restart recovery, attach,
 `pf resume`). A blocked work item resumed after the upgrade is re-claimed
 into the new `capsules/<project>-<seq>` directory (cloned from its capsule
-chain, as every re-claim is). The daemon never looks for an id-named
-directory again: `pf ship` and `pf watch` of a closed work item find only
-`<workspace>/capsules/<project>-<seq>`, and there is no "accept both names"
-fallback for directories or branches.
+chain, as every re-claim is); its old `capsules/<wi_id>` worktree and the
+id-keyed external git-dir `<data-dir>/git/<wi_id>.git` are moved aside
+together, as one unit, to `capsules/<wi_id>.quarantined.<ts>` and
+`git/<wi_id>.git.quarantined.<ts>` (never deleted). Apart from that
+re-claim, the daemon never looks for an id-named directory again:
+`pf ship` and `pf watch` of a closed work item find only
+`<workspace>/capsules/<project>-<seq>`, and there is no "accept both
+names" fallback for directories or branches.
 
 **Before upgrading a work machine:**
 
