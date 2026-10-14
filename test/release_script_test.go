@@ -108,7 +108,9 @@ case "$1" in
   login) echo "docker login" >> "$CALLLOG"; cat >/dev/null ;;
   buildx) [ -n "$FAKE_NO_BUILDX" ] && { echo "docker: 'buildx' is not a docker command." >&2; exit 1; }
     echo "Name: x"; echo "Digest: $FAKE_REGISTRY_DIGEST" ;;
-  manifest) printf '{\n\t"Ref": "x",\n\t"Descriptor": {\n\t\t"mediaType": "m",\n\t\t"digest": "%s",\n\t\t"size": 952\n\t},\n\t"SchemaV2Manifest": {\n\t\t"config": {\n\t\t\t"digest": "sha256:cccc"\n\t\t}\n\t}\n}\n' "$FAKE_REGISTRY_DIGEST" ;;
+  # config/layer digests come BEFORE the Descriptor here, so only the
+  # Descriptor-scoped read can find the manifest digest
+  manifest) printf '{\n\t"Ref": "x",\n\t"SchemaV2Manifest": {\n\t\t"config": {\n\t\t\t"digest": "sha256:cccc"\n\t\t},\n\t\t"layers": [\n\t\t\t{\n\t\t\t\t"Digest": "sha256:dddd"\n\t\t\t}\n\t\t]\n\t},\n\t"Descriptor": {\n\t\t"mediaType": "m",\n\t\t"digest": "%s",\n\t\t"size": 952\n\t}\n}\n' "$FAKE_REGISTRY_DIGEST" ;;
 esac
 exit 0
 `, 0o755)
