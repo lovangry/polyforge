@@ -902,14 +902,16 @@ func TestW079SkillTeachesModelsYaml(t *testing.T) {
 
 // TestW079ShipFragmentRoutesRepoPathsViaRegistry: the verb fragments that
 // name repos/<name> worktrees say the inventory is the aihub registry's,
-// never the yaml's.
+// never the yaml's. The ship fragment was the one that did; since pf ship
+// is gone (polyforge#166: delivery is the workflows' deliver step) no
+// fragment routes repo paths today, so there is no floor on how many are
+// checked; one that does again must still name the registry.
 func TestW079ShipFragmentRoutesRepoPathsViaRegistry(t *testing.T) {
 	verbsDir := filepath.Join(v1Root(t), "skills", "polyforge", "verbs")
 	ents, err := os.ReadDir(verbsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	checked := 0
 	for _, e := range ents {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
@@ -921,16 +923,12 @@ func TestW079ShipFragmentRoutesRepoPathsViaRegistry(t *testing.T) {
 		if !strings.Contains(string(raw), "repos/") {
 			continue
 		}
-		checked++
 		if !strings.Contains(string(raw), "registry") {
 			t.Fatalf("%s routes repo paths but does not name the aihub registry as their source", e.Name())
 		}
 		if strings.Contains(string(raw), "`projects` section") {
 			t.Fatalf("%s still teaches the retired yaml projects section", e.Name())
 		}
-	}
-	if checked == 0 {
-		t.Fatal("no verb fragment routes repo paths — the floor lost its subject")
 	}
 }
 
