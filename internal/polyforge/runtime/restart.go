@@ -244,10 +244,23 @@ func (r *Runtime) attachPaused(ctx context.Context, rec *jobRecord, cause, detai
 		SessionID:  rec.SessionID,
 		MachineID:  r.cfg.MachineID,
 	}); err != nil {
+		var ae *api.Error
+		if !errors.As(err, &ae) {
+			// no typed hub answer: the hub was not reached (transport)
+			return &hubTransportError{err: err}
+		}
 		return err
 	}
 	return r.restartResume(ctx, rec, j, cause, detail)
 }
+
+// hubTransportError marks a SessionAttach that never got a typed hub
+// answer, so the live resume door can answer DAEMON-503 (hub
+// unreachable, nothing resumed) exactly like its verify step.
+type hubTransportError struct{ err error }
+
+func (e *hubTransportError) Error() string { return e.err.Error() }
+func (e *hubTransportError) Unwrap() error { return e.err }
 
 // ResumePaused is the LIVE-holder half of the operator's `pf resume`
 // (wi_seWTgHeKtaa8, v2-converge §7): the operator already cleared
@@ -260,7 +273,8 @@ func (r *Runtime) attachPaused(ctx context.Context, rec *jobRecord, cause, detai
 // takes the ordinary recovery continuation.
 //
 // It returns the resume outcome for the route's answer
-// (ResumeAttached / ResumeAlreadyLive) or a typed *api.Error refusal:
+// (ResumeAttached / ResumeAlreadyLive / ResumeClosed) or a typed
+// *api.Error refusal:
 // DAEMON-404 (this daemon holds no record for the WI), DAEMON-409 (not
 // a paused record, clean_pause not yet cleared, a pending terminal
 // close, or the session no longer holds the WI), DAEMON-503 (hub
@@ -326,11 +340,23 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 				r.blockUnrecoverable(ctx, rec, err)
 				return "", &api.Error{Code: api.ErrDaemonConflict, Detail: err.Error()}
 			}
+			var te *hubTransportError
+			if errors.As(err, &te) {
+				return "", &api.Error{Code: api.ErrDaemonHubUnavailable, Detail: "session attach: " + err.Error() + "; nothing was resumed"}
+			}
 			var ae *api.Error
 			if errors.As(err, &ae) {
 				return "", err
 			}
 			return "", &api.Error{Code: api.ErrDaemonInternal, Detail: err.Error()}
+		}
+		// the recovery continuation runs synchronously (opMu held): a
+		// terminal capsule verdict or an exhausted relaunch ladder closes
+		// the job inside it — the WI does NOT continue in place then.
+		if nj := r.jobOf(id); nj == nil {
+			return ResumeClosed, nil
+		} else if st, _ := nj.snapshot(); st != StateRunning {
+			return ResumeClosed, nil
 		}
 		return ResumeAttached, nil
 	default:
@@ -683,6 +709,11 @@ const (
 	// ResumeAlreadyLive: the work item is already running here — an
 	// earlier resume or a live dispatch owns the record; idempotent.
 	ResumeAlreadyLive = "already_live"
+	// ResumeClosed: the session was re-attached, but the recovery
+	// continuation closed the job (a terminal capsule verdict — wrapped,
+	// failed, blocked — or an exhausted relaunch ladder); nothing
+	// continues in place.
+	ResumeClosed = "closed"
 )
 
 // Recovery causes that are lifecycle events, exempt from the

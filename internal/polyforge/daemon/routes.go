@@ -125,7 +125,7 @@ type resumeBlockedResponse struct {
 type resumePausedResponse struct {
 	Resumed    bool   `json:"resumed"`
 	WorkItemID string `json:"work_item_id"`
-	// Outcome: attached | already_live.
+	// Outcome: attached | already_live | closed.
 	Outcome string `json:"outcome,omitempty"`
 }
 

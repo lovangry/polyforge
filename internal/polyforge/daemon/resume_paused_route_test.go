@@ -14,6 +14,7 @@ package daemon
 //     already_live without a second attach.
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
 // pauseForResume parks a live job through the REAL pause route and waits
@@ -136,5 +138,59 @@ func TestResumePausedRouteIdempotentWhileRunning(t *testing.T) {
 	}
 	if got := attachCount(td.hub); got != 1 {
 		t.Fatalf("session-attach calls = %d, want one (no second attach)", got)
+	}
+}
+
+// TestResumePausedRouteAttachTransportIs503: a SessionAttach that never
+// reaches the hub answers DAEMON-503 (hub unreachable, nothing resumed)
+// like the verify step does — not DAEMON-500 — and the record stays
+// paused.
+func TestResumePausedRouteAttachTransportIs503(t *testing.T) {
+	td := newTestDaemon(t, func(c *Config) {
+		c.DrainInterval = time.Hour
+	})
+	pauseForResume(t, td, "wi_net")
+	clearHubCleanPause(td)
+	td.hub.mu.Lock()
+	td.hub.attachErr = errors.New("dial tcp 127.0.0.1:1: connect: connection refused")
+	td.hub.mu.Unlock()
+	_, err := td.client.ResumePaused("wi_net")
+	var ae *api.Error
+	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonHubUnavailable {
+		t.Fatalf("an unreachable hub at attach must answer DAEMON-503, got %v", err)
+	}
+	waitState(t, td, "wi_net", "paused")
+}
+
+// TestResumePausedRouteClosedByRecovery: when the synchronous recovery
+// continuation closes the job (here: the capsule already carries the
+// completed verdict, so the recovery wraps it), the door answers the
+// closed outcome, never "attached" (which the CLI prints as "continues
+// in place").
+func TestResumePausedRouteClosedByRecovery(t *testing.T) {
+	td := newTestDaemon(t, func(c *Config) {
+		c.DrainInterval = time.Hour
+	})
+	pauseForResume(t, td, "wi_done")
+	clearHubCleanPause(td)
+	execPath := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", "wi_done", capsule.ExecutionJSON)
+	doc := map[string]any{}
+	if raw, err := os.ReadFile(execPath); err == nil {
+		_ = json.Unmarshal(raw, &doc)
+	}
+	doc["workflow_status"] = capsule.WorkflowStatusCompleted
+	raw, _ := json.Marshal(doc)
+	if err := os.MkdirAll(filepath.Dir(execPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(execPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := td.client.ResumePaused("wi_done")
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if res.Outcome != "closed" || res.Resumed {
+		t.Fatalf("resume over a job the recovery closed = %+v, want the closed outcome", res)
 	}
 }

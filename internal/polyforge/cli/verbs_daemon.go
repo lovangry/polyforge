@@ -260,13 +260,21 @@ var cmdResume = &Command{
 				}
 				// typed refusal — including the mid-flight block: a missing
 				// capsule / unmapped project answers blocked (the typed
-				// cause names the remediation), never the restart copy.
-				return err
+				// cause names the remediation). The hub side already
+				// succeeded, so the answer says so (same code, so the exit
+				// status and --json envelope are unchanged).
+				return &api.Error{Code: ae.Code, Extra: ae.Extra, Detail: ae.Detail +
+					"; the hub side succeeded (clean_pause is cleared) — the daemon refused the in-place resume, so the holder daemon's next start reconciles it (and resumes it unless the refusal above blocked the work item)"}
 			}
 			raw, _ := json.Marshal(res)
 			ctx.finish(raw, func() {
 				if res.Outcome == "already_live" {
 					fmt.Fprintf(ctx.Stdout, "resumed %s: the work item is already running on this daemon\n", args[0])
+					return
+				}
+				if res.Outcome == "closed" {
+					fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the holder daemon re-attached the paused session, but its recovery closed the work item (terminal verdict or exhausted relaunch) — it does not continue in place\n", args[0])
+					fmt.Fprintln(ctx.Stdout, "(see `pf watch "+args[0]+" --once` for the close)")
 					return
 				}
 				fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the holder daemon re-attached the paused session and continues the current step in place\n", args[0])

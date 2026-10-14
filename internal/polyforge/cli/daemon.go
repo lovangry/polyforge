@@ -277,7 +277,8 @@ func (d *DaemonClient) ResumeBlocked(wiID string) (json.RawMessage, error) {
 type ResumePausedResponse struct {
 	Resumed    bool   `json:"resumed"`
 	WorkItemID string `json:"work_item_id"`
-	// Outcome: attached (continued in place) | already_live.
+	// Outcome: attached (continued in place) | already_live | closed
+	// (re-attached, but the recovery closed the job).
 	Outcome string `json:"outcome,omitempty"`
 }
 

@@ -124,6 +124,9 @@ type fakeHub struct {
 	// seeded list — the drain degraded-signal test scripts denials with
 	// it.
 	queueErr error
+	// attachErr, when non-nil, is what SessionAttach answers (a
+	// transport-class error: the hub was not reached).
+	attachErr error
 	// cleanPauseCleared records the operator's `pf resume` PATCH having
 	// cleared clean_pause on this hub (the B6 repro's HTTP face writes
 	// it; the daemon-side resume-paused route reads it through
@@ -191,6 +194,9 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.attachErr != nil {
+		return nil, h.attachErr
+	}
 	h.attaches = append(h.attaches, req)
 	id := h.canonicalID(wi)
 	h.status[id] = api.StatusRunning

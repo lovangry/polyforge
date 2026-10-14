@@ -123,4 +123,7 @@ func TestResumePausedBlockedRefusalSurfaces(t *testing.T) {
 	if !strings.Contains(stderr, "DAEMON-409") || !strings.Contains(stderr, "capsule missing") {
 		t.Errorf("stderr must carry the typed blocked cause: %s", stderr)
 	}
+	if !strings.Contains(stderr, "hub side succeeded") || !strings.Contains(stderr, "next start") {
+		t.Errorf("stderr must say the hub-side clear succeeded and the next daemon start reconciles it: %s", stderr)
+	}
 }
