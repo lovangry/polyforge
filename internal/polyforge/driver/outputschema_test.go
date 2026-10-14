@@ -201,6 +201,11 @@ func TestRunVerificationPreExistingFailureDoesNotRewind(t *testing.T) {
 	}
 }
 
+// deliverSample is the known-good output of the deliver step every
+// delivery bundle ships (one shared step document): one repo pushed and
+// merged under the merge rule, one with nothing to deliver.
+const deliverSample = `{"verdict":"pass","repos":[{"name":"app","default_branch":"main","branch":"polyforge/app-7","pr_url":"https://github.com/o/app/pull/9","merged":true,"merge_commit":"def5678","llm_resolved_conflict":false,"tests_passed":true},{"name":"docs","skipped_reason":"no commits beyond the claim baseline"}],"delivery_note":"app: polyforge/app-7 merged as def5678 (PR #9); docs: nothing to deliver"}`
+
 // shippedSamples is one known-good completed output per shipped step,
 // written from each step document's own instructions (the shape a
 // conforming agent emits; `null` on an optional property included where
@@ -209,12 +214,12 @@ var shippedSamples = map[string]string{
 	"bug-fix/repro":             `{"repro_path":"artifacts/repro.md","reproduces":true,"test_files":["internal/x/x_test.go"],"summary":"reproduced"}`,
 	"bug-fix/root-cause":        `{"verdict":"pass","root_cause":"nil map write","evidence":[{"kind":"code","ref":"internal/x/x.go:42","detail":"write before init"}],"fail_reason":null}`,
 	"bug-fix/fix":               `{"commits":[{"sha":"abc1234","message":"fix: init map"}],"build_status":"green","root_cause_addressed":true,"regression_test":"internal/x/x_test.go","summary":"init before write"}`,
-	"bug-fix/verification":      `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"repro","status":"pass"}],"fail_reason":null}`,
+	"bug-fix/verification":      `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"repro","status":"pass"}],"fail_reason":null,"test_bar":[{"repo":"app","command":"go build ./..."},{"repo":"app","command":"go test ./..."}]}`,
 	"bug-fix/review":            `{"verdict":"pass","findings":[{"severity":"non-blocking","detail":"nit"}],"fail_reason":null}`,
 	"chore/plan":                `{"plan_path":"artifacts/plan.md","step_ids":["s1"],"touched_files":[{"path":"a.go","intent":"write"}]}`,
 	"chore/code":                `{"commits":[{"sha":"abc1234","message":"chore: drop dead code"}],"build_status":"green"}`,
 	"chore/review":              `{"verdict":"pass","findings":[]}`,
-	"chore/verification":        `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"unit","status":"pre_existing","detail":"TestFlaky fails on base abc1234 too"}],"pre_existing_failures":["internal/x/flaky_test.go: TestFlaky"]}`,
+	"chore/verification":        `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"unit","status":"pre_existing","detail":"TestFlaky fails on base abc1234 too"}],"pre_existing_failures":["internal/x/flaky_test.go: TestFlaky"],"test_bar":[{"repo":"app","command":"go build ./..."},{"repo":"app","command":"go test ./..."}]}`,
 	"feature-full/grill":        `{"qa_log":"artifacts/grill-qa.md","ready_for_spec":true}`,
 	"feature-full/spec":         `{"spec_path":"artifacts/spec.md","requirement_titles":["R1"],"non_goals":[]}`,
 	"feature-full/grill-review": `{"verdict":"pass","qa_log":"artifacts/grill-qa.md","fail_reason":null}`,
@@ -224,10 +229,14 @@ var shippedSamples = map[string]string{
 	"feature-full/code":         `{"commits":[{"step_id":"s1","sha":"abc1234","message":"feat: s1"}],"build_status":"green","summary":"done"}`,
 	"feature-full/e2e-run":      `{"results_path":"artifacts/e2e-results.md","verdict":"pass","authored_titles":["A","B"],"scenarios":[{"title":"A","status":"pass"},{"title":"B","status":"skipped","detail":"needs GPU"}],"fail_reason":null}`,
 	"feature-full/review":       `{"verdict":"pass","findings":[{"severity":"non-blocking","detail":"nit"}]}`,
-	"feature-full/verification": `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"tests","status":"skipped","detail":"no tests"}]}`,
+	"feature-full/verification": `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"tests","status":"skipped","detail":"no tests"}],"test_bar":[{"repo":"app","command":"go build ./..."},{"repo":"app","command":"go test ./..."}]}`,
 	"quick-fix/grill":           `{"qa_log":"artifacts/grill-qa.md","memo_path":"artifacts/fix-memo.md","scope_points":["fix the typo"],"non_goals":[]}`,
 	"quick-fix/fix":             `{"commits":[{"sha":"abc1234","message":"fix: typo"}],"build_status":"green"}`,
-	"quick-fix/verification":    `{"verdict":"pass","checks":[{"name":"build","status":"pass"}]}`,
+	"quick-fix/verification":    `{"verdict":"pass","checks":[{"name":"build","status":"pass"}],"test_bar":[{"repo":"app","command":"go build ./..."},{"repo":"app","command":"go test ./..."}]}`,
+	"bug-fix/deliver":           deliverSample,
+	"chore/deliver":             deliverSample,
+	"feature-full/deliver":      deliverSample,
+	"quick-fix/deliver":         deliverSample,
 	"release/release":           `{"verdict":"pass","version":"v2.5.0","commit":"abc1234","notes":"docs/release-notes/v2.5.0.md","artifacts_published":["pf-linux-amd64"],"fail_reason":null}`,
 	"release/verify":            `{"verdict":"pass","version":"v2.5.0","commit":"abc1234","checks":[{"name":"release.sh --verify","status":"pass"}]}`,
 	"release/deploy":            `{"verdict":"defer","state":"none"}`,

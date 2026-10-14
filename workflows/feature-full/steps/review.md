@@ -78,7 +78,8 @@ rather than merely passing on a technicality.
 
 **Do not run tests or builds.** This step reads and judges; it never runs the build, the
 test suite (`go test ./...`, `make test`, the full `./test`, `npm test`) or the e2e
-suite. The full bar runs exactly once per pass, in `verification` (after this step), and
+suite. The full bar runs exactly once per pass, in `verification` (after this step;
+`deliver` re-runs that same bar only after merging a moved default branch changed the tree), and
 the authored suite's evidence is `artifacts/e2e-results.md`. Reading a test file's source
 is part of the review; running it is not.
 

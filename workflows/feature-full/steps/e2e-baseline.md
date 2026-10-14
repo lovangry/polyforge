@@ -62,7 +62,7 @@ against and that `e2e-run` re-runs as a hard gate after `code`.
 **Run only the authored files.** Execute the scenarios `e2e-author` authored and nothing
 else — never the project's full suite (`go test ./...`, `make test`, the full `./test`,
 `npm test`) or unrelated packages; target the authored test files directly (e.g.
-`go test ./test/ -run '<authored test names>'`). The full bar runs once, in `verification`.
+`go test ./test/ -run '<authored test names>'`). The full bar runs once, in `verification` (`deliver` re-runs that same bar only after merging a moved default branch changed the tree).
 
 ## When the run counts as laid (completed vs incomplete)
 
