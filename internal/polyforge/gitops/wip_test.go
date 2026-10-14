@@ -22,6 +22,12 @@ import (
 func wipEnv(t *testing.T, wi string) (Opts, string, string) {
 	t.Helper()
 	setIdentity(t)
+	// never the operator's real global config (TestMain exposes it for
+	// the identity): an empty throwaway one for the whole test
+	gc := filepath.Join(t.TempDir(), "gitconfig")
+	writeT(t, gc, "")
+	t.Setenv("GIT_CONFIG_GLOBAL", gc)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	o, base := taskOpts(t, wi)
 	mkBare(t, o.RemoteURL, false)
 	mkTaskCapsule(t, o)
@@ -188,7 +194,7 @@ func TestPushTaskWIPRunsFromATempRepo(t *testing.T) {
 	}
 	wantAdd := []string{"--git-dir=" + tmp,
 		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "http.proxy=",
-		"--work-tree=" + repo, "add", "-A"}
+		"--work-tree=" + repo, "add", "-A", "--ignore-errors"}
 	if strings.Join(add, " ") != strings.Join(wantAdd, " ") {
 		t.Fatalf("WIP add argv = %q\nwant %q", add, wantAdd)
 	}
@@ -349,15 +355,17 @@ func TestPushTaskWIPHonoursGlobalAndRepoExcludes(t *testing.T) {
 	}
 }
 
-// S3: when the keep snapshot cannot be pushed, the older WIP ref is
-// dropped (it would otherwise be applied, stale, by the next re-claim)
-// and carrier_push_failed names the WIP ref.
-func TestPushTaskWIPFailureDropsOlderRef(t *testing.T) {
+// S-C: when the keep snapshot cannot be pushed, the hub's older WIP ref
+// is left alone (it is only applied on its own parent — the state it was
+// taken on — so it beats nothing) and carrier_push_failed names the WIP
+// ref and says the hub's WIP predates this close.
+func TestPushTaskWIPFailureKeepsOlderRef(t *testing.T) {
 	o, repo, _ := wipEnv(t, "wi_wip8")
 	events := captureEvents(&o)
 	writeT(t, filepath.Join(repo, "new.txt"), "v1\n")
 	PushTaskWIP(o, true, true)
-	if _, ok := bareRefSHA(t, o.RemoteURL, TaskWIPRefName("demo-src")); !ok {
+	first, ok := bareRefSHA(t, o.RemoteURL, TaskWIPRefName("demo-src"))
+	if !ok {
 		t.Fatal("setup: no first WIP")
 	}
 	// the hub now refuses WIP updates (deletion still allowed)
@@ -367,12 +375,13 @@ func TestPushTaskWIPFailureDropsOlderRef(t *testing.T) {
 	}
 	writeT(t, filepath.Join(repo, "new.txt"), "v2\n")
 	PushTaskWIP(o, true, true)
-	if wip, ok := bareRefSHA(t, o.RemoteURL, TaskWIPRefName("demo-src")); ok {
-		t.Fatalf("a failed WIP push left the older snapshot %s in place", wip)
+	if wip, ok := bareRefSHA(t, o.RemoteURL, TaskWIPRefName("demo-src")); !ok || wip != first {
+		t.Fatalf("a failed WIP push must leave the older snapshot %s alone, got %q (%v)", first, wip, ok)
 	}
 	var failed bool
 	for _, e := range events() {
-		if e["kind"] == EventCarrierPushFailed && e["ref"] == TaskWIPRefName("demo-src") {
+		if e["kind"] == EventCarrierPushFailed && e["ref"] == TaskWIPRefName("demo-src") &&
+			strings.Contains(e["error"].(string), "predates this close") {
 			failed = true
 		}
 	}
@@ -384,6 +393,7 @@ func TestPushTaskWIPFailureDropsOlderRef(t *testing.T) {
 // N2: an expired Deadline cuts every lane call: nothing is pushed.
 func TestPushTaskWIPHonoursDeadline(t *testing.T) {
 	o, repo, _ := wipEnv(t, "wi_wip9")
+	events := captureEvents(&o)
 	writeT(t, filepath.Join(repo, "new.txt"), "x\n")
 	o.Deadline = time.Now().Add(-time.Second)
 	start := time.Now()
@@ -393,5 +403,67 @@ func TestPushTaskWIPHonoursDeadline(t *testing.T) {
 	}
 	if el := time.Since(start); el > 30*time.Second {
 		t.Fatalf("the lane ran %s past an expired deadline", el)
+	}
+	// the alerts say why: the deadline, not a misleading layout refusal
+	var n int
+	for _, e := range events() {
+		if e["kind"] != EventCarrierPushFailed {
+			continue
+		}
+		n++
+		if !strings.Contains(e["error"].(string), "deadline exceeded") {
+			t.Fatalf("carrier_push_failed after the deadline = %v, want it to name the deadline", e)
+		}
+	}
+	if n == 0 {
+		t.Fatal("no carrier_push_failed for the lost snapshot")
+	}
+}
+
+// S-A: a file git cannot read (root-owned build output, mode 000) is left
+// out and reported; the rest of the work is still saved. Root reads any
+// file regardless of mode, so the test needs a non-root euid.
+func TestPushTaskWIPSkipsUnreadableFiles(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads mode-000 files: run as a non-root user")
+	}
+	o, repo, _ := wipEnv(t, "wi_wip10")
+	events := captureEvents(&o)
+	writeT(t, filepath.Join(repo, "new.txt"), "keep\n")
+	writeT(t, filepath.Join(repo, "locked.out"), "docker output\n")
+	if err := os.Chmod(filepath.Join(repo, "locked.out"), 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(repo, "locked.out"), 0o644) })
+	PushTaskWIP(o, true, true)
+	if _, files := wipTree(t, o); strings.Join(files, " ") != "hello.txt new.txt work.txt" {
+		t.Fatalf("WIP tree = %v, want the unreadable file left out and the rest saved", files)
+	}
+	if sk := skippedText(events()); !strings.Contains(sk, "locked.out (unreadable") {
+		t.Fatalf("task_wip_skipped = %q, want locked.out named", sk)
+	}
+}
+
+// N: the repo's .git/info/attributes counts for the lfs/git-crypt rule,
+// and an embedded repository inside an ignored directory is neither
+// walked nor reported.
+func TestPushTaskWIPInfoAttributesAndIgnoredEmbedded(t *testing.T) {
+	o, repo, _ := wipEnv(t, "wi_wip11")
+	events := captureEvents(&o)
+	writeT(t, filepath.Join(repo, ".git", "info", "attributes"), "*.psd filter=lfs\n")
+	writeT(t, filepath.Join(repo, "art.psd"), "smudged\n")
+	writeT(t, filepath.Join(repo, ".gitignore"), "build/\n")
+	mustRun(t, "git", "init", "-q", filepath.Join(repo, "build", "dep"))
+	writeT(t, filepath.Join(repo, "new.txt"), "keep\n")
+	PushTaskWIP(o, true, true)
+	if _, files := wipTree(t, o); strings.Join(files, " ") != ".gitignore hello.txt new.txt work.txt" {
+		t.Fatalf("WIP tree = %v", files)
+	}
+	sk := skippedText(events())
+	if !strings.Contains(sk, "art.psd (filter=lfs") {
+		t.Fatalf("task_wip_skipped = %q, want art.psd (info/attributes lfs)", sk)
+	}
+	if strings.Contains(sk, "build") {
+		t.Fatalf("an embedded repo under an ignored dir was reported: %q", sk)
 	}
 }

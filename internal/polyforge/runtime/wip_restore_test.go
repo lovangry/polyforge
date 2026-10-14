@@ -35,6 +35,7 @@ type wipRig struct {
 
 func newWIPRig(t *testing.T, wi string) *wipRig {
 	t.Helper()
+	isolateGitConfig(t)
 	hub := newFakeHub()
 	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
 	source := filepath.Join(ws, ".repo", "app")
@@ -275,6 +276,7 @@ func TestWrappedCloseLeavesNoWIPRef(t *testing.T) {
 // never removed THROUGH the new symlink, so the file outside the repo
 // survives. HEAD and the repo's index stay on head.
 func TestWIPCheckoutNeverFollowsASymlinkOutOfTheRepo(t *testing.T) {
+	isolateGitConfig(t)
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	if err := os.MkdirAll(filepath.Join(repo, "a"), 0o755); err != nil {
@@ -327,4 +329,16 @@ func TestWIPCheckoutNeverFollowsASymlinkOutOfTheRepo(t *testing.T) {
 	if staged := carrierGit(t, repo, "diff", "--cached", "--name-only"); staged != "" {
 		t.Fatalf("the restore staged %q", staged)
 	}
+}
+
+// isolateGitConfig points git at an empty throwaway global config (and
+// XDG dir) for the whole test: never the operator's real ~/.gitconfig.
+func isolateGitConfig(t *testing.T) {
+	t.Helper()
+	gc := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(gc, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", gc)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 }

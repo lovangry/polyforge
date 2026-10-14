@@ -115,6 +115,11 @@ type Opts struct {
 	Deadline time.Time
 }
 
+// expired reports whether o.Deadline is set and has passed.
+func (o Opts) expired() bool {
+	return !o.Deadline.IsZero() && !time.Now().Before(o.Deadline)
+}
+
 // bound cuts a carrier-lane timeout to the time left before o.Deadline
 // (never below 1ms: a zero timeout would mean unbounded).
 func (o Opts) bound(d time.Duration) time.Duration {
@@ -572,7 +577,15 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc) {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
+		if o.expired() {
+			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s skipped: deadline exceeded\n", o.WorkItemID, e.Name())
+			o.carrierFailed(e.Name(), chainOK, "deadline exceeded")
+			continue
+		}
 		objects, sha, reason := carrierSourceT(reposDir, e.Name(), o.bound(carrierCheckTimeout))
+		if reason != "" && o.expired() {
+			reason = "deadline exceeded (" + reason + ")"
+		}
 		if reason != "" {
 			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s refused (task-repo state may not survive a re-claim): %s\n", o.WorkItemID, e.Name(), reason)
 			o.carrierFailed(e.Name(), chainOK, "carrier push refused: "+reason)
@@ -598,8 +611,12 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc) {
 			o.CarrierAlerts.clear(TaskRefName(s.name))
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %v: %s\n", o.WorkItemID, s.name, err, strings.TrimSpace(out))
-		o.carrierFailed(s.name, chainOK, err.Error())
+		detail := err.Error()
+		if o.expired() {
+			detail = "deadline exceeded: " + detail
+		}
+		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %s: %s\n", o.WorkItemID, s.name, detail, strings.TrimSpace(out))
+		o.carrierFailed(s.name, chainOK, detail)
 		// Never force: a non-fast-forward rejection means the carrier
 		// and this worktree DIVERGED (e.g. a re-claim that started
 		// from a clone lacking the carried commits). The carrier is

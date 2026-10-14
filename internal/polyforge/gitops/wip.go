@@ -16,30 +16,45 @@ package gitops
 // pf-carrier-* repo the carrier push uses) whose object store borrows the
 // task repo's through objects/info/alternates, pointed at the task repo
 // as --work-tree, with a temporary index file (GIT_INDEX_FILE inside the
-// temp repo): read-tree HEAD, add -A, prune (pruneWIPIndex), write-tree,
-// commit-tree -p HEAD. Nothing of the agent's repo is written — not its
-// HEAD, branch, index, config or object store (the new blobs, trees and
-// the commit land in the temp repo) — and its config is never loaded as
-// configuration: git reads the temp repo's config, so no repo-defined
-// clean filter, fsmonitor, hook or credential helper can run. The flip
-// side: no clean/smudge filter or attribute-driven conversion applies,
-// the snapshot stores RAW working-tree bytes — so files whose attributes
-// name the lfs or git-crypt filter are left out (their raw content is
-// the smudged object/plaintext). Ignore rules: .gitignore files in the
-// work tree (data), plus — written to the temp repo's info/exclude — the
-// effective core.excludesFile (the repo's, else the operator's global,
-// else ~/.config/git/ignore) and the repo's .git/info/exclude. Embedded
-// repositories, blobs over the carrier limit and content above the total
-// cap are left out and reported (task_wip_skipped). `git stash create`
-// was rejected: it runs inside the agent repo (its config, its object
-// store) and never records untracked files.
+// temp repo): read-tree HEAD, pre-scan (prescanWIP), add -A
+// --ignore-errors, prune (pruneWIPIndex), write-tree, commit-tree -p
+// HEAD. Nothing of the agent's repo is written — not its HEAD, branch,
+// index, config or object store (the new blobs, trees and the commit land
+// in the temp repo) — and its config is never loaded as configuration:
+// git reads the temp repo's config, so no repo-defined clean filter,
+// fsmonitor, hook or credential helper can run. The flip side: no
+// clean/smudge filter or attribute-driven conversion applies, the
+// snapshot stores RAW working-tree bytes — so files whose attributes name
+// the lfs or git-crypt filter are left out (their raw content is the
+// smudged object/plaintext).
+//
+// Ignore and attribute sources the carrier env drops are copied in as
+// data (bounded regular files, opened non-blocking): the effective
+// core.excludesFile / core.attributesFile (the repo's, else the
+// operator's global, else $XDG_CONFIG_HOME/git/ignore|attributes) and the
+// repo's .git/info/exclude / .git/info/attributes; .gitignore and
+// .gitattributes in the work tree apply as usual.
+//
+// Left out and reported (commit message + task_wip_skipped), so one bad
+// path never loses the whole snapshot: embedded repositories, untracked
+// files over the blob limit or above the total cap (excluded BEFORE add —
+// never hashed), tracked files over the blob limit (kept at HEAD via
+// skip-worktree, never hashed), files git cannot read (add
+// --ignore-errors), lfs/git-crypt files. A left-out tracked path keeps
+// its HEAD entry, never becomes a deletion.
+//
+// `git stash create` was rejected: it runs inside the agent repo (its
+// config, its object store) and never records untracked files.
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -100,10 +115,16 @@ var wipSkippedFilters = map[string]bool{"lfs": true, "git-crypt": true}
 //
 //   - keep and uncommitted changes: snapshot them (see the file comment)
 //     and force-push the WIP commit to refs/pf-wip/<name>;
-//   - otherwise (a clean repo, or keep=false — the wrapped close), and
-//     also when the keep snapshot FAILED: delete the hub's WIP ref (a
-//     stale snapshot must never be re-applied over newer work; deleting
-//     a ref the hub does not hold is a quiet no-op).
+//   - otherwise (a clean repo, or keep=false — the wrapped close):
+//     delete the hub's WIP ref (a stale snapshot must never be re-applied
+//     over newer work; deleting a ref the hub does not hold is a quiet
+//     no-op).
+//
+// A keep snapshot that FAILS leaves the hub's older WIP ref alone: it is
+// only ever applied when its parent is the restored head — exactly the
+// state that older snapshot was taken on — so applying it is strictly
+// better than nothing; carrier_push_failed says the hub's WIP predates
+// this close.
 //
 // Best-effort-loud like the carrier lane: a failure is logged and raised
 // as carrier_push_failed (when chainOK) and never fails the close. An
@@ -128,6 +149,13 @@ func PushTaskWIP(o Opts, keep, chainOK bool) {
 	env := carrierEnv(reposDir)
 	for _, s := range srcs {
 		ref := TaskWIPRefName(s.name)
+		if o.expired() {
+			fmt.Fprintf(os.Stderr, "gitops: %s: repo %s: WIP lane skipped: deadline exceeded\n", o.WorkItemID, s.name)
+			if keep {
+				o.carrierRefFailed(s.name, ref, chainOK, "deadline exceeded before the WIP snapshot (the hub's WIP ref, if any, predates this close)")
+			}
+			continue
+		}
 		if keep {
 			wip, skipped, out, err := pushTaskWIP(o, env, reposDir, s, additions)
 			if len(skipped) > 0 {
@@ -139,9 +167,12 @@ func PushTaskWIP(o Opts, keep, chainOK bool) {
 				}
 			}
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "gitops: %s: WIP push for repo %s failed (its uncommitted work may not survive a re-claim; the older WIP ref is dropped): %v: %s\n", o.WorkItemID, s.name, err, strings.TrimSpace(out))
-				o.carrierRefFailed(s.name, ref, chainOK, err.Error())
-				dropWIPRef(o, env, ref, additions)
+				detail := err.Error()
+				if o.expired() {
+					detail = "deadline exceeded: " + detail
+				}
+				fmt.Fprintf(os.Stderr, "gitops: %s: WIP push for repo %s failed (its uncommitted work may not survive a re-claim; the hub's WIP ref, if any, predates this close): %s: %s\n", o.WorkItemID, s.name, detail, strings.TrimSpace(out))
+				o.carrierRefFailed(s.name, ref, chainOK, detail+" (the hub's WIP ref, if any, predates this close)")
 				continue
 			}
 			if wip != "" {
@@ -180,20 +211,36 @@ func pushTaskWIP(o Opts, env []string, reposDir string, s carrierSrc, credAdditi
 	if err != nil {
 		return "", nil, out, err
 	}
-	// Embedded repositories (a nested .git the HEAD does not track as a
-	// submodule) are excluded: `add -A` would record them as gitlinks, or
-	// fail the whole snapshot outright when one has no commit.
-	nested := embeddedRepos(dir, head)
-	for _, p := range nested {
-		skipped = append(skipped, p+" (embedded git repository)")
+	// The ignore and attribute sources the carrier env drops, as data.
+	if err := writeWIPInfo(tmp, "attributes", wipAttributes(o, dir, tmp)); err != nil {
+		return "", nil, "", err
 	}
-	if err := writeWIPExclude(o, dir, tmp, nested); err != nil {
-		return "", skipped, "", err
+	ignore := wipIgnores(o, dir, tmp)
+	if err := writeWIPInfo(tmp, "exclude", ignore); err != nil {
+		return "", nil, "", err
+	}
+	// Pre-scan (before anything is hashed): embedded repositories and
+	// over-limit untracked files go to the exclude, over-limit tracked
+	// files keep their HEAD entry (skip-worktree) — `add -A` never reads
+	// a multi-GB file.
+	extra, skipped, out, err := prescanWIP(gitw, dir, head)
+	if err != nil {
+		return "", skipped, out, err
+	}
+	if len(extra) > 0 {
+		if err := writeWIPInfo(tmp, "exclude", ignore+"\n"+strings.Join(extra, "\n")+"\n"); err != nil {
+			return "", skipped, "", err
+		}
 	}
 	// add -A hashes every changed or untracked, not-ignored file: it may
-	// read a large tree, so it takes the push bound.
-	if out, err := gitw(carrierPushTimeout, "add", "-A"); err != nil {
-		return "", skipped, out, err
+	// read a large tree, so it takes the push bound. --ignore-errors: a
+	// file git cannot read (root-owned build output, mode 000) is left
+	// out — exit 1 is a partial snapshot, not a lost one.
+	if out, err := gitw(carrierPushTimeout, "add", "-A", "--ignore-errors"); err != nil {
+		if exitCode(err) != 1 {
+			return "", skipped, out, err
+		}
+		skipped = append(skipped, unindexedPaths(err.Error())...)
 	}
 	more, out, err := pruneWIPIndex(gitw, dir, head)
 	skipped = append(skipped, more...)
@@ -218,7 +265,7 @@ func pushTaskWIP(o Opts, env []string, reposDir string, s carrierSrc, credAdditi
 		if len(list) > 50 {
 			list = append(append([]string{}, list[:50]...), fmt.Sprintf("... and %d more", len(skipped)-50))
 		}
-		msg += "\n\nLeft out (restored at their HEAD state):\n" + strings.Join(list, "\n")
+		msg += "\n\nLeft out (tracked paths kept at HEAD, untracked absent):\n" + strings.Join(list, "\n")
 	}
 	wip, err = gitw(carrierCheckTimeout, "commit-tree", tree, "-p", s.sha, "-m", msg)
 	if err != nil {
@@ -254,35 +301,105 @@ func wipIndex(gitw func(time.Duration, ...string) (string, error)) (map[string]i
 	return m, "", nil
 }
 
-// embeddedRepos lists the working-tree directories (relative, slash
-// separated) holding their own .git — file or directory — other than the
-// top level, except the submodules HEAD tracks (gitlinks). The walk never
-// follows a symlink and does not descend into an embedded repository.
-func embeddedRepos(dir string, head map[string]indexEntry) []string {
-	var out []string
-	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			if d != nil && d.IsDir() {
-				return filepath.SkipDir
+// prescanWIP runs before `add -A` on the temporary index (HEAD's
+// entries): `ls-files -o --exclude-standard` (the temp exclude in effect)
+// lists the untracked, not-ignored paths — git shows an embedded
+// repository as one "dir/" entry and never descends into ignored
+// directories. It answers the extra exclude lines (embedded repositories;
+// untracked files over the blob cap; above the total cap the largest
+// untracked files first) and the left-out paths, and marks every tracked
+// regular file whose working copy is over the blob cap skip-worktree so
+// `add -A` keeps its HEAD entry without hashing it (recorded when its
+// size differs from HEAD's blob).
+func prescanWIP(gitw func(time.Duration, ...string) (string, error), dir string, head map[string]indexEntry) (extra, skipped []string, out string, err error) {
+	others, err := gitw(carrierPushTimeout, "ls-files", "-o", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, nil, others, err
+	}
+	type file struct {
+		path string
+		size int64
+	}
+	var untracked []file
+	var total int64
+	for _, p := range strings.Split(others, "\x00") {
+		if p == "" {
+			continue
+		}
+		if strings.HasSuffix(p, "/") {
+			rel := strings.TrimSuffix(p, "/")
+			extra = append(extra, "/"+escapeIgnore(rel)+"/")
+			skipped = append(skipped, rel+" (embedded git repository)")
+			continue
+		}
+		st, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(p)))
+		if err != nil || !st.Mode().IsRegular() {
+			continue
+		}
+		if st.Size() > wipBlobCap {
+			extra = append(extra, "/"+escapeIgnore(p))
+			skipped = append(skipped, fmt.Sprintf("%s (%d bytes, over the %d-byte blob limit; not read)", p, st.Size(), wipBlobCap))
+			continue
+		}
+		untracked = append(untracked, file{p, st.Size()})
+		total += st.Size()
+	}
+	if total > wipTotalCap {
+		sort.SliceStable(untracked, func(a, b int) bool { return untracked[a].size > untracked[b].size })
+		for _, f := range untracked {
+			if total <= wipTotalCap {
+				break
 			}
-			return nil
+			extra = append(extra, "/"+escapeIgnore(f.path))
+			skipped = append(skipped, fmt.Sprintf("%s (%d bytes, left out to keep the snapshot under %d bytes; not read)", f.path, f.size, wipTotalCap))
+			total -= f.size
 		}
-		if !d.IsDir() || p == dir {
-			return nil
+	}
+	var pin []string
+	paths := make([]string, 0, len(head))
+	for p := range head {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		e := head[p]
+		if e.mode != "100644" && e.mode != "100755" {
+			continue
 		}
-		if d.Name() == ".git" {
-			return filepath.SkipDir // the top level's own (or a nested one's) git dir
+		st, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(p)))
+		if err != nil || !st.Mode().IsRegular() || st.Size() <= wipBlobCap {
+			continue
 		}
-		if _, err := os.Lstat(filepath.Join(p, ".git")); err != nil {
-			return nil
+		pin = append(pin, p)
+		if hs, err := gitw(carrierCheckTimeout, "cat-file", "-s", e.sha); err != nil || strings.TrimSpace(hs) != strconv.FormatInt(st.Size(), 10) {
+			skipped = append(skipped, fmt.Sprintf("%s (%d bytes, over the %d-byte blob limit; kept at HEAD, not read)", p, st.Size(), wipBlobCap))
 		}
-		rel, _ := filepath.Rel(dir, p)
-		rel = filepath.ToSlash(rel)
-		if e, ok := head[rel]; !ok || e.mode != "160000" {
-			out = append(out, rel)
+	}
+	for i := 0; i < len(pin); i += 200 {
+		if out, err := gitw(carrierCheckTimeout, append([]string{"update-index", "--skip-worktree", "--"}, pin[i:min(i+200, len(pin))]...)...); err != nil {
+			return extra, skipped, out, err
 		}
-		return filepath.SkipDir
-	})
+	}
+	return extra, skipped, "", nil
+}
+
+// unindexedPaths answers the paths a `git add --ignore-errors` reported
+// it could not index (C-locale "unable to index file '<path>'" lines),
+// each marked as left out; one generic entry when none parse.
+func unindexedPaths(msg string) []string {
+	var out []string
+	for _, line := range strings.Split(msg, "\n") {
+		i := strings.Index(line, "unable to index file '")
+		if i < 0 {
+			continue
+		}
+		p := strings.TrimSuffix(strings.TrimSpace(line[i+len("unable to index file '"):]), "'")
+		out = append(out, p+" (unreadable: git could not index it)")
+	}
+	if len(out) == 0 {
+		first, _, _ := strings.Cut(strings.TrimSpace(msg), "\n")
+		out = append(out, "(some paths: git add reported errors: "+first+")")
+	}
 	return out
 }
 
@@ -382,39 +499,41 @@ func pruneWIPIndex(gitw func(time.Duration, ...string) (string, error), dir stri
 	return skipped, "", nil
 }
 
-// wipExcludeMax bounds each ignore source the snapshot copies.
+// wipExcludeMax bounds each ignore/attribute source the snapshot copies.
 const wipExcludeMax = 1 << 20
 
-// writeWIPExclude writes the temporary repo's info/exclude: the effective
-// ignore sources the carrier env would otherwise drop — the excludes file
-// git would use (the task repo's own core.excludesFile, else the
-// operator's global one, else $XDG_CONFIG_HOME/git/ignore or
-// ~/.config/git/ignore), then the repo's .git/info/exclude — plus one
-// anchored pattern per embedded repository. Ignore sources are read as
-// data only: a regular file, bounded, never through a symlinked
-// info/exclude.
-func writeWIPExclude(o Opts, dir, tmp string, nested []string) error {
-	var buf strings.Builder
-	if f := effectiveExcludesFile(o, dir, tmp); f != "" {
-		buf.WriteString(readIgnoreSource(f, true))
-		buf.WriteString("\n")
-	}
-	buf.WriteString(readIgnoreSource(filepath.Join(dir, ".git", "info", "exclude"), false))
-	buf.WriteString("\n")
-	for _, p := range nested {
-		buf.WriteString("/" + escapeIgnore(p) + "/\n")
-	}
+// wipIgnores answers the ignore sources the carrier env would otherwise
+// drop, as one exclude file: the excludes file git would use (the task
+// repo's own core.excludesFile, else the operator's global one, else
+// $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore), then the repo's
+// .git/info/exclude.
+func wipIgnores(o Opts, dir, tmp string) string {
+	return readIgnoreSource(effectiveInfoFile(o, dir, tmp, "core.excludesFile", "ignore"), true) + "\n" +
+		readIgnoreSource(filepath.Join(dir, ".git", "info", "exclude"), false) + "\n"
+}
+
+// wipAttributes is wipIgnores for attributes (core.attributesFile, else
+// $XDG_CONFIG_HOME/git/attributes, then .git/info/attributes) — the
+// snapshot reads them only to leave filtered (lfs, git-crypt) files out.
+func wipAttributes(o Opts, dir, tmp string) string {
+	return readIgnoreSource(effectiveInfoFile(o, dir, tmp, "core.attributesFile", "attributes"), true) + "\n" +
+		readIgnoreSource(filepath.Join(dir, ".git", "info", "attributes"), false) + "\n"
+}
+
+// writeWIPInfo writes the temporary repo's info/<name>.
+func writeWIPInfo(tmp, name, content string) error {
 	if err := os.MkdirAll(filepath.Join(tmp, "info"), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(tmp, "info", "exclude"), []byte(buf.String()), 0o600)
+	return os.WriteFile(filepath.Join(tmp, "info", name), []byte(content), 0o600)
 }
 
-// effectiveExcludesFile answers the core.excludesFile git would use for
-// the task repo: its own config's value (read as a file — no includes),
-// else the operator's global value, else the XDG default. Relative values
-// are taken against the work tree.
-func effectiveExcludesFile(o Opts, dir, tmp string) string {
+// effectiveInfoFile answers the file git would use for key
+// (core.excludesFile / core.attributesFile) in the task repo: the repo
+// config's value (read as a file — no includes), else the operator's
+// global value, else $XDG_CONFIG_HOME/git/<xdgName>. Relative values are
+// taken against the work tree.
+func effectiveInfoFile(o Opts, dir, tmp, key, xdgName string) string {
 	// the daemon's own environment minus GIT_* — except the operator's
 	// GIT_CONFIG_GLOBAL, which names the global config to read
 	plain := make([]string, 0, len(os.Environ()))
@@ -432,10 +551,10 @@ func effectiveExcludesFile(o Opts, dir, tmp string) string {
 	}
 	v := ""
 	if repoCfg := filepath.Join(dir, ".git", "config"); regularFile(repoCfg) {
-		v = get("--file", repoCfg, "core.excludesFile")
+		v = get("--file", repoCfg, key)
 	}
 	if v == "" {
-		v = get("--global", "core.excludesFile")
+		v = get("--global", key)
 	}
 	if v == "" {
 		xdg := os.Getenv("XDG_CONFIG_HOME")
@@ -446,7 +565,7 @@ func effectiveExcludesFile(o Opts, dir, tmp string) string {
 			}
 			xdg = filepath.Join(home, ".config")
 		}
-		return filepath.Join(xdg, "git", "ignore")
+		return filepath.Join(xdg, "git", xdgName)
 	}
 	if !filepath.IsAbs(v) {
 		v = filepath.Join(dir, v)
@@ -460,24 +579,29 @@ func regularFile(p string) bool {
 	return err == nil && st.Mode().IsRegular()
 }
 
-// readIgnoreSource reads one ignore file as data: a regular file (when
-// follow, the path may be a symlink to one — an operator's dotfiles
-// often are), at most wipExcludeMax bytes; "" otherwise.
+// readIgnoreSource reads one ignore/attribute file as data: a regular
+// file (when follow, the path may be a symlink to one — an operator's
+// dotfiles often are; otherwise never through a symlink), opened
+// non-blocking (a FIFO swapped in cannot hang the close) and read through
+// a limit of wipExcludeMax bytes; "" otherwise (or when larger).
 func readIgnoreSource(p string, follow bool) string {
-	st, err := os.Lstat(p)
+	if p == "" {
+		return ""
+	}
+	flags := os.O_RDONLY | syscall.O_NONBLOCK
+	if !follow {
+		flags |= syscall.O_NOFOLLOW
+	}
+	f, err := os.OpenFile(p, flags, 0)
 	if err != nil {
 		return ""
 	}
-	if follow && st.Mode()&os.ModeSymlink != 0 {
-		if st, err = os.Stat(p); err != nil {
-			return ""
-		}
-	}
-	if !st.Mode().IsRegular() || st.Size() > wipExcludeMax {
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
 		return ""
 	}
-	b, err := os.ReadFile(p)
-	if err != nil {
+	b, err := io.ReadAll(io.LimitReader(f, wipExcludeMax+1))
+	if err != nil || len(b) > wipExcludeMax {
 		return ""
 	}
 	return string(b)

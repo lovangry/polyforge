@@ -14,8 +14,13 @@ func TestWIPSliceSplitsTheBudget(t *testing.T) {
 	if s := wipSlice(ctx, 3); s > 20*time.Second || s < 19*time.Second {
 		t.Fatalf("slice of 60s over 3 jobs = %s, want ~20s", s)
 	}
-	if s := wipSlice(ctx, 1); s != wipSliceMax && s > wipSliceMax {
-		t.Fatalf("slice %s exceeds the cap %s", s, wipSliceMax)
+	if s := wipSlice(ctx, 1); s > 60*time.Second || s < 59*time.Second {
+		t.Fatalf("slice of 60s for the last job = %s, want ~60s", s)
+	}
+	long, cancelLong := context.WithTimeout(context.Background(), time.Hour)
+	defer cancelLong()
+	if s := wipSlice(long, 2); s != wipSliceMax {
+		t.Fatalf("slice of 1h over 2 jobs = %s, want the cap %s", s, wipSliceMax)
 	}
 	if s := wipSlice(context.Background(), 2); s != wipSliceMax {
 		t.Fatalf("no deadline: slice %s, want the cap %s", s, wipSliceMax)
