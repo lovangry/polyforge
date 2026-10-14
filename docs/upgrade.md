@@ -109,7 +109,8 @@ correctly on the result, existing rows carry the defaults.
 
 The per-work-item repo inventory (02 §4.6) moves from the
 `wi_repo_inventory` table into one JSON column, `work_items.repo_inventory`
-(`[{name, url, subdir?}]`, NULL = no inventory). Production held 0 rows in
+(`[{"name": "<project repo>"}]`, names only — URLs are resolved from the
+project at claim time; NULL = no inventory). Production held 0 rows in
 the table, so nothing is carried over. The v2.5.0 server reads and writes
 the column, so it does not work until this SQL has run. The file
 `deploy/sql/v2.5.0/upgrade.sql` is the source of truth; its content:

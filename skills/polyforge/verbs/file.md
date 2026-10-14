@@ -31,15 +31,16 @@ remember`, which are hub-wide and need no mapping),
 registry ticket), `--parent ID`, `--attr key=json-value` (repeatable),
 `--repo NAME` (repeatable), `--stdin`.
 
-`--repo NAME` declares the repos this work item works in: name only, the
-URL comes from the project's repos. When a work item declares repos, the
-daemon clones only those at claim (and at every re-claim); without
-`--repo` it clones every repo of the project. The list is frozen at
-create — it cannot be edited; cancel and re-create to change it. 1–8
-names, no duplicates. The `--stdin` body may carry the full form
-`"repo_inventory": [{"name": "...", "url": "...", "subdir": "..."}]`
-(`url` optional for a project repo). A frozen base commit is not
-supported: an entry with `base` is refused.
+`--repo NAME` declares the repos this work item works in: a name of one
+of the project's repos (`pf projects get <project>` lists them). The
+URL always comes from the project's record, looked up when a daemon
+claims the work item. When a work item declares repos, the daemon clones
+only those at claim (and at every re-claim); without `--repo` it clones
+every repo of the project. The list is frozen at create — it cannot be
+edited; cancel and re-create to change it. 1–8 names, no duplicates. A
+`--stdin` body may carry the same list as `"repo_inventory": [{"name":
+"..."}]` (not together with `--repo`). Only names are accepted: an entry
+with `url`, `subdir` or `base` is refused.
 
 `edit` flags (only the flags you pass are sent; `--label` replaces the whole
 set): `--goal`, `--content`, `--label`, `--priority`, `--milestone` (an empty
@@ -71,8 +72,8 @@ assignee, waiting, created (and closed when terminal).
 |---|---|---|
 | `AUTH-401` | api key missing or invalid | The AIHub credential is rejected — check `--api-key` / `PF_API_KEY` / the config's `api_key`. |
 | `CORE-400` | Invalid field or type; a workflow-frontmatter rule failed at create (`detail` names the rule); an `--attr` key hit the execution-state blacklist | The request body is wrong — read `detail` for the exact field/rule and fix the flags. |
-| `CORE-400` `REPO_NOT_IN_PROJECT` | A `--repo` name is not one of the project's repos | Name a repo the project has (`pf projects get <project>` lists them) or give its URL via `--stdin`. |
-| `CORE-400` `INVENTORY_DUPLICATE_NAME` / `INVENTORY_BASE_UNSUPPORTED` | The same repo named twice; a `base` commit given | Drop the duplicate; omit `base` (not supported). |
+| `CORE-400` `REPO_NOT_IN_PROJECT` | A `--repo` name is not one of the project's repos | Name a repo the project has (`pf projects get <project>` lists them); a maintainer adds new repos to the project. |
+| `CORE-400` `INVENTORY_DUPLICATE_NAME` / `INVENTORY_URL_NOT_ALLOWED` / `INVENTORY_SUBDIR_UNSUPPORTED` / `INVENTORY_BASE_UNSUPPORTED` | The same repo named twice; a `--stdin` entry carrying `url`, `subdir` or `base` | Drop the duplicate; give names only. |
 | `CORE-404` | Unknown or invisible work item id, unknown project | No such work item (or you cannot see it) — check the `wi_` id and the project name. |
 | `CORE-409` | Create-time conflict (e.g. duplicate) | The state machine refuses this write — read `detail`. |
 | `CORE-410` | PATCH of a terminal work item (wrapped/failed/cancelled) | This work item is closed and can no longer be edited — file a new one instead. |
