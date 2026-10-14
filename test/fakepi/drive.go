@@ -93,6 +93,9 @@ type planAction struct {
 	// object in this capsule-relative file (written by the Run commands:
 	// the values a real agent learns while running, e.g. a merge commit).
 	OutputFile string `json:"output_file,omitempty"`
+	// NoStartedAt leaves started_at out of the Run commands' evidence
+	// entries (real agents report only argv, exit_code and duration_ms).
+	NoStartedAt bool `json:"no_started_at,omitempty"`
 
 	// Evidence carries extra structured command-evidence entries
 	// (merged with the synthetic one; suppressed entirely by
@@ -332,7 +335,7 @@ func sleepMS(n int) {
 func (d *driveEnv) runEnvelopeAction(act planAction) {
 	// Scripted commands run first, whatever the action does afterwards
 	// (park, crash, envelope).
-	runEvidence := d.runCommands(act.Run)
+	runEvidence := d.runCommands(act.Run, act.NoStartedAt)
 	if act.Silent {
 		// The zero-signal harness: no record at all (UI noise optionally),
 		// no envelope, no exit.
@@ -789,7 +792,7 @@ func (d *driveEnv) writeEnvelope(act planAction, runEvidence []map[string]any) {
 
 // runCommands executes an action's Run commands (see planAction.Run) and
 // answers their command_evidence entries.
-func (d *driveEnv) runCommands(cmds []string) []map[string]any {
+func (d *driveEnv) runCommands(cmds []string, noStartedAt bool) []map[string]any {
 	var ev []map[string]any
 	for _, c := range cmds {
 		started := time.Now()
@@ -808,13 +811,16 @@ func (d *driveEnv) runCommands(cmds []string) []map[string]any {
 			ms = 1
 		}
 		d.journal("run", map[string]any{"cmd": c, "exit_code": code, "output": string(out)})
-		ev = append(ev, map[string]any{
+		entry := map[string]any{
 			"argv":        []any{"sh", "-c", c},
 			"cwd":         d.capsuleRoot(),
 			"exit_code":   code,
 			"duration_ms": ms,
-			"started_at":  started.UTC().Format(time.RFC3339Nano),
-		})
+		}
+		if !noStartedAt {
+			entry["started_at"] = started.UTC().Format(time.RFC3339Nano)
+		}
+		ev = append(ev, entry)
 	}
 	return ev
 }

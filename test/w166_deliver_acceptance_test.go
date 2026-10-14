@@ -216,6 +216,16 @@ func moveMain(bare, file, content string) string {
 		`git -c user.name=o -c user.email=o@invalid commit -q -m "other PR"; git push -q origin HEAD:refs/heads/main; rm -rf "$t"`
 }
 
+// deliverTestBar is the scenarios' test bar: verification runs it in
+// repos/demo and names it in test_bar; deliver re-runs it verbatim.
+const deliverTestBar = `test -s work.txt && git diff --quiet HEAD`
+
+const deliverTestBarCmd = `cd repos/demo && ` + deliverTestBar
+
+func verifiedWithTestBar() map[string]any {
+	return map[string]any{"verdict": "pass", "test_bar": []map[string]any{{"repo": "demo", "command": deliverTestBar}}}
+}
+
 // newDeliverWI files a WI on bundle with an empty plan and answers it and
 // its feature branch (the plan is written once the branch is known).
 func newDeliverWI(t *testing.T, inst *v1Install, goal, bundle string) (string, string) {
@@ -354,7 +364,7 @@ func TestW166DeliverHandResolvedConflictStopsAtHuman(t *testing.T) {
 	origin := w.origin("demo")
 	wi, branch := newDeliverWI(t, inst, "w166: a hand-resolved conflict needs a human", "chore")
 	const qid = "deliver-merge"
-	const testBar = `cd repos/demo && test -s work.txt && git diff --quiet HEAD`
+	testBar := deliverTestBarCmd
 	resolve := dPre("demo") + `git fetch -q origin; if git merge -q --no-edit origin/main; then exit 9; fi; ` +
 		`{ echo "fake agent repo work"; echo "main moved on"; } > work.txt; git add work.txt; git commit -q --no-edit; ` +
 		`git push -q origin "HEAD:refs/heads/$b"; gh pr create --base main --head "$b" --title "w166 conflict" --body-file /dev/null`
@@ -364,7 +374,7 @@ func TestW166DeliverHandResolvedConflictStopsAtHuman(t *testing.T) {
 		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
 			"run": []string{moveMain(origin, "work.txt", "main moved on")}},
 		// the test bar verification records (and deliver must re-run verbatim)
-		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}, "run": []string{testBar}},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": verifiedWithTestBar(), "run": []string{testBar}},
 		// resolves, re-runs the test bar, pushes, opens the PR — and lies about the conflict
 		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
 			"run": literalBranch(branch, resolve, testBar,
@@ -549,5 +559,78 @@ func TestW166DeliverBackToCodeRoundTrip(t *testing.T) {
 	x := readExecution(t, d.capsuleDir(wi))
 	if n, _ := x.RewindStats["count"].(float64); n < 1 {
 		t.Fatalf("no rewind recorded: %+v", x.RewindStats)
+	}
+}
+
+// TestW166DeliverMainMovedTestBarRerunAutoMerges: origin main moved on
+// cleanly; deliver merges it, re-runs verification's test bar after the
+// merge (its evidence carries no started_at, as real agents report it)
+// and auto-merges — the driver accepts the re-run by order alone.
+func TestW166DeliverMainMovedTestBarRerunAutoMerges(t *testing.T) {
+	inst := newV1Install(t)
+	w := newDeliverWorld(t)
+	origin := w.origin("demo")
+	wi, branch := newDeliverWI(t, inst, "w166: main moved, test bar re-run, auto-merge", "chore")
+	inst.setPlanFull(t, wi, []map[string]any{
+		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
+			"run": []string{moveMain(origin, "other.txt", "another PR")}},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": verifiedWithTestBar(),
+			"run": []string{deliverTestBarCmd}, "no_started_at": true},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput, "no_started_at": true,
+			"run": literalBranch(branch, pushAndPR("demo"), deliverTestBarCmd, mergeRecord("demo", ""), assemble)},
+	}, nil)
+	d := startDeliverDaemon(t, inst, w, wi)
+
+	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	branchHead := strings.TrimSpace(gitRun(t, origin, "rev-parse", "refs/heads/"+branch))
+	if p := strings.Fields(gitRun(t, origin, "rev-list", "--parents", "-n", "1", branchHead)); len(p) != 3 {
+		t.Fatalf("the delivered head %s is not deliver's merge of the moved main (parents %v)", branchHead, p)
+	}
+	mainHead := strings.TrimSpace(gitRun(t, origin, "rev-parse", "refs/heads/main"))
+	if p := strings.Fields(gitRun(t, origin, "rev-list", "--parents", "-n", "1", mainHead)); len(p) != 3 || p[2] != branchHead {
+		t.Fatalf("origin main %s is not the PR merge of %s (parents %v)", mainHead, branchHead, p)
+	}
+	for _, e := range d.eventsOf(t, wi) {
+		if e.Kind == "envelope_rejected" {
+			t.Fatalf("an envelope was rejected: %s", e.Body)
+		}
+	}
+}
+
+// TestW166DeliverAlreadyMergedAfterMainMoved: main moved on; the first
+// deliver dispatch merges it, re-runs the test bar, pushes, opens and
+// merges the PR, then dies before reporting. The re-dispatch finds the PR
+// merged, re-runs the test bar (HEAD is not the verified commit) and is
+// accepted without a human: the recorded merge commit merged the local
+// HEAD and the fetched main contains it.
+func TestW166DeliverAlreadyMergedAfterMainMoved(t *testing.T) {
+	inst := newV1Install(t)
+	w := newDeliverWorld(t)
+	origin := w.origin("demo")
+	wi, branch := newDeliverWI(t, inst, "w166: already merged after main moved", "chore")
+	full := literalBranch(branch, pushAndPR("demo"), deliverTestBarCmd, mergeRecord("demo", ""), assemble)
+	inst.setPlanFull(t, wi, []map[string]any{
+		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
+			"run": []string{moveMain(origin, "other.txt", "another PR")}},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": verifiedWithTestBar(), "run": []string{deliverTestBarCmd}},
+		{"do": "envelope", "id": "deliver", "crash": "before", "no_started_at": true, "run": full},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput, "no_started_at": true, "run": full},
+	}, nil)
+	d := startDeliverDaemon(t, inst, w, wi)
+
+	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	if c, m := w.calls("gh pr create"), w.calls("gh pr merge"); c != 1 || m != 1 {
+		t.Fatalf("gh pr create ran %d and gh pr merge %d times, want 1 each", c, m)
+	}
+	for _, e := range d.eventsOf(t, wi) {
+		if e.Kind == "envelope_rejected" {
+			t.Fatalf("an envelope was rejected: %s", e.Body)
+		}
 	}
 }
