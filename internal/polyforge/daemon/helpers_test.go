@@ -113,6 +113,8 @@ type fakeHub struct {
 	// probeFails, when > 0, makes the next N GetWorkItem calls fail with a
 	// transport-class error (a transient hub blip).
 	probeFails int
+	// unknown lists canonical ids GetWorkItem answers CORE-404 for.
+	unknown map[string]bool
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string
@@ -270,6 +272,9 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 		return nil, errors.New("connection refused")
 	}
 	id := h.canonicalID(idOrSlug)
+	if h.unknown[id] {
+		return nil, &api.Error{Code: api.ErrCoreNotFound, Detail: "work item not found"}
+	}
 	st := h.status[id]
 	if st == "" {
 		st = api.StatusRunning

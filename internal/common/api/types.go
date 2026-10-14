@@ -13,6 +13,7 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"strings"
 )
 
@@ -56,13 +57,19 @@ func DisplayName(slug, id string) string {
 // metacharacter and the URL fragment separator) replaced by "-". It names
 // the capsule directory and the `pf ship` branch. Project names never
 // contain "#", so the seq is always the part after the last "-". The id
-// is the answer only when no slug is known.
+// is the answer when no slug is known, or when the slug is not of the
+// "<project>#<seq>" shape (it never becomes a path or ref component
+// unchecked).
 func PathName(slug, id string) string {
-	if slug != "" {
+	if slugShape.MatchString(slug) {
 		return strings.Replace(slug, "#", "-", 1)
 	}
 	return id
 }
+
+// slugShape is the slug a path or ref may be built from: an aihub project
+// name (core/admin.go's charset) and a decimal seq.
+var slugShape = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}#[0-9]+$`)
 
 // WI statuses (02 §4.1).
 const (

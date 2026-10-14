@@ -123,8 +123,10 @@ func (e *SessionVerifyOutageError) Error() string {
 // the truth (in-flight capsules keep their homes across mapping
 // re-adds and across the capsule-name change: a capsule claimed under
 // the old id-named layout keeps its recorded path); a record without it
-// falls back to the CURRENT naming, <project>-<seq> under the project's
-// mapped workspace — an id-named directory is never probed.
+// falls back to the CURRENT naming under the project's mapped workspace:
+// api.PathName of the record's slug, i.e. <project>-<seq> (the id name
+// only for a record that carries no slug). One name is built; nothing
+// else is probed.
 func (r *Runtime) requireMidflightCapsule(wi, project, slug, recordedDir string) error {
 	ws, merr := r.cfg.Mapping.WorkspaceFor(project)
 	if merr != nil {

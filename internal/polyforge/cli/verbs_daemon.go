@@ -404,7 +404,9 @@ var cmdShip = &Command{
 		"  DAEMON-409  the remote branch moved past the sealed commit\n" +
 		"              (never force-pushed over it)\n" +
 		"  DAEMON-512  push preflight failed: no usable local git push identity\n" +
-		"              or the origin is unreachable",
+		"              or the origin is unreachable\n" +
+		"  DAEMON-503  the hub record naming the capsule and branch could not\n" +
+		"              be read (aihub unreachable; retry later)",
 	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {

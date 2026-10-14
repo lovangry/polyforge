@@ -85,10 +85,10 @@ func TestNewClaimCapsuleNamedBySlugAndFoundAfterRestart(t *testing.T) {
 	}
 }
 
-// The restart's fallback for a record without a capsule_dir uses the
-// CURRENT naming (<project>-<seq> from the record's slug) and never
-// probes an id-named directory.
-func TestRestartFallbackUsesSlugNameOnly(t *testing.T) {
+// The restart's fallback for a record without a capsule_dir builds ONE
+// name from the record: <project>-<seq> when the record carries a slug
+// (an id-named directory is then not found), the id name when it does not.
+func TestRestartFallbackBuildsOneNameFromTheRecord(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, _, _ := newTestRuntime(t, hub, sp)
@@ -110,14 +110,19 @@ func TestRestartFallbackUsesSlugNameOnly(t *testing.T) {
 	if err := r.requireMidflightCapsule("wi_fb", "proj", "proj#7", ""); err != nil {
 		t.Fatalf("the slug-named directory must be found: %v", err)
 	}
+	// a record without a slug falls back to the id name
+	if err := r.requireMidflightCapsule("wi_fb", "proj", "", ""); err != nil {
+		t.Fatalf("a slug-less record must fall back to the id-named directory: %v", err)
+	}
 }
 
 // The upgrade: work items claimed under the old id-named layout are
 // recorded with their capsule_dir and no slug. After the upgrade a
 // running one recovers in its old directory, a paused one attaches in
 // its old directory, and a blocked one (no record; the owner's resume
-// re-claims it) is cloned into the new <project>-<seq> directory — the
-// old directory is left untouched, never renamed or probed.
+// re-claims it) is cloned into the new <project>-<seq> directory, its old
+// id-named worktree quarantined TOGETHER with the id-keyed git-dir (one
+// unit, one timestamp — the scene is never split).
 func TestUpgradeOldNamedCapsulesContinue(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -145,8 +150,16 @@ func TestUpgradeOldNamedCapsulesContinue(t *testing.T) {
 	}
 	writeTranscript(t, jobFromRecord(pause))
 	writeStateFile(t, r, []*jobRecord{run, pause})
+	// the blocked one's old scene: an id-named worktree whose .git points
+	// at the id-keyed external git-dir
 	oldBlocked := testCapsuleDir(r, "wi_old_block")
-	if err := os.MkdirAll(oldBlocked, 0o755); err != nil {
+	oldGitDir := r.gitDirFor("wi_old_block")
+	for _, d := range []string{oldBlocked, oldGitDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(oldBlocked, ".git"), []byte("gitdir: "+oldGitDir+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,7 +198,16 @@ func TestUpgradeOldNamedCapsulesContinue(t *testing.T) {
 	if !ok || ji.CapsuleDir != testCapsuleDir(r, "proj-3") {
 		t.Fatalf("the re-claim must use the new name, got %q", ji.CapsuleDir)
 	}
-	if !dirExists(oldBlocked) {
-		t.Fatal("the old id-named directory must be left untouched")
+	if dirExists(oldBlocked) {
+		t.Fatal("the old id-named worktree must be quarantined, not left with a dangling .git pointer")
+	}
+	movedCap, _ := filepath.Glob(oldBlocked + ".quarantined.*")
+	movedGit, _ := filepath.Glob(oldGitDir + ".quarantined.*")
+	if len(movedCap) != 1 || len(movedGit) != 1 ||
+		strings.TrimPrefix(movedCap[0], oldBlocked) != strings.TrimPrefix(movedGit[0], oldGitDir) {
+		t.Fatalf("worktree and git-dir must move aside together under one timestamp: %v %v", movedCap, movedGit)
+	}
+	if !isRegularFile(filepath.Join(ji.CapsuleDir, ".git")) || !dirExists(oldGitDir) {
+		t.Fatal("the new capsule must be a fresh clone with its own externalized git-dir")
 	}
 }

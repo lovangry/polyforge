@@ -1005,7 +1005,19 @@ func (r *Runtime) prepareCapsule(j *job) error {
 	// together, so the fresh clone can never meet a previous session's
 	// HEAD/index (a stale git-dir reused under a fresh worktree made
 	// every later push non-fast-forward).
-	if err := quarantineCapsule(o.CapsuleDir, o.GitDir); err != nil {
+	//
+	// A capsule claimed before the readable naming (polyforge#144) sits at
+	// the id-named sibling capsules/<wi> with the same id-keyed git-dir:
+	// on a re-claim into capsules/<project>-<seq> that old worktree and
+	// the git-dir are the unit, so they move aside together.
+	gitDir := o.GitDir
+	if old := filepath.Join(filepath.Dir(o.CapsuleDir), j.wi); old != o.CapsuleDir && dirExists(old) {
+		if err := quarantineCapsule(old, gitDir); err != nil {
+			return err
+		}
+		gitDir = ""
+	}
+	if err := quarantineCapsule(o.CapsuleDir, gitDir); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {

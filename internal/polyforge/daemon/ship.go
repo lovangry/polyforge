@@ -117,12 +117,18 @@ func (d *Daemon) Ship(ctx context.Context, wi, initiator string) (*shipResponse,
 	// <workspace>/capsules/<project>-<seq> and polyforge/<project>-<seq>.
 	// No record, no ship — never a guess outside the mapping.
 	item, err := d.hub.GetWorkItem(wi)
-	if err != nil || item == nil || item.ProjectName == "" {
+	if err != nil {
 		var ae *api.Error
-		if errors.As(err, &ae) && ae.HTTPStatus() < 500 {
-			return nil, shipErr(api.ErrDaemonNotFound, "work item %s: %v", wi, err)
+		switch {
+		case errors.As(err, &ae) && ae.Code == api.ErrCoreNotFound:
+			return nil, shipErr(api.ErrDaemonNotFound, "work item %s: no such work item at the hub: %s", wi, ae.Detail)
+		case errors.As(err, &ae) && ae.HTTPStatus() < 500:
+			return nil, ae // the hub's own refusal (401/403/...), verbatim
 		}
 		return nil, shipErr(api.ErrDaemonHubUnavailable, "work item %s: the hub record that names its sealed capsule and branch is unavailable (retry later): %v", wi, err)
+	}
+	if item == nil || item.ProjectName == "" {
+		return nil, shipErr(api.ErrDaemonInternal, "work item %s: the hub record names no project, so its sealed capsule and branch cannot be named", wi)
 	}
 	label := api.DisplayName(item.Slug, wi)
 	capName := api.PathName(item.Slug, wi)

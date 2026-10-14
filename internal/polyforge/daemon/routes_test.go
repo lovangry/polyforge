@@ -456,7 +456,7 @@ func TestShip(t *testing.T) {
 		t.Fatalf("re-ship outcome = %+v, want the same branch, reused", sr)
 	}
 
-	// An unknown work item answers DAEMON-404.
+	// A known work item with no local capsule answers DAEMON-404.
 	if _, err := td.client.Ship("wi_ghost"); err == nil {
 		t.Fatal("ship of unknown wi succeeded")
 	} else {
@@ -464,6 +464,31 @@ func TestShip(t *testing.T) {
 		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonNotFound {
 			t.Fatalf("ship unknown error = %v, want DAEMON-404", err)
 		}
+	}
+}
+
+// TestShipHubRecordFailures: ship names the capsule and the branch from
+// the hub record, so an unknown work item (hub CORE-404) answers
+// DAEMON-404 and an unreachable hub answers DAEMON-503 — nothing pushed.
+func TestShipHubRecordFailures(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.hub.mu.Lock()
+	td.hub.unknown = map[string]bool{"wi_nosuch": true}
+	td.hub.mu.Unlock()
+	var ae *api.Error
+	if _, err := td.client.Ship("wi_nosuch"); !errors.As(err, &ae) || ae.Code != api.ErrDaemonNotFound {
+		t.Fatalf("ship of a hub-unknown wi = %v, want DAEMON-404", err)
+	}
+	td.hub.mu.Lock()
+	td.hub.probeFails = 1000 // every read fails: the hub is unreachable
+	td.hub.mu.Unlock()
+	t.Cleanup(func() {
+		td.hub.mu.Lock()
+		td.hub.probeFails = 0
+		td.hub.mu.Unlock()
+	})
+	if _, err := td.client.Ship("wi_x"); !errors.As(err, &ae) || ae.Code != api.ErrDaemonHubUnavailable {
+		t.Fatalf("ship with the hub unreachable = %v, want DAEMON-503", err)
 	}
 }
 

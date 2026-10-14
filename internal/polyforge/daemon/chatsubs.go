@@ -116,7 +116,14 @@ func (s *subStore) Subscribe(chat, wi, slug string, cursor int64) (bool, error) 
 	defer s.mu.Unlock()
 	c := s.chatLocked(chat, true)
 	if sub, ok := c.Subs[wi]; ok {
+		fill := sub.Slug == "" && slug != ""
+		if fill {
+			sub.Slug = slug // a subscription recorded before its slug was known
+		}
 		if !sub.Done {
+			if fill {
+				return false, s.persistLocked()
+			}
 			return false, nil
 		}
 		sub.Done, sub.Notified = false, nil

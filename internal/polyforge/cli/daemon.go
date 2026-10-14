@@ -335,7 +335,8 @@ func (d *DaemonClient) Wrap(wiID, reason string) (json.RawMessage, error) {
 }
 
 // Ship asks the daemon to push a closed WI's sealed capsule commits to
-// each inventory repo's origin as the fixed-name branch polyforge/<id>.
+// each inventory repo's origin as the fixed-name branch
+// polyforge/<project>-<seq>.
 func (d *DaemonClient) Ship(wiID string) (json.RawMessage, error) {
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/ship", "", map[string]any{}, nil)
 }

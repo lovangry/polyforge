@@ -23,6 +23,13 @@ func TestSubStorePersistsAcrossRestart(t *testing.T) {
 	if ch, _ := s.Subscribe("chat_a", "wi_1", "", 99); ch {
 		t.Fatal("re-subscribing an active WI changes nothing and must not move the cursor")
 	}
+	// a re-subscribe that knows the slug fills a subscription recorded without one
+	if _, err := s.Subscribe("chat_a", "wi_1", "proj#1", 99); err != nil {
+		t.Fatal(err)
+	}
+	if subs := s.List("chat_a"); len(subs) != 1 || subs[0].Slug != "proj#1" || subs[0].Cursor != 7 {
+		t.Fatalf("slug fill: %+v", subs)
+	}
 	if err := s.Ack("chat_a", protocol.ChatAck{WI: "wi_1", Cursor: 12, Notified: []string{"needs_input:q-1"}}); err != nil {
 		t.Fatal(err)
 	}
