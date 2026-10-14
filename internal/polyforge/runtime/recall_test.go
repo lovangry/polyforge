@@ -23,13 +23,13 @@ func recallItem(id, typ, excerpt string) RecalledMemory {
 
 // startWithRecall wires a fake recall seam plus a task definition and
 // runs one Start.
-func startWithRecall(t *testing.T, wi string, seam func(query string, topK int) ([]RecalledMemory, error)) (*Runtime, string) {
+func startWithRecall(t *testing.T, wi string, seam func(query, project string, topK int) ([]RecalledMemory, error)) (*Runtime, string) {
 	t.Helper()
 	setGitIdentity(t)
 	hub := newFakeHub()
 	content := "background about the flaky provider retry ladder"
 	hub.items = map[string]*api.WorkItem{wi: {
-		ID: wi, ProjectName: "proj", Goal: "fix the flaky retry ladder",
+		ID: wi, ProjectID: "prj_rc", ProjectName: "proj", Goal: "fix the flaky retry ladder",
 		Content: &content, Status: api.StatusRunning,
 	}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
@@ -58,9 +58,10 @@ func readSnapshot(t *testing.T, path string) recalledSnapshot {
 // hits with bounded excerpts, and no notice.
 func TestRecalledMemoriesSnapshotShape(t *testing.T) {
 	var gotQuery string
+	var gotProject string
 	var gotTopK int
-	_, path := startWithRecall(t, "wi_rc1", func(query string, topK int) ([]RecalledMemory, error) {
-		gotQuery, gotTopK = query, topK
+	_, path := startWithRecall(t, "wi_rc1", func(query, project string, topK int) ([]RecalledMemory, error) {
+		gotQuery, gotProject, gotTopK = query, project, topK
 		return []RecalledMemory{
 			recallItem("mem_1", "experience.debug", "first lesson text"),
 			recallItem("mem_2", "rule.process", "second lesson text"),
@@ -76,6 +77,11 @@ func TestRecalledMemoriesSnapshotShape(t *testing.T) {
 	}
 	if snap.Query != gotQuery {
 		t.Fatalf("snapshot query %q != seam query %q", snap.Query, gotQuery)
+	}
+	// B5 daemon half: the recall must be scoped to the work item's own
+	// project, not to everything the daemon credential can read.
+	if gotProject != "prj_rc" {
+		t.Fatalf("recall must carry the work item's project id: got %q, want prj_rc", gotProject)
 	}
 	if gotTopK != 10 || snap.TopK != 10 {
 		t.Fatalf("top_k: seam saw %d, snapshot %d (default must be 10)", gotTopK, snap.TopK)
@@ -96,7 +102,7 @@ func TestRecalledMemoriesSnapshotShape(t *testing.T) {
 // list plus a notice — never a failed spawn, never a missing file.
 func TestRecalledMemoriesDegradations(t *testing.T) {
 	// (a) search error → empty items + failure notice.
-	_, path := startWithRecall(t, "wi_rc2", func(string, int) ([]RecalledMemory, error) {
+	_, path := startWithRecall(t, "wi_rc2", func(string, string, int) ([]RecalledMemory, error) {
 		return nil, errors.New("aihub unreachable")
 	})
 	snap := readSnapshot(t, path)
@@ -108,7 +114,7 @@ func TestRecalledMemoriesDegradations(t *testing.T) {
 	}
 
 	// (b) zero hits → empty items + the no-hit notice.
-	_, path = startWithRecall(t, "wi_rc3", func(string, int) ([]RecalledMemory, error) {
+	_, path = startWithRecall(t, "wi_rc3", func(string, string, int) ([]RecalledMemory, error) {
 		return []RecalledMemory{}, nil
 	})
 	snap = readSnapshot(t, path)
