@@ -333,22 +333,10 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 			return "", &api.Error{Code: api.ErrDaemonInternal, Detail: err.Error()}
 		}
 		return ResumeAttached, nil
-	case api.StatusRunning:
-		// paused locally but running at the hub under our session (a
-		// pause close whose SessionEnd never landed): the same self-heal
-		// the restart runs — back through the recovery engine, no attach
-		// needed (the hub already wants it running).
-		if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
-			r.blockUnrecoverable(ctx, rec, err)
-			return "", &api.Error{Code: api.ErrDaemonConflict, Detail: err.Error()}
-		}
-		if err := r.restartRunning(ctx, rec); err != nil {
-			return "", &api.Error{Code: api.ErrDaemonInternal, Detail: err.Error()}
-		}
-		return ResumeAttached, nil
 	default:
-		// queued/blocked/terminal under our session: not this door's
-		// business — the record is kept for the next restart's verdict.
+		// any other hub status under our session (running, queued,
+		// blocked, terminal): not this door's business — the record is
+		// kept for the next restart's reconciliation verdict.
 		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("aihub says %s while the session still holds the work item; the record is kept and the next daemon start reconciles it", v.Status)}
 	}
 }
@@ -697,13 +685,14 @@ const (
 	ResumeAlreadyLive = "already_live"
 )
 
-// Recovery causes that are lifecycle events, exempt from the storm ledger.
+// Recovery causes that are lifecycle events, exempt from the
+// consecutive-failures ledger.
 const (
 	causeDaemonRestart  = "daemon_restart"
 	causeOperatorAttach = "operator daemon shutdown"
 	// causeOperatorResume is the live-holder operator resume
 	// (wi_seWTgHeKtaa8): a deliberate stop's deliberate continuation —
 	// a lifecycle event like the operator attach, never a failure the
-	// storm ledger should count.
+	// consecutive-failures ledger should count.
 	causeOperatorResume = "operator resume"
 )

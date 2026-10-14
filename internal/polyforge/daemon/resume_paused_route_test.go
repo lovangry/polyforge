@@ -10,9 +10,8 @@ package daemon
 //   - a missing mid-flight capsule answers BLOCKED at aihub (the typed
 //     blockUnrecoverable path, never the "reattaches at next start"
 //     copy) and the typed refusal names the remediation;
-//   - the happy path attaches the retained session and continues the
-//     current step in place (attach recorded, state back to running,
-//     one fresh dispatch).
+//   - a repeated resume over a record already running again answers
+//     already_live without a second attach.
 
 import (
 	"errors"
@@ -114,44 +113,18 @@ func TestResumePausedRouteMissingCapsuleBlocks(t *testing.T) {
 	})
 }
 
-// TestResumePausedRouteAttachesInPlace: the happy path at the route
-// seam — with the flag cleared, the retained session is re-attached and
-// the current step continues in place (state back to running, one fresh
-// dispatch), and the answer reports the attached outcome.
-func TestResumePausedRouteAttachesInPlace(t *testing.T) {
-	td := newTestDaemon(t, func(c *Config) {
-		c.DrainInterval = time.Hour
-	})
-	pauseForResume(t, td, "wi_ok")
-	spawns := td.spawner.callCount()
-	clearHubCleanPause(td)
-	res, err := td.client.ResumePaused("wi_ok")
-	if err != nil {
-		t.Fatalf("resume-paused: %v", err)
-	}
-	if !res.Resumed || res.Outcome != "attached" {
-		t.Fatalf("answer = %+v, want the attached outcome", res)
-	}
-	if got := attachCount(td.hub); got != 1 {
-		t.Fatalf("session-attach calls = %d, want exactly one (the re-attach)", got)
-	}
-	if got := td.spawner.callCount(); got != spawns+1 {
-		t.Fatalf("spawns after resume = %d, want %d (the continued current step)", got, spawns+1)
-	}
-	waitState(t, td, "wi_ok", "running")
-}
-
-// TestResumePausedRouteIdempotentWhileRunning: a second resume over a
-// record that is already running again answers already_live and does
-// not attach a second time.
+// TestResumePausedRouteIdempotentWhileRunning: the first resume answers
+// attached (the in-place path itself is the B6 repro's); a second resume
+// over the record now running again answers already_live and does not
+// attach a second time.
 func TestResumePausedRouteIdempotentWhileRunning(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) {
 		c.DrainInterval = time.Hour
 	})
 	pauseForResume(t, td, "wi_twice")
 	clearHubCleanPause(td)
-	if _, err := td.client.ResumePaused("wi_twice"); err != nil {
-		t.Fatalf("first resume: %v", err)
+	if res, err := td.client.ResumePaused("wi_twice"); err != nil || res.Outcome != "attached" {
+		t.Fatalf("first resume: %+v, %v (want the attached outcome)", res, err)
 	}
 	waitState(t, td, "wi_twice", "running")
 	res, err := td.client.ResumePaused("wi_twice")

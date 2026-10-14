@@ -248,7 +248,7 @@ func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 // persisted queue's origin=auto entries must not re-enter a machine the
 // operator turned auto OFF on — the same rule the live auto-off purge
 // applies (v2-converge §5), replayed at restart (restartsignal.go).
-// An explicit (cli) entry replays as before.
+// An explicit (chat-origin) entry replays as before.
 func TestSubmitReplayDropsAutoOriginEntriesWhenAutoOff(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -265,7 +265,7 @@ func TestSubmitReplayDropsAutoOriginEntriesWhenAutoOff(t *testing.T) {
 		// entry and one explicit entry, both still queued at aihub.
 		blob, _ := json.Marshal(submitQueueState{Version: 1, Entries: []qEntry{
 			{WorkItemID: wiAuto, Intent: "claim", SubmittedAt: now, EnqueuedAt: now, Origin: runtime.Origin{Kind: runtime.OriginAuto}},
-			{WorkItemID: wiCLI, Intent: "claim", SubmittedAt: now, EnqueuedAt: now, Origin: runtime.Origin{Kind: runtime.OriginCLI}},
+			{WorkItemID: wiCLI, Intent: "claim", SubmittedAt: now, EnqueuedAt: now, Origin: runtime.Origin{Kind: runtime.OriginChat}},
 		}})
 		if err := os.WriteFile(filepath.Join(c.DataDir, submitQueueFile), blob, 0o600); err != nil {
 			t.Fatal(err)
