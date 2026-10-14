@@ -25,14 +25,20 @@
 # `docker save | ssh docker load`: the server never holds GitHub credentials
 # and never builds the release image. Downtime is SECONDS: every backup step
 # runs ONLINE (the service keeps running); the new image is loaded next to the
-# running container; only the final `docker compose up -d --no-deps aihub`
-# (container recreate) interrupts service. Images are never built by compose,
+# running container; only the SWITCH WINDOW interrupts service: the old
+# container stops (graceful drain), the version's UPGRADE SQL is applied
+# (deploy/sql/<TAG>/{upgrade,rollback,probe}.sql fetched from the target git
+# tag, probe-guarded run-once, ONE transaction per script), and the new
+# container starts. Images are never built by compose,
 # so a recreate can no longer silently revert the binary to an older image.
 #
 #   0 preflight   tag, release assets + SHA256SUMS (covers the binaries and
 #                 aihub-image.digest), docker pull ghcr.io/silgrid/aihub:<tag> on
 #                 this machine, repo digest == aihub-image.digest, /aihub -version,
-#                 ssh, container, compose file, versions, disk space
+#                 ssh, container, compose file, versions, disk space; the
+#                 upgrade-SQL plan: server python3 SQLite >= 3.35 gate, then the
+#                 structural probe per version in (old, tag] with a deploy/sql dir
+#                 (read-only; the probes decide what the window will apply)
 #   1 baseline    read-only: integrity_check, table row counts, file counts, sizes
 #   2 save old binary   docker cp <container>:/aihub -> <root>/aihub-bin-<old>-<TS>;
 #                       rollback image polyforge/aihub:<old>: if the old release has
@@ -47,8 +53,11 @@
 #                       the image ID on the server == the verified local one, tag it
 #                       polyforge/aihub:<tag>, back up and edit ONLY the aihub service
 #                       of the compose file (image, no build:, stop_grace_period),
-#                       compose config -q, compose up -d --no-deps aihub, poll HTTP,
-#                       print downtime
+#                       compose config -q, then the SWITCH WINDOW: compose stop
+#                       $AIHUB_SERVICE (drain <= DRAIN_SECS) -> apply the upgrade SQL
+#                       of every not-yet-applied version in (old, tag] (ascending,
+#                       one transaction each) -> compose up -d --no-deps aihub ->
+#                       poll HTTP, print downtime
 #   7 verify      image + version, logs panic/fatal, counts >= baseline, pf smoke
 #   8 rollback    concrete commands printed; final summary
 #
@@ -58,9 +67,14 @@
 #   * Server-side deploy lock (see "Deploy lock" below): two deploys can not
 #     mutate the server at once; held from step 2 through verification/rollback,
 #     and the lock session is checked before every long step and before the swap.
-#   * AUTO-ROLLBACK: if the swap or the post-swap verification fails, the script
-#     itself points the compose file back at the previous image, recreates the
-#     service and verifies that the OLD version answers. Data restore stays
+#   * AUTO-ROLLBACK: if anything from the switch window on fails (the upgrade
+#     SQL included), the script first runs the rollback.sql of every version
+#     whose upgrade SQL was applied in THIS run (descending version order, one
+#     transaction each) - the old binary must never see the post-upgrade
+#     schema - then points the compose file back at the previous image,
+#     recreates the service and verifies that the OLD version answers. A
+#     FAILED upgrade script was rolled back by its own transaction, so nothing
+#     of it is applied and no rollback SQL runs for it. Data restore stays
 #     manual (it needs a stop) - the commands are printed.
 #
 # Usage:
@@ -177,15 +191,20 @@ KEY_TABLES="work_items memories projects users api_keys machines"
 ASSET_AIHUB="aihub-linux-amd64"
 ASSET_PF="pf-linux-amd64"
 ASSET_DIGEST="aihub-image.digest"
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pf-deploy.XXXXXX")"
-SWAPPED=""   # the compose up was attempted (service may run the new image)
+SWAPPED=""   # the switch window was entered (the service is interrupted)
 ROLLING=""   # the automatic rollback is running
 FINISHED=""  # the deploy completed and verified
 LOCK_PID=""
 STEP="0"
-OLDVER=""; OLDIMG=""; NEWIMG=""; COMPOSE_BAK=""; DOCKERFILE=""; TS=""; BIN_SAVED=""; SRV_BACKUP=""; LOCAL_BACKUP=""
+OLDVER=""; OLDIMG=""; NEWIMG=""; COMPOSE_BAK=""; DOCKERFILE=""; BIN_SAVED=""; SRV_BACKUP=""; LOCAL_BACKUP=""
 NEW_LOCAL_ID=""; OLD_LOCAL_ID=""; OLD_HAS_GHCR=""
+SQLVERS=""        # release tags in (OLDVER, TAG] carrying deploy/sql/<tag>/, ascending
+SQLTODO=""        # the subset whose probe reports not-yet-applied (applied in the window)
+APPLIED_VERS=""   # versions whose upgrade.sql was applied THIS run (rollback.sql targets)
+SQLSRV=""         # server-side staging dir of the SQL files (filled before the window)
 
 rssh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$AIHUB_HOST" "$@"; }
 # check_lock [restore-compose]: the lock session (background ssh) must still be
@@ -217,7 +236,7 @@ cleanup() { release_lock; rm -rf "$WORK"; }
 on_exit() {
   rc=$?
   if [ -n "$SWAPPED" ] && [ -z "$FINISHED" ] && [ -z "$ROLLING" ]; then
-    echo "deploy: unexpected exit (status $rc) after the swap - rolling back" >&2
+    echo "deploy: unexpected exit (status $rc) after the switch window began - rolling back" >&2
     # auto_rollback always exits: run it in a subshell so that the cleanup below
     # (lock release, $WORK removal) still happens; its exit code (10 rolled back,
     # 11 rollback failed) is the outcome that is reported.
@@ -272,10 +291,21 @@ rollback_text() {
   ssh $AIHUB_HOST docker exec $AIHUB_CONTAINER /aihub -version   # must print $OLDVER
   # (the pre-deploy compose file is kept as $COMPOSE_BAK, but its image/build keys
   #  point at the stale v1.0.0 image - do NOT use it to roll back the binary)
+  # the schema: if upgrade SQL was applied this run, deploy.sh already ran the
+  # rollback.sql of every applied version (descending, one transaction each)
+  # BEFORE recreating the old image - the old binary must never see the
+  # post-upgrade schema; if THAT step failed, run the same files by hand,
+  # newest version first, before starting the old version (see the lines
+  # printed after this block when they apply)
   # OPTIONAL, ONLY if the data is damaged (this needs a STOP = real downtime; the backup's
   # aihub.db is the consistent snapshot):
   ssh $AIHUB_HOST "docker stop $AIHUB_CONTAINER && mv $AIHUB_DATA $AIHUB_DATA.failed-$TS && cp -a $SRV_BACKUP $AIHUB_DATA && docker start $AIHUB_CONTAINER"
 EOF
+  if [ -n "$APPLIED_VERS" ] && [ -n "$SQLSRV" ]; then
+    for v in $APPLIED_VERS; do
+      echo "  ssh $AIHUB_HOST \"python3 - '$AIHUB_DATA/aihub.db' '$SQLSRV/$v-rollback.sql'\"   # rollback SQL of $v (if it did not run yet)"
+    done
+  fi
 }
 
 # rollback_failed_report: loud manual instructions when the automatic rollback failed.
@@ -315,9 +345,14 @@ auto_rollback() {
   fi
   {
     echo
-    echo "deploy: !!! the new version FAILED after the swap: $1"
+    echo "deploy: !!! the deploy FAILED in the switch window: $1"
     echo "deploy: !!! AUTOMATIC ROLLBACK to $OLDVER ($OLDIMG) starting"
   } >&2
+  # the rollback SQL of every version applied this run runs FIRST (descending,
+  # one transaction each): the old binary must never see the post-upgrade
+  # schema. A failed upgrade script applied nothing, so when nothing was
+  # applied this run this is exactly today's rollback.
+  sql_rollback_phase
   rssh "sed -i 's|image: $NEWIMG|image: $OLDIMG|' '$COMPOSE_FILE'" || die "rollback: could not point $COMPOSE_FILE back at $OLDIMG"
   swap_up || die "rollback: docker compose up of $OLDIMG failed or no HTTP answer within ${UP_WAIT_SECS}s (\"$down\")"
   img_now="$(dk inspect -f '{{.Config.Image}}' "$AIHUB_CONTAINER" 2>/dev/null || true)"
@@ -330,6 +365,11 @@ auto_rollback() {
     echo "#############################################################################"
     echo "reason: $1"
     echo "verified: container image $OLDIMG, version $OLDVER answers, HTTP up (${down}s)"
+    if [ -n "$APPLIED_VERS" ]; then
+      echo "schema: rolled back by the rollback.sql of $(printf '%s ' $APPLIED_VERS)(applied this run, descending order)"
+    else
+      echo "schema: untouched by the rollback (no upgrade SQL was applied this run)"
+    fi
     echo "data: untouched by the rollback; backups at $AIHUB_HOST:$SRV_BACKUP and $LOCAL_BACKUP."
     echo "only if the DATA is damaged (needs a STOP = real downtime), by hand:"
     echo "  ssh $AIHUB_HOST \"docker stop $AIHUB_CONTAINER && mv $AIHUB_DATA $AIHUB_DATA.failed-$TS && cp -a $SRV_BACKUP $AIHUB_DATA && docker start $AIHUB_CONTAINER\""
@@ -346,6 +386,206 @@ vcmp() {
     for (i = 1; i <= 3; i++) { p = x[i] + 0; q = y[i] + 0
       if (p < q) { print -1; exit } if (p > q) { print 1; exit } }
     print 0 }'
+}
+
+# ---- upgrade SQL (deploy/sql/<TAG>/{upgrade,rollback,probe}.sql) ----
+# Sourced per version from that version's git tag, with a working-tree
+# fallback, exactly like the legacy Dockerfile fetch. One directory per
+# release tag; no dir -> that release has no schema change -> the window is
+# exactly today's (no SQL step).
+
+# sql_candidate_versions: release tags strictly between the running version
+# (exclusive) and the target (inclusive), ascending. A same-version
+# re-deploy (--force) considers the target itself - the probe decides, so a
+# re-deploy of an already-upgraded version is a no-op for the SQL.
+sql_candidate_versions() {
+  if [ "$OLDVER" = "$TAG" ]; then printf '%s\n' "$TAG"; return 0; fi
+  git -C "$SCRIPT_DIR" tag -l 'v*' | awk -v old="${OLDVER#v}" -v new="${TAG#v}" '
+    function num(s,  a) { sub(/[-+].*/, "", s); split(s, a, "."); return a[1] * 1000000 + a[2] * 1000 + a[3] + 0 }
+    { v = $0; sub(/^v/, "", v)
+      if (v !~ /^[0-9]+\.[0-9]+\.[0-9]+/) next
+      n = num(v)
+      if (n > num(old) && n <= num(new)) printf "%012d %s\n", n, v }' \
+    | sort -n | awk '{print "v" $2}'
+}
+
+# sql_fetch <ver> <file> <dest>: copy the version's SQL file into <dest>
+# from its git tag, falling back to the working tree. Returns 1 when the
+# version has no such file (no dir -> no schema change for it).
+sql_fetch() {
+  sv="$1"; sf="$2"; dst="$3"
+  if git -C "$SCRIPT_DIR" show "$sv:deploy/sql/$sv/$sf" >"$dst" 2>/dev/null && [ -s "$dst" ]; then
+    return 0
+  fi
+  if [ -s "$SCRIPT_DIR/../deploy/sql/$sv/$sf" ]; then
+    cp "$SCRIPT_DIR/../deploy/sql/$sv/$sf" "$dst"
+    return 0
+  fi
+  rm -f "$dst"
+  return 1
+}
+
+# sql_version_gate: the server's python3 must link a SQLite >= 3.35 (the
+# first release with ALTER TABLE ... DROP COLUMN). Refused in preflight,
+# before the window, nothing changed. Runs whenever any version in range
+# ships SQL (even when only intermediate versions do).
+sql_version_gate() {
+  ver="$(printf 'import sqlite3\nprint(sqlite3.sqlite_version)\n' | rssh python3 - 2>/dev/null || true)"
+  n="$(printf '%s\n' "$ver" | awk '{split($1, a, "."); print a[1] * 1000000 + a[2] * 1000 + a[3] + 0}')"
+  [ "$n" -ge 3035000 ] || die "the python3 on $AIHUB_HOST links SQLite \"$ver\" - 3.35 or newer is required (DROP COLUMN) for the upgrade SQL; refusing BEFORE the window (nothing was changed)"
+  note "server python3 sqlite3: $ver (>= 3.35: DROP COLUMN supported)"
+}
+
+# The upgrade/rollback SQL runner (python3, stdlib sqlite3 - the same
+# pattern as the sqlite probes; the sqlite3 CLI is NOT used). One script =
+# ONE transaction: a failure rolls the whole script back, so a failed
+# script applies nothing. The SQL file must already sit on the server
+# (staged in $SQLSRV before the window).
+# shellcheck disable=SC2016
+PYRUNSQL='
+import sqlite3, sys
+db, path = sys.argv[1], sys.argv[2]
+sql = open(path).read()
+stmts, buf = [], ""
+for line in sql.splitlines(True):
+    buf += line
+    if sqlite3.complete_statement(buf):
+        if buf.strip():
+            stmts.append(buf)
+        buf = ""
+if buf.strip():
+    sys.exit("incomplete final SQL statement in " + path)
+if not stmts:
+    sys.exit("no SQL statements in " + path)
+conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+try:
+    conn.execute("BEGIN IMMEDIATE")
+    for s in stmts:
+        conn.execute(s)
+    conn.commit()
+except Exception as e:
+    try:
+        conn.execute("ROLLBACK")
+    except Exception:
+        pass
+    print("SQL-FAILED:", e)
+    sys.exit(1)
+print("SQL-OK %d statements" % len(stmts))
+'
+
+# The probe runner (read-only: the live db is opened mode=ro while the
+# service still runs). Prints "PROBE <value>": the probe.sql contract is
+# that its FINAL statement answers one value - 0 = already applied (skip
+# the version), nonzero = apply it. No bookkeeping table is written.
+# shellcheck disable=SC2016
+PYPROBE='
+import sqlite3, sys
+db, path = sys.argv[1], sys.argv[2]
+sql = open(path).read()
+stmts, buf = [], ""
+for line in sql.splitlines(True):
+    buf += line
+    if sqlite3.complete_statement(buf):
+        if buf.strip():
+            stmts.append(buf)
+        buf = ""
+if buf.strip():
+    sys.exit("incomplete final SQL statement in " + path)
+if not stmts:
+    sys.exit("no SQL statements in " + path)
+conn = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=30)
+val = None
+for s in stmts:
+    val = conn.execute(s).fetchone()
+if not val or val[0] is None:
+    sys.exit("probe returned no value: " + path)
+print("PROBE", val[0])
+'
+
+# run_sql <remote-file>: apply one SQL script as ONE transaction against
+# the live db (called only inside the window or the rollback, when the
+# container is stopped).
+run_sql() {
+  printf '%s\n' "$PYRUNSQL" | rssh python3 - "$AIHUB_DATA/aihub.db" "$1"
+}
+
+# sql_plan (step 0, read-only on the db): fetch every candidate version's
+# SQL files, run the >= 3.35 gate, stage the files on the server and probe
+# which versions are still un-applied. Sets SQLVERS/SQLTODO/SQLSRV. In
+# dry-run nothing is staged (strictly read-only): only the candidates are
+# printed; the probes run at deploy time.
+sql_plan() {
+  for v in $(sql_candidate_versions); do
+    if sql_fetch "$v" upgrade.sql "$WORK/sql-$v-upgrade.sql"; then
+      sql_fetch "$v" rollback.sql "$WORK/sql-$v-rollback.sql" \
+        || die "deploy/sql/$v/ has upgrade.sql but no rollback.sql - incomplete SQL dir, refusing (nothing was changed)"
+      sql_fetch "$v" probe.sql "$WORK/sql-$v-probe.sql" \
+        || die "deploy/sql/$v/ has upgrade.sql but no probe.sql - incomplete SQL dir, refusing (nothing was changed)"
+      SQLVERS="$SQLVERS$v
+"
+    fi
+  done
+  [ -n "$SQLVERS" ] || { note "upgrade SQL: none (no deploy/sql dir in ($OLDVER, $TAG]) - the window is exactly today's"; return 0; }
+  sql_version_gate
+  if [ -n "$DRY" ]; then
+    note "upgrade SQL candidates (dry-run - the probes run at deploy time): $(printf '%s ' $SQLVERS)"
+    return 0
+  fi
+  SQLSRV="$SRV_ROOT/aihub-sql-$TS"
+  rssh "mkdir -p '$SQLSRV'" || die "cannot create the SQL staging dir $SQLSRV on $AIHUB_HOST"
+  for v in $SQLVERS; do
+    for f in upgrade rollback probe; do
+      scp -o BatchMode=yes "$WORK/sql-$v-$f.sql" "$AIHUB_HOST:$SQLSRV/$v-$f.sql" >"$WORK/scpsql-$v-$f.log" 2>&1 \
+        || die "scp of deploy/sql/$v/$f.sql to $AIHUB_HOST failed: $(tail -2 "$WORK/scpsql-$v-$f.log")"
+    done
+  done
+  for v in $SQLVERS; do
+    out="$(printf '%s\n' "$PYPROBE" | rssh python3 - "$AIHUB_DATA/aihub.db" "$SQLSRV/$v-probe.sql" 2>&1)" \
+      || die "probe of deploy/sql/$v/probe.sql failed: $out"
+    case "$out" in
+      "PROBE 0")
+        note "upgrade SQL $v: already applied (probe) - skipped" ;;
+      "PROBE "[1-9]*)
+        note "upgrade SQL $v: not yet applied (probe: $(printf '%s' "$out" | sed 's/^PROBE //')) - runs in the window"
+        SQLTODO="$SQLTODO$v
+" ;;
+      *)
+        die "probe of deploy/sql/$v/probe.sql answered \"$out\" - refusing (nothing was changed)" ;;
+    esac
+  done
+}
+
+# apply_upgrade_sql (inside the window): run the pending versions'
+# upgrade.sql in ascending order, one transaction each; a failure dies into
+# the auto-rollback (a failed script applied nothing of its own; versions
+# applied EARLIER this run are rolled back by their rollback.sql).
+apply_upgrade_sql() {
+  for v in $SQLTODO; do
+    note "upgrade SQL: applying deploy/sql/$v/upgrade.sql (one transaction)"
+    if ! run_sql "$SQLSRV/$v-upgrade.sql" >"$WORK/sql-$v.log" 2>&1; then
+      die "upgrade SQL of $v failed (its transaction rolled back, nothing of it applied): $(tail -3 "$WORK/sql-$v.log")"
+    fi
+    grep -q '^SQL-OK' "$WORK/sql-$v.log" || die "upgrade SQL of $v did not confirm: $(tail -3 "$WORK/sql-$v.log")"
+    APPLIED_VERS="$APPLIED_VERS$v
+"
+    note "upgrade SQL of $v applied: $(tail -1 "$WORK/sql-$v.log")"
+  done
+}
+
+# sql_rollback_phase (auto-rollback only): run the rollback.sql of every
+# version applied THIS run, descending, one transaction each, BEFORE the old
+# image is recreated - the old binary must never see the post-upgrade schema.
+# Nothing applied this run -> no rollback SQL at all (today's rollback).
+sql_rollback_phase() {
+  [ -n "$APPLIED_VERS" ] || return 0
+  desc="$(printf '%s\n' "$APPLIED_VERS" | awk '{a[NR] = $0} END {for (i = NR; i >= 1; i--) print a[i]}')"
+  for v in $desc; do
+    note "rollback SQL: applying deploy/sql/$v/rollback.sql (one transaction)"
+    if ! run_sql "$SQLSRV/$v-rollback.sql" >"$WORK/rbsql-$v.log" 2>&1; then
+      die "rollback SQL of $v failed: $(tail -3 "$WORK/rbsql-$v.log")"
+    fi
+    grep -q '^SQL-OK' "$WORK/rbsql-$v.log" || die "rollback SQL of $v did not confirm: $(tail -3 "$WORK/rbsql-$v.log")"
+  done
 }
 
 # The sqlite probe (python3, stdlib only). args: <db> <ro|copy>
@@ -581,12 +821,28 @@ else:
     open(path + ".tmp", "w").write(text)
     os.replace(path + ".tmp", path)
 '
+# window_stop: gracefully stop the old container (drain <= DRAIN_SECS) and
+# answer the server-side epoch when the stop began - the downtime clock
+# (old-exit -> new-HTTP covers stop + upgrade SQL + up + poll).
+# shellcheck disable=SC2016
+STOP_SNIP='
+cf="$1"; proj="$2"; svc="$3"; grace="$4"
+t0=$(date +%s.%N)
+docker compose -f "$cf" -p "$proj" stop -t "$grace" "$svc" </dev/null >/dev/null 2>&1 || { echo "STOP-FAILED"; exit 3; }
+awk "BEGIN{printf \"%.1f\\n\", $t0}"
+'
+window_stop() {
+  stopped_at="$(printf '%s\n' "$STOP_SNIP" | rssh sh -s -- "$COMPOSE_FILE" "$COMPOSE_PROJECT" "$AIHUB_SERVICE" "$DRAIN_SECS")"
+}
+
 # swap_up: compose up -d --no-deps <svc> on the server, then poll HTTP; sets $down
-# (seconds, or the failure token). Used by the deploy and by the rollback.
+# (seconds from the given t0 - the window start on the deploy path, the up
+# itself on the rollback path - or the failure token). Used by the deploy and
+# by the rollback.
 # shellcheck disable=SC2016
 RESTART_SNIP='
-cf="$1"; proj="$2"; svc="$3"; port="$4"; limit="$5"
-t0=$(date +%s.%N)
+cf="$1"; proj="$2"; svc="$3"; port="$4"; limit="$5"; t0="$6"
+[ -n "$t0" ] || t0=$(date +%s.%N)
 docker compose -f "$cf" -p "$proj" up -d --no-deps "$svc" </dev/null >/dev/null 2>&1 || { echo "UP-FAILED"; exit 3; }
 while :; do
   code=$(curl -s -m 1 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port/" </dev/null 2>/dev/null || true)
@@ -600,7 +856,7 @@ awk "BEGIN{printf \"%.1f\\n\", $t1 - $t0}"
 '
 swap_up() {
   down=""
-  down="$(printf '%s\n' "$RESTART_SNIP" | rssh sh -s -- "$COMPOSE_FILE" "$COMPOSE_PROJECT" "$AIHUB_SERVICE" "$AIHUB_PORT" "$UP_WAIT_SECS")"
+  down="$(printf '%s\n' "$RESTART_SNIP" | rssh sh -s -- "$COMPOSE_FILE" "$COMPOSE_PROJECT" "$AIHUB_SERVICE" "$AIHUB_PORT" "$UP_WAIT_SECS" "${1:-}")"
 }
 
 compose_edit() { printf '%s\n' "$PYCOMPOSE" | rssh python3 - "$COMPOSE_FILE" "$AIHUB_SERVICE" "$NEWIMG" "$DRAIN_SECS" "$1"; }
@@ -655,6 +911,12 @@ elif [ "$cmp" = "-1" ]; then
   note "WARNING: downgrade $OLDVER -> $TAG (--force)"
 fi
 
+# The upgrade-SQL plan (polyforge#154): which versions in (OLDVER, TAG] ship
+# a deploy/sql dir, and - outside dry-run - which of them the structural
+# probe reports as not yet applied (those run inside the switch window).
+# Read-only on the db; nothing of the service is touched.
+sql_plan
+
 # The rollback image: the old release's GHCR image when it has one (a release
 # that published aihub-image.digest), else the legacy build from the saved old
 # binary (releases before the GHCR image existed, e.g. v2.2.0).
@@ -706,7 +968,6 @@ for d in aihub.db aihub.db-wal memory git; do
 done
 
 # ------------------------------------------------------- plan (2-8)
-TS="$(date -u +%Y%m%dT%H%M%SZ)"
 BIN_SAVED="$SRV_ROOT/aihub-bin-$OLDVER-$TS"
 SRV_BACKUP="$SRV_ROOT/aihub-backup-$OLDVER-$TS"
 LOCAL_BACKUP="$BACKUP_ROOT/aihub-backup-$OLDVER-$TS"
@@ -720,7 +981,14 @@ else
 fi
 
 echo
-echo "== plan for steps 2-8 (ONLINE backup; the only interruption is one container recreate) =="
+echo "== plan for steps 2-8 (ONLINE backup; the only interruption is the switch window: old container stop -> upgrade SQL -> new container start) =="
+if [ -n "$SQLTODO" ]; then
+  SQL_LINE=": $(printf '%s ' $SQLTODO)(ascending, one transaction each)"
+elif [ -n "$DRY" ] && [ -n "$SQLVERS" ]; then
+  SQL_LINE=": candidates $(printf '%s ' $SQLVERS)(the probes run at deploy time)"
+else
+  SQL_LINE=": none (no pending deploy/sql in ($OLDVER, $TAG])"
+fi
 cat <<EOF
 2. save old binary   ssh $AIHUB_HOST docker cp $AIHUB_CONTAINER:/aihub $BIN_SAVED
                      rollback image $OLDIMG (if absent on the server): $OLD_PLAN; verify -version == $OLDVER
@@ -735,8 +1003,8 @@ cat <<EOF
                      docker save $GHCR_IMAGE:$TAG | ssh $AIHUB_HOST docker load  (service keeps running); server image ID == $NEW_LOCAL_ID
                      docker tag on the server -> $NEWIMG ; verify git, curl in it
                      back up $COMPOSE_FILE -> $COMPOSE_BAK ; edit ONLY service $AIHUB_SERVICE (planned diff below) ; docker compose config -q (failure -> backup restored, stop)
-                     docker compose -f $COMPOSE_FILE -p $COMPOSE_PROJECT up -d --no-deps $AIHUB_SERVICE ; poll http://127.0.0.1:$AIHUB_PORT/ every 0.2s ; print downtime (warn > ${MAX_DOWNTIME_SECS}s, fail if not up in ${UP_WAIT_SECS}s)
-   (a failure from the swap on AUTO-ROLLS BACK to $OLDIMG and exits 10; rollback failure exits 11)
+   switch window     docker compose stop $AIHUB_SERVICE (graceful drain <= ${DRAIN_SECS}s) -> upgrade SQL${SQL_LINE} -> docker compose -f $COMPOSE_FILE -p $COMPOSE_PROJECT up -d --no-deps $AIHUB_SERVICE ; poll http://127.0.0.1:$AIHUB_PORT/ every 0.2s ; downtime = stop until HTTP answers (warn > ${MAX_DOWNTIME_SECS}s, fail if not up in ${UP_WAIT_SECS}s)
+   (a failure from the window on AUTO-ROLLS BACK: the rollback SQL of every version applied this run runs FIRST (descending, one transaction each), then the swap back to $OLDIMG; exits 10; rollback failure exits 11)
    lock               flock -n $DEPLOY_LOCK_FILE on $AIHUB_HOST held from step 2 to exit (not taken in dry-run)
 7. verify            container image == $NEWIMG ; wait <= ${WAIT_SECS}s for 'docker exec $AIHUB_CONTAINER /aihub -version' == $TAG ; docker logs --since <start>: print error lines, FAIL on Go runtime panic/fatal error
                      integrity + row counts >= frozen baseline (read-only); local 'pf queue --limit 1'
@@ -864,7 +1132,7 @@ counts_cmp "$WORK/frozen.counts" "$WORK/local.counts" eq || die "row counts of t
 note "local row counts equal the frozen baseline"
 
 # ---------------------------------------------------------------- step 6
-step 6 "load image, edit compose, swap (the only interruption: one container recreate)"
+step 6 "load image, edit compose, run the switch window (stop -> upgrade SQL -> up)"
 check_lock
 ship_image "$TAG" "$NEW_LOCAL_ID" "$NEWIMG"
 dk run --rm --entrypoint /aihub "$NEWIMG" -version 2>/dev/null | awk 'NF{v=$NF} END{print v}' | grep -qx "$TAG" || die "image $NEWIMG on the server does not report $TAG (service untouched)"
@@ -880,12 +1148,16 @@ if ! rssh docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" config -q >"$W
   die "docker compose config -q rejected the edited file (backup restored, service untouched): $(head -5 "$WORK/cfg.log")"
 fi
 note "compose file edited and validated (docker compose config -q ok)"
-# (c) swap: recreate only the aihub service on the new image, time until HTTP answers.
+# (c) the switch window - the ONLY service interruption: the old container
+# stops (graceful drain), the upgrade SQL runs (if any), the new container
+# starts; the downtime clock starts at the stop.
 START_AT="$(rssh "date -u +%Y-%m-%dT%H:%M:%SZ")"
-check_lock restore   # the last look at the lock before the swap (restores the compose file when it died)
-SWAPPED=1   # from here on a failure means "rollback"
-swap_up || die "swap did not complete: \"$down\" (docker compose up failed, or no HTTP answer within ${UP_WAIT_SECS}s)"
-note "downtime: ${down}s (compose up -d --no-deps $AIHUB_SERVICE until HTTP answers; old container drained <= ${DRAIN_SECS}s)"
+check_lock restore   # the last look at the lock before the window (restores the compose file when it died)
+SWAPPED=1   # from here on the service is interrupted: a failure means "rollback"
+window_stop || die "stopping the old container failed: \"$stopped_at\" (docker compose stop $AIHUB_SERVICE)"
+apply_upgrade_sql
+swap_up "$stopped_at" || die "swap did not complete: \"$down\" (docker compose up failed, or no HTTP answer within ${UP_WAIT_SECS}s of the window start)"
+note "downtime: ${down}s (container stop [drain <= ${DRAIN_SECS}s] + upgrade SQL + compose up -d --no-deps $AIHUB_SERVICE, until HTTP answers)"
 if awk -v d="$down" -v m="$MAX_DOWNTIME_SECS" 'BEGIN{exit !(d + 0 > m + 0)}'; then
   note "WARNING: downtime ${down}s exceeded ${MAX_DOWNTIME_SECS}s"
 fi
@@ -931,6 +1203,11 @@ rollback_text
 echo
 echo "== summary =="
 echo "  version:        $OLDVER -> $TAG   (downtime ${down}s)"
+if [ -n "$APPLIED_VERS" ]; then
+  echo "  upgrade SQL:    applied $(printf '%s ' $APPLIED_VERS)(deploy/sql/<tag>/upgrade.sql, one transaction each)"
+else
+  echo "  upgrade SQL:    none (no pending deploy/sql in ($OLDVER, $TAG])"
+fi
 echo "  old binary:     $AIHUB_HOST:$BIN_SAVED"
 echo "  server backup:  $AIHUB_HOST:$SRV_BACKUP"
 echo "  local backup:   $LOCAL_BACKUP"

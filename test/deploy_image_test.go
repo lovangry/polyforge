@@ -81,7 +81,21 @@ case "$1" in
     v=$(sh "$ctx/aihub" -version | awk '{print $NF}')
     printf 'sha256:built%s\n%s\n\n' "$v" "$v" > "$S/img/$(key "$t")"; exit 0 ;;
   compose)
-    shift; f=""; while [ $# -gt 0 ]; do case "$1" in -f) f="$2"; shift 2 ;; -p) shift 2 ;; config) [ -f "$f" ]; exit $? ;; version) exit 0 ;; up) break ;; *) shift ;; esac; done
+    shift; f=""; verb=""
+    while [ $# -gt 0 ]; do case "$1" in
+      -f) f="$2"; shift 2 ;;
+      -p) shift 2 ;;
+      config) [ -f "$f" ]; exit $? ;;
+      version) exit 0 ;;
+      up|stop) verb="$1"; break ;;
+      *) shift ;;
+    esac; done
+    if [ "$verb" = stop ]; then
+      # the switch window: the old container exits (graceful drain); the
+      # service stays DOWN until the next up - recorded for ordering asserts
+      printf '%s\n' "$(sed -n 's/^    image: //p' "$f" | head -1)" > "$S/stopped-from"
+      exit 0
+    fi
     img=$(sed -n 's/^    image: //p' "$f" | head -1)
     [ -n "$FAKE_FAIL_UP_IMG" ] && [ "$img" = "$FAKE_FAIL_UP_IMG" ] && { echo "fake: compose up failed" >&2; exit 1; }
     printf '%s\n' "$img" > "$S/container"; exit 0 ;;
@@ -95,6 +109,15 @@ shift   # host
 export FAKE_SIDE=server
 echo "ssh $*" >> "$FAKE_W/log-ssh"
 case "$*" in flock\ -n*) echo $$ > "$FAKE_W/lockpid" ;; esac
+# FAKE_SQLITE_VERSION: fake the server python3's linked sqlite3 library
+# version (the deploy's >= 3.35 preflight gate). Only the gate's program is
+# intercepted; every other python3 program runs for real (the SQL really
+# executes against the local sqlite fixture).
+if [ -n "$FAKE_SQLITE_VERSION" ] && [ "$1" = python3 ] && [ "$2" = - ]; then
+  prog="$(cat)"
+  case "$prog" in *sqlite3.sqlite_version*) echo "$FAKE_SQLITE_VERSION"; exit 0 ;; esac
+  printf '%s\n' "$prog" | exec python3 - "$3" "$4"
+fi
 if [ -n "$FAKE_MISSING_TOOL" ]; then
   exec sh -c "command() { [ \"\$2\" = $FAKE_MISSING_TOOL ] && return 1; type \"\$2\" >/dev/null 2>&1; }; $*"
 fi
@@ -130,10 +153,11 @@ echo "fake gh: unhandled: $*" >&2; exit 99
 const fakeCurl = "#!/bin/sh\necho 200\n"
 
 type deployWorld struct {
-	t    *testing.T
-	w    string
-	path string
-	env  []string
+	t      *testing.T
+	w      string
+	path   string
+	script string // the deploy.sh under test (default: the repo's own; SQL tests point it at a throwaway deployer repo)
+	env    []string
 }
 
 func wf(t *testing.T, path, body string, mode os.FileMode) {
@@ -206,6 +230,7 @@ c.commit()`
 	compose := filepath.Join(w, "srv", "compose", "docker-compose.yml")
 	wf(t, compose, "services:\n  aihub:\n    image: polyforge/aihub:"+oldVer+"\n    ports:\n      - \"8080:8080\"\n  other:\n    image: busybox\n", 0o644)
 	d.path = bin + ":" + os.Getenv("PATH")
+	d.script = filepath.Join("..", ".polyforge", "deploy.sh")
 	d.env = append(os.Environ(),
 		"PATH="+d.path, "FAKE_W="+w, "TMPDIR="+w,
 		"HOME="+filepath.Join(w, "home"), "DOCKER_CONFIG="+filepath.Join(w, "home", ".docker"),
@@ -216,7 +241,7 @@ c.commit()`
 }
 
 func (d *deployWorld) run(stdin string, args ...string) (string, error) {
-	cmd := exec.Command("sh", append([]string{filepath.Join("..", ".polyforge", "deploy.sh")}, args...)...)
+	cmd := exec.Command("sh", append([]string{d.script}, args...)...)
 	cmd.Env = d.env
 	cmd.Stdin = strings.NewReader(stdin)
 	var b bytes.Buffer
