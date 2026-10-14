@@ -194,14 +194,18 @@
   `[workspace."<path>"]` sections（每节 `projects = [...]`）是**唯一的
   workspace 来源**——CLI 与 Daemon 读同一份映射，placement 类动词的
   `--project` 按它校验，Capsule 按被认领 WI 的 project 经逆映射落到
-  `<workspace>/capsules/<wi>`；不存在任何默认 project 或启动期 workspace
-  选择面（历史旗标/环境变量已删除，仅在迁移文档中作为历史出现）；
+  `<workspace>/capsules/<wi>`；不存在任何启动期 workspace 选择面（历史旗标/环境变量已删除，仅在
+  迁移文档中作为历史出现），也不存在环境默认 project——唯一例外是 `pf file create` 的
+  cwd 推断（C16 裁定，polyforge#150：`cli/verbs_aihub.go` `inferProjectFromCwd`）：cwd 恰好
+  落在**一个**映射 workspace 且该 workspace 恰好映射**一个** project 时，视同已传
+  `--project`；其余一切情形（无包含、多包含、多 project）都要求显式 `--project`，
+  绝不环境默认（#113 原则不变）；
   `pf doctor` 是本机的唯一健康面（配置 + 映射 + 连通性）。
 - **AIHub**：全局仲裁与持久层。work item 生命周期状态机（排队/认领/暂停/终止）、owner generation
   仲裁、Memory 管理与检索、远端 Capsule Revision 存储与 HEAD 指针、最终结果归档，以及调度器/
-  就绪队列（扁平两数组 `{executable, blocked}` 响应，schema 权威见
-  `02-aihub-core.md#§5.1b`：`executable` 为可立即认领面，恒排除 `bundle_name IS NULL` 的登记票，
-  也排除一切终态与 `running`/`paused`/`blocked` 状态的 WI）。AIHub 对执行态**只读**（read-through，INV-1），
+  就绪队列（`{items, running, paused}` 三段响应（D1 裁定，polyforge#150：以代码为准），schema 权威见
+  `02-aihub-core.md#§5.1b`：`items` 为可执行段，恒排除 `bundle_name IS NULL` 的登记票，
+  也排除一切终态与 `running`/`paused`/`blocked` 状态的 WI；等依赖的票不出现在任何段）。AIHub 对执行态**只读**（read-through，INV-1），
   从不落库。**对外面与单端口（定稿裁定）**：AIHub 的对外客户端面有且只有 HTTP API 与 `pf` CLI
   两个——现行系统的 MCP 服务器在 vNext 中删除，不实现、不迁移（新 repo 取代声明见 §3.3）；
   AIHub 进程只开**一个** HTTP 监听端口（A5 单端口裁定）：Core API、Revision 发布、Memory、
@@ -375,8 +379,8 @@ Daemon 原样转发给正在等待的 WI Agent，不解析、不改写：
 
 #### 3.4b Batch <!-- §3.4b -->
 
-AIHub 调度器（vNext AIHub 自带的就绪队列——扁平两数组 `{executable, blocked}` 响应，schema 权威
-`02-aihub-core.md#§5.1b`，端点 `02-aihub-core.md#§5.1` 行 4；wave 推荐消费其 `executable` 面）先给出一批候选
+AIHub 调度器（vNext AIHub 自带的就绪队列——`{items, running, paused}` 三段响应（D1 裁定，polyforge#150），schema 权威
+`02-aihub-core.md#§5.1b`，端点 `02-aihub-core.md#§5.1` 行 4；wave 推荐消费其 `items` 可执行段）先给出一批候选
 WI 作为**一个 wave 的推荐**；这个推荐必须经**人显式确认**（可增删）之后，才由 Daemon 一次性成批（wave）
 创建 Capsule 并派生持久 WI Agent。wave 的最终边界（确认后实际提交哪些 WI）由人给定，
 Daemon 不自行扩大或缩小该集合，也不在未经确认前把调度器的推荐当作既定 Job 执行。wave 内**同时
@@ -386,7 +390,7 @@ Daemon 不自行扩大或缩小该集合，也不在未经确认前把调度器�
 #### 3.4c Drain <!-- §3.4c -->
 
 自主的、常驻的连续 wave 执行模式：Daemon 反复向 **AIHub 调度器**（vNext AIHub 自带的就绪
-队列——扁平两数组 `{executable, blocked}` 响应（schema 权威 `02-aihub-core.md#§5.1b`）及其排队与
+队列——`{items, running, paused}` 三段响应（D1 裁定，polyforge#150；schema 权威 `02-aihub-core.md#§5.1b`）及其排队与
 优先级判据，端点 `02-aihub-core.md#§5.1` 行 4）取下一批可执行 WI，无需每个 WI 单独的
 人工确认，取到即提交，一波接一波连续执行。Drain **不实现自己的新调度算法**——它是 AIHub 调度器
 的一个自主消费者；调度决策（谁先执行、并发度）的权威定义在 AIHub 侧，Daemon 侧只负责

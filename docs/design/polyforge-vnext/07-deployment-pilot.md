@@ -464,16 +464,16 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 | M8 发布时延与结果 | 见下方独立说明（B13 口径修订：仅对已真实发生的边界同步请求计分，不使用无活动时间窗口判定）。 |
 | M9 rewind 收敛 | 数据源 = `03-execution-capsule.md#§4.2` `runtime-state/execution.json` 的 `rewind_stats`（`{total, by_step}`），经 `02-aihub-core.md#§5.2` read-through 逐字读取；窗口 = 单 WI 生命周期内累计值，不做跨 WI 聚合比例。 |
 
-**就绪队列口径（扁平化核对，定稿裁定）**：vNext 的就绪队列是扁平过滤列表（`GET /api/v1/ready-queue?project=`，
-`02-aihub-core.md#§5.1` 行 4），不存在旧系统的多段结构；其响应 schema 权威为扁平两数组
-`{executable, blocked}`（`02-aihub-core.md#§5.1b`）：`executable` 为可立即认领面，恒排除
-`bundle_name IS NULL` 的登记票与一切终态/`running`/`paused`/`blocked` 的 WI；`blocked` 为等待面；
-`running` WI（含心跳过期的 stale running）不出现在任一数组。本节任何涉及队列条目的计数一律以
-**扁平两数组的条目数**（同一 `project=` 查询下 `executable` 与 `blocked` 各自的返回条目数）为口径，
-不按段分别计数、不设段间配额。经核对：
+**就绪队列口径（扁平化核对，定稿裁定；D1 修订 polyforge#150：以代码为准）**：vNext 的就绪队列是扁平过滤列表（`GET /api/v1/ready-queue?project=`，
+`02-aihub-core.md#§5.1` 行 4），不存在旧系统的多段结构；其响应 schema 权威为三段
+`{items, running, paused}`（`02-aihub-core.md#§5.1b`）：`items` 为可立即认领面，恒排除
+`bundle_name IS NULL` 的登记票与一切终态/`running`/`paused`/`blocked` 的 WI；等依赖的票不出现在任何段（无 `blocked` 数组）；
+`running`/`paused` WI 各自出现在同名可见性段（含心跳过期的 stale running，不设独立段）。本节任何涉及队列条目的计数一律以
+**响应各段的条目数**（同一 `project=` 查询下 `items`/`running`/`paused` 各自的返回条目数）为口径，
+不设段间配额。经核对：
 M1–M9 无一依赖旧多段结构——M3 的卡死判定来自 step 状态与机器心跳两个扁平字段
 （`02-aihub-core.md#§4.10`），不来自队列分段；Batch/Drain 的取批（`00-architecture.md#§3.4b`/§3.4c）
-消费的也是该扁平两数组面。
+消费的也是该三段响应的 `items` 可执行段。
 
 **M8（发布时延与结果，机械口径，B13 口径修订）**：早前口径曾用一个可配置的「30 分钟无 dirty/
 无发布」窗口（`pilot.stale_head_window_minutes`）推断某个 WI 可能卡死——把「一段时间内没有观测
@@ -683,12 +683,12 @@ the loser」：`internal/mcp/attempt_binding.go` 的 typed `LOCAL_ATTEMPT_SUPERS
 `internal/domain/work_items.go`）。
 
 vNext：机器心跳与 stale_running 检测经监控面外显（`02-aihub-core.md#§4.10`/§9）；就绪队列不为其
-设任何段——该 WI 处于 `running` 状态，按 `02-aihub-core.md#§5.1b` 不出现在 `executable`/`blocked`
-任一数组；被接管一方的下一次写/
+设任何段——该 WI 处于 `running` 状态，按 `02-aihub-core.md#§5.1b` 只出现在 `running` 可见性段、不设独立
+stale 段；被接管一方的下一次写/
 发布请求会明确收到失效响应（`02-aihub-core.md#§5.1` `CORE-403 STALE_OWNER`），响应体携带需要重新认领的提示，
 不含可被误用的裸 generation 整数。
 机械反例断言：心跳停止超过既定阈值后，该 WI 经监控面以 stale 标记可查询，且在就绪队列
-（`02-aihub-core.md#§5.1b`）两数组中均不出现（条目数口径 = §9.2 的扁平两数组条目数）；接管发生后，旧
+（`02-aihub-core.md#§5.1b`）中仅出现在 `running` 可见性段、无独立 stale 段（条目数口径 = §9.2 的各段条目数）；接管发生后，旧
 generation 的下一次写请求被拒绝，且响应体明确提示需要重新认领而不透出可用于伪造新凭证的信息。
 
 **R5 `aihub#747`** — 缺陷：某个执行环境下 verification 类 step 没有可用的命令执行能力（例如
