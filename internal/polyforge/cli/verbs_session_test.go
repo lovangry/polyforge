@@ -130,7 +130,7 @@ func TestResumeBlockedDoorWiring(t *testing.T) {
 	if strings.Contains(stdout, "clean_pause cleared") {
 		t.Errorf("a parked workflow must never answer the pause copy: %s", stdout)
 	}
-	if !strings.Contains(stdout, "resumed wi_blocked") || !strings.Contains(stdout, "parked blocked") {
+	if !strings.Contains(stdout, "resumed pf-43") || !strings.Contains(stdout, "parked blocked") {
 		t.Errorf("stdout must carry the §6.4 owner-move copy: %s", stdout)
 	}
 	// The hub door is landed by the CLI with the HUMAN's key, before the

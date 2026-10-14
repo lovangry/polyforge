@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
@@ -46,7 +47,7 @@ func StateLabel(s *protocol.WatchSnapshot) string {
 // and the line goes to a terminal status area, never into an agent context.
 func ProgressLine(s *protocol.WatchSnapshot, now time.Time) string {
 	var b strings.Builder
-	b.WriteString(safeID(s.WorkItem))
+	b.WriteString(safeID(api.DisplayName(s.Slug, s.WorkItem)))
 	b.WriteString(" ")
 	b.WriteString(StateLabel(s))
 	if ex := s.Execution; ex != nil && ex.CurrentStep != "" {
@@ -90,7 +91,11 @@ func ProgressLine(s *protocol.WatchSnapshot, now time.Time) string {
 // and the latest events.
 func FormatOnce(s *protocol.WatchSnapshot, now time.Time, maxEvents int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "work item:  %s\n", safeID(s.WorkItem))
+	if s.Slug != "" {
+		fmt.Fprintf(&b, "work item:  %s (%s)\n", safeID(s.Slug), safeID(s.WorkItem))
+	} else {
+		fmt.Fprintf(&b, "work item:  %s\n", safeID(s.WorkItem))
+	}
 	fmt.Fprintf(&b, "status:     %s\n", StateLabel(s))
 	if s.Execution == nil {
 		if s.Known || s.Queued {

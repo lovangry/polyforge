@@ -20,15 +20,17 @@ CLI 与 Daemon 读同一份配置；**不存在任何启动期 workspace 旗标�
 - **配置含零个 `[workspace]` 节**（新装机模板形状）时 Daemon 拒绝启动，指向该形状与 `pf doctor`。
 - Daemon 启动时校验**每一个**已映射 workspace：目录必须**已存在**（Daemon 绝不代建它），且
   `<workspace>/capsules/` 可创建、可写。Daemon 在任一 workspace 内只写 `capsules/` 子树。
-- Capsule 按被认领 WI 的 project 经逆映射路由到 `<workspace>/capsules/<wi_id>/`。
+- Capsule 按被认领 WI 的 project 经逆映射路由到 `<workspace>/capsules/<project>-<seq>/`（polyforge#144；
+  此前认领的 capsule 目录名为 `<wi_id>`，按记录路径续跑）。
 - **换基不需要搬进行中的 capsule**：把旧基底作为 workspace 节（连同它的 projects）保留在映射里，
   进行中的 capsule 就「留在原地」继续有效——重启对账按记录里的 capsule 路径就地续跑，绝不搬迁、
   绝不从远端 git 链重建（未发布的本地 capsule 状态不允许被静默丢弃）。
 - 运行中的 WI 若其 project 已从映射中消失（操作者删节后重启），Daemon **硬失败并点名该 project**
   （`mid-flight project "…" is not in the [workspace] mapping`）——capsule **绝不**被搬迁到别的
   workspace。唯一的补救就是把该 project 的 workspace 节重新加回映射，再重启。
-- 终态（已 wrap/fail/cancel）的 capsule 留在原地不动；Daemon 工具面（`pf ship` 等）只会在**映射内**的
-  workspace 集合里寻找 capsule——把旧基底重新加回映射即可让 `pf ship` 继续找到它。
+- 终态（已 wrap/fail/cancel）的 capsule 留在原地不动；Daemon 工具面（`pf ship` 等）只在该 WI 的 project
+  **映射到的** workspace 里按 `capsules/<project>-<seq>` 寻找 capsule——把旧基底（连同该 project）重新加回映射即可让
+  `pf ship` 继续找到它。
 
 ## 2. 迁移序列（人工，按序执行）<!-- §2 -->
 
@@ -42,8 +44,8 @@ mkdir -p /srv/polyforge/workspace
 pf ops shutdown
 # （systemd 机器：systemctl stop polyforge-daemon）
 
-# 2. 把「进行中」的 capsule 目录整体移动到新基底的 capsules/ 下（目录名 = wi_id，原样搬）
-mv ~/.local/share/polyforge/workspace/capsules/wi_xxx  /srv/polyforge/workspace/capsules/
+# 2. 把「进行中」的 capsule 目录整体移动到新基底的 capsules/ 下（目录名原样搬：<project>-<seq>，#144 前认领的为 wi_id）
+mv ~/.local/share/polyforge/workspace/capsules/polyforge-140  /srv/polyforge/workspace/capsules/
 #    只搬还在进行中的 WI；终态 capsule 不搬（留在旧基底，需要时人工取用）
 
 # 3. 改写共享配置的 [workspace] 映射：新基底一节，列出这些 WI 的 projects

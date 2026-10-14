@@ -39,7 +39,8 @@ var cmdSubmit = &Command{
 				return fmt.Errorf("submit: --models: %w", merr)
 			}
 		}
-		if err := submitPrecheck(ctx, args[0]); err != nil {
+		name, err := submitPrecheck(ctx, args[0])
+		if err != nil {
 			return err
 		}
 		raw, err := ctx.daemon().ClaimWithModels(args[0], stringFlag(fs, "priority"), models)
@@ -49,7 +50,7 @@ var cmdSubmit = &Command{
 		ctx.finish(raw, func() {
 			var sr SubmitResponse
 			if err := json.Unmarshal(raw, &sr); err == nil && sr.Accepted {
-				fmt.Fprintf(ctx.Stdout, "submitted %s (accepted by the local daemon)\n", sr.WorkItemID)
+				fmt.Fprintf(ctx.Stdout, "submitted %s (accepted by the local daemon)\n", name)
 			} else {
 				printJSON(ctx.Stdout, raw)
 			}
@@ -62,21 +63,34 @@ var cmdSubmit = &Command{
 // daemon's machine key — for the work item before the local daemon is
 // involved: a typed CORE-404 (unknown or hidden id) and an explicit
 // terminal status refuse early; every other read outcome defers to the
-// daemon's claim, which stays the authority.
-func submitPrecheck(ctx *Context, wiID string) error {
+// daemon's claim, which stays the authority. It answers the work item's
+// display name (its slug; the given spelling when the read failed).
+func submitPrecheck(ctx *Context, wiID string) (string, error) {
 	wi, err := ctx.aihub().GetWorkItem(wiID)
 	if err != nil {
 		var ae *api.Error
 		if errors.As(err, &ae) && ae.Code == api.ErrCoreNotFound {
-			return err
+			return "", err
 		}
-		return nil
+		return wiID, nil
 	}
+	name := api.DisplayName(wi.Slug, wiID)
 	switch wi.Status {
 	case api.StatusWrapped, api.StatusFailed, api.StatusCanceled:
-		return fmt.Errorf("submit: %s is terminal (%s); no claim or resume can start", wiID, wi.Status)
+		return "", fmt.Errorf("submit: %s is terminal (%s); no claim or resume can start", name, wi.Status)
 	}
-	return nil
+	return name, nil
+}
+
+// wiDisplayName answers the display name (slug) of a work item for a
+// verb's human output, read with the caller's key; the given spelling
+// when the read fails — the output never blocks on it.
+func wiDisplayName(ctx *Context, idOrSlug string) string {
+	wi, err := ctx.aihub().GetWorkItem(idOrSlug)
+	if err != nil || wi == nil {
+		return idOrSlug
+	}
+	return api.DisplayName(wi.Slug, idOrSlug)
 }
 
 // ---------------------------------------------------------------------------
@@ -162,10 +176,20 @@ var cmdPause = &Command{
 			return err
 		}
 		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "pause requested for %s (clean_pause set on the hub; restart will not auto-resume it)\n", args[0])
+			fmt.Fprintf(ctx.Stdout, "pause requested for %s (clean_pause set on the hub; restart will not auto-resume it)\n", closeName(raw, args[0]))
 		})
 		return nil
 	},
+}
+
+// closeName answers the display name a pause/wrap answer carries (the
+// daemon's job-record slug), else the operator's own spelling.
+func closeName(raw []byte, arg string) string {
+	var ans struct {
+		Slug string `json:"slug"`
+	}
+	_ = json.Unmarshal(raw, &ans)
+	return api.DisplayName(ans.Slug, arg)
 }
 
 // patchCleanPause PATCHes the work item with the additive clean_pause
@@ -217,13 +241,14 @@ var cmdResume = &Command{
 		if len(args) != 1 {
 			return fmt.Errorf("resume: expected exactly one work item id")
 		}
-		if err := submitPrecheck(ctx, args[0]); err != nil {
+		if _, err := submitPrecheck(ctx, args[0]); err != nil {
 			return err
 		}
 		wi, err := ctx.aihub().GetWorkItem(args[0])
 		if err != nil {
 			return err
 		}
+		name := api.DisplayName(wi.Slug, args[0])
 		// Dispatch order, decided by WI state (v2 merge of D1 + D2):
 		//  1. hub status blocked  -> the human-key resume-blocked door, then
 		//     the daemon's claim/start (below).
@@ -246,7 +271,7 @@ var cmdResume = &Command{
 					// machine's daemon continues on ITS operator resume, or on
 					// its next start (the restart reconciliation — the working
 					// fallback that has always existed).
-					fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; this machine's daemon does not hold the paused session\n", args[0])
+					fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; this machine's daemon does not hold the paused session\n", name)
 					fmt.Fprintln(ctx.Stdout, "(resume it on the holder machine's daemon to continue in place; a work item whose holder is gone moves with `pf ops end-session <id> --reason ...` then `pf submit <id>`)")
 					return nil
 				}
@@ -254,7 +279,7 @@ var cmdResume = &Command{
 					// the daemon socket is unreachable (a transport error, no
 					// typed envelope): the flag clear stands at the hub; the
 					// holder daemon picks the resume up at its next start.
-					fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the daemon socket is unreachable (%v)\n", args[0], err)
+					fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the daemon socket is unreachable (%v)\n", name, err)
 					fmt.Fprintln(ctx.Stdout, "(once the holder daemon starts, its restart reconciliation attaches the paused session; to continue without it use `pf ops end-session <id> --reason ...` then `pf submit <id>`)")
 					return nil
 				}
@@ -269,15 +294,15 @@ var cmdResume = &Command{
 			raw, _ := json.Marshal(res)
 			ctx.finish(raw, func() {
 				if res.Outcome == "already_live" {
-					fmt.Fprintf(ctx.Stdout, "resumed %s: the work item is already running on this daemon\n", args[0])
+					fmt.Fprintf(ctx.Stdout, "resumed %s: the work item is already running on this daemon\n", name)
 					return
 				}
 				if res.Outcome == "closed" {
-					fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the holder daemon re-attached the paused session, but its recovery closed the work item (terminal verdict or exhausted relaunch) — it does not continue in place\n", args[0])
+					fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the holder daemon re-attached the paused session, but its recovery closed the work item (terminal verdict or exhausted relaunch) — it does not continue in place\n", name)
 					fmt.Fprintln(ctx.Stdout, "(see `pf watch "+args[0]+" --once` for the close)")
 					return
 				}
-				fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the holder daemon re-attached the paused session and continues the current step in place\n", args[0])
+				fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the holder daemon re-attached the paused session and continues the current step in place\n", name)
 				fmt.Fprintln(ctx.Stdout, "(a pending question is re-posed and waits for your answer; watch it with `pf watch "+args[0]+" --once`)")
 			})
 			return nil
@@ -300,10 +325,10 @@ var cmdResume = &Command{
 		_ = json.Unmarshal(raw, &ans)
 		ctx.finish(raw, func() {
 			if ans.Deferred {
-				fmt.Fprintf(ctx.Stdout, "resumed %s: the hub is unreachable right now; the claim is queued in the daemon and will run when the hub is reachable (retried with backoff; watch it with `pf watch <id> --once`)\n", args[0])
+				fmt.Fprintf(ctx.Stdout, "resumed %s: the hub is unreachable right now; the claim is queued in the daemon and will run when the hub is reachable (retried with backoff; watch it with `pf watch <id> --once`)\n", name)
 				return
 			}
-			fmt.Fprintf(ctx.Stdout, "resumed %s: the workflow was parked blocked (incomplete result) — the §6.4 owner move re-established execution over the parked capsule\n", args[0])
+			fmt.Fprintf(ctx.Stdout, "resumed %s: the workflow was parked blocked (incomplete result) — the §6.4 owner move re-established execution over the parked capsule\n", name)
 			fmt.Fprintln(ctx.Stdout, "(the frozen current step re-dispatches in place as a fresh derivation; watch it with `pf watch <id> --once`)")
 		})
 		return nil
@@ -354,7 +379,7 @@ var cmdWrap = &Command{
 			return err
 		}
 		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "%s requested for %s\n", reason, args[0])
+			fmt.Fprintf(ctx.Stdout, "%s requested for %s\n", reason, closeName(raw, args[0]))
 		})
 		return nil
 	},
@@ -363,14 +388,14 @@ var cmdWrap = &Command{
 // ---------------------------------------------------------------------------
 // ship — the wrap→git delivery bridge: push a closed WI's sealed capsule
 // commits to each inventory repo's origin as the fixed-name branch
-// polyforge/<id>, then open/reuse a PR when a credential exists (a
+// polyforge/<project>-<seq>, then open/reuse a PR when a credential exists (a
 // missing PR credential is NOT an error; only the push credential is).
 // ---------------------------------------------------------------------------
 
 var cmdShip = &Command{
 	Name:    "ship",
 	Group:   GroupDelivery,
-	Summary: "Push a closed WI's sealed capsule commits to git origin (branch polyforge/<id>)",
+	Summary: "Push a closed WI's sealed capsule commits to git origin (branch polyforge/<project>-<seq>)",
 	Usage: "pf ship <id>\n" +
 		"\n" +
 		"Typed errors:\n" +
@@ -379,7 +404,9 @@ var cmdShip = &Command{
 		"  DAEMON-409  the remote branch moved past the sealed commit\n" +
 		"              (never force-pushed over it)\n" +
 		"  DAEMON-512  push preflight failed: no usable local git push identity\n" +
-		"              or the origin is unreachable",
+		"              or the origin is unreachable\n" +
+		"  DAEMON-503  the hub record naming the capsule and branch could not\n" +
+		"              be read (aihub unreachable; retry later)",
 	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
@@ -545,7 +572,7 @@ serve ` + "`pf help daemon`" + ` presentation.
 Workspace mapping (polyforge#113): the daemon reads the [workspace]
 sections of the shared config — one [workspace."<path>"] section per
 workspace, each carrying the projects whose capsules live under it.
-Capsules are placed at <workspace>/capsules/<wi_id> per the claimed
+Capsules are placed at <workspace>/capsules/<project>-<seq> per the claimed
 work item's project; an unmapped project is refused at claim time; a
 config with zero sections refuses startup. There is no launch-time
 workspace flag and no default project: the mapping is the only source.
@@ -660,12 +687,13 @@ func opsEndSession(ctx *Context, args []string) error {
 	if strings.TrimSpace(*reason) == "" {
 		return fmt.Errorf("ops end-session: --reason is required (recorded in the audit event)")
 	}
+	name := wiDisplayName(ctx, rest[0])
 	if err := ctx.aihub().ForceEndSession(rest[0], strings.TrimSpace(*reason)); err != nil {
 		return err
 	}
 	raw, _ := json.Marshal(map[string]any{"work_item_id": rest[0], "status": "queued"})
 	ctx.finish(raw, func() {
-		fmt.Fprintf(ctx.Stdout, "ended the session of %s; it is queued again — claim it on any daemon with `pf submit %s`\n", rest[0], rest[0])
+		fmt.Fprintf(ctx.Stdout, "ended the session of %s; it is queued again — claim it on any daemon with `pf submit %s`\n", name, rest[0])
 		fmt.Fprintln(ctx.Stdout, "  the previous holder is fenced (its secret no longer matches)")
 	})
 	return nil

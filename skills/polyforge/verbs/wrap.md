@@ -32,7 +32,7 @@ with `pf cancel <id>`, and `pf wrap --fail` on one just says so.
 
 ## Success
 
-Human mode: `wrap requested for <id>` (or `fail requested for <id>`) plus
+Human mode: `wrap requested for <slug>` (or `fail requested for <slug>`) plus
 the daemon's raw answer (`--json`: the raw answer alone — `sealed`, or
 `already_terminal` with the server-side status when the work item had
 already closed). After the close lands, the work item is terminal

@@ -40,10 +40,11 @@ func TestGoldenStatus(t *testing.T) {
 		Auto:       true,
 		Workspaces: []string{"/srv/pf-ws"},
 		Jobs: []StatusJob{
-			{WorkItemID: "wi_abc", Status: "running", SpawnN: 3, SessionFingerprint: "ab12cd34ef56aa00", AgentPID: 42,
+			{WorkItemID: "wi_abc", Slug: "polyforge#140", Status: "running", SpawnN: 3, SessionFingerprint: "ab12cd34ef56aa00", AgentPID: 42,
 				StepAgeSec: int64Ptr(3725), LastWorkAgoSec: int64Ptr(7)},
 			// D6: a job presented as needs_input shows its pending
-			// question's id in the QUESTION column. A job with no session
+			// question's id in the QUESTION column. A record without a
+			// slug shows its id in WORK ITEM. A job with no session
 			// fingerprint renders "-" in SESSION (and "-" in SPAWN while
 			// no derivation was announced).
 			{WorkItemID: "wi_ask", Status: "needs_input", AgentPID: 43,
@@ -57,26 +58,27 @@ func TestGoldenStatus(t *testing.T) {
 		`daemon: m1  auto: on  max: 2  queue: 1 pending / 2 running
 workspaces: /srv/pf-ws
 
-WORK ITEM  STATUS       SESSION           SPAWN  AGENT PID  QUESTION  STEP-AGE  LAST-WORK
----------  -----------  ----------------  -----  ---------  --------  --------  ---------
-wi_abc     running      ab12cd34ef56aa00  #3     42         -         62:05     00:07
-wi_ask     needs_input  -                 -      43         q_zz9     -         -
+WORK ITEM      STATUS       SESSION           SPAWN  AGENT PID  QUESTION  STEP-AGE  LAST-WORK
+-------------  -----------  ----------------  -----  ---------  --------  --------  ---------
+polyforge#140  running      ab12cd34ef56aa00  #3     42         -         62:05     00:07
+wi_ask         needs_input  -                 -      43         q_zz9     -         -
 `)
 }
 
 func TestGoldenShip(t *testing.T) {
 	s := ShipResponse{
 		WorkItemID: "wi_abc",
-		Branch:     "polyforge/wi_abc",
+		Slug:       "polyforge#140",
+		Branch:     "polyforge/polyforge-140",
 		Repos: []ShipRepoOutcome{
-			{Name: "polyforge", Head: "deadbee", Branch: "polyforge/wi_abc", Pushed: true, PRURL: "https://x/pr/1"},
-			{Name: "tsshd", Head: "cafe123", Branch: "polyforge/wi_abc", Reused: true, CompareURL: "https://x/compare"},
+			{Name: "polyforge", Head: "deadbee", Branch: "polyforge/polyforge-140", Pushed: true, PRURL: "https://x/pr/1"},
+			{Name: "tsshd", Head: "cafe123", Branch: "polyforge/polyforge-140", Reused: true, CompareURL: "https://x/compare"},
 		},
 	}
 	var b bytes.Buffer
 	renderShip(&b, &s)
 	golden(t, "Ship", b.String(),
-		`shipped wi_abc → branch polyforge/wi_abc
+		`shipped polyforge#140 → branch polyforge/polyforge-140
   polyforge:         deadbee  pushed
     pr:      https://x/pr/1
   tsshd:             cafe123  reused (remote branch already at the sealed commit)

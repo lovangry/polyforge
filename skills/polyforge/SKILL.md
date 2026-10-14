@@ -47,8 +47,13 @@ progress, and answers needs_input questions.
 
 Map the user's words to a fragment; the fragment owns the real command shape,
 success rendering and error branches. Work items carry server-minted ids
-(`wi_` + random chars); slugs exist for humans and resolve wherever the CLI
-accepts an id.
+(`wi_` + random chars); slugs (`<project>#<seq>`, e.g. `polyforge#140`) exist
+for humans and resolve wherever the CLI accepts an id. Human-facing output —
+status line, wake-up lines, `pf watch`, `pf ops status`, verb confirmations —
+names a work item by its slug (the id only when no slug is known); `--json`
+keeps the id as the machine identifier. Quote a slug in shell commands
+(`pf watch 'polyforge#140' --once`): `#` is a glob character under zsh
+EXTENDED_GLOB and starts a comment after whitespace.
 
 | Intent (EN / 中文) | Fragment | Face |
 |---|---|---|
@@ -112,8 +117,9 @@ proactive face, and it carries exactly two kinds of signal:
   dropped submit, a blocked work item (including a missing capsule or an
   unmapped project), a daemon restart.
   These wake you with ONE fixed-template line:
-  `[polyforge] <wi> <kind> — <short fixed phrase>; this is a human decision,
-  the agent must not answer it`.
+  `[polyforge] <slug> <kind> — <short fixed phrase>; this is a human decision,
+  the agent must not answer it` (e.g. `[polyforge] polyforge#140 needs_input
+  q-1 — ...`).
 
 **Subscription is the whole ownership model.** A chat (`PF_CHAT_ID`) is
 subscribed to the work items it submits (`pf submit` does it); it subscribes to
@@ -244,8 +250,9 @@ pf [global flags] <verb> [verb flags] [positional args]
   placement verbs (`file create`, `remember`, `recall`) REQUIRE
   `--project` and validate it against the mapping; `queue` without
   `--project` covers all mapped projects; one daemon serves every mapped
-  workspace and routes capsules to `<workspace>/capsules/<wi>` by the
-  claimed work item's project.
+  workspace and routes capsules to `<workspace>/capsules/<project>-<seq>`
+  (e.g. `capsules/polyforge-140`; no `#` in paths) by the claimed work item's
+  project.
 - **Output**: human mode renders per-verb views; `--json` emits the response
   body raw, as-is (machine consumption).
 - **Errors**: every non-2xx answer — from AIHub AND from the daemon — is the

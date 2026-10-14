@@ -98,7 +98,7 @@
 ### 3.1 Capsule 目录布局（权威） <!-- §3.1 -->
 
 ```
-<pf-workspace>/capsules/<wi_id>/            # capsule_id = cap_<wi_id>；目录名用 wi_id。
+<pf-workspace>/capsules/<project>-<seq>/    # capsule_id = cap_<wi_id>；目录名用可读的 <project>-<seq>（polyforge#144，此前为 wi_id）。
                                             # <pf-workspace> 由操作者经必填的 pf daemon -workspace <path>
                                             # 旗标（或 POLYFORGE_WORKSPACE 环境变量）指定——没有默认值：两者
                                             # 皆缺时 Daemon 拒绝启动。启动时校验 workspace 目录存在
@@ -360,7 +360,7 @@ Native runner：v1 trusted internal repo，host-native，不引入 per-step isol
 
 Daemon 在 `claim`/`takeover` 成功后（`04-local-runtime.md#§6.1`）按下列顺序驱动：
 
-1. 计算 `dir = <pf-workspace>/capsules/<wi_id>`，`gen` 取自本次 claim/takeover 返回的当前活跃 generation。
+1. 计算 `dir = <pf-workspace>/capsules/<project>-<seq>`，`gen` 取自本次 claim/takeover 返回的当前活跃 generation。
 2. 若 `dir` 存在且可读到 `capsule.json`：
    a. 若 `capsule.json.generation == gen` 且 `status == "ready"`：**直接复用**该目录（幂等重试路径），跳到第 6 步。
    b. 若 `capsule.json.generation == gen` 且 `status == "initializing"`：视为上次创建中途崩溃留下的不可信半成品，走第 3 步的隔离重建。

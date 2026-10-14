@@ -102,7 +102,7 @@ func TestV1S25ReclaimTaskRepoNotDurable(t *testing.T) {
 			return false
 		}
 		for _, e := range ents {
-			if strings.HasPrefix(e.Name(), wi+".quarantined.") {
+			if strings.HasPrefix(e.Name(), wiPathName(t, inst, wi)+".quarantined.") {
 				return true
 			}
 		}

@@ -935,7 +935,29 @@ func (d *v1Daemon) watch(t *testing.T, wi string) *protocol.WatchSnapshot {
 
 // capsuleDir is this daemon's capsule root for wi.
 func (d *v1Daemon) capsuleDir(wi string) string {
-	return filepath.Join(d.workspace, "capsules", wi)
+	return filepath.Join(d.workspace, "capsules", wiPathName(d.t, d.inst, wi))
+}
+
+// wiPathName answers the capsule directory / ship branch name of wi —
+// "<project>-<seq>" (polyforge#144) — from its aihub record.
+func wiPathName(t *testing.T, inst *v1Install, wi string) string {
+	t.Helper()
+	item, err := inst.client.GetWorkItem(wi)
+	if err != nil {
+		t.Fatalf("get work item %s: %v", wi, err)
+	}
+	return api.PathName(item.Slug, item.ID)
+}
+
+// wiSlug answers wi's "<project>#<seq>" slug — the name the human faces
+// (ops status, watch, wake-up lines) show (polyforge#144).
+func wiSlug(t *testing.T, inst *v1Install, wi string) string {
+	t.Helper()
+	item, err := inst.client.GetWorkItem(wi)
+	if err != nil || item.Slug == "" {
+		t.Fatalf("get work item %s slug: %+v %v", wi, item, err)
+	}
+	return item.Slug
 }
 
 // eventsOf reads the daemon's durable events.log and returns the entries

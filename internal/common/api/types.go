@@ -13,6 +13,8 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
+	"strings"
 )
 
 // WorkItem is the server-side work item record (02 §4). Field semantics are
@@ -39,6 +41,35 @@ type WorkItem struct {
 	UpdatedAt   string         `json:"updated_at"`
 	ClosedAt    *string        `json:"closed_at"`
 }
+
+// DisplayName answers the human-facing name of a work item: its slug
+// ("<project>#<seq>"), or the id when no slug is known. Machine-side
+// references (API paths, capsule.json, state.json keys) keep the id.
+func DisplayName(slug, id string) string {
+	if slug != "" {
+		return slug
+	}
+	return id
+}
+
+// PathName answers the path- and ref-safe readable name of a work item,
+// "<project>-<seq>": the slug with its "#" (a zsh EXTENDED_GLOB
+// metacharacter and the URL fragment separator) replaced by "-". It names
+// the capsule directory and the `pf ship` branch. Project names never
+// contain "#", so the seq is always the part after the last "-". The id
+// is the answer when no slug is known, or when the slug is not of the
+// "<project>#<seq>" shape (it never becomes a path or ref component
+// unchecked).
+func PathName(slug, id string) string {
+	if slugShape.MatchString(slug) {
+		return strings.Replace(slug, "#", "-", 1)
+	}
+	return id
+}
+
+// slugShape is the slug a path or ref may be built from: an aihub project
+// name (core/admin.go's charset) and a decimal seq.
+var slugShape = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}#[0-9]+$`)
 
 // WI statuses (02 §4.1).
 const (

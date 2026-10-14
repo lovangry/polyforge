@@ -480,8 +480,8 @@ func w113EnsureProject(t *testing.T, inst *v1Install, name string) {
 }
 
 // w113Capsule is the capsule dir of wi under workspace ws.
-func w113Capsule(ws, wi string) string {
-	return filepath.Join(ws, "capsules", wi)
+func w113Capsule(t *testing.T, inst *v1Install, ws, wi string) string {
+	return filepath.Join(ws, "capsules", wiPathName(t, inst, wi))
 }
 
 // w113TopLevel lists the entry names of dir.
@@ -860,8 +860,8 @@ func TestW113MappingTildeExpansionAndRouting(t *testing.T) {
 	d.pfWant(inst, -1, "submit", wiA)
 	d.pfWant(inst, -1, "submit", wiB)
 
-	capA := w113Capsule(tildeWS, wiA)
-	capB := w113Capsule(absWS, wiB)
+	capA := w113Capsule(t, inst, tildeWS, wiA)
+	capB := w113Capsule(t, inst, absWS, wiB)
 	w113WaitCapsule(t, capA, 60*time.Second)
 	w113WaitCapsule(t, capB, 60*time.Second)
 	w113WaitCompleted(t, capA, 120*time.Second)
@@ -1130,7 +1130,7 @@ func TestW113DaemonDefaultConfigLocation(t *testing.T) {
 	d.start()
 	defer d.stop()
 	d.pfWant(inst, -1, "submit", wiA)
-	capA := w113Capsule(defaultWS, wiA)
+	capA := w113Capsule(t, inst, defaultWS, wiA)
 	w113WaitCapsule(t, capA, 60*time.Second)
 	w113WaitCompleted(t, capA, 120*time.Second)
 
@@ -1145,7 +1145,7 @@ func TestW113DaemonDefaultConfigLocation(t *testing.T) {
 	d2.start()
 	defer d2.stop()
 	d2.pfWant(inst, -1, "submit", wiB)
-	capB := w113Capsule(otherWS, wiB)
+	capB := w113Capsule(t, inst, otherWS, wiB)
 	w113WaitCapsule(t, capB, 60*time.Second)
 	w113WaitCompleted(t, capB, 120*time.Second)
 }
@@ -1223,7 +1223,7 @@ func TestW113DaemonValidatesAllMappedWorkspaces(t *testing.T) {
 // TestW113CrossProjectClaimsRoutePerWorkspace pins criteria #9 and #12
 // (and the live halves of #8 and #14): one daemon, workspace A mapping
 // `e2e` and workspace B mapping `ieops`, claims land the capsules at
-// A/capsules/<wi> and B/capsules/<wi>, each workspace's top level
+// A/capsules/<project>-<seq> and B/capsules/<project>-<seq>, each workspace's top level
 // holds only capsules/, `pf ops status` names BOTH workspaces, and the
 // WI-anchored `pf watch --once` works with no project anywhere (unchanged
 // face).
@@ -1252,8 +1252,8 @@ func TestW113CrossProjectClaimsRoutePerWorkspace(t *testing.T) {
 	d.pfWant(inst, -1, "submit", wiA)
 	d.pfWant(inst, -1, "submit", wiB)
 
-	capA := w113Capsule(wsA, wiA)
-	capB := w113Capsule(wsB, wiB)
+	capA := w113Capsule(t, inst, wsA, wiA)
+	capB := w113Capsule(t, inst, wsB, wiB)
 	w113WaitCapsule(t, capA, 60*time.Second)
 	w113WaitCapsule(t, capB, 60*time.Second)
 	w113WaitCompleted(t, capA, 120*time.Second)
@@ -1323,8 +1323,8 @@ func TestW113UnmappedProjectClaimRefused(t *testing.T) {
 		}
 	}
 	// No capsule was created for the unmapped project anywhere.
-	if _, err := os.Stat(w113Capsule(wsA, wi)); err == nil {
-		t.Fatalf("a capsule was created for unmapped project ghostproj at %s", w113Capsule(wsA, wi))
+	if _, err := os.Stat(w113Capsule(t, inst, wsA, wi)); err == nil {
+		t.Fatalf("a capsule was created for unmapped project ghostproj at %s", w113Capsule(t, inst, wsA, wi))
 	}
 	// The server-side claim state is unchanged.
 	if after := inst.wiStatus(t, wi); after != before {
@@ -1337,7 +1337,7 @@ func TestW113UnmappedProjectClaimRefused(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestW113InflightCapsulesKeepHomesAcrossRestart pins criterion #11's
-// cutover story: a mid-flight capsule under A/capsules/<wi> survives a
+// cutover story: a mid-flight capsule under A/capsules/<project>-<seq> survives a
 // daemon crash and restart on the SAME mapping — the restarted daemon
 // reconciles in place (marker file intact, no second capsule anywhere)
 // and the work item wraps. No migration path is needed or shipped.
@@ -1365,7 +1365,7 @@ func TestW113InflightCapsulesKeepHomesAcrossRestart(t *testing.T) {
 	d.start()
 	d.pfWant(inst, -1, "submit", wi)
 
-	capDir := w113Capsule(wsA, wi)
+	capDir := w113Capsule(t, inst, wsA, wi)
 	w113WaitCapsule(t, capDir, 60*time.Second)
 	w113StepStatus(t, capDir, "fix", "in_progress", 60*time.Second)
 	marker := filepath.Join(capDir, "w113-marker.txt")
@@ -1387,7 +1387,7 @@ func TestW113InflightCapsulesKeepHomesAcrossRestart(t *testing.T) {
 	if raw, err := os.ReadFile(marker); err != nil || string(raw) != "in flight\n" {
 		t.Fatalf("marker file lost or changed: %q, %v", raw, err)
 	}
-	if got := w113TopLevel(t, filepath.Join(wsA, "capsules")); len(got) != 1 || got[0] != wi {
+	if got := w113TopLevel(t, filepath.Join(wsA, "capsules")); len(got) != 1 || got[0] != wiPathName(t, inst, wi) {
 		t.Fatalf("capsules dir of %s holds %v, want exactly [%s]", wsA, got, wi)
 	}
 }
@@ -1434,7 +1434,7 @@ func TestW113UnmappedMidflightWIBlocksThenResumes(t *testing.T) {
 		w113DOptConfig(fullCfgPath), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d.start()
 	d.pfWant(inst, -1, "submit", wi)
-	capX := w113Capsule(wsX, wi)
+	capX := w113Capsule(t, inst, wsX, wi)
 	w113WaitCapsule(t, capX, 60*time.Second)
 	w113StepStatus(t, capX, "fix", "in_progress", 60*time.Second)
 	d.crash()
@@ -1453,9 +1453,10 @@ func TestW113UnmappedMidflightWIBlocksThenResumes(t *testing.T) {
 	if raw := wiRawWithEvents(t, inst, wi); !strings.Contains(raw, "ieops") || !strings.Contains(raw, "[workspace] mapping") {
 		t.Fatalf("the blocked reason does not name the project: %s", raw)
 	}
+	slug := wiSlug(t, inst, wi) // ops status names the WI by its slug
 	waitUntil(t, 20*time.Second, "the unmapped WI is still held by the daemon", func() bool {
 		snap, _ := d2.pf(inst, "ops", "status")
-		return !strings.Contains(snap, wi)
+		return !strings.Contains(snap, slug)
 	})
 
 	// No relocation: the capsule stays under wsX, nothing appears under
@@ -1463,8 +1464,8 @@ func TestW113UnmappedMidflightWIBlocksThenResumes(t *testing.T) {
 	if _, err := os.Stat(capX); err != nil {
 		t.Fatalf("the original capsule disappeared from %s: %v", capX, err)
 	}
-	if _, err := os.Stat(w113Capsule(wsA, wi)); err == nil {
-		t.Fatalf("the mid-flight capsule was relocated to %s", w113Capsule(wsA, wi))
+	if _, err := os.Stat(w113Capsule(t, inst, wsA, wi)); err == nil {
+		t.Fatalf("the mid-flight capsule was relocated to %s", w113Capsule(t, inst, wsA, wi))
 	}
 
 	// The operator restores the mapping and the human resumes: the work
@@ -1481,8 +1482,8 @@ func TestW113UnmappedMidflightWIBlocksThenResumes(t *testing.T) {
 	defer d3.stop()
 	d3.pfWant(inst, 0, "resume", wi)
 	inst.waitWIStatus(t, wi, "wrapped", 180*time.Second)
-	if _, err := os.Stat(w113Capsule(wsA, wi)); err == nil {
-		t.Fatalf("the resumed work item was placed under %s", w113Capsule(wsA, wi))
+	if _, err := os.Stat(w113Capsule(t, inst, wsA, wi)); err == nil {
+		t.Fatalf("the resumed work item was placed under %s", w113Capsule(t, inst, wsA, wi))
 	}
 }
 
@@ -1730,8 +1731,8 @@ func TestW113DrainIteratesAllMappedProjects(t *testing.T) {
 	d.start()
 	defer d.stop()
 
-	capA := w113Capsule(wsA, wiA)
-	capB := w113Capsule(wsB, wiB)
+	capA := w113Capsule(t, inst, wsA, wiA)
+	capB := w113Capsule(t, inst, wsB, wiB)
 	w113WaitCapsule(t, capA, 90*time.Second)
 	w113WaitCapsule(t, capB, 90*time.Second)
 	w113WaitCompleted(t, capA, 240*time.Second)

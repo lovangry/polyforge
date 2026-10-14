@@ -23,7 +23,7 @@ attach, one daemon start later). A typed mid-flight failure (missing
 capsule, unmapped project) answers `DAEMON-409` and the work item is
 BLOCKED at aihub with the typed cause — never the restart copy.
 
-Success: `resumed <id>: clean_pause cleared; the holder daemon re-attached
+Success: `resumed <slug>: clean_pause cleared; the holder daemon re-attached
 the paused session and continues the current step in place`. `--json`: the
 raw answer.
 
@@ -45,7 +45,7 @@ current step re-dispatches IN PLACE as a fresh derivation (the spawn
 journal and the step's prior output survive; the resumed lane continues
 the parked capsule, never a pre-blocked re-derivation).
 
-Success: `resumed <id>: the workflow was parked blocked (incomplete
+Success: `resumed <slug>: the workflow was parked blocked (incomplete
 result) — the §6.4 owner move re-established execution over the parked
 capsule`, then `(the frozen current step re-dispatches in place as a fresh
 derivation; watch it with pf watch <id> --once)`. `--json`: the raw answer.
@@ -99,7 +99,7 @@ refused before anything else happens.
 | Code | When | What to tell the user |
 |---|---|---|
 | `CORE-404` | Unknown or invisible id (CLI precheck) | No such work item — check the `wi_` id. |
-| (no code) `submit: <id> is terminal (<status>)` | The work item is wrapped/failed/cancelled | A finished work item cannot be resumed — file a new one. |
+| (no code) `submit: <slug> is terminal (<status>)` | The work item is wrapped/failed/cancelled | A finished work item cannot be resumed — file a new one. |
 | `DAEMON-409` | The work item is already active or queued on this daemon, the `clean_pause` flag was not yet cleared at the hub, or the paused resume was blocked by a typed mid-flight failure (missing capsule / unmapped project — the detail names the remediation) | `pf watch <id> --once` shows the state; for a blocked one, fix the named cause, then `pf resume` again. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | Graceful shutdown in progress | Wait for restart, then resume. |
 | `AUTH-403` (from the resume door) | The caller is not the work item's reporter, a project maintainer or an admin | Ask the task owner or a maintainer to continue it. |

@@ -15,7 +15,7 @@ import (
 // capsule's inventory repo (repos/<name>, a real git worktree the fix
 // step's envelope action created with its own origin remote) is pushed
 // by the ship bridge to that origin as the fixed-name branch
-// polyforge/<wi>. Verified with real git against the origin bare repo:
+// polyforge/<project>-<seq>. Verified with real git against the origin bare repo:
 // the remote branch SHA equals the sealed worktree head, and a second
 // ship is an idempotent reuse (pushed=false, reused=true) — never a
 // force-push.
@@ -57,7 +57,7 @@ func TestV1S04WrapShip(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &ship); err != nil {
 		t.Fatalf("ship answer undecodable: %v (%q)", err, out)
 	}
-	if ship.Branch != "polyforge/"+wi {
+	if ship.Branch != "polyforge/"+wiPathName(t, inst, wi) {
 		t.Fatalf("ship branch wrong: %q", ship.Branch)
 	}
 	if len(ship.Repos) != 1 || ship.Repos[0].Name != "demo" {
@@ -70,7 +70,7 @@ func TestV1S04WrapShip(t *testing.T) {
 
 	// Real-git verification: the origin now holds the branch at the
 	// sealed commit.
-	remoteRef := strings.TrimSpace(gitRun(t, origin, "rev-parse", "refs/heads/polyforge/"+wi))
+	remoteRef := strings.TrimSpace(gitRun(t, origin, "rev-parse", "refs/heads/polyforge/"+wiPathName(t, inst, wi)))
 	if remoteRef != sealedHead {
 		t.Fatalf("origin branch %s != sealed head %s", remoteRef, sealedHead)
 	}

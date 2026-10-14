@@ -102,7 +102,7 @@ Daemon-to-Daemon 协议或互推通道，一切跨机信息经 AIHub HTTP 中转
   不声明、不物化、不做工具链闭包（`03-execution-capsule.md#§1.2`/§3.2）——工具链缺失时的失败路径权威在 `03-execution-capsule.md#§5.1`
   `CAP-401`（R11，§10.2）；对运行 Drain/Batch 的工作机，其机器用户还须是对应 project 的 writer
   成员——membership 不随机器注册自动授予（`machines register` 只建身份），缺失时 ready-queue 查询
-  折叠为 `CORE-404`、Daemon 静默空转（安装步骤见 §6.1 步 3）；以及与 AIHub 的 HTTP 网络可达性。**对任务仓 origin 的 git push 可达与推送权限**（基线修订 polyforge#37 所加）：`ship` 交付桥（`04-local-runtime.md#§5.1`）在本机把已收尾 WI 的 `polyforge/<wi-slug>` 固定名分支推送到任务仓 origin，复用工作机既有 git 身份（SSH/credential helper），不新增任何凭证存储；`ship` 成为第 13 个用户动词（`00-architecture.md#§5.1`）后，仅有 clone 拉取权限的工作机不再充分——push 权限与可达性自此属于本清单的一部分。这份清单是 INV-12 在工作机侧的落地
+  折叠为 `CORE-404`、Daemon 静默空转（安装步骤见 §6.1 步 3）；以及与 AIHub 的 HTTP 网络可达性。**对任务仓 origin 的 git push 可达与推送权限**（基线修订 polyforge#37 所加）：`ship` 交付桥（`04-local-runtime.md#§5.1`）在本机把已收尾 WI 的 `polyforge/<project>-<seq>` 固定名分支推送到任务仓 origin，复用工作机既有 git 身份（SSH/credential helper），不新增任何凭证存储；`ship` 成为第 13 个用户动词（`00-architecture.md#§5.1`）后，仅有 clone 拉取权限的工作机不再充分——push 权限与可达性自此属于本清单的一部分。这份清单是 INV-12 在工作机侧的落地
   判据，与上一条 AIHub 存储依赖清单是两份独立的清单，检查/升级一方不隐含对另一方的任何断言。
 
 **新仓部署物与旧系统的并存（权威）**：vNext AIHub 是新 repo 实现的部署物
@@ -187,7 +187,7 @@ WI Agent（§2.3）不在本表——它没有独立的部署位置或版本号�
 `POLYFORGE_WORKSPACE` 环境变量指定（无默认值，缺则拒绝启动；迁移走
 `08-capsule-base-migration.md` 的人工运行手册）：
 
-<pf-workspace>/capsules/<wi_id>/…     # Capsule 布局权威，`03-execution-capsule.md#§3.1`；执行权威文件为
+<pf-workspace>/capsules/<project>-<seq>/…  # （polyforge#144；此前认领的为 <wi_id>）Capsule 布局权威，`03-execution-capsule.md#§3.1`；执行权威文件为
                                        # <capsule>/runtime-state/execution.json（`03-execution-capsule.md#§4.2`）
 $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/state.json + credentials/），
                                        # 权威路径见 `04-local-runtime.md#§4.1`；不含任何 workflow 执行状态字段
@@ -656,7 +656,7 @@ commit。
 
 vNext：claim 前有本机预检步骤（`04-local-runtime.md#§6.1` 第 1 步），且 Capsule 是有形化的、可独立校验的目录
 结构（`03-execution-capsule.md#§3.1`/§6.1），`capsule.json` 是身份可验证文件。
-机械反例断言：任一 WI claim 成功后，`<pf-workspace>/capsules/<wi_id>/capsule.json` 必然存在，且其记录
+机械反例断言：任一 WI claim 成功后，`<pf-workspace>/capsules/<project>-<seq>/capsule.json` 必然存在，且其记录
 的 generation 与 Core 侧记录一致；预检失败时不产生任何 claim 事件（服务端零记录）。
 
 **R3 `aihub#714`** — 缺陷：本地状态目录不可用的情况未在发起接管（takeover）操作前被检测到，

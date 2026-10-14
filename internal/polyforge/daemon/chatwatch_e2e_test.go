@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -34,8 +35,12 @@ func (c clientAPI) Attention(owner string) ([]protocol.ChatAttentionItem, error)
 // The real watcher against the real daemon: a chat submits, the step asks a
 // question, the watcher prints ONE fixed-template line (no question text),
 // acks it, and does not repeat it.
+//
+// polyforge#144: every human face names the WI by its slug — the wake-up
+// line, the progress file, the snapshot and the ops status entry.
 func TestWatcherAgainstRealDaemonNeedsInputOnce(t *testing.T) {
 	td := newTestDaemon(t, nil)
+	td.hub.slugs = map[string]string{"wi_e2e": "proj#7"}
 	td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_e2e", Owner: "alice"}
 	td.submitClaim(t, "wi_e2e")
 	td.waitMonitored(t, "wi_e2e")
@@ -54,7 +59,7 @@ func TestWatcherAgainstRealDaemonNeedsInputOnce(t *testing.T) {
 		return out.String()
 	}
 	out := run()
-	if !strings.Contains(out, "[polyforge] wi_e2e needs_input q-7 — a step is waiting for a human answer; this is a human decision, the agent must not answer it") {
+	if !strings.Contains(out, "[polyforge] proj#7 needs_input q-7 — a step is waiting for a human answer; this is a human decision, the agent must not answer it") {
 		t.Fatalf("out = %q", out)
 	}
 	if strings.Contains(out, secret) || strings.Count(out, "\n") != 1 {
@@ -78,8 +83,18 @@ func TestWatcherAgainstRealDaemonNeedsInputOnce(t *testing.T) {
 	defer cancel2()
 	_ = watcher.Run(ctx2, api, watcher.Options{Status: sink, Poll: 20 * time.Millisecond})
 	raw, err := os.ReadFile(subs.StatusPath)
-	if err != nil || !strings.Contains(string(raw), "wi_e2e needs input step=plan") {
+	if err != nil || !strings.Contains(string(raw), "proj#7 needs input step=plan") {
 		t.Fatalf("progress file = %q err=%v", raw, err)
+	}
+	if snap, err := td.client.WatchSnapshot("wi_e2e", 0); err != nil || snap.Slug != "proj#7" || snap.WorkItem != "wi_e2e" {
+		t.Fatalf("snapshot must carry the slug beside the id: %+v %v", snap, err)
+	}
+	if subs.Subscriptions[0].Slug != "proj#7" {
+		t.Fatalf("the auto-subscription must record the slug: %+v", subs.Subscriptions[0])
+	}
+	var st cli.StatusResponse
+	if raw, err := td.client.Status(); err != nil || json.Unmarshal(raw, &st) != nil || len(st.Jobs) != 1 || st.Jobs[0].Slug != "proj#7" {
+		t.Fatalf("ops status must carry the slug: %+v %v", st, err)
 	}
 }
 

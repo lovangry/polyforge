@@ -194,7 +194,7 @@
   `[workspace."<path>"]` sections（每节 `projects = [...]`）是**唯一的
   workspace 来源**——CLI 与 Daemon 读同一份映射，placement 类动词的
   `--project` 按它校验，Capsule 按被认领 WI 的 project 经逆映射落到
-  `<workspace>/capsules/<wi>`；不存在任何启动期 workspace 选择面（历史旗标/环境变量已删除，仅在
+  `<workspace>/capsules/<project>-<seq>`（polyforge#144）；不存在任何启动期 workspace 选择面（历史旗标/环境变量已删除，仅在
   迁移文档中作为历史出现），也不存在环境默认 project——唯一例外是 `pf file create` 的
   cwd 推断（C16 裁定，polyforge#150：`cli/verbs_aihub.go` `inferProjectFromCwd`）：cwd 恰好
   落在**一个**映射 workspace 且该 workspace 恰好映射**一个** project 时，视同已传
@@ -591,7 +591,7 @@ origin，人工桥接验证可行后收编为一等动词）按同一判据落�
 | `pause`（暂停执行中的 WI） | Daemon 本机面 | `04-local-runtime.md#§5.1`（收尾需 Daemon 生成的 `flush_evidence`，`02-aihub-core.md#§6.4`） |
 | `resume`（恢复执行） | Daemon 本机面 | `04-local-runtime.md#§5.1` |
 | `wrap`（收尾） | Daemon 本机面 | `04-local-runtime.md#§5.1`（同 `pause` 的 flush 理由） |
-| `ship`（wrap→git 交付桥：把已收尾 WI 的封存 capsule 以固定名分支 `polyforge/<wi-slug>` 推送到 git origin） | Daemon 本机面 | `04-local-runtime.md#§5.1`（语义、幂等、PR 分层与安全面权威在彼处；CLI 入口 `pf ship <wi>` 同面转发；基线修订 polyforge#37） |
+| `ship`（wrap→git 交付桥：把已收尾 WI 的封存 capsule 以固定名分支 `polyforge/<project>-<seq>` 推送到 git origin） | Daemon 本机面 | `04-local-runtime.md#§5.1`（语义、幂等、PR 分层与安全面权威在彼处；CLI 入口 `pf ship <wi>` 同面转发；基线修订 polyforge#37） |
 | `ops`（模式切换、优雅停机等运维动作） | Daemon 本机面 | `04-local-runtime.md#§5.1`（`mode(set/drain/...)`、`shutdown()`） |
 
 分流不改变任何动词的语义权威，也不绕过任何校验：数据面动词直连不意味着豁免 A17 权限硬边界

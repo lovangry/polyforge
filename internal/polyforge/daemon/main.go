@@ -93,7 +93,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if where == "" {
 			where = cli.DefaultConfigPath()
 		}
-		fmt.Fprintf(stderr, "pf daemon: refusing to start: no workspace mapping is configured — add at least one [workspace.\"<path>\"] section with a projects = [\"...\"] list to %s; the daemon places capsules at <workspace>/capsules/<wi> per the claim's project (`pf doctor` checks the mapping)\n", where)
+		fmt.Fprintf(stderr, "pf daemon: refusing to start: no workspace mapping is configured — add at least one [workspace.\"<path>\"] section with a projects = [\"...\"] list to %s; the daemon places capsules at <workspace>/capsules/<project>-<seq> per the claim's project (`pf doctor` checks the mapping)\n", where)
 		return 1
 	}
 
