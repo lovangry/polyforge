@@ -188,19 +188,23 @@ func patchCleanPause(ctx *Context, wiID string, value bool) error {
 //     it and re-establishes execution over the parked capsule — the frozen current step
 //     re-dispatches in place as a fresh derivation. It must never answer
 //     the pause copy again (nothing here was ever paused).
-//   - every other status keeps the operator-pause door exactly as it was:
-//     a clean_pause=false PATCH on the hub, the WI left to its HOLDER
-//     daemon (the session's machine attaches on its next start via
-//     session-attach; a work item whose holder is gone moves with `pf
-//     ops end-session` + `pf submit`). This deliberately replaces v1's “fresh local claim via
-//     the daemon” behavior — the v1.5 pause keeps the session on the hub,
-//     and only the holder may resume it. Since the v1.5 review Finding 2
-//     the pause also RETAINS the holder daemon's local record, so the
-//     attach promised below really can fire. If the holder daemon is LIVE
-//     when the resume lands there is deliberately NO auto-pickup this
-//     phase: the retained paused record sits until that daemon's next
-//     start (whose restart reconciliation attaches); to continue
-//     immediately use `pf ops end-session` + `pf submit`.
+//   - every other status keeps the operator-pause door — with the
+//     live-holder continuation of wi_seWTgHeKtaa8 (v2-converge §7): the
+//     CLI still PATCHes clean_pause=false on the hub (the resume's
+//     hub-side effect), but then TELLS the local daemon (the
+//     resume-paused route). When this machine's daemon is the paused
+//     work item's holder it re-validates the session (hub: session
+//     matches, status paused, clean_pause cleared), re-attaches it
+//     (SessionAttach) and continues the current step IN PLACE — the
+//     exact semantics attaching after a restart has, the pending-question
+//     re-pose included; until this fix the cleared flag was observable
+//     only by the startup reconciliation, so a LIVE holder never picked
+//     the resume up (the old "next start" copy was that design's
+//     self-description). A daemon that does not hold the work item
+//     (DAEMON-404) or an unreachable socket keeps the holder-machine
+//     guidance (end-session + submit when the holder is gone); a typed
+//     mid-flight failure answers BLOCKED (the missing-capsule /
+//     unmapped-project copy), never "reattaches at next start".
 // ---------------------------------------------------------------------------
 
 var cmdResume = &Command{
@@ -223,16 +227,51 @@ var cmdResume = &Command{
 		// Dispatch order, decided by WI state (v2 merge of D1 + D2):
 		//  1. hub status blocked  -> the human-key resume-blocked door, then
 		//     the daemon's claim/start (below).
-		//  2. otherwise (paused) -> clear clean_pause on the hub; no daemon.
+		//  2. otherwise (paused) -> clear clean_pause on the hub, then tell
+		//     the local daemon: a holder that is live continues IN PLACE
+		//     (wi_seWTgHeKtaa8, v2-converge §7) — the resume must be
+		//     observable by the online holder, not only by the startup
+		//     reconciliation.
 		// end_pending (D2) is a distinct local state with no door of its own:
 		// the daemon retries its SessionEnd itself.
 		if wi.Status != api.StatusBlocked {
 			if err := patchCleanPause(ctx, args[0], false); err != nil {
 				return err
 			}
-			fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the paused work item stays with its holder daemon\n", args[0])
-			fmt.Fprintln(ctx.Stdout, "(its machine re-attaches on the next daemon start; a work item whose holder is gone moves with `pf ops end-session <id> --reason ...` then `pf submit <id>`)")
-			fmt.Fprintln(ctx.Stdout, "(a live holder daemon does NOT pick this up until its next start; to continue immediately use `pf ops end-session <id> --reason ...` then `pf submit <id>`)")
+			res, err := ctx.daemon().ResumePaused(args[0])
+			if err != nil {
+				var ae *api.Error
+				if errors.As(err, &ae) && ae.Code == api.ErrDaemonNotFound {
+					// the hub flag is cleared and stays cleared: the holder
+					// machine's daemon continues on ITS operator resume, or on
+					// its next start (the restart reconciliation — the working
+					// fallback that has always existed).
+					fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; this machine's daemon does not hold the paused session\n", args[0])
+					fmt.Fprintln(ctx.Stdout, "(resume it on the holder machine's daemon to continue in place; a work item whose holder is gone moves with `pf ops end-session <id> --reason ...` then `pf submit <id>`)")
+					return nil
+				}
+				if !errors.As(err, &ae) {
+					// the daemon socket is unreachable (a transport error, no
+					// typed envelope): the flag clear stands at the hub; the
+					// holder daemon picks the resume up at its next start.
+					fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the daemon socket is unreachable (%v)\n", args[0], err)
+					fmt.Fprintln(ctx.Stdout, "(once the holder daemon starts, its restart reconciliation attaches the paused session; to continue without it use `pf ops end-session <id> --reason ...` then `pf submit <id>`)")
+					return nil
+				}
+				// typed refusal — including the mid-flight block: a missing
+				// capsule / unmapped project answers blocked (the typed
+				// cause names the remediation), never the restart copy.
+				return err
+			}
+			raw, _ := json.Marshal(res)
+			ctx.finish(raw, func() {
+				if res.Outcome == "already_live" {
+					fmt.Fprintf(ctx.Stdout, "resumed %s: the work item is already running on this daemon\n", args[0])
+					return
+				}
+				fmt.Fprintf(ctx.Stdout, "resumed %s: clean_pause cleared; the holder daemon re-attached the paused session and continues the current step in place\n", args[0])
+				fmt.Fprintln(ctx.Stdout, "(a pending question is re-posed and waits for your answer; watch it with `pf watch "+args[0]+" --once`)")
+			})
 			return nil
 		}
 		// The authorization-bearing step runs with the HUMAN's own api key

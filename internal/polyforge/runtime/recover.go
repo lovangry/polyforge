@@ -427,10 +427,11 @@ func (r *Runtime) killAgentTree(j *job) {
 }
 
 // restartExemptCause reports whether a recovery cause is a daemon
-// restart or an operator attach — a process-lifecycle event, not a
-// failure, so the consecutive-failures ledger ignores it.
+// restart, an operator attach or an operator resume — a process-
+// lifecycle event, not a failure, so the consecutive-failures ledger
+// ignores it.
 func restartExemptCause(cause string) bool {
-	return cause == causeDaemonRestart || cause == causeOperatorAttach
+	return cause == causeDaemonRestart || cause == causeOperatorAttach || cause == causeOperatorResume
 }
 
 // acceptedResultCount reads the capsule's execution state and counts the

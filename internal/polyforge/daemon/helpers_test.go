@@ -126,9 +126,16 @@ type fakeHub struct {
 	queueErr error
 	// cleanPauseCleared records the operator's `pf resume` PATCH having
 	// cleared clean_pause on this hub (the B6 repro's HTTP face writes
-	// it; nothing reads it yet — the holder pickup is the missing
-	// behavior under test).
+	// it; the daemon-side resume-paused route reads it through
+	// SessionVerify's CleanPause answer below).
 	cleanPauseCleared bool
+	// cleanPause is the hub-side clean_pause state per work item
+	// (wi_seWTgHeKtaa8): latched by a pause close's
+	// SessionEnd(paused, CleanPause=true), cleared by the operator's
+	// resume PATCH (cleanPauseCleared). SessionVerify answers it so the
+	// live-holder resume door re-validates the flag exactly like the
+	// startup reconciliation does against the real hub.
+	cleanPause map[string]bool
 	// queueBlock, when non-nil, parks each Queue call until the channel
 	// closes; queueEntered, when non-nil, is closed exactly once when a
 	// Queue call has parked. The B3 race repro (auto off landing while a
@@ -154,7 +161,7 @@ type endCall struct {
 }
 
 func newFakeHub() *fakeHub {
-	return &fakeHub{status: map[string]string{}, held: map[string]string{}}
+	return &fakeHub{status: map[string]string{}, held: map[string]string{}, cleanPause: map[string]bool{}}
 }
 
 func (h *fakeHub) canonicalID(in string) string {
@@ -203,6 +210,12 @@ func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyRespons
 		st = api.StatusRunning
 	}
 	out := &api.SessionVerifyResponse{WorkItemID: id, Status: st}
+	// the hub-side operator-pause flag (wi_seWTgHeKtaa8): latched by the
+	// pause close's SessionEnd, cleared by the operator's resume PATCH
+	// (cleanPauseCleared — the B6 repro's HTTP face writes it).
+	if st == api.StatusPaused && h.cleanPause[id] && !h.cleanPauseCleared {
+		out.CleanPause = true
+	}
 	if cur := h.held[id]; cur != "" {
 		if cur == sessionID {
 			out.Matches = true
@@ -231,6 +244,10 @@ func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 	switch req.Status {
 	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked, api.StatusCanceled:
 		h.held[id] = ""
+		h.cleanPause[id] = false
+	case api.StatusPaused:
+		// the pause close's operator-pause marker (wi_seWTgHeKtaa8)
+		h.cleanPause[id] = req.CleanPause
 	}
 	h.status[id] = req.Status
 	return nil

@@ -688,17 +688,30 @@ func (d *Daemon) abortStartup() {
 // them through the same RTStarted shape observe builds monitors on.
 func (d *Daemon) reattachRecovered() {
 	for _, ji := range d.rt.List() {
-		if ji.Agent == nil {
-			continue
-		}
-		d.attachCh.Push(d.buildAttach(protocol.RTMsg{
-			Kind: protocol.RTStarted, SpawnN: ji.SpawnN,
-			WorkItem: ji.WorkItem, AgentPID: ji.AgentPID,
-			// the in-process secret re-arms the M4 revalidation for
-			// reattached jobs (it rides RTMsg, never a log surface).
-			SessionID: ji.SessionID,
-		}, ji))
+		d.reattachJob(ji)
 	}
+}
+
+// reattachJob synthesizes ONE job's observe attachment through the
+// RTStarted shape. A retained-paused job's monitor was released at the
+// pause close (RTFinished), and the in-place resume's RTRecovered
+// alone cannot rebuild it — observe drops a recovered message for an
+// unmonitored work item (a fresh daemon's restart reconciliation has
+// the same shape, which is why reattachRecovered exists). The monitor
+// this creates reads the capsule's execution.json itself, so the
+// pending-question projection (and the M4 revalidation) come back with
+// it.
+func (d *Daemon) reattachJob(ji runtime.JobInfo) {
+	if ji.Agent == nil {
+		return
+	}
+	d.attachCh.Push(d.buildAttach(protocol.RTMsg{
+		Kind: protocol.RTStarted, SpawnN: ji.SpawnN,
+		WorkItem: ji.WorkItem, AgentPID: ji.AgentPID,
+		// the in-process secret re-arms the M4 revalidation for
+		// reattached jobs (it rides RTMsg, never a log surface).
+		SessionID: ji.SessionID,
+	}, ji))
 }
 
 // buildAttach turns one runtime snapshot into an observe attachment:

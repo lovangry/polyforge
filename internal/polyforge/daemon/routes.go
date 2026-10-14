@@ -115,6 +115,20 @@ type resumeBlockedResponse struct {
 	Deferred bool `json:"deferred,omitempty"`
 }
 
+// resumePausedResponse is the POST /jobs/{id}/resume-paused answer
+// (wi_seWTgHeKtaa8): the operator's `pf resume` on a work item this
+// daemon holds PAUSED — the live-holder continuation. Attached: the
+// paused session was re-attached (SessionAttach) and the work item
+// continues IN PLACE (same semantics as attaching after a restart,
+// the pending-question re-pose included). AlreadyLive: the work item
+// is already running here (an earlier resume or a live dispatch won).
+type resumePausedResponse struct {
+	Resumed    bool   `json:"resumed"`
+	WorkItemID string `json:"work_item_id"`
+	// Outcome: attached | already_live.
+	Outcome string `json:"outcome,omitempty"`
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -209,6 +223,12 @@ func (d *Daemon) handler() http.Handler {
 	// live driver, no bridge handle and no job record; the owner's moves
 	// are their own route, not a runtime call.
 	mux.HandleFunc("POST /jobs/{wi}/resume-blocked", d.resumeBlockedRoute)
+	// wi_seWTgHeKtaa8 (v2-converge §7): the live-holder half of the
+	// operator's `pf resume` on a PAUSED work item — the CLI has already
+	// cleared clean_pause at the hub; this route makes that observable
+	// by the ONLINE holder (the startup reconciliation is the only other
+	// consumer of that hub state, and it runs once per daemon start).
+	mux.HandleFunc("POST /jobs/{wi}/resume-paused", d.resumePausedRoute)
 	mux.HandleFunc("POST /jobs/{wi}/pause", d.pauseRoute)
 	mux.HandleFunc("POST /jobs/{wi}/wrap", d.wrapRoute)
 	mux.HandleFunc("POST /jobs/{wi}/ship", d.shipRoute)
@@ -405,6 +425,61 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	d.autoSubscribe(body.Origin, canonical, cursor)
 	writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical})
+}
+
+// ---------------------------------------------------------------------------
+// resume-paused: the live-holder continuation (wi_seWTgHeKtaa8).
+
+// resumePausedRoute serves POST /jobs/{id}/resume-paused — the
+// live-holder half of the operator's `pf resume` on a work item this
+// daemon holds PAUSED. The CLI has already PATCHed clean_pause=false at
+// the hub (the resume's hub-side effect, unchanged); before the fix the
+// ONLY consumer of that hub state was the startup reconciliation
+// (runtime/restart.go), which runs exactly once per daemon process — a
+// LIVE holder never re-observed the cleared flag, so a paused work item
+// sat parked until its holder restarted. This route runs the same
+// reconciliation for the ONE retained paused record NOW: verify the
+// session still holds the WI (paused, clean_pause cleared), re-attach it
+// (SessionAttach) and continue the current step IN PLACE through the
+// recovery engine — the exact semantics attaching after a restart has,
+// including re-posing a pending unanswered question and waiting for the
+// human answer before any dispatch.
+//
+// The daemon's run context, NOT the HTTP request's (see
+// resumeBlockedRoute): the recovery continuation must survive the CLI
+// hanging up on this answer.
+func (d *Daemon) resumePausedRoute(w http.ResponseWriter, r *http.Request) {
+	wi := r.PathValue("wi")
+	var body struct {
+		Origin *reqOrigin `json:"origin,omitempty"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if err := d.modes.AdmitSubmit(); err != nil {
+		writeAdmissionErr(w, err)
+		return
+	}
+	canonical := d.canonWI(wi)
+	d.rt.NoteAlias(wi, canonical)
+	outcome, err := d.rt.ResumePaused(d.runCtx, canonical)
+	if err != nil {
+		writeErrOf(w, err)
+		return
+	}
+	if outcome == runtime.ResumeAttached {
+		// the pause close released the job's observe monitor; the
+		// in-place resume rebuilds it (the same re-attachment a restart
+		// does for its recovered jobs) so the QUESTION column, the M4
+		// revalidation and the watch faces all come back with the
+		// continuation.
+		if ji, live := d.rt.Info(canonical); live {
+			d.reattachJob(ji)
+		}
+	}
+	writeJSON(w, http.StatusOK, resumePausedResponse{
+		Resumed: outcome == runtime.ResumeAttached, WorkItemID: canonical, Outcome: outcome,
+	})
 }
 
 // ---------------------------------------------------------------------------
