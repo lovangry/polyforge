@@ -124,6 +124,18 @@ type fakeHub struct {
 	// seeded list — the drain degraded-signal test scripts denials with
 	// it.
 	queueErr error
+	// cleanPauseCleared records the operator's `pf resume` PATCH having
+	// cleared clean_pause on this hub (the B6 repro's HTTP face writes
+	// it; nothing reads it yet — the holder pickup is the missing
+	// behavior under test).
+	cleanPauseCleared bool
+	// queueBlock, when non-nil, parks each Queue call until the channel
+	// closes; queueEntered, when non-nil, is closed exactly once when a
+	// Queue call has parked. The B3 race repro (auto off landing while a
+	// wave is mid-fetch) scripts the interleave with them; both are nil
+	// in every other test.
+	queueBlock   chan struct{}
+	queueEntered chan struct{}
 	// heartbeats/heartbeatErr are the M3 liveness seam: heartbeats
 	// records every Heartbeat payload the daemon POSTed; heartbeatErr,
 	// when non-nil, is what Heartbeat answers instead.
@@ -254,6 +266,16 @@ func (h *fakeHub) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error
 }
 
 func (h *fakeHub) Queue(project string) ([]api.WorkItem, error) {
+	h.mu.Lock()
+	block, entered := h.queueBlock, h.queueEntered
+	h.queueEntered = nil
+	h.mu.Unlock()
+	if entered != nil {
+		close(entered)
+	}
+	if block != nil {
+		<-block
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.queueErr != nil {

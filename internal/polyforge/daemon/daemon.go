@@ -910,16 +910,25 @@ func (d *Daemon) dispatch() {
 // never beyond the concurrency it can actually start — the wave's
 // free-slot budget is spent per enqueued entry (audit B3a: one wave
 // enqueues at most the CURRENT free-slot count; the rest of the ready
-// queue stays on aihub for the next wave). Authorization-class denials
-// raise the denial signal — a typed queue_fetch_denied event in the
-// observe lane's durable log, once per healthy→denied episode (the
-// flag clears on the next successful fetch); transport-class losses
-// stay silent idle.
+// queue stays on aihub for the next wave) and is reduced by the entries
+// ALREADY queued — including ones held back in their DAEMON-503
+// backoff: they occupy no running slot yet, but they are waiting for
+// one, so a wave that ignored them could push the pending set past
+// max_concurrent. The auto switch is RE-CHECKED before each enqueue:
+// the wave's ready-queue fetch is a batch of HTTP round trips, and a
+// `pf ops auto off` landing mid-fetch must stop THIS wave too — the
+// switch flip's purge (autoOffPurge) only sees entries already landed.
+// Authorization-class denials raise the denial signal — a typed
+// queue_fetch_denied event in the observe lane's durable log, once per
+// healthy→denied episode (the flag clears on the next successful
+// fetch); transport-class losses stay silent idle.
 func (d *Daemon) fetchAutoWave() {
 	if !d.modes.AdmitAutoPull() {
 		return
 	}
-	budget := d.q.FreeSlots()
+	// all pending entries (backoff included) are waiting for a slot:
+	// the wave may only enqueue what is left of the concurrency cap.
+	budget := d.q.FreeSlots() - d.q.LenPending()
 	if budget <= 0 {
 		return
 	}
@@ -966,6 +975,14 @@ func (d *Daemon) fetchAutoWave() {
 	for _, it := range items {
 		if budget == 0 {
 			break // the wave spent its slots; the next wave claims the rest
+		}
+		// auto off landed while this wave was fetching (its round trips
+		// are the window): nothing more may be enqueued — the flip's purge
+		// ran on a queue that did not contain this wave's entries yet, so
+		// this re-check is the only thing that stops them (audit B3 race,
+		// wi_seWTgHeKtaa8).
+		if !d.modes.AdmitAutoPull() {
+			return
 		}
 		if it.BundleName == nil {
 			continue // registration tickets never execute

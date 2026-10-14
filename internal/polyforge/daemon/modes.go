@@ -344,7 +344,9 @@ func (q *jobQueue) LenPending() int {
 }
 
 // FreeSlots reports how many spawn slots are open right now (the wave
-// budget fetchAutoWave spends per enqueued entry, audit B3a).
+// budget fetchAutoWave spends per enqueued entry, audit B3a). It counts
+// only RUNNING work; the wave budget subtracts the already-queued
+// entries itself (wi_seWTgHeKtaa8) — Take() is the start-side gate.
 func (q *jobQueue) FreeSlots() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -353,11 +355,6 @@ func (q *jobQueue) FreeSlots() int {
 		n = 0
 	}
 	return n
-}
-
-// SlotFree reports whether a spawn slot is open.
-func (q *jobQueue) SlotFree() bool {
-	return q.FreeSlots() > 0
 }
 
 // Take pops the next DUE pending entry IF a slot is free (04 §6.1d
