@@ -996,7 +996,10 @@ func (s *Server) hCreateMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	// do (id or "<project>#<seq>" slug) and is stored as the canonical
 	// id; an unknown or unreadable one is a typed CORE-404, never the
 	// foreign-key failure of the insert (polyforge#155). An empty one is
-	// no attribution.
+	// no attribution. A memory belongs to one project: a readable work
+	// item of another project is refused as bad input (checked after the
+	// read gate, so an unreadable one stays indistinguishable from an
+	// unknown one).
 	if req.WorkItemID != nil && *req.WorkItemID == "" {
 		req.WorkItemID = nil
 	}
@@ -1007,6 +1010,11 @@ func (s *Server) hCreateMemory(w http.ResponseWriter, r *http.Request, idn *iden
 			return
 		}
 		if !s.requireRead(w, idn, wiProjectID, "work item %s", *req.WorkItemID) {
+			return
+		}
+		if wiProjectID != projectID {
+			writeErr(w, core.Fail(api.ErrCoreBadInput, "",
+				"work item %s belongs to another project than %s", *req.WorkItemID, req.Project))
 			return
 		}
 		req.WorkItemID = &wiID
