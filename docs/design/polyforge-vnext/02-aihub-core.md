@@ -294,7 +294,7 @@ repo_inventory TEXT   -- JSON 数组 [{"name": "<项目仓库名>"}]，只存名
 - **只存名字（安全边界）**：认领方 Daemon 用本机 git 凭证 clone 清单里的仓库，所以 clone 源只能来自项目记录（`projects.repos`，由项目 maintainer/admin 维护），绝不来自建票人。每项只接受 `{name}`；url 在**认领时**从项目记录解析。
 - **校验（Go 侧，创建事务内，失败则整体不落库）**：1..8 项；每项必须有字符串 `name`；`name` 必须是该项目的仓库（否则 `CORE-400 REPO_NOT_IN_PROJECT`）且在同一 WI 内唯一（重复 → `CORE-400 INVENTORY_DUPLICATE_NAME`）；携带 `url` → `CORE-400 INVENTORY_URL_NOT_ALLOWED`（即使与项目记录相同）；携带 `subdir` → `CORE-400 INVENTORY_SUBDIR_UNSUPPORTED`；其他键 → `CORE-400`（未知键）。
 - **不支持冻结 base commit**：工作机不会检出指定 base，故任一项携带 `base`，或请求体的 `repo_inventory_base` 数组非空 → `CORE-400 INVENTORY_BASE_UNSUPPORTED`（拒绝而非存了不生效；`null`/`[]` 视为无）。工作机 clone 各仓库的默认分支；同一 WI 重新认领时由 carrier ref 恢复上次现场（`03-execution-capsule.md#§4`）。
-- **认领消费**：`POST /api/v1/work-items/{id}/claim` 的答复 `repos` 在 WI 有清单时**只**返回清单内仓库，url 取认领时项目记录中的值（`{name, url, description?}`）；无清单时返回项目全部仓库（向后兼容）；重新认领（blocked→resume）同理。清单中的名字已不再是项目仓库 → 认领被拒 `CORE-409 INVENTORY_REPO_GONE`（认领事务回滚，WI 保持 `queued`；在项目上恢复该仓库，或取消并重新建票）。Daemon 按 `repos` 逐个 clone，无额外逻辑。
+- **认领消费**：`POST /api/v1/work-items/{id}/claim` 的答复 `repos` 在 WI 有清单时**只**返回清单内仓库，url 取认领时项目记录中的值（`{name, url, description?}`）；无清单时返回项目全部仓库（向后兼容）；重新认领（blocked→resume）同理。清单中的名字已不再是项目仓库 → 认领被拒 `CORE-409 INVENTORY_REPO_GONE`（认领事务回滚，WI 保持 `queued`；在项目上恢复该仓库，或取消并重新建票）。这样的 WI 同时**离开就绪队列**（`GET .../ready-queue` 的 `items` 不含它，与有未完成 `blocks` 边的 WI 同理，不新增状态或 `waiting_on` 值，就绪投影也不单列原因），因此 Daemon 的自动拉取不会反复认领它；仓库恢复后自动回到 `items`。Daemon 按 `repos` 逐个 clone，无额外逻辑。
 
 **API**（权威签名；`01`/`03`/`05` 只引用，不重复定义）：
 

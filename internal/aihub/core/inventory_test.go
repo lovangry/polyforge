@@ -260,3 +260,49 @@ func TestClaimRefusesInventoryRepoGone(t *testing.T) {
 		t.Fatalf("refused claim must leave the WI queued, got %+v (%v)", got, err)
 	}
 }
+
+// TestReadyQueueSkipsInventoryRepoGone: a queued WI whose inventory
+// names a repo the project no longer has leaves the executable segment
+// (its claim would only be refused INVENTORY_REPO_GONE) and comes back
+// when the repo is restored; a WI without an inventory is unaffected.
+func TestReadyQueueSkipsInventoryRepoGone(t *testing.T) {
+	env := newEnv(t)
+	reposProject(t, env)
+	withInv, err := env.WIs.Create(invCreate(env, names("big")))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	plain, err := env.WIs.Create(invCreate(env, nil))
+	if err != nil {
+		t.Fatalf("create plain: %v", err)
+	}
+	items := func() map[string]bool {
+		t.Helper()
+		q, err := env.WIs.ReadyQueue("bravo")
+		if err != nil {
+			t.Fatalf("ready queue: %v", err)
+		}
+		out := map[string]bool{}
+		for _, it := range q.Items {
+			out[it.ID] = true
+		}
+		return out
+	}
+	setRepos := func(js string) {
+		t.Helper()
+		if _, err := env.DB.Exec(`UPDATE projects SET repos=?1 WHERE name='bravo'`, js); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := items(); !got[withInv.ID] || !got[plain.ID] {
+		t.Fatalf("both WIs must be ready while big is a project repo: %v", got)
+	}
+	setRepos(`[{"name":"app","url":"file:///srv/app.git"}]`)
+	if got := items(); got[withInv.ID] || !got[plain.ID] {
+		t.Fatalf("big removed: want only the plain WI ready, got %v", got)
+	}
+	setRepos(`[{"name":"app","url":"file:///srv/app.git"},{"name":"big","url":"file:///srv/big2.git"}]`)
+	if got := items(); !got[withInv.ID] || !got[plain.ID] {
+		t.Fatalf("big restored: both WIs must be ready again, got %v", got)
+	}
+}

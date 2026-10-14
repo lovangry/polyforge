@@ -36,8 +36,10 @@ func queueLess(a, b *WIView) bool {
 }
 
 // ReadyQueue builds the queue for a project (name or id). A WI is
-// executable when: status queued, waiting_on empty, and no unfinished
-// `blocks` dependency edge.
+// executable when: status queued, waiting_on empty, no unfinished
+// `blocks` dependency edge, and every repo its inventory names is still
+// one of the project's repos (02 §4.6; else its claim would be refused
+// INVENTORY_REPO_GONE on every drain wave).
 func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	var projectID, projectName string
 	err := m.db.QueryRow(`SELECT id, name FROM projects WHERE name=?1 OR id=?1`, project).
@@ -47,6 +49,14 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 			return nil, Fail(api.ErrCoreNotFound, "", "project %q", project)
 		}
 		return nil, err
+	}
+	projectRepos, err := projectReposTx(m.db, projectID)
+	if err != nil {
+		return nil, err
+	}
+	inProject := map[string]bool{}
+	for _, pr := range projectRepos {
+		inProject[pr.Name] = true
 	}
 	q := &ReadyQueue{
 		Project:        projectName,
@@ -151,6 +161,13 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 			}
 			if blocked {
 				continue
+			}
+			gone, err := inventoryRepoGone(m.db, c.wi.ID, inProject)
+			if err != nil {
+				return nil, err
+			}
+			if gone {
+				continue // 02 §4.6: a declared repo left the project
 			}
 			q.Items = append(q.Items, *c.view)
 		}

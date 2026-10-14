@@ -162,3 +162,21 @@ func claimReposTx(tx *sql.Tx, wiID, projectID string) ([]api.ProjectRepo, error)
 	}
 	return repos, nil
 }
+
+// inventoryRepoGone reports whether a WI's frozen inventory names a repo
+// that is not in inProject (the project's current repo-name set). Such a
+// WI would only draw CORE-409 INVENTORY_REPO_GONE on every claim, so the
+// ready projection leaves it out (like an unfinished blocks edge) until
+// the repo is restored or the WI is canceled.
+func inventoryRepoGone(q queryRower, wiID string, inProject map[string]bool) (bool, error) {
+	inv, err := repoInventoryOf(q, wiID)
+	if err != nil {
+		return false, err
+	}
+	for _, r := range inv {
+		if !inProject[r.Name] {
+			return true, nil
+		}
+	}
+	return false, nil
+}

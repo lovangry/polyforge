@@ -503,7 +503,7 @@ func cacheIdempotentClaimTx(tx *sql.Tx, key, wiID, callerIdentity string, claim 
 // projectReposTx reads the project's task-repo inventory on the claim's
 // own snapshot (the runtime clones each entry into the capsule before the
 // agent starts).
-func projectReposTx(tx *sql.Tx, projectID string) ([]api.ProjectRepo, error) {
+func projectReposTx(tx queryRower, projectID string) ([]api.ProjectRepo, error) {
 	var reposJSON string
 	err := tx.QueryRow(`SELECT repos FROM projects WHERE id=?1`, projectID).Scan(&reposJSON)
 	if errors.Is(err, sql.ErrNoRows) {
