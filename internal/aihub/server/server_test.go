@@ -415,6 +415,45 @@ func TestMemoryOverHTTP(t *testing.T) {
 	}
 }
 
+// TestMemoryWorkItemSlug (polyforge#155): the attributing work item of a
+// memory write accepts the "<project>#<seq>" slug the other faces accept
+// and stores the canonical id; an unknown id or slug answers a typed
+// CORE-404, never the insert's foreign-key failure as a 500.
+func TestMemoryWorkItemSlug(t *testing.T) {
+	e := newSrvEnv(t)
+	var wi struct {
+		ID   string `json:"id"`
+		Slug string `json:"slug"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items", e.key,
+		map[string]any{"project": "alpha", "goal": "attribution"}, &wi); code != 201 || wi.ID == "" || wi.Slug == "" {
+		t.Fatalf("create wi: %d %s", code, raw)
+	}
+	for _, spelling := range []string{wi.Slug, wi.ID} {
+		var m struct {
+			ID         string `json:"id"`
+			WorkItemID string `json:"work_item_id"`
+		}
+		if code, raw := e.do(t, "POST", "/api/v1/memories", e.key, map[string]any{
+			"project": "alpha", "type": "fact.note", "visibility": "project",
+			"content": "attributed via " + spelling, "work_item_id": spelling,
+		}, &m); code != 201 || m.WorkItemID != wi.ID {
+			t.Fatalf("create memory with work_item_id %q: %d %s (want canonical %s)", spelling, code, raw, wi.ID)
+		}
+	}
+	for _, unknown := range []string{"alpha#999", "wi_doesnotexist", "nope#1", "garbage"} {
+		var envl struct {
+			Code string `json:"code"`
+		}
+		if code, raw := e.do(t, "POST", "/api/v1/memories", e.key, map[string]any{
+			"project": "alpha", "type": "fact.note", "visibility": "project",
+			"content": "orphan", "work_item_id": unknown,
+		}, &envl); code != 404 || envl.Code != api.ErrCoreNotFound {
+			t.Fatalf("unknown work_item_id %q: %d %s, want 404 %s", unknown, code, raw, api.ErrCoreNotFound)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Management face over HTTP (#10): the six endpoints the CLI verbs call.
 
