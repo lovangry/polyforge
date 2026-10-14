@@ -159,8 +159,8 @@ func run(args ...string) (string, error) {
 // mkCapsule builds an initialized, externalized capsule worktree.
 func mkCapsule(t *testing.T, o Opts) {
 	t.Helper()
-	if err := InitLocal(o); err != nil {
-		t.Fatalf("InitLocal: %v", err)
+	if err := initLocal(t, o); err != nil {
+		t.Fatalf("initLocal: %v", err)
 	}
 	if err := ExternalizeGitDir(o); err != nil {
 		t.Fatalf("ExternalizeGitDir: %v", err)
@@ -774,14 +774,14 @@ func TestCleanStaleLocksAges(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// InitLocal / ExternalizeGitDir (the hoisted single implementation)
+// initLocal / ExternalizeGitDir (the hoisted single implementation)
 
 func TestInitLocalAndExternalize(t *testing.T) {
 	setIdentity(t)
 	o, _ := testOpts(t, "wi_init")
 
-	if err := InitLocal(o); err != nil {
-		t.Fatalf("InitLocal: %v", err)
+	if err := initLocal(t, o); err != nil {
+		t.Fatalf("initLocal: %v", err)
 	}
 	if err := ExternalizeGitDir(o); err != nil {
 		t.Fatalf("ExternalizeGitDir: %v", err)

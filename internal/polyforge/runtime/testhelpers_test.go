@@ -64,7 +64,7 @@ type fakeHub struct {
 	// bare capsule repo aihub creates at claim (the production contract):
 	// the runtime's claim-time clone path has a remote to clone. The
 	// runtime's no-remote local init is a typed refusal since the audit's
-	// dead-code sweep (gitops.InitLocal's production path is gone).
+	// dead-code sweep (there is no production local-init path).
 	capsuleRepoBase string
 }
 
@@ -516,8 +516,8 @@ func initGitCapsule(t *testing.T, j *job) string {
 	j.git.RemoteURL = bare
 	j.git.Username = j.wi
 	j.git.Secret = "push-secret"
-	if err := gitops.InitLocal(j.git); err != nil {
-		t.Fatalf("gitops.InitLocal: %v", err)
+	if out, err := exec.Command("git", "init", j.git.CapsuleDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
 	}
 	if err := gitops.ExternalizeGitDir(j.git); err != nil {
 		t.Fatalf("gitops.ExternalizeGitDir: %v", err)

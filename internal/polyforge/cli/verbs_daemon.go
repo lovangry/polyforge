@@ -288,7 +288,7 @@ var cmdWrap = &Command{
 		// (`pf cancel`). The daemon refuses `wrap` and `wrap --fail` on a
 		// parked-blocked WI with DAEMON-409 naming those two moves; when it
 		// cannot tell (no local job, DAEMON-404) `--fail` prints the same
-		// owner-move hint below.
+		// owner-move hint below and still exits non-zero.
 		raw, err := ctx.daemon().Wrap(args[0], reason)
 		if err != nil {
 			var ae *api.Error
@@ -296,10 +296,13 @@ var cmdWrap = &Command{
 				// C9 (audit-subtraction pass B): a WI parked blocked has no
 				// local job to fail. The owner's moves are exactly two —
 				// continue with `pf resume`, abandon with `pf cancel` — and
-				// this command does neither: it says so and touches nothing
-				// (no hub door, no termination).
-				fmt.Fprintf(ctx.Stdout, "%s has no running job on this daemon; if it is parked blocked, continue it with `pf resume %s` or abandon it with `pf cancel %s`\n", args[0], args[0], args[0])
-				return nil
+				// this command does neither: it says so, touches nothing
+				// (no hub door, no termination) and fails — the wrap did
+				// not happen, so the exit is the typed DAEMON-404's.
+				if !ctx.JSON {
+					fmt.Fprintf(ctx.Stderr, "%s has no running job on this daemon; if it is parked blocked, continue it with `pf resume %s` or abandon it with `pf cancel %s`\n", args[0], args[0], args[0])
+				}
+				return err
 			}
 			return err
 		}
@@ -533,7 +536,8 @@ Launch flags (with environment variable and default, where one exists):
       store, which the daemon also passes them)
   --operator-agent-dir PATH
       SOURCE of the dedicated step agent directory: the daemon copies
-      the minimal set (auth.json, models.json, agents/) from here into
+      the minimal set (auth.json, models.json, agents/,
+      extensions/subagent/ — the subagent tool) from here into
       <data-dir>/step-agent and every step agent runs against THAT
       directory, so the operator's own harness settings — user-level
       packages included — never reach a step agent

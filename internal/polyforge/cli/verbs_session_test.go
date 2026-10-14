@@ -48,8 +48,8 @@ func TestResumeFlagClearSemantics(t *testing.T) {
 // TestWrapFailOnBlockedPrintsResumeOrCancelHint (C9, audit-subtraction
 // pass B): `pf wrap --fail` on a WI with no local job (the parked-blocked
 // shape — the daemon answers the wrap probe with DAEMON-404) prints the
-// dedicated resume-or-cancel hint and touches NOTHING else: no hub door,
-// no termination — the owner continues with `pf resume` or abandons with
+// dedicated resume-or-cancel hint, exits non-zero (the wrap did not
+// happen) and touches NOTHING else: no hub door, no termination — the owner continues with `pf resume` or abandons with
 // `pf cancel`. A plain wrap on the same shape stays the typed error.
 func TestWrapFailOnBlockedPrintsResumeOrCancelHint(t *testing.T) {
 	var rec reqRecorder
@@ -60,12 +60,14 @@ func TestWrapFailOnBlockedPrintsResumeOrCancelHint(t *testing.T) {
 	code, stdout, stderr := runPf(t, map[string]string{
 		"PF_SERVER": hub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
 	}, "wrap", "wi_blocked", "--fail")
-	if code != 0 {
-		t.Fatalf("wrap --fail hint: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	// the wrap did not happen: non-zero exit with the typed error, the
+	// hint alongside it on stderr
+	if code != 1 || !strings.Contains(stderr, "DAEMON-404") {
+		t.Fatalf("wrap --fail on no local job must fail with DAEMON-404: code=%d stdout=%s stderr=%s", code, stdout, stderr)
 	}
 	for _, want := range []string{"blocked", "pf resume", "pf cancel"} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("the hint must name %q: %s", want, stdout)
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the hint must name %q: %s", want, stderr)
 		}
 	}
 	if got := d.rec.last(); got.Path != "/jobs/wi_blocked/wrap" || !strings.Contains(got.Body, `"reason":"fail"`) {

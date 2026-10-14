@@ -54,6 +54,35 @@ func TestNeedsInputEnvelopeValidation(t *testing.T) {
 	}
 }
 
+// D11: the agent-chosen question id must have the accepted shape; a
+// malformed id makes the envelope invalid (the in-process retry lane).
+func TestNeedsInputQuestionIDShape(t *testing.T) {
+	for _, ok := range []string{"q1", "q_7f3a1c", "3f2b8c1e-5d4a-4f6b-9a7c-2e1d0b9a8f7e", "grill-review-wi_0123456789abcdef-d5-confirm", "a.b-c_D", strings.Repeat("x", 64)} {
+		f := newFixture(t, false)
+		f.res.Outcome, f.res.Output = OutcomeNeedsInput, nil
+		f.res.QuestionID, f.res.Question = ok, "why?"
+		if err := ValidateStepResult(f.res, f.spec); err != nil {
+			t.Fatalf("question id %q must validate: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"q 1", "q/../x", "q\nfake line", "[polyforge]", "q;rm", "é", strings.Repeat("x", 65)} {
+		f := newFixture(t, false)
+		f.res.Outcome, f.res.Output = OutcomeNeedsInput, nil
+		f.res.QuestionID, f.res.Question = bad, "why?"
+		if err := ValidateStepResult(f.res, f.spec); err == nil || !strings.Contains(err.Error(), "malformed") {
+			t.Fatalf("question id %q must be rejected as malformed, got %v", bad, err)
+		}
+		// embedded in the output object: same rule
+		g := newFixture(t, false)
+		g.res.Outcome = OutcomeNeedsInput
+		blob, _ := json.Marshal(map[string]string{"question_id": bad, "question": "why?"})
+		g.res.Output = blob
+		if err := ValidateStepResult(g.res, g.spec); err == nil || !strings.Contains(err.Error(), "malformed") {
+			t.Fatalf("embedded question id %q must be rejected as malformed, got %v", bad, err)
+		}
+	}
+}
+
 func TestHumanGateGuarantee(t *testing.T) {
 	f := newFixture(t, false)
 	f.spec.RequiresHumanAnswer = true
