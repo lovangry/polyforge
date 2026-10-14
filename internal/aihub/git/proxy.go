@@ -126,6 +126,7 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		"REMOTE_ADDR="+remoteAddr(r),
 		"CONTENT_TYPE="+r.Header.Get("Content-Type"),
 		"GIT_PF_MAX_BLOB="+strconv.FormatInt(m.MaxBlobBytes, 10),
+		"GIT_PF_MAX_TASK_BLOB="+strconv.FormatInt(m.MaxTaskBlobBytes, 10),
 		"PF_EXPECTED_FINGERPRINT="+expectedHandle,
 	)
 	if n := r.Header.Get("Content-Length"); n != "" {
