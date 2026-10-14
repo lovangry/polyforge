@@ -42,7 +42,11 @@
 // stdin EOF does not exit — the process parks alive, which the
 // daemon-crash scenarios need (the WI agent must survive its parent's
 // death). There is no model behind a turn: every "run" is a canned
-// record burst.
+// record burst. Because it never exits on its own, it watches the test
+// binary instead: with FAKEPI_TEST_PID set (the acceptance TestMain sets
+// it), the process exits once that pid is gone — an agent orphaned by a
+// killed or timed-out test run (no test cleanup runs then) does not
+// linger for hours.
 //
 // Test-only helper; nothing in production imports or references it.
 package main
@@ -53,8 +57,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -72,6 +78,7 @@ var outMu sync.Mutex
 var drv *driveEnv
 
 func main() {
+	watchTestBinary()
 	drv = newDriveEnv()
 	if drv == nil {
 		parkForever()
@@ -239,6 +246,23 @@ func emitRecord(rec map[string]any) {
 	outMu.Lock()
 	defer outMu.Unlock()
 	fmt.Println(string(raw))
+}
+
+// watchTestBinary exits the process once the test binary named by
+// FAKEPI_TEST_PID is gone (see the package doc). No-op without it.
+func watchTestBinary() {
+	pid, err := strconv.Atoi(os.Getenv("FAKEPI_TEST_PID"))
+	if err != nil || pid <= 1 {
+		return
+	}
+	go func() {
+		for {
+			if syscall.Kill(pid, 0) == syscall.ESRCH {
+				os.Exit(97)
+			}
+			time.Sleep(time.Second)
+		}
+	}()
 }
 
 func parkForever() {
