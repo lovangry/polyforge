@@ -1,17 +1,16 @@
 package driver
 
-// d7_ratelimit_test.go: the D7 semantics of polyforge#147 — a provider
-// throttle (429 / rate limit / overloaded / quota / billing credit) is
-// NOT a model-class death. The driver waits out an exponential backoff
-// and retries the SAME model, with no retry-count bound of its own: the
-// step's cumulative runtime T is the only limit.
-//
-// Written RED against the pre-change driver (the throttle texts lived
-// in modelPatterns, so the first one switched candidates and the third
-// one blocked the step on the failure counter), GREEN after.
+// d7_ratelimit_test.go: the D7 semantics of polyforge#147 — a transient
+// provider throttle (429 / rate limit / too many requests / overloaded)
+// is NOT a model-class death. The driver waits out an exponential
+// backoff and retries the SAME model, with no retry-count bound of its
+// own: the step's cumulative runtime T (which the backoff waits count
+// into) is the only limit. Allowance and auth problems (quota, billing,
+// credit, insufficient ..., 401/403) stay model-class and switch.
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -19,21 +18,38 @@ import (
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
-// TestD7ThrottleTextsAreRateLimitedNotModelClass: the throttle
-// signatures classify as the rate-limit cause, and that cause never
-// advances the candidate chain.
+// TestD7ThrottleTextsAreRateLimitedNotModelClass: only the transient
+// throttle signatures classify as the rate-limit cause (also on an
+// error turn), and that cause never advances the candidate chain;
+// allowance/auth texts stay model-class even next to a 429.
 func TestD7ThrottleTextsAreRateLimitedNotModelClass(t *testing.T) {
 	for _, text := range []string{
 		"provider request failed: HTTP 429 Too Many Requests",
 		"error: rate limit exceeded, retry later",
 		"upstream error: the model is overloaded",
-		"You exceeded your current quota",
+	} {
+		for _, turnErr := range []bool{false, true} {
+			got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 1, LastError: text, TurnError: turnErr})
+			if got != FailRateLimited {
+				t.Errorf("%q (turn error %v) classified %q, want %q", text, turnErr, got, FailRateLimited)
+			}
+		}
+	}
+	for _, text := range []string{
+		"429: You exceeded your current quota",
 		"insufficient credit on this account",
 		"billing: credit balance is too low",
+		"403 insufficient permissions",
+		"401 unauthorized",
 	} {
-		got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 1, LastError: text})
-		if got != FailRateLimited {
-			t.Errorf("%q classified %q, want %q", text, got, FailRateLimited)
+		for _, turnErr := range []bool{false, true} {
+			got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 1, LastError: text, TurnError: turnErr})
+			if got != FailExitModel {
+				t.Errorf("%q (turn error %v) classified %q, want %q", text, turnErr, got, FailExitModel)
+			}
+		}
+		if got, _, _ := classifyWaitFailure(errors.New("write prompt: broken pipe: " + text)); got != FailExitModel {
+			t.Errorf("startup %q classified %q, want %q", text, got, FailExitModel)
 		}
 	}
 	if IsModelClass(FailRateLimited) {
@@ -184,5 +200,54 @@ func TestD7RateLimitDispositionIsSameModelRetry(t *testing.T) {
 	}
 	if ms, _ := body["backoff_ms"].(int64); ms != RateLimitBackoffBase.Milliseconds() {
 		t.Fatalf("backoff_ms %v, want %d", body["backoff_ms"], RateLimitBackoffBase.Milliseconds())
+	}
+}
+
+// TestD7AllowanceAndAuthFailuresSwitchCandidates: "exceeded your current
+// quota" and "403 insufficient permissions" are not throttles — another
+// model/provider may work, so they advance the candidate chain with no
+// backoff.
+func TestD7AllowanceAndAuthFailuresSwitchCandidates(t *testing.T) {
+	for _, text := range []string{
+		"429 You exceeded your current quota, please check your plan and billing details",
+		"403 Forbidden: insufficient permissions for this model",
+	} {
+		var slept []time.Duration
+		env := newSupEnv(t, func(c *Config) {
+			c.Sleep = func(_ context.Context, d time.Duration) { slept = append(slept, d) }
+		}, chain("s", "a", "b"))
+		env.sp.script = []fakeEntry{exitErr(1, text, true), done(`{"ok":true}`)}
+		if err := env.d.Run(context.Background()); err != nil {
+			t.Fatalf("%q: Run: %v", text, err)
+		}
+		if m := env.models(); len(m) != 2 || m[0] == m[1] {
+			t.Fatalf("%q must switch candidates: dispatched %v", text, m)
+		}
+		ev := env.log.byKind("step_failed")
+		if len(ev) != 1 || ev[0].body["cause"] != FailExitModel || ev[0].body["disposition"] != "switch_model" {
+			t.Fatalf("%q: step_failed %v, want a model-class switch", text, ev)
+		}
+		if len(slept) != 0 {
+			t.Fatalf("%q: a candidate switch must not back off: %v", text, slept)
+		}
+	}
+}
+
+// TestD7BackoffCountsIntoT: the owner bounds same-model retries only by
+// the step's cumulative T, so every backoff wait is booked into the
+// step's consumed runtime (and thus into the next dispatch's prior
+// runtime) — three throttles add at least 1s+2s+4s.
+func TestD7BackoffCountsIntoT(t *testing.T) {
+	env := newSupEnv(t, func(c *Config) {
+		c.Sleep = func(context.Context, time.Duration) {}
+	}, chain("s", "a", "b"))
+	throttle := exitErr(1, "429 Too Many Requests", false)
+	env.sp.script = []fakeEntry{throttle, throttle, throttle, done(`{"ok":true}`)}
+	if err := env.d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := (1*time.Second + 2*time.Second + 4*time.Second).Milliseconds()
+	if got := env.exec(t).Steps["s"].BudgetConsumed.WallMs; got < want {
+		t.Fatalf("step T %dms, want the backoff waits (>= %dms) counted in", got, want)
 	}
 }

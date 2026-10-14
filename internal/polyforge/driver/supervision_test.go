@@ -117,9 +117,11 @@ func TestClassifyWaitFailure(t *testing.T) {
 		{"unparseable model on stderr", &ExitedError{ExitCode: 1, LastError: `error: model "x/y" not found (unknown model)`}, FailExitModel},
 		{"401 auth", &ExitedError{ExitCode: 1, LastError: "provider returned 401 Unauthorized"}, FailExitModel},
 		{"invalid api key", &ExitedError{ExitCode: 1, LastError: "Invalid API key provided"}, FailExitModel},
-		// polyforge#147 D7: the throttle signatures are their own class —
-		// the same model is retried after a backoff, the chain stays put.
-		{"quota", &ExitedError{ExitCode: 1, LastError: "You exceeded your current quota"}, FailRateLimited},
+		// polyforge#147 D7: only transient throttles are their own class —
+		// the same model is retried after a backoff, the chain stays put;
+		// allowance/permission problems stay model-class and switch.
+		{"quota is model-class", &ExitedError{ExitCode: 1, LastError: "You exceeded your current quota"}, FailExitModel},
+		{"403 insufficient permissions", &ExitedError{ExitCode: 1, LastError: "403 insufficient permissions"}, FailExitModel},
 		{"429", &ExitedError{ExitCode: 1, LastError: "provider returned HTTP 429"}, FailRateLimited},
 		{"overloaded outranks an error turn", &ExitedError{ExitCode: 1, TurnError: true, LastError: "upstream overloaded"}, FailRateLimited},
 		{"harness-reported ENOSPC", &ExitedError{ExitCode: 1, LastError: "write: no space left on device"}, FailExitHost},
