@@ -192,11 +192,11 @@ type ResultSpec struct {
 	ReviewPassed bool
 	// HasReview: the workflow declares a review step.
 	HasReview bool
-	// VerifiedHeads / VerifiedCommands: the driver's record of the
-	// verification step (task repo -> HEAD when it completed; the command
-	// evidence it was accepted with) — deliver_facts.go.
-	VerifiedHeads    map[string]string
-	VerifiedCommands []CommandEvidence
+	// VerifiedHeads / VerifiedTestBar: the verification step's record
+	// (task repo -> HEAD when it completed, driver-written; the test bar
+	// it named) — deliver_facts.go.
+	VerifiedHeads   map[string]string
+	VerifiedTestBar []testBarCmd
 }
 
 // ValidateStepResult runs the staging gates over one envelope:

@@ -781,7 +781,7 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	if stepID == deliverStepID {
 		spec.ReviewPassed = reviewPassed(d.exec.Steps[reviewStepID])
 		spec.HasReview = d.workflow.step(reviewStepID) != nil
-		spec.VerifiedHeads, spec.VerifiedCommands = verificationRecord(d.exec.Steps[verificationStepID])
+		spec.VerifiedHeads, spec.VerifiedTestBar = verificationRecord(d.exec.Steps[verificationStepID])
 	}
 	d.mu.Unlock()
 	// Declared outputs, gate-ness and duties (gate-ness feeds the

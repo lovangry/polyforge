@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
@@ -44,11 +43,28 @@ func deliverCapsule(t *testing.T) string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	bare := filepath.Join(filepath.Dir(filepath.Dir(repos)), "origin.git")
+	tgit(t, filepath.Dir(bare), "init", "-q", "--bare", "-b", "main", bare)
 	tgit(t, dir, "init", "-q", "-b", "main")
+	tgit(t, dir, "remote", "add", "origin", bare)
+	dwrite(t, filepath.Join(dir, "base.txt"), "base\n")
+	tgit(t, dir, "add", "-A")
+	tgit(t, dir, "commit", "-q", "-m", "baseline")
+	tgit(t, dir, "push", "-q", "origin", "main")
+	tgit(t, dir, "fetch", "-q", "origin")
+	tgit(t, dir, "remote", "set-head", "origin", "main")
 	dwrite(t, filepath.Join(dir, "a.txt"), "a\n")
 	tgit(t, dir, "add", "-A")
 	tgit(t, dir, "commit", "-q", "-m", "work")
+	pushFeature(t, dir)
 	return repos
+}
+
+// pushFeature pushes HEAD to the feature branch (moving
+// refs/remotes/origin/polyforge/polyforge-166 with it).
+func pushFeature(t *testing.T, dir string) {
+	t.Helper()
+	tgit(t, dir, "push", "-q", "origin", "HEAD:refs/heads/polyforge/polyforge-166")
 }
 
 func dwrite(t *testing.T, p, body string) {
@@ -63,8 +79,8 @@ func deliverSpec(repos string, reviewPassed bool, answers int) ResultSpec {
 	head, _ := repoGit(filepath.Join(repos, "demo"), "rev-parse", "HEAD")
 	return ResultSpec{WIID: "wi_d", StepID: deliverStepID, SpawnN: 1, Gate: true,
 		RequireCommandEvidence: true, ReposDir: repos, ReviewPassed: reviewPassed, HasReview: true, HumanAnswers: answers,
-		VerifiedHeads:    map[string]string{"demo": strings.TrimSpace(head)},
-		VerifiedCommands: []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && make test"}, DurationMs: 9}}}
+		VerifiedHeads:   map[string]string{"demo": strings.TrimSpace(head)},
+		VerifiedTestBar: []testBarCmd{{Repo: "demo", Command: "make test"}}}
 }
 
 func ev(cmds ...string) []CommandEvidence {
@@ -140,6 +156,12 @@ func TestDeliverCommandRule(t *testing.T) {
 		// git configuration changed for the push
 		{"global config swapped", []string{"GIT_CONFIG_GLOBAL=/tmp/x git push origin HEAD:polyforge/polyforge-166"}, "GIT_CONFIG_GLOBAL"},
 		{"git dir swapped", []string{"GIT_DIR=/tmp/x.git git push origin HEAD:polyforge/polyforge-166"}, "GIT_DIR"},
+		{"ssh command and prompt allowed", []string{"GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' git push origin HEAD:polyforge/polyforge-166"}, ""},
+		{"index file swapped", []string{"GIT_TERMINAL_PROMPT=0 GIT_INDEX_FILE=/tmp/i git push origin HEAD:polyforge/polyforge-166"}, "GIT_INDEX_FILE"},
+		{"admin as value form", []string{"gh pr merge 1 --merge --admin=true"}, "--admin=true"},
+		{"auto as value form", []string{"gh pr merge 1 --merge --auto=true"}, "--auto=true"},
+		{"squash as value form", []string{"gh pr merge 1 --squash=true"}, "--squash=true"},
+		{"admin turned off", []string{"gh pr merge 1 --merge --admin=false"}, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -255,6 +277,7 @@ func TestDeliverMergeFacts(t *testing.T) {
 		dwrite(t, filepath.Join(dir, "a.txt"), "main\n")
 		tgit(t, dir, "commit", "-q", "-am", "main work")
 		spec.VerifiedHeads["demo"] = tgit(t, dir, "rev-parse", "HEAD")
+		pushFeature(t, dir)
 		if conflict {
 			cmd := exec.Command("git", "merge", "-q", "--no-edit", "side")
 			cmd.Dir = dir
@@ -271,10 +294,19 @@ func TestDeliverMergeFacts(t *testing.T) {
 				tgit(t, dir, "commit", "-q", "--amend", "--no-edit")
 			}
 		}
+		pushFeature(t, dir)
 		return repos, spec
 	}
-	rerun := []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && make test"}, DurationMs: 9, StartedAt: time.Now().Add(2 * time.Second)}}
-	stale := []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && make test"}, DurationMs: 9, StartedAt: time.Now().Add(-time.Hour)}}
+	rerun := []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && make test"}, DurationMs: 9}}
+	// the test bar ran, then the merge: not after the last merge
+	stale := []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && make test"}, DurationMs: 9},
+		{Argv: []string{"git", "-C", "repos/demo", "merge", "--no-edit", "side"}, DurationMs: 9}}
+	// the merge, then the test bar — but in another repo, or failing
+	otherRepo := []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && git merge --no-edit side"}, DurationMs: 9},
+		{Argv: []string{"sh", "-c", "cd repos/other && make test"}, DurationMs: 9}}
+	failing := []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && make   test"}, DurationMs: 9, ExitCode: 2}}
+	ordered := []CommandEvidence{{Argv: []string{"sh", "-c", "cd repos/demo && git merge -q --no-edit side 2>&1"}, DurationMs: 9},
+		{Argv: []string{"make", "test"}, Cwd: "repos/demo", DurationMs: 9}}
 	push := ev(goodPush)
 	cases := []struct {
 		name               string
@@ -286,6 +318,9 @@ func TestDeliverMergeFacts(t *testing.T) {
 		{"clean merge, tests not re-run", false, false, push, mergedOut, "tests are not shown to pass"},
 		{"clean merge, tests re-run before the merge", false, false, append(push, stale...), mergedOut, "tests are not shown to pass"},
 		{"clean merge, tests re-run after it", false, false, append(push, rerun...), mergedOut, ""},
+		{"clean merge, test bar in another repo", false, false, append(push, otherRepo...), mergedOut, "tests are not shown to pass"},
+		{"clean merge, test bar failing", false, false, append(push, failing...), mergedOut, "tests are not shown to pass"},
+		{"clean merge, merge then test bar by cwd", false, false, append(push, ordered...), mergedOut, ""},
 		{"hand-resolved conflict, flag says no conflict", true, false, append(push, rerun...), mergedOut, "had conflicts"},
 		{"clean merge edited by hand", false, true, append(push, rerun...), mergedOut, "differs from git's own merge result"},
 	}
@@ -346,6 +381,59 @@ func TestDeliverMergeFacts(t *testing.T) {
 		tgit(t, dir, "commit", "-q", "-am", "more")
 		if err := ValidateStepResult(deliverRes(OutcomeCompleted, skipped, push), spec); err == nil || !strings.Contains(err.Error(), "beyond its baseline") {
 			t.Fatalf("skip with commits: %v", err)
+		}
+	})
+}
+
+// TestDeliverDeliveredHead: the pushed and merged head is tied to the
+// local HEAD the facts were derived from.
+func TestDeliverDeliveredHead(t *testing.T) {
+	push := ev(goodPush)
+	t.Run("HEAD moved after the push", func(t *testing.T) {
+		repos := deliverCapsule(t)
+		spec := deliverSpec(repos, true, 0)
+		dir := filepath.Join(repos, "demo")
+		tgit(t, dir, "commit", "-q", "--allow-empty", "-m", "after the push")
+		spec.VerifiedHeads["demo"] = tgit(t, dir, "rev-parse", "HEAD")
+		err := ValidateStepResult(deliverRes(OutcomeCompleted, mergedOut, push), spec)
+		if err == nil || !strings.Contains(err.Error(), "is not the local HEAD") {
+			t.Fatalf("want a pushed-head mismatch, got %v", err)
+		}
+	})
+	t.Run("not delivered from the latest default branch", func(t *testing.T) {
+		repos := deliverCapsule(t)
+		spec := deliverSpec(repos, true, 0)
+		dir := filepath.Join(repos, "demo")
+		// origin main moves on; the fetch sees it, HEAD never merged it
+		other := filepath.Join(t.TempDir(), "other")
+		tgit(t, filepath.Dir(other), "clone", "-q", filepath.Join(filepath.Dir(filepath.Dir(repos)), "origin.git"), other)
+		tgit(t, other, "commit", "-q", "--allow-empty", "-m", "another PR")
+		tgit(t, other, "push", "-q", "origin", "HEAD:main")
+		tgit(t, dir, "fetch", "-q", "origin")
+		err := ValidateStepResult(deliverRes(OutcomeCompleted, mergedOut, push), spec)
+		if err == nil || !strings.Contains(err.Error(), "not delivered from the latest default branch") {
+			t.Fatalf("want a stale-main rejection, got %v", err)
+		}
+	})
+	t.Run("already merged", func(t *testing.T) {
+		repos := deliverCapsule(t)
+		spec := deliverSpec(repos, true, 0)
+		dir := filepath.Join(repos, "demo")
+		// the PR merge lands on origin main (a --no-ff merge of HEAD)
+		other := filepath.Join(t.TempDir(), "other")
+		tgit(t, filepath.Dir(other), "clone", "-q", filepath.Join(filepath.Dir(filepath.Dir(repos)), "origin.git"), other)
+		tgit(t, other, "merge", "-q", "--no-ff", "-m", "Merge pull request #1", "origin/polyforge/polyforge-166")
+		tgit(t, other, "push", "-q", "origin", "HEAD:main")
+		mc := tgit(t, other, "rev-parse", "HEAD")
+		tgit(t, dir, "fetch", "-q", "origin")
+		out := strings.Replace(mergedOut, `"merge_commit":"abc"`, `"merge_commit":"`+mc+`"`, 1)
+		if err := ValidateStepResult(deliverRes(OutcomeCompleted, out, push), spec); err != nil {
+			t.Fatalf("an already-merged PR of HEAD was refused: %v", err)
+		}
+		// a recorded merge commit that did not merge HEAD
+		bad := strings.Replace(mergedOut, `"merge_commit":"abc"`, `"merge_commit":"`+tgit(t, other, "rev-parse", "HEAD^1")+`"`, 1)
+		if err := ValidateStepResult(deliverRes(OutcomeCompleted, bad, push), spec); err == nil || !strings.Contains(err.Error(), "did not merge the local HEAD") {
+			t.Fatalf("want a merge-commit mismatch, got %v", err)
 		}
 	})
 }

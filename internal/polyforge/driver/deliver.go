@@ -148,7 +148,7 @@ func deliverMergeRule(res *StepResult, branch string, spec ResultSpec) error {
 		if strings.TrimSpace(r.PRURL) == "" || strings.TrimSpace(r.MergeCommit) == "" {
 			return fmt.Errorf("driver: deliver output %s is merged and owes its pr_url and merge_commit", label)
 		}
-		f := deliverFacts(spec, r.Name, res.CommandEvidence)
+		f := deliverFacts(spec, r, branch, res.CommandEvidence)
 		f.selfReportedConflict = r.LLMResolvedConflict
 		f.selfReportedTestsFailed = r.TestsPassed != nil && !*r.TestsPassed
 		if ok, why := autoMergeEligible(f); !ok {
@@ -300,7 +300,7 @@ func checkSegment(seg []string, branch string, depth int) error {
 			if strings.HasPrefix(w, mainPushOverride+"=") {
 				return fmt.Errorf("(%s): sets %s (the pre-push hook's human-only override)", strings.Join(seg, " "), mainPushOverride)
 			}
-			if strings.HasPrefix(w, "GIT_") {
+			if strings.HasPrefix(w, "GIT_") && !allowedPushEnv[strings.SplitN(w, "=", 2)[0]] {
 				gitEnv = append(gitEnv, w)
 			}
 			i++
@@ -447,6 +447,11 @@ func checkPush(args []string, branch string) error {
 	return nil
 }
 
+// allowedPushEnv are the GIT_* assignments a push line may carry (they
+// change how git talks to the remote, not what it pushes or which
+// configuration and hooks apply); every other GIT_* assignment is refused.
+var allowedPushEnv = map[string]bool{"GIT_TERMINAL_PROMPT": true, "GIT_SSH_COMMAND": true}
+
 // forbiddenPushOptions are refused by name or by any abbreviation git
 // would accept for them (git takes unambiguous long-option prefixes).
 var forbiddenPushOptions = []string{"--force", "--force-with-lease", "--force-if-includes", "--all", "--branches",
@@ -476,7 +481,11 @@ func orPrefix(branch string) string {
 func checkGHMerge(args []string) error {
 	merge := false
 	for _, a := range args {
-		switch a {
+		name, val, hasVal := strings.Cut(a, "=")
+		if hasVal && (strings.EqualFold(val, "false") || val == "0") {
+			continue // --flag=false turns the flag off
+		}
+		switch name {
 		case "--merge", "-m":
 			merge = true
 		case "--squash", "-s", "--rebase", "-r", "--admin", "--auto":
