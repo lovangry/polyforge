@@ -67,7 +67,7 @@ func TestObserveAnswerPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("watch: %v", err)
 	}
-	if snap.WorkItem != "wi_b" || !snap.Known || snap.Job == nil || snap.Job.Status != protocol.JobRunning {
+	if snap.WorkItem != "wi_b" || !snap.Known || snap.Job == nil || snap.Job.Status != "running" {
 		t.Fatalf("watch snapshot = %+v", snap)
 	}
 	if len(snap.Events) == 0 {
@@ -323,7 +323,7 @@ func TestOpsAutoAndMax(t *testing.T) {
 		t.Fatalf("state not applied: auto=%v max=%d", td.modes.Auto(), td.q.MaxConcurrent())
 	}
 	// A manual submit is ALLOWED while auto is on (no DAEMON-409).
-	if _, err := td.client.Claim("wi_z", "normal"); err != nil {
+	if _, err := td.client.ClaimWithModels("wi_z", "normal", nil); err != nil {
 		t.Fatalf("claim while auto on: %v", err)
 	}
 	if _, err := td.client.OpsConfig(cli.OpsConfigRequest{Auto: &off}); err != nil {
@@ -343,7 +343,7 @@ func TestOpsAutoAndMax(t *testing.T) {
 	}
 	// A submit and an auto switch during shutdown answer DAEMON-410.
 	td.modes.SetShuttingDown()
-	if _, err := td.client.Claim("wi_y", "normal"); err == nil {
+	if _, err := td.client.ClaimWithModels("wi_y", "normal", nil); err == nil {
 		t.Fatal("claim during shutdown succeeded")
 	} else {
 		var ae *api.Error
@@ -362,7 +362,7 @@ func TestSubmitDispatchBackfill(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) { c.MaxConcurrent = 1 })
 	for _, wi := range []string{"wi_p", "wi_q", "wi_r"} {
 		mkBare(t, td.cfg.GitRemoteBase, wi)
-		if _, err := td.client.Claim(wi, "normal"); err != nil {
+		if _, err := td.client.ClaimWithModels(wi, "normal", nil); err != nil {
 			t.Fatalf("claim %s: %v", wi, err)
 		}
 	}

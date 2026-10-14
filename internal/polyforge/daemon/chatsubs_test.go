@@ -265,3 +265,97 @@ func TestWatchProgressProjection(t *testing.T) {
 		t.Fatalf("files-only projection: %+v", p)
 	}
 }
+
+// TestAttentionAllDecisionClasses (D9): the attention class derivation
+// covers every decision class — not only needs_input — through the
+// state the daemon holds: the status-backed classes (needs_input,
+// paused, blocked, completed, failed), the ring-derived classes status
+// alone cannot distinguish (step_dead, candidates_exhausted,
+// submit_rejected, submit_dropped, daemon_restarted), and canceled —
+// the hub-side class — for a record the daemon still holds.
+func TestAttentionAllDecisionClasses(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	wi := "wi_" + "attcls"
+	td.hub.reporters = map[string]string{wi: "bob"}
+
+	// running jobs with no ring events present no decision
+	if got := td.attentionClass(statusJob{WorkItemID: "wi_plain", Status: "running"}); got != "" {
+		t.Fatalf("a plain running job must present no decision, got %q", got)
+	}
+
+	cases := []struct {
+		name   string
+		job    statusJob
+		events []string // ring kinds appended before derivation, oldest first
+		hub    string   // hub status seeded for the hub-canceled arm
+		want   string
+	}{
+		{"needs_input", statusJob{WorkItemID: wi, Status: "running", NeedsInput: true, QuestionID: "q-1"}, nil, "", "needs_input"},
+		{"paused", statusJob{WorkItemID: wi, Status: "paused"}, nil, "", "paused"},
+		{"blocked (end_pending close)", statusJob{WorkItemID: wi, Status: "end_pending"}, nil, "", "blocked"},
+		{"completed (wrap close)", statusJob{WorkItemID: wi, Status: "sealing", StopReason: protocol.FinishWrapped}, nil, "", "completed"},
+		{"failed (fail close)", statusJob{WorkItemID: wi, Status: "sealing", StopReason: protocol.FinishFailed}, nil, "", "failed"},
+		{"step_dead", statusJob{WorkItemID: wi, Status: "running"}, []string{"step_dead"}, "", "step_dead"},
+		{"candidates_exhausted", statusJob{WorkItemID: wi, Status: "running"}, []string{"candidates_exhausted"}, "", "candidates_exhausted"},
+		{"submit_rejected", statusJob{WorkItemID: wi, Status: "running"}, []string{observe.EvSubmitRejected}, "", "submit_rejected"},
+		{"submit_dropped", statusJob{WorkItemID: wi, Status: "running"}, []string{observe.EvSubmitDropped}, "", "submit_dropped"},
+		{"daemon_restarted", statusJob{WorkItemID: wi, Status: "running"}, []string{observe.EvDaemonRestarted}, "", "daemon_restarted"},
+		{"canceled (hub says so)", statusJob{WorkItemID: wi, Status: "paused"}, nil, "canceled", "canceled"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range tc.events {
+				if err := td.obs.Events().Append(wi, k, map[string]any{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.hub != "" {
+				td.hub.status[wi] = tc.hub
+			}
+			if got := td.attentionClass(tc.job); got != tc.want && tc.hub == "" {
+				t.Fatalf("class = %q, want %q", got, tc.want)
+			}
+			if tc.hub != "" {
+				if got := td.attentionClassHubCanceled(tc.job); got != tc.want {
+					t.Fatalf("hub class = %q, want %q", got, tc.want)
+				}
+			}
+		})
+	}
+
+	// the newest decision-class event wins over older ones
+	if err := td.obs.Events().Append("wi_two", "step_dead", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := td.obs.Events().Append("wi_two", observe.EvDaemonRestarted, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := td.attentionClass(statusJob{WorkItemID: "wi_two", Status: "running"}); got != observe.EvDaemonRestarted {
+		t.Fatalf("newest decision event must win: %q", got)
+	}
+
+	// the whole hub-canceled class flows through the attention face: a
+	// real retained paused job whose WI was canceled at the hub reaches
+	// the owner (reporter-fallback routing)
+	wiHold := "wi_holdcancel"
+	td.client.Origin = nil
+	td.submitClaim(t, wiHold)
+	td.waitMonitored(t, wiHold)
+	if _, err := td.client.Pause(wiHold); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, td, wiHold, "paused")
+	td.hub.reporters[wiHold] = "bob"
+	td.hub.status[wiHold] = "canceled"
+	items, err := td.attention("chat_z", "bob", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, it := range items {
+		found = found || (it.WI == wiHold && it.Reason == "canceled")
+	}
+	if !found {
+		t.Fatalf("the hub-canceled held record must reach the owner: %+v", items)
+	}
+}

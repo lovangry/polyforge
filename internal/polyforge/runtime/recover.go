@@ -10,7 +10,8 @@
 //	fresh failing → one FAILED recovery: the budget counts failures and
 //	  a successful recovery RESETS it. After MaxRecoveries (default 2)
 //	  consecutive failed recoveries the WI terminates
-//	  RTFinished(blocked) — the storm guard: never a third relaunch
+//	  RTFinished(blocked) — the consecutive-failures ledger: never a
+//	  third relaunch without an accepted step result
 //	  attempt after two failed ones, and never a poisoned budget after
 //	  a healthy relaunch.
 package runtime
@@ -41,8 +42,9 @@ func (r *Runtime) recoverOp(ctx context.Context, j *job, cause, detail string) {
 }
 
 // recoverCore is the recovery sequence; the caller holds opMu. cause
-// names the recovery trigger (the storm guard's ledger key and the
-// interrupted-dispatch archive's class input); detail is the observe
+// names the recovery trigger (the interrupted-dispatch archive's class
+// input, and the consecutive-failures ledger's exempt-cause key);
+// detail is the observe
 // lane's free-text elaboration ("" when none).
 func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string) {
 	if err := j.transition(StateRecovering); err != nil {
@@ -74,9 +76,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// capsule's terminal workflow_status is translated into the WI's
 	// close: completed wraps, failed fails, blocked hands the WI to its
 	// owner (the hub's blocked verdict is the unblock door). Without
-	// this the terminal exit bounced through death-recovery into the
-	// storm guard and closed the WI as blocked instead of wrapped —
-	// within one second, exactly as the guard was designed to.
+	// this the terminal exit bounced through death-recovery and closed
+	// the WI as blocked instead of wrapped.
 	switch capsuleWorkflowStatus(j.capsuleDir) {
 	case capsule.WorkflowStatusCompleted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)
@@ -110,38 +111,43 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		r.boundedFail(ctx, j, "workflow blocked: the owner holds the next move (resume / rewind / wrap --fail)")
 		return
 	}
-	// The v2 entry-rate storm guard (the #97 lesson): a relaunch that
-	// SUCCEEDS as a spawn but dies within seconds used to reset the
-	// failure budget on every iteration — a poisoned capsule (a rejected
-	// envelope, a wedged driver) then recovered forever at ~1 Hz, each
-	// iteration spawning a real step process and pushing a commitDirty.
-	// The budget's reset-on-success cannot see a fast death, so the RATE
-	// of re-entry is the missing signal: a recoverCore that fires again
-	// inside the stability window (default 60s) is one storm unit,
-	// counted on its own ledger; a re-entry after a stable gap resets it
-	// (the previous relaunch survived — a fresh episode). The counter is
-	// deliberately separate from recoverFails: ladder-internal retries
-	// and their reset-on-success semantics (§三) are unchanged.
-	//
-	// A daemon restart / operator attach is NOT a failure (v2-converge
-	// §2.3): those causes are exempt from the ledger entirely — neither
-	// counted nor resetting a real storm — so a deploy retry or a
+	// The single recovery ledger (C7, audit-subtraction pass B): ONE
+	// counter of consecutive recovery failures. A recovery whose relaunch
+	// made no real progress — no step result accepted since — is a
+	// failure, counted at the NEXT re-entry (that re-entry is its proof);
+	// a re-entry that follows an accepted result resets the counter (real
+	// progress is the only reset). The progress signal is the capsule
+	// execution state's accepted-result attempts (the driver's R14 commit
+	// points — the same surface the observe lane polls); a dead agent
+	// writes nothing, so a dying relaunch can never fake its way out of
+	// the ledger. A daemon restart / operator attach is NOT a failure
+	// (v2-converge §2.3): those causes are exempt from the ledger
+	// entirely — neither counted nor resetting — so a deploy retry or a
 	// systemd restart loop cannot bounded-fail every running WI.
 	if !restartExemptCause(cause) {
-		now := time.Now()
 		j.mu.Lock()
-		if !j.lastRecoveryAt.IsZero() && now.Sub(j.lastRecoveryAt) < r.recoveryStabilityWindow() {
-			j.stormFails++
-		} else {
-			j.stormFails = 0
+		accepted := acceptedResultCount(j.capsuleDir)
+		switch {
+		case accepted > j.acceptedAtRelaunch:
+			// real progress since the last relaunch (a step's result was
+			// accepted): the consecutive ledger resets (C7 — real
+			// progress is the only reset).
+			j.recoverFails = 0
+		case j.lastRelaunchRecovery:
+			// no accepted result since the last RECOVERY relaunch: that
+			// relaunch failed to stabilize the WI — one consecutive
+			// unit. (The original claim's death is a trigger, not a
+			// recovery failure; only a recovery's own relaunch can fail.)
+			j.recoverFails++
 		}
-		j.lastRecoveryAt = now
-		storm := j.stormFails
+		j.acceptedAtRelaunch = accepted
+		j.lastRelaunchRecovery = false // the current relaunch re-arms it on success
+		fails := j.recoverFails
 		j.mu.Unlock()
-		if storm >= r.cfg.MaxRecoveries {
+		if fails >= r.cfg.MaxRecoveries {
 			r.boundedFail(ctx, j, fmt.Sprintf(
-				"recovery storm: %d recoveries re-fired inside the %.0fs stability window (latest cause %q) — the relaunch is dying faster than it can stabilize",
-				storm, r.recoveryStabilityWindow().Seconds(), cause))
+				"recovery budget exhausted (%d consecutive recovery failures without an accepted step result, latest cause %q)",
+				fails, cause))
 			return
 		}
 	}
@@ -181,11 +187,11 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		return
 	}
 
-	// The storm guard (§三): each FAILED recovery ladder spends one unit
-	// of the budget; a successful recovery RESETS it (a healthy relaunch
-	// must never inherit earlier failures). Only when MaxRecoveries
-	// recoveries have FAILED outright does the WI bounded-fail — never
-	// merely because it has recovered before.
+	// The ladder's own spend (§三): each FAILED relaunch attempt is one
+	// consecutive recovery failure on the SAME single counter (C7); only
+	// an accepted step result resets it (the entry block above). Only
+	// when the counter reaches MaxRecoveries does the WI bounded-fail —
+	// never merely because it has recovered before.
 	//
 	// polyforge#79: the effective lists this re-derivation dispatches
 	// under (rehydrated or re-derived — see
@@ -262,7 +268,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
 		}
 		if fails >= r.cfg.MaxRecoveries {
-			r.boundedFail(ctx, j, fmt.Sprintf("recovery budget exhausted (%d consecutive failed recoveries, cause %q)", fails, cause))
+			r.boundedFail(ctx, j, fmt.Sprintf("recovery budget exhausted (%d consecutive recovery failures, cause %q)", fails, cause))
 			return
 		}
 		fmt.Fprintf(os.Stderr, "runtime: %s: recovery failed (%d/%d), retrying the ladder\n", j.wi, fails, r.cfg.MaxRecoveries)
@@ -291,7 +297,13 @@ func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
 // polyforge#106: every relaunch is a fresh driver derivation.)
 func (r *Runtime) recovered(j *job, h AgentHandle, cause string) {
 	j.mu.Lock()
-	j.recoverFails = 0
+	// C7: the ledger's reset is the accepted-result check at the next
+	// entry, never the relaunch itself (a relaunch that dies before its
+	// step's result is accepted must keep counting). The relaunch marks
+	// the job recovery-stabilized-so-far and notes the accepted-result
+	// count it starts from.
+	j.lastRelaunchRecovery = true
+	j.acceptedAtRelaunch = acceptedResultCount(j.capsuleDir)
 	spawnN := j.spawnN
 	pid := j.agentPID
 	j.mu.Unlock()
@@ -327,18 +339,11 @@ func capsuleWorkflowStatus(capsuleDir string) string {
 	return exec.WorkflowStatus
 }
 
-func (r *Runtime) recoveryStabilityWindow() time.Duration {
-	if r.cfg.RecoveryStabilityWindow > 0 {
-		return r.cfg.RecoveryStabilityWindow
-	}
-	return 60 * time.Second
-}
-
 // boundedFail terminates the WI without a relaunch: SessionEnd(blocked)
 // — the hub clears the session row and marks the WI blocked, which the
-// claim gate excludes until a human intervenes (M2). The storm guard's
-// "never a third relaunch" contract is preserved: restart sees blocked
-// and leaves the record untouched. RTFinished(blocked) follows. Before the verdict the
+// claim gate excludes until a human intervenes (M2). The ledger's
+// "never a third relaunch without progress" contract is preserved:
+// restart sees blocked and leaves the record untouched. RTFinished(blocked) follows. Before the verdict the
 // agent tree is killed and the dirty capsule committed+pushed best-effort
 // (polyforge#116: the parked verdict must reach the chain; v2-converge §6
 // bug 4: every branch, not just the blocked one). A SessionEnd the hub does
@@ -347,8 +352,8 @@ func (r *Runtime) recoveryStabilityWindow() time.Duration {
 func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	// No writer may outlive the verdict, and the last local work must
 	// reach aihub before the WI is handed to its owner (v2-converge §6
-	// bug 4): every bounded-fail branch — missing capsule, storm guard,
-	// budget exhaustion — kills the driver/agent tree
+	// bug 4): every bounded-fail branch — missing capsule, budget
+	// exhaustion — kills the driver/agent tree
 	// and commits+pushes best-effort here, not in the callers. The head
 	// the capsule ends at rides the blocked verdict (cross-daemon continue
 	// check, §7).
@@ -415,7 +420,6 @@ func (r *Runtime) killAgentTree(j *job) {
 		WIID:       j.wi,
 		DaemonID:   r.cfg.MachineID,
 		CapsuleDir: j.capsuleDir,
-		CgroupPath: r.cgroupPathFor(j.wi),
 	}, cleanupBound)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: agent tree cleanup incomplete: %v (warnings: %v)\n", j.wi, err, rep.Warnings)
@@ -424,7 +428,38 @@ func (r *Runtime) killAgentTree(j *job) {
 
 // restartExemptCause reports whether a recovery cause is a daemon
 // restart or an operator attach — a process-lifecycle event, not a
-// failure, so the storm ledger ignores it.
+// failure, so the consecutive-failures ledger ignores it.
 func restartExemptCause(cause string) bool {
 	return cause == causeDaemonRestart || cause == causeOperatorAttach
+}
+
+// acceptedResultCount reads the capsule's execution state and counts the
+// accepted-result attempts across steps (the driver's R14 commit
+// points): the runtime's real-progress signal for the consecutive-
+// failures ledger (C7 — the counter resets when a step's result is
+// accepted). 0 when the file is absent or unparsable: nothing proven,
+// never a reset. The file is agent-writable, but the ledger's adversary
+// is death — a dead relaunch writes nothing, so the signal cannot be
+// gamed by the failure mode the ledger bounds.
+func acceptedResultCount(capsuleDir string) int64 {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.ExecutionJSON))
+	if err != nil {
+		return 0
+	}
+	var exec capsule.Execution
+	if json.Unmarshal(raw, &exec) != nil {
+		return 0
+	}
+	var n int64
+	for _, st := range exec.Steps {
+		if st == nil {
+			continue
+		}
+		for _, at := range st.Attempts {
+			if at.Cause == "accepted" {
+				n++
+			}
+		}
+	}
+	return n
 }

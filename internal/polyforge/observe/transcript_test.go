@@ -310,11 +310,9 @@ func TestSyncTranscriptCopyByteIdentical(t *testing.T) {
 	if string(got) != body {
 		t.Fatalf("the synced transcript must be byte-identical to the source:\n got %q\nwant %q", got, body)
 	}
-	// The copy really rides the shared parser: the source is
-	// session-jsonl parseable end to end.
-	if _, err := sessionjsonl.Tail(src, 0); err != nil {
-		t.Fatalf("the source must be session-jsonl parseable: %v", err)
-	}
+	// The copy is byte-verbatim (the shared parser faces were deleted
+	// with the audit's dead-code sweep; the byte-identical assertion
+	// above is the pin).
 	// tmp+rename semantics: no temp residue next to the destination.
 	ents, err := os.ReadDir(filepath.Dir(dst))
 	if err != nil {

@@ -23,7 +23,7 @@ func TestSlugLifecycleEndToEnd(t *testing.T) {
 
 	// submit BY SLUG: accepted, and the answer names the canonical id —
 	// the queue and the runtime key everything by it.
-	raw, err := td.client.Claim("proj#7", "normal")
+	raw, err := td.client.ClaimWithModels("proj#7", "normal", nil)
 	if err != nil {
 		t.Fatalf("claim by slug: %v", err)
 	}

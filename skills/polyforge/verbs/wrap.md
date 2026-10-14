@@ -26,7 +26,9 @@ pf wrap <id> --fail   # close with reason=fail  → terminal failure
 ```
 
 No other outcomes exist on this verb. `--fail` is the owner's failed
-verdict; to abandon a blocked work item use `pf cancel <id>`.
+verdict on a RUNNING job. It is not a door into a parked workflow: a
+work item parked blocked is continued with `pf resume <id>` or abandoned
+with `pf cancel <id>`, and `pf wrap --fail` on one just says so.
 
 ## Success
 
@@ -43,6 +45,7 @@ wrap answers the graceful `already_terminal` shape, not an error.
 |---|---|---|
 | `DAEMON-404` | No local job and the work item is not blocked or terminal on the server | It is not running here — check `pf watch <id> --once`; if it runs elsewhere, wrap it there. |
 | (no code) `the workflow is parked blocked …` | A close of a workflow parked blocked on an incomplete result (polyforge#116): a parked workflow never completed, so there is nothing to seal — a `wrap` (success), a `--fail`, or a `pause` of a parked workflow is all refused; there is no hub verdict door for a parked `--fail` (the terminate door is deleted, polyforge#149) | Use `pf resume <id>` to continue it, or `pf cancel <id>` to abandon it — those are the only two exits of a parked workflow. |
+| `DAEMON-404` with `<id> has no running job on this daemon; if it is parked blocked …` | `--fail` on a work item with no local job (most often one parked blocked on an incomplete result, polyforge#116). The CLI makes NO hub call, terminates nothing and exits non-zero (the wrap did not happen): a parked workflow has exactly two owner moves, and neither of them is this verb | Continue it with `pf resume <id>`, or abandon it with `pf cancel <id>`. The work item stays blocked until one of those runs. |
 | `DAEMON-409` | A close is already in progress for this job — another pause/wrap, or a mid-recovery state | Wait for the in-flight close to settle, then check `pf watch <id> --once`; the work item is being closed exactly once either way. |
 | `CORE-*` passthrough (e.g. `CORE-403`, `CORE-409`) | The server-side end-generation was refused | The typed Core verdict arrives verbatim — typically the generation is no longer yours to end; act per its detail. |
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |

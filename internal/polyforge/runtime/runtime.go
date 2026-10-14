@@ -71,18 +71,22 @@ type Config struct {
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
 	Harness       string // harness adapter name ("pi")
 	PiBin         string // harness binary (default "pi")
-	CgroupRoot    string // cgroup v2 root; empty ⇒ layer-0 unavailable
 	// HarnessSessionsRoot overrides the harness's default session store
 	// (the live-transcript locator of the seal/pause/bounded-fail sync).
+	// The default is the dedicated step-agent-sessions dir under DataDir
+	// (addendum 2): the step processes run with
+	// PI_CODING_AGENT_SESSION_DIR pointing at the same place.
 	HarnessSessionsRoot string
-	MaxRecoveries       int // consecutive FAILED recoveries before bounded fail (default 2)
-	// RecoveryStabilityWindow bounds the v2 entry-rate storm guard: a
-	// recoverCore that re-fires inside this window (default 60s) counts
-	// one storm unit; MaxRecoveries rapid re-entries bounded-fail the WI
-	// (a relaunch dying faster than it can stabilize never resets the
-	// budget — the #97 death loop). A re-entry after a stable gap resets
-	// the storm ledger: an isolated later failure is a fresh episode.
-	RecoveryStabilityWindow time.Duration
+	// OperatorAgentDir is the SOURCE of the dedicated step agent
+	// directory's minimal set (addendum 2, owner ruling A): the
+	// operator's agent dir by default; a flag/env-configured source is
+	// Explicit — a missing auth.json there is a spawn-refusing error,
+	// while the implicit default without file credentials is carried on
+	// with a warning (the harness adapter may hold credentials
+	// elsewhere).
+	OperatorAgentDir         string
+	OperatorAgentDirExplicit bool
+	MaxRecoveries            int // consecutive recovery failures before bounded fail (default 2; C7 — the only recovery ledger)
 	// EndRetryBase/EndRetryMax shape the backoff of the durable
 	// SessionEnd(blocked) retry (end_pending records and the re-claim
 	// abandon lane): first retry after Base, doubling up to Max
@@ -121,11 +125,20 @@ func (c *Config) fill() {
 	if c.Harness == "" {
 		c.Harness = "pi"
 	}
+	if c.OperatorAgentDir == "" {
+		c.OperatorAgentDir = OperatorAgentDirDefault()
+		c.OperatorAgentDirExplicit = false
+	}
+	// addendum 2: step processes run with their own session store
+	// (PI_CODING_AGENT_SESSION_DIR under the data dir), so the
+	// live-transcript locator's root follows them there by default. An
+	// explicit override (tests, relocated installs) still governs both
+	// sides — the spawner passes this same value to the child.
+	if c.HarnessSessionsRoot == "" && c.DataDir != "" {
+		c.HarnessSessionsRoot = c.StepAgentSessionsDir()
+	}
 	if c.MaxRecoveries <= 0 {
 		c.MaxRecoveries = 2
-	}
-	if c.RecoveryStabilityWindow <= 0 {
-		c.RecoveryStabilityWindow = 60 * time.Second
 	}
 	if c.RecallTopK <= 0 {
 		c.RecallTopK = defaultRecallTopK
@@ -258,25 +271,21 @@ type job struct {
 	agentStartedAt string
 
 	spawnN       int
-	recoverFails int // consecutive FAILED recoveries; reset on success
-	// stormFails/lastRecoveryAt feed the v2 entry-rate storm guard: a
-	// recoverCore re-entry inside RecoveryStabilityWindow counts one
-	// storm unit (a fast-dying relaunch never proves stability); a
-	// re-entry after the gap resets the ledger. Separate from
-	// recoverFails so the ladder's own reset-on-success semantics stay
-	// untouched.
-	stormFails     int
-	lastRecoveryAt time.Time
+	recoverFails int // consecutive recovery failures; reset on an accepted step result (C7)
+	// acceptedAtRelaunch is the accepted-result count (execution state)
+	// the last relaunch started from — the watermark the next recovery
+	// entry compares against to tell real progress from another failure.
+	acceptedAtRelaunch int64
+	// lastRelaunchRecovery: the job's live relaunch was a RECOVERY's (not
+	// the original claim's) — the mark that lets the ledger count a
+	// relaunch that stabilized nothing while never counting the original
+	// claim's own death as a recovery failure.
+	lastRelaunchRecovery bool
 	// cleanPause mirrors the hub's operator-pause flag: latched true by
 	// the pause close (Finding 2) so the retained Paused record carries
 	// the same marker the hub does; false everywhere else (a graceful
 	// shutdown keeps it false — the attach-on-restart shape, M3).
 	cleanPause bool
-	// verifyPending marks a record whose restart SessionVerify could not
-	// reach aihub: it keeps its place (no agent yet) while the daemon
-	// retries the verify with backoff, then proceeds through restartOne.
-	// In-memory only — a daemon restart re-verifies everything anyway.
-	verifyPending bool
 	// endNote/endHead: the pending SessionEnd(blocked) verdict of an
 	// end_pending job (see StateEndPending).
 	endNote string
@@ -508,15 +517,6 @@ func (r *Runtime) Resolve(id string) string {
 		return id // a job key is canonical by construction (F2)
 	}
 	return r.aliases[id]
-}
-
-// cgroupPathFor returns the per-WI cgroup v2 directory (layer 0); empty
-// config root means cgroups are off and layer 0 degrades away.
-func (r *Runtime) cgroupPathFor(wi string) string {
-	if r.cfg.CgroupRoot == "" {
-		return ""
-	}
-	return filepath.Join(r.cfg.CgroupRoot, "polyforge-"+wi)
 }
 
 // capsuleDirForProject resolves the capsule base for one project through
@@ -1006,12 +1006,15 @@ func (r *Runtime) prepareCapsule(j *job) error {
 		return err
 	}
 	if o.RemoteURL == "" {
-		// No capsule remote (tests only; aihub always supplies one at
-		// claim): a purely local init.
-		if err := gitops.InitLocal(o); err != nil {
-			return fmt.Errorf("runtime: %s: local init: %w", j.wi, err)
-		}
-	} else if err := gitops.Clone(o); err != nil {
+		// A capsule whose origin cannot be resolved is never silently
+		// init'ed locally and restarted from step 1 (the audit's
+		// dead-code sweep: the local-init escape hatch's production-reachable
+		// path is gone; aihub always supplies the remote at claim). Loud and
+		// typed: the caller abandons the claim.
+		return &api.Error{Code: api.ErrDaemonCapsuleClone,
+			Detail: fmt.Sprintf("capsule clone failed: no remote URL is configured for %s — aihub always supplies one at claim; refusing a local init", j.wi)}
+	}
+	if err := gitops.Clone(o); err != nil {
 		// aihub creates the bare repo at claim, so a clone failure is
 		// never "nothing published yet": refuse loudly (the caller
 		// abandons the claim) rather than init locally and restart the
@@ -1133,11 +1136,12 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 		Repos:      repoSHAs,
 		CreatedAt:  nowStamp(),
 	}
-	// polyforge#79: the claim-time snapshot doubles as the audit record —
-	// the parsed yaml verbatim, the per-step post-precedence candidate
-	// lists, the resolved repo sources. A no-yaml claim records NOTHING
-	// (omitempty, never fabricated) and its legacy fields are unchanged.
-	stampWorkspaceAudit(j, &idn)
+	// polyforge#79: the claim-time audit record — the parsed yaml
+	// verbatim and the resolved repo sources. A no-yaml claim records
+	// NOTHING (omitempty, never fabricated) and its legacy fields are
+	// unchanged. (The per-step effective-candidate list was deleted with
+	// the audit's dead-code sweep: the workspace yaml is the recovery
+	// re-derivation's own governing source.)
 	blob, _ := json.MarshalIndent(idn, "", "  ")
 	if err := atomicfile.Write(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
 		return err
@@ -1176,19 +1180,6 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// (materialize.go): the bundle lands under workflows/<bundle> and
 	// agents/, and sync/materialized.json gates every later consumer.
 	return r.materializeBundle(j)
-}
-
-// stampWorkspaceAudit records the claim-time effective candidate lists
-// in the capsule identity — the audit AND the snapshot recovery
-// rehydrates — when the workspace yaml governs this project's models. A
-// claim the yaml does not touch records nothing.
-func stampWorkspaceAudit(j *job, idn *capsule.Identity) {
-	if len(j.manualModels) == 0 && (j.workspaceYaml == nil || j.workspaceYaml.Models[j.project] == nil) {
-		return
-	}
-	if len(j.stepCandidates) > 0 {
-		idn.EffectiveCandidates = j.stepCandidates
-	}
 }
 
 // writeWorkItemFile materializes runtime-state/work-item.json (F1): the

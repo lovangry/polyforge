@@ -70,8 +70,10 @@ end), `CORE-410` (terminal).
   progress-shaped exceptions: STEP-AGE is mm:ss since the current dispatch
   began, and LAST-WORK is mm:ss since its harness last did real work (`-`
   when there is none). UI noise never refreshes LAST-WORK, so a job that is
-  chattering but wedged reads as stale, not fresh. A LAST-WORK over ~10
-  minutes on a non-`needs_input` job is a stalled job — report it to the owner.
+  chattering but wedged reads as stale, not fresh. The daemon's own
+  supervisor owns the stuck verdict (its silence/tool/step bounds, which
+  a workflow step may override) and acts on it; a long LAST-WORK here is
+  an observation to read in that light, not a rule to apply.
   A work item whose capsule directory is missing at restart
   (`capsule_missing`) or whose project is no longer mapped
   (`project_unmapped`) is not listed here: the daemon sets it `blocked` at

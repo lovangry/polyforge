@@ -54,7 +54,7 @@ func TestWatcherAgainstRealDaemonNeedsInputOnce(t *testing.T) {
 		return out.String()
 	}
 	out := run()
-	if !strings.Contains(out, "[polyforge] wi_e2e needs_input — a step is waiting for a human answer; this is a human decision, the agent must not answer it") {
+	if !strings.Contains(out, "[polyforge] wi_e2e needs_input q-7 — a step is waiting for a human answer; this is a human decision, the agent must not answer it") {
 		t.Fatalf("out = %q", out)
 	}
 	if strings.Contains(out, secret) || strings.Count(out, "\n") != 1 {

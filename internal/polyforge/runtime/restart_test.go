@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -421,65 +420,61 @@ func TestRestartFinishesInterruptedSeal(t *testing.T) {
 	unseal(t, testWorkspace(r))
 }
 
-func TestRestartKeepsRecordWhenAihubUnreachable(t *testing.T) {
+// TestRestartVerifyOutageParksBlocked (the C6 posture): a failed
+// restart-time session verify — aihub unreachable — parks the WI in the
+// ordinary blocked state. No local verify-pending state, no background
+// retry: the agent tree is killed, the blocked verdict (its reason naming
+// the unreachable-aihub restart and the incomplete session verify) is
+// attempted at the hub, and with the hub still down the record is kept
+// end_pending for the durable retry. Once aihub answers, the verdict
+// lands and the owner's `pf resume` takes the ordinary blocked → resume
+// path.
+func TestRestartVerifyOutageParksBlocked(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
-	r, _, _ := newTestRuntime(t, hub, sp)
-	wi := "wi_unreach"
-	hub.lookupErr[wi] = errLookupBoom
-	pid, startedAt := spawnSleeper(t, wi)
-	writeStateFile(t, r, []*jobRecord{matrixRecord(r, wi, pid, startedAt)})
-
-	if err := r.Restart(context.Background()); err != nil {
-		t.Fatalf("Restart must survive an unreachable aihub per record: %v", err)
-	}
-	mustBeAlive(t, pid) // no verdict ⇒ no action
-	if recs := loadRecords(t, r); len(recs) != 1 {
-		t.Fatalf("unreachable record must be kept, got %+v", recs)
-	}
-	if sp.callCount() != 0 {
-		t.Fatal("no verdict ⇒ no spawn")
-	}
-	_ = killFn(-pid, 9)
-}
-
-// aihub down at boot: the record stays verify_pending (no agent, no
-// verdict guessed), the daemon retries the verify with backoff in-process,
-// and once aihub answers the record proceeds through restartOne (here: the
-// hub says wrapped, so the record is dropped) without a daemon restart.
-func TestRestartVerifyRetriesUntilAihubComesUp(t *testing.T) {
-	hub := newFakeHub()
-	sp := &scriptedSpawner{}
-	r, _, _ := newTestRuntime(t, hub, sp)
-	wi := "wi_verify_retry"
+	r, toOB, _ := newTestRuntime(t, hub, sp)
+	wi := "wi_verify_outage"
 	hub.lookupErr[wi] = errLookupBoom
 	pid, startedAt := spawnSleeper(t, wi)
 	rec := matrixRecord(r, wi, pid, startedAt)
 	writeStateFile(t, r, []*jobRecord{rec})
 
 	if err := r.Restart(context.Background()); err != nil {
-		t.Fatalf("Restart: %v", err)
+		t.Fatalf("Restart must survive an unreachable aihub per record: %v", err)
 	}
-	ji, ok := r.Info(wi)
-	if !ok || !ji.VerifyPending {
-		t.Fatalf("an unverifiable record must be verify_pending, got %+v ok=%v", ji, ok)
+	// the parked WI holds no agent: the tree is killed, nothing spawns
+	waitDead(t, pid)
+	if sp.callCount() != 0 {
+		t.Fatal("a verify outage must not spawn")
 	}
-	time.Sleep(60 * time.Millisecond) // a few failed retries
-	if _, ok := r.Info(wi); !ok {
-		t.Fatal("record dropped while aihub is still down")
+	// the blocked verdict is pending at the (unreachable) hub: the record
+	// is kept end_pending, carrying the outage reason verbatim
+	recs := loadRecords(t, r)
+	if len(recs) != 1 || recs[0].State != string(StateEndPending) {
+		t.Fatalf("the verify-outage record must be kept end_pending, got %+v", recs)
+	}
+	if !strings.Contains(recs[0].EndNote, "unreachable") || !strings.Contains(recs[0].EndNote, "verify") {
+		t.Fatalf("the parked reason must name the unreachable-aihub restart and the incomplete verify: %q", recs[0].EndNote)
+	}
+	msg := recvRT(t, toOB)
+	if msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
+		t.Fatalf("expected RTFinished(blocked), got %+v", msg)
 	}
 
+	// aihub answers: the durable retry lands the blocked verdict, and the
+	// job leaves the live set (the owner's `pf resume` takes it from here)
 	hub.mu.Lock()
 	delete(hub.lookupErr, wi)
 	hub.mu.Unlock()
-	hub.hold(wi, rec.SessionID, api.StatusWrapped)
-	waitFor(t, "the retried verify to settle the record", func() bool {
+	waitFor(t, "the end-pending blocked close to settle once aihub answers", func() bool {
 		_, ok := r.Info(wi)
 		return !ok
 	})
-	waitDead(t, pid)
-	if sp.callCount() != 0 {
-		t.Fatal("a terminal verdict must not spawn")
+	if hub.endCount() != 1 || hub.lastEnd().Status != protocol.FinishBlocked {
+		t.Fatalf("the blocked close must land once the hub answers, got %+v", hub.lastEnd())
+	}
+	if !strings.Contains(hub.lastEnd().Note, "unreachable") {
+		t.Fatalf("the hub-side blocked reason must name the outage: %q", hub.lastEnd().Note)
 	}
 }
 

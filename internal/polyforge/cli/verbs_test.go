@@ -818,7 +818,7 @@ func TestMachinesListRequestShapeAndHumanRender(t *testing.T) {
 	if got.Header.Get("Authorization") != "Bearer k_cli" {
 		t.Errorf("auth = %q", got.Header.Get("Authorization"))
 	}
-	if !strings.Contains(stdout, "machines: 1 (stale threshold 120s)\n") {
+	if !strings.Contains(stdout, "daemons: 1 (stale threshold 120s)\n") {
 		t.Errorf("stdout header missing: %q", stdout)
 	}
 	// The full row: runtime rendered, LIVE WI the bare count 2 (never the
@@ -957,5 +957,58 @@ func TestVerbSubmitModels(t *testing.T) {
 	}
 	if got := d.rec.all(); strings.Contains(got[1].Body, "models") {
 		t.Fatalf("plain submit body must not carry models: %s", got[1].Body)
+	}
+}
+
+// TestVerbRecallRememberNotMappingRestricted (C15, audit-subtraction
+// pass B): recall and remember succeed against aihub for a project that
+// is NOT locally mapped (no [workspace] section at all), while an unset
+// --project is still a loud local error on both verbs.
+func TestVerbRecallRememberNotMappingRestricted(t *testing.T) {
+	// the recall/remember wire shapes (any project the key can see)
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/memories/search"):
+			io.WriteString(w, `{"items":[],"total":0}`)
+		case strings.Contains(r.URL.Path, "/memories"):
+			io.WriteString(w, `{"id":"mem_new","type":"fact.note"}`)
+		default:
+			io.WriteString(w, cannedWI)
+		}
+	})
+	// NO mapping config at all: the hermetic scratch XDG carries no
+	// [workspace] section — recall/remember must still proceed.
+	env := map[string]string{"PF_SERVER": srv.URL}
+
+	if code, _, stderr := runPf(t, env, "recall", "--project", "v4unmapped", "probe"); code != 0 {
+		t.Fatalf("unmapped recall: code=%d stderr=%s", code, stderr)
+	}
+	if last := rec.last(); !strings.Contains(last.Path, "project=v4unmapped") {
+		t.Errorf("unmapped recall request path = %s", last.Path)
+	}
+	if code, _, stderr := runPf(t, env, "remember", "--project", "v4unmapped",
+		"--type", "fact.note", "content"); code != 0 {
+		t.Fatalf("unmapped remember: code=%d stderr=%s", code, stderr)
+	}
+	last := rec.last()
+	if last.Method != "POST" || !strings.Contains(last.Path, "/api/v1/memories") {
+		t.Errorf("unmapped remember request = %s %s", last.Method, last.Path)
+	}
+	if !strings.Contains(last.Body, `"project":"v4unmapped"`) {
+		t.Errorf("unmapped remember body missing the project: %s", last.Body)
+	}
+
+	// --project stays required on both
+	for _, verb := range []string{"recall", "remember"} {
+		args := []string{verb}
+		if verb == "remember" {
+			args = append(args, "--type", "fact.note")
+		}
+		args = append(args, "probe")
+		code, _, stderr := runPf(t, env, args...)
+		if code != 1 || !strings.Contains(stderr, "required") {
+			t.Errorf("%s without --project: code=%d stderr=%s", verb, code, stderr)
+		}
 	}
 }

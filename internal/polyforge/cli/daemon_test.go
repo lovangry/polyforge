@@ -71,7 +71,7 @@ func (d *daemonFixture) answer(method, path string, body string) {
 
 func TestDaemonClientSubmitFamilyRoundtrip(t *testing.T) {
 	d := newDaemonFixture(t)
-	for _, intent := range []string{"claim", "resume"} {
+	for _, intent := range []string{"claim"} {
 		d.answer("POST", "/jobs/wi_abc/"+intent, `{"accepted":true,"work_item_id":"wi_abc"}`)
 	}
 	c := NewDaemonClient(d.sock)
@@ -80,8 +80,10 @@ func TestDaemonClientSubmitFamilyRoundtrip(t *testing.T) {
 		call func() (json.RawMessage, error)
 		want string
 	}{
-		{func() (json.RawMessage, error) { return c.Claim("wi_abc", "high") }, "/jobs/wi_abc/claim"},
-		{func() (json.RawMessage, error) { return c.Resume("wi_abc", "") }, "/jobs/wi_abc/resume"},
+		// The plain Claim/Resume client arms (and the plain resume route)
+		// were deleted with the audit's dead-code sweep: the claim face is
+		// ClaimWithModels, the parked-blocked face is ResumeBlocked.
+		{func() (json.RawMessage, error) { return c.ClaimWithModels("wi_abc", "high", nil) }, "/jobs/wi_abc/claim"},
 	}
 	for i, tc := range cases {
 		raw, err := tc.call()

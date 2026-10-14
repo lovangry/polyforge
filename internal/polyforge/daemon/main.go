@@ -45,8 +45,8 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
 	piBin := fs.String("pi-bin", "", "harness binary (default pi)")
-	sessionsRoot := fs.String("harness-sessions-root", "", "harness session store root for the live-transcript sync (env POLYFORGE_HARNESS_SESSIONS_ROOT; default ~/.pi/agent/sessions)")
-	cgroupRoot := fs.String("cgroup-root", "", "cgroup v2 root for layer-0 cleanup (env POLYFORGE_CGROUP_ROOT)")
+	sessionsRoot := fs.String("harness-sessions-root", "", "harness session store root for the live-transcript sync (env POLYFORGE_HARNESS_SESSIONS_ROOT; default <data-dir>/step-agent-sessions, the step processes' own session store)")
+	operatorAgentDir := fs.String("operator-agent-dir", "", "SOURCE of the dedicated step agent directory's minimal set — model service credentials, model configuration and subagent definitions are copied from here into <data-dir>/step-agent (env POLYFORGE_OPERATOR_AGENT_DIR; default ~/.pi/agent). A configured source without a readable auth.json refuses the start")
 	gitRemoteBase := fs.String("git-remote-base", "", "aihub bare-repo base URL (default <server>/git)")
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
 	recallTopK := fs.Int("recall-topk", 0, "claim-time memory snapshot hit count (env POLYFORGE_RECALL_TOPK; default 10, max 50)")
@@ -130,11 +130,11 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *workflowsDir == "" {
 		*workflowsDir = "workflows"
 	}
-	if *cgroupRoot == "" {
-		*cgroupRoot = os.Getenv("POLYFORGE_CGROUP_ROOT")
-	}
 	if *sessionsRoot == "" {
 		*sessionsRoot = os.Getenv("POLYFORGE_HARNESS_SESSIONS_ROOT")
+	}
+	if *operatorAgentDir == "" {
+		*operatorAgentDir = os.Getenv("POLYFORGE_OPERATOR_AGENT_DIR")
 	}
 	if *gitRemoteBase == "" {
 		*gitRemoteBase = strings.TrimSuffix(*server, "/") + "/git"
@@ -157,13 +157,17 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		WorkflowsDir:        *workflowsDir,
 		PiBin:               *piBin,
 		HarnessSessionsRoot: *sessionsRoot,
-		CgroupRoot:          *cgroupRoot,
-		APIKey:              *apiKey,
-		MaxConcurrent:       *maxConcurrent,
-		RecallTopK:          *recallTopK,
-		Auto:                autoCfg,
-		HeartbeatEvery:      *heartbeatEvery,
-		Hub:                 aihubclient.New(*server, *apiKey),
+		// An operator-named source is EXPLICIT: a missing auth.json
+		// under it refuses the start rather than running step agents
+		// without credentials (addendum 2).
+		OperatorAgentDir:         *operatorAgentDir,
+		OperatorAgentDirExplicit: *operatorAgentDir != "",
+		APIKey:                   *apiKey,
+		MaxConcurrent:            *maxConcurrent,
+		RecallTopK:               *recallTopK,
+		Auto:                     autoCfg,
+		HeartbeatEvery:           *heartbeatEvery,
+		Hub:                      aihubclient.New(*server, *apiKey),
 		// Zero fields fall through to the documented defaults.
 		Supervision: SupervisionConfig{
 			SilenceWindow:          *silenceWindow,

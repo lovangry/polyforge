@@ -19,6 +19,12 @@ pf watch --chat <chat> --statusline                        # print the progress 
 pf watch --statusline --harness-session <id|->             # same, chat resolved from the harness session
 ```
 
+Chat id resolution (the explicit flags outrank the environment):
+`--chat <id>` or `--harness-session <id|->` names the chat explicitly and wins
+over `PF_CHAT_ID`; passing BOTH flags is a usage error (`--chat and
+--harness-session are both explicit chat-id sources`); `PF_CHAT_ID` is used only
+when neither flag is given.
+
 `--once` is the pull: status (`running`, `needs input`, `completed`, `failed`,
 `blocked`, or `queued/preparing` for a work item the daemon
 has not registered yet), the current step and how long it has run, the age of
@@ -37,7 +43,8 @@ here (`--once`) only when asked.
 
 | Code | When | What to tell the user |
 |---|---|---|
-| (no code) `watch: no chat id` | Neither `--chat` nor `PF_CHAT_ID` is set | The session has no chat id — see the Chat identity section of `SKILL.md`. |
+| (no code) `watch: no chat id` | None of `--chat`, `--harness-session` or `PF_CHAT_ID` is set | The session has no chat id — see the Chat identity section of `SKILL.md`. |
+| (no code) `watch: --chat and --harness-session are both explicit chat-id sources` | Both flags were passed | Pass exactly one of them. |
 | `DAEMON-400` | Bad cursor or chat id | Fix the invocation. |
 | `dial unix …` | Daemon not running | Nothing is executing here — start the daemon or check `--socket`. The resident watcher prints `daemon unreachable; progress paused` and keeps retrying. |
 

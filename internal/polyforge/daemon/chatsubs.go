@@ -320,23 +320,28 @@ func (d *Daemon) attentionRoute(w http.ResponseWriter, r *http.Request) {
 // attention lists the WIs that need a human, have no live subscribed
 // watcher, and belong to this chat (origin) or this owner (origin owner,
 // falling back to the WI reporter), skipping what the chat was already
-// shown. mark records the listed notices as shown.
+// shown. mark records the listed notices as shown. The reminder covers
+// every decision class the held job presents (D9), not only needs_input.
 func (d *Daemon) attention(chat, owner string, mark bool) ([]protocol.ChatAttentionItem, error) {
 	items := []protocol.ChatAttentionItem{}
 	jobs, _ := d.statusJobs()
 	for _, j := range jobs {
-		reason := ""
-		switch {
-		case j.NeedsInput:
-			reason = "needs_input"
-		default:
-			continue
-		}
 		if d.subs.Covered(j.WorkItemID) {
 			continue
 		}
 		mine := j.Origin != nil && j.Origin.ChatID == chat
 		if !mine && !(owner != "" && d.ownerOf(j) == owner) {
+			continue
+		}
+		reason := d.attentionClass(j)
+		if hubCanceledCandidate(string(j.Status)) {
+			// a hub-side cancel of a record the daemon still holds is the
+			// newer decision: it outranks the retained-state class
+			if c := d.attentionClassHubCanceled(j); c != "" {
+				reason = c
+			}
+		}
+		if reason == "" {
 			continue
 		}
 		key := j.WorkItemID + "|" + reason + "|" + j.QuestionID
@@ -350,6 +355,68 @@ func (d *Daemon) attention(chat, owner string, mark bool) ([]protocol.ChatAttent
 	}
 	sort.Slice(items, func(i, k int) bool { return items[i].WI < items[k].WI })
 	return items, nil
+}
+
+// attentionClass derives one held job's attention class (D9) from the
+// state the daemon holds — never a hub call. Status-backed classes
+// first: the needs_input projection, the retained operator pause, the
+// end_pending blocked close, and the recorded stop reason of a close
+// (completed/failed/blocked). Then the classes status alone cannot
+// distinguish — step_dead, candidates_exhausted, submit_rejected,
+// submit_dropped, daemon_restarted — from the WI's decision-event ring,
+// newest first. "" = the job presents no decision. (canceled, the one
+// class no local state can name, is attention's hub-checked arm.)
+func (d *Daemon) attentionClass(j statusJob) string {
+	switch {
+	case j.NeedsInput:
+		return protocol.JobNeedsInput
+	case j.Status == string(runtime.StatePaused):
+		return "paused"
+	case j.Status == string(runtime.StateEndPending):
+		return "blocked"
+	}
+	switch j.StopReason {
+	case protocol.FinishWrapped:
+		return "completed"
+	case protocol.FinishFailed:
+		return "failed"
+	}
+	if d.obs != nil {
+		ring := d.obs.Events().SinceAfter(j.WorkItemID, 0)
+		for i := len(ring) - 1; i >= 0; i-- {
+			switch ring[i].Kind {
+			case "step_dead", "candidates_exhausted",
+				observe.EvSubmitRejected, observe.EvSubmitDropped, observe.EvDaemonRestarted:
+				return ring[i].Kind
+			}
+		}
+	}
+	return ""
+}
+
+// hubCanceledCandidate reports whether a job in this state can have
+// been canceled at the hub while the daemon still holds its record
+// (pf cancel works on a paused or blocked WI; the record is dropped at
+// the next reconciliation, so the held window is exactly these states).
+func hubCanceledCandidate(status string) bool {
+	return status == string(runtime.StatePaused) || status == string(runtime.StateEndPending)
+}
+
+// attentionClassHubCanceled answers "canceled" — the one decision class
+// with no local face — for a held record the hub says was canceled.
+// "" otherwise.
+func (d *Daemon) attentionClassHubCanceled(j statusJob) string {
+	if d.hub == nil || !hubCanceledCandidate(string(j.Status)) {
+		return ""
+	}
+	item, err := d.hub.GetWorkItem(j.WorkItemID)
+	if err != nil || item == nil {
+		return ""
+	}
+	if item.Status == api.StatusCanceled {
+		return "canceled"
+	}
+	return ""
 }
 
 // ownerOf answers a WI's owner: the origin owner, else the WI reporter.
@@ -381,7 +448,7 @@ func (d *Daemon) lastSeq(wi string) int64 {
 	if d.obs == nil {
 		return 0
 	}
-	ring := d.obs.Events().Since(wi)
+	ring := d.obs.Events().SinceAfter(wi, 0)
 	if len(ring) == 0 {
 		return 0
 	}

@@ -113,7 +113,6 @@ const PushTimeout = 60 * 1e9 // 60 seconds (ns, for time.Duration)
 
 // Daemon job states.
 const (
-	JobRunning    = "running"
 	JobNeedsInput = "needs_input"
 )
 

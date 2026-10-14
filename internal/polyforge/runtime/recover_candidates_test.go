@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -64,15 +63,19 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	}
 	sp := &scriptedSpawner{}
 	cfg := Config{
-		MachineID:               "m-test",
-		Mapping:                 mappingFor(ws, "proj"),
-		DataDir:                 filepath.Join(t.TempDir(), "data"),
-		MaxRecoveries:           2,
-		RecoveryStabilityWindow: time.Nanosecond,
+		MachineID:     "m-test",
+		Mapping:       mappingFor(ws, "proj"),
+		DataDir:       filepath.Join(t.TempDir(), "data"),
+		MaxRecoveries: 2,
 	}
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
+
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	hub.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 	rec := &recordingStarter{base: scriptedEngineStarter(sp)}
 	r.cfg.AgentStarter = rec.start
@@ -126,16 +129,21 @@ func TestRecoveryReconstructedJobRehydratesRecordNotYamlOrCapsule(t *testing.T) 
 	wfDir := frontmatterBundle(t, w079Frontmatter)
 	sp := &scriptedSpawner{}
 	cfg := Config{
-		MachineID:               "m-test",
-		Mapping:                 mappingFor(filepath.Join(t.TempDir(), "ws")),
-		DataDir:                 filepath.Join(t.TempDir(), "data"),
-		AgentStarter:            scriptedEngineStarter(sp),
-		MaxRecoveries:           2,
-		RecoveryStabilityWindow: time.Nanosecond,
+		MachineID:     "m-test",
+		Mapping:       mappingFor(filepath.Join(t.TempDir(), "ws")),
+		DataDir:       filepath.Join(t.TempDir(), "data"),
+		AgentStarter:  scriptedEngineStarter(sp),
+		MaxRecoveries: 2,
 	}
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
-	r := New(cfg, newFakeHub(), sp, toOB, fromOB)
+	hub2 := newFakeHub()
+	r := New(cfg, hub2, sp, toOB, fromOB)
+
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	hub2.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = hub2.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 	ws, err := r.cfg.Mapping.WorkspaceFor("proj")
 	if err != nil {
@@ -173,16 +181,21 @@ func TestRecoveryAuditlessCapsuleRehydratesNil(t *testing.T) {
 	wfDir := frontmatterBundle(t, w079Frontmatter)
 	sp := &scriptedSpawner{}
 	cfg := Config{
-		MachineID:               "m-test",
-		Mapping:                 mappingFor(filepath.Join(t.TempDir(), "ws")),
-		DataDir:                 filepath.Join(t.TempDir(), "data"),
-		AgentStarter:            scriptedEngineStarter(sp),
-		MaxRecoveries:           2,
-		RecoveryStabilityWindow: time.Nanosecond,
+		MachineID:     "m-test",
+		Mapping:       mappingFor(filepath.Join(t.TempDir(), "ws")),
+		DataDir:       filepath.Join(t.TempDir(), "data"),
+		AgentStarter:  scriptedEngineStarter(sp),
+		MaxRecoveries: 2,
 	}
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
-	r := New(cfg, newFakeHub(), sp, toOB, fromOB)
+	hub2 := newFakeHub()
+	r := New(cfg, hub2, sp, toOB, fromOB)
+
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	hub2.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = hub2.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 	j := seedJob(r, "wi_w079rec4")
 	if got := r.effectiveCandidatesForRecovery(j); got != nil {

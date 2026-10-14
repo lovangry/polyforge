@@ -3,7 +3,10 @@
 Data-plane verb: the `pf` CLI talks HTTP direct to AIHub. Cancel only ends a
 work item that has **no active generation**; it never interrupts a running
 one (that is `pause` or `wrap --fail`). This is also the "abandon" of a
-**blocked** work item (the counterpart of `resume` = continue). Allowed to the task's reporter, a project
+**blocked** work item (the counterpart of `resume` = continue): the two
+owner moves on a parked workflow are exactly `pf resume` and this verb —
+`pf wrap --fail` on a blocked work item only prints that hint and
+changes nothing. Allowed to the task's reporter, a project
 maintainer or an admin.
 
 ## Triggers

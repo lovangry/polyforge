@@ -81,11 +81,17 @@ type Config struct {
 	WorkflowsDir  string // daemon checkout's workflows/
 	PiBin         string
 	// HarnessSessionsRoot overrides the harness's default session store
-	// for the live-transcript locator (F3); "" = ~/.pi/agent/sessions.
+	// for the live-transcript locator (F3); "" = the dedicated
+	// step-agent-sessions dir under DataDir (addendum 2).
 	HarnessSessionsRoot string
-	CgroupRoot          string
-	APIKey              string // machine credential; NEVER reaches an agent env
-	MaxConcurrent       int    // cross-mode concurrency cap (default 4)
+	// OperatorAgentDir is the SOURCE of the dedicated step agent
+	// directory's minimal set (addendum 2, owner ruling A): the
+	// operator's agent dir by default. Explicit (flag/env) sources whose
+	// auth.json is missing refuse the daemon start.
+	OperatorAgentDir         string
+	OperatorAgentDirExplicit bool
+	APIKey                   string // machine credential; NEVER reaches an agent env
+	MaxConcurrent            int    // cross-mode concurrency cap (default 4)
 	// RecallTopK is the F6-A claim-time memory snapshot's hit count
 	// (0 = the runtime default, 10; bounded at 50 there).
 	RecallTopK int
@@ -217,17 +223,17 @@ type Daemon struct {
 	shutMu      sync.Mutex
 	shutdownErr error
 
-	// drainDegraded is the drain degraded-signal episode flag: set when
-	// the first drain_degraded event of a silent→degraded transition has
-	// been emitted, cleared on the next successful wave fetch. Only the
-	// drain ticker goroutine touches it (fetchAutoWave), so it carries
-	// no lock.
-	drainDegraded bool
+	// queueFetchDenied is the denial episode flag: set when the first
+	// queue_fetch_denied event of a healthy→denied transition has been
+	// emitted, cleared on the next successful wave fetch. Only the
+	// auto-pull ticker goroutine touches it (fetchAutoWave), so it
+	// carries no lock.
+	queueFetchDenied bool
 	// yamlRefused is project → the last workspace-yaml refusal logged for
 	// it: auto-pull skips a project whose .polyforge.yaml is invalid
 	// (nothing is claimed, the WIs stay queued for other machines) and
 	// logs a given refusal once, not every tick. Same single-goroutine
-	// ownership as drainDegraded.
+	// ownership as queueFetchDenied.
 	yamlRefused map[string]string
 
 	// sup hands out the per-WI supervision links shared by the driver
@@ -297,18 +303,34 @@ func New(cfg Config) (*Daemon, error) {
 	}
 	cfg.fill()
 
+	// addendum 2 (owner ruling A): the dedicated step agent directory is
+	// synced at daemon start — the only point that also prunes entries
+	// outside the minimal set; the spawner refreshes the allowlisted
+	// members before every spawn. A source that is explicitly configured but cannot
+	// present its credentials refuses startup; the implicit default
+	// without file credentials carries on with a warning.
 	rtCfg := runtime.Config{
-		MachineID:           cfg.MachineID,
-		Mapping:             cfg.Mapping,
-		DataDir:             cfg.DataDir,
-		GitRemoteBase:       cfg.GitRemoteBase,
-		WorkflowsDir:        cfg.WorkflowsDir,
-		Harness:             cfg.Harness,
-		PiBin:               cfg.PiBin,
-		CgroupRoot:          cfg.CgroupRoot,
-		HarnessSessionsRoot: cfg.HarnessSessionsRoot,
-		EnvSecrets:          []string{cfg.APIKey},
+		MachineID:                cfg.MachineID,
+		Mapping:                  cfg.Mapping,
+		DataDir:                  cfg.DataDir,
+		GitRemoteBase:            cfg.GitRemoteBase,
+		WorkflowsDir:             cfg.WorkflowsDir,
+		Harness:                  cfg.Harness,
+		PiBin:                    cfg.PiBin,
+		HarnessSessionsRoot:      cfg.HarnessSessionsRoot,
+		OperatorAgentDir:         cfg.OperatorAgentDir,
+		OperatorAgentDirExplicit: cfg.OperatorAgentDirExplicit,
+		EnvSecrets:               []string{cfg.APIKey},
 	}
+	rtCfg.FillDefaults()
+	if err := rtCfg.SyncStepAgentDir(); err != nil {
+		return nil, err
+	}
+	// The step processes' session store is the locator's root too: the
+	// filled runtime value (the dedicated step-agent-sessions dir, or the
+	// operator's explicit override) governs both the child env and the
+	// live-transcript scan below.
+	cfg.HarnessSessionsRoot = rtCfg.HarnessSessionsRoot
 	// Runtime-sourced diagnostic events (a seal push that failed after
 	// its retries, pilot item 3) land in the observe lane's durable
 	// events log next to its own entries; the tap reads d.obs at call
@@ -889,8 +911,8 @@ func (d *Daemon) dispatch() {
 // free-slot budget is spent per enqueued entry (audit B3a: one wave
 // enqueues at most the CURRENT free-slot count; the rest of the ready
 // queue stays on aihub for the next wave). Authorization-class denials
-// raise the degraded signal — a typed drain_degraded event in the
-// observe lane's durable log, once per silent→degraded episode (the
+// raise the denial signal — a typed queue_fetch_denied event in the
+// observe lane's durable log, once per healthy→denied episode (the
 // flag clears on the next successful fetch); transport-class losses
 // stay silent idle.
 func (d *Daemon) fetchAutoWave() {
@@ -903,11 +925,11 @@ func (d *Daemon) fetchAutoWave() {
 	}
 	// polyforge#113: no daemon-level project scope exists — the drain
 	// wave iterates ALL mapped projects. A per-project authorization-class
-	// denial raises the degraded signal naming THAT project; healthy
+	// denial raises the denial signal naming THAT project; healthy
 	// projects still enqueue (partial coverage beats none, and the
-	// degraded episode is visible).
+	// denial episode is visible).
 	var items []api.WorkItem
-	degraded := false
+	denied := false
 	for _, project := range d.cfg.Mapping.Projects() {
 		if _, lerr := d.rt.LoadWorkspace(project); lerr != nil {
 			if d.yamlRefused == nil {
@@ -923,11 +945,11 @@ func (d *Daemon) fetchAutoWave() {
 		pis, err := d.hub.Queue(project)
 		if err != nil {
 			if authDenied(err) {
-				degraded = true
-				fmt.Fprintf(os.Stderr, "daemon: drain fetch degraded: ready queue of project %q denied (%v)\n", project, err)
-				if !d.drainDegraded && d.obs != nil {
-					d.drainDegraded = true
-					_ = d.obs.Events().Append("", observe.EvDrainDegraded, map[string]any{
+				denied = true
+				fmt.Fprintf(os.Stderr, "daemon: auto-pull fetch denied: ready queue of project %q refused authorization (%v)\n", project, err)
+				if !d.queueFetchDenied && d.obs != nil {
+					d.queueFetchDenied = true
+					_ = d.obs.Events().Append("", observe.EvQueueFetchDenied, map[string]any{
 						"project": project,
 						"class":   "authorization",
 						"error":   err.Error(),
@@ -938,8 +960,8 @@ func (d *Daemon) fetchAutoWave() {
 		}
 		items = append(items, pis...)
 	}
-	if !degraded {
-		d.drainDegraded = false // episode cleared: this fetch fully succeeded
+	if !denied {
+		d.queueFetchDenied = false // episode cleared: this fetch fully succeeded
 	}
 	for _, it := range items {
 		if budget == 0 {

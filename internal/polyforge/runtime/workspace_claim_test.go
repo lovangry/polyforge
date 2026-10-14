@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -42,11 +41,15 @@ func newWorkspaceTestRuntime(t *testing.T, hub Aihub, project string) (*Runtime,
 		MaxRecoveries: 2,
 		// The storm guard's window is collapsed: test episodes are
 		// separated by handleOB calls, not real time.
-		RecoveryStabilityWindow: time.Nanosecond,
 	}
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
+
+	// The claim-time capsule remote (see newTestRuntime): aihub creates
+	// the bare repo at claim; the fake hub implements the contract.
+	hub.(*fakeHub).capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = r.cfg.DataDir + "/capsule-remotes"
 	r.cfg.WorkflowsDir = wfDir
 	return r, ws, sp
 }

@@ -19,7 +19,7 @@ import (
 // RTFinished(blocked), the aihub side blocked with waiting_on=owner and
 // NO closed_at (blocked is resumable-by-owner, not closed), the job
 // dropped from the daemon's live set. The DRIVER-crash bound (the
-// recovery engine's storm guard) has its own scenario
+// recovery engine's consecutive-failures ledger) has its own scenario
 // (TestV2DriverCrashLoopBoundedThenBlocked). This one runs the counter
 // through the REAL daemon, the real spawner and real step processes.
 func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
@@ -73,8 +73,8 @@ func TestV1S17RecoveryBudgetBoundedFail(t *testing.T) {
 	}
 
 	// T5 (M2): the bounded fail CLEARED the session row — blocked with a
-	// live session would be revivable by a restart and the storm guard
-	// would be a lie. The cleared row keeps the work item OUT of the
+	// live session would be revivable by a restart and the ledger's
+	// bound would be a lie. The cleared row keeps the work item OUT of the
 	// claimable set: the CAS gate answers the typed NOT_CLAIMABLE refusal
 	// on the wire.
 	if sess := inst.sessionOf(t, wi); sess.Fingerprint != "" {

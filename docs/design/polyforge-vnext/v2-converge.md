@@ -39,7 +39,7 @@
 |---|---|---|
 | **driver** | 执行 WI：按步骤派发 step 进程、收结果文件、推进 `execution.json`、按死因处理、维护失败计数 | 不判断"活着但不推进" |
 | **supervisor**（原 observe 组件，改名以免与命令混淆） | 观察执行动态、**判断 step 是否已死**、判断 **driver 是否卡在步骤之间**、M4 僵尸会话重验、记录事件、推送进度到 aihub、提供查询接口 | 不推进执行 |
-| **恢复引擎**（runtime） | driver 自身异常退出后的重拉；保留 storm guard 语义（短时间多次崩溃 → blocked） | 不判 step 死活 |
+| **恢复引擎**（runtime） | driver 自身异常退出后的重拉；保留有界失败语义（连续多次恢复失败 → blocked；唯一的失败账本是“连续恢复失败”计数器，步骤结果被接受即清零） | 不判 step 死活 |
 | **`pf watch`**（CLI） | 面向人的进展与决策通知 | 不做任何判断 |
 
 **例外（已定）**：step 进程**退出却没交结果**，由 driver 直接处理（它在等结果时就能看到），再告知 supervisor。
@@ -119,7 +119,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | 机器问题 | blocked，通知人，不换模型 |
 | daemon 重启 | 同模型重新派发，**不计失败** |
 | `driver_stalled` | 终止当前 git/推送子进程，driver 重拉（计入 driver 异常退出界） |
-| driver 自身异常退出 | 恢复引擎重拉；**短时间多次（保留 storm guard 语义）→ blocked**——防止"崩溃 → 重启不计失败 → 再崩溃"无界循环（#97 教训） |
+| driver 自身异常退出 | 恢复引擎重拉；**连续多次恢复失败（唯一账本：连续恢复失败计数器）→ blocked**——防止"崩溃 → 重启不计失败 → 再崩溃"无界循环（#97 教训） |
 | 同一步失败计数达上限（默认 3） | blocked，通知人 |
 
 **候选用尽**：指针停在末尾，后续"换模型"按同模型重试计数；决策事件注明"候选已用尽"。
@@ -163,6 +163,20 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 **`context_policy`（step 键，`inherit`\|`fresh`，缺省 `inherit`）**：声明一个 step 与上游的上下文关系。`inherit` = 本 step 续上游的活：派发时 driver 找**最近一个已 done 且声明 `handoff: true` 的更早 step**，按路径约定 `artifacts/handoff-<step-id>.md` 读出交接正文，原样拼进派发 prompt 的「Handoff from step …」小节；`fresh` = 从零开始，不注入交接正文，要读的上游产物按产物路径约定自取。`gate: true` 的 step 强制 `fresh`——闸只凭自己的输入判，不继承有倾向性的上下文。
 
 **`handoff`（step 键，bool，缺省 false）**：`true` 的 step 必须在收尾前把交接内容写成 `artifacts/handoff-<step-id>.md`。**路径约定就是全部契约**：没有摘要、没有字节数、没有信封字段，driver 不校验交接文件的哈希、不比对清单；交接文件不在时，下游 inherit step 的派发只是少了那一段正文，不构成信封级失败。权威细节见 `01-workflow-skills.md#§4.4a`。
+
+### 2.7 harness 适配层的隔离保证（owner 裁决 A4，2026-10-13）
+
+**禁止 step agent 使用 harness 后台任务，是 harness 适配层的责任，不是写进提示词的纪律。** 后台任务会让一个步骤在它的派生进程之外留下活动，监督面（判死、step 结束、派生计数）全部失真；靠"规则里写了不许用"约束的只是诚实的 agent。
+
+pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的数据目录下维护 `<data-dir>/step-agent/`，派生每个 step 进程时注入 `PI_CODING_AGENT_DIR=<data-dir>/step-agent`（会话另置于 `PI_CODING_AGENT_SESSION_DIR=<data-dir>/step-agent-sessions/`，实时 transcript 定位器跟着同一个根走）。该目录是 operator agent 目录的**最小快照**——只有 `auth.json`（模型服务凭证）、`models.json`（模型服务配置，保留源文件权限）、`agents/`（子 agent 定义）、`extensions/subagent/`（子 agent **工具**本身），**没有 `settings.json`**，而用户级 package（例如提供后台任务工具的 `npm:pi-background-tasks`）正是在 `settings.json` 里声明的：没有声明就没有加载，后台任务工具对 step agent **机械不可见**，与提示词无关。
+
+- **子 agent 工具如何送达**：它不是 pi 内建工具，而是 operator agent 目录下的扩展 `extensions/subagent/`；pi 只从 `<agent 目录>/extensions/` 自动发现全局扩展（`resource-loader` / `package-manager` 的全局 extensions 根）。所以快照**恰好**拷贝 `extensions/subagent/` 这一个子目录，其余扩展一律不带（例如 `extensions/polyforge` 是交互会话用的），`settings.json` 与 packages 永远不带。
+- 拷贝而非链接：快照不跟随 operator 后续改动（包括全局重装），也没有任何符号链接把专用目录变成整个 operator 目录的窗口（树内符号链接跳过不拷）。**每次派生前**只刷新白名单成员（源文件大小+mtime 变化即重拷，源里没了就删）；清除白名单以外的条目**只在 daemon 启动时**做——那时本 daemon 没有存活的 step 进程，不会把文件从运行中的 step 进程脚下抽走。凭证不可读 = 大声拒绝派生，绝不降级运行。
+- **凭证限制**：拷贝的 `auth.json` 支持 API-key 条目。OAuth 条目在 pi 刷新令牌之前可用；pi 会把刷新后的令牌写进**副本**，而下一次同步发现副本与 operator 文件不一致，就用 operator 的（旧）条目覆盖它——step 侧的刷新结果会丢失。没有为此设机制：step agent 应使用 API-key 凭证。
+- 位置在数据目录下，**绝不在 capsule 内**：capsule 会提交并推送到 aihub，且对 agent 可写。
+- `--no-extensions` 仍然**不传**：子 agent 工具就是上面那个扩展，关掉它等于关掉整条 step-agent 派发路径；隔离由目录（只带这一个扩展）而非开关完成。
+- **任何未来的 harness 在接入前，必须提供等价的保证**（一个 harness 若无法从启动配置上关掉后台任务族，就不具备接入资格）——这是适配层的准入条件，写在这里而不是写在执行者规则里。
+- 与 #135（独立 agent 用户）方向一致：该目录届时对 step agent 用户只读，daemon 仍是唯一写入者。
 
 ## 3. 人工协同：`pf watch`（已定）
 
@@ -238,7 +252,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 **原则**：session 是唯一的锁；`execution.json` 是唯一的进度账本；推到 aihub git 才算保存；**绝不悄悄从远端重建本地现场**（#103）。
 
 **已定**
-- 某 WI 的 capsule 在重启时缺失 / 项目未映射（cli.toml 无该项目的 workspace 映射）：**只该 WI 被置为普通的 aihub `blocked`**——经与其他 blocked 结局相同的 bounded-fail 收尾发 SessionEnd(blocked)，原因备注写明成因（"capsule missing at <path> …" / "project <p> is not in the daemon's [workspace] mapping …"）；**本地不停放任何东西**（无本地 job 记录、无槽位），仍写 `capsule_missing` / `project_unmapped` 事件（`pf watch` 可见）；daemon 照常启动、其余 WI 照常恢复。人（如需）先修复成因（补映射），再 `pf resume <wi>`：这是普通的 blocked 门（resume-blocked + daemon claim）= 从 aihub capsule 链 + task-repo 载体 ref（`refs/pf-task/<name>`）**重新领取**；死现场（如有）被隔离，已完成的步骤不重跑，最后一次推送之后发布的工作丢失。`pf cancel <wi>` 就是普通的 blocked 放弃出口（hub cancel；`pf wrap --fail <wi>` 对 parked 工作流不再有任何 hub 门，见 §6.4 收紧）。session-end 只接受 wrapped|failed|blocked|paused。
+- 某 WI 的 capsule 在重启时缺失 / 项目未映射（cli.toml 无该项目的 workspace 映射）：**只该 WI 被置为普通的 aihub `blocked`**——经与其他 blocked 结局相同的 bounded-fail 收尾发 SessionEnd(blocked)，原因备注写明成因（"capsule missing at <path> …" / "project <p> is not in the daemon's [workspace] mapping …"）；**本地不停放任何东西**（无本地 job 记录、无槽位），仍写 `capsule_missing` / `project_unmapped` 事件（`pf watch` 可见）；daemon 照常启动、其余 WI 照常恢复。人（如需）先修复成因（补映射），再 `pf resume <wi>`：这是普通的 blocked 门（resume-blocked + daemon claim）= 从 aihub capsule 链 + task-repo 载体 ref（`refs/pf-task/<name>`）**重新领取**；死现场（如有）被隔离，已完成的步骤不重跑，最后一次推送之后发布的工作丢失。blocked 的两个出口就是 **`pf resume <wi>`（继续）/ `pf cancel <wi>`（放弃）**；`pf wrap --fail <wi>` 不是 blocked 的门，对 parked 工作流不再有任何 hub 门（§6.4 收紧）：daemon 以 DAEMON-409 拒绝并点名这两条路；daemon 无法判定时（本机无 job，DAEMON-404）CLI 只打印这两条路的提示，不调用 hub、不终结任何东西（审计减法 pass B，C9）。session-end 只接受 wrapped|failed|blocked|paused。
 - **不加租约**（保留 v1.5 裁决：领取永不驱逐活着的持有者，接管是单独的特权操作）。改为 WI 级"失联"提示：**WI 失联 = 其持有 daemon 的心跳超时（统一一个阈值，替代 aihub 展示层的 5 分钟与本文早先的 15 分钟两套），或该 WI 从该 daemon 心跳上报的在跑列表中消失**；在 `pf queue`/`pf watch` 提示"可接管"并发事件。
 - 同一步失败计数上限（2.3）；driver 异常退出界（2.3）。
 
@@ -390,7 +404,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | #44 agent 死无人知 | driver 退出检测 + ②③④ |
 | #48 活动量误判、incident 风暴 | "真实输出"定义 + 失败计数上限 |
 | #83 长工具被误杀 | ③ 默认 30 分钟 + 重试放宽 Y |
-| #97 快速死亡死循环 | 恢复引擎 driver 异常退出界（保留 storm guard 语义） |
+| #97 快速死亡死循环 | 恢复引擎 driver 异常退出界（连续恢复失败计数器） |
 | #99 等人期间假卡死 | 等人期间无进程、不计时 |
 | #99 双写者 | 孤儿回收与监督替换同批 |
 | #103 绝不悄悄重建 | 坏任务置 blocked，人显式 `pf resume` 才重新领取（原"待修复"原地续跑，此后已并入 blocked，见第6节） |
@@ -436,5 +450,5 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 **与正文的实现差异（均为补充，不改契约语义）**
 - 事实集合多一条 `exec_committed{version}`：事件触发推送需要"driver 提交了新 Version"的提示，否则只能回到轮询 `execution.json`。
 - 事实/判定走 `supervise.Link`（进程内）；driver 与 supervisor 之外的"harness 海量输出"由翻译器直接折叠进每派发一份的 `Tracker`（只保留最新状态，不排队）。
-- `driver_stalled`：supervisor 同时向 driver 发判定，并经 `OBNeedsRecovery(reason=driver_stalled)` 交给恢复引擎——卡死的 driver 无法自己消费判定；恢复引擎杀树并重拉，计入 storm guard。当前 driver 自身不做 git/推送（推送在 supervisor 的推送环里，受 60s 单次上界约束），所以该规则管的是"driver 在步骤之间的任何卡死"。
+- `driver_stalled`：supervisor 同时向 driver 发判定，并经 `OBNeedsRecovery(reason=driver_stalled)` 交给恢复引擎——卡死的 driver 无法自己消费判定；恢复引擎杀树并重拉，计入连续恢复失败计数器。当前 driver 自身不做 git/推送（推送在 supervisor 的推送环里，受 60s 单次上界约束），所以该规则管的是"driver 在步骤之间的任何卡死"。
 - 前一次 transcript 作为"只读参考"仅在 capsule 里读得到时才附上（capsule 内的转录靠提交边界同步，进程刚死时可能还没有）；声明的 resume 路径不可读时，resume 退化为 fresh。

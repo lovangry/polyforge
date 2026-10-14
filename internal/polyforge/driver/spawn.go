@@ -18,7 +18,7 @@ package driver
 //     argv, the resume session rides the spawn journal's latest
 //     transcript, the spawn identity line is appended through
 //     SpawnParams.Journal, and the isolation flags / env sanitize
-//     point / cgroup enrollment stay in their one place
+//     point / dedicated step agent directory stay in their one place
 //     (runtime/spawn.go).
 //
 //   - RESULT COLLECTION. The step process delivers its envelope by
@@ -84,9 +84,6 @@ type StepSpawnAdapter struct {
 	// runtime.DefaultSpawner(&runtime.Config{...}) so isolation, env
 	// sanitization and the model pin keep their single home.
 	Spawner spawn.Spawner
-	// CgroupPath is the per-WI cgroup v2 dir ("" = layer 0
-	// unavailable) — passed through to SpawnParams.
-	CgroupPath string
 	// Link is the per-WI supervision link: the harness translator of
 	// every dispatch folds the step process's stdout records into the
 	// dispatch's Tracker on it. nil = no harness tracking.
@@ -207,7 +204,6 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		TranscriptPath: transcript,
 		Resume:         resume,
 		InitialPrompt:  assembleStepPrompt(parts),
-		CgroupPath:     a.CgroupPath,
 		Model:          sp.Model,
 	}
 	if translator != nil {
@@ -425,7 +421,7 @@ func deliveryContract(p promptParts) string {
 	if p.HandoffDue {
 		b.WriteString("; this step DECLARES handoff, so write the handoff file at `artifacts/handoff-" + p.StepID + ".md` — the next inherit step reads it by that path convention")
 	}
-	b.WriteString("; a `needs_input` result carries `question_id` and `question` instead. End your turn once the file is written.\n")
+	b.WriteString("; a `needs_input` result carries `question_id` (1–64 chars of `A-Za-z0-9._-`) and `question` instead. End your turn once the file is written.\n")
 	if p.RequireCommandEvidence {
 		b.WriteString("\nCommand evidence: this step requires `command_evidence` — a list of OBJECTS " +
 			"`{\"argv\": [\"go\", \"test\", \"./...\"], \"exit_code\": 0, \"duration_ms\": 1200}`, never strings. " +

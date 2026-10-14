@@ -34,18 +34,13 @@ priority-first.
 `--json`: the server body raw. Human mode: `N work item(s)` + a table
 (SLUG, STATUS, PRIORITY, BUNDLE, GOAL).
 
-### Harness presentation rule (owner-facing answer)
+### Presenting a queue result
 
-When an interactive session presents a queue/list result to the owner, do NOT
-paste the CLI's terminal table (its GOAL column is width-truncated). Instead:
-
-1. Fetch the data with `pf queue --json` (global `--json` flag BEFORE the
-   verb) and render it yourself as a markdown table in the reply — columns
-   SLUG, STATUS, PRIORITY, BUNDLE, GOAL (full text, no truncation).
-2. Present the GOAL column in Chinese: translate or concisely summarize
-   English goals into Chinese; goals already in Chinese pass through as-is.
-3. Order rows by PRIORITY first (`urgent` > `high` > `normal` > `low`), and
-   by descending seq within the same priority tier.
+The CLI's terminal table truncates the GOAL column, so when a long goal
+matters use `pf queue --json` (global `--json` flag BEFORE the verb) and
+show the full text. Nothing else about the presentation is prescribed:
+how to format, order or summarize the rows for the person asking is an
+ordinary judgment call, not a rule of this skill.
 
 ## Failure branches
 

@@ -158,14 +158,13 @@ type reqOrigin struct {
 	Owner  string `json:"owner,omitempty"`
 }
 
-// origin maps the request to the recorded origin: a chat id makes it a
-// "chat" origin, otherwise "cli". A nil receiver is a plain cli submit.
+// origin maps the request to the recorded origin: every interactive
+// submit is a chat origin — the ChatID labels the harness chat when
+// one is present, and an empty ChatID marks a chat-less manual submit.
+// A nil receiver is the plain chat-less shape.
 func (o *reqOrigin) origin() runtime.Origin {
 	if o == nil {
-		return runtime.Origin{Kind: runtime.OriginCLI}
+		return runtime.Origin{Kind: runtime.OriginChat}
 	}
-	if o.ChatID != "" {
-		return runtime.Origin{Kind: runtime.OriginChat, ChatID: o.ChatID, Owner: o.Owner}
-	}
-	return runtime.Origin{Kind: runtime.OriginCLI, Owner: o.Owner}
+	return runtime.Origin{Kind: runtime.OriginChat, ChatID: o.ChatID, Owner: o.Owner}
 }

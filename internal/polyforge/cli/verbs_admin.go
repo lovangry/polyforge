@@ -398,9 +398,9 @@ var cmdBackup = &Command{
 var cmdMachines = &Command{
 	Name:    "machines",
 	Group:   GroupMgmt,
-	Summary: "Machines liveness face (M3, admin only)",
+	Summary: "Daemon liveness face (M3, admin only)",
 	Usage: "pf machines list\n\n" +
-		"Requires an admin credential: the machines liveness face is admin-only.",
+		"Requires an admin credential: the daemon liveness face is admin-only.",
 	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 || args[0] != "list" {

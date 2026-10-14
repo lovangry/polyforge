@@ -164,25 +164,36 @@ func watchOnce(ctx *Context, fs *flag.FlagSet, wi string, asJSON bool) error {
 	return nil
 }
 
-// watchChat resolves the chat id: --chat, else PF_CHAT_ID, else a
-// --harness-session lookup through the daemon.
+// watchChat resolves the chat id (addendum 1): the explicit flags
+// outrank the environment — --chat and --harness-session are BOTH
+// explicit (passing both is a usage error, never a silent pick), and
+// the session lookup's result (including its not-found error) wins
+// over PF_CHAT_ID. With neither flag, PF_CHAT_ID is used; with nothing
+// at all, the existing no-chat-id error.
 func watchChat(ctx *Context, fs *flag.FlagSet) (string, error) {
 	chat := stringFlag(fs, "chat")
-	if chat == "" {
-		chat = ctx.Cfg.ChatID
+	hs := stringFlag(fs, "harness-session")
+	if chat != "" && hs != "" {
+		return "", fmt.Errorf("watch: --chat and --harness-session are both explicit chat-id sources — pass exactly one (not both)")
 	}
-	if chat == "" {
-		if hs := stringFlag(fs, "harness-session"); hs != "" {
-			c, err := chatFromHarnessSession(ctx, stringFlag(fs, "harness"), hs)
-			if err != nil {
-				return "", err
-			}
-			chat = c
+	if chat != "" {
+		return validateChatID(chat)
+	}
+	if hs != "" {
+		c, err := chatFromHarnessSession(ctx, stringFlag(fs, "harness"), hs)
+		if err != nil {
+			return "", err
 		}
+		return validateChatID(c)
 	}
-	if chat == "" {
-		return "", fmt.Errorf("watch: no chat id — pass --chat <id>, set PF_CHAT_ID, or use --harness-session <id>")
+	if c := ctx.Cfg.ChatID; c != "" {
+		return validateChatID(c)
 	}
+	return "", fmt.Errorf("watch: no chat id — pass --chat <id>, set PF_CHAT_ID, or use --harness-session <id>")
+}
+
+// validateChatID enforces the chat-id shape at the resolution exit.
+func validateChatID(chat string) (string, error) {
 	if !watcher.ChatIDRe.MatchString(chat) {
 		return "", fmt.Errorf("watch: chat id %q must be 1-64 characters of [A-Za-z0-9_-]", chat)
 	}

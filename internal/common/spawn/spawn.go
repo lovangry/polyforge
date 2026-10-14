@@ -16,7 +16,6 @@ type Params struct {
 	TranscriptPath string
 	Resume         bool
 	InitialPrompt  string
-	CgroupPath     string
 	Model          string
 	Journal        func(pid int, startedAt string) error
 	// OnRecord, when set, receives every raw stdout record line the

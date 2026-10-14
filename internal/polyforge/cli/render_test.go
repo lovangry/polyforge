@@ -147,7 +147,7 @@ func TestGoldenMachines(t *testing.T) {
 	var b bytes.Buffer
 	renderMachines(&b, list)
 	golden(t, "Machines", b.String(),
-		`machines: 2 (stale threshold 120s)
+		`daemons: 2 (stale threshold 120s)
 ID   MODE   RUNTIME  LIVE WI  HEARTBEAT AGE  LAST HEARTBEAT  STATE
 ---  -----  -------  -------  -------------  --------------  -----
 m_1  agent  go1.99   2        42s            t1              alive
@@ -158,7 +158,7 @@ m_2  grace  -        0        ?              t2              STALE
 	b.Reset()
 	renderMachines(&b, &aihubclient.MachinesList{StaleAfterSeconds: 120})
 	golden(t, "MachinesEmpty", b.String(),
-		`machines: 0 (stale threshold 120s)
+		`daemons: 0 (stale threshold 120s)
 ID  MODE  RUNTIME  LIVE WI  HEARTBEAT AGE  LAST HEARTBEAT  STATE
 --  ----  -------  -------  -------------  --------------  -----
 `)

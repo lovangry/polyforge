@@ -14,9 +14,9 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 )
 
-// verbs_doctor.go: `pf doctor` — the machine's single health face
+// verbs_doctor.go: `pf doctor` — the daemon's single health face
 // (polyforge#113). One command reports every health dimension the
-// machine depends on:
+// daemon depends on:
 //
 //   - config: an unloadable (old-shape/malformed) file fails here with
 //     migration guidance, and every config-dependent check is reported
@@ -69,7 +69,7 @@ const (
 var cmdDoctor = &Command{
 	Name:         "doctor",
 	Group:        GroupDiag,
-	Summary:      "Check this machine's health: config, workspace mapping, connectivity",
+	Summary:      "Check this daemon's health: config, workspace mapping, connectivity",
 	Usage:        "pf doctor [--json]",
 	NoConfigLoad: true,
 	Setup:        func(fs *flag.FlagSet) {},
@@ -259,5 +259,5 @@ func probeDaemonSocket(sock string) (bool, string) {
 		MachineID string `json:"machine_id"`
 	}
 	_ = json.Unmarshal(raw, &st)
-	return true, fmt.Sprintf("daemon socket %s answers (machine %s)", sock, st.MachineID)
+	return true, fmt.Sprintf("daemon socket %s answers (daemon %s)", sock, st.MachineID)
 }
