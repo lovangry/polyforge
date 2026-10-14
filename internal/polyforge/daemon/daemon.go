@@ -989,23 +989,24 @@ func (d *Daemon) fetchAutoWave() {
 		if budget == 0 {
 			break // the wave spent its slots; the next wave claims the rest
 		}
-		// auto off landed while this wave was fetching (its round trips
-		// are the window): nothing more may be enqueued — the flip's purge
-		// ran on a queue that did not contain this wave's entries yet, so
-		// this re-check is the only thing that stops them (audit B3 race,
-		// wi_seWTgHeKtaa8).
-		if !d.modes.AdmitAutoPull() {
-			return
-		}
 		if it.BundleName == nil {
 			continue // registration tickets never execute
 		}
 		if d.q.IsRunning(it.ID) || d.q.IsPending(it.ID) {
 			continue
 		}
-		if err := d.q.Enqueue(qEntry{WorkItemID: it.ID, Priority: it.Priority, Intent: "claim", Origin: runtime.Origin{Kind: runtime.OriginAuto}}); err != nil {
+		// auto off may land while this wave was fetching (its round trips
+		// are the window): the switch is re-checked under the queue lock
+		// the auto-off purge takes, so an entry either sees auto off or
+		// lands before the purge and is dropped by it (audit B3 race,
+		// wi_seWTgHeKtaa8).
+		ok, err := d.q.EnqueueIf(qEntry{WorkItemID: it.ID, Priority: it.Priority, Intent: "claim", Origin: runtime.Origin{Kind: runtime.OriginAuto}}, d.modes.AdmitAutoPull)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: drain enqueue %s: queue persist failed: %v\n", it.ID, err)
 			continue // nothing landed: the budget is not spent
+		}
+		if !ok {
+			return // auto is off: nothing more may be enqueued
 		}
 		budget--
 	}

@@ -274,14 +274,15 @@ func TestSubmitReplayDropsAutoOriginEntriesWhenAutoOff(t *testing.T) {
 	})
 	// no persisted mode file: the fresh daemon defaults to auto OFF, so
 	// the startup replay must drop the auto entry and replay the
-	// explicit one (the path the live auto-off purge mirrors).
+	// explicit one (the path the live auto-off purge mirrors). The
+	// socket file exists before Run reaches the replay, so wait for it.
+	waitFor(t, "submit_dropped event for the auto entry", 5*time.Second, func() bool {
+		return hasKind(eventKinds(td.Daemon, wiAuto), observe.EvSubmitDropped)
+	})
+	td.waitLive(t, wiCLI)
 	if _, live := td.rt.Info(wiAuto); live {
 		t.Errorf("the origin=auto entry must not replay on an auto-off machine")
 	}
-	if !hasKind(eventKinds(td.Daemon, wiAuto), observe.EvSubmitDropped) {
-		t.Errorf("want a submit_dropped event for the auto entry, got %v", eventKinds(td.Daemon, wiAuto))
-	}
-	td.waitLive(t, wiCLI)
 	if hub.claimCount() != 1 {
 		t.Fatalf("only the explicit claim may run (claims=%d)", hub.claimCount())
 	}
