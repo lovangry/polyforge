@@ -189,8 +189,15 @@ func (m *AdminManager) CreateAPIKey(userID, name, projectScope string) (*IssuedK
 	}, nil
 }
 
+// RevokeAPIKey records the revocation time in revoked_at. The
+// statement carries two distinct bind positions: the audit's B1
+// finding was the mixed `?`/`?1` form, which made `?` collapse onto
+// parameter 1 so the single keyID argument was written into BOTH
+// revoked_at and the WHERE clause — revoked_at held the key id, not a
+// time, and the arity slip was silent.
 func (m *AdminManager) RevokeAPIKey(keyID string) error {
-	res, err := m.db.Exec(`UPDATE api_keys SET revoked_at=? WHERE id=?1 AND revoked_at IS NULL`, keyID)
+	res, err := m.db.Exec(`UPDATE api_keys SET revoked_at=?1 WHERE id=?2 AND revoked_at IS NULL`,
+		Now(), keyID)
 	if err != nil {
 		return err
 	}
