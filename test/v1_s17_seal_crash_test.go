@@ -47,7 +47,7 @@ func TestV1S17SealCrashResume(t *testing.T) {
 	x := readExecution(t, capDir)
 	accepted := 0
 	for _, a := range x.Steps["fix"].Attempts {
-		if a["accepted_result_id"] != nil {
+		if a["cause"] == "accepted" {
 			accepted++
 		}
 	}
@@ -67,7 +67,7 @@ func TestV1S17SealCrashResume(t *testing.T) {
 	waitWorkflowStatus(t, d, wi, "completed", 90*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 
-	// The spawn journal holds exactly the four step dispatches (no
+	// The spawn journal holds exactly the three step dispatches (no
 	// re-derivation), the whole chain is done, and the only recovery
 	// signal in the events log is the completion translation.
 	spawns := waitSpawnCount(t, d, wi, 3, 30*time.Second)

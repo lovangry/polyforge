@@ -60,7 +60,7 @@ source of truth, not the local clone and not the previous step's report.
 
 ## Inputs
 
-`artifacts/release-record.json` (declared input) names the claimed `version`, `commit`,
+`artifacts/release-record.json` (by path convention) names the claimed `version`, `commit`,
 `default_branch`, `origin_head_at_release`, `notes`, `repo` and the pre-release tag list
 file (`artifacts/pre-release-tags.txt`, the remote tag list captured before the
 procedure ran). Re-resolve the owner yourself: exactly one repo under `repos/` carries

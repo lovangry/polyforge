@@ -23,7 +23,7 @@ func TestNeedsInputEnvelopeValidation(t *testing.T) {
 	mk := func() *fixture {
 		f := newFixture(t, false)
 		f.res.Outcome = OutcomeNeedsInput
-		f.res.Artifacts, f.res.Output = nil, nil
+		f.res.Output = nil
 		return f
 	}
 	f := mk()
@@ -63,7 +63,7 @@ func TestHumanGateGuarantee(t *testing.T) {
 	}
 	// needs_input is still allowed on a human-gate step.
 	q := *f.res
-	q.Outcome, q.QuestionID, q.Question, q.Artifacts, q.Output = OutcomeNeedsInput, "q1", "ok?", nil, nil
+	q.Outcome, q.QuestionID, q.Question, q.Output = OutcomeNeedsInput, "q1", "ok?", nil
 	if err := ValidateStepResult(&q, f.spec); err != nil {
 		t.Fatalf("needs_input must stay legal on a human-gate step: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestShippedBundlesDeclareHumanGates(t *testing.T) {
 func TestTolerantReparseKeepsObjectEvidence(t *testing.T) {
 	dir := t.TempDir()
 	drop := filepath.Join(dir, "1.json")
-	raw := `{"protocol_version":1,"result_id":"r1","outcome":"completed","output":{},
+	raw := `{"outcome":"completed","output":{},
 	 "command_evidence":["ran go test", {"argv":["go","test"],"exit_code":0,"duration_ms":42}]}`
 	if err := os.WriteFile(drop, []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestTolerantReparseKeepsObjectEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	// all-strings: dropped, and the gate then rejects with the object hint.
-	if err := os.WriteFile(drop, []byte(`{"protocol_version":1,"result_id":"r1","outcome":"completed","output":{},"command_evidence":["x"]}`), 0o644); err != nil {
+	if err := os.WriteFile(drop, []byte(`{"outcome":"completed","output":{},"command_evidence":["x"]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	res, err = r.collect()
@@ -204,7 +204,7 @@ func TestDeliveryContractStatesGuaranteesOnlyWhenTheyApply(t *testing.T) {
 	const evLine = "Command evidence: this step requires `command_evidence`"
 	const humanLine = "this step requires a human answer before completion: return `needs_input` first; a `completed` envelope without an answer in this round is rejected"
 	plain := deliveryContract(promptParts{WIID: "wi", StepID: "a", SpawnN: 1})
-	for _, l := range []string{evLine, humanLine} {
+	for _, l := range []string{evLine, humanLine, `"command_evidence"`} {
 		if strings.Contains(plain, l) {
 			t.Fatalf("plain step must not carry %q", l)
 		}
@@ -225,7 +225,7 @@ func TestDeliveryContractStatesGuaranteesOnlyWhenTheyApply(t *testing.T) {
 func TestTolerantReparseNamesBadStartedAt(t *testing.T) {
 	dir := t.TempDir()
 	drop := filepath.Join(dir, "1.json")
-	raw := `{"protocol_version":1,"result_id":"r1","outcome":"completed","output":{},
+	raw := `{"outcome":"completed","output":{},
 	 "command_evidence":[{"argv":["go","test"],"exit_code":0,"duration_ms":42,"started_at":"yesterday"}]}`
 	if err := os.WriteFile(drop, []byte(raw), 0o644); err != nil {
 		t.Fatal(err)

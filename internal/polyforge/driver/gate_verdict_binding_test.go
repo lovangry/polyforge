@@ -25,13 +25,11 @@ import (
 // gateRes builds a minimal valid envelope for one outcome/output pair.
 func gateRes(outcome Outcome, output string) *StepResult {
 	return &StepResult{
-		ProtocolVersion: 1,
-		ResultID:        "11111111-1111-4111-8111-111111111111",
-		WIID:            "wi_run",
-		StepID:          "review",
-		SpawnN:          1,
-		Outcome:         outcome,
-		Output:          json.RawMessage(output),
+		WIID:    "wi_run",
+		StepID:  "review",
+		SpawnN:  1,
+		Outcome: outcome,
+		Output:  json.RawMessage(output),
 	}
 }
 
@@ -99,38 +97,9 @@ func TestValidateStepResultGateVerdictBinding(t *testing.T) {
 			res:       gateRes(OutcomeGateFailed, `{"verdict":"pass"}`),
 			wantBound: false,
 		},
-		{
-			// The binding runs BEFORE substance: a gate-fail report owes
-			// no completed duties (declared outputs, handoff_ref).
-			name: "bound gate-fail report owes no declared outputs",
-			spec: ResultSpec{WIID: "wi_run", StepID: "review", SpawnN: 1, Gate: true,
-				Outputs: []OutputSpec{{Path: "artifacts/review.md", Schema: "object"}}},
-			res:       gateRes(OutcomeCompleted, failOutput),
-			wantBound: true,
-		},
-		{
-			// Same envelope without the fail verdict: the completed duty
-			// bites (the binding must not be a general amnesty).
-			name: "unbound completed still owes declared outputs",
-			spec: ResultSpec{WIID: "wi_run", StepID: "review", SpawnN: 1, Gate: true,
-				Outputs: []OutputSpec{{Path: "artifacts/review.md", Schema: "object"}}},
-			res:        gateRes(OutcomeCompleted, `{"verdict":"pass"}`),
-			wantBound:  false,
-			wantErr:    true,
-			wantErrSub: "declares output",
-		},
-		{
-			name:       "unbound completed handoff duty still bites",
-			spec:       ResultSpec{WIID: "wi_run", StepID: "review", SpawnN: 1, Gate: true, HandoffRequired: true},
-			res:        gateRes(OutcomeCompleted, `{"verdict":"pass"}`),
-			wantBound:  false,
-			wantErr:    true,
-			wantErrSub: "handoff_ref",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.spec.CapsuleRoot = t.TempDir()
 			delivered := tc.res.Outcome
 			err := ValidateStepResult(tc.res, tc.spec)
 			if tc.wantErr {
@@ -168,9 +137,8 @@ func TestRunGateVerdictBindingRewindsAndLogs(t *testing.T) {
 	sp.script = []fakeEntry{
 		done(`{"summary":"fix applied"}`),
 		fakeEntry{res: &StepResult{
-			ProtocolVersion: 1,
-			Outcome:         OutcomeCompleted,
-			Output:          json.RawMessage(verdictJSON),
+			Outcome: OutcomeCompleted,
+			Output:  json.RawMessage(verdictJSON),
 		}},
 		// The rewind re-dispatches fix (spawn 3) — this entry lets the
 		// ledger record it with the rewind input aboard. The loop then

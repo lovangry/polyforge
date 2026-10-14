@@ -75,7 +75,7 @@ func gateSpec(id, target string) StepSpec {
 		ID:            id,
 		Gate:          true,
 		ContextPolicy: "fresh",
-		OnFail:        &OnFail{Action: "rewind", Target: target, IncludeVerdict: true},
+		OnFail:        &OnFail{Target: target},
 	}
 }
 
@@ -97,13 +97,11 @@ func mustStart(t *testing.T, d *Driver, stepID string, n int64) {
 
 func completedResult(stepID string, n int64, output string) *StepResult {
 	return &StepResult{
-		ProtocolVersion: 1,
-		ResultID:        "319584c8-10e7-5703-8b0f-4af0a03f8657" + stepID + "-" + string(rune('0'+n)),
-		WIID:            "wi_t1",
-		StepID:          stepID,
-		SpawnN:          n,
-		Outcome:         OutcomeCompleted,
-		Output:          json.RawMessage(output),
+		WIID:    "wi_t1",
+		StepID:  stepID,
+		SpawnN:  n,
+		Outcome: OutcomeCompleted,
+		Output:  json.RawMessage(output),
 	}
 }
 
@@ -239,7 +237,7 @@ func TestTransitionFence(t *testing.T) {
 	// The result envelope's own spawn_n must agree with the request.
 	err = d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "a", SpawnN: 1,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "162bc0dd-9635-5323-b170-99044b484a69", StepID: "a", SpawnN: 99, Outcome: OutcomeCompleted},
+		Result: &StepResult{StepID: "a", SpawnN: 99, Outcome: OutcomeCompleted},
 	})
 	if !errors.Is(err, ErrStaleFence) {
 		t.Fatalf("envelope/request spawn disagreement must be fenced, got %v", err)
@@ -256,7 +254,7 @@ func TestTransitionStepStartFreshConsumesRewindInput(t *testing.T) {
 	d.mu.Lock()
 	d.exec.Steps["a"].PendingRewindInput = &capsule.RewindInput{ToStep: "a", Reason: "fix it harder"}
 	d.exec.Steps["a"].Output = map[string]any{"stale": true}
-	d.exec.Steps["a"].BudgetConsumed = capsule.Budget{Tokens: 42}
+	d.exec.Steps["a"].BudgetConsumed = capsule.Budget{WallMs: 42}
 	d.mu.Unlock()
 
 	before := clk.t
@@ -266,7 +264,7 @@ func TestTransitionStepStartFreshConsumesRewindInput(t *testing.T) {
 	if st.Status != capsule.StepInProgress || st.PendingRewindInput != nil {
 		t.Fatalf("start must flip to in_progress and consume the rewind verdict: %+v", st)
 	}
-	if st.Output != nil || st.BudgetConsumed.Tokens != 0 {
+	if st.Output != nil || st.BudgetConsumed.WallMs != 0 {
 		t.Fatalf("a fresh start reopens a clean window: output=%v budget=%+v", st.Output, st.BudgetConsumed)
 	}
 	if st.Model != "prov/m1" || st.StepStartedAt == "" || st.StepStartedAt <= before.Format(time.RFC3339Nano) {
@@ -286,7 +284,7 @@ func TestTransitionStepStartResumeRefreshesWindow(t *testing.T) {
 	// in place — the SAME step_start kind, resume shape.
 	if err := d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "a", SpawnN: 1,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "6b42e63c-86e4-56ae-a240-d08ecb1ec59f", StepID: "a", SpawnN: 1,
+		Result: &StepResult{StepID: "a", SpawnN: 1,
 			Outcome: OutcomeNeedsInput, QuestionID: "q_1", Question: "which shape?"},
 	}); err != nil {
 		t.Fatalf("needs_input: %v", err)
@@ -322,7 +320,7 @@ func TestTransitionStepStartIllegal(t *testing.T) {
 	mustStart(t, d, "b", 2)
 	if err := d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "b", SpawnN: 2,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "1856f743-9ae1-5efa-871b-3e60732c504d", StepID: "b", SpawnN: 2, Outcome: OutcomeIncomplete},
+		Result: &StepResult{StepID: "b", SpawnN: 2, Outcome: OutcomeIncomplete},
 	}); err != nil {
 		t.Fatalf("incomplete: %v", err)
 	}
@@ -368,15 +366,13 @@ func TestTransitionStepResultCompleted(t *testing.T) {
 func TestTransitionStepResultRefusals(t *testing.T) {
 	d, _, _, _ := testEnv(t, spec("a"), spec("b"))
 	mustInit(t, d)
-	// No envelope, no idempotency key, wrong protocol, unknown outcome,
-	// foreign work item — all refused before any mutation.
+	// No envelope, unknown outcome, foreign work item — all refused
+	// before any mutation.
 	mustStart(t, d, "a", 1)
 	cases := []TransitionRequest{
 		{Kind: TransStepResult, StepID: "a", SpawnN: 1},
-		{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: &StepResult{ProtocolVersion: 1, StepID: "a", SpawnN: 1, Outcome: OutcomeCompleted}},
-		{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: &StepResult{ProtocolVersion: 2, ResultID: "6cd3ee96-87f8-5308-afb8-15adc04deb32", StepID: "a", SpawnN: 1, Outcome: OutcomeCompleted}},
-		{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: &StepResult{ProtocolVersion: 1, ResultID: "34db40ce-3b19-5b67-89e5-dc3027d765bb", StepID: "a", SpawnN: 1, Outcome: OutcomeWeird}},
-		{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: &StepResult{ProtocolVersion: 1, ResultID: "545a1611-82ea-553a-b526-5b0f7f3c2772", WIID: "wi_OTHER", StepID: "a", SpawnN: 1, Outcome: OutcomeCompleted}},
+		{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: &StepResult{StepID: "a", SpawnN: 1, Outcome: OutcomeWeird}},
+		{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: &StepResult{WIID: "wi_OTHER", StepID: "a", SpawnN: 1, Outcome: OutcomeCompleted}},
 		// Result for a step that is not current.
 		{Kind: TransStepResult, StepID: "b", SpawnN: 1, Result: completedResult("b", 1, `{}`)},
 	}
@@ -391,7 +387,7 @@ func TestTransitionStepResultRefusals(t *testing.T) {
 	// needs_input without a question payload is refused too.
 	if err := d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "a", SpawnN: 1,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "92309c71-09d2-5605-b425-e09f2ae05034", StepID: "a", SpawnN: 1, Outcome: OutcomeNeedsInput},
+		Result: &StepResult{StepID: "a", SpawnN: 1, Outcome: OutcomeNeedsInput},
 	}); err == nil {
 		t.Fatal("needs_input without question_id must be refused")
 	}
@@ -405,7 +401,7 @@ func TestTransitionStepResultGateFailedAndIncomplete(t *testing.T) {
 	mustStart(t, d, "check", 1)
 	if err := d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "check", SpawnN: 1,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "63f44695-aa75-5030-a746-03ded8957265", StepID: "check", SpawnN: 1,
+		Result: &StepResult{StepID: "check", SpawnN: 1,
 			Outcome: OutcomeGateFailed, Output: json.RawMessage(`{"verdict":"FAIL"}`)},
 	}); err != nil {
 		t.Fatalf("gate_failed: %v", err)
@@ -421,7 +417,7 @@ func TestTransitionStepResultGateFailedAndIncomplete(t *testing.T) {
 	// incomplete → blocked, position frozen, partial output recorded.
 	if err := d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "check", SpawnN: 1,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "6cfbbada-9905-5d57-90f4-25866ff90918", StepID: "check", SpawnN: 1,
+		Result: &StepResult{StepID: "check", SpawnN: 1,
 			Outcome: OutcomeIncomplete, Output: json.RawMessage(`{"partial":true}`)},
 	}); err != nil {
 		t.Fatalf("incomplete: %v", err)
@@ -441,7 +437,7 @@ func TestTransitionNeedsInputAndAnswer(t *testing.T) {
 	mustStart(t, d, "a", 1)
 	if err := d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "a", SpawnN: 1,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "f830c814-4a8d-5f53-b83a-820807c56981", StepID: "a", SpawnN: 1,
+		Result: &StepResult{StepID: "a", SpawnN: 1,
 			Outcome: OutcomeNeedsInput, QuestionID: "q_abc123", Question: "lean or compatible?",
 			Output: json.RawMessage(`{"ctx":1}`)},
 	}); err != nil {
@@ -508,15 +504,15 @@ func TestTransitionGateFailRewind(t *testing.T) {
 	// The gate FAILs.
 	if err := d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "check", SpawnN: 3,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "15ea00ac-1695-5056-bcc3-726228268ff9", StepID: "check", SpawnN: 3,
+		Result: &StepResult{StepID: "check", SpawnN: 3,
 			Outcome: OutcomeGateFailed, Output: json.RawMessage(`{"verdict":"FAIL: tests red"}`)},
 	}); err != nil {
 		t.Fatalf("gate result: %v", err)
 	}
 	if err := d.transition(TransitionRequest{
 		Kind: TransGateFail, StepID: "check", SpawnN: 3,
-		Gate: &GateVerdict{GateStepID: "check", Action: "rewind", TargetStep: "build",
-			IncludeVerdict: true, VerdictText: "FAIL: tests red"},
+		Gate: &GateVerdict{GateStepID: "check", TargetStep: "build",
+			VerdictText: "FAIL: tests red"},
 	}); err != nil {
 		t.Fatalf("gate_fail: %v", err)
 	}
@@ -575,13 +571,13 @@ func TestTransitionGateFailBounds(t *testing.T) {
 		mustStart(t, d, "check", n+1)
 		if err := d.transition(TransitionRequest{
 			Kind: TransStepResult, StepID: "check", SpawnN: n + 1,
-			Result: &StepResult{ProtocolVersion: 1, ResultID: "28d435b1-398e-51c3-b1a6-1da4bc80cbb3", StepID: "check", SpawnN: n + 1, Outcome: OutcomeGateFailed},
+			Result: &StepResult{StepID: "check", SpawnN: n + 1, Outcome: OutcomeGateFailed},
 		}); err != nil {
 			t.Fatalf("gate result (round %d): %v", round, err)
 		}
 		if err := d.transition(TransitionRequest{
 			Kind: TransGateFail, StepID: "check", SpawnN: n + 1,
-			Gate: &GateVerdict{GateStepID: "check", Action: "rewind", TargetStep: "a", IncludeVerdict: true, VerdictText: "v"},
+			Gate: &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
 		}); err != nil {
 			t.Fatalf("gate_fail (round %d): %v", round, err)
 		}
@@ -615,14 +611,14 @@ func TestTransitionGateFailBounds(t *testing.T) {
 	mustStart(t, d2, "check", 2)
 	if err := d2.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "check", SpawnN: 2,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "d9d2310b-7808-5936-8004-ed81be4792d5", StepID: "check", SpawnN: 2, Outcome: OutcomeGateFailed},
+		Result: &StepResult{StepID: "check", SpawnN: 2, Outcome: OutcomeGateFailed},
 	}); err != nil {
 		t.Fatalf("gate result: %v", err)
 	}
 	// First rewind to a passes (per-step count 0 → 1)...
 	if err := d2.transition(TransitionRequest{
 		Kind: TransGateFail, StepID: "check", SpawnN: 2,
-		Gate: &GateVerdict{GateStepID: "check", Action: "rewind", TargetStep: "a", VerdictText: "v"},
+		Gate: &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
 	}); err != nil {
 		t.Fatalf("first rewind: %v", err)
 	}
@@ -634,13 +630,13 @@ func TestTransitionGateFailBounds(t *testing.T) {
 	mustStart(t, d2, "check", 4)
 	if err := d2.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "check", SpawnN: 4,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "b81d5f9d-5f09-5149-b445-0792f6dd4081", StepID: "check", SpawnN: 4, Outcome: OutcomeGateFailed},
+		Result: &StepResult{StepID: "check", SpawnN: 4, Outcome: OutcomeGateFailed},
 	}); err != nil {
 		t.Fatalf("gate result: %v", err)
 	}
 	if err := d2.transition(TransitionRequest{
 		Kind: TransGateFail, StepID: "check", SpawnN: 4,
-		Gate: &GateVerdict{GateStepID: "check", Action: "rewind", TargetStep: "a", VerdictText: "v"},
+		Gate: &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
 	}); err != nil {
 		t.Fatalf("second rewind: %v", err)
 	}
@@ -659,14 +655,14 @@ func TestTransitionGateFailTerminateAndIllegalTarget(t *testing.T) {
 	mustStart(t, d, "check", 2)
 	if err := d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "check", SpawnN: 2,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "7de51012-d10c-5845-a159-e33267353d9c", StepID: "check", SpawnN: 2, Outcome: OutcomeGateFailed},
+		Result: &StepResult{StepID: "check", SpawnN: 2, Outcome: OutcomeGateFailed},
 	}); err != nil {
 		t.Fatalf("gate result: %v", err)
 	}
-	// terminate (the default policy too) → failed_gate.
+	// no rewind target declared → failed_gate.
 	if err := d.transition(TransitionRequest{
 		Kind: TransGateFail, StepID: "check", SpawnN: 2,
-		Gate: &GateVerdict{GateStepID: "check", Action: "", VerdictText: "v"},
+		Gate: &GateVerdict{GateStepID: "check", VerdictText: "v"},
 	}); err != nil {
 		t.Fatalf("terminate: %v", err)
 	}
@@ -683,7 +679,7 @@ func TestTransitionGateFailTerminateAndIllegalTarget(t *testing.T) {
 	mustStart(t, d2, "check", 1)
 	if err := d2.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "check", SpawnN: 1,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "79f56efb-3d66-54ce-9c06-51abd76a0495", StepID: "check", SpawnN: 1, Outcome: OutcomeGateFailed},
+		Result: &StepResult{StepID: "check", SpawnN: 1, Outcome: OutcomeGateFailed},
 	}); err != nil {
 		t.Fatalf("gate result: %v", err)
 	}
@@ -693,7 +689,7 @@ func TestTransitionGateFailTerminateAndIllegalTarget(t *testing.T) {
 	for _, bad := range []string{"check", "nope"} {
 		err := d2.transition(TransitionRequest{
 			Kind: TransGateFail, StepID: "check", SpawnN: 1,
-			Gate: &GateVerdict{GateStepID: "check", Action: "rewind", TargetStep: bad, VerdictText: "v"},
+			Gate: &GateVerdict{GateStepID: "check", TargetStep: bad, VerdictText: "v"},
 		})
 		if err == nil {
 			t.Fatalf("rewind target %q must be refused", bad)
@@ -720,12 +716,12 @@ func TestTransitionOperatorRewindFromBlocked(t *testing.T) {
 	mustStart(t, d, "c", 3)
 	if err := d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "c", SpawnN: 3,
-		Result: &StepResult{ProtocolVersion: 1, ResultID: "d1814589-7aa0-56a8-9722-54c20a0ab3b5", StepID: "c", SpawnN: 3, Outcome: OutcomeIncomplete},
+		Result: &StepResult{StepID: "c", SpawnN: 3, Outcome: OutcomeIncomplete},
 	}); err != nil {
 		t.Fatalf("incomplete: %v", err)
 	}
 	// The owner's verdict: rewind to a.
-	if err := d.Rewind("a", "owner: wrong premise"); err != nil {
+	if err := d.transition(TransitionRequest{Kind: TransRewind, StepID: "a", Reason: "owner: wrong premise", SpawnN: d.currentSpawnN()}); err != nil {
 		t.Fatalf("operator rewind: %v", err)
 	}
 	snap := d.Snapshot()
@@ -756,7 +752,7 @@ func TestTransitionOperatorRewindFromBlocked(t *testing.T) {
 		t.Fatalf("position/stats: current=%q stats=%+v", snap.CurrentStep, snap.RewindStats)
 	}
 	// While running with an open question the rewind is refused.
-	if err := d.Rewind("a", "too late"); err == nil {
+	if err := d.transition(TransitionRequest{Kind: TransRewind, StepID: "a", Reason: "too late", SpawnN: d.currentSpawnN()}); err == nil {
 		t.Fatal("a rewind past a non-current target must be refused (c is current)")
 	}
 }
@@ -787,23 +783,23 @@ func TestTransitionBudgetUpdate(t *testing.T) {
 	mustStart(t, d, "a", 1)
 	if err := d.transition(TransitionRequest{
 		Kind: TransBudgetUpdate, StepID: "a", SpawnN: 1,
-		Budget: &capsule.Budget{USD: 0.25, WallMs: 1000, Tokens: 500},
+		Budget: &capsule.Budget{WallMs: 1000},
 	}); err != nil {
 		t.Fatalf("budget: %v", err)
 	}
 	// StepID empty credits the CURRENT step.
 	if err := d.transition(TransitionRequest{
 		Kind: TransBudgetUpdate, SpawnN: 1,
-		Budget: &capsule.Budget{USD: 0.10, Tokens: 100},
+		Budget: &capsule.Budget{WallMs: 500},
 	}); err != nil {
 		t.Fatalf("budget (current step): %v", err)
 	}
 	snap := d.Snapshot()
 	st := snap.Steps["a"]
-	if st.BudgetConsumed.USD != 0.35 || st.BudgetConsumed.WallMs != 1000 || st.BudgetConsumed.Tokens != 600 {
+	if st.BudgetConsumed.WallMs != 1500 {
 		t.Fatalf("step budget must accumulate: %+v", st.BudgetConsumed)
 	}
-	if snap.BudgetConsumed.USD != 0.35 || snap.BudgetConsumed.Tokens != 600 {
+	if snap.BudgetConsumed.WallMs != 1500 {
 		t.Fatalf("workflow budget aggregates the same deltas: %+v", snap.BudgetConsumed)
 	}
 }

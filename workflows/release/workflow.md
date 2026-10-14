@@ -8,8 +8,8 @@ defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
   - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, budget: { wall_minutes: 45 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verify, context_policy: fresh, handoff: false, kind: gate, gate: true, requires_command_evidence: true, inputs: [artifacts/release-record.json], budget: { wall_minutes: 20 }, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3] }
-  - { id: deploy, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, inputs: [artifacts/verified-version.json], budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: verify, context_policy: fresh, handoff: false, kind: gate, gate: true, requires_command_evidence: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3] }
+  - { id: deploy, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
 ---
 
 # release - release lane
@@ -45,10 +45,13 @@ without recorded commands is refused.
 
 ## Artifact flow between steps
 
+No step declares frontmatter `inputs:`; each step reads the upstream artifact by its
+path convention under `artifacts/`:
+
 | step | writes | read by |
 |---|---|---|
-| `release` | `artifacts/release-record.json` (version, release commit, default branch, pre-release remote tag list, notes location) | `verify` (declared input) |
-| `verify` | `artifacts/verified-version.json` (only on pass: the verified version) | `deploy` (declared input) |
+| `release` | `artifacts/release-record.json` (version, release commit, default branch, pre-release remote tag list, notes location) | `verify` (by path) |
+| `verify` | `artifacts/verified-version.json` (only on pass: the verified version) | `deploy` (by path) |
 | `deploy` | the step output (which version is serving, or the rollback report) | (terminal) |
 
 `deploy` never resolves "latest" and never reads `release`'s claims: its only version

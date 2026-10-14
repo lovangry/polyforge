@@ -13,7 +13,7 @@ import (
 
 func TestRunRejectsQuestionlessNeedsInputInProcess(t *testing.T) {
 	d, sp, execPath := runEnv(t, StepSpec{ID: "grill"})
-	bad := fakeEntry{res: &StepResult{ProtocolVersion: 1, Outcome: OutcomeNeedsInput, Question: "lean or compatible?"}}
+	bad := fakeEntry{res: &StepResult{Outcome: OutcomeNeedsInput, Question: "lean or compatible?"}}
 	sp.script = []fakeEntry{bad, asks("q_1", "lean or compatible?"), done(`{}`)}
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- d.Run(context.Background()) }()

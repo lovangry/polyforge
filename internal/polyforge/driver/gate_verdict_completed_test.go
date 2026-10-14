@@ -43,8 +43,7 @@ func TestRunGateFailVerdictInsideCompletedOutputMustNotAdvance(t *testing.T) {
 		// fail branch (verdict + fail_reason + a blocking finding), the
 		// verdict the review step's instructions told it to emit.
 		fakeEntry{res: &StepResult{
-			ProtocolVersion: 1,
-			Outcome:         OutcomeCompleted,
+			Outcome: OutcomeCompleted,
 			Output: json.RawMessage(`{"verdict":"fail",` +
 				`"fail_reason":"the fix suppresses the symptom at one call site; the cause is still reachable",` +
 				`"findings":[{"severity":"blocking","detail":"root cause not removed"}]}`),
