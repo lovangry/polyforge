@@ -1,49 +1,75 @@
 # Upgrade guide
 
-This document describes how to upgrade an existing aihub database from
-the pre-#149 (audit subtraction C) schema to the current one. The server
-runs **no automatic migration** (`Open` installs the schema with
+This document describes how an aihub database moves from an old schema to
+a new one. The upgrade is executed by `.polyforge/deploy.sh`; there is no
+startup auto-migration (`Open` installs the schema with
 `CREATE TABLE IF NOT EXISTS` only), and the new server does **not** work
 on an un-upgraded database: the old `projects.identifier_hash` column is
 `TEXT NOT NULL` without a default and the new code no longer writes it,
-so creating a project fails until the SQL below has been applied. Run
-the upgrade SQL **before** starting the new aihub.
+so creating a project fails until the upgrade SQL has run.
 
-## Upgrade procedure
+## The deploy.sh flow (seconds-level downtime)
 
-Requirement: the `sqlite3` CLI version 3.35 or newer (the first release
-with `ALTER TABLE ... DROP COLUMN`). Check with `sqlite3 --version`.
+- **Online backup before the window**: rsync of `memory/` and `git/`, a
+  SQLite backup-API snapshot of `aihub.db` (consistent even under WAL
+  writes), and an off-host copy. The service keeps running throughout.
+- **The switch window is the only service interruption**, in this order:
+  1. the old aihub container exits gracefully (drain ≤ `DRAIN_SECS`);
+  2. deploy.sh applies the upgrade SQL (see below), one transaction per
+     script;
+  3. the new container starts and HTTP is polled.
+  The actual downtime is printed and warned past `MAX_DOWNTIME_SECS`. It
+  is still seconds: the SQL is a handful of DDL statements.
+- **Automatic rollback**: if anything from the window on fails (the SQL
+  transaction fails, the new container does not come up, verification
+  fails, unexpected exit), deploy.sh first runs the `rollback.sql` of
+  every version applied in this run — in descending version order, one
+  transaction each — and only then recreates the old image and verifies
+  the old version answers. The old binary never sees the post-upgrade
+  schema; no backup restore is needed. A script that failed was fully
+  rolled back by its own transaction, so nothing of it is applied.
 
-1. **Stop the aihub server.** The SQL must not run against a live
-   server.
+## Where the SQL lives
 
-2. **Back up.** Copy the whole data directory (the `aihub.db` file and
-   its WAL sidecars) somewhere safe:
+Every release tag that changes the schema ships a directory:
 
-   ```sh
-   systemctl stop aihub   # or however you stop it
-   cp -a /var/lib/aihub /var/lib/aihub.backup-$(date +%Y%m%d)
-   ```
+    deploy/sql/<TAG>/upgrade.sql    the schema delta, applied as ONE transaction
+    deploy/sql/<TAG>/rollback.sql   restores the pre-release shape for auto-rollback
+    deploy/sql/<TAG>/probe.sql      the structural applied-check (run-once)
 
-   The SQL below drops tables and columns; the only way back is the
-   backup.
+deploy.sh reads the files **from the target git tag at deploy time**
+(`git -C .polyforge/.. show <TAG>:deploy/sql/<TAG>/...`, with a
+working-tree fallback), the same way the legacy rollback Dockerfile is
+fetched. release.sh is not involved — the SQL is not a release asset. A
+release tag without a `deploy/sql/<TAG>/` directory carries no schema
+change; its switch window is just the container recreate.
 
-3. **Apply the upgrade SQL** below, exactly once, with the `sqlite3`
-   CLI against the data file:
+**Run-once**: `probe.sql` is a structural check answered read-only against
+the live database before the window (e.g. "does the column that will be
+dropped still exist?"). `0` means the upgrade already ran and the version
+is skipped — re-deploying the same version (`--force` included) never
+applies the SQL twice. No bookkeeping table is written to the production
+database.
 
-   ```sh
-   sqlite3 /var/lib/aihub/aihub.db
-   ```
+**Multi-version gaps**: when the running version is several schema-changing
+releases behind, deploy.sh applies every not-yet-applied version's SQL in
+ascending version order inside the one window (probe-reported applied
+versions are skipped).
 
-4. **Start the new aihub** and check the log for schema errors; the
-   smoke test is a `GET /api/v1/projects/<project>/ready-queue` plus
-   filing and claiming one throw-away work item.
+## Requirements
 
-## The upgrade SQL (mandatory)
+The server's `python3` (stdlib `sqlite3`) must link a SQLite library
+**≥ 3.35** — the first release with `ALTER TABLE ... DROP COLUMN`. deploy.sh
+checks this in preflight, before the window, and refuses the deploy with
+nothing changed when the linked library is older. SQL execution itself uses
+the deployer's ssh + `python3` stdlib-sqlite3 path; the `sqlite3` CLI is
+neither used nor required.
 
-This is the whole schema delta of polyforge#149 (audit subtraction C):
-the delivery ledger, the dead tables and columns are gone. Run it
-exactly once; a second run fails on the already-dropped columns.
+## First instance: v2.4.0 (polyforge#149, audit subtraction C)
+
+The whole schema delta of #149: the delivery ledger, the dead tables and
+columns are gone. The file `deploy/sql/v2.4.0/upgrade.sql` is the source
+of truth; its content:
 
 ```sql
 DROP TABLE IF EXISTS wi_ship_ledger;
@@ -55,20 +81,14 @@ ALTER TABLE work_items DROP COLUMN workflow_budget_baseline;
 ALTER TABLE work_items DROP COLUMN session_owner;
 ```
 
-What each statement removes:
+The matching `deploy/sql/v2.4.0/rollback.sql` re-adds the five dropped
+columns with defaults (`identifier_hash TEXT NOT NULL DEFAULT ''`; the
+others nullable as before) and rebuilds `wi_ship_ledger` and `core_meta`
+as empty tables from the pre-#149 (85cf926) DDL: old-version code runs
+correctly on the result, existing rows carry the defaults.
+`deploy/sql/v2.4.0/probe.sql` counts the dead shapes (0 = already applied).
 
-- `wi_ship_ledger` — the polyforge#123 delivery ledger (audit item C1).
-  Delivery truth is the git branch; nothing reads the table.
-- `core_meta` — a key/value table no code path ever touched.
-- `projects.scenario`, `projects.identifier_hash` — dead columns from
-  the v0 project face.
-- `work_items.bundle_digest` — the bundle digest chain (audit item B9):
-  the reference is `bundle_name` only.
-- `work_items.workflow_budget_baseline` — a never-written budget column.
-- `work_items.session_owner` — the session owner column (audit item
-  C12); the machine id (`session_machine`) stays.
-
-## Optional: stale `waiting_on` cleanup
+## Optional: stale `waiting_on` cleanup (manual, NOT in the window)
 
 The server's `waiting_on` value domain dropped the `gate` and
 `runtime:*` branches (polyforge#149) while keeping `owner` and
@@ -76,7 +96,8 @@ The server's `waiting_on` value domain dropped the `gate` and
 a now-dead value. The cleanup is OPTIONAL — a stale value is inert (the
 row is excluded from the executable queue segments, exactly as before) —
 and its WHERE clause is deliberately bounded to the dead values: it must
-never touch `owner` or `dependency:*` rows, which are live data.
+never touch `owner` or `dependency:*` rows, which are live data. It is
+deliberately NOT part of deploy.sh's window SQL:
 
 ```sql
 UPDATE work_items SET waiting_on = NULL
@@ -89,14 +110,14 @@ WHERE waiting_on = 'gate' OR waiting_on LIKE 'runtime:%';
 `CREATE TABLE IF NOT EXISTS` and gains nothing else. An old-schema
 database is not repaired at boot, and the new server cannot create
 projects on it (the dead `projects.identifier_hash NOT NULL` column has
-no default). The upgrade is always this document's manual SQL, applied
-by an operator with the server stopped, after a backup, before the new
-aihub starts.
+no default). The upgrade is always the deploy.sh window SQL described
+above — applied transactionally, probe-guarded and rolled back
+automatically by the same tool when the deploy fails.
 
 ## Delivery notes (polyforge#149, audit subtraction C)
 
-One row per deletion: the audit item, the commit (the message
-identifies the plan unit) and the externally visible change.
+One row per deletion: the audit item, the commit (the message identifies
+the plan unit) and the externally visible change.
 
 | audit item | what was removed | externally visible change |
 |---|---|---|
