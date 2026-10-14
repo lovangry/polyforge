@@ -540,7 +540,7 @@ func TestDeployVerifyExcludesTablesTheUpgradeDrops(t *testing.T) {
 	}
 	for _, want := range []string{
 		"table wi_ship_ledger dropped by the upgrade SQL (was 94) - expected",
-		"table core_meta dropped by the upgrade SQL (was 2) - expected",
+		"table Core_Meta dropped by the upgrade SQL (was 2) - expected",
 		"row counts >= baseline",
 		"deployed=v2.3.0",
 	} {
@@ -581,4 +581,70 @@ func TestDeployVerifyStillStrictForTablesTheUpgradeKeeps(t *testing.T) {
 	if n := sqlRuns(d, "v2.3.0-rollback.sql"); n != 1 {
 		t.Errorf("rollback SQL ran %d times, want 1", n)
 	}
+}
+
+// ---- a table rebuild (drop + re-create under the same name) ----
+//
+// The SQLite table-rebuild idiom DROPs the table, but the table exists again
+// after the swap: it is NOT exempt and its rows are compared like any other.
+
+// rebuildUpgradeSQL rebuilds audit_log keeping the rows matched by where
+// (one statement per line: the runner refuses two on one line), plus the
+// test column drop that makes the probe report "not yet applied".
+func rebuildUpgradeSQL(where string) string {
+	return "ALTER TABLE projects DROP COLUMN identifier_hash;\n" +
+		"CREATE TABLE audit_log_new(id integer);\n" +
+		"INSERT INTO audit_log_new SELECT id FROM audit_log" + where + ";\n" +
+		"DROP TABLE audit_log;\n" +
+		"ALTER TABLE audit_log_new RENAME TO audit_log;\n"
+}
+
+func newRebuildWorld(t *testing.T, upgradeSQL string) *deployWorld {
+	t.Helper()
+	d := newSQLWorldVers(t, "v2.2.1", []string{"v2.3.0"},
+		[]sqlVer{{"v2.3.0", upgradeSQL, testRollbackSQL, testProbeSQL}}, []string{"identifier_hash"})
+	seedTable(t, d.dbPath(), "audit_log", 5)
+	return d
+}
+
+func TestDeployVerifyChecksRebuiltTables(t *testing.T) {
+	t.Run("rebuild loses rows", func(t *testing.T) {
+		d := newRebuildWorld(t, rebuildUpgradeSQL(" WHERE id >= 2"))
+		out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
+		if exitCode(err) != 10 {
+			t.Fatalf("want exit 10, got %v\n%s", err, out)
+		}
+		for _, want := range []string{
+			"table audit_log LOST rows: 3 < 5",
+			"row counts after the swap are BELOW the baseline",
+			"deployed=ROLLED_BACK previous=v2.2.1 attempted=v2.3.0",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output lacks %q\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "table audit_log dropped by the upgrade SQL") {
+			t.Errorf("a rebuilt table was exempted as dropped\n%s", out)
+		}
+		if n := sqlRuns(d, "v2.3.0-rollback.sql"); n != 1 {
+			t.Errorf("rollback SQL ran %d times, want 1", n)
+		}
+	})
+	t.Run("rebuild keeps rows", func(t *testing.T) {
+		d := newRebuildWorld(t, rebuildUpgradeSQL(""))
+		out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
+		if err != nil {
+			t.Fatalf("deploy failed: %v\n%s", err, out)
+		}
+		for _, want := range []string{"row counts >= baseline", "deployed=v2.3.0"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output lacks %q\n%s", want, out)
+			}
+		}
+		for _, bad := range []string{"dropped by the upgrade SQL", "ROLLED_BACK"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("output carries %q\n%s", bad, out)
+			}
+		}
+	})
 }

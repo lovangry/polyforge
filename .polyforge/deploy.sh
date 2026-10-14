@@ -1271,10 +1271,18 @@ for v in $APPLIED_VERS; do
          }
        }' "$WORK/sql-$v-upgrade.sql" >>"$WORK/dropped.tables"
 done
-awk 'FILENAME == ARGV[1] { d[$1] = 1; next } !(tolower($1) in d)' "$WORK/dropped.tables" "$WORK/frozen.counts" >"$WORK/verify.counts"
-for t in $(sort -u "$WORK/dropped.tables"); do
-  note "table $t dropped by the upgrade SQL (was $(awk -v t="$t" 'tolower($1) == t { print $2 }' "$WORK/frozen.counts")) - expected"
-done
+# Only a dropped table that is really gone after the swap is left out: a
+# table the SQL drops and re-creates (a rebuild) is still compared.
+: >"$WORK/gone.tables"
+awk -v gone="$WORK/gone.tables" '
+     FILENAME == ARGV[1] { d[$1] = 1; next }
+     FILENAME == ARGV[2] { a[tolower($1)] = 1; next }
+     { k = tolower($1) }
+     (k in d) && !(k in a) { print $1, $2 >> gone; next }
+     { print }' "$WORK/dropped.tables" "$WORK/after.counts" "$WORK/frozen.counts" >"$WORK/verify.counts"
+while read -r t n; do
+  note "table $t dropped by the upgrade SQL (was $n) - expected"
+done <"$WORK/gone.tables"
 counts_cmp "$WORK/verify.counts" "$WORK/after.counts" ge || die "row counts after the swap are BELOW the baseline"
 note "row counts >= baseline"
 note "HTTP answered during the restart poll (any status = serving)"
