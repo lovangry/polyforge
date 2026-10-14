@@ -28,6 +28,15 @@ output:
       type: array
       items: { type: string }
       description: "Tests that fail on this tree AND fail the same way on the base commit (re-run there) - pre-existing failures, reported but never this change's fault, each as `<repo-relative test file>: <test name>`. Their checks carry status pre_existing with the base sha in detail; they never fail the gate. Never the repro, an authored test_files entry or the regression test (the driver rejects that)."
+    test_bar:
+      type: array
+      items:
+        type: object
+        required: [repo, command]
+        properties:
+          repo: { type: string, description: "The task repo (repos/<repo>) the command runs in." }
+          command: { type: string, description: "The command exactly as you ran it inside that repo (no leading cd)." }
+      description: The full test bar - the build/lint/test commands that make this verdict, one entry per command per repo, exactly as run. The deliver step re-runs exactly these after merging the latest default branch, and the driver only accepts that re-run as covering the tests when the commands match; without a test_bar a moved default branch always needs a human.
   oneOf:
     - description: A pass verdict - every recorded check must itself be pass or an honestly-marked skipped; no check may be recorded as fail.
       properties:
@@ -111,6 +120,14 @@ names only the new failures. The base runs are command evidence like any other.
 — a repro that still fails is an unfixed bug, not a pre-existing failure. Report them
 `pass` or `fail`, never `pre_existing`; the driver rejects a result that classifies a
 repro check or an authored/regression test as pre_existing.
+
+## Test bar for delivery
+
+List the commands that make up the test bar in `test_bar` (`{repo, command}` per command,
+each command exactly as you ran it inside `repos/<repo>/`, without a leading `cd`). When the
+default branch moved on before delivery, the `deliver` step re-runs exactly these commands on
+the merged head, and the driver accepts the delivery without a human only if they match. Keep
+incidental inspection commands (`cat`, `grep`, `git log`) out of it.
 
 ## Honesty
 

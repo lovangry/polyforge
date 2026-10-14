@@ -1,57 +1,41 @@
-# ship — push a closed work item's sealed commits to git origin
+# deliver — the workflow's delivery step (pf ship is gone)
 
-Execution-plane verb: routed to the local daemon (the wrap→git delivery
-bridge, the 13th verb). `ship` is the delivery step AFTER `wrap`: the
-closed WI's task-repo commits live in the sealed capsule, and `ship` pushes
-them to each inventory repo's own origin as the fixed-name branch
-`polyforge/<project>-<seq>` (the slug with `-` for `#`, e.g.
-`polyforge/polyforge-140` — the same branch on every ship of that work item),
-then opens or reuses a PR when a PR credential exists.
+There is no `pf ship` verb (removed by polyforge#166) and the daemon never
+pushes a delivery. Delivery is the last step of the delivery lanes:
+`feature-full`, `bug-fix`, `quick-fix` and `chore` each end with a
+`deliver` step that:
+
+1. merges the latest origin default branch into the work,
+2. pushes **only** the feature branch `polyforge/<project>-<seq>` (the slug
+   with `-` for `#`, e.g. `polyforge/polyforge-140`) — never main/master,
+3. opens a PR for it, or reuses the open one,
+4. auto-merges with `gh pr merge --merge` when the review passed with no
+   blocking finding, the tests passed, no merge conflict had to be
+   resolved by the LLM, and its pre-flight (nothing uncommitted, no release
+   residue) found nothing. quick-fix has no review step: there
+   verification's pass stands in for the review.
+
+Otherwise the step asks a **human-only** question. `pf watch <id> --once`
+shows it; the human answers with one of:
+
+```
+pf answer <id> --text "merge"
+pf answer <id> --text "don't merge"
+pf answer <id> --text "back to code: <what to change>"
+```
+
+Only a human answers this question — never answer it on the user's behalf
+or on your own, even if the user's earlier wording sounded like consent.
 
 ## Triggers
 
-- EN: ship it / push the wrapped branch to origin / deliver it / open the
-  PR for the wrapped work item / push the sealed commits
-- 中文: 推上去 / 交付 / 把封存提交推送到远端 / 给收尾的票开 PR / 推送分支
+- EN: ship it / deliver / push the branch / open the PR / merge it
+- 中文: 推上去 / 交付 / 开 PR / 合进去
 
-## Command
+## Routing
 
-```
-pf ship <id>
-```
-
-One argument, no flags. The daemon reads the sealed capsule on this machine
-at `<workspace>/capsules/<project>-<seq>` (read-only access; the write ban
-on the sealed scene holds) and pushes each
-`repos/<name>` worktree's sealed HEAD to that repo's origin. No AIHub
-credential is involved — the push uses the machine's existing git push
-identity.
-
-The inventory itself is never resolved by hand: the capsule's
-`repos/<name>` worktrees were cloned at claim from the repo list the aihub
-project registry serves.
-
-## Success
-
-Human mode: `shipped polyforge#140 → branch polyforge/polyforge-140` plus one line per
-inventory repo (`pushed`, or `reused (remote branch already at the sealed
-commit)` on a repeat ship — the branch is never pushed twice, never
-force-pushed) and the PR URL; `--json`: the raw answer
-(`{work_item_id, slug, branch, repos:[{name, origin_url, head, branch, pushed,
-reused, pr_url, compare_url}]}`). When no PR credential is available the
-answer carries a compare URL instead of a PR URL and the op STILL SUCCEEDS
-— a missing PR credential is not an error; only the push credential is.
-
-## Failure branches
-
-| Code | When | What to tell the user |
-|---|---|---|
-| `DAEMON-404` | This machine holds no sealed capsule for the WI | The capsule lives on the machine that executed the WI — run `pf ship` there. A work item claimed before the readable capsule names (its capsule is still `capsules/wi_…`) is not found either: see the polyforge#144 section of `docs/upgrade.md`. |
-| `DAEMON-503` | The hub record that names the capsule and the branch (project + slug) could not be read | Retry when aihub is reachable. |
-| `DAEMON-409` | The work item is still active on this daemon, or the remote branch `polyforge/<project>-<seq>` moved past the sealed commit | Active: wrap it first. Moved: ship never force-pushes over it — inspect the remote branch and reconcile by hand. |
-| `DAEMON-403` | Reserved branch target (main/master) | ship structurally never pushes main/master; this id cannot be shipped as-is — bridge the commits manually. |
-| `DAEMON-512` (`SHIP_PUSH_PREFLIGHT_FAILED`) | No usable local git push identity (SSH/credential helper) or the origin is unreachable | The push was never initiated. Fix the machine's git push credential or the origin reachability, then re-run — ship is idempotent. |
-| `dial unix …` | Daemon not running | Nothing can be shipped without the local daemon — start it or check `--socket`. |
-
-A successful ship is safe to repeat: a second run with the same sealed
-commit reuses the branch and re-attaches the existing PR (or compare URL).
+These requests have no verb of their own. Tell the user delivery happens
+in the work item's own `deliver` step, and point at `pf watch <id> --once`
+to see where it is (or whether the merge question is waiting for them). If
+the work item is not running yet, that is `verbs/submit.md`; if it is
+waiting on the merge question, the human answers it via `verbs/answer.md`.

@@ -3,8 +3,8 @@
 // family, pinned by internal/polyforge/cli/daemon.go), the Runtime
 // (lifecycle) and Observe (supervision) modules wired over the five
 // protocol messages, and the machine-level operations — the three
-// admission modes, the pending-job dispatcher, the auto-claim loop, the ship
-// delivery bridge and the graceful shutdown sequence.
+// admission modes, the pending-job dispatcher, the auto-claim loop and the
+// graceful shutdown sequence.
 //
 // Design authority: docs/design/polyforge-vnext/v1-architecture-spec.md
 // (rulings C1–C3), v1-spec-full.md (§一 §二 §五 §十一), 04-local-runtime.md

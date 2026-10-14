@@ -39,7 +39,6 @@ func TestErrorCodeExitMatrix(t *testing.T) {
 		{"DAEMON-503", 503, 2},
 		{"DAEMON-507", 507, 2},
 		{"DAEMON-511", 511, 2},
-		{"DAEMON-512", 512, 2},
 		{"GIT-500", 500, 2},
 	}
 	for _, tc := range cases {

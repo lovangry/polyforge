@@ -799,6 +799,11 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 			outputs[id] = st.Output
 		}
 	}
+	if stepID == deliverStepID {
+		spec.ReviewPassed = reviewPassed(d.exec.Steps[reviewStepID])
+		spec.HasReview = d.workflow.step(reviewStepID) != nil
+		spec.VerifiedHeads, spec.VerifiedTestBar = verificationRecord(d.exec.Steps[verificationStepID])
+	}
 	d.mu.Unlock()
 	spec.OutputSchema = d.outputSchema(stepID)
 	spec.PreExisting = preExistingRulesOf(outputs)

@@ -213,8 +213,8 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/aihub/memory` | Core-side memory store: FTS5-trigram full-text search, authoritative `memory.md` files and the reconcile procedure. |
 | `internal/aihub/server` | The AIHub HTTP face: business endpoints, the admin face, and the `/git/{wi}.git/...` proxy mount; Bearer API key auth, typed `api.Error` envelope. |
 | `internal/polyforge/aihubclient` | Shared HTTP client for the aihub server, used by runtime, observe and the CLI verbs; decodes the typed error envelope back into `*api.Error`. |
-| `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, memory, submit, `watch`, answer, pause, resume, wrap, ops), `chat`, `ship`, the management face (users, api-keys, projects, machines, backup), the daemon client over the UDS socket, and config resolution. |
-| `internal/polyforge/daemon` | Assembly of the local work machine: the UDS HTTP face, runtime, observe lane and driver wired together, the auto switch, the pending-job dispatcher, the auto-pull loop, the ship delivery bridge and the graceful shutdown sequence. |
+| `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, memory, submit, `watch`, answer, pause, resume, wrap, ops), `chat`, the management face (users, api-keys, projects, machines, backup), the daemon client over the UDS socket, and config resolution. |
+| `internal/polyforge/daemon` | Assembly of the local work machine: the UDS HTTP face, runtime, observe lane and driver wired together, the auto switch, the pending-job dispatcher, the auto-pull loop and the graceful shutdown sequence. |
 | `internal/polyforge/gitops` | Shared capsule-git operations layer used by Runtime (clone at start, dirty-commit at recover) and Observe (async commit+push); owns the per-WI git mutex and the `Polyforge-Seq` trailer derivation. |
 | `internal/polyforge/bridge` | Connects the runtime's job machinery to the Go driver: a running `Driver.Run` is the job's agent handle for supervision. |
 | `internal/polyforge/mapping` | The workspace→projects plan read from cli.toml's `[workspace]` sections, and its validated inverse (project → workspace). |
@@ -244,7 +244,6 @@ daemon socket by design.)
 | POST | `/jobs/{wi}/resume-blocked` | The claim/start half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
 | POST | `/jobs/{wi}/wrap` | CLI close path: seal the job with reason `wrap` or `fail`. | user |
-| POST | `/jobs/{wi}/ship` | Delivery bridge: push the sealed capsule's task repos to their origins as branch `polyforge/<project>-<seq>` (+ PR when a credential exists). | user |
 | GET | `/status` | Machine status: jobs (with the needs-input projection), queue stats, auto switch. | user |
 | POST | `/ops/config` | `pf ops auto on\|off` / `pf ops max N`: body `{"auto":bool,"max":N}` (either or both). | user |
 | POST | `/shutdown` | Trigger the bounded graceful shutdown sequence. | user |
@@ -325,9 +324,12 @@ dispatches):
 
 This repository's own procedures: `release.sh` (vX.Y.Z, bump `major|minor|patch`,
 default `minor`) refuses a dirty tree or a HEAD that is not the fetched
-`origin/main` or a HEAD that already carries a release tag on origin, runs `make test`
-(including the e2e suite; the real-GitHub ship-PR e2e is skipped unless
-`POLYFORGE_TEST_REAL_GITHUB=1`), takes the version floor from the highest semver
+`origin/main` or a HEAD that already carries a release tag on origin, refuses unless
+every commit that entered `main` since the previous release tag came through a merged
+PR (main's first-parent history must be merge commits that `gh api
+repos/<repo>/commits/<sha>/pulls` names as a merged PR's merge commit — the shape
+the workflows' `deliver` step produces with `gh pr merge --merge`), runs `make test`
+(including the e2e suite), takes the version floor from the highest semver
 among the ORIGIN tags only (an unreadable `ls-remote` is fatal), builds the two
 binaries and the `ghcr.io/silgrid/aihub:<tag>` image, claims the version by
 pushing the git tag (fails if it exists: nothing is published), pushes the
@@ -336,7 +338,8 @@ image, writes `aihub-image.digest` after the push, then `SHA256SUMS` and
 `aihub-image.digest`, `SHA256SUMS`). `aihub-image.digest` holds the bare image digest
 `sha256:<64 hex>`; `deploy.sh` looks for `ghcr.io/silgrid/aihub@<that digest>` among
 the pulled image's repo digests. `release.sh --verify <version>` also requires the
-version to be strictly greater than every other tag on origin. It never deletes or
+version to be strictly greater than every other tag on origin and runs the same
+PR-only check over previous-tag..version. It never deletes or
 overwrites a tag, release or image; a failure after the tag push burns the version
 (cut the next one).
 
@@ -388,8 +391,7 @@ deployment pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
     go test ./...
 
 Opt-in tests (skipped with a clear message unless their variable is set):
-`POLYFORGE_TEST_REAL_GITHUB=1` runs the ship-PR e2e, which creates a REAL private
-GitHub repo and PR with this machine's `gh`; `POLYFORGE_TEST_SYSTEM_INSTALL=1` runs
+`POLYFORGE_TEST_SYSTEM_INSTALL=1` runs
 the installer scenarios, which write `/usr/local/bin/pf` (disposable hosts only).
 
 ## `pf` commands
@@ -404,7 +406,7 @@ registry; `pf <verb> -help` one verb's face. The routing skill's fragments
 | Face | Verbs |
 | --- | --- |
 | aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember`, `memory` |
-| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ship`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
+| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
 | management | `users`, `api-keys`, `projects`, `machines`, `backup` (DB-only snapshot, see below) |
 | local | `daemon` (run the work machine), `doctor` |
 

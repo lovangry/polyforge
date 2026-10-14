@@ -3,16 +3,13 @@ package daemon
 // routes_test.go: full UDS round trips over a real unix socket, driven
 // through the CLI's own DaemonClient so every response is asserted
 // against the pinned CLI contract field by field (submit/pause/resume/
-// wrap dual-path arbitration/ship/ops + the top-level api.Error
+// wrap dual-path arbitration/ops + the top-level api.Error
 // envelope).
 
 import (
 	"encoding/json"
 	"errors"
 	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -381,115 +378,6 @@ func TestSubmitDispatchBackfill(t *testing.T) {
 		t.Fatalf("wrap wi_p: %v", err)
 	}
 	td.waitLive(t, "wi_q")
-}
-
-// TestShip: the wrap→git delivery bridge against a real sealed capsule
-// holding one task-repo worktree with its own origin. The capsule and the
-// branch are both named for the slug (polyforge#144): capsules/proj-12
-// and polyforge/proj-12, the same branch on every ship.
-func TestShip(t *testing.T) {
-	td := newTestDaemon(t, nil)
-	td.hub.slugs = map[string]string{"wi_s": "proj#12"}
-	td.submitClaim(t, "wi_s")
-	capDir := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", "proj-12")
-
-	// A task repo inside the capsule, with its own origin remote and a
-	// commit (the "inventory" the agent would have checked out).
-	origin := filepath.Join(t.TempDir(), "task-origin.git")
-	if out, err := exec.Command("git", "init", "--bare", origin).CombinedOutput(); err != nil {
-		t.Fatalf("git init --bare origin: %v: %s", err, out)
-	}
-	repo := filepath.Join(capDir, "repos", "app")
-	if out, err := exec.Command("git", "clone", origin, repo).CombinedOutput(); err != nil {
-		t.Fatalf("git clone: %v: %s", err, out)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("hi\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{{"add", "-A"}, {"commit", "-m", "work"}, {"push", "origin", "HEAD:refs/heads/main"}} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
-
-	if _, err := td.client.Ship("wi_s"); err == nil {
-		t.Fatal("ship of a still-active work item succeeded; want DAEMON-409")
-	}
-	if _, err := td.client.Wrap("wi_s", "wrap"); err != nil {
-		t.Fatalf("wrap: %v", err)
-	}
-	waitGone(t, td, "wi_s")
-
-	raw, err := td.client.Ship("wi_s")
-	if err != nil {
-		t.Fatalf("ship: %v", err)
-	}
-	var sr cli.ShipResponse
-	if err := json.Unmarshal(raw, &sr); err != nil {
-		t.Fatalf("ship undecodable: %v", err)
-	}
-	if sr.WorkItemID != "wi_s" || sr.Slug != "proj#12" || sr.Branch != "polyforge/proj-12" || len(sr.Repos) != 1 {
-		t.Fatalf("ship response = %+v", sr)
-	}
-	oc := sr.Repos[0]
-	if oc.Name != "app" || oc.Branch != "polyforge/proj-12" || !oc.Pushed || oc.Reused {
-		t.Fatalf("ship repo outcome = %+v", oc)
-	}
-	if oc.Head == "" || oc.OriginURL == "" {
-		t.Fatalf("ship repo outcome missing head/origin: %+v", oc)
-	}
-	// The branch exists at the sealed commit on the origin.
-	out, err := exec.Command("git", "--git-dir", origin, "rev-parse", "refs/heads/polyforge/proj-12").Output()
-	if err != nil || len(out) == 0 {
-		t.Fatalf("origin has no polyforge branch: %v %q", err, out)
-	}
-
-	// Idempotent re-ship: the branch is reused, nothing pushed.
-	raw, err = td.client.Ship("wi_s")
-	if err != nil {
-		t.Fatalf("re-ship: %v", err)
-	}
-	json.Unmarshal(raw, &sr)
-	if sr.Branch != "polyforge/proj-12" || !sr.Repos[0].Reused || sr.Repos[0].Pushed {
-		t.Fatalf("re-ship outcome = %+v, want the same branch, reused", sr)
-	}
-
-	// A known work item with no local capsule answers DAEMON-404.
-	if _, err := td.client.Ship("wi_ghost"); err == nil {
-		t.Fatal("ship of unknown wi succeeded")
-	} else {
-		var ae *api.Error
-		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonNotFound {
-			t.Fatalf("ship unknown error = %v, want DAEMON-404", err)
-		}
-	}
-}
-
-// TestShipHubRecordFailures: ship names the capsule and the branch from
-// the hub record, so an unknown work item (hub CORE-404) answers
-// DAEMON-404 and an unreachable hub answers DAEMON-503 — nothing pushed.
-func TestShipHubRecordFailures(t *testing.T) {
-	td := newTestDaemon(t, nil)
-	td.hub.mu.Lock()
-	td.hub.unknown = map[string]bool{"wi_nosuch": true}
-	td.hub.mu.Unlock()
-	var ae *api.Error
-	if _, err := td.client.Ship("wi_nosuch"); !errors.As(err, &ae) || ae.Code != api.ErrDaemonNotFound {
-		t.Fatalf("ship of a hub-unknown wi = %v, want DAEMON-404", err)
-	}
-	td.hub.mu.Lock()
-	td.hub.probeFails = 1000 // every read fails: the hub is unreachable
-	td.hub.mu.Unlock()
-	t.Cleanup(func() {
-		td.hub.mu.Lock()
-		td.hub.probeFails = 0
-		td.hub.mu.Unlock()
-	})
-	if _, err := td.client.Ship("wi_x"); !errors.As(err, &ae) || ae.Code != api.ErrDaemonHubUnavailable {
-		t.Fatalf("ship with the hub unreachable = %v, want DAEMON-503", err)
-	}
 }
 
 // ---------------------------------------------------------------------------

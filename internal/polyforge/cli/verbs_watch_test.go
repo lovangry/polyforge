@@ -86,7 +86,7 @@ func watchEnv(w *watchDaemon, t *testing.T, extra map[string]string) map[string]
 
 func completedSnap() protocol.WatchSnapshot {
 	return protocol.WatchSnapshot{WorkItem: "wi_1", Known: true, LastSeq: 3,
-		Execution: &protocol.WatchExecution{WorkflowStatus: "completed", CurrentStep: "ship"},
+		Execution: &protocol.WatchExecution{WorkflowStatus: "completed", CurrentStep: "deliver"},
 		Events:    []protocol.EventEntry{{Seq: 3, Kind: "step_ended", At: "2026-10-12T10:00:00Z"}}}
 }
 
@@ -263,7 +263,7 @@ func TestHelpGroupsAreExplicitMetadata(t *testing.T) {
 	var out bytes.Buffer
 	printUsage(&out)
 	help := out.String()
-	for _, name := range []string{"watch ", "submit", "doctor", "daemon", "ship", "users"} {
+	for _, name := range []string{"watch ", "submit", "doctor", "daemon", "users"} {
 		if !strings.Contains(help, "  "+name) {
 			t.Errorf("help lacks %q", name)
 		}
@@ -291,7 +291,7 @@ func TestHelpGroupsAreExplicitMetadata(t *testing.T) {
 		}
 	}
 	// the watch verb sits in the execution-plane group, between its header and the next
-	exec := help[strings.Index(help, "Execution-plane"):strings.Index(help, "Delivery bridge")]
+	exec := help[strings.Index(help, "Execution-plane"):strings.Index(help, "Management face")]
 	if !strings.Contains(exec, "  watch ") || !strings.Contains(exec, "  chat ") {
 		t.Errorf("watch/chat must be listed under the execution plane:\n%s", exec)
 	}

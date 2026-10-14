@@ -30,11 +30,11 @@ binary's help faces print them; `pf help` lists the full registry and
 | wrap | `verbs/wrap.md` | `pf wrap <id>` — terminal success; `pf wrap <id> --fail` — the owner's failed verdict |
 | ops | `verbs/ops.md` | `pf ops status` — jobs, auto/max, queue counters, the workspace set; `pf ops auto on|off`; `pf ops max N`; `pf ops shutdown` — graceful stop; `pf ops end-session <wi> --reason ...` — force-end a stuck holder's session (admin/maintainer), then `pf submit` |
 
-## Delivery bridge (wrap → git, local daemon unix socket)
+## Delivery (no verb)
 
-| Verb | Fragment | Command |
-|---|---|---|
-| ship | `verbs/ship.md` | `pf ship <id>` — push a closed work item's sealed commits to git origin |
+There is no `pf ship`. The delivery lanes end with a `deliver` workflow step
+(push the feature branch, open/reuse the PR, auto-merge or ask a human) —
+see `verbs/ship.md`.
 
 ## CLI-meta verbs
 

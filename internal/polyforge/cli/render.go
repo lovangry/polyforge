@@ -335,30 +335,6 @@ func mmssAgo(sec int64) string {
 	return fmt.Sprintf("%02d:%02d", sec/60, sec%60)
 }
 
-// renderShip renders the ship answer: the fixed-name branch plus one
-// line per inventory repo, each with the PR URL or the compare-URL
-// fallback.
-func renderShip(w io.Writer, s *ShipResponse) {
-	fmt.Fprintf(w, "shipped %s → branch %s\n", api.DisplayName(s.Slug, s.WorkItemID), s.Branch)
-	if len(s.Repos) == 0 {
-		fmt.Fprintln(w, "  (no inventory repos in the sealed capsule: nothing to push)")
-		return
-	}
-	for _, r := range s.Repos {
-		verdict := "pushed"
-		if r.Reused {
-			verdict = "reused (remote branch already at the sealed commit)"
-		}
-		fmt.Fprintf(w, "  %-18s %s  %s\n", r.Name+":", r.Head, verdict)
-		if r.PRURL != "" {
-			fmt.Fprintf(w, "    pr:      %s\n", r.PRURL)
-		}
-		if r.CompareURL != "" {
-			fmt.Fprintf(w, "    compare: %s\n", r.CompareURL)
-		}
-	}
-}
-
 // renderUsers renders the M1 list.
 func renderUsers(w io.Writer, items []api.User) {
 	rows := make([][]string, 0, len(items))

@@ -85,11 +85,8 @@ func newRelWorld(t *testing.T, originTags, localTags []string) *relWorld {
 	if len(originTags) > 0 {
 		relGit(t, w.work, "push", "-q", "origin", "--tags")
 	}
-	// a second commit so a log range exists
-	relWrite(t, filepath.Join(w.work, "second"), "2\n", 0o644)
-	relGit(t, w.work, "add", "-A")
-	relGit(t, w.work, "commit", "-q", "-m", "second change")
-	relGit(t, w.work, "push", "-q", "origin", "main")
+	// a second change, landed through a (fake) merged PR, so a log range exists
+	w.landPR("second", "second change")
 	for _, tg := range localTags {
 		relGit(t, w.work, "tag", "-a", "-m", tg, tg)
 	}
@@ -137,12 +134,68 @@ case "$cmd" in
     d="$FAKE_GH/$3"; shift 3
     out=.; while [ $# -gt 0 ]; do case "$1" in -D) out="$2"; shift 2 ;; *) shift ;; esac; done
     for f in "$d"/*; do cp "$f" "$out/"; done ;;
+  "api repos/"*)
+    # commit -> merged-PR association: a sha listed in $FAKE_GH/pr-merges is
+    # the merge commit of a merged PR (the --jq filter's answer is its number).
+    [ -n "$FAKE_GH_API_FAIL" ] && { echo "gh: HTTP 502" >&2; exit 1; }
+    sha=$(printf '%s\n' "$2" | sed -n 's|.*/commits/\([0-9a-f]*\)/pulls$|\1|p')
+    if [ -n "$sha" ] && grep -qx "$sha" "$FAKE_GH/pr-merges" 2>/dev/null; then echo 7; fi ;;
   "auth token") echo "gh auth token" >> "$CALLLOG"; echo tok ;;
   "api user") echo me ;;
 esac
 exit 0
 `, 0o755)
 	return w
+}
+
+// commitOnMain adds one file in a direct (non-PR) commit on main and pushes it.
+func (w *relWorld) commitOnMain(file, msg string) string {
+	w.t.Helper()
+	relWrite(w.t, filepath.Join(w.work, file), msg+"\n", 0o644)
+	relGit(w.t, w.work, "add", "-A")
+	relGit(w.t, w.work, "commit", "-q", "-m", msg)
+	relGit(w.t, w.work, "push", "-q", "origin", "main")
+	return relGit(w.t, w.work, "rev-parse", "HEAD")
+}
+
+// mergeOnMain lands one file the way `gh pr merge --merge` does — a topic
+// branch commit merged with --no-ff onto main — and pushes main. recordPR
+// registers the merge commit as a merged PR's merge commit in the fake gh.
+func (w *relWorld) mergeOnMain(file, content, msg string, recordPR bool) string {
+	w.t.Helper()
+	topic := "topic-" + filepath.Base(file)
+	relGit(w.t, w.work, "checkout", "-q", "-b", topic)
+	relWrite(w.t, filepath.Join(w.work, file), content, 0o644)
+	relGit(w.t, w.work, "add", "-A")
+	relGit(w.t, w.work, "commit", "-q", "-m", msg)
+	relGit(w.t, w.work, "checkout", "-q", "main")
+	relGit(w.t, w.work, "merge", "-q", "--no-ff", "-m", "Merge pull request from "+topic, topic)
+	relGit(w.t, w.work, "branch", "-q", "-D", topic)
+	relGit(w.t, w.work, "push", "-q", "origin", "main")
+	sha := relGit(w.t, w.work, "rev-parse", "HEAD")
+	if recordPR {
+		w.recordPR(sha)
+	}
+	return sha
+}
+
+// landPR is mergeOnMain with the merged-PR record: the normal way a change
+// reaches main.
+func (w *relWorld) landPR(file, msg string) string { return w.mergeOnMain(file, msg+"\n", msg, true) }
+
+// recordPR registers sha as the merge commit of a merged PR in the fake gh.
+func (w *relWorld) recordPR(sha string) {
+	w.t.Helper()
+	p := filepath.Join(w.fakeRel, "pr-merges")
+	if err := os.MkdirAll(w.fakeRel, 0o755); err != nil {
+		w.t.Fatal(err)
+	}
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	defer f.Close()
+	fmt.Fprintln(f, sha)
 }
 
 func (w *relWorld) env(extra ...string) []string {
@@ -410,10 +463,7 @@ func TestReleaseScriptNotesGeneratedWhenMissing(t *testing.T) {
 
 func TestReleaseScriptCommittedNotesUsedAsIs(t *testing.T) {
 	w := newRelWorld(t, []string{"v1.2.0"}, nil)
-	relWrite(t, filepath.Join(w.work, "docs", "release-notes", "v1.3.0.md"), "# hand written\n", 0o644)
-	relGit(t, w.work, "add", "-A")
-	relGit(t, w.work, "commit", "-q", "-m", "notes")
-	relGit(t, w.work, "push", "-q", "origin", "main")
+	w.mergeOnMain(filepath.Join("docs", "release-notes", "v1.3.0.md"), "# hand written\n", "notes", true)
 	if out, err := w.run(nil); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
@@ -530,5 +580,96 @@ func TestReleaseScriptHelpMentionsVerify(t *testing.T) {
 		if err != nil || !strings.Contains(out, "--verify") {
 			t.Fatalf("%s: %v\n%s", a, err, out)
 		}
+	}
+}
+
+// ---- PR-only check (polyforge#163)
+
+// TestReleaseScriptRefusesCommitsNotFromAMergedPR: every first-parent commit
+// that entered main since the previous release tag must be the merge commit of
+// a merged PR; anything else refuses the release before the test gate, with
+// nothing tagged or published.
+func TestReleaseScriptRefusesCommitsNotFromAMergedPR(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(w *relWorld) string // returns the offending sha
+		env   []string
+		why   string
+	}{
+		{"direct commit on main", func(w *relWorld) string { return w.commitOnMain("direct", "direct push") }, nil, "not a merge commit"},
+		{"local merge never a PR", func(w *relWorld) string { return w.mergeOnMain("local", "l\n", "local merge", false) }, nil, "no merged PR"},
+		{"squash-style PR commit", func(w *relWorld) string {
+			sha := w.commitOnMain("squashed", "squashed PR")
+			w.recordPR(sha) // associated with a PR, but not a merge commit
+			return sha
+		}, nil, "not a merge commit"},
+		{"gh api failure", func(w *relWorld) string { return relGit(w.t, w.work, "rev-parse", "HEAD") }, []string{"FAKE_GH_API_FAIL=1"}, "gh api failed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newRelWorld(t, []string{"v1.2.0"}, nil)
+			bad := c.setup(w)
+			w.landPR("later", "a later PR") // a good PR after it does not launder it
+			if c.env != nil {
+				bad = relGit(t, w.work, "rev-parse", "HEAD")
+			}
+			out, err := w.run(c.env)
+			if err == nil {
+				t.Fatalf("expected a refusal\n%s", out)
+			}
+			for _, want := range []string{"without a merged PR", bad, c.why, "nothing built or published"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("refusal lacks %q\n%s", want, out)
+				}
+			}
+			if calls := w.calls(); len(calls) != 0 {
+				t.Fatalf("work happened despite the refusal: %v", calls)
+			}
+			if got := w.originTags(); strings.Contains(got, "v1.3.0") {
+				t.Fatalf("tag cut despite the refusal: %q", got)
+			}
+		})
+	}
+}
+
+// TestReleaseScriptVerifyPROnly: --verify runs the same check over
+// previous-tag..tag.
+func TestReleaseScriptVerifyPROnly(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		direct bool
+		env    []string
+		fail   string
+	}{
+		{name: "all through PRs", direct: false},
+		{name: "a direct commit", direct: true, fail: "not a merge commit"},
+		{name: "gh api failure", env: []string{"FAKE_GH_API_FAIL=1"}, fail: "gh api failed"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newRelWorld(t, []string{"v1.2.0"}, nil)
+			if c.direct {
+				w.commitOnMain("direct", "direct push")
+			}
+			w.landPR("third", "third change")
+			relGit(t, w.work, "tag", "-a", "-m", "v1.3.0", "v1.3.0")
+			relGit(t, w.work, "push", "-q", "origin", "v1.3.0")
+			w.publishFake("v1.3.0", goodRelease())
+			out, err := w.run(c.env, "--verify", "v1.3.0")
+			if c.fail == "" {
+				if err != nil || !strings.Contains(out, "PASS pr-only") || strings.Contains(out, "FAIL") {
+					t.Fatalf("expected pass: %v\n%s", err, out)
+				}
+				return
+			}
+			ok := false
+			for _, l := range strings.Split(out, "\n") {
+				if strings.HasPrefix(l, "FAIL pr-only") && strings.Contains(l, c.fail) {
+					ok = true
+				}
+			}
+			if err == nil || !ok {
+				t.Fatalf("expected FAIL pr-only containing %q: err=%v\n%s", c.fail, err, out)
+			}
+		})
 	}
 }

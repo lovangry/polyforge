@@ -180,7 +180,8 @@ or on-remote names derived from it use the `#`-free form
 - **capsule directory**: a NEW claim lands at
   `<workspace>/capsules/<project>-<seq>` (was `capsules/<wi_id>`);
 - **ship branch**: `pf ship` pushes `polyforge/<project>-<seq>` (was
-  `polyforge/<wi_id>`).
+  `polyforge/<wi_id>`). (Pre-#166: `pf ship` is removed — see the
+  polyforge#166 section below; the `deliver` step pushes the same branch.)
 
 The id stays the machine identifier everywhere else (API, `state.json`
 keys, `capsule.json`, the external git-dir, the capsule remote).
@@ -216,3 +217,31 @@ work item is no longer found by any daemon face; to ship it anyway, rename
 it by hand while the daemon holds no job for it
 (`mv capsules/<wi_id> capsules/<project>-<seq>`), or bridge its commits
 manually; otherwise delete it once it is no longer needed.
+
+## `pf ship` removed: delivery is the workflows' `deliver` step (polyforge#166)
+
+The daemon no longer pushes deliveries: the `pf ship` verb, the daemon's
+`POST /jobs/{wi}/ship` route and the `DAEMON-512` push-preflight code are
+gone (`pf ship` now answers "unknown command"). The delivery lanes
+(`feature-full`, `bug-fix`, `quick-fix`, `chore`) instead end with a
+`deliver` workflow step that merges the latest origin default branch,
+pushes only the feature branch `polyforge/<project>-<seq>`, opens or reuses
+its PR, and auto-merges it (`gh pr merge --merge`) when review and tests
+passed with no LLM-resolved conflict (quick-fix, which has no review step,
+on verification's pass) — otherwise it asks a human-only
+question answered via `pf answer`. The section above describes the
+pre-#166 `pf ship`; a closed work item that was never shipped before the
+upgrade has to be bridged manually (push its sealed capsule commits by
+hand).
+
+`deliver` runs at the end of EVERY work item on those four lanes, so before
+upgrading check each work machine and each task repo:
+
+- the machine's git push identity and `gh` login work for the step agents
+  (they inherit the daemon's environment: `HOME`, SSH agent, `gh`'s login);
+- a task repo whose origin is not on GitHub, or a machine without a usable
+  `gh`, gets no PR: the step pushes the feature branch only and then asks
+  the human question (merge by hand, or don't merge) — it does not block;
+- the `polyforge/<project>-<seq>` branches it pushes are the only refs it
+  writes; nothing merges without a PR (`gh pr merge --merge`) or a human's
+  answer.

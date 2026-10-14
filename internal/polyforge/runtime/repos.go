@@ -7,9 +7,9 @@ package runtime
 // materialize turns it into real git clones under the capsule's
 // repos/<name> BEFORE the agent spawns, and capsule.json records each
 // clone's claim-time HEAD SHA as the baseline (name → SHA). The agent
-// works inside repos/<name>; the daemon's ship bridge later pushes those
-// worktrees back to their own origins — this file is the "incoming"
-// half only.
+// works inside repos/<name>; the workflows' deliver step later pushes the
+// feature branch back to its origin (polyforge#166) — this file is the
+// "incoming" half only.
 //
 // Credentials: task repos are ordinary remotes (GitHub, an internal
 // git host, a local file:// path). Cloning uses the machine's default git
@@ -22,7 +22,7 @@ package runtime
 // time AND has a baseline recorded in the prior capsule.json (a
 // same-generation husk from a crashed Start, or an in-place materialize
 // rerun) is NEVER fetched, reset or re-cloned — the agent's uncommitted
-// edits in that worktree are the live scene a later commit-dirty/ship
+// edits in that worktree are the live scene a later commit-dirty/deliver
 // path needs. A directory with NO recorded baseline is the crash window
 // between the clone and the capsule.json write: an untouched fresh
 // clone, which takes the carrier restore like any new clone.

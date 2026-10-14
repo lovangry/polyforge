@@ -436,6 +436,11 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 				}
 			}
 		}
+		if req.StepID == verificationStepID && d.wi.CapsuleDir != "" {
+			// the commit verification passed on, per task repo — the
+			// deliver merge rule's anchor (deliver_facts.go)
+			recordVerifiedHeads(out, d.wi.CapsuleDir)
+		}
 		st.Status = capsule.StepDone
 		st.Output = out
 		// Commit point: archive the accepted attempt (the step's attempt

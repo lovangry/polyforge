@@ -217,6 +217,17 @@ type ResultSpec struct {
 	// of the done steps (e2e-author, repro) and bug-fix's regression_test
 	// paths — and whether the repro reproduced the bug (checkPreExisting).
 	PreExisting PreExistingRules
+	// ReviewPassed: the workflow's independent review (the `review` step)
+	// is done with a pass verdict and no blocking finding. The deliver
+	// binding (deliver.go) merges without a human only when it holds.
+	ReviewPassed bool
+	// HasReview: the workflow declares a review step.
+	HasReview bool
+	// VerifiedHeads / VerifiedTestBar: the verification step's record
+	// (task repo -> HEAD when it completed, driver-written; the test bar
+	// it named) — deliver_facts.go.
+	VerifiedHeads   map[string]string
+	VerifiedTestBar []testBarCmd
 }
 
 // ValidateStepResult runs the staging gates over one envelope:
@@ -266,7 +277,12 @@ type ResultSpec struct {
 //  7. the authored-tests gate (ReposDir and AuthoredTests set): the
 //     test files an earlier step authored must be unchanged since its
 //     commit, unless a human answered in this attempt chain (then
-//     res.rebaseline is set) (polyforge#164 H4).
+//     res.rebaseline is set) (polyforge#164 H4);
+//  8. the delivery binding (the `deliver` step only, deliverBinding):
+//     recorded pushes target only the feature branch, merges use
+//     --merge, and a completed pass that merged outside the merge rule
+//     or left a PR unmerged owes a human answer — rejected like the
+//     evidence gate.
 //
 // The minimal contract: an envelope missing the retired protocol
 // fields is never judged invalid for its absence — there is no
@@ -375,6 +391,15 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 		}
 		res.rebaseline = len(changed) > 0
 		res.rebaselined = changed
+	}
+	// 8. the delivery binding (polyforge#166, deliver.go): the deliver
+	// step's recorded pushes target only the feature branch and merge only
+	// with --merge; a merge outside the merge rule, or a PR left unmerged,
+	// needs a human answer.
+	if spec.StepID == deliverStepID {
+		if err := deliverBinding(res, delivered, spec); err != nil {
+			return err
+		}
 	}
 	return nil
 }
