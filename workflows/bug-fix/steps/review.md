@@ -56,8 +56,10 @@ catch one.
 ## What to do
 
 1. Read, in this order: `artifacts/root-cause.md` (the proven cause),
-   `artifacts/repro.md` (the observed failure), the actual diff `fix` produced (read the
-   repo worktree's history for the commits `fix` reported), and
+   `artifacts/repro.md` (the observed failure), the full diff (in each task repo
+   `git diff $(git merge-base HEAD origin/HEAD)..HEAD`, falling back to `origin/main` or
+   `origin/master` when `origin/HEAD` is unset — this carries `repro`'s test commit,
+   `fix`'s commits and any commit `fix` did not report), and
    `artifacts/verification-report.md` (the mechanical results, repro re-run included).
 2. Judge the causal fit: does the diff remove the *diagnosed condition*, or does it
    merely suppress the observed symptom at one call site? Would the failure still occur
@@ -67,6 +69,11 @@ catch one.
 3. Judge the blast radius: the diff's effect on adjacent behavior the diagnosis did not
    implicate; scope creep beyond what the cause demanded; missing test coverage of the
    corrected behavior if the project expects tests alongside fixes.
+   Judge the tests in the diff too: a repro or regression test that does not actually
+   reproduce the diagnosed failure (vacuous, or passing whatever the code does) is a
+   blocking finding — `fix` may not change it on its own (the driver's authored-tests
+   gate) and must ask a human through `needs_input`, so name the test and why. A
+   redundant or oversized test is a `non-blocking` finding.
 4. Record every finding in `findings`, tagged `blocking` or `non-blocking`. Non-blocking
    findings do not fail the gate but are still useful history.
 5. `verdict: pass` only if there are zero blocking findings - the schema enforces this:
@@ -119,8 +126,8 @@ these present:
 ## Position in the flow
 
 This step is declared `kind: review` in the workflow frontmatter, which the schema
-grants positional freedom (rule V8) — in this bundle it sits between `verification` and
-the end of the lane because ship-readiness judgment needs both the mechanical results and the
+grants positional freedom — in every delivery bundle that has a review it sits between `verification` and
+`deliver` because ship-readiness judgment needs both the mechanical results and the
 evidence chain in hand.
 
 ## Output

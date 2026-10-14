@@ -224,12 +224,10 @@ var shippedSamples = map[string]string{
 	"feature-full/spec":         `{"spec_path":"artifacts/spec.md","requirement_titles":["R1"],"non_goals":[]}`,
 	"feature-full/grill-review": `{"verdict":"pass","qa_log":"artifacts/grill-qa.md","fail_reason":null}`,
 	"feature-full/plan":         `{"plan_path":"artifacts/plan.md","step_ids":["s1","s2"],"touched_files":[{"path":"a.go","intent":"write"},{"path":"b.go","intent":"read"}]}`,
-	"feature-full/e2e-author":   `{"scenarios_path":"artifacts/e2e-scenarios.md","scenario_titles":["A","B"],"test_files":["test/a_test.go"]}`,
-	"feature-full/e2e-baseline": `{"results_path":"artifacts/e2e-baseline.md","authored_titles":["A","B"],"scenarios":[{"title":"A","status":"fail","evidence":"want 1 got 0"},{"title":"B","status":"fail","evidence":"404"}]}`,
+	"feature-full/e2e-author":   `{"scenarios_path":"artifacts/e2e-scenarios.md","scenario_titles":["A","B"],"test_files":["test/a_test.go"],"baseline":[{"title":"A","status":"fail","evidence":"want 1 got 0"},{"title":"B","status":"fail","evidence":"404"}],"already_satisfied":["C"],"added_test_lines":512,"size_justification":"each scenario drives its own daemon lifecycle"}`,
 	"feature-full/code":         `{"commits":[{"step_id":"s1","sha":"abc1234","message":"feat: s1"}],"build_status":"green","summary":"done"}`,
-	"feature-full/e2e-run":      `{"results_path":"artifacts/e2e-results.md","verdict":"pass","authored_titles":["A","B"],"scenarios":[{"title":"A","status":"pass"},{"title":"B","status":"skipped","detail":"needs GPU"}],"fail_reason":null}`,
 	"feature-full/review":       `{"verdict":"pass","findings":[{"severity":"non-blocking","detail":"nit"}]}`,
-	"feature-full/verification": `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"tests","status":"skipped","detail":"no tests"}],"test_bar":[{"repo":"app","command":"go build ./..."},{"repo":"app","command":"go test ./..."}]}`,
+	"feature-full/verification": `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"tests","status":"skipped","detail":"no tests"},{"name":"authored-scenarios","status":"pass"}],"authored_titles":["A","B"],"scenarios":[{"title":"A","status":"pass"},{"title":"B","status":"skipped","detail":"needs GPU"}],"test_bar":[{"repo":"app","command":"go build ./..."},{"repo":"app","command":"go test ./..."},{"repo":"app","command":"npm run test:e2e -- test/e2e/a.spec.ts"}]}`,
 	"quick-fix/grill":           `{"qa_log":"artifacts/grill-qa.md","memo_path":"artifacts/fix-memo.md","scope_points":["fix the typo"],"non_goals":[]}`,
 	"quick-fix/fix":             `{"commits":[{"sha":"abc1234","message":"fix: typo"}],"build_status":"green"}`,
 	"quick-fix/verification":    `{"verdict":"pass","checks":[{"name":"build","status":"pass"}],"test_bar":[{"repo":"app","command":"go build ./..."},{"repo":"app","command":"go test ./..."}]}`,
@@ -265,5 +263,29 @@ func TestShippedStepSchemasAcceptKnownGoodOutputs(t *testing.T) {
 		if err := checkOutputSchema(s.Schema, json.RawMessage(sample)); err != nil {
 			t.Fatalf("%s: known-good output rejected: %v", key, err)
 		}
+	}
+}
+
+// TestFeatureFullMergedStepSchemasRejectContradictions (polyforge#165):
+// e2e-author's baseline admits only proven reds, and feature-full's
+// verification (which absorbed e2e-run) cannot pass over a red authored
+// scenario or omit the per-scenario results.
+func TestFeatureFullMergedStepSchemasRejectContradictions(t *testing.T) {
+	bundle := filepath.Join("..", "..", "..", "workflows", "feature-full")
+	for step, bad := range map[string]string{
+		"e2e-author":   `{"scenarios_path":"artifacts/e2e-scenarios.md","scenario_titles":["A"],"baseline":[{"title":"A","status":"pass","evidence":"ok"}]}`,
+		"verification": `{"verdict":"pass","checks":[{"name":"build","status":"pass"}],"authored_titles":["A"],"scenarios":[{"title":"A","status":"fail"}]}`,
+	} {
+		s, err := loadStepOutputSchema(bundle, step)
+		if err != nil || s == nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		if err := checkOutputSchema(s.Schema, json.RawMessage(bad)); err == nil {
+			t.Fatalf("%s: contradictory output accepted: %s", step, bad)
+		}
+	}
+	s, _ := loadStepOutputSchema(bundle, "verification")
+	if err := checkOutputSchema(s.Schema, json.RawMessage(`{"verdict":"pass","checks":[{"name":"build","status":"pass"}]}`)); err == nil {
+		t.Fatal("verification without authored_titles/scenarios accepted")
 	}
 }

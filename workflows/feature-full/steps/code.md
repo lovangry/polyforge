@@ -49,16 +49,18 @@ verdict) and address every point it raises before proceeding with the rest of th
   `go build ./... && go vet ./... && gofmt -l .` plus `go test` of the touched packages.
   A formatter listing any file (non-empty `gofmt -l` output, or the repo's equivalent)
   counts as red, exactly like a non-zero exit. That is the whole per-unit bar. Full
-  testing belongs to the acceptance lane and the gates: `e2e-run` re-runs the authored
-  e2e suite and `verification` runs the project's full bar — do not run the full suite
-  (e.g. `go test ./...`) here, and do not proceed on top of a red fast check. The files
-  named in `execution.json`'s `steps.e2e-author.output.test_files` are not part of this
-  step's per-unit bar — they are committed by `e2e-author` itself and exercised by
-  `e2e-run`/`verification`.
+  testing belongs to the gate: `verification` runs the project's full bar and the
+  authored e2e suite — do not run the full suite (e.g. `go test ./...`) here, and do
+  not proceed on top of a red fast check. The files named in `execution.json`'s
+  `steps.e2e-author.output.test_files` are not part of this step's per-unit bar — they
+  are committed by `e2e-author` itself (proven red there, see its `baseline`) and
+  exercised by `verification`; running them while you work is fine.
 - **Never edit `e2e-author`'s test files.** The paths in
   `steps.e2e-author.output.test_files` are read-only to `code`: do not modify, move,
   rename, delete, or stage them. If one looks wrong, make no change to it — ask via
-  `needs_input`; satisfying the tests is the job, rewriting them is not. The driver
+  `needs_input`; satisfying the tests is the job, rewriting them is not. The same
+  holds when a `review` FAIL names an authored test as wrong or vacuous: ask via
+  `needs_input`, quoting the finding, and change the test only after a human answered. The driver
   enforces this: a completion whose tree changed those files since `e2e-author`'s commit
   (`git diff <author-commit>..HEAD -- <test_files>`) is rejected, unless a human
   answered your question in this attempt.
@@ -75,7 +77,7 @@ verdict) and address every point it raises before proceeding with the rest of th
 If a plan step turns out to be infeasible as written, or the build cannot be made green
 within reasonable effort, do not fabricate a passing `build_status: green`. Report
 honestly: leave `build_status: red` and explain the blocker in `summary`. A dishonest
-green here corrupts every downstream gate (`verification`, `e2e-run`, `review`) that
+green here corrupts every downstream gate (`verification`, `review`) that
 trusts this step's word for it.
 
 ## Output

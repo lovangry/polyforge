@@ -120,4 +120,3 @@ func TestUnreadableYamlIsTyped(t *testing.T) {
 		t.Fatal("a directory at the yaml path must refuse")
 	}
 }
-

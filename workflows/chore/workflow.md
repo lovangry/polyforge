@@ -1,6 +1,6 @@
 ---
 name: chore
-description: Deletion-type maintenance lane - plan, code, review, verify; deletions and cleanup ship through this lane. No release slot.
+description: Deletion-type maintenance lane - plan, code, verify, review, deliver; deletions and cleanup ship through this lane. No release slot.
 rewind:
   max_total: 2
   max_per_step: 2
@@ -9,24 +9,24 @@ defaults:
 steps:
   - { id: plan, context_policy: fresh, handoff: true, kind: author }
   - { id: code, context_policy: inherit, handoff: true, kind: code }
-  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, on_fail: { target: code } }
   - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, on_fail: { target: code }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, on_fail: { target: code } }
   - { id: deliver, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, on_fail: { target: code } }
 ---
 
 # chore — deletion-type maintenance flow
 
-This is the flow-level narrative for the workflow. It explains how the four
+This is the flow-level narrative for the workflow. It explains how the five
 steps compose; it is not itself a structural schema — the frontmatter `steps` array above
 is the *only* execution order. Nothing here overrides it.
 
 ## Shape of the flow
 
 ```
-plan --> code --> review --> verification
-          ^          |             |
-          +----------+-------------+
-               (FAIL: rewind to code)
+plan --> code --> verification --> review --> deliver
+          ^            |              |           |
+          +------------+--------------+-----------+
+                    (FAIL: rewind to code)
 ```
 
 The lane covers deletion-type and maintenance work: dead-code and feature removal,
@@ -63,9 +63,10 @@ file under `artifacts/`; no step declares frontmatter `inputs:`, so downstream s
 | step | primary artifact it writes | who reads it |
 |---|---|---|
 | `plan` | `artifacts/plan.md` (may legitimately be a single trivial step for a small chore) | `code` |
-| `code` | changes under `repos/<name>/**`, `artifacts/code-summary.md` | `review`, `verification` |
-| `review` | `artifacts/review.md` (verdict) | `verification`, (rewind context for `code` via `pending_rewind_input`) |
-| `verification` | `artifacts/verification-report.md` (verdict) | (terminal) |
+| `code` | changes under `repos/<name>/**`, `artifacts/code-summary.md` | `verification`, `review` |
+| `verification` | `artifacts/verification-report.md` (verdict) | `review`, `deliver` |
+| `review` | `artifacts/review.md` (verdict) | `deliver`, (rewind context for `code` via `pending_rewind_input`) |
+| `deliver` | `artifacts/delivery.md` | (terminal) |
 
 ## `plan` is a normal step, not an optional one
 
@@ -81,12 +82,14 @@ small is not an option; writing the small thought down is cheap.
 All rewind declarations live in the frontmatter `on_fail` of the gates; a target must
 exist and sit strictly earlier than the failing step. This section explains the choices:
 
+- **`verification` FAILs -> rewind to `code`.** Build/lint/tests failed on the changed
+  tree, and `code` is the only step that can change it. It runs before `review`, so a
+  mechanical failure never costs a review.
 - **`review` FAILs -> rewind to `code`.** The owner-rules checklist or the
   plan-conformance judgment found the change wanting (undeclared writes, a
   half-finished deletion, a rule hit); `code` is the only step that can change the
-  tree, so both gates on this lane share it as their rewind target.
-- **`verification` FAILs -> rewind to `code`.** Build/lint/tests failed on the changed
-  tree, and `code` is the only step that can change it.
+  tree, so every gate on this lane shares it as its rewind target (`deliver`'s "back to
+  code" included). The re-run passes through `verification` again before `review`.
 
 Workflow-level rewind bounds are the tightest of the reference bundles:
 `max_total: 2`, `max_per_step: 2`. A chore that needs more than two bounded attempts to

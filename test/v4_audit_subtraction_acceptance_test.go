@@ -205,8 +205,8 @@ func TestV4NeedsInputWaitNotCountedIntoT(t *testing.T) {
 }
 
 // TestV4BundleFeatureFullLaneWraps: the shipped feature-full bundle
-// (grill -> spec -> grill-review -> plan -> e2e-author -> e2e-baseline
-// -> code -> e2e-run -> review -> verification) runs end to end through
+// (grill -> spec -> grill-review -> plan -> e2e-author -> code ->
+// verification -> review -> deliver) runs end to end through
 // the real daemon and wraps — the only e2e run of that lane.
 func TestV4BundleFeatureFullLaneWraps(t *testing.T) {
 	inst := newV1Install(t)
@@ -216,11 +216,9 @@ func TestV4BundleFeatureFullLaneWraps(t *testing.T) {
 		{"do": "envelope", "id": "grill-review", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "e2e-author", "outcome": "completed", "handoff": true},
-		{"do": "envelope", "id": "e2e-baseline", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true},
-		{"do": "envelope", "id": "e2e-run", "outcome": "completed", "handoff": true},
-		{"do": "envelope", "id": "review", "outcome": "completed"},
 		{"do": "envelope", "id": "verification", "outcome": "completed"},
+		{"do": "envelope", "id": "review", "outcome": "completed"},
 	}
 	wi := newWIWithBundle(t, inst, "v4: feature-full lane end to end", "feature-full", actions)
 	d := newV1Daemon(t, inst)
@@ -233,7 +231,7 @@ func TestV4BundleFeatureFullLaneWraps(t *testing.T) {
 	if x.WorkflowStatus != "completed" {
 		t.Fatalf("workflow status %q, want completed", x.WorkflowStatus)
 	}
-	for _, step := range []string{"grill", "spec", "grill-review", "plan", "e2e-author", "e2e-baseline", "code", "e2e-run", "review", "verification"} {
+	for _, step := range []string{"grill", "spec", "grill-review", "plan", "e2e-author", "code", "verification", "review", "deliver"} {
 		if st, ok := x.Steps[step]; !ok || st.Status != "done" {
 			t.Fatalf("step %s not done: %+v", step, st)
 		}
