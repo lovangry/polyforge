@@ -21,16 +21,16 @@ steps:
 
 # bug-fix — root-cause lane
 
-This is the flow-level narrative for the workflow. It explains how the six
+This is the flow-level narrative for the workflow. It explains how the five
 steps compose and what flows between them; it is not itself a structural schema — the
 frontmatter `steps` array above is the *only* execution order. Nothing here overrides it.
 
 ## Shape of the flow
 
 ```
-repro --> root-cause --> fix --> verification --> review --> deliver
-   ^         |                     |                |           |
-   |   (FAIL: rewind to repro)  (FAIL: rewind to fix)  (FAIL: rewind to fix)  (FAIL: rewind to fix)
+repro --> root-cause --> fix --> verification --> review
+   ^         |                     |                |
+   |   (FAIL: rewind to repro)  (FAIL: rewind to fix)  (FAIL: rewind to fix)
 ```
 
 The lane exists for bugs whose cause is NOT already known. Its contract with the rest of
@@ -68,10 +68,9 @@ convention — the driver injects nothing and there is no frontmatter declaratio
 |---|---|---|
 | `repro` | `artifacts/repro.md` (commands, environment, observed vs expected), plus a failing test under `repos/<name>/**` when one is authored | `root-cause`, `verification` |
 | `root-cause` | `artifacts/root-cause.md` (verdict, cause, evidence) | `fix`, `review` |
-| `fix` | changes under `repos/<name>/**`, `artifacts/fix-summary.md`, and the repro pinned as a regression test (required output `regression_test`; waived only with a review-visible reason) | `verification`, `review`, `deliver` |
+| `fix` | changes under `repos/<name>/**`, `artifacts/fix-summary.md`, and the repro pinned as a regression test (required output `regression_test`; waived only with a review-visible reason) | `verification`, `review` |
 | `verification` | `artifacts/verification-report.md` (verdict) | `review` |
-| `review` | `artifacts/review.md` (verdict) | `deliver` (the merge rule's independent review) |
-| `deliver` | the pushed feature branch, PR and merge outcome per repo, `artifacts/delivery.md` | (terminal) |
+| `review` | `artifacts/review.md` (verdict) | (terminal) |
 
 The repro artifact is the spine of the lane: `root-cause` cites it as evidence, and
 `verification` re-runs it — the originally failing case passing on the fixed tree is the
@@ -94,8 +93,6 @@ exist and sit strictly earlier than the failing step. This section explains the 
   with the blocking findings attached; `root-cause` is NOT a rewind target — if the
   review verdict says the diagnosis itself was wrong, `fix`'s re-run is expected to say
   so in its output and stop honestly rather than re-litigate the cause mid-flow.
-- **`deliver` FAILs ("back to code") -> rewind to `fix`.** The human sent the delivery
-  back; `fix` re-runs and the re-run delivery reuses the same branch and PR.
 
 Workflow-level rewind bounds: `max_total: 4`, `max_per_step: 2`. A diagnosis-fix loop
 that cannot converge in four bounded rewinds is telling you the WI is mis-scoped —

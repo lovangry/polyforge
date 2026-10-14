@@ -15,22 +15,21 @@ steps:
 
 # quick-fix — light remediation flow
 
-This is the flow-level narrative for the workflow. It explains how the four
+This is the flow-level narrative for the workflow. It explains how the three
 steps compose and what flows between them; it is not itself a structural schema — the
 frontmatter `steps` array above is the *only* execution order. Nothing here overrides it.
 
 ## Shape of the flow
 
 ```
-grill --> fix --> verification --> deliver
-           ^          |               |
-           +----------+---------------+
-                (FAIL: rewind to fix)
+grill --> fix --> verification
+                |
+          (FAIL: rewind to fix)
 ```
 
 The flow collapses the feature-full clarification trio (`grill` -> `spec` ->
 `grill-review`) into ONE front-loaded interactive checkpoint (`grill`), then runs a
-single fix pass and one machine-checkable gate, then delivers (`deliver`, below). It is for work whose
+single fix pass and one machine-checkable gate. It is for work whose
 scope is already small and well understood: a bounded bug fix, a small config or
 dependency change, a tiny feature. If a WI routed here turns out to need a real spec or a
 separate review pass, that is a signal it was misrouted — cancel and re-file against
@@ -59,21 +58,17 @@ file under `artifacts/`; no step declares frontmatter `inputs:`, so downstream s
 | step | primary artifact it writes | who reads it |
 |---|---|---|
 | `grill` | `artifacts/grill-qa.md` (question/answer log), `artifacts/fix-memo.md` (micro-spec) | `fix` |
-| `fix` | changes under `repos/<name>/**`, `artifacts/fix-summary.md` | `verification`, `deliver` |
-| `verification` | `artifacts/verification-report.md` (verdict) | `deliver` |
-| `deliver` | the pushed feature branch, PR and merge outcome per repo, `artifacts/delivery.md` | (terminal) |
+| `fix` | changes under `repos/<name>/**`, `artifacts/fix-summary.md` | `verification` |
+| `verification` | `artifacts/verification-report.md` (verdict) | (terminal) |
 
 ## Rewind boundaries
 
-Both gates (`verification`, `deliver`) declare `on_fail: {target: fix}` — this section explains the choice. A rewind target must exist in the `steps` array and sit strictly
+The lane's one gate declares `on_fail: {target: fix}` — this section explains the choice. A rewind target must exist in the `steps` array and sit strictly
 earlier than the failing step:
 
 - **`verification` FAILs -> rewind to `fix`.** Verification is the machine gate
   (build/lint/tests); a failure means the tree is wrong, and `fix` is the only step that
   can change it.
-- **`deliver` FAILs ("back to code") -> rewind to `fix`.** The human sent the delivery
-  back, or the merge rule was not met and a re-work is due; `fix` is again the only
-  step that can change the tree.
 
 Workflow-level rewind bounds for this bundle are declared once in the frontmatter:
 `max_total: 2`, `max_per_step: 2`. A quick fix that cannot land within two bounded
