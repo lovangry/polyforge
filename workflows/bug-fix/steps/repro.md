@@ -71,10 +71,12 @@ commit** containing exactly those files, **verbatim** — the exact paths you re
 `test_files`, staged by path, no content edits after authoring, and no unrelated files
 in the same commit. `fix` is forbidden from touching these files, and a resume of the
 work item restores each task repo at its committed HEAD only, so an authored test
-left uncommitted is lost on the next resume. The driver enforces this mechanically:
-a `completed` result whose `test_files` lists any path that is not committed and
-clean in its task repo is rejected (and the step re-dispatched) with the
-uncommitted paths named; `verification` additionally FAILs on any path listed in
+left uncommitted is lost on the next resume. Commit BEFORE writing the result
+envelope (the step process is torn down once it appears); `git add -f` a path under
+a .gitignore'd directory. The driver enforces this mechanically: a `completed` result
+whose `test_files` lists a repo-relative path that exists in no task repo, or is not
+committed at HEAD in every task repo where it exists, is rejected (and the step
+re-dispatched) with the uncommitted paths named; `verification` additionally FAILs on any path listed in
 `steps.repro.output.test_files` that is not tracked (committed) in the repo
 worktree. A scripted-repro-only step (no test files authored)
 commits nothing — this duty fires only when `test_files` is non-empty.
