@@ -26,7 +26,7 @@ the end-generation call.
 
 ## Success
 
-`pause requested for <id>` plus the daemon's raw answer (`--json`: the raw
+`pause requested for <slug>` plus the daemon's raw answer (`--json`: the raw
 answer alone). The local run stops but the session is kept; the sealed capsule stays on
 disk as the read-only scene a later resume continues from.
 

@@ -143,3 +143,46 @@ the plan unit) and the externally visible change.
 | waiting_on dead branches (kept-face of the rewind-fix Requirement) | only the `gate` and `runtime:*` branches of `validWaitingOn`; `owner` and `dependency:<slug>` stay live (`git show 0cde108`) | PATCH `waiting_on='gate'`/`'runtime:*'` is refused CORE-400; the optional cleanup SQL above is bounded to those values |
 | **D3** — goal limit counts characters | `MaxGoalBytes` → `MaxGoalRunes`; create and PATCH checks switch to rune counting (`git show 8919250`) | a 500-character CJK goal (1500 bytes) is accepted; 501 characters is refused |
 | **D5** — owner is the reporter, gate scope pinned | no production change (code was already reporter-based); behavior pinned by the new server-suite test (`git show b267598`) | the reporter may continue/abandon only; ForceEnd stays admin/maintainer (no widening) |
+
+## Work machines: readable capsule directories and ship branches (polyforge#144)
+
+From this release a work machine names what a human sees by the work
+item's slug (`<project>#<seq>`, e.g. `polyforge#140`), and the two on-disk
+or on-remote names derived from it use the `#`-free form
+`<project>-<seq>`:
+
+- **capsule directory**: a NEW claim lands at
+  `<workspace>/capsules/<project>-<seq>` (was `capsules/<wi_id>`);
+- **ship branch**: `pf ship` pushes `polyforge/<project>-<seq>` (was
+  `polyforge/<wi_id>`).
+
+The id stays the machine identifier everywhere else (API, `state.json`
+keys, `capsule.json`, the external git-dir, the capsule remote).
+
+**Nothing is renamed or migrated.** A work item that is running, paused or
+end_pending when the daemon is upgraded keeps the capsule directory its
+`state.json` record names and continues there (restart recovery, attach,
+`pf resume`). A blocked work item resumed after the upgrade is re-claimed
+into the new `capsules/<project>-<seq>` directory (cloned from its capsule
+chain, as every re-claim is). The daemon never looks for an id-named
+directory again: `pf ship` and `pf watch` of a closed work item find only
+`<workspace>/capsules/<project>-<seq>`, and there is no "accept both names"
+fallback for directories or branches.
+
+**Before upgrading a work machine:**
+
+1. Let every work item claimed on it finish — or at least close it — and
+   **ship every closed work item you still intend to ship** before the
+   upgrade. After it, `pf ship` of a work item whose capsule is still
+   `capsules/<wi_id>` answers `DAEMON-404`, and a work item that was
+   already shipped would otherwise open a second PR from the new
+   `polyforge/<project>-<seq>` branch beside the old `polyforge/<wi_id>`
+   one.
+2. Upgrade the binary and restart the daemon as usual.
+
+**Leftovers after the upgrade.** Existing `polyforge/wi_*` branches and
+their PRs are left untouched. An id-named capsule directory of a closed
+work item is no longer found by any daemon face; to ship it anyway, rename
+it by hand while the daemon holds no job for it
+(`mv capsules/<wi_id> capsules/<project>-<seq>`), or bridge its commits
+manually; otherwise delete it once it is no longer needed.

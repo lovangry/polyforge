@@ -240,7 +240,7 @@ daemon socket by design.)
 | POST | `/jobs/{wi}/resume-blocked` | The claim/start half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
 | POST | `/jobs/{wi}/wrap` | CLI close path: seal the job with reason `wrap` or `fail`. | user |
-| POST | `/jobs/{wi}/ship` | Delivery bridge: push the sealed capsule's task repos to their origins as branch `polyforge/<wi>` (+ PR when a credential exists). | user |
+| POST | `/jobs/{wi}/ship` | Delivery bridge: push the sealed capsule's task repos to their origins as branch `polyforge/<project>-<seq>` (+ PR when a credential exists). | user |
 | GET | `/status` | Machine status: jobs (with the needs-input projection), queue stats, auto switch. | user |
 | POST | `/ops/config` | `pf ops auto on\|off` / `pf ops max N`: body `{"auto":bool,"max":N}` (either or both). | user |
 | POST | `/shutdown` | Trigger the bounded graceful shutdown sequence. | user |
