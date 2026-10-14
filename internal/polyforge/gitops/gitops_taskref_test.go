@@ -119,6 +119,42 @@ func TestCommitPushCarriesTaskRefs(t *testing.T) {
 	}
 }
 
+// The task repo is agent-controlled: a pre-push hook planted in it must
+// not run during the carrier push (it would run as the daemon with the
+// credential askpass in its environment).
+func TestTaskRefPushSkipsRepoHooks(t *testing.T) {
+	setIdentity(t)
+	o, base := taskOpts(t, "wi_taskhook")
+	mkBare(t, o.RemoteURL, false)
+	mkTaskCapsule(t, o)
+	workHead := mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
+	marker := filepath.Join(base, "pre-push-ran")
+	hook := filepath.Join(o.CapsuleDir, capsule.DirRepos, "demo-src", ".git", "hooks", "pre-push")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Control: the planted hook is live for a plain push.
+	ctl := filepath.Join(base, "ctl.git")
+	mkBare(t, ctl, false)
+	mustRun(t, "git", "-C", filepath.Join(o.CapsuleDir, capsule.DirRepos, "demo-src"), "push", "-q", ctl, "HEAD:refs/heads/x")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("control: a plain push should have run the planted hook")
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+		t.Fatalf("CommitPush: %v", err)
+	}
+	if got, ok := bareRefSHA(t, o.RemoteURL, TaskRefName("demo-src")); !ok || got != workHead {
+		t.Fatalf("carrier ref = %q (%v), want %q", got, ok, workHead)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the task repo's pre-push hook ran during the carrier push")
+	}
+}
+
 // Best-effort-loud, mechanically: a carrier push REJECTED by the remote
 // (this test's simplified hook enforces the seq trailer on every ref —
 // stricter than production's, which exempts refs/pf-task/*; pinned in

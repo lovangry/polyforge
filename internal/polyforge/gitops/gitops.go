@@ -506,7 +506,10 @@ func pushTaskRefsLocked(o Opts) {
 		if out, err := git(nil, dir, "rev-parse", "HEAD"); err != nil || strings.TrimSpace(out) == "" {
 			continue // unborn/absent HEAD: nothing to carry yet
 		}
-		args := []string{"push"}
+		// The task repo is agent-controlled (agents are untrusted): its
+		// hooks (pre-push would run as the daemon WITH the credential
+		// askpass) and fsmonitor are disabled for this invocation.
+		args := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "push"}
 		if o.Fingerprint != "" {
 			args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
 		}
