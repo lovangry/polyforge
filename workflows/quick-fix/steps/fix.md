@@ -38,8 +38,14 @@ rewind re-entry, also read `execution.json`'s `pending_rewind_input` for this st
 
 - **Work only inside the declared repo worktree(s)** (`repos/<name>/**`); never touch
   paths outside them.
-- **Keep the build green between commits.** Run the project's build and test commands
-  (via `bash`) after each compilable unit; do not proceed on top of a red build.
+- **Keep the build green between commits — fast checks only, per unit.** After each
+  compilable unit run, via `bash`: `go build ./...`, `go vet ./...`, `gofmt -l .`, plus
+  the unit tests of the packages this unit touched — the packages of the changed files
+  and of their tests (a changed file's package and its test package, no more). That is
+  the whole per-unit bar: this lane's 90-minute budget cannot absorb full-suite runs
+  per unit. Full-suite testing belongs to `verification` (the one gate that runs the
+  project's full bar); do not run `go test ./...` here, and do not proceed on top of a
+  red fast check.
 - **Commit per compilable unit** with a message that names what it fixes. A quick fix is
   usually one or two commits - do not accumulate everything into one undifferentiated
   commit, and do not pad the change with drive-by edits the memo did not ask for: scope
