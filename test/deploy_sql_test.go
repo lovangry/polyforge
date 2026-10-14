@@ -38,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -482,4 +483,102 @@ func TestDeployRefusesDowngradeAcrossSQLVersion(t *testing.T) {
 		t.Fatalf("want exit 1 + the downgrade refusal, got %v\n%s", err, out)
 	}
 	d.assertNothingMutated("v2.10.0")
+}
+
+// ---- tables an applied upgrade.sql drops on purpose (v2.4.1 incident) ----
+//
+// The v2.4.0 upgrade.sql drops wi_ship_ledger and core_meta; step 7 used to
+// compare EVERY baseline table against the post-swap counts, reported the
+// dropped tables "missing" and auto-rolled back a good deploy. A table a
+// DROP TABLE of an applied upgrade.sql names is now left out of the check;
+// every other table still must hold its rows.
+
+// seedTable creates table name in the fixture db and inserts rows rows.
+func seedTable(t *testing.T, dbPath, name string, rows int) {
+	t.Helper()
+	py := `import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute('create table if not exists "%s"(id integer)' % sys.argv[2])
+c.executemany('insert into "%s"(id) values (?)' % sys.argv[2], [(i,) for i in range(int(sys.argv[3]))])
+c.commit()`
+	if out, err := exec.Command("python3", "-I", "-c", py, dbPath, name, strconv.Itoa(rows)).CombinedOutput(); err != nil {
+		t.Fatalf("seed %s: %v\n%s", name, err, out)
+	}
+}
+
+// newDropWorld: the server runs v2.2.1 with a populated wi_ship_ledger and
+// Core_Meta (mixed case on purpose) plus rows in machines; v2.3.0's
+// upgrade.sql is upgradeSQL, its probe reports "not yet applied" while
+// wi_ship_ledger exists.
+func newDropWorld(t *testing.T, upgradeSQL string) *deployWorld {
+	t.Helper()
+	d := newSQLWorldVers(t, "v2.2.1", []string{"v2.3.0"}, []sqlVer{{"v2.3.0", upgradeSQL,
+		"CREATE TABLE wi_ship_ledger(id integer);\nCREATE TABLE \"Core_Meta\"(id integer);\n",
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wi_ship_ledger';\n"}}, nil)
+	seedTable(t, d.dbPath(), "wi_ship_ledger", 94)
+	seedTable(t, d.dbPath(), "Core_Meta", 2)
+	seedTable(t, d.dbPath(), "machines", 3)
+	return d
+}
+
+// dropUpgradeSQL: the shapes the extraction must see through — IF EXISTS,
+// a quoted mixed-case name, a statement over two lines — and the ones it
+// must NOT take as a drop (a -- comment, a /* */ comment). (The SQL runner
+// itself refuses two statements on one line, so none is used here.)
+const dropUpgradeSQL = `-- drops the dead ledger; DROP TABLE machines would be a comment here
+/* DROP TABLE machines; */
+DROP TABLE IF EXISTS wi_ship_ledger;
+DROP TABLE
+  IF EXISTS "Core_Meta";
+`
+
+func TestDeployVerifyExcludesTablesTheUpgradeDrops(t *testing.T) {
+	d := newDropWorld(t, dropUpgradeSQL)
+	out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
+	if err != nil {
+		t.Fatalf("deploy failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"table wi_ship_ledger dropped by the upgrade SQL (was 94) - expected",
+		"table core_meta dropped by the upgrade SQL (was 2) - expected",
+		"row counts >= baseline",
+		"deployed=v2.3.0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{"missing (was", "BELOW the baseline", "ROLLED_BACK", "dropped by the upgrade SQL (was 3)"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("output carries %q\n%s", bad, out)
+		}
+	}
+	if n := sqlRuns(d, "v2.3.0-rollback.sql"); n != 0 {
+		t.Errorf("rollback SQL ran %d times on a good deploy", n)
+	}
+}
+
+func TestDeployVerifyStillStrictForTablesTheUpgradeKeeps(t *testing.T) {
+	// the same drops, but machines (not dropped - only named in comments)
+	// loses its rows: that is still a loss and must roll back.
+	d := newDropWorld(t, dropUpgradeSQL+"DELETE FROM machines;\n")
+	out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
+	if exitCode(err) != 10 {
+		t.Fatalf("want exit 10, got %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"table machines LOST rows: 0 < 3",
+		"row counts after the swap are BELOW the baseline",
+		"deployed=ROLLED_BACK previous=v2.2.1 attempted=v2.3.0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "table wi_ship_ledger missing") || strings.Contains(out, "table Core_Meta missing") {
+		t.Errorf("a dropped table was still compared\n%s", out)
+	}
+	if n := sqlRuns(d, "v2.3.0-rollback.sql"); n != 1 {
+		t.Errorf("rollback SQL ran %d times, want 1", n)
+	}
 }
