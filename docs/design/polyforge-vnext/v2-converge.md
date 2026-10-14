@@ -99,11 +99,11 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 | 细分 | 判据 | 处理 |
 |---|---|---|
-| 模型类 | 错误文本命中额度·鉴权特征（401/403/鉴权失败/api key、quota / insufficient / billing / credit）或模型名不可解析，或退出前最后信号为"本轮出错"且文本不属限流类/上游瞬时类 | 同 `model_error`：换模型（F4 教训：模型 pin 失败必须推进候选）。额度·鉴权文本最先判：同时带 429 或连接中断特征（"429 … exceeded your current quota"、"insufficient balance … connection reset"）仍立即换模型 |
-| 限流类（polyforge#147 D7） | 错误文本命中瞬时限流特征（429 / rate limit / too many requests / overloaded），且不命中额度·鉴权特征 | `rate_limited`：原模型退避重试，不推进候选指针、不计失败计数 |
+| 模型类 | 错误文本命中额度·鉴权特征（401/403/鉴权失败/api key、quota / insufficient / billing / credit；中文：余额不足 / 欠费 / 额度·配额用尽 / 认证失败 / 模型·接口无权限 等）或模型名不可解析，或退出前最后信号为"本轮出错"且文本不属限流类/上游瞬时类 | 同 `model_error`：换模型（F4 教训：模型 pin 失败必须推进候选）。额度·鉴权文本最先判：同时带 429 或连接中断特征（"429 … exceeded your current quota"、"insufficient balance … connection reset"）仍立即换模型 |
+| 限流类（polyforge#147 D7） | 错误文本命中瞬时限流特征（429 / rate limit / too many requests / overloaded；中文：并发数过高 / 请求过于频繁 / 请求过多 / 限流 / 繁忙 等），且不命中额度·鉴权特征 | `rate_limited`：原模型退避重试，不推进候选指针、不计失败计数 |
 | 上游瞬时类（wi_seWTgHeKtaa8） | harness 报告的上游返回损坏或上游流中断：工具调用参数 / JSON 不完整·截断·畸形、空回复（0 token）、上游连接 reset / refused / closed / EOF；不命中额度·鉴权与限流特征 | `upstream_transient`：原模型按 D7 退避重试，**最多 2 次**，第 3 次即归档为模型类（`exit_model_class`）并换模型；不计失败计数。裸的 "invalid …"（工具名、请求参数）、上下文超长、driver 自身的本地 I/O 错误（如 "read transcript: unexpected EOF"）都**不**属此类 |
 
-**文本分类顺序**（`driver/supervision.go` `classifyWaitFailure`）：机器类 → 正常结束一轮后干净退出（`ended_without_result`）→ 额度·鉴权（换模型）→ 限流（同模型）→ 上游瞬时（同模型，界 2）→ 模型名不可解析（换模型）→ 本轮出错（模型类）→ 其余。非进程退出（driver 自身失败）不做上游瞬时匹配。中文 provider 文本同样覆盖（polyforge#155）：额度·鉴权类含 余额不足 / 欠费 / 额度·配额 用尽·不足·超出 / 账户…停用 / 鉴权失败 / 认证失败 / 无权限 等，限流类含 并发数过高·超限 / 请求过于频繁 / 请求频率 / 限流 / 速率限制 / 繁忙 / 负载过高；均为多字短语（CJK 下 `(?i)`、`\b` 无效，不用单字），两者同时出现仍额度·鉴权优先（换模型）。
+**文本分类顺序**（`driver/supervision.go` `classifyWaitFailure`）：机器类 → 正常结束一轮后干净退出（`ended_without_result`）→ 额度·鉴权（换模型）→ 限流（同模型）→ 上游瞬时（同模型，界 2）→ 模型名不可解析（换模型）→ 本轮出错（模型类）→ 其余。非进程退出（driver 自身失败）不做上游瞬时匹配。中文 provider 文本同样覆盖（polyforge#155）：额度·鉴权类含 余额不足 / 欠费 / 额度·配额 用尽·不足·超出 / 账户…停用 / 鉴权失败 / 认证失败 / 模型·接口·API·服务 无权限 等（裸"权限不足"不算，本地 权限不够 / 权限被拒绝 / 拒绝访问 归机器类），限流类含 并发数过高·超限 / 并发超额 / 请求过于频繁 / 请求频率 / 请求过多 / 限流 / 速率限制 / 繁忙 / 负载过高；均为多字短语（CJK 下 `(?i)`、`\b` 无效，不用单字），两者同时出现仍额度·鉴权优先（换模型）。
 | 机器类 | driver 自身 I/O 错误（ENOSPC、EACCES 等）或翻译器上报的宿主错误 | 机器问题 |
 | 其余 | — | 同模型重试 |
 
@@ -116,7 +116,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | `ended_without_result` | 同模型重试；重试的 prompt 明确告知"上一轮已结束但没有写结果信封"。进程在正常结束一轮后以退出码 0 自行退出且无结果，也归此类（被杀 / 崩溃仍是退出其余） |
 | `model_error`、`model_hung`、退出（模型类） | 换下一个候选模型 |
 | `step_timeout_slow_model` | **放宽 T（翻倍，写入 `execution.json`）后换下一个候选模型**（polyforge#147 D6）：新候选在**放宽后的完整额度**下运行，累计耗时连续结转但严格低于翻倍后的界——绝不在启动瞬间即被判超时 |
-| `rate_limited`（429 / rate limit / too many requests / overloaded；额度/账单/权限类不在此列，归模型类换模型） | **不换模型**：原模型退避重试（polyforge#147 D7），退避 1s 起逐次翻倍、单次上限 300s；**退避等待计入该步累计 T**；**不另设重试次数上限**，唯一的界是该步累计 T（T 耗尽即走既有超时处理）；**不放宽 T**（只有超时类死因放宽）；不计入失败计数 |
+| `rate_limited`（429 / rate limit / too many requests / overloaded / 中文限流文本；额度/账单/权限类不在此列，归模型类换模型） | **不换模型**：原模型退避重试（polyforge#147 D7），退避 1s 起逐次翻倍、单次上限 300s；**退避等待计入该步累计 T**；**不另设重试次数上限**，唯一的界是该步累计 T（T 耗尽即走既有超时处理）；**不放宽 T**（只有超时类死因放宽）；不计入失败计数 |
 | `upstream_transient`（上游返回损坏 / 上游流中断，见上表） | **不换模型**：原模型按 D7 同一退避重试（1s 起翻倍、单次上限 300s，**退避计入该步累计 T**），不推进候选指针、不计失败计数；**连续 2 次后**第 3 次归档为 `exit_model_class` → 换下一个候选（界只由 attempts 归档里尾部连续的 `upstream_transient` 计数，崩溃恢复后的 driver 读到同样的剩余次数） |
 | `tool_hung` | 同模型重试，并**放宽 Y**（同 T 的放宽规则） |
 | `step_timeout_long_task` | 同模型重试（**不换模型**）并放宽 T（翻倍并持久化）；再超时 → 同样再翻倍 T 并持久化，然后 blocked（人工"继续"在新放宽的界下运行，不会一启动就超时） |

@@ -171,6 +171,8 @@ func TestD8ClassificationPrecedence(t *testing.T) {
 		{"服务繁忙，请稍后重试", FailRateLimited},
 		{"系统繁忙", FailRateLimited},
 		{"当前负载过高", FailRateLimited},
+		{"请求过多，请稍后重试", FailRateLimited},
+		{"并发超额", FailRateLimited},
 		// Chinese balance/quota/auth texts → model class (switch)
 		{"账户余额不足", FailExitModel},
 		{"您的账户已欠费", FailExitModel},
@@ -182,6 +184,14 @@ func TestD8ClassificationPrecedence(t *testing.T) {
 		{"认证失败：无效的 API Key", FailExitModel},
 		{"API Key 无效", FailExitModel},
 		{"无权限访问该模型", FailExitModel},
+		{"该模型无权限", FailExitModel},
+		{"API 权限不足", FailExitModel},
+		// a bare permission phrase is a local error, not allowance; the
+		// Chinese EACCES phrasings stay host-class
+		{"无法打开文件: 权限不足", FailExitOther},
+		{"open /tmp/x: 权限不够", FailExitHost},
+		{"写入失败：权限被拒绝", FailExitHost},
+		{"拒绝访问", FailExitHost},
 		// allowance wins over throttle when both appear
 		{"余额不足；请求过于频繁", FailExitModel},
 		// Chinese negatives: no bare single-character match

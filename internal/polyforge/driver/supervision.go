@@ -222,7 +222,7 @@ type StepFailure struct {
 // Exit classification (the driver's own judgement, 2.3 table).
 
 var (
-	hostPatterns = regexp.MustCompile(`(?i)(no space left|enospc|disk quota|edquot|permission denied|eacces|read-only file system|erofs|too many open files|emfile|cannot allocate memory|out of memory|enomem|input/output error|executable file not found|no such file or directory.*(pi|harness))`)
+	hostPatterns = regexp.MustCompile(`(?i)(no space left|enospc|disk quota|edquot|permission denied|eacces|read-only file system|erofs|too many open files|emfile|cannot allocate memory|out of memory|enomem|input/output error|executable file not found|no such file or directory.*(pi|harness)|权限不够|权限被拒绝|拒绝访问)`)
 	// allowance/auth (model-class, D7): the account or key cannot use
 	// this candidate — a different one may work, so these switch
 	// IMMEDIATELY. Checked before every other text class: a text that also
@@ -230,10 +230,13 @@ var (
 	// current quota", "insufficient balance ... connection reset") still
 	// switches. Chinese provider texts are matched literally: (?i) and
 	// \b mean nothing to CJK, so each alternative is a multi-character
-	// phrase (never a bare 额/限) and a gap is bounded to the same clause.
+	// phrase (never a bare 额/限) and a gap is bounded to the same clause;
+	// a permission phrase counts only next to its subject (模型/接口/API/
+	// 服务) — a bare 权限不足 is as likely a local file error.
 	allowanceAuthPatterns = regexp.MustCompile(`(?i)(\b401\b|\b403\b|unauthori[sz]ed|authentication|invalid api key|incorrect api key|api key|quota|insufficient|billing|credit|` +
 		`余额不足|欠费|(额度|配额)[^，。；,.;\n]{0,6}(用尽|用完|耗尽|不足|超出|超限)|(超出|超过)了?(额度|配额)|` +
-		`账户[^，。；,.;\n]{0,10}(停用|禁用|冻结)|鉴权失败|认证失败|无效的?(密钥|令牌)|(密钥|令牌)无效|无权限|没有权限|权限不足)`)
+		`账户[^，。；,.;\n]{0,10}(停用|禁用|冻结)|鉴权失败|认证失败|无效的?(密钥|令牌)|(密钥|令牌)无效|` +
+		`(无权限|没有权限|权限不足)[^，。；,.;\n]{0,6}(模型|接口|API|服务)|(模型|接口|API|服务)[^，。；,.;\n]{0,6}(无权限|没有权限|权限不足))`)
 	// model-name (model-class, F4): a pinned model that cannot resolve
 	// must advance the candidate chain. Checked AFTER the throttle and
 	// upstream-transient classes: its loose "model ... invalid" shape
@@ -249,7 +252,7 @@ var (
 	// Chinese throttle texts (并发数过高, 请求过于频繁, 限流, 系统繁忙 ...)
 	// are literal phrases, same rule as the allowance class.
 	rateLimitPatterns = regexp.MustCompile(`(?i)(\b429\b|rate.?limit|too many requests|overloaded|` +
-		`并发[^，。；,.;\n]{0,6}(过高|过大|过多|超限|超出|超过)|请求(过于|太)?频繁|请求频率|限流|速率限制|繁忙|负载过高)`)
+		`并发[^，。；,.;\n]{0,6}(过高|过大|过多|超限|超出|超过)|请求(过于|太)?频繁|请求频率|请求过多|并发超额|限流|速率限制|繁忙|负载过高)`)
 	// upstream-transient class (wi_seWTgHeKtaa8, the #147 incident's
 	// truncated tool-call arguments): ONLY a corrupted upstream return or
 	// a drop of the upstream stream, as the harness reports it —
