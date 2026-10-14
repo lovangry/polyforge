@@ -1,10 +1,10 @@
 package server
 
-// The §4.6 repo inventory on the HTTP surface: a create carrying a base
-// commit (per entry or as the removed repo_inventory_base array) or a
-// name-only entry that is not one of the project's repos is refused with
-// a typed CORE-400 and persists nothing; a PATCH of the frozen inventory
-// is refused IMMUTABLE.
+// The §4.6 repo inventory on the HTTP surface: a create carrying a
+// client url, a base commit (per entry or as the removed
+// repo_inventory_base array) or a name that is not one of the project's
+// repos is refused with a typed CORE-400 and persists nothing; a PATCH
+// of the frozen inventory is refused IMMUTABLE.
 
 import (
 	"encoding/json"
@@ -57,7 +57,7 @@ func TestWIRepoInventoryHTTPRefusals(t *testing.T) {
 		e := newSrvEnv(t)
 		code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
 			"project": "alpha", "goal": "a frozen base is not supported",
-			"repo_inventory": []map[string]any{{"name": "polyforge", "url": repoURL, "base": "abc123"}},
+			"repo_inventory": []map[string]any{{"name": "polyforge", "base": "abc123"}},
 		}, nil)
 		refuseShape(t, code, raw, "INVENTORY_BASE_UNSUPPORTED")
 		nothingPersisted(t, e)
@@ -67,10 +67,20 @@ func TestWIRepoInventoryHTTPRefusals(t *testing.T) {
 		e := newSrvEnv(t)
 		code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
 			"project": "alpha", "goal": "the removed second array is refused",
-			"repo_inventory":      []map[string]any{{"name": "polyforge", "url": repoURL}},
+			"repo_inventory":      []map[string]any{{"name": "polyforge"}},
 			"repo_inventory_base": []map[string]any{{"name": "polyforge", "base": "abc123"}},
 		}, nil)
 		refuseShape(t, code, raw, "INVENTORY_BASE_UNSUPPORTED")
+		nothingPersisted(t, e)
+	})
+
+	t.Run("create/client-url", func(t *testing.T) {
+		e := newSrvEnv(t)
+		code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
+			"project": "alpha", "goal": "the daemon never clones a filer-supplied url",
+			"repo_inventory": []map[string]any{{"name": "polyforge", "url": repoURL}},
+		}, nil)
+		refuseShape(t, code, raw, "INVENTORY_URL_NOT_ALLOWED")
 		nothingPersisted(t, e)
 	})
 
@@ -94,7 +104,7 @@ func TestWIRepoInventoryHTTPRefusals(t *testing.T) {
 			t.Fatalf("seed create: %d %s", code, raw)
 		}
 		code, raw := e.do(t, "PATCH", "/api/v1/work-items/"+created.ID, e.key, map[string]any{
-			"repo_inventory": []map[string]any{{"name": "polyforge", "url": repoURL}},
+			"repo_inventory": []map[string]any{{"name": "polyforge"}},
 		}, nil)
 		refuseShape(t, code, raw, "IMMUTABLE")
 	})

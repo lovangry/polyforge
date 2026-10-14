@@ -138,10 +138,11 @@ type CreateWorkItemRequest struct {
 	Labels     []string       `json:"labels,omitempty"`
 	Attrs      map[string]any `json:"attrs,omitempty"`
 	BundleName *string        `json:"bundle_name,omitempty"`
-	// RepoInventory is passed through to aihub as given (02 §4.6:
-	// [{name, url?, subdir?}]; a name-only entry takes its URL from the
-	// project's repos).
-	RepoInventory json.RawMessage `json:"repo_inventory,omitempty"`
+	// RepoInventory and RepoInventoryBase are passed through to aihub as
+	// given (02 §4.6: [{name}] of project repos), so aihub refuses what it
+	// does not accept (url, subdir, base) instead of the CLI dropping it.
+	RepoInventory     json.RawMessage `json:"repo_inventory,omitempty"`
+	RepoInventoryBase json.RawMessage `json:"repo_inventory_base,omitempty"`
 }
 
 // CreateWorkItem creates a work item and returns the raw detail record.

@@ -182,6 +182,9 @@ func fileCreate(ctx *Context, args []string) error {
 		req.ParentID = strPtr(*parent)
 	}
 	if len(repos) > 0 {
+		if len(req.RepoInventory) > 0 {
+			return fmt.Errorf("file create: --repo cannot be combined with a --stdin body that carries repo_inventory; declare the repos in one place")
+		}
 		inv := make([]map[string]string, 0, len(repos))
 		for _, name := range repos {
 			inv = append(inv, map[string]string{"name": name})

@@ -185,10 +185,11 @@ func TestPatchBundleWaitingOnNotRefused(t *testing.T) {
 // inventory keeps it verbatim through bundle binds and unbinds.
 func TestPatchBundleRepoInventoryUntouched(t *testing.T) {
 	env := newEnv(t)
+	reposProject(t, env)
 	wi, err := env.WIs.Create(CreateRequest{
-		Project: "alpha", Goal: "w140 inventory untouched", Reporter: env.UserID,
+		Project: "bravo", Goal: "w140 inventory untouched", Reporter: env.UserID,
 		BundleName:    strPtrTest("w140-inv-a"),
-		RepoInventory: []RepoDecl{decl("polyforge", "https://example.com/polyforge.git")},
+		RepoInventory: names("app"),
 	})
 	if err != nil {
 		t.Fatalf("create with inventory: %v", err)

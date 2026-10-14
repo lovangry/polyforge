@@ -47,11 +47,11 @@ type CreateRequest struct {
 	// clear bundle_name through the shared persist path (bundleRef);
 	// after the first claim it is immutable again (INV-2e as amended).
 	BundleName *string `json:"bundle_name"`
-	// Repo inventory (02 §4.6): the repos this WI works in, frozen at
-	// create into work_items.repo_inventory and served by the claim in
-	// place of the project's full repo list. An entry may carry only a
-	// name (the URL then comes from the project's repos).
-	RepoInventory []RepoDecl `json:"repo_inventory"`
+	// Repo inventory (02 §4.6): the project repos this WI works in,
+	// [{name}] only, frozen at create into work_items.repo_inventory and
+	// served by the claim (URLs resolved from the project then) in place
+	// of the project's full repo list.
+	RepoInventory RepoInventoryInput `json:"repo_inventory"`
 	// RepoInventoryBase is the removed second array of the pre-v2.5.0
 	// shape. It is decoded only to be refused (INVENTORY_BASE_UNSUPPORTED):
 	// a frozen base is not supported and must not be silently dropped.
@@ -183,9 +183,8 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 
 	// Repo inventory (02 §4.6): resolved INSIDE the create transaction
 	// against the project's repos, so a refused create persists nothing.
-	if len(req.RepoInventoryBase) > 0 && string(req.RepoInventoryBase) != "null" {
-		return nil, Fail(api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED",
-			"repo_inventory_base is not supported; omit it (the work machine clones each repo's default branch)")
+	if err := refuseRepoInventoryBase(req.RepoInventoryBase); err != nil {
+		return nil, err
 	}
 	projectRepos, err := projectReposTx(tx, projectID)
 	if err != nil {

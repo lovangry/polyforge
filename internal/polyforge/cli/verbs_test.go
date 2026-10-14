@@ -70,13 +70,32 @@ func TestVerbFileCreateRepoInventory(t *testing.T) {
 		t.Errorf("body missing %s: %s", want, rec.last().Body)
 	}
 
-	stdinBody := `{"project":"polyforge","goal":"g","repo_inventory":[{"name":"app","url":"file:///srv/app.git","subdir":"x"}]}`
+	// --stdin: repo_inventory and repo_inventory_base reach aihub as
+	// given (aihub refuses url/subdir/base — the CLI drops nothing).
+	stdinBody := `{"project":"polyforge","goal":"g","repo_inventory":[{"name":"app","url":"file:///etc"}],"repo_inventory_base":[{"name":"app","base":"abc"}]}`
 	var stdout, errb bytes.Buffer
 	if code := Run([]string{"file", "create", "--stdin"}, strings.NewReader(stdinBody), &stdout, &errb); code != 0 {
 		t.Fatalf("stdin create: code=%d stderr=%s", code, errb.String())
 	}
-	if want := `"repo_inventory":[{"name":"app","url":"file:///srv/app.git","subdir":"x"}]`; !strings.Contains(rec.last().Body, want) {
-		t.Errorf("stdin body missing %s: %s", want, rec.last().Body)
+	for _, want := range []string{
+		`"repo_inventory":[{"name":"app","url":"file:///etc"}]`,
+		`"repo_inventory_base":[{"name":"app","base":"abc"}]`,
+	} {
+		if !strings.Contains(rec.last().Body, want) {
+			t.Errorf("stdin body missing %s: %s", want, rec.last().Body)
+		}
+	}
+
+	// --repo together with a stdin repo_inventory is refused locally.
+	sent := len(rec.all())
+	stdout.Reset()
+	errb.Reset()
+	if code := Run([]string{"file", "create", "--stdin", "--repo", "lib"}, strings.NewReader(stdinBody), &stdout, &errb); code != 1 ||
+		!strings.Contains(errb.String(), "--repo cannot be combined") {
+		t.Fatalf("--repo + stdin repo_inventory: code=%d stderr=%s", code, errb.String())
+	}
+	if len(rec.all()) != sent {
+		t.Fatal("the refused create still reached aihub")
 	}
 }
 

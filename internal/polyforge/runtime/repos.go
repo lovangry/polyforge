@@ -110,7 +110,7 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 			// the origin's HEAD as the baseline.
 		} else {
 			if pr.URL == "" {
-				return nil, repoCloneErr(j.wi, pr, "recorded in the prior capsule.json but absent from the project inventory and missing on disk: no URL to clone from")
+				return nil, repoCloneErr(j.wi, pr, "recorded in the prior capsule.json but absent from the claim inventory and missing on disk: no URL to clone from")
 			}
 			if err := gitClone(ctx, pr.URL, dir); err != nil {
 				return nil, repoCloneErr(j.wi, pr, "clone failed: %v", err)
@@ -238,7 +238,7 @@ func repoCloneErr(wi string, pr api.ProjectRepo, format string, args ...any) *ap
 // gitClone runs a plain full clone with the daemon's own environment:
 // the machine's default git credential context, nothing injected.
 func gitClone(ctx context.Context, url, dir string) error {
-	cmd := exec.CommandContext(ctx, "git", "clone", url, dir)
+	cmd := exec.CommandContext(ctx, "git", "clone", "--", url, dir)
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {

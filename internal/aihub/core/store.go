@@ -106,9 +106,10 @@ CREATE TABLE IF NOT EXISTS work_items (
   assignee     TEXT REFERENCES users(id),
   waiting_on   TEXT,
   bundle_name  TEXT,
-  -- §4.6 repo inventory: JSON array [{name, url, subdir?}] frozen at
-  -- create (no UPDATE path); NULL = no inventory (the claim then serves
-  -- every project repo). deploy/sql/v2.5.0 adds it to older databases.
+  -- §4.6 repo inventory: JSON array of project repo names [{"name":..}]
+  -- frozen at create (no UPDATE path; URLs are resolved from the project
+  -- at claim); NULL = no inventory (the claim then serves every project
+  -- repo). deploy/sql/v2.5.0 adds it to older databases.
   repo_inventory TEXT,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,

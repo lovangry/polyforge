@@ -103,7 +103,7 @@ func TestUpgradeV250RoundTrip(t *testing.T) {
 
 	env := newEnvAt(t, dataDir)
 	reposProject(t, env)
-	req := invCreate(env, []RepoDecl{{Name: "app"}})
+	req := invCreate(env, names("app"))
 	req.Project = "bravo"
 	wi, err := env.WIs.Create(req)
 	if err != nil {
