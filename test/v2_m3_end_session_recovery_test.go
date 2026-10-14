@@ -250,7 +250,7 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 	quarantined := false
 	ents, _ := os.ReadDir(filepath.Join(daemonA.workspace, "capsules"))
 	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), wi+".quarantined.") {
+		if strings.HasPrefix(e.Name(), wiPathName(t, inst, wi)+".quarantined.") {
 			quarantined = true
 		}
 	}

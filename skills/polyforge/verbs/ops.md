@@ -61,9 +61,10 @@ end), `CORE-410` (terminal).
   the queue counters (`pending / running`), one line naming the
   mapped workspace SET (`workspaces: <path>, <path>` — sorted; every
   `[workspace]` section the daemon routes capsules into, polyforge#113;
-  per-WI capsules live at `<workspace>/capsules/<wi_id>`), and a
+  per-WI capsules live at `<workspace>/capsules/<project>-<seq>`), and a
   jobs table (WORK
-  ITEM, STATUS, SESSION, SPAWN, AGENT PID, QUESTION, STEP-AGE, LAST-WORK;
+  ITEM — the slug, e.g. `polyforge#140`, or the id for a job claimed before
+  slugs were recorded —, STATUS, SESSION, SPAWN, AGENT PID, QUESTION, STEP-AGE, LAST-WORK;
   plus ORIGIN when some job has one). This is
   bookkeeping about what this machine manages — not workflow execution
   progress (`pf watch` is the progress verb) — with two deliberately

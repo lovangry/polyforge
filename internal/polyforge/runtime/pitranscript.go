@@ -19,10 +19,11 @@ package runtime
 // The session-directory naming rule is the harness's own, mirrored here
 // verbatim from its source: the resolved cwd is stripped of its one
 // leading slash, every "/ \ :" becomes "-", and the result is wrapped in
-// "--" ... "--". A capsule at /root/ws/capsules/wi_x therefore writes
-// under "--root-ws-capsules-wi_x--". Path characters the rule does NOT
-// fold (e.g. "#") survive into the directory name — one more reason the
-// capsule directory itself must carry the canonical work-item id (F2).
+// "--" ... "--". A capsule at /root/ws/capsules/polyforge-140 therefore
+// writes under "--root-ws-capsules-polyforge-140--". Path characters the
+// rule does NOT fold (e.g. "#") survive into the directory name — one
+// more reason the capsule directory never carries a raw slug: it is
+// named by api.PathName ("<project>-<seq>", F2 / polyforge#144).
 
 import (
 	"fmt"

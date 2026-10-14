@@ -34,7 +34,7 @@ api key, so obviously doomed submissions fail fast with a visible verdict.
 
 ## Success
 
-`submitted <id> (accepted by the local daemon)` — acceptance means the daemon
+`submitted <slug> (accepted by the local daemon)` — acceptance means the daemon
 queued the job; its dispatcher derives the Go driver for it within a
 moment, priority-desc against the machine's concurrency cap. `--json`: the
 raw answer `{accepted, work_item_id}`.
@@ -44,7 +44,7 @@ raw answer `{accepted, work_item_id}`.
 | Code | When | What to tell the user |
 |---|---|---|
 | `CORE-404` | Unknown or invisible id (CLI precheck) | No such work item — check the `wi_` id. |
-| (no code) `submit: <id> is terminal (<status>)` | The work item is already wrapped/failed/cancelled (CLI precheck) | It is finished and can never be claimed again — file a new work item instead. |
+| (no code) `submit: <slug> is terminal (<status>)` | The work item is already wrapped/failed/cancelled (CLI precheck) | It is finished and can never be claimed again — file a new work item instead. |
 | `DAEMON-409` | The work item is already active or queued on this daemon | Wait for the running attempt. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | The daemon is in graceful shutdown | Wait for the shutdown to finish and the daemon to restart, then submit again. |
 | `DAEMON-503` | The hub could not be reached before the claim (transient) | Nothing was claimed; the submit stays queued in the daemon and is retried with backoff (1s doubling to 30s). Check aihub reachability; `pf watch <id> --once` shows it once claimed. |

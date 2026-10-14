@@ -220,8 +220,8 @@ func (d *v3DaemonProc) crash() {
 }
 
 // capsuleDir is the WI's capsule directory under this daemon's workspace.
-func (d *v3DaemonProc) capsuleDir(wi string) string {
-	return filepath.Join(d.workspace, "capsules", wi)
+func (d *v3DaemonProc) capsuleDir(inst *v1Install, wi string) string {
+	return filepath.Join(d.workspace, "capsules", wiPathName(d.t, inst, wi))
 }
 
 // v3Pf runs the real pf CLI against an explicit daemon socket and
@@ -332,7 +332,7 @@ func TestV3DriverLifecycleProductionArgv(t *testing.T) {
 		t.Fatalf("submit: exit %d, output %q", code, out)
 	}
 
-	capDir := d.capsuleDir(wi)
+	capDir := d.capsuleDir(inst, wi)
 
 	// Claim→clone: the task repo lands in the capsule before the agent
 	// spawns (the #108 claim lane is a kept face).
@@ -428,7 +428,7 @@ func TestV3AnswerWithoutLiveBridgeFailsFast(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "accepted") {
 		t.Fatalf("submit: exit %d, output %q", code, out)
 	}
-	capDir := d1.capsuleDir(wi)
+	capDir := d1.capsuleDir(inst, wi)
 	waitUntil(t, 60*time.Second, "grill never parked in needs_input", func() bool {
 		return v3PendingQID(v3ReadExec(t, capDir), "grill") == qid
 	})

@@ -127,6 +127,10 @@ type stateFile struct {
 type jobRecord struct {
 	WorkItemID string `json:"work_item_id"`
 	Project    string `json:"project"`
+	// Slug is the claim answer's "<project>#<seq>" — the display name of
+	// the human-facing faces (status, watch, wake-up lines). Absent on
+	// records written before it existed: those faces show the id.
+	Slug string `json:"slug,omitempty"`
 	// SessionID is the v1.5 SECRET (B3): 64-hex, minted by this daemon
 	// at claim, the git push password. It lives ONLY here and in the
 	// one-shot GIT_ASKPASS — never in the capsule, never in agent env,
@@ -203,6 +207,7 @@ func (j *job) record() *jobRecord {
 	return &jobRecord{
 		WorkItemID:         j.wi,
 		Project:            j.project,
+		Slug:               j.slug,
 		SessionID:          j.sessionID,
 		SessionFingerprint: j.sessionFingerprint,
 		State:              string(j.state),
@@ -231,6 +236,7 @@ func jobFromRecord(rec *jobRecord) *job {
 	return &job{
 		wi:                 rec.WorkItemID,
 		project:            rec.Project,
+		slug:               rec.Slug,
 		sessionID:          rec.SessionID,
 		sessionFingerprint: rec.SessionFingerprint,
 		state:              JobState(rec.State),

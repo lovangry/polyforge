@@ -17,16 +17,23 @@ func TestSubStorePersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ch, err := s.Subscribe("chat_a", "wi_1", 7); err != nil || !ch {
+	if ch, err := s.Subscribe("chat_a", "wi_1", "", 7); err != nil || !ch {
 		t.Fatalf("subscribe: %v %v", ch, err)
 	}
-	if ch, _ := s.Subscribe("chat_a", "wi_1", 99); ch {
+	if ch, _ := s.Subscribe("chat_a", "wi_1", "", 99); ch {
 		t.Fatal("re-subscribing an active WI changes nothing and must not move the cursor")
+	}
+	// a re-subscribe that knows the slug fills a subscription recorded without one
+	if _, err := s.Subscribe("chat_a", "wi_1", "proj#1", 99); err != nil {
+		t.Fatal(err)
+	}
+	if subs := s.List("chat_a"); len(subs) != 1 || subs[0].Slug != "proj#1" || subs[0].Cursor != 7 {
+		t.Fatalf("slug fill: %+v", subs)
 	}
 	if err := s.Ack("chat_a", protocol.ChatAck{WI: "wi_1", Cursor: 12, Notified: []string{"needs_input:q-1"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Subscribe("chat_b", "wi_2", 0); err != nil {
+	if _, err := s.Subscribe("chat_b", "wi_2", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	// daemon restart: a brand-new store over the same file
@@ -46,7 +53,7 @@ func TestSubStorePersistsAcrossRestart(t *testing.T) {
 	}
 	// a finished WI is re-armed by a new submit
 	_ = s2.Ack("chat_a", protocol.ChatAck{WI: "wi_1", Cursor: 12, Done: true})
-	if ch, _ := s2.Subscribe("chat_a", "wi_1", 0); !ch {
+	if ch, _ := s2.Subscribe("chat_a", "wi_1", "", 0); !ch {
 		t.Fatal("re-subscribe of a finished WI must re-arm it")
 	}
 	if l := s2.List("chat_a"); l[0].Done || l[0].Cursor != 12 {
@@ -69,7 +76,7 @@ func TestWatcherLivenessExpires(t *testing.T) {
 	s, _ := newSubStore(filepath.Join(t.TempDir(), chatSubsFile))
 	now := time.Now()
 	s.now = func() time.Time { return now }
-	_, _ = s.Subscribe("chat_a", "wi_1", 0)
+	_, _ = s.Subscribe("chat_a", "wi_1", "", 0)
 	if s.Covered("wi_1") {
 		t.Fatal("no heartbeat yet: not covered")
 	}
@@ -161,10 +168,12 @@ func TestWatchSnapshotRoute(t *testing.T) {
 func TestWatchSnapshotReadsFinishedWIFromTheCapsule(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	// a WI the daemon holds no job for, but whose capsule is on disk
-	// (finished while the watcher was down)
+	// (finished while the watcher was down): its hub record names the
+	// capsule, capsules/<project>-<seq> (polyforge#144)
+	td.hub.slugs = map[string]string{"wi_gone": "proj#9"}
 	td.seedPendingQuestion(t, "wi_gone", "q-9", "s1", "x")
 	snap, err := td.client.WatchSnapshot("wi_gone", 0)
-	if err != nil || snap.Execution == nil || !snap.Known {
+	if err != nil || snap.Execution == nil || !snap.Known || snap.Slug != "proj#9" {
 		t.Fatalf("capsule fallback: %+v %v", snap, err)
 	}
 }
@@ -210,7 +219,7 @@ func TestAttentionRoutingAndOwnerFallback(t *testing.T) {
 		t.Fatalf("reporter fallback for bob: %v", got)
 	}
 	// a live subscribed watcher covers the WI: nobody else is nagged
-	_, _ = td.subs.Subscribe("chat_a", "wi_chat", 0)
+	_, _ = td.subs.Subscribe("chat_a", "wi_chat", "", 0)
 	td.subs.Heartbeat("chat_a")
 	if got := ids("chat_z", "alice", false); got["wi_chat"] {
 		t.Fatalf("covered WI must not be listed: %v", got)

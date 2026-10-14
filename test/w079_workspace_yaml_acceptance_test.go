@@ -157,8 +157,8 @@ func w079PfWant(t *testing.T, inst *v1Install, wantExit int, e w079Env, args ...
 }
 
 // w079Capsule is the capsule dir of wi under workspace ws.
-func w079Capsule(ws, wi string) string {
-	return filepath.Join(ws, "capsules", wi)
+func w079Capsule(t *testing.T, inst *v1Install, ws, wi string) string {
+	return filepath.Join(ws, "capsules", wiPathName(t, inst, wi))
 }
 
 // w079CapsuleRaw answers the raw capsule.json bytes of one capsule.
@@ -248,8 +248,8 @@ func w079Refused(t *testing.T, d *w113Daemon, inst *v1Install, ws, wi, submitOut
 		if status := inst.wiStatus(t, wi); status != "queued" {
 			t.Fatalf("refused work item %s left the queued state: status %q — a pre-claim refusal must never claim it (log tail %s)", wi, status, d.logTail())
 		}
-		if _, err := os.Stat(w079Capsule(ws, wi)); err == nil {
-			t.Fatalf("refused claim of %s materialized a capsule at %s", wi, w079Capsule(ws, wi))
+		if _, err := os.Stat(w079Capsule(t, inst, ws, wi)); err == nil {
+			t.Fatalf("refused claim of %s materialized a capsule at %s", wi, w079Capsule(t, inst, ws, wi))
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -261,7 +261,7 @@ func w079Refused(t *testing.T, d *w113Daemon, inst *v1Install, ws, wi, submitOut
 func w079Run(t *testing.T, d *w113Daemon, inst *v1Install, ws, wi string) string {
 	t.Helper()
 	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(ws, wi)
+	capDir := w079Capsule(t, inst, ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113WaitCompleted(t, capDir, 240*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
@@ -532,7 +532,7 @@ func TestW079FixYamlAndResubmitIsClean(t *testing.T) {
 
 	w079Yaml(t, ws, "models:\n  e2e:\n    default: [w079-reclaimed]\n")
 	capDir := w079Run(t, d, inst, ws, wi)
-	if got := w113TopLevel(t, filepath.Join(ws, "capsules")); len(got) != 1 || got[0] != wi {
+	if got := w113TopLevel(t, filepath.Join(ws, "capsules")); len(got) != 1 || got[0] != wiPathName(t, inst, wi) {
 		t.Fatalf("capsules dir holds %v, want exactly [%s]", got, wi)
 	}
 	if got := w079Model(t, capDir, "grill"); got != "w079-reclaimed" {
@@ -605,7 +605,7 @@ func TestW079RotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 					{"do": "envelope", "id": "verification", "outcome": "completed"},
 				})
 			d.pfWant(inst, -1, "submit", wi)
-			capDir := w079Capsule(ws, wi)
+			capDir := w079Capsule(t, inst, ws, wi)
 			w113WaitCapsule(t, capDir, 90*time.Second)
 			w113WaitCompleted(t, capDir, 300*time.Second)
 			inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
@@ -651,7 +651,7 @@ func TestW079GateFailRewindResetsEffectiveHead(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 		})
 	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(ws, wi)
+	capDir := w079Capsule(t, inst, ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113WaitCompleted(t, capDir, 300*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
@@ -694,7 +694,7 @@ func TestW079RotationUntouchedWithoutYaml(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 		})
 	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(ws, wi)
+	capDir := w079Capsule(t, inst, ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113WaitCompleted(t, capDir, 300*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
@@ -732,7 +732,7 @@ func TestW079RestartKeepsClaimTimeSnapshot(t *testing.T) {
 	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d.start()
 	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(ws, wi)
+	capDir := w079Capsule(t, inst, ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113StepStatus(t, capDir, "fix", "in_progress", 90*time.Second)
 	time.Sleep(2 * time.Second)
@@ -1050,14 +1050,14 @@ func TestW079PlacementFollowsCliTomlOnly(t *testing.T) {
 
 	wi := w113NewWI(t, inst, "e2e", "w079 placement follows cli.toml only", envelopeQuickFix())
 	d.pfWant(inst, -1, "submit", wi)
-	capDir := w079Capsule(wsY, wi)
+	capDir := w079Capsule(t, inst, wsY, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113WaitCompleted(t, capDir, 240*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
 
 	// Placement went through the mapping; wsX's yaml never moved it.
-	if _, err := os.Stat(w079Capsule(wsX, wi)); err == nil {
-		t.Fatalf("the claim landed in %s — the yaml moved capsule placement", w079Capsule(wsX, wi))
+	if _, err := os.Stat(w079Capsule(t, inst, wsX, wi)); err == nil {
+		t.Fatalf("the claim landed in %s — the yaml moved capsule placement", w079Capsule(t, inst, wsX, wi))
 	}
 	// The read yaml is the MAPPED workspace's (wsY's, absent): the
 	// models stay bundle-only, wsX's flow default governs nothing.

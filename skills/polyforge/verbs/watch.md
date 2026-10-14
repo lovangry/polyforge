@@ -25,7 +25,8 @@ over `PF_CHAT_ID`; passing BOTH flags is a usage error (`--chat and
 --harness-session are both explicit chat-id sources`); `PF_CHAT_ID` is used only
 when neither flag is given.
 
-`--once` is the pull: status (`running`, `needs input`, `completed`, `failed`,
+`--once` is the pull, headed `work item:  polyforge#140 (wi_…)` (the slug,
+the id beside it): status (`running`, `needs input`, `completed`, `failed`,
 `blocked`, or `queued/preparing` for a work item the daemon
 has not registered yet), the current step and how long it has run, the age of
 the last work signal when known, the pending question's id and text, and the
@@ -37,7 +38,10 @@ The resident watcher, the Claude Code status line / wake loop and the pi
 extension are described in the `pf watch` section of `SKILL.md`. A decision
 wake-up line is a fixed template and carries no question or error text:
 present it to the human, never answer it yourself, and read the question text
-here (`--once`) only when asked.
+here (`--once`) only when asked. Progress lines, wake-up lines and
+`pf watch list` name the work item by its slug (`polyforge#140`); the id stands
+in only when no slug is known. Quote a slug when you pass it back
+(`pf watch 'polyforge#140' --once`) — `#` is a zsh glob character.
 
 ## Failure branches
 
