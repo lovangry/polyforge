@@ -42,8 +42,12 @@ func TestS12ManualModelsBeatYamlAndAdvanceOnModelFailure(t *testing.T) {
 			t.Fatalf("step %s model %q, want %q (manual list; fix advanced once on the provider failure)", step, got, want)
 		}
 	}
-	if raw := w079CapsuleRaw(t, capDir); strings.Contains(raw, "manual_candidates") || strings.Contains(raw, "s12-yaml") || !strings.Contains(raw, "s12-m1") {
-		t.Fatalf("capsule audit must carry the effective (manual) candidates only, never the manual field or the yaml's: %s", raw)
+	// capsule.json records NO candidate audit at all (the effective-candidates
+	// field was deleted with the audit's dead-code sweep; the manual list is
+	// the daemon-private Start note, the yaml governs dispatches directly).
+	// The models the steps dispatched under (above) are the behavior pin.
+	if raw := w079CapsuleRaw(t, capDir); strings.Contains(raw, "manual_candidates") || strings.Contains(raw, "s12-yaml") || strings.Contains(raw, "effective_candidates") {
+		t.Fatalf("capsule.json must not carry a candidate audit (manual, yaml, or effective): %s", raw)
 	}
 
 	// an ordinary submit of another WI is unaffected: the yaml chain governs.

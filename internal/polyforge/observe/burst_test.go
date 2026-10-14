@@ -54,14 +54,25 @@ func TestRecoveryBurstNeverDropped(t *testing.T) {
 	for _, h := range handles {
 		h.die()
 	}
-	soon(t, 10*time.Second, "every recovery request queued", func() bool { return ob.Len() >= n })
-
 	seen := map[string]int{}
-	for m, ok := ob.Pop(); ok; m, ok = ob.Pop() {
-		if m.Kind == protocol.OBNeedsRecovery {
-			seen[m.WorkItem]++
+	soon(t, 10*time.Second, "every recovery request queued", func() bool {
+		// Queue.Len was deleted with the audit's dead-code sweep; the wait
+		// drains through Pop and counts distinct work items instead of a
+		// size probe.
+		for {
+			m, ok := ob.Pop()
+			if !ok {
+				return false
+			}
+			if m.Kind == protocol.OBNeedsRecovery {
+				seen[m.WorkItem]++
+				if len(seen) >= n {
+					return true
+				}
+			}
 		}
-	}
+	})
+
 	if len(seen) != n {
 		t.Fatalf("recovery requests delivered for %d of %d work items", len(seen), n)
 	}

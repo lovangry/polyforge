@@ -1,14 +1,14 @@
 package test
 
-// v1_s17: the drain degraded signal, driver/envelope edition. A
+// v1_s17: the queue-fetch denial signal, driver/envelope edition. A
 // auto-on daemon runs on a DEDICATED machine key (a machine user's api
 // key, not the bootstrap admin key), claims a wave member whose driver
 // parks on an open needs_input question (the parked envelope agent), and
 // then mid-run the admin revokes that key (`pf api-keys revoke`). The
 // next wave fetch is authorization-denied (aihub 401), and the daemon
-// must NOT silently idle and must NOT crash: a typed drain_degraded event
+// must NOT silently idle and must NOT crash: a typed queue_fetch_denied event
 // lands in the durable events log (daemon scope, exactly once per
-// silent→degraded episode) and is readable from the parked member's
+// healthy→denied episode) and is readable from the parked member's
 // observe view; the process stays alive, the UDS face keeps answering,
 // auto stays on, and the parked member is undisturbed.
 import (
@@ -48,7 +48,7 @@ func daemonEvents(t *testing.T, d *v1Daemon) []protocol.EventEntry {
 }
 
 // daemonEventCount counts the durable events of one kind (the daemon-scope
-// degraded signal is wi="", which per-WI event reads never see).
+// denial signal is wi="", which per-WI event reads never see).
 func daemonEventCount(t *testing.T, d *v1Daemon, kind string) int {
 	t.Helper()
 	n := 0
@@ -60,7 +60,7 @@ func daemonEventCount(t *testing.T, d *v1Daemon, kind string) int {
 	return n
 }
 
-func TestV1S17DrainKeyRevokedDegradedSignal(t *testing.T) {
+func TestV1S17AutoPullKeyRevokedQueueFetchDenied(t *testing.T) {
 	inst := newV1Install(t)
 
 	// The daemon's machine identity: a dedicated machine user + key, so
@@ -110,47 +110,47 @@ func TestV1S17DrainKeyRevokedDegradedSignal(t *testing.T) {
 			s.Execution.PendingQuestion.ID == qid
 	})
 
-	// Determinism guard: the key is still valid, so no degraded signal
+	// Determinism guard: the key is still valid, so no denial signal
 	// exists yet.
-	if n := daemonEventCount(t, d, observe.EvDrainDegraded); n != 0 {
-		t.Fatalf("pre-revoke degraded events: %d", n)
+	if n := daemonEventCount(t, d, observe.EvQueueFetchDenied); n != 0 {
+		t.Fatalf("pre-revoke denial events: %d", n)
 	}
 
 	// Mid-run: the admin revokes the daemon's current api key.
 	inst.pf(t, "api-keys", "revoke", issued.Token.ID)
 
-	// The next wave fetch is authorization-denied: the typed degraded
+	// The next wave fetch is authorization-denied: the typed denial
 	// event lands in the durable events log...
-	waitUntil(t, 30*time.Second, "drain_degraded event never landed after revocation", func() bool {
-		return daemonEventCount(t, d, observe.EvDrainDegraded) == 1
+	waitUntil(t, 30*time.Second, "queue_fetch_denied event never landed after revocation", func() bool {
+		return daemonEventCount(t, d, observe.EvQueueFetchDenied) == 1
 	})
 	// ...exactly once per episode: two more denied waves (5s period)
 	// must not re-emit.
 	time.Sleep(12 * time.Second)
-	if n := daemonEventCount(t, d, observe.EvDrainDegraded); n != 1 {
-		t.Fatalf("degraded event count %d after multiple denied waves, want 1 (edge-triggered per episode)", n)
+	if n := daemonEventCount(t, d, observe.EvQueueFetchDenied); n != 1 {
+		t.Fatalf("denial event count %d after multiple denied waves, want 1 (edge-triggered per episode)", n)
 	}
 
 	// The event is a daemon-scope entry (wi="") of the durable events
 	// log and carries the pinned payload.
 	var gotBody map[string]any
 	for _, e := range daemonEvents(t, d) {
-		if e.Kind != observe.EvDrainDegraded {
+		if e.Kind != observe.EvQueueFetchDenied {
 			continue
 		}
 		if e.WI != "" {
-			t.Fatalf("drain_degraded must be daemon-scope (wi=\"\"), got wi=%q", e.WI)
+			t.Fatalf("queue_fetch_denied must be daemon-scope (wi=\"\"), got wi=%q", e.WI)
 		}
 		if err := json.Unmarshal(e.Body, &gotBody); err != nil {
-			t.Fatalf("drain_degraded payload undecodable: %v", err)
+			t.Fatalf("queue_fetch_denied payload undecodable: %v", err)
 		}
 		break
 	}
 	if gotBody == nil {
-		t.Fatalf("drain_degraded not in the durable events log")
+		t.Fatalf("queue_fetch_denied not in the durable events log")
 	}
 	if gotBody["project"] != v1Project || gotBody["class"] != "authorization" {
-		t.Fatalf("drain_degraded payload wrong: %v", gotBody)
+		t.Fatalf("queue_fetch_denied payload wrong: %v", gotBody)
 	}
 
 	// 不崩: the process is alive, the UDS face still answers, auto

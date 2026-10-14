@@ -20,8 +20,10 @@ pf file show <id>
 ```
 
 `create` flags: `--project` (REQUIRED — there is no default project
-anymore, polyforge#113; the value is validated against the `[workspace]`
-mapping in cli.toml, and an unmapped project fails loudly naming it),
+anymore, polyforge#113; filing places work on THIS machine, so the value
+is validated against the `[workspace]` mapping in cli.toml and a project
+with no mapping fails loudly naming it — unlike `pf recall` / `pf
+remember`, which are hub-wide and need no mapping),
 `--goal` (required, one line ≤500 chars),
 `--content` (markdown background; `-` reads stdin, `@file` reads a file),
 `--label` (repeatable), `--priority low|normal|high|urgent`, `--milestone`,

@@ -110,7 +110,7 @@ func TestAutoOffClearsPendingAutoEntries(t *testing.T) {
 	}
 
 	// one EXPLICIT submit rides alongside — auto off must not touch it.
-	if _, err := td.client.Claim("wi_b3_manual", "normal"); err != nil {
+	if _, err := td.client.ClaimWithModels("wi_b3_manual", "normal", nil); err != nil {
 		t.Fatalf("explicit claim: %v", err)
 	}
 
@@ -125,8 +125,8 @@ func TestAutoOffClearsPendingAutoEntries(t *testing.T) {
 		switch e.Origin.Kind {
 		case runtime.OriginAuto:
 			auto++
-		case runtime.OriginCLI:
-			manual++
+		case runtime.OriginChat:
+			manual++ // the explicit submit is a chat origin (chat-less: empty ChatID)
 		}
 	}
 	if auto != 0 {

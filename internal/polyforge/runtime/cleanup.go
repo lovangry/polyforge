@@ -1,10 +1,9 @@
-// cleanup.go: the six-layer process cleanup (v1-spec-full §八). One WI's
+// cleanup.go: the layered process cleanup (v1-spec-full §八, minus the
+// deleted layer-0 cgroup kill — audit-subtraction pass B). One WI's
 // agent tree — the agent itself, its step agents and command children — is
 // wiped with escalating precision, because a surviving orphan keeps writing
 // the capsule next to the re-derived agent (single-writer domain).
 //
-//	L0 cgroup v2: per-WI cgroup, cgroup.kill atomically kills every
-//	   descendant; degrades away when cgroups are unavailable.
 //	L1 PPID snapshot: walk /proc and snapshot the FULL descendant set
 //	   BEFORE any signal (100% precise while the tree is intact).
 //	L2 process group: kill(-pgid, TERM→KILL) — one signal collects the
@@ -38,11 +37,6 @@ var (
 	procRoot = "/proc"
 	// killFn is the signal(2) face; a variable so EPERM seams are testable.
 	killFn = syscall.Kill
-	// cgroupKillWrite writes the kill trigger to a cgroup dir; a seam so
-	// layer 0 is testable where a real cgroup fs is not writable.
-	cgroupKillWrite = func(cgPath string) error {
-		return os.WriteFile(filepath.Join(cgPath, "cgroup.kill"), []byte("1"), 0o644)
-	}
 	// sleepFn is the inter-poll pause of the bounded waits.
 	sleepFn = time.Sleep
 )
@@ -65,7 +59,6 @@ type CleanupTarget struct {
 	// host never reaps that daemon's live step process.
 	DaemonID   string
 	CapsuleDir string
-	CgroupPath string // per-WI cgroup v2 dir; "" ⇒ layer 0 unavailable
 }
 
 // CleanupReport records what each layer did.
@@ -80,7 +73,7 @@ type CleanupReport struct {
 // WI survive every layer.
 var ErrCleanupIncomplete = errors.New("runtime: process cleanup left survivors")
 
-// Cleanup runs the six layers over one target and returns the report. The
+// Cleanup runs the kill layers over one target and returns the report. The
 // bound bounds every bounded wait inside.
 func Cleanup(t CleanupTarget, bound time.Duration) (*CleanupReport, error) {
 	rep := &CleanupReport{}
@@ -91,20 +84,6 @@ func Cleanup(t CleanupTarget, bound time.Duration) (*CleanupReport, error) {
 	if !rootOurs {
 		rep.Warnings = append(rep.Warnings,
 			fmt.Sprintf("recorded pid %d no longer matches its creation time (pid reuse); root/group signals skipped, relying on identity-marked layers", t.PID))
-	}
-
-	// L0 — cgroup v2 atomic kill.
-	if t.CgroupPath != "" && cgroupAvailable(t.CgroupPath) {
-		rep.Layers = append(rep.Layers, "l0-cgroup")
-		if err := cgroupKillWrite(t.CgroupPath); err != nil {
-			rep.Warnings = append(rep.Warnings, "layer 0 cgroup.kill failed: "+err.Error())
-		} else if treeGone(t, time.Second) {
-			rep.Layers = append(rep.Layers, "l5-cwd-scan")
-			cwdScan(t, rep)
-			return rep, nil
-		} else {
-			rep.Warnings = append(rep.Warnings, "layer 0 kill incomplete; escalating")
-		}
 	}
 
 	// L1 — PPID snapshot of the full descendant set, BEFORE any signal.
@@ -489,32 +468,6 @@ func waitGroupEmpty(pgid int, bound time.Duration) bool {
 		}
 		sleepFn(20 * time.Millisecond)
 	}
-}
-
-// ---------------------------------------------------------------------------
-// cgroup v2 (L0)
-
-func cgroupAvailable(cgPath string) bool {
-	st, err := os.Stat(filepath.Join(cgPath, "cgroup.kill"))
-	return err == nil && st.Mode().IsRegular()
-}
-
-// treeGone waits for the target's own pid / group to disappear after a
-// cgroup kill (the kernel emptied the cgroup; this is the local proof).
-func treeGone(t CleanupTarget, bound time.Duration) bool {
-	if t.PID > 0 {
-		deadline := time.Now().Add(bound)
-		for {
-			if !procExists(t.PID) {
-				return true
-			}
-			if time.Now().After(deadline) {
-				return false
-			}
-			sleepFn(20 * time.Millisecond)
-		}
-	}
-	return true
 }
 
 // ---------------------------------------------------------------------------

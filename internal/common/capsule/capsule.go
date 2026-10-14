@@ -46,13 +46,6 @@ type Identity struct {
 	BundleName string            `json:"bundle_name"`
 	Repos      map[string]string `json:"repos"` // repo name -> checked-out SHA at claim
 	CreatedAt  string            `json:"created_at"`
-
-	// EffectiveCandidates is the polyforge#79 audit: the per-step
-	// post-precedence candidate list the claim actually applied when the
-	// workspace yaml governs the project (step id → list; a present-empty
-	// list governs and means no switchable chain). Doubles as the
-	// claim-time SNAPSHOT the recovery path rehydrates from.
-	EffectiveCandidates map[string][]string `json:"effective_candidates,omitempty"`
 }
 
 // WorkItemDoc is runtime-state/work-item.json: the daemon-materialized

@@ -304,3 +304,65 @@ func TestHelpGroupsAreExplicitMetadata(t *testing.T) {
 		t.Errorf("watch-probe must be unknown: %d %q", code, stderr)
 	}
 }
+
+// TestWatchChatIDResolutionPrecedence (addendum 1): the five cases.
+// --chat and --harness-session are both explicit and outrank PF_CHAT_ID
+// (the session lookup's result — including its not-found error — wins
+// over the env); passing both is a usage error, never a silent pick;
+// env-only and nothing-provided keep their existing behaviors.
+func TestWatchChatIDResolutionPrecedence(t *testing.T) {
+	w := newWatchDaemon(t, protocol.WatchSnapshot{}, protocol.ChatSub{WI: "wi_1", Cursor: 5})
+	list := func(env map[string]string, args ...string) (string, int, string) {
+		t.Helper()
+		code, out, stderr := runPf(t, env, append([]string{"watch", "list"}, args...)...)
+		return out, code, stderr
+	}
+	env := watchEnv(w, t, map[string]string{"PF_CHAT_ID": "chat_env"})
+
+	// case 1: env only — PF_CHAT_ID is used (kept face)
+	out, code, _ := list(env)
+	if code != 0 || !strings.Contains(out, "chat chat_env:") {
+		t.Fatalf("env-only case: %d %q", code, out)
+	}
+	// case 2: env + --chat — the flag wins (kept face)
+	out, code, _ = list(env, "--chat", "chat_flag")
+	if code != 0 || !strings.Contains(out, "chat chat_flag:") || strings.Contains(out, "chat chat_env:") {
+		t.Fatalf("env + --chat case: %d %q", code, out)
+	}
+	// case 3: env + --harness-session — the session lookup wins over the env
+	out, code, _ = list(env, "--harness-session", "sess_v4")
+	if code != 0 || !strings.Contains(out, "chat chat_from_session:") || strings.Contains(out, "chat chat_env:") {
+		t.Fatalf("env + --harness-session case: %d %q", code, out)
+	}
+	// case 4: --chat and --harness-session together — a usage error
+	// naming both, never a silent pick
+	out, code, stderr := list(env, "--chat", "chat_flag", "--harness-session", "sess_v4")
+	if code == 0 || !strings.Contains(stderr, "chat") || !strings.Contains(stderr, "harness-session") {
+		t.Fatalf("--chat + --harness-session case: %d %q %q", code, out, stderr)
+	}
+	// case 5: nothing provided — the existing no-chat-id error (kept face)
+	out, code, stderr = list(watchEnv(w, t, nil))
+	if code != 1 || !strings.Contains(stderr, "no chat id") {
+		t.Fatalf("no-chat case: %d %q %q", code, out, stderr)
+	}
+}
+
+// TestWatchHarnessSessionNotFoundBeatsEnv (addendum 1): the session
+// lookup's not-found error also wins over PF_CHAT_ID — the env is never
+// a silent fallback when the operator named a session explicitly.
+func TestWatchHarnessSessionNotFoundBeatsEnv(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /chat/init", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusNotFound)
+		io.WriteString(rw, `{"code":"DAEMON-404","detail":"no chat mapped for session sess_gone"}`)
+	})
+	sock := newFakeDaemon(t, mux)
+	env := map[string]string{
+		"PF_DAEMON_SOCKET": sock, "XDG_RUNTIME_DIR": t.TempDir(), "PF_CHAT_ID": "chat_env",
+	}
+	code, out, stderr := runPf(t, env, "watch", "list", "--harness-session", "sess_gone")
+	if code == 0 || strings.Contains(out, "chat chat_env") || !strings.Contains(stderr, "sess_gone") {
+		t.Fatalf("the session-lookup error must win over PF_CHAT_ID: %d %q %q", code, out, stderr)
+	}
+}

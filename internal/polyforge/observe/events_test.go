@@ -28,7 +28,7 @@ func TestEventSeqMonotonicAcrossTruncation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ring := l.Since("wi_seq")
+	ring := l.SinceAfter("wi_seq", 50) // cursor inside the ring window: the RING answers (EventLog.Since was deleted with the audit sweep)
 	if len(ring) != RingCap {
 		t.Fatalf("retained ring size: got %d, want %d", len(ring), RingCap)
 	}
@@ -44,7 +44,7 @@ func TestEventSeqMonotonicAcrossTruncation(t *testing.T) {
 	if err := l.Append("wi_seq", "t_event", nil); err != nil {
 		t.Fatal(err)
 	}
-	ring = l.Since("wi_seq")
+	ring = l.SinceAfter("wi_seq", 50)
 	if got := ring[len(ring)-1].Seq; got != int64(total+1) {
 		t.Fatalf("post-truncation seq: got %d, want %d", got, total+1)
 	}
@@ -67,7 +67,7 @@ func TestEventSeqMonotonicAcrossTruncation(t *testing.T) {
 	if err := l.Append("wi_other", "t_event", nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := l.Since("wi_other")[0].Seq; got != 1 {
+	if got := l.SinceAfter("wi_other", 0)[0].Seq; got != 1 {
 		t.Fatalf("second WI's first seq: got %d, want 1", got)
 	}
 }
@@ -141,14 +141,14 @@ func TestEventSeqMonotonicAcrossRestart(t *testing.T) {
 	defer l2.Close()
 	_ = l2.Append("wi_a", "t_event", nil)
 	_ = l2.Append("wi_b", "t_event", nil)
-	ring := l2.Since("wi_a")
+	ring := l2.SinceAfter("wi_a", 0)
 	if got := ring[len(ring)-1].Seq; got != 8 {
 		t.Fatalf("wi_a first seq after restart: got %d, want 8", got)
 	}
 	if len(ring) != 8 {
 		t.Fatalf("the ring must be pre-filled from the durable file: %d entries, want 8", len(ring))
 	}
-	if got := l2.Since("wi_b")[1].Seq; got != 2 {
+	if got := l2.SinceAfter("wi_b", 0)[1].Seq; got != 2 {
 		t.Fatalf("wi_b second seq: got %d, want 2", got)
 	}
 }
@@ -187,13 +187,13 @@ func TestEventLogRotatesBySizeAndKeepsCounting(t *testing.T) {
 	}
 	defer l2.Close()
 	_ = l2.Append("wi_hot", "t_event", nil)
-	hot := l2.Since("wi_hot")
+	hot := l2.SinceAfter("wi_hot", 0)
 	if got := hot[len(hot)-1].Seq; got != 61 {
 		t.Fatalf("wi_hot seq after rotation+restart: got %d, want 61", got)
 	}
 	// wi_old's lines rotated away entirely; its counter must not restart
 	_ = l2.Append("wi_old", "t_event", nil)
-	old := l2.Since("wi_old")
+	old := l2.SinceAfter("wi_old", 0)
 	if got := old[len(old)-1].Seq; got != 3 {
 		t.Fatalf("wi_old seq after its lines rotated away: got %d, want 3 (snapshot-backed)", got)
 	}
@@ -233,7 +233,7 @@ func TestEventAppendFailureIsDegradationOnly(t *testing.T) {
 	if err := l.Append("wi_f", "t_event", nil); err == nil {
 		t.Fatal("a failed file write must be reported to the caller")
 	}
-	if got := l.Since("wi_f"); len(got) != 1 || got[0].Seq != 1 {
+	if got := l.SinceAfter("wi_f", 0); len(got) != 1 || got[0].Seq != 1 {
 		t.Fatalf("the ring must still record the event: %+v", got)
 	}
 }

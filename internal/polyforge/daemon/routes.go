@@ -60,6 +60,11 @@ type statusJob struct {
 	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
 	// Origin is how the job was submitted; may be absent.
 	Origin *runtime.Origin `json:"origin,omitempty"`
+	// StopReason is the recorded verdict of a close in flight or
+	// settled (wrapped/failed/blocked/paused) — empty while the job
+	// runs. The attention face (D9) derives the terminal decision
+	// classes from it.
+	StopReason string `json:"stop_reason,omitempty"`
 }
 
 type queueStats struct {
@@ -156,7 +161,7 @@ func (d *Daemon) handler() http.Handler {
 				AnsweredBy string `json:"answered_by"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				http.Error(w, `{"code":"BAD-400","detail":"decode: `+err.Error()+`"}`, 400)
+				writeErr(w, api.ErrDaemonBadInput, "decode: "+err.Error())
 				return
 			}
 			if payload.AnsweredBy == "" {
@@ -172,22 +177,19 @@ func (d *Daemon) handler() http.Handler {
 				ids := d.pendingQuestionIDs(wi)
 				switch len(ids) {
 				case 0:
-					http.Error(w, `{"code":"ANSWER-400","detail":"no pending question found for this work item"}`, 400)
+					writeErr(w, api.ErrDaemonBadInput, "no pending question found for this work item")
 					return
 				case 1:
 					payload.QuestionID = ids[0]
 				default:
-					body, _ := json.Marshal(map[string]string{
-						"code": "ANSWER-400",
-						"detail": fmt.Sprintf("this work item has %d pending questions (%s) — answer a specific one with --question",
-							len(ids), strings.Join(ids, ", ")),
-					})
-					http.Error(w, string(body), 400)
+					writeErr(w, api.ErrDaemonBadInput,
+						fmt.Sprintf("this work item has %d pending questions (%s) — answer a specific one with --question",
+							len(ids), strings.Join(ids, ", ")))
 					return
 				}
 			}
 			if err := h.Answer(payload.QuestionID, payload.AnswerText, payload.AnsweredBy); err != nil {
-				http.Error(w, `{"code":"ANSWER-409","detail":"`+err.Error()+`"}`, 409)
+				writeErr(w, api.ErrDaemonConflict, err.Error())
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -202,7 +204,6 @@ func (d *Daemon) handler() http.Handler {
 			"no live bridge handle for work item "+wi+": the workflow is between derivations — retry after the daemon re-derives it")
 	})
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute("claim"))
-	mux.HandleFunc("POST /jobs/{wi}/resume", d.submitRoute("resume"))
 	// polyforge#116: the §6.4 owner move on a workflow parked blocked on an
 	// honest incomplete result — the state the bounded close leaves has no
 	// live driver, no bridge handle and no job record; the owner's moves
@@ -446,10 +447,6 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
 		return
 	}
-	if ji.VerifyPending {
-		writeErr(w, api.ErrDaemonConflict, wi+" is verify_pending — the daemon is still retrying its session verify with aihub; retry shortly")
-		return
-	}
 	if ji.State == runtime.StateSealing || ji.State == runtime.StateRecovering {
 		writeErr(w, api.ErrDaemonConflict, "work item is "+string(ji.State)+"; a close is already in progress")
 		return
@@ -562,10 +559,7 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			SessionFingerprint: ji.SessionFingerprint,
 			AgentPID:           ji.AgentPID,
 			Origin:             ji.Origin,
-		}
-		if ji.VerifyPending {
-			// restart verify could not reach aihub: retried with backoff
-			sj.Status = "verify_pending"
+			StopReason:         ji.StopReason,
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID

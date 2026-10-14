@@ -349,15 +349,6 @@ func (s Snapshot) LastErrorText() string {
 	return s.LastError
 }
 
-// LastWorkAge answers how long ago the last work-class signal arrived
-// (the dispatch age when none has).
-func (s Snapshot) LastWorkAge(now time.Time) time.Duration {
-	if s.LastWork.IsZero() {
-		return now.Sub(s.StartedAt)
-	}
-	return now.Sub(s.LastWork)
-}
-
 // summarizeTool renders a tool call for the live-progress face and extracts
 // the file path it works on (when the arguments name one).
 func summarizeTool(name, args string) (summary, path string) {

@@ -404,10 +404,9 @@ func (q *jobQueue) Take() *qEntry {
 const daemonStateFile = "daemon-state.json"
 
 type daemonState struct {
-	Version           int    `json:"version"`
-	MachineID         string `json:"machine_id"`
-	Auto              bool   `json:"auto"`
-	MaxConcurrentJobs int    `json:"max_concurrent_jobs"`
+	Version           int  `json:"version"`
+	Auto              bool `json:"auto"`
+	MaxConcurrentJobs int  `json:"max_concurrent_jobs"`
 }
 
 func (d *Daemon) statePath() string {
@@ -443,7 +442,6 @@ func (d *Daemon) loadDaemonState() error {
 func (d *Daemon) persistDaemonState() error {
 	st := daemonState{
 		Version:           1,
-		MachineID:         d.cfg.MachineID,
 		Auto:              d.modes.Auto(),
 		MaxConcurrentJobs: d.q.MaxConcurrent(),
 	}

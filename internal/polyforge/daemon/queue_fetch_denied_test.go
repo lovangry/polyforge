@@ -12,14 +12,14 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 )
 
-// drain_degraded edge semantics: an authorization-class denial of the
-// drain wave fetch (authDenied: typed error, HTTP 401/403/404) raises the
-// typed degraded signal exactly once per silent→degraded episode, the
+// queue_fetch_denied edge semantics: an authorization-class denial of the
+// auto-pull wave fetch (authDenied: typed error, HTTP 401/403/404) raises the
+// typed denial signal exactly once per healthy→denied episode, the
 // episode clears on the next successful fetch, and the event lands in
 // the durable events log at daemon scope (wi="") with the payload the
 // e2e pins (project + class=authorization + error). Transport-class
 // losses stay silent.
-func TestDrainDegradedEdgeSemantics(t *testing.T) {
+func TestQueueFetchDeniedEdgeSemantics(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	if err := td.modes.SetAuto(true); err != nil {
 		t.Fatalf("enable auto: %v", err)
@@ -36,7 +36,7 @@ func TestDrainDegradedEdgeSemantics(t *testing.T) {
 		}
 		n := 0
 		for _, line := range strings.Split(string(raw), "\n") {
-			if strings.Contains(line, `"`+observe.EvDrainDegraded+`"`) {
+			if strings.Contains(line, `"`+observe.EvQueueFetchDenied+`"`) {
 				n++
 			}
 		}
@@ -44,7 +44,7 @@ func TestDrainDegradedEdgeSemantics(t *testing.T) {
 	}
 
 	// Authorization-class denial (the admin revoked the machine key):
-	// exactly one drain_degraded event lands, and further denied waves
+	// exactly one queue_fetch_denied event lands, and further denied waves
 	// do not re-emit (edge-triggered per episode).
 	td.hub.mu.Lock()
 	td.hub.queueErr = &api.Error{Code: "CORE-401", Detail: "api key revoked"}
@@ -52,7 +52,7 @@ func TestDrainDegradedEdgeSemantics(t *testing.T) {
 	waitUntilCount(t, 5*time.Second, count, 1)
 	time.Sleep(300 * time.Millisecond) // many denied waves at DrainInterval 10ms
 	if n := count(); n != 1 {
-		t.Fatalf("denied waves re-emitted: %d drain_degraded events, want 1", n)
+		t.Fatalf("denied waves re-emitted: %d queue_fetch_denied events, want 1", n)
 	}
 
 	// The event is daemon-scope with the pinned payload shape.
@@ -62,7 +62,7 @@ func TestDrainDegradedEdgeSemantics(t *testing.T) {
 	}
 	var hit map[string]any
 	for _, line := range strings.Split(string(raw), "\n") {
-		if !strings.Contains(line, observe.EvDrainDegraded) {
+		if !strings.Contains(line, observe.EvQueueFetchDenied) {
 			continue
 		}
 		var e struct {
@@ -73,11 +73,11 @@ func TestDrainDegradedEdgeSemantics(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			t.Fatalf("event line undecodable: %v (%s)", err, line)
 		}
-		if e.Kind != observe.EvDrainDegraded {
+		if e.Kind != observe.EvQueueFetchDenied {
 			continue
 		}
 		if e.WI != "" {
-			t.Fatalf("drain_degraded must be daemon-scope (wi=\"\"), got wi=%q", e.WI)
+			t.Fatalf("queue_fetch_denied must be daemon-scope (wi=\"\"), got wi=%q", e.WI)
 		}
 		hit = map[string]any{}
 		if err := json.Unmarshal(e.Body, &hit); err != nil {
@@ -86,7 +86,7 @@ func TestDrainDegradedEdgeSemantics(t *testing.T) {
 		break
 	}
 	if hit == nil {
-		t.Fatal("no drain_degraded event found")
+		t.Fatal("no queue_fetch_denied event found")
 	}
 	if hit["project"] != "proj" || hit["class"] != "authorization" {
 		t.Fatalf("payload wrong: %v", hit)
@@ -102,7 +102,7 @@ func TestDrainDegradedEdgeSemantics(t *testing.T) {
 	td.hub.mu.Unlock()
 	time.Sleep(200 * time.Millisecond) // ~20 clean fetches at DrainInterval 10ms
 	if n := count(); n != 1 {
-		t.Fatalf("clean fetches must not emit: %d drain_degraded events, want 1", n)
+		t.Fatalf("clean fetches must not emit: %d queue_fetch_denied events, want 1", n)
 	}
 	td.hub.mu.Lock()
 	td.hub.queueErr = &api.Error{Code: "CORE-403", Detail: "membership removed"}

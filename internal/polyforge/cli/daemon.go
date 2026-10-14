@@ -250,22 +250,11 @@ type ShipResponse struct {
 // Routes.
 // ---------------------------------------------------------------------------
 
-// Claim submits a single-WI interactive claim request. priority defaults
-// to "normal" server-side; empty keeps the default.
-func (d *DaemonClient) Claim(wiID, priority string) (json.RawMessage, error) {
-	return d.submit(wiID, "claim", priority, nil)
-}
-
-// ClaimWithModels is Claim carrying the manual `--models` candidate list.
+// ClaimWithModels submits a single-WI interactive claim request carrying
+// the manual `--models` candidate list (nil keeps the default). priority
+// defaults to "normal" server-side; empty keeps the default.
 func (d *DaemonClient) ClaimWithModels(wiID, priority string, models []string) (json.RawMessage, error) {
 	return d.submit(wiID, "claim", priority, models)
-}
-
-// Resume submits a resume request — the daemon claims the paused WI
-// into a new session (attach semantics belong to the daemon restart
-// path, not the CLI).
-func (d *DaemonClient) Resume(wiID, priority string) (json.RawMessage, error) {
-	return d.submit(wiID, "resume", priority, nil)
 }
 
 // ResumeBlocked submits the §6.4 owner move for a workflow parked blocked

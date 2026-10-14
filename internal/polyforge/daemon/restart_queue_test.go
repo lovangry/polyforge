@@ -36,7 +36,7 @@ func (h *rejectHub) SessionClaim(api.SessionClaimRequest) (*api.SessionClaimResp
 
 func eventKinds(d *Daemon, wi string) []string {
 	var kinds []string
-	for _, e := range d.obs.Events().Since(wi) {
+	for _, e := range d.obs.Events().SinceAfter(wi, 0) {
 		kinds = append(kinds, e.Kind)
 	}
 	return kinds
@@ -234,7 +234,7 @@ func TestSubmitRejectedRecordedAsEvent(t *testing.T) {
 	waitFor(t, "submit_rejected event", 10*time.Second, func() bool {
 		return hasKind(eventKinds(td.Daemon, wi), observe.EvSubmitRejected)
 	})
-	for _, e := range td.obs.Events().Since(wi) {
+	for _, e := range td.obs.Events().SinceAfter(wi, 0) {
 		if e.Kind == observe.EvSubmitRejected && !strings.Contains(string(mustJSON(e)), "NOT_CLAIMABLE") {
 			t.Errorf("event must carry the error: %s", mustJSON(e))
 		}
@@ -327,7 +327,7 @@ func TestRestartMissingCapsuleBlocksOnlyThatWI(t *testing.T) {
 	if !hasKind(eventKinds(d, good), observe.EvDaemonRestarted) {
 		t.Errorf("want daemon_restarted on %s, got %v", good, eventKinds(d, good))
 	}
-	for _, e := range d.obs.Events().Since(good) {
+	for _, e := range d.obs.Events().SinceAfter(good, 0) {
 		if e.Kind == observe.EvDaemonRestarted && !strings.Contains(string(mustJSON(e)), "signal") {
 			t.Errorf("daemon_restarted must carry the previous shutdown cause: %s", mustJSON(e))
 		}

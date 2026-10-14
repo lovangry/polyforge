@@ -25,7 +25,7 @@ type JobState string
 //
 //	RUNNING → SEALING → DONE                  (stop path)
 //	RUNNING → RECOVERING → RUNNING            (recovery succeeded)
-//	RUNNING → RECOVERING → DONE               (bounded fail, storm guard)
+//	RUNNING → RECOVERING → DONE               (bounded fail)
 //	RUNNING → PAUSED                          (operator pause close, Finding 2)
 //	PAUSED → RUNNING                          (restart attach/resume, M3)
 //	PAUSED → DONE                             (later close of a retained record)
@@ -133,7 +133,7 @@ type jobRecord struct {
 	// never in logs or events.
 	SessionID string `json:"session_id"`
 	// SessionFingerprint is the PUBLIC handle (hex(sha256(secret))[:16]):
-	// the value logs, events and PF_SESSION_HANDLE carry.
+	// the value logs and events carry.
 	SessionFingerprint string `json:"session_fingerprint"`
 	State              string `json:"state"`
 	StopReason         string `json:"stop_reason,omitempty"`
@@ -156,16 +156,18 @@ type jobRecord struct {
 	// recoveries continue from it; a fresh clone (re-claim on another machine) re-seeds it
 	// from the capsule's spawn journal.
 	SpawnN       int `json:"spawn_n"`
-	RecoverFails int `json:"recover_fails"` // consecutive failed recoveries
-	// StormFails/LastRecoveryAt persist the entry-rate storm guard (v2):
-	// rapid recoverCore re-entries survive a daemon crash inside the
-	// storm window. RFC3339Nano; zero = never recovered.
-	StormFails     int    `json:"storm_fails"`
-	LastRecoveryAt string `json:"last_recovery_at,omitempty"`
-	Transcript     string `json:"transcript"`
-	BundleName     string `json:"bundle_name"`
-	AgentPID       int    `json:"agent_pid"`
-	AgentStart     string `json:"agent_started_at"`
+	RecoverFails int `json:"recover_fails"` // consecutive recovery failures (C7)
+	// AcceptedAtRelaunch is the accepted-result count (the capsule's
+	// execution state) the last relaunch started from — the watermark the
+	// next recovery entry compares progress against. Survives a crash
+	// with the counter itself.
+	AcceptedAtRelaunch int64 `json:"accepted_at_relaunch,omitempty"`
+	// RecoveryRelaunch persists lastRelaunchRecovery (see job).
+	RecoveryRelaunch bool   `json:"recovery_relaunch,omitempty"`
+	Transcript       string `json:"transcript"`
+	BundleName       string `json:"bundle_name"`
+	AgentPID         int    `json:"agent_pid"`
+	AgentStart       string `json:"agent_started_at"`
 	// Origin is how the job was submitted (v2 identity model). Absent on
 	// records written before it existed: such a job loads fine and is
 	// treated as owned by the WI reporter by later consumers.
@@ -183,8 +185,7 @@ type jobRecord struct {
 
 // Origin kinds.
 const (
-	OriginChat = "chat" // interactive submit from a harness chat
-	OriginCLI  = "cli"  // interactive/batch submit without a chat
+	OriginChat = "chat" // interactive submit — a harness chat when ChatID is set, a chat-less manual submit when it is empty
 	OriginAuto = "auto" // auto-claim (pf ops auto on)
 )
 
@@ -213,8 +214,8 @@ func (j *job) record() *jobRecord {
 		CleanPause:         j.cleanPause,
 		SpawnN:             j.spawnN,
 		RecoverFails:       j.recoverFails,
-		StormFails:         j.stormFails,
-		LastRecoveryAt:     stampIfSet(j.lastRecoveryAt),
+		AcceptedAtRelaunch: j.acceptedAtRelaunch,
+		RecoveryRelaunch:   j.lastRelaunchRecovery,
 		Transcript:         j.transcript,
 		BundleName:         j.bundleName,
 		AgentPID:           j.agentPID,
@@ -248,19 +249,19 @@ func jobFromRecord(rec *jobRecord) *job {
 			Username:    rec.WorkItemID,
 			Secret:      rec.SessionID,
 		},
-		cleanPause:     rec.CleanPause,
-		spawnN:         rec.SpawnN,
-		recoverFails:   rec.RecoverFails,
-		stormFails:     rec.StormFails,
-		lastRecoveryAt: parseStamp(rec.LastRecoveryAt),
-		transcript:     rec.Transcript,
-		bundleName:     rec.BundleName,
-		agentPID:       rec.AgentPID,
-		agentStartedAt: rec.AgentStart,
-		origin:         rec.Origin,
-		endNote:        rec.EndNote,
-		endHead:        rec.EndHead,
-		stepCandidates: rec.StepCandidates,
+		cleanPause:           rec.CleanPause,
+		spawnN:               rec.SpawnN,
+		recoverFails:         rec.RecoverFails,
+		acceptedAtRelaunch:   rec.AcceptedAtRelaunch,
+		lastRelaunchRecovery: rec.RecoveryRelaunch,
+		transcript:           rec.Transcript,
+		bundleName:           rec.BundleName,
+		agentPID:             rec.AgentPID,
+		agentStartedAt:       rec.AgentStart,
+		origin:               rec.Origin,
+		endNote:              rec.EndNote,
+		endHead:              rec.EndHead,
+		stepCandidates:       rec.StepCandidates,
 	}
 }
 
@@ -283,32 +284,27 @@ func loadState(path string) (*stateFile, error) {
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
-// stampIfSet renders t as RFC3339Nano ("" for the zero time — the
-// storm guard's never-recovered marker).
-func stampIfSet(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format(time.RFC3339Nano)
-}
-
-// parseStamp is stampIfSet's inverse; an unparsable value reads as
-// never (a torn record must never look like a live storm window).
-func parseStamp(s string) time.Time {
-	if s == "" {
-		return time.Time{}
-	}
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		return time.Time{}
-	}
-	return t
-}
-
 // restoredJob is jobFromRecord plus the runtime-owned wiring (the gitops
 // event sink) a bare record cannot carry.
 func (r *Runtime) restoredJob(rec *jobRecord) *job {
+	normalizeOrigin(rec)
 	j := jobFromRecord(rec)
 	j.git.EventSink = r.gitEventSink(rec.WorkItemID)
 	return j
+}
+
+// normalizeOrigin applies the decode default for a persisted origin: a
+// kind the current code does not recognize (a record written by an
+// older build) is read as a chat-less manual submit — kind chat, an
+// empty ChatID, the owner as recorded. The default is a plain
+// unknown-kind default (never a branch keyed on a historical kind).
+func normalizeOrigin(rec *jobRecord) {
+	if rec.Origin == nil {
+		return
+	}
+	switch rec.Origin.Kind {
+	case OriginChat, OriginAuto:
+	default:
+		rec.Origin = &Origin{Kind: OriginChat, Owner: rec.Origin.Owner}
+	}
 }
