@@ -743,11 +743,20 @@ blocked→resume 等重新认领从上游 clone 后按 carrier ref 恢复任务�
   对 `refs/pf-task/*` 用 100 MiB（`capsule.MaxTaskBlobBytes`，env `GIT_PF_MAX_TASK_BLOB`）。原因：任务仓库在 aihub 上最初为空，
   首次 carrier 推送带上整个上游历史，上游历史里的大资源（例：skypilot 的 21 MB `streamlit_app.mp4`）不能让该仓库永远无法携带。
   超过 100 MiB 的上游 blob 仍会被拒（"carrier 只存 WI 自己的提交"的根治方案未实施）。
-- **失败即决策**：carrier 推送因任何原因失败（超限、non-fast-forward 分叉、传输），除 stderr 日志外 daemon 写 `carrier_push_failed`
-  事件（body：`repo`、`ref`、git 错误），watcher 把它归为人工决策，提醒行为固定模板：
-  `[polyforge] <slug> carrier_push_failed <repo> — this task repo cannot be saved; a resume would lose its commits; this is a human decision, the agent must not answer it`。
-  仓库名经与 WI id 相同的字符集过滤；错误文本只在 `pf watch <wi> --once` 的事件里。同一 WI+仓库只提醒一次，直到该仓库的 carrier
-  推送再次成功（daemon 内存状态，daemon 重启后下一次失败会再提醒一次）。non-fast-forward 失败另外照旧发 `task_ref_diverged`。
+- **失败即决策**：carrier 推送因任何原因失败或被拒（超限、non-fast-forward 分叉、传输、下述仓库配置拒绝），除 stderr 日志外，
+  **仅当本次 capsule 链推送成功时** daemon 写 `carrier_push_failed` 事件（body：`repo`、`ref`、截断到约 2 KB 的 git 错误或拒绝原因）；
+  链推送也失败（aihub 不可达、会话被 fence）时不提醒，仍失败的 carrier 在下一次链推送成功的发布时提醒。watcher 把它归为人工决策，
+  提醒行为固定模板：
+  `[polyforge] <slug> carrier_push_failed <repo> — this task repo cannot be saved; a resume may lose its commits; this is a human decision, the agent must not answer it`。
+  仓库名经与 WI id 相同的字符集过滤；错误文本只在 `pf watch <wi> --once` 的事件里。每个 job 每个仓库只提醒一次，直到该仓库的 carrier
+  推送再次成功（状态挂在 runtime job 上的内存里：job 结束即消失，重新认领 = 新 job 会再提醒；daemon 重启后同样重新提醒一次）。
+  non-fast-forward 失败另外照旧发 `task_ref_diverged`。
+- **凭证安全**（任务仓库由不可信 agent 控制，carrier 推送带会话凭证）：推送 argv 为
+  `git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= -c http.proxy= push [--push-option=session-fingerprint=<fp>] <carrier URL> HEAD:refs/pf-task/<name>`；
+  准备凭证之前先以同样的 `-c` 参数、去掉 GIT_* 环境读取该仓库自己的配置（`git config --list --show-scope -z`，只看 local/worktree 作用域，
+  被 include 的文件算 local），出现以下任一键即拒绝推送并发 `carrier_push_failed`：`url.*.insteadOf`、`url.*.pushInsteadOf`、`credential.*`、
+  `http.*`、`remote.*.pushurl`、`remote.*.proxy`、`core.sshCommand`、`core.askPass`、`core.gitProxy`、`include.*`、`includeIf.*`、`gpg.*`、
+  `push.gpgSign`；并要求 `git ls-remote --get-url <carrier URL>` 解析结果与 carrier URL 完全相同。
 
 ## 8. 安全边界 <!-- §8 -->
 

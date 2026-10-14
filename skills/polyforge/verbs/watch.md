@@ -40,8 +40,8 @@ wake-up line is a fixed template and carries no question or error text:
 present it to the human, never answer it yourself, and read the question text
 here (`--once`) only when asked. A `carrier_push_failed <repo>` line means the
 work item's commits in that task repo could not be saved to aihub, so a
-`pf resume` after a block would lose them; the git error is in the `--once`
-events, never in the line. Progress lines, wake-up lines and
+`pf resume` after a block may lose them; the git error (or the refusal reason)
+is in the `--once` events, never in the line. Progress lines, wake-up lines and
 `pf watch list` name the work item by its slug (`polyforge#140`); the id stands
 in only when no slug is known. Quote a slug when you pass it back
 (`pf watch 'polyforge#140' --once`) — `#` is a zsh glob character.

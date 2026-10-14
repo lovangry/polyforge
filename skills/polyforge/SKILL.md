@@ -116,7 +116,7 @@ proactive face, and it carries exactly two kinds of signal:
   completed workflow, a step judged dead, candidates exhausted, a rejected or
   dropped submit, a blocked work item (including a missing capsule or an
   unmapped project), a daemon restart, a task repo whose carrier ref could
-  not be saved (`carrier_push_failed <repo>`: a resume would lose that repo's
+  not be saved (`carrier_push_failed <repo>`: a resume may lose that repo's
   commits).
   These wake you with ONE fixed-template line:
   `[polyforge] <slug> <kind> — <short fixed phrase>; this is a human decision,

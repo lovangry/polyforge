@@ -190,7 +190,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 - `pf watch --chat <id>`（缺省取 `PF_CHAT_ID`）**不因订阅的 WI 结束而退出**（保持常驻；D10 裁定，polyforge#150：以代码为准——只跳过已结束的 WI；仍会在父 harness 进程消失、stdout 关闭、或 `--wait-decision` 打印首批决策后退出，`watcher/engine.go`）；一个会话一个进程。
 - 只产出两种信号：
   - **进展**：当前 step、已运行时长、正在执行的命令及时长、最近修改的文件、工具调用计数（由翻译器信号机械生成，**不调用模型**）。
-  - **决策事件**：有问题要回答/gate、失败、blocked、完成、被判死并已处理、候选已用尽；以及状态/来源类事件（C13 裁定，polyforge#150，与 `watcher/decision.go` 的事件类别表对齐）：`canceled`（终态）、`paused`（非终态，可继续）、`submit_rejected`、`submit_dropped`、`daemon_restarted`；以及 `carrier_push_failed`（polyforge#158：某任务仓库的 carrier ref 推送失败，resume 会丢该仓库的提交；提醒行带经字符集过滤的仓库名，不带错误文本；每个 WI+仓库只提醒一次，直到该仓库推送再次成功）。
+  - **决策事件**：有问题要回答/gate、失败、blocked、完成、被判死并已处理、候选已用尽；以及状态/来源类事件（C13 裁定，polyforge#150，与 `watcher/decision.go` 的事件类别表对齐）：`canceled`（终态）、`paused`（非终态，可继续）、`submit_rejected`、`submit_dropped`、`daemon_restarted`；以及 `carrier_push_failed`（polyforge#158：capsule 链推送成功而某任务仓库的 carrier ref 推送失败或被拒，resume 可能丢该仓库的提交；提醒行带经字符集过滤的仓库名，不带错误文本；每个 job 每个仓库只提醒一次，直到该仓库推送再次成功）。
 - **订阅关系与读取游标存于 daemon**（按 chat id），不存在 agent 可写的位置。
 - **重连 / daemon 重启后**：先以 `execution.json` 核对每个订阅 WI 的当前状态（权威），再按单调事件 id 补读事件——"WI 在 watch 不在时结束"也不会漏。
 - **提交后、监控尚未注册**：显示"排队 / 准备中"，不当作错误（#98/#101 注册竞态）。
