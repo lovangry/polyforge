@@ -487,7 +487,7 @@ CREATE TABLE service_secret_epochs (
 
 **26 = WI 业务 6（行 1–6）+ 执行权 7（行 7–13）+ 同步 7（行 14–20）+ 机器 1（行 21）+ Memory 4 组（行 22–25；行 25 `memories/rebuild-index` 已由 polyforge#149 删除，表中不再列出，索引重建只在 aihub 启动时 reconcile）+ 依赖边 1 组（行 26，基线修订 polyforge#3）**
 
-F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-secret）单列 M1–M5 共 5 行：同端口、同鉴权，属 `pf` 管理 CLI 的 CRUD 面，不在 26 端点计数口径内（该口径只覆盖业务/执行/同步/机器/Memory/依赖边面）。清单外的旧端点行全部删除：workflow-pin（§4.5 已改为创建事务内部步骤，无独立端点）、bundle 注册表与文件取回端点（§4.4 裁定删除）、`pause`/`block`/`wrap`/`fail` 四个分立端点（合并为行 9 的 `end-generation` 四合一）、`resume`（并入行 7：§2.3 裁定 resume 即新一次 claim）、事件流分立读写端点（读取并入行 3 的 `include=events`，追加由 Core 状态机事务内部完成，§5.1c）、`reauthorize` 独立端点（§6.6 改为 claim 幂等重放流程，无独立端点）与 service 自管理操作（`service/heartbeat` 已由行 21 承载、`whoami` 由 `pf` 读本地配置不设端点、`rotate-secret` 归管理面 M5 行——均不占业务 26 端点行）。
+F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-secret）单列 M1–M5 共 5 行：同端口、同鉴权，属 `pf` 管理 CLI 的 CRUD 面，不在 26 端点计数口径内（该口径只覆盖业务/执行/同步/机器/Memory/依赖边面）。清单外的旧端点行全部删除：workflow-pin（§4.5 已改为创建事务内部步骤，无独立端点）、bundle 注册表与文件取回端点（§4.4 裁定删除）、`pause`/`block`/`wrap`/`fail` 四个分立端点（合并为行 9 的 `session-end` 四合一）、`resume`（并入行 7：§2.3 裁定 resume 即新一次 claim）、事件流分立读写端点（读取并入行 3 的 `include=events`，追加由 Core 状态机事务内部完成，§5.1c）、`reauthorize` 独立端点（§6.6 改为 claim 幂等重放流程，无独立端点）与 service 自管理操作（`service/heartbeat` 已由行 21 承载、`whoami` 由 `pf` 读本地配置不设端点、`rotate-secret` 归管理面 M5 行——均不占业务 26 端点行）。
 
 | # | 方法 | 路径 | 调用方 | 语义 | 错误码 |
 |---|---|---|---|---|---|
@@ -541,7 +541,7 @@ token 与 `(wi_id, generation, machine_id)` 三元绑定；换机器重放同一
 
 1. **无 WI 上下文**（行 1 `POST /work-items` 创建、行 21 `POST /machines/heartbeat` 注册/心跳 upsert）：仅需 api_key（身份），无 generation 概念，不要求任何 token。
 2. **WI 已存在但当前无活跃 generation**（行 7 `claim`（含对 `paused` WI 的 resume 场景）、对 `queued`/`paused`/`blocked` WI 的行 3 `PATCH`、行 10 `unblock`、行 5 `cancel`（§6.5））：仅需 api_key（身份）+ WI 状态合法性，不需要 token——`blocked`/`paused` 的 WI 本就没有可用的活跃 token，若要求 token 则这些 WI 永远无法被解阻或取消。
-3. **WI 有活跃 generation 且操作属于该 generation 的执行现场**（行 14–15 Revision 发布、行 9 `end-generation`、行 12 `budget` 读取）：需 token，因为这些操作都是「当前 owner 结束或延续自己的 generation」，与类别 2 的「重新激活一个已结束的 generation」在时序上根本不同。两类角色授权例外不要求 token：行 8 `force-takeover`（调用方不是当前 owner，只需 `users.role='admin'`）与行 11 `budget-increments`（人工在 WI 处于 `blocked` 时从外部做出的决定，按 reporter/maintainer/admin 角色授权，§6.7）——二者均基于角色而非执行现场凭证（§8）。
+3. **WI 有活跃 generation 且操作属于该 generation 的执行现场**（行 14–15 Revision 发布、行 9 `session-end`、行 12 `budget` 读取）：需 token，因为这些操作都是「当前 owner 结束或延续自己的 generation」，与类别 2 的「重新激活一个已结束的 generation」在时序上根本不同。两类角色授权例外不要求 token：行 8 `force-takeover`（调用方不是当前 owner，只需 `users.role='admin'`）与行 11 `budget-increments`（人工在 WI 处于 `blocked` 时从外部做出的决定，按 reporter/maintainer/admin 角色授权，§6.7）——二者均基于角色而非执行现场凭证（§8）。
 
 ### 5.1b ready-queue 响应 schema（四段：items/running/paused/pending_bundles；A8 裁定 + D1 修订 polyforge#150） <!-- §5.1b -->
 
