@@ -441,6 +441,15 @@ func TestMemoryWorkItemSlug(t *testing.T) {
 			t.Fatalf("create memory with work_item_id %q: %d %s (want canonical %s)", spelling, code, raw, wi.ID)
 		}
 	}
+	var bare struct {
+		WorkItemID *string `json:"work_item_id"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/memories", e.key, map[string]any{
+		"project": "alpha", "type": "fact.note", "visibility": "project",
+		"content": "unattributed", "work_item_id": "",
+	}, &bare); code != 201 || bare.WorkItemID != nil {
+		t.Fatalf("empty work_item_id is no attribution: %d %s", code, raw)
+	}
 	for _, unknown := range []string{"alpha#999", "wi_doesnotexist", "nope#1", "garbage"} {
 		var envl struct {
 			Code string `json:"code"`

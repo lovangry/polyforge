@@ -995,8 +995,12 @@ func (s *Server) hCreateMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	// The attributing work item accepts every WI spelling the other faces
 	// do (id or "<project>#<seq>" slug) and is stored as the canonical
 	// id; an unknown or unreadable one is a typed CORE-404, never the
-	// foreign-key failure of the insert (polyforge#155).
-	if req.WorkItemID != nil && *req.WorkItemID != "" {
+	// foreign-key failure of the insert (polyforge#155). An empty one is
+	// no attribution.
+	if req.WorkItemID != nil && *req.WorkItemID == "" {
+		req.WorkItemID = nil
+	}
+	if req.WorkItemID != nil {
 		wiID, wiProjectID, err := s.wiProject(idn, *req.WorkItemID)
 		if err != nil {
 			writeErr(w, err)
