@@ -1,0 +1,113 @@
+---
+name: review
+description: Human-judgment gate over the completed maintenance/deletion change - plan conformance plus the fixed owner-rules checklist - before the final machine gate.
+tools: [read, bash]
+output:
+  type: object
+  required: [verdict]
+  properties:
+    verdict:
+      type: string
+      enum: [pass, fail]
+      description: pass means the change is ready to ship as-is; fail means it needs another code pass.
+    findings:
+      type: array
+      items:
+        type: object
+        required: [severity, detail]
+        properties:
+          severity: { type: string, enum: [blocking, non-blocking] }
+          detail: { type: string }
+      description: Individual review findings, whether or not they are severe enough to fail the gate. A pass verdict with a blocking finding is self-contradictory - the schema's oneOf forbids it.
+    fail_reason:
+      type: string
+      description: Required when verdict is fail - a synthesis of the blocking findings, to be carried back to code as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
+  oneOf:
+    - description: A pass verdict - zero blocking findings; any recorded findings must be non-blocking.
+      properties:
+        verdict: { type: string, enum: [pass] }
+        findings:
+          type: array
+          items:
+            type: object
+            properties:
+              severity: { type: string, enum: [non-blocking] }
+      required: [verdict]
+    - description: A fail verdict - at least one blocking finding exists; requires a non-empty fail_reason synthesizing them.
+      properties:
+        verdict: { type: string, enum: [fail] }
+        fail_reason: { type: string, minLength: 1 }
+        findings:
+          type: array
+          contains:
+            properties:
+              severity: { type: string, enum: [blocking] }
+      required: [verdict, fail_reason]
+---
+
+# review
+
+Judge whether this maintenance/deletion change is ready to ship. Unlike
+`verification`, this step is a judgment call, not a mechanical check — and on this
+lane it carries the same fixed owner-rules checklist the other delivery lanes'
+reviews carry, so a deletion-type change cannot dodge the rules by riding the light
+lane.
+
+## What to do
+
+1. Read, in this order: `artifacts/plan.md` (the declared units and touched files),
+   the actual diff `code` produced (read the repo worktree's history for the commits
+   `code` reported), and `artifacts/code-summary.md` (the code step's own account of
+   what it did and why).
+2. Judge plan conformance: the diff covers the plan's declared steps, touches no
+   files the plan did not declare (an undeclared write is a lock-scope gap, not a
+   paperwork gap), and a declared deletion is actually complete — no half-removed
+   feature left compiling against ghosts of itself.
+3. Judge the deletion-type acceptance bar: the existing test suite stays meaningful
+   after the deletion, and the few targeted tests for behavior the deletion actually
+   changes exist where the project expects tests. A full acceptance suite or an e2e
+   lane is NOT this lane's bar — demanding one here is scope creep, not rigor.
+4. Run the owner-rules checklist below — any hit is a blocking finding.
+5. Record every finding in `findings`, tagged `blocking` or `non-blocking`.
+   Non-blocking findings do not fail the gate but are still useful history.
+6. `verdict: pass` only if there are zero blocking findings — the schema enforces
+   this: under a pass verdict every recorded finding must be `non-blocking`.
+7. `verdict: fail` if there is at least one blocking finding (the schema's fail
+   branch requires the findings list to contain one); synthesize them into
+   `fail_reason` — concrete enough that `code`'s next attempt (which receives this
+   text as its `pending_rewind_input`) does not have to guess what to change.
+
+## Owner-rules checklist (any hit is a blocking finding)
+
+On top of the plan-conformance judgment above, check the diff against the owner's
+fixed rules. ANY hit is a blocking finding - there is no pass verdict with one of
+these present:
+
+- **No faked concurrency semantics.** No timing-based fakes (`time.Sleep` as a
+  synchronization stand-in, backoff tuned to "usually long enough") and no
+  in-process locks/mutexes standing in for the cross-process or distributed mutual
+  exclusion the semantics actually require.
+- **No unrequested concepts.** No new states, fields, error codes, config items, or
+  concepts the WI and the plan did not request. List each one you find as its own
+  must-fix finding.
+- **No manual-gate bypass.** No code path that bypasses a manual checkpoint
+  (`needs_input` / gate) - the flow's interactive checkpoints must stay
+  load-bearing.
+- **No backward-compatibility code.** No compat shims, dual paths, or
+  legacy-behavior fallbacks; when behavior is removed, the old shape is deleted,
+  not carried alongside.
+- **Agent reachability for new entry points.** If the diff adds a new daemon or
+  aihub entry point, the diff must state whether the step agent can reach it; an
+  unstated new entry point is itself a finding.
+
+## Position in the flow
+
+This step is declared `kind: review` in the workflow frontmatter, which the schema
+grants positional freedom — in this bundle it sits between `code` and
+`verification`: the judgment pass reads the diff and the plan, and the machine gate
+behind it re-runs the full green bar as the final mechanical word before the change
+merges.
+
+## Output
+
+Emit the final JSON object per the schema above.
