@@ -276,7 +276,7 @@ key、claim 响应、Job 创建意图、Harness session identity 均先于对应
    WI-Agent 引擎删除）。引擎与 Daemon 同一份发行物交付，升级 Daemon 即升级引擎，不存在独立的
    引擎版本协商面。harness（Pi/Claude）仅作为 step 派生的宿主适配器（envelope 一次一步）。
 9. 【polyforge#106 修订】绑定执行引擎（Daemon 内的 Go driver，`00-architecture.md#§3.6` 修订注记），把
-   Capsule 路径、**claim 响应携带的** `bundle_name`（Core 在 claim 事务内随 generation/token 一并返回——因此执行路径**不需要任何数据面详情读取**：机器的执行面授权由 key scope 与 claim 端点承载，数据面 membership 不可见性不构成障碍，`02-aihub-core.md#§8` 执行面规则）作为输入传入。driver 从本机 checkout 物化
+   Capsule 路径、**claim 响应携带的** `bundle_name`（Core 在 claim 事务内随 generation/token 一并返回——因此执行路径**不需要任何数据面详情读取**：机器的 claim 授权 = 该 project 的 writer/maintainer membership 或全局 admin（D4 裁定，polyforge#150，`02-aihub-core.md#§4.10`），key scope 只是收窄过滤；claim 响应自带执行所需信息，数据面 membership 不可见性不构成障碍，`02-aihub-core.md#§8` 执行面规则）作为输入传入。driver 从本机 checkout 物化
    `workflows/<bundle_name>/`（不做 digest 校验——校验链已删，polyforge#149 B9；`03-execution-capsule.md#§4.5`）后加载
    `workflow.md` 正文驱动执行，按 step 图逐 step 派生短驻 harness 进程（envelope 一次一步；
    claim/resume/takeover 不分叉），并在整个 WI 生命周期内持续驱动（不因单个 step 结束而

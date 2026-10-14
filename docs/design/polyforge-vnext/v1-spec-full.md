@@ -87,7 +87,7 @@ SEALING 丢弃同 attempt-id 的 WINeedsRecovery（如果 push 已落地）
 - **Generation fencing 两层**：
   - 主层：attempt-scoped push credential（takeover 吊销旧凭证 → 旧 daemon push 被 auth 拒绝）
   - 备层：pre-receive hook 校验 push-option 中的 attempt-id
-- 跨仓库原子性：task-repo 先推、capsule 后推；恢复时容忍 capsule 引用未落地 task-repo SHA
+- 跨仓库原子性：capsule 链先推、task-repo carrier ref（`refs/pf-task/<name>`）后推，后者失败只记日志、不回滚 capsule 链（D8 裁定，polyforge#150：以代码为准）；恢复时容忍 capsule 引用未落地 task-repo SHA
 - 定期 gc/repack
 
 ## 七、双轨恢复
