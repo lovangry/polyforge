@@ -755,8 +755,8 @@ type StepRun interface {
 // transition. It builds a ResultSpec from the driver's current state and
 // delegates to ValidateStepResult (the staging gates: shape, binding and
 // fencing, the needs_input question pair, the verdict binding, the
-// human-gate guarantee, the release verdict binding and the V4
-// command-evidence gate). A
+// human-gate guarantee, the release verdict binding, the V4
+// command-evidence gate and the committed-test-files gate). A
 // failure is an infrastructure-class rejection — Run surfaces it and the
 // recovery lane owns re-derivation.
 func (d *Driver) validateResultStrict(res *StepResult, stepID string, n int64) error {
@@ -766,7 +766,8 @@ func (d *Driver) validateResultStrict(res *StepResult, stepID string, n int64) e
 
 // buildResultSpec assembles the read-only validation snapshot from the
 // driver's current durable state (gate policy, human-answer duty, the
-// answers of the current attempt chain and the command-evidence duty).
+// answers of the current attempt chain, the command-evidence duty and the
+// task-repo root the committed-test-files gate reads).
 func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	spec := ResultSpec{
 		WIID:   d.wi.ID,
@@ -787,6 +788,9 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	}
 	if stepID == verificationStepID {
 		spec.RequireCommandEvidence = true
+	}
+	if d.wi.CapsuleDir != "" {
+		spec.ReposDir = filepath.Join(d.wi.CapsuleDir, capsule.DirRepos)
 	}
 	return spec
 }
