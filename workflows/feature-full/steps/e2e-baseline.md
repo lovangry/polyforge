@@ -40,7 +40,8 @@ against and that `e2e-run` re-runs as a hard gate after `code`.
 ## What to do
 
 1. Read `artifacts/e2e-scenarios.md` (and any test files `e2e-author` recorded in
-   `test_files`).
+   `test_files`). The authored suite is read from the committed tree: `e2e-author`
+   committed those files (the driver refuses its completion otherwise).
 2. Copy `scenario_titles` verbatim from `execution.json`'s
    `steps.e2e-author.output.scenario_titles` into your `authored_titles` output field -
    element for element, same order, no additions and no omissions. The executor
