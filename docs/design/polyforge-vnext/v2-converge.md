@@ -26,7 +26,7 @@
 | 主线 | 记忆 | 存储与检索、recall/remember、领取时快照 |
 | 主线 | workflow 定义 | bundle、step、gate/rewind、按步骤选模型（将来：harness） |
 | 主线 | 执行 | daemon、capsule、driver、并发、工作区映射 |
-| 主线 | 交付 | ship → git 分支 / PR (removed by polyforge#166: delivery is the workflows' deliver step) |
+| 主线 | 交付 | ship → git 分支 / PR (removed by polyforge#166: delivery is the workflows' deliver step. The driver checks the deliver step's recorded commands and the delivered history after the fact and escalates violations to a human; prevention rests on the step contract and the machine's local pre-push hook.) |
 | 横切 | 人工协同 | 提问/回答、暂停/继续、进展可见（`pf watch`） |
 | 横切 | 可靠性 | 监督（判死）、恢复、session 隔离、接管 |
 | 横切 | 运维 | doctor、backup、ops status、事件日志 |

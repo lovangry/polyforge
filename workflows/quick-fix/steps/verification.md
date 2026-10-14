@@ -24,6 +24,15 @@ output:
     fail_reason:
       type: string
       description: Required when verdict is fail - a precise description of what failed, to be carried back to fix as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
+    test_bar:
+      type: array
+      items:
+        type: object
+        required: [repo, command]
+        properties:
+          repo: { type: string, description: "The task repo (repos/<repo>) the command runs in." }
+          command: { type: string, description: "The command exactly as you ran it inside that repo (no leading cd)." }
+      description: The full test bar - the build/lint/test commands that make this verdict, one entry per command per repo, exactly as run. The deliver step re-runs exactly these after merging the latest default branch, and the driver only accepts that re-run as covering the tests when the commands match; without a test_bar a moved default branch always needs a human.
   oneOf:
     - description: A pass verdict - every recorded check must itself be pass or an honestly-marked skipped; no check may be recorded as fail.
       properties:
@@ -84,6 +93,14 @@ line of defense before the change ships: run the full standard set, not a smoke 
    failing command, its output excerpt, and what it implicates. The schema requires
    `fail_reason` here. This text becomes `fix`'s `pending_rewind_input` on the next
    attempt; vague language wastes the rewind.
+
+## Test bar for delivery
+
+List the commands that make up the test bar in `test_bar` (`{repo, command}` per command,
+each command exactly as you ran it inside `repos/<repo>/`, without a leading `cd`). When the
+default branch moved on before delivery, the `deliver` step re-runs exactly these commands on
+the merged head, and the driver accepts the delivery without a human only if they match. Keep
+incidental inspection commands (`cat`, `grep`, `git log`) out of it.
 
 ## Honesty
 

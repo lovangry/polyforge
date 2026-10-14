@@ -54,6 +54,10 @@ command evidence (a completed result without evidence is refused).
 
 ## Hard rules (the driver checks your recorded commands)
 
+The driver judges your result after the fact: by then the push and the merge have
+happened, so a broken rule is detected and escalated to a human, not prevented.
+Prevention is these rules and the machine's local pre-push hook - follow them.
+
 - **Push only the feature branch.** The branch is `polyforge/<capsule directory name>`
   (your working directory is the capsule root: `basename "$PWD"`, e.g.
   `polyforge/polyforge-166`). Every push is exactly
@@ -63,11 +67,15 @@ command evidence (a completed result without evidence is refused).
   `-c core.hooksPath=...`: the machine's global pre-push hook must run. Never push the default branch (`main`/`master`/whatever origin's HEAD is), never
   push without a refspec, never `--force`/`-f`/`--force-with-lease`, `--all`, `--mirror`,
   `--tags`, `--delete`, a `+` refspec (nor an abbreviation of these options), never change
-  git's configuration for the push (`GIT_CONFIG_*`, `GIT_DIR` and the like), and never set
+  git's configuration for the push (on a push line the only `GIT_*` assignments allowed are
+  `GIT_TERMINAL_PROMPT` and `GIT_SSH_COMMAND`; `GIT_CONFIG_*`, `GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_INDEX_FILE` and every other `GIT_*` are refused), push to the remote named
+  `origin` (not a URL: the push must move `refs/remotes/origin/<branch>`), and never set
   `PF_ALLOW_MAIN_PUSH`. A recorded command that breaks this rule gets the whole result
   rejected.
 - **Merge only through the PR, only with `gh pr merge <pr> --merge`.** Never
-  `--squash`, `--rebase`, `--admin` or `--auto`, and never `gh repo sync`. The release procedure refuses to release a default
+  `--squash`, `--rebase`, `--admin` or `--auto` (in any `--flag=value` form), and never
+  `gh repo sync`. The release procedure refuses to release a default
   branch whose history contains anything but PR merge commits.
 - **The human-only question.** When the merge rule below does not hold, you do not decide
   to merge or not: ask (needs_input) and act on the human's answer. Only a human answers
@@ -80,8 +88,8 @@ command evidence (a completed result without evidence is refused).
 
 - `execution.json` (under `runtime-state/`): `steps.review.output` - the independent
   review's verdict and findings - and `steps.verification.output`: its `verified_heads`
-  (written by the driver: each repo's HEAD when verification passed) and its `commands`
-  (the test bar it ran). A workflow without a `review` step has no independent review.
+  (written by the driver: each repo's HEAD when verification passed) and its `test_bar`
+  (`{repo, command}` - the test-bar commands it ran in each repo). A workflow without a `review` step has no independent review.
 - `capsule.json`: `repos` maps each declared repo name to its claim-time baseline sha.
 - `artifacts/verification-report.md`: the full test bar (the exact build/lint/test
   commands verification ran).
@@ -99,10 +107,10 @@ commits beyond its baseline (`git rev-list --count <baseline>..HEAD` is 0). Othe
    when `git merge-base --is-ancestor HEAD origin/<default>` holds and
    `gh pr list --head <branch> --state merged --json url,mergeCommit` names a PR, this
    repo is merged - record that PR and its merge commit (`merged: true`) and skip to the
-   result. The merge rule still applies to it: when HEAD is not the verified commit and
-   you did not re-run the test bar in this dispatch (or the history shows a hand-resolved
-   merge), report it through the human question ("already merged; acknowledge") instead
-   of completing.
+   result. The merge rule still applies to it: when HEAD is not the verified commit,
+   re-run the test bar (step 3) in this dispatch first; if that fails or the history shows
+   a hand-resolved merge, report it through the human question ("already merged;
+   acknowledge") instead of completing.
    **Origin not on GitHub, or `gh` unavailable/unauthenticated:** there is no PR to open.
    Do the pre-flight, the merge and the push (steps 2-4) only, then ask the human question
    with the pushed branch instead of a PR link; record `merged: false` with the reason
@@ -125,10 +133,12 @@ commits beyond its baseline (`git rev-list --count <baseline>..HEAD` is 0). Othe
    - **Tests are covered only when HEAD equals the commit verification passed on**
      (`verified_heads.<name>`). "Already up to date" is NOT enough: an earlier dispatch of
      this step (before a crash or a daemon restart) may already have merged. Whenever
-     HEAD differs - a clean merge now or earlier - re-run verification's recorded
-     commands (`steps.verification.output.commands`, every one that exited 0) VERBATIM,
-     after your last merge, in this same dispatch. The driver checks exactly that; tests
-     run in an earlier dispatch do not count.
+     HEAD differs - a clean merge now or earlier - re-run every `test_bar` command of this
+     repo exactly as written, inside `repos/<name>/` (as `cd repos/<name> && <command>`, or
+     with that cwd), AFTER your last `git merge`/`git pull` of this repo, in this same
+     dispatch, each with exit 0. The driver checks exactly that, in the order your commands
+     are recorded; tests run in an earlier dispatch do not count, and a verification without
+     a `test_bar` for this repo means a human decides.
    - **A conflict:** resolve it yourself in this worktree, keeping both sides' intent,
      commit the merge, then you MUST (a) re-run the test bar as above and (b) have the
      resolution reviewed in a FRESH context - call the `subagent` tool (a new agent with
@@ -142,6 +152,7 @@ commits beyond its baseline (`git rev-list --count <baseline>..HEAD` is 0). Othe
    Never add other commits here. Record `tests_passed` for the head you are about to push:
    true only when it equals the verified commit or you re-ran the test bar on it.
 4. **Push the feature branch (idempotent).** `git ls-remote origin refs/heads/<branch>`:
+   (HEAD must contain `origin/<default>` as fetched - the driver checks it.)
    - absent, or an ancestor of HEAD (`git merge-base --is-ancestor <remote> HEAD`):
      `git push origin HEAD:refs/heads/<branch>` (a re-run of an up-to-date branch is a
      harmless no-op);
