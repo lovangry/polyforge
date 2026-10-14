@@ -468,7 +468,8 @@ func pushChainLocked(env []string, capsuleDir string, args []string) (bool, int6
 // re-claim renames away. The namespace lives OUTSIDE refs/heads/* so a
 // plain clone of the bare repo never materializes task branches, and
 // aihub's pre-receive hook exempts it from the chain-only seq/gitlink
-// invariants while keeping deletion, fast-forward and the blob limit.
+// invariants while keeping deletion, fast-forward and a blob limit (the
+// carrier's own, capsule.MaxTaskBlobBytes).
 const TaskCarrierNamespace = "refs/pf-task/"
 
 // TaskRefName answers the carrier ref for one task repo.
@@ -479,8 +480,10 @@ func TaskRefName(repo string) string { return TaskCarrierNamespace + repo }
 // the per-WI lock (called from pushLocked), AFTER the chain push, and is
 // BEST-EFFORT-LOUD: each push is its own git invocation — a rejected or
 // failed carrier never fails the execution-state publish this lane
-// rides; it is logged loudly so the operator can see a re-claim would
-// lose that repo's state. An unborn or unreadable task HEAD is nothing
+// rides; it is logged loudly and raised as a carrier_push_failed event
+// (a human decision, once per WI + repo until the repo's carrier push
+// succeeds again) so the human sees that a re-claim would lose that
+// repo's state. An unborn or unreadable task HEAD is nothing
 // to carry (honest skip, not a failure). The invocations run inside each
 // task worktree with its OWN git-dir — never the capsule's external
 // GIT_DIR/GIT_WORK_TREE binding, whose history holds none of these
@@ -514,20 +517,34 @@ func pushTaskRefsLocked(o Opts) {
 			args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
 		}
 		args = append(args, o.RemoteURL, "HEAD:"+TaskRefName(e.Name()))
-		if out, err := git(env, dir, args...); err != nil {
-			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %v: %s\n", o.WorkItemID, e.Name(), err, strings.TrimSpace(out))
-			// Never force: a non-fast-forward rejection means the carrier
-			// and this worktree DIVERGED (e.g. a re-claim that started
-			// from a clone lacking the carried commits). The carrier is
-			// left untouched and the divergence is raised as an error
-			// event, not left to stderr.
-			if IsNonFastForward(err, out) && o.EventSink != nil {
-				o.EventSink(EventTaskRefDiverged, map[string]any{
-					"repo":  e.Name(),
-					"ref":   TaskRefName(e.Name()),
-					"error": err.Error(),
-				})
-			}
+		out, err := git(env, dir, args...)
+		if err == nil {
+			carrierAlertClear(o.WorkItemID, e.Name())
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %v: %s\n", o.WorkItemID, e.Name(), err, strings.TrimSpace(out))
+		// Any carrier failure means a re-claim would lose this repo's
+		// commits: raised once as a carrier_push_failed event (a human
+		// decision for the watcher) until a push of the repo succeeds
+		// again — not on every publish.
+		if o.EventSink != nil && carrierAlertOnce(o.WorkItemID, e.Name()) {
+			o.EventSink(EventCarrierPushFailed, map[string]any{
+				"repo":  e.Name(),
+				"ref":   TaskRefName(e.Name()),
+				"error": err.Error(),
+			})
+		}
+		// Never force: a non-fast-forward rejection means the carrier
+		// and this worktree DIVERGED (e.g. a re-claim that started
+		// from a clone lacking the carried commits). The carrier is
+		// left untouched and the divergence is raised as an error
+		// event, not left to stderr.
+		if IsNonFastForward(err, out) && o.EventSink != nil {
+			o.EventSink(EventTaskRefDiverged, map[string]any{
+				"repo":  e.Name(),
+				"ref":   TaskRefName(e.Name()),
+				"error": err.Error(),
+			})
 		}
 	}
 }
@@ -877,6 +894,46 @@ func cleanStaleLocks(gitDir string) error {
 // EventTaskRefDiverged is the error event kind raised when the carrier
 // push of one task repo is rejected non-fast-forward.
 const EventTaskRefDiverged = "task_ref_diverged"
+
+// EventCarrierPushFailed is the event kind raised when the carrier push
+// of one task repo fails for any reason (blob limit, divergence,
+// transport): a re-claim would restore that repo without the commits
+// since its last carried head, so the watcher classifies it as a human
+// decision (polyforge#158). Raised once per work item + repo until a
+// carrier push of that repo succeeds again (carrierAlertOnce).
+const EventCarrierPushFailed = "carrier_push_failed"
+
+// carrierAlerted holds, in memory, the work item + repo pairs whose
+// carrier failure has already been raised; a successful carrier push
+// clears the pair, so a later failure alerts again. A daemon restart
+// forgets it: the next failure after a restart alerts once more.
+var carrierAlerted = struct {
+	sync.Mutex
+	m map[string]bool
+}{m: map[string]bool{}}
+
+func carrierKey(wi, repo string) string { return wi + "\x00" + repo }
+
+// carrierAlertOnce records a carrier failure for wi/repo and reports
+// whether it is the first since the last success (i.e. whether to alert).
+func carrierAlertOnce(wi, repo string) bool {
+	carrierAlerted.Lock()
+	defer carrierAlerted.Unlock()
+	k := carrierKey(wi, repo)
+	if carrierAlerted.m[k] {
+		return false
+	}
+	carrierAlerted.m[k] = true
+	return true
+}
+
+// carrierAlertClear forgets wi/repo's raised failure after a successful
+// carrier push.
+func carrierAlertClear(wi, repo string) {
+	carrierAlerted.Lock()
+	delete(carrierAlerted.m, carrierKey(wi, repo))
+	carrierAlerted.Unlock()
+}
 
 // IsNonFastForward reports a push refused because the remote ref is not an
 // ancestor of the pushed commit. It matches git's C-locale output

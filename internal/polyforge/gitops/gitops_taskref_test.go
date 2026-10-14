@@ -249,7 +249,7 @@ func TestPushTaskRefsWithoutReposIsANoop(t *testing.T) {
 // stderr).
 func TestTaskRefDivergenceIsRejectedAndRaisedAsEvent(t *testing.T) {
 	setIdentity(t)
-	o, base := taskOpts(t, "wi_task3")
+	o, base := taskOpts(t, "wi_task5")
 	mkBare(t, o.RemoteURL, false)
 	mkTaskCapsule(t, o)
 	workHead := mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
@@ -281,8 +281,10 @@ func TestTaskRefDivergenceIsRejectedAndRaisedAsEvent(t *testing.T) {
 	if got, _ := bareRefSHA(t, o.RemoteURL, TaskRefName("demo-src")); got != workHead {
 		t.Fatalf("carrier moved to %q: a diverged push must never overwrite it (want %q)", got, workHead)
 	}
-	if len(kinds) != 1 || kinds[0] != EventTaskRefDiverged {
-		t.Fatalf("events = %v, want one %s", kinds, EventTaskRefDiverged)
+	// A divergence is a carrier failure too: the human decision first,
+	// then the divergence detail.
+	if len(kinds) != 2 || kinds[0] != EventCarrierPushFailed || kinds[1] != EventTaskRefDiverged {
+		t.Fatalf("events = %v, want [%s %s]", kinds, EventCarrierPushFailed, EventTaskRefDiverged)
 	}
 	if body["repo"] != "demo-src" || body["ref"] != TaskRefName("demo-src") {
 		t.Fatalf("event body = %v", body)
@@ -362,5 +364,97 @@ func TestIsNonFastForwardOnRealGitOutput(t *testing.T) {
 	o := Opts{WorkItemID: "wi_loc", RemoteURL: bare, Username: "u", Secret: "s"}
 	if sha, err := FetchTaskRef(o, b, "nothing"); err != nil || sha != "" {
 		t.Fatalf("absent carrier under a foreign locale: %q, %v", sha, err)
+	}
+}
+
+// polyforge#158: a failed carrier push is raised as a carrier_push_failed
+// event (the watcher's human decision) — ONCE per work item + repo, not
+// on every publish, until a carrier push of that repo succeeds again; a
+// later failure then alerts again. The body names the repo and keeps the
+// git error as detail (the watcher's line never shows it).
+func TestCarrierPushFailureAlertsOnceUntilSuccess(t *testing.T) {
+	setIdentity(t)
+	o, base := taskOpts(t, "wi_task6")
+	bare := mkBare(t, o.RemoteURL, true) // hook: seq enforced on EVERY ref
+	mkTaskCapsule(t, o)
+	workHead := mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
+	t.Cleanup(func() { carrierAlertClear(o.WorkItemID, "demo-src") })
+
+	var kinds []string
+	var bodies []map[string]any
+	o.EventSink = func(kind string, b map[string]any) {
+		kinds = append(kinds, kind)
+		bodies = append(bodies, b)
+	}
+	publish := func(label string) {
+		t.Helper()
+		if _, _, _, err := CommitPush(o, label); err != nil {
+			t.Fatalf("CommitPush(%s): %v", label, err)
+		}
+	}
+
+	// 1. Rejected carrier: one alert.
+	publish("boundary 1")
+	if len(kinds) != 1 || kinds[0] != EventCarrierPushFailed {
+		t.Fatalf("events = %v, want one %s", kinds, EventCarrierPushFailed)
+	}
+	if bodies[0]["repo"] != "demo-src" || bodies[0]["ref"] != TaskRefName("demo-src") {
+		t.Fatalf("event body = %v", bodies[0])
+	}
+	if e, _ := bodies[0]["error"].(string); !strings.Contains(e, "Polyforge-Seq") {
+		t.Fatalf("event body must keep the git error as detail: %v", bodies[0])
+	}
+
+	// 2. Still failing on the next publish: no second alert.
+	publish("boundary 2")
+	if len(kinds) != 1 {
+		t.Fatalf("a persisting failure must not alert again: %v", kinds)
+	}
+
+	// 3. The carrier push succeeds (the hub accepts it now): no event,
+	// and the alert state is cleared.
+	if err := os.Remove(filepath.Join(bare.dir, "hooks", "pre-receive")); err != nil {
+		t.Fatal(err)
+	}
+	publish("boundary 3")
+	if len(kinds) != 1 {
+		t.Fatalf("a successful carrier push must raise nothing: %v", kinds)
+	}
+	if got, ok := bareRefSHA(t, o.RemoteURL, TaskRefName("demo-src")); !ok || got != workHead {
+		t.Fatalf("carrier = %q (%v), want %q", got, ok, workHead)
+	}
+
+	// 4. A new failure after the success alerts again (here: a diverged
+	// head, rejected non-fast-forward).
+	repoDir := filepath.Join(o.CapsuleDir, capsule.DirRepos, "demo-src")
+	mustRun(t, "git", "-C", repoDir, "reset", "-q", "--hard", "HEAD~1")
+	if err := os.WriteFile(filepath.Join(repoDir, "other.txt"), []byte("diverged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, "git", "-C", repoDir, "add", "-A")
+	mustRun(t, "git", "-C", repoDir, "commit", "-q", "-m", "diverged work")
+	publish("boundary 4")
+	if len(kinds) != 3 || kinds[1] != EventCarrierPushFailed || kinds[2] != EventTaskRefDiverged {
+		t.Fatalf("events = %v, want a second %s after the success", kinds, EventCarrierPushFailed)
+	}
+}
+
+// The once-per-repo state is keyed by work item AND repo: a failure of
+// one repo never silences another repo's, or another work item's.
+func TestCarrierAlertOnceIsPerWorkItemAndRepo(t *testing.T) {
+	t.Cleanup(func() {
+		carrierAlertClear("wi_a", "r1")
+		carrierAlertClear("wi_a", "r2")
+		carrierAlertClear("wi_b", "r1")
+	})
+	if !carrierAlertOnce("wi_a", "r1") || carrierAlertOnce("wi_a", "r1") {
+		t.Fatal("wi_a/r1: first failure alerts, the second does not")
+	}
+	if !carrierAlertOnce("wi_a", "r2") || !carrierAlertOnce("wi_b", "r1") {
+		t.Fatal("another repo / another work item must alert on its own")
+	}
+	carrierAlertClear("wi_a", "r1")
+	if !carrierAlertOnce("wi_a", "r1") {
+		t.Fatal("after a success the next failure alerts again")
 	}
 }
