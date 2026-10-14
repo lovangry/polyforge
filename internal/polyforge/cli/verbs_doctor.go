@@ -30,12 +30,16 @@ import (
 //   - the connectivity family: server reach (any HTTP answer proves it),
 //     daemon socket (GET /status over the UDS), auth (a signed aihub
 //     read getting past the key boundary — the same read face the
-//     projects check uses, no admin-only surface).
+//     projects check uses, no admin-only surface);
+//   - the harness progress-display family (doctor_display.go): Claude
+//     Code's statusLine and pi's pf-chat extension — pass/warn/skip
+//     only, never fail, so they never move the exit code. `--harness`
+//     runs this family alone (tools/install.sh prints it).
 //
 // Exit codes: 0 every check passes, 1 any check fails, 2 usage errors
 // (the repo convention — unknown flags parse-fail before any check).
 // --json emits {"ok": <bool>, "checks": [{"name", "status":
-// "pass"|"fail"|"skip", "detail"}]}.
+// "pass"|"fail"|"skip"|"warn", "detail"}]}.
 //
 // The verb loads the config ITSELF (Command.NoConfigLoad): an unloadable
 // config is the subject of the report, not an early exit.
@@ -69,15 +73,22 @@ const (
 var cmdDoctor = &Command{
 	Name:         "doctor",
 	Group:        GroupDiag,
-	Summary:      "Check this daemon's health: config, workspace mapping, connectivity",
-	Usage:        "pf doctor [--json]",
+	Summary:      "Check this daemon's health: config, workspace mapping, connectivity, progress display",
+	Usage:        "pf doctor [--harness] [--json]",
 	NoConfigLoad: true,
-	Setup:        func(fs *flag.FlagSet) {},
+	Setup: func(fs *flag.FlagSet) {
+		fs.Bool("harness", false, "run only the harness progress-display checks")
+	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 0 {
 			return fmt.Errorf("doctor: unexpected arguments %v", args)
 		}
-		rep := runDoctorChecks(ctx)
+		var rep doctorReport
+		if boolFlag(fs, "harness") {
+			rep = doctorReport{OK: true, Checks: harnessDisplayChecks()}
+		} else {
+			rep = runDoctorChecks(ctx)
+		}
 		if ctx.JSON {
 			b, err := json.Marshal(rep)
 			if err != nil {
@@ -128,6 +139,7 @@ func runDoctorChecks(ctx *Context) doctorReport {
 		for _, name := range []string{docChMapping, docChDirs, docChProjects, docChServer, docChSocket, docChAuth} {
 			add(name, "skip", "config-dependent check not run: the config could not be loaded")
 		}
+		checks = append(checks, harnessDisplayChecks()...)
 		return doctorReport{OK: false, Checks: checks}
 	}
 	where := ctx.ConfigPath
@@ -219,6 +231,8 @@ func runDoctorChecks(ctx *Context) doctorReport {
 			add(docChAuth, "skip", "not proven: the aihub project read failed for another reason")
 		}
 	}
+
+	checks = append(checks, harnessDisplayChecks()...)
 
 	ok := true
 	for _, c := range checks {
