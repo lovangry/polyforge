@@ -99,8 +99,8 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 | 细分 | 判据 | 处理 |
 |---|---|---|
-| 模型类 | 退出前最后信号为"本轮出错"，或退出码 / 错误文本命中模型类特征（模型名不可解析、401/鉴权失败等） | 同 `model_error`：换模型（F4 教训：模型 pin 失败必须推进候选） |
-| 限流类（polyforge#147 D7） | 错误文本命中限流特征（429 / rate limit / too many requests / overloaded / 配额 / 余额·账单），判在模型类之前 | `rate_limited`：原模型退避重试，不推进候选指针、不计失败计数 |
+| 模型类 | 错误文本命中模型类特征（模型名不可解析、401/403/鉴权失败、quota / insufficient / billing / credit 等额度·权限问题），或退出前最后信号为"本轮出错"且文本不是纯限流 | 同 `model_error`：换模型（F4 教训：模型 pin 失败必须推进候选）。模型类文本判在限流类之前：同时带 429 的"exceeded your current quota"仍换模型 |
+| 限流类（polyforge#147 D7） | 错误文本**只**命中瞬时限流特征（429 / rate limit / too many requests / overloaded），且不命中模型类特征 | `rate_limited`：原模型退避重试，不推进候选指针、不计失败计数 |
 | 机器类 | driver 自身 I/O 错误（ENOSPC、EACCES 等）或翻译器上报的宿主错误 | 机器问题 |
 | 其余 | — | 同模型重试 |
 
@@ -113,9 +113,9 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | `ended_without_result` | 同模型重试；重试的 prompt 明确告知"上一轮已结束但没有写结果信封"。进程在正常结束一轮后以退出码 0 自行退出且无结果，也归此类（被杀 / 崩溃仍是退出其余） |
 | `model_error`、`model_hung`、退出（模型类） | 换下一个候选模型 |
 | `step_timeout_slow_model` | **放宽 T（翻倍，写入 `execution.json`）后换下一个候选模型**（polyforge#147 D6）：新候选在**放宽后的完整额度**下运行，累计耗时连续结转但严格低于翻倍后的界——绝不在启动瞬间即被判超时 |
-| `rate_limited`（429 / rate limit / too many requests / overloaded / quota / insufficient / billing / credit） | **不换模型**：原模型退避重试（polyforge#147 D7），退避 1s 起逐次翻倍、单次上限 300s；**不另设重试次数上限**，唯一的界是该步累计 T；**不放宽 T**（只有超时类死因放宽）；不计入失败计数 |
+| `rate_limited`（429 / rate limit / too many requests / overloaded；额度/账单/权限类不在此列，归模型类换模型） | **不换模型**：原模型退避重试（polyforge#147 D7），退避 1s 起逐次翻倍、单次上限 300s；**退避等待计入该步累计 T**；**不另设重试次数上限**，唯一的界是该步累计 T（T 耗尽即走既有超时处理）；**不放宽 T**（只有超时类死因放宽）；不计入失败计数 |
 | `tool_hung` | 同模型重试，并**放宽 Y**（同 T 的放宽规则） |
-| `step_timeout_long_task` | 同模型重试（**不换模型**）并放宽 T（翻倍并持久化）；再超时 → blocked |
+| `step_timeout_long_task` | 同模型重试（**不换模型**）并放宽 T（翻倍并持久化）；再超时 → 同样再翻倍 T 并持久化，然后 blocked（人工"继续"在新放宽的界下运行，不会一启动就超时） |
 | 机器问题 | blocked，通知人，不换模型 |
 | daemon 重启 | 同模型重新派发，**不计失败** |
 | `driver_stalled` | 终止当前 git/推送子进程，driver 重拉（计入 driver 异常退出界） |
@@ -140,9 +140,9 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - **T 的 step 级覆盖复用现有 `budget.wall_minutes`**，但它是**估计值而非硬上限**（bundle 里现有的 15–30 分钟都是估计）：声明了 `wall_minutes` 的 step，总时长界 **T = max(3 × wall_minutes, 全局 `--step-timeout` 默认)**；未声明则就是全局默认。不新增键；X、Y 的 step 级覆盖在 frontmatter 新增。覆盖值随 bundle 在领取时钉住，对之后领取的 WI 生效。
 - X 默认按 harness 翻译器声明的**输出粒度**取：逐字粒度（思考时也有输出）可短（例 10 分钟）；整条粒度或模型不返回思考内容时放长（例 30 分钟）。"模型不返回思考内容"在模型配置中声明。
 - Y 默认 30 分钟（#83 教训）；T 默认 60–90 分钟（#117 教训）；N 默认 10 分钟。
-- **放宽**：每次放宽翻倍（放宽后的界 = 放宽前界 × 2），写入 `execution.json`（`steps.<id>.supervision.relaxed_wall_ms` / `relaxed_tool_ms`），重启后沿用。**只有超时类死因放宽 T**（`step_timeout_slow_model` 与 `step_timeout_long_task` 各自在处置时放宽一次）；换模型、人工继续、限流退避一律不放宽（polyforge#147 D6）。
-- T 按**整个步骤累计**（跨该步的多次派发、跨换模型、跨人工继续连续累计，polyforge#147 D6 起不再有任何"重开窗口"的 rebase——`runtime_base_ms` 已删）；**只计 agent 实际运行时间**：等人回答（needs_input）的挂钟时间、限流退避的等待时间都不计入。
-- **rewind 重跑清零**：gate FAIL rewind 回到某步时，该步的累计 T 归零（旧窗口的记账随归档 attempt 留存）。
+- **放宽**：每次放宽翻倍（放宽后的界 = 放宽前界 × 2），写入 `execution.json`（`steps.<id>.supervision.relaxed_wall_ms` / `relaxed_tool_ms`），重启后沿用。**只有超时类死因放宽 T**（`step_timeout_slow_model` 与 `step_timeout_long_task` 每次处置都放宽一次，第二次 `step_timeout_long_task` 也先翻倍再 blocked）；换模型、人工继续、限流退避一律不放宽（polyforge#147 D6）。
+- T 按**整个步骤累计**（跨该步的多次派发、跨换模型、跨人工继续连续累计，polyforge#147 D6 起不再有任何"重开窗口"的 rebase——`runtime_base_ms` 已删）；计入 agent 实际运行时间与**限流退避的等待时间**（D7：同模型重试只受 T 约束，owner 裁定），等人回答（needs_input）的挂钟时间不计入。
+- **rewind 重跑清零**：gate FAIL rewind 回到某步时，该步的累计 T 归零（旧窗口的记账随归档 attempt 留存）；发起 rewind 的 gate 步自身（不归档、保持 in_progress）的累计 T 同样归零，重入在新窗口下评审。
 
 ### 2.5 harness 翻译器
 

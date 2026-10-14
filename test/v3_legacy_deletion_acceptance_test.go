@@ -491,11 +491,14 @@ func TestV3GrepCleanDeletedFaces(t *testing.T) {
 	}
 }
 
+// v3D15ReplayFixture is the one collected data file the scan skips.
+const v3D15ReplayFixture = "internal/polyforge/supervise/testdata/pi-session-replay.jsonl"
+
 // v3WalkTextFiles walks root's regular files, skipping .git/, the frozen
-// v0/ archive, testdata/ directories (real collected DATA fixtures —
-// e.g. the D15 replay fixture of the supervise package, captured pi
+// v0/ archive, the D15 replay fixture (v3D15ReplayFixture: captured pi
 // session records whose content legitimately discusses the retired
-// faces it replays — are not authored code/build surfaces), markdown
+// faces it replays — collected data, not an authored code/build
+// surface; every other testdata file is still scanned), markdown
 // (excluded from the gate by the spec), and non-regular entries
 // (symlinks — e.g. the shared-checkout links the capsule materialization
 // creates — and binary-looking files, sniffed by a NUL byte in the first
@@ -507,13 +510,16 @@ func v3WalkTextFiles(root string, fn func(path string, raw []byte)) error {
 		}
 		if de.IsDir() {
 			name := de.Name()
-			if name == ".git" || (name == "v0" && path == filepath.Join(root, "v0")) || name == "testdata" {
+			if name == ".git" || (name == "v0" && path == filepath.Join(root, "v0")) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		if !de.Type().IsRegular() {
 			return nil // symlinks and special files are not repo bytes
+		}
+		if path == filepath.Join(root, filepath.FromSlash(v3D15ReplayFixture)) {
+			return nil
 		}
 		if strings.HasSuffix(path, ".md") {
 			return nil

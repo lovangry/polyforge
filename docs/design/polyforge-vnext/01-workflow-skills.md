@@ -111,7 +111,7 @@ Step 元素字段：
 | `kind` | string | 必填 | one of `qa`\|`spec`\|`author`\|`code`\|`gate`\|`review`（V8）；分类分桶（§9）与结构约束（V10）的判定依据 |
 | `interactive` | bool | 可选，缺省 false | true 表示需要人在会话内驱动（grill/grill-review 等）；无位置限制（规则 V4） |
 | `gate` | bool | 可选，缺省 false | true 表示本 step 产出业务判定（review/verification/grill-review 皆可）；`interactive` 与 `gate` 可同时为 true |
-| `on_fail` | OnFail | 可选，仅 `gate: true` 的 step 允许携带 | `OnFail = {action: rewind, target: 更早的 step id（必填）}`；**polyforge#147 C5 起 driver 侧 bundle 解析器只认 `action: rewind`**——`terminate` 选项与 `include_verdict` 键已删除（gate FAIL 判定全文一律随 `pending_rewind_input` 送达 target，不再可关），未声明 `on_fail` 即 §6.2 第 1 步的 `failed_gate` 终止 |
+| `on_fail` | OnFail | 可选，仅 `gate: true` 的 step 允许携带 | `OnFail = {target: 更早的 step id（必填）}`——声明即 rewind 边；未声明 `on_fail` 即 §6.2 第 1 步的 `failed_gate` 终止。gate FAIL 判定全文一律随 `pending_rewind_input` 送达 target（polyforge#147 C5：`action` 与 `include_verdict` 键已删除，判定转发无条件） |
 | `context_policy` | string | 可选，缺省 `inherit` | `inherit`\|`fresh`：见 §4.4a。`inherit` 的 step 续上上游交接（派发输入带 handoff 文件正文），`fresh` 从零开始；`gate: true` 的 step 必须是 `fresh`（闸只凭自己的输入判，不继承有倾向性的上下文） |
 | `handoff` | bool | 可选，缺省 false | true 表示本 step 必须写交接文件 `artifacts/handoff-<step-id>.md`：见 §4.4a |
 | `budget` | Budget | 可选 | step 级，覆盖/叠加 workflow 级，结构同 §6.6 |
@@ -144,14 +144,14 @@ vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontm
 
 1. `grill`（`kind: qa`，`interactive: true`，非 gate）
 2. `spec`（`kind: spec`；消费 `grill` 的问答记录产物）
-3. `grill-review`（`kind: qa`，`interactive: true` 且 `gate: true`；消费 `spec` 的产物；`on_fail: {action: rewind, target: spec}`）
+3. `grill-review`（`kind: qa`，`interactive: true` 且 `gate: true`；消费 `spec` 的产物；`on_fail: {target: spec}`）
 4. `plan`（`kind: author`；消费 `spec` 的产物）
 5. `e2e-author`（`kind: author`；消费 `spec` 的产物，在 code 之前编写端到端验收场景）
 6. `e2e-baseline`（`kind: code`，非 gate；消费 `e2e-author` 的场景产物，对照实现前的工作树执行场景并把红 bar 交给 `code`）
 7. `code`（`kind: code`；消费 `plan` 的产物与 `e2e-baseline` 铺好的验收 bar）
-8. `e2e-run`（`kind: code`，`gate: true`；复跑 `e2e-author` 编写的同一套场景；`on_fail: {action: rewind, target: code}`）
-9. `review`（`kind: review`，`gate: true`；`on_fail: {action: rewind, target: code}`）
-10. `verification`（`kind: gate`，`gate: true`；最后一道机器闸，在 `review` 之后复跑完整绿灯 bar；`on_fail: {action: rewind, target: code}`）
+8. `e2e-run`（`kind: code`，`gate: true`；复跑 `e2e-author` 编写的同一套场景；`on_fail: {target: code}`）
+9. `review`（`kind: review`，`gate: true`；`on_fail: {target: code}`）
+10. `verification`（`kind: gate`，`gate: true`；最后一道机器闸，在 `review` 之后复跑完整绿灯 bar；`on_fail: {target: code}`）
 
 （2026-10-13 起 feature-full / bug-fix / quick-fix 不再含 `release` 槽位，见下方「发版独立成 bundle」。）
 
@@ -171,7 +171,7 @@ vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontm
 
 - step 间数据流不入结构 schema（§4.1）：上游产物落 Capsule `artifacts/` 与 `execution.json` 的 `steps.<id>.output`（`03-execution-capsule.md#§4.2`），下游 step 的 agent 指令（§4.4 正文）按产物路径约定读取。grill 的问答记录（`artifacts/grill-qa.md`，§4.3）即按此约定被 `spec` 与 `grill-review` 消费。
 - `grill` 在 `spec` 之前、`grill-review` 在 `spec` 之后：两者都是普通 step，位置由数组顺序表达；`grill` 先于全部 `kind: spec` step 由 V10 结构性保证，`grill-review`（`gate: true` 的 qa step）的位置由 bundle 作者在数组中排定。
-- `grill-review` 是两段式 grill 的既定实现（不是待设计的回调）：其 PASS/FAIL 判定复用 §6.2 既有 rewind 机制；FAIL 且目标为 `spec` 时，FAIL 判定全文随目标 step 的输入一并送回（polyforge#147 C5 起 `include_verdict` 键已删，送回是无条件的），不引入任何新状态或恢复机制。
+- `grill-review` 是两段式 grill 的既定实现（不是待设计的回调）：其 PASS/FAIL 判定复用 §6.2 既有 rewind 机制；FAIL 且目标为 `spec` 时，FAIL 判定全文随目标 step 的输入一并送回（无条件），不引入任何新状态或恢复机制。
 - `review` 的位置自由度由 `kind: review` 表达（V8：可插在任意合法位置）；WI 创建固化后，执行序即 frontmatter `steps` 数组顺序，运行时不再漂移。
 
 ### 4.3 grill 的两段式行为 <!-- §4.3 -->
@@ -179,7 +179,7 @@ vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontm
 grill 的两段职责分别由两个独立 step 承载，不是单 step 内的隐藏相位：
 
 1. **`grill`**（spec 之前）：对模糊需求逐项发问，`interactive: true`，非 gate；问答记录写入 Capsule `artifacts/grill-qa.md`，产物路径记入 `steps.grill.output` 供 `spec` 消费。
-2. **`grill-review`**（spec 之后）：对 spec 产物做一次总结性确认问答，`interactive: true` 且 `gate: true`；PASS 表示用户确认无异议，直接推进 `plan`；FAIL 表示用户要求修改，触发 `on_fail: {action: rewind, target: spec}`（复用 §6.2 机制），问答追加进同一份 `artifacts/grill-qa.md`（按 step id 分节）。
+2. **`grill-review`**（spec 之后）：对 spec 产物做一次总结性确认问答，`interactive: true` 且 `gate: true`；PASS 表示用户确认无异议，直接推进 `plan`；FAIL 表示用户要求修改，触发 `on_fail: {target: spec}`（复用 §6.2 机制），问答追加进同一份 `artifacts/grill-qa.md`（按 step id 分节）。
 
 `grill-review` 的判定语义是「人是否确认」而非质量评分，但驱动引擎不区分判定来源，一律按 gate FAIL 语义处理，因此不需要为其新增状态机分支，恢复路径与其余 gate 完全一致。
 
@@ -275,7 +275,7 @@ step 单次执行尝试的消耗；workflow 级上界限制整个 WI 生命周�
 | WF-202 | 创建事务内本机 checkout 并发变更，导致校验读取与 digest 输入不一致（§4.5 第 3 步重算不可复现）；创建整体失败，无中间状态落库，重试创建即可 |
 | WF-203 | 执行机本机 checkout 的 bundle 文件漂移（例如 checkout 被误改、停留在错误版本或缺失文件）：物化不做 digest 校验（校验链已删，polyforge#149 B9），缺 bundle/缺文件按 `03-execution-capsule.md#§4.5` **告警继续**；确需修复时更新本机 checkout 后由新 generation 重物化，Core 不提供任何文件取回端点（`02-aihub-core.md#§4.4`） |
 | WF-101 | rewind 上界耗尽，终态 `failed_rewind_exhausted` |
-| WF-102 | gate FAIL 且无 rewind（`on_fail` 缺失或 `action: terminate`），终态 `failed_gate` |
+| WF-102 | gate FAIL 且无 rewind（`on_fail` 缺失），终态 `failed_gate` |
 | WF-103 | 超预算（`OVER_BUDGET`），workflow 转 blocked（§6.6） |
 | WF-105 | interactive step 在无人驱动（批处理）模式下被调度：不派发，其 WI 转 blocked（`waiting_on=owner`，`02-aihub-core.md#§2.4`） |
 
@@ -293,12 +293,12 @@ step 单次执行尝试的消耗；workflow 级上界限制整个 WI 生命周�
 
 当一个 `gate: true` 的 step 产出 `FAIL` 判定时，按下列步骤处理：
 
-1. 若该 step 未声明 `on_fail`，或声明为 `action: terminate`：workflow 立即终止，终态为 `failed_gate`（`WF-102`），FAIL 判定全文随下一次同步发布一并写入 `execution.json`（权威 schema 见 `03-execution-capsule.md#§4.2`，本文只引用）。流程到此结束。
-2. 若声明为 `action: rewind`：先检查两类上界。若本 workflow 实例的累计 rewind 次数已达到 `rewind.max_total`（缺省 4），或本次回退目标 step 被重入的次数已达到 `rewind.max_per_step`（缺省 2）：workflow 终止，终态为 `failed_rewind_exhausted`（`WF-101`）。这两类上界检查中的任一命中都必须立即终止流程，不得在命中后继续执行下面的回退步骤。
+1. 若该 step 未声明 `on_fail`：workflow 立即终止，终态为 `failed_gate`（`WF-102`），FAIL 判定全文随下一次同步发布一并写入 `execution.json`（权威 schema 见 `03-execution-capsule.md#§4.2`，本文只引用）。流程到此结束。
+2. 若声明了 `on_fail: {target: X}`：先检查两类上界。若本 workflow 实例的累计 rewind 次数已达到 `rewind.max_total`（缺省 4），或本次回退目标 step 被重入的次数已达到 `rewind.max_per_step`（缺省 2）：workflow 终止，终态为 `failed_rewind_exhausted`（`WF-101`）。这两类上界检查中的任一命中都必须立即终止流程，不得在命中后继续执行下面的回退步骤。
 3. 若两类上界均未命中：累计 rewind 计数（`consumed_rewinds_total`）与该目标的重入计数（`rewinds_reached[target]`）各加一；两者的唯一持久化落盘形态是 `execution.json` 的 `rewind_stats`（`03-execution-capsule.md#§4.2`），本文只定义计数语义。
 4. 对区间 `[target, gate)`（包含 `target` 本身，不包含触发 FAIL 的 gate step 自身）内的每个 step：把它当前的执行结果归档为一条历史尝试记录（不覆盖删除，供审计；归档 attempts 的权威 schema 在 `03-execution-capsule.md#§4.2` 的 `steps.<id>.attempts`，本文只引用），随后把它在 `execution.json` 中的状态重置为 `pending`、输出清空。清空输出的目的是防止任何下游 step 在重跑前消费到陈旧产物。
 5. 把当前执行位置设回 `target`。
-6. 若 `on_fail.include_verdict` 为真（缺省即真）：把本次 FAIL 判定全文作为附加输入传给 `target` step，保证触发回退的意见必定到达被回退的 step，不依赖任何旁路传递。该判定全文在触发 rewind 时即作为**待消费 rewind 输入**持久化在 `execution.json` 中（权威 schema 见 `03-execution-capsule.md#§4.2` 的 `steps.<id>.pending_rewind_input`，本文只引用），`target` 重跑时从该记录消费，不依赖 WI Agent 进程内存。
+6. 把本次 FAIL 判定全文（无条件）作为附加输入传给 `target` step，保证触发回退的意见必定到达被回退的 step，不依赖任何旁路传递。该判定全文在触发 rewind 时即作为**待消费 rewind 输入**持久化在 `execution.json` 中（权威 schema 见 `03-execution-capsule.md#§4.2` 的 `steps.<id>.pending_rewind_input`，本文只引用），`target` 重跑时从该记录消费，不依赖 WI Agent 进程内存。
 7. 本次 rewind 消耗计入预算（§6.6）。
 8. 流程从 `target` 重新按 §6.1 的顺序推进逻辑继续执行。
 

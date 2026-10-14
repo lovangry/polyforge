@@ -157,9 +157,9 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 	}
 
 	// B resumed at the interrupted step (the last one) and parks on it.
-	waitStepStatus(t, daemonB, wi, "verification", "in_progress", 90*time.Second)
+	waitStepStatus(t, daemonB, wi, "verification", "in_progress", 60*time.Second)
 	capB := daemonB.capsuleDir(wi)
-	waitUntil(t, 60*time.Second, "B's verification never parked", func() bool {
+	waitUntil(t, 30*time.Second, "B's verification never parked", func() bool {
 		for _, rec := range fakeJournal(t, capB) {
 			if n, _ := rec["spawn_n"].(float64); rec["type"] == "park" && int(n) > preSpawns {
 				return true
@@ -183,8 +183,11 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 			stepsRun = append(stepsRun, rec["step"].(string))
 		}
 	}
-	if contains(stepsRun, "grill") || contains(stepsRun, "fix") {
-		t.Fatalf("B re-ran a completed step: B's envelope writes %v", stepsRun)
+	if len(stepsRun) == 0 || contains(stepsRun, "grill") || contains(stepsRun, "fix") {
+		t.Fatalf("B re-ran a completed step or ran nothing: B's envelope writes %v", stepsRun)
+	}
+	if stepsRun[0] != "verification" {
+		t.Fatalf("B did not resume at the interrupted step: %v", stepsRun)
 	}
 	x := readExecution(t, capB)
 	if x.CurrentStep != "verification" || x.Steps["grill"].Status != "done" || x.Steps["fix"].Status != "done" {
@@ -215,7 +218,7 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 	if len(stepPIDsBefore) == 0 {
 		t.Fatal("B's parked verification step has no live process to protect")
 	}
-	spawnsAtPark := len(spawnJournal(t, capB))
+	spawnsAtRelease := len(spawnJournal(t, capB))
 
 	// A restarts later: its restart session verify sees the WI is held by
 	// another session and releases — no resurrection, no double-run, no
@@ -256,8 +259,8 @@ func TestV2M3EndSessionRecovery(t *testing.T) {
 	}
 	// No double-run: B's chain-wide dispatch count did not move.
 	time.Sleep(2 * time.Second)
-	if n := len(spawnJournal(t, capB)); n != spawnsAtPark {
-		t.Fatalf("a dispatch appeared after A's restart: %d, want %d", n, spawnsAtPark)
+	if n := len(spawnJournal(t, capB)); n != spawnsAtRelease {
+		t.Fatalf("a dispatch appeared after A's restart: %d, want %d", n, spawnsAtRelease)
 	}
 }
 
