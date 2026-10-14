@@ -32,7 +32,7 @@ func TestS12ManualModelsBeatYamlAndAdvanceOnModelFailure(t *testing.T) {
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 		})
 	d.pfWant(inst, -1, "submit", wi, "--models", "s12-m1, s12-m2,s12-m3")
-	capDir := w079Capsule(ws, wi)
+	capDir := w079Capsule(t, inst, ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113WaitCompleted(t, capDir, 300*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 90*time.Second)
@@ -97,7 +97,7 @@ func TestS12ManualModelsSurviveDaemonRestart(t *testing.T) {
 	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d.start()
 	d.pfWant(inst, -1, "submit", wi, "--models", "s12-m1,s12-m2")
-	capDir := w079Capsule(ws, wi)
+	capDir := w079Capsule(t, inst, ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113StepStatus(t, capDir, "fix", "in_progress", 90*time.Second)
 	time.Sleep(2 * time.Second)

@@ -70,7 +70,7 @@ type Config struct {
 	// Mapping is the REQUIRED workspace→projects plan of record
 	// (polyforge#113), assembled in main.go from the shared config's
 	// [workspace."<path>"] sections. Capsules route per project through
-	// the inverse mapping: <mapped-workspace>/capsules/<wi_id>. There is
+	// the inverse mapping: <mapped-workspace>/capsules/<project>-<seq>. There is
 	// no single workspace and no daemon project scope anymore — batch
 	// and drain iterate ALL mapped projects. New validates the mapping
 	// is non-empty and every mapped workspace exists with capsules/

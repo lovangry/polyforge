@@ -19,6 +19,7 @@ import (
 type JobInfo struct {
 	WorkItem string
 	Project  string
+	Slug     string // "<project>#<seq>" display name; "" on a pre-slug record
 	// SessionFingerprint is the PUBLIC session handle (B3); the secret
 	// never leaves state.json and the one-shot askpass, but it is exposed
 	// here for the daemon's in-process faces (the M4 revalidation seam
@@ -70,6 +71,7 @@ func (j *job) info() JobInfo {
 	return JobInfo{
 		WorkItem:           j.wi,
 		Project:            j.project,
+		Slug:               j.slug,
 		SessionFingerprint: j.sessionFingerprint,
 		State:              j.state,
 		StopReason:         j.stopReason,

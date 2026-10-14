@@ -8,7 +8,7 @@ package test
 // gh under the authenticated account, a WI whose driver-pinned workflow
 // lays the inventory repo (the fix step's envelope action) and completes,
 // then the real `pf --json ship` — asserting the PR actually opens on
-// github.com with head branch polyforge/<wi>, and that a second ship
+// github.com with head branch polyforge/<project>-<seq>, and that a second ship
 // reuses the SAME single OPEN PR instead of duplicating it.
 //
 // The scenario is OPT-IN: it creates a real repo and PR with the machine's
@@ -192,7 +192,7 @@ func TestV1S19ShipPR(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &ship); err != nil {
 		t.Fatalf("ship answer undecodable: %v (%q)", err, out)
 	}
-	if ship.Branch != "polyforge/"+wi {
+	if ship.Branch != "polyforge/"+wiPathName(t, inst, wi) {
 		t.Fatalf("ship branch wrong: %q", ship.Branch)
 	}
 	if len(ship.Repos) != 1 || ship.Repos[0].Name != "demo" {
@@ -211,7 +211,7 @@ func TestV1S19ShipPR(t *testing.T) {
 
 	// Independent verification: the PR is real, OPEN, on the right
 	// head branch, and its url is the ship-reported one.
-	branch := "polyforge/" + wi
+	branch := "polyforge/" + wiPathName(t, inst, wi)
 	state, headRefName, prURL := ghViewPR(t, fullRepo, branch)
 	if state != "OPEN" {
 		t.Fatalf("pr state %q, want OPEN (pr %s)", state, prURL)

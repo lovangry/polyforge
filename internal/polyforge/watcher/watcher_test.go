@@ -197,6 +197,38 @@ func TestDecisionLineSanitizesTheWIId(t *testing.T) {
 	}
 }
 
+// polyforge#144: the human faces name the WI by its slug — the progress
+// line, the --once header (id beside it), the wake-up line and the
+// attention notice; "#" survives the charset filter.
+func TestHumanFacesNameTheWIBySlug(t *testing.T) {
+	now := time.Date(2026, 10, 12, 10, 4, 12, 0, time.UTC)
+	snap := running("wi_LRLfXwxPqtEw", "grill")
+	snap.Slug = "polyforge#140"
+	snap.Execution.PendingQuestion = &protocol.WatchPendingQuestion{ID: "q-1", Step: "grill", Question: "?"}
+	if got := ProgressLine(snap, now); got != "polyforge#140 needs input step=grill 4m12s" {
+		t.Fatalf("progress line: %q", got)
+	}
+	if once := FormatOnce(snap, now, 8); !strings.HasPrefix(once, "work item:  polyforge#140 (wi_LRLfXwxPqtEw)\n") {
+		t.Fatalf("--once header: %q", once)
+	}
+	res := Evaluate(protocol.ChatSub{WI: snap.WorkItem}, snap)
+	if len(res.Decisions) != 1 {
+		t.Fatalf("decisions = %+v", res.Decisions)
+	}
+	want := "[polyforge] polyforge#140 needs_input q-1 — a step is waiting for a human answer; " + suffix
+	if got := res.Decisions[0].Line(); got != want {
+		t.Fatalf("wake-up line:\n got %q\nwant %q", got, want)
+	}
+	if got := AttentionLine([]string{"polyforge#140"}); !strings.Contains(got, "1 WI needs you: polyforge#140 —") {
+		t.Fatalf("attention line: %q", got)
+	}
+	// no slug known: the id stands in
+	snap.Slug = ""
+	if got := ProgressLine(snap, now); !strings.HasPrefix(got, "wi_LRLfXwxPqtEw ") {
+		t.Fatalf("id fallback: %q", got)
+	}
+}
+
 func TestAttentionLineIsFixedTemplate(t *testing.T) {
 	got := AttentionLine([]string{"wi_b", "wi_a"})
 	want := "[polyforge] 2 WIs need you: wi_a, wi_b — pending human decisions; this is a human decision, the agent must not answer it"

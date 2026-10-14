@@ -36,7 +36,9 @@ type submitResponse struct {
 
 type statusJob struct {
 	WorkItemID string `json:"work_item_id"`
-	Status     string `json:"status"`
+	// Slug is the "<project>#<seq>" display name ("" on a pre-slug record).
+	Slug   string `json:"slug,omitempty"`
+	Status string `json:"status"`
 	// SpawnN is the v1.5 B2 derivation counter; SessionFingerprint is
 	// the PUBLIC session handle (B3) — together they replace the deleted
 	// attempt-id lineage handle.
@@ -97,6 +99,7 @@ type opsConfigResponse struct {
 
 type closeResponse struct {
 	WorkItemID string `json:"work_item_id"`
+	Slug       string `json:"slug,omitempty"` // display name, from the job record
 	// Outcome: sealed | already_terminal | already_paused.
 	Outcome string `json:"outcome"`
 	Status  string `json:"status,omitempty"`
@@ -531,7 +534,7 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	// happened and the record is exactly where the contract wants it.
 	if reason == reasonPaused && ji.State == runtime.StatePaused {
 		writeJSON(w, http.StatusOK, closeResponse{
-			WorkItemID: wi, Outcome: "already_paused", Status: string(ji.State),
+			WorkItemID: wi, Slug: ji.Slug, Outcome: "already_paused", Status: string(ji.State),
 		})
 		return
 	}
@@ -550,14 +553,14 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	if err := d.rt.Stop(ctx, wi, reason); err != nil {
 		graceful, ae := d.mapCloseErr(err)
 		if graceful {
-			writeJSON(w, http.StatusOK, closeResponse{WorkItemID: wi, Outcome: "already_terminal"})
+			writeJSON(w, http.StatusOK, closeResponse{WorkItemID: wi, Slug: ji.Slug, Outcome: "already_terminal"})
 			return
 		}
 		writeJSON(w, ae.HTTPStatus(), ae)
 		return
 	}
 	writeJSON(w, http.StatusOK, closeResponse{
-		WorkItemID: wi, Outcome: "sealed", Reason: reason,
+		WorkItemID: wi, Slug: ji.Slug, Outcome: "sealed", Reason: reason,
 	})
 }
 
@@ -627,6 +630,7 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 		}
 		sj := statusJob{
 			WorkItemID: ji.WorkItem,
+			Slug:       ji.Slug,
 			Status:     string(ji.State),
 			// the rendered identity is the PUBLIC session handle plus the
 			// derivation counter (B2/B3) — never the secret.

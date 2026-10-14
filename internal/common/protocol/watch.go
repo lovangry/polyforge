@@ -17,6 +17,10 @@ package protocol
 // local bookkeeping; Events carry only what happened after `after`.
 type WatchSnapshot struct {
 	WorkItem string `json:"work_item"`
+	// Slug is the WI's "<project>#<seq>" display name, from the daemon's
+	// job record or the aihub record — never agent text. Empty when
+	// neither knows it; the human faces then show WorkItem.
+	Slug string `json:"slug,omitempty"`
 	// Known is false when the daemon holds neither a job record nor a
 	// capsule for the WI — a WI submitted but not yet registered (queued /
 	// preparing), or one this daemon never saw.
@@ -92,6 +96,9 @@ type WatchProgress struct {
 // ChatSub is one daemon-held subscription of a chat to a WI.
 type ChatSub struct {
 	WI string `json:"wi"`
+	// Slug is the WI's display name, recorded at subscribe time (empty
+	// when unknown then).
+	Slug string `json:"slug,omitempty"`
 	// Cursor is the last event seq the chat's watcher consumed.
 	Cursor int64 `json:"cursor"`
 	// Notified lists the state-derived decision keys already delivered
@@ -116,6 +123,7 @@ type ChatSubscriptions struct {
 type ChatSubscribeAnswer struct {
 	ChatID  string `json:"chat_id"`
 	WI      string `json:"wi"`
+	Slug    string `json:"slug,omitempty"`
 	Changed bool   `json:"changed"`
 }
 
@@ -132,7 +140,8 @@ type ChatAck struct {
 // ChatAttentionItem is one WI that needs a human and has no live watcher.
 type ChatAttentionItem struct {
 	WI     string `json:"wi"`
-	Reason string `json:"reason"` // needs_input
+	Slug   string `json:"slug,omitempty"` // display name; empty = show WI
+	Reason string `json:"reason"`         // needs_input
 }
 
 // ChatAttention is the GET /chats/{id}/attention answer.

@@ -60,7 +60,7 @@ type Config struct {
 	// Mapping is the workspace→projects plan of record (polyforge#113):
 	// the daemon assembles it from the shared cli.toml ([workspace.
 	// "<path>"] sections) and the runtime routes every capsule through it
-	// — <mapped-workspace>/capsules/<wi> per the claim answer's project.
+	// — <mapped-workspace>/capsules/<project>-<seq> per the claim answer.
 	// There is no single workspace and no default project anymore. The
 	// daemon refuses to start when the mapping is empty; a recorded
 	// mid-flight project that falls out of it blocks only that work item
@@ -222,6 +222,10 @@ type AgentStartFunc func(ctx context.Context, in AgentStartInput) (AgentHandle, 
 type job struct {
 	wi      string
 	project string
+	// slug is the work item's human-facing name ("<project>#<seq>") from
+	// the claim answer — display only; every key and path stays on wi,
+	// except the capsule directory name (api.PathName).
+	slug string
 	// sessionID is the v1.5 SECRET (B3): 64-hex minted at claim, the git
 	// push password. It never reaches the capsule, agent env, argv or
 	// any log/event surface — only state.json and the one-shot askpass.
@@ -520,16 +524,17 @@ func (r *Runtime) Resolve(id string) string {
 }
 
 // capsuleDirForProject resolves the capsule base for one project through
-// the inverse mapping (polyforge#113): <workspace>/capsules/<wi>. An
+// the inverse mapping (polyforge#113): <workspace>/capsules/<name>, name
+// being the work item's api.PathName ("<project>-<seq>"). An
 // unmapped project answers the typed *mapping.UnmappedError — callers on
 // the claim path re-surface it as the typed DAEMON-412 refusal BEFORE any
 // capsule or claim state exists.
-func (r *Runtime) capsuleDirForProject(project, wi string) (string, error) {
+func (r *Runtime) capsuleDirForProject(project, name string) (string, error) {
 	ws, err := r.cfg.Mapping.WorkspaceFor(project)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(ws, "capsules", wi), nil
+	return filepath.Join(ws, "capsules", name), nil
 }
 
 func (r *Runtime) gitDirFor(wi string) string {
@@ -671,14 +676,14 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 // the journaled one back; the claim answer's fingerprint must agree).
 //
 // wi may arrive as the canonical id OR any id-or-slug form the aihub claim
-// endpoint accepts ("<project>#<seq>"): the job and every path derived
-// from it — capsule directory, external git-dir, push remote, spawn
-// journal — are keyed by the CANONICAL work-item id the claim answer
-// carries (F2). A slug contains "#", the URL fragment separator: a
-// slug-built push remote answers 404 and a slug-named directory leaks the
-// separator into the harness's session directory naming, so slugs never
-// reach any path. The submitted spelling is registered as an alias so
-// lookups by it still resolve.
+// endpoint accepts ("<project>#<seq>"): the job and every machine-side
+// path derived from it — external git-dir, push remote, spawn journal —
+// are keyed by the CANONICAL work-item id the claim answer carries (F2).
+// The capsule directory alone is named for humans: the claim answer's
+// slug in its path-safe form "<project>-<seq>" (api.PathName). A raw slug
+// never reaches any path: its "#" is the URL fragment separator (a
+// slug-built push remote answers 404) and a glob character. The submitted
+// spelling is registered as an alias so lookups by it still resolve.
 func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse, wcfg *workspace.Config, manual []string) error {
 	c := resp.Claim
 	// canonical id resolution (F2): the claim answer's work item is the
@@ -734,6 +739,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	j := &job{
 		wi:                 id,
 		project:            resp.WorkItem.ProjectName,
+		slug:               resp.WorkItem.Slug,
 		sessionID:          sessionID,
 		sessionFingerprint: fp,
 		state:              StateRunning,
@@ -758,7 +764,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	// edit between the pre-check and the claim answer, or a journal
 	// replay over a changed config) compensates with the D5 blocked end —
 	// no capsule directory is ever touched.
-	capDir, rerr := r.capsuleDirForProject(j.project, id)
+	capDir, rerr := r.capsuleDirForProject(j.project, api.PathName(j.slug, id))
 	if rerr != nil {
 		err2 := unmappedProjectError(j.project)
 		return r.abandonClaim(j, wi, err2, err2.Detail)
@@ -1062,8 +1068,8 @@ func readSessionMarker(capsuleDir string) string {
 }
 
 // quarantineCapsule moves a stale/foreign/superseded capsule aside, never
-// deleting it (v1.5 naming, contract §4.4: capsules/<id> →
-// capsules/<id>.quarantined.<ts> — a sibling, so the scene sits next to
+// deleting it (v1.5 naming, contract §4.4: capsules/<name> →
+// capsules/<name>.quarantined.<ts> — a sibling, so the scene sits next to
 // whatever replaces it and the bytes always survive).
 func quarantineCapsule(capsuleDir, gitDir string) error {
 	ts := strconv.FormatInt(time.Now().UnixNano(), 36)
@@ -1301,7 +1307,7 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 // (fencing-on-use rejects our writes; a SessionEnd would be refused as
 // STALE and a blocked verdict would sabotage the new owner), runs NO
 // recovery, and instead: kills the local tree, quarantines the capsule
-// in place (capsules/<id>.quarantined.<ts>), drops the state.json record
+// in place (capsules/<name>.quarantined.<ts>), drops the state.json record
 // and emits the owner-visible event — the local capsule (and any answers
 // recorded in it) did not travel, so "answers may be lost; question
 // re-opened" (m3).

@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/watcher"
 )
@@ -103,9 +104,9 @@ var cmdWatch = &Command{
 					b, _ := json.Marshal(ans)
 					ctx.Out(b)
 				} else if ans.Changed {
-					fmt.Fprintf(ctx.Stdout, "%s %s: %s\n", verb, chat, ans.WI)
+					fmt.Fprintf(ctx.Stdout, "%s %s: %s\n", verb, chat, api.DisplayName(ans.Slug, ans.WI))
 				} else {
-					fmt.Fprintf(ctx.Stdout, "no change: %s %s was already %s\n", chat, ans.WI, map[bool]string{true: "subscribed", false: "not subscribed"}[args[0] == "subscribe"])
+					fmt.Fprintf(ctx.Stdout, "no change: %s %s was already %s\n", chat, api.DisplayName(ans.Slug, ans.WI), map[bool]string{true: "subscribed", false: "not subscribed"}[args[0] == "subscribe"])
 				}
 				return nil
 			case "list":
@@ -128,7 +129,7 @@ var cmdWatch = &Command{
 					if s.Done {
 						state = "finished"
 					}
-					fmt.Fprintf(ctx.Stdout, "  %-22s %-8s cursor=%d\n", s.WI, state, s.Cursor)
+					fmt.Fprintf(ctx.Stdout, "  %-22s %-8s cursor=%d\n", api.DisplayName(s.Slug, s.WI), state, s.Cursor)
 				}
 				return nil
 			}

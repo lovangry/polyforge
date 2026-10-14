@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
@@ -70,7 +71,11 @@ var statusRules = map[string]struct {
 
 // Decision is one delivered human decision.
 type Decision struct {
-	WI     string
+	WI string
+	// Slug is the WI's display name from the snapshot (the daemon's job
+	// record or the aihub record, never agent text); the line shows it,
+	// falling back to WI when empty.
+	Slug   string
 	Class  string
 	Phrase string
 	// QuestionID is the pending question id of a needs_input decision
@@ -87,20 +92,20 @@ type Decision struct {
 // answer for the human).
 const suffix = "this is a human decision, the agent must not answer it"
 
-// Line renders the decision from the FIXED template. The WI id is the
-// daemon's canonical id, reduced to a safe charset; a needs_input
-// decision also carries the pending question id (D11), through the
-// same filter; nothing else varies.
+// Line renders the decision from the FIXED template. The WI is named by
+// its slug ("<project>#<seq>", the canonical id when no slug is known),
+// reduced to a safe charset; a needs_input decision also carries the
+// pending question id (D11), through the same filter; nothing else varies.
 func (d Decision) Line() string {
 	qid := ""
 	if d.QuestionID != "" {
 		qid = " " + safeID(d.QuestionID)
 	}
-	return fmt.Sprintf("[polyforge] %s %s%s — %s; %s", safeID(d.WI), d.Class, qid, d.Phrase, suffix)
+	return fmt.Sprintf("[polyforge] %s %s%s — %s; %s", safeID(api.DisplayName(d.Slug, d.WI)), d.Class, qid, d.Phrase, suffix)
 }
 
 // AttentionLine is the fixed-template notice for WIs that need a human but
-// had no live watcher.
+// had no live watcher; wis are their display names (slug, else id).
 func AttentionLine(wis []string) string {
 	ids := make([]string, 0, len(wis))
 	for _, w := range wis {
@@ -119,12 +124,13 @@ func AttentionLine(wis []string) string {
 	return fmt.Sprintf("[polyforge] %d %s you: %s%s — pending human decisions; %s", len(ids), noun, strings.Join(shown, ", "), more, suffix)
 }
 
-// safeID keeps only [A-Za-z0-9._:-] so an id can never smuggle text.
+// safeID keeps only [A-Za-z0-9._:#-] so an id or slug can never smuggle
+// text.
 func safeID(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-', r == ':':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-', r == ':', r == '#':
 			b.WriteRune(r)
 		default:
 			b.WriteByte('_')
@@ -161,7 +167,7 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 	fire := func(key string, r Rule) {
 		cur[key] = true
 		if !have[key] {
-			res.Decisions = append(res.Decisions, Decision{WI: snap.WorkItem, Class: r.Class, Phrase: r.Phrase, Key: key})
+			res.Decisions = append(res.Decisions, Decision{WI: snap.WorkItem, Slug: snap.Slug, Class: r.Class, Phrase: r.Phrase, Key: key})
 		}
 	}
 
@@ -194,7 +200,7 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 		cur[key] = true
 		if !have[key] {
 			res.Decisions = append(res.Decisions, Decision{
-				WI: snap.WorkItem, Class: r.Class, Phrase: r.Phrase,
+				WI: snap.WorkItem, Slug: snap.Slug, Class: r.Class, Phrase: r.Phrase,
 				QuestionID: pendingID, Key: key,
 			})
 		}
@@ -213,7 +219,7 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 		if !ok || r.StateBacked {
 			continue
 		}
-		res.Decisions = append(res.Decisions, Decision{WI: snap.WorkItem, Class: r.Class, Phrase: r.Phrase})
+		res.Decisions = append(res.Decisions, Decision{WI: snap.WorkItem, Slug: snap.Slug, Class: r.Class, Phrase: r.Phrase})
 	}
 
 	for k := range cur {

@@ -109,9 +109,9 @@ func (s *subStore) chatLocked(id string, create bool) *chatDoc {
 
 // Subscribe adds (or re-arms) a subscription; cursor is the event seq the
 // watcher should start after for a NEW subscription (history is not
-// replayed). Re-subscribing a finished WI re-arms it. Reports whether
-// anything changed.
-func (s *subStore) Subscribe(chat, wi string, cursor int64) (bool, error) {
+// replayed), slug the WI's display name ("" = unknown). Re-subscribing a
+// finished WI re-arms it. Reports whether anything changed.
+func (s *subStore) Subscribe(chat, wi, slug string, cursor int64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.chatLocked(chat, true)
@@ -122,7 +122,7 @@ func (s *subStore) Subscribe(chat, wi string, cursor int64) (bool, error) {
 		sub.Done, sub.Notified = false, nil
 		return true, s.persistLocked()
 	}
-	c.Subs[wi] = &protocol.ChatSub{WI: wi, Cursor: cursor, SubscribedAt: s.now().UTC().Format(time.RFC3339)}
+	c.Subs[wi] = &protocol.ChatSub{WI: wi, Slug: slug, Cursor: cursor, SubscribedAt: s.now().UTC().Format(time.RFC3339)}
 	return true, s.persistLocked()
 }
 
@@ -261,8 +261,9 @@ func (d *Daemon) subscribeRoute(subscribe bool) http.HandlerFunc {
 			changed bool
 			err     error
 		)
+		slug := d.slugOf(wi)
 		if subscribe {
-			changed, err = d.subs.Subscribe(id, wi, d.lastSeq(wi))
+			changed, err = d.subs.Subscribe(id, wi, slug, d.lastSeq(wi))
 		} else {
 			changed, err = d.subs.Unsubscribe(id, wi)
 		}
@@ -270,7 +271,7 @@ func (d *Daemon) subscribeRoute(subscribe bool) http.HandlerFunc {
 			writeErr(w, api.ErrDaemonInternal, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, protocol.ChatSubscribeAnswer{ChatID: id, WI: wi, Changed: changed})
+		writeJSON(w, http.StatusOK, protocol.ChatSubscribeAnswer{ChatID: id, WI: wi, Slug: slug, Changed: changed})
 	}
 }
 
@@ -350,7 +351,7 @@ func (d *Daemon) attention(chat, owner string, mark bool) ([]protocol.ChatAttent
 			return nil, err
 		}
 		if fresh {
-			items = append(items, protocol.ChatAttentionItem{WI: j.WorkItemID, Reason: reason})
+			items = append(items, protocol.ChatAttentionItem{WI: j.WorkItemID, Slug: j.Slug, Reason: reason})
 		}
 	}
 	sort.Slice(items, func(i, k int) bool { return items[i].WI < items[k].WI })
@@ -438,9 +439,23 @@ func (d *Daemon) autoSubscribe(o *reqOrigin, wi string, cursor int64) {
 	if d.subs == nil || o == nil || !chatIDRe.MatchString(o.ChatID) {
 		return
 	}
-	if _, err := d.subs.Subscribe(o.ChatID, wi, cursor); err != nil {
+	if _, err := d.subs.Subscribe(o.ChatID, wi, d.slugOf(wi), cursor); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: auto-subscribe %s to %s: %v\n", o.ChatID, wi, err)
 	}
+}
+
+// slugOf answers a WI's display name: the local job record's slug, else
+// the aihub record's; "" when neither knows it (callers show the id).
+func (d *Daemon) slugOf(wi string) string {
+	if ji, ok := d.rt.Info(wi); ok && ji.Slug != "" {
+		return ji.Slug
+	}
+	if d.hub != nil {
+		if item, err := d.hub.GetWorkItem(wi); err == nil && item != nil {
+			return item.Slug
+		}
+	}
+	return ""
 }
 
 // lastSeq is the highest retained event seq of a WI (0 = none).
@@ -476,12 +491,13 @@ func (d *Daemon) watchSnapshot(wi string, after int64) protocol.WatchSnapshot {
 	snap := protocol.WatchSnapshot{WorkItem: wi, Events: []protocol.EventEntry{}}
 	snap.Queued = d.q != nil && d.q.IsPending(wi)
 	jobs, _ := d.statusJobs()
-	localLive := false
+	localLive, held := false, false
 	for _, j := range jobs {
 		if j.WorkItemID != wi {
 			continue
 		}
-		snap.Known = true
+		snap.Known, held = true, true
+		snap.Slug = j.Slug
 		localLive = j.Status != string(runtime.StatePaused)
 		wj := &protocol.WatchJob{Status: j.Status,
 			QuestionID: j.QuestionID, LastProgressAgoSec: j.LastWorkAgoSec}
@@ -490,17 +506,28 @@ func (d *Daemon) watchSnapshot(wi string, after int64) protocol.WatchSnapshot {
 		}
 		snap.Job = wj
 	}
-	if exec := d.readExecution(wi); exec != nil {
-		snap.Known = true
-		snap.Execution = exec
+	// The hub record is read once, only when no live local job answers:
+	// it names a closed WI's capsule (project + slug), its display name,
+	// and — a manual close (wrap / wrap --fail / cancel / pause) leaves
+	// execution.json at `running` — its status, the authority for how
+	// the WI ended.
+	var item *api.WorkItem
+	if !localLive && (!snap.Queued || !held) && d.hub != nil {
+		if it, err := d.hub.GetWorkItem(wi); err == nil && it != nil {
+			item = it
+		}
 	}
-	if !localLive && !snap.Queued && d.hub != nil {
-		// No live local job: a manual close (wrap / wrap --fail / cancel /
-		// pause) leaves execution.json at `running`, so the hub's status
-		// is the authority for how the WI ended.
-		if item, err := d.hub.GetWorkItem(wi); err == nil && item != nil {
+	if item != nil {
+		if snap.Slug == "" {
+			snap.Slug = item.Slug
+		}
+		if !snap.Queued {
 			snap.HubStatus = item.Status
 		}
+	}
+	if exec := d.readExecution(wi, item); exec != nil {
+		snap.Known = true
+		snap.Execution = exec
 	}
 	if d.obs != nil {
 		// live progress of the in-flight dispatch (current command, recent
@@ -533,18 +560,19 @@ func watchProgress(lp observe.LiveProgress) *protocol.WatchProgress {
 }
 
 // readExecution reads the WI's execution.json (the authority), from the
-// live job's capsule or, for a WI the daemon no longer holds, from the
-// mapped workspaces' capsules/<wi>.
-func (d *Daemon) readExecution(wi string) *protocol.WatchExecution {
+// job record's capsule or, for a WI the daemon no longer holds, from the
+// capsule its hub record names: capsules/<project>-<seq> under the
+// project's mapped workspace (item nil = no record, nothing to read).
+func (d *Daemon) readExecution(wi string, item *api.WorkItem) *protocol.WatchExecution {
 	var candidates []string
 	if d.rt != nil {
 		if ji, ok := d.rt.Info(wi); ok && ji.CapsuleDir != "" {
 			candidates = append(candidates, filepath.Join(ji.CapsuleDir, capsule.ExecutionJSON))
 		}
 	}
-	if d.cfg.Mapping != nil {
-		for _, ws := range d.cfg.Mapping.Workspaces() {
-			candidates = append(candidates, filepath.Join(ws, "capsules", wi, capsule.ExecutionJSON))
+	if len(candidates) == 0 && item != nil && d.cfg.Mapping != nil {
+		if ws, err := d.cfg.Mapping.WorkspaceFor(item.ProjectName); err == nil {
+			candidates = append(candidates, filepath.Join(ws, "capsules", api.PathName(item.Slug, wi), capsule.ExecutionJSON))
 		}
 	}
 	for _, p := range candidates {

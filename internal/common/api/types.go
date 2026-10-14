@@ -13,6 +13,7 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 )
 
 // WorkItem is the server-side work item record (02 §4). Field semantics are
@@ -38,6 +39,29 @@ type WorkItem struct {
 	CreatedAt   string         `json:"created_at"`
 	UpdatedAt   string         `json:"updated_at"`
 	ClosedAt    *string        `json:"closed_at"`
+}
+
+// DisplayName answers the human-facing name of a work item: its slug
+// ("<project>#<seq>"), or the id when no slug is known. Machine-side
+// references (API paths, capsule.json, state.json keys) keep the id.
+func DisplayName(slug, id string) string {
+	if slug != "" {
+		return slug
+	}
+	return id
+}
+
+// PathName answers the path- and ref-safe readable name of a work item,
+// "<project>-<seq>": the slug with its "#" (a zsh EXTENDED_GLOB
+// metacharacter and the URL fragment separator) replaced by "-". It names
+// the capsule directory and the `pf ship` branch. Project names never
+// contain "#", so the seq is always the part after the last "-". The id
+// is the answer only when no slug is known.
+func PathName(slug, id string) string {
+	if slug != "" {
+		return strings.Replace(slug, "#", "-", 1)
+	}
+	return id
 }
 
 // WI statuses (02 §4.1).

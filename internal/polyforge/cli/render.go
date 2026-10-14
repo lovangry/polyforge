@@ -248,7 +248,7 @@ func firstLine(s string) string {
 // renderStatus renders the daemon status() bookkeeping list. The
 // WORKSPACE line is the #103 owner face: the active capsule base the
 // daemon was launched with (-workspace; capsules live at
-// <workspace>/capsules/<wi_id>) — exactly one line, no annotation. The
+// <workspace>/capsules/<project>-<seq>) — exactly one line, no annotation. The
 // QUESTION column is the D6 owner face: any job the daemon reports with a
 // pending question shows its question id ("-" otherwise), so an agent
 // blocked on a human is impossible to miss at a glance. The SPAWN column
@@ -312,7 +312,7 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 				origin += ":" + j.Origin.ChatID
 			}
 		}
-		row := []string{j.WorkItemID, j.Status, sess, spawn, pid, question, stepAge, lastWork}
+		row := []string{api.DisplayName(j.Slug, j.WorkItemID), j.Status, sess, spawn, pid, question, stepAge, lastWork}
 		if showOrigin {
 			row = append(row, origin)
 		}
@@ -339,7 +339,7 @@ func mmssAgo(sec int64) string {
 // line per inventory repo, each with the PR URL or the compare-URL
 // fallback.
 func renderShip(w io.Writer, s *ShipResponse) {
-	fmt.Fprintf(w, "shipped %s → branch %s\n", s.WorkItemID, s.Branch)
+	fmt.Fprintf(w, "shipped %s → branch %s\n", api.DisplayName(s.Slug, s.WorkItemID), s.Branch)
 	if len(s.Repos) == 0 {
 		fmt.Fprintln(w, "  (no inventory repos in the sealed capsule: nothing to push)")
 		return

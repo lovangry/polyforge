@@ -37,6 +37,9 @@ func TestStartSlugClaimRunsUnderCanonicalID(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
 	hub.canonical = map[string]string{"proj#7": "wi_canon7"}
+	hub.items = map[string]*api.WorkItem{
+		"wi_canon7": {ID: "wi_canon7", Slug: "proj#7", Seq: 7, ProjectName: "proj"},
+	}
 	sp := &scriptedSpawner{}
 	r, _, _ := newTestRuntime(t, hub, sp)
 
@@ -68,9 +71,10 @@ func TestStartSlugClaimRunsUnderCanonicalID(t *testing.T) {
 	if !ok || ji.WorkItem != canonical {
 		t.Fatalf("Info by slug must resolve to the canonical job, got %+v ok=%v", ji.WorkItem, ok)
 	}
-	// every path is canonical: capsule dir, git dir, push remote.
-	if got := ji.CapsuleDir; !strings.HasSuffix(got, filepath.Join("capsules", canonical)) {
-		t.Fatalf("capsule dir %q must be canonical-named", got)
+	// every machine-side path is canonical (git dir, push remote); the
+	// capsule dir is the slug's path-safe form, never the raw slug.
+	if got := ji.CapsuleDir; !strings.HasSuffix(got, filepath.Join("capsules", "proj-7")) || strings.Contains(got, "#") {
+		t.Fatalf("capsule dir %q must be named <project>-<seq>", got)
 	}
 	if got := ji.Git.GitDir; !strings.HasSuffix(got, canonical+".git") || strings.Contains(got, "#") {
 		t.Fatalf("git dir %q must be canonical-named and # -free", got)
@@ -128,7 +132,7 @@ func TestWorkItemFileMaterializedAtStart(t *testing.T) {
 	}
 	defer func() { _ = r.Stop(ctx, "wi_goal9", protocol.FinishWrapped) }()
 
-	path := filepath.Join(testCapsuleDir(r, "wi_goal9"), filepath.FromSlash(capsule.WorkItemJSON))
+	path := filepath.Join(testCapsuleDir(r, "proj-9"), filepath.FromSlash(capsule.WorkItemJSON))
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("work-item.json missing: %v", err)

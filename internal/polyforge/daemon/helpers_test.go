@@ -116,6 +116,9 @@ type fakeHub struct {
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string
+	// slugs maps a canonical id to its "<project>#<seq>" slug (#144
+	// display/naming tests); an unmapped id answers no slug.
+	slugs map[string]string
 	// memDo, when non-nil, serves the generic Do calls the F6 memory
 	// adapters make (search + memory create); nil answers a typed
 	// refusal. The tests that exercise the memory lanes script it.
@@ -187,7 +190,7 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 			SessionFingerprint: api.SessionFingerprint(req.SessionID),
 			BundleName:         "demo-bundle",
 		},
-		WorkItem: api.WorkItem{ID: id, ProjectName: "proj"},
+		WorkItem: api.WorkItem{ID: id, Slug: h.slugs[id], ProjectName: "proj"},
 	}, nil
 }
 
@@ -202,7 +205,7 @@ func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.S
 	h.status[id] = api.StatusRunning
 	return &api.SessionClaimResponse{
 		Claim:    api.SessionClaim{WorkItemID: id, SessionFingerprint: api.SessionFingerprint(req.SessionID)},
-		WorkItem: api.WorkItem{ID: id, ProjectName: "proj"},
+		WorkItem: api.WorkItem{ID: id, Slug: h.slugs[id], ProjectName: "proj"},
 	}, nil
 }
 
@@ -271,7 +274,7 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	if st == "" {
 		st = api.StatusRunning
 	}
-	return &api.WorkItem{ID: id, Status: st, ProjectName: "proj", Reporter: h.reporters[id]}, nil
+	return &api.WorkItem{ID: id, Slug: h.slugs[id], Status: st, ProjectName: "proj", Reporter: h.reporters[id]}, nil
 }
 
 // ResumeBlockedWorkItem is the §6.4 owner resume door (polyforge#116):
@@ -587,7 +590,10 @@ func (td *testDaemon) submitClaim(t *testing.T, wi string) {
 // so the supervisor projects it.
 func (td *testDaemon) seedPendingQuestion(t *testing.T, wi, qid, step, question string) {
 	t.Helper()
-	path := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", wi, filepath.FromSlash(capsule.ExecutionJSON))
+	td.hub.mu.Lock()
+	name := api.PathName(td.hub.slugs[wi], wi)
+	td.hub.mu.Unlock()
+	path := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", name, filepath.FromSlash(capsule.ExecutionJSON))
 	exec := capsule.Execution{WorkItemID: wi, Steps: map[string]*capsule.Step{}}
 	if raw, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(raw, &exec)

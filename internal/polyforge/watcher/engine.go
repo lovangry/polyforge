@@ -212,7 +212,7 @@ func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
 		if len(items) > 0 {
 			wis := make([]string, 0, len(items))
 			for _, it := range items {
-				wis = append(wis, it.WI)
+				wis = append(wis, api.DisplayName(it.Slug, it.WI))
 			}
 			b.out = append(b.out, AttentionLine(wis))
 		}
@@ -239,7 +239,7 @@ func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
 			if !errors.As(err, &ae) {
 				return nil, batch{}, err // transport: the daemon went away mid-cycle
 			}
-			lines = append(lines, safeID(sub.WI)+" unavailable ("+ae.Code+")")
+			lines = append(lines, safeID(api.DisplayName(sub.Slug, sub.WI))+" unavailable ("+ae.Code+")")
 			continue
 		}
 		lines = append(lines, ProgressLine(snap, now))

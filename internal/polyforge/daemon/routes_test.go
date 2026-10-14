@@ -384,11 +384,14 @@ func TestSubmitDispatchBackfill(t *testing.T) {
 }
 
 // TestShip: the wrap→git delivery bridge against a real sealed capsule
-// holding one task-repo worktree with its own origin.
+// holding one task-repo worktree with its own origin. The capsule and the
+// branch are both named for the slug (polyforge#144): capsules/proj-12
+// and polyforge/proj-12, the same branch on every ship.
 func TestShip(t *testing.T) {
 	td := newTestDaemon(t, nil)
+	td.hub.slugs = map[string]string{"wi_s": "proj#12"}
 	td.submitClaim(t, "wi_s")
-	capDir := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", "wi_s")
+	capDir := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", "proj-12")
 
 	// A task repo inside the capsule, with its own origin remote and a
 	// commit (the "inventory" the agent would have checked out).
@@ -427,18 +430,18 @@ func TestShip(t *testing.T) {
 	if err := json.Unmarshal(raw, &sr); err != nil {
 		t.Fatalf("ship undecodable: %v", err)
 	}
-	if sr.WorkItemID != "wi_s" || sr.Branch != "polyforge/wi_s" || len(sr.Repos) != 1 {
+	if sr.WorkItemID != "wi_s" || sr.Slug != "proj#12" || sr.Branch != "polyforge/proj-12" || len(sr.Repos) != 1 {
 		t.Fatalf("ship response = %+v", sr)
 	}
 	oc := sr.Repos[0]
-	if oc.Name != "app" || oc.Branch != "polyforge/wi_s" || !oc.Pushed || oc.Reused {
+	if oc.Name != "app" || oc.Branch != "polyforge/proj-12" || !oc.Pushed || oc.Reused {
 		t.Fatalf("ship repo outcome = %+v", oc)
 	}
 	if oc.Head == "" || oc.OriginURL == "" {
 		t.Fatalf("ship repo outcome missing head/origin: %+v", oc)
 	}
 	// The branch exists at the sealed commit on the origin.
-	out, err := exec.Command("git", "--git-dir", origin, "rev-parse", "refs/heads/polyforge/wi_s").Output()
+	out, err := exec.Command("git", "--git-dir", origin, "rev-parse", "refs/heads/polyforge/proj-12").Output()
 	if err != nil || len(out) == 0 {
 		t.Fatalf("origin has no polyforge branch: %v %q", err, out)
 	}
@@ -449,8 +452,8 @@ func TestShip(t *testing.T) {
 		t.Fatalf("re-ship: %v", err)
 	}
 	json.Unmarshal(raw, &sr)
-	if !sr.Repos[0].Reused || sr.Repos[0].Pushed {
-		t.Fatalf("re-ship outcome = %+v, want reused", sr.Repos[0])
+	if sr.Branch != "polyforge/proj-12" || !sr.Repos[0].Reused || sr.Repos[0].Pushed {
+		t.Fatalf("re-ship outcome = %+v, want the same branch, reused", sr)
 	}
 
 	// An unknown work item answers DAEMON-404.

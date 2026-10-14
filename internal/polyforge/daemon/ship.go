@@ -4,9 +4,9 @@ package daemon
 // amendment polyforge#37; v1 shape). After a WI closes, its task-repo
 // commits live only in the sealed capsule; ship reads the sealed bytes
 // back out and pushes them to each inventory repo's git origin as the
-// fixed-name branch polyforge/<wi>, then layers a PR on top when a PR
-// credential exists (a missing PR credential is NOT an error; only the
-// push credential is — DAEMON-512).
+// fixed-name branch polyforge/<project>-<seq>, then layers a PR on top
+// when a PR credential exists (a missing PR credential is NOT an error;
+// only the push credential is — DAEMON-512).
 //
 // v1 inventory: the capsule's repos/<name>/ subdirectories that are git
 // worktrees (03: task repo checkouts carry their own histories); each
@@ -67,12 +67,16 @@ type shipRepoOutcome struct {
 
 type shipResponse struct {
 	WorkItemID string            `json:"work_item_id"`
+	Slug       string            `json:"slug,omitempty"`
 	Branch     string            `json:"branch"`
 	Initiator  string            `json:"initiator,omitempty"`
 	Repos      []shipRepoOutcome `json:"repos"`
 }
 
-func shipBranch(wi string) string { return "polyforge/" + wi }
+// shipBranch is the delivery branch of a work item: polyforge/ plus its
+// path-safe slug (api.PathName, "<project>-<seq>"). The slug never
+// changes, so every ship of the same work item targets the same branch.
+func shipBranch(name string) string { return "polyforge/" + name }
 
 // neverPushTarget structurally enforces that the delivery branch can
 // never be a reserved name (main/master), however the branch computation
@@ -105,48 +109,42 @@ func (d *Daemon) shipRoute(w http.ResponseWriter, r *http.Request) {
 // Ship executes the ship operation: a purely local read of the sealed
 // capsule plus one push per inventory repo to that repo's own origin.
 func (d *Daemon) Ship(ctx context.Context, wi, initiator string) (*shipResponse, error) {
-	branch := shipBranch(wi)
+	if ji, ok := d.rt.Info(wi); ok {
+		return nil, shipErr(api.ErrDaemonConflict, "work item %s is still active on this daemon; ship applies to a sealed capsule only", api.DisplayName(ji.Slug, wi))
+	}
+	// The hub record names both the capsule and the branch: the project
+	// routes to its mapped workspace (polyforge#113) and the slug names
+	// <workspace>/capsules/<project>-<seq> and polyforge/<project>-<seq>.
+	// No record, no ship — never a guess outside the mapping.
+	item, err := d.hub.GetWorkItem(wi)
+	if err != nil || item == nil || item.ProjectName == "" {
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.HTTPStatus() < 500 {
+			return nil, shipErr(api.ErrDaemonNotFound, "work item %s: %v", wi, err)
+		}
+		return nil, shipErr(api.ErrDaemonHubUnavailable, "work item %s: the hub record that names its sealed capsule and branch is unavailable (retry later): %v", wi, err)
+	}
+	label := api.DisplayName(item.Slug, wi)
+	capName := api.PathName(item.Slug, wi)
+	branch := shipBranch(capName)
 	if neverPushTarget(branch) {
 		return nil, shipErr(api.ErrDaemonForbidden, "reserved branch target %q: ship never pushes main/master", branch)
 	}
-	if _, ok := d.rt.Info(wi); ok {
-		return nil, shipErr(api.ErrDaemonConflict, "work item %s is still active on this daemon; ship applies to a sealed capsule only", wi)
+	ws, merr := d.cfg.Mapping.WorkspaceFor(item.ProjectName)
+	if merr != nil {
+		return nil, shipErr(api.ErrDaemonNotFound, "no local sealed capsule for %s on this machine: project %q is not in the [workspace] mapping", label, item.ProjectName)
 	}
-	// polyforge#113: the sealed capsule lives under its project's mapped
-	// workspace. Resolve it across the mapped workspace set: the inverse
-	// mapping first (a hub read names the WI's project), then any mapped
-	// workspace whose capsules/<wi> exists — none → the existing
-	// not-found shape. Never a guess outside the mapping.
-	capDir := ""
-	if item, err := d.hub.GetWorkItem(wi); err == nil && item != nil && item.ProjectName != "" {
-		if ws, merr := d.cfg.Mapping.WorkspaceFor(item.ProjectName); merr == nil {
-			capDir = filepath.Join(ws, "capsules", wi)
-		}
-	}
-	if capDir == "" {
-		for _, ws := range d.cfg.Mapping.Workspaces() {
-			candidate := filepath.Join(ws, "capsules", wi)
-			if st, err := os.Stat(candidate); err == nil && st.IsDir() {
-				capDir = candidate
-				break
-			}
-		}
-	}
-	if capDir != "" {
-		if st, err := os.Stat(capDir); err != nil || !st.IsDir() {
-			capDir = "" // the inverse-mapped base lost the scene: fall through to the set-wide probe result below
-		}
-	}
-	if capDir == "" {
-		return nil, shipErr(api.ErrDaemonNotFound, "no local sealed capsule for %s on this machine", wi)
+	capDir := filepath.Join(ws, "capsules", capName)
+	if st, err := os.Stat(capDir); err != nil || !st.IsDir() {
+		return nil, shipErr(api.ErrDaemonNotFound, "no local sealed capsule for %s on this machine (looked for %s)", label, capDir)
 	}
 	names, err := inventory(capDir)
 	if err != nil {
-		return nil, shipErr(api.ErrDaemonInternal, "sealed capsule of %s is not shippable: %v", wi, err)
+		return nil, shipErr(api.ErrDaemonInternal, "sealed capsule of %s is not shippable: %v", label, err)
 	}
-	out := &shipResponse{WorkItemID: wi, Branch: branch, Initiator: initiator, Repos: []shipRepoOutcome{}}
+	out := &shipResponse{WorkItemID: wi, Slug: item.Slug, Branch: branch, Initiator: initiator, Repos: []shipRepoOutcome{}}
 	for _, name := range names {
-		oc, err := d.shipOneRepo(ctx, capDir, name, branch, wi)
+		oc, err := d.shipOneRepo(ctx, capDir, name, branch, label)
 		if err != nil {
 			return nil, err // first typed failure fails the op: no partial answer, no force-push
 		}
@@ -184,7 +182,7 @@ func inventory(capDir string) ([]string, error) {
 	return names, nil
 }
 
-func (d *Daemon) shipOneRepo(ctx context.Context, capDir, name, branch, wi string) (*shipRepoOutcome, error) {
+func (d *Daemon) shipOneRepo(ctx context.Context, capDir, name, branch, label string) (*shipRepoOutcome, error) {
 	dir := filepath.Join(capDir, "repos", name)
 	origin, err := gitCombined(ctx, dir, "remote", "get-url", "origin")
 	if err != nil || strings.TrimSpace(origin) == "" {
@@ -226,7 +224,7 @@ func (d *Daemon) shipOneRepo(ctx context.Context, capDir, name, branch, wi strin
 		}
 		oc.Pushed = true
 	}
-	oc.PRURL, oc.CompareURL = prLayer(ctx, origin, branch, wi, head)
+	oc.PRURL, oc.CompareURL = prLayer(ctx, origin, branch, label, head)
 	return oc, nil
 }
 
@@ -259,7 +257,7 @@ func firstField(s string) string {
 // PR layering: gh when present AND usable; compare URL otherwise. A
 // missing PR credential NEVER fails the op.
 
-func prLayer(ctx context.Context, originURL, branch, wi, head string) (prURL, compareURL string) {
+func prLayer(ctx context.Context, originURL, branch, label, head string) (prURL, compareURL string) {
 	owner, repo, ok := parseGitHubRepo(originURL)
 	if !ok {
 		return "", compareFallback(originURL, branch)
@@ -274,8 +272,8 @@ func prLayer(ctx context.Context, originURL, branch, wi, head string) (prURL, co
 	if url := ghPRView(gctx, owner, repo, branch); url != "" {
 		return url, ""
 	}
-	title := "ship " + wi + ": " + branch
-	body := "Sealed capsule delivery for work item " + wi + " (branch " + branch + ", sealed commit " + head + ")."
+	title := "ship " + label + ": " + branch
+	body := "Sealed capsule delivery for work item " + label + " (branch " + branch + ", sealed commit " + head + ")."
 	if url := ghPRCreate(gctx, owner, repo, branch, title, body); url != "" {
 		return url, ""
 	}

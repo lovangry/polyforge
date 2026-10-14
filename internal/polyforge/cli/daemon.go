@@ -190,7 +190,10 @@ type StatusResponse struct {
 // StatusJob is one jobs[] bookkeeping entry.
 type StatusJob struct {
 	WorkItemID string `json:"work_item_id"`
-	Status     string `json:"status"`
+	// Slug is the "<project>#<seq>" display name (absent on a job record
+	// that predates it: the WORK ITEM column then shows the id).
+	Slug   string `json:"slug,omitempty"`
+	Status string `json:"status"`
 	// SpawnN is the v1.5 B2 derivation counter; SessionFingerprint is
 	// the PUBLIC session handle (B3) — the session model's identity
 	// pair, replacing the deleted attempt-id lineage handle.
@@ -241,6 +244,7 @@ type ShipRepoOutcome struct {
 // outcome line per inventory repo of the sealed capsule.
 type ShipResponse struct {
 	WorkItemID string            `json:"work_item_id"`
+	Slug       string            `json:"slug,omitempty"`
 	Branch     string            `json:"branch"`
 	Initiator  string            `json:"initiator,omitempty"`
 	Repos      []ShipRepoOutcome `json:"repos"`
