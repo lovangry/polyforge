@@ -232,3 +232,15 @@ question answered via `pf answer`. The section above describes the
 pre-#166 `pf ship`; a closed work item that was never shipped before the
 upgrade has to be bridged manually (push its sealed capsule commits by
 hand).
+
+`deliver` runs at the end of EVERY work item on those four lanes, so before
+upgrading check each work machine and each task repo:
+
+- the machine's git push identity and `gh` login work for the step agents
+  (they inherit the daemon's environment: `HOME`, SSH agent, `gh`'s login);
+- a task repo whose origin is not on GitHub, or a machine without a usable
+  `gh`, gets no PR: the step pushes the feature branch only and then asks
+  the human question (merge by hand, or don't merge) — it does not block;
+- the `polyforge/<project>-<seq>` branches it pushes are the only refs it
+  writes; nothing merges without a PR (`gh pr merge --merge`) or a human's
+  answer.

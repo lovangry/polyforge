@@ -1,7 +1,7 @@
 ---
 name: deliver
 description: Deliver the verified change - merge the latest origin default branch, push ONLY the feature branch polyforge/<project>-<seq>, open or reuse its PR, and merge it with gh pr merge --merge when the merge rule holds; otherwise stop at a human-only question.
-tools: [read, bash]
+tools: [read, bash, subagent]
 output:
   type: object
   required: [verdict]
@@ -62,10 +62,12 @@ command evidence (a completed result without evidence is refused).
   recorded command text, and a refspec it cannot read is refused). Never `--no-verify` or
   `-c core.hooksPath=...`: the machine's global pre-push hook must run. Never push the default branch (`main`/`master`/whatever origin's HEAD is), never
   push without a refspec, never `--force`/`-f`/`--force-with-lease`, `--all`, `--mirror`,
-  `--tags`, `--delete`, a `+` refspec, and never set `PF_ALLOW_MAIN_PUSH`. A recorded
-  command that breaks this rule gets the whole result rejected.
+  `--tags`, `--delete`, a `+` refspec (nor an abbreviation of these options), never change
+  git's configuration for the push (`GIT_CONFIG_*`, `GIT_DIR` and the like), and never set
+  `PF_ALLOW_MAIN_PUSH`. A recorded command that breaks this rule gets the whole result
+  rejected.
 - **Merge only through the PR, only with `gh pr merge <pr> --merge`.** Never
-  `--squash`, `--rebase` or `--admin`. The release procedure refuses to release a default
+  `--squash`, `--rebase`, `--admin` or `--auto`, and never `gh repo sync`. The release procedure refuses to release a default
   branch whose history contains anything but PR merge commits.
 - **The human-only question.** When the merge rule below does not hold, you do not decide
   to merge or not: ask (needs_input) and act on the human's answer. Only a human answers
@@ -77,8 +79,9 @@ command evidence (a completed result without evidence is refused).
 ## 1. Inputs
 
 - `execution.json` (under `runtime-state/`): `steps.review.output` - the independent
-  review's verdict and findings - and `steps.verification.output`. A workflow without a
-  `review` step has no independent review.
+  review's verdict and findings - and `steps.verification.output`: its `verified_heads`
+  (written by the driver: each repo's HEAD when verification passed) and its `commands`
+  (the test bar it ran). A workflow without a `review` step has no independent review.
 - `capsule.json`: `repos` maps each declared repo name to its claim-time baseline sha.
 - `artifacts/verification-report.md`: the full test bar (the exact build/lint/test
   commands verification ran).
@@ -95,7 +98,15 @@ commits beyond its baseline (`git rev-list --count <baseline>..HEAD` is 0). Othe
    **Already delivered?** (a re-dispatch, a resume or a daemon restart after the merge):
    when `git merge-base --is-ancestor HEAD origin/<default>` holds and
    `gh pr list --head <branch> --state merged --json url,mergeCommit` names a PR, this
-   repo is done - record that PR and its merge commit (`merged: true`) and skip the rest.
+   repo is merged - record that PR and its merge commit (`merged: true`) and skip to the
+   result. The merge rule still applies to it: when HEAD is not the verified commit and
+   you did not re-run the test bar in this dispatch (or the history shows a hand-resolved
+   merge), report it through the human question ("already merged; acknowledge") instead
+   of completing.
+   **Origin not on GitHub, or `gh` unavailable/unauthenticated:** there is no PR to open.
+   Do the pre-flight, the merge and the push (steps 2-4) only, then ask the human question
+   with the pushed branch instead of a PR link; record `merged: false` with the reason
+   (or what the human did by hand). This is not `incomplete`.
 2. **Mechanical pre-flight (the delivery checklist).** Any hit is a reason for the human
    question (section 3) - not yours to fix:
    - `git status --porcelain --untracked-files=all` must be empty: an untracked or
@@ -111,17 +122,25 @@ commits beyond its baseline (`git rev-list --count <baseline>..HEAD` is 0). Othe
    review; list any you notice in the delivery note as review points for the human.
 3. **Merge the latest default branch.** Record `pre_merge=$(git rev-parse HEAD)`, then
    `git merge --no-edit origin/<default>`.
-   - Already up to date: nothing to re-run - verification's pass covers this tree.
-   - A clean merge that brought in commits: re-run the full test bar on the merged head.
+   - **Tests are covered only when HEAD equals the commit verification passed on**
+     (`verified_heads.<name>`). "Already up to date" is NOT enough: an earlier dispatch of
+     this step (before a crash or a daemon restart) may already have merged. Whenever
+     HEAD differs - a clean merge now or earlier - re-run verification's recorded
+     commands (`steps.verification.output.commands`, every one that exited 0) VERBATIM,
+     after your last merge, in this same dispatch. The driver checks exactly that; tests
+     run in an earlier dispatch do not count.
    - **A conflict:** resolve it yourself in this worktree, keeping both sides' intent,
-     commit the merge, then you MUST (a) re-run the full test bar and (b) have the
+     commit the merge, then you MUST (a) re-run the test bar as above and (b) have the
      resolution reviewed in a FRESH context - call the `subagent` tool (a new agent with
      no history of this conversation) and have it read only `git diff <pre_merge> HEAD` for the conflicted files and the two sides
      (`git show origin/<default>:<file>`, `git show <pre_merge>:<file>`) and reports
      whether the resolution drops or breaks either side. Record `llm_resolved_conflict: true`
      and the reviewer's conclusion in the delivery note. A failing re-run or a reviewer
-     objection is a reason in the human question.
-   Record `tests_passed` for the head you are about to push.
+     objection is a reason in the human question. The driver recognises a hand-resolved
+     merge from the history itself (it re-does every merge since the verified commit), so
+     the question is asked whatever you report.
+   Never add other commits here. Record `tests_passed` for the head you are about to push:
+   true only when it equals the verified commit or you re-ran the test bar on it.
 4. **Push the feature branch (idempotent).** `git ls-remote origin refs/heads/<branch>`:
    - absent, or an ancestor of HEAD (`git merge-base --is-ancestor <remote> HEAD`):
      `git push origin HEAD:refs/heads/<branch>` (a re-run of an up-to-date branch is a
@@ -138,8 +157,10 @@ commits beyond its baseline (`git rev-list --count <baseline>..HEAD` is 0). Othe
 6. **Merge rule.** The PR may be merged without asking iff ALL hold:
    - an independent review exists and passed with no blocking finding
      (`steps.review.output.verdict` is pass, no finding with severity `blocking`);
-   - `tests_passed` is true;
-   - `llm_resolved_conflict` is not true;
+   - the tests are covered on the pushed head (HEAD is the verified commit, or you re-ran
+     the test bar after the last merge in this dispatch) and `tests_passed` is true;
+   - no merge since the verified commit was hand-resolved (`llm_resolved_conflict` is
+     not true);
    - the pre-flight found nothing.
    Then: `gh pr merge <pr_url> --merge`, and read the merge commit with
    `gh pr view <pr_url> --json mergeCommit -q .mergeCommit.oid`. If `gh pr merge` itself
@@ -170,8 +191,9 @@ else is a new question.
 Write `artifacts/delivery.md` (the delivery note) and emit `verdict: pass` with one
 `repos` entry per declared repo (`branch`, `pr_url`, `merged` and `merge_commit` or
 `not_merged_reason`, `llm_resolved_conflict`, `tests_passed`; or `skipped_reason`) and the
-same note in `delivery_note`. An infrastructure failure (no push identity, `gh` not
-authenticated, origin unreachable) is outcome `incomplete` with the exact error - the
+same note in `delivery_note`. A repo left unmerged without a PR (non-GitHub origin) has
+`pr_url` empty. An infrastructure failure (no push identity, origin unreachable) is
+outcome `incomplete` with the exact error - the
 work item blocks and a human fixes the machine and resumes; never work around it.
 
 ## Output

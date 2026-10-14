@@ -48,7 +48,10 @@
 # break the "first parent = one PR merge" shape that `gh pr merge --merge` (the
 # workflows' deliver step) produces. The PR content itself is the second-parent
 # side of each merge and is not walked. A gh API failure is a refusal, never a
-# pass. There is no override: a non-PR commit on the branch blocks every release
+# pass. A PR merged by hand (a local git merge pushed with the pre-push hook's
+# PF_ALLOW_MAIN_PUSH override) passes only if GitHub records that very commit as
+# the PR's merge commit; otherwise it is refused - merge with gh pr merge --merge.
+# There is no override: a non-PR commit on the branch blocks every release
 # (each compares against the previous tag) until a human audits it and decides
 # how to cut the next release by hand.
 #
