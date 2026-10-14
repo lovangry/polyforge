@@ -1416,6 +1416,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// can only race it or fail against the revoked attempt credential.
 	// Only the read-only seal and the terminal close remain.
 	finalReason := reason
+	chainOK := true
 	if !alreadyPushed {
 		// The seq trailer is gitops' business (derived in-lock).
 		// CommitPush is honest on every path — including a clean tree,
@@ -1441,8 +1442,14 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 				})
 			}
 			finalReason = protocol.FinishBlocked
+			chainOK = false
 		}
 	}
+	// Task-repo uncommitted work (polyforge#167): every close but wrapped
+	// snapshots it to refs/pf-wip so a later re-claim restores it; the
+	// wrapped close only drops stale WIP refs. Before SessionEnd (the
+	// session credential dies with it); the tree is already killed.
+	r.saveTaskWIP(j, finalReason != protocol.FinishWrapped, chainOK)
 	// v1.5: the terminal close is SessionEnd — fenced on the session
 	// hash. A STALE_SESSION refusal (this daemon was superseded between
 	// the seal push and here) surfaces as the error below and leaves the
@@ -1549,6 +1556,10 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job, alreadyPushed bool) error
 				})
 			}
 		}
+		// The task repos' uncommitted work rides refs/pf-wip
+		// (polyforge#167): an attach resumes in place, but a later
+		// re-claim restores from the carrier.
+		r.saveTaskWIP(j, true, perr == nil)
 	}
 	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
 		SessionID: j.sessionID,

@@ -11,7 +11,8 @@ package daemon
 //     in the working tree is picked up by the recovery engine's
 //     commit-dirty-on-recover at the next start);
 //  4. seal: stop the observe lane (no recovery signal may fire against
-//     the teardown), terminate every live agent tree, persist the
+//     the teardown), terminate every live agent tree, snapshot the task
+//     repos' uncommitted work to refs/pf-wip (polyforge#167), persist the
 //     bookkeeping (Runtime's state.json + the daemon state file);
 //  5. close the UDS listener; Run returns; the process exits.
 //
@@ -198,6 +199,15 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 			}
 		}
 	}
+	// Step 4b': with the step processes gone, snapshot each live job's
+	// task-repo uncommitted work to refs/pf-wip (polyforge#167) — the
+	// local capsule keeps it for the attach, the hub keeps it for a
+	// re-claim. Each job gets its own slice of what is left of the budget
+	// (its git calls are killed at the slice's end), so one hung hub
+	// cannot starve the other jobs or outlive the process.
+	for i, ji := range live {
+		d.rt.SaveTaskWIP(ctx, ji.WorkItem, wipSlice(ctx, len(live)-i))
+	}
 
 	// Step 4c: persist the bookkeeping (jobs/attempts ride Runtime's
 	// state.json; mode/concurrency ride the daemon state file) — but
@@ -243,6 +253,24 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 
 // liveJobs snapshots the jobs the shutdown sequence owns: locally
 // managed, with a live agent, not already closing.
+// wipSlice is one job's share of the shutdown budget left for the WIP
+// snapshots: the time to ctx's deadline split over the jobs still to go,
+// capped at wipSliceMax (and wipSliceMax when ctx has no deadline).
+func wipSlice(ctx context.Context, jobsLeft int) time.Duration {
+	dl, ok := ctx.Deadline()
+	if !ok || jobsLeft < 1 {
+		return wipSliceMax
+	}
+	slice := time.Until(dl) / time.Duration(jobsLeft)
+	if slice > wipSliceMax {
+		return wipSliceMax
+	}
+	return slice
+}
+
+// wipSliceMax caps one job's WIP snapshot at shutdown.
+const wipSliceMax = 2 * time.Minute
+
 func (d *Daemon) liveJobs() []runtime.JobInfo {
 	var out []runtime.JobInfo
 	for _, ji := range d.rt.List() {

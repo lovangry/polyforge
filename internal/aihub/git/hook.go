@@ -4,8 +4,9 @@ package git
 // v1 capsule-chain invariants (v1-spec-full §六; secret scanning is NOT
 // among them — dropped by ruling C1):
 //
-//   - FF-only: a pushed ref must move fast-forward;
-//   - no ref deletion;
+//   - FF-only: a pushed ref must move fast-forward (refs/pf-wip/*
+//     excepted, see below);
+//   - no ref deletion (refs/pf-wip/* excepted);
 //   - no gitlink (mode 160000) anywhere in a pushed commit's tree;
 //   - every commit carries the Polyforge-Seq trailer (capsule.SeqTrailer)
 //     and the sequence increases monotonically, continuing above the
@@ -33,6 +34,13 @@ package git
 // because the first carrier push of a repo carries its whole upstream
 // history and an upstream asset must not make it uncarriable
 // (polyforge#158).
+//
+// The refs/pf-wip/<repo> namespace (polyforge#167) carries a snapshot
+// of a task repo's UNCOMMITTED work (one daemon-made commit on top of the
+// carried head) across a re-claim. It is scratch by design — every close
+// supersedes it with a force push or deletes it — so it is exempt from
+// deletion, fast-forward, seq and gitlink; its new objects face the
+// carrier blob limit (MaxTaskBlobBytes).
 //
 // The hook is a bash script exec'd by the real git receive-pack; the
 // server process never interprets pack data itself.
@@ -88,6 +96,19 @@ if [ -n "${PF_EXPECTED_FINGERPRINT:-}" ]; then
 fi
 
 while read -r old new ref; do
+  # Task-repo WIP namespace (polyforge#167): a scratch snapshot of a task
+  # repo's uncommitted work, superseded (non-fast-forward) or deleted at
+  # every close. Deletion and force are allowed; only the objects new to
+  # the repo face the carrier blob limit; no seq or gitlink invariant.
+  case "$ref" in refs/pf-wip/*)
+    [ "$new" = "$zero" ] && continue
+    badblob=$(git rev-list --objects "$new" --not --all | awk '{print $1}' \
+      | git cat-file --batch-check='%%(objecttype) %%(objectsize) %%(objectname)' \
+      | awk -v max="$MAXTASKBLOB" '$1=="blob" && $2>max {print $3" ("$2" bytes)"}')
+    [ -z "$badblob" ] || reject "blob exceeds the ${MAXTASKBLOB}-byte limit: $badblob"
+    continue ;;
+  esac
+
   [ "$new" = "$zero" ] && reject "ref deletion is not allowed ($ref)"
 
   if [ "$old" != "$zero" ]; then

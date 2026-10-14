@@ -775,6 +775,52 @@ blocked→resume 等重新认领从上游 clone 后按 carrier ref 恢复任务�
   （不只是推送失败或推送垃圾）。这类基于竞态的残余要等读取/打包改在 agent 自己的 uid 下执行（#135）才能消除；
   在那之前 agent 与 daemon 同 uid，本可直接读写同机其他目录，这一层是纵深防御，而不是隔离边界。
 
+### 7.6 任务仓库未提交改动：WIP ref（polyforge#167） <!-- §7.6 -->
+
+carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改动。补充一条 WIP ref `refs/pf-wip/<name>`（`gitops.PushTaskWIP`）：
+
+- **何时写**：只在步骤进程已退出的关闭点——bounded-fail（blocked，SessionEnd 之前）、`stopOp` 收尾（failed / blocked 等非 wrapped）、
+  operator pause（`pauseOp`）、daemon 正常关停（杀掉 agent 树之后）。observe 的常规发布不写。
+  先按 §7.5 镜像每个仓库的 HEAD 到 `refs/pf-task/<name>`，再对每个仓库：有未提交改动（已跟踪修改、删除与未跟踪文件）→ 生成一个
+  WIP 提交（唯一父提交 = HEAD）并强推到 `refs/pf-wip/<name>`；干净或 wrapped 关闭 → 直接推 `:refs/pf-wip/<name>` 删除
+  （hub 上没有该 ref 时静默）。本次 WIP 生成/推送失败时**保留** hub 上较旧的 WIP ref：它只在父提交等于恢复后的 HEAD（即它被拍下时
+  的状态）时才会被应用，应用它总比什么都没有好；失败只记日志并发 `carrier_push_failed`（`ref` = WIP ref，`error` 注明 hub 上的
+  WIP 早于本次关闭；同样仅在链推送成功时、每 job 每 ref 一次），从不让关闭失败。
+  unborn HEAD 跳过。
+- **生成方式**：在 §7.5 的 `pf-carrier-*` 临时裸仓库里完成（alternates 借任务仓库对象），任务仓库只作 `--work-tree`，
+  index 用临时文件（`GIT_INDEX_FILE=<tmp>/pf-wip-index`）：`read-tree <HEAD>`、预扫描（见下）、`add -A --ignore-errors`、剔除、
+  `write-tree`（树与 HEAD 相同 =
+  干净）、`commit-tree <tree> -p <HEAD>`（作者/提交者 `polyforge-daemon`），再用 §7.5 同一条推送命令推 `+<wip>:refs/pf-wip/<name>`。
+  同样的 env 与 `-c` 标志、超时（`add -A` 用推送的 10 分钟）。不写任务仓库的 HEAD、分支、index、对象库，也不把它的配置当配置读——
+  git 读的是临时仓库的配置，所以仓库里定义的 clean filter、fsmonitor、hook 都不会运行。不用 `git stash create`：它在 agent
+  仓库里执行（读其配置、写其对象库），且不收未跟踪文件。
+- **快照是工作树原始字节**：不应用任何 clean/smudge filter 与属性驱动的转换（eol、`working-tree-encoding` 等）。因此属性声明
+  `filter=lfs` 或 `filter=git-crypt` 的已改动文件不进快照（其原始内容是 smudge 后的对象/明文）。
+- **忽略与属性来源**：工作树里的 `.gitignore` / `.gitattributes`（数据）照常生效；carrier env 丢掉的来源复制进临时仓库的
+  `info/exclude` / `info/attributes`：生效的 `core.excludesFile` / `core.attributesFile`（任务仓库自己配置里的值——只按文件读该键、
+  不跟 include；否则运维者的全局配置（含 `GIT_CONFIG_GLOBAL`）；否则 `$XDG_CONFIG_HOME/git/ignore|attributes`），再加仓库的
+  `.git/info/exclude` / `.git/info/attributes`。只读普通文件（非阻塞打开），每个上限 1 MiB。
+- **剔除并记录**（WIP 提交说明列出路径，并发 `task_wip_skipped` 事件：`repo`、`ref`、`skipped`），单个坏路径不再让整个快照丢失：
+  - 预扫描（`add` 之前，不读文件内容）：`ls-files -o --exclude-standard`（临时 exclude 生效，不进入被忽略目录）列出未跟踪路径——
+    嵌套 git 仓库显示为一个 `dir/` 条目（HEAD 记为子模块的不在其中；没有提交的嵌套仓库原本会让 `add -A` 整体失败）、超过 carrier
+    blob 上限（`capsule.MaxTaskBlobBytes`）的未跟踪文件、未跟踪总量超过同一上限时的最大文件，都写进 `info/exclude`；工作区大小超过
+    blob 上限的已跟踪文件设 `skip-worktree`，保持 HEAD 条目（大小与 HEAD 的 blob 不同时记录）。这些文件从不被哈希。
+  - `add -A --ignore-errors`：读不了的文件（root 拥有的构建产物、mode 000）跳过，退出码 1 视为部分成功，跳过的路径来自
+    `unable to index file` 行。
+  - `add` 之后兜底剔除：属性为 lfs/git-crypt filter 的改动文件；单个超过 blob 上限的；改动总量超过上限时先剔除最大的。
+  被剔除的已跟踪路径在快照里保持 HEAD 的内容（不会变成删除），未跟踪路径直接不收。
+- **关停**：每个 job 的快照分到剩余关停预算的一份（上限 2 分钟），作为 `gitops.Opts.Deadline`：carrier 通道每次 git 调用的超时都
+  截到该时刻，到点杀掉整个 git 进程组，不会有推送活过 daemon 进程；到点后剩下的仓库不再尝试，`carrier_push_failed` 写明
+  `deadline exceeded`（而不是误导的仓库布局拒绝原因）。
+- **hook**：`refs/pf-wip/*` 是草稿 ref，允许删除与 non-fast-forward；只检查新对象（`rev-list --objects <new> --not --all`）的
+  blob 上限，用 carrier 的 100 MiB；不做 seq / gitlink 检查。其余 ref 的规则不变（`refs/pf-task/*` 仍禁止删除与非快进）。
+- **恢复**（`runtime.restoreTaskWIP`，在 `restoreTaskRepoState` 之后，只对新 clone）：取 `refs/pf-wip/<name>`；若其唯一父提交等于
+  恢复后的 HEAD，把新 clone 的 `.git/index` 复制成临时 `GIT_INDEX_FILE`，由 git 执行 `read-tree -m -u <head> <wip>` 把改动写入
+  工作树（删除、mode、目录变 symlink 都由 git 处理，不跟随 symlink 走出工作树；没有手写的删除）——不提交、不移动 HEAD、
+  仓库 index 不变，改动以未暂存/未跟踪形式出现（原先暂存与否的区别不保留）。父提交不一致（carrier 已前进）或读取/应用失败 →
+  不应用，发 `task_wip_not_applied` 事件（`repo`、`ref`、`head`、`wip`、`wip_parent`、`reason`）。不阻塞认领。
+  应用后 WIP ref 保留，由下一个关闭点覆盖或删除；在那之前崩溃再认领会再次应用同一份（HEAD 未变时结果相同）。
+
 ## 8. 安全边界 <!-- §8 -->
 
 - 发布面信任模型：只有持有当前 generation 的 Daemon 可写 Revision 数据（§2.9 fencing）；Main
