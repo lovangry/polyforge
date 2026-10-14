@@ -65,10 +65,16 @@ If you generated test files under `repos/<name>/**`, you MUST commit them yourse
 before completing this step: **ONE dedicated commit** containing exactly those
 files, **verbatim** — the exact paths you report in `test_files`, staged by path,
 no content edits after authoring, and no unrelated files in the same commit.
-`code` is forbidden from touching these files, so a generated test file left
-uncommitted would sit untracked until flow end; `verification` mechanically FAILs
-on any path listed in `steps.e2e-author.output.test_files` that is not tracked
-(committed) in the repo worktree. A scenarios-document-only step (no generated test
+`code` is forbidden from touching these files, and a resume of the work item
+restores each task repo at its committed HEAD only, so a generated test file left
+uncommitted is lost on the next resume. Commit BEFORE writing the result envelope
+(the step process is torn down once it appears); `git add -f` a path under a
+.gitignore'd directory. The driver enforces this mechanically: a `completed` result
+whose `test_files` lists a repo-relative path that exists in no task repo, or is not
+committed at HEAD in every task repo where it exists, is rejected (and the step
+re-dispatched) with the uncommitted paths named; `verification` additionally FAILs on any path listed in
+`steps.e2e-author.output.test_files` that is not tracked (committed) in the repo
+worktree. A scenarios-document-only step (no generated test
 files) commits nothing — this duty fires only when `test_files` is non-empty.
 
 ## Non-goals

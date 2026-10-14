@@ -178,6 +178,14 @@ type ResultSpec struct {
 	// at least one command_evidence entry, each with a non-empty argv and
 	// duration_ms > 0 (the V4 gate; exit_code presence is not checkable).
 	RequireCommandEvidence bool
+	// ReposDir is the capsule's task-repo root (<capsule>/repos). When
+	// set, a completed result whose output declares a non-empty
+	// test_files list is accepted only if every listed (repo-relative)
+	// path exists in a task repo and is committed at HEAD in every task
+	// repo where it exists (polyforge#156: a resume restores task repos
+	// at their carrier ref, i.e. HEAD only, so an uncommitted authored
+	// test would be lost).
+	ReposDir string
 }
 
 // ValidateStepResult runs the staging gates over one envelope:
@@ -216,7 +224,11 @@ type ResultSpec struct {
 //     silent reclassification;
 //  4. the V4 command-evidence gate (RequireCommandEvidence steps): a
 //     completed result must carry at least one command_evidence entry,
-//     each with a non-empty argv and duration_ms > 0.
+//     each with a non-empty argv and duration_ms > 0;
+//  5. the committed-test-files gate (ReposDir set, any step): a
+//     completed result whose output declares test_files must have every
+//     listed path committed at HEAD in its task repo(s)
+//     (checkTestFilesCommitted) — rejected like the evidence gate.
 //
 // The minimal contract: an envelope missing the retired protocol
 // fields is never judged invalid for its absence — there is no
@@ -288,6 +300,13 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 				err = fmt.Errorf("%w (entries dropped while parsing the envelope: %s)", err, strings.Join(res.evidenceDropped, "; "))
 			}
 			return fmt.Errorf("driver: step %q completed without verification evidence: %w", spec.StepID, err)
+		}
+	}
+	// 5. the committed-test-files gate (polyforge#156): declared test
+	// files must survive a resume, which restores task repos at HEAD only.
+	if res.Outcome == OutcomeCompleted && spec.ReposDir != "" {
+		if err := checkTestFilesCommitted(spec.ReposDir, res.Output); err != nil {
+			return fmt.Errorf("driver: step %q completed with %w", spec.StepID, err)
 		}
 	}
 	return nil
