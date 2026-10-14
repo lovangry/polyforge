@@ -31,7 +31,7 @@ package driver
 // pre-push hook.
 //
 // autoMergeEligible is the merge rule itself, isolated so the owner's
-// pending quick-fix decision is a one-line change.
+// quick-fix rule (no review step) stays one visible condition.
 
 import (
 	"encoding/json"
@@ -60,15 +60,16 @@ type mergeFacts struct {
 }
 
 // autoMergeEligible is the merge rule: a PR merges without a human only
-// when the independent review passed with no blocking finding, the tests
-// are covered on the pushed head, and no conflict was hand-resolved. The
-// pre-flight (nothing uncommitted, no release residue) is the step
-// contract's part. quick-fix has no review step, so it never qualifies;
-// to let it auto-merge on verification alone, change the first test to
-// `f.hasReview && !f.reviewPassed`.
+// when the independent review passed with no blocking finding (in a
+// workflow that has one), the tests are covered on the pushed head, the
+// delivered head is the local HEAD on the latest default branch, and no
+// conflict was hand-resolved. The pre-flight (nothing uncommitted, no
+// release residue) is the step contract's part. quick-fix has no review
+// step: there verification's pass (a gate the lane cannot pass by
+// without) stands in for it — owner decision, polyforge#166.
 func autoMergeEligible(f mergeFacts) (bool, string) {
 	switch {
-	case !f.reviewPassed:
+	case f.hasReview && !f.reviewPassed:
 		return false, "no independent review passed with no blocking finding"
 	case f.handResolved != "":
 		return false, "the delivered history has a hand-resolved or hand-made change (" + f.handResolved + ")"

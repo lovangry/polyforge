@@ -227,7 +227,8 @@ gone (`pf ship` now answers "unknown command"). The delivery lanes
 `deliver` workflow step that merges the latest origin default branch,
 pushes only the feature branch `polyforge/<project>-<seq>`, opens or reuses
 its PR, and auto-merges it (`gh pr merge --merge`) when review and tests
-passed with no LLM-resolved conflict — otherwise it asks a human-only
+passed with no LLM-resolved conflict (quick-fix, which has no review step,
+on verification's pass) — otherwise it asks a human-only
 question answered via `pf answer`. The section above describes the
 pre-#166 `pf ship`; a closed work item that was never shipped before the
 upgrade has to be bridged manually (push its sealed capsule commits by

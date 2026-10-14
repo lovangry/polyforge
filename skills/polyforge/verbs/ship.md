@@ -12,8 +12,8 @@ pushes a delivery. Delivery is the last step of the delivery lanes:
 4. auto-merges with `gh pr merge --merge` when the review passed with no
    blocking finding, the tests passed, no merge conflict had to be
    resolved by the LLM, and its pre-flight (nothing uncommitted, no release
-   residue) found nothing. quick-fix has no review step, so its deliveries
-   always ask.
+   residue) found nothing. quick-fix has no review step: there
+   verification's pass stands in for the review.
 
 Otherwise the step asks a **human-only** question. `pf watch <id> --once`
 shows it; the human answers with one of:

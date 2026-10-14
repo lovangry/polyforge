@@ -166,8 +166,9 @@ commits beyond its baseline (`git rev-list --count <baseline>..HEAD` is 0). Othe
      the body naming the WI slug, a change summary, the review verdict and the test
      results (verification's, plus your re-run if any).
 6. **Merge rule.** The PR may be merged without asking iff ALL hold:
-   - an independent review exists and passed with no blocking finding
-     (`steps.review.output.verdict` is pass, no finding with severity `blocking`);
+   - the independent review passed with no blocking finding
+     (`steps.review.output.verdict` is pass, no finding with severity `blocking`); in a
+     workflow without a `review` step (quick-fix) verification's pass stands in for it;
    - the tests are covered on the pushed head (HEAD is the verified commit, or you re-ran
      the test bar after the last merge in this dispatch) and `tests_passed` is true;
    - no merge since the verified commit was hand-resolved (`llm_resolved_conflict` is

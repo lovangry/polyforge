@@ -97,7 +97,7 @@ resolution), pushes ONLY the feature branch `polyforge/<project>-<seq>`, opens o
 the PR, and merges it with `gh pr merge --merge` iff the independent review passed with no
 blocking finding, the tests passed, no conflict was LLM-resolved and its mechanical
 pre-flight (nothing uncommitted, no release residue) found nothing. Otherwise it asks a
-human-only question (merge / don't merge / back to code). This workflow has no independent `review` step, so the merge rule never holds here: every quick-fix delivery stops at the human question with its PR open. "Back to code" is a
+human-only question (merge / don't merge / back to code). This workflow has no independent `review` step, so verification's pass stands in for it: a quick-fix delivery auto-merges when its tests are covered on the pushed head, no conflict was hand-resolved and the pre-flight is clean, and asks otherwise. "Back to code" is a
 `gate_failed` verdict that rewinds to `fix`; a re-run reuses the same branch and PR. The
 result records branch, PR URL and merge commit (or why not merged) per repo, plus the
 delivery note (`artifacts/delivery.md`). The driver refuses a completed `deliver` whose

@@ -407,41 +407,74 @@ func TestW166DeliverHandResolvedConflictStopsAtHuman(t *testing.T) {
 	}
 }
 
-// TestW166DeliverWithoutIndependentReviewNeedsHuman: quick-fix has no
-// review step, so the merge rule never holds: a merge claim without a
-// human answer is refused; the human answers "don't merge" and the lane
-// completes with the PR open and origin main untouched.
-func TestW166DeliverWithoutIndependentReviewNeedsHuman(t *testing.T) {
+// TestW166DeliverQuickFixAutoMerges: quick-fix has no review step;
+// verification's pass stands in for it (owner decision), so a clean
+// delivery on the verified commit auto-merges without a human.
+func TestW166DeliverQuickFixAutoMerges(t *testing.T) {
 	inst := newV1Install(t)
 	w := newDeliverWorld(t)
 	origin := w.origin("demo")
-	wi, branch := newDeliverWI(t, inst, "w166: no independent review, human decides", "quick-fix")
-	const qid = "deliver-merge"
+	wi, branch := newDeliverWI(t, inst, "w166: quick-fix auto-merges on verification", "quick-fix")
 	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
-			"run": literalBranch(branch, pushAndPR("demo"), claimRecord("demo", `"merged":true,"merge_commit":"x","tests_passed":true`), assemble)},
-		{"do": "envelope", "id": "deliver", "outcome": "needs_input", "question_id": qid,
-			"question": "PR https://github.com/fake/demo/pull/1: no independent review in quick-fix. merge / don't merge / back to code?"},
+			"run": literalBranch(branch, pushAndPR("demo"), mergeRecord("demo", ""), assemble)},
+	}, nil)
+	d := startDeliverDaemon(t, inst, w, wi)
+
+	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	w.mergedInto(origin, branch)
+	for _, e := range d.eventsOf(t, wi) {
+		if e.Kind == "envelope_rejected" {
+			t.Fatalf("an envelope was rejected: %s", e.Body)
+		}
+	}
+}
+
+// TestW166DeliverQuickFixHandResolvedConflictAsks: quick-fix still asks when
+// merging main needed a hand-resolved conflict (driver-derived, whatever
+// the step reports); the human answers "don't merge" and the lane
+// completes with the PR open and origin main untouched by it.
+func TestW166DeliverQuickFixHandResolvedConflictAsks(t *testing.T) {
+	inst := newV1Install(t)
+	w := newDeliverWorld(t)
+	origin := w.origin("demo")
+	wi, branch := newDeliverWI(t, inst, "w166: quick-fix hand-resolved conflict asks", "quick-fix")
+	const qid = "deliver-merge"
+	resolve := dPre("demo") + `git fetch -q origin; if git merge -q --no-edit origin/main; then exit 9; fi; ` +
+		`{ echo "fake agent repo work"; echo "main moved on"; } > work.txt; git add work.txt; git commit -q --no-edit; ` +
+		`git push -q origin "HEAD:refs/heads/$b"; gh pr create --base main --head "$b" --title "w166 conflict" --body-file /dev/null`
+	inst.setPlanFull(t, wi, []map[string]any{
+		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
+		// main moves on with a conflicting change while verification runs
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": verifiedWithTestBar(),
+			"run": []string{moveMain(origin, "work.txt", "main moved on"), deliverTestBarCmd}},
 		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
-			"run": literalBranch(branch, claimRecord("demo", `"merged":false,"not_merged_reason":"human: don't merge yet","tests_passed":true`), assemble)},
+			"run": literalBranch(branch, resolve, deliverTestBarCmd,
+				claimRecord("demo", `"merged":true,"merge_commit":"pending","tests_passed":true,"llm_resolved_conflict":false`), assemble)},
+		{"do": "envelope", "id": "deliver", "outcome": "needs_input", "question_id": qid,
+			"question": "PR https://github.com/fake/demo/pull/1: merging main needed a hand-resolved conflict. merge / don't merge / back to code?"},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
+			"run": literalBranch(branch, claimRecord("demo", `"merged":false,"not_merged_reason":"human: don't merge yet","tests_passed":true,"llm_resolved_conflict":true`), assemble)},
 	}, nil)
 	d := startDeliverDaemon(t, inst, w, wi)
 
 	waitQuestion(t, d, wi, qid, 120*time.Second)
-	expectRejection(t, d, wi, "independent review")
+	expectRejection(t, d, wi, "had conflicts")
 	answerQuestion(t, d, wi, qid, "don't merge")
 	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
 	if w.prState("demo", "1") != "OPEN" || w.calls("gh pr merge") != 0 {
 		t.Fatalf("PR must stay open and unmerged (state %q)", w.prState("demo", "1"))
 	}
-	if merges := strings.TrimSpace(gitRun(t, origin, "rev-list", "--merges", "refs/heads/main")); merges != "" {
-		t.Fatalf("origin main got a merge despite \"don't merge\": %s", merges)
+	branchHead := strings.TrimSpace(gitRun(t, origin, "rev-parse", "refs/heads/"+branch))
+	if strings.Contains(gitRun(t, origin, "branch", "--contains", branchHead), "main") {
+		t.Fatal("origin main contains the delivered branch despite \"don't merge\"")
 	}
-	gitRun(t, origin, "rev-parse", "--verify", "refs/heads/"+branch) // the feature branch was pushed
 }
 
 // TestW166DeliverMultiRepoCrashBetweenPRAndMerge: a WI with two task repos
