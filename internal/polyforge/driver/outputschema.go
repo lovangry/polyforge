@@ -9,11 +9,12 @@
 //     prompt ahead of the step body (the body says "per the schema
 //     above"), instead of being stripped with the rest of the
 //     frontmatter;
-//   - the driver enforces it: a completed result's output is validated
-//     against the compiled schema inside ValidateStepResult, and a
-//     violation is an ordinary envelope rejection (the in-process retry
-//     lane: the step is re-dispatched with the validation error, and
-//     the bound sends a persistently broken author to blocked
+//   - the driver validates it: a completed result's output is checked
+//     against the compiled schema inside ValidateStepResult. In the
+//     v2.5.0 RECORD-ONLY mode (enforceOutputSchemas false) a violation is
+//     the durable output_schema_violation event and the result is still
+//     accepted; with the switch flipped it becomes an ordinary envelope
+//     rejection (the in-process retry lane, bounded into blocked
 //     result_invalid).
 //
 // A step definition without an `output:` block declares nothing and is
@@ -27,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	"gopkg.in/yaml.v3"
@@ -155,8 +157,9 @@ func dropNulls(v any) any {
 	return v
 }
 
-// maxSchemaErrorLen bounds the validation detail an envelope rejection
-// carries back into the retry prompt.
+// maxSchemaErrorLen bounds the validation detail carried by the
+// output_schema_violation event (record-only mode) or, when enforcing,
+// by the rejection fed back into the retry prompt.
 const maxSchemaErrorLen = 2000
 
 // checkOutputSchema validates one output payload against the declared
@@ -180,7 +183,11 @@ func checkOutputSchema(s *jsonschema.Schema, output json.RawMessage) error {
 		}
 		detail = strings.TrimSpace(detail)
 		if len(detail) > maxSchemaErrorLen {
-			detail = detail[:maxSchemaErrorLen] + " …"
+			cut := maxSchemaErrorLen
+			for cut > 0 && !utf8.RuneStart(detail[cut]) {
+				cut-- // never split a UTF-8 rune
+			}
+			detail = detail[:cut] + " …"
 		}
 		return fmt.Errorf("output does not match the step's declared output schema (shown in your prompt under \"Output schema\"): %s", detail)
 	}

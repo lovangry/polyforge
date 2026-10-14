@@ -340,13 +340,14 @@ func TestV2StepTimeoutLongTaskRelaxesThenBlocks(t *testing.T) {
 // re-pinning the dead model forever).
 func TestV2ModelPinFailureAdvancesCandidate(t *testing.T) {
 	inst := newV1Install(t)
-	// grill runs healthy on its first candidate; fix's first candidate
-	// (the flash model) cannot be resolved by this harness, so ordinal 2
-	// dies at birth and its action is never reached.
+	// grill and fix run healthy on their first candidate (the bundle
+	// defaults head); verification's first candidate (its flash-first
+	// step list, polyforge#164 S8) cannot be resolved by this harness, so
+	// ordinal 3 dies at birth and its action is never reached.
 	actions := []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
-		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true}, // spawn 2 dies at birth: never reached
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "verification", "outcome": "completed"}, // spawn 3 dies at birth: never reached
 		{"do": "envelope", "id": "verification", "outcome": "completed"},
 	}
 	wi := inst.newWI(t, "f4: model pin failure exit", actions, nil)
@@ -358,25 +359,25 @@ func TestV2ModelPinFailureAdvancesCandidate(t *testing.T) {
 
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 	fails := stepFailures(t, d, wi)
-	if len(fails) != 1 || fails[0].Step != "fix" || fails[0].Cause != "exit_model_class" || fails[0].Disposition != "switch_model" ||
+	if len(fails) != 1 || fails[0].Step != "verification" || fails[0].Cause != "exit_model_class" || fails[0].Disposition != "switch_model" ||
 		fails[0].From != "sub2api-glm/glm-5.3-flash" || fails[0].To != "sub2api-glm/glm-5.3" || fails[0].Count != 0 {
-		t.Fatalf("failure records %+v, want exit_model_class/switch_model flash -> glm-5.3 on fix", fails)
+		t.Fatalf("failure records %+v, want exit_model_class/switch_model flash -> glm-5.3 on verification", fails)
 	}
 	if vs := verdicts(t, d, wi); len(vs) != 0 {
 		t.Fatalf("an exit is the driver's own judgement, no supervisor verdict: %+v", vs)
 	}
 	x := readExecution(t, d.capsuleDir(wi))
 	var sawClass bool
-	for _, a := range x.Steps["fix"].Attempts {
+	for _, a := range x.Steps["verification"].Attempts {
 		if a["failure_cause"] == "exit_model_class" {
 			sawClass = true
 		}
 	}
 	if !sawClass {
-		t.Fatalf("the attempt must carry the cause sub-class: %+v", x.Steps["fix"].Attempts)
+		t.Fatalf("the attempt must carry the cause sub-class: %+v", x.Steps["verification"].Attempts)
 	}
-	if x.Steps["fix"].Model != "sub2api-glm/glm-5.3" {
-		t.Fatalf("fix finished on model %q, want the advanced candidate", x.Steps["fix"].Model)
+	if x.Steps["verification"].Model != "sub2api-glm/glm-5.3" {
+		t.Fatalf("verification finished on model %q, want the advanced candidate", x.Steps["verification"].Model)
 	}
 }
 

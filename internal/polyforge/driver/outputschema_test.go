@@ -183,7 +183,7 @@ func TestRunVerificationPreExistingFailureDoesNotRewind(t *testing.T) {
 		verificationDone(`{"verdict":"pass","checks":[
 			{"name":"build","status":"pass"},
 			{"name":"unit","status":"pre_existing","detail":"TestFlaky fails on base abc1234 too"}],
-			"pre_existing_failures":["TestFlaky"]}`),
+			"pre_existing_failures":["internal/x/flaky_test.go: TestFlaky"]}`),
 	}
 	if err := d.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -196,7 +196,7 @@ func TestRunVerificationPreExistingFailureDoesNotRewind(t *testing.T) {
 		t.Fatalf("workflow must complete without a rewind: %s", exec.WorkflowStatus)
 	}
 	blob, _ := json.Marshal(exec.Steps["verification"].Output["pre_existing_failures"])
-	if string(blob) != `["TestFlaky"]` {
+	if string(blob) != `["internal/x/flaky_test.go: TestFlaky"]` {
 		t.Fatalf("the pre-existing failures must stay reported: %s", blob)
 	}
 }
@@ -214,7 +214,7 @@ var shippedSamples = map[string]string{
 	"chore/plan":                `{"plan_path":"artifacts/plan.md","step_ids":["s1"],"touched_files":[{"path":"a.go","intent":"write"}]}`,
 	"chore/code":                `{"commits":[{"sha":"abc1234","message":"chore: drop dead code"}],"build_status":"green"}`,
 	"chore/review":              `{"verdict":"pass","findings":[]}`,
-	"chore/verification":        `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"unit","status":"pre_existing","detail":"TestFlaky fails on base abc1234 too"}],"pre_existing_failures":["TestFlaky"]}`,
+	"chore/verification":        `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"unit","status":"pre_existing","detail":"TestFlaky fails on base abc1234 too"}],"pre_existing_failures":["internal/x/flaky_test.go: TestFlaky"]}`,
 	"feature-full/grill":        `{"qa_log":"artifacts/grill-qa.md","ready_for_spec":true}`,
 	"feature-full/spec":         `{"spec_path":"artifacts/spec.md","requirement_titles":["R1"],"non_goals":[]}`,
 	"feature-full/grill-review": `{"verdict":"pass","qa_log":"artifacts/grill-qa.md","fail_reason":null}`,

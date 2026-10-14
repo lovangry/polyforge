@@ -8,6 +8,7 @@ package driver
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -72,5 +73,67 @@ func TestRunFeatureFullVerificationCannotExcuseAuthoredTests(t *testing.T) {
 	}
 	if exec := readExec(t, execPath); exec.WorkflowStatus != StatusCompleted {
 		t.Fatalf("a genuine pre-existing failure with its base sha passes: %s", exec.WorkflowStatus)
+	}
+}
+
+// bug-fix: once the repro reproduced the bug, a verification pass must
+// show the repro re-run passing — a skipped (or missing) repro check
+// under a pass is rejected.
+func TestRunBugFixPassNeedsPassingRepro(t *testing.T) {
+	d, sp, execPath := runEnv(t, spec("repro"), spec("fix"), gateSpec("verification", "fix"))
+	writeCapsuleFile(t, d.wi.CapsuleDir, "workflows/b/steps/verification.md", shippedStepDef(t, "bug-fix", "verification"))
+	sp.script = []fakeEntry{
+		done(`{"repro_path":"artifacts/repro.md","reproduces":true}`),
+		done(`{"regression_test":"waived: no test surface"}`),
+		verificationDone(`{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"repro","status":"skipped","detail":"slow"}]}`),
+		verificationDone(`{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"original repro","status":"pass"}]}`),
+	}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := sp.dispatched(); len(got) != 4 {
+		t.Fatalf("the skipped repro under a pass must be rejected once, got %v", got)
+	}
+	if fb := sp.spawnAt(3).PriorRejection; !strings.Contains(fb, `check named "repro" with status pass`) {
+		t.Fatalf("feedback must ask for the passing repro check: %q", fb)
+	}
+	if exec := readExec(t, execPath); exec.WorkflowStatus != StatusCompleted {
+		t.Fatalf("the pass with a passing repro completes: %s", exec.WorkflowStatus)
+	}
+}
+
+// Matching is by path, never by substring: a protected file matches
+// exactly, a protected directory as a component-boundary prefix; a
+// "repro" check is "repro" as a word; regression_test entries reduce to
+// their path token.
+func TestPreExistingMatchingRules(t *testing.T) {
+	rules := preExistingRulesOf(map[string]map[string]any{
+		"e2e-author": {"test_files": []any{"test/a_test.go", "test/e2e/"}},
+		"fix":        {"regression_test": "internal/x/nil_test.go (TestNilMap), ./internal/y/y_test.go:TestY"},
+	})
+	for _, p := range []string{"test/a_test.go", "test/e2e/login_test.go", "internal/x/nil_test.go", "internal/y/y_test.go"} {
+		if protectedPath(p, rules.Protected) == "" {
+			t.Errorf("%s must be protected (rules %v)", p, rules.Protected)
+		}
+	}
+	for _, p := range []string{"test/a_test.go.bak", "xtest/a_test.go", "test/e2ex/a_test.go", "a_test.go", "internal/x/nil_test"} {
+		if pr := protectedPath(p, rules.Protected); pr != "" {
+			t.Errorf("%s must not match (matched %s)", p, pr)
+		}
+	}
+	ok := `{"verdict":"pass","checks":[{"name":"TestReproducibleBuild","status":"pre_existing","detail":"fails on base 0123abcd; unrelated to test/a_test.go.bak"}],
+		"pre_existing_failures":["internal/z/build_test.go: TestReproducibleBuild"]}`
+	if err := checkPreExisting(json.RawMessage(ok), rules, true); err != nil {
+		t.Fatalf("a genuine pre-existing failure must pass: %v", err)
+	}
+	for name, out := range map[string]string{
+		"bare test name entry": `{"checks":[{"name":"unit","status":"pre_existing","detail":"base 0123abcd"}],"pre_existing_failures":["TestOld"]}`,
+		"no entry at all":      `{"checks":[{"name":"unit","status":"pre_existing","detail":"base 0123abcd"}]}`,
+		"protected dir entry":  `{"checks":[{"name":"e2e","status":"pre_existing","detail":"base 0123abcd"}],"pre_existing_failures":["test/e2e/login_test.go: TestLogin"]}`,
+		"repro word":           `{"checks":[{"name":"repro-run","status":"pre_existing","detail":"base 0123abcd"}],"pre_existing_failures":["internal/z/z_test.go: TestZ"]}`,
+	} {
+		if err := checkPreExisting(json.RawMessage(out), rules, true); err == nil {
+			t.Errorf("%s: must be rejected", name)
+		}
 	}
 }

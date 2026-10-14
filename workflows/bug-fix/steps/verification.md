@@ -114,7 +114,10 @@ names only the new failures. The base runs are command evidence like any other.
 **Never pre_existing:** the repro re-run (its check and the original repro case), every test in `steps.repro.output.test_files`, and the `steps.fix.output.regression_test` test(s). These pin THIS change and fail on the base by design
 — a repro that still fails is an unfixed bug, not a pre-existing failure. Report them
 `pass` or `fail`, never `pre_existing`; the driver rejects a result that classifies a
-repro check or an authored/regression test as pre_existing.
+repro check or an authored/regression test as pre_existing. When `repro` reproduced the
+bug (`reproduces: true`), a `pass` verdict must record the repro re-run as a check named
+`repro` with status `pass` — the driver rejects a pass whose repro check is skipped or
+missing.
 
 ## Honesty
 

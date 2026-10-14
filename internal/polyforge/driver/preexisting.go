@@ -8,8 +8,11 @@
 // "pre-existing"), and so do the authored acceptance tests and the
 // regression test. The driver therefore rejects — through the ordinary
 // envelope-rejection retry lane — a completed result that classifies a
-// repro check or any protected test as pre_existing, and one whose
-// pre_existing check does not name the base commit it was re-run on.
+// repro check or any protected test as pre_existing, a pre_existing
+// check that names no base commit or is not backed by a well-formed
+// `<repo-relative path>: <test>` pre_existing_failures entry, and (bug-fix)
+// a verification pass that does not show the reproduced bug's repro
+// check passing.
 package driver
 
 import (
@@ -27,20 +30,75 @@ const statusPreExisting = "pre_existing"
 // baseSHAShape finds a commit sha (abbreviated or full) in a detail.
 var baseSHAShape = regexp.MustCompile(`\b[0-9a-f]{7,40}\b`)
 
-// protectedTestsOf folds the protected tests from the done steps'
-// outputs: every declared test_files path (e2e-author, repro) and the
-// regression_test paths (bug-fix fix; a `waived: ...` value names none).
-func protectedTestsOf(outputs map[string]map[string]any) []string {
-	seen := map[string]bool{}
+// reproName matches a check named for the repro: "repro" as a word
+// (repro, repro-run, "original repro"), never TestReproducibleBuild.
+var reproName = regexp.MustCompile(`(?i)\brepro\b`)
+
+// preExistingEntry is the documented pre_existing_failures entry form:
+// `<repo-relative test file>: <test name>`.
+var preExistingEntry = regexp.MustCompile(`^(\S+): (\S.*)$`)
+
+// PreExistingRules is what the pre-existing boundary judges against,
+// folded from the done steps' outputs.
+type PreExistingRules struct {
+	// Protected are repo-relative test paths (files, or directories
+	// matched as exact path prefixes) that pin this change.
+	Protected []string
+	// ReproReproduced: bug-fix's repro reported reproduces: true, so a
+	// passing verification must show a passing repro check.
+	ReproReproduced bool
+}
+
+// cleanRel normalizes one repo-relative path ("" when it is not one).
+func cleanRel(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	c := path.Clean(p)
+	if path.IsAbs(c) || c == "." || c == ".." || strings.HasPrefix(c, "../") {
+		return ""
+	}
+	return c
+}
+
+// regressionPaths parses fix's regression_test: comma-separated entries,
+// each reduced to its path token (a trailing "(TestFoo)" or a test name
+// after whitespace is dropped); a `waived: ...` value names none.
+func regressionPaths(rt string) []string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rt)), "waived") {
+		return nil
+	}
 	var out []string
-	add := func(s string) {
-		s = strings.TrimSpace(s)
-		if s != "" && !seen[s] {
-			seen[s] = true
-			out = append(out, s)
+	for _, item := range strings.Split(rt, ",") {
+		fields := strings.Fields(item)
+		if len(fields) == 0 {
+			continue
+		}
+		tok := fields[0]
+		if i := strings.IndexAny(tok, "(:"); i >= 0 {
+			tok = tok[:i]
+		}
+		if c := cleanRel(tok); c != "" {
+			out = append(out, c)
 		}
 	}
-	for _, o := range outputs {
+	return out
+}
+
+// preExistingRulesOf folds the rules from the done steps' outputs: every
+// declared test_files path (e2e-author, repro), the regression_test
+// paths (bug-fix fix) and whether the repro reproduced the bug.
+func preExistingRulesOf(outputs map[string]map[string]any) PreExistingRules {
+	var r PreExistingRules
+	seen := map[string]bool{}
+	add := func(p string) {
+		if c := cleanRel(p); c != "" && !seen[c] {
+			seen[c] = true
+			r.Protected = append(r.Protected, c)
+		}
+	}
+	for id, o := range outputs {
 		if list, ok := o["test_files"].([]any); ok {
 			for _, v := range list {
 				if s, ok := v.(string); ok {
@@ -48,34 +106,56 @@ func protectedTestsOf(outputs map[string]map[string]any) []string {
 				}
 			}
 		}
-		if rt, ok := o["regression_test"].(string); ok && !strings.HasPrefix(strings.TrimSpace(strings.ToLower(rt)), "waived") {
-			for _, s := range strings.Split(rt, ",") {
-				add(s)
+		if rt, ok := o["regression_test"].(string); ok {
+			for _, p := range regressionPaths(rt) {
+				add(p)
 			}
 		}
+		if id == "repro" && o["reproduces"] == true {
+			r.ReproReproduced = true
+		}
 	}
-	return out
+	return r
 }
 
-// mentionsProtected answers the protected test text names (by its path
-// or its file name), "" when none.
-func mentionsProtected(text string, protected []string) string {
-	for _, p := range protected {
-		if strings.Contains(text, p) || strings.Contains(text, path.Base(p)) {
-			return p
+// protectedPath answers the protected entry p matches: the exact path,
+// or a protected directory on a path-component boundary ("" = none).
+func protectedPath(p string, protected []string) string {
+	c := cleanRel(p)
+	if c == "" {
+		return ""
+	}
+	for _, pr := range protected {
+		if c == pr || strings.HasPrefix(c, pr+"/") {
+			return pr
 		}
 	}
 	return ""
 }
 
-// checkPreExisting judges the pre_existing classifications of one
-// output (a no-op for outputs without any).
-func checkPreExisting(output json.RawMessage, protected []string) error {
+// mentionsProtected scans free text (a check name or detail) token by
+// token — never a bare substring — for a protected path.
+func mentionsProtected(text string, protected []string) string {
+	for _, tok := range strings.FieldsFunc(text, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || strings.ContainsRune(",;()[]{}\"'`", r)
+	}) {
+		tok = strings.TrimRight(tok, ":.")
+		if pr := protectedPath(tok, protected); pr != "" {
+			return pr
+		}
+	}
+	return ""
+}
+
+// checkPreExisting judges one completed output against the boundary.
+// verification marks the step whose pass must show the repro (bug-fix).
+func checkPreExisting(output json.RawMessage, rules PreExistingRules, verification bool) error {
 	if len(output) == 0 {
 		return nil
 	}
 	var probe struct {
-		Checks []struct {
+		Verdict any `json:"verdict"`
+		Checks  []struct {
 			Name   string `json:"name"`
 			Status string `json:"status"`
 			Detail string `json:"detail"`
@@ -86,24 +166,43 @@ func checkPreExisting(output json.RawMessage, protected []string) error {
 		return nil
 	}
 	var problems []string
+	preChecks := 0
+	reproPassed := false
 	for _, c := range probe.Checks {
+		if reproName.MatchString(c.Name) && c.Status == "pass" {
+			reproPassed = true
+		}
 		if c.Status != statusPreExisting {
 			continue
 		}
+		preChecks++
 		switch {
-		case strings.Contains(strings.ToLower(c.Name), "repro"):
+		case reproName.MatchString(c.Name):
 			problems = append(problems, fmt.Sprintf("check %q is the repro of the bug being fixed — it fails on the base by definition, so it can never be pre_existing", c.Name))
-		case mentionsProtected(c.Name+" "+c.Detail, protected) != "":
-			problems = append(problems, fmt.Sprintf("check %q covers the protected test %s", c.Name, mentionsProtected(c.Name+" "+c.Detail, protected)))
+		case mentionsProtected(c.Name+" "+c.Detail, rules.Protected) != "":
+			problems = append(problems, fmt.Sprintf("check %q covers the protected test %s", c.Name, mentionsProtected(c.Name+" "+c.Detail, rules.Protected)))
 		case !baseSHAShape.MatchString(c.Detail):
 			problems = append(problems, fmt.Sprintf("check %q is pre_existing but its detail names no base commit sha", c.Name))
 		}
 	}
+	entries := 0
 	for _, v := range probe.PreExisting {
 		s, _ := v.(string)
-		if p := mentionsProtected(s, protected); p != "" {
-			problems = append(problems, fmt.Sprintf("pre_existing_failures entry %q is the protected test %s", s, p))
+		m := preExistingEntry.FindStringSubmatch(strings.TrimSpace(s))
+		if m == nil || cleanRel(m[1]) == "" {
+			problems = append(problems, fmt.Sprintf("pre_existing_failures entry %q is not of the form `<repo-relative test file>: <test name>`", s))
+			continue
 		}
+		entries++
+		if pr := protectedPath(m[1], rules.Protected); pr != "" {
+			problems = append(problems, fmt.Sprintf("pre_existing_failures entry %q is the protected test %s", s, pr))
+		}
+	}
+	if preChecks > 0 && entries == 0 {
+		problems = append(problems, "a pre_existing check must be backed by at least one pre_existing_failures entry `<repo-relative test file>: <test name>`")
+	}
+	if verdict, _ := probe.Verdict.(string); verification && rules.ReproReproduced && strings.EqualFold(strings.TrimSpace(verdict), "pass") && !reproPassed {
+		problems = append(problems, "the repro reproduced the bug, so a pass needs the repro re-run recorded as a check named \"repro\" with status pass (not skipped, not missing)")
 	}
 	if len(problems) == 0 {
 		return nil

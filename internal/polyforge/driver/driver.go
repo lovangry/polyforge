@@ -801,7 +801,7 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	}
 	d.mu.Unlock()
 	spec.OutputSchema = d.outputSchema(stepID)
-	spec.ProtectedTests = protectedTestsOf(outputs)
+	spec.PreExisting = preExistingRulesOf(outputs)
 	// Declared outputs, gate-ness and duties (gate-ness feeds the
 	// verdict binding — the #106 lesson).
 	if ss := d.workflow.step(stepID); ss != nil {

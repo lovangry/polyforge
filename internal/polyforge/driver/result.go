@@ -212,11 +212,11 @@ type ResultSpec struct {
 	// AuthoredTests is the authored-tests baseline of the done steps
 	// before this one (polyforge#164 H4); nil = no authored tests.
 	AuthoredTests *AuthoredTests
-	// ProtectedTests are the tests that pin the change itself — the
-	// authored test_files of the done steps (e2e-author, repro) and
-	// bug-fix's regression_test paths. A result may never classify one
-	// of them (or a repro check) as pre_existing (checkPreExisting).
-	ProtectedTests []string
+	// PreExisting is the pre-existing-failure boundary (polyforge#164
+	// S6): the tests that pin the change itself — the authored test_files
+	// of the done steps (e2e-author, repro) and bug-fix's regression_test
+	// paths — and whether the repro reproduced the bug (checkPreExisting).
+	PreExisting PreExistingRules
 }
 
 // ValidateStepResult runs the staging gates over one envelope:
@@ -363,7 +363,7 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	// that pin THIS change — the repro, the authored acceptance and
 	// regression tests — can never be excused as failing on the base.
 	if res.Outcome == OutcomeCompleted {
-		if err := checkPreExisting(res.Output, spec.ProtectedTests); err != nil {
+		if err := checkPreExisting(res.Output, spec.PreExisting, spec.StepID == verificationStepID); err != nil {
 			return fmt.Errorf("driver: step %q completed with %w", spec.StepID, err)
 		}
 	}
