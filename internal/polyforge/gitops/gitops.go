@@ -119,7 +119,7 @@ func (o Opts) Env() []string {
 
 // CEnv returns env (nil = inherited environ) pinned to the C locale:
 // LC_ALL=C and no LANGUAGE, so git's messages are never translated and
-// the output this package (and ship) pattern-matches stays stable.
+// the output this package pattern-matches stays stable.
 func CEnv(env []string) []string {
 	if env == nil {
 		env = os.Environ()

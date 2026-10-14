@@ -32,7 +32,7 @@
 - 定义 AIHub 的**对外面与接口分流**：AIHub 的对外客户端面有且只有 HTTP API 与 `pf` CLI 两个
   （MCP 删除，§3.1）；AIHub 进程只开一个 HTTP 监听端口（A5 单端口裁定，§3.1）；路由 13 个
   用户动词按目标面二分为「经 `pf` CLI 直连 AIHub」与「打 Daemon 本机面」（分流表 §5.1；
-  第 13 个动词 `ship` 为基线修订 polyforge#37 所加，见 §5.1）；
+  第 13 个动词 `ship` (removed by polyforge#166: delivery is the workflows' deliver step) 为基线修订 polyforge#37 所加，见 §5.1）；
   AIHub 服务端是权限硬边界的唯一执行点（A17，§8）。
 - 【polyforge#106 修订】原 v1 的「每 WI 一个持久化 Harness RPC WI Agent（agent 侧执行
   skill 主循环 + harness-native subagent 派生）」执行面已被删除。现在的执行引擎是 Daemon 内的
@@ -552,7 +552,7 @@ HTTP API 与 `pf` CLI 两个（MCP 删除，§3.1），且全部端点共用单�
 
 | 接口 | 调用方 → 被调方 | 权威定义 |
 |---|---|---|
-| 路由 Skill → Daemon 操作请求（执行面动词 submit/observe/answer/batch-confirm/pause/resume/wrap/ship/ops，分流表 §5.1） | Harness → Daemon | `04-local-runtime.md#§5.1` |
+| 路由 Skill → Daemon 操作请求（执行面动词 submit/observe/answer/batch-confirm/pause/resume/wrap/ship (removed by polyforge#166: delivery is the workflows' deliver step)/ops，分流表 §5.1） | Harness → Daemon | `04-local-runtime.md#§5.1` |
 | 路由 Skill / CI → AIHub 数据面动词（file/queue/cancel/recall，经 `pf` CLI 直连 HTTP，不经 Daemon） | `pf` CLI → AIHub | 本文 §5.1、`02-aihub-core.md#§5.1`（canonical 26 端点清单） |
 | Workflow 选择与创建时校验/固化（提交方创建 WI 时只提交 `bundle_name`；frontmatter 校验与 digest 固化是 AIHub 创建事务内的服务端内部步骤，无独立端点，INV-8） | 路由 Skill/CLI → AIHub（`POST /api/v1/work-items`） | `01-workflow-skills.md#§4.6`、`02-aihub-core.md#§4.5` |
 | Core 读写 API（允许操作集为 WI 生命周期/读操作） | WI Agent（不持有任何 Core API key 或 Revision 发布 token）→ Daemon 本地认证代理（`04-local-runtime.md#§5.3`）→ AIHub | `04-local-runtime.md#§5.3`、`02-aihub-core.md#§5.1` |
@@ -572,7 +572,7 @@ HTTP API 与 `pf` CLI 两个（MCP 删除，§3.1），且全部端点共用单�
 路由 skill 的 13 个用户动词 fragment（`01-workflow-skills.md#§2.1`/§3）按目标面二分；分流判据：**凡
 语义上依赖本机执行现场（Capsule、WI Agent 进程）或必须由 Daemon 机械执行的 Revision 发布
 （INV-11，含收尾 flush 证据 `02-aihub-core.md#§6.4`）的动词，打 Daemon 本机面；纯 Core 数据读写
-（不触碰执行现场）的动词直连 AIHub，由 `pf` CLI 承载 HTTP 调用**。第 13 个动词 `ship`
+（不触碰执行现场）的动词直连 AIHub，由 `pf` CLI 承载 HTTP 调用**。第 13 个动词 `ship` (removed by polyforge#166: delivery is the workflows' deliver step)
 （wrap→git 交付桥，基线修订 polyforge#37 所加，方案 B 裁定：polyforge#2 全程 wrap 落定后，其
 git commit 只存在于封存 capsule（detached HEAD）与 Revision 链，原有动词无一能把它推送至 git
 origin，人工桥接验证可行后收编为一等动词）按同一判据落在 Daemon 本机面：ship 的语义依赖本机
@@ -591,7 +591,7 @@ origin，人工桥接验证可行后收编为一等动词）按同一判据落�
 | `pause`（暂停执行中的 WI） | Daemon 本机面 | `04-local-runtime.md#§5.1`（收尾需 Daemon 生成的 `flush_evidence`，`02-aihub-core.md#§6.4`） |
 | `resume`（恢复执行） | Daemon 本机面 | `04-local-runtime.md#§5.1` |
 | `wrap`（收尾） | Daemon 本机面 | `04-local-runtime.md#§5.1`（同 `pause` 的 flush 理由） |
-| `ship`（wrap→git 交付桥：把已收尾 WI 的封存 capsule 以固定名分支 `polyforge/<project>-<seq>` 推送到 git origin） | Daemon 本机面 | `04-local-runtime.md#§5.1`（语义、幂等、PR 分层与安全面权威在彼处；CLI 入口 `pf ship <wi>` 同面转发；基线修订 polyforge#37） |
+| `ship` (removed by polyforge#166: delivery is the workflows' deliver step)（wrap→git 交付桥：把已收尾 WI 的封存 capsule 以固定名分支 `polyforge/<project>-<seq>` 推送到 git origin） | Daemon 本机面 | `04-local-runtime.md#§5.1`（语义、幂等、PR 分层与安全面权威在彼处；CLI 入口 `pf ship <wi>` 同面转发；基线修订 polyforge#37） |
 | `ops`（模式切换、优雅停机等运维动作） | Daemon 本机面 | `04-local-runtime.md#§5.1`（`mode(set/drain/...)`、`shutdown()`） |
 
 分流不改变任何动词的语义权威，也不绕过任何校验：数据面动词直连不意味着豁免 A17 权限硬边界

@@ -65,8 +65,7 @@ type Command struct {
 // Command.Group, not position): the 13 routing verbs first — 6 direct
 // to aihub (file, queue, cancel, recall, remember, memory; the blocked exits are
 // `resume` = continue and `cancel` = abandon, v2-converge §7) + 7 on the daemon UDS face (submit, watch,
-// answer, pause, resume, wrap, ops) — then ship (the wrap→git
-// delivery bridge, daemon face), then the management face M1–M5, then the
+// answer, pause, resume, wrap, ops), then the management face M1–M5, then the
 // machine health face (doctor, #113), then the daemon
 // placeholder (help-only: cmd/pf/main.go intercepts the real launch).
 var commands = []*Command{
@@ -84,7 +83,6 @@ var commands = []*Command{
 	cmdOps,
 	cmdChat,
 	cmdWatch,
-	cmdShip,
 	cmdUsers,
 	cmdApiKeys,
 	cmdMachines,
@@ -277,18 +275,16 @@ func fsHasFlags(fs *flag.FlagSet) bool {
 // Help groups (Command.Group), in print order. A verb with an empty Group
 // stays dispatchable but is not listed.
 const (
-	GroupData     = "data"
-	GroupExec     = "exec"
-	GroupDelivery = "delivery"
-	GroupMgmt     = "mgmt"
-	GroupDiag     = "diag"
-	GroupProcess  = "process"
+	GroupData    = "data"
+	GroupExec    = "exec"
+	GroupMgmt    = "mgmt"
+	GroupDiag    = "diag"
+	GroupProcess = "process"
 )
 
 var helpGroups = []struct{ id, title string }{
 	{GroupData, "Data-plane verbs (direct to aihub):"},
 	{GroupExec, "Execution-plane verbs (local daemon UDS face):"},
-	{GroupDelivery, "Delivery bridge (wrap→git, local daemon UDS face):"},
 	{GroupMgmt, "Management face (M1–M5):"},
 	{GroupDiag, "Diagnostics:"},
 	{GroupProcess, "Process:"},

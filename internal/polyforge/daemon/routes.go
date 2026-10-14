@@ -234,7 +234,6 @@ func (d *Daemon) handler() http.Handler {
 	mux.HandleFunc("POST /jobs/{wi}/resume-paused", d.resumePausedRoute)
 	mux.HandleFunc("POST /jobs/{wi}/pause", d.pauseRoute)
 	mux.HandleFunc("POST /jobs/{wi}/wrap", d.wrapRoute)
-	mux.HandleFunc("POST /jobs/{wi}/ship", d.shipRoute)
 	mux.HandleFunc("GET /status", d.statusRoute)
 	mux.HandleFunc("POST /ops/config", d.opsConfigRoute)
 	mux.HandleFunc("POST /shutdown", d.shutdownRoute)

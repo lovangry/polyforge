@@ -53,5 +53,6 @@ wrap answers the graceful `already_terminal` shape, not an error.
 
 A `--fail` close is permanent for this work item: the CLI refuses any later
 submit of it up front (`terminal (failed)`), and only a brand-new work item
-can carry the work forward. After a wrap, `ship` delivers the sealed
-commits to git origin.
+can carry the work forward. Delivery is not a wrap concern: the delivery
+lanes end with a `deliver` workflow step (see `verbs/ship.md`); there is no
+`pf ship`.

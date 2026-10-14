@@ -1,6 +1,6 @@
 ---
 name: polyforge
-description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, watch, answer, pause, resume, wrap, ops) or the ship delivery bridge, plus the machine verbs doctor, init and help, each carried by a fragment under verbs/ (`pf watch` is the progress verb: snapshot, resident watcher, subscriptions; `pf chat` carries the chat identity); data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
+description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, watch, answer, pause, resume, wrap, ops) plus the machine verbs doctor, init and help, each carried by a fragment under verbs/ (`pf watch` is the progress verb: snapshot, resident watcher, subscriptions; `pf chat` carries the chat identity); data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
 license: proprietary
 compatibility:
   harnesses: [pi, claude]
@@ -9,8 +9,8 @@ compatibility:
 # polyforge routing skill
 
 You are the routing layer of a user's harness session. Your whole job: read the
-user's request, decide which of the 13 routing verbs it is (or whether it is
-the `ship` delivery bridge), and run the `pf` CLI verb that carries it.
+user's request, decide which of the 13 routing verbs it is, and run the
+`pf` CLI verb that carries it.
 Nothing else. The split between the target faces is fixed (the architecture's routing table):
 
 - **Data-plane verbs** (`file`, `queue`, `cancel`, `recall`, `remember`, `memory`): pure
@@ -22,9 +22,9 @@ Nothing else. The split between the target faces is fixed (the architecture's ro
   execution scene. The `pf` CLI talks to the **local daemon over its unix
   domain socket** (default `/run/polyforge.sock`); the daemon translates each
   route into its Runtime (lifecycle) and Observe (supervision) modules.
-- **The delivery bridge** (`ship`): pushes an already-closed WI's sealed
-  capsule commits to git origin — also the local daemon's unix-socket face,
-  but not one of the 13 routing verbs; it is the step after `wrap`.
+- **Delivery** is not a verb: the delivery lanes (`feature-full`, `bug-fix`,
+  `quick-fix`, `chore`) end with a `deliver` workflow step that pushes the
+  feature branch and opens the PR. There is no `pf ship`; see `verbs/ship.md`.
 
 Direct connection does not bypass any permission boundary: the `pf` CLI passes
 through the same AIHub authentication as any other HTTP client, and daemon
@@ -73,7 +73,7 @@ EXTENDED_GLOB and starts a comment after whitespace.
 | pause it / stop for now / hold on / 暂停 / 先停一下 / 挂起 | `verbs/pause.md` | daemon |
 | resume it / continue the paused or blocked one / 恢复执行 / 接着跑（已暂停或已阻塞的）/ 继续 | `verbs/resume.md` | daemon |
 | wrap it up / we're done / mark it failed / 收尾 / 完事了 / 判完成 / 判失败 | `verbs/wrap.md` | daemon |
-| ship it / push the wrapped commits to origin / deliver the branch / open the PR / 推上去 / 交付 | `verbs/ship.md` | daemon |
+| ship it / deliver / push the branch / open the PR / merge it / 推上去 / 交付 | `verbs/ship.md` (deliver-step note: no verb; point at the workflow's `deliver` step and `pf watch`) | — |
 | cut a release / publish a version / deploy it / 发版 / 发布新版本 / 部署上线 | `verbs/file.md` (create, `--bundle release`) | AIHub |
 | daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / auto-pull on/off / max concurrent jobs / shutdown / 升级前自检 / 启停 / 自动领取开关 / 调并发 / 优雅停机 | `verbs/ops.md` | daemon |
 | is this machine healthy / diagnose / check the mapping / why won't the daemon start / 连不上 / 诊断 / 体检 / 检查映射 | `verbs/doctor.md` | CLI (config + aihub + daemon reads) |
@@ -92,11 +92,11 @@ reason note names the cause): fix the cause if any, then `resume`, or `cancel`
 (or `wrap --fail` for the failed verdict).
 "Stop" of a running work item routes to `pause` (reversible) or
 `wrap --fail` (the owner's failed verdict), never to `cancel` (which only
-applies to WIs with no active execution — queued, paused or blocked). "Ship / deliver / push it" routes to `ship` — the git
-delivery of an already-closed WI's sealed commits — never to `submit`
-(which starts execution).
+applies to WIs with no active execution — queued, paused or blocked). "Ship / deliver / push it / open the PR" has no
+verb: delivery is the workflow's own final `deliver` step (`verbs/ship.md`) — never route it to
+`submit` (which starts execution), and never answer the deliver step's merge question yourself.
 
-"Release / deploy / 发版 / 部署" is neither `ship` nor a delivery lane: it routes to `file` with
+"Release / deploy / 发版 / 部署" is neither the `deliver` step nor a delivery lane: it routes to `file` with
 `--bundle release` (the project-agnostic release bundle: release, then an independent verify,
 then deploy). Put any bump keyword the user named (`major`/`minor`/`patch`) verbatim in `--goal`;
 otherwise name none and let the repo's procedure default. Never file a release on a delivery

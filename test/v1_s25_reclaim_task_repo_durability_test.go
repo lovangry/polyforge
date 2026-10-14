@@ -34,8 +34,8 @@ func TestV1S25ReclaimTaskRepoNotDurable(t *testing.T) {
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 			// The code step: a real commit on top of the claim-time clone
 			// of demo-src (makeRepo commits work.txt locally; nothing is
-			// pushed to the task repo's origin — ship is the only push
-			// lane, and this run never ships).
+			// pushed to the task repo's origin — the deliver step is the
+			// only push lane, and this run never delivers).
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true,
 				"name": "demo-src", "origin": remote.url},
 			// The verification step dies BEFORE its envelope write, three

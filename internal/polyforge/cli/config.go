@@ -8,7 +8,7 @@
 //
 //	Local daemon UDS HTTP face (the client surface is pinned in
 //	internal/common/protocol and verbs_daemon.go):
-//	  submit, answer, pause, resume, wrap, ship, ops, watch, chat, daemon.
+//	  submit, answer, pause, resume, wrap, ops, watch, chat, daemon.
 //
 // Output: human-readable tables by default; --json emits the server's
 // JSON response as-is. Errors are decoded from the typed errStatus

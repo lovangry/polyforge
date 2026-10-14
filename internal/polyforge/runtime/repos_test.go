@@ -344,8 +344,8 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 	if got := capsuleReposOf(t, testCapsuleDir(r, wi))["app"]; got != workHead {
 		t.Fatalf("re-claim baseline = %q, want the carried head %q", got, workHead)
 	}
-	// The task origin never moved: ship is the only push path, and
-	// nothing here pushed to it.
+	// The task origin never moved: the workflows' deliver step is the only
+	// push path, and nothing here pushed to it.
 	originHead, err := exec.Command("git", "-C", remoteDir, "rev-parse", "HEAD").Output()
 	if err != nil || strings.TrimSpace(string(originHead)) != head {
 		t.Fatalf("task origin moved: %q (%v), want %q", strings.TrimSpace(string(originHead)), err, head)

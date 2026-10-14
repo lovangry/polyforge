@@ -13,7 +13,7 @@ package runtime
 // list (base64 JSON in the session-data script element).
 //
 // OPT-IN, like the repo's other real-world drives (cf.
-// POLYFORGE_TEST_REAL_GITHUB in test/v1_s19_ship_pr_test.go): it burns
+// POLYFORGE_TEST_SYSTEM_INSTALL for the installer scenarios): it burns
 // real model tokens with the operator's credentials, so it runs only
 // with POLYFORGE_TEST_REAL_PI=1 and SKIPS (never hard-fails) when a
 // gate is missing — short mode, no pi binary, no credentials to copy.

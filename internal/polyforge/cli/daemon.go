@@ -26,7 +26,7 @@ import (
 //	POST /jobs/{id}/answer                  body = the five-field relay
 //	                                        message itself (00 §3.4a)
 //	POST /jobs/{id}/pause  {}               POST /jobs/{id}/wrap {"reason"}
-//	POST /jobs/{id}/ship  {}                 GET  /status
+//	GET  /status
 //	POST /ops/config {"auto":bool,"max":N}
 //	POST /shutdown
 //
@@ -228,28 +228,6 @@ type QueueStats struct {
 	MaxConcurrent int `json:"max_concurrent"`
 }
 
-// ShipRepoOutcome is one repo's ship result.
-type ShipRepoOutcome struct {
-	Name       string `json:"name"`
-	OriginURL  string `json:"origin_url"`
-	Head       string `json:"head"`
-	Branch     string `json:"branch"`
-	Pushed     bool   `json:"pushed"`
-	Reused     bool   `json:"reused"`
-	PRURL      string `json:"pr_url,omitempty"`
-	CompareURL string `json:"compare_url,omitempty"`
-}
-
-// ShipResponse is the ship answer: the fixed-name branch plus one
-// outcome line per inventory repo of the sealed capsule.
-type ShipResponse struct {
-	WorkItemID string            `json:"work_item_id"`
-	Slug       string            `json:"slug,omitempty"`
-	Branch     string            `json:"branch"`
-	Initiator  string            `json:"initiator,omitempty"`
-	Repos      []ShipRepoOutcome `json:"repos"`
-}
-
 // ---------------------------------------------------------------------------
 // Routes.
 // ---------------------------------------------------------------------------
@@ -332,13 +310,6 @@ func (d *DaemonClient) Wrap(wiID, reason string) (json.RawMessage, error) {
 	}
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/wrap", "",
 		map[string]any{"reason": reason}, nil)
-}
-
-// Ship asks the daemon to push a closed WI's sealed capsule commits to
-// each inventory repo's origin as the fixed-name branch
-// polyforge/<project>-<seq>.
-func (d *DaemonClient) Ship(wiID string) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/ship", "", map[string]any{}, nil)
 }
 
 // Status returns the local jobs bookkeeping.
