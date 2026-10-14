@@ -464,16 +464,16 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 | M8 发布时延与结果 | 见下方独立说明（B13 口径修订：仅对已真实发生的边界同步请求计分，不使用无活动时间窗口判定）。 |
 | M9 rewind 收敛 | 数据源 = `03-execution-capsule.md#§4.2` `runtime-state/execution.json` 的 `rewind_stats`（`{total, by_step}`），经 `02-aihub-core.md#§5.2` read-through 逐字读取；窗口 = 单 WI 生命周期内累计值，不做跨 WI 聚合比例。 |
 
-**就绪队列口径（扁平化核对，定稿裁定；D1 修订 polyforge#150：以代码为准）**：vNext 的就绪队列是扁平过滤列表（`GET /api/v1/ready-queue?project=`，
-`02-aihub-core.md#§5.1` 行 4），不存在旧系统的多段结构；其响应 schema 权威为三段
-`{items, running, paused}`（`02-aihub-core.md#§5.1b`）：`items` 为可立即认领面，恒排除
+**就绪队列口径（扁平化核对，定稿裁定；D1 修订 polyforge#150：以代码为准）**：vNext 的就绪队列是扁平过滤列表（`GET /api/v1/projects/{project}/ready-queue`，
+`02-aihub-core.md#§5.1` 行 4），不存在旧系统的多段结构；其响应 schema 权威为四段
+`{items, running, paused, pending_bundles}`（`02-aihub-core.md#§5.1b`）：`items` 为可立即认领面，恒排除
 `bundle_name IS NULL` 的登记票与一切终态/`running`/`paused`/`blocked` 的 WI；等依赖的票不出现在任何段（无 `blocked` 数组）；
 `running`/`paused` WI 各自出现在同名可见性段（含心跳过期的 stale running，不设独立段）。本节任何涉及队列条目的计数一律以
-**响应各段的条目数**（同一 `project=` 查询下 `items`/`running`/`paused` 各自的返回条目数）为口径，
+**响应各段的条目数**（同一 project 查询下 `items`/`running`/`paused`/`pending_bundles` 各自的返回条目数）为口径，
 不设段间配额。经核对：
 M1–M9 无一依赖旧多段结构——M3 的卡死判定来自 step 状态与机器心跳两个扁平字段
 （`02-aihub-core.md#§4.10`），不来自队列分段；Batch/Drain 的取批（`00-architecture.md#§3.4b`/§3.4c）
-消费的也是该三段响应的 `items` 可执行段。
+消费的也是该四段响应的 `items` 可执行段。
 
 **M8（发布时延与结果，机械口径，B13 口径修订）**：早前口径曾用一个可配置的「30 分钟无 dirty/
 无发布」窗口（`pilot.stale_head_window_minutes`）推断某个 WI 可能卡死——把「一段时间内没有观测

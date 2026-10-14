@@ -79,13 +79,13 @@
 | `claim` | `queued` | `running` | 开启新 generation |
 | `pause` | `running` | `paused` | 结束当前活跃 generation |
 | `resume` | `paused` | `running` | 新一次 claim（开启新 generation） |
-| `block` | `running`/`paused` | `blocked` | 结束当前活跃 generation（`paused` 起点本就无活跃行，直接落 `blocked`） |
+| `block` | `running`/`paused` | `blocked` | 结束当前活跃 generation（`paused` 起点仍持有会话：`End()` 按同一 session-hash fence 校验后直接落 `blocked` 并清空会话，无需先 `resume`） |
 | `unblock` | `blocked` | `running` | 新一次 claim（开启新 generation） |
-| `wrap`/`fail` | `running`/`paused` | `wrapped`/`failed` | 结束当前活跃 generation（`paused` 起点本就无活跃行，直接落终态） |
+| `wrap`/`fail` | `running`/`paused` | `wrapped`/`failed` | 结束当前活跃 generation（`paused` 起点仍持有会话：`End()` 按同一 session-hash fence 校验后直接落终态并清空会话，无需先 `resume`） |
 | `cancel` | `queued`/`paused`/`blocked` | `cancelled` | 本就没有活跃 generation（§6.5） |
 | `force-takeover` | `running`（另一 machine 持有） | `running` | 结束旧活跃 generation，开启新 generation |
 
-`blocked` 的进入原因写入 `waiting_on` 与生命周期事件（§5.1a 枚举内的通用 `blocked` 事件，`{generation, reason?}`）；`paused` 与 `blocked` 的区别：`paused` 是人主动挂起（无外部等待对象），`blocked` 是有明确等待对象（`waiting_on` 非空）。**`paused` 直接收尾（D14 裁定，polyforge#150，以代码为准）**：`paused` 的 WI 可**直接**迁移到 `wrapped`/`failed`/`blocked`（`End()`），无需先 `resume` 重新开 generation——上表 `wrap`/`fail`/`block` 三行的前置状态因此含 `paused`，行 9 end-generation 对 `paused` 起点同样合法；`cancel` 亦早已允许从 `paused` 直接终止（§6.5）。workflow 侧的 `failed_gate`/`failed_rewind_exhausted` 终态（`01-workflow-skills.md#§6.5`，权威落盘在 Capsule 的 `execution.json.workflow_status`，`03-execution-capsule.md#§4.2`）在 Core 侧统一映射为业务态 `blocked`（`waiting_on=owner`），不映射为 Core 的终态——workflow 失败与 WI 失败是两层分离的概念（`00-architecture.md#§3.2` 归属判据）。**Core 只落这一层映射后的业务信号本身**：`status=blocked`、`waiting_on=owner`，不持久化「具体是哪一种 workflow 终态导致」这一区分——那是 workflow/Capsule 侧的执行态语义，只存在于 `execution.json`，Core 不复制、不新增列或事件类型来表示它（INV-2c）。终态行只读；对终态 WI 的任何写 API 一律返回 `CORE-410 TERMINAL_STATE`。
+`blocked` 的进入原因写入 `waiting_on` 与生命周期事件（§5.1a 枚举内的通用 `blocked` 事件，`{generation, reason?}`）；`paused` 与 `blocked` 的区别：`paused` 是人主动挂起（无外部等待对象），`blocked` 是有明确等待对象（`waiting_on` 非空）。**`paused` 直接收尾（D14 裁定，polyforge#150，以代码为准）**：`paused` 的 WI **保留其会话**（pause 不清空 session 行），因此可**直接**迁移到 `wrapped`/`failed`/`blocked`：`End()` 对 `paused` 起点与 `running` 起点走同一 session-hash fence（hash 不匹配即 `CORE-403 STALE_SESSION`），校验通过后落状态并清空会话，无需先 `resume`——上表 `wrap`/`fail`/`block` 三行的前置状态因此含 `paused`，行 9 `session-end` 对 `paused` 起点同样合法；`cancel` 亦早已允许从 `paused` 直接终止（§6.5）。workflow 侧的 `failed_gate`/`failed_rewind_exhausted` 终态（`01-workflow-skills.md#§6.5`，权威落盘在 Capsule 的 `execution.json.workflow_status`，`03-execution-capsule.md#§4.2`）在 Core 侧统一映射为业务态 `blocked`（`waiting_on=owner`），不映射为 Core 的终态——workflow 失败与 WI 失败是两层分离的概念（`00-architecture.md#§3.2` 归属判据）。**Core 只落这一层映射后的业务信号本身**：`status=blocked`、`waiting_on=owner`，不持久化「具体是哪一种 workflow 终态导致」这一区分——那是 workflow/Capsule 侧的执行态语义，只存在于 `execution.json`，Core 不复制、不新增列或事件类型来表示它（INV-2c）。终态行只读；对终态 WI 的任何写 API 一律返回 `CORE-410 TERMINAL_STATE`。
 
 ### 2.6 本文新增不变量 <!-- §2.6 -->
 
@@ -223,7 +223,7 @@ CREATE TABLE claim_idempotency (
   idempotency_key TEXT PRIMARY KEY,
   work_item_id    TEXT NOT NULL REFERENCES work_items(id),
   caller_identity TEXT NOT NULL,             -- 发起 claim 的 api_key 所属 user_id（或 machine_id）；INV-2d 命中前必须核对
-  response_json   TEXT NOT NULL,             -- 硬化的 claim 响应体（含 generation、generation_token、secret_epoch）
+  response_json   TEXT NOT NULL,             -- 缓存的 claim 应答：公开的 SessionClaim（含 session_fingerprint），不含任何 secret
   created_at      TEXT NOT NULL              -- 永不过期、无任何清理任务（owner 2026-10-13 补登裁定，polyforge#150：
                                              -- 以代码为准——全库不存在 DELETE 本表的路径；缓存应答里只有公开
                                              -- fingerprint、无任何密钥，永久保留无安全问题，不为此新增定时清理任务）
@@ -495,13 +495,13 @@ F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-se
 | 1 | POST | `/api/v1/work-items` | `pf` CLI（路由 skill/CI/人） | 创建 WI（`queued`）；body 可带 `bundle_name`（非空 = 执行票，走 §4.5 校验/固化；NULL/缺省 = 纯登记票，跳过，§4.4）、可选 `parent_id`（epic-lite，写路径约束 §4.2a）、`repo_inventory`+`repo_inventory_base`（§4.6）与 `attrs`（业务级自由属性，受 INV-2c 黑名单校验，§5.1a）；服务端在同一事务内完成 workflow.md frontmatter 校验与三 scalar 固化（§4.5） | CORE-400（含 frontmatter 校验失败，`detail` 携带命中 `rule_id`）/ CORE-409 |
 | 2 | GET | `/api/v1/work-items?project=&status=&assignee=&waiting_on=&parent=&milestone=` | `pf` CLI | 列表/过滤；`parent=` 经 `idx_wi_parent`、`milestone=` 经 `idx_wi_milestone`（§4.2）；结果先经 §4.10 权限硬边界裁剪 | CORE-400 |
 | 3 | GET/PATCH | `/api/v1/work-items/{id}?include=events,deps,children` | `pf` CLI（只读详情亦经 Daemon 本地认证代理，`04-local-runtime.md#§5.3`） | 详情（基本记录 + `repo_inventory` 含 base；`include` 参数权威定义见 §5.1c；w140 新增只读派生 `derived` 块（有子票时，`wi-kind-contract.md`））/ 更新 goal、content、labels、priority、milestone、waiting_on（`attrs` 受 INV-2c 黑名单校验；`bundle_name` 仅 R2 窗口内可 PATCH（§4.5），认领后不可变 INV-2e；digest 键不在可更新集合（携带即 `CORE-400`）；`parent_id` 不可变 §4.2a）。同路径 GET+PATCH 计 1 行（计数口径见上） | CORE-404 / CORE-409 / CORE-410 / CORE-400 |
-| 4 | GET | `/api/v1/ready-queue?project=` | `pf` CLI | 就绪队列：`{items, running, paused}` 三段响应（D1 裁定，polyforge#150：以代码为准），schema 权威见 §5.1b；结果先经 §4.10 裁剪 | CORE-400 / CORE-404 |
+| 4 | GET | `/api/v1/projects/{project}/ready-queue` | `pf` CLI | 就绪队列：`{items, running, paused, pending_bundles}` 四段响应（D1 裁定，polyforge#150：以代码为准），schema 权威见 §5.1b；结果先经 §4.10 裁剪 | CORE-400 / CORE-404 |
 | 5 | POST | `/api/v1/work-items/{id}/cancel` | `pf` CLI（reporter / 该 project maintainer / admin，§6.5） | 终止 `queued`/`paused`/`blocked` 的 WI（不要求活跃 generation） | CORE-409（状态不属于三者之一）/ CORE-410 |
 | 6 | GET | `/api/v1/work-items/{id}/progress` | 任意客户端（人/CI；`observe` 经 Daemon 本地认证代理） | read-through 进度（§5.2） | CORE-404 / CORE-504 |
 | **B. 执行权（7 行：行 7–13）** | | | | | |
 | 7 | POST | `/api/v1/work-items/{id}/claim` | Daemon（机器 api_key） | 认领：generation+1、开活跃行（§6.1）；`resume`（对 `paused` WI 的重新激活）不是独立端点，走本端点（§2.3/§6.2：重新激活 = 新一次 claim）；body 带 `idempotency_key`，重发同 key + 同调用方身份 + 同 WI 返回同一次结果（§6.6，INV-2d）；登记票不可 claim（`NOT_CLAIMABLE`，§4.4） | CORE-409（ALREADY_CLAIMED / NOT_CLAIMABLE / IDEMPOTENCY_KEY_REUSED）/ CORE-503 |
 | 8 | POST | `/api/v1/work-items/{id}/force-takeover` | 人（`role='admin'`）经 `pf` CLI | 强制接管：generation+1（§6.2）；不需 `flush_evidence`、不需持有旧 token | CORE-403 / CORE-404 |
-| 9 | POST | `/api/v1/work-items/{id}/end-generation` | Daemon | 结束当前活跃 generation 的**四合一端点**：body `{reason, flush_evidence}`，`reason` ∈ {`pause`, `block`, `wrap`, `fail`}，对应 §2.5 四条结束活跃行的迁移（D14 裁定：`paused` 起点可直接 `block`/`wrap`/`fail`，无需先 `resume`）；`flush_evidence` 协议权威在 §6.4（全部事实字段由 Daemon 生成）；取代旧 `pause`/`block`/`wrap`/`fail` 四个分立端点，四条迁移共用一个端点与同一套校验，语义无分叉 | CORE-403 / CORE-409 / CORE-410 / CORE-425 |
+| 9 | POST | `/api/v1/work-items/{id}/session-end` | Daemon | 会话收尾端点（已取代并删除 v1 的 `end-generation`）：body `{session_id, status, note?, clean_pause?, head_sha?}`，`status` ∈ {`wrapped`, `failed`, `blocked`, `paused`}；`paused` 走 M3 pause 迁移（会话**保留**，`clean_pause` 随同一 fenced UPDATE 落盘），三个终态裁决经 session-hash fence 校验后落状态并清空会话（D14 裁定：`paused` 起点可直接 `blocked`/`wrapped`/`failed`，无需先 `resume`）；`head_sha` 仅随 `blocked` 携带 | CORE-400 / CORE-403 / CORE-404 / CORE-409 |
 | 10 | POST | `/api/v1/work-items/{id}/unblock` | Daemon（重新认领） | 解阻：`blocked` → `running`，新一次 claim（generation+1，§6.2） | CORE-409（非 `blocked`）/ CORE-410 |
 | 11 | POST | `/api/v1/work-items/{id}/budget-increments` | 人（reporter / 该 project maintainer / admin）经 `pf` CLI | 增加预算（§6.7），CAS 写入 `workflow_budget_increments`（`based_on_seq`）；按角色授权，不要求 generation token（§6.7/§8） | CORE-400 / CORE-403 / CORE-409（CAS 冲突） |
 | 12 | GET | `/api/v1/work-items/{id}/budget` | Daemon 本地认证代理 / `pf` CLI | 预算读面：Core 不持有预算数据（基线列已删，polyforge#149），预算消耗与上界判定由执行侧账本（`runtime-state/execution.json` 的 `budget_consumed`）承担，本端点仅转发该口径 | CORE-404 |
@@ -543,9 +543,9 @@ token 与 `(wi_id, generation, machine_id)` 三元绑定；换机器重放同一
 2. **WI 已存在但当前无活跃 generation**（行 7 `claim`（含对 `paused` WI 的 resume 场景）、对 `queued`/`paused`/`blocked` WI 的行 3 `PATCH`、行 10 `unblock`、行 5 `cancel`（§6.5））：仅需 api_key（身份）+ WI 状态合法性，不需要 token——`blocked`/`paused` 的 WI 本就没有可用的活跃 token，若要求 token 则这些 WI 永远无法被解阻或取消。
 3. **WI 有活跃 generation 且操作属于该 generation 的执行现场**（行 14–15 Revision 发布、行 9 `end-generation`、行 12 `budget` 读取）：需 token，因为这些操作都是「当前 owner 结束或延续自己的 generation」，与类别 2 的「重新激活一个已结束的 generation」在时序上根本不同。两类角色授权例外不要求 token：行 8 `force-takeover`（调用方不是当前 owner，只需 `users.role='admin'`）与行 11 `budget-increments`（人工在 WI 处于 `blocked` 时从外部做出的决定，按 reporter/maintainer/admin 角色授权，§6.7）——二者均基于角色而非执行现场凭证（§8）。
 
-### 5.1b ready-queue 响应 schema（三段：items/running/paused；A8 裁定 + D1 修订 polyforge#150） <!-- §5.1b -->
+### 5.1b ready-queue 响应 schema（四段：items/running/paused/pending_bundles；A8 裁定 + D1 修订 polyforge#150） <!-- §5.1b -->
 
-行 4 `GET /api/v1/ready-queue?project=<name>` 的响应体是 **`{items, running, paused}` 三段**（D1 裁定，2026-10-13，polyforge#150：以代码为准，`internal/aihub/core/queue.go`），不存在旧七段队列语义（`needs_human_session`/`stale_running` 等分段一律不存在），也不存在 `blocked` 数组——等依赖的票**不出现**在任何段（无可执行性即从响应消失）：
+行 4 `GET /api/v1/projects/{project}/ready-queue`（`{project}` 为项目名或 id）的响应体是 **`project` 字段 + `{items, running, paused, pending_bundles}` 四段**（D1 裁定，2026-10-13，polyforge#150：以代码为准，`internal/aihub/core/queue.go` `ReadyQueue`），不存在旧七段队列语义（`needs_human_session`/`stale_running` 等分段一律不存在），也不存在 `blocked` 数组——等依赖的票**不出现**在任何段（无可执行性即从响应消失）：
 
 ```json
 {
@@ -556,7 +556,8 @@ token 与 `(wi_id, generation, machine_id)` 三元绑定；换机器重放同一
      "…": "其余 §4.2 基本列（labels/assignee/milestone 等，随详情同构裁剪）"}
   ],
   "running": [ {"…": "同构条目"} ],
-  "paused":  [ {"…": "同构条目"} ]
+  "paused":  [ {"…": "同构条目"} ],
+  "pending_bundles": [ {"…": "同构条目"} ]
 }
 ```
 
@@ -565,7 +566,7 @@ token 与 `(wi_id, generation, machine_id)` 三元绑定；换机器重放同一
 - **排序**：各段内均按 `priority`（`urgent`→`high`→`normal`→`low`）→ `created_at`（先创建在前）。
 - **v1 无分页**：全量返回，不设 cursor/limit；规模出现压力后再议（§12）。
 - `running` WI（含心跳过期的 stale running）只出现在 `running` 可见性段、不设任何独立 stale 段；stale 检测在 §9 监控面暴露，接管由人决策（行 8），Core 不自动接管（§7）。
-- **w140 增量（只做加法，`wi-kind-contract.md`）**：在线实现的 ready-queue 响应（`project`/`items`/`running`/`paused`）新增「待选 bundle」分段（`pending_bundles`：bundle 为空 ∧ 无子票 ∧ queued 且等待/依赖排除同上）与条目级只读派生 `derived` 块（父票完成状态，不写终态）；旧字段不改名不删减。D1 修订后本节三段口径即在线实现形状，与代码一致。
+- **w140 增量（只做加法，`wi-kind-contract.md`）**：在线实现的 ready-queue 响应（`project`/`items`/`running`/`paused`）新增「待选 bundle」分段（`pending_bundles`：bundle 为空 ∧ 无子票 ∧ queued 且等待/依赖排除同上）与条目级只读派生 `derived` 块（父票完成状态，不写终态）；旧字段不改名不删减。
 - `slug` 为展示名 `<project-name>#<seq>`（如 `aihub#793`，`seq` 见 §4.2，项目内唯一）；调用方对该 project 无访问资格（membership OR 全局 admin 均不满足，§4.10）时整个查询按不存在处理（`CORE-404`）；全局 admin 不受 membership 限制。
 
 ### 5.1c `GET /work-items/{id}` 的 `include` 参数（events/deps/children 拼详情；A9 裁定） <!-- §5.1c -->
@@ -739,7 +740,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 ## 8. 安全边界 <!-- §8 -->
 
 - 写 API 三重校验：api_key（身份）→ WI 级 generation 凭证（有活跃 generation 时）→ 状态机合法性。过期 generation 一律 `CORE-403`，防止被接管方残留写入。
-- **api_key project scope 由 HTTP middleware 在进入任何业务 handler 之前强制执行**（§4.10）：`api_keys.project_id` 非 NULL 的 key 对 scope 外 project 的一切对象（含列表/过滤/检索请求中的 project 维参数）一律拒绝，不依赖各 handler 自觉校验；scope 只收窄不扩大授权（scoped key 的 user 仍须本就在 `project_members` 中）。无 membership 者的不可见性（§4.10 权限硬边界）同样在 middleware 层先于 handler 生效。**两面分层（澄清 7 的 middleware 落地；D4 修订 polyforge#150）**：membership 不可见性只作用于**数据面端点**（A 组 WI 业务、E 组 Memory、管理面）——机器调用方在这些端点上按 membership OR admin 判定；**执行面端点**（B 组 claim/force-takeover/end-generation/budget、C 组同步、D 组心跳）不做 membership **可见性过滤**（不泄露对象存在性），但 claim 本身仍要求该 project 的 writer/maintainer membership 或全局 admin（D4：`hSessionClaim` → `requireWrite`，403 otherwise），其余执行面端点按角色（force-takeover 限 admin）与 generation token 判定；claim 响应携带 bundle 引用与预算基线，机器无需任何数据面读取即可完成执行路径（`04-local-runtime.md#§6.1`）。
+- **api_key project scope 由 HTTP middleware 在进入任何业务 handler 之前强制执行**（§4.10）：`api_keys.project_id` 非 NULL 的 key 对 scope 外 project 的一切对象（含列表/过滤/检索请求中的 project 维参数）一律拒绝，不依赖各 handler 自觉校验；scope 只收窄不扩大授权（scoped key 的 user 仍须本就在 `project_members` 中）。无 membership 者的不可见性（§4.10 权限硬边界）同样在 middleware 层先于 handler 生效。**两面分层（澄清 7 的 middleware 落地；D4 修订 polyforge#150）**：membership 不可见性只作用于**数据面端点**（A 组 WI 业务、E 组 Memory、管理面）——机器调用方在这些端点上按 membership OR admin 判定；**执行面端点**（B 组 claim/force-takeover/session-end/budget、C 组同步、D 组心跳）不做 membership **可见性过滤**，但 claim 本身仍要求该 project 的 writer/maintainer membership 或全局 admin（D4：`hSessionClaim` → `requireWrite`，403 otherwise），其余执行面端点按角色（force-takeover 限 admin）与 generation token 判定；claim 响应携带 bundle 引用与预算基线，机器无需任何数据面读取即可完成执行路径（`04-local-runtime.md#§6.1`）。
 - api_keys 只存哈希；service_secret 仅存在进程内存 + 本地文件（0600），不入库。本地目录 `memory/`、`capsules/`、`backups/` 权限 0750、属主 aihub 进程用户。
 - Core API 不提供任何「删除目录/工作树」端点：远端数据的删除只有 `05-sync-revision-recovery.md#§2.10` 的带保护删除流程；运维清扫面的入口被结构性移除。
 - `budget-increments`、`force-takeover`、`rotate-secret` 等敏感操作均基于 `users.role` 而非 generation token 授权，避免把人工决策面错误地绑定到执行现场凭证上。

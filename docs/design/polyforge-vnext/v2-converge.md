@@ -169,7 +169,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 ### 3.1 形态
 
 - Go 实现的 `pf watch`，**取代 `watch.sh` 与 `pf watch-probe`**；`pf observe` 并入为 `pf watch <wi> --once`。
-- `pf watch --chat <id>`（缺省取 `PF_CHAT_ID`）**永不退出**（保持常驻；D10 裁定，polyforge#150：以代码为准——watcher 不因订阅的 WI 结束而退出，只跳过已结束的 WI）；一个会话一个进程。
+- `pf watch --chat <id>`（缺省取 `PF_CHAT_ID`）**不因订阅的 WI 结束而退出**（保持常驻；D10 裁定，polyforge#150：以代码为准——只跳过已结束的 WI；仍会在父 harness 进程消失、stdout 关闭、或 `--wait-decision` 打印首批决策后退出，`watcher/engine.go`）；一个会话一个进程。
 - 只产出两种信号：
   - **进展**：当前 step、已运行时长、正在执行的命令及时长、最近修改的文件、工具调用计数（由翻译器信号机械生成，**不调用模型**）。
   - **决策事件**：有问题要回答/gate、失败、blocked、完成、被判死并已处理、候选已用尽；以及状态/来源类事件（C13 裁定，polyforge#150，与 `watcher/decision.go` 的事件类别表对齐）：`canceled`（终态）、`paused`（非终态，可继续）、`submit_rejected`、`submit_dropped`、`daemon_restarted`。
@@ -337,19 +337,19 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 | # | 裁定（一句话） | 文档落点 |
 |---|---|---|
-| D1 | 就绪队列响应为 `{items, running, paused}` 三段（`internal/aihub/core/queue.go`）；无 `blocked` 数组，等依赖的票不出现 | `02-aihub-core.md#§5.1b`（重写）及 §5.1 行 4 / §4.2a 行 26 / §7 / §10 关联句；`00` §3.1 组件表、§3.4b/§3.4c 与 `07` §9.2 同步最小修订 |
+| D1 | 就绪队列（`GET /api/v1/projects/{project}/ready-queue`）响应为 `{items, running, paused, pending_bundles}` 四段（`internal/aihub/core/queue.go`）；无 `blocked` 数组，等依赖的票不出现 | `02-aihub-core.md#§5.1b`（重写）及 §5.1 行 4 / §4.2a 行 26 / §7 / §10 关联句；`00` §3.1 组件表、§3.4b/§3.4c 与 `07` §9.2 同步最小修订 |
 | D2 | `seq` 项目内唯一（`UNIQUE(project_id, seq)`），非全局 | `02-aihub-core.md#§4.2` DDL |
 | D4 | claim 需该 project 的 writer/maintainer membership 或全局 admin（`hSessionClaim`→`requireWrite`，403 otherwise）；key scope 不构成认领授权 | `02-aihub-core.md#§4.10`、`#§8`；`04` §6.1 关联句 |
 | D8 | 先推 capsule 链，再推任务仓库 carrier ref（`refs/pf-task/<name>`）；任务仓库推送失败只记日志、不回滚 capsule 链 | `v1-spec-full.md`（单行最小修订）+ 本表登记（“或”：两处都做） |
-| D10 | watcher 永不退出（保持常驻），只跳过已结束的 WI | 本文 §3.1 |
-| D14 | `paused` 的 WI 可直接 wrap/fail/block，无需先 resume（`End()`） | `02-aihub-core.md#§2.5` 表行与相邻文字、§5.1 行 9 |
+| D10 | watcher 不因订阅的 WI 结束而退出（保持常驻），只跳过已结束的 WI；父 harness 消失、stdout 关闭或 `--wait-decision` 打印后仍退出 | 本文 §3.1 |
+| D14 | `paused` 的 WI 保留会话，可直接 wrap/fail/block，无需先 resume（`End()` 同一 session-hash fence，通过后清空会话） | `02-aihub-core.md#§2.5` 表行与相邻文字、§5.1 行 9 |
 | C5 | `context_policy` / `handoff` 保留并写入文档 | **已由 #147 落地**，见 `01-workflow-skills.md#§4`/`§4.4a` 与本文 §2.6（本票不重复修改） |
 | C11 | job 级收尾前活转录同步保留（`runtime/pitranscript.go`） | 本文 §2.2 |
 | C13 | 决策类别补 `canceled`/`paused`/`submit_dropped`（另含 `submit_rejected`/`daemon_restarted`，与 `watcher/decision.go` 代码表对齐） | 本文 §3.1 |
 | C16 | `pf file create` 在 cwd 恰落一个映射 workspace 且该 workspace 恰映射一个 project 时推断 `--project`；其余一切情形要求显式 | `00-architecture.md#§3.1` |
 | 补登 | claim 幂等记录永不过期、无任何清理任务（缓存应答只含公开 fingerprint，永久保留无安全问题） | `02-aihub-core.md#§4.3`、`#§6.6` |
 
-其余审计条目（B*、C1–C4、C6–C10、C12、C14–C15、D3/D5–D7/D9/D11–D15 等）属其他票（#144/#145/#146/#147 等），不在本票范围。
+其余审计条目（B*、C1–C4、C6–C10、C12、C14–C15、D3/D5–D7/D9/D11–D13/D15 等）属其他票（#144/#145/#146/#147 等），不在本票范围。
 
 ---
 
