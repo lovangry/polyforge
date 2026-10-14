@@ -189,12 +189,10 @@ func (m *AdminManager) CreateAPIKey(userID, name, projectScope string) (*IssuedK
 	}, nil
 }
 
-// RevokeAPIKey records the revocation time in revoked_at. The
-// statement carries two distinct bind positions: the audit's B1
-// finding was the mixed `?`/`?1` form, which made `?` collapse onto
-// parameter 1 so the single keyID argument was written into BOTH
-// revoked_at and the WHERE clause — revoked_at held the key id, not a
-// time, and the arity slip was silent.
+// RevokeAPIKey records the revocation time in revoked_at. Both bind
+// positions are numbered: SQLite gives a bare `?` the number after the
+// highest one used so far, so mixing `?` and `?1` would bind the same
+// argument twice.
 func (m *AdminManager) RevokeAPIKey(keyID string) error {
 	res, err := m.db.Exec(`UPDATE api_keys SET revoked_at=?1 WHERE id=?2 AND revoked_at IS NULL`,
 		Now(), keyID)

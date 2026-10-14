@@ -1,9 +1,7 @@
 package core
 
-// Audit-2026-10-13 repro tests (polyforge WI wi_erdKWiSz5Sfv). These
-// tests assert the EXPECTED behavior from the audit findings; they are
-// expected to FAIL on the current main (0834378-lineage) for exactly
-// the reported reason. Once fixed they become the regression tests.
+// Regression tests for the 2026-10-13 audit item B1 (polyforge#146):
+// a revoked API key records the revocation time in revoked_at.
 
 import (
 	"testing"
@@ -11,9 +9,9 @@ import (
 )
 
 // B1: RevokeAPIKey must write the revocation TIME into revoked_at.
-// Reported: internal/aihub/core/admin.go RevokeAPIKey binds keyID to
-// BOTH placeholders of `UPDATE api_keys SET revoked_at=? WHERE id=?1`,
-// so revoked_at stores the key id instead of a timestamp.
+// Before the fix RevokeAPIKey bound keyID to BOTH placeholders of
+// `UPDATE api_keys SET revoked_at=? WHERE id=?1`, so revoked_at held
+// the key id instead of a timestamp.
 func TestReproB1RevokedAtIsTimestamp(t *testing.T) {
 	env := newEnv(t)
 

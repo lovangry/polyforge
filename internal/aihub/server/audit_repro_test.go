@@ -1,9 +1,8 @@
 package server
 
-// Audit-2026-10-13 repro tests (polyforge WI wi_erdKWiSz5Sfv), items
-// B5 / B11 / B12. Each test asserts the EXPECTED behavior from the
-// audit; each is expected to FAIL on current main for exactly the
-// reported reason, and doubles as the regression test after the fix.
+// Regression tests for the 2026-10-13 audit items B5 / B11 / B12
+// (polyforge#146): memory search honors project=, non-member memory
+// reads answer 404, and dependency reads surface DB errors as 5xx.
 
 import (
 	"net/http"
@@ -23,8 +22,8 @@ func projectIDOfName(t *testing.T, e *srvEnv, name string) string {
 }
 
 // B5: memory search with project=<name> must only return memories of
-// that project. Reported: hSearchMemory drops the client's project
-// parameter, so results span every project the caller can read.
+// that project. Before the fix hSearchMemory dropped the client's
+// project parameter, so results spanned every project the caller can read.
 func TestReproB5MemorySearchHonorsProjectFilter(t *testing.T) {
 	e := newSrvEnv(t)
 	if _, err := e.admin.CreateProject(core.CreateProjectRequest{Name: "beta"}); err != nil {
@@ -73,10 +72,21 @@ func TestReproB5MemorySearchHonorsProjectFilter(t *testing.T) {
 				it.ID, it.ProjectID, alphaID)
 		}
 	}
+
+	// A caller with no membership in alpha asking for project=alpha gets
+	// the same not-found as for an unknown project: neither the project
+	// nor its memories are revealed.
+	outsider, _ := e.admin.CreateUser("b5-stranger", "b5-stranger@example.com", "writer", "human")
+	okey, _ := e.admin.CreateAPIKey(outsider.ID, "o", "")
+	for _, p := range []string{"alpha", "no-such-project"} {
+		if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=unicorn&project="+p, okey.Plain, nil, nil); code != http.StatusNotFound {
+			t.Fatalf("B5: non-member search with project=%s returned %d (%s), want 404", p, code, raw)
+		}
+	}
 }
 
 // B11: a non-member reading a memory must get 404, not 403 — the object
-// must not be revealed to exist. Reported: memReadAllowed answers
+// must not be revealed to exist. Before the fix memReadAllowed answered
 // MEM-403 for non-members.
 func TestReproB11NonMemberMemoryReadIs404(t *testing.T) {
 	e := newSrvEnv(t)
@@ -102,8 +112,8 @@ func TestReproB11NonMemberMemoryReadIs404(t *testing.T) {
 }
 
 // B12: a database error while resolving a work item's dependencies must
-// surface as a typed 5xx error, not an empty 200 list. Reported:
-// depsView swallows the error from WIs.Dependencies.
+// surface as a typed 5xx error, not an empty 200 list. Before the fix
+// depsView swallowed the error from WIs.Dependencies.
 func TestReproB12DepsDBErrorReturns5xx(t *testing.T) {
 	e := newSrvEnv(t)
 
