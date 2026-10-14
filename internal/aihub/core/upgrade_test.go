@@ -1,12 +1,16 @@
 package core
 
-// upgrade_test.go — the polyforge#149 documented-manual-SQL upgrade pins.
+// upgrade_test.go — the polyforge#149 in-window-SQL upgrade pins.
 // The fixture is a REAL pre-#149 database: the literal old DDL (preW149DDL,
 // copied verbatim from `git show 85cf926:internal/aihub/core/store.go`),
 // populated through raw SQL because the current code cannot write to it.
-// The SQL is parsed DIRECTLY out of docs/upgrade.md (the document is the
-// single source); after it runs, the current server's write paths must
-// succeed on the upgraded database, and without it they must not.
+// The upgrade/rollback/probe SQL is read DIRECTLY out of
+// deploy/sql/v2.4.0/ (the files deploy.sh executes inside the switch
+// window — the single source of truth); docs/upgrade.md is pinned to quote
+// the upgrade file verbatim. After the SQL runs, the current server's write
+// paths must succeed on the upgraded database, and without it they must not.
+// The rollback round-trip (upgrade -> new code -> rollback -> old-code
+// write shape) and the probe's run-once semantics are pinned here too.
 
 import (
 	"database/sql"
@@ -279,7 +283,26 @@ func upgradeStatements(block string) []string {
 	return out
 }
 
-// loadUpgradeDoc reads docs/upgrade.md and answers its sql blocks.
+// sqlVer is the first in-window instance directory: the release tag that
+// ships polyforge#149's schema delta (the next release after v2.3.0).
+const sqlVer = "v2.4.0"
+
+// loadSQLFile reads one file of deploy/sql/<ver>/ — the SQL deploy.sh
+// executes inside the switch window (upgrade.sql / rollback.sql /
+// probe.sql).
+func loadSQLFile(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "sql", sqlVer, name))
+	if err != nil {
+		t.Fatalf("read deploy/sql/%s/%s: %v", sqlVer, name, err)
+	}
+	if len(upgradeStatements(string(raw))) == 0 {
+		t.Fatalf("deploy/sql/%s/%s carries no statements", sqlVer, name)
+	}
+	return string(raw)
+}
+
+// loadUpgradeDoc answers docs/upgrade.md's fenced sql blocks.
 func loadUpgradeDoc(t *testing.T) []string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "upgrade.md"))
@@ -290,23 +313,20 @@ func loadUpgradeDoc(t *testing.T) []string {
 	if len(blocks) == 0 {
 		t.Fatalf("docs/upgrade.md carries no fenced sql block")
 	}
-	var hasDropLedger, hasCleanup bool
-	for _, blk := range blocks {
-		up := strings.ToUpper(blk)
-		if strings.Contains(up, "DROP") && strings.Contains(blk, "wi_ship_ledger") {
-			hasDropLedger = true
-		}
-		if strings.Contains(up, "UPDATE") && strings.Contains(blk, "waiting_on") {
-			hasCleanup = true
-		}
-	}
-	if !hasDropLedger {
-		t.Fatalf("docs/upgrade.md carries no mandatory block dropping wi_ship_ledger")
-	}
-	if !hasCleanup {
-		t.Fatalf("docs/upgrade.md carries no optional waiting_on cleanup UPDATE")
-	}
 	return blocks
+}
+
+// loadCleanupSQL answers the optional waiting_on cleanup UPDATE of
+// docs/upgrade.md — manual, deliberately NOT part of the window SQL.
+func loadCleanupSQL(t *testing.T) string {
+	t.Helper()
+	for _, blk := range loadUpgradeDoc(t) {
+		if isCleanupBlock(strings.ToUpper(blk)) {
+			return blk
+		}
+	}
+	t.Fatal("docs/upgrade.md carries no optional waiting_on cleanup UPDATE")
+	return ""
 }
 
 // rawTableExists and rawColumnExists probe the schema on a raw handle.
@@ -419,24 +439,20 @@ func assertDeadGone(t *testing.T, db *sql.DB) {
 	}
 }
 
-// applyUpgradeDoc applies the statements of every doc block that passes
-// keep, in document order.
-func applyUpgradeDoc(t *testing.T, db *sql.DB, blocks []string, keep func(upper string) bool) {
+// applySQLText executes the statements of one SQL text in order (the
+// deploy.sh runner executes the same statements inside one transaction;
+// statement-level equivalence is what matters here).
+func applySQLText(t *testing.T, db *sql.DB, sqlText string) {
 	t.Helper()
 	applied := 0
-	for _, blk := range blocks {
-		if !keep(strings.ToUpper(blk)) {
-			continue
+	for _, stmt := range upgradeStatements(sqlText) {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("sql statement failed: %v\n%s", err, stmt)
 		}
-		for _, stmt := range upgradeStatements(blk) {
-			if _, err := db.Exec(stmt); err != nil {
-				t.Fatalf("upgrade statement failed: %v\n%s", err, stmt)
-			}
-			applied++
-		}
+		applied++
 	}
 	if applied == 0 {
-		t.Fatalf("docs/upgrade.md carries no applicable statements")
+		t.Fatalf("sql text carries no applicable statements")
 	}
 }
 
@@ -445,18 +461,36 @@ func isCleanupBlock(upper string) bool {
 	return strings.Contains(upper, "UPDATE") && strings.Contains(upper, "WAITING_ON")
 }
 
-// upgradeRun builds a real old database, applies the documented SQL,
-// reopens it with the current Open and drives the live write paths.
+// TestDocsQuoteTheWindowSQL: the upgrade block of docs/upgrade.md is
+// equal to deploy/sql/<ver>/upgrade.sql modulo comments/whitespace — the
+// file is the source of truth, the doc must not drift from it.
+func TestDocsQuoteTheWindowSQL(t *testing.T) {
+	for _, blk := range loadUpgradeDoc(t) {
+		if isMandatoryBlock(strings.ToUpper(blk)) {
+			norm := func(s string) string { return strings.Join(upgradeStatements(s), "\n") }
+			if norm(blk) != norm(loadSQLFile(t, "upgrade.sql")) {
+				t.Fatalf("docs/upgrade.md's upgrade block differs from deploy/sql/%s/upgrade.sql", sqlVer)
+			}
+			return
+		}
+	}
+	t.Fatalf("docs/upgrade.md carries no mandatory block dropping wi_ship_ledger")
+}
+
+// upgradeRun builds a real old database, applies the window upgrade SQL
+// (deploy/sql/<ver>/upgrade.sql), reopens it with the current Open and
+// drives the live write paths.
 func upgradeRun(t *testing.T, populate bool) {
-	blocks := loadUpgradeDoc(t)
+	upSQL := loadSQLFile(t, "upgrade.sql")
 	dataDir, raw := oldSchemaDB(t, populate)
 
-	applyUpgradeDoc(t, raw, blocks, isMandatoryBlock)
+	applySQLText(t, raw, upSQL)
 	assertDeadGone(t, raw)
 
 	if populate {
-		// The optional cleanup touches ONLY the dead waiting_on values.
-		applyUpgradeDoc(t, raw, blocks, isCleanupBlock)
+		// The optional cleanup (docs/upgrade.md, manual) touches ONLY the
+		// dead waiting_on values.
+		applySQLText(t, raw, loadCleanupSQL(t))
 		var stale, live, total int
 		if err := raw.QueryRow(`SELECT COUNT(*) FROM work_items
 			WHERE waiting_on='gate' OR waiting_on LIKE 'runtime:%'`).Scan(&stale); err != nil {
@@ -541,5 +575,175 @@ func TestOpenRunsNoAutoMigration(t *testing.T) {
 	}
 	if _, err := NewAdminManager(db).CreateProject(CreateProjectRequest{Name: "alpha"}); err == nil {
 		t.Fatal("CreateProject succeeded on an un-upgraded database; docs/upgrade.md says it fails until the SQL runs")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The owner-confirmed acceptance of the deploy.sh window (wi_xKcIlUlXhPSX):
+// round-trip through the real SQL files and the probe's run-once semantics.
+// ---------------------------------------------------------------------------
+
+// probeValue executes probe.sql's FINAL statement and answers its scalar:
+// 0 = already applied (skip), nonzero = apply — the deploy.sh contract.
+func probeValue(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	stmts := upgradeStatements(loadSQLFile(t, "probe.sql"))
+	if len(stmts) == 0 {
+		t.Fatal("probe.sql carries no statements")
+	}
+	var v int
+	if err := db.QueryRow(stmts[len(stmts)-1]).Scan(&v); err != nil {
+		t.Fatalf("probe statement failed: %v\n%s", err, stmts[len(stmts)-1])
+	}
+	return v
+}
+
+// assertDeadShapesRestored asserts the rollback SQL put every dead table
+// and column back (old-version code needs the full old shape).
+func assertDeadShapesRestored(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, table := range []string{"core_meta", "wi_ship_ledger"} {
+		if !rawTableExists(t, db, table) {
+			t.Errorf("rollback did not rebuild the dead table %s", table)
+		}
+	}
+	for _, d := range []struct{ table, column string }{
+		{"projects", "scenario"},
+		{"projects", "identifier_hash"},
+		{"work_items", "bundle_digest"},
+		{"work_items", "workflow_budget_baseline"},
+		{"work_items", "session_owner"},
+	} {
+		if !rawColumnExists(t, db, d.table, d.column) {
+			t.Errorf("rollback did not re-add the dead column %s.%s", d.table, d.column)
+		}
+	}
+}
+
+// TestProbeRunOnceSemantics — the run-once guarantee of the window SQL:
+// the structural probe answers "apply" on the old schema, "skip" after the
+// upgrade; the upgrade SQL itself is NOT re-runnable (the second DROP
+// COLUMN fails), so the probe is the guard; after the rollback SQL the
+// probe answers "apply" again, and a retry upgrade works.
+func TestProbeRunOnceSemantics(t *testing.T) {
+	_, raw := oldSchemaDB(t, true)
+	if v := probeValue(t, raw); v == 0 {
+		t.Fatal("probe answers 0 (already applied) on a fresh old-schema db")
+	}
+	applySQLText(t, raw, loadSQLFile(t, "upgrade.sql"))
+	if v := probeValue(t, raw); v != 0 {
+		t.Fatalf("probe answers %d (apply) after the upgrade - a re-deploy would run the SQL twice", v)
+	}
+	// The upgrade SQL is deliberately not idempotent: re-running it must
+	// FAIL (a DROP COLUMN of a missing column), proving the probe - not
+	// the SQL - carries the run-once guarantee.
+	failed := false
+	for _, stmt := range upgradeStatements(loadSQLFile(t, "upgrade.sql")) {
+		if _, err := raw.Exec(stmt); err != nil {
+			failed = true
+			break
+		}
+	}
+	if !failed {
+		t.Fatal("re-running the upgrade SQL must fail - the probe is the run-once guard")
+	}
+	applySQLText(t, raw, loadSQLFile(t, "rollback.sql"))
+	if v := probeValue(t, raw); v == 0 {
+		t.Fatal("probe answers 0 (already applied) after the rollback - a retry upgrade must be allowed")
+	}
+	applySQLText(t, raw, loadSQLFile(t, "upgrade.sql"))
+	assertDeadGone(t, raw)
+}
+
+// TestUpgradeRollbackRoundTrip — the ticket's acceptance test 1: a real
+// pre-#149 database with data -> upgrade SQL -> the CURRENT (new-version)
+// code reads and writes, project creation included -> rollback SQL -> the
+// OLD-version code's write shape works again (INSERTs naming every dead
+// column, the rebuilt tables), with defaults on the rows the new version
+// created meanwhile.
+func TestUpgradeRollbackRoundTrip(t *testing.T) {
+	dataDir, raw := oldSchemaDB(t, true)
+	applySQLText(t, raw, loadSQLFile(t, "upgrade.sql"))
+	assertDeadGone(t, raw)
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// ---- new-version code on the upgraded database -------------------
+	env := newEnvAt(t, dataDir) // creates the user, a writer and project alpha
+	id := mustCreateExecWI(t, env, "round-trip smoke ticket", nil, "")
+	m := NewSessionManager(env.DB)
+	if _, err := m.Claim(id, api.SessionClaimRequest{
+		SessionID: strings.Repeat("3", 32), MachineID: "m1", IdempotencyKey: "rt-1",
+	}, env.UserID); err != nil {
+		t.Fatalf("post-upgrade claim: %v", err)
+	}
+	if _, err := env.WIs.Patch(oldWIID(2), map[string]json.RawMessage{"priority": json.RawMessage(`"high"`)}); err != nil {
+		t.Fatalf("post-upgrade patch of an old row: %v", err)
+	}
+	if _, err := env.WIs.ReadyQueue("legacy"); err != nil {
+		t.Fatalf("post-upgrade ready queue of an old project: %v", err)
+	}
+	if err := env.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// ---- rollback SQL: the old shape back ----------------------------
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "aihub.db"))
+	if err != nil {
+		t.Fatalf("reopen for rollback: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	applySQLText(t, db, loadSQLFile(t, "rollback.sql"))
+	assertDeadShapesRestored(t, db)
+
+	// the dropped-column data is gone by the upgrade (that is what a
+	// drop is); after the rollback SQL EVERY row — old ones included —
+	// carries the re-added defaults.
+	var ih string
+	var scen sql.NullString
+	if err := db.QueryRow(`SELECT identifier_hash, scenario FROM projects WHERE id='p-old'`).Scan(&ih, &scen); err != nil {
+		t.Fatal(err)
+	}
+	if ih != "" || scen.Valid {
+		t.Fatalf("old project row after rollback: identifier_hash=%q (want the re-added default), scenario=%+v (want NULL)", ih, scen)
+	}
+	var fresh int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM projects WHERE identifier_hash=''`).Scan(&fresh); err != nil {
+		t.Fatal(err)
+	}
+	if fresh < 1 {
+		t.Fatal("no new-version project row carries the re-added identifier_hash default ''")
+	}
+
+	// ---- old-version code writes (the pre-#149 INSERT shapes) --------
+	now := "2026-10-14T00:00:00Z"
+	oldStmts := []string{
+		// old code always wrote identifier_hash (NOT NULL, no default)
+		`INSERT INTO projects(id,name,description,repos,visible,scenario,identifier_hash,created_at,updated_at)
+			VALUES('p-rt','round-trip','','[]',1,NULL,'cafebabe','` + now + `','` + now + `')`,
+		`INSERT INTO work_items(id,seq,project_id,goal,reporter,waiting_on,bundle_name,
+			bundle_digest,workflow_budget_baseline,session_owner,created_at,updated_at)
+			VALUES('wi_rt',1,'p-rt','old code writes the full old column set','u-old','owner','b',
+			'` + strings.Repeat("d", 64) + `','{}','m-rt','` + now + `','` + now + `')`,
+		// the ship bridge of the old version recorded into the rebuilt table
+		`INSERT INTO wi_ship_ledger(work_item_id,repo,branch,branch_top_sha,pushed_at)
+			VALUES('wi_rt','demo-src','polyforge/rt','` + strings.Repeat("e", 40) + `','` + now + `')`,
+		`INSERT INTO core_meta(key,value) VALUES('rt','1')`,
+	}
+	for _, s := range oldStmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("old-version write failed after the rollback SQL: %v\n%s", err, s)
+		}
+	}
+	// and the old-version reads (every re-added column scans):
+	var bdl, wbb, so sql.NullString
+	if err := db.QueryRow(`SELECT bundle_digest, workflow_budget_baseline, session_owner
+		FROM work_items WHERE id='wi_rt'`).Scan(&bdl, &wbb, &so); err != nil {
+		t.Fatalf("old-version read after the rollback: %v", err)
+	}
+	if !bdl.Valid || !wbb.Valid || !so.Valid || so.String != "m-rt" {
+		t.Fatalf("old-version read got bundle_digest=%+v baseline=%+v session_owner=%+v", bdl, wbb, so)
 	}
 }
