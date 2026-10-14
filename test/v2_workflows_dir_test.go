@@ -7,6 +7,10 @@ package test
 // no question) can never satisfy. Scenarios that are not about the gate
 // therefore run a copy with that one frontmatter flag stripped; scenarios
 // that are (TestV2HumanGateGuaranteeEndToEnd) set inst.gateQuickFixGrill.
+// Likewise the delivery bundles end with the `deliver` step (polyforge#166),
+// which pushes to the task repos' origins: scenarios that are not about
+// delivery run without that step line; the delivery scenarios set
+// inst.keepDeliver.
 
 import (
 	"os"
@@ -18,6 +22,9 @@ import (
 
 var humanGateFlag = regexp.MustCompile(`,\s*requires_human_answer:\s*true`)
 
+// deliverStepLine matches the deliver step's frontmatter line.
+var deliverStepLine = regexp.MustCompile(`(?m)^\s*- \{ id: deliver,.*\}\n`)
+
 // stepWallBudget matches one step-level `budget: { wall_minutes: N }`
 // override (the flow-map holds ONLY wall_minutes).
 var stepWallBudget = regexp.MustCompile(`,\s*budget:\s*\{\s*wall_minutes:\s*\d+\s*\}`)
@@ -26,7 +33,7 @@ var stepWallBudget = regexp.MustCompile(`,\s*budget:\s*\{\s*wall_minutes:\s*\d+\
 func (u *v1Install) workflowsPath() string {
 	shipped := filepath.Join(u.root, "workflows")
 	if u.strippedWF == "" {
-		u.strippedWF = strippedWorkflowsDir(u.t, shipped)
+		u.strippedWF = copyWorkflowsDir(u.t, shipped, !u.keepDeliver)
 		if u.gateQuickFixGrill {
 			addGrillHumanGate(u.t, u.strippedWF)
 		}
@@ -57,9 +64,17 @@ func addGrillHumanGate(t testing.TB, dir string) {
 }
 
 // strippedWorkflowsDir copies the shipped workflows tree into a test temp
-// dir with the requires_human_answer flag removed from every workflow.md,
-// for daemons started by harnesses other than v1Install (w113/w079, v3).
+// dir with the requires_human_answer flag and the deliver step removed from
+// every workflow.md, for daemons started by harnesses other than v1Install
+// (w113/w079, v3).
 func strippedWorkflowsDir(t testing.TB, shipped string) string {
+	t.Helper()
+	return copyWorkflowsDir(t, shipped, true)
+}
+
+// copyWorkflowsDir is strippedWorkflowsDir with the deliver step kept when
+// stripDeliver is false.
+func copyWorkflowsDir(t testing.TB, shipped string, stripDeliver bool) string {
 	t.Helper()
 	dst := filepath.Join(t.TempDir(), "workflows")
 	err := filepath.Walk(shipped, func(p string, info os.FileInfo, err error) error {
@@ -77,6 +92,9 @@ func strippedWorkflowsDir(t testing.TB, shipped string) string {
 		}
 		if strings.HasSuffix(p, "workflow.md") {
 			raw = humanGateFlag.ReplaceAll(raw, nil)
+			if stripDeliver {
+				raw = deliverStepLine.ReplaceAll(raw, nil)
+			}
 		}
 		return os.WriteFile(out, raw, info.Mode().Perm())
 	})

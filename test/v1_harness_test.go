@@ -125,7 +125,10 @@ type v1Install struct {
 	// questions); by default workflowsPath hands out a copy with every
 	// human gate flag stripped so unattended plans run.
 	gateQuickFixGrill bool
-	strippedWF        string
+	// keepDeliver keeps the delivery bundles' `deliver` step in the
+	// daemons' workflows copy (stripped by default: see workflowsPath).
+	keepDeliver bool
+	strippedWF  string
 	// stripWallBudgets removes every step-level `budget: { wall_minutes }`
 	// override from the daemon's workflow copy, so the daemon-wide
 	// --step-timeout flag (T) governs the scenario (a step's own
@@ -593,6 +596,12 @@ func optMachineID(id string) daemonOpt {
 // optAPIKey boots the daemon on a dedicated aihub api key (e.g. a
 // machine user's key the scenario revokes mid-run) instead of the
 // install's bootstrap admin key.
+// optEnv adds environment entries to the daemon process (and so to every
+// step process it spawns), e.g. a PATH with a fake gh first.
+func optEnv(kv ...string) daemonOpt {
+	return func(d *v1Daemon) { d.extraEnv = append(d.extraEnv, kv...) }
+}
+
 func optAPIKey(key string) daemonOpt {
 	return func(d *v1Daemon) { d.apiKey = key }
 }
@@ -938,7 +947,7 @@ func (d *v1Daemon) capsuleDir(wi string) string {
 	return filepath.Join(d.workspace, "capsules", wiPathName(d.t, d.inst, wi))
 }
 
-// wiPathName answers the capsule directory / ship branch name of wi —
+// wiPathName answers the capsule directory / delivery branch name of wi —
 // "<project>-<seq>" (polyforge#144) — from its aihub record.
 func wiPathName(t *testing.T, inst *v1Install, wi string) string {
 	t.Helper()

@@ -10,6 +10,7 @@ steps:
   - { id: grill, context_policy: fresh, handoff: true, kind: spec, budget: { wall_minutes: 30 } }
   - { id: fix, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
   - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: fix } }
+  - { id: deliver, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, on_fail: { target: fix } }
 ---
 
 # quick-fix — light remediation flow
@@ -86,3 +87,21 @@ needs more than 90 minutes in total.
 This bundle has no release step. Releases and deploys never ride a delivery lane: they
 happen only through the dedicated `release` workflow bundle (a separate WI), so shipping
 is always an explicit, separately-gated act on a verified origin head.
+
+## Delivery: the `deliver` step
+
+`deliver` runs last, after every gate passed (a failing gate never reaches it). Per declared
+repo it fetches and merges the latest origin default branch (a conflict is resolved in the
+capsule, then the full test bar is re-run and a fresh-context reviewer checks the
+resolution), pushes ONLY the feature branch `polyforge/<project>-<seq>`, opens or reuses
+the PR, and merges it with `gh pr merge --merge` iff the independent review passed with no
+blocking finding, the tests passed, no conflict was LLM-resolved and its mechanical
+pre-flight (nothing uncommitted, no release residue) found nothing. Otherwise it asks a
+human-only question (merge / don't merge / back to code). This workflow has no independent `review` step, so the merge rule never holds here: every quick-fix delivery stops at the human question with its PR open. "Back to code" is a
+`gate_failed` verdict that rewinds to `fix`; a re-run reuses the same branch and PR. The
+result records branch, PR URL and merge commit (or why not merged) per repo, plus the
+delivery note (`artifacts/delivery.md`). The driver refuses a completed `deliver` whose
+recorded commands push anything but the feature branch, merge other than `--merge`, or
+merge/leave unmerged outside the rule without a human answer. Step definition:
+`steps/deliver.md`. Releases stay in the separate `release` bundle, cut from the merged
+origin head.

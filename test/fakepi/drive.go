@@ -82,6 +82,18 @@ type planAction struct {
 	// root-cause consuming artifacts/repro.md).
 	Files map[string]string `json:"files,omitempty"`
 
+	// Run executes shell commands (sh -c, capsule root as cwd, in order)
+	// BEFORE the envelope write — the scripted stand-in for the commands a
+	// real step agent runs (the deliver step's git/gh calls). Each one is
+	// journaled and recorded as a real command_evidence entry (argv
+	// sh -c <cmd>, its exit code and measured duration); a failing command
+	// does not stop the rest.
+	Run []string `json:"run,omitempty"`
+	// OutputFile, when set, replaces the output payload with the JSON
+	// object in this capsule-relative file (written by the Run commands:
+	// the values a real agent learns while running, e.g. a merge commit).
+	OutputFile string `json:"output_file,omitempty"`
+
 	// Evidence carries extra structured command-evidence entries
 	// (merged with the synthetic one; suppressed entirely by
 	// NoEvidence). The driver copies command_evidence onto
@@ -390,6 +402,7 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 			d.journal("file_error", map[string]any{"path": p, "err": err.Error()})
 		}
 	}
+	runEvidence := d.runCommands(act.Run)
 	if act.Crash == "before" {
 		d.journal("crash_before", map[string]any{"step": act.ID, "outcome": act.Outcome})
 		if act.CrashStderr != "" {
@@ -397,7 +410,7 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 		}
 		os.Exit(101) // die before the envelope write: the envelope never lands
 	}
-	d.writeEnvelope(act)
+	d.writeEnvelope(act, runEvidence)
 	if act.Crash == "after" {
 		d.journal("crash_after", map[string]any{"step": act.ID, "outcome": act.Outcome})
 		os.Exit(101) // die after the write: the envelope is on the drop path
@@ -619,11 +632,11 @@ func errString(err error) string {
 }
 
 // makeRepo lays a real git worktree under repos/<name> with an origin
-// remote — the ship scenario's inventory (the daemon's ship bridge pushes
-// this worktree's HEAD to its own origin as the fixed-name branch).
+// remote — a scenario's inventory repo (the daemon never pushes it;
+// delivery is the workflows' deliver step, polyforge#166).
 // When an origin carries a main baseline, the worktree descends from it
 // (the real-agent shape: clone the repo, work on top) so the origin's
-// history and the shipped branch share a root — github's PR API refuses
+// history and the delivered branch share a root — github's PR API refuses
 // to open a PR for a head with no history in common with the base. An
 // origin without a main (s04's fresh empty bare repo) keeps today's
 // fresh-init worktree.
@@ -679,7 +692,7 @@ func (d *driveEnv) makeRepo(name, origin string) {
 // present. Structured command evidence rides command_evidence (the V4
 // gate; the driver copies it onto execution.json's output.commands)
 // unless the action suppressed it.
-func (d *driveEnv) writeEnvelope(act planAction) {
+func (d *driveEnv) writeEnvelope(act planAction, runEvidence []map[string]any) {
 	outcome := act.Outcome
 	if outcome == "" {
 		outcome = "completed"
@@ -690,6 +703,18 @@ func (d *driveEnv) writeEnvelope(act planAction) {
 	dropPath := filepath.Join(capsuleRoot, "runtime-state", "pending-results", spawnN+".json")
 
 	output := act.Output
+	if act.OutputFile != "" {
+		var fromFile map[string]any
+		raw, err := os.ReadFile(filepath.Join(capsuleRoot, act.OutputFile))
+		if err == nil {
+			err = json.Unmarshal(raw, &fromFile)
+		}
+		if err != nil {
+			d.journal("output_file_error", map[string]any{"path": act.OutputFile, "err": err.Error()})
+		} else {
+			output = fromFile
+		}
+	}
 	if output == nil {
 		output = map[string]interface{}{"summary": "envelope action"}
 	}
@@ -703,6 +728,9 @@ func (d *driveEnv) writeEnvelope(act planAction) {
 			"started_at":  nowStamp(),
 		})
 		for _, e := range act.Evidence {
+			evidence = append(evidence, e)
+		}
+		for _, e := range runEvidence {
 			evidence = append(evidence, e)
 		}
 	}
@@ -751,6 +779,38 @@ func (d *driveEnv) writeEnvelope(act planAction) {
 	d.journal("envelope", map[string]any{"step": stepID, "outcome": outcome,
 		"path": dropPath, "question_id": act.QuestionID, "dup": dupes,
 		"evidence": !act.NoEvidence, "crash": act.Crash})
+}
+
+// runCommands executes an action's Run commands (see planAction.Run) and
+// answers their command_evidence entries.
+func (d *driveEnv) runCommands(cmds []string) []map[string]any {
+	var ev []map[string]any
+	for _, c := range cmds {
+		started := time.Now()
+		cmd := exec.Command("sh", "-c", c)
+		cmd.Dir = d.capsuleRoot()
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if err != nil {
+			code = -1
+			if ee, ok := err.(*exec.ExitError); ok {
+				code = ee.ExitCode()
+			}
+		}
+		ms := time.Since(started).Milliseconds()
+		if ms < 1 {
+			ms = 1
+		}
+		d.journal("run", map[string]any{"cmd": c, "exit_code": code, "output": string(out)})
+		ev = append(ev, map[string]any{
+			"argv":        []any{"sh", "-c", c},
+			"cwd":         d.capsuleRoot(),
+			"exit_code":   code,
+			"duration_ms": ms,
+			"started_at":  started.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return ev
 }
 
 // capsuleRoot answers the capsule directory: the fakepi runs with the

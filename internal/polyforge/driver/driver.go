@@ -778,6 +778,9 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	if st, ok := d.exec.Steps[stepID]; ok {
 		spec.HumanAnswers = currentChainAnswers(st)
 	}
+	if stepID == deliverStepID {
+		spec.ReviewPassed = reviewPassed(d.exec.Steps[reviewStepID])
+	}
 	d.mu.Unlock()
 	// Declared outputs, gate-ness and duties (gate-ness feeds the
 	// verdict binding — the #106 lesson).
