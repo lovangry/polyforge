@@ -732,6 +732,23 @@ bootstrap 分支）；再按 `02-aihub-core.md#§4.6`/§5.1 的 Core 权威 repo
 总是完整替换，不保留本地内容。§7.1 的本机崩溃（WI Agent 重启但 generation 未变）不走这条 〔#111分类：删→驱动〕
 路径，而是等待下一次触发事件走 §6 的正常发布流程；本地未发布的改动被保留，不被完整替换覆盖。
 
+### 7.5 任务仓库 carrier ref（polyforge#108 / #158） <!-- §7.5 -->
+
+本节描述当前代码（v2 Go 执行驱动），与上文 Revision 模型并列。每次 capsule 发布，daemon 先推 capsule 链（`refs/heads/main`），
+再把每个任务仓库 `repos/<name>` 的本地 HEAD 推到该 WI 裸仓库的 carrier ref `refs/pf-task/<name>`（`gitops.pushTaskRefsLocked`）；
+blocked→resume 等重新认领从上游 clone 后按 carrier ref 恢复任务仓库（`runtime.restoreTaskRepoState`）。carrier 推送失败不回滚、
+不阻塞 capsule 链发布（D8）。
+
+- **blob 上限分两档**：aihub pre-receive hook 对 capsule 链沿用 16 MiB（`capsule.MaxBlobBytes`，env `GIT_PF_MAX_BLOB`），
+  对 `refs/pf-task/*` 用 100 MiB（`capsule.MaxTaskBlobBytes`，env `GIT_PF_MAX_TASK_BLOB`）。原因：任务仓库在 aihub 上最初为空，
+  首次 carrier 推送带上整个上游历史，上游历史里的大资源（例：skypilot 的 21 MB `streamlit_app.mp4`）不能让该仓库永远无法携带。
+  超过 100 MiB 的上游 blob 仍会被拒（"carrier 只存 WI 自己的提交"的根治方案未实施）。
+- **失败即决策**：carrier 推送因任何原因失败（超限、non-fast-forward 分叉、传输），除 stderr 日志外 daemon 写 `carrier_push_failed`
+  事件（body：`repo`、`ref`、git 错误），watcher 把它归为人工决策，提醒行为固定模板：
+  `[polyforge] <slug> carrier_push_failed <repo> — this task repo cannot be saved; a resume would lose its commits; this is a human decision, the agent must not answer it`。
+  仓库名经与 WI id 相同的字符集过滤；错误文本只在 `pf watch <wi> --once` 的事件里。同一 WI+仓库只提醒一次，直到该仓库的 carrier
+  推送再次成功（daemon 内存状态，daemon 重启后下一次失败会再提醒一次）。non-fast-forward 失败另外照旧发 `task_ref_diverged`。
+
 ## 8. 安全边界 <!-- §8 -->
 
 - 发布面信任模型：只有持有当前 generation 的 Daemon 可写 Revision 数据（§2.9 fencing）；Main
