@@ -237,3 +237,92 @@ func TestNewSurfacesWorkflowParseError(t *testing.T) {
 		t.Fatalf("New must surface the workflow validation error, got %v", err)
 	}
 }
+
+// TestValidateKindVocabulary (#118): a declared kind outside the closed
+// vocabulary is refused at load; an undeclared kind is legal.
+func TestValidateKindVocabulary(t *testing.T) {
+	wf, err := parseWorkflow([]byte("steps:\n  - { id: s, kind: coder }\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := validateWorkflow(wf); err == nil || !strings.Contains(err.Error(), `unknown kind "coder"`) {
+		t.Fatalf("a misspelled kind must be refused, got %v", err)
+	}
+	wf = mustParseExt(t, "steps:\n  - { id: s, kind: author }\n  - { id: t }\n")
+	if wf.step("s").Kind != "author" || wf.step("t").Kind != "" {
+		t.Fatalf("kind parse: %+v", wf.Steps)
+	}
+}
+
+// TestValidateOnFail (#118): on_fail only on a gate, and its target must
+// be a strictly earlier step — checked at load, not at the gate's first
+// FAIL.
+func TestValidateOnFail(t *testing.T) {
+	for name, front := range map[string]string{
+		"non-gate":       "steps:\n  - { id: a }\n  - { id: b, on_fail: { target: a } }\n",
+		"missing target": "steps:\n  - { id: a }\n  - { id: g, gate: true, context_policy: fresh, on_fail: { target: e2e-run } }\n",
+		"self target":    "steps:\n  - { id: a }\n  - { id: g, gate: true, context_policy: fresh, on_fail: { target: g } }\n",
+		"later target":   "steps:\n  - { id: g, gate: true, context_policy: fresh, on_fail: { target: b } }\n  - { id: b }\n",
+		"empty target":   "steps:\n  - { id: a }\n  - { id: g, gate: true, context_policy: fresh, on_fail: { target: \"\" } }\n",
+	} {
+		wf, err := parseWorkflow([]byte(front))
+		if err != nil {
+			t.Fatalf("%s: parse: %v", name, err)
+		}
+		if err := validateWorkflow(wf); err == nil || !strings.Contains(err.Error(), "on_fail") {
+			t.Fatalf("%s: must be refused, got %v", name, err)
+		}
+	}
+	mustParseExt(t, "steps:\n  - { id: a }\n  - { id: g, gate: true, context_policy: fresh, on_fail: { target: a } }\n")
+}
+
+// TestShippedBundlesValidate: every shipped workflow bundle passes the
+// load-time validation.
+func TestShippedBundlesValidate(t *testing.T) {
+	dirs, err := filepath.Glob(filepath.Join("..", "..", "..", "workflows", "*"))
+	if err != nil || len(dirs) == 0 {
+		t.Fatalf("no shipped bundles found: %v", err)
+	}
+	for _, dir := range dirs {
+		if _, err := LoadWorkflow(dir); err != nil {
+			t.Errorf("%s: %v", filepath.Base(dir), err)
+		}
+	}
+}
+
+// TestNewRefusesExecutionWithRemovedSteps (polyforge#165 rollout): an
+// in-flight feature-full WI's execution.json carries an entry for EVERY
+// step of the bundle it was claimed on (the skeleton seeds them all),
+// including e2e-baseline and e2e-run. Same-daemon recovery relaunches
+// from the capsule's own materialized snapshot (the old bundle) and is
+// unaffected; a re-claim materializes the daemon's current checkout,
+// where those steps no longer exist. The driver must refuse that start
+// loudly, naming every removed step (the claim then lands the WI
+// blocked with this reason) — never crash or continue on a mismatched
+// graph.
+func TestNewRefusesExecutionWithRemovedSteps(t *testing.T) {
+	capDir := t.TempDir()
+	execJSON := `{"work_item_id":"wi_old","workflow_status":"blocked","current_step":"code","steps":{` +
+		`"grill":{"status":"done"},"spec":{"status":"done"},"grill-review":{"status":"done"},"plan":{"status":"done"},` +
+		`"e2e-author":{"status":"done"},"e2e-baseline":{"status":"done"},"code":{"status":"in_progress"},` +
+		`"e2e-run":{"status":"pending"},"review":{"status":"pending"},"verification":{"status":"pending"},"deliver":{"status":"pending"}}}`
+	execPath := filepath.Join(capDir, "execution.json")
+	if err := os.WriteFile(execPath, []byte(execJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(Config{
+		WI:        WIInfo{ID: "wi_old", CapsuleDir: capDir, BundleName: "feature-full"},
+		ExecPath:  execPath,
+		BundleDir: filepath.Join("..", "..", "..", "workflows", "feature-full"),
+		Spawner:   &fakeSpawner{},
+		Log:       &eventLog{},
+	})
+	if err == nil {
+		t.Fatal("an execution.json naming removed steps must refuse the driver start")
+	}
+	for _, want := range []string{`"e2e-baseline", "e2e-run"`, `"feature-full"`, "cancel it and re-file"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal must name %s: %v", want, err)
+		}
+	}
+}

@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/silgrid/polyforge/internal/common/workflow"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,19 +48,6 @@ const FileName = ".polyforge.yaml"
 // the project that has neither a list of its own kind nor a bundle
 // step-level model_candidates list.
 const DefaultKey = "default"
-
-// KindVocabulary is the closed V8 step-kind set (the same vocabulary
-// bundle validation pins): the only legal per-kind keys.
-var KindVocabulary = []string{"qa", "spec", "author", "code", "gate", "review"}
-
-func validKind(k string) bool {
-	for _, v := range KindVocabulary {
-		if k == v {
-			return true
-		}
-	}
-	return false
-}
 
 // Config is the parsed `.polyforge.yaml`.
 type Config struct {
@@ -128,8 +116,8 @@ func validate(path string, cfg *Config) error {
 			return &Error{Path: path, Reason: fmt.Sprintf("models.%s: entry is empty — declare %s or a kind list, or remove it", project, DefaultKey)}
 		}
 		for key, list := range keys {
-			if key != DefaultKey && !validKind(key) {
-				return &Error{Path: path, Reason: fmt.Sprintf("models.%s: key %q is neither %q nor a workflow kind (%s)", project, key, DefaultKey, strings.Join(KindVocabulary, ", "))}
+			if key != DefaultKey && !workflow.ValidKind(key) {
+				return &Error{Path: path, Reason: fmt.Sprintf("models.%s: key %q is neither %q nor a workflow kind (%s)", project, key, DefaultKey, strings.Join(workflow.KindVocabulary, ", "))}
 			}
 			if list == nil {
 				return &Error{Path: path, Reason: fmt.Sprintf("models.%s.%s: must be a list of model ids", project, key)}

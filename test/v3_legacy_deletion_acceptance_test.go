@@ -550,13 +550,14 @@ func v3WalkTextFiles(root string, fn func(path string, raw []byte)) error {
 // rewrites (runnable parts).
 // ---------------------------------------------------------------------------
 
-// v3StepFilesCitingTheSkill are the five workflow step files the spec
-// names as carrying the deleted skill's §4/§7 citations that must be
-// re-homed inline.
+// v3StepFilesCitingTheSkill are the workflow step files that carried the
+// deleted skill's §4/§7 citations that had to be re-homed inline. The
+// spec named e2e-baseline.md and e2e-run.md for §4; polyforge#165 merged
+// e2e-run (and its echoed-field cross-check) into feature-full's
+// verification step, which now carries the §4 mechanism text.
 func v3StepFilesCitingTheSkill(root string) []string {
 	return []string{
-		filepath.Join(root, "workflows", "feature-full", "steps", "e2e-baseline.md"),
-		filepath.Join(root, "workflows", "feature-full", "steps", "e2e-run.md"),
+		filepath.Join(root, "workflows", "feature-full", "steps", "verification.md"),
 		filepath.Join(root, "workflows", "feature-full", "steps", "grill-review.md"),
 		filepath.Join(root, "workflows", "feature-full", "steps", "grill.md"),
 		filepath.Join(root, "workflows", "quick-fix", "steps", "grill.md"),
@@ -564,11 +565,11 @@ func v3StepFilesCitingTheSkill(root string) []string {
 }
 
 // TestV3SkillDeletedAndMechanismTextRehomed pins the skill-deletion
-// criterion's mechanical parts: the skill directory is gone, the five
-// citing step files carry no citation any more, and each still teaches
-// the mechanism it cited (the §4 echoed-field cross-check marker for the
-// two e2e files; the §7 needs_input mechanism marker for the three
-// grill-side files) — the mechanism must survive the re-homing, not just
+// criterion's mechanical parts: the skill directory is gone, the citing
+// step files carry no citation any more, and each still teaches the
+// mechanism it cited (the §4 echoed-field cross-check marker for
+// feature-full's verification; the §7 needs_input mechanism marker for
+// the three grill-side files) — the mechanism must survive the re-homing, not just
 // lose its pointer.
 func TestV3SkillDeletedAndMechanismTextRehomed(t *testing.T) {
 	root := v1Root(t)
@@ -584,10 +585,9 @@ func TestV3SkillDeletedAndMechanismTextRehomed(t *testing.T) {
 	}
 	markers := []mark{
 		{v3StepFilesCitingTheSkill(root)[0], "cross-check"}, // §4: echoed-field cross-check
-		{v3StepFilesCitingTheSkill(root)[1], "cross-check"},
-		{v3StepFilesCitingTheSkill(root)[2], "needs_input"}, // §7: the interactive needs_input loop
+		{v3StepFilesCitingTheSkill(root)[1], "needs_input"}, // §7: the interactive needs_input loop
+		{v3StepFilesCitingTheSkill(root)[2], "needs_input"},
 		{v3StepFilesCitingTheSkill(root)[3], "needs_input"},
-		{v3StepFilesCitingTheSkill(root)[4], "needs_input"},
 	}
 	for _, m := range markers {
 		raw, err := os.ReadFile(m.file)

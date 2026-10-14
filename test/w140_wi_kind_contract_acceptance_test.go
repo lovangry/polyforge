@@ -14,7 +14,7 @@ package test
 //
 // Suite posture (see artifacts/e2e-scenarios.md for the full mapping):
 //   - New-behavior bars are RED on the pre-implementation tree
-//     (e2e-baseline): assertion-level reds, never build reds — this
+//     (e2e-author's baseline run): assertion-level reds, never build reds — this
 //     file compiles/vets against today's tree, and every failure is
 //     an HTTP-status / JSON-shape / typed-error-reason / filesystem
 //     assertion. They go green when the change lands the spec.

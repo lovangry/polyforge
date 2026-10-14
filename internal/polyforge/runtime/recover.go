@@ -106,9 +106,9 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		// wedges and escapes depending on a timing race). Seal the parked
 		// capsule explicitly: kill the (already returned) driver's tree, then
 		// commit+push the parked state — journal, step output and the blocked
-		// verdict together. The §6.4 owner moves (resume / wrap --fail) and
+		// verdict together. The §6.4 owner moves (resume / cancel) and
 		// every re-materialization read exactly this state.
-		r.boundedFail(ctx, j, "workflow blocked: the owner holds the next move (resume / rewind / wrap --fail)")
+		r.boundedFail(ctx, j, "workflow blocked: the owner holds the next move (resume / cancel)")
 		return
 	}
 	// The single recovery ledger (C7, audit-subtraction pass B): ONE

@@ -271,11 +271,9 @@ func TestW166DeliverFeatureFullAutoMergesIdempotently(t *testing.T) {
 		{"do": "envelope", "id": "grill-review", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "e2e-author", "outcome": "completed", "handoff": true},
-		{"do": "envelope", "id": "e2e-baseline", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
-		{"do": "envelope", "id": "e2e-run", "outcome": "completed", "handoff": true},
-		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		// dies after pushing, opening AND merging, before the envelope
 		{"do": "envelope", "id": "deliver", "run": deliver, "crash": "before"},
 		// the re-dispatch: the same idempotent procedure
@@ -326,9 +324,9 @@ func TestW166DeliverCrashAfterMergeCommitBeforeTests(t *testing.T) {
 	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
 			"run": []string{moveMain(origin, "other.txt", "another PR")}},
-		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "deliver", "run": []string{dPre("demo") + "git fetch -q origin; git merge -q --no-edit origin/main"}, "crash": "before"},
 		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
 			"run": literalBranch(branch, pushAndPR("demo"), claimRecord("demo", `"merged":true,"merge_commit":"pending","tests_passed":true`), assemble)},
@@ -371,10 +369,10 @@ func TestW166DeliverHandResolvedConflictStopsAtHuman(t *testing.T) {
 	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
-		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
-			"run": []string{moveMain(origin, "work.txt", "main moved on")}},
 		// the test bar verification records (and deliver must re-run verbatim)
 		{"do": "envelope", "id": "verification", "outcome": "completed", "output": verifiedWithTestBar(), "run": []string{testBar}},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
+			"run": []string{moveMain(origin, "work.txt", "main moved on")}},
 		// resolves, re-runs the test bar, pushes, opens the PR — and lies about the conflict
 		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
 			"run": literalBranch(branch, resolve, testBar,
@@ -491,8 +489,8 @@ func TestW166DeliverMultiRepoCrashBetweenPRAndMerge(t *testing.T) {
 	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": demo, "run": []string{cloneTwo}},
-		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "deliver", "crash": "before", "run": literalBranch(branch, pushAndPR("demo"), pushAndPR("two"))},
 		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
 			"run": literalBranch(branch, pushAndPR("demo"), pushAndPR("two"), mergeRecord("demo", ""), mergeRecord("two", ""), assemble)},
@@ -523,8 +521,8 @@ func TestW166DeliverSurvivesDaemonRestart(t *testing.T) {
 	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
-		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "deliver", "park": true, "run": literalBranch(branch, pushAndPR("demo"))},
 		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
 			"run": literalBranch(branch, pushAndPR("demo"), mergeRecord("demo", ""), assemble)},
@@ -563,16 +561,16 @@ func TestW166DeliverBackToCodeRoundTrip(t *testing.T) {
 	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
-		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "deliver", "outcome": "needs_input", "question_id": qid,
 			"question": "PR https://github.com/fake/demo/pull/1 is open. merge / don't merge / back to code?",
 			"run":      literalBranch(branch, pushAndPR("demo"))},
 		{"do": "envelope", "id": "deliver", "outcome": "gate_failed",
 			"output": map[string]any{"verdict": "fail", "fail_reason": "human: back to code: rework work.txt (PR https://github.com/fake/demo/pull/1)"}},
 		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "run": []string{rework}},
-		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
 			"run": literalBranch(branch, pushAndPR("demo"), mergeRecord("demo", ""), assemble)},
 	}, nil)
@@ -607,10 +605,10 @@ func TestW166DeliverMainMovedTestBarRerunAutoMerges(t *testing.T) {
 	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
-		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
-			"run": []string{moveMain(origin, "other.txt", "another PR")}},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "output": verifiedWithTestBar(),
 			"run": []string{deliverTestBarCmd}, "no_started_at": true},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
+			"run": []string{moveMain(origin, "other.txt", "another PR")}},
 		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput, "no_started_at": true,
 			"run": literalBranch(branch, pushAndPR("demo"), deliverTestBarCmd, mergeRecord("demo", ""), assemble)},
 	}, nil)
@@ -648,9 +646,9 @@ func TestW166DeliverAlreadyMergedAfterMainMoved(t *testing.T) {
 	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": verifiedWithTestBar(), "run": []string{deliverTestBarCmd}},
 		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
 			"run": []string{moveMain(origin, "other.txt", "another PR")}},
-		{"do": "envelope", "id": "verification", "outcome": "completed", "output": verifiedWithTestBar(), "run": []string{deliverTestBarCmd}},
 		{"do": "envelope", "id": "deliver", "crash": "before", "no_started_at": true, "run": full},
 		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput, "no_started_at": true, "run": full},
 	}, nil)

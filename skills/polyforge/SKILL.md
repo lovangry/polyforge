@@ -88,8 +88,7 @@ PATCH only — the kept session is re-attached by its holder daemon) or a
 moves: continue = `resume`, abandon = `cancel` (both are allowed to the task's reporter, a project maintainer or an admin).
 A WI whose capsule directory went missing, or whose project lost its
 `[workspace]` mapping, across a daemon restart is simply set `blocked` (the
-reason note names the cause): fix the cause if any, then `resume`, or `cancel`
-(or `wrap --fail` for the failed verdict).
+reason note names the cause): fix the cause if any, then `resume`, or `cancel`.
 "Stop" of a running work item routes to `pause` (reversible) or
 `wrap --fail` (the owner's failed verdict), never to `cancel` (which only
 applies to WIs with no active execution — queued, paused or blocked). "Ship / deliver / push it / open the PR" has no

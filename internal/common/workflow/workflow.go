@@ -13,12 +13,25 @@ import (
 
 // ---------------------------------------------------------------------------
 // Minimal frontmatter read surface (the F4 lane: candidate-chain
-// consumption). The v0 validator's full structure rule set (WF-201, rule
-// ids V1–V10) deliberately stayed deleted — aihub owns bundle validation
-// at WI creation; the runtime needs only to READ the two fields that drive
-// model selection: workflow-level defaults.model_candidates and the
-// per-step model_candidates override. Nothing else is parsed, nothing is
-// validated here.
+// consumption): the fields that drive model selection — workflow-level
+// defaults.model_candidates, the per-step model_candidates override and
+// the step kind. Nothing is validated here; the driver's LoadWorkflow is
+// the one structural check of a bundle.
+
+// KindVocabulary is the closed step-kind set: the only legal frontmatter
+// `kind` values (the driver refuses any other at load) and the only legal
+// per-kind keys of the workspace yaml's model lists.
+var KindVocabulary = []string{"qa", "spec", "author", "code", "gate", "review"}
+
+// ValidKind reports whether k is in KindVocabulary.
+func ValidKind(k string) bool {
+	for _, v := range KindVocabulary {
+		if k == v {
+			return true
+		}
+	}
+	return false
+}
 
 // Defaults carries the workflow-level fallback model candidates.
 type Defaults struct {
@@ -29,8 +42,7 @@ type Defaults struct {
 // the read surface needs (the id, the step's V8 KIND, and the per-step
 // candidate override). Kind is the polyforge#79 read-surface addition:
 // the workspace yaml's per-project kind lists are kind-KEYED, so the compose needs
-// the same closed vocabulary the bundle declares. A read-surface
-// addition only — aihub's bundle validation is untouched.
+// the same closed vocabulary the bundle declares.
 type FrontmatterStep struct {
 	ID              string   `yaml:"id"`
 	Kind            string   `yaml:"kind"`

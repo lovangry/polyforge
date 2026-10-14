@@ -72,7 +72,6 @@ const (
 	TransStepStart    TransitionKind = "step_start"
 	TransStepResult   TransitionKind = "step_result"
 	TransGateFail     TransitionKind = "gate_fail"
-	TransRewind       TransitionKind = "rewind"
 	TransTerminal     TransitionKind = "terminal"
 	TransBudgetUpdate TransitionKind = "budget_update"
 	// TransInit and TransAnswer are additions the single-write rule
@@ -108,7 +107,7 @@ const (
 // TransitionRequest is one submitted execution.json mutation. SpawnN is
 // the fencing key: the ordinal of the derivation the request belongs
 // to. The driver's own loop fills it from the dispatch it is settling;
-// daemon-side callers (Answer/Rewind/Terminate) snapshot the current
+// daemon-side callers (Answer/Terminate) snapshot the current
 // counter — a mismatch is the honest answer "this request targets a
 // superseded spawn", never retried blindly.
 type TransitionRequest struct {
@@ -244,8 +243,6 @@ func (d *Driver) applyLocked(req TransitionRequest, info *appliedInfo) error {
 		return d.applyStepResultLocked(req)
 	case TransGateFail:
 		return d.applyGateFailLocked(req, info)
-	case TransRewind:
-		return d.applyRewindLocked(req, info)
 	case TransTerminal:
 		return d.applyTerminalLocked(req)
 	case TransBudgetUpdate:
@@ -532,7 +529,7 @@ func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) e
 		d.exec.WorkflowStatus = StatusFailedRewindExhausted
 		return nil
 	}
-	d.applyRewindRangeLocked(tIdx, gIdx, target, gate, "", info)
+	d.applyRewindRangeLocked(tIdx, gIdx, target, gate, info)
 	// The gate itself stays in_progress, but its verdict closes the human
 	// round it judged: answers recorded so far must not satisfy a
 	// requires_human_answer gate on re-entry (human-gate bypass).
@@ -559,53 +556,11 @@ func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) e
 	return nil
 }
 
-// applyRewindLocked is the OPERATOR rewind (the owner's §6.4 verdict
-// after blocked, or an in-flight correction while running): the same
-// archive-and-reset mechanics over [target, current), no gate verdict
-// to route. The §6.2 bounds do not apply — they bound automated gate
-// loops, not owner decisions — but the rewind statistics count it.
-// While running, a rewind is refused if the current step holds an open
-// question: the awaiting face must stay total (answer it or wait). From
-// blocked, the rewind is ALSO the owner's unblock: the verdict rewrites
-// the workflow running again (03 §4.2: the owner's follow-up writes
-// running or a terminal back).
-func (d *Driver) applyRewindLocked(req TransitionRequest, info *appliedInfo) error {
-	if isTerminalStatus(d.exec.WorkflowStatus) {
-		return fmt.Errorf("driver: workflow is terminal (%s); rewind is frozen", d.exec.WorkflowStatus)
-	}
-	status := d.exec.WorkflowStatus
-	if status != StatusRunning && status != StatusBlocked {
-		return fmt.Errorf("driver: rewind from %q is illegal", status)
-	}
-	cur := d.exec.CurrentStep
-	cIdx, ok := d.workflow.indexOf(cur)
-	if !ok {
-		return fmt.Errorf("driver: current step %q is not in the workflow", cur)
-	}
-	target := req.StepID
-	tIdx, ok := d.workflow.indexOf(target)
-	if !ok {
-		return fmt.Errorf("driver: rewind target %q is not in the workflow", target)
-	}
-	if tIdx >= cIdx {
-		return fmt.Errorf("driver: rewind target %q must be an earlier step than the current %q", target, cur)
-	}
-	if status == StatusRunning {
-		if cs := d.exec.Steps[cur]; cs != nil && cs.PendingQuestion != nil {
-			return fmt.Errorf("driver: rewind refused while step %q holds an open question (answer it or wait)", cur)
-		}
-	}
-	d.applyRewindRangeLocked(tIdx, cIdx, target, "", req.Reason, info)
-	d.exec.WorkflowStatus = StatusRunning
-	return nil
-}
-
 // applyRewindRangeLocked archives every step in [from, to) as a
 // gate_fail_rewind attempt and resets it to pending with output
 // cleared, then moves the position to the target. rewindGate names the
-// triggering gate ("" for an operator rewind, whose reason rides the
-// archived Detail instead).
-func (d *Driver) applyRewindRangeLocked(from, to int, target, rewindGate, detail string, info *appliedInfo) {
+// triggering gate.
+func (d *Driver) applyRewindRangeLocked(from, to int, target, rewindGate string, info *appliedInfo) {
 	for i := from; i < to; i++ {
 		sid := d.workflow.Steps[i].ID
 		st := d.exec.Steps[sid]
@@ -628,7 +583,6 @@ func (d *Driver) applyRewindRangeLocked(from, to int, target, rewindGate, detail
 			ArchivedAt:     d.stamp(),
 			RewindGate:     rewindGate,
 			Result:         raw,
-			Detail:         detail,
 			ConsumedBudget: &consumed,
 		})
 		st.Status = capsule.StepPending
@@ -863,11 +817,6 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 			body["target"] = info.target
 			body["archived"] = info.archived
 		}
-	case TransRewind:
-		kind = "rewind"
-		body["target"] = req.StepID
-		body["archived"] = info.archived
-		body["reason"] = req.Reason
 	case TransTerminal:
 		kind = "terminal"
 		body["status"] = req.Status

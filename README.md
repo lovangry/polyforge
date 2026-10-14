@@ -567,8 +567,9 @@ section is a faithful summary, and that doc remains the single authority.
 graph.** If a change alters observable behavior — a new endpoint, a
 protocol/contract/semantics change, an ownership or fencing rule change, a
 new external capability — the ticket must be filed with `bundle_name` set to
-a graph that carries e2e-author / e2e-run steps (currently `feature-full`;
-giving another graph those steps is zero code). Pure refactors, pure docs,
+a graph that carries an e2e-author step (currently `feature-full`, whose
+verification also runs the authored scenarios; giving another graph that
+step is zero code). Pure refactors, pure docs,
 and obviously non-behavior chores keep the existing graphs (the existing
 suite + verification is enough). Quick test: ask "after this merges, what
 difference would users/callers perceive that the existing scenarios can't

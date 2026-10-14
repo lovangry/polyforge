@@ -1,10 +1,10 @@
 ---
 name: verification
-description: Machine-checkable gate that the build, lint, and unit/integration tests pass on the code step's output - the last machine gate, re-running the full bar after review and before release.
+description: Machine-checkable gate that the build, lint, and unit/integration tests pass on the code step's output, with a per-scenario result for every e2e-author scenario - the machine gate before review.
 tools: [read, bash]
 output:
   type: object
-  required: [verdict, checks]
+  required: [verdict, checks, authored_titles, scenarios]
   properties:
     verdict:
       type: string
@@ -24,6 +24,32 @@ output:
     fail_reason:
       type: string
       description: Required when verdict is fail - a precise description of what failed, to be carried back to code as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
+    authored_titles:
+      type: array
+      minItems: 1
+      uniqueItems: true
+      items: { type: string }
+      description: "Verbatim echo of e2e-author's scenario_titles, read from execution.json's steps.e2e-author.output.scenario_titles. Must equal it element for element and in order - the cross-check that one result exists per authored scenario, no more and no fewer. uniqueItems mirrors the producer's own schema, so a verbatim echo of a valid authored list can never violate it. Compare the two lists element for element before returning completed: a mismatch means this step did not exercise the authored suite."
+    scenarios:
+      type: array
+      minItems: 1
+      items:
+        type: object
+        required: [title, status]
+        properties:
+          title: { type: string }
+          status: { type: string, enum: [pass, fail, skipped] }
+          detail: { type: string }
+        oneOf:
+          - description: A pass or fail entry - detail optional (recommended for a fail).
+            properties:
+              status: { type: string, enum: [pass, fail] }
+          - description: A skipped entry - only legal with a non-empty detail recording why the scenario was skipped and what review should weigh.
+            properties:
+              status: { type: string, enum: [skipped] }
+              detail: { type: string, minLength: 1 }
+            required: [status, detail]
+      description: Per-scenario outcome of the authored acceptance suite, one entry per authored title, same order as authored_titles. A failing scenario is also a failing check (authored-scenarios), so it fails the verdict.
     pre_existing_failures:
       type: array
       items: { type: string }
@@ -47,6 +73,12 @@ output:
             type: object
             properties:
               status: { type: string, enum: [pass, skipped, pre_existing] }
+        scenarios:
+          type: array
+          items:
+            type: object
+            properties:
+              status: { type: string, enum: [pass, skipped] }
       required: [verdict]
     - description: A fail verdict - at least one check failed; requires a non-empty fail_reason. The contains constraint mechanically requires at least one check with status fail, so an all-pass checks array cannot ride a fail verdict (draft-07 mechanical only).
       properties:
@@ -66,9 +98,10 @@ output:
 # verification
 
 You are a machine-checkable gate, not a human-style code review. Your only job is to run
-the project's build, lint, and test commands against the tree `code` produced and report
+the project's build, lint, and test commands against the tree `code` produced, plus the
+acceptance scenarios `e2e-author` authored and proved red before `code` ran, and report
 whether they pass — no subjective judgment about design quality belongs here (that is
-`review`'s job, the step just before this one).
+`review`'s job, the step right after this one; it reads your report).
 
 ## What to do
 
@@ -89,13 +122,26 @@ whether they pass — no subjective judgment about design quality belongs here (
    `code` may not touch them, so any untracked or missing test file at this gate is
    residue the flow must not ship. Record this as its own named check (e.g.
    `no-untracked-test-files`).
-4. Record every check run (name, pass/fail/skipped, and enough detail to reproduce a
+4. **Authored acceptance scenarios.** Copy `steps.e2e-author.output.scenario_titles`
+   verbatim into `authored_titles` and record one `scenarios` entry per title, same
+   order. If the full bar already ran `e2e-author`'s test files (e.g. `go test ./test/`
+   covers `test/...`), read each scenario's result from that run. If it did not (e.g.
+   the project's e2e runner is not part of its unit test command), run those files with
+   a targeted command and add that command to `test_bar`, so the acceptance tests are
+   re-run on delivery too. A document-only scenario is driven through the project's
+   actual interfaces and judged against its THEN clause. Never rewrite, relax or skip a
+   scenario because the implementation does not satisfy it — record `fail` with a
+   detailed `detail`. A skip is legal only with a non-empty `detail` and does not fail
+   this gate; `review` judges it. Record the suite as its own named check
+   (`authored-scenarios`): `fail` if any scenario failed, and write the per-scenario
+   results into `artifacts/verification-report.md`.
+5. Record every check run (name, pass/fail/skipped, and enough detail to reproduce a
    failure) in `checks` - at least one entry is required.
-5. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
+6. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
    pass verdict - the schema's oneOf rejects that combination as self-contradictory.
-6. If any check fails: `verdict: fail`, and write a precise `fail_reason` — the exact
+7. If any check fails: `verdict: fail`, and write a precise `fail_reason` — the exact
    failing command, its output excerpt, and which plan step's work it implicates if that
-   is discernible. The schema requires `fail_reason` here. This text becomes `code`'s
+   is discernible; for a failing authored scenario, its title and expected vs observed. The schema requires `fail_reason` here. This text becomes `code`'s
    `pending_rewind_input` on the next attempt; vague language like "tests failed"
    without specifics wastes the rewind.
 
@@ -138,8 +184,8 @@ default branch to a human.
 
 Do not report `pass` on a check you skipped because it seemed slow or you assumed it
 would pass — mark it `skipped` with a reason, and let that visibly not-checked status be
-what it is. A false `pass` here defeats the entire purpose of a last machine gate:
-a later release would ship an unchecked tree.
+what it is. A false `pass` here defeats the entire purpose of the machine gate: `review`
+and `deliver` trust it, and the tree would ship unchecked.
 
 ## Evidence obligation (hard gate)
 

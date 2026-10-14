@@ -697,66 +697,6 @@ func TestTransitionGateFailTerminateAndIllegalTarget(t *testing.T) {
 	}
 }
 
-func TestTransitionOperatorRewindFromBlocked(t *testing.T) {
-	d, _, _, _ := testEnv(t, spec("a"), spec("b"), spec("c"))
-	mustInit(t, d)
-	for _, s := range []struct {
-		id string
-		n  int64
-	}{
-		{"a", 1}, {"b", 2},
-	} {
-		mustStart(t, d, s.id, s.n)
-		if err := d.transition(TransitionRequest{
-			Kind: TransStepResult, StepID: s.id, SpawnN: s.n, Result: completedResult(s.id, s.n, `{"x":1}`),
-		}); err != nil {
-			t.Fatalf("result %s: %v", s.id, err)
-		}
-	}
-	mustStart(t, d, "c", 3)
-	if err := d.transition(TransitionRequest{
-		Kind: TransStepResult, StepID: "c", SpawnN: 3,
-		Result: &StepResult{StepID: "c", SpawnN: 3, Outcome: OutcomeIncomplete},
-	}); err != nil {
-		t.Fatalf("incomplete: %v", err)
-	}
-	// The owner's verdict: rewind to a.
-	if err := d.transition(TransitionRequest{Kind: TransRewind, StepID: "a", Reason: "owner: wrong premise", SpawnN: d.currentSpawnN()}); err != nil {
-		t.Fatalf("operator rewind: %v", err)
-	}
-	snap := d.Snapshot()
-	for _, id := range []string{"a", "b"} {
-		st := snap.Steps[id]
-		if st.Status != capsule.StepPending {
-			t.Fatalf("%s archived+reset: %+v", id, st)
-		}
-		// Find the operator-rewind archive ("accepted" attempts are extra).
-		var att capsule.Attempt
-		for _, a := range st.Attempts {
-			if a.Detail == "owner: wrong premise" {
-				att = a
-				break
-			}
-		}
-		if att.Cause == "" {
-			t.Fatalf("%s missing operator rewind archive: %+v", id, st.Attempts)
-		}
-		if att.RewindGate != "" {
-			t.Fatalf("an operator rewind archives without a gate: %+v", att)
-		}
-	}
-	if snap.Steps["c"].Status != capsule.StepInProgress || len(snap.Steps["c"].Attempts) != 0 {
-		t.Fatalf("the current step is not in the rewind range: %+v", snap.Steps["c"])
-	}
-	if snap.CurrentStep != "a" || snap.RewindStats.Count != 1 {
-		t.Fatalf("position/stats: current=%q stats=%+v", snap.CurrentStep, snap.RewindStats)
-	}
-	// While running with an open question the rewind is refused.
-	if err := d.transition(TransitionRequest{Kind: TransRewind, StepID: "a", Reason: "too late", SpawnN: d.currentSpawnN()}); err == nil {
-		t.Fatal("a rewind past a non-current target must be refused (c is current)")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // terminal + budget
 

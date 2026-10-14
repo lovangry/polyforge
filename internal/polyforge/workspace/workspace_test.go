@@ -120,12 +120,3 @@ func TestUnreadableYamlIsTyped(t *testing.T) {
 		t.Fatal("a directory at the yaml path must refuse")
 	}
 }
-
-// TestKindVocabulary pins the closed V8 set the loader validates
-// per-kind keys against.
-func TestKindVocabulary(t *testing.T) {
-	want := "qa spec author code gate review"
-	if got := strings.Join(KindVocabulary, " "); got != want {
-		t.Fatalf("kind vocabulary %q, want %q", got, want)
-	}
-}

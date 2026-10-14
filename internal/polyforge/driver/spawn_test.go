@@ -242,17 +242,17 @@ func TestSpawnStepFreshPromptOmitsHandoff(t *testing.T) {
 // TestLatestJournalTranscriptFiltersByStep: the capsule journal
 // interleaves every step's spawns; a resume of step X must never pick
 // the higher-ordinal transcript of another step (the review-inside-
-// e2e-run's-conversation bug), and lines without a step id never match.
+// another-step's-conversation bug), and lines without a step id never match.
 func TestLatestJournalTranscriptFiltersByStep(t *testing.T) {
 	ad, _, capDir := spawnEnv(t)
 	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
 		`{"spawn_n":1,"step_id":"review","transcript":"/t/review1.jsonl"}
 {"spawn_n":2,"step_id":"code","transcript":"/t/code2.jsonl"}
-{"spawn_n":3,"step_id":"e2e-run","transcript":"/t/e2e3.jsonl"}
+{"spawn_n":3,"step_id":"verification","transcript":"/t/ver3.jsonl"}
 {"spawn_n":4,"transcript":"/t/untagged4.jsonl"}
 {"spawn_n":5,"step_id":"review","transcript":""}
 `)
-	for step, want := range map[string]string{"review": "/t/review1.jsonl", "code": "/t/code2.jsonl", "e2e-run": "/t/e2e3.jsonl"} {
+	for step, want := range map[string]string{"review": "/t/review1.jsonl", "code": "/t/code2.jsonl", "verification": "/t/ver3.jsonl"} {
 		got, err := ad.latestJournalTranscript(step)
 		if err != nil || got != want {
 			t.Fatalf("step %s: got (%q, %v) want %q", step, got, err, want)

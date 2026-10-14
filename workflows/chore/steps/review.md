@@ -1,6 +1,6 @@
 ---
 name: review
-description: Human-judgment gate over the completed maintenance/deletion change - plan conformance plus the fixed owner-rules checklist - before the final machine gate.
+description: Human-judgment gate over the completed maintenance/deletion change - plan conformance plus the fixed owner-rules checklist - after the machine gate, before delivery.
 tools: [read, bash]
 output:
   type: object
@@ -56,9 +56,11 @@ lane.
 ## What to do
 
 1. Read, in this order: `artifacts/plan.md` (the declared units and touched files),
-   the actual diff `code` produced (read the repo worktree's history for the commits
-   `code` reported), and `artifacts/code-summary.md` (the code step's own account of
-   what it did and why).
+   the full diff (in each task repo `git diff $(git merge-base HEAD origin/HEAD)..HEAD`,
+   falling back to `origin/main` or `origin/master` when `origin/HEAD` is unset — this
+   includes any commit `code` did not report), `artifacts/code-summary.md` (the code
+   step's own account of what it did and why) and `artifacts/verification-report.md`
+   (the machine gate's results).
 2. Judge plan conformance: the diff covers the plan's declared steps, touches no
    files the plan did not declare (an undeclared write is a lock-scope gap, not a
    paperwork gap), and a declared deletion is actually complete — no half-removed
@@ -66,7 +68,9 @@ lane.
 3. Judge the deletion-type acceptance bar: the existing test suite stays meaningful
    after the deletion, and the few targeted tests for behavior the deletion actually
    changes exist where the project expects tests. A full acceptance suite or an e2e
-   lane is NOT this lane's bar — demanding one here is scope creep, not rigor.
+   lane is NOT this lane's bar — demanding one here is scope creep, not rigor. A test
+   that asserts nothing real (vacuous) is a blocking finding; a redundant one is
+   non-blocking.
 4. Run the owner-rules checklist below — any hit is a blocking finding.
 5. Record every finding in `findings`, tagged `blocking` or `non-blocking`.
    Non-blocking findings do not fail the gate but are still useful history.
@@ -79,9 +83,10 @@ lane.
 
 **Do not run tests or builds.** This step reads and judges; it never runs the build or
 the test suite (`go test ./...`, `make test`, the full `./test`, `npm test`). The full
-bar runs exactly once per pass, in `verification` (after this step;
-`deliver` re-runs that same bar only after merging a moved default branch changed the tree). Reading a test
-file's source is part of the review; running it is not.
+bar ran exactly once, in `verification` (before this step;
+`deliver` re-runs that same bar only after merging a moved default branch changed the tree): its report
+is this step's test evidence. Reading a test file's source is part of the review;
+running it is not.
 
 ## Owner-rules checklist (any hit is a blocking finding)
 
@@ -114,10 +119,9 @@ these present:
 ## Position in the flow
 
 This step is declared `kind: review` in the workflow frontmatter, which the schema
-grants positional freedom — in this bundle it sits between `code` and
-`verification`: the judgment pass reads the diff and the plan, and the machine gate
-behind it re-runs the full green bar as the final mechanical word before the change
-merges.
+grants positional freedom — in every delivery bundle that has a review it sits between `verification`
+and `deliver`: the mechanical gate runs first, so a mechanical failure never costs a
+review, and the judgment reads its results.
 
 ## Output
 

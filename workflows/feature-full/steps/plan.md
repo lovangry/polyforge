@@ -45,8 +45,8 @@ the spec's requirement titles), plus an ordered `## Steps` section. Every step M
   (Makefile, package.json scripts, CI config); for a Go repo, `go build ./... &&
   go vet ./... && gofmt -l .` plus `go test` of the touched packages. Name the concrete
   commands. The full suite is NOT a per-unit bar, not even for the final unit - it
-  belongs to `e2e-run` and `verification`, which also exercise `e2e-author`'s test
-  files (those are not part of any per-unit bar);
+  belongs to `verification`, which also exercises `e2e-author`'s test files (those
+  are not part of any per-unit bar);
 - carry a `Touched files: <repo-relative path> (write|read), ...` line, or
   `Touched files: (no file edits)` for steps that only reason/verify without changing
   the tree.
@@ -71,7 +71,7 @@ Example:
    and run tests on the tree so far — do not plan a sequence that only compiles once
    every step has landed. This is what lets `code` commit per unit rather than in one
    undifferentiated blob.
-3. If this is a rewind re-entry (the `code` or `review` step's FAIL verdict routed here
+3. If this is a rewind re-entry (a `verification` or `review` FAIL verdict routed here
    indirectly through a re-planned `code` pass — see `workflow.md`'s rewind-boundaries
    section for why `plan` itself is not a direct rewind target in this bundle), still
    re-derive the plan from the current spec rather than patching the old plan blindly.

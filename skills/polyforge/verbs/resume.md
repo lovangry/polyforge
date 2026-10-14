@@ -113,9 +113,9 @@ refused before anything else happens.
 | `dial unix …` | Daemon not running | The blocked-door resume re-establishes execution, so a daemon must be involved — start the daemon or check `--socket`. The paused-door resume still cleared `clean_pause` at the hub; once the holder daemon starts, its restart reconciliation attaches the paused session (to continue without it, `pf ops end-session` + `pf submit`). |
 
 Do not route "continue / go on" of a **running** work item here — that is
-`watch`. The §6.4 sibling moves of Door 2 (rewind to a step, terminate
-the WI) are not exposed on this verb: `pf cancel <id>` abandons a blocked
-work item, and `pf wrap --fail <id>` records the owner's failed verdict.
+`watch`. A blocked work item has exactly two owner moves: continue it here,
+or abandon it with `pf cancel <id>`. There is no rewind-to-a-step move, and
+`pf wrap --fail` on a blocked work item only prints that hint.
 
 ## Watching after a resume
 
