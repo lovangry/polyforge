@@ -68,11 +68,18 @@ pass. No subjective judgment belongs here.
 3. Check the diff `code` reported against `artifacts/plan.md`'s touched-files
    declaration: undeclared writes are a finding worth recording even when the checks
    pass — they signal a lock-scope gap. Record this as a `plan-conformance` check.
-4. Record every check run (name, pass/fail/skipped, and enough detail to reproduce a
+4. **No untracked test files (mechanical).** In EACH declared repo worktree
+   (`repos/<name>/`), run `git status --porcelain --untracked-files=all` and FAIL on any
+   `??` line that is a test file by the repo's own conventions — e.g. `*_test.go`,
+   `*.test.*`, `*.spec.*`, or any file under a `test/` or `tests/` directory (use the
+   repo's actual test-file patterns where they differ). Nothing on this lane authors
+   tests that are meant to stay uncommitted, so any such file is residue the flow must
+   not ship. Record this as its own named check (e.g. `no-untracked-test-files`).
+5. Record every check run (name, pass/fail/skipped, and enough detail to reproduce a
    failure) in `checks` - at least one entry is required.
-5. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
+6. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
    pass verdict - the schema's oneOf rejects that combination as self-contradictory.
-6. If any check fails: `verdict: fail`, and write a precise `fail_reason` — the exact
+7. If any check fails: `verdict: fail`, and write a precise `fail_reason` — the exact
    failing command, its output excerpt, and which plan step's work it implicates. The
    schema requires `fail_reason` here. This text becomes `code`'s `pending_rewind_input`
    on the next attempt; vague language wastes the rewind.

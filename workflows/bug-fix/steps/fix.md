@@ -49,17 +49,22 @@ is a rewind re-entry, also read `execution.json`'s `pending_rewind_input` for th
   in this lane; see `workflow.md`'s rewind-boundaries section).
 - **Work only inside the declared repo worktree(s)** (`repos/<name>/**`).
 - **Keep the build green between commits — fast checks only, per unit.** After each
-  compilable unit run, via `bash`: `go build ./...`, `go vet ./...`, `gofmt -l .`, plus
-  the unit tests of the packages this unit touched — the packages of the changed files
-  and of their tests (a changed file's package and its test package, no more). That is
-  the whole per-unit bar. Full-suite testing belongs to `verification` (the one gate
-  that runs the project's full bar); do not run `go test ./...` here, and do not
-  proceed on top of a red fast check.
+  compilable unit, run, via `bash`, the repo's fast checks: the project's own build, its
+  lint/format check, and the unit tests of the packages/modules this unit touched (the
+  changed files' packages/modules and their tests, no more) — as the repo itself defines
+  them (Makefile, package.json scripts, CI config). For a Go repo that is `go build
+  ./... && go vet ./... && gofmt -l .` plus `go test` of the touched packages. A
+  formatter listing any file (non-empty `gofmt -l` output, or the repo's equivalent)
+  counts as red, exactly like a non-zero exit. That is the whole per-unit bar.
+  Full-suite testing belongs to `verification` (the one gate that runs the project's
+  full bar); do not run the full suite (e.g. `go test ./...`) here, and do not proceed
+  on top of a red fast check.
 - **Commit per compilable unit** with a message that references what it changes and why.
 - **The repro test must now pass** — if `repro` encoded the failure as a failing test,
   that test passing on your tree is your own fastest feedback; run it before declaring
-  done. Do not modify the test to make it pass (tightening an over-broad assertion you
-  can *prove* was wrong is the only exception, and it belongs in `summary`).
+  done. `fix` never edits `repro`'s test files (the paths in
+  `steps.repro.output.test_files`) — no exceptions. If a repro test is wrong, leave it
+  untouched and report it in `summary` (or ask via `needs_input`).
 - **No drive-by fixes.** Adjacent ugliness the diagnosis did not implicate stays
   untouched; note it in `summary` if it deserves its own WI.
 

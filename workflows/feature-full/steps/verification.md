@@ -64,14 +64,18 @@ whether they pass — no subjective judgment about design quality belongs here (
    actually how this repo is built).
 2. Run each command via `bash`, working inside the relevant `repos/<name>/` worktree(s).
    Do not modify any files — this step observes, it does not fix.
-3. **No untracked upstream test files (mechanical).** Read `execution.json`'s
-   `steps.e2e-author.output.test_files` and verify every listed path is tracked
-   (committed) in the repo worktree — `git status --porcelain` must show no untracked
-   residue for any of those paths, and `git ls-files --error-unmatch <path>` must
-   succeed for each. `e2e-author` is required to commit its generated tests itself and
-   `code` may not touch them, so any listed path that is missing or untracked at this
-   gate is a residue the flow must not ship. Record this as its own named check (e.g.
-   `upstream-test-files-committed`); an empty `test_files` list trivially passes.
+3. **No untracked test files (mechanical).** In EACH declared repo worktree
+   (`repos/<name>/`), run `git status --porcelain --untracked-files=all` and FAIL on any
+   `??` line that is a test file by the repo's own conventions — e.g. `*_test.go`,
+   `*.test.*`, `*.spec.*`, or any file under a `test/` or `tests/` directory (use the
+   repo's actual test-file patterns where they differ). In addition, read
+   `execution.json`'s `steps.e2e-author.output.test_files` — repo-relative paths, each
+   resolved inside its own repo worktree — and require `git ls-files --error-unmatch
+   <path>` to succeed for every listed path in that worktree; an empty list trivially
+   passes this part. `e2e-author` is required to commit its authored tests itself and
+   `code` may not touch them, so any untracked or missing test file at this gate is
+   residue the flow must not ship. Record this as its own named check (e.g.
+   `no-untracked-test-files`).
 4. Record every check run (name, pass/fail/skipped, and enough detail to reproduce a
    failure) in `checks` - at least one entry is required.
 5. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a

@@ -39,21 +39,14 @@ the spec's requirement titles), plus an ordered `## Steps` section. Every step M
 
 - be phrased as a **compilable/testable unit** — something that leaves the tree in a
   working, buildable state when done, not a mid-refactor fragment;
-- declare each step's **per-unit green bar**: the bar IS the project's `verification`
-  gate's bar, **verbatim** — the same component list, no paraphrase, no subset — so a
-  unit that holds itself green can never diverge from the bar the gate runs;
-- when the graph carries an e2e lane (`e2e-author` is in the flow), intermediate units
-  may run that bar minus exactly the e2e-authored test files: each excluded by its
-  exact repo-relative path as recorded in `execution.json`'s
-  `steps.e2e-author.output.test_files` — a NAMED list, never a directory-, pattern-,
-  or category-level subset (those files are allowed to sit red until the
-  implementation satisfies them). The FULL gate bar — the named files included —
-  applies at the plan's **final** unit and at the rerun gate: no exclusion survives to
-  the final unit. Since `plan` runs before `e2e-author`, the plan expresses the
-  exclusion by its named-list source; `code` resolves the concrete names from
-  `e2e-author`'s recorded output. How the repo mechanically excludes named files from
-  its bar commands (selection, build tags, moving aside) is each WI's plan's own
-  business — the exclusion SET is what this contract fixes;
+- declare each step's **per-unit green bar** as the repo's FAST-CHECK bar - the same
+  bar `code` runs per unit: the project's own build, its lint/format check, and the
+  unit tests of the packages/modules the unit touches, as the repo itself defines them
+  (Makefile, package.json scripts, CI config); for a Go repo, `go build ./... &&
+  go vet ./... && gofmt -l .` plus `go test` of the touched packages. Name the concrete
+  commands. The full suite is NOT a per-unit bar, not even for the final unit - it
+  belongs to `e2e-run` and `verification`, which also exercise `e2e-author`'s test
+  files (those are not part of any per-unit bar);
 - carry a `Touched files: <repo-relative path> (write|read), ...` line, or
   `Touched files: (no file edits)` for steps that only reason/verify without changing
   the tree.

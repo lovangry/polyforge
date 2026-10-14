@@ -95,6 +95,11 @@ these present:
 - **No backward-compatibility code.** No compat shims, dual paths, or
   legacy-behavior fallbacks; when behavior changes, the old shape is deleted, not
   carried alongside.
+- **Spec-forced inventions.** If the spec itself forces an invented
+  mechanism - e.g. it demands "the loser must be refused" where both
+  serializations are valid, which is what drove a sleep+latch hack - do not pass
+  the diff for faithfully implementing it: flag it as a blocking finding and
+  propose the spec change in that finding instead.
 - **Agent reachability for new entry points.** If the diff adds a new daemon or
   aihub entry point, the diff must state whether the step agent can reach it; an
   unstated new entry point is itself a finding.
@@ -111,4 +116,6 @@ without also reconsidering what evidence would then be available to it.
 
 ## Output
 
-Emit the final JSON object per the schema above.
+Write `artifacts/review.md` (this step's declared output): the verdict, every
+finding with its severity, and the `fail_reason` on a fail. Then emit the final JSON
+object per the schema above.
