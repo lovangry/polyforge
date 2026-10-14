@@ -648,3 +648,93 @@ func TestDeployVerifyChecksRebuiltTables(t *testing.T) {
 		}
 	})
 }
+
+// ---- the real v2.5.0 window SQL (polyforge#157) through deploy.sh ----
+//
+// The deploy drill the ticket asks for: the repo's own deploy/sql/v2.5.0
+// files run on a fixture holding an (empty, as in production)
+// wi_repo_inventory. The good deploy passes the post-swap check with the
+// table exempted as dropped; a failed deploy runs the rollback SQL and the
+// old shape is back.
+
+// realSQL reads one file of the repo's deploy/sql/v2.5.0.
+func realSQL(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "deploy", "sql", "v2.5.0", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func newV250World(t *testing.T) *deployWorld {
+	t.Helper()
+	d := newSQLWorldVers(t, "v2.4.2", []string{"v2.5.0"}, []sqlVer{{"v2.5.0",
+		realSQL(t, "upgrade.sql"), realSQL(t, "rollback.sql"), realSQL(t, "probe.sql")}}, nil)
+	seedTable(t, d.dbPath(), "wi_repo_inventory", 0)
+	return d
+}
+
+// dbTableCols answers the column names of table in the fixture db.
+func dbTableCols(t *testing.T, dbPath, table string) []string {
+	t.Helper()
+	py := `import sqlite3, sys
+print(" ".join(r[1] for r in sqlite3.connect(sys.argv[1]).execute("pragma table_info(%s)" % sys.argv[2])))`
+	out, err := exec.Command("python3", "-I", "-c", py, dbPath, table).CombinedOutput()
+	if err != nil {
+		t.Fatalf("columns of %s: %v\n%s", table, err, out)
+	}
+	return strings.Fields(string(out))
+}
+
+func hasCol(cols []string, c string) bool {
+	for _, x := range cols {
+		if x == c {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDeployV250RepoInventorySQL(t *testing.T) {
+	t.Run("good deploy", func(t *testing.T) {
+		d := newV250World(t)
+		out, err := d.run("", "v2.5.0", "--confirm", "v2.5.0")
+		if err != nil {
+			t.Fatalf("deploy failed: %v\n%s", err, out)
+		}
+		for _, want := range []string{
+			"upgrade SQL v2.5.0: not yet applied (probe: 2) - runs in the window",
+			"table wi_repo_inventory dropped by the upgrade SQL (was 0) - expected",
+			"row counts >= baseline",
+			"deployed=v2.5.0",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output lacks %q\n%s", want, out)
+			}
+		}
+		if !hasCol(dbTableCols(t, d.dbPath(), "work_items"), "repo_inventory") {
+			t.Error("work_items.repo_inventory missing after the deploy")
+		}
+		if len(dbTableCols(t, d.dbPath(), "wi_repo_inventory")) != 0 {
+			t.Error("wi_repo_inventory still present after the deploy")
+		}
+	})
+	t.Run("failed deploy rolls the schema back", func(t *testing.T) {
+		d := newV250World(t)
+		d.env = append(d.env, "FAKE_BAD_IMG=polyforge/aihub:v2.5.0")
+		out, err := d.run("", "v2.5.0", "--confirm", "v2.5.0")
+		if exitCode(err) != 10 {
+			t.Fatalf("want exit 10, got %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "schema: rolled back by the rollback.sql of v2.5.0") {
+			t.Errorf("no schema rollback line\n%s", out)
+		}
+		if hasCol(dbTableCols(t, d.dbPath(), "work_items"), "repo_inventory") {
+			t.Error("work_items.repo_inventory still present after the rollback")
+		}
+		if !hasCol(dbTableCols(t, d.dbPath(), "wi_repo_inventory"), "base") {
+			t.Error("wi_repo_inventory not rebuilt by the rollback")
+		}
+	})
+}

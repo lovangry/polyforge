@@ -21,7 +21,7 @@ var cmdFile = &Command{
 	Name:    "file",
 	Group:   GroupData,
 	Summary: "Create, edit or show a work item",
-	Usage: "pf file create --project P --goal G [flags] | --stdin\n" +
+	Usage: "pf file create --project P --goal G [--repo NAME]... [flags] | --stdin\n" +
 		"pf file edit <id> [flags] | --stdin\n" +
 		"pf file show <id>",
 	Setup: func(fs *flag.FlagSet) {},
@@ -111,8 +111,10 @@ func fileCreate(ctx *Context, args []string) error {
 		bundle    = f.String("bundle", "", "bundle_name: non-empty makes an execution ticket")
 		parent    = f.String("parent", "", "parent work item id")
 		attrs     kvList
+		repos     stringList
 		useStdin  = f.Bool("stdin", false, "read the full create-body JSON from stdin")
 	)
+	f.Var(&repos, "repo", "project repo this work item works in (repeatable; only these are cloned at claim)")
 	f.Var(&content, "content", "markdown background; '-' reads stdin, '@file' reads a file")
 	f.Var(&labels, "label", "label (repeatable)")
 	f.Var(&milestone, "milestone", "milestone name")
@@ -178,6 +180,17 @@ func fileCreate(ctx *Context, args []string) error {
 	}
 	if *parent != "" {
 		req.ParentID = strPtr(*parent)
+	}
+	if len(repos) > 0 {
+		inv := make([]map[string]string, 0, len(repos))
+		for _, name := range repos {
+			inv = append(inv, map[string]string{"name": name})
+		}
+		raw, err := json.Marshal(inv)
+		if err != nil {
+			return err
+		}
+		req.RepoInventory = raw
 	}
 	if len(attrs) > 0 {
 		req.Attrs = map[string]any{}

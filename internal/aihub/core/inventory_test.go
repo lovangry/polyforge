@@ -1,11 +1,11 @@
 package core
 
-// §4.6 repo-inventory tests: the WI repo-reference triple (name/url/
-// subdir + frozen base sha) must never persist half-empty. Every
-// refusal is typed (INVENTORY_BASE_MISSING names the offending repo;
-// set/count mismatches are INVENTORY_MISMATCH) and fails whole with
-// nothing persisted; a well-formed create freezes and serves the
-// triple; a well-formed patch is refused immutable (no UPDATE path).
+// §4.6 repo-inventory tests: the inventory freezes at create into
+// work_items.repo_inventory (one array, name-only entries take their URL
+// from the project), every refusal is typed and persists nothing, a
+// frozen base is refused (not supported), the claim serves only the
+// declared repos (re-claim included) and a WI without an inventory keeps
+// getting every project repo.
 
 import (
 	"encoding/json"
@@ -15,17 +15,30 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
-// invCreate is a create request carrying the given inventory pair.
-func invCreate(env *testEnv, inv []RepoDecl, bases []RepoBaseDecl) CreateRequest {
+func decl(name, url string) RepoDecl { return RepoDecl{Name: name, URL: url} }
+
+// invCreate is a create request on project alpha carrying inv.
+func invCreate(env *testEnv, inv []RepoDecl) CreateRequest {
 	return CreateRequest{
 		Project: "alpha", Goal: "repo-backed wi", Reporter: env.UserID,
-		RepoInventory: inv, RepoInventoryBase: bases,
+		BundleName: strPtrTest("demo-bundle"), RepoInventory: inv,
 	}
 }
 
-func decl(name, url string) RepoDecl { return RepoDecl{Name: name, URL: url} }
-
-func baseDecl(name, base string) RepoBaseDecl { return RepoBaseDecl{Name: name, Base: base} }
+// reposProject creates project bravo with three repos.
+func reposProject(t *testing.T, env *testEnv) {
+	t.Helper()
+	if _, err := env.Admin.CreateProject(CreateProjectRequest{
+		Name: "bravo",
+		Repos: []api.ProjectRepo{
+			{Name: "app", URL: "file:///srv/app.git"},
+			{Name: "lib", URL: "file:///srv/lib.git"},
+			{Name: "big", URL: "file:///srv/big.git"},
+		},
+	}); err != nil {
+		t.Fatalf("project: %v", err)
+	}
+}
 
 // wantTypedRefusal asserts the typed envelope and that nothing persisted.
 func wantTypedRefusal(t *testing.T, env *testEnv, err error, code, reason, nameSub string) {
@@ -42,158 +55,162 @@ func wantTypedRefusal(t *testing.T, env *testEnv, err error, code, reason, nameS
 	if nameSub != "" && !strings.Contains(err.Error(), nameSub) {
 		t.Fatalf("refusal must name the offending repo %q, got %v", nameSub, err)
 	}
-	wis, lerr := env.WIs.List(ListFilters{Project: "alpha"})
-	if lerr != nil {
-		t.Fatalf("list: %v", lerr)
-	}
-	if len(wis) != 0 {
-		t.Fatalf("refused create must not persist; found %d work item(s)", len(wis))
+	for _, p := range []string{"alpha", "bravo"} {
+		wis, lerr := env.WIs.List(ListFilters{Project: p})
+		if lerr != nil && !IsCode(lerr, api.ErrCoreNotFound) {
+			t.Fatalf("list: %v", lerr)
+		}
+		if len(wis) != 0 {
+			t.Fatalf("refused create must not persist; found %d work item(s) in %s", len(wis), p)
+		}
 	}
 }
 
-func TestWIRepoInventoryBlankBaseRefused(t *testing.T) {
+func TestWIRepoInventoryBaseRefused(t *testing.T) {
 	env := newEnv(t)
-	// Blank base string.
-	_, err := env.WIs.Create(invCreate(env,
-		[]RepoDecl{decl("polyforge", "https://example.com/polyforge.git")},
-		[]RepoBaseDecl{baseDecl("polyforge", "")}))
-	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "INVENTORY_BASE_MISSING", "polyforge")
-	// Whole base array absent.
-	_, err = env.WIs.Create(invCreate(env,
-		[]RepoDecl{decl("polyforge", "https://example.com/polyforge.git")}, nil))
-	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "INVENTORY_BASE_MISSING", "polyforge")
-	// Base row for a different name: the declared entry's base is missing.
-	_, err = env.WIs.Create(invCreate(env,
-		[]RepoDecl{decl("polyforge", "https://example.com/polyforge.git")},
-		[]RepoBaseDecl{baseDecl("other", "abc123")}))
-	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "INVENTORY_BASE_MISSING", "polyforge")
+	inv := decl("polyforge", "https://example.com/polyforge.git")
+	inv.Base = "0123456789abcdef"
+	_, err := env.WIs.Create(invCreate(env, []RepoDecl{inv}))
+	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED", "polyforge")
+	// The removed second array of the pre-v2.5.0 shape is refused too,
+	// never silently dropped.
+	req := invCreate(env, []RepoDecl{decl("polyforge", "https://example.com/polyforge.git")})
+	req.RepoInventoryBase = json.RawMessage(`[{"name":"polyforge","base":"abc"}]`)
+	_, err = env.WIs.Create(req)
+	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED", "")
 }
 
-func TestWIRepoInventoryMismatchRefused(t *testing.T) {
+func TestWIRepoInventoryDuplicateRefused(t *testing.T) {
 	env := newEnv(t)
-	// Duplicate declaration name.
-	_, err := env.WIs.Create(invCreate(env,
-		[]RepoDecl{decl("r1", "u1"), decl("r1", "u2")},
-		[]RepoBaseDecl{baseDecl("r1", "abc"), baseDecl("r1", "abc")}))
-	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "INVENTORY_MISMATCH", "r1")
-	// Duplicate base entry.
-	_, err = env.WIs.Create(invCreate(env,
-		[]RepoDecl{decl("r1", "u1")},
-		[]RepoBaseDecl{baseDecl("r1", "abc"), baseDecl("r1", "def")}))
-	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "INVENTORY_MISMATCH", "r1")
-	// Extra base entry with no declaration.
-	_, err = env.WIs.Create(invCreate(env,
-		[]RepoDecl{decl("r1", "u1")},
-		[]RepoBaseDecl{baseDecl("r1", "abc"), baseDecl("r2", "def")}))
-	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "INVENTORY_MISMATCH", "")
+	_, err := env.WIs.Create(invCreate(env, []RepoDecl{decl("r1", "u1"), decl("r1", "u2")}))
+	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "INVENTORY_DUPLICATE_NAME", "r1")
 }
 
 func TestWIRepoInventoryTooManyRefused(t *testing.T) {
 	env := newEnv(t)
 	var inv []RepoDecl
-	var bases []RepoBaseDecl
 	for i := 0; i < 9; i++ {
-		name := "r" + strings.Repeat("x", i) // distinct names
-		inv = append(inv, decl(name, "u"))
-		bases = append(bases, baseDecl(name, "abc"))
+		inv = append(inv, decl("r"+strings.Repeat("x", i), "u")) // distinct names
 	}
-	_, err := env.WIs.Create(invCreate(env, inv, bases))
+	_, err := env.WIs.Create(invCreate(env, inv))
 	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "", "")
+}
+
+func TestWIRepoInventoryUnknownProjectRepoRefused(t *testing.T) {
+	env := newEnv(t)
+	reposProject(t, env)
+	req := invCreate(env, []RepoDecl{{Name: "app"}, {Name: "nope"}})
+	req.Project = "bravo"
+	_, err := env.WIs.Create(req)
+	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "REPO_NOT_IN_PROJECT", "nope")
 }
 
 func TestWIRepoInventoryWellFormedCreatePersistsAndServes(t *testing.T) {
 	env := newEnv(t)
+	reposProject(t, env)
 	sub := "tools/inner"
-	wi, err := env.WIs.Create(invCreate(env,
-		[]RepoDecl{decl("polyforge", "https://example.com/polyforge.git"),
-			{Name: "other", URL: "https://example.com/other.git", Subdir: &sub}},
-		[]RepoBaseDecl{baseDecl("polyforge", "abc123def"), baseDecl("other", " 456xyz789 ")}))
+	req := invCreate(env, []RepoDecl{
+		{Name: "lib"}, // name only: the URL comes from the project
+		{Name: "other", URL: "https://example.com/other.git", Subdir: &sub},
+	})
+	req.Project = "bravo"
+	wi, err := env.WIs.Create(req)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// Rows frozen in the store, in declaration order.
-	inv, err := env.WIs.repoInventoryOf(wi.ID)
-	if err != nil {
-		t.Fatalf("load inventory: %v", err)
+	var stored string
+	if err := env.DB.QueryRow(`SELECT repo_inventory FROM work_items WHERE id=?1`, wi.ID).Scan(&stored); err != nil {
+		t.Fatalf("read column: %v", err)
 	}
-	if len(inv) != 2 {
-		t.Fatalf("want 2 frozen entries, got %d", len(inv))
+	if want := `[{"name":"lib","url":"file:///srv/lib.git"},{"name":"other","url":"https://example.com/other.git","subdir":"tools/inner"}]`; stored != want {
+		t.Fatalf("stored inventory\n got %s\nwant %s", stored, want)
 	}
-	if inv[0].Name != "polyforge" || inv[0].URL != "https://example.com/polyforge.git" ||
-		inv[0].Base != "abc123def" || inv[0].Position != 1 || inv[0].Subdir != nil {
-		t.Fatalf("entry 0 mismatch: %+v", inv[0])
-	}
-	if inv[1].Name != "other" || inv[1].Subdir == nil || *inv[1].Subdir != sub || inv[1].Position != 2 {
-		t.Fatalf("entry 1 mismatch: %+v", inv[1])
-	}
-	if inv[1].Base != "456xyz789" {
-		t.Fatalf("base must be trimmed and frozen verbatim otherwise, got %q", inv[1].Base)
-	}
-	// Served on the WI view (base included, E2: not silently discarded).
 	view, err := env.WIs.View(wi)
 	if err != nil {
 		t.Fatalf("view: %v", err)
 	}
-	if len(view.RepoInventory) != 2 || view.RepoInventory[0].Base != "abc123def" {
-		t.Fatalf("view inventory mismatch: %+v", view.RepoInventory)
-	}
-	// And visible in the marshalled view JSON.
 	raw, _ := json.Marshal(view)
-	if !strings.Contains(string(raw), `"repo_inventory":[`) || !strings.Contains(string(raw), "abc123def") {
-		t.Fatalf("view JSON must carry repo_inventory with base, got %s", raw)
+	if !strings.Contains(string(raw), `"repo_inventory":`+stored) {
+		t.Fatalf("view JSON must carry the frozen inventory, got %s", raw)
 	}
-	// A WI without an inventory omits the key.
+	// A WI without an inventory stores NULL and omits the key.
 	plain := mustCreateWI(t, env, "no inventory", nil, "")
+	var col *string
+	if err := env.DB.QueryRow(`SELECT repo_inventory FROM work_items WHERE id=?1`, plain).Scan(&col); err != nil || col != nil {
+		t.Fatalf("plain WI column = %v (%v), want NULL", col, err)
+	}
 	pv, err := env.WIs.View(&api.WorkItem{ID: plain})
 	if err != nil {
 		t.Fatalf("plain view: %v", err)
 	}
-	if len(pv.RepoInventory) != 0 {
-		t.Fatalf("plain WI must serve no inventory, got %+v", pv.RepoInventory)
+	if raw, _ := json.Marshal(pv); strings.Contains(string(raw), "repo_inventory") {
+		t.Fatalf("plain WI must omit repo_inventory, got %s", raw)
 	}
 }
 
-func TestWIRepoInventoryPatchRefusals(t *testing.T) {
+func TestWIRepoInventoryPatchRefused(t *testing.T) {
 	env := newEnv(t)
 	id := mustCreateWI(t, env, "patch carrier", nil, "")
-	raw := func(v any) json.RawMessage {
-		b, _ := json.Marshal(v)
-		return b
-	}
-	// Half-empty triple: base-naming refusal, carrier unmutated.
 	_, err := env.WIs.Patch(id, map[string]json.RawMessage{
-		"repo_inventory":      raw([]RepoDecl{decl("polyforge", "https://example.com/polyforge.git")}),
-		"repo_inventory_base": raw([]RepoBaseDecl{baseDecl("polyforge", "")}),
-	})
-	if !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "INVENTORY_BASE_MISSING" {
-		t.Fatalf("want INVENTORY_BASE_MISSING, got %v", err)
-	}
-	// Well-formed triple: immutable (§4.6 has no UPDATE path).
-	_, err = env.WIs.Patch(id, map[string]json.RawMessage{
-		"repo_inventory":      raw([]RepoDecl{decl("polyforge", "https://example.com/polyforge.git")}),
-		"repo_inventory_base": raw([]RepoBaseDecl{baseDecl("polyforge", "abc123")}),
+		"repo_inventory": json.RawMessage(`[{"name":"polyforge","url":"https://example.com/polyforge.git"}]`),
 	})
 	if !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "IMMUTABLE" {
-		t.Fatalf("want IMMUTABLE for well-formed inventory patch, got %v", err)
+		t.Fatalf("want IMMUTABLE for an inventory patch, got %v", err)
 	}
-	// Base-only key is part of the frozen surface.
-	_, err = env.WIs.Patch(id, map[string]json.RawMessage{
-		"repo_inventory_base": raw([]RepoBaseDecl{baseDecl("polyforge", "abc123")}),
-	})
-	if !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "IMMUTABLE" {
-		t.Fatalf("want IMMUTABLE for repo_inventory_base patch, got %v", err)
-	}
-	// Nothing from the refused patches applied: the carrier WI is
-	// unmutated and carries no inventory rows.
-	wi, err := env.WIs.Get(id, GetOptions{})
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if wi.Goal != "patch carrier" {
-		t.Fatalf("refused patch must not mutate the WI; goal=%q", wi.Goal)
-	}
-	inv, err := env.WIs.repoInventoryOf(id)
+	inv, err := repoInventoryOf(env.DB, id)
 	if err != nil || len(inv) != 0 {
-		t.Fatalf("refused patches must not freeze inventory rows, got %+v (%v)", inv, err)
+		t.Fatalf("refused patch must not freeze an inventory, got %+v (%v)", inv, err)
+	}
+}
+
+// TestClaimServesDeclaredInventoryOnly: the claim answers exactly the
+// declared repos — on the first claim and on the re-claim after a
+// blocked→resume — while a WI without an inventory gets every project
+// repo.
+func TestClaimServesDeclaredInventoryOnly(t *testing.T) {
+	env := newEnv(t)
+	reposProject(t, env)
+	req := invCreate(env, []RepoDecl{{Name: "lib"}})
+	req.Project = "bravo"
+	wi, err := env.WIs.Create(req)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	m := NewSessionManager(env.DB)
+	wantLib := func(res *api.SessionClaim) {
+		t.Helper()
+		if len(res.Repos) != 1 || res.Repos[0].Name != "lib" || res.Repos[0].URL != "file:///srv/lib.git" {
+			t.Fatalf("claim repos = %+v, want only lib", res.Repos)
+		}
+	}
+	secret := strings.Repeat("4", 32)
+	res, err := m.Claim(wi.ID, api.SessionClaimRequest{SessionID: secret}, env.UserID)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	wantLib(res)
+	if err := m.End(wi.ID, api.SessionEndRequest{SessionID: secret, Status: api.StatusBlocked, Note: "x"}, env.UserID); err != nil {
+		t.Fatalf("block: %v", err)
+	}
+	if _, err := env.WIs.ResumeBlocked(wi.ID, env.UserID); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	res, err = m.Claim(wi.ID, api.SessionClaimRequest{SessionID: strings.Repeat("5", 32)}, env.UserID)
+	if err != nil {
+		t.Fatalf("re-claim: %v", err)
+	}
+	wantLib(res)
+
+	plain, err := env.WIs.Create(CreateRequest{Project: "bravo", Goal: "no inventory",
+		Reporter: env.UserID, BundleName: strPtrTest("demo-bundle")})
+	if err != nil {
+		t.Fatalf("create plain: %v", err)
+	}
+	res, err = m.Claim(plain.ID, api.SessionClaimRequest{SessionID: strings.Repeat("6", 32)}, env.UserID)
+	if err != nil {
+		t.Fatalf("claim plain: %v", err)
+	}
+	if len(res.Repos) != 3 {
+		t.Fatalf("a WI without an inventory must get every project repo, got %+v", res.Repos)
 	}
 }

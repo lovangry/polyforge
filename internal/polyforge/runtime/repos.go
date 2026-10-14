@@ -1,8 +1,9 @@
 package runtime
 
 // repos.go: the task-repo half of the v0 claim contract, restored for v1
-// (真机 pilot gap DAEMON-507 lane). Claim answers the project's task-repo
-// inventory (api.Claim.Repos, served by aihub from the project row);
+// (真机 pilot gap DAEMON-507 lane). Claim answers the task-repo inventory
+// (api.Claim.Repos, served by aihub: the WI's declared repo_inventory,
+// else every repo of its project — 02 §4.6);
 // materialize turns it into real git clones under the capsule's
 // repos/<name> BEFORE the agent spawns, and capsule.json records each
 // clone's claim-time HEAD SHA as the baseline (name → SHA). The agent

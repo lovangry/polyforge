@@ -1,12 +1,10 @@
 package server
 
-// Repro test for the TODO(v1) §4.5 checkout-hash gap named in the WI
-// goal (workitem.go ~line 191): the WI repo-reference triple must not be
-// persistable half-empty. A repo-reference entry that carries name+URL
-// but a missing/blank HEAD sha (base) must be refused at WI create and
-// at WI patch with the typed CORE-400 INVENTORY_BASE_MISSING refusal —
-// the vocabulary this codebase already uses for exactly this refusal
-// (v0 core, 02-aihub-core.md §4.6) — and nothing may be persisted.
+// The §4.6 repo inventory on the HTTP surface: a create carrying a base
+// commit (per entry or as the removed repo_inventory_base array) or a
+// name-only entry that is not one of the project's repos is refused with
+// a typed CORE-400 and persists nothing; a PATCH of the frozen inventory
+// is refused IMMUTABLE.
 
 import (
 	"encoding/json"
@@ -17,11 +15,11 @@ import (
 )
 
 // refuseShape asserts the typed refusal envelope: HTTP 400, CORE-400,
-// machine-readable reason INVENTORY_BASE_MISSING.
-func refuseShape(t *testing.T, code int, raw []byte) {
+// machine-readable reason.
+func refuseShape(t *testing.T, code int, raw []byte, reason string) {
 	t.Helper()
 	if code != http.StatusBadRequest {
-		t.Fatalf("want HTTP 400 (CORE-400 INVENTORY_BASE_MISSING), got %d %s", code, raw)
+		t.Fatalf("want HTTP 400 (CORE-400 %s), got %d %s", reason, code, raw)
 	}
 	var envl api.Error
 	if err := json.Unmarshal(raw, &envl); err != nil {
@@ -31,8 +29,8 @@ func refuseShape(t *testing.T, code int, raw []byte) {
 		t.Fatalf("want error code %s, got %q (raw: %s)", api.ErrCoreBadInput, envl.Code, raw)
 	}
 	var m map[string]string
-	if len(envl.Extra) == 0 || json.Unmarshal(envl.Extra, &m) != nil || m["reason"] != "INVENTORY_BASE_MISSING" {
-		t.Fatalf("want reason INVENTORY_BASE_MISSING in extra, got %s", raw)
+	if len(envl.Extra) == 0 || json.Unmarshal(envl.Extra, &m) != nil || m["reason"] != reason {
+		t.Fatalf("want reason %s in extra, got %s", reason, raw)
 	}
 }
 
@@ -52,46 +50,41 @@ func nothingPersisted(t *testing.T, e *srvEnv) {
 	}
 }
 
-// TestWIRepoRefTripleBlankBaseRefused pins the desired refusal shape at
-// both surfaces the WI goal names.
-func TestWIRepoRefTripleBlankBaseRefused(t *testing.T) {
-	const repoInv = "https://example.com/polyforge.git"
+func TestWIRepoInventoryHTTPRefusals(t *testing.T) {
+	const repoURL = "https://example.com/polyforge.git"
 
-	// WI create: repo-reference entry with name+URL but a blank base sha.
-	t.Run("create/base-blank", func(t *testing.T) {
+	t.Run("create/base-in-entry", func(t *testing.T) {
 		e := newSrvEnv(t)
 		code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
-			"project": "alpha",
-			"goal":    "half-empty repo-reference triple must be refused",
-			"repo_inventory": []map[string]any{
-				{"name": "polyforge", "url": repoInv},
-			},
-			"repo_inventory_base": []map[string]any{
-				{"name": "polyforge", "base": ""},
-			},
+			"project": "alpha", "goal": "a frozen base is not supported",
+			"repo_inventory": []map[string]any{{"name": "polyforge", "url": repoURL, "base": "abc123"}},
 		}, nil)
-		refuseShape(t, code, raw)
+		refuseShape(t, code, raw, "INVENTORY_BASE_UNSUPPORTED")
 		nothingPersisted(t, e)
 	})
 
-	// WI create: same entry with the base list absent entirely.
-	t.Run("create/base-absent", func(t *testing.T) {
+	t.Run("create/base-array", func(t *testing.T) {
 		e := newSrvEnv(t)
 		code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
-			"project": "alpha",
-			"goal":    "half-empty repo-reference triple must be refused",
-			"repo_inventory": []map[string]any{
-				{"name": "polyforge", "url": repoInv},
-			},
+			"project": "alpha", "goal": "the removed second array is refused",
+			"repo_inventory":      []map[string]any{{"name": "polyforge", "url": repoURL}},
+			"repo_inventory_base": []map[string]any{{"name": "polyforge", "base": "abc123"}},
 		}, nil)
-		refuseShape(t, code, raw)
+		refuseShape(t, code, raw, "INVENTORY_BASE_UNSUPPORTED")
 		nothingPersisted(t, e)
 	})
 
-	// WI patch: patching a repo-reference entry whose base is blank must
-	// draw the same typed refusal, not a silent accept and not a
-	// different reason.
-	t.Run("patch/base-blank", func(t *testing.T) {
+	t.Run("create/unknown-project-repo", func(t *testing.T) {
+		e := newSrvEnv(t)
+		code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
+			"project": "alpha", "goal": "a name-only entry must be a project repo",
+			"repo_inventory": []map[string]any{{"name": "nope"}},
+		}, nil)
+		refuseShape(t, code, raw, "REPO_NOT_IN_PROJECT")
+		nothingPersisted(t, e)
+	})
+
+	t.Run("patch/frozen", func(t *testing.T) {
 		e := newSrvEnv(t)
 		var created struct {
 			ID string `json:"id"`
@@ -101,24 +94,8 @@ func TestWIRepoRefTripleBlankBaseRefused(t *testing.T) {
 			t.Fatalf("seed create: %d %s", code, raw)
 		}
 		code, raw := e.do(t, "PATCH", "/api/v1/work-items/"+created.ID, e.key, map[string]any{
-			"repo_inventory": []map[string]any{
-				{"name": "polyforge", "url": repoInv},
-			},
-			"repo_inventory_base": []map[string]any{
-				{"name": "polyforge", "base": ""},
-			},
+			"repo_inventory": []map[string]any{{"name": "polyforge", "url": repoURL}},
 		}, nil)
-		refuseShape(t, code, raw)
-		// Nothing from the refused patch may be applied: the carrier WI
-		// keeps its original goal.
-		var wi struct {
-			Goal string `json:"goal"`
-		}
-		if code, raw := e.do(t, "GET", "/api/v1/work-items/"+created.ID, e.key, nil, &wi); code != http.StatusOK {
-			t.Fatalf("get after refused patch: %d %s", code, raw)
-		}
-		if wi.Goal != "patch carrier" {
-			t.Fatalf("refused patch must not mutate the WI; goal=%q", wi.Goal)
-		}
+		refuseShape(t, code, raw, "IMMUTABLE")
 	})
 }

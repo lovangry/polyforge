@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -46,6 +47,36 @@ func TestVerbFileCreateRequestShape(t *testing.T) {
 		if !strings.Contains(got.Body, want) {
 			t.Errorf("body missing %s: %s", want, got.Body)
 		}
+	}
+}
+
+// TestVerbFileCreateRepoInventory: --repo (repeatable) sends name-only
+// inventory entries (aihub fills the URL from the project's repos); the
+// --stdin body's repo_inventory reaches aihub as given.
+func TestVerbFileCreateRepoInventory(t *testing.T) {
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, cannedWI)
+	})
+	env := withMappingConfig(t)
+	env["PF_SERVER"] = srv.URL
+	env["PF_API_KEY"] = "k_cli"
+	code, _, stderr := runPf(t, env, "file", "create", "--project", "polyforge", "--goal", "g",
+		"--repo", "app", "--repo", "lib")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if want := `"repo_inventory":[{"name":"app"},{"name":"lib"}]`; !strings.Contains(rec.last().Body, want) {
+		t.Errorf("body missing %s: %s", want, rec.last().Body)
+	}
+
+	stdinBody := `{"project":"polyforge","goal":"g","repo_inventory":[{"name":"app","url":"file:///srv/app.git","subdir":"x"}]}`
+	var stdout, errb bytes.Buffer
+	if code := Run([]string{"file", "create", "--stdin"}, strings.NewReader(stdinBody), &stdout, &errb); code != 0 {
+		t.Fatalf("stdin create: code=%d stderr=%s", code, errb.String())
+	}
+	if want := `"repo_inventory":[{"name":"app","url":"file:///srv/app.git","subdir":"x"}]`; !strings.Contains(rec.last().Body, want) {
+		t.Errorf("stdin body missing %s: %s", want, rec.last().Body)
 	}
 }
 

@@ -127,9 +127,7 @@ func (c *Client) Queue(project string) ([]api.WorkItem, error) {
 // Only additive methods live here: no existing signature above changes.
 // ---------------------------------------------------------------------------
 
-// CreateWorkItemRequest is the work-item create body. v1 trim vs v0: the
-// repo-inventory declarations are gone (the capsule IS a git worktree,
-// v1-architecture-spec key decision 1).
+// CreateWorkItemRequest is the work-item create body.
 type CreateWorkItemRequest struct {
 	Project    string         `json:"project"`
 	Goal       string         `json:"goal"`
@@ -140,6 +138,10 @@ type CreateWorkItemRequest struct {
 	Labels     []string       `json:"labels,omitempty"`
 	Attrs      map[string]any `json:"attrs,omitempty"`
 	BundleName *string        `json:"bundle_name,omitempty"`
+	// RepoInventory is passed through to aihub as given (02 §4.6:
+	// [{name, url?, subdir?}]; a name-only entry takes its URL from the
+	// project's repos).
+	RepoInventory json.RawMessage `json:"repo_inventory,omitempty"`
 }
 
 // CreateWorkItem creates a work item and returns the raw detail record.
