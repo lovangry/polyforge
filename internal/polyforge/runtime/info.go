@@ -36,9 +36,6 @@ type JobInfo struct {
 	AgentPID           int
 	AgentStartedAt     string
 	Origin             *Origin
-	// VerifyPending: the restart session verify could not reach aihub and
-	// is being retried with backoff; the job has no agent yet.
-	VerifyPending bool
 }
 
 // Info returns the snapshot of one job; ok=false when the work item has
@@ -86,7 +83,6 @@ func (j *job) info() JobInfo {
 		AgentPID:           j.agentPID,
 		AgentStartedAt:     j.agentStartedAt,
 		Origin:             j.origin,
-		VerifyPending:      j.verifyPending,
 	}
 }
 

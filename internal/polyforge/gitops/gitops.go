@@ -605,20 +605,6 @@ func Clone(o Opts) error {
 	return err
 }
 
-// InitLocal initializes the capsule worktree without a remote (no
-// RemoteURL configured; tests only). Takes the per-WI lock.
-func InitLocal(o Opts) error {
-	release := Lock(o.WorkItemID)
-	defer release()
-	if err := os.MkdirAll(o.CapsuleDir, 0o755); err != nil {
-		return err
-	}
-	if _, err := git(nil, "", "init", o.CapsuleDir); err != nil {
-		return fmt.Errorf("git init: %s", err.Error())
-	}
-	return nil
-}
-
 // crossDeviceMove moves src to dst, falling back to copy+remove when
 // rename(2) refuses to cross a filesystem boundary (EXDEV) — the
 // workspace-capsule era puts capsules under -workspace while the git

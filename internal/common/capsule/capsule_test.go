@@ -37,10 +37,12 @@ func mustJSON(t *testing.T, v any) []byte {
 	return blob
 }
 
-// TestCapsuleAuditFieldsRoundTrip pins the polyforge#79 audit contract:
-// a governed capsule's effective_candidates decode typed; a legacy
-// capsule without it (or with the retired workspace_yaml/repo_sources
-// keys) decodes loose; and an audit-less Identity marshals WITHOUT the key.
+// TestCapsuleAuditFieldsRoundTrip pins the post-subtraction audit
+// contract (the effective_candidates audit field is deleted — the
+// workspace yaml is the governing source at every dispatch): a capsule
+// carrying the retired key decodes loose (unknown keys ignored — old
+// capsules still parse), and an audit-less Identity marshals WITHOUT
+// the key.
 func TestCapsuleAuditFieldsRoundTrip(t *testing.T) {
 	const governed = `{
 	  "work_item_id": "wi_gov",
@@ -49,23 +51,14 @@ func TestCapsuleAuditFieldsRoundTrip(t *testing.T) {
 	}`
 	var idn Identity
 	if err := json.Unmarshal([]byte(governed), &idn); err != nil {
-		t.Fatalf("governed capsule.json must parse: %v", err)
-	}
-	if got := idn.EffectiveCandidates["fix"]; len(got) != 2 || got[0] != "a" {
-		t.Fatalf("effective_candidates must decode: %v", idn.EffectiveCandidates)
-	}
-	if got, ok := idn.EffectiveCandidates["grill"]; !ok || len(got) != 0 {
-		t.Fatalf("a present-empty effective list must decode as present-empty: %v", idn.EffectiveCandidates)
+		t.Fatalf("a capsule carrying the retired audit key must parse: %v", err)
 	}
 
-	// A legacy capsule (old keys included) decodes loose, field empty.
+	// A legacy capsule (old keys included) decodes loose.
 	const legacy = `{"work_item_id": "wi_old", "generation": 4, "workspace_yaml": {"projects": {}}, "repo_sources": {"a": "/x"}}`
 	var old Identity
 	if err := json.Unmarshal([]byte(legacy), &old); err != nil {
 		t.Fatalf("legacy capsule must parse: %v", err)
-	}
-	if old.EffectiveCandidates != nil {
-		t.Fatalf("legacy reads must leave the audit field empty: %+v", old)
 	}
 
 	// An audit-less Identity marshals without the key at all.

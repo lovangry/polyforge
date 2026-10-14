@@ -37,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -343,8 +344,19 @@ func needsInputQuestion(res *StepResult) (id, text string, err error) {
 		return id, text, fmt.Errorf("driver: needs_input result is missing %s (set them on the envelope or in the output object)",
 			strings.Join(missing, " and "))
 	}
+	// D11: the id is agent-chosen and travels into the human-facing
+	// wake-up line, the answer verb and the event log — so its shape is
+	// part of the envelope contract (the watcher's safeID filter stays as
+	// defense in depth).
+	if !questionIDShape.MatchString(id) {
+		return id, text, fmt.Errorf("driver: needs_input question_id %q is malformed (must match %s)", id, questionIDShape)
+	}
 	return id, text, nil
 }
+
+// questionIDShape is the accepted needs_input question id: 1–64 chars of
+// letters, digits, '.', '_' and '-'.
+var questionIDShape = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // currentChainAnswers counts the human answers of a step's current attempt
 // chain: answers recorded since the step's last gate-fail rewind

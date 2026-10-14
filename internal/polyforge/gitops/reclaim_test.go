@@ -12,7 +12,7 @@ import (
 func TestExternalizeGitDirRefusesExistingTarget(t *testing.T) {
 	setIdentity(t)
 	o, _ := testOpts(t, "wi_stale_gd")
-	if err := InitLocal(o); err != nil {
+	if err := initLocal(t, o); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(o.GitDir, 0o755); err != nil {

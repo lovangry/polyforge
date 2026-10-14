@@ -9,7 +9,8 @@ package daemon
 //
 //   - the supervision config seam: daemon.Config.Supervision carries the
 //     bounds into the assembled supervisor, and a driver that keeps
-//     stalling is bounded by the recovery engine's storm guard.
+//     stalling is bounded by the recovery engine's consecutive-failures
+//     ledger (C7).
 
 import (
 	"context"
@@ -63,7 +64,7 @@ func TestRecoveryWindowThenWrapClosesOnce(t *testing.T) {
 	// by the attachment pipeline: poll until it logs agent_recovered for
 	// spawn 2 (the recovered derivation's counter).
 	adopted := func() bool {
-		for _, e := range td.obs.Events().Since("wi_rw") {
+		for _, e := range td.obs.Events().SinceAfter("wi_rw", 0) {
 			if e.Kind != observe.EvAgentRecovered {
 				continue
 			}
@@ -103,9 +104,10 @@ func TestRecoveryWindowThenWrapClosesOnce(t *testing.T) {
 // driver that sits between steps past the injected stall window — here a
 // fake engine that never announces a dispatch — draws a driver_stalled
 // recovery through the production path), and the recovery engine's
-// storm guard still bounds a driver that keeps stalling: after the
-// bound the WI is parked blocked, never relaunched forever (the #97
-// crash-loop lesson, now fed by the stall verdict too).
+// consecutive-failures ledger still bounds a driver that keeps
+// stalling: after the bound the WI is parked blocked, never
+// relaunched forever (the #97 crash-loop lesson, now fed by the stall
+// verdict too).
 func TestSupervisionStallWindowDrivesRecoveryThenBlocks(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) {
 		c.Supervision = SupervisionConfig{StallWindow: 80 * time.Millisecond}
@@ -121,16 +123,17 @@ func TestSupervisionStallWindowDrivesRecoveryThenBlocks(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	var sawStall bool
-	for _, e := range td.obs.Events().Since("wi_stall") {
+	for _, e := range td.obs.Events().SinceAfter("wi_stall", 0) {
 		if e.Kind == observe.EvNeedsRecovery && strings.Contains(string(e.Body), protocol.RecoverDriverStalled) {
 			sawStall = true
 		}
 	}
 	if !sawStall {
-		t.Fatalf("no driver_stalled recovery event: %v", td.obs.Events().Since("wi_stall"))
+		t.Fatalf("no driver_stalled recovery event: %v", td.obs.Events().SinceAfter("wi_stall", 0))
 	}
 
-	// It keeps stalling: the storm guard parks the WI blocked.
+	// It keeps stalling: the consecutive-failures ledger parks the WI
+	// blocked.
 	deadline = time.Now().Add(15 * time.Second)
 	for td.hub.endCount() == 0 {
 		if time.Now().After(deadline) {

@@ -19,9 +19,10 @@ pf remember [--project P] --type T [--title S] [--visibility V] [--tags a,b] [--
 
 `--type` is required (e.g. `experience.debug`, `fact.note`). The content
 is the positional text; `-` reads it from stdin, `@file` from a file.
-`--project` is REQUIRED (polyforge#113 — no default project exists) and
-validated against the `[workspace]` mapping in cli.toml: an unmapped
-project fails loudly naming it. `--visibility` defaults
+`--project` is REQUIRED (polyforge#113 — no default project exists) but
+NOT restricted to the machine's `[workspace]` mapping: memory lives in
+AIHub, so remember works for any project the api key can see, mapped
+here or not. `--visibility` defaults
 to `project` (`admin|private|project|team|public`); `--work-item`
 optionally attributes the memory to a work item id.
 

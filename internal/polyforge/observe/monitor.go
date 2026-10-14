@@ -28,7 +28,7 @@ package observe
 //
 // RECOVERING: after WINeedsRecovery is sent (driver exit / stall) the
 // monitor suppresses every further recovery signal of the same
-// derivation (storm guard) until RTRecovered arrives.
+// derivation (the recovery lane) until RTRecovered arrives.
 
 import (
 	"context"
@@ -557,7 +557,8 @@ func (m *Monitor) maybeFinishExitFlush() {
 	m.needRecovery(m.exitFlushReason, m.exitFlushDetail)
 }
 
-// needRecovery is the single choke point for the storm guard: after one
+// needRecovery is the single choke point for the recovery lane's dedupe:
+// after one
 // WINeedsRecovery is sent for an attempt, every further signal of the
 // SAME attempt is suppressed ("已发后静默到恢复完成") — the select keeps
 // draining, the Runtime sees exactly one message. SEALING likewise drops

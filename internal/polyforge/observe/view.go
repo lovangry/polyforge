@@ -109,19 +109,3 @@ func (o *Observe) Progress(wi string) (LiveProgress, bool) {
 	}
 	return m.liveProgress(), true
 }
-
-// Progresses answers the live progress of every monitored work item
-// (canonical id -> LiveProgress).
-func (o *Observe) Progresses() map[string]LiveProgress {
-	o.mu.Lock()
-	monitors := make([]*Monitor, 0, len(o.monitors))
-	for _, m := range o.monitors {
-		monitors = append(monitors, m)
-	}
-	o.mu.Unlock()
-	out := map[string]LiveProgress{}
-	for _, m := range monitors {
-		out[m.wi.WorkItem] = m.liveProgress()
-	}
-	return out
-}

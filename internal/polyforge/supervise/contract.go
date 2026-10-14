@@ -214,13 +214,6 @@ func (q *Queue[T]) Pop() (v T, ok bool) {
 	return v, true
 }
 
-// Len reports the queued item count (diagnostics).
-func (q *Queue[T]) Len() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return len(q.items)
-}
-
 // ---------------------------------------------------------------------------
 // Link: one per work item.
 

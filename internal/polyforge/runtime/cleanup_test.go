@@ -1,14 +1,14 @@
 package runtime
 
-// Six-layer cleanup regressions (v1-spec-full §八), against REAL child
-// processes: a parent that forks a grandchild, layer-0 cgroup (via the
-// injected kill seam), the degrade path, the (pid,starttime) PID-reuse
-// guard, the env-marker sweep and the warn-only cwd scan.
+// Layered cleanup regressions (v1-spec-full §八), against REAL child
+// processes: a parent that forks a grandchild, the (pid,starttime)
+// PID-reuse guard, the env-marker sweep and the warn-only cwd scan.
+// (The layer-0 cgroup tests went with the deleted layer — audit
+// subtraction pass B.)
 
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -82,57 +82,6 @@ func TestCleanupFullTreeWithoutCgroup(t *testing.T) {
 	}
 	if len(rep.Survivors) != 0 {
 		t.Fatalf("survivors: %v", rep.Survivors)
-	}
-}
-
-func TestCleanupLayer0CgroupAtomicKill(t *testing.T) {
-	pid, startedAt := startTree(t, "wi_c2")
-	// a stand-in cgroup dir with the kill trigger file present
-	cg := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cg, "cgroup.kill"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// the seam plays the kernel: writing cgroup.kill atomically kills the
-	// whole tree (here: via the group, which is what the kernel would do)
-	orig := cgroupKillWrite
-	defer func() { cgroupKillWrite = orig }()
-	cgroupKillWrite = func(p string) error {
-		if err := os.WriteFile(filepath.Join(p, "cgroup.kill"), []byte("1"), 0o644); err != nil {
-			return err
-		}
-		return killGroup(pid, 3*time.Second)
-	}
-
-	rep, err := Cleanup(CleanupTarget{PID: pid, Pgid: pid, StartedAt: startedAt, WIID: "wi_c2", CgroupPath: cg}, 5*time.Second)
-	if err != nil {
-		t.Fatalf("cleanup errored: %v (report %+v)", err, rep)
-	}
-	waitDead(t, pid)
-	if !layerApplied(rep, "l0-cgroup") {
-		t.Fatalf("layer 0 must be applied: %+v", rep.Layers)
-	}
-	if layerApplied(rep, "l2-pgid") {
-		t.Fatalf("a successful layer-0 kill must not fall through to layer 2: %+v", rep.Layers)
-	}
-	if n := groupMemberCount(pid); n != 0 {
-		t.Fatalf("group %d still holds %d members", pid, n)
-	}
-}
-
-func TestCleanupLayer0DegradesWhenUnavailable(t *testing.T) {
-	pid, startedAt := startTree(t, "wi_c3")
-	// cgroup path exists but carries no cgroup.kill file → unavailable
-	cg := t.TempDir()
-	rep, err := Cleanup(CleanupTarget{PID: pid, Pgid: pid, StartedAt: startedAt, WIID: "wi_c3", CgroupPath: cg}, 5*time.Second)
-	if err != nil {
-		t.Fatalf("cleanup errored: %v (report %+v)", err, rep)
-	}
-	if layerApplied(rep, "l0-cgroup") {
-		t.Fatal("layer 0 must not be applied when the cgroup is unavailable")
-	}
-	waitDead(t, pid)
-	if n := groupMemberCount(pid); n != 0 {
-		t.Fatalf("degraded cleanup must still empty the group, %d left", n)
 	}
 }
 

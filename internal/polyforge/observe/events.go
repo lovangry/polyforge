@@ -67,16 +67,17 @@ const (
 	// to the driver.
 	EvSupervisorVerdict = "supervisor_verdict"
 	EvJobStopped        = "job_stopped"
-	// EvDrainDegraded is the drain loop's authorization-class degraded
-	// signal (daemon/daemon.go fetchDrainWave): a drain-mode wave fetch of
-	// the ready queue was denied for authorization reasons (typed aihub
-	// error with HTTP 401/403/404 — e.g. the machine key revoked mid-run).
+	// EvQueueFetchDenied names the signal it actually carries: a
+	// project's ready-queue fetch was AUTHORIZATION-DENIED (typed aihub
+	// error with HTTP 401/403/404 — e.g. the machine key revoked
+	// mid-run), raised by the auto-pull wave (daemon/daemon.go
+	// fetchAutoWave).
 	// Daemon-scope: appended with wi="" (the fetch owns no job) and
-	// kept in the durable events log only. Edge-triggered once per silent→degraded
-	// episode; the episode clears on the next successful fetch. Denial
-	// MUST surface as this event, never as silent idling; transport-class
+	// kept in the durable events log only. Edge-triggered once per
+	// healthy→denied episode; the episode clears on the next successful
+	// fetch. Denial MUST surface as this event, never as silent idling; transport-class
 	// losses (network/5xx) stay silent idle, unchanged.
-	EvDrainDegraded = "drain_degraded"
+	EvQueueFetchDenied = "queue_fetch_denied"
 	// EvSessionSuperseded is the v1.5 M4 verdict record: the periodic
 	// session revalidation learned another daemon holds this work item
 	// (matches=false). Payload carries the CURRENT holder's public
@@ -319,16 +320,6 @@ func (l *EventLog) Append(wi, kind string, body any) error {
 	}
 	l.rings[wi] = ring
 	return werr
-}
-
-// Since returns the ring entries for wi (at most RingCap, oldest first):
-// the live view, pre-filled from the durable file at open.
-func (l *EventLog) Since(wi string) []protocol.EventEntry {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]protocol.EventEntry, len(l.rings[wi]))
-	copy(out, l.rings[wi])
-	return out
 }
 
 // SinceAfter returns the entries for wi whose seq is strictly greater

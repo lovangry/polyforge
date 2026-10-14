@@ -286,9 +286,24 @@ var cmdWrap = &Command{
 		// A WI parked blocked has no hub door for a failed verdict: the
 		// blocked exits are continue (`pf resume`) and abandon
 		// (`pf cancel`). The daemon refuses `wrap` and `wrap --fail` on a
-		// parked-blocked WI with DAEMON-409 naming those two moves.
+		// parked-blocked WI with DAEMON-409 naming those two moves; when it
+		// cannot tell (no local job, DAEMON-404) `--fail` prints the same
+		// owner-move hint below and still exits non-zero.
 		raw, err := ctx.daemon().Wrap(args[0], reason)
 		if err != nil {
+			var ae *api.Error
+			if reason == "fail" && errors.As(err, &ae) && ae.Code == api.ErrDaemonNotFound {
+				// C9 (audit-subtraction pass B): a WI parked blocked has no
+				// local job to fail. The owner's moves are exactly two —
+				// continue with `pf resume`, abandon with `pf cancel` — and
+				// this command does neither: it says so, touches nothing
+				// (no hub door, no termination) and fails — the wrap did
+				// not happen, so the exit is the typed DAEMON-404's.
+				if !ctx.JSON {
+					fmt.Fprintf(ctx.Stderr, "%s has no running job on this daemon; if it is parked blocked, continue it with `pf resume %s` or abandon it with `pf cancel %s`\n", args[0], args[0], args[0])
+				}
+				return err
+			}
 			return err
 		}
 		ctx.finish(raw, func() {
@@ -516,9 +531,18 @@ Launch flags (with environment variable and default, where one exists):
       harness binary (default pi)
   --harness-sessions-root PATH
       harness session store root for the live-transcript sync
-      (env POLYFORGE_HARNESS_SESSIONS_ROOT; default ~/.pi/agent/sessions)
-  --cgroup-root PATH
-      cgroup v2 root for layer-0 cleanup (env POLYFORGE_CGROUP_ROOT)
+      (env POLYFORGE_HARNESS_SESSIONS_ROOT; default
+      <data-dir>/step-agent-sessions — the step processes' own session
+      store, which the daemon also passes them)
+  --operator-agent-dir PATH
+      SOURCE of the dedicated step agent directory: the daemon copies
+      the minimal set (auth.json, models.json, agents/,
+      extensions/subagent/ — the subagent tool) from here into
+      <data-dir>/step-agent and every step agent runs against THAT
+      directory, so the operator's own harness settings — user-level
+      packages included — never reach a step agent
+      (env POLYFORGE_OPERATOR_AGENT_DIR; default ~/.pi/agent). A
+      configured source without a readable auth.json refuses the start.
   --git-remote-base URL
       aihub bare-repo base URL (default <server>/git)
   --max-concurrent-jobs N
@@ -563,10 +587,8 @@ var cmdDaemon = &Command{
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		// In a correct build this Run is unreachable: cmd/pf/main.go
 		// intercepts `pf daemon` argv and calls daemon.Main. If it is
-		// ever reached, do not lie about the daemon — reprint the help.
-		fmt.Fprintln(ctx.Stdout, daemonUsage)
-		fmt.Fprintln(ctx.Stdout, "\n(this path is help-only: cmd/pf/main.go intercepts `pf daemon` and")
-		fmt.Fprintln(ctx.Stdout, "runs internal/polyforge/daemon.Main directly)")
+		// ever reached, the only honest answer is the launch-surface help.
+		fmt.Fprint(ctx.Stdout, daemonUsage)
 		return nil
 	},
 }

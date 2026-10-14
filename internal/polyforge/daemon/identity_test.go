@@ -74,13 +74,13 @@ func TestChatInitRoute(t *testing.T) {
 
 func TestReqOriginKinds(t *testing.T) {
 	var none *reqOrigin
-	if o := none.origin(); o.Kind != runtime.OriginCLI {
-		t.Errorf("nil: %+v", o)
+	if o := none.origin(); o.Kind != runtime.OriginChat || o.ChatID != "" {
+		t.Errorf("nil (chat-less manual): %+v", o)
 	}
 	if o := (&reqOrigin{ChatID: "chat_x", Owner: "u"}).origin(); o.Kind != runtime.OriginChat || o.ChatID != "chat_x" || o.Owner != "u" {
 		t.Errorf("chat: %+v", o)
 	}
-	if o := (&reqOrigin{Owner: "u"}).origin(); o.Kind != runtime.OriginCLI || o.Owner != "u" {
-		t.Errorf("cli: %+v", o)
+	if o := (&reqOrigin{Owner: "u"}).origin(); o.Kind != runtime.OriginChat || o.ChatID != "" || o.Owner != "u" {
+		t.Errorf("chat-less manual: %+v", o)
 	}
 }

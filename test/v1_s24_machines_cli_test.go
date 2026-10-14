@@ -146,7 +146,7 @@ func TestV1S24MachinesListCLI(t *testing.T) {
 	// header's stale-threshold line, the "-" RUNTIME placeholder
 	// (orDash) and the alive STATE cell, all drawn by renderMachines.
 	out = inst.pf(t, "machines", "list")
-	if !strings.Contains(out, "machines: 1 (stale threshold 300s)") {
+	if !strings.Contains(out, "daemons: 1 (stale threshold 300s)") {
 		t.Fatalf("header line wrong:\n%s", out)
 	}
 	cells := s24RowCells(t, out, "m-s24")
