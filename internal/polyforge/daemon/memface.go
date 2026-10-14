@@ -38,13 +38,16 @@ func (h memSearchHit) title() string {
 	return ""
 }
 
-// recallSnapshot binds the F6-A claim-time seam: goal+content in, the
-// top-K hits (identity + bounded excerpt) out. The runtime's
+// recallSnapshot binds the F6-A claim-time seam: goal+content (and the
+// work item's own project, so the search is scoped to exactly that
+// project — audit B5's daemon half: the snapshot used to be filled
+// from a search over every project the machine credential could read)
+// in, the top-K hits (identity + bounded excerpt) out. The runtime's
 // materialize writes the answer as the static snapshot; failures travel
 // back as errors and degrade to a noticed empty list there.
-func recallSnapshot(hub Hub) func(query string, topK int) ([]runtime.RecalledMemory, error) {
-	return func(query string, topK int) ([]runtime.RecalledMemory, error) {
-		hits, err := memSearch(hub, query, topK, snapshotExcerptRunes)
+func recallSnapshot(hub Hub) func(query, project string, topK int) ([]runtime.RecalledMemory, error) {
+	return func(query, project string, topK int) ([]runtime.RecalledMemory, error) {
+		hits, err := memSearch(hub, query, project, topK, snapshotExcerptRunes)
 		if err != nil {
 			return nil, err
 		}
@@ -62,10 +65,14 @@ func recallSnapshot(hub Hub) func(query string, topK int) ([]runtime.RecalledMem
 }
 
 // memSearch runs one bounded memory search against aihub and decodes the
-// excerpted hits.
-func memSearch(hub Hub, query string, topK, excerptRunes int) ([]memSearchHit, error) {
+// excerpted hits. project, when non-empty, scopes the search to that
+// project (aihub resolves ids and names alike).
+func memSearch(hub Hub, query, project string, topK, excerptRunes int) ([]memSearchHit, error) {
 	v := url.Values{}
 	v.Set("q", query)
+	if project != "" {
+		v.Set("project", project)
+	}
 	if topK > 0 {
 		v.Set("limit", strconv.Itoa(topK))
 	}

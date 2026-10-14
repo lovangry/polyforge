@@ -728,7 +728,9 @@ func (s *Server) hAddDep(w http.ResponseWriter, r *http.Request, idn *identity) 
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, s.depsView(blocked))
+	if deps := s.depsView(w, blocked); deps != nil {
+		writeJSON(w, http.StatusCreated, deps)
+	}
 }
 
 func (s *Server) hDeps(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -740,13 +742,20 @@ func (s *Server) hDeps(w http.ResponseWriter, r *http.Request, idn *identity) {
 	if !s.requireRead(w, idn, projectID, "work item %s", id) {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.depsView(id))
+	if deps := s.depsView(w, id); deps != nil {
+		writeJSON(w, http.StatusOK, deps)
+	}
 }
 
-func (s *Server) depsView(wiID string) *core.Deps {
+// depsView renders the dependency edges of wiID. A query failure is a
+// typed 5xx envelope via writeErr — never a false "no edges" answer
+// (audit B12: the empty lists stay reserved for a genuinely edge-free
+// work item). Answers nil after writing the error envelope.
+func (s *Server) depsView(w http.ResponseWriter, wiID string) *core.Deps {
 	deps, err := s.WIs.Dependencies(wiID)
 	if err != nil {
-		return &core.Deps{Blocking: []core.Edge{}, BlockedBy: []core.Edge{}}
+		writeErr(w, err)
+		return nil
 	}
 	return deps
 }
@@ -774,7 +783,9 @@ func (s *Server) hDelDep(w http.ResponseWriter, r *http.Request, idn *identity) 
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.depsView(blocked))
+	if deps := s.depsView(w, blocked); deps != nil {
+		writeJSON(w, http.StatusOK, deps)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -941,16 +952,27 @@ func (s *Server) memAllowed(idn *identity) func(*memory.Entry) bool {
 	}
 }
 
-func (s *Server) memReadAllowed(idn *identity, projectID string) error {
+// memReadAllowed is the coarse project gate of a memory READ. A denied
+// gate must answer the same not-found shape as a genuinely missing
+// memory — object existence must not leak (02-aihub-core.md §4.10: a
+// non-member's read is 404, only writes are 403) — so membership
+// denial and project-scope mismatch both land as MEM-404 carrying the
+// memory's own id, indistinguishable from memRead's visibility-tier
+// 404 below. The write path keeps MEM-403 (memWriteAllowed); real
+// storage errors still propagate.
+func (s *Server) memReadAllowed(idn *identity, projectID, memID string) error {
 	if idn.Role == "admin" {
 		return nil
 	}
-	ok, err := s.canRead(idn, projectID)
+	if err := scopeCheck(idn, projectID); err != nil {
+		return core.Fail(api.ErrMemNotFound, "", "memory %q", memID)
+	}
+	role, err := s.memberRole(projectID, idn.UserID)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return core.Fail(api.ErrMemForbidden, "", "no access to this project's memories")
+	if role == "" {
+		return core.Fail(api.ErrMemNotFound, "", "memory %q", memID)
 	}
 	return nil
 }
@@ -1021,7 +1043,7 @@ func (s *Server) memRead(idOrSlug string, idn *identity) (*memory.Entry, []byte,
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.memReadAllowed(idn, e.ProjectID); err != nil {
+	if err := s.memReadAllowed(idn, e.ProjectID, memID); err != nil {
 		return nil, nil, err
 	}
 	allowed := s.memAllowed(idn)
@@ -1061,7 +1083,27 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	excerpt, _ := strconv.Atoi(q.Get("excerpt"))
-	s.hSearchRun(w, q.Get("q"), q.Get("type"), tags, limit, excerpt, idn)
+	// project= narrows the search to one project (audit B5): the
+	// parameter used to be silently dropped, so every search spanned
+	// every project the caller could read. It is resolved, then
+	// read-gated with the same non-leaking not-found shape the rest of
+	// the read face uses (an unresolvable and an inaccessible project
+	// answer identically), and applied in the candidate predicate IN
+	// ADDITION to — never instead of — the membership and visibility
+	// layers (06-memory-search.md §7's fixed two-layer order).
+	project := ""
+	if p := q.Get("project"); p != "" {
+		projectID, err := s.projectIDOf(p)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		if !s.requireRead(w, idn, projectID, "project %q", p) {
+			return
+		}
+		project = projectID
+	}
+	s.hSearchRun(w, q.Get("q"), q.Get("type"), tags, project, limit, excerpt, idn)
 }
 
 // maxMemoryExcerptRunes bounds the content excerpt a search answer may
@@ -1084,7 +1126,7 @@ type memoryHitList struct {
 	Total int         `json:"total"`
 }
 
-func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags []string, limit, excerpt int, idn *identity) {
+func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags []string, project string, limit, excerpt int, idn *identity) {
 	// Membership-first filtering: restrict to the projects the caller can
 	// read before visibility tiers apply.
 	allowed := s.memAllowed(idn)
@@ -1095,6 +1137,11 @@ func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags [
 			if err != nil || !ok {
 				return false
 			}
+		}
+		// The requested project (B5) narrows the membership-filtered
+		// candidate set further; an empty value keeps the union.
+		if project != "" && e.ProjectID != project {
+			return false
 		}
 		return baseAllowed(e)
 	}

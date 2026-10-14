@@ -189,8 +189,13 @@ func (m *AdminManager) CreateAPIKey(userID, name, projectScope string) (*IssuedK
 	}, nil
 }
 
+// RevokeAPIKey records the revocation time in revoked_at. Both bind
+// positions are numbered: SQLite gives a bare `?` the number after the
+// highest one used so far, so mixing `?` and `?1` would bind the same
+// argument twice.
 func (m *AdminManager) RevokeAPIKey(keyID string) error {
-	res, err := m.db.Exec(`UPDATE api_keys SET revoked_at=? WHERE id=?1 AND revoked_at IS NULL`, keyID)
+	res, err := m.db.Exec(`UPDATE api_keys SET revoked_at=?1 WHERE id=?2 AND revoked_at IS NULL`,
+		Now(), keyID)
 	if err != nil {
 		return err
 	}

@@ -104,12 +104,15 @@ type Config struct {
 	// runtime-state/recalled-memories.json (default 10, capped at 50).
 	RecallTopK int
 	// MemoryRecall, when non-nil, is the F6-A claim-time semantic-recall
-	// seam: materialize calls it with the claim's goal+content and writes
-	// the answer as a static snapshot for the agent. The daemon binds it
-	// to aihub's memory search face (the machine credential stays with the
-	// daemon — agents hold no aihub credential of any kind); nil disables
-	// the snapshot entirely (slim installs, most unit tests).
-	MemoryRecall func(query string, topK int) ([]RecalledMemory, error)
+	// seam: materialize calls it with the claim's goal+content, the work
+	// item's own project (audit B5: the snapshot is scoped to that
+	// project, not to everything the daemon credential can read) and the
+	// top-K, and writes the answer as a static snapshot for the agent.
+	// The daemon binds it to aihub's memory search face (the machine
+	// credential stays with the daemon — agents hold no aihub credential
+	// of any kind); nil disables the snapshot entirely (slim installs,
+	// most unit tests).
+	MemoryRecall func(query, project string, topK int) ([]RecalledMemory, error)
 }
 
 func (c *Config) fill() {
