@@ -149,6 +149,7 @@ func v3StartDaemon(t *testing.T, inst *v1Install, sock, dataDir, workspace, mach
 		"GIT_COMMITTER_EMAIL=pf-e2e@invalid",
 	)
 	cmd.Stdout, cmd.Stderr = logf, logf
+	ownGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -202,9 +203,10 @@ func (d *v3DaemonProc) stop() {
 	select {
 	case <-d.waitExit:
 	case <-time.After(10 * time.Second):
-		_ = d.cmd.Process.Kill()
+		killGroup(d.cmd)
 		<-d.waitExit
 	}
+	killGroup(d.cmd)
 	d.cmd = nil
 }
 

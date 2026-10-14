@@ -95,6 +95,7 @@ func v1Bins(t *testing.T) string {
 	if v1BinErr != nil {
 		t.Fatalf("binary build cache: %v", v1BinErr)
 	}
+	registerBinSweep(t, v1BinDir)
 	return v1BinDir
 }
 
@@ -105,19 +106,22 @@ const v1Project = "e2e"
 
 // v1Install is a scratch install of the real system.
 type v1Install struct {
-	t          *testing.T
-	binDir     string
-	root       string
-	dataDir    string // aihub data dir (bare repos under dataDir/git)
-	url        string
-	port       int
-	adminKey   string
-	aihubLog   string
-	aihubCmd   *exec.Cmd
-	client     *aihubclient.Client
-	planDir    string
-	pfPath     string
-	fakepiPath string
+	t        *testing.T
+	binDir   string
+	root     string
+	dataDir  string // aihub data dir (bare repos under dataDir/git)
+	url      string
+	port     int
+	adminKey string
+	aihubLog string
+	aihubCmd *exec.Cmd
+	// aihubExited closes when aihubCmd's process has exited (its one
+	// waiter goroutine; see startAihubProc).
+	aihubExited <-chan struct{}
+	client      *aihubclient.Client
+	planDir     string
+	pfPath      string
+	fakepiPath  string
 
 	// gateQuickFixGrill makes daemons run a copy of the shipped bundles
 	// whose quick-fix grill additionally declares requires_human_answer
@@ -223,26 +227,7 @@ func newV1InstallRepos(t *testing.T, repos []api.ProjectRepo) *v1Install {
 	cmd := exec.Command(filepath.Join(bins, "aihub"),
 		"--data-dir", inst.dataDir, "--listen", "127.0.0.1:"+strconv.Itoa(inst.port))
 	cmd.Stdout, cmd.Stderr = logf, logf
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	inst.aihubCmd = cmd
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			// SIGTERM first: the server's own graceful path (also flushes
-			// any instrumented-coverage data at exit); SIGKILL fallback.
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-			done := make(chan struct{})
-			go func() { _, _ = cmd.Process.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				_ = cmd.Process.Kill()
-				<-done
-			}
-		}
-		logf.Close()
-	})
+	inst.startAihubProc(t, cmd, logf)
 	inst.waitHTTP(t)
 	inst.adminKey = v1HarvestBootstrapKey(t, inst.aihubLog)
 	inst.client = aihubclient.New(inst.url, inst.adminKey)
@@ -252,6 +237,28 @@ func newV1InstallRepos(t *testing.T, repos []api.ProjectRepo) *v1Install {
 		t.Fatalf("create project: %v", err)
 	}
 	return inst
+}
+
+// startAihubProc starts one aihub process in its own process group and
+// registers its teardown (also on every t.Fatal path after this point):
+// SIGTERM first — the server's own graceful path, which also flushes any
+// instrumented-coverage data at exit — then a group SIGKILL fallback.
+// The exit is observed once, by one waiter goroutine, shared with
+// stopAihub.
+func (u *v1Install) startAihubProc(t *testing.T, cmd *exec.Cmd, logf *os.File) {
+	t.Helper()
+	ownGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		logf.Close()
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	u.aihubCmd, u.aihubExited = cmd, exited
+	t.Cleanup(func() {
+		stopGroup(cmd, exited, 5*time.Second)
+		logf.Close()
+	})
 }
 
 // waitHTTP polls the aihub TCP face until it answers.
@@ -304,16 +311,8 @@ func (u *v1Install) stopAihub() {
 	if u.aihubCmd == nil || u.aihubCmd.Process == nil {
 		return
 	}
-	_ = u.aihubCmd.Process.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() { _, _ = u.aihubCmd.Process.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(15 * time.Second):
-		_ = u.aihubCmd.Process.Kill()
-		<-done
-	}
-	u.aihubCmd = nil
+	stopGroup(u.aihubCmd, u.aihubExited, 15*time.Second)
+	u.aihubCmd, u.aihubExited = nil, nil
 }
 
 // restartAihub re-execs the aihub on the SAME data dir and port (the
@@ -332,24 +331,7 @@ func (u *v1Install) restartAihub() {
 	cmd := exec.Command(filepath.Join(u.binDir, "aihub"),
 		"--data-dir", u.dataDir, "--listen", "127.0.0.1:"+strconv.Itoa(u.port))
 	cmd.Stdout, cmd.Stderr = logf, logf
-	if err := cmd.Start(); err != nil {
-		u.t.Fatal(err)
-	}
-	u.aihubCmd = cmd
-	u.t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-			done := make(chan struct{})
-			go func() { _, _ = cmd.Process.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				_ = cmd.Process.Kill()
-				<-done
-			}
-		}
-		logf.Close()
-	})
+	u.startAihubProc(u.t, cmd, logf)
 	u.waitHTTP(u.t)
 }
 
@@ -357,9 +339,10 @@ func (u *v1Install) restartAihub() {
 // path: the harness hands it to every pf CLI invocation via --config so
 // no operator config file (~/.config/polyforge/cli.toml — this machine
 // is a live polyforge install) leaks into a run. The config surface is
-// contract under test, never ambient host state; git/gh credential
-// configuration (HOME-based) is deliberately left untouched — the
-// daemon's push and PR lanes need it.
+// contract under test, never ambient host state. HOME and the global git
+// config are the package TestMain's scratch ones (internal/testenv): no
+// operator git setting reaches a run — pushes go to the local aihub or
+// file:// remotes and gh is always a stub.
 func hermeticConfigPath(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "hermetic-cli.toml")
@@ -745,6 +728,7 @@ func (d *v1Daemon) start() {
 	}
 	cmd.Dir = d.dataDir
 	cmd.Stdout, cmd.Stderr = logf, logf
+	ownGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		d.t.Fatal(err)
 	}
@@ -799,7 +783,8 @@ func (d *v1Daemon) logTail() string {
 }
 
 // stop terminates the daemon process: SIGTERM first (the graceful path
-// when the process is mid-run), SIGKILL fallback. Idempotent.
+// when the process is mid-run), group SIGKILL fallback, then a group kill
+// for any straggler left in the daemon's process group. Idempotent.
 func (d *v1Daemon) stop() {
 	if d.cmd == nil || d.cmd.Process == nil {
 		return
@@ -808,9 +793,10 @@ func (d *v1Daemon) stop() {
 	select {
 	case <-d.waitedExit:
 	case <-time.After(10 * time.Second):
-		_ = d.cmd.Process.Kill()
+		killGroup(d.cmd)
 		<-d.waitedExit
 	}
+	killGroup(d.cmd)
 	d.cmd = nil
 }
 

@@ -332,6 +332,8 @@ func (d *w113Daemon) boot(bound time.Duration) (served bool, output string, code
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + d.home,
 		"XDG_CONFIG_HOME=" + d.xdg,
+		// the fakepi orphan watchdog's pid (see proc_hygiene_test.go)
+		fakepiTestPIDEnv + "=" + os.Getenv(fakepiTestPIDEnv),
 		"GIT_AUTHOR_NAME=pf-e2e",
 		"GIT_AUTHOR_EMAIL=pf-e2e@invalid",
 		"GIT_COMMITTER_NAME=pf-e2e",
@@ -344,6 +346,7 @@ func (d *w113Daemon) boot(bound time.Duration) (served bool, output string, code
 	cmd.Env = env
 	cmd.Dir = d.dataDir
 	cmd.Stdout, cmd.Stderr = logf, logf
+	ownGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		d.t.Fatal(err)
 	}
@@ -388,7 +391,8 @@ func (d *w113Daemon) logTail() string {
 	return string(raw)
 }
 
-// stop terminates the daemon (SIGTERM, SIGKILL fallback). Idempotent.
+// stop terminates the daemon (SIGTERM, group SIGKILL fallback, then a
+// group kill for stragglers). Idempotent.
 func (d *w113Daemon) stop() {
 	if d.logFile != nil {
 		_ = d.logFile.Close()
@@ -400,9 +404,10 @@ func (d *w113Daemon) stop() {
 	select {
 	case <-d.waitExit:
 	case <-time.After(10 * time.Second):
-		_ = d.cmd.Process.Kill()
+		killGroup(d.cmd)
 		<-d.waitExit
 	}
+	killGroup(d.cmd)
 	d.cmd = nil
 }
 
