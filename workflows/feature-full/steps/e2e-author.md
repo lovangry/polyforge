@@ -59,6 +59,18 @@ as a document-only scenario `e2e-baseline` can drive manually through the projec
 actual interfaces. Never reverse-engineer a scenario from an imagined implementation,
 and never write an unrunnable file.
 
+## Commit duty for generated test files (hard rule)
+
+If you generated test files under `repos/<name>/**`, you MUST commit them yourself
+before completing this step: **ONE dedicated commit** containing exactly those
+files, **verbatim** — the exact paths you report in `test_files`, staged by path,
+no content edits after authoring, and no unrelated files in the same commit.
+`code` is forbidden from touching these files, so a generated test file left
+uncommitted would sit untracked until flow end; `verification` mechanically FAILs
+on any path listed in `steps.e2e-author.output.test_files` that is not tracked
+(committed) in the repo worktree. A scenarios-document-only step (no generated test
+files) commits nothing — this duty fires only when `test_files` is non-empty.
+
 ## Non-goals
 
 - Do not run the scenarios here — `e2e-baseline` (the pre-code bar-laying run) and

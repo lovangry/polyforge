@@ -39,10 +39,17 @@ and address every point it raises before proceeding with the rest of the plan.
 - **Follow the plan's step order.** Each plan step is designed to leave the tree
   buildable; if the order genuinely does not work, that is a finding to report in
   `summary`, not a license to silently reorder.
-- **Keep the build green between commits.** After each plan step, run the `verification`
-  gate's bar for this repo — verbatim: the same component list, no paraphrase, no
-  subset (via `bash`) — before moving to the next. The full bar applies to every unit;
-  nothing is ever excluded from it on this lane. Do not proceed on top of a red build.
+- **Keep the build green between commits — fast checks only, per unit.** After each plan
+  step, run, via `bash`, the repo's fast checks: the project's own build, its
+  lint/format check, and the unit tests of the packages/modules this unit touched (the
+  changed files' packages/modules and their tests, no more) — as the repo itself defines
+  them (Makefile, package.json scripts, CI config). For a Go repo that is `go build
+  ./... && go vet ./... && gofmt -l .` plus `go test` of the touched packages. A
+  formatter listing any file (non-empty `gofmt -l` output, or the repo's equivalent)
+  counts as red, exactly like a non-zero exit. That is the whole per-unit bar.
+  Full-suite testing belongs to `verification` (the one gate that runs the project's
+  full bar); do not run the full suite (e.g. `go test ./...`) here, and do not proceed
+  on top of a red fast check.
 - **Commit per compilable unit**, with a message identifying which plan step it
   satisfies. For a single-step chore this is one commit; for a sweep it is many.
 - **Stay mechanical.** This lane's contract is no judgment calls: no drive-by
@@ -55,8 +62,8 @@ and address every point it raises before proceeding with the rest of the plan.
 If a plan step is infeasible as written, or the build cannot be made green within
 reasonable effort, do not fabricate a passing `build_status: green`. Report honestly:
 leave `build_status: red` and explain the blocker in `summary`. On this lane a red hand
-off is doubly important — there is no review step behind you; `verification` is the
-only thing between your tree and merge.
+off is doubly important — `review` and `verification` are what stand between your
+tree and merge.
 
 ## Output
 

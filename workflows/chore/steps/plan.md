@@ -50,10 +50,13 @@ whether it exists:
 2. Determine the unit structure: if the change cannot land in one compilable unit, order
    the steps so each leaves the tree buildable — same discipline as feature-full's
    `plan`, minus the spec input (chores carry no product spec).
-3. Declare each step's green bar as the `verification` gate's bar for the repo,
-   **verbatim** — the same component list, no paraphrase, no subset — so a unit that
-   holds itself green can never diverge from the bar the gate runs. The full bar
-   applies to every unit on this lane: there are no named-file exclusions here.
+3. Declare each step's per-unit green bar as the repo's FAST-CHECK bar — the same bar
+   `code` runs per unit: the project's own build, its lint/format check, and the unit
+   tests of the packages/modules the unit touches, as the repo itself defines them
+   (Makefile, package.json scripts, CI config); for a Go repo, `go build ./... &&
+   go vet ./... && gofmt -l .` plus `go test` of the touched packages. Name the
+   concrete commands. The full suite is not a per-unit bar — it belongs to
+   `verification`.
 4. Every step MUST carry a `Touched files: <repo-relative path> (write|read), ...` line,
    or `Touched files: (no file edits)` for steps that only verify. Declare honestly —
    this list becomes the WI's `declared_resources` and, downstream, its file-scope

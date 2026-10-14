@@ -69,11 +69,23 @@ quality belongs here (`review` handles that next).
    against the fixed tree; if `repro` authored a failing test, run that test. Record the
    outcome as its own named check. The observed behavior must match `## Expected` — a
    repro that now fails *differently* is a fail, not a pass.
-4. Record every check run (name, pass/fail/skipped, detail) in `checks` - at least one
+4. **No untracked test files (mechanical).** In EACH declared repo worktree
+   (`repos/<name>/`), run `git status --porcelain --untracked-files=all` and FAIL on any
+   `??` line that is a test file by the repo's own conventions — e.g. `*_test.go`,
+   `*.test.*`, `*.spec.*`, or any file under a `test/` or `tests/` directory (use the
+   repo's actual test-file patterns where they differ). In addition, read
+   `execution.json`'s `steps.repro.output.test_files` — repo-relative paths, each
+   resolved inside its own repo worktree — and require `git ls-files --error-unmatch
+   <path>` to succeed for every listed path in that worktree; an empty list trivially
+   passes this part. `repro` is required to commit its authored tests itself and `fix`
+   may not touch them, so any untracked or missing test file at this gate is residue the
+   flow must not ship. Record this as its own named check (e.g.
+   `no-untracked-test-files`).
+5. Record every check run (name, pass/fail/skipped, detail) in `checks` - at least one
    entry is required, repro included.
-5. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
+6. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
    pass verdict - the schema's oneOf rejects that combination as self-contradictory.
-6. If any check fails: `verdict: fail` with a precise `fail_reason` - exact command,
+7. If any check fails: `verdict: fail` with a precise `fail_reason` - exact command,
    output excerpt, and which part of the fix it implicates. The schema requires
    `fail_reason` here. This text becomes `fix`'s `pending_rewind_input`; vague language
    wastes the rewind.
