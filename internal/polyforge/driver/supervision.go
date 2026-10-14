@@ -223,10 +223,19 @@ type StepFailure struct {
 
 var (
 	hostPatterns = regexp.MustCompile(`(?i)(no space left|enospc|disk quota|edquot|permission denied|eacces|read-only file system|erofs|too many open files|emfile|cannot allocate memory|out of memory|enomem|input/output error|executable file not found|no such file or directory.*(pi|harness))`)
-	// model-class: the model/provider side is broken, a different model
-	// may work (F4: a pinned model that cannot resolve must advance the
-	// candidate chain).
-	modelPatterns = regexp.MustCompile(`(?i)(model\W.{0,60}(not found|unknown|unresolved|cannot be resolved|could not be resolved|not resolve|invalid|unavailable|not available|unsupported|does not exist)|(unknown|invalid|unparse?able|unresolved|unsupported|no such) model|no models? (found|available|match)|\b401\b|\b403\b|unauthori[sz]ed|authentication|invalid api key|incorrect api key|api key|quota|insufficient|billing|credit)`)
+	// allowance/auth (model-class, D7): the account or key cannot use
+	// this candidate — a different one may work, so these switch
+	// IMMEDIATELY. Checked before every other text class: a text that also
+	// carries a throttle or transport signature ("429 ... exceeded your
+	// current quota", "insufficient balance ... connection reset") still
+	// switches.
+	allowanceAuthPatterns = regexp.MustCompile(`(?i)(\b401\b|\b403\b|unauthori[sz]ed|authentication|invalid api key|incorrect api key|api key|quota|insufficient|billing|credit)`)
+	// model-name (model-class, F4): a pinned model that cannot resolve
+	// must advance the candidate chain. Checked AFTER the throttle and
+	// upstream-transient classes: its loose "model ... invalid" shape
+	// would otherwise swallow "the model returned an invalid tool call
+	// (incomplete JSON arguments)".
+	modelNamePatterns = regexp.MustCompile(`(?i)(model\W.{0,60}(not found|unknown|unresolved|cannot be resolved|could not be resolved|not resolve|invalid|unavailable|not available|unsupported|does not exist)|(unknown|invalid|unparse?able|unresolved|unsupported|no such) model|no models? (found|available|match))`)
 	// rate-limit class (polyforge#147 D7): ONLY transient throttling.
 	// Another model would be throttled just the same (and a switch would
 	// burn the chain), so these never advance the candidate pointer: the
@@ -235,15 +244,21 @@ var (
 	// they are model-class and switch candidates.
 	rateLimitPatterns = regexp.MustCompile(`(?i)(\b429\b|rate.?limit|too many requests|overloaded)`)
 	// upstream-transient class (wi_seWTgHeKtaa8, the #147 incident's
-	// truncated tool-call arguments): an upstream return corruption or a
-	// mid-flight transport drop. Not model-class (another model would be
-	// corrupted just the same — the model is not the fault) and not a
-	// throttle: the same model is retried under the D7 backoff, bounded
-	// at UpstreamTransientRetryBound.
-	upstreamTransientPatterns = regexp.MustCompile(`(?i)(tool\W{0,20}call\W.{0,80}(incomplete|invalid|truncated|malformed|unparseable)|` +
-		`(incomplete|invalid|truncated|malformed|unparseable)\W.{0,60}(json|argument|tool|response|reply|completion)|` +
-		`empty\W(response|reply|completion|message)|(connection|upstream|stream|remote)\W.{0,20}(reset|refused|dropped|closed|aborted|eof)|` +
-		`unexpected\W(eof|end\W{0,5}(of\W)?stream))`)
+	// truncated tool-call arguments): ONLY a corrupted upstream return or
+	// a drop of the upstream stream, as the harness reports it —
+	// malformed/incomplete/truncated tool-call arguments or JSON in the
+	// provider reply, an empty (0-token) reply, a reset/refused/closed/EOF
+	// upstream connection. Not model-class (another model would be
+	// corrupted just the same) and not a throttle: the same model is
+	// retried under the D7 backoff, bounded at
+	// UpstreamTransientRetryBound. A bare "invalid ..." (tool name,
+	// request, argument), a context-length error or a local I/O error is
+	// NOT here.
+	upstreamTransientPatterns = regexp.MustCompile(`(?i)(` +
+		`tool\W{0,3}calls?\W.{0,60}\b(incomplete|truncated|malformed|unterminated)\b|` +
+		`\b(incomplete|truncated|malformed|unterminated)\W{1,3}(json|arguments|tool\W{0,3}calls?)\b|` +
+		`\bempty\W(response|reply|completion)\b|\b(0|zero)\W?(output\W)?tokens?\b|` +
+		`\b(upstream|provider|stream|connection)\W.{0,30}\b(reset|refused|dropped|closed|aborted|eof)\b)`)
 )
 
 // classifyWaitFailure maps a Wait error (not a cancellation) onto a
@@ -262,11 +277,11 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 			// before any text match: leftover stderr must never turn a
 			// clean stop into a model fault that burns a candidate.
 			return FailEndedWithoutResult, ee.ExitCode, ee.Error()
-		case modelPatterns.MatchString(text):
-			// evaluated before the throttle class: a text that names a
-			// model/auth/allowance problem ("429 ... exceeded your
-			// current quota", "403 insufficient permissions") switches
-			// candidates even when it also carries a throttle signature
+		case allowanceAuthPatterns.MatchString(text):
+			// evaluated before every other text class: an allowance/auth
+			// problem ("429 ... exceeded your current quota", "403
+			// insufficient permissions") switches candidates even when it
+			// also carries a throttle or transport signature
 			return FailExitModel, ee.ExitCode, ee.Error()
 		case rateLimitPatterns.MatchString(text):
 			// a pure throttle (the error turn it usually ends is the
@@ -277,6 +292,8 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 			// (the #147 incident's truncated tool-call arguments): the same
 			// model is retried under the D7 backoff, bounded
 			return FailUpstreamTransient, ee.ExitCode, ee.Error()
+		case modelNamePatterns.MatchString(text):
+			return FailExitModel, ee.ExitCode, ee.Error()
 		case ee.TurnError:
 			return FailExitModel, ee.ExitCode, ee.Error()
 		default:
@@ -291,14 +308,17 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 	// A harness that died at startup never read its prompt (EPIPE on the
 	// write); the error carries its stderr, and a model-class text there
 	// advances the candidate chain (F4) — a pure throttle text does not.
-	if modelPatterns.MatchString(err.Error()) {
+	// No upstream-transient match here: this path is the driver's own
+	// failure, never an upstream return ("read transcript: unexpected
+	// EOF" is a local I/O error, not a provider stream drop).
+	if allowanceAuthPatterns.MatchString(err.Error()) {
 		return FailExitModel, -1, err.Error()
 	}
 	if rateLimitPatterns.MatchString(err.Error()) {
 		return FailRateLimited, -1, err.Error()
 	}
-	if upstreamTransientPatterns.MatchString(err.Error()) {
-		return FailUpstreamTransient, -1, err.Error()
+	if modelNamePatterns.MatchString(err.Error()) {
+		return FailExitModel, -1, err.Error()
 	}
 	return FailExitOther, -1, err.Error()
 }

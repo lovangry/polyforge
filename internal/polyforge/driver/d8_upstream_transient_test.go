@@ -29,7 +29,9 @@ func TestD8TransientTextsClassifyUpstreamTransient(t *testing.T) {
 		"empty response from the provider",
 		"connection reset by peer while streaming",
 		"upstream dropped the connection",
-		"unexpected EOF",
+		"stream closed: unexpected EOF",
+		"the model returned an invalid tool call (incomplete JSON arguments)",
+		"provider returned an empty response (0 output tokens)",
 	} {
 		for _, turnErr := range []bool{false, true} {
 			got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 1, LastError: text, TurnError: turnErr})
@@ -37,8 +39,9 @@ func TestD8TransientTextsClassifyUpstreamTransient(t *testing.T) {
 				t.Errorf("%q (turn error %v) classified %q, want %q", text, turnErr, got, FailUpstreamTransient)
 			}
 		}
-		if got, _, _ := classifyWaitFailure(errWithText("read transcript: " + text)); got != FailUpstreamTransient {
-			t.Errorf("startup %q classified %q, want %q", text, got, FailUpstreamTransient)
+		// the non-exit path is the driver's own failure: never transient
+		if got, _, _ := classifyWaitFailure(errWithText("read transcript: " + text)); got == FailUpstreamTransient {
+			t.Errorf("driver-local %q classified %q, want not transient", text, got)
 		}
 	}
 	// controls: the other classes keep their texts.
@@ -139,5 +142,44 @@ func TestD8TransientArchiveLedgerAndSwitch(t *testing.T) {
 	// the two in-bound retries waited the D7 ladder; the switch did not.
 	if len(slept) != 2 || slept[0] != RateLimitBackoffBase || slept[1] != 2*RateLimitBackoffBase {
 		t.Fatalf("backoff waits %v, want the D7 ladder [1s 2s] for the two retries only", slept)
+	}
+}
+
+// TestD8ClassificationPrecedence pins the text-class order: allowance/
+// auth (switch) > throttle (same model) > upstream transient (same
+// model, bounded) > model name (switch) — and keeps the transient class
+// narrow (bare "invalid ...", context length and local I/O errors stay
+// out of it).
+func TestD8ClassificationPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want string
+	}{
+		{"the model returned an invalid tool call (incomplete JSON arguments)", FailUpstreamTransient},
+		{"insufficient balance on the account; connection reset by peer", FailExitModel},
+		{"invalid model name foo", FailExitModel},
+		{"401 Unauthorized", FailExitModel},
+		{"429 Too Many Requests: connection reset", FailRateLimited},
+		{"429 You exceeded your current quota", FailExitModel},
+		// negatives: not upstream transient
+		{"Invalid tool name: foo", FailExitOther},
+		{"400 invalid request: invalid argument", FailExitOther},
+		{"context length exceeded", FailExitOther},
+		{"read transcript: unexpected EOF", FailExitOther},
+	} {
+		got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 1, LastError: tc.text})
+		if got != tc.want {
+			t.Errorf("%q classified %q, want %q", tc.text, got, tc.want)
+		}
+	}
+	// the driver's own (non-exit) failures never classify transient
+	for _, text := range []string{
+		"read transcript: unexpected EOF",
+		"stage envelope: connection closed",
+		"read drop: incomplete JSON",
+	} {
+		if got, _, _ := classifyWaitFailure(errWithText(text)); got != FailExitOther {
+			t.Errorf("driver-local %q classified %q, want %q", text, got, FailExitOther)
+		}
 	}
 }
