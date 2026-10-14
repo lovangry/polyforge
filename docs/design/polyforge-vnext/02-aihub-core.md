@@ -123,12 +123,11 @@
 | `service_secret_epochs` | service_secret 轮换历史（§6.6） |
 | `projects` / `project_members` | project 定义（精简）与成员关系——权限硬边界的机械判据（§4.10） |
 | `users` / `api_keys` / `machines` | 身份、密钥（可带可选 project scope）与机器注册（§4.10） |
-| `work_items` | WI 记录，含 parent_id（epic-lite）、milestone、workflow 引用三列与预算基线（§4.2、§4.4） |
+| `work_items` | WI 记录，含 parent_id（epic-lite）、milestone、workflow 引用三列与预算基线（§4.2、§4.4）；`repo_inventory` JSON 列（§4.6） |
 | `wi_dependencies` | WI 间依赖边（blocks/supersedes/related；防环与 epic 父子约束，§4.2a） |
 | `owner_generations` | 归属权代数（§4.3） |
 | `claim_idempotency` | claim 幂等硬化（§4.3、§6.6） |
 | `workflow_budget_increments` | 预算增量的独立可追加记录（§4.5a、§6.7） |
-| `wi_repo_inventory` | repo inventory 声明与冻结基线（§4.6） |
 | `wi_events` | WI 事件流（§4.7） |
 | `capsule_revisions` / `capsule_heads` / `capsule_tombstones` | Revision 登记、HEAD 指针与删除保护（§4.8） |
 | `memories` / `memory_fts` | Memory 元数据与派生检索索引（§4.9） |
@@ -157,6 +156,7 @@ CREATE TABLE work_items (
   waiting_on   TEXT,                        -- §2.4 取值域；非空 = 阻塞可见信号
   bundle_name  TEXT,                        -- workflow bundle 名；NULL = 纯登记票（不可 claim、不可 submit，§4.4）。digest 列与
                                              -- 预算基线列已删（polyforge#149 B9/dead-code：引用即名字本身）
+  repo_inventory TEXT,                      -- §4.6：JSON [{name}]（项目仓库名），建票冻结；NULL = 无清单
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
   closed_at    TEXT                         -- 终态时间戳
@@ -257,7 +257,7 @@ CREATE TABLE claim_idempotency (
 3. **引用落库**：校验通过后把 `bundle_name` 写入 `work_items`（§4.2/§4.4），与 repo inventory 冻结（§4.6）在同一创建事务内提交。frontmatter 解析结果等一切校验中间产物**不落库**——落库的只有 `bundle_name`（引用即名字本身；digest 列已删，polyforge#149 B9）。
 4. **无（认领后的）重新固定路径**：`bundle_name` 首次认领冻结（INV-2e）；R2 窗口内 `PATCH bundle_name` 是唯一的重新固定路径（见下段），认领后不存在「整体替换引用」的窗口，确需变更 workflow 只能取消当前 WI（§6.5）并新建 WI 重新走创建流程。
 
-**R2 窗口与 PATCH 落库（w140 裁决，首次认领冻结）**：`bundle_name` 的固化时点为**首次认领冻结**——R2 窗口（`status='queued'` 且从未认领：无活跃 session 行且无 `session_claimed` 事件）内，`PATCH /api/v1/work-items/{id}` 携带 `bundle_name` 被接受：NULL→X 补挂、X→Y 换名、X→NULL 解绑（票回到 ready queue 待选 bundle 分段）；写路径与创建共用同一落库规则（引用即名字；携带 digest 键的 PATCH 整体拒绝 `CORE-400`；`wi_repo_inventory` 不触碰），窗口判定不看 `waiting_on`。窗口外拒绝且不写库：已认领/非 queued → `CORE-400 reason=IMMUTABLE`，终态 → `CORE-410 reason=TERMINAL_STATE`。对称规则（§4.2a）：有子票的票拒绝非 NULL 绑定（`CORE-400 reason=HAS_CHILDREN_NO_BUNDLE`）。并发：PATCH bundle vs Claim 不另设仲裁，单写者事务串行化加各自 CAS 保证终态一致——绑定或改名的 PATCH 不会让 Claim 失败，PATCH 排在其前则 Claim 冻结新 bundle，排在其后则被拒（`CORE-400 reason=IMMUTABLE`，或复查无具体原因时 `CORE-409 reason=RACE_LOST`），均不写库；绑定 bundle vs 新增子票以创建事务内父票 bundle 复查互斥，终态不同时出现「有子票 ∧ bundle 非空」。接口契约（字段、reason 清单、响应形状、部署与回滚）权威：`wi-kind-contract.md`。
+**R2 窗口与 PATCH 落库（w140 裁决，首次认领冻结）**：`bundle_name` 的固化时点为**首次认领冻结**——R2 窗口（`status='queued'` 且从未认领：无活跃 session 行且无 `session_claimed` 事件）内，`PATCH /api/v1/work-items/{id}` 携带 `bundle_name` 被接受：NULL→X 补挂、X→Y 换名、X→NULL 解绑（票回到 ready queue 待选 bundle 分段）；写路径与创建共用同一落库规则（引用即名字；携带 digest 键的 PATCH 整体拒绝 `CORE-400`；`repo_inventory` 不触碰），窗口判定不看 `waiting_on`。窗口外拒绝且不写库：已认领/非 queued → `CORE-400 reason=IMMUTABLE`，终态 → `CORE-410 reason=TERMINAL_STATE`。对称规则（§4.2a）：有子票的票拒绝非 NULL 绑定（`CORE-400 reason=HAS_CHILDREN_NO_BUNDLE`）。并发：PATCH bundle vs Claim 不另设仲裁，单写者事务串行化加各自 CAS 保证终态一致——绑定或改名的 PATCH 不会让 Claim 失败，PATCH 排在其前则 Claim 冻结新 bundle，排在其后则被拒（`CORE-400 reason=IMMUTABLE`，或复查无具体原因时 `CORE-409 reason=RACE_LOST`），均不写库；绑定 bundle vs 新增子票以创建事务内父票 bundle 复查互斥，终态不同时出现「有子票 ∧ bundle 非空」。接口契约（字段、reason 清单、响应形状、部署与回滚）权威：`wi-kind-contract.md`。
 
 ### 4.5a `workflow_budget_increments`（预算增量，独立可追加记录） <!-- §4.5a -->
 
@@ -281,28 +281,25 @@ CREATE TABLE workflow_budget_increments (
 
 预算基线列已删（polyforge#149 dead-code）：Core 不再持有任何预算数据；WI 的预算消耗与上界判定全部由执行侧账本（`runtime-state/execution.json` 的 `budget_consumed`，driver 单写者）承担（`01-workflow-skills.md#§6.6`）。 〔#111分类：删→驱动〕
 
-### 4.6 `wi_repo_inventory`（repo inventory 的 Core 权威存储） <!-- §4.6 -->
+### 4.6 `work_items.repo_inventory`（repo inventory 的 Core 权威存储） <!-- §4.6 -->
 
-**权威归属**：repo inventory 的声明（name/url/subdir）与冻结基线（base sha）均以本表为唯一权威落点；`03-execution-capsule.md#§4` 只描述其语义与消费方式，不重复存储。WI 创建时在同一事务内写入 `name`/`url`/`subdir` 并回填 `base`：创建 body 携带 `repo_inventory_base`，与 §4.5 的 workflow 校验/固化同事务；条数或 `name` 集合与声明行不一致 → `CORE-400 INVENTORY_MISMATCH`，任一行缺 `base` → `CORE-400 INVENTORY_BASE_MISSING`，创建整体失败。此后 `base` 不可变（无 UPDATE 路径，只能随「新 WI」整行重建）。
+**权威归属**：WI 的 repo inventory（这张票要动的仓库）以 `work_items.repo_inventory` 一列为唯一权威落点（polyforge#157：原 `wi_repo_inventory` 表并入此列，`deploy/sql/v2.5.0`）；`03-execution-capsule.md#§4` 只描述其语义与消费方式，不重复存储。
 
 ```sql
-CREATE TABLE wi_repo_inventory (
-  work_item_id TEXT NOT NULL REFERENCES work_items(id),
-  position     INTEGER NOT NULL,            -- 声明顺序，1..8，供确定性检出顺序与展示
-  name         TEXT NOT NULL,               -- repo 短名，Capsule 内子目录名
-  url          TEXT NOT NULL,
-  subdir       TEXT,                        -- 可空：仓内子目录锚点
-  base         TEXT,                        -- commit sha；创建事务内冻结写入，之后不可变
-  PRIMARY KEY (work_item_id, position)
-);
-CREATE UNIQUE INDEX idx_inventory_name ON wi_repo_inventory(work_item_id, name);
+-- work_items 上的一列（§4.2 DDL）：
+repo_inventory TEXT   -- JSON 数组 [{"name": "<项目仓库名>"}]，只存名字；NULL = 无清单
 ```
+
+- **建票冻结**：在 WI 创建事务内校验并写入，此后不可变（无 UPDATE 路径；`PATCH` 携带 `repo_inventory` → `CORE-400 reason=IMMUTABLE`；改清单 = 取消并新建 WI）。
+- **只存名字（安全边界）**：认领方 Daemon 用本机 git 凭证 clone 清单里的仓库，所以 clone 源只能来自项目记录（`projects.repos`，由项目 maintainer/admin 维护），绝不来自建票人。每项只接受 `{name}`；url 在**认领时**从项目记录解析。
+- **校验（Go 侧，创建事务内，失败则整体不落库）**：1..8 项；每项必须有字符串 `name`；`name` 必须是该项目的仓库（否则 `CORE-400 REPO_NOT_IN_PROJECT`）且在同一 WI 内唯一（重复 → `CORE-400 INVENTORY_DUPLICATE_NAME`）；携带 `url` → `CORE-400 INVENTORY_URL_NOT_ALLOWED`（即使与项目记录相同）；携带 `subdir` → `CORE-400 INVENTORY_SUBDIR_UNSUPPORTED`；其他键 → `CORE-400`（未知键）。
+- **不支持冻结 base commit**：工作机不会检出指定 base，故任一项携带 `base`，或请求体的 `repo_inventory_base` 数组非空 → `CORE-400 INVENTORY_BASE_UNSUPPORTED`（拒绝而非存了不生效；`null`/`[]` 视为无）。工作机 clone 各仓库的默认分支；同一 WI 重新认领时由 carrier ref 恢复上次现场（`03-execution-capsule.md#§4`）。
+- **认领消费**：`POST /api/v1/work-items/{id}/claim` 的答复 `repos` 在 WI 有清单时**只**返回清单内仓库，url 取认领时项目记录中的值（`{name, url, description?}`）；无清单时返回项目全部仓库（向后兼容）；重新认领（blocked→resume）同理。清单中的名字已不再是项目仓库 → 认领被拒 `CORE-409 INVENTORY_REPO_GONE`（认领事务回滚，WI 保持 `queued`；在项目上恢复该仓库，或取消并重新建票）。这样的 WI 同时**离开就绪队列**（`GET .../ready-queue` 的 `items` 不含它，与有未完成 `blocks` 边的 WI 同理，不新增状态或 `waiting_on` 值，就绪投影也不单列原因），因此 Daemon 的自动拉取不会反复认领它；仓库恢复后自动回到 `items`。Daemon 按 `repos` 逐个 clone，无额外逻辑。
 
 **API**（权威签名；`01`/`03`/`05` 只引用，不重复定义）：
 
-- `POST /api/v1/work-items` body 可带 `repo_inventory: [{name, url, subdir?}]`（1..8 条，`name` 在同一 WI 内唯一）与 `repo_inventory_base: [{name, base}]`（条数与 `name` 集合须与 `repo_inventory` 完全一致，同事务冻结 `base`，见上）；缺省为空数组（非仓库类 WI）。
-- `GET /api/v1/work-items/{id}` 响应体含 `repo_inventory` 字段（含 `base`；创建后即已冻结，不为 `null`）。
-- `GET /api/v1/work-items/{id}/repo-inventory`：独立只读端点，返回同 `GET .../work-items/{id}` 内嵌字段的等价内容，供 `05-sync-revision-recovery.md#§7.4` 远端现场恢复（takeover / Capsule 重建）流程不拉取整份 WI 详情即可重建检出清单。`CORE-404`（WI 不存在）。
+- `POST /api/v1/work-items` body 可带 `repo_inventory: [{name}]`（规则见上）；缺省 = 无清单。`pf file create --repo <name>`（可重复）发送这些项。
+- `GET /api/v1/work-items/{id}` 响应体在 WI 有清单时含 `repo_inventory`（冻结的名字数组）；无清单时省略该键。
 
 ### 4.7 `wi_events` <!-- §4.7 -->
 
@@ -492,14 +489,14 @@ F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-se
 | # | 方法 | 路径 | 调用方 | 语义 | 错误码 |
 |---|---|---|---|---|---|
 | **A. WI 业务（6 行：行 1–6）** | | | | | |
-| 1 | POST | `/api/v1/work-items` | `pf` CLI（路由 skill/CI/人） | 创建 WI（`queued`）；body 可带 `bundle_name`（非空 = 执行票，走 §4.5 校验/固化；NULL/缺省 = 纯登记票，跳过，§4.4）、可选 `parent_id`（epic-lite，写路径约束 §4.2a）、`repo_inventory`+`repo_inventory_base`（§4.6）与 `attrs`（业务级自由属性，受 INV-2c 黑名单校验，§5.1a）；服务端在同一事务内完成 workflow.md frontmatter 校验与三 scalar 固化（§4.5） | CORE-400（含 frontmatter 校验失败，`detail` 携带命中 `rule_id`）/ CORE-409 |
+| 1 | POST | `/api/v1/work-items` | `pf` CLI（路由 skill/CI/人） | 创建 WI（`queued`）；body 可带 `bundle_name`（非空 = 执行票，走 §4.5 校验/固化；NULL/缺省 = 纯登记票，跳过，§4.4）、可选 `parent_id`（epic-lite，写路径约束 §4.2a）、`repo_inventory`（§4.6）与 `attrs`（业务级自由属性，受 INV-2c 黑名单校验，§5.1a）；服务端在同一事务内完成 workflow.md frontmatter 校验与三 scalar 固化（§4.5） | CORE-400（含 frontmatter 校验失败，`detail` 携带命中 `rule_id`）/ CORE-409 |
 | 2 | GET | `/api/v1/work-items?project=&status=&assignee=&waiting_on=&parent=&milestone=` | `pf` CLI | 列表/过滤；`parent=` 经 `idx_wi_parent`、`milestone=` 经 `idx_wi_milestone`（§4.2）；结果先经 §4.10 权限硬边界裁剪 | CORE-400 |
-| 3 | GET/PATCH | `/api/v1/work-items/{id}?include=events,deps,children` | `pf` CLI（只读详情亦经 Daemon 本地认证代理，`04-local-runtime.md#§5.3`） | 详情（基本记录 + `repo_inventory` 含 base；`include` 参数权威定义见 §5.1c；w140 新增只读派生 `derived` 块（有子票时，`wi-kind-contract.md`））/ 更新 goal、content、labels、priority、milestone、waiting_on（`attrs` 受 INV-2c 黑名单校验；`bundle_name` 仅 R2 窗口内可 PATCH（§4.5），认领后不可变 INV-2e；digest 键不在可更新集合（携带即 `CORE-400`）；`parent_id` 不可变 §4.2a）。同路径 GET+PATCH 计 1 行（计数口径见上） | CORE-404 / CORE-409 / CORE-410 / CORE-400 |
+| 3 | GET/PATCH | `/api/v1/work-items/{id}?include=events,deps,children` | `pf` CLI（只读详情亦经 Daemon 本地认证代理，`04-local-runtime.md#§5.3`） | 详情（基本记录 + `repo_inventory`（有清单时）；`include` 参数权威定义见 §5.1c；w140 新增只读派生 `derived` 块（有子票时，`wi-kind-contract.md`））/ 更新 goal、content、labels、priority、milestone、waiting_on（`attrs` 受 INV-2c 黑名单校验；`bundle_name` 仅 R2 窗口内可 PATCH（§4.5），认领后不可变 INV-2e；digest 键不在可更新集合（携带即 `CORE-400`）；`parent_id` 不可变 §4.2a）。同路径 GET+PATCH 计 1 行（计数口径见上） | CORE-404 / CORE-409 / CORE-410 / CORE-400 |
 | 4 | GET | `/api/v1/projects/{project}/ready-queue` | `pf` CLI | 就绪队列：`{items, running, paused, pending_bundles}` 四段响应（D1 裁定，polyforge#150：以代码为准），schema 权威见 §5.1b；结果先经 §4.10 裁剪 | CORE-400 / CORE-404 |
 | 5 | POST | `/api/v1/work-items/{id}/cancel` | `pf` CLI（reporter / 该 project maintainer / admin，§6.5） | 终止 `queued`/`paused`/`blocked` 的 WI（不要求活跃 generation） | CORE-409（状态不属于三者之一）/ CORE-410 |
 | 6 | GET | `/api/v1/work-items/{id}/progress` | 任意客户端（人/CI；`observe` 经 Daemon 本地认证代理） | read-through 进度（§5.2） | CORE-404 / CORE-504 |
 | **B. 执行权（7 行：行 7–13）** | | | | | |
-| 7 | POST | `/api/v1/work-items/{id}/claim` | Daemon（机器 api_key） | 认领：generation+1、开活跃行（§6.1）；`resume`（对 `paused` WI 的重新激活）不是独立端点，走本端点（§2.3/§6.2：重新激活 = 新一次 claim）；body 带 `idempotency_key`，重发同 key + 同调用方身份 + 同 WI 返回同一次结果（§6.6，INV-2d）；登记票不可 claim（`NOT_CLAIMABLE`，§4.4） | CORE-409（ALREADY_CLAIMED / NOT_CLAIMABLE / IDEMPOTENCY_KEY_REUSED）/ CORE-503 |
+| 7 | POST | `/api/v1/work-items/{id}/claim` | Daemon（机器 api_key） | 认领：generation+1、开活跃行（§6.1）；`resume`（对 `paused` WI 的重新激活）不是独立端点，走本端点（§2.3/§6.2：重新激活 = 新一次 claim）；body 带 `idempotency_key`，重发同 key + 同调用方身份 + 同 WI 返回同一次结果（§6.6，INV-2d）；登记票不可 claim（`NOT_CLAIMABLE`，§4.4） | CORE-409（ALREADY_CLAIMED / NOT_CLAIMABLE / IDEMPOTENCY_KEY_REUSED / INVENTORY_REPO_GONE，§4.6）/ CORE-503 |
 | 8 | POST | `/api/v1/work-items/{id}/force-takeover` | 人（`role='admin'`）经 `pf` CLI | 强制接管：generation+1（§6.2）；不需 `flush_evidence`、不需持有旧 token | CORE-403 / CORE-404 |
 | 9 | POST | `/api/v1/work-items/{id}/session-end` | Daemon | 会话收尾端点（已取代并删除 v1 的 `end-generation`）：body `{session_id, status, note?, clean_pause?, head_sha?}`，`status` ∈ {`wrapped`, `failed`, `blocked`, `paused`}；`paused` 走 M3 pause 迁移（会话**保留**，`clean_pause` 随同一 fenced UPDATE 落盘），三个终态裁决经 session-hash fence 校验后落状态并清空会话（D14 裁定：`paused` 起点可直接 `blocked`/`wrapped`/`failed`，无需先 `resume`）；`head_sha` 仅随 `blocked` 携带 | CORE-400 / CORE-403 / CORE-404 / CORE-409 |
 | 10 | POST | `/api/v1/work-items/{id}/unblock` | Daemon（重新认领） | 解阻：`blocked` → `running`，新一次 claim（generation+1，§6.2） | CORE-409（非 `blocked`）/ CORE-410 |
@@ -579,7 +576,7 @@ token 与 `(wi_id, generation, machine_id)` 三元绑定；换机器重放同一
 | `deps` | `deps` | 依赖边两组清单（§4.2a）：`blocking`（本 WI 阻塞了谁）与 `blocked_by`（谁阻塞本 WI），各条目 `{wi_id, kind}`；边端对象随 §4.10 权限硬边界先行裁剪 |
 | `children` | `children` | 直接子票清单（`parent_id` = 本 WI，经 `idx_wi_parent`，§4.2/§4.2a）+ 派生 `rollup`：`{total, wrapped, running, blocked, queued}`——`total` 为直接子票总数，其余为对应状态计数（未列状态不单独计数，可由 `total` 差额得出）；**rollup 是查询时派生聚合，不落库**（无任何 Core 列/表承载，每次现算） |
 
-include 拼装与基本记录读取在同一读事务内完成，保证一致性；默认（无 `include`）只返回基本记录 + `repo_inventory`（含 `base`，§4.6）。三条 include 均不携带执行态（`events` 的 payload 受 INV-2c 词表约束，§5.1a）。
+include 拼装与基本记录读取在同一读事务内完成，保证一致性；默认（无 `include`）只返回基本记录 + `repo_inventory`（有清单时，§4.6）。三条 include 均不携带执行态（`events` 的 payload 受 INV-2c 词表约束，§5.1a）。
 
 ### 5.2 进度 read-through API（权威定义） <!-- §5.2 -->
 
@@ -612,11 +609,11 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 | 码 | 语义 |
 |---|---|
-| CORE-400 | 请求非法（字段/类型/UNKNOWN_EVENT_TYPE/EXECUTION_STATE_REJECTED/INVENTORY_MISMATCH/INVENTORY_BASE_MISSING/parent_id 与依赖边约束（§4.2a：PARENT_DEPTH/PARENT_NOT_REGISTRY/PARENT_PROJECT_MISMATCH/PARENT_CHILD_DEPENDENCY）/创建时 workflow.md frontmatter 校验失败——`detail` 携带命中 `rule_id`，§4.5） |
+| CORE-400 | 请求非法（字段/类型/UNKNOWN_EVENT_TYPE/EXECUTION_STATE_REJECTED/INVENTORY_DUPLICATE_NAME/INVENTORY_URL_NOT_ALLOWED/INVENTORY_SUBDIR_UNSUPPORTED/INVENTORY_BASE_UNSUPPORTED/REPO_NOT_IN_PROJECT/parent_id 与依赖边约束（§4.2a：PARENT_DEPTH/PARENT_NOT_REGISTRY/PARENT_PROJECT_MISMATCH/PARENT_CHILD_DEPENDENCY）/创建时 workflow.md frontmatter 校验失败——`detail` 携带命中 `rule_id`，§4.5） |
 | CORE-401 | 凭证缺失或无效 |
 | CORE-403 | token 或授权校验失败；body 携带 `reason`：`stale_generation`（fencing，§6.4）\|`secret_rotated_expired`（§6.6 宽限轮换后的过期）\|`secret_rolled_back`（§6.6 mode=rollback 作废：token 的 epoch 已被回滚标记 retired，**不可重新授权**，唯一出路是 admin force-takeover）\|`forbidden`（角色/权限不足，如非 admin 调 force-takeover/budget-increments、无 membership 访问他 project 对象，§4.10） |
 | CORE-404 | 对象不存在（含权限硬边界下的「按不存在处理」，§4.10） |
-| CORE-409 | 状态冲突（已认领/登记票不可 claim（NOT_CLAIMABLE）/依赖环（DEPENDENCY_CYCLE）/索引重复/budget-increments 的 CAS 冲突） |
+| CORE-409 | 状态冲突（已认领/登记票不可 claim（NOT_CLAIMABLE）/清单仓库已不在项目中（INVENTORY_REPO_GONE，§4.6）/依赖环（DEPENDENCY_CYCLE）/索引重复/budget-increments 的 CAS 冲突） |
 | CORE-410 | 终态不可写 |
 | CORE-413 | payload 超限 |
 | CORE-425 | FLUSH_REQUIRED：结束 generation 前 `flush_evidence` 缺失或校验未通过（§6.4），`reason` 细分见 §6.4 |

@@ -8,7 +8,7 @@
 
 - **create**（`POST /api/v1/work-items`）：请求体可选 `bundle_name`（非空字符串）。非空 = 执行票；NULL / 缺省 = 纯登记票。（digest 链已删，polyforge#149 B9：载荷携带 digest 字段会被忽略，不再落库。）
 - **PATCH**（`PATCH /api/v1/work-items/{id}`）：`bundle_name` 为 R2 窗口内可更新键（string 或 null）；`null` = 解绑（票回到 ready queue「待选 bundle」分段）。digest 键已从可更新键集合删除（polyforge#149 B9）：携带该键的 PATCH 整体拒绝 `CORE-400`（未知/不可更新字段）。
-- **落库规则（create 与 PATCH 共用同一代码路径）**：bundle 引用即 `bundle_name` 本身，无 digest（不再派生 stand-in，也不接受显式 pin）；`wi_repo_inventory` 不受 PATCH 影响。
+- **落库规则（create 与 PATCH 共用同一代码路径）**：bundle 引用即 `bundle_name` 本身，无 digest（不再派生 stand-in，也不接受显式 pin）；`repo_inventory`（`02-aihub-core.md#§4.6`）不受 PATCH 影响。
 - **响应面**：WI 视图（GET 详情 / 列表 / queue 条目）携带 `bundle_name`（既有字段，形状不变）。
 
 ## 2. R2 窗口语义（首次认领冻结）

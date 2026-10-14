@@ -1,138 +1,182 @@
 package core
 
-// WI repo inventory (02 §4.6): the repo-reference triple (name/url/subdir
-// declaration + frozen base sha) whose Core-authoritative store is the
-// wi_repo_inventory table. The two input arrays arrive on the WI
-// create/patch body and are validated as ONE triple; the base is frozen
-// inside the create transaction and immutable after (no UPDATE path — a
-// changed inventory means a new WI). This file ports the v0 validation
-// block (v0/internal/core/workitem/workitem.go:186-212, git history) into the v1
-// core, closing the TODO(v1) §4.5 checkout-hash gap the WI goal names:
-// a ProjectRepo-style entry with name+URL but a missing/blank HEAD sha
-// can no longer slip through as a half-empty triple.
+// WI repo inventory (02 §4.6): the project repos one work item declares
+// it works in. It is stored as ONE JSON array of NAMES in
+// work_items.repo_inventory (NULL = no inventory): [{"name": "..."}].
+// Frozen at create — there is no UPDATE path (a changed inventory means a
+// new WI). The claim answer serves it instead of the project's full repo
+// list, so a ticket only clones the repos it declared.
+//
+// Only names are accepted: every URL the claiming daemon clones (with
+// the machine's git credentials) comes from projects.repos, resolved at
+// claim time — never from the filer. A client-supplied url, a subdir or
+// a frozen base commit is refused at create instead of being stored.
 
 import (
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
-// RepoDecl is one declared inventory entry (the §4.6 wire shape of
-// repo_inventory). It is deliberately NOT api.ProjectRepo: that type is
-// the project-level inventory (name/url/description, no sha) and stays
-// untouched; this is the WI-level triple's declaration half.
+// RepoDecl is one stored repo_inventory entry: a project repo name.
 type RepoDecl struct {
-	Name   string  `json:"name"`
-	URL    string  `json:"url"`
-	Subdir *string `json:"subdir"`
-}
-
-// RepoBaseDecl is one repo_inventory_base entry: the frozen base commit
-// sha for a declared repo name.
-type RepoBaseDecl struct {
 	Name string `json:"name"`
-	Base string `json:"base"`
 }
 
-// WIRepoEntry is one wi_repo_inventory row as served on the WI view
-// (base included — frozen at create, never null for a declared repo).
-type WIRepoEntry struct {
-	Position int64   `json:"position"`
-	Name     string  `json:"name"`
-	URL      string  `json:"url"`
-	Subdir   *string `json:"subdir"`
-	Base     string  `json:"base"`
-}
+// RepoInventoryInput is the create body's repo_inventory: one object
+// per entry, kept raw so every key other than name is refused by name
+// rather than silently dropped.
+type RepoInventoryInput []map[string]json.RawMessage
 
 // maxRepoInventory is the §4.6 cardinality bound: 1..8 entries per WI.
 const maxRepoInventory = 8
 
-// validateRepoInventory enforces the §4.6 triple on the two input arrays:
-// 1..8 entries, unique names per WI, and a base sha for every declared
-// repo. A declared entry whose base is missing (no base row at all) or
-// blank draws INVENTORY_BASE_MISSING naming the offending repo — the
-// same refusal vocabulary as v0 workitem.go:211 and doc line 276; the
-// create/patch carrying it must fail whole. Duplicate names and a base
-// set that does not match the declaration set are INVENTORY_MISMATCH.
-// On success it returns the name→base map for the freeze insert.
-func validateRepoInventory(inv []RepoDecl, bases []RepoBaseDecl) (map[string]string, error) {
-	if len(inv) > maxRepoInventory {
+// resolveRepoInventory validates a create's declared inventory against
+// the §4.6 rules: 1..8 entries, each exactly {name}, the name one of the
+// project's repos and unique. It answers the array to freeze (nil when
+// none was declared).
+func resolveRepoInventory(in RepoInventoryInput, projectRepos []api.ProjectRepo) ([]RepoDecl, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	if len(in) > maxRepoInventory {
 		return nil, Fail(api.ErrCoreBadInput, "", "repo_inventory allows 1..8 entries")
 	}
-	baseByName := map[string]string{}
-	for _, b := range bases {
-		if _, dup := baseByName[b.Name]; dup {
-			return nil, Fail(api.ErrCoreBadInput, "INVENTORY_MISMATCH", "duplicate base entry for %q", b.Name)
+	inProject := map[string]bool{}
+	for _, pr := range projectRepos {
+		inProject[pr.Name] = true
+	}
+	out := make([]RepoDecl, 0, len(in))
+	seen := map[string]bool{}
+	for _, entry := range in {
+		var name string
+		if raw, ok := entry["name"]; !ok || json.Unmarshal(raw, &name) != nil || strings.TrimSpace(name) == "" {
+			return nil, Fail(api.ErrCoreBadInput, "", "every repo_inventory entry needs a string name")
 		}
-		baseByName[b.Name] = b.Base
-	}
-	seenNames := map[string]bool{}
-	for _, r := range inv {
-		if seenNames[r.Name] {
-			return nil, Fail(api.ErrCoreBadInput, "INVENTORY_MISMATCH", "duplicate inventory name %q", r.Name)
+		name = strings.TrimSpace(name)
+		if _, ok := entry["url"]; ok {
+			return nil, Fail(api.ErrCoreBadInput, "INVENTORY_URL_NOT_ALLOWED",
+				"repo %q: url is not accepted; name a project repo (its url comes from the project)", name)
 		}
-		seenNames[r.Name] = true
-	}
-	// Per-entry base check FIRST: a declared entry with name+URL whose
-	// base row is absent entirely (the whole repo_inventory_base array
-	// missing, or just this name) is exactly the half-empty triple §4.6
-	// refuses — it draws the base-naming refusal, not the generic
-	// count-mismatch one.
-	for _, r := range inv {
-		base, ok := baseByName[r.Name]
-		if !ok || strings.TrimSpace(base) == "" {
-			return nil, Fail(api.ErrCoreBadInput, "INVENTORY_BASE_MISSING", "base missing for %q", r.Name)
+		if _, ok := entry["subdir"]; ok {
+			return nil, Fail(api.ErrCoreBadInput, "INVENTORY_SUBDIR_UNSUPPORTED",
+				"repo %q: subdir is not supported; omit it", name)
 		}
-		baseByName[r.Name] = strings.TrimSpace(base)
+		if _, ok := entry["base"]; ok {
+			return nil, Fail(api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED",
+				"repo %q: a frozen base commit is not supported; omit base (the work machine clones the repo's default branch)", name)
+		}
+		if len(entry) != 1 {
+			return nil, Fail(api.ErrCoreBadInput, "", "repo %q: unknown repo_inventory key (entries are {name})", name)
+		}
+		if seen[name] {
+			return nil, Fail(api.ErrCoreBadInput, "INVENTORY_DUPLICATE_NAME", "duplicate inventory name %q", name)
+		}
+		seen[name] = true
+		if !inProject[name] {
+			return nil, Fail(api.ErrCoreBadInput, "REPO_NOT_IN_PROJECT",
+				"repo %q is not one of the project's repos", name)
+		}
+		out = append(out, RepoDecl{Name: name})
 	}
-	// What remains of the set comparison: base entries naming repos the
-	// declaration does not carry (extra or foreign names).
-	if len(baseByName) != len(inv) {
-		return nil, Fail(api.ErrCoreBadInput, "INVENTORY_MISMATCH",
-			"repo_inventory_base does not match repo_inventory (count/name set)")
-	}
-	return baseByName, nil
+	return out, nil
 }
 
-// insertRepoInventoryTx freezes the validated triple into
-// wi_repo_inventory inside the caller's create transaction (§4.6: the
-// declaration and the base land in the SAME transaction as the WI row;
-// there is no UPDATE path afterwards).
-func insertRepoInventoryTx(tx *sql.Tx, wiID string, inv []RepoDecl, baseByName map[string]string) error {
-	for i, r := range inv {
-		var subdir any
-		if r.Subdir != nil {
-			subdir = *r.Subdir
-		}
-		if _, err := tx.Exec(`INSERT INTO wi_repo_inventory(work_item_id, position, name, url, subdir, base)
-			VALUES (?1,?2,?3,?4,?5,?6)`, wiID, i+1, r.Name, r.URL, subdir, baseByName[r.Name]); err != nil {
-			return err
-		}
+// refuseRepoInventoryBase refuses the removed second array of the
+// pre-v2.5.0 shape when it carries any entry (absent, null and [] mean
+// "no bases" and pass).
+func refuseRepoInventoryBase(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
 	}
-	return nil
+	var bases []json.RawMessage
+	if json.Unmarshal(raw, &bases) == nil && len(bases) == 0 {
+		return nil
+	}
+	return Fail(api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED",
+		"repo_inventory_base is not supported; omit it (the work machine clones each repo's default branch)")
 }
 
-// repoInventoryOf reads the frozen inventory (base included) in
-// declaration order. WIs without an inventory serve an empty array.
-func (m *WIManager) repoInventoryOf(wiID string) ([]WIRepoEntry, error) {
-	rows, err := m.db.Query(`SELECT position, name, url, subdir, base FROM wi_repo_inventory
-		WHERE work_item_id=?1 ORDER BY position`, wiID)
+// repoInventoryJSON is the column value of a resolved inventory: NULL
+// when none was declared.
+func repoInventoryJSON(inv []RepoDecl) (any, error) {
+	if len(inv) == 0 {
+		return nil, nil
+	}
+	b, err := json.Marshal(inv)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []WIRepoEntry{}
-	for rows.Next() {
-		var e WIRepoEntry
-		var subdir sql.NullString
-		if err := rows.Scan(&e.Position, &e.Name, &e.URL, &subdir, &e.Base); err != nil {
-			return nil, err
-		}
-		if subdir.Valid {
-			e.Subdir = &subdir.String
-		}
-		out = append(out, e)
+	return string(b), nil
+}
+
+// repoInventoryOf reads a WI's frozen inventory in declaration order
+// (nil when it declared none).
+func repoInventoryOf(q queryRower, wiID string) ([]RepoDecl, error) {
+	var raw sql.NullString
+	err := q.QueryRow(`SELECT repo_inventory FROM work_items WHERE id=?1`, wiID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
 	}
-	return out, rows.Err()
+	if err != nil || !raw.Valid || raw.String == "" {
+		return nil, err
+	}
+	var inv []RepoDecl
+	if err := json.Unmarshal([]byte(raw.String), &inv); err != nil {
+		return nil, err
+	}
+	return inv, nil
+}
+
+// claimReposTx answers the claim's task repos: the WI's inventory when
+// it declared one — each name resolved to its URL from the project's
+// repos NOW, so the clone source is always the project's record — else
+// every repo of its project (WIs filed without an inventory keep the
+// pre-§4.6 behavior). A declared name the project no longer has refuses
+// the claim (CORE-409 INVENTORY_REPO_GONE; the caller's transaction
+// rolls back, the WI stays queued).
+func claimReposTx(tx *sql.Tx, wiID, projectID string) ([]api.ProjectRepo, error) {
+	inv, err := repoInventoryOf(tx, wiID)
+	if err != nil {
+		return nil, err
+	}
+	projectRepos, err := projectReposTx(tx, projectID)
+	if err != nil || len(inv) == 0 {
+		return projectRepos, err
+	}
+	byName := map[string]api.ProjectRepo{}
+	for _, pr := range projectRepos {
+		byName[pr.Name] = pr
+	}
+	repos := make([]api.ProjectRepo, 0, len(inv))
+	for _, r := range inv {
+		pr, ok := byName[r.Name]
+		if !ok {
+			return nil, Fail(api.ErrCoreConflict, "INVENTORY_REPO_GONE",
+				"declared repo %q is no longer one of the project's repos; restore it on the project, or cancel and re-file the work item", r.Name)
+		}
+		repos = append(repos, pr)
+	}
+	return repos, nil
+}
+
+// inventoryRepoGone reports whether a WI's frozen inventory names a repo
+// that is not in inProject (the project's current repo-name set). Such a
+// WI would only draw CORE-409 INVENTORY_REPO_GONE on every claim, so the
+// ready projection leaves it out (like an unfinished blocks edge) until
+// the repo is restored or the WI is canceled.
+func inventoryRepoGone(q queryRower, wiID string, inProject map[string]bool) (bool, error) {
+	inv, err := repoInventoryOf(q, wiID)
+	if err != nil {
+		return false, err
+	}
+	for _, r := range inv {
+		if !inProject[r.Name] {
+			return true, nil
+		}
+	}
+	return false, nil
 }

@@ -122,7 +122,7 @@ tracker sync 等 v1 不含的能力）是两个互不共享代码与数据的独
 | INV-D1 | 升级期间**没有**双写窗：旧 aihub 进程必须先停稳、释放 `02-aihub-core.md#§2.2` 的 `service.lock`，新进程才允许启动。 |
 | INV-D2 | 删除只经 Core API（`05-sync-revision-recovery.md#§2.10` 的状态门 + 确认门 + 24h tombstone 三重防护，签名与错误码见 `05-sync-revision-recovery.md#§5.1`/§5.2）；**不存在**文件系统级清扫入口——任何「直接删除 `<data_dir>` 或工作机 Capsule 目录」的操作在 vNext 部署面上无对应端点。 |
 | INV-D3 | Pilot/监控口径中任何「某条命令确实被执行」的判据，其来源只能是 Capsule Native runner 在 `RunCommand`（`03-execution-capsule.md#§5.1`）调用返回给 WI Agent 的 `Result{exit_code, stdout, stderr, killed, duration_ms}`，并进一步体现为 WI Agent 据此写入 `runtime-state/execution.json`（`03-execution-capsule.md#§4.2`）的 `steps.<id>.output`/`attempts` 内容；**不得**采信 Capsule `logs/` 目录的内容作为该证据——`logs/` 对 harness-native subagent 是可追加写权限（`03-execution-capsule.md#§5.2`），subagent 是被观察对象，不能同时充当自己是否被正确执行的证人（§9.2a 展开）。 |
-| INV-D4 | Pilot 否决门槛判定「某 step 是否产出了它承诺的 artifact」时，判据是该 step 对应仓库相对**该 step 自己的起始基线**（`03-execution-capsule.md#§4.2` `steps.<id>.step_start_refs`，**不是** §4.1/§4.3 的 WI 级 `repo_inventory_base`）的实际工作树 diff、`artifacts/` 目录下的新增产物，或 `runtime-state/execution.json` 中该 step 的 `output` 字段（`03-execution-capsule.md#§4.2`）是否非空——与该 step 调用了多少次 `RunCommand` **无关**：一个 step 完全可能只通过文件写工具（Edit/Write 类）合法完成全部工作而不触发任何 `RunCommand` 调用（§9.2a 展开）。使用 step 自己的起始基线而非 WI 级基线，是为了区分“本 step 自己产出了什么”与“前面 step 留下的改动”：后者对 WI 级基线而言也是非空 diff，会让未实际产出的后续 step 逃过本检查。当前架构未定义任何「声明改动文件清单 vs 实际 diff」的机械全等校验字段，本判据不得假设存在这样一份声明清单。 |
+| INV-D4 | Pilot 否决门槛判定「某 step 是否产出了它承诺的 artifact」时，判据是该 step 对应仓库相对**该 step 自己的起始基线**（`03-execution-capsule.md#§4.2` `steps.<id>.step_start_refs`，**不是** §4.1/§4.3 的 WI 级认领基线（`capsule.json` 的 `repos`））的实际工作树 diff、`artifacts/` 目录下的新增产物，或 `runtime-state/execution.json` 中该 step 的 `output` 字段（`03-execution-capsule.md#§4.2`）是否非空——与该 step 调用了多少次 `RunCommand` **无关**：一个 step 完全可能只通过文件写工具（Edit/Write 类）合法完成全部工作而不触发任何 `RunCommand` 调用（§9.2a 展开）。使用 step 自己的起始基线而非 WI 级基线，是为了区分“本 step 自己产出了什么”与“前面 step 留下的改动”：后者对 WI 级基线而言也是非空 diff，会让未实际产出的后续 step 逃过本检查。当前架构未定义任何「声明改动文件清单 vs 实际 diff」的机械全等校验字段，本判据不得假设存在这样一份声明清单。 |
 | INV-D5 | 任何以「样本占比超过阈值」形式表达的否决门槛，必须同时给出：统计窗口（Pilot 累计周期或滚动周期）与分母的精确定义（哪一类事件、取自哪个时间范围）；只给比例不给窗口/分母的表述在本文视为未完成定义，不得进入否决门槛表（§9.3 逐条落实）。 |
 
 ### 2.3 部署单元与 WI Agent 的关系 <!-- §2.3 -->
@@ -528,7 +528,7 @@ M1–M9 无一依赖旧多段结构——M3 的卡死判定来自 step 状态与
   作用域限定；`kind ∈ {qa, spec, gate, review}` 的 step 不计算本判据）**：一个该类 step 的执行
   结果被判定为「未产出承诺的 artifact」，当且仅当以下三者**同时**成立：
   1. 该 step 所写仓库相对**该 step 自己的起始基线**（`03-execution-capsule.md#§4.2` `steps.<id>.step_start_refs`，不是 WI 级
-   `repo_inventory_base`）的实际工作树 diff 为空；
+   认领基线（`capsule.json` 的 `repos`））的实际工作树 diff 为空；
   2. `artifacts/` 目录下没有该 step 新增的文件；
   3. `runtime-state/execution.json` 中该 step 的 `output` 字段（`03-execution-capsule.md#§4.2`）为空或不含任何非空
      产出内容（含 `output.commands` 为空或缺失）。
