@@ -28,7 +28,7 @@ type Handle struct {
 	cancel  context.CancelFunc
 	pid     int
 	started string
-	// drv is the underlying Driver (Answer/Rewind/Terminate operator
+	// drv is the underlying Driver (Answer/Terminate operator
 	// seams); set by Start.
 	drv *driver.Driver
 }

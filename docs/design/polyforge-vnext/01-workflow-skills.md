@@ -121,7 +121,7 @@ frontmatter 不声明 step 间输入 wiring、执行目录（`cwd`）或任何�
 
 v1 schema 不声明任何 step 级 isolation 类键名；v1 不引入 per-step isolation 的权威裁定见 `00-architecture.md#§1.2`/INV-12、`03-execution-capsule.md#§1.2`。
 
-**加载期校验（以代码为准，polyforge#118/#165）**：AIHub 创建 WI 时不解析、不校验 frontmatter。唯一的结构校验在工作机 driver 加载已物化 bundle 时执行（`internal/polyforge/driver/workflow.go` 的 `LoadWorkflow` → `validateWorkflow`）；任一规则失败 → 该 workflow 加载失败、WI 不派发，错误信息点名 step 与违反的规则。frontmatter 的读取是宽松的：未知键被忽略，不拒绝。
+**加载期校验（以代码为准，polyforge#118/#165）**：AIHub 创建 WI 时不解析、不校验 frontmatter。唯一的结构校验在工作机 driver 加载已物化 bundle 时执行（`internal/polyforge/driver/workflow.go` 的 `LoadWorkflow` → `validateWorkflow`）；任一规则失败 → 该 workflow 加载失败、WI 不派发；错误信息点名 step 与问题，不带规则编号、不带错误码（下表编号只供文档引用）。frontmatter 的读取是宽松的：未知键被忽略，不拒绝。
 
 | 规则 | 内容 |
 |---|---|
@@ -267,7 +267,7 @@ step 单次执行尝试的消耗；workflow 级上界限制整个 WI 生命周�
 | 码 | 语义 |
 |---|---|
 | WF-200 | `bundle_name` 在 AIHub 本机 checkout 的 `workflows/` 内不存在（§4.6 第 2 步）；创建整体失败 |
-| WF-201 | frontmatter 结构校验失败（§4.1 的 V2/V5/V8/V11）：driver 加载 bundle 时拒绝，错误信息点名 step 与规则；创建时不校验 |
+| WF-201 | 不再作为错误码出现：frontmatter 违反 §4.1 的规则时，driver 加载 bundle 报错（点名 step 与问题，不带规则编号或错误码），WI 不派发；创建时不校验 |
 | WF-202 | 创建事务内本机 checkout 并发变更，导致校验读取与 digest 输入不一致（§4.5 第 3 步重算不可复现）；创建整体失败，无中间状态落库，重试创建即可 |
 | WF-203 | 执行机本机 checkout 的 bundle 文件漂移（例如 checkout 被误改、停留在错误版本或缺失文件）：物化不做 digest 校验（校验链已删，polyforge#149 B9），缺 bundle/缺文件按 `03-execution-capsule.md#§4.5` **告警继续**；确需修复时更新本机 checkout 后由新 generation 重物化，Core 不提供任何文件取回端点（`02-aihub-core.md#§4.4`） |
 | WF-101 | rewind 上界耗尽，终态 `failed_rewind_exhausted` |

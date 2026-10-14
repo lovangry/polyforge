@@ -19,9 +19,9 @@ compose; it is not itself a structural schema - the frontmatter `steps` array ab
 the *only* execution order. Nothing here overrides it.
 
 This is the ONLY lane that releases or deploys. The delivery lanes (`feature-full`,
-`bug-fix`, `quick-fix`, `chore`) end at their verification/review gate and never ship;
-shipping is a separate WI filed against this bundle, so it always acts on a verified
-origin head and is gated, evidenced and auditable on its own.
+`bug-fix`, `quick-fix`, `chore`) end at their `deliver` step (push, PR, rule-bound
+merge) and never release or deploy; shipping is a separate WI filed against this bundle,
+so it always acts on a verified merged origin head and is gated, evidenced and auditable on its own.
 
 The bundle is project-agnostic. The release and deploy procedures belong to the project
 repositories (`.polyforge/release.sh`, `.polyforge/deploy.sh`); this lane only
