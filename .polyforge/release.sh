@@ -14,9 +14,10 @@
 #   1. refuse a dirty worktree; fetch origin; refuse unless HEAD == origin/main;
 #      refuse if HEAD already carries a release tag on origin (a second release
 #      of the same commit: redeploy the existing version instead); compute the
-#      version from the origin tags;
-#   2. test gate (GOWORK=off make test, includes the long e2e; the opt-in
-#      real-GitHub e2e is skipped unless POLYFORGE_TEST_REAL_GITHUB=1);
+#      version from the origin tags; refuse unless every commit that entered
+#      main since the previous release tag came through a merged PR (the
+#      PR-only check below);
+#   2. test gate (GOWORK=off make test, includes the long e2e);
 #   3. build the binaries (GOWORK=off make release
 #      VERSION=<tag>) -> aihub-linux-amd64, pf-linux-amd64; build the image from
 #      deploy/Dockerfile tagged ghcr.io/silgrid/aihub:<tag>;
@@ -31,10 +32,25 @@
 #
 # --verify <tag> (no mutation, no tests, no build): tag format; strict
 # monotonicity (the tag must be strictly greater than EVERY other release tag on
-# origin); release exists with EXACTLY the 4
+# origin); the PR-only check over previous-tag..tag (needs the commits locally:
+# git fetch origin first); release exists with EXACTLY the 4
 # assets; sha256sum -c SHA256SUMS on the downloaded assets; aihub-image.digest is
 # exactly sha256:<64 hex> and the registry digest of ghcr.io/silgrid/aihub:<tag>
 # equals it. Exit 0 iff all pass.
+#
+# PR-only check (polyforge#163): main's FIRST-PARENT history from the previous
+# release tag to the released commit must consist only of merge commits that
+# GitHub records as the merge commit of a merged PR
+# (gh api repos/<repo>/commits/<sha>/pulls: a merged PR whose merge_commit_sha
+# is that commit). Two halves, because each alone is forgeable: a merge commit
+# is just a commit with two parents (anyone can `git merge` locally and push),
+# and a PR association alone would also accept squash/rebase merges, which
+# break the "first parent = one PR merge" shape that `gh pr merge --merge` (the
+# workflows' deliver step) produces. The PR content itself is the second-parent
+# side of each merge and is not walked. A gh API failure is a refusal, never a
+# pass. There is no override: a non-PR commit on the branch blocks every release
+# (each compares against the previous tag) until a human audits it and decides
+# how to cut the next release by hand.
 #
 # Nothing is ever deleted, overwritten or forced. If a step fails after the tag
 # was pushed, the script prints recovery instructions and does NOT undo anything.
@@ -83,6 +99,38 @@ tags_at() {
   printf '%s\n' "$1" | awk -v c="$2" '$1 == c {print $2}' | sed -n 's|^refs/tags/||p' | sed 's/\^{}$//' | grep -E "$SEMVER_RE" | sort -Vu || true
 }
 
+# tag_commit <ls-remote output> <tag>: the commit <tag> points at (peeled for
+# an annotated tag, direct for a lightweight one); empty when absent.
+tag_commit() {
+  _p=$(printf '%s\n' "$1" | awk -v r="refs/tags/$2^{}" '$2 == r {print $1; exit}')
+  [ -n "$_p" ] || _p=$(printf '%s\n' "$1" | awk -v r="refs/tags/$2" '$2 == r {print $1; exit}')
+  printf '%s' "$_p"
+}
+# non_pr_commits <from> <to>: prints one "<sha> (<why>)" line per first-parent
+# commit in <from>..<to> that is not the merge commit of a merged PR (see the
+# PR-only check above); prints nothing when all of them are. Returns non-zero
+# when the range cannot be walked.
+non_pr_commits() {
+  _list=$(git rev-list --first-parent "$1..$2") || return 1
+  for _c in $_list; do
+    _n=$(git rev-list --parents -n 1 "$_c" | wc -w)
+    if [ "$_n" -lt 3 ]; then echo "$_c (not a merge commit)"; continue; fi
+    if ! _pr=$(gh api "repos/$GH_REPO/commits/$_c/pulls" --jq ".[] | select(.merged_at != null and .merge_commit_sha == \"$_c\") | .number" 2>/dev/null); then
+      echo "$_c (gh api failed: cannot confirm a merged PR)"; continue
+    fi
+    [ -n "$_pr" ] || echo "$_c (no merged PR has it as its merge commit)"
+  done
+}
+# pr_only_check <prev tag> <prev commit> <commit>: "" when every first-parent
+# commit in prev..commit came through a merged PR, else the reason.
+pr_only_check() {
+  git cat-file -e "$2^{commit}" 2>/dev/null || { echo "previous release tag $1 ($2) is not available locally (git fetch $REMOTE first)"; return; }
+  git cat-file -e "$3^{commit}" 2>/dev/null || { echo "commit $3 is not available locally (git fetch $REMOTE first)"; return; }
+  git merge-base --is-ancestor "$2" "$3" || { echo "previous release tag $1 ($2) is not an ancestor of $3: cannot tell what entered $BRANCH"; return; }
+  _bad=$(non_pr_commits "$2" "$3") || { echo "cannot walk $1..$3"; return; }
+  [ -z "$_bad" ] || echo "commits entered $BRANCH since $1 without a merged PR: $(printf '%s\n' "$_bad" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
+}
+
 case "${1:-}" in
   -h|--help) usage; echo; echo "--verify <tag> checks an already published release without changing anything."; exit 0 ;;
 esac
@@ -125,6 +173,22 @@ if [ "${1:-}" = "--verify" ]; then
       pass "monotonic: no other tag on $REMOTE (first release)"
     else
       pass "monotonic: $VTAG > every other tag on $REMOTE (highest other $HIGH)"
+    fi
+    # PR-only: what entered the branch between the previous release and this one.
+    VC=$(tag_commit "${LS:-}" "$VTAG")
+    if [ -z "$VC" ]; then
+      fail "pr-only: commit of $VTAG unknown on $REMOTE"
+    elif [ -n "$NOTGT" ]; then
+      fail "pr-only: no previous release to check against ($VTAG is not the latest tag)"
+    elif [ -z "$HIGH" ]; then
+      pass "pr-only: first release, no previous tag to check against"
+    else
+      WHY=$(pr_only_check "$HIGH" "$(tag_commit "$LS" "$HIGH")" "$VC")
+      if [ -z "$WHY" ]; then
+        pass "pr-only: every commit on $BRANCH since $HIGH came through a merged PR"
+      else
+        fail "pr-only: $WHY"
+      fi
     fi
   else
     fail "tag format: \"$VTAG\" does not match $SEMVER_RE"
@@ -231,6 +295,11 @@ PREVTAG="$FLOOR"
 if printf '%s\n' "$LS" | grep -q "[[:space:]]refs/tags/$TAG\(\^{}\)\{0,1\}\$"; then
   die "tag $TAG already exists on $REMOTE; nothing published"
 fi
+
+# 1c. PR-only: every commit that entered the branch since the previous release
+# came through a merged PR.
+WHY=$(pr_only_check "$PREVTAG" "$(tag_commit "$LS" "$PREVTAG")" "$COMMIT")
+[ -z "$WHY" ] || die "refusing to release: $WHY; nothing built or published"
 
 # 2. test gate.
 echo "release: running test gate"
