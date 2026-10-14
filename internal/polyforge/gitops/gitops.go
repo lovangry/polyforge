@@ -46,6 +46,7 @@ package gitops
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -59,6 +60,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -100,6 +102,10 @@ type Opts struct {
 	// (e.g. EventTaskRefDiverged), already bound to this work item by the
 	// runtime. nil drops them.
 	EventSink func(kind string, body map[string]any)
+	// CarrierAlerts is the job's once-per-repo state for
+	// carrier_push_failed (owned by the runtime job, so it ends with the
+	// job and starts fresh on a re-claim). nil raises every failure.
+	CarrierAlerts *CarrierAlerts
 }
 
 // Env returns the environment every raw git invocation against this
@@ -153,13 +159,40 @@ func exitCode(err error) int {
 // git runs git once with the given environment (nil = inherit) and dir.
 // It is a var so the tests can probe the argv the package builds.
 var git = func(env []string, dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	return runGit(0, env, dir, args...)
+}
+
+// gitTimed is git bounded by timeout: on expiry the whole git process
+// group is killed (git spawns remote helpers and pack-objects), so a
+// hung remote cannot hold the per-WI lock forever. A var for the same
+// test seam as git.
+var gitTimed = func(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
+	return runGit(timeout, env, dir, args...)
+}
+
+// runGit runs git once; timeout 0 = unbounded.
+func runGit(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = CEnv(env)
 	cmd.Dir = dir
+	if timeout > 0 {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+		cmd.WaitDelay = 5 * time.Second
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if err != nil && ctx.Err() != nil {
+		err = fmt.Errorf("timed out after %s: %w", timeout, err)
+	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
@@ -427,8 +460,12 @@ func pushLocked(o Opts) (bool, int64, error) {
 	env := append(o.Env(), additions...)
 	pushed, pushMS, perr := pushChainLocked(env, o.CapsuleDir, args)
 	// Task-repo durability lane: after the chain push either way, its
-	// own invocations, its own failures — never the chain's result.
-	pushTaskRefsLocked(o)
+	// own invocations, its own failures — never the chain's result. A
+	// carrier failure is raised as a human decision only when the chain
+	// push itself landed: a hub outage or a fenced session fails both,
+	// and that is not a "cannot be saved" decision (a still-failing
+	// carrier is reported on the next successful publish).
+	pushTaskRefsLocked(o, perr == nil)
 	return pushed, pushMS, perr
 }
 
@@ -468,7 +505,8 @@ func pushChainLocked(env []string, capsuleDir string, args []string) (bool, int6
 // re-claim renames away. The namespace lives OUTSIDE refs/heads/* so a
 // plain clone of the bare repo never materializes task branches, and
 // aihub's pre-receive hook exempts it from the chain-only seq/gitlink
-// invariants while keeping deletion, fast-forward and the blob limit.
+// invariants while keeping deletion, fast-forward and a blob limit (the
+// carrier's own, capsule.MaxTaskBlobBytes).
 const TaskCarrierNamespace = "refs/pf-task/"
 
 // TaskRefName answers the carrier ref for one task repo.
@@ -477,19 +515,52 @@ func TaskRefName(repo string) string { return TaskCarrierNamespace + repo }
 // pushTaskRefsLocked mirrors every task-repo worktree's HEAD under the
 // capsule into the WI's bare repo (HEAD:refs/pf-task/<name>). Runs under
 // the per-WI lock (called from pushLocked), AFTER the chain push, and is
-// BEST-EFFORT-LOUD: each push is its own git invocation — a rejected or
-// failed carrier never fails the execution-state publish this lane
-// rides; it is logged loudly so the operator can see a re-claim would
-// lose that repo's state. An unborn or unreadable task HEAD is nothing
-// to carry (honest skip, not a failure). The invocations run inside each
-// task worktree with its OWN git-dir — never the capsule's external
-// GIT_DIR/GIT_WORK_TREE binding, whose history holds none of these
-// objects.
-func pushTaskRefsLocked(o Opts) {
+// BEST-EFFORT-LOUD: each push is its own git invocation — a rejected,
+// refused or failed carrier never fails the execution-state publish this
+// lane rides; it is logged loudly and, when the chain push landed
+// (chainOK), raised as a carrier_push_failed event (a human decision,
+// once per repo per job until the repo's carrier push succeeds again) so
+// the human sees that a re-claim may lose that repo's state. An unborn
+// task HEAD is nothing to carry (honest skip, not a failure).
+//
+// The task repo is agent-controlled (agents are untrusted) and the push
+// carries the session credential, so the credentialed push NEVER runs
+// inside it (git has no switch to ignore a repo's own config, and an
+// agent can rewrite that config at any time): carrierSource only reads
+// the repo's HEAD SHA and validates its layout, and pushCarrier pushes
+// that SHA from a daemon-owned temporary bare repo that borrows the task
+// repo's object store through objects/info/alternates (data only — git
+// reads objects from an alternate, it runs nothing from it).
+func pushTaskRefsLocked(o Opts, chainOK bool) {
 	reposDir := filepath.Join(o.CapsuleDir, capsule.DirRepos)
 	ents, err := os.ReadDir(reposDir)
 	if err != nil {
 		return // no repos/ tree: no inventory, nothing to carry
+	}
+	// ONE symlink-resolved repos dir for every check and push (the
+	// GIT_CEILING_DIRECTORIES value and the object paths agree).
+	if reposDir, err = filepath.EvalSymlinks(reposDir); err != nil {
+		return
+	}
+	type source struct{ name, objects, sha string }
+	var srcs []source
+	for _, e := range ents {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		objects, sha, reason := carrierSource(reposDir, e.Name())
+		if reason != "" {
+			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s refused (task-repo state may not survive a re-claim): %s\n", o.WorkItemID, e.Name(), reason)
+			o.carrierFailed(e.Name(), chainOK, "carrier push refused: "+reason)
+			continue
+		}
+		if sha == "" {
+			continue // unborn HEAD: nothing to carry yet
+		}
+		srcs = append(srcs, source{e.Name(), objects, sha})
+	}
+	if len(srcs) == 0 {
+		return
 	}
 	additions, cleanup, cerr := credentialEnv(o)
 	if cerr != nil {
@@ -497,39 +568,238 @@ func pushTaskRefsLocked(o Opts) {
 		return
 	}
 	defer cleanup()
-	env := append(os.Environ(), additions...)
-	for _, e := range ents {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+	for _, s := range srcs {
+		out, err := pushCarrier(o, reposDir, s.objects, s.sha, s.name, additions)
+		if err == nil {
+			o.CarrierAlerts.clear(s.name)
 			continue
 		}
-		dir := filepath.Join(reposDir, e.Name())
-		if out, err := git(nil, dir, "rev-parse", "HEAD"); err != nil || strings.TrimSpace(out) == "" {
-			continue // unborn/absent HEAD: nothing to carry yet
+		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %v: %s\n", o.WorkItemID, s.name, err, strings.TrimSpace(out))
+		o.carrierFailed(s.name, chainOK, err.Error())
+		// Never force: a non-fast-forward rejection means the carrier
+		// and this worktree DIVERGED (e.g. a re-claim that started
+		// from a clone lacking the carried commits). The carrier is
+		// left untouched and the divergence is raised as an error
+		// event, not left to stderr.
+		if IsNonFastForward(err, out) && o.EventSink != nil {
+			o.EventSink(EventTaskRefDiverged, map[string]any{
+				"repo":  s.name,
+				"ref":   TaskRefName(s.name),
+				"error": EventDetail(err.Error()),
+			})
 		}
-		// The task repo is agent-controlled (agents are untrusted): its
-		// hooks (pre-push would run as the daemon WITH the credential
-		// askpass) and fsmonitor are disabled for this invocation.
-		args := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "push"}
-		if o.Fingerprint != "" {
-			args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
+	}
+}
+
+// carrierEnv is the ONE environment of every git call on the carrier
+// lane (the task-repo reads and the push alike): the daemon's environment
+// minus every GIT_* variable, no system or global config (nothing an
+// operator's ~/.gitconfig says can reroute a credentialed push), and
+// repository discovery fenced at reposDir so a task repo without its own
+// .git can never resolve to the capsule or anything above it.
+func carrierEnv(reposDir string) []string {
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
 		}
-		args = append(args, o.RemoteURL, "HEAD:"+TaskRefName(e.Name()))
-		if out, err := git(env, dir, args...); err != nil {
-			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %v: %s\n", o.WorkItemID, e.Name(), err, strings.TrimSpace(out))
-			// Never force: a non-fast-forward rejection means the carrier
-			// and this worktree DIVERGED (e.g. a re-claim that started
-			// from a clone lacking the carried commits). The carrier is
-			// left untouched and the divergence is raised as an error
-			// event, not left to stderr.
-			if IsNonFastForward(err, out) && o.EventSink != nil {
-				o.EventSink(EventTaskRefDiverged, map[string]any{
-					"repo":  e.Name(),
-					"ref":   TaskRefName(e.Name()),
-					"error": err.Error(),
-				})
+	}
+	return append(env,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CEILING_DIRECTORIES="+reposDir,
+	)
+}
+
+// Carrier-lane git timeouts: the read-only checks and the temp-repo
+// set-up are local and short; the push talks to the hub.
+var (
+	carrierCheckTimeout = time.Minute
+	carrierPushTimeout  = 10 * time.Minute
+)
+
+// carrierFlags lead every git call on the carrier lane: no hooks, no
+// fsmonitor (both would run programs), no credential helper (an empty
+// value resets the helper list), no http proxy.
+var carrierFlags = []string{
+	"-c", "core.hooksPath=/dev/null",
+	"-c", "core.fsmonitor=false",
+	"-c", "credential.helper=",
+	"-c", "http.proxy=",
+}
+
+// carrierSource validates the task repo repos/<name> and reads its HEAD.
+// reposDir is already symlink-resolved. It answers the repo's object
+// directory and the HEAD commit SHA ("" = unborn: nothing to carry), or a
+// refusal reason. The repo must own its storage outright
+// (carrierLayoutRefusal), and git must resolve the repo to exactly its
+// own .git. The calls only READ (rev-parse); none of them pushes or
+// holds the credential.
+func carrierSource(reposDir, name string) (objects, sha, reason string) {
+	dir := filepath.Join(reposDir, name)
+	gitDir := filepath.Join(dir, ".git")
+	if reason := carrierLayoutRefusal(gitDir); reason != "" {
+		return "", "", "repos/" + name + ": " + reason
+	}
+	objects = filepath.Join(gitDir, "objects")
+	env := carrierEnv(reposDir)
+	// safe.directory: the repo may be owned by another uid (#135).
+	flags := append(append([]string{}, carrierFlags...), "-c", "safe.directory="+dir)
+	out, err := gitTimed(carrierCheckTimeout, env, dir, append(flags, "rev-parse", "--absolute-git-dir")...)
+	if err != nil || strings.TrimSpace(out) != gitDir {
+		return "", "", "git does not resolve repos/" + name + " to its own .git directory"
+	}
+	head, err := gitTimed(carrierCheckTimeout, env, dir, append(flags, "rev-parse", "--verify", "-q", "HEAD^{commit}")...)
+	if err != nil {
+		return objects, "", "" // unborn HEAD
+	}
+	return objects, strings.TrimSpace(head), ""
+}
+
+// carrierLayoutRefusal answers why the git dir at gitDir does not own its
+// storage outright ("" = it does). Every piece git would read refs or
+// objects through must be a real file or directory of THIS repo: .git
+// itself (not a symlink, not a gitfile), no commondir (a worktree-style
+// redirect of refs and objects), no symlink at HEAD, packed-refs,
+// anywhere under refs/, at any entry of objects/ (pack, info, the ??
+// fan-out dirs) or of objects/pack/, and no objects/info/alternates or
+// http-alternates (borrowed object stores).
+func carrierLayoutRefusal(gitDir string) string {
+	if st, err := os.Lstat(gitDir); err != nil || !st.IsDir() {
+		return ".git is not a real directory (missing, a symlink or a gitfile)"
+	}
+	if _, err := os.Lstat(filepath.Join(gitDir, "commondir")); err == nil {
+		return ".git/commondir redirects to another repository"
+	}
+	for _, rel := range []string{"HEAD", "packed-refs"} {
+		if st, err := os.Lstat(filepath.Join(gitDir, rel)); err == nil && st.Mode()&os.ModeSymlink != 0 {
+			return ".git/" + rel + " is a symlink"
+		}
+	}
+	refs := filepath.Join(gitDir, "refs")
+	if st, err := os.Lstat(refs); err == nil {
+		if !st.IsDir() {
+			return ".git/refs is not a real directory"
+		}
+		bad := ""
+		_ = filepath.WalkDir(refs, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				bad = "cannot read .git/refs"
+				return filepath.SkipAll
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				rel, _ := filepath.Rel(gitDir, path)
+				bad = ".git/" + rel + " is a symlink"
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if bad != "" {
+			return bad
+		}
+	}
+	objects := filepath.Join(gitDir, "objects")
+	if st, err := os.Lstat(objects); err != nil || !st.IsDir() {
+		return ".git/objects is not a real directory"
+	}
+	for _, dir := range []string{objects, filepath.Join(objects, "pack")} {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "cannot read " + dir
+		}
+		for _, e := range ents {
+			if e.Type()&os.ModeSymlink != 0 {
+				rel, _ := filepath.Rel(gitDir, filepath.Join(dir, e.Name()))
+				return ".git/" + rel + " is a symlink"
 			}
 		}
 	}
+	for _, alt := range []string{"alternates", "http-alternates"} {
+		if _, err := os.Lstat(filepath.Join(objects, "info", alt)); err == nil {
+			return "borrows objects from another store (objects/info/" + alt + ")"
+		}
+	}
+	return ""
+}
+
+// pushCarrier pushes sha to refs/pf-task/<name> on the WI's bare repo
+// from a daemon-owned temporary bare repo whose only object source is
+// the task repo's object store (objects/info/alternates), with the
+// carrier env plus the credential additions, a protocol allow-list of
+// the remote's own scheme, and no submodule recursion. The temporary
+// repo lives outside the capsule and is removed afterwards (a daemon
+// killed mid-push leaves it behind: SweepCarrierTemps). reposDir is the
+// symlink-resolved repos dir carrierSource used.
+func pushCarrier(o Opts, reposDir, objects, sha, name string, credAdditions []string) (string, error) {
+	base := ""
+	if o.GitDir != "" {
+		base = filepath.Dir(o.GitDir)
+	}
+	tmp, err := os.MkdirTemp(base, "pf-carrier-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmp)
+	env := carrierEnv(reposDir)
+	if out, err := gitTimed(carrierCheckTimeout, env, tmp, "init", "-q", "--bare", "--template=", tmp); err != nil {
+		return out, err
+	}
+	if err := os.MkdirAll(filepath.Join(tmp, "objects", "info"), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "objects", "info", "alternates"), []byte(objects+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	tmpFlags := append([]string{"--git-dir=" + tmp}, carrierFlags...)
+	if out, err := gitTimed(carrierCheckTimeout, env, tmp, append(append([]string{}, tmpFlags...), "update-ref", "refs/pf-carrier/tmp", sha)...); err != nil {
+		return out, err
+	}
+	scheme := "file"
+	if i := strings.Index(o.RemoteURL, "://"); i > 0 {
+		scheme = o.RemoteURL[:i]
+	}
+	args := append(append([]string{}, tmpFlags...),
+		"-c", "protocol.allow=never",
+		"-c", "protocol."+scheme+".allow=always",
+		"push", "--no-recurse-submodules")
+	if o.Fingerprint != "" {
+		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
+	}
+	args = append(args, o.RemoteURL, sha+":"+TaskRefName(name))
+	return gitTimed(carrierPushTimeout, append(env, credAdditions...), tmp, args...)
+}
+
+// carrierFailed raises carrier_push_failed for repo — only when the
+// chain push landed (chainOK), and only the first time since the repo's
+// last successful carrier push in this job (CarrierAlerts).
+func (o Opts) carrierFailed(repo string, chainOK bool, detail string) {
+	if !chainOK || o.EventSink == nil || !o.CarrierAlerts.first(repo) {
+		return
+	}
+	o.EventSink(EventCarrierPushFailed, map[string]any{
+		"repo":  repo,
+		"ref":   TaskRefName(repo),
+		"error": EventDetail(detail),
+	})
+}
+
+// eventDetailMax bounds the free-text detail an event body carries.
+const eventDetailMax = 2048
+
+// EventDetail truncates an event body's free-text detail (a git error)
+// to eventDetailMax bytes, cut on a rune boundary.
+func EventDetail(s string) string {
+	if len(s) <= eventDetailMax {
+		return s
+	}
+	cut := eventDetailMax
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…(truncated)"
 }
 
 // FetchTaskRef reads the carrier lane from the claim side: it fetches
@@ -846,6 +1116,32 @@ func SweepAskpass(gitRoot string) error {
 	return firstErr
 }
 
+// SweepCarrierTemps removes the pf-carrier-* temporary bare repos a
+// killed process left next to the external git-dirs (pushCarrier removes
+// its own when the call unwinds). Call it ONCE at daemon startup with
+// the same gitRoot as SweepAskpass: nothing can be live that early.
+// Best-effort — the first removal error is reported, the sweep
+// continues.
+func SweepCarrierTemps(gitRoot string) error {
+	ents, err := os.ReadDir(gitRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var firstErr error
+	for _, e := range ents {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "pf-carrier-") {
+			continue
+		}
+		if rerr := os.RemoveAll(filepath.Join(gitRoot, e.Name())); rerr != nil && firstErr == nil {
+			firstErr = rerr
+		}
+	}
+	return firstErr
+}
+
 // ---------------------------------------------------------------------------
 // Stale lock handling
 
@@ -877,6 +1173,54 @@ func cleanStaleLocks(gitDir string) error {
 // EventTaskRefDiverged is the error event kind raised when the carrier
 // push of one task repo is rejected non-fast-forward.
 const EventTaskRefDiverged = "task_ref_diverged"
+
+// EventCarrierPushFailed is the event kind raised when the carrier push
+// of one task repo fails for any reason (blob limit, divergence,
+// transport, a refused repo config): a re-claim restores that repo
+// without the commits since its last carried head, so the watcher
+// classifies it as a human decision (polyforge#158). Raised only after a
+// chain push that landed, and once per repo per job until a carrier push
+// of that repo succeeds again (CarrierAlerts).
+const EventCarrierPushFailed = "carrier_push_failed"
+
+// CarrierAlerts is one job's in-memory record of the task repos whose
+// carrier failure has already been raised; a successful carrier push of
+// a repo clears it, so a later failure alerts again. The runtime keeps
+// one per job: it ends with the job, and a re-claim (a new job) starts
+// clean. The zero value is ready; a nil *CarrierAlerts raises every
+// failure.
+type CarrierAlerts struct {
+	mu sync.Mutex
+	m  map[string]bool
+}
+
+// first records a failure of repo and reports whether it is the first
+// since the repo's last success (i.e. whether to alert).
+func (a *CarrierAlerts) first(repo string) bool {
+	if a == nil {
+		return true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.m[repo] {
+		return false
+	}
+	if a.m == nil {
+		a.m = map[string]bool{}
+	}
+	a.m[repo] = true
+	return true
+}
+
+// clear forgets repo's raised failure after a successful carrier push.
+func (a *CarrierAlerts) clear(repo string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	delete(a.m, repo)
+	a.mu.Unlock()
+}
 
 // IsNonFastForward reports a push refused because the remote ref is not an
 // ancestor of the pushed commit. It matches git's C-locale output

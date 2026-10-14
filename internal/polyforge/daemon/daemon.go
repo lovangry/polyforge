@@ -499,6 +499,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := gitops.SweepAskpass(filepath.Join(d.cfg.DataDir, "git")); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: askpass sweep: %v\n", err)
 	}
+	// Same for the carrier lane's pf-carrier-* temporary bare repos.
+	if err := gitops.SweepCarrierTemps(filepath.Join(d.cfg.DataDir, "git")); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: carrier temp sweep: %v\n", err)
+	}
 	d.runCtx, d.cancelRun = context.WithCancel(ctx)
 	d.obsCtx, d.cancelObs = context.WithCancel(d.runCtx)
 

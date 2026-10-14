@@ -190,7 +190,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 - `pf watch --chat <id>`（缺省取 `PF_CHAT_ID`）**不因订阅的 WI 结束而退出**（保持常驻；D10 裁定，polyforge#150：以代码为准——只跳过已结束的 WI；仍会在父 harness 进程消失、stdout 关闭、或 `--wait-decision` 打印首批决策后退出，`watcher/engine.go`）；一个会话一个进程。
 - 只产出两种信号：
   - **进展**：当前 step、已运行时长、正在执行的命令及时长、最近修改的文件、工具调用计数（由翻译器信号机械生成，**不调用模型**）。
-  - **决策事件**：有问题要回答/gate、失败、blocked、完成、被判死并已处理、候选已用尽；以及状态/来源类事件（C13 裁定，polyforge#150，与 `watcher/decision.go` 的事件类别表对齐）：`canceled`（终态）、`paused`（非终态，可继续）、`submit_rejected`、`submit_dropped`、`daemon_restarted`。
+  - **决策事件**：有问题要回答/gate、失败、blocked、完成、被判死并已处理、候选已用尽；以及状态/来源类事件（C13 裁定，polyforge#150，与 `watcher/decision.go` 的事件类别表对齐）：`canceled`（终态）、`paused`（非终态，可继续）、`submit_rejected`、`submit_dropped`、`daemon_restarted`；以及 `carrier_push_failed`（polyforge#158：capsule 链推送成功而某任务仓库的 carrier ref 推送失败或被拒，resume 可能丢该仓库的提交；提醒行带经字符集过滤的仓库名，不带错误文本；每个 job 每个仓库只提醒一次，直到该仓库推送再次成功）。
 - **订阅关系与读取游标存于 daemon**（按 chat id），不存在 agent 可写的位置。
 - **重连 / daemon 重启后**：先以 `execution.json` 核对每个订阅 WI 的当前状态（权威），再按单调事件 id 补读事件——"WI 在 watch 不在时结束"也不会漏。
 - **提交后、监控尚未注册**：显示"排队 / 准备中"，不当作错误（#98/#101 注册竞态）。
@@ -359,7 +359,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 | D1 | 就绪队列（`GET /api/v1/projects/{project}/ready-queue`）响应为 `{items, running, paused, pending_bundles}` 四段（`internal/aihub/core/queue.go`）；无 `blocked` 数组，等依赖的票不出现 | `02-aihub-core.md#§5.1b`（重写）及 §5.1 行 4 / §4.2a 行 26 / §7 / §10 关联句；`00` §3.1 组件表、§3.4b/§3.4c 与 `07` §9.2 同步最小修订 |
 | D2 | `seq` 项目内唯一（`UNIQUE(project_id, seq)`），非全局 | `02-aihub-core.md#§4.2` DDL |
 | D4 | claim 需该 project 的 writer/maintainer membership 或全局 admin（`hSessionClaim`→`requireWrite`，403 otherwise）；key scope 不构成认领授权 | `02-aihub-core.md#§4.10`、`#§8`；`04` §6.1 关联句 |
-| D8 | 先推 capsule 链，再推任务仓库 carrier ref（`refs/pf-task/<name>`）；任务仓库推送失败只记日志、不回滚 capsule 链 | `v1-spec-full.md`（单行最小修订）+ 本表登记（“或”：两处都做） |
+| D8 | 先推 capsule 链，再推任务仓库 carrier ref（`refs/pf-task/<name>`）；任务仓库推送失败不回滚 capsule 链（polyforge#158 起另发 `carrier_push_failed` 决策提醒，见 `05` §7.5） | `v1-spec-full.md`（单行最小修订）+ 本表登记（“或”：两处都做） |
 | D10 | watcher 不因订阅的 WI 结束而退出（保持常驻），只跳过已结束的 WI；父 harness 消失、stdout 关闭或 `--wait-decision` 打印后仍退出 | 本文 §3.1 |
 | D14 | `paused` 的 WI 保留会话，可直接 wrap/fail/block，无需先 resume（`End()` 同一 session-hash fence，通过后清空会话） | `02-aihub-core.md#§2.5` 表行与相邻文字、§5.1 行 9 |
 | C5 | `context_policy` / `handoff` 保留并写入文档 | **已由 #147 落地**，见 `01-workflow-skills.md#§4`/`§4.4a` 与本文 §2.6（本票不重复修改） |

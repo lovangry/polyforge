@@ -5,6 +5,7 @@
 package watcher
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -25,6 +26,11 @@ type Rule struct {
 	// cannot lose the decision (state persists until acted on) and it
 	// cannot report a stale one (a question answered since).
 	StateBacked bool
+	// NamesRepo rules name the task repo the event is about: the line
+	// carries the event body's "repo" field, through the same charset
+	// filter as WI ids (the repo name is the only body field a line
+	// ever shows; error text never).
+	NamesRepo bool
 }
 
 // THE DECISION TABLE. Event kinds are open strings the daemon and driver
@@ -43,6 +49,12 @@ var eventRules = map[string]Rule{
 	"submit_rejected":  {Class: "submit_rejected", Phrase: "a submit was accepted but did not start"},
 	"submit_dropped":   {Class: "submit_dropped", Phrase: "a queued submit was dropped"},
 	"daemon_restarted": {Class: "daemon_restarted", Phrase: "the daemon restarted"},
+	// a task repo's carrier ref (refs/pf-task/<repo>) could not be pushed
+	// although the capsule chain landed: a resume restores the repo
+	// without the WI's commits since its last carried head
+	// (polyforge#158). The daemon raises it once per repo per job until a
+	// carrier push of that repo succeeds again.
+	"carrier_push_failed": {Class: "carrier_push_failed", Phrase: "this task repo cannot be saved; a resume may lose its commits", NamesRepo: true},
 }
 
 // statusRules maps a status to its terminal decision: the driver's
@@ -83,6 +95,9 @@ type Decision struct {
 	// filter as WI ids — so the owner can answer without free text
 	// ever leaving the question. Empty for every other class.
 	QuestionID string
+	// Repo is the task repo a carrier_push_failed decision names
+	// (charset-filtered like QuestionID). Empty for every other class.
+	Repo string
 	// Key identifies a state-derived decision for dedupe ("" for event
 	// decisions, which the cursor dedupes).
 	Key string
@@ -95,11 +110,15 @@ const suffix = "this is a human decision, the agent must not answer it"
 // Line renders the decision from the FIXED template. The WI is named by
 // its slug ("<project>#<seq>", the canonical id when no slug is known),
 // reduced to a safe charset; a needs_input decision also carries the
-// pending question id (D11), through the same filter; nothing else varies.
+// pending question id (D11) and a carrier_push_failed decision the task
+// repo name, through the same filter; nothing else varies.
 func (d Decision) Line() string {
 	qid := ""
-	if d.QuestionID != "" {
+	switch {
+	case d.QuestionID != "":
 		qid = " " + safeID(d.QuestionID)
+	case d.Repo != "":
+		qid = " " + safeID(d.Repo)
 	}
 	return fmt.Sprintf("[polyforge] %s %s%s — %s; %s", safeID(api.DisplayName(d.Slug, d.WI)), d.Class, qid, d.Phrase, suffix)
 }
@@ -219,7 +238,11 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 		if !ok || r.StateBacked {
 			continue
 		}
-		res.Decisions = append(res.Decisions, Decision{WI: snap.WorkItem, Slug: snap.Slug, Class: r.Class, Phrase: r.Phrase})
+		d := Decision{WI: snap.WorkItem, Slug: snap.Slug, Class: r.Class, Phrase: r.Phrase}
+		if r.NamesRepo {
+			d.Repo = bodyRepo(e.Body)
+		}
+		res.Decisions = append(res.Decisions, d)
 	}
 
 	for k := range cur {
@@ -227,4 +250,16 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 	}
 	sort.Strings(res.Notified)
 	return res
+}
+
+// bodyRepo reads the "repo" field of an event body ("" when absent or
+// unreadable); Line filters it.
+func bodyRepo(body json.RawMessage) string {
+	var b struct {
+		Repo string `json:"repo"`
+	}
+	if len(body) == 0 || json.Unmarshal(body, &b) != nil {
+		return ""
+	}
+	return b.Repo
 }

@@ -31,6 +31,9 @@ type Manager struct {
 	DataDir      string
 	Root         string // <data>/git
 	MaxBlobBytes int64  // pre-receive blob limit (default capsule.MaxBlobBytes)
+	// MaxTaskBlobBytes is the blob limit for the refs/pf-task/* carrier
+	// refs (default capsule.MaxTaskBlobBytes).
+	MaxTaskBlobBytes int64
 
 	checker CredentialChecker
 
@@ -45,11 +48,12 @@ func NewManager(dataDir string, checker CredentialChecker) (*Manager, error) {
 		return nil, fmt.Errorf("git: create git root: %w", err)
 	}
 	return &Manager{
-		DataDir:      dataDir,
-		Root:         root,
-		MaxBlobBytes: capsule.MaxBlobBytes,
-		checker:      checker,
-		known:        map[string]bool{},
+		DataDir:          dataDir,
+		Root:             root,
+		MaxBlobBytes:     capsule.MaxBlobBytes,
+		MaxTaskBlobBytes: capsule.MaxTaskBlobBytes,
+		checker:          checker,
+		known:            map[string]bool{},
 	}, nil
 }
 
@@ -91,7 +95,7 @@ func (m *Manager) EnsureBare(wiID string) error {
 		if err := os.MkdirAll(filepath.Join(dir, "hooks"), 0o750); err != nil {
 			return err
 		}
-		if err := writeHook(filepath.Join(dir, "hooks", "pre-receive"), m.MaxBlobBytes); err != nil {
+		if err := writeHook(filepath.Join(dir, "hooks", "pre-receive"), m.MaxBlobBytes, m.MaxTaskBlobBytes); err != nil {
 			return err
 		}
 		m.known[wiID] = true
@@ -112,7 +116,7 @@ func (m *Manager) EnsureBare(wiID string) error {
 	if _, err := git(dir, nil, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
 		return err
 	}
-	if err := writeHook(filepath.Join(dir, "hooks", "pre-receive"), m.MaxBlobBytes); err != nil {
+	if err := writeHook(filepath.Join(dir, "hooks", "pre-receive"), m.MaxBlobBytes, m.MaxTaskBlobBytes); err != nil {
 		return err
 	}
 	m.known[wiID] = true

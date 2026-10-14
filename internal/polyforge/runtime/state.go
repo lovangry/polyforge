@@ -291,11 +291,13 @@ func loadState(path string) (*stateFile, error) {
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 // restoredJob is jobFromRecord plus the runtime-owned wiring (the gitops
-// event sink) a bare record cannot carry.
+// event sink and the job's in-memory carrier alert state) a bare record
+// cannot carry.
 func (r *Runtime) restoredJob(rec *jobRecord) *job {
 	normalizeOrigin(rec)
 	j := jobFromRecord(rec)
 	j.git.EventSink = r.gitEventSink(rec.WorkItemID)
+	j.git.CarrierAlerts = &gitops.CarrierAlerts{}
 	return j
 }
 

@@ -752,6 +752,9 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			Username:    id,
 			Secret:      sessionID, // v1.5: the session secret IS the push password
 			EventSink:   r.gitEventSink(id),
+			// once-per-repo carrier_push_failed state: per job, so a
+			// re-claim (a new job) alerts afresh.
+			CarrierAlerts: &gitops.CarrierAlerts{},
 		},
 		bundleName:   c.BundleName,
 		repos:        c.Repos,

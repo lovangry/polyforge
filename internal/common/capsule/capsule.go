@@ -226,6 +226,15 @@ type RewindStats struct {
 // monotonically increasing commit sequence per work item (v1-spec-full §六).
 const SeqTrailer = "Polyforge-Seq"
 
-// MaxBlobBytes is the pre-receive blob size limit (default 16 MiB; the
-// secret scanner is gone per ruling C1 but size stays bounded).
+// MaxBlobBytes is the pre-receive blob size limit for the capsule chain
+// (default 16 MiB; the secret scanner is gone per ruling C1 but size
+// stays bounded).
 const MaxBlobBytes = 16 << 20
+
+// MaxTaskBlobBytes is the pre-receive blob size limit for the task-repo
+// carrier refs (refs/pf-task/*). Their history is the task repo's own,
+// upstream history included (the first carrier push of a repo carries
+// all of it), so it is not the capsule's to keep small: an upstream
+// asset above MaxBlobBytes must not make a repo uncarriable
+// (polyforge#158).
+const MaxTaskBlobBytes = 100 << 20

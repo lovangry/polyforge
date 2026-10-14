@@ -273,7 +273,8 @@ func readCapsuleRepos(capsuleDir string) map[string]string {
 }
 
 // gitEventSink binds the durable EventTap to one WI for the gitops lanes
-// (task_ref_diverged); nil when no tap is configured.
+// (task_ref_diverged, carrier_push_failed); nil when no tap is
+// configured.
 func (r *Runtime) gitEventSink(wi string) func(kind string, body map[string]any) {
 	tap := r.cfg.EventTap
 	if tap == nil {

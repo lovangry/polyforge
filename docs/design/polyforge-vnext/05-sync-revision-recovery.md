@@ -732,6 +732,49 @@ bootstrap 分支）；再按 `02-aihub-core.md#§4.6`/§5.1 的 Core 权威 repo
 总是完整替换，不保留本地内容。§7.1 的本机崩溃（WI Agent 重启但 generation 未变）不走这条 〔#111分类：删→驱动〕
 路径，而是等待下一次触发事件走 §6 的正常发布流程；本地未发布的改动被保留，不被完整替换覆盖。
 
+### 7.5 任务仓库 carrier ref（polyforge#108 / #158） <!-- §7.5 -->
+
+本节描述当前代码（v2 Go 执行驱动），与上文 Revision 模型并列。每次 capsule 发布，daemon 先推 capsule 链（`refs/heads/main`），
+再把每个任务仓库 `repos/<name>` 的本地 HEAD 推到该 WI 裸仓库的 carrier ref `refs/pf-task/<name>`（`gitops.pushTaskRefsLocked`）；
+blocked→resume 等重新认领从上游 clone 后按 carrier ref 恢复任务仓库（`runtime.restoreTaskRepoState`）。carrier 推送失败不回滚、
+不阻塞 capsule 链发布（D8）。
+
+- **blob 上限分两档**：aihub pre-receive hook 对 capsule 链沿用 16 MiB（`capsule.MaxBlobBytes`，env `GIT_PF_MAX_BLOB`），
+  对 `refs/pf-task/*` 用 100 MiB（`capsule.MaxTaskBlobBytes`，env `GIT_PF_MAX_TASK_BLOB`）。原因：任务仓库在 aihub 上最初为空，
+  首次 carrier 推送带上整个上游历史，上游历史里的大资源（例：skypilot 的 21 MB `streamlit_app.mp4`）不能让该仓库永远无法携带。
+  超过 100 MiB 的上游 blob 仍会被拒（"carrier 只存 WI 自己的提交"的根治方案未实施）。
+- **失败即决策**：carrier 推送因任何原因失败或被拒（超限、non-fast-forward 分叉、传输、下述仓库配置拒绝），除 stderr 日志外，
+  **仅当本次 capsule 链推送成功时** daemon 写 `carrier_push_failed` 事件（body：`repo`、`ref`、截断到约 2 KB 的 git 错误或拒绝原因）；
+  链推送也失败（aihub 不可达、会话被 fence）时不提醒，仍失败的 carrier 在下一次链推送成功的发布时提醒。watcher 把它归为人工决策，
+  提醒行为固定模板：
+  `[polyforge] <slug> carrier_push_failed <repo> — this task repo cannot be saved; a resume may lose its commits; this is a human decision, the agent must not answer it`。
+  仓库名经与 WI id 相同的字符集过滤；错误文本只在 `pf watch <wi> --once` 的事件里。每个 job 每个仓库只提醒一次，直到该仓库的 carrier
+  推送再次成功（状态挂在 runtime job 上的内存里：job 结束即消失，重新认领 = 新 job 会再提醒；daemon 重启后同样重新提醒一次）。
+  non-fast-forward 失败另外照旧发 `task_ref_diverged`。
+- **凭证安全：带凭证的推送从不在任务仓库里执行**（任务仓库由不可信 agent 控制；git 没有忽略仓库本地配置的开关，
+  agent 也可能在检查与推送之间改写配置，所以不做配置黑名单）。每个任务仓库：
+  1. 只读校验（不带凭证）：仓库必须完全自有其存储——`repos/<name>/.git` 是真实目录（Lstat：非 symlink、非 gitfile）；
+     不存在 `.git/commondir`；`.git/HEAD`、`.git/packed-refs`、`.git/refs` 及其下任何条目都不是 symlink；`.git/objects` 是真实目录，
+     其每个条目（`pack`、`info`、`??` 扇出目录）与 `objects/pack/` 的每个条目都不是 symlink；不存在 `objects/info/alternates`
+     与 `objects/info/http-alternates`。在仓库内执行 `git rev-parse --absolute-git-dir` 必须恰好等于该 `.git`；再读一次 HEAD：
+     `git rev-parse --verify -q HEAD^{commit}`（unborn = 无可携带，静默跳过）。仓库内的这两次读取另带 `-c safe.directory=<repo>`
+     （#135 后仓库属于另一个 uid 时仍可读）。任一校验失败即拒绝并发 `carrier_push_failed`（原因写在事件里），不准备凭证。
+  2. 在任务仓库之外（WI 裸仓库目录旁，`pf-carrier-*` 临时目录）建一个 daemon 自有的临时裸仓库，`objects/info/alternates`
+     指向 `<repo>/.git/objects`，`update-ref refs/pf-carrier/tmp <sha>`；推送完即删除。
+  3. 从临时仓库推送：
+     `git --git-dir=<tmp> -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= -c http.proxy= -c protocol.allow=never -c protocol.<RemoteURL 的 scheme>.allow=always push --no-recurse-submodules [--push-option=session-fingerprint=<fp>] <RemoteURL> <sha>:refs/pf-task/<name>`。
+  carrier 通道上每一次 git 调用（校验与推送）用同一个环境：daemon 环境去掉全部 `GIT_*`，加 `GIT_CONFIG_NOSYSTEM=1`、
+  `GIT_CONFIG_GLOBAL=/dev/null`、`GIT_CEILING_DIRECTORIES=<解析 symlink 后的 repos 目录>`（校验与推送用同一个值）；推送另加一次性 askpass（`GIT_ASKPASS`、`GIT_TERMINAL_PROMPT=0`）。
+  于是任务仓库里的 `credential.helper`、`url.*.insteadOf`/`pushInsteadOf`、`remote.<url>.vcs`（remote helper）、
+  `push.recurseSubmodules`/`submodule.recurse` 与子模块自己的 origin、hooks 等都不参与推送。git 从 alternates 只读取对象数据，
+  不执行其中任何东西。carrier 通道的每次 git 调用都有超时（校验与临时仓库准备 1 分钟，推送 10 分钟，超时杀掉整个 git 进程组），
+  挂住的 hub 不会永久占住该 WI 的锁；daemon 启动时清理残留的 `pf-carrier-*` 临时仓库（与 askpass 清理相同）。
+  **残余（#135 之前）**：上述无竞态的借用方式（commondir、symlink 的 refs/objects、alternates）一律拒绝；但对象读取与打包
+  仍以 daemon 的 uid 读 agent 可写的目录，agent 可以利用校验到推送之间的窗口——例如校验之后再写入嵌套的
+  `objects/info/alternates`，或把 `.git` 换成指向别处的 symlink——把**另一个 WI 的内容**拉进本 WI 的 carrier ref
+  （不只是推送失败或推送垃圾）。这类基于竞态的残余要等读取/打包改在 agent 自己的 uid 下执行（#135）才能消除；
+  在那之前 agent 与 daemon 同 uid，本可直接读写同机其他目录，这一层是纵深防御，而不是隔离边界。
+
 ## 8. 安全边界 <!-- §8 -->
 
 - 发布面信任模型：只有持有当前 generation 的 Daemon 可写 Revision 数据（§2.9 fencing）；Main

@@ -115,7 +115,9 @@ proactive face, and it carries exactly two kinds of signal:
 - **Decisions** — a question to answer or gate to pass, a failed / blocked /
   completed workflow, a step judged dead, candidates exhausted, a rejected or
   dropped submit, a blocked work item (including a missing capsule or an
-  unmapped project), a daemon restart.
+  unmapped project), a daemon restart, a task repo whose carrier ref could
+  not be saved (`carrier_push_failed <repo>`: a resume may lose that repo's
+  commits).
   These wake you with ONE fixed-template line:
   `[polyforge] <slug> <kind> — <short fixed phrase>; this is a human decision,
   the agent must not answer it` (e.g. `[polyforge] polyforge#140 needs_input

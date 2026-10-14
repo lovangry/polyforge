@@ -20,6 +20,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/aihub/core"
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
 // gitEnv is one fully wired environment.
@@ -745,6 +746,73 @@ func TestTaskCarrierRefStillFenced(t *testing.T) {
 	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main"); err == nil {
 		t.Fatalf("seq-less chain push accepted: %s", out)
 	} else if !strings.Contains(out, "Polyforge-Seq") {
+		t.Fatalf("wrong rejection: %s", out)
+	}
+}
+
+// TestTaskCarrierBlobLimit (polyforge#158): the carrier refs carry the
+// task repo's whole upstream history on their first push, so an upstream
+// asset above the capsule-chain limit (skypilot's 21 MB mp4 against the
+// 16 MiB chain limit) must not make the repo uncarriable. With the
+// DEFAULT limits: a blob just over capsule.MaxBlobBytes lands on
+// refs/pf-task/* while the same blob stays refused on the chain.
+func TestTaskCarrierBlobLimit(t *testing.T) {
+	e := newGitEnv(t)
+	if e.mgr.MaxBlobBytes != capsule.MaxBlobBytes || e.mgr.MaxTaskBlobBytes != capsule.MaxTaskBlobBytes {
+		t.Fatalf("manager limits = %d/%d, want the capsule defaults", e.mgr.MaxBlobBytes, e.mgr.MaxTaskBlobBytes)
+	}
+	if capsule.MaxTaskBlobBytes <= capsule.MaxBlobBytes {
+		t.Fatalf("carrier limit %d must exceed the chain limit %d", capsule.MaxTaskBlobBytes, capsule.MaxBlobBytes)
+	}
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
+	wt := newWorktree(t)
+	if err := os.WriteFile(filepath.Join(wt, "asset.mp4"), bytes.Repeat([]byte{7}, capsule.MaxBlobBytes+1), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, wt, "add", "-A")
+	mustGit(t, wt, "commit", "-m", "upstream asset\n\nPolyforge-Seq: 1")
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/pf-task/demo-src"); err != nil {
+		t.Fatalf("carrier push of a blob under the carrier limit rejected: %s", out)
+	}
+	out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main")
+	if err == nil {
+		t.Fatalf("chain push of a blob over the chain limit accepted: %s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("blob exceeds the %d-byte limit", capsule.MaxBlobBytes)) {
+		t.Fatalf("wrong rejection: %s", out)
+	}
+}
+
+// TestTaskCarrierBlobOverCarrierLimitRejected: the carrier limit is a
+// limit — a blob above MaxTaskBlobBytes is refused on refs/pf-task/*
+// (shrunk limits keep the test fast; the hook reads them via the env the
+// proxy sets).
+func TestTaskCarrierBlobOverCarrierLimitRejected(t *testing.T) {
+	e := newGitEnv(t)
+	e.mgr.MaxBlobBytes = 512
+	e.mgr.MaxTaskBlobBytes = 4096
+	wiID, secret := e.claimWI(t)
+	cred := e.credURL(wiID, secret)
+	wt := newWorktree(t)
+	if err := os.WriteFile(filepath.Join(wt, "mid.bin"), bytes.Repeat([]byte{1}, 2048), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, wt, "add", "-A")
+	mustGit(t, wt, "commit", "-m", "mid")
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/pf-task/demo-src"); err != nil {
+		t.Fatalf("carrier push under the carrier limit rejected: %s", out)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "big.bin"), bytes.Repeat([]byte{2}, 8192), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, wt, "add", "-A")
+	mustGit(t, wt, "commit", "-m", "big")
+	out, err := runGit(t, wt, "push", cred, "HEAD:refs/pf-task/demo-src")
+	if err == nil {
+		t.Fatalf("carrier push over the carrier limit accepted: %s", out)
+	}
+	if !strings.Contains(out, "blob exceeds the 4096-byte limit") {
 		t.Fatalf("wrong rejection: %s", out)
 	}
 }

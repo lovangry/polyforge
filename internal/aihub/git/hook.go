@@ -11,7 +11,9 @@ package git
 //     and the sequence increases monotonically, continuing above the
 //     previous tip;
 //   - blob size ≤ MaxBlobBytes (via the GIT_PF_MAX_BLOB env the proxy
-//     sets; the default matches capsule.MaxBlobBytes);
+//     sets; the default matches capsule.MaxBlobBytes) — for the
+//     refs/pf-task/* carrier refs the limit is MaxTaskBlobBytes instead
+//     (GIT_PF_MAX_TASK_BLOB; default capsule.MaxTaskBlobBytes);
 //   - the session-fingerprint push option must be present and equal
 //     PF_EXPECTED_FINGERPRINT whenever the push came through the proxy,
 //     which sets that variable (session fencing: the proxy
@@ -27,7 +29,10 @@ package git
 // it carries no Polyforge-Seq trailer and may legitimately contain
 // submodules — so the chain-only seq and gitlink invariants do not
 // apply to it. Deletion, fast-forward and the blob limit stay enforced
-// for every ref.
+// for every ref; the carrier refs get the larger task-repo blob limit,
+// because the first carrier push of a repo carries its whole upstream
+// history and an upstream asset must not make it uncarriable
+// (polyforge#158).
 //
 // The hook is a bash script exec'd by the real git receive-pack; the
 // server process never interprets pack data itself.
@@ -39,12 +44,13 @@ import (
 )
 
 // hookTemplate is the hook body. Kept as a function so the blob limit
-// default can be baked in (the env override still wins at runtime).
-func hookTemplate(defaultMaxBlob int64) string {
+// defaults can be baked in (the env overrides still win at runtime).
+func hookTemplate(defaultMaxBlob, defaultMaxTaskBlob int64) string {
 	return fmt.Sprintf(`#!/usr/bin/env bash
 # aihub pre-receive (v1). Rejects the WHOLE push on any violation.
 set -u
 MAXBLOB="${GIT_PF_MAX_BLOB:-%d}"
+MAXTASKBLOB="${GIT_PF_MAX_TASK_BLOB:-%d}"
 TRAILER="${GIT_PF_SEQ_TRAILER:-Polyforge-Seq}"
 zero=0000000000000000000000000000000000000000
 reject() { echo "aihub: $*" >&2; exit 1; }
@@ -95,11 +101,14 @@ while read -r old new ref; do
     prev=""
   fi
 
-  # blob size limit (every ref, carrier namespace included).
+  # blob size limit (every ref; the carrier namespace has its own,
+  # larger limit: task-repo history includes the upstream's).
+  limit="$MAXBLOB"
+  case "$ref" in refs/pf-task/*) limit="$MAXTASKBLOB" ;; esac
   badblob=$(git rev-list --objects "$range" | awk '{print $1}' \
     | git cat-file --batch-check='%%(objecttype) %%(objectsize) %%(objectname)' \
-    | awk -v max="$MAXBLOB" '$1=="blob" && $2>max {print $3" ("$2" bytes)"}')
-  [ -z "$badblob" ] || reject "blob exceeds the ${MAXBLOB}-byte limit: $badblob"
+    | awk -v max="$limit" '$1=="blob" && $2>max {print $3" ("$2" bytes)"}')
+  [ -z "$badblob" ] || reject "blob exceeds the ${limit}-byte limit: $badblob"
 
   # Task-repo carrier namespace: foreign (task-repo) history — the
   # chain-only gitlink and seq invariants stop here. Deletion,
@@ -127,12 +136,12 @@ while read -r old new ref; do
   done
 done
 exit 0
-`, defaultMaxBlob)
+`, defaultMaxBlob, defaultMaxTaskBlob)
 }
 
 // writeHook writes the pre-receive hook and makes it executable.
-func writeHook(path string, maxBlob int64) error {
-	body := hookTemplate(maxBlob)
+func writeHook(path string, maxBlob, maxTaskBlob int64) error {
+	body := hookTemplate(maxBlob, maxTaskBlob)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
