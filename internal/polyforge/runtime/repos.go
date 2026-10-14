@@ -138,6 +138,9 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		if restored != "" {
 			sha = restored
 		}
+		// The previous session's uncommitted work (polyforge#167):
+		// checked out on top of the restored head, never committed.
+		r.restoreTaskWIP(ctx, j, pr.Name, dir, sha)
 		out[pr.Name] = sha
 	}
 	return out, nil
@@ -188,6 +191,99 @@ func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, name, dir st
 	return sha, nil
 }
 
+// restoreTaskWIP applies the previous session's uncommitted work
+// (gitops.TaskWIPRefName, polyforge#167) to a FRESH task-repo clone whose
+// HEAD is head: when the WIP commit's single parent is head, its tree is
+// checked out into the working tree through a temporary index —
+// read-tree + checkout-index -a -f, then the tracked files the WIP
+// deleted are removed — so HEAD, the branch and the repo's own index stay
+// on head and the work shows up as uncommitted changes, as the step left
+// it (staged and unstaged edits both come back unstaged). A WIP on
+// another parent (the carrier moved past it, or the restore fell back)
+// is NOT applied: task_wip_not_applied is raised and the ref is left for
+// the next close to supersede. Best-effort by design — the committed head
+// is already restored and a WIP that cannot be read must not block the
+// claim; every failure is loud (stderr + the event). The ref also stays
+// after an apply: the next close supersedes or deletes it, and
+// re-applying it after a crash before that close is the same restore.
+func (r *Runtime) restoreTaskWIP(ctx context.Context, j *job, name, dir, head string) {
+	ref := gitops.TaskWIPRefName(name)
+	notApplied := func(reason string, extra map[string]any) {
+		fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: %s not applied: %s\n", j.wi, name, ref, reason)
+		if j.git.EventSink == nil {
+			return
+		}
+		body := map[string]any{"repo": name, "ref": ref, "head": head, "reason": gitops.EventDetail(reason)}
+		for k, v := range extra {
+			body[k] = v
+		}
+		j.git.EventSink(gitops.EventTaskWIPNotApplied, body)
+	}
+	wip, err := gitops.FetchTaskWIP(j.git, dir, name)
+	if err != nil {
+		notApplied("fetch failed: "+err.Error(), nil)
+		return
+	}
+	if wip == "" {
+		return // no uncommitted work was saved
+	}
+	out, err := gitTask(ctx, dir, "rev-list", "--parents", "-n", "1", wip)
+	if err != nil {
+		notApplied("unreadable WIP commit: "+err.Error(), map[string]any{"wip": wip})
+		return
+	}
+	fields := strings.Fields(out)
+	parent := ""
+	if len(fields) > 1 {
+		parent = strings.Join(fields[1:], " ")
+	}
+	if len(fields) != 2 || head == "" || parent != head {
+		notApplied(fmt.Sprintf("its parent %q is not the restored head %q", parent, head), map[string]any{"wip": wip, "wip_parent": parent})
+		return
+	}
+	if err := checkoutWIPTree(ctx, dir, head, wip); err != nil {
+		notApplied("checkout failed: "+err.Error(), map[string]any{"wip": wip})
+		return
+	}
+	fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: restored the previous session's uncommitted work from %s (%s) onto %s\n", j.wi, name, ref, wip, head)
+}
+
+// checkoutWIPTree writes the tree of wip into dir's working tree without
+// touching HEAD or the repo's index (a temporary GIT_INDEX_FILE), then
+// removes the tracked files of head the WIP deleted.
+func checkoutWIPTree(ctx context.Context, dir, head, wip string) error {
+	tmp, err := os.MkdirTemp("", "pf-wip-index-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	env := append(os.Environ(), "GIT_INDEX_FILE="+filepath.Join(tmp, "index"))
+	if _, err := gitTaskEnv(ctx, env, dir, "read-tree", wip); err != nil {
+		return err
+	}
+	if _, err := gitTaskEnv(ctx, env, dir, "checkout-index", "-a", "-f"); err != nil {
+		return err
+	}
+	out, err := gitTask(ctx, dir, "diff", "--name-only", "--no-renames", "--diff-filter=D", "-z", head, wip)
+	if err != nil {
+		return err
+	}
+	root := filepath.Clean(dir) + string(filepath.Separator)
+	for _, p := range strings.Split(out, "\x00") {
+		if p == "" {
+			continue
+		}
+		full := filepath.Join(dir, p)
+		if !strings.HasPrefix(full, root) {
+			continue // never outside the worktree
+		}
+		if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // carrierFallbackBranch names the local branch a carrier is restored onto
 // when the fresh clone has no checked-out branch (detached-HEAD source).
 const carrierFallbackBranch = "pf-carrier"
@@ -198,8 +294,13 @@ const carrierFallbackBranch = "pf-carrier"
 // default credential context, ctx-bounded like the other task-repo git
 // calls of this file.
 func gitTask(ctx context.Context, dir string, args ...string) (string, error) {
+	return gitTaskEnv(ctx, os.Environ(), dir, args...)
+}
+
+// gitTaskEnv is gitTask with an explicit environment.
+func gitTaskEnv(ctx context.Context, env []string, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = os.Environ()
+	cmd.Env = env
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

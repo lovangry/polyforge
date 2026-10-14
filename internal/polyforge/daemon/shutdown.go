@@ -11,7 +11,8 @@ package daemon
 //     in the working tree is picked up by the recovery engine's
 //     commit-dirty-on-recover at the next start);
 //  4. seal: stop the observe lane (no recovery signal may fire against
-//     the teardown), terminate every live agent tree, persist the
+//     the teardown), terminate every live agent tree, snapshot the task
+//     repos' uncommitted work to refs/pf-wip (polyforge#167), persist the
 //     bookkeeping (Runtime's state.json + the daemon state file);
 //  5. close the UDS listener; Run returns; the process exits.
 //
@@ -197,6 +198,13 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 				fmt.Fprintf(os.Stderr, "daemon: %s: agent tree teardown incomplete: %v\n", ji.WorkItem, err)
 			}
 		}
+	}
+	// Step 4b': with the step processes gone, snapshot each live job's
+	// task-repo uncommitted work to refs/pf-wip (polyforge#167) — the
+	// local capsule keeps it for the attach, the hub keeps it for a
+	// re-claim. Bounded by the shutdown budget.
+	for _, ji := range live {
+		d.rt.SaveTaskWIP(ctx, ji.WorkItem)
 	}
 
 	// Step 4c: persist the bookkeeping (jobs/attempts ride Runtime's

@@ -159,7 +159,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// state is committed and pushed BEFORE the new instance can touch the
 	// worktree. Best-effort by design: a failed push surfaces at the next
 	// boundary; the local commit already keeps the bytes.
-	commitDirty(r, j)
+	_, _ = commitDirty(r, j)
 
 	// F1 repair: a capsule without runtime-state/work-item.json (a pre-F1
 	// pre-F1 scene) gets it re-materialized before the next derivation
@@ -360,7 +360,13 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	r.killAgentTree(j)
 	head := ""
 	if dirExists(j.capsuleDir) {
-		head = commitDirty(r, j)
+		var perr error
+		head, perr = commitDirty(r, j)
+		// The re-claim the owner's resume runs restores the task repos
+		// from the carrier: their uncommitted work rides refs/pf-wip
+		// (polyforge#167). Before the verdict — the session credential
+		// dies with it.
+		r.saveTaskWIP(j, true, perr == nil)
 	}
 	r.finishBlocked(j, detail, head)
 	_ = ctx
@@ -372,13 +378,48 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 // HEAD push), so the next boundary sees an honest remote state. Errors
 // are the caller's to log; the LOCAL commit is the durable half and it
 // stands on its own.
-func commitDirty(r *Runtime, j *job) string {
+func commitDirty(r *Runtime, j *job) (string, error) {
 	r.syncLiveTranscript(j.capsuleDir)
 	sha, _, _, perr := gitops.CommitPush(j.git, "recover: commit dirty capsule before re-derivation")
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: commit-dirty-on-recover push failed (local commit %q stands): %v\n", j.wi, sha, perr)
 	}
-	return sha
+	return sha, perr
+}
+
+// saveTaskWIP runs the task-repo WIP lane (polyforge#167) at a close
+// point where the step process is already gone: keep snapshots each
+// dirty task repo to refs/pf-wip/<name> (a clean one drops its stale
+// WIP ref); keep=false — the wrapped close — only drops stale WIP refs.
+// chainOK reports whether the close's chain push landed (the carrier
+// alert gate). Best-effort: never fails the close.
+func (r *Runtime) saveTaskWIP(j *job, keep, chainOK bool) {
+	if !dirExists(j.capsuleDir) {
+		return
+	}
+	gitops.PushTaskWIP(j.git, keep, chainOK)
+}
+
+// SaveTaskWIP is the graceful-shutdown face of the WIP lane: called after
+// the shutdown terminated wi's agent tree, it snapshots the task repos'
+// uncommitted work (the session stays alive at the hub, so a re-claim
+// after the restart can still restore it). Bounded by ctx (the shutdown
+// budget): on expiry it returns and the snapshot is abandoned with the
+// process.
+func (r *Runtime) SaveTaskWIP(ctx context.Context, wi string) {
+	j := r.jobOf(wi)
+	if j == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.saveTaskWIP(j, true, true)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // killAgentTree tears the current agent's whole tree down through the six

@@ -775,6 +775,30 @@ blocked→resume 等重新认领从上游 clone 后按 carrier ref 恢复任务�
   （不只是推送失败或推送垃圾）。这类基于竞态的残余要等读取/打包改在 agent 自己的 uid 下执行（#135）才能消除；
   在那之前 agent 与 daemon 同 uid，本可直接读写同机其他目录，这一层是纵深防御，而不是隔离边界。
 
+### 7.6 任务仓库未提交改动：WIP ref（polyforge#167） <!-- §7.6 -->
+
+carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改动。补充一条 WIP ref `refs/pf-wip/<name>`（`gitops.PushTaskWIP`）：
+
+- **何时写**：只在步骤进程已退出的关闭点——bounded-fail（blocked，SessionEnd 之前）、`stopOp` 收尾（failed / blocked 等非 wrapped）、
+  operator pause（`pauseOp`）、daemon 正常关停（杀掉 agent 树之后，受关停预算约束）。observe 的常规发布不写。
+  先按 §7.5 镜像每个仓库的 HEAD 到 `refs/pf-task/<name>`，再对每个仓库：有未提交改动（已跟踪修改、删除与未跟踪文件，遵守
+  工作树 `.gitignore` 与仓库的 `.git/info/exclude`）→ 生成一个 WIP 提交（唯一父提交 = HEAD）并强推到 `refs/pf-wip/<name>`；
+  干净，或 wrapped 关闭 → 若 hub 上有旧 WIP ref 则删除（`ls-remote` 后推 `:refs/pf-wip/<name>`）。unborn HEAD 跳过。
+  失败只记日志并发 `carrier_push_failed`（`ref` = WIP ref；同样仅在链推送成功时、每 job 每 ref 一次），从不让关闭失败。
+- **生成方式**：在 §7.5 的 `pf-carrier-*` 临时裸仓库里完成（alternates 借任务仓库对象），任务仓库只作 `--work-tree`，
+  index 用临时文件（`GIT_INDEX_FILE=<tmp>/pf-wip-index`）：`read-tree <HEAD>`、`add -A`、`write-tree`（树与 HEAD 相同 = 干净）、
+  `commit-tree <tree> -p <HEAD>`（作者/提交者为 `polyforge-daemon`），再用 §7.5 同一条推送命令推 `+<wip>:refs/pf-wip/<name>`。
+  同样的 env 与 `-c` 标志、超时（`add -A` 用推送的 10 分钟）。不写任务仓库的 HEAD、分支、index、对象库，也不读它的配置——
+  git 读的是临时仓库的配置，所以仓库里定义的 clean filter、fsmonitor、hook 都不会运行。不用 `git stash create`：它在 agent
+  仓库里执行（读其配置、写其对象库），且不收未跟踪文件。
+- **hook**：`refs/pf-wip/*` 是草稿 ref，允许删除与 non-fast-forward；只检查新对象（`rev-list --objects <new> --not --all`）的
+  blob 上限，用 carrier 的 100 MiB；不做 seq / gitlink 检查。其余 ref 的规则不变（`refs/pf-task/*` 仍禁止删除与非快进）。
+- **恢复**（`runtime.restoreTaskWIP`，在 `restoreTaskRepoState` 之后，只对新 clone）：取 `refs/pf-wip/<name>`；若其唯一父提交等于
+  恢复后的 HEAD，用临时 index `read-tree <wip>` + `checkout-index -a -f` 写入工作树，再删除 WIP 相对 HEAD 删掉的已跟踪文件——
+  不提交、不移动 HEAD、仓库 index 不变，改动以未暂存/未跟踪形式出现（原先暂存与否的区别不保留）。父提交不一致（carrier 已前进）
+  或读取失败 → 不应用，发 `task_wip_not_applied` 事件（`repo`、`ref`、`head`、`wip`、`wip_parent`、`reason`）。不阻塞认领。
+  应用后 WIP ref 保留，由下一个关闭点覆盖或删除；在那之前崩溃再认领会再次应用同一份（HEAD 未变时结果相同）。
+
 ## 8. 安全边界 <!-- §8 -->
 
 - 发布面信任模型：只有持有当前 generation 的 Daemon 可写 Revision 数据（§2.9 fencing）；Main
