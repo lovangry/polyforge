@@ -167,11 +167,34 @@ func TestVerificationEvidenceFromStepIDAndField(t *testing.T) {
 	}
 }
 
+// requires_human_answer takes true/false or "if_asked" (polyforge#164
+// H11); any other value is a parse error, never a silent false.
+func TestRequiresHumanAnswerIfAskedParse(t *testing.T) {
+	wf, err := parseWorkflow([]byte("steps:\n  - {id: a, requires_human_answer: if_asked}\n  - {id: b, requires_human_answer: false}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wf.Steps[0].HumanAnswerIfAsked || wf.Steps[0].RequiresHumanAnswer || wf.Steps[1].HumanAnswerIfAsked || wf.Steps[1].RequiresHumanAnswer {
+		t.Fatalf("if_asked not parsed: %+v", wf.Steps)
+	}
+	if _, err := parseWorkflow([]byte("steps:\n  - {id: a, requires_human_answer: sometimes}\n")); err == nil {
+		t.Fatal("an unknown requires_human_answer value must be refused")
+	}
+}
+
 func TestShippedBundlesDeclareHumanGates(t *testing.T) {
 	// Only steps whose text REQUIRES a human confirmation carry the flag:
-	// the grills allow zero questions, so they must not.
+	// the grills allow zero questions, so they must not. quick-fix grill
+	// (the lane's only checkpoint) declares if_asked (polyforge#164 H11).
 	want := map[string][]string{
 		"feature-full": {"grill-review"},
+	}
+	qf, err := LoadWorkflow(filepath.Join("..", "..", "..", "workflows", "quick-fix"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := qf.step("grill"); s == nil || !s.HumanAnswerIfAsked || s.RequiresHumanAnswer {
+		t.Fatalf("quick-fix/grill must declare requires_human_answer: if_asked: %+v", s)
 	}
 	for bundle, ids := range map[string][]string{"feature-full": {"grill"}, "quick-fix": {"grill"}} {
 		wf, err := LoadWorkflow(filepath.Join("..", "..", "..", "workflows", bundle))

@@ -21,7 +21,7 @@ output:
       minItems: 1
       uniqueItems: true
       items: { type: string }
-      description: Verbatim echo of e2e-author's scenario_titles, read from execution.json's steps.e2e-author.output.scenario_titles. Must equal it element for element and in order - this is the mechanical cross-check that one result exists per authored scenario, no more and no fewer; a run whose recorded titles diverge from the authored list did not exercise the authored suite. uniqueItems mirrors the producer's own schema (R3-F3 - e2e-author's scenario_titles declares uniqueItems too), so a VERBATIM echo of a valid authored list can never violate it; without the producer-side constraint a duplicated authored list would leave this step with no valid response - echoing it violates uniqueItems here, deduping it violates the exact-echo instruction. The element-for-element equality itself is not expressible in draft-07; the step performs that comparison mechanically before returning its completed envelope, via the echoed-field cross-check: when the output schema requires echoing a field of a referenced prior step's output, compare element for element before returning `completed` - a mismatch means the step did not exercise what the upstream step produced, and is an infrastructure failure of this step, never a silent `completed`.
+      description: "Verbatim echo of e2e-author's scenario_titles, read from execution.json's steps.e2e-author.output.scenario_titles. Must equal it element for element and in order - this is the mechanical cross-check that one result exists per authored scenario, no more and no fewer; a run whose recorded titles diverge from the authored list did not exercise the authored suite. uniqueItems mirrors the producer's own schema (R3-F3 - e2e-author's scenario_titles declares uniqueItems too), so a VERBATIM echo of a valid authored list can never violate it; without the producer-side constraint a duplicated authored list would leave this step with no valid response - echoing it violates uniqueItems here, deduping it violates the exact-echo instruction. The element-for-element equality itself is not expressible in draft-07; the step performs that comparison mechanically before returning its completed envelope, via the echoed-field cross-check: when the output schema requires echoing a field of a referenced prior step's output, compare element for element before returning `completed` - a mismatch means the step did not exercise what the upstream step produced, and is an infrastructure failure of this step, never a silent `completed`."
     scenarios:
       type: array
       minItems: 1
@@ -95,6 +95,11 @@ hard gate: red rewinds to `code`.
    purpose of authoring it independently in an earlier step.
 5. Record every scenario's outcome in `artifacts/e2e-results.md`, in the same order
    `e2e-author` declared them, so `review` can line the two documents up directly.
+
+**Run only the authored files.** Execute the scenarios `e2e-author` authored and nothing
+else — never the project's full suite (`go test ./...`, `make test`, the full `./test`,
+`npm test`) or unrelated packages; target the authored test files directly (e.g.
+`go test ./test/ -run '<authored test names>'`). The full bar runs once, in `verification`.
 
 ## Gate semantics
 

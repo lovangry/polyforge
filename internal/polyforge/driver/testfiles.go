@@ -167,3 +167,176 @@ func repoGit(dir string, args ...string) (string, error) {
 	}
 	return stdout.String(), nil
 }
+
+// ---------------------------------------------------------------------------
+// The authored-tests immutability gate (polyforge#164 H4).
+//
+// The tests an authoring step committed (feature-full's e2e-author,
+// bug-fix's repro: any step whose accepted output declares test_files)
+// are the acceptance bar the later steps are judged by, so a later step
+// may not change them: code "fixing" a red scenario by weakening its
+// assertion would otherwise pass every gate. When an authoring step's
+// completed result is accepted, the driver stamps its output with
+// testFilesCommitKey — each task repo's HEAD at that moment (the
+// authored commit). Every later completed step is then checked
+// mechanically: the declared files must be identical between that
+// commit and HEAD — `git diff <author-commit>..HEAD -- <test_files>`,
+// computed as two `git ls-tree -r` listings so the untrusted repo runs
+// no diff driver, filter or hook. A difference rejects the envelope
+// (the ordinary retry lane) unless a human answered a question of the
+// step's current attempt chain: a step that believes an authored test
+// is wrong must say so through needs_input, and the approved change
+// becomes the new baseline (the authoring steps' stamps are replaced
+// with the new HEADs, so the approval survives a rewind of the step).
+
+// testFilesCommitKey is the driver-written output key carrying the
+// authored-tests baseline: task repo name -> commit sha.
+const testFilesCommitKey = "test_files_commit"
+
+// AuthoredTests is the authored-tests baseline a later step is judged
+// against: the declared files and, per task repo, the commit they must
+// be unchanged from.
+type AuthoredTests struct {
+	Files    []string
+	Baseline map[string]string
+}
+
+// authoredTestsBefore folds the baseline from the done steps that
+// precede stepID in workflow order: files are the union of their
+// declared test_files, and each repo's baseline is the latest stamped
+// commit (a later stamp — an approved change — supersedes an earlier).
+func authoredTestsBefore(wf *Workflow, steps map[string]map[string]any, stepID string) *AuthoredTests {
+	at := &AuthoredTests{Baseline: map[string]string{}}
+	seen := map[string]bool{}
+	for _, s := range wf.Steps {
+		if s.ID == stepID {
+			break
+		}
+		out, ok := steps[s.ID]
+		if !ok {
+			continue
+		}
+		if list, ok := out["test_files"].([]any); ok {
+			for _, v := range list {
+				if f, ok := v.(string); ok && strings.TrimSpace(f) != "" && !seen[strings.TrimSpace(f)] {
+					seen[strings.TrimSpace(f)] = true
+					at.Files = append(at.Files, strings.TrimSpace(f))
+				}
+			}
+		}
+		switch stamp := out[testFilesCommitKey].(type) {
+		case map[string]any:
+			for repo, sha := range stamp {
+				if s, ok := sha.(string); ok && s != "" {
+					at.Baseline[repo] = s
+				}
+			}
+		case map[string]string:
+			for repo, sha := range stamp {
+				if sha != "" {
+					at.Baseline[repo] = sha
+				}
+			}
+		}
+	}
+	if len(at.Files) == 0 || len(at.Baseline) == 0 {
+		return nil
+	}
+	return at
+}
+
+// changedAuthoredTests answers the authored test files that differ
+// between each repo's baseline commit and its HEAD ("repos/<name>:
+// <path>" entries). An unreadable baseline or HEAD is reported as a
+// change — fail closed: a rewritten history cannot hide an edit.
+func changedAuthoredTests(reposDir string, at *AuthoredTests) []string {
+	if at == nil {
+		return nil
+	}
+	repos := make([]string, 0, len(at.Baseline))
+	for repo := range at.Baseline {
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+	var changed []string
+	for _, repo := range repos {
+		dir := filepath.Join(reposDir, repo)
+		base, berr := repoGit(dir, lsTreeArgs(at.Baseline[repo], at.Files)...)
+		head, herr := repoGit(dir, lsTreeArgs("HEAD", at.Files)...)
+		if berr != nil || herr != nil {
+			changed = append(changed, "repos/"+repo+": baseline "+shortSHA(at.Baseline[repo])+" or HEAD unreadable")
+			continue
+		}
+		bm, hm := lsTreeByPath(base), lsTreeByPath(head)
+		var paths []string
+		for p := range bm {
+			paths = append(paths, p)
+		}
+		for p := range hm {
+			if _, ok := bm[p]; !ok {
+				paths = append(paths, p)
+			}
+		}
+		sort.Strings(paths)
+		for _, p := range paths {
+			if bm[p] != hm[p] {
+				changed = append(changed, "repos/"+repo+": "+p)
+			}
+		}
+	}
+	return changed
+}
+
+// lsTreeArgs is `git ls-tree -r --full-tree <rev> -- <files...>`.
+func lsTreeArgs(rev string, files []string) []string {
+	return append([]string{"ls-tree", "-r", "--full-tree", rev, "--"}, files...)
+}
+
+// lsTreeByPath indexes `git ls-tree -r` output: path -> "mode type sha".
+func lsTreeByPath(out string) map[string]string {
+	m := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		meta, p, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		m[p] = meta
+	}
+	return m
+}
+
+func shortSHA(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
+// checkAuthoredTestsUnchanged is the gate's verdict for one completed
+// step: nil when nothing authored changed; changed=true with a nil error
+// when the change is human-approved (the caller re-baselines); an error
+// otherwise.
+func checkAuthoredTestsUnchanged(reposDir string, at *AuthoredTests, humanAnswers int) (changed bool, err error) {
+	diff := changedAuthoredTests(reposDir, at)
+	if len(diff) == 0 {
+		return false, nil
+	}
+	if humanAnswers > 0 {
+		return true, nil
+	}
+	return true, fmt.Errorf("changed authored test files: %s — the tests e2e-author/repro committed are the acceptance bar and later steps may not edit them (`git diff <author-commit>..HEAD -- <test_files>` must be empty). Restore them (`git checkout <author-commit> -- <path>` and commit); if you believe an authored test is itself wrong, return needs_input asking the owner instead of changing it",
+		strings.Join(diff, "; "))
+}
+
+// repoHeads answers each task repo's HEAD commit (repos with an unborn
+// or unreadable HEAD are omitted).
+func repoHeads(reposDir string) map[string]any {
+	heads := map[string]any{}
+	for _, name := range taskRepoNames(reposDir) {
+		out, err := repoGit(filepath.Join(reposDir, name), "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+		if sha := strings.TrimSpace(out); err == nil && sha != "" {
+			heads[name] = sha
+		}
+	}
+	return heads
+}

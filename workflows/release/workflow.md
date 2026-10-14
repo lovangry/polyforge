@@ -8,8 +8,8 @@ defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
   - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, budget: { wall_minutes: 45 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verify, context_policy: fresh, handoff: false, kind: gate, gate: true, requires_command_evidence: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3] }
-  - { id: deploy, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: verify, context_policy: fresh, handoff: false, kind: gate, gate: true, requires_command_evidence: true, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3] }
+  - { id: deploy, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
 ---
 
 # release - release lane
@@ -93,10 +93,11 @@ also never be used.
 
 ## Budget guidance
 
-`release` 45 minutes (it runs the repo's full test gate, builds and publishes), `verify`
-20, `deploy` 30 - 95 minutes in total. The declared wall is an estimate, not a limit: the
-daemon bounds a step's total runtime across its dispatches at
-T = max(3 x its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
+Only `release` declares a wall: 45 minutes (it runs the repo's full test gate, builds and
+publishes). The declared wall is an estimate, not a limit: the daemon bounds a step's total
+runtime across its dispatches at T = max(3 x its `budget.wall_minutes`, the daemon's
+`--step-timeout`, default 90 minutes), so `release` gets 135 minutes. `verify` and `deploy`
+declare none (an estimate of 30 or less is inert under that rule) and get the 90-minute default.
 
 ## Procedure contract (what a repo provides)
 

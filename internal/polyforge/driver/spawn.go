@@ -160,6 +160,14 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		PriorEndedWithoutResult: sp.PriorEndedWithoutResult,
 		RequireCommandEvidence:  spec.RequiresCommandEvidence || sp.StepID == verificationStepID,
 		RequiresHumanAnswer:     spec.RequiresHumanAnswer,
+		HumanAnswerIfAsked:      spec.HumanAnswerIfAsked,
+	}
+	// H3 (polyforge#164): the declared output schema rides the prompt —
+	// the same schema the driver validates the completed output against.
+	if schema, err := loadStepOutputSchema(a.BundleDir, sp.StepID); err != nil {
+		fmt.Fprintf(os.Stderr, "driver: %s/%s: %v\n", a.WI.ID, sp.StepID, err)
+	} else if schema != nil {
+		parts.OutputSchema = schema.Text
 	}
 	if policy == ContextInherit {
 		h, err := a.resolveHandoff(sp.StepID)
@@ -321,6 +329,13 @@ type promptParts struct {
 	// RequiresHumanAnswer marks a requires_human_answer step: the
 	// contract states that a human answer must precede completion.
 	RequiresHumanAnswer bool
+	// HumanAnswerIfAsked marks a requires_human_answer: if_asked step:
+	// the contract states that its questions are a human's to answer and
+	// that a zero-question completion is recorded and notified.
+	HumanAnswerIfAsked bool
+	// OutputSchema is the step definition's declared output schema
+	// (YAML), shown ahead of the definition body; "" = none declared.
+	OutputSchema string
 	// Reference is the previous attempt's transcript path (a fresh retry
 	// carries it as read-only reference material; "" = none).
 	Reference string
@@ -347,6 +362,12 @@ func assembleStepPrompt(p promptParts) string {
 		b.WriteString("Context policy: INHERIT — this step continues the previous step's work; the handoff below (when present) is the upstream continuation.\n\n")
 	case ContextFresh:
 		b.WriteString("Context policy: FRESH — this step starts from a clean context; nothing from previous steps is carried in: read whatever upstream artifacts your instructions name, by their path.\n\n")
+	}
+	if p.OutputSchema != "" {
+		b.WriteString("# Output schema\n\n")
+		b.WriteString("The `output` object of a `completed` result envelope must validate against this JSON Schema (draft-07, written as YAML). The driver validates it and rejects a non-conforming envelope:\n\n```yaml\n")
+		b.WriteString(p.OutputSchema)
+		b.WriteString("\n```\n\n")
 	}
 	b.WriteString("# Step definition\n\n")
 	b.WriteString(p.Definition)
@@ -431,6 +452,11 @@ func deliveryContract(p promptParts) string {
 	if p.RequiresHumanAnswer {
 		b.WriteString("\nHuman answer: this step requires a human answer before completion: return `needs_input` first; " +
 			"a `completed` envelope without an answer in this round is rejected.\n")
+	}
+	if p.HumanAnswerIfAsked {
+		b.WriteString("\nHuman questions: every question this step raises is answered by a human only — " +
+			"ask through `needs_input` and never answer it yourself (the daemon refuses `pf answer` from a step process). " +
+			"Completing with zero questions is allowed, but it is recorded and the owner is notified.\n")
 	}
 	if p.Gate {
 		b.WriteString("\nGate verdict binding: this step is a GATE (the workflow declares it `gate: true`), " +

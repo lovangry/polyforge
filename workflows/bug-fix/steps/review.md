@@ -81,6 +81,12 @@ catch one.
    cause mid-flow (there is no direct rewind to `root-cause` in this lane; see
    `workflow.md`'s rewind-boundaries section).
 
+**Do not run tests or builds.** This step reads and judges; it never runs the build or
+the test suite (`go test ./...`, `make test`, the full `./test`, `npm test`). The full
+bar ran exactly once, in `verification`: its report (`artifacts/verification-report.md`,
+read above) is this step's test evidence. Reading a test file's source is part of the
+review; running it is not.
+
 ## Owner-rules checklist (any hit is a blocking finding)
 
 On top of the spec-conformance judgment above, check the diff against the owner's
