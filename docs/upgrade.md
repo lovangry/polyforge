@@ -20,6 +20,9 @@ so creating a project fails until the upgrade SQL has run.
   3. the new container starts and HTTP is polled.
   The actual downtime is printed and warned past `MAX_DOWNTIME_SECS`. It
   is still seconds: the SQL is a handful of DDL statements.
+- **Post-swap verification**: row counts must be >= the frozen baseline,
+  except tables dropped by a `DROP TABLE` in an upgrade.sql applied this
+  run, which are excluded from the post-swap row-count check.
 - **Automatic rollback**: if anything from the window on fails (the SQL
   transaction fails, the new container does not come up, verification
   fails, unexpected exit), deploy.sh first runs the `rollback.sql` of

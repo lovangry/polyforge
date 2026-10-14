@@ -1243,7 +1243,47 @@ if grep -E '^(panic:|fatal error:|goroutine [0-9]+ \[)' "$WORK/logs.txt" >"$WORK
 fi
 probe_to remote "$AIHUB_DATA/aihub.db" ro "$WORK/after.counts"
 note "integrity_check ok after the swap"
-counts_cmp "$WORK/frozen.counts" "$WORK/after.counts" ge || die "row counts after the swap are BELOW the baseline"
+# A table the upgrade SQL applied this run drops on purpose is not a lost
+# table: leave it out of the baseline (every other table still must hold).
+# Statements are split on ';' after stripping -- and /* */ comments, so
+# several statements per line, a statement over several lines and quoted
+# names ("t", `t`, [t]) are all recognized; matching is case-insensitive.
+# (FILENAME, not NR == FNR: dropped.tables is empty on most deploys.)
+: >"$WORK/dropped.tables"
+for v in $APPLIED_VERS; do
+  awk '{ sub(/--.*$/, ""); s = s " " $0 }
+       END {
+         while ((i = index(s, "/*")) > 0) {
+           j = index(substr(s, i + 2), "*/")
+           if (j == 0) { s = substr(s, 1, i - 1); break }
+           s = substr(s, 1, i - 1) " " substr(s, i + j + 3)
+         }
+         n = split(tolower(s), st, ";")
+         for (k = 1; k <= n; k++) {
+           t = st[k]; sub(/^[ \t\r]+/, "", t)
+           if (t !~ /^drop[ \t\r]+table[ \t\r]/) continue
+           sub(/^drop[ \t\r]+table[ \t\r]+/, "", t)
+           sub(/^if[ \t\r]+exists[ \t\r]+/, "", t)
+           gsub(/"/, "", t); gsub(/`/, "", t); gsub(/\[/, "", t); gsub(/\]/, "", t)
+           sub(/^main\./, "", t)
+           sub(/[^a-z0-9_].*$/, "", t)
+           if (t != "") print t
+         }
+       }' "$WORK/sql-$v-upgrade.sql" >>"$WORK/dropped.tables"
+done
+# Only a dropped table that is really gone after the swap is left out: a
+# table the SQL drops and re-creates (a rebuild) is still compared.
+: >"$WORK/gone.tables"
+awk -v gone="$WORK/gone.tables" '
+     FILENAME == ARGV[1] { d[$1] = 1; next }
+     FILENAME == ARGV[2] { a[tolower($1)] = 1; next }
+     { k = tolower($1) }
+     (k in d) && !(k in a) { print $1, $2 >> gone; next }
+     { print }' "$WORK/dropped.tables" "$WORK/after.counts" "$WORK/frozen.counts" >"$WORK/verify.counts"
+while read -r t n; do
+  note "table $t dropped by the upgrade SQL (was $n) - expected"
+done <"$WORK/gone.tables"
+counts_cmp "$WORK/verify.counts" "$WORK/after.counts" ge || die "row counts after the swap are BELOW the baseline"
 note "row counts >= baseline"
 note "HTTP answered during the restart poll (any status = serving)"
 if command -v pf >/dev/null 2>&1; then
