@@ -4,15 +4,15 @@ package driver
 // driver (sequencing, supervision overrides, result duties) and the
 // spawn adapter (prompt assembly) read the same Workflow value, parsed
 // once in driver.New / NewStepSpawnAdapter. The read is loose (unknown
-// keys ignored) and full bundle VALIDATION stays aihub's job at WI
-// creation; this refuses only what the driver cannot honor (unknown
-// context policies, non-capsule-relative artifact paths, gate steps
-// that are not fresh) and surfaces every parse error.
+// keys ignored); validateWorkflow is the one structural check of a
+// bundle (docs/design/polyforge-vnext/01-workflow-skills.md §4) and
+// surfaces every parse error.
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"gopkg.in/yaml.v3"
@@ -47,6 +47,9 @@ type Workflow struct {
 type StepSpec struct {
 	ID   string
 	Gate bool
+	// Kind is the declared step kind ("" when undeclared); a declared
+	// kind must be in workflow.KindVocabulary.
+	Kind string
 	// ContextPolicy is ContextInherit (the default) or ContextFresh.
 	ContextPolicy   string
 	ModelCandidates []string
@@ -140,6 +143,7 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 		step := StepSpec{
 			ID:                      s.ID,
 			Gate:                    s.Gate,
+			Kind:                    s.Kind,
 			Handoff:                 s.Handoff,
 			ContextPolicy:           s.ContextPolicy,
 			RequiresHumanAnswer:     s.RequiresHumanAnswer.required,
@@ -164,12 +168,15 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 	return wf, nil
 }
 
-// validateWorkflow refuses what the spawn adapter cannot honor:
+// validateWorkflow refuses, at load, what the driver cannot honor:
 // missing/duplicate step ids, context policies outside the closed set
-// (every step carries one after parseWorkflow — the inherit
-// default), gate steps that are not fresh (a gate must judge on its
-// own declared inputs, never on an inherited persuasive context), and
-// artifact paths that are not capsule-relative.
+// (every step carries one after parseWorkflow — the inherit default),
+// gate steps that are not fresh (a gate must judge on its own declared
+// inputs, never on an inherited persuasive context), a declared kind
+// outside workflow.KindVocabulary (a misspelled kind would silently
+// bypass the workspace's per-kind model list), and an on_fail that is
+// not on a gate or whose target is not an earlier step of the workflow
+// (otherwise the mistake would only surface at the gate's first FAIL).
 func validateWorkflow(wf *Workflow) error {
 	if wf == nil || len(wf.Steps) == 0 {
 		return fmt.Errorf("driver: workflow has no steps")
@@ -194,6 +201,19 @@ func validateWorkflow(wf *Workflow) error {
 			return fmt.Errorf("driver: gate step %q must run context_policy: %s (found %q)",
 				s.ID, ContextFresh, s.ContextPolicy)
 		}
+		if s.Kind != "" && !workflow.ValidKind(s.Kind) {
+			return fmt.Errorf("driver: step %q has unknown kind %q (want one of %s)",
+				s.ID, s.Kind, strings.Join(workflow.KindVocabulary, ", "))
+		}
+		if s.OnFail != nil {
+			if !s.Gate {
+				return fmt.Errorf("driver: step %q declares on_fail but is not a gate", s.ID)
+			}
+			// seen holds this step and every step declared before it.
+			if s.OnFail.Target == s.ID || !seen[s.OnFail.Target] {
+				return fmt.Errorf("driver: gate %q on_fail target %q is not an earlier step of the workflow", s.ID, s.OnFail.Target)
+			}
+		}
 	}
 	return nil
 }
@@ -216,6 +236,7 @@ type extRewind struct {
 
 type extStep struct {
 	ID                      string     `yaml:"id"`
+	Kind                    string     `yaml:"kind"`
 	Gate                    bool       `yaml:"gate"`
 	Handoff                 bool       `yaml:"handoff"`
 	RequiresHumanAnswer     humanGate  `yaml:"requires_human_answer"`

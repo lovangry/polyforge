@@ -121,11 +121,3 @@ func TestUnreadableYamlIsTyped(t *testing.T) {
 	}
 }
 
-// TestKindVocabulary pins the closed V8 set the loader validates
-// per-kind keys against.
-func TestKindVocabulary(t *testing.T) {
-	want := "qa spec author code gate review"
-	if got := strings.Join(KindVocabulary, " "); got != want {
-		t.Fatalf("kind vocabulary %q, want %q", got, want)
-	}
-}

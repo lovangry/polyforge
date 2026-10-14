@@ -237,3 +237,55 @@ func TestNewSurfacesWorkflowParseError(t *testing.T) {
 		t.Fatalf("New must surface the workflow validation error, got %v", err)
 	}
 }
+
+// TestValidateKindVocabulary (#118): a declared kind outside the closed
+// vocabulary is refused at load; an undeclared kind is legal.
+func TestValidateKindVocabulary(t *testing.T) {
+	wf, err := parseWorkflow([]byte("steps:\n  - { id: s, kind: coder }\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := validateWorkflow(wf); err == nil || !strings.Contains(err.Error(), `unknown kind "coder"`) {
+		t.Fatalf("a misspelled kind must be refused, got %v", err)
+	}
+	wf = mustParseExt(t, "steps:\n  - { id: s, kind: author }\n  - { id: t }\n")
+	if wf.step("s").Kind != "author" || wf.step("t").Kind != "" {
+		t.Fatalf("kind parse: %+v", wf.Steps)
+	}
+}
+
+// TestValidateOnFail (#118): on_fail only on a gate, and its target must
+// be a strictly earlier step — checked at load, not at the gate's first
+// FAIL.
+func TestValidateOnFail(t *testing.T) {
+	for name, front := range map[string]string{
+		"non-gate":       "steps:\n  - { id: a }\n  - { id: b, on_fail: { target: a } }\n",
+		"missing target": "steps:\n  - { id: a }\n  - { id: g, gate: true, context_policy: fresh, on_fail: { target: e2e-run } }\n",
+		"self target":    "steps:\n  - { id: a }\n  - { id: g, gate: true, context_policy: fresh, on_fail: { target: g } }\n",
+		"later target":   "steps:\n  - { id: g, gate: true, context_policy: fresh, on_fail: { target: b } }\n  - { id: b }\n",
+		"empty target":   "steps:\n  - { id: a }\n  - { id: g, gate: true, context_policy: fresh, on_fail: { target: \"\" } }\n",
+	} {
+		wf, err := parseWorkflow([]byte(front))
+		if err != nil {
+			t.Fatalf("%s: parse: %v", name, err)
+		}
+		if err := validateWorkflow(wf); err == nil || !strings.Contains(err.Error(), "on_fail") {
+			t.Fatalf("%s: must be refused, got %v", name, err)
+		}
+	}
+	mustParseExt(t, "steps:\n  - { id: a }\n  - { id: g, gate: true, context_policy: fresh, on_fail: { target: a } }\n")
+}
+
+// TestShippedBundlesValidate: every shipped workflow bundle passes the
+// load-time validation.
+func TestShippedBundlesValidate(t *testing.T) {
+	dirs, err := filepath.Glob(filepath.Join("..", "..", "..", "workflows", "*"))
+	if err != nil || len(dirs) == 0 {
+		t.Fatalf("no shipped bundles found: %v", err)
+	}
+	for _, dir := range dirs {
+		if _, err := LoadWorkflow(dir); err != nil {
+			t.Errorf("%s: %v", filepath.Base(dir), err)
+		}
+	}
+}

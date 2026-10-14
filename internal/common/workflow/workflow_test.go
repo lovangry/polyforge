@@ -104,3 +104,16 @@ func TestReadFrontmatterAbsentConditions(t *testing.T) {
 		t.Fatalf("torn yaml must answer (nil, err), got (%v, %v)", fm, err)
 	}
 }
+
+// TestKindVocabulary pins the closed step-kind set the driver validates
+// bundle kinds against and the workspace loader validates per-kind keys
+// against.
+func TestKindVocabulary(t *testing.T) {
+	want := "qa spec author code gate review"
+	if got := strings.Join(KindVocabulary, " "); got != want {
+		t.Fatalf("kind vocabulary %q, want %q", got, want)
+	}
+	if !ValidKind("gate") || ValidKind("") || ValidKind("verify") {
+		t.Fatal("ValidKind must accept exactly the vocabulary")
+	}
+}
