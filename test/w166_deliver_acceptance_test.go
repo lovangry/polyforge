@@ -2,13 +2,16 @@ package test
 
 // w166_deliver_acceptance_test.go: the `deliver` step that ends the
 // delivery bundles (polyforge#166), end to end through the real daemon
-// and driver. GitHub is never contacted: the task repo's origin is a
+// and driver. GitHub is never contacted: each task repo's origin is a
 // local bare repo and `gh` is a fake first on the daemon's PATH that
-// keeps PRs as files and performs `gh pr merge --merge` as a real
-// --no-ff merge into the bare origin's main. The step agent is the
-// scripted fakepi: its deliver actions run the step's git/gh commands
-// (recorded as real command evidence the driver judges) and report the
-// output JSON those commands wrote.
+// keeps PRs as files (per origin, chosen by the cwd's origin remote) and
+// performs `gh pr merge --merge` as a real --no-ff merge into that bare
+// origin's main. The step agent is the scripted fakepi: its deliver
+// actions run the step's git/gh commands (recorded as real command
+// evidence the driver judges) and report the output JSON those commands
+// wrote. The driver derives the merge rule's facts itself (the commit
+// verification passed on, re-done merges), so these scenarios also pin
+// what a crash or a daemon restart mid-deliver can and cannot launder.
 
 import (
 	"os"
@@ -18,13 +21,12 @@ import (
 	"time"
 )
 
-// fakeGHPRs is the stand-in for GitHub's PR API over the bare origin
-// $FAKE_GH_ORIGIN; state lives under $FAKE_GH_STATE (prs/<n>/{head,base,
-// state,url,merge} and calls.log). It ignores --json/--jq and prints the
-// one value each scripted call asks for.
+// fakeGHPRs is the stand-in for GitHub's PR API. It ignores --json/--jq
+// and prints the one value each scripted call asks for.
 const fakeGHPRs = `#!/bin/sh
-S="$FAKE_GH_STATE"; mkdir -p "$S/prs"
-echo "gh $*" >> "$S/calls.log"
+echo "gh $*" >> "$FAKE_GH_STATE/calls.log"
+origin=$(git remote get-url origin 2>/dev/null) || { echo "fake gh: not in a repo with an origin" >&2; exit 2; }
+S="$FAKE_GH_STATE/$(basename "$origin" .git)"; mkdir -p "$S/prs"
 [ "$1" = pr ] || { echo "fake gh: unsupported: $*" >&2; exit 2; }
 sub=$2; shift 2
 head=""; state=all; base=main; target=""; method=""
@@ -58,13 +60,13 @@ case "$sub" in
     done
     n=$(( $(ls "$S/prs" | wc -l) + 1 )); d="$S/prs/$n"; mkdir -p "$d"
     echo "$head" > "$d/head"; echo "$base" > "$d/base"; echo OPEN > "$d/state"
-    echo "https://github.com/fake/demo/pull/$n" > "$d/url"; cat "$d/url" ;;
+    echo "https://github.com/fake/$(basename "$S")/pull/$n" > "$d/url"; cat "$d/url" ;;
   merge)
     d="$S/prs/${target##*/}"
     [ "$method" = --merge ] || { echo "fake gh: refusing merge method '$method'" >&2; exit 1; }
     [ "$(cat "$d/state")" = OPEN ] || { echo "fake gh: PR not open" >&2; exit 1; }
     w=$(mktemp -d)
-    git clone -q "$FAKE_GH_ORIGIN" "$w/c" || exit 1
+    git clone -q "$origin" "$w/c" || exit 1
     (cd "$w/c" && git checkout -q "$(cat "$d/base")" &&
       git merge -q --no-ff -m "Merge pull request #${target##*/} from $(cat "$d/head")" "origin/$(cat "$d/head")" &&
       git push -q origin "HEAD:refs/heads/$(cat "$d/base")" && git rev-parse HEAD > "$d/merge") || exit 1
@@ -74,30 +76,24 @@ case "$sub" in
 esac
 `
 
-// deliverWorld is one scenario's fake GitHub: the bare origin (main
-// seeded with a baseline), the fake gh and its state dir.
+// deliverWorld is one scenario's fake GitHub: bare origins (main seeded
+// with a baseline), the fake gh and its state dir.
 type deliverWorld struct {
-	origin string
-	state  string
-	bin    string
+	t     *testing.T
+	root  string
+	state string
+	bin   string
 }
 
 func newDeliverWorld(t *testing.T) *deliverWorld {
 	t.Helper()
 	root := shortTmp("/tmp", "pfw166")
 	t.Cleanup(func() { os.RemoveAll(root) })
-	w := &deliverWorld{origin: filepath.Join(root, "demo.git"), state: filepath.Join(root, "gh"), bin: filepath.Join(root, "bin")}
-	gitRun(t, "", "init", "-q", "--bare", "-b", "main", w.origin)
-	seed := filepath.Join(root, "seed")
-	gitRun(t, "", "clone", "-q", w.origin, seed)
-	if err := os.WriteFile(filepath.Join(seed, "README"), []byte("demo\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitRun(t, seed, "add", "-A")
-	gitRun(t, seed, "-c", "user.name=t", "-c", "user.email=t@invalid", "commit", "-q", "-m", "baseline")
-	gitRun(t, seed, "push", "-q", "origin", "HEAD:refs/heads/main")
-	if err := os.MkdirAll(w.bin, 0o755); err != nil {
-		t.Fatal(err)
+	w := &deliverWorld{t: t, root: root, state: filepath.Join(root, "gh"), bin: filepath.Join(root, "bin")}
+	for _, d := range []string{w.bin, w.state} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(w.bin, "gh"), []byte(fakeGHPRs), 0o755); err != nil {
 		t.Fatal(err)
@@ -105,14 +101,30 @@ func newDeliverWorld(t *testing.T) *deliverWorld {
 	return w
 }
 
-func (w *deliverWorld) daemonEnv() daemonOpt {
-	return optEnv("PATH="+w.bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"FAKE_GH_STATE="+w.state, "FAKE_GH_ORIGIN="+w.origin)
+// origin creates the bare origin <name>.git with a main baseline.
+func (w *deliverWorld) origin(name string) string {
+	t := w.t
+	t.Helper()
+	bare := filepath.Join(w.root, name+".git")
+	gitRun(t, "", "init", "-q", "--bare", "-b", "main", bare)
+	seed := filepath.Join(w.root, "seed-"+name)
+	gitRun(t, "", "clone", "-q", bare, seed)
+	if err := os.WriteFile(filepath.Join(seed, "README"), []byte(name+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, seed, "add", "-A")
+	gitRun(t, seed, "commit", "-q", "-m", "baseline")
+	gitRun(t, seed, "push", "-q", "origin", "HEAD:refs/heads/main")
+	return bare
 }
 
-// prState answers PR n's state file ("" when absent).
-func (w *deliverWorld) prState(n string) string {
-	b, _ := os.ReadFile(filepath.Join(w.state, "prs", n, "state"))
+func (w *deliverWorld) daemonEnv() daemonOpt {
+	return optEnv("PATH="+w.bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_GH_STATE="+w.state)
+}
+
+// prState answers repo's PR n state ("" when absent).
+func (w *deliverWorld) prState(repo, n string) string {
+	b, _ := os.ReadFile(filepath.Join(w.state, repo, "prs", n, "state"))
 	return strings.TrimSpace(string(b))
 }
 
@@ -128,9 +140,68 @@ func (w *deliverWorld) calls(prefix string) int {
 	return n
 }
 
-// literalBranch spells the feature branch out in a scripted command: the
-// driver judges the recorded command text, so a push names its branch
-// literally (steps/deliver.md), never through a shell variable.
+// mergedInto asserts origin main is the PR merge commit of the feature
+// branch (exactly one merge commit on main).
+func (w *deliverWorld) mergedInto(bare, branch string) {
+	t := w.t
+	t.Helper()
+	branchHead := strings.TrimSpace(gitRun(t, bare, "rev-parse", "refs/heads/"+branch))
+	mainHead := strings.TrimSpace(gitRun(t, bare, "rev-parse", "refs/heads/main"))
+	parents := strings.Fields(gitRun(t, bare, "rev-list", "--parents", "-n", "1", mainHead))
+	if len(parents) != 3 || parents[2] != branchHead {
+		t.Fatalf("%s main %s is not the PR merge commit of %s (parents %v)", bare, mainHead, branchHead, parents)
+	}
+	if merges := strings.Fields(gitRun(t, bare, "rev-list", "--merges", "--first-parent", "refs/heads/main")); len(merges) != 1 {
+		t.Fatalf("%s main carries %d first-parent merge commits, want 1", bare, len(merges))
+	}
+}
+
+// --- the scripted deliver procedure (steps/deliver.md), per repo. "$b" is
+// the feature branch; literalBranch spells it out before the plan is
+// written (the driver reads pushes literally).
+
+func dPre(repo string) string {
+	return `set -e; cap="$PWD"; mkdir -p artifacts; cd repos/` + repo + `; `
+}
+
+// pushAndPR: fetch; an already-merged repo stops here; else merge
+// origin/main, push the feature branch (never forced), reuse or open the PR.
+func pushAndPR(repo string) string {
+	return dPre(repo) + `git fetch -q origin; ` +
+		`url=$(gh pr list --head "$b" --state merged --json url -q '.[0].url' | head -1); ` +
+		`if [ -n "$url" ] && git merge-base --is-ancestor HEAD origin/main; then exit 0; fi; ` +
+		`git merge -q --no-edit origin/main; ` +
+		`remote=$(git ls-remote origin "refs/heads/$b" | cut -f1); ` +
+		`if [ -n "$remote" ] && ! git merge-base --is-ancestor "$remote" HEAD; then exit 3; fi; ` +
+		`git push -q origin "HEAD:refs/heads/$b"; ` +
+		`url=$(gh pr list --head "$b" --state open --json url -q '.[0].url' | head -1); ` +
+		`[ -n "$url" ] || gh pr create --base main --head "$b" --title "w166 delivery" --body-file /dev/null`
+}
+
+// mergeRecord merges the open PR (if any) with --merge and records the repo.
+func mergeRecord(repo, extra string) string {
+	return dPre(repo) +
+		`url=$(gh pr list --head "$b" --state open --json url -q '.[0].url' | head -1); ` +
+		`if [ -n "$url" ]; then gh pr merge "$url" --merge; fi; ` +
+		`url=$(gh pr list --head "$b" --state merged --json url -q '.[0].url' | head -1); ` +
+		`mc=$(gh pr view "$url" --json mergeCommit -q .mergeCommit.oid); ` +
+		`printf '{"name":"` + repo + `","branch":"%s","pr_url":"%s","merged":true,"merge_commit":"%s","tests_passed":true` + extra + `}' "$b" "$url" "$mc" > "$cap/artifacts/deliver-repo-` + repo + `.json"`
+}
+
+// claimRecord records repo with the given fields WITHOUT merging anything.
+func claimRecord(repo, fields string) string {
+	return dPre(repo) +
+		`url=$(gh pr list --head "$b" --state open --json url -q '.[0].url' | head -1); ` +
+		`printf '{"name":"` + repo + `","branch":"%s","pr_url":"%s",` + fields + `}' "$b" "$url" > "$cap/artifacts/deliver-repo-` + repo + `.json"`
+}
+
+// assemble writes artifacts/deliver-output.json from the per-repo records.
+const assemble = `set -e; e=$(for f in artifacts/deliver-repo-*.json; do cat "$f"; echo; done | paste -sd, -); ` +
+	`printf '{"verdict":"pass","repos":[%s],"delivery_note":"scripted delivery"}' "$e" > artifacts/deliver-output.json`
+
+const deliverOutput = "artifacts/deliver-output.json"
+
+// literalBranch spells the feature branch out in scripted commands.
 func literalBranch(branch string, cmds ...string) []string {
 	out := make([]string, len(cmds))
 	for i, c := range cmds {
@@ -139,83 +210,72 @@ func literalBranch(branch string, cmds ...string) []string {
 	return out
 }
 
-// deliverPre opens every scripted deliver command: the feature branch from
-// the capsule directory name, then into the task repo.
-const deliverPre = `set -e; b="polyforge/$(basename "$PWD")"; cap="$PWD"; mkdir -p artifacts; cd repos/demo; `
-
-// deliverOut writes the deliver output JSON for one repo.
-func deliverOut(fields string) string {
-	return `printf '{"verdict":"pass","repos":[{"name":"demo","branch":"%s","pr_url":"%s",` + fields + `}],"delivery_note":"scripted delivery"}' "$b" "$url"` +
-		` > "$cap/artifacts/deliver-output.json"`
+// moveMain lands a commit on bare's main (another PR merged meanwhile).
+func moveMain(bare, file, content string) string {
+	return `set -e; t=$(mktemp -d); git clone -q ` + bare + ` "$t/c"; cd "$t/c"; echo "` + content + `" > ` + file + `; git add -A; ` +
+		`git -c user.name=o -c user.email=o@invalid commit -q -m "other PR"; git push -q origin HEAD:refs/heads/main; rm -rf "$t"`
 }
 
-// deliverPushAndPR is steps 1-5 of steps/deliver.md for one repo, idempotent:
-// an already-delivered repo (local head on origin main and a merged PR)
-// skips to the record; otherwise merge origin/main, push the feature
-// branch (never forced), reuse or open the PR.
-const deliverPushAndPR = deliverPre + `git fetch -q origin; ` +
-	`url=$(gh pr list --head "$b" --state merged --json url -q '.[0].url' | head -1); ` +
-	`if [ -n "$url" ] && git merge-base --is-ancestor HEAD origin/main; then exit 0; fi; ` +
-	`git merge -q --no-edit origin/main; ` +
-	`remote=$(git ls-remote origin "refs/heads/$b" | cut -f1); ` +
-	`if [ -n "$remote" ] && ! git merge-base --is-ancestor "$remote" HEAD; then exit 3; fi; ` +
-	`git push -q origin "HEAD:refs/heads/$b"; ` +
-	`url=$(gh pr list --head "$b" --state open --json url -q '.[0].url' | head -1); ` +
-	`[ -n "$url" ] || gh pr create --base main --head "$b" --title "w166 delivery" --body-file /dev/null`
+// newDeliverWI files a WI on bundle with an empty plan and answers it and
+// its feature branch (the plan is written once the branch is known).
+func newDeliverWI(t *testing.T, inst *v1Install, goal, bundle string) (string, string) {
+	t.Helper()
+	inst.keepDeliver = true
+	wi := newWIWithBundle(t, inst, goal, bundle, nil)
+	return wi, "polyforge/" + wiPathName(t, inst, wi)
+}
 
-// deliverMergeAndRecord merges the open PR (if any) with --merge and
-// records it.
-const deliverMergeAndRecord = deliverPre +
-	`url=$(gh pr list --head "$b" --state open --json url -q '.[0].url' | head -1); ` +
-	`if [ -n "$url" ]; then gh pr merge "$url" --merge; fi; ` +
-	`url=$(gh pr list --head "$b" --state merged --json url -q '.[0].url' | head -1); ` +
-	`mc=$(gh pr view "$url" --json mergeCommit -q .mergeCommit.oid); `
+func startDeliverDaemon(t *testing.T, inst *v1Install, w *deliverWorld, wi string) *v1Daemon {
+	t.Helper()
+	d := newV1Daemon(t, inst, w.daemonEnv())
+	d.start()
+	t.Cleanup(func() { killOrphans(wi) })
+	d.pf(t, "submit", wi)
+	return d
+}
+
+func expectRejection(t *testing.T, d *v1Daemon, wi, want string) {
+	t.Helper()
+	rej := waitForEvent(t, d, wi, "envelope_rejected", 30*time.Second)
+	if !strings.Contains(string(rej.Body), want) {
+		t.Fatalf("deliver envelope not refused for %q: %s", want, rej.Body)
+	}
+}
 
 // TestW166DeliverFeatureFullAutoMergesIdempotently: a feature-full ticket
 // whose gates all pass is delivered automatically — the feature branch
 // pushed, one PR opened and merged with a merge commit into origin main.
 // The first deliver dispatch dies after merging and before reporting; the
 // re-dispatch runs the same procedure and reuses the branch and PR: still
-// one PR, one merge.
+// one PR, one merge, accepted without a human (the pushed head is the
+// commit verification passed on).
 func TestW166DeliverFeatureFullAutoMergesIdempotently(t *testing.T) {
 	inst := newV1Install(t)
-	inst.keepDeliver = true
 	w := newDeliverWorld(t)
-	wi := newWIWithBundle(t, inst, "w166: feature-full delivered automatically", "feature-full", nil)
-	branch := "polyforge/" + wiPathName(t, inst, wi)
-	deliver := literalBranch(branch, deliverPushAndPR, deliverMergeAndRecord+
-		`printf '{"verdict":"pass","repos":[{"name":"demo","branch":"%s","pr_url":"%s","merged":true,"merge_commit":"%s","tests_passed":true}],"delivery_note":"scripted delivery"}' "$b" "$url" "$mc" > "$cap/artifacts/deliver-output.json"`)
-	actions := []map[string]any{
+	origin := w.origin("demo")
+	wi, branch := newDeliverWI(t, inst, "w166: feature-full delivered automatically", "feature-full")
+	deliver := literalBranch(branch, pushAndPR("demo"), mergeRecord("demo", ""), assemble)
+	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "spec", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "grill-review", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "e2e-author", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "e2e-baseline", "outcome": "completed", "handoff": true},
-		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": w.origin},
+		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
 		{"do": "envelope", "id": "e2e-run", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
 		// dies after pushing, opening AND merging, before the envelope
 		{"do": "envelope", "id": "deliver", "run": deliver, "crash": "before"},
 		// the re-dispatch: the same idempotent procedure
-		{"do": "envelope", "id": "deliver", "outcome": "completed", "run": deliver, "output_file": "artifacts/deliver-output.json"},
-	}
-	inst.setPlanFull(t, wi, actions, nil)
-	d := newV1Daemon(t, inst, w.daemonEnv())
-	d.start()
-	t.Cleanup(func() { killOrphans(wi) })
-	d.pf(t, "submit", wi)
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "run": deliver, "output_file": deliverOutput},
+	}, nil)
+	d := startDeliverDaemon(t, inst, w, wi)
 
 	waitWorkflowStatus(t, d, wi, "completed", 240*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
-
-	branchHead := strings.TrimSpace(gitRun(t, w.origin, "rev-parse", "refs/heads/"+branch))
-	mainHead := strings.TrimSpace(gitRun(t, w.origin, "rev-parse", "refs/heads/main"))
-	parents := strings.Fields(gitRun(t, w.origin, "rev-list", "--parents", "-n", "1", mainHead))
-	if len(parents) != 3 || parents[2] != branchHead {
-		t.Fatalf("origin main %s is not the PR merge commit of %s (parents %v)", mainHead, branchHead, parents)
-	}
+	w.mergedInto(origin, branch)
 	if n := w.calls("gh pr create"); n != 1 {
 		t.Fatalf("gh pr create ran %d times, want exactly 1 (idempotent re-dispatch)", n)
 	}
@@ -225,86 +285,114 @@ func TestW166DeliverFeatureFullAutoMergesIdempotently(t *testing.T) {
 	if n := w.calls("gh pr view"); n != 2 {
 		t.Fatalf("the procedure ran to its record %d times, want 2 (the crashed dispatch and the re-dispatch)", n)
 	}
-	if merges := strings.Fields(gitRun(t, w.origin, "rev-list", "--merges", "refs/heads/main")); len(merges) != 1 {
-		t.Fatalf("origin main carries %d merge commits, want 1", len(merges))
-	}
 	x := readExecution(t, d.capsuleDir(wi))
-	st := x.Steps["deliver"]
-	if st == nil || st.Status != "done" {
-		t.Fatalf("deliver not done: %+v", st)
+	if heads, _ := x.Steps["verification"].Output["verified_heads"].(map[string]any); heads["demo"] == nil {
+		t.Fatalf("the driver did not record the verified head: %+v", x.Steps["verification"].Output)
 	}
+	st := x.Steps["deliver"]
 	repos, _ := st.Output["repos"].([]any)
-	if len(repos) != 1 {
-		t.Fatalf("deliver output repos: %+v", st.Output)
+	if st.Status != "done" || len(repos) != 1 {
+		t.Fatalf("deliver output: %+v", st)
 	}
 	r, _ := repos[0].(map[string]any)
+	mainHead := strings.TrimSpace(gitRun(t, origin, "rev-parse", "refs/heads/main"))
 	if r["branch"] != branch || r["merged"] != true || r["merge_commit"] != mainHead || r["pr_url"] != "https://github.com/fake/demo/pull/1" {
 		t.Fatalf("deliver result does not record branch/PR/merge commit: %+v (want branch %s, merge %s)", r, branch, mainHead)
 	}
 }
 
-// TestW166DeliverLLMResolvedConflictStopsAtHuman: origin main moves on with
-// a conflicting change while the chore lane runs; deliver resolves the
-// conflict, re-runs the tests, pushes and opens the PR — and may not merge
-// on its own: a completed result claiming the merge is refused, the step
-// asks, and only after a human answers "merge" does the merge land.
-func TestW166DeliverLLMResolvedConflictStopsAtHuman(t *testing.T) {
+// TestW166DeliverCrashAfterMergeCommitBeforeTests: origin main moved on
+// cleanly; the first deliver dispatch merges it and dies before running
+// the tests. The re-dispatch sees "Already up to date", skips the tests
+// and reports tests_passed — the driver refuses the auto-merge (the
+// pushed head is not the verified commit and no test re-run is in this
+// dispatch's evidence), the step asks, and only a human's answer merges.
+func TestW166DeliverCrashAfterMergeCommitBeforeTests(t *testing.T) {
 	inst := newV1Install(t)
-	inst.keepDeliver = true
 	w := newDeliverWorld(t)
+	origin := w.origin("demo")
+	wi, branch := newDeliverWI(t, inst, "w166: crash between the merge commit and the tests", "chore")
 	const qid = "deliver-merge"
-	wi := newWIWithBundle(t, inst, "w166: conflict resolved by the LLM needs a human", "chore", nil)
-	branch := "polyforge/" + wiPathName(t, inst, wi)
-	// main moves on: another change to the same file lands on origin main
-	moveMain := `set -e; t=$(mktemp -d); git clone -q ` + w.origin + ` "$t/c"; cd "$t/c"; echo "main moved on" > work.txt; git add -A; ` +
-		`git -c user.name=o -c user.email=o@invalid commit -q -m "other PR"; git push -q origin HEAD:refs/heads/main; rm -rf "$t"`
-	resolve := deliverPre + `git fetch -q origin; if git merge -q --no-edit origin/main; then exit 9; fi; ` +
-		`{ echo "fake agent repo work"; echo "main moved on"; } > work.txt; git add work.txt; git commit -q --no-edit; ` +
-		`echo "full test bar re-run: ok"; ` +
-		`git push -q origin "HEAD:refs/heads/$b"; ` +
-		`url=$(gh pr create --base main --head "$b" --title "w166 conflict" --body-file /dev/null); ` +
-		deliverOut(`"merged":true,"merge_commit":"not-merged-yet","tests_passed":true,"llm_resolved_conflict":true`)
-	merge := deliverMergeAndRecord +
-		`printf '{"verdict":"pass","repos":[{"name":"demo","branch":"%s","pr_url":"%s","merged":true,"merge_commit":"%s","tests_passed":true,"llm_resolved_conflict":true}]}' "$b" "$url" "$mc" > "$cap/artifacts/deliver-output.json"`
-	actions := []map[string]any{
+	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
-		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": w.origin},
-		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}, "run": []string{moveMain}},
+		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
+			"run": []string{moveMain(origin, "other.txt", "another PR")}},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
-		// resolves, re-tests, pushes, opens the PR — then claims a merge it may not make alone
-		{"do": "envelope", "id": "deliver", "outcome": "completed", "run": literalBranch(branch, resolve), "output_file": "artifacts/deliver-output.json"},
+		{"do": "envelope", "id": "deliver", "run": []string{dPre("demo") + "git fetch -q origin; git merge -q --no-edit origin/main"}, "crash": "before"},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
+			"run": literalBranch(branch, pushAndPR("demo"), claimRecord("demo", `"merged":true,"merge_commit":"pending","tests_passed":true`), assemble)},
 		{"do": "envelope", "id": "deliver", "outcome": "needs_input", "question_id": qid,
-			"question": "PR https://github.com/fake/demo/pull/1: merging main needed an LLM-resolved conflict in work.txt. merge / don't merge / back to code?"},
-		{"do": "envelope", "id": "deliver", "outcome": "completed", "run": literalBranch(branch, merge), "output_file": "artifacts/deliver-output.json"},
-	}
-	inst.setPlanFull(t, wi, actions, nil)
-	d := newV1Daemon(t, inst, w.daemonEnv())
-	d.start()
-	t.Cleanup(func() { killOrphans(wi) })
-	d.pf(t, "submit", wi)
+			"question": "PR https://github.com/fake/demo/pull/1: the tests did not run on the merged head. merge / don't merge / back to code?"},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
+			"run": literalBranch(branch, mergeRecord("demo", ""), assemble)},
+	}, nil)
+	d := startDeliverDaemon(t, inst, w, wi)
 
-	waitQuestion(t, d, wi, qid, 180*time.Second)
-	rej := waitForEvent(t, d, wi, "envelope_rejected", 30*time.Second)
-	if !strings.Contains(string(rej.Body), "LLM-resolved conflict") {
-		t.Fatalf("the unanswered merge claim was not refused for the LLM-resolved conflict: %s", rej.Body)
+	waitQuestion(t, d, wi, qid, 120*time.Second)
+	expectRejection(t, d, wi, "tests are not shown to pass")
+	if w.prState("demo", "1") != "OPEN" || w.calls("gh pr merge") != 0 {
+		t.Fatalf("PR must be open and unmerged while the question is pending (state %q)", w.prState("demo", "1"))
 	}
-	branchHead := strings.TrimSpace(gitRun(t, w.origin, "rev-parse", "refs/heads/"+branch))
-	if w.prState("1") != "OPEN" || w.calls("gh pr merge") != 0 {
-		t.Fatalf("PR must be open and unmerged while the human question is pending (state %q)", w.prState("1"))
-	}
-	if strings.Contains(gitRun(t, w.origin, "branch", "--contains", branchHead), "main") {
-		t.Fatal("origin main already contains the delivered branch before the human answered")
-	}
-
 	answerQuestion(t, d, wi, qid, "merge")
 	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
-	if w.prState("1") != "MERGED" {
-		t.Fatalf("PR state %q after the human's merge answer", w.prState("1"))
+	if w.prState("demo", "1") != "MERGED" {
+		t.Fatalf("PR state %q after the human's merge answer", w.prState("demo", "1"))
 	}
-	mainHead := strings.TrimSpace(gitRun(t, w.origin, "rev-parse", "refs/heads/main"))
-	parents := strings.Fields(gitRun(t, w.origin, "rev-list", "--parents", "-n", "1", mainHead))
-	if len(parents) != 3 || parents[2] != branchHead {
+}
+
+// TestW166DeliverHandResolvedConflictStopsAtHuman: origin main moves on
+// with a conflicting change; deliver resolves the conflict, re-runs the
+// verification commands on the merged head, pushes and opens the PR — and
+// reports NO conflict. The driver re-does the merge itself, sees the hand
+// resolution and refuses the auto-merge; the merge lands only after a
+// human answers "merge".
+func TestW166DeliverHandResolvedConflictStopsAtHuman(t *testing.T) {
+	inst := newV1Install(t)
+	w := newDeliverWorld(t)
+	origin := w.origin("demo")
+	wi, branch := newDeliverWI(t, inst, "w166: a hand-resolved conflict needs a human", "chore")
+	const qid = "deliver-merge"
+	const testBar = `cd repos/demo && test -s work.txt && git diff --quiet HEAD`
+	resolve := dPre("demo") + `git fetch -q origin; if git merge -q --no-edit origin/main; then exit 9; fi; ` +
+		`{ echo "fake agent repo work"; echo "main moved on"; } > work.txt; git add work.txt; git commit -q --no-edit; ` +
+		`git push -q origin "HEAD:refs/heads/$b"; gh pr create --base main --head "$b" --title "w166 conflict" --body-file /dev/null`
+	inst.setPlanFull(t, wi, []map[string]any{
+		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"},
+			"run": []string{moveMain(origin, "work.txt", "main moved on")}},
+		// the test bar verification records (and deliver must re-run verbatim)
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}, "run": []string{testBar}},
+		// resolves, re-runs the test bar, pushes, opens the PR — and lies about the conflict
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
+			"run": literalBranch(branch, resolve, testBar,
+				claimRecord("demo", `"merged":true,"merge_commit":"pending","tests_passed":true,"llm_resolved_conflict":false`), assemble)},
+		{"do": "envelope", "id": "deliver", "outcome": "needs_input", "question_id": qid,
+			"question": "PR https://github.com/fake/demo/pull/1: merging main needed a hand-resolved conflict in work.txt. merge / don't merge / back to code?"},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
+			"run": literalBranch(branch, mergeRecord("demo", `,"llm_resolved_conflict":true`), assemble)},
+	}, nil)
+	d := startDeliverDaemon(t, inst, w, wi)
+
+	waitQuestion(t, d, wi, qid, 180*time.Second)
+	expectRejection(t, d, wi, "had conflicts")
+	branchHead := strings.TrimSpace(gitRun(t, origin, "rev-parse", "refs/heads/"+branch))
+	if w.prState("demo", "1") != "OPEN" || w.calls("gh pr merge") != 0 {
+		t.Fatalf("PR must be open and unmerged while the human question is pending (state %q)", w.prState("demo", "1"))
+	}
+	if strings.Contains(gitRun(t, origin, "branch", "--contains", branchHead), "main") {
+		t.Fatal("origin main already contains the delivered branch before the human answered")
+	}
+	answerQuestion(t, d, wi, qid, "merge")
+	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	if w.prState("demo", "1") != "MERGED" {
+		t.Fatalf("PR state %q after the human's merge answer", w.prState("demo", "1"))
+	}
+	mainHead := strings.TrimSpace(gitRun(t, origin, "rev-parse", "refs/heads/main"))
+	if parents := strings.Fields(gitRun(t, origin, "rev-list", "--parents", "-n", "1", mainHead)); len(parents) != 3 || parents[2] != branchHead {
 		t.Fatalf("origin main %s is not the merge of %s (parents %v)", mainHead, branchHead, parents)
 	}
 }
@@ -315,43 +403,151 @@ func TestW166DeliverLLMResolvedConflictStopsAtHuman(t *testing.T) {
 // completes with the PR open and origin main untouched.
 func TestW166DeliverWithoutIndependentReviewNeedsHuman(t *testing.T) {
 	inst := newV1Install(t)
-	inst.keepDeliver = true
 	w := newDeliverWorld(t)
+	origin := w.origin("demo")
+	wi, branch := newDeliverWI(t, inst, "w166: no independent review, human decides", "quick-fix")
 	const qid = "deliver-merge"
-	push := deliverPushAndPR + `; url=$(gh pr list --head "$b" --state open --json url -q '.[0].url' | head -1); ` +
-		deliverOut(`"merged":true,"merge_commit":"x","tests_passed":true`)
-	keep := deliverPre + `url=$(gh pr list --head "$b" --state open --json url -q '.[0].url' | head -1); ` +
-		deliverOut(`"merged":false,"not_merged_reason":"human: don't merge yet","tests_passed":true`)
-	wi := inst.newWI(t, "w166: no independent review, human decides", nil, nil)
-	branch := "polyforge/" + wiPathName(t, inst, wi)
-	inst.setPlanFull(t, wi,
-		[]map[string]any{
-			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
-			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "name": "demo", "origin": w.origin},
-			{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
-			{"do": "envelope", "id": "deliver", "outcome": "completed", "run": literalBranch(branch, push), "output_file": "artifacts/deliver-output.json"},
-			{"do": "envelope", "id": "deliver", "outcome": "needs_input", "question_id": qid,
-				"question": "PR https://github.com/fake/demo/pull/1: no independent review in quick-fix. merge / don't merge / back to code?"},
-			{"do": "envelope", "id": "deliver", "outcome": "completed", "run": literalBranch(branch, keep), "output_file": "artifacts/deliver-output.json"},
-		}, nil)
-	d := newV1Daemon(t, inst, w.daemonEnv())
-	d.start()
-	t.Cleanup(func() { killOrphans(wi) })
-	d.pf(t, "submit", wi)
+	inst.setPlanFull(t, wi, []map[string]any{
+		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
+			"run": literalBranch(branch, pushAndPR("demo"), claimRecord("demo", `"merged":true,"merge_commit":"x","tests_passed":true`), assemble)},
+		{"do": "envelope", "id": "deliver", "outcome": "needs_input", "question_id": qid,
+			"question": "PR https://github.com/fake/demo/pull/1: no independent review in quick-fix. merge / don't merge / back to code?"},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
+			"run": literalBranch(branch, claimRecord("demo", `"merged":false,"not_merged_reason":"human: don't merge yet","tests_passed":true`), assemble)},
+	}, nil)
+	d := startDeliverDaemon(t, inst, w, wi)
 
 	waitQuestion(t, d, wi, qid, 120*time.Second)
-	rej := waitForEvent(t, d, wi, "envelope_rejected", 30*time.Second)
-	if !strings.Contains(string(rej.Body), "independent review") {
-		t.Fatalf("the unanswered merge claim was not refused for the missing review: %s", rej.Body)
-	}
+	expectRejection(t, d, wi, "independent review")
 	answerQuestion(t, d, wi, qid, "don't merge")
 	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
 	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
-	if w.prState("1") != "OPEN" || w.calls("gh pr merge") != 0 {
-		t.Fatalf("PR must stay open and unmerged (state %q)", w.prState("1"))
+	if w.prState("demo", "1") != "OPEN" || w.calls("gh pr merge") != 0 {
+		t.Fatalf("PR must stay open and unmerged (state %q)", w.prState("demo", "1"))
 	}
-	if merges := strings.TrimSpace(gitRun(t, w.origin, "rev-list", "--merges", "refs/heads/main")); merges != "" {
+	if merges := strings.TrimSpace(gitRun(t, origin, "rev-list", "--merges", "refs/heads/main")); merges != "" {
 		t.Fatalf("origin main got a merge despite \"don't merge\": %s", merges)
 	}
-	gitRun(t, w.origin, "rev-parse", "--verify", "refs/heads/"+branch) // the feature branch was pushed
+	gitRun(t, origin, "rev-parse", "--verify", "refs/heads/"+branch) // the feature branch was pushed
+}
+
+// TestW166DeliverMultiRepoCrashBetweenPRAndMerge: a WI with two task repos
+// gets one delivery pass per repo. The first dispatch pushes both branches
+// and opens both PRs, then dies before merging; the re-dispatch reuses
+// both PRs and merges each once.
+func TestW166DeliverMultiRepoCrashBetweenPRAndMerge(t *testing.T) {
+	inst := newV1Install(t)
+	w := newDeliverWorld(t)
+	demo, two := w.origin("demo"), w.origin("two")
+	wi, branch := newDeliverWI(t, inst, "w166: two repos, crash between PR and merge", "chore")
+	cloneTwo := `set -e; mkdir -p repos; git clone -q ` + two + ` repos/two; cd repos/two; echo two > two.txt; git add -A; ` +
+		`git -c user.name=a -c user.email=a@invalid commit -q -m "two work"`
+	inst.setPlanFull(t, wi, []map[string]any{
+		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": demo, "run": []string{cloneTwo}},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "deliver", "crash": "before", "run": literalBranch(branch, pushAndPR("demo"), pushAndPR("two"))},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
+			"run": literalBranch(branch, pushAndPR("demo"), pushAndPR("two"), mergeRecord("demo", ""), mergeRecord("two", ""), assemble)},
+	}, nil)
+	d := startDeliverDaemon(t, inst, w, wi)
+
+	waitWorkflowStatus(t, d, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	w.mergedInto(demo, branch)
+	w.mergedInto(two, branch)
+	if c, m := w.calls("gh pr create"), w.calls("gh pr merge"); c != 2 || m != 2 {
+		t.Fatalf("gh pr create ran %d and gh pr merge %d times, want 2 each (one per repo)", c, m)
+	}
+	repos, _ := readExecution(t, d.capsuleDir(wi)).Steps["deliver"].Output["repos"].([]any)
+	if len(repos) != 2 {
+		t.Fatalf("deliver result must carry one entry per repo: %+v", repos)
+	}
+}
+
+// TestW166DeliverSurvivesDaemonRestart: the daemon crashes while deliver
+// is running (after the branch push and the PR); the restarted daemon
+// re-dispatches deliver, which reuses the PR and merges once.
+func TestW166DeliverSurvivesDaemonRestart(t *testing.T) {
+	inst := newV1Install(t)
+	w := newDeliverWorld(t)
+	origin := w.origin("demo")
+	wi, branch := newDeliverWI(t, inst, "w166: daemon restart during deliver", "chore")
+	inst.setPlanFull(t, wi, []map[string]any{
+		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "deliver", "park": true, "run": literalBranch(branch, pushAndPR("demo"))},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
+			"run": literalBranch(branch, pushAndPR("demo"), mergeRecord("demo", ""), assemble)},
+	}, nil)
+	d := startDeliverDaemon(t, inst, w, wi)
+
+	waitUntil(t, 120*time.Second, "deliver never opened its PR", func() bool { return w.prState("demo", "1") == "OPEN" })
+	d.crash()
+	d2 := &v1Daemon{
+		t: t, inst: inst, sock: d.sock, dataDir: d.dataDir, workspace: d.workspace,
+		machineID: d.machineID, extraArgs: d.extraArgs, extraEnv: d.extraEnv,
+		logPath: filepath.Join(t.TempDir(), "daemon2.log"),
+	}
+	t.Cleanup(func() { d2.stop() })
+	d2.start()
+
+	waitWorkflowStatus(t, d2, wi, "completed", 120*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	w.mergedInto(origin, branch)
+	if c, m := w.calls("gh pr create"), w.calls("gh pr merge"); c != 1 || m != 1 {
+		t.Fatalf("gh pr create ran %d and gh pr merge %d times, want 1 each across the restart", c, m)
+	}
+}
+
+// TestW166DeliverBackToCodeRoundTrip: the human answers "back to code";
+// deliver's fail verdict rewinds the lane to code, the gates re-run on the
+// new work, and the next deliver reuses the same branch and PR and
+// auto-merges the new head.
+func TestW166DeliverBackToCodeRoundTrip(t *testing.T) {
+	inst := newV1Install(t)
+	w := newDeliverWorld(t)
+	origin := w.origin("demo")
+	wi, branch := newDeliverWI(t, inst, "w166: back to code round trip", "chore")
+	const qid = "deliver-merge"
+	rework := `set -e; cd repos/demo; echo rework >> work.txt; git -c user.name=a -c user.email=a@invalid commit -q -am "rework after review"`
+	inst.setPlanFull(t, wi, []map[string]any{
+		{"do": "envelope", "id": "plan", "outcome": "completed", "handoff": true},
+		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "deliver", "outcome": "needs_input", "question_id": qid,
+			"question": "PR https://github.com/fake/demo/pull/1 is open. merge / don't merge / back to code?",
+			"run":      literalBranch(branch, pushAndPR("demo"))},
+		{"do": "envelope", "id": "deliver", "outcome": "gate_failed",
+			"output": map[string]any{"verdict": "fail", "fail_reason": "human: back to code: rework work.txt (PR https://github.com/fake/demo/pull/1)"}},
+		{"do": "envelope", "id": "code", "outcome": "completed", "handoff": true, "run": []string{rework}},
+		{"do": "envelope", "id": "review", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "verification", "outcome": "completed", "output": map[string]any{"verdict": "pass"}},
+		{"do": "envelope", "id": "deliver", "outcome": "completed", "output_file": deliverOutput,
+			"run": literalBranch(branch, pushAndPR("demo"), mergeRecord("demo", ""), assemble)},
+	}, nil)
+	d := startDeliverDaemon(t, inst, w, wi)
+
+	waitQuestion(t, d, wi, qid, 120*time.Second)
+	answerQuestion(t, d, wi, qid, "back to code: rework work.txt")
+	waitWorkflowStatus(t, d, wi, "completed", 180*time.Second)
+	inst.waitWIStatus(t, wi, "wrapped", 60*time.Second)
+	w.mergedInto(origin, branch)
+	if c := w.calls("gh pr create"); c != 1 {
+		t.Fatalf("gh pr create ran %d times, want 1 (the PR is reused after the rewind)", c)
+	}
+	if log := gitRun(t, origin, "log", "--format=%s", "refs/heads/"+branch); !strings.Contains(log, "rework after review") {
+		t.Fatalf("the reworked commit was not delivered:\n%s", log)
+	}
+	x := readExecution(t, d.capsuleDir(wi))
+	if n, _ := x.RewindStats["count"].(float64); n < 1 {
+		t.Fatalf("no rewind recorded: %+v", x.RewindStats)
+	}
 }

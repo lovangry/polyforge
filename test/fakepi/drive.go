@@ -83,7 +83,7 @@ type planAction struct {
 	Files map[string]string `json:"files,omitempty"`
 
 	// Run executes shell commands (sh -c, capsule root as cwd, in order)
-	// BEFORE the envelope write — the scripted stand-in for the commands a
+	// FIRST, before any other part of the action (park, crash, envelope) — the scripted stand-in for the commands a
 	// real step agent runs (the deliver step's git/gh calls). Each one is
 	// journaled and recorded as a real command_evidence entry (argv
 	// sh -c <cmd>, its exit code and measured duration); a failing command
@@ -330,6 +330,9 @@ func sleepMS(n int) {
 // ms delay), the crash shapes, and the envelope write itself (question
 // text, output payload, command evidence, duplicates).
 func (d *driveEnv) runEnvelopeAction(act planAction) {
+	// Scripted commands run first, whatever the action does afterwards
+	// (park, crash, envelope).
+	runEvidence := d.runCommands(act.Run)
 	if act.Silent {
 		// The zero-signal harness: no record at all (UI noise optionally),
 		// no envelope, no exit.
@@ -402,7 +405,6 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 			d.journal("file_error", map[string]any{"path": p, "err": err.Error()})
 		}
 	}
-	runEvidence := d.runCommands(act.Run)
 	if act.Crash == "before" {
 		d.journal("crash_before", map[string]any{"step": act.ID, "outcome": act.Outcome})
 		if act.CrashStderr != "" {
@@ -719,7 +721,9 @@ func (d *driveEnv) writeEnvelope(act planAction, runEvidence []map[string]any) {
 		output = map[string]interface{}{"summary": "envelope action"}
 	}
 	var evidence []interface{}
-	if !act.NoEvidence {
+	if !act.NoEvidence && len(runEvidence) == 0 {
+		// the synthetic entry stands in for "a command ran" only when
+		// the action scripted none
 		evidence = append(evidence, map[string]any{
 			"argv":        []any{"fakepi", "envelope", stepID},
 			"cwd":         capsuleRoot,
@@ -727,6 +731,8 @@ func (d *driveEnv) writeEnvelope(act planAction, runEvidence []map[string]any) {
 			"duration_ms": 40,
 			"started_at":  nowStamp(),
 		})
+	}
+	if !act.NoEvidence {
 		for _, e := range act.Evidence {
 			evidence = append(evidence, e)
 		}
