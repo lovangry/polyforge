@@ -105,6 +105,28 @@ as empty tables from the pre-#149 (85cf926) DDL: old-version code runs
 correctly on the result, existing rows carry the defaults.
 `deploy/sql/v2.4.0/probe.sql` counts the dead shapes (0 = already applied).
 
+## v2.5.0 (polyforge#157, repo inventory column)
+
+The per-work-item repo inventory (02 §4.6) moves from the
+`wi_repo_inventory` table into one JSON column, `work_items.repo_inventory`
+(`[{name, url, subdir?}]`, NULL = no inventory). Production held 0 rows in
+the table, so nothing is carried over. The v2.5.0 server reads and writes
+the column, so it does not work until this SQL has run. The file
+`deploy/sql/v2.5.0/upgrade.sql` is the source of truth; its content:
+
+```sql
+DROP TABLE IF EXISTS wi_repo_inventory;
+ALTER TABLE work_items ADD COLUMN repo_inventory TEXT;
+```
+
+The post-swap row-count check leaves `wi_repo_inventory` out (it is
+dropped by this upgrade.sql). `deploy/sql/v2.5.0/rollback.sql` drops the
+column (an inventory filed during the failed deploy is lost with it) and
+rebuilds `wi_repo_inventory` with its unique index as an empty table from
+the v2.4.x DDL. `deploy/sql/v2.5.0/probe.sql` answers 0 when the table is
+gone and the column exists (a database created by v2.5.0 is already in
+that shape).
+
 ## Optional: stale `waiting_on` cleanup (manual, NOT in the window)
 
 The server's `waiting_on` value domain dropped the `gate` and

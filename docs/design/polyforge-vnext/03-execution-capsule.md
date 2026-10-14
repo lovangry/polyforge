@@ -135,7 +135,7 @@ internal/runner/    # Native runner：RunCommand 实现、runtime-state 写保�
 
 ### 4.1 repo inventory：声明格式 <!-- §4.1 -->
 
-WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 8。**权威存储在 `02-aihub-core.md#§4.6` `wi_repo_inventory` 表**（本文不重复定义存储）：创建时写入 `name`/`url`/`subdir`，`base` 为 NULL；**base commit 在 WI 创建事务中冻结**（`02-aihub-core.md#§4.6` 的 `POST /api/v1/work-items` 创建请求体 `repo_inventory_base` 字段），此后不可变（`wi_repo_inventory` 不受 bundle 变更影响；bundle 引用的冻结时点同 `bundle_name`：首次认领冻结，`02-aihub-core.md#§4.5`——digest 链已删，polyforge#149 B9）。Daemon 丢失本地声明（takeover/重新检出）时通过 `GET /api/v1/work-items/{id}/repo-inventory`（`02-aihub-core.md#§5.1`）重建清单，不依赖本地缓存或推断。
+WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 8。**权威存储在 `02-aihub-core.md#§4.6` `work_items.repo_inventory` 列**（本文不重复定义存储）：创建事务内冻结，此后不可变（不受 bundle 变更影响）。**不支持冻结 base commit**（携带 `base` 在建票时被拒，`02-aihub-core.md#§4.6`）：认领答复的 `repos` 只含清单内仓库（无清单时为项目全部仓库），Daemon 逐个 clone 默认分支；重新认领时若 WI 的 carrier ref 存在，则恢复到上次 session 发布的 head。Daemon 丢失本地声明（takeover/重新检出）时通过认领答复或 `GET /api/v1/work-items/{id}` 的 `repo_inventory` 重建清单，不依赖本地缓存或推断。
 
 ### 4.2 `runtime-state/execution.json`：完整文件格式（权威，INV-1 的唯一执行权威文件） <!-- §4.2 -->
 
@@ -214,7 +214,7 @@ WI 创建时声明 repo inventory：`[{name, url, subdir?}]`，1 ≤ 条数 ≤ 
   断定是本 step 写的。重新派发（rewind 回到该
   step、基础设施失败 resume）**不**更新该字段（保持第一次进入该 step 时的基线，保证多次 attempt
   的 diff 基线一致）。`07-deployment-pilot.md` 的 INV-D4/M4/M5 判定均必须比对该字段（HEAD+脏集）而非 `03-execution-capsule.md#§4.1`/
-  §4.3 的 WI 级 `repo_inventory_base`/`inventory.json`，后者是整个 WI 的起始基线，不能区分“本
+  §4.3 的 WI 级认领基线（`capsule.json` 的 `repos`）/`inventory.json`，后者是整个 WI 的起始基线，不能区分“本
   step 自己改了什么”与“前面 step 留下的改动”。
 - `review_rounds`：**review 轮次**，`{<gate_step_id>: <int>}`，值等于该 gate step 自身 `attempts` 数组长度加当前一次未归档结果（即该 gate 已被评估的总次数）；与 `rewind_stats` 的关系是**派生但同一原子写入单元**内一起落盘，不是第二权威——`rewind_stats` 统计的是「触发了多少次回退」，`review_rounds` 统计的是「某个 gate 被评估了多少次」，两者口径不同，都从同一份 `steps` 归档结构机械推得。
 - `rewind_stats`：`{total, by_step}`，`total` 是全 workflow 累计触发的 rewind 次数，`by_step` 是按 `on_fail.target` 分组的计数；与 `01-workflow-skills.md#§6.2` `consumed_rewinds_total`/`rewinds_reached[target]` 逐字对应。
