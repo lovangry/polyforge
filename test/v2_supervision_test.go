@@ -111,12 +111,14 @@ func plan(first []map[string]any) []map[string]any {
 // the next prompt, the session idles forever (35+ minutes observed).
 // Rule 1 judges it one grace after the error — the turn ended with an
 // error and no result file followed — and the driver advances the
-// candidate (a model-class death).
+// candidate (a model-class death). The error text here is a fatal
+// request error: a throttle or upstream-transient text takes the D7
+// same-model path instead (v2_live_error_turn_d7_test.go, polyforge#162).
 func TestV2F5FatalProviderErrorThenIdleModelError(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "f5: fatal provider error then idle",
 		plan([]map[string]any{
-			{"do": "envelope", "id": "grill", "error_turn": "provider overloaded (529): retries exhausted"},
+			{"do": "envelope", "id": "grill", "error_turn": "provider error: 400 invalid_request_error: messages must alternate between user and assistant"},
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		}), nil)
 	grace := 2 * time.Second
@@ -128,7 +130,7 @@ func TestV2F5FatalProviderErrorThenIdleModelError(t *testing.T) {
 	rec := waitForEvent(t, d, wi, "supervisor_verdict", 60*time.Second)
 	var v verdictEvent
 	eventBody(t, rec, &v)
-	if v.Verdict != "step_dead" || v.Cause != "model_error" || !strings.Contains(v.Evidence, "529") {
+	if v.Verdict != "step_dead" || v.Cause != "model_error" || !strings.Contains(v.Evidence, "invalid_request_error") {
 		t.Fatalf("verdict %+v, want step_dead model_error naming the provider error", v)
 	}
 	// within the grace (not instantly, not never): the verdict lands

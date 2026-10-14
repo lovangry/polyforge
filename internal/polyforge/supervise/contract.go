@@ -150,6 +150,10 @@ type StepDead struct {
 	SpawnN   int64  `json:"spawn_n"`
 	Cause    Cause  `json:"cause"`
 	Evidence string `json:"evidence"`
+	// TurnError is the harness's own error text of the error-ended turn
+	// (model_error only): the driver classifies it like the error text of
+	// an exited dispatch (D7: a throttle is not a model-class death).
+	TurnError string `json:"turn_error,omitempty"`
 }
 
 // DriverStalled: the driver sat between steps (not waiting on a human)

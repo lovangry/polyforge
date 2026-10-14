@@ -37,9 +37,11 @@ func Judge(s Snapshot, now time.Time, grace time.Duration) *StepDead {
 	}
 	// 1: model_error — the turn ended on an error and no result followed.
 	if s.TurnError && now.Sub(s.TurnErrAt) >= grace {
-		return dead(CauseModelError, fmt.Sprintf(
+		v := dead(CauseModelError, fmt.Sprintf(
 			"turn ended with an error %s ago and no result file followed within the %s grace: %s",
 			now.Sub(s.TurnErrAt).Round(time.Second), grace.Round(time.Second), s.TurnErrText))
+		v.TurnError = s.TurnErrText
+		return v
 	}
 	// 1b: ended_without_result — the turn ended normally and no result
 	// file followed within the grace: the agent stopped without
