@@ -106,7 +106,11 @@ case "$1" in
   push) echo "docker $*" >> "$CALLLOG"; [ -n "$FAKE_PUSH_FAIL" ] && exit 1 ;;
   inspect) echo "docker inspect" >> "$CALLLOG"; echo "ghcr.io/silgrid/aihub@$FAKE_PUSH_DIGEST" ;;
   login) echo "docker login" >> "$CALLLOG"; cat >/dev/null ;;
-  buildx) echo "Name: x"; echo "Digest: $FAKE_REGISTRY_DIGEST" ;;
+  buildx) [ -n "$FAKE_NO_BUILDX" ] && { echo "docker: 'buildx' is not a docker command." >&2; exit 1; }
+    echo "Name: x"; echo "Digest: $FAKE_REGISTRY_DIGEST" ;;
+  # config/layer digests come BEFORE the Descriptor here, so only the
+  # Descriptor-scoped read can find the manifest digest
+  manifest) printf '{\n\t"Ref": "x",\n\t"SchemaV2Manifest": {\n\t\t"config": {\n\t\t\t"digest": "sha256:cccc"\n\t\t},\n\t\t"layers": [\n\t\t\t{\n\t\t\t\t"Digest": "sha256:dddd"\n\t\t\t}\n\t\t]\n\t},\n\t"Descriptor": {\n\t\t"mediaType": "m",\n\t\t"digest": "%s",\n\t\t"size": 952\n\t}\n}\n' "$FAKE_REGISTRY_DIGEST" ;;
 esac
 exit 0
 `, 0o755)
@@ -471,6 +475,12 @@ func TestReleaseScriptVerify(t *testing.T) {
 			mut: func(f map[string]string) { delete(f, "pf-linux-amd64") }, fail: "asset set"},
 		{name: "digest mismatch", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
 			env: []string{"FAKE_REGISTRY_DIGEST=sha256:bbbb"}, fail: "digest mismatch"},
+		// no buildx: the `docker manifest inspect -v` fallback reads the
+		// lowercase "digest" inside "Descriptor"
+		{name: "pass via manifest fallback", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
+			env: []string{"FAKE_NO_BUILDX=1"}},
+		{name: "digest mismatch via manifest fallback", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
+			env: []string{"FAKE_NO_BUILDX=1", "FAKE_REGISTRY_DIGEST=sha256:bbbb"}, fail: "digest mismatch"},
 		{name: "non-monotonic", tag: "v1.2.0", origin: []string{"v1.02.0", "v1.2.0"}, fail: "monotonic"},
 		{name: "newer tag exists", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0", "v1.4.0"}, fail: "not strictly greater"},
 		{name: "equal key spelling exists", tag: "v1.3.0", origin: []string{"v1.3.0", "v1.03.0"}, fail: "not strictly greater"},

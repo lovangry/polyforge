@@ -24,7 +24,10 @@ NOT restricted to the machine's `[workspace]` mapping: memory lives in
 AIHub, so remember works for any project the api key can see, mapped
 here or not. `--visibility` defaults
 to `project` (`admin|private|project|team|public`); `--work-item`
-optionally attributes the memory to a work item id.
+optionally attributes the memory to a work item (id or `<project>#<seq>`
+slug; an unknown one is a typed CORE-404). The work item must belong to
+`--project` — a memory belongs to one project; another project's work
+item is refused with CORE-400.
 
 ## Success
 

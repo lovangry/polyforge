@@ -253,18 +253,18 @@ func (m *WIManager) Resolve(idOrSlug string) (string, error) {
 	}
 	i := strings.LastIndexByte(idOrSlug, '#')
 	if i < 0 {
-		return "", Fail(api.ErrCoreNotFound, "", "work item %q", idOrSlug)
+		return "", Fail(api.ErrCoreNotFound, "", "work item %s", idOrSlug)
 	}
 	project, seqStr := idOrSlug[:i], idOrSlug[i+1:]
 	seq, err := strconv.ParseInt(seqStr, 10, 64)
 	if err != nil {
-		return "", Fail(api.ErrCoreNotFound, "", "work item %q", idOrSlug)
+		return "", Fail(api.ErrCoreNotFound, "", "work item %s", idOrSlug)
 	}
 	var id string
 	err = m.db.QueryRow(`SELECT w.id FROM work_items w JOIN projects p ON p.id=w.project_id
 		WHERE p.name=?1 AND w.seq=?2`, project, seq).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", Fail(api.ErrCoreNotFound, "", "work item %q", idOrSlug)
+		return "", Fail(api.ErrCoreNotFound, "", "work item %s", idOrSlug)
 	}
 	if err != nil {
 		return "", err

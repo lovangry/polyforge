@@ -161,6 +161,42 @@ func TestD8ClassificationPrecedence(t *testing.T) {
 		{"401 Unauthorized", FailExitModel},
 		{"429 Too Many Requests: connection reset", FailRateLimited},
 		{"429 You exceeded your current quota", FailExitModel},
+		// Chinese provider texts (no \b / (?i) for CJK): throttle → rate limit
+		{"当前并发数过高，请稍后重试", FailRateLimited},
+		{"并发 超限", FailRateLimited},
+		{"请求过于频繁，请稍后再试", FailRateLimited},
+		{"请求频率超过限制", FailRateLimited},
+		{"触发限流", FailRateLimited},
+		{"超过速率限制", FailRateLimited},
+		{"服务繁忙，请稍后重试", FailRateLimited},
+		{"系统繁忙", FailRateLimited},
+		{"当前负载过高", FailRateLimited},
+		{"请求过多，请稍后重试", FailRateLimited},
+		{"并发超额", FailRateLimited},
+		// Chinese balance/quota/auth texts → model class (switch)
+		{"账户余额不足", FailExitModel},
+		{"您的账户已欠费", FailExitModel},
+		{"额度已用尽", FailExitModel},
+		{"配额不足", FailExitModel},
+		{"已超出额度", FailExitModel},
+		{"账户已被停用", FailExitModel},
+		{"鉴权失败", FailExitModel},
+		{"认证失败：无效的 API Key", FailExitModel},
+		{"API Key 无效", FailExitModel},
+		{"无权限访问该模型", FailExitModel},
+		{"该模型无权限", FailExitModel},
+		{"API 权限不足", FailExitModel},
+		// a bare permission phrase is a local error, not allowance; the
+		// Chinese EACCES phrasings stay host-class
+		{"无法打开文件: 权限不足", FailExitOther},
+		{"open /tmp/x: 权限不够", FailExitHost},
+		{"写入失败：权限被拒绝", FailExitHost},
+		{"拒绝访问", FailExitHost},
+		// allowance wins over throttle when both appear
+		{"余额不足；请求过于频繁", FailExitModel},
+		// Chinese negatives: no bare single-character match
+		{"参数错误：消息格式不正确", FailExitOther},
+		{"限制条件不满足", FailExitOther},
 		// negatives: not upstream transient
 		{"Invalid tool name: foo", FailExitOther},
 		{"400 invalid request: invalid argument", FailExitOther},

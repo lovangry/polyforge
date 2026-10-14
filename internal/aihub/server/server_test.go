@@ -415,6 +415,98 @@ func TestMemoryOverHTTP(t *testing.T) {
 	}
 }
 
+// TestMemoryWorkItemSlug (polyforge#155): the attributing work item of a
+// memory write accepts the "<project>#<seq>" slug the other faces accept
+// and stores the canonical id; an unknown id or slug answers a typed
+// CORE-404, never the insert's foreign-key failure as a 500.
+func TestMemoryWorkItemSlug(t *testing.T) {
+	e := newSrvEnv(t)
+	var wi struct {
+		ID   string `json:"id"`
+		Slug string `json:"slug"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items", e.key,
+		map[string]any{"project": "alpha", "goal": "attribution"}, &wi); code != 201 || wi.ID == "" || wi.Slug == "" {
+		t.Fatalf("create wi: %d %s", code, raw)
+	}
+	for _, spelling := range []string{wi.Slug, wi.ID} {
+		var m struct {
+			ID         string `json:"id"`
+			WorkItemID string `json:"work_item_id"`
+		}
+		if code, raw := e.do(t, "POST", "/api/v1/memories", e.key, map[string]any{
+			"project": "alpha", "type": "fact.note", "visibility": "project",
+			"content": "attributed via " + spelling, "work_item_id": spelling,
+		}, &m); code != 201 || m.WorkItemID != wi.ID {
+			t.Fatalf("create memory with work_item_id %q: %d %s (want canonical %s)", spelling, code, raw, wi.ID)
+		}
+	}
+	var bare struct {
+		WorkItemID *string `json:"work_item_id"`
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/memories", e.key, map[string]any{
+		"project": "alpha", "type": "fact.note", "visibility": "project",
+		"content": "unattributed", "work_item_id": "",
+	}, &bare); code != 201 || bare.WorkItemID != nil {
+		t.Fatalf("empty work_item_id is no attribution: %d %s", code, raw)
+	}
+	type envelope struct {
+		Code   string `json:"code"`
+		Detail string `json:"detail"`
+	}
+	remember := func(key, project, wiRef string) (int, envelope, []byte) {
+		var envl envelope
+		code, raw := e.do(t, "POST", "/api/v1/memories", key, map[string]any{
+			"project": project, "type": "fact.note", "visibility": "project",
+			"content": "orphan", "work_item_id": wiRef,
+		}, &envl)
+		return code, envl, raw
+	}
+	for _, unknown := range []string{"alpha#999", "wi_doesnotexist", "nope#1", "garbage"} {
+		if code, envl, raw := remember(e.key, "alpha", unknown); code != 404 || envl.Code != api.ErrCoreNotFound ||
+			envl.Detail != "work item "+unknown {
+			t.Fatalf("unknown work_item_id %q: %d %s, want 404 %s", unknown, code, raw, api.ErrCoreNotFound)
+		}
+	}
+
+	// A memory belongs to one project: a readable work item of another
+	// project is refused as bad input.
+	if _, err := e.admin.CreateProject(core.CreateProjectRequest{Name: "beta"}); err != nil {
+		t.Fatalf("project beta: %v", err)
+	}
+	for _, spelling := range []string{wi.Slug, wi.ID} {
+		if code, envl, raw := remember(e.key, "beta", spelling); code != 400 || envl.Code != api.ErrCoreBadInput {
+			t.Fatalf("cross-project work_item_id %q: %d %s, want 400 %s", spelling, code, raw, api.ErrCoreBadInput)
+		}
+	}
+
+	// No existence leak: a writer on beta who is NOT a member of alpha
+	// gets, for alpha's existing work item (slug or id), exactly the
+	// answer an unknown work item gets — before the project check.
+	outsider, err := e.admin.CreateUser("out3", "out3@example.com", "writer", "human")
+	if err != nil {
+		t.Fatalf("outsider: %v", err)
+	}
+	okey, err := e.admin.CreateAPIKey(outsider.ID, "o3", "")
+	if err != nil {
+		t.Fatalf("outsider key: %v", err)
+	}
+	if err := e.admin.AddMember(e.adminProjectID(t, "beta"), outsider.ID, "writer"); err != nil {
+		t.Fatalf("member: %v", err)
+	}
+	for _, pair := range [][2]string{{wi.Slug, "alpha#999"}, {wi.ID, "wi_doesnotexist"}} {
+		existing, unknown := pair[0], pair[1]
+		code, got, raw := remember(okey.Plain, "beta", existing)
+		ucode, want, uraw := remember(okey.Plain, "beta", unknown)
+		if code != 404 || got.Code != api.ErrCoreNotFound || ucode != 404 || want.Code != api.ErrCoreNotFound {
+			t.Fatalf("outsider: existing %q → %d %s; unknown %q → %d %s", existing, code, raw, unknown, ucode, uraw)
+		}
+		if strings.Replace(got.Detail, existing, "X", 1) != strings.Replace(want.Detail, unknown, "X", 1) {
+			t.Fatalf("existence leak: hidden %q detail %q vs unknown %q detail %q", existing, got.Detail, unknown, want.Detail)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Management face over HTTP (#10): the six endpoints the CLI verbs call.
 
