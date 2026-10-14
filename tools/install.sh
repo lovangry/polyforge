@@ -284,10 +284,9 @@ PYEOF
   fi
 fi
 # Progress display: the same judgement as `pf doctor` (reads only; a
-# warn row carries the copyable snippet — user files are never edited).
+# warn row carries the copyable snippet, a skip row names an absent
+# harness — user files are never edited).
 "$BIN" doctor --harness 2>/dev/null | sed -e '/^ok:/d' -e '/^$/d' -e 's/^/   /'
-command -v pi >/dev/null 2>&1 || [ -d "$HOME/.claude" ] || command -v claude >/dev/null 2>&1 \
-  || echo "   no pi/claude — CLI only (skills optional)"
 
 # ─── 4. daemon: start only when a real mapping exists ────────────────
 echo "== 4/5 daemon"

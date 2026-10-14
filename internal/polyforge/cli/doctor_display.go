@@ -38,8 +38,12 @@ const (
 const statuslineCommand = "pf watch --statusline --harness-session -"
 
 // pfStatuslineRe matches a `pf watch ... --statusline` invocation on
-// one line (bare `pf` or a path ending in /pf).
-var pfStatuslineRe = regexp.MustCompile(`(^|[\s/;|&(])pf\s+watch\b.*--statusline`)
+// one line (bare `pf`, a path ending in /pf, or quoted as in
+// `bash -c 'pf watch ...'`).
+var pfStatuslineRe = regexp.MustCompile(`(^|[\s/;|&('"` + "`" + `])pf\s+watch\b.*--statusline`)
+
+// scriptRe matches a token naming a script file by its extension.
+var scriptRe = regexp.MustCompile(`\.(sh|bash|zsh|py|js|ts|rb|pl)$`)
 
 // polyforgePkgRe matches a pi package source of the polyforge repo.
 var polyforgePkgRe = regexp.MustCompile(`github\.com[:/]silgrid/polyforge(\.git)?(@|$)`)
@@ -114,34 +118,67 @@ func claudeDisplayCheck(home string) doctorCheck {
 		c.Status, c.Detail = "pass", "the statusLine command runs pf watch --statusline"
 		return c
 	}
+	// A file the command names that cannot be read (relative, missing,
+	// split by quoting) or a read script naming another script leaves
+	// the verdict open: "cannot tell", not a definite "will not show".
+	var unresolved []string
 	for _, tok := range strings.Fields(cmd) {
-		f := strings.Trim(tok, `"'`)
+		f := strings.Trim(tok, `"';&|()`)
 		if strings.HasPrefix(f, "~/") {
 			f = filepath.Join(home, f[2:])
 		}
 		f = strings.NewReplacer("${HOME}", home, "$HOME", home).Replace(f)
 		if !filepath.IsAbs(f) {
+			if scriptRe.MatchString(f) {
+				unresolved = append(unresolved, f)
+			}
 			continue
 		}
 		st, err := os.Stat(f)
-		if err != nil || !st.Mode().IsRegular() || st.Size() > maxScriptBytes {
+		if err != nil {
+			unresolved = append(unresolved, f)
 			continue
 		}
-		if body, err := os.ReadFile(f); err == nil && runsPfStatusline(string(body)) {
+		if !st.Mode().IsRegular() || st.Size() > maxScriptBytes {
+			continue
+		}
+		body, err := os.ReadFile(f)
+		if err != nil {
+			unresolved = append(unresolved, f)
+			continue
+		}
+		if runsPfStatusline(string(body)) {
 			c.Status, c.Detail = "pass", "the statusLine script "+f+" runs pf watch --statusline"
 			return c
 		}
+		for _, line := range strings.Split(string(body), "\n") {
+			if l := strings.TrimSpace(line); strings.HasPrefix(l, "#") {
+				continue
+			}
+			for _, w := range strings.Fields(line) {
+				if w = strings.Trim(w, `"';&|()`); scriptRe.MatchString(w) {
+					unresolved = append(unresolved, f+" → "+w)
+				}
+			}
+		}
+	}
+	if len(unresolved) > 0 {
+		c.Status, c.Detail = "warn", "cannot tell: the statusLine command in "+path+
+			" does not run pf watch --statusline itself and names script(s) not checked ("+strings.Join(unresolved, ", ")+
+			") — progress shows only if one of them runs "+statuslineCommand
+		return c
 	}
 	// Append, never replace: the wrapper feeds the session JSON to the
-	// user's own command first (its output kept, ended by one newline),
-	// then to the progress face, whose rows follow below.
+	// user's own command first (its non-empty output kept, ended by one
+	// newline), then to the progress face, whose rows follow below. The
+	// group closes on a new line so a trailing `&` or `# comment` in the
+	// user's command stays intact.
 	sl := map[string]any{}
 	for k, v := range cfg.StatusLine {
 		sl[k] = v
 	}
-	sl["command"] = `input=$(cat); printf '%s\n' "$(printf '%s' "$input" | { ` +
-		strings.TrimRight(strings.TrimSpace(cmd), ";") + `; })"; printf '%s' "$input" | ` +
-		statuslineCommand + ` 2>/dev/null`
+	sl["command"] = `input=$(cat); out=$(printf '%s' "$input" | { ` + cmd + "\n" +
+		`}); [ -z "$out" ] || printf '%s\n' "$out"; printf '%s' "$input" | ` + statuslineCommand + ` 2>/dev/null`
 	c.Status, c.Detail = "warn", "will not show: the statusLine command in "+path+
 		" does not run pf watch --statusline — to keep its output and append the progress rows, set "+statusLineJSON(sl)
 	return c
@@ -173,7 +210,7 @@ func piDisplayCheck(agentDir string) doctorCheck {
 	}
 	var cfg struct {
 		Packages   []json.RawMessage `json:"packages"`
-		Extensions []string          `json:"extensions"`
+		Extensions []any             `json:"extensions"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		c.Status, c.Detail = "warn", "cannot tell: "+path+" does not parse as a settings object: "+err.Error()
@@ -193,8 +230,8 @@ func piDisplayCheck(agentDir string) doctorCheck {
 			return c
 		}
 	}
-	for _, e := range cfg.Extensions {
-		if filepath.Base(e) == "pf-chat.ts" {
+	for _, x := range cfg.Extensions {
+		if e, ok := x.(string); ok && filepath.Base(e) == "pf-chat.ts" {
 			c.Status, c.Detail = "pass", "pi extension "+e+" is listed"
 			return c
 		}

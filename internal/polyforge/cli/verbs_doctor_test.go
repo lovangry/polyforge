@@ -254,6 +254,9 @@ func TestDoctorUnloadableConfigDoesNotFakeGreen(t *testing.T) {
 	}
 	skips := 0
 	for _, c := range doc.Checks {
+		if c.Name == docChClaudeDisplay || c.Name == docChPiDisplay {
+			continue // config-independent (polyforge#142)
+		}
 		if c.Status == "skip" {
 			skips++
 		}

@@ -48,7 +48,7 @@ reported `skip` — a skip never pretends to be a pass.
 
 | Check | `pass` | `warn` (detail carries the fix) | `skip` |
 |---|---|---|---|
-| `claude progress display` | `~/.claude/settings.json`'s statusLine command runs `pf watch --statusline`, directly or in a script file it names | no statusLine → the full `"statusLine"` snippet; a statusLine without pf → an append-style snippet that runs the user's command first, keeps its output, then the progress rows; unreadable/malformed settings → "cannot tell" | no `~/.claude` |
+| `claude progress display` | `~/.claude/settings.json`'s statusLine command runs `pf watch --statusline`, directly or in a script file it names | no statusLine → the full `"statusLine"` snippet; a statusLine without pf → an append-style snippet that runs the user's command first, keeps its output, then the progress rows; unreadable/malformed settings, or a named script that could not be checked (relative, missing, or itself naming another script) → "cannot tell" | no `~/.claude` |
 | `pi progress display` | pi settings list the polyforge package (or `pf-chat.ts` itself) | the `pi install …` line; malformed settings → "cannot tell" | no pi agent dir (`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) |
 
 The judgement is static: the statusLine command is read, never run, and

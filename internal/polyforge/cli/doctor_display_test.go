@@ -56,6 +56,7 @@ func TestClaudeDisplayCheck(t *testing.T) {
 	scripts := t.TempDir()
 	withPf := writeScript(t, scripts, "with-pf.sh", "#!/bin/sh\ninput=$(cat)\necho main\nprintf '%s' \"$input\" | env -u PF_CHAT_ID pf watch --statusline --harness-session - 2>/dev/null\n")
 	withoutPf := writeScript(t, scripts, "without-pf.sh", "#!/bin/sh\necho main\n# pf watch --statusline (commented out)\n")
+	callsOther := writeScript(t, scripts, "calls-other.sh", "#!/bin/sh\necho main\n. \"$HOME/more.sh\"\n")
 	cases := []struct {
 		name     string
 		settings string
@@ -68,7 +69,11 @@ func TestClaudeDisplayCheck(t *testing.T) {
 		{"statusLine of the wrong shape", `{"statusLine":"pf"}`, "warn", "cannot tell"},
 		{"no statusLine", `{"hooks":{}}`, "warn", "will not show"},
 		{"statusLine runs pf directly", statusLineSettings("pf watch --statusline --harness-session -"), "pass", "statusLine command"},
+		{"statusLine runs pf quoted", statusLineSettings("bash -c 'pf watch --statusline --harness-session -'"), "pass", "statusLine command"},
 		{"statusLine script runs pf", statusLineSettings("bash " + withPf), "pass", withPf},
+		{"relative script", statusLineSettings("bash statusline.sh"), "warn", "cannot tell"},
+		{"missing script", statusLineSettings("bash " + filepath.Join(scripts, "gone.sh")), "warn", "cannot tell"},
+		{"script calling another script", statusLineSettings("bash " + callsOther), "warn", "cannot tell"},
 		{"statusLine script without pf", statusLineSettings("bash " + withoutPf), "warn", "append"},
 		{"inline command without pf", statusLineSettings("echo hi"), "warn", "append"},
 	}
@@ -99,36 +104,48 @@ func snippetStatusLine(t *testing.T, detail string) map[string]any {
 
 // TestClaudeDisplayAppendSnippetRuns pins that the copied snippet works:
 // it parses as JSON, keeps the user's statusLine fields, and run as the
-// statusLine command prints the user's own output unchanged followed by
-// the progress rows, both fed the same session JSON.
+// statusLine command prints the user's own non-empty output unchanged
+// followed by the progress rows, both fed the same session JSON — also
+// for a user command ending in `;`, `&` or a `# comment`.
 func TestClaudeDisplayAppendSnippetRuns(t *testing.T) {
 	bin := t.TempDir()
 	writeScript(t, bin, "pf", "#!/bin/sh\necho \"pf $*: $(cat)\"\n")
 	user := writeScript(t, t.TempDir(), "user.sh", "#!/bin/sh\nprintf 'user: %s' \"$(cat)\"\n")
-	settings := `{"statusLine":{"type":"command","command":"sh ` + user + `;","refreshInterval":5}}`
-	c := claudeDisplayCheck(displayHome(t, settings, ""))
-	if c.Status != "warn" {
-		t.Fatalf("got %s %q, want warn", c.Status, c.Detail)
+	const in = `{"session_id":"s1"}`
+	pfRow := "pf watch --statusline --harness-session -: " + in + "\n"
+	cases := []struct{ cmd, want string }{
+		{"sh " + user + ";", "user: " + in + "\n" + pfRow},
+		{"sh " + user + " # the user's comment", "user: " + in + "\n" + pfRow},
+		{"echo hi &", "hi\n" + pfRow},
+		{"true", pfRow},
 	}
-	sl := snippetStatusLine(t, c.Detail)
-	if sl["type"] != "command" || sl["refreshInterval"] != float64(5) {
-		t.Fatalf("snippet dropped the user's statusLine fields: %v", sl)
-	}
-	cmd := exec.Command("sh", "-c", sl["command"].(string))
-	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
-	cmd.Stdin = strings.NewReader(`{"session_id":"s1"}`)
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("snippet command failed: %v (%s)", err, out)
-	}
-	want := "user: {\"session_id\":\"s1\"}\npf watch --statusline --harness-session -: {\"session_id\":\"s1\"}\n"
-	if string(out) != want {
-		t.Fatalf("snippet output %q, want %q", out, want)
-	}
-	// Re-judged with the snippet in place, the statusLine now shows.
-	b, _ := json.Marshal(map[string]any{"statusLine": sl})
-	if c := claudeDisplayCheck(displayHome(t, string(b), "")); c.Status != "pass" {
-		t.Fatalf("snippet re-judged: %s %q, want pass", c.Status, c.Detail)
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			b, _ := json.Marshal(map[string]any{"statusLine": map[string]any{"type": "command", "command": tc.cmd, "refreshInterval": 5}})
+			c := claudeDisplayCheck(displayHome(t, string(b), ""))
+			if c.Status != "warn" {
+				t.Fatalf("got %s %q, want warn", c.Status, c.Detail)
+			}
+			sl := snippetStatusLine(t, c.Detail)
+			if sl["type"] != "command" || sl["refreshInterval"] != float64(5) {
+				t.Fatalf("snippet dropped the user's statusLine fields: %v", sl)
+			}
+			cmd := exec.Command("sh", "-c", sl["command"].(string))
+			cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+			cmd.Stdin = strings.NewReader(in)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("snippet command failed: %v (%s)", err, out)
+			}
+			if string(out) != tc.want {
+				t.Fatalf("snippet output %q, want %q", out, tc.want)
+			}
+			// Re-judged with the snippet in place, the statusLine now shows.
+			b, _ = json.Marshal(map[string]any{"statusLine": sl})
+			if c := claudeDisplayCheck(displayHome(t, string(b), "")); c.Status != "pass" {
+				t.Fatalf("snippet re-judged: %s %q, want pass", c.Status, c.Detail)
+			}
+		})
 	}
 }
 
@@ -145,7 +162,7 @@ func TestPiDisplayCheck(t *testing.T) {
 		{"package not installed", `{"packages":["git:git@github.com:other/repo.git"]}`, "warn", "pi install"},
 		{"package installed", `{"packages":["git:git@github.com:other/repo.git","git:git@github.com:silgrid/polyforge.git@v2.2.1"]}`, "pass", "silgrid/polyforge"},
 		{"package installed (object entry)", `{"packages":[{"source":"https://github.com/silgrid/polyforge"}]}`, "pass", "silgrid/polyforge"},
-		{"extension listed", `{"extensions":["/src/polyforge/skills/polyforge/extensions/pf-chat.ts"]}`, "pass", "pf-chat.ts"},
+		{"extension listed", `{"extensions":[{"x":1},"/src/polyforge/skills/polyforge/extensions/pf-chat.ts"]}`, "pass", "pf-chat.ts"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
