@@ -37,6 +37,24 @@ import (
 // outputSchemaKey is the step-definition frontmatter key of the schema.
 const outputSchemaKey = "output"
 
+// enforceOutputSchemas selects the H3 mode (the one switch; flip the
+// default to true in a later release). false (v2.5.0) = RECORD
+// ONLY: the schema rides the prompt and every completed output is
+// validated, but a violation is the durable EvOutputSchemaViolation event,
+// never an envelope rejection — replayed real outputs (written before
+// any agent saw a schema) violate it too often to enforce yet. true =
+// a violation is an envelope rejection (the in-process retry lane).
+var enforceOutputSchemas = false
+
+// EvOutputSchemaViolation is the durable event kind recording a
+// completed output that violates its step's declared schema (record-only
+// mode). EvOutputSchemaUnloadable records a declared schema that does
+// not load (so nothing is validated for that step).
+const (
+	EvOutputSchemaViolation  = "output_schema_violation"
+	EvOutputSchemaUnloadable = "output_schema_unloadable"
+)
+
 // stepOutputSchema is one step's declared output schema: the YAML text
 // the prompt shows and the compiled form the validator runs.
 type stepOutputSchema struct {
@@ -116,6 +134,27 @@ func mappingValue(doc *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
+// dropNulls removes every object property whose value is null, at any
+// depth: an agent writing `"fail_reason": null` on a pass means the
+// optional property is absent, and is validated as such.
+func dropNulls(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, e := range t {
+			if e == nil {
+				delete(t, k)
+				continue
+			}
+			t[k] = dropNulls(e)
+		}
+	case []any:
+		for i, e := range t {
+			t[i] = dropNulls(e)
+		}
+	}
+	return v
+}
+
 // maxSchemaErrorLen bounds the validation detail an envelope rejection
 // carries back into the retry prompt.
 const maxSchemaErrorLen = 2000
@@ -133,6 +172,7 @@ func checkOutputSchema(s *jsonschema.Schema, output json.RawMessage) error {
 	if err := dec.Decode(&v); err != nil {
 		return fmt.Errorf("output is not valid JSON: %w", err)
 	}
+	v = dropNulls(v)
 	if err := s.Validate(v); err != nil {
 		detail := err.Error()
 		if ve, ok := err.(*jsonschema.ValidationError); ok {

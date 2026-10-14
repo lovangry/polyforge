@@ -449,6 +449,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			return fmt.Errorf("driver: step %s result transition failed: %w", stepID, err)
 		}
 		d.noteUnaskedHumanGate(stepID, n, res)
+		d.noteAcceptedResultRecords(stepID, n, res)
 
 		switch res.Outcome {
 		case OutcomeCompleted:
@@ -800,6 +801,7 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	}
 	d.mu.Unlock()
 	spec.OutputSchema = d.outputSchema(stepID)
+	spec.ProtectedTests = protectedTestsOf(outputs)
 	// Declared outputs, gate-ness and duties (gate-ness feeds the
 	// verdict binding — the #106 lesson).
 	if ss := d.workflow.step(stepID); ss != nil {
@@ -835,7 +837,9 @@ func (d *Driver) outputSchema(stepID string) *jsonschema.Schema {
 		var err error
 		s, err = loadStepOutputSchema(d.bundleDir, stepID)
 		if err != nil {
+			// loud, never a silent nil: stderr AND a durable event
 			fmt.Fprintf(os.Stderr, "driver: %s: %v (output not schema-validated)\n", d.wi.ID, err)
+			d.emit(EvOutputSchemaUnloadable, map[string]any{"step": stepID, "error": err.Error()})
 			s = nil
 		}
 		d.mu.Lock()
@@ -846,6 +850,25 @@ func (d *Driver) outputSchema(stepID string) *jsonschema.Schema {
 		return nil
 	}
 	return s.Schema
+}
+
+// noteAcceptedResultRecords emits the durable records an accepted result
+// owes: an output that violates its declared schema while the schema lane
+// is record-only (polyforge#164 H3), and a human-approved re-baseline of
+// authored tests naming the files (H4).
+func (d *Driver) noteAcceptedResultRecords(stepID string, n int64, res *StepResult) {
+	if res.schemaViolation != "" {
+		d.emit(EvOutputSchemaViolation, map[string]any{
+			"step": stepID, "spawn_n": n,
+			"schema": dirStepDefs + "/" + stepID + ".md#/output",
+			"errors": res.schemaViolation,
+		})
+	}
+	if res.rebaseline {
+		d.emit(EvAuthoredTestsRebaselined, map[string]any{
+			"step": stepID, "spawn_n": n, "files": res.rebaselined,
+		})
+	}
 }
 
 // noteUnaskedHumanGate records a requires_human_answer: if_asked step

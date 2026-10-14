@@ -27,7 +27,7 @@ output:
     pre_existing_failures:
       type: array
       items: { type: string }
-      description: Tests that fail on this tree AND fail the same way on the base commit (re-run there) - pre-existing failures, reported but never this change's fault. Their checks carry status pre_existing; they never fail the gate.
+      description: "Tests that fail on this tree AND fail the same way on the base commit (re-run there) - pre-existing failures, reported but never this change's fault, each as `<repo-relative test file>: <test name>`. Their checks carry status pre_existing with the base sha in detail; they never fail the gate. Never the repro, an authored test_files entry or the regression test (the driver rejects that)."
   oneOf:
     - description: A pass verdict - every recorded check must itself be pass or an honestly-marked skipped; no check may be recorded as fail.
       properties:
@@ -92,16 +92,23 @@ pass. No subjective judgment belongs here.
 
 Before you record a failing test as `fail`, re-run ONLY the failing tests on the base
 commit this work item's branch started from (`git merge-base HEAD origin/HEAD`, falling
-back to `origin/main` or `origin/master`), in a throwaway worktree: `git worktree add
---detach <tmp> <base>`, run the failing tests there, then `git worktree remove --force
-<tmp>` — never check the base out in the task repo itself. A test that fails the same way
-on the base commit is a PRE-EXISTING failure: record its check as `status: pre_existing`
-(the base sha and the base run's failure excerpt in `detail`), list the test in
-`pre_existing_failures`, and list it in the report. Pre-existing failures do not fail this
-gate: no rewind, no question to the owner — they are reported. Only a failure that does
-not occur on the base (or a test the base does not have) is this change's `fail`; a check
-with both kinds is `fail`, and `fail_reason` names only the new failures. The base runs
-are command evidence like any other.
+back to `origin/main` or `origin/master`), in a throwaway worktree OUTSIDE the capsule:
+`tmp=$(mktemp -d)`, `git worktree add --detach "$tmp" <base>`, run the failing tests
+there, then `git worktree remove --force "$tmp"` (and `rm -rf "$tmp"`) — never check the
+base out in the task repo itself. A test that fails the same way on the base commit is a
+PRE-EXISTING failure: record its check as `status: pre_existing` with the base commit
+sha and the base run's failure excerpt in `detail` (the driver rejects a pre_existing
+check whose detail names no sha), list it in `pre_existing_failures` as
+`<repo-relative test file>: <test name>`, and list it in the report. Pre-existing
+failures do not fail this gate: no rewind, no question to the owner — they are
+reported. Only a failure that does not occur on the base (or a test the base does not
+have) is this change's `fail`; a check with both kinds is `fail`, and `fail_reason`
+names only the new failures. The base runs are command evidence like any other.
+
+**Never pre_existing:** any test the plan names as pinning this change, and any repro check. These pin THIS change and fail on the base by design
+— a repro that still fails is an unfixed bug, not a pre-existing failure. Report them
+`pass` or `fail`, never `pre_existing`; the driver rejects a result that classifies a
+repro check or an authored/regression test as pre_existing.
 
 ## Honesty
 

@@ -139,6 +139,13 @@ type StepResult struct {
 	// authored test files with a human's approval (the authored-tests
 	// gate): the accepted output is stamped with the new baseline.
 	rebaseline bool
+	// rebaselined names the authored test files a human-approved change
+	// touched (the authored_tests_rebaselined event body).
+	rebaselined []string
+	// schemaViolation is the declared-output-schema validation error of
+	// an accepted result while the schema lane records instead of
+	// enforcing (enforceOutputSchemas false); "" = conforming.
+	schemaViolation string
 }
 
 // verificationStepID is the conventional id of the V4 verification step:
@@ -205,6 +212,11 @@ type ResultSpec struct {
 	// AuthoredTests is the authored-tests baseline of the done steps
 	// before this one (polyforge#164 H4); nil = no authored tests.
 	AuthoredTests *AuthoredTests
+	// ProtectedTests are the tests that pin the change itself — the
+	// authored test_files of the done steps (e2e-author, repro) and
+	// bug-fix's regression_test paths. A result may never classify one
+	// of them (or a repro check) as pre_existing (checkPreExisting).
+	ProtectedTests []string
 }
 
 // ValidateStepResult runs the staging gates over one envelope:
@@ -336,10 +348,23 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 		}
 	}
 	// 6. the declared output schema (polyforge#164 H3): the schema the
-	// prompt shows is the contract the driver enforces.
+	// prompt shows is the contract. While enforceOutputSchemas is false
+	// a violation is recorded (res.schemaViolation -> the
+	// output_schema_violation event), never rejected.
 	if res.Outcome == OutcomeCompleted && spec.OutputSchema != nil {
 		if err := checkOutputSchema(spec.OutputSchema, res.Output); err != nil {
-			return fmt.Errorf("driver: step %q completed but its %w", spec.StepID, err)
+			if enforceOutputSchemas {
+				return fmt.Errorf("driver: step %q completed but its %w", spec.StepID, err)
+			}
+			res.schemaViolation = err.Error()
+		}
+	}
+	// 6b. the pre-existing-failure boundary (polyforge#164 S6): the tests
+	// that pin THIS change — the repro, the authored acceptance and
+	// regression tests — can never be excused as failing on the base.
+	if res.Outcome == OutcomeCompleted {
+		if err := checkPreExisting(res.Output, spec.ProtectedTests); err != nil {
+			return fmt.Errorf("driver: step %q completed with %w", spec.StepID, err)
 		}
 	}
 	// 7. the authored-tests gate (polyforge#164 H4).
@@ -348,7 +373,8 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 		if err != nil {
 			return fmt.Errorf("driver: step %q completed with %w", spec.StepID, err)
 		}
-		res.rebaseline = changed
+		res.rebaseline = len(changed) > 0
+		res.rebaselined = changed
 	}
 	return nil
 }

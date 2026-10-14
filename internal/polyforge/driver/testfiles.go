@@ -189,6 +189,11 @@ func repoGit(dir string, args ...string) (string, error) {
 // becomes the new baseline (the authoring steps' stamps are replaced
 // with the new HEADs, so the approval survives a rewind of the step).
 
+// EvAuthoredTestsRebaselined is the durable event kind recording a
+// human-approved change to authored test files (the files it names
+// become the new baseline).
+const EvAuthoredTestsRebaselined = "authored_tests_rebaselined"
+
 // testFilesCommitKey is the driver-written output key carrying the
 // authored-tests baseline: task repo name -> commit sha.
 const testFilesCommitKey = "test_files_commit"
@@ -313,18 +318,18 @@ func shortSHA(s string) string {
 }
 
 // checkAuthoredTestsUnchanged is the gate's verdict for one completed
-// step: nil when nothing authored changed; changed=true with a nil error
-// when the change is human-approved (the caller re-baselines); an error
-// otherwise.
-func checkAuthoredTestsUnchanged(reposDir string, at *AuthoredTests, humanAnswers int) (changed bool, err error) {
+// step: nothing when no authored file changed; the changed files with a
+// nil error when the change is human-approved (the caller re-baselines);
+// an error otherwise.
+func checkAuthoredTestsUnchanged(reposDir string, at *AuthoredTests, humanAnswers int) (changed []string, err error) {
 	diff := changedAuthoredTests(reposDir, at)
 	if len(diff) == 0 {
-		return false, nil
+		return nil, nil
 	}
 	if humanAnswers > 0 {
-		return true, nil
+		return diff, nil
 	}
-	return true, fmt.Errorf("changed authored test files: %s — the tests e2e-author/repro committed are the acceptance bar and later steps may not edit them (`git diff <author-commit>..HEAD -- <test_files>` must be empty). Restore them (`git checkout <author-commit> -- <path>` and commit); if you believe an authored test is itself wrong, return needs_input asking the owner instead of changing it",
+	return diff, fmt.Errorf("changed authored test files: %s — the tests e2e-author/repro committed are the acceptance bar and later steps may not edit them (`git diff <author-commit>..HEAD -- <test_files>` must be empty). Restore them (`git checkout <author-commit> -- <path>` and commit); if you believe an authored test is itself wrong, return needs_input asking the owner instead of changing it",
 		strings.Join(diff, "; "))
 }
 

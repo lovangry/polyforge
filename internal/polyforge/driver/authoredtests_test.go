@@ -124,6 +124,20 @@ func TestRunAuthoredTestChangeAcceptedAfterHumanAnswer(t *testing.T) {
 	if _, ok := exec.Steps["fix"].Output[testFilesCommitKey]; ok {
 		t.Fatalf("the baseline lives on the authoring step, not the approving one: %v", exec.Steps["fix"].Output)
 	}
+	var rebased []any
+	for _, e := range d.log.(*eventLog).entries {
+		if e.kind == EvAuthoredTestsRebaselined {
+			rebased, _ = e.body["files"].([]any)
+			if files, ok := e.body["files"].([]string); ok {
+				for _, f := range files {
+					rebased = append(rebased, f)
+				}
+			}
+		}
+	}
+	if len(rebased) != 1 || rebased[0] != "repos/app: t/r_test.go" {
+		t.Fatalf("the approved re-baseline must be recorded naming the files: %v", rebased)
+	}
 	if exec.Steps["check"].Status != capsule.StepDone {
 		t.Fatalf("check must complete against the new baseline: %+v", exec.Steps["check"])
 	}

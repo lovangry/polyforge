@@ -25,7 +25,7 @@ output:
           title: { type: string }
           status: { type: string, enum: [fail] }
           evidence: { type: string, minLength: 1 }
-      description: One entry per authored title, in the same order as authored_titles. Every entry records a semantic failure - the assertion-level red that is this step's legal completed output. The status enum admits only fail (a vacuous pass cannot ride a completed result); evidence carries the assertion-level failure proof - a runner output excerpt or an observed-vs-expected contrast, long enough to be checked by a reader (minLength 1).
+      description: One entry per authored title, in the same order as authored_titles. Every entry records a semantic failure - the assertion-level red that is this step's legal completed output. The status enum admits only fail (a vacuous pass cannot ride a completed result - a scenario that passes makes the outcome incomplete, whose output is not held to this schema); evidence carries the assertion-level failure proof - a runner output excerpt or an observed-vs-expected contrast, long enough to be checked by a reader (minLength 1).
 ---
 
 # e2e-baseline
@@ -101,4 +101,7 @@ executable acceptance it just saw laid — the baseline document is the bar, and
 
 Emit the final JSON object per the schema above: the baseline results document path,
 the verbatim `authored_titles` echo (equal to `e2e-author`'s `scenario_titles`), and
-one `fail` entry per authored scenario with assertion-level `evidence`.
+one `fail` entry per authored scenario with assertion-level `evidence`. The schema admits
+only `fail` in a COMPLETED baseline: if any scenario passes against the pre-implementation
+tree, the bar is not laid — report `outcome: incomplete` (see above), listing the passing
+scenarios (status `pass`) and why they need re-authoring; never `completed`.
